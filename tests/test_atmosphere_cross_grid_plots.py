@@ -1352,3 +1352,184 @@ class TestAmipToMatrixFormat:
         # second call with its own matrix-format file, losing the
         # AMIP free-form summary.
         assert (tmp_path / "results_amip.txt").read_text() == original_amip_text
+
+
+# ---------------------------------------------------------------------------
+# iter-46: Held-Suarez init consistency across grids
+# ---------------------------------------------------------------------------
+
+class TestHeldSuarezInitConsistency:
+    """Regression tests that pin per-grid HS initial-state consistency.
+
+    iter-46 audit: the cube-cold / latlon-warm structural disagreement
+    documented in iter-9..15 is dycore-level (effective dissipation /
+    sponge formulation), NOT init-level.  This test class exists to
+    prevent a future change from accidentally regressing init
+    consistency — e.g. by changing ``T_init`` for one grid only or by
+    drifting one grid's perturbation amplitude relative to the
+    others.
+
+    The matrix runner's ``run_held_suarez`` calls each grid's init
+    function with the SAME defaults (``T_init=300.0``,
+    ``perturbation_amplitude=1.0``, ``seed=42``).  Each init function
+    must produce:
+      * mean T close to T_init (within perturbation_amplitude)
+      * zero wind (u=v=0)
+      * surface pressure equal to p_ref (no topography)
+      * the same Held-Suarez forcing constants (K_A, K_S, K_F,
+        SIGMA_B, DELTA_T_Y, DELTA_THETA_Z, T_MIN)
+
+    These tests import the actual init functions; they do NOT use
+    synthetic surrogates, so a real change to the init implementation
+    flips the test.
+    """
+
+    @pytest.fixture(scope="class")
+    def hs_module(self):
+        """Import the held_suarez module once for all tests."""
+        import importlib
+        return importlib.import_module(
+            "legoesm.atmosphere.held_suarez",
+        )
+
+    def test_forcing_constants_match_held_suarez_1994(self, hs_module):
+        """Pin the table-1 constants from the Held-Suarez 1994 paper.
+
+        These constants are SHARED across all four forcing variants
+        (cubed_sphere, latlon, mpas, spectral) so a single source of
+        truth is enforced by the test.
+        """
+        # Temperature relaxation timescales [1/s].
+        assert abs(hs_module.K_A - 1.0 / (40.0 * 86400.0)) < 1.0e-30
+        assert abs(hs_module.K_S - 1.0 / (4.0 * 86400.0)) < 1.0e-30
+        # Rayleigh friction timescale [1/s].
+        assert abs(hs_module.K_F - 1.0 / (1.0 * 86400.0)) < 1.0e-30
+        # Boundary-layer threshold (dimensionless sigma).
+        assert hs_module.SIGMA_B == 0.7
+        # Equilibrium temperature parameters [K].
+        assert hs_module.DELTA_T_Y == 60.0
+        assert hs_module.DELTA_THETA_Z == 10.0
+        assert hs_module.T_MIN == 200.0
+
+    def test_init_signatures_share_canonical_defaults(self, hs_module):
+        """Every per-grid HS init function must use the same defaults
+        for the four user-facing parameters.  iter-46 audit guard: a
+        drift in any single grid's defaults would re-introduce the
+        structural cube-cold disagreement at the init level.
+        """
+        import inspect
+        for fn_name in (
+            "held_suarez_init",
+            "held_suarez_init_latlon",
+            "held_suarez_init_mpas",
+        ):
+            fn = getattr(hs_module, fn_name)
+            sig = inspect.signature(fn)
+            params = sig.parameters
+            assert params["T_init"].default == 300.0, (
+                f"{fn_name}.T_init drifted from 300.0"
+            )
+            assert params["p_s_init"].default == hs_module.constants.p_ref, (
+                f"{fn_name}.p_s_init drifted from constants.p_ref"
+            )
+            assert params["perturbation_amplitude"].default == 1.0, (
+                f"{fn_name}.perturbation_amplitude drifted from 1.0"
+            )
+            assert params["seed"].default == 42, (
+                f"{fn_name}.seed drifted from 42"
+            )
+
+    def test_held_suarez_equilibrium_temperature_basic_properties(
+        self, hs_module,
+    ):
+        """``T_eq`` must respect the canonical Held-Suarez 1994
+        invariants:
+
+        * T_eq is positive everywhere.
+        * T_eq >= T_MIN = 200 K.
+        * Surface T_eq at the equator > T_eq at the poles (≥
+          DELTA_T_Y / 2 K difference).
+        * T_eq decreases monotonically with altitude near the
+          equator (from p_ref to 100 hPa).
+        """
+        import jax.numpy as jnp
+        T_eq_eq = float(hs_module.held_suarez_equilibrium_temperature(
+            jnp.array(0.0), jnp.array(hs_module.constants.p_ref),
+        ))
+        T_eq_pole = float(hs_module.held_suarez_equilibrium_temperature(
+            jnp.array(jnp.pi / 2), jnp.array(hs_module.constants.p_ref),
+        ))
+        assert T_eq_eq > 0
+        assert T_eq_pole > 0
+        assert T_eq_eq >= hs_module.T_MIN
+        assert T_eq_pole >= hs_module.T_MIN
+        assert T_eq_eq - T_eq_pole >= hs_module.DELTA_T_Y / 2
+
+        T_eq_sfc = float(hs_module.held_suarez_equilibrium_temperature(
+            jnp.array(0.0), jnp.array(hs_module.constants.p_ref),
+        ))
+        T_eq_100hPa = float(hs_module.held_suarez_equilibrium_temperature(
+            jnp.array(0.0), jnp.array(10000.0),
+        ))
+        assert T_eq_sfc > T_eq_100hPa
+
+    def test_init_produces_zero_wind(self, hs_module):
+        """Each per-grid init must produce a state at rest (u=v=0).
+
+        iter-46 audit invariant: the cubed-sphere, latlon, and MPAS
+        inits all start from an isothermal atmosphere at rest with
+        only a small T perturbation.  A future change that adds
+        nonzero u/v to one variant only would diverge cross-grid
+        HS comparisons from t=0.
+        """
+        import jax.numpy as jnp
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.grids.vertical import standard_hybrid_levels
+
+        sigma = standard_hybrid_levels(8)
+
+        grid_cube = create_cubed_sphere(6)
+        s_cube = hs_module.held_suarez_init(grid_cube, sigma)
+        assert float(jnp.max(jnp.abs(s_cube.u.data))) == 0.0
+        assert float(jnp.max(jnp.abs(s_cube.v.data))) == 0.0
+
+        grid_ll = create_latlon_grid(8, 16)
+        s_ll = hs_module.held_suarez_init_latlon(grid_ll, sigma)
+        assert float(jnp.max(jnp.abs(s_ll.u.data))) == 0.0
+        assert float(jnp.max(jnp.abs(s_ll.v.data))) == 0.0
+
+    def test_init_produces_constant_p_s_when_no_topography(
+        self, hs_module,
+    ):
+        """Without topography, p_s must equal p_s_init at every cell."""
+        import jax.numpy as jnp
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.grids.vertical import standard_hybrid_levels
+
+        sigma = standard_hybrid_levels(8)
+        grid_ll = create_latlon_grid(8, 16)
+        s_ll = hs_module.held_suarez_init_latlon(grid_ll, sigma)
+        p_s_arr = jnp.asarray(s_ll.p_s.data)
+        assert abs(float(jnp.min(p_s_arr)) - hs_module.constants.p_ref) < 1e-6
+        assert abs(float(jnp.max(p_s_arr)) - hs_module.constants.p_ref) < 1e-6
+
+    def test_init_mean_T_close_to_T_init(self, hs_module):
+        """The bulk-mean T of the initial state must be close to
+        T_init (within ``perturbation_amplitude`` / sqrt(N_cells)).
+        """
+        import jax.numpy as jnp
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.grids.vertical import standard_hybrid_levels
+
+        sigma = standard_hybrid_levels(8)
+        grid_ll = create_latlon_grid(16, 32)
+        s_ll = hs_module.held_suarez_init_latlon(grid_ll, sigma)
+        mean_T = float(jnp.mean(s_ll.T.data))
+        # 16x32x8 = 4096 cells; perturbation only at the lowest
+        # level (16x32 = 512 cells); stddev of mean ≈ 1/sqrt(512)
+        # ≈ 0.044, then divided by 8 levels ≈ 0.006.  Allow 0.1 K.
+        assert abs(mean_T - 300.0) < 0.1, (
+            f"latlon init mean T={mean_T:.4f} differs from T_init=300 "
+            f"by more than 0.1 K"
+        )

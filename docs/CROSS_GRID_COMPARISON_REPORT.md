@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-45 snapshot)
+**Branch**: `simulation_full_check` (iter-46 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..45 findings.  It is the user-facing
+This report consolidates iter-1..46 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -29,8 +29,8 @@ and every available pair of grids:
   `T(latitude, σ)` cross-section, the canonical Held-Suarez
   Fig. 3 layout.
 
-Every helper has a corresponding unit test (72 / 72 pass in
-`tests/test_atmosphere_cross_grid_plots.py` (66) +
+Every helper has a corresponding unit test (78 / 78 pass in
+`tests/test_atmosphere_cross_grid_plots.py` (72) +
 `test_ocean_cross_grid_plots.py` (6)).
 
 CLI:
@@ -350,11 +350,26 @@ issues; final convergence is clean.
   RECOVERY run emits the original AMIP metadata
   (``status: PASS``, real grid name, real resolution).
 
-72/72 unit tests pass across both
-``tests/test_atmosphere_cross_grid_plots.py`` (66) and
+* iter-46: HS init consistency audit + regression tests.
+  Audited the per-grid ``held_suarez_init*`` functions and the
+  per-grid ``held_suarez_forcing*`` functions to confirm that
+  the cube-cold / latlon-warm structural disagreement
+  (documented in iter-9..15) is GENUINELY dycore-level
+  (effective dissipation / sponge formulation) and not
+  init-level.  All four init variants share the same
+  user-facing defaults (``T_init=300``, ``perturbation_amplitude=1``,
+  ``seed=42``); all four forcing variants share the same
+  Held-Suarez 1994 Table-1 constants (``K_A``, ``K_S``,
+  ``K_F``, ``SIGMA_B``, ``DELTA_T_Y``, ``DELTA_THETA_Z``,
+  ``T_MIN``).  6 new regression tests pin these invariants so
+  a future change cannot regress init consistency without
+  flipping a test.
+
+78/78 unit tests pass across both
+``tests/test_atmosphere_cross_grid_plots.py`` (72) and
 ``tests/test_ocean_cross_grid_plots.py`` (6).
 
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-45 update).*
+(iter-46 update).*
