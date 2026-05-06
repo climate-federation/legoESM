@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-52 snapshot)
+**Branch**: `simulation_full_check` (iter-53 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..52 findings.  It is the user-facing
+This report consolidates iter-1..53 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -29,10 +29,10 @@ and every available pair of grids:
   `T(latitude, σ)` cross-section, the canonical Held-Suarez
   Fig. 3 layout.
 
-Every helper has a corresponding unit test (104 / 104 pass
+Every helper has a corresponding unit test (110 / 110 pass
 across `tests/test_atmosphere_cross_grid_plots.py` (71) +
 `test_ocean_cross_grid_plots.py` (15) +
-`test_cross_grid_wrappers.py` (18)) plus 3 MPAS-mesh-
+`test_cross_grid_wrappers.py` (24)) plus 3 MPAS-mesh-
 unavailable skips.
 
 CLI:
@@ -176,8 +176,8 @@ cross-grid ocean test (wind-driven gyres / OMIP) is a follow-up.
 **Codex adversarial review iterations**: iter-5, iter-6, iter-7,
 iter-16, iter-21, iter-26, iter-27, iter-32, iter-36, iter-37,
 iter-39, iter-42, iter-43, iter-44, iter-46, iter-47, iter-49,
-iter-50.  Each round caught real issues; final convergence is
-clean.
+iter-50, iter-52.  Each round caught real issues; final
+convergence is clean.
 
 ---
 
@@ -194,7 +194,7 @@ clean.
 | Same colorbar/projection across grids | ✅ DONE (cartopy PlateCarrée + shared cmap) |
 | Physical consistency vs reference papers | ⚠️ Williamson cases agree to machine precision; HS climatology disagrees structurally (documented in §2) |
 | GPU / MPI efficiency | ✅ DONE (iter-28/29: per-test-case ``wall-time/day`` ranking + speedup factor in every ``comparison_summary.txt``) |
-| `/codex:adversarial-review` | ✅ DONE (18 review rounds: iter-5/6/7/16/21/26/27/32/36/37/39/42/43/44/46/47/49/50, all findings addressed) |
+| `/codex:adversarial-review` | ✅ DONE (19 review rounds: iter-5/6/7/16/21/26/27/32/36/37/39/42/43/44/46/47/49/50/52, all findings addressed) |
 
 ---
 
@@ -493,12 +493,32 @@ clean.
     * Shared conventions: ``set -e``, ``JAX_ENABLE_X64=1``,
       ``${1:?usage:...}`` guards.
 
-104/104 unit tests pass + 3 MPAS-mesh-unavailable skips
+* iter-53: tighten iter-52 wrapper tests against codex review
+  (4 HIGH + 4 MEDIUM + 1 LOW).  HIGH:
+  ``test_grid_disc_mapping_is_exact`` now pins the EXACT
+  per-grid mapping (iter-52 only checked values were valid
+  discretizations, so ``[latlon]=cdgrid`` would have
+  passed); OMIP coverage extended with ``run_omip.py``
+  invocation + ``$OUTDIR`` propagation tests; cross-grid
+  plot invocation now anchored as the LAST python call
+  (substring-anywhere passes a stale call); NPZ purge order
+  pinned via byte-offset comparison
+  (``rm -f "$OUTDIR/timeseries.npz"`` must come BEFORE
+  ``run_amip.py``).  MEDIUM: converter order pinned (must
+  run AFTER run_amip.py); converter must use ``$OUTDIR``
+  not ``$OUTPUT``; ``ANY_FAILED=1`` must be inside an
+  ``if ! converter; then ... fi`` block tied to the
+  converter exit status; loop regex tightened with
+  no-duplicate-grid-name check.  LOW: forcing-file support
+  test extended from substring to positional-arg parsing
+  + ``--*-file`` propagation.
+
+110/110 unit tests pass + 3 MPAS-mesh-unavailable skips
 (across ``tests/test_atmosphere_cross_grid_plots.py`` (71 +
 3 skips), ``tests/test_ocean_cross_grid_plots.py`` (15), and
-``tests/test_cross_grid_wrappers.py`` (18)).
+``tests/test_cross_grid_wrappers.py`` (24)).
 
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-52 update).*
+(iter-53 update).*
