@@ -1086,3 +1086,170 @@ class TestOceanCliResolutionPerGridDispatch:
             "--quick --resolution 16`` to verify; expected 12/12 "
             "PASS (3 grids × 4 rest_state variants) since iter-102."
         )
+
+
+class TestOceanMatrixBlowupReporting:
+    """iter-105 (codex iter-104 MEDIUM-3): mirror the iter-98
+    atmosphere matrix BLOWUP-reporting fix in the ocean matrix
+    runner.  Pre-iter-105, the ocean ``_run_timeloop`` printed
+    BLOWUP and returned ``ok=False``, but no ``_blowup_info``
+    was stored, so ``results.txt`` notes were derived from the
+    last *clean* diagnostic (same false-improvement risk as
+    iter-96 OMIP ⇒ iter-97 fix).
+
+    iter-105 added:
+    * ``diag["_blowup_info"]`` capture in ``_run_timeloop``
+    * ``diag=`` and ``blowup_info=`` kwargs on
+      ``_write_results_txt``
+    * ``diag=diag`` threaded through all 14 ocean callsites
+
+    These tests mirror the iter-98 atmosphere structural and
+    behavioural pins.
+    """
+
+    def _import_module(self):
+        import importlib
+        import sys
+        from pathlib import Path
+        scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+        if str(scripts_dir) not in sys.path:
+            sys.path.insert(0, str(scripts_dir))
+        return importlib.import_module("run_ocean_test_matrix")
+
+    def test_run_timeloop_records_blowup_info_in_diag(self):
+        """``_run_timeloop`` writes ``_blowup_info`` into diag
+        when a BLOWUP fires.
+        """
+        import inspect
+        import re
+        M = self._import_module()
+        src = inspect.getsource(M._run_timeloop)
+        src_no_strings = re.sub(r'""".*?"""', "", src, flags=re.DOTALL)
+        src_no_strings = re.sub(r"'''.*?'''", "", src_no_strings, flags=re.DOTALL)
+        code_only = "\n".join(
+            line for line in src_no_strings.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        assert ('diag["_blowup_info"]' in code_only or
+                "diag['_blowup_info']" in code_only), (
+            "iter-105: ocean ``_run_timeloop`` must store "
+            "BLOWUP details in ``diag['_blowup_info']`` so "
+            "``_write_results_txt`` can surface them."
+        )
+
+    def test_write_results_txt_accepts_diag_kwarg(self):
+        import inspect
+        M = self._import_module()
+        sig = inspect.signature(M._write_results_txt)
+        assert "diag" in sig.parameters, (
+            "iter-105: ocean ``_write_results_txt`` must "
+            "accept ``diag`` kwarg for opt-in BLOWUP info "
+            "threading."
+        )
+        assert "blowup_info" in sig.parameters, (
+            "iter-105: ocean ``_write_results_txt`` must "
+            "accept ``blowup_info`` kwarg as the lower-level "
+            "entry point."
+        )
+
+    def test_write_results_txt_emits_blowup_marker(self, tmp_path):
+        """End-to-end: ocean ``_write_results_txt`` with a
+        synthetic BLOWUP-info-bearing diag emits a BLOWUP
+        marker in results.txt notes.
+        """
+        M = self._import_module()
+        diag = {
+            "times": [0.0, 1.0],
+            "steps": [0, 100],
+            "vol": [1e18, 1e18],
+            "_blowup_info": {
+                "step": 200,
+                "day": 0.69,
+                "metric": 1234.5,
+                "is_finite": False,
+                "threshold": 1000.0,
+                "reason": "state non-finite (NaN/Inf)",
+            },
+        }
+        rows = {
+            "test": "rest_state",
+            "grid": "cubed_sphere",
+            "status": "FAIL",
+            "notes": "eta drift=1.2e-17",
+            "wall_time": "15.6s",
+        }
+        M._write_results_txt(tmp_path, rows, diag=diag)
+        text = (tmp_path / "results.txt").read_text()
+        assert "BLOWUP at step 200" in text, (
+            f"iter-105: ocean results.txt must contain BLOWUP "
+            f"marker when ``diag['_blowup_info']`` is set; got:"
+            f"\n{text}"
+        )
+        assert "state non-finite" in text, (
+            "iter-105: ocean results.txt must include reason."
+        )
+        assert "last clean: eta drift=1.2e-17" in text, (
+            "iter-105: ocean results.txt must preserve the "
+            "original notes labeled as ``last clean:``."
+        )
+
+    def test_write_results_txt_unaffected_for_pass_runs(self, tmp_path):
+        M = self._import_module()
+        diag = {
+            "times": [0.0, 1.0],
+            "steps": [0, 100],
+            "vol": [1e18, 1e18],
+        }
+        rows = {
+            "test": "rest_state",
+            "grid": "cubed_sphere",
+            "status": "PASS",
+            "notes": "eta drift=1.2e-17",
+            "wall_time": "15.6s",
+        }
+        M._write_results_txt(tmp_path, rows, diag=diag)
+        text = (tmp_path / "results.txt").read_text()
+        assert "BLOWUP" not in text, (
+            "iter-105: ocean PASS runs must not have BLOWUP markers."
+        )
+        assert "notes: eta drift=1.2e-17" in text
+
+    def test_all_ocean_write_results_txt_callsites_thread_diag(self):
+        """Mirror iter-99 atmosphere structural test: every
+        ``_write_results_txt`` call in the ocean matrix runner
+        threads ``diag=`` (or equivalent).
+        """
+        import inspect
+        import re
+        M = self._import_module()
+        text = inspect.getsource(M)
+        code_only = "\n".join(
+            line for line in text.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        all_calls = list(re.finditer(
+            r"_write_results_txt\(", code_only
+        ))
+        callsite_count = 0
+        threaded_count = 0
+        for m in all_calls:
+            start = max(0, m.start() - 10)
+            preceding = code_only[start:m.start()]
+            if "def " in preceding:
+                continue
+            callsite_count += 1
+            tail = code_only[m.start():m.start() + 800]
+            if re.search(r"\bdiag\s*=\s*\w", tail):
+                threaded_count += 1
+        # We expect at least 13 callsites (14 minus the def).
+        # iter-105 threaded all of them.
+        assert callsite_count >= 13, (
+            f"iter-105 sanity: expected ≥13 ``_write_results_txt`` "
+            f"callsites in ocean matrix runner; found {callsite_count}."
+        )
+        assert threaded_count == callsite_count, (
+            f"iter-105: every ``_write_results_txt`` callsite in "
+            f"ocean matrix must thread ``diag=`` to surface "
+            f"BLOWUP info uniformly.  Found {threaded_count}/"
+            f"{callsite_count} threaded."
+        )

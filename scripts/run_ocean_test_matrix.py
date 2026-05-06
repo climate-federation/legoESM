@@ -449,6 +449,23 @@ def _run_timeloop(
             is_finite, metric = check_fn(state)
             if not is_finite or metric > blowup_threshold:
                 print(f"  BLOWUP at step {step}, metric={metric:.1f}")
+                # iter-105 (codex iter-104 MEDIUM-3): mirror the
+                # iter-98 atmosphere matrix BLOWUP-info fix.
+                # Without this, results.txt would emit notes
+                # derived from the last *clean* diagnostic
+                # (same false-improvement risk as iter-96 OMIP).
+                diag["_blowup_info"] = {
+                    "step": step,
+                    "day": step * dt / 86400.0,
+                    "metric": float(metric),
+                    "is_finite": bool(is_finite),
+                    "threshold": float(blowup_threshold),
+                    "reason": (
+                        "state non-finite (NaN/Inf)" if not is_finite
+                        else f"metric {float(metric):.1f} > "
+                             f"threshold {float(blowup_threshold):.1f}"
+                    ),
+                }
                 blown_up = True
                 break
 
@@ -896,8 +913,35 @@ def _fill_nan_section(section: np.ndarray) -> np.ndarray:
 # File writers
 # ---------------------------------------------------------------------------
 
-def _write_results_txt(output_dir: Path, rows: dict[str, Any]):
+def _write_results_txt(output_dir: Path, rows: dict[str, Any],
+                       *, diag: dict | None = None,
+                       blowup_info: dict | None = None):
+    """Write results.txt for an ocean-matrix-runner case.
+
+    iter-105 (codex iter-104 MEDIUM-3): added ``diag`` and
+    ``blowup_info`` kwargs mirroring the iter-98 atmosphere
+    matrix fix.  When ``diag`` is passed, ``_blowup_info`` is
+    auto-extracted from it.  When BLOWUP info is present and
+    ``rows.get("status") == "FAIL"``, the function prepends a
+    BLOWUP marker to the ``notes`` field so a reader of
+    ``results.txt`` sees the failure mode unambiguously
+    instead of last-clean-diagnostic notes.
+    """
+    if diag is not None and blowup_info is None:
+        blowup_info = diag.get("_blowup_info")
     output_dir.mkdir(parents=True, exist_ok=True)
+    if blowup_info is not None and rows.get("status") == "FAIL":
+        original_notes = rows.get("notes", "")
+        blowup_str = (
+            f"BLOWUP at step {blowup_info['step']} "
+            f"(day {blowup_info.get('day', 0):.2f}), "
+            f"reason: {blowup_info['reason']}"
+        )
+        if original_notes:
+            rows = {**rows,
+                    "notes": f"{blowup_str}; last clean: {original_notes}"}
+        else:
+            rows = {**rows, "notes": blowup_str}
     with open(output_dir / "results.txt", "w") as f:
         for k, v in rows.items():
             f.write(f"{k}: {v}\n")
@@ -2704,7 +2748,8 @@ def run_rest_state(tc: TestCase, output_dir: Path, days: float
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
         "days": days, "dt": dt, "levels": z_coord.n_levels,
         "status": "PASS" if ok else "FAIL", "notes": notes,
-        "wall_time": f"{wall:.1f}s"})
+        "wall_time": f"{wall:.1f}s"},
+        diag=diag)  # iter-105: surface BLOWUP info if any
     _save_case_diagnostics(
         output_dir, f"Rest State {tc.grid_type} {tc.resolution}",
         dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
@@ -2762,7 +2807,8 @@ def run_rest_state_no_land(tc: TestCase, output_dir: Path, days: float
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
         "days": days, "dt": dt, "levels": z_coord.n_levels,
         "status": "PASS" if ok else "FAIL", "notes": notes,
-        "wall_time": f"{wall:.1f}s"})
+        "wall_time": f"{wall:.1f}s"},
+        diag=diag)  # iter-105: surface BLOWUP info if any
     _save_case_diagnostics(
         output_dir, f"Rest State No Land {tc.grid_type} {tc.resolution}",
         dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
@@ -2822,7 +2868,8 @@ def run_rest_state_uniform_ts(tc: TestCase, output_dir: Path, days: float
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
         "days": days, "dt": dt, "levels": z_coord.n_levels,
         "status": "PASS" if ok else "FAIL", "notes": notes,
-        "wall_time": f"{wall:.1f}s"})
+        "wall_time": f"{wall:.1f}s"},
+        diag=diag)  # iter-105: surface BLOWUP info if any
     _save_case_diagnostics(
         output_dir, f"Rest State Uniform T/S {tc.grid_type} {tc.resolution}",
         dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
@@ -2877,7 +2924,8 @@ def run_rest_state_uniform_ts_no_land(tc: TestCase, output_dir: Path, days: floa
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
         "days": days, "dt": dt, "levels": z_coord.n_levels,
         "status": "PASS" if ok else "FAIL", "notes": notes,
-        "wall_time": f"{wall:.1f}s"})
+        "wall_time": f"{wall:.1f}s"},
+        diag=diag)  # iter-105: surface BLOWUP info if any
     _save_case_diagnostics(
         output_dir, f"Rest State Uniform T/S No Land {tc.grid_type} {tc.resolution}",
         dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
@@ -2939,7 +2987,8 @@ def run_barotropic_wave(tc: TestCase, output_dir: Path, days: float
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
         "days": days, "dt": dt, "levels": z_coord.n_levels,
         "status": "PASS" if ok else "FAIL", "notes": notes,
-        "wall_time": f"{wall:.1f}s"})
+        "wall_time": f"{wall:.1f}s"},
+        diag=diag)  # iter-105: surface BLOWUP info if any
     _save_case_diagnostics(
         output_dir, f"Barotropic Wave {tc.grid_type} {tc.resolution}",
         dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
@@ -3164,7 +3213,8 @@ def _run_gyre_experiment(tc: TestCase, output_dir: Path, days: float,
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
         "days": days, "dt": dt, "levels": z_coord.n_levels,
         "status": "PASS" if ok else "FAIL", "notes": notes,
-        "wall_time": f"{wall:.1f}s"})
+        "wall_time": f"{wall:.1f}s"},
+        diag=diag)  # iter-105: surface BLOWUP info if any
 
     field_specs = [
         ("eta", "SSH (m)", "RdBu_r"),
@@ -3399,7 +3449,7 @@ def run_baroclinic_gyre(tc: TestCase, output_dir: Path, days: float,
         "days": days, "dt": dt, "levels": z_coord.n_levels,
         "max_speed": max_speed, "eta_drift": eta_drift, "T_drift": T_drift,
         "depth": depth.tolist(), "notes": notes,
-    })
+    }, diag=diag)  # iter-105: surface BLOWUP info if any
     
     # Regional extent for proper plotting
     extent = (config.lon_west, config.lon_east, config.lat_south, config.lat_north)
@@ -3542,7 +3592,8 @@ def run_global_barotropic_wind(tc: TestCase, output_dir: Path, days: float
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
         "days": days, "dt": dt, "levels": z_coord.n_levels,
         "status": "PASS" if ok else "FAIL", "notes": notes,
-        "wall_time": f"{wall:.1f}s"})
+        "wall_time": f"{wall:.1f}s"},
+        diag=diag)  # iter-105: surface BLOWUP info if any
 
     _save_case_diagnostics(
         output_dir, f"Global Wind {tc.grid_type} {tc.resolution}",
@@ -3602,7 +3653,8 @@ def run_geostrophic_adjustment(tc: TestCase, output_dir: Path, days: float
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
         "days": days, "dt": dt, "levels": z_coord.n_levels,
         "status": "PASS" if ok else "FAIL", "notes": notes,
-        "wall_time": f"{wall:.1f}s"})
+        "wall_time": f"{wall:.1f}s"},
+        diag=diag)  # iter-105: surface BLOWUP info if any
     _save_case_diagnostics(
         output_dir, f"Geostrophic Adj {tc.grid_type} {tc.resolution}",
         dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
@@ -3852,7 +3904,8 @@ def run_phillips_two_layer(tc: TestCase, output_dir: Path, days: float
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
         "days": days, "dt": dt, "levels": z_coord.n_levels,
         "status": "PASS" if ok else "FAIL", "notes": notes,
-        "wall_time": f"{wall:.1f}s"})
+        "wall_time": f"{wall:.1f}s"},
+        diag=diag)  # iter-105: surface BLOWUP info if any
     _save_case_diagnostics(
         output_dir, f"Phillips 2-Layer {tc.grid_type} {tc.resolution}",
         dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
@@ -4059,7 +4112,8 @@ def run_inertia_gravity_wave(tc: TestCase, output_dir: Path, days: float
         "reference": "Bishnu et al. 2024, DOI:10.1029/2022MS003545",
         "L2_error": l2_err, "omega_analytical": omega,
         "status": "PASS" if ok else "FAIL", "notes": notes,
-        "wall_time": f"{wall:.1f}s"})
+        "wall_time": f"{wall:.1f}s"},
+        diag=diag)  # iter-105: surface BLOWUP info if any
     _save_case_diagnostics(
         output_dir, f"IGW Bishnu {tc.grid_type} {tc.resolution}",
         dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
@@ -4224,7 +4278,8 @@ def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
         "reference": "Petersen et al. 2015, DOI:10.1016/j.ocemod.2014.12.004",
         "PE_drift": pe_drift, "PE_rel_final": pe_rel_final,
         "status": "PASS" if ok else "FAIL", "notes": notes,
-        "wall_time": f"{wall:.1f}s"})
+        "wall_time": f"{wall:.1f}s"},
+        diag=diag)  # iter-105: surface BLOWUP info if any
     _save_case_diagnostics(
         output_dir, f"Lock Exchange {tc.grid_type} {tc.resolution}",
         dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
@@ -4379,7 +4434,8 @@ def run_overflow(tc: TestCase, output_dir: Path, days: float
         "reference": "Petersen et al. 2015, DOI:10.1016/j.ocemod.2014.12.004",
         "PE_drift": pe_drift, "PE_rel_final": pe_rel_final,
         "status": "PASS" if ok else "FAIL", "notes": notes,
-        "wall_time": f"{wall:.1f}s"})
+        "wall_time": f"{wall:.1f}s"},
+        diag=diag)  # iter-105: surface BLOWUP info if any
     _save_case_diagnostics(
         output_dir, f"Overflow {tc.grid_type} {tc.resolution}",
         dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
@@ -4534,7 +4590,8 @@ def run_stommel_gyre_tracer(tc: TestCase, output_dir: Path, days: float
         "S_integral_drift": S_int_drift,
         "S_overshoot": overshoot, "S_undershoot": undershoot,
         "status": "PASS" if ok else "FAIL", "notes": notes,
-        "wall_time": f"{wall:.1f}s"})
+        "wall_time": f"{wall:.1f}s"},
+        diag=diag)  # iter-105: surface BLOWUP info if any
 
     field_specs = [
         ("eta", "SSH (m)", "RdBu_r"),
