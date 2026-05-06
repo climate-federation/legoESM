@@ -110,6 +110,14 @@ def parse_args():
                    help="Override biharmonic viscosity B_h [m⁴/s] (default: 5e9 for bathymetry).")
     p.add_argument("--K-h", type=float, default=None,
                    help="Override horizontal tracer diffusivity K_h [m²/s] (default: 1e3 with bathy).")
+    p.add_argument("--no-lat-scaling", action="store_true",
+                   help=(
+                       "Disable cos²(lat) scaling of A_h. By default A_h is "
+                       "scaled by cos²(lat) to keep the viscous CFL latitude-"
+                       "independent.  This flag uses a constant A_h everywhere, "
+                       "useful for diagnosing whether cos² scaling drives "
+                       "high-latitude instability."
+                   ))
     p.add_argument("--A-h-eq-boost", type=float, default=1.0,
                    help=(
                        "Equatorial A_h boost (>=1). Multiplies A_h by "
@@ -293,7 +301,8 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                   C_smag: float = None,
                   C_leith: float = None,
                   pgf_scheme: str = None,
-                  slope_foot_alpha: float = 0.0):
+                  slope_foot_alpha: float = 0.0,
+                  no_lat_scaling: bool = False):
     """Create grid, z_coord, config, model for any grid type.
 
     All grids use the SAME config-based diffusion (A_h, K_h, A_v, K_v)
@@ -412,7 +421,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
             _C_smag = C_smag if C_smag is not None else 0.0
             _C_leith = C_leith if C_leith is not None else 0.0
             config = LatLonCGridOceanConfig(
-                A_h=_A_h, A_h_lat_scaling=True,
+                A_h=_A_h, A_h_lat_scaling=(not no_lat_scaling),
                 A_h_eq_boost=A_h_eq_boost,
                 A_h_eq_sigma_deg=A_h_eq_sigma_deg,
                 K_h=_K_h, A_v=A_v, K_v=K_v,
@@ -1984,6 +1993,7 @@ def run_omip_single(grid_type: str, args) -> dict:
         C_leith=args.C_leith,
         pgf_scheme=args.pgf_scheme,
         slope_foot_alpha=args.slope_foot_alpha,
+        no_lat_scaling=args.no_lat_scaling,
     )
 
     # --- Initialization strategy ---
