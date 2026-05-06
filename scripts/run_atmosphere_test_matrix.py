@@ -4359,8 +4359,28 @@ def _compute_cross_grid_rms_agreement(
             diff = zm_common[ga] - zm_common[gb]
             pairwise[f"{ga} vs {gb}"] = float(np.sqrt(np.nanmean(diff ** 2)))
 
+    # Iter-14: per-level cross-grid spread (max - min across grids,
+    # zonally averaged at each latitude, then averaged horizontally).
+    # Exposes WHICH levels carry the cross-grid disagreement —
+    # e.g. for the iter-13 60-day HS data the upper-troposphere
+    # disagreement was much larger than the surface disagreement,
+    # diagnostic of the inconsistent upper-atmosphere damping
+    # across grids.
+    n_lev = next(iter(nlev_set))
+    per_level_spread = np.zeros(n_lev, dtype=np.float64)
+    per_level_max_grid = ["?"] * n_lev
+    per_level_min_grid = ["?"] * n_lev
+    stack = np.stack([zm_common[g] for g in grid_names], axis=0)  # (n_grids, n_lat, n_lev)
+    for k in range(n_lev):
+        # At each level, compute the latitude-averaged max-min across grids.
+        slab = stack[:, :, k]  # (n_grids, n_lat)
+        slab_horizmean = np.nanmean(slab, axis=1)  # (n_grids,)
+        per_level_spread[k] = float(np.max(slab_horizmean) - np.min(slab_horizmean))
+        per_level_max_grid[k] = grid_names[int(np.argmax(slab_horizmean))]
+        per_level_min_grid[k] = grid_names[int(np.argmin(slab_horizmean))]
+
     # Ensemble (deviation from cross-grid mean).
-    ens_mean_field = np.mean(np.stack(list(zm_common.values()), axis=0), axis=0)
+    ens_mean_field = np.mean(stack, axis=0)
     ensemble: dict[str, float] = {}
     for grid_name, zm in zm_common.items():
         diff = zm - ens_mean_field
@@ -4375,6 +4395,10 @@ def _compute_cross_grid_rms_agreement(
         "n_lat_target": target_n_lat,
         "n_lev": next(iter(nlev_set)),
         "n_avg_used": n_avg_used,
+        "per_level_spread": per_level_spread,
+        "per_level_max_grid": per_level_max_grid,
+        "per_level_min_grid": per_level_min_grid,
+        "grid_names": grid_names,
     }
 
 
@@ -4552,6 +4576,30 @@ def _create_atmosphere_comparison_summary(
                 f"\nEnsemble-averaged RMS: {metric['ensemble_mean']:.3f}"
                 f"{unit_suffix} ({metric['n_grids']} grids)\n"
             )
+
+            # Iter-14: top-5 vertical levels with largest cross-grid
+            # spread.  Diagnostic: HS shows largest disagreement in
+            # the upper troposphere (different sponge / hyperdiffusion
+            # treatments).  Levels are 0=top, n_lev-1=surface.
+            spread = metric.get("per_level_spread")
+            if spread is not None and len(spread) > 0:
+                fh.write(
+                    "\nTop-5 levels by cross-grid spread (max-min of "
+                    "horizontally-averaged value per grid; level 0 = "
+                    "model top, level N-1 = surface):\n"
+                )
+                # argsort descending.
+                ordered = np.argsort(-spread)[:5]
+                fh.write(
+                    f"  {'level':<8}  {'spread':<10}  "
+                    f"{'max grid':<14}  {'min grid':<14}\n"
+                )
+                for k in ordered:
+                    fh.write(
+                        f"  {int(k):<8d}  {spread[k]:8.3f}{unit_suffix:<2}  "
+                        f"{metric['per_level_max_grid'][k]:<14}  "
+                        f"{metric['per_level_min_grid'][k]:<14}\n"
+                    )
             fh.write("=" * 70 + "\n")
     print(f"    Saved: {out_file.name}")
 
