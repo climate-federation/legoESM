@@ -64,6 +64,8 @@ from legoesm.core.conservation import (
     zero_mean_tendency,
     fix_mass_hydrostatic,
     fix_mass_hydrostatic_target,
+    fix_ps_mass,
+    fix_ps_mass_target,
 )
 from legoesm.core.operators import (
     global_integral,

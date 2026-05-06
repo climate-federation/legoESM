@@ -203,23 +203,62 @@ def _compute_drift(values: list[float]) -> float:
     return abs(values[-1] - values[0]) / max(abs(values[0]), 1e-30)
 
 
+def _grid_cell_area(grid_or_mesh):
+    """Return the cell-area array for any supported grid object.
+
+    Cubed-sphere and lat-lon grids expose ``.area``; Voronoi /
+    icosahedral meshes expose ``.areaCell``; Gaussian grids expose
+    ``.grid_area``.  Pick whichever attribute exists in the order
+    most-specific → most-generic to avoid surprises.
+    """
+    for attr in ("areaCell", "grid_area", "area"):
+        a = getattr(grid_or_mesh, attr, None)
+        if a is not None:
+            return a
+    raise AttributeError(
+        f"_grid_cell_area: object {type(grid_or_mesh).__name__} exposes "
+        f"none of areaCell/grid_area/area"
+    )
+
+
 def _area_weighted_mean(field, area) -> float:
     """Area-weighted scalar mean.
 
-    Returns ``sum(field * area) / sum(area)`` as a Python float.  Works
-    for any matching-shape pair: cubed-sphere ``(6, n, n)``,
-    lat-lon ``(nlat, nlon)``, icosahedral / Voronoi ``(n_cells,)``,
-    Gaussian ``(nlat, nlon)``.
+    Returns ``sum(field * area) / sum(area)`` as a Python float when
+    ``field`` and ``area`` have the same shape.  When ``field`` has
+    *more* dimensions than ``area`` (typical case: 3-D atmospheric
+    field ``(nlat, nlon, nlev)`` with 2-D horizontal area
+    ``(nlat, nlon)``, or cubed-sphere ``(6, n, n, nlev)`` with area
+    ``(6, n, n)``, or Voronoi ``(n_cells, nlev)`` with area
+    ``(n_cells,)``), the extra trailing axes are collapsed via a
+    uniform mean *first* and the horizontal weighting is then
+    applied.  This keeps the cross-grid mean physically meaningful
+    (vertical-uniform-mean of a horizontally area-weighted average)
+    while being grid-agnostic.
 
     Use this instead of bare ``jnp.mean`` whenever a field lives on
     cells with non-uniform area.  Bare ``jnp.mean`` over-weights
     high-latitude cells on lat-lon and Gaussian grids and disagrees
     with cube/icosahedral domain-mean h by ~15 % for Williamson 2 (the
-    inconsistency exposed by the iter-1 cross-grid time-series plot).
+    inconsistency exposed by the iter-1 cross-grid time-series plot
+    and resolved in iter-2 for shallow-water; iter-3 extends the fix
+    to the hydrostatic / AMIP scalar diagnostics, which have the same
+    bug pattern but on 3-D fields).
     """
     f = jnp.asarray(field, dtype=jnp.float64)
     a = jnp.asarray(area, dtype=jnp.float64)
-    return float(jnp.sum(f * a) / jnp.sum(a))
+    if f.ndim == a.ndim:
+        return float(jnp.sum(f * a) / jnp.sum(a))
+    if f.ndim < a.ndim:
+        raise ValueError(
+            f"_area_weighted_mean: field.ndim={f.ndim} < area.ndim={a.ndim}; "
+            f"area must have <= field dims (got shapes {f.shape} vs {a.shape})"
+        )
+    # Collapse extra trailing axes via uniform mean, then horizontal
+    # area-weighted average over the leading axes.
+    extra_axes = tuple(range(a.ndim, f.ndim))
+    f_collapsed = jnp.mean(f, axis=extra_axes)
+    return float(jnp.sum(f_collapsed * a) / jnp.sum(a))
 
 
 # ---------------------------------------------------------------------------
@@ -1476,13 +1515,20 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             f"Shallow water not implemented for grid '{tc.grid_type}'")
 
     # --- Time loop ---
+    # Area-weighted reference mass: cross-grid consistency requires the
+    # SAME definition on every grid.  Bare ``jnp.mean`` over-weights
+    # the shrunken pole cells on lat-lon and Gaussian grids — see
+    # ``_area_weighted_mean`` docstring and iter-2 commit.
     if tc.grid_type == "spectral":
         from legoesm.grids.gaussian import sh_synthesis as _sh
-        mass_init = float(jnp.mean(
-            _sh(grid, state.phi_hat.data) / constants.g))
+        h_init = _sh(grid, state.phi_hat.data) / constants.g
+        mass_init = _area_weighted_mean(h_init, grid.grid_area)
     else:
         h_data = state.h if isinstance(state.h, jnp.ndarray) else state.h.data
-        mass_init = float(jnp.mean(h_data))
+        if tc.grid_type == "icosahedral":
+            mass_init = _area_weighted_mean(h_data, grid.areaCell)
+        else:  # cubed_sphere, latlon
+            mass_init = _area_weighted_mean(h_data, grid.area)
     n_steps = int(days * 86400 / dt)
     diag_every = max(1, n_steps // 20)
 
@@ -1959,7 +2005,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
                 "mass": mass_fn(s),
                 "max_wind": float(jnp.max(jnp.sqrt(
                     s.u.data ** 2 + s.v.data ** 2))),
-                "mean_T": float(jnp.mean(s.T.data)),
+                "mean_T": _area_weighted_mean(s.T.data, grid.area),
             }
 
         _cos_a = np.asarray(grid.cos_angle, dtype=np.float64)
@@ -2012,7 +2058,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
             return {
                 "mass": mass_fn(s),
                 "max_wind": float(jnp.max(jnp.sqrt(u_c ** 2 + v_c ** 2))),
-                "mean_T": float(jnp.mean(s.T)),
+                "mean_T": _area_weighted_mean(s.T, grid.area),
             }
 
         def extract_fn(s):
@@ -2064,7 +2110,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
             return {
                 "mass": mass_fn(s),
                 "max_wind": float(jnp.max(jnp.abs(s.u.data))),
-                "mean_T": float(jnp.mean(s.T.data)),
+                "mean_T": _area_weighted_mean(s.T.data, mesh.areaCell),
             }
 
         lon_cell = np.asarray(mesh.lonCell, dtype=np.float64) * 180 / np.pi
@@ -2117,10 +2163,17 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         def scalar_fn(s):
             fields = spectral_pe_to_grid(s, grid, sigma)
             return {
-                "mass": float(jnp.mean(fields['p_s'])),
+                # ``mass`` here is the area-weighted MEAN p_s (not the
+                # full integral) — kept consistent with the cube/latlon/
+                # ico paths which use ``jnp.sum(p_s * area)`` directly,
+                # but the column header ``mass`` is overloaded; the
+                # cross-grid drift comparison in
+                # ``comparison_timeseries.png`` only requires
+                # consistency, which area-weighting now provides.
+                "mass": _area_weighted_mean(fields['p_s'], grid.grid_area),
                 "max_wind": float(jnp.max(jnp.sqrt(
                     fields['u'] ** 2 + fields['v'] ** 2))),
-                "mean_T": float(jnp.mean(fields['T'])),
+                "mean_T": _area_weighted_mean(fields['T'], grid.grid_area),
             }
 
         def extract_fn(s):
@@ -2392,7 +2445,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         def scalar_fn(s):
             fields = spectral_pe_to_grid(s, grid, sigma)
             return {
-                "mass": float(jnp.mean(fields['p_s'])),
+                "mass": _area_weighted_mean(fields['p_s'], grid.grid_area),
                 "max_wind": float(jnp.max(jnp.sqrt(
                     fields['u'] ** 2 + fields['v'] ** 2))),
                 "ps_perturbation": float(jnp.max(
@@ -2631,12 +2684,14 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
         return (check_finite({"tracers": s.tracers.data}),
                 float(jnp.max(jnp.abs(s.tracers.data))))
 
+    _area_for_mean = _grid_cell_area(grid)
+
     def scalar_fn(s):
         q = s.tracers.data
         return {
             "q1_min": float(jnp.min(q[..., 0])),
             "q1_max": float(jnp.max(q[..., 0])),
-            "q1_mean": float(jnp.mean(q[..., 0])),
+            "q1_mean": _area_weighted_mean(q[..., 0], _area_for_mean),
         }
 
     def key_array_fn(s):
@@ -2733,8 +2788,8 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
                 "mass": mass_fn(s),
                 "max_wind": float(jnp.max(jnp.sqrt(
                     s.u.data ** 2 + s.v.data ** 2))),
-                "mean_T": float(jnp.mean(s.T.data)),
-                "mean_p_s": float(jnp.mean(s.p_s.data)),
+                "mean_T":   _area_weighted_mean(s.T.data,   grid.area),
+                "mean_p_s": _area_weighted_mean(s.p_s.data, grid.area),
             }
 
         _cos_a = np.asarray(grid.cos_angle, dtype=np.float64)
@@ -2786,8 +2841,8 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
             return {
                 "mass": mass_fn(s),
                 "max_wind": float(jnp.max(jnp.sqrt(u_c ** 2 + v_c ** 2))),
-                "mean_T": float(jnp.mean(s.T)),
-                "mean_p_s": float(jnp.mean(s.p_s)),
+                "mean_T":   _area_weighted_mean(s.T,   grid.area),
+                "mean_p_s": _area_weighted_mean(s.p_s, grid.area),
             }
 
         def extract_fn(s):
@@ -2838,8 +2893,8 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
             return {
                 "mass": mass_fn(s),
                 "max_wind": float(jnp.max(jnp.abs(s.u.data))),
-                "mean_T": float(jnp.mean(s.T.data)),
-                "mean_p_s": float(jnp.mean(s.p_s.data)),
+                "mean_T":   _area_weighted_mean(s.T.data,   mesh.areaCell),
+                "mean_p_s": _area_weighted_mean(s.p_s.data, mesh.areaCell),
             }
 
         lon_cell = np.asarray(mesh.lonCell, dtype=np.float64) * 180 / np.pi
@@ -2892,11 +2947,11 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         def scalar_fn(s):
             fields = spectral_pe_to_grid(s, grid, sigma)
             return {
-                "mass": float(jnp.mean(fields['p_s'])),
+                "mass":     _area_weighted_mean(fields['p_s'], grid.grid_area),
                 "max_wind": float(jnp.max(jnp.sqrt(
                     fields['u'] ** 2 + fields['v'] ** 2))),
-                "mean_T": float(jnp.mean(fields['T'])),
-                "mean_p_s": float(jnp.mean(fields['p_s'])),
+                "mean_T":   _area_weighted_mean(fields['T'],   grid.grid_area),
+                "mean_p_s": _area_weighted_mean(fields['p_s'], grid.grid_area),
             }
 
         def extract_fn(s):
@@ -3184,8 +3239,10 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
         def scalar_fn(s):
             return {
                 "max_abs_w": float(jnp.max(jnp.abs(s.w.data))),
-                "mean_theta_prime": float(jnp.mean(s.theta_prime.data)),
-                "mean_rho_prime": float(jnp.mean(s.rho_prime.data)),
+                "mean_theta_prime": _area_weighted_mean(
+                    s.theta_prime.data, grid.area),
+                "mean_rho_prime":   _area_weighted_mean(
+                    s.rho_prime.data,   grid.area),
             }
 
         _cos_a_nh = np.asarray(grid.cos_angle, dtype=np.float64)
@@ -3302,8 +3359,10 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
         def scalar_fn(s):
             return {
                 "max_abs_w": float(jnp.max(jnp.abs(s.w.data))),
-                "mean_theta_prime": float(jnp.mean(s.theta_prime.data)),
-                "mean_rho_prime": float(jnp.mean(s.rho_prime.data)),
+                "mean_theta_prime": _area_weighted_mean(
+                    s.theta_prime.data, mesh.areaCell),
+                "mean_rho_prime":   _area_weighted_mean(
+                    s.rho_prime.data,   mesh.areaCell),
             }
 
         def extract_fn(s):
@@ -3431,8 +3490,8 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             rho_p = sh_synthesis_3d(grid, s.rho_prime_hat.data)
             return {
                 "max_abs_w": float(jnp.max(jnp.abs(w))),
-                "mean_theta_prime": float(jnp.mean(theta_p)),
-                "mean_rho_prime": float(jnp.mean(rho_p)),
+                "mean_theta_prime": _area_weighted_mean(theta_p, grid.grid_area),
+                "mean_rho_prime":   _area_weighted_mean(rho_p,   grid.grid_area),
             }
 
         def extract_fn(s):
