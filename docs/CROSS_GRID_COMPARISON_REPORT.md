@@ -1,6 +1,6 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-112 snapshot)
+**Branch**: `simulation_full_check` (iter-113 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
@@ -32,6 +32,32 @@ The cross-grid plot infrastructure produces shared-colorbar
 shared-projection comparison PNGs for every category; check
 ``results/{atmosphere,ocean,omip,rce}/`` for the iter-96
 output.
+
+## iter-113 reproducibility check
+
+Verified that iter-104..112 fixes do not regress the iter-96
+baseline.  Re-ran the 3 fast smoke categories with a clean
+output tree (``rm -rf results/``) and ``--resolution 16``:
+
+| Category | Pass / Total | Wall | Notes |
+|---|---|---|---|
+| Shallow water | **12 / 12** | 136 s | Same metrics as iter-96. |
+| Held-Suarez | **8 / 8** | 205 s | Same metrics as iter-96 (cube 6e-11, latlon 1e-4, ico 1e-12, spectral 2e-4). |
+| Ocean rest_state | **12 / 12** | 180 s | All drifts at machine precision (0 to 1e-17), same as iter-96. |
+
+After the iter-95 dispatch fix and iter-108 collector fix,
+output tree layout is now uniformly grid-typed:
+
+* ``cubed_sphere/C16/``
+* ``latlon/16x32/``
+* ``icosahedral/ico3/``
+* ``spectral/T16/``
+
+with no stale bare-numeric ``16/`` dirs (since the matrix
+runner emits the grid-typed format from the iter-95 dispatch).
+The iter-108 collector also gracefully handles output trees
+with hidden / internal directories (``__pycache__``,
+``.ipynb_checkpoints``, etc.) without picking them.
 
 ---
 
