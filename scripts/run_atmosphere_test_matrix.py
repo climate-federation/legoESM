@@ -1588,7 +1588,8 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
     _write_results_txt(output_dir, {
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
         "days": days, "dt": dt, "status": "PASS" if ok else "FAIL",
-        "notes": notes})
+        "notes": notes,
+        "wall_time": f"{wall:.1f}s"})  # iter-29: enable iter-28 GPU efficiency table on SW
     _save_case_diagnostics(
         output_dir, f"SW Williamson {test_num} {tc.resolution}", dt,
         diag, snapshots, coord_kind, lon_deg, lat_deg,
@@ -1944,7 +1945,8 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
     _write_results_txt(output_dir, {
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
         "days": days, "dt": dt, "status": "PASS" if ok else "FAIL",
-        "notes": notes})
+        "notes": notes,
+        "wall_time": f"{wall:.1f}s"})  # iter-29: enable iter-28 GPU efficiency table on cosine bell
     _save_case_diagnostics(
         output_dir, f"Cosine Bell PL07 {tc.resolution}", dt,
         diag, snapshots, coord_kind, lon_deg, lat_deg,
