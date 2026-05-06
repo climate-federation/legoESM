@@ -459,6 +459,74 @@ class TestIter92AuditFollowupDelegation:
             f"{good_matches}"
         )
 
+    def test_bench_spectral_sw_uses_helper(self):
+        """``bench_spectral_sw.py`` Williamson SW conservation
+        plots and TC2/TC5 scalar drifts use the shared helper.
+        """
+        from pathlib import Path
+        bench_path = Path(__file__).resolve().parent.parent.parent / \
+                     "tests" / "validation" / "bench_spectral_sw.py"
+        text = bench_path.read_text()
+        code_only = "\n".join(
+            line for line in text.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        # Plotting timeseries (mass, energy, enstrophy) — 3 sites.
+        assert code_only.count("relative_drift_series(") >= 3, (
+            "iter-93: ``bench_spectral_sw.py`` conservation plot "
+            "must use ``relative_drift_series`` for mass/energy/"
+            "enstrophy (3 callsites)."
+        )
+        # Scalar drifts (TC2 + TC5: mass + energy = 4 callsites).
+        assert code_only.count("compute_relative_drift(") >= 4, (
+            "iter-93: ``bench_spectral_sw.py`` TC2/TC5 must use "
+            "``compute_relative_drift`` for mass_drift / "
+            "energy_drift (4 callsites)."
+        )
+        # No remaining inline ``/ abs(X[0])`` no-floor patterns.
+        import re
+        bad = re.findall(
+            r"/ abs\([a-zA-Z_]+\[0\]\)", code_only,
+        )
+        assert len(bad) == 0, (
+            f"iter-93: found {len(bad)} remaining ``/ abs(X[0])`` "
+            f"no-floor patterns in bench_spectral_sw.py: {bad}"
+        )
+
+    def test_w2_w5_cosine_bell_uses_helper(self):
+        """``run_w2_w5_cosine_bell_iter1030.py`` mass drift uses
+        the shared helper.
+        """
+        from pathlib import Path
+        path = Path(__file__).resolve().parent.parent.parent / \
+               "scripts" / "run_w2_w5_cosine_bell_iter1030.py"
+        text = path.read_text()
+        code_only = "\n".join(
+            line for line in text.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        assert "compute_relative_drift([mass_init, mass_final])" in code_only, (
+            "iter-93: ``run_w2_w5_cosine_bell_iter1030.py`` must "
+            "compute mass drift via the shared helper."
+        )
+
+    def test_advection_convergence_2d_uses_helper(self):
+        """``run_advection_convergence_2d.py`` mass drift uses
+        the shared helper.
+        """
+        from pathlib import Path
+        path = Path(__file__).resolve().parent.parent.parent / \
+               "scripts" / "run_advection_convergence_2d.py"
+        text = path.read_text()
+        code_only = "\n".join(
+            line for line in text.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        assert "compute_relative_drift([mass_init, mass_final])" in code_only, (
+            "iter-93: ``run_advection_convergence_2d.py`` must "
+            "compute mass drift via the shared helper."
+        )
+
     def test_bench_spectral_pe_uses_relative_drift_series(self):
         """``bench_spectral_pe.py`` JW06 conservation plot uses the
         shared helper, not an inline ``max(abs(KE_ts[0]), 1e-30)``.
