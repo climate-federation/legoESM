@@ -518,7 +518,13 @@ class TestPathDiscovery:
         assert out == gd / "C36"
 
     def test_select_resolution_dir_multiple_warns_once(self, tmp_path, capsys):
-        # Reset the dedup set — also reset by main(); test isolation.
+        """iter-108 update: when multiple GRID-TYPED dirs exist
+        (e.g., ``T21`` + ``T42``), no warning fires — both are
+        valid post-iter-95 candidates and we silently pick
+        alphabetically-first.  The warning only fires when at
+        least one *non-grid-typed* dir exists alongside a
+        grid-typed one (the iter-108 stale-vs-fresh case).
+        """
         M._RES_DIR_WARNED.clear()
         gd = tmp_path / "spectral"
         (gd / "T21").mkdir(parents=True)
@@ -526,12 +532,32 @@ class TestPathDiscovery:
         out1 = M._select_resolution_dir(gd)
         out2 = M._select_resolution_dir(gd)
         captured = capsys.readouterr()
-        # First call warns, second is silent (deduped).
-        assert "multiple resolution" in captured.out
-        # No second warning.
-        assert captured.out.count("multiple resolution") == 1
-        # Both calls return the same alphabetically-first directory.
+        # Pre-iter-108: would warn "multiple resolution dirs".
+        # Post-iter-108: both T21 and T42 are valid grid-typed
+        # candidates, so no stale-dir warning is needed.
+        assert "ignoring non-grid-typed" not in captured.out
+        # Both calls return the alphabetically-first grid-typed dir.
         assert out1 == out2 == gd / "T21"
+
+    def test_select_resolution_dir_warns_when_stale_present(self, tmp_path, capsys):
+        """iter-108 stale-dir warning: if a non-grid-typed dir
+        coexists with a grid-typed one (e.g., ``16/`` from a
+        pre-iter-95 run alongside a fresh ``T16/``), we silently
+        prefer the typed dir AND emit a warning naming the
+        stale dirs.
+        """
+        M._RES_DIR_WARNED.clear()
+        gd = tmp_path / "spectral"
+        (gd / "16").mkdir(parents=True)  # stale pre-iter-95 form
+        (gd / "T16").mkdir(parents=True)  # fresh post-iter-95 form
+        out1 = M._select_resolution_dir(gd)
+        out2 = M._select_resolution_dir(gd)
+        captured = capsys.readouterr()
+        # Warning fires once (deduped via _RES_DIR_WARNED).
+        assert "ignoring non-grid-typed" in captured.out
+        assert captured.out.count("ignoring non-grid-typed") == 1
+        # The typed dir wins.
+        assert out1 == out2 == gd / "T16"
 
     def test_vertical_coords_for_case_empty_dir(self, tmp_path):
         assert M._vertical_coords_for_case(tmp_path) == []
@@ -3307,3 +3333,86 @@ class TestCliResolutionValidation:
             "``is_bare_int and N <= 0`` so pre-formatted "
             "strings are not affected."
         )
+
+
+class TestSelectResolutionDirPrefersGridTyped:
+    """iter-108 (codex iter-104 MEDIUM-6): the cross-grid plot
+    collector previously took ``sorted(res_dirs)[0]`` —
+    alphabetically-first — which made stale ``16/`` dirs (from
+    pre-iter-95 verbatim-resolution runs) shadow fresh ``C16/``
+    dirs (post-iter-95 per-grid dispatch).  iter-108 prefers
+    the grid-typed format explicitly:
+
+    * cubed_sphere → ``C*``
+    * latlon → ``*x*``
+    * icosahedral / mpas → ``ico*``
+    * spectral → ``T*``
+    * regional grids → ``*km``
+
+    Falls back to ``sorted(res_dirs)[0]`` only when no
+    grid-typed candidate exists (graceful degradation for
+    pure-legacy trees).
+    """
+
+    def test_atmosphere_prefers_C_over_bare_int(self, tmp_path):
+        """``cubed_sphere/{16, C16}`` → C16."""
+        grid_dir = tmp_path / "cubed_sphere"
+        grid_dir.mkdir()
+        (grid_dir / "16").mkdir()
+        (grid_dir / "C16").mkdir()
+        chosen = M._select_resolution_dir(grid_dir)
+        assert chosen.name == "C16"
+
+    def test_atmosphere_prefers_xform_over_bare_int(self, tmp_path):
+        """``latlon/{16, 16x32}`` → 16x32."""
+        grid_dir = tmp_path / "latlon"
+        grid_dir.mkdir()
+        (grid_dir / "16").mkdir()
+        (grid_dir / "16x32").mkdir()
+        chosen = M._select_resolution_dir(grid_dir)
+        assert chosen.name == "16x32"
+
+    def test_atmosphere_prefers_ico_over_bare_int(self, tmp_path):
+        """``icosahedral/{16, ico3}`` → ico3."""
+        grid_dir = tmp_path / "icosahedral"
+        grid_dir.mkdir()
+        (grid_dir / "16").mkdir()
+        (grid_dir / "ico3").mkdir()
+        chosen = M._select_resolution_dir(grid_dir)
+        assert chosen.name == "ico3"
+
+    def test_atmosphere_prefers_T_over_bare_int(self, tmp_path):
+        """``spectral/{16, T16}`` → T16."""
+        grid_dir = tmp_path / "spectral"
+        grid_dir.mkdir()
+        (grid_dir / "16").mkdir()
+        (grid_dir / "T16").mkdir()
+        chosen = M._select_resolution_dir(grid_dir)
+        assert chosen.name == "T16"
+
+    def test_atmosphere_falls_back_to_alphabetical_for_legacy(self, tmp_path):
+        """If only legacy dirs are present (no grid-typed
+        candidate), fall back to alphabetical-first.
+        """
+        grid_dir = tmp_path / "cubed_sphere"
+        grid_dir.mkdir()
+        (grid_dir / "16").mkdir()
+        (grid_dir / "32").mkdir()
+        chosen = M._select_resolution_dir(grid_dir)
+        # Both are bare-integer (no grid-typed); falls back to
+        # alphabetical-first which is "16" (< "32" alphabetically).
+        assert chosen.name == "16"
+
+    def test_atmosphere_returns_none_for_empty(self, tmp_path):
+        grid_dir = tmp_path / "cubed_sphere"
+        grid_dir.mkdir()
+        chosen = M._select_resolution_dir(grid_dir)
+        assert chosen is None
+
+    def test_atmosphere_picks_C_when_only_grid_typed(self, tmp_path):
+        """No stale dirs — just pick the grid-typed one."""
+        grid_dir = tmp_path / "cubed_sphere"
+        grid_dir.mkdir()
+        (grid_dir / "C24").mkdir()
+        chosen = M._select_resolution_dir(grid_dir)
+        assert chosen.name == "C24"

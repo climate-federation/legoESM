@@ -1253,3 +1253,90 @@ class TestOceanMatrixBlowupReporting:
             f"BLOWUP info uniformly.  Found {threaded_count}/"
             f"{callsite_count} threaded."
         )
+
+
+class TestSelectOceanResolutionDirPrefersGridTyped:
+    """iter-108 (codex iter-104 MEDIUM-6): mirror the
+    atmosphere collector iter-108 fix in the ocean collector.
+    Stale ``16/`` dirs from pre-iter-102 runs would previously
+    shadow fresh ``C16/`` / ``36x32/`` / ``ico3/`` / ``T16/``
+    dirs.
+
+    Ocean grid types: cubed_sphere, latlon, mpas, spectral
+    (and regional variants ``mpas_regional``,
+    ``latlon_regional``, ``cs_regional`` which use ``Nkm``).
+    """
+
+    def _import_module(self):
+        import importlib
+        import sys
+        from pathlib import Path
+        scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+        if str(scripts_dir) not in sys.path:
+            sys.path.insert(0, str(scripts_dir))
+        return importlib.import_module("run_ocean_test_matrix")
+
+    def test_cubed_sphere_prefers_C(self, tmp_path):
+        M = self._import_module()
+        grid_dir = tmp_path / "cubed_sphere"
+        grid_dir.mkdir()
+        (grid_dir / "16").mkdir()
+        (grid_dir / "C16").mkdir()
+        chosen = M._select_ocean_resolution_dir(
+            grid_dir, list(grid_dir.iterdir()))
+        assert chosen.name == "C16"
+
+    def test_latlon_prefers_xform(self, tmp_path):
+        M = self._import_module()
+        grid_dir = tmp_path / "latlon"
+        grid_dir.mkdir()
+        (grid_dir / "16").mkdir()
+        (grid_dir / "16x32").mkdir()
+        chosen = M._select_ocean_resolution_dir(
+            grid_dir, list(grid_dir.iterdir()))
+        assert chosen.name == "16x32"
+
+    def test_mpas_prefers_ico(self, tmp_path):
+        M = self._import_module()
+        grid_dir = tmp_path / "mpas"
+        grid_dir.mkdir()
+        (grid_dir / "16").mkdir()
+        (grid_dir / "ico3").mkdir()
+        chosen = M._select_ocean_resolution_dir(
+            grid_dir, list(grid_dir.iterdir()))
+        assert chosen.name == "ico3"
+
+    def test_spectral_prefers_T(self, tmp_path):
+        M = self._import_module()
+        grid_dir = tmp_path / "spectral"
+        grid_dir.mkdir()
+        (grid_dir / "16").mkdir()
+        (grid_dir / "T16").mkdir()
+        chosen = M._select_ocean_resolution_dir(
+            grid_dir, list(grid_dir.iterdir()))
+        assert chosen.name == "T16"
+
+    def test_regional_prefers_km(self, tmp_path):
+        M = self._import_module()
+        grid_dir = tmp_path / "mpas_regional"
+        grid_dir.mkdir()
+        (grid_dir / "16").mkdir()
+        (grid_dir / "50km").mkdir()
+        chosen = M._select_ocean_resolution_dir(
+            grid_dir, list(grid_dir.iterdir()))
+        assert chosen.name == "50km"
+
+    def test_falls_back_to_first_for_legacy(self, tmp_path):
+        """No grid-typed candidate → fall back to first."""
+        M = self._import_module()
+        grid_dir = tmp_path / "cubed_sphere"
+        grid_dir.mkdir()
+        d16 = grid_dir / "16"
+        d16.mkdir()
+        d32 = grid_dir / "32"
+        d32.mkdir()
+        chosen = M._select_ocean_resolution_dir(
+            grid_dir, [d16, d32])
+        # Falls back to the first in the input list (filesystem
+        # order, not sorted) — pin to whichever was passed first.
+        assert chosen.name in ("16", "32")

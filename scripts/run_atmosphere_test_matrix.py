@@ -4020,14 +4020,61 @@ def _select_resolution_dir(grid_dir: Path) -> Path | None:
     """Pick the (single) resolution subdirectory under ``grid_dir``.
 
     When more than one resolution directory exists (stale + fresh
-    output mixed in the same tree), warn ONCE per ``grid_dir`` and
-    return the alphabetically-first one.  Centralised so
-    ``_collect_grid_results_atmosphere`` and ``_vertical_coords_for_case``
-    use identical selection logic and don't emit duplicate warnings.
+    output mixed in the same tree), prefer the directory whose
+    name matches the per-grid format from iter-95 (``C*`` for
+    cubed_sphere, ``*x*`` for latlon, ``ico*`` for icosahedral,
+    ``T*`` for spectral).  Only fall back to the
+    alphabetically-first dir if no grid-typed candidate exists
+    (graceful degradation for pre-iter-95 output trees).
+
+    iter-108 (codex iter-104 MEDIUM-6): the original
+    ``sorted(res_dirs)[0]`` rule picked alphabetically-first,
+    so a stale ``16/`` dir would win over a fresh ``C16/`` dir
+    after iter-95's per-grid dispatch fix.  Now prefer the
+    grid-typed name explicitly.
+
+    Centralised so ``_collect_grid_results_atmosphere`` and
+    ``_vertical_coords_for_case`` use identical selection logic
+    and don't emit duplicate warnings.
     """
     res_dirs = [d for d in grid_dir.iterdir() if d.is_dir()]
     if not res_dirs:
         return None
+
+    # iter-108: prefer grid-typed format over bare numeric.
+    grid_name = grid_dir.name
+    grid_typed_pattern = {
+        "cubed_sphere": lambda n: n.startswith("C") and n[1:].isdigit(),
+        "latlon": lambda n: "x" in n and all(p.isdigit() for p in n.split("x") if p),
+        "icosahedral": lambda n: n.startswith("ico") and n[3:].isdigit(),
+        "spectral": lambda n: n.startswith("T") and n[1:].isdigit(),
+        # Ocean grid types
+        "mpas": lambda n: n.startswith("ico") and n[3:].isdigit(),
+        "mpas_regional": lambda n: n.endswith("km") and n[:-2].isdigit(),
+        "latlon_regional": lambda n: n.endswith("km") and n[:-2].isdigit(),
+        "cs_regional": lambda n: n.endswith("km") and n[:-2].isdigit(),
+    }
+    matcher = grid_typed_pattern.get(grid_name)
+
+    if matcher is not None:
+        typed = [d for d in res_dirs if matcher(d.name)]
+        if typed:
+            chosen = sorted(typed)[0]
+            # If we filtered out stale dirs, warn once.
+            stale = [d.name for d in res_dirs if d not in typed]
+            if stale and grid_dir not in _RES_DIR_WARNED:
+                _RES_DIR_WARNED.add(grid_dir)
+                print(
+                    f"    [comparison] {grid_name}: ignoring "
+                    f"non-grid-typed resolution dirs {sorted(stale)} "
+                    f"in favor of {chosen.name} (iter-108 prefers "
+                    f"the grid-typed format from iter-95 "
+                    f"dispatch).  Re-run with a clean output tree "
+                    f"to remove stale dirs."
+                )
+            return chosen
+    # Graceful degradation: no grid-typed dir found, fall back
+    # to the alphabetically-first dir as before iter-108.
     if len(res_dirs) > 1 and grid_dir not in _RES_DIR_WARNED:
         _RES_DIR_WARNED.add(grid_dir)
         print(

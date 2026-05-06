@@ -4701,6 +4701,61 @@ def filter_tests(tests: list[TestCase], args) -> list[TestCase]:
     return filtered
 
 
+_OCEAN_RES_DIR_WARNED: set = set()
+
+
+def _select_ocean_resolution_dir(grid_dir, resolution_dirs):
+    """iter-108 (codex iter-104 MEDIUM-6): prefer grid-typed
+    resolution dirs over bare-numeric ones.
+
+    Pre-iter-108 the ocean collector took ``resolution_dirs[0]``
+    (filesystem order) which left stale ``16/`` dirs from
+    pre-iter-102 runs shadowing fresh ``C16/`` / ``36x32/`` /
+    ``ico3/`` dirs.  Now match the per-grid format from the
+    iter-95/102 dispatch table:
+
+    * cubed_sphere → ``C*``
+    * latlon → ``*x*``
+    * mpas → ``ico*``
+    * spectral → ``T*``
+    * regional grids → ``*km``
+
+    If a typed dir is present, it wins over bare-numeric.  If
+    no typed dir is found (pre-iter-95 pure-legacy tree), fall
+    back to ``resolution_dirs[0]`` for graceful degradation.
+    Warn ONCE per ``grid_dir`` if stale dirs are filtered out.
+    """
+    grid_name = grid_dir.name
+    grid_typed_pattern = {
+        "cubed_sphere": lambda n: n.startswith("C") and n[1:].isdigit(),
+        "latlon": lambda n: "x" in n and all(p.isdigit() for p in n.split("x") if p),
+        "mpas": lambda n: n.startswith("ico") and n[3:].isdigit(),
+        "spectral": lambda n: n.startswith("T") and n[1:].isdigit(),
+        "mpas_regional": lambda n: n.endswith("km") and n[:-2].isdigit(),
+        "latlon_regional": lambda n: n.endswith("km") and n[:-2].isdigit(),
+        "cs_regional": lambda n: n.endswith("km") and n[:-2].isdigit(),
+    }
+    matcher = grid_typed_pattern.get(grid_name)
+    if matcher is not None:
+        typed = [d for d in resolution_dirs if matcher(d.name)]
+        if typed:
+            chosen = sorted(typed)[0]
+            stale = [d.name for d in resolution_dirs if d not in typed]
+            if stale and grid_dir not in _OCEAN_RES_DIR_WARNED:
+                _OCEAN_RES_DIR_WARNED.add(grid_dir)
+                print(
+                    f"    [comparison] {grid_name}: ignoring "
+                    f"non-grid-typed resolution dirs "
+                    f"{sorted(stale)} in favor of {chosen.name} "
+                    f"(iter-108 prefers the grid-typed format "
+                    f"from iter-95/102 dispatch).  Re-run with "
+                    f"a clean output tree to remove stale dirs."
+                )
+            return chosen
+    # Fall back to filesystem order for graceful degradation.
+    return resolution_dirs[0]
+
+
 def _collect_grid_results(test_case_dir: Path) -> dict:
     """Collect results from all grids that completed for this test case.
 
@@ -4727,7 +4782,13 @@ def _collect_grid_results(test_case_dir: Path) -> dict:
         resolution_dirs = [d for d in grid_dir.iterdir() if d.is_dir()]
         if not resolution_dirs:
             continue
-        resolution_dir = resolution_dirs[0]  # Take first (should be only one)
+        # iter-108 (codex iter-104 MEDIUM-6): prefer grid-typed
+        # resolution dirs (e.g., ``C24`` over ``24``) so stale
+        # pre-iter-102 bare-numeric output trees don't shadow
+        # fresh post-iter-102 grid-typed dirs.  Mirrors the
+        # atmosphere collector iter-108 fix.
+        resolution_dir = _select_ocean_resolution_dir(
+            grid_dir, resolution_dirs)
 
         # iter-49: relaxed predicate.
         csv_file = resolution_dir / "mean_timeseries.csv"
