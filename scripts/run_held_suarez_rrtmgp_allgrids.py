@@ -108,18 +108,88 @@ def run_grid(name: str, grid_kwargs: dict) -> dict:
     driver.setup()
     t_setup = time.time() - t0
 
+    # iter-121 (codex iter-119-followup MEDIUM-3): capture
+    # initial atmospheric mass for the post-run mass-drift
+    # gate.  Pre-iter-121, this allgrids HS+RRTMGP runner only
+    # checked ``driver.run()`` status (stability/blowup), not
+    # conservation.  This made it pass even on dycore-side
+    # mass-conservation regressions.
+    mass_init = _compute_driver_mass(driver)
+
     t0 = time.time()
     status = driver.run(compiled=False)
     t_run = time.time() - t0
 
-    logger.info(f"{name}: {status} (setup={t_setup:.1f}s, run={t_run:.1f}s)")
+    # iter-121: compute final mass and apply the same 1e-2
+    # tolerance the matrix runner uses for HS.  If we can't
+    # compute mass for this state type, skip the gate (graceful
+    # degradation — the status-based gate is still in effect).
+    mass_final = _compute_driver_mass(driver)
+    mass_drift = None
+    if mass_init is not None and mass_final is not None:
+        from legoesm.diagnostics.conservation_drift import compute_relative_drift
+        mass_drift = compute_relative_drift([mass_init, mass_final])
+        import numpy as _np
+        if not _np.isfinite(mass_drift) or mass_drift > 1e-2:
+            # Override the status string so ``status_to_exit_code``
+            # picks up the FAIL.  Preserve the original status
+            # text for diagnostic clarity.
+            status = (
+                f"FAIL: mass drift {mass_drift:.2e} exceeds "
+                f"tolerance 1e-2 (was {status})"
+            )
+
+    logger.info(
+        f"{name}: {status} (setup={t_setup:.1f}s, "
+        f"run={t_run:.1f}s, mass_drift="
+        f"{'N/A' if mass_drift is None else f'{mass_drift:.2e}'})"
+    )
 
     return {
         "name": name,
         "status": status,
         "setup_time": t_setup,
         "run_time": t_run,
+        "mass_drift": mass_drift,
     }
+
+
+def _compute_driver_mass(driver) -> float | None:
+    """Compute total atmospheric mass ∫p_s dA from a
+    ``ModelDriver`` (driver holds both state and grid).
+
+    iter-121: walks common ``driver.state.p_s.data`` / area
+    attribute paths.  Returns None for state layouts where
+    we can't find a (p_s, area) pair (e.g., spectral states
+    that store ``lnps_hat`` instead).  None disables the
+    iter-121 gate gracefully — the status-based BLOWUP gate
+    from ``ModelDriver.run()`` is still in effect.
+
+    Returns
+    -------
+    Total mass-related integral ``∫p_s dA`` in Pa·m², or
+    ``None`` when the layout is not recognized.
+    """
+    import jax.numpy as _jnp
+    state = getattr(driver, "state", None)
+    if state is None:
+        return None
+    p_s = getattr(getattr(state, "p_s", None), "data", None)
+    if p_s is None:
+        return None
+    # Driver holds the grid object; try common area-attribute
+    # paths in priority order.
+    grid = getattr(driver, "grid", None)
+    if grid is None:
+        return None
+    for attr in ("area", "areaCell", "grid_area"):
+        area = getattr(grid, attr, None)
+        if area is not None:
+            try:
+                return float(_jnp.sum(p_s * area))
+            except Exception:
+                return None
+    return None
 
 
 def main():

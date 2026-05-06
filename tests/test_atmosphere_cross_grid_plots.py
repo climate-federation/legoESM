@@ -4168,6 +4168,76 @@ class TestHeldSuarezMassDriftTolerance:
             "error_fn doesn't supply mass_drift."
         )
 
+    def test_allgrids_runner_uses_mass_drift_gate(self):
+        """iter-121 codex iter-119-followup MEDIUM-3:
+        ``run_held_suarez_rrtmgp_allgrids.py`` must compute
+        and gate on mass_drift, not just status.
+        """
+        from pathlib import Path
+        path = Path(__file__).resolve().parent.parent / "scripts" / "run_held_suarez_rrtmgp_allgrids.py"
+        text = path.read_text()
+        assert "_compute_driver_mass" in text, (
+            "iter-121: ``run_held_suarez_rrtmgp_allgrids.py`` "
+            "must compute mass via ``_compute_driver_mass`` "
+            "for the post-run drift gate."
+        )
+        assert "mass drift" in text and "tolerance 1e-2" in text, (
+            "iter-121: ``run_held_suarez_rrtmgp_allgrids.py`` "
+            "must apply a 1e-2 mass-drift tolerance."
+        )
+
+    def test_compute_driver_mass_handles_missing_state(self):
+        """Graceful degradation: ``_compute_driver_mass``
+        returns None for state layouts it can't recognize.
+        """
+        import importlib
+        import sys
+        from pathlib import Path
+        from types import SimpleNamespace
+        scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+        if str(scripts_dir) not in sys.path:
+            sys.path.insert(0, str(scripts_dir))
+        m = importlib.import_module("run_held_suarez_rrtmgp_allgrids")
+
+        # No state at all.
+        driver = SimpleNamespace(state=None)
+        assert m._compute_driver_mass(driver) is None
+
+        # State without p_s.
+        driver = SimpleNamespace(state=SimpleNamespace())
+        assert m._compute_driver_mass(driver) is None
+
+        # State with p_s but no .data attribute (None).
+        driver = SimpleNamespace(state=SimpleNamespace(p_s=None))
+        assert m._compute_driver_mass(driver) is None
+
+    def test_compute_driver_mass_works_for_grid_state(self):
+        """Mass = ∫p_s dA computed correctly when both p_s
+        and grid.area are present.
+        """
+        import importlib
+        import sys
+        from pathlib import Path
+        from types import SimpleNamespace
+        import jax.numpy as jnp
+        scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+        if str(scripts_dir) not in sys.path:
+            sys.path.insert(0, str(scripts_dir))
+        m = importlib.import_module("run_held_suarez_rrtmgp_allgrids")
+
+        # Build a synthetic driver with p_s = 1e5 Pa,
+        # area = 1e10 m² per cell × 100 cells = 1e17 total mass.
+        ps = jnp.full((10, 10), 1e5)
+        area = jnp.full((10, 10), 1e10)
+        driver = SimpleNamespace(
+            state=SimpleNamespace(p_s=SimpleNamespace(data=ps)),
+            grid=SimpleNamespace(area=area),
+        )
+        mass = m._compute_driver_mass(driver)
+        # Expected: 1e5 × 1e10 × 100 = 1e17
+        assert mass == pytest.approx(1e17, rel=1e-9)
+
+
     def test_4grids_runner_uses_mass_drift_tolerance(self):
         """iter-119 codex iter-118-followup MEDIUM-2:
         ``run_held_suarez_rrtmgp_4grids.py`` must gate PASS
