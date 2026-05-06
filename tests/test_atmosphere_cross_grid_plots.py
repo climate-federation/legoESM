@@ -3208,3 +3208,102 @@ class TestRunAmipFiniteCheckSpectralFields:
         # Grid-space iteration order: T comes first.
         assert ok is False
         assert bad == "T"
+
+
+class TestCliResolutionValidation:
+    """iter-107 (codex iter-104 LOW-7): pre-iter-107,
+    ``--resolution 0`` raised a confusing
+    ``ValueError: math domain error`` deep inside the
+    icosahedral level computation, and ``--resolution -16``
+    silently produced ``C-16`` / ``-16x-32`` / ``T-16``
+    invalid strings while icosahedral mapped as if positive.
+
+    iter-107 added validation at the boundary: bare integer
+    ``N <= 0`` is rejected with a clear parser-style error
+    message and ``sys.exit(2)``.
+
+    Also added a warning when ``--resolution N`` maps to an
+    icosahedral level > 8 (the max supported per
+    ``voronoi.py:1063``).
+    """
+
+    def test_atmosphere_resolution_zero_rejected(self):
+        """``run_atmosphere_test_matrix.py --resolution 0``
+        exits with code 2 and a clear error message.
+        """
+        import subprocess
+        from pathlib import Path
+        repo_root = Path(__file__).resolve().parent.parent
+        result = subprocess.run(
+            [".venv/bin/python",
+             "scripts/run_atmosphere_test_matrix.py",
+             "--only", "sw", "--quick", "--resolution", "0",
+             "--no-cross-grid-plots"],
+            cwd=str(repo_root),
+            capture_output=True, text=True,
+            env={"JAX_ENABLE_X64": "1", "PATH": "/usr/bin:/bin"},
+            timeout=60,
+        )
+        assert result.returncode == 2, (
+            f"iter-107: --resolution 0 must exit 2, got "
+            f"{result.returncode}.\nstderr:\n{result.stderr}"
+        )
+        assert "must be a positive integer" in result.stderr, (
+            f"iter-107: --resolution 0 must produce a clear "
+            f"error message; got:\n{result.stderr}"
+        )
+
+    def test_atmosphere_resolution_negative_rejected(self):
+        """``run_atmosphere_test_matrix.py --resolution -16``
+        exits with code 2 and a clear error message.
+        """
+        import subprocess
+        from pathlib import Path
+        repo_root = Path(__file__).resolve().parent.parent
+        result = subprocess.run(
+            [".venv/bin/python",
+             "scripts/run_atmosphere_test_matrix.py",
+             "--only", "sw", "--quick", "--resolution", "-16",
+             "--no-cross-grid-plots"],
+            cwd=str(repo_root),
+            capture_output=True, text=True,
+            env={"JAX_ENABLE_X64": "1", "PATH": "/usr/bin:/bin"},
+            timeout=60,
+        )
+        assert result.returncode == 2, (
+            f"iter-107: --resolution -16 must exit 2, got "
+            f"{result.returncode}.\nstderr:\n{result.stderr}"
+        )
+        assert "must be a positive integer" in result.stderr
+
+    def test_atmosphere_resolution_string_format_still_works(self):
+        """Pre-formatted strings (``C36``, ``ico5``, etc.) must
+        still pass through unchanged.  The iter-107 validation
+        only rejects bare-integer ``N <= 0``, not strings.
+        """
+        import inspect
+        import re
+        # Source-level pin: the iter-107 validation only triggers
+        # when ``is_bare_int`` is True (so non-integer strings
+        # like "C36" pass through to ``_expand_cli_res``
+        # unchanged).
+        from importlib import import_module
+        import sys
+        from pathlib import Path
+        scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+        if str(scripts_dir) not in sys.path:
+            sys.path.insert(0, str(scripts_dir))
+        m = import_module("run_atmosphere_test_matrix")
+        text = inspect.getsource(m)
+        text_no_strings = re.sub(r'""".*?"""', "", text, flags=re.DOTALL)
+        text_no_strings = re.sub(r"'''.*?'''", "", text_no_strings, flags=re.DOTALL)
+        code_only = "\n".join(
+            line for line in text_no_strings.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        # The validation is gated on ``is_bare_int and N <= 0``.
+        assert "is_bare_int and N <= 0" in code_only, (
+            "iter-107: validation must be gated on "
+            "``is_bare_int and N <= 0`` so pre-formatted "
+            "strings are not affected."
+        )
