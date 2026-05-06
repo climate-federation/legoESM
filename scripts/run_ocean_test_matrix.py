@@ -6105,8 +6105,52 @@ def main():
         return
 
     if args.resolution:
+        # iter-102 fix: ``--resolution N`` (integer) was previously
+        # applied verbatim to every grid type, breaking 3+ of 4
+        # parsers (mirrors the iter-95 atmosphere matrix fix).
+        # Specifically:
+        #   cubed_sphere ``int(res[1:])``: "24" → 4 (silent wrong)
+        #   latlon ``res.split("x")``: "24" → unpack error
+        #   mpas ``res.replace("ico","")``: "24" → level=24
+        #     (4.29e+10 cells, ValueError)
+        #   spectral ``int(res[1:])``: "24" → 4 (silent wrong)
+        #
+        # iter-102: bare integer N expands per-grid; pre-formatted
+        # strings (``"C24"``, ``"ico3"``, ``"36x72"``, ``"T21"``)
+        # pass through unchanged.
+        cli_res = args.resolution
+        try:
+            N = int(cli_res)
+            is_bare_int = True
+        except ValueError:
+            is_bare_int = False
+
+        def _expand_cli_res(grid_type: str) -> str:
+            if not is_bare_int:
+                return cli_res
+            if grid_type == "cubed_sphere":
+                return f"C{N}"
+            elif grid_type == "latlon":
+                return f"{N}x{2 * N}"
+            elif grid_type == "mpas":
+                # mpas (icosahedral): level so 10·4^level + 2 ≈ 2N²
+                # (latlon-coverage).  iter-95 dispatch table.
+                # N=16 → ico3 (642 cells), N=32 → ico4 (2562),
+                # N=72 → ico5 (10242).
+                import math
+                level = max(2, min(8, round(math.log(2 * N * N / 10) / math.log(4))))
+                return f"ico{level}"
+            elif grid_type == "spectral":
+                return f"T{N}"
+            elif grid_type in ("mpas_regional", "latlon_regional", "cs_regional"):
+                # Regional grids use km resolution; pass through
+                # the bare integer as ``Nkm`` form.
+                return f"{N}km"
+            else:
+                return cli_res
+
         tests = [TestCase(
-            t.case, t.grid_type, args.resolution,
+            t.case, t.grid_type, _expand_cli_res(t.grid_type),
             t.duration_days, t.quick_days, t.run_kwargs)
             for t in tests]
 
