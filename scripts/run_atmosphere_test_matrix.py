@@ -2492,6 +2492,28 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
     max_wind = diag["max_wind"][-1] if diag.get("max_wind") else 0
     notes = f"mass drift={mass_drift:.2e}, max|v|={max_wind:.1f}"
 
+    # iter-117 (codex iter-114 HIGH-5 followup): apply a
+    # mass-drift tolerance to the HS PASS criteria.  Pre-iter-117
+    # ``ok`` only checked finiteness + non-blown-up, allowing
+    # latlon/spectral mass drift ~1e-4 to PASS while cube/ico
+    # are at machine precision (~1e-11).  This makes the
+    # cross-grid PASS column meaningless as a conservation
+    # metric.  iter-117 adds ``HELD_SUAREZ_MASS_DRIFT_TOL`` =
+    # 1e-2 (1% over the run duration), which:
+    # * Allows current latlon/spectral 1e-4 to pass
+    # * Catches gross conservation violations (1% drift would
+    #   indicate a real bug in the dycore/fixer chain)
+    # * Documents the cross-grid quality gap explicitly: when
+    #   the threshold is later tightened to 1e-3, latlon will
+    #   FAIL until the fix_mass conservation fixer is improved.
+    HELD_SUAREZ_MASS_DRIFT_TOL = 1e-2
+    if ok and mass_drift > HELD_SUAREZ_MASS_DRIFT_TOL:
+        ok = False
+        notes += (
+            f" [FAIL: mass drift {mass_drift:.2e} > tolerance "
+            f"{HELD_SUAREZ_MASS_DRIFT_TOL:.0e}]"
+        )
+
     level_values = np.asarray(
         getattr(sigma, "sigma_full", np.arange(nlev)), dtype=np.float64)
 
