@@ -3779,6 +3779,31 @@ class TestSharedCliResolution:
                 validate_cli_resolution(bad)
             assert e.value.code == 2
 
+    def test_validate_rejects_zero_components(self):
+        """iter-118 codex iter-117-followup MEDIUM-1: per-grid
+        regexes pre-iter-118 accepted zero-sized formats
+        (``C0``, ``0x32``, ``16x0``, ``0km``, ``ico0``,
+        ``T0``).  These would later crash in the per-grid
+        parsers.  iter-118 tightened the regex to require
+        ``[1-9]\\d*`` so any zero-component is rejected at
+        the boundary.
+        """
+        from legoesm.driver.cli_resolution import validate_cli_resolution
+        for bad in ("C0", "0x32", "16x0", "0km", "ico0", "T0"):
+            with pytest.raises(SystemExit) as e:
+                validate_cli_resolution(bad)
+            assert e.value.code == 2, (
+                f"iter-118: {bad!r} must be rejected; got "
+                f"{e.value.code}"
+            )
+
+    def test_validate_rejects_empty_string(self):
+        """``--resolution ''`` must exit 2."""
+        from legoesm.driver.cli_resolution import validate_cli_resolution
+        with pytest.raises(SystemExit) as e:
+            validate_cli_resolution("")
+        assert e.value.code == 2
+
     def test_expand_for_each_grid(self):
         from legoesm.driver.cli_resolution import expand_cli_resolution
         assert expand_cli_resolution(16, "cubed_sphere") == "C16"
@@ -3967,6 +3992,87 @@ class TestHeldSuarezMassDriftTolerance:
             f"catch gross violations (< 1.0) but loose enough "
             f"to allow current latlon/spectral 1e-4 (> 1e-4).  "
             f"Got {tol:.0e}."
+        )
+
+    def test_apply_mass_drift_tolerance_fails_nan(self):
+        """iter-118 codex iter-117-followup MEDIUM-2: NaN
+        mass_drift must fail the tolerance check.  Pre-iter-118
+        ``mass_drift > tol`` was False for NaN, so a NaN-but-
+        finite-state-checked run could PASS.
+        """
+        m = self._import_module()
+        ok, notes = m._apply_mass_drift_tolerance(
+            ok=True, notes="initial", mass_drift=float("nan"),
+            tol=1e-2,
+        )
+        assert ok is False, (
+            "iter-118: NaN mass_drift must fail the tolerance "
+            "check (gated via not isfinite || > tol)."
+        )
+        assert "non-finite" in notes
+
+    def test_apply_mass_drift_tolerance_fails_inf(self):
+        m = self._import_module()
+        ok, notes = m._apply_mass_drift_tolerance(
+            ok=True, notes="initial", mass_drift=float("inf"),
+            tol=1e-2,
+        )
+        assert ok is False
+        assert "non-finite" in notes
+
+    def test_apply_mass_drift_tolerance_passes_below_tol(self):
+        m = self._import_module()
+        ok, notes = m._apply_mass_drift_tolerance(
+            ok=True, notes="initial", mass_drift=1e-4,
+            tol=1e-2,
+        )
+        assert ok is True
+        assert notes == "initial"
+
+    def test_apply_mass_drift_tolerance_fails_above_tol(self):
+        m = self._import_module()
+        ok, notes = m._apply_mass_drift_tolerance(
+            ok=True, notes="initial", mass_drift=2e-2,
+            tol=1e-2,
+        )
+        assert ok is False
+        assert "tolerance" in notes
+        assert "2.00e-02" in notes
+
+    def test_apply_mass_drift_tolerance_idempotent_on_failed_run(self):
+        """If ok is already False, the helper passes through
+        without changing anything (no double-annotation)."""
+        m = self._import_module()
+        ok, notes = m._apply_mass_drift_tolerance(
+            ok=False, notes="BLOWUP at step 100",
+            mass_drift=2e-2, tol=1e-2,
+        )
+        assert ok is False
+        assert notes == "BLOWUP at step 100"
+
+    def test_baroclinic_uses_mass_drift_tolerance(self):
+        """iter-118 codex iter-117-followup MEDIUM-3:
+        ``run_baroclinic`` must apply the mass-drift tolerance.
+        """
+        import inspect
+        m = self._import_module()
+        src = inspect.getsource(m.run_baroclinic)
+        assert "_apply_mass_drift_tolerance" in src, (
+            "iter-118: ``run_baroclinic`` must call "
+            "``_apply_mass_drift_tolerance`` to gate PASS on "
+            "conservation."
+        )
+
+    def test_amip_uses_mass_drift_tolerance(self):
+        """iter-118 codex iter-117-followup MEDIUM-3:
+        ``run_amip`` must apply the mass-drift tolerance.
+        """
+        import inspect
+        m = self._import_module()
+        src = inspect.getsource(m.run_amip)
+        assert "_apply_mass_drift_tolerance" in src, (
+            "iter-118: ``run_amip`` must call "
+            "``_apply_mass_drift_tolerance``."
         )
 
     def test_held_suarez_smoke_at_c16_passes_placeholder(self):

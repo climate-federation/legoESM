@@ -52,12 +52,18 @@ from typing import Optional
 # string passed to ``--resolution`` must match one of these,
 # otherwise iter-115 codex MEDIUM-2 says we should reject at
 # the boundary.
+#
+# iter-118 (codex iter-117 followup MEDIUM-1): require POSITIVE
+# components — pre-iter-118 patterns like ``\d+`` matched 0
+# (e.g., ``C0``, ``0x32``, ``16x0``, ``0km``), which then
+# crashed later in the per-grid parsers.  iter-118 uses
+# ``[1-9]\d*`` to require a non-zero leading digit.
 _PER_GRID_FORMAT_PATTERNS = {
-    "C": re.compile(r"^C\d+$"),                    # cubed_sphere / cs_regional
-    "x": re.compile(r"^\d+x\d+$"),                 # latlon / latlon_regional
-    "ico": re.compile(r"^ico\d+$"),                # icosahedral / mpas
-    "T": re.compile(r"^T\d+$"),                    # spectral
-    "km": re.compile(r"^\d+km$"),                  # mpas_regional
+    "C": re.compile(r"^C[1-9]\d*$"),                          # cubed_sphere / cs_regional
+    "x": re.compile(r"^[1-9]\d*x[1-9]\d*$"),                  # latlon / latlon_regional
+    "ico": re.compile(r"^ico[1-9]\d*$"),                      # icosahedral / mpas
+    "T": re.compile(r"^T[1-9]\d*$"),                          # spectral
+    "km": re.compile(r"^[1-9]\d*km$"),                        # mpas_regional
 }
 
 

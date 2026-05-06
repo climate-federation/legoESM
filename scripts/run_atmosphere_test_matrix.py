@@ -241,6 +241,47 @@ def _compute_drift(values: list[float]) -> float:
     return compute_relative_drift(values)
 
 
+def _apply_mass_drift_tolerance(
+    ok: bool, notes: str, mass_drift: float, tol: float,
+) -> tuple[bool, str]:
+    """Apply a mass-drift PASS tolerance to a test case.
+
+    iter-117 introduced ``HELD_SUAREZ_MASS_DRIFT_TOL`` for the HS
+    runner.  iter-118 codex iter-117-followup MEDIUM-2/3
+    factored this into a shared helper because:
+
+    * The HS gate ``mass_drift > tol`` was False for NaN drift,
+      so a NaN-but-finite-checked run could PASS.  iter-118
+      gates on ``not np.isfinite(...) or > tol``.
+    * Other runners (baroclinic, AMIP) compute mass_drift but
+      did not gate on it; codex iter-117 followup MEDIUM-3
+      flagged this as making the cross-grid PASS column
+      meaningless.  The helper makes it cheap to apply the
+      same gate across all of them.
+
+    Returns
+    -------
+    (ok, notes): tuple of updated values.  When ``mass_drift``
+    is non-finite or exceeds ``tol``, ``ok`` is set to False
+    and a ``[FAIL: mass drift ...]`` annotation is appended to
+    ``notes``.
+    """
+    import numpy as _np
+    if ok and (not _np.isfinite(mass_drift) or mass_drift > tol):
+        ok = False
+        if not _np.isfinite(mass_drift):
+            notes += (
+                f" [FAIL: mass drift is non-finite "
+                f"({mass_drift!r})]"
+            )
+        else:
+            notes += (
+                f" [FAIL: mass drift {mass_drift:.2e} > "
+                f"tolerance {tol:.0e}]"
+            )
+    return ok, notes
+
+
 def _grid_cell_area(grid_or_mesh):
     """Return the cell-area array for any supported grid object.
 
@@ -2496,23 +2537,12 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
     # mass-drift tolerance to the HS PASS criteria.  Pre-iter-117
     # ``ok`` only checked finiteness + non-blown-up, allowing
     # latlon/spectral mass drift ~1e-4 to PASS while cube/ico
-    # are at machine precision (~1e-11).  This makes the
-    # cross-grid PASS column meaningless as a conservation
-    # metric.  iter-117 adds ``HELD_SUAREZ_MASS_DRIFT_TOL`` =
-    # 1e-2 (1% over the run duration), which:
-    # * Allows current latlon/spectral 1e-4 to pass
-    # * Catches gross conservation violations (1% drift would
-    #   indicate a real bug in the dycore/fixer chain)
-    # * Documents the cross-grid quality gap explicitly: when
-    #   the threshold is later tightened to 1e-3, latlon will
-    #   FAIL until the fix_mass conservation fixer is improved.
+    # are at machine precision (~1e-11).  iter-117 adds 1e-2.
+    # iter-118 (codex iter-117 followup MEDIUM-2): also fail
+    # on non-finite drift via ``_apply_mass_drift_tolerance``.
     HELD_SUAREZ_MASS_DRIFT_TOL = 1e-2
-    if ok and mass_drift > HELD_SUAREZ_MASS_DRIFT_TOL:
-        ok = False
-        notes += (
-            f" [FAIL: mass drift {mass_drift:.2e} > tolerance "
-            f"{HELD_SUAREZ_MASS_DRIFT_TOL:.0e}]"
-        )
+    ok, notes = _apply_mass_drift_tolerance(
+        ok, notes, mass_drift, HELD_SUAREZ_MASS_DRIFT_TOL)
 
     level_values = np.asarray(
         getattr(sigma, "sigma_full", np.arange(nlev)), dtype=np.float64)
@@ -2792,6 +2822,13 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
     notes = f"mass drift={mass_drift:.2e}"
     if diag.get("max_wind"):
         notes += f", max|v|={diag['max_wind'][-1]:.1f}"
+    # iter-118 (codex iter-117 followup MEDIUM-3): apply
+    # a 1e-2 mass-drift tolerance to baroclinic.  Same
+    # rationale as iter-117 HS: PASS column was meaningless
+    # without a gate, since fix_mass-on cube/ico hit machine
+    # precision while latlon/spectral hit ~1e-4.
+    ok, notes = _apply_mass_drift_tolerance(
+        ok, notes, mass_drift, 1e-2)
 
     level_values = np.asarray(
         getattr(sigma, "sigma_full", np.arange(nlev)), dtype=np.float64)
@@ -3313,6 +3350,11 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
 
     mass_drift = _compute_drift(diag.get("mass", []))
     notes = f"mass drift={mass_drift:.2e}"
+    # iter-118 (codex iter-117 followup MEDIUM-3): apply
+    # a 1e-2 mass-drift tolerance to AMIP.  Same rationale
+    # as iter-117 HS / iter-118 baroclinic.
+    ok, notes = _apply_mass_drift_tolerance(
+        ok, notes, mass_drift, 1e-2)
 
     level_values = np.asarray(
         getattr(sigma, "sigma_full", np.arange(nlev)), dtype=np.float64)
