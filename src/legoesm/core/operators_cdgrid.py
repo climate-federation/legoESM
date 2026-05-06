@@ -743,7 +743,7 @@ def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid,
     dh_dt : jax.Array, shape (6, n, n[, nlev])
     """
     if h.ndim == 4:
-        # 3D: apply per level via vmap
+        # 3D: apply per level via vmap (main's clean structure).
         h_t = jnp.moveaxis(h, -1, 0)
         u_c_t = jnp.moveaxis(u_c, -1, 0)
         v_c_t = jnp.moveaxis(v_c, -1, 0)
@@ -2468,44 +2468,35 @@ def _overlapped_interp_center_to_corner(field, cdgrid, masks=None):
 
 
 def _overlapped_arakawa_lamb_gradient(B, cdgrid, masks=None):
-    """Like _arakawa_lamb_gradient but with interior/boundary overlap.
+    """Compute the Arakawa-Lamb gradient on a 4D field.
 
-    Only supports 4D fields (6, n, n, nlev).
+    The previous implementation vmapped a per-level "interior/boundary
+    overlap" pad+stencil pass.  The overlap helper itself does a
+    *blocking* halo exchange (see ``async_halo.overlapped_halo_compute``
+    — interior compute, then ``pad_halo``, then boundary compute), so
+    the vmap turned one 4D halo exchange into ``nlev`` per-level
+    exchanges.  Under MPI that is ``nlev`` extra round-trip latencies
+    per RHS evaluation — strictly worse than the single 4D-batched
+    halo path.
+
+    Until ``async_halo`` is rewritten to either (a) use one 4D halo
+    exchange and split compute by mask, or (b) drive real non-blocking
+    MPI calls (``Isend`` / ``Irecv`` are not yet exposed by ``mpi4jax``),
+    the safe behaviour for scaling is to fall through to the regular
+    4D-batched path.  Keeping the function signature lets the call
+    site stay opt-in via ``CDGridPrimitiveEquationConfig.use_async_halo``.
 
     Parameters
     ----------
-    B : jax.Array, shape (6, n, n, nlev)
+    B : jax.Array, shape (6, n, n, nlev) or (6, n, n)
     cdgrid : CubedSphereCDGrid
-    masks : InteriorBoundaryMasks, optional
-
-    Returns
-    -------
-    dB_dx, dB_dy_perp : each (6, n+1, n+1, nlev)
+    masks : InteriorBoundaryMasks, optional (currently unused)
     """
-    if B.ndim == 3:
-        return _arakawa_lamb_gradient(B, cdgrid)
-
-    c00 = cdgrid.grad_c00
-    c01 = cdgrid.grad_c01
-    c10 = cdgrid.grad_c10
-    c11 = cdgrid.grad_c11
-
-    def _stencil_body(f_pad):
-        """Arakawa-Lamb gradient stencil -> (6, n+1, n+1, 2) packed dx/dy."""
-        B_sw = f_pad[:, :-1, :-1]
-        B_se = f_pad[:, 1:, :-1]
-        B_nw = f_pad[:, :-1, 1:]
-        B_ne = f_pad[:, 1:, 1:]
-        dB_raw_x = (B_se + B_ne) - (B_sw + B_nw)
-        dB_raw_y = (B_nw + B_ne) - (B_sw + B_se)
-        dB_dx = c00 * dB_raw_x + c01 * dB_raw_y
-        dB_dy = c10 * dB_raw_x + c11 * dB_raw_y
-        return jnp.stack([dB_dx, dB_dy], axis=-1)  # (6, n+1, n+1, 2)
-
-    # Apply per-level
-    B_t = jnp.moveaxis(B, -1, 0)  # (nlev, 6, n, n)
-    result_t = jax.vmap(
-        lambda f: overlapped_halo_compute(f, _stencil_body, halo_width=1, masks=masks)
-    )(B_t)  # (nlev, 6, n+1, n+1, 2)
-    result = jnp.moveaxis(result_t, 0, -2)  # (6, n+1, n+1, nlev, 2)
-    return result[..., 0], result[..., 1]
+    # Iter 6 cleanup: the previous 4D path vmapped a "blocking-pad +
+    # interior/boundary-split" stencil per level, turning one 4D halo
+    # exchange into ``nlev`` per-level exchanges — strictly worse than
+    # the regular 4D-batched ``_arakawa_lamb_gradient`` it was meant to
+    # accelerate.  ``mpi4jax`` has no non-blocking primitives yet, so
+    # just delegate to the canonical packed path; ``masks`` is preserved
+    # in the signature for forward compatibility but ignored here.
+    return _arakawa_lamb_gradient(B, cdgrid)

@@ -48,8 +48,13 @@ N_WARMUP=3
 N_TIMING=100
 N_LEVELS=26
 WEAK_BASE_N=24
-STRONG_RESOLUTIONS="48,96,192"
-GPU_COUNTS="1,2,3,6,24,54"    # valid cubed-sphere GPU counts
+# Iter 18 default: icosahedral is the only validated multi-rank MPI grid
+# (see iter-13/17 ``_MPI_SUPPORTED_GRIDS`` in the Python driver).  The
+# previous default (``--grid <unset>`` ⇒ spectral) silently downgraded
+# multi-rank submissions to a no-MPI single-rank spectral run.
+GRID="icosahedral"
+STRONG_RESOLUTIONS="4,5,6"     # icosahedral subdivision levels
+GPU_COUNTS="1,2,4,8"           # any positive count works for icosahedral
 DRY_RUN=0
 CONSTRAINT=""                  # e.g., "a100_80g" for 80GB nodes only
 
@@ -72,7 +77,9 @@ Options:
   --n-timing N           Timing steps (default: 100)
   --n-levels N           Vertical levels (default: 26)
   --weak-base-n N        Base resolution for weak scaling (default: 24)
-  --strong-res LIST      Resolutions for strong scaling (default: 48,96,192)
+  --strong-res LIST      Resolutions for strong scaling (default: 4,5,6)
+  --grid GRID            Grid type (default: icosahedral; only validated
+                         multi-rank MPI path)
   --constraint STR       SLURM constraint (e.g., a100_80g)
   --dry-run              Print sbatch commands without submitting
   -h, --help             Show this help
@@ -88,6 +95,7 @@ while [[ $# -gt 0 ]]; do
         --mode)          MODE="$2"; shift 2 ;;
         --precision)     PRECISION="$2"; shift 2 ;;
         --gpu-counts)    GPU_COUNTS="$2"; shift 2 ;;
+        --grid)          GRID="$2"; shift 2 ;;
         --n-warmup)      N_WARMUP="$2"; shift 2 ;;
         --n-timing)      N_TIMING="$2"; shift 2 ;;
         --n-levels)      N_LEVELS="$2"; shift 2 ;;
@@ -158,8 +166,11 @@ for N_GPUS in "${GPU_LIST[@]}"; do
     RUN_OUTPUT="${CAMPAIGN_DIR}/gpu_${N_GPUS}"
     SCRIPT_PATH="${JOBS_DIR}/${JOB_NAME}.sbatch"
 
-    # Build the Python command
+    # Build the Python command.  Iter 18 fix: pass ``--grid`` (the
+    # wrapper previously omitted it, so multi-rank jobs silently
+    # ran the default ``spectral`` grid which has no MPI dispatch).
     PYTHON_CMD=".venv/bin/python scripts/run_levante_gpu_scaling.py"
+    PYTHON_CMD="${PYTHON_CMD} --grid ${GRID}"
     PYTHON_CMD="${PYTHON_CMD} --mode ${MODE}"
     PYTHON_CMD="${PYTHON_CMD} --precision ${PRECISION}"
     PYTHON_CMD="${PYTHON_CMD} --n-gpus ${N_GPUS}"
@@ -211,7 +222,20 @@ module load python3 cuda/12
 source .venv/bin/activate
 
 # --- JAX / XLA configuration ---
-export JAX_PLATFORMS="gpu,cpu"
+# Iter 22/26: ``JAX_PLATFORMS="gpu,cpu"`` is the legacy alias and is
+# rejected by JAX 0.10+ ("Backend 'rocm' is not in the list of known
+# backends: ['cpu', 'tpu', 'cuda']").  Default to ``cuda,cpu`` on
+# NVIDIA nodes.  Iter 26 follow-up: respect a value already exported
+# by ``sbatch --export=JAX_PLATFORMS=...`` so ROCm sites can override
+# without editing this file.
+# Iter 27: escape the parameter expansion so it resolves at *job*
+# runtime (under the sbatch'd shell), not at wrapper-execution time
+# inside the heredoc.  Without the backslash, bash expands
+# ${JAX_PLATFORMS:-cuda,cpu} when writing the .sbatch script, picking
+# up the wrapper's env (typically empty on the submit host) and
+# baking ``cuda,cpu`` into the file — which then overrides any
+# ``sbatch --export=JAX_PLATFORMS=rocm,cpu`` the user supplied.
+export JAX_PLATFORMS="\${JAX_PLATFORMS:-cuda,cpu}"
 export JAX_ENABLE_X64=1
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
@@ -325,6 +349,7 @@ cat > "${CAMPAIGN_DIR}/manifest.json" <<MANIFEST_EOF
   "n_timing": ${N_TIMING},
   "weak_base_n": ${WEAK_BASE_N},
   "strong_resolutions": "${STRONG_RESOLUTIONS}",
+  "grid": "${GRID}",
   "time_limit": "${TIME_LIMIT}",
   "project_dir": "${PROJECT_DIR}",
   "campaign_dir": "${CAMPAIGN_DIR}",

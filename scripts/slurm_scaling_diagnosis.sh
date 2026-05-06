@@ -94,8 +94,14 @@ module load cuda/12.3.2
 # Activate venv
 source .venv/bin/activate
 
-# JAX configuration
-export JAX_PLATFORMS="gpu,cpu"
+# JAX configuration.  Iter 25: ``gpu,cpu`` is the legacy alias and is
+# rejected by JAX 0.10+ (``Backend 'rocm' is not in the list of
+# known backends: ['cpu', 'tpu', 'cuda']``).  Default to ``cuda,cpu``
+# on Levante's NVIDIA partition.  Iter 26: respect a value already
+# exported by ``sbatch --export=JAX_PLATFORMS=...`` so ROCm sites
+# don't have to edit this script — the documented override now
+# actually works.
+export JAX_PLATFORMS="${JAX_PLATFORMS:-cuda,cpu}"
 export XLA_PYTHON_CLIENT_PREALLOCATE="false"
 export XLA_PYTHON_CLIENT_MEM_FRACTION="0.90"
 export XLA_FLAGS="--xla_gpu_enable_latency_hiding_scheduler=true"
@@ -107,8 +113,12 @@ fi
 # Enable MPI profiling
 export LEGOESM_PROFILE_MPI=1
 
-# GPU binding: each rank gets one GPU
-export CUDA_VISIBLE_DEVICES=$SLURM_LOCALID
+# Iter 28: GPU binding is applied inside each ``srun`` task by SLURM
+# (``--gpus-per-task=1``) and the Python entry point's
+# ``_configure_env`` (which reads ``SLURM_LOCALID`` per-rank).
+# Exporting ``CUDA_VISIBLE_DEVICES`` here at wrapper scope binds
+# *every* rank to the launcher's local id (typically 0), pinning all
+# ranks to GPU 0 and serialising the run.
 
 # NCCL tuning for Levante
 export NCCL_DEBUG=WARN
