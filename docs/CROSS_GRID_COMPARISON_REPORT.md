@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-57 snapshot)
+**Branch**: `simulation_full_check` (iter-58 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..57 findings.  It is the user-facing
+This report consolidates iter-1..58 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -29,8 +29,8 @@ and every available pair of grids:
   `T(latitude, σ)` cross-section, the canonical Held-Suarez
   Fig. 3 layout.
 
-Every helper has a corresponding unit test (112 / 112 pass
-across `tests/test_atmosphere_cross_grid_plots.py` (71) +
+Every helper has a corresponding unit test (116 / 116 pass
+across `tests/test_atmosphere_cross_grid_plots.py` (75) +
 `test_ocean_cross_grid_plots.py` (15) +
 `test_cross_grid_wrappers.py` (26)) plus 3 MPAS-mesh-
 unavailable skips.
@@ -600,12 +600,25 @@ issues; final convergence is clean.
   neither is a one-iter fix.  Pure documentation /
   diagnosis; no source changes.
 
-112/112 unit tests pass + 3 MPAS-mesh-unavailable skips
-(across ``tests/test_atmosphere_cross_grid_plots.py`` (71 +
+* iter-58: pin the iter-57 dissipation imbalance with a
+  quantitative regression test class
+  ``TestHeldSuarezDissipationImbalance`` (4 tests).  Asserts:
+  cube/latlon Laplacian-viscosity ratio is 0.5 at matched dx
+  (the ``frac=0.05`` vs ``frac=0.10`` choice); cube branch
+  uses all four dissipation terms; latlon C-grid does NOT
+  expose biharmonic / div_damp fields (so a future change
+  that adds them flips the test and requires updating §5
+  fix-candidate (a)); hyperdiff_cube scales as 1/n⁴;
+  div_damp_cube scales as 1/n².  Future rebalancing must
+  update the test alongside the docs — the iter-57 finding
+  is now atomic with the source.
+
+116/116 unit tests pass + 3 MPAS-mesh-unavailable skips
+(across ``tests/test_atmosphere_cross_grid_plots.py`` (75 +
 3 skips), ``tests/test_ocean_cross_grid_plots.py`` (15), and
 ``tests/test_cross_grid_wrappers.py`` (26)).
 
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-57 update).*
+(iter-58 update).*

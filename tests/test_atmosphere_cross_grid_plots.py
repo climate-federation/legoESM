@@ -1770,3 +1770,135 @@ class TestHeldSuarezInitConsistency:
             f"Either the function was refactored or a grid branch "
             f"was dropped — update this test if intentional."
         )
+
+
+# ---------------------------------------------------------------------------
+# iter-58: pin the iter-57 cross-dycore dissipation imbalance
+# ---------------------------------------------------------------------------
+
+class TestHeldSuarezDissipationImbalance:
+    """Quantitative regression test for the iter-57 dissipation
+    imbalance audit.
+
+    The matrix runner's ``run_held_suarez`` configures four
+    different grids with different dissipation operators:
+
+      * cube:  hyperdiff (biharmonic, 4 terms)
+                + hyperdiff_ps (biharmonic on p_s)
+                + div_damp (Laplacian on divergence)
+                + A_h (Laplacian viscosity, frac=0.05)
+      * latlon: A_h (Laplacian viscosity, frac=0.10) ONLY
+      * MPAS:   _hyperdiff_ico (biharmonic) ONLY
+      * spectral: hyperdiff (biharmonic) + spectral_filter
+
+    iter-57 identified that this imbalance is the likely cause
+    of the HS cube-cold structural pattern.  The cube has more
+    total dissipation than any of the other three grids AND it's
+    biharmonic-dominated.
+
+    These tests pin the current numerical relationship.  A future
+    fix that rebalances the dissipation MUST update these
+    expected ratios alongside the source — the test exists to
+    make the rebalancing inspectable + atomic with the docs in
+    ``CROSS_GRID_COMPARISON_REPORT.md`` §5.
+    """
+
+    def test_cube_laplacian_visc_is_half_latlon_at_matched_dx(self):
+        """``_laplacian_visc_cube`` uses ``frac=0.05`` while
+        ``_laplacian_visc_latlon`` uses ``frac=0.10``.  At matched
+        grid spacing this means the cube's A_h is HALF of latlon's
+        — a known iter-57 imbalance contributor.  Pin the ratio.
+        """
+        import math
+        from legoesm import constants
+        # Pick a cube_n and latlon_n_lat that give similar dx.
+        # cube dx = π R / (2 n);  latlon dy = π R / n_lat.
+        # Equal dx means n_lat = 2 n.  Use n=48 → n_lat=96.
+        cube_n = 48
+        latlon_n_lat = 96
+        c_gw = math.sqrt(constants.R_d * 300.0)
+        cube_dx = math.pi * constants.R_earth / (2.0 * cube_n)
+        ll_dy = math.pi * constants.R_earth / latlon_n_lat
+        # Verify dx ≈ dy (within 1% — they are mathematically equal
+        # under the n_lat = 2 n choice).
+        assert abs(cube_dx - ll_dy) / cube_dx < 0.01
+
+        cube_visc = M._laplacian_visc_cube(cube_n)  # frac=0.05
+        ll_visc = M._laplacian_visc_latlon(latlon_n_lat)  # frac=0.10
+        # Ratio cube/latlon should be ≈ 0.5 (the frac ratio).
+        ratio = cube_visc / ll_visc
+        assert abs(ratio - 0.5) < 0.01, (
+            f"iter-57 audit: cube/latlon Laplacian-viscosity ratio "
+            f"changed from 0.5 to {ratio:.4f}.  If you intended a "
+            f"rebalancing, update §5 of "
+            f"CROSS_GRID_COMPARISON_REPORT.md and this test."
+        )
+
+    def test_cube_has_strict_superset_of_latlon_dissipation(self):
+        """Cube uses 4 dissipation terms; latlon uses 1.  This
+        test pins that no one has accidentally dropped a cube
+        dissipation term or added one to the latlon C-grid path.
+        """
+        import inspect
+        src = inspect.getsource(M.run_held_suarez)
+        # iter-57 audit: search for the per-grid configurations.
+        # Cube branch must reference all of: hyperdiff_coeff,
+        # hyperdiff_ps_coeff, div_damp_coeff, A_h.
+        for term in (
+            "hyperdiff_coeff",
+            "hyperdiff_ps_coeff",
+            "div_damp_coeff",
+            "A_h",
+        ):
+            assert term in src, (
+                f"iter-57: cube branch is missing dissipation term "
+                f"``{term}`` in run_held_suarez.  This breaks the "
+                f"iter-57 audit baseline."
+            )
+        # Latlon C-grid branch must use ONLY ``A_h`` (no biharmonic
+        # / div_damp).  The C-grid latlon config NamedTuple does not
+        # currently support biharmonic; if a future change adds it
+        # AND the matrix runner passes it, this test must be
+        # updated alongside §5 to reflect the rebalancing.
+        from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+            CGridLatLonPrimitiveEquationConfig,
+        )
+        ll_fields = set(CGridLatLonPrimitiveEquationConfig._fields)
+        assert "A_h" in ll_fields
+        # Pin the iter-57 finding: latlon C-grid does NOT support
+        # biharmonic.  This is the structural reason cube cannot be
+        # easily matched at the configuration level.
+        for nope in ("hyperdiff_coeff", "div_damp_coeff"):
+            assert nope not in ll_fields, (
+                f"iter-57: ``CGridLatLonPrimitiveEquationConfig`` "
+                f"now exposes ``{nope}`` — the matrix runner's "
+                f"latlon HS branch should be updated to use it, "
+                f"and the §5 fix-candidate (a) plan in "
+                f"CROSS_GRID_COMPARISON_REPORT.md should be "
+                f"marked done."
+            )
+
+    def test_hyperdiff_cube_scales_inversely_with_n_to_fourth_power(self):
+        """Pin the iter-57 hyperdiff scaling.  This is the
+        biharmonic operator's CFL-like scaling rule
+        (``coeff ~ dx⁴``) and the matrix runner uses it for
+        every C48 / C96 / etc.  A future change that breaks
+        this scaling would silently shift the cube-cold pattern.
+        """
+        c48 = M._hyperdiff_cube(48)
+        c96 = M._hyperdiff_cube(96)
+        c192 = M._hyperdiff_cube(192)
+        # hyperdiff_cube(n) = ref * (48/n)^4.  Doubling n → ratio (1/2)^4 = 1/16.
+        assert abs(c48 / c96 - 16.0) < 1e-6
+        assert abs(c48 / c192 - 256.0) < 1e-6
+        # Reference value at n=ref_n should be the ref_coeff.
+        assert abs(c48 - 1e16) < 1e6
+
+    def test_div_damp_cube_scales_inversely_with_n_squared(self):
+        """Pin the iter-57 div_damp scaling.  Laplacian damping
+        scales as ``dx²``.  Doubling n → ratio (1/2)² = 1/4.
+        """
+        d48 = M._div_damp_cube(48)
+        d96 = M._div_damp_cube(96)
+        assert abs(d48 / d96 - 4.0) < 1e-6
+        assert abs(d48 - 1.5e7) < 1e-3
