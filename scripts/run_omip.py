@@ -586,6 +586,31 @@ def _save_output(output_dir: Path, diag, args, grid_type, wall_time, ok):
         for i in range(n_rows):
             w.writerow([diag[k][i] if i < len(diag[k]) else "" for k in keys])
 
+    # iter-25: also write a matrix-compatible ``mean_timeseries.csv``
+    # so ``run_ocean_test_matrix.py --replot`` (and the cross-grid
+    # plotter generally) can pick this up.  The ocean-matrix
+    # plotter expects ``time_days`` column + a set of mean_*
+    # diagnostics; rename columns appropriately and write a
+    # parallel CSV.  Don't replace ``timeseries.csv`` since that
+    # filename + ``results.json`` is the existing OMIP output
+    # contract.
+    mean_csv_path = output_dir / "mean_timeseries.csv"
+    column_renames = {
+        "day": "time_days",
+        "SST": "mean_SST",
+        "SSS": "mean_SSS",
+        "SSH": "mean_eta",
+        "max_speed": "max_speed",
+        "step": "step",
+    }
+    out_keys = [column_renames.get(k, k) for k in keys]
+    with open(mean_csv_path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(out_keys)
+        n_rows = len(diag[keys[0]])
+        for i in range(n_rows):
+            w.writerow([diag[k][i] if i < len(diag[k]) else "" for k in keys])
+
     # Results JSON
     results = {
         "grid_type": grid_type,
@@ -604,6 +629,33 @@ def _save_output(output_dir: Path, diag, args, grid_type, wall_time, ok):
     }
     with open(output_dir / "results.json", "w") as f:
         json.dump(results, f, indent=2)
+
+    # iter-25: also write a matrix-compatible ``results.txt`` next to
+    # the existing ``results.json`` so the ocean cross-grid plotter
+    # (which parses ``key: value`` lines from results.txt) can pick
+    # this up.
+    final_sst = diag["SST"][-1] if diag.get("SST") else None
+    final_sss = diag["SSS"][-1] if diag.get("SSS") else None
+    final_ssh = diag["SSH"][-1] if diag.get("SSH") else None
+    notes_parts = []
+    if final_sst is not None:
+        notes_parts.append(f"SST={final_sst:.3f}")
+    if final_sss is not None:
+        notes_parts.append(f"SSS={final_sss:.3f}")
+    if final_ssh is not None:
+        notes_parts.append(f"SSH={final_ssh:.3e}")
+    notes_str = ", ".join(notes_parts) if notes_parts else "OMIP complete"
+    with open(output_dir / "results.txt", "w") as f:
+        f.write(f"test: omip\n")
+        f.write(f"grid: {grid_type}\n")
+        f.write(f"resolution: {results['resolution']}\n")
+        f.write(f"days: {results['days']}\n")
+        f.write(f"dt: {results['dt']}\n")
+        f.write(f"levels: {results['nlev']}\n")
+        f.write(f"physics: {results['physics']}\n")
+        f.write(f"status: {results['status']}\n")
+        f.write(f"notes: {notes_str}\n")
+        f.write(f"wall_time: {wall_time:.1f}s\n")
 
     # Plot timeseries
     try:
