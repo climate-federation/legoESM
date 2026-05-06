@@ -1224,45 +1224,64 @@ class TestAmipToMatrixFormat:
         assert not (tmp_path / "results_amip.txt").exists()
 
     def test_collector_recognizes_converted_output(self, tmp_path):
-        """The matrix runner's ``_has_collectable`` must return True
+        """The matrix runner's collector predicate must return True
         on a directory after conversion.  This is the integration
         guarantee — without this, the iter-41 wrapper silently no-ops.
 
-        iter-42 codex MEDIUM: extract the predicate from the actual
-        matrix-runner source instead of re-implementing it locally,
-        so a future change to ``_has_collectable`` cannot make this
-        test silently lie.
+        iter-43 codex MEDIUM: bind directly to
+        ``has_collectable_atmosphere_outputs`` (lifted to module
+        scope in iter-43).  No more re-implementing the predicate
+        locally; if the matrix runner's predicate semantics change,
+        this test goes red automatically.
         """
         mod = self._import_converter()
         self._write_synthetic_amip_outputs(tmp_path)
         rc = mod.main(tmp_path)
         assert rc == 0
 
-        # iter-42 codex MEDIUM: build a predicate that mirrors the
-        # matrix-runner's by examining the source.  We can't easily
-        # import ``_has_collectable`` because it's defined inside a
-        # function in run_atmosphere_test_matrix.py, but we can
-        # assert that the source still uses the same two-file
-        # criterion this test depends on.  This makes the test fail
-        # loudly if the matrix-runner ever changes its collector
-        # criterion.
-        import inspect
-        matrix_src = inspect.getsource(M)
-        assert (
-            'mean_timeseries.csv' in matrix_src
-            and 'results.txt' in matrix_src
-            and 'snapshots_latlon.npz' in matrix_src
-        ), (
-            "matrix-runner _has_collectable criteria changed; "
-            "iter-42 converter must be updated to match"
-        )
+        # Direct import of the real predicate.
+        assert M.has_collectable_atmosphere_outputs(tmp_path)
 
-        def _has_collectable(d: Path) -> bool:
-            if (d / "snapshots_latlon.npz").exists():
-                return True
-            return (d / "mean_timeseries.csv").exists() and (d / "results.txt").exists()
+    def test_collector_rejects_directory_with_only_csv(self, tmp_path):
+        """The predicate must NOT return True on a directory with only
+        ``mean_timeseries.csv`` (no ``results.txt``).  This is the
+        iter-27 codex LOW guarantee — a stale CSV without provenance
+        must not produce a phantom cross-grid combo.  iter-43: now
+        binds to the real predicate.
+        """
+        (tmp_path / "mean_timeseries.csv").write_text("time_days\n0\n")
+        assert not M.has_collectable_atmosphere_outputs(tmp_path)
 
-        assert _has_collectable(tmp_path)
+    def test_crash_safety_during_conversion(self, tmp_path, monkeypatch):
+        """iter-43 codex LOW: simulate a crash between the rename and
+        the CSV write.  The directory must NOT be collectable until
+        the FINAL ``results.txt`` write commits.
+        """
+        mod = self._import_converter()
+        self._write_synthetic_amip_outputs(tmp_path)
+
+        # Monkeypatch _atomic_write_text to crash on the CSV write.
+        original = mod._atomic_write_text
+        crash_count = {"n": 0}
+
+        def crashing_write(path, text):
+            if path.name == "mean_timeseries.csv":
+                crash_count["n"] += 1
+                raise RuntimeError("simulated crash mid-conversion")
+            original(path, text)
+
+        monkeypatch.setattr(mod, "_atomic_write_text", crashing_write)
+        with pytest.raises(RuntimeError, match="simulated crash"):
+            mod.main(tmp_path)
+        assert crash_count["n"] == 1
+        # Directory must NOT be collectable: results.txt was renamed
+        # to results_amip.txt before the crash, so results.txt is
+        # missing.
+        assert not (tmp_path / "results.txt").exists()
+        assert (tmp_path / "results_amip.txt").exists()
+        # The predicate (real one) returns False because results.txt
+        # is missing.
+        assert not M.has_collectable_atmosphere_outputs(tmp_path)
 
     def test_converter_idempotent(self, tmp_path):
         """Running the converter twice must produce identical output

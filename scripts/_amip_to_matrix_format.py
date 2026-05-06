@@ -249,28 +249,18 @@ def main(out_dir: Path) -> int:
             continue
         cols.append((dst_key, arr_np))
 
-    # Build the CSV in memory and write atomically.
-    csv_lines = [",".join(c[0] for c in cols)]
-    for i in range(n):
-        csv_lines.append(",".join(f"{c[1][i]:.6e}" for c in cols))
-    _atomic_write_text(
-        out_dir / "mean_timeseries.csv", "\n".join(csv_lines) + "\n",
-    )
-
-    # Rewrite results.txt in the matrix-runner key:value format.  Keep
-    # the original AMIP results.txt around as ``results_amip.txt`` so
-    # we don't lose the free-form summary.
-    #
-    # iter-42 idempotency: if ``results.txt`` already starts with the
-    # matrix-format ``test: amip`` marker, the converter has run
-    # before — re-parse from the preserved ``results_amip.txt``
-    # instead of clobbering ``results_amip.txt`` with the matrix-
-    # format file from the previous run.
-    #
-    # iter-42 codex LOW: if ``results.txt`` is in matrix format AND
-    # ``results_amip.txt`` is missing (unusual — manual file removal),
-    # parse the matrix-format file directly so we don't drop metadata
-    # and emit a status: ERROR record.
+    # iter-43 codex LOW: write order matters for crash safety.
+    # ``has_collectable_atmosphere_outputs`` requires BOTH
+    # ``mean_timeseries.csv`` AND ``results.txt`` to be present, so
+    # if we crash between writing the CSV and writing the new
+    # results.txt while results.txt is still the AMIP free-form
+    # original, the directory would be ``collectable`` but with the
+    # wrong format.  Mitigation: rename results.txt → results_amip.txt
+    # FIRST so the directory transiently has no results.txt, then
+    # write the CSV, then write the new matrix-format results.txt.
+    # At every crash point in this sequence,
+    # ``has_collectable_atmosphere_outputs`` returns False (because
+    # results.txt is missing) until the final atomic write.
     results_txt = out_dir / "results.txt"
     results_amip = out_dir / "results_amip.txt"
     already_converted = (
@@ -278,23 +268,30 @@ def main(out_dir: Path) -> int:
         and results_txt.read_text(errors="replace").startswith("test: amip")
     )
     if already_converted:
+        # On a re-run, both results_amip.txt and the matrix-format
+        # results.txt already exist.  Re-parse from the preserved
+        # AMIP file (or fall back to the matrix-format file if the
+        # AMIP original was manually removed).
         if results_amip.exists():
             parsed = _parse_amip_results_txt(results_amip)
         else:
-            # iter-42 codex LOW: graceful fallback when the AMIP
-            # original was manually removed between converter runs.
             parsed = _parse_matrix_results_txt(results_txt)
     else:
         parsed = _parse_amip_results_txt(results_txt)
         if results_txt.exists():
+            # Rename FIRST so the directory transiently has no
+            # results.txt — _has_collectable returns False during
+            # the crash window between this and the final write.
             results_txt.rename(results_amip)
 
-    # iter-42 codex HIGH: if no Status was found, default to ERROR
-    # (otherwise downstream tooling sees a results.txt with no
-    # status field and treats it as a passing run).
+    # iter-42 codex HIGH: if no Status was found, default to ERROR.
     if "status" not in parsed:
         parsed["status"] = "ERROR"
 
+    # Build CSV and matrix-format results.txt content in memory.
+    csv_lines = [",".join(c[0] for c in cols)]
+    for i in range(n):
+        csv_lines.append(",".join(f"{c[1][i]:.6e}" for c in cols))
     out_text_lines = ["test: amip"]
     for key in (
         "grid", "resolution", "nlev", "dt", "days",
@@ -306,6 +303,14 @@ def main(out_dir: Path) -> int:
         "notes: real-AMIP run via run_amip.py; "
         "format converted by _amip_to_matrix_format.py for "
         "matrix-runner cross-grid collection (iter-42)"
+    )
+
+    # Write CSV first (this is safe at any crash point because the
+    # rename above removed results.txt).  Then write the matrix-
+    # format results.txt last (the final commit point that flips
+    # the directory to collectable).
+    _atomic_write_text(
+        out_dir / "mean_timeseries.csv", "\n".join(csv_lines) + "\n",
     )
     _atomic_write_text(results_txt, "\n".join(out_text_lines) + "\n")
     return 0

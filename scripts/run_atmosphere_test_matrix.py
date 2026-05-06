@@ -197,6 +197,30 @@ def _snapshot_steps(n_steps: int, n_snaps: int = 10) -> set[int]:
     return steps
 
 
+def has_collectable_atmosphere_outputs(d: Path) -> bool:
+    """Return True iff ``d`` looks like a collectable per-grid output.
+
+    iter-43 codex MEDIUM: extracted to module scope so the iter-42
+    AMIP format converter (and its tests) can rely on a SINGLE source
+    of truth.  Previously the predicate lived inside
+    ``_create_atmosphere_comparison`` so anyone wanting to verify it
+    had to either re-implement it or assert against the source string.
+
+    Criterion (iter-26/iter-27 codex review):
+
+      * a ``snapshots_latlon.npz`` file (hydro-style snapshot output), OR
+      * BOTH ``mean_timeseries.csv`` AND ``results.txt`` (timeseries-
+        only run, e.g. RCE / OMIP / AMIP-via-iter-42-converter).
+
+    A bare ``mean_timeseries.csv`` with no ``results.txt`` is
+    rejected so a stale CSV without provenance doesn't produce a
+    phantom cross-grid combo.
+    """
+    if (d / "snapshots_latlon.npz").exists():
+        return True
+    return (d / "mean_timeseries.csv").exists() and (d / "results.txt").exists()
+
+
 def _compute_drift(values: list[float]) -> float:
     if len(values) < 2:
         return 0.0
@@ -4068,16 +4092,14 @@ def _vertical_coords_for_case(
         # (``mean_timeseries.csv`` AND ``results.txt``, OR
         # ``snapshots_latlon.npz``) so a stale CSV without
         # ``results.txt`` doesn't produce a phantom no-op combo.
-        # iter-27 codex review LOW.
-        def _has_collectable(d: Path) -> bool:
-            if (d / "snapshots_latlon.npz").exists():
-                return True
-            return (d / "mean_timeseries.csv").exists() and (d / "results.txt").exists()
-
-        if _has_collectable(res_dir):
+        # iter-27 codex review LOW.  iter-43 codex MEDIUM: predicate
+        # lifted to ``has_collectable_atmosphere_outputs`` at module
+        # scope so the iter-42 converter and its tests bind to a
+        # single source of truth.
+        if has_collectable_atmosphere_outputs(res_dir):
             found_sw = True
         for sub in res_dir.iterdir():
-            if sub.is_dir() and _has_collectable(sub):
+            if sub.is_dir() and has_collectable_atmosphere_outputs(sub):
                 verts.add(sub.name)
     if verts and found_sw:
         # Mixed layout: SOME grids have leaf files at the resolution

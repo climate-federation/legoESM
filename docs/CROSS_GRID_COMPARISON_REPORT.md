@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-43 snapshot)
+**Branch**: `simulation_full_check` (iter-44 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..43 findings.  It is the user-facing
+This report consolidates iter-1..44 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -29,8 +29,8 @@ and every available pair of grids:
   `T(latitude, σ)` cross-section, the canonical Held-Suarez
   Fig. 3 layout.
 
-Every helper has a corresponding unit test (69 / 69 pass in
-`tests/test_atmosphere_cross_grid_plots.py` (63) +
+Every helper has a corresponding unit test (71 / 71 pass in
+`tests/test_atmosphere_cross_grid_plots.py` (65) +
 `test_ocean_cross_grid_plots.py` (6)).
 
 CLI:
@@ -161,11 +161,13 @@ cross-grid ocean test (wind-driven gyres / OMIP) is a follow-up.
 | 43 | brittle `Grid:` regex (rejected scientific notation dt, singular `day`, decimal days, missing L<n>) | MEDIUM |
 | 43 | length-mismatched variables silently dropped from CSV | MEDIUM |
 | 43 | 1-D all-NaN arrays would emit a column of NaNs instead of being skipped | MEDIUM |
+| 44 | wrapper would reconvert old data on failed re-run (stale timeseries.npz survived) | HIGH |
+| 44 | crash between rename and CSV write left directory collectable but inconsistent | LOW |
 
 **Codex adversarial review iterations**: iter-5, iter-6, iter-7,
 iter-16, iter-21, iter-26, iter-27, iter-32, iter-36, iter-37,
-iter-39, iter-42.  Each round caught real issues; final
-convergence is clean.
+iter-39, iter-42, iter-43.  Each round caught real issues;
+final convergence is clean.
 
 ---
 
@@ -182,7 +184,7 @@ convergence is clean.
 | Same colorbar/projection across grids | ✅ DONE (cartopy PlateCarrée + shared cmap) |
 | Physical consistency vs reference papers | ⚠️ Williamson cases agree to machine precision; HS climatology disagrees structurally (documented in §2) |
 | GPU / MPI efficiency | ✅ DONE (iter-28/29: per-test-case ``wall-time/day`` ranking + speedup factor in every ``comparison_summary.txt``) |
-| `/codex:adversarial-review` | ✅ DONE (12 review rounds: iter-5/6/7/16/21/26/27/32/36/37/39/42, all findings addressed) |
+| `/codex:adversarial-review` | ✅ DONE (13 review rounds: iter-5/6/7/16/21/26/27/32/36/37/39/42/43, all findings addressed) |
 
 ---
 
@@ -315,11 +317,28 @@ convergence is clean.
   fallback path when the AMIP original is manually deleted;
   atomic writes via ``<name>.tmp`` + ``os.replace``.
 
-69/69 unit tests pass across both
-``tests/test_atmosphere_cross_grid_plots.py`` (63) and
+* iter-44: address codex iter-43 review (1 HIGH + 1 MEDIUM
+  + 1 LOW).  HIGH: wrapper now removes stale ``timeseries.npz``
+  + ``mean_timeseries.csv`` BEFORE invoking ``run_amip.py``,
+  so a failed re-run cannot reconvert old data; the converter's
+  purge path then fires when no npz appears.  MEDIUM:
+  ``has_collectable_atmosphere_outputs`` lifted from inside
+  ``_create_atmosphere_comparison`` to module scope of
+  ``run_atmosphere_test_matrix.py``; the iter-42 collector test
+  now imports it directly rather than re-implementing it
+  locally.  LOW: write order inside the converter rearranged
+  so a crash between the AMIP→matrix rename and the final
+  ``results.txt`` write leaves the directory NON-collectable
+  (results.txt missing) until the very last atomic rename.
+  New ``test_crash_safety_during_conversion`` monkeypatches
+  ``_atomic_write_text`` to crash on the CSV write and
+  asserts the directory is not collectable.
+
+71/71 unit tests pass across both
+``tests/test_atmosphere_cross_grid_plots.py`` (65) and
 ``tests/test_ocean_cross_grid_plots.py`` (6).
 
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-43 update).*
+(iter-44 update).*

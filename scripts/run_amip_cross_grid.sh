@@ -95,6 +95,15 @@ for GRID in cubed_sphere latlon voronoi gaussian; do
     echo "  → $OUTDIR"
     echo "=================================================="
     mkdir -p "$OUTDIR"
+    # iter-43 codex HIGH: remove stale ``timeseries.npz`` from a
+    # prior successful run BEFORE invoking ``run_amip.py``.  If the
+    # new run fails, no ``timeseries.npz`` will exist, which makes
+    # the converter's purge path fire (and it also returns non-zero
+    # so ANY_FAILED is set correctly).  Without this delete, a
+    # failed re-run into an existing OUTDIR would re-converge old
+    # data on the next cross-grid pass.
+    rm -f "$OUTDIR/timeseries.npz"
+    rm -f "$OUTDIR/mean_timeseries.csv"
     JAX_ENABLE_X64=1 .venv/bin/python scripts/run_amip.py \
         --grid-type "$GRID" --discretization "$DISC" \
         $TRUNC --days "$DAYS" --output "$OUTDIR" \
