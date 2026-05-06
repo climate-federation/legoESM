@@ -364,3 +364,133 @@ class TestRegressionPathologyDirect:
             [baseline, baseline * (1 + 1e-9)]
         )
         assert result == pytest.approx(1.0e-9, rel=1e-6)
+
+
+class TestIter92AuditFollowupDelegation:
+    """iter-92 audit followup to codex iter-90 review.
+
+    iter-90 codex caught HIGH-1 (script ocean ``_compute_drift``).
+    iter-91 audited and caught two more in the package.  iter-92
+    audited even more aggressively and caught four MORE missed
+    callsites:
+
+    * ``src/legoesm/diagnostics/precision_drift.py:406`` — production
+      energy-drift-rate normalization with ``max(abs(energy_prev), 1e-30)``.
+    * ``scripts/run_sea_ice_test_matrix.py`` — 6 ``vol_drift`` callsites
+      with ``max(vol_X, 1e-20)`` floors (deferred in iter-91).
+    * ``tests/validation/bench_spectral_pe.py:323`` — JW06 KE timeseries
+      with ``max(abs(KE_ts[0]), 1e-30)`` floor.
+    * ``tests/validation/bench_spectral_pe.py:317`` — JW06 mass timeseries
+      with NO floor at all (would NaN for mass=0).
+
+    These tests pin the iter-92 fixes by directly probing the
+    target functions / source for the right delegation pattern.
+    """
+
+    def test_precision_drift_uses_compute_relative_drift(self):
+        """``precision_health_report``'s energy-drift block must
+        delegate to ``compute_relative_drift``.
+        """
+        import inspect
+        import re
+        from legoesm.diagnostics.precision_drift import precision_health_report
+        src = inspect.getsource(precision_health_report)
+        # Strip docstrings + line comments first.
+        src_no_strings = re.sub(r'""".*?"""', "", src, flags=re.DOTALL)
+        src_no_strings = re.sub(r"'''.*?'''", "", src_no_strings, flags=re.DOTALL)
+        code_only = "\n".join(
+            line for line in src_no_strings.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        assert "compute_relative_drift" in code_only, (
+            "iter-92: ``precision_health_report``'s energy-drift "
+            "computation must delegate to "
+            "``compute_relative_drift`` from "
+            "``legoesm.diagnostics.conservation_drift``."
+        )
+        assert "1e-30" not in code_only, (
+            "iter-92: legacy 1e-30 floor must not appear in the "
+            "active code of ``precision_health_report``."
+        )
+
+    def test_sea_ice_matrix_uses_compute_relative_drift(self):
+        """``run_sea_ice_test_matrix.py`` no longer inlines
+        ``max(vol_X, 1e-20)`` — all 6 vol_drift callsites delegate.
+        """
+        from pathlib import Path
+        scripts_dir = Path(__file__).resolve().parent.parent.parent / "scripts"
+        sea_ice_path = scripts_dir / "run_sea_ice_test_matrix.py"
+        text = sea_ice_path.read_text()
+        # Strip line comments to test ACTIVE code only.
+        code_only = "\n".join(
+            line for line in text.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        # 1) Helper IS imported and called.
+        assert "from legoesm.diagnostics.conservation_drift import compute_relative_drift" in code_only, (
+            "iter-92: ``run_sea_ice_test_matrix.py`` must import "
+            "``compute_relative_drift``."
+        )
+        # 2) Legacy 1e-20 vol_drift floor must be gone — count
+        # occurrences of the inline pattern across all variants.
+        # ``r_xy = jnp.sqrt(... + 1e-20)`` for distance is still
+        # legitimate (NaN-gradient guard); we only flag the
+        # ``vol_drift = abs(.) / max(., 1e-20)`` form.
+        import re
+        bad_pattern = re.compile(
+            r"vol_drift\s*=\s*abs\([^)]*\)\s*/\s*max\([^)]*1e-20\)"
+        )
+        bad_matches = bad_pattern.findall(code_only)
+        assert len(bad_matches) == 0, (
+            f"iter-92: found {len(bad_matches)} remaining inline "
+            f"``vol_drift = abs(.) / max(., 1e-20)`` patterns in "
+            f"``run_sea_ice_test_matrix.py``: {bad_matches}.  All "
+            f"must delegate to ``compute_relative_drift``."
+        )
+        # 3) At least 6 ``compute_relative_drift([..., ...])``
+        # callsites for vol_drift.
+        good_matches = re.findall(
+            r"compute_relative_drift\(\[vol_\w+,\s*vol_\w+\]\)",
+            code_only,
+        )
+        assert len(good_matches) >= 6, (
+            f"iter-92: expected ≥6 ``compute_relative_drift`` "
+            f"vol_drift call sites, found {len(good_matches)}: "
+            f"{good_matches}"
+        )
+
+    def test_bench_spectral_pe_uses_relative_drift_series(self):
+        """``bench_spectral_pe.py`` JW06 conservation plot uses the
+        shared helper, not an inline ``max(abs(KE_ts[0]), 1e-30)``.
+        """
+        from pathlib import Path
+        bench_path = Path(__file__).resolve().parent.parent.parent / \
+                     "tests" / "validation" / "bench_spectral_pe.py"
+        text = bench_path.read_text()
+        # Strip line comments so we test ACTIVE CODE only — the
+        # iter-92 commit message + comments mention the legacy
+        # formula for history, which would false-positive a naive
+        # literal-text grep.
+        code_only = "\n".join(
+            line for line in text.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        assert "relative_drift_series(mass_ts)" in code_only, (
+            "iter-92: ``bench_spectral_pe.py`` mass conservation "
+            "plot must use ``relative_drift_series``."
+        )
+        assert "relative_drift_series(KE_ts)" in code_only, (
+            "iter-92: ``bench_spectral_pe.py`` KE conservation "
+            "plot must use ``relative_drift_series``."
+        )
+        # Active code (non-comment) check: the legacy 1e-30 floor
+        # is gone from the conservation plotting code.
+        assert "/ max(abs(KE_ts[0]), 1e-30)" not in code_only, (
+            "iter-92: the legacy 1e-30 KE floor must not appear "
+            "in active code."
+        )
+        assert "/ abs(mass_ts[0])" not in code_only, (
+            "iter-92: the unfloored ``/ abs(mass_ts[0])`` "
+            "(NaN-on-zero) must not appear in active code — "
+            "replaced by ``relative_drift_series(mass_ts)``."
+        )
