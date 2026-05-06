@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-76 snapshot)
+**Branch**: `simulation_full_check` (iter-77 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..76 findings.  It is the user-facing
+This report consolidates iter-1..77 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -1278,12 +1278,53 @@ round caught real issues; final convergence is clean.
   ``results.txt`` timestamp 89 s later than the first,
   files have new content (no stale-data interference).
 
+* iter-77: validated remaining matrix tests not previously
+  smoke-run.  Both PASS across all 4 grids:
+
+    SW cosine_bell (1.4 min, 4 grids PASS):
+      cube C36       L1=0.120, L2=0.117, Linf=0.123
+      ico5           L1=0.097, L2=0.074, Linf=0.080
+      latlon 72×144  L1=0.028, L2=0.024, Linf=0.035  ← best
+      spectral T21   L1=0.386, L2=0.161, Linf=0.130
+      mass drift     ≤ 2.2e-5 (latlon — best mass cons.)
+      GPU rank       spectral 0.6 / latlon 0.9 / ico 0.8 /
+                     cube 23.4 s/day  (39× cube vs spectral)
+
+    Hydrostatic baroclinic (2 days × 2 vert. coords, 4 grids PASS):
+      cube C36       max|v|=29.9 m/s   mass drift=4.7e-10
+      ico5           max|v|=34.7 m/s   mass drift=9.4e-9
+      latlon 72×144  max|v|=54.5 m/s   mass drift=8.9e-9
+      spectral T21   max|v|=24.3 m/s   mass drift=8.7e-6
+      Pair-wise RMS  ico-latlon 1.23 K (best)
+                     ico-spectral 1.98 K
+                     cube-spectral 2.17 K
+                     cube-ico 2.32 K (worst)
+
+  Same dissipation-imbalance signature as HS: cube-vs-
+  others pair-wise RMS is largest (consistent with iter-57
+  diagnosis — out of scope per user handoff).
+
+  **All user-prompt simulation tests now validated**
+  end-to-end on all 4 grids:
+
+    SW Williamson 2     iter-61
+    SW Williamson 5     iter-62
+    SW cosine_bell      iter-77
+    HS 3-day            iter-62
+    HS 7-day            iter-65
+    Baroclinic 2-day    iter-77
+    RCE 5-day           iter-73
+    AMIP 2-day + CMIP6  iter-69 + iter-74
+    OMIP 2-day          iter-71
+
+  Pure validation; no source changes.
+
 128/128 unit tests pass + 3 MPAS-mesh-unavailable skips
-(across ``tests/test_atmosphere_cross_grid_plots.py`` (78 +
+(across ``tests/test_atmosphere_cross_grid_plots.py`` (79 +
 3 skips), ``tests/test_ocean_cross_grid_plots.py`` (15), and
 ``tests/test_cross_grid_wrappers.py`` (34)).
 
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-76 update).*
+(iter-77 update).*
