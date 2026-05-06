@@ -1,6 +1,6 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-96 snapshot)
+**Branch**: `simulation_full_check` (iter-97 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
@@ -23,7 +23,7 @@ quick / short-day mode:
 | AMIP 1-day smoke | 16 | 1 | **4 / 4** | 87 s | Mass drift 5e-12 (cube), 3e-6 (latlon), 2e-15 (ico), 1e-7 (spectral). |
 | RCE | default | 2 | **3 / 4** | — | Icosahedral BLOWUP at day 1 — USER HANDOFF (iter-73). |
 | Ocean rest_state | default | quick | **12 / 12** | 176 s | All 3 grids × 4 variants (rest, stratified, uniform-no-land, stratified-no-land).  All eta and T drifts at machine precision (0 to 1e-16) — confirms iter-78/80/88/91/92 fixes work. |
-| OMIP 2-day | default | 2 | **3 / 4** | — | Cube SST=19.76 (no longer BLOWUP per iter-71, but criteria still FAIL) — USER HANDOFF.  Latlon, MPAS, spectral PASS. |
+| OMIP 2-day | default | 2 | **3 / 4** | — | **Cube STILL BLOWUP** per iter-71 (max\|T\|=8.34e+06 °C, max\|η\|=2678 m at step 500 / day 1.74).  iter-96 misread 19.76 as a healthy SST; in fact it was the *last clean* diagnostic from BEFORE the BLOWUP (iter-97 corrected this).  USER HANDOFF.  Latlon, MPAS, spectral PASS. |
 
 **Total: 42 / 44 PASS** (95.5 %), with the 2 FAILs being known
 USER HANDOFF items deferred per the user's iter-68 directive.

@@ -807,3 +807,169 @@ class TestOceanTestMatrixPackageDelegates:
             "active code of "
             "``ocean_test_matrix.diagnostic_io._save_conservation``."
         )
+
+
+class TestOmipBlowupReporting:
+    """iter-97: when the cube OMIP BLOWS UP, the results.txt and
+    CLI summary table must clearly mark the run as a BLOWUP rather
+    than reporting the last *clean* SST/SSS/SSH (which iter-96
+    misread as a false-improvement claim — "cube OMIP no longer
+    BLOWUPS, now reports finite SST=19.76" — when in fact the
+    BLOWUP at step 500 was still happening; the 19.76 was just
+    the last clean diagnostic from before the blowup).
+
+    These tests pin the BLOWUP-aware output format so a future
+    regression that drops the BLOWUP marker would fail this test.
+    """
+
+    def _import_run_omip(self):
+        import importlib
+        import sys
+        from pathlib import Path
+        scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+        if str(scripts_dir) not in sys.path:
+            sys.path.insert(0, str(scripts_dir))
+        return importlib.import_module("run_omip")
+
+    def test_run_omip_loop_returns_blowup_info(self):
+        """``_run_omip_loop`` returns 5-tuple ending in
+        ``blowup_info``.  This is a contract iter-96 audit
+        relied on: callers can no longer ignore that the
+        cube ran into a BLOWUP rather than a clean run.
+        """
+        import inspect
+        m = self._import_run_omip()
+        src = inspect.getsource(m._run_omip_loop)
+        # Strip docstrings + comments before pattern check.
+        import re
+        src_no_strings = re.sub(r'""".*?"""', "", src, flags=re.DOTALL)
+        src_no_strings = re.sub(r"'''.*?'''", "", src_no_strings, flags=re.DOTALL)
+        code_only = "\n".join(
+            line for line in src_no_strings.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        # Returns include blowup_info as the last element.
+        assert "blowup_info" in code_only, (
+            "iter-97: ``_run_omip_loop`` must capture and return "
+            "``blowup_info`` so downstream output can mark BLOWUP "
+            "runs distinctly."
+        )
+        assert "return state, diag, wall, ok, blowup_info" in code_only, (
+            "iter-97: ``_run_omip_loop`` must end with "
+            "``return state, diag, wall, ok, blowup_info``."
+        )
+
+    def test_save_output_accepts_blowup_info(self):
+        """``_save_output`` accepts ``blowup_info`` kwarg and
+        threads it into the results.txt notes.
+        """
+        import inspect
+        m = self._import_run_omip()
+        sig = inspect.signature(m._save_output)
+        assert "blowup_info" in sig.parameters, (
+            "iter-97: ``_save_output`` must accept ``blowup_info`` "
+            "kwarg so the BLOWUP step / max|T| / max|η| can be "
+            "written into results.txt."
+        )
+
+    def test_results_txt_emits_blowup_marker_for_failed_runs(self):
+        """End-to-end: when ``_save_output`` is called with a
+        non-None ``blowup_info``, the resulting ``results.txt``
+        must lead with a BLOWUP marker, not the last-clean SST.
+        """
+        import argparse
+        from pathlib import Path
+        import tempfile
+        m = self._import_run_omip()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir) / "cubed_sphere" / "C24"
+            # Synthetic diag dict with last-clean SST=19.759 (the
+            # iter-96 misleading value).
+            diag = {
+                "day": [0.0, 1.0],
+                "step": [0, 288],
+                "SST": [20.0, 19.759],
+                "SSS": [35.0, 35.0],
+                "SSH": [0.0, 1.4e-6],
+            }
+            args = argparse.Namespace(
+                resolution="C24", nlev=20, days=2.0, dt=300.0,
+                physics="full", water_type="ocean", sw_down=300.0,
+                output=tmpdir,
+            )
+            blowup_info = {
+                "step": 500,
+                "day": 1.74,
+                "T_max": 8.342e6,
+                "T_finite": True,
+                "eta_max": 2678.0,
+                "eta_finite": True,
+                "reasons": [
+                    "|T| reached 8341965.5 °C (sanity threshold 100 °C)",
+                    "|η| reached 2678 m (iter-79 sanity threshold 1000 m)",
+                ],
+            }
+            m._save_output(
+                output_dir, diag, args, "cubed_sphere",
+                wall_time=74.0, ok=False, blowup_info=blowup_info,
+            )
+            text = (output_dir / "results.txt").read_text()
+
+            # The BLOWUP marker MUST appear early in notes.
+            assert "BLOWUP at step 500" in text, (
+                f"iter-97: results.txt must contain ``BLOWUP at "
+                f"step 500`` for cube OMIP failure; got:\n{text}"
+            )
+            assert "max|T|=8.342e+06" in text, (
+                "iter-97: results.txt must include max|T| at the "
+                "BLOWUP step."
+            )
+            assert "max|η|=2678" in text, (
+                "iter-97: results.txt must include max|η| at the "
+                "BLOWUP step."
+            )
+            assert "last clean SST=19.759" in text, (
+                "iter-97: results.txt should still preserve the "
+                "last clean diagnostic (with explicit ``last "
+                "clean`` label) so the reader can see what the "
+                "system looked like before BLOWUP."
+            )
+
+    def test_results_txt_clean_run_unaffected(self):
+        """For a clean (PASS) run, ``results.txt`` still emits
+        SST/SSS/SSH normally — iter-97 must not regress the
+        existing behaviour for non-BLOWUP runs.
+        """
+        import argparse
+        from pathlib import Path
+        import tempfile
+        m = self._import_run_omip()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir) / "latlon" / "36x72"
+            diag = {
+                "day": [0.0, 1.0, 2.0],
+                "step": [0, 288, 576],
+                "SST": [20.0, 19.85, 19.75],
+                "SSS": [35.0, 35.0, 35.0],
+                "SSH": [0.0, 5.0e-7, 1.0e-6],
+            }
+            args = argparse.Namespace(
+                resolution="36x72", nlev=20, days=2.0, dt=300.0,
+                physics="full", water_type="ocean", sw_down=300.0,
+                output=tmpdir,
+            )
+            m._save_output(
+                output_dir, diag, args, "latlon",
+                wall_time=3.8, ok=True, blowup_info=None,
+            )
+            text = (output_dir / "results.txt").read_text()
+            assert "BLOWUP" not in text, (
+                "iter-97: clean PASS runs must NOT contain "
+                "``BLOWUP`` in results.txt."
+            )
+            assert "SST=19.750" in text, (
+                "iter-97: clean PASS runs must report the final "
+                "SST normally (3-decimal format from iter-25)."
+            )

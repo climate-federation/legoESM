@@ -516,6 +516,16 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
     for i in range(1, min(10, n_steps)):
         snap_steps.add(max(1, int(i * n_steps / 10)))
 
+    # iter-97: capture BLOWUP details so ``results.txt`` can
+    # surface them rather than just reporting the last *clean*
+    # diagnostic (which masks BLOWUPs as "PASS-shaped FAIL").
+    # The iter-96 cube OMIP smoke saw SST=19.76 in
+    # results.txt, and only by re-running with verbose output
+    # was it visible that max|T|=8.3M K and η=2678 m had
+    # actually blown up.  The BLOWUP info now lives in
+    # ``blowup_info`` and is emitted in results.txt.
+    blowup_info: dict | None = None
+
     # Initial diagnostics
     scalars = _extract_scalars(state, grid_type, grid, z_coord)
     for k, v in scalars.items():
@@ -562,22 +572,43 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                     # and η triggers (iter-79 reported only η).
                     # Multiple conditions can fire simultaneously
                     # (e.g., a NaN cascade hits both T and η).
+                    reasons = []
                     if not T_finite:
-                        print(f"    Reason: T contains NaN/Inf")
+                        msg = "T contains NaN/Inf"
+                        print(f"    Reason: {msg}")
+                        reasons.append(msg)
                     elif T_max >= 100.0:
-                        print(
-                            f"    Reason: |T| reached {T_max:.1f} °C "
-                            f"(sanity threshold 100 °C)"
-                        )
+                        msg = (f"|T| reached {T_max:.1f} °C "
+                               f"(sanity threshold 100 °C)")
+                        print(f"    Reason: {msg}")
+                        reasons.append(msg)
                     if not eta_finite:
-                        print(f"    Reason: η contains NaN/Inf")
+                        msg = "η contains NaN/Inf"
+                        print(f"    Reason: {msg}")
+                        reasons.append(msg)
                     elif eta_max >= 1000.0:
-                        print(
-                            f"    Reason: |η| reached {eta_max:.0f} m "
-                            f"(iter-79 sanity threshold 1000 m)"
-                        )
+                        msg = (f"|η| reached {eta_max:.0f} m "
+                               f"(iter-79 sanity threshold 1000 m)")
+                        print(f"    Reason: {msg}")
+                        reasons.append(msg)
+                    # iter-97: persist BLOWUP info so the report
+                    # can surface it in results.txt.
+                    blowup_info = {
+                        "step": step,
+                        "day": step * dt / 86400.0,
+                        "T_max": T_max,
+                        "T_finite": T_finite,
+                        "eta_max": eta_max,
+                        "eta_finite": eta_finite,
+                        "reasons": reasons,
+                    }
                 else:
                     print(f"  BLOWUP at step {step}")
+                    blowup_info = {
+                        "step": step,
+                        "day": step * dt / 86400.0,
+                        "reasons": ["spectral state non-finite"],
+                    }
                 blown_up = True
                 break
 
@@ -606,15 +637,24 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
 
     wall = time.time() - t0
     ok = not blown_up and _check_finite(state, grid_type)
-    return state, diag, wall, ok
+    return state, diag, wall, ok, blowup_info
 
 
 # ===========================================================================
 # Output
 # ===========================================================================
 
-def _save_output(output_dir: Path, diag, args, grid_type, wall_time, ok):
-    """Save diagnostics and metadata."""
+def _save_output(output_dir: Path, diag, args, grid_type, wall_time, ok,
+                 blowup_info: dict | None = None):
+    """Save diagnostics and metadata.
+
+    iter-97: ``blowup_info`` (added kwarg) carries the BLOWUP
+    step / max|T| / max|η| / reasons captured at the time the
+    state went non-finite, so ``results.txt`` can clearly mark
+    BLOWUP runs as such instead of silently reporting the last
+    *clean* SST/SSS/SSH (which led to a false-improvement claim
+    in iter-96).
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Timeseries CSV
@@ -668,6 +708,10 @@ def _save_output(output_dir: Path, diag, args, grid_type, wall_time, ok):
         "final_SST": diag["SST"][-1] if diag["SST"] else None,
         "final_SSS": diag["SSS"][-1] if diag["SSS"] else None,
         "final_SSH": diag["SSH"][-1] if diag["SSH"] else None,
+        # iter-97: include BLOWUP info in results.json so the
+        # CLI summary table can label BLOWUP rows distinctly
+        # rather than displaying the last-clean SST.
+        "blowup_info": blowup_info,
     }
     with open(output_dir / "results.json", "w") as f:
         json.dump(results, f, indent=2)
@@ -680,12 +724,33 @@ def _save_output(output_dir: Path, diag, args, grid_type, wall_time, ok):
     final_sss = diag["SSS"][-1] if diag.get("SSS") else None
     final_ssh = diag["SSH"][-1] if diag.get("SSH") else None
     notes_parts = []
-    if final_sst is not None:
-        notes_parts.append(f"SST={final_sst:.3f}")
-    if final_sss is not None:
-        notes_parts.append(f"SSS={final_sss:.3f}")
-    if final_ssh is not None:
-        notes_parts.append(f"SSH={final_ssh:.3e}")
+    # iter-97: lead with BLOWUP marker when the run failed
+    # because a BLOWUP was detected.  This is unambiguous —
+    # readers no longer mistake "SST=19.76 (last clean diag)"
+    # for a healthy run.
+    if blowup_info is not None:
+        notes_parts.append(
+            f"BLOWUP at step {blowup_info['step']} "
+            f"(day {blowup_info.get('day', 0):.2f})"
+        )
+        if "T_max" in blowup_info:
+            notes_parts.append(f"max|T|={blowup_info['T_max']:.3e} °C")
+        if "eta_max" in blowup_info:
+            notes_parts.append(f"max|η|={blowup_info['eta_max']:.0f} m")
+        for reason in blowup_info.get("reasons", []):
+            notes_parts.append(f"reason: {reason}")
+        # Also keep the last clean diagnostic so a reader can
+        # see what the system looked like at the last sane
+        # state — but mark it as such.
+        if final_sst is not None:
+            notes_parts.append(f"last clean SST={final_sst:.3f}")
+    else:
+        if final_sst is not None:
+            notes_parts.append(f"SST={final_sst:.3f}")
+        if final_sss is not None:
+            notes_parts.append(f"SSS={final_sss:.3f}")
+        if final_ssh is not None:
+            notes_parts.append(f"SSH={final_ssh:.3e}")
     notes_str = ", ".join(notes_parts) if notes_parts else "OMIP complete"
     with open(output_dir / "results.txt", "w") as f:
         f.write(f"test: omip\n")
@@ -787,7 +852,7 @@ def run_omip_single(grid_type: str, args) -> dict:
     print(f"  Setup: {setup_time:.1f}s")
 
     # Run time loop
-    state, diag, wall_time, ok = _run_omip_loop(
+    state, diag, wall_time, ok, blowup_info = _run_omip_loop(
         model, state, grid_type, grid, z_coord,
         dt, n_steps, diag_every,
         label=f"{grid_type}/{resolution}",
@@ -798,12 +863,21 @@ def run_omip_single(grid_type: str, args) -> dict:
     status = "PASS" if ok else "FAIL"
     icon = "  " if ok else "**"
     sst_str = f"SST={diag['SST'][-1]:.2f}" if diag["SST"] else ""
+    # iter-97: when the run blew up, ``diag['SST'][-1]`` is the
+    # last *clean* diagnostic from BEFORE the BLOWUP, which can
+    # mislead the reader into thinking the run is healthy.
+    # Show the BLOWUP marker explicitly.
+    if blowup_info is not None:
+        sst_str = f"BLOWUP at step {blowup_info['step']}"
     print(f"\n  {icon} {status} | {grid_type}/{resolution} | "
           f"{wall_time:.1f}s | {sst_str}")
 
     # Save output
     output_dir = Path(args.output) / grid_type / resolution
-    results = _save_output(output_dir, diag, args, grid_type, wall_time, ok)
+    results = _save_output(
+        output_dir, diag, args, grid_type, wall_time, ok,
+        blowup_info=blowup_info,
+    )
 
     ALL_RESULTS.append(results)
     return results
@@ -826,7 +900,16 @@ def print_summary():
     print(f"  {'-'*15} {'-'*10} {'-'*8} {'-'*10} {'-'*10}")
 
     for r in ALL_RESULTS:
-        sst = f"{r['final_SST']:.2f}" if r["final_SST"] is not None else "N/A"
+        # iter-97: when the run blew up, show "BLOWUP@N" instead
+        # of the last-clean SST (which misled the iter-96 audit
+        # into a false-improvement claim).
+        blowup = r.get("blowup_info")
+        if blowup is not None:
+            sst = f"BLOWUP@{blowup['step']}"
+        elif r["final_SST"] is not None:
+            sst = f"{r['final_SST']:.2f}"
+        else:
+            sst = "N/A"
         print(f"  {r['grid_type']:<15s} {r['resolution']:<10s} "
               f"{r['status']:<8s} {r['wall_time_s']:<10.1f} {sst:<10s}")
 
