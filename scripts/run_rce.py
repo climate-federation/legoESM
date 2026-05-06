@@ -529,6 +529,13 @@ def main():
 
     t_start = time.time()
 
+    # iter-24: collect diagnostics per snapshot for matrix-compatible
+    # CSV output.  Each diag dict slot records the same scalars that
+    # the run loop already prints, so we can emit ``mean_timeseries.csv``
+    # for the cross-grid plotter without changing the loop body.
+    diag_log: list[dict[str, float]] = []
+    blowup = False
+
     for step in range(n_steps):
         # (1) Dynamics only (no inline physics)
         state = model.step(state, DT)
@@ -588,8 +595,19 @@ def main():
             print(f"  {day:6.0f}  {mean_sfc:8.2f}  {mean_T:8.2f}"
                   f"  {mean_precip:8.2f}  {mean_cwv:6.1f}  {max_v:8.2f}")
 
+            diag_log.append({
+                "step": int(step + 1),
+                "time_days": float(day),
+                "mean_T_sfc": mean_sfc,
+                "mean_T": mean_T,
+                "mean_precip": mean_precip,
+                "mean_cwv": mean_cwv,
+                "max_wind": max_v,
+            })
+
             if not bool(is_finite_state(state)) or max_v > 500:
                 print(f"  BLOWUP at day {day:.0f}")
+                blowup = True
                 break
 
     _, _, u_final, _ = to_grid_arrays(state)
@@ -597,6 +615,42 @@ def main():
     total = time.time() - t_start
     print(f"\n  Complete: {total:.1f}s wall time")
     print(f"  Output: {OUTPUT_DIR}")
+
+    # iter-24: persist diagnostics in matrix-compatible format so the
+    # cross-grid plotter from ``run_atmosphere_test_matrix.py``
+    # (``--cross-grid-plots-only``) can pick this run up.  Emits
+    # ``mean_timeseries.csv`` (one row per diag interval) and
+    # ``results.txt`` (the matrix's per-test metadata file).
+    if diag_log:
+        import csv
+        csv_path = OUTPUT_DIR / "mean_timeseries.csv"
+        cols = list(diag_log[0].keys())
+        with open(csv_path, "w", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=cols)
+            writer.writeheader()
+            for row in diag_log:
+                writer.writerow(row)
+
+        last = diag_log[-1]
+        notes = (
+            f"BLOWUP at day {last['time_days']:.0f}"
+            if blowup
+            else f"mean_T_sfc={last['mean_T_sfc']:.2f}, "
+                 f"mean_T={last['mean_T']:.2f}, "
+                 f"max|v|={last['max_wind']:.2f}"
+        )
+        with open(OUTPUT_DIR / "results.txt", "w") as fh:
+            fh.write(f"test: rce\n")
+            fh.write(f"grid: {grid_type}\n")
+            fh.write(f"resolution: {N}\n")
+            fh.write(f"days: {args.days}\n")
+            fh.write(f"dt: {DT}\n")
+            fh.write(f"levels: {NLEV}\n")
+            fh.write(f"mode: {args.mode}\n")
+            fh.write(f"ocean_mode: {args.ocean_mode}\n")
+            fh.write(f"status: {'FAIL' if blowup else 'PASS'}\n")
+            fh.write(f"notes: {notes}\n")
+            fh.write(f"wall_time: {total:.1f}s\n")
 
 
 if __name__ == "__main__":
