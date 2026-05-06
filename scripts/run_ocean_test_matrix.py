@@ -1176,16 +1176,22 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
                     # try to broadcast incompatible shapes.  Mirrors
                     # the same averaging done in
                     # ``_extract_latlon_cgrid_ocean`` for ``speed_sfc``.
+                    # iter-21 codex review MEDIUM: removed the silent
+                    # ``[:ny, :nx]`` clamp that masked unexpected
+                    # shape mismatches.  Now we ONLY apply the
+                    # canonical face→cell averagings; if the post-
+                    # averaging shapes still differ, skip the quiver
+                    # overlay rather than silently truncate.
                     if u_raw.shape != v_raw.shape:
                         if u_raw.shape[1] == v_raw.shape[1] + 1:
                             u_raw = 0.5 * (u_raw[:, :-1] + u_raw[:, 1:])
                         if v_raw.shape[0] == u_raw.shape[0] + 1:
                             v_raw = 0.5 * (v_raw[:-1, :] + v_raw[1:, :])
-                        # Final clamp to common (n_lat, n_lon) shape.
-                        ny = min(u_raw.shape[0], v_raw.shape[0])
-                        nx = min(u_raw.shape[1], v_raw.shape[1])
-                        u_raw = u_raw[:ny, :nx]
-                        v_raw = v_raw[:ny, :nx]
+                    if u_raw.shape != v_raw.shape:
+                        # Non-canonical mismatch — skip quiver overlay
+                        # rather than truncate-and-mislead.  Earlier
+                        # logic silently dropped the high-index edge.
+                        continue
                     _lm = (np.asarray(snapshots[step]["land_mask"], dtype=np.float64)
                             if "land_mask" in snapshots[step] else None)
                     u_reg = _regrid_2d(u_raw, lon_deg, lat_deg, coord_kind,

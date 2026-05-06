@@ -335,6 +335,18 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
                 if field_key in ("SST", "speed_sfc") and "u_sfc" in snapshots[step] and "v_sfc" in snapshots[step]:
                     u_raw = np.asarray(snapshots[step]["u_sfc"], dtype=np.float64)
                     v_raw = np.asarray(snapshots[step]["v_sfc"], dtype=np.float64)
+                    # iter-21: fix the same staggered-velocity shape
+                    # mismatch as iter-19 patched in
+                    # ``run_ocean_test_matrix.py``.  Average u along
+                    # the +1 lon faces and v along the +1 lat faces
+                    # to cell centres before regridding.
+                    if u_raw.shape != v_raw.shape:
+                        if u_raw.shape[1] == v_raw.shape[1] + 1:
+                            u_raw = 0.5 * (u_raw[:, :-1] + u_raw[:, 1:])
+                        if v_raw.shape[0] == u_raw.shape[0] + 1:
+                            v_raw = 0.5 * (v_raw[:-1, :] + v_raw[1:, :])
+                    if u_raw.shape != v_raw.shape:
+                        continue  # non-canonical, skip quiver
                     _lm = (np.asarray(snapshots[step]["land_mask"], dtype=np.float64)
                             if "land_mask" in snapshots[step] else None)
                     u_reg = _regrid_2d(u_raw, lon_deg, lat_deg, coord_kind,
