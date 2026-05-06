@@ -78,6 +78,24 @@ class TestComputeRelativeDriftScalar:
         with pytest.raises(ValueError, match="min_baseline"):
             compute_relative_drift([1.0, 2.0], min_baseline=0.0)
 
+    def test_inf_min_baseline_raises(self):
+        # iter-89 self-review: silently accepting ``inf`` would make
+        # every drift evaluate to 0 (since denom = inf).  The helper
+        # must reject this with a clear ValueError so a regression
+        # passing inf to the helper would fail loudly.
+        with pytest.raises(ValueError, match="min_baseline"):
+            compute_relative_drift([1.0, 2.0], min_baseline=float("inf"))
+
+    def test_neg_inf_min_baseline_raises(self):
+        with pytest.raises(ValueError, match="min_baseline"):
+            compute_relative_drift([1.0, 2.0], min_baseline=float("-inf"))
+
+    def test_nan_min_baseline_raises(self):
+        # iter-89 self-review: silently accepting NaN would make
+        # every drift evaluate to NaN.  Fail-fast at the boundary.
+        with pytest.raises(ValueError, match="min_baseline"):
+            compute_relative_drift([1.0, 2.0], min_baseline=float("nan"))
+
     def test_accepts_numpy_array(self):
         arr = np.array([5.0e19, 5.0e19 + 5.0e16])
         result = compute_relative_drift(arr)
@@ -166,6 +184,15 @@ class TestRelativeDriftSeries:
     def test_zero_min_baseline_raises(self):
         with pytest.raises(ValueError, match="min_baseline"):
             relative_drift_series([1.0, 2.0], min_baseline=0.0)
+
+    def test_inf_min_baseline_raises(self):
+        # iter-89: same defensive validation as the scalar version.
+        with pytest.raises(ValueError, match="min_baseline"):
+            relative_drift_series([1.0, 2.0], min_baseline=float("inf"))
+
+    def test_nan_min_baseline_raises(self):
+        with pytest.raises(ValueError, match="min_baseline"):
+            relative_drift_series([1.0, 2.0], min_baseline=float("nan"))
 
     def test_custom_min_baseline_argument(self):
         # baseline=0.5, floor=0.1 → use 0.5.  series=[0.5, 0.7] → [0, 0.4]

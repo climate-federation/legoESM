@@ -16,8 +16,8 @@ ocean, and HS+RRTMGP cross-grid drivers:
   in the diagnostic's natural units), report **absolute** drift in those
   units.  This handles rest-state runs where ``x[0] = 0`` cleanly.
 * When the baseline is **above ``min_baseline``** (production runs:
-  atmosphere mass ~ 5e+19 Pa·m², ocean volume ~ 10²⁰ m³, ocean heat
-  ~ 10²⁵ J), report dimensionless **relative** drift.
+  atmosphere mass ~ 5e+19 Pa·m², ocean volume ~ 1.34e+18 m³, ocean
+  heat ~ 1e+25 J), report dimensionless **relative** drift.
 
 The piecewise behaviour is intentional — see iter-80 _save_conservation
 docstring for the full rationale.
@@ -41,9 +41,30 @@ History
 """
 from __future__ import annotations
 
+import math
 from typing import Sequence
 
 import numpy as np
+
+
+def _validate_min_baseline(min_baseline: float) -> None:
+    """Reject non-finite or non-positive ``min_baseline`` values.
+
+    iter-89 self-review: silently accepting ``inf`` would make every
+    drift evaluate to 0 (since ``denom = inf``); silently accepting
+    ``nan`` would make every drift NaN.  Both cases are pure user
+    error and a fail-fast ValueError is preferable to a silent
+    misleading number.
+    """
+    if not math.isfinite(min_baseline):
+        raise ValueError(
+            f"min_baseline must be a finite positive float, "
+            f"got {min_baseline!r}"
+        )
+    if min_baseline <= 0.0:
+        raise ValueError(
+            f"min_baseline must be > 0, got {min_baseline!r}"
+        )
 
 # Default baseline floor (in the diagnostic's natural physical units).
 # All currently-tracked conservation diagnostics in legoESM have either
@@ -71,10 +92,7 @@ def compute_relative_drift(
     See module docstring for the iter-78/80/83/87 history of the
     ``min_baseline`` floor.
     """
-    if min_baseline <= 0.0:
-        raise ValueError(
-            f"min_baseline must be > 0, got {min_baseline!r}"
-        )
+    _validate_min_baseline(min_baseline)
     if len(values) < 2:
         return 0.0
     arr = np.asarray(values, dtype=np.float64)
@@ -97,10 +115,7 @@ def relative_drift_series(
     emit a per-timestep drift trace for plotting.  ``min_baseline``
     defaults to 1.0 — see module docstring.
     """
-    if min_baseline <= 0.0:
-        raise ValueError(
-            f"min_baseline must be > 0, got {min_baseline!r}"
-        )
+    _validate_min_baseline(min_baseline)
     arr = np.asarray(values, dtype=np.float64)
     if arr.size == 0:
         return arr
