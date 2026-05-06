@@ -4107,6 +4107,67 @@ class TestHeldSuarezMassDriftTolerance:
                 f"{bad!r} must be rejected; got {e.value.code}"
             )
 
+    def test_apply_mass_drift_tolerance_fails_on_too_few_samples(self):
+        """iter-120 codex iter-119-followup MEDIUM-1: when the
+        mass series has < 2 samples, the helper returns 0.0
+        sentinel that pre-iter-120 silently passed.  iter-120
+        adds an ``n_samples`` kwarg that fails the gate when
+        n_samples < 2.
+        """
+        m = self._import_module()
+        ok, notes = m._apply_mass_drift_tolerance(
+            ok=True, notes="initial",
+            mass_drift=0.0, tol=1e-2, n_samples=0,
+        )
+        assert ok is False
+        assert "only 0 sample" in notes
+
+        ok, notes = m._apply_mass_drift_tolerance(
+            ok=True, notes="initial",
+            mass_drift=0.0, tol=1e-2, n_samples=1,
+        )
+        assert ok is False
+        assert "only 1 sample" in notes
+
+    def test_apply_mass_drift_tolerance_passes_with_2_samples(self):
+        """With ≥2 samples and finite drift below tol, PASS."""
+        m = self._import_module()
+        ok, notes = m._apply_mass_drift_tolerance(
+            ok=True, notes="initial",
+            mass_drift=1e-4, tol=1e-2, n_samples=2,
+        )
+        assert ok is True
+        assert notes == "initial"
+
+    def test_apply_mass_drift_tolerance_n_samples_optional_default_skips(self):
+        """Backward-compat: default n_samples=None skips the
+        sample-count check (existing callsites still work).
+        """
+        m = self._import_module()
+        ok, notes = m._apply_mass_drift_tolerance(
+            ok=True, notes="initial",
+            mass_drift=1e-4, tol=1e-2,
+            # n_samples not passed → default None
+        )
+        assert ok is True
+
+    def test_cosine_bell_unifies_mass_drift_across_grids(self):
+        """iter-120 codex iter-119-followup MEDIUM-2: cosine_bell
+        now computes / falls back on diag['mean_height'] for
+        ALL 4 grids (cube, latlon, icosahedral, spectral), not
+        just latlon.  Pin the source-level branch.
+        """
+        import inspect
+        m = self._import_module()
+        src = inspect.getsource(m.run_cosine_bell)
+        # The fallback path (when "mass_drift" not in norms)
+        # uses diag.get("mean_height", []).
+        assert 'diag.get("mean_height", [])' in src, (
+            "iter-120: cosine_bell must fall back to "
+            "``diag.get('mean_height', [])`` for grids whose "
+            "error_fn doesn't supply mass_drift."
+        )
+
     def test_4grids_runner_uses_mass_drift_tolerance(self):
         """iter-119 codex iter-118-followup MEDIUM-2:
         ``run_held_suarez_rrtmgp_4grids.py`` must gate PASS

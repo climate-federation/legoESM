@@ -243,6 +243,7 @@ def _compute_drift(values: list[float]) -> float:
 
 def _apply_mass_drift_tolerance(
     ok: bool, notes: str, mass_drift: float, tol: float,
+    *, n_samples: int | None = None,
 ) -> tuple[bool, str]:
     """Apply a mass-drift PASS tolerance to a test case.
 
@@ -259,14 +260,30 @@ def _apply_mass_drift_tolerance(
       meaningless.  The helper makes it cheap to apply the
       same gate across all of them.
 
+    iter-120 (codex iter-119-followup MEDIUM-1): added the
+    optional ``n_samples`` kwarg.  When the mass series has
+    fewer than 2 samples, ``compute_relative_drift`` returns
+    0.0 sentinel (not actually drift) — pre-iter-120 this
+    silently passed the gate.  When ``n_samples`` is provided
+    and < 2, the gate now fails explicitly with a clear note.
+    Backward-compatible default ``n_samples=None`` skips the
+    sample-count check (existing callsites still work).
+
     Returns
     -------
     (ok, notes): tuple of updated values.  When ``mass_drift``
-    is non-finite or exceeds ``tol``, ``ok`` is set to False
-    and a ``[FAIL: mass drift ...]`` annotation is appended to
-    ``notes``.
+    is non-finite or exceeds ``tol`` (or n_samples < 2),
+    ``ok`` is set to False and a ``[FAIL: ...]`` annotation
+    is appended to ``notes``.
     """
     import numpy as _np
+    if ok and n_samples is not None and n_samples < 2:
+        ok = False
+        notes += (
+            f" [FAIL: mass series has only {n_samples} "
+            f"sample(s); need >= 2 for a valid drift]"
+        )
+        return ok, notes
     if ok and (not _np.isfinite(mass_drift) or mass_drift > tol):
         ok = False
         if not _np.isfinite(mass_drift):
@@ -2223,20 +2240,35 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
     notes = ""
     norms = error_fn(state, days * 86400.0)
     notes = f"L1={norms['l1']:.2e}, L2={norms['l2']:.2e}, Linf={norms['linf']:.2e}"
+    # iter-120 (codex iter-119-followup MEDIUM-2): unified mass
+    # drift across all 4 cosine_bell grids.  Pre-iter-120 only
+    # the latlon error_fn computed ``mass_drift`` (line ~2079);
+    # cube/ico/spectral skipped the gate entirely.  iter-120
+    # falls back to ``_compute_drift(diag["mean_height"])`` for
+    # grids whose ``error_fn`` doesn't supply ``mass_drift``.
+    # ``mean_height`` is the area-weighted mean of h, so its
+    # relative drift equals the relative mass drift (linear).
     if "mass_drift" in norms:
-        notes += f", mass_drift={norms['mass_drift']:.2e}"
-        if norms["mass_drift"] > 0.01:
-            logger.warning(
-                "Cosine bell %s: mass drift %.2e exceeds 1%% threshold",
-                tc.grid_type, norms["mass_drift"])
-        # iter-119 (codex iter-118-followup MEDIUM-1): apply
-        # the iter-117/118 mass-drift PASS gate.  Pre-iter-119
-        # cosine_bell only WARNED on mass_drift > 0.01 but
-        # never FAILed.  The threshold matches the existing
-        # warning level (1%) so the iter-119 gate just turns
-        # the existing warning into a hard fail.
-        ok, notes = _apply_mass_drift_tolerance(
-            ok, notes, norms["mass_drift"], 1e-2)
+        mass_drift = norms["mass_drift"]
+        notes += f", mass_drift={mass_drift:.2e}"
+        n_mass_samples = len(diag.get("mean_height", []))
+    else:
+        mass_drift = _compute_drift(diag.get("mean_height", []))
+        n_mass_samples = len(diag.get("mean_height", []))
+        if mass_drift > 0 or n_mass_samples >= 2:
+            notes += f", mass_drift={mass_drift:.2e}"
+    if mass_drift > 0.01:
+        logger.warning(
+            "Cosine bell %s: mass drift %.2e exceeds 1%% threshold",
+            tc.grid_type, mass_drift)
+    # iter-119 (codex iter-118-followup MEDIUM-1): apply
+    # the iter-117/118 mass-drift PASS gate.  Pre-iter-119
+    # cosine_bell only WARNED.  iter-120: now applies to ALL
+    # 4 grids via the unified mass_drift / n_mass_samples
+    # path above.
+    ok, notes = _apply_mass_drift_tolerance(
+        ok, notes, mass_drift, 1e-2,
+        n_samples=n_mass_samples)
 
     _write_results_txt(output_dir, {
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
@@ -2548,9 +2580,13 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
     # are at machine precision (~1e-11).  iter-117 adds 1e-2.
     # iter-118 (codex iter-117 followup MEDIUM-2): also fail
     # on non-finite drift via ``_apply_mass_drift_tolerance``.
+    # iter-120 (codex iter-119 followup MEDIUM-1): also fail
+    # on series with < 2 samples (pre-iter-120 returned 0.0
+    # sentinel that silently passed).
     HELD_SUAREZ_MASS_DRIFT_TOL = 1e-2
     ok, notes = _apply_mass_drift_tolerance(
-        ok, notes, mass_drift, HELD_SUAREZ_MASS_DRIFT_TOL)
+        ok, notes, mass_drift, HELD_SUAREZ_MASS_DRIFT_TOL,
+        n_samples=len(diag.get("mass", [])))
 
     level_values = np.asarray(
         getattr(sigma, "sigma_full", np.arange(nlev)), dtype=np.float64)
@@ -2832,11 +2868,11 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         notes += f", max|v|={diag['max_wind'][-1]:.1f}"
     # iter-118 (codex iter-117 followup MEDIUM-3): apply
     # a 1e-2 mass-drift tolerance to baroclinic.  Same
-    # rationale as iter-117 HS: PASS column was meaningless
-    # without a gate, since fix_mass-on cube/ico hit machine
-    # precision while latlon/spectral hit ~1e-4.
+    # rationale as iter-117 HS.  iter-120 also gates on
+    # n_samples >= 2 (codex iter-119 followup MEDIUM-1).
     ok, notes = _apply_mass_drift_tolerance(
-        ok, notes, mass_drift, 1e-2)
+        ok, notes, mass_drift, 1e-2,
+        n_samples=len(diag.get("mass", [])))
 
     level_values = np.asarray(
         getattr(sigma, "sigma_full", np.arange(nlev)), dtype=np.float64)
@@ -3360,9 +3396,11 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
     notes = f"mass drift={mass_drift:.2e}"
     # iter-118 (codex iter-117 followup MEDIUM-3): apply
     # a 1e-2 mass-drift tolerance to AMIP.  Same rationale
-    # as iter-117 HS / iter-118 baroclinic.
+    # as iter-117 HS / iter-118 baroclinic.  iter-120 also
+    # gates on n_samples >= 2.
     ok, notes = _apply_mass_drift_tolerance(
-        ok, notes, mass_drift, 1e-2)
+        ok, notes, mass_drift, 1e-2,
+        n_samples=len(diag.get("mass", [])))
 
     level_values = np.asarray(
         getattr(sigma, "sigma_full", np.arange(nlev)), dtype=np.float64)
