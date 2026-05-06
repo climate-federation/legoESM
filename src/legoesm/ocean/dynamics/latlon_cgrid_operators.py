@@ -985,8 +985,7 @@ def slope_foot_enhancement_3d(
     n_lat, n_lon = H_bathy.shape
 
     # ∇H at cell centres via centred differences (periodic in lon, walls in lat)
-    cos_lat = jnp.cos(grid.lat * (jnp.pi / 180.0))
-    cos_lat = jnp.maximum(cos_lat, 1e-3)
+    cos_lat = jnp.maximum(grid.cos_lat, 1e-3)
     dlat = jnp.pi / n_lat
     dlon = 2.0 * jnp.pi / n_lon
     dy = R * dlat

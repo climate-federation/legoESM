@@ -341,15 +341,13 @@ def _forward_backward_coriolis_3d(
         min_water_column_m=config.min_water_column_m,
     )
 
-    # h at u-faces
-    h_west = jnp.roll(h_k, 1, axis=1)
-    h_u = 0.5 * (h_west + h_k)
-    h_u = jnp.concatenate([h_u, h_u[:, 0:1, :]], axis=1)
-
-    # h at v-faces (zero at poles for wall BC).  Single Pad HLO op
-    # replaces alloc-zeros + concatenate-of-three.
-    h_v_interior = 0.5 * (h_k[:-1] + h_k[1:])
-    h_v = jnp.pad(h_v_interior, ((1, 1), (0, 0), (0, 0)))
+    # h at u/v-faces — min-rule (MOM6/MITgcm hFacW convention).
+    # Must match the PE tendency and slow-forcing depth-average which
+    # both use min_cell_to_uface/min_cell_to_vface.  Arithmetic mean
+    # overestimates face depth at topographic steps, creating a
+    # barotropic-baroclinic residual that drives spurious currents.
+    h_u = min_cell_to_uface(h_k)
+    h_v = min_cell_to_vface(h_k)
 
     # --- Depth-averaged velocity (barotropic component) ---
     # Per-face thickness + barotropic-mean column reductions share the
