@@ -562,3 +562,197 @@ class TestIter92AuditFollowupDelegation:
             "(NaN-on-zero) must not appear in active code — "
             "replaced by ``relative_drift_series(mass_ts)``."
         )
+
+
+class TestStructuralRegressionNoNewIter78Pathology:
+    """iter-94 forward-looking structural regression test.
+
+    iter-90/91/92/93 each found 1+ missed copies of the iter-78
+    pathology pattern (``max(abs(x[0]), 1e-30)`` and variants)
+    that earlier iterations had not migrated.  This pattern is
+    insidious: it's only pathological for rest-state baselines,
+    so production runs with non-zero baselines hide the bug, and
+    each new copy gets reviewed in isolation rather than against
+    the canonical helper.
+
+    This structural test scans ``scripts/``, ``src/legoesm/``,
+    and ``tests/`` for *active code* (comments stripped) matching
+    the pathological pattern, and asserts ZERO matches.  Any
+    future PR that introduces a new inline copy will fail this
+    test, so a reviewer / next-iteration audit will be alerted
+    *before* the copy ships.
+
+    The test deliberately NOT-checks for legitimate epsilon uses
+    (``jnp.sqrt(... + 1e-30)`` for NaN-grad guards, weighted
+    means with positive weights, log-of-zero protection, etc.) —
+    it only matches the specific iter-78 *baseline-zero
+    normalization* shape.
+    """
+
+    @staticmethod
+    def _strip_comments_and_docstrings(text: str) -> str:
+        """Remove ``#`` line comments and triple-quoted strings.
+
+        This is intentionally simple — it does not parse Python.
+        The goal is to eliminate the most common false-positive
+        sources (history comments, audit-mention docstrings) so
+        the regex sees only active code.
+        """
+        import re
+        # Strip ``"""..."""`` and ``'''...'''`` blocks (incl.
+        # multi-line, non-greedy).
+        no_triple_dbl = re.sub(r'"""[\s\S]*?"""', "", text)
+        no_triple = re.sub(r"'''[\s\S]*?'''", "", no_triple_dbl)
+        # Strip line comments.
+        out_lines = []
+        for line in no_triple.splitlines():
+            # Inline-comment stripping is risky (strings can contain
+            # ``#``); for our regex this rarely matters since the
+            # pathological pattern has no ``#`` in it.  Just drop
+            # whole-line comments.
+            if line.lstrip().startswith("#"):
+                continue
+            out_lines.append(line)
+        return "\n".join(out_lines)
+
+    @staticmethod
+    def _walk_python_files():
+        """Yield (path, text) for *.py under scripts/, src/legoesm/,
+        tests/, excluding __pycache__.
+        """
+        from pathlib import Path
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        roots = [
+            repo_root / "scripts",
+            repo_root / "src" / "legoesm",
+            repo_root / "tests",
+        ]
+        # Files that legitimately contain the pattern as DATA
+        # (test assertions checking string presence/absence,
+        # the canonical helper module itself).
+        exempt_files = {
+            repo_root / "src" / "legoesm" / "diagnostics" / "conservation_drift.py",
+            repo_root / "tests" / "unit" / "test_conservation_drift.py",
+            repo_root / "tests" / "test_atmosphere_cross_grid_plots.py",
+            repo_root / "tests" / "test_ocean_cross_grid_plots.py",
+        }
+        for root in roots:
+            for path in root.rglob("*.py"):
+                if path in exempt_files:
+                    continue
+                if "__pycache__" in path.parts:
+                    continue
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except (UnicodeDecodeError, OSError):
+                    continue
+                yield path, text
+
+    def test_no_inline_max_abs_x_zero_1e30_pattern(self):
+        """No ``max(abs(X[0]), 1e-XX)`` for tiny epsilon in active
+        code.  The canonical helper's
+        ``DEFAULT_MIN_BASELINE = 1.0`` is the single source of
+        truth for the floor.
+        """
+        import re
+        # Match: max(abs(<anything ending in [0])>), 1e-NN)
+        # where NN >= 10 (so 1e-10, 1e-12, 1e-20, 1e-30, ...)
+        # This catches the iter-78 family but NOT
+        # ``max(abs(x), 1.0)`` (the helper's canonical form).
+        pat = re.compile(
+            r"max\(\s*abs\([^)]*\[0\][^)]*\)\s*,\s*1e-\d{2,}\s*\)"
+        )
+        offenders = []
+        for path, text in self._walk_python_files():
+            code_only = self._strip_comments_and_docstrings(text)
+            for match in pat.finditer(code_only):
+                # Find the line number of the match.
+                line_num = code_only[:match.start()].count("\n") + 1
+                offenders.append(
+                    f"{path.relative_to(path.parents[3])}:~{line_num}  "
+                    f"{match.group(0)}"
+                )
+        assert offenders == [], (
+            "iter-94 structural regression: found inline "
+            "``max(abs(X[0]), 1e-XX)`` patterns (the iter-78 "
+            "baseline-zero pathology) in active code.  Use "
+            "``compute_relative_drift`` from "
+            "``legoesm.diagnostics.conservation_drift`` instead "
+            "of inlining the floor:\n"
+            + "\n".join(f"  - {o}" for o in offenders)
+        )
+
+    def test_no_inline_abs_x_zero_plus_eps_pattern(self):
+        """No ``abs(X[0]) + 1e-XX`` denominator pattern.
+
+        This is the iter-87 variant — the HS+RRTMGP runner used
+        ``/ abs(mass_vals[0] + 1e-30)`` which has the same iter-78
+        pathology.
+        """
+        import re
+        # Match: / (abs(...) + 1e-NN) or / abs(...) + 1e-NN
+        pat = re.compile(
+            r"/\s*\(?\s*abs\([^)]*\[0\][^)]*\)\s*\+\s*1e-\d{2,}\s*\)?"
+        )
+        offenders = []
+        for path, text in self._walk_python_files():
+            code_only = self._strip_comments_and_docstrings(text)
+            for match in pat.finditer(code_only):
+                line_num = code_only[:match.start()].count("\n") + 1
+                offenders.append(
+                    f"{path.relative_to(path.parents[3])}:~{line_num}  "
+                    f"{match.group(0)}"
+                )
+        assert offenders == [], (
+            "iter-94 structural regression: found inline "
+            "``/ (abs(X[0]) + 1e-XX)`` patterns (iter-87 variant "
+            "of the iter-78 pathology) in active code:\n"
+            + "\n".join(f"  - {o}" for o in offenders)
+        )
+
+    def test_no_inline_max_x_zero_1e20_pattern(self):
+        """No ``max(X_init, 1e-20)`` time-zero-baseline denominator
+        (iter-92 sea-ice variant).
+
+        Tightening note: the regex requires the variable name to
+        match a *time-zero baseline* identifier (``_init``,
+        ``_initial``, ``_before``, ``_baseline``, ``_zero``) NOT a
+        *norm/scale* identifier (``_scale``, ``_norm``, ``_max``,
+        ``_ref``, ``_f``).  This avoids false positives on:
+
+        * ``max(T_scale, 1e-30)`` — relative tendency
+          normalization where the denominator is a norm of the
+          field, NOT a time-zero baseline.  Found in
+          ``scripts/diagnose_redi_residual_at_t0.py`` and
+          ``tests/ocean/unit/test_gm_redi_eady_physics.py``;
+          legitimate divide-by-zero guard for a degenerate
+          (uniform-zero) field.
+        * ``max(hl_f, 1e-30)`` — regression-test comparison
+          of live vs committed file values
+          (``tests/unit/test_cdgrid_fv3_regression.py``); not a
+          time-zero baseline.
+        """
+        import re
+        pat = re.compile(
+            r"max\(\s*"
+            # Variable name MUST end in _init / _initial / _before /
+            # _baseline / _zero — names that semantically imply
+            # "time-zero baseline" and trigger the iter-78 bug.
+            r"\w+(?:_init|_initial|_before|_baseline|_zero)"
+            r"\s*,\s*1e-(?:1[5-9]|2\d|3\d|4\d)\s*\)"
+        )
+        offenders = []
+        for path, text in self._walk_python_files():
+            code_only = self._strip_comments_and_docstrings(text)
+            for match in pat.finditer(code_only):
+                line_num = code_only[:match.start()].count("\n") + 1
+                offenders.append(
+                    f"{path.relative_to(path.parents[3])}:~{line_num}  "
+                    f"{match.group(0)}"
+                )
+        assert offenders == [], (
+            "iter-94 structural regression: found inline "
+            "``max(X_init, 1e-XX)`` patterns (iter-92 sea-ice "
+            "variant of the iter-78 pathology) in active code:\n"
+            + "\n".join(f"  - {o}" for o in offenders)
+        )
