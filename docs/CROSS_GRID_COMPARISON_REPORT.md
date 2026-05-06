@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-62 snapshot)
+**Branch**: `simulation_full_check` (iter-63 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..62 findings.  It is the user-facing
+This report consolidates iter-1..63 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -723,6 +723,39 @@ round caught real issues; final convergence is clean.
   signature is already strongly visible — multi-iter retuning
   work will need to budget at least a 30-day window per
   candidate dissipation choice to compare climatologies.
+* iter-63: ran fix-candidate (b) experimentally
+  (``hd = 0.5 * _hyperdiff_cube(n)`` and ``dd = 0.5 *
+  _div_damp_cube(n)`` in the cube HS branch — temporary,
+  reverted before commit) over a 3-day HS smoke.  Result:
+  **NO statistically discernable change** in any cross-grid
+  RMS metric.  Per-grid deviations from ensemble mean,
+  pair-wise RMS, and top-5 levels by spread were
+  byte-for-byte identical to baseline (iter-62 numbers
+  reproduced exactly).
+
+  Diagnosis of the null result: at C36 grid scale (L ≈ 2.78e5
+  m) the biharmonic damping timescale is ``L⁴ /
+  hyperdiff_coeff ≈ 6e21 / 3.16e16 ≈ 2.2 d``.  At baseline
+  the biharmonic has barely had ONE e-folding by 3 d; at
+  half-coefficient it has had < 0.7 e-foldings.  Neither has
+  acted enough to shift the climatology measurably.  The
+  iter-62 latlon-warm outlier signature must therefore come
+  from something OTHER than the cube biharmonic at 3-day
+  windows — likely cube's div_damp Laplacian or the cube's
+  upper-level Rayleigh sponge (τ=1 h, see iter-15 NOTE in
+  ``run_held_suarez``).
+
+  Implication for the iter-57 retuning plan: fix-candidate
+  (b) (cube damping reduction) is INCONCLUSIVE under
+  3-day windows.  Confirming or refuting it requires at
+  least a 7-day spin-up where the biharmonic has ≥ 3
+  e-foldings.  This pushes the retuning study into the
+  multi-iter scope acknowledged in §5 next-steps and is
+  consistent with iter-62's "30-day window per candidate"
+  budget.
+
+  Pure experiment / diagnosis; no source changes.  Tests
+  still 118/118 + 3 MPAS skips.
 
 118/118 unit tests pass + 3 MPAS-mesh-unavailable skips
 (across ``tests/test_atmosphere_cross_grid_plots.py`` (77 +
@@ -732,4 +765,4 @@ round caught real issues; final convergence is clean.
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-62 update).*
+(iter-63 update).*
