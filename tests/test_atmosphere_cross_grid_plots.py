@@ -422,3 +422,75 @@ class TestPathDiscovery:
                 (d / "snapshots_latlon.npz").touch()
         out = M._vertical_coords_for_case(tmp_path)
         assert out == ["hybrid", "sigma"]
+
+    def test_vertical_coords_for_case_csv_only_run(self, tmp_path):
+        """iter-26 codex HIGH: RCE-style runs without snapshot NPZ
+        but WITH ``mean_timeseries.csv`` + ``results.txt`` should
+        be discovered.  iter-27 codex LOW: a stale CSV without
+        ``results.txt`` should NOT trigger a phantom combo."""
+        # Grid 1: full CSV+results.txt run (collectable).
+        d1 = tmp_path / "cubed_sphere" / "C24"
+        d1.mkdir(parents=True)
+        (d1 / "mean_timeseries.csv").touch()
+        (d1 / "results.txt").touch()
+        # Grid 2: stale CSV only (NOT collectable — missing
+        # results.txt).
+        d2 = tmp_path / "latlon" / "32x64"
+        d2.mkdir(parents=True)
+        (d2 / "mean_timeseries.csv").touch()
+        out = M._vertical_coords_for_case(tmp_path)
+        # Grid 1 is collectable → SW-style anchor (None).  Grid 2
+        # is not collectable; its presence should not add a
+        # vertical-coord variant.
+        assert out == [None]
+
+
+# ---------------------------------------------------------------------------
+# iter-26: NPZ-missing collection path (timeseries-only runs)
+# ---------------------------------------------------------------------------
+
+class TestNpzMissingCollection:
+    def test_collect_grid_results_skips_missing_results_txt(self, tmp_path):
+        """``_collect_grid_results_atmosphere`` requires CSV +
+        results.txt to populate a grid entry.  CSV-only runs are
+        skipped (no phantom entries)."""
+        # cube has CSV but NO results.txt — should be skipped.
+        d_cube = tmp_path / "cubed_sphere" / "C24"
+        d_cube.mkdir(parents=True)
+        (d_cube / "mean_timeseries.csv").write_text("time_days,mean_T\n0,300\n")
+
+        # latlon has CSV + results.txt (no NPZ) — should be picked up
+        # via the iter-26 NPZ-optional path.
+        d_latlon = tmp_path / "latlon" / "X1"
+        d_latlon.mkdir(parents=True)
+        (d_latlon / "mean_timeseries.csv").write_text("time_days,mean_T\n0,290\n")
+        (d_latlon / "results.txt").write_text("test: rce\nstatus: PASS\n")
+
+        gr = M._collect_grid_results_atmosphere(tmp_path)
+        # Only latlon should be collected.
+        assert "cubed_sphere" not in gr
+        assert "latlon" in gr
+        # The latlon entry should use the empty-snapshots stub.
+        assert gr["latlon"]["snapshots"] is M._EMPTY_SNAPSHOTS_STUB
+
+    def test_empty_snapshots_stub_skips_field_extraction(self):
+        """``_atm_extract_field_2d(stub, "T_3d")`` returns ``None``
+        because the stub has no fields."""
+        stub = M._EMPTY_SNAPSHOTS_STUB
+        out = M._atm_extract_field_2d(stub, "T_3d")
+        assert out is None
+        # Even an empty string field name should fail gracefully.
+        out = M._atm_extract_field_2d(stub, "")
+        assert out is None
+
+    def test_rms_agreement_skips_grids_with_empty_snapshots(self):
+        """If both grids have empty snapshot stubs,
+        ``_compute_cross_grid_rms_agreement`` returns ``None``
+        (fewer than 2 valid 4-D fields)."""
+        stub = M._EMPTY_SNAPSHOTS_STUB
+        gr = {
+            "a": {"snapshots": stub, "metadata": {}, "resolution": "x"},
+            "b": {"snapshots": stub, "metadata": {}, "resolution": "y"},
+        }
+        metric = M._compute_cross_grid_rms_agreement(gr, "T_3d")
+        assert metric is None

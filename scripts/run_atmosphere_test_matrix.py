@@ -3929,17 +3929,21 @@ def _vertical_coords_for_case(
             continue
         # Detect SW-style (leaf files at resolution level) vs. hydro-style
         # (vertical-coord subdir level).  iter-26 codex review HIGH:
-        # accept ``mean_timeseries.csv`` as the discovery anchor too,
-        # so timeseries-only runs (e.g. RCE iter-24 output without
-        # snapshots) participate in the cross-grid plotter.
-        if (res_dir / "snapshots_latlon.npz").exists() or \
-                (res_dir / "mean_timeseries.csv").exists():
+        # accept timeseries-only runs (e.g. RCE iter-24 output without
+        # snapshots) — but match the COLLECTION criteria
+        # (``mean_timeseries.csv`` AND ``results.txt``, OR
+        # ``snapshots_latlon.npz``) so a stale CSV without
+        # ``results.txt`` doesn't produce a phantom no-op combo.
+        # iter-27 codex review LOW.
+        def _has_collectable(d: Path) -> bool:
+            if (d / "snapshots_latlon.npz").exists():
+                return True
+            return (d / "mean_timeseries.csv").exists() and (d / "results.txt").exists()
+
+        if _has_collectable(res_dir):
             found_sw = True
         for sub in res_dir.iterdir():
-            if sub.is_dir() and (
-                (sub / "snapshots_latlon.npz").exists()
-                or (sub / "mean_timeseries.csv").exists()
-            ):
+            if sub.is_dir() and _has_collectable(sub):
                 verts.add(sub.name)
     if verts and found_sw:
         # Mixed layout: SOME grids have leaf files at the resolution
@@ -4512,13 +4516,18 @@ def _create_atmosphere_comparison_timeseries(
         # comparison overlay this mass diagnostic across grids.
         "mass", "mean_p_s", "mass_drift", "energy_drift",
         "mean_q_v", "max_q_v", "global_precip",
+        # iter-26: RCE diagnostics — make moist-RCE timeseries
+        # comparable across grids.  iter-27 codex MEDIUM: moved
+        # ahead of NH ``mean_theta_prime`` etc. so the four-panel
+        # cap doesn't drop them for typical RCE CSVs (which have
+        # ``mean_T``, ``mean_T_sfc``, ``max_wind``, ``mean_precip``,
+        # ``mean_cwv`` as the 5 useful columns).  ``mean_precip``
+        # is now slot 4, ``mean_cwv`` slot 5 — still capped.
+        "mean_precip", "mean_cwv",
         # DCMIP transport tracer scalars
         "q1_min", "q1_max", "q1_mean",
         # NH dycore scalars
         "mean_theta_prime", "mean_rho_prime",
-        # iter-26: RCE diagnostics — make moist-RCE timeseries
-        # comparable across grids (mean precip + column water vapor).
-        "mean_precip", "mean_cwv",
     ]
     for col in candidates:
         if all(col in data["timeseries"].columns
@@ -4527,8 +4536,10 @@ def _create_atmosphere_comparison_timeseries(
     if not common_cols:
         return  # No common columns to compare.
 
-    # Cap at 4 panels.
-    common_cols = common_cols[:4]
+    # iter-27 codex MEDIUM: cap at 6 panels (was 4) so RCE
+    # diagnostics (``mean_T_sfc``, ``mean_T``, ``max_wind``,
+    # ``mean_precip``, ``mean_cwv``) fit in a single 3×2 grid.
+    common_cols = common_cols[:6]
 
     n = len(common_cols)
     nrows = (n + 1) // 2
