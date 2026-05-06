@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-81 snapshot)
+**Branch**: `simulation_full_check` (iter-82 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..81 findings.  It is the user-facing
+This report consolidates iter-1..82 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -29,9 +29,9 @@ and every available pair of grids:
   `T(latitude, σ)` cross-section, the canonical Held-Suarez
   Fig. 3 layout.
 
-Every helper has a corresponding unit test (128 / 128 pass
+Every helper has a corresponding unit test (131 / 131 pass
 across `tests/test_atmosphere_cross_grid_plots.py` (79) +
-`test_ocean_cross_grid_plots.py` (15) +
+`test_ocean_cross_grid_plots.py` (18) +
 `test_cross_grid_wrappers.py` (34)) plus 3 MPAS-mesh-
 unavailable skips.
 
@@ -1461,12 +1461,32 @@ round caught real issues; final convergence is clean.
     LOW: comment edge case (``< 1000.0`` means exactly
       1000 m triggers BLOWUP).  Acknowledged in source.
 
-128/128 unit tests pass + 3 MPAS-mesh-unavailable skips
+* iter-82: regression tests for the iter-80 conservation-
+  timeseries denominator-floor fix.  3 new tests in
+  ``TestSaveConservationDenominatorFloor``:
+
+    * ``test_rest_state_baseline_zero_does_not_blow_up`` —
+      synthesize a rest-state diag dict (vol[0]=0, drift
+      ~1e-17), invoke ``_save_conservation``, assert
+      ``vol_rel`` final value is ~1e-17 (NOT 1e+13).
+    * ``test_real_baseline_uses_relative_drift`` — synthesize
+      a forced run (vol[0]=1.5e18 m³, drift 1.5e15 m³),
+      assert ``vol_rel`` is ~1e-3 (relative).  Pins that
+      iter-80 didn't accidentally always-absolute the metric.
+    * ``test_min_relative_baseline_constant_is_one`` —
+      source-level pin: ``_save_conservation`` must literally
+      contain ``_MIN_RELATIVE_BASELINE = 1.0``.  Any change
+      flips this test (with an explanatory message).
+
+  Tests: 18 ocean (was 15); full suite 131/131 + 3 MPAS
+  skips (was 128/128 + 3 skips).
+
+131/131 unit tests pass + 3 MPAS-mesh-unavailable skips
 (across ``tests/test_atmosphere_cross_grid_plots.py`` (79 +
-3 skips), ``tests/test_ocean_cross_grid_plots.py`` (15), and
+3 skips), ``tests/test_ocean_cross_grid_plots.py`` (18), and
 ``tests/test_cross_grid_wrappers.py`` (34)).
 
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-81 update).*
+(iter-82 update).*

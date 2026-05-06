@@ -424,3 +424,115 @@ class TestRelaxedCollectorAcceptsTimeseriesOnly:
         M._create_comparison_timeseries(case_dir, results)
         # No timeseries.png emitted (no timeseries data).
         assert not (case_dir / "comparison_timeseries.png").exists()
+
+
+# ---------------------------------------------------------------------------
+# iter-82: pin the iter-80 conservation-timeseries denominator-floor fix
+# ---------------------------------------------------------------------------
+
+class TestSaveConservationDenominatorFloor:
+    """The iter-80 fix raised ``_save_conservation``'s denominator
+    floor from 1e-30 to 1.0.  Pin that the floor stays at a
+    physically meaningful value so a regression to 1e-30 (or
+    lower) would amplify machine-precision rounding into spurious
+    1e+13-magnitude "relative drift" values for rest-state runs.
+    """
+
+    def _import_matrix_module(self):
+        import importlib
+        return importlib.import_module("run_ocean_test_matrix")
+
+    def test_rest_state_baseline_zero_does_not_blow_up(self, tmp_path):
+        """Rest-state runs have ``vol[0] = 0`` (initial mean η is
+        zero by construction).  After the iter-80 fix, machine-
+        precision rounding of -2.83e-17 should produce a
+        ``vol_rel`` value of -2.83e-17, NOT -2.83e+13.
+        """
+        M = self._import_matrix_module()
+
+        # Mimic a rest-state diag dict: vol baseline ≈ 0,
+        # tiny rounding drift over 3 steps.
+        diag = {
+            "vol_key": [0.0, -1e-19, -2.83e-17],
+            "heat_key": [5.23, 5.23, 5.23],
+            "salt_key": [35.0, 35.0, 35.0],
+            "times": [0.0, 0.05, 0.10],
+        }
+        out = tmp_path / "out"
+        M._save_conservation(
+            out, "rest_state", diag,
+            vol_key="vol_key", heat_key="heat_key", salt_key="salt_key",
+        )
+        csv_path = out / "conservation_timeseries.csv"
+        assert csv_path.exists()
+        # Read back and parse the last vol_rel.
+        import csv as csv_mod
+        with open(csv_path) as f:
+            reader = csv_mod.DictReader(f)
+            rows = list(reader)
+        last_vol_rel = float(rows[-1]["vol_rel"])
+        # iter-80: the value should be in the range of the actual
+        # rounding (1e-17), NOT the iter-78 spurious 1e+13.
+        # If a future regression drops the denominator floor back
+        # to 1e-30, vol_rel would be ~-2.83e+13 (29 orders bigger
+        # than the actual value).
+        assert abs(last_vol_rel) < 1e-10, (
+            f"iter-80 regression: vol_rel = {last_vol_rel:.2e} for "
+            f"a rest-state baseline (vol[0]=0).  Expected ~1e-17 "
+            f"(actual rounding magnitude); got 1e-10 or larger.  "
+            f"Most likely cause: the ``_MIN_RELATIVE_BASELINE`` "
+            f"constant was lowered from 1.0 back toward 1e-30."
+        )
+
+    def test_real_baseline_uses_relative_drift(self, tmp_path):
+        """When the baseline is non-trivial (e.g., a forced run
+        with vol[0] = 1.5e18 m³), ``vol_rel`` should report
+        relative drift, not absolute.
+        """
+        M = self._import_matrix_module()
+        # Realistic ocean baseline: 1.5e18 m³ (~ Earth ocean volume).
+        # Drift over 3 steps: 1.5e15 m³ (= 1e-3 relative).
+        diag = {
+            "vol_key": [1.5e18, 1.5e18 + 5e14, 1.5e18 + 1.5e15],
+            "heat_key": [3.6e25, 3.6e25, 3.6e25],
+            "salt_key": [1.4e22, 1.4e22, 1.4e22],
+            "times": [0.0, 0.05, 0.10],
+        }
+        out = tmp_path / "out"
+        M._save_conservation(
+            out, "forced_run", diag,
+            vol_key="vol_key", heat_key="heat_key", salt_key="salt_key",
+        )
+        import csv as csv_mod
+        with open(out / "conservation_timeseries.csv") as f:
+            reader = csv_mod.DictReader(f)
+            rows = list(reader)
+        last_vol_rel = float(rows[-1]["vol_rel"])
+        # With baseline 1.5e18 and drift 1.5e15, relative drift
+        # should be 1e-3.  Not -2.83e+13, not 1.5e15.
+        assert 0.5e-3 <= last_vol_rel <= 2e-3, (
+            f"vol_rel = {last_vol_rel:.4e} for a forced run with "
+            f"baseline 1.5e18 m³ and drift 1.5e15 m³; expected "
+            f"~1e-3 (the relative-drift value).  Was the iter-80 "
+            f"fix accidentally always-absolute?"
+        )
+
+    def test_min_relative_baseline_constant_is_one(self, tmp_path):
+        """Direct source-level pin of the iter-80 constant: the
+        ``_MIN_RELATIVE_BASELINE`` value used in
+        ``_save_conservation`` must be 1.0 (not 1e-30, not 0.0,
+        not 1e6).  Any change to this value should be a deliberate
+        decision visible in this test.
+        """
+        import inspect
+        M = self._import_matrix_module()
+        src = inspect.getsource(M._save_conservation)
+        assert "_MIN_RELATIVE_BASELINE = 1.0" in src, (
+            "iter-80: ``_save_conservation`` must define "
+            "``_MIN_RELATIVE_BASELINE = 1.0`` so the relative-"
+            "drift denominator never drops below 1.0 (the iter-78 "
+            "cube rest_state finding showed that a 1e-30 floor "
+            "amplifies machine-precision rounding to spurious "
+            "1e+13 'relative drift' values).  If you intentionally "
+            "changed this, update this test alongside the source."
+        )
