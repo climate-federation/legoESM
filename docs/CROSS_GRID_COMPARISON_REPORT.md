@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-56 snapshot)
+**Branch**: `simulation_full_check` (iter-57 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..56 findings.  It is the user-facing
+This report consolidates iter-1..57 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -204,10 +204,47 @@ issues; final convergence is clean.
 ## 5. Recommended next steps (post-Ralph)
 
 1. **Cross-dycore dissipation retuning**: principled fix for the
-   HS cube-cold / latlon-warm pattern.  Likely involves
-   replacing the cubed-sphere Rayleigh sponge with a more
-   FV3-faithful (sin² log-pressure) profile AND retuning all 4
-   grids' hyperdiffusion to a common effective viscosity.
+   HS cube-cold / latlon-warm pattern.  iter-57 audit of the
+   matrix runner's per-grid dissipation coefficients identified
+   a SPECIFIC cause:
+   * cube uses ``PrimitiveEquationConfig(hyperdiff_coeff,
+     hyperdiff_ps_coeff, div_damp_coeff, A_h)`` — FOUR
+     dissipation terms simultaneously.  ``A_h`` uses
+     ``frac=0.05`` (half the latlon/MPAS value).
+   * latlon uses ``CGridLatLonPrimitiveEquationConfig(A_h)``
+     ONLY — Laplacian viscosity with ``frac=0.1``.  No
+     biharmonic, no divergence damping.
+   * MPAS: a single biharmonic ``hyperdiff_coeff = dx⁴/(48 h)``;
+     no Laplacian, no div_damp.
+   * spectral: hyperdiff + spectral filter; no Laplacian, no
+     div_damp.
+
+   Net effect: cube has *more* total dissipation than latlon
+   or MPAS, AND its dissipation is biharmonic-dominated which
+   preferentially damps small scales.  In a Held-Suarez
+   climatology this pattern produces a cooler mean
+   stratosphere on the cube relative to latlon (which has
+   only a Laplacian and therefore retains more eddy heat
+   flux into the high-latitude upper troposphere).
+
+   Two fix candidates to evaluate:
+   * (a) Add biharmonic + div_damp to the latlon configuration
+     to match the cube's effective viscosity profile.
+   * (b) Reduce the cube's div_damp_coeff and hyperdiff_coeff
+     and let A_h carry more of the work.
+
+   Option (a) requires the C-grid latlon dycore to support
+   biharmonic (it currently does not in
+   ``CGridLatLonPrimitiveEquationConfig``).  Option (b) is
+   a tuning study within the existing API surface.  Neither
+   is a one-iter fix; both should land with a 30-day visual-
+   diagnostic comparison plot per dissipation choice.
+
+   FV3-faithful sin²-log-pressure sponge replacement
+   (originally proposed in earlier reports) was attempted in
+   iter-15 with τ=7 d and made the cube-cold *worse*; the
+   iter-57 audit clarifies why — the issue is the bulk
+   dissipation imbalance, not the sponge profile.
 2. **CMIP6 input4MIPs forcing wiring**: thread the existing
    `forcing/external.py` GHG/aerosol/ozone loaders into the
    AMIP RadiationConfig.  Already loadable; just needs the
@@ -539,6 +576,30 @@ issues; final convergence is clean.
   ``if [ -n "$VAR" ]; then EXTRA_FLAGS+=...`` pattern matches
   with ``${var}`` / ``$var`` flexibility.
 
+* iter-55: re-indent ``_run_replot`` so the
+  ``try/except _replot_case_snapshots`` is INSIDE the inner
+  marker loop AND inside the snapshot-marker branch (was
+  running once per glob using stale ``res_dir``, including
+  on timeseries-only directories that have no snapshots
+  payload).
+* iter-56: scripts/README.md now lists the cross-grid
+  wrappers and matrix-runner CLI overrides for steady-state
+  CMIP6 forcing.  Pure documentation.
+* iter-57: identified the root cause of the HS cube-cold /
+  latlon-warm pattern documented in iter-9..15.  Per-grid
+  dissipation imbalance: cube uses FOUR dissipation terms
+  (hyperdiff, hyperdiff_ps, div_damp, A_h with frac=0.05);
+  latlon uses ONE (A_h with frac=0.1).  MPAS uses one
+  biharmonic; spectral uses hyperdiff + spectral filter.
+  Net: cube has more total dissipation than the others, AND
+  it's biharmonic-dominated which preferentially damps
+  small scales, producing a cooler stratosphere mean.  This
+  is documented in §5 with two fix candidates (add
+  biharmonic to latlon C-grid, or reduce cube's
+  div_damp/hyperdiff and let A_h carry more of the work);
+  neither is a one-iter fix.  Pure documentation /
+  diagnosis; no source changes.
+
 112/112 unit tests pass + 3 MPAS-mesh-unavailable skips
 (across ``tests/test_atmosphere_cross_grid_plots.py`` (71 +
 3 skips), ``tests/test_ocean_cross_grid_plots.py`` (15), and
@@ -547,4 +608,4 @@ issues; final convergence is clean.
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-56 update).*
+(iter-57 update).*
