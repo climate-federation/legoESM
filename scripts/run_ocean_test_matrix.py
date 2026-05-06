@@ -6281,6 +6281,22 @@ def main():
             )
             _sys.exit(2)
 
+        # iter-111 (codex iter-110 LOW-4): reject decimal
+        # numeric strings.  See atmosphere matrix runner for
+        # the rationale.
+        if not is_bare_int:
+            import re as _re
+            if _re.fullmatch(r"-?\d+\.\d+", cli_res):
+                import sys as _sys
+                print(
+                    f"error: --resolution must be a positive "
+                    f"INTEGER (or a per-grid format string like "
+                    f"'C24', 'ico3', '36x72', 'T21', '50km').  "
+                    f"Got decimal string {cli_res!r}.",
+                    file=_sys.stderr,
+                )
+                _sys.exit(2)
+
         def _expand_cli_res(grid_type: str) -> str:
             if not is_bare_int:
                 return cli_res

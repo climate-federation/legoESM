@@ -3302,6 +3302,56 @@ class TestCliResolutionValidation:
         )
         assert "must be a positive integer" in result.stderr
 
+    def test_atmosphere_resolution_decimal_rejected(self):
+        """iter-111 codex iter-110 LOW-4: ``--resolution 0.5``
+        and other decimal numerics must exit 2 with a clear
+        error.  Pre-iter-111 they slipped past the int() parse,
+        were treated as preformatted strings, and produced 12
+        ERRORs deep inside the per-grid parsers.
+        """
+        import subprocess
+        from pathlib import Path
+        repo_root = Path(__file__).resolve().parent.parent
+        result = subprocess.run(
+            [".venv/bin/python",
+             "scripts/run_atmosphere_test_matrix.py",
+             "--only", "sw", "--quick", "--resolution", "0.5",
+             "--no-cross-grid-plots"],
+            cwd=str(repo_root),
+            capture_output=True, text=True,
+            env={"JAX_ENABLE_X64": "1", "PATH": "/usr/bin:/bin"},
+            timeout=60,
+        )
+        assert result.returncode == 2, (
+            f"iter-111: --resolution 0.5 must exit 2, got "
+            f"{result.returncode}.\nstderr:\n{result.stderr}"
+        )
+        assert "must be a positive INTEGER" in result.stderr, (
+            f"iter-111: error message must say INTEGER; got:\n"
+            f"{result.stderr}"
+        )
+        assert "decimal string" in result.stderr, (
+            f"iter-111: error must mention decimal-string"
+            f" rejection; got:\n{result.stderr}"
+        )
+
+    def test_atmosphere_resolution_negative_decimal_rejected(self):
+        """``--resolution -0.5`` also exits 2."""
+        import subprocess
+        from pathlib import Path
+        repo_root = Path(__file__).resolve().parent.parent
+        result = subprocess.run(
+            [".venv/bin/python",
+             "scripts/run_atmosphere_test_matrix.py",
+             "--only", "sw", "--quick", "--resolution", "-0.5",
+             "--no-cross-grid-plots"],
+            cwd=str(repo_root),
+            capture_output=True, text=True,
+            env={"JAX_ENABLE_X64": "1", "PATH": "/usr/bin:/bin"},
+            timeout=60,
+        )
+        assert result.returncode == 2
+
     def test_atmosphere_resolution_string_format_still_works(self):
         """Pre-formatted strings (``C36``, ``ico5``, etc.) must
         still pass through unchanged.  The iter-107 validation
@@ -3527,3 +3577,87 @@ class TestModelDriverWrappersUseStatusHelper:
             "``scripts/run_held_suarez_icos_0p5deg.py`` "
             "must propagate ``main()``'s return value."
         )
+
+
+class TestCliBehaviorOnBlowup:
+    """iter-111 (codex iter-110 LOW-5): behavior test for the
+    iter-109 cli.py exit-code propagation.
+
+    Pre-iter-111, only source-level pins existed
+    (``TestModelDriverWrappersUseStatusHelper``).  iter-111
+    adds a true behavior test: monkeypatch ``ModelDriver`` to
+    return a BLOWUP status, invoke ``cmd_run``, assert
+    ``SystemExit(1)``.
+    """
+
+    def _build_dummy_args(self, tmp_path):
+        """Construct minimal Namespace + dummy Config so that
+        cmd_run can run end-to-end without touching disk."""
+        from types import SimpleNamespace
+        # The legoesm.config.Config.get(...) method is used at
+        # several points in cmd_run to log info — return strings
+        # so logger calls don't crash.
+        class DummyConfig:
+            def get(self, key):
+                return f"<{key}>"
+            def to_experiment_config(self):
+                return SimpleNamespace()
+        return SimpleNamespace(config=str(tmp_path / "fake.yaml")), \
+               DummyConfig()
+
+    def _patch_cli_for_test(self, monkeypatch, dummy_config, dummy_run_status):
+        """Patch the heavy bits of cmd_run so it can be invoked
+        unit-test-style: Config.from_yaml, bootstrap, ModelDriver."""
+        from legoesm import config as legoesm_config_mod
+        from legoesm.driver import model_driver
+        from legoesm import runtime as legoesm_runtime_mod
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(
+            legoesm_config_mod.Config, "from_yaml",
+            classmethod(lambda cls, p: dummy_config))
+        monkeypatch.setattr(
+            legoesm_runtime_mod, "bootstrap_from_yaml_config",
+            lambda c: SimpleNamespace(
+                backend="cpu", precision="fp32",
+                device_config=SimpleNamespace(n_devices=1),
+                distributed=False))
+
+        class DummyDriver:
+            def __init__(self, config):
+                self.config = config
+            def setup(self):
+                pass
+            def run(self, *args, **kwargs):
+                return dummy_run_status
+        monkeypatch.setattr(
+            model_driver, "ModelDriver", DummyDriver)
+
+    def test_cli_cmd_run_exits_one_on_blowup(self, monkeypatch, tmp_path):
+        """``cmd_run`` exits with SystemExit(1) when the
+        driver returns ``"BLOWUP at day 5.7"``.
+        """
+        from legoesm import cli
+        args, dummy_config = self._build_dummy_args(tmp_path)
+        self._patch_cli_for_test(monkeypatch, dummy_config, "BLOWUP at day 5.7")
+
+        with pytest.raises(SystemExit) as exc_info:
+            cli.cmd_run(args)
+        assert exc_info.value.code == 1
+
+    def test_cli_cmd_run_succeeds_on_completed(self, monkeypatch, tmp_path):
+        """``cmd_run`` returns normally (no SystemExit) when
+        the driver returns ``"COMPLETED"``.
+        """
+        from legoesm import cli
+        args, dummy_config = self._build_dummy_args(tmp_path)
+        self._patch_cli_for_test(monkeypatch, dummy_config, "COMPLETED")
+
+        # Should NOT raise SystemExit on clean completion.
+        try:
+            cli.cmd_run(args)
+        except SystemExit as e:
+            assert e.code == 0, (
+                f"iter-111: ``cmd_run`` must NOT exit non-zero "
+                f"on COMPLETED status; got code {e.code}."
+            )

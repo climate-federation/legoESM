@@ -5481,6 +5481,28 @@ def main():
             )
             _sys.exit(2)
 
+        # iter-111 (codex iter-110 LOW-4): reject decimal
+        # numeric strings (``--resolution 0.5``,
+        # ``--resolution 1.0``, ``--resolution -0.5``) at the
+        # boundary.  Pre-iter-111, these slipped past the
+        # ``int()`` parse (``is_bare_int=False``) and were
+        # treated as preformatted strings, then crashed later
+        # with ``invalid literal for int() with base 10: '0.5'``
+        # in the per-grid parser — 12 ERRORs across all
+        # tests but the wrapper still exited 0.
+        if not is_bare_int:
+            import re as _re
+            if _re.fullmatch(r"-?\d+\.\d+", cli_res):
+                import sys as _sys
+                print(
+                    f"error: --resolution must be a positive "
+                    f"INTEGER (or a per-grid format string like "
+                    f"'C36', 'ico5', '72x144', 'T21').  Got "
+                    f"decimal string {cli_res!r}.",
+                    file=_sys.stderr,
+                )
+                _sys.exit(2)
+
         def _expand_cli_res(grid_type: str) -> str:
             if not is_bare_int:
                 return cli_res
