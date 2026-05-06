@@ -1797,6 +1797,37 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
     elif test_num == 2 and tc.grid_type == "icosahedral":
         norms = compute_error_norms_mpas(state.h.data, init_fns[2](mesh).h.data, mesh)
         notes = f"L2={norms['l2']:.2e}, Linf={norms['linf']:.2e}"
+    elif test_num == 2 and tc.grid_type == "spectral":
+        # iter-116 (codex iter-114 HIGH-5): pre-iter-116, the
+        # spectral W2 branch fell through to ``mass drift=0``
+        # below — codex correctly flagged this as not a valid
+        # Williamson L2 comparison.  iter-116 computes the
+        # area-weighted L2/Linf height-error norm against the
+        # analytical steady-state solution (which IS the
+        # initial state for W2: ``williamson_test2_spectral``
+        # is itself the closed-form geostrophic balance).
+        from legoesm.grids.gaussian import sh_synthesis as _sh_syn
+        from legoesm.atmosphere.dynamics.spectral_sw import (
+            williamson_test2_spectral as _w2_spec)
+        from legoesm import constants as _consts
+        _init_state = _w2_spec(grid)
+        _init_h = np.asarray(
+            _sh_syn(grid, _init_state.phi_hat.data) / _consts.g,
+            dtype=np.float64,
+        )
+        _final_h = np.asarray(
+            _sh_syn(grid, state.phi_hat.data) / _consts.g,
+            dtype=np.float64,
+        )
+        _err = _final_h - _init_h
+        _area = np.asarray(grid.grid_area, dtype=np.float64)
+        _l2 = float(np.sqrt(
+            np.sum(_err ** 2 * _area)
+            / np.sum(_init_h ** 2 * _area)
+        ))
+        _linf = float(
+            np.max(np.abs(_err)) / np.max(np.abs(_init_h)))
+        notes = f"L2={_l2:.2e}, Linf={_linf:.2e}"
     elif diag.get("mean_height"):
         notes = f"mass drift={_compute_drift(diag['mean_height']):.2e}"
 

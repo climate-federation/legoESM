@@ -3805,3 +3805,107 @@ class TestSharedCliResolution:
             "iter-115: ``run_omip.py`` must use the shared "
             "``expand_cli_resolution`` helper."
         )
+
+
+class TestSpectralW2L2Norm:
+    """iter-116 (codex iter-114 HIGH-5): pre-iter-116, the
+    spectral W2 branch fell through to ``notes: mass drift=0``
+    rather than computing the analytical L2 height error.
+    Codex correctly flagged this as ``not a valid Williamson
+    L2 comparison`` — comparing cube/latlon/ico L2 errors
+    against a spectral ``mass drift=0`` is meaningless.
+
+    iter-116 added a spectral W2 branch that:
+    1. Re-creates the initial state via
+       ``williamson_test2_spectral(grid)`` (which IS the
+       analytical steady-state solution for W2).
+    2. Synthesizes both initial and final ``phi_hat`` to grid
+       space height.
+    3. Computes area-weighted L2/Linf error norms.
+
+    These tests pin the iter-116 fix at the source level.
+    """
+
+    def _import_module(self):
+        import importlib
+        import sys
+        from pathlib import Path
+        scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+        if str(scripts_dir) not in sys.path:
+            sys.path.insert(0, str(scripts_dir))
+        return importlib.import_module("run_atmosphere_test_matrix")
+
+    def test_source_pin_spectral_w2_l2_branch_present(self):
+        """The matrix runner contains the iter-116 spectral W2
+        branch.  Pre-iter-116 the matrix had branches for
+        cube, latlon, and icosahedral W2 but NOT spectral —
+        spectral fell through to the generic mass-drift
+        branch.
+        """
+        import inspect
+        import re
+        M = self._import_module()
+        text = inspect.getsource(M)
+        text_no_strings = re.sub(r'""".*?"""', "", text, flags=re.DOTALL)
+        text_no_strings = re.sub(r"'''.*?'''", "", text_no_strings, flags=re.DOTALL)
+        code_only = "\n".join(
+            line for line in text_no_strings.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        assert 'test_num == 2 and tc.grid_type == "spectral"' in code_only, (
+            "iter-116: matrix runner must have a "
+            "``test_num == 2 and tc.grid_type == \"spectral\"`` "
+            "branch that computes L2/Linf, not fall through to "
+            "the generic mass-drift branch."
+        )
+        assert "williamson_test2_spectral" in code_only, (
+            "iter-116: spectral W2 branch must re-create the "
+            "initial state via ``williamson_test2_spectral`` "
+            "to use as the analytical steady-state reference."
+        )
+
+    def test_spectral_w2_l2_below_threshold(self):
+        """End-to-end smoke: run spectral W2 at T16 for 1 day
+        and assert L2 < 1e-6 (much better than the FV/MPAS
+        dycores' ~1e-3 to 1e-4 at C16/16x32/ico3).
+        """
+        import subprocess
+        from pathlib import Path
+        repo_root = Path(__file__).resolve().parent.parent
+        result = subprocess.run(
+            [".venv/bin/python",
+             "scripts/run_atmosphere_test_matrix.py",
+             "--only", "sw", "--test", "williamson2",
+             "--grid", "spectral",
+             "--quick", "--resolution", "16",
+             "--no-cross-grid-plots"],
+            cwd=str(repo_root),
+            capture_output=True, text=True,
+            env={"JAX_ENABLE_X64": "1", "PATH": "/usr/bin:/bin"},
+            timeout=120,
+        )
+        assert result.returncode == 0, (
+            f"iter-116: spectral W2 must PASS; got "
+            f"{result.returncode}.\nstdout:\n{result.stdout}"
+            f"\nstderr:\n{result.stderr}"
+        )
+        # Extract the L2 from the PASS line.
+        import re
+        m = re.search(
+            r"shallow_water/williamson2/spectral.*L2=([\d.eE+-]+)",
+            result.stdout,
+        )
+        assert m is not None, (
+            f"iter-116: PASS line must include L2=...; got:\n"
+            f"{result.stdout}"
+        )
+        l2 = float(m.group(1))
+        # Williamson 1992 reports T42 W2 L2 ~ 1e-9.  At T16 +
+        # 1 day with dt~10 min, expect ~1e-8.  Allow 10x
+        # headroom for resolution / dt sensitivity → 1e-6.
+        assert l2 < 1e-6, (
+            f"iter-116: spectral T16 W2 L2 should be at least "
+            f"1e-6 (was 3.6e-8 in development); got {l2:.2e}.  "
+            f"This is a much tighter bound than cube/latlon/ico "
+            f"and serves as a regression sentinel."
+        )

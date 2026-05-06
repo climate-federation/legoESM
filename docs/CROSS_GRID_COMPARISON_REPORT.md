@@ -1,6 +1,6 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-115 snapshot)
+**Branch**: `simulation_full_check` (iter-116 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
@@ -77,6 +77,32 @@ Quality improvements vs iter-96:
 * Unambiguous BLOWUP markers in results.txt
 * CI-correct exit code propagation (run_X.py → wrapper → user)
 * Clear ``--resolution N`` validation rejecting non-integers
+* Spectral W2 reports L2/Linf instead of mass drift (iter-116)
+
+## iter-116 cross-grid W2 L2 comparison (1 day, low resolution)
+
+iter-116 added a spectral W2 L2 branch (codex iter-114
+HIGH-5) so all 4 grids now report the same metric:
+
+| Grid | Resolution | L2 (height) | Linf (height) | Wall |
+|---|---|---|---|---|
+| spectral | T16 | **3.61e-08** | 4.74e-08 | 0.9 s |
+| cubed_sphere | C16 | 8.19e-04 | 3.16e-03 | 22.7 s |
+| icosahedral | ico3 | 1.32e-03 | 2.71e-03 | 2.2 s |
+| latlon | 16x32 | 7.87e-03 | 2.34e-02 | 1.7 s |
+
+The spectral T16 L2 is **4-5 orders of magnitude lower** than
+the FV/MPAS dycores at comparable resolution.  This is
+consistent with Williamson 1992 expectations: at T42, W2 L2
+is essentially numerical roundoff (~1e-9); at T16 with
+dt=600s, ~1e-8.  The FV C-grid / MPAS errors at C16/ico3 are
+dominated by the discrete operator's truncation error, not
+time-stepping.
+
+Pre-iter-116 the spectral W2 reported ``mass drift=0`` —
+codex iter-114 review correctly flagged this as not a valid
+Williamson L2 comparison.  iter-116 now provides apples-to-
+apples L2/Linf metrics across all 4 grids.
 
 After the iter-95 dispatch fix and iter-108 collector fix,
 output tree layout is now uniformly grid-typed:
