@@ -996,7 +996,16 @@ def _write_results_txt(output_dir: Path, rows: dict[str, Any],
 
 
 def _save_timeseries_csv(output_dir: Path, diag: dict, dt: float):
-    keys = [k for k in diag if k not in ("steps", "times")]
+    # iter-125 (codex iter-124-followup LOW-4): exclude
+    # underscore-prefixed metadata keys (e.g.,
+    # ``_blowup_info`` from iter-105) from the timeseries CSV.
+    # These are dicts, not lists, and would crash with
+    # ``KeyError: 0`` when ``diag[k][i]`` is dispatched as a
+    # list-index access.
+    keys = [
+        k for k in diag
+        if k not in ("steps", "times") and not k.startswith("_")
+    ]
     if not keys or not diag["steps"]:
         return
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1009,7 +1018,13 @@ def _save_timeseries_csv(output_dir: Path, diag: dict, dt: float):
 
 def _save_timeseries_plot(output_dir: Path, case_name: str, diag: dict,
                           scalar_units: dict[str, str]):
-    keys = [k for k in diag if k not in ("steps", "times")]
+    # iter-125: same underscore-prefix exclusion as
+    # ``_save_timeseries_csv`` so the plot doesn't try to
+    # render metadata as a per-step series.
+    keys = [
+        k for k in diag
+        if k not in ("steps", "times") and not k.startswith("_")
+    ]
     times = diag.get("times", [])
     if not keys or not times:
         return
@@ -4534,6 +4549,15 @@ def run_overflow(tc: TestCase, output_dir: Path, days: float
     T_drift = _compute_drift(diag.get("mean_T", []))
     notes = (f"PE drift={pe_drift:.2e}, PE_rel={pe_rel_final:.4e}, "
              f"T drift={T_drift:.2e}")
+    # iter-125 (codex iter-124-followup MEDIUM-2): apply
+    # T-drift gate to overflow.  T should be conserved
+    # (passive scalar in adiabatic regime); empirical quick
+    # runs show T drift ~1e-16 (latlon) to ~3e-4 (cube), well
+    # below 1e-2.  PE drift is NOT gated because PE evolves
+    # physically per codex iter-119-followup MEDIUM-4 caveat.
+    ok, notes = _apply_drift_tolerance(
+        ok, notes, T_drift, 1e-2,
+        label="T", n_samples=len(diag.get("mean_T", [])))
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full
@@ -4691,14 +4715,16 @@ def run_stommel_gyre_tracer(tc: TestCase, output_dir: Path, days: float
              f"overshoot={overshoot:.3f}, undershoot={undershoot:.3f}")
     # iter-124 (codex iter-123-followup MEDIUM-1): S_integral
     # is the area-integrated salinity tracer.  Stommel-gyre is
-    # a passive transport test → S_integral should be conserved
-    # exactly modulo discretization error (typically 1e-6 to
-    # 1e-3 depending on resolution and scheme).  Use 1e-2 (1%)
-    # as a generous PASS gate that catches gross conservation
-    # violations without being so tight that it false-fails on
-    # legitimate transport-scheme errors.
+    # a passive transport test → S_integral should be conserved.
+    # iter-125 (codex iter-124-followup HIGH-1): tightened from
+    # 1e-2 to 1e-3 to match the documented threshold in
+    # ``docs/ocean_experiments_reference.md`` for stommel-gyre.
+    # Empirical drift is typically 1e-6 to 1e-4 at resolutions
+    # exercised by the test matrix; 1e-3 catches gross
+    # conservation violations without false-failing on
+    # legitimate transport-scheme discretization errors.
     ok, notes = _apply_drift_tolerance(
-        ok, notes, S_int_drift, 1e-2,
+        ok, notes, S_int_drift, 1e-3,
         label="S_integral",
         n_samples=len(diag.get("S_integral", [])))
 

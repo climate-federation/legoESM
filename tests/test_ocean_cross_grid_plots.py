@@ -1443,6 +1443,83 @@ class TestIter123OceanDriftTolerance:
             "T conservation."
         )
 
+    def test_save_timeseries_csv_skips_blowup_info_metadata(self, tmp_path):
+        """iter-125 codex iter-124-followup LOW-4:
+        ``_save_timeseries_csv`` must skip underscore-prefixed
+        metadata keys (e.g., ``_blowup_info``) which are dicts
+        not lists.  Pre-iter-125, a BLOWUP would crash the
+        post-run CSV writer with ``KeyError: 0``.
+        """
+        m = self._import_module()
+        diag = {
+            "steps": [0, 100, 200],
+            "times": [0.0, 0.5, 1.0],
+            "mean_eta": [0.0, 0.001, 0.002],
+            "_blowup_info": {  # iter-105 metadata; not a series
+                "step": 200, "day": 1.0, "metric": 1234.5,
+                "is_finite": False, "threshold": 1000.0,
+                "reason": "test",
+            },
+        }
+        # Pre-iter-125 this would raise KeyError: 0.
+        m._save_timeseries_csv(tmp_path, diag, dt=300.0)
+        # CSV file should exist and contain mean_eta but NOT
+        # ``_blowup_info`` column.
+        csv_text = (tmp_path / "mean_timeseries.csv").read_text()
+        assert "_blowup_info" not in csv_text, (
+            "iter-125: ``_blowup_info`` metadata must not appear "
+            "in mean_timeseries.csv as a column."
+        )
+        assert "mean_eta" in csv_text, (
+            "iter-125: legitimate timeseries columns must "
+            "still be present."
+        )
+
+    def test_overflow_uses_drift_tolerance(self):
+        """iter-125 codex iter-124-followup MEDIUM-2:
+        ``run_overflow`` must apply the T-drift tolerance.
+        PE drift is NOT gated since PE evolves physically.
+        """
+        import inspect
+        m = self._import_module()
+        src = inspect.getsource(m.run_overflow)
+        assert "_apply_drift_tolerance" in src, (
+            "iter-125: ``run_overflow`` must call "
+            "``_apply_drift_tolerance`` for the T-drift gate."
+        )
+        # Pin that the gate is on T (not PE).
+        assert 'label="T"' in src, (
+            "iter-125: overflow gate must target T (passive "
+            "scalar), not PE (which evolves physically)."
+        )
+
+    def test_stommel_tolerance_matches_documented_threshold(self):
+        """iter-125 codex iter-124-followup HIGH-1: stommel
+        tolerance was tightened from 1e-2 to 1e-3 to match the
+        documented threshold in ocean_experiments_reference.md.
+        """
+        import inspect
+        m = self._import_module()
+        src = inspect.getsource(m.run_stommel_gyre_tracer)
+        # The drift tolerance line should now be 1e-3, not 1e-2.
+        import re
+        # Find _apply_drift_tolerance call with S_integral label.
+        # Match: _apply_drift_tolerance(... TOL, label="S_integral" ...)
+        m_match = re.search(
+            r"_apply_drift_tolerance\(\s*"
+            r"ok,\s*notes,\s*S_int_drift,\s*"
+            r"([\d.eE+-]+)",
+            src,
+        )
+        assert m_match is not None, (
+            "iter-125: could not parse stommel tolerance from source."
+        )
+        tol = float(m_match.group(1))
+        assert tol <= 1e-3, (
+            f"iter-125: stommel tolerance must be <= 1e-3 "
+            f"(documented).  Got {tol:.0e}."
+        )
+
     def test_stommel_gyre_tracer_uses_drift_tolerance(self):
         """iter-124 codex iter-123-followup MEDIUM-1:
         ``run_stommel_gyre_tracer`` must apply the
