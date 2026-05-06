@@ -1416,6 +1416,47 @@ class TestIter123OceanDriftTolerance:
         assert ok is False
         assert notes == "BLOWUP at step 100"
 
+    def test_label_is_keyword_only(self):
+        """iter-124 codex iter-123-followup LOW-4: ``label``
+        must be keyword-only so future callers can't silently
+        swap arguments.
+        """
+        m = self._import_module()
+        # Calling with label as positional MUST raise TypeError.
+        import pytest as _pytest
+        with _pytest.raises(TypeError):
+            m._apply_drift_tolerance(
+                True, "initial", 1e-12, 1e-10, "eta",
+                n_samples=2)
+
+    def test_geostrophic_adjustment_uses_drift_tolerance(self):
+        """iter-124 codex iter-123-followup MEDIUM-1:
+        ``run_geostrophic_adjustment`` must apply the
+        T-drift tolerance.
+        """
+        import inspect
+        m = self._import_module()
+        src = inspect.getsource(m.run_geostrophic_adjustment)
+        assert "_apply_drift_tolerance" in src, (
+            "iter-124: ``run_geostrophic_adjustment`` must "
+            "call ``_apply_drift_tolerance`` to gate PASS on "
+            "T conservation."
+        )
+
+    def test_stommel_gyre_tracer_uses_drift_tolerance(self):
+        """iter-124 codex iter-123-followup MEDIUM-1:
+        ``run_stommel_gyre_tracer`` must apply the
+        S_integral-drift tolerance.
+        """
+        import inspect
+        m = self._import_module()
+        src = inspect.getsource(m.run_stommel_gyre_tracer)
+        assert "_apply_drift_tolerance" in src, (
+            "iter-124: ``run_stommel_gyre_tracer`` must "
+            "call ``_apply_drift_tolerance`` to gate PASS on "
+            "S_integral conservation."
+        )
+
     def test_rest_state_uses_drift_tolerance(self):
         """All 4 rest_state variants apply ``_apply_drift_tolerance``
         for both eta and T.  Source-pin via inspect.

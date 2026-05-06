@@ -4185,6 +4185,22 @@ class TestHeldSuarezMassDriftTolerance:
             "iter-121: ``run_held_suarez_rrtmgp_allgrids.py`` "
             "must apply a 1e-2 mass-drift tolerance."
         )
+        # iter-124 codex iter-123-followup LOW-2: only override
+        # status when the original was COMPLETED.  A regression
+        # that brings back the unconditional override would
+        # rewrite already-failed BLOWUP statuses.
+        import re
+        text_no_strings = re.sub(r'""".*?"""', "", text, flags=re.DOTALL)
+        text_no_strings = re.sub(r"'''.*?'''", "", text_no_strings, flags=re.DOTALL)
+        code_only = "\n".join(
+            line for line in text_no_strings.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        assert 'status == "COMPLETED"' in code_only, (
+            "iter-124: status override must be gated on "
+            "``status == \"COMPLETED\"`` so already-failed "
+            "BLOWUP statuses aren't rewritten."
+        )
 
     def test_compute_driver_mass_handles_missing_state(self):
         """Graceful degradation: ``_compute_driver_mass``
@@ -4209,6 +4225,14 @@ class TestHeldSuarezMassDriftTolerance:
 
         # State with p_s but no .data attribute (None).
         driver = SimpleNamespace(state=SimpleNamespace(p_s=None))
+        assert m._compute_driver_mass(driver) is None
+
+        # iter-124 codex iter-123-followup LOW-3: p_s exists
+        # but p_s.data is missing (object without .data attr).
+        # ``getattr(...,"data",None)`` returns None →
+        # _compute_driver_mass returns None.  Pin this shape.
+        driver = SimpleNamespace(
+            state=SimpleNamespace(p_s=SimpleNamespace()))
         assert m._compute_driver_mass(driver) is None
 
     def test_4grids_compare_results_fails_on_excessive_mass_drift(self, tmp_path):

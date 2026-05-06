@@ -130,13 +130,18 @@ def run_grid(name: str, grid_kwargs: dict) -> dict:
         from legoesm.diagnostics.conservation_drift import compute_relative_drift
         mass_drift = compute_relative_drift([mass_init, mass_final])
         import numpy as _np
-        if not _np.isfinite(mass_drift) or mass_drift > 1e-2:
-            # Override the status string so ``status_to_exit_code``
-            # picks up the FAIL.  Preserve the original status
-            # text for diagnostic clarity.
+        # iter-124 (codex iter-123-followup LOW-2): only
+        # override when the original status is ``COMPLETED``.
+        # Pre-iter-124 the override also rewrote already-failed
+        # statuses (e.g., ``BLOWUP at day 5``) into
+        # ``FAIL: mass drift ... (was BLOWUP at day 5)``,
+        # weakening the ``ModelDriver.run()`` status contract
+        # and breaking consumers that classify by prefix.
+        if (status == "COMPLETED" and
+                (not _np.isfinite(mass_drift) or mass_drift > 1e-2)):
             status = (
                 f"FAIL: mass drift {mass_drift:.2e} exceeds "
-                f"tolerance 1e-2 (was {status})"
+                f"tolerance 1e-2"
             )
 
     logger.info(

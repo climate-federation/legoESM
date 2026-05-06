@@ -384,8 +384,8 @@ def _snapshot_steps(n_steps: int, n_snaps: int = 10) -> set[int]:
 
 
 def _apply_drift_tolerance(
-    ok: bool, notes: str, drift: float, tol: float, label: str,
-    *, n_samples: int | None = None,
+    ok: bool, notes: str, drift: float, tol: float,
+    *, label: str, n_samples: int | None = None,
 ) -> tuple[bool, str]:
     """Apply a drift PASS tolerance to an ocean test case.
 
@@ -2786,11 +2786,11 @@ def run_rest_state(tc: TestCase, output_dir: Path, days: float
     # conservation violations.  Same NaN/n_samples gating as
     # the iter-117/118/120 atmosphere helpers.
     ok, notes = _apply_drift_tolerance(
-        ok, notes, eta_drift, 1e-10, "eta",
-        n_samples=len(eta_list))
+        ok, notes, eta_drift, 1e-10,
+        label="eta", n_samples=len(eta_list))
     ok, notes = _apply_drift_tolerance(
-        ok, notes, T_drift, 1e-8, "T",
-        n_samples=len(diag.get("mean_T", [])))
+        ok, notes, T_drift, 1e-8,
+        label="T", n_samples=len(diag.get("mean_T", [])))
 
     # Spectral land-leakage diagnostic: check that eta stays near zero in land cells
     if tc.grid_type == "spectral" and hasattr(state, 'land_mask_grid'):
@@ -2866,11 +2866,11 @@ def run_rest_state_no_land(tc: TestCase, output_dir: Path, days: float
     # conservation violations.  Same NaN/n_samples gating as
     # the iter-117/118/120 atmosphere helpers.
     ok, notes = _apply_drift_tolerance(
-        ok, notes, eta_drift, 1e-10, "eta",
-        n_samples=len(eta_list))
+        ok, notes, eta_drift, 1e-10,
+        label="eta", n_samples=len(eta_list))
     ok, notes = _apply_drift_tolerance(
-        ok, notes, T_drift, 1e-8, "T",
-        n_samples=len(diag.get("mean_T", [])))
+        ok, notes, T_drift, 1e-8,
+        label="T", n_samples=len(diag.get("mean_T", [])))
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full  # positive downward for plotting
@@ -2939,11 +2939,11 @@ def run_rest_state_uniform_ts(tc: TestCase, output_dir: Path, days: float
     # conservation violations.  Same NaN/n_samples gating as
     # the iter-117/118/120 atmosphere helpers.
     ok, notes = _apply_drift_tolerance(
-        ok, notes, eta_drift, 1e-10, "eta",
-        n_samples=len(eta_list))
+        ok, notes, eta_drift, 1e-10,
+        label="eta", n_samples=len(eta_list))
     ok, notes = _apply_drift_tolerance(
-        ok, notes, T_drift, 1e-8, "T",
-        n_samples=len(diag.get("mean_T", [])))
+        ok, notes, T_drift, 1e-8,
+        label="T", n_samples=len(diag.get("mean_T", [])))
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full
@@ -3007,11 +3007,11 @@ def run_rest_state_uniform_ts_no_land(tc: TestCase, output_dir: Path, days: floa
     # conservation violations.  Same NaN/n_samples gating as
     # the iter-117/118/120 atmosphere helpers.
     ok, notes = _apply_drift_tolerance(
-        ok, notes, eta_drift, 1e-10, "eta",
-        n_samples=len(eta_list))
+        ok, notes, eta_drift, 1e-10,
+        label="eta", n_samples=len(eta_list))
     ok, notes = _apply_drift_tolerance(
-        ok, notes, T_drift, 1e-8, "T",
-        n_samples=len(diag.get("mean_T", [])))
+        ok, notes, T_drift, 1e-8,
+        label="T", n_samples=len(diag.get("mean_T", [])))
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full
@@ -3749,6 +3749,12 @@ def run_geostrophic_adjustment(tc: TestCase, output_dir: Path, days: float
     # All grids now use same physical units
     T_drift = _compute_drift(diag.get("mean_T", []))
     notes = f"T drift={T_drift:.2e}"
+    # iter-124 (codex iter-123-followup MEDIUM-1):
+    # geostrophic_adjustment has no T forcing → T should be
+    # conserved.  Apply 1e-8 relative T-drift tolerance.
+    ok, notes = _apply_drift_tolerance(
+        ok, notes, T_drift, 1e-8,
+        label="T", n_samples=len(diag.get("mean_T", [])))
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full
@@ -4683,6 +4689,18 @@ def run_stommel_gyre_tracer(tc: TestCase, output_dir: Path, days: float
     undershoot = max(0, S_min_init - S_min_final)
     notes = (f"S integral drift={S_int_drift:.2e}, "
              f"overshoot={overshoot:.3f}, undershoot={undershoot:.3f}")
+    # iter-124 (codex iter-123-followup MEDIUM-1): S_integral
+    # is the area-integrated salinity tracer.  Stommel-gyre is
+    # a passive transport test → S_integral should be conserved
+    # exactly modulo discretization error (typically 1e-6 to
+    # 1e-3 depending on resolution and scheme).  Use 1e-2 (1%)
+    # as a generous PASS gate that catches gross conservation
+    # violations without being so tight that it false-fails on
+    # legitimate transport-scheme errors.
+    ok, notes = _apply_drift_tolerance(
+        ok, notes, S_int_drift, 1e-2,
+        label="S_integral",
+        n_samples=len(diag.get("S_integral", [])))
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full
