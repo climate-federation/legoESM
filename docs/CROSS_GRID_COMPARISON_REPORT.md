@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-50 snapshot)
+**Branch**: `simulation_full_check` (iter-51 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..50 findings.  It is the user-facing
+This report consolidates iter-1..51 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -29,9 +29,9 @@ and every available pair of grids:
   `T(latitude, σ)` cross-section, the canonical Held-Suarez
   Fig. 3 layout.
 
-Every helper has a corresponding unit test (85 / 85 pass in
+Every helper has a corresponding unit test (86 / 86 pass in
 `tests/test_atmosphere_cross_grid_plots.py` (71) +
-`test_ocean_cross_grid_plots.py` (14)) plus 3 MPAS-mesh-
+`test_ocean_cross_grid_plots.py` (15)) plus 3 MPAS-mesh-
 unavailable skips.
 
 CLI:
@@ -170,11 +170,13 @@ cross-grid ocean test (wind-driven gyres / OMIP) is a follow-up.
 | 49 | OMIP runs silently skipped from the ocean cross-grid plot pass (collector required all 3 files; OMIP writes only 2) | HIGH |
 | 50 | mixed runs (1 with snapshots, others timeseries-only) emitted single-grid "cross-grid" snapshot plots | MEDIUM |
 | 50 | corrupt `snapshots_latlon.npz` would drop an otherwise-usable timeseries run | MEDIUM |
+| 51 | unparseable `results.txt` (empty metadata) would drop a CSV-valid run despite per-artifact isolation | MEDIUM |
 
 **Codex adversarial review iterations**: iter-5, iter-6, iter-7,
 iter-16, iter-21, iter-26, iter-27, iter-32, iter-36, iter-37,
-iter-39, iter-42, iter-43, iter-44, iter-46, iter-47, iter-49.
-Each round caught real issues; final convergence is clean.
+iter-39, iter-42, iter-43, iter-44, iter-46, iter-47, iter-49,
+iter-50.  Each round caught real issues; final convergence is
+clean.
 
 ---
 
@@ -191,7 +193,7 @@ Each round caught real issues; final convergence is clean.
 | Same colorbar/projection across grids | ✅ DONE (cartopy PlateCarrée + shared cmap) |
 | Physical consistency vs reference papers | ⚠️ Williamson cases agree to machine precision; HS climatology disagrees structurally (documented in §2) |
 | GPU / MPI efficiency | ✅ DONE (iter-28/29: per-test-case ``wall-time/day`` ranking + speedup factor in every ``comparison_summary.txt``) |
-| `/codex:adversarial-review` | ✅ DONE (17 review rounds: iter-5/6/7/16/21/26/27/32/36/37/39/42/43/44/46/47/49, all findings addressed) |
+| `/codex:adversarial-review` | ✅ DONE (18 review rounds: iter-5/6/7/16/21/26/27/32/36/37/39/42/43/44/46/47/49/50, all findings addressed) |
 
 ---
 
@@ -449,12 +451,25 @@ Each round caught real issues; final convergence is clean.
   emitted), corrupt-npz fallback, snapshots-only-no-
   timeseries-plot.
 
-85/85 unit tests pass + 3 MPAS-mesh-unavailable skips
+* iter-51: address codex iter-50 review (1 MEDIUM).
+  Per-artifact load isolation was nearly correct but the
+  post-load predicate was still too strict — a CSV-valid
+  run with an unparseable ``results.txt`` (empty metadata
+  dict) would be dropped even though the timeseries data
+  alone is enough for the cross-grid timeseries plot.
+  Fix: drop the run only when BOTH ``snapshots_data is None``
+  AND ``timeseries_df is None``; allow empty metadata since
+  ``_create_comparison_summary`` already uses
+  ``metadata.get(..., 'N/A')`` defensive defaults.  New test
+  ``test_csv_valid_metadata_corrupt_keeps_run`` exercises
+  the case.
+
+86/86 unit tests pass + 3 MPAS-mesh-unavailable skips
 (across ``tests/test_atmosphere_cross_grid_plots.py`` (71
 + 3 skips) and ``tests/test_ocean_cross_grid_plots.py``
-(14)).
+(15)).
 
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-50 update).*
+(iter-51 update).*

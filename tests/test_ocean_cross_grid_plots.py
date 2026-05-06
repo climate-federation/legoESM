@@ -376,6 +376,34 @@ class TestRelaxedCollectorAcceptsTimeseriesOnly:
         # Timeseries half is preserved.
         assert entry["timeseries"] is not None
 
+    def test_csv_valid_metadata_corrupt_keeps_run(self, tmp_path):
+        """iter-51 codex MEDIUM: per-artifact load isolation must
+        also handle the case where ``results.txt`` is unparseable
+        (metadata ends up empty) but ``mean_timeseries.csv`` is
+        valid.  The run should be KEPT (timeseries data is enough);
+        downstream summary plotter uses ``metadata.get(..., 'N/A')``
+        so missing fields render as N/A.
+        """
+        M = self._import_matrix_module()
+        case_dir = tmp_path / "rest_state"
+        grid_dir = case_dir / "cubed_sphere" / "C24"
+        self._write_synthetic_timeseries_only(grid_dir)
+        # Overwrite results.txt with content that has no ``key:value``
+        # lines so the parser produces an empty metadata dict.
+        (grid_dir / "results.txt").write_text(
+            "this file has no colon-separated lines\n"
+            "so the iter-49 parser produces empty metadata\n"
+        )
+
+        results = M._collect_grid_results(case_dir)
+        # Run is still collected (timeseries half is intact).
+        assert "cubed_sphere" in results
+        entry = results["cubed_sphere"]
+        # Timeseries loaded.
+        assert entry["timeseries"] is not None
+        # Metadata is empty.
+        assert entry["metadata"] == {}
+
     def test_snapshots_only_skips_empty_timeseries_plot(self, tmp_path):
         """iter-50 codex LOW: when all collected grids are snapshots-
         only (no timeseries CSV), ``_create_comparison_timeseries``

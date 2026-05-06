@@ -4695,11 +4695,19 @@ def _collect_grid_results(test_case_dir: Path) -> dict:
                 )
 
         # Re-check: after loading, the run must still satisfy the
-        # collector predicate (at least one half remains usable).
-        if snapshots_data is None and (timeseries_df is None or not metadata):
+        # collector predicate (at least one DATA half remains
+        # usable).  iter-51 codex MEDIUM: the iter-50 check
+        # ``... or not metadata`` was too strict — a valid
+        # timeseries_df should keep the run even if results.txt
+        # parsing failed.  The downstream
+        # ``_create_comparison_summary`` already uses
+        # ``metadata.get(..., 'N/A')`` so missing metadata is
+        # rendered as N/A rather than crashing.
+        if snapshots_data is None and timeseries_df is None:
             print(
                 f"Warning: {grid_dir.name} had artifacts but all "
-                f"loads failed; dropping from cross-grid collection"
+                f"data loads failed; dropping from cross-grid "
+                f"collection"
             )
             continue
 
