@@ -3528,6 +3528,461 @@ CATEGORY_RUNNER_HINTS: dict[str, str] = {
 
 
 # ===========================================================================
+# Cross-grid comparison plots
+# ===========================================================================
+# Per-case field metadata for shared-colorbar / shared-projection comparison
+# plots.  ``range`` is ``(vmin, vmax)`` — use ``(None, None)`` to autoscale
+# from the data across all grids (recommended for adaptive cases).
+# ``cmap`` is the matplotlib colormap; diverging maps for signed wind/v;
+# sequential for height / scalar.  ``units`` flows into the colorbar label.
+
+ATMOSPHERE_COMPARISON_FIELDS: dict[str, list[dict]] = {
+    # Williamson 2: solid-body steady state — height ~ 2.94e3 m,
+    # zonal wind ~38 m/s.  Use adaptive ranges so any drift from the
+    # analytic state is visible.
+    "williamson2": [
+        {"field": "height",     "vmin": None,  "vmax": None,  "cmap": "viridis", "units": "m"},
+        {"field": "u",          "vmin": -50,   "vmax": 50,    "cmap": "RdBu_r",  "units": "m/s"},
+        {"field": "wind_speed", "vmin": 0,     "vmax": 50,    "cmap": "viridis", "units": "m/s"},
+    ],
+    # Williamson 5: flow over an isolated mountain — height develops a
+    # standing-wave pattern downstream, ~5400 ± 500 m.
+    "williamson5": [
+        {"field": "height",     "vmin": None,  "vmax": None,  "cmap": "viridis", "units": "m"},
+        {"field": "u",          "vmin": -30,   "vmax": 60,    "cmap": "RdBu_r",  "units": "m/s"},
+        {"field": "wind_speed", "vmin": 0,     "vmax": 60,    "cmap": "viridis", "units": "m/s"},
+    ],
+    # Cosine-bell tracer: height field passively advects.
+    "cosine_bell": [
+        {"field": "height",     "vmin": None,  "vmax": None,  "cmap": "viridis", "units": "m"},
+        {"field": "wind_speed", "vmin": 0,     "vmax": 50,    "cmap": "viridis", "units": "m/s"},
+    ],
+    # Held-Suarez: zonally averaged steady-state climate.
+    "held_suarez": [
+        {"field": "T",          "vmin": 200,   "vmax": 320,   "cmap": "plasma",  "units": "K"},
+        {"field": "u",          "vmin": -40,   "vmax": 60,    "cmap": "RdBu_r",  "units": "m/s"},
+        {"field": "p_s",        "vmin": 95000, "vmax": 105000,"cmap": "viridis", "units": "Pa"},
+    ],
+    "baroclinic": [
+        {"field": "T",          "vmin": 220,   "vmax": 310,   "cmap": "plasma",  "units": "K"},
+        {"field": "u",          "vmin": -40,   "vmax": 80,    "cmap": "RdBu_r",  "units": "m/s"},
+        {"field": "p_s",        "vmin": 95000, "vmax": 105000,"cmap": "viridis", "units": "Pa"},
+    ],
+    "amip": [
+        {"field": "T_sfc",      "vmin": 220,   "vmax": 305,   "cmap": "plasma",  "units": "K"},
+        {"field": "p_s",        "vmin": 95000, "vmax": 105000,"cmap": "viridis", "units": "Pa"},
+        {"field": "precip",     "vmin": 0,     "vmax": 50,    "cmap": "Blues",   "units": "mm/day"},
+    ],
+}
+
+
+def _atmosphere_grid_color() -> dict[str, str]:
+    return {
+        "cubed_sphere": "tab:blue",
+        "latlon":       "tab:red",
+        "icosahedral":  "tab:green",
+        "spectral":     "tab:orange",
+    }
+
+
+def _collect_grid_results_atmosphere(test_case_dir: Path) -> dict[str, dict]:
+    """Walk ``<grid>/<resolution>/[<vertical>/]`` under ``test_case_dir`` and
+    load each grid's outputs.
+
+    Atmosphere layout has an optional ``<vertical_coord>`` level beyond
+    ``<grid>/<resolution>/`` (e.g. ``hydrostatic/held_suarez/cubed_sphere/C36/sigma/``).
+    For shallow-water cases there is no vertical coord and the layout is
+    ``<grid>/<resolution>/`` only.
+
+    Returns
+    -------
+    dict mapping ``grid_type`` to ``{timeseries, snapshots, metadata, resolution}``.
+    Grids whose required artifacts are missing or unreadable are skipped.
+    """
+    import pandas as pd
+
+    grid_results: dict[str, dict] = {}
+    if not test_case_dir.exists():
+        return grid_results
+
+    for grid_dir in sorted(test_case_dir.iterdir()):
+        if not grid_dir.is_dir() or grid_dir.name.startswith("."):
+            continue
+        if grid_dir.name not in GRID_TYPES:
+            continue
+        # Find the (single) resolution subdirectory.
+        res_dirs = [d for d in grid_dir.iterdir() if d.is_dir()]
+        if not res_dirs:
+            continue
+        # Each grid should have exactly one resolution per matrix run.
+        res_dir = sorted(res_dirs)[0]
+        # Optional vertical-coord level.
+        sub_dirs = [d for d in res_dir.iterdir() if d.is_dir()]
+        leaf = res_dir
+        if sub_dirs:
+            # Use the first vertical-coord subdir if multiple; in practice
+            # the comparison is invoked per (case, vertical_coord).
+            leaf = sorted(sub_dirs)[0]
+
+        csv_file = leaf / "mean_timeseries.csv"
+        npz_file = leaf / "snapshots_latlon.npz"
+        results_file = leaf / "results.txt"
+        if not (csv_file.exists() and npz_file.exists() and results_file.exists()):
+            continue
+
+        try:
+            timeseries_df = pd.read_csv(csv_file)
+            snapshots = np.load(npz_file)
+            metadata: dict[str, str] = {}
+            with open(results_file, "r") as fh:
+                for line in fh:
+                    if ":" in line:
+                        k, v = line.split(":", 1)
+                        metadata[k.strip()] = v.strip()
+            grid_results[grid_dir.name] = {
+                "timeseries": timeseries_df,
+                "snapshots":  snapshots,
+                "metadata":   metadata,
+                "resolution": res_dir.name,
+            }
+        except Exception as e:  # noqa: BLE001 — best-effort post-hoc collection
+            print(f"    [comparison] skipping {grid_dir.name}: {e}")
+            continue
+
+    return grid_results
+
+
+def _atm_extract_field_2d(snapshots: np.lib.npyio.NpzFile, field: str) -> np.ndarray | None:
+    """Pull the final-timestep 2-D lat-lon slice of ``field``.
+
+    Handles 2-D (lat, lon), 3-D (n_times, lat, lon), and
+    4-D (n_times, lat, lon, nlev) — for 4-D, takes the lowest model
+    level (index -1, surface).  Returns ``None`` if the field is absent
+    or the shape is unrecognised.
+    """
+    if field not in snapshots.files:
+        return None
+    arr = np.asarray(snapshots[field])
+    if arr.ndim == 2:
+        return arr
+    if arr.ndim == 3:
+        return arr[-1]
+    if arr.ndim == 4:
+        return arr[-1, :, :, -1]
+    return None
+
+
+def _create_atmosphere_comparison_snapshots(
+    test_case_dir: Path, grid_results: dict, fields: list[dict],
+) -> None:
+    """4-panel snapshot comparison across grids using a SHARED PlateCarrée
+    projection and SHARED colorbar per field.
+
+    One PNG is written per field: ``comparison_snapshots_<field>.png``.
+    Missing-grid panels are blanked but the layout slot is preserved so
+    the colorbar alignment stays consistent across runs.
+    """
+    try:
+        import cartopy.crs as ccrs  # type: ignore
+        import cartopy.feature as cfeature  # type: ignore
+        have_cartopy = True
+    except Exception:
+        have_cartopy = False
+
+    case_name = test_case_dir.name
+
+    for spec in fields:
+        field = spec["field"]
+        vmin = spec["vmin"]
+        vmax = spec["vmax"]
+        cmap = spec["cmap"]
+        units = spec.get("units", "")
+
+        fields_2d: dict[str, np.ndarray] = {}
+        for grid_name, data in grid_results.items():
+            f2 = _atm_extract_field_2d(data["snapshots"], field)
+            if f2 is not None:
+                fields_2d[grid_name] = f2
+        if not fields_2d:
+            continue
+
+        # Auto-range from data across grids if vmin/vmax is None.
+        if vmin is None or vmax is None:
+            stacked = np.concatenate([f.ravel() for f in fields_2d.values()])
+            finite = stacked[np.isfinite(stacked)]
+            if finite.size > 0:
+                if vmin is None:
+                    vmin = float(np.nanmin(finite))
+                if vmax is None:
+                    vmax = float(np.nanmax(finite))
+
+        # Layout: 2 columns × ⌈n/2⌉ rows.  Always allocate 4 slots so the
+        # colorbar geometry is identical across runs.
+        nrows, ncols = 2, 2
+        if have_cartopy:
+            proj = ccrs.PlateCarree()
+            fig, axes = plt.subplots(
+                nrows, ncols, figsize=(13, 6.5),
+                subplot_kw={"projection": proj},
+            )
+        else:
+            fig, axes = plt.subplots(nrows, ncols, figsize=(13, 6.5))
+
+        # Get final time across grids for the title (use first grid's metadata).
+        sim_time_str = ""
+        for data in grid_results.values():
+            snap = data["snapshots"]
+            if "times_days" in snap.files:
+                sim_time_str = f" (t = {float(snap['times_days'][-1]):.2f} d)"
+                break
+
+        fig.suptitle(
+            f"{case_name} — {field} cross-grid comparison{sim_time_str}",
+            fontsize=13, fontweight="bold",
+        )
+
+        slot_order = [g for g in GRID_TYPES if g in grid_results]
+        # Append any extra grid names (e.g. regional variants) at the end.
+        slot_order += [g for g in grid_results if g not in slot_order]
+
+        im = None
+        for slot, ax in zip(range(nrows * ncols), axes.flat):
+            if slot >= len(slot_order):
+                ax.set_visible(False)
+                continue
+            grid_name = slot_order[slot]
+            data = grid_results[grid_name]
+            if grid_name not in fields_2d:
+                ax.set_title(f"{grid_name} ({data['resolution']}) — {field} N/A")
+                ax.set_visible(False)
+                continue
+            f2 = fields_2d[grid_name]
+            # The snapshot file may carry canonical 181x360 lat/lon
+            # metadata even when the data array was saved at native
+            # resolution.  Always derive the plotting grid from the
+            # actual array shape to keep dimensions consistent.
+            n_lat, n_lon = f2.shape
+            md_lat = np.asarray(data["snapshots"]["lat"])
+            md_lon = np.asarray(data["snapshots"]["lon"])
+            if md_lat.size == n_lat:
+                lat = md_lat
+            else:
+                lat = np.linspace(-90.0, 90.0, n_lat)
+            if md_lon.size == n_lon:
+                lon = md_lon
+            else:
+                lon = np.linspace(-180.0, 180.0, n_lon)
+            if have_cartopy:
+                im = ax.pcolormesh(
+                    lon, lat, f2, cmap=cmap, vmin=vmin, vmax=vmax,
+                    transform=ccrs.PlateCarree(), shading="auto",
+                )
+                ax.set_global()
+                ax.coastlines(linewidth=0.4, color="black", alpha=0.6)
+                ax.gridlines(draw_labels=False, linewidth=0.3, alpha=0.4)
+            else:
+                im = ax.imshow(
+                    f2, origin="lower", aspect="auto",
+                    extent=[float(lon.min()), float(lon.max()),
+                            float(lat.min()), float(lat.max())],
+                    cmap=cmap, vmin=vmin, vmax=vmax,
+                )
+                ax.set_xlabel("Longitude")
+                ax.set_ylabel("Latitude")
+            ax.set_title(f"{grid_name} ({data['resolution']})")
+
+        if im is not None:
+            cbar_ax = fig.add_axes([0.92, 0.15, 0.018, 0.7])
+            cb = fig.colorbar(im, cax=cbar_ax)
+            cb.set_label(f"{field}" + (f" ({units})" if units else ""))
+
+        from datetime import datetime
+        fig.text(0.99, 0.01,
+                 f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                 ha="right", va="bottom", fontsize=7, color="gray")
+
+        # Cartopy GeoAxes are incompatible with ``tight_layout``; use
+        # explicit margin control instead to silence the UserWarning.
+        fig.subplots_adjust(left=0.04, right=0.9, top=0.92, bottom=0.05,
+                            wspace=0.05, hspace=0.15)
+
+        out_file = test_case_dir / f"comparison_snapshots_{field}.png"
+        plt.savefig(out_file, dpi=140, bbox_inches="tight")
+        plt.close(fig)
+        print(f"    Saved: {out_file.name}")
+
+
+def _create_atmosphere_comparison_timeseries(
+    test_case_dir: Path, grid_results: dict,
+) -> None:
+    """Overlay the common scalar columns from ``mean_timeseries.csv`` across
+    grids.  Plots up to 4 columns auto-detected as numeric scalar TS.
+
+    Produces ``comparison_timeseries.png`` with one panel per shared column.
+    """
+    common_cols: list[str] = []
+    candidates = [
+        "mean_height", "max_height", "min_height",
+        "mean_T", "mean_T_sfc", "max_T", "min_T",
+        "mean_u", "max_speed", "max_wind", "max_abs_w",
+        "mean_p_s", "mass_drift", "energy_drift",
+        "mean_q_v", "max_q_v", "global_precip",
+    ]
+    for col in candidates:
+        if all(col in data["timeseries"].columns
+               for data in grid_results.values()):
+            common_cols.append(col)
+    if not common_cols:
+        return  # No common columns to compare.
+
+    # Cap at 4 panels.
+    common_cols = common_cols[:4]
+
+    n = len(common_cols)
+    nrows = (n + 1) // 2
+    ncols = 1 if n == 1 else 2
+    fig, axes = plt.subplots(nrows, ncols, figsize=(12, 4 * nrows), squeeze=False)
+    fig.suptitle(
+        f"{test_case_dir.name} — cross-grid time series",
+        fontsize=13, fontweight="bold",
+    )
+    colors = _atmosphere_grid_color()
+
+    time_col = None
+    for data in grid_results.values():
+        for c in ("time_days", "time_d", "t_days", "time"):
+            if c in data["timeseries"].columns:
+                time_col = c
+                break
+        if time_col is not None:
+            break
+    if time_col is None:
+        time_col = grid_results[next(iter(grid_results))]["timeseries"].columns[0]
+
+    for idx, col in enumerate(common_cols):
+        r, c = divmod(idx, 2)
+        ax = axes[r, c]
+        for grid_name, data in grid_results.items():
+            df = data["timeseries"]
+            ax.plot(
+                df[time_col], df[col],
+                label=f"{grid_name} ({data['resolution']})",
+                color=colors.get(grid_name, "black"),
+                lw=1.2,
+            )
+        ax.set_ylabel(col)
+        ax.set_xlabel("Time (days)" if "day" in time_col else time_col)
+        ax.grid(True, alpha=0.3)
+        if idx == 0:
+            ax.legend(loc="best", fontsize=8)
+
+    # Hide unused panels.
+    for idx in range(n, nrows * ncols):
+        r, c = divmod(idx, 2)
+        axes[r, c].set_visible(False)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    out_file = test_case_dir / "comparison_timeseries.png"
+    plt.savefig(out_file, dpi=140, bbox_inches="tight")
+    plt.close(fig)
+    print(f"    Saved: {out_file.name}")
+
+
+def _create_atmosphere_comparison_summary(
+    test_case_dir: Path, grid_results: dict,
+) -> None:
+    """Write a plain-text cross-grid summary table to
+    ``comparison_summary.txt``.  Columns are auto-selected from the
+    metadata that the runners write into ``results.txt`` (status,
+    wall_time, plus any numeric metric the runner recorded).
+    """
+    out_file = test_case_dir / "comparison_summary.txt"
+    grids_sorted = sorted(grid_results.keys())
+    if not grids_sorted:
+        return
+
+    # Union of all metadata keys across grids.
+    all_keys: list[str] = []
+    seen: set[str] = set()
+    for g in grids_sorted:
+        for k in grid_results[g]["metadata"]:
+            if k not in seen:
+                seen.add(k)
+                all_keys.append(k)
+
+    with open(out_file, "w") as fh:
+        fh.write(f"{test_case_dir.name} — Cross-grid comparison\n")
+        fh.write("=" * 70 + "\n")
+        header = f"{'metric':<32}  " + "  ".join(f"{g:<14}" for g in grids_sorted)
+        fh.write(header + "\n")
+        fh.write("-" * len(header) + "\n")
+        for k in all_keys:
+            row = f"{k:<32}  " + "  ".join(
+                f"{grid_results[g]['metadata'].get(k, '-'):<14}"
+                for g in grids_sorted
+            )
+            fh.write(row + "\n")
+        fh.write("=" * 70 + "\n")
+    print(f"    Saved: {out_file.name}")
+
+
+def _create_cross_grid_comparisons_atmosphere(test_case_dir: Path) -> None:
+    """Top-level entry point: collect per-grid outputs under
+    ``test_case_dir`` and emit shared-colorbar / shared-projection
+    comparison plots and a summary table.
+
+    No-ops if fewer than 2 grids produced output.
+    """
+    grid_results = _collect_grid_results_atmosphere(test_case_dir)
+    if len(grid_results) < 2:
+        return
+
+    case_name = test_case_dir.name
+    fields = ATMOSPHERE_COMPARISON_FIELDS.get(
+        case_name,
+        # Default for unmapped cases: pick whatever shared field is available.
+        [
+            {"field": "height",     "vmin": None, "vmax": None, "cmap": "viridis", "units": "m"},
+            {"field": "T",          "vmin": None, "vmax": None, "cmap": "plasma",  "units": "K"},
+            {"field": "wind_speed", "vmin": 0,    "vmax": None, "cmap": "viridis", "units": "m/s"},
+        ],
+    )
+
+    print(f"  Creating cross-grid comparisons for {case_name}...")
+    _create_atmosphere_comparison_snapshots(test_case_dir, grid_results, fields)
+    _create_atmosphere_comparison_timeseries(test_case_dir, grid_results)
+    _create_atmosphere_comparison_summary(test_case_dir, grid_results)
+
+
+def _walk_atmosphere_test_cases(output_base: Path) -> list[Path]:
+    """Enumerate per-case directories under ``output_base`` that have at
+    least one grid subdirectory.  Layout is
+    ``<output_base>/<equation_set>/<case>/<grid>/<resolution>/[<vert>/]``.
+
+    For hydrostatic runs with a vertical-coord layer the *case* directory
+    is one level above the grid subdir, i.e.
+    ``<output_base>/hydrostatic/held_suarez/`` — this is the right level
+    for the comparison plots because each grid's output sits below it.
+    """
+    cases: list[Path] = []
+    if not output_base.exists():
+        return cases
+    for eq_dir in output_base.iterdir():
+        if not eq_dir.is_dir():
+            continue
+        for case_dir in eq_dir.iterdir():
+            if not case_dir.is_dir():
+                continue
+            # Has at least one known grid subdir?
+            has_grid = any(
+                (case_dir / g).is_dir() for g in GRID_TYPES
+            )
+            if has_grid:
+                cases.append(case_dir)
+    return cases
+
+
+# ===========================================================================
 # CLI
 # ===========================================================================
 
@@ -3565,6 +4020,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--list-category-scripts", action="store_true",
         help="List canonical per-category runner scripts and exit")
+    p.add_argument(
+        "--no-cross-grid-plots", action="store_true",
+        help="Skip the post-run cross-grid comparison plots and summary "
+             "(useful for single-grid runs or quick iteration)")
+    p.add_argument(
+        "--cross-grid-plots-only", action="store_true",
+        help="Skip running tests; only generate cross-grid comparison plots "
+             "from an existing output tree.")
     return p
 
 
@@ -3611,13 +4074,32 @@ def main():
         print("No tests match the given filters.")
         return
 
+    output_base = Path(args.output)
+
+    # --cross-grid-plots-only: skip the test loop entirely, just regenerate
+    # comparison artifacts from existing per-grid output trees.
+    if args.cross_grid_plots_only:
+        print("=" * 78)
+        print("  Cross-grid comparison plots — generating from existing output")
+        print(f"  Output base: {output_base}")
+        print("=" * 78)
+        cases = _walk_atmosphere_test_cases(output_base)
+        if not cases:
+            print(f"  No per-case output directories under {output_base}")
+            return
+        for case_dir in cases:
+            try:
+                _create_cross_grid_comparisons_atmosphere(case_dir)
+            except Exception as e:  # noqa: BLE001
+                print(f"  [WARN] {case_dir}: {e}")
+        print(f"  Done.  {len(cases)} case(s) processed.")
+        return
+
     if args.resolution:
         tests = [TestCase(
             t.equation_set, t.case, t.grid_type, args.resolution,
             t.vertical_coord, t.duration_days, t.quick_days, t.run_kwargs)
             for t in tests]
-
-    output_base = Path(args.output)
 
     print("=" * 78)
     print("  legoESM Atmosphere Test Matrix")
@@ -3717,6 +4199,20 @@ def main():
                     f"{r['wall_time']:7.1f}s  {r['notes']}\n")
 
     print(f"\n  Summary: {output_base / 'summary.json'}")
+
+    # --- Cross-grid comparison plots ---
+    if not args.no_cross_grid_plots:
+        print("\n" + "=" * 78)
+        print("  CROSS-GRID COMPARISON PLOTS")
+        print("=" * 78)
+        cases = _walk_atmosphere_test_cases(output_base)
+        for case_dir in cases:
+            try:
+                _create_cross_grid_comparisons_atmosphere(case_dir)
+            except Exception as e:  # noqa: BLE001
+                # Don't fail the whole run on plotting errors.
+                print(f"  [WARN] comparison plots failed for {case_dir}: {e}")
+        print("=" * 78)
 
     if n_fail > 0 or n_error > 0:
         sys.exit(1)
