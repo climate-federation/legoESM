@@ -384,9 +384,21 @@ def _snapshot_steps(n_steps: int, n_snaps: int = 10) -> set[int]:
 
 
 def _compute_drift(values: list[float]) -> float:
-    if len(values) < 2:
-        return 0.0
-    return abs(values[-1] - values[0]) / max(abs(values[0]), 1e-30)
+    """Scalar drift wrapper.
+
+    iter-90 (codex review HIGH-1): the previous inline implementation
+    used ``max(abs(values[0]), 1e-30)`` — the same iter-78/80
+    pathology that was already fixed in
+    ``run_atmosphere_test_matrix.py:_compute_drift`` (iter-83) and
+    ``run_held_suarez_rrtmgp_4grids.py`` (iter-87) and factored into
+    ``legoesm.diagnostics.conservation_drift`` (iter-88).  This
+    function was missed in the iter-88 refactor; iter-90 routes it
+    through the shared helper so all 10 ocean callsites
+    (``T_drift``, ``PE_drift``, ``S_integral_drift``) inherit the
+    1.0 floor.
+    """
+    from legoesm.diagnostics.conservation_drift import compute_relative_drift
+    return compute_relative_drift(values)
 
 
 # ===========================================================================

@@ -46,6 +46,16 @@ from typing import Sequence
 
 import numpy as np
 
+# Default baseline floor (in the diagnostic's natural physical units).
+# All currently-tracked conservation diagnostics in legoESM have either
+# ``|x[0]| = 0`` (rest state) or ``|x[0]| >> 1`` (production: mass in
+# Pa·m², volume in m³, heat in J, salt in kg).  Setting the floor at 1.0
+# makes the function piecewise:
+#   |x[0]| <= 1.0:  return absolute drift in natural units
+#   |x[0]| >  1.0:  return dimensionless relative drift
+# See module docstring for the iter-78/80/83/87 history.
+DEFAULT_MIN_BASELINE: float = 1.0
+
 
 def _validate_min_baseline(min_baseline: float) -> None:
     """Reject non-finite or non-positive ``min_baseline`` values.
@@ -66,16 +76,6 @@ def _validate_min_baseline(min_baseline: float) -> None:
             f"min_baseline must be > 0, got {min_baseline!r}"
         )
 
-# Default baseline floor (in the diagnostic's natural physical units).
-# All currently-tracked conservation diagnostics in legoESM have either
-# ``|x[0]| = 0`` (rest state) or ``|x[0]| >> 1`` (production: mass in
-# Pa·m², volume in m³, heat in J, salt in kg).  Setting the floor at 1.0
-# makes the function piecewise:
-#   |x[0]| <= 1.0:  return absolute drift in natural units
-#   |x[0]| >  1.0:  return dimensionless relative drift
-# See module docstring for the iter-78/80/83/87 history.
-DEFAULT_MIN_BASELINE: float = 1.0
-
 
 def compute_relative_drift(
     values: Sequence[float],
@@ -86,8 +86,38 @@ def compute_relative_drift(
 
     Returns ``|values[-1] - values[0]| / max(|values[0]|, min_baseline)``.
 
-    For series shorter than 2 entries returns ``0.0`` (drift is undefined
-    for a single sample).  ``min_baseline`` must be strictly positive.
+    Empty / single-element behaviour
+    --------------------------------
+    For ``len(values) < 2`` returns ``0.0`` (drift is undefined for a
+    single sample).
+
+    Non-finite inputs
+    -----------------
+    iter-90 codex review (MEDIUM-3, MEDIUM-5):
+    * If ``values[0]`` is NaN, ``abs(NaN) = NaN`` and ``max(NaN, x)``
+      returns NaN under Python's stdlib ``max`` — so the result is
+      NaN.  This signals "diagnostic was already broken" rather than
+      silently masking it.
+    * If ``values[-1]`` is NaN or inf, the result is NaN or inf,
+      again a deliberate "broken diagnostic" signal.
+    Callers wanting a different convention should pre-clean their
+    series.  This is consistent with the legacy inline behaviour at
+    all three iter-80/83/87 callsites.
+
+    Sign
+    ----
+    Always returns ``>= 0`` (uses ``abs`` on the numerator).  See
+    ``relative_drift_series`` for the signed per-step series.
+
+    Parameters
+    ----------
+    values
+        Conservation diagnostic timeseries (Python list, tuple, or
+        ``np.ndarray``).  Coerced to float64 internally.
+    min_baseline
+        Floor on the denominator magnitude.  Must be a finite
+        positive float (rejected by ``_validate_min_baseline``
+        otherwise).  Default 1.0 — see module docstring.
 
     See module docstring for the iter-78/80/83/87 history of the
     ``min_baseline`` floor.
@@ -107,17 +137,51 @@ def relative_drift_series(
 ) -> np.ndarray:
     """Per-step drift series ``values - values[0]`` normalized by the baseline.
 
-    Returns a ``np.ndarray`` of the same length as ``values`` (always at
-    least 1-D, dtype float64).  Each element is
+    Returns a ``np.ndarray`` of the same length as ``values`` (always
+    1-D, dtype float64, always a fresh copy — never aliased to the
+    input).  Each element is
     ``(values[i] - values[0]) / max(|values[0]|, min_baseline)``.
 
+    Empty / single-element behaviour
+    --------------------------------
+    iter-90 codex review (LOW-7): for ``len(values) == 0`` returns an
+    empty float64 array (shape ``(0,)``).  For ``len(values) == 1``
+    returns ``np.zeros(1)`` (since ``values[0] - values[0] = 0``).
+    This differs from ``compute_relative_drift`` which collapses both
+    cases to scalar 0.0 — the series API preserves the input shape.
+
+    Sign
+    ----
+    iter-90 codex review (MEDIUM-4): the series IS signed
+    (``arr - arr[0]`` not ``abs(arr - arr[0])``) so that callers can
+    distinguish drift in opposite directions in their plots — the
+    ocean ``_save_conservation`` panel uses this to show whether
+    volume is gaining or losing mass over time.  To compare against
+    ``compute_relative_drift``'s scalar result, take
+    ``abs(result[-1])``.
+
+    Non-finite inputs
+    -----------------
+    Same NaN/inf propagation rules as ``compute_relative_drift`` —
+    see that function's docstring.
+
+    Parameters
+    ----------
+    values
+        Conservation diagnostic timeseries (Python list, tuple, or
+        ``np.ndarray``).
+    min_baseline
+        See ``compute_relative_drift``.
+
     Used by ``scripts/run_ocean_test_matrix.py:_save_conservation`` to
-    emit a per-timestep drift trace for plotting.  ``min_baseline``
-    defaults to 1.0 — see module docstring.
+    emit a per-timestep drift trace for plotting.
     """
     _validate_min_baseline(min_baseline)
     arr = np.asarray(values, dtype=np.float64)
     if arr.size == 0:
-        return arr
+        # iter-90 codex review (LOW-6): return a fresh empty array
+        # so callers can't accidentally mutate their input via the
+        # returned alias.
+        return np.empty(0, dtype=np.float64)
     denom = max(abs(float(arr[0])), float(min_baseline))
     return (arr - arr[0]) / denom

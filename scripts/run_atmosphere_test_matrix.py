@@ -224,13 +224,16 @@ def has_collectable_atmosphere_outputs(d: Path) -> bool:
 def _compute_drift(values: list[float]) -> float:
     """Relative drift of a scalar diagnostic series.
 
-    iter-88: this function now delegates to the shared helper
-    ``legoesm.diagnostics.conservation_drift.compute_relative_drift``
-    so that the ``min_baseline = 1.0`` floor convention (added in
-    iter-80 / iter-83 / iter-87) is enforced from a single source.
-    The wrapper exists for backward compatibility with the existing
-    callsites in this module and the iter-83 / iter-86 unit tests in
-    ``tests/test_atmosphere_cross_grid_plots.py``.
+    Thin wrapper that delegates to the shared helper
+    ``legoesm.diagnostics.conservation_drift.compute_relative_drift``.
+    The wrapper exists so that the dozens of internal callsites in
+    this script can stay terse (``_compute_drift(diag["mass"])``) and
+    so that the iter-83 / iter-86 unit tests retain a stable target
+    in this module — no external API contract is being preserved.
+
+    iter-90 codex LOW-8: the previous docstring said "backward
+    compatibility" which was misleading; the rationale is purely
+    "internal callsite ergonomics" (≥4 callsites in this module).
 
     Returns ``|values[-1] - values[0]| / max(|values[0]|, 1.0)``.
     """

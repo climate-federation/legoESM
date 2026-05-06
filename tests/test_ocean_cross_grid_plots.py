@@ -546,21 +546,138 @@ class TestSaveConservationDenominatorFloor:
         )
 
     def test_min_relative_baseline_constant_is_one(self, tmp_path):
-        """Direct source-level pin of the iter-80 constant: the
-        ``_MIN_RELATIVE_BASELINE`` value used in
-        ``_save_conservation`` must be 1.0 (not 1e-30, not 0.0,
-        not 1e6).  Any change to this value should be a deliberate
-        decision visible in this test.
+        """Source-level pin of the iter-80 floor convention.
+
+        iter-90 codex HIGH-2: the previous test checked for the
+        literal string ``_MIN_RELATIVE_BASELINE = 1.0`` in
+        ``_save_conservation``'s source.  After iter-88 factored
+        the inline floor into the shared helper module, that exact
+        literal still appeared in a docstring comment ("originally
+        written inline here as ``_MIN_RELATIVE_BASELINE = 1.0``")
+        — so the test passed for the WRONG reason and would no
+        longer catch a regression that re-introduced the 1e-30
+        floor.
+
+        Updated test pins:
+          1) ``_save_conservation`` delegates to
+             ``relative_drift_series`` (the canonical helper).
+          2) The 1e-30 anti-pattern is absent from the actual code
+             (we strip comments first to avoid the iter-88
+             docstring-mention false-positive).
+          3) The shared helper's ``DEFAULT_MIN_BASELINE`` is 1.0.
         """
         import inspect
+        import re
+
         M = self._import_matrix_module()
-        src = inspect.getsource(M._save_conservation)
-        assert "_MIN_RELATIVE_BASELINE = 1.0" in src, (
-            "iter-80: ``_save_conservation`` must define "
-            "``_MIN_RELATIVE_BASELINE = 1.0`` so the relative-"
-            "drift denominator never drops below 1.0 (the iter-78 "
-            "cube rest_state finding showed that a 1e-30 floor "
-            "amplifies machine-precision rounding to spurious "
-            "1e+13 'relative drift' values).  If you intentionally "
-            "changed this, update this test alongside the source."
+        from legoesm.diagnostics.conservation_drift import (
+            DEFAULT_MIN_BASELINE,
         )
+
+        src = inspect.getsource(M._save_conservation)
+        # Strip ``#`` line-comments and docstring-style ``"""..."""``
+        # blocks so we test the actual code, not iter-88-style
+        # historical mentions of the legacy formula.
+        src_no_strings = re.sub(r'""".*?"""', "", src, flags=re.DOTALL)
+        src_no_strings = re.sub(r"'''.*?'''", "", src_no_strings, flags=re.DOTALL)
+        # Drop any line whose first non-whitespace char is ``#``.
+        code_only = "\n".join(
+            line for line in src_no_strings.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+
+        # 1) Delegation to the canonical helper.
+        assert "relative_drift_series" in code_only, (
+            "iter-90: ``_save_conservation`` must call "
+            "``relative_drift_series`` from "
+            "``legoesm.diagnostics.conservation_drift`` so that the "
+            "iter-80 floor convention is inherited from the single "
+            "source of truth."
+        )
+
+        # 2) The 1e-30 anti-pattern must not reappear in code.
+        assert "1e-30" not in code_only, (
+            "iter-90: the legacy 1e-30 denominator floor must not "
+            "appear in ``_save_conservation``'s code (only in the "
+            "history comments).  iter-78/80 showed it amplifies "
+            "machine-precision rounding to spurious 1e+13 "
+            "'relative drift' values for rest-state baselines."
+        )
+
+        # 3) The shared floor constant is 1.0.
+        assert DEFAULT_MIN_BASELINE == 1.0, (
+            "iter-90: the canonical "
+            "``DEFAULT_MIN_BASELINE`` must remain at 1.0.  Any "
+            "deliberate change should land in iter-N alongside this "
+            "test."
+        )
+
+
+class TestOceanComputeDriftDelegates:
+    """iter-90 codex review HIGH-1: the ocean script's
+    ``_compute_drift`` (separate from the atmosphere version of the
+    same name) was missed in the iter-88 refactor.  Ten callsites
+    (T_drift, PE_drift, S_integral_drift) had stale ``1e-30`` floor
+    behavior.  Pin that the function now delegates to the shared
+    helper so all 10 callsites inherit the iter-80 floor convention.
+    """
+
+    def _import_matrix_module(self):
+        import importlib
+        return importlib.import_module("run_ocean_test_matrix")
+
+    def test_ocean_compute_drift_delegates_to_helper(self):
+        """The ocean ``_compute_drift`` body must call the canonical
+        ``compute_relative_drift`` (or be that function directly),
+        not re-implement the floor inline.
+        """
+        import inspect
+        import re
+
+        M = self._import_matrix_module()
+        src = inspect.getsource(M._compute_drift)
+        # Strip docstring + line comments to test actual code only.
+        src_no_strings = re.sub(r'""".*?"""', "", src, flags=re.DOTALL)
+        src_no_strings = re.sub(r"'''.*?'''", "", src_no_strings, flags=re.DOTALL)
+        code_only = "\n".join(
+            line for line in src_no_strings.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        assert "compute_relative_drift" in code_only, (
+            "iter-90 (codex HIGH-1): ocean ``_compute_drift`` must "
+            "call ``compute_relative_drift`` from "
+            "``legoesm.diagnostics.conservation_drift`` so the "
+            "iter-80 floor convention is inherited from a single "
+            "source.  iter-88 missed this 10-callsite function."
+        )
+        # The legacy 1e-30 floor must not appear in the active code.
+        assert "1e-30" not in code_only, (
+            "iter-90: the legacy 1e-30 denominator floor must not "
+            "appear in ocean ``_compute_drift``'s code."
+        )
+
+    def test_ocean_compute_drift_zero_baseline_returns_absolute(self):
+        """End-to-end: invoke the ocean ``_compute_drift`` and
+        verify rest-state behavior.  Baseline = 0 + 1e-17 rounding
+        ⇒ result ~ 1e-17 (NOT 1e+13 spurious).
+        """
+        M = self._import_matrix_module()
+        result = M._compute_drift([0.0, 1.0e-17])
+        assert result < 1.0e-10, (
+            f"iter-90: ocean ``_compute_drift`` regression — "
+            f"baseline=0 + 1e-17 drift returned {result:.6e}, "
+            f"should be ~1e-17 (1.0 floor convention).  Got "
+            f"≥1e-10 means the legacy 1e-30 floor came back."
+        )
+
+    def test_ocean_compute_drift_normal_baseline(self):
+        """Production-baseline behavior preserved post-refactor."""
+        M = self._import_matrix_module()
+        # Ocean mean_T baseline ~ 280 K, drift 0.02 K → 7.14e-5.
+        result = M._compute_drift([280.0, 280.02])
+        assert result == pytest.approx(0.02 / 280.0, rel=1e-6)
+
+    def test_ocean_compute_drift_short_series(self):
+        M = self._import_matrix_module()
+        assert M._compute_drift([]) == 0.0
+        assert M._compute_drift([1.0]) == 0.0

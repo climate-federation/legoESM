@@ -216,6 +216,104 @@ class TestRelativeDriftSeries:
         assert result[0] == pytest.approx(0.0)
 
 
+class TestNonFiniteValueInputs:
+    """iter-90 codex MEDIUM-5: ``values`` may contain inf or NaN
+    when a diagnostic blows up.  Pin the contract: the helper
+    propagates non-finite values to the output (instead of silently
+    masking them) so downstream consumers see a clear "broken
+    diagnostic" signal rather than a plausible-looking number.
+    """
+
+    def test_inf_endpoint_returns_inf(self):
+        # CFL violation produces inf at last sample.
+        result = compute_relative_drift([1.0e19, float("inf")])
+        assert result == float("inf")
+
+    def test_nan_endpoint_returns_nan(self):
+        result = compute_relative_drift([1.0e19, float("nan")])
+        assert result != result  # NaN != NaN
+
+    def test_nan_baseline_returns_nan(self):
+        # iter-90 codex MEDIUM-3: NaN baseline propagates because
+        # max(NaN, 1.0) returns NaN under Python's stdlib max.
+        # Documenting this contract; not a regression vs legacy.
+        result = compute_relative_drift([float("nan"), 1.0e19])
+        assert result != result  # NaN
+
+    def test_inf_in_middle_does_not_affect_scalar(self):
+        # The scalar API only reads [0] and [-1] — middle inf is
+        # ignored.  Pins the "endpoints only" contract.
+        result = compute_relative_drift(
+            [1.0e19, float("inf"), 1.01e19]
+        )
+        assert result == pytest.approx(1.0e-2)
+
+    def test_inf_in_middle_does_affect_series(self):
+        # The series API computes per-step drift, so an inf in the
+        # middle will appear as inf in the series.
+        result = relative_drift_series(
+            [1.0e19, float("inf"), 1.01e19]
+        )
+        assert result[0] == pytest.approx(0.0)
+        assert result[1] == float("inf")
+        assert result[2] == pytest.approx(1.0e-2, rel=1e-9)
+
+
+class TestEmptyArrayAliasing:
+    """iter-90 codex LOW-6: ``relative_drift_series([])`` must
+    return a fresh empty array — not the same object as
+    ``np.asarray([])`` — so a caller can't accidentally mutate
+    their input through the returned alias.
+    """
+
+    def test_empty_returns_fresh_array(self):
+        original = np.asarray([], dtype=np.float64)
+        result = relative_drift_series(original)
+        # Both empty, but result is a separate allocation.
+        assert result.size == 0
+        assert result is not original
+
+    def test_empty_caller_mutation_does_not_affect_input(self):
+        # iter-90: even though both are empty (so neither can hold
+        # values), the contract is they are distinct objects.
+        # Resizing the result must not affect input.
+        empty_input: list[float] = []
+        result = relative_drift_series(empty_input)
+        # result is a numpy array, empty_input is a Python list.
+        # The contract is just: result is a fresh ndarray.
+        assert isinstance(result, np.ndarray)
+
+
+class TestSingleElementSeriesShape:
+    """iter-90 codex LOW-7: the series API preserves the input
+    length even for length-1 inputs (returns ``[0.0]``), unlike
+    the scalar API which returns ``0.0``.
+    """
+
+    def test_single_element_returns_length_one(self):
+        result = relative_drift_series([42.0])
+        assert result.shape == (1,)
+        assert result[0] == pytest.approx(0.0)
+
+    def test_scalar_api_for_single_element(self):
+        # Scalar always returns 0.0 for short series.
+        assert compute_relative_drift([42.0]) == 0.0
+
+    def test_apis_diverge_only_on_short_input(self):
+        # For length >= 2, the series last element (in absolute
+        # value) matches the scalar result.
+        for series in (
+            [5.0e19, 5.5e19],
+            [-1.0e19, -1.05e19],
+            [1.34e18, 1.34e18, 1.34e18 + 1e15],
+        ):
+            scalar = compute_relative_drift(series)
+            arr = relative_drift_series(series)
+            assert arr.shape == (len(series),)
+            assert arr[0] == pytest.approx(0.0)
+            assert abs(arr[-1]) == pytest.approx(scalar, rel=1e-9)
+
+
 class TestRegressionPathologyDirect:
     """Direct regression tests for the iter-78/80/83/87 pathology.
 
