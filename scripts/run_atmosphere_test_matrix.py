@@ -1981,6 +1981,20 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         dd = _div_damp_cube(n)
         ah = _laplacian_visc_cube(n)
         dt = 200.0
+        # Iter-13 NOTE: The cubed-sphere ``CDGridPrimitiveEquationConfig``
+        # carries an upper-atmosphere Rayleigh sponge (default
+        # ``sponge_tau_sec=3600``, ``sponge_sigma=0.15``) that
+        # lat-lon / icosahedral lack and spectral has OFF by default.
+        # Disabling the sponge here actually WORSENED cross-grid
+        # mean_T agreement (gap grew 5 K → 11 K vs lat-lon at t=30d),
+        # because the cubed-sphere already runs systematically cold
+        # vs the other three grids at this resolution and the sponge
+        # was partially compensating.  The remaining cross-grid
+        # disagreement is a deeper dycore issue (different
+        # hyperdiffusion / div-damping coefficients across grids,
+        # different physics-dynamics splitting, different effective
+        # viscosity).  Tracked as a follow-up — leave the sponge at
+        # its dycore default for now.
         config = PrimitiveEquationConfig(
             hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
             div_damp_coeff=dd, A_h=ah,
