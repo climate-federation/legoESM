@@ -271,6 +271,61 @@ class TestCrossGridRMS:
         assert abs(metric["ensemble"]["b"] - 2.0/3.0) < 1e-10
         assert abs(metric["ensemble"]["c"] - 7.0/3.0) < 1e-10
 
+    def test_per_level_spread_uniform_offsets(self):
+        """iter-14 per-level spread = max-min of cos-lat-weighted
+        horizontal mean per grid, per level.  For constant offsets,
+        spread should equal abs offset and not depend on level."""
+        n_times, n_lat, n_lon, n_lev = 5, 36, 72, 4
+        f_a = np.zeros((n_times, n_lat, n_lon, n_lev))
+        f_b = np.full_like(f_a, 2.0)
+        f_c = np.full_like(f_a, 5.0)
+        gr = self._fake_grid_results({"a": f_a, "b": f_b, "c": f_c})
+        metric = M._compute_cross_grid_rms_agreement(gr, "T_3d")
+        assert metric is not None
+        spread = metric["per_level_spread"]
+        assert spread.shape == (n_lev,)
+        # Constant offsets → spread = max - min = 5 - 0 = 5 K everywhere.
+        assert np.all(np.abs(spread - 5.0) < 1e-10)
+        for k in range(n_lev):
+            assert metric["per_level_max_grid"][k] == "c"
+            assert metric["per_level_min_grid"][k] == "a"
+
+    def test_per_level_spread_cos_lat_weighting(self):
+        """iter-16 codex MEDIUM: per-level spread uses cos-lat
+        weighting.  Construct a field that's:
+          a: uniform 0 K everywhere
+          b: 100 K only above |lat| > 80°, 0 K elsewhere (pole-only)
+        Uniform-lat-mean would give b ≈ 100 * (10°/180°) ≈ 5.6 K
+        per-grid horizontal mean.  Cos-lat-weighted gives
+        b ≈ 100 * (1 - cos(80°)) ≈ 100 * 0.826 ... no, cos-lat
+        weighted of a band [80°, 90°]:
+          ∫_{80°}^{90°} cos(φ) dφ / ∫_{-90°}^{90°} cos(φ) dφ
+          = (sin 90° - sin 80°) / 2  (single hemisphere)
+          = (1 - 0.985) / 2 = 0.0076
+        Total over both hemispheres = 0.0152.  So b mean ≈ 1.52 K.
+        The uniform mean would give ~5.6 K.  Test discriminates."""
+        n_times, n_lat, n_lon, n_lev = 5, 91, 72, 2
+        f_a = np.zeros((n_times, n_lat, n_lon, n_lev))
+        f_b = np.zeros_like(f_a)
+        # Latitudes go -90 to 90 in 91 points (steps of 2°).
+        lat_axis = np.linspace(-90.0, 90.0, n_lat)
+        polar_mask = np.abs(lat_axis) > 80.0
+        # Set b = 100 above 80° latitude.
+        f_b[:, polar_mask, :, :] = 100.0
+        gr = self._fake_grid_results({"a": f_a, "b": f_b})
+        metric = M._compute_cross_grid_rms_agreement(gr, "T_3d")
+        assert metric is not None
+        spread = metric["per_level_spread"]
+        # Cos-lat-weighted polar-band fraction is ~0.015, so the spread
+        # should be ~1.5 K — clearly less than the uniform-mean ~5.6 K.
+        for k in range(n_lev):
+            assert spread[k] < 3.0, (
+                f"level {k} spread {spread[k]:.2f} too large — likely "
+                f"uniform-lat mean instead of cos-lat-weighted"
+            )
+            # but greater than zero (the polar perturbation IS there)
+            assert spread[k] > 0.5
+
 
 # ---------------------------------------------------------------------------
 # _atm_extract_field_2d

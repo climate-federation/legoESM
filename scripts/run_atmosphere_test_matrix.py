@@ -1984,22 +1984,30 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         # Iter-15 NOTE on the cubed-sphere upper-atmosphere sponge:
         # The default ``sponge_tau_sec = 3600`` (1 hour) is FAR more
         # aggressive than the FV3 Fortran reference
-        # (``atmos_cubed_sphere/dyn_core.F90::Ray_fast``) which uses
-        # ``tau`` in DAYS — typical production setting is 5-10 days,
-        # i.e. ~430-860x weaker damping.  However, EMPIRICALLY for
-        # this HS configuration:
+        # (``../FV3/atmos_cubed_sphere-symmetryclean/model/dyn_core.F90``,
+        # subroutine ``Ray_fast`` line 2922-2985) which uses ``tau``
+        # in DAYS — typical production setting is 5-10 days, i.e.
+        # ~430-860x weaker damping.  However, EMPIRICALLY for this
+        # SPECIFIC HS configuration (gray radiation, hydrostatic,
+        # ``sigma`` vertical coord, C36 / 72×144 / ico5 / T21
+        # resolutions, ``DEFAULT_NLEV = 40``, 30-day quick spin-up,
+        # cross-grid mean_T gap measured at t=30 d as
+        # ``mean_T(latlon, t=30) - mean_T(cubed, t=30)``):
         #   - τ = 1 h (default): cube-vs-latlon mean_T gap  -5.0 K
         #   - τ = 7 d (FV3-like):                          -10.8 K
         #   - τ = ∞ (sponge OFF, iter-13):                 -11.3 K
         # The aggressive 1-h sponge produces the BEST cross-grid
-        # agreement, despite being non-canonical for HS.  Suspected
-        # cause: the cubed-sphere hyperdiffusion + sponge combination
-        # is empirically tuned to roughly match the effective
-        # dissipation that lat-lon's Laplacian viscosity provides; a
-        # weaker sponge under-damps the cubed-sphere upper troposphere
-        # and the climatology drifts further from the lat-lon /
-        # icosahedral / spectral cluster.  Keep the 1-h default for
-        # this HS test until a more principled retuning is done.
+        # agreement on this metric, despite being non-canonical for
+        # HS.  Suspected cause: the cubed-sphere hyperdiffusion +
+        # sponge combination is empirically tuned to roughly match
+        # the effective dissipation that lat-lon's Laplacian
+        # viscosity provides; a weaker sponge under-damps the
+        # cubed-sphere upper troposphere and the climatology drifts
+        # further from the lat-lon / icosahedral / spectral cluster.
+        # NOT yet established for HYBRID coord, RRTMGP radiation,
+        # or 200-day spin-up — those may have different optimal τ.
+        # Keep the 1-h default for this HS test until a more
+        # principled retuning is done.
         config = PrimitiveEquationConfig(
             hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
             div_damp_coeff=dd, A_h=ah,
@@ -4072,14 +4080,16 @@ def _create_atmosphere_comparison_snapshots(
 
 # Iter-10: fraction of trailing snapshots to average for zonal-mean
 # climatology cross-sections.  ``0.5`` averages the last 50 % of the
-# snapshots, which for an 11-snapshot HS run takes the last 5 (i.e.
-# roughly the second half of the integration).  This balances "long
-# enough to suppress eddy variance" against "short enough not to
-# contaminate the average with the early spin-up transient".  The
-# canonical HS climatology uses 1000 days after a 200-day spin-up;
-# we don't reach that here, but using HALF the integration as the
-# averaging window already substantially reduces cross-grid RMS
-# vs. a single-snapshot diagnostic.
+# snapshots — for an 11-snapshot HS run that's
+# ``ceil(11 × 0.5) = 6`` snapshots (days ~15-30 of a 30-day quick
+# run).  Iter-16 codex review LOW: this is a variance/transient
+# COMPROMISE — it does NOT cleanly exclude the early spin-up; it
+# trades samples-for-noise against samples-for-transient-bias.  The
+# canonical HS climatology averages 1000+ days after a 200-day
+# spin-up; we don't reach that here, but a 50 % trailing window
+# already substantially reduces cross-grid RMS vs. a single-
+# snapshot diagnostic.  If a tighter window is needed, expose
+# ``--climatology-fraction`` as a CLI knob in a future iteration.
 CLIMATOLOGY_AVG_FRACTION = 0.5
 
 
@@ -4364,25 +4374,47 @@ def _compute_cross_grid_rms_agreement(
             diff = zm_common[ga] - zm_common[gb]
             pairwise[f"{ga} vs {gb}"] = float(np.sqrt(np.nanmean(diff ** 2)))
 
-    # Iter-14: per-level cross-grid spread (max - min across grids,
-    # zonally averaged at each latitude, then averaged horizontally).
+    # Iter-14: per-level cross-grid spread (max - min across grids
+    # of each grid's COS-LATITUDE-weighted horizontal mean at each
+    # level).  Iter-16 codex review MEDIUM: switched from uniform
+    # latitude mean to cos-lat-weighted mean to match the area-
+    # weighted convention used everywhere else in this script.
+    # Without the weighting, the 72 equally-spaced latitude samples
+    # over-weight the polar cells where actual cell area shrinks
+    # as cos(φ).
+    #
     # Exposes WHICH levels carry the cross-grid disagreement —
     # e.g. for the iter-13 60-day HS data the upper-troposphere
-    # disagreement was much larger than the surface disagreement,
-    # diagnostic of the inconsistent upper-atmosphere damping
-    # across grids.
+    # disagreement was much larger than the surface disagreement.
     n_lev = next(iter(nlev_set))
     per_level_spread = np.zeros(n_lev, dtype=np.float64)
     per_level_max_grid = ["?"] * n_lev
     per_level_min_grid = ["?"] * n_lev
     stack = np.stack([zm_common[g] for g in grid_names], axis=0)  # (n_grids, n_lat, n_lev)
+    cos_lat_weights = np.cos(np.deg2rad(lat_target))               # (n_lat,)
     for k in range(n_lev):
-        # At each level, compute the latitude-averaged max-min across grids.
         slab = stack[:, :, k]  # (n_grids, n_lat)
-        slab_horizmean = np.nanmean(slab, axis=1)  # (n_grids,)
-        per_level_spread[k] = float(np.max(slab_horizmean) - np.min(slab_horizmean))
-        per_level_max_grid[k] = grid_names[int(np.argmax(slab_horizmean))]
-        per_level_min_grid[k] = grid_names[int(np.argmin(slab_horizmean))]
+        # Cos-lat-weighted horizontal mean per grid, NaN-aware.
+        weights_b = np.broadcast_to(cos_lat_weights[None, :], slab.shape)
+        finite = np.isfinite(slab)
+        masked_slab = np.where(finite, slab, 0.0)
+        masked_w = np.where(finite, weights_b, 0.0)
+        w_sum = masked_w.sum(axis=1)                               # (n_grids,)
+        # Per-grid mean: nan when no finite samples.
+        slab_horizmean = np.where(
+            w_sum > 0, (masked_slab * masked_w).sum(axis=1) / np.maximum(w_sum, 1e-30), np.nan,
+        )
+        finite_grid = np.isfinite(slab_horizmean)
+        if int(finite_grid.sum()) < 2:
+            per_level_spread[k] = float("nan")
+            per_level_max_grid[k] = "?"
+            per_level_min_grid[k] = "?"
+            continue
+        finite_vals = slab_horizmean[finite_grid]
+        finite_idx = np.where(finite_grid)[0]
+        per_level_spread[k] = float(np.max(finite_vals) - np.min(finite_vals))
+        per_level_max_grid[k] = grid_names[int(finite_idx[int(np.argmax(finite_vals))])]
+        per_level_min_grid[k] = grid_names[int(finite_idx[int(np.argmin(finite_vals))])]
 
     # Ensemble (deviation from cross-grid mean).
     ens_mean_field = np.mean(stack, axis=0)
@@ -4593,18 +4625,24 @@ def _create_atmosphere_comparison_summary(
                     "horizontally-averaged value per grid; level 0 = "
                     "model top, level N-1 = surface):\n"
                 )
-                # argsort descending.
-                ordered = np.argsort(-spread)[:5]
-                fh.write(
-                    f"  {'level':<8}  {'spread':<10}  "
-                    f"{'max grid':<14}  {'min grid':<14}\n"
-                )
-                for k in ordered:
+                # argsort descending; skip NaN rows (iter-16 codex
+                # LOW: NaN-robust ordering — only finite spreads
+                # contribute to the top-5 list).
+                finite_idx = np.where(np.isfinite(spread))[0]
+                if finite_idx.size > 0:
+                    ordered = finite_idx[np.argsort(-spread[finite_idx])][:5]
                     fh.write(
-                        f"  {int(k):<8d}  {spread[k]:8.3f}{unit_suffix:<2}  "
-                        f"{metric['per_level_max_grid'][k]:<14}  "
-                        f"{metric['per_level_min_grid'][k]:<14}\n"
+                        f"  {'level':<8}  {'spread':<10}  "
+                        f"{'max grid':<14}  {'min grid':<14}\n"
                     )
+                    for k in ordered:
+                        fh.write(
+                            f"  {int(k):<8d}  {spread[k]:8.3f}{unit_suffix:<2}  "
+                            f"{metric['per_level_max_grid'][k]:<14}  "
+                            f"{metric['per_level_min_grid'][k]:<14}\n"
+                        )
+                else:
+                    fh.write("  (no finite per-level spreads)\n")
             fh.write("=" * 70 + "\n")
     print(f"    Saved: {out_file.name}")
 
@@ -4778,6 +4816,11 @@ def filter_tests(tests: list[TestCase], args) -> list[TestCase]:
 def main():
     parser = build_parser()
     args = parser.parse_args()
+
+    # iter-16 codex review LOW: validate ``--days`` is positive.
+    # Zero or negative values silently produce nonsensical runs.
+    if args.days is not None and args.days <= 0:
+        parser.error("--days must be positive")
 
     # iter-7 codex review LOW: reset the multi-resolution warning
     # dedup set so a single ``main()`` invocation produces at most one
