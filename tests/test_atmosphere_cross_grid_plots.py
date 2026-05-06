@@ -2819,3 +2819,178 @@ class TestAtmosphereMatrixAllRunnersThreadDiag:
             f"``diag=`` to surface BLOWUP info uniformly.  Found "
             f"{threaded_count} / {callsite_count} threaded."
         )
+
+
+class TestRunAmipFiniteCheck:
+    """iter-100: closes the iter-98 deferred gap that
+    ``scripts/run_amip.py`` had ZERO finiteness checks
+    (``grep -c isfinite`` = 0 in 450 lines).  A NaN-producing
+    AMIP run would silently complete and print "Complete." while
+    writing garbage to the output directory.
+
+    iter-100 added ``_check_run_state_finite(driver)`` which
+    inspects ``driver.state`` for NaN/Inf in T, u, v, p_s and
+    returns ``(ok, first_bad_field)``.  When the check fails,
+    ``main()`` prints a FAIL message to stderr and exits with
+    code 1 so wrapper scripts can detect failure.
+
+    These tests validate the helper logic without booting the
+    full driver: synthetic state objects let us exercise the
+    finite/non-finite branches deterministically.
+    """
+
+    def _import_run_amip(self):
+        import importlib
+        import sys
+        from pathlib import Path
+        scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+        if str(scripts_dir) not in sys.path:
+            sys.path.insert(0, str(scripts_dir))
+        return importlib.import_module("run_amip")
+
+    def _make_synthetic_driver(self, *, T_data, u_data, v_data, ps_data):
+        """Build a minimal duck-typed driver object with .state."""
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            state=SimpleNamespace(
+                T=SimpleNamespace(data=T_data),
+                u=SimpleNamespace(data=u_data),
+                v=SimpleNamespace(data=v_data),
+                p_s=SimpleNamespace(data=ps_data),
+            ),
+        )
+
+    def test_check_finite_returns_ok_for_clean_state(self):
+        import jax.numpy as jnp
+        m = self._import_run_amip()
+        driver = self._make_synthetic_driver(
+            T_data=jnp.full((6, 4, 4, 5), 280.0),
+            u_data=jnp.full((6, 4, 4, 5), 10.0),
+            v_data=jnp.full((6, 4, 4, 5), 5.0),
+            ps_data=jnp.full((6, 4, 4), 1e5),
+        )
+        ok, bad = m._check_run_state_finite(driver)
+        assert ok is True
+        assert bad is None
+
+    def test_check_finite_detects_nan_in_T(self):
+        import jax.numpy as jnp
+        m = self._import_run_amip()
+        T_data = jnp.full((6, 4, 4, 5), 280.0)
+        T_data = T_data.at[0, 0, 0, 0].set(float("nan"))
+        driver = self._make_synthetic_driver(
+            T_data=T_data,
+            u_data=jnp.full((6, 4, 4, 5), 10.0),
+            v_data=jnp.full((6, 4, 4, 5), 5.0),
+            ps_data=jnp.full((6, 4, 4), 1e5),
+        )
+        ok, bad = m._check_run_state_finite(driver)
+        assert ok is False
+        assert bad == "T"
+
+    def test_check_finite_detects_inf_in_u(self):
+        import jax.numpy as jnp
+        m = self._import_run_amip()
+        u_data = jnp.full((6, 4, 4, 5), 10.0)
+        u_data = u_data.at[0, 0, 0, 0].set(float("inf"))
+        driver = self._make_synthetic_driver(
+            T_data=jnp.full((6, 4, 4, 5), 280.0),
+            u_data=u_data,
+            v_data=jnp.full((6, 4, 4, 5), 5.0),
+            ps_data=jnp.full((6, 4, 4), 1e5),
+        )
+        ok, bad = m._check_run_state_finite(driver)
+        assert ok is False
+        assert bad == "u"
+
+    def test_check_finite_detects_nan_in_p_s(self):
+        import jax.numpy as jnp
+        m = self._import_run_amip()
+        ps_data = jnp.full((6, 4, 4), 1e5)
+        ps_data = ps_data.at[0, 0, 0].set(float("nan"))
+        driver = self._make_synthetic_driver(
+            T_data=jnp.full((6, 4, 4, 5), 280.0),
+            u_data=jnp.full((6, 4, 4, 5), 10.0),
+            v_data=jnp.full((6, 4, 4, 5), 5.0),
+            ps_data=ps_data,
+        )
+        ok, bad = m._check_run_state_finite(driver)
+        assert ok is False
+        assert bad == "p_s"
+
+    def test_check_finite_handles_missing_state(self):
+        """If ``driver.state`` is None (e.g., setup not yet run),
+        return ``(True, None)`` — there's nothing to check.
+        """
+        from types import SimpleNamespace
+        m = self._import_run_amip()
+        driver = SimpleNamespace(state=None)
+        ok, bad = m._check_run_state_finite(driver)
+        assert ok is True
+        assert bad is None
+
+    def test_check_finite_handles_partial_state(self):
+        """Spectral state may not have all of T/u/v/p_s; helper
+        skips missing fields gracefully and returns OK if the
+        present fields are finite.
+        """
+        import jax.numpy as jnp
+        from types import SimpleNamespace
+        m = self._import_run_amip()
+        # Synthetic state with only T (no u/v/p_s attributes).
+        driver = SimpleNamespace(
+            state=SimpleNamespace(
+                T=SimpleNamespace(data=jnp.full((6, 4, 4, 5), 280.0)),
+            )
+        )
+        ok, bad = m._check_run_state_finite(driver)
+        assert ok is True
+        assert bad is None
+
+    def test_main_emits_fail_message_on_nan_state(self, monkeypatch, capsys):
+        """End-to-end: monkey-patching the driver to produce a
+        NaN final state, ``main()`` prints the iter-100 FAIL
+        message and exits with code 1.
+
+        This is the contract: wrapper scripts (e.g.,
+        ``run_amip_cross_grid.sh``) check ``$?`` to decide
+        whether to mark the AMIP run as failed.
+        """
+        import jax.numpy as jnp
+        m = self._import_run_amip()
+
+        # Build a dummy driver class with a state attribute that
+        # has NaN.  Replace ModelDriver in the module.
+        class DummyDriver:
+            def __init__(self, config):
+                from types import SimpleNamespace
+                T = jnp.full((6, 4, 4, 5), 280.0)
+                T = T.at[0, 0, 0, 0].set(float("nan"))
+                self.state = SimpleNamespace(
+                    T=SimpleNamespace(data=T),
+                    u=SimpleNamespace(data=jnp.full((6, 4, 4, 5), 10.0)),
+                    v=SimpleNamespace(data=jnp.full((6, 4, 4, 5), 5.0)),
+                    p_s=SimpleNamespace(data=jnp.full((6, 4, 4), 1e5)),
+                )
+                self.output_dir = "/tmp/amip_test_unused"
+                self._mpi_rank = None
+            def setup(self):
+                pass
+            def run(self, **kwargs):
+                pass
+            def load_checkpoint(self, p):
+                return 0, 0.0
+
+        # Patch the import inside main()
+        from legoesm.driver import model_driver
+        monkeypatch.setattr(model_driver, "ModelDriver", DummyDriver)
+
+        with pytest.raises(SystemExit) as exc_info:
+            m.main([
+                "--dataset", "analytical", "--days", "1",
+                "--resolution", "16", "--dt", "600",
+            ])
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "FAIL" in captured.err
+        assert "T" in captured.err  # the bad field

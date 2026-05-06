@@ -388,6 +388,56 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
     return args
 
 
+def _check_run_state_finite(driver) -> tuple[bool, str | None]:
+    """Inspect ``driver.state`` for NaN/Inf in primary fields.
+
+    iter-100: the standalone ``run_amip.py`` previously had no
+    finiteness check.  This helper inspects the final state
+    after ``driver.run(...)`` returns and reports the first
+    field with a non-finite value.
+
+    Returns
+    -------
+    (ok, bad_field): tuple
+        ``ok`` is False when any of T, u, v, p_s contains
+        NaN/Inf; ``bad_field`` is the name of the first such
+        field (in iteration order) or None when all fields are
+        finite.
+
+    Notes
+    -----
+    Spectral states use a different attribute layout
+    (``T_hat`` / ``vor_hat`` / ``div_hat``).  For now, treat the
+    spectral case the same way and accept whatever fields the
+    state object exposes — if none of T/u/v/p_s are present
+    (because the spectral state has no T but has T_hat), the
+    helper returns ``(True, None)``, deferring to a future
+    extension that handles the spectral attribute names.  This
+    is acceptable since ``run_amip.py`` is currently driven via
+    grid-typed config, and the most common AMIP execution path
+    uses cube/latlon/icosahedral states that DO have T/u/v/p_s.
+    """
+    import jax.numpy as jnp
+
+    state = getattr(driver, "state", None)
+    if state is None:
+        return True, None
+    for fname in ("T", "u", "v", "p_s"):
+        f = getattr(state, fname, None)
+        if f is None:
+            continue
+        data = getattr(f, "data", None)
+        if data is None:
+            continue
+        try:
+            ok = bool(jnp.all(jnp.isfinite(data)))
+        except Exception:
+            continue
+        if not ok:
+            return False, fname
+    return True, None
+
+
 def main(argv: list[str] | None = None):
     parser = build_arg_parser()
     args = parser.parse_args(argv)
@@ -433,8 +483,32 @@ def main(argv: list[str] | None = None):
     if _is_root:
         print("Running...")
     driver.run(start_step=start_step, start_day=start_day)
+
+    # iter-100: post-run finiteness check.  Pre-iter-100,
+    # ``run_amip.py`` had ZERO blowup detection (``grep -c
+    # isfinite`` = 0 in 450 lines).  A NaN-producing AMIP run
+    # would silently complete and print "Complete." while
+    # writing garbage to the output directory.  iter-98's audit
+    # of the OMIP/atmosphere-matrix BLOWUP-reporting bug flagged
+    # this as a separate gap; iter-100 closes it.
+    #
+    # The check inspects the final ``driver.state`` for NaN/Inf
+    # in the primary atmospheric fields (T, u, v, p_s).  When
+    # non-finite, the run is flagged FAIL with a clear message
+    # and the script exits with code 1 so wrappers
+    # (``run_amip_cross_grid.sh``) can detect failure.
+    state_ok, bad_field = _check_run_state_finite(driver)
     if _is_root:
-        print(f"Complete. Output: {driver.output_dir}")
+        if state_ok:
+            print(f"Complete. Output: {driver.output_dir}")
+        else:
+            print(
+                f"FAIL: final state contains NaN/Inf in field "
+                f"``{bad_field}``.  Output (with garbage): "
+                f"{driver.output_dir}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     if args.plot and _is_root:
         # Iter 34: ``plot_amip`` lives under ``scripts/diagnostic/``
