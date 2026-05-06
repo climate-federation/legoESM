@@ -98,6 +98,11 @@ for GRID in cubed_sphere latlon voronoi gaussian; do
         --grid-type "$GRID" --discretization "$DISC" \
         $TRUNC --days "$DAYS" --output "$OUTDIR" \
         $EXTRA_FLAGS
+    # iter-42: convert run_amip.py outputs (timeseries.npz +
+    # free-form results.txt) to matrix-runner-compatible files
+    # (mean_timeseries.csv + key:value results.txt) so the
+    # cross-grid plot collector below can pick them up.
+    .venv/bin/python scripts/_amip_to_matrix_format.py "$OUTDIR"
 done
 
 echo ""

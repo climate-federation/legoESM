@@ -950,3 +950,160 @@ class TestOzoneProfileOverrides:
         kmax_a1 = int(jnp.argmax(o3_a1[0]))
         kmax_a3 = int(jnp.argmax(o3_a3[0]))
         assert kmax_a1 != kmax_a3
+
+
+# ---------------------------------------------------------------------------
+# iter-42: AMIP → matrix-runner-format converter for the iter-41 wrapper
+# ---------------------------------------------------------------------------
+
+class TestAmipToMatrixFormat:
+    """Tests for ``scripts/_amip_to_matrix_format.py`` (iter-42).
+
+    The iter-41 ``run_amip_cross_grid.sh`` wrapper invokes
+    ``scripts/run_amip.py`` per grid; ``run_amip.py`` writes
+    ``timeseries.npz`` + a free-form ``results.txt``, but the
+    matrix-runner cross-grid plot collector requires
+    ``mean_timeseries.csv`` + a key:value ``results.txt``.  The
+    converter bridges the two formats.
+
+    Without this bridge, the wrapper would silently skip every grid
+    in the cross-grid plot pass — exactly the include_clouds-style
+    "plumbed but never read" failure mode the iter-39 codex review
+    flagged.
+    """
+
+    def _import_converter(self):
+        import importlib.util
+        path = _SCRIPT_DIR / "_amip_to_matrix_format.py"
+        spec = importlib.util.spec_from_file_location(
+            "_amip_to_matrix_format", path,
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def _write_synthetic_amip_outputs(self, out_dir: Path, n: int = 6):
+        """Mimic ``run_amip.py``'s outputs in ``out_dir``."""
+        out_dir.mkdir(parents=True, exist_ok=True)
+        days = np.arange(n, dtype=np.float64)
+        np.savez(
+            out_dir / "timeseries.npz",
+            days=days,
+            T_atm=280.0 + 0.05 * days,
+            max_wind=20.0 + 0.1 * days,
+            dry_mass_ps=np.full(n, 1.0e15),
+            precip=2.5 + 0.01 * days,
+            CWV=25.0 + 0.05 * days,
+            sw_up_toa=np.full(n, 100.0),
+            lw_up_toa=np.full(n, 230.0),
+            sst=np.float64(np.nan),  # NaN-sentinel (run_amip.py ocean off)
+            sic=np.float64(np.nan),
+        )
+        (out_dir / "results.txt").write_text(
+            "legoESM AMIP run\n"
+            "Grid: cubed_sphere C48 / L20, dt=300.0s, 30 days\n"
+            "Radiation: rrtmgp\n"
+            "Status: COMPLETED\n\n"
+            "JIT compilation: 12.3s\n"
+            "Wall time: 67.8s\n\n"
+            "Final <T_atm>: 280.250 K\n"
+            "Final <Precip>: 2.55 mm/day\n"
+            "Final <CWV>: 25.25 kg/m2\n"
+        )
+
+    def test_converter_produces_matrix_format_files(self, tmp_path):
+        """End-to-end: synthetic AMIP outputs → matrix-format outputs."""
+        mod = self._import_converter()
+        self._write_synthetic_amip_outputs(tmp_path, n=6)
+        mod.main(tmp_path)
+        # mean_timeseries.csv must exist and have the canonical column names.
+        csv_path = tmp_path / "mean_timeseries.csv"
+        assert csv_path.exists()
+        header = csv_path.read_text().splitlines()[0]
+        assert header.startswith("time_days,")
+        # Real (non-NaN) AMIP variables made it into the CSV.
+        assert "mean_T" in header
+        assert "max_wind" in header
+        assert "mass" in header
+        # NaN-sentinel variables (sst, sic) are skipped.
+        assert "mean_SST" not in header
+        # results.txt is now matrix-key:value format.
+        results_text = (tmp_path / "results.txt").read_text()
+        assert results_text.startswith("test: amip\n")
+        assert "grid: cubed_sphere" in results_text
+        assert "resolution: C48" in results_text
+        assert "status: PASS" in results_text  # COMPLETED → PASS
+        assert "wall_time: 67.8s" in results_text
+        # Original AMIP results.txt preserved.
+        assert (tmp_path / "results_amip.txt").exists()
+
+    def test_converter_status_mapping(self, tmp_path):
+        """``Status: COMPLETED`` → PASS; anything else → ERROR."""
+        mod = self._import_converter()
+        self._write_synthetic_amip_outputs(tmp_path)
+        # Overwrite with a non-COMPLETED status line.
+        (tmp_path / "results.txt").write_text(
+            "legoESM AMIP run\n"
+            "Grid: spectral T42 / L20, dt=600.0s, 30 days\n"
+            "Status: FAILED\n"
+            "Wall time: 5.0s\n"
+        )
+        mod.main(tmp_path)
+        results_text = (tmp_path / "results.txt").read_text()
+        assert "status: ERROR" in results_text
+
+    def test_converter_handles_missing_npz(self, tmp_path, capsys):
+        """If timeseries.npz is missing, converter warns and exits cleanly."""
+        mod = self._import_converter()
+        # No ``timeseries.npz`` in tmp_path.
+        mod.main(tmp_path)
+        captured = capsys.readouterr()
+        assert "WARNING" in captured.err or "missing" in captured.err
+        # Must NOT have written a CSV.
+        assert not (tmp_path / "mean_timeseries.csv").exists()
+
+    def test_collector_recognizes_converted_output(self, tmp_path):
+        """The matrix runner's ``_has_collectable`` must return True
+        on a directory after conversion.  This is the integration
+        guarantee — without this, the iter-41 wrapper silently no-ops.
+        """
+        mod = self._import_converter()
+        self._write_synthetic_amip_outputs(tmp_path)
+        mod.main(tmp_path)
+
+        # Re-implement the matrix-runner predicate locally.
+        def _has_collectable(d: Path) -> bool:
+            if (d / "snapshots_latlon.npz").exists():
+                return True
+            return (d / "mean_timeseries.csv").exists() and (d / "results.txt").exists()
+
+        assert _has_collectable(tmp_path)
+
+    def test_converter_idempotent(self, tmp_path):
+        """Running the converter twice must produce identical output
+        AND must preserve the original AMIP free-form ``results.txt``
+        across both calls (no data loss)."""
+        mod = self._import_converter()
+        self._write_synthetic_amip_outputs(tmp_path, n=4)
+        original_amip_text = (tmp_path / "results.txt").read_text()
+        mod.main(tmp_path)
+        first_csv = (tmp_path / "mean_timeseries.csv").read_text()
+        first_results = (tmp_path / "results.txt").read_text()
+        # After first call, the original AMIP file is preserved.
+        assert (tmp_path / "results_amip.txt").exists()
+        assert (tmp_path / "results_amip.txt").read_text() == original_amip_text
+        # Second call.
+        mod.main(tmp_path)
+        second_csv = (tmp_path / "mean_timeseries.csv").read_text()
+        second_results = (tmp_path / "results.txt").read_text()
+        # CSV is byte-identical.
+        assert second_csv == first_csv
+        # Matrix-format results.txt is byte-identical (same parsed
+        # fields from the preserved AMIP file).
+        assert second_results == first_results
+        # Crucially: the AMIP original is STILL there and STILL
+        # contains the original free-form text.  iter-42: an earlier
+        # version of the converter overwrote results_amip.txt on the
+        # second call with its own matrix-format file, losing the
+        # AMIP free-form summary.
+        assert (tmp_path / "results_amip.txt").read_text() == original_amip_text
