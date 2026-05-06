@@ -334,7 +334,23 @@ def _create_vertical(nlev: int, vertical_coord: str):
 # RRTMGP physics factory
 # ---------------------------------------------------------------------------
 
-def _make_rrtmgp_physics(model_type: str, dt: float, hs_fn=None):
+# Iter-31: per-run GHG overrides set from CLI flags by ``main()``
+# before any runner invokes ``_make_rrtmgp_physics``.  The runner
+# functions don't take additional kwargs (they all share the
+# ``runner(tc, out_dir, days, radiation=...)`` signature), so this
+# module-level pattern threads the values through without changing
+# the runner interface.
+_RUNTIME_RRTMGP_OVERRIDES: dict[str, float | None] = {
+    "co2_ppmv": None,
+    "ch4_ppbv": None,
+    "n2o_ppbv": None,
+}
+
+
+def _make_rrtmgp_physics(model_type: str, dt: float, hs_fn=None,
+                          co2_ppmv: float | None = None,
+                          ch4_ppbv: float | None = None,
+                          n2o_ppbv: float | None = None):
     """Create RRTMGP-based physics function, optionally combined with Held-Suarez.
 
     When *hs_fn* is provided the returned function sums the Held-Suarez
@@ -350,16 +366,42 @@ def _make_rrtmgp_physics(model_type: str, dt: float, hs_fn=None):
     hs_fn : callable, optional
         Held-Suarez forcing function ``(state, grid, sigma_coord) -> tendencies``.
         When ``None``, only RRTMGP radiation is applied (no HS forcing).
+    co2_ppmv, ch4_ppbv, n2o_ppbv : float, optional
+        Iter-31: per-experiment GHG concentration overrides for the
+        AMIP "realistic forcing" prompt item.  When ``None``, the
+        ``RRTMGPConfig`` defaults are used (415 ppm CO2, 1900 ppb
+        CH4, 332 ppb N2O — present-day values).  Pass e.g.
+        ``co2_ppmv=280`` for a pre-industrial AMIP run.  Time-varying
+        CMIP6 input4MIPs forcing requires a deeper integration with
+        ``forcing/external.py:get_ghg_at_time`` that's tracked as a
+        post-Ralph follow-up.
     """
     from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
-    from legoesm.atmosphere.physics.radiation.config import RadiationConfig
+    from legoesm.atmosphere.physics.radiation.config import (
+        RadiationConfig, RRTMGPConfig,
+    )
     from legoesm.atmosphere.physics.convection.config import ConvectionConfig
     from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
     from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
     from legoesm.atmosphere.physics.gravity_wave_drag.config import GravityWaveDragConfig
 
+    # Iter-31: build RRTMGPConfig with optional GHG overrides.
+    # Argument values take precedence; otherwise fall back to the
+    # module-level runtime overrides set from CLI flags.
+    eff_co2 = co2_ppmv if co2_ppmv is not None else _RUNTIME_RRTMGP_OVERRIDES.get("co2_ppmv")
+    eff_ch4 = ch4_ppbv if ch4_ppbv is not None else _RUNTIME_RRTMGP_OVERRIDES.get("ch4_ppbv")
+    eff_n2o = n2o_ppbv if n2o_ppbv is not None else _RUNTIME_RRTMGP_OVERRIDES.get("n2o_ppbv")
+    rrtmgp_kwargs = {}
+    if eff_co2 is not None:
+        rrtmgp_kwargs["co2_ppmv"] = eff_co2
+    if eff_ch4 is not None:
+        rrtmgp_kwargs["ch4_ppbv"] = eff_ch4
+    if eff_n2o is not None:
+        rrtmgp_kwargs["n2o_ppbv"] = eff_n2o
+    rrtmgp_cfg = RRTMGPConfig(**rrtmgp_kwargs) if rrtmgp_kwargs else RRTMGPConfig()
+
     phys_cfg = PhysicsConfig(
-        radiation=RadiationConfig(scheme="rrtmgp"),
+        radiation=RadiationConfig(scheme="rrtmgp", rrtmgp=rrtmgp_cfg),
         convection=ConvectionConfig(scheme="none"),
         turbulence=TurbulenceConfig(scheme="none"),
         microphysics=MicrophysicsConfig(scheme="none"),
@@ -4871,6 +4913,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--radiation", type=str, default="gray",
         choices=["gray", "rrtmgp"],
         help="Radiation scheme for applicable tests (default: gray)")
+    # Iter-31: AMIP "realistic GHG forcing" CLI knobs.  Applied
+    # only when ``--radiation rrtmgp``.  Defaults to RRTMGP's own
+    # present-day defaults (415 ppm CO2, 1900 ppb CH4, 332 ppb N2O).
+    # Set ``--co2-ppmv 280`` for pre-industrial AMIP runs.  Time-
+    # varying CMIP6 input4MIPs forcing is a deeper integration
+    # tracked as a post-Ralph follow-up.
+    p.add_argument(
+        "--co2-ppmv", type=float, default=None,
+        help="Override RRTMGP CO2 concentration [ppmv].  Default: 415 "
+             "(present-day).  Use 280 for pre-industrial.")
+    p.add_argument(
+        "--ch4-ppbv", type=float, default=None,
+        help="Override RRTMGP CH4 concentration [ppbv].  Default: 1900.")
+    p.add_argument(
+        "--n2o-ppbv", type=float, default=None,
+        help="Override RRTMGP N2O concentration [ppbv].  Default: 332.")
     p.add_argument(
         "--resolution", type=str, default=None,
         help="Override baseline resolution (e.g. C48, 90x180, ico6)")
@@ -4926,6 +4984,17 @@ def main():
     # Zero or negative values silently produce nonsensical runs.
     if args.days is not None and args.days <= 0:
         parser.error("--days must be positive")
+
+    # iter-31: thread per-run GHG overrides through to _make_rrtmgp_physics.
+    if args.co2_ppmv is not None and args.co2_ppmv <= 0:
+        parser.error("--co2-ppmv must be positive")
+    if args.ch4_ppbv is not None and args.ch4_ppbv <= 0:
+        parser.error("--ch4-ppbv must be positive")
+    if args.n2o_ppbv is not None and args.n2o_ppbv <= 0:
+        parser.error("--n2o-ppbv must be positive")
+    _RUNTIME_RRTMGP_OVERRIDES["co2_ppmv"] = args.co2_ppmv
+    _RUNTIME_RRTMGP_OVERRIDES["ch4_ppbv"] = args.ch4_ppbv
+    _RUNTIME_RRTMGP_OVERRIDES["n2o_ppbv"] = args.n2o_ppbv
 
     # iter-7 codex review LOW: reset the multi-resolution warning
     # dedup set so a single ``main()`` invocation produces at most one
