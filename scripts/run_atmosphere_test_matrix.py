@@ -4642,6 +4642,43 @@ def _create_atmosphere_comparison_summary(
             fh.write(row + "\n")
         fh.write("=" * 70 + "\n")
 
+        # Iter-28: GPU/MPI efficiency snapshot for the user's prompt
+        # item "ensure code runs efficiently on GPUs and MPI".
+        # Rank grids by wall_time for this case.  Metric value is
+        # wall-time PER SIMULATED DAY so cases of different
+        # ``--days`` are roughly comparable.
+        wall_per_day: list[tuple[str, float]] = []
+        for g in grids_sorted:
+            md = grid_results[g]["metadata"]
+            wt_str = md.get("wall_time", "")
+            days_str = md.get("days", "")
+            if not wt_str or not days_str:
+                continue
+            try:
+                wt = float(wt_str.rstrip("s").strip())
+                d = float(days_str)
+            except ValueError:
+                continue
+            if d <= 0:
+                continue
+            wall_per_day.append((g, wt / d))
+        if wall_per_day:
+            wall_per_day.sort(key=lambda kv: kv[1])
+            fastest = wall_per_day[0][1]
+            fh.write(
+                "\nGPU / MPI efficiency — wall-time per simulated day "
+                "(faster = better):\n"
+            )
+            fh.write(f"  {'rank':<5}  {'grid':<14}  {'s/day':>10}  "
+                     f"{'speedup vs slowest':>18}\n")
+            slowest = wall_per_day[-1][1]
+            for rank, (g, sd) in enumerate(wall_per_day, 1):
+                speedup = slowest / sd if sd > 0 else float("inf")
+                fh.write(
+                    f"  {rank:<5d}  {g:<14}  {sd:10.2f}  {speedup:18.2f}x\n"
+                )
+            fh.write("=" * 70 + "\n")
+
         # Iter-9: quantitative cross-grid RMS agreement on the
         # zonal-mean cross-section, for cases where that diagnostic
         # is the canonical inter-model metric.
