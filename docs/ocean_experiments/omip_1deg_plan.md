@@ -1,5 +1,70 @@
 # Plan: OMIP-Style Forced Global Ocean Run at 1°
 
+## Recent Status (2026-05-05)
+
+### What works
+- 10-year stable run completed (88 min, 2× V100): `results/jra55_10yr_production/`
+- Stability stack: basin-removal flood-fill + narrow-passage fill (min_width=2)
+  + 3D maxvel clip (3 m/s) + slope-foot viscosity (alpha=3) + Smag (C=0.2)
+  + SSS restoring + freeze cap + open Southern Ocean (south-cap-lat=−90).
+- Production config: `A_h=2e5, K_h=1e3, B_h=5e9, B_h_barotropic=1e14`,
+  `bottom_drag_r=2.5e-3, DRAG_BG_VEL=0.1`, GM/Redi (Visbeck adaptive
+  kappa_GM=kappa_Redi=800, range [200, 2000]).
+
+### Limitations of the production run
+- Circulation looks like zonal jets, no closed gyres / ACC.
+- Surface eq currents 0.15 m/s — over-damped (real EUC ~1 m/s at depth,
+  surface SEC ~0.3–0.5 m/s).
+- Global SST too cold (16.2°C vs ~17–18°C observed).
+- Hypothesis: A_h=2e5 is way too high; baseline's "good-looking" equator
+  is an accident of over-damping.
+
+### Failed sweep — A_h reduction with K_h=0 (2026-05-05)
+
+Tested two runs in parallel (one GPU each via `CUDA_VISIBLE_DEVICES`):
+
+| Run | A_h | K_h | Result at day 524/1825 |
+|-----|-----|-----|------------------------|
+| A | 5e4 | 0 | Eq SST 5.9°C, surface |u| 1.15 m/s, w≈10 µm/s |
+| B | 2e4 | 0 | Eq SST 6.5°C, surface |u| 1.08 m/s, w≈17 µm/s |
+
+Both blew up dynamically at the equator. Top 5 levels homogenized
+to ~6°C — runaway upwelling cold pool.
+
+**Diagnosis** — NOT a diffusion problem:
+- Wind stress is the same (JRA55-do).
+- With low A_h, equatorial response is unconstrained because f→0 leaves
+  no rotational stiffness; only viscosity can damp eq currents.
+- Strong currents → strong vertical pumping → cold deep water reaches
+  the surface mixed layer.
+- `cos²(lat)` scaling makes effective A_h *largest* at the equator
+  (=user value), so reducing A_h hits the eq band hardest. Wrong sign
+  of latitude dependence for this problem — the eq band needs *more*
+  viscosity at coarse resolution, not less.
+- K_h=0 was a red herring; even with K_h=1e3 the dynamic blowup would
+  have happened.
+
+Runs killed at day 524 to free GPUs for redesigned sweep.
+
+### Next sweep design (TODO)
+
+Need latitude-dependent A_h that *boosts* viscosity within ±5° and lets
+midlatitudes use lower A_h for realistic gyres. Options:
+
+1. **Eq-band A_h boost**: keep `A_h=1e5` baseline, multiply by 5× within
+   ±5° (linearly tapered to 1× by ±15°). Real OGCM practice (MOM6 OM4,
+   NEMO ORCA1 use latitude-dependent A_h profiles).
+2. **Reverse cos²(lat) scaling near eq**: change `laplacian_scaling_factor`
+   to add an eq enhancement term, e.g. `cos²(lat) + α·exp(−(lat/5°)²)`.
+3. **Heavier Smag at eq**: increase `C_smag` from 0.2 to 0.5 — Smag
+   responds to deformation, but eq currents are largely zonal so
+   shear is small. May not be enough.
+
+Probably option 1 is cleanest. Implementation: add a meridional A_h
+profile to `LatLonCGridOceanConfig` and apply it inside
+`laplacian_scaling_factor`. Or precompute a `A_h_field(lat)` and pass
+through.
+
 ## Goal
 
 Run a forced global ocean simulation at 1° lat-lon resolution driven by

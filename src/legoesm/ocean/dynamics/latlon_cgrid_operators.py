@@ -857,6 +857,57 @@ def laplacian_scaling_factor(grid: LatLonGrid) -> tuple[jnp.ndarray, jnp.ndarray
     return cos_u ** 2, cos_v ** 2
 
 
+def equatorial_boost_factor(
+    grid: LatLonGrid, sigma_deg: float, boost: float,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Latitude-dependent equatorial enhancement factor for A_h.
+
+    Returns a multiplier ``1 + (boost - 1) * exp(-(lat / sigma_deg)^2)``
+    evaluated at u- and v-face latitudes.  Used to boost horizontal
+    Laplacian viscosity within ±sigma_deg of the equator, where the
+    Coriolis parameter f→0 leaves no rotational stiffness to constrain
+    the ocean's response to wind stress.  At coarse resolution (~1°)
+    without this boost, the equatorial currents and upwelling become
+    unconstrained and produce a runaway cold tongue.  Production
+    OGCMs (MOM6 OM4 ``KH_VEL_LAT_RES``, NEMO meridional ``rn_ahm0``
+    profiles, POP anisotropic viscosity) all enhance equatorial
+    momentum dissipation in some form.
+
+    The factor is applied multiplicatively on top of the cos²(lat)
+    CFL scaling from ``laplacian_scaling_factor``.
+
+    Parameters
+    ----------
+    grid : LatLonGrid
+    sigma_deg : float
+        Gaussian half-width in degrees.  Typical values 3-7°.
+    boost : float
+        Multiplier at the exact equator (lat=0).  Values >= 1.0;
+        boost = 1.0 disables the enhancement.  Typical values 3-10.
+
+    Returns
+    -------
+    boost_u : (n_lat,)
+        Boost factor at u-face (cell-centre) latitudes.
+    boost_v : (n_lat+1,)
+        Boost factor at v-face latitudes.
+    """
+    if boost <= 1.0:
+        n_lat = grid.lat.shape[0]
+        ones_u = jnp.ones(n_lat, dtype=grid.lat.dtype)
+        ones_v = jnp.ones(n_lat + 1, dtype=grid.lat.dtype)
+        return ones_u, ones_v
+
+    sigma_rad = jnp.deg2rad(sigma_deg)
+    lat_u = grid.lat                                       # (n_lat,)
+    lat_v_interior = 0.5 * (lat_u[:-1] + lat_u[1:])         # (n_lat-1,)
+    lat_v = jnp.concatenate([lat_u[:1], lat_v_interior, lat_u[-1:]])
+
+    boost_u = 1.0 + (boost - 1.0) * jnp.exp(-(lat_u / sigma_rad) ** 2)
+    boost_v = 1.0 + (boost - 1.0) * jnp.exp(-(lat_v / sigma_rad) ** 2)
+    return boost_u, boost_v
+
+
 def biharmonic_scaling_factor(grid: LatLonGrid) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Grid-dependent scaling for biharmonic viscosity on a lat-lon grid.
 
@@ -892,6 +943,89 @@ def biharmonic_scaling_factor(grid: LatLonGrid) -> tuple[jnp.ndarray, jnp.ndarra
     """
     cos_u, cos_v = _cos_lat_uv(grid)
     return cos_u ** 4, cos_v ** 4
+
+
+def slope_foot_enhancement_3d(
+    H_bathy: jnp.ndarray,
+    mask: jnp.ndarray,
+    grid: LatLonGrid,
+    n_levels_from_bottom: int = 5,
+    alpha: float = 3.0,
+    threshold: float = 0.1,
+    is_active: jnp.ndarray = None,
+    nlev: int = None,
+) -> jnp.ndarray:
+    """Slope-foot viscosity enhancement factor (MOM6 OM4 KH_BG_2D analog).
+
+    Returns a 3D multiplicative factor (≥1) that boosts viscosity in the
+    bottom ``n_levels_from_bottom`` levels over steep bathymetric slopes:
+
+        E(j,i,k) = 1 + α · tanh(|∇H|/H / δ) · vertical_taper(k)
+
+    where ``vertical_taper(k) = 1`` for the bottom-N active levels per
+    column, 0 elsewhere. The factor saturates at ``1 + α`` over very
+    steep slopes (e.g., the African shelf, Indonesian Throughflow).
+
+    MOM6 OM4 standard: ``α = 3``, ``δ = 0.1``, N = 5.
+
+    Parameters
+    ----------
+    H_bathy : (n_lat, n_lon) array — column depths [m]
+    mask : (n_lat, n_lon) — ocean mask (1=ocean, 0=land)
+    grid : LatLonGrid
+    is_active : (n_lat, n_lon, nlev) bool, optional — partial-cell per-level
+        active mask. When None, treats all levels as active.
+    nlev : int, required when is_active is None.
+
+    Returns
+    -------
+    E_3d : (n_lat, n_lon, nlev) — multiplicative factor, ≥1.
+    """
+    R = getattr(grid, "radius", 6.371e6)
+    n_lat, n_lon = H_bathy.shape
+
+    # ∇H at cell centres via centred differences (periodic in lon, walls in lat)
+    cos_lat = jnp.cos(grid.lat * (jnp.pi / 180.0))
+    cos_lat = jnp.maximum(cos_lat, 1e-3)
+    dlat = jnp.pi / n_lat
+    dlon = 2.0 * jnp.pi / n_lon
+    dy = R * dlat
+    dx = R * cos_lat[:, None] * dlon
+
+    H_e = jnp.roll(H_bathy, -1, axis=1)
+    H_w = jnp.roll(H_bathy, 1, axis=1)
+    dHdx = (H_e - H_w) / (2.0 * dx)
+
+    # No wrap in lat — use one-sided differences at boundaries
+    H_n = jnp.concatenate([H_bathy[1:, :], H_bathy[-1:, :]], axis=0)
+    H_s = jnp.concatenate([H_bathy[:1, :], H_bathy[:-1, :]], axis=0)
+    dHdy = (H_n - H_s) / (2.0 * dy)
+
+    grad_H_mag = jnp.sqrt(dHdx ** 2 + dHdy ** 2)
+    H_safe = jnp.maximum(H_bathy, 1.0)
+    slope_metric = grad_H_mag / (H_safe * threshold)
+    enhancement_2d = alpha * jnp.tanh(slope_metric) * mask  # (n_lat, n_lon)
+
+    # Vertical taper: bottom N active levels
+    if is_active is not None:
+        nlev_local = is_active.shape[-1]
+        # Per-column deepest active level: count active levels - 1
+        n_active = jnp.sum(is_active.astype(jnp.int32), axis=-1)  # (n_lat, n_lon)
+        k_bottom = n_active - 1                                    # (n_lat, n_lon)
+        k_idx = jnp.arange(nlev_local)[None, None, :]              # (1,1,nlev)
+        in_band = (k_idx >= (k_bottom[..., None] - n_levels_from_bottom + 1)) & \
+                  (k_idx <= k_bottom[..., None])
+        vertical_taper = (in_band & is_active).astype(H_bathy.dtype)
+    else:
+        if nlev is None:
+            raise ValueError("nlev required when is_active is None")
+        v = jnp.zeros((nlev,), dtype=H_bathy.dtype)
+        v = v.at[nlev - n_levels_from_bottom:].set(1.0)
+        vertical_taper = jnp.broadcast_to(
+            v[None, None, :], (n_lat, n_lon, nlev)
+        )
+
+    return 1.0 + enhancement_2d[..., None] * vertical_taper
 
 
 def strain_rate_cgrid(
