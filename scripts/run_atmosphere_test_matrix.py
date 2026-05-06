@@ -3638,14 +3638,18 @@ ATMOSPHERE_COMPARISON_FIELDS: dict[str, list[dict]] = {
         {"field": "height",     "vmin": None,  "vmax": None,  "cmap": "viridis", "units": "m"},
         {"field": "wind_speed", "vmin": 0,     "vmax": 50,    "cmap": "viridis", "units": "m/s"},
     ],
-    # Held-Suarez: zonally averaged steady-state climate.
+    # Held-Suarez: zonally averaged steady-state climate.  ``T_3d`` is
+    # the 3-D temperature field as saved by the runners; the 4-D-array
+    # branch in ``_atm_extract_field_2d`` slices the lowest model level
+    # (surface T proxy) for the comparison panel.
     "held_suarez": [
-        {"field": "T",          "vmin": 200,   "vmax": 320,   "cmap": "plasma",  "units": "K"},
+        {"field": "T_3d",       "vmin": 230,   "vmax": 310,   "cmap": "plasma",  "units": "K"},
         {"field": "u",          "vmin": -40,   "vmax": 60,    "cmap": "RdBu_r",  "units": "m/s"},
         {"field": "p_s",        "vmin": 95000, "vmax": 105000,"cmap": "viridis", "units": "Pa"},
+        {"field": "wind_speed", "vmin": 0,     "vmax": 60,    "cmap": "viridis", "units": "m/s"},
     ],
     "baroclinic": [
-        {"field": "T",          "vmin": 220,   "vmax": 310,   "cmap": "plasma",  "units": "K"},
+        {"field": "T_3d",       "vmin": 220,   "vmax": 310,   "cmap": "plasma",  "units": "K"},
         {"field": "u",          "vmin": -40,   "vmax": 80,    "cmap": "RdBu_r",  "units": "m/s"},
         {"field": "p_s",        "vmin": 95000, "vmax": 105000,"cmap": "viridis", "units": "Pa"},
     ],
@@ -3666,7 +3670,9 @@ def _atmosphere_grid_color() -> dict[str, str]:
     }
 
 
-def _collect_grid_results_atmosphere(test_case_dir: Path) -> dict[str, dict]:
+def _collect_grid_results_atmosphere(
+    test_case_dir: Path, vertical_coord: str | None = None,
+) -> dict[str, dict]:
     """Walk ``<grid>/<resolution>/[<vertical>/]`` under ``test_case_dir`` and
     load each grid's outputs.
 
@@ -3674,6 +3680,11 @@ def _collect_grid_results_atmosphere(test_case_dir: Path) -> dict[str, dict]:
     ``<grid>/<resolution>/`` (e.g. ``hydrostatic/held_suarez/cubed_sphere/C36/sigma/``).
     For shallow-water cases there is no vertical coord and the layout is
     ``<grid>/<resolution>/`` only.
+
+    When ``vertical_coord`` is given, only the matching subdir under each
+    grid's resolution directory is collected.  Grids that lack that
+    specific vertical-coord subdir are skipped (allows separate
+    sigma vs. hybrid comparisons for hydrostatic runs).
 
     Returns
     -------
@@ -3695,15 +3706,20 @@ def _collect_grid_results_atmosphere(test_case_dir: Path) -> dict[str, dict]:
         res_dirs = [d for d in grid_dir.iterdir() if d.is_dir()]
         if not res_dirs:
             continue
-        # Each grid should have exactly one resolution per matrix run.
         res_dir = sorted(res_dirs)[0]
-        # Optional vertical-coord level.
-        sub_dirs = [d for d in res_dir.iterdir() if d.is_dir()]
-        leaf = res_dir
-        if sub_dirs:
-            # Use the first vertical-coord subdir if multiple; in practice
-            # the comparison is invoked per (case, vertical_coord).
-            leaf = sorted(sub_dirs)[0]
+
+        # Determine the leaf directory.  When vertical_coord is given,
+        # it MUST exist as a subdir; otherwise skip this grid.  When not
+        # given, accept the resolution directory directly (SW case);
+        # if the resolution dir itself has subdirs (hydro case) but no
+        # ``vertical_coord`` filter was specified, fall through and use
+        # the resolution dir (no leaf-files there → grid is skipped).
+        if vertical_coord is not None:
+            leaf = res_dir / vertical_coord
+            if not leaf.is_dir():
+                continue
+        else:
+            leaf = res_dir
 
         csv_file = leaf / "mean_timeseries.csv"
         npz_file = leaf / "snapshots_latlon.npz"
@@ -3725,12 +3741,52 @@ def _collect_grid_results_atmosphere(test_case_dir: Path) -> dict[str, dict]:
                 "snapshots":  snapshots,
                 "metadata":   metadata,
                 "resolution": res_dir.name,
+                "vertical_coord": vertical_coord or "",
             }
         except Exception as e:  # noqa: BLE001 — best-effort post-hoc collection
             print(f"    [comparison] skipping {grid_dir.name}: {e}")
             continue
 
     return grid_results
+
+
+def _vertical_coords_for_case(test_case_dir: Path) -> list[str | None]:
+    """Enumerate the vertical-coord variants present across grids for a
+    given case directory.
+
+    Returns ``[None]`` for shallow-water-style layouts where each grid
+    has the leaf files directly under ``<grid>/<resolution>/``.
+    Returns the union of vertical-coord subdirectory names (e.g.
+    ``["sigma", "hybrid"]``) for hydrostatic-style layouts.  An empty
+    list is returned only if no recognised grid layout exists.
+    """
+    if not test_case_dir.exists():
+        return []
+    found_sw = False
+    verts: set[str] = set()
+    for grid_dir in test_case_dir.iterdir():
+        if not grid_dir.is_dir() or grid_dir.name not in GRID_TYPES:
+            continue
+        res_dirs = [d for d in grid_dir.iterdir() if d.is_dir()]
+        if not res_dirs:
+            continue
+        res_dir = sorted(res_dirs)[0]
+        # Detect SW-style (leaf files at resolution level) vs. hydro-style
+        # (vertical-coord subdir level).
+        if (res_dir / "snapshots_latlon.npz").exists():
+            found_sw = True
+        for sub in res_dir.iterdir():
+            if sub.is_dir() and (sub / "snapshots_latlon.npz").exists():
+                verts.add(sub.name)
+    if verts and found_sw:
+        # Mixed layout: shouldn't happen in practice, but be defensive
+        # — emit both the SW-style sentinel AND the hydro-style coords.
+        return [None] + sorted(verts)
+    if verts:
+        return sorted(verts)
+    if found_sw:
+        return [None]
+    return []
 
 
 def _atm_extract_field_2d(snapshots: np.lib.npyio.NpzFile, field: str) -> np.ndarray | None:
@@ -3755,9 +3811,17 @@ def _atm_extract_field_2d(snapshots: np.lib.npyio.NpzFile, field: str) -> np.nda
 
 def _create_atmosphere_comparison_snapshots(
     test_case_dir: Path, grid_results: dict, fields: list[dict],
+    *, label: str | None = None,
 ) -> None:
     """4-panel snapshot comparison across grids using a SHARED PlateCarrée
     projection and SHARED colorbar per field.
+
+    Output PNGs are written into ``test_case_dir`` (caller is
+    responsible for choosing the right output directory — see
+    ``_create_cross_grid_comparisons_atmosphere``).  Pass ``label`` to
+    override the default suptitle text (which is ``test_case_dir.name``);
+    callers should set ``label`` to e.g. ``"held_suarez/sigma"`` so
+    sigma vs hybrid comparisons are visually distinguishable.
 
     One PNG is written per field: ``comparison_snapshots_<field>.png``.
     Missing-grid panels are blanked but the layout slot is preserved so
@@ -3770,7 +3834,7 @@ def _create_atmosphere_comparison_snapshots(
     except Exception:
         have_cartopy = False
 
-    case_name = test_case_dir.name
+    case_name = label if label is not None else test_case_dir.name
 
     for spec in fields:
         field = spec["field"]
@@ -3895,11 +3959,13 @@ def _create_atmosphere_comparison_snapshots(
 
 def _create_atmosphere_comparison_timeseries(
     test_case_dir: Path, grid_results: dict,
+    *, label: str | None = None,
 ) -> None:
     """Overlay the common scalar columns from ``mean_timeseries.csv`` across
     grids.  Plots up to 4 columns auto-detected as numeric scalar TS.
 
-    Produces ``comparison_timeseries.png`` with one panel per shared column.
+    Pass ``label`` to override the default suptitle text.  Output is
+    written to ``test_case_dir/comparison_timeseries.png``.
     """
     common_cols: list[str] = []
     candidates = [
@@ -3923,8 +3989,9 @@ def _create_atmosphere_comparison_timeseries(
     nrows = (n + 1) // 2
     ncols = 1 if n == 1 else 2
     fig, axes = plt.subplots(nrows, ncols, figsize=(12, 4 * nrows), squeeze=False)
+    title_label = label if label is not None else test_case_dir.name
     fig.suptitle(
-        f"{test_case_dir.name} — cross-grid time series",
+        f"{title_label} — cross-grid time series",
         fontsize=13, fontweight="bold",
     )
     colors = _atmosphere_grid_color()
@@ -3971,11 +4038,15 @@ def _create_atmosphere_comparison_timeseries(
 
 def _create_atmosphere_comparison_summary(
     test_case_dir: Path, grid_results: dict,
+    *, label: str | None = None,
 ) -> None:
     """Write a plain-text cross-grid summary table to
     ``comparison_summary.txt``.  Columns are auto-selected from the
     metadata that the runners write into ``results.txt`` (status,
     wall_time, plus any numeric metric the runner recorded).
+
+    Pass ``label`` to override the default header (which is
+    ``test_case_dir.name``).
     """
     out_file = test_case_dir / "comparison_summary.txt"
     grids_sorted = sorted(grid_results.keys())
@@ -3991,8 +4062,9 @@ def _create_atmosphere_comparison_summary(
                 seen.add(k)
                 all_keys.append(k)
 
+    title_label = label if label is not None else test_case_dir.name
     with open(out_file, "w") as fh:
-        fh.write(f"{test_case_dir.name} — Cross-grid comparison\n")
+        fh.write(f"{title_label} — Cross-grid comparison\n")
         fh.write("=" * 70 + "\n")
         header = f"{'metric':<32}  " + "  ".join(f"{g:<14}" for g in grids_sorted)
         fh.write(header + "\n")
@@ -4007,14 +4079,26 @@ def _create_atmosphere_comparison_summary(
     print(f"    Saved: {out_file.name}")
 
 
-def _create_cross_grid_comparisons_atmosphere(test_case_dir: Path) -> None:
+def _create_cross_grid_comparisons_atmosphere(
+    test_case_dir: Path, vertical_coord: str | None = None,
+) -> None:
     """Top-level entry point: collect per-grid outputs under
-    ``test_case_dir`` and emit shared-colorbar / shared-projection
-    comparison plots and a summary table.
+    ``test_case_dir`` for ONE vertical-coord variant and emit shared-
+    colorbar / shared-projection comparison plots plus a summary
+    table.
 
-    No-ops if fewer than 2 grids produced output.
+    For hydrostatic-style cases (multiple vertical coords per grid),
+    output is written to ``test_case_dir/<vertical_coord>/`` so that
+    sigma and hybrid comparisons live in separate sub-directories and
+    don't overwrite each other.  For SW-style cases (no vertical
+    coord), output goes to ``test_case_dir/`` directly.
+
+    No-ops if fewer than 2 grids produced output for the requested
+    vertical coord.
     """
-    grid_results = _collect_grid_results_atmosphere(test_case_dir)
+    grid_results = _collect_grid_results_atmosphere(
+        test_case_dir, vertical_coord=vertical_coord,
+    )
     if len(grid_results) < 2:
         return
 
@@ -4029,10 +4113,22 @@ def _create_cross_grid_comparisons_atmosphere(test_case_dir: Path) -> None:
         ],
     )
 
-    print(f"  Creating cross-grid comparisons for {case_name}...")
-    _create_atmosphere_comparison_snapshots(test_case_dir, grid_results, fields)
-    _create_atmosphere_comparison_timeseries(test_case_dir, grid_results)
-    _create_atmosphere_comparison_summary(test_case_dir, grid_results)
+    # Output directory: case_dir/<vert>/ when vertical_coord is set,
+    # else case_dir/ (SW).  Create if missing.
+    out_dir = test_case_dir / vertical_coord if vertical_coord else test_case_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    label = case_name + (f"/{vertical_coord}" if vertical_coord else "")
+    print(f"  Creating cross-grid comparisons for {label}...")
+    _create_atmosphere_comparison_snapshots(
+        out_dir, grid_results, fields, label=label,
+    )
+    _create_atmosphere_comparison_timeseries(
+        out_dir, grid_results, label=label,
+    )
+    _create_atmosphere_comparison_summary(
+        out_dir, grid_results, label=label,
+    )
 
 
 def _walk_atmosphere_test_cases(output_base: Path) -> list[Path]:
@@ -4168,12 +4264,18 @@ def main():
         if not cases:
             print(f"  No per-case output directories under {output_base}")
             return
+        n_combos = 0
         for case_dir in cases:
-            try:
-                _create_cross_grid_comparisons_atmosphere(case_dir)
-            except Exception as e:  # noqa: BLE001
-                print(f"  [WARN] {case_dir}: {e}")
-        print(f"  Done.  {len(cases)} case(s) processed.")
+            for vc in _vertical_coords_for_case(case_dir):
+                try:
+                    _create_cross_grid_comparisons_atmosphere(
+                        case_dir, vertical_coord=vc,
+                    )
+                    n_combos += 1
+                except Exception as e:  # noqa: BLE001
+                    label = case_dir.name + (f"/{vc}" if vc else "")
+                    print(f"  [WARN] {label}: {e}")
+        print(f"  Done.  {n_combos} (case, vert) combo(s) processed.")
         return
 
     if args.resolution:
@@ -4288,11 +4390,15 @@ def main():
         print("=" * 78)
         cases = _walk_atmosphere_test_cases(output_base)
         for case_dir in cases:
-            try:
-                _create_cross_grid_comparisons_atmosphere(case_dir)
-            except Exception as e:  # noqa: BLE001
-                # Don't fail the whole run on plotting errors.
-                print(f"  [WARN] comparison plots failed for {case_dir}: {e}")
+            for vc in _vertical_coords_for_case(case_dir):
+                try:
+                    _create_cross_grid_comparisons_atmosphere(
+                        case_dir, vertical_coord=vc,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    # Don't fail the whole run on plotting errors.
+                    label = case_dir.name + (f"/{vc}" if vc else "")
+                    print(f"  [WARN] comparison plots failed for {label}: {e}")
         print("=" * 78)
 
     if n_fail > 0 or n_error > 0:
