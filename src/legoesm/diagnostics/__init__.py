@@ -1,6 +1,11 @@
 """Online diagnostics for legoESM."""
 
 from legoesm.diagnostics.column_integrals import column_water_vapor
+from legoesm.diagnostics.conservation_drift import (
+    DEFAULT_MIN_BASELINE,
+    compute_relative_drift,
+    relative_drift_series,
+)
 from legoesm.diagnostics.energy_budget import (
     EnergyBudget,
     EnergyBudgetTracker,

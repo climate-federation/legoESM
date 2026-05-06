@@ -172,26 +172,54 @@ class TestComputeDriftDenominatorFloor:
         )
 
     def test_floor_constant_is_one(self):
-        """Source-level pin: the denominator floor in
-        ``_compute_drift`` must be ``1.0`` (not 1e-30 or lower).
+        """Source-level pin: the denominator floor in the canonical
+        ``compute_relative_drift`` helper must be ``1.0`` (not 1e-30
+        or lower).
+
+        iter-88: the iter-83 inline expression
+        ``max(abs(values[0]), 1.0)`` was factored out into
+        ``legoesm.diagnostics.conservation_drift.compute_relative_drift``.
+        ``_compute_drift`` is now a thin delegating wrapper, so this
+        test pins the floor in the shared helper instead.  The
+        ``DEFAULT_MIN_BASELINE = 1.0`` module constant is the
+        single source of truth.
         """
         import inspect
-        src = inspect.getsource(M._compute_drift)
-        # The fix uses ``max(abs(values[0]), 1.0)`` and removed
-        # the older ``1e-30`` floor.  Pin both: 1.0 present, 1e-30
-        # absent.
-        assert "max(abs(values[0]), 1.0)" in src, (
-            "iter-83: ``_compute_drift`` must use ``max(abs(values[0]), 1.0)`` "
-            "as the relative-drift denominator floor.  iter-78/80 "
-            "showed the previous 1e-30 floor amplified machine-"
-            "precision rounding to 1e+30-magnitude spurious values."
+
+        from legoesm.diagnostics.conservation_drift import (
+            DEFAULT_MIN_BASELINE,
+            compute_relative_drift,
         )
-        # The original buggy expression ``max(abs(values[0]), 1e-30)``
-        # must no longer be present as actual code.  (The docstring
-        # mentions "1e-30" historically; that's allowed.)
-        assert "max(abs(values[0]), 1e-30)" not in src, (
-            "iter-83: the legacy 1e-30 denominator floor must be "
-            "removed from ``_compute_drift`` code.  Use 1.0."
+        # 1) The shared helper's default floor is 1.0.
+        assert DEFAULT_MIN_BASELINE == 1.0, (
+            "iter-88: the canonical denominator floor "
+            "``DEFAULT_MIN_BASELINE`` must be 1.0.  iter-78/80 showed "
+            "the previous 1e-30 floor amplified machine-precision "
+            "rounding to 1e+30-magnitude spurious values."
+        )
+        helper_src = inspect.getsource(compute_relative_drift)
+        # 2) The helper uses ``max(abs(...), float(min_baseline))``
+        #    style — pin that the floor parameter is honoured (no
+        #    raw 1e-30 literal remaining).
+        assert "max(" in helper_src and "min_baseline" in helper_src, (
+            "iter-88: the canonical helper must use "
+            "``max(|x[0]|, min_baseline)`` form."
+        )
+        assert "1e-30" not in helper_src, (
+            "iter-88: the legacy 1e-30 denominator floor must be "
+            "removed from the canonical helper.  Use the "
+            "``min_baseline`` parameter (default 1.0)."
+        )
+        # 3) The thin wrapper ``_compute_drift`` must delegate to the
+        #    canonical helper (not re-implement the floor).
+        wrapper_src = inspect.getsource(M._compute_drift)
+        assert "compute_relative_drift" in wrapper_src, (
+            "iter-88: ``_compute_drift`` must delegate to the shared "
+            "``compute_relative_drift`` helper."
+        )
+        assert "1e-30" not in wrapper_src, (
+            "iter-88: the legacy 1e-30 floor must not reappear in "
+            "the wrapper either."
         )
 
 

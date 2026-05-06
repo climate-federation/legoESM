@@ -425,18 +425,12 @@ def compare_results(results: dict, output_dir: Path):
         mean_T = diag.get("mean_T", [0])[-1] if diag.get("mean_T") else 0
         max_wind = diag.get("max_wind", [0])[-1] if diag.get("max_wind") else 0
 
-        mass_vals = diag.get("mass", [])
-        if len(mass_vals) >= 2:
-            # iter-87: mirror the iter-83 fix in
-            # ``run_atmosphere_test_matrix.py:_compute_drift``.
-            # Previous denominator ``abs(mass_vals[0] + 1e-30)``
-            # had the same iter-78/80 pathology — for HS
-            # atmosphere mass_vals[0] is ~5e+19 Pa·m² so the
-            # 1e-30 floor never bit, but defensive consistency
-            # with iter-83 means using ``max(abs(.), 1.0)``.
-            mass_drift = abs(mass_vals[-1] - mass_vals[0]) / max(abs(mass_vals[0]), 1.0)
-        else:
-            mass_drift = 0
+        # iter-88: delegate to the shared baseline-zero-safe
+        # helper (factored out of the iter-83 / iter-87 inline
+        # implementations).  See
+        # ``legoesm.diagnostics.conservation_drift`` for history.
+        from legoesm.diagnostics.conservation_drift import compute_relative_drift
+        mass_drift = compute_relative_drift(diag.get("mass", []))
 
         print(f"  {grid_name:<20} {status:<8} {mean_T:<12.2f} "
               f"{max_wind:<12.1f} {mass_drift:<14.2e} {wall:<10.1f}")

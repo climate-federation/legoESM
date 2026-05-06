@@ -939,43 +939,30 @@ def _save_conservation(output_dir: Path, case_name: str, diag: dict,
     vol = np.array(vol_vals, dtype=np.float64)
     heat = np.array(heat_vals, dtype=np.float64)
     t = np.array(times, dtype=np.float64)
-    # iter-80: the previous denominator floor of 1e-30 caused the
-    # iter-78 cube ``rest_state`` finding (cross_variant_summary
-    # reported -2.8e+13 m volume drift).  In rest-state runs the
-    # initial volume / heat / salt baselines are exactly zero (or
-    # near-zero for heat in stratified variants), so dividing
-    # machine-precision rounding errors by 1e-30 produced spurious
-    # 1e+13 "relative drift" values that were 30 orders of
-    # magnitude beyond the actual physics.
+    # iter-88: the iter-80 baseline-zero floor logic (originally
+    # written inline here as ``_MIN_RELATIVE_BASELINE = 1.0`` and
+    # ``vol_denom = max(abs(vol[0]), _MIN_RELATIVE_BASELINE)``) now
+    # lives in ``legoesm.diagnostics.conservation_drift`` so that
+    # the same floor convention is shared by the atmosphere,
+    # ocean, and HS+RRTMGP cross-grid drivers.  See that module's
+    # docstring for the full iter-78/80/83/87 history.
     #
-    # Fix: when ``|vol[0]| < 1.0`` (i.e., baseline volume is
-    # essentially zero in physical units of m³), report ABSOLUTE
-    # drift in the same column.  When ``|vol[0]| >> 1`` (real
-    # baseline), keep the relative-drift normalization.  Same
-    # treatment for heat and salt.
-    #
-    # iter-81 codex MEDIUM: the column name ``vol_rel`` is now
+    # iter-81 codex MEDIUM: the column name ``vol_rel`` is
     # unit-ambiguous (relative when baseline ≥ 1, absolute when
     # < 1).  This is acceptable for the cross-variant comparison
     # plot's purposes (both forms convey "is the system drifting
     # away from initial state?") but downstream consumers reading
     # these columns should treat them as drift magnitudes, NOT as
-    # dimensionless relative deviations.  A future cleanup could
-    # split into two columns (``vol_drift_abs`` always absolute,
-    # ``vol_drift_rel`` only when baseline >> 0) but that's
-    # downstream-tooling-breaking and out of scope.
-    _MIN_RELATIVE_BASELINE = 1.0
-    vol_denom = max(abs(vol[0]), _MIN_RELATIVE_BASELINE)
-    heat_denom = max(abs(heat[0]), _MIN_RELATIVE_BASELINE)
-    vol_rel = (vol - vol[0]) / vol_denom
-    heat_rel = (heat - heat[0]) / heat_denom
+    # dimensionless relative deviations.
+    from legoesm.diagnostics.conservation_drift import relative_drift_series
+    vol_rel = relative_drift_series(vol)
+    heat_rel = relative_drift_series(heat)
 
     n_panels = 2
     has_salt = len(salt_vals) == len(times)
     if has_salt:
         salt = np.array(salt_vals, dtype=np.float64)
-        salt_denom = max(abs(salt[0]), _MIN_RELATIVE_BASELINE)
-        salt_rel = (salt - salt[0]) / salt_denom
+        salt_rel = relative_drift_series(salt)
         n_panels = 3
 
     with open(output_dir / "conservation_timeseries.csv", "w") as f:
