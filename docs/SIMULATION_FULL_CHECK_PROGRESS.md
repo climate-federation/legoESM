@@ -158,33 +158,98 @@ Same metric, applied to the iter-3 30-day data:
 
 Also added `--days <N>` CLI flag for spin-up convergence studies.
 
-## Iteration 11 (in progress) — 60-day HS run
+## Iteration 11 — 60-day HS run launched + doc refresh
 
-A 60-day run is in flight (background).  Cubed_sphere
-mean_T trajectory shows continued cooling at t=60d (251 K and
-falling at -0.29 K/d, vs. -1.08 K/d at t=0d).  Decay rate has
-slowed by ~3.7×, indicating approach to equilibrium but not yet
-there.
+A 60-day HS run was kicked off (background).  Cubed_sphere
+mean_T trajectory showed continued cooling at t=60d (251 K and
+falling at -0.29 K/d, vs. -1.08 K/d at t=0d) — decay rate
+slowed ~3.7×, approaching but not at equilibrium.
 
-Iter-12 will analyse the 60-day data once latlon (CFL-limited
-dt=10 s, ~30 min wall time per coord) completes.
+## Iteration 12 — unit tests for cross-grid helpers
+
+27 unit tests added in `tests/test_atmosphere_cross_grid_plots.py`
+covering `_area_weighted_mean`, `_zonal_mean_at_final_time`,
+`_zonal_mean_climatology`, `_interp_zonal_mean_to_target`,
+`_compute_cross_grid_rms_agreement`, `_atm_extract_field_2d`,
+`_select_resolution_dir`, `_vertical_coords_for_case`.  All pass
+in 0.8 s.
+
+## Iteration 13 — HS 60-day cross-grid finding: gap is GROWING
+
+User's directive in iter-9: "make HS cases consistent within
+small values".  The 60-day run shows the OPPOSITE: cross-grid
+spread is GROWING with time:
+
+| metric | t=30d climatology | t=60d climatology |
+|--------|-------------------|-------------------|
+| best pair | 0.65 K | 1.45 K |
+| worst pair | 3.74 K | 7.22 K |
+| ensemble RMS | 1.63 K | 3.21 K |
+
+Mean_T(t) cube-vs-latlon gap is +0.17 K/day at t=60d — DIVERGING,
+not transient.  Forcing parameters/formulas/inits are identical
+across grids; the cubed_sphere `CDGridPrimitiveEquationConfig`
+has an upper-atmosphere Rayleigh sponge ON by default that
+lat-lon / icosahedral lack and spectral has OFF by default.
+
+iter-13 tried disabling the cubed-sphere sponge → gap got WORSE
+(5 K → 11 K).  Reverted.
+
+## Iteration 14 — per-level cross-grid spread diagnostic
+
+Added a top-5 levels by cross-grid spread table to
+`comparison_summary.txt`.  Shows the largest disagreement is at
+levels 25-28 (mid-troposphere ~σ=0.6-0.7), the baroclinic-eddy
+zone, with latlon consistently warmest and cubed_sphere coldest
+at every level.
+
+## Iteration 15 — FV3-Fortran sponge τ comparison
+
+User's hint: refer to `../FV3/atmos_cubed_sphere/` Fortran
+reference.  Found legoESM cubed_sphere `sponge_tau_sec=3600` (1 h)
+is ~430-860× more aggressive than FV3's typical `tau=5-10` days.
+Tested τ=7 days — gap got WORSE (5 K → 11 K).  Reverted.
+Counterintuitive conclusion: legoESM's 1-h sponge is empirically
+tuned to match the effective dissipation of the latlon/ico/
+spectral cluster; relaxing it (or removing it) underdamps
+cubed_sphere.
+
+## Iteration 16 — codex review of iter-10..15
+
+Codex verdict: WARN, 1 MEDIUM + 5 LOW, all addressed:
+* MEDIUM: per-level spread used uniform-lat mean → switched to
+  cos-lat-weighted (with NaN-aware masking).  Mid-troposphere
+  spread changes 8.0 K → 10.7 K (tropics-amplified).
+* LOW: docstring off-by-one (5 → 6 snapshots in 30-day quick run).
+* LOW: NaN-robust top-5 ordering.
+* LOW: sponge comment now has full run provenance.
+* LOW: `--days` validates positive value.
+* LOW: 2 new unit tests for per-level spread (29/29 pass).
+
+The iterate-with-codex protocol on iter-10..15 is now CLEAN
+(all findings closed).
 
 ---
 
 ## Iteration backlog
 
-- [ ] iter-12: 60-day HS run analysis — does climatology RMS drop
-      as expected with longer spin-up?  Goal: ≤ 1.0 K.
-- [ ] iter-13+: 200-day HS run for canonical climatology
-      verification.
-- [ ] AMIP physical realism with realistic GHG/aerosol/ozone
-      forcing.  Currently AMIP uses Held-Suarez forcing as a
-      placeholder.
-- [ ] OMIP integration with ocean test matrix (already has
-      cross-grid plots from iter-1's predecessor).
-- [ ] GPU / MPI efficiency benchmarking pass with cross-grid
+- [ ] **HS at full 200-day spin-up to test convergence at
+      equilibrium** (~1 hr wall time on 4 grids, 8 runs).
+- [ ] **AMIP physical realism with realistic GHG/aerosol/ozone
+      forcing**.  Currently AMIP uses Held-Suarez forcing as a
+      placeholder; `forcing/external.py` has GHGConfig + Kinne
+      aerosol + CMIP6 ozone infrastructure that needs to be
+      wired in.
+- [ ] **RCE cross-grid comparison**.  Infrastructure
+      (`scripts/run_rce.py`) supports all 4 grid types; needs
+      a wrapper that runs each grid and feeds the iter-1..16
+      comparison plotter.
+- [ ] **OMIP integration** with ocean test matrix (already has
+      cross-grid plots from the existing
+      `run_ocean_test_matrix.py`).
+- [ ] **GPU / MPI efficiency benchmarking** pass with cross-grid
       timing table in the summary.
-- [ ] Direct unit test for the new helpers under
-      `tests/scripts/test_atmosphere_cross_grid_plots.py`.
-- [ ] Long-running / GPU-aware codex review on the post-iter-10
-      branch.
+- [ ] **Cross-dycore dissipation retuning**: the iter-13/14/15
+      conclusion is that cube/latlon/ico/spectral need
+      principled re-tuning so all four implement the same
+      effective dissipation profile.  Multi-iteration scope.
