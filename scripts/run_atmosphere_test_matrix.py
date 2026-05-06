@@ -393,6 +393,7 @@ def _make_rrtmgp_physics(model_type: str, dt: float, hs_fn=None,
     eff_co2 = co2_ppmv if co2_ppmv is not None else _RUNTIME_RRTMGP_OVERRIDES.get("co2_ppmv")
     eff_ch4 = ch4_ppbv if ch4_ppbv is not None else _RUNTIME_RRTMGP_OVERRIDES.get("ch4_ppbv")
     eff_n2o = n2o_ppbv if n2o_ppbv is not None else _RUNTIME_RRTMGP_OVERRIDES.get("n2o_ppbv")
+    eff_cloud = _RUNTIME_RRTMGP_OVERRIDES.get("cloud_scheme")
     rrtmgp_kwargs = {}
     if eff_co2 is not None:
         rrtmgp_kwargs["co2_ppmv"] = eff_co2
@@ -400,11 +401,19 @@ def _make_rrtmgp_physics(model_type: str, dt: float, hs_fn=None,
         rrtmgp_kwargs["ch4_ppbv"] = eff_ch4
     if eff_n2o is not None:
         rrtmgp_kwargs["n2o_ppbv"] = eff_n2o
+    # Iter-36 codex HIGH: ``RRTMGPConfig.include_clouds`` defaults to
+    # False, which gates the RRTMGP cloud-optics path off even when
+    # ``RadiationConfig.cloud_scheme != "none"``.  When the user
+    # asks for a non-trivial cloud_scheme via ``--cloud-scheme``,
+    # also flip ``include_clouds`` so RRTMGP actually consumes the
+    # computed cloud properties.
+    if eff_cloud is not None and eff_cloud != "none":
+        rrtmgp_kwargs["include_clouds"] = True
     rrtmgp_cfg = RRTMGPConfig(**rrtmgp_kwargs) if rrtmgp_kwargs else RRTMGPConfig()
 
     # Iter-34: route ``--cloud-scheme`` through RadiationConfig
-    # for AMIP-with-clouds runs.
-    eff_cloud = _RUNTIME_RRTMGP_OVERRIDES.get("cloud_scheme")
+    # for AMIP-with-clouds runs.  iter-36: ``include_clouds`` flag
+    # above ensures the scheme actually fires.
     rad_kwargs = {"scheme": "rrtmgp", "rrtmgp": rrtmgp_cfg}
     if eff_cloud is not None:
         rad_kwargs["cloud_scheme"] = eff_cloud

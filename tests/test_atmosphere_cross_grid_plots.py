@@ -629,50 +629,80 @@ class TestRrtmgpGhgOverrides:
         assert params["ch4_ppbv"].default is None
         assert params["n2o_ppbv"].default is None
 
+    def test_cloud_scheme_flips_include_clouds_in_rrtmgp_config(self):
+        """iter-36 codex HIGH: when ``--cloud-scheme`` is set to a
+        non-"none" value, ``RRTMGPConfig.include_clouds`` must
+        flip to True so RRTMGP actually consumes cloud properties.
+
+        Verify by reading the source code path that builds
+        ``rrtmgp_kwargs`` — we check for the conditional that
+        injects ``include_clouds=True``.  A direct
+        ``_make_rrtmgp_physics`` call would JIT-compile the full
+        radiation kernel; not desirable in a fast unit test.
+        """
+        import inspect
+        src = inspect.getsource(M._make_rrtmgp_physics)
+        # The iter-36 fix injects ``include_clouds=True`` whenever
+        # ``eff_cloud not in (None, "none")``.
+        assert 'include_clouds' in src, (
+            "iter-36 fix missing: --cloud-scheme should flip "
+            "RRTMGPConfig.include_clouds to True"
+        )
+        assert 'eff_cloud' in src and '"none"' in src
+
 
 # ---------------------------------------------------------------------------
 # iter-35: _augment_with_rrtmgp_overrides helper
 # ---------------------------------------------------------------------------
 
 class TestAugmentWithRrtmgpOverrides:
+    """Tests for ``_augment_with_rrtmgp_overrides`` (iter-35).
+
+    All tests snapshot the full ``_RUNTIME_RRTMGP_OVERRIDES`` dict
+    before mutating and restore it afterwards (iter-36 codex LOW
+    fix).  This makes the tests isolation-safe regardless of which
+    keys end up being touched.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolate_overrides(self):
+        """Snapshot/restore the full overrides dict around each test."""
+        snapshot = dict(M._RUNTIME_RRTMGP_OVERRIDES)
+        try:
+            # Start each test from a known-clean state.
+            for k in M._RUNTIME_RRTMGP_OVERRIDES:
+                M._RUNTIME_RRTMGP_OVERRIDES[k] = None
+            yield
+        finally:
+            M._RUNTIME_RRTMGP_OVERRIDES.clear()
+            M._RUNTIME_RRTMGP_OVERRIDES.update(snapshot)
+
     def test_no_op_for_gray_radiation(self):
         """Helper is a no-op when ``radiation != "rrtmgp"``."""
         rows = {"test": "x", "wall_time": "1.0s"}
-        # Even if overrides are SET, gray-rad path doesn't write them.
         M._RUNTIME_RRTMGP_OVERRIDES["co2_ppmv"] = 280.0
-        try:
-            out = M._augment_with_rrtmgp_overrides(rows, "gray")
-            assert "co2_ppmv" not in out
-            assert out["test"] == "x"
-        finally:
-            M._RUNTIME_RRTMGP_OVERRIDES["co2_ppmv"] = None
+        out = M._augment_with_rrtmgp_overrides(rows, "gray")
+        assert "co2_ppmv" not in out
+        assert out["test"] == "x"
 
     def test_appends_rrtmgp_overrides(self):
         """When ``radiation == "rrtmgp"``, set overrides are recorded."""
-        # Set up overrides.
         M._RUNTIME_RRTMGP_OVERRIDES["co2_ppmv"] = 280.0
         M._RUNTIME_RRTMGP_OVERRIDES["cloud_scheme"] = "sundqvist"
-        try:
-            out = M._augment_with_rrtmgp_overrides(
-                {"test": "y", "wall_time": "1.0s"}, "rrtmgp",
-            )
-            assert out["co2_ppmv"] == 280.0
-            assert out["cloud_scheme"] == "sundqvist"
-            # Unset overrides not appended.
-            assert "ch4_ppbv" not in out
-            assert "n2o_ppbv" not in out
-        finally:
-            M._RUNTIME_RRTMGP_OVERRIDES["co2_ppmv"] = None
-            M._RUNTIME_RRTMGP_OVERRIDES["cloud_scheme"] = None
+        out = M._augment_with_rrtmgp_overrides(
+            {"test": "y", "wall_time": "1.0s"}, "rrtmgp",
+        )
+        assert out["co2_ppmv"] == 280.0
+        assert out["cloud_scheme"] == "sundqvist"
+        # Unset overrides not appended (fixture clears all keys to None).
+        assert "ch4_ppbv" not in out
+        assert "n2o_ppbv" not in out
 
     def test_does_not_mutate_input_dict(self):
         """Helper returns a NEW dict; doesn't mutate the caller's."""
         original = {"test": "z", "wall_time": "1.0s"}
         M._RUNTIME_RRTMGP_OVERRIDES["co2_ppmv"] = 415.0
-        try:
-            out = M._augment_with_rrtmgp_overrides(original, "rrtmgp")
-            assert "co2_ppmv" in out
-            # Original dict unchanged.
-            assert "co2_ppmv" not in original
-        finally:
-            M._RUNTIME_RRTMGP_OVERRIDES["co2_ppmv"] = None
+        out = M._augment_with_rrtmgp_overrides(original, "rrtmgp")
+        assert "co2_ppmv" in out
+        # Original dict unchanged.
+        assert "co2_ppmv" not in original
