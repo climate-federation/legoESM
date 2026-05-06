@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-75 snapshot)
+**Branch**: `simulation_full_check` (iter-76 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..75 findings.  It is the user-facing
+This report consolidates iter-1..76 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -29,8 +29,8 @@ and every available pair of grids:
   `T(latitude, σ)` cross-section, the canonical Held-Suarez
   Fig. 3 layout.
 
-Every helper has a corresponding unit test (127 / 127 pass
-across `tests/test_atmosphere_cross_grid_plots.py` (78) +
+Every helper has a corresponding unit test (128 / 128 pass
+across `tests/test_atmosphere_cross_grid_plots.py` (79) +
 `test_ocean_cross_grid_plots.py` (15) +
 `test_cross_grid_wrappers.py` (34)) plus 3 MPAS-mesh-
 unavailable skips.
@@ -1261,13 +1261,29 @@ round caught real issues; final convergence is clean.
 
   2 new structural-regression tests pin the iter-75 stale-
   purge fixes.
+* iter-76: closed the iter-75 deferred MEDIUM (end-to-end
+  stub coverage of ``--cross-grid-plots-only --test
+  <external>`` fallback).  New test
+  ``TestCrossGridPlotsOnlyExternalCaseFallback::test_test_rce_fallback_finds_synthetic_output``
+  synthesises 4-grid timeseries-only RCE-style output,
+  invokes ``M.main()`` with ``--cross-grid-plots-only
+  --test rce``, and asserts ``comparison_timeseries.png``
+  is produced.  This pins the iter-73 ``{args.test}``
+  fallback for the case where ``--test <name>`` matches no
+  TEST_MATRIX entry.
 
-127/127 unit tests pass + 3 MPAS-mesh-unavailable skips
-(across ``tests/test_atmosphere_cross_grid_plots.py`` (77 +
+  Also validated the iter-75 stale-purge fix end-to-end by
+  running the RCE wrapper twice into the same OUTDIR — both
+  runs regenerate output cleanly, second run's
+  ``results.txt`` timestamp 89 s later than the first,
+  files have new content (no stale-data interference).
+
+128/128 unit tests pass + 3 MPAS-mesh-unavailable skips
+(across ``tests/test_atmosphere_cross_grid_plots.py`` (78 +
 3 skips), ``tests/test_ocean_cross_grid_plots.py`` (15), and
 ``tests/test_cross_grid_wrappers.py`` (34)).
 
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-75 update).*
+(iter-76 update).*

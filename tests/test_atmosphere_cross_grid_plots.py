@@ -497,6 +497,96 @@ class TestNpzMissingCollection:
 
 
 # ---------------------------------------------------------------------------
+# iter-76: pin the iter-73 ``--test <external>`` fallback (RCE / OMIP /
+# any case run by external scripts not in TEST_MATRIX)
+# ---------------------------------------------------------------------------
+
+class TestCrossGridPlotsOnlyExternalCaseFallback:
+    """End-to-end stub coverage of the iter-73 ``--cross-grid-plots-only
+    --test <external>`` fallback.  TEST_MATRIX has no ``rce``,
+    ``omip``, etc. entries (those are run by external
+    ``run_rce.py`` / ``run_omip.py``), but the user-facing wrapper
+    invokes ``--cross-grid-plots-only --test rce`` to collect the
+    cross-grid plot.  Without the iter-73 fallback, the matrix
+    runner would silently skip all cases.
+
+    The codex iter-75 review flagged this as MEDIUM coverage gap
+    (no end-to-end stub).  iter-76 closes it: synthesize 4-grid
+    timeseries-only output, run ``main()`` with ``--cross-grid-
+    plots-only --test rce``, assert the cross-grid plot is
+    produced.
+    """
+
+    def _write_synthetic_grid_output(
+        self, base: Path, test_case: str, grid: str, resolution: str,
+    ):
+        """Mimic a per-grid RCE/OMIP output with matrix-format files."""
+        d = base / "hydrostatic" / test_case / grid / resolution
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "mean_timeseries.csv").write_text(
+            "time_days,mean_T_sfc,mean_T,max_wind\n"
+            "1.0,299.96,278.64,0.86\n"
+            "2.0,299.95,277.27,1.76\n"
+            "3.0,299.95,275.95,2.65\n"
+        )
+        (d / "results.txt").write_text(
+            f"test: {test_case}\n"
+            f"grid: {grid}\n"
+            f"resolution: {resolution}\n"
+            f"days: 3\n"
+            f"dt: 600.0\n"
+            f"levels: 20\n"
+            f"status: PASS\n"
+            f"wall_time: 16.5s\n"
+        )
+
+    def test_test_rce_fallback_finds_synthetic_output(self, tmp_path, monkeypatch):
+        """Synthesize 4-grid RCE-style output, run main() with
+        ``--cross-grid-plots-only --test rce``, verify the
+        cross-grid plot is produced (i.e. the iter-73 fallback
+        ``{args.test}`` for empty allowed_cases worked).
+        """
+        # 4-grid synthetic output.
+        for grid, resolution in [
+            ("cubed_sphere", "C24"),
+            ("latlon", "32x64"),
+            ("icosahedral", "ico4"),
+            ("spectral", "T21"),
+        ]:
+            self._write_synthetic_grid_output(
+                tmp_path, "rce", grid, resolution,
+            )
+
+        # Invoke main() via argv override.
+        monkeypatch.setattr(
+            sys, "argv",
+            [
+                "run_atmosphere_test_matrix.py",
+                "--cross-grid-plots-only",
+                "--test", "rce",
+                "--output", str(tmp_path),
+            ],
+        )
+        # main() prints to stdout — capture isn't strictly needed,
+        # but we need to make sure it doesn't sys.exit.
+        try:
+            M.main()
+        except SystemExit as e:
+            assert e.code in (0, None), (
+                f"main() exited with code {e.code}"
+            )
+
+        # Cross-grid plot was produced at the case-dir level.
+        case_dir = tmp_path / "hydrostatic" / "rce"
+        plot_path = case_dir / "comparison_timeseries.png"
+        assert plot_path.exists(), (
+            f"iter-73 fallback failed: {plot_path} was not produced.  "
+            f"This means ``--test rce`` matched 0 cases (the iter-73 "
+            f"``{{args.test}}`` fallback regressed)."
+        )
+
+
+# ---------------------------------------------------------------------------
 # iter-32: GPU/MPI efficiency table behaviour on DCMIP / NH metadata
 # ---------------------------------------------------------------------------
 
