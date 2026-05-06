@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-53 snapshot)
+**Branch**: `simulation_full_check` (iter-54 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..53 findings.  It is the user-facing
+This report consolidates iter-1..54 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -29,10 +29,10 @@ and every available pair of grids:
   `T(latitude, σ)` cross-section, the canonical Held-Suarez
   Fig. 3 layout.
 
-Every helper has a corresponding unit test (110 / 110 pass
+Every helper has a corresponding unit test (112 / 112 pass
 across `tests/test_atmosphere_cross_grid_plots.py` (71) +
 `test_ocean_cross_grid_plots.py` (15) +
-`test_cross_grid_wrappers.py` (24)) plus 3 MPAS-mesh-
+`test_cross_grid_wrappers.py` (26)) plus 3 MPAS-mesh-
 unavailable skips.
 
 CLI:
@@ -172,12 +172,14 @@ cross-grid ocean test (wind-driven gyres / OMIP) is a follow-up.
 | 50 | mixed runs (1 with snapshots, others timeseries-only) emitted single-grid "cross-grid" snapshot plots | MEDIUM |
 | 50 | corrupt `snapshots_latlon.npz` would drop an otherwise-usable timeseries run | MEDIUM |
 | 51 | unparseable `results.txt` (empty metadata) would drop a CSV-valid run despite per-artifact isolation | MEDIUM |
+| 54 | OMIP wrapper never invoked the cross-grid plotter — only per-grid plots produced | HIGH |
+| 54 | OMIP `_run_replot` discovery rglob'd `snapshots_latlon.npz` only, missing iter-49 timeseries-only runs | HIGH |
 
 **Codex adversarial review iterations**: iter-5, iter-6, iter-7,
 iter-16, iter-21, iter-26, iter-27, iter-32, iter-36, iter-37,
 iter-39, iter-42, iter-43, iter-44, iter-46, iter-47, iter-49,
-iter-50, iter-52.  Each round caught real issues; final
-convergence is clean.
+iter-50, iter-52, iter-53.  Each round caught real issues;
+final convergence is clean.
 
 ---
 
@@ -194,7 +196,7 @@ convergence is clean.
 | Same colorbar/projection across grids | ✅ DONE (cartopy PlateCarrée + shared cmap) |
 | Physical consistency vs reference papers | ⚠️ Williamson cases agree to machine precision; HS climatology disagrees structurally (documented in §2) |
 | GPU / MPI efficiency | ✅ DONE (iter-28/29: per-test-case ``wall-time/day`` ranking + speedup factor in every ``comparison_summary.txt``) |
-| `/codex:adversarial-review` | ✅ DONE (19 review rounds: iter-5/6/7/16/21/26/27/32/36/37/39/42/43/44/46/47/49/50/52, all findings addressed) |
+| `/codex:adversarial-review` | ✅ DONE (20 review rounds: iter-5/6/7/16/21/26/27/32/36/37/39/42/43/44/46/47/49/50/52/53, all findings addressed) |
 
 ---
 
@@ -513,12 +515,35 @@ convergence is clean.
   test extended from substring to positional-arg parsing
   + ``--*-file`` propagation.
 
-110/110 unit tests pass + 3 MPAS-mesh-unavailable skips
+* iter-54: tighten iter-53 wrapper tests against codex
+  re-review (3 HIGH + 1 MEDIUM + 1 LOW).  Added
+  ``_extract_grid_loop_body`` helper that returns the bash
+  loop body only, so per-iteration ordering checks are now
+  scoped (iter-53 whole-file order let an out-of-loop refactor
+  pass).  HIGH: NPZ purge order checked INSIDE the loop;
+  converter order checked INSIDE the loop; "last python
+  invocation" widened from matrix-runner only to all python
+  calls so an unrelated post-hoc python step flips the test.
+  HIGH: OMIP wrapper actually wires the cross-grid plotter
+  (was missing entirely) — both ``run_omip.py --output
+  $OUTPUT/omip`` and a final ``run_ocean_test_matrix.py
+  --replot --only omip`` invocation; ``_run_replot``
+  discovery extended to also glob for
+  ``mean_timeseries.csv`` so iter-49's collector relaxation
+  has an entry point for OMIP.  MEDIUM: ANY_FAILED guard
+  rewritten with structural checks (find ``if !`` block, find
+  matching ``fi``, check ``ANY_FAILED=1`` is in between)
+  rather than the iter-53 brittle ``[^f]*?`` regex.  LOW:
+  forcing-flag propagation tests rewritten as exact
+  ``if [ -n "$VAR" ]; then EXTRA_FLAGS+=...`` pattern matches
+  with ``${var}`` / ``$var`` flexibility.
+
+112/112 unit tests pass + 3 MPAS-mesh-unavailable skips
 (across ``tests/test_atmosphere_cross_grid_plots.py`` (71 +
 3 skips), ``tests/test_ocean_cross_grid_plots.py`` (15), and
-``tests/test_cross_grid_wrappers.py`` (24)).
+``tests/test_cross_grid_wrappers.py`` (26)).
 
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-53 update).*
+(iter-54 update).*

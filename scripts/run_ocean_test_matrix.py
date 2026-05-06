@@ -5938,25 +5938,53 @@ def _run_replot(args) -> None:
 
     t_start = time.time()
 
-    # Discover all test case directories with results
+    # Discover all test case directories with results.
+    # iter-53: ALSO discover timeseries-only test cases (OMIP-style)
+    # by globbing for ``mean_timeseries.csv``.  Without this, iter-49's
+    # collector relaxation has no entry point — replot would silently
+    # skip OMIP runs because they don't emit ``snapshots_latlon.npz``.
     test_case_dirs = set()
     replotted = 0
 
-    for case_dir in sorted(output_base.rglob("snapshots_latlon.npz")):
-        res_dir = case_dir.parent        # e.g., results/ocean/baroclinic_gyre/latlon_regional/24x48
-        grid_dir = res_dir.parent         # e.g., results/ocean/baroclinic_gyre/latlon_regional
-        test_dir = grid_dir.parent        # e.g., results/ocean/baroclinic_gyre
+    discovery_globs = ["snapshots_latlon.npz", "mean_timeseries.csv"]
+    seen_res_dirs: set[Path] = set()
 
-        grid_name = grid_dir.name
-        test_name = test_dir.name
+    for pattern in discovery_globs:
+        for marker in sorted(output_base.rglob(pattern)):
+            res_dir = marker.parent
+            if res_dir in seen_res_dirs:
+                continue
+            seen_res_dirs.add(res_dir)
+            grid_dir = res_dir.parent
+            test_dir = grid_dir.parent
 
-        # Apply filters
-        if args.only != "all" and args.only not in test_name:
-            continue
-        if args.grid != "all" and args.grid != grid_name:
-            continue
+            grid_name = grid_dir.name
+            test_name = test_dir.name
 
-        print(f"  Replotting {test_name}/{grid_name}/{res_dir.name} ...")
+            # Apply filters
+            if args.only != "all" and args.only not in test_name:
+                continue
+            if args.grid != "all" and args.grid != grid_name:
+                continue
+
+            # iter-53: only the snapshot-marker path replots
+            # individual case snapshots.  Timeseries-only cases skip
+            # ``_replot_case_snapshots`` (it requires npz data) but
+            # still add to ``test_case_dirs`` so the cross-grid
+            # comparison block below picks them up.
+            if pattern == "snapshots_latlon.npz":
+                print(
+                    f"  Replotting {test_name}/{grid_name}/"
+                    f"{res_dir.name} ..."
+                )
+            else:
+                print(
+                    f"  Discovered timeseries-only "
+                    f"{test_name}/{grid_name}/{res_dir.name}"
+                )
+                # Skip the per-case snapshot-replot step.
+                test_case_dirs.add(test_dir)
+                continue
         try:
             _replot_case_snapshots(res_dir)
             replotted += 1

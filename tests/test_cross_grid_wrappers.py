@@ -81,6 +81,31 @@ def _extract_grid_loop(text: str) -> list[str]:
     return m.group(1).split()
 
 
+def _extract_grid_loop_body(text: str) -> tuple[int, int, str]:
+    """Return ``(start_offset, end_offset, body)`` of the bash
+    ``for GRID in ...; do  <body>  done`` block.
+
+    iter-54 fix: the cross-grid wrappers contain no nested
+    ``for``/``while``/``until`` blocks, so we just locate the
+    NEXT ``done`` keyword (anchored at line start to avoid
+    matching ``for``/``done`` substrings inside echo / variable /
+    error-message text such as ``run_amip.py failed for $GRID``)
+    after the ``for GRID in ...; do`` opening.
+    """
+    m_open = re.search(r"for\s+GRID\s+in\s+[^;]+;\s*do", text)
+    assert m_open, "no `for GRID in ...; do` loop opening"
+    # Match a ``done`` keyword at the start of a line (allowing
+    # leading whitespace) — bash convention for loop closures
+    # in these wrapper scripts.
+    m_close = re.search(
+        r"^[ \t]*done\b", text[m_open.end():], re.MULTILINE,
+    )
+    assert m_close, "no matching ``done`` for grid loop"
+    body_start = m_open.end()
+    body_end = body_start + m_close.start()
+    return body_start, body_end, text[body_start:body_end]
+
+
 def _strip_comments(text: str) -> str:
     """Remove ``#`` line comments so substring checks can't false-match
     against documentation/usage examples in the header.
@@ -180,15 +205,15 @@ class TestRceCrossGridWrapper:
         in the file — otherwise a refactor that adds an unrelated
         post-step could leave the cross-grid plot calling against
         partial output."""
-        # Find every python invocation of the matrix runner.
-        # Bash line continuations (``\\\n``) are consumed so we
-        # capture the FULL command including any flags on the next
-        # line (e.g. ``--cross-grid-plots-only``).
+        # iter-54 codex HIGH: find EVERY python invocation
+        # (not just the matrix runner) and assert the LAST one is
+        # the cross-grid plot.  A buggy refactor that puts an
+        # unrelated python call after the cross-grid plot
+        # invocation must flip the test.
         invocations = [
             (m.start(), m.group(0))
             for m in re.finditer(
-                r"python\s+scripts/run_atmosphere_test_matrix\.py"
-                r"(?:[^\n\\]|\\\n)*",  # consume through line continuations
+                r"python\s+\S+\.py(?:[^\n\\]|\\\n)*",
                 wrapper_code,
             )
         ]
@@ -260,6 +285,37 @@ class TestOmipCrossGridWrapper:
             "run_omip.py so the matrix-runner collector picks it up"
         )
 
+    def test_outdir_uses_canonical_omip_prefix(self, wrapper_code):
+        """iter-53 fix: ``$OUTPUT/omip`` ensures the test_case_dir
+        parent has the canonical name for the ocean-matrix
+        ``--replot`` path to discover OMIP runs.  Without this,
+        ``_run_replot`` would not find the OMIP test case."""
+        m = re.search(r'OUTDIR=\s*"\$OUTPUT/omip"', wrapper_code)
+        assert m, (
+            "OMIP wrapper OUTDIR must be ``\"$OUTPUT/omip\"`` so "
+            "the ocean-matrix --replot path discovers the runs"
+        )
+
+    def test_invokes_cross_grid_plotter_at_end(self, wrapper_code):
+        """iter-53 + iter-54 codex HIGH: the OMIP wrapper must
+        invoke ``run_ocean_test_matrix.py --replot`` after the
+        per-grid loop so the iter-49-relaxed collector emits
+        cross-grid comparison plots.  Without this step the
+        wrapper produces only per-grid plots (the original
+        iter-25 limitation)."""
+        invocations = [
+            (m.start(), m.group(0))
+            for m in re.finditer(
+                r"python\s+\S+\.py(?:[^\n\\]|\\\n)*",
+                wrapper_code,
+            )
+        ]
+        assert invocations
+        last = invocations[-1][1]
+        assert "run_ocean_test_matrix.py" in last
+        assert "--replot" in last
+        assert "--only omip" in last
+
 
 class TestAmipCrossGridWrapper:
     """Pin ``scripts/run_amip_cross_grid.sh`` (iter-41) and the
@@ -318,70 +374,92 @@ class TestAmipCrossGridWrapper:
             '`"$OUTPUT/hydrostatic/amip/$FOLDER/$RES"`'
         )
 
-    def test_purges_stale_npz_BEFORE_run_amip(self, wrapper_code):
-        """iter-53 codex HIGH: not only must ``rm -f
-        $OUTDIR/timeseries.npz`` appear, but it must come BEFORE
-        the ``run_amip.py`` invocation in source order.  Otherwise
-        a wrapper that purges AFTER would still fool the substring
-        check while reverting the iter-43 fix."""
+    def test_purges_stale_npz_BEFORE_run_amip_inside_loop(
+        self, wrapper_code,
+    ):
+        """iter-54 codex HIGH: the iter-53 whole-file order check
+        let a hypothetical refactor that moved the purge OUT of
+        the loop body still pass.  Re-scope the order check to
+        WITHIN the loop body so per-iteration semantics are
+        pinned.
+        """
+        _, _, body = _extract_grid_loop_body(wrapper_code)
         purge_match = re.search(
             r'rm\s+-f\s+"\$OUTDIR/timeseries\.npz"',
-            wrapper_code,
+            body,
         )
-        run_match = re.search(r'scripts/run_amip\.py', wrapper_code)
+        run_match = re.search(r'scripts/run_amip\.py', body)
         assert purge_match, (
-            "iter-43 codex HIGH guard missing: "
+            "iter-43 codex HIGH guard missing INSIDE the loop body: "
             'rm -f "$OUTDIR/timeseries.npz"'
         )
-        assert run_match, "no run_amip.py invocation found"
+        assert run_match, "no run_amip.py invocation INSIDE the loop body"
         assert purge_match.start() < run_match.start(), (
-            f"iter-53 codex HIGH: the rm -f \"$OUTDIR/timeseries.npz\" "
-            f"line (at offset {purge_match.start()}) must come BEFORE "
-            f"the run_amip.py invocation (at offset {run_match.start()})"
+            f"iter-54 codex HIGH: rm -f must come BEFORE run_amip.py "
+            f"INSIDE the loop body"
         )
 
-    def test_converter_runs_AFTER_run_amip(self, wrapper_code):
-        """iter-53 codex MEDIUM: the converter must run AFTER
-        ``run_amip.py`` finishes (otherwise it would convert
-        whatever stale or partial state was on disk)."""
-        run_match = re.search(r'scripts/run_amip\.py', wrapper_code)
+    def test_converter_runs_AFTER_run_amip_inside_loop(self, wrapper_code):
+        """iter-54 codex HIGH: the converter must run AFTER
+        ``run_amip.py`` finishes within EACH per-grid iteration,
+        not just somewhere after the whole loop."""
+        _, _, body = _extract_grid_loop_body(wrapper_code)
+        run_match = re.search(r'scripts/run_amip\.py', body)
         conv_match = re.search(
-            r'scripts/_amip_to_matrix_format\.py', wrapper_code,
+            r'scripts/_amip_to_matrix_format\.py', body,
         )
-        assert run_match and conv_match
+        assert run_match and conv_match, (
+            "Both run_amip.py and _amip_to_matrix_format.py must "
+            "appear INSIDE the per-grid loop body"
+        )
         assert run_match.start() < conv_match.start(), (
-            "iter-53 codex MEDIUM: ``_amip_to_matrix_format.py`` "
-            "must be invoked AFTER ``run_amip.py``"
+            "iter-54 codex HIGH: converter must run AFTER run_amip.py "
+            "INSIDE the loop body (per-iteration ordering)"
         )
 
     def test_converter_uses_per_grid_OUTDIR(self, wrapper_code):
         """iter-53 codex MEDIUM: the converter must be invoked with
         ``$OUTDIR`` (the per-grid path) not ``$OUTPUT`` (the
-        cross-grid base)."""
+        cross-grid base).  iter-54 codex MEDIUM: scope to the
+        loop body."""
+        _, _, body = _extract_grid_loop_body(wrapper_code)
         m = re.search(
             r'_amip_to_matrix_format\.py\s+"\$OUTDIR"',
-            wrapper_code,
+            body,
         )
         assert m, (
             "iter-53 codex MEDIUM: converter must be called with "
-            '``"$OUTDIR"`` (the per-grid path)'
+            '``"$OUTDIR"`` INSIDE the loop body'
         )
 
     def test_any_failed_set_on_converter_failure(self, wrapper_code):
-        """iter-53 codex MEDIUM: ``ANY_FAILED=1`` must be inside
+        """iter-54 codex MEDIUM: ``ANY_FAILED=1`` must be inside
         the ``if ! ... ; then`` block whose condition is the
-        converter invocation — otherwise a stray assignment
-        elsewhere would fool the substring check."""
-        # Find the if-not-converter block.
-        m = re.search(
+        converter invocation — scoped to the loop body for
+        proper per-grid semantics.  The previous regex
+        ``[^f]*?`` was brittle; use a simpler structural check:
+        the converter's ``if ! ...`` line must appear in the
+        loop body, and ``ANY_FAILED=1`` must appear BEFORE the
+        matching ``fi`` for that block."""
+        _, _, body = _extract_grid_loop_body(wrapper_code)
+        # Find the converter's if-not block opening.
+        if_open = re.search(
             r'if\s+!\s+\.venv/bin/python\s+scripts/_amip_to_matrix_format\.py'
-            r'\s+"\$OUTDIR";?\s*then[^f]*?ANY_FAILED=1[^f]*?fi',
-            wrapper_code, re.DOTALL,
+            r'\s+"\$OUTDIR";?\s*then',
+            body,
         )
-        assert m, (
-            "iter-53 codex MEDIUM: ``ANY_FAILED=1`` must be inside "
-            "an ``if ! .../_amip_to_matrix_format.py \"$OUTDIR\"; "
-            "then ... fi`` block tied to the converter exit status"
+        assert if_open, (
+            "iter-54 codex MEDIUM: missing ``if ! ... "
+            "_amip_to_matrix_format.py \"$OUTDIR\"; then`` block "
+            "in the loop body"
+        )
+        # Find the matching ``fi`` (no nested if expected here).
+        fi_match = re.search(r'\n\s*fi\b', body[if_open.end():])
+        assert fi_match, "missing ``fi`` for converter if-block"
+        block_text = body[if_open.end():if_open.end() + fi_match.start()]
+        assert "ANY_FAILED=1" in block_text, (
+            "iter-54 codex MEDIUM: ``ANY_FAILED=1`` must be inside "
+            "the converter ``if ! ...; then ... fi`` block"
         )
 
     def test_cross_grid_plot_is_last_python_invocation(self, wrapper_code):
@@ -401,27 +479,47 @@ class TestAmipCrossGridWrapper:
         assert "--test amip" in last
 
     def test_supports_optional_forcing_file_args(self, wrapper_code):
-        """iter-53 codex LOW: tighten from substring to
-        positional-arg parsing.  The wrapper must read
-        ``$3``/``$4``/``$5`` as GHG/OZONE/AEROSOL files AND
-        propagate them via ``--*-forcing external --*-file``."""
+        """iter-54 codex LOW: tighten from substring to
+        positional-arg parsing AND verify the ``--*-file`` flags
+        appear in the EXTRA_FLAGS string that's threaded through
+        to ``run_amip.py``.  Substring tests on the whole file
+        could match dead branches or commented-out earlier
+        attempts.
+        """
         # Positional args.
-        assert re.search(r"GHG_FILE=\$\{3:-\}", wrapper_code), (
-            "GHG_FILE must come from positional arg 3"
+        assert re.search(r"GHG_FILE=\$\{3:-\}", wrapper_code)
+        assert re.search(r"OZONE_FILE=\$\{4:-\}", wrapper_code)
+        assert re.search(r"AEROSOL_FILE=\$\{5:-\}", wrapper_code)
+
+        # Each forcing kind must:
+        #   1. Build an EXTRA_FLAGS append guarded by ``-n "$XXX_FILE"``.
+        #   2. Use both ``--<kind>-forcing external`` AND
+        #      ``--<kind>-file $XXX_FILE``.
+        for kind, var in [
+            ("ghg", "GHG_FILE"),
+            ("ozone", "OZONE_FILE"),
+            ("aerosol", "AEROSOL_FILE"),
+        ]:
+            # Find the if-block that constructs the EXTRA_FLAGS for
+            # this kind.  Bash accepts both ``"$VAR"`` and
+            # ``"${VAR}"``; allow either spelling.
+            m = re.search(
+                rf'if\s+\[\s+-n\s+"\${{?{var}}}?"\s+\];?\s*then\s*\n'
+                rf'\s*EXTRA_FLAGS\+=" --{kind}-forcing external '
+                rf'--{kind}-file \${{?{var}}}?"',
+                wrapper_code,
+            )
+            assert m, (
+                f"iter-54 codex LOW: {kind} forcing-file plumbing "
+                f"missing or refactored.  Expected an "
+                f'``if [ -n "${var}" ]; then EXTRA_FLAGS+=" '
+                f'--{kind}-forcing external --{kind}-file ${var}"`` '
+                f"block (with or without ``${{}}`` braces)."
+            )
+        # And EXTRA_FLAGS must be passed through to run_amip.py.
+        assert "$EXTRA_FLAGS" in wrapper_code, (
+            "EXTRA_FLAGS must be passed through to run_amip.py"
         )
-        assert re.search(r"OZONE_FILE=\$\{4:-\}", wrapper_code), (
-            "OZONE_FILE must come from positional arg 4"
-        )
-        assert re.search(r"AEROSOL_FILE=\$\{5:-\}", wrapper_code), (
-            "AEROSOL_FILE must come from positional arg 5"
-        )
-        # Propagation through --*-forcing external --*-file flags.
-        assert "--ghg-forcing external" in wrapper_code
-        assert "--ghg-file $GHG_FILE" in wrapper_code
-        assert "--ozone-forcing external" in wrapper_code
-        assert "--ozone-file $OZONE_FILE" in wrapper_code
-        assert "--aerosol-forcing external" in wrapper_code
-        assert "--aerosol-file $AEROSOL_FILE" in wrapper_code
 
 
 class TestSharedConventions:

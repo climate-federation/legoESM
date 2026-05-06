@@ -25,7 +25,13 @@ DAYS=${2:-30}
 PHYSICS=${3:-full}
 
 for GRID in cubed_sphere latlon mpas spectral; do
-    OUTDIR="$OUTPUT"
+    # iter-53: write under ``$OUTPUT/omip/`` so the test-case
+    # parent directory has the canonical name for the
+    # ocean-matrix collector + replot path.  ``run_omip.py``
+    # appends ``/<grid>/<resolution>/`` itself, so the final
+    # layout is ``$OUTPUT/omip/<grid>/<resolution>/`` matching
+    # the matrix-runner convention.
+    OUTDIR="$OUTPUT/omip"
     echo "=================================================="
     echo "  OMIP on $GRID (days=$DAYS, physics=$PHYSICS)"
     echo "=================================================="
@@ -36,9 +42,11 @@ done
 
 echo ""
 echo "=================================================="
-echo "  All OMIP grids done.  Cross-grid plots: per-grid"
-echo "  ``timeseries.png`` files are under \$OUTPUT/<grid>/."
-echo "  Full cross-grid comparison plots require reorganizing"
-echo "  the OMIP output to match the ocean-matrix layout —"
-echo "  follow-up scope."
+echo "  Generating cross-grid comparison plots"
 echo "=================================================="
+# iter-53: invoke the ocean matrix's ``--replot`` discovery
+# path so the iter-49-relaxed collector produces the OMIP
+# cross-grid comparison plots.  Without this step the
+# wrapper produces only per-grid plots.
+JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py \
+    --replot --only omip --output "$OUTPUT"
