@@ -427,7 +427,14 @@ def compare_results(results: dict, output_dir: Path):
 
         mass_vals = diag.get("mass", [])
         if len(mass_vals) >= 2:
-            mass_drift = abs(mass_vals[-1] - mass_vals[0]) / abs(mass_vals[0] + 1e-30)
+            # iter-87: mirror the iter-83 fix in
+            # ``run_atmosphere_test_matrix.py:_compute_drift``.
+            # Previous denominator ``abs(mass_vals[0] + 1e-30)``
+            # had the same iter-78/80 pathology — for HS
+            # atmosphere mass_vals[0] is ~5e+19 Pa·m² so the
+            # 1e-30 floor never bit, but defensive consistency
+            # with iter-83 means using ``max(abs(.), 1.0)``.
+            mass_drift = abs(mass_vals[-1] - mass_vals[0]) / max(abs(mass_vals[0]), 1.0)
         else:
             mass_drift = 0
 
