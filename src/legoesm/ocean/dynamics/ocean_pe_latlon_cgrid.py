@@ -60,6 +60,7 @@ from legoesm.ocean.dynamics.ocean_tendency_common import (
 )
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     biharmonic_scaling_factor,
+    equatorial_boost_factor,
     laplacian_scaling_factor,
     divergence_cgrid,
     gradient_x_cgrid,
@@ -1314,6 +1315,40 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # Uses the proper vector Laplacian grad(div) - k×grad(curl) directly
     # on face velocities, avoiding the lossy cell-center detour.
     # See issue #105 for details.
+
+    # Slope-foot enhancement (MOM6 OM4 KH_BG_2D analog): multiplicative
+    # 3D factor (≥1) that boosts viscosity in the bottom-N levels over
+    # steep slopes. Targets f≈0 + steep-bathymetry instabilities
+    # (African shelf, ITF). When alpha=0, factor is identically 1
+    # (no-op, bit-exact backward compat).
+    _slope_foot_alpha = getattr(config, "slope_foot_alpha", 0.0)
+    if _slope_foot_alpha > 0.0:
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import slope_foot_enhancement_3d
+        _is_active = z_coord.is_active if isinstance(z_coord, OceanPartialCellCoordinate) else None
+        _slope_E = slope_foot_enhancement_3d(
+            H_bathy, mask, grid,
+            n_levels_from_bottom=getattr(config, "slope_foot_n_levels", 5),
+            alpha=_slope_foot_alpha,
+            threshold=getattr(config, "slope_foot_threshold", 0.1),
+            is_active=_is_active,
+            nlev=u.shape[-1],
+        )
+        # Interpolate cell-centred enhancement to u-faces, v-faces (min-rule
+        # for safety: the more conservative neighbour wins, so the boost
+        # acts on the steeper of the two adjacent columns).
+        _slope_E_u = jnp.minimum(_slope_E, jnp.roll(_slope_E, 1, axis=1))
+        _slope_E_u = jnp.concatenate([_slope_E_u, _slope_E_u[:, 0:1, :]], axis=1)
+        _slope_E_v_int = jnp.minimum(_slope_E[:-1], _slope_E[1:])
+        _slope_E_v = jnp.pad(_slope_E_v_int, ((1, 1), (0, 0), (0, 0)),
+                             constant_values=1.0)
+    else:
+        _slope_E_u = 1.0
+        _slope_E_v = 1.0
+
+    def _apply_slope_foot(t_u, t_v):
+        # No-op when slope_foot_alpha = 0 (factors are 1.0 scalars).
+        return t_u * _slope_E_u, t_v * _slope_E_v
+
     if config.A_h > 0 and config.B_h > 0:
         # Both A_h Laplacian and B_h biharmonic active: the biharmonic's
         # *inner* vector Laplacian is identical to the explicit A_h
@@ -1326,11 +1361,22 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             mask=mask, u_mask=u_mask, v_mask=v_mask)
         if config.A_h_lat_scaling:
             lap_scale_u, lap_scale_v = laplacian_scaling_factor(grid)
+            if config.A_h_eq_boost > 1.0:
+                eb_u, eb_v = equatorial_boost_factor(
+                    grid, config.A_h_eq_sigma_deg, config.A_h_eq_boost)
+                lap_scale_u = lap_scale_u * eb_u
+                lap_scale_v = lap_scale_v * eb_v
             diag_Ah_lap_u = config.A_h * lap_scale_u[:, None, None] * _vlap_u
             diag_Ah_lap_v = config.A_h * lap_scale_v[:, None, None] * _vlap_v
+        elif config.A_h_eq_boost > 1.0:
+            eb_u, eb_v = equatorial_boost_factor(
+                grid, config.A_h_eq_sigma_deg, config.A_h_eq_boost)
+            diag_Ah_lap_u = config.A_h * eb_u[:, None, None] * _vlap_u
+            diag_Ah_lap_v = config.A_h * eb_v[:, None, None] * _vlap_v
         else:
             diag_Ah_lap_u = config.A_h * _vlap_u
             diag_Ah_lap_v = config.A_h * _vlap_v
+        diag_Ah_lap_u, diag_Ah_lap_v = _apply_slope_foot(diag_Ah_lap_u, diag_Ah_lap_v)
         du_dt = du_dt + diag_Ah_lap_u
         dv_dt = dv_dt + diag_Ah_lap_v
         bilap_u, bilap_v = vector_laplacian_cgrid(
@@ -1339,6 +1385,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         scale_u, scale_v = biharmonic_scaling_factor(grid)
         diag_Bh_bilap_u = -config.B_h * scale_u[:, None, None] * bilap_u
         diag_Bh_bilap_v = -config.B_h * scale_v[:, None, None] * bilap_v
+        diag_Bh_bilap_u, diag_Bh_bilap_v = _apply_slope_foot(diag_Bh_bilap_u, diag_Bh_bilap_v)
         du_dt = du_dt + diag_Bh_bilap_u
         dv_dt = dv_dt + diag_Bh_bilap_v
     elif config.A_h > 0:
@@ -1347,11 +1394,22 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             mask=mask, u_mask=u_mask, v_mask=v_mask)
         if config.A_h_lat_scaling:
             lap_scale_u, lap_scale_v = laplacian_scaling_factor(grid)
+            if config.A_h_eq_boost > 1.0:
+                eb_u, eb_v = equatorial_boost_factor(
+                    grid, config.A_h_eq_sigma_deg, config.A_h_eq_boost)
+                lap_scale_u = lap_scale_u * eb_u
+                lap_scale_v = lap_scale_v * eb_v
             diag_Ah_lap_u = config.A_h * lap_scale_u[:, None, None] * vlap_u
             diag_Ah_lap_v = config.A_h * lap_scale_v[:, None, None] * vlap_v
+        elif config.A_h_eq_boost > 1.0:
+            eb_u, eb_v = equatorial_boost_factor(
+                grid, config.A_h_eq_sigma_deg, config.A_h_eq_boost)
+            diag_Ah_lap_u = config.A_h * eb_u[:, None, None] * vlap_u
+            diag_Ah_lap_v = config.A_h * eb_v[:, None, None] * vlap_v
         else:
             diag_Ah_lap_u = config.A_h * vlap_u
             diag_Ah_lap_v = config.A_h * vlap_v
+        diag_Ah_lap_u, diag_Ah_lap_v = _apply_slope_foot(diag_Ah_lap_u, diag_Ah_lap_v)
         du_dt = du_dt + diag_Ah_lap_u
         dv_dt = dv_dt + diag_Ah_lap_v
     elif config.B_h > 0:
@@ -1363,6 +1421,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         scale_u, scale_v = biharmonic_scaling_factor(grid)
         diag_Bh_bilap_u = -config.B_h * scale_u[:, None, None] * bilap_u
         diag_Bh_bilap_v = -config.B_h * scale_v[:, None, None] * bilap_v
+        diag_Bh_bilap_u, diag_Bh_bilap_v = _apply_slope_foot(diag_Bh_bilap_u, diag_Bh_bilap_v)
         du_dt = du_dt + diag_Bh_bilap_u
         dv_dt = dv_dt + diag_Bh_bilap_v
 
@@ -1372,6 +1431,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             mask=mask, u_mask=u_mask, v_mask=v_mask)
         diag_Cs_smag_u = -smag_u
         diag_Cs_smag_v = -smag_v
+        diag_Cs_smag_u, diag_Cs_smag_v = _apply_slope_foot(diag_Cs_smag_u, diag_Cs_smag_v)
         du_dt = du_dt + diag_Cs_smag_u
         dv_dt = dv_dt + diag_Cs_smag_v
 
@@ -1382,6 +1442,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             mask=mask, u_mask=u_mask, v_mask=v_mask)
         diag_Cl_leith_u = -leith_u
         diag_Cl_leith_v = -leith_v
+        diag_Cl_leith_u, diag_Cl_leith_v = _apply_slope_foot(diag_Cl_leith_u, diag_Cl_leith_v)
         du_dt = du_dt + diag_Cl_leith_u
         dv_dt = dv_dt + diag_Cl_leith_v
 

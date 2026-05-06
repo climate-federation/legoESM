@@ -197,6 +197,7 @@ These are recurring mistakes caught by slopbuster. Check for them before submitt
 - State assumptions explicitly.
 - When changing numerics or algorithms, explain the expected effect on stability, accuracy, conservation, or differentiability.
 - Do not present guesses as facts.
+- **Do not read/load image files into context** (via the Read tool) unless the user explicitly asks to see them. Instead, report the file path so the user can open it themselves. Loading images bloats context rapidly.
 
 # iterate-with-codex agent
 1. Implement the requested change

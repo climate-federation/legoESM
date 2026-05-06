@@ -94,6 +94,8 @@ def parse_args():
                    help="Minimum ocean depth [m]; shallower cells become land (default 10).")
     p.add_argument("--smoothing-passes", type=int, default=2,
                    help="Laplacian smoothing passes for bathymetry (default 2).")
+    p.add_argument("--r-factor-max", type=float, default=0.2,
+                   help="Maximum bathymetric slope r-factor for partial cells (default 0.2).")
     p.add_argument("--north-cap-lat", type=float, default=80.0,
                    help="Latitude [°N] above which all cells become land (default 80).")
     p.add_argument("--south-cap-lat", type=float, default=-80.0,
@@ -101,6 +103,48 @@ def parse_args():
                        "Latitude [°S] below which all cells become land. "
                        "Set to -90 to disable the southern cap and let "
                        "ETOPO define Antarctica naturally (default -80)."
+                   ))
+    p.add_argument("--A-h", type=float, default=None,
+                   help="Override Laplacian viscosity A_h [m²/s] (default: grid-dependent).")
+    p.add_argument("--B-h", type=float, default=None,
+                   help="Override biharmonic viscosity B_h [m⁴/s] (default: 5e9 for bathymetry).")
+    p.add_argument("--K-h", type=float, default=None,
+                   help="Override horizontal tracer diffusivity K_h [m²/s] (default: 1e3 with bathy).")
+    p.add_argument("--A-h-eq-boost", type=float, default=1.0,
+                   help=(
+                       "Equatorial A_h boost (>=1). Multiplies A_h by "
+                       "1 + (boost-1)*exp(-(lat/sigma)^2) so eq momentum gets "
+                       "extra dissipation. K_h (tracers) untouched. "
+                       "Typical 3-10. 1=disabled."
+                   ))
+    p.add_argument("--A-h-eq-sigma", type=float, default=5.0,
+                   help="Eq A_h boost Gaussian half-width [degrees]. Typical 3-7.")
+    p.add_argument("--C-smag", type=float, default=None,
+                   help="Smagorinsky biharmonic coefficient (dimensionless, OM4 uses 0.06).")
+    p.add_argument("--C-leith", type=float, default=None,
+                   help="Leith biharmonic coefficient (dimensionless, typical 1.0-2.0).")
+    p.add_argument("--pgf-scheme", type=str, default=None,
+                   choices=["adcroft", "smc03"],
+                   help="PGF scheme override (default smc03 with bathymetry).")
+    p.add_argument("--slope-foot-alpha", type=float, default=0.0,
+                   help=(
+                       "Slope-foot viscosity enhancement (MOM6 OM4 KH_BG_2D analog). "
+                       "Multiplies horizontal viscosity in bottom-N levels by "
+                       "1 + alpha*tanh(|grad H|/H/0.1). 0=disabled, 3.0=production. "
+                       "Targets African shelf, ITF, equatorial trench instabilities."
+                   ))
+    p.add_argument("--min-passage-width", type=int, default=0,
+                   help=(
+                       "Minimum passage width in grid cells. Passages narrower "
+                       "than this are filled (become land). Set to 2 to eliminate "
+                       "all 1-cell-wide straits that bottleneck WBCs (default 0=disabled)."
+                   ))
+    p.add_argument("--close-arctic-lat", type=float, default=None,
+                   help=(
+                       "Close off the Arctic completely above this latitude. "
+                       "Unlike --north-cap-lat which just caps land, this makes "
+                       "ALL cells above the latitude into land, creating a solid "
+                       "wall. E.g. 65.0 closes off the entire Arctic basin."
                    ))
     p.add_argument("--sw-down", type=float, default=200.0,
                    help="Constant downwelling SW [W/m²]")
@@ -240,7 +284,16 @@ def _build_physics_config(preset: str, water_type: str):
 
 def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                   physics_preset: str, water_type: str,
-                  use_bathymetry: bool = False):
+                  use_bathymetry: bool = False,
+                  A_h_override: float = None,
+                  B_h_override: float = None,
+                  K_h_override: float = None,
+                  A_h_eq_boost: float = 1.0,
+                  A_h_eq_sigma_deg: float = 5.0,
+                  C_smag: float = None,
+                  C_leith: float = None,
+                  pgf_scheme: str = None,
+                  slope_foot_alpha: float = 0.0):
     """Create grid, z_coord, config, model for any grid type.
 
     All grids use the SAME config-based diffusion (A_h, K_h, A_v, K_v)
@@ -353,10 +406,21 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                     kappa_max=2000.0,
                 ),
             )
+            _A_h = A_h_override if A_h_override is not None else 2.0e5
+            _B_h = B_h_override if B_h_override is not None else 5.0e9
+            _K_h = K_h_override if K_h_override is not None else 1e3
+            _C_smag = C_smag if C_smag is not None else 0.0
+            _C_leith = C_leith if C_leith is not None else 0.0
             config = LatLonCGridOceanConfig(
-                A_h=2.0e5, A_h_lat_scaling=True,
-                K_h=1e3, A_v=A_v, K_v=K_v,
-                B_h=5.0e9,
+                A_h=_A_h, A_h_lat_scaling=True,
+                A_h_eq_boost=A_h_eq_boost,
+                A_h_eq_sigma_deg=A_h_eq_sigma_deg,
+                K_h=_K_h, A_v=A_v, K_v=K_v,
+                B_h=_B_h,
+                C_smag=_C_smag,
+                C_leith=_C_leith,
+                C_leith_modified=(_C_leith > 0),
+                slope_foot_alpha=slope_foot_alpha,
                 # A2: biharmonic hyperviscosity on the DEPTH-MEAN
                 # (U_bar, V_bar) only.  Surgically damps the barotropic
                 # standing mode at deep cells next to steep slopes
@@ -380,7 +444,12 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                 physics=bathy_physics,
                 gm_redi=bathy_gm_redi,
                 barotropic_solver="implicit_cn",
-                pgf_scheme="smc03",
+                pgf_scheme=pgf_scheme if pgf_scheme is not None else "smc03",
+                # MOM6 MAXVEL: clip barotropic velocities to prevent
+                # blowup from WBC intensification at coarse resolution.
+                # MOM6 default is 6.0 m/s; we use 3.0 since realistic
+                # currents at 1° shouldn't exceed ~2 m/s.
+                maxvel_barotropic=3.0,
             )
         else:
             config = LatLonCGridOceanConfig(
@@ -693,12 +762,10 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
         state["dz_top"] = float(np.asarray(z_coord.dz_ref)[0])
     state["enable_sss_restoring"] = sss_restoring_enabled
 
-    # T_freeze cap inside the sponge zone — stand-in for sea ice.
-    # Requires the sponge mask to define the cap region.
-    freeze_cap_enabled = (
-        not args.jra55_no_freeze_cap
-        and sponge_enabled  # need sponge mask to scope the cap
-    )
+    # T_freeze cap — stand-in for the missing sea-ice model.
+    # When a sponge is active, cap only inside the sponge zone.
+    # When no sponge, cap globally over all ocean cells.
+    freeze_cap_enabled = not args.jra55_no_freeze_cap
     state["enable_freeze_cap"] = freeze_cap_enabled
     from legoesm import constants as _consts
     # State temperature is stored in °C per the lat-lon C-grid ocean
@@ -754,22 +821,30 @@ def _apply_sss_restoring(state, jra55_state, dt):
 
 
 def _apply_freeze_cap(state, jra55_state):
-    """Cap surface T from below at ``T_freeze_ocean`` inside the sponge.
+    """Cap surface T from below at ``T_freeze_ocean`` globally.
 
-    Stand-in for the missing sea-ice model: where the sponge gamma is
-    non-zero (the polar 5° of the active domain), prevent the surface
-    layer from cooling below seawater's freezing point. Without this,
-    bulk-flux heat loss in the closure cap drives spurious open-ocean
-    deep convection at the boundary.
+    Stand-in for the missing sea-ice model: prevent the surface layer
+    from cooling below seawater's freezing point (-1.8°C). Without
+    this, JRA55-do bulk-flux heat loss over polar regions (where the
+    atmosphere is very cold) drives SST below freezing and produces
+    unphysical densities.
+
+    When a sponge is active, the cap is scoped to the sponge zone only
+    (backward-compatible). When no sponge, the cap applies to all
+    ocean cells.
     """
-    sponge_active = jra55_state["sponge_gamma_2d"] > 0.0  # (n_lat, n_lon)
+    sponge_gamma = jra55_state.get("sponge_gamma_2d", None)
+    if sponge_gamma is not None and jnp.any(sponge_gamma > 0):
+        # Sponge active: cap only inside sponge zone
+        freeze_mask = sponge_gamma > 0.0
+    else:
+        # No sponge: cap globally over all ocean cells
+        freeze_mask = state.land_mask.data > 0.5
     T = state.T.data
     T_top = T[..., 0]
-    # State T is in °C; cap value is the seawater freezing point in °C
-    # (-1.8). Without this the cap would silently never trigger.
     T_freeze_C = jnp.asarray(jra55_state["T_freeze_ocean_C"], dtype=T.dtype)
     T_top_capped = jnp.where(
-        sponge_active,
+        freeze_mask,
         jnp.maximum(T_top, T_freeze_C),
         T_top,
     )
@@ -994,11 +1069,23 @@ def _build_jra55_block_fn(model, jra55_state, dt):
         sss_target_static = None
 
     if enable_freeze:
-        freeze_mask_static = jra55_state["sponge_gamma_2d"] > 0.0
+        sponge_gamma = jra55_state.get("sponge_gamma_2d", None)
+        if sponge_gamma is not None and np.any(np.asarray(sponge_gamma) > 0):
+            freeze_mask_static = sponge_gamma > 0.0
+        else:
+            # No sponge: cap globally over all ocean cells.
+            # Use the land_mask from the initial state (captured below).
+            freeze_mask_static = jra55_state.get("_ocean_mask_2d", None)
         T_freeze_C_static = float(jra55_state["T_freeze_ocean_C"])
     else:
         freeze_mask_static = None
         T_freeze_C_static = -1.8
+
+    # 3D velocity clip — caps ALL velocity components (barotropic +
+    # baroclinic) after each step.  The barotropic-only MAXVEL inside
+    # the split-explicit solver doesn't prevent baroclinic blowup.
+    _maxvel_3d = model.config.maxvel_barotropic
+    enable_maxvel = _maxvel_3d > 0.0
 
     @jax.jit
     def block_fn(state, atm_stack, runoff_stack, block_start_step):
@@ -1091,6 +1178,15 @@ def _build_jra55_block_fn(model, jra55_state, dt):
                 )
                 new_state = new_state._replace(
                     T=new_state.T.replace(data=T.at[..., 0].set(T_top_capped)),
+                )
+
+            # 3D velocity clip (MOM6 MAXVEL analog for full field).
+            if enable_maxvel:
+                u_clipped = jnp.clip(new_state.u.data, -_maxvel_3d, _maxvel_3d)
+                v_clipped = jnp.clip(new_state.v.data, -_maxvel_3d, _maxvel_3d)
+                new_state = new_state._replace(
+                    u=new_state.u.replace(data=u_clipped),
+                    v=new_state.v.replace(data=v_clipped),
                 )
 
             return new_state, None
@@ -1879,6 +1975,15 @@ def run_omip_single(grid_type: str, args) -> dict:
         grid_type, resolution, args.nlev, args.H_max,
         args.physics, args.water_type,
         use_bathymetry=(args.bathymetry is not None),
+        A_h_override=args.A_h,
+        B_h_override=args.B_h,
+        K_h_override=args.K_h,
+        A_h_eq_boost=args.A_h_eq_boost,
+        A_h_eq_sigma_deg=args.A_h_eq_sigma,
+        C_smag=args.C_smag,
+        C_leith=args.C_leith,
+        pgf_scheme=args.pgf_scheme,
+        slope_foot_alpha=args.slope_foot_alpha,
     )
 
     # --- Initialization strategy ---
@@ -1905,7 +2010,7 @@ def run_omip_single(grid_type: str, args) -> dict:
             enforce_straits=True,
             fill_isolated_basins=True,
             depth_is_negative=True,
-            r_factor_max=0.2,
+            r_factor_max=args.r_factor_max,
             north_cap_lat=args.north_cap_lat,
             south_cap_lat=args.south_cap_lat,
         )
@@ -1917,7 +2022,7 @@ def run_omip_single(grid_type: str, args) -> dict:
         print(f"  Bathymetry: {Path(args.bathymetry).name} "
               f"({n_ocean}/{n_total} ocean cells, "
               f"H_min={args.H_min}m, {args.smoothing_passes} smoothing passes, "
-              f"r_max=0.2)")
+              f"r_max={args.r_factor_max})")
 
         # Equatorial-only extra smoothing.
         # The 30-day spinup diagnosed a barotropic standing-mode
@@ -1971,6 +2076,188 @@ def run_omip_single(grid_type: str, args) -> dict:
             H_bathy_init = jnp.asarray(H_np, dtype=jnp.float64)
             print(f"  Equatorial smoothing: {eq_passes} extra Laplacian "
                   f"passes within ±{eq_band:.0f}° (cosine taper, wet-only)")
+
+        # --- Close Arctic completely (solid wall) ---
+        if args.close_arctic_lat is not None:
+            ocean_mask = np.array(land_mask_init, copy=True) > 0.5
+            lat_c = np.asarray(grid.lat) if hasattr(grid, 'lat') else None
+            if lat_c is not None:
+                # grid.lat is in radians; convert threshold to radians
+                arctic_rows = lat_c > np.deg2rad(args.close_arctic_lat)
+                n_closed = int(np.sum(ocean_mask[arctic_rows, :]))
+                ocean_mask[arctic_rows, :] = False
+                # Keep H_bathy unchanged — land cells retain depth values
+                # but are masked out (setting H=0 confuses partial-cell coord).
+                land_mask_init = jnp.asarray(ocean_mask.astype(np.float64))
+                print(f"  Arctic closure: {n_closed} cells → land above "
+                      f"{args.close_arctic_lat:.1f}°N")
+
+        # --- Widen narrow passages ---
+        if args.min_passage_width >= 2:
+            H_np = np.array(H_bathy_init, copy=True)
+            ocean_mask = np.array(land_mask_init, copy=True) > 0.5
+            n_lat_g, n_lon_g = ocean_mask.shape
+            fill_cells = np.zeros_like(ocean_mask)
+            min_w = args.min_passage_width
+
+            # Find cells that are part of passages narrower than min_w
+            # in the zonal direction (land on both sides within min_w-1)
+            for j in range(n_lat_g):
+                for i in range(n_lon_g):
+                    if not ocean_mask[j, i]:
+                        continue
+                    # Check zonal width: how many consecutive ocean cells
+                    # in the east-west direction including this cell?
+                    width = 1
+                    # count east
+                    for di in range(1, min_w):
+                        ii = (i + di) % n_lon_g
+                        if ocean_mask[j, ii]:
+                            width += 1
+                        else:
+                            break
+                    # count west
+                    for di in range(1, min_w):
+                        ii = (i - di) % n_lon_g
+                        if ocean_mask[j, ii]:
+                            width += 1
+                        else:
+                            break
+                    if width < min_w:
+                        fill_cells[j, i] = True
+
+            # Same for meridional direction
+            for j in range(n_lat_g):
+                for i in range(n_lon_g):
+                    if not ocean_mask[j, i]:
+                        continue
+                    width = 1
+                    for dj in range(1, min_w):
+                        jj = j + dj
+                        if jj < n_lat_g and ocean_mask[jj, i]:
+                            width += 1
+                        else:
+                            break
+                    for dj in range(1, min_w):
+                        jj = j - dj
+                        if jj >= 0 and ocean_mask[jj, i]:
+                            width += 1
+                        else:
+                            break
+                    if width < min_w:
+                        # Only fill if ALSO narrow zonally (avoid filling
+                        # long coastlines). A true narrow passage is narrow
+                        # in at least one direction.
+                        fill_cells[j, i] = True
+
+            # Actually we want cells that are narrow in BOTH directions
+            # to be filled... No — a 1-cell-wide strait running N-S is
+            # narrow zonally but wide meridionally. We want to fill cells
+            # narrow in ANY direction. But let's be more careful:
+            # Fill cells that are zonally narrow (land within min_w on both sides)
+            fill_zonal = np.zeros_like(ocean_mask)
+            fill_merid = np.zeros_like(ocean_mask)
+            for j in range(n_lat_g):
+                for i in range(n_lon_g):
+                    if not ocean_mask[j, i]:
+                        continue
+                    # Zonal: find distance to land on each side
+                    dist_e = 0
+                    for di in range(1, min_w + 1):
+                        ii = (i + di) % n_lon_g
+                        if ocean_mask[j, ii]:
+                            dist_e += 1
+                        else:
+                            break
+                    dist_w = 0
+                    for di in range(1, min_w + 1):
+                        ii = (i - di) % n_lon_g
+                        if ocean_mask[j, ii]:
+                            dist_w += 1
+                        else:
+                            break
+                    # Total passage width = dist_w + 1 + dist_e
+                    if (dist_w + 1 + dist_e) < min_w:
+                        fill_zonal[j, i] = True
+
+                    # Meridional
+                    dist_n = 0
+                    for dj in range(1, min_w + 1):
+                        jj = j + dj
+                        if jj < n_lat_g and ocean_mask[jj, i]:
+                            dist_n += 1
+                        else:
+                            break
+                    dist_s = 0
+                    for dj in range(1, min_w + 1):
+                        jj = j - dj
+                        if jj >= 0 and ocean_mask[jj, i]:
+                            dist_s += 1
+                        else:
+                            break
+                    if (dist_s + 1 + dist_n) < min_w:
+                        fill_merid[j, i] = True
+
+            # A cell in a narrow passage is one that's narrow in at least
+            # one direction. But we only want to close actual straits, not
+            # peninsulas. A narrow strait is narrow zonally OR meridionally.
+            fill_cells = fill_zonal | fill_merid
+            n_filled = int(np.sum(fill_cells))
+            if n_filled > 0:
+                ocean_mask[fill_cells] = False
+                # Keep H_np unchanged — land cells retain their depth value
+                # but are masked out. Setting H=0 confuses partial-cell coord.
+                land_mask_init = jnp.asarray(ocean_mask.astype(np.float64))
+                H_bathy_init = jnp.asarray(H_np, dtype=jnp.float64)
+            print(f"  Narrow passage fill (min_width={min_w}): "
+                  f"{n_filled} cells → land")
+
+        # --- Remove small enclosed basins ---
+        # After closing narrow passages and polar caps, some small bays
+        # may remain connected to the open ocean only through 1-2 cells.
+        # These drain over multi-year runs (no sea ice to buffer).
+        # Fix: flood-fill from the largest connected ocean basin, then
+        # remove any disconnected basins smaller than min_basin_size.
+        from collections import deque
+        H_np = np.array(H_bathy_init, copy=True)
+        ocean_mask = np.array(land_mask_init, copy=True) > 0.5
+        n_lat_g, n_lon_g = ocean_mask.shape
+        labeled = np.zeros(ocean_mask.shape, dtype=np.int32)
+        basin_id = 0
+        basin_sizes = {}
+        for j in range(n_lat_g):
+            for i in range(n_lon_g):
+                if ocean_mask[j, i] and labeled[j, i] == 0:
+                    basin_id += 1
+                    q = deque()
+                    q.append((j, i))
+                    labeled[j, i] = basin_id
+                    count = 0
+                    while q:
+                        cj, ci = q.popleft()
+                        count += 1
+                        for dj, di in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                            nj = cj + dj
+                            ni = (ci + di) % n_lon_g
+                            if 0 <= nj < n_lat_g and ocean_mask[nj, ni] and labeled[nj, ni] == 0:
+                                labeled[nj, ni] = basin_id
+                                q.append((nj, ni))
+                    basin_sizes[basin_id] = count
+        if basin_sizes:
+            main_basin = max(basin_sizes, key=basin_sizes.get)
+            n_removed = 0
+            for bid, bsize in basin_sizes.items():
+                if bid != main_basin:
+                    small_cells = labeled == bid
+                    ocean_mask[small_cells] = False
+                    n_removed += int(np.sum(small_cells))
+            if n_removed > 0:
+                land_mask_init = jnp.asarray(ocean_mask.astype(np.float64))
+                H_bathy_init = jnp.asarray(H_np, dtype=jnp.float64)
+            n_basins_removed = len(basin_sizes) - 1
+            print(f"  Small basin removal: {n_removed} cells in "
+                  f"{n_basins_removed} disconnected basins → land "
+                  f"(main basin: {basin_sizes[main_basin]} cells)")
 
         # Snap H_bathy to layer interfaces when the resulting partial
         # cell would be too thin.  Thin partial cells (<30% of full
@@ -2045,6 +2332,8 @@ def run_omip_single(grid_type: str, args) -> dict:
             args, grid, grid_type,
             z_coord=z_coord, T_woa=T_woa, S_woa=S_woa,
         )
+        # Provide the ocean mask for global freeze-cap when no sponge.
+        jra55_state["_ocean_mask_2d"] = state.land_mask.data > 0.5
         flags = []
         if jra55_state.get("enable_sponge"):
             flags.append("sponge")
