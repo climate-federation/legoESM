@@ -137,6 +137,18 @@ def main():
     for name, r in results.items():
         logger.info(f"  {name:20s}: {r['status']}")
 
+    # iter-109 (codex iter-104 MEDIUM-8): propagate per-grid
+    # status to exit code so wrappers / automation can detect
+    # BLOWUP via ``$?``.  Returns 0 if all grids are
+    # ``COMPLETED``, 1 if any grid hit BLOWUP / FAILED /
+    # exception (caught above as ``FAILED: ...``).
+    from legoesm.driver.run_status import status_to_exit_code
+    overall = max(
+        status_to_exit_code(r["status"]) for r in results.values()
+    )
+    return overall
+
 
 if __name__ == "__main__":
-    main()
+    import sys
+    sys.exit(main())

@@ -3416,3 +3416,86 @@ class TestSelectResolutionDirPrefersGridTyped:
         (grid_dir / "C24").mkdir()
         chosen = M._select_resolution_dir(grid_dir)
         assert chosen.name == "C24"
+
+
+class TestStatusToExitCode:
+    """iter-109 (codex iter-104 MEDIUM-8): centralized
+    status-to-exit-code helper.  Pre-iter-109, three other
+    user-facing ``ModelDriver`` wrappers (src/legoesm/cli.py,
+    scripts/run_held_suarez_rrtmgp_allgrids.py,
+    scripts/run_held_suarez_icos_0p5deg.py) logged the run
+    status string but exited 0 even when status indicated
+    BLOWUP.
+
+    iter-109 added ``legoesm.driver.run_status.status_to_exit_code``
+    and applied it to all 3 wrappers.  ``status="COMPLETED"``
+    → 0; everything else → 1.
+    """
+
+    def test_completed_returns_zero(self):
+        from legoesm.driver.run_status import status_to_exit_code
+        assert status_to_exit_code("COMPLETED") == 0
+
+    def test_blowup_returns_one(self):
+        from legoesm.driver.run_status import status_to_exit_code
+        assert status_to_exit_code("BLOWUP at day 5.7") == 1
+
+    def test_unknown_status_returns_one(self):
+        """Defensive: unexpected strings are treated as failure."""
+        from legoesm.driver.run_status import status_to_exit_code
+        assert status_to_exit_code("WEIRD") == 1
+        assert status_to_exit_code("") == 1
+        assert status_to_exit_code("FAILED: ImportError") == 1
+
+    def test_helper_is_re_exported_from_driver(self):
+        """Discoverability: ``from legoesm.driver import
+        status_to_exit_code`` works.
+        """
+        from legoesm.driver import status_to_exit_code as _ste
+        assert _ste("COMPLETED") == 0
+
+
+class TestModelDriverWrappersUseStatusHelper:
+    """iter-109: structural pin that the 3 ModelDriver wrappers
+    flagged by codex iter-104 MEDIUM-8 actually use the
+    centralized helper.
+    """
+
+    def _read(self, rel: str) -> str:
+        from pathlib import Path
+        return (Path(__file__).resolve().parent.parent / rel).read_text()
+
+    def test_cli_uses_status_to_exit_code(self):
+        text = self._read("src/legoesm/cli.py")
+        assert "status_to_exit_code" in text, (
+            "iter-109: ``src/legoesm/cli.py`` must use "
+            "``status_to_exit_code`` to translate driver status "
+            "to process exit code."
+        )
+
+    def test_held_suarez_rrtmgp_allgrids_uses_helper(self):
+        text = self._read("scripts/run_held_suarez_rrtmgp_allgrids.py")
+        assert "status_to_exit_code" in text, (
+            "iter-109: "
+            "``scripts/run_held_suarez_rrtmgp_allgrids.py`` "
+            "must use ``status_to_exit_code``."
+        )
+        assert "sys.exit(main())" in text, (
+            "iter-109: "
+            "``scripts/run_held_suarez_rrtmgp_allgrids.py`` "
+            "must propagate ``main()``'s return value to "
+            "``sys.exit`` so wrappers can detect failure."
+        )
+
+    def test_held_suarez_icos_0p5deg_uses_helper(self):
+        text = self._read("scripts/run_held_suarez_icos_0p5deg.py")
+        assert "status_to_exit_code" in text, (
+            "iter-109: "
+            "``scripts/run_held_suarez_icos_0p5deg.py`` "
+            "must use ``status_to_exit_code``."
+        )
+        assert "sys.exit(main())" in text, (
+            "iter-109: "
+            "``scripts/run_held_suarez_icos_0p5deg.py`` "
+            "must propagate ``main()``'s return value."
+        )
