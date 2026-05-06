@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-68 snapshot)
+**Branch**: `simulation_full_check` (iter-69 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..68 findings.  It is the user-facing
+This report consolidates iter-1..69 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -992,6 +992,44 @@ round caught real issues; final convergence is clean.
   Pure experiment + revert; no source changes (everything
   reverted before commit).  Tests still 118/118 + 3 MPAS
   skips.
+* iter-69: validated the iter-41/42/43/44/45 AMIP wrapper
+  + format-converter chain end-to-end with real CMIP6
+  forcing files.  Ran ``run_amip.py`` with:
+
+    --grid-type cubed_sphere --discretization cdgrid
+    --resolution 24 --days 5 --diag-days 1
+    --ghg-forcing external
+    --ghg-file forcing_amip/ghg_amip_1979-1981.nc
+    --ozone-forcing external
+    --ozone-file forcing_amip/ozone_amip_clim.nc
+
+  5-day cube C24 AMIP completed in 10.7 s wall (6.9 s JIT).
+  Status: COMPLETED.
+
+  ``_amip_to_matrix_format.py`` then converted the run_amip
+  output (``timeseries.npz`` + free-form ``results.txt``) to
+  matrix-runner-compatible format (``mean_timeseries.csv``
+  with 15 columns: ``time_days,mean_T,mean_T_low,mass,
+  max_wind,mean_SST,mean_SIC,mean_precip,mean_CWV,sw_up_toa,
+  lw_up_toa,sw_net_sfc,lw_net_sfc,energy_residual,
+  moisture_residual``; matrix ``results.txt`` with
+  ``test:amip status:PASS days:5 wall_time:10.7s``).
+
+  This validates iter-41 wrapper architecture, iter-42
+  format-bridge logic, iter-43..45 codex hardening, and
+  the iter-49-relaxed ocean / atmosphere collectors all work
+  in practice with real CMIP6 input4MIPs forcing data.
+
+  iter-69 also caught a minor UX issue: the converter's
+  "ERROR: 'days' missing" message on a zero-length ``days``
+  array (when ``days < diag-days``) is misleading — could be
+  improved to "'days' array is empty" but is purely a
+  terminology quibble.  Functionally the converter handles
+  it correctly (returns non-zero, purges stale matrix-format
+  files).
+
+  Pure validation; no source changes.  Tests still
+  118/118 + 3 MPAS skips.
 
 118/118 unit tests pass + 3 MPAS-mesh-unavailable skips
 (across ``tests/test_atmosphere_cross_grid_plots.py`` (77 +
@@ -1001,4 +1039,4 @@ round caught real issues; final convergence is clean.
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-68 update).*
+(iter-69 update).*
