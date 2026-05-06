@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-61 snapshot)
+**Branch**: `simulation_full_check` (iter-62 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..61 findings.  It is the user-facing
+This report consolidates iter-1..62 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -670,6 +670,59 @@ round caught real issues; final convergence is clean.
   Output snapshot at ``/tmp/iter61_sw_smoke/shallow_water/
   williamson2/`` (this host, not committed — the validation
   is the existence + numerics, not the binary plots).
+* iter-62: extended end-to-end validation to Williamson 5
+  (90 s, all 4 grids PASS, mass drift cube=1.4e-7 / ico=
+  1.5e-9 / latlon=3.1e-5 / spectral=0; same plot set as W2)
+  AND a 3-day Held-Suarez cross-grid smoke (4.8 min, 8 runs:
+  4 grids × 2 vertical coords).
+
+  **iter-62 also produced REAL DATA validating iter-57**:
+  the 3-day HS hybrid-coord ``comparison_summary.txt``
+  ``Quantitative cross-grid RMS — zonal-mean T_3d`` table
+  shows the iter-57 dissipation-imbalance signature even at
+  short integration time:
+
+    ``Deviation from ensemble mean (per grid)``:
+      icosahedral:                0.081 K
+      spectral:                   0.121 K
+      cubed_sphere:               0.125 K
+      latlon:                     0.227 K  ← OUTLIER
+
+    ``Top-5 levels by cross-grid spread``:
+      level 3 (upper trop):       0.590 K  max=latlon, min=cube
+      level 2 (upper strat):      0.477 K  max=latlon, min=cube
+      level 1:                    0.477 K  max=latlon, min=cube
+      level 0 (model top):        0.458 K  max=latlon, min=cube
+      level 8:                    0.430 K  max=latlon, min=cube
+
+  iter-57's framing was "cube-cold / latlon-warm".  The
+  iter-62 smoke data refines this: **latlon is the warm
+  outlier**, with deviation from the cube/ico/spectral
+  ensemble mean ~3× larger than icosahedral.  At every
+  upper-level the ``max grid`` is latlon; the ``min grid``
+  is cubed_sphere.
+
+  This is the predicted signature of latlon's
+  dissipation-deficit (only Laplacian, no biharmonic, no
+  div_damp): less small-scale damping in the eddy-active
+  upper troposphere allows more eddy heat flux into the
+  high-latitude upper troposphere, warming the latlon
+  zonal-mean.  Cube's biharmonic + div_damp + Laplacian
+  combination preferentially damps small scales and cools
+  the same region.  Ico and spectral sit in between.
+
+  This iter-62 data confirms that iter-57's §5 fix-candidate
+  (a) (extend ``CGridLatLonPrimitiveEquationConfig`` to
+  support biharmonic + div_damp) would address the
+  imbalance.  The cube-side reduction (fix-candidate (b)) is
+  likely also viable but would shift the ensemble mean
+  toward the latlon-warm side, which may not be desirable.
+
+  The 3-day window is too short to pretend it's the canonical
+  Held-Suarez climatology, but the dissipation-imbalance
+  signature is already strongly visible — multi-iter retuning
+  work will need to budget at least a 30-day window per
+  candidate dissipation choice to compare climatologies.
 
 118/118 unit tests pass + 3 MPAS-mesh-unavailable skips
 (across ``tests/test_atmosphere_cross_grid_plots.py`` (77 +
@@ -679,4 +732,4 @@ round caught real issues; final convergence is clean.
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-61 update).*
+(iter-62 update).*
