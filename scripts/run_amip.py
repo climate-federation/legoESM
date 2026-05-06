@@ -396,33 +396,42 @@ def _check_run_state_finite(driver) -> tuple[bool, str | None]:
     after ``driver.run(...)`` returns and reports the first
     field with a non-finite value.
 
+    iter-104 (codex HIGH-2): the original iter-100 implementation
+    only checked grid-space fields (T, u, v, p_s).  Spectral
+    AMIP states (when ``run_amip.py --grid-type gaussian
+    --discretization spectral``) use a different attribute
+    layout — ``T_hat``, ``vor_hat``, ``div_hat``, ``lnps_hat``
+    — and would silently bypass the iter-100 check (returning
+    ``(True, None)``).  iter-104 extends the field list to cover
+    both grid-space AND spectral attribute names; the helper
+    iterates through every field name and skips the ones not
+    present, so the same helper handles both layouts.
+
     Returns
     -------
     (ok, bad_field): tuple
-        ``ok`` is False when any of T, u, v, p_s contains
-        NaN/Inf; ``bad_field`` is the name of the first such
-        field (in iteration order) or None when all fields are
+        ``ok`` is False when any field in the union of
+        ``{T, u, v, p_s, T_hat, vor_hat, div_hat, lnps_hat}``
+        contains NaN/Inf; ``bad_field`` is the name of the
+        first such field (in iteration order, grid-space first
+        then spectral) or None when all present fields are
         finite.
-
-    Notes
-    -----
-    Spectral states use a different attribute layout
-    (``T_hat`` / ``vor_hat`` / ``div_hat``).  For now, treat the
-    spectral case the same way and accept whatever fields the
-    state object exposes — if none of T/u/v/p_s are present
-    (because the spectral state has no T but has T_hat), the
-    helper returns ``(True, None)``, deferring to a future
-    extension that handles the spectral attribute names.  This
-    is acceptable since ``run_amip.py`` is currently driven via
-    grid-typed config, and the most common AMIP execution path
-    uses cube/latlon/icosahedral states that DO have T/u/v/p_s.
     """
     import jax.numpy as jnp
 
     state = getattr(driver, "state", None)
     if state is None:
         return True, None
-    for fname in ("T", "u", "v", "p_s"):
+    # iter-104 codex HIGH-2: union of grid-space and spectral
+    # field names so this helper covers both AMIP execution
+    # paths.  Order: grid-space first (most common AMIP),
+    # then spectral.  ``getattr(..., None)`` short-circuits
+    # missing attributes.
+    field_names = (
+        "T", "u", "v", "p_s",
+        "T_hat", "vor_hat", "div_hat", "lnps_hat",
+    )
+    for fname in field_names:
         f = getattr(state, fname, None)
         if f is None:
             continue

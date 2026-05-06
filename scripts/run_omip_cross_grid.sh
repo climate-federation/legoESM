@@ -80,15 +80,26 @@ fi
 # path so the iter-49-relaxed collector produces the OMIP
 # cross-grid comparison plots.  Without this step the
 # wrapper produces only per-grid plots.
+# iter-104 codex MEDIUM-4: wrap the comparison-plot step so
+# ``set -e`` doesn't abort the wrapper before the iter-103
+# ``exit "$ANY_FAILED"``.  Pre-iter-104, a plot-step failure
+# caused the wrapper to exit with the plot command's status
+# (and never reach the explicit exit), so callers couldn't
+# distinguish per-grid BLOWUP from plot-step failure.
+PLOT_FAILED=0
 JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py \
-    --replot --only omip --output "$OUTPUT"
+    --replot --only omip --output "$OUTPUT" || PLOT_FAILED=1
+if [ "$PLOT_FAILED" = "1" ]; then
+    echo "  WARNING: comparison-plot step failed; partial plots"
+    echo "  may still exist for grids that succeeded."
+fi
 
 # iter-103: propagate ANY_FAILED to the wrapper's own exit
 # code so CI/automation that calls
 # ``bash run_omip_cross_grid.sh ... && next-step`` correctly
-# halts on per-grid BLOWUP.  Pre-iter-103 the wrapper exited
-# 0 unconditionally, masking failures from the caller (the
-# user-facing per-grid printout still showed FAIL, but
-# ``$?`` was 0).  Comparison plots are still generated above
-# so successful grids contribute to debugging output.
-exit "$ANY_FAILED"
+# halts on per-grid BLOWUP.  iter-104 also factors PLOT_FAILED
+# into the final exit so plot-step failures (e.g., matplotlib
+# error, missing inputs) are also surfaced as non-zero exit.
+# Bash arithmetic: ``$((A || B))`` evaluates to 1 if either
+# variable is non-zero, else 0.
+exit $((ANY_FAILED || PLOT_FAILED))

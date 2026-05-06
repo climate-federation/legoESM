@@ -3088,3 +3088,123 @@ class TestRunRceExitCodeOnBlowup:
             "iter-101 so the fix is discoverable from the "
             "wrapper context."
         )
+
+
+class TestRunAmipFiniteCheckSpectralFields:
+    """iter-104 codex HIGH-2: the iter-100
+    ``_check_run_state_finite`` originally only checked grid-
+    space fields (T, u, v, p_s).  Spectral AMIP states (``--
+    grid-type gaussian --discretization spectral``) use
+    different attribute names: ``T_hat``, ``vor_hat``,
+    ``div_hat``, ``lnps_hat``.  Pre-iter-104 a NaN in any of
+    those would silently bypass the iter-100 check and the
+    helper would return ``(True, None)``.
+
+    iter-104 extended the field list to include both grid-space
+    and spectral names.  The helper iterates through the union
+    and skips missing attributes (so the same helper works for
+    both AMIP execution paths).
+    """
+
+    def _import_run_amip(self):
+        import importlib
+        import sys
+        from pathlib import Path
+        scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+        if str(scripts_dir) not in sys.path:
+            sys.path.insert(0, str(scripts_dir))
+        return importlib.import_module("run_amip")
+
+    def test_check_finite_detects_nan_in_T_hat(self):
+        """Pre-iter-104, NaN in T_hat would return (True, None).
+        Post-iter-104, it returns (False, "T_hat").
+        """
+        import jax.numpy as jnp
+        from types import SimpleNamespace
+        m = self._import_run_amip()
+        T_hat = jnp.full((6, 4, 4, 5), 280.0, dtype=jnp.complex128)
+        T_hat = T_hat.at[0, 0, 0, 0].set(jnp.nan)
+        # Spectral state: only T_hat, vor_hat, div_hat, lnps_hat.
+        # No grid-space T/u/v/p_s.
+        driver = SimpleNamespace(
+            state=SimpleNamespace(
+                T_hat=SimpleNamespace(data=T_hat),
+                vor_hat=SimpleNamespace(
+                    data=jnp.zeros((6, 4, 4, 5), dtype=jnp.complex128)),
+                div_hat=SimpleNamespace(
+                    data=jnp.zeros((6, 4, 4, 5), dtype=jnp.complex128)),
+                lnps_hat=SimpleNamespace(
+                    data=jnp.zeros((6, 4, 4), dtype=jnp.complex128)),
+            )
+        )
+        ok, bad = m._check_run_state_finite(driver)
+        assert ok is False
+        assert bad == "T_hat"
+
+    def test_check_finite_detects_nan_in_vor_hat(self):
+        import jax.numpy as jnp
+        from types import SimpleNamespace
+        m = self._import_run_amip()
+        vor_hat = jnp.full((6, 4, 4, 5), 0.0, dtype=jnp.complex128)
+        vor_hat = vor_hat.at[0, 0, 0, 0].set(jnp.inf)
+        driver = SimpleNamespace(
+            state=SimpleNamespace(
+                T_hat=SimpleNamespace(
+                    data=jnp.full((6, 4, 4, 5), 280.0, dtype=jnp.complex128)),
+                vor_hat=SimpleNamespace(data=vor_hat),
+                div_hat=SimpleNamespace(
+                    data=jnp.zeros((6, 4, 4, 5), dtype=jnp.complex128)),
+                lnps_hat=SimpleNamespace(
+                    data=jnp.zeros((6, 4, 4), dtype=jnp.complex128)),
+            )
+        )
+        ok, bad = m._check_run_state_finite(driver)
+        assert ok is False
+        assert bad == "vor_hat"
+
+    def test_check_finite_clean_spectral_state(self):
+        """Clean spectral state returns (True, None)."""
+        import jax.numpy as jnp
+        from types import SimpleNamespace
+        m = self._import_run_amip()
+        driver = SimpleNamespace(
+            state=SimpleNamespace(
+                T_hat=SimpleNamespace(
+                    data=jnp.full((6, 4, 4, 5), 280.0, dtype=jnp.complex128)),
+                vor_hat=SimpleNamespace(
+                    data=jnp.zeros((6, 4, 4, 5), dtype=jnp.complex128)),
+                div_hat=SimpleNamespace(
+                    data=jnp.zeros((6, 4, 4, 5), dtype=jnp.complex128)),
+                lnps_hat=SimpleNamespace(
+                    data=jnp.zeros((6, 4, 4), dtype=jnp.complex128)),
+            )
+        )
+        ok, bad = m._check_run_state_finite(driver)
+        assert ok is True
+        assert bad is None
+
+    def test_check_finite_grid_space_takes_priority_when_both_present(self):
+        """If a hybrid state has both grid and spectral fields
+        (unusual but the helper handles it), grid-space is
+        checked first.  Pin the iteration order.
+        """
+        import jax.numpy as jnp
+        from types import SimpleNamespace
+        m = self._import_run_amip()
+        T = jnp.full((6, 4, 4, 5), 280.0)
+        T = T.at[0, 0, 0, 0].set(jnp.nan)
+        T_hat = jnp.full((6, 4, 4, 5), 280.0, dtype=jnp.complex128)
+        T_hat = T_hat.at[0, 0, 0, 0].set(jnp.nan)
+        driver = SimpleNamespace(
+            state=SimpleNamespace(
+                T=SimpleNamespace(data=T),
+                u=SimpleNamespace(data=jnp.full((6, 4, 4, 5), 10.0)),
+                v=SimpleNamespace(data=jnp.full((6, 4, 4, 5), 5.0)),
+                p_s=SimpleNamespace(data=jnp.full((6, 4, 4), 1e5)),
+                T_hat=SimpleNamespace(data=T_hat),
+            )
+        )
+        ok, bad = m._check_run_state_finite(driver)
+        # Grid-space iteration order: T comes first.
+        assert ok is False
+        assert bad == "T"

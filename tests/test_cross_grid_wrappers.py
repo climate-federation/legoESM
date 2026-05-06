@@ -766,12 +766,23 @@ class TestWrappersPropagateAnyFailedToExitCode:
         ]
 
     def test_all_wrappers_exit_with_any_failed(self, wrappers):
+        """iter-103 + iter-104: every wrapper must propagate
+        per-grid failure (ANY_FAILED) AND plot-step failure
+        (PLOT_FAILED) to its own exit code.
+        """
         for path in wrappers:
             text = _strip_comments(path.read_text())
-            assert 'exit "$ANY_FAILED"' in text, (
-                f"iter-103: {path.name} must end with "
-                f"``exit \"$ANY_FAILED\"`` so CI can detect "
-                f"per-grid failures via ``$?``."
+            # iter-104 MEDIUM-4: changed from
+            # ``exit "$ANY_FAILED"`` to
+            # ``exit $((ANY_FAILED || PLOT_FAILED))``
+            # so plot-step failures are surfaced too (and
+            # ``set -e`` doesn't abort the wrapper before the
+            # exit line is reached).
+            assert "exit $((ANY_FAILED || PLOT_FAILED))" in text, (
+                f"iter-104: {path.name} must end with "
+                f"``exit $((ANY_FAILED || PLOT_FAILED))`` so CI "
+                f"can detect both per-grid failures AND plot-step "
+                f"failures via ``$?``."
             )
 
     def test_exit_is_after_comparison_plot_step(self, wrappers):
@@ -787,17 +798,34 @@ class TestWrappersPropagateAnyFailedToExitCode:
             plot_idx = text.find("--cross-grid-plots-only")
             if plot_idx < 0:
                 plot_idx = text.find("--replot")
-            exit_idx = text.find('exit "$ANY_FAILED"')
+            exit_idx = text.find("exit $((ANY_FAILED || PLOT_FAILED))")
             assert plot_idx >= 0, (
                 f"iter-103 prerequisite: {path.name} must invoke "
                 f"a comparison-plot step "
                 f"(--cross-grid-plots-only or --replot)."
             )
             assert exit_idx > plot_idx, (
-                f"iter-103: in {path.name}, "
-                f"``exit \"$ANY_FAILED\"`` must come AFTER the "
-                f"comparison-plot step so partial-failure runs "
-                f"still get diagnostic plots for the successful "
-                f"grids.  Found exit at index {exit_idx}, plot "
-                f"at {plot_idx}."
+                f"iter-103/104: in {path.name}, the final "
+                f"``exit $((ANY_FAILED || PLOT_FAILED))`` must "
+                f"come AFTER the comparison-plot step so "
+                f"partial-failure runs still get diagnostic "
+                f"plots for the successful grids.  Found exit "
+                f"at index {exit_idx}, plot at {plot_idx}."
+            )
+
+    def test_plot_step_does_not_abort_wrapper(self, wrappers):
+        """iter-104 MEDIUM-4: the comparison-plot step must NOT
+        abort the wrapper via ``set -e`` if it fails — instead
+        it must capture the failure into ``PLOT_FAILED`` and
+        let the wrapper continue to the explicit ``exit``.
+        """
+        for path in wrappers:
+            text = _strip_comments(path.read_text())
+            # The plot invocation must be guarded with
+            # ``|| PLOT_FAILED=1`` (or similar) so set -e
+            # doesn't fire on failure.
+            assert "PLOT_FAILED=1" in text, (
+                f"iter-104: {path.name} must capture comparison-"
+                f"plot failure into ``PLOT_FAILED=1`` rather "
+                f"than letting set -e abort the wrapper."
             )

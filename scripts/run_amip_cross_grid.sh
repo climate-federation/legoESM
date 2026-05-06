@@ -136,6 +136,16 @@ for GRID in cubed_sphere latlon voronoi gaussian; do
         echo "  with cross-grid loop so other grids still produce"
         echo "  output.  The format converter below will purge the"
         echo "  $GRID directory of stale matrix-format files."
+        # iter-104 codex HIGH-1: previously this block did NOT
+        # set ANY_FAILED=1, relying on the converter (line ~148)
+        # to detect failure via missing timeseries.npz.  But the
+        # iter-100 ``run_amip.py`` exit-1 on NaN happens AFTER
+        # ``driver.run()`` has already written a partial
+        # timeseries.npz, so the converter could succeed on
+        # garbage and ANY_FAILED would never get set.  Mark
+        # failure HERE, where ``run_amip.py``'s exit code is
+        # the unambiguous truth.
+        ANY_FAILED=1
     }
     # iter-42: convert run_amip.py outputs (timeseries.npz +
     # free-form results.txt) to matrix-runner-compatible files
@@ -162,10 +172,18 @@ if [ "$ANY_FAILED" = "1" ]; then
     echo "  succeeded.  Re-run the failing grid(s) to get a"
     echo "  complete cross-grid comparison."
 fi
+# iter-104 codex MEDIUM-4: wrap the comparison-plot step.
+# See ``run_omip_cross_grid.sh`` for the rationale.
+PLOT_FAILED=0
 JAX_ENABLE_X64=1 .venv/bin/python scripts/run_atmosphere_test_matrix.py \
-    --cross-grid-plots-only --test amip --output "$OUTPUT"
+    --cross-grid-plots-only --test amip --output "$OUTPUT" \
+    || PLOT_FAILED=1
+if [ "$PLOT_FAILED" = "1" ]; then
+    echo "  WARNING: comparison-plot step failed; partial plots"
+    echo "  may still exist for grids that succeeded."
+fi
 
-# iter-103: propagate ANY_FAILED to the wrapper's own exit
-# code so CI/automation can detect per-grid failures via
-# ``$?``.  See ``run_omip_cross_grid.sh`` for the rationale.
-exit "$ANY_FAILED"
+# iter-103/104: propagate ANY_FAILED || PLOT_FAILED to the
+# wrapper's own exit code so CI can detect per-grid failures
+# AND plot-step failures via ``$?``.
+exit $((ANY_FAILED || PLOT_FAILED))

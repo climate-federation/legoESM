@@ -96,14 +96,18 @@ if [ "$ANY_FAILED" = "1" ]; then
     echo "  succeeded.  Re-run the failing grid(s) to get a"
     echo "  complete cross-grid comparison."
 fi
+# iter-104 codex MEDIUM-4: wrap the comparison-plot step.
+# See ``run_omip_cross_grid.sh`` for the rationale.
+PLOT_FAILED=0
 JAX_ENABLE_X64=1 .venv/bin/python scripts/run_atmosphere_test_matrix.py \
-    --cross-grid-plots-only --test rce --output "$OUTPUT"
+    --cross-grid-plots-only --test rce --output "$OUTPUT" \
+    || PLOT_FAILED=1
+if [ "$PLOT_FAILED" = "1" ]; then
+    echo "  WARNING: comparison-plot step failed; partial plots"
+    echo "  may still exist for grids that succeeded."
+fi
 
-# iter-103: propagate ANY_FAILED to the wrapper's own exit
-# code so CI/automation can detect per-grid failures via
-# ``$?``.  This pairs with iter-101 which fixed
-# ``run_rce.py`` to exit 1 on BLOWUP — the per-grid exit code
-# is now reliably caught by the ``|| { ANY_FAILED=1; }``
-# guard above.  See ``run_omip_cross_grid.sh`` for the
-# rationale.
-exit "$ANY_FAILED"
+# iter-103/104: propagate ANY_FAILED || PLOT_FAILED to the
+# wrapper's own exit code.  This pairs with iter-101 which
+# fixed ``run_rce.py`` to exit 1 on BLOWUP.
+exit $((ANY_FAILED || PLOT_FAILED))
