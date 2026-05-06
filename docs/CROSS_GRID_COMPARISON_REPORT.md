@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-51 snapshot)
+**Branch**: `simulation_full_check` (iter-52 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..51 findings.  It is the user-facing
+This report consolidates iter-1..52 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -29,9 +29,10 @@ and every available pair of grids:
   `T(latitude, σ)` cross-section, the canonical Held-Suarez
   Fig. 3 layout.
 
-Every helper has a corresponding unit test (86 / 86 pass in
-`tests/test_atmosphere_cross_grid_plots.py` (71) +
-`test_ocean_cross_grid_plots.py` (15)) plus 3 MPAS-mesh-
+Every helper has a corresponding unit test (104 / 104 pass
+across `tests/test_atmosphere_cross_grid_plots.py` (71) +
+`test_ocean_cross_grid_plots.py` (15) +
+`test_cross_grid_wrappers.py` (18)) plus 3 MPAS-mesh-
 unavailable skips.
 
 CLI:
@@ -464,12 +465,40 @@ clean.
   ``test_csv_valid_metadata_corrupt_keeps_run`` exercises
   the case.
 
-86/86 unit tests pass + 3 MPAS-mesh-unavailable skips
-(across ``tests/test_atmosphere_cross_grid_plots.py`` (71
-+ 3 skips) and ``tests/test_ocean_cross_grid_plots.py``
-(15)).
+* iter-52: structural tests for the cross-grid shell wrappers.
+  ``tests/test_cross_grid_wrappers.py`` (18 tests) parses the
+  three wrapper scripts (RCE / OMIP / AMIP) textually and pins:
+
+    * Each wrapper iterates over the four canonical grid types
+      for its domain (cube/latlon/voronoi/gaussian for
+      atmosphere; cube/latlon/mpas/spectral for ocean).  A
+      future change that drops a grid flips the test.
+    * The GRID_DISC mapping uses only valid discretization
+      names from ``src/legoesm/supported_matrix.py`` (catches
+      the iter-26 codex HIGH where ``cdgrid`` was passed for
+      latlon / voronoi / gaussian).
+    * RCE and AMIP wrappers share the same GRID_DISC mapping
+      (cross-grid HS / RCE / AMIP must use consistent
+      discretizations).
+    * Output paths include the matrix-runner-collector prefix
+      (``hydrostatic/rce/`` for RCE; ``hydrostatic/amip/`` for
+      AMIP).
+    * Each wrapper invokes ``--cross-grid-plots-only`` at the
+      end with the right ``--test`` flag.
+    * The AMIP wrapper invokes ``_amip_to_matrix_format.py``
+      after each per-grid run (iter-42 integration), purges
+      stale ``timeseries.npz`` before the run (iter-43 codex
+      HIGH guard), and propagates converter exit status via
+      ``ANY_FAILED`` (iter-43 partial-failure UX).
+    * Shared conventions: ``set -e``, ``JAX_ENABLE_X64=1``,
+      ``${1:?usage:...}`` guards.
+
+104/104 unit tests pass + 3 MPAS-mesh-unavailable skips
+(across ``tests/test_atmosphere_cross_grid_plots.py`` (71 +
+3 skips), ``tests/test_ocean_cross_grid_plots.py`` (15), and
+``tests/test_cross_grid_wrappers.py`` (18)).
 
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-51 update).*
+(iter-52 update).*
