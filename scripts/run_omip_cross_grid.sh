@@ -36,6 +36,18 @@ for GRID in cubed_sphere latlon mpas spectral; do
     echo "=================================================="
     echo "  OMIP on $GRID (days=$DAYS, physics=$PHYSICS)"
     echo "=================================================="
+    # iter-75 codex HIGH: purge stale matrix-format files
+    # from a prior successful run BEFORE invoking
+    # ``run_omip.py``.  Without this, a failed re-run could
+    # leave the cross-grid plotter reading old data.
+    # ``run_omip.py`` writes to ``$OUTDIR/<grid>/<resolution>/``
+    # so we purge per-grid (not per-resolution since the
+    # resolution is determined by ``run_omip.py``'s own
+    # GRID_DEFAULTS).  The ``-rf`` is scoped tightly to the
+    # known ``$OUTDIR/$GRID`` subdirectory to avoid wider
+    # damage if ``$OUTDIR`` is unset (the ``${1:?}`` guard
+    # at line 23 catches the unset OUTPUT case anyway).
+    rm -rf "$OUTDIR/$GRID"
     # iter-72: ``run_omip.py`` exits with code 1 on FAIL (e.g.,
     # the iter-71 cube C24 BLOWUP).  Without the ``|| { ... }``
     # guard, ``set -e`` aborts the whole wrapper after the

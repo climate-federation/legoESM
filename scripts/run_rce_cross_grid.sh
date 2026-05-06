@@ -9,12 +9,13 @@
 # ``run_atmosphere_test_matrix.py --cross-grid-plots-only`` picks it up.
 #
 # Usage:
-#     scripts/run_rce_cross_grid.sh OUTPUT [DAYS]
-# Default DAYS = 30.
+#     scripts/run_rce_cross_grid.sh OUTPUT [DAYS] [DIAG_DAYS]
+# Defaults: DAYS=30, DIAG_DAYS=1 (one diag entry per day so
+# short-day smokes accumulate data).
 
 set -e
 
-OUTPUT=${1:?usage: $0 OUTPUT [DAYS]}
+OUTPUT=${1:?usage: $0 OUTPUT [DAYS] [DIAG_DAYS]}
 DAYS=${2:-30}
 ANY_FAILED=0
 # iter-73: ``run_rce.py`` only writes ``mean_timeseries.csv`` +
@@ -57,6 +58,15 @@ for GRID in cubed_sphere latlon voronoi gaussian; do
     echo "  → $OUTDIR"
     echo "=================================================="
     mkdir -p "$OUTDIR"
+    # iter-75 codex HIGH: purge stale matrix-format files from a
+    # prior run BEFORE invoking ``run_rce.py``.  Without this, a
+    # failed re-run into an existing OUTDIR could leave old
+    # ``mean_timeseries.csv`` / ``results.txt`` in place which
+    # the cross-grid plotter would treat as current success.
+    # Mirrors the iter-43 AMIP wrapper pattern.
+    rm -f "$OUTDIR/mean_timeseries.csv"
+    rm -f "$OUTDIR/results.txt"
+    rm -f "$OUTDIR/timeseries.npz"
     # iter-73: mirror the iter-43 / iter-72 single-grid-failure
     # tolerance pattern so a per-grid blowup (e.g., the iter-71
     # cube-side dycore weakness) does not abort the entire

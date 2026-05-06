@@ -29,10 +29,10 @@ and every available pair of grids:
   `T(latitude, σ)` cross-section, the canonical Held-Suarez
   Fig. 3 layout.
 
-Every helper has a corresponding unit test (125 / 125 pass
+Every helper has a corresponding unit test (127 / 127 pass
 across `tests/test_atmosphere_cross_grid_plots.py` (78) +
 `test_ocean_cross_grid_plots.py` (15) +
-`test_cross_grid_wrappers.py` (32)) plus 3 MPAS-mesh-
+`test_cross_grid_wrappers.py` (34)) plus 3 MPAS-mesh-
 unavailable skips.
 
 CLI:
@@ -184,6 +184,7 @@ cross-grid ocean test (wind-driven gyres / OMIP) is a follow-up.
 | 74 | AMIP wrapper computed `$RES` from GRID_RES dict for OUTDIR but never passed `--resolution` to `run_amip.py` — every grid actually ran at default n=16 | HIGH |
 | 74 | AMIP wrapper had same `--diag-days` issue as RCE: short-day smokes silently produced empty output | HIGH |
 | 74 | AMIP wrapper GRID_RES had "90x180" for latlon but `run_amip.py --resolution` is `type=int` (would have failed at argparse if iter-74 had passed it without the simplification) | MEDIUM |
+| 75 | RCE/OMIP wrappers didn't purge stale per-grid output before re-runs (failed reruns left old data discoverable by cross-grid plotter) | HIGH |
 
 **Codex adversarial review iterations**: iter-5, iter-6, iter-7,
 iter-16, iter-21, iter-26, iter-27, iter-32, iter-36, iter-37,
@@ -1234,10 +1235,37 @@ round caught real issues; final convergence is clean.
   Tests: 32 wrapper (was 27), full suite 125/125 + 3 MPAS
   skips (was 120/120 + 3 skips).
 
-125/125 unit tests pass + 3 MPAS-mesh-unavailable skips
+* iter-75 codex review (1 HIGH + 3 MEDIUM + 2 LOW):
+    HIGH: RCE/OMIP wrappers continue after a grid failure
+      but didn't purge stale per-grid artifacts.  Failed
+      re-runs could leave old ``mean_timeseries.csv`` /
+      ``results.txt`` in $OUTDIR; cross-grid plotter would
+      treat stale data as current success.  Fixed: ``rm -f``
+      stale files in RCE wrapper before each per-grid run;
+      ``rm -rf "$OUTDIR/$GRID"`` in OMIP wrapper.  iter-43
+      AMIP wrapper already had this guard.
+    LOW: RCE wrapper usage text said ``OUTPUT [DAYS]`` but
+      accepted ``[DIAG_DAYS]`` as 3rd arg.  Fixed.
+    MEDIUM/LOW remaining (deferred):
+      * MEDIUM: RCE/OMIP swallow per-grid failures even on
+        success exit (deliberate UX choice; explicit
+        ``exit "$ANY_FAILED"`` would break the existing
+        wrapper-success-when-most-grids-pass behavior).
+      * MEDIUM: end-to-end stub coverage of the matrix
+        runner's ``--cross-grid-plots-only --test rce``
+        fallback (deferred — iter-73 validated this end-to-
+        end already).
+      * MEDIUM: AMIP latlon legacy "90x180" output dirs
+        from old runs would be discoverable in the same
+        $OUTPUT (out-of-scope cleanup).
+
+  2 new structural-regression tests pin the iter-75 stale-
+  purge fixes.
+
+127/127 unit tests pass + 3 MPAS-mesh-unavailable skips
 (across ``tests/test_atmosphere_cross_grid_plots.py`` (77 +
 3 skips), ``tests/test_ocean_cross_grid_plots.py`` (15), and
-``tests/test_cross_grid_wrappers.py`` (32)).
+``tests/test_cross_grid_wrappers.py`` (34)).
 
 ---
 

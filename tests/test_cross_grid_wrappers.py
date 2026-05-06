@@ -263,6 +263,37 @@ class TestRceCrossGridWrapper:
             "blowup does not abort the whole cross-grid run."
         )
 
+    def test_purges_stale_outputs_before_each_run(self, wrapper_code):
+        """iter-75 codex HIGH: a failed re-run into an existing
+        ``$OUTDIR`` could leave old ``mean_timeseries.csv`` /
+        ``results.txt`` in place which the cross-grid plotter would
+        treat as current success.  iter-75 added defensive ``rm
+        -f`` calls before each ``run_rce.py`` invocation
+        (mirrors the iter-43 AMIP pattern).
+
+        Pin: the wrapper must call ``rm -f "$OUTDIR/...``"`` for
+        the matrix-format files before invoking run_rce.py.
+        """
+        # Find the rm -f calls inside the loop body.
+        body_match = re.search(
+            r'for\s+GRID\s+in\b.*?done', wrapper_code, re.DOTALL,
+        )
+        assert body_match, "could not locate RCE wrapper for-loop body"
+        body = body_match.group(0)
+        # The purge happens BEFORE run_rce.py.
+        purge_match = re.search(
+            r'rm\s+-f\s+"\$OUTDIR/mean_timeseries\.csv"', body,
+        )
+        run_match = re.search(r'scripts/run_rce\.py', body)
+        assert purge_match, (
+            "iter-75 codex HIGH: RCE wrapper must purge stale "
+            "$OUTDIR/mean_timeseries.csv before each run"
+        )
+        assert run_match, "no run_rce.py found in loop body"
+        assert purge_match.start() < run_match.start(), (
+            "iter-75 codex HIGH: rm -f must come BEFORE run_rce.py"
+        )
+
 
 class TestOmipCrossGridWrapper:
     """Pin ``scripts/run_omip_cross_grid.sh`` (iter-25).
@@ -377,6 +408,34 @@ class TestOmipCrossGridWrapper:
             "``|| { ... ANY_FAILED=1 ... }`` so a single grid "
             "failure (e.g., the iter-71 cube C24 BLOWUP) does not "
             "abort the whole cross-grid run."
+        )
+
+    def test_purges_stale_outputs_before_each_run(self, wrapper_code):
+        """iter-75 codex HIGH: a failed re-run into an existing
+        ``$OUTDIR/$GRID`` could leave old per-grid OMIP output
+        in place which the matrix-runner ``--replot`` would treat
+        as current success.  iter-75 added a defensive ``rm -rf
+        "$OUTDIR/$GRID"`` before each ``run_omip.py`` invocation.
+
+        Pin: the wrapper must purge ``$OUTDIR/$GRID`` before
+        invoking run_omip.py.
+        """
+        body_match = re.search(
+            r'for\s+GRID\s+in\b.*?done', wrapper_code, re.DOTALL,
+        )
+        assert body_match, "could not locate OMIP wrapper for-loop body"
+        body = body_match.group(0)
+        purge_match = re.search(
+            r'rm\s+-rf\s+"\$OUTDIR/\$GRID"', body,
+        )
+        run_match = re.search(r'scripts/run_omip\.py', body)
+        assert purge_match, (
+            "iter-75 codex HIGH: OMIP wrapper must purge "
+            "$OUTDIR/$GRID before each run"
+        )
+        assert run_match, "no run_omip.py found in loop body"
+        assert purge_match.start() < run_match.start(), (
+            "iter-75 codex HIGH: rm -rf must come BEFORE run_omip.py"
         )
 
 
