@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-55 snapshot)
+**Branch**: `simulation_full_check` (iter-56 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..55 findings.  It is the user-facing
+This report consolidates iter-1..56 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -547,4 +547,4 @@ issues; final convergence is clean.
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-55 update).*
+(iter-56 update).*
