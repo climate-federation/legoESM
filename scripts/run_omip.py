@@ -473,7 +473,18 @@ def _check_finite(state, grid_type):
     if not ok_finite:
         return False
 
-    return bool(jnp.max(jnp.abs(T_ocean)) < 100.0)
+    # Bound checks: ocean SSH variations are < 10 m even with
+    # tsunamis (Mariana Trench depth ~11 km but η is the surface
+    # elevation, not depth).  Use 1000 m as the sanity threshold —
+    # well above any realistic dynamic range, but catches the
+    # iter-71 cube C24 OMIP BLOWUP (eta_max=2677 m at step 500).
+    # iter-79 added the η bound; previously only T was bounded
+    # (< 100 °C), so slow η drift could escape detection (the
+    # iter-78 cube rest_state finding showed -2.8e+13 m drift
+    # passing the BLOWUP detector silently).
+    if not bool(jnp.max(jnp.abs(T_ocean)) < 100.0):
+        return False
+    return bool(jnp.max(jnp.abs(eta_ocean)) < 1000.0)
 
 
 # ===========================================================================
@@ -531,9 +542,24 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                     mask = state.land_mask.data
                     m3 = mask[:, jnp.newaxis] if grid_type == "mpas" else mask[..., jnp.newaxis]
                     T_oc = jnp.where(m3 > 0.5, state.T.data, 0.0)
-                    print(f"  BLOWUP step {step}: max|T|={float(jnp.max(jnp.abs(T_oc))):.1f}"
-                          f" T_finite={bool(jnp.all(jnp.isfinite(T_oc)))}"
-                          f" eta_max={float(jnp.max(jnp.abs(state.eta.data))):.2f}")
+                    eta_max = float(jnp.max(jnp.abs(state.eta.data)))
+                    eta_finite = bool(jnp.all(jnp.isfinite(state.eta.data)))
+                    print(
+                        f"  BLOWUP step {step}: "
+                        f"max|T|={float(jnp.max(jnp.abs(T_oc))):.1f} "
+                        f"T_finite={bool(jnp.all(jnp.isfinite(T_oc)))} "
+                        f"eta_max={eta_max:.2f} "
+                        f"eta_finite={eta_finite}"
+                    )
+                    # iter-79 bound (max|eta| > 1000 m) and the
+                    # original T bound (max|T| > 100 °C) both
+                    # trigger the BLOWUP path; the message tells
+                    # the user which one fired.
+                    if eta_max >= 1000.0:
+                        print(
+                            f"    Reason: |η| reached {eta_max:.0f} m "
+                            f"(iter-79 sanity threshold 1000 m)"
+                        )
                 else:
                     print(f"  BLOWUP at step {step}")
                 blown_up = True

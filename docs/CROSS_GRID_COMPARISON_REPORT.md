@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-78 snapshot)
+**Branch**: `simulation_full_check` (iter-79 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..78 findings.  It is the user-facing
+This report consolidates iter-1..79 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -186,6 +186,8 @@ cross-grid ocean test (wind-driven gyres / OMIP) is a follow-up.
 | 74 | AMIP wrapper GRID_RES had "90x180" for latlon but `run_amip.py --resolution` is `type=int` (would have failed at argparse if iter-74 had passed it without the simplification) | MEDIUM |
 | 75 | RCE/OMIP wrappers didn't purge stale per-grid output before re-runs (failed reruns left old data discoverable by cross-grid plotter) | HIGH |
 | 78 | cube ocean rest_state has eta drift of -2.8e13 m (latlon/mpas: 0) despite passing the run_omip.py BLOWUP detector — USER HANDOFF for cube ocean conservation | HIGH |
+| 79 | iter-78 cube η drift is execution-order-dependent: cube alone shows machine-precision conservation, but cube AFTER latlon/mpas/spectral shows -2.8e13 m drift (per-grid run isolation bug, not cube physics) | HIGH |
+| 79 | run_omip.py BLOWUP detector lacked η bound — relied on T<100 to catch large-eta blowups; iter-79 added max\|η\| < 1000 m sanity check | MEDIUM |
 
 **Codex adversarial review iterations**: iter-5, iter-6, iter-7,
 iter-16, iter-21, iter-26, iter-27, iter-32, iter-36, iter-37,
@@ -1357,6 +1359,37 @@ round caught real issues; final convergence is clean.
 
   Bug-fix table records the iter-78 HIGH (cube
   rest-state eta drift, USER HANDOFF).
+* iter-79: TWO findings:
+    (a) iter-79 source improvement: extended
+        ``run_omip.py:_check_finite`` BLOWUP detector with
+        a max\|η\| < 1000 m sanity check.  iter-71 cube
+        OMIP BLOWUP produced eta_max=2677 m at step 500
+        but was caught only via the existing T < 100 °C
+        bound at the same step.  iter-79 catches gross η
+        drift independently.  Latlon rest_state baseline
+        still PASS (η drift = 0 at machine precision).
+
+    (b) iter-79 reproduction of iter-78 finding: the
+        iter-78 ``-2.83e+13 m`` cube η drift was REAL but
+        EXECUTION-ORDER-DEPENDENT.  Re-running with
+        ``--grid all`` reproduces -2.83e+13.  Re-running
+        with ``--grid cubed_sphere`` (cube alone) gives
+        +2.83e-17 (machine precision).
+
+        This means: when the cube ocean rest-state runs
+        AFTER latlon / mpas / spectral in the same Python
+        process, some shared state (JAX cache, precision
+        policy, module-level static, etc.) corrupts cube's
+        result.  When cube runs alone, it conserves η at
+        machine precision.
+
+        This is a NEW finding: the cube ocean dycore is
+        actually CORRECT in isolation; the iter-78 finding
+        was an isolation bug in the multi-grid matrix
+        runner, NOT a cube-physics bug.  This narrows the
+        debug scope significantly.  Per the iter-68 user
+        handoff, the per-grid run isolation fix is also
+        out of scope, but the diagnosis is clearer now.
 
 128/128 unit tests pass + 3 MPAS-mesh-unavailable skips
 (across ``tests/test_atmosphere_cross_grid_plots.py`` (79 +
@@ -1366,4 +1399,4 @@ round caught real issues; final convergence is clean.
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-78 update).*
+(iter-79 update).*
