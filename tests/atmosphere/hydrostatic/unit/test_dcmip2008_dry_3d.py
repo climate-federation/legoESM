@@ -312,6 +312,35 @@ class TestNonRotatingGravityWave:
         # be zero everywhere.
         assert float(jnp.max(jnp.abs(grid.f))) == 0.0
 
+    def test_cubed_sphere_cdgrid_inherits_omega_zero(self):
+        """The CD-grid corner Coriolis must follow the base grid's Ω.
+
+        Regression for an earlier bug where ``create_cubed_sphere_cdgrid``
+        defaulted to ``omega=constants.Omega`` and silently overrode a
+        non-rotating base grid — making §3-1 still feel Earth's Coriolis
+        at the corners even after we passed ``omega=0`` to the base
+        factory.
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid,
+        )
+        base = create_cubed_sphere(8, omega=0.0)
+        cdgrid = create_cubed_sphere_cdgrid(base)
+        assert float(jnp.max(jnp.abs(cdgrid.f_corner))) == 0.0
+
+    def test_cubed_sphere_cdgrid_default_inherits_earth(self):
+        """Earth-default base grid → Earth-default cdgrid (no regression
+        for the canonical AMIP / Held-Suarez path)."""
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import (
+            create_cubed_sphere_cdgrid,
+        )
+        base = create_cubed_sphere(8)  # default omega = Earth's
+        cdgrid = create_cubed_sphere_cdgrid(base)
+        # f_corner should be of order 2·Ω·O(1) ≈ 1e-4, NOT zero.
+        assert float(jnp.max(jnp.abs(cdgrid.f_corner))) > 1e-5
+
     def test_latlon_omega_zero_zeroes_coriolis(self):
         from legoesm.grids.latlon import create_latlon_grid
         grid = create_latlon_grid(24, 48, omega=0.0)

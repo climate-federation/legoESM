@@ -537,7 +537,7 @@ def _compute_supergrid_metrics(n, face_gnomonic_to_lonlat, radius):
 
 def create_cubed_sphere_cdgrid(
     base: CubedSphereGrid,
-    omega: float = constants.Omega,
+    omega: float | None = None,
     metric_dtype=None,
 ) -> CubedSphereCDGrid:
     """Create a C-D grid from an existing cell-centre grid.
@@ -549,8 +549,10 @@ def create_cubed_sphere_cdgrid(
     omega : float or None
         Planetary rotation rate [rad/s].  If ``None`` (default), the
         effective omega is inferred from ``base.f`` and ``base.sin_lat``
-        so that `cdgrid.f_corner` is consistent with `base.f` under
-        small-earth scaling (see ``scale_cubed_sphere_metrics``).
+        so that ``cdgrid.f_corner`` is consistent with ``base.f`` under
+        any rescaling (small-earth, non-rotating §3-1, …).  Pass an
+        explicit float only when you specifically need to *override*
+        the base grid's Coriolis at the corners (rare).
     metric_dtype : dtype or None
         Dtype for corner-critical metrics (gradient matrix, rsin, rarea,
         cosa, sin_sg, dxc/dyc).  Defaults to float32.

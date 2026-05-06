@@ -245,8 +245,11 @@ def _build_test_matrix() -> list[TestCase]:
             "hydrostatic", "rest_state_topo", g, res[g], "hybrid", 7, 1,
             {"h_0": 2000.0}))
         # Held-Suarez over idealized Gaussian/cosine-bell mountain.
+        # Quick-mode duration is short (2 days) so the smoke test
+        # finishes in a few minutes per grid; full duration (200 days)
+        # is needed only for the actual HS climatology.
         matrix.append(TestCase(
-            "hydrostatic", "held_suarez_topo", g, res[g], "hybrid", 200, 30,
+            "hydrostatic", "held_suarez_topo", g, res[g], "hybrid", 200, 2,
             {"h_0": 2000.0}))
         # DCMIP 2008 §3-1 / §3-2 / §5-0 / §6-0 — dry-3D Hughes-tutorial
         # tests on hydrostatic dycores.  Short integrations (1-3 days) so
