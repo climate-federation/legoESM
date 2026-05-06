@@ -4037,7 +4037,17 @@ def _select_resolution_dir(grid_dir: Path) -> Path | None:
     ``_vertical_coords_for_case`` use identical selection logic
     and don't emit duplicate warnings.
     """
-    res_dirs = [d for d in grid_dir.iterdir() if d.is_dir()]
+    # iter-110 codex MEDIUM-3: filter hidden / internal /
+    # tooling directories so collector fallback can't pick
+    # ``.ipynb_checkpoints`` or ``__pycache__`` over a valid
+    # legacy ``16/`` dir.
+    _BAD_DIRNAMES = {"__pycache__", ".ipynb_checkpoints"}
+    res_dirs = [
+        d for d in grid_dir.iterdir()
+        if d.is_dir()
+        and not d.name.startswith(".")
+        and d.name not in _BAD_DIRNAMES
+    ]
     if not res_dirs:
         return None
 

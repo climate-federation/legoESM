@@ -3444,11 +3444,19 @@ def run_baroclinic_gyre(tc: TestCase, output_dir: Path, days: float,
     # Save results  
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full
+    # iter-110 codex MEDIUM-2: pre-iter-110 this rows dict
+    # omitted ``status`` and ``wall_time``, so the iter-105
+    # BLOWUP-marker logic (gated on
+    # ``rows.get("status") == "FAIL"``) never fired here.
+    # Adding ``status`` and ``wall_time`` to align with the
+    # other 13 ocean callsites.
     _write_results_txt(output_dir, {
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
         "days": days, "dt": dt, "levels": z_coord.n_levels,
+        "status": "PASS" if ok else "FAIL",
         "max_speed": max_speed, "eta_drift": eta_drift, "T_drift": T_drift,
         "depth": depth.tolist(), "notes": notes,
+        "wall_time": f"{wall:.1f}s",
     }, diag=diag)  # iter-105: surface BLOWUP info if any
     
     # Regional extent for proper plotting
@@ -4726,14 +4734,31 @@ def _select_ocean_resolution_dir(grid_dir, resolution_dirs):
     Warn ONCE per ``grid_dir`` if stale dirs are filtered out.
     """
     grid_name = grid_dir.name
+    # iter-110 codex MEDIUM-3: filter hidden/internal dirs
+    # (``.ipynb_checkpoints``, ``__pycache__``, ``.DS_Store``)
+    # so the fallback can't pick those over a valid legacy
+    # ``16/`` dir when no grid-typed candidate exists.
+    _BAD_DIRNAMES = {"__pycache__", ".ipynb_checkpoints"}
+    resolution_dirs = [
+        d for d in resolution_dirs
+        if not d.name.startswith(".")
+        and d.name not in _BAD_DIRNAMES
+    ]
+    if not resolution_dirs:
+        return None
+    # iter-110 codex MEDIUM-1: regional grids use grid-typed
+    # forms matching ``_parse_resolution`` (line ~1875-1881):
+    # mpas_regional → ``Nkm``, latlon_regional → ``NxM``,
+    # cs_regional → ``CN``.  iter-102 had all three → ``Nkm``
+    # which was wrong for latlon_regional and cs_regional.
     grid_typed_pattern = {
         "cubed_sphere": lambda n: n.startswith("C") and n[1:].isdigit(),
         "latlon": lambda n: "x" in n and all(p.isdigit() for p in n.split("x") if p),
         "mpas": lambda n: n.startswith("ico") and n[3:].isdigit(),
         "spectral": lambda n: n.startswith("T") and n[1:].isdigit(),
         "mpas_regional": lambda n: n.endswith("km") and n[:-2].isdigit(),
-        "latlon_regional": lambda n: n.endswith("km") and n[:-2].isdigit(),
-        "cs_regional": lambda n: n.endswith("km") and n[:-2].isdigit(),
+        "latlon_regional": lambda n: "x" in n and all(p.isdigit() for p in n.split("x") if p),
+        "cs_regional": lambda n: n.startswith("C") and n[1:].isdigit(),
     }
     matcher = grid_typed_pattern.get(grid_name)
     if matcher is not None:
@@ -6287,10 +6312,20 @@ def main():
                 return f"ico{level}"
             elif grid_type == "spectral":
                 return f"T{N}"
-            elif grid_type in ("mpas_regional", "latlon_regional", "cs_regional"):
-                # Regional grids use km resolution; pass through
-                # the bare integer as ``Nkm`` form.
+            elif grid_type == "mpas_regional":
+                # MPAS-regional uses km resolution.
                 return f"{N}km"
+            elif grid_type == "latlon_regional":
+                # iter-110 codex MEDIUM-1: latlon_regional
+                # expects ``NxM`` form (per ``_parse_resolution``
+                # at line ~1877), NOT ``Nkm``.  iter-102 fix had
+                # this wrong; iter-110 corrects.
+                return f"{N}x{2 * N}"
+            elif grid_type == "cs_regional":
+                # iter-110 codex MEDIUM-1: cs_regional expects
+                # ``CN`` form (per ``_parse_resolution`` at line
+                # ~1881).
+                return f"C{N}"
             else:
                 return cli_res
 

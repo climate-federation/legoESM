@@ -3417,6 +3417,34 @@ class TestSelectResolutionDirPrefersGridTyped:
         chosen = M._select_resolution_dir(grid_dir)
         assert chosen.name == "C24"
 
+    def test_iter110_filters_hidden_dirs(self, tmp_path):
+        """iter-110 codex MEDIUM-3: filter ``.ipynb_checkpoints``
+        and ``__pycache__`` before fallback.  Pre-iter-110 the
+        atmosphere collector could pick an ``.ipynb_checkpoints/``
+        dir over a valid ``16/`` legacy dir if the hidden one
+        sorted alphabetically first.
+        """
+        M._RES_DIR_WARNED.clear()
+        grid_dir = tmp_path / "cubed_sphere"
+        grid_dir.mkdir()
+        (grid_dir / ".ipynb_checkpoints").mkdir()
+        (grid_dir / "__pycache__").mkdir()
+        (grid_dir / "16").mkdir()  # legacy bare-numeric
+        chosen = M._select_resolution_dir(grid_dir)
+        assert chosen.name == "16"
+
+    def test_iter110_returns_none_for_only_hidden(self, tmp_path):
+        """If only hidden/internal dirs exist, return None
+        rather than picking one of them.
+        """
+        M._RES_DIR_WARNED.clear()
+        grid_dir = tmp_path / "cubed_sphere"
+        grid_dir.mkdir()
+        (grid_dir / ".ipynb_checkpoints").mkdir()
+        (grid_dir / "__pycache__").mkdir()
+        chosen = M._select_resolution_dir(grid_dir)
+        assert chosen is None
+
 
 class TestStatusToExitCode:
     """iter-109 (codex iter-104 MEDIUM-8): centralized

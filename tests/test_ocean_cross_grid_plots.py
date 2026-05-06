@@ -1340,3 +1340,121 @@ class TestSelectOceanResolutionDirPrefersGridTyped:
         # Falls back to the first in the input list (filesystem
         # order, not sorted) — pin to whichever was passed first.
         assert chosen.name in ("16", "32")
+
+
+class TestIter110CodexReviewFixes:
+    """iter-110 (codex iter-104 follow-up review): 3 MEDIUM
+    findings on the iter-104..109 fix sequence:
+
+    * MEDIUM-1: ocean ``--resolution N`` for regional grids
+      mapped all 3 to ``Nkm``, but ``_parse_resolution``
+      expects ``latlon_regional → NxM`` and
+      ``cs_regional → CN``.
+    * MEDIUM-2: ``run_baroclinic_gyre`` passed ``diag=diag``
+      but omitted ``status``, so iter-105 BLOWUP marker never
+      fired (gated on ``rows.get("status") == "FAIL"``).
+    * MEDIUM-3: collector fallback could pick
+      ``.ipynb_checkpoints`` or ``__pycache__`` over a valid
+      legacy ``16/`` dir.
+    """
+
+    def _import_module(self):
+        import importlib
+        import sys
+        from pathlib import Path
+        scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+        if str(scripts_dir) not in sys.path:
+            sys.path.insert(0, str(scripts_dir))
+        return importlib.import_module("run_ocean_test_matrix")
+
+    def test_medium_1_latlon_regional_uses_xform(self, tmp_path):
+        """``latlon_regional/{16, 16x32}`` → 16x32 (NOT 16km)."""
+        M = self._import_module()
+        grid_dir = tmp_path / "latlon_regional"
+        grid_dir.mkdir()
+        (grid_dir / "16").mkdir()
+        (grid_dir / "16x32").mkdir()
+        chosen = M._select_ocean_resolution_dir(
+            grid_dir, list(grid_dir.iterdir()))
+        assert chosen.name == "16x32"
+
+    def test_medium_1_cs_regional_uses_C_form(self, tmp_path):
+        """``cs_regional/{16, C16}`` → C16 (NOT 16km)."""
+        M = self._import_module()
+        grid_dir = tmp_path / "cs_regional"
+        grid_dir.mkdir()
+        (grid_dir / "16").mkdir()
+        (grid_dir / "C16").mkdir()
+        chosen = M._select_ocean_resolution_dir(
+            grid_dir, list(grid_dir.iterdir()))
+        assert chosen.name == "C16"
+
+    def test_medium_1_mpas_regional_still_uses_km(self, tmp_path):
+        """``mpas_regional/{16, 50km}`` → 50km (unchanged from
+        iter-108).  iter-110 only re-routed latlon_regional
+        and cs_regional, not mpas_regional.
+        """
+        M = self._import_module()
+        grid_dir = tmp_path / "mpas_regional"
+        grid_dir.mkdir()
+        (grid_dir / "16").mkdir()
+        (grid_dir / "50km").mkdir()
+        chosen = M._select_ocean_resolution_dir(
+            grid_dir, list(grid_dir.iterdir()))
+        assert chosen.name == "50km"
+
+    def test_medium_2_baroclinic_gyre_writes_status(self):
+        """``run_baroclinic_gyre`` must include ``status`` in
+        its rows dict so the iter-105 BLOWUP marker can fire.
+        """
+        import inspect
+        import re
+        M = self._import_module()
+        src = inspect.getsource(M.run_baroclinic_gyre)
+        # Strip docstrings + line comments before pattern check.
+        src_no_strings = re.sub(r'""".*?"""', "", src, flags=re.DOTALL)
+        src_no_strings = re.sub(r"'''.*?'''", "", src_no_strings, flags=re.DOTALL)
+        code_only = "\n".join(
+            line for line in src_no_strings.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        assert '"status": "PASS" if ok else "FAIL"' in code_only, (
+            "iter-110 codex MEDIUM-2: ``run_baroclinic_gyre`` "
+            "must include ``status: PASS|FAIL`` in its "
+            "_write_results_txt rows dict so the iter-105 "
+            "BLOWUP-marker logic fires on FAIL."
+        )
+
+    def test_medium_3_filters_hidden_dirs(self, tmp_path):
+        """Hidden dirs (``.ipynb_checkpoints``) and internal
+        tooling dirs (``__pycache__``) must be filtered out
+        before fallback selection.  Pre-iter-110, a stale
+        ``.ipynb_checkpoints/`` dir alongside a valid ``16/``
+        dir could be chosen by the fallback.
+        """
+        M = self._import_module()
+        grid_dir = tmp_path / "cubed_sphere"
+        grid_dir.mkdir()
+        (grid_dir / ".ipynb_checkpoints").mkdir()
+        (grid_dir / "__pycache__").mkdir()
+        (grid_dir / "16").mkdir()
+        chosen = M._select_ocean_resolution_dir(
+            grid_dir, list(grid_dir.iterdir()))
+        # Must pick the ``16/`` dir, NOT the hidden/internal
+        # dirs.  No grid-typed candidate present → falls back
+        # to the legacy bare-numeric dir, which is the right
+        # behaviour.
+        assert chosen.name == "16"
+
+    def test_medium_3_returns_none_for_only_hidden(self, tmp_path):
+        """If only hidden/internal dirs are present, return
+        None so the collector skips this grid_dir entirely.
+        """
+        M = self._import_module()
+        grid_dir = tmp_path / "cubed_sphere"
+        grid_dir.mkdir()
+        (grid_dir / ".ipynb_checkpoints").mkdir()
+        (grid_dir / "__pycache__").mkdir()
+        chosen = M._select_ocean_resolution_dir(
+            grid_dir, list(grid_dir.iterdir()))
+        assert chosen is None
