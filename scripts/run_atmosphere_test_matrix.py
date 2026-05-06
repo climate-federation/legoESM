@@ -2162,7 +2162,8 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
         "days": days, "dt": dt, "status": "PASS" if ok else "FAIL",
         "notes": notes,
-        "wall_time": f"{wall:.1f}s"})  # iter-29: enable iter-28 GPU efficiency table on cosine bell
+        "wall_time": f"{wall:.1f}s"},  # iter-29: enable iter-28 GPU efficiency table on cosine bell
+        diag=diag)  # iter-99: surface BLOWUP info if any
     _save_case_diagnostics(
         output_dir, f"Cosine Bell PL07 {tc.resolution}", dt,
         diag, snapshots, coord_kind, lon_deg, lat_deg,
@@ -2746,7 +2747,8 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
         "vertical_coord": tc.vertical_coord, "days": days, "dt": dt,
         "status": "PASS" if ok else "FAIL", "notes": notes,
-        "wall_time": f"{wall:.1f}s"})
+        "wall_time": f"{wall:.1f}s"},
+        diag=diag)  # iter-99: surface BLOWUP info if any
     _save_case_diagnostics(
         output_dir,
         f"Baroclinic {tc.resolution} {tc.vertical_coord}",
@@ -2977,7 +2979,8 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
         "levels": nlev, "period_days": period, "dt": dt,
         "status": "PASS" if ok else "FAIL", "notes": notes,
-        "wall_time": f"{wall:.1f}s"})
+        "wall_time": f"{wall:.1f}s"},
+        diag=diag)  # iter-99: surface BLOWUP info if any
     _save_case_diagnostics(
         output_dir,
         f"DCMIP transport {test_num} {tc.grid_type} {tc.resolution}",
@@ -3270,7 +3273,8 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         "radiation": radiation, "days": days, "dt": dt,
         "status": "PASS" if ok else "FAIL", "notes": notes,
         "wall_time": f"{wall:.1f}s",
-    }, radiation))
+    }, radiation),
+        diag=diag)  # iter-99: surface BLOWUP info if any
     _save_case_diagnostics(
         output_dir,
         f"AMIP {radiation} {tc.resolution} hybrid",
@@ -3835,7 +3839,8 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
         "levels": nlev, "duration_hours": duration_hours, "dt": dt,
         "status": "PASS" if ok else "FAIL", "notes": notes,
-        "wall_time": f"{wall:.1f}s"})
+        "wall_time": f"{wall:.1f}s"},
+        diag=diag)  # iter-99: surface BLOWUP info if any
     _save_case_diagnostics(
         output_dir, f"NH DCMIP {test_case} {tc.resolution}",
         dt, diag, snapshots, coord_kind, lon_deg, lat_deg,

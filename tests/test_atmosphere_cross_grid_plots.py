@@ -2740,3 +2740,82 @@ class TestAtmosphereMatrixBlowupReporting:
         text = (tmp_path / "results.txt").read_text()
         assert "BLOWUP" not in text
         assert "notes: mass drift=0.00e+00" in text
+
+
+class TestAtmosphereMatrixAllRunnersThreadDiag:
+    """iter-99: structural assertion that EVERY caller of
+    ``_write_results_txt`` in the atmosphere matrix runner
+    threads ``diag=diag`` (or equivalent), so BLOWUP info from
+    iter-98's ``diag["_blowup_info"]`` is surfaced uniformly
+    across SW, HS, cosine_bell, baroclinic, dcmip_transport,
+    AMIP, and DCMIP-NH runners.
+
+    Pre-iter-99: only 2 of 8 callers (SW + HS, iter-98) threaded
+    ``diag=``; the other 6 (cosine_bell, baroclinic,
+    dcmip_transport, AMIP-w/-radiation, NH DCMIP) used the
+    default ``diag=None`` and would silently emit
+    last-clean-diagnostic notes for BLOWUP-failed runs.
+
+    iter-99 threaded the remaining 6.  This test asserts every
+    callsite has the marker comment so a future regression
+    (e.g., a new test runner added without ``diag=``) would
+    fail the CI.
+    """
+
+    def test_all_write_results_txt_callsites_thread_diag(self):
+        """Every ``_write_results_txt(...)`` call in the
+        atmosphere matrix runner module passes ``diag=`` (either
+        ``diag=diag`` or, in the future, ``diag=...``).
+        """
+        import inspect
+        import re
+        # Read raw source — ``inspect.getsource`` on a module
+        # returns the file contents.
+        text = inspect.getsource(M)
+        # Strip line comments to count active callsites.
+        code_only = "\n".join(
+            line for line in text.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        # Count callsite invocations (skip the def itself).
+        # The function signature ``def _write_results_txt(...)``
+        # also matches ``_write_results_txt(`` but we want only
+        # the call sites; filter by checking the line is NOT
+        # immediately preceded by ``def``.
+        all_calls = list(re.finditer(
+            r"_write_results_txt\(", code_only
+        ))
+        # Filter out the def itself.
+        callsite_count = 0
+        threaded_count = 0
+        for m in all_calls:
+            # Look back ~10 chars for "def " preceding.
+            start = max(0, m.start() - 10)
+            preceding = code_only[start:m.start()]
+            if "def " in preceding:
+                continue
+            callsite_count += 1
+            # Look forward up to 500 chars for the closing ``)``
+            # of this call, then check if ``diag=`` appears
+            # within the call's argument list.
+            tail = code_only[m.start():m.start() + 500]
+            # Naive but effective: look for ``diag=`` followed
+            # by an identifier or expression.
+            if re.search(r"\bdiag\s*=\s*\w", tail):
+                threaded_count += 1
+        # We expect the SW(1803), cosine_bell(2161), HS(2467),
+        # baroclinic(2746), dcmip_transport(2978), AMIP(3271),
+        # NH DCMIP(3838) — 7 from explicit list above plus 1 hs
+        # variant — totals 8 callsites.  All must thread ``diag=``.
+        assert callsite_count >= 7, (
+            f"iter-99 sanity check: expected at least 7 "
+            f"``_write_results_txt(...)`` callsites in the "
+            f"atmosphere matrix runner; found {callsite_count}.  "
+            f"If you removed callsites, update the expected count."
+        )
+        assert threaded_count == callsite_count, (
+            f"iter-99: every ``_write_results_txt(...)`` callsite "
+            f"in the atmosphere matrix runner must thread "
+            f"``diag=`` to surface BLOWUP info uniformly.  Found "
+            f"{threaded_count} / {callsite_count} threaded."
+        )
