@@ -316,6 +316,31 @@ class TestOmipCrossGridWrapper:
         assert "--replot" in last
         assert "--only omip" in last
 
+    def test_continues_on_single_grid_failure(self, wrapper_code):
+        """iter-72: ``run_omip.py`` exits with code 1 on FAIL
+        (e.g., the iter-71 cube C24 BLOWUP).  Without an explicit
+        ``|| { ... }`` continuation, ``set -e`` aborts the whole
+        wrapper after the first grid failure.  iter-72 added a
+        guard that mirrors the iter-43 AMIP wrapper pattern: log
+        a warning, set ``ANY_FAILED=1``, and continue to the
+        remaining grids so they still contribute to the cross-grid
+        plot.
+
+        Pin: the per-grid run is followed by a ``|| { ... }``
+        block AND ``ANY_FAILED=1`` is set inside that block.
+        """
+        # Find the ``run_omip.py ... || { ... }`` pattern.
+        m = re.search(
+            r"run_omip\.py.*?\|\|\s*\{[^}]*?ANY_FAILED=1[^}]*?\}",
+            wrapper_code, re.DOTALL,
+        )
+        assert m, (
+            "iter-72: OMIP wrapper must wrap ``run_omip.py`` with "
+            "``|| { ... ANY_FAILED=1 ... }`` so a single grid "
+            "failure (e.g., the iter-71 cube C24 BLOWUP) does not "
+            "abort the whole cross-grid run."
+        )
+
 
 class TestAmipCrossGridWrapper:
     """Pin ``scripts/run_amip_cross_grid.sh`` (iter-41) and the

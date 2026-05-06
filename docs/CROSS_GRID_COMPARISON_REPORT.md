@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-71 snapshot)
+**Branch**: `simulation_full_check` (iter-72 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..71 findings.  It is the user-facing
+This report consolidates iter-1..72 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -29,10 +29,10 @@ and every available pair of grids:
   `T(latitude, σ)` cross-section, the canonical Held-Suarez
   Fig. 3 layout.
 
-Every helper has a corresponding unit test (119 / 119 pass
+Every helper has a corresponding unit test (120 / 120 pass
 across `tests/test_atmosphere_cross_grid_plots.py` (78) +
 `test_ocean_cross_grid_plots.py` (15) +
-`test_cross_grid_wrappers.py` (26)) plus 3 MPAS-mesh-
+`test_cross_grid_wrappers.py` (27)) plus 3 MPAS-mesh-
 unavailable skips.
 
 CLI:
@@ -176,6 +176,7 @@ cross-grid ocean test (wind-driven gyres / OMIP) is a follow-up.
 | 54 | OMIP `_run_replot` discovery rglob'd `snapshots_latlon.npz` only, missing iter-49 timeseries-only runs | HIGH |
 | 55 | iter-54 `_run_replot` had try/except outside the inner marker loop, calling `_replot_case_snapshots` on stale `res_dir` once per glob | HIGH |
 | 71 | OMIP cube C24 BLOWUP at step 500 (max\|T\|=8M K, eta=2677 m) while latlon / MPAS / spectral PASS — USER HANDOFF for cube debug | HIGH |
+| 72 | OMIP wrapper aborted entire cross-grid run on first grid failure (set -e + run_omip.py exits 1 on FAIL) | HIGH |
 
 **Codex adversarial review iterations**: iter-5, iter-6, iter-7,
 iter-16, iter-21, iter-26, iter-27, iter-32, iter-36, iter-37,
@@ -1094,8 +1095,29 @@ round caught real issues; final convergence is clean.
 
   Pure validation; no source changes.  Tests still
   119/119 + 3 MPAS skips.
+* iter-72: harden the OMIP wrapper to tolerate single-grid
+  failures.  iter-71 found that ``run_omip.py`` exits 1 on
+  FAIL (e.g., the cube C24 BLOWUP), and the iter-25 wrapper
+  has ``set -e`` — so a single grid failure aborts the
+  whole cross-grid run, preventing the 3 working grids
+  from contributing to the comparison plot.  Fix: wrap
+  the per-grid invocation with ``|| { echo WARNING; ...
+  ANY_FAILED=1; }`` (mirrors the iter-43 AMIP wrapper
+  pattern).
 
-119/119 unit tests pass + 3 MPAS-mesh-unavailable skips
+  End-to-end validation: cube fails as in iter-71, but
+  latlon/MPAS/spectral run successfully and the matrix
+  ``--replot`` step produces ``$OUTPUT/omip/comparison_timeseries.png``
+  (1789×1194 px).  This is the first end-to-end OMIP
+  cross-grid plot.
+
+  New regression test ``test_continues_on_single_grid_failure``
+  pins the iter-72 ``|| { ... ANY_FAILED=1 ... }`` block
+  with a structural regex.  Test count: 27 wrapper (was 26);
+  full suite 120/120 + 3 MPAS skips (was 119/119 + 3
+  skips).
+
+120/120 unit tests pass + 3 MPAS-mesh-unavailable skips
 (across ``tests/test_atmosphere_cross_grid_plots.py`` (77 +
 3 skips), ``tests/test_ocean_cross_grid_plots.py`` (15), and
 ``tests/test_cross_grid_wrappers.py`` (26)).
@@ -1103,4 +1125,4 @@ round caught real issues; final convergence is clean.
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-71 update).*
+(iter-72 update).*

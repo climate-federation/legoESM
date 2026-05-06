@@ -23,6 +23,7 @@ set -e
 OUTPUT=${1:?usage: $0 OUTPUT [DAYS] [PHYSICS]}
 DAYS=${2:-30}
 PHYSICS=${3:-full}
+ANY_FAILED=0
 
 for GRID in cubed_sphere latlon mpas spectral; do
     # iter-53: write under ``$OUTPUT/omip/`` so the test-case
@@ -35,15 +36,34 @@ for GRID in cubed_sphere latlon mpas spectral; do
     echo "=================================================="
     echo "  OMIP on $GRID (days=$DAYS, physics=$PHYSICS)"
     echo "=================================================="
+    # iter-72: ``run_omip.py`` exits with code 1 on FAIL (e.g.,
+    # the iter-71 cube C24 BLOWUP).  Without the ``|| { ... }``
+    # guard, ``set -e`` aborts the whole wrapper after the
+    # first grid failure — preventing the other 3 grids from
+    # contributing to the cross-grid plot.  Mirrors the iter-43
+    # AMIP wrapper pattern: log a warning, set ANY_FAILED=1,
+    # and continue.
     JAX_ENABLE_X64=1 .venv/bin/python scripts/run_omip.py \
         --grid "$GRID" --days "$DAYS" --physics "$PHYSICS" \
-        --output "$OUTDIR"
+        --output "$OUTDIR" || {
+        echo "  WARNING: run_omip.py FAILED for $GRID"
+        echo "  (e.g., the iter-71 cube C24 BLOWUP).  Continuing"
+        echo "  with cross-grid loop so the other grids still"
+        echo "  contribute to the cross-grid plot."
+        ANY_FAILED=1
+    }
 done
 
 echo ""
 echo "=================================================="
 echo "  Generating cross-grid comparison plots"
 echo "=================================================="
+if [ "$ANY_FAILED" = "1" ]; then
+    echo "  NOTE: at least one grid had no usable OMIP output;"
+    echo "  the cross-grid plot will only show the grids that"
+    echo "  succeeded.  Re-run the failing grid(s) to get a"
+    echo "  complete cross-grid comparison."
+fi
 # iter-53: invoke the ocean matrix's ``--replot`` discovery
 # path so the iter-49-relaxed collector produces the OMIP
 # cross-grid comparison plots.  Without this step the
