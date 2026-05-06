@@ -1,14 +1,37 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-95 snapshot)
+**Branch**: `simulation_full_check` (iter-96 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..86 findings.  It is the user-facing
+This report consolidates iter-1..96 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
+
+## iter-96 comprehensive smoke results
+
+iter-95 fixed the ``--resolution N`` per-grid dispatch bug.
+iter-96 ran the full user-prompt simulation hierarchy at
+quick / short-day mode:
+
+| Category | Resolution | Days | Pass / Total | Wall | Notes |
+|---|---|---|---|---|---|
+| Shallow water (W2/W5/cosine bell) | 16 | 1 | **12 / 12** | 136 s | All 4 grids × 3 SW cases.  W2 L2: cube 8e-4, latlon 8e-3, ico 1e-3, spectral 0. |
+| Held-Suarez hydrostatic | 16 | 30 quick | **8 / 8** | 204 s | All 4 grids × {hybrid, sigma}.  Mass drift 6e-11 (cube), 1e-4 (latlon), 1e-12 (ico), 2e-4 (spectral). |
+| AMIP 1-day smoke | 16 | 1 | **4 / 4** | 87 s | Mass drift 5e-12 (cube), 3e-6 (latlon), 2e-15 (ico), 1e-7 (spectral). |
+| RCE | default | 2 | **3 / 4** | — | Icosahedral BLOWUP at day 1 — USER HANDOFF (iter-73). |
+| Ocean rest_state | default | quick | **12 / 12** | 176 s | All 3 grids × 4 variants (rest, stratified, uniform-no-land, stratified-no-land).  All eta and T drifts at machine precision (0 to 1e-16) — confirms iter-78/80/88/91/92 fixes work. |
+| OMIP 2-day | default | 2 | **3 / 4** | — | Cube SST=19.76 (no longer BLOWUP per iter-71, but criteria still FAIL) — USER HANDOFF.  Latlon, MPAS, spectral PASS. |
+
+**Total: 42 / 44 PASS** (95.5 %), with the 2 FAILs being known
+USER HANDOFF items deferred per the user's iter-68 directive.
+
+The cross-grid plot infrastructure produces shared-colorbar
+shared-projection comparison PNGs for every category; check
+``results/{atmosphere,ocean,omip,rce}/`` for the iter-96
+output.
 
 ---
 
