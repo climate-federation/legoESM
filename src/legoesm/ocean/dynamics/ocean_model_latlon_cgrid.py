@@ -1083,7 +1083,7 @@ class LatLonCGridOceanModel:
                 state_new, state, self.grid, self.z_coord, self.config,
             )
 
-        return cast_pytree(state_new, None, "storage")
+        return cast_pytree(state_new, None, "storage", allow_downcast=True)
 
     @partial(jax.jit, static_argnums=(0,))
     def step(self, state: LatLonCGridOceanState, dt: float,
