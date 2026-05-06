@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-65 snapshot)
+**Branch**: `simulation_full_check` (iter-66 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..65 findings.  It is the user-facing
+This report consolidates iter-1..66 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -863,6 +863,46 @@ round caught real issues; final convergence is clean.
 
   Pure experiment / diagnosis; no source changes.  Tests
   still 118/118 + 3 MPAS skips.
+* iter-66: redid the iter-63 fix-candidate (b) experiment
+  at 7-day window (where biharmonic IS active).  Halved
+  cube ``hd = 0.5 * _hyperdiff_cube(n)`` and ``dd = 0.5 *
+  _div_damp_cube(n)``, ran 7-day HS, reverted before
+  commit.
+
+  Result at 7 d (compare to iter-65 baseline):
+
+    grid           baseline   half-cube-damp   delta
+    icosahedral    0.218 K    0.218 K          0.000
+    spectral       0.315 K    0.316 K         +0.001
+    cubed_sphere   0.399 K    0.400 K         +0.001
+    latlon         0.490 K    0.490 K          0.000
+    ensemble       0.356 K    0.356 K          0.000
+    top spread (level 8): 1.275 → 1.275 K     0.000
+
+  Halving cube biharmonic+div_damp produces NO MEANINGFUL
+  CHANGE even at 7 d where biharmonic has had ~3 e-foldings.
+
+  Combined finding from iter-63 / iter-64 / iter-66:
+
+    iter-63: halve cube damping at 3 d → no change
+    iter-64: disable cube sponge at 3 d → WORSE
+    iter-66: halve cube damping at 7 d → no change
+
+  All three cube-side damping experiments are NEGATIVE.
+  This decisively rules out fix-candidate (b) (cube damping
+  reduction) at the tested windows.
+
+  The cross-grid disagreement therefore IS structural — it
+  reflects the architectural difference between the four
+  dycores' dissipation profiles, NOT just a tunable
+  coefficient choice.  The §5 fix-candidate (a)
+  (architectural extension of
+  ``CGridLatLonPrimitiveEquationConfig`` to support
+  biharmonic + div_damp) is the only viable retuning path
+  that the iter-62..66 data supports.
+
+  Pure experiment / diagnosis; no source changes.  Tests
+  still 118/118 + 3 MPAS skips.
 
 118/118 unit tests pass + 3 MPAS-mesh-unavailable skips
 (across ``tests/test_atmosphere_cross_grid_plots.py`` (77 +
@@ -872,4 +912,4 @@ round caught real issues; final convergence is clean.
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-65 update).*
+(iter-66 update).*
