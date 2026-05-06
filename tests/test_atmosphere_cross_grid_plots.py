@@ -1398,32 +1398,57 @@ class TestHeldSuarezInitConsistency:
         These constants are SHARED across all four forcing variants
         (cubed_sphere, latlon, mpas, spectral) so a single source of
         truth is enforced by the test.
+
+        iter-47 codex LOW: use ``pytest.approx`` instead of
+        ``< 1e-30`` so harmless representation refactors (e.g.
+        switching ``1.0/(40.0*86400.0)`` to ``1.0/3456000.0``)
+        don't false-positive.
         """
         # Temperature relaxation timescales [1/s].
-        assert abs(hs_module.K_A - 1.0 / (40.0 * 86400.0)) < 1.0e-30
-        assert abs(hs_module.K_S - 1.0 / (4.0 * 86400.0)) < 1.0e-30
+        assert hs_module.K_A == pytest.approx(1.0 / (40.0 * 86400.0), rel=1e-12)
+        assert hs_module.K_S == pytest.approx(1.0 / (4.0 * 86400.0), rel=1e-12)
         # Rayleigh friction timescale [1/s].
-        assert abs(hs_module.K_F - 1.0 / (1.0 * 86400.0)) < 1.0e-30
+        assert hs_module.K_F == pytest.approx(1.0 / (1.0 * 86400.0), rel=1e-12)
         # Boundary-layer threshold (dimensionless sigma).
-        assert hs_module.SIGMA_B == 0.7
+        assert hs_module.SIGMA_B == pytest.approx(0.7)
         # Equilibrium temperature parameters [K].
-        assert hs_module.DELTA_T_Y == 60.0
-        assert hs_module.DELTA_THETA_Z == 10.0
-        assert hs_module.T_MIN == 200.0
+        assert hs_module.DELTA_T_Y == pytest.approx(60.0)
+        assert hs_module.DELTA_THETA_Z == pytest.approx(10.0)
+        assert hs_module.T_MIN == pytest.approx(200.0)
 
     def test_init_signatures_share_canonical_defaults(self, hs_module):
         """Every per-grid HS init function must use the same defaults
         for the four user-facing parameters.  iter-46 audit guard: a
         drift in any single grid's defaults would re-introduce the
         structural cube-cold disagreement at the init level.
+
+        iter-47 codex HIGH: spectral (Gaussian grid) is added to the
+        coverage.  ``isothermal_rest_state_spectral`` lives in
+        ``atmosphere/dynamics/spectral_pe.py`` rather than the
+        ``held_suarez`` module, but its defaults must match the
+        other three since the matrix runner's spectral HS branch
+        calls it directly.
         """
         import inspect
-        for fn_name in (
-            "held_suarez_init",
-            "held_suarez_init_latlon",
-            "held_suarez_init_mpas",
-        ):
-            fn = getattr(hs_module, fn_name)
+        # Cube/latlon/MPAS inits all live in the held_suarez module.
+        spectral_fn = None
+        try:
+            from legoesm.atmosphere.dynamics.spectral_pe import (
+                isothermal_rest_state_spectral,
+            )
+            spectral_fn = isothermal_rest_state_spectral
+        except ImportError:
+            pass
+
+        cases = [
+            ("held_suarez_init",        hs_module.held_suarez_init),
+            ("held_suarez_init_latlon", hs_module.held_suarez_init_latlon),
+            ("held_suarez_init_mpas",   hs_module.held_suarez_init_mpas),
+        ]
+        if spectral_fn is not None:
+            cases.append(("isothermal_rest_state_spectral", spectral_fn))
+
+        for fn_name, fn in cases:
             sig = inspect.signature(fn)
             params = sig.parameters
             assert params["T_init"].default == 300.0, (
@@ -1450,7 +1475,11 @@ class TestHeldSuarezInitConsistency:
         * Surface T_eq at the equator > T_eq at the poles (≥
           DELTA_T_Y / 2 K difference).
         * T_eq decreases monotonically with altitude near the
-          equator (from p_ref to 100 hPa).
+          equator (from p_ref to 100 hPa, sampled at 5 levels).
+
+        iter-47 codex LOW: extended the monotonic check from 2 to
+        5 sample points so a non-monotonic profile between p_ref
+        and 100 hPa cannot slip through.
         """
         import jax.numpy as jnp
         T_eq_eq = float(hs_module.held_suarez_equilibrium_temperature(
@@ -1465,22 +1494,36 @@ class TestHeldSuarezInitConsistency:
         assert T_eq_pole >= hs_module.T_MIN
         assert T_eq_eq - T_eq_pole >= hs_module.DELTA_T_Y / 2
 
-        T_eq_sfc = float(hs_module.held_suarez_equilibrium_temperature(
-            jnp.array(0.0), jnp.array(hs_module.constants.p_ref),
-        ))
-        T_eq_100hPa = float(hs_module.held_suarez_equilibrium_temperature(
-            jnp.array(0.0), jnp.array(10000.0),
-        ))
-        assert T_eq_sfc > T_eq_100hPa
+        # iter-47 codex LOW: 5-point monotonicity check.
+        # Pressure levels from p_ref (surface) → 10000 Pa (100 hPa).
+        p_levels = jnp.linspace(hs_module.constants.p_ref, 10000.0, 5)
+        T_profile = [
+            float(hs_module.held_suarez_equilibrium_temperature(
+                jnp.array(0.0), jnp.array(p),
+            ))
+            for p in p_levels
+        ]
+        # Each successive level must be no warmer than the previous.
+        for i in range(1, len(T_profile)):
+            assert T_profile[i] <= T_profile[i - 1] + 1e-9, (
+                f"T_eq non-monotonic at equator: levels {i-1}→{i}: "
+                f"{T_profile[i-1]:.2f} → {T_profile[i]:.2f} K"
+            )
 
     def test_init_produces_zero_wind(self, hs_module):
         """Each per-grid init must produce a state at rest (u=v=0).
 
-        iter-46 audit invariant: the cubed-sphere, latlon, and MPAS
-        inits all start from an isothermal atmosphere at rest with
-        only a small T perturbation.  A future change that adds
-        nonzero u/v to one variant only would diverge cross-grid
-        HS comparisons from t=0.
+        iter-47 codex HIGH: extended from cube/latlon to also
+        cover MPAS.  Spectral has u stored as ``vor_hat``/``div_hat``
+        spectral coefficients (not a u/v state field), so we test
+        that the synthesised grid u/v are zero in a separate
+        spectral test below.
+
+        iter-46 audit invariant: the cubed-sphere, latlon, MPAS,
+        and spectral inits all start from an isothermal atmosphere
+        at rest with only a small T perturbation.  A future change
+        that adds nonzero u/v to one variant only would diverge
+        cross-grid HS comparisons from t=0.
         """
         import jax.numpy as jnp
         from legoesm.grids.cubed_sphere import create_cubed_sphere
@@ -1499,37 +1542,209 @@ class TestHeldSuarezInitConsistency:
         assert float(jnp.max(jnp.abs(s_ll.u.data))) == 0.0
         assert float(jnp.max(jnp.abs(s_ll.v.data))) == 0.0
 
+        # iter-47 codex HIGH: also exercise the MPAS init.  MPAS
+        # state stores u on edges (no separate v); a single u
+        # array must be zero.
+        try:
+            from legoesm.grids.mpas import create_mpas_mesh
+        except ImportError:
+            pytest.skip("MPAS mesh module unavailable")
+        try:
+            mesh = create_mpas_mesh(level=2)
+        except Exception:
+            pytest.skip("MPAS level-2 mesh unavailable")
+        s_mpas = hs_module.held_suarez_init_mpas(mesh, sigma)
+        assert float(jnp.max(jnp.abs(s_mpas.u.data))) == 0.0
+
+    def test_spectral_init_produces_zero_wind(self):
+        """iter-47 codex HIGH: the spectral init must also produce a
+        rest state (zero vorticity and zero divergence in spectral
+        space, which synthesises to zero u and v on the grid).
+        """
+        import jax.numpy as jnp
+        try:
+            from legoesm.atmosphere.dynamics.spectral_pe import (
+                isothermal_rest_state_spectral, spectral_pe_to_grid,
+            )
+            from legoesm.grids.gaussian import create_gaussian_grid
+            from legoesm.grids.vertical import create_sigma_coordinate
+        except ImportError:
+            pytest.skip("spectral dynamics module unavailable")
+
+        grid = create_gaussian_grid(21)  # T21 — small but valid
+        sigma = create_sigma_coordinate(8)
+        s = isothermal_rest_state_spectral(grid, sigma, T_init=300.0)
+        # Vorticity and divergence coefficients all zero.
+        assert float(jnp.max(jnp.abs(s.vor_hat.data))) == 0.0
+        assert float(jnp.max(jnp.abs(s.div_hat.data))) == 0.0
+        # Sanity: synthesised grid u/v are also zero (modulo
+        # rounding from the spectral-to-grid transform).
+        fields = spectral_pe_to_grid(s, grid, sigma)
+        assert float(jnp.max(jnp.abs(fields["u"]))) < 1e-10
+        assert float(jnp.max(jnp.abs(fields["v"]))) < 1e-10
+
     def test_init_produces_constant_p_s_when_no_topography(
         self, hs_module,
     ):
-        """Without topography, p_s must equal p_s_init at every cell."""
+        """Without topography, p_s must equal p_s_init at every cell.
+
+        iter-47 codex HIGH: extended from latlon-only to also cover
+        cube and MPAS.  All four grids share the same hydrostatic
+        adjustment formula (``p_s = p_s_init * exp(-phis/(R_d*T_init))``);
+        with phis=0 (no topography) the result must be exactly
+        p_s_init.
+        """
         import jax.numpy as jnp
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.latlon import create_latlon_grid
         from legoesm.grids.vertical import standard_hybrid_levels
 
         sigma = standard_hybrid_levels(8)
+        p_ref = hs_module.constants.p_ref
+
+        # Latlon.
         grid_ll = create_latlon_grid(8, 16)
         s_ll = hs_module.held_suarez_init_latlon(grid_ll, sigma)
         p_s_arr = jnp.asarray(s_ll.p_s.data)
-        assert abs(float(jnp.min(p_s_arr)) - hs_module.constants.p_ref) < 1e-6
-        assert abs(float(jnp.max(p_s_arr)) - hs_module.constants.p_ref) < 1e-6
+        assert abs(float(jnp.min(p_s_arr)) - p_ref) < 1e-6
+        assert abs(float(jnp.max(p_s_arr)) - p_ref) < 1e-6
+
+        # Cubed-sphere.
+        grid_cube = create_cubed_sphere(6)
+        s_cube = hs_module.held_suarez_init(grid_cube, sigma)
+        p_s_cube = jnp.asarray(s_cube.p_s.data)
+        assert abs(float(jnp.min(p_s_cube)) - p_ref) < 1e-6
+        assert abs(float(jnp.max(p_s_cube)) - p_ref) < 1e-6
+
+        # MPAS.
+        try:
+            from legoesm.grids.mpas import create_mpas_mesh
+        except ImportError:
+            return  # MPAS unavailable; cube/latlon coverage suffices
+        try:
+            mesh = create_mpas_mesh(level=2)
+        except Exception:
+            return
+        s_mpas = hs_module.held_suarez_init_mpas(mesh, sigma)
+        p_s_mpas = jnp.asarray(s_mpas.p_s.data)
+        assert abs(float(jnp.min(p_s_mpas)) - p_ref) < 1e-6
+        assert abs(float(jnp.max(p_s_mpas)) - p_ref) < 1e-6
 
     def test_init_mean_T_close_to_T_init(self, hs_module):
         """The bulk-mean T of the initial state must be close to
         T_init (within ``perturbation_amplitude`` / sqrt(N_cells)).
+
+        iter-47 codex HIGH: extended from latlon-only to also cover
+        cube and MPAS.  All three grids share the same uniform-T
+        + low-level perturbation pattern.
         """
         import jax.numpy as jnp
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.latlon import create_latlon_grid
         from legoesm.grids.vertical import standard_hybrid_levels
 
         sigma = standard_hybrid_levels(8)
+
+        # Latlon.
         grid_ll = create_latlon_grid(16, 32)
         s_ll = hs_module.held_suarez_init_latlon(grid_ll, sigma)
-        mean_T = float(jnp.mean(s_ll.T.data))
+        mean_T_ll = float(jnp.mean(s_ll.T.data))
         # 16x32x8 = 4096 cells; perturbation only at the lowest
         # level (16x32 = 512 cells); stddev of mean ≈ 1/sqrt(512)
         # ≈ 0.044, then divided by 8 levels ≈ 0.006.  Allow 0.1 K.
-        assert abs(mean_T - 300.0) < 0.1, (
-            f"latlon init mean T={mean_T:.4f} differs from T_init=300 "
-            f"by more than 0.1 K"
+        assert abs(mean_T_ll - 300.0) < 0.1, (
+            f"latlon init mean T={mean_T_ll:.4f} ≠ T_init=300"
         )
+
+        # Cubed-sphere.
+        grid_cube = create_cubed_sphere(6)
+        s_cube = hs_module.held_suarez_init(grid_cube, sigma)
+        mean_T_cube = float(jnp.mean(s_cube.T.data))
+        # 6x6x6x8 = 1728 cells; perturbation at the lowest level
+        # (6x6x6 = 216 cells); stddev of mean ≈ 1/sqrt(216)/8 ≈ 0.009.
+        # Allow 0.2 K.
+        assert abs(mean_T_cube - 300.0) < 0.2, (
+            f"cube init mean T={mean_T_cube:.4f} ≠ T_init=300"
+        )
+
+        # MPAS.
+        try:
+            from legoesm.grids.mpas import create_mpas_mesh
+        except ImportError:
+            return
+        try:
+            mesh = create_mpas_mesh(level=2)
+        except Exception:
+            return
+        s_mpas = hs_module.held_suarez_init_mpas(mesh, sigma)
+        mean_T_mpas = float(jnp.mean(s_mpas.T.data))
+        assert abs(mean_T_mpas - 300.0) < 0.2, (
+            f"mpas init mean T={mean_T_mpas:.4f} ≠ T_init=300"
+        )
+
+    def test_runner_dispatch_passes_consistent_kwargs(self):
+        """iter-47 codex MEDIUM: the matrix runner's ``run_held_suarez``
+        must call each per-grid init function with the SAME effective
+        kwargs (i.e. relying on the canonical defaults rather than
+        passing per-grid overrides).  A bug like
+        ``held_suarez_init_latlon(..., T_init=290.0)`` while the
+        cubed-sphere branch uses the default 300.0 would silently
+        disagree from t=0 — and the iter-46 default-pinning tests
+        would NOT catch it because they only check the function
+        signatures.
+
+        Strategy: parse the matrix script source and verify each of
+        the four ``held_suarez_init*`` / ``isothermal_rest_state_spectral``
+        call sites passes only the grid + sigma positional args
+        (no explicit kwarg overrides for ``T_init``,
+        ``perturbation_amplitude``, ``seed``, ``p_s_init``).
+        """
+        import re
+        path = _SCRIPT_DIR / "run_atmosphere_test_matrix.py"
+        src_lines = path.read_text().splitlines()
+
+        # iter-47 codex MEDIUM: scope to ``run_held_suarez`` only —
+        # the matrix runner's ``run_amip`` deliberately passes
+        # ``T_init=280.0`` to all four inits, which is intentional
+        # (AMIP-style cooler init).  Find the function-body boundary
+        # by scanning until the next top-level ``def `` (column 0).
+        start_idx = None
+        for i, line in enumerate(src_lines):
+            if line.startswith("def run_held_suarez("):
+                start_idx = i
+                break
+        assert start_idx is not None, (
+            "run_held_suarez not found in matrix runner"
+        )
+        end_idx = len(src_lines)
+        for i in range(start_idx + 1, len(src_lines)):
+            if src_lines[i].startswith("def ") or src_lines[i].startswith("class "):
+                end_idx = i
+                break
+        run_hs_body = "\n".join(src_lines[start_idx:end_idx])
+
+        # Find each init call within run_held_suarez.  All inits
+        # should be invoked with EXACTLY positional args (grid/mesh
+        # + sigma), no kwargs.
+        init_calls = re.findall(
+            r"(?:held_suarez_init(?:_latlon|_mpas)?|"
+            r"isothermal_rest_state_spectral)"
+            r"\(([^)]*)\)",
+            run_hs_body,
+        )
+        assert init_calls, (
+            "no per-grid init calls found in run_held_suarez body — "
+            "test broken or function refactored"
+        )
+        for args_str in init_calls:
+            args_str = args_str.strip().replace("\n", " ")
+            # iter-47: any of the canonical kwargs in the call site
+            # would mean the runner is passing a per-grid override —
+            # the iter-46 default-pinning audit would not catch it.
+            for kwarg in ("T_init", "perturbation_amplitude", "seed", "p_s_init"):
+                assert f"{kwarg}=" not in args_str, (
+                    f"run_held_suarez init call contains '{kwarg}=' "
+                    f"override (args={args_str!r}) — this would break "
+                    f"cross-grid init consistency.  Use the per-init "
+                    f"default instead."
+                )

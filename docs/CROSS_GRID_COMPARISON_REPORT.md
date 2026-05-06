@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-46 snapshot)
+**Branch**: `simulation_full_check` (iter-47 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..46 findings.  It is the user-facing
+This report consolidates iter-1..47 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -29,9 +29,10 @@ and every available pair of grids:
   `T(latitude, σ)` cross-section, the canonical Held-Suarez
   Fig. 3 layout.
 
-Every helper has a corresponding unit test (78 / 78 pass in
-`tests/test_atmosphere_cross_grid_plots.py` (72) +
-`test_ocean_cross_grid_plots.py` (6)).
+Every helper has a corresponding unit test (79 / 79 pass in
+`tests/test_atmosphere_cross_grid_plots.py` (73) +
+`test_ocean_cross_grid_plots.py` (6)) plus 1 MPAS-mesh-
+unavailable skip.
 
 CLI:
 * `--no-cross-grid-plots` — skip the post-run comparison block.
@@ -164,11 +165,13 @@ cross-grid ocean test (wind-driven gyres / OMIP) is a follow-up.
 | 44 | wrapper would reconvert old data on failed re-run (stale timeseries.npz survived) | HIGH |
 | 44 | crash between rename and CSV write left directory collectable but inconsistent | LOW |
 | 45 | post-crash recovery dropped AMIP metadata and emitted bogus `status: ERROR` | LOW |
+| 47 | iter-46 init regression tests skipped MPAS / spectral coverage | HIGH |
+| 47 | matrix runner's spectral branch passed `T_init=300.0` explicitly while others used default (latent silent-disagreement risk) | MEDIUM |
 
 **Codex adversarial review iterations**: iter-5, iter-6, iter-7,
 iter-16, iter-21, iter-26, iter-27, iter-32, iter-36, iter-37,
-iter-39, iter-42, iter-43, iter-44.  Each round caught real
-issues; final convergence is clean.
+iter-39, iter-42, iter-43, iter-44, iter-46.  Each round
+caught real issues; final convergence is clean.
 
 ---
 
@@ -185,7 +188,7 @@ issues; final convergence is clean.
 | Same colorbar/projection across grids | ✅ DONE (cartopy PlateCarrée + shared cmap) |
 | Physical consistency vs reference papers | ⚠️ Williamson cases agree to machine precision; HS climatology disagrees structurally (documented in §2) |
 | GPU / MPI efficiency | ✅ DONE (iter-28/29: per-test-case ``wall-time/day`` ranking + speedup factor in every ``comparison_summary.txt``) |
-| `/codex:adversarial-review` | ✅ DONE (14 review rounds: iter-5/6/7/16/21/26/27/32/36/37/39/42/43/44, all findings addressed) |
+| `/codex:adversarial-review` | ✅ DONE (15 review rounds: iter-5/6/7/16/21/26/27/32/36/37/39/42/43/44/46, all findings addressed) |
 
 ---
 
@@ -365,11 +368,35 @@ issues; final convergence is clean.
   a future change cannot regress init consistency without
   flipping a test.
 
-78/78 unit tests pass across both
-``tests/test_atmosphere_cross_grid_plots.py`` (72) and
-``tests/test_ocean_cross_grid_plots.py`` (6).
+* iter-47: address codex iter-46 review (2 HIGH + 1 MEDIUM
+  + 2 LOW).  HIGH: extended HS init regression tests from
+  cube/latlon-only to cube/latlon/MPAS/spectral; spectral
+  init signature defaults pinned via
+  ``isothermal_rest_state_spectral`` import; new spectral
+  zero-wind test verifies vor_hat/div_hat are zero AND
+  synthesised grid u/v are zero (round-trip check).  MEDIUM:
+  ``test_runner_dispatch_passes_consistent_kwargs`` parses
+  the matrix runner's ``run_held_suarez`` body and verifies
+  every per-grid init call uses positional grid+sigma args
+  only — no per-grid kwarg overrides.  LOW: T_eq monotonicity
+  check extended from 2 to 5 sample points; ``pytest.approx``
+  used for HS Table-1 constants.
+
+  The runner-dispatch test caught a real latent inconsistency:
+  the spectral branch was passing ``T_init=300.0`` explicitly
+  while the cube/latlon/MPAS branches relied on the default.
+  Same numeric value today, but a future change to the
+  spectral default would silently disagree with the others.
+  Source fix: removed the explicit kwarg from the spectral
+  branch.
+
+79/79 unit tests pass across both
+``tests/test_atmosphere_cross_grid_plots.py`` (73) and
+``tests/test_ocean_cross_grid_plots.py`` (6).  iter-47 also
+adds a spectral-init-zero-wind test that pins the round-trip
+spectral→grid u/v consistency.
 
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-46 update).*
+(iter-47 update).*

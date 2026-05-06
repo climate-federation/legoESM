@@ -2327,7 +2327,13 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
             spectral_filter_strength=0.01,
         )
         model = SpectralPrimitiveEquationModel(grid, sigma, pe_config)
-        state = isothermal_rest_state_spectral(grid, sigma, T_init=300.0)
+        # iter-47 codex MEDIUM: rely on the canonical
+        # ``T_init=300.0`` default rather than passing it
+        # explicitly — keeps the spectral branch consistent with
+        # the cube/latlon/mpas branches in the same function and
+        # makes the iter-46 default-audit the single source of
+        # truth.
+        state = isothermal_rest_state_spectral(grid, sigma)
 
         physics_fn = (_make_rrtmgp_physics("spectral_pe", dt, hs_fn=held_suarez_forcing_spectral)
                       if radiation == "rrtmgp" else held_suarez_forcing_spectral)
