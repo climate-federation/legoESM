@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-84 snapshot)
+**Branch**: `simulation_full_check` (iter-85 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..84 findings.  It is the user-facing
+This report consolidates iter-1..85 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -1529,6 +1529,18 @@ round caught real issues; final convergence is clean.
 
   Tests still 135/135 + 3 MPAS skips (no new tests, just
   tightened assertions on existing ones).
+* iter-85: production-non-regression check on the iter-83
+  ``_compute_drift`` change.  Re-ran SW W2 cube quick
+  smoke; results IDENTICAL to iter-61 baseline:
+
+      L2=2.05e-04, Linf=2.73e-03, v_ll_Linf=1.32e-01
+      (pre-regrid 1.52e-01)
+
+  The denominator-floor change (1e-30 → 1.0) doesn't
+  affect production callers because their baselines
+  (atmospheric mass ~5e+19 Pa·m², SW mean_height
+  ~5e+18 m·m²) are far above the floor.  Defensive fix
+  only.
 
 135/135 unit tests pass + 3 MPAS-mesh-unavailable skips
 (across ``tests/test_atmosphere_cross_grid_plots.py`` (83 +
@@ -1538,4 +1550,4 @@ round caught real issues; final convergence is clean.
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-84 update).*
+(iter-85 update).*
