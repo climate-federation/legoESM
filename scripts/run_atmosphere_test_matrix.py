@@ -5324,8 +5324,55 @@ def main():
         return
 
     if args.resolution:
+        # iter-95 fix: ``--resolution N`` (integer) was previously
+        # applied verbatim to every grid type, breaking 3 of 4
+        # parsers.  Specifically:
+        #   cubed_sphere ``int(res[1:])``: "16" → 6 (silent wrong N)
+        #   latlon ``res.split("x")``: "16" → unpack error
+        #   icosahedral ``res.replace("ico","")``: "16" → level=16
+        #     (4.29e+10 cells, ValueError)
+        #   spectral ``res.replace("T","")``: "16" → 16 (correct)
+        #
+        # Now: if ``--resolution`` is a bare integer N, dispatch
+        # per-grid:
+        #   cubed_sphere → f"C{N}"
+        #   latlon → f"{N}x{2*N}"
+        #   icosahedral → "ico{level}" where 4^level ≈ N²/10
+        #     (matches cell count to ≈ N×2N latlon coverage)
+        #   spectral → f"T{N}"
+        # Per-grid strings (e.g. "C36", "ico5") are still passed
+        # through unchanged.
+        cli_res = args.resolution
+        try:
+            N = int(cli_res)
+            is_bare_int = True
+        except ValueError:
+            is_bare_int = False
+
+        def _expand_cli_res(grid_type: str) -> str:
+            if not is_bare_int:
+                return cli_res
+            if grid_type == "cubed_sphere":
+                return f"C{N}"
+            elif grid_type == "latlon":
+                return f"{N}x{2 * N}"
+            elif grid_type == "icosahedral":
+                # level so that 10·4^level + 2 ≈ 2N² (latlon-coverage)
+                # level 3 → 642 cells, 4 → 2562, 5 → 10242, 6 → 40962
+                # N=16 → 2N²=512 → level 3 (closest)
+                # N=32 → 2N²=2048 → level 4 (closest)
+                # N=72 → 2N²=10368 → level 5 (closest)
+                import math
+                level = max(2, min(8, round(math.log(2 * N * N / 10) / math.log(4))))
+                return f"ico{level}"
+            elif grid_type == "spectral":
+                return f"T{N}"
+            else:
+                return cli_res
+
         tests = [TestCase(
-            t.equation_set, t.case, t.grid_type, args.resolution,
+            t.equation_set, t.case, t.grid_type,
+            _expand_cli_res(t.grid_type),
             t.vertical_coord, t.duration_days, t.quick_days, t.run_kwargs)
             for t in tests]
 
