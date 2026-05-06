@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-80 snapshot)
+**Branch**: `simulation_full_check` (iter-81 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..80 findings.  It is the user-facing
+This report consolidates iter-1..81 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -1440,6 +1440,26 @@ round caught real issues; final convergence is clean.
   Bug-fix table records the iter-80 HIGH (vol_rel
   spurious 1e+13 from 1e-30 denominator floor in
   ``_save_conservation_timeseries``).
+* iter-81 codex review (1 MEDIUM + 3 LOW addressed):
+
+    MEDIUM: ``vol_rel`` / ``heat_rel`` / ``salt_rel``
+      column NAMES are now unit-ambiguous after the iter-80
+      fix (relative when baseline ≥ 1, absolute when < 1).
+      Documented as acceptable in source comment with a
+      future-cleanup note (split into separate columns
+      would break downstream tooling).
+
+    LOW: iter-79 BLOWUP detector message reported a "Reason"
+      line for η triggers but not for T triggers.  Now
+      reports Reason for BOTH (with NaN/Inf vs sanity-
+      threshold distinction).
+
+    LOW: comment in run_omip.py:_check_finite still
+      framed iter-78 as a real missed BLOWUP instead of a
+      display artifact.  Updated to reflect iter-80 finding.
+
+    LOW: comment edge case (``< 1000.0`` means exactly
+      1000 m triggers BLOWUP).  Acknowledged in source.
 
 128/128 unit tests pass + 3 MPAS-mesh-unavailable skips
 (across ``tests/test_atmosphere_cross_grid_plots.py`` (79 +
@@ -1449,4 +1469,4 @@ round caught real issues; final convergence is clean.
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-80 update).*
+(iter-81 update).*

@@ -940,21 +940,30 @@ def _save_conservation(output_dir: Path, case_name: str, diag: dict,
     heat = np.array(heat_vals, dtype=np.float64)
     t = np.array(times, dtype=np.float64)
     # iter-80: the previous denominator floor of 1e-30 caused the
-    # iter-78 cube ``rest_state`` finding (-2.8e+13 m vol drift!).
-    # In rest-state runs the initial volume / heat / salt baselines
-    # are exactly zero (or nearly so for heat in stratified
-    # variants), so dividing machine-precision rounding errors by
-    # 1e-30 produced spurious 1e+13 "relative drift" values that
-    # were 30 orders of magnitude beyond the actual physics.
+    # iter-78 cube ``rest_state`` finding (cross_variant_summary
+    # reported -2.8e+13 m volume drift).  In rest-state runs the
+    # initial volume / heat / salt baselines are exactly zero (or
+    # near-zero for heat in stratified variants), so dividing
+    # machine-precision rounding errors by 1e-30 produced spurious
+    # 1e+13 "relative drift" values that were 30 orders of
+    # magnitude beyond the actual physics.
     #
     # Fix: when ``|vol[0]| < 1.0`` (i.e., baseline volume is
     # essentially zero in physical units of m³), report ABSOLUTE
     # drift in the same column.  When ``|vol[0]| >> 1`` (real
     # baseline), keep the relative-drift normalization.  Same
-    # treatment for heat and salt.  This makes the
-    # ``conservation_timeseries.csv`` ``vol_rel`` / ``heat_rel`` /
-    # ``salt_rel`` columns physically meaningful for both
-    # rest-state (absolute) and forced runs (relative).
+    # treatment for heat and salt.
+    #
+    # iter-81 codex MEDIUM: the column name ``vol_rel`` is now
+    # unit-ambiguous (relative when baseline ≥ 1, absolute when
+    # < 1).  This is acceptable for the cross-variant comparison
+    # plot's purposes (both forms convey "is the system drifting
+    # away from initial state?") but downstream consumers reading
+    # these columns should treat them as drift magnitudes, NOT as
+    # dimensionless relative deviations.  A future cleanup could
+    # split into two columns (``vol_drift_abs`` always absolute,
+    # ``vol_drift_rel`` only when baseline >> 0) but that's
+    # downstream-tooling-breaking and out of scope.
     _MIN_RELATIVE_BASELINE = 1.0
     vol_denom = max(abs(vol[0]), _MIN_RELATIVE_BASELINE)
     heat_denom = max(abs(heat[0]), _MIN_RELATIVE_BASELINE)

@@ -479,9 +479,14 @@ def _check_finite(state, grid_type):
     # well above any realistic dynamic range, but catches the
     # iter-71 cube C24 OMIP BLOWUP (eta_max=2677 m at step 500).
     # iter-79 added the η bound; previously only T was bounded
-    # (< 100 °C), so slow η drift could escape detection (the
-    # iter-78 cube rest_state finding showed -2.8e+13 m drift
-    # passing the BLOWUP detector silently).
+    # (< 100 °C), so an η-only blowup could in principle escape
+    # detection (T might still be reasonable while η diverged).
+    # The iter-71 BLOWUP was caught via the T bound at step 500
+    # but the η bound is defensive.
+    #
+    # iter-81 codex LOW: state must remain below the threshold
+    # (strict ``<``).  Exactly 1000 m would trigger a BLOWUP —
+    # acceptable since 1000 m is already absurd for SSH.
     if not bool(jnp.max(jnp.abs(T_ocean)) < 100.0):
         return False
     return bool(jnp.max(jnp.abs(eta_ocean)) < 1000.0)
@@ -544,18 +549,29 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                     T_oc = jnp.where(m3 > 0.5, state.T.data, 0.0)
                     eta_max = float(jnp.max(jnp.abs(state.eta.data)))
                     eta_finite = bool(jnp.all(jnp.isfinite(state.eta.data)))
+                    T_max = float(jnp.max(jnp.abs(T_oc)))
+                    T_finite = bool(jnp.all(jnp.isfinite(T_oc)))
                     print(
                         f"  BLOWUP step {step}: "
-                        f"max|T|={float(jnp.max(jnp.abs(T_oc))):.1f} "
-                        f"T_finite={bool(jnp.all(jnp.isfinite(T_oc)))} "
+                        f"max|T|={T_max:.1f} "
+                        f"T_finite={T_finite} "
                         f"eta_max={eta_max:.2f} "
                         f"eta_finite={eta_finite}"
                     )
-                    # iter-79 bound (max|eta| > 1000 m) and the
-                    # original T bound (max|T| > 100 °C) both
-                    # trigger the BLOWUP path; the message tells
-                    # the user which one fired.
-                    if eta_max >= 1000.0:
+                    # iter-81 codex LOW: report Reason for BOTH T
+                    # and η triggers (iter-79 reported only η).
+                    # Multiple conditions can fire simultaneously
+                    # (e.g., a NaN cascade hits both T and η).
+                    if not T_finite:
+                        print(f"    Reason: T contains NaN/Inf")
+                    elif T_max >= 100.0:
+                        print(
+                            f"    Reason: |T| reached {T_max:.1f} °C "
+                            f"(sanity threshold 100 °C)"
+                        )
+                    if not eta_finite:
+                        print(f"    Reason: η contains NaN/Inf")
+                    elif eta_max >= 1000.0:
                         print(
                             f"    Reason: |η| reached {eta_max:.0f} m "
                             f"(iter-79 sanity threshold 1000 m)"
