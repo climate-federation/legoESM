@@ -4075,6 +4075,67 @@ class TestHeldSuarezMassDriftTolerance:
             "``_apply_mass_drift_tolerance``."
         )
 
+    def test_cosine_bell_uses_mass_drift_tolerance(self):
+        """iter-119 codex iter-118-followup MEDIUM-1:
+        ``run_cosine_bell`` must apply the mass-drift
+        tolerance.  Pre-iter-119 it only WARNED on
+        mass_drift > 0.01 but never FAILed.
+        """
+        import inspect
+        m = self._import_module()
+        src = inspect.getsource(m.run_cosine_bell)
+        assert "_apply_mass_drift_tolerance" in src, (
+            "iter-119: ``run_cosine_bell`` must call "
+            "``_apply_mass_drift_tolerance`` to gate PASS on "
+            "conservation, not just warn."
+        )
+
+    def test_validate_rejects_leading_zeros(self):
+        """iter-119 codex iter-118-followup LOW-3: per-grid
+        format strings with leading zeros (``C01``, ``ico03``,
+        ``T021``, ``001km``) are rejected by the
+        ``[1-9]\\d*`` regex.  Pin the policy.
+        """
+        from legoesm.driver.cli_resolution import validate_cli_resolution
+        import pytest as _pytest
+        for bad in ("C01", "ico03", "T021", "001km", "01x32",
+                    "16x032", "C001"):
+            with _pytest.raises(SystemExit) as e:
+                validate_cli_resolution(bad)
+            assert e.value.code == 2, (
+                f"iter-119: leading-zero per-grid format "
+                f"{bad!r} must be rejected; got {e.value.code}"
+            )
+
+    def test_4grids_runner_uses_mass_drift_tolerance(self):
+        """iter-119 codex iter-118-followup MEDIUM-2:
+        ``run_held_suarez_rrtmgp_4grids.py`` must gate PASS
+        on mass drift.  Pre-iter-119 it only checked
+        finiteness/non-blown-up.
+        """
+        from pathlib import Path
+        path = Path(__file__).resolve().parent.parent / "scripts" / "run_held_suarez_rrtmgp_4grids.py"
+        text = path.read_text()
+        assert "HS_RRTMGP_MASS_DRIFT_TOL" in text, (
+            "iter-119: ``run_held_suarez_rrtmgp_4grids.py`` "
+            "must define a mass-drift tolerance constant."
+        )
+        # The fail-back-to-results-dict pattern must persist
+        # the gate so main()'s all_ok aggregation reflects it.
+        import re
+        text_no_strings = re.sub(r'""".*?"""', "", text, flags=re.DOTALL)
+        text_no_strings = re.sub(r"'''.*?'''", "", text_no_strings, flags=re.DOTALL)
+        code_only = "\n".join(
+            line for line in text_no_strings.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        assert "results[grid_name] = (state, diag, wall, ok)" in code_only, (
+            "iter-119: 4-grid HS runner must persist the "
+            "iter-119 mass-drift gate back to the ``results`` "
+            "dict so ``main()``'s ``all(r[3] ...)`` "
+            "aggregation reflects the gate."
+        )
+
     def test_held_suarez_smoke_at_c16_passes_placeholder(self):
         """Placeholder for the manual end-to-end HS smoke.
         The actual run takes ~200s wall (4 grids × 2 vert
