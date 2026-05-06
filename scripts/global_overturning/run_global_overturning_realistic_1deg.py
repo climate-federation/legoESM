@@ -65,9 +65,13 @@ from legoesm.ocean.experiments.global_overturning import (
 OUTPUT_DIR = Path("results/ocean/global_overturning_realistic_1deg")
 ETOPO_FILE = Path("data/bathymetry/etopo_1deg.nc")
 
-# Same viscosity config as 5° Phase 4(c):
-A_H_GLOBAL = 2.0e5
+# Viscosity config — cos¹(lat) scaling with floor (Tier 1 fix).
+# cos¹ keeps grid Re constant; cos² (legacy) made Re blow up at poles.
+A_H_GLOBAL = 8.0e4     # was 2e5 — can reduce with cos¹ scaling
 A_H_LAT_SCALING = True
+A_H_FLOOR = 1000.0     # minimum A_h_eff at extreme latitudes [m²/s]
+A_H_EQ_BOOST = 3.0     # equatorial enhancement factor
+B_H = 5.0e11           # was 5e9 — increased for grid-scale damping
 NORTH_CAP_LAT = 80.0
 
 
@@ -183,11 +187,17 @@ def main():
         physics=physics,
         A_h=A_H_GLOBAL,
         A_h_lat_scaling=A_H_LAT_SCALING,
-        B_h=5.0e9,
+        A_h_floor=A_H_FLOOR,
+        A_h_eq_boost=A_H_EQ_BOOST,
+        A_h_eq_sigma_deg=5.0,
+        B_h=B_H,
+        C_smag=0.2,                 # biharmonic Smagorinsky (OMIP stack)
+        slope_foot_alpha=3.0,       # slope-foot viscosity enhancement (OMIP stack)
         A_v=config.A_v,
         K_v=config.K_v,
         bottom_drag_r=config.bottom_drag_coeff,
         bottom_drag_bbl_thickness=100.0,
+        bottom_drag_bg_velocity=0.1, # quadratic-with-floor drag (OMIP stack)
         eos="linear",
         eos_linear=eos_config,
         gm_redi=gm_redi_cfg,

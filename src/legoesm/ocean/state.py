@@ -476,11 +476,15 @@ class LatLonCGridOceanConfig(NamedTuple):
     g: float = 9.80616  # = constants.g
     rho_0: float = 1025.0        # = eos.rho_0
     A_h: float = 1.0e4
-    A_h_lat_scaling: bool = False  # When True, A_h is multiplied by cos²(lat)
-                                    # to keep viscous CFL latitude-independent on
-                                    # lat-lon grids.  Standard MITgcm/MOM6/NEMO
-                                    # convention.  Default False to preserve
-                                    # bit-exact regression on legacy configs.
+    A_h_lat_scaling: bool = False  # When True, A_h is scaled by cos(lat) to
+                                    # keep the grid Reynolds number latitude-
+                                    # independent on lat-lon grids.  Default
+                                    # False to preserve bit-exact regression on
+                                    # legacy configs.
+    A_h_floor: float = 0.0         # Minimum effective A_h [m²/s] after latitude
+                                    # scaling.  Prevents viscosity from vanishing
+                                    # at extreme latitudes.  Recommended 1000.0
+                                    # for grids extending past 85°.
     A_h_eq_boost: float = 1.0      # Equatorial Laplacian-viscosity boost.  When
                                     # > 1, multiplies A_h by 1 + (boost-1) *
                                     # exp(-(lat/sigma)²), so horizontal momentum

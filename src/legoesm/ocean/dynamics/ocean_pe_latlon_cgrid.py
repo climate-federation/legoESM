@@ -1360,7 +1360,9 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             u_prime, v_prime, grid,
             mask=mask, u_mask=u_mask, v_mask=v_mask)
         if config.A_h_lat_scaling:
-            lap_scale_u, lap_scale_v = laplacian_scaling_factor(grid)
+            _floor = config.A_h_floor / config.A_h if config.A_h_floor > 0 else 0.0
+            lap_scale_u, lap_scale_v = laplacian_scaling_factor(
+                grid, power=1, floor=_floor)
             if config.A_h_eq_boost > 1.0:
                 eb_u, eb_v = equatorial_boost_factor(
                     grid, config.A_h_eq_sigma_deg, config.A_h_eq_boost)
@@ -1393,7 +1395,9 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             u_prime, v_prime, grid,
             mask=mask, u_mask=u_mask, v_mask=v_mask)
         if config.A_h_lat_scaling:
-            lap_scale_u, lap_scale_v = laplacian_scaling_factor(grid)
+            _floor = config.A_h_floor / config.A_h if config.A_h_floor > 0 else 0.0
+            lap_scale_u, lap_scale_v = laplacian_scaling_factor(
+                grid, power=1, floor=_floor)
             if config.A_h_eq_boost > 1.0:
                 eb_u, eb_v = equatorial_boost_factor(
                     grid, config.A_h_eq_sigma_deg, config.A_h_eq_boost)

@@ -816,27 +816,31 @@ def _cos_lat_uv(grid: LatLonGrid) -> tuple[jnp.ndarray, jnp.ndarray]:
     return cos_u, cos_v
 
 
-def laplacian_scaling_factor(grid: LatLonGrid) -> tuple[jnp.ndarray, jnp.ndarray]:
+def laplacian_scaling_factor(
+    grid: LatLonGrid,
+    power: int = 1,
+    floor: float = 0.0,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Grid-dependent scaling for Laplacian viscosity on a lat-lon grid.
 
     On a latitude-longitude grid the zonal grid spacing shrinks as
-    ``cos(lat)`` near the poles.  Because the Laplacian-viscosity
-    timescale ``dx^2 / A_h`` shrinks with ``cos^2(lat)``, a constant
-    ``A_h`` becomes effectively very large near the poles — and at the
-    high-latitude coastal partial-cell vertices on real ETOPO this
-    triggers a viscous-Coriolis amplification that produces a localized
-    runaway in η at lat ~82.5° (see ``docs/ocean_experiments/realistic_geometry_phase4_results.md``
-    and the D1 diagnostic in ``ah_diagnostics/``).
+    ``cos(lat)`` near the poles.  Two conventions exist:
 
-    Following the standard MITgcm/MOM6/NEMO production convention, the
-    Laplacian coefficient is multiplied by ``cos^2(lat)``.  This keeps
-    the viscous CFL number ``A_h * dt / dx^2`` latitude-independent and
-    matches the cos⁴-scaling that ``biharmonic_scaling_factor`` already
-    applies to ``B_h``.
+    ``power=1`` (recommended): ``A_h_eff = A_h × cos(lat)``.
+        Keeps the grid Reynolds number ``U·dx / A_h_eff`` latitude-
+        independent.  The viscous CFL grows as ``1/cos(lat)`` toward
+        the poles but stays well below the stability limit at
+        realistic ``dt`` and ``A_h`` (CFL < 0.03 at 85° for
+        ``A_h=1e5``, ``dt=300s``).
+
+    ``power=2`` (legacy): ``A_h_eff = A_h × cos²(lat)``.
+        Keeps the viscous CFL latitude-independent but makes the grid
+        Reynolds number grow as ``1/cos(lat)`` → ∞ at the poles,
+        causing blowup at high latitudes on 1° grids.
 
     Usage::
 
-        scale_u, scale_v = laplacian_scaling_factor(grid)
+        scale_u, scale_v = laplacian_scaling_factor(grid, power=1)
         vlap_u, vlap_v = vector_laplacian_cgrid(u, v, grid, ...)
         du_dt += A_h * scale_u[:, None, None] * vlap_u
         dv_dt += A_h * scale_v[:, None, None] * vlap_v
@@ -844,17 +848,29 @@ def laplacian_scaling_factor(grid: LatLonGrid) -> tuple[jnp.ndarray, jnp.ndarray
     Parameters
     ----------
     grid : LatLonGrid
+    power : {1, 2}
+        Exponent on cos(lat).  1 = constant Re_grid (recommended).
+        2 = constant viscous CFL (legacy).
+    floor : float
+        Minimum value for the scaling factor (dimensionless).
+        When the caller supplies ``floor = A_h_floor / A_h``, this
+        enforces a minimum effective viscosity of ``A_h_floor`` m²/s.
 
     Returns
     -------
     scale_u : (n_lat,)
-        cos²(lat) at u-face latitudes (cell centres).  Reshape to
+        cos^power(lat) at u-face latitudes (cell centres).  Reshape to
         ``[:, None]`` for 2D fields or ``[:, None, None]`` for 3D.
     scale_v : (n_lat+1,)
-        cos²(lat) at v-face latitudes.
+        cos^power(lat) at v-face latitudes.
     """
     cos_u, cos_v = _cos_lat_uv(grid)
-    return cos_u ** 2, cos_v ** 2
+    scale_u = cos_u ** power
+    scale_v = cos_v ** power
+    if floor > 0:
+        scale_u = jnp.maximum(scale_u, floor)
+        scale_v = jnp.maximum(scale_v, floor)
+    return scale_u, scale_v
 
 
 def equatorial_boost_factor(
