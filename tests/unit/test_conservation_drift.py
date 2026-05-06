@@ -648,19 +648,60 @@ class TestStructuralRegressionNoNewIter78Pathology:
                     continue
                 yield path, text
 
-    def test_no_inline_max_abs_x_zero_1e30_pattern(self):
-        """No ``max(abs(X[0]), 1e-XX)`` for tiny epsilon in active
-        code.  The canonical helper's
-        ``DEFAULT_MIN_BASELINE = 1.0`` is the single source of
-        truth for the floor.
+    def test_iter_106_regex_catches_decimal_form(self):
+        """iter-106 codex iter-104 MEDIUM-5: pin that the
+        broadened regex actually distinguishes both
+        ``1e-30`` and ``1.0e-30`` decimal forms from the
+        canonical helper expression ``max(abs(x), 1.0)``.
         """
         import re
-        # Match: max(abs(<anything ending in [0])>), 1e-NN)
-        # where NN >= 10 (so 1e-10, 1e-12, 1e-20, 1e-30, ...)
-        # This catches the iter-78 family but NOT
-        # ``max(abs(x), 1.0)`` (the helper's canonical form).
         pat = re.compile(
-            r"max\(\s*abs\([^)]*\[0\][^)]*\)\s*,\s*1e-\d{2,}\s*\)"
+            r"max\(\s*abs\([^)]*\[0\][^)]*\)\s*,\s*"
+            r"\d(?:\.\d+)?e-\d{2,}\s*\)"
+        )
+        # Should match (iter-78 pathology):
+        for bad in [
+            "max(abs(mass[0]), 1e-30)",
+            "max(abs(mass[0]), 1.0e-30)",
+            "max(abs(values[0]), 1.5e-25)",
+            "max(abs(energy[0]), 1.0e-30)",
+        ]:
+            assert pat.search(bad) is not None, (
+                f"iter-106: regex must catch {bad!r}"
+            )
+        # Should NOT match (canonical or different form):
+        for good in [
+            "max(abs(values[0]), 1.0)",  # canonical helper
+            "max(abs(x), 1e-10)",  # no [0] subscript
+            "abs(values[0]) + 1.0e-30",  # different operator
+        ]:
+            assert pat.search(good) is None, (
+                f"iter-106: regex must NOT match {good!r}"
+            )
+
+    def test_no_inline_max_abs_x_zero_1e30_pattern(self):
+        """No ``max(abs(X[0]), 1e-XX)`` (or ``1.0e-XX`` decimal
+        form) for tiny epsilon in active code.  The canonical
+        helper's ``DEFAULT_MIN_BASELINE = 1.0`` is the single
+        source of truth for the floor.
+
+        iter-106 codex iter-104 MEDIUM-5: the original iter-94
+        regex used ``1e-\\d{2,}`` and missed the ``1.0e-30``
+        form found in
+        ``tests/validation/run_dycore_progression_suite.py``.
+        Now matches both forms via ``1(?:\\.\\d+)?e-\\d{2,}``.
+        """
+        import re
+        # Match: max(abs(<anything ending in [0])>), Xe-NN)
+        # where:
+        #   X is "1" or "1.0" / "1.5" etc (decimal form)
+        #   NN >= 10 (so 1e-10, 1e-12, 1e-20, 1e-30, 1.0e-30, ...)
+        # Catches the iter-78 family but NOT
+        # ``max(abs(x), 1.0)`` (the helper's canonical form, no
+        # ``e-`` exponent suffix).
+        pat = re.compile(
+            r"max\(\s*abs\([^)]*\[0\][^)]*\)\s*,\s*"
+            r"\d(?:\.\d+)?e-\d{2,}\s*\)"
         )
         offenders = []
         for path, text in self._walk_python_files():
@@ -683,16 +724,21 @@ class TestStructuralRegressionNoNewIter78Pathology:
         )
 
     def test_no_inline_abs_x_zero_plus_eps_pattern(self):
-        """No ``abs(X[0]) + 1e-XX`` denominator pattern.
+        """No ``abs(X[0]) + 1e-XX`` (or ``1.0e-XX`` decimal form)
+        denominator pattern.
 
         This is the iter-87 variant — the HS+RRTMGP runner used
         ``/ abs(mass_vals[0] + 1e-30)`` which has the same iter-78
         pathology.
+
+        iter-106 codex iter-104 MEDIUM-5: broadened regex to
+        also match ``1.0e-30`` decimal form.
         """
         import re
-        # Match: / (abs(...) + 1e-NN) or / abs(...) + 1e-NN
+        # Match: / (abs(...) + Xe-NN) or / abs(...) + Xe-NN
         pat = re.compile(
-            r"/\s*\(?\s*abs\([^)]*\[0\][^)]*\)\s*\+\s*1e-\d{2,}\s*\)?"
+            r"/\s*\(?\s*abs\([^)]*\[0\][^)]*\)\s*\+\s*"
+            r"\d(?:\.\d+)?e-\d{2,}\s*\)?"
         )
         offenders = []
         for path, text in self._walk_python_files():
@@ -739,7 +785,9 @@ class TestStructuralRegressionNoNewIter78Pathology:
             # _baseline / _zero — names that semantically imply
             # "time-zero baseline" and trigger the iter-78 bug.
             r"\w+(?:_init|_initial|_before|_baseline|_zero)"
-            r"\s*,\s*1e-(?:1[5-9]|2\d|3\d|4\d)\s*\)"
+            # iter-106: also match decimal form ``1.0e-XX`` (codex
+            # iter-104 MEDIUM-5).
+            r"\s*,\s*\d(?:\.\d+)?e-(?:1[5-9]|2\d|3\d|4\d)\s*\)"
         )
         offenders = []
         for path, text in self._walk_python_files():
