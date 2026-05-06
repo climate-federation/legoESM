@@ -3806,7 +3806,9 @@ def _collect_grid_results_atmosphere(
     return grid_results
 
 
-def _vertical_coords_for_case(test_case_dir: Path) -> list[str | None]:
+def _vertical_coords_for_case(
+    test_case_dir: Path, *, allowed_grids: set[str] | None = None,
+) -> list[str | None]:
     """Enumerate the vertical-coord variants present across grids for a
     given case directory.
 
@@ -3822,6 +3824,8 @@ def _vertical_coords_for_case(test_case_dir: Path) -> list[str | None]:
     verts: set[str] = set()
     for grid_dir in test_case_dir.iterdir():
         if not grid_dir.is_dir() or grid_dir.name not in GRID_TYPES:
+            continue
+        if allowed_grids is not None and grid_dir.name not in allowed_grids:
             continue
         # iter-6 L1: shared resolution-selection helper, identical
         # warnings as the collector (deduplicated via _RES_DIR_WARNED).
@@ -4307,6 +4311,13 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
 
+    # iter-7 codex review LOW: reset the multi-resolution warning
+    # dedup set so a single ``main()`` invocation produces at most one
+    # warning per grid_dir.  Persists across invocations only when the
+    # interpreter calls ``main()`` repeatedly (rare), but resetting on
+    # entry keeps the warning behaviour invocation-local.
+    _RES_DIR_WARNED.clear()
+
     tests = filter_tests(TEST_MATRIX, args)
 
     if args.list_category_scripts:
@@ -4361,7 +4372,9 @@ def main():
         for case_dir in cases:
             if allowed_cases is not None and case_dir.name not in allowed_cases:
                 continue
-            for vc in _vertical_coords_for_case(case_dir):
+            for vc in _vertical_coords_for_case(
+                case_dir, allowed_grids=allowed_grids,
+            ):
                 try:
                     _create_cross_grid_comparisons_atmosphere(
                         case_dir,
