@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-73 snapshot)
+**Branch**: `simulation_full_check` (iter-74 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..73 findings.  It is the user-facing
+This report consolidates iter-1..74 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -181,6 +181,9 @@ cross-grid ocean test (wind-driven gyres / OMIP) is a follow-up.
 | 73 | RCE wrapper had `set -e` with no per-grid failure guard (would abort whole run on iter-71-style cube/voronoi blowups) | HIGH |
 | 73 | `--cross-grid-plots-only --test rce` matched 0 cases because TEST_MATRIX has no rce entry | HIGH |
 | 73 | RCE voronoi (MPAS) BLOWUP at day 1 — similar dycore fragility to iter-71 cube OMIP — USER HANDOFF | HIGH |
+| 74 | AMIP wrapper computed `$RES` from GRID_RES dict for OUTDIR but never passed `--resolution` to `run_amip.py` — every grid actually ran at default n=16 | HIGH |
+| 74 | AMIP wrapper had same `--diag-days` issue as RCE: short-day smokes silently produced empty output | HIGH |
+| 74 | AMIP wrapper GRID_RES had "90x180" for latlon but `run_amip.py --resolution` is `type=int` (would have failed at argparse if iter-74 had passed it without the simplification) | MEDIUM |
 
 **Codex adversarial review iterations**: iter-5, iter-6, iter-7,
 iter-16, iter-21, iter-26, iter-27, iter-32, iter-36, iter-37,
@@ -1169,13 +1172,52 @@ round caught real issues; final convergence is clean.
   architectural fragility.  Per the iter-68 user handoff
   (cube dycore retuning), the voronoi RCE blowup is also
   out of scope.
+* iter-74: AMIP wrapper end-to-end validation + 3 fixes:
+
+    1. **iter-74 caught a HIGH wrapper bug**: the iter-41
+       wrapper computed ``$RES`` from GRID_RES for the
+       OUTDIR path but NEVER passed ``--resolution`` to
+       ``run_amip.py``.  Every grid silently ran at the
+       default n=16 (``run_amip.py --resolution`` default)
+       regardless of what the GRID_RES dict said.  The
+       iter-69 single-grid validation didn't catch this
+       because it invoked ``run_amip.py`` directly with
+       ``--resolution 24``, not via the wrapper.  Fix:
+       pass ``--resolution "$RES"`` in the wrapper's
+       ``run_amip.py`` invocation.
+
+    2. AMIP wrapper had the same ``--diag-days`` issue as
+       iter-73 RCE: short-day smokes produced empty
+       diagnostics that the iter-42 converter then purged.
+       Fix: pass ``--diag-days 1``.
+
+    3. GRID_RES had "90x180" for latlon — but
+       ``run_amip.py --resolution`` is ``type=int``, so
+       passing it would have failed at argparse.
+       Simplified GRID_RES values to single ints for all
+       grids:
+
+         cubed_sphere: 48     (C48)
+         latlon:       90     (run_amip.py: n_lat=90 → n_lon=180)
+         voronoi:      6      (MPAS level)
+         gaussian:     42     (T42, passed via --truncation)
+
+  End-to-end AMIP wrapper validation (DAYS=2): 3 of 4
+  grids PASS (cube / latlon / spectral), 1 empty
+  (icosahedral / voronoi — same architectural fragility
+  as iter-71/73 cube/voronoi blowups).  Cross-grid plot
+  produced at
+  ``$OUTPUT/hydrostatic/amip/comparison_timeseries.png``.
+
+  Bug-fix table records 3 new iter-74 entries (2 HIGH +
+  1 MEDIUM).  Tests still 120/120 + 3 MPAS skips.
 
 120/120 unit tests pass + 3 MPAS-mesh-unavailable skips
 (across ``tests/test_atmosphere_cross_grid_plots.py`` (77 +
 3 skips), ``tests/test_ocean_cross_grid_plots.py`` (15), and
-``tests/test_cross_grid_wrappers.py`` (26)).
+``tests/test_cross_grid_wrappers.py`` (27)).
 
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-73 update).*
+(iter-74 update).*

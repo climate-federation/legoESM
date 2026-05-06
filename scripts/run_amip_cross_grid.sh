@@ -47,10 +47,18 @@ ANY_FAILED=0
 # consistency testing.
 declare -A GRID_RES=(
     [cubed_sphere]="48"
-    [latlon]="90x180"
+    [latlon]="90"
     [voronoi]="6"
     [gaussian]="42"
 )
+# iter-74: ``run_amip.py --resolution`` is ``type=int`` and means
+# different things per grid:
+#   cubed_sphere → n      (C48 → 48 cells per face per face dim)
+#   latlon       → n_lat  (run_amip.py sets n_lon = 2 * n_lat)
+#   voronoi      → MPAS level
+#   gaussian     → ignored (use --truncation instead)
+# The previous "90x180" form for latlon was never run end-to-end
+# and would have failed at argparse (int conversion).
 declare -A GRID_DISC=(
     [cubed_sphere]="cdgrid"
     [latlon]="latlon_cgrid"
@@ -104,9 +112,25 @@ for GRID in cubed_sphere latlon voronoi gaussian; do
     # data on the next cross-grid pass.
     rm -f "$OUTDIR/timeseries.npz"
     rm -f "$OUTDIR/mean_timeseries.csv"
+    # iter-74: ``run_amip.py`` only emits diagnostics every
+    # ``--diag-days`` (default 5).  Short-day smokes (DAYS<=5)
+    # produce empty ``timeseries.npz``, which the iter-42
+    # converter then purges as failed output.  Force daily
+    # diagnostics so even 1-2 day smokes accumulate data.
+    # iter-73 made the same fix for the RCE wrapper.
+    #
+    # iter-74 ALSO fixes a latent bug: the wrapper computed
+    # ``$RES`` from the GRID_RES dict for the OUTDIR path but
+    # never passed it to ``run_amip.py``.  Result: every grid
+    # ran at ``--resolution`` default (16), regardless of the
+    # GRID_RES value.  Now ``--resolution "$RES"`` is passed
+    # explicitly so cube C48 runs at C48, latlon at the right
+    # n_lat, etc.  ``$TRUNC`` (--truncation) is the gaussian-
+    # specific override that the iter-41 wrapper already had.
     JAX_ENABLE_X64=1 .venv/bin/python scripts/run_amip.py \
         --grid-type "$GRID" --discretization "$DISC" \
-        $TRUNC --days "$DAYS" --output "$OUTDIR" \
+        --resolution "$RES" \
+        $TRUNC --days "$DAYS" --diag-days 1 --output "$OUTDIR" \
         $EXTRA_FLAGS || {
         echo "  WARNING: run_amip.py failed for $GRID; continuing"
         echo "  with cross-grid loop so other grids still produce"
