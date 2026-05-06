@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-49 snapshot)
+**Branch**: `simulation_full_check` (iter-50 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..49 findings.  It is the user-facing
+This report consolidates iter-1..50 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -29,9 +29,9 @@ and every available pair of grids:
   `T(latitude, σ)` cross-section, the canonical Held-Suarez
   Fig. 3 layout.
 
-Every helper has a corresponding unit test (81 / 81 pass in
+Every helper has a corresponding unit test (85 / 85 pass in
 `tests/test_atmosphere_cross_grid_plots.py` (71) +
-`test_ocean_cross_grid_plots.py` (10)) plus 3 MPAS-mesh-
+`test_ocean_cross_grid_plots.py` (14)) plus 3 MPAS-mesh-
 unavailable skips.
 
 CLI:
@@ -168,11 +168,13 @@ cross-grid ocean test (wind-driven gyres / OMIP) is a follow-up.
 | 47 | iter-46 init regression tests skipped MPAS / spectral coverage | HIGH |
 | 47 | matrix runner's spectral branch passed `T_init=300.0` explicitly while others used default (latent silent-disagreement risk) | MEDIUM |
 | 49 | OMIP runs silently skipped from the ocean cross-grid plot pass (collector required all 3 files; OMIP writes only 2) | HIGH |
+| 50 | mixed runs (1 with snapshots, others timeseries-only) emitted single-grid "cross-grid" snapshot plots | MEDIUM |
+| 50 | corrupt `snapshots_latlon.npz` would drop an otherwise-usable timeseries run | MEDIUM |
 
 **Codex adversarial review iterations**: iter-5, iter-6, iter-7,
 iter-16, iter-21, iter-26, iter-27, iter-32, iter-36, iter-37,
-iter-39, iter-42, iter-43, iter-44, iter-46, iter-47.  Each
-round caught real issues; final convergence is clean.
+iter-39, iter-42, iter-43, iter-44, iter-46, iter-47, iter-49.
+Each round caught real issues; final convergence is clean.
 
 ---
 
@@ -189,7 +191,7 @@ round caught real issues; final convergence is clean.
 | Same colorbar/projection across grids | ✅ DONE (cartopy PlateCarrée + shared cmap) |
 | Physical consistency vs reference papers | ⚠️ Williamson cases agree to machine precision; HS climatology disagrees structurally (documented in §2) |
 | GPU / MPI efficiency | ✅ DONE (iter-28/29: per-test-case ``wall-time/day`` ranking + speedup factor in every ``comparison_summary.txt``) |
-| `/codex:adversarial-review` | ✅ DONE (16 review rounds: iter-5/6/7/16/21/26/27/32/36/37/39/42/43/44/46/47, all findings addressed) |
+| `/codex:adversarial-review` | ✅ DONE (17 review rounds: iter-5/6/7/16/21/26/27/32/36/37/39/42/43/44/46/47/49, all findings addressed) |
 
 ---
 
@@ -428,12 +430,31 @@ round caught real issues; final convergence is clean.
   snapshots-only acceptance, neither-half rejection,
   graceful fall-through when all grids are timeseries-only.
 
-81/81 unit tests pass + 3 MPAS-mesh-unavailable skips
+* iter-50: address codex iter-49 review (2 MEDIUM + 2 LOW).
+  MEDIUM: ``_create_cross_grid_comparisons`` was passing the
+  full ``grid_results`` to the snapshot plotters even when
+  only one grid had snapshots — would emit a single-grid
+  "cross-grid" plot.  Fix: skip if ``len(grids_with_snapshots)
+  < 2``; otherwise pass the filtered dict to the plotters
+  instead of the full one.  MEDIUM: per-artifact load
+  isolation in ``_collect_grid_results`` — a corrupt
+  ``snapshots_latlon.npz`` no longer drops an otherwise-
+  usable run; each artifact now loads under its own
+  try/except.  LOW: ``_create_comparison_timeseries`` early-
+  returns if no grid has timeseries data (snapshots-only
+  cross-grid case used to emit an empty PNG with legend
+  warnings).  LOW: 4 new tests covering the mixed-fixture
+  scenarios — 1-with-snapshots/1-without (no snapshot plot
+  emitted), 2-with-snapshots/1-without (snapshot plot
+  emitted), corrupt-npz fallback, snapshots-only-no-
+  timeseries-plot.
+
+85/85 unit tests pass + 3 MPAS-mesh-unavailable skips
 (across ``tests/test_atmosphere_cross_grid_plots.py`` (71
 + 3 skips) and ``tests/test_ocean_cross_grid_plots.py``
-(10)).
+(14)).
 
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-49 update).*
+(iter-50 update).*

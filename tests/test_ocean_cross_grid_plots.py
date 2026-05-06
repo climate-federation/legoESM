@@ -271,3 +271,128 @@ class TestRelaxedCollectorAcceptsTimeseriesOnly:
                 f"unexpected snapshot plot {f.name} for "
                 f"timeseries-only test case"
             )
+
+    def _write_synthetic_full_run(self, dir_path: Path):
+        """A run with BOTH timeseries CSV and snapshots npz."""
+        self._write_synthetic_timeseries_only(dir_path)
+        # Add a 2-time-step eta snapshot for plotting.
+        eta = np.zeros((2, 4, 6), dtype=np.float64)
+        np.savez(
+            dir_path / "snapshots_latlon.npz",
+            eta=eta, times_days=np.array([0.0, 2.0]),
+        )
+
+    def test_mixed_fixture_only_grids_with_snapshots_get_snapshot_plots(
+        self, tmp_path,
+    ):
+        """iter-50 codex MEDIUM: when one grid has snapshots and
+        another is timeseries-only, the snapshot plotters must
+        receive ONLY the grids that contributed snapshots — not
+        both.
+
+        Specifically: with N=2 grids total but only 1 with
+        snapshots, ``len(grids_with_snapshots) < 2`` so the
+        cross-grid snapshot plot is skipped (would otherwise be
+        a misleading single-grid "cross-grid" plot).
+        """
+        M = self._import_matrix_module()
+        case_dir = tmp_path / "omip"
+        # Grid A: full run (snapshots + timeseries).
+        self._write_synthetic_full_run(case_dir / "cubed_sphere" / "C24")
+        # Grid B: timeseries-only.
+        self._write_synthetic_timeseries_only(case_dir / "latlon" / "C24")
+        (case_dir / "latlon" / "C24" / "results.txt").write_text(
+            "test: omip\n"
+            "grid: latlon\n"
+            "resolution: 90x180\n"
+            "status: PASS\n"
+            "wall_time: 18.4s\n"
+        )
+
+        results = M._collect_grid_results(case_dir)
+        assert len(results) == 2
+        M._create_cross_grid_comparisons(case_dir, results)
+        # Timeseries plot was emitted (both grids contribute).
+        assert (case_dir / "comparison_timeseries.png").exists()
+        # Snapshot plots are SKIPPED because only 1 grid has
+        # snapshots — a single-grid "cross-grid" plot would be
+        # misleading.
+        for f in case_dir.iterdir():
+            assert not f.name.startswith("comparison_snapshots_"), (
+                f"unexpected snapshot plot {f.name} for mixed "
+                f"fixture (1 snapshots, 1 timeseries-only)"
+            )
+
+    def test_mixed_fixture_two_with_snapshots_does_emit_snapshot_plots(
+        self, tmp_path,
+    ):
+        """If 2+ grids have snapshots, the cross-grid snapshot plot
+        SHOULD be emitted — even if other grids are timeseries-only.
+        """
+        M = self._import_matrix_module()
+        case_dir = tmp_path / "omip"
+        # 2 grids with snapshots.
+        self._write_synthetic_full_run(case_dir / "cubed_sphere" / "C24")
+        self._write_synthetic_full_run(case_dir / "latlon" / "C24")
+        (case_dir / "latlon" / "C24" / "results.txt").write_text(
+            "test: omip\nstatus: PASS\nwall_time: 1s\n"
+        )
+        # 1 timeseries-only grid (extra context but doesn't add to
+        # the snapshot panel).
+        self._write_synthetic_timeseries_only(case_dir / "spectral" / "T21")
+        (case_dir / "spectral" / "T21" / "results.txt").write_text(
+            "test: omip\nstatus: PASS\nwall_time: 1s\n"
+        )
+
+        results = M._collect_grid_results(case_dir)
+        assert len(results) == 3
+        M._create_cross_grid_comparisons(case_dir, results)
+        # Snapshot plot emitted for eta (2 grids contribute).
+        assert (case_dir / "comparison_snapshots_eta.png").exists()
+        assert (case_dir / "comparison_timeseries.png").exists()
+
+    def test_corrupt_npz_falls_back_to_timeseries(self, tmp_path):
+        """iter-50 codex MEDIUM: per-artifact load isolation.  A
+        corrupt ``snapshots_latlon.npz`` must NOT drop the whole
+        run; the CSV + results.txt are still usable for the
+        timeseries cross-grid comparison.
+        """
+        M = self._import_matrix_module()
+        case_dir = tmp_path / "rest_state"
+        grid_dir = case_dir / "cubed_sphere" / "C24"
+        self._write_synthetic_timeseries_only(grid_dir)
+        # Write a corrupt npz file (random bytes that aren't a
+        # valid numpy archive).
+        (grid_dir / "snapshots_latlon.npz").write_bytes(
+            b"NOT_A_VALID_NPZ_FILE\x00\x01\x02\x03"
+        )
+
+        results = M._collect_grid_results(case_dir)
+        # Run is still collected (timeseries half is intact).
+        assert "cubed_sphere" in results
+        entry = results["cubed_sphere"]
+        # Snapshots load failed → None.
+        assert entry["snapshots"] is None
+        # Timeseries half is preserved.
+        assert entry["timeseries"] is not None
+
+    def test_snapshots_only_skips_empty_timeseries_plot(self, tmp_path):
+        """iter-50 codex LOW: when all collected grids are snapshots-
+        only (no timeseries CSV), ``_create_comparison_timeseries``
+        must early-return so we don't emit an empty
+        ``comparison_timeseries.png`` with no curves.
+        """
+        M = self._import_matrix_module()
+        case_dir = tmp_path / "rest_state"
+        for grid in ("cubed_sphere", "latlon"):
+            self._write_synthetic_snapshots_only(case_dir / grid / "C24")
+
+        results = M._collect_grid_results(case_dir)
+        assert len(results) == 2
+        # All entries are snapshots-only.
+        for entry in results.values():
+            assert entry["timeseries"] is None
+            assert entry["snapshots"] is not None
+        M._create_comparison_timeseries(case_dir, results)
+        # No timeseries.png emitted (no timeseries data).
+        assert not (case_dir / "comparison_timeseries.png").exists()

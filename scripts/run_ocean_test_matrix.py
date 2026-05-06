@@ -4653,39 +4653,86 @@ def _collect_grid_results(test_case_dir: Path) -> dict:
         if not (has_snapshots or has_timeseries):
             continue
 
-        try:
-            # Load timeseries data if present.
-            timeseries_df = pd.read_csv(csv_file) if csv_file.exists() else None
+        # iter-50 codex MEDIUM: per-artifact load isolation.  A
+        # corrupt/stale optional file should NOT drop an otherwise-
+        # usable run.  Previously, ``except Exception`` around the
+        # full load block meant a bad npz would also throw away the
+        # CSV + results.txt.  Now each artifact load is wrapped
+        # individually; a corrupted artifact becomes ``None`` and
+        # the run is still collected on the other artifact.
+        timeseries_df = None
+        if csv_file.exists():
+            try:
+                timeseries_df = pd.read_csv(csv_file)
+            except Exception as e:
+                print(
+                    f"Warning: Failed to read {csv_file} for "
+                    f"{grid_dir.name}: {e}"
+                )
 
-            # Load snapshot data if present.
-            snapshots_data = np.load(npz_file) if has_snapshots else None
+        snapshots_data = None
+        if has_snapshots:
+            try:
+                snapshots_data = np.load(npz_file)
+            except Exception as e:
+                print(
+                    f"Warning: Failed to load {npz_file} for "
+                    f"{grid_dir.name}: {e}"
+                )
 
-            # Parse results metadata if present.
-            metadata = {}
-            if results_file.exists():
+        metadata: dict = {}
+        if results_file.exists():
+            try:
                 with open(results_file, 'r') as f:
                     for line in f:
                         if ':' in line:
                             key, value = line.strip().split(':', 1)
                             metadata[key.strip()] = value.strip()
+            except Exception as e:
+                print(
+                    f"Warning: Failed to parse {results_file} for "
+                    f"{grid_dir.name}: {e}"
+                )
 
-            grid_results[grid_dir.name] = {
-                'timeseries': timeseries_df,
-                'snapshots': snapshots_data,
-                'metadata': metadata,
-                'resolution': resolution_dir.name
-            }
-        except Exception as e:
-            print(f"Warning: Failed to load data for {grid_dir.name}: {e}")
+        # Re-check: after loading, the run must still satisfy the
+        # collector predicate (at least one half remains usable).
+        if snapshots_data is None and (timeseries_df is None or not metadata):
+            print(
+                f"Warning: {grid_dir.name} had artifacts but all "
+                f"loads failed; dropping from cross-grid collection"
+            )
             continue
+
+        grid_results[grid_dir.name] = {
+            'timeseries': timeseries_df,
+            'snapshots': snapshots_data,
+            'metadata': metadata,
+            'resolution': resolution_dir.name,
+        }
 
     return grid_results
 
 
 def _create_comparison_timeseries(test_case_dir: Path, grid_results: dict) -> None:
-    """Create 4-panel time series comparison plot across all grids."""
+    """Create 4-panel time series comparison plot across all grids.
+
+    iter-50 codex LOW: early-return if no grid has timeseries data;
+    otherwise we'd emit an empty ``comparison_timeseries.png`` with
+    legend warnings.  This is the snapshots-only-cross-grid case.
+    """
     import matplotlib.pyplot as plt
-    
+
+    grids_with_timeseries = {
+        name: data for name, data in grid_results.items()
+        if data.get('timeseries') is not None
+    }
+    if not grids_with_timeseries:
+        print(
+            "    [iter-50] no grid has timeseries data; skipping "
+            "comparison_timeseries.png"
+        )
+        return
+
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
     fig.suptitle(f'Time Series Comparison - {test_case_dir.name}', fontsize=14, fontweight='bold')
     
@@ -5625,22 +5672,35 @@ def _create_cross_grid_comparisons(test_case_dir: Path, grid_results: dict) -> N
         print("    [iter-49] timeseries-only run; skipping snapshot plots")
         return
 
+    # iter-50 codex MEDIUM: a "cross-grid" snapshot plot needs at
+    # least 2 grids with snapshots — otherwise we'd produce a
+    # single-grid plot mislabelled as cross-grid.
+    if len(grids_with_snapshots) < 2:
+        print(
+            "    [iter-50] only 1 grid has snapshots; skipping cross-"
+            "grid snapshot plots (would be single-grid)"
+        )
+        return
+
     # Final snapshot comparisons (use only the grids that actually
-    # have snapshots).  ``_create_comparison_snapshots`` and
-    # ``_create_comparison_evolution`` themselves still iterate over
-    # all of ``grid_results``; guarding here is the simplest fix —
-    # they early-return when their needed field is missing.
+    # have snapshots).  iter-50 codex MEDIUM: pass the filtered
+    # ``grids_with_snapshots`` rather than the full ``grid_results``
+    # so the downstream plotters don't have to do the same skip
+    # twice (and a future plotter that forgets the guard cannot
+    # silently emit a single-grid plot).
     for field in ['eta', 'SST', 'w_133m']:
         field_available = any(
-            data['snapshots'] is not None and (
-                field in data['snapshots'].files or
-                any(f.startswith(f'{field}_step') for f in data['snapshots'].files)
-            )
-            for data in grid_results.values()
+            field in data['snapshots'].files or
+            any(f.startswith(f'{field}_step') for f in data['snapshots'].files)
+            for data in grids_with_snapshots.values()
         )
         if field_available:
-            _create_comparison_snapshots(test_case_dir, grid_results, field)
-            _create_comparison_evolution(test_case_dir, grid_results, field)
+            _create_comparison_snapshots(
+                test_case_dir, grids_with_snapshots, field,
+            )
+            _create_comparison_evolution(
+                test_case_dir, grids_with_snapshots, field,
+            )
 
     # Forcing profile plot for wind-driven cases
     if 'barotropic_wind' in test_case_dir.name:
