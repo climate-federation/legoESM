@@ -203,6 +203,25 @@ def _compute_drift(values: list[float]) -> float:
     return abs(values[-1] - values[0]) / max(abs(values[0]), 1e-30)
 
 
+def _area_weighted_mean(field, area) -> float:
+    """Area-weighted scalar mean.
+
+    Returns ``sum(field * area) / sum(area)`` as a Python float.  Works
+    for any matching-shape pair: cubed-sphere ``(6, n, n)``,
+    lat-lon ``(nlat, nlon)``, icosahedral / Voronoi ``(n_cells,)``,
+    Gaussian ``(nlat, nlon)``.
+
+    Use this instead of bare ``jnp.mean`` whenever a field lives on
+    cells with non-uniform area.  Bare ``jnp.mean`` over-weights
+    high-latitude cells on lat-lon and Gaussian grids and disagrees
+    with cube/icosahedral domain-mean h by ~15 % for Williamson 2 (the
+    inconsistency exposed by the iter-1 cross-grid time-series plot).
+    """
+    f = jnp.asarray(field, dtype=jnp.float64)
+    a = jnp.asarray(area, dtype=jnp.float64)
+    return float(jnp.sum(f * a) / jnp.sum(a))
+
+
 # ---------------------------------------------------------------------------
 # Hyperdiffusion helpers
 # ---------------------------------------------------------------------------
@@ -1234,7 +1253,7 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
 
         def scalar_fn(s):
             return {
-                "mean_height": float(jnp.mean(s.h)),
+                "mean_height": _area_weighted_mean(s.h, grid.area),
                 "max_wind": float(jnp.max(jnp.abs(s.u_d))),
             }
 
@@ -1317,7 +1336,7 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             u_c = 0.5 * (s.u[:, :-1] + s.u[:, 1:])
             v_c = 0.5 * (s.v[:-1] + s.v[1:])
             return {
-                "mean_height": float(jnp.mean(s.h)),
+                "mean_height": _area_weighted_mean(s.h, grid.area),
                 "max_wind": float(jnp.max(jnp.sqrt(u_c ** 2 + v_c ** 2))),
             }
 
@@ -1363,7 +1382,7 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
 
         def scalar_fn(s):
             return {
-                "mean_height": float(jnp.mean(s.h.data)),
+                "mean_height": _area_weighted_mean(s.h.data, mesh.areaCell),
                 "max_wind": float(jnp.max(jnp.abs(s.u.data))),
             }
 
@@ -1427,7 +1446,8 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             cos2d = grid.cos_lat[:, None]
             ws = jnp.sqrt((u_cos / cos2d) ** 2 + (v_cos / cos2d) ** 2)
             return {
-                "mean_height": float(jnp.mean(phi / constants.g)),
+                "mean_height": _area_weighted_mean(
+                    phi / constants.g, grid.grid_area),
                 "max_wind": float(jnp.max(ws)),
             }
 
@@ -1620,7 +1640,7 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
                     float(jnp.max(jnp.abs(s.h))))
 
         def scalar_fn(s):
-            return {"mean_height": float(jnp.mean(s.h)),
+            return {"mean_height": _area_weighted_mean(s.h, grid.area),
                     "max_height": float(jnp.max(s.h))}
 
         _cs_w = _get_cs_weights(n)
@@ -1689,7 +1709,7 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
                     float(jnp.max(jnp.abs(s.h))))
 
         def scalar_fn(s):
-            return {"mean_height": float(jnp.mean(s.h)),
+            return {"mean_height": _area_weighted_mean(s.h, grid.area),
                     "max_height": float(jnp.max(s.h))}
 
         def extract_fn(s):
@@ -1769,7 +1789,8 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
                     float(jnp.max(jnp.abs(s.h.data))))
 
         def scalar_fn(s):
-            return {"mean_height": float(jnp.mean(s.h.data)),
+            return {"mean_height": _area_weighted_mean(
+                        s.h.data, mesh.areaCell),
                     "max_height": float(jnp.max(s.h.data))}
 
         def extract_fn(s):
@@ -1829,7 +1850,8 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
 
         def scalar_fn(s):
             phi = sh_synthesis(grid, s.phi_hat.data)
-            return {"mean_height": float(jnp.mean(phi / C.g)),
+            return {"mean_height": _area_weighted_mean(
+                        phi / C.g, grid.grid_area),
                     "max_height": float(jnp.max(phi / C.g))}
 
         def extract_fn(s):
