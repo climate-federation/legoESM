@@ -620,6 +620,27 @@ def _run_timeloop(
             is_finite, metric = check_fn(state)
             if not is_finite or metric > blowup_threshold:
                 print(f"  BLOWUP at step {step}, metric={metric:.1f}")
+                # iter-98: store the BLOWUP details in the diag
+                # dict (private ``_blowup_info`` key) so
+                # ``_write_results_txt`` callers can surface them
+                # in results.txt instead of leaving the reader to
+                # parse stdout.  Mirrors iter-97 fix for OMIP.
+                # When ``ok=False``, the last ``diag`` entries are
+                # from BEFORE the BLOWUP step — without this info
+                # results.txt could falsely report "PASS-shaped"
+                # last-clean values.
+                diag["_blowup_info"] = {
+                    "step": step,
+                    "day": step * dt / 86400.0,
+                    "metric": float(metric),
+                    "is_finite": bool(is_finite),
+                    "threshold": float(blowup_threshold),
+                    "reason": (
+                        "state non-finite (NaN/Inf)" if not is_finite
+                        else f"metric {float(metric):.1f} > "
+                             f"threshold {float(blowup_threshold):.1f}"
+                    ),
+                }
                 blown_up = True
                 break
 
@@ -873,8 +894,37 @@ def _augment_with_rrtmgp_overrides(rows: dict[str, Any], radiation: str) -> dict
     return rows
 
 
-def _write_results_txt(output_dir: Path, rows: dict[str, Any]):
+def _write_results_txt(output_dir: Path, rows: dict[str, Any],
+                       *, diag: dict | None = None,
+                       blowup_info: dict | None = None):
+    """Write results.txt for a matrix-runner case.
+
+    iter-98: ``diag`` and ``blowup_info`` (both optional, default
+    None) carry BLOWUP details from ``_run_timeloop`` (iter-98
+    stored them in ``diag["_blowup_info"]``).  When ``diag`` is
+    passed, the function auto-extracts ``_blowup_info`` from it,
+    so callers can opt in with one-line ``diag=diag`` additions.
+    When ``blowup_info`` is non-None and ``rows.get("status") ==
+    "FAIL"``, the function prepends a BLOWUP marker to the
+    ``notes`` field so a reader of ``results.txt`` sees the
+    failure mode unambiguously instead of just "FAIL" with
+    last-clean diagnostic values.
+    """
+    if diag is not None and blowup_info is None:
+        blowup_info = diag.get("_blowup_info")
     output_dir.mkdir(parents=True, exist_ok=True)
+    if blowup_info is not None and rows.get("status") == "FAIL":
+        # Prepend BLOWUP info to the notes field if any.
+        original_notes = rows.get("notes", "")
+        blowup_str = (
+            f"BLOWUP at step {blowup_info['step']} "
+            f"(day {blowup_info.get('day', 0):.2f}), "
+            f"reason: {blowup_info['reason']}"
+        )
+        if original_notes:
+            rows = {**rows, "notes": f"{blowup_str}; last clean: {original_notes}"}
+        else:
+            rows = {**rows, "notes": blowup_str}
     with open(output_dir / "results.txt", "w") as f:
         for k, v in rows.items():
             f.write(f"{k}: {v}\n")
@@ -1754,7 +1804,8 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
         "days": days, "dt": dt, "status": "PASS" if ok else "FAIL",
         "notes": notes,
-        "wall_time": f"{wall:.1f}s"})  # iter-29: enable iter-28 GPU efficiency table on SW
+        "wall_time": f"{wall:.1f}s"},  # iter-29: enable iter-28 GPU efficiency table on SW
+        diag=diag)  # iter-98: surface BLOWUP info if any
     _save_case_diagnostics(
         output_dir, f"SW Williamson {test_num} {tc.resolution}", dt,
         diag, snapshots, coord_kind, lon_deg, lat_deg,
@@ -2417,7 +2468,8 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         "vertical_coord": tc.vertical_coord, "radiation": radiation,
         "days": days, "dt": dt, "levels": nlev,
         "status": "PASS" if ok else "FAIL", "notes": notes,
-        "wall_time": f"{wall:.1f}s"}, radiation))
+        "wall_time": f"{wall:.1f}s"}, radiation),
+        diag=diag)  # iter-98: surface BLOWUP info if any
     _save_case_diagnostics(
         output_dir,
         f"Held-Suarez {radiation} {tc.resolution} {tc.vertical_coord}",

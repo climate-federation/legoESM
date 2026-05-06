@@ -2613,3 +2613,130 @@ class TestCliResolutionPerGridDispatch:
             "iter-95: ``--resolution N`` must dispatch to "
             "``f\"T{N}\"`` for spectral."
         )
+
+
+class TestAtmosphereMatrixBlowupReporting:
+    """iter-98: extends the iter-97 OMIP BLOWUP-reporting fix to
+    the atmosphere matrix runner.  ``_run_timeloop`` now stores
+    BLOWUP details in ``diag["_blowup_info"]``;
+    ``_write_results_txt`` accepts ``diag=`` kwarg and prepends a
+    BLOWUP marker to the ``notes`` field of results.txt when a
+    BLOWUP occurred.
+
+    Pre-iter-98, atmosphere matrix runs that BLEW UP would write
+    ``status: FAIL`` to results.txt with ``notes`` derived from
+    the LAST CLEAN diagnostic — the same false-improvement bug
+    that misled iter-96 for OMIP.
+    """
+
+    def test_run_timeloop_records_blowup_info_in_diag(self):
+        """Source-level: ``_run_timeloop`` writes a
+        ``_blowup_info`` key into ``diag`` when a BLOWUP fires.
+        """
+        import inspect
+        import re
+        src = inspect.getsource(M._run_timeloop)
+        src_no_strings = re.sub(r'""".*?"""', "", src, flags=re.DOTALL)
+        src_no_strings = re.sub(r"'''.*?'''", "", src_no_strings, flags=re.DOTALL)
+        code_only = "\n".join(
+            line for line in src_no_strings.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        assert 'diag["_blowup_info"]' in code_only or \
+               "diag['_blowup_info']" in code_only, (
+            "iter-98: ``_run_timeloop`` must store BLOWUP details "
+            "in ``diag['_blowup_info']`` so ``_write_results_txt`` "
+            "can surface them."
+        )
+
+    def test_write_results_txt_accepts_diag_kwarg(self):
+        """Source-level: ``_write_results_txt`` signature has a
+        ``diag=None`` kwarg (introduced iter-98).
+        """
+        import inspect
+        sig = inspect.signature(M._write_results_txt)
+        assert "diag" in sig.parameters, (
+            "iter-98: ``_write_results_txt`` must accept ``diag`` "
+            "kwarg for opt-in BLOWUP info threading."
+        )
+        assert "blowup_info" in sig.parameters, (
+            "iter-98: ``_write_results_txt`` must accept "
+            "``blowup_info`` kwarg as the lower-level entry point."
+        )
+
+    def test_write_results_txt_emits_blowup_marker(self, tmp_path):
+        """End-to-end: invoking ``_write_results_txt`` with a
+        synthetic BLOWUP-info-bearing diag emits a BLOWUP marker
+        in the resulting ``results.txt`` notes.
+        """
+        diag = {
+            "times": [0.0, 1.0],
+            "steps": [0, 100],
+            "mass": [5.0e19, 5.0e19],
+            "_blowup_info": {
+                "step": 200,
+                "day": 0.69,
+                "metric": 1234.5,
+                "is_finite": False,
+                "threshold": 1000.0,
+                "reason": "state non-finite (NaN/Inf)",
+            },
+        }
+        rows = {
+            "test": "amip",
+            "grid": "cubed_sphere",
+            "status": "FAIL",
+            "notes": "mass drift=5.5e-12",
+            "wall_time": "13.6s",
+        }
+        M._write_results_txt(tmp_path, rows, diag=diag)
+        text = (tmp_path / "results.txt").read_text()
+        assert "BLOWUP at step 200" in text, (
+            f"iter-98: results.txt must include the BLOWUP "
+            f"marker when ``diag['_blowup_info']`` is set; got:\n"
+            f"{text}"
+        )
+        assert "state non-finite" in text, (
+            "iter-98: results.txt must include the BLOWUP reason."
+        )
+        assert "last clean: mass drift=5.5e-12" in text, (
+            "iter-98: results.txt must preserve the original "
+            "notes (the last clean diagnostic) but mark them "
+            "explicitly as ``last clean:``."
+        )
+
+    def test_write_results_txt_unaffected_for_pass_runs(self, tmp_path):
+        """For PASS runs, no BLOWUP marker should appear."""
+        diag = {
+            "times": [0.0, 1.0],
+            "steps": [0, 100],
+            "mass": [5.0e19, 5.0e19],
+        }
+        rows = {
+            "test": "amip",
+            "grid": "cubed_sphere",
+            "status": "PASS",
+            "notes": "mass drift=5.5e-12",
+            "wall_time": "13.6s",
+        }
+        M._write_results_txt(tmp_path, rows, diag=diag)
+        text = (tmp_path / "results.txt").read_text()
+        assert "BLOWUP" not in text, (
+            "iter-98: PASS runs must not have BLOWUP markers."
+        )
+        assert "notes: mass drift=5.5e-12" in text, (
+            "iter-98: PASS runs should write notes verbatim."
+        )
+
+    def test_write_results_txt_unaffected_when_no_diag_passed(self, tmp_path):
+        """Backward compat: if caller doesn't pass ``diag=`` and
+        no ``blowup_info=``, output is unchanged from pre-iter-98.
+        """
+        rows = {
+            "test": "sw", "grid": "spectral", "status": "PASS",
+            "notes": "mass drift=0.00e+00", "wall_time": "0.9s",
+        }
+        M._write_results_txt(tmp_path, rows)
+        text = (tmp_path / "results.txt").read_text()
+        assert "BLOWUP" not in text
+        assert "notes: mass drift=0.00e+00" in text
