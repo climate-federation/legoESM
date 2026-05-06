@@ -21,6 +21,9 @@ write the AMIP outputs to disk but the matrix runner's
 ``--cross-grid-plots-only --test amip`` would silently skip every grid
 because none of them satisfy ``_has_collectable``.
 
+iter-42 codex review tightened this module against several silent-
+failure modes.  See inline comments tagged ``iter-42 codex``.
+
 This module is intentionally tiny and self-contained: ``main(out_dir)``
 reads the npz / free-form results.txt and writes the two
 matrix-compatible files.  Idempotent — safe to call repeatedly.
@@ -28,6 +31,7 @@ matrix-compatible files.  Idempotent — safe to call repeatedly.
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -57,81 +61,171 @@ _VARNAME_REMAP = {
 }
 
 
+# iter-42 codex MEDIUM: status whitelist.  ``run_amip.py`` writes
+# "Status: COMPLETED" on success, but matrix-runner-compatible status
+# parsers also exist for legacy run scripts that emit SUCCESS / PASS /
+# OK.  Treat any of these as PASS so the cross-grid collector picks up
+# successful runs from older / sister scripts; everything else → ERROR.
+_PASS_STATUSES = frozenset({
+    "COMPLETED", "COMPLETE", "SUCCESS", "PASS", "PASSED", "OK", "DONE",
+})
+
+
 def _is_real_array(v) -> bool:
-    """Skip the run_amip.py NaN-sentinel for missing diagnostics."""
+    """Return True iff ``v`` looks like a usable per-step diagnostic.
+
+    iter-42 codex MEDIUM: also reject 1-D all-NaN arrays.  ``run_amip.py``
+    currently uses scalar ``np.float64(np.nan)`` as the missing-
+    diagnostic sentinel, but a future change might emit a 1-D NaN array
+    with the same length as the time axis.  Either way, we don't want a
+    column of NaNs in the CSV.
+    """
     arr = np.asarray(v)
     if arr.ndim == 0:
         return False
-    return arr.size > 0
+    if arr.size == 0:
+        return False
+    # Treat all-NaN arrays as sentinels too.
+    if np.all(np.isnan(arr.astype(np.float64, copy=False))):
+        return False
+    return True
 
 
 def _parse_amip_results_txt(path: Path) -> dict:
     """Extract (Grid, Status, Wall time, JIT) from the free-form file.
 
     Returns lower-case keys ready for the matrix-format writer.
+
+    iter-42 codex MEDIUM: relax the regexes against the brittle
+    iter-42 v1 patterns:
+
+      * ``dt=``: accept scientific notation (``300.0`` and ``3e2``).
+      * ``days``: accept singular / plural / decimal.
+      * resolution: allow internal hyphens / colons (``T42``,
+        ``90x180``, ``ico6``, ``C48-ext``).
+      * nlev: optional — newer ``run_amip.py`` may not include it.
     """
     out: dict[str, str | float] = {}
     if not path.exists():
         return out
-    text = path.read_text()
+    text = path.read_text(errors="replace")
     # Grid line: "Grid: cubed_sphere C48 / L20, dt=300.0s, 30 days"
-    m = re.search(r"Grid:\s*(\S+)\s+(\S+)\s*/\s*L(\d+),\s*dt=([\d.]+)s,\s*(\d+)\s*days", text)
+    # iter-42 codex MEDIUM: relaxed regex.  The L<n> chunk and ``dt=``
+    # chunk are optional; the day count accepts decimals and singular.
+    m = re.search(
+        r"Grid:\s*(\S+)\s+(\S+)"               # grid + resolution
+        r"(?:\s*/\s*L(\d+))?"                  # optional L<n>
+        r"(?:\s*,\s*dt=([\d.eE+-]+)\s*s)?"     # optional dt
+        r"(?:\s*,\s*([\d.]+)\s*days?)?",        # optional days (sing/plur)
+        text,
+    )
     if m:
         out["grid"] = m.group(1)
         out["resolution"] = m.group(2)
-        out["nlev"] = int(m.group(3))
-        out["dt"] = float(m.group(4))
-        out["days"] = int(m.group(5))
+        if m.group(3) is not None:
+            out["nlev"] = int(m.group(3))
+        if m.group(4) is not None:
+            try:
+                out["dt"] = float(m.group(4))
+            except ValueError:
+                pass
+        if m.group(5) is not None:
+            try:
+                d = float(m.group(5))
+                out["days"] = int(d) if d == int(d) else d
+            except ValueError:
+                pass
     # Status line: "Status: COMPLETED"
     m = re.search(r"Status:\s*(\S+)", text)
     if m:
-        # Map the AMIP free-form status to the matrix-runner convention
-        # ("PASS" / "ERROR").  Anything that's not COMPLETED is treated
-        # as ERROR by the matrix collector.
-        s = m.group(1).upper()
-        out["status"] = "PASS" if s == "COMPLETED" else "ERROR"
+        s = m.group(1).upper().rstrip(",.")
+        out["status"] = "PASS" if s in _PASS_STATUSES else "ERROR"
     # Wall time: "Wall time: 123.4s"
-    m = re.search(r"Wall time:\s*([\d.]+)s", text)
+    m = re.search(r"Wall time:\s*([\d.eE+-]+)s", text)
     if m:
-        out["wall_time"] = f"{float(m.group(1)):.1f}s"
+        try:
+            out["wall_time"] = f"{float(m.group(1)):.1f}s"
+        except ValueError:
+            pass
     # JIT compilation: "JIT compilation: 12.3s"
-    m = re.search(r"JIT compilation:\s*([\d.]+)s", text)
+    m = re.search(r"JIT compilation:\s*([\d.eE+-]+)s", text)
     if m:
-        out["jit_time"] = f"{float(m.group(1)):.1f}s"
+        try:
+            out["jit_time"] = f"{float(m.group(1)):.1f}s"
+        except ValueError:
+            pass
     return out
 
 
-def main(out_dir: Path) -> None:
+def _atomic_write_text(path: Path, text: str) -> None:
+    """iter-42 codex LOW: write to ``<name>.tmp`` then ``os.replace``
+    so a crashed converter run cannot leave a half-written file that
+    still satisfies ``_has_collectable``.
+    """
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "w") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def _purge_stale_matrix_outputs(out_dir: Path) -> None:
+    """Remove matrix-format outputs from a previous (now-stale) run.
+
+    iter-42 codex HIGH: a failed AMIP rerun into an existing OUTDIR
+    can be silently collected as old data unless we explicitly remove
+    the prior converted files when ``timeseries.npz`` is absent.
+    Called only on the missing-npz path.
+    """
+    for name in ("mean_timeseries.csv", "results.txt", "results_amip.txt"):
+        p = out_dir / name
+        if p.exists():
+            p.unlink()
+
+
+def main(out_dir: Path) -> int:
     """Convert ``out_dir/timeseries.npz`` + ``out_dir/results.txt`` to
     matrix-runner-compatible ``mean_timeseries.csv`` + ``results.txt``.
 
-    Writes nothing if ``timeseries.npz`` is missing (caller must fail
-    visibly elsewhere).  Overwrites pre-existing matrix-format files.
+    Returns 0 on success.  Returns 2 on missing/empty ``timeseries.npz``
+    (caller — the wrapper script — should treat this as a failed
+    AMIP run).  Idempotent across repeated calls.
+
+    iter-42 codex HIGH:
+      * Missing ``timeseries.npz`` is now a NON-zero exit code AND
+        purges any stale matrix-format files in ``out_dir`` so a
+        cross-grid collection pass cannot pick up old data.
+      * If the AMIP ``results.txt`` is missing or has no parsable
+        Status line, the matrix-format ``results.txt`` written by
+        this converter explicitly emits ``status: ERROR`` so the
+        downstream collector treats the run as failed.
     """
     out_dir = Path(out_dir)
     npz_path = out_dir / "timeseries.npz"
     if not npz_path.exists():
-        # Don't silently succeed — the wrapper should fail loudly if
-        # ``run_amip.py`` produced no output.
+        # iter-42 codex HIGH: failed AMIP → purge stale converted
+        # outputs and return non-zero so the wrapper aborts the
+        # cross-grid collection step.
         print(
-            f"  [_amip_to_matrix_format] WARNING: {npz_path} missing; "
-            f"skipping conversion in {out_dir}",
+            f"  [_amip_to_matrix_format] ERROR: {npz_path} missing; "
+            f"purging stale matrix outputs in {out_dir}",
             file=sys.stderr,
         )
-        return
+        _purge_stale_matrix_outputs(out_dir)
+        return 2
 
     data = np.load(npz_path, allow_pickle=False)
     # Build (column_name, array) pairs in deterministic order, skipping
     # NaN-sentinel entries.
     cols: list[tuple[str, np.ndarray]] = []
-    days = data.get("days") if "days" in data.files else None
+    days = data["days"] if "days" in data.files else None
     if days is None or not _is_real_array(days):
         print(
-            f"  [_amip_to_matrix_format] WARNING: 'days' missing from "
+            f"  [_amip_to_matrix_format] ERROR: 'days' missing from "
             f"{npz_path}; cannot write CSV.",
             file=sys.stderr,
         )
-        return
+        _purge_stale_matrix_outputs(out_dir)
+        return 2
     cols.append(("time_days", np.asarray(days)))
     n = len(cols[0][1])
     for src_key, dst_key in _VARNAME_REMAP.items():
@@ -142,16 +236,26 @@ def main(out_dir: Path) -> None:
         arr = data[src_key]
         if not _is_real_array(arr):
             continue
-        if np.asarray(arr).shape[0] != n:
-            # Length mismatch — skip rather than break the CSV.
+        arr_np = np.asarray(arr)
+        if arr_np.shape[0] != n:
+            # iter-42 codex MEDIUM: warn loudly so a length mismatch
+            # is not a silent data drop.
+            print(
+                f"  [_amip_to_matrix_format] WARNING: variable "
+                f"'{src_key}' has length {arr_np.shape[0]} but the "
+                f"time axis is length {n}; dropping it from the CSV.",
+                file=sys.stderr,
+            )
             continue
-        cols.append((dst_key, np.asarray(arr)))
+        cols.append((dst_key, arr_np))
 
-    csv_path = out_dir / "mean_timeseries.csv"
-    with open(csv_path, "w") as f:
-        f.write(",".join(c[0] for c in cols) + "\n")
-        for i in range(n):
-            f.write(",".join(f"{c[1][i]:.6e}" for c in cols) + "\n")
+    # Build the CSV in memory and write atomically.
+    csv_lines = [",".join(c[0] for c in cols)]
+    for i in range(n):
+        csv_lines.append(",".join(f"{c[1][i]:.6e}" for c in cols))
+    _atomic_write_text(
+        out_dir / "mean_timeseries.csv", "\n".join(csv_lines) + "\n",
+    )
 
     # Rewrite results.txt in the matrix-runner key:value format.  Keep
     # the original AMIP results.txt around as ``results_amip.txt`` so
@@ -162,6 +266,11 @@ def main(out_dir: Path) -> None:
     # before — re-parse from the preserved ``results_amip.txt``
     # instead of clobbering ``results_amip.txt`` with the matrix-
     # format file from the previous run.
+    #
+    # iter-42 codex LOW: if ``results.txt`` is in matrix format AND
+    # ``results_amip.txt`` is missing (unusual — manual file removal),
+    # parse the matrix-format file directly so we don't drop metadata
+    # and emit a status: ERROR record.
     results_txt = out_dir / "results.txt"
     results_amip = out_dir / "results_amip.txt"
     already_converted = (
@@ -169,28 +278,75 @@ def main(out_dir: Path) -> None:
         and results_txt.read_text(errors="replace").startswith("test: amip")
     )
     if already_converted:
-        # Parse from the preserved AMIP file (or fall back to the
-        # current matrix-format file if for some reason the AMIP
-        # original is missing).
-        parsed = _parse_amip_results_txt(results_amip)
+        if results_amip.exists():
+            parsed = _parse_amip_results_txt(results_amip)
+        else:
+            # iter-42 codex LOW: graceful fallback when the AMIP
+            # original was manually removed between converter runs.
+            parsed = _parse_matrix_results_txt(results_txt)
     else:
         parsed = _parse_amip_results_txt(results_txt)
         if results_txt.exists():
             results_txt.rename(results_amip)
-    with open(results_txt, "w") as f:
-        f.write("test: amip\n")
-        for key in (
-            "grid", "resolution", "nlev", "dt", "days",
-            "status", "wall_time", "jit_time",
-        ):
-            if key in parsed:
-                f.write(f"{key}: {parsed[key]}\n")
-        # Add a brief note for downstream readers.
-        f.write(
-            "notes: real-AMIP run via run_amip.py; "
-            "format converted by _amip_to_matrix_format.py for "
-            "matrix-runner cross-grid collection (iter-42)\n"
-        )
+
+    # iter-42 codex HIGH: if no Status was found, default to ERROR
+    # (otherwise downstream tooling sees a results.txt with no
+    # status field and treats it as a passing run).
+    if "status" not in parsed:
+        parsed["status"] = "ERROR"
+
+    out_text_lines = ["test: amip"]
+    for key in (
+        "grid", "resolution", "nlev", "dt", "days",
+        "status", "wall_time", "jit_time",
+    ):
+        if key in parsed:
+            out_text_lines.append(f"{key}: {parsed[key]}")
+    out_text_lines.append(
+        "notes: real-AMIP run via run_amip.py; "
+        "format converted by _amip_to_matrix_format.py for "
+        "matrix-runner cross-grid collection (iter-42)"
+    )
+    _atomic_write_text(results_txt, "\n".join(out_text_lines) + "\n")
+    return 0
+
+
+def _parse_matrix_results_txt(path: Path) -> dict:
+    """Re-parse a matrix-format ``results.txt`` back into the dict.
+
+    Used as a recovery path when the AMIP original is missing.
+    iter-42 codex LOW: makes the idempotency fallback honest.
+    """
+    out: dict[str, str | float] = {}
+    if not path.exists():
+        return out
+    for line in path.read_text(errors="replace").splitlines():
+        if ":" not in line:
+            continue
+        k, v = line.split(":", 1)
+        k = k.strip()
+        v = v.strip()
+        if not k or not v:
+            continue
+        if k in ("nlev",):
+            try:
+                out[k] = int(v)
+            except ValueError:
+                pass
+        elif k in ("dt",):
+            try:
+                out[k] = float(v)
+            except ValueError:
+                pass
+        elif k == "days":
+            try:
+                d = float(v)
+                out[k] = int(d) if d == int(d) else d
+            except ValueError:
+                pass
+        else:
+            out[k] = v
+    return out
 
 
 if __name__ == "__main__":
@@ -200,4 +356,4 @@ if __name__ == "__main__":
             file=sys.stderr,
         )
         sys.exit(1)
-    main(Path(sys.argv[1]))
+    sys.exit(main(Path(sys.argv[1])))

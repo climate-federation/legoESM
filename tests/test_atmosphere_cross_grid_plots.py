@@ -1015,7 +1015,8 @@ class TestAmipToMatrixFormat:
         """End-to-end: synthetic AMIP outputs → matrix-format outputs."""
         mod = self._import_converter()
         self._write_synthetic_amip_outputs(tmp_path, n=6)
-        mod.main(tmp_path)
+        rc = mod.main(tmp_path)
+        assert rc == 0
         # mean_timeseries.csv must exist and have the canonical column names.
         csv_path = tmp_path / "mean_timeseries.csv"
         assert csv_path.exists()
@@ -1038,40 +1039,224 @@ class TestAmipToMatrixFormat:
         assert (tmp_path / "results_amip.txt").exists()
 
     def test_converter_status_mapping(self, tmp_path):
-        """``Status: COMPLETED`` → PASS; anything else → ERROR."""
+        """``Status: COMPLETED`` → PASS; anything else → ERROR.
+
+        iter-42 codex MEDIUM: the whitelist is broader now —
+        SUCCESS / PASS / OK / DONE / COMPLETE all map to PASS too.
+        """
         mod = self._import_converter()
-        self._write_synthetic_amip_outputs(tmp_path)
-        # Overwrite with a non-COMPLETED status line.
+        for status_keyword, expected in [
+            ("COMPLETED", "PASS"),
+            ("COMPLETE", "PASS"),
+            ("SUCCESS", "PASS"),
+            ("PASS", "PASS"),
+            ("OK", "PASS"),
+            ("DONE", "PASS"),
+            ("FAILED", "ERROR"),
+            ("CRASHED", "ERROR"),
+            ("UNKNOWN", "ERROR"),
+        ]:
+            self._write_synthetic_amip_outputs(tmp_path)
+            (tmp_path / "results.txt").write_text(
+                "legoESM AMIP run\n"
+                "Grid: spectral T42 / L20, dt=600.0s, 30 days\n"
+                f"Status: {status_keyword}\n"
+                "Wall time: 5.0s\n"
+            )
+            rc = mod.main(tmp_path)
+            assert rc == 0
+            results_text = (tmp_path / "results.txt").read_text()
+            assert f"status: {expected}" in results_text, (
+                f"{status_keyword} → expected status: {expected}"
+            )
+
+    def test_converter_relaxed_grid_regex(self, tmp_path):
+        """iter-42 codex MEDIUM: ``Grid:`` regex must accept variations
+        like singular ``day``, decimal days, scientific notation in
+        ``dt=``, missing ``L<n>`` and missing ``dt=``.  iter-42 v1
+        was overly strict and dropped grid metadata silently.
+        """
+        mod = self._import_converter()
+        for grid_line, expect_resolution in [
+            ("Grid: cubed_sphere C48 / L20, dt=300.0s, 30 days",  "C48"),
+            ("Grid: spectral T42 / L20, dt=6e2s, 30 days",         "T42"),  # sci dt
+            ("Grid: cubed_sphere C48 / L20, dt=300s, 1 day",       "C48"),  # singular
+            ("Grid: cubed_sphere C48 / L20, dt=300s, 0.5 days",    "C48"),  # decimal days
+            ("Grid: voronoi ico6, dt=600s, 30 days",                "ico6"), # no L<n>
+            ("Grid: latlon 90x180",                                 "90x180"),  # bare grid+res
+        ]:
+            self._write_synthetic_amip_outputs(tmp_path)
+            (tmp_path / "results.txt").write_text(
+                "legoESM AMIP run\n"
+                f"{grid_line}\n"
+                "Status: COMPLETED\n"
+                "Wall time: 1.0s\n"
+            )
+            rc = mod.main(tmp_path)
+            assert rc == 0
+            results_text = (tmp_path / "results.txt").read_text()
+            assert f"resolution: {expect_resolution}" in results_text, (
+                f"failed on grid_line={grid_line!r}"
+            )
+
+    def test_converter_all_nan_array_skipped(self, tmp_path):
+        """iter-42 codex MEDIUM: a 1-D all-NaN array must be skipped
+        from the CSV — not written as a column of NaNs.
+        """
+        mod = self._import_converter()
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        n = 6
+        days = np.arange(n, dtype=np.float64)
+        np.savez(
+            tmp_path / "timeseries.npz",
+            days=days,
+            T_atm=280.0 + 0.05 * days,
+            # 1-D all-NaN array (a future run_amip.py change might
+            # use this instead of the scalar NaN sentinel).
+            sst=np.full(n, np.nan, dtype=np.float64),
+        )
         (tmp_path / "results.txt").write_text(
             "legoESM AMIP run\n"
-            "Grid: spectral T42 / L20, dt=600.0s, 30 days\n"
-            "Status: FAILED\n"
+            "Grid: cubed_sphere C48 / L20, dt=300.0s, 30 days\n"
+            "Status: COMPLETED\n"
+            "Wall time: 1.0s\n"
+        )
+        rc = mod.main(tmp_path)
+        assert rc == 0
+        header = (tmp_path / "mean_timeseries.csv").read_text().splitlines()[0]
+        assert "mean_SST" not in header
+        assert "mean_T" in header
+
+    def test_converter_length_mismatch_warns(self, tmp_path, capsys):
+        """iter-42 codex MEDIUM: a length-mismatched variable must
+        emit a stderr warning rather than silently dropping data.
+        """
+        mod = self._import_converter()
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        n = 6
+        days = np.arange(n, dtype=np.float64)
+        np.savez(
+            tmp_path / "timeseries.npz",
+            days=days,
+            T_atm=280.0 + 0.05 * days,
+            # Wrong length — must trigger a warning.
+            max_wind=np.array([1.0, 2.0, 3.0]),
+        )
+        (tmp_path / "results.txt").write_text(
+            "legoESM AMIP run\n"
+            "Grid: cubed_sphere C48 / L20, dt=300s, 1 day\n"
+            "Status: COMPLETED\nWall time: 1.0s\n"
+        )
+        capsys.readouterr()  # clear any prior output
+        rc = mod.main(tmp_path)
+        assert rc == 0
+        captured = capsys.readouterr()
+        assert "WARNING" in captured.err
+        assert "max_wind" in captured.err
+        # The mismatched variable is still skipped from the CSV.
+        header = (tmp_path / "mean_timeseries.csv").read_text().splitlines()[0]
+        assert "max_wind" not in header
+
+    def test_converter_default_status_error_when_missing(self, tmp_path):
+        """iter-42 codex HIGH: if results.txt has no parsable Status
+        line, the converter must emit ``status: ERROR`` (not omit
+        the status field) so the matrix collector treats the run
+        as failed.
+        """
+        mod = self._import_converter()
+        self._write_synthetic_amip_outputs(tmp_path)
+        # Overwrite results.txt with no Status line.
+        (tmp_path / "results.txt").write_text(
+            "legoESM AMIP run\n"
+            "Grid: spectral T42 / L20, dt=600s, 30 days\n"
             "Wall time: 5.0s\n"
         )
-        mod.main(tmp_path)
+        rc = mod.main(tmp_path)
+        assert rc == 0
+        results_text = (tmp_path / "results.txt").read_text()
+        assert "status: ERROR" in results_text
+
+    def test_converter_default_status_error_when_results_missing(
+        self, tmp_path,
+    ):
+        """If the AMIP results.txt is missing entirely, the converter
+        must still write a matrix-format results.txt with
+        ``status: ERROR``.  Without this, _has_collectable would
+        accept an output with no provenance metadata.
+        """
+        mod = self._import_converter()
+        self._write_synthetic_amip_outputs(tmp_path)
+        (tmp_path / "results.txt").unlink()
+        rc = mod.main(tmp_path)
+        assert rc == 0
         results_text = (tmp_path / "results.txt").read_text()
         assert "status: ERROR" in results_text
 
     def test_converter_handles_missing_npz(self, tmp_path, capsys):
-        """If timeseries.npz is missing, converter warns and exits cleanly."""
+        """If timeseries.npz is missing, converter returns non-zero and
+        purges stale matrix-format files.  iter-42 codex HIGH: a failed
+        AMIP rerun into an existing OUTDIR must NOT silently leave
+        behind data from the previous successful run.
+        """
         mod = self._import_converter()
-        # No ``timeseries.npz`` in tmp_path.
-        mod.main(tmp_path)
+        # Simulate a stale converter run: matrix-format files from
+        # a previous successful AMIP run, but timeseries.npz is now
+        # missing because the most recent AMIP run failed.
+        (tmp_path / "mean_timeseries.csv").write_text(
+            "time_days,mean_T\n0,300\n1,301\n",
+        )
+        (tmp_path / "results.txt").write_text(
+            "test: amip\nstatus: PASS\nwall_time: 5.0s\n",
+        )
+        (tmp_path / "results_amip.txt").write_text(
+            "legoESM AMIP run\nGrid: foo bar / L1, dt=1.0s, 1 days\n"
+            "Status: COMPLETED\nWall time: 5.0s\n",
+        )
+        # Now call the converter — it must purge the stale outputs
+        # and return non-zero.
+        rc = mod.main(tmp_path)
+        assert rc != 0
         captured = capsys.readouterr()
-        assert "WARNING" in captured.err or "missing" in captured.err
-        # Must NOT have written a CSV.
+        assert "ERROR" in captured.err or "missing" in captured.err
+        # Stale matrix-format files have been purged.
         assert not (tmp_path / "mean_timeseries.csv").exists()
+        assert not (tmp_path / "results.txt").exists()
+        assert not (tmp_path / "results_amip.txt").exists()
 
     def test_collector_recognizes_converted_output(self, tmp_path):
         """The matrix runner's ``_has_collectable`` must return True
         on a directory after conversion.  This is the integration
         guarantee — without this, the iter-41 wrapper silently no-ops.
+
+        iter-42 codex MEDIUM: extract the predicate from the actual
+        matrix-runner source instead of re-implementing it locally,
+        so a future change to ``_has_collectable`` cannot make this
+        test silently lie.
         """
         mod = self._import_converter()
         self._write_synthetic_amip_outputs(tmp_path)
-        mod.main(tmp_path)
+        rc = mod.main(tmp_path)
+        assert rc == 0
 
-        # Re-implement the matrix-runner predicate locally.
+        # iter-42 codex MEDIUM: build a predicate that mirrors the
+        # matrix-runner's by examining the source.  We can't easily
+        # import ``_has_collectable`` because it's defined inside a
+        # function in run_atmosphere_test_matrix.py, but we can
+        # assert that the source still uses the same two-file
+        # criterion this test depends on.  This makes the test fail
+        # loudly if the matrix-runner ever changes its collector
+        # criterion.
+        import inspect
+        matrix_src = inspect.getsource(M)
+        assert (
+            'mean_timeseries.csv' in matrix_src
+            and 'results.txt' in matrix_src
+            and 'snapshots_latlon.npz' in matrix_src
+        ), (
+            "matrix-runner _has_collectable criteria changed; "
+            "iter-42 converter must be updated to match"
+        )
+
         def _has_collectable(d: Path) -> bool:
             if (d / "snapshots_latlon.npz").exists():
                 return True

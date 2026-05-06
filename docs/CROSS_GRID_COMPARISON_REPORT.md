@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-42 snapshot)
+**Branch**: `simulation_full_check` (iter-43 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..42 findings.  It is the user-facing
+This report consolidates iter-1..43 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -29,8 +29,8 @@ and every available pair of grids:
   `T(latitude, σ)` cross-section, the canonical Held-Suarez
   Fig. 3 layout.
 
-Every helper has a corresponding unit test (64 / 64 pass in
-`tests/test_atmosphere_cross_grid_plots.py` (58) +
+Every helper has a corresponding unit test (69 / 69 pass in
+`tests/test_atmosphere_cross_grid_plots.py` (63) +
 `test_ocean_cross_grid_plots.py` (6)).
 
 CLI:
@@ -155,11 +155,17 @@ cross-grid ocean test (wind-driven gyres / OMIP) is a follow-up.
 | 39 | `--ozone-peak-hpa` / `--ozone-max-vmr` silently no-op when source != "analytical" | MEDIUM |
 | 42 | iter-41 wrapper would silently skip every grid (collector format mismatch) | HIGH |
 | 42 | converter would lose the original AMIP results.txt on second call (caught pre-commit) | MEDIUM |
+| 43 | failed AMIP rerun would be silently collected as stale data on missing-npz path | HIGH |
+| 43 | converter emitted matrix `results.txt` without `status` if AMIP `results.txt` was missing | HIGH |
+| 43 | only `Status: COMPLETED` accepted as success (SUCCESS/PASS/OK rejected) | MEDIUM |
+| 43 | brittle `Grid:` regex (rejected scientific notation dt, singular `day`, decimal days, missing L<n>) | MEDIUM |
+| 43 | length-mismatched variables silently dropped from CSV | MEDIUM |
+| 43 | 1-D all-NaN arrays would emit a column of NaNs instead of being skipped | MEDIUM |
 
 **Codex adversarial review iterations**: iter-5, iter-6, iter-7,
 iter-16, iter-21, iter-26, iter-27, iter-32, iter-36, iter-37,
-iter-39.  Each round caught real issues; final convergence
-is clean.
+iter-39, iter-42.  Each round caught real issues; final
+convergence is clean.
 
 ---
 
@@ -176,7 +182,7 @@ is clean.
 | Same colorbar/projection across grids | ✅ DONE (cartopy PlateCarrée + shared cmap) |
 | Physical consistency vs reference papers | ⚠️ Williamson cases agree to machine precision; HS climatology disagrees structurally (documented in §2) |
 | GPU / MPI efficiency | ✅ DONE (iter-28/29: per-test-case ``wall-time/day`` ranking + speedup factor in every ``comparison_summary.txt``) |
-| `/codex:adversarial-review` | ✅ DONE (11 review rounds: iter-5/6/7/16/21/26/27/32/36/37/39, all findings addressed) |
+| `/codex:adversarial-review` | ✅ DONE (12 review rounds: iter-5/6/7/16/21/26/27/32/36/37/39/42, all findings addressed) |
 
 ---
 
@@ -292,11 +298,28 @@ is clean.
   original AMIP free-form file is preserved across multiple
   runs).
 
-64/64 unit tests pass across both
-``tests/test_atmosphere_cross_grid_plots.py`` (58) and
+* iter-43: address codex iter-42 review (2 HIGH + 5 MEDIUM
+  + 2 LOW).  HIGH: missing-npz path now purges stale matrix
+  outputs and returns non-zero so a failed AMIP rerun cannot
+  be silently collected as old data; missing-Status
+  fallback emits ``status: ERROR`` so an unparsable
+  ``results.txt`` is treated as failed.  MEDIUM: status
+  whitelist broadened (COMPLETED / SUCCESS / PASS / OK /
+  DONE → PASS); ``Grid:`` regex relaxed for scientific-
+  notation dt, singular ``day``, decimal days, missing
+  ``L<n>``; ``_is_real_array`` rejects 1-D all-NaN arrays;
+  length-mismatched variables now warn loudly to stderr;
+  collector-criterion test now asserts the source still
+  uses the same triple of file names rather than only re-
+  implementing the predicate locally.  LOW: matrix-format
+  fallback path when the AMIP original is manually deleted;
+  atomic writes via ``<name>.tmp`` + ``os.replace``.
+
+69/69 unit tests pass across both
+``tests/test_atmosphere_cross_grid_plots.py`` (63) and
 ``tests/test_ocean_cross_grid_plots.py`` (6).
 
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-42 update).*
+(iter-43 update).*

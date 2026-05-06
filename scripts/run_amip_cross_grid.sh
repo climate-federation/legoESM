@@ -39,6 +39,7 @@ DAYS=${2:-30}
 GHG_FILE=${3:-}
 OZONE_FILE=${4:-}
 AEROSOL_FILE=${5:-}
+ANY_FAILED=0
 
 # Map grid_type → (resolution, discretization, folder) appropriate
 # for ~3 deg coverage (matrix-runner default for AMIP).  AMIP needs
@@ -97,17 +98,36 @@ for GRID in cubed_sphere latlon voronoi gaussian; do
     JAX_ENABLE_X64=1 .venv/bin/python scripts/run_amip.py \
         --grid-type "$GRID" --discretization "$DISC" \
         $TRUNC --days "$DAYS" --output "$OUTDIR" \
-        $EXTRA_FLAGS
+        $EXTRA_FLAGS || {
+        echo "  WARNING: run_amip.py failed for $GRID; continuing"
+        echo "  with cross-grid loop so other grids still produce"
+        echo "  output.  The format converter below will purge the"
+        echo "  $GRID directory of stale matrix-format files."
+    }
     # iter-42: convert run_amip.py outputs (timeseries.npz +
     # free-form results.txt) to matrix-runner-compatible files
     # (mean_timeseries.csv + key:value results.txt) so the
     # cross-grid plot collector below can pick them up.
-    .venv/bin/python scripts/_amip_to_matrix_format.py "$OUTDIR"
+    # iter-42 codex HIGH: converter returns non-zero on missing
+    # timeseries.npz (= failed AMIP run); we honor that exit
+    # status by setting ANY_FAILED so the cross-grid plot step
+    # can warn the user.
+    if ! .venv/bin/python scripts/_amip_to_matrix_format.py "$OUTDIR"; then
+        echo "  WARNING: $GRID has no usable AMIP output; cross-"
+        echo "  grid collection will skip it."
+        ANY_FAILED=1
+    fi
 done
 
 echo ""
 echo "=================================================="
 echo "  Generating cross-grid comparison plots"
 echo "=================================================="
+if [ "$ANY_FAILED" = "1" ]; then
+    echo "  NOTE: at least one grid had no usable AMIP output;"
+    echo "  the cross-grid plot will only show the grids that"
+    echo "  succeeded.  Re-run the failing grid(s) to get a"
+    echo "  complete cross-grid comparison."
+fi
 JAX_ENABLE_X64=1 .venv/bin/python scripts/run_atmosphere_test_matrix.py \
     --cross-grid-plots-only --test amip --output "$OUTPUT"
