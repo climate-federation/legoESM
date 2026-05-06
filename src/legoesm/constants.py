@@ -67,8 +67,15 @@ S_0 = 1361.0                    # Total solar irradiance [W/m^2]
 # Broadband longwave emissivities (used as defaults when a tile config
 # does not specify its own).  Sea-water and most ice surfaces are
 # near-blackbody in the thermal-IR window; sand/dry-soil ~0.91.
+# Note: ``driver/config.py`` and ``driver/physics_pipeline.py`` carry
+# pre-existing ``emissivity_ice = 0.95`` defaults that predate the
+# centralisation here.  0.97 is the fresh-sea-ice / fresh-snow
+# value used by ``ice/config.py`` and the bare-ice albedo path; 0.95
+# represents a melt-pond / weathered ice surface mix.  Reconciliation
+# is tracked as a follow-up — see slopbuster review of
+# Physical_Consistency PR.
 emissivity_ocean = 0.97         # [-] open ocean / lake water
-emissivity_ice = 0.97           # [-] sea ice / fresh snow
+emissivity_ice = 0.97           # [-] fresh sea ice / fresh snow
 emissivity_land = 0.95          # [-] generic land surface
 
 # ==============================================================================

@@ -445,6 +445,155 @@ class TestSpectralPETracerStep:
 
 
 # ---------------------------------------------------------------------------
+# Iter-92/95 ``forcing_data`` API regression tests (slopbuster HIGH finding)
+# ---------------------------------------------------------------------------
+
+class TestSpectralPEForcingDataAPI:
+    """Iter-92/95 introduced ``model.step(state, dt, physics_fn,
+    forcing_data)`` that threads a TRACED pytree through a 4-arg
+    physics_fn signature.  These tests exercise the new code path
+    directly (slopbuster review flagged the absence of a fast unit
+    test for this API).
+    """
+
+    def _proper_hyperdiff(self, grid):
+        a = grid.radius
+        eig_max = grid.n_max * (grid.n_max + 1) / (a * a)
+        return 1.0 / (4.0 * 3600.0 * eig_max ** 2)
+
+    def test_forcing_data_threads_to_physics_fn(self, grid, sigma_coord, rest_state):
+        """A 4-arg physics_fn receives forcing_data and the day value
+        is read DYNAMICALLY at JIT trace time, NOT baked-in at first
+        compile.
+
+        Why non-vacuous: under the iter-74 stale-day bug, calling
+        step with two different forcing_data values would silently use
+        the first call's value for both — the test below would see
+        BIT-IDENTICAL output.  With the iter-92 fix, forcing_data flows
+        as a TRACED pytree and changing its values produces a
+        materially different post-step state.
+        """
+        config = SpectralPEConfig(
+            hyperdiff_coeff=self._proper_hyperdiff(grid),
+            time_integrator="ssp_rk3",
+        )
+        model = SpectralPrimitiveEquationModel(grid, sigma_coord, config)
+
+        # physics_fn that BIASES the T tendency by the forcing value.
+        # If forcing_data flows as TRACED, the post-step T_hat differs
+        # between two distinct forcing values.  If it's baked-in
+        # (the bug), both calls produce the same output.
+        def physics_fn_4arg(s, g, sc, fd):
+            bias = fd["bias"]  # JAX scalar — must NOT call float() on it
+            T_tend_data = bias * jnp.ones_like(s.T_hat.data)
+            return s._replace(
+                vor_hat=s.vor_hat.replace(data=jnp.zeros_like(s.vor_hat.data)),
+                div_hat=s.div_hat.replace(data=jnp.zeros_like(s.div_hat.data)),
+                T_hat=s.T_hat.replace(data=T_tend_data),
+                lnps_hat=s.lnps_hat.replace(data=jnp.zeros_like(s.lnps_hat.data)),
+                phis_hat=s.phis_hat.replace(data=jnp.zeros_like(s.phis_hat.data)),
+            )
+
+        fd1 = {"bias": jnp.asarray(1.0, dtype=jnp.float64)}
+        s1 = model.step(rest_state, dt=300.0, physics_fn=physics_fn_4arg, forcing_data=fd1)
+
+        fd2 = {"bias": jnp.asarray(5.0, dtype=jnp.float64)}
+        s2 = model.step(rest_state, dt=300.0, physics_fn=physics_fn_4arg, forcing_data=fd2)
+
+        # The two outputs MUST differ.  Under the iter-74 stale-day
+        # bug, both calls would use the first compile's bias and the
+        # outputs would be bit-identical.
+        diff = float(jnp.max(jnp.abs(s1.T_hat.data - s2.T_hat.data)))
+        assert diff > 1e-6, (
+            f"forcing_data did not propagate dynamically: "
+            f"max |s1.T_hat − s2.T_hat| = {diff:.3e}.  "
+            f"Expected > 1e-6.  Iter-74 stale-day bug regression."
+        )
+        assert jnp.all(jnp.isfinite(s1.T_hat.data))
+        assert jnp.all(jnp.isfinite(s2.T_hat.data))
+
+    def test_legacy_3arg_physics_fn_still_works(self, grid, sigma_coord, rest_state):
+        """The legacy 3-arg physics_fn API must still work when
+        forcing_data is None — backward compatibility check."""
+        config = SpectralPEConfig(
+            hyperdiff_coeff=self._proper_hyperdiff(grid),
+            time_integrator="ssp_rk3",
+        )
+        model = SpectralPrimitiveEquationModel(grid, sigma_coord, config)
+
+        def physics_fn_3arg(s, g, sc):
+            return s._replace(
+                vor_hat=s.vor_hat.replace(data=jnp.zeros_like(s.vor_hat.data)),
+                div_hat=s.div_hat.replace(data=jnp.zeros_like(s.div_hat.data)),
+                T_hat=s.T_hat.replace(data=jnp.zeros_like(s.T_hat.data)),
+                lnps_hat=s.lnps_hat.replace(data=jnp.zeros_like(s.lnps_hat.data)),
+                phis_hat=s.phis_hat.replace(data=jnp.zeros_like(s.phis_hat.data)),
+            )
+
+        # Call WITHOUT forcing_data — must fall through to legacy path.
+        s_out = model.step(rest_state, dt=300.0, physics_fn=physics_fn_3arg)
+        assert jnp.all(jnp.isfinite(s_out.T_hat.data))
+
+    def test_forcing_data_threads_through_leapfrog_si_path(
+        self, grid, sigma_coord, rest_state,
+    ):
+        """The leapfrog-SI integrator dispatches to a different pair of
+        JIT methods (``_euler_si_with_forcing_jit`` for the startup
+        step and ``_leapfrog_si_with_forcing_jit`` for subsequent
+        steps).  Both must thread forcing_data correctly.
+
+        Why non-vacuous: under the iter-74 stale-day bug the *second*
+        step would silently reuse the first compile's bias, so two
+        runs with different bias values from the second step onward
+        would produce identical state-after-2 even though step-1 saw
+        the right value.  Running 2 steps catches both branches.
+        """
+        config = SpectralPEConfig(
+            hyperdiff_coeff=self._proper_hyperdiff(grid),
+            time_integrator="leapfrog_si",
+            implicit_hyperdiff=True,  # required with leapfrog
+            semi_implicit=True,       # SI matrices populated by _ensure_si_data
+        )
+        model_a = SpectralPrimitiveEquationModel(grid, sigma_coord, config)
+        model_b = SpectralPrimitiveEquationModel(grid, sigma_coord, config)
+
+        def physics_fn_4arg(s, g, sc, fd):
+            bias = fd["bias"]
+            T_tend_data = bias * jnp.ones_like(s.T_hat.data)
+            return s._replace(
+                vor_hat=s.vor_hat.replace(data=jnp.zeros_like(s.vor_hat.data)),
+                div_hat=s.div_hat.replace(data=jnp.zeros_like(s.div_hat.data)),
+                T_hat=s.T_hat.replace(data=T_tend_data),
+                lnps_hat=s.lnps_hat.replace(data=jnp.zeros_like(s.lnps_hat.data)),
+                phis_hat=s.phis_hat.replace(data=jnp.zeros_like(s.phis_hat.data)),
+            )
+
+        fd_a = {"bias": jnp.asarray(1.0, dtype=jnp.float64)}
+        fd_b = {"bias": jnp.asarray(7.0, dtype=jnp.float64)}
+
+        # Run 2 steps each so we exercise BOTH the euler-si (startup)
+        # and leapfrog-si (subsequent) JIT paths.
+        s_a1 = model_a.step(rest_state, dt=300.0, physics_fn=physics_fn_4arg, forcing_data=fd_a)
+        s_a2 = model_a.step(s_a1, dt=300.0, physics_fn=physics_fn_4arg, forcing_data=fd_a)
+
+        s_b1 = model_b.step(rest_state, dt=300.0, physics_fn=physics_fn_4arg, forcing_data=fd_b)
+        s_b2 = model_b.step(s_b1, dt=300.0, physics_fn=physics_fn_4arg, forcing_data=fd_b)
+
+        diff_step1 = float(jnp.max(jnp.abs(s_a1.T_hat.data - s_b1.T_hat.data)))
+        diff_step2 = float(jnp.max(jnp.abs(s_a2.T_hat.data - s_b2.T_hat.data)))
+        assert diff_step1 > 1e-6, (
+            f"forcing_data did not propagate through _euler_si_with_forcing_jit: "
+            f"max |s_a1.T_hat − s_b1.T_hat| = {diff_step1:.3e}"
+        )
+        assert diff_step2 > 1e-6, (
+            f"forcing_data did not propagate through _leapfrog_si_with_forcing_jit: "
+            f"max |s_a2.T_hat − s_b2.T_hat| = {diff_step2:.3e}"
+        )
+        assert jnp.all(jnp.isfinite(s_a2.T_hat.data))
+        assert jnp.all(jnp.isfinite(s_b2.T_hat.data))
+
+
+# ---------------------------------------------------------------------------
 # Convection q_v sink propagates through to spectral PE
 # ---------------------------------------------------------------------------
 
