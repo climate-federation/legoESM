@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-69 snapshot)
+**Branch**: `simulation_full_check` (iter-70 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..69 findings.  It is the user-facing
+This report consolidates iter-1..70 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -29,8 +29,8 @@ and every available pair of grids:
   `T(latitude, σ)` cross-section, the canonical Held-Suarez
   Fig. 3 layout.
 
-Every helper has a corresponding unit test (118 / 118 pass
-across `tests/test_atmosphere_cross_grid_plots.py` (77) +
+Every helper has a corresponding unit test (119 / 119 pass
+across `tests/test_atmosphere_cross_grid_plots.py` (78) +
 `test_ocean_cross_grid_plots.py` (15) +
 `test_cross_grid_wrappers.py` (26)) plus 3 MPAS-mesh-
 unavailable skips.
@@ -1030,8 +1030,29 @@ round caught real issues; final convergence is clean.
 
   Pure validation; no source changes.  Tests still
   118/118 + 3 MPAS skips.
+* iter-70: address the iter-69 minor UX issue.  The iter-42
+  converter previously printed "ERROR: 'days' missing from
+  X" both when the npz lacked the ``days`` key AND when the
+  array was empty (e.g., ``--days < --diag-days``).  The
+  message was misleading in the empty-array case.
 
-118/118 unit tests pass + 3 MPAS-mesh-unavailable skips
+  Two distinct messages now:
+    * ``'days' key not in X``      — npz schema mismatch
+    * ``'days' array in X is empty (shape=(0,)); ... Did
+      the AMIP run shorter than ``--diag-days``?``  —
+      diagnostic-buffer-empty case.
+
+  Functional behavior unchanged (both paths still return
+  non-zero, purge stale matrix-format files).  New
+  regression test
+  ``test_converter_distinguishes_empty_days_from_missing``
+  pins the empty-array message contains "empty" + the
+  ``--diag-days`` hint.
+
+  Tests: 78 atmosphere total (was 77); full suite 119/119
+  + 3 MPAS skips (was 118/118 + 3 skips).
+
+119/119 unit tests pass + 3 MPAS-mesh-unavailable skips
 (across ``tests/test_atmosphere_cross_grid_plots.py`` (77 +
 3 skips), ``tests/test_ocean_cross_grid_plots.py`` (15), and
 ``tests/test_cross_grid_wrappers.py`` (26)).
@@ -1039,4 +1060,4 @@ round caught real issues; final convergence is clean.
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-69 update).*
+(iter-70 update).*

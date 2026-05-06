@@ -1223,6 +1223,42 @@ class TestAmipToMatrixFormat:
         assert not (tmp_path / "results.txt").exists()
         assert not (tmp_path / "results_amip.txt").exists()
 
+    def test_converter_distinguishes_empty_days_from_missing(
+        self, tmp_path, capsys,
+    ):
+        """iter-70: the iter-69 5-day AMIP smoke initially produced a
+        npz with an empty ``days`` array (run was 1 day, default
+        ``--diag-days 5``, so no diagnostic snapshot was emitted).
+        The iter-42 message read "'days' missing" which was
+        misleading.  iter-70 distinguishes the two cases:
+
+          * 'days' key not in the npz file at all
+          * 'days' key present but the array is empty
+
+        Both still return non-zero (the converter is correct that
+        no CSV can be written), but the error message is now
+        actionable for the AMIP smoke-test case (suggests checking
+        ``--diag-days`` vs ``--days``).
+        """
+        import numpy as np
+        mod = self._import_converter()
+
+        # Empty-days case: write a npz with ``days=array([])``.
+        np.savez(
+            tmp_path / "timeseries.npz",
+            days=np.array([], dtype=np.float64),
+            T_atm=np.array([], dtype=np.float64),
+        )
+        (tmp_path / "results.txt").write_text(
+            "legoESM AMIP run\nStatus: COMPLETED\n",
+        )
+        rc = mod.main(tmp_path)
+        assert rc != 0
+        captured = capsys.readouterr()
+        # iter-70 message includes "empty" + a hint about diag-days.
+        assert "empty" in captured.err.lower()
+        assert "diag-days" in captured.err
+
     def test_collector_recognizes_converted_output(self, tmp_path):
         """The matrix runner's collector predicate must return True
         on a directory after conversion.  This is the integration

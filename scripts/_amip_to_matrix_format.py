@@ -217,11 +217,27 @@ def main(out_dir: Path) -> int:
     # Build (column_name, array) pairs in deterministic order, skipping
     # NaN-sentinel entries.
     cols: list[tuple[str, np.ndarray]] = []
-    days = data["days"] if "days" in data.files else None
-    if days is None or not _is_real_array(days):
+    # iter-70 codex review: distinguish "days array missing" from
+    # "days array empty" in the error message — the iter-69 5-day
+    # AMIP smoke initially produced empty diagnostics
+    # (``--days 1`` shorter than ``--diag-days 5``) and the
+    # iter-42 message read "'days' missing" which is misleading.
+    if "days" not in data.files:
         print(
-            f"  [_amip_to_matrix_format] ERROR: 'days' missing from "
+            f"  [_amip_to_matrix_format] ERROR: 'days' key not in "
             f"{npz_path}; cannot write CSV.",
+            file=sys.stderr,
+        )
+        _purge_stale_matrix_outputs(out_dir)
+        return 2
+    days = data["days"]
+    if not _is_real_array(days):
+        days_arr = np.asarray(days)
+        print(
+            f"  [_amip_to_matrix_format] ERROR: 'days' array in "
+            f"{npz_path} is empty (shape={days_arr.shape}); cannot "
+            f"write CSV.  Did the AMIP run shorter than "
+            f"``--diag-days``?",
             file=sys.stderr,
         )
         _purge_stale_matrix_outputs(out_dir)
