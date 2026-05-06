@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-67 snapshot)
+**Branch**: `simulation_full_check` (iter-68 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..67 findings.  It is the user-facing
+This report consolidates iter-1..68 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -203,7 +203,18 @@ round caught real issues; final convergence is clean.
 
 ## 5. Recommended next steps (post-Ralph)
 
-1. **Cross-dycore dissipation retuning**: principled fix for the
+> **iter-68 user handoff**: the cube/latlon HS dissipation
+> retuning is OUT OF SCOPE for this Ralph loop.  The user
+> directed: "if you are struggling with the cubed sphere — you
+> can leave it for a later iteration I will do myself".
+> iter-62..68 diagnostic data + the failed iter-68 ad-hoc
+> attempt remain documented as a starting point for the
+> manual retuning work.  Future implementation MUST consult a
+> Fortran/C reference (e.g., MOM6 ``MOM_hor_visc.F90``, GFDL
+> FMS) per the iter-68 user directive on ad-hoc fixes.
+
+1. **Cross-dycore dissipation retuning** (USER HANDOFF):
+   principled fix for the
    HS cube-cold / latlon-warm pattern.  iter-57 audit of the
    matrix runner's per-grid dissipation coefficients identified
    a SPECIFIC cause:
@@ -937,6 +948,50 @@ round caught real issues; final convergence is clean.
 
   Pure experiment / diagnosis; no source changes.  Tests
   still 118/118 + 3 MPAS skips.
+* iter-68: **FAILED ATTEMPT** at fix-candidate (a).  Added
+  ``hyperdiff_coeff`` field to
+  ``CGridLatLonPrimitiveEquationConfig`` and an ad-hoc
+  biharmonic block ``-coeff · vector_laplacian_cgrid²``
+  applied to u, v, T after the existing Laplacian block.
+  Wired the matrix runner's latlon HS branch to pass
+  ``hyperdiff_coeff = 0.05 · dx_pole⁴ / dt``.  Ran 7-day HS:
+
+    grid           iter-65   iter-68 (ad-hoc bihd)
+    cubed_sphere   0.399 K   1.779 K   (4.5× worse)
+    icosahedral    0.218 K   1.826 K   (8.4× worse)
+    spectral       0.315 K   1.900 K   (6.0× worse)
+    latlon         0.490 K   5.445 K  (11× worse)
+    top spread     1.275 K   12.435 K  (10× worse)
+
+  The naïve "apply Laplacian twice" implementation made
+  things 10× worse across the board, not just for latlon.
+
+  **User directive (iter-68 mid-run)**: "do not use ad-hoc
+  fixes — rather those fixes should be fundamental and
+  always use reference implementations in Fortran or C if
+  needed".  Saved as a feedback memory for future
+  iterations.
+
+  All iter-68 source changes REVERTED.  The lesson: the
+  naïve biharmonic on a C-grid latlon ignores polar metric
+  corrections, vector-component coupling at the poles, and
+  stability filters that production codes (MOM6, GFDL FMS,
+  etc.) handle explicitly.  Re-attempting fix-candidate (a)
+  requires reading a Fortran reference (e.g.,
+  ``MOM_hor_visc.F90``) and replicating its operator
+  structure rather than guessing from textbook descriptions.
+
+  **User handoff (iter-68 mid-run)**: "if you are struggling
+  with the cubed sphere — you can leave it for a later
+  iteration I will do myself".  The cube/latlon HS
+  dissipation retuning is therefore **out of scope for this
+  Ralph loop**.  iter-62..68 data and diagnoses remain in
+  the report as a starting point for the user's manual
+  retuning work.
+
+  Pure experiment + revert; no source changes (everything
+  reverted before commit).  Tests still 118/118 + 3 MPAS
+  skips.
 
 118/118 unit tests pass + 3 MPAS-mesh-unavailable skips
 (across ``tests/test_atmosphere_cross_grid_plots.py`` (77 +
@@ -946,4 +1001,4 @@ round caught real issues; final convergence is clean.
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-67 update).*
+(iter-68 update).*

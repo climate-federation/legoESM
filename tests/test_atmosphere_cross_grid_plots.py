@@ -1936,6 +1936,12 @@ class TestHeldSuarezDissipationImbalance:
         # Latlon C-grid config NamedTuple field check (independent
         # confirmation that biharmonic / div_damp are not yet
         # exposed at the config layer).
+        # iter-68 NOTE: an ad-hoc biharmonic implementation
+        # (``-coeff · vector_laplacian_cgrid²``) was attempted and
+        # made the cross-grid disagreement 11× WORSE (latlon
+        # deviation 0.490 → 5.445 K).  Reverted.  The fix-candidate
+        # (a) needs a proper Fortran-reference biharmonic operator
+        # (e.g., MOM6 / GFDL FMS) before re-attempt.
         from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
             CGridLatLonPrimitiveEquationConfig,
         )
@@ -1948,7 +1954,10 @@ class TestHeldSuarezDissipationImbalance:
                 f"latlon HS branch should be updated to use it, "
                 f"and the §5 fix-candidate (a) plan in "
                 f"CROSS_GRID_COMPARISON_REPORT.md should be "
-                f"marked done."
+                f"marked done.  iter-68 attempted this with an "
+                f"ad-hoc biharmonic implementation and made the "
+                f"cross-grid disagreement 11× worse — re-attempt "
+                f"requires a Fortran-reference operator."
             )
 
     def _find_branch_body(self, branch_grid: str):
