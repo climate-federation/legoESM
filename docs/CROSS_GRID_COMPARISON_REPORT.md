@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-70 snapshot)
+**Branch**: `simulation_full_check` (iter-71 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..70 findings.  It is the user-facing
+This report consolidates iter-1..71 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -175,6 +175,7 @@ cross-grid ocean test (wind-driven gyres / OMIP) is a follow-up.
 | 54 | OMIP wrapper never invoked the cross-grid plotter — only per-grid plots produced | HIGH |
 | 54 | OMIP `_run_replot` discovery rglob'd `snapshots_latlon.npz` only, missing iter-49 timeseries-only runs | HIGH |
 | 55 | iter-54 `_run_replot` had try/except outside the inner marker loop, calling `_replot_case_snapshots` on stale `res_dir` once per glob | HIGH |
+| 71 | OMIP cube C24 BLOWUP at step 500 (max\|T\|=8M K, eta=2677 m) while latlon / MPAS / spectral PASS — USER HANDOFF for cube debug | HIGH |
 
 **Codex adversarial review iterations**: iter-5, iter-6, iter-7,
 iter-16, iter-21, iter-26, iter-27, iter-32, iter-36, iter-37,
@@ -1051,6 +1052,48 @@ round caught real issues; final convergence is clean.
 
   Tests: 78 atmosphere total (was 77); full suite 119/119
   + 3 MPAS skips (was 118/118 + 3 skips).
+* iter-71: validated the OMIP per-grid runner end-to-end.
+  Ran ``run_omip.py --grid <X> --days 2 --quick`` for each
+  of the 4 ocean grids:
+
+    grid          status   time   final SST
+    cubed_sphere  FAIL     73.8s  19.76 °C  ← BLOWUP step 500
+    latlon        PASS     16.4s  19.51 °C
+    mpas          PASS     17.0s  19.59 °C
+    spectral      PASS     25.5s  19.54 °C
+
+  3 of 4 grids PASS with consistent SST (19.51-19.59 °C, only
+  0.08 °C cross-grid spread).
+
+  **cubed_sphere C24 OMIP BLEW UP** at step 500 (run-time
+  before final SST checkpoint), with ``max|T|=8341965.5 K``
+  and ``eta_max=2677.69 m`` — clearly a numerical
+  instability, not a physics state.  Latlon / MPAS / spectral
+  with the same physics defaults (``--physics full --water-type II
+  --sw-down 200``) on similar resolutions are stable.
+
+  This is a NEW finding: the cube-side instability extends to
+  OMIP, not just HS.  Combined with the iter-62..68 cube/latlon
+  HS dissipation diagnosis, the cube ocean dycore likely shares
+  the same architectural weakness (insufficient stabilization
+  for the C-D grid edge stencils on Held-Suarez or OMIP-scale
+  forcing).
+
+  **Per the iter-68 user handoff** ("if you are struggling
+  with the cubed sphere — you can leave it for a later
+  iteration I will do myself"), the cube OMIP fix is OUT OF
+  SCOPE for this Ralph loop.  iter-71 documents the failure
+  + the 3-grid working baseline (latlon / mpas / spectral
+  agree to 0.08 °C SST) as a starting point for the user's
+  manual debugging.
+
+  Other 3 grids' matrix-format outputs were correctly produced
+  (``mean_timeseries.csv`` + matrix ``results.txt``); the
+  iter-49-relaxed ocean cross-grid plotter would pick them up
+  for a 3-grid timeseries comparison.
+
+  Pure validation; no source changes.  Tests still
+  119/119 + 3 MPAS skips.
 
 119/119 unit tests pass + 3 MPAS-mesh-unavailable skips
 (across ``tests/test_atmosphere_cross_grid_plots.py`` (77 +
@@ -1060,4 +1103,4 @@ round caught real issues; final convergence is clean.
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-70 update).*
+(iter-71 update).*
