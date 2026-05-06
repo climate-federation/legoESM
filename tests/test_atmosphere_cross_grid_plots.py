@@ -629,26 +629,56 @@ class TestRrtmgpGhgOverrides:
         assert params["ch4_ppbv"].default is None
         assert params["n2o_ppbv"].default is None
 
-    def test_cloud_scheme_flips_include_clouds_in_rrtmgp_config(self):
+    def test_cloud_scheme_flips_include_clouds_in_rrtmgp_config(
+        self, monkeypatch,
+    ):
         """iter-36 codex HIGH: when ``--cloud-scheme`` is set to a
         non-"none" value, ``RRTMGPConfig.include_clouds`` must
         flip to True so RRTMGP actually consumes cloud properties.
 
-        Verify by reading the source code path that builds
-        ``rrtmgp_kwargs`` — we check for the conditional that
-        injects ``include_clouds=True``.  A direct
-        ``_make_rrtmgp_physics`` call would JIT-compile the full
-        radiation kernel; not desirable in a fast unit test.
+        iter-37 codex LOW: replace the iter-36 source-inspection
+        test (which can false-positive on stale comments and false-
+        negative on helper refactors) with a proper config-capture
+        test.  We monkeypatch ``make_physics`` to record the
+        ``RRTMGPConfig`` it was given.
         """
-        import inspect
-        src = inspect.getsource(M._make_rrtmgp_physics)
-        # The iter-36 fix injects ``include_clouds=True`` whenever
-        # ``eff_cloud not in (None, "none")``.
-        assert 'include_clouds' in src, (
-            "iter-36 fix missing: --cloud-scheme should flip "
-            "RRTMGPConfig.include_clouds to True"
-        )
-        assert 'eff_cloud' in src and '"none"' in src
+        captured = {}
+
+        def fake_make_physics(phys_cfg, model_type, dt):
+            captured["phys_cfg"] = phys_cfg
+            return lambda *a, **kw: None  # no-op physics_fn
+
+        # monkeypatch the import inside ``_make_rrtmgp_physics``.
+        import legoesm.atmosphere.physics.combined as combined_mod
+        monkeypatch.setattr(combined_mod, "make_physics", fake_make_physics)
+
+        # Case 1: cloud_scheme="sundqvist" → include_clouds=True.
+        M._RUNTIME_RRTMGP_OVERRIDES["cloud_scheme"] = "sundqvist"
+        try:
+            _ = M._make_rrtmgp_physics("hydrostatic", dt=300.0)
+            phys_cfg = captured["phys_cfg"]
+            assert phys_cfg.radiation.scheme == "rrtmgp"
+            assert phys_cfg.radiation.cloud_scheme == "sundqvist"
+            assert phys_cfg.radiation.rrtmgp.include_clouds is True
+        finally:
+            M._RUNTIME_RRTMGP_OVERRIDES["cloud_scheme"] = None
+
+        # Case 2: cloud_scheme="none" → include_clouds remains False.
+        captured.clear()
+        M._RUNTIME_RRTMGP_OVERRIDES["cloud_scheme"] = "none"
+        try:
+            _ = M._make_rrtmgp_physics("hydrostatic", dt=300.0)
+            phys_cfg = captured["phys_cfg"]
+            assert phys_cfg.radiation.cloud_scheme == "none"
+            assert phys_cfg.radiation.rrtmgp.include_clouds is False
+        finally:
+            M._RUNTIME_RRTMGP_OVERRIDES["cloud_scheme"] = None
+
+        # Case 3: cloud_scheme=None (default) → include_clouds default (False).
+        captured.clear()
+        _ = M._make_rrtmgp_physics("hydrostatic", dt=300.0)
+        phys_cfg = captured["phys_cfg"]
+        assert phys_cfg.radiation.rrtmgp.include_clouds is False
 
 
 # ---------------------------------------------------------------------------

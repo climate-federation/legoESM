@@ -4983,10 +4983,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override RRTMGP N2O concentration [ppbv].  Default: 332.")
     p.add_argument(
         "--cloud-scheme", type=str, default=None,
-        choices=["none", "sundqvist", "xu_randall"],
+        choices=["none", "sundqvist"],
         help="iter-34: cloud fraction scheme for RRTMGP cloud-radiation "
              "coupling.  Default: ``none`` (clear-sky).  Only takes "
-             "effect with ``--radiation rrtmgp``.")
+             "effect with ``--radiation rrtmgp``.  iter-37: "
+             "``xu_randall`` removed from choices because it requires "
+             "``q_cloud`` + ``q_ice`` condensate tracers, which the "
+             "matrix runners' ``MicrophysicsConfig(scheme=\"none\")`` "
+             "does not produce — would silently give zero cloud "
+             "fraction and clear-sky radiation.  Re-add when a runner "
+             "with active microphysics + condensate tracers exists.")
     p.add_argument(
         "--resolution", type=str, default=None,
         help="Override baseline resolution (e.g. C48, 90x180, ico6)")
