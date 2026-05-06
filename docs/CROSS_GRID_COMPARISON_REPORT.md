@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-66 snapshot)
+**Branch**: `simulation_full_check` (iter-67 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..66 findings.  It is the user-facing
+This report consolidates iter-1..67 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -903,6 +903,40 @@ round caught real issues; final convergence is clean.
 
   Pure experiment / diagnosis; no source changes.  Tests
   still 118/118 + 3 MPAS skips.
+* iter-67: tested the inverse — increase latlon ``A_h`` 5×
+  to see if MORE damping pulls latlon toward the ensemble
+  mean.  Result: byte-identical to iter-65 baseline.
+
+  Diagnosis: the latlon HS branch already clamps
+  ``ah = min(ah, _A_h_max)`` where ``_A_h_max = 0.4 *
+  dx_pole² / dt`` is the CFL stability limit.  At n_lat=72
+  with ``dt ≈ 10 s`` (polar CFL), ``_A_h_max ≈ 1.17e6``
+  while ``_laplacian_visc_latlon(72) ≈ 9.65e6`` — so the
+  baseline is already at the CFL ceiling, and 5× gets
+  clamped right back down to the same value.
+
+  **This is a structural finding**: the latlon C-grid
+  dycore is already running at the maximum stable
+  Laplacian-only damping.  Going beyond that REQUIRES
+  biharmonic, which has a less restrictive CFL because of
+  higher-order spatial scaling (``dx⁴/dt`` instead of
+  ``dx²/dt``); biharmonic at the same effective viscosity
+  is CFL-stable where Laplacian is not.
+
+  This strengthens the engineering case for fix-candidate
+  (a): the reason ``CGridLatLonPrimitiveEquationConfig``
+  lacks biharmonic is presumably "Laplacian was sufficient
+  for shallow-water / barotropic tests"; for HS climatology
+  the Laplacian-only path is now demonstrably insufficient
+  (capped by CFL at half the cube's effective viscosity).
+
+  Combined iter-62..67 data **definitively rules out
+  coefficient retuning** as a fix.  The architectural
+  extension (fix-candidate (a)) is the only path supported
+  by the data.
+
+  Pure experiment / diagnosis; no source changes.  Tests
+  still 118/118 + 3 MPAS skips.
 
 118/118 unit tests pass + 3 MPAS-mesh-unavailable skips
 (across ``tests/test_atmosphere_cross_grid_plots.py`` (77 +
@@ -912,4 +946,4 @@ round caught real issues; final convergence is clean.
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-66 update).*
+(iter-67 update).*
