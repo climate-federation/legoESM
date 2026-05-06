@@ -1981,20 +1981,25 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         dd = _div_damp_cube(n)
         ah = _laplacian_visc_cube(n)
         dt = 200.0
-        # Iter-13 NOTE: The cubed-sphere ``CDGridPrimitiveEquationConfig``
-        # carries an upper-atmosphere Rayleigh sponge (default
-        # ``sponge_tau_sec=3600``, ``sponge_sigma=0.15``) that
-        # lat-lon / icosahedral lack and spectral has OFF by default.
-        # Disabling the sponge here actually WORSENED cross-grid
-        # mean_T agreement (gap grew 5 K → 11 K vs lat-lon at t=30d),
-        # because the cubed-sphere already runs systematically cold
-        # vs the other three grids at this resolution and the sponge
-        # was partially compensating.  The remaining cross-grid
-        # disagreement is a deeper dycore issue (different
-        # hyperdiffusion / div-damping coefficients across grids,
-        # different physics-dynamics splitting, different effective
-        # viscosity).  Tracked as a follow-up — leave the sponge at
-        # its dycore default for now.
+        # Iter-15 NOTE on the cubed-sphere upper-atmosphere sponge:
+        # The default ``sponge_tau_sec = 3600`` (1 hour) is FAR more
+        # aggressive than the FV3 Fortran reference
+        # (``atmos_cubed_sphere/dyn_core.F90::Ray_fast``) which uses
+        # ``tau`` in DAYS — typical production setting is 5-10 days,
+        # i.e. ~430-860x weaker damping.  However, EMPIRICALLY for
+        # this HS configuration:
+        #   - τ = 1 h (default): cube-vs-latlon mean_T gap  -5.0 K
+        #   - τ = 7 d (FV3-like):                          -10.8 K
+        #   - τ = ∞ (sponge OFF, iter-13):                 -11.3 K
+        # The aggressive 1-h sponge produces the BEST cross-grid
+        # agreement, despite being non-canonical for HS.  Suspected
+        # cause: the cubed-sphere hyperdiffusion + sponge combination
+        # is empirically tuned to roughly match the effective
+        # dissipation that lat-lon's Laplacian viscosity provides; a
+        # weaker sponge under-damps the cubed-sphere upper troposphere
+        # and the climatology drifts further from the lat-lon /
+        # icosahedral / spectral cluster.  Keep the 1-h default for
+        # this HS test until a more principled retuning is done.
         config = PrimitiveEquationConfig(
             hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
             div_damp_coeff=dd, A_h=ah,
