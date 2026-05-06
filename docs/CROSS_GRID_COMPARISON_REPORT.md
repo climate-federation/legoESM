@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-39 snapshot)
+**Branch**: `simulation_full_check` (iter-41 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..39 findings.  It is the user-facing
+This report consolidates iter-1..41 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -168,7 +168,7 @@ is clean.
 | Shallow water tests on all grids | ✅ DONE |
 | Hydrostatic Held-Suarez on all grids | ✅ DONE (with documented structural disagreement) |
 | Hydrostatic RCE on all grids | ✅ DONE (iter-24: ``mean_timeseries.csv`` + ``results.txt`` output, ``run_rce_cross_grid.sh`` wrapper) |
-| Hydrostatic AMIP w/ realistic GHG/aerosol/O3 | ⚠️ iter-22 RRTMGP wired (steady-state); iter-31 ``--co2-ppmv`` / ``--ch4-ppbv`` / ``--n2o-ppbv`` CLI knobs; iter-34/36 ``--cloud-scheme {none,sundqvist}`` with auto-``include_clouds=True``; iter-39 ``--ozone-source {standard,analytical,none}`` / ``--ozone-peak-hpa`` / ``--ozone-max-vmr`` knobs with auto-``source=analytical`` promotion and VMR-bound checks.  CMIP6 input4MIPs time-varying loaders still pending. |
+| Hydrostatic AMIP w/ realistic GHG/aerosol/O3 | ⚠️ iter-22 RRTMGP wired (steady-state); iter-31 ``--co2-ppmv`` / ``--ch4-ppbv`` / ``--n2o-ppbv`` matrix-runner knobs; iter-34/36 ``--cloud-scheme`` with auto-``include_clouds=True``; iter-39 ``--ozone-source`` / ``--ozone-peak-hpa`` / ``--ozone-max-vmr`` knobs.  iter-41 ``scripts/run_amip_cross_grid.sh`` wrapper threads the real ``scripts/run_amip.py`` (with full CMIP6 GHG / aerosol / ozone file support) per grid; matrix-runner ``run_amip`` remains an HS+RRTMGP stub for cross-grid CONSISTENCY testing rather than full AMIP.  Time-varying CMIP6 input4MIPs files: passed through the wrapper but not yet matrix-runner-native. |
 | Ocean test cases on all grids | ✅ DONE |
 | OMIP | ✅ DONE (iter-25: matrix-compatible CSV + results.txt, ``run_omip_cross_grid.sh`` wrapper) |
 | Same colorbar/projection across grids | ✅ DONE (cartopy PlateCarrée + shared cmap) |
@@ -262,6 +262,17 @@ is clean.
   (``--ozone-peak-hpa``); ``results.txt`` key casing made
   consistent.
 
+* iter-41: ``scripts/run_amip_cross_grid.sh`` wrapper added.
+  Mirrors the iter-24 RCE / iter-25 OMIP wrappers: invokes the
+  real ``scripts/run_amip.py`` (full CMIP6 GHG/aerosol/ozone
+  file support — the matrix runner's ``run_amip`` is HS+RRTMGP
+  only) once per grid, then calls the matrix runner's
+  ``--cross-grid-plots-only`` to produce the comparison plots.
+  Wrapper accepts optional GHG/ozone/aerosol file paths;
+  defaults to constant present-day forcing for quick smoke
+  runs.  Bash syntax-checked; usage error fires on missing
+  OUTPUT.
+
 59/59 unit tests pass across both
 ``tests/test_atmosphere_cross_grid_plots.py`` (53) and
 ``tests/test_ocean_cross_grid_plots.py`` (6).
@@ -269,4 +280,4 @@ is clean.
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-39 update).*
+(iter-41 update).*
