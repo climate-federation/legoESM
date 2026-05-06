@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-54 snapshot)
+**Branch**: `simulation_full_check` (iter-55 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..54 findings.  It is the user-facing
+This report consolidates iter-1..55 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -174,12 +174,13 @@ cross-grid ocean test (wind-driven gyres / OMIP) is a follow-up.
 | 51 | unparseable `results.txt` (empty metadata) would drop a CSV-valid run despite per-artifact isolation | MEDIUM |
 | 54 | OMIP wrapper never invoked the cross-grid plotter — only per-grid plots produced | HIGH |
 | 54 | OMIP `_run_replot` discovery rglob'd `snapshots_latlon.npz` only, missing iter-49 timeseries-only runs | HIGH |
+| 55 | iter-54 `_run_replot` had try/except outside the inner marker loop, calling `_replot_case_snapshots` on stale `res_dir` once per glob | HIGH |
 
 **Codex adversarial review iterations**: iter-5, iter-6, iter-7,
 iter-16, iter-21, iter-26, iter-27, iter-32, iter-36, iter-37,
 iter-39, iter-42, iter-43, iter-44, iter-46, iter-47, iter-49,
-iter-50, iter-52, iter-53.  Each round caught real issues;
-final convergence is clean.
+iter-50, iter-52, iter-53, iter-54.  Each round caught real
+issues; final convergence is clean.
 
 ---
 
@@ -196,7 +197,7 @@ final convergence is clean.
 | Same colorbar/projection across grids | ✅ DONE (cartopy PlateCarrée + shared cmap) |
 | Physical consistency vs reference papers | ⚠️ Williamson cases agree to machine precision; HS climatology disagrees structurally (documented in §2) |
 | GPU / MPI efficiency | ✅ DONE (iter-28/29: per-test-case ``wall-time/day`` ranking + speedup factor in every ``comparison_summary.txt``) |
-| `/codex:adversarial-review` | ✅ DONE (20 review rounds: iter-5/6/7/16/21/26/27/32/36/37/39/42/43/44/46/47/49/50/52/53, all findings addressed) |
+| `/codex:adversarial-review` | ✅ DONE (21 review rounds: iter-5/6/7/16/21/26/27/32/36/37/39/42/43/44/46/47/49/50/52/53/54, all findings addressed) |
 
 ---
 
@@ -546,4 +547,4 @@ final convergence is clean.
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-54 update).*
+(iter-55 update).*

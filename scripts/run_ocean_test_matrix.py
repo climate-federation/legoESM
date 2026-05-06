@@ -5972,27 +5972,37 @@ def _run_replot(args) -> None:
             # ``_replot_case_snapshots`` (it requires npz data) but
             # still add to ``test_case_dirs`` so the cross-grid
             # comparison block below picks them up.
+            #
+            # iter-55 codex HIGH: the iter-53 version had the
+            # ``try/except _replot_case_snapshots`` block at the
+            # OUTER ``for pattern`` indent, so it ran once per
+            # discovery_glob (using whatever ``res_dir`` was last
+            # bound) — and worse, on the timeseries-only pass it
+            # would call ``_replot_case_snapshots`` on a directory
+            # without ``snapshots_latlon.npz``.  Re-indented so the
+            # snapshot-replot step is INSIDE the marker loop AND
+            # only runs on the snapshot-marker branch.
             if pattern == "snapshots_latlon.npz":
                 print(
                     f"  Replotting {test_name}/{grid_name}/"
                     f"{res_dir.name} ..."
                 )
+                try:
+                    _replot_case_snapshots(res_dir)
+                    replotted += 1
+                except Exception as e:
+                    print(f"    ERROR: {e}")
+                    traceback.print_exc()
+                test_case_dirs.add(test_dir)
             else:
                 print(
                     f"  Discovered timeseries-only "
                     f"{test_name}/{grid_name}/{res_dir.name}"
                 )
-                # Skip the per-case snapshot-replot step.
+                # Skip the per-case snapshot-replot step;
+                # cross-grid plot below will use the iter-49
+                # relaxed collector.
                 test_case_dirs.add(test_dir)
-                continue
-        try:
-            _replot_case_snapshots(res_dir)
-            replotted += 1
-        except Exception as e:
-            print(f"    ERROR: {e}")
-            traceback.print_exc()
-
-        test_case_dirs.add(test_dir)
 
     # Regenerate cross-grid comparisons
     if test_case_dirs:
