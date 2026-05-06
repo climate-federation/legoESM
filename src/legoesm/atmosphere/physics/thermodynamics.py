@@ -312,4 +312,14 @@ def compute_cape(
     dp = p_half[:, 1:] - p_half[:, :-1]  # (ncol, nlev)
     buoyancy = jnp.maximum(0.0, T_parcel - T_env)
 
-    return constants.R_d * jnp.sum(buoyancy * dp / p_full, axis=1)
+    # Use the half-level midpoint pressure for the discrete ``∫ dlnp``
+    # approximation: ``(p_half[k+1] - p_half[k]) / p_mid`` with
+    # ``p_mid = 0.5 (p_half[k] + p_half[k+1])`` is the canonical
+    # convention used by every sister physics helper
+    # (``_shared.compute_layer_dz``, ``mass_flux``, ``dca``).  The
+    # earlier code used ``p_full``, which on hybrid-sigma grids is a
+    # layer-mean pressure (not a half-level midpoint) and produced a
+    # 0.5-2 % CAPE bias relative to the moist-adiabat path that
+    # consumed it (audit cycle iter-39 finding HIGH #1).
+    p_mid = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+    return constants.R_d * jnp.sum(buoyancy * dp / p_mid, axis=1)

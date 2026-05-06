@@ -18,6 +18,8 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 
+from legoesm.ocean.eos import rho_0 as _RHO_0_DEFAULT, c_sw as _C_SW_DEFAULT
+
 
 # ==============================================================================
 # Jerlov water type parameters
@@ -61,8 +63,8 @@ def shortwave_penetration_tendency(
     z_coord_z_half_ref: jnp.ndarray,
     jacobian: jnp.ndarray,
     config: ShortwavePenetrationConfig = ShortwavePenetrationConfig(),
-    rho_0: float = 1025.0,  # = eos.rho_0
-    c_sw: float = 3994.0,   # = eos.c_sw
+    rho_0: float = _RHO_0_DEFAULT,
+    c_sw: float = _C_SW_DEFAULT,
 ) -> jnp.ndarray:
     """Compute 3D temperature tendency from subsurface SW absorption.
 
@@ -103,8 +105,17 @@ def shortwave_penetration_tendency(
     I_half = R * jnp.exp(z_half / zeta1) + (1.0 - R) * jnp.exp(z_half / zeta2)
     # Shape: (nlev+1,)
 
-    # Fraction absorbed in each layer = I_half[k] - I_half[k+1]
+    # Fraction absorbed in each layer = I_half[k] - I_half[k+1].
+    # Without correction, frac_absorbed sums to 1 - I_half[-1] (the
+    # remainder reaches the bathymetric bottom and is "lost" from the
+    # column heat budget).  For deep open ocean (H >> zeta2 = 23 m)
+    # the leakage is negligible, but for shelf seas / lakes (H ≈ 50 m,
+    # I_half[-1] ≈ 0.06) the loss is non-trivial.  Add the leaked
+    # fraction to the bottom layer so the column always absorbs the
+    # full surface SW (boundary condition: total absorption at the
+    # bottom; backscatter from the seafloor is neglected).
     frac_absorbed = I_half[:-1] - I_half[1:]  # (nlev,)
+    frac_absorbed = frac_absorbed.at[-1].add(I_half[-1])
 
     # Actual layer thickness
     dz_actual = z_coord_dz_ref * jacobian[..., jnp.newaxis]  # (..., nlev)

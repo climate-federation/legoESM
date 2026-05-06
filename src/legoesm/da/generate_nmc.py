@@ -342,16 +342,35 @@ def _build_spectral_physics_fn(driver, gray_config, n_levels: int):
 
     day_ref = _DayRef(0.0)
 
-    def physics_fn(state, grid_arg, sigma_coord):
-        """Spectral tendency: gray radiation + Rayleigh friction."""
+    def physics_fn(state, grid_arg, sigma_coord, forcing_data=None):
+        """Spectral tendency: gray radiation + Rayleigh friction.
+
+        Iter-96 fix: when ``forcing_data`` is provided, reads
+        ``day``, ``sst``, ``sic``, ``insol`` from the TRACED
+        pytree.  This avoids the iter-74 ``_DayRef`` JIT-cache
+        stale-day pathology where the closure-captured day was
+        baked at first trace.  Falls back to ``day_ref.day``
+        for backward compatibility with existing 3-arg callers.
+        """
         fields = spectral_pe_to_grid(state, grid_arg, sigma_coord)
         T_g = fields["T"]
         u_g = fields["u"]
         v_g = fields["v"]
         p_s_g = fields["p_s"]
 
-        # SST/SIC boundary condition
-        sst, sic = driver.get_sst_sic(day_ref.day)
+        # SST/SIC boundary condition.  When forcing_data is provided
+        # (iter-96 migration to the new API), use the TRACED values
+        # — JAX retraces ONCE at first call but subsequent values
+        # propagate as dynamic inputs.  Otherwise fall back to the
+        # legacy ``day_ref.day`` closure read (which has the iter-74
+        # JIT-cache stale-day issue, but preserves backward compat).
+        if forcing_data is not None and "sst" in forcing_data:
+            sst = forcing_data["sst"]
+            sic = forcing_data["sic"]
+            current_day = forcing_data["day"]
+        else:
+            sst, sic = driver.get_sst_sic(day_ref.day)
+            current_day = day_ref.day
         if sst.ndim == 1:
             sst = jnp.broadcast_to(sst[:, None], shape_2d)
             sic = jnp.broadcast_to(sic[:, None], shape_2d)
@@ -374,8 +393,11 @@ def _build_spectral_physics_fn(driver, gray_config, n_levels: int):
             q_v_col = jnp.zeros_like(T_col)
         T_sfc_col = T_sfc.reshape(ncol)
 
-        # Gray radiation
-        insol = daily_mean_insolation(lat_col, day_ref.day, S_0)
+        # Gray radiation — use traced day from forcing_data when supplied
+        if forcing_data is not None and "insol" in forcing_data:
+            insol = forcing_data["insol"]
+        else:
+            insol = daily_mean_insolation(lat_col, current_day, S_0)
         rad_out = gray_radiation(
             T=T_col, p_full=p_full_col, p_half=p_half_col,
             sfc_temperature=T_sfc_col, lat=lat_col,
@@ -464,9 +486,35 @@ def _run_forecast_with_physics(
     driver.model._state_prev = None
 
     state = ic_spectral
+    # Iter-96 migration: build TRACED forcing_data each step (day,
+    # sst, sic, insol as JAX arrays) and pass through the iter-92/95
+    # ``model.step(forcing_data=...)`` API.  JAX traces over the
+    # array values dynamically — single compile, dynamic forcing.
+    # Closes the iter-74 ``_DayRef`` JIT-cache stale-day pathology
+    # for the NMC forecast path.
+    grid = driver.grid
+    grid_lat = grid.grid_lat
+    lat_2d = (
+        jnp.broadcast_to(grid_lat[:, None], (grid.n_lat, grid.n_lon))
+        if grid_lat.ndim == 1 else grid_lat
+    )
+    lat_col_local = lat_2d.reshape(-1)
+    S_0_local = driver.config.S_0
     for step in range(n_steps):
-        day_ref.day = start_day + (step + 1) * dt / 86400.0
-        state = driver.model.step(state, dt, physics_fn=physics_fn)
+        current_day = start_day + (step + 1) * dt / 86400.0
+        day_ref.day = current_day  # backward-compat: keep _DayRef synced
+        # Build TRACED forcing_data
+        sst, sic = driver.get_sst_sic(current_day)
+        insol = daily_mean_insolation(lat_col_local, current_day, S_0_local)
+        forcing_data = {
+            "day": jnp.asarray(current_day),
+            "sst": sst,
+            "sic": sic,
+            "insol": insol,
+        }
+        state = driver.model.step(
+            state, dt, physics_fn=physics_fn, forcing_data=forcing_data,
+        )
 
     return state
 

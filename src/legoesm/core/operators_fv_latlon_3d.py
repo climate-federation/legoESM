@@ -99,7 +99,14 @@ def fv_flux_divergence_latlon_3d(
     q_3d: jax.Array, u_3d: jax.Array, v_3d: jax.Array,
     grid: LatLonGrid, limiter: bool = True,
 ) -> jax.Array:
-    """Conservative FV flux divergence at all levels (single halo pad).
+    """Conservative FV flux-divergence TENDENCY at all levels.
+
+    **Sign convention** (load-bearing, audit cycle iter-35):
+    Returns the tracer tendency form ``dq/dt = -div(q · v)``,
+    matching the cubed-sphere counterpart in ``operators_3d``.
+    Callers that want moisture convergence use this output
+    directly; callers that want the divergence quantity itself
+    must explicitly negate the output.
 
     Parameters
     ----------
@@ -111,6 +118,7 @@ def fv_flux_divergence_latlon_3d(
     Returns
     -------
     jax.Array : shape (n_lat, n_lon, nlev)
+        ``dq/dt = -div(q · v)`` — the tracer-advection tendency.
     """
     R = grid.radius
     dlat = grid.dlat

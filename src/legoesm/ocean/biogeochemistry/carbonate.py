@@ -145,7 +145,7 @@ def solve_carbonate_system(
     ALK: jnp.ndarray,
     T_degC: jnp.ndarray,
     S_psu: jnp.ndarray,
-    rho_sw: float = 1025.0,
+    rho_sw: float = constants.rho_ocean,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Solve the carbonate system for pCO2 and pH.
 

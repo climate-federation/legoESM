@@ -118,13 +118,16 @@ def thompson_microphysics(
     ) / jnp.clip(rho, 0.1)
     dN_i_nuc = jnp.clip(N_i_target - N_i, 0.0) / jnp.clip(dt, 1.0)
 
-    # Depositional growth
+    # Depositional growth.  Same heuristic form as Morrison —
+    # ``q_i_min_growth`` floor only, so fresh nucleation can grow.
+    # See morrison.py for the rationale.
     q_sat_i = _saturation_mixing_ratio_ice(T, p_full)
     S_i = q_v / jnp.clip(q_sat_i, 1e-10) - 1.0
+    q_i_eff = jnp.maximum(jnp.clip(q_i, 0.0), config.q_i_min_growth)
     dq_i_dep = (
         config.dep_coeff
         * jnp.maximum(S_i, 0.0)
-        * jnp.clip(q_i, 0.0)
+        * q_i_eff
         * safe_pow(N_i, 1.0 / 3.0)
         * f_ice
     )
@@ -209,6 +212,33 @@ def thompson_microphysics(
     )
     rime_to_graupel_from_i = config.rime_to_graupel_rate * riming_i * graupel_frac
     rime_to_graupel_from_s = config.rime_to_graupel_rate * riming_s * graupel_frac
+    rime_to_graupel = rime_to_graupel_from_i + rime_to_graupel_from_s
+
+    # === DONOR CLAMP for q_i sinks ===
+    # Mirror of the q_c clamp.  q_i sinks: aggregation, melt_ice,
+    # rime_to_graupel_from_i.  Riming_i is a q_i source (not a sink),
+    # so it is NOT included.  Without this clamp, an explicit Euler
+    # step with combined sinks > q_i / dt drives q_i negative.
+    qi_sink_total = aggregation + melt_ice + rime_to_graupel_from_i
+    qi_avail = jnp.clip(q_i, 0.0)
+    qi_scale = jnp.minimum(
+        1.0,
+        qi_avail / jnp.maximum(qi_sink_total * dt_safe, 1e-30),
+    )
+    aggregation = aggregation * qi_scale
+    melt_ice = melt_ice * qi_scale
+    rime_to_graupel_from_i = rime_to_graupel_from_i * qi_scale
+
+    # === DONOR CLAMP for q_s sinks ===
+    # q_s sinks: melt_snow, rime_to_graupel_from_s.
+    qs_sink_total = melt_snow + rime_to_graupel_from_s
+    qs_avail = jnp.clip(q_s, 0.0)
+    qs_scale = jnp.minimum(
+        1.0,
+        qs_avail / jnp.maximum(qs_sink_total * dt_safe, 1e-30),
+    )
+    melt_snow = melt_snow * qs_scale
+    rime_to_graupel_from_s = rime_to_graupel_from_s * qs_scale
     rime_to_graupel = rime_to_graupel_from_i + rime_to_graupel_from_s
 
     # === SEDIMENTATION ===

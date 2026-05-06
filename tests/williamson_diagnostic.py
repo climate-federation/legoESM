@@ -22,6 +22,7 @@ import jax.numpy as jnp
 
 jax.config.update("jax_enable_x64", True)
 
+from legoesm import constants
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
@@ -32,11 +33,11 @@ from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
 
 
 # =============================================================================
-# Physical constants
+# Physical constants — pulled from the central legoesm.constants module
 # =============================================================================
-g = 9.80616
-omega = 7.292e-5
-R_earth = 6.371229e6
+g = constants.g
+omega = constants.Omega
+R_earth = constants.R_earth
 
 
 # =============================================================================

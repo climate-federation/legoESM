@@ -55,7 +55,7 @@ class EadyUniformConfig:
 
     # Linear EOS
     alpha_T: float = 2.0e-4
-    rho_0: float = 1025.0
+    rho_0: float = 1025.0        # = eos.rho_0
 
     # Shear: U = Λz (zero at bottom, U_surface at top)
     # U_surface=0.8 gives τ≈5 days (classical Eady e-folding time).

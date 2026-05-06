@@ -115,3 +115,54 @@ def test_jit_compiles():
     fn = jax.jit(shortwave_penetration_tendency)
     out = fn(sw_down, dz_ref, z_half_ref, J)
     assert jnp.all(jnp.isfinite(out))
+
+
+def test_column_sw_conservation_deep_water():
+    """SW penetration must conserve the column heat budget:
+    sum over layers of dT/dt · rho_0 · c_sw · dz_layer = sw_down.
+
+    For deep water (H >> zeta2), the original formulation already
+    closed to ~6 sig figs.  The iter-1 fix added the bottom-layer
+    leakage absorption; the column closure must hold to bit-precision.
+    """
+    from legoesm.ocean.eos import rho_0, c_sw
+
+    sw_down = jnp.full((4, 3), 200.0)
+    nlev = 30
+    H = 500.0  # deep ocean
+    dz_ref = jnp.full((nlev,), H / nlev)
+    z_half_ref = -jnp.linspace(0.0, H, nlev + 1)
+    jacobian = jnp.ones((4, 3))
+
+    dT_dt = shortwave_penetration_tendency(
+        sw_down, dz_ref, z_half_ref, jacobian,
+    )
+    # Column heating in W/m²: sum(dT_dt * rho_0 * c_sw * dz_actual)
+    dz_actual = dz_ref * jacobian[..., None]
+    col_heating = jnp.sum(dT_dt * rho_0 * c_sw * dz_actual, axis=-1)
+    # Should equal sw_down to high precision.
+    assert jnp.allclose(col_heating, sw_down, rtol=1e-12)
+
+
+def test_column_sw_conservation_shallow_water():
+    """The iter-1 bottom-layer leakage fix matters most in shallow
+    water (H comparable to zeta2 = 23 m).  Without the fix, ~6 % of
+    SW would escape from the column; with the fix the column heating
+    must still equal sw_down exactly.
+    """
+    from legoesm.ocean.eos import rho_0, c_sw
+
+    sw_down = jnp.full((2, 2), 200.0)
+    nlev = 10
+    H = 50.0  # shallow shelf — zeta2 = 23 m → I_half[-1] ≈ 0.06
+    dz_ref = jnp.full((nlev,), H / nlev)
+    z_half_ref = -jnp.linspace(0.0, H, nlev + 1)
+    jacobian = jnp.ones((2, 2))
+
+    dT_dt = shortwave_penetration_tendency(
+        sw_down, dz_ref, z_half_ref, jacobian,
+    )
+    dz_actual = dz_ref * jacobian[..., None]
+    col_heating = jnp.sum(dT_dt * rho_0 * c_sw * dz_actual, axis=-1)
+    # Bottom-layer absorption fix must keep column closure exact.
+    assert jnp.allclose(col_heating, sw_down, rtol=1e-12)

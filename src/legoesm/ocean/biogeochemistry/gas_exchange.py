@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.ocean.biogeochemistry.carbonate import (
     co2_solubility,
     solve_carbonate_system,
@@ -74,7 +75,7 @@ def air_sea_co2_flux(
     S_surf: jnp.ndarray,
     U10: jnp.ndarray,
     pCO2_atm: float = 400.0,
-    rho_sw: float = 1025.0,
+    rho_sw: float = constants.rho_ocean,
 ) -> AirSeaCO2Diagnostics:
     """Compute air-sea CO2 flux.
 

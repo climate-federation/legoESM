@@ -214,7 +214,7 @@ def _plot_latlon(snap: dict, scheme: str, time_idx: int, out_dir: Path):
     sigma = snap["sigma_full"]
     dp = np.diff(np.concatenate(
         [[0.0], 0.5 * (sigma[:-1] + sigma[1:]), [1.0]])) * p_s
-    cwv = np.sum(snap["q_v"][time_idx] * dp / 9.80616, axis=-1)
+    cwv = np.sum(snap["q_v"][time_idx] * dp / constants.g, axis=-1)
 
     fig, axes = plt.subplots(2, 2, figsize=(11, 7))
     panels = [

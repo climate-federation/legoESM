@@ -72,7 +72,7 @@ class ACCChannelConfig:
 
     # Linear EOS
     alpha_T: float = 2.0e-4
-    rho_0: float = 1025.0
+    rho_0: float = 1025.0        # = eos.rho_0
     T_ref: float = 4.0              # reference T for EOS
 
     # Wind forcing

@@ -149,6 +149,7 @@ def freshwater_from_coupler(
     ice_config=None,
     ocean_mask: jnp.ndarray | None = None,
     dt: float = 1.0,
+    surface_mass_flux: jnp.ndarray | None = None,
 ) -> FreshwaterForcing:
     """Compute freshwater forcing from coupler fields.
 
@@ -157,9 +158,12 @@ def freshwater_from_coupler(
     precip_total : jax.Array, shape (nCells,)
         Total precipitation [kg/m2/s].
     lhflx : jax.Array, shape (nCells,)
-        Latent heat flux [W/m2], positive upward.
+        Latent heat flux [W/m2], positive upward.  Used only as the
+        fallback when ``surface_mass_flux`` is None — see audit F22.
     L_v : float
-        Latent heat of vaporization [J/kg].
+        Latent heat of vaporization [J/kg].  Fallback factor for
+        ``lhflx``-based evap; ignored when ``surface_mass_flux`` is
+        provided.
     runoff_surface : jax.Array or None, shape (nCells,)
         Surface runoff from land [kg/m2/s].
     runoff_subsurface : jax.Array or None, shape (nCells,)
@@ -172,6 +176,13 @@ def freshwater_from_coupler(
         Ocean mask (1=ocean). Used to restrict fluxes to ocean cells.
     dt : float
         Timestep [s]. Used for ice thickness change rate.
+    surface_mass_flux : jax.Array or None, shape (nCells,)
+        Phase-aware moisture mass flux from SurfaceToAtm
+        [kg/m²/s, positive up].  Added in iter-16 of the
+        Physical_Consistency cycle (audit F3).  Preferred over the
+        ``lhflx / L_v`` back-derivation because the latter
+        under-counts mass by ~13 % on sublimating tiles.  When
+        provided, this overrides the lhflx-based evap calculation.
 
     Returns
     -------
@@ -182,8 +193,12 @@ def freshwater_from_coupler(
     # Precipitation over ocean
     precip = precip_total
 
-    # Evaporation from latent heat flux: E = lhflx / L_v
-    evap = lhflx / L_v
+    # Evaporation: prefer the phase-aware surface_mass_flux when
+    # available, fall back to lhflx / L_v for legacy callers.
+    if surface_mass_flux is not None:
+        evap = surface_mass_flux
+    else:
+        evap = lhflx / L_v
 
     # Land runoff (sum surface + subsurface).  Pin the zero-fallback
     # dtype to the precip path so a missing runoff input does not

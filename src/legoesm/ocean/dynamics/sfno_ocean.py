@@ -86,7 +86,7 @@ class SFNOOceanConfig(NamedTuple):
     mode: str = "state_update"
     dt_sfno: float = 3600.0
     g: float = 9.80616  # = constants.g
-    rho_0: float = 1025.0
+    rho_0: float = 1025.0        # = eos.rho_0
     correct_volume: bool = True
     correct_heat: bool = True
     correct_salt: bool = True

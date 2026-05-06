@@ -194,6 +194,56 @@ def _step_slab(
     )
     q_sfc_new = saturation_mixing_ratio_ice(T_ice_new, forcing.p_surface)
 
+    # Sea-ice → ocean freshwater flux: the ice mass that exchanged
+    # with the ocean (basal/surface melt and open-water freezing),
+    # NOT counting sublimation (already in the atmospheric lhflx
+    # channel).  Positive = freshwater INTO ocean (melt > freeze);
+    # negative = freshwater extracted to form ice.
+    dh_dt_total = (h_new - h) / dt
+    dh_dt_sublim = jnp.where(
+        h > config.h_ice_min,
+        -lhflx / (config.rho_ice * constants.L_s),
+        0.0,
+    )
+    freshwater_to_ocean = -config.rho_ice * (dh_dt_total - dh_dt_sublim)
+
+    # Heat extracted from the ocean by this tile.  Two contributions:
+    #   1) basal melt/growth: F_ocean drawn from warm ocean to melt
+    #      ice base (positive when SST > T_freeze_ocean).
+    #   2) open-water freezing: latent heat L_f · rho_ice · dh_open
+    #      removed from the ocean to form new ice.
+    # The signs work out so both are positive when ocean LOSES energy
+    # to the ice tile.  Ocean tile receives this back as a sink in
+    # its surface heat budget.  Audit F8.
+    ice_mask_init = h > config.h_ice_min
+    F_ocean = jnp.where(
+        ice_mask_init,
+        config.ocean_heat_transfer_coeff * jnp.maximum(
+            ocean_sst - config.T_freeze_ocean, 0.0,
+        ),
+        0.0,
+    )
+    # On previously-open-water cells, all of h_new is freshly frozen
+    # ice at base.  L_f · rho_ice · h_new / dt is the heat extracted
+    # from the ocean per unit area.
+    dh_dt_freeze_open = jnp.where(~ice_mask_init, h_new / dt, 0.0)
+    open_freeze_flux = config.rho_ice * config.L_f * dh_dt_freeze_open
+    ocean_heat_extraction = F_ocean + open_freeze_flux
+
+    # Sea-ice → ocean back-reaction stress (Newton's third law).
+    # The ocean→ice drag tau_oi accelerates the ice; the ice exerts
+    # −tau_oi on the ocean column.  Compute the proper Cauchy drag
+    # using the ocean-ice drag coefficient (config.drag_ocean = C_oi)
+    # and the relative velocity, weighted by ice concentration so
+    # ice-free cells contribute no stress.  Audit F9.
+    du_oi = ocean_u - u_ice
+    dv_oi = ocean_v - v_ice
+    speed_oi = jnp.sqrt(du_oi ** 2 + dv_oi ** 2 + 1e-10)
+    tau_oi_x = config.rho_ocean_ref * config.drag_ocean * speed_oi * du_oi
+    tau_oi_y = config.rho_ocean_ref * config.drag_ocean * speed_oi * dv_oi
+    ocean_stress_x = -tau_oi_x * conc
+    ocean_stress_y = -tau_oi_y * conc
+
     response = TileResponse(
         T_surface=T_ice_new,
         albedo=alpha_ice,
@@ -208,6 +258,14 @@ def _step_slab(
         u_ocean_sfc=u_ice,
         v_ocean_sfc=v_ice,
         co2_flux=jnp.zeros_like(h),
+        freshwater_flux=freshwater_to_ocean,
+        ocean_heat_extraction=ocean_heat_extraction,
+        ocean_stress_x=ocean_stress_x,
+        ocean_stress_y=ocean_stress_y,
+        # Sea-ice surface moisture exchange is sublimation/deposition
+        # (L_s).  lhflx already used L_s in the bulk-flux call, so
+        # surface_mass_flux = lhflx / L_s recovers the correct mass.
+        surface_mass_flux=lhflx / constants.L_s,
     )
 
     return new_state, response
@@ -445,16 +503,47 @@ def _thermo_single(
     )
     dh_dt_basal = (F_cond - F_ocean) / (config.rho_ice * config.L_f)
 
-    # Combine surface and basal melt/growth for existing ice
-    dh_dt_ice = dh_dt_basal + dh_dt_surface_melt
+    # Sublimation mass loss: lhflx > 0 means moisture leaves the
+    # surface into the atmosphere via L_s, so the equivalent ice mass
+    # is removed from the column.  When lhflx < 0 (deposition), mass
+    # is added.  Without this term the surface energy budget closes
+    # but the ice mass budget is open: thin polar ice would grow
+    # endlessly under sublimation, biased high by ~tens of cm/year.
+    # (Coupler-conservation audit F7.)
+    dh_dt_sublim = jnp.where(
+        ice_mask,
+        -lhflx / (config.rho_ice * constants.L_s),
+        0.0,
+    )
+
+    # Combine surface and basal melt/growth + sublimation for existing ice
+    dh_dt_ice = dh_dt_basal + dh_dt_surface_melt + dh_dt_sublim
 
     freeze_flux_open = jnp.maximum(-Q_sfc, 0.0)
     dh_dt_open = freeze_flux_open / (config.rho_ice * config.L_f)
     dh_dt = jnp.where(ice_mask, dh_dt_ice, dh_dt_open)
     h_new = jnp.maximum(h + dt * dh_dt, 0.0)
 
-    # Concentration
-    dconc_growth = jnp.maximum(dh_dt, 0.0) * (1.0 - conc) / config.h_new_ice
+    # Concentration evolution (CICE / Icepack ``add_new_ice`` convention).
+    #
+    # Growth: areal concentration only increases from NEW-ICE FORMATION
+    # in OPEN-WATER portions of the cell.  The driver is ``dh_dt_open``
+    # (the lead-freezing rate from a destabilizing surface flux), NOT
+    # ``dh_dt_ice`` (vertical growth of existing floes by basal /
+    # surface / sublimation processes).  This holds whether the cell
+    # is fully open water (ice_mask=False) or partially ice-covered
+    # (ice_mask=True with A<1).  In the partial-cover case
+    # ``(1 − A) > 0`` represents the lead fraction that can refreeze;
+    # the prior formulation suppressed this entire pathway by gating on
+    # ``~ice_mask``, which under-grew concentration on every partial-
+    # cover cell with positive surface freezing flux.  The earlier
+    # ``max(dh_dt, 0)`` formulation was wrong in the opposite direction:
+    # it let basal vertical growth spread floes laterally.
+    #
+    # Melt: concentration decreases as floes shrink in area while their
+    # thickness stays roughly constant — ``dh_dt · A / h_eff`` (sign
+    # carries through, dh_dt < 0 in melt).
+    dconc_growth = dh_dt_open * (1.0 - conc) / config.h_new_ice
     dconc_melt = jnp.minimum(dh_dt, 0.0) * conc / h_eff
     conc_new = jnp.clip(conc + dt * (dconc_growth + dconc_melt), 0.0, 1.0)
 
@@ -532,4 +621,14 @@ def _build_response(
         u_ocean_sfc=u_ice,
         v_ocean_sfc=v_ice,
         co2_flux=jnp.zeros_like(h),
+        # Multi-cat aggregate: freshwater, ocean-heat-extraction, and
+        # ice→ocean stress are constructed in the multi-cat step
+        # path (above); the aggregator just exposes zero placeholders
+        # and lets the multi-cat path overwrite if needed.
+        freshwater_flux=jnp.zeros_like(h),
+        ocean_heat_extraction=jnp.zeros_like(h),
+        ocean_stress_x=jnp.zeros_like(h),
+        ocean_stress_y=jnp.zeros_like(h),
+        # Sublimation mass flux from the aggregated ice surface.
+        surface_mass_flux=lhflx / constants.L_s,
     )

@@ -472,6 +472,41 @@ def fix_moisture_hydrostatic(
     return q_v * scale
 
 
+def diagnose_moisture_correction(
+    q_v: jax.Array,
+    target_moisture: jax.Array,
+    p_s: jax.Array,
+    dsigma: jax.Array,
+    grid,
+    owned_mask: jax.Array | None = None,
+) -> dict[str, jax.Array]:
+    """Diagnose the moisture correction that ``fix_moisture_hydrostatic``
+    would apply, without actually applying it.
+
+    Returns a dict of:
+      - ``current_mass`` [kg]: current global column water-vapor integral
+      - ``target_mass`` [kg]: prescribed target
+      - ``correction_mass`` [kg]: target - current (positive = mass added by
+        the fixer; negative = mass removed)
+      - ``scale``: multiplicative factor that ``fix_moisture_hydrostatic``
+        would multiply q_v by.  Equals 1.0 when target == current.
+
+    Use to track silent corrections that would otherwise compound with
+    other untracked sources/sinks (advection clipping, microphysics
+    saturation adjustment, etc.) and bias the moist energy budget.
+    Iter-87 audit follow-up to the deferred multiplicative-fixer
+    tracking finding.
+    """
+    current = compute_global_moisture(q_v, p_s, dsigma, grid, owned_mask=owned_mask)
+    scale = jnp.where(current > _tiny(current), target_moisture / current, 1.0)
+    return {
+        "current_mass": current,
+        "target_mass": target_moisture,
+        "correction_mass": target_moisture - current,
+        "scale": scale,
+    }
+
+
 def fix_total_water(
     tracers: dict[str, jax.Array],
     target_total_water: jax.Array,
@@ -518,6 +553,7 @@ def fix_mass_hydrostatic_target(
     state_new: HydrostaticState,
     target_mass: jax.Array,
     grid: CubedSphereGrid,
+    owned_mask: jax.Array | None = None,
 ) -> HydrostaticState:
     """Fix mass conservation anchored to a fixed target mass.
 
@@ -532,11 +568,28 @@ def fix_mass_hydrostatic_target(
     target_mass : jax.Array
         Target global mass integral (∫ p_s * dA at t=0).
     grid : CubedSphereGrid
+    owned_mask : jax.Array, optional
+        Shape ``(n_faces,)`` for MPI replicated dynamics — pass-through
+        to ``fix_ps_mass_target`` so the mass integral correctly
+        avoids double-counting under replicated MPI.  Iter-99 audit
+        fix: previously this function called the Field-API
+        ``global_integral`` directly without an owned_mask escape
+        hatch.
 
     Returns
     -------
     HydrostaticState : Mass-conserving state.
     """
+    if owned_mask is not None:
+        # Use the raw-array path that handles owned_mask for MPI
+        # replicated dynamics.  Same correction formula but the
+        # global integral correctly weights by owned_mask.
+        p_s_fixed_data = fix_ps_mass_target(
+            state_new.p_s.data, target_mass, grid, owned_mask=owned_mask,
+        )
+        return state_new._replace(
+            p_s=state_new.p_s.replace(data=p_s_fixed_data),
+        )
     mass_new = global_integral(state_new.p_s, grid)
     correction = (target_mass - mass_new) / grid.total_area
     p_s_fixed = state_new.p_s.replace(data=state_new.p_s.data + correction)

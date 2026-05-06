@@ -362,6 +362,54 @@ class TestSpectralSW:
         assert np.isfinite(diag['mass'])
         assert np.isfinite(diag['energy'])
 
+    def test_williamson5_energy_includes_topography_PE(self, grid_t21):
+        """The total mechanical energy on Williamson Test 5 must include
+        the topography PE term ``g·h·h_s``.
+
+        Why non-vacuous: under the prior bug, the energy diagnostic was
+        ``0.5·h·|v|² + 0.5·g·h²`` only, ignoring the rest energy of the
+        fluid column above non-zero bottom topography.  Williamson 5 has
+        a tall isolated mountain (h_s peak ~2000 m) — including it
+        increases the diagnostic energy by ``g·∫h·h_s dA`` ≈ a measurable
+        ~0.3% of the total energy (mountain footprint × mean h ≈ 5 km ×
+        2000 m = 1e7 m² × 9.8 × 5e3 ≈ 5e11 J/m, vs total ~1.5e14 J/m).
+
+        This test asserts the energy diagnostic on a Williamson-5 state
+        is HIGHER than what the buggy formula would give, by at least
+        the topography PE ``g · ∫h·h_s dA``.
+        """
+        state = williamson_test5_spectral(grid_t21)
+        diag = compute_spectral_diagnostics(state, grid_t21)
+        energy_with_topo = diag['energy']
+
+        # Recompute the buggy value (without h·h_s) for comparison.
+        from legoesm.atmosphere.dynamics.spectral_sw import spectral_to_grid
+        fields = spectral_to_grid(state, grid_t21)
+        h, u, v, h_s = fields['h'], fields['u'], fields['v'], fields['h_s']
+        w = grid_t21.weights[:, None]
+        dlon = 2.0 * jnp.pi / grid_t21.n_lon
+        a2 = grid_t21.radius * grid_t21.radius
+        dA = w * dlon * a2
+        g = constants.g
+
+        energy_buggy = float(jnp.sum(
+            (0.5 * h * (u**2 + v**2) + 0.5 * g * h**2) * dA
+        ))
+        energy_topo_term = float(jnp.sum(g * h * h_s * dA))
+
+        # The diagnostic must equal the buggy value PLUS the topo term
+        # (within float roundoff).
+        assert abs(energy_with_topo - (energy_buggy + energy_topo_term)) < 1e-3 * abs(energy_topo_term), (
+            f"Energy diagnostic mismatch: with-topo={energy_with_topo:.6e}, "
+            f"buggy+topo_term={energy_buggy + energy_topo_term:.6e}, "
+            f"buggy={energy_buggy:.6e}, topo_term={energy_topo_term:.6e}"
+        )
+        # Topography PE must be non-trivial on TC5 (mountain present).
+        assert energy_topo_term > 1e10, (
+            f"Topography PE on Williamson 5 was {energy_topo_term:.3e}; "
+            f"expected > 1e10 J/m for a 2000 m isolated mountain."
+        )
+
     def test_differentiability(self, grid_t21):
         """jax.grad through a single step should produce finite gradients."""
         state = williamson_test2_spectral(grid_t21)
