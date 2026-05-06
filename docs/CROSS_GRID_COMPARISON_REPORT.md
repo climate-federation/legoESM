@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-77 snapshot)
+**Branch**: `simulation_full_check` (iter-78 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..77 findings.  It is the user-facing
+This report consolidates iter-1..78 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -185,6 +185,7 @@ cross-grid ocean test (wind-driven gyres / OMIP) is a follow-up.
 | 74 | AMIP wrapper had same `--diag-days` issue as RCE: short-day smokes silently produced empty output | HIGH |
 | 74 | AMIP wrapper GRID_RES had "90x180" for latlon but `run_amip.py --resolution` is `type=int` (would have failed at argparse if iter-74 had passed it without the simplification) | MEDIUM |
 | 75 | RCE/OMIP wrappers didn't purge stale per-grid output before re-runs (failed reruns left old data discoverable by cross-grid plotter) | HIGH |
+| 78 | cube ocean rest_state has eta drift of -2.8e13 m (latlon/mpas: 0) despite passing the run_omip.py BLOWUP detector — USER HANDOFF for cube ocean conservation | HIGH |
 
 **Codex adversarial review iterations**: iter-5, iter-6, iter-7,
 iter-16, iter-21, iter-26, iter-27, iter-32, iter-36, iter-37,
@@ -1318,6 +1319,44 @@ round caught real issues; final convergence is clean.
     OMIP 2-day          iter-71
 
   Pure validation; no source changes.
+* iter-78: validated the ocean test matrix end-to-end on
+  the two non-OMIP cases the user prompt mentions:
+
+    barotropic_wave (--quick, 3 grids, 1.2 min wall):
+      cube C24       max|eta|=0.1004 m  16.2s
+      latlon 48x72   max|eta|=0.2092 m   2.3s
+      mpas ico4      max|eta|=0.2156 m   2.7s
+      (spectral not in this case's matrix entry)
+
+    rest_state (4 variants × 3 grids = 12 tests, 3.0 min):
+      stratified+land    cube=PASS  latlon=PASS  mpas=PASS
+      uniform+land       cube=PASS  latlon=PASS  mpas=PASS
+      stratified, noland cube=PASS  latlon=PASS  mpas=PASS
+      uniform, noland    cube=PASS  latlon=PASS  mpas=PASS
+
+  **NEW finding (rest_state cube eta drift)**: the cube
+  rest-state runs have eta drift of -2.8e+13 m (negative,
+  magnitude unphysical), while latlon / mpas show 0
+  (machine precision).  All 4 variants on cube show this
+  pattern (eta drift -6.5e+12 to -2.8e+13 m; T and S
+  drifts at machine precision).
+
+  This is consistent with the iter-71 cube OMIP BLOWUP
+  diagnosis: the cube ocean dycore has architectural
+  weakness in eta conservation that surfaces even on
+  rest-state runs (no forcing, no winds — the ocean
+  should sit motionless).  The runs DO complete (status
+  PASS) because the BLOWUP-detector in run_omip.py only
+  triggers on T/SSH NaN-or-overflow, not on slow eta
+  drift.
+
+  Per the iter-68 user handoff (cube dycore retuning), the
+  cube ocean eta-conservation issue is also out of scope
+  for this Ralph loop.  iter-78 documents it for the
+  user's manual debugging.
+
+  Bug-fix table records the iter-78 HIGH (cube
+  rest-state eta drift, USER HANDOFF).
 
 128/128 unit tests pass + 3 MPAS-mesh-unavailable skips
 (across ``tests/test_atmosphere_cross_grid_plots.py`` (79 +
@@ -1327,4 +1366,4 @@ round caught real issues; final convergence is clean.
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-77 update).*
+(iter-78 update).*
