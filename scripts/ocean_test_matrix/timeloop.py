@@ -32,9 +32,24 @@ def _snapshot_steps(n_steps: int, n_snaps: int = 10) -> set[int]:
 
 
 def _compute_drift(values: list[float]) -> float:
-    if len(values) < 2:
-        return 0.0
-    return abs(values[-1] - values[0]) / max(abs(values[0]), 1e-30)
+    """Scalar drift wrapper.
+
+    iter-91 (codex iter-90 followup audit): the previous inline
+    implementation used ``max(abs(values[0]), 1e-30)`` — the iter-78
+    pathology pattern that was already fixed in
+    ``scripts/run_ocean_test_matrix.py:_compute_drift`` (iter-90)
+    and factored into
+    ``legoesm.diagnostics.conservation_drift`` (iter-88).  This
+    second copy in the ``ocean_test_matrix`` package was missed in
+    iter-88 and iter-90; iter-91's audit (re-greping for ``1e-30``
+    in scripts/) caught it.
+
+    Used by 10 callsites in ``experiments.py``
+    (T_drift, PE_drift, S_integral_drift).  All inherit the 1.0
+    floor convention via this delegation.
+    """
+    from legoesm.diagnostics.conservation_drift import compute_relative_drift
+    return compute_relative_drift(values)
 
 
 # ===========================================================================

@@ -681,3 +681,129 @@ class TestOceanComputeDriftDelegates:
         M = self._import_matrix_module()
         assert M._compute_drift([]) == 0.0
         assert M._compute_drift([1.0]) == 0.0
+
+
+class TestOceanTestMatrixPackageDelegates:
+    """iter-91 audit followup to codex iter-90 review.
+
+    Codex's HIGH-1 finding pointed out that
+    ``scripts/run_ocean_test_matrix.py:_compute_drift`` (a script-
+    level copy) had been missed in iter-88's "factor into shared
+    helper" refactor.  iter-91 audited more aggressively and
+    found two MORE missed copies in the sibling
+    ``scripts/ocean_test_matrix/`` package:
+
+      * ``ocean_test_matrix/timeloop.py:_compute_drift``
+        (10 callsites in ``experiments.py``: T_drift, PE_drift,
+        S_integral_drift)
+      * ``ocean_test_matrix/diagnostic_io.py:_save_conservation``
+        (called transitively by ``_save_case_diagnostics``, used
+        by ``experiments.py``, ``continue_eady_uniform.py``,
+        ``run_eady_advection_comparison.py``)
+
+    Both had the iter-78/80 ``1e-30`` denominator floor and would
+    spuriously inflate machine epsilon to 1e+13 for rest-state
+    baselines.  Migrated to delegate to the canonical helper.
+
+    These tests pin the delegation so a future regression
+    re-introducing the legacy floor would be caught immediately.
+    """
+
+    def test_timeloop_compute_drift_delegates(self):
+        """``ocean_test_matrix.timeloop._compute_drift`` calls
+        the canonical ``compute_relative_drift`` helper, not an
+        inline ``1e-30`` floor.
+        """
+        import importlib
+        import inspect
+        import re
+        import sys
+        from pathlib import Path
+
+        scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+        if str(scripts_dir) not in sys.path:
+            sys.path.insert(0, str(scripts_dir))
+        timeloop = importlib.import_module(
+            "ocean_test_matrix.timeloop"
+        )
+
+        src = inspect.getsource(timeloop._compute_drift)
+        # Strip docstrings + line comments; test active code only.
+        src_no_strings = re.sub(r'""".*?"""', "", src, flags=re.DOTALL)
+        src_no_strings = re.sub(r"'''.*?'''", "", src_no_strings, flags=re.DOTALL)
+        code_only = "\n".join(
+            line for line in src_no_strings.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        assert "compute_relative_drift" in code_only, (
+            "iter-91: ``ocean_test_matrix.timeloop._compute_drift`` "
+            "must delegate to ``compute_relative_drift`` from "
+            "``legoesm.diagnostics.conservation_drift``.  Codex "
+            "iter-90 review caught the iter-88 audit was incomplete "
+            "for the script copy; iter-91 audit caught this package "
+            "copy."
+        )
+        assert "1e-30" not in code_only, (
+            "iter-91: legacy 1e-30 floor must not appear in the "
+            "active code of ``timeloop._compute_drift``."
+        )
+
+    def test_timeloop_compute_drift_zero_baseline(self):
+        """Behavioural pin: rest-state baseline (0) returns
+        absolute drift, NOT the spurious 1e+13.
+        """
+        import importlib
+        import sys
+        from pathlib import Path
+
+        scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+        if str(scripts_dir) not in sys.path:
+            sys.path.insert(0, str(scripts_dir))
+        timeloop = importlib.import_module(
+            "ocean_test_matrix.timeloop"
+        )
+        result = timeloop._compute_drift([0.0, 1.0e-17])
+        assert result < 1.0e-10, (
+            f"iter-91: ``timeloop._compute_drift`` regression — "
+            f"baseline=0 + 1e-17 drift returned {result:.6e}, "
+            f"should be ~1e-17 (1.0 floor convention)."
+        )
+
+    def test_diagnostic_io_save_conservation_delegates(self):
+        """``ocean_test_matrix.diagnostic_io._save_conservation``
+        uses ``relative_drift_series``, not an inline 1e-30 floor.
+        """
+        import importlib
+        import inspect
+        import re
+        import sys
+        from pathlib import Path
+
+        scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+        if str(scripts_dir) not in sys.path:
+            sys.path.insert(0, str(scripts_dir))
+        diagnostic_io = importlib.import_module(
+            "ocean_test_matrix.diagnostic_io"
+        )
+
+        src = inspect.getsource(diagnostic_io._save_conservation)
+        src_no_strings = re.sub(r'""".*?"""', "", src, flags=re.DOTALL)
+        src_no_strings = re.sub(r"'''.*?'''", "", src_no_strings, flags=re.DOTALL)
+        code_only = "\n".join(
+            line for line in src_no_strings.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        assert "relative_drift_series" in code_only, (
+            "iter-91: "
+            "``ocean_test_matrix.diagnostic_io._save_conservation`` "
+            "must delegate to ``relative_drift_series`` from "
+            "``legoesm.diagnostics.conservation_drift``.  iter-91 "
+            "audit caught this duplicate of "
+            "``run_ocean_test_matrix._save_conservation`` had been "
+            "missed in iter-88+90."
+        )
+        assert "1e-30" not in code_only, (
+            "iter-91: legacy 1e-30 floor must not appear in the "
+            "active code of "
+            "``ocean_test_matrix.diagnostic_io._save_conservation``."
+        )
