@@ -2799,7 +2799,16 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         model = PrimitiveEquationModel(grid, sigma, config)
         state = held_suarez_init(grid, sigma, T_init=280.0)
 
-        physics_fn = held_suarez_forcing
+        # iter-22: route ``--radiation`` flag through.  Previously
+        # AMIP ignored it and always used HS forcing.  When
+        # ``--radiation rrtmgp`` is set the user gets actual
+        # RRTMGP radiation (which itself uses the GHG / aerosol /
+        # ozone defaults baked into ``forcing/external.py``); the
+        # canonical AMIP forcing wiring (CMIP6 input4MIPs realistic
+        # GHG/aerosol/ozone) is a follow-up that needs the
+        # ``forcing/external.py`` loaders threaded into RadiationConfig.
+        physics_fn = (_make_rrtmgp_physics("hydrostatic", dt, hs_fn=held_suarez_forcing)
+                      if radiation == "rrtmgp" else held_suarez_forcing)
 
         def step_fn(s, dt_):
             return model.step_with_physics(s, dt_, physics_fn)
@@ -2851,7 +2860,9 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         state_cc = held_suarez_init_latlon(grid, sigma, T_init=280.0)
         state = hydrostatic_to_cgrid(state_cc, grid)
 
-        physics_fn = held_suarez_forcing_latlon
+        # iter-22: route --radiation flag (was: always HS forcing).
+        physics_fn = (_make_rrtmgp_physics("hydrostatic", dt, hs_fn=held_suarez_forcing_latlon)
+                      if radiation == "rrtmgp" else held_suarez_forcing_latlon)
 
         def step_fn(s, dt_):
             return model.step_with_physics(s, dt_, physics_fn)
@@ -2907,8 +2918,12 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         state = held_suarez_init_mpas(mesh, sigma, T_init=280.0)
         grid = mesh
 
+        # iter-22: route --radiation flag (was: always HS forcing).
+        physics_fn_mpas = (_make_rrtmgp_physics("mpas", dt, hs_fn=held_suarez_forcing_mpas)
+                           if radiation == "rrtmgp" else held_suarez_forcing_mpas)
+
         def step_fn(s, dt_):
-            return model.step(s, dt_, held_suarez_forcing_mpas)
+            return model.step(s, dt_, physics_fn_mpas)
 
         mass_fn = lambda s: float(jnp.sum(s.p_s.data * mesh.areaCell))
 
@@ -2961,7 +2976,9 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         state = isothermal_rest_state_spectral(
             grid, sigma, T_init=280.0)
 
-        physics_fn = held_suarez_forcing_spectral
+        # iter-22: route --radiation flag (was: always HS forcing).
+        physics_fn = (_make_rrtmgp_physics("spectral_pe", dt, hs_fn=held_suarez_forcing_spectral)
+                      if radiation == "rrtmgp" else held_suarez_forcing_spectral)
 
         def step_fn(s, dt_):
             return model.step(s, dt_, physics_fn=physics_fn)
