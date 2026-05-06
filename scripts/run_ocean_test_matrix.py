@@ -4823,6 +4823,13 @@ def _collect_grid_results(test_case_dir: Path) -> dict:
         # atmosphere collector iter-108 fix.
         resolution_dir = _select_ocean_resolution_dir(
             grid_dir, resolution_dirs)
+        # iter-115 codex iter-114-followup MEDIUM-4: the iter-110
+        # hidden-dir filter inside ``_select_ocean_resolution_dir``
+        # can leave ``resolution_dir is None`` when grid_dir
+        # contains only hidden / internal subdirs.  Skip rather
+        # than crash on ``None / "results.txt"``.
+        if resolution_dir is None:
+            continue
 
         # iter-49: relaxed predicate.
         csv_file = resolution_dir / "mean_timeseries.csv"
@@ -6270,94 +6277,25 @@ def main():
         # iter-102: bare integer N expands per-grid; pre-formatted
         # strings (``"C24"``, ``"ico3"``, ``"36x72"``, ``"T21"``)
         # pass through unchanged.
+        # iter-115 (codex iter-114-followup): centralized via
+        # the shared ``validate_cli_resolution`` /
+        # ``expand_cli_resolution`` helpers.  See atmosphere
+        # matrix runner for the rationale.
+        from legoesm.driver.cli_resolution import (
+            validate_cli_resolution as _validate,
+            expand_cli_resolution as _expand_shared,
+        )
         cli_res = args.resolution
-        try:
-            N = int(cli_res)
-            is_bare_int = True
-        except ValueError:
-            is_bare_int = False
-
-        # iter-107 (codex iter-104 LOW-7): reject N <= 0 BEFORE
-        # ``_expand_cli_res`` is invoked.  See atmosphere matrix
-        # runner for the rationale.
-        if is_bare_int and N <= 0:
-            import sys as _sys
-            print(
-                f"error: --resolution must be a positive integer "
-                f"(or a per-grid format string like 'C24', 'ico3', "
-                f"'36x72', 'T21', '50km').  Got N={N}.",
-                file=_sys.stderr,
-            )
-            _sys.exit(2)
-
-        # iter-111 / iter-112 (codex iter-110 LOW-4 +
-        # iter-112 MEDIUM-1): reject ANY non-integer numeric
-        # string.  See atmosphere matrix runner for the
-        # rationale.  The ``float()`` test catches ``.5``,
-        # ``1.``, ``1e3``, ``inf``, ``nan`` in addition to
-        # the ``0.5``-style decimals iter-111 already caught.
-        if not is_bare_int:
-            try:
-                _ = float(cli_res)
-                import sys as _sys
-                print(
-                    f"error: --resolution must be a positive "
-                    f"INTEGER (or a per-grid format string like "
-                    f"'C24', 'ico3', '36x72', 'T21', '50km').  "
-                    f"Got non-integer numeric string {cli_res!r}.",
-                    file=_sys.stderr,
-                )
-                _sys.exit(2)
-            except ValueError:
-                pass
+        N = _validate(
+            cli_res,
+            additional_examples="'C24', 'ico3', '36x72', 'T21', '50km'",
+        )
+        is_bare_int = N is not None
 
         def _expand_cli_res(grid_type: str) -> str:
             if not is_bare_int:
                 return cli_res
-            if grid_type == "cubed_sphere":
-                return f"C{N}"
-            elif grid_type == "latlon":
-                return f"{N}x{2 * N}"
-            elif grid_type == "mpas":
-                # mpas (icosahedral): level so 10·4^level + 2 ≈ 2N²
-                # (latlon-coverage).  iter-95 dispatch table.
-                # N=16 → ico3 (642 cells), N=32 → ico4 (2562),
-                # N=72 → ico5 (10242).
-                import math
-                raw_level = round(
-                    math.log(2 * N * N / 10) / math.log(4))
-                level = max(2, min(8, raw_level))
-                # iter-107: warn when clipping to ico8 (max
-                # supported level per ``voronoi.py:1063``).
-                if raw_level > 8:
-                    print(
-                        f"warning: --resolution {N} maps to "
-                        f"icosahedral level {raw_level} which "
-                        f"exceeds the maximum supported level "
-                        f"(8 = 655,362 cells); clipping to "
-                        f"ico8.  Use load_mpas_mesh() with a "
-                        f"pre-built mesh file for higher "
-                        f"resolutions.",
-                    )
-                return f"ico{level}"
-            elif grid_type == "spectral":
-                return f"T{N}"
-            elif grid_type == "mpas_regional":
-                # MPAS-regional uses km resolution.
-                return f"{N}km"
-            elif grid_type == "latlon_regional":
-                # iter-110 codex MEDIUM-1: latlon_regional
-                # expects ``NxM`` form (per ``_parse_resolution``
-                # at line ~1877), NOT ``Nkm``.  iter-102 fix had
-                # this wrong; iter-110 corrects.
-                return f"{N}x{2 * N}"
-            elif grid_type == "cs_regional":
-                # iter-110 codex MEDIUM-1: cs_regional expects
-                # ``CN`` form (per ``_parse_resolution`` at line
-                # ~1881).
-                return f"C{N}"
-            else:
-                return cli_res
+            return _expand_shared(N, grid_type)
 
         tests = [TestCase(
             t.case, t.grid_type, _expand_cli_res(t.grid_type),

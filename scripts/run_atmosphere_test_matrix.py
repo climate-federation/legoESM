@@ -5470,100 +5470,28 @@ def main():
         #   spectral → f"T{N}"
         # Per-grid strings (e.g. "C36", "ico5") are still passed
         # through unchanged.
+        # iter-115 (codex iter-114-followup): use the shared
+        # ``validate_cli_resolution`` + ``expand_cli_resolution``
+        # helpers so the atmosphere/ocean/OMIP CLIs all share
+        # one implementation.  iter-115 also adds the per-grid
+        # format whitelist, rejecting strings like ``2j`` /
+        # ``hello`` that previously slipped past float()
+        # parsing only to crash later in the per-grid parser.
+        from legoesm.driver.cli_resolution import (
+            validate_cli_resolution as _validate,
+            expand_cli_resolution as _expand_shared,
+        )
         cli_res = args.resolution
-        try:
-            N = int(cli_res)
-            is_bare_int = True
-        except ValueError:
-            is_bare_int = False
-
-        # iter-107 (codex iter-104 LOW-7): reject N <= 0 BEFORE
-        # ``_expand_cli_res`` is invoked.  Pre-iter-107,
-        # ``--resolution 0`` raised a confusing
-        # ``ValueError: math domain error`` deep inside the
-        # icosahedral level computation; ``--resolution -16``
-        # silently produced ``C-16`` / ``-16x-32`` / ``T-16``
-        # invalid strings while icosahedral mapped as if positive.
-        # Now: clear parser-style error at the boundary.
-        if is_bare_int and N <= 0:
-            import sys as _sys
-            print(
-                f"error: --resolution must be a positive integer "
-                f"(or a per-grid format string like 'C36', 'ico5', "
-                f"'72x144', 'T21').  Got N={N}.",
-                file=_sys.stderr,
-            )
-            _sys.exit(2)
-
-        # iter-111 / iter-112 (codex iter-110 LOW-4 +
-        # iter-112 MEDIUM-1): reject any non-integer numeric
-        # string (``0.5``, ``.5``, ``1.``, ``1e3``, ``inf``,
-        # ``nan``, etc.) at the boundary.  Pre-iter-112, the
-        # iter-111 regex ``-?\d+\.\d+`` only caught the
-        # ``\d+\.\d+`` form, so ``--resolution .5`` (no
-        # leading digit) and ``1e3`` (scientific) slipped
-        # through.  ``--resolution .5`` then crashed in the
-        # cube-sphere parser (``int("5"[1:])``) with 3 PASS /
-        # 9 ERROR.  iter-112 broadens by attempting
-        # ``float()``: if the string parses as float (i.e.,
-        # any numeric form), and ``int()`` already failed, it
-        # must be a non-integer numeric — reject.
-        if not is_bare_int:
-            try:
-                _ = float(cli_res)
-                # Parses as float but not as int → non-integer
-                # numeric.  Reject explicitly.
-                import sys as _sys
-                print(
-                    f"error: --resolution must be a positive "
-                    f"INTEGER (or a per-grid format string like "
-                    f"'C36', 'ico5', '72x144', 'T21').  Got "
-                    f"non-integer numeric string {cli_res!r}.",
-                    file=_sys.stderr,
-                )
-                _sys.exit(2)
-            except ValueError:
-                # Not a numeric string at all — pass through
-                # to ``_expand_cli_res`` as a per-grid format.
-                pass
+        N = _validate(
+            cli_res,
+            additional_examples="'C36', 'ico5', '72x144', 'T21'",
+        )
+        is_bare_int = N is not None
 
         def _expand_cli_res(grid_type: str) -> str:
             if not is_bare_int:
                 return cli_res
-            if grid_type == "cubed_sphere":
-                return f"C{N}"
-            elif grid_type == "latlon":
-                return f"{N}x{2 * N}"
-            elif grid_type == "icosahedral":
-                # level so that 10·4^level + 2 ≈ 2N² (latlon-coverage)
-                # level 3 → 642 cells, 4 → 2562, 5 → 10242, 6 → 40962
-                # N=16 → 2N²=512 → level 3 (closest)
-                # N=32 → 2N²=2048 → level 4 (closest)
-                # N=72 → 2N²=10368 → level 5 (closest)
-                import math
-                raw_level = round(
-                    math.log(2 * N * N / 10) / math.log(4))
-                level = max(2, min(8, raw_level))
-                # iter-107: warn when clipping to the max
-                # supported icosahedral level (8 = 655,362
-                # cells per ``voronoi.py:1063``).  Helps the
-                # user notice that requesting N >> 200 gets
-                # silently truncated to ico8.
-                if raw_level > 8:
-                    print(
-                        f"warning: --resolution {N} maps to "
-                        f"icosahedral level {raw_level} which "
-                        f"exceeds the maximum supported level "
-                        f"(8 = 655,362 cells); clipping to "
-                        f"ico8.  Use load_mpas_mesh() with a "
-                        f"pre-built mesh file for higher "
-                        f"resolutions.",
-                    )
-                return f"ico{level}"
-            elif grid_type == "spectral":
-                return f"T{N}"
-            else:
-                return cli_res
+            return _expand_shared(N, grid_type)
 
         tests = [TestCase(
             t.equation_set, t.case, t.grid_type,

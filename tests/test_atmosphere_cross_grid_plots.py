@@ -2602,42 +2602,65 @@ class TestCliResolutionPerGridDispatch:
         assert _expand(72, "icosahedral") == "ico5"
 
     def test_source_pin_cli_resolution_dispatch_present(self):
-        """Source-level pin: the matrix runner contains the
-        per-grid dispatch logic, not just a verbatim
-        application of ``args.resolution``.
+        """Source-level pin: the matrix runner uses the shared
+        ``legoesm.driver.cli_resolution`` helpers (iter-115
+        refactored from inline iter-95 literals).
+
+        The actual dispatch literals (``f"C{N}"`` etc.) now
+        live in
+        ``src/legoesm/driver/cli_resolution.py:expand_cli_resolution``;
+        verify the helper's behaviour separately (e.g., via
+        a unit test that imports and calls it).
         """
         import inspect
         import re
         M = self._import_module()
-        # The dispatch lives in ``main`` (or wherever
-        # ``args.resolution`` is consumed).  Look for the
-        # specific shape ``f"C{N}"`` for cubed_sphere,
-        # ``f"{N}x{2 * N}"`` for latlon, ``f"ico{level}"``
-        # for icosahedral.
         text = inspect.getsource(M)
-        # Strip line comments and triple-quoted blocks.
         text_no_strings = re.sub(r'""".*?"""', "", text, flags=re.DOTALL)
         text_no_strings = re.sub(r"'''.*?'''", "", text_no_strings, flags=re.DOTALL)
         code_only = "\n".join(
             line for line in text_no_strings.splitlines()
             if not line.lstrip().startswith("#")
         )
-        assert 'f"C{N}"' in code_only, (
-            "iter-95: ``--resolution N`` must dispatch to "
-            "``f\"C{N}\"`` for cubed_sphere."
+        # iter-115 refactor: matrix runner uses the shared helpers.
+        assert "validate_cli_resolution" in code_only, (
+            "iter-115: matrix dispatch must use the shared "
+            "validate_cli_resolution helper."
         )
-        assert 'f"{N}x{2 * N}"' in code_only, (
-            "iter-95: ``--resolution N`` must dispatch to "
-            "``f\"{N}x{2 * N}\"`` for latlon."
+        assert "expand_cli_resolution" in code_only, (
+            "iter-115: matrix dispatch must use the shared "
+            "expand_cli_resolution helper."
         )
-        assert 'f"ico{level}"' in code_only, (
-            "iter-95: ``--resolution N`` must dispatch to "
-            "``f\"ico{{level}}\"`` for icosahedral with computed "
-            "level."
+
+    def test_source_pin_cli_resolution_dispatch_legacy_literals_in_helper(self):
+        """The iter-95 dispatch literals (``f"C{N}"``,
+        ``f"{N}x{2 * N}"``, ``f"ico{level}"``, ``f"T{N}"``)
+        now live in the shared helper module.  Pin that they
+        are present so a future regression that breaks the
+        per-grid dispatch would fail this test.
+        """
+        from legoesm.driver import cli_resolution as cr
+        import inspect
+        text = inspect.getsource(cr)
+        assert 'f"C{N}"' in text, (
+            "iter-115: helper must contain ``f\"C{N}\"`` "
+            "for cubed_sphere dispatch."
         )
-        assert 'f"T{N}"' in code_only, (
-            "iter-95: ``--resolution N`` must dispatch to "
-            "``f\"T{N}\"`` for spectral."
+        assert 'f"{N}x{2 * N}"' in text, (
+            "iter-115: helper must contain ``f\"{N}x{2 * N}\"`` "
+            "for latlon dispatch."
+        )
+        assert 'f"ico{level}"' in text, (
+            "iter-115: helper must contain ``f\"ico{level}\"`` "
+            "for icosahedral dispatch."
+        )
+        assert 'f"T{N}"' in text, (
+            "iter-115: helper must contain ``f\"T{N}\"`` "
+            "for spectral dispatch."
+        )
+        assert 'f"{N}km"' in text, (
+            "iter-115: helper must contain ``f\"{N}km\"`` "
+            "for mpas_regional dispatch."
         )
 
 
@@ -3404,11 +3427,19 @@ class TestCliResolutionValidation:
             line for line in text_no_strings.splitlines()
             if not line.lstrip().startswith("#")
         )
-        # The validation is gated on ``is_bare_int and N <= 0``.
-        assert "is_bare_int and N <= 0" in code_only, (
-            "iter-107: validation must be gated on "
-            "``is_bare_int and N <= 0`` so pre-formatted "
-            "strings are not affected."
+        # iter-115 refactored to use the shared helper.
+        # Validation now lives in
+        # ``legoesm.driver.cli_resolution.validate_cli_resolution``;
+        # the matrix runner only invokes the helpers.
+        assert "validate_cli_resolution" in code_only, (
+            "iter-115: dispatch must use the shared "
+            "``legoesm.driver.cli_resolution.validate_cli_resolution`` "
+            "helper instead of inline validation."
+        )
+        assert "expand_cli_resolution" in code_only, (
+            "iter-115: dispatch must use the shared "
+            "``legoesm.driver.cli_resolution.expand_cli_resolution`` "
+            "helper instead of inline per-grid format strings."
         )
 
 
@@ -3688,3 +3719,89 @@ class TestCliBehaviorOnBlowup:
                 f"iter-111: ``cmd_run`` must NOT exit non-zero "
                 f"on COMPLETED status; got code {e.code}."
             )
+
+
+class TestSharedCliResolution:
+    """iter-115 (codex iter-114-followup HIGH-1, MEDIUM-2):
+    centralized ``--resolution`` validation + dispatch via
+    ``legoesm.driver.cli_resolution``.
+
+    Pre-iter-115:
+    * MEDIUM-2: float() gate let ``2j``, ``hello`` slip through
+    * HIGH-1: ``run_omip.py`` had no dispatch (verbatim apply)
+
+    iter-115 fixes:
+    * Added ``validate_cli_resolution`` that rejects non-numeric
+      strings unless they match a known per-grid format
+      pattern (``C\\d+``, ``\\d+x\\d+``, ``ico\\d+``, ``T\\d+``,
+      ``\\d+km``).
+    * Added ``expand_cli_resolution`` for the per-grid mapping.
+    * Centralized in ``src/legoesm/driver/cli_resolution.py``.
+    * Applied to atmosphere matrix, ocean matrix, modular ocean
+      cli, and ``run_omip.py``.
+    """
+
+    def test_validate_accepts_positive_int(self):
+        from legoesm.driver.cli_resolution import validate_cli_resolution
+        assert validate_cli_resolution("16") == 16
+        assert validate_cli_resolution("32") == 32
+        assert validate_cli_resolution("1") == 1
+
+    def test_validate_returns_none_for_grid_typed_string(self):
+        from legoesm.driver.cli_resolution import validate_cli_resolution
+        for s in ("C24", "C36", "ico3", "ico5", "36x72", "72x144", "T21", "T42", "50km"):
+            assert validate_cli_resolution(s) is None, (
+                f"iter-115: {s!r} should pass through (None)"
+            )
+
+    def test_validate_rejects_zero_negative(self):
+        from legoesm.driver.cli_resolution import validate_cli_resolution
+        for bad in ("0", "-1", "-16"):
+            with pytest.raises(SystemExit) as e:
+                validate_cli_resolution(bad)
+            assert e.value.code == 2
+
+    def test_validate_rejects_decimal(self):
+        from legoesm.driver.cli_resolution import validate_cli_resolution
+        for bad in ("0.5", "1.0", "1.5", ".5", "1.", "1e3", "inf", "nan"):
+            with pytest.raises(SystemExit) as e:
+                validate_cli_resolution(bad)
+            assert e.value.code == 2
+
+    def test_validate_rejects_unrecognized_strings(self):
+        """iter-115 codex MEDIUM-2: ``2j``, ``hello``,
+        ``garbage`` must be rejected — pre-iter-115 they
+        slipped past the float() check.
+        """
+        from legoesm.driver.cli_resolution import validate_cli_resolution
+        for bad in ("2j", "hello", "garbage", "C", "ico", "T"):
+            with pytest.raises(SystemExit) as e:
+                validate_cli_resolution(bad)
+            assert e.value.code == 2
+
+    def test_expand_for_each_grid(self):
+        from legoesm.driver.cli_resolution import expand_cli_resolution
+        assert expand_cli_resolution(16, "cubed_sphere") == "C16"
+        assert expand_cli_resolution(16, "latlon") == "16x32"
+        assert expand_cli_resolution(16, "icosahedral") == "ico3"
+        assert expand_cli_resolution(16, "mpas") == "ico3"
+        assert expand_cli_resolution(16, "spectral") == "T16"
+        assert expand_cli_resolution(16, "mpas_regional") == "16km"
+        assert expand_cli_resolution(16, "latlon_regional") == "16x32"
+        assert expand_cli_resolution(16, "cs_regional") == "C16"
+
+    def test_run_omip_uses_helper(self):
+        """iter-115 codex HIGH-1: ``run_omip.py`` must use the
+        shared dispatch helper.
+        """
+        from pathlib import Path
+        path = Path(__file__).resolve().parent.parent / "scripts" / "run_omip.py"
+        text = path.read_text()
+        assert "validate_cli_resolution" in text, (
+            "iter-115: ``run_omip.py`` must use the shared "
+            "``validate_cli_resolution`` helper."
+        )
+        assert "expand_cli_resolution" in text, (
+            "iter-115: ``run_omip.py`` must use the shared "
+            "``expand_cli_resolution`` helper."
+        )

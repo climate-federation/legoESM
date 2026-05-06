@@ -71,7 +71,18 @@ def _collect_grid_results(test_case_dir: Path) -> dict:
             if typed:
                 resolution_dir = sorted(typed)[0]
             else:
-                resolution_dir = resolution_dirs[0]
+                # iter-115 codex iter-114-followup MEDIUM-3:
+                # prefer bare-numeric isdigit() dirs over
+                # arbitrary names (e.g., ``_archive`` legacy
+                # dirs).  Mirrors the iter-112 fix for the
+                # monolithic ocean collector.
+                bare_numeric = [
+                    d for d in resolution_dirs if d.name.isdigit()
+                ]
+                if bare_numeric:
+                    resolution_dir = sorted(bare_numeric)[0]
+                else:
+                    resolution_dir = resolution_dirs[0]
         else:
             resolution_dir = resolution_dirs[0]
 

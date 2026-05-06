@@ -797,7 +797,27 @@ def _save_output(output_dir: Path, diag, args, grid_type, wall_time, ok,
 
 def run_omip_single(grid_type: str, args) -> dict:
     """Run OMIP simulation on a single grid type."""
-    resolution = args.resolution or GRID_DEFAULTS[grid_type]["resolution"]
+    # iter-115 codex iter-114-followup HIGH-1: pre-iter-115,
+    # ``--resolution 16`` was applied verbatim to every grid
+    # type.  Cube/spectral parsed it (silently wrong: cube
+    # ``int("16"[1:]) = 6``); latlon errored; mpas
+    # interpreted as level 16 (4.29e+10 cells).  Now use the
+    # iter-115 shared dispatch helper.
+    if args.resolution is not None:
+        from legoesm.driver.cli_resolution import (
+            expand_cli_resolution, validate_cli_resolution,
+        )
+        N = validate_cli_resolution(
+            args.resolution,
+            additional_examples="'C24', 'ico3', '36x72', 'T21', '50km'",
+        )
+        if N is not None:
+            resolution = expand_cli_resolution(N, grid_type)
+        else:
+            # Pre-formatted per-grid string — pass through.
+            resolution = args.resolution
+    else:
+        resolution = GRID_DEFAULTS[grid_type]["resolution"]
     dt = args.dt or GRID_DEFAULTS[grid_type]["dt"]
     days = 30.0 if args.quick else args.days
     n_steps = int(days * 86400.0 / dt)

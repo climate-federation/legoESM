@@ -1036,8 +1036,16 @@ class TestOceanCliResolutionPerGridDispatch:
         assert _expand(72, "mpas") == "ico5"
 
     def test_ocean_source_pin_resolution_dispatch(self):
-        """Source-level pin: the ocean matrix runner contains
-        per-grid dispatch logic, not just a verbatim apply.
+        """Source-level pin: the ocean matrix runner uses the
+        shared cli_resolution helpers (iter-115 refactored
+        from inline iter-102 literals to a centralized helper
+        in ``legoesm.driver.cli_resolution``).
+
+        The actual dispatch literals (``f"C{N}"`` etc.) now
+        live in
+        ``src/legoesm/driver/cli_resolution.py:expand_cli_resolution``
+        — see ``TestSharedCliResolution`` for the
+        behavior-level tests of that helper.
         """
         import inspect
         import re
@@ -1049,26 +1057,16 @@ class TestOceanCliResolutionPerGridDispatch:
             line for line in text_no_strings.splitlines()
             if not line.lstrip().startswith("#")
         )
-        # The four iter-102 dispatch literals must all be present.
-        assert 'f"C{N}"' in code_only, (
-            "iter-102: ocean ``--resolution N`` must dispatch to "
-            "``f\"C{N}\"`` for cubed_sphere."
+        # iter-115: matrix runner uses the shared helper.
+        assert "validate_cli_resolution" in code_only, (
+            "iter-115: ocean matrix dispatch must use the shared "
+            "``legoesm.driver.cli_resolution.validate_cli_resolution`` "
+            "helper instead of inline validation."
         )
-        assert 'f"{N}x{2 * N}"' in code_only, (
-            "iter-102: ocean ``--resolution N`` must dispatch to "
-            "``f\"{N}x{2 * N}\"`` for latlon."
-        )
-        assert 'f"ico{level}"' in code_only, (
-            "iter-102: ocean ``--resolution N`` must dispatch to "
-            "``f\"ico{{level}}\"`` for mpas with computed level."
-        )
-        assert 'f"T{N}"' in code_only, (
-            "iter-102: ocean ``--resolution N`` must dispatch to "
-            "``f\"T{N}\"`` for spectral."
-        )
-        assert 'f"{N}km"' in code_only, (
-            "iter-102: ocean ``--resolution N`` must dispatch to "
-            "``f\"{N}km\"`` for regional grids."
+        assert "expand_cli_resolution" in code_only, (
+            "iter-115: ocean matrix dispatch must use the shared "
+            "``legoesm.driver.cli_resolution.expand_cli_resolution`` "
+            "helper instead of inline per-grid format strings."
         )
 
     def test_ocean_resolution_smoke_runs_on_all_grids(self):
