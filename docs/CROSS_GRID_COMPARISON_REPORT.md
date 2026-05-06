@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-60 snapshot)
+**Branch**: `simulation_full_check` (iter-61 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..60 findings.  It is the user-facing
+This report consolidates iter-1..61 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -647,6 +647,30 @@ round caught real issues; final convergence is clean.
   ``CGridLatLonPrimitiveEquationConfig(A_h=ah, ...)``;
   ``n`` is derived from ``tc.resolution`` (not hardcoded).
 
+* iter-61: end-to-end pipeline validation via real SW W2
+  cross-grid smoke (1-day quick mode, all 4 atmosphere grids).
+  Wall time 90 s; produces:
+
+    - 4 ``comparison_snapshots_<field>.png`` (height, u,
+      wind_speed) at 1743×910 pixels each, with cartopy
+      PlateCarrée projection + shared colorbar across grids.
+    - 1 ``comparison_timeseries.png`` overlaying scalar
+      diagnostics from all 4 grids.
+    - 1 ``comparison_summary.txt`` with per-grid metric table
+      + GPU/MPI efficiency ranking (spectral fastest at
+      0.8 s/day, cubed-sphere slowest at 23.0 s/day; 28.75×
+      span).
+
+  Cross-grid Williamson 2 errors agree to within a factor of
+  ~2 across all 4 grids (L2 1.0e-04..2.2e-04), confirming
+  the iter-1..60 area-weighting / regridding / projection
+  infrastructure is correct in practice.  Spectral mass
+  drift is 1.9e-16 (machine precision under x64).
+
+  Output snapshot at ``/tmp/iter61_sw_smoke/shallow_water/
+  williamson2/`` (this host, not committed — the validation
+  is the existence + numerics, not the binary plots).
+
 118/118 unit tests pass + 3 MPAS-mesh-unavailable skips
 (across ``tests/test_atmosphere_cross_grid_plots.py`` (77 +
 3 skips), ``tests/test_ocean_cross_grid_plots.py`` (15), and
@@ -655,4 +679,4 @@ round caught real issues; final convergence is clean.
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-60 update).*
+(iter-61 update).*
