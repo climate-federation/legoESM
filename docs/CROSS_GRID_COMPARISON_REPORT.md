@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-64 snapshot)
+**Branch**: `simulation_full_check` (iter-65 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..64 findings.  It is the user-facing
+This report consolidates iter-1..65 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -794,6 +794,75 @@ round caught real issues; final convergence is clean.
 
   Pure experiment / diagnosis; no source changes.  Tests
   still 118/118 + 3 MPAS skips.
+* iter-65: ran the 7-day HS baseline (no source changes) to
+  see how the iter-62/63/64 latlon-warm pattern evolves
+  past the biharmonic timescale (τ_biharm ≈ 2.2 d at C36;
+  3 e-foldings by 7 d).
+
+  Per-grid deviation from ensemble mean:
+
+    grid           3 d    7 d   ratio
+    icosahedral   0.081  0.218   2.7x
+    spectral      0.121  0.315   2.6x
+    cubed_sphere  0.125  0.399   3.2x
+    latlon        0.227  0.490   2.2x
+    ensemble      0.138  0.356   2.6x
+
+  Top-level cross-grid spread (max-min):
+
+    level         3 d    7 d   ratio
+    8             0.43   1.28   3.0x
+    3             0.59   1.11   1.9x
+    2             0.48   1.11   2.3x
+    9              -     1.10    -
+    1             0.48   1.04   2.2x
+
+  Pair-wise RMS:
+
+    pair                3 d    7 d   ratio
+    ico-spec          0.072  0.171   2.4x
+    cube-ico          0.143  0.524   3.7x  ← grew fastest
+    cube-spec         0.182  0.613   3.4x  ← grew fastest
+    ico-latlon        0.298  0.659   2.2x
+    cube-latlon       0.311  0.731   2.4x
+    latlon-spec       0.329  0.735   2.2x
+
+  Three findings:
+
+    (i) Disagreement is **GROWING** roughly linearly with
+        time (~2.3-3.2x over 3-d → 7-d, or 2.5x in mean).
+        The cross-grid agreement is NOT stabilizing toward
+        a common climatology at this resolution.
+
+    (ii) **At 7 d, cube becomes a divergent grid too**.
+        Pair-wise cube-vs-{ico,spec} grew 3.4-3.7x — faster
+        than any other pair.  This is consistent with
+        cube's biharmonic only kicking in past 2.2 d (3
+        e-foldings by 7 d): biharmonic-active integrations
+        on cube DO drift further from ico/spec than the 3-d
+        biharmonic-inactive integrations.
+
+    (iii) Latlon still has the largest absolute deviation
+        (0.490 K vs cube's 0.399), but the gap closed:
+        ratio 0.227/0.125 = 1.82 at 3 d, 0.490/0.399 = 1.23
+        at 7 d.  Cube is catching up.
+
+  Implication for the §5 retuning plan:
+
+    * Fix-candidate (b) (cube damping reduction) becomes
+      potentially testable at 7 d — biharmonic is now
+      active.  Repeat the iter-63 ``hd = 0.5 *
+      _hyperdiff_cube(n)`` experiment over 7 d to see if
+      cube's pair-wise RMS with the others decreases.
+    * Fix-candidate (a) (extend latlon C-grid config) is
+      still the structurally cleanest path.
+
+  At C36 / 7-d, 8 runs took 8.0 min wall time on this host.
+  A 30-day spin-up would be ~32 min; a 200-day canonical
+  HS would be ~3.5 hr.  These are real costs to budget.
+
+  Pure experiment / diagnosis; no source changes.  Tests
+  still 118/118 + 3 MPAS skips.
 
 118/118 unit tests pass + 3 MPAS-mesh-unavailable skips
 (across ``tests/test_atmosphere_cross_grid_plots.py`` (77 +
@@ -803,4 +872,4 @@ round caught real issues; final convergence is clean.
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-64 update).*
+(iter-65 update).*
