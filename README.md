@@ -124,9 +124,10 @@ estimation, sensitivity analysis, and hybrid AI–physics modeling.
 ### Validation Infrastructure
 
 - **Test matrices**:
-  - Atmosphere: `scripts/run_atmosphere_test_matrix.py` (Williamson 2/5, Galewsky, Jablonowski–Williamson, Held–Suarez, RCE, …)
+  - Atmosphere: `scripts/run_atmosphere_test_matrix.py` (Williamson 2/5/6, Jablonowski–Williamson + rotated DCMIP-2008 §4-1/§4-2, Held–Suarez ± topography, DCMIP 2012 §2-0-0 rest-with-topography, DCMIP transport, RCE, …) — selectable via `--family {sw,hydro,nh,climate,tracer,dcmip2008,dcmip2012,dcmip2016,hughes,all}`
   - Ocean: `scripts/run_ocean_test_matrix.py` (16 idealized experiments)
   - Sea ice: `scripts/run_sea_ice_test_matrix.py` (15 benchmark tests)
+- **Dycore validation catalog**: [`docs/dycore_validation_catalog.md`](docs/dycore_validation_catalog.md) — complete have/missing inventory against Hughes (2026) *"How to validate a 3D spherical dynamical core"* tutorial
 - **Dycore progression suite** (`tests/validation/run_dycore_progression_suite.py`)
 - **Distributed tests** including MPI differentiability (`tests/distributed/test_mpi_differentiability.py`)
 - **Scaling benchmarks** (`scripts/run_levante_gpu_scaling.py`, `scripts/run_cpu_mpi_scaling.py`)

@@ -92,6 +92,7 @@ class TestCase:
     duration_days: float
     quick_days: float
     run_kwargs: dict = field(default_factory=dict)
+    family: str = ""        # Hughes-tutorial family (filled by lookup)
 
     @property
     def output_path(self) -> str:
@@ -99,6 +100,81 @@ class TestCase:
         if self.vertical_coord != "none":
             parts.append(self.vertical_coord)
         return "/".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Hughes (2026) catalog: which families each case belongs to
+# ---------------------------------------------------------------------------
+#
+# Each case is tagged with a *set* of family memberships so a single case
+# can simultaneously belong to an equation-set family ("hydro", "tracer",
+# …) and to a paper-vintage family ("dcmip2008", "dcmip2012", …) and to
+# the Hughes-tutorial meta-tag ("hughes").  ``--family X`` selects the
+# cases whose membership set contains X.
+#
+# Tagging conventions:
+#   - equation-set family: sw / hydro / nh / climate / tracer / moist
+#       (mutually exclusive within a single case)
+#   - paper vintage:       dcmip2008 / dcmip2012 / dcmip2016
+#       (a case may carry zero or one vintage tag)
+#   - hughes (meta):       any case that appears in Hughes (2026) §2-§7
+#       — including the Williamson "extras" (W1/W2/W5/W6) implied as
+#       prerequisites and the DCMIP 2025 NH cases (which are partial
+#       coverage of the canonical DCMIP 2012 set, see catalog).
+#
+# See ``docs/dycore_validation_catalog.md`` for the canonical inventory.
+_CASE_FAMILIES: dict[str, frozenset[str]] = {
+    # Williamson SW (W1=cosine_bell, W2, W5 wired pre-M1; W6 added M1.a)
+    "williamson2":        frozenset({"sw", "hughes"}),
+    "williamson5":        frozenset({"sw", "hughes"}),
+    "williamson6":        frozenset({"sw", "hughes"}),
+    "cosine_bell":        frozenset({"sw", "hughes"}),
+    # Hydrostatic dry
+    "baroclinic":         frozenset({"hydro", "hughes"}),  # canonical J-W
+    "rotated_baroclinic": frozenset({"hydro", "dcmip2008", "hughes"}),
+    "rotated_steady":     frozenset({"hydro", "dcmip2008", "hughes"}),
+    "rest_state_topo":    frozenset({"hydro", "dcmip2012", "hughes"}),
+    # Tracer transport
+    "dcmip_transport_11": frozenset({"tracer", "dcmip2012", "hughes"}),
+    "dcmip_transport_12": frozenset({"tracer", "dcmip2012", "hughes"}),
+    "dcmip_transport_13": frozenset({"tracer", "dcmip2012", "hughes"}),
+    # Climate-timescale
+    "held_suarez":        frozenset({"climate", "hughes"}),
+    "held_suarez_topo":   frozenset({"climate", "hughes"}),
+    # Production AMIP — NOT a canonical Hughes idealized test
+    "amip":               frozenset({"climate"}),
+    # Non-hydrostatic (DCMIP 2025; partial coverage of Hughes §4 / §6)
+    "dcmip_tc1":          frozenset({"nh", "hughes"}),
+    "dcmip_tc2":          frozenset({"nh", "moist", "hughes"}),
+    "dcmip_tc3":          frozenset({"nh", "moist", "hughes"}),
+}
+
+# Primary equation-set tag, used only for the ``--list`` display column.
+# Falls back to "" for unrecognised cases.
+_EQUATION_SET_TAGS = frozenset(
+    {"sw", "hydro", "nh", "tracer", "climate", "moist"})
+
+
+def _primary_family(case: str) -> str:
+    families = _CASE_FAMILIES.get(case, frozenset())
+    primary = families & _EQUATION_SET_TAGS
+    return next(iter(sorted(primary)), "")
+
+
+# Family tags that are reserved for forthcoming milestones — they must
+# remain valid CLI choices (``--family dcmip2016`` returns the empty set
+# today but is documented in the catalog) so users do not get an
+# argparse error before the M3 cases land.
+_RESERVED_FAMILIES: frozenset[str] = frozenset({"dcmip2016"})
+
+# Allowed values of the ``--family`` CLI flag.  Constructed from the
+# union of every tag mentioned in ``_CASE_FAMILIES`` plus the reserved
+# set, so adding a new case automatically extends the CLI surface and
+# pre-announced families stay accepted.
+_FAMILY_CHOICES: list[str] = sorted(
+    {tag for tags in _CASE_FAMILIES.values() for tag in tags}
+    | _RESERVED_FAMILIES
+) + ["all"]
 
 
 # ===========================================================================
@@ -119,6 +195,17 @@ def _build_test_matrix() -> list[TestCase]:
         ]:
             matrix.append(TestCase(
                 "shallow_water", case, g, res[g], "none", dur, quick, dict(kw)))
+        # Williamson 6 (Rossby-Haurwitz wave-4) — Hughes-tutorial extended
+        # SW set.  Wired for icosahedral (MPAS) and spectral grids in
+        # M1.a.  Cubed-sphere (FV3 D-grid) and lat-lon C-grid require
+        # analytic edge-/face-midpoint wind init at non-trivial lon/lat
+        # offsets (W6 winds depend on both lon and lat, unlike W2/W5),
+        # so they are deferred to M1.b.  See
+        # ``docs/dycore_validation_catalog.md``.
+        if g in ("icosahedral", "spectral"):
+            matrix.append(TestCase(
+                "shallow_water", "williamson6", g, res[g], "none", 14, 1,
+                {"test_num": 6}))
 
     # --- Hydrostatic: all grids, sigma + hybrid ---
     for g in GRID_TYPES:
@@ -136,6 +223,27 @@ def _build_test_matrix() -> list[TestCase]:
         matrix.append(TestCase(
             "hydrostatic", "amip", g, res[g], "hybrid", 365, 30))
 
+        # --- Hughes-tutorial extensions (M1.a) ---
+        # Rotated Jablonowski-Williamson — DCMIP 2008 §4-1 (steady) /
+        # §4-2 (baroclinic). Hybrid coord only by default since the
+        # canonical DCMIP setup uses pressure-based vertical levels.
+        matrix.append(TestCase(
+            "hydrostatic", "rotated_baroclinic", g, res[g], "hybrid", 10, 2,
+            {"alpha": 0.7853981633974483, "perturbed": True}))
+        matrix.append(TestCase(
+            "hydrostatic", "rotated_steady", g, res[g], "hybrid", 30, 2,
+            {"alpha": 0.7853981633974483, "perturbed": False}))
+        # DCMIP 2012 §2-0-0 — atmosphere at rest with steep topography.
+        # Hybrid coord only (sigma cannot represent the ridged mountain
+        # consistently for hydrostatic-balance tests).
+        matrix.append(TestCase(
+            "hydrostatic", "rest_state_topo", g, res[g], "hybrid", 7, 1,
+            {"h_0": 2000.0}))
+        # Held-Suarez over idealized Gaussian/cosine-bell mountain.
+        matrix.append(TestCase(
+            "hydrostatic", "held_suarez_topo", g, res[g], "hybrid", 200, 30,
+            {"h_0": 2000.0}))
+
     # --- Non-hydrostatic: cubed-sphere, icosahedral, and spectral only ---
     # (lat-lon NH dycore does not exist)
     nh_grids = ["cubed_sphere", "icosahedral", "spectral"]
@@ -150,6 +258,12 @@ def _build_test_matrix() -> list[TestCase]:
             matrix.append(TestCase(
                 "nonhydrostatic", case, g, res[g], "height", dur, quick,
                 dict(kw)))
+
+    # Fill in the primary equation-set family tag for the --list column.
+    # Multi-tag membership (including paper vintage) is consulted
+    # directly from ``_CASE_FAMILIES`` inside ``filter_tests``.
+    for tc in matrix:
+        tc.family = _primary_family(tc.case)
 
     return matrix
 
@@ -1347,7 +1461,12 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         dt = 300.0
         config = MPASShallowWaterConfig(nu_del4=_hyperdiff_ico(mesh))
         model = MPASShallowWaterModel(mesh, config)
-        init_fns = {2: williamson_test2_mpas, 5: williamson_test5_mpas}
+        if test_num == 6:
+            from tests.test_cases.williamson_extended import (
+                williamson_test6_mpas)
+            init_fns = {6: williamson_test6_mpas}
+        else:
+            init_fns = {2: williamson_test2_mpas, 5: williamson_test5_mpas}
         state = init_fns[test_num](mesh)
         grid = mesh  # for consistent naming
 
@@ -1402,12 +1521,18 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         _c_gw = math.sqrt(constants.g * 5960.0)  # shallow-water wave speed
         dt = min(600.0, 0.5 * grid.radius / (n_max * _c_gw))
         config = SpectralSWConfig(
-            spectral_filter_order=8 if test_num == 5 else 0,
+            spectral_filter_order=8 if test_num in (5, 6) else 0,
         )
         model = SpectralShallowWaterModel(grid, config)
-        state = (williamson_test2_spectral(grid) if test_num == 2
-                 else williamson_test5_spectral(grid))
-        if test_num == 5:
+        if test_num == 6:
+            from tests.test_cases.williamson_extended import (
+                williamson_test6_spectral)
+            state = williamson_test6_spectral(grid)
+            state = model.filter_initial_state(state)
+        elif test_num == 2:
+            state = williamson_test2_spectral(grid)
+        else:
+            state = williamson_test5_spectral(grid)
             state = model.filter_initial_state(state)
 
         def step_fn(s, dt_):
@@ -1896,6 +2021,11 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
 def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
                     radiation: str = "gray") -> tuple[str, float, str]:
     nlev = DEFAULT_NLEV
+    # When tc.case == "held_suarez_topo" we swap the init for the
+    # topography-aware version (forcing function is unchanged — see
+    # ``src/legoesm/atmosphere/idealized/held_suarez_topo.py``).
+    _topo = tc.case == "held_suarez_topo"
+    _topo_h0 = float(tc.run_kwargs.get("h_0", 2000.0)) if _topo else 0.0
 
     if tc.grid_type == "cubed_sphere":
         from legoesm.grids.cubed_sphere import create_cubed_sphere
@@ -1918,7 +2048,12 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
             div_damp_coeff=dd, A_h=ah,
             use_conservation_fixer=True, fix_mass=True)
         model = PrimitiveEquationModel(grid, sigma, config)
-        state = held_suarez_init(grid, sigma)
+        if _topo:
+            from legoesm.atmosphere.idealized.held_suarez_topo import (
+                held_suarez_topo_init)
+            state = held_suarez_topo_init(grid, sigma, h_0=_topo_h0)
+        else:
+            state = held_suarez_init(grid, sigma)
 
         physics_fn = (_make_rrtmgp_physics("hydrostatic", dt, hs_fn=held_suarez_forcing)
                       if radiation == "rrtmgp" else held_suarez_forcing)
@@ -1969,7 +2104,13 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         ah = min(ah, _A_h_max)
         config = CGridLatLonPrimitiveEquationConfig(A_h=ah, fix_mass=True)
         model = CGridLatLonPrimitiveEquationModel(grid, sigma, config, dt=dt)
-        state_cc = held_suarez_init_latlon(grid, sigma)
+        if _topo:
+            from legoesm.atmosphere.idealized.held_suarez_topo import (
+                held_suarez_topo_init_latlon)
+            state_cc = held_suarez_topo_init_latlon(
+                grid, sigma, h_0=_topo_h0)
+        else:
+            state_cc = held_suarez_init_latlon(grid, sigma)
         state = hydrostatic_to_cgrid(state_cc, grid)
 
         physics_fn = (_make_rrtmgp_physics("hydrostatic", dt, hs_fn=held_suarez_forcing_latlon)
@@ -2023,7 +2164,12 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         config = MPASPrimitiveEquationConfig(
             nu_del4=_hyperdiff_ico(mesh), nu_del2=ah, fix_mass=True)
         model = MPASPrimitiveEquationModel(mesh, sigma, config)
-        state = held_suarez_init_mpas(mesh, sigma)
+        if _topo:
+            from legoesm.atmosphere.idealized.held_suarez_topo import (
+                held_suarez_topo_init_mpas)
+            state = held_suarez_topo_init_mpas(mesh, sigma, h_0=_topo_h0)
+        else:
+            state = held_suarez_init_mpas(mesh, sigma)
         grid = mesh
 
         physics_fn_mpas = (_make_rrtmgp_physics("mpas", dt, hs_fn=held_suarez_forcing_mpas)
@@ -2079,7 +2225,13 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
             spectral_filter_strength=0.01,
         )
         model = SpectralPrimitiveEquationModel(grid, sigma, pe_config)
-        state = isothermal_rest_state_spectral(grid, sigma, T_init=300.0)
+        if _topo:
+            from legoesm.atmosphere.idealized.held_suarez_topo import (
+                held_suarez_topo_init_spectral)
+            state = held_suarez_topo_init_spectral(
+                grid, sigma, h_0=_topo_h0, T_init=300.0)
+        else:
+            state = isothermal_rest_state_spectral(grid, sigma, T_init=300.0)
 
         physics_fn = (_make_rrtmgp_physics("spectral_pe", dt, hs_fn=held_suarez_forcing_spectral)
                       if radiation == "rrtmgp" else held_suarez_forcing_spectral)
@@ -2169,6 +2321,20 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
 def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
                    radiation: str = "gray") -> tuple[str, float, str]:
     nlev = DEFAULT_NLEV
+    # Rotated J-W variant (DCMIP 2008 §4-1 / §4-2).  ``alpha`` defaults
+    # to π/4 (45°) per DCMIP convention; ``perturbed=False`` selects the
+    # steady-state DCMIP §4-1 rotated test.
+    _rotated = tc.case in ("rotated_baroclinic", "rotated_steady")
+    _rot_alpha = float(tc.run_kwargs.get("alpha", jnp.pi / 4.0)) if _rotated else 0.0
+    _rot_perturbed = bool(tc.run_kwargs.get(
+        "perturbed", tc.case == "rotated_baroclinic")) if _rotated else True
+    # DCMIP 2012 §2-0-0 rest-state-with-topography variant.  Replaces the
+    # baroclinic init with a true rest state over a ridged cosine-bell
+    # mountain.  The dycore should preserve rest indefinitely; spurious
+    # max-wind growth diagnoses pressure-gradient-force errors on
+    # terrain-following coordinates.
+    _rest = tc.case == "rest_state_topo"
+    _rest_h0 = float(tc.run_kwargs.get("h_0", 2000.0)) if _rest else 0.0
 
     if tc.grid_type == "cubed_sphere":
         from legoesm.grids.cubed_sphere import create_cubed_sphere
@@ -2193,7 +2359,18 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             div_damp_coeff=dd, A_h=ah,
             use_conservation_fixer=True, fix_mass=True)
         model = PrimitiveEquationModel(grid, sigma, config)
-        state = baroclinic_wave_init(grid, sigma_for_init, perturbed=True)
+        if _rotated:
+            from tests.test_cases.dcmip2008.jablonowski_rotated import (
+                rotated_baroclinic_init)
+            state = rotated_baroclinic_init(
+                grid, sigma_for_init,
+                perturbed=_rot_perturbed, alpha=_rot_alpha)
+        elif _rest:
+            from tests.test_cases.dcmip2012.rest_state_topography import (
+                rest_state_topography_init)
+            state = rest_state_topography_init(grid, sigma, h_0=_rest_h0)
+        else:
+            state = baroclinic_wave_init(grid, sigma_for_init, perturbed=True)
 
         def step_fn(s, dt_):
             return model.step(s, dt_)
@@ -2245,7 +2422,20 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         ah = min(ah, _A_h_max)
         config = CGridLatLonPrimitiveEquationConfig(A_h=ah, fix_mass=True)
         model = CGridLatLonPrimitiveEquationModel(grid, sigma, config, dt=dt)
-        state_cc = baroclinic_wave_init_latlon(grid, sigma_for_init, perturbed=True)
+        if _rotated:
+            from tests.test_cases.dcmip2008.jablonowski_rotated import (
+                rotated_baroclinic_init_latlon)
+            state_cc = rotated_baroclinic_init_latlon(
+                grid, sigma_for_init,
+                perturbed=_rot_perturbed, alpha=_rot_alpha)
+        elif _rest:
+            from tests.test_cases.dcmip2012.rest_state_topography import (
+                rest_state_topography_init_latlon)
+            state_cc = rest_state_topography_init_latlon(
+                grid, sigma, h_0=_rest_h0)
+        else:
+            state_cc = baroclinic_wave_init_latlon(
+                grid, sigma_for_init, perturbed=True)
         state = hydrostatic_to_cgrid(state_cc, grid)
 
         def step_fn(s, dt_):
@@ -2300,7 +2490,20 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         config = MPASPrimitiveEquationConfig(
             nu_del4=_hyperdiff_ico(mesh), nu_del2=ah, fix_mass=True)
         model = MPASPrimitiveEquationModel(mesh, sigma, config)
-        state = baroclinic_wave_init_mpas(mesh, sigma_for_init, perturbed=True)
+        if _rotated:
+            from tests.test_cases.dcmip2008.jablonowski_rotated import (
+                rotated_baroclinic_init_mpas)
+            state = rotated_baroclinic_init_mpas(
+                mesh, sigma_for_init,
+                perturbed=_rot_perturbed, alpha=_rot_alpha)
+        elif _rest:
+            from tests.test_cases.dcmip2012.rest_state_topography import (
+                rest_state_topography_init_mpas)
+            state = rest_state_topography_init_mpas(
+                mesh, sigma, h_0=_rest_h0)
+        else:
+            state = baroclinic_wave_init_mpas(
+                mesh, sigma_for_init, perturbed=True)
         grid = mesh
 
         def step_fn(s, dt_):
@@ -2351,8 +2554,20 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             spectral_filter_strength=0.01,
         )
         model = SpectralPrimitiveEquationModel(grid, sigma, pe_config)
-        state = baroclinic_wave_init_spectral(
-            grid, sigma_for_init, perturbed=True)
+        if _rotated:
+            from tests.test_cases.dcmip2008.jablonowski_rotated import (
+                rotated_baroclinic_init_spectral)
+            state = rotated_baroclinic_init_spectral(
+                grid, sigma_for_init,
+                perturbed=_rot_perturbed, alpha=_rot_alpha)
+        elif _rest:
+            from tests.test_cases.dcmip2012.rest_state_topography import (
+                rest_state_topography_init_spectral)
+            state = rest_state_topography_init_spectral(
+                grid, sigma, h_0=_rest_h0)
+        else:
+            state = baroclinic_wave_init_spectral(
+                grid, sigma_for_init, perturbed=True)
 
         def step_fn(s, dt_):
             return model.step(s, dt_)
@@ -3505,9 +3720,14 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
 RUNNERS: dict[str, Callable] = {
     "williamson2": run_shallow_water,
     "williamson5": run_shallow_water,
+    "williamson6": run_shallow_water,                # M1.a (mpas + spectral)
     "cosine_bell": run_cosine_bell,
     "held_suarez": run_held_suarez,
+    "held_suarez_topo": run_held_suarez,             # M1.a (HS over topo)
     "baroclinic": run_baroclinic,
+    "rotated_baroclinic": run_baroclinic,            # M1.a (DCMIP 2008 §4-2 rotated)
+    "rotated_steady": run_baroclinic,                # M1.a (DCMIP 2008 §4-1 rotated)
+    "rest_state_topo": run_baroclinic,               # M1.a (DCMIP 2012 §2-0-0)
     "dcmip_transport_11": run_dcmip_transport,
     "dcmip_transport_12": run_dcmip_transport,
     "dcmip_transport_13": run_dcmip_transport,
@@ -3539,6 +3759,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--only", type=str, default="all",
         choices=["sw", "hydro", "nh", "all"],
         help="Run only a specific equation set (default: all)")
+    p.add_argument(
+        "--family", type=str, default="all",
+        choices=_FAMILY_CHOICES,
+        help=("Run only cases tagged with the given Hughes (2026) "
+              "tutorial family. 'hughes' selects the full canonical "
+              "3D-spherical-dycore validation set; 'dcmip2008' / "
+              "'dcmip2012' / 'dcmip2016' select paper-vintage groups; "
+              "'sw'/'hydro'/'nh'/'moist'/'climate'/'tracer' select "
+              "equation-set families. A single case may belong to "
+              "multiple families simultaneously."))
     p.add_argument(
         "--grid", type=str, default="all",
         choices=["cubed_sphere", "latlon", "icosahedral", "spectral", "all"],
@@ -3575,6 +3805,12 @@ def filter_tests(tests: list[TestCase], args) -> list[TestCase]:
     if args.only != "all":
         eq_set = eq_map[args.only]
         filtered = [t for t in filtered if t.equation_set == eq_set]
+    if getattr(args, "family", "all") != "all":
+        wanted = args.family
+        filtered = [
+            t for t in filtered
+            if wanted in _CASE_FAMILIES.get(t.case, frozenset())
+        ]
     if args.grid != "all":
         filtered = [t for t in filtered if t.grid_type == args.grid]
     if args.test:
@@ -3597,12 +3833,13 @@ def main():
     if args.list:
         print(f"{'#':>3}  {'Equation Set':<16}  {'Case':<22}  "
               f"{'Grid':<14}  {'Resolution':<10}  {'Vert':<7}  "
-              f"{'Days':>8}  {'Quick':>8}")
-        print("-" * 105)
+              f"{'Family':<8}  {'Days':>8}  {'Quick':>8}")
+        print("-" * 113)
         for i, tc in enumerate(tests, 1):
             print(f"{i:3d}  {tc.equation_set:<16}  {tc.case:<22}  "
                   f"{tc.grid_type:<14}  {tc.resolution:<10}  "
-                  f"{tc.vertical_coord:<7}  {tc.duration_days:8.4f}  "
+                  f"{tc.vertical_coord:<7}  {tc.family:<8}  "
+                  f"{tc.duration_days:8.4f}  "
                   f"{tc.quick_days:8.4f}")
         print(f"\nTotal: {len(tests)} test cases "
               f"(of {len(TEST_MATRIX)} in full matrix)")
