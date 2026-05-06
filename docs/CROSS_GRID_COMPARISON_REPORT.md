@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-48 snapshot)
+**Branch**: `simulation_full_check` (iter-49 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..48 findings.  It is the user-facing
+This report consolidates iter-1..49 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -29,9 +29,9 @@ and every available pair of grids:
   `T(latitude, σ)` cross-section, the canonical Held-Suarez
   Fig. 3 layout.
 
-Every helper has a corresponding unit test (77 / 77 pass in
+Every helper has a corresponding unit test (81 / 81 pass in
 `tests/test_atmosphere_cross_grid_plots.py` (71) +
-`test_ocean_cross_grid_plots.py` (6)) plus 3 MPAS-mesh-
+`test_ocean_cross_grid_plots.py` (10)) plus 3 MPAS-mesh-
 unavailable skips.
 
 CLI:
@@ -167,6 +167,7 @@ cross-grid ocean test (wind-driven gyres / OMIP) is a follow-up.
 | 45 | post-crash recovery dropped AMIP metadata and emitted bogus `status: ERROR` | LOW |
 | 47 | iter-46 init regression tests skipped MPAS / spectral coverage | HIGH |
 | 47 | matrix runner's spectral branch passed `T_init=300.0` explicitly while others used default (latent silent-disagreement risk) | MEDIUM |
+| 49 | OMIP runs silently skipped from the ocean cross-grid plot pass (collector required all 3 files; OMIP writes only 2) | HIGH |
 
 **Codex adversarial review iterations**: iter-5, iter-6, iter-7,
 iter-16, iter-21, iter-26, iter-27, iter-32, iter-36, iter-37,
@@ -184,7 +185,7 @@ round caught real issues; final convergence is clean.
 | Hydrostatic RCE on all grids | ✅ DONE (iter-24: ``mean_timeseries.csv`` + ``results.txt`` output, ``run_rce_cross_grid.sh`` wrapper) |
 | Hydrostatic AMIP w/ realistic GHG/aerosol/O3 | ⚠️ iter-22 RRTMGP wired (steady-state); iter-31 ``--co2-ppmv`` / ``--ch4-ppbv`` / ``--n2o-ppbv`` matrix-runner knobs; iter-34/36 ``--cloud-scheme`` with auto-``include_clouds=True``; iter-39 ``--ozone-source`` / ``--ozone-peak-hpa`` / ``--ozone-max-vmr`` knobs.  iter-41/42 ``scripts/run_amip_cross_grid.sh`` wrapper + ``_amip_to_matrix_format.py`` post-processor: invokes the real ``scripts/run_amip.py`` (with full CMIP6 GHG / aerosol / ozone file support) per grid then bridges the output format so the matrix-runner cross-grid plot path collects the AMIP results.  Matrix-runner ``run_amip`` remains an HS+RRTMGP stub for cross-grid CONSISTENCY testing rather than full AMIP. |
 | Ocean test cases on all grids | ✅ DONE |
-| OMIP | ✅ DONE (iter-25: matrix-compatible CSV + results.txt, ``run_omip_cross_grid.sh`` wrapper) |
+| OMIP | ✅ DONE (iter-25: matrix-compatible CSV + results.txt, ``run_omip_cross_grid.sh`` wrapper; iter-49 relaxes the ocean collector to accept timeseries-only OMIP runs so ``run_ocean_test_matrix.py --cross-grid-plots-only`` picks them up) |
 | Same colorbar/projection across grids | ✅ DONE (cartopy PlateCarrée + shared cmap) |
 | Physical consistency vs reference papers | ⚠️ Williamson cases agree to machine precision; HS climatology disagrees structurally (documented in §2) |
 | GPU / MPI efficiency | ✅ DONE (iter-28/29: per-test-case ``wall-time/day`` ranking + speedup factor in every ``comparison_summary.txt``) |
@@ -409,12 +410,30 @@ round caught real issues; final convergence is clean.
   ``pytest.skip``, so a real broken MPAS setup surfaces
   rather than masquerading as a skip.
 
-77/77 unit tests pass + 3 MPAS-mesh-unavailable skips
+* iter-49: relax ocean cross-grid collector to accept
+  timeseries-only runs (matches the iter-26 atmosphere-matrix
+  pattern).  Previously ``_collect_grid_results`` required
+  ALL THREE of ``mean_timeseries.csv`` +
+  ``snapshots_latlon.npz`` + ``results.txt``; OMIP runs
+  (which don't emit a snapshots payload) were silently
+  skipped from the cross-grid plot pass.  Now accepts EITHER
+  ``snapshots_latlon.npz`` OR (``mean_timeseries.csv`` AND
+  ``results.txt``).  Downstream comparison functions
+  (snapshots, evolution, vertical section, evolution
+  vertical section) guarded against ``snapshots is None``.
+  ``_create_cross_grid_comparisons`` early-returns from the
+  snapshot loop when no grid contributes a snapshots
+  payload, emitting only the timeseries comparison plot.
+  4 new unit tests pin: timeseries-only acceptance,
+  snapshots-only acceptance, neither-half rejection,
+  graceful fall-through when all grids are timeseries-only.
+
+81/81 unit tests pass + 3 MPAS-mesh-unavailable skips
 (across ``tests/test_atmosphere_cross_grid_plots.py`` (71
 + 3 skips) and ``tests/test_ocean_cross_grid_plots.py``
-(6)).
+(10)).
 
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-48 update).*
+(iter-49 update).*

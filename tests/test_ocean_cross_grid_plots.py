@@ -143,3 +143,131 @@ class TestModularCopyParity:
             import diagnostic_io  # noqa: F401
         finally:
             sys.path.pop(0)
+
+
+# ---------------------------------------------------------------------------
+# iter-49: relaxed _collect_grid_results for timeseries-only OMIP runs
+# ---------------------------------------------------------------------------
+
+class TestRelaxedCollectorAcceptsTimeseriesOnly:
+    """Pin the iter-49 relaxation of ``_collect_grid_results``.
+
+    Previously the ocean cross-grid collector required ALL THREE of
+    ``mean_timeseries.csv`` + ``snapshots_latlon.npz`` + ``results.txt``;
+    OMIP runs (which don't emit snapshots_latlon.npz) were silently
+    skipped from the cross-grid plot pass.  iter-49 relaxes the
+    predicate to match the iter-26 atmosphere-matrix pattern: accept
+    EITHER ``snapshots_latlon.npz`` OR (``mean_timeseries.csv`` AND
+    ``results.txt``).
+    """
+
+    def _import_matrix_module(self):
+        import importlib
+        return importlib.import_module("run_ocean_test_matrix")
+
+    def _write_synthetic_timeseries_only(self, dir_path: Path):
+        """Mimic an OMIP per-grid output: CSV + results.txt, no npz."""
+        dir_path.mkdir(parents=True, exist_ok=True)
+        (dir_path / "mean_timeseries.csv").write_text(
+            "time_days,mean_eta,max_speed\n"
+            "0.0,0.0,0.0\n"
+            "1.0,0.001,0.05\n"
+            "2.0,0.002,0.10\n"
+        )
+        (dir_path / "results.txt").write_text(
+            "test: omip\n"
+            "grid: cubed_sphere\n"
+            "resolution: C24\n"
+            "status: PASS\n"
+            "wall_time: 12.3s\n"
+        )
+
+    def _write_synthetic_snapshots_only(self, dir_path: Path):
+        """Snapshots-only output (legacy path, less common)."""
+        dir_path.mkdir(parents=True, exist_ok=True)
+        eta = np.zeros((2, 4, 6), dtype=np.float64)
+        np.savez(dir_path / "snapshots_latlon.npz", eta=eta)
+
+    def test_collector_accepts_timeseries_only(self, tmp_path):
+        """A grid directory with CSV + results.txt (but no
+        snapshots_latlon.npz) must be picked up by the collector.
+        """
+        M = self._import_matrix_module()
+        case_dir = tmp_path / "omip"
+        grid_dir = case_dir / "cubed_sphere" / "C24"
+        self._write_synthetic_timeseries_only(grid_dir)
+
+        results = M._collect_grid_results(case_dir)
+        assert "cubed_sphere" in results
+        entry = results["cubed_sphere"]
+        # Timeseries was loaded.
+        assert entry["timeseries"] is not None
+        # Snapshots is None (no npz file).
+        assert entry["snapshots"] is None
+        # Metadata parsed from results.txt.
+        assert entry["metadata"]["test"] == "omip"
+        assert entry["metadata"]["status"] == "PASS"
+
+    def test_collector_accepts_snapshots_only(self, tmp_path):
+        """A grid directory with snapshots_latlon.npz only (no CSV /
+        results.txt) must still be picked up — the iter-26 pattern
+        accepts EITHER half."""
+        M = self._import_matrix_module()
+        case_dir = tmp_path / "rest_state"
+        grid_dir = case_dir / "latlon" / "36x72"
+        self._write_synthetic_snapshots_only(grid_dir)
+
+        results = M._collect_grid_results(case_dir)
+        assert "latlon" in results
+        entry = results["latlon"]
+        # Snapshots loaded.
+        assert entry["snapshots"] is not None
+        # Timeseries is None (no CSV).
+        assert entry["timeseries"] is None
+
+    def test_collector_rejects_empty_grid_dir(self, tmp_path):
+        """A grid directory with NEITHER half is rejected (no
+        phantom collection of runs that didn't produce output)."""
+        M = self._import_matrix_module()
+        case_dir = tmp_path / "barotropic_wave"
+        grid_dir = case_dir / "spectral" / "T21"
+        grid_dir.mkdir(parents=True, exist_ok=True)
+        # Touch an unrelated file — must NOT count.
+        (grid_dir / "stale.log").write_text("nothing here\n")
+
+        results = M._collect_grid_results(case_dir)
+        assert "spectral" not in results
+
+    def test_create_cross_grid_comparisons_handles_timeseries_only(
+        self, tmp_path,
+    ):
+        """``_create_cross_grid_comparisons`` must NOT crash when all
+        grids in the test case have only timeseries data (no snapshots).
+        It should emit ONLY the timeseries comparison plot.
+        """
+        M = self._import_matrix_module()
+        case_dir = tmp_path / "omip"
+        for grid in ("cubed_sphere", "latlon"):
+            grid_dir = case_dir / grid / "C24"
+            self._write_synthetic_timeseries_only(grid_dir)
+        # Override the grid name in the metadata so they look distinct.
+        (case_dir / "latlon" / "C24" / "results.txt").write_text(
+            "test: omip\n"
+            "grid: latlon\n"
+            "resolution: 90x180\n"
+            "status: PASS\n"
+            "wall_time: 18.4s\n"
+        )
+
+        results = M._collect_grid_results(case_dir)
+        assert len(results) == 2
+        # Should not crash even though no grid has snapshots.
+        M._create_cross_grid_comparisons(case_dir, results)
+        # Only the timeseries comparison was emitted; no
+        # comparison_snapshots_*.png.
+        assert (case_dir / "comparison_timeseries.png").exists()
+        for f in case_dir.iterdir():
+            assert not f.name.startswith("comparison_snapshots_"), (
+                f"unexpected snapshot plot {f.name} for "
+                f"timeseries-only test case"
+            )

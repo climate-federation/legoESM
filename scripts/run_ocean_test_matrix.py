@@ -4618,53 +4618,67 @@ def filter_tests(tests: list[TestCase], args) -> list[TestCase]:
 
 def _collect_grid_results(test_case_dir: Path) -> dict:
     """Collect results from all grids that completed for this test case.
-    
+
+    iter-49: relaxed to match the iter-26 atmosphere-matrix collector
+    pattern.  Previously required ALL THREE of ``mean_timeseries.csv``,
+    ``snapshots_latlon.npz``, and ``results.txt``.  Now accepts EITHER
+    ``snapshots_latlon.npz`` OR (``mean_timeseries.csv`` AND
+    ``results.txt``) so that timeseries-only ocean runs (e.g.
+    ``run_omip.py`` output without snapshots) can be cross-grid-plotted
+    too.  The downstream ``_create_comparison_*`` functions already
+    handle missing snapshots gracefully (they emit only the timeseries
+    plot when snapshots are absent).
+
     Returns:
         dict mapping grid_type -> {timeseries, snapshots, metadata}
     """
     grid_results = {}
-    
+
     for grid_dir in test_case_dir.iterdir():
         if not grid_dir.is_dir():
             continue
-            
+
         # Find resolution subdirectory (e.g., C24, 36x72, ico3, T21)
         resolution_dirs = [d for d in grid_dir.iterdir() if d.is_dir()]
         if not resolution_dirs:
             continue
         resolution_dir = resolution_dirs[0]  # Take first (should be only one)
-        
-        # Check for required files
+
+        # iter-49: relaxed predicate.
         csv_file = resolution_dir / "mean_timeseries.csv"
         npz_file = resolution_dir / "snapshots_latlon.npz"
         results_file = resolution_dir / "results.txt"
-        
-        if all(f.exists() for f in [csv_file, npz_file, results_file]):
-            try:
-                # Load timeseries data
-                timeseries_df = pd.read_csv(csv_file)
-                
-                # Load snapshot data
-                snapshots_data = np.load(npz_file)
-                
-                # Parse results metadata
-                metadata = {}
+        has_snapshots = npz_file.exists()
+        has_timeseries = csv_file.exists() and results_file.exists()
+        if not (has_snapshots or has_timeseries):
+            continue
+
+        try:
+            # Load timeseries data if present.
+            timeseries_df = pd.read_csv(csv_file) if csv_file.exists() else None
+
+            # Load snapshot data if present.
+            snapshots_data = np.load(npz_file) if has_snapshots else None
+
+            # Parse results metadata if present.
+            metadata = {}
+            if results_file.exists():
                 with open(results_file, 'r') as f:
                     for line in f:
                         if ':' in line:
                             key, value = line.strip().split(':', 1)
                             metadata[key.strip()] = value.strip()
-                
-                grid_results[grid_dir.name] = {
-                    'timeseries': timeseries_df,
-                    'snapshots': snapshots_data,
-                    'metadata': metadata,
-                    'resolution': resolution_dir.name
-                }
-            except Exception as e:
-                print(f"Warning: Failed to load data for {grid_dir.name}: {e}")
-                continue
-    
+
+            grid_results[grid_dir.name] = {
+                'timeseries': timeseries_df,
+                'snapshots': snapshots_data,
+                'metadata': metadata,
+                'resolution': resolution_dir.name
+            }
+        except Exception as e:
+            print(f"Warning: Failed to load data for {grid_dir.name}: {e}")
+            continue
+
     return grid_results
 
 
@@ -4689,6 +4703,9 @@ def _create_comparison_timeseries(test_case_dir: Path, grid_results: dict) -> No
     
     for grid_name, data in grid_results.items():
         df = data['timeseries']
+        # iter-49: skip grids that have only snapshots (no timeseries CSV).
+        if df is None:
+            continue
         color = colors.get(grid_name, 'black')
         ls = linestyles.get(grid_name, '-')
 
@@ -4752,6 +4769,9 @@ def _create_comparison_snapshots(test_case_dir: Path, grid_results: dict, field:
         all_vals = []
         for data in grid_results.values():
             snapshots = data['snapshots']
+            # iter-49: skip timeseries-only grids (no snapshots payload).
+            if snapshots is None:
+                continue
             if field in snapshots.files:
                 fd = snapshots[field]
                 if fd.ndim == 3:
@@ -4796,6 +4816,9 @@ def _create_comparison_snapshots(test_case_dir: Path, grid_results: dict, field:
     sim_time_str = ""
     for data in grid_results.values():
         snapshots_any = data['snapshots']
+        # iter-49: timeseries-only grids have snapshots=None.
+        if snapshots_any is None:
+            continue
         if 'times_days' in snapshots_any.files:
             t_final = float(snapshots_any['times_days'][-1])
             sim_time_str = f" (t = {t_final:.2f} days)"
@@ -4823,6 +4846,10 @@ def _create_comparison_snapshots(test_case_dir: Path, grid_results: dict, field:
 
         ax = axes[i]
         snapshots = data['snapshots']
+        # iter-49: skip timeseries-only grids.
+        if snapshots is None:
+            ax.set_visible(False)
+            continue
 
         # Determine plot extent: prefer source coordinate range (accurate
         # for regional unstructured meshes) over the regridded grid range.
@@ -5064,6 +5091,9 @@ def _create_comparison_evolution(test_case_dir: Path, grid_results: dict,
     n_times_per_grid = {}
     for gname, data in grid_results.items():
         snaps = data['snapshots']
+        # iter-49: skip timeseries-only grids.
+        if snaps is None:
+            continue
         if field in snaps.files and snaps[field].ndim == 3:
             n_times_per_grid[gname] = snaps[field].shape[0]
         elif 'times_days' in snaps.files:
@@ -5078,8 +5108,11 @@ def _create_comparison_evolution(test_case_dir: Path, grid_results: dict,
         return  # No grids at all
 
     # Ensure we have at least 2 time steps from grids that actually have the field
-    has_field_times = [nt for gname, nt in n_times_per_grid.items() 
-                       if field in grid_results[gname]['snapshots'].files]
+    has_field_times = [
+        nt for gname, nt in n_times_per_grid.items()
+        if grid_results[gname]['snapshots'] is not None  # iter-49 guard
+        and field in grid_results[gname]['snapshots'].files
+    ]
     if not has_field_times or max(has_field_times) < 2:
         return  # Need at least 2 time steps for evolution
 
@@ -5091,6 +5124,9 @@ def _create_comparison_evolution(test_case_dir: Path, grid_results: dict,
     grid_field_data = {}  # gname -> list of (time_label, 2D_array or None)
     for gname, data in grid_results.items():
         snaps = data['snapshots']
+        # iter-49: skip timeseries-only grids.
+        if snaps is None:
+            continue
         times_days = snaps['times_days'] if 'times_days' in snaps.files else None
 
         if field in snaps.files and snaps[field].ndim == 3:
@@ -5129,7 +5165,9 @@ def _create_comparison_evolution(test_case_dir: Path, grid_results: dict,
 
     # Actual number of columns (may differ per grid; use max)
     actual_cols = max(len(v) for v in grid_field_data.values())
-    actual_grids = grid_names  # Include all grids, even those with missing fields
+    # iter-49: only iterate over grids that actually contributed
+    # snapshot data — timeseries-only grids were skipped above.
+    actual_grids = list(grid_field_data.keys())
     n_rows = len(actual_grids)
 
     fig, axes = plt.subplots(n_rows, actual_cols,
@@ -5244,9 +5282,12 @@ def _create_comparison_vertical_section(test_case_dir: Path, grid_results: dict)
     grids_with_T3d = {}
     for grid_name, data in grid_results.items():
         snapshots = data['snapshots']
+        # iter-49: skip timeseries-only grids.
+        if snapshots is None:
+            continue
         if 'T_3d' in snapshots.files:
             grids_with_T3d[grid_name] = data
-    
+
     if len(grids_with_T3d) < 2:
         return
     
@@ -5413,6 +5454,9 @@ def _create_comparison_vertical_evolution(
     grids_with_T3d = {}
     for gname, data in grid_results.items():
         snaps = data["snapshots"]
+        # iter-49: skip timeseries-only grids.
+        if snaps is None:
+            continue
         if "T_3d" in snaps.files:
             grids_with_T3d[gname] = data
     if len(grids_with_T3d) < 1:
@@ -5555,20 +5599,43 @@ def _create_comparison_vertical_evolution(
 
 
 def _create_cross_grid_comparisons(test_case_dir: Path, grid_results: dict) -> None:
-    """Create all cross-grid comparison plots and summary for a test case."""
+    """Create all cross-grid comparison plots and summary for a test case.
+
+    iter-49: gracefully handle the timeseries-only case (e.g. OMIP runs
+    that don't emit ``snapshots_latlon.npz``).  When no grid has a
+    snapshots payload, skip the snapshot-based plots and only emit the
+    timeseries comparison.
+    """
     if len(grid_results) < 2:
         return  # Need at least 2 grids for comparison
 
     print(f"  Creating cross-grid comparisons for {test_case_dir.name}...")
 
-    # Time series comparison
+    # Time series comparison (works whether or not snapshots are present).
     _create_comparison_timeseries(test_case_dir, grid_results)
 
-    # Final snapshot comparisons
+    # iter-49: only attempt snapshot-based comparisons if at least one
+    # grid has a snapshots payload.  ``data['snapshots']`` is None for
+    # timeseries-only runs (the relaxed collector emits None there).
+    grids_with_snapshots = {
+        name: data for name, data in grid_results.items()
+        if data.get('snapshots') is not None
+    }
+    if not grids_with_snapshots:
+        print("    [iter-49] timeseries-only run; skipping snapshot plots")
+        return
+
+    # Final snapshot comparisons (use only the grids that actually
+    # have snapshots).  ``_create_comparison_snapshots`` and
+    # ``_create_comparison_evolution`` themselves still iterate over
+    # all of ``grid_results``; guarding here is the simplest fix —
+    # they early-return when their needed field is missing.
     for field in ['eta', 'SST', 'w_133m']:
         field_available = any(
-            field in data['snapshots'].files or
-            any(f.startswith(f'{field}_step') for f in data['snapshots'].files)
+            data['snapshots'] is not None and (
+                field in data['snapshots'].files or
+                any(f.startswith(f'{field}_step') for f in data['snapshots'].files)
+            )
             for data in grid_results.values()
         )
         if field_available:
