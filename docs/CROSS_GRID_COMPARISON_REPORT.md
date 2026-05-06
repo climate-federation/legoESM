@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-85 snapshot)
+**Branch**: `simulation_full_check` (iter-86 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..85 findings.  It is the user-facing
+This report consolidates iter-1..86 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -29,8 +29,8 @@ and every available pair of grids:
   `T(latitude, σ)` cross-section, the canonical Held-Suarez
   Fig. 3 layout.
 
-Every helper has a corresponding unit test (135 / 135 pass
-across `tests/test_atmosphere_cross_grid_plots.py` (83) +
+Every helper has a corresponding unit test (136 / 136 pass
+across `tests/test_atmosphere_cross_grid_plots.py` (84) +
 `test_ocean_cross_grid_plots.py` (18) +
 `test_cross_grid_wrappers.py` (34)) plus 3 MPAS-mesh-
 unavailable skips.
@@ -1541,13 +1541,29 @@ round caught real issues; final convergence is clean.
   (atmospheric mass ~5e+19 Pa·m², SW mean_height
   ~5e+18 m·m²) are far above the floor.  Defensive fix
   only.
+* iter-86 codex review (2 LOW addressed):
 
-135/135 unit tests pass + 3 MPAS-mesh-unavailable skips
-(across ``tests/test_atmosphere_cross_grid_plots.py`` (83 +
+    LOW: ocean zero-baseline test used identical drift
+      values for vol/heat/salt — caught denominator-floor
+      regressions but not column-mixup bugs.  Updated to
+      use distinct per-column drifts (-2.83e-17 / -1.59e-16
+      / -7.42e-18).
+
+    LOW: ``_compute_drift`` tests only used positive-drift
+      series.  Regression dropping ``abs()`` on numerator
+      would still pass.  Added
+      ``test_drift_is_absolute_value_for_decreasing_series``
+      pinning decreasing series report POSITIVE drift.
+
+  Tests: 84 atmosphere (was 83) + 18 ocean + 34 wrappers =
+  136/136 + 3 MPAS skips (was 135/135).
+
+136/136 unit tests pass + 3 MPAS-mesh-unavailable skips
+(across ``tests/test_atmosphere_cross_grid_plots.py`` (84 +
 3 skips), ``tests/test_ocean_cross_grid_plots.py`` (18), and
 ``tests/test_cross_grid_wrappers.py`` (34)).
 
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-85 update).*
+(iter-86 update).*

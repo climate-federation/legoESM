@@ -456,15 +456,17 @@ class TestSaveConservationDenominatorFloor:
         """
         M = self._import_matrix_module()
 
-        # Mimic a rest-state diag dict where ALL THREE conservation
-        # variables have a zero baseline + tiny rounding drift.
-        # This catches future regressions that lower the floor for
-        # any one of vol, heat, or salt independently.
-        drift = -2.83e-17
+        # iter-86 codex LOW: use DISTINCT drifts per column so a
+        # column-mixup bug (e.g., heat_rel accidentally written
+        # to salt_rel) would also flip the test, not just a
+        # denominator-floor regression.
+        vol_drift = -2.83e-17
+        heat_drift = -1.59e-16
+        salt_drift = -7.42e-18
         diag = {
-            "vol_key": [0.0, -1e-19, drift],
-            "heat_key": [0.0, -1e-19, drift],
-            "salt_key": [0.0, -1e-19, drift],
+            "vol_key": [0.0, -1e-19, vol_drift],
+            "heat_key": [0.0, -1e-19, heat_drift],
+            "salt_key": [0.0, -1e-19, salt_drift],
             "times": [0.0, 0.05, 0.10],
         }
         out = tmp_path / "out"
@@ -481,7 +483,14 @@ class TestSaveConservationDenominatorFloor:
         # iter-84: pin all three columns, with both magnitude
         # bound (catches the spurious 1e+13) AND exact value
         # match (catches subtler floor regressions).
-        for col in ("vol_rel", "heat_rel", "salt_rel"):
+        # iter-86: distinct drifts per column also catch
+        # column-mixup bugs.
+        expected_per_col = {
+            "vol_rel": vol_drift,
+            "heat_rel": heat_drift,
+            "salt_rel": salt_drift,
+        }
+        for col, drift in expected_per_col.items():
             value = float(rows[-1][col])
             assert abs(value) < 1e-10, (
                 f"iter-80/82 regression: {col} = {value:.2e} for "
@@ -494,12 +503,13 @@ class TestSaveConservationDenominatorFloor:
             # iter-84 codex LOW: pin the EXACT value.  With the
             # iter-80 fix (denominator = max(|baseline|, 1.0) =
             # 1.0 for baseline=0), the column reports absolute
-            # drift in physical units: -2.83e-17.
+            # drift in physical units.  iter-86: distinct
+            # per-column drift values catch column-mixup bugs.
             assert value == pytest.approx(drift, rel=1e-6), (
-                f"iter-80/82 regression: {col} = {value:.6e}, "
-                f"expected exactly {drift:.6e} (the absolute "
-                f"drift since baseline=0).  Drift in physical "
-                f"units is preserved when baseline < 1.0."
+                f"iter-80/82/86 regression: {col} = {value:.6e}, "
+                f"expected exactly {drift:.6e}.  If {col} returned "
+                f"another column's drift, the column-mixup bug "
+                f"flipped this test — check the CSV writer order."
             )
 
     def test_real_baseline_uses_relative_drift(self, tmp_path):

@@ -122,6 +122,26 @@ class TestComputeDriftDenominatorFloor:
         # 1e-4 with reasonable tolerance.
         assert abs(result - 1e-4) < 1e-6
 
+    def test_drift_is_absolute_value_for_decreasing_series(self):
+        """iter-86 codex LOW: the function uses ``abs(values[-1] -
+        values[0])`` so decreasing series report POSITIVE drift.
+        A regression dropping the ``abs(...)`` on the numerator
+        would let this test catch the sign error (the previous
+        tests all used positive drift).
+        """
+        baseline = 5.0e19
+        drift_amount = 5.0e15
+        # Decreasing series: drift is negative if abs() is dropped.
+        result = M._compute_drift([baseline, baseline - drift_amount])
+        # Same magnitude as the positive case; if abs() was
+        # dropped, this would be negative (-1e-4).
+        assert result == pytest.approx(1e-4, rel=1e-6), (
+            f"iter-86 regression: ``_compute_drift`` of a "
+            f"decreasing series returned {result:.6e}, expected "
+            f"+1e-4 (positive magnitude).  If you got -1e-4, the "
+            f"``abs()`` on the numerator was dropped."
+        )
+
     def test_baseline_zero_does_not_blow_up(self):
         """The iter-78/80 pathology: baseline ≈ 0 + tiny rounding
         drift.  iter-83 ensures the result is the absolute drift
