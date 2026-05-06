@@ -494,3 +494,137 @@ class TestNpzMissingCollection:
         }
         metric = M._compute_cross_grid_rms_agreement(gr, "T_3d")
         assert metric is None
+
+
+# ---------------------------------------------------------------------------
+# iter-32: GPU/MPI efficiency table behaviour on DCMIP / NH metadata
+# ---------------------------------------------------------------------------
+
+class TestGpuEfficiencyTableMetadataKeys:
+    """Pin the iter-32 codex MEDIUM fix where the GPU efficiency table
+    now accepts ``period_days`` (DCMIP) and ``duration_hours`` (NH)
+    in addition to ``days``.
+
+    These are integration-style tests: they exercise
+    ``_create_atmosphere_comparison_summary`` end-to-end and assert
+    the GPU efficiency table appears with correct s/day values.
+    """
+
+    def _grid_results_with_metadata(self, metadata_per_grid):
+        """Build a minimal grid_results dict with prescribed metadata."""
+        out = {}
+        for gname, md in metadata_per_grid.items():
+            out[gname] = {
+                "timeseries": __import__("pandas").DataFrame(
+                    {"time_days": [0.0, 1.0], "mean_T": [300.0, 299.0]}
+                ),
+                "snapshots": M._EMPTY_SNAPSHOTS_STUB,
+                "metadata": md,
+                "resolution": md.get("resolution", "X1"),
+                "vertical_coord": md.get("vertical_coord", ""),
+            }
+        return out
+
+    def test_efficiency_table_with_days_key(self, tmp_path):
+        """Standard ``days`` key path (HS / SW / baroclinic / AMIP)."""
+        gr = self._grid_results_with_metadata({
+            "cubed_sphere": {"days": "30", "wall_time": "60.0s"},
+            "spectral":     {"days": "30", "wall_time": "10.0s"},
+        })
+        out_dir = tmp_path
+        M._create_atmosphere_comparison_summary(out_dir, gr, label="test")
+        text = (out_dir / "comparison_summary.txt").read_text()
+        assert "GPU / MPI efficiency" in text
+        # spectral should be fastest (10s/30d = 0.33 s/d).
+        assert "spectral" in text
+        # cube is slowest (60/30 = 2.00 s/d).  Speedup vs slowest:
+        # spectral 2.00 / 0.33 = 6x.
+        # The exact format check: look for "0.33" and "2.00" strings.
+        assert "0.33" in text
+        assert "2.00" in text
+
+    def test_efficiency_table_with_period_days_key(self, tmp_path):
+        """DCMIP transport writes ``period_days`` instead of
+        ``days`` — iter-32 fix should pick this up."""
+        gr = self._grid_results_with_metadata({
+            "cubed_sphere": {"period_days": "12", "wall_time": "120.0s"},
+            "spectral":     {"period_days": "12", "wall_time":  "30.0s"},
+        })
+        out_dir = tmp_path
+        M._create_atmosphere_comparison_summary(out_dir, gr, label="dcmip")
+        text = (out_dir / "comparison_summary.txt").read_text()
+        assert "GPU / MPI efficiency" in text
+        # spectral: 30/12 = 2.50 s/d; cube: 120/12 = 10.00 s/d.
+        assert "2.50" in text
+        assert "10.00" in text
+
+    def test_efficiency_table_with_duration_hours_key(self, tmp_path):
+        """NH dycore writes ``duration_hours`` (e.g., DCMIP TC1
+        which runs for 3 hours) — iter-32 fix divides by 24 to
+        get s/day."""
+        gr = self._grid_results_with_metadata({
+            "cubed_sphere": {"duration_hours": "3", "wall_time": "300.0s"},
+            "spectral":     {"duration_hours": "3", "wall_time":  "60.0s"},
+        })
+        out_dir = tmp_path
+        M._create_atmosphere_comparison_summary(out_dir, gr, label="dcmip_tc1")
+        text = (out_dir / "comparison_summary.txt").read_text()
+        assert "GPU / MPI efficiency" in text
+        # 3 hours = 0.125 days; cube: 300/0.125 = 2400 s/d;
+        # spectral: 60/0.125 = 480 s/d.
+        assert "2400" in text
+        assert "480" in text
+
+    def test_efficiency_table_skips_missing_wall_time(self, tmp_path):
+        """When wall_time is missing for both grids the table no-ops."""
+        gr = self._grid_results_with_metadata({
+            "cubed_sphere": {"days": "30"},   # no wall_time
+            "spectral":     {"days": "30"},
+        })
+        out_dir = tmp_path
+        M._create_atmosphere_comparison_summary(out_dir, gr, label="bare")
+        text = (out_dir / "comparison_summary.txt").read_text()
+        # No GPU/MPI efficiency line (no wall_time data).
+        assert "GPU / MPI efficiency" not in text
+
+    def test_efficiency_table_skips_non_finite_days(self, tmp_path):
+        """iter-32 codex caveat: NaN/inf in days metadata should
+        not produce nan-rate rows."""
+        gr = self._grid_results_with_metadata({
+            "cubed_sphere": {"days": "nan", "wall_time": "60.0s"},
+            "spectral":     {"days": "inf", "wall_time": "10.0s"},
+        })
+        out_dir = tmp_path
+        M._create_atmosphere_comparison_summary(out_dir, gr, label="bad")
+        text = (out_dir / "comparison_summary.txt").read_text()
+        # Both grids skipped → table absent.
+        assert "GPU / MPI efficiency" not in text
+
+
+# ---------------------------------------------------------------------------
+# iter-32: _make_rrtmgp_physics GHG override correctness
+# ---------------------------------------------------------------------------
+
+class TestRrtmgpGhgOverrides:
+    """Pin the iter-31/32 GHG-override knobs."""
+
+    def test_runtime_overrides_dict_present(self):
+        assert hasattr(M, "_RUNTIME_RRTMGP_OVERRIDES")
+        d = M._RUNTIME_RRTMGP_OVERRIDES
+        assert "co2_ppmv" in d
+        assert "ch4_ppbv" in d
+        assert "n2o_ppbv" in d
+
+    def test_make_rrtmgp_physics_signature_has_ghg_kwargs(self):
+        """The function should accept co2_ppmv/ch4_ppbv/n2o_ppbv."""
+        import inspect
+        sig = inspect.signature(M._make_rrtmgp_physics)
+        params = sig.parameters
+        assert "co2_ppmv" in params
+        assert "ch4_ppbv" in params
+        assert "n2o_ppbv" in params
+        # All default to None so the runtime overrides path is the
+        # default behaviour.
+        assert params["co2_ppmv"].default is None
+        assert params["ch4_ppbv"].default is None
+        assert params["n2o_ppbv"].default is None
