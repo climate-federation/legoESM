@@ -225,6 +225,44 @@ class TestRceCrossGridWrapper:
         assert "--cross-grid-plots-only" in last
         assert "--test rce" in last
 
+    def test_passes_diag_days_for_short_smokes(self, wrapper_code):
+        """iter-73: ``run_rce.py`` only emits matrix-format outputs
+        when its diag_log is non-empty, which requires ``DAYS >=
+        --diag-days`` (default 5).  Short-day smokes (DAYS<=5) need
+        the wrapper to force smaller --diag-days, otherwise the
+        cross-grid plotter silently has nothing to read.
+        """
+        # The wrapper accepts a third positional arg (DIAG_DAYS) and
+        # defaults it to 1.  Pin both the variable definition AND
+        # that it's passed via ``--diag-days "$DIAG_DAYS"``.
+        assert re.search(r'DIAG_DAYS=\$\{3:-\s*1\s*\}', wrapper_code), (
+            "iter-73: RCE wrapper must define ``DIAG_DAYS=${3:-1}`` "
+            "so short-day smokes produce diagnostics"
+        )
+        assert re.search(
+            r'--diag-days\s+"?\$\{?DIAG_DAYS\}?"?', wrapper_code,
+        ), (
+            "iter-73: RCE wrapper must pass ``--diag-days "
+            "\"$DIAG_DAYS\"`` to ``run_rce.py``"
+        )
+
+    def test_continues_on_single_grid_failure(self, wrapper_code):
+        """iter-73: the iter-24 RCE wrapper had ``set -e`` and no
+        per-grid failure guard.  iter-73 added the iter-43 / iter-72
+        AMIP/OMIP pattern: ``|| { echo WARNING; ANY_FAILED=1; }``
+        so a per-grid blowup (e.g., the iter-73 voronoi RCE
+        BLOWUP) doesn't abort the whole cross-grid run.
+        """
+        m = re.search(
+            r"run_rce\.py.*?\|\|\s*\{[^}]*?ANY_FAILED=1[^}]*?\}",
+            wrapper_code, re.DOTALL,
+        )
+        assert m, (
+            "iter-73: RCE wrapper must wrap ``run_rce.py`` with "
+            "``|| { ... ANY_FAILED=1 ... }`` so a single grid "
+            "blowup does not abort the whole cross-grid run."
+        )
+
 
 class TestOmipCrossGridWrapper:
     """Pin ``scripts/run_omip_cross_grid.sh`` (iter-25).
@@ -545,6 +583,62 @@ class TestAmipCrossGridWrapper:
         assert "$EXTRA_FLAGS" in wrapper_code, (
             "EXTRA_FLAGS must be passed through to run_amip.py"
         )
+
+    def test_passes_resolution_to_run_amip(self, wrapper_code):
+        """iter-74: the iter-41 wrapper computed ``$RES`` from
+        GRID_RES for the OUTDIR path but NEVER passed
+        ``--resolution`` to ``run_amip.py``.  Result: every grid
+        silently ran at the default n=16.  iter-74 fixed this with
+        ``--resolution "$RES"`` in the wrapper's ``run_amip.py``
+        invocation.
+
+        Pin: the wrapper must include ``--resolution "$RES"`` (or
+        ``--resolution $RES``) in the run_amip.py call.
+        """
+        # Match the run_amip.py invocation including line continuations.
+        m = re.search(
+            r'run_amip\.py(?:[^\n\\]|\\\n)*?--resolution\s+"?\$\{?RES\}?"?',
+            wrapper_code,
+        )
+        assert m, (
+            "iter-74: AMIP wrapper must pass ``--resolution "
+            "\"$RES\"`` to ``run_amip.py``.  Without this, the "
+            "GRID_RES dict is decorative-only and every grid runs "
+            "at the default n=16."
+        )
+
+    def test_passes_diag_days_for_short_smokes(self, wrapper_code):
+        """iter-74: ``run_amip.py`` only emits diagnostics every
+        ``--diag-days`` (default 5).  Short-day smokes (DAYS<=5)
+        produce empty ``timeseries.npz`` which the iter-42 converter
+        purges as failed output.  iter-74 forced ``--diag-days 1``
+        in the wrapper.
+        """
+        m = re.search(
+            r'run_amip\.py(?:[^\n\\]|\\\n)*?--diag-days\s+\d+',
+            wrapper_code,
+        )
+        assert m, (
+            "iter-74: AMIP wrapper must pass ``--diag-days 1`` (or "
+            "similar small int) so short-day smokes accumulate "
+            "diagnostics."
+        )
+
+    def test_grid_res_uses_int_compatible_values(self, wrapper_code):
+        """iter-74: ``run_amip.py --resolution`` is ``type=int``.
+        The previous GRID_RES had ``[latlon]="90x180"`` which
+        would fail at argparse.  iter-74 simplified to single
+        ints for all 4 grids.
+        """
+        mapping = _parse_bash_assoc_array(wrapper_code, "GRID_RES")
+        for grid, value in mapping.items():
+            # Each value must be parseable as an int (or contain
+            # only digits with optional whitespace).
+            assert value.strip().isdigit(), (
+                f"iter-74: GRID_RES[{grid}] = {value!r} is not an "
+                f"int — ``run_amip.py --resolution`` is type=int "
+                f"and would fail at argparse"
+            )
 
 
 class TestSharedConventions:

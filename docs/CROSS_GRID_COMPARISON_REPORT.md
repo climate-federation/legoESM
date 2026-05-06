@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-74 snapshot)
+**Branch**: `simulation_full_check` (iter-75 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..74 findings.  It is the user-facing
+This report consolidates iter-1..75 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -29,10 +29,10 @@ and every available pair of grids:
   `T(latitude, σ)` cross-section, the canonical Held-Suarez
   Fig. 3 layout.
 
-Every helper has a corresponding unit test (120 / 120 pass
+Every helper has a corresponding unit test (125 / 125 pass
 across `tests/test_atmosphere_cross_grid_plots.py` (78) +
 `test_ocean_cross_grid_plots.py` (15) +
-`test_cross_grid_wrappers.py` (27)) plus 3 MPAS-mesh-
+`test_cross_grid_wrappers.py` (32)) plus 3 MPAS-mesh-
 unavailable skips.
 
 CLI:
@@ -1211,13 +1211,35 @@ round caught real issues; final convergence is clean.
 
   Bug-fix table records 3 new iter-74 entries (2 HIGH +
   1 MEDIUM).  Tests still 120/120 + 3 MPAS skips.
+* iter-75: add wrapper-structural regression tests for the
+  iter-73 + iter-74 fixes so they can't silently regress:
 
-120/120 unit tests pass + 3 MPAS-mesh-unavailable skips
+    RCE wrapper:
+      * ``test_passes_diag_days_for_short_smokes`` — pin
+        ``DIAG_DAYS=${3:-1}`` + ``--diag-days "$DIAG_DAYS"``
+      * ``test_continues_on_single_grid_failure`` — pin
+        ``run_rce.py ... || { ... ANY_FAILED=1 ... }``
+
+    AMIP wrapper:
+      * ``test_passes_resolution_to_run_amip`` — pin
+        ``--resolution "$RES"`` (the iter-74 HIGH bug fix
+        — without this the GRID_RES dict was decorative-
+        only and every grid silently ran at default n=16)
+      * ``test_passes_diag_days_for_short_smokes`` — pin
+        ``--diag-days 1``
+      * ``test_grid_res_uses_int_compatible_values`` —
+        pin GRID_RES values are all ints (not "90x180"
+        which would fail ``argparse type=int``)
+
+  Tests: 32 wrapper (was 27), full suite 125/125 + 3 MPAS
+  skips (was 120/120 + 3 skips).
+
+125/125 unit tests pass + 3 MPAS-mesh-unavailable skips
 (across ``tests/test_atmosphere_cross_grid_plots.py`` (77 +
 3 skips), ``tests/test_ocean_cross_grid_plots.py`` (15), and
-``tests/test_cross_grid_wrappers.py`` (27)).
+``tests/test_cross_grid_wrappers.py`` (32)).
 
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-74 update).*
+(iter-75 update).*
