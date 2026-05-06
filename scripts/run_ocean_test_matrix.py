@@ -383,6 +383,54 @@ def _snapshot_steps(n_steps: int, n_snaps: int = 10) -> set[int]:
     return steps
 
 
+def _apply_drift_tolerance(
+    ok: bool, notes: str, drift: float, tol: float, label: str,
+    *, n_samples: int | None = None,
+) -> tuple[bool, str]:
+    """Apply a drift PASS tolerance to an ocean test case.
+
+    iter-123 (codex iter-119-followup MEDIUM-4): ocean
+    matrix cases compute conservation-like drifts
+    (``eta_drift``, ``T_drift``, ``PE_drift``,
+    ``S_integral_drift``) but pre-iter-123 ``status`` was
+    only set from ``ok = is_finite and not blown_up``.
+    This made the cross-grid PASS column meaningless for
+    conservation tests like ``rest_state``.
+
+    Mirrors the atmosphere matrix's ``_apply_mass_drift_tolerance``
+    (iter-117/118/120) but generalized over the diagnostic
+    label so the same helper handles eta/T/S/PE drifts.
+
+    Returns
+    -------
+    (ok, notes): tuple of updated values.  When ``drift`` is
+    non-finite, n_samples < 2, or > tol, ``ok`` is set to
+    False and a ``[FAIL: <label> drift ...]`` annotation is
+    appended to ``notes``.
+    """
+    import numpy as _np
+    if ok and n_samples is not None and n_samples < 2:
+        ok = False
+        notes += (
+            f" [FAIL: {label} series has only {n_samples} "
+            f"sample(s); need >= 2 for a valid drift]"
+        )
+        return ok, notes
+    if ok and (not _np.isfinite(drift) or drift > tol):
+        ok = False
+        if not _np.isfinite(drift):
+            notes += (
+                f" [FAIL: {label} drift is non-finite "
+                f"({drift!r})]"
+            )
+        else:
+            notes += (
+                f" [FAIL: {label} drift {drift:.2e} > "
+                f"tolerance {tol:.0e}]"
+            )
+    return ok, notes
+
+
 def _compute_drift(values: list[float]) -> float:
     """Scalar drift wrapper.
 
@@ -2731,6 +2779,18 @@ def run_rest_state(tc: TestCase, output_dir: Path, days: float
                  if len(eta_list) >= 2 else 0.0)
     T_drift = _compute_drift(diag.get("mean_T", []))
     notes = f"eta drift={eta_drift:.2e}, T drift={T_drift:.2e}"
+    # iter-123 (codex iter-119-followup MEDIUM-4): rest_state
+    # ocean has zero forcing → drift should be machine precision.
+    # Tolerances are generous (1e-10 m for SSH, 1e-8 relative for T)
+    # — well above typical machine epsilon but catches gross
+    # conservation violations.  Same NaN/n_samples gating as
+    # the iter-117/118/120 atmosphere helpers.
+    ok, notes = _apply_drift_tolerance(
+        ok, notes, eta_drift, 1e-10, "eta",
+        n_samples=len(eta_list))
+    ok, notes = _apply_drift_tolerance(
+        ok, notes, T_drift, 1e-8, "T",
+        n_samples=len(diag.get("mean_T", [])))
 
     # Spectral land-leakage diagnostic: check that eta stays near zero in land cells
     if tc.grid_type == "spectral" and hasattr(state, 'land_mask_grid'):
@@ -2799,6 +2859,18 @@ def run_rest_state_no_land(tc: TestCase, output_dir: Path, days: float
                  if len(eta_list) >= 2 else 0.0)
     T_drift = _compute_drift(diag.get("mean_T", []))
     notes = f"eta drift={eta_drift:.2e}, T drift={T_drift:.2e}"
+    # iter-123 (codex iter-119-followup MEDIUM-4): rest_state
+    # ocean has zero forcing → drift should be machine precision.
+    # Tolerances are generous (1e-10 m for SSH, 1e-8 relative for T)
+    # — well above typical machine epsilon but catches gross
+    # conservation violations.  Same NaN/n_samples gating as
+    # the iter-117/118/120 atmosphere helpers.
+    ok, notes = _apply_drift_tolerance(
+        ok, notes, eta_drift, 1e-10, "eta",
+        n_samples=len(eta_list))
+    ok, notes = _apply_drift_tolerance(
+        ok, notes, T_drift, 1e-8, "T",
+        n_samples=len(diag.get("mean_T", [])))
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full  # positive downward for plotting
@@ -2860,6 +2932,18 @@ def run_rest_state_uniform_ts(tc: TestCase, output_dir: Path, days: float
                  if len(eta_list) >= 2 else 0.0)
     T_drift = _compute_drift(diag.get("mean_T", []))
     notes = f"eta drift={eta_drift:.2e}, T drift={T_drift:.2e}"
+    # iter-123 (codex iter-119-followup MEDIUM-4): rest_state
+    # ocean has zero forcing → drift should be machine precision.
+    # Tolerances are generous (1e-10 m for SSH, 1e-8 relative for T)
+    # — well above typical machine epsilon but catches gross
+    # conservation violations.  Same NaN/n_samples gating as
+    # the iter-117/118/120 atmosphere helpers.
+    ok, notes = _apply_drift_tolerance(
+        ok, notes, eta_drift, 1e-10, "eta",
+        n_samples=len(eta_list))
+    ok, notes = _apply_drift_tolerance(
+        ok, notes, T_drift, 1e-8, "T",
+        n_samples=len(diag.get("mean_T", [])))
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full
@@ -2916,6 +3000,18 @@ def run_rest_state_uniform_ts_no_land(tc: TestCase, output_dir: Path, days: floa
                  if len(eta_list) >= 2 else 0.0)
     T_drift = _compute_drift(diag.get("mean_T", []))
     notes = f"eta drift={eta_drift:.2e}, T drift={T_drift:.2e}"
+    # iter-123 (codex iter-119-followup MEDIUM-4): rest_state
+    # ocean has zero forcing → drift should be machine precision.
+    # Tolerances are generous (1e-10 m for SSH, 1e-8 relative for T)
+    # — well above typical machine epsilon but catches gross
+    # conservation violations.  Same NaN/n_samples gating as
+    # the iter-117/118/120 atmosphere helpers.
+    ok, notes = _apply_drift_tolerance(
+        ok, notes, eta_drift, 1e-10, "eta",
+        n_samples=len(eta_list))
+    ok, notes = _apply_drift_tolerance(
+        ok, notes, T_drift, 1e-8, "T",
+        n_samples=len(diag.get("mean_T", [])))
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full

@@ -1340,6 +1340,110 @@ class TestSelectOceanResolutionDirPrefersGridTyped:
         assert chosen.name in ("16", "32")
 
 
+class TestIter123OceanDriftTolerance:
+    """iter-123 (codex iter-119-followup MEDIUM-4): ocean
+    matrix conservation gates.
+
+    Pre-iter-123, ocean rest_state PASS criteria checked
+    only finiteness + non-blown-up; eta_drift and T_drift
+    were reported in notes but never gated.  This made the
+    cross-grid PASS column meaningless for conservation
+    tests where the expectation is machine precision.
+
+    iter-123 added a generalized ``_apply_drift_tolerance``
+    helper (mirrors the atmosphere ``_apply_mass_drift_tolerance``
+    iter-117/118/120) and applied it to all 4 rest_state
+    variants with eta tol 1e-10 m and T tol 1e-8 relative.
+    """
+
+    def _import_module(self):
+        import importlib
+        import sys
+        from pathlib import Path
+        scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+        if str(scripts_dir) not in sys.path:
+            sys.path.insert(0, str(scripts_dir))
+        return importlib.import_module("run_ocean_test_matrix")
+
+    def test_apply_drift_tolerance_passes_at_machine_precision(self):
+        """Rest-state-style: drift = 1e-17 should pass."""
+        m = self._import_module()
+        ok, notes = m._apply_drift_tolerance(
+            ok=True, notes="initial",
+            drift=1e-17, tol=1e-10, label="eta",
+            n_samples=2,
+        )
+        assert ok is True
+
+    def test_apply_drift_tolerance_fails_above_tol(self):
+        m = self._import_module()
+        ok, notes = m._apply_drift_tolerance(
+            ok=True, notes="initial",
+            drift=1e-9, tol=1e-10, label="eta",
+            n_samples=2,
+        )
+        assert ok is False
+        assert "eta drift" in notes
+        assert "tolerance 1e-10" in notes
+
+    def test_apply_drift_tolerance_fails_nan(self):
+        m = self._import_module()
+        ok, notes = m._apply_drift_tolerance(
+            ok=True, notes="initial",
+            drift=float("nan"), tol=1e-10, label="T",
+            n_samples=2,
+        )
+        assert ok is False
+        assert "T drift is non-finite" in notes
+
+    def test_apply_drift_tolerance_fails_few_samples(self):
+        m = self._import_module()
+        ok, notes = m._apply_drift_tolerance(
+            ok=True, notes="initial",
+            drift=0.0, tol=1e-10, label="eta",
+            n_samples=1,
+        )
+        assert ok is False
+        assert "eta series has only 1 sample" in notes
+
+    def test_apply_drift_tolerance_idempotent_on_failed(self):
+        m = self._import_module()
+        ok, notes = m._apply_drift_tolerance(
+            ok=False, notes="BLOWUP at step 100",
+            drift=1e-3, tol=1e-10, label="eta",
+            n_samples=2,
+        )
+        assert ok is False
+        assert notes == "BLOWUP at step 100"
+
+    def test_rest_state_uses_drift_tolerance(self):
+        """All 4 rest_state variants apply ``_apply_drift_tolerance``
+        for both eta and T.  Source-pin via inspect.
+        """
+        import inspect
+        m = self._import_module()
+        # The rest_state variant runners share an inline
+        # tolerance-application pattern.  Pin its presence in
+        # the module source.
+        text = inspect.getsource(m)
+        # Strip line comments first.
+        import re
+        text_no_strings = re.sub(r'""".*?"""', "", text, flags=re.DOTALL)
+        text_no_strings = re.sub(r"'''.*?'''", "", text_no_strings, flags=re.DOTALL)
+        code_only = "\n".join(
+            line for line in text_no_strings.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        # Count occurrences of the helper call — should be at
+        # least 8 (4 rest_state variants × 2 drifts each).
+        count = code_only.count("_apply_drift_tolerance(")
+        assert count >= 8, (
+            f"iter-123: at least 8 ``_apply_drift_tolerance`` "
+            f"call sites expected (4 rest_state × 2 "
+            f"drifts).  Found {count}."
+        )
+
+
 class TestIter110CodexReviewFixes:
     """iter-110 (codex iter-104 follow-up review): 3 MEDIUM
     findings on the iter-104..109 fix sequence:
