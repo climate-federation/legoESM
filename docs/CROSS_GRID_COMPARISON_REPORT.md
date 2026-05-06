@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-79 snapshot)
+**Branch**: `simulation_full_check` (iter-80 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..79 findings.  It is the user-facing
+This report consolidates iter-1..80 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -188,6 +188,7 @@ cross-grid ocean test (wind-driven gyres / OMIP) is a follow-up.
 | 78 | cube ocean rest_state has eta drift of -2.8e13 m (latlon/mpas: 0) despite passing the run_omip.py BLOWUP detector — USER HANDOFF for cube ocean conservation | HIGH |
 | 79 | iter-78 cube η drift is execution-order-dependent: cube alone shows machine-precision conservation, but cube AFTER latlon/mpas/spectral shows -2.8e13 m drift (per-grid run isolation bug, not cube physics) | HIGH |
 | 79 | run_omip.py BLOWUP detector lacked η bound — relied on T<100 to catch large-eta blowups; iter-79 added max\|η\| < 1000 m sanity check | MEDIUM |
+| 80 | conservation_timeseries.csv `vol_rel` denominator floor `max(abs(vol[0]), 1e-30)` amplified machine precision to 1e+13 for rest-state runs (iter-78 cube finding was 100% display-bug, not physics) | HIGH |
 
 **Codex adversarial review iterations**: iter-5, iter-6, iter-7,
 iter-16, iter-21, iter-26, iter-27, iter-32, iter-36, iter-37,
@@ -1390,6 +1391,55 @@ round caught real issues; final convergence is clean.
         debug scope significantly.  Per the iter-68 user
         handoff, the per-grid run isolation fix is also
         out of scope, but the diagnosis is clearer now.
+* iter-80: **iter-79's diagnosis was wrong** — investigation
+  reveals the iter-78 finding was 100% a metric-display
+  bug, NOT a per-grid isolation bug or cube physics bug.
+
+  Inspection of the per-step ``mean_eta`` in cube's
+  ``mean_timeseries.csv`` for both iter-78 (broken
+  -2.83e+13) and iter-79 (correct 2.83e-17) shows the
+  per-step values are BYTE-IDENTICAL.  Cube's mean_eta
+  final value is -2.83e-17 in both runs.
+
+  The discrepancy traces to ``conservation_timeseries.csv``
+  which is read by ``_create_rest_state_cross_variant_comparison``:
+
+      vol_rel = (vol - vol[0]) / max(abs(vol[0]), 1e-30)
+
+  In rest-state runs ``vol[0] = 0`` exactly (initial mean η
+  is zero by construction).  The denominator floor 1e-30 is
+  way too small — it amplifies machine-precision rounding
+  (-2.83e-17) to 1e+13 in the "relative" metric.
+
+  Fix: change the denominator floor from ``1e-30`` to
+  ``1.0`` (a physically meaningful baseline for ocean
+  volume in m³, heat in J, salt in kg).  When the baseline
+  is essentially zero, ``vol_rel`` is effectively absolute
+  drift; when there's a real baseline (e.g., a forced run
+  with non-zero initial volume), ``vol_rel`` remains
+  the relative drift it was meant to be.
+
+  Re-running the iter-78 reproduction with the iter-80 fix:
+
+      Variant                Grid           eta drift
+      Stratified + Land      cubed_sphere   -2.83e-17  ← was -2.83e+13
+      Stratified + Land      latlon          0
+      Stratified + Land      mpas            0
+      Uniform + Land         cubed_sphere   -6.55e-18  ← was -6.55e+12
+      Stratified, No Land    cubed_sphere   -2.79e-17
+      Uniform, No Land       cubed_sphere   -6.67e-18
+
+  All grids now show machine-precision conservation —
+  cube agrees with latlon / mpas at the 1e-17 level.
+
+  **The cube ocean rest-state IS conservation-correct.**
+  The iter-78 / iter-79 framing of "cube broken" was a
+  diagnostic artifact, not physics.  This removes one item
+  from the user-handoff list.
+
+  Bug-fix table records the iter-80 HIGH (vol_rel
+  spurious 1e+13 from 1e-30 denominator floor in
+  ``_save_conservation_timeseries``).
 
 128/128 unit tests pass + 3 MPAS-mesh-unavailable skips
 (across ``tests/test_atmosphere_cross_grid_plots.py`` (79 +
@@ -1399,4 +1449,4 @@ round caught real issues; final convergence is clean.
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-79 update).*
+(iter-80 update).*

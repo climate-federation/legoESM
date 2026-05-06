@@ -939,14 +939,34 @@ def _save_conservation(output_dir: Path, case_name: str, diag: dict,
     vol = np.array(vol_vals, dtype=np.float64)
     heat = np.array(heat_vals, dtype=np.float64)
     t = np.array(times, dtype=np.float64)
-    vol_rel = (vol - vol[0]) / max(abs(vol[0]), 1e-30)
-    heat_rel = (heat - heat[0]) / max(abs(heat[0]), 1e-30)
+    # iter-80: the previous denominator floor of 1e-30 caused the
+    # iter-78 cube ``rest_state`` finding (-2.8e+13 m vol drift!).
+    # In rest-state runs the initial volume / heat / salt baselines
+    # are exactly zero (or nearly so for heat in stratified
+    # variants), so dividing machine-precision rounding errors by
+    # 1e-30 produced spurious 1e+13 "relative drift" values that
+    # were 30 orders of magnitude beyond the actual physics.
+    #
+    # Fix: when ``|vol[0]| < 1.0`` (i.e., baseline volume is
+    # essentially zero in physical units of m³), report ABSOLUTE
+    # drift in the same column.  When ``|vol[0]| >> 1`` (real
+    # baseline), keep the relative-drift normalization.  Same
+    # treatment for heat and salt.  This makes the
+    # ``conservation_timeseries.csv`` ``vol_rel`` / ``heat_rel`` /
+    # ``salt_rel`` columns physically meaningful for both
+    # rest-state (absolute) and forced runs (relative).
+    _MIN_RELATIVE_BASELINE = 1.0
+    vol_denom = max(abs(vol[0]), _MIN_RELATIVE_BASELINE)
+    heat_denom = max(abs(heat[0]), _MIN_RELATIVE_BASELINE)
+    vol_rel = (vol - vol[0]) / vol_denom
+    heat_rel = (heat - heat[0]) / heat_denom
 
     n_panels = 2
     has_salt = len(salt_vals) == len(times)
     if has_salt:
         salt = np.array(salt_vals, dtype=np.float64)
-        salt_rel = (salt - salt[0]) / max(abs(salt[0]), 1e-30)
+        salt_denom = max(abs(salt[0]), _MIN_RELATIVE_BASELINE)
+        salt_rel = (salt - salt[0]) / salt_denom
         n_panels = 3
 
     with open(output_dir / "conservation_timeseries.csv", "w") as f:
