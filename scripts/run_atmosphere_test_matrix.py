@@ -2163,14 +2163,13 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         def scalar_fn(s):
             fields = spectral_pe_to_grid(s, grid, sigma)
             return {
-                # ``mass`` here is the area-weighted MEAN p_s (not the
-                # full integral) — kept consistent with the cube/latlon/
-                # ico paths which use ``jnp.sum(p_s * area)`` directly,
-                # but the column header ``mass`` is overloaded; the
-                # cross-grid drift comparison in
-                # ``comparison_timeseries.png`` only requires
-                # consistency, which area-weighting now provides.
-                "mass": _area_weighted_mean(fields['p_s'], grid.grid_area),
+                # ``mass`` is the area integral ``∫ p_s dA`` (Pa·m²),
+                # consistent with the cube/latlon/ico paths
+                # (``mass_fn = lambda s: float(jnp.sum(s.p_s * area))``).
+                # iter-5 codex review H1 caught my iter-3 mistake of
+                # using the area-weighted MEAN here (Pa) — that broke
+                # cross-grid ``mass`` time-series comparability.
+                "mass": float(jnp.sum(fields['p_s'] * grid.grid_area)),
                 "max_wind": float(jnp.max(jnp.sqrt(
                     fields['u'] ** 2 + fields['v'] ** 2))),
                 "mean_T": _area_weighted_mean(fields['T'], grid.grid_area),
@@ -2445,7 +2444,8 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         def scalar_fn(s):
             fields = spectral_pe_to_grid(s, grid, sigma)
             return {
-                "mass": _area_weighted_mean(fields['p_s'], grid.grid_area),
+                # See iter-5 H1: ``mass`` is the integral, not the mean.
+                "mass": float(jnp.sum(fields['p_s'] * grid.grid_area)),
                 "max_wind": float(jnp.max(jnp.sqrt(
                     fields['u'] ** 2 + fields['v'] ** 2))),
                 "ps_perturbation": float(jnp.max(
@@ -2947,7 +2947,9 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         def scalar_fn(s):
             fields = spectral_pe_to_grid(s, grid, sigma)
             return {
-                "mass":     _area_weighted_mean(fields['p_s'], grid.grid_area),
+                # See iter-5 H1: ``mass`` is the integral (Pa·m²),
+                # ``mean_p_s`` is the area-weighted mean (Pa).
+                "mass":     float(jnp.sum(fields['p_s'] * grid.grid_area)),
                 "max_wind": float(jnp.max(jnp.sqrt(
                     fields['u'] ** 2 + fields['v'] ** 2))),
                 "mean_T":   _area_weighted_mean(fields['T'],   grid.grid_area),
@@ -3654,9 +3656,32 @@ ATMOSPHERE_COMPARISON_FIELDS: dict[str, list[dict]] = {
         {"field": "p_s",        "vmin": 95000, "vmax": 105000,"cmap": "viridis", "units": "Pa"},
     ],
     "amip": [
-        {"field": "T_sfc",      "vmin": 220,   "vmax": 305,   "cmap": "plasma",  "units": "K"},
+        # AMIP runners save ``T_3d`` (4-D) and ``p_s`` / ``u`` /
+        # ``wind_speed`` (3-D).  The plotter slices the lowest level
+        # of T_3d as a surface-T proxy.  ``T_sfc`` and ``precip`` are
+        # NOT currently saved by any AMIP extractor; iter-5 codex
+        # review M2 caught my iter-1 mistake of advertising fields
+        # the runners don't produce.  Restore those panels once the
+        # AMIP extractors emit them.
+        {"field": "T_3d",       "vmin": 220,   "vmax": 305,   "cmap": "plasma",  "units": "K"},
         {"field": "p_s",        "vmin": 95000, "vmax": 105000,"cmap": "viridis", "units": "Pa"},
-        {"field": "precip",     "vmin": 0,     "vmax": 50,    "cmap": "Blues",   "units": "mm/day"},
+        {"field": "wind_speed", "vmin": 0,     "vmax": 60,    "cmap": "viridis", "units": "m/s"},
+    ],
+    # DCMIP transport tests save tracer fields (``q1``..``q4`` 2-D and
+    # ``q1_3d`` 3-D).  Solid-body / divergent-flow advection should
+    # preserve the tracer pattern across grids; cross-grid panels
+    # expose grid-specific dispersion / monotonicity differences.
+    # iter-5 codex review M3.
+    "dcmip_transport_11": [
+        {"field": "q1",         "vmin": 0,     "vmax": 1.1,   "cmap": "viridis", "units": "kg/kg"},
+        {"field": "q2",         "vmin": 0,     "vmax": 1.1,   "cmap": "viridis", "units": "kg/kg"},
+    ],
+    "dcmip_transport_12": [
+        {"field": "q1",         "vmin": 0,     "vmax": 1.1,   "cmap": "viridis", "units": "kg/kg"},
+    ],
+    "dcmip_transport_13": [
+        {"field": "q1",         "vmin": 0,     "vmax": 1.1,   "cmap": "viridis", "units": "kg/kg"},
+        {"field": "q2",         "vmin": 0,     "vmax": 1.1,   "cmap": "viridis", "units": "kg/kg"},
     ],
 }
 
@@ -3702,10 +3727,19 @@ def _collect_grid_results_atmosphere(
             continue
         if grid_dir.name not in GRID_TYPES:
             continue
-        # Find the (single) resolution subdirectory.
+        # Find the (single) resolution subdirectory.  iter-5 codex
+        # review M4: warn if multiple resolution dirs exist so a stale
+        # mixed-resolution tree doesn't silently drive the comparison.
         res_dirs = [d for d in grid_dir.iterdir() if d.is_dir()]
         if not res_dirs:
             continue
+        if len(res_dirs) > 1:
+            print(
+                f"    [comparison] {grid_dir.name}: multiple resolution "
+                f"dirs found ({sorted(d.name for d in res_dirs)}); using "
+                f"{sorted(res_dirs)[0].name} — re-run with a clean output "
+                f"tree if a different one is intended."
+            )
         res_dir = sorted(res_dirs)[0]
 
         # Determine the leaf directory.  When vertical_coord is given,
@@ -3779,8 +3813,18 @@ def _vertical_coords_for_case(test_case_dir: Path) -> list[str | None]:
             if sub.is_dir() and (sub / "snapshots_latlon.npz").exists():
                 verts.add(sub.name)
     if verts and found_sw:
-        # Mixed layout: shouldn't happen in practice, but be defensive
-        # — emit both the SW-style sentinel AND the hydro-style coords.
+        # Mixed layout: SOME grids have leaf files at the resolution
+        # level (SW-style) and others have a vertical-coord subdir
+        # level (hydro-style).  Almost always indicates stale output
+        # mixed with a re-run.  iter-5 codex review L1: warn the user
+        # rather than silently emitting two comparison sets.
+        print(
+            f"  [comparison] {test_case_dir.name}: mixed SW-style and "
+            f"vertical-coord layouts detected — emitting BOTH SW-style "
+            f"and per-vertical-coord comparisons.  This usually means "
+            f"the output tree contains stale data; consider clearing "
+            f"the case directory before re-running."
+        )
         return [None] + sorted(verts)
     if verts:
         return sorted(verts)
@@ -3972,8 +4016,16 @@ def _create_atmosphere_comparison_timeseries(
         "mean_height", "max_height", "min_height",
         "mean_T", "mean_T_sfc", "max_T", "min_T",
         "mean_u", "max_speed", "max_wind", "max_abs_w",
-        "mean_p_s", "mass_drift", "energy_drift",
+        # iter-5 M1: ``mass`` is the integral ``∫ p_s dA`` (Pa·m²)
+        # written by the cube/latlon/ico/spectral hydro/AMIP runners.
+        # Adding it to the TS candidate list lets the cross-grid
+        # comparison overlay this mass diagnostic across grids.
+        "mass", "mean_p_s", "mass_drift", "energy_drift",
         "mean_q_v", "max_q_v", "global_precip",
+        # DCMIP transport tracer scalars
+        "q1_min", "q1_max", "q1_mean",
+        # NH dycore scalars
+        "mean_theta_prime", "mean_rho_prime",
     ]
     for col in candidates:
         if all(col in data["timeseries"].columns
@@ -4247,18 +4299,26 @@ def main():
         print(f"\nTotal: {len(tests)} test cases "
               f"(of {len(TEST_MATRIX)} in full matrix)")
         return
-    if not tests:
-        print("No tests match the given filters.")
-        return
-
     output_base = Path(args.output)
 
     # --cross-grid-plots-only: skip the test loop entirely, just regenerate
     # comparison artifacts from existing per-grid output trees.
+    # iter-5 codex review L2: this path runs BEFORE the empty-tests
+    # check so a filter that matches no test cases doesn't suppress
+    # the regeneration.  Filters DO restrict which case directories
+    # get re-plotted (matched against tc.case names from the filtered
+    # TEST_MATRIX).
     if args.cross_grid_plots_only:
         print("=" * 78)
         print("  Cross-grid comparison plots — generating from existing output")
         print(f"  Output base: {output_base}")
+        if args.test or args.only != "all" or args.grid != "all":
+            allowed_cases = {t.case for t in tests}
+            print(f"  Filters: case={args.test or '*'} only={args.only} grid={args.grid}")
+            print(f"  Matching {len(allowed_cases)} case name(s): "
+                  f"{', '.join(sorted(allowed_cases)) or '(none)'}")
+        else:
+            allowed_cases = None  # no filter
         print("=" * 78)
         cases = _walk_atmosphere_test_cases(output_base)
         if not cases:
@@ -4266,6 +4326,8 @@ def main():
             return
         n_combos = 0
         for case_dir in cases:
+            if allowed_cases is not None and case_dir.name not in allowed_cases:
+                continue
             for vc in _vertical_coords_for_case(case_dir):
                 try:
                     _create_cross_grid_comparisons_atmosphere(
@@ -4276,6 +4338,10 @@ def main():
                     label = case_dir.name + (f"/{vc}" if vc else "")
                     print(f"  [WARN] {label}: {e}")
         print(f"  Done.  {n_combos} (case, vert) combo(s) processed.")
+        return
+
+    if not tests:
+        print("No tests match the given filters.")
         return
 
     if args.resolution:
