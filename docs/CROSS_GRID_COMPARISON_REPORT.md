@@ -29,8 +29,8 @@ and every available pair of grids:
   `T(latitude, σ)` cross-section, the canonical Held-Suarez
   Fig. 3 layout.
 
-Every helper has a corresponding unit test (57 / 57 pass in
-`tests/test_atmosphere_cross_grid_plots.py` (51) +
+Every helper has a corresponding unit test (59 / 59 pass in
+`tests/test_atmosphere_cross_grid_plots.py` (53) +
 `test_ocean_cross_grid_plots.py` (6)).
 
 CLI:
@@ -151,10 +151,13 @@ cross-grid ocean test (wind-driven gyres / OMIP) is a follow-up.
 | 32 | GPU efficiency table no-ops on DCMIP/NH (`days` key only) | MEDIUM |
 | 36 | `--cloud-scheme sundqvist` silently broken (`include_clouds=False`) | HIGH |
 | 37 | `--cloud-scheme xu_randall` would silently no-op (no condensate tracers) | MEDIUM |
+| 39 | `--ozone-max-vmr 8` would set VMR=8 (unphysical) instead of being read as ppmv | HIGH |
+| 39 | `--ozone-peak-hpa` / `--ozone-max-vmr` silently no-op when source != "analytical" | MEDIUM |
 
 **Codex adversarial review iterations**: iter-5, iter-6, iter-7,
-iter-16, iter-21, iter-26, iter-27, iter-32, iter-36, iter-37.
-Each round caught real issues; final convergence is clean.
+iter-16, iter-21, iter-26, iter-27, iter-32, iter-36, iter-37,
+iter-39.  Each round caught real issues; final convergence
+is clean.
 
 ---
 
@@ -165,13 +168,13 @@ Each round caught real issues; final convergence is clean.
 | Shallow water tests on all grids | ✅ DONE |
 | Hydrostatic Held-Suarez on all grids | ✅ DONE (with documented structural disagreement) |
 | Hydrostatic RCE on all grids | ✅ DONE (iter-24: ``mean_timeseries.csv`` + ``results.txt`` output, ``run_rce_cross_grid.sh`` wrapper) |
-| Hydrostatic AMIP w/ realistic GHG/aerosol/O3 | ⚠️ iter-22 RRTMGP wired (steady-state); iter-31 ``--co2-ppmv`` / ``--ch4-ppbv`` / ``--n2o-ppbv`` CLI knobs; iter-34/36 ``--cloud-scheme {none,sundqvist}`` with auto-``include_clouds=True``; iter-39 ``--ozone-source {standard,analytical,none}`` / ``--ozone-peak-hPa`` / ``--ozone-max-vmr`` knobs.  CMIP6 input4MIPs time-varying loaders still pending. |
+| Hydrostatic AMIP w/ realistic GHG/aerosol/O3 | ⚠️ iter-22 RRTMGP wired (steady-state); iter-31 ``--co2-ppmv`` / ``--ch4-ppbv`` / ``--n2o-ppbv`` CLI knobs; iter-34/36 ``--cloud-scheme {none,sundqvist}`` with auto-``include_clouds=True``; iter-39 ``--ozone-source {standard,analytical,none}`` / ``--ozone-peak-hpa`` / ``--ozone-max-vmr`` knobs with auto-``source=analytical`` promotion and VMR-bound checks.  CMIP6 input4MIPs time-varying loaders still pending. |
 | Ocean test cases on all grids | ✅ DONE |
 | OMIP | ✅ DONE (iter-25: matrix-compatible CSV + results.txt, ``run_omip_cross_grid.sh`` wrapper) |
 | Same colorbar/projection across grids | ✅ DONE (cartopy PlateCarrée + shared cmap) |
 | Physical consistency vs reference papers | ⚠️ Williamson cases agree to machine precision; HS climatology disagrees structurally (documented in §2) |
 | GPU / MPI efficiency | ✅ DONE (iter-28/29: per-test-case ``wall-time/day`` ranking + speedup factor in every ``comparison_summary.txt``) |
-| `/codex:adversarial-review` | ✅ DONE (10 review rounds: iter-5/6/7/16/21/26/27/32/36/37, all findings addressed) |
+| `/codex:adversarial-review` | ✅ DONE (11 review rounds: iter-5/6/7/16/21/26/27/32/36/37/39, all findings addressed) |
 
 ---
 
@@ -244,15 +247,23 @@ Each round caught real issues; final convergence is clean.
   proper config-capture using ``monkeypatch``.
 * iter-38: doc refresh consolidating iter-30..37 work.
 * iter-39: ``--ozone-source {standard, analytical, none}`` /
-  ``--ozone-peak-hPa`` / ``--ozone-max-vmr`` CLI knobs added.
+  ``--ozone-peak-hpa`` / ``--ozone-max-vmr`` CLI knobs added.
   Mirrors the iter-31 GHG-overrides pattern: runtime-overrides
-  dict, validate non-negative-finite, augment helper records
-  the values in ``results.txt`` for reproducibility.  7 new
-  unit tests including a config-capture test that pins the
-  ``OzoneProfileConfig`` propagation through ``RadiationConfig``.
+  dict, augment helper records the values in ``results.txt``
+  for reproducibility.  9 new unit tests including a
+  ``_compute_ozone_vmr`` consumption test that pins the
+  end-to-end VMR-scaling-with-config behaviour.
+  iter-39 codex review (1 HIGH + 3 MEDIUM + 1 LOW): VMR upper-
+  bound (``--ozone-max-vmr 8`` is unphysical, was confusing
+  with 8 ppmv); implicit ``source=analytical`` promotion when
+  only peak/vmr is set; explicit-contradiction guard
+  (``--ozone-source standard --ozone-peak-hpa 50`` rejected at
+  parse time); CLI casing harmonized to lower-case unit suffix
+  (``--ozone-peak-hpa``); ``results.txt`` key casing made
+  consistent.
 
-57/57 unit tests pass across both
-``tests/test_atmosphere_cross_grid_plots.py`` (51) and
+59/59 unit tests pass across both
+``tests/test_atmosphere_cross_grid_plots.py`` (53) and
 ``tests/test_ocean_cross_grid_plots.py`` (6).
 
 ---

@@ -349,9 +349,15 @@ _RUNTIME_RRTMGP_OVERRIDES: dict[str, float | str | None] = {
     # iter-39: optional analytical-ozone-profile knobs.  These map
     # directly onto ``OzoneProfileConfig`` fields and are forwarded
     # via ``RadiationConfig.ozone`` only when at least one is set.
+    # iter-39 codex MEDIUM: keys are lower-case + lower-case unit
+    # suffix to match the iter-31 GHG keys (``co2_ppmv``,
+    # ``ch4_ppbv``, ``n2o_ppbv``).  The ``OzoneProfileConfig``
+    # internal field is still ``p_peak_hPa`` (mixed-case unit
+    # suffix); the override dict layer stays lower-case so
+    # ``results.txt`` columns are consistent.
     "ozone_source": None,    # "standard" | "analytical" | "none"
-    "ozone_peak_hPa": None,  # float
-    "ozone_max_vmr": None,   # float (volume mixing ratio)
+    "ozone_peak_hpa": None,  # float (analytical-source only)
+    "ozone_max_vmr": None,   # float (analytical-source only); 0 < vmr <= 1
 }
 
 
@@ -427,13 +433,28 @@ def _make_rrtmgp_physics(model_type: str, dt: float, hs_fn=None,
     # Iter-39: optional ozone-profile overrides.  Only construct an
     # ``OzoneProfileConfig`` if at least one of the three knobs is
     # set; otherwise leave the radiation default.
+    #
+    # iter-39 codex MEDIUM: ``--ozone-peak-hpa`` / ``--ozone-max-vmr``
+    # only affect the analytical Gaussian path
+    # (``_compute_ozone_vmr`` source=="analytical"); they're silently
+    # ignored when source is ``standard`` (built-in profile) or
+    # ``none`` (zero ozone).  When the user sets one of these
+    # without explicitly setting source, auto-promote source to
+    # ``"analytical"`` — matches the iter-36 ``include_clouds``
+    # auto-flip pattern.  CLI-side parser_error guards against the
+    # explicit-contradiction case (``--ozone-source standard
+    # --ozone-peak-hpa 50``).
     eff_o3_src = _RUNTIME_RRTMGP_OVERRIDES.get("ozone_source")
-    eff_o3_peak = _RUNTIME_RRTMGP_OVERRIDES.get("ozone_peak_hPa")
+    eff_o3_peak = _RUNTIME_RRTMGP_OVERRIDES.get("ozone_peak_hpa")
     eff_o3_vmr = _RUNTIME_RRTMGP_OVERRIDES.get("ozone_max_vmr")
     if eff_o3_src is not None or eff_o3_peak is not None or eff_o3_vmr is not None:
         o3_kwargs = {}
         if eff_o3_src is not None:
             o3_kwargs["source"] = eff_o3_src
+        elif eff_o3_peak is not None or eff_o3_vmr is not None:
+            # Implicit promotion so the analytical-only knobs
+            # actually take effect.
+            o3_kwargs["source"] = "analytical"
         if eff_o3_peak is not None:
             o3_kwargs["p_peak_hPa"] = eff_o3_peak
         if eff_o3_vmr is not None:
@@ -801,9 +822,11 @@ def _augment_with_rrtmgp_overrides(rows: dict[str, Any], radiation: str) -> dict
         return rows
     rows = dict(rows)  # shallow copy; preserve caller's dict
     # iter-39: ozone-profile knobs join the existing GHG/cloud trio.
+    # iter-39 codex LOW: keys are lower-case + lower-case unit
+    # suffix for column-name consistency with the iter-31 GHG keys.
     keys = (
         "co2_ppmv", "ch4_ppbv", "n2o_ppbv", "cloud_scheme",
-        "ozone_source", "ozone_peak_hPa", "ozone_max_vmr",
+        "ozone_source", "ozone_peak_hpa", "ozone_max_vmr",
     )
     for key in keys:
         val = _RUNTIME_RRTMGP_OVERRIDES.get(key)
@@ -5036,14 +5059,22 @@ def build_parser() -> argparse.ArgumentParser:
              "profile.  ``none`` disables ozone absorption entirely. "
              "Only takes effect with ``--radiation rrtmgp``.")
     p.add_argument(
-        "--ozone-peak-hPa", type=float, default=None,
+        "--ozone-peak-hpa", type=float, default=None,
+        dest="ozone_peak_hpa",
         help="Override analytical-ozone-profile peak pressure [hPa]. "
-             "Default: 30.  Used only when ``--ozone-source analytical``.")
+             "Default: 30.  Setting this auto-promotes "
+             "``--ozone-source`` to ``analytical`` if not already "
+             "set.  iter-39 codex review: lower-case unit suffix "
+             "matches the iter-31 GHG flags.")
     p.add_argument(
         "--ozone-max-vmr", type=float, default=None,
         help="Override analytical-ozone-profile peak volume mixing "
-             "ratio [unitless].  Default: 8.0e-6 (8 ppmv).  Used "
-             "only when ``--ozone-source analytical``.")
+             "ratio (fraction, 0 < vmr <= 1).  Default: 8.0e-6 "
+             "(8 ppmv).  Setting this auto-promotes "
+             "``--ozone-source`` to ``analytical`` if not already "
+             "set.  iter-39 codex HIGH: input is fractional VMR, "
+             "NOT ppmv — passing ``8`` is an unphysical value and "
+             "is rejected.  For 8 ppmv, use ``8e-6``.")
     p.add_argument(
         "--resolution", type=str, default=None,
         help="Override baseline resolution (e.g. C48, 90x180, ico6)")
@@ -5118,17 +5149,43 @@ def main():
     _RUNTIME_RRTMGP_OVERRIDES["n2o_ppbv"] = args.n2o_ppbv
     _RUNTIME_RRTMGP_OVERRIDES["cloud_scheme"] = args.cloud_scheme
 
-    # iter-39: validate and stash ozone-profile knobs.  Same
-    # non-negative-finite rule as the GHG knobs, except the source
-    # is a string (already validated by ``choices=...``).
-    for fname, fval in [
-        ("--ozone-peak-hPa", args.ozone_peak_hPa),
-        ("--ozone-max-vmr", args.ozone_max_vmr),
-    ]:
-        if fval is not None and (fval <= 0 or not _math.isfinite(fval)):
-            parser.error(f"{fname} must be a positive finite number")
+    # iter-39: validate and stash ozone-profile knobs.  iter-39
+    # codex review:
+    #
+    # HIGH — ``--ozone-max-vmr`` is fractional VMR, NOT ppmv;
+    #   reject any value > 1 (unphysical) so ``8`` does not
+    #   silently mean VMR=8 instead of 8 ppmv.
+    # MEDIUM — ``--ozone-peak-hpa`` / ``--ozone-max-vmr`` only
+    #   affect the analytical Gaussian path.  Reject the explicit
+    #   contradiction case (``--ozone-source standard
+    #   --ozone-peak-hpa 50``) at parse time; the implicit
+    #   "no source given" case is auto-promoted to analytical
+    #   inside ``_make_rrtmgp_physics``.
+    if args.ozone_peak_hpa is not None and (
+        args.ozone_peak_hpa <= 0 or not _math.isfinite(args.ozone_peak_hpa)
+    ):
+        parser.error("--ozone-peak-hpa must be a positive finite number")
+    if args.ozone_max_vmr is not None:
+        if args.ozone_max_vmr <= 0 or not _math.isfinite(args.ozone_max_vmr):
+            parser.error("--ozone-max-vmr must be a positive finite number")
+        if args.ozone_max_vmr > 1.0:
+            parser.error(
+                "--ozone-max-vmr is fractional volume mixing ratio "
+                "(0 < vmr <= 1); for 8 ppmv use 8e-6.  Got "
+                f"{args.ozone_max_vmr}"
+            )
+    if args.ozone_source in ("standard", "none") and (
+        args.ozone_peak_hpa is not None or args.ozone_max_vmr is not None
+    ):
+        parser.error(
+            "--ozone-peak-hpa / --ozone-max-vmr only affect the "
+            "analytical Gaussian path; cannot be combined with "
+            f"--ozone-source {args.ozone_source}.  Use "
+            "--ozone-source analytical (or omit it for implicit "
+            "promotion)."
+        )
     _RUNTIME_RRTMGP_OVERRIDES["ozone_source"] = args.ozone_source
-    _RUNTIME_RRTMGP_OVERRIDES["ozone_peak_hPa"] = args.ozone_peak_hPa
+    _RUNTIME_RRTMGP_OVERRIDES["ozone_peak_hpa"] = args.ozone_peak_hpa
     _RUNTIME_RRTMGP_OVERRIDES["ozone_max_vmr"] = args.ozone_max_vmr
 
     # iter-7 codex review LOW: reset the multi-resolution warning

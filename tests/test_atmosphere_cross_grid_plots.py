@@ -767,19 +767,20 @@ class TestOzoneProfileOverrides:
     def test_overrides_dict_has_ozone_keys(self):
         d = M._RUNTIME_RRTMGP_OVERRIDES
         assert "ozone_source" in d
-        assert "ozone_peak_hPa" in d
+        # iter-39 codex MEDIUM: lower-case unit suffix.
+        assert "ozone_peak_hpa" in d
         assert "ozone_max_vmr" in d
 
     def test_augment_records_set_ozone_overrides(self):
         """When set, ozone overrides should appear in the augmented row."""
         M._RUNTIME_RRTMGP_OVERRIDES["ozone_source"] = "analytical"
-        M._RUNTIME_RRTMGP_OVERRIDES["ozone_peak_hPa"] = 50.0
+        M._RUNTIME_RRTMGP_OVERRIDES["ozone_peak_hpa"] = 50.0
         M._RUNTIME_RRTMGP_OVERRIDES["ozone_max_vmr"] = 1.0e-5
         out = M._augment_with_rrtmgp_overrides(
             {"test": "ozone", "wall_time": "1.0s"}, "rrtmgp",
         )
         assert out["ozone_source"] == "analytical"
-        assert out["ozone_peak_hPa"] == 50.0
+        assert out["ozone_peak_hpa"] == 50.0
         assert out["ozone_max_vmr"] == 1.0e-5
 
     def test_augment_skips_unset_ozone_overrides(self):
@@ -788,7 +789,7 @@ class TestOzoneProfileOverrides:
             {"test": "no_ozone", "wall_time": "1.0s"}, "rrtmgp",
         )
         assert "ozone_source" not in out
-        assert "ozone_peak_hPa" not in out
+        assert "ozone_peak_hpa" not in out
         assert "ozone_max_vmr" not in out
 
     def test_augment_no_op_for_gray_with_ozone_set(self):
@@ -813,7 +814,7 @@ class TestOzoneProfileOverrides:
         monkeypatch.setattr(combined_mod, "make_physics", fake_make_physics)
 
         M._RUNTIME_RRTMGP_OVERRIDES["ozone_source"] = "analytical"
-        M._RUNTIME_RRTMGP_OVERRIDES["ozone_peak_hPa"] = 50.0
+        M._RUNTIME_RRTMGP_OVERRIDES["ozone_peak_hpa"] = 50.0
         M._RUNTIME_RRTMGP_OVERRIDES["ozone_max_vmr"] = 1.0e-5
         _ = M._make_rrtmgp_physics("hydrostatic", dt=300.0)
         phys_cfg = captured["phys_cfg"]
@@ -841,11 +842,15 @@ class TestOzoneProfileOverrides:
         # Default OzoneProfileConfig has source="standard".
         assert phys_cfg.radiation.ozone.source == "standard"
 
-    def test_make_rrtmgp_physics_partial_ozone_overrides(
+    def test_implicit_source_promotion_when_only_peak_set(
         self, monkeypatch,
     ):
-        """Only ``--ozone-peak-hPa`` set: source stays at the
-        OzoneProfileConfig default ("standard"), but peak is updated.
+        """iter-39 codex MEDIUM: when only ``--ozone-peak-hpa`` is
+        set without an explicit source, ``_make_rrtmgp_physics``
+        must auto-promote source to ``"analytical"`` so the peak
+        knob actually takes effect (otherwise it silently no-ops
+        because ``_compute_ozone_vmr`` ignores ``p_peak_hPa`` when
+        source != "analytical").
         """
         captured = {}
 
@@ -856,10 +861,92 @@ class TestOzoneProfileOverrides:
         import legoesm.atmosphere.physics.combined as combined_mod
         monkeypatch.setattr(combined_mod, "make_physics", fake_make_physics)
 
-        M._RUNTIME_RRTMGP_OVERRIDES["ozone_peak_hPa"] = 25.0
+        M._RUNTIME_RRTMGP_OVERRIDES["ozone_peak_hpa"] = 25.0
         _ = M._make_rrtmgp_physics("hydrostatic", dt=300.0)
         phys_cfg = captured["phys_cfg"]
+        assert phys_cfg.radiation.ozone.source == "analytical"
         assert phys_cfg.radiation.ozone.p_peak_hPa == 25.0
         # Other ozone fields keep NamedTuple defaults.
-        assert phys_cfg.radiation.ozone.source == "standard"
         assert phys_cfg.radiation.ozone.o3_max_vmr == 8.0e-6
+
+    def test_implicit_source_promotion_when_only_vmr_set(
+        self, monkeypatch,
+    ):
+        """Same as above but with ``--ozone-max-vmr`` only."""
+        captured = {}
+
+        def fake_make_physics(phys_cfg, model_type, dt):
+            captured["phys_cfg"] = phys_cfg
+            return lambda *a, **kw: None
+
+        import legoesm.atmosphere.physics.combined as combined_mod
+        monkeypatch.setattr(combined_mod, "make_physics", fake_make_physics)
+
+        M._RUNTIME_RRTMGP_OVERRIDES["ozone_max_vmr"] = 1.5e-5
+        _ = M._make_rrtmgp_physics("hydrostatic", dt=300.0)
+        phys_cfg = captured["phys_cfg"]
+        assert phys_cfg.radiation.ozone.source == "analytical"
+        assert phys_cfg.radiation.ozone.o3_max_vmr == 1.5e-5
+
+    def test_compute_ozone_vmr_actually_consumes_config(self):
+        """iter-39 codex MEDIUM: end-to-end O3 consumption test.
+        Directly call ``_compute_ozone_vmr`` from the radiation
+        module with each source value to verify the analytical
+        knobs reach the actual ozone-VMR computation site
+        (RRTMGP's downstream consumer).  Catches the include_clouds-
+        style "config plumbed but never read" failure mode.
+        """
+        import jax.numpy as jnp
+        from legoesm.atmosphere.physics.radiation.config import (
+            OzoneProfileConfig,
+        )
+        from legoesm.atmosphere.physics.radiation.integration import (
+            _compute_ozone_vmr,
+        )
+
+        # 4-column, 5-level pressure profile (Pa).
+        p = jnp.broadcast_to(
+            jnp.linspace(1.0e3, 1.0e5, 5)[None, :], (4, 5),
+        )
+        lat = jnp.array([-0.5, -0.1, 0.1, 0.5])
+
+        # source="standard" → returns None (RRTMGP uses built-in).
+        cfg_std = OzoneProfileConfig(source="standard")
+        assert _compute_ozone_vmr(p, lat, cfg_std) is None
+
+        # source="none" → returns ~zero everywhere.
+        cfg_none = OzoneProfileConfig(source="none")
+        o3_none = _compute_ozone_vmr(p, lat, cfg_none)
+        assert o3_none is not None
+        assert float(jnp.max(o3_none)) <= 1.0e-9
+
+        # source="analytical" with default peak/vmr → non-trivial
+        # Gaussian, max ~ default vmr.
+        cfg_a1 = OzoneProfileConfig(source="analytical")
+        o3_a1 = _compute_ozone_vmr(p, lat, cfg_a1)
+        assert o3_a1 is not None
+        peak1 = float(jnp.max(o3_a1))
+        # Default o3_max_vmr is 8e-6; with lat_dependence factor up
+        # to 1.5, peak should fall in (4e-6, 1.6e-5).
+        assert 4.0e-6 < peak1 < 1.6e-5
+
+        # Doubling o3_max_vmr should approximately double the peak.
+        cfg_a2 = OzoneProfileConfig(
+            source="analytical", o3_max_vmr=1.6e-5,
+        )
+        o3_a2 = _compute_ozone_vmr(p, lat, cfg_a2)
+        peak2 = float(jnp.max(o3_a2))
+        # Strict ratio test: VMR scales linearly in o3_max_vmr.
+        assert abs(peak2 / peak1 - 2.0) < 1.0e-6
+
+        # Moving the peak higher (lower hPa = higher altitude)
+        # changes the location of the maximum.  The default peak is
+        # 30 hPa; move to 100 hPa and verify the level-of-max changes.
+        cfg_a3 = OzoneProfileConfig(
+            source="analytical", p_peak_hPa=100.0,
+        )
+        o3_a3 = _compute_ozone_vmr(p, lat, cfg_a3)
+        # Per-column argmax level differs from cfg_a1's argmax.
+        kmax_a1 = int(jnp.argmax(o3_a1[0]))
+        kmax_a3 = int(jnp.argmax(o3_a3[0]))
+        assert kmax_a1 != kmax_a3
