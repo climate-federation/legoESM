@@ -4777,7 +4777,16 @@ def _select_ocean_resolution_dir(grid_dir, resolution_dirs):
                     f"a clean output tree to remove stale dirs."
                 )
             return chosen
-    # Fall back to filesystem order for graceful degradation.
+    # iter-112 codex LOW-4: fallback prefers bare-numeric
+    # dirs (legacy pre-iter-95 form) over arbitrary names
+    # (e.g., ``_archive``, ``backup``).  Ensures
+    # ``cubed_sphere/{_archive, 16}`` picks ``16`` not
+    # ``_archive``.
+    bare_numeric = [d for d in resolution_dirs if d.name.isdigit()]
+    if bare_numeric:
+        return sorted(bare_numeric)[0]
+    # Final fallback: filesystem order for graceful
+    # degradation when no bare-numeric is present either.
     return resolution_dirs[0]
 
 
@@ -6281,21 +6290,26 @@ def main():
             )
             _sys.exit(2)
 
-        # iter-111 (codex iter-110 LOW-4): reject decimal
-        # numeric strings.  See atmosphere matrix runner for
-        # the rationale.
+        # iter-111 / iter-112 (codex iter-110 LOW-4 +
+        # iter-112 MEDIUM-1): reject ANY non-integer numeric
+        # string.  See atmosphere matrix runner for the
+        # rationale.  The ``float()`` test catches ``.5``,
+        # ``1.``, ``1e3``, ``inf``, ``nan`` in addition to
+        # the ``0.5``-style decimals iter-111 already caught.
         if not is_bare_int:
-            import re as _re
-            if _re.fullmatch(r"-?\d+\.\d+", cli_res):
+            try:
+                _ = float(cli_res)
                 import sys as _sys
                 print(
                     f"error: --resolution must be a positive "
                     f"INTEGER (or a per-grid format string like "
                     f"'C24', 'ico3', '36x72', 'T21', '50km').  "
-                    f"Got decimal string {cli_res!r}.",
+                    f"Got non-integer numeric string {cli_res!r}.",
                     file=_sys.stderr,
                 )
                 _sys.exit(2)
+            except ValueError:
+                pass
 
         def _expand_cli_res(grid_type: str) -> str:
             if not is_bare_int:

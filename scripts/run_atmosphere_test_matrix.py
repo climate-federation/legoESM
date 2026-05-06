@@ -4083,8 +4083,22 @@ def _select_resolution_dir(grid_dir: Path) -> Path | None:
                     f"to remove stale dirs."
                 )
             return chosen
-    # Graceful degradation: no grid-typed dir found, fall back
-    # to the alphabetically-first dir as before iter-108.
+    # iter-112 codex LOW-4: fallback prefers bare-numeric
+    # dirs (legacy pre-iter-95 form) over arbitrary names.
+    bare_numeric = [d for d in res_dirs if d.name.isdigit()]
+    if bare_numeric:
+        if len(res_dirs) > 1 and grid_dir not in _RES_DIR_WARNED:
+            _RES_DIR_WARNED.add(grid_dir)
+            print(
+                f"    [comparison] {grid_dir.name}: multiple "
+                f"resolution dirs found "
+                f"({sorted(d.name for d in res_dirs)}); using "
+                f"{sorted(bare_numeric)[0].name} — re-run with "
+                f"a clean output tree if a different one is "
+                f"intended."
+            )
+        return sorted(bare_numeric)[0]
+    # Final fallback: alphabetically-first.
     if len(res_dirs) > 1 and grid_dir not in _RES_DIR_WARNED:
         _RES_DIR_WARNED.add(grid_dir)
         print(
@@ -5481,27 +5495,37 @@ def main():
             )
             _sys.exit(2)
 
-        # iter-111 (codex iter-110 LOW-4): reject decimal
-        # numeric strings (``--resolution 0.5``,
-        # ``--resolution 1.0``, ``--resolution -0.5``) at the
-        # boundary.  Pre-iter-111, these slipped past the
-        # ``int()`` parse (``is_bare_int=False``) and were
-        # treated as preformatted strings, then crashed later
-        # with ``invalid literal for int() with base 10: '0.5'``
-        # in the per-grid parser — 12 ERRORs across all
-        # tests but the wrapper still exited 0.
+        # iter-111 / iter-112 (codex iter-110 LOW-4 +
+        # iter-112 MEDIUM-1): reject any non-integer numeric
+        # string (``0.5``, ``.5``, ``1.``, ``1e3``, ``inf``,
+        # ``nan``, etc.) at the boundary.  Pre-iter-112, the
+        # iter-111 regex ``-?\d+\.\d+`` only caught the
+        # ``\d+\.\d+`` form, so ``--resolution .5`` (no
+        # leading digit) and ``1e3`` (scientific) slipped
+        # through.  ``--resolution .5`` then crashed in the
+        # cube-sphere parser (``int("5"[1:])``) with 3 PASS /
+        # 9 ERROR.  iter-112 broadens by attempting
+        # ``float()``: if the string parses as float (i.e.,
+        # any numeric form), and ``int()`` already failed, it
+        # must be a non-integer numeric — reject.
         if not is_bare_int:
-            import re as _re
-            if _re.fullmatch(r"-?\d+\.\d+", cli_res):
+            try:
+                _ = float(cli_res)
+                # Parses as float but not as int → non-integer
+                # numeric.  Reject explicitly.
                 import sys as _sys
                 print(
                     f"error: --resolution must be a positive "
                     f"INTEGER (or a per-grid format string like "
                     f"'C36', 'ico5', '72x144', 'T21').  Got "
-                    f"decimal string {cli_res!r}.",
+                    f"non-integer numeric string {cli_res!r}.",
                     file=_sys.stderr,
                 )
                 _sys.exit(2)
+            except ValueError:
+                # Not a numeric string at all — pass through
+                # to ``_expand_cli_res`` as a per-grid format.
+                pass
 
         def _expand_cli_res(grid_type: str) -> str:
             if not is_bare_int:

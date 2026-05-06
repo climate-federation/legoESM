@@ -227,8 +227,75 @@ def main():
         return
 
     if args.resolution:
+        # iter-112 codex MEDIUM-2: port the iter-95/102/107/111
+        # per-grid dispatch + validation from the monolithic
+        # ``run_ocean_test_matrix.py`` to this modular CLI.
+        # Pre-iter-112 this path applied ``args.resolution``
+        # verbatim to every grid type, suffering the same
+        # ``--resolution 16`` → silent-wrong / ValueError /
+        # 4.29e+10-cells bugs.
+        cli_res = args.resolution
+        try:
+            N = int(cli_res)
+            is_bare_int = True
+        except ValueError:
+            is_bare_int = False
+
+        if is_bare_int and N <= 0:
+            import sys as _sys
+            print(
+                f"error: --resolution must be a positive integer "
+                f"(or a per-grid format string like 'C24', 'ico3', "
+                f"'36x72', 'T21', '50km').  Got N={N}.",
+                file=_sys.stderr,
+            )
+            _sys.exit(2)
+        if not is_bare_int:
+            try:
+                _ = float(cli_res)
+                import sys as _sys
+                print(
+                    f"error: --resolution must be a positive "
+                    f"INTEGER (or a per-grid format string).  "
+                    f"Got non-integer numeric string {cli_res!r}.",
+                    file=_sys.stderr,
+                )
+                _sys.exit(2)
+            except ValueError:
+                pass
+
+        def _expand_cli_res(grid_type: str) -> str:
+            if not is_bare_int:
+                return cli_res
+            if grid_type == "cubed_sphere":
+                return f"C{N}"
+            elif grid_type == "latlon":
+                return f"{N}x{2 * N}"
+            elif grid_type == "mpas":
+                import math
+                raw_level = round(
+                    math.log(2 * N * N / 10) / math.log(4))
+                level = max(2, min(8, raw_level))
+                if raw_level > 8:
+                    print(
+                        f"warning: --resolution {N} maps to "
+                        f"icosahedral level {raw_level} > max "
+                        f"supported (8); clipping to ico8."
+                    )
+                return f"ico{level}"
+            elif grid_type == "spectral":
+                return f"T{N}"
+            elif grid_type == "mpas_regional":
+                return f"{N}km"
+            elif grid_type == "latlon_regional":
+                return f"{N}x{2 * N}"
+            elif grid_type == "cs_regional":
+                return f"C{N}"
+            else:
+                return cli_res
+
         tests = [TestCase(
-            t.case, t.grid_type, args.resolution,
+            t.case, t.grid_type, _expand_cli_res(t.grid_type),
             t.duration_days, t.quick_days, t.run_kwargs)
             for t in tests]
 

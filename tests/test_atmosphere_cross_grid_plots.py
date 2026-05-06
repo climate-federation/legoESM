@@ -3330,9 +3330,12 @@ class TestCliResolutionValidation:
             f"iter-111: error message must say INTEGER; got:\n"
             f"{result.stderr}"
         )
-        assert "decimal string" in result.stderr, (
-            f"iter-111: error must mention decimal-string"
-            f" rejection; got:\n{result.stderr}"
+        # iter-112 (codex MEDIUM-1): broadened wording from
+        # "decimal string" → "non-integer numeric string" to
+        # cover ``.5``, ``1.``, ``1e3``, ``inf``, ``nan``.
+        assert "non-integer numeric string" in result.stderr, (
+            f"iter-112: error must mention non-integer numeric"
+            f" string rejection; got:\n{result.stderr}"
         )
 
     def test_atmosphere_resolution_negative_decimal_rejected(self):
@@ -3351,6 +3354,30 @@ class TestCliResolutionValidation:
             timeout=60,
         )
         assert result.returncode == 2
+
+    def test_atmosphere_resolution_iter112_extended_forms_rejected(self):
+        """iter-112 codex MEDIUM-1: ``.5``, ``1.``, ``1e3``,
+        ``inf``, ``nan`` (which slipped past iter-111's regex)
+        all exit 2.
+        """
+        import subprocess
+        from pathlib import Path
+        repo_root = Path(__file__).resolve().parent.parent
+        for bad in (".5", "1.", "1e3", "inf", "nan"):
+            result = subprocess.run(
+                [".venv/bin/python",
+                 "scripts/run_atmosphere_test_matrix.py",
+                 "--only", "sw", "--quick", "--resolution", bad,
+                 "--no-cross-grid-plots"],
+                cwd=str(repo_root),
+                capture_output=True, text=True,
+                env={"JAX_ENABLE_X64": "1", "PATH": "/usr/bin:/bin"},
+                timeout=60,
+            )
+            assert result.returncode == 2, (
+                f"iter-112: --resolution {bad} must exit 2; got "
+                f"{result.returncode}.\nstderr:\n{result.stderr}"
+            )
 
     def test_atmosphere_resolution_string_format_still_works(self):
         """Pre-formatted strings (``C36``, ``ico5``, etc.) must
