@@ -339,11 +339,13 @@ def _create_vertical(nlev: int, vertical_coord: str):
 # functions don't take additional kwargs (they all share the
 # ``runner(tc, out_dir, days, radiation=...)`` signature), so this
 # module-level pattern threads the values through without changing
-# the runner interface.
-_RUNTIME_RRTMGP_OVERRIDES: dict[str, float | None] = {
+# the runner interface.  Iter-34 added ``cloud_scheme`` to the
+# same dict for the same reason.
+_RUNTIME_RRTMGP_OVERRIDES: dict[str, float | str | None] = {
     "co2_ppmv": None,
     "ch4_ppbv": None,
     "n2o_ppbv": None,
+    "cloud_scheme": None,   # iter-34
 }
 
 
@@ -400,8 +402,15 @@ def _make_rrtmgp_physics(model_type: str, dt: float, hs_fn=None,
         rrtmgp_kwargs["n2o_ppbv"] = eff_n2o
     rrtmgp_cfg = RRTMGPConfig(**rrtmgp_kwargs) if rrtmgp_kwargs else RRTMGPConfig()
 
+    # Iter-34: route ``--cloud-scheme`` through RadiationConfig
+    # for AMIP-with-clouds runs.
+    eff_cloud = _RUNTIME_RRTMGP_OVERRIDES.get("cloud_scheme")
+    rad_kwargs = {"scheme": "rrtmgp", "rrtmgp": rrtmgp_cfg}
+    if eff_cloud is not None:
+        rad_kwargs["cloud_scheme"] = eff_cloud
+
     phys_cfg = PhysicsConfig(
-        radiation=RadiationConfig(scheme="rrtmgp", rrtmgp=rrtmgp_cfg),
+        radiation=RadiationConfig(**rad_kwargs),
         convection=ConvectionConfig(scheme="none"),
         turbulence=TurbulenceConfig(scheme="none"),
         microphysics=MicrophysicsConfig(scheme="none"),
@@ -4956,6 +4965,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--n2o-ppbv", type=float, default=None,
         help="Override RRTMGP N2O concentration [ppbv].  Default: 332.")
     p.add_argument(
+        "--cloud-scheme", type=str, default=None,
+        choices=["none", "sundqvist", "xu_randall"],
+        help="iter-34: cloud fraction scheme for RRTMGP cloud-radiation "
+             "coupling.  Default: ``none`` (clear-sky).  Only takes "
+             "effect with ``--radiation rrtmgp``.")
+    p.add_argument(
         "--resolution", type=str, default=None,
         help="Override baseline resolution (e.g. C48, 90x180, ico6)")
     p.add_argument(
@@ -5027,6 +5042,7 @@ def main():
     _RUNTIME_RRTMGP_OVERRIDES["co2_ppmv"] = args.co2_ppmv
     _RUNTIME_RRTMGP_OVERRIDES["ch4_ppbv"] = args.ch4_ppbv
     _RUNTIME_RRTMGP_OVERRIDES["n2o_ppbv"] = args.n2o_ppbv
+    _RUNTIME_RRTMGP_OVERRIDES["cloud_scheme"] = args.cloud_scheme
 
     # iter-7 codex review LOW: reset the multi-resolution warning
     # dedup set so a single ``main()`` invocation produces at most one
