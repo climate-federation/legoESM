@@ -4211,6 +4211,70 @@ class TestHeldSuarezMassDriftTolerance:
         driver = SimpleNamespace(state=SimpleNamespace(p_s=None))
         assert m._compute_driver_mass(driver) is None
 
+    def test_4grids_compare_results_fails_on_excessive_mass_drift(self, tmp_path):
+        """iter-122 codex iter-119-followup LOW-5: behavioral
+        test of the iter-119 4-grid HS+RRTMGP mass-drift gate.
+
+        Pre-iter-122, only source-pin tests verified the gate
+        was present.  iter-122 invokes ``compare_results``
+        directly with a fabricated results dict where the
+        diag's mass series produces drift > 1e-2 and asserts:
+        * The local ``ok`` is updated to False
+        * ``results[grid_name][3]`` reflects the failure (so
+          ``main()``'s ``all(r[3] ...)`` aggregates correctly)
+        """
+        import importlib
+        import sys
+        from pathlib import Path
+        scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+        if str(scripts_dir) not in sys.path:
+            sys.path.insert(0, str(scripts_dir))
+        m = importlib.import_module("run_held_suarez_rrtmgp_4grids")
+
+        # Fabricate a results dict where:
+        # * cube_sphere: mass series with 5% drift (> 1e-2 tol)
+        #   → must FAIL post-gate
+        # * latlon: clean mass series (1e-6 drift) → PASS
+        # * icosahedral: NaN-ending mass series → must FAIL
+        # * spectral: missing mass field → no gate (ok unchanged)
+        results = {
+            "cubed_sphere": (
+                None, {"mass": [1.0e19, 1.05e19]}, 1.0, True),
+            "latlon": (
+                None, {"mass": [1.0e19, 1.0e19 + 1.0e13]},
+                1.0, True),
+            "icosahedral": (
+                None, {"mass": [1.0e19, float("nan")]}, 1.0, True),
+            "spectral": (
+                None, {}, 1.0, True),
+        }
+        m.compare_results(results, tmp_path)
+
+        # Cube: 5% drift → FAIL
+        assert results["cubed_sphere"][3] is False, (
+            "iter-122: cube with 5% mass drift must fail the "
+            "iter-119 gate.  Got results[cube][3]="
+            f"{results['cubed_sphere'][3]}"
+        )
+        # Latlon: 1e-6 drift → PASS
+        assert results["latlon"][3] is True, (
+            "iter-122: latlon with 1e-6 drift should pass."
+        )
+        # Icosahedral: NaN drift → FAIL
+        assert results["icosahedral"][3] is False, (
+            "iter-122: icosahedral with NaN mass series must "
+            "fail the iter-119 NaN gate."
+        )
+        # Spectral: no mass field → mass_drift=0 (sentinel)
+        # iter-119 gate doesn't fire for non-finite-or-too-big
+        # drift; spectral stays True.  This is acceptable
+        # (graceful degradation) — the runner-level finiteness
+        # check would already have caught actual blowup.
+        assert results["spectral"][3] is True, (
+            "iter-122: spectral with no mass field falls "
+            "through the mass gate gracefully (no FAIL)."
+        )
+
     def test_compute_driver_mass_works_for_grid_state(self):
         """Mass = ∫p_s dA computed correctly when both p_s
         and grid.area are present.
