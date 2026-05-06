@@ -3686,6 +3686,29 @@ ATMOSPHERE_COMPARISON_FIELDS: dict[str, list[dict]] = {
 }
 
 
+# Iter-8: per-case 3-D fields whose zonal-mean cross-section
+# ``(latitude, sigma)`` is the canonical inter-model comparison
+# (e.g. Held & Suarez 1994 Fig. 3-4).  Each entry mirrors the
+# ATMOSPHERE_COMPARISON_FIELDS schema but the ``field`` key MUST
+# resolve to a 4-D ``(n_times, lat, lon, nlev)`` array in
+# ``snapshots_latlon.npz`` so the plotter can compute
+# ``mean(field[t_final], axis=lon-axis)``.
+ATMOSPHERE_ZONAL_MEAN_FIELDS: dict[str, list[dict]] = {
+    "held_suarez": [
+        {"field": "T_3d", "vmin": 200,   "vmax": 310,  "cmap": "plasma",
+         "units": "K",   "longname": "Zonal-mean temperature"},
+    ],
+    "baroclinic": [
+        {"field": "T_3d", "vmin": 220,   "vmax": 310,  "cmap": "plasma",
+         "units": "K",   "longname": "Zonal-mean temperature"},
+    ],
+    "amip": [
+        {"field": "T_3d", "vmin": 200,   "vmax": 305,  "cmap": "plasma",
+         "units": "K",   "longname": "Zonal-mean temperature"},
+    ],
+}
+
+
 def _atmosphere_grid_color() -> dict[str, str]:
     return {
         "cubed_sphere": "tab:blue",
@@ -4028,6 +4051,135 @@ def _create_atmosphere_comparison_snapshots(
         print(f"    Saved: {out_file.name}")
 
 
+def _zonal_mean_at_final_time(arr_4d: np.ndarray) -> np.ndarray:
+    """Reduce a 4-D ``(n_times, n_lat, n_lon, n_lev)`` snapshot array to
+    the zonal-mean cross-section at the final time, returning a 2-D
+    array shaped ``(n_lat, n_lev)``.
+
+    Used by the zonal-mean cross-grid comparison.  Iter-8.
+    """
+    if arr_4d.ndim != 4:
+        raise ValueError(
+            f"_zonal_mean_at_final_time: expected 4-D (n_times, n_lat, "
+            f"n_lon, n_lev), got shape {arr_4d.shape}"
+        )
+    return np.nanmean(arr_4d[-1], axis=1)  # collapse longitude axis
+
+
+def _create_atmosphere_comparison_zonal_mean(
+    test_case_dir: Path, grid_results: dict, fields: list[dict],
+    *, label: str | None = None,
+) -> None:
+    """4-panel zonal-mean ``(latitude, sigma-level)`` cross-section
+    comparison across grids using a SHARED colormap.
+
+    For Held-Suarez this is the canonical Fig. 3 / Fig. 4 of
+    Held & Suarez (1994): the climatological zonal-mean temperature
+    and zonal-mean zonal wind versus latitude and pressure level.
+    Cross-grid disagreement in this plot is the principal physical-
+    consistency check the user asked about in iter-5 ("ideally those
+    Held and Suarez cases should all be the same after a few days").
+
+    One PNG is written per requested 4-D field:
+    ``comparison_zonal_mean_<field>.png``.
+
+    The vertical axis is the model-level INDEX (0 = top, nlev-1 =
+    surface) — labelled "Sigma level (top → bottom)" so the
+    convention is unambiguous regardless of which vertical
+    coordinate (sigma vs hybrid vs height) the run used.
+    """
+    case_name = label if label is not None else test_case_dir.name
+
+    for spec in fields:
+        field = spec["field"]
+        vmin = spec["vmin"]
+        vmax = spec["vmax"]
+        cmap = spec["cmap"]
+        units = spec.get("units", "")
+        longname = spec.get("longname", field)
+
+        zonal_means: dict[str, np.ndarray] = {}
+        for grid_name, data in grid_results.items():
+            snap = data["snapshots"]
+            if field not in snap.files:
+                continue
+            arr = np.asarray(snap[field])
+            if arr.ndim != 4:
+                continue
+            try:
+                zm = _zonal_mean_at_final_time(arr)
+            except ValueError:
+                continue
+            zonal_means[grid_name] = zm
+
+        if len(zonal_means) < 2:
+            continue
+
+        nrows, ncols = 2, 2
+        fig, axes = plt.subplots(nrows, ncols, figsize=(13, 8))
+
+        sim_time_str = ""
+        for data in grid_results.values():
+            snap = data["snapshots"]
+            if "times_days" in snap.files:
+                sim_time_str = f" (t = {float(snap['times_days'][-1]):.2f} d)"
+                break
+
+        fig.suptitle(
+            f"{case_name} — {longname} cross-grid comparison{sim_time_str}",
+            fontsize=13, fontweight="bold",
+        )
+
+        slot_order = [g for g in GRID_TYPES if g in grid_results]
+        slot_order += [g for g in grid_results if g not in slot_order]
+
+        im = None
+        for slot, ax in zip(range(nrows * ncols), axes.flat):
+            if slot >= len(slot_order):
+                ax.set_visible(False)
+                continue
+            grid_name = slot_order[slot]
+            data = grid_results[grid_name]
+            if grid_name not in zonal_means:
+                ax.set_title(f"{grid_name} ({data['resolution']}) — {field} N/A")
+                ax.set_visible(False)
+                continue
+            zm = zonal_means[grid_name]              # (n_lat, n_lev)
+            n_lat, n_lev = zm.shape
+            md_lat = np.asarray(data["snapshots"]["lat"])
+            lat = md_lat if md_lat.size == n_lat else np.linspace(-90.0, 90.0, n_lat)
+            # Plot with sigma level on vertical (top-down: 0 at top)
+            im = ax.pcolormesh(
+                lat, np.arange(n_lev), zm.T, cmap=cmap, vmin=vmin, vmax=vmax,
+                shading="auto",
+            )
+            ax.invert_yaxis()  # so model top is at the top of the plot
+            ax.set_title(f"{grid_name} ({data['resolution']})")
+            ax.set_xlabel("Latitude (deg)")
+            ax.set_ylabel("Sigma level (top → bottom)")
+            ax.set_xlim(-90, 90)
+            ax.set_xticks([-60, -30, 0, 30, 60])
+            ax.grid(True, alpha=0.25, linewidth=0.4)
+
+        if im is not None:
+            cbar_ax = fig.add_axes([0.92, 0.15, 0.018, 0.7])
+            cb = fig.colorbar(im, cax=cbar_ax)
+            cb.set_label(f"{field}" + (f" ({units})" if units else ""))
+
+        from datetime import datetime
+        fig.text(0.99, 0.01,
+                 f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                 ha="right", va="bottom", fontsize=7, color="gray")
+
+        fig.subplots_adjust(left=0.06, right=0.9, top=0.92, bottom=0.07,
+                            wspace=0.18, hspace=0.25)
+
+        out_file = test_case_dir / f"comparison_zonal_mean_{field}.png"
+        plt.savefig(out_file, dpi=140, bbox_inches="tight")
+        plt.close(fig)
+        print(f"    Saved: {out_file.name}")
+
+
 def _create_atmosphere_comparison_timeseries(
     test_case_dir: Path, grid_results: dict,
     *, label: str | None = None,
@@ -4214,6 +4366,16 @@ def _create_cross_grid_comparisons_atmosphere(
     _create_atmosphere_comparison_summary(
         out_dir, grid_results, label=label,
     )
+    # Iter-8: zonal-mean cross-section comparison.  Only emitted for
+    # cases registered in ATMOSPHERE_ZONAL_MEAN_FIELDS (currently HS,
+    # baroclinic, AMIP) — these are the cases where a steady-state /
+    # statistical-equilibrium zonal climatology is the canonical
+    # cross-grid agreement metric (Held & Suarez 1994 Fig. 3-4).
+    zm_fields = ATMOSPHERE_ZONAL_MEAN_FIELDS.get(case_name)
+    if zm_fields:
+        _create_atmosphere_comparison_zonal_mean(
+            out_dir, grid_results, zm_fields, label=label,
+        )
 
 
 def _walk_atmosphere_test_cases(output_base: Path) -> list[Path]:
