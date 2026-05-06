@@ -628,3 +628,51 @@ class TestRrtmgpGhgOverrides:
         assert params["co2_ppmv"].default is None
         assert params["ch4_ppbv"].default is None
         assert params["n2o_ppbv"].default is None
+
+
+# ---------------------------------------------------------------------------
+# iter-35: _augment_with_rrtmgp_overrides helper
+# ---------------------------------------------------------------------------
+
+class TestAugmentWithRrtmgpOverrides:
+    def test_no_op_for_gray_radiation(self):
+        """Helper is a no-op when ``radiation != "rrtmgp"``."""
+        rows = {"test": "x", "wall_time": "1.0s"}
+        # Even if overrides are SET, gray-rad path doesn't write them.
+        M._RUNTIME_RRTMGP_OVERRIDES["co2_ppmv"] = 280.0
+        try:
+            out = M._augment_with_rrtmgp_overrides(rows, "gray")
+            assert "co2_ppmv" not in out
+            assert out["test"] == "x"
+        finally:
+            M._RUNTIME_RRTMGP_OVERRIDES["co2_ppmv"] = None
+
+    def test_appends_rrtmgp_overrides(self):
+        """When ``radiation == "rrtmgp"``, set overrides are recorded."""
+        # Set up overrides.
+        M._RUNTIME_RRTMGP_OVERRIDES["co2_ppmv"] = 280.0
+        M._RUNTIME_RRTMGP_OVERRIDES["cloud_scheme"] = "sundqvist"
+        try:
+            out = M._augment_with_rrtmgp_overrides(
+                {"test": "y", "wall_time": "1.0s"}, "rrtmgp",
+            )
+            assert out["co2_ppmv"] == 280.0
+            assert out["cloud_scheme"] == "sundqvist"
+            # Unset overrides not appended.
+            assert "ch4_ppbv" not in out
+            assert "n2o_ppbv" not in out
+        finally:
+            M._RUNTIME_RRTMGP_OVERRIDES["co2_ppmv"] = None
+            M._RUNTIME_RRTMGP_OVERRIDES["cloud_scheme"] = None
+
+    def test_does_not_mutate_input_dict(self):
+        """Helper returns a NEW dict; doesn't mutate the caller's."""
+        original = {"test": "z", "wall_time": "1.0s"}
+        M._RUNTIME_RRTMGP_OVERRIDES["co2_ppmv"] = 415.0
+        try:
+            out = M._augment_with_rrtmgp_overrides(original, "rrtmgp")
+            assert "co2_ppmv" in out
+            # Original dict unchanged.
+            assert "co2_ppmv" not in original
+        finally:
+            M._RUNTIME_RRTMGP_OVERRIDES["co2_ppmv"] = None

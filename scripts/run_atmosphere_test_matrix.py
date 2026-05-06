@@ -759,6 +759,23 @@ def _fill_nan_section(section: np.ndarray) -> np.ndarray:
 # File writers
 # ---------------------------------------------------------------------------
 
+def _augment_with_rrtmgp_overrides(rows: dict[str, Any], radiation: str) -> dict[str, Any]:
+    """If RRTMGP is active, append the effective GHG / cloud overrides
+    to ``rows`` so they're recorded in ``results.txt`` for
+    reproducibility.  Iter-32 LOW2 finding (originally inlined in
+    ``run_amip``); iter-35 factored out so other runners
+    (``run_held_suarez`` etc.) get the same metadata.
+    """
+    if radiation != "rrtmgp":
+        return rows
+    rows = dict(rows)  # shallow copy; preserve caller's dict
+    for key in ("co2_ppmv", "ch4_ppbv", "n2o_ppbv", "cloud_scheme"):
+        val = _RUNTIME_RRTMGP_OVERRIDES.get(key)
+        if val is not None:
+            rows[key] = val
+    return rows
+
+
 def _write_results_txt(output_dir: Path, rows: dict[str, Any]):
     output_dir.mkdir(parents=True, exist_ok=True)
     with open(output_dir / "results.txt", "w") as f:
@@ -2292,12 +2309,12 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
     level_values = np.asarray(
         getattr(sigma, "sigma_full", np.arange(nlev)), dtype=np.float64)
 
-    _write_results_txt(output_dir, {
+    _write_results_txt(output_dir, _augment_with_rrtmgp_overrides({
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
         "vertical_coord": tc.vertical_coord, "radiation": radiation,
         "days": days, "dt": dt, "levels": nlev,
         "status": "PASS" if ok else "FAIL", "notes": notes,
-        "wall_time": f"{wall:.1f}s"})
+        "wall_time": f"{wall:.1f}s"}, radiation))
     _save_case_diagnostics(
         output_dir,
         f"Held-Suarez {radiation} {tc.resolution} {tc.vertical_coord}",
@@ -3089,25 +3106,16 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
     level_values = np.asarray(
         getattr(sigma, "sigma_full", np.arange(nlev)), dtype=np.float64)
 
-    # iter-32 codex LOW: record effective GHG concentrations in
-    # ``results.txt`` for reproducibility when RRTMGP is active.
-    rows = {
+    # iter-32 codex LOW + iter-35 factored: record effective GHG
+    # concentrations in ``results.txt`` for reproducibility when
+    # RRTMGP is active.  ``_augment_with_rrtmgp_overrides`` is the
+    # shared helper now also used by ``run_held_suarez``.
+    _write_results_txt(output_dir, _augment_with_rrtmgp_overrides({
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
         "radiation": radiation, "days": days, "dt": dt,
         "status": "PASS" if ok else "FAIL", "notes": notes,
         "wall_time": f"{wall:.1f}s",
-    }
-    if radiation == "rrtmgp":
-        co2 = _RUNTIME_RRTMGP_OVERRIDES.get("co2_ppmv")
-        ch4 = _RUNTIME_RRTMGP_OVERRIDES.get("ch4_ppbv")
-        n2o = _RUNTIME_RRTMGP_OVERRIDES.get("n2o_ppbv")
-        if co2 is not None:
-            rows["co2_ppmv"] = co2
-        if ch4 is not None:
-            rows["ch4_ppbv"] = ch4
-        if n2o is not None:
-            rows["n2o_ppbv"] = n2o
-    _write_results_txt(output_dir, rows)
+    }, radiation))
     _save_case_diagnostics(
         output_dir,
         f"AMIP {radiation} {tc.resolution} hybrid",
