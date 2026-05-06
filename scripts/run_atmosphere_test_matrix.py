@@ -2231,7 +2231,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         field_3d_key="T_3d", level_values=level_values,
         level_label="Sigma level",
         mass_key="mass", energy_key="mean_T",
-        scalar_units={"mass": "Pa*sr", "max_wind": "m/s", "mean_T": "K"})
+        scalar_units={"mass": "Pa*m^2", "max_wind": "m/s", "mean_T": "K"})
 
     return "PASS" if ok else "FAIL", wall, notes
 
@@ -2509,7 +2509,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         level_label="Sigma level",
         mass_key="mass", energy_key="max_wind",
         scalar_units={
-            "mass": "Pa*sr", "max_wind": "m/s",
+            "mass": "Pa*m^2", "max_wind": "m/s",
             "ps_perturbation": "Pa"})
 
     return "PASS" if ok else "FAIL", wall, notes
@@ -3011,7 +3011,7 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         level_label="Sigma level",
         mass_key="mass", energy_key="mean_T",
         scalar_units={
-            "mass": "Pa*sr", "max_wind": "m/s", "mean_T": "K",
+            "mass": "Pa*m^2", "max_wind": "m/s", "mean_T": "K",
             "mean_p_s": "Pa"})
 
     return "PASS" if ok else "FAIL", wall, notes
@@ -3695,8 +3695,37 @@ def _atmosphere_grid_color() -> dict[str, str]:
     }
 
 
+_RES_DIR_WARNED: set[Path] = set()
+
+
+def _select_resolution_dir(grid_dir: Path) -> Path | None:
+    """Pick the (single) resolution subdirectory under ``grid_dir``.
+
+    When more than one resolution directory exists (stale + fresh
+    output mixed in the same tree), warn ONCE per ``grid_dir`` and
+    return the alphabetically-first one.  Centralised so
+    ``_collect_grid_results_atmosphere`` and ``_vertical_coords_for_case``
+    use identical selection logic and don't emit duplicate warnings.
+    """
+    res_dirs = [d for d in grid_dir.iterdir() if d.is_dir()]
+    if not res_dirs:
+        return None
+    if len(res_dirs) > 1 and grid_dir not in _RES_DIR_WARNED:
+        _RES_DIR_WARNED.add(grid_dir)
+        print(
+            f"    [comparison] {grid_dir.name}: multiple resolution "
+            f"dirs found ({sorted(d.name for d in res_dirs)}); using "
+            f"{sorted(res_dirs)[0].name} — re-run with a clean output "
+            f"tree if a different one is intended."
+        )
+    return sorted(res_dirs)[0]
+
+
 def _collect_grid_results_atmosphere(
-    test_case_dir: Path, vertical_coord: str | None = None,
+    test_case_dir: Path,
+    vertical_coord: str | None = None,
+    *,
+    allowed_grids: set[str] | None = None,
 ) -> dict[str, dict]:
     """Walk ``<grid>/<resolution>/[<vertical>/]`` under ``test_case_dir`` and
     load each grid's outputs.
@@ -3727,20 +3756,13 @@ def _collect_grid_results_atmosphere(
             continue
         if grid_dir.name not in GRID_TYPES:
             continue
-        # Find the (single) resolution subdirectory.  iter-5 codex
-        # review M4: warn if multiple resolution dirs exist so a stale
-        # mixed-resolution tree doesn't silently drive the comparison.
-        res_dirs = [d for d in grid_dir.iterdir() if d.is_dir()]
-        if not res_dirs:
+        if allowed_grids is not None and grid_dir.name not in allowed_grids:
             continue
-        if len(res_dirs) > 1:
-            print(
-                f"    [comparison] {grid_dir.name}: multiple resolution "
-                f"dirs found ({sorted(d.name for d in res_dirs)}); using "
-                f"{sorted(res_dirs)[0].name} — re-run with a clean output "
-                f"tree if a different one is intended."
-            )
-        res_dir = sorted(res_dirs)[0]
+        # iter-6 L1: centralised resolution selection (warns once
+        # per grid_dir on multi-resolution trees).
+        res_dir = _select_resolution_dir(grid_dir)
+        if res_dir is None:
+            continue
 
         # Determine the leaf directory.  When vertical_coord is given,
         # it MUST exist as a subdir; otherwise skip this grid.  When not
@@ -3801,10 +3823,11 @@ def _vertical_coords_for_case(test_case_dir: Path) -> list[str | None]:
     for grid_dir in test_case_dir.iterdir():
         if not grid_dir.is_dir() or grid_dir.name not in GRID_TYPES:
             continue
-        res_dirs = [d for d in grid_dir.iterdir() if d.is_dir()]
-        if not res_dirs:
+        # iter-6 L1: shared resolution-selection helper, identical
+        # warnings as the collector (deduplicated via _RES_DIR_WARNED).
+        res_dir = _select_resolution_dir(grid_dir)
+        if res_dir is None:
             continue
-        res_dir = sorted(res_dirs)[0]
         # Detect SW-style (leaf files at resolution level) vs. hydro-style
         # (vertical-coord subdir level).
         if (res_dir / "snapshots_latlon.npz").exists():
@@ -4132,7 +4155,10 @@ def _create_atmosphere_comparison_summary(
 
 
 def _create_cross_grid_comparisons_atmosphere(
-    test_case_dir: Path, vertical_coord: str | None = None,
+    test_case_dir: Path,
+    vertical_coord: str | None = None,
+    *,
+    allowed_grids: set[str] | None = None,
 ) -> None:
     """Top-level entry point: collect per-grid outputs under
     ``test_case_dir`` for ONE vertical-coord variant and emit shared-
@@ -4146,10 +4172,13 @@ def _create_cross_grid_comparisons_atmosphere(
     coord), output goes to ``test_case_dir/`` directly.
 
     No-ops if fewer than 2 grids produced output for the requested
-    vertical coord.
+    vertical coord.  ``allowed_grids`` (iter-6 L3) restricts which
+    grid sub-directories are loaded; ``None`` loads every grid.
     """
     grid_results = _collect_grid_results_atmosphere(
-        test_case_dir, vertical_coord=vertical_coord,
+        test_case_dir,
+        vertical_coord=vertical_coord,
+        allowed_grids=allowed_grids,
     )
     if len(grid_results) < 2:
         return
@@ -4314,11 +4343,15 @@ def main():
         print(f"  Output base: {output_base}")
         if args.test or args.only != "all" or args.grid != "all":
             allowed_cases = {t.case for t in tests}
+            allowed_grids = {t.grid_type for t in tests} if args.grid != "all" else None
             print(f"  Filters: case={args.test or '*'} only={args.only} grid={args.grid}")
             print(f"  Matching {len(allowed_cases)} case name(s): "
                   f"{', '.join(sorted(allowed_cases)) or '(none)'}")
+            if allowed_grids is not None:
+                print(f"  Restricting to grids: {sorted(allowed_grids)}")
         else:
             allowed_cases = None  # no filter
+            allowed_grids = None
         print("=" * 78)
         cases = _walk_atmosphere_test_cases(output_base)
         if not cases:
@@ -4331,7 +4364,9 @@ def main():
             for vc in _vertical_coords_for_case(case_dir):
                 try:
                     _create_cross_grid_comparisons_atmosphere(
-                        case_dir, vertical_coord=vc,
+                        case_dir,
+                        vertical_coord=vc,
+                        allowed_grids=allowed_grids,
                     )
                     n_combos += 1
                 except Exception as e:  # noqa: BLE001
