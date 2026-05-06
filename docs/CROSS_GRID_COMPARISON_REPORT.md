@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-32 snapshot)
+**Branch**: `simulation_full_check` (iter-37 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..32 findings.  It is the user-facing
+This report consolidates iter-1..37 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -29,8 +29,8 @@ and every available pair of grids:
   `T(latitude, σ)` cross-section, the canonical Held-Suarez
   Fig. 3 layout.
 
-Every helper has a corresponding unit test (39 / 39 pass in
-`tests/test_atmosphere_cross_grid_plots.py` (33) +
+Every helper has a corresponding unit test (50 / 50 pass in
+`tests/test_atmosphere_cross_grid_plots.py` (44) +
 `test_ocean_cross_grid_plots.py` (6)).
 
 CLI:
@@ -144,10 +144,17 @@ cross-grid ocean test (wind-driven gyres / OMIP) is a follow-up.
 | 19 | latlon C-grid quiver shape mismatch (4/4 ocean ERROR) | HIGH |
 | 21 (codex MED) | iter-19 silent truncation fallback | MEDIUM |
 | 22 | `--radiation rrtmgp` ignored in AMIP runner | MEDIUM |
+| 26 | RCE outputs not collectable (snapshots NPZ required) | HIGH |
+| 26 | RCE wrapper missing per-grid `--discretization` | HIGH |
+| 27 | 4-panel cap drops `mean_cwv` for RCE | MEDIUM |
+| 32 | GHG zero values wrongly rejected | MEDIUM |
+| 32 | GPU efficiency table no-ops on DCMIP/NH (`days` key only) | MEDIUM |
+| 36 | `--cloud-scheme sundqvist` silently broken (`include_clouds=False`) | HIGH |
+| 37 | `--cloud-scheme xu_randall` would silently no-op (no condensate tracers) | MEDIUM |
 
 **Codex adversarial review iterations**: iter-5, iter-6, iter-7,
-iter-16, iter-21.  Final convergence: WARN, no HIGH/MED, all
-LOW residuals addressed.
+iter-16, iter-21, iter-26, iter-27, iter-32, iter-36, iter-37.
+Each round caught real issues; final convergence is clean.
 
 ---
 
@@ -158,13 +165,13 @@ LOW residuals addressed.
 | Shallow water tests on all grids | ✅ DONE |
 | Hydrostatic Held-Suarez on all grids | ✅ DONE (with documented structural disagreement) |
 | Hydrostatic RCE on all grids | ✅ DONE (iter-24: ``mean_timeseries.csv`` + ``results.txt`` output, ``run_rce_cross_grid.sh`` wrapper) |
-| Hydrostatic AMIP w/ realistic GHG/aerosol/O3 | ⚠️ iter-22: RRTMGP wired (steady-state CMIP6 defaults); CMIP6 input4MIPs time-varying loaders threading still pending |
+| Hydrostatic AMIP w/ realistic GHG/aerosol/O3 | ⚠️ iter-22 RRTMGP wired (steady-state); iter-31 ``--co2-ppmv`` / ``--ch4-ppbv`` / ``--n2o-ppbv`` CLI knobs; iter-34/36 ``--cloud-scheme {none,sundqvist}`` with auto-``include_clouds=True``.  CMIP6 input4MIPs time-varying loaders still pending. |
 | Ocean test cases on all grids | ✅ DONE |
 | OMIP | ✅ DONE (iter-25: matrix-compatible CSV + results.txt, ``run_omip_cross_grid.sh`` wrapper) |
 | Same colorbar/projection across grids | ✅ DONE (cartopy PlateCarrée + shared cmap) |
 | Physical consistency vs reference papers | ⚠️ Williamson cases agree to machine precision; HS climatology disagrees structurally (documented in §2) |
 | GPU / MPI efficiency | ✅ DONE (iter-28/29: per-test-case ``wall-time/day`` ranking + speedup factor in every ``comparison_summary.txt``) |
-| `/codex:adversarial-review` | ✅ DONE (7 review rounds: iter-5/6/7/16/21/26/27, all findings addressed) |
+| `/codex:adversarial-review` | ✅ DONE (10 review rounds: iter-5/6/7/16/21/26/27/32/36/37, all findings addressed) |
 
 ---
 
@@ -219,12 +226,28 @@ LOW residuals addressed.
   ``results.txt`` so the iter-28 GPU efficiency table fires
   on those cases too.  Verified: SW W5 1-day spectral 28×
   faster than cubed-sphere C36.
+* iter-30..32: doc refresh; iter-32 codex review (2 MED + 3 LOW)
+  fixed (``period_days`` / ``duration_hours`` fallback for the
+  GPU efficiency table; GHG zero-value acceptance; unused-local
+  cleanup; results.txt records GHG overrides).
+* iter-33: 7 unit tests pinning the iter-32 fixes.
+* iter-34: ``--cloud-scheme {none, sundqvist}`` CLI flag added.
+* iter-35: factored ``_augment_with_rrtmgp_overrides`` helper —
+  HS RRTMGP runs now also record GHG/cloud-scheme overrides.
+* iter-36: codex caught HIGH where ``--cloud-scheme sundqvist``
+  was silently broken (``include_clouds=False`` defaulted off).
+  Fix: also flip ``include_clouds=True`` when cloud_scheme
+  is non-"none".  Test isolation tightened via autouse fixture.
+* iter-37: codex caught MEDIUM where ``xu_randall`` would
+  silently no-op without condensate tracers.  Removed from
+  CLI choices.  Replaced fragile source-inspection test with
+  proper config-capture using ``monkeypatch``.
 
-39/39 unit tests pass across both
-``tests/test_atmosphere_cross_grid_plots.py`` (33) and
+50/50 unit tests pass across both
+``tests/test_atmosphere_cross_grid_plots.py`` (44) and
 ``tests/test_ocean_cross_grid_plots.py`` (6).
 
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-30 update).*
+(iter-37 update).*
