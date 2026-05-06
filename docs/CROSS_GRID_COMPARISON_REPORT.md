@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-44 snapshot)
+**Branch**: `simulation_full_check` (iter-45 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..44 findings.  It is the user-facing
+This report consolidates iter-1..45 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -29,8 +29,8 @@ and every available pair of grids:
   `T(latitude, σ)` cross-section, the canonical Held-Suarez
   Fig. 3 layout.
 
-Every helper has a corresponding unit test (71 / 71 pass in
-`tests/test_atmosphere_cross_grid_plots.py` (65) +
+Every helper has a corresponding unit test (72 / 72 pass in
+`tests/test_atmosphere_cross_grid_plots.py` (66) +
 `test_ocean_cross_grid_plots.py` (6)).
 
 CLI:
@@ -163,11 +163,12 @@ cross-grid ocean test (wind-driven gyres / OMIP) is a follow-up.
 | 43 | 1-D all-NaN arrays would emit a column of NaNs instead of being skipped | MEDIUM |
 | 44 | wrapper would reconvert old data on failed re-run (stale timeseries.npz survived) | HIGH |
 | 44 | crash between rename and CSV write left directory collectable but inconsistent | LOW |
+| 45 | post-crash recovery dropped AMIP metadata and emitted bogus `status: ERROR` | LOW |
 
 **Codex adversarial review iterations**: iter-5, iter-6, iter-7,
 iter-16, iter-21, iter-26, iter-27, iter-32, iter-36, iter-37,
-iter-39, iter-42, iter-43.  Each round caught real issues;
-final convergence is clean.
+iter-39, iter-42, iter-43, iter-44.  Each round caught real
+issues; final convergence is clean.
 
 ---
 
@@ -184,7 +185,7 @@ final convergence is clean.
 | Same colorbar/projection across grids | ✅ DONE (cartopy PlateCarrée + shared cmap) |
 | Physical consistency vs reference papers | ⚠️ Williamson cases agree to machine precision; HS climatology disagrees structurally (documented in §2) |
 | GPU / MPI efficiency | ✅ DONE (iter-28/29: per-test-case ``wall-time/day`` ranking + speedup factor in every ``comparison_summary.txt``) |
-| `/codex:adversarial-review` | ✅ DONE (13 review rounds: iter-5/6/7/16/21/26/27/32/36/37/39/42/43, all findings addressed) |
+| `/codex:adversarial-review` | ✅ DONE (14 review rounds: iter-5/6/7/16/21/26/27/32/36/37/39/42/43/44, all findings addressed) |
 
 ---
 
@@ -334,11 +335,26 @@ final convergence is clean.
   ``_atomic_write_text`` to crash on the CSV write and
   asserts the directory is not collectable.
 
-71/71 unit tests pass across both
-``tests/test_atmosphere_cross_grid_plots.py`` (65) and
+* iter-45: address codex iter-44 review (1 LOW).  Post-crash
+  recovery path: if a previous converter run crashed between
+  the AMIP→matrix rename and the final ``results.txt`` write,
+  results.txt is missing but results_amip.txt has the AMIP
+  free-form file.  Without an explicit recovery branch, the
+  next converter run would parse a non-existent results.txt,
+  default to ``status: ERROR``, and emit a matrix results.txt
+  with no grid metadata even though the AMIP file is preserved
+  on disk.  Fix: add an ``elif not results_txt.exists() and
+  results_amip.exists()`` branch that re-parses from the
+  preserved AMIP file.  New ``test_post_crash_recovery_recovers_metadata``
+  uses ``monkeypatch`` to crash the FIRST run, then verifies a
+  RECOVERY run emits the original AMIP metadata
+  (``status: PASS``, real grid name, real resolution).
+
+72/72 unit tests pass across both
+``tests/test_atmosphere_cross_grid_plots.py`` (66) and
 ``tests/test_ocean_cross_grid_plots.py`` (6).
 
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-44 update).*
+(iter-45 update).*

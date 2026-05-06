@@ -276,6 +276,14 @@ def main(out_dir: Path) -> int:
             parsed = _parse_amip_results_txt(results_amip)
         else:
             parsed = _parse_matrix_results_txt(results_txt)
+    elif not results_txt.exists() and results_amip.exists():
+        # iter-44 codex LOW: post-crash recovery path.  A previous
+        # converter run crashed between the AMIP→matrix rename and
+        # the final results.txt write, so results.txt is missing
+        # but results_amip.txt has the AMIP free-form file.  Re-
+        # parse from results_amip.txt rather than dropping metadata
+        # and emitting a bogus ``status: ERROR``.
+        parsed = _parse_amip_results_txt(results_amip)
     else:
         parsed = _parse_amip_results_txt(results_txt)
         if results_txt.exists():

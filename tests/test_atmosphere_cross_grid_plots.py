@@ -1283,6 +1283,47 @@ class TestAmipToMatrixFormat:
         # is missing.
         assert not M.has_collectable_atmosphere_outputs(tmp_path)
 
+    def test_post_crash_recovery_recovers_metadata(
+        self, tmp_path, monkeypatch,
+    ):
+        """iter-44 codex LOW: after a crash that leaves results_amip.txt
+        but no results.txt, a rerun must recover the AMIP metadata
+        from results_amip.txt rather than emitting a bogus
+        ``status: ERROR`` with empty grid/resolution fields.
+        """
+        mod = self._import_converter()
+        self._write_synthetic_amip_outputs(tmp_path)
+
+        # Crash on the FIRST converter run (CSV write).
+        original = mod._atomic_write_text
+        def crashing_write(path, text):
+            if path.name == "mean_timeseries.csv":
+                raise RuntimeError("simulated crash mid-conversion")
+            original(path, text)
+        monkeypatch.setattr(mod, "_atomic_write_text", crashing_write)
+        with pytest.raises(RuntimeError):
+            mod.main(tmp_path)
+
+        # Restore the real writer for the recovery run.
+        monkeypatch.setattr(mod, "_atomic_write_text", original)
+
+        # Verify the post-crash state matches what codex described:
+        # results.txt is missing, results_amip.txt has the AMIP file.
+        assert not (tmp_path / "results.txt").exists()
+        assert (tmp_path / "results_amip.txt").exists()
+
+        # Recovery run should succeed AND emit the original AMIP
+        # metadata (status: PASS, the grid line, etc.), NOT a bare
+        # status: ERROR.
+        rc = mod.main(tmp_path)
+        assert rc == 0
+        results_text = (tmp_path / "results.txt").read_text()
+        assert "status: PASS" in results_text  # COMPLETED → PASS
+        assert "grid: cubed_sphere" in results_text
+        assert "resolution: C48" in results_text
+        # The directory is now collectable (real predicate).
+        assert M.has_collectable_atmosphere_outputs(tmp_path)
+
     def test_converter_idempotent(self, tmp_path):
         """Running the converter twice must produce identical output
         AND must preserve the original AMIP free-form ``results.txt``
