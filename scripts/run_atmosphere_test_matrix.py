@@ -4051,6 +4051,24 @@ def _create_atmosphere_comparison_snapshots(
         print(f"    Saved: {out_file.name}")
 
 
+# Iter-10: fraction of trailing snapshots to average for zonal-mean
+# climatology cross-sections.  ``0.5`` averages the last 50 % of the
+# snapshots, which for an 11-snapshot HS run takes the last 5 (i.e.
+# roughly the second half of the integration).  This balances "long
+# enough to suppress eddy variance" against "short enough not to
+# contaminate the average with the early spin-up transient".  The
+# canonical HS climatology uses 1000 days after a 200-day spin-up;
+# we don't reach that here, but using HALF the integration as the
+# averaging window already substantially reduces cross-grid RMS
+# vs. a single-snapshot diagnostic.
+CLIMATOLOGY_AVG_FRACTION = 0.5
+
+
+def _n_climatology_avg(n_times: int) -> int:
+    """Number of trailing snapshots to average for a climatology mean."""
+    return max(1, int(np.ceil(n_times * CLIMATOLOGY_AVG_FRACTION)))
+
+
 def _zonal_mean_at_final_time(arr_4d: np.ndarray) -> np.ndarray:
     """Reduce a 4-D ``(n_times, n_lat, n_lon, n_lev)`` snapshot array to
     the zonal-mean cross-section at the final time, returning a 2-D
@@ -4064,6 +4082,36 @@ def _zonal_mean_at_final_time(arr_4d: np.ndarray) -> np.ndarray:
             f"n_lon, n_lev), got shape {arr_4d.shape}"
         )
     return np.nanmean(arr_4d[-1], axis=1)  # collapse longitude axis
+
+
+def _zonal_mean_climatology(
+    arr_4d: np.ndarray, n_avg: int = 1,
+) -> np.ndarray:
+    """Reduce a 4-D ``(n_times, n_lat, n_lon, n_lev)`` snapshot array to
+    a TIME-MEAN zonal-mean cross-section, returning a 2-D
+    ``(n_lat, n_lev)`` array.
+
+    ``n_avg`` is the number of trailing snapshots to average over.
+    For Held-Suarez climatology comparison, this should ideally be
+    100s of days of snapshots — but in practice we cap at the
+    available number of snapshots.
+
+    Iter-10: addresses the snapshot-vs-climatology distinction
+    surfaced when investigating the user's iter-5
+    HS-cross-grid-agreement question.  A single-snapshot zonal
+    mean carries large sampling variance from the eddy field;
+    a multi-snapshot time mean drives that variance toward zero
+    and exposes the actual cross-grid CLIMATOLOGY agreement.
+    """
+    if arr_4d.ndim != 4:
+        raise ValueError(
+            f"_zonal_mean_climatology: expected 4-D (n_times, n_lat, "
+            f"n_lon, n_lev), got shape {arr_4d.shape}"
+        )
+    n_times = arr_4d.shape[0]
+    n_use = max(1, min(int(n_avg), n_times))
+    # Average over the last n_use snapshots, then over longitude.
+    return np.nanmean(np.nanmean(arr_4d[-n_use:], axis=2), axis=0)
 
 
 def _create_atmosphere_comparison_zonal_mean(
@@ -4099,6 +4147,7 @@ def _create_atmosphere_comparison_zonal_mean(
         longname = spec.get("longname", field)
 
         zonal_means: dict[str, np.ndarray] = {}
+        n_avg_used: int | None = None
         for grid_name, data in grid_results.items():
             snap = data["snapshots"]
             if field not in snap.files:
@@ -4107,7 +4156,14 @@ def _create_atmosphere_comparison_zonal_mean(
             if arr.ndim != 4:
                 continue
             try:
-                zm = _zonal_mean_at_final_time(arr)
+                # Iter-10: use climatology (time-mean over trailing
+                # snapshots) instead of single t_final snapshot.
+                # Removes eddy variance that contaminated single-time
+                # cross-grid RMS at finite spin-up.
+                n_avg = _n_climatology_avg(arr.shape[0])
+                zm = _zonal_mean_climatology(arr, n_avg=n_avg)
+                if n_avg_used is None:
+                    n_avg_used = n_avg
             except ValueError:
                 continue
             zonal_means[grid_name] = zm
@@ -4122,7 +4178,16 @@ def _create_atmosphere_comparison_zonal_mean(
         for data in grid_results.values():
             snap = data["snapshots"]
             if "times_days" in snap.files:
-                sim_time_str = f" (t = {float(snap['times_days'][-1]):.2f} d)"
+                t_days = np.asarray(snap["times_days"])
+                t_final = float(t_days[-1])
+                if n_avg_used is not None and len(t_days) >= n_avg_used:
+                    t_avg_start = float(t_days[-n_avg_used])
+                    sim_time_str = (
+                        f" (climatology t = {t_avg_start:.1f}–{t_final:.1f} d, "
+                        f"{n_avg_used} snapshots)"
+                    )
+                else:
+                    sim_time_str = f" (t = {t_final:.2f} d)"
                 break
 
         fig.suptitle(
@@ -4228,6 +4293,7 @@ def _compute_cross_grid_rms_agreement(
     """
     zonal_means: dict[str, np.ndarray] = {}
     lat_natives: dict[str, np.ndarray] = {}
+    n_avg_used: int | None = None
     for grid_name, data in grid_results.items():
         snap = data["snapshots"]
         if field not in snap.files:
@@ -4236,7 +4302,12 @@ def _compute_cross_grid_rms_agreement(
         if arr.ndim != 4:
             continue
         try:
-            zm = _zonal_mean_at_final_time(arr)
+            # Iter-10: climatology mean (trailing N snapshots) instead
+            # of single t_final, matches what the plot now shows.
+            n_avg = _n_climatology_avg(arr.shape[0])
+            zm = _zonal_mean_climatology(arr, n_avg=n_avg)
+            if n_avg_used is None:
+                n_avg_used = n_avg
         except ValueError:
             continue
         n_lat = zm.shape[0]
@@ -4289,6 +4360,7 @@ def _compute_cross_grid_rms_agreement(
         "n_grids": len(zm_common),
         "n_lat_target": target_n_lat,
         "n_lev": next(iter(nlev_set)),
+        "n_avg_used": n_avg_used,
     }
 
 
@@ -4438,9 +4510,16 @@ def _create_atmosphere_comparison_summary(
             metric = _compute_cross_grid_rms_agreement(grid_results, field)
             if metric is None:
                 continue
+            n_avg = metric.get("n_avg_used")
+            avg_label = (
+                f"climatology = trailing {n_avg} snapshot(s)"
+                if n_avg and n_avg > 1
+                else "single t_final snapshot"
+            )
             fh.write(
                 f"\nQuantitative cross-grid RMS — zonal-mean {field}"
-                f" (interpolated to {metric['n_lat_target']} lat × "
+                f" ({avg_label}; interpolated to "
+                f"{metric['n_lat_target']} lat × "
                 f"{metric['n_lev']} lev)\n"
             )
             fh.write("-" * 70 + "\n")
@@ -4592,6 +4671,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--quick", action="store_true",
         help="Use shorter durations for quick verification")
     p.add_argument(
+        "--days", type=float, default=None,
+        help="Override per-case integration length (in days).  Takes "
+             "precedence over both --quick and the matrix defaults.  "
+             "Useful for cross-grid spin-up convergence studies "
+             "(e.g. ``--only hydro --test held_suarez --days 200`` to "
+             "run the canonical Held-Suarez spin-up).")
+    p.add_argument(
         "--list", action="store_true",
         help="List all test cases and exit")
     p.add_argument(
@@ -4729,7 +4815,12 @@ def main():
     t_start_all = time.time()
 
     for i, tc in enumerate(tests, 1):
-        days = tc.quick_days if args.quick else tc.duration_days
+        if args.days is not None:
+            days = args.days
+        elif args.quick:
+            days = tc.quick_days
+        else:
+            days = tc.duration_days
         out_dir = output_base / tc.output_path
 
         label = f"{tc.equation_set}/{tc.case}/{tc.grid_type}"
