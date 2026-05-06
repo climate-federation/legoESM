@@ -1,6 +1,6 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-113 snapshot)
+**Branch**: `simulation_full_check` (iter-114 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
@@ -33,17 +33,50 @@ shared-projection comparison PNGs for every category; check
 ``results/{atmosphere,ocean,omip,rce}/`` for the iter-96
 output.
 
-## iter-113 reproducibility check
+## iter-113 + iter-114 reproducibility check (full hierarchy)
 
 Verified that iter-104..112 fixes do not regress the iter-96
-baseline.  Re-ran the 3 fast smoke categories with a clean
-output tree (``rm -rf results/``) and ``--resolution 16``:
+baseline.  Re-ran the FULL user-prompt hierarchy across all 6
+categories with a clean output tree (``rm -rf results/``) and
+``--resolution 16``:
 
-| Category | Pass / Total | Wall | Notes |
-|---|---|---|---|
-| Shallow water | **12 / 12** | 136 s | Same metrics as iter-96. |
-| Held-Suarez | **8 / 8** | 205 s | Same metrics as iter-96 (cube 6e-11, latlon 1e-4, ico 1e-12, spectral 2e-4). |
-| Ocean rest_state | **12 / 12** | 180 s | All drifts at machine precision (0 to 1e-17), same as iter-96. |
+| Category | iter-96 | iter-113/114 | Wall | Notes |
+|---|---|---|---|---|
+| Shallow water (W2/W5/cosine bell × 4 grids) | 12/12 | **12/12** ✓ | 136 s | Same metrics |
+| Held-Suarez (4 grids × 2 vert coords) | 8/8 | **8/8** ✓ | 205 s | cube 6e-11, latlon 1e-4, ico 1e-12, spectral 2e-4 |
+| AMIP 1-day (4 grids) | 4/4 | **4/4** ✓ | 87 s | cube 5e-12, latlon 3e-6, ico 5e-15, spectral 1e-7 |
+| RCE 2-day (4 grids) | 3/4 | **3/4** ✓ | — | ico BLOWUP at day 1 (USER HANDOFF iter-73), wrapper EXIT 1 (iter-101/103/104 contract) |
+| Ocean rest_state (4 variants × 3 grids) | 12/12 | **12/12** ✓ | 180 s | All drifts at machine precision (0 to 1e-17) |
+| OMIP 2-day (4 grids) | 3/4 | **3/4** ✓ | — | cube BLOWUP at step 500 (USER HANDOFF iter-71), wrapper EXIT 1 with full BLOWUP-info notes (iter-97 contract) |
+
+**Total 42/44 PASS** (95.5%) — identical to iter-96.
+
+The 2 FAILs are the same USER HANDOFF items deferred per
+iter-68/71/73 directive.  Both now surface unambiguously via:
+* Per-grid ``status: FAIL`` in results.txt (iter-97/98/105)
+* BLOWUP info in ``notes`` field for OMIP cube
+  (``BLOWUP at step 500 (day 1.74), max|T|=8.342e+06 °C,
+  max|η|=2678 m, reason: ..., last clean SST=19.759``)
+  vs. iter-96 misleading ``SST=19.76`` plain note
+* Wrapper exit code 1 (iter-101/103/104)
+
+After the iter-95 dispatch fix and iter-108 collector fix,
+output tree layout is uniformly grid-typed:
+
+* ``cubed_sphere/C16/``
+* ``latlon/16x32/``
+* ``icosahedral/ico3/`` (or ``mpas/ico3/`` for ocean)
+* ``spectral/T16/``
+
+The iter-108 collector also gracefully handles output trees
+with hidden / internal directories (``__pycache__``,
+``.ipynb_checkpoints``, etc.) without picking them.
+
+Quality improvements vs iter-96:
+* Clean output tree (no stale bare-numeric ``16/`` dirs)
+* Unambiguous BLOWUP markers in results.txt
+* CI-correct exit code propagation (run_X.py → wrapper → user)
+* Clear ``--resolution N`` validation rejecting non-integers
 
 After the iter-95 dispatch fix and iter-108 collector fix,
 output tree layout is now uniformly grid-typed:
