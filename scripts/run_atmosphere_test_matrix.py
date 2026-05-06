@@ -5259,6 +5259,18 @@ def main():
         print(f"  Output base: {output_base}")
         if args.test or args.only != "all" or args.grid != "all":
             allowed_cases = {t.case for t in tests}
+            # iter-73: when ``--test <name>`` is explicitly passed
+            # but ``<name>`` is not in TEST_MATRIX (e.g., "rce" /
+            # "omip" — these are run by external scripts
+            # ``run_rce.py`` / ``run_omip.py`` and have no matrix
+            # runner), fall back to ``{args.test}`` so the filter
+            # still matches a per-case directory of that name.
+            # Without this, ``run_rce_cross_grid.sh`` /
+            # ``run_omip_cross_grid.sh`` invocations of
+            # ``--cross-grid-plots-only --test rce`` would silently
+            # find 0 cases.
+            if args.test and not allowed_cases:
+                allowed_cases = {args.test}
             allowed_grids = {t.grid_type for t in tests} if args.grid != "all" else None
             print(f"  Filters: case={args.test or '*'} only={args.only} grid={args.grid}")
             print(f"  Matching {len(allowed_cases)} case name(s): "

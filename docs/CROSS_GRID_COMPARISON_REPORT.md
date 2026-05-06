@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-72 snapshot)
+**Branch**: `simulation_full_check` (iter-73 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..72 findings.  It is the user-facing
+This report consolidates iter-1..73 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -177,6 +177,10 @@ cross-grid ocean test (wind-driven gyres / OMIP) is a follow-up.
 | 55 | iter-54 `_run_replot` had try/except outside the inner marker loop, calling `_replot_case_snapshots` on stale `res_dir` once per glob | HIGH |
 | 71 | OMIP cube C24 BLOWUP at step 500 (max\|T\|=8M K, eta=2677 m) while latlon / MPAS / spectral PASS — USER HANDOFF for cube debug | HIGH |
 | 72 | OMIP wrapper aborted entire cross-grid run on first grid failure (set -e + run_omip.py exits 1 on FAIL) | HIGH |
+| 73 | RCE wrapper produced no output on short-day smokes (DAYS < default --diag-days 5) | HIGH |
+| 73 | RCE wrapper had `set -e` with no per-grid failure guard (would abort whole run on iter-71-style cube/voronoi blowups) | HIGH |
+| 73 | `--cross-grid-plots-only --test rce` matched 0 cases because TEST_MATRIX has no rce entry | HIGH |
+| 73 | RCE voronoi (MPAS) BLOWUP at day 1 — similar dycore fragility to iter-71 cube OMIP — USER HANDOFF | HIGH |
 
 **Codex adversarial review iterations**: iter-5, iter-6, iter-7,
 iter-16, iter-21, iter-26, iter-27, iter-32, iter-36, iter-37,
@@ -1117,6 +1121,55 @@ round caught real issues; final convergence is clean.
   full suite 120/120 + 3 MPAS skips (was 119/119 + 3
   skips).
 
+* iter-73: validated the RCE cross-grid wrapper end-to-end
+  AND fixed three latent issues caught along the way:
+
+    1. ``run_rce.py`` only emits ``mean_timeseries.csv`` /
+       matrix-format ``results.txt`` when its diag_log is
+       non-empty (``DAYS >= --diag-days`` default 5).
+       Short-day smokes silently produced no output.  Fix:
+       wrapper now passes ``--diag-days 1`` (or third
+       positional arg) so even 1-day smokes accumulate
+       diagnostics.
+
+    2. iter-24 wrapper had ``set -e`` and no per-grid
+       failure guard.  Apply the iter-43 / iter-72 pattern:
+       ``|| { echo WARNING; ANY_FAILED=1; }`` so a single
+       grid blowup does not abort the whole cross-grid run.
+
+    3. ``run_atmosphere_test_matrix.py --cross-grid-plots-only
+       --test rce`` filtered against TEST_MATRIX, which has
+       no ``rce`` entry (RCE is run by external
+       ``run_rce.py``, not a matrix-runner test).  Result:
+       ``--test rce`` matched 0 cases and the cross-grid
+       plot was skipped.  Fix: when ``--test <name>`` is
+       passed but ``allowed_cases`` is empty (no matching
+       TEST_MATRIX entry), fall back to ``{args.test}`` so
+       the per-case directory of that name is matched.
+
+  End-to-end validation: 4-grid 5-day RCE cross-grid run.
+
+    grid          status   wall   final T_sfc / max|v|
+    cubed_sphere  PASS     16.5s  299.97 K / 3.95 m/s
+    icosahedral   FAIL      5.8s  BLOWUP at day 1
+    latlon        PASS     19.0s  299.87 K / 8.98 m/s
+    spectral      PASS     12.0s  299.88 K / 8.85 m/s
+
+    cross-grid mean_T_sfc: 299.91 K (3 PASS grids)
+    cross-grid mean_T_atm: 273.90 K (3 PASS grids)
+
+    Output: ``$OUTPUT/hydrostatic/rce/comparison_timeseries.png``
+
+  3 of 4 grids agree on T_sfc to 0.10 K and T_atm to 0.02
+  K — much tighter cross-grid agreement than HS.  The
+  voronoi/MPAS RCE BLOWUP at day 1 is a NEW finding,
+  similar in character to the iter-71 cube OMIP BLOWUP.
+  iter-71 documented cube ocean dycore weakness; iter-73
+  reveals the RCE/voronoi-MPAS dycore has the same kind of
+  architectural fragility.  Per the iter-68 user handoff
+  (cube dycore retuning), the voronoi RCE blowup is also
+  out of scope.
+
 120/120 unit tests pass + 3 MPAS-mesh-unavailable skips
 (across ``tests/test_atmosphere_cross_grid_plots.py`` (77 +
 3 skips), ``tests/test_ocean_cross_grid_plots.py`` (15), and
@@ -1125,4 +1178,4 @@ round caught real issues; final convergence is clean.
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-72 update).*
+(iter-73 update).*
