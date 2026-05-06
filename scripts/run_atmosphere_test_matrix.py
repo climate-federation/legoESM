@@ -4180,6 +4180,118 @@ def _create_atmosphere_comparison_zonal_mean(
         print(f"    Saved: {out_file.name}")
 
 
+def _interp_zonal_mean_to_target(
+    zm_native: np.ndarray, lat_native: np.ndarray, lat_target: np.ndarray,
+) -> np.ndarray:
+    """Linearly interpolate a zonal-mean ``(n_lat_native, n_lev)`` array
+    onto a target latitude axis ``lat_target`` (in degrees).  Returns
+    ``(n_lat_target, n_lev)``.
+
+    Used for cross-grid RMS comparison so each grid's native
+    latitudes don't bias the metric toward the higher-resolution one.
+    Iter-9.
+    """
+    n_lev = zm_native.shape[1]
+    out = np.empty((lat_target.size, n_lev), dtype=np.float64)
+    # Ensure latitude is monotonically increasing for np.interp.
+    if lat_native[0] > lat_native[-1]:
+        lat_native = lat_native[::-1]
+        zm_native = zm_native[::-1]
+    for k in range(n_lev):
+        out[:, k] = np.interp(lat_target, lat_native, zm_native[:, k])
+    return out
+
+
+def _compute_cross_grid_rms_agreement(
+    grid_results: dict, field: str, *, target_n_lat: int = 72,
+) -> dict | None:
+    """Compute pair-wise and ensemble cross-grid RMS agreement of the
+    zonal-mean cross-section of ``field`` at the final timestep.
+
+    Workflow:
+    1. For each grid, compute ``_zonal_mean_at_final_time(field)``
+       → ``(n_lat_native, n_lev)``.
+    2. Interpolate each grid's zonal mean onto a common target
+       latitude axis (``-90..90`` linspace, default 72 points).
+    3. Vertical level count must match across grids; if it doesn't,
+       skip that grid (warn).
+    4. RMS pair-wise:  ``rms_AB = sqrt(mean((zm_A - zm_B)^2))``.
+    5. Ensemble:       ``rms_ens = sqrt(mean((zm_grid - zm_mean_ensemble)^2))``.
+
+    Returns a dict with keys ``pairwise`` (mapping ``"a-b"`` strings
+    to floats), ``ensemble`` (mapping grid names to floats), and
+    ``ensemble_mean`` (float — the average of all per-grid ensemble
+    RMS values).  Returns ``None`` if fewer than 2 grids have valid
+    zonal-mean data.
+
+    Iter-9: addresses the user's iter-5 observation quantitatively.
+    """
+    zonal_means: dict[str, np.ndarray] = {}
+    lat_natives: dict[str, np.ndarray] = {}
+    for grid_name, data in grid_results.items():
+        snap = data["snapshots"]
+        if field not in snap.files:
+            continue
+        arr = np.asarray(snap[field])
+        if arr.ndim != 4:
+            continue
+        try:
+            zm = _zonal_mean_at_final_time(arr)
+        except ValueError:
+            continue
+        n_lat = zm.shape[0]
+        md_lat = np.asarray(snap["lat"])
+        lat_native = md_lat if md_lat.size == n_lat else np.linspace(-90.0, 90.0, n_lat)
+        zonal_means[grid_name] = zm
+        lat_natives[grid_name] = lat_native
+
+    if len(zonal_means) < 2:
+        return None
+
+    # Verify nlev consistency across grids.
+    nlev_per_grid = {g: zm.shape[1] for g, zm in zonal_means.items()}
+    nlev_set = set(nlev_per_grid.values())
+    if len(nlev_set) > 1:
+        print(
+            f"    [comparison] cross-grid RMS for {field}: vertical-level "
+            f"count differs across grids ({nlev_per_grid}); skipping metric."
+        )
+        return None
+
+    # Interpolate each grid's zonal mean to common latitude axis.
+    lat_target = np.linspace(-90.0, 90.0, target_n_lat)
+    zm_common: dict[str, np.ndarray] = {}
+    for grid_name, zm in zonal_means.items():
+        zm_common[grid_name] = _interp_zonal_mean_to_target(
+            zm, lat_natives[grid_name], lat_target,
+        )
+
+    # Pair-wise RMS.
+    pairwise: dict[str, float] = {}
+    grid_names = sorted(zm_common.keys())
+    for i, ga in enumerate(grid_names):
+        for gb in grid_names[i + 1:]:
+            diff = zm_common[ga] - zm_common[gb]
+            pairwise[f"{ga} vs {gb}"] = float(np.sqrt(np.nanmean(diff ** 2)))
+
+    # Ensemble (deviation from cross-grid mean).
+    ens_mean_field = np.mean(np.stack(list(zm_common.values()), axis=0), axis=0)
+    ensemble: dict[str, float] = {}
+    for grid_name, zm in zm_common.items():
+        diff = zm - ens_mean_field
+        ensemble[grid_name] = float(np.sqrt(np.nanmean(diff ** 2)))
+    ensemble_mean = float(np.mean(list(ensemble.values())))
+
+    return {
+        "pairwise": pairwise,
+        "ensemble": ensemble,
+        "ensemble_mean": ensemble_mean,
+        "n_grids": len(zm_common),
+        "n_lat_target": target_n_lat,
+        "n_lev": next(iter(nlev_set)),
+    }
+
+
 def _create_atmosphere_comparison_timeseries(
     test_case_dir: Path, grid_results: dict,
     *, label: str | None = None,
@@ -4270,6 +4382,7 @@ def _create_atmosphere_comparison_timeseries(
 def _create_atmosphere_comparison_summary(
     test_case_dir: Path, grid_results: dict,
     *, label: str | None = None,
+    case_name: str | None = None,
 ) -> None:
     """Write a plain-text cross-grid summary table to
     ``comparison_summary.txt``.  Columns are auto-selected from the
@@ -4277,7 +4390,12 @@ def _create_atmosphere_comparison_summary(
     wall_time, plus any numeric metric the runner recorded).
 
     Pass ``label`` to override the default header (which is
-    ``test_case_dir.name``).
+    ``test_case_dir.name``).  ``case_name`` controls which entry of
+    ``ATMOSPHERE_ZONAL_MEAN_FIELDS`` is consulted for the iter-9
+    quantitative cross-grid RMS metric.  When ``None``, falls back
+    to ``test_case_dir.name`` for case lookup, so the metric still
+    fires for HS/baroclinic/AMIP regardless of whether the writer
+    is invoked from the SW or hydrostatic path.
     """
     out_file = test_case_dir / "comparison_summary.txt"
     grids_sorted = sorted(grid_results.keys())
@@ -4294,6 +4412,9 @@ def _create_atmosphere_comparison_summary(
                 all_keys.append(k)
 
     title_label = label if label is not None else test_case_dir.name
+    lookup_key = case_name if case_name is not None else test_case_dir.name
+    zm_fields = ATMOSPHERE_ZONAL_MEAN_FIELDS.get(lookup_key, [])
+
     with open(out_file, "w") as fh:
         fh.write(f"{title_label} — Cross-grid comparison\n")
         fh.write("=" * 70 + "\n")
@@ -4307,6 +4428,38 @@ def _create_atmosphere_comparison_summary(
             )
             fh.write(row + "\n")
         fh.write("=" * 70 + "\n")
+
+        # Iter-9: quantitative cross-grid RMS agreement on the
+        # zonal-mean cross-section, for cases where that diagnostic
+        # is the canonical inter-model metric.
+        for spec in zm_fields:
+            field = spec["field"]
+            units = spec.get("units", "")
+            metric = _compute_cross_grid_rms_agreement(grid_results, field)
+            if metric is None:
+                continue
+            fh.write(
+                f"\nQuantitative cross-grid RMS — zonal-mean {field}"
+                f" (interpolated to {metric['n_lat_target']} lat × "
+                f"{metric['n_lev']} lev)\n"
+            )
+            fh.write("-" * 70 + "\n")
+            unit_suffix = f" {units}" if units else ""
+            fh.write("Pair-wise RMS:\n")
+            for pair, rms in sorted(
+                metric["pairwise"].items(), key=lambda kv: kv[1]
+            ):
+                fh.write(f"  {pair:<40}  {rms:8.3f}{unit_suffix}\n")
+            fh.write("\nDeviation from ensemble mean (per grid):\n")
+            for g, rms in sorted(
+                metric["ensemble"].items(), key=lambda kv: kv[1]
+            ):
+                fh.write(f"  {g:<40}  {rms:8.3f}{unit_suffix}\n")
+            fh.write(
+                f"\nEnsemble-averaged RMS: {metric['ensemble_mean']:.3f}"
+                f"{unit_suffix} ({metric['n_grids']} grids)\n"
+            )
+            fh.write("=" * 70 + "\n")
     print(f"    Saved: {out_file.name}")
 
 
@@ -4364,7 +4517,7 @@ def _create_cross_grid_comparisons_atmosphere(
         out_dir, grid_results, label=label,
     )
     _create_atmosphere_comparison_summary(
-        out_dir, grid_results, label=label,
+        out_dir, grid_results, label=label, case_name=case_name,
     )
     # Iter-8: zonal-mean cross-section comparison.  Only emitted for
     # cases registered in ATMOSPHERE_ZONAL_MEAN_FIELDS (currently HS,
