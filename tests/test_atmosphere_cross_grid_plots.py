@@ -92,6 +92,78 @@ class TestAreaWeightedMean:
 
 
 # ---------------------------------------------------------------------------
+# iter-83: _compute_drift denominator floor (mirror of iter-80 fix)
+# ---------------------------------------------------------------------------
+
+class TestComputeDriftDenominatorFloor:
+    """The iter-83 fix raised ``_compute_drift``'s denominator
+    floor from ``1e-30`` to ``1.0``, mirroring the iter-80 fix
+    in ``run_ocean_test_matrix.py:_save_conservation``.  Pin
+    that the floor stays at a physically meaningful value so a
+    regression to 1e-30 (or lower) would amplify machine-
+    precision rounding into spurious 1e+30-magnitude "drift"
+    values for any future caller with a near-zero baseline.
+    """
+
+    def test_returns_zero_for_short_series(self):
+        """Empty / single-element series → 0 (no drift defined)."""
+        assert M._compute_drift([]) == 0.0
+        assert M._compute_drift([1.0]) == 0.0
+
+    def test_relative_drift_for_non_zero_baseline(self):
+        """For a realistic baseline (e.g., atmospheric mass
+        ~5e19 Pa·m², drift 5e15), drift = 5e15 / 5e19 = 1e-4.
+        Pin that the relative-drift normalization is preserved
+        when the baseline is well above the floor.
+        """
+        baseline = 5.0e19
+        drift_amount = 5.0e15
+        result = M._compute_drift([baseline, baseline + drift_amount])
+        # 1e-4 with reasonable tolerance.
+        assert abs(result - 1e-4) < 1e-6
+
+    def test_baseline_zero_does_not_blow_up(self):
+        """The iter-78/80 pathology: baseline ≈ 0 + tiny rounding
+        drift.  iter-83 ensures the result is the absolute drift
+        (in physical units), NOT a 1e+30-magnitude spurious value.
+        """
+        # Baseline 0, drift 1e-17 (machine precision).
+        result = M._compute_drift([0.0, 1.0e-17])
+        # With iter-83 floor 1.0: result = 1e-17 / 1 = 1e-17.
+        # With iter-78 floor 1e-30: result = 1e-17 / 1e-30 = 1e+13.
+        assert result < 1e-10, (
+            f"iter-83 regression: drift = {result:.2e} for "
+            f"baseline=0 + 1e-17 rounding drift.  Expected ~1e-17 "
+            f"(absolute drift); got 1e-10 or larger.  Most likely "
+            f"cause: the denominator floor was lowered from 1.0 "
+            f"back toward 1e-30."
+        )
+
+    def test_floor_constant_is_one(self):
+        """Source-level pin: the denominator floor in
+        ``_compute_drift`` must be ``1.0`` (not 1e-30 or lower).
+        """
+        import inspect
+        src = inspect.getsource(M._compute_drift)
+        # The fix uses ``max(abs(values[0]), 1.0)`` and removed
+        # the older ``1e-30`` floor.  Pin both: 1.0 present, 1e-30
+        # absent.
+        assert "max(abs(values[0]), 1.0)" in src, (
+            "iter-83: ``_compute_drift`` must use ``max(abs(values[0]), 1.0)`` "
+            "as the relative-drift denominator floor.  iter-78/80 "
+            "showed the previous 1e-30 floor amplified machine-"
+            "precision rounding to 1e+30-magnitude spurious values."
+        )
+        # The original buggy expression ``max(abs(values[0]), 1e-30)``
+        # must no longer be present as actual code.  (The docstring
+        # mentions "1e-30" historically; that's allowed.)
+        assert "max(abs(values[0]), 1e-30)" not in src, (
+            "iter-83: the legacy 1e-30 denominator floor must be "
+            "removed from ``_compute_drift`` code.  Use 1.0."
+        )
+
+
+# ---------------------------------------------------------------------------
 # _zonal_mean_at_final_time / _zonal_mean_climatology
 # ---------------------------------------------------------------------------
 

@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-82 snapshot)
+**Branch**: `simulation_full_check` (iter-83 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..82 findings.  It is the user-facing
+This report consolidates iter-1..83 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -29,8 +29,8 @@ and every available pair of grids:
   `T(latitude, σ)` cross-section, the canonical Held-Suarez
   Fig. 3 layout.
 
-Every helper has a corresponding unit test (131 / 131 pass
-across `tests/test_atmosphere_cross_grid_plots.py` (79) +
+Every helper has a corresponding unit test (135 / 135 pass
+across `tests/test_atmosphere_cross_grid_plots.py` (83) +
 `test_ocean_cross_grid_plots.py` (18) +
 `test_cross_grid_wrappers.py` (34)) plus 3 MPAS-mesh-
 unavailable skips.
@@ -189,6 +189,7 @@ cross-grid ocean test (wind-driven gyres / OMIP) is a follow-up.
 | 79 | iter-78 cube η drift is execution-order-dependent: cube alone shows machine-precision conservation, but cube AFTER latlon/mpas/spectral shows -2.8e13 m drift (per-grid run isolation bug, not cube physics) | HIGH |
 | 79 | run_omip.py BLOWUP detector lacked η bound — relied on T<100 to catch large-eta blowups; iter-79 added max\|η\| < 1000 m sanity check | MEDIUM |
 | 80 | conservation_timeseries.csv `vol_rel` denominator floor `max(abs(vol[0]), 1e-30)` amplified machine precision to 1e+13 for rest-state runs (iter-78 cube finding was 100% display-bug, not physics) | HIGH |
+| 83 | `run_atmosphere_test_matrix.py:_compute_drift` had the same `max(abs(values[0]), 1e-30)` pattern — defensive fix; production callers (atmospheric mass, SW mean_height) all use baselines >> 1, so it didn't bite | LOW |
 
 **Codex adversarial review iterations**: iter-5, iter-6, iter-7,
 iter-16, iter-21, iter-26, iter-27, iter-32, iter-36, iter-37,
@@ -1481,12 +1482,38 @@ round caught real issues; final convergence is clean.
   Tests: 18 ocean (was 15); full suite 131/131 + 3 MPAS
   skips (was 128/128 + 3 skips).
 
-131/131 unit tests pass + 3 MPAS-mesh-unavailable skips
-(across ``tests/test_atmosphere_cross_grid_plots.py`` (79 +
+* iter-83: discovered the same iter-80 pathology in
+  ``run_atmosphere_test_matrix.py:_compute_drift``:
+
+      return abs(values[-1] - values[0]) / max(abs(values[0]), 1e-30)
+
+  Same ``1e-30`` floor that caused the iter-78 cube
+  rest-state spurious 1e+13 drift.  ``_compute_drift`` is
+  called on atmospheric ``mass`` (~5e+19 Pa·m²) and SW
+  ``mean_height`` (~5e+18 m·m²), both far from zero — so
+  the bug never bit in production for these specific
+  callers.  But defensively, applied the same fix
+  (1e-30 → 1.0).
+
+  4 new regression tests in
+  ``TestComputeDriftDenominatorFloor``:
+    * empty / single-element series → 0 (no drift defined)
+    * non-zero baseline → relative drift preserved
+    * baseline = 0 + machine-precision drift → result <
+      1e-10 (NOT 1e+13)
+    * source-level pin: must contain
+      ``max(abs(values[0]), 1.0)`` and NOT
+      ``max(abs(values[0]), 1e-30)``
+
+  Tests: 83 atmosphere (was 79); full suite 135/135 + 3
+  MPAS skips (was 131/131 + 3 skips).
+
+135/135 unit tests pass + 3 MPAS-mesh-unavailable skips
+(across ``tests/test_atmosphere_cross_grid_plots.py`` (83 +
 3 skips), ``tests/test_ocean_cross_grid_plots.py`` (18), and
 ``tests/test_cross_grid_wrappers.py`` (34)).
 
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-82 update).*
+(iter-83 update).*

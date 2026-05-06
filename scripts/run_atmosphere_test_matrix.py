@@ -222,9 +222,27 @@ def has_collectable_atmosphere_outputs(d: Path) -> bool:
 
 
 def _compute_drift(values: list[float]) -> float:
+    """Relative drift of a scalar diagnostic series.
+
+    Returns ``|values[-1] - values[0]| / max(|values[0]|, 1.0)``.
+
+    iter-83: the previous denominator floor of ``1e-30`` was the
+    same pathology as the iter-78/80 ``_save_conservation``
+    finding: when the baseline ``values[0]`` is essentially zero
+    (e.g., a quiescent diagnostic at the start of a rest-state-
+    like run), machine-precision rounding gets amplified to
+    spurious 1e+30-magnitude "relative drift" values.  In
+    practice ``_compute_drift`` is currently called on
+    atmospheric ``mass`` (~5e+19 Pa·m²) and SW ``mean_height``
+    (~5e+18 m·m²), both of which are far from zero — so the
+    1e-30 floor never bit in production.  But defensively, raise
+    the floor to ``1.0`` so the function reports absolute drift
+    (in physical units) when the baseline is vanishing.  This
+    matches iter-80's ``_MIN_RELATIVE_BASELINE`` convention.
+    """
     if len(values) < 2:
         return 0.0
-    return abs(values[-1] - values[0]) / max(abs(values[0]), 1e-30)
+    return abs(values[-1] - values[0]) / max(abs(values[0]), 1.0)
 
 
 def _grid_cell_area(grid_or_mesh):
