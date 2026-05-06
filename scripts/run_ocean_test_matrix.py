@@ -93,6 +93,11 @@ ensure_metal_or_fallback()
 
 import jax.numpy as jnp
 import numpy as np
+import pandas as pd  # iter-19 fix: pd was used (lines 4617, 6106) but
+                    # never imported, silently disabling the
+                    # cross-grid comparison block introduced by the
+                    # iter-1-predecessor's
+                    # ``cross_grid_comparison_plots_plan.md`` work.
 from scipy.spatial import cKDTree
 
 import matplotlib
@@ -1164,6 +1169,23 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
                 if field_key in ("SST", "speed_sfc") and "u_sfc" in snapshots[step] and "v_sfc" in snapshots[step]:
                     u_raw = np.asarray(snapshots[step]["u_sfc"], dtype=np.float64)
                     v_raw = np.asarray(snapshots[step]["v_sfc"], dtype=np.float64)
+                    # Iter-19 fix: latlon C-grid stores u on east-west
+                    # faces (n_lat, n_lon+1) and v on north-south faces
+                    # (n_lat+1, n_lon).  Average both to cell centres
+                    # before regridding so the quiver overlay doesn't
+                    # try to broadcast incompatible shapes.  Mirrors
+                    # the same averaging done in
+                    # ``_extract_latlon_cgrid_ocean`` for ``speed_sfc``.
+                    if u_raw.shape != v_raw.shape:
+                        if u_raw.shape[1] == v_raw.shape[1] + 1:
+                            u_raw = 0.5 * (u_raw[:, :-1] + u_raw[:, 1:])
+                        if v_raw.shape[0] == u_raw.shape[0] + 1:
+                            v_raw = 0.5 * (v_raw[:-1, :] + v_raw[1:, :])
+                        # Final clamp to common (n_lat, n_lon) shape.
+                        ny = min(u_raw.shape[0], v_raw.shape[0])
+                        nx = min(u_raw.shape[1], v_raw.shape[1])
+                        u_raw = u_raw[:ny, :nx]
+                        v_raw = v_raw[:ny, :nx]
                     _lm = (np.asarray(snapshots[step]["land_mask"], dtype=np.float64)
                             if "land_mask" in snapshots[step] else None)
                     u_reg = _regrid_2d(u_raw, lon_deg, lat_deg, coord_kind,
