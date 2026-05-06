@@ -3765,6 +3765,22 @@ def _atmosphere_grid_color() -> dict[str, str]:
 _RES_DIR_WARNED: set[Path] = set()
 
 
+class _EmptyNpzShim:
+    """Mimics ``numpy.lib.npyio.NpzFile`` with no fields.  Used by
+    ``_collect_grid_results_atmosphere`` (iter-26) when a grid has a
+    valid timeseries but no snapshot NPZ — snapshot-based plots see
+    no fields and cleanly no-op while the timeseries plot still runs.
+    """
+    files: list[str] = []
+    def __getitem__(self, key):
+        raise KeyError(f"empty snapshot stub does not contain {key!r}")
+    def __contains__(self, key):
+        return False
+
+
+_EMPTY_SNAPSHOTS_STUB = _EmptyNpzShim()
+
+
 def _select_resolution_dir(grid_dir: Path) -> Path | None:
     """Pick the (single) resolution subdirectory under ``grid_dir``.
 
@@ -3847,12 +3863,24 @@ def _collect_grid_results_atmosphere(
         csv_file = leaf / "mean_timeseries.csv"
         npz_file = leaf / "snapshots_latlon.npz"
         results_file = leaf / "results.txt"
-        if not (csv_file.exists() and npz_file.exists() and results_file.exists()):
+        # iter-26 codex review HIGH: relax the all-three requirement.
+        # Cross-grid TIMESERIES + SUMMARY plots only need
+        # ``mean_timeseries.csv`` + ``results.txt``.  The snapshot
+        # NPZ is only needed for the snapshot panels and zonal-mean
+        # plot.  Allow runs without snapshots (e.g. RCE iter-24
+        # output) to participate in TIMESERIES comparisons by
+        # providing an empty-snapshot stub when the NPZ is missing.
+        if not (csv_file.exists() and results_file.exists()):
             continue
 
         try:
             timeseries_df = pd.read_csv(csv_file)
-            snapshots = np.load(npz_file)
+            if npz_file.exists():
+                snapshots = np.load(npz_file)
+            else:
+                # Empty stub so downstream snapshot-only plotters
+                # (which iterate ``snapshots.files``) cleanly skip.
+                snapshots = _EMPTY_SNAPSHOTS_STUB
             metadata: dict[str, str] = {}
             with open(results_file, "r") as fh:
                 for line in fh:
@@ -3900,11 +3928,18 @@ def _vertical_coords_for_case(
         if res_dir is None:
             continue
         # Detect SW-style (leaf files at resolution level) vs. hydro-style
-        # (vertical-coord subdir level).
-        if (res_dir / "snapshots_latlon.npz").exists():
+        # (vertical-coord subdir level).  iter-26 codex review HIGH:
+        # accept ``mean_timeseries.csv`` as the discovery anchor too,
+        # so timeseries-only runs (e.g. RCE iter-24 output without
+        # snapshots) participate in the cross-grid plotter.
+        if (res_dir / "snapshots_latlon.npz").exists() or \
+                (res_dir / "mean_timeseries.csv").exists():
             found_sw = True
         for sub in res_dir.iterdir():
-            if sub.is_dir() and (sub / "snapshots_latlon.npz").exists():
+            if sub.is_dir() and (
+                (sub / "snapshots_latlon.npz").exists()
+                or (sub / "mean_timeseries.csv").exists()
+            ):
                 verts.add(sub.name)
     if verts and found_sw:
         # Mixed layout: SOME grids have leaf files at the resolution
@@ -4481,6 +4516,9 @@ def _create_atmosphere_comparison_timeseries(
         "q1_min", "q1_max", "q1_mean",
         # NH dycore scalars
         "mean_theta_prime", "mean_rho_prime",
+        # iter-26: RCE diagnostics — make moist-RCE timeseries
+        # comparable across grids (mean precip + column water vapor).
+        "mean_precip", "mean_cwv",
     ]
     for col in candidates:
         if all(col in data["timeseries"].columns

@@ -17,12 +17,21 @@ set -e
 OUTPUT=${1:?usage: $0 OUTPUT [DAYS]}
 DAYS=${2:-30}
 
-# Map grid_type → (resolution, dt) appropriate for ~1.25-3 deg coverage.
+# Map grid_type → (resolution, discretization, folder) appropriate
+# for ~1.25-3 deg coverage.  iter-26 codex HIGH: ``--discretization``
+# is REQUIRED for non-cubed grids — ``run_rce.py``'s default
+# ``cdgrid`` is rejected for latlon/voronoi/gaussian.
 declare -A GRID_RES=(
     [cubed_sphere]="24"
     [latlon]="32"
     [voronoi]="4"
     [gaussian]="21"
+)
+declare -A GRID_DISC=(
+    [cubed_sphere]="cdgrid"
+    [latlon]="latlon_cgrid"
+    [voronoi]="mpas"
+    [gaussian]="spectral"
 )
 declare -A GRID_FOLDER=(
     [cubed_sphere]="cubed_sphere"
@@ -33,16 +42,17 @@ declare -A GRID_FOLDER=(
 
 for GRID in cubed_sphere latlon voronoi gaussian; do
     RES=${GRID_RES[$GRID]}
+    DISC=${GRID_DISC[$GRID]}
     FOLDER=${GRID_FOLDER[$GRID]}
     OUTDIR="$OUTPUT/hydrostatic/rce/$FOLDER/$RES"
     echo "=================================================="
-    echo "  RCE on $GRID (resolution=$RES, days=$DAYS)"
+    echo "  RCE on $GRID/$DISC (resolution=$RES, days=$DAYS)"
     echo "  → $OUTDIR"
     echo "=================================================="
     mkdir -p "$OUTDIR"
     JAX_ENABLE_X64=1 .venv/bin/python scripts/run_rce.py \
-        --grid-type "$GRID" --resolution "$RES" \
-        --days "$DAYS" --output "$OUTDIR"
+        --grid-type "$GRID" --discretization "$DISC" \
+        --resolution "$RES" --days "$DAYS" --output "$OUTDIR"
 done
 
 echo ""
