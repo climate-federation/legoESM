@@ -1835,39 +1835,112 @@ class TestHeldSuarezDissipationImbalance:
         )
 
     def test_cube_has_strict_superset_of_latlon_dissipation(self):
-        """Cube uses 4 dissipation terms; latlon uses 1.  This
-        test pins that no one has accidentally dropped a cube
-        dissipation term or added one to the latlon C-grid path.
+        """Cube uses 4 dissipation terms; latlon uses 1.
+
+        iter-59 codex HIGH: scope the source checks to the cube
+        branch ONLY (was matching anywhere in ``run_held_suarez``,
+        which would let a spectral / MPAS / comment match cover
+        for a cube branch that dropped a term).  Use AST parsing
+        to find the ``elif tc.grid_type == "cubed_sphere":`` /
+        ``if tc.grid_type == "cubed_sphere":`` branch body.
         """
+        import ast
         import inspect
         src = inspect.getsource(M.run_held_suarez)
-        # iter-57 audit: search for the per-grid configurations.
-        # Cube branch must reference all of: hyperdiff_coeff,
-        # hyperdiff_ps_coeff, div_damp_coeff, A_h.
+        tree = ast.parse(src)
+        # Find the function definition.
+        func_def = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "run_held_suarez":
+                func_def = node
+                break
+        assert func_def is not None
+
+        # Walk if/elif chain, find the branch whose test is
+        # ``tc.grid_type == "cubed_sphere"``.
+        cube_branch_body = None
+        latlon_branch_body = None
+
+        def _matches_grid_type(test, value):
+            return (
+                isinstance(test, ast.Compare)
+                and len(test.ops) == 1
+                and isinstance(test.ops[0], ast.Eq)
+                and isinstance(test.left, ast.Attribute)
+                and test.left.attr == "grid_type"
+                and len(test.comparators) == 1
+                and isinstance(test.comparators[0], ast.Constant)
+                and test.comparators[0].value == value
+            )
+
+        def _walk_if_chain(node):
+            nonlocal cube_branch_body, latlon_branch_body
+            if not isinstance(node, ast.If):
+                return
+            if _matches_grid_type(node.test, "cubed_sphere"):
+                cube_branch_body = node.body
+            elif _matches_grid_type(node.test, "latlon"):
+                latlon_branch_body = node.body
+            for sub in node.orelse:
+                _walk_if_chain(sub)
+
+        for node in func_def.body:
+            _walk_if_chain(node)
+
+        assert cube_branch_body is not None, (
+            "could not locate ``tc.grid_type == 'cubed_sphere'`` "
+            "branch in run_held_suarez"
+        )
+        assert latlon_branch_body is not None, (
+            "could not locate ``tc.grid_type == 'latlon'`` branch "
+            "in run_held_suarez"
+        )
+
+        # Dump just those branches as source.
+        cube_src = "\n".join(ast.unparse(s) for s in cube_branch_body)
+        latlon_src = "\n".join(ast.unparse(s) for s in latlon_branch_body)
+
+        # iter-57 audit: cube branch must reference all four.
         for term in (
             "hyperdiff_coeff",
             "hyperdiff_ps_coeff",
             "div_damp_coeff",
             "A_h",
         ):
-            assert term in src, (
-                f"iter-57: cube branch is missing dissipation term "
-                f"``{term}`` in run_held_suarez.  This breaks the "
-                f"iter-57 audit baseline."
+            assert term in cube_src, (
+                f"iter-57: cube branch dropped dissipation term "
+                f"``{term}``.  Update the iter-57 audit in §5 of "
+                f"CROSS_GRID_COMPARISON_REPORT.md alongside this "
+                f"change."
             )
-        # Latlon C-grid branch must use ONLY ``A_h`` (no biharmonic
-        # / div_damp).  The C-grid latlon config NamedTuple does not
-        # currently support biharmonic; if a future change adds it
-        # AND the matrix runner passes it, this test must be
-        # updated alongside §5 to reflect the rebalancing.
+
+        # iter-59 codex HIGH: latlon branch must use ``A_h`` (the
+        # iter-57 finding asserts latlon has Laplacian-only
+        # dissipation).  A future change that drops ``A_h`` from
+        # the latlon HS instantiation would silently shift the
+        # cross-grid disagreement.
+        assert "A_h" in latlon_src, (
+            "iter-57 audit: latlon HS branch dropped ``A_h``.  "
+            "This would change the cross-grid dissipation balance "
+            "documented in §5."
+        )
+        # And iter-57: latlon HS must NOT instantiate biharmonic
+        # / div_damp (until the C-grid config supports them).
+        for nope in ("hyperdiff_coeff", "div_damp_coeff"):
+            assert nope not in latlon_src, (
+                f"iter-57 audit: latlon HS branch now uses "
+                f"``{nope}``.  This is the §5 fix-candidate (a) "
+                f"path — update the audit doc."
+            )
+
+        # Latlon C-grid config NamedTuple field check (independent
+        # confirmation that biharmonic / div_damp are not yet
+        # exposed at the config layer).
         from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
             CGridLatLonPrimitiveEquationConfig,
         )
         ll_fields = set(CGridLatLonPrimitiveEquationConfig._fields)
         assert "A_h" in ll_fields
-        # Pin the iter-57 finding: latlon C-grid does NOT support
-        # biharmonic.  This is the structural reason cube cannot be
-        # easily matched at the configuration level.
         for nope in ("hyperdiff_coeff", "div_damp_coeff"):
             assert nope not in ll_fields, (
                 f"iter-57: ``CGridLatLonPrimitiveEquationConfig`` "
@@ -1877,6 +1950,98 @@ class TestHeldSuarezDissipationImbalance:
                 f"CROSS_GRID_COMPARISON_REPORT.md should be "
                 f"marked done."
             )
+
+    def test_cube_branch_wires_helpers_with_local_n(self):
+        """iter-59 codex MEDIUM: pin that the cube HS branch
+        actually invokes ``_hyperdiff_cube(n)``,
+        ``_div_damp_cube(n)``, ``_laplacian_visc_cube(n)`` with
+        the local ``n`` derived from ``tc.resolution``, AND
+        passes those values to the corresponding config fields.
+
+        The iter-58 helper-scaling tests pinned the helpers
+        themselves but did NOT prove the HS branch actually
+        wires them.  A refactor that drops the helper and
+        replaces it with a hardcoded constant would slip
+        through.
+        """
+        import ast
+        import inspect
+        src = inspect.getsource(M.run_held_suarez)
+        tree = ast.parse(src)
+
+        # Find the cube branch as before.
+        cube_branch_body = None
+        for func_def in (n for n in ast.walk(tree)
+                         if isinstance(n, ast.FunctionDef)
+                         and n.name == "run_held_suarez"):
+            for node in ast.walk(func_def):
+                if (
+                    isinstance(node, ast.If)
+                    and isinstance(node.test, ast.Compare)
+                    and isinstance(node.test.left, ast.Attribute)
+                    and node.test.left.attr == "grid_type"
+                    and len(node.test.comparators) == 1
+                    and isinstance(node.test.comparators[0], ast.Constant)
+                    and node.test.comparators[0].value == "cubed_sphere"
+                ):
+                    cube_branch_body = node.body
+                    break
+        assert cube_branch_body is not None
+        cube_src = "\n".join(ast.unparse(s) for s in cube_branch_body)
+
+        # Each helper must be invoked with ``n`` (local var) — pin
+        # against any future hardcode like ``_hyperdiff_cube(48)``.
+        assert "_hyperdiff_cube(n)" in cube_src, (
+            "iter-59 codex MEDIUM: cube HS branch must call "
+            "``_hyperdiff_cube(n)`` (uses the per-resolution n)"
+        )
+        assert "_div_damp_cube(n)" in cube_src
+        assert "_laplacian_visc_cube(n)" in cube_src
+
+    def test_hyperdiff_ps_coeff_uses_same_helper_as_hyperdiff(self):
+        """iter-59 codex MEDIUM: the iter-58 tests numerically
+        pinned ``_hyperdiff_cube`` scaling, but only name-checked
+        ``hyperdiff_ps_coeff``.  Pin that the cube HS branch
+        passes the SAME ``hd`` value to both.  A divergence between
+        atmospheric and surface-pressure biharmonic would shift
+        the cube-cold pattern in a hard-to-attribute way.
+        """
+        import ast
+        import inspect
+        src = inspect.getsource(M.run_held_suarez)
+        tree = ast.parse(src)
+        # Find the cube branch.
+        for func_def in (n for n in ast.walk(tree)
+                         if isinstance(n, ast.FunctionDef)
+                         and n.name == "run_held_suarez"):
+            for node in ast.walk(func_def):
+                if (
+                    isinstance(node, ast.If)
+                    and isinstance(node.test, ast.Compare)
+                    and isinstance(node.test.left, ast.Attribute)
+                    and node.test.left.attr == "grid_type"
+                    and len(node.test.comparators) == 1
+                    and isinstance(node.test.comparators[0], ast.Constant)
+                    and node.test.comparators[0].value == "cubed_sphere"
+                ):
+                    cube_branch = node.body
+                    break
+        cube_src = "\n".join(ast.unparse(s) for s in cube_branch)
+
+        # The cube branch idiom is:
+        #   hd = _hyperdiff_cube(n)
+        #   ...
+        #   PrimitiveEquationConfig(
+        #       hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd, ...)
+        assert "hyperdiff_coeff=hd" in cube_src, (
+            "cube HS branch should pass ``hyperdiff_coeff=hd``"
+        )
+        assert "hyperdiff_ps_coeff=hd" in cube_src, (
+            "cube HS branch should pass ``hyperdiff_ps_coeff=hd``"
+            " — the iter-57 audit assumes the same biharmonic "
+            "coefficient is shared between atmospheric and "
+            "surface-pressure operators"
+        )
 
     def test_hyperdiff_cube_scales_inversely_with_n_to_fourth_power(self):
         """Pin the iter-57 hyperdiff scaling.  This is the

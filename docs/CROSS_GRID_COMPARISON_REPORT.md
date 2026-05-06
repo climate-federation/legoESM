@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-58 snapshot)
+**Branch**: `simulation_full_check` (iter-59 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..58 findings.  It is the user-facing
+This report consolidates iter-1..59 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -29,8 +29,8 @@ and every available pair of grids:
   `T(latitude, σ)` cross-section, the canonical Held-Suarez
   Fig. 3 layout.
 
-Every helper has a corresponding unit test (116 / 116 pass
-across `tests/test_atmosphere_cross_grid_plots.py` (75) +
+Every helper has a corresponding unit test (118 / 118 pass
+across `tests/test_atmosphere_cross_grid_plots.py` (77) +
 `test_ocean_cross_grid_plots.py` (15) +
 `test_cross_grid_wrappers.py` (26)) plus 3 MPAS-mesh-
 unavailable skips.
@@ -179,8 +179,8 @@ cross-grid ocean test (wind-driven gyres / OMIP) is a follow-up.
 **Codex adversarial review iterations**: iter-5, iter-6, iter-7,
 iter-16, iter-21, iter-26, iter-27, iter-32, iter-36, iter-37,
 iter-39, iter-42, iter-43, iter-44, iter-46, iter-47, iter-49,
-iter-50, iter-52, iter-53, iter-54.  Each round caught real
-issues; final convergence is clean.
+iter-50, iter-52, iter-53, iter-54, iter-58.  Each round
+caught real issues; final convergence is clean.
 
 ---
 
@@ -197,7 +197,7 @@ issues; final convergence is clean.
 | Same colorbar/projection across grids | ✅ DONE (cartopy PlateCarrée + shared cmap) |
 | Physical consistency vs reference papers | ⚠️ Williamson cases agree to machine precision; HS climatology disagrees structurally (documented in §2) |
 | GPU / MPI efficiency | ✅ DONE (iter-28/29: per-test-case ``wall-time/day`` ranking + speedup factor in every ``comparison_summary.txt``) |
-| `/codex:adversarial-review` | ✅ DONE (21 review rounds: iter-5/6/7/16/21/26/27/32/36/37/39/42/43/44/46/47/49/50/52/53/54, all findings addressed) |
+| `/codex:adversarial-review` | ✅ DONE (22 review rounds: iter-5/6/7/16/21/26/27/32/36/37/39/42/43/44/46/47/49/50/52/53/54/58, all findings addressed) |
 
 ---
 
@@ -613,12 +613,29 @@ issues; final convergence is clean.
   update the test alongside the docs — the iter-57 finding
   is now atomic with the source.
 
-116/116 unit tests pass + 3 MPAS-mesh-unavailable skips
-(across ``tests/test_atmosphere_cross_grid_plots.py`` (75 +
+* iter-59: address codex iter-58 review (2 HIGH + 2 MEDIUM).
+  HIGH: ``test_cube_has_strict_superset_of_latlon_dissipation``
+  switched from substring-anywhere search of ``run_held_suarez``
+  source to AST-extracted cube/latlon branch bodies.  Cube
+  branch must reference all 4 dissipation terms; latlon
+  branch must reference ``A_h`` AND must NOT reference
+  biharmonic / div_damp.  HIGH: latlon HS instantiation now
+  pinned (was only checking config NamedTuple field set,
+  not the actual matrix-runner usage).  MEDIUM:
+  ``test_cube_branch_wires_helpers_with_local_n`` pins that
+  the cube HS branch invokes ``_hyperdiff_cube(n)`` /
+  ``_div_damp_cube(n)`` / ``_laplacian_visc_cube(n)`` with
+  the local ``n``.  MEDIUM: ``test_hyperdiff_ps_coeff_uses_same_helper_as_hyperdiff``
+  numerically pins ``hyperdiff_coeff=hd`` and
+  ``hyperdiff_ps_coeff=hd`` use the same value (a divergence
+  would shift the cube-cold pattern subtly).
+
+118/118 unit tests pass + 3 MPAS-mesh-unavailable skips
+(across ``tests/test_atmosphere_cross_grid_plots.py`` (77 +
 3 skips), ``tests/test_ocean_cross_grid_plots.py`` (15), and
 ``tests/test_cross_grid_wrappers.py`` (26)).
 
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-58 update).*
+(iter-59 update).*
