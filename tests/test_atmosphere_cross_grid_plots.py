@@ -1494,20 +1494,22 @@ class TestHeldSuarezInitConsistency:
         assert T_eq_pole >= hs_module.T_MIN
         assert T_eq_eq - T_eq_pole >= hs_module.DELTA_T_Y / 2
 
-        # iter-47 codex LOW: 5-point monotonicity check.
+        # iter-48 codex LOW: dense 51-point monotonicity check.
+        # 5 samples missed possible non-monotonic behavior between
+        # sampled pressures; 51 samples (Δp ≈ 1800 Pa from p_ref to
+        # 100 hPa) makes any local maximum >Δp wide visible.
         # Pressure levels from p_ref (surface) → 10000 Pa (100 hPa).
-        p_levels = jnp.linspace(hs_module.constants.p_ref, 10000.0, 5)
-        T_profile = [
-            float(hs_module.held_suarez_equilibrium_temperature(
-                jnp.array(0.0), jnp.array(p),
-            ))
-            for p in p_levels
-        ]
+        p_levels = jnp.linspace(hs_module.constants.p_ref, 10000.0, 51)
+        T_eq_array = hs_module.held_suarez_equilibrium_temperature(
+            jnp.zeros_like(p_levels), p_levels,
+        )
+        T_profile = [float(x) for x in T_eq_array]
         # Each successive level must be no warmer than the previous.
         for i in range(1, len(T_profile)):
             assert T_profile[i] <= T_profile[i - 1] + 1e-9, (
                 f"T_eq non-monotonic at equator: levels {i-1}→{i}: "
-                f"{T_profile[i-1]:.2f} → {T_profile[i]:.2f} K"
+                f"p={float(p_levels[i-1]):.0f} → {float(p_levels[i]):.0f} Pa, "
+                f"T={T_profile[i-1]:.2f} → {T_profile[i]:.2f} K"
             )
 
     def test_init_produces_zero_wind(self, hs_module):
@@ -1545,14 +1547,18 @@ class TestHeldSuarezInitConsistency:
         # iter-47 codex HIGH: also exercise the MPAS init.  MPAS
         # state stores u on edges (no separate v); a single u
         # array must be zero.
+        # iter-48 codex LOW: tighten the catch.  ``ImportError`` for
+        # missing module + ``FileNotFoundError`` for missing mesh
+        # data file are legitimate skips; everything else is a real
+        # bug we want to surface.
         try:
             from legoesm.grids.mpas import create_mpas_mesh
         except ImportError:
             pytest.skip("MPAS mesh module unavailable")
         try:
             mesh = create_mpas_mesh(level=2)
-        except Exception:
-            pytest.skip("MPAS level-2 mesh unavailable")
+        except FileNotFoundError:
+            pytest.skip("MPAS level-2 mesh data file unavailable")
         s_mpas = hs_module.held_suarez_init_mpas(mesh, sigma)
         assert float(jnp.max(jnp.abs(s_mpas.u.data))) == 0.0
 
@@ -1617,14 +1623,15 @@ class TestHeldSuarezInitConsistency:
         assert abs(float(jnp.max(p_s_cube)) - p_ref) < 1e-6
 
         # MPAS.
+        # iter-48 codex LOW: only catch legitimate-skip exceptions.
         try:
             from legoesm.grids.mpas import create_mpas_mesh
         except ImportError:
-            return  # MPAS unavailable; cube/latlon coverage suffices
+            pytest.skip("MPAS mesh module unavailable; cube/latlon coverage suffices")
         try:
             mesh = create_mpas_mesh(level=2)
-        except Exception:
-            return
+        except FileNotFoundError:
+            pytest.skip("MPAS level-2 mesh data file unavailable")
         s_mpas = hs_module.held_suarez_init_mpas(mesh, sigma)
         p_s_mpas = jnp.asarray(s_mpas.p_s.data)
         assert abs(float(jnp.min(p_s_mpas)) - p_ref) < 1e-6
@@ -1668,14 +1675,15 @@ class TestHeldSuarezInitConsistency:
         )
 
         # MPAS.
+        # iter-48 codex LOW: legitimate-skip-only catches.
         try:
             from legoesm.grids.mpas import create_mpas_mesh
         except ImportError:
-            return
+            pytest.skip("MPAS mesh module unavailable")
         try:
             mesh = create_mpas_mesh(level=2)
-        except Exception:
-            return
+        except FileNotFoundError:
+            pytest.skip("MPAS level-2 mesh data file unavailable")
         s_mpas = hs_module.held_suarez_init_mpas(mesh, sigma)
         mean_T_mpas = float(jnp.mean(s_mpas.T.data))
         assert abs(mean_T_mpas - 300.0) < 0.2, (
@@ -1693,58 +1701,72 @@ class TestHeldSuarezInitConsistency:
         would NOT catch it because they only check the function
         signatures.
 
-        Strategy: parse the matrix script source and verify each of
-        the four ``held_suarez_init*`` / ``isothermal_rest_state_spectral``
-        call sites passes only the grid + sigma positional args
-        (no explicit kwarg overrides for ``T_init``,
-        ``perturbation_amplitude``, ``seed``, ``p_s_init``).
+        iter-48 codex MEDIUM: previous regex-based version had two
+        gaps — (1) ``T_init = 290.0`` (whitespace around ``=``)
+        would slip through the ``T_init=`` substring check, and
+        (2) the test didn't assert all four expected init calls
+        are present, so a dropped branch (e.g. spectral renamed
+        away) would pass.  Switched to AST parsing.
         """
-        import re
+        import ast
         path = _SCRIPT_DIR / "run_atmosphere_test_matrix.py"
-        src_lines = path.read_text().splitlines()
+        tree = ast.parse(path.read_text())
 
-        # iter-47 codex MEDIUM: scope to ``run_held_suarez`` only —
-        # the matrix runner's ``run_amip`` deliberately passes
-        # ``T_init=280.0`` to all four inits, which is intentional
-        # (AMIP-style cooler init).  Find the function-body boundary
-        # by scanning until the next top-level ``def `` (column 0).
-        start_idx = None
-        for i, line in enumerate(src_lines):
-            if line.startswith("def run_held_suarez("):
-                start_idx = i
+        # Locate the run_held_suarez function definition.
+        run_hs_func = None
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.FunctionDef)
+                and node.name == "run_held_suarez"
+            ):
+                run_hs_func = node
                 break
-        assert start_idx is not None, (
+        assert run_hs_func is not None, (
             "run_held_suarez not found in matrix runner"
         )
-        end_idx = len(src_lines)
-        for i in range(start_idx + 1, len(src_lines)):
-            if src_lines[i].startswith("def ") or src_lines[i].startswith("class "):
-                end_idx = i
-                break
-        run_hs_body = "\n".join(src_lines[start_idx:end_idx])
 
-        # Find each init call within run_held_suarez.  All inits
-        # should be invoked with EXACTLY positional args (grid/mesh
-        # + sigma), no kwargs.
-        init_calls = re.findall(
-            r"(?:held_suarez_init(?:_latlon|_mpas)?|"
-            r"isothermal_rest_state_spectral)"
-            r"\(([^)]*)\)",
-            run_hs_body,
+        # Walk the body to find every init call.
+        expected_callees = {
+            "held_suarez_init",
+            "held_suarez_init_latlon",
+            "held_suarez_init_mpas",
+            "isothermal_rest_state_spectral",
+        }
+        forbidden_kwargs = {
+            "T_init", "perturbation_amplitude", "seed", "p_s_init",
+        }
+        seen_callees: set[str] = set()
+        for node in ast.walk(run_hs_func):
+            if not isinstance(node, ast.Call):
+                continue
+            # Resolve the callee name (handle both ``foo()`` and
+            # ``mod.foo()`` forms — though the matrix runner uses
+            # the former).
+            if isinstance(node.func, ast.Name):
+                callee = node.func.id
+            elif isinstance(node.func, ast.Attribute):
+                callee = node.func.attr
+            else:
+                continue
+            if callee not in expected_callees:
+                continue
+            seen_callees.add(callee)
+            # Check that none of the forbidden kwargs is passed.
+            for kw in node.keywords:
+                if kw.arg in forbidden_kwargs:
+                    raise AssertionError(
+                        f"run_held_suarez calls {callee} with kwarg "
+                        f"{kw.arg!r} — this would break cross-grid "
+                        f"init consistency.  Rely on the canonical "
+                        f"default instead."
+                    )
+
+        # iter-48: assert all four expected init callees are present
+        # so a dropped branch (e.g. spectral renamed away or stripped
+        # out) flips the test.
+        missing = expected_callees - seen_callees
+        assert not missing, (
+            f"run_held_suarez is missing call sites for: {missing}.  "
+            f"Either the function was refactored or a grid branch "
+            f"was dropped — update this test if intentional."
         )
-        assert init_calls, (
-            "no per-grid init calls found in run_held_suarez body — "
-            "test broken or function refactored"
-        )
-        for args_str in init_calls:
-            args_str = args_str.strip().replace("\n", " ")
-            # iter-47: any of the canonical kwargs in the call site
-            # would mean the runner is passing a per-grid override —
-            # the iter-46 default-pinning audit would not catch it.
-            for kwarg in ("T_init", "perturbation_amplitude", "seed", "p_s_init"):
-                assert f"{kwarg}=" not in args_str, (
-                    f"run_held_suarez init call contains '{kwarg}=' "
-                    f"override (args={args_str!r}) — this would break "
-                    f"cross-grid init consistency.  Use the per-init "
-                    f"default instead."
-                )

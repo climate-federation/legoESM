@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-47 snapshot)
+**Branch**: `simulation_full_check` (iter-48 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..47 findings.  It is the user-facing
+This report consolidates iter-1..48 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -29,10 +29,10 @@ and every available pair of grids:
   `T(latitude, σ)` cross-section, the canonical Held-Suarez
   Fig. 3 layout.
 
-Every helper has a corresponding unit test (79 / 79 pass in
-`tests/test_atmosphere_cross_grid_plots.py` (73) +
-`test_ocean_cross_grid_plots.py` (6)) plus 1 MPAS-mesh-
-unavailable skip.
+Every helper has a corresponding unit test (77 / 77 pass in
+`tests/test_atmosphere_cross_grid_plots.py` (71) +
+`test_ocean_cross_grid_plots.py` (6)) plus 3 MPAS-mesh-
+unavailable skips.
 
 CLI:
 * `--no-cross-grid-plots` — skip the post-run comparison block.
@@ -170,8 +170,8 @@ cross-grid ocean test (wind-driven gyres / OMIP) is a follow-up.
 
 **Codex adversarial review iterations**: iter-5, iter-6, iter-7,
 iter-16, iter-21, iter-26, iter-27, iter-32, iter-36, iter-37,
-iter-39, iter-42, iter-43, iter-44, iter-46.  Each round
-caught real issues; final convergence is clean.
+iter-39, iter-42, iter-43, iter-44, iter-46, iter-47.  Each
+round caught real issues; final convergence is clean.
 
 ---
 
@@ -188,7 +188,7 @@ caught real issues; final convergence is clean.
 | Same colorbar/projection across grids | ✅ DONE (cartopy PlateCarrée + shared cmap) |
 | Physical consistency vs reference papers | ⚠️ Williamson cases agree to machine precision; HS climatology disagrees structurally (documented in §2) |
 | GPU / MPI efficiency | ✅ DONE (iter-28/29: per-test-case ``wall-time/day`` ranking + speedup factor in every ``comparison_summary.txt``) |
-| `/codex:adversarial-review` | ✅ DONE (15 review rounds: iter-5/6/7/16/21/26/27/32/36/37/39/42/43/44/46, all findings addressed) |
+| `/codex:adversarial-review` | ✅ DONE (16 review rounds: iter-5/6/7/16/21/26/27/32/36/37/39/42/43/44/46/47, all findings addressed) |
 
 ---
 
@@ -390,13 +390,31 @@ caught real issues; final convergence is clean.
   Source fix: removed the explicit kwarg from the spectral
   branch.
 
-79/79 unit tests pass across both
-``tests/test_atmosphere_cross_grid_plots.py`` (73) and
-``tests/test_ocean_cross_grid_plots.py`` (6).  iter-47 also
-adds a spectral-init-zero-wind test that pins the round-trip
-spectral→grid u/v consistency.
+* iter-48: address codex iter-47 review (1 MEDIUM + 2 LOW).
+  MEDIUM: regex-based dispatch test had two gaps —
+  ``T_init = 290.0`` (whitespace around ``=``) would slip
+  through the substring check, and there was no assertion
+  that all four expected init callees are present.  Switched
+  to AST-based parsing using ``ast.walk`` to find every
+  ``ast.Call`` in ``run_held_suarez``, resolve the callee
+  name (handles ``foo()`` and ``mod.foo()`` forms), then
+  check ``node.keywords`` for the four forbidden kwargs
+  (``T_init`` / ``perturbation_amplitude`` / ``seed`` /
+  ``p_s_init``).  Also assert all four expected callees
+  appear so a dropped branch flips the test.  LOW: T_eq
+  monotonicity check extended from 5 → 51 sample points so
+  any local maximum >Δp wide is visible.  LOW: tightened
+  MPAS skip catches from ``except Exception: return`` to
+  ``except FileNotFoundError`` / ``except ImportError`` +
+  ``pytest.skip``, so a real broken MPAS setup surfaces
+  rather than masquerading as a skip.
+
+77/77 unit tests pass + 3 MPAS-mesh-unavailable skips
+(across ``tests/test_atmosphere_cross_grid_plots.py`` (71
++ 3 skips) and ``tests/test_ocean_cross_grid_plots.py``
+(6)).
 
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-47 update).*
+(iter-48 update).*
