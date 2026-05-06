@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-83 snapshot)
+**Branch**: `simulation_full_check` (iter-84 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..83 findings.  It is the user-facing
+This report consolidates iter-1..84 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -1507,6 +1507,28 @@ round caught real issues; final convergence is clean.
 
   Tests: 83 atmosphere (was 79); full suite 135/135 + 3
   MPAS skips (was 131/131 + 3 skips).
+* iter-84 codex review (1 MEDIUM + 2 LOW addressed):
+
+    MEDIUM: iter-82 regression test only checked
+      ``vol_rel`` zero-baseline behavior; ``heat_rel`` /
+      ``salt_rel`` could regress independently.  Extended
+      ``test_rest_state_baseline_zero_does_not_blow_up``
+      to test all three columns simultaneously.
+
+    LOW: iter-82/83 zero-baseline tests only asserted
+      magnitude bound (``< 1e-10``), which catches the
+      iter-78 1e+13 case but misses subtler floor regressions
+      (e.g., 1e-15).  Added ``pytest.approx`` exact-value
+      assertions to both ``vol_rel/heat_rel/salt_rel``
+      ocean test and the ``_compute_drift`` atmosphere test.
+
+    LOW: source-string pins (``"X" in src``) acknowledged
+      as brittle but kept — they're the simplest way to
+      flag regressions and the failure messages explicitly
+      tell the regress-er to update the test alongside.
+
+  Tests still 135/135 + 3 MPAS skips (no new tests, just
+  tightened assertions on existing ones).
 
 135/135 unit tests pass + 3 MPAS-mesh-unavailable skips
 (across ``tests/test_atmosphere_cross_grid_plots.py`` (83 +
@@ -1516,4 +1538,4 @@ round caught real issues; final convergence is clean.
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-83 update).*
+(iter-84 update).*

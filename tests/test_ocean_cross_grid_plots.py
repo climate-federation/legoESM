@@ -447,15 +447,24 @@ class TestSaveConservationDenominatorFloor:
         zero by construction).  After the iter-80 fix, machine-
         precision rounding of -2.83e-17 should produce a
         ``vol_rel`` value of -2.83e-17, NOT -2.83e+13.
+
+        iter-84 codex MEDIUM: extended to also test heat_rel and
+        salt_rel zero-baseline behavior.  iter-82 only checked
+        vol_rel; if a future regression lowered only heat_denom
+        or salt_denom back to 1e-30, the iter-82 test would
+        miss it.
         """
         M = self._import_matrix_module()
 
-        # Mimic a rest-state diag dict: vol baseline ≈ 0,
-        # tiny rounding drift over 3 steps.
+        # Mimic a rest-state diag dict where ALL THREE conservation
+        # variables have a zero baseline + tiny rounding drift.
+        # This catches future regressions that lower the floor for
+        # any one of vol, heat, or salt independently.
+        drift = -2.83e-17
         diag = {
-            "vol_key": [0.0, -1e-19, -2.83e-17],
-            "heat_key": [5.23, 5.23, 5.23],
-            "salt_key": [35.0, 35.0, 35.0],
+            "vol_key": [0.0, -1e-19, drift],
+            "heat_key": [0.0, -1e-19, drift],
+            "salt_key": [0.0, -1e-19, drift],
             "times": [0.0, 0.05, 0.10],
         }
         out = tmp_path / "out"
@@ -465,24 +474,33 @@ class TestSaveConservationDenominatorFloor:
         )
         csv_path = out / "conservation_timeseries.csv"
         assert csv_path.exists()
-        # Read back and parse the last vol_rel.
         import csv as csv_mod
         with open(csv_path) as f:
             reader = csv_mod.DictReader(f)
             rows = list(reader)
-        last_vol_rel = float(rows[-1]["vol_rel"])
-        # iter-80: the value should be in the range of the actual
-        # rounding (1e-17), NOT the iter-78 spurious 1e+13.
-        # If a future regression drops the denominator floor back
-        # to 1e-30, vol_rel would be ~-2.83e+13 (29 orders bigger
-        # than the actual value).
-        assert abs(last_vol_rel) < 1e-10, (
-            f"iter-80 regression: vol_rel = {last_vol_rel:.2e} for "
-            f"a rest-state baseline (vol[0]=0).  Expected ~1e-17 "
-            f"(actual rounding magnitude); got 1e-10 or larger.  "
-            f"Most likely cause: the ``_MIN_RELATIVE_BASELINE`` "
-            f"constant was lowered from 1.0 back toward 1e-30."
-        )
+        # iter-84: pin all three columns, with both magnitude
+        # bound (catches the spurious 1e+13) AND exact value
+        # match (catches subtler floor regressions).
+        for col in ("vol_rel", "heat_rel", "salt_rel"):
+            value = float(rows[-1][col])
+            assert abs(value) < 1e-10, (
+                f"iter-80/82 regression: {col} = {value:.2e} for "
+                f"a zero baseline.  Expected ~1e-17 (actual "
+                f"rounding magnitude); got 1e-10 or larger.  Most "
+                f"likely cause: ``_MIN_RELATIVE_BASELINE`` (or its "
+                f"per-column equivalent) was lowered from 1.0 "
+                f"back toward 1e-30."
+            )
+            # iter-84 codex LOW: pin the EXACT value.  With the
+            # iter-80 fix (denominator = max(|baseline|, 1.0) =
+            # 1.0 for baseline=0), the column reports absolute
+            # drift in physical units: -2.83e-17.
+            assert value == pytest.approx(drift, rel=1e-6), (
+                f"iter-80/82 regression: {col} = {value:.6e}, "
+                f"expected exactly {drift:.6e} (the absolute "
+                f"drift since baseline=0).  Drift in physical "
+                f"units is preserved when baseline < 1.0."
+            )
 
     def test_real_baseline_uses_relative_drift(self, tmp_path):
         """When the baseline is non-trivial (e.g., a forced run

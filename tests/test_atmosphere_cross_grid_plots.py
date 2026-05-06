@@ -138,6 +138,18 @@ class TestComputeDriftDenominatorFloor:
             f"cause: the denominator floor was lowered from 1.0 "
             f"back toward 1e-30."
         )
+        # iter-84 codex LOW: pin the EXACT behavioral contract.
+        # With floor=1.0 and baseline=0, drift = 1e-17 / 1 = 1e-17
+        # (absolute drift in physical units).  Subtler floor
+        # regressions (e.g., 1e-15) wouldn't fail the < 1e-10
+        # check above but WOULD fail this exact-value check.
+        assert result == pytest.approx(1.0e-17, rel=1e-6), (
+            f"iter-84: ``_compute_drift`` for baseline=0 + 1e-17 "
+            f"drift must return exactly 1e-17 (denominator=max(0, "
+            f"1.0)=1.0, drift / 1 = 1e-17).  Got {result:.6e}.  "
+            f"This catches subtler floor regressions than the "
+            f"< 1e-10 magnitude bound."
+        )
 
     def test_floor_constant_is_one(self):
         """Source-level pin: the denominator floor in
