@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-63 snapshot)
+**Branch**: `simulation_full_check` (iter-64 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..63 findings.  It is the user-facing
+This report consolidates iter-1..64 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -756,6 +756,44 @@ round caught real issues; final convergence is clean.
 
   Pure experiment / diagnosis; no source changes.  Tests
   still 118/118 + 3 MPAS skips.
+* iter-64: tested the iter-63 hypothesis that cube's 1-hour
+  Rayleigh sponge is the fast-acting culprit at 3-day
+  windows.  Temporarily set ``sponge_tau_sec=0.0`` in the
+  cube branch (sponge OFF), ran a 3-day HS smoke,
+  reverted before commit.  Result:
+
+    cube=0.136  K (was 0.125, +0.011)
+    latlon=0.236 K (was 0.227, +0.009)
+    ico=0.074    K (was 0.081, -0.007)
+    spec=0.113   K (was 0.121, -0.008)
+    top-level spread=0.633 K (was 0.590, +0.043)
+
+  **Disabling the cube sponge made the cross-grid
+  disagreement WORSE**, not better.  This validates the
+  iter-15 NOTE (the empirical 1-hour τ was tuned to
+  partially compensate for an underlying imbalance) and
+  REFUTES the iter-64 hypothesis.
+
+  Combined finding from iter-63+64: at 3-day windows, the
+  latlon-warm pattern is **robust to all tested cube
+  damping reductions** — halving biharmonic+div_damp
+  (iter-63) or disabling sponge (iter-64) does not pull
+  cube away from the ensemble in the expected direction.
+  The disagreement is therefore NOT primarily caused by
+  tunable cube damping parameters; it's a STRUCTURAL
+  difference in the dissipation operators between the four
+  dycores (cube C-D grid + biharmonic + div_damp + sponge
+  vs latlon C-grid + Laplacian only).
+
+  Resolution requires architectural work (iter-57
+  fix-candidate (a): extend
+  ``CGridLatLonPrimitiveEquationConfig`` to support
+  biharmonic + div_damp) or genuinely longer integrations
+  (≥7 days, where biharmonic e-foldings accumulate).
+  Both push retuning into the §5 multi-iter scope.
+
+  Pure experiment / diagnosis; no source changes.  Tests
+  still 118/118 + 3 MPAS skips.
 
 118/118 unit tests pass + 3 MPAS-mesh-unavailable skips
 (across ``tests/test_atmosphere_cross_grid_plots.py`` (77 +
@@ -765,4 +803,4 @@ round caught real issues; final convergence is clean.
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-63 update).*
+(iter-64 update).*
