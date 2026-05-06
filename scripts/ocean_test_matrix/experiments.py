@@ -721,6 +721,11 @@ def run_geostrophic_adjustment(tc: TestCase, output_dir: Path, days: float
     # All grids now use same physical units
     T_drift = _compute_drift(diag.get("mean_T", []))
     notes = f"T drift={T_drift:.2e}"
+    # iter-127 (codex iter-126-followup MEDIUM-2): apply
+    # T-drift gate (mirrors monolithic geostrophic_adjustment).
+    ok, notes = _apply_drift_tolerance(
+        ok, notes, T_drift, 1e-8,
+        label="T", n_samples=len(diag.get("mean_T", [])))
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full
@@ -1192,6 +1197,12 @@ def run_overflow(tc: TestCase, output_dir: Path, days: float
     T_drift = _compute_drift(diag.get("mean_T", []))
     notes = (f"PE drift={pe_drift:.2e}, PE_rel={pe_rel_final:.4e}, "
              f"T drift={T_drift:.2e}")
+    # iter-127 (codex iter-126-followup MEDIUM-2): apply
+    # T-drift gate to overflow.  Mirrors monolithic at 1e-2.
+    # PE drift NOT gated since PE evolves physically.
+    ok, notes = _apply_drift_tolerance(
+        ok, notes, T_drift, 1e-2,
+        label="T", n_samples=len(diag.get("mean_T", [])))
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full
@@ -1304,6 +1315,13 @@ def run_stommel_gyre_tracer(tc: TestCase, output_dir: Path, days: float
     undershoot = max(0, S_min_init - S_min_final)
     notes = (f"S integral drift={S_int_drift:.2e}, "
              f"overshoot={overshoot:.3f}, undershoot={undershoot:.3f}")
+    # iter-127 (codex iter-126-followup MEDIUM-2): apply
+    # S_integral-drift gate at 1e-3 (documented in
+    # ocean_experiments_reference.md) — mirrors monolithic.
+    ok, notes = _apply_drift_tolerance(
+        ok, notes, S_int_drift, 1e-3,
+        label="S_integral",
+        n_samples=len(diag.get("S_integral", [])))
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full

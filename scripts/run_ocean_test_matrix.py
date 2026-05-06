@@ -387,48 +387,23 @@ def _apply_drift_tolerance(
     ok: bool, notes: str, drift: float, tol: float,
     *, label: str, n_samples: int | None = None,
 ) -> tuple[bool, str]:
-    """Apply a drift PASS tolerance to an ocean test case.
+    """Thin wrapper that delegates to the centralized
+    ``legoesm.diagnostics.conservation_drift.apply_drift_tolerance``
+    helper (iter-127 codex iter-126-followup LOW-5).
 
-    iter-123 (codex iter-119-followup MEDIUM-4): ocean
-    matrix cases compute conservation-like drifts
-    (``eta_drift``, ``T_drift``, ``PE_drift``,
-    ``S_integral_drift``) but pre-iter-123 ``status`` was
-    only set from ``ok = is_finite and not blown_up``.
-    This made the cross-grid PASS column meaningless for
-    conservation tests like ``rest_state``.
-
-    Mirrors the atmosphere matrix's ``_apply_mass_drift_tolerance``
-    (iter-117/118/120) but generalized over the diagnostic
-    label so the same helper handles eta/T/S/PE drifts.
-
-    Returns
-    -------
-    (ok, notes): tuple of updated values.  When ``drift`` is
-    non-finite, n_samples < 2, or > tol, ``ok`` is set to
-    False and a ``[FAIL: <label> drift ...]`` annotation is
-    appended to ``notes``.
+    Pre-iter-127, the helper was duplicated in this module
+    AND in ``scripts/ocean_test_matrix/timeloop.py``.  iter-127
+    consolidates so future fixes flow through one place.
+    The wrapper exists for backward compatibility with the
+    existing callsites in this module.
     """
-    import numpy as _np
-    if ok and n_samples is not None and n_samples < 2:
-        ok = False
-        notes += (
-            f" [FAIL: {label} series has only {n_samples} "
-            f"sample(s); need >= 2 for a valid drift]"
-        )
-        return ok, notes
-    if ok and (not _np.isfinite(drift) or drift > tol):
-        ok = False
-        if not _np.isfinite(drift):
-            notes += (
-                f" [FAIL: {label} drift is non-finite "
-                f"({drift!r})]"
-            )
-        else:
-            notes += (
-                f" [FAIL: {label} drift {drift:.2e} > "
-                f"tolerance {tol:.0e}]"
-            )
-    return ok, notes
+    from legoesm.diagnostics.conservation_drift import (
+        apply_drift_tolerance,
+    )
+    return apply_drift_tolerance(
+        ok, notes, drift, tol,
+        label=label, n_samples=n_samples,
+    )
 
 
 def _compute_drift(values: list[float]) -> float:

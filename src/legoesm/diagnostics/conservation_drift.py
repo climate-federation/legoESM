@@ -185,3 +185,85 @@ def relative_drift_series(
         return np.empty(0, dtype=np.float64)
     denom = max(abs(float(arr[0])), float(min_baseline))
     return (arr - arr[0]) / denom
+
+
+def apply_drift_tolerance(
+    ok: bool, notes: str, drift: float, tol: float,
+    *, label: str, n_samples: int | None = None,
+) -> tuple[bool, str]:
+    """Apply a drift PASS tolerance to a test case.
+
+    iter-127 (codex iter-126-followup LOW-5/maintainability):
+    centralized version of the helper introduced in iter-117
+    for the atmosphere matrix runner (HS) and ported in iter-123/
+    124/125/126 to the ocean matrix monolithic + modular
+    runners.  Pre-iter-127 there were 2 byte-near-identical
+    copies (one in each runner) plus a third in the
+    atmosphere matrix.  iter-127 centralizes here so future
+    fixes flow through a single source of truth.
+
+    Behaviour:
+
+    * If the input series has fewer than ``n_samples=2`` samples
+      (when ``n_samples`` is provided), fail with a clear
+      ``[FAIL: <label> series has only N sample(s); ...]``
+      annotation (iter-120 fix).
+    * If ``drift`` is non-finite (NaN or Inf), fail with a
+      ``[FAIL: <label> drift is non-finite ...]`` annotation
+      (iter-118 fix).
+    * If ``drift > tol``, fail with a
+      ``[FAIL: <label> drift X.YYe-ZZ > tolerance ...]``
+      annotation (iter-117 baseline behaviour).
+    * Idempotent on already-failed runs (``ok=False`` short-
+      circuits all of the above).
+
+    The atmosphere matrix runner has a ``_apply_mass_drift_tolerance``
+    that is a thin wrapper over this helper specialized for
+    label="mass"; it remains for backward compatibility with
+    its existing callers.
+
+    Parameters
+    ----------
+    ok
+        Current PASS state of the test case.  False short-
+        circuits (idempotent).
+    notes
+        Per-test-case ``notes`` string that gets appended to.
+    drift
+        Computed drift magnitude.
+    tol
+        PASS tolerance.  Drift > tol or non-finite fails.
+    label
+        Diagnostic label (e.g., ``"mass"``, ``"eta"``,
+        ``"T"``, ``"S_integral"``).  Keyword-only per
+        iter-124 LOW-4.
+    n_samples
+        Optional length of the underlying series.  When
+        provided and < 2, fail with a "too few samples"
+        annotation.
+
+    Returns
+    -------
+    (ok, notes): tuple of updated values.
+    """
+    import numpy as _np
+    if ok and n_samples is not None and n_samples < 2:
+        ok = False
+        notes += (
+            f" [FAIL: {label} series has only {n_samples} "
+            f"sample(s); need >= 2 for a valid drift]"
+        )
+        return ok, notes
+    if ok and (not _np.isfinite(drift) or drift > tol):
+        ok = False
+        if not _np.isfinite(drift):
+            notes += (
+                f" [FAIL: {label} drift is non-finite "
+                f"({drift!r})]"
+            )
+        else:
+            notes += (
+                f" [FAIL: {label} drift {drift:.2e} > "
+                f"tolerance {tol:.0e}]"
+            )
+    return ok, notes

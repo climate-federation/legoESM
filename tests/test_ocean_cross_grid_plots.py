@@ -1568,6 +1568,121 @@ class TestIter123OceanDriftTolerance:
             "and use ``_apply_drift_tolerance``."
         )
 
+    def test_iter127_helper_centralized(self):
+        """iter-127 codex iter-126-followup LOW-5: the
+        ``apply_drift_tolerance`` helper is now centralized
+        in ``legoesm.diagnostics.conservation_drift`` and
+        re-exported.  Both runner copies are thin delegating
+        wrappers.
+        """
+        from legoesm.diagnostics import apply_drift_tolerance
+        # Centralized helper exists and is callable.
+        ok, notes = apply_drift_tolerance(
+            ok=True, notes="initial",
+            drift=1e-3, tol=1e-2, label="test",
+            n_samples=2,
+        )
+        assert ok is True
+
+        # Both runner wrappers delegate to the centralized one.
+        from pathlib import Path
+        for rel in (
+            "scripts/run_ocean_test_matrix.py",
+            "scripts/ocean_test_matrix/timeloop.py",
+        ):
+            text = (
+                Path(__file__).resolve().parent.parent / rel
+            ).read_text()
+            assert "apply_drift_tolerance" in text, (
+                f"iter-127: {rel} must use the centralized helper."
+            )
+
+    def test_iter127_modular_geostrophic_uses_gate(self):
+        from pathlib import Path
+        path = (Path(__file__).resolve().parent.parent
+                / "scripts" / "ocean_test_matrix"
+                / "experiments.py")
+        text = path.read_text()
+        # Find run_geostrophic_adjustment and verify it has
+        # a _apply_drift_tolerance call.
+        import re
+        m = re.search(
+            r"def run_geostrophic_adjustment\b.*?(?=\ndef \w)",
+            text, re.DOTALL,
+        )
+        assert m is not None, (
+            "iter-127: could not find run_geostrophic_adjustment "
+            "in modular experiments.py"
+        )
+        body = m.group(0)
+        assert "_apply_drift_tolerance" in body, (
+            "iter-127: modular run_geostrophic_adjustment must "
+            "apply T-drift tolerance."
+        )
+
+    def test_iter127_modular_overflow_uses_gate(self):
+        from pathlib import Path
+        path = (Path(__file__).resolve().parent.parent
+                / "scripts" / "ocean_test_matrix"
+                / "experiments.py")
+        text = path.read_text()
+        import re
+        m = re.search(
+            r"def run_overflow\b.*?(?=\ndef \w)",
+            text, re.DOTALL,
+        )
+        assert m is not None
+        body = m.group(0)
+        assert "_apply_drift_tolerance" in body
+        assert 'label="T"' in body, (
+            "iter-127: modular run_overflow must gate on T "
+            "(passive scalar), not PE (which evolves physically)."
+        )
+
+    def test_iter127_modular_stommel_uses_gate(self):
+        from pathlib import Path
+        path = (Path(__file__).resolve().parent.parent
+                / "scripts" / "ocean_test_matrix"
+                / "experiments.py")
+        text = path.read_text()
+        import re
+        m = re.search(
+            r"def run_stommel_gyre_tracer\b.*?(?=\ndef \w|$)",
+            text, re.DOTALL,
+        )
+        assert m is not None
+        body = m.group(0)
+        assert "_apply_drift_tolerance" in body
+        assert 'label="S_integral"' in body
+        # Verify tolerance is the documented 1e-3 (not 1e-2).
+        m2 = re.search(
+            r"_apply_drift_tolerance\(\s*ok,\s*notes,\s*"
+            r"S_int_drift,\s*([\d.eE+-]+)",
+            body,
+        )
+        assert m2 is not None
+        assert float(m2.group(1)) <= 1e-3
+
+    def test_iter127_save_csv_handles_only_private_keys(self, tmp_path):
+        """iter-127 codex iter-126-followup LOW-4: when ALL
+        diag keys are private (underscore-prefixed), the CSV
+        writer should return cleanly without writing anything.
+        """
+        m = self._import_module()
+        diag = {
+            "steps": [0, 100, 200],
+            "times": [0.0, 0.5, 1.0],
+            "_blowup_info": {"step": 200},
+            # No legitimate timeseries columns.
+        }
+        m._save_timeseries_csv(tmp_path, diag, dt=300.0)
+        # CSV file should NOT exist (no legitimate keys).
+        csv_path = tmp_path / "mean_timeseries.csv"
+        assert not csv_path.exists(), (
+            "iter-127: when ALL diag keys are private, no CSV "
+            "should be written.  Got an empty CSV."
+        )
+
     def test_modular_rest_state_uses_drift_tolerance(self):
         """All 4 modular rest_state variants apply
         ``_apply_drift_tolerance`` for both eta and T.
