@@ -652,6 +652,19 @@ def main():
             fh.write(f"notes: {notes}\n")
             fh.write(f"wall_time: {total:.1f}s\n")
 
+    # iter-101: BLOWUP must surface as a non-zero exit code so
+    # wrapper scripts (``run_rce_cross_grid.sh``) and direct
+    # invocations can detect failure via ``$?``.  Pre-iter-101,
+    # ``run_rce.py`` wrote ``status: FAIL`` to results.txt but
+    # exited 0 (the default), which the iter-73 wrapper comment
+    # explicitly flagged as a "defensive guard for future
+    # regressions" (``run_rce.py`` did not currently exit
+    # non-zero the way run_omip.py did).  iter-101 closes that
+    # gap, mirroring the iter-100 ``run_amip.py`` and iter-97
+    # ``run_omip.py`` exit-code conventions.
+    if blowup:
+        sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

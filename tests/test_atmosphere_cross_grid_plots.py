@@ -2994,3 +2994,97 @@ class TestRunAmipFiniteCheck:
         captured = capsys.readouterr()
         assert "FAIL" in captured.err
         assert "T" in captured.err  # the bad field
+
+
+class TestRunRceExitCodeOnBlowup:
+    """iter-101: pre-iter-101, ``run_rce.py`` wrote
+    ``status: FAIL`` to results.txt on BLOWUP but exited with
+    code 0 (the default).  The ``run_rce_cross_grid.sh`` wrapper
+    comment at iter-73 explicitly flagged this:
+
+        ``run_rce.py`` does not currently exit non-zero on FAIL
+        the way ``run_omip.py`` does, so this is a defensive
+        guard for future regressions.
+
+    A user invoking ``run_rce.py`` directly (not via the wrapper)
+    would not know if it BLEW UP — exit 0 silently misled.
+    iter-101 added ``sys.exit(1)`` after the results.txt write
+    block when ``blowup`` is True, mirroring iter-97
+    ``run_omip.py`` and iter-100 ``run_amip.py`` exit-code
+    conventions.
+
+    These tests pin the source-level contract.  An end-to-end
+    run-the-script test is impractical (RCE needs ~5 s wall +
+    full module bootstrapping), so the pin is via inspecting the
+    source for the ``if blowup: sys.exit(1)`` pattern.
+    """
+
+    def test_run_rce_source_contains_blowup_exit_guard(self):
+        """Source-level pin: ``run_rce.py`` body contains
+        ``if blowup: sys.exit(1)`` so BLOWUP runs surface as
+        exit code 1 to wrapper scripts.
+        """
+        import re
+        from pathlib import Path
+        path = Path(__file__).resolve().parent.parent / "scripts" / "run_rce.py"
+        text = path.read_text()
+        # Strip line comments + triple-quoted strings.
+        text_no_strings = re.sub(r'""".*?"""', "", text, flags=re.DOTALL)
+        text_no_strings = re.sub(r"'''.*?'''", "", text_no_strings, flags=re.DOTALL)
+        code_only = "\n".join(
+            line for line in text_no_strings.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        # Match ``if blowup:`` followed (within a few lines) by
+        # ``sys.exit(1)``.
+        assert re.search(
+            r"if\s+blowup\s*:\s*\n\s+sys\.exit\(1\)",
+            code_only,
+        ) is not None, (
+            "iter-101: ``run_rce.py`` must contain "
+            "``if blowup: sys.exit(1)`` after the results.txt "
+            "write so BLOWUP runs surface as exit code 1.  "
+            "iter-73 wrapper comment explicitly flagged this as "
+            "missing pre-iter-101."
+        )
+
+    def test_run_rce_imports_sys(self):
+        """Sanity: ``sys`` must be imported (the iter-101 fix
+        uses ``sys.exit``).
+        """
+        from pathlib import Path
+        path = Path(__file__).resolve().parent.parent / "scripts" / "run_rce.py"
+        text = path.read_text()
+        # Strip docstrings.
+        import re
+        text_no_strings = re.sub(r'""".*?"""', "", text, flags=re.DOTALL)
+        assert "import sys" in text_no_strings, (
+            "iter-101: ``run_rce.py`` must import ``sys`` for "
+            "the BLOWUP exit-code guard."
+        )
+
+    def test_run_rce_cross_grid_wrapper_comment_updated(self):
+        """The iter-73 wrapper comment that called out
+        ``run_rce.py`` lacking exit-code support has been
+        updated to reflect iter-101's fix.  This pins the
+        documentation so future readers don't think the gap is
+        still open.
+        """
+        from pathlib import Path
+        path = Path(__file__).resolve().parent.parent / "scripts" / "run_rce_cross_grid.sh"
+        text = path.read_text()
+        # Pre-iter-101 comment claimed run_rce.py "does not
+        # currently exit non-zero on FAIL" — that statement must
+        # no longer appear (or must be updated).
+        assert "does not currently exit non-zero on FAIL" not in text, (
+            "iter-101: the iter-73 wrapper comment claiming "
+            "``run_rce.py does not currently exit non-zero on "
+            "FAIL`` must be updated since iter-101 fixed it."
+        )
+        # The new comment must reference iter-101 explicitly
+        # so future readers can find the fix.
+        assert "iter-101" in text, (
+            "iter-101: the wrapper comment must reference "
+            "iter-101 so the fix is discoverable from the "
+            "wrapper context."
+        )

@@ -68,11 +68,13 @@ for GRID in cubed_sphere latlon voronoi gaussian; do
     rm -f "$OUTDIR/results.txt"
     rm -f "$OUTDIR/timeseries.npz"
     # iter-73: mirror the iter-43 / iter-72 single-grid-failure
-    # tolerance pattern so a per-grid blowup (e.g., the iter-71
-    # cube-side dycore weakness) does not abort the entire
-    # cross-grid run.  ``run_rce.py`` does not currently exit
-    # non-zero on FAIL the way ``run_omip.py`` does, so this is
-    # a defensive guard for future regressions.
+    # tolerance pattern so a per-grid blowup (e.g., the iter-73
+    # voronoi RCE BLOWUP) does not abort the entire cross-grid
+    # run.  iter-101 made ``run_rce.py`` exit 1 on BLOWUP
+    # (matching iter-97 ``run_omip.py`` and iter-100
+    # ``run_amip.py`` conventions), so this guard now reliably
+    # catches the expected per-grid failures via ``$?`` and
+    # records ``ANY_FAILED=1``.
     JAX_ENABLE_X64=1 .venv/bin/python scripts/run_rce.py \
         --grid-type "$GRID" --discretization "$DISC" \
         --resolution "$RES" --days "$DAYS" --diag-days "$DIAG_DAYS" \
