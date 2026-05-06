@@ -1,13 +1,13 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-37 snapshot)
+**Branch**: `simulation_full_check` (iter-39 snapshot)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
 grids, with shared colorbar / shared projection plotting and quantitative
 agreement metrics.
 
-This report consolidates iter-1..37 findings.  It is the user-facing
+This report consolidates iter-1..39 findings.  It is the user-facing
 "what works, what doesn't, what's known" summary.
 
 ---
@@ -29,8 +29,8 @@ and every available pair of grids:
   `T(latitude, σ)` cross-section, the canonical Held-Suarez
   Fig. 3 layout.
 
-Every helper has a corresponding unit test (50 / 50 pass in
-`tests/test_atmosphere_cross_grid_plots.py` (44) +
+Every helper has a corresponding unit test (57 / 57 pass in
+`tests/test_atmosphere_cross_grid_plots.py` (51) +
 `test_ocean_cross_grid_plots.py` (6)).
 
 CLI:
@@ -165,7 +165,7 @@ Each round caught real issues; final convergence is clean.
 | Shallow water tests on all grids | ✅ DONE |
 | Hydrostatic Held-Suarez on all grids | ✅ DONE (with documented structural disagreement) |
 | Hydrostatic RCE on all grids | ✅ DONE (iter-24: ``mean_timeseries.csv`` + ``results.txt`` output, ``run_rce_cross_grid.sh`` wrapper) |
-| Hydrostatic AMIP w/ realistic GHG/aerosol/O3 | ⚠️ iter-22 RRTMGP wired (steady-state); iter-31 ``--co2-ppmv`` / ``--ch4-ppbv`` / ``--n2o-ppbv`` CLI knobs; iter-34/36 ``--cloud-scheme {none,sundqvist}`` with auto-``include_clouds=True``.  CMIP6 input4MIPs time-varying loaders still pending. |
+| Hydrostatic AMIP w/ realistic GHG/aerosol/O3 | ⚠️ iter-22 RRTMGP wired (steady-state); iter-31 ``--co2-ppmv`` / ``--ch4-ppbv`` / ``--n2o-ppbv`` CLI knobs; iter-34/36 ``--cloud-scheme {none,sundqvist}`` with auto-``include_clouds=True``; iter-39 ``--ozone-source {standard,analytical,none}`` / ``--ozone-peak-hPa`` / ``--ozone-max-vmr`` knobs.  CMIP6 input4MIPs time-varying loaders still pending. |
 | Ocean test cases on all grids | ✅ DONE |
 | OMIP | ✅ DONE (iter-25: matrix-compatible CSV + results.txt, ``run_omip_cross_grid.sh`` wrapper) |
 | Same colorbar/projection across grids | ✅ DONE (cartopy PlateCarrée + shared cmap) |
@@ -242,12 +242,20 @@ Each round caught real issues; final convergence is clean.
   silently no-op without condensate tracers.  Removed from
   CLI choices.  Replaced fragile source-inspection test with
   proper config-capture using ``monkeypatch``.
+* iter-38: doc refresh consolidating iter-30..37 work.
+* iter-39: ``--ozone-source {standard, analytical, none}`` /
+  ``--ozone-peak-hPa`` / ``--ozone-max-vmr`` CLI knobs added.
+  Mirrors the iter-31 GHG-overrides pattern: runtime-overrides
+  dict, validate non-negative-finite, augment helper records
+  the values in ``results.txt`` for reproducibility.  7 new
+  unit tests including a config-capture test that pins the
+  ``OzoneProfileConfig`` propagation through ``RadiationConfig``.
 
-50/50 unit tests pass across both
-``tests/test_atmosphere_cross_grid_plots.py`` (44) and
+57/57 unit tests pass across both
+``tests/test_atmosphere_cross_grid_plots.py`` (51) and
 ``tests/test_ocean_cross_grid_plots.py`` (6).
 
 ---
 
 *Generated 2026-05-06 from simulation_full_check branch HEAD
-(iter-37 update).*
+(iter-39 update).*

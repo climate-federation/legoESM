@@ -346,6 +346,12 @@ _RUNTIME_RRTMGP_OVERRIDES: dict[str, float | str | None] = {
     "ch4_ppbv": None,
     "n2o_ppbv": None,
     "cloud_scheme": None,   # iter-34
+    # iter-39: optional analytical-ozone-profile knobs.  These map
+    # directly onto ``OzoneProfileConfig`` fields and are forwarded
+    # via ``RadiationConfig.ozone`` only when at least one is set.
+    "ozone_source": None,    # "standard" | "analytical" | "none"
+    "ozone_peak_hPa": None,  # float
+    "ozone_max_vmr": None,   # float (volume mixing ratio)
 }
 
 
@@ -380,7 +386,7 @@ def _make_rrtmgp_physics(model_type: str, dt: float, hs_fn=None,
     """
     from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
     from legoesm.atmosphere.physics.radiation.config import (
-        RadiationConfig, RRTMGPConfig,
+        OzoneProfileConfig, RadiationConfig, RRTMGPConfig,
     )
     from legoesm.atmosphere.physics.convection.config import ConvectionConfig
     from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
@@ -417,6 +423,22 @@ def _make_rrtmgp_physics(model_type: str, dt: float, hs_fn=None,
     rad_kwargs = {"scheme": "rrtmgp", "rrtmgp": rrtmgp_cfg}
     if eff_cloud is not None:
         rad_kwargs["cloud_scheme"] = eff_cloud
+
+    # Iter-39: optional ozone-profile overrides.  Only construct an
+    # ``OzoneProfileConfig`` if at least one of the three knobs is
+    # set; otherwise leave the radiation default.
+    eff_o3_src = _RUNTIME_RRTMGP_OVERRIDES.get("ozone_source")
+    eff_o3_peak = _RUNTIME_RRTMGP_OVERRIDES.get("ozone_peak_hPa")
+    eff_o3_vmr = _RUNTIME_RRTMGP_OVERRIDES.get("ozone_max_vmr")
+    if eff_o3_src is not None or eff_o3_peak is not None or eff_o3_vmr is not None:
+        o3_kwargs = {}
+        if eff_o3_src is not None:
+            o3_kwargs["source"] = eff_o3_src
+        if eff_o3_peak is not None:
+            o3_kwargs["p_peak_hPa"] = eff_o3_peak
+        if eff_o3_vmr is not None:
+            o3_kwargs["o3_max_vmr"] = eff_o3_vmr
+        rad_kwargs["ozone"] = OzoneProfileConfig(**o3_kwargs)
 
     phys_cfg = PhysicsConfig(
         radiation=RadiationConfig(**rad_kwargs),
@@ -778,7 +800,12 @@ def _augment_with_rrtmgp_overrides(rows: dict[str, Any], radiation: str) -> dict
     if radiation != "rrtmgp":
         return rows
     rows = dict(rows)  # shallow copy; preserve caller's dict
-    for key in ("co2_ppmv", "ch4_ppbv", "n2o_ppbv", "cloud_scheme"):
+    # iter-39: ozone-profile knobs join the existing GHG/cloud trio.
+    keys = (
+        "co2_ppmv", "ch4_ppbv", "n2o_ppbv", "cloud_scheme",
+        "ozone_source", "ozone_peak_hPa", "ozone_max_vmr",
+    )
+    for key in keys:
         val = _RUNTIME_RRTMGP_OVERRIDES.get(key)
         if val is not None:
             rows[key] = val
@@ -4993,6 +5020,30 @@ def build_parser() -> argparse.ArgumentParser:
              "does not produce — would silently give zero cloud "
              "fraction and clear-sky radiation.  Re-add when a runner "
              "with active microphysics + condensate tracers exists.")
+    # iter-39: ozone-profile knobs.  Mirrors the iter-31 GHG pattern.
+    # Only applies under ``--radiation rrtmgp``; gray radiation
+    # ignores ozone entirely.  The "standard" source is the existing
+    # US-Standard-1976 climatology (no latitude dependence); the
+    # "analytical" source is a Gaussian peak with optional
+    # sin²(lat) scaling, useful for sensitivity studies of
+    # stratospheric ozone amplitude on tropospheric circulation.
+    p.add_argument(
+        "--ozone-source", type=str, default=None,
+        choices=["standard", "analytical", "none"],
+        help="Override RRTMGP ozone profile source.  Default: "
+             "``standard`` (US-Standard-1976, no latitude dependence). "
+             "``analytical`` enables the latitude-dependent Gaussian "
+             "profile.  ``none`` disables ozone absorption entirely. "
+             "Only takes effect with ``--radiation rrtmgp``.")
+    p.add_argument(
+        "--ozone-peak-hPa", type=float, default=None,
+        help="Override analytical-ozone-profile peak pressure [hPa]. "
+             "Default: 30.  Used only when ``--ozone-source analytical``.")
+    p.add_argument(
+        "--ozone-max-vmr", type=float, default=None,
+        help="Override analytical-ozone-profile peak volume mixing "
+             "ratio [unitless].  Default: 8.0e-6 (8 ppmv).  Used "
+             "only when ``--ozone-source analytical``.")
     p.add_argument(
         "--resolution", type=str, default=None,
         help="Override baseline resolution (e.g. C48, 90x180, ico6)")
@@ -5066,6 +5117,19 @@ def main():
     _RUNTIME_RRTMGP_OVERRIDES["ch4_ppbv"] = args.ch4_ppbv
     _RUNTIME_RRTMGP_OVERRIDES["n2o_ppbv"] = args.n2o_ppbv
     _RUNTIME_RRTMGP_OVERRIDES["cloud_scheme"] = args.cloud_scheme
+
+    # iter-39: validate and stash ozone-profile knobs.  Same
+    # non-negative-finite rule as the GHG knobs, except the source
+    # is a string (already validated by ``choices=...``).
+    for fname, fval in [
+        ("--ozone-peak-hPa", args.ozone_peak_hPa),
+        ("--ozone-max-vmr", args.ozone_max_vmr),
+    ]:
+        if fval is not None and (fval <= 0 or not _math.isfinite(fval)):
+            parser.error(f"{fname} must be a positive finite number")
+    _RUNTIME_RRTMGP_OVERRIDES["ozone_source"] = args.ozone_source
+    _RUNTIME_RRTMGP_OVERRIDES["ozone_peak_hPa"] = args.ozone_peak_hPa
+    _RUNTIME_RRTMGP_OVERRIDES["ozone_max_vmr"] = args.ozone_max_vmr
 
     # iter-7 codex review LOW: reset the multi-resolution warning
     # dedup set so a single ``main()`` invocation produces at most one

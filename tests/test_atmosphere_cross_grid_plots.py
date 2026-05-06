@@ -736,3 +736,130 @@ class TestAugmentWithRrtmgpOverrides:
         assert "co2_ppmv" in out
         # Original dict unchanged.
         assert "co2_ppmv" not in original
+
+
+# ---------------------------------------------------------------------------
+# iter-39: ozone-profile CLI override knobs
+# ---------------------------------------------------------------------------
+
+class TestOzoneProfileOverrides:
+    """Tests for the iter-39 ``--ozone-source`` / ``--ozone-peak-hPa``
+    / ``--ozone-max-vmr`` CLI knobs.
+
+    These mirror the iter-31/32/36 GHG and cloud-scheme override
+    tests: validate the runtime-override dict has the new keys, the
+    augment helper records them when set, and ``_make_rrtmgp_physics``
+    propagates them through ``RadiationConfig.ozone``.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolate_overrides(self):
+        """Snapshot/restore the full overrides dict around each test."""
+        snapshot = dict(M._RUNTIME_RRTMGP_OVERRIDES)
+        try:
+            for k in M._RUNTIME_RRTMGP_OVERRIDES:
+                M._RUNTIME_RRTMGP_OVERRIDES[k] = None
+            yield
+        finally:
+            M._RUNTIME_RRTMGP_OVERRIDES.clear()
+            M._RUNTIME_RRTMGP_OVERRIDES.update(snapshot)
+
+    def test_overrides_dict_has_ozone_keys(self):
+        d = M._RUNTIME_RRTMGP_OVERRIDES
+        assert "ozone_source" in d
+        assert "ozone_peak_hPa" in d
+        assert "ozone_max_vmr" in d
+
+    def test_augment_records_set_ozone_overrides(self):
+        """When set, ozone overrides should appear in the augmented row."""
+        M._RUNTIME_RRTMGP_OVERRIDES["ozone_source"] = "analytical"
+        M._RUNTIME_RRTMGP_OVERRIDES["ozone_peak_hPa"] = 50.0
+        M._RUNTIME_RRTMGP_OVERRIDES["ozone_max_vmr"] = 1.0e-5
+        out = M._augment_with_rrtmgp_overrides(
+            {"test": "ozone", "wall_time": "1.0s"}, "rrtmgp",
+        )
+        assert out["ozone_source"] == "analytical"
+        assert out["ozone_peak_hPa"] == 50.0
+        assert out["ozone_max_vmr"] == 1.0e-5
+
+    def test_augment_skips_unset_ozone_overrides(self):
+        """None values are not appended (matches GHG behaviour)."""
+        out = M._augment_with_rrtmgp_overrides(
+            {"test": "no_ozone", "wall_time": "1.0s"}, "rrtmgp",
+        )
+        assert "ozone_source" not in out
+        assert "ozone_peak_hPa" not in out
+        assert "ozone_max_vmr" not in out
+
+    def test_augment_no_op_for_gray_with_ozone_set(self):
+        """Even with ozone overrides set, gray radiation should ignore them."""
+        M._RUNTIME_RRTMGP_OVERRIDES["ozone_source"] = "analytical"
+        out = M._augment_with_rrtmgp_overrides(
+            {"test": "gray_with_ozone", "wall_time": "1.0s"}, "gray",
+        )
+        assert "ozone_source" not in out
+
+    def test_make_rrtmgp_physics_propagates_ozone_config(self, monkeypatch):
+        """When ozone overrides are set, ``_make_rrtmgp_physics`` must
+        construct a non-default ``RadiationConfig.ozone``.
+        """
+        captured = {}
+
+        def fake_make_physics(phys_cfg, model_type, dt):
+            captured["phys_cfg"] = phys_cfg
+            return lambda *a, **kw: None  # no-op
+
+        import legoesm.atmosphere.physics.combined as combined_mod
+        monkeypatch.setattr(combined_mod, "make_physics", fake_make_physics)
+
+        M._RUNTIME_RRTMGP_OVERRIDES["ozone_source"] = "analytical"
+        M._RUNTIME_RRTMGP_OVERRIDES["ozone_peak_hPa"] = 50.0
+        M._RUNTIME_RRTMGP_OVERRIDES["ozone_max_vmr"] = 1.0e-5
+        _ = M._make_rrtmgp_physics("hydrostatic", dt=300.0)
+        phys_cfg = captured["phys_cfg"]
+        assert phys_cfg.radiation.ozone.source == "analytical"
+        assert phys_cfg.radiation.ozone.p_peak_hPa == 50.0
+        assert phys_cfg.radiation.ozone.o3_max_vmr == 1.0e-5
+
+    def test_make_rrtmgp_physics_default_ozone_when_unset(
+        self, monkeypatch,
+    ):
+        """When no ozone overrides are set, ``RadiationConfig.ozone``
+        falls back to its NamedTuple default (source="standard").
+        """
+        captured = {}
+
+        def fake_make_physics(phys_cfg, model_type, dt):
+            captured["phys_cfg"] = phys_cfg
+            return lambda *a, **kw: None
+
+        import legoesm.atmosphere.physics.combined as combined_mod
+        monkeypatch.setattr(combined_mod, "make_physics", fake_make_physics)
+
+        _ = M._make_rrtmgp_physics("hydrostatic", dt=300.0)
+        phys_cfg = captured["phys_cfg"]
+        # Default OzoneProfileConfig has source="standard".
+        assert phys_cfg.radiation.ozone.source == "standard"
+
+    def test_make_rrtmgp_physics_partial_ozone_overrides(
+        self, monkeypatch,
+    ):
+        """Only ``--ozone-peak-hPa`` set: source stays at the
+        OzoneProfileConfig default ("standard"), but peak is updated.
+        """
+        captured = {}
+
+        def fake_make_physics(phys_cfg, model_type, dt):
+            captured["phys_cfg"] = phys_cfg
+            return lambda *a, **kw: None
+
+        import legoesm.atmosphere.physics.combined as combined_mod
+        monkeypatch.setattr(combined_mod, "make_physics", fake_make_physics)
+
+        M._RUNTIME_RRTMGP_OVERRIDES["ozone_peak_hPa"] = 25.0
+        _ = M._make_rrtmgp_physics("hydrostatic", dt=300.0)
+        phys_cfg = captured["phys_cfg"]
+        assert phys_cfg.radiation.ozone.p_peak_hPa == 25.0
+        # Other ozone fields keep NamedTuple defaults.
+        assert phys_cfg.radiation.ozone.source == "standard"
+        assert phys_cfg.radiation.ozone.o3_max_vmr == 8.0e-6
