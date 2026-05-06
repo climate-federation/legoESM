@@ -1534,6 +1534,68 @@ class TestIter123OceanDriftTolerance:
             "S_integral conservation."
         )
 
+    def test_modular_timeloop_has_apply_drift_tolerance(self):
+        """iter-126 codex iter-124-followup MEDIUM-3:
+        ``scripts/ocean_test_matrix/timeloop.py`` must export
+        ``_apply_drift_tolerance`` so the modular package's
+        ``experiments.py`` can use the iter-123/124 helper.
+        """
+        import importlib
+        import sys
+        from pathlib import Path
+        scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+        if str(scripts_dir) not in sys.path:
+            sys.path.insert(0, str(scripts_dir))
+        timeloop = importlib.import_module(
+            "ocean_test_matrix.timeloop")
+        assert hasattr(timeloop, "_apply_drift_tolerance"), (
+            "iter-126: ``ocean_test_matrix.timeloop`` must "
+            "export ``_apply_drift_tolerance`` for the modular "
+            "experiments runners."
+        )
+
+    def test_modular_experiments_imports_helper(self):
+        """``ocean_test_matrix.experiments`` imports
+        ``_apply_drift_tolerance`` from timeloop.
+        """
+        from pathlib import Path
+        path = (Path(__file__).resolve().parent.parent
+                / "scripts" / "ocean_test_matrix"
+                / "experiments.py")
+        text = path.read_text()
+        assert "_apply_drift_tolerance" in text, (
+            "iter-126: modular ``experiments.py`` must import "
+            "and use ``_apply_drift_tolerance``."
+        )
+
+    def test_modular_rest_state_uses_drift_tolerance(self):
+        """All 4 modular rest_state variants apply
+        ``_apply_drift_tolerance`` for both eta and T.
+        """
+        from pathlib import Path
+        path = (Path(__file__).resolve().parent.parent
+                / "scripts" / "ocean_test_matrix"
+                / "experiments.py")
+        text = path.read_text()
+        # Strip line comments before counting active calls.
+        import re
+        text_no_strings = re.sub(r'""".*?"""', "", text, flags=re.DOTALL)
+        text_no_strings = re.sub(r"'''.*?'''", "", text_no_strings, flags=re.DOTALL)
+        code_only = "\n".join(
+            line for line in text_no_strings.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        # Expect ≥8 callsites: 4 rest_state variants × 2 drifts
+        # (eta + T).  After replace_all, all 4 rest_state
+        # blocks should each have 2 helper calls.
+        count = code_only.count("_apply_drift_tolerance(")
+        assert count >= 8, (
+            f"iter-126: expected ≥8 ``_apply_drift_tolerance`` "
+            f"call sites in modular ``experiments.py`` "
+            f"(4 rest_state variants × 2 drifts each); "
+            f"found {count}."
+        )
+
     def test_rest_state_uses_drift_tolerance(self):
         """All 4 rest_state variants apply ``_apply_drift_tolerance``
         for both eta and T.  Source-pin via inspect.

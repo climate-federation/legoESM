@@ -52,6 +52,50 @@ def _compute_drift(values: list[float]) -> float:
     return compute_relative_drift(values)
 
 
+def _apply_drift_tolerance(
+    ok: bool, notes: str, drift: float, tol: float,
+    *, label: str, n_samples: int | None = None,
+) -> tuple[bool, str]:
+    """Apply a drift PASS tolerance to an ocean test case.
+
+    iter-126 (codex iter-124-followup MEDIUM-3): mirror copy
+    of the iter-123/124 helper from
+    ``scripts/run_ocean_test_matrix.py`` so the modular
+    ``ocean_test_matrix`` package can use the same gating
+    contract.  Identical semantics:
+
+    * NaN/Inf gate (iter-118)
+    * n_samples >= 2 gate (iter-120)
+    * Idempotent on already-failed runs
+    * label keyword-only (iter-124 LOW-4)
+
+    Returns
+    -------
+    (ok, notes): tuple of updated values.
+    """
+    import numpy as _np
+    if ok and n_samples is not None and n_samples < 2:
+        ok = False
+        notes += (
+            f" [FAIL: {label} series has only {n_samples} "
+            f"sample(s); need >= 2 for a valid drift]"
+        )
+        return ok, notes
+    if ok and (not _np.isfinite(drift) or drift > tol):
+        ok = False
+        if not _np.isfinite(drift):
+            notes += (
+                f" [FAIL: {label} drift is non-finite "
+                f"({drift!r})]"
+            )
+        else:
+            notes += (
+                f" [FAIL: {label} drift {drift:.2e} > "
+                f"tolerance {tol:.0e}]"
+            )
+    return ok, notes
+
+
 # ===========================================================================
 # Generic time loop
 # ===========================================================================

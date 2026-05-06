@@ -14,7 +14,9 @@ import numpy as np
 
 from ocean_test_matrix import config
 from ocean_test_matrix.setup import _create_ocean_setup
-from ocean_test_matrix.timeloop import _run_timeloop, _compute_drift
+from ocean_test_matrix.timeloop import (
+    _run_timeloop, _compute_drift, _apply_drift_tolerance,
+)
 from ocean_test_matrix.extraction import (
     _make_check_fn, _make_scalar_fn, _make_extract_fn, _key_array_fn,
     _make_baroclinic_scalar_fn,
@@ -58,6 +60,17 @@ def run_rest_state(tc: TestCase, output_dir: Path, days: float
                  if len(eta_list) >= 2 else 0.0)
     T_drift = _compute_drift(diag.get("mean_T", []))
     notes = f"eta drift={eta_drift:.2e}, T drift={T_drift:.2e}"
+    # iter-126 (codex iter-124-followup MEDIUM-3): apply
+    # the iter-123/124 drift tolerance from the monolithic
+    # runner.  Same generous thresholds (1e-10 m for SSH,
+    # 1e-8 relative for T) — well above machine precision
+    # but catches gross conservation violations.
+    ok, notes = _apply_drift_tolerance(
+        ok, notes, eta_drift, 1e-10,
+        label="eta", n_samples=len(eta_list))
+    ok, notes = _apply_drift_tolerance(
+        ok, notes, T_drift, 1e-8,
+        label="T", n_samples=len(diag.get("mean_T", [])))
 
     # Spectral land-leakage diagnostic: check that eta stays near zero in land cells
     if tc.grid_type == "spectral" and hasattr(state, 'land_mask_grid'):
@@ -126,6 +139,17 @@ def run_rest_state_no_land(tc: TestCase, output_dir: Path, days: float
                  if len(eta_list) >= 2 else 0.0)
     T_drift = _compute_drift(diag.get("mean_T", []))
     notes = f"eta drift={eta_drift:.2e}, T drift={T_drift:.2e}"
+    # iter-126 (codex iter-124-followup MEDIUM-3): apply
+    # the iter-123/124 drift tolerance from the monolithic
+    # runner.  Same generous thresholds (1e-10 m for SSH,
+    # 1e-8 relative for T) — well above machine precision
+    # but catches gross conservation violations.
+    ok, notes = _apply_drift_tolerance(
+        ok, notes, eta_drift, 1e-10,
+        label="eta", n_samples=len(eta_list))
+    ok, notes = _apply_drift_tolerance(
+        ok, notes, T_drift, 1e-8,
+        label="T", n_samples=len(diag.get("mean_T", [])))
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full  # positive downward for plotting
@@ -187,6 +211,17 @@ def run_rest_state_uniform_ts(tc: TestCase, output_dir: Path, days: float
                  if len(eta_list) >= 2 else 0.0)
     T_drift = _compute_drift(diag.get("mean_T", []))
     notes = f"eta drift={eta_drift:.2e}, T drift={T_drift:.2e}"
+    # iter-126 (codex iter-124-followup MEDIUM-3): apply
+    # the iter-123/124 drift tolerance from the monolithic
+    # runner.  Same generous thresholds (1e-10 m for SSH,
+    # 1e-8 relative for T) — well above machine precision
+    # but catches gross conservation violations.
+    ok, notes = _apply_drift_tolerance(
+        ok, notes, eta_drift, 1e-10,
+        label="eta", n_samples=len(eta_list))
+    ok, notes = _apply_drift_tolerance(
+        ok, notes, T_drift, 1e-8,
+        label="T", n_samples=len(diag.get("mean_T", [])))
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full
@@ -243,6 +278,17 @@ def run_rest_state_uniform_ts_no_land(tc: TestCase, output_dir: Path, days: floa
                  if len(eta_list) >= 2 else 0.0)
     T_drift = _compute_drift(diag.get("mean_T", []))
     notes = f"eta drift={eta_drift:.2e}, T drift={T_drift:.2e}"
+    # iter-126 (codex iter-124-followup MEDIUM-3): apply
+    # the iter-123/124 drift tolerance from the monolithic
+    # runner.  Same generous thresholds (1e-10 m for SSH,
+    # 1e-8 relative for T) — well above machine precision
+    # but catches gross conservation violations.
+    ok, notes = _apply_drift_tolerance(
+        ok, notes, eta_drift, 1e-10,
+        label="eta", n_samples=len(eta_list))
+    ok, notes = _apply_drift_tolerance(
+        ok, notes, T_drift, 1e-8,
+        label="T", n_samples=len(diag.get("mean_T", [])))
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full
