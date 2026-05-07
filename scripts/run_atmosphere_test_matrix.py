@@ -2557,6 +2557,40 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
 
 def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
                     radiation: str = "gray") -> tuple[str, float, str]:
+    """Run a Held-Suarez test on the given test case.
+
+    .. rubric:: User-facing env vars (FV3_3D iter 13-46 history)
+
+    The cubed-sphere HS branch reads these env vars at runtime to
+    activate the FV3-fidelity damping path.  All are OPTIONAL with
+    sensible auto-applied defaults.  See ``FV3_3D.md`` for full
+    calibration history.
+
+    | env var                  | default | iter | what                |
+    |:-------------------------|--------:|-----:|:--------------------|
+    | LEGOESM_DAMP_V           | 0.0     |   13 | post-step vorticity |
+    | LEGOESM_CDD_D2BG         | 0.0     |   16 | corner-div damp d2  |
+    | LEGOESM_CDD_D4BG         | 0.0     |   18 | corner-div damp d4  |
+    | LEGOESM_CDD_NORD         | 0       |   18 | nord (1=del-4)      |
+    | LEGOESM_CDD_FV3_VFILL    | 0       |   22 | vector corner fill  |
+    | LEGOESM_AH_SCALE         | auto    |   34 | A_h multiplier      |
+    | LEGOESM_AH_AUTO_DISABLE  | 0       |   46 | disable iter-43 auto|
+
+    .. rubric:: Recommended invocations
+
+    ``LEGOESM_AH_SCALE`` auto-applies per resolution when unset:
+    C36→1.0, C48→2.0, C72→10.0 (iter 33/37/43).
+
+    ``LEGOESM_CDD_*`` are off by default; the iter-19/24 production
+    setting opts in via env::
+
+        LEGOESM_CDD_D2BG=0.0005 LEGOESM_CDD_D4BG=0.02 \\
+        LEGOESM_CDD_NORD=1
+
+    For pre-iter-43 baseline behavior (e.g., regression test that
+    expects C72 to NaN at default A_h), set
+    ``LEGOESM_AH_AUTO_DISABLE=1``.
+    """
     nlev = DEFAULT_NLEV
     # When tc.case == "held_suarez_topo" we swap the init for the
     # topography-aware version (forcing function is unchanged — see
