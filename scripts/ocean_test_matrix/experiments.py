@@ -16,6 +16,7 @@ from ocean_test_matrix import config
 from ocean_test_matrix.setup import _create_ocean_setup
 from ocean_test_matrix.timeloop import (
     _run_timeloop, _compute_drift, _apply_drift_tolerance,
+    _apply_value_threshold, _apply_pe_rel_sign,
 )
 from ocean_test_matrix.extraction import (
     _make_check_fn, _make_scalar_fn, _make_extract_fn, _key_array_fn,
@@ -722,7 +723,14 @@ def run_geostrophic_adjustment(tc: TestCase, output_dir: Path, days: float
     T_drift = _compute_drift(diag.get("mean_T", []))
     notes = f"T drift={T_drift:.2e}"
     # iter-127 (codex iter-126-followup MEDIUM-2): apply
-    # T-drift gate (mirrors monolithic geostrophic_adjustment).
+    # T-drift gate.  geostrophic_adjustment has zero T tendency
+    # (no surface fluxes, no diffusion in this setup), so any
+    # measurable drift is a numerical bug.  1e-8 is empirically
+    # validated and tighter than the documented 1e-3 in
+    # ``docs/ocean_experiments_reference.md:419`` — see
+    # iter-128 update of that doc.  Same gate as monolithic
+    # ``run_geostrophic_adjustment`` in
+    # ``scripts/run_ocean_test_matrix.py:3745``.
     ok, notes = _apply_drift_tolerance(
         ok, notes, T_drift, 1e-8,
         label="T", n_samples=len(diag.get("mean_T", [])))
@@ -1198,11 +1206,20 @@ def run_overflow(tc: TestCase, output_dir: Path, days: float
     notes = (f"PE drift={pe_drift:.2e}, PE_rel={pe_rel_final:.4e}, "
              f"T drift={T_drift:.2e}")
     # iter-127 (codex iter-126-followup MEDIUM-2): apply
-    # T-drift gate to overflow.  Mirrors monolithic at 1e-2.
-    # PE drift NOT gated since PE evolves physically.
+    # T-drift gate to overflow.  Applies the same gate as
+    # monolithic at 1e-2.
+    # PE drift magnitude is NOT gated because RPE decreases
+    # physically (PE → KE conversion); instead the iter-128
+    # block below applies the documented sign constraint
+    # ``pe_rel_final < 0`` (docs/ocean_experiments_reference.md:626).
     ok, notes = _apply_drift_tolerance(
         ok, notes, T_drift, 1e-2,
         label="T", n_samples=len(diag.get("mean_T", [])))
+    # iter-128 (codex iter-127-followup MEDIUM-2): apply the
+    # documented ``pe_rel_final < 0`` sign check.
+    if len(diag.get("PE_rel", [])) >= 2:
+        ok, notes = _apply_pe_rel_sign(
+            ok, notes, pe_rel_final, label="PE_rel_final")
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full
@@ -1317,11 +1334,23 @@ def run_stommel_gyre_tracer(tc: TestCase, output_dir: Path, days: float
              f"overshoot={overshoot:.3f}, undershoot={undershoot:.3f}")
     # iter-127 (codex iter-126-followup MEDIUM-2): apply
     # S_integral-drift gate at 1e-3 (documented in
-    # ocean_experiments_reference.md) — mirrors monolithic.
+    # ocean_experiments_reference.md:680) — same gate as
+    # monolithic.
     ok, notes = _apply_drift_tolerance(
         ok, notes, S_int_drift, 1e-3,
         label="S_integral",
         n_samples=len(diag.get("S_integral", [])))
+    # iter-128 (codex iter-127-followup MEDIUM-3): apply the
+    # documented overshoot/undershoot < 0.1 PSU thresholds
+    # (docs/ocean_experiments_reference.md:681-682) — these
+    # catch monotonicity violations that the integral
+    # conservation gate misses.
+    ok, notes = _apply_value_threshold(
+        ok, notes, overshoot, 0.1,
+        label="S overshoot", op="le", units="PSU")
+    ok, notes = _apply_value_threshold(
+        ok, notes, undershoot, 0.1,
+        label="S undershoot", op="le", units="PSU")
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full

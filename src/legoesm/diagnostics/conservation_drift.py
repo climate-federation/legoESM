@@ -217,10 +217,12 @@ def apply_drift_tolerance(
     * Idempotent on already-failed runs (``ok=False`` short-
       circuits all of the above).
 
-    The atmosphere matrix runner has a ``_apply_mass_drift_tolerance``
-    that is a thin wrapper over this helper specialized for
-    label="mass"; it remains for backward compatibility with
-    its existing callers.
+    The atmosphere matrix runner ``_apply_mass_drift_tolerance``
+    delegates to this helper specialized for ``label="mass"``
+    (post-iter-128 codex iter-127-followup LOW-1).  The two ocean
+    runners (monolithic ``scripts/run_ocean_test_matrix.py`` and
+    modular ``scripts/ocean_test_matrix/timeloop.py``) likewise
+    delegate via thin ``_apply_drift_tolerance`` wrappers.
 
     Parameters
     ----------
@@ -266,4 +268,65 @@ def apply_drift_tolerance(
                 f" [FAIL: {label} drift {drift:.2e} > "
                 f"tolerance {tol:.0e}]"
             )
+    return ok, notes
+
+
+def apply_value_threshold(
+    ok: bool, notes: str, value: float, threshold: float,
+    *, label: str, op: str = "le", units: str = "",
+) -> tuple[bool, str]:
+    """Apply a non-drift PASS threshold (overshoot, sign-check, etc.).
+
+    iter-128 (codex iter-127-followup MEDIUM-2/3): companion to
+    ``apply_drift_tolerance`` for tests that gate on non-drift
+    quantities — e.g., the documented Stommel
+    ``overshoot < 0.1 PSU`` and ``undershoot < 0.1 PSU`` thresholds
+    (``docs/ocean_experiments_reference.md:681-682``) and the
+    Overflow ``pe_rel_final < 0`` sign check
+    (``docs/ocean_experiments_reference.md:626``).
+
+    Behaviour:
+
+    * ``op="le"`` (less-than-or-equal): fail if ``value > threshold``
+      (or non-finite).  Used for overshoot/undershoot/absolute
+      magnitude tests.
+    * ``op="lt_zero"``: fail if ``value >= 0`` (or non-finite).
+      Used for the Overflow ``pe_rel_final < 0`` sign check; the
+      ``threshold`` argument is ignored in this mode but kept in
+      the signature for caller symmetry.
+    * Idempotent on already-failed runs (``ok=False`` short-
+      circuits).
+
+    Returns
+    -------
+    (ok, notes): tuple of updated values.
+    """
+    import numpy as _np
+    if not ok:
+        return ok, notes
+    if not _np.isfinite(value):
+        ok = False
+        notes += (
+            f" [FAIL: {label} is non-finite ({value!r})]"
+        )
+        return ok, notes
+    if op == "le":
+        if value > threshold:
+            ok = False
+            notes += (
+                f" [FAIL: {label}={value:.3g}{units} > "
+                f"threshold {threshold:.3g}{units}]"
+            )
+    elif op == "lt_zero":
+        if value >= 0.0:
+            ok = False
+            notes += (
+                f" [FAIL: {label}={value:.3g}{units} >= 0; "
+                f"expected strictly negative]"
+            )
+    else:
+        raise ValueError(
+            f"apply_value_threshold: unknown op {op!r} "
+            f"(expected 'le' or 'lt_zero')"
+        )
     return ok, notes

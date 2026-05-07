@@ -69,6 +69,35 @@ def _apply_drift_tolerance(
     )
 
 
+def _apply_value_threshold(
+    ok: bool, notes: str, value: float, threshold: float,
+    *, label: str, op: str = "le", units: str = "",
+) -> tuple[bool, str]:
+    """Thin wrapper for non-drift PASS thresholds.  Delegates
+    to ``legoesm.diagnostics.conservation_drift.apply_value_threshold``
+    (iter-128 codex iter-127-followup MEDIUM-2/3).
+    """
+    from legoesm.diagnostics.conservation_drift import (
+        apply_value_threshold,
+    )
+    return apply_value_threshold(
+        ok, notes, value, threshold,
+        label=label, op=op, units=units,
+    )
+
+
+def _apply_pe_rel_sign(
+    ok: bool, notes: str, pe_rel_final: float, *, label: str,
+) -> tuple[bool, str]:
+    """Apply the documented Overflow ``pe_rel_final < 0`` sign
+    constraint (iter-128 codex iter-127-followup MEDIUM-2).
+    """
+    return _apply_value_threshold(
+        ok, notes, pe_rel_final, 0.0,
+        label=label, op="lt_zero",
+    )
+
+
 # ===========================================================================
 # Generic time loop
 # ===========================================================================

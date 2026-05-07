@@ -245,58 +245,24 @@ def _apply_mass_drift_tolerance(
     ok: bool, notes: str, mass_drift: float, tol: float,
     *, n_samples: int | None = None,
 ) -> tuple[bool, str]:
-    """Apply a mass-drift PASS tolerance to a test case.
+    """Thin wrapper that delegates to the centralized
+    ``legoesm.diagnostics.conservation_drift.apply_drift_tolerance``
+    helper specialized for ``label="mass"``
+    (iter-128 codex iter-127-followup LOW-1: previously the
+    atmosphere runner had its own near-identical copy of the
+    same gate logic; iter-128 collapses to a single source of
+    truth in the diagnostics package).
 
-    iter-117 introduced ``HELD_SUAREZ_MASS_DRIFT_TOL`` for the HS
-    runner.  iter-118 codex iter-117-followup MEDIUM-2/3
-    factored this into a shared helper because:
-
-    * The HS gate ``mass_drift > tol`` was False for NaN drift,
-      so a NaN-but-finite-checked run could PASS.  iter-118
-      gates on ``not np.isfinite(...) or > tol``.
-    * Other runners (baroclinic, AMIP) compute mass_drift but
-      did not gate on it; codex iter-117 followup MEDIUM-3
-      flagged this as making the cross-grid PASS column
-      meaningless.  The helper makes it cheap to apply the
-      same gate across all of them.
-
-    iter-120 (codex iter-119-followup MEDIUM-1): added the
-    optional ``n_samples`` kwarg.  When the mass series has
-    fewer than 2 samples, ``compute_relative_drift`` returns
-    0.0 sentinel (not actually drift) — pre-iter-120 this
-    silently passed the gate.  When ``n_samples`` is provided
-    and < 2, the gate now fails explicitly with a clear note.
-    Backward-compatible default ``n_samples=None`` skips the
-    sample-count check (existing callsites still work).
-
-    Returns
-    -------
-    (ok, notes): tuple of updated values.  When ``mass_drift``
-    is non-finite or exceeds ``tol`` (or n_samples < 2),
-    ``ok`` is set to False and a ``[FAIL: ...]`` annotation
-    is appended to ``notes``.
+    Behaviour and signature are unchanged from iter-117–iter-120:
+    NaN-aware, n_samples-aware, idempotent on already-failed runs.
     """
-    import numpy as _np
-    if ok and n_samples is not None and n_samples < 2:
-        ok = False
-        notes += (
-            f" [FAIL: mass series has only {n_samples} "
-            f"sample(s); need >= 2 for a valid drift]"
-        )
-        return ok, notes
-    if ok and (not _np.isfinite(mass_drift) or mass_drift > tol):
-        ok = False
-        if not _np.isfinite(mass_drift):
-            notes += (
-                f" [FAIL: mass drift is non-finite "
-                f"({mass_drift!r})]"
-            )
-        else:
-            notes += (
-                f" [FAIL: mass drift {mass_drift:.2e} > "
-                f"tolerance {tol:.0e}]"
-            )
-    return ok, notes
+    from legoesm.diagnostics.conservation_drift import (
+        apply_drift_tolerance,
+    )
+    return apply_drift_tolerance(
+        ok, notes, mass_drift, tol,
+        label="mass", n_samples=n_samples,
+    )
 
 
 def _grid_cell_area(grid_or_mesh):

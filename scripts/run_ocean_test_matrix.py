@@ -406,6 +406,36 @@ def _apply_drift_tolerance(
     )
 
 
+def _apply_value_threshold(
+    ok: bool, notes: str, value: float, threshold: float,
+    *, label: str, op: str = "le", units: str = "",
+) -> tuple[bool, str]:
+    """Thin wrapper for non-drift PASS thresholds (overshoot,
+    undershoot, sign checks).  Delegates to the centralized
+    ``legoesm.diagnostics.conservation_drift.apply_value_threshold``
+    helper (iter-128 codex iter-127-followup MEDIUM-2/3).
+    """
+    from legoesm.diagnostics.conservation_drift import (
+        apply_value_threshold,
+    )
+    return apply_value_threshold(
+        ok, notes, value, threshold,
+        label=label, op=op, units=units,
+    )
+
+
+def _apply_pe_rel_sign(
+    ok: bool, notes: str, pe_rel_final: float, *, label: str,
+) -> tuple[bool, str]:
+    """Apply the documented Overflow ``pe_rel_final < 0`` sign
+    constraint via the centralized value-threshold helper.
+    """
+    return _apply_value_threshold(
+        ok, notes, pe_rel_final, 0.0,
+        label=label, op="lt_zero",
+    )
+
+
 def _compute_drift(values: list[float]) -> float:
     """Scalar drift wrapper.
 
@@ -4528,11 +4558,23 @@ def run_overflow(tc: TestCase, output_dir: Path, days: float
     # T-drift gate to overflow.  T should be conserved
     # (passive scalar in adiabatic regime); empirical quick
     # runs show T drift ~1e-16 (latlon) to ~3e-4 (cube), well
-    # below 1e-2.  PE drift is NOT gated because PE evolves
-    # physically per codex iter-119-followup MEDIUM-4 caveat.
+    # below 1e-2.  PE drift magnitude is NOT gated because RPE
+    # decreases physically (the overflow CONVERTS PE → KE);
+    # docs/ocean_experiments_reference.md:626 instead asserts
+    # the SIGN constraint pe_rel_final < 0.
     ok, notes = _apply_drift_tolerance(
         ok, notes, T_drift, 1e-2,
         label="T", n_samples=len(diag.get("mean_T", [])))
+    # iter-128 (codex iter-127-followup MEDIUM-2): apply the
+    # documented ``pe_rel_final < 0`` sign check.  Overflow is
+    # a gravity-current experiment — RPE must decrease.  A
+    # positive pe_rel_final indicates spurious PE creation
+    # (numerical mixing increasing the basin RPE), which is
+    # the opposite of the expected dynamics.
+    pe_n_samples = len(diag.get("PE_rel", []))
+    if pe_n_samples >= 2:
+        ok, notes = _apply_pe_rel_sign(
+            ok, notes, pe_rel_final, label="PE_rel_final")
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full
@@ -4702,6 +4744,19 @@ def run_stommel_gyre_tracer(tc: TestCase, output_dir: Path, days: float
         ok, notes, S_int_drift, 1e-3,
         label="S_integral",
         n_samples=len(diag.get("S_integral", [])))
+    # iter-128 (codex iter-127-followup MEDIUM-3): apply the
+    # documented overshoot/undershoot < 0.1 PSU thresholds
+    # (docs/ocean_experiments_reference.md:681-682).  A
+    # tracer-conservative scheme can pass the integral
+    # conservation check (S_int_drift < 1e-3) while still
+    # producing local extrema that exceed the initial
+    # range — these gates catch monotonicity violations.
+    ok, notes = _apply_value_threshold(
+        ok, notes, overshoot, 0.1,
+        label="S overshoot", op="le", units="PSU")
+    ok, notes = _apply_value_threshold(
+        ok, notes, undershoot, 0.1,
+        label="S undershoot", op="le", units="PSU")
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full
