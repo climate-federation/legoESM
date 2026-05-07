@@ -3163,6 +3163,41 @@ class TestIter123OceanDriftTolerance:
                 f"iter-138: {rel}: barotropic_wave must NOT use "
                 f"the iter-133/134 initial-vs-final ratio.")
 
+    # ====== iter-149/150: cube bottom_drag_r warning ======
+
+    def test_iter149_cube_bottom_drag_r_warns(self):
+        """iter-149/150: passing ``bottom_drag_r > 0`` for cube
+        triggers an explicit ``warnings.warn`` so users see the
+        cube-doesn't-have-model-level-drag limitation in their
+        run logs.  Silent for ``bottom_drag_r=None`` or 0.0
+        (intentional "no drag" requests).
+        """
+        from pathlib import Path
+        text = (Path(__file__).resolve().parent.parent
+                / "scripts" / "run_ocean_test_matrix.py").read_text()
+        # The warning lives inside the cube branch of
+        # _create_ocean_setup.
+        assert "warnings.warn" in text, (
+            "iter-149: scripts/run_ocean_test_matrix.py must "
+            "emit a warning when bottom_drag_r is silently "
+            "dropped on cube.")
+        # Verify the warning fires only when bottom_drag_r > 0.
+        import re
+        m = re.search(
+            r"if bottom_drag_r is not None and bottom_drag_r > 0\.0:",
+            text,
+        )
+        assert m is not None, (
+            "iter-149: warning must be guarded by "
+            "``bottom_drag_r > 0.0`` so None/0.0 stays silent.")
+        # Verify the warning message mentions the cube limitation
+        # (must not just say "ignored" — needs to point users to
+        # the alternative grids).
+        assert "latlon" in text.split("warnings.warn", 1)[1][:600] or \
+               "mpas" in text.split("warnings.warn", 1)[1][:600], (
+            "iter-149: warning message must point to alternative "
+            "grids that DO support model-level drag.")
+
     def test_iter138_pe_rel_sign_uses_le_not_lt(self):
         """iter-138 (iter-137 FAIL-2): _apply_pe_rel_sign uses
         op="le" (≤ 0) not op="lt" (< 0) so a quick-mode run
