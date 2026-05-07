@@ -486,17 +486,29 @@ def _apply_pe_rel_sign(
             f"in days so the gate can select op='lt' (full "
             f"mode, days>=1) vs op='le' (quick mode)."
         )
+    # iter-155 (codex iter-154 review LOW-1): use ``numbers.Real``
+    # + explicit ``bool`` reject so np.float32 / np.int64 / etc.
+    # are accepted but ``days=True`` is rejected (bool subclasses
+    # int, which would silently get treated as days=1).
     import math as _math
-    if days is None or not isinstance(days, (int, float)) or \
-            not _math.isfinite(days) or days <= 0:
+    import numbers as _numbers
+    if (days is None or isinstance(days, bool)
+            or not isinstance(days, _numbers.Real)):
+        raise ValueError(
+            f"_apply_pe_rel_sign: 'days' must be a real number "
+            f"(int, float, np.float32/64, etc.), got "
+            f"{type(days).__name__}={days!r} (label={label!r})."
+        )
+    days_f = float(days)
+    if not _math.isfinite(days_f) or days_f <= 0:
         raise ValueError(
             f"_apply_pe_rel_sign: 'days' must be a finite "
             f"positive number, got {days!r} "
-            f"(label={label!r}).  Pass days=None is rejected "
+            f"(label={label!r}).  ``days=None`` is rejected "
             f"to prevent silent quick-mode weakening; pass an "
             f"explicit experiment duration."
         )
-    op = "lt" if days >= 1.0 else "le"
+    op = "lt" if days_f >= 1.0 else "le"
     return _apply_value_threshold(
         ok, notes, pe_rel_final, 0.0,
         label=label, op=op, n_samples=n_samples,

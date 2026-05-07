@@ -133,14 +133,24 @@ def _apply_pe_rel_sign(
             f"_apply_pe_rel_sign: 'days' kwarg is required "
             f"(label={label!r})."
         )
+    # iter-155 (codex iter-154 review LOW-1): same numbers.Real
+    # + bool reject as monolithic.
     import math as _math
-    if days is None or not isinstance(days, (int, float)) or \
-            not _math.isfinite(days) or days <= 0:
+    import numbers as _numbers
+    if (days is None or isinstance(days, bool)
+            or not isinstance(days, _numbers.Real)):
+        raise ValueError(
+            f"_apply_pe_rel_sign: 'days' must be a real number, "
+            f"got {type(days).__name__}={days!r} "
+            f"(label={label!r})."
+        )
+    days_f = float(days)
+    if not _math.isfinite(days_f) or days_f <= 0:
         raise ValueError(
             f"_apply_pe_rel_sign: 'days' must be a finite "
             f"positive number, got {days!r} (label={label!r})."
         )
-    op = "lt" if days >= 1.0 else "le"
+    op = "lt" if days_f >= 1.0 else "le"
     return _apply_value_threshold(
         ok, notes, pe_rel_final, 0.0,
         label=label, op=op, n_samples=n_samples,

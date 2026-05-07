@@ -3265,21 +3265,58 @@ class TestIter123OceanDriftTolerance:
                     f"call line must use op='lt'/'le'/op variable; "
                     f"got: {line.strip()!r}")
 
+    def test_iter155_pe_sign_days_numpy_scalars_accepted(self):
+        """iter-155 (codex iter-154 review LOW-1): numpy scalar
+        types like ``np.float32``, ``np.float64``, ``np.int64``
+        must be accepted (callers naturally pass these from
+        diagnostic dicts).  ``bool`` must be rejected
+        (subclasses int but ``days=True`` is nonsense).
+        """
+        import numpy as np
+        import pytest
+        mod = self._import_monolithic_runner()
+        # np.float64 (the most common case from diag dicts).
+        ok, _ = mod._apply_pe_rel_sign(
+            True, "", -0.5, label="PE_rel_final",
+            n_samples=10, days=np.float64(2.0))
+        assert ok is True
+        # np.float32 (less common but possible).
+        ok, _ = mod._apply_pe_rel_sign(
+            True, "", -0.5, label="PE_rel_final",
+            n_samples=10, days=np.float32(2.0))
+        assert ok is True
+        # np.int64 (also possible).
+        ok, _ = mod._apply_pe_rel_sign(
+            True, "", -0.5, label="PE_rel_final",
+            n_samples=10, days=np.int64(2))
+        assert ok is True
+        # bool MUST be rejected even though it's a subclass of int.
+        with pytest.raises(ValueError, match="must be a real number"):
+            mod._apply_pe_rel_sign(
+                True, "", -0.5, label="PE_rel_final",
+                n_samples=10, days=True)
+        # str is also rejected.
+        with pytest.raises(ValueError, match="must be a real number"):
+            mod._apply_pe_rel_sign(
+                True, "", -0.5, label="PE_rel_final",
+                n_samples=10, days="2.0")
+
     def test_iter154_pe_sign_days_none_rejected(self):
-        """iter-154 (codex iter-153 review MEDIUM-1): explicit
-        ``days=None`` must also be rejected — pre-iter-154 it
-        silently selected quick-mode ``op="le"``, weakening
-        the documented full-mode strict gate.  Now requires a
-        finite positive number.
+        """iter-154/iter-155: explicit ``days=None``, NaN, 0,
+        negative all rejected.  iter-155 split the validation
+        into "must be a real number" (None, str, etc.) vs
+        "must be a finite positive number" (NaN, 0, -1) so the
+        regex matches either error message.
         """
         import pytest
         mod = self._import_monolithic_runner()
-        # days=None must raise.
-        with pytest.raises(ValueError, match="finite positive number"):
+        # days=None must raise (real-number check).
+        with pytest.raises(ValueError,
+                           match="real number|finite positive number"):
             mod._apply_pe_rel_sign(
                 True, "", -0.5, label="PE_rel_final",
                 n_samples=10, days=None)
-        # days=NaN must raise.
+        # days=NaN must raise (finite check).
         with pytest.raises(ValueError, match="finite positive number"):
             mod._apply_pe_rel_sign(
                 True, "", -0.5, label="PE_rel_final",
