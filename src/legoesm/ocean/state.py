@@ -6,6 +6,11 @@ NonHydrostaticState in core/state.py.
 """
 
 from __future__ import annotations
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from legoesm.ocean.biogeochemistry.config import (
+        BiogeoConfig, OceanBiogeoState,
+    )
 
 from typing import NamedTuple
 
@@ -46,6 +51,11 @@ class OceanState(NamedTuple):
     eta: Field
     H_bathy: Field
     land_mask: Field
+    biogeo: "OceanBiogeoState | None" = None  # BGC tracers; None = disabled
+    biogeo: "OceanBiogeoState | None" = None  # BGC tracers; None = disabled
+    biogeo: "OceanBiogeoState | None" = None  # BGC tracers; None = disabled
+    biogeo: "OceanBiogeoState | None" = None  # BGC tracers; None = disabled
+    biogeo: "OceanBiogeoState | None" = None  # BGC tracers; None = disabled
 
 
 class OceanTendencies(NamedTuple):
