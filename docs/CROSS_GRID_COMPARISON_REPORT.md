@@ -1,6 +1,6 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-145 snapshot — atmos matrix latlon: 19/19 PASS; atmos matrix icosahedral: 21/23 PASS; ocean matrix latlon: 13/13 PASS; ocean matrix mpas: 11/11 PASS; ocean matrix cube: 6/11 (5 cube handoff). RCE latlon PASS (T_sfc 299.94K, precip 0.35 mm/d). OMIP latlon PASS (30-day quick, SST 19.51°C, full physics + RRTMGP + salinity restoring). Cross-grid plotting + MPI infrastructure verified)
+**Branch**: `simulation_full_check` (iter-146 snapshot — atmos matrix latlon: 19/19 PASS; atmos matrix icosahedral: 21/23 PASS; ocean matrix latlon: 13/13 PASS; ocean matrix mpas: 11/11 PASS; ocean matrix cube: 6/11 (5 cube handoff). RCE latlon PASS (T_sfc 299.94K, precip 0.35 mm/d); RCE mpas BLOWUP (matches existing user-handoff "voronoi RCE BLOWUP"). OMIP latlon PASS SST=19.51°C; OMIP mpas PASS SST=19.59°C — cross-grid SST consistency (0.08°C apart). Cross-grid plotting + MPI infrastructure verified)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
