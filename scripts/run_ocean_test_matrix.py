@@ -426,13 +426,24 @@ def _apply_value_threshold(
 
 def _apply_pe_rel_sign(
     ok: bool, notes: str, pe_rel_final: float, *, label: str,
+    n_samples: int | None = None,
 ) -> tuple[bool, str]:
-    """Apply the documented Overflow ``pe_rel_final < 0`` sign
-    constraint via the centralized value-threshold helper.
+    """Apply the documented ``pe_rel_final < 0`` sign constraint
+    via the centralized value-threshold helper.
+
+    iter-129 (codex iter-128-followup MEDIUM-1/LOW-3): switched
+    from the deprecated ``op="lt_zero"`` to ``op="lt"`` with
+    explicit ``threshold=0.0``.  Added ``n_samples`` kwarg so
+    callsites with missing/short PE_rel diagnostics fail
+    explicitly rather than silently passing via a default-zero
+    placeholder.
+
+    Used by Overflow and Lock Exchange (both have the same
+    ``pe_rel_final < 0`` contract).
     """
     return _apply_value_threshold(
         ok, notes, pe_rel_final, 0.0,
-        label=label, op="lt_zero",
+        label=label, op="lt", n_samples=n_samples,
     )
 
 
@@ -4398,6 +4409,14 @@ def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
     pe_drift = _compute_drift(diag.get("PE", []))
     pe_rel_final = diag["PE_rel"][-1] if diag.get("PE_rel") else 0.0
     notes = f"PE drift={pe_drift:.2e}, PE_rel_final={pe_rel_final:.4e}"
+    # iter-129 (codex iter-128-followup MEDIUM-2): apply the
+    # documented ``pe_rel_final < 0`` sign check to Lock Exchange
+    # (docs/ocean_experiments_reference.md:575).  Lock Exchange
+    # is the canonical PE → KE conversion test; positive
+    # pe_rel_final is spurious PE creation by numerical mixing.
+    ok, notes = _apply_pe_rel_sign(
+        ok, notes, pe_rel_final, label="PE_rel_final",
+        n_samples=len(diag.get("PE_rel", [])))
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full
@@ -4571,10 +4590,13 @@ def run_overflow(tc: TestCase, output_dir: Path, days: float
     # positive pe_rel_final indicates spurious PE creation
     # (numerical mixing increasing the basin RPE), which is
     # the opposite of the expected dynamics.
-    pe_n_samples = len(diag.get("PE_rel", []))
-    if pe_n_samples >= 2:
-        ok, notes = _apply_pe_rel_sign(
-            ok, notes, pe_rel_final, label="PE_rel_final")
+    # iter-129 (codex iter-128-followup MEDIUM-1): pass
+    # ``n_samples`` so a missing/single-sample PE_rel series
+    # fails explicitly instead of silently passing via the
+    # default ``pe_rel_final = 0.0`` placeholder above.
+    ok, notes = _apply_pe_rel_sign(
+        ok, notes, pe_rel_final, label="PE_rel_final",
+        n_samples=len(diag.get("PE_rel", [])))
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full
@@ -4723,11 +4745,24 @@ def run_stommel_gyre_tracer(tc: TestCase, output_dir: Path, days: float
         label=f"Stommel Tracer ({tc.grid_type})", total_days=days)
 
     S_int_drift = _compute_drift(diag.get("S_integral", []))
-    S_min_final = diag["S_min"][-1] if diag.get("S_min") else 0
-    S_max_final = diag["S_max"][-1] if diag.get("S_max") else 0
-    # Check for new extrema (overshoots/undershoots)
-    overshoot = max(0, S_max_final - S_max_init)
-    undershoot = max(0, S_min_init - S_min_final)
+    S_min_series = diag.get("S_min", [])
+    S_max_series = diag.get("S_max", [])
+    # iter-129 (codex iter-128-followup LOW-2): pre-check
+    # finiteness of S extrema before clamping with ``max(0, ...)``.
+    # ``max(0, NaN)`` is order-dependent in Python — it can
+    # return 0 and bypass the helper's non-finite check.
+    # Compute raw signed deltas; let the helper see NaN if any
+    # appears and emit the proper "non-finite" failure.
+    S_min_final = (
+        float(S_min_series[-1]) if S_min_series else float("nan"))
+    S_max_final = (
+        float(S_max_series[-1]) if S_max_series else float("nan"))
+    raw_over = S_max_final - S_max_init
+    raw_under = S_min_init - S_min_final
+    overshoot = (max(0.0, raw_over)
+                 if np.isfinite(raw_over) else float("nan"))
+    undershoot = (max(0.0, raw_under)
+                  if np.isfinite(raw_under) else float("nan"))
     notes = (f"S integral drift={S_int_drift:.2e}, "
              f"overshoot={overshoot:.3f}, undershoot={undershoot:.3f}")
     # iter-124 (codex iter-123-followup MEDIUM-1): S_integral
@@ -4746,17 +4781,23 @@ def run_stommel_gyre_tracer(tc: TestCase, output_dir: Path, days: float
         n_samples=len(diag.get("S_integral", [])))
     # iter-128 (codex iter-127-followup MEDIUM-3): apply the
     # documented overshoot/undershoot < 0.1 PSU thresholds
-    # (docs/ocean_experiments_reference.md:681-682).  A
-    # tracer-conservative scheme can pass the integral
-    # conservation check (S_int_drift < 1e-3) while still
-    # producing local extrema that exceed the initial
-    # range — these gates catch monotonicity violations.
+    # (docs/ocean_experiments_reference.md:681-682).
+    # iter-129 (codex iter-128-followup LOW-1): switched from
+    # ``op="le"`` (PASS at exactly 0.1) to ``op="lt"`` (strict
+    # <) to match the documented strict bound.  iter-129 LOW-2:
+    # the raw S extrema feed the helper before clamping, so a
+    # NaN in ``S_min``/``S_max`` correctly triggers the helper's
+    # non-finite failure.  iter-129 MEDIUM-1: pass ``n_samples``
+    # so a missing/single-sample series fails explicitly.
+    n_S_samples = len(S_min_series)
     ok, notes = _apply_value_threshold(
         ok, notes, overshoot, 0.1,
-        label="S overshoot", op="le", units="PSU")
+        label="S overshoot", op="lt", units="PSU",
+        n_samples=n_S_samples)
     ok, notes = _apply_value_threshold(
         ok, notes, undershoot, 0.1,
-        label="S undershoot", op="le", units="PSU")
+        label="S undershoot", op="lt", units="PSU",
+        n_samples=n_S_samples)
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full

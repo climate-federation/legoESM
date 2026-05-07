@@ -88,13 +88,21 @@ def _apply_value_threshold(
 
 def _apply_pe_rel_sign(
     ok: bool, notes: str, pe_rel_final: float, *, label: str,
+    n_samples: int | None = None,
 ) -> tuple[bool, str]:
-    """Apply the documented Overflow ``pe_rel_final < 0`` sign
+    """Apply the documented ``pe_rel_final < 0`` sign
     constraint (iter-128 codex iter-127-followup MEDIUM-2).
+
+    iter-129 (codex iter-128-followup MEDIUM-1/LOW-3): switched
+    from deprecated ``op="lt_zero"`` to general ``op="lt"`` with
+    explicit ``threshold=0.0``.  Added ``n_samples`` kwarg.
+
+    Used by Overflow and Lock Exchange (both have the same
+    documented ``pe_rel_final < 0`` contract).
     """
     return _apply_value_threshold(
         ok, notes, pe_rel_final, 0.0,
-        label=label, op="lt_zero",
+        label=label, op="lt", n_samples=n_samples,
     )
 
 

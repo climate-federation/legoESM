@@ -1113,6 +1113,13 @@ def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
     pe_drift = _compute_drift(diag.get("PE", []))
     pe_rel_final = diag["PE_rel"][-1] if diag.get("PE_rel") else 0.0
     notes = f"PE drift={pe_drift:.2e}, PE_rel_final={pe_rel_final:.4e}"
+    # iter-129 (codex iter-128-followup MEDIUM-2): apply the
+    # documented ``pe_rel_final < 0`` sign check to Lock Exchange
+    # (docs/ocean_experiments_reference.md:575).  Same gate as
+    # monolithic ``run_lock_exchange``.
+    ok, notes = _apply_pe_rel_sign(
+        ok, notes, pe_rel_final, label="PE_rel_final",
+        n_samples=len(diag.get("PE_rel", [])))
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full
@@ -1217,9 +1224,13 @@ def run_overflow(tc: TestCase, output_dir: Path, days: float
         label="T", n_samples=len(diag.get("mean_T", [])))
     # iter-128 (codex iter-127-followup MEDIUM-2): apply the
     # documented ``pe_rel_final < 0`` sign check.
-    if len(diag.get("PE_rel", [])) >= 2:
-        ok, notes = _apply_pe_rel_sign(
-            ok, notes, pe_rel_final, label="PE_rel_final")
+    # iter-129 (codex iter-128-followup MEDIUM-1): pass
+    # ``n_samples`` so a missing/single-sample PE_rel series
+    # fails explicitly instead of silently passing via the
+    # default ``pe_rel_final = 0.0`` placeholder above.
+    ok, notes = _apply_pe_rel_sign(
+        ok, notes, pe_rel_final, label="PE_rel_final",
+        n_samples=len(diag.get("PE_rel", [])))
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full
@@ -1325,11 +1336,22 @@ def run_stommel_gyre_tracer(tc: TestCase, output_dir: Path, days: float
         label=f"Stommel Tracer ({tc.grid_type})", total_days=days)
 
     S_int_drift = _compute_drift(diag.get("S_integral", []))
-    S_min_final = diag["S_min"][-1] if diag.get("S_min") else 0
-    S_max_final = diag["S_max"][-1] if diag.get("S_max") else 0
-    # Check for new extrema (overshoots/undershoots)
-    overshoot = max(0, S_max_final - S_max_init)
-    undershoot = max(0, S_min_init - S_min_final)
+    S_min_series = diag.get("S_min", [])
+    S_max_series = diag.get("S_max", [])
+    # iter-129 (codex iter-128-followup LOW-2): pre-check
+    # finiteness of S extrema before clamping with ``max(0, ...)``;
+    # ``max(0, NaN)`` is order-dependent in Python and can return
+    # 0, bypassing the helper's non-finite check.
+    S_min_final = (
+        float(S_min_series[-1]) if S_min_series else float("nan"))
+    S_max_final = (
+        float(S_max_series[-1]) if S_max_series else float("nan"))
+    raw_over = S_max_final - S_max_init
+    raw_under = S_min_init - S_min_final
+    overshoot = (max(0.0, raw_over)
+                 if np.isfinite(raw_over) else float("nan"))
+    undershoot = (max(0.0, raw_under)
+                  if np.isfinite(raw_under) else float("nan"))
     notes = (f"S integral drift={S_int_drift:.2e}, "
              f"overshoot={overshoot:.3f}, undershoot={undershoot:.3f}")
     # iter-127 (codex iter-126-followup MEDIUM-2): apply
@@ -1345,12 +1367,19 @@ def run_stommel_gyre_tracer(tc: TestCase, output_dir: Path, days: float
     # (docs/ocean_experiments_reference.md:681-682) — these
     # catch monotonicity violations that the integral
     # conservation gate misses.
+    # iter-129 (codex iter-128-followup LOW-1): switched from
+    # ``op="le"`` to ``op="lt"`` to match the documented
+    # strict bound.  iter-129 MEDIUM-1: pass ``n_samples`` so
+    # missing series fail explicitly.
+    n_S_samples = len(S_min_series)
     ok, notes = _apply_value_threshold(
         ok, notes, overshoot, 0.1,
-        label="S overshoot", op="le", units="PSU")
+        label="S overshoot", op="lt", units="PSU",
+        n_samples=n_S_samples)
     ok, notes = _apply_value_threshold(
         ok, notes, undershoot, 0.1,
-        label="S undershoot", op="le", units="PSU")
+        label="S undershoot", op="lt", units="PSU",
+        n_samples=n_S_samples)
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full

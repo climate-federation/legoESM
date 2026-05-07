@@ -274,6 +274,7 @@ def apply_drift_tolerance(
 def apply_value_threshold(
     ok: bool, notes: str, value: float, threshold: float,
     *, label: str, op: str = "le", units: str = "",
+    n_samples: int | None = None,
 ) -> tuple[bool, str]:
     """Apply a non-drift PASS threshold (overshoot, sign-check, etc.).
 
@@ -281,19 +282,34 @@ def apply_value_threshold(
     ``apply_drift_tolerance`` for tests that gate on non-drift
     quantities — e.g., the documented Stommel
     ``overshoot < 0.1 PSU`` and ``undershoot < 0.1 PSU`` thresholds
-    (``docs/ocean_experiments_reference.md:681-682``) and the
-    Overflow ``pe_rel_final < 0`` sign check
-    (``docs/ocean_experiments_reference.md:626``).
+    (``docs/ocean_experiments_reference.md:681-682``), and the
+    Overflow / Lock-Exchange ``pe_rel_final < 0`` sign check
+    (``docs/ocean_experiments_reference.md:626`` and ``:575``).
+
+    iter-129 (codex iter-128-followup LOW-1/3/MEDIUM-1):
+      * Removed ``op="lt_zero"`` (one-iteration-old API; replaced
+        by the more general ``op="lt"`` with explicit ``threshold``
+        argument).  This eliminates the silent ignoring of
+        ``threshold`` that LOW-3 flagged.
+      * Added ``op="lt"`` (strict less-than): fail if
+        ``value >= threshold``.  Stommel uses this with
+        ``threshold=0.1`` to match the documented
+        ``< 0.1 PSU`` strict bound (LOW-1).
+      * Added ``n_samples`` kwarg (parity with
+        ``apply_drift_tolerance``); when provided and < 2,
+        fail explicitly so missing/single-sample diagnostics
+        cannot silently pass via a default-zero placeholder
+        (MEDIUM-1).
 
     Behaviour:
 
     * ``op="le"`` (less-than-or-equal): fail if ``value > threshold``
       (or non-finite).  Used for overshoot/undershoot/absolute
-      magnitude tests.
-    * ``op="lt_zero"``: fail if ``value >= 0`` (or non-finite).
-      Used for the Overflow ``pe_rel_final < 0`` sign check; the
-      ``threshold`` argument is ignored in this mode but kept in
-      the signature for caller symmetry.
+      magnitude tests where the boundary value passes.
+    * ``op="lt"`` (strict less-than): fail if ``value >= threshold``
+      (or non-finite).  Used for sign checks (e.g., RPE must
+      strictly decrease) and any documented ``< X`` strict
+      bound.
     * Idempotent on already-failed runs (``ok=False`` short-
       circuits).
 
@@ -303,6 +319,13 @@ def apply_value_threshold(
     """
     import numpy as _np
     if not ok:
+        return ok, notes
+    if n_samples is not None and n_samples < 2:
+        ok = False
+        notes += (
+            f" [FAIL: {label} series has only {n_samples} "
+            f"sample(s); need >= 2 for a valid threshold check]"
+        )
         return ok, notes
     if not _np.isfinite(value):
         ok = False
@@ -317,16 +340,17 @@ def apply_value_threshold(
                 f" [FAIL: {label}={value:.3g}{units} > "
                 f"threshold {threshold:.3g}{units}]"
             )
-    elif op == "lt_zero":
-        if value >= 0.0:
+    elif op == "lt":
+        if value >= threshold:
             ok = False
             notes += (
-                f" [FAIL: {label}={value:.3g}{units} >= 0; "
-                f"expected strictly negative]"
+                f" [FAIL: {label}={value:.3g}{units} >= "
+                f"threshold {threshold:.3g}{units}; "
+                f"expected strictly less-than]"
             )
     else:
         raise ValueError(
             f"apply_value_threshold: unknown op {op!r} "
-            f"(expected 'le' or 'lt_zero')"
+            f"(expected 'le' or 'lt')"
         )
     return ok, notes

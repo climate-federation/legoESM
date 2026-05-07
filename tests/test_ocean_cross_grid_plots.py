@@ -1716,34 +1716,49 @@ class TestIter123OceanDriftTolerance:
         assert ok is False
         assert notes == "prior"
 
-    def test_iter128_value_threshold_helper_lt_zero(self):
-        """iter-128 codex iter-127-followup MEDIUM-2: the
-        ``op="lt_zero"`` mode for sign-check gates (Overflow
-        ``pe_rel_final < 0``).
+    def test_iter128_value_threshold_helper_lt(self):
+        """iter-128/iter-129 codex iter-127/128-followup
+        MEDIUM-2: the ``op="lt"`` mode for strict-less-than
+        gates.  iter-129 generalized the iter-128 ``op="lt_zero"``
+        to a general ``op="lt"`` with explicit threshold (LOW-3).
+        Overflow uses it with threshold=0.0 for the documented
+        ``pe_rel_final < 0`` sign check.
         """
         from legoesm.diagnostics import apply_value_threshold
-        # Pass case: strictly negative.
+        # Pass case: strictly less than threshold.
         ok, _ = apply_value_threshold(
             ok=True, notes="", value=-0.5, threshold=0.0,
-            label="PE_rel_final", op="lt_zero")
+            label="PE_rel_final", op="lt")
         assert ok is True
-        # Fail case: zero (must be strictly less than zero).
+        # Fail case: equal to threshold (must be STRICTLY less).
         ok, notes = apply_value_threshold(
             ok=True, notes="", value=0.0, threshold=0.0,
-            label="PE_rel_final", op="lt_zero")
+            label="PE_rel_final", op="lt")
         assert ok is False
-        assert "expected strictly negative" in notes
-        # Fail case: positive (spurious PE creation).
+        assert "expected strictly less-than" in notes
+        # Fail case: above threshold.
         ok, notes = apply_value_threshold(
             ok=True, notes="", value=0.1, threshold=0.0,
-            label="PE_rel_final", op="lt_zero")
+            label="PE_rel_final", op="lt")
         assert ok is False
-        # NaN case.
+        # NaN/Inf case.
         ok, notes = apply_value_threshold(
             ok=True, notes="", value=float("inf"), threshold=0.0,
-            label="PE_rel_final", op="lt_zero")
+            label="PE_rel_final", op="lt")
         assert ok is False
         assert "non-finite" in notes
+        # Generic threshold (not just zero): pe_rel_final must
+        # be < -0.001 (10x noise floor).
+        ok, _ = apply_value_threshold(
+            ok=True, notes="", value=-0.005, threshold=-0.001,
+            label="PE_rel_final", op="lt")
+        assert ok is True
+        ok, notes = apply_value_threshold(
+            ok=True, notes="", value=-0.0005, threshold=-0.001,
+            label="PE_rel_final", op="lt")
+        assert ok is False, (
+            "iter-129 LOW-3: ``op='lt'`` must respect the "
+            "threshold argument, not always compare against 0.")
 
     def test_iter128_value_threshold_unknown_op_raises(self):
         from legoesm.diagnostics import apply_value_threshold
@@ -1931,6 +1946,275 @@ class TestIter123OceanDriftTolerance:
             f"iter-128: modular overflow T tolerance must be "
             f"1e-2 (matches docs/ocean_experiments_reference.md:625). "
             f"Got {tol}.")
+
+    # ====== iter-129: codex iter-128-followup MEDIUM-1/2 + LOW-1/2/3/4 ======
+
+    def test_iter129_value_threshold_n_samples_kwarg(self):
+        """iter-129 codex iter-128-followup MEDIUM-1: the new
+        ``n_samples`` kwarg fails explicitly when the underlying
+        diagnostic series has < 2 samples — preventing a missing
+        diagnostic from silently passing via a default-zero
+        placeholder.
+        """
+        from legoesm.diagnostics import apply_value_threshold
+        # Empty series: must FAIL even though value would pass.
+        ok, notes = apply_value_threshold(
+            ok=True, notes="", value=-0.5, threshold=0.0,
+            label="PE_rel_final", op="lt", n_samples=0)
+        assert ok is False
+        assert "0 sample" in notes
+        # Single-sample: must FAIL.
+        ok, notes = apply_value_threshold(
+            ok=True, notes="", value=-0.5, threshold=0.0,
+            label="PE_rel_final", op="lt", n_samples=1)
+        assert ok is False
+        assert "1 sample" in notes
+        # Adequate samples: pass through to value check.
+        ok, _ = apply_value_threshold(
+            ok=True, notes="", value=-0.5, threshold=0.0,
+            label="PE_rel_final", op="lt", n_samples=10)
+        assert ok is True
+        # n_samples=None (default): no sample-count check.
+        ok, _ = apply_value_threshold(
+            ok=True, notes="", value=-0.5, threshold=0.0,
+            label="PE_rel_final", op="lt")
+        assert ok is True
+
+    def test_iter129_lt_zero_op_removed(self):
+        """iter-129 codex iter-128-followup LOW-3: the
+        deprecated ``op="lt_zero"`` is removed.  Callers must
+        use ``op="lt"`` with explicit threshold.
+        """
+        from legoesm.diagnostics import apply_value_threshold
+        import pytest
+        with pytest.raises(ValueError, match="unknown op"):
+            apply_value_threshold(
+                ok=True, notes="", value=-0.5, threshold=0.0,
+                label="x", op="lt_zero")
+
+    def test_iter129_no_lt_zero_in_runner_callsites(self):
+        """iter-129 codex iter-128-followup LOW-3: no production
+        code (runners or src/) should still reference the
+        deprecated ``op="lt_zero"``.  Comments and docstrings
+        that *describe* the deprecation are OK.
+        """
+        from pathlib import Path
+        repo = Path(__file__).resolve().parent.parent
+        for rel in (
+            "scripts/run_ocean_test_matrix.py",
+            "scripts/ocean_test_matrix/timeloop.py",
+            "scripts/ocean_test_matrix/experiments.py",
+            "src/legoesm/diagnostics/conservation_drift.py",
+        ):
+            text = (repo / rel).read_text()
+            # An actual op="lt_zero" call would look like
+            # ``op="lt_zero"`` or ``op='lt_zero'`` in code.
+            # Allow it in docstrings/comments only.
+            for line_no, line in enumerate(text.splitlines(), 1):
+                stripped = line.lstrip()
+                if (stripped.startswith("#") or
+                        stripped.startswith('"""') or
+                        stripped.startswith("'''") or
+                        stripped.startswith('``op="lt_zero"``') or
+                        '"lt_zero"' in stripped and
+                        ('Removed' in stripped or
+                         'deprecated' in stripped or
+                         'Pre-iter' in stripped or
+                         'pre-iter' in stripped)):
+                    continue
+                # If we still see 'lt_zero' in code, fail.
+                if 'lt_zero' in line:
+                    # Allow strings in docstrings — heuristic: if
+                    # the line is part of a docstring block, skip.
+                    # Simpler: only fail on `op="lt_zero"` or
+                    # `op='lt_zero'` exactly.
+                    if 'op="lt_zero"' in line or "op='lt_zero'" in line:
+                        # Ignore docstring lines.
+                        if line.lstrip().startswith('*') or line.lstrip().startswith('('):
+                            continue
+                        raise AssertionError(
+                            f"iter-129: {rel}:{line_no} still has "
+                            f"op='lt_zero' callsite: {line.strip()!r}")
+
+    def test_iter129_overflow_short_pe_series_fails(self):
+        """iter-129 codex iter-128-followup MEDIUM-1: with an
+        empty ``PE_rel`` series, the Overflow PE-sign gate must
+        FAIL explicitly (not silently pass via the default
+        ``pe_rel_final = 0.0`` placeholder).  Behavior test of
+        the wrapper, not just substring.
+        """
+        from legoesm.diagnostics.conservation_drift import (
+            apply_value_threshold,
+        )
+        # Simulate the wrapper call with n_samples=0 (no PE_rel
+        # samples collected) and the placeholder pe_rel_final=0.0.
+        ok, notes = apply_value_threshold(
+            ok=True, notes="initial", value=0.0, threshold=0.0,
+            label="PE_rel_final", op="lt", n_samples=0)
+        assert ok is False, (
+            "iter-129: empty PE_rel series with default 0.0 "
+            "placeholder must NOT silently pass.")
+        assert "0 sample" in notes
+
+    def test_iter129_monolithic_lock_exchange_pe_sign_gate(self):
+        """iter-129 codex iter-128-followup MEDIUM-2: monolithic
+        run_lock_exchange must apply the same ``pe_rel_final < 0``
+        sign gate as Overflow (per
+        docs/ocean_experiments_reference.md:575).
+        """
+        from pathlib import Path
+        path = (Path(__file__).resolve().parent.parent
+                / "scripts" / "run_ocean_test_matrix.py")
+        text = path.read_text()
+        import re
+        m = re.search(
+            r"def run_lock_exchange\b.*?(?=\ndef \w|^\s*RUNNERS)",
+            text, re.DOTALL | re.MULTILINE,
+        )
+        assert m is not None
+        body = m.group(0)
+        assert "_apply_pe_rel_sign" in body, (
+            "iter-129: monolithic run_lock_exchange must apply "
+            "the documented pe_rel_final < 0 sign gate.")
+        assert 'label="PE_rel_final"' in body
+        # Must pass n_samples to fail explicitly on missing series.
+        assert "n_samples=" in body and "PE_rel" in body
+
+    def test_iter129_modular_lock_exchange_pe_sign_gate(self):
+        """iter-129 codex iter-128-followup MEDIUM-2: modular
+        run_lock_exchange ports the same gate.
+        """
+        from pathlib import Path
+        path = (Path(__file__).resolve().parent.parent
+                / "scripts" / "ocean_test_matrix"
+                / "experiments.py")
+        text = path.read_text()
+        import re
+        m = re.search(
+            r"def run_lock_exchange\b.*?(?=\ndef \w)",
+            text, re.DOTALL,
+        )
+        assert m is not None
+        body = m.group(0)
+        assert "_apply_pe_rel_sign" in body
+        assert 'label="PE_rel_final"' in body
+        assert "n_samples=" in body
+
+    def test_iter129_stommel_uses_lt_strict(self):
+        """iter-129 codex iter-128-followup LOW-1: Stommel
+        overshoot/undershoot gates use ``op="lt"`` (strict)
+        to match the documented ``< 0.1 PSU`` strict bound,
+        not ``op="le"`` which would pass at exactly 0.1.
+        """
+        from pathlib import Path
+        for rel in (
+            "scripts/run_ocean_test_matrix.py",
+            "scripts/ocean_test_matrix/experiments.py",
+        ):
+            text = (Path(__file__).resolve().parent.parent
+                    / rel).read_text()
+            import re
+            m = re.search(
+                r"def run_stommel_gyre_tracer\b"
+                r".*?(?=\ndef \w|\nRUNNERS)",
+                text, re.DOTALL,
+            )
+            assert m is not None, f"{rel}: missing function"
+            body = m.group(0)
+            # Strip comment lines so a comment that quotes
+            # ``op="le"`` for context doesn't trip the gate.
+            code_lines = [
+                line for line in body.splitlines()
+                if not line.lstrip().startswith("#")
+            ]
+            code_only = "\n".join(code_lines)
+            # Both gates must use op="lt" not op="le".
+            le_count = code_only.count('op="le"')
+            lt_count = code_only.count('op="lt"')
+            assert lt_count >= 2, (
+                f"iter-129: {rel}:run_stommel_gyre_tracer must "
+                f"have at least 2 ``op='lt'`` code-level gates "
+                f"(overshoot+undershoot).  Got lt={lt_count} "
+                f"le={le_count}.")
+            # No remaining op="le" in the Stommel code (comments
+            # quoting the historical op="le" are OK).
+            assert le_count == 0, (
+                f"iter-129: {rel}:run_stommel_gyre_tracer must "
+                f"use op='lt' (strict <), not op='le' (<=). "
+                f"Found {le_count} ``op='le'`` code-level calls.")
+
+    def test_iter129_stommel_nan_extrema_caught(self):
+        """iter-129 codex iter-128-followup LOW-2: a NaN in
+        ``S_min``/``S_max`` must propagate to the helper as
+        non-finite (not get masked by ``max(0, NaN)`` which can
+        return 0).  Verify the helper catches non-finite values.
+        """
+        import numpy as np
+        from legoesm.diagnostics import apply_value_threshold
+        # If S_max_final = NaN, the raw delta is NaN; the helper
+        # must fail with "non-finite", not pass.
+        ok, notes = apply_value_threshold(
+            ok=True, notes="", value=float("nan"), threshold=0.1,
+            label="S overshoot", op="lt", units="PSU",
+            n_samples=10)
+        assert ok is False
+        assert "non-finite" in notes
+        # Verify Python's max(0, NaN) gotcha is real (this is the
+        # bug pattern iter-129 LOW-2 fixed): max with NaN is
+        # order-dependent and non-deterministic.  We don't assert
+        # what it returns — just that the runner now bypasses
+        # max(0, ...) on NaN by computing raw deltas first.
+        # Read the runner source to confirm the fix is in place.
+        from pathlib import Path
+        for rel in (
+            "scripts/run_ocean_test_matrix.py",
+            "scripts/ocean_test_matrix/experiments.py",
+        ):
+            text = (Path(__file__).resolve().parent.parent
+                    / rel).read_text()
+            import re
+            m = re.search(
+                r"def run_stommel_gyre_tracer\b"
+                r".*?(?=\ndef \w|\nRUNNERS)",
+                text, re.DOTALL,
+            )
+            assert m is not None
+            body = m.group(0)
+            # The fix introduces ``raw_over``/``raw_under`` and
+            # checks ``np.isfinite(raw_*)`` BEFORE clamping.
+            assert "raw_over" in body
+            assert "raw_under" in body
+            assert "isfinite(raw_over)" in body
+            assert "isfinite(raw_under)" in body
+
+    def test_iter129_overflow_passes_n_samples_to_pe_sign(self):
+        """iter-129 codex iter-128-followup MEDIUM-1: the
+        Overflow PE-sign callsite passes ``n_samples`` so a
+        missing/single-sample PE_rel series fails explicitly.
+        """
+        from pathlib import Path
+        for rel in (
+            "scripts/run_ocean_test_matrix.py",
+            "scripts/ocean_test_matrix/experiments.py",
+        ):
+            text = (Path(__file__).resolve().parent.parent
+                    / rel).read_text()
+            import re
+            m = re.search(
+                r"def run_overflow\b.*?(?=\ndef \w|\nRUNNERS)",
+                text, re.DOTALL,
+            )
+            assert m is not None, f"{rel}: missing run_overflow"
+            body = m.group(0)
+            # Find the _apply_pe_rel_sign call and verify it has
+            # n_samples= in its argument list.
+            m2 = re.search(
+                r"_apply_pe_rel_sign\([^)]*n_samples=[^)]*\)",
+                body, re.DOTALL,
+            )
+            assert m2 is not None, (
+                f"iter-129: {rel}:run_overflow must pass "
+                f"n_samples= to _apply_pe_rel_sign.")
 
     def test_iter128_geostrophic_doc_documents_tighter_gate(self):
         """iter-128 codex iter-127-followup MEDIUM-1: the doc
