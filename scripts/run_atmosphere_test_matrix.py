@@ -2523,10 +2523,11 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         # C36/C48 behaviour; set LEGOESM_AH_SCALE=10.0 at C72.
         _ah_scale = float(os.environ.get("LEGOESM_AH_SCALE", "1.0"))
         ah = ah * _ah_scale
-        # FV3_3D iter 41: print a stability tip at C72+ when the
-        # user has NOT set LEGOESM_AH_SCALE — the iter-33 finding
-        # showed default A_h NaNs at C72 (~13 days into the 30-day
-        # HS spin-up).  Recommend ah_scale=2.0 at C48, 10.0 at C72.
+        # FV3_3D iter 41/42: print a stability or quality tip when
+        # the user has NOT set a sufficient LEGOESM_AH_SCALE.
+        #   C72+: stability tip — default A_h NaNs ~day 13 (iter-33).
+        #   C48:  quality tip — default A_h has 2x worse mid_std
+        #         vs ah_scale=2 (iter-37 sweet spot).
         if n >= 72 and _ah_scale < 5.0:
             print(
                 f"[FV3_3D iter 41 stability tip] At C{n} the matrix "
@@ -2534,6 +2535,15 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
                 f"will likely NaN around day 13.  Recommended: set "
                 f"LEGOESM_AH_SCALE=10.0 (or use _laplacian_visc_cube_v2(n) "
                 f"directly) per FV3_3D.md iter 33-39.",
+                flush=True,
+            )
+        elif n >= 48 and n < 72 and _ah_scale < 1.5:
+            print(
+                f"[FV3_3D iter 42 quality tip] At C{n} the matrix "
+                f"default A_h={ah:.2e} is stable but produces "
+                f"~2x larger cube imprint than ah_scale=2.  Optional: "
+                f"set LEGOESM_AH_SCALE=2.0 for sweet-spot climatology "
+                f"per FV3_3D.md iter 37.",
                 flush=True,
             )
         dt = 200.0
@@ -3011,10 +3021,11 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         # C36/C48 behaviour; set LEGOESM_AH_SCALE=10.0 at C72.
         _ah_scale = float(os.environ.get("LEGOESM_AH_SCALE", "1.0"))
         ah = ah * _ah_scale
-        # FV3_3D iter 41: print a stability tip at C72+ when the
-        # user has NOT set LEGOESM_AH_SCALE — the iter-33 finding
-        # showed default A_h NaNs at C72 (~13 days into the 30-day
-        # HS spin-up).  Recommend ah_scale=2.0 at C48, 10.0 at C72.
+        # FV3_3D iter 41/42: print a stability or quality tip when
+        # the user has NOT set a sufficient LEGOESM_AH_SCALE.
+        #   C72+: stability tip — default A_h NaNs ~day 13 (iter-33).
+        #   C48:  quality tip — default A_h has 2x worse mid_std
+        #         vs ah_scale=2 (iter-37 sweet spot).
         if n >= 72 and _ah_scale < 5.0:
             print(
                 f"[FV3_3D iter 41 stability tip] At C{n} the matrix "
@@ -3022,6 +3033,15 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
                 f"will likely NaN around day 13.  Recommended: set "
                 f"LEGOESM_AH_SCALE=10.0 (or use _laplacian_visc_cube_v2(n) "
                 f"directly) per FV3_3D.md iter 33-39.",
+                flush=True,
+            )
+        elif n >= 48 and n < 72 and _ah_scale < 1.5:
+            print(
+                f"[FV3_3D iter 42 quality tip] At C{n} the matrix "
+                f"default A_h={ah:.2e} is stable but produces "
+                f"~2x larger cube imprint than ah_scale=2.  Optional: "
+                f"set LEGOESM_AH_SCALE=2.0 for sweet-spot climatology "
+                f"per FV3_3D.md iter 37.",
                 flush=True,
             )
         dt = 200.0
@@ -3610,10 +3630,11 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         # C36/C48 behaviour; set LEGOESM_AH_SCALE=10.0 at C72.
         _ah_scale = float(os.environ.get("LEGOESM_AH_SCALE", "1.0"))
         ah = ah * _ah_scale
-        # FV3_3D iter 41: print a stability tip at C72+ when the
-        # user has NOT set LEGOESM_AH_SCALE — the iter-33 finding
-        # showed default A_h NaNs at C72 (~13 days into the 30-day
-        # HS spin-up).  Recommend ah_scale=2.0 at C48, 10.0 at C72.
+        # FV3_3D iter 41/42: print a stability or quality tip when
+        # the user has NOT set a sufficient LEGOESM_AH_SCALE.
+        #   C72+: stability tip — default A_h NaNs ~day 13 (iter-33).
+        #   C48:  quality tip — default A_h has 2x worse mid_std
+        #         vs ah_scale=2 (iter-37 sweet spot).
         if n >= 72 and _ah_scale < 5.0:
             print(
                 f"[FV3_3D iter 41 stability tip] At C{n} the matrix "
@@ -3621,6 +3642,15 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
                 f"will likely NaN around day 13.  Recommended: set "
                 f"LEGOESM_AH_SCALE=10.0 (or use _laplacian_visc_cube_v2(n) "
                 f"directly) per FV3_3D.md iter 33-39.",
+                flush=True,
+            )
+        elif n >= 48 and n < 72 and _ah_scale < 1.5:
+            print(
+                f"[FV3_3D iter 42 quality tip] At C{n} the matrix "
+                f"default A_h={ah:.2e} is stable but produces "
+                f"~2x larger cube imprint than ah_scale=2.  Optional: "
+                f"set LEGOESM_AH_SCALE=2.0 for sweet-spot climatology "
+                f"per FV3_3D.md iter 37.",
                 flush=True,
             )
         dt = 300.0
