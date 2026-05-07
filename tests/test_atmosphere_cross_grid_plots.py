@@ -2149,6 +2149,47 @@ class TestHeldSuarezDissipationImbalance:
                 f"{v2_values[i]:.3e}."
             )
 
+    def test_auto_ah_scale_resolution_buckets(self):
+        """iter 43/44: auto-apply returns the recommended scale per
+        resolution bucket.  Pin the iter-33/37 thresholds.
+        """
+        # No env override — auto-apply per resolution.
+        # C36 → 1.0 (no change).
+        scale_36, msg_36 = M._auto_ah_scale(36, None)
+        assert scale_36 == 1.0
+        assert msg_36 is None, "C36 should NOT print an auto-apply message"
+
+        # C48 → 2.0.
+        scale_48, msg_48 = M._auto_ah_scale(48, None)
+        assert scale_48 == 2.0
+        assert msg_48 is not None and "iter-37" in msg_48
+
+        # C72 → 10.0.
+        scale_72, msg_72 = M._auto_ah_scale(72, None)
+        assert scale_72 == 10.0
+        assert msg_72 is not None and "iter-33" in msg_72
+
+        # C96 → 10.0 (continues iter-33 bucket).
+        scale_96, msg_96 = M._auto_ah_scale(96, None)
+        assert scale_96 == 10.0
+
+    def test_auto_ah_scale_explicit_override(self):
+        """iter 43/44: explicit env var overrides the auto-apply."""
+        # Even at C72 where auto would give 10.0, explicit env var wins.
+        scale, msg = M._auto_ah_scale(72, "1.0")
+        assert scale == 1.0
+        assert msg is None, "explicit override should NOT print message"
+
+        # Explicit scale=20 (above auto bucket).
+        scale, msg = M._auto_ah_scale(72, "20.0")
+        assert scale == 20.0
+        assert msg is None
+
+        # Explicit scale=1.0 at C36 — same as auto.
+        scale, msg = M._auto_ah_scale(36, "1.0")
+        assert scale == 1.0
+        assert msg is None
+
     def test_laplacian_visc_cube_v2_extrapolation_powerlaw(self):
         """iter 39: the v2 log-linear extrapolation should produce
         ``A_h ∝ n^2.32`` between C36 and C72.  Pin the slope.

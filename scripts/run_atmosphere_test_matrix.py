@@ -519,6 +519,38 @@ def _laplacian_visc_cube(n: int, frac: float = 0.05) -> float:
     return frac * c_gw * dx
 
 
+def _auto_ah_scale(n: int, env_value: str | None = None) -> tuple[float, str | None]:
+    """Resolve the iter-43 ``LEGOESM_AH_SCALE`` auto-apply for cube res ``n``.
+
+    Returns ``(scale, message_or_none)``.  ``message`` is non-None when
+    the auto-apply fires (so the matrix can ``print`` it once).
+
+    Auto-apply rules (when ``env_value`` is None):
+    -   n  <  48  → scale=1.0 (no change, iter-19 default)
+    -   n  ∈ [48, 72) → scale=2.0 (iter-37 sweet spot)
+    -   n  >= 72  → scale=10.0 (iter-33 stability fix)
+
+    When ``env_value`` is provided (string), it is parsed as a float
+    and used unchanged — this is the explicit-override path.
+
+    See ``FV3_3D.md`` iter 33-43 for the calibration history.
+    """
+    if env_value is not None:
+        return float(env_value), None
+    if n >= 72:
+        return 10.0, (
+            f"[FV3_3D iter 43 auto] At C{n} auto-applying "
+            f"LEGOESM_AH_SCALE=10 (iter-33).  Set env var to override."
+        )
+    if n >= 48:
+        return 2.0, (
+            f"[FV3_3D iter 43 auto] At C{n} auto-applying "
+            f"LEGOESM_AH_SCALE=2 (iter-37 sweet spot).  Set env var "
+            f"to override."
+        )
+    return 1.0, None
+
+
 def _laplacian_visc_cube_v2(n: int) -> float:
     """Empirically calibrated Laplacian viscosity for cubed-sphere
     HS hybrid path (iter 33-37).
@@ -2521,31 +2553,13 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         # is INSUFFICIENT at C72+ (iter 33 found C72 NaN at default
         # A_h but stable at 10x).  Default 1.0 preserves iter-17/24
         # C36/C48 behaviour; set LEGOESM_AH_SCALE=10.0 at C72.
-        # FV3_3D iter 43: auto-apply resolution-dependent A_h scale
-        # when LEGOESM_AH_SCALE is unset, based on iter-33 (C72) and
-        # iter-37 (C48) findings.  Explicit env var overrides.
-        _ah_scale_env = os.environ.get("LEGOESM_AH_SCALE")
-        if _ah_scale_env is None:
-            if n >= 72:
-                _ah_scale = 10.0
-                print(
-                    f"[FV3_3D iter 43 auto] At C{n} auto-applying "
-                    f"LEGOESM_AH_SCALE=10 (iter-33).  Set env var to "
-                    f"override.",
-                    flush=True,
-                )
-            elif n >= 48:
-                _ah_scale = 2.0
-                print(
-                    f"[FV3_3D iter 43 auto] At C{n} auto-applying "
-                    f"LEGOESM_AH_SCALE=2 (iter-37 sweet spot).  Set "
-                    f"env var to override.",
-                    flush=True,
-                )
-            else:
-                _ah_scale = 1.0
-        else:
-            _ah_scale = float(_ah_scale_env)
+        # FV3_3D iter 43/44: auto-apply resolution-dependent A_h
+        # scale via _auto_ah_scale helper.  Explicit env var overrides.
+        _ah_scale, _ah_msg = _auto_ah_scale(
+            n, os.environ.get("LEGOESM_AH_SCALE"),
+        )
+        if _ah_msg is not None:
+            print(_ah_msg, flush=True)
         ah = ah * _ah_scale
         dt = 200.0
         # Iter-15 NOTE on the cubed-sphere upper-atmosphere sponge:
@@ -3020,31 +3034,13 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         # is INSUFFICIENT at C72+ (iter 33 found C72 NaN at default
         # A_h but stable at 10x).  Default 1.0 preserves iter-17/24
         # C36/C48 behaviour; set LEGOESM_AH_SCALE=10.0 at C72.
-        # FV3_3D iter 43: auto-apply resolution-dependent A_h scale
-        # when LEGOESM_AH_SCALE is unset, based on iter-33 (C72) and
-        # iter-37 (C48) findings.  Explicit env var overrides.
-        _ah_scale_env = os.environ.get("LEGOESM_AH_SCALE")
-        if _ah_scale_env is None:
-            if n >= 72:
-                _ah_scale = 10.0
-                print(
-                    f"[FV3_3D iter 43 auto] At C{n} auto-applying "
-                    f"LEGOESM_AH_SCALE=10 (iter-33).  Set env var to "
-                    f"override.",
-                    flush=True,
-                )
-            elif n >= 48:
-                _ah_scale = 2.0
-                print(
-                    f"[FV3_3D iter 43 auto] At C{n} auto-applying "
-                    f"LEGOESM_AH_SCALE=2 (iter-37 sweet spot).  Set "
-                    f"env var to override.",
-                    flush=True,
-                )
-            else:
-                _ah_scale = 1.0
-        else:
-            _ah_scale = float(_ah_scale_env)
+        # FV3_3D iter 43/44: auto-apply resolution-dependent A_h
+        # scale via _auto_ah_scale helper.  Explicit env var overrides.
+        _ah_scale, _ah_msg = _auto_ah_scale(
+            n, os.environ.get("LEGOESM_AH_SCALE"),
+        )
+        if _ah_msg is not None:
+            print(_ah_msg, flush=True)
         ah = ah * _ah_scale
         dt = 200.0
         config = PrimitiveEquationConfig(
@@ -3630,31 +3626,13 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         # is INSUFFICIENT at C72+ (iter 33 found C72 NaN at default
         # A_h but stable at 10x).  Default 1.0 preserves iter-17/24
         # C36/C48 behaviour; set LEGOESM_AH_SCALE=10.0 at C72.
-        # FV3_3D iter 43: auto-apply resolution-dependent A_h scale
-        # when LEGOESM_AH_SCALE is unset, based on iter-33 (C72) and
-        # iter-37 (C48) findings.  Explicit env var overrides.
-        _ah_scale_env = os.environ.get("LEGOESM_AH_SCALE")
-        if _ah_scale_env is None:
-            if n >= 72:
-                _ah_scale = 10.0
-                print(
-                    f"[FV3_3D iter 43 auto] At C{n} auto-applying "
-                    f"LEGOESM_AH_SCALE=10 (iter-33).  Set env var to "
-                    f"override.",
-                    flush=True,
-                )
-            elif n >= 48:
-                _ah_scale = 2.0
-                print(
-                    f"[FV3_3D iter 43 auto] At C{n} auto-applying "
-                    f"LEGOESM_AH_SCALE=2 (iter-37 sweet spot).  Set "
-                    f"env var to override.",
-                    flush=True,
-                )
-            else:
-                _ah_scale = 1.0
-        else:
-            _ah_scale = float(_ah_scale_env)
+        # FV3_3D iter 43/44: auto-apply resolution-dependent A_h
+        # scale via _auto_ah_scale helper.  Explicit env var overrides.
+        _ah_scale, _ah_msg = _auto_ah_scale(
+            n, os.environ.get("LEGOESM_AH_SCALE"),
+        )
+        if _ah_msg is not None:
+            print(_ah_msg, flush=True)
         ah = ah * _ah_scale
         dt = 300.0
         config = PrimitiveEquationConfig(
