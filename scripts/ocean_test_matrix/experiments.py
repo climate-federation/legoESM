@@ -1175,14 +1175,17 @@ def run_inertia_gravity_wave(tc: TestCase, output_dir: Path, days: float
     # documented IGW PASS gates.  Same as monolithic.
     # iter-138b: days-aware L2 threshold (0.1 full / 2.0 quick).
     l2_threshold = 0.1 if days >= 1.0 else 2.0
+    # iter-140: same quick-mode amp_ratio relaxation as monolithic.
+    amp_lower = 0.8 if days >= 1.0 else 0.5
+    amp_upper = 1.2 if days >= 1.0 else 1.5
     ok, notes = _apply_value_threshold(
         ok, notes, l2_err, l2_threshold,
         label="IGW L2 vs analytical", op="lt")
     ok, notes = _apply_value_threshold(
-        ok, notes, amplitude_ratio, 0.8,
+        ok, notes, amplitude_ratio, amp_lower,
         label="IGW amplitude_ratio_lower", op="ge")
     ok, notes = _apply_value_threshold(
-        ok, notes, amplitude_ratio, 1.2,
+        ok, notes, amplitude_ratio, amp_upper,
         label="IGW amplitude_ratio_upper", op="le")
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)

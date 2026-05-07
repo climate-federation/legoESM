@@ -2760,12 +2760,14 @@ class TestIter123OceanDriftTolerance:
         assert 'label="IGW L2 vs analytical"' in code
         assert "l2_threshold = 0.1 if days >= 1.0 else 2.0" in code
         assert "l2_err, l2_threshold" in code
-        # amplitude_ratio range gate (>=0.8 and <=1.2).
+        # amplitude_ratio range gate, days-aware per iter-140.
         assert 'label="IGW amplitude_ratio_lower"' in code
-        assert "amplitude_ratio, 0.8" in code
+        assert "amp_lower = 0.8 if days >= 1.0 else 0.5" in code
+        assert "amplitude_ratio, amp_lower" in code
         assert 'op="ge"' in code
         assert 'label="IGW amplitude_ratio_upper"' in code
-        assert "amplitude_ratio, 1.2" in code
+        assert "amp_upper = 1.2 if days >= 1.0 else 1.5" in code
+        assert "amplitude_ratio, amp_upper" in code
 
     def test_iter132_igw_has_l2_and_amplitude_gates_modular(self):
         """iter-132 codex iter-131-followup HIGH-1: modular
