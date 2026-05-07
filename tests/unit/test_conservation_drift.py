@@ -280,6 +280,59 @@ class TestNonFiniteValueInputs:
             "output array.")
 
 
+class TestIter176SingleSampleNonFinite:
+    """iter-176 (codex iter-176 review MEDIUM-1): single-sample
+    non-finite series must return NaN, not 0.0.
+
+    Pre-iter-176 contract:
+        compute_relative_drift([nan]) -> 0.0   # WRONG silent pass
+        compute_relative_drift([inf]) -> 0.0   # WRONG silent pass
+
+    The bug was ordering — the ``len(values) < 2: return 0.0``
+    early-return ran BEFORE the all-finite check, so any non-
+    finite single-sample input got the "no-drift-to-compute"
+    path instead of being surfaced as NaN.
+
+    Post-iter-176 contract:
+        compute_relative_drift([nan]) -> NaN
+        compute_relative_drift([inf]) -> NaN
+        compute_relative_drift([])    -> 0.0  (empty stays as is)
+        compute_relative_drift([1.0]) -> 0.0  (finite single-sample
+                                              still returns 0.0
+                                              — no series to compare)
+
+    Impact: a truncated/degraded run with only one non-finite
+    diagnostic sample (e.g. blow-up at step 0 with no further
+    samples collected) was reported as ``drift=0.0`` and PASSED
+    downstream gating.  This was a real silent-pass.
+    """
+
+    def test_single_nan_returns_nan(self):
+        result = compute_relative_drift([float("nan")])
+        assert result != result  # NaN != NaN
+
+    def test_single_inf_returns_nan(self):
+        result = compute_relative_drift([float("inf")])
+        assert result != result  # NaN
+
+    def test_single_neg_inf_returns_nan(self):
+        result = compute_relative_drift([float("-inf")])
+        assert result != result  # NaN
+
+    def test_single_finite_returns_zero(self):
+        # iter-176 must NOT regress the finite single-sample case
+        # — that one still returns 0.0 (no drift to compute when
+        # there's only one sample).
+        result = compute_relative_drift([1.0e19])
+        assert result == 0.0
+
+    def test_empty_still_returns_zero(self):
+        # iter-176 preserves the empty-series contract: 0.0
+        # (nothing to be non-finite about).
+        result = compute_relative_drift([])
+        assert result == 0.0
+
+
 class TestEmptyArrayAliasing:
     """iter-90 codex LOW-6: ``relative_drift_series([])`` must
     return a fresh empty array — not the same object as

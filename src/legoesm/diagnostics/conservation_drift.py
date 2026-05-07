@@ -123,7 +123,27 @@ def compute_relative_drift(
     ``min_baseline`` floor.
     """
     _validate_min_baseline(min_baseline)
-    if len(values) < 2:
+    # iter-176 (codex iter-176 review MEDIUM-1): convert to array
+    # and check finiteness BEFORE the ``len < 2`` early return.
+    # Previously the order was:
+    #   1. ``_validate_min_baseline``
+    #   2. ``if len(values) < 2: return 0.0``  (early)
+    #   3. Convert to array
+    #   4. ``np.all(np.isfinite(arr))`` check
+    # This left a silent-pass hole for single-sample non-finite
+    # series: ``compute_relative_drift([nan])`` or ``[inf]``
+    # would early-return 0.0 (the "no drift to compute" path)
+    # without ever touching the finite-check, so a truncated /
+    # degraded run with only one non-finite diagnostic could be
+    # reported as stable instead of failed.  Codex iter-176 flagged
+    # this as a no-ship for callers that do not also pass
+    # ``n_samples`` to ``apply_drift_tolerance``.
+    #
+    # Fix: do the np.asarray + isfinite check FIRST, so a
+    # non-finite sample produces NaN regardless of series length.
+    # Empty series (``len == 0``) still returns 0.0 since there
+    # is nothing to be non-finite about.
+    if len(values) == 0:
         return 0.0
     arr = np.asarray(values, dtype=np.float64)
     # iter-152 (codex iter-151 review HIGH-1): if ANY sample
@@ -135,6 +155,8 @@ def compute_relative_drift(
     # unstable mid-run.  This was a real silent-pass failure mode.
     if not np.all(np.isfinite(arr)):
         return float("nan")
+    if len(arr) < 2:
+        return 0.0
     denom = max(abs(float(arr[0])), float(min_baseline))
     return float(abs(arr[-1] - arr[0]) / denom)
 
