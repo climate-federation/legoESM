@@ -2190,6 +2190,31 @@ class TestHeldSuarezDissipationImbalance:
         assert scale == 1.0
         assert msg is None
 
+    def test_auto_ah_scale_auto_disable_opt_out(self):
+        """iter 46: auto_disable=True returns scale=1.0 with no
+        message regardless of n.  This is the backwards-compat
+        escape hatch (codex iter-45 review).
+        """
+        # At C72 with auto_disable=True, scale=1.0 (NOT 10.0).
+        scale, msg = M._auto_ah_scale(72, env_value=None, auto_disable=True)
+        assert scale == 1.0
+        assert msg is None, "auto_disable should NOT print a message"
+
+        # At C48 with auto_disable=True, scale=1.0 (NOT 2.0).
+        scale, msg = M._auto_ah_scale(48, env_value=None, auto_disable=True)
+        assert scale == 1.0
+        assert msg is None
+
+        # At C36 with auto_disable=True, scale=1.0 (same as default).
+        scale, msg = M._auto_ah_scale(36, env_value=None, auto_disable=True)
+        assert scale == 1.0
+        assert msg is None
+
+        # Explicit env_value still wins even with auto_disable=True.
+        scale, msg = M._auto_ah_scale(72, env_value="5.0", auto_disable=True)
+        assert scale == 5.0
+        assert msg is None
+
     def test_auto_ah_scale_edge_cases(self):
         """iter 45 codex review: edge-case handling for env_value."""
         import pytest as _pytest

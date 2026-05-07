@@ -519,13 +519,18 @@ def _laplacian_visc_cube(n: int, frac: float = 0.05) -> float:
     return frac * c_gw * dx
 
 
-def _auto_ah_scale(n: int, env_value: str | None = None) -> tuple[float, str | None]:
+def _auto_ah_scale(
+    n: int,
+    env_value: str | None = None,
+    auto_disable: bool = False,
+) -> tuple[float, str | None]:
     """Resolve the iter-43 ``LEGOESM_AH_SCALE`` auto-apply for cube res ``n``.
 
     Returns ``(scale, message_or_none)``.  ``message`` is non-None when
     the auto-apply fires (so the matrix can ``print`` it once).
 
-    Auto-apply rules (when ``env_value`` is None or empty string):
+    Auto-apply rules (when ``env_value`` is None or empty string AND
+    ``auto_disable`` is False):
     -   n  <  48  → scale=1.0 (no change, iter-19 default)
     -   n  ∈ [48, 72) → scale=2.0 (iter-37 sweet spot, EXTRAPOLATED
         from C48 stability data — C60 is inferred, not directly
@@ -538,7 +543,13 @@ def _auto_ah_scale(n: int, env_value: str | None = None) -> tuple[float, str | N
     override path.  Validation: must be finite positive; 0, NaN,
     inf, and negative values raise ``ValueError``.
 
-    See ``FV3_3D.md`` iter 33-45 for the calibration history.
+    When ``auto_disable=True`` AND env_value is unset, returns
+    scale=1.0 with no message regardless of ``n``.  This is the
+    iter-46 escape hatch (controlled by ``LEGOESM_AH_AUTO_DISABLE``
+    env var) for users who want pre-iter-43 baseline behavior
+    (e.g., regression tests that expect C72 to NaN at default A_h).
+
+    See ``FV3_3D.md`` iter 33-46 for the calibration history.
     """
     import math
     # iter-45 codex feedback: treat '' (empty env var) as unset.
@@ -552,6 +563,10 @@ def _auto_ah_scale(n: int, env_value: str | None = None) -> tuple[float, str | N
                 f"env var to use the iter-43 auto-apply default."
             )
         return scale, None
+    # iter-46 codex feedback: auto-disable escape hatch for
+    # backwards-compat with pre-iter-43 baseline expectations.
+    if auto_disable:
+        return 1.0, None
     if n >= 72:
         return 10.0, (
             f"[FV3_3D iter 43 auto] At C{n} auto-applying "
@@ -2568,10 +2583,17 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         # is INSUFFICIENT at C72+ (iter 33 found C72 NaN at default
         # A_h but stable at 10x).  Default 1.0 preserves iter-17/24
         # C36/C48 behaviour; set LEGOESM_AH_SCALE=10.0 at C72.
-        # FV3_3D iter 43/44: auto-apply resolution-dependent A_h
-        # scale via _auto_ah_scale helper.  Explicit env var overrides.
+        # FV3_3D iter 43/44/46: auto-apply resolution-dependent A_h
+        # scale via _auto_ah_scale helper.  Explicit env var overrides;
+        # LEGOESM_AH_AUTO_DISABLE=1 disables the auto-apply entirely
+        # (iter-46 codex backwards-compat opt-out).
+        _ah_auto_disable = (
+            os.environ.get("LEGOESM_AH_AUTO_DISABLE", "0").strip().lower()
+            in ("1", "true", "yes", "on")
+        )
         _ah_scale, _ah_msg = _auto_ah_scale(
             n, os.environ.get("LEGOESM_AH_SCALE"),
+            auto_disable=_ah_auto_disable,
         )
         if _ah_msg is not None:
             print(_ah_msg, flush=True)
@@ -3049,10 +3071,17 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         # is INSUFFICIENT at C72+ (iter 33 found C72 NaN at default
         # A_h but stable at 10x).  Default 1.0 preserves iter-17/24
         # C36/C48 behaviour; set LEGOESM_AH_SCALE=10.0 at C72.
-        # FV3_3D iter 43/44: auto-apply resolution-dependent A_h
-        # scale via _auto_ah_scale helper.  Explicit env var overrides.
+        # FV3_3D iter 43/44/46: auto-apply resolution-dependent A_h
+        # scale via _auto_ah_scale helper.  Explicit env var overrides;
+        # LEGOESM_AH_AUTO_DISABLE=1 disables the auto-apply entirely
+        # (iter-46 codex backwards-compat opt-out).
+        _ah_auto_disable = (
+            os.environ.get("LEGOESM_AH_AUTO_DISABLE", "0").strip().lower()
+            in ("1", "true", "yes", "on")
+        )
         _ah_scale, _ah_msg = _auto_ah_scale(
             n, os.environ.get("LEGOESM_AH_SCALE"),
+            auto_disable=_ah_auto_disable,
         )
         if _ah_msg is not None:
             print(_ah_msg, flush=True)
@@ -3641,10 +3670,17 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         # is INSUFFICIENT at C72+ (iter 33 found C72 NaN at default
         # A_h but stable at 10x).  Default 1.0 preserves iter-17/24
         # C36/C48 behaviour; set LEGOESM_AH_SCALE=10.0 at C72.
-        # FV3_3D iter 43/44: auto-apply resolution-dependent A_h
-        # scale via _auto_ah_scale helper.  Explicit env var overrides.
+        # FV3_3D iter 43/44/46: auto-apply resolution-dependent A_h
+        # scale via _auto_ah_scale helper.  Explicit env var overrides;
+        # LEGOESM_AH_AUTO_DISABLE=1 disables the auto-apply entirely
+        # (iter-46 codex backwards-compat opt-out).
+        _ah_auto_disable = (
+            os.environ.get("LEGOESM_AH_AUTO_DISABLE", "0").strip().lower()
+            in ("1", "true", "yes", "on")
+        )
         _ah_scale, _ah_msg = _auto_ah_scale(
             n, os.environ.get("LEGOESM_AH_SCALE"),
+            auto_disable=_ah_auto_disable,
         )
         if _ah_msg is not None:
             print(_ah_msg, flush=True)
