@@ -11,6 +11,27 @@ visible cube imprint (concentric blobs at face centres bordered by
 red/blue rings at panel boundaries) in u/v wind snapshots from
 Held-Suarez and baroclinic test cases.
 
+## Table of Contents (iter 53)
+
+This document tracks 50+ investigation iterations.  For most users
+the relevant sections are at the top; the iteration log preserves
+the diagnostic chain for future maintainers.
+
+- [**Investigation summary**](#investigation-summary-iter-51-codex-meta-review-consolidation) — two-mechanism story (corner-divergence damping vs Laplacian viscosity calibration), open generalization gap.
+- [**Quick Reference**](#quick-reference-iter-38-summary) — production setting per resolution, env vars, recommended invocations.
+- [**Reference oracle**](#reference-oracle-read-only-never-modify) — pointer into the FV3 Fortran source for FV3-fidelity work.
+
+Key iterations:
+- Iter 18: FV3 nord>0 implementation
+- Iter 19-25: C36/C48 production validation
+- Iter 26-32: C72 instability investigation (7-step elimination)
+- Iter 33: BREAKTHROUGH — 10x A_h stabilises C72
+- Iter 34-46: env vars, helpers, auto-apply, escape hatches
+- Iter 48-52: e2e validation, codex review iterations, regression tests
+- Iter 51: codex meta-review insights (open generalization gap)
+
+The full iteration log follows.
+
 ## Investigation summary (iter 51 codex meta-review consolidation)
 
 The FV3_3D investigation has produced **two complementary
