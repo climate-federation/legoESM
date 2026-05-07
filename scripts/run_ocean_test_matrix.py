@@ -3165,13 +3165,25 @@ def run_barotropic_wave(tc: TestCase, output_dir: Path, days: float
     n_eta = len(max_eta_series)
     if n_eta >= 2:
         max_eta_arr = np.asarray(max_eta_series, dtype=np.float64)
+        # iter-134 (self-review): denominator = max amplitude over
+        # the FIRST 20% of samples, where the Gaussian peak is
+        # well-sampled before dispersion damps it.
         eta_initial = float(np.nanmax(np.abs(max_eta_arr[:max(1, n_eta // 5)])))
         eta_final = float(abs(max_eta_arr[-1]))
         if eta_initial > 1e-12 and np.isfinite(eta_final):
             eta_conservation = eta_final / eta_initial
         else:
             eta_conservation = float("nan")
-        min_final_amplitude = eta_final
+        # iter-134 (self-review): ``min_final_amplitude`` was
+        # incorrectly using only ``eta_final`` (the last
+        # sample's max|eta|).  The doc threshold
+        # ``min_final_amplitude > 0.1 m`` means the wave
+        # amplitude must NOT damp out — the right metric is
+        # the MINIMUM max|eta| across the FINAL 20% of samples
+        # (the post-dispersion regime), so a transient dip
+        # below 0.1 m correctly fails.
+        final_window = max_eta_arr[-max(1, n_eta // 5):]
+        min_final_amplitude = float(np.nanmin(np.abs(final_window)))
     else:
         eta_conservation = float("nan")
         min_final_amplitude = float("nan")

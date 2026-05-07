@@ -2946,6 +2946,99 @@ class TestIter123OceanDriftTolerance:
             assert 'label="eta_drift_absolute"' in code
             assert "eta_drift), 1e-3" in code
 
+    # ====== iter-134: self-review barotropic gate semantics ======
+
+    def test_iter134_min_final_amplitude_uses_window_min(self):
+        """iter-134 self-review fix: ``min_final_amplitude``
+        should be the MIN max|eta| across the final 20% of
+        samples, not just the last sample.  This catches
+        transient damping that the last-sample-only check
+        would miss.
+        """
+        from pathlib import Path
+        for rel in (
+            "scripts/run_ocean_test_matrix.py",
+            "scripts/ocean_test_matrix/experiments.py",
+        ):
+            text = (Path(__file__).resolve().parent.parent
+                    / rel).read_text()
+            import re
+            m = re.search(
+                r"def run_barotropic_wave\b"
+                r".*?(?=\ndef \w|\nRUNNERS)",
+                text, re.DOTALL,
+            )
+            assert m is not None
+            body = m.group(0)
+            # Must compute ``final_window`` and use np.nanmin.
+            assert "final_window" in body
+            assert "np.nanmin" in body
+            assert "n_eta // 5" in body, (
+                f"iter-134: {rel}: barotropic_wave must use "
+                f"a window of size n_eta // 5 (~20%) for the "
+                f"final-amplitude diagnostic.")
+            # Must NOT use the buggy iter-133 form
+            # ``min_final_amplitude = eta_final``.
+            code_lines = [
+                line for line in body.splitlines()
+                if not line.lstrip().startswith("#")
+            ]
+            code_only = "\n".join(code_lines)
+            assert "min_final_amplitude = eta_final" not in code_only, (
+                f"iter-134: {rel}: barotropic_wave must NOT "
+                f"use the buggy iter-133 form "
+                f"min_final_amplitude = eta_final.  Use the "
+                f"window-min instead.")
+
+    def test_iter134_barotropic_wave_window_behavior(self):
+        """iter-134 behavior test: the window-min logic
+        correctly catches a wave that damps then recovers.
+
+        Simulates a max_eta_series like [1.0, 0.5, 0.3, 0.05, 0.15]:
+        last sample is 0.15 (would PASS the > 0.1 gate), but the
+        min over the final 20% (1 sample = 0.15) — wait,
+        with n=5, n//5=1, so window=[0.15], min=0.15, PASSES.
+
+        Use a longer series: [1.0, 0.8, 0.6, 0.4, 0.3, 0.2,
+        0.15, 0.05, 0.12, 0.18] (n=10, window=[0.18, 0.12,
+        0.05, 0.18][last 2]=0.05 — that's the bug demo).
+        """
+        import numpy as np
+        # n=10, n//5=2, so the final window is the last 2 samples.
+        max_eta_series = [1.0, 0.8, 0.6, 0.4, 0.3, 0.2,
+                          0.15, 0.05, 0.12, 0.18]
+        n = len(max_eta_series)
+        arr = np.asarray(max_eta_series)
+        final_window = arr[-max(1, n // 5):]
+        # The min over the last 2 samples [0.12, 0.18] is 0.12.
+        min_final_amplitude = float(np.nanmin(np.abs(final_window)))
+        assert min_final_amplitude == 0.12
+        # If we'd used eta_final only (= 0.18), it would PASS
+        # the > 0.1 gate trivially.  The window-min still
+        # PASSES at 0.12 here, but a deeper transient would
+        # correctly fail.
+
+        # Demonstration: a series where last sample passes
+        # but final-window min fails:
+        max_eta_series2 = [1.0, 0.8, 0.6, 0.4, 0.3, 0.2,
+                           0.15, 0.05, 0.05, 0.15]
+        arr2 = np.asarray(max_eta_series2)
+        n2 = len(arr2)
+        final_window2 = arr2[-max(1, n2 // 5):]
+        # Last 2 samples: [0.05, 0.15], min=0.05
+        min_amp2 = float(np.nanmin(np.abs(final_window2)))
+        assert min_amp2 == 0.05
+        # With the gate threshold of 0.1, this run FAILS as it
+        # should — but the iter-133 last-sample-only check
+        # would have PASSED (0.15 > 0.1).
+        from legoesm.diagnostics import apply_value_threshold
+        ok, notes = apply_value_threshold(
+            ok=True, notes="", value=min_amp2, threshold=0.1,
+            label="min_final_amplitude", op="ge", units="m",
+            n_samples=n2)
+        assert ok is False
+        assert "0.05" in notes
+
     def test_iter128_geostrophic_doc_documents_tighter_gate(self):
         """iter-128 codex iter-127-followup MEDIUM-1: the doc
         threshold of 1e-3 is the loose contract; the runner uses
