@@ -3678,6 +3678,71 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
 
+## Iteration 60 (2026-05-07): Smagorinsky alone does NOT stabilise C72
+
+### Goal
+
+Test whether the iter-58 Smagorinsky-style adaptive A_h closure
+alone (with matrix-default A_h, NO LEGOESM_AH_SCALE=10) stabilises
+C72 30d.  This addresses codex's iter-51 "open generalization gap":
+is the iter-33 10x A_h a case calibration, or does Smagorinsky
+generalise it?
+
+### Scan results (HS C72 hybrid 30 day, default A_h + d4=0.02 nord=1)
+
+| label                       | result                            |
+|:----------------------------|:----------------------------------|
+| smag_cs=0.0 (iter 26 baseline) | NaN at step 5732 (~13.27 d)    |
+| smag_cs=0.2 (typical FV3)      | NaN at step 5746 (~13.30 d)    |
+| smag_cs=0.4 (aggressive)       | NaN at step 5757 (~13.32 d)    |
+
+### Conclusion: Smagorinsky alone INSUFFICIENT for C72
+
+All three Smagorinsky values produce NaN within ~25 steps of the
+baseline.  Even ``cs = 0.4`` only delays the NaN by ~0.05 days.
+
+**Why Smagorinsky alone fails**: Smagorinsky A_h ∝ ``|D|`` (strain
+magnitude).  The C72 unstable mode is a slow exponential growth
+that does NOT trigger high strain until the very last few steps
+before NaN.  By then the static damping shortfall has already
+let the mode grow unboundedly.
+
+The iter-33 10x A_h works because it provides static damping
+**regardless of flow state** — even at small initial strain.
+
+### Implication for production guidance
+
+Smagorinsky is a **complement**, not a replacement, for the
+LEGOESM_AH_SCALE=10 fix at C72.  The recommended config combines
+both:
+
+```bash
+LEGOESM_AH_SCALE=10.0 \
+LEGOESM_SMAG_CS=0.2 \   # optional adaptive on top
+LEGOESM_CDD_D2BG=0.0005 LEGOESM_CDD_D4BG=0.02 LEGOESM_CDD_NORD=1 \
+  python scripts/run_atmosphere_test_matrix.py --grid cubed_sphere
+```
+
+Smagorinsky may help reduce the static A_h scaling slightly (e.g.,
+LEGOESM_AH_SCALE=5 + LEGOESM_SMAG_CS=0.4 might match LEGOESM_AH_SCALE=10
+alone in stability), but C72 fundamentally needs a static minimum.
+
+### Status
+
+iter 60 closes the codex iter-51 "open generalization gap" with an
+honest empirical answer: **Smagorinsky alone is insufficient at
+C72**.  The iter-33 static A_h scaling remains load-bearing.  This
+is consistent with the iter-32 finding that the unstable mode is
+exponential — a strain-rate-dependent closure cannot catch a mode
+whose strain doesn't manifest until the last few steps.
+
+The Smagorinsky path (iter 57-59) is still useful as an OPTIONAL
+adaptive enhancement on top of static A_h, but does not replace
+the static calibration.
+
+247 tests still pass (no test-level changes; this iter is empirical
+investigation only).
+
 ## Iteration 56 (2026-05-07): comprehensive test sanity check
 
 After 38 cycles of Ralph-loop iteration (iter 18-55), ran the
