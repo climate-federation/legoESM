@@ -2215,6 +2215,44 @@ class TestHeldSuarezDissipationImbalance:
         assert scale == 5.0
         assert msg is None
 
+    def test_iter43_production_guidance_end_to_end(self):
+        """iter 52: end-to-end pin of the iter-43 production
+        guidance.  When the matrix calls
+        ``ah = _laplacian_visc_cube(n) * scale`` with scale from
+        ``_auto_ah_scale(n, env_value=None)``, the resulting ``ah``
+        must match the iter-37/33-verified values:
+
+        | n  | matrix default ah | auto scale | recommended ah |
+        | 36 |   4.08e+06        |  1.0       |  4.08e+06      |
+        | 48 |   3.06e+06        |  2.0       |  6.12e+06      |
+        | 72 |   2.04e+06        | 10.0       |  2.04e+07      |
+
+        These are the LOAD-BEARING production numbers from iter
+        17/24 (C36), iter 37 (C48), iter 33 (C72).  Updating any
+        of them requires retesting the end-to-end stability and
+        cube-imprint metrics.
+        """
+        for n, scale_expected, ah_recommended in [
+            (36,  1.0,  4.08e+06),
+            (48,  2.0,  6.12e+06),
+            (72, 10.0,  2.04e+07),
+        ]:
+            scale, msg = M._auto_ah_scale(n, env_value=None)
+            assert scale == scale_expected, (
+                f"iter-43 auto-apply at C{n}: expected scale "
+                f"{scale_expected}, got {scale}"
+            )
+            ah_default = M._laplacian_visc_cube(n)
+            ah_combined = ah_default * scale
+            # 0.5% relative tolerance to absorb the FV3_3D.md
+            # documentation's rounding to 3 sig figs.
+            assert abs(ah_combined - ah_recommended) / ah_recommended < 0.005, (
+                f"iter-43 end-to-end at C{n}: matrix-default ah * "
+                f"auto-scale = {ah_combined:.3e}, expected "
+                f"{ah_recommended:.3e}.  See iter-17/24 (C36), "
+                f"iter-37 (C48), iter-33 (C72) calibration."
+            )
+
     def test_auto_ah_scale_precedence_explicit_wins(self):
         """iter 49 codex review: pin the precedence ordering.
 
