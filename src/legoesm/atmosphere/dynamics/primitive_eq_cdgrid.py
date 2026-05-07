@@ -235,6 +235,20 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # Order of the post-step vorticity damping (0=del-2, 1=del-4,
         # 2=del-6).  FV3 default is 2 (del-6).  Used only when
         # ``damp_v > 0``.
+    use_fv3_a2b_zeta_corner: bool = False
+        # FV3-faithful 4th-order A→B interpolation for the relative
+        # vorticity ``ζ`` from cell centres to D-grid corners (the
+        # rotational ζ × v term in the momentum tendency).  Reuses the
+        # SW backbone ``_interp_center_to_corner_a2b_ord4`` from
+        # ``operators_cdgrid.py`` (port of FV3 ``a2b_edge.F90:a2b_ord4``
+        # — tensor-product 4th-order Lagrange).  When True, only the
+        # ζ_corner step uses a2b_ord4; T_corner, hybrid_factor and
+        # other corner interpolations stay with the legacy 2nd-order
+        # 4-point average.  Default False preserves the legacy
+        # behaviour.  iter-9 established that swapping ALL corner
+        # interpolations breaks discrete operator balance (max winds
+        # 2.7× larger); iter 14 tests whether a TARGETED swap of
+        # zeta_corner only is stable.
 
 
 # ==============================================================================
@@ -401,8 +415,26 @@ def fv3_hydrostatic_tendencies(
     _div_v_pad = None
 
     # Vorticity interpolated to D-grid corners, absolute vorticity = ζ_corner + f_corner
-    zeta_corner = (_interp_center_to_corner(zeta, cdgrid, padded=_zeta_pad)
-                   + cdgrid.f_corner[..., None])
+    # FV3_3D iter 14: optionally use FV3-faithful 4th-order A→B for
+    # the zeta corner interpolation (SW-backbone reuse).  Default
+    # uses the legacy 2nd-order 4-point average.
+    if config.use_fv3_a2b_zeta_corner:
+        from legoesm.core.operators_cdgrid import (
+            _interp_center_to_corner_a2b_ord4,
+        )
+        # a2b_ord4 takes 3D shape (6, n, n) — vmap over level axis.
+        if zeta.ndim == 4:
+            zeta_corner_relative = jax.vmap(
+                lambda lev: _interp_center_to_corner_a2b_ord4(lev, cdgrid),
+                in_axes=-1, out_axes=-1,
+            )(zeta)
+        else:
+            zeta_corner_relative = _interp_center_to_corner_a2b_ord4(zeta, cdgrid)
+    else:
+        zeta_corner_relative = _interp_center_to_corner(
+            zeta, cdgrid, padded=_zeta_pad,
+        )
+    zeta_corner = zeta_corner_relative + cdgrid.f_corner[..., None]
 
     # --- 7. Bernoulli gradient at D-grid corners (Arakawa-Lamb) ---
     dB_dx, dB_dy_perp = _arakawa_lamb_gradient(B, cdgrid, padded=_B_pad)

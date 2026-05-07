@@ -1440,5 +1440,76 @@ flag.  Test on HS C36 hybrid 30-day in combination with
 ``damp_v = 0.30`` to see if the two FV3-faithful mechanisms compound
 the reduction.
 
+## Iteration 14 (2026-05-07): Targeted a2b_ord4 for zeta_corner — no-op result
+
+### Implementation
+
+Added ``use_fv3_a2b_zeta_corner: bool = False`` to
+``CDGridPrimitiveEquationConfig``.  When True, the zeta_corner
+interpolation in ``fv3_hydrostatic_tendencies`` (used in the
+rotational ζ × v term) uses ``_interp_center_to_corner_a2b_ord4``
+(SW backbone, port of FV3 ``a2b_edge.F90:a2b_ord4``) instead of
+the legacy 2nd-order 4-point average.  All other corner
+interpolations (T_corner harmonic mean, hybrid_factor, lap_uv
+etc.) remain at the legacy 4-point average — unlike iter 9 which
+swapped ALL corner interps and broke the model.
+
+This is a DIRECT source edit, not a monkey-patch, so per iter 11
+it actually applies in the JIT-compiled tendency.
+
+### HS C36 hybrid 30-day results — 2×2 matrix
+
+| use_fv3_a2b_zeta_corner | damp_v | max\|u\| | max\|v\| | mid_max\|v\| | mid_std |
+|-------------------------|-------:|---------:|---------:|-------------:|--------:|
+|       False             |  0.00  |   11.57  |   6.52   |    2.556     |  0.635  |
+|       True              |  0.00  |   11.57  |   6.53   |    2.559     |  0.635  |
+|       False             |  0.30  |   11.02  |   6.10   |    2.118     |  0.529  |
+|       True              |  0.30  |   11.02  |   6.10   |    2.121     |  0.530  |
+
+The targeted a2b_ord4 zeta_corner swap is a **no-op** (within
+rounding) both standalone and in combination with iter-12's
+damp_v=0.30.
+
+### Why a2b_ord4 doesn't help here
+
+Relative vorticity ζ = ∂v/∂x − ∂u/∂y is computed at cell centres
+via the circulation form (``dgrid_vorticity``), and on a smooth
+zonal flow it varies slowly across cube-vertex regions.  The
+2nd-order 4-point average and the 4th-order Lagrange give nearly
+identical values at the cube vertices when the underlying field is
+smooth.
+
+a2b_ord4 would help if ζ had sharp gradients at panel boundaries
+that the 2nd-order interpolation smears — but in HS the ζ
+distribution is smooth (the cube imprint shows up in u, v winds,
+not in ζ_corner directly).
+
+The dominant cube-imprint source remains the A-L gradient of B and
+ln(p_s) at corners (per iter-2 diagnosis), which a2b_ord4 of
+zeta_corner doesn't touch.
+
+### Status
+
+iter 14 wires the toggle (``use_fv3_a2b_zeta_corner``) cleanly with
+proper source-level integration but produces no measurable
+improvement over iter 12.  The toggle is retained for future
+forward-backward path use.
+
+38 atmospheric tests pass with the default config (toggle = False).
+
+### Direction for next iteration
+
+iter 15: try the OPPOSITE targeted swap — use a2b_ord4 for the B
+gradient (KE + Φ) interpolation BUT swap to a more conservative
+formulation that doesn't read corner halos.  This would reduce the
+A-L matrix's halo amplification at panel boundaries.
+
+Alternatively, iter 15+ could investigate the FV3
+``divergence_corner_duo`` (sw_core.F90:2345) — a duo-grid-aware
+corner-divergence variant — for use in the 3D divergence damping
+path.  FV3 uses this when ``flagstruct%duogrid`` is True, and our
+duogrid pathway already exists; it just isn't exercised by the 3D
+HS config.
+
 
 
