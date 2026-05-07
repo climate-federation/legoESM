@@ -3572,6 +3572,50 @@ iter 39+: implement a corrected ``_laplacian_visc_cube`` with the
 proper resolution scaling — but only as an opt-in (e.g.,
 ``_laplacian_visc_cube_v2``) so existing tests are not regressed.
 
+## Iteration 48 (2026-05-07): end-to-end matrix validation at C36
+
+### Goal
+
+Run the actual matrix HS test (3 configs: C36 sigma, C36 hybrid,
+C36 hybrid+topo) with NO env vars and verify the iter-43 auto-
+apply at C36 does NOT regress the iter-17 baseline behavior.
+
+### Result
+
+```
+| test                         | result | mass_drift | max|v| |
+| held_suarez (C36 sigma 30d)  |  PASS  |  1.35e-09  |  11.2 |
+| held_suarez (C36 hybrid 30d) |  PASS  |  1.41e-09  |  11.6 |
+| held_suarez_topo (C36 2d)    |  PASS  |  1.09e-11  |   2.0 |
+```
+
+All 3 PASS.  Mass drift and max\|v\| match the iter-17 baseline
+(within natural variance of the matrix's snapshot timing).
+
+The iter-43 auto-apply at C36 returns scale=1.0 (per the bucket
+``n < 48 → 1.0``), so A_h is unchanged from the matrix default.
+With no LEGOESM_CDD_* env vars set, the corner-divergence damping
+is also off (iter-17 baseline path).  This confirms:
+
+- **No regression at C36**: iter-43 auto-apply is a no-op when
+  not opted in via env vars.
+- **Backwards-compat preserved**: existing matrix tests that ran
+  the iter-17 baseline at C36 still produce iter-17 numbers.
+
+### Status
+
+iter 48 is end-to-end validation that closes the iter-43 codex
+backwards-compat concern at the matrix level.  The auto-apply
+machinery doesn't regress C36 baseline behavior, while still
+auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
+
+169 tests still pass.
+
+### Direction for next iteration
+
+iter 49+: Smagorinsky-style adaptive A_h, longer integration
+verification, OR substantive nord >= 2 fidelity restructure.
+
 ## Iteration 39 (2026-05-07): _laplacian_visc_cube_v2 with empirical calibration
 
 ### New opt-in helper
