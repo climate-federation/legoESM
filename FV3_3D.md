@@ -3451,5 +3451,89 @@ iter 37+: explore whether a Smagorinsky-style adaptive closure
 (``A_h = c * dx^2 * |D|``) replaces the constant A_h and
 auto-scales with resolution.
 
+## Iteration 37 (2026-05-07): C48 A_h sweep — ah_x2 is the sweet spot
+
+### Scan results (HS C48 hybrid 30 day, d4=0.02 nord=1)
+
+| ah_scale | max\|u\| | max\|v\| | mid_std | edge_v | mass_drift |
+|---------:|---------:|---------:|--------:|-------:|-----------:|
+|  1.0 (default, iter 25) |   18.04 |  10.93 |  0.993 |  0.836 |  2.34e-09 |
+|  2.0     |   11.20 |   5.97 |  0.517 |  0.470 |  1.51e-09 |
+|  5.0     |    4.67 |   1.87 |  0.166 |  0.141 |  5.36e-10 |
+
+### Key findings
+
+**(1) ah_x2 at C48 dramatically improves cube-imprint**:
+- mid_std: 0.993 → 0.517 (-48 %)
+- edge_v:  0.836 → 0.470 (-44 %)
+- max\|u\|: 18.04 → 11.20 (-38 %)
+
+These are LARGER reductions than the iter-19 d4_bg=0.02 alone
+gave at C48 from baseline.  A_h × 2 is a single-knob doubling
+that yields half the cube imprint.
+
+**(2) ah_x5 at C48 over-damps the physical jet**:
+- max\|u\|=4.67 m/s — much lower than C36's iter-17 baseline
+  max\|u\|=8.54.  HS climatological jets typically produce
+  6-10 m/s at C36.  The C48 ah_x5 result looks suppressed.
+- mid_std=0.166 is BETTER than C36 baseline 0.236, but at the
+  cost of the actual atmospheric circulation.
+
+**(3) ah_x2 is the sweet spot at C48**:
+- max\|u\|=11.20 still in the same range as iter-19 C36 (8.54)
+  and iter-25 C48 default (18.04 was over-imprinted).
+- mid_std=0.517 — substantial reduction, no over-damping.
+
+### Updated production recommendation
+
+For C48:
+
+```python
+CDGridPrimitiveEquationConfig(
+    ...,
+    A_h=6.12e+06,                       # 2x default _laplacian_visc_cube(48)
+    corner_div_damp_d2_bg=0.0005,       # iter-17
+    corner_div_damp_dddmp=0.20,
+    corner_div_damp_d4_bg=0.02,         # iter-19/24
+    corner_div_damp_nord=1,
+)
+```
+
+Or via env var: ``LEGOESM_AH_SCALE=2.0``.
+
+### Inferred A_h scaling
+
+Combining iter 33 (C72: scale=10) + iter 37 (C48: scale=2):
+
+| n   | matrix default A_h | recommended scale | recommended A_h |
+|----:|-------------------:|------------------:|----------------:|
+|  36 |   4.08e+06         |        1.0        |     4.08e+06    |
+|  48 |   3.06e+06         |        2.0        |     6.12e+06    |
+|  72 |   2.04e+06         |       10.0        |     2.04e+07    |
+
+The recommended A_h is roughly **constant** at 4-6e+06 between C36
+and C48, but jumps to 2e+07 at C72.  This is consistent with the
+iter-32 finding that the C72 instability is a different beast —
+synoptic-scale interior eigenmode that needs much stronger del-2
+damping than the grid-scale damping the heuristic targets.
+
+### Status
+
+iter 37 finds the C48 sweet spot (``ah_x2``) and confirms a
+non-trivial A_h scaling pattern: nearly constant at C36/C48,
+~10x bigger at C72.  The matrix's ``_laplacian_visc_cube``
+heuristic gives WRONG SLOPE in resolution.
+
+27 unit tests still pass (no test-level changes).
+
+### Direction for next iteration
+
+iter 38: try ``ah_x3`` and ``ah_x1.5`` at C48 for finer
+calibration.  And ``ah_x5``, ``ah_x7``, ``ah_x15`` at C72.
+
+iter 39+: implement a corrected ``_laplacian_visc_cube`` with the
+proper resolution scaling — but only as an opt-in (e.g.,
+``_laplacian_visc_cube_v2``) so existing tests are not regressed.
+
 
 
