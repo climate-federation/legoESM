@@ -211,6 +211,42 @@ def test_corner_laplacian_iteration_finite_on_random_input(small_cube):
     assert jnp.all(jnp.isfinite(lap))
 
 
+def test_corner_laplacian_vector_fill_is_noop_for_nord1(small_cube):
+    """Code-level audit of the iter-19 fill_corners gap claim.
+
+    For ``nord = 1`` the only Laplacian iteration runs at ``nt = 0``,
+    where the divergence operator and corner-removal access only
+    cells that fill_corners DOES NOT write to.  Therefore the FV3
+    ``fill_corners(vc, uc, VECTOR=true, DGRID=true)`` is mathematically
+    a no-op at nt=0.
+
+    This test runs the same input through both
+    ``apply_vector_corner_fill = False`` (default iter-18 path) and
+    ``apply_vector_corner_fill = True`` (FV3-fully-faithful wider-shape
+    path) and verifies bit-for-bit identical output.  Codex iter-19
+    MEDIUM-3 audit is satisfied by this concrete equivalence proof.
+    """
+    _, cdgrid, n = small_cube
+    rng = np.random.default_rng(seed=2042)
+
+    # Multiple seeds to sample the input space.
+    for seed in [11, 18, 31, 42, 99]:
+        rng_ = np.random.default_rng(seed=seed)
+        divg_d = jnp.asarray(
+            rng_.uniform(-1.0, 1.0, size=(6, n + 1, n + 1)),
+        ) * 1e-6
+        out_default = fv3_corner_laplacian_iteration(
+            divg_d, cdgrid, apply_vector_corner_fill=False,
+        )
+        out_with_fill = fv3_corner_laplacian_iteration(
+            divg_d, cdgrid, apply_vector_corner_fill=True,
+        )
+        np.testing.assert_array_equal(
+            np.asarray(out_default), np.asarray(out_with_fill),
+            err_msg=f"vector fill must be no-op at nt=0 (seed={seed})",
+        )
+
+
 def test_corner_laplacian_iteration_iterates_correctly(small_cube):
     """Two iterations of the operator give a smoother field than one
     (in the sense that small-scale noise is preferentially damped).

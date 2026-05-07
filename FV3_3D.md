@@ -2174,5 +2174,89 @@ production damping.
 iter 21+: scan with longer integration (200-day) to verify climate-
 relevant stability and confirm the d4_bg recommendation generalises.
 
+## Iteration 20 (2026-05-07): pre-fixer mass-drift audit + vector-fill scaffolding
+
+### Pre-fixer mass-drift validation (codex MEDIUM-1)
+
+Iter-19 reported a **-46 % mass-drift improvement** at d4=0.02 nord=1
+vs the iter-17 baseline.  Codex flagged this as potentially a
+conservation-fixer artifact — the fixer applies a per-step
+allreduce correction that masks the real divergence pattern.
+
+Re-ran the same configurations with ``use_conservation_fixer=False``
+and ``fix_mass=False``::
+
+    config                            max|u|  max|v|  mid_std  mass_drift_RAW
+    baseline_d2only_NOFIX             8.50    4.25    0.232    6.040e-04
+    iter19_d4=0.02_NOFIX              7.47    3.59    0.229    5.975e-04
+
+**Pre-fixer mass-drift improvement is only -1 %**, not -46 %.  The
+big iter-19 number was almost entirely the fixer doing more work
+to clean up roughly the same amount of spurious divergence.
+
+This does NOT invalidate iter-18/19 (the conservation-fixer always
+runs in production, and tighter fixer behaviour IS a valid quality
+metric), but the iter-19 ``-46 %`` claim should be read as
+**fixer-correction reduction**, not raw-physics improvement.  The
+nord>0 path's *physical* effect on cube-imprint magnitude is on the
+order of 1-3 % at the tested coefficients — comparable to mid_std
+and edge_v reductions.
+
+### Code-level audit of the nord=1 fill_corners gap (codex MEDIUM-3)
+
+Iter-19 argued from FV3 sw_core.F90:1737-1820 that the omitted
+``fill_corners(vc, uc, VECTOR=true, DGRID=true)`` writes only to
+cells (vc / uc cube-vertex halo) that are NOT read by the divergence
+operator or the corner-removal at ``nt = 0``.  Codex requested a
+concrete instrumented audit.
+
+iter-20 implements a SECOND code path,
+``fv3_corner_laplacian_iteration(..., apply_vector_corner_fill=True)``,
+that:
+
+- Uses the FULL FV3 D-grid layout for vc / uc:
+  ``vc shape (6, n+2, n+3)``, ``uc shape (6, n+3, n+2)``, with halo=1
+  on each axis.
+- Calls ``fv3_fill_corners_dgrid_vector`` between gradient and
+  divergence (sw_core.F90:1762).
+- Adjusts the divergence and corner-removal indices for the wider
+  layout.
+
+A new unit test
+(``test_corner_laplacian_vector_fill_is_noop_for_nord1``) runs both
+paths over 5 random seeds and verifies bit-for-bit identical output
+via ``np.testing.assert_array_equal``.  All tests PASS.
+
+This is the concrete proof codex requested.  The vector cube-vertex
+fill IS a mathematical no-op at nt=0 in our implementation —
+verified, not just argued.
+
+### Status
+
+iter 20 closes two codex MEDIUM concerns from iter 19:
+
+- mass-drift improvement re-characterised as fixer-correction
+  reduction rather than physical-divergence reduction.
+- nord=1 fill_corners gap claim now backed by a bit-for-bit
+  equivalence regression test.
+
+The ``apply_vector_corner_fill = True`` path is also scaffolding for
+the future nord >= 2 fidelity restructure: the wider vc / uc shapes
+and proper FV3 vector fill are now in place; what remains is to
+restructure the OUTER nord loop to use halo'd intermediate divg_d
+arrays.
+
+26 unit tests pass (25 + 1 new bit-for-bit equivalence test).
+
+### Direction for next iteration
+
+iter 21: extend ``fv3_corner_laplacian_iteration`` to operate on
+halo'd intermediate divg_d for nord >= 2, using the
+``apply_vector_corner_fill`` machinery from iter 20.  This is the
+substantive fix for the FV3 nord >= 2 fidelity gap.
+
+iter 22+: 200-day integration verification and multi-resolution
+robustness check on the recommended production setting.
+
 
 

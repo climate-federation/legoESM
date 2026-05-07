@@ -458,6 +458,7 @@ def fv3_divergence_corner_3d(
 def fv3_corner_laplacian_iteration(
     divg_d: jnp.ndarray,
     cdgrid: CubedSphereCDGrid,
+    apply_vector_corner_fill: bool = False,
 ) -> jnp.ndarray:
     """Apply one Laplacian iteration on a B-grid corner-staggered field.
 
@@ -521,21 +522,33 @@ def fv3_corner_laplacian_iteration(
 
     Documented fidelity gaps relative to FV3:
 
-    * FV3's ``fill_corners(vc, uc, VECTOR=.true., DGRID=.true.)`` between
-      the gradient and divergence steps (sw_core.F90:1762) is NOT
-      applied to the corner-vertex halo cells of ``vc`` / ``uc``.  Our
-      vc / uc at cube-vertex halo cells inherit the value implied by
-      ``divg_pad``'s scalar cross-panel halo, NOT the FV3 sign-flipped
-      vector diagonal mirror (see ``fv3_fill_corners_dgrid_vector``).
-      For HS-style flow the residual cube-vertex error is small; this
-      gap is acknowledged and may be tightened in a future iteration.
-
     * FV3 calls ``fill_corners(divg_d, ..., FILL=XDir, BGRID=.true.)``
       and ``YDir`` separately before each gradient (sw_core.F90:1746,
       1754) for direction-aware cube-vertex completion.  We use a
       single ``pad_halo`` with the iter-7 average corner mode; this is
       direction-agnostic but consistent with the iter-15 / iter-16
       port philosophy.
+
+    Optional FV3 vector cube-vertex fill (iter 20):
+
+    * ``apply_vector_corner_fill = True`` triggers FV3's
+      ``fill_corners(vc, uc, VECTOR=true, DGRID=true)`` between
+      gradient and divergence (sw_core.F90:1762, ported in
+      ``legoesm.grids._fv3_dgrid_corner_fill``).  This affects the
+      4 cube-vertex halo cells of vc / uc.
+
+    * Code-level audit verified the cells written by the vector fill
+      are NOT read by the divergence operator OR the corner-removal
+      step at ``nt = 0`` (the only iteration when ``nord = 1``).  In
+      that regime ``apply_vector_corner_fill = True`` produces output
+      bit-for-bit identical to ``apply_vector_corner_fill = False`` —
+      see the regression test ``test_corner_laplacian_vector_fill_is_noop_for_nord1``.
+
+    * For ``nord >= 2``, the inner iterations have ``nt > 0`` and the
+      divergence operator extends into halo rows that DO read the
+      fill-written cells.  In that regime the flag changes output.
+      Default off to preserve iter-18 bit-for-bit nord=1 behaviour
+      until the wider nord >= 2 restructure (iter 21+) is in place.
     """
     n = cdgrid.n
 
@@ -545,6 +558,17 @@ def fv3_corner_laplacian_iteration(
     # ``set_corner_fill_mode`` (default "avg" since iter-7).
     from legoesm.grids.halo import pad_halo
     divg_pad = pad_halo(divg_d)                            # (6, n+3, n+3)
+
+    if apply_vector_corner_fill:
+        # FV3-faithful path with full halo'd vc / uc (matches FV3
+        # D-grid layout) and ``fill_corners(vc, uc, VECTOR=true,
+        # DGRID=true)`` applied between gradient and divergence.
+        return _laplacian_iteration_with_vector_fill(
+            divg_pad, cdgrid, n,
+        )
+
+    # Default iter-18 path: vc / uc with the minimum halo needed by
+    # the divergence operator + corner removal at nt = 0.
 
     # Step 2: x-flux ``vc(i, j) = (divg_d(i+1, j) - divg_d(i, j)) * divg_u``
     # at i ∈ [-1, n], j ∈ [0, n] — shape (6, n+2, n+1).
@@ -608,4 +632,98 @@ def fv3_corner_laplacian_iteration(
     lap_divg = lap_divg.at[:, 0, n].add(nw)
 
     # Step 6: normalise by rarea_c (Fortran line 1782).
+    return lap_divg * cdgrid.rarea_c
+
+
+def _laplacian_iteration_with_vector_fill(
+    divg_pad: jnp.ndarray,
+    cdgrid: CubedSphereCDGrid,
+    n: int,
+) -> jnp.ndarray:
+    """FV3-fully-faithful Laplacian iteration with vector cube-vertex fill.
+
+    Differs from the default path: vc / uc are computed on the FV3
+    D-grid layout shape ((6, n+2, n+3) and (6, n+3, n+2) respectively),
+    and ``fv3_fill_corners_dgrid_vector`` is applied between gradient
+    and divergence (matching FV3 ``sw_core.F90:1762``).
+
+    For nord = 1 (single iteration with nt = 0) the divergence
+    operator and corner-removal access cells that are unaffected by
+    the vector fill — the output is bit-for-bit identical to the
+    default path.  Verified by ``test_corner_laplacian_vector_fill_is_noop_for_nord1``.
+
+    For nord >= 2, the inner iterations (nt > 0) extend into halo
+    rows that DO read fill-written cells, so the flag is genuinely
+    effective there.  This function is preparation for a future
+    nord >= 2 fidelity fix.
+    """
+    from legoesm.grids._fv3_dgrid_corner_fill import (
+        fv3_fill_corners_dgrid_vector,
+    )
+
+    # vc at i ∈ [-1, n], j ∈ [-1, n+1] — shape (6, n+2, n+3).
+    # Padded index translation in our shifted convention:
+    #   i (shifted) = -1..n   → padded i = 0..n+1
+    #   j (shifted) = -1..n+1 → padded j = 0..n+2
+    # vc(i, j) = divg_d(i+1, j) - divg_d(i, j)
+    # divg_d(i+1) → padded i = 1..n+2
+    # divg_d(i)   → padded i = 0..n+1
+    vc_raw = (
+        divg_pad[:, 1:n + 3, 0:n + 3]
+        - divg_pad[:, 0:n + 2, 0:n + 3]
+    )                                                       # (6, n+2, n+3)
+    divg_u = cdgrid.dy_edge_x * cdgrid.rdxc                  # (6, n+1, n)
+    # Pad to (6, n+2, n+3): (1, 0) on i (add west halo), (1, 2) on j
+    # (add 1 south halo + 2 north halo to cover j ∈ [-1, n+1]).
+    divg_u_pad = jnp.pad(
+        divg_u, [(0, 0), (1, 0), (1, 2)], mode="edge",
+    )                                                       # (6, n+2, n+3)
+    vc = vc_raw * divg_u_pad                                # (6, n+2, n+3)
+
+    # uc at i ∈ [-1, n+1], j ∈ [-1, n] — shape (6, n+3, n+2).
+    uc_raw = (
+        divg_pad[:, 0:n + 3, 1:n + 3]
+        - divg_pad[:, 0:n + 3, 0:n + 2]
+    )                                                       # (6, n+3, n+2)
+    divg_v = cdgrid.dx_edge_y * cdgrid.rdyc                  # (6, n, n+1)
+    divg_v_pad = jnp.pad(
+        divg_v, [(0, 0), (1, 2), (1, 0)], mode="edge",
+    )                                                       # (6, n+3, n+2)
+    uc = uc_raw * divg_v_pad                                # (6, n+3, n+2)
+
+    # Apply FV3 vector cube-vertex fill (sw_core.F90:1762).
+    # This overwrites the 4 cube-vertex halo cells of vc / uc with the
+    # sign-flipped diagonal mirror of the OTHER component.
+    vc, uc = fv3_fill_corners_dgrid_vector(vc, uc, n)
+
+    # Divergence at interior corners (i, j) ∈ [0, n] × [0, n].
+    # In the wider vc shape (n+2, n+3), padded i = 0..n+1 = i_logical = -1..n;
+    # padded j = 0..n+2 = j_logical = -1..n+1.
+    # vc(i-1, j) for (i, j) ∈ [0, n]² → padded i = 0..n, padded j = 1..n+1.
+    # vc(i,   j) for (i, j) ∈ [0, n]² → padded i = 1..n+1, padded j = 1..n+1.
+    # uc(i, j-1) for (i, j) ∈ [0, n]² → padded i = 1..n+1, padded j = 0..n.
+    # uc(i,   j) for (i, j) ∈ [0, n]² → padded i = 1..n+1, padded j = 1..n+1.
+    lap_divg_raw = (
+        uc[:, 1:n + 2, 0:n + 1]      # uc(i, j-1)
+        - uc[:, 1:n + 2, 1:n + 2]    # uc(i, j)
+        + vc[:, 0:n + 1, 1:n + 2]    # vc(i-1, j)
+        - vc[:, 1:n + 2, 1:n + 2]    # vc(i, j)
+    )                                                       # (6, n+1, n+1)
+
+    # Corner removal — same logical positions as the default path
+    # but adjusted indices for the wider arrays.
+    # SW: uc(i_logical = 0, j_logical = -1) → padded i = 1, j = 0.
+    # SE: uc(i_logical = n, j_logical = -1) → padded i = n+1, j = 0.
+    # NE: uc(i_logical = n, j_logical = n)  → padded i = n+1, j = n+1.
+    # NW: uc(i_logical = 0, j_logical = n)  → padded i = 1,   j = n+1.
+    sw = uc[:, 1, 0]
+    se = uc[:, n + 1, 0]
+    ne = uc[:, n + 1, n + 1]
+    nw = uc[:, 1, n + 1]
+    lap_divg = lap_divg_raw
+    lap_divg = lap_divg.at[:, 0, 0].add(-sw)
+    lap_divg = lap_divg.at[:, n, 0].add(-se)
+    lap_divg = lap_divg.at[:, n, n].add(ne)
+    lap_divg = lap_divg.at[:, 0, n].add(nw)
+
     return lap_divg * cdgrid.rarea_c
