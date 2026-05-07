@@ -84,6 +84,33 @@ if desired::
 
     LEGOESM_AH_SCALE=10.0 LEGOESM_SMAG_CS=0.2  # C72: static + adaptive
 
+### C96+ user guidance (iter 63)
+
+For users at resolutions higher than C72 (UNTESTED in this branch):
+
+1. **First try the C72 setting**: ``LEGOESM_AH_SCALE=10.0`` is the
+   iter-43 auto-default at n>=72.  It MAY be sufficient at C96 but
+   the empirical pattern (C36→1, C48→2, C72→10) suggests the
+   required scale grows non-linearly.
+
+2. **If NaN**: try larger scales empirically:
+   ``LEGOESM_AH_SCALE=15.0`` then ``20.0`` then ``30.0``.
+
+3. **Run a 5-day stability check first**: a short run is much
+   cheaper than a 30-day run and exposes the iter-30-style
+   exponential growth (NaN-by-day-13 mode) by day 5 if present.
+
+4. **If long-time integration is the goal**: use
+   ``_laplacian_visc_cube_v2(n)`` (iter 39) directly via
+   ``CDGridPrimitiveEquationConfig(A_h=...)`` to bypass the
+   matrix's ``_laplacian_visc_cube`` heuristic that has the wrong
+   slope.  At C96, v2 returns 3.98e+07 (~ 26x v1).
+
+5. **If still unstable**: the iter-26-32 analysis suggests the
+   issue is structural and may require ``nord >= 2`` or forward-
+   backward time stepping (deferred work).  Falls outside the
+   iter 18-62 scope.
+
 ## Quick Reference (iter 38 summary)
 
 ### Production-recommended setting per resolution
