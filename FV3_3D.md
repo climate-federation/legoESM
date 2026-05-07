@@ -3063,5 +3063,69 @@ hypothesis (3) — better corner damping at high resolution).
 iter 33+: forward-backward time stepping (definitive fix if RK3
 is the limit).
 
+## Iteration 31 (2026-05-07): RK3 is NOT the cause — instability is SPATIAL
+
+### Scan result (HS C72 hybrid, d4=0.02 nord=1)
+
+| time_integrator | result                            |
+|:----------------|:----------------------------------|
+| ssp_rk3 (iter 26)  | NaN at step 5732 (~13.27 d)    |
+| **ssp_rk54**       | **NaN at step 5761 (~13.34 d)**|
+
+The 5-stage 4th-order SSPRK has essentially **no effect** on C72
+stability — failing within 30 steps of the ssp_rk3 NaN.
+
+### Conclusion: hypothesis (1) is REJECTED
+
+The C72 instability is **NOT** a time-integrator spectral radius
+issue.  Both ssp_rk3 and ssp_rk54 fail at virtually the same
+simulation time, confirming the unstable mode is intrinsic to the
+**spatial discretization at C72 grid spacing**, not the temporal
+integration.
+
+Combined with iter 28 (16x stronger hyperdiff has no effect) and
+iter 27 (d4_bg sweet spot is too narrow), this leaves spatial-
+mechanism hypotheses (2) and (3) from iter 30 as the prime
+candidates:
+
+- **(2) Cube-vertex metric singularity amplification at high
+  resolution** — the iter-2 structural cube imprint exceeds
+  containment threshold at C72.
+
+- **(3) Unstable Rossby-mode-like eigenfunction at the cube
+  vertex** that exists in the spatial operator's spectrum and
+  is not damped by any of: hyperdiff, div-damp, corner-divergence
+  damping, sponge, or A_h Laplacian viscosity.
+
+Both point to the **C-D + A-L + RK3 architecture's spatial
+operator** having a growing eigenmode at C72 — the time
+integrator was not the bottleneck.
+
+### Status
+
+iter 31 closes hypothesis (1).  The C72 issue is structural in the
+spatial discretization, not the time stepping.  This is consistent
+with iter-2's original diagnosis ("cube imprint is structural to
+C-D + A-L + RK3 architecture") — at C72 the structural amplification
+crosses the threshold from "controllable by damping" to "growing
+unstable mode".
+
+27 unit tests still pass.
+
+### Direction for next iteration
+
+iter 32: examine the C72 diagnostic trajectory more carefully —
+where on the grid does the unstable wind growth concentrate?
+(Add a per-face max\|u\| diagnostic to iter-30's script.)  If it's
+at cube vertices, the FV3 vector corner fill (iter-22 scaffolding,
+nord >= 2 deferred) is more relevant than I thought.
+
+iter 33+: substantive nord >= 2 fidelity restructure with the
+``apply_vector_corner_fill = True`` machinery.  Hypothesis (3)
+predicts this would help.
+
+iter 34+: implement the iter-2-suggested forward-backward time
+stepping if even nord >= 2 doesn't help.
+
 
 
