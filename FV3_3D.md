@@ -3127,5 +3127,91 @@ predicts this would help.
 iter 34+: implement the iter-2-suggested forward-backward time
 stepping if even nord >= 2 doesn't help.
 
+## Iteration 32 (2026-05-07): C72 unstable mode is INTERIOR, not vertex
+
+### Localization data (HS C72 hybrid 30d, d4=0.02 nord=1)
+
+Per-region max wind speed (m/s) at each diagnostic step:
+
+| step | day  | total  | vertex | edge   | interior |
+|-----:|-----:|-------:|-------:|-------:|---------:|
+|  500 |  1.16|   1.08 |   0.99 |   1.08 |     1.08 |
+| 1000 |  2.31|   2.61 |   2.20 |   2.61 |     2.60 |
+| 2000 |  4.63|   6.93 |   5.30 |   6.93 |     6.89 |
+| 3000 |  6.94|  12.97 |   9.70 |  12.97 |    12.89 |
+| 4000 |  9.26|  22.35 |  16.95 |  22.30 |    22.35 |
+| 5000 | 11.57|  44.90 |  33.86 |  42.57 |    44.90 |
+| 5500 | 12.73|  78.37 |  54.46 |  67.49 |    78.37 |
+| 5700 | 13.19| 109.03 |  67.07 | 109.03 |   106.80 |
+| 5732 | 13.27| **NaN**                                   |
+
+### Conclusion: HYPOTHESES (2) AND (3) REJECTED
+
+The unstable mode is **NOT at cube vertices**.  Throughout the
+trajectory:
+
+- Vertex max is consistently the LOWEST (60-90 % of total).
+- Interior max ≈ edge max, both growing fastest.
+- Cube vertices are actually being **effectively damped** by
+  ``d4_bg`` corner-divergence damping — the vertex/total ratio
+  DECREASES over time (0.92 at day 1 → 0.61 at day 13).
+
+This **rejects** the iter-30 hypotheses (2) cube-vertex metric
+singularity and (3) cube-vertex Rossby mode.  The C72 instability
+is an **interior eigenmode** of the spatial operator, not a
+cube-vertex artifact.
+
+The corner-divergence damping IS working at the vertices — it just
+doesn't reach the interior unstable mode.
+
+### Implication: nord >= 2 will NOT help C72
+
+The iter-30 staged "iter 33+" plan (nord >= 2 fidelity restructure)
+addresses cube-vertex damping.  Since cube vertices are NOT where
+the C72 mode lives, nord >= 2 will not fix C72 either.
+
+This points to a fundamentally different fix:
+
+- **(4) Interior damping**: stronger horizontal diffusion (NOT
+  hyperdiff, which iter 28 showed is ineffective at 16x — perhaps
+  the hyperdiff implementation has a bug, or perhaps it's only
+  applied to certain fields).  Selective Smagorinsky / del-4 on
+  interior cells might.
+
+- **(5) A-L architecture failure mode**: the A-grid -> A-L (Lin)
+  divergence / vorticity diagnostic from C-D winds may be
+  introducing unstable modes that grow at C72.  Different
+  C-grid construction (forward-backward, c_sw + d_sw) would
+  fix this.
+
+- **(6) Hybrid sigma-pressure coordinate instability**: the
+  vertical-coordinate jacobian at C72 may amplify modes the
+  C36/C48 grids contain.  Test with sigma coord at C72.
+
+### Status
+
+iter 32 produces the most surprising finding of the C72 series:
+**cube-vertex damping is working**.  The unstable mode is interior.
+This redirects iter 33+ from vector-corner-fill nord>=2 (which
+would't help) to investigating the A-L architecture or interior
+hyperdiff implementation.
+
+27 unit tests still pass.
+
+### Direction for next iteration
+
+iter 33: investigate the iter 28 hyperdiff finding more carefully.
+Is hyperdiff actually applied to D-grid winds at C72, or is there
+a code-path bug that makes it ineffective?  Trace the hyperdiff
+path with diagnostic prints.
+
+iter 34+: test C72 with sigma vertical coord (vs hybrid).  If
+sigma is stable, the issue is hybrid-coord-related.
+
+iter 35+: try a much larger hyperdiff (1000x default) — if THAT
+stabilises C72, the issue is the matrix's hd tuning being
+shockingly off; if NOT, hyperdiff doesn't reach the unstable
+interior mode at all.
+
 
 
