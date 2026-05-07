@@ -2521,7 +2521,21 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         # is INSUFFICIENT at C72+ (iter 33 found C72 NaN at default
         # A_h but stable at 10x).  Default 1.0 preserves iter-17/24
         # C36/C48 behaviour; set LEGOESM_AH_SCALE=10.0 at C72.
-        ah = ah * float(os.environ.get("LEGOESM_AH_SCALE", "1.0"))
+        _ah_scale = float(os.environ.get("LEGOESM_AH_SCALE", "1.0"))
+        ah = ah * _ah_scale
+        # FV3_3D iter 41: print a stability tip at C72+ when the
+        # user has NOT set LEGOESM_AH_SCALE — the iter-33 finding
+        # showed default A_h NaNs at C72 (~13 days into the 30-day
+        # HS spin-up).  Recommend ah_scale=2.0 at C48, 10.0 at C72.
+        if n >= 72 and _ah_scale < 5.0:
+            print(
+                f"[FV3_3D iter 41 stability tip] At C{n} the matrix "
+                f"default A_h={ah:.2e} is INSUFFICIENT and the run "
+                f"will likely NaN around day 13.  Recommended: set "
+                f"LEGOESM_AH_SCALE=10.0 (or use _laplacian_visc_cube_v2(n) "
+                f"directly) per FV3_3D.md iter 33-39.",
+                flush=True,
+            )
         dt = 200.0
         # Iter-15 NOTE on the cubed-sphere upper-atmosphere sponge:
         # The default ``sponge_tau_sec = 3600`` (1 hour) is FAR more
@@ -2995,7 +3009,21 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         # is INSUFFICIENT at C72+ (iter 33 found C72 NaN at default
         # A_h but stable at 10x).  Default 1.0 preserves iter-17/24
         # C36/C48 behaviour; set LEGOESM_AH_SCALE=10.0 at C72.
-        ah = ah * float(os.environ.get("LEGOESM_AH_SCALE", "1.0"))
+        _ah_scale = float(os.environ.get("LEGOESM_AH_SCALE", "1.0"))
+        ah = ah * _ah_scale
+        # FV3_3D iter 41: print a stability tip at C72+ when the
+        # user has NOT set LEGOESM_AH_SCALE — the iter-33 finding
+        # showed default A_h NaNs at C72 (~13 days into the 30-day
+        # HS spin-up).  Recommend ah_scale=2.0 at C48, 10.0 at C72.
+        if n >= 72 and _ah_scale < 5.0:
+            print(
+                f"[FV3_3D iter 41 stability tip] At C{n} the matrix "
+                f"default A_h={ah:.2e} is INSUFFICIENT and the run "
+                f"will likely NaN around day 13.  Recommended: set "
+                f"LEGOESM_AH_SCALE=10.0 (or use _laplacian_visc_cube_v2(n) "
+                f"directly) per FV3_3D.md iter 33-39.",
+                flush=True,
+            )
         dt = 200.0
         config = PrimitiveEquationConfig(
             hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
@@ -3580,7 +3608,21 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         # is INSUFFICIENT at C72+ (iter 33 found C72 NaN at default
         # A_h but stable at 10x).  Default 1.0 preserves iter-17/24
         # C36/C48 behaviour; set LEGOESM_AH_SCALE=10.0 at C72.
-        ah = ah * float(os.environ.get("LEGOESM_AH_SCALE", "1.0"))
+        _ah_scale = float(os.environ.get("LEGOESM_AH_SCALE", "1.0"))
+        ah = ah * _ah_scale
+        # FV3_3D iter 41: print a stability tip at C72+ when the
+        # user has NOT set LEGOESM_AH_SCALE — the iter-33 finding
+        # showed default A_h NaNs at C72 (~13 days into the 30-day
+        # HS spin-up).  Recommend ah_scale=2.0 at C48, 10.0 at C72.
+        if n >= 72 and _ah_scale < 5.0:
+            print(
+                f"[FV3_3D iter 41 stability tip] At C{n} the matrix "
+                f"default A_h={ah:.2e} is INSUFFICIENT and the run "
+                f"will likely NaN around day 13.  Recommended: set "
+                f"LEGOESM_AH_SCALE=10.0 (or use _laplacian_visc_cube_v2(n) "
+                f"directly) per FV3_3D.md iter 33-39.",
+                flush=True,
+            )
         dt = 300.0
         config = PrimitiveEquationConfig(
             hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
