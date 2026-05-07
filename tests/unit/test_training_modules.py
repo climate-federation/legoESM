@@ -345,6 +345,46 @@ class TestERA5ToState:
         w2 = _get_cs_weights(100, _GRID)
         assert w1 is w2  # same object from cache
 
+    def test_era5_to_cubedsphere_carry_shapes_and_finite(self):
+        """era5_to_cubedsphere_carry produces carry with correct shapes
+        and finite values from a synthetic ERA5Slice."""
+        import jax.numpy as jnp
+        from legoesm.training.era5_to_state import ERA5Slice, era5_to_cubedsphere_carry
+
+        n_lat, n_lon, n_plev = 18, 36, 4
+        rng = np.random.default_rng(0)
+        # Realistic T and p_s to avoid saturation/interp edge cases
+        T_ll = (260.0 + rng.random((n_lat, n_lon, n_plev)) * 40.0).astype(np.float32)
+        u_ll = rng.random((n_lat, n_lon, n_plev)).astype(np.float32) * 20.0
+        v_ll = rng.random((n_lat, n_lon, n_plev)).astype(np.float32) * 20.0
+        q_ll = (rng.random((n_lat, n_lon, n_plev)) * 0.01).astype(np.float32)
+        p_s = np.full((n_lat, n_lon), 101325.0, dtype=np.float32)
+        plev_Pa = np.array([5000.0, 25000.0, 50000.0, 100000.0], dtype=np.float64)
+
+        era5 = ERA5Slice(
+            T=T_ll, u=u_ll, v=v_ll, q=q_ll,
+            p_s=p_s, sst=np.full((n_lat, n_lon), 290.0, dtype=np.float32),
+            phis=np.zeros((n_lat, n_lon), dtype=np.float32),
+            lat=np.linspace(-np.pi/2, np.pi/2, n_lat),
+            lon=np.linspace(0, 2*np.pi, n_lon, endpoint=False),
+            plev_Pa=plev_Pa,
+        )
+
+        carry = era5_to_cubedsphere_carry(era5, _GRID, _SIGMA)
+
+        expected_3d = (6, N, N, NLEV)
+        expected_2d = (6, N, N)
+        assert carry.T.shape == expected_3d, f"T shape {carry.T.shape} != {expected_3d}"
+        assert carry.u.shape == expected_3d
+        assert carry.v.shape == expected_3d
+        assert carry.q_v.shape == expected_3d
+        assert carry.p_s.shape == expected_2d
+
+        assert jnp.all(jnp.isfinite(carry.T)), "T contains non-finite values"
+        assert jnp.all(jnp.isfinite(carry.u)), "u contains non-finite values"
+        assert jnp.all(jnp.isfinite(carry.q_v)), "q_v contains non-finite values"
+        assert jnp.all(carry.q_v >= 0), "q_v contains negative values"
+
 
 # ---------------------------------------------------------------------------
 # 8. training_driver

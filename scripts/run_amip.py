@@ -93,6 +93,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Initial isothermal temperature [K] (default 300)")
     parser.add_argument("--rh-init", type=float, default=None,
                         help="Initial relative humidity (default 0.7); lower for drier IC")
+    parser.add_argument("--ic", type=str, default="default",
+                        choices=["default", "era5"],
+                        help="Initial condition source: 'default' uses held_suarez_init; "
+                             "'era5' loads reanalysis from --ic-path")
+    parser.add_argument("--ic-path", type=str, default="",
+                        help="Path to ERA5 Zarr store for --ic era5")
 
     # Radiation
     parser.add_argument("--radiation", type=str, default="gray",
@@ -333,6 +339,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         gradient_checkpoint=args.gradient_checkpoint,
         distributed=args.distributed,
         ensemble_size=args.ensemble_size,
+        ic=args.ic,
+        ic_path=args.ic_path,
         **({"T_init": args.t_init} if args.t_init is not None else {}),
         **({"RH_init": args.rh_init} if args.rh_init is not None else {}),
     )
@@ -357,6 +365,8 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
         parser.error("--forcing-path required (unless --dataset analytical or --restart-from)")
     if args.solar_source in ("file", "spectral_file") and not args.solar_file:
         parser.error("--solar-file required when --solar-source is file/spectral_file")
+    if args.ic == "era5" and not args.ic_path:
+        parser.error("--ic-path required when --ic era5")
     if args.ghg_forcing == "external" and not args.ghg_file:
         parser.error("--ghg-file required when --ghg-forcing is external")
     if args.physics_parameterization == "ml":

@@ -135,6 +135,10 @@ class ExperimentConfig(NamedTuple):
     dynamic_albedo: bool = False
     carbon_cycle: str = "none"
 
+    # Initial conditions
+    ic: str = "default"   # "default" (held_suarez_init) or "era5"
+    ic_path: str = ""     # ERA5 Zarr path when ic="era5"
+
     # CMIP
     experiment: str = ""
     start_year: int = 1979
@@ -240,6 +244,11 @@ class ExperimentConfig(NamedTuple):
                 f"ModelDriver is atmosphere-only with prescribed SST/SIC. "
                 f"Set carbon_cycle='none' or use a coupled driver."
             )
+        _valid_ic = ("default", "era5")
+        if self.ic not in _valid_ic:
+            errors.append(f"ic must be one of {_valid_ic}, got {self.ic!r}")
+        if self.ic == "era5" and not self.ic_path:
+            errors.append("ic='era5' requires ic_path to be set")
 
         if errors:
             raise ValueError(
