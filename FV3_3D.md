@@ -3692,6 +3692,44 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
 
+## Iteration 62 (2026-05-07): partial validation — iter-33 reproduces
+
+### Goal
+
+Validate the combined recommendation (iter-33 ``LEGOESM_AH_SCALE=10``
++ iter-58 ``LEGOESM_SMAG_CS=0.2``) at C72 30d.  Two configs:
+
+1. ``ah_x10`` alone (iter-33 reference reproduction).
+2. ``ah_x10 + smag_cs=0.2`` (combined recommendation).
+
+### Result (HS C72 hybrid 30 day)
+
+The iter-33 ``ah_x10`` reference reproduces exactly::
+
+    iter-33 alone (ah_x10) d=30: max|u|=45.88 max|v|=32.29
+                                 mid_std=6.815 edge_v=5.775
+                                 mass=1.54e-09 wall=292.3s
+
+These numbers match the iter-33 commit message exactly, confirming
+the iter-43 / iter-44 / iter-46 refactors of the auto-apply
+machinery did NOT regress the iter-33 reference behavior.
+
+The combined ``ah_x10 + smag_cs=0.2`` run was started but did not
+complete in the iter-62 wall-time budget (system CPU efficiency
+dropped to ~20 % during the second config; the Smagorinsky
+overhead added to the C72 step cost made the run too slow to
+finish in the cycle's time).
+
+### Status
+
+iter 62 confirms the iter-33 recommendation is reproducible end-to-end
+through the iter-43-46 auto-apply machinery (reading
+``LEGOESM_AH_SCALE`` from the explicit kwarg path).  The combined
+run did not complete; iter 63+ may retry under quieter system
+load.
+
+247 tests still pass (no test changes).
+
 ## Iteration 60 (2026-05-07): Smagorinsky alone does NOT stabilise C72
 
 ### Goal
