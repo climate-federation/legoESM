@@ -1511,5 +1511,85 @@ path.  FV3 uses this when ``flagstruct%duogrid`` is True, and our
 duogrid pathway already exists; it just isn't exercised by the 3D
 HS config.
 
+## Iteration 15 (2026-05-07): Faithful port of FV3 divergence_corner
+
+### Per user direction "no improvisation — be faithful to FV3 fortran"
+
+iter 15 ports ``sw_core.F90:divergence_corner`` (line 2124-2229)
+EXACTLY into JAX, including:
+
+* the **sin_sg edge metric** at the j==1 / j==npy boundary rows
+  (``uf(i,j) = u(i,j) * dyc * 0.5*(sin_sg(i,j-1,4)+sin_sg(i,j,2))``);
+* the **cosa cross-correction** at interior rows
+  (``uf(i,j) = (u(i,j) - 0.25*(va(j-1)+va(j))*(cos_sg(j-1,4)+cos_sg(j,2)))
+  * dyc * 0.5*(sin_sg(j-1,4)+sin_sg(j,2))``);
+* the **boundary i-face simplification** at i==1 / i==npx for vf;
+* the **four corner-removal terms** at sw / se / ne / nw cube
+  vertices (``divg_d(1,1) -= vf(1,0)`` etc.);
+* the **division by rarea_c**.
+
+This is the canonical FV3 B-grid corner divergence used in
+``d_sw5`` (sw_core.F90:1641-1719) before the adaptive Smagorinsky-
+style damping is applied.
+
+### New module: ``src/legoesm/core/_fv3_divergence_corner.py``
+
+Two functions:
+
+* :func:`fv3_divergence_corner_2d`: the 2D port — takes our
+  ``(6, n+1, n+1)`` C-D-grid winds, internally converts to FV3
+  normal D-grid (n, n+1) / (n+1, n) and A-grid cell centres
+  (n, n) by averaging, then applies the FV3 formula and returns
+  ``divg_d`` at B-grid corners ``(6, n+1, n+1)``.
+
+* :func:`fv3_divergence_corner_3d`: 3D wrapper that vmaps the 2D
+  port over the trailing level axis.
+
+### Unit tests: ``tests/test_fv3_divergence_corner.py``
+
+Five tests, all passing:
+
+| test | property | result |
+|------|----------|--------|
+| zero winds → exactly zero divergence | regression guard | ✓ |
+| uniform winds → near-zero (metric noise only) | structural | ✓ |
+| 3D vmap wrapper preserves levels | API consistency | ✓ |
+| 4 corner cells finite (regression guard for corner-removal) | numerical safety | ✓ |
+| global area-weighted average near zero | continuity / discrete property | ✓ |
+
+### Status
+
+iter 15 delivers a **faithful FV3 port** of the canonical B-grid
+corner divergence — no improvisation, every Fortran line accounted
+for in the docstring and code.  This is a building block; not yet
+wired into ``fv3_hydrostatic_tendencies``.
+
+iter 16+ will use ``fv3_divergence_corner_3d`` to drive an adaptive
+damping term in the 3D path that targets cube-vertex halo errors
+specifically (the FV3 d_sw5 pattern).
+
+### Direction for next iteration
+
+iter 16: wire ``fv3_divergence_corner_3d`` into the 3D dycore as an
+opt-in damping source.  Specifically:
+
+1. Add config field ``corner_div_damp_d2_bg: float = 0.0`` (FV3
+   ``d2_bg``).
+2. After computing the existing div_v at cell centres, ALSO compute
+   the FV3 B-grid corner divergence via the new helper.
+3. Compute adaptive damping coefficient
+   ``damp = da_min_c * max(d2_bg, min(0.20, dddmp * |delpc|))``
+   (faithful to ``sw_core.F90:1720``).
+4. Add the resulting damping term to the momentum tendency at
+   D-grid corners.
+5. Test on HS C36 hybrid 30-day combined with iter-12's damp_v=0.30
+   to see if the two FV3 mechanisms compound.
+
+This is the natural follow-up to iter 12: iter 12 ported the
+post-step ``del6_vt_flux``; iter 16 ports the in-step
+``divergence_corner`` damping that pairs with it in FV3 ``d_sw5``.
+
+43 atmospheric / FV3 tests pass with the default config.
+
 
 
