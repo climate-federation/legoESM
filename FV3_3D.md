@@ -2503,5 +2503,99 @@ C48 if time permits.
 iter 25+: substantive nord >= 2 fidelity restructure (outer-loop
 halo'd intermediate divg_d arrays).
 
+## Iteration 24 (2026-05-07): complete 60-day verification of d4=0.02
+
+### Scan completed (HS C36 hybrid, 60 day)
+
+| label              | day | max\|u\| | max\|v\| | mid_std | edge_v | mass_drift |
+|:-------------------|----:|---------:|---------:|--------:|-------:|-----------:|
+| baseline_d2only    |  30 |    8.54  |    4.27  |  0.236  |  0.188 |   6.88e-10 |
+| baseline_d2only    |  60 |   10.42  |    5.12  |  0.354  |  0.292 |   1.76e-09 |
+| d4=0.02 nord=1     |  30 |    7.50  |    3.61  |  0.228  |  0.158 |   3.73e-10 |
+| d4=0.02 nord=1     |  60 |    9.17  |    4.16  |  0.292  |  0.182 |   8.70e-10 |
+
+Day-30 numbers match iter-19 exactly (harness validated).
+
+### Key finding: d4=0.02 nord=1 reduces CUBE-IMPRINT GROWTH RATE
+
+Comparing day-30 to day-60 ratios:
+
+| metric    | baseline growth | d4=0.02 growth | growth-rate reduction |
+|:----------|----------------:|---------------:|----------------------:|
+| max\|u\|  |          +22 % |         +22 %  |                  0 %  |
+| max\|v\|  |          +20 % |         +15 %  |                 25 %  |
+| mid_std   |          +50 % |         +28 %  |                 44 %  |
+| edge_v    |          +55 % |         +15 %  |                 73 %  |
+| mass_drift|         +156 % |        +133 %  |                 14 %  |
+
+The d4=0.02 setting **substantially reduces** the cube-imprint
+growth rate over 60 days — particularly visible in ``edge_v``
+(73 % less growth) and ``mid_std`` (44 % less growth).  The
+**absolute** values at day 60 are also better:
+
+| metric    | baseline d=60 | d4=0.02 d=60 | reduction |
+|:----------|--------------:|-------------:|----------:|
+| max\|u\|  |       10.42   |        9.17  |    -12 %  |
+| max\|v\|  |        5.12   |        4.16  |    -19 %  |
+| mid_std   |       0.354   |       0.292  |    -18 %  |
+| edge_v    |       0.292   |       0.182  |    -38 %  |
+| mass_drift|     1.76e-9   |     8.70e-10 |    -51 %  |
+
+This **upgrades the iter-19 finding** from "preferred candidate"
+(based on day-30 numbers alone, where mid_std reductions were
+modest at -3 to -7 %) to a more robust recommendation: d4=0.02
+nord=1 prevents up to 73 % of the cube-imprint growth that
+appears between day 30 and day 60.
+
+### Status
+
+iter 24 closes the codex iter-19 HIGH "preferred candidate" framing
+by showing the d4=0.02 nord=1 setting is empirically beneficial
+beyond day 30:
+
+- mid_std growth rate reduced 44 %.
+- edge_v growth rate reduced 73 % (the cleanest cube-imprint signal).
+- mass-drift growth rate reduced 14 %.
+- All five end-of-run metrics at day 60 are better with d4=0.02.
+
+The iter-19 30-day mid_std comparison (only -3 % at d4=0.02 vs
+baseline) **understated the effect**: at day 60 the same setting
+gives -18 % mid_std and -38 % edge_v.
+
+27 unit tests still pass (no test-level changes).
+
+### Updated production recommendation
+
+The iter-19 ``preferred candidate`` is now elevated to
+``recommended``:
+
+```python
+CDGridPrimitiveEquationConfig(
+    ...,
+    corner_div_damp_d2_bg=0.0005,        # iter-17 optimum
+    corner_div_damp_dddmp=0.20,          # FV3 default
+    corner_div_damp_d4_bg=0.02,          # iter-19/24 — best long-run
+    corner_div_damp_nord=1,              # del-4
+    # corner_div_damp_fv3_vector_fill=False is default (iter-22 no-op at nord=1)
+)
+```
+
+Or via env vars::
+
+    LEGOESM_CDD_D2BG=0.0005 \
+    LEGOESM_CDD_D4BG=0.02 \
+    LEGOESM_CDD_NORD=1 \
+      JAX_ENABLE_X64=1 python scripts/run_atmosphere_test_matrix.py \
+        --grid cubed_sphere --only hydro --test held_suarez --quick
+
+### Direction for next iteration
+
+iter 25: multi-resolution validation at C48 (and C72 if budget
+allows) to verify the d4_bg=0.02 setting generalises to higher
+resolution.
+
+iter 26+: substantive nord >= 2 fidelity restructure (outer-loop
+halo'd intermediate divg_d arrays).
+
 
 
