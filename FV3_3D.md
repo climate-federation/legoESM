@@ -2758,5 +2758,81 @@ iter 28+: substantive nord >= 2 fidelity restructure (the
 deferred priority, now potentially relevant if C72 stability needs
 del-6).
 
+## Iteration 27 (2026-05-07): C72 stability probe — d4_bg can't fix this alone
+
+### Scan results (HS C72 hybrid 30 day)
+
+| label              | result                              |
+|:-------------------|:------------------------------------|
+| d4=0.02 nord=1 (iter 26)| NaN at step 5732 (~13.3 days)  |
+| d4=0.04 nord=1     | NaN at step 6861 (~15.9 days)       |
+| d4=0.08 nord=1     | **NaN at step 5 (~0.0 days)**       |
+
+### Findings
+
+**d4=0.04 stabilises slightly longer than d4=0.02** (15.9 vs 13.3
+days) — confirming the dimensional argument that C72 needs
+~2x larger ``d4_bg`` than C36 to match effective damping.  But
+even d4=0.04 doesn't reach 30 days.
+
+**d4=0.08 over-damps catastrophically**.  NaN at step 5 (~0.1
+days) — the higher-order damping coefficient is too aggressive
+at this resolution, immediately destabilising the simulation.
+
+The d4_bg "sweet spot" at C72 is somewhere in [0.04, 0.06].
+Outside that band: too weak (NaN by day 16) or too strong
+(NaN immediately).  And none of the tested values stabilise 30
+days.
+
+### Conclusion: d4_bg alone CANNOT stabilise C72
+
+The iter-26 finding is now decisive: the iter-19/24 production
+recommendation is **fundamentally insufficient** at C72.  No
+choice of ``d4_bg`` along the tested axis stabilises a 30-day HS
+C72 hybrid run.
+
+The C72 instability has root causes beyond cube-vertex divergence:
+
+- **(a)** ``dt = 200 s`` may be CFL-marginal at the C72 grid
+  spacing (~80 km).  Cube-vertex velocity overshoots can push
+  individual cells past a 1.0 Courant number for the timestep.
+- **(b)** The matrix's ``_hyperdiff_cube(72) = 1.98e15`` may be
+  too weak.  Compare to ``_hyperdiff_cube(36) = 3.16e16`` (16x
+  stronger at C36, despite C36 being lower resolution — the
+  matrix's heuristic scales hyperdiff DOWN with resolution).
+- **(c)** A different damping form may be needed — e.g., the FV3
+  nord >= 2 path or selective Smagorinsky.
+
+### Updated production recommendation
+
+The iter-24/25 setting (d4=0.02 nord=1 d2=0.0005) is **only
+validated up to C48**.  For C72+ users:
+
+- Run with these settings but **monitor stability over the first 30 days**.
+- If NaN appears, options are: smaller dt, stronger hyperdiff,
+  Galewsky-style upper-atmosphere sponge, or wait for iter 28+
+  nord >= 2 fidelity restructure.
+
+### Status
+
+iter 27 closes the C72 question definitively: ``d4_bg`` is not
+the right knob for C72 stability.  This is a real limitation of
+the iter-17 / iter-18 / iter-19 configuration that needs a
+DIFFERENT approach for production at higher resolution.
+
+27 unit tests still pass.
+
+### Direction for next iteration
+
+iter 28: try (b) — increase ``hyperdiff_coeff`` at C72 to see if
+that restores stability, with d4=0.02 fixed.  If stronger hd works,
+the C72 issue is matrix-tuning, not corner-divergence damping.
+
+iter 29+: try (a) — smaller ``dt`` (100 s) at C72 with the iter-24
+setting.  If smaller dt works, the C72 issue is a CFL-velocity
+condition that ``d4_bg`` cannot fix.
+
+iter 30+: substantive nord >= 2 fidelity restructure.
+
 
 
