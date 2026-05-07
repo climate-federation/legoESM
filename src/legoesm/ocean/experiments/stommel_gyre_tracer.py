@@ -317,14 +317,20 @@ def compute_tracer_conservation_metrics(state, grid_type: str, grid,
     # Current surface salinity
     S_sfc = np.asarray(state.S.data[..., 0], dtype=np.float64)
 
-    # Integral conservation
+    # Integral conservation.
+    #
+    # iter-157: migrated from inline ``abs(S - S_init) / abs(S_init)`` with
+    # ``> 1e-30`` floor (the iter-78 pathology pattern that was systematically
+    # removed from the ocean test matrix in iter-90/91/93 but missed here).
+    # Now uses the centralized helper which applies a ``DEFAULT_MIN_BASELINE
+    # = 1.0`` floor and returns NaN if any sample is non-finite.
     S_integral = float(np.sum(S_sfc * area * mask))
     metrics["S_integral"] = S_integral
 
-    if abs(initial_values.get("S_integral", 0)) > 1e-30:
-        S_integral_init = initial_values["S_integral"]
-        integral_drift = abs(S_integral - S_integral_init) / abs(S_integral_init)
-        metrics["S_integral_drift"] = integral_drift
+    if "S_integral" in initial_values:
+        from legoesm.diagnostics import compute_relative_drift
+        metrics["S_integral_drift"] = compute_relative_drift(
+            [initial_values["S_integral"], S_integral])
 
     # Extrema preservation
     S_min = float(np.min(S_sfc[ocean]))
@@ -365,14 +371,21 @@ def compute_transport_metrics(diagnostics: Dict[str, list],
     """
     metrics = {}
 
-    # Integral conservation over time
+    # Integral conservation over time.
+    #
+    # iter-157: migrated from inline ``abs(final - init) / abs(init)`` with
+    # ``> 1e-30`` floor (the iter-78 pathology pattern) to the centralized
+    # ``compute_relative_drift`` helper.  The helper:
+    # * uses ``DEFAULT_MIN_BASELINE = 1.0`` floor (not 1e-30, which would
+    #   inflate tiny-baseline drifts by ~1e30x);
+    # * returns NaN if any sample is non-finite (instead of silently
+    #   producing NaN that downstream comparisons treat as False).
     S_integral_list = diagnostics.get("S_integral", [])
     if len(S_integral_list) >= 2:
-        S_int_init = S_integral_list[0]
-        S_int_final = S_integral_list[-1]
-        if abs(S_int_init) > 1e-30:
-            integral_drift = abs(S_int_final - S_int_init) / abs(S_int_init)
-            metrics["integral_drift"] = integral_drift
+        from legoesm.diagnostics import compute_relative_drift
+        integral_drift = compute_relative_drift(
+            [S_integral_list[0], S_integral_list[-1]])
+        metrics["integral_drift"] = integral_drift
 
     # Extrema evolution
     S_min_list = diagnostics.get("S_min", [])

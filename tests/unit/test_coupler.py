@@ -6,6 +6,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
+from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.coupler.config import CouplerConfig, TileConfig
 from legoesm.coupler.coupling_fields import AtmToSurface, SurfaceToAtm, TileResponse
@@ -1276,7 +1277,7 @@ def test_coupler_with_fv_ocean_tracer_transport():
 
     new_sfc, blended = step_fn(
         sfc_state, forcing, tile_cfg,
-        sst + 273.15,
+        sst + constants.T_freeze,  # iter-166: was 273.15 literal
         jnp.zeros(shape), jnp.zeros(shape), DT,
     )
     assert jnp.all(jnp.isfinite(blended.T_surface))

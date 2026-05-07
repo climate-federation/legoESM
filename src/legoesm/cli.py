@@ -100,6 +100,7 @@ def cmd_run(args):
 
         # Now safe to import JAX-heavy model code.
         from legoesm.driver.model_driver import ModelDriver
+        from legoesm.driver.run_status import status_to_exit_code
 
         experiment_config = config.to_experiment_config()
 
@@ -109,6 +110,17 @@ def cmd_run(args):
         logger.info("Running simulation...")
         status = driver.run()
         logger.info(f"Simulation completed: {status}")
+        # iter-109 (codex iter-104 MEDIUM-8): propagate
+        # ModelDriver status to exit code so wrappers /
+        # automation can detect BLOWUP via ``$?``.  Pre-iter-109
+        # this CLI exited 0 even when ``status="BLOWUP at day 5"``.
+        rc = status_to_exit_code(status)
+        if rc != 0:
+            logger.error(
+                f"Simulation status '{status}' does not indicate "
+                f"a clean run; exiting with code {rc}."
+            )
+            sys.exit(rc)
     except Exception as e:
         logger.error(f"Error running simulation: {e}", exc_info=True)
         sys.exit(1)

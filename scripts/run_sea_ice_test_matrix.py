@@ -99,6 +99,7 @@ import matplotlib.pyplot as plt
 
 from legoesm import constants
 from legoesm.core.field import Field
+from legoesm.diagnostics.conservation_drift import compute_relative_drift
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.ice.config import SeaIceConfig
 from legoesm.ice.state import (
@@ -669,7 +670,7 @@ def run_advect_step(tc: TestCase, outdir: Path, quick: bool) -> tuple[str, str]:
     a_bounded = float(jnp.min(a)) >= -1e-10 and float(jnp.max(a)) <= 1.0 + 1e-10
     T_bounded = float(jnp.min(T)) >= 180.0 - 1e-6 and float(jnp.max(T)) <= 271.35 + 1e-6
     vol_final = float(jnp.sum(h * a))
-    vol_drift = abs(vol_final - vol_init) / max(vol_init, 1e-20)
+    vol_drift = compute_relative_drift([vol_init, vol_final])
 
     ok = bool(h_nonneg and a_bounded and T_bounded)
     if not ok:
@@ -708,7 +709,7 @@ def run_itd_growth_remap(tc: TestCase, outdir: Path, quick: bool) -> tuple[str, 
             if float(h_r[k]) < float(lo[k]) - 1e-8 or float(h_r[k]) > float(hi[k]) + 1e-8:
                 bounds_ok = False
 
-    vol_drift = abs(vol_after - vol_before) / max(vol_before, 1e-20)
+    vol_drift = compute_relative_drift([vol_before, vol_after])
     T_bounded = jnp.all(T_r >= 180.0) and jnp.all(T_r <= 271.35)
 
     diag = {"times": [1], "vol_before": [vol_before], "vol_after": [vol_after],
@@ -745,7 +746,7 @@ def run_itd_melt_remap(tc: TestCase, outdir: Path, quick: bool) -> tuple[str, st
                 bounds_ok = False
 
     a_bounded = jnp.all(a_r >= 0.0) and jnp.all(a_r <= 1.0)
-    vol_drift = abs(vol_after - vol_before) / max(vol_before, 1e-20)
+    vol_drift = compute_relative_drift([vol_before, vol_after])
 
     diag = {"times": [1], "vol_drift": [vol_drift]}
     _save_results(outdir, tc, diag)
@@ -768,7 +769,7 @@ def run_itd_roundtrip(tc: TestCase, outdir: Path, quick: bool) -> tuple[str, str
     h_agg, T_agg, a_agg = aggregate_state(h_mc, T_mc, a_mc)
 
     vol_agg = float(h_agg * a_agg)
-    vol_drift = abs(vol_agg - vol_init) / max(vol_init, 1e-20)
+    vol_drift = compute_relative_drift([vol_init, vol_agg])
 
     h_err = abs(float(h_agg) - float(h_slab))
     T_err = abs(float(T_agg) - float(T_slab))
@@ -1007,7 +1008,7 @@ def run_cosine_bell(tc: TestCase, outdir: Path, quick: bool) -> tuple[str, str]:
 
         if (i + 1) % max(1, n_steps // 20) == 0 or i == n_steps - 1:
             vol_now = float(jnp.sum(h * a * grid.area))
-            vol_drift = abs(vol_now - vol_init) / max(vol_init, 1e-20)
+            vol_drift = compute_relative_drift([vol_init, vol_now])
             # Compute L2 error against initial condition
             diff = h - h_init
             L2 = float(jnp.sqrt(jnp.sum(diff ** 2 * grid.area) / jnp.sum(grid.area)))
@@ -1023,7 +1024,7 @@ def run_cosine_bell(tc: TestCase, outdir: Path, quick: bool) -> tuple[str, str]:
     L2 = float(jnp.sqrt(jnp.sum(diff ** 2 * area) / jnp.sum(h_init ** 2 * area + 1e-30)))
     Linf = float(jnp.max(jnp.abs(diff)) / (jnp.max(h_init) + 1e-30))
     vol_final = float(jnp.sum(h * a * area))
-    vol_drift = abs(vol_final - vol_init) / max(vol_init, 1e-20)
+    vol_drift = compute_relative_drift([vol_init, vol_final])
 
     _save_results(outdir, tc, diag)
 

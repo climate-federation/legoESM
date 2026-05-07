@@ -33,9 +33,6 @@ from legoesm.ice.transport import advect_ice_tracers
 from legoesm.ice.itd import aggregate_state, linear_remap
 from legoesm.coupler.surface_energy import surface_radiation_fluxes
 from legoesm.ice.config import SeaIceConfig
-from legoesm.ice.dynamics import evp_solver, free_drift_velocity
-from legoesm.ice.transport import advect_ice_tracers
-from legoesm.ice.itd import aggregate_state, linear_remap
 from legoesm.ice.state import (
     SeaIceState,
     DynamicSeaIceState,

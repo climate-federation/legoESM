@@ -38,9 +38,6 @@ from legoesm.grids.halo import (
     pad_halo_vector_4d,
     synchronize_cgrid_fluxes,
 )
-from legoesm.core.operators import laplacian_compact
-from legoesm.core.operators_3d import laplacian_compact_3d
-from legoesm.core.fv_tp_2d import transport_step
 from legoesm.parallel.async_halo import overlapped_halo_compute
 
 _EPS = float(jnp.finfo(jnp.float32).eps)  # Float32 machine epsilon (~1.19e-7)

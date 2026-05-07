@@ -28,7 +28,6 @@ from legoesm.grids.vertical import (
     HeightCoordinate,
     SigmaCoordinate,
     TerrainMetric,
-    compute_pressure_velocity,
     compute_sigma_dot,
     pressure_from_sigma,
     compute_sigma_dot_and_total,
@@ -76,11 +75,6 @@ from legoesm.atmosphere.physics.thermodynamics import (
     reconstruct_half_level_pressure_hydrostatic,
     sanitize_theta_rho,
 )
-from legoesm.atmosphere.dynamics.spectral_pe import (
-    SpectralHydrostaticState,
-    spectral_pe_to_grid,
-)
-from legoesm.grids.gaussian import sh_analysis_3d, vordiv_from_uv_3d
 
 
 def _get_convection_fn(config: ConvectionConfig):

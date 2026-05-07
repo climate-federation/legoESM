@@ -32,9 +32,129 @@ def _snapshot_steps(n_steps: int, n_snaps: int = 10) -> set[int]:
 
 
 def _compute_drift(values: list[float]) -> float:
-    if len(values) < 2:
-        return 0.0
-    return abs(values[-1] - values[0]) / max(abs(values[0]), 1e-30)
+    """Scalar drift wrapper.
+
+    iter-91 (codex iter-90 followup audit): the previous inline
+    implementation used ``max(abs(values[0]), 1e-30)`` — the iter-78
+    pathology pattern that was already fixed in
+    ``scripts/run_ocean_test_matrix.py:_compute_drift`` (iter-90)
+    and factored into
+    ``legoesm.diagnostics.conservation_drift`` (iter-88).  This
+    second copy in the ``ocean_test_matrix`` package was missed in
+    iter-88 and iter-90; iter-91's audit (re-greping for ``1e-30``
+    in scripts/) caught it.
+
+    Used by 10 callsites in ``experiments.py``
+    (T_drift, PE_drift, S_integral_drift).  All inherit the 1.0
+    floor convention via this delegation.
+    """
+    from legoesm.diagnostics.conservation_drift import compute_relative_drift
+    return compute_relative_drift(values)
+
+
+def _apply_drift_tolerance(
+    ok: bool, notes: str, drift: float, tol: float,
+    *, label: str, n_samples: int | None = None,
+) -> tuple[bool, str]:
+    """Thin wrapper that delegates to the centralized
+    ``legoesm.diagnostics.conservation_drift.apply_drift_tolerance``
+    helper (iter-127 codex iter-126-followup LOW-5).
+    """
+    from legoesm.diagnostics.conservation_drift import (
+        apply_drift_tolerance,
+    )
+    return apply_drift_tolerance(
+        ok, notes, drift, tol,
+        label=label, n_samples=n_samples,
+    )
+
+
+def _apply_value_threshold(
+    ok: bool, notes: str, value: float, threshold: float,
+    *, label: str, op: str = "le", units: str = "",
+    n_samples: int | None = None,
+) -> tuple[bool, str]:
+    """Thin wrapper for non-drift PASS thresholds.  Delegates
+    to ``legoesm.diagnostics.conservation_drift.apply_value_threshold``
+    (iter-128 codex iter-127-followup MEDIUM-2/3).
+
+    iter-130 (codex iter-129-followup HIGH-2): added the
+    ``n_samples`` kwarg.  Without it, callsites that pass
+    ``n_samples=`` would raise ``TypeError``.  Mirror of the
+    fix in monolithic ``run_ocean_test_matrix.py``.
+    """
+    from legoesm.diagnostics.conservation_drift import (
+        apply_value_threshold,
+    )
+    return apply_value_threshold(
+        ok, notes, value, threshold,
+        label=label, op=op, units=units, n_samples=n_samples,
+    )
+
+
+# iter-154: import the centralized sentinel from
+# legoesm.diagnostics so the same singleton is used here and
+# in scripts/run_ocean_test_matrix.py.
+from legoesm.diagnostics import DAYS_REQUIRED as _DAYS_REQUIRED
+
+
+def _apply_pe_rel_sign(
+    ok: bool, notes: str, pe_rel_final: float, *, label: str,
+    n_samples: int | None = None, days=_DAYS_REQUIRED,
+) -> tuple[bool, str]:
+    """Apply the documented ``pe_rel_final < 0`` sign
+    constraint (iter-128 codex iter-127-followup MEDIUM-2).
+
+    iter-129 (codex iter-128-followup MEDIUM-1/LOW-3): switched
+    from deprecated ``op="lt_zero"`` to general ``op="lt"`` with
+    explicit ``threshold=0.0``.  Added ``n_samples`` kwarg.
+
+    Used by Overflow and Lock Exchange (both have the same
+    documented ``pe_rel_final < 0`` contract).
+
+    iter-138 (iter-137 production finding FAIL-2): same
+    ``op="lt" → op="le"`` loosening as monolithic; the strict
+    gate broke quick mode where 28-30 timesteps weren't enough
+    for measurable PE evolution.
+
+    iter-152 (codex iter-151 review MEDIUM-2): days-aware op
+    selection — strict ``< 0`` for full mode, ``≤ 0`` for
+    quick (matches monolithic).
+
+    iter-153 (codex iter-152 review MEDIUM-1): ``days`` is
+    REQUIRED.
+
+    iter-154 (codex iter-153 review MEDIUM-1): also reject
+    ``days=None`` and non-finite/non-positive — see monolithic
+    docstring for full rationale.
+    """
+    if days is _DAYS_REQUIRED:
+        raise TypeError(
+            f"_apply_pe_rel_sign: 'days' kwarg is required "
+            f"(label={label!r})."
+        )
+    # iter-155 (codex iter-154 review LOW-1): same numbers.Real
+    # + bool reject as monolithic.
+    import math as _math
+    import numbers as _numbers
+    if (days is None or isinstance(days, bool)
+            or not isinstance(days, _numbers.Real)):
+        raise ValueError(
+            f"_apply_pe_rel_sign: 'days' must be a real number, "
+            f"got {type(days).__name__}={days!r} "
+            f"(label={label!r})."
+        )
+    days_f = float(days)
+    if not _math.isfinite(days_f) or days_f <= 0:
+        raise ValueError(
+            f"_apply_pe_rel_sign: 'days' must be a finite "
+            f"positive number, got {days!r} (label={label!r})."
+        )
+    op = "lt" if days_f >= 1.0 else "le"
+    return _apply_value_threshold(
+        ok, notes, pe_rel_final, 0.0,
+        label=label, op=op, n_samples=n_samples,
+    )
 
 
 # ===========================================================================
