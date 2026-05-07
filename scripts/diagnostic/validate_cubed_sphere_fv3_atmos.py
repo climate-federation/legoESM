@@ -135,7 +135,10 @@ def run_sw_validation(output_dir):
         wall = time.time() - t0
 
         mass_final = mass_series[-1]
-        mass_drift = abs(mass_final - mass_init) / abs(mass_init)
+        # iter-159: centralized drift helper (NaN-aware, 1.0
+        # baseline floor).  Same migration as iter-157.
+        from legoesm.diagnostics import compute_relative_drift
+        mass_drift = compute_relative_drift([mass_init, mass_final])
         ok = bool(jnp.all(jnp.isfinite(state.h)))
         edge = cube_edge_jump(state.h, grid)
 
@@ -199,7 +202,9 @@ def run_hydro_validation(output_dir):
     wall = time.time() - t0
     ok = bool(jnp.all(jnp.isfinite(s.T.data)))
     mass_final = float(global_integral(s.p_s, grid))
-    mass_drift = abs(mass_final - mass_init) / abs(mass_init)
+    # iter-159: centralized drift helper.
+    from legoesm.diagnostics import compute_relative_drift
+    mass_drift = compute_relative_drift([mass_init, mass_final])
     ps_drift = float(jnp.max(jnp.abs(s.p_s.data - state.p_s.data))) / 1e5
     edge_T = cube_edge_jump(s.T.data[..., -1], grid)
 
@@ -249,7 +254,10 @@ def run_hydro_validation(output_dir):
         if ok:
             mass_final = float(global_integral(s.p_s, grid))
             mass_init_val = float(global_integral(state.p_s, grid))
-            r["mass_drift"] = abs(mass_final - mass_init_val) / abs(mass_init_val)
+            # iter-159: centralized drift helper.
+            from legoesm.diagnostics import compute_relative_drift
+            r["mass_drift"] = compute_relative_drift(
+                [mass_init_val, mass_final])
             r["T_range"] = [float(jnp.min(s.T.data)), float(jnp.max(s.T.data))]
             edge_T = cube_edge_jump(s.T.data[..., -1], grid)
             r["edge_T_max_jump"] = edge_T["max_jump"]

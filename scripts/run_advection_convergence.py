@@ -353,10 +353,19 @@ def _run_level1_single(scheme, n_lat, n_lon, output_dir, dt_override=None,
     l2 = float(np.sqrt(np.sum(error**2 * area) / np.sum(exact**2 * area)))
     linf = float(np.max(np.abs(error)) / np.max(np.abs(exact)))
 
-    # Conservation
+    # Conservation.
+    #
+    # iter-159: migrated from inline ``abs(mass_final - mass_init) /
+    # abs(mass_init)`` to the centralized
+    # ``compute_relative_drift`` helper (uses
+    # ``DEFAULT_MIN_BASELINE = 1.0`` floor and is NaN-aware,
+    # so a blown-up run reports NaN instead of producing a
+    # silent non-finite that downstream comparisons treat as
+    # False).  Same migration as iter-157 for cosine_bell.
     mass_init = float(np.sum(np.asarray(tracer_init[..., 0]) * area))
     mass_final = float(np.sum(np.asarray(tracer[..., 0]) * area))
-    mass_drift = abs(mass_final - mass_init) / abs(mass_init)
+    from legoesm.diagnostics import compute_relative_drift
+    mass_drift = compute_relative_drift([mass_init, mass_final])
 
     result = {
         "scheme": scheme, "n_lon": n_lon, "n_lat": n_lat,
