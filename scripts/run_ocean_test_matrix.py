@@ -2032,13 +2032,25 @@ def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
         # ``OceanConfig`` does NOT expose ``bottom_drag_r`` (only
         # ``LatLonCGridOceanConfig`` and ``MPASOceanConfig`` do —
         # see src/legoesm/ocean/state.py:486 and
-        # src/legoesm/ocean/mpas_config.py:81).  Silently skip
+        # src/legoesm/ocean/mpas_config.py:81).  Skip
         # the kwarg here so wind-driven gyre runs don't crash;
         # cubed_sphere gyre runs proceed without model-level
         # linear drag (a known limitation tracked under the
         # cube-ocean user-handoff items).
-        if bottom_drag_r is not None:
-            kw["bottom_drag_r"] = bottom_drag_r
+        # iter-149 (self-review): warn the user explicitly so
+        # the silent-skip surfaces in the run log and they
+        # know cube doesn't currently get bottom drag.
+        if bottom_drag_r is not None and bottom_drag_r > 0.0:
+            import warnings
+            warnings.warn(
+                f"cubed_sphere OceanConfig does not expose "
+                f"``bottom_drag_r`` (requested {bottom_drag_r:g}). "
+                f"Cube wind-driven gyre runs proceed WITHOUT "
+                f"model-level linear drag; expect long-term "
+                f"instability (~30 days at coarse resolution).  "
+                f"Use latlon or mpas for explicit linear drag.",
+                stacklevel=2,
+            )
         config_kw = {k: v for k, v in kw.items()
                      if k != "bottom_drag_r"}
         config = OceanConfig(**config_kw)
