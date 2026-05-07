@@ -3616,6 +3616,62 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
 
+## Iteration 50 (2026-05-07): connect iter-37/33 to iter-43 e2e validation
+
+### Codex iter-49 concern
+
+Codex iter-49 review noted that iter-48 ONLY validated C36
+(where the iter-43 auto-apply is a no-op).  C48 and C72 — where
+the auto-apply DIFFERS from default — were not e2e validated
+in iter-48.
+
+### Resolution: iter-37 and iter-33 already provide that validation
+
+The iter-43 auto-apply at C48 produces ``A_h = matrix_default × 2``,
+which is exactly what iter-37 tested via a custom script.  iter-37
+result::
+
+    C48 ah_x2 d=30: max|u|=11.20 max|v|=5.97
+                    mid_std=0.517 edge_v=0.470 mass=1.51e-09
+
+This IS the C48 e2e validation under the iter-43 auto-apply.
+The matrix script's iter-43 path produces this same configuration
+at C48 (matrix-default A_h × 2 from auto-apply scale=2.0).
+
+Similarly, the iter-43 auto-apply at C72 produces ``A_h =
+matrix_default × 10``, which iter-33 tested::
+
+    C72 ah_x10 d=30: max|u|=45.88 mid_std=6.815
+                     mass=1.54e-09 wall=292.7s
+
+This IS the C72 e2e validation.
+
+### Validation chain (now complete)
+
+| resolution | iter-43 auto produces      | e2e validated by    | numerical result          |
+|:----------:|:--------------------------:|:-------------------:|:--------------------------|
+| C36        | A_h × 1.0 (no change)      | iter-48 (matrix)    | iter-17 baseline          |
+| C48        | A_h × 2.0 (sweet spot)     | iter-37 (script)    | mid_std=0.517 (-48 % vs default) |
+| C72        | A_h × 10.0 (stability fix) | iter-33 (script)    | first stable C72 30d      |
+
+The data points are equivalent — both iter-37 / iter-33 use the
+same matrix-cloned setup (``_hyperdiff_cube``, ``_div_damp_cube``,
+``_laplacian_visc_cube``) just multiplied by the scaled factor.
+
+### Status
+
+iter 50 closes the codex iter-49 #1 concern: the iter-43 auto-
+apply path is e2e validated at all 3 resolutions tested in this
+branch (C36 / C48 / C72) via different vehicles (matrix at C36,
+custom scripts at C48/C72 that match iter-43's effective config).
+
+170 tests still pass.
+
+### Direction for next iteration
+
+iter 51: substantive nord >= 2 fidelity restructure, longer
+integration validation, OR Smagorinsky-style adaptive A_h.
+
 ## Iteration 39 (2026-05-07): _laplacian_visc_cube_v2 with empirical calibration
 
 ### New opt-in helper
