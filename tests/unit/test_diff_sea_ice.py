@@ -100,6 +100,115 @@ class TestSlabIceGrad:
         grad = jax.grad(loss)(self.ocean_sst)
         assert_gradient_ok(grad, "Slab ice h_ice w.r.t. ocean_sst")
 
+    def test_partial_cover_lead_freezing_grows_concentration(self):
+        """A partially-covered cell (h > 0, A < 1) with destabilizing
+        surface flux must refreeze the open-water lead and INCREASE
+        concentration via the CICE/Icepack ``add_new_ice`` pathway.
+
+        Why non-vacuous: in iter-48's first attempt I gated dconc_growth
+        on ``~ice_mask`` (i.e., suppressed lead refreezing on any
+        partially-covered cell).  This test would fail under that
+        formulation because ΔA == 0 despite positive lead freezing.
+        It also fails the ORIGINAL buggy code's ``max(dh_dt, 0)``
+        formulation because the basal growth of existing ice produces
+        SPURIOUS ΔA.  This test only passes when lead refreezing is
+        the SOLE driver of concentration growth — exactly the CICE
+        convention.
+        """
+        # Partially-covered cell with strong surface cooling so the
+        # lead freezing rate is large.  Make ice cold (basal freezing
+        # is also active) so that the buggy ``max(dh_dt, 0)`` formula
+        # would over-grow concentration.
+        ice_state = self.state._replace(
+            h_ice=self.state.h_ice.replace(
+                data=jnp.full_like(self.state.h_ice.data, 1.0)
+            ),
+            T_ice=self.state.T_ice.replace(
+                data=jnp.full_like(self.state.T_ice.data, 250.0)
+            ),
+            concentration=self.state.concentration.replace(
+                data=jnp.full_like(self.state.concentration.data, 0.5)
+            ),
+        )
+        # Set forcing for very cold air (drives strong surface cooling
+        # → Q_sfc < 0 → freeze_flux_open > 0 → lead refreezing).
+        cold_forcing = self.forcing._replace(
+            T_lowest=jnp.full_like(self.forcing.T_lowest, 230.0),
+            sw_down=jnp.zeros_like(self.forcing.sw_down),  # polar night
+            lw_down=jnp.full_like(self.forcing.lw_down, 150.0),  # cold sky
+        )
+        ocean_sst = jnp.full_like(self.ocean_sst, 271.35)
+        out, _ = self.step_fn(
+            ice_state, cold_forcing, ocean_sst,
+            self.ocean_u, self.ocean_v,
+            self.config, U_min=1.0, dt=self.dt,
+        )
+
+        conc_change = float(jnp.max(
+            out.concentration.data - ice_state.concentration.data
+        ))
+        # Lead refreezing must INCREASE concentration on a partial-
+        # cover cell.  Under the over-restrictive iter-48-first-pass
+        # gate on ~ice_mask, this would be ΔA == 0 (FAIL).
+        assert conc_change > 1e-6, (
+            f"Concentration did not grow on partial-cover cell with "
+            f"lead refreezing (ΔA = {conc_change:.3e}).  Per CICE / "
+            f"Icepack add_new_ice convention, lead refreezing must "
+            f"increase A even when ice_mask = True."
+        )
+
+    def test_existing_ice_basal_growth_does_not_spread_laterally(self):
+        """Basal growth of EXISTING ice (ice_mask=True) should thicken
+        the floe (h_new > h) without changing concentration.  CICE
+        convention: areal concentration only grows from new-ice
+        formation in OPEN-WATER portions of the cell.
+
+        Why non-vacuous: under the prior bug
+        ``dconc_growth = max(dh_dt, 0) * (1-A) / h_new_ice``,
+        existing ice with positive dh_dt (basal freezing) would spread
+        laterally at rate ``(1-A)/h_new_ice`` per second of growth.
+        For A=0.8 and h_new_ice=0.05 m, even a small basal-growth rate
+        of dh_dt=1e-7 m/s × 3600s = 3.6e-4 m thickening produced a
+        spurious dA = 3.6e-4 · 0.2 / 0.05 = 1.4e-3 over 1 hour.
+        The test below constructs a column with strong basal growth
+        and asserts ΔA < 1e-6 — the buggy code returned ΔA ≈ 1e-3.
+        """
+        # Ice-covered cell (ice_mask=True), partial concentration.  Make
+        # T_ice cold (260 K) and ocean SST = T_freeze (no basal melt) so
+        # the conductive-flux-driven F_cond = k * (271.35 - 260) / h
+        # produces basal GROWTH (dh_dt_basal > 0).
+        cold_state = self.state._replace(
+            T_ice=self.state.T_ice.replace(
+                data=jnp.full_like(self.state.T_ice.data, 250.0)
+            ),
+        )
+        ocean_sst = jnp.full_like(self.ocean_sst, 271.35)  # ocean at freeze pt
+        out, _ = self.step_fn(
+            cold_state, self.forcing, ocean_sst,
+            self.ocean_u, self.ocean_v,
+            self.config, U_min=1.0, dt=self.dt,
+        )
+
+        h_change = float(jnp.max(out.h_ice.data - cold_state.h_ice.data))
+        conc_change = float(jnp.max(jnp.abs(
+            out.concentration.data - cold_state.concentration.data
+        )))
+
+        # Sanity: basal growth must be active (h must INCREASE)
+        assert h_change > 1e-6, (
+            f"Test setup failed: ice did not grow (Δh = {h_change}); "
+            f"basal growth path not exercised."
+        )
+
+        # Concentration must NOT spread laterally on existing ice growth
+        assert conc_change < 1e-6, (
+            f"Concentration grew by {conc_change:.3e} on existing ice "
+            f"with basal growth.  Per CICE convention, vertical growth "
+            f"of existing floes must NOT change areal concentration. "
+            f"Under the prior bug ``max(dh_dt, 0) * (1-A) / h_new_ice`` "
+            f"this would be O(1e-3) over 1 hour."
+        )
+
 
 # ============================================================================
 # 5b  Dynamic sea ice (EVP)
@@ -186,7 +295,7 @@ class TestRheologyGrad:
             s11, s22, s12 = evp_stress_update(
                 sigma_11, sigma_22, sigma_12,
                 eps_11, eps_22, eps_12, P,
-                e_yield=2.0, T_evp=0.36, dt_s=30.0,
+                e_yield=2.0, T_evp=0.36, dt_s=30.0, N_evp=120,
             )
             return jnp.sum(s11 ** 2 + s22 ** 2 + s12 ** 2)
 

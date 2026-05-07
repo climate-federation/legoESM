@@ -32,7 +32,7 @@ from legoesm import constants
 # Physical constants
 KAPPA = constants.kappa_vk  # von Kármán constant (0.4)
 G = constants.g
-NU_AIR = 1.5e-5  # kinematic viscosity of air [m²/s]
+NU_AIR = constants.nu_air  # kinematic viscosity of air [m²/s]
 
 
 # ============================================================================

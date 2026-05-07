@@ -278,11 +278,14 @@ class CoupledESMDriver:
         if not cfg.co2_tracer:
             return
 
-        # CO2 as a prognostic atmospheric tracer
-        # Mixing ratio: co2_ppmv * 1e-6 * (M_CO2 / M_air)
-        M_CO2 = 44.01
-        M_air = 28.97
-        co2_init_kgkg = cfg.co2_ppmv_init * 1.0e-6 * (M_CO2 / M_air)
+        # CO2 as a prognostic atmospheric tracer.
+        # Mixing ratio: co2_ppmv * 1e-6 * (M_CO2 / M_air).
+        # Molar masses come from ``legoesm.constants`` per CLAUDE.md
+        # (no hardcoded physical constants in production code).
+        co2_init_kgkg = (
+            cfg.co2_ppmv_init * 1.0e-6
+            * (constants.M_CO2 / constants.M_air)
+        )
 
         # Get 3D shape from atmosphere state
         T_data = self._atm.state.T.data
@@ -351,12 +354,28 @@ class CoupledESMDriver:
         sw_down = sw_net_sfc / jnp.maximum(1.0 - albedo_eff, 0.01)
 
         T_sfc = blend_surface_temperature(sst, sic, acfg.T_ice)
-        eps_sfc = 0.96
+        # Surface emissivity comes from the coupler config (per-tile
+        # ocean/ice/land emissivity is blended via tile fractions
+        # downstream).  The 0.96 broad-spectrum default lives in the
+        # ``CoupledDriverConfig.surface_emissivity`` field, falling
+        # back to the canonical ocean emissivity from
+        # ``constants.emissivity_ocean`` if not set.
+        eps_sfc = getattr(
+            self.coupled_cfg, "surface_emissivity",
+            constants.emissivity_ocean,
+        )
         lw_up_sfc = eps_sfc * constants.sigma_sb * T_sfc ** 4
         lw_down = (lw_net_sfc + lw_up_sfc) / jnp.maximum(eps_sfc, 0.01)
 
         precip_total = jnp.maximum(seg_precip, 0.0)
-        snow_frac = jnp.where(T_low < constants.T_freeze, 1.0, 0.0)
+        # Smooth snow fraction (Wigmosta 1994 / Dai 2008): ramp from 0
+        # at T_low = T_freeze + 2 K to 1 at T_low = T_freeze - 2 K.
+        # The prior hard step ``where(T_low < T_freeze, 1, 0)`` killed
+        # gradients (training/DA paths) and miscounted mixed-phase
+        # precipitation in the 0–4 °C band.
+        snow_frac = jnp.clip(
+            (constants.T_freeze + 2.0 - T_low) / 4.0, 0.0, 1.0,
+        )
         precip_snow = precip_total * snow_frac
 
         # Cosine zenith
@@ -365,7 +384,9 @@ class CoupledESMDriver:
         lat = self._atm._grid_lat
         if lat is not None:
             from legoesm.atmosphere.physics.radiation.solar import daily_mean_insolation
-            S_0 = getattr(acfg, 'S_0', 1360.0)
+            # Solar constant from legoesm.constants per CLAUDE.md.
+            # ``acfg.S_0`` allows override for sensitivity studies.
+            S_0 = getattr(acfg, 'S_0', constants.S_0)
             Q_daily = daily_mean_insolation(lat, float(doy), S_0=S_0)
             cos_zen = jnp.clip(Q_daily / S_0, 0.0, 1.0)
         else:
@@ -373,9 +394,10 @@ class CoupledESMDriver:
 
         # CO2: prognostic or constant
         if self.coupled_cfg.co2_tracer and hasattr(self, '_co2_field'):
-            M_CO2, M_air = 44.01, 28.97
             co2_lowest = self._co2_field[..., -1]
-            co2_ppmv = co2_lowest / (M_CO2 / M_air) * 1.0e6
+            co2_ppmv = (
+                co2_lowest / (constants.M_CO2 / constants.M_air) * 1.0e6
+            )
         else:
             co2_ppmv = jnp.full_like(p_s, self.atm_config.co2_ppmv)
 
@@ -496,8 +518,10 @@ class CoupledESMDriver:
         }
         idx = 3
         if has_co2:
-            M_CO2, M_air = 44.01, 28.97
-            diag["co2_ppmv_mean"] = float(host[idx]) / (M_CO2 / M_air) * 1e6
+            diag["co2_ppmv_mean"] = (
+                float(host[idx])
+                / (constants.M_CO2 / constants.M_air) * 1e6
+            )
             idx += 1
         if has_T_sfc:
             diag["T_sfc_mean"] = float(host[idx])

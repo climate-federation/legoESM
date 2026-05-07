@@ -4,8 +4,17 @@ from __future__ import annotations
 
 from typing import Callable
 
+import jax.numpy as jnp
+
+from legoesm import constants
 from legoesm.grids.cubed_sphere import CubedSphereGrid
-from legoesm.ocean.eos import compute_ocean_rho as _compute_rho
+from legoesm.ocean.eos import (
+    compute_ocean_rho as _compute_rho,
+    rho_0 as _RHO_0,
+    c_sw as _C_SW,
+    thermal_expansion_coeff,
+    haline_contraction_coeff,
+)
 from legoesm.ocean.state import OceanState, OceanTendencies
 from legoesm.ocean.vertical import OceanZStarCoordinate, compute_ocean_jacobian
 from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig

@@ -244,7 +244,15 @@ def fv_flux_divergence_3d(
     q_3d: jax.Array, u_3d: jax.Array, v_3d: jax.Array,
     grid: CubedSphereGrid, limiter: bool = True,
 ) -> jax.Array:
-    """Conservative FV flux divergence at all levels via vmap.
+    """Conservative FV flux-divergence TENDENCY at all levels via vmap.
+
+    **Sign convention** (load-bearing, audit cycle iter-35):
+    Returns the tracer tendency form ``dq/dt = -div(q · v)``, NOT
+    the raw divergence ``+div(q · v)``.  Callers that want moisture
+    convergence should use this output directly without further
+    negation; callers that want the divergence quantity itself should
+    explicitly negate the output.  See the underlying ``_fv_flux_
+    divergence_2d`` (operators_fv.py) for the formula.
 
     Parameters
     ----------
@@ -256,6 +264,7 @@ def fv_flux_divergence_3d(
     Returns
     -------
     jax.Array : shape (6, n, n, nlev)
+        ``dq/dt = -div(q · v)`` — the tracer-advection tendency.
     """
     def single_level(q_k, u_k, v_k):
         return _fv_flux_divergence_2d(q_k, u_k, v_k, grid, limiter)

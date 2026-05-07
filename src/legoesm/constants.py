@@ -17,7 +17,12 @@ R_earth = 6.371229e6            # Earth mean radius [m]
 # ==============================================================================
 R_d = 287.05                    # Gas constant for dry air [J/(kg*K)]
 c_pd = 1004.64                  # Specific heat at constant pressure [J/(kg*K)]
-c_vd = 717.56                   # Specific heat at constant volume [J/(kg*K)]
+# Enforce the thermodynamic identity ``R_d = c_pd - c_vd`` exactly so
+# the compressible Euler EOS (``pressure_from_eos``: p_0 · (R_d·ρ·θ/p_0)^(c_p/c_v))
+# is consistent.  An earlier hardcoded value of 717.56 violated the
+# identity by 0.03 J/(kg·K), introducing a ~0.01 % bias in p that
+# compounded in tendencies.  Audit cycle iter-39 finding MEDIUM #6.
+c_vd = c_pd - R_d               # Specific heat at constant volume [J/(kg*K)] = 717.59
 kappa = R_d / c_pd              # Poisson constant R_d/c_pd (~0.2857)
 p_ref = 1.0e5                   # Reference pressure [Pa] (1000 hPa)
 
@@ -33,8 +38,20 @@ L_s = 2.834e6                   # Latent heat of sublimation at 0C [J/kg]
 L_f = 3.337e5                   # Latent heat of fusion at 0C [J/kg]
 rho_water = 1000.0              # Density of liquid water [kg/m^3]
 rho_ice = 917.0                 # Density of ice [kg/m^3]
+rho_air = 1.225                 # Reference dry-air density at sea level [kg/m^3]
+rho_ocean = 1025.0              # Reference seawater density [kg/m^3] (= ocean.eos.rho_0)
+c_sw = 3994.0                   # Specific heat of seawater [J/(kg*K)] (Gill 1982)
 T_freeze = 273.15               # Freezing point of water [K]
 T_freeze_ocean = 271.35         # Freezing point of seawater [K] (~-1.8 C)
+# Freshwater EOS local-parabolic fit (Kell 1975 / Jones-Harris)
+T_freshwater_max_density = 277.133  # Max-density temperature [K] (~3.983 C)
+rho_freshwater_curvature = 8.0e-6   # ρ-anomaly curvature [K^-2] from d²ρ/dT² at T_max
+
+# Molar masses (g/mol) — used for CO2 ↔ mixing-ratio conversions, etc.
+# Dry-air mean molar mass (NIST, US Standard Atmosphere 1976)
+M_air = 28.9647        # [g/mol] dry air
+M_CO2 = 44.01           # [g/mol] CO2
+M_H2O = 18.01528        # [g/mol] water
 
 # ==============================================================================
 # Moisture Parameters
@@ -46,6 +63,20 @@ epsilon = R_d / R_v              # Molecular weight ratio (~0.622)
 # ==============================================================================
 sigma_sb = 5.670374419e-8       # Stefan-Boltzmann constant [W/(m^2*K^4)]
 S_0 = 1361.0                    # Total solar irradiance [W/m^2]
+
+# Broadband longwave emissivities (used as defaults when a tile config
+# does not specify its own).  Sea-water and most ice surfaces are
+# near-blackbody in the thermal-IR window; sand/dry-soil ~0.91.
+# Note: ``driver/config.py`` and ``driver/physics_pipeline.py`` carry
+# pre-existing ``emissivity_ice = 0.95`` defaults that predate the
+# centralisation here.  0.97 is the fresh-sea-ice / fresh-snow
+# value used by ``ice/config.py`` and the bare-ice albedo path; 0.95
+# represents a melt-pond / weathered ice surface mix.  Reconciliation
+# is tracked as a follow-up — see slopbuster review of
+# Physical_Consistency PR.
+emissivity_ocean = 0.97         # [-] open ocean / lake water
+emissivity_ice = 0.97           # [-] fresh sea ice / fresh snow
+emissivity_land = 0.95          # [-] generic land surface
 
 # ==============================================================================
 # Molecular Weights
@@ -73,6 +104,7 @@ RAD_TO_DEG = 180.0 / jnp.pi
 # Turbulence
 # ==============================================================================
 kappa_vk = 0.4                  # von Kármán constant
+nu_air = 1.5e-5                 # Kinematic viscosity of air at 15°C [m^2/s]
 
 # ==============================================================================
 # Shallow Water Test Case Constants

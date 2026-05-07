@@ -65,6 +65,56 @@ def test_bulk_formula_emissivity_field_present():
     assert bf_default.emissivity == pytest.approx(0.97)
 
 
+def test_bulk_formula_constant_heat_flux_uses_wind_speed():
+    """Heat fluxes must scale with |U_a|, not signed U_a.
+
+    Audit cycle 2026-05-05 finding F2/F1: the constant-coefficient
+    branch used signed ``cfg.U_a`` for Q_sh and Q_lh, which inverted
+    the sign of the heat fluxes under easterlies (cfg.U_a < 0).  A
+    strong easterly wind should still cool a warm ocean, not warm
+    it.
+
+    Regression test: run the constant-coefficient bulk formula with
+    +5 m/s and -5 m/s zonal wind at the SAME magnitude and verify
+    that Q_sh and Q_lh are identical (both magnitudes are |U_a|·5).
+    The stress, however, should flip sign with U_a.
+    """
+    from legoesm.ocean.physics.surface_forcing.bulk_formulas import (
+        bulk_formula_surface_forcing,
+    )
+    from legoesm.ocean.vertical import create_ocean_z_star
+
+    # Tiny single-cell column: SST 295 K (warm), atm 290 K (cool air).
+    # Either wind sign should produce upward sensible heat flux.
+    T = jnp.array([[[[295.0]]]])
+    S = jnp.array([[[[35.0]]]])
+    z_coord = create_ocean_z_star(n_levels=1, H_max=10.0)
+    jacobian = jnp.array([[[1.0]]])
+
+    bf_east = BulkFormulaConfig(
+        bulk_scheme="constant", U_a=5.0,
+        T_a=290.0, q_a=5e-3, rho_a=1.2,
+        SW_down=0.0, LW_down=320.0,
+    )
+    bf_west = bf_east._replace(U_a=-5.0)
+
+    out_east = bulk_formula_surface_forcing(T, S, z_coord, jacobian, bf_east)
+    out_west = bulk_formula_surface_forcing(T, S, z_coord, jacobian, bf_west)
+
+    # Q_net (the magnitude minus radiation) is the same regardless of
+    # wind sign because turbulent fluxes scale with |U_a|.  Compare
+    # the dT_dt magnitudes.
+    assert jnp.allclose(out_east.Q_net, out_west.Q_net, rtol=1e-12), (
+        f"Q_net should be identical for +U_a vs -U_a; "
+        f"east={float(out_east.Q_net):.4e}, west={float(out_west.Q_net):.4e}"
+    )
+
+    # Stress is directional → sign should flip.
+    assert jnp.allclose(out_east.tau_x, -out_west.tau_x, rtol=1e-12), (
+        "tau_x should flip sign with U_a"
+    )
+
+
 @pytest.mark.parametrize("scheme", ["none", "harmonic", "biharmonic", "gm_redi"])
 def test_lateral_mixing_factory_dispatch(scheme):
     from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig

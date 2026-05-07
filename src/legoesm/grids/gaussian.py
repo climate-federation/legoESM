@@ -188,6 +188,7 @@ def create_gaussian_grid(
     n_max: int,
     radius: float = constants.R_earth,
     *,
+    omega: float = constants.Omega,
     dealiasing: str = "quadratic",
     allow_unsupported_backend: bool = False,
     legoesm_config=None,
@@ -200,6 +201,12 @@ def create_gaussian_grid(
         Spectral truncation.
     radius : float
         Sphere radius [m].
+    omega : float
+        Planetary rotation rate [rad/s] used to populate ``f =
+        2·omega·sin(lat)``.  Default ``constants.Omega`` (Earth).  Set
+        to ``0.0`` for the canonical DCMIP 2008 §3-1 non-rotating
+        gravity-wave test, or to ``constants.Omega · X`` for the
+        Wedi-Smolarkiewicz 2009 small-planet framework.
     dealiasing : str
         Dealiasing rule for the transform grid size:
         - ``"quadratic"`` (default): n_lat = 3*(n_max+1)//2.
@@ -334,7 +341,7 @@ def create_gaussian_grid(
 
     # Build 2D grids
     lon2d_np, lat2d_np = np.meshgrid(lon_np, lat_np)
-    f_np = 2.0 * constants.Omega * sin_lat_np[:, None] * np.ones((1, n_lon))
+    f_np = 2.0 * float(omega) * sin_lat_np[:, None] * np.ones((1, n_lon))
 
     target_device = jax.devices("cpu")[0] if backend == "metal" else None
 

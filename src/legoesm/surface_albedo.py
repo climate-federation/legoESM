@@ -83,7 +83,7 @@ class IceAlbedoConfig(NamedTuple):
     alpha_ice_cold: float = 0.65
     alpha_ice_warm: float = 0.45
     T_transition_width: float = 5.0
-    T_freeze: float = 271.35
+    T_freeze: float = 271.35       # = constants.T_freeze_ocean
 
 
 class OceanAlbedoConfig(NamedTuple):

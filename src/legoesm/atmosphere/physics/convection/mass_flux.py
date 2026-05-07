@@ -171,7 +171,7 @@ def _apply_mass_flux_kernel(
     z: jax.Array,
     rho: jax.Array,
     delta_0: float,
-    M_u_max: float = 0.05,
+    M_u_max: float,
     p_min_convection: float = 10_000.0,
     p_gate_sharpness: float = 1_500.0,
 ) -> Tuple[jax.Array, jax.Array, jax.Array]:
@@ -218,10 +218,11 @@ def _apply_mass_flux_kernel(
     # Per-layer convective heating ``≈ delta_0 · M_u · (T_u−T)/ρ``
     # scales linearly with ``M_u``, so an uncapped ``M_u`` produces
     # column heating well in excess of what surface fluxes can supply
-    # and destabilises the integration.  Clipping at the cap (default
-    # ``0.05 kg/m²/s``, the literature peak tropical updraft mass flux)
-    # bounds per-layer tendencies without distorting the moist adiabat
-    # or the q_v / q_c split.
+    # and destabilises the integration.  Callers thread the cap from
+    # their config NamedTuple (typically ``config.M_b_max ≈ 0.05
+    # kg/m²/s``, the literature peak tropical updraft mass flux); the
+    # clip bounds per-layer tendencies without distorting the moist
+    # adiabat or the q_v / q_c split.
     M_profile = jnp.clip(M_profile, 0.0, M_u_max)
 
     # Stratospheric pressure gate — see ``stratosphere_mass_flux_gate``.

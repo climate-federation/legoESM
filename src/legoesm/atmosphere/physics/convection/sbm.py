@@ -89,7 +89,17 @@ def sbm_convection(
     # 3. Identify the convective layer: only levels where the moist adiabat
     #    is warmer than the environment (conditional instability).
     #    This prevents adjusting the stable stratosphere (Frierson 2007).
-    cloud_mask = (T_moist >= T).astype(T.dtype)  # (ncol, nlev)
+    #
+    #    A pure ``(T_moist >= T).astype(...)`` boolean breaks
+    #    differentiability (∂mask/∂T = 0 a.e.), but a pure sigmoid changes
+    #    the FORWARD semantics — at the surface the moist adiabat is
+    #    initialized from T[:,-1] so ``T_moist - T = 0`` gives mask = 0.5
+    #    instead of the prior mask = 1.  Use a straight-through estimator:
+    #    forward = hard step (preserve prior numerics exactly), backward =
+    #    sigmoid' (keep gradients alive across layer membership).
+    soft = jax.nn.sigmoid(config.cloud_mask_sharpness * (T_moist - T))
+    hard = (T_moist >= T).astype(T.dtype)
+    cloud_mask = soft + jax.lax.stop_gradient(hard - soft)  # (ncol, nlev)
 
     # 4. Compute CAPE from the RAW moist adiabat (before enthalpy correction)
     #    to avoid artificial CAPE from the Newton correction.
