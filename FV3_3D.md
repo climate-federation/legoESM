@@ -301,4 +301,92 @@ This iteration commits the diagnostic data to FV3_3D.md but **makes no
 source code changes** because no FV3-faithful single-operator fix
 exists for the underlying problem.
 
+## Iteration 3 (2026-05-07): FV3 Lin (1997) cross-product PGF — port + tests
+
+Started option (b) above with the most surgical FV3 architecture
+piece: the Lin (1997) cross-product hydrostatic pressure-gradient
+force from `dyn_core.F90:p_grad_c` (line 2073).  This formulation
+gives EXACT cancellation of the hydrostatic balance term in any
+column by CONSTRUCTION — it does not split into ∇Φ + R_d*T*∇(ln p_s)
+that O(dx) halo errors can break, the way our existing A-L corner
+gradient does.
+
+### New module: `src/legoesm/atmosphere/dynamics/_fv3_lin_pgf.py`
+
+Three faithful ports of FV3 hydrostatic helpers:
+
+1. `compute_pkappa_half(p_s, coord)` — `pk_half = p_half^κ` at cell
+   centres, mirroring FV3 `dyn_core.F90:2746`.
+2. `compute_geopotential_half_fv3(T, p_s, phis, coord)` — bottom-up
+   `gz(k) = gz(k+1) + cp*θ(k)*δpk(k)` where θ = T*(p_ref/p_full)^κ,
+   matching FV3 `dyn_core.F90:2767-2778`.  Necessary because the
+   cross-product PGF requires geopotential at half-levels using the
+   FV3-specific recurrence; our existing `compute_geopotential_hybrid`
+   uses Simmons-Burridge at full levels which would break the
+   discrete cancellation.
+3. `fv3_lin1997_pgf_3d_cgrid(T, p_s, phis, coord, cdgrid)` — direct
+   port of `p_grad_c` (lines 2098-2129).  Returns the PGF tendency at
+   C-grid u/v faces with the **correct Fortran sign** (verified by
+   the `test_surface_pressure_tilt_produces_pgf` unit test below).
+4. `project_cgrid_pgf_to_dgrid_corners(pgf_x_c, pgf_y_c)` — 2-point
+   average from C-grid faces to D-grid corners (the bridge our C-D
+   grid prognostic-wind storage requires; FV3's normal-D-grid
+   architecture would skip this projection entirely).
+
+The 2-point projection is a SIMPLE average, not the A-L 4-point matrix
++ Cartesian rotation that the existing `_arakawa_lamb_gradient` uses.
+This is the structural improvement: the Lin cross-product PGF at
+C-grid faces is well-conditioned (no halo-amplification), and the
+2-point projection to corners cannot amplify halo errors either.
+
+### Unit tests: `tests/test_fv3_lin_pgf.py`
+
+Four tests, all passing:
+
+| Test | Property | Result |
+|------|----------|--------|
+| uniform hydrostatic state | C-grid PGF = 0 (machine precision) | max\|pgf\| < 1e-5 m/s² ✓ |
+| D-grid projection | corner PGF = 0 | max\|pgf\| < 1e-5 m/s² ✓ |
+| gz_half recurrence | `gz(k) - gz(k+1) = cp*θ*δpk` | rel err < 1e-12 ✓ |
+| p_s tilt drives westward PGF | sign convention matches FV3 | mean PGF on face 0 NEGATIVE ✓ |
+
+Tests verify that the implementation:
+- Reproduces machine-precision exact hydrostatic cancellation (the
+  whole point of the Lin formulation).
+- Has the correct Fortran sign convention so it can be added directly
+  to `du_c/dt`.
+- Has internally consistent gz/pk arithmetic (the recurrence holds
+  exactly).
+
+### Status
+
+Module is implemented and unit-tested.  **NOT YET WIRED** into
+`fv3_hydrostatic_tendencies` — that requires a config-flag-gated
+opt-in path that swaps out the existing
+`(dB/dx + pg_corr_x = ∇(KE+Φ) + R_d*T*∇(ln p_s))` block with
+`(dKE/dx + project_cgrid_pgf_to_dgrid_corners(...))`.  The KE part of
+the existing dB/dx must be retained (it's the rotational vector form
+term) but the Φ part must be removed (replaced by the cross-product
+PGF).  This wiring change is the iter-4 deliverable.
+
+### Direction for next iteration
+
+iter 4: wire `fv3_lin1997_pgf_3d_cgrid` into
+`fv3_hydrostatic_tendencies` behind `use_fv3_lin_pgf: bool = False`
+config flag.  Default OFF so all existing tests still pass.  When ON:
+1. Compute KE-only Bernoulli: `B_KE = KE` (drop Φ)
+2. Compute `dKE/dx, dKE/dy_perp` via existing A-L gradient
+3. Compute `pgf_x_c, pgf_y_c` via new Lin (1997) function
+4. Project to corners: `pgf_x_d, pgf_y_d`
+5. Replace `du_d/dt = ζ*v - dB/dx - pg_corr_x` with
+   `du_d/dt = ζ*v - dKE/dx + pgf_x_d`
+6. Same for `dv_d/dt`
+7. Skip the existing `pg_corr_x, pg_corr_y_perp` computation entirely
+   (the cross-product already includes the η-coordinate correction)
+
+Then: re-run HS C36 hybrid 30-day with `use_fv3_lin_pgf=True` and
+quantify the cube-imprint reduction against iter-2 baseline metrics
+(edge_std, max\|v\|, eddy_std).
+
+
 
