@@ -4,6 +4,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
+from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.core.state import ShallowWaterState
 from legoesm.core.conservation import (
@@ -74,7 +75,7 @@ class TestConservationFixers:
         def total_energy(s):
             h, u, v, h_s = s.h.data, s.u.data, s.v.data, s.h_s.data
             ke = 0.5 * h * (u**2 + v**2)
-            pe = 0.5 * 9.80616 * (h + h_s)**2
+            pe = 0.5 * constants.g * (h + h_s)**2  # iter-166: was 9.80616
             return jnp.sum((ke + pe) * grid.area)
 
         E_old = total_energy(state)
@@ -96,7 +97,7 @@ class TestConservationFixers:
         def total_energy(s):
             h, u, v, h_s = s.h.data, s.u.data, s.v.data, s.h_s.data
             ke = 0.5 * h * (u**2 + v**2)
-            pe = 0.5 * 9.80616 * (h + h_s)**2
+            pe = 0.5 * constants.g * (h + h_s)**2  # iter-166: was 9.80616
             return jnp.sum((ke + pe) * grid.area)
 
         E_old = total_energy(state)

@@ -193,8 +193,12 @@ class TestEnergyConservation:
     def test_energy_bounded(self, mesh):
         """Total energy should stay bounded over 50 steps."""
         from legoesm.core.operators_voronoi import kinetic_energy_cell
+        # iter-166: replaced literal 9.80616 with constants.g per
+        # CLAUDE.md "Tests and scripts must follow the constant-
+        # hygiene rule too."
+        from legoesm import constants
 
-        g = 9.80616
+        g = constants.g
         config = MPASShallowWaterConfig(
             g=g,
             pv_scheme="energy",
