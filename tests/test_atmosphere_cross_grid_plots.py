@@ -2190,6 +2190,40 @@ class TestHeldSuarezDissipationImbalance:
         assert scale == 1.0
         assert msg is None
 
+    def test_auto_ah_scale_edge_cases(self):
+        """iter 45 codex review: edge-case handling for env_value."""
+        import pytest as _pytest
+
+        # Empty env var → treated as unset (auto-apply).
+        scale, msg = M._auto_ah_scale(72, "")
+        assert scale == 10.0, "empty env var should fall through to auto"
+        assert msg is not None and "iter-33" in msg
+
+        # Whitespace-only env var → also treated as unset.
+        scale, msg = M._auto_ah_scale(72, "   ")
+        assert scale == 10.0
+        assert msg is not None
+
+        # Negative scale → ValueError.
+        with _pytest.raises(ValueError, match="finite positive"):
+            M._auto_ah_scale(72, "-1.0")
+
+        # Zero scale → ValueError (would zero out viscosity).
+        with _pytest.raises(ValueError, match="finite positive"):
+            M._auto_ah_scale(72, "0")
+
+        # NaN → ValueError.
+        with _pytest.raises(ValueError, match="finite positive"):
+            M._auto_ah_scale(72, "nan")
+
+        # inf → ValueError.
+        with _pytest.raises(ValueError, match="finite positive"):
+            M._auto_ah_scale(72, "inf")
+
+        # Non-numeric → ValueError (from float() conversion).
+        with _pytest.raises(ValueError):
+            M._auto_ah_scale(72, "not-a-number")
+
     def test_laplacian_visc_cube_v2_extrapolation_powerlaw(self):
         """iter 39: the v2 log-linear extrapolation should produce
         ``A_h ∝ n^2.32`` between C36 and C72.  Pin the slope.

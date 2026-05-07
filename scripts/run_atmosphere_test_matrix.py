@@ -525,18 +525,33 @@ def _auto_ah_scale(n: int, env_value: str | None = None) -> tuple[float, str | N
     Returns ``(scale, message_or_none)``.  ``message`` is non-None when
     the auto-apply fires (so the matrix can ``print`` it once).
 
-    Auto-apply rules (when ``env_value`` is None):
+    Auto-apply rules (when ``env_value`` is None or empty string):
     -   n  <  48  → scale=1.0 (no change, iter-19 default)
-    -   n  ∈ [48, 72) → scale=2.0 (iter-37 sweet spot)
-    -   n  >= 72  → scale=10.0 (iter-33 stability fix)
+    -   n  ∈ [48, 72) → scale=2.0 (iter-37 sweet spot, EXTRAPOLATED
+        from C48 stability data — C60 is inferred, not directly
+        validated; codex iter-45 review caveat)
+    -   n  >= 72  → scale=10.0 (iter-33 stability fix at C72; C96+
+        EXTRAPOLATED, not validated)
 
-    When ``env_value`` is provided (string), it is parsed as a float
-    and used unchanged — this is the explicit-override path.
+    When ``env_value`` is provided (string) and non-empty, it is
+    parsed as a float and used unchanged — this is the explicit-
+    override path.  Validation: must be finite positive; 0, NaN,
+    inf, and negative values raise ``ValueError``.
 
-    See ``FV3_3D.md`` iter 33-43 for the calibration history.
+    See ``FV3_3D.md`` iter 33-45 for the calibration history.
     """
-    if env_value is not None:
-        return float(env_value), None
+    import math
+    # iter-45 codex feedback: treat '' (empty env var) as unset.
+    if env_value is not None and env_value.strip() != "":
+        scale = float(env_value)
+        # iter-45 codex feedback: validate finite positive.
+        if not math.isfinite(scale) or scale <= 0.0:
+            raise ValueError(
+                f"LEGOESM_AH_SCALE must be a finite positive float, "
+                f"got {env_value!r} (parsed as {scale}).  Unset the "
+                f"env var to use the iter-43 auto-apply default."
+            )
+        return scale, None
     if n >= 72:
         return 10.0, (
             f"[FV3_3D iter 43 auto] At C{n} auto-applying "
