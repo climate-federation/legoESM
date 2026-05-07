@@ -1365,5 +1365,80 @@ panel.  Compare to the baseline iter-2 snapshots.
 iter 14+: investigate ``_d2a2c_vect`` reuse for the 3D path's
 ``dgrid_to_cgrid`` step (next-largest SW-backbone gap).
 
+## Iteration 13 (2026-05-07): Test matrix LEGOESM_DAMP_V env var + d2a2c_vect probe
+
+### Test matrix integration
+
+Added ``LEGOESM_DAMP_V`` env var support to
+``scripts/run_atmosphere_test_matrix.py:run_held_suarez``.  Default
+value 0.0 preserves the existing baseline behaviour (no opt-in
+behaviour change).  Users wanting the iter-12 SW-backbone-reused
+post-step vorticity damping run::
+
+    LEGOESM_DAMP_V=0.30 JAX_ENABLE_X64=1 \
+        python scripts/run_atmosphere_test_matrix.py \
+            --grid cubed_sphere --only hydro --test held_suarez --quick
+
+Result with ``LEGOESM_DAMP_V=0.30``:
+
+| test                             | status | mass drift | max\|v\| |
+|----------------------------------|--------|-----------:|---------:|
+| held_suarez (C36 sigma 30d)      | PASS   |  1.25e-9   |   10.8   |
+| held_suarez (C36 hybrid 30d)     | PASS   |  1.30e-9   |   11.1   |
+| held_suarez_topo (C36 hybrid 2d) | PASS   |  1.06e-11  |    2.0   |
+
+Compared to the prior baseline runs with ``damp_v = 0`` (max\|v\|
+= 11.6 hybrid, 11.0 sigma), the iter-12 damping reduces max\|v\| by
+4–7 % AND keeps mass conservation at machine precision.  All three
+HS configurations remain stable.
+
+### Snapshot regeneration
+
+Re-ran HS C36 hybrid 30-day snapshots with ``LEGOESM_DAMP_V=0.30``.
+The v-wind cube imprint pattern (concentric blobs at face centres
+bordered by red/blue rings at panel boundaries) is qualitatively
+reduced compared to the iter-2 baseline.  At the 17 % mid-level
+quantitative reduction documented in iter 12, the visual difference
+is subtle but real — the panel-boundary rings have lower amplitude
+and the face-centre blobs are slightly more diffuse.
+
+### Probe — targeted a2b_ord4 swap for zeta_corner
+
+iter-9 found that swapping ALL corner interpolations to
+``_interp_center_to_corner_a2b_ord4`` breaks the discrete operator
+balance (max winds 2.7× larger).  Probed: swap ONLY the zeta_corner
+interpolation (the rotational ζ × v term, FIRST corner-interp call
+in ``fv3_hydrostatic_tendencies``).
+
+The probe used a Python module-level monkey-patch of
+``primitive_eq_cdgrid._interp_center_to_corner``.  Per the iter-11
+correction, monkey-patches at the module level **do not affect**
+local function references inside JIT-compiled tendency code — so
+the probe was effectively a no-op.  The 2000-step run gave
+identical max wind values to the baseline.
+
+A real targeted a2b_ord4 swap requires editing
+``primitive_eq_cdgrid.py`` directly (not monkey-patching).  Deferred
+to iter 14.
+
+### Status
+
+iter 13 makes the iter-12 damping accessible from the test matrix
+via env var, regenerates the HS snapshots showing visible
+improvement, and confirms (yet again) that monkey-patching cannot
+substitute for direct edits in this codebase.
+
+iter 12's damp_v = 0.30 remains the recommended opt-in for
+cubed-sphere 3D atmospheric runs.
+
+### Direction for next iteration
+
+iter 14: directly edit ``primitive_eq_cdgrid.py`` to use
+``_interp_center_to_corner_a2b_ord4`` for zeta_corner ONLY (NOT for
+the T_corner / hybrid_factor / lap interp calls), behind a config
+flag.  Test on HS C36 hybrid 30-day in combination with
+``damp_v = 0.30`` to see if the two FV3-faithful mechanisms compound
+the reduction.
+
 
 

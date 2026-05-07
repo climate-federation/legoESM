@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 import time
@@ -2474,9 +2475,14 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         # or 200-day spin-up — those may have different optimal τ.
         # Keep the 1-h default for this HS test until a more
         # principled retuning is done.
+        # FV3_3D iter 13: optional FV3-faithful post-step vorticity
+        # damping (SW backbone reuse).  Set LEGOESM_DAMP_V=0.30 to
+        # opt in (~17 % mid-level cube-imprint reduction at C36).
+        _damp_v_env = float(os.environ.get("LEGOESM_DAMP_V", "0.0"))
         config = PrimitiveEquationConfig(
             hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
             div_damp_coeff=dd, A_h=ah,
+            damp_v=_damp_v_env, nord_v=2,
             use_conservation_fixer=True, fix_mass=True)
         model = PrimitiveEquationModel(grid, sigma, config)
         if _topo:
