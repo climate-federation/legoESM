@@ -2215,6 +2215,36 @@ class TestHeldSuarezDissipationImbalance:
         assert scale == 5.0
         assert msg is None
 
+    def test_auto_ah_scale_precedence_explicit_wins(self):
+        """iter 49 codex review: pin the precedence ordering.
+
+        Order (highest priority first):
+        1. Explicit non-empty env_value → parse as float, use it.
+        2. auto_disable=True → 1.0 (no message).
+        3. Auto-apply bucket per resolution.
+
+        Empty / whitespace env_value falls through to (2) or (3).
+        """
+        # Explicit "10.0" at C72 with auto_disable=True → 10.0 (rule 1).
+        scale, msg = M._auto_ah_scale(72, env_value="10.0", auto_disable=True)
+        assert scale == 10.0
+        assert msg is None
+
+        # Explicit "2.0" at C36 with auto_disable=True → 2.0 (rule 1).
+        scale, msg = M._auto_ah_scale(36, env_value="2.0", auto_disable=True)
+        assert scale == 2.0
+        assert msg is None
+
+        # Empty env_value + auto_disable=True at C72 → 1.0 (rule 2).
+        scale, msg = M._auto_ah_scale(72, env_value="", auto_disable=True)
+        assert scale == 1.0
+        assert msg is None
+
+        # Empty env_value + auto_disable=False at C72 → 10.0 (rule 3).
+        scale, msg = M._auto_ah_scale(72, env_value="", auto_disable=False)
+        assert scale == 10.0
+        assert msg is not None and "iter-33" in msg
+
     def test_auto_ah_scale_edge_cases(self):
         """iter 45 codex review: edge-case handling for env_value."""
         import pytest as _pytest
