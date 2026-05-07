@@ -2575,6 +2575,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
     | LEGOESM_CDD_FV3_VFILL    | 0       |   22 | vector corner fill  |
     | LEGOESM_AH_SCALE         | auto    |   34 | A_h multiplier      |
     | LEGOESM_AH_AUTO_DISABLE  | 0       |   46 | disable iter-43 auto|
+    | LEGOESM_SMAG_CS          | 0.0     |   59 | Smagorinsky c_s     |
 
     .. rubric:: Recommended invocations
 
@@ -2687,6 +2688,13 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
             os.environ.get("LEGOESM_CDD_FV3_VFILL", "0").strip().lower()
             in ("1", "true", "yes", "on")
         )
+        # FV3_3D iter 59: optional Smagorinsky-style adaptive A_h
+        # (iter 57/58).  When > 0 (typical 0.1-0.4), an adaptive
+        # ``A_h_smag = c_s * dx² * |D|`` is added on top of the static
+        # config.A_h.  Auto-scales with local flow strain — addresses
+        # the iter-51 codex meta-review concern that the iter-33
+        # 10x-A_h is case-specific.  Default 0.0 = off.
+        _smag_cs_env = float(os.environ.get("LEGOESM_SMAG_CS", "0.0"))
         config = PrimitiveEquationConfig(
             hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
             div_damp_coeff=dd, A_h=ah,
@@ -2696,6 +2704,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
             corner_div_damp_d4_bg=_cdd_d4_bg_env,
             corner_div_damp_nord=_cdd_nord_env,
             corner_div_damp_fv3_vector_fill=_cdd_fv3_vfill_env,
+            smagorinsky_cs=_smag_cs_env,
             use_conservation_fixer=True, fix_mass=True)
         model = PrimitiveEquationModel(grid, sigma, config)
         if _topo:
