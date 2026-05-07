@@ -939,5 +939,109 @@ cube-imprint elimination).  Per iter-4 plan:
 This is multi-iteration; each piece is a separate iteration with
 unit tests and regression guards.
 
+## Iteration 9 (2026-05-07): Three negative-result probes
+
+Probed three more FV3-faithful interventions in the existing 3D
+architecture; all either fail or produce no measurable effect.
+
+### Probe 9.A — Wire ``_interp_center_to_corner_a2b_ord4`` into 3D
+
+The existing FV3-faithful 4th-order A→B interpolation
+(``operators_cdgrid.py:1352``) is currently used only by the SW
+path's vorticity damping.  Probe: replace
+``_interp_center_to_corner`` (2nd-order 4-pt average) with
+a2b_ord4 in the 3D PE tendency function (``ζ_corner``,
+``T_corner``, all batched corner interpolations).
+
+| metric (HS C36 hybrid, day 10) | baseline (2-pt avg) | a2b_ord4 |
+|--------------------------------|--------------------:|---------:|
+| max\|u\|                       |        6.02         |  16.39   |
+| max\|v\|                       |        3.08         |   9.80   |
+| max speed                      |        6.02         |  16.62   |
+| wall time                      |        66 s         |  331 s   |
+
+**Disastrous.** Max winds 2.7× larger and 5× slower.  Same root cause
+as the iter-4 Lin PGF failure: a2b_ord4 is FV3-faithful in tandem with
+the cross-product PGF + forward-backward time stepping, but inserting
+it alone into our (A-L gradient + RK3) architecture breaks the
+discrete operator balance — mixing 4th-order corner interpolation
+with 2nd-order A-L gradient produces uncorrelated halo errors that
+accumulate.
+
+### Probe 9.B — FV3 sign-flipped vertex tendency override
+
+Apply the FV3 vector corner-fill formula
+(``fv_mp_mod.F90:fill_corners_dgrid``) directly to ``du_d_dt`` /
+``dv_d_dt`` at the 4 cube-vertex cells per face.  This is the
+FV3-faithful version of iter-1's bilinear extrapolation attempt.
+
+| metric (HS C36 hybrid, day 10) | baseline | sign-flip vertex |
+|--------------------------------|---------:|-----------------:|
+| max\|u\|                       |   6.02   |       6.03       |
+| max\|v\|                       |   3.08   |       3.12       |
+| max speed                      |   6.02   |       6.03       |
+
+Within roundoff.  **No-op for HS dynamics.**  The 8 cube-vertex points
+are too localized to affect bulk dynamics; even a faithful sign-flip
+formula at those points doesn't propagate enough to shift the
+cube-imprint pattern (which spans entire panel boundaries).
+
+### Probe 9.C — Iter-7 toggle + stronger upper-atmosphere sponge
+
+iter-7 documented that the XDir corner fill mode increases
+max-over-all-levels max\|v\| at day 30 (+56%).  Probe: localize where
+those increased winds live, and try a stronger sponge to clip them.
+
+Level-by-level breakdown (HS C36 hybrid, day 10, XDir mode ON):
+
+| level | name | max\|u\| | max\|v\| |
+|------:|------|---------:|---------:|
+|     0 | top (sponge zone)  |  0.25    |  0.19    |
+|     5 | upper trop / jet   |  5.82    |  3.14    |
+|    10 |                    |  3.55    |  1.99    |
+|    20 | mid-trop           |  1.35    |  0.91    |
+|    30 | lower trop         |  1.50    |  0.71    |
+|    38 | near surface       |  2.62    |  1.36    |
+
+The maximum winds are at level 5 (upper-tropospheric jet at ~150 hPa),
+NOT at the model top (sponge zone — already damped to 0.25 m/s).
+
+Stronger sponge (``sponge_tau_sec=1800``, ``sponge_sigma=0.20``)
+reduced max\|u\| from 6.35 to 4.93 (~22 % reduction at day 10), but
+the dominant lev-5 jet intensity reduces from 5.82 to 4.64 — partly
+because the sponge reaches further down and damps the jet itself
+(physical signal loss), not because cube imprint is targeted.
+
+This is parameter tuning, not FV3-architectural fidelity.  Not
+adopted as a default.
+
+### Conclusion of iteration 9
+
+Three more single-mechanism FV3-faithful attempts at reducing the
+cube imprint without changing the dycore architecture.  Confirms the
+iter-2/4 conclusions: full elimination requires the forward-backward
+architecture port.
+
+The iter-7 corner-fill toggle remains the only working contribution
+this loop.  All other probes either break the discrete balance
+(Lin PGF, a2b_ord4) or produce no measurable effect (vertex tendency
+sign-flip).  This iteration adds NO new code — just diagnostic data
+in FV3_3D.md.
+
+### Direction for next iteration
+
+iter 10+: stop incremental probes and start the FB skeleton.  Per
+iter-4/iter-8 plan:
+
+1. Add ``time_integrator = "fv3_forward_backward"`` config option
+   that routes ``_step_fv3`` through a new ``_step_fv3_fb`` method.
+2. Initial ``_step_fv3_fb`` is just one RK3 stage (placeholder) —
+   no functional change yet, but the wiring point is in place.
+3. Subsequent iterations replace the placeholder with the c_sw
+   half (forward-backward C-grid step) and d_sw5 half (D-grid step).
+
+This sets up the architecture migration without breaking existing
+behaviour (default ``time_integrator = "ssp_rk3"`` preserved).
+
 
 
