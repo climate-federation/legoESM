@@ -3178,40 +3178,65 @@ class TestIter123OceanDriftTolerance:
                 f"iter-138: {rel}: barotropic_wave must NOT use "
                 f"the iter-133/134 initial-vs-final ratio.")
 
-    # ====== iter-149/150: cube bottom_drag_r warning ======
+    # ====== iter-149/150 → iter-174: cube bottom_drag_r SKIP ======
 
-    def test_iter149_cube_bottom_drag_r_warns(self):
-        """iter-149/150: passing ``bottom_drag_r > 0`` for cube
-        triggers an explicit ``warnings.warn`` so users see the
-        cube-doesn't-have-model-level-drag limitation in their
-        run logs.  Silent for ``bottom_drag_r=None`` or 0.0
+    def test_iter174_cube_bottom_drag_r_raises_skip(self):
+        """iter-174 (codex iter-173 review MEDIUM-1):
+        passing ``bottom_drag_r > 0`` for cube must raise
+        ``NotImplementedError`` so the main runner converts
+        the case to ``SKIP`` (with the reason in notes)
+        instead of silently dropping the parameter and
+        producing a misleading ``PASS`` result.
+
+        This supersedes the iter-149 ``warnings.warn``
+        approach — codex flagged the warning as
+        insufficient because cube runs without the
+        requested damping still appeared as comparable
+        cross-grid results.
+
+        Silent for ``bottom_drag_r=None`` or 0.0
         (intentional "no drag" requests).
         """
         from pathlib import Path
         text = (Path(__file__).resolve().parent.parent
                 / "scripts" / "run_ocean_test_matrix.py").read_text()
-        # The warning lives inside the cube branch of
-        # _create_ocean_setup.
-        assert "warnings.warn" in text, (
-            "iter-149: scripts/run_ocean_test_matrix.py must "
-            "emit a warning when bottom_drag_r is silently "
-            "dropped on cube.")
-        # Verify the warning fires only when bottom_drag_r > 0.
+        # The cube branch of _create_ocean_setup must raise
+        # NotImplementedError (caught by the main loop ->
+        # SKIP).  The old warnings.warn must be gone.
+        assert "raise NotImplementedError" in text, (
+            "iter-174: scripts/run_ocean_test_matrix.py must "
+            "raise NotImplementedError on cube + drag>0 so "
+            "the main runner converts to SKIP.")
+        # Verify the gate fires only when bottom_drag_r > 0.
         import re
         m = re.search(
-            r"if bottom_drag_r is not None and bottom_drag_r > 0\.0:",
+            r"if bottom_drag_r is not None and bottom_drag_r > 0\.0:\s*\n"
+            r"\s*raise NotImplementedError",
             text,
         )
         assert m is not None, (
-            "iter-149: warning must be guarded by "
+            "iter-174: NotImplementedError must be guarded by "
             "``bottom_drag_r > 0.0`` so None/0.0 stays silent.")
-        # Verify the warning message mentions the cube limitation
-        # (must not just say "ignored" — needs to point users to
-        # the alternative grids).
-        assert "latlon" in text.split("warnings.warn", 1)[1][:600] or \
-               "mpas" in text.split("warnings.warn", 1)[1][:600], (
-            "iter-149: warning message must point to alternative "
+        # Verify the message mentions the cube limitation
+        # (must point users to the alternative grids).
+        # Look in the 600 chars after the raise.
+        post_raise = text.split("raise NotImplementedError", 1)[1][:600]
+        assert "latlon" in post_raise or "mpas" in post_raise, (
+            "iter-174: error message must point to alternative "
             "grids that DO support model-level drag.")
+        # The cube branch must NOT also have a warnings.warn
+        # for the same condition (would be redundant since the
+        # raise short-circuits).  Allow warnings.warn elsewhere
+        # in the file.
+        cube_branch = text.split("OceanConfig does not expose", 1)
+        if len(cube_branch) > 1:
+            # Look in the 800 chars surrounding the cube guard
+            # for any leftover ``warnings.warn`` related to drag.
+            ctx = cube_branch[1][:800]
+            assert "warnings.warn" not in ctx, (
+                "iter-174: the iter-149 ``warnings.warn`` must be "
+                "removed from the cube + drag>0 branch — the "
+                "raise NotImplementedError supersedes it.")
 
     def test_iter138_pe_rel_sign_uses_le_not_lt(self):
         """iter-138 (iter-137 FAIL-2) + iter-152 update:

@@ -2083,24 +2083,31 @@ def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
         # ``OceanConfig`` does NOT expose ``bottom_drag_r`` (only
         # ``LatLonCGridOceanConfig`` and ``MPASOceanConfig`` do —
         # see src/legoesm/ocean/state.py:486 and
-        # src/legoesm/ocean/mpas_config.py:81).  Skip
-        # the kwarg here so wind-driven gyre runs don't crash;
-        # cubed_sphere gyre runs proceed without model-level
-        # linear drag (a known limitation tracked under the
-        # cube-ocean user-handoff items).
-        # iter-149 (self-review): warn the user explicitly so
-        # the silent-skip surfaces in the run log and they
-        # know cube doesn't currently get bottom drag.
+        # src/legoesm/ocean/mpas_config.py:81).
+        #
+        # iter-174 (codex iter-173 review MEDIUM-1): previously
+        # iter-149 only emitted a ``warnings.warn`` here and then
+        # silently dropped the kwarg, which let cube gyre runs
+        # produce ordinary ``PASS`` results that look comparable
+        # to lat-lon / MPAS in the cross-grid matrix even though
+        # the physical setup differs (no linear bottom drag on
+        # cube).  Codex flagged this as a no-ship: the matrix
+        # was advertising unsupported runs as comparable.
+        #
+        # Fix: raise ``NotImplementedError`` so the main runner's
+        # existing exception handler (line ~7062) records the
+        # case as ``SKIP`` with the reason in ``notes``.  This
+        # keeps cube cases from contaminating cross-grid
+        # comparisons and surfaces the ``cube ocean dycore lacks
+        # bottom drag`` user-deferred item in the structured
+        # results.
         if bottom_drag_r is not None and bottom_drag_r > 0.0:
-            import warnings
-            warnings.warn(
+            raise NotImplementedError(
                 f"cubed_sphere OceanConfig does not expose "
-                f"``bottom_drag_r`` (requested {bottom_drag_r:g}). "
-                f"Cube wind-driven gyre runs proceed WITHOUT "
-                f"model-level linear drag; expect long-term "
-                f"instability (~30 days at coarse resolution).  "
-                f"Use latlon or mpas for explicit linear drag.",
-                stacklevel=2,
+                f"bottom_drag_r (requested {bottom_drag_r:g}); "
+                f"cube ocean dycore lacks linear bottom drag "
+                f"(deferred per user). Use latlon or mpas for "
+                f"this case to get cross-grid-comparable results."
             )
         config_kw = {k: v for k, v in kw.items()
                      if k != "bottom_drag_r"}
