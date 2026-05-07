@@ -2974,5 +2974,94 @@ matrix default hd.  If stable for 30 days, the C72 issue is CFL.
 iter 30+: substantive nord >= 2 fidelity restructure / forward-
 backward time stepping if dt smaller still doesn't fix it.
 
+## Iteration 30 (2026-05-07): C72 failure mode is exponential wind growth, NOT CFL
+
+### Diagnostic trajectory (HS C72 hybrid, d4=0.02 nord=1, dt=200)
+
+State diagnostics every 100 steps before step 5500, every 5 steps
+after.  Captured up to NaN at step 5732 (~13.27 days):
+
+| step  | day   | max\|u\|  | max\|v\|  | max\|T\| | min(p_s) |
+|------:|------:|----------:|----------:|---------:|---------:|
+|     0 |  0.00 |     0.00  |     0.00  |   303.75 |   100000 |
+|  1000 |  2.31 |     2.61  |     1.75  |   305.82 |    99758 |
+|  2000 |  4.63 |     6.88  |     4.37  |   308.46 |    99558 |
+|  3000 |  6.94 |    12.75  |     8.17  |   309.30 |    98956 |
+|  4000 |  9.26 |    21.81  |    14.85  |   308.93 |    97491 |
+|  5000 | 11.57 |    43.34  |    32.66  |   307.08 |    92205 |
+|  5500 | 12.73 |    74.83  |    67.39  |   304.91 |    81371 |
+|  5600 | 12.96 |    85.72  |    84.07  |   306.21 |    76547 |
+|  5700 | 13.19 |    98.89  |   109.03  |   315.69 |    69628 |
+|  5725 | 13.25 |   102.67  |   117.00  |   318.70 |    67455 |
+|  5730 | 13.26 |   455.58  |   907.16  | 142,755  |    67000 |
+|  5732 | 13.27 |    *** NaN ***                                |
+
+### Failure mode is EXPONENTIAL WIND GROWTH, not CFL
+
+The trajectory shows a clear **doubling-time of ~3 days**:
+
+- Day  3 →  Day  6: max\|u\| 4 → 13 (3.3x in 3 days)
+- Day  6 →  Day  9: max\|u\| 13 → 25 (1.9x in 3 days)
+- Day  9 → Day 12: max\|u\| 25 → 60 (2.4x in 3 days)
+- Day 12 → Day 13: max\|u\| 60 → 100 (1.7x in 1 day, accelerating)
+
+This is a **growing numerical eigenmode**, not a meteorological
+mode (HS climatological winds top out at ~30-40 m/s; the C36
+baseline reaches max\|u\| ~ 11.6 in steady state).
+
+**CFL is not violated**: ``CFL = 102 m/s * 200 s / 80 km = 0.26``
+at step 5725 (well below 1).  At step 5730 the run has clearly
+already gone non-physical (winds 4-9x speed of sound, T = 143000 K)
+but the simulation hasn't yet thrown NaN — it's in the catastrophic
+final cascade between step 5725 and 5732.
+
+### Implication for fixes
+
+The C72 instability is **not a CFL/timestep issue**.  Smaller dt
+would only delay the unstable mode, not suppress it (the mode's
+growth rate is per-step, so halving dt doubles the number of steps
+to reach the same instability magnitude).
+
+Likely root causes:
+
+- **(1) Spectral radius of SSP-RK3 + C-D + A-L architecture**
+  exceeds RK3 stability region at C72 grid spacing.  Different
+  time integrator needed (forward-backward, 5-stage SSPRK).
+
+- **(2) Cube-vertex metric singularity** has stronger numerical
+  amplification at higher resolution.  Iter-2 diagnosed cube
+  imprint as STRUCTURAL — at C72 the structural amplification
+  exceeds containment threshold for damping alone.
+
+- **(3) An unstable Rossby-mode-like eigenfunction** at the cube
+  vertex that the iter-7 corner-fill mode (``avg``) does not
+  fully suppress.  Smagorinsky / nord >= 2 / proper FV3 vector
+  fill might.
+
+### Status
+
+iter 30 closes the diagnostic question on C72: it's **not** CFL,
+**not** insufficient diffusion, **not** d4_bg too small or too
+large.  It's a **structural numerical instability** at the C-D +
+A-L + RK3 architecture level at C72 grid spacing.
+
+This justifies the iter-26 conclusion that ``d4_bg`` alone cannot
+fix C72 — the instability mechanism is upstream of corner-divergence
+damping.
+
+27 unit tests still pass.
+
+### Direction for next iteration
+
+iter 31: try a **5-stage SSPRK** time integrator (instead of the
+default 3-stage) at C72 to test hypothesis (1).  If stable, the
+C72 fix is upgrading the time integrator.
+
+iter 32+: substantive nord >= 2 fidelity restructure (test
+hypothesis (3) — better corner damping at high resolution).
+
+iter 33+: forward-backward time stepping (definitive fix if RK3
+is the limit).
+
 
 
