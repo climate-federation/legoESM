@@ -2834,5 +2834,65 @@ condition that ``d4_bg`` cannot fix.
 
 iter 30+: substantive nord >= 2 fidelity restructure.
 
+## Iteration 28 (2026-05-07): hyperdiff is NOT the C72 issue
+
+### Scan results (HS C72 hybrid 30 day, d4=0.02 nord=1 fixed)
+
+| label  | hyperdiff       | result                           |
+|:-------|:----------------|:---------------------------------|
+| iter-26| 1.98e+15 (default) | NaN at step 5732 (~13.3 d)    |
+| hd_x5  | 9.92e+15        | NaN at step 5735 (~13.3 d)       |
+| hd_x16 | 3.17e+16        | NaN at step 5753 (~13.3 d)       |
+
+### Conclusion
+
+The hyperdiff coefficient at C72 has **essentially no effect** on
+when the simulation goes NaN.  All three values (default, 5x, 16x)
+fail at virtually the same simulation time (~13.3 days, step
+5732-5753, a difference of <0.5 %).
+
+This **rules out** hyperdiff strength as the C72 instability
+mechanism.  Increasing the diffusion coefficient by 16x — a much
+larger range than would be operationally reasonable — gains
+nothing.
+
+### Implication
+
+The C72 instability is NOT a "diffusion-too-weak" problem.  It is
+a structural / numerical issue at the dycore level — likely:
+
+- **CFL violation**: ``dt = 200 s`` with grid spacing ~80 km
+  requires max wind < 400 m/s for CFL=1.  Cube-vertex velocity
+  spikes can transiently exceed this if the corner-divergence
+  damping doesn't catch them at the right cell.  Iter 29 will test
+  ``dt = 100 s``.
+
+- **Time-integration scheme limit**: SSP-RK3 has a stability
+  bound on the spectral radius of the discretised operator.
+  At C72 the cube-vertex eigenvalues may push past that bound
+  in a way no diffusion fixer reaches.  This would require a
+  forward-backward or implicit time scheme to fix.
+
+- **Dycore architectural limit**: the iter-2 diagnosis identified
+  cube imprint as **structural** to C-D + A-L + RK3.  At low
+  resolution (C36) the structural imprint is small enough that
+  hyperdiff/divdamp/cdd contain it.  At high resolution it
+  exceeds containment and goes unstable.
+
+### Status
+
+iter 28 closes one of the three hypothesised C72-instability
+mechanisms: hyperdiff is NOT the cause.
+
+27 unit tests still pass.
+
+### Direction for next iteration
+
+iter 29: test ``dt = 100 s`` at C72 with the iter-24 setting +
+matrix default hd.  If stable for 30 days, the C72 issue is CFL.
+
+iter 30+: substantive nord >= 2 fidelity restructure / forward-
+backward time stepping if dt smaller still doesn't fix it.
+
 
 
