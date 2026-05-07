@@ -3353,5 +3353,103 @@ iter 36+: investigate WHY ``_laplacian_visc_cube`` at C72 needs a
 factor of 10 boost.  Update the heuristic at the source so users
 don't need the env var.
 
+## Iteration 35 (2026-05-07): why _laplacian_visc_cube underestimates at C72
+
+### The heuristic
+
+``scripts/run_atmosphere_test_matrix.py:_laplacian_visc_cube``::
+
+    A_h = 0.05 * c_gw * dx
+    where dx = pi * R_earth / (2 * n)   # grid spacing per face
+          c_gw = sqrt(R_d * 300 K) ≈ 293 m/s
+
+So::
+
+    n =  36:  dx = 277 km, A_h = 4.08e+06 m²/s
+    n =  72:  dx = 139 km, A_h = 2.04e+06 m²/s   (half of C36)
+    n = 192:  dx =  52 km, A_h = 7.6e+05  m²/s   (1/5 of C36)
+
+A_h DECREASES with resolution under this heuristic.
+
+### Why this is the wrong scaling for synoptic-scale damping
+
+The heuristic targets **grid-scale** damping (numerical viscosity
+to suppress noise at the grid Nyquist).  At higher resolution
+(smaller dx), the grid Nyquist captures finer scales, so less
+viscosity is needed at THAT wavelength.
+
+**But synoptic-scale (~ 1000 km) modes are present at every
+resolution** — they don't go away when dx shrinks.  And iter-32
+showed the C72 unstable mode is at synoptic scale (interior, not
+grid-scale, exponential growth).
+
+The CFL-based stability bound for a Laplacian viscosity is::
+
+    A_h_max = 0.5 * dx^2 / dt
+
+At C72 with dx=139 km and dt=200 s::
+
+    A_h_max(C72) = 0.5 * (1.39e5)^2 / 200 = 4.83e+07 m²/s
+
+The default heuristic gives 2.04e+06 — **23x below the stability
+bound**.  The iter-33 fix (10x default = 2.04e+07) is at ~42 % of
+the bound, well within the stable range.
+
+### A more principled scaling
+
+The standard practice for synoptic-scale numerical viscosity is::
+
+    A_h = frac * dx^2 / dt
+    where frac ~ 0.01-0.05
+
+With frac=0.05::
+
+    n = 36:  A_h = 0.05 * (2.77e5)^2 / 200 = 1.92e+07
+    n = 72:  A_h = 0.05 * (1.39e5)^2 / 200 = 4.83e+06
+    n =192:  A_h = 0.05 * (5.20e4)^2 / 200 = 6.76e+05
+
+This still has A_h decreasing, but at half the rate (proportional
+to dx² rather than dx).
+
+A truly resolution-independent synoptic-scale viscosity would
+need to be calibrated to the synoptic-scale wavelength target,
+not the grid scale.  E.g.,::
+
+    A_h = frac * U_synoptic * L_synoptic
+        ~ 0.01 * 30 m/s * 1e6 m = 3e+05 m²/s
+
+That's actually MUCH SMALLER than what we measured to work.
+Hmm.  This suggests the C72 instability isn't a pure synoptic-
+scale phenomenon — it's grid-scale-augmented-by-resolution-
+dependent-cube-edge-coupling.
+
+### Status
+
+iter 35 documents the analysis but does NOT change the
+``_laplacian_visc_cube`` heuristic at the source.  Reasons:
+
+- Changing the heuristic would regress C36/C48 climatologies
+  (which were tuned around the iter-17 default A_h).
+- The right fix is per-resolution calibration, not a single
+  formula change.
+- The env-var workaround (LEGOESM_AH_SCALE=10) is the
+  recommended user-facing fix for now.
+
+The deeper fix is iter 36+: a per-resolution LUT or
+Smagorinsky-style adaptive viscosity that targets the
+unstable-mode scale at each resolution.
+
+27 unit tests still pass.
+
+### Direction for next iteration
+
+iter 36: empirically calibrate ``LEGOESM_AH_SCALE`` per resolution.
+Need values for C36 (1.0 confirmed), C48 (likely 1.0-2.0), C72
+(10.0 confirmed), C96 (untested), C192 (untested).
+
+iter 37+: explore whether a Smagorinsky-style adaptive closure
+(``A_h = c * dx^2 * |D|``) replaces the constant A_h and
+auto-scales with resolution.
+
 
 
