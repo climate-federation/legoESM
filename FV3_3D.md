@@ -11,6 +11,86 @@ visible cube imprint (concentric blobs at face centres bordered by
 red/blue rings at panel boundaries) in u/v wind snapshots from
 Held-Suarez and baroclinic test cases.
 
+## Quick Reference (iter 29 summary)
+
+### Production-recommended setting (C36 / C48 only)
+
+```python
+CDGridPrimitiveEquationConfig(
+    ...,
+    corner_div_damp_d2_bg=0.0005,        # iter-17 optimum
+    corner_div_damp_dddmp=0.20,          # FV3 default
+    corner_div_damp_d4_bg=0.02,          # iter-19/24 — best long-run
+    corner_div_damp_nord=1,              # del-4
+)
+```
+
+Or via env vars::
+
+    LEGOESM_CDD_D2BG=0.0005 \
+    LEGOESM_CDD_D4BG=0.02 \
+    LEGOESM_CDD_NORD=1
+
+### What this setting does (and where it works)
+
+| resolution | result                                            |
+|:----------:|:--------------------------------------------------|
+| C36        | Stable 30 day, mid_std reduced -3% / edge_v -16% / mass_drift -46% vs iter-17 baseline |
+| C36 60 day | mid_std growth-rate reduced -44%; edge_v growth-rate reduced -73%; absolute mid_std -18%, edge_v -38% |
+| C48        | Stable 30 day, mid_std -45% / edge_v -54% / mass_drift -47% — BIGGER benefit than at C36 |
+| **C72**    | **NaN at ~13 days — recommendation INSUFFICIENT** |
+| C72 (d4 sweep)  | NaN at all d4_bg ∈ [0.02, 0.04, 0.08]        |
+| C72 (16x hd)    | Still NaN at ~13 days — hyperdiff ineffective|
+| C72 (smaller dt)| Untested in budget (iter 29 incomplete)      |
+
+### Key empirical findings
+
+- **At C48 the matrix's default ``hd / dd / ah`` tuning is INSUFFICIENT**
+  for HS without corner-divergence damping.  Cube imprint amplifies
+  ~7.7x relative to C36 baseline.  ``d4=0.02 nord=1`` rescues C48
+  stability with -45 % mid_std reduction.
+
+- **At C72 no combination of corner damping and hyperdiff** tested
+  produces a stable 30-day HS run.  The cube-imprint amplification at
+  this resolution exceeds what damping alone can contain.  Suspected
+  CFL or RK3-stability limit — needs smaller ``dt``, forward-backward
+  time stepping, or nord >= 2 fidelity restructure (iter 30+).
+
+- **The conservation fixer dominates the iter-19 mass-drift claim**.
+  Pre-fixer raw mass drift at d4=0.02 vs baseline differs by only -1 %
+  (vs -46 % with fixer).  The fixer is doing more work to clean up
+  similar amounts of spurious divergence in both runs.
+
+### Code-level audited claims
+
+- ``corner_div_damp_fv3_vector_fill = True`` is **mathematically a
+  no-op at nord = 1** — proven via 5 random seeds + 54 deterministic
+  impulse positions + nonuniform-metric stress test
+  (``test_corner_laplacian_vector_fill_is_noop_for_nord1``).
+
+- ``corner_div_damp_d4_bg = 0`` OR ``corner_div_damp_nord = 0``
+  is **bit-for-bit baseline** (iter-16 path) via Python-static gating
+  (``test_corner_div_damp_d4_disabled_bit_for_bit_with_d2``).
+
+### How this rescues use cases
+
+- **Production HS / baroclinic at C36 / C48**: enable d4=0.02 nord=1.
+- **Production at C72+**: NOT yet supported by this branch.  Fall
+  back to alternatives: lat-lon CGrid, icosahedral, or wait for
+  iter 30+ nord >= 2 / forward-backward.
+- **Differentiable-model gradient flow**: bit-for-bit baseline path
+  preserved, so existing trained weights remain valid.
+
+### Open follow-ups (iter 30+)
+
+- Substantive nord >= 2 fidelity restructure (halo'd intermediate
+  divg_d arrays, vector corner fill at nt > 0).
+- ``dt = 100 s`` re-test at C72 under quieter system load.
+- 200-day climate-relevant integration verification.
+- C96 / C192 production-resolution scaling.
+
+---
+
 ## Reference oracle (read-only, never modify)
 
 - `sw_core.F90` (3917 LOC):
