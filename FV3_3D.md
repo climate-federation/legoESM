@@ -596,5 +596,93 @@ The cube imprint problem requires the architecture port.  iter 6+
 should start the forward-backward time-stepping skeleton.  See
 iter-4 conclusion for the proposed sub-iteration plan (a)-(e).
 
+## Iteration 6 (2026-05-07): FV3 D-grid vector cube-vertex corner fill
+
+### Motivation
+
+iter-2 identified the 8 cube vertices (where 3 faces meet) as a
+worst-case halo source.  Looking at our existing cube-vertex
+treatment in `halo.py::_fill_corners_h1` (line 1467), the docstring
+explicitly notes a fidelity gap:
+
+> "The Fortran transport path uses ``copy_corners(dir=1/2)`` in
+> tp_core.F90:243-299 — a directional rotated copy tailored to
+> X-sweep vs Y-sweep of PPM.  That mechanism writes DIFFERENT values
+> at the same cube-vertex cell for different sweep directions.  Our
+> 2-point average is a direction-invariant single value."
+
+There's a related FV3 mechanism for VECTOR fields:
+``fv_mp_mod.F90:fill_corners_dgrid_r8`` (line 1257).  At cube
+vertices, the missing 4th cell is filled with the DIAGONAL MIRROR of
+the OTHER vector component, with a sign flip on SW and NE corners
+to account for the local-basis rotation.  This is FV3-faithful and
+has no JAX equivalent in our code.
+
+### Implementation
+
+New module ``src/legoesm/grids/_fv3_dgrid_corner_fill.py`` with two
+functions:
+
+* `fv3_fill_corners_dgrid_vector(x, y, n)` — direct port of the
+  Fortran formula (lines 1264-1287).  Operates on a padded D-grid
+  vector pair (``x`` shape ``(6, n+2, n+3)``, ``y`` shape
+  ``(6, n+3, n+2)``).  Overwrites the 4 cube-vertex halo cells per
+  face with the sign-flipped diagonal mirror.
+
+* `fv3_fill_corners_agrid_scalar(q, n)` — companion for cell-centre
+  scalars (no sign flip), faithful to FV3 ``fill_corners_2d_r8``
+  AGRID branch.
+
+This module is **decoupled** from the existing ``_fill_corners_h1``
+2-point-average path — it neither replaces it nor calls into it.
+It is exposed for future use by:
+- A forward-backward c_sw + d_sw 3D path (iter-7+).
+- An opt-in flag in ``pad_halo_vector`` to apply the FV3 corner fill
+  AFTER the standard scalar-pad path (preserving existing operator
+  expectations while testing the cube-vertex contribution).
+
+### Unit tests: ``tests/test_fv3_dgrid_corner_fill.py``
+
+Six tests, all passing:
+
+| test | property | result |
+|------|----------|--------|
+| agrid scalar — overwrites only cube vertices | exactly 4 cells per face modified | ✓ |
+| agrid scalar — diagonal mirror sources match FV3 indexing | exact match to source cells | ✓ |
+| dgrid vector — overwrites only cube vertices | exactly 4 cells per face for both x, y | ✓ |
+| dgrid vector — Fortran sign pattern | SW/NE flip; NW/SE no flip | ✓ |
+| dgrid vector — zero input stays zero | regardless of sign | ✓ |
+| agrid scalar — uniform input is invariant | diagonal mirror of constant = constant | ✓ |
+
+### Status
+
+Pure helper module + tests, no integration into the main path yet.
+This is a **building block** — the forward-backward port (iter-7+)
+will need it.
+
+### Conclusion
+
+iter 6 closes one of the explicit FV3 fidelity gaps documented in
+``halo.py``.  The new module is testable in isolation, FV3-faithful
+to the line, and ready for integration.  Like iter 5's adaptive
+divergence damping, the immediate effect on the HS C36 cube imprint
+is zero (the helper isn't yet wired into the dycore), but the FV3
+fidelity of the legoESM codebase improves by another concrete
+mechanism.
+
+20 atmospheric/halo tests pass (iter-1039 sentinels, FV3-Lin-PGF
+helpers, adaptive damping, new corner fill).
+
+### Direction for next iteration
+
+iter 7: wire ``fv3_fill_corners_dgrid_vector`` into ``pad_halo_vector``
+behind a config flag so the cube-vertex halo can use the FV3-faithful
+mirror.  Test on HS C36 hybrid 30-day to quantify whether the
+8 cube-vertex contributions to the cube imprint shrink.
+
+iter 8+: forward-backward time stepping skeleton (the architecture
+port).  Each iteration ports one self-contained piece of c_sw or
+d_sw1/5.
+
 
 
