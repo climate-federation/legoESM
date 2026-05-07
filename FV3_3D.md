@@ -70,6 +70,20 @@ production rule across resolutions / timesteps / physics / forecast
 lengths.  The iter-39 ``_laplacian_visc_cube_v2`` is the empirical
 extrapolation but UNTESTED at C96+.
 
+**iter 60 update on the generalization gap**: I tried Smagorinsky-style
+adaptive A_h (``c_s = 0.0 / 0.2 / 0.4``) at C72 with default static
+A_h.  All three NaN within ~25 steps of baseline.  Smagorinsky CANNOT
+replace the iter-33 static A_h scaling — the C72 unstable mode is a
+slow exponential whose strain stays small until the last few steps,
+so a strain-rate-dependent closure can't catch it in time.  The
+iter-33 10x static A_h remains the load-bearing mechanism.
+
+Smagorinsky (iter 57-59) is therefore a COMPLEMENT, not a replacement,
+for ``LEGOESM_AH_SCALE``.  Use it in addition to the static scaling
+if desired::
+
+    LEGOESM_AH_SCALE=10.0 LEGOESM_SMAG_CS=0.2  # C72: static + adaptive
+
 ## Quick Reference (iter 38 summary)
 
 ### Production-recommended setting per resolution
