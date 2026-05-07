@@ -62,15 +62,6 @@ from legoesm.atmosphere.physics.thermodynamics import (
     reconstruct_half_level_pressure_hydrostatic,
     sanitize_theta_rho,
 )
-from legoesm.atmosphere.dynamics.spectral_pe import (
-    SpectralHydrostaticState,
-    spectral_pe_to_grid,
-)
-from legoesm.grids.gaussian import (
-    sh_analysis_3d,
-    sh_analysis_oc2_3d,
-    sh_analysis_dmu_3d,
-)
 
 
 def _get_gwd_fn(config: GravityWaveDragConfig):

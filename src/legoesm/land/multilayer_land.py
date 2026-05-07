@@ -37,7 +37,6 @@ from legoesm.coupler.bulk_flux import simple_bulk_fluxes, compute_most_fluxes
 from legoesm.coupler.coupling_fields import AtmToSurface, TileResponse
 from legoesm.land.soil_hydraulics import psi_from_theta
 from legoesm.coupler.surface_energy import surface_radiation_fluxes
-from legoesm.land.soil_hydraulics import psi_from_theta
 from legoesm.land.carbon.config import CarbonState
 from legoesm.land.carbon.carbon_cycle import step_carbon
 from legoesm.land.config import MultiLayerLandConfig

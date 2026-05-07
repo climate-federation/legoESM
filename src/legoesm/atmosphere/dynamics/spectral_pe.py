@@ -67,7 +67,6 @@ from legoesm.timestepping.semi_implicit import (
     robert_asselin_filter,
     ssp_rk3_step_si,
 )
-from legoesm.runtime.backend import get_backend, check_spectral_backend
 from legoesm import constants
 
 _LNPS_MIN = float(jnp.log(100.0))

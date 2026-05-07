@@ -63,7 +63,6 @@ from legoesm.timestepping.split_explicit import (
     SplitExplicitConfig,
 )
 from legoesm.atmosphere.dynamics.compressible_euler import (
-    CompressibleEulerConfig,
     compute_exner_perturbation,
     _sponge_profile,
     acoustic_substeps,

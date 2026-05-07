@@ -103,18 +103,7 @@ from legoesm.grids.vertical import (
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
-from legoesm.core.precision import _resolve_dtype, cast_pytree
-from legoesm.core.operators import (
-    global_integral,
-    hyperdiffusion,
-    laplacian_compact,
-)
 from legoesm.core.operators_cdgrid import _overlapped_arakawa_lamb_gradient
-from legoesm.core.conservation import (
-    fix_mass_hydrostatic,
-    fix_mass_hydrostatic_target,
-)
-from legoesm.core.state import HydrostaticTendencies
 from legoesm.grids.halo import (
     pad_halo_4d as _pad_halo_4d_module,
     pad_halo_vector,

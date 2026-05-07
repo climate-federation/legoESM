@@ -46,7 +46,6 @@ from legoesm.grids.gaussian import (
     spectral_hyperdiffusion_3d,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
-from legoesm.runtime.backend import get_backend, check_spectral_backend
 from legoesm import constants
 
 

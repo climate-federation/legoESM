@@ -96,8 +96,6 @@ from legoesm.grids.halo_latlon import (
     pad_halo_latlon_3d as _pad_halo_latlon_3d,
 )
 
-from legoesm.core.cfl import pole_cell_dx, cfl_max_dt
-from legoesm.core.precision import cast_pytree
 from legoesm.grids.halo_latlon import pad_halo_latlon_3d
 from legoesm import constants
 import inspect
