@@ -140,6 +140,18 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # needs A_h ~ 2.0e+07 at C72.  Iter 33 confirmed stability
         # with that value; iter 34 added LEGOESM_AH_SCALE env var to
         # the matrix as a workaround.  See FV3_3D.md iter 33-35.
+    smagorinsky_cs: float = 0.0
+        # FV3_3D iter 57/58 finding: opt-in Smagorinsky-style adaptive
+        # Laplacian viscosity.  When > 0 (typical 0.1-0.4), an
+        # additional A_h field is computed from the local strain-
+        # rate tensor of (u, v) and added to the static ``A_h``:
+        #   A_h_total(i,j) = A_h + smagorinsky_cs * dx² * |D|(i,j)
+        # where ``|D| = sqrt(D11² + 2*D12² + D22²)``.  The adaptive
+        # term auto-scales with local flow strain, addressing the
+        # iter-51 codex meta-review concern that the iter-33
+        # 10x-A_h calibration is case-specific.  Default 0.0 = off,
+        # bit-for-bit baseline.  See FV3_3D.md iter 57/58 for the
+        # closure derivation.
     hyperdiff_coeff: float = 0.0
     hyperdiff_ps_coeff: float = 0.0
     div_damp_coeff: float = 0.0   # Divergence damping coefficient [m^2/s]
@@ -1083,9 +1095,37 @@ def fv3_hydrostatic_tendencies(
     dv_d_dt = dv_d_dt + _vert_adv_uv_d[..., 1]
 
     if config.A_h > 0:
-        du_d_dt = du_d_dt + config.A_h * _lap_uv_d[..., 0]
-        dv_d_dt = dv_d_dt + config.A_h * _lap_uv_d[..., 1]
-        dT_dt_data = dT_dt_data + config.A_h * lap_uvT[..., 2]
+        # FV3_3D iter 58: optional Smagorinsky-style adaptive A_h
+        # added on top of the static ``config.A_h`` constant.  When
+        # ``config.smagorinsky_cs > 0``, compute the per-cell adaptive
+        # field at corners and add it to the static value.
+        if config.smagorinsky_cs > 0.0:
+            from legoesm.core._smagorinsky_visc import (
+                compute_smagorinsky_ah_3d,
+            )
+            _ah_smag_corner = compute_smagorinsky_ah_3d(
+                u_d, v_d, cdgrid, config.smagorinsky_cs,
+            )                                              # (6, n+1, n+1, nlev)
+            # _lap_uv_d is at corners (same shape).  Combined:
+            #   du/dt += (A_h + ah_smag) * lap_u
+            _ah_eff_corner = config.A_h + _ah_smag_corner
+            du_d_dt = du_d_dt + _ah_eff_corner * _lap_uv_d[..., 0]
+            dv_d_dt = dv_d_dt + _ah_eff_corner * _lap_uv_d[..., 1]
+            # T is at cell centers.  Interpolate ah_smag from corners
+            # via 4-point average; add to static A_h for cell-centred
+            # T tendency.
+            _ah_smag_cell = 0.25 * (
+                _ah_smag_corner[:, :-1, :-1, :]
+                + _ah_smag_corner[:, 1:, :-1, :]
+                + _ah_smag_corner[:, :-1, 1:, :]
+                + _ah_smag_corner[:, 1:, 1:, :]
+            )                                              # (6, n, n, nlev)
+            _ah_eff_cell = config.A_h + _ah_smag_cell
+            dT_dt_data = dT_dt_data + _ah_eff_cell * lap_uvT[..., 2]
+        else:
+            du_d_dt = du_d_dt + config.A_h * _lap_uv_d[..., 0]
+            dv_d_dt = dv_d_dt + config.A_h * _lap_uv_d[..., 1]
+            dT_dt_data = dT_dt_data + config.A_h * lap_uvT[..., 2]
 
     if config.hyperdiff_coeff > 0:
         du_d_dt = du_d_dt + _hd_uv_d[..., 0]

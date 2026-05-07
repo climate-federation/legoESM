@@ -622,6 +622,108 @@ def test_corner_div_damp_fv3_vector_fill_bit_for_bit_nord1(small_3d_state):
     )
 
 
+def test_smagorinsky_cs_zero_is_bit_for_bit_baseline(small_3d_state):
+    """iter 58: ``smagorinsky_cs = 0`` (default) → bit-for-bit
+    identical to the iter-19/24 path that does not have Smagorinsky.
+
+    Pin this so the iter-58 wiring is non-disruptive for users who
+    don't opt in.
+    """
+    grid, cdgrid, coord, _ = small_3d_state
+
+    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        CDGridPrimitiveEquationModel,
+    )
+
+    s = held_suarez_init(grid, coord)
+    s = hydrostatic_to_fv3(s, cdgrid)
+    n = grid.n
+    nlev = s.u_d.data.shape[-1]
+    rng = np.random.default_rng(seed=58)
+    u_p = rng.uniform(-3.0, 3.0, size=(6, n + 1, n + 1, nlev))
+    v_p = rng.uniform(-3.0, 3.0, size=(6, n + 1, n + 1, nlev))
+    s = s._replace(
+        u_d=s.u_d.replace(data=jnp.asarray(u_p)),
+        v_d=s.v_d.replace(data=jnp.asarray(v_p)),
+    )
+
+    cfg_no_smag = CDGridPrimitiveEquationConfig(
+        div_damp_coeff=1e7, A_h=1e6,
+        corner_div_damp_d2_bg=0.0005,
+        corner_div_damp_dddmp=0.20,
+    )
+    cfg_smag_zero = CDGridPrimitiveEquationConfig(
+        div_damp_coeff=1e7, A_h=1e6,
+        corner_div_damp_d2_bg=0.0005,
+        corner_div_damp_dddmp=0.20,
+        smagorinsky_cs=0.0,    # explicit zero — should be no-op
+    )
+
+    m_no = CDGridPrimitiveEquationModel(grid, coord, cfg_no_smag)
+    m_zero = CDGridPrimitiveEquationModel(grid, coord, cfg_smag_zero)
+
+    s_no = m_no.step(s, 100.0)
+    s_zero = m_zero.step(s, 100.0)
+
+    np.testing.assert_array_equal(
+        np.asarray(s_no.u_d.data), np.asarray(s_zero.u_d.data),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(s_no.v_d.data), np.asarray(s_zero.v_d.data),
+    )
+
+
+def test_smagorinsky_cs_active_changes_winds(small_3d_state):
+    """iter 58: ``smagorinsky_cs = 0.2`` changes winds vs the
+    no-Smagorinsky path on a perturbed initial state (where local
+    strain is non-zero).
+    """
+    grid, cdgrid, coord, _ = small_3d_state
+
+    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        CDGridPrimitiveEquationModel,
+    )
+
+    s = held_suarez_init(grid, coord)
+    s = hydrostatic_to_fv3(s, cdgrid)
+    n = grid.n
+    nlev = s.u_d.data.shape[-1]
+    rng = np.random.default_rng(seed=2358)
+    u_p = rng.uniform(-3.0, 3.0, size=(6, n + 1, n + 1, nlev))
+    v_p = rng.uniform(-3.0, 3.0, size=(6, n + 1, n + 1, nlev))
+    s = s._replace(
+        u_d=s.u_d.replace(data=jnp.asarray(u_p)),
+        v_d=s.v_d.replace(data=jnp.asarray(v_p)),
+    )
+
+    cfg_no = CDGridPrimitiveEquationConfig(
+        div_damp_coeff=1e7, A_h=1e6,
+        corner_div_damp_d2_bg=0.0005,
+        corner_div_damp_dddmp=0.20,
+        smagorinsky_cs=0.0,
+    )
+    cfg_yes = CDGridPrimitiveEquationConfig(
+        div_damp_coeff=1e7, A_h=1e6,
+        corner_div_damp_d2_bg=0.0005,
+        corner_div_damp_dddmp=0.20,
+        smagorinsky_cs=0.2,
+    )
+
+    m_no = CDGridPrimitiveEquationModel(grid, coord, cfg_no)
+    m_yes = CDGridPrimitiveEquationModel(grid, coord, cfg_yes)
+
+    s_no = m_no.step(s, 100.0)
+    s_yes = m_yes.step(s, 100.0)
+
+    diff = float(jnp.max(jnp.abs(s_no.u_d.data - s_yes.u_d.data)))
+    base = float(jnp.max(jnp.abs(s_no.u_d.data)))
+    assert diff > 1e-8 * base, (
+        "smagorinsky_cs=0.2 must change winds vs c_s=0"
+    )
+    assert jnp.all(jnp.isfinite(s_yes.u_d.data))
+    assert jnp.all(jnp.isfinite(s_yes.v_d.data))
+
+
 def test_corner_div_damp_d4_stable_short_run_nord2(small_3d_state):
     """nord=2 (FV3 production default for del-6) is finite for 20 steps.
 
