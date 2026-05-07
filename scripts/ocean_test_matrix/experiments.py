@@ -1115,8 +1115,11 @@ def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
     notes = f"PE drift={pe_drift:.2e}, PE_rel_final={pe_rel_final:.4e}"
     # iter-129 (codex iter-128-followup MEDIUM-2): apply the
     # documented ``pe_rel_final < 0`` sign check to Lock Exchange
-    # (docs/ocean_experiments_reference.md:575).  Same gate as
-    # monolithic ``run_lock_exchange``.
+    # (see the "Lock Exchange (lock_exchange)" Validation
+    # Thresholds block in docs/ocean_experiments_reference.md;
+    # iter-130 codex iter-129-followup LOW-2: removed hard-
+    # coded line number).  Same gate as monolithic
+    # ``run_lock_exchange``.
     ok, notes = _apply_pe_rel_sign(
         ok, notes, pe_rel_final, label="PE_rel_final",
         n_samples=len(diag.get("PE_rel", [])))
@@ -1218,7 +1221,10 @@ def run_overflow(tc: TestCase, output_dir: Path, days: float
     # PE drift magnitude is NOT gated because RPE decreases
     # physically (PE → KE conversion); instead the iter-128
     # block below applies the documented sign constraint
-    # ``pe_rel_final < 0`` (docs/ocean_experiments_reference.md:626).
+    # ``pe_rel_final < 0`` (see the "Overflow (overflow)"
+    # Validation Thresholds block in
+    # docs/ocean_experiments_reference.md; iter-130 codex
+    # iter-129-followup LOW-2: removed stale line number).
     ok, notes = _apply_drift_tolerance(
         ok, notes, T_drift, 1e-2,
         label="T", n_samples=len(diag.get("mean_T", [])))
@@ -1371,15 +1377,17 @@ def run_stommel_gyre_tracer(tc: TestCase, output_dir: Path, days: float
     # ``op="le"`` to ``op="lt"`` to match the documented
     # strict bound.  iter-129 MEDIUM-1: pass ``n_samples`` so
     # missing series fail explicitly.
-    n_S_samples = len(S_min_series)
+    # iter-130 (codex iter-129-followup LOW-1): use the right
+    # series-length per gate (S_max for overshoot, S_min for
+    # undershoot).
     ok, notes = _apply_value_threshold(
         ok, notes, overshoot, 0.1,
         label="S overshoot", op="lt", units="PSU",
-        n_samples=n_S_samples)
+        n_samples=len(S_max_series))
     ok, notes = _apply_value_threshold(
         ok, notes, undershoot, 0.1,
         label="S undershoot", op="lt", units="PSU",
-        n_samples=n_S_samples)
+        n_samples=len(S_min_series))
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full

@@ -409,18 +409,25 @@ def _apply_drift_tolerance(
 def _apply_value_threshold(
     ok: bool, notes: str, value: float, threshold: float,
     *, label: str, op: str = "le", units: str = "",
+    n_samples: int | None = None,
 ) -> tuple[bool, str]:
     """Thin wrapper for non-drift PASS thresholds (overshoot,
     undershoot, sign checks).  Delegates to the centralized
     ``legoesm.diagnostics.conservation_drift.apply_value_threshold``
     helper (iter-128 codex iter-127-followup MEDIUM-2/3).
+
+    iter-130 (codex iter-129-followup HIGH-1): added the
+    ``n_samples`` kwarg that iter-129 added to the centralized
+    helper.  Without it, callsites that pass ``n_samples=`` (the
+    Stommel overshoot/undershoot gates and ``_apply_pe_rel_sign``)
+    would raise ``TypeError`` at runtime.
     """
     from legoesm.diagnostics.conservation_drift import (
         apply_value_threshold,
     )
     return apply_value_threshold(
         ok, notes, value, threshold,
-        label=label, op=op, units=units,
+        label=label, op=op, units=units, n_samples=n_samples,
     )
 
 
@@ -4411,9 +4418,13 @@ def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
     notes = f"PE drift={pe_drift:.2e}, PE_rel_final={pe_rel_final:.4e}"
     # iter-129 (codex iter-128-followup MEDIUM-2): apply the
     # documented ``pe_rel_final < 0`` sign check to Lock Exchange
-    # (docs/ocean_experiments_reference.md:575).  Lock Exchange
-    # is the canonical PE → KE conversion test; positive
-    # pe_rel_final is spurious PE creation by numerical mixing.
+    # (see the "Lock Exchange (lock_exchange)" Validation
+    # Thresholds block in docs/ocean_experiments_reference.md;
+    # iter-130 codex iter-129-followup LOW-2: removed hard-
+    # coded line number to prevent doc-line drift).  Lock
+    # Exchange is the canonical PE → KE conversion test;
+    # positive pe_rel_final is spurious PE creation by
+    # numerical mixing.
     ok, notes = _apply_pe_rel_sign(
         ok, notes, pe_rel_final, label="PE_rel_final",
         n_samples=len(diag.get("PE_rel", [])))
@@ -4579,8 +4590,11 @@ def run_overflow(tc: TestCase, output_dir: Path, days: float
     # runs show T drift ~1e-16 (latlon) to ~3e-4 (cube), well
     # below 1e-2.  PE drift magnitude is NOT gated because RPE
     # decreases physically (the overflow CONVERTS PE → KE);
-    # docs/ocean_experiments_reference.md:626 instead asserts
-    # the SIGN constraint pe_rel_final < 0.
+    # the documented sign constraint pe_rel_final < 0 is
+    # asserted in the iter-128 block below (see
+    # docs/ocean_experiments_reference.md "Overflow" section;
+    # iter-130 codex iter-129-followup LOW-2: removed stale
+    # line number).
     ok, notes = _apply_drift_tolerance(
         ok, notes, T_drift, 1e-2,
         label="T", n_samples=len(diag.get("mean_T", [])))
@@ -4589,7 +4603,9 @@ def run_overflow(tc: TestCase, output_dir: Path, days: float
     # a gravity-current experiment — RPE must decrease.  A
     # positive pe_rel_final indicates spurious PE creation
     # (numerical mixing increasing the basin RPE), which is
-    # the opposite of the expected dynamics.
+    # the opposite of the expected dynamics.  See the
+    # "Overflow (overflow)" Validation Thresholds block in
+    # docs/ocean_experiments_reference.md.
     # iter-129 (codex iter-128-followup MEDIUM-1): pass
     # ``n_samples`` so a missing/single-sample PE_rel series
     # fails explicitly instead of silently passing via the
@@ -4789,15 +4805,17 @@ def run_stommel_gyre_tracer(tc: TestCase, output_dir: Path, days: float
     # NaN in ``S_min``/``S_max`` correctly triggers the helper's
     # non-finite failure.  iter-129 MEDIUM-1: pass ``n_samples``
     # so a missing/single-sample series fails explicitly.
-    n_S_samples = len(S_min_series)
+    # iter-130 (codex iter-129-followup LOW-1): use the right
+    # series-length per gate (S_max for overshoot, S_min for
+    # undershoot) so a partial diagnostic doesn't bypass either.
     ok, notes = _apply_value_threshold(
         ok, notes, overshoot, 0.1,
         label="S overshoot", op="lt", units="PSU",
-        n_samples=n_S_samples)
+        n_samples=len(S_max_series))
     ok, notes = _apply_value_threshold(
         ok, notes, undershoot, 0.1,
         label="S undershoot", op="lt", units="PSU",
-        n_samples=n_S_samples)
+        n_samples=len(S_min_series))
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full

@@ -72,17 +72,23 @@ def _apply_drift_tolerance(
 def _apply_value_threshold(
     ok: bool, notes: str, value: float, threshold: float,
     *, label: str, op: str = "le", units: str = "",
+    n_samples: int | None = None,
 ) -> tuple[bool, str]:
     """Thin wrapper for non-drift PASS thresholds.  Delegates
     to ``legoesm.diagnostics.conservation_drift.apply_value_threshold``
     (iter-128 codex iter-127-followup MEDIUM-2/3).
+
+    iter-130 (codex iter-129-followup HIGH-2): added the
+    ``n_samples`` kwarg.  Without it, callsites that pass
+    ``n_samples=`` would raise ``TypeError``.  Mirror of the
+    fix in monolithic ``run_ocean_test_matrix.py``.
     """
     from legoesm.diagnostics.conservation_drift import (
         apply_value_threshold,
     )
     return apply_value_threshold(
         ok, notes, value, threshold,
-        label=label, op=op, units=units,
+        label=label, op=op, units=units, n_samples=n_samples,
     )
 
 

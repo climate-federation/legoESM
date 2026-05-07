@@ -2216,6 +2216,190 @@ class TestIter123OceanDriftTolerance:
                 f"iter-129: {rel}:run_overflow must pass "
                 f"n_samples= to _apply_pe_rel_sign.")
 
+    # ====== iter-130: codex iter-129-followup HIGH-1/2 + MEDIUM + LOW ======
+
+    @staticmethod
+    def _import_monolithic_runner():
+        """Helper: import scripts/run_ocean_test_matrix.py
+        as a module under a stable name so dataclass decorators
+        can resolve their module via sys.modules.
+
+        Cached in module-level _MONOLITHIC_RUNNER_MODULE on
+        first call to avoid repeated heavy imports.
+        """
+        import importlib.util
+        import sys
+        from pathlib import Path
+        cached = sys.modules.get("_run_ocean_test_matrix_runner")
+        if cached is not None:
+            return cached
+        path = (Path(__file__).resolve().parent.parent
+                / "scripts" / "run_ocean_test_matrix.py")
+        spec = importlib.util.spec_from_file_location(
+            "_run_ocean_test_matrix_runner", path)
+        mod = importlib.util.module_from_spec(spec)
+        # Critical: register before exec so dataclass can find
+        # the module via sys.modules.
+        sys.modules["_run_ocean_test_matrix_runner"] = mod
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_iter130_monolithic_value_threshold_wrapper_accepts_n_samples(self):
+        """iter-130 codex iter-129-followup HIGH-1: the
+        monolithic ``_apply_value_threshold`` wrapper must accept
+        the ``n_samples`` kwarg that iter-129 added to the
+        centralized helper.  Without this, runtime callsites
+        (Stommel overshoot/undershoot, _apply_pe_rel_sign) raise
+        TypeError.  This is a BEHAVIOR test that actually
+        invokes the wrapper, so it would catch the iter-129
+        regression that string-only tests missed.
+        """
+        mod = self._import_monolithic_runner()
+        # Must accept n_samples without raising TypeError.
+        ok, notes = mod._apply_value_threshold(
+            ok=True, notes="", value=0.05, threshold=0.1,
+            label="overshoot", op="lt", units="PSU",
+            n_samples=10)
+        assert ok is True
+        # Short series must FAIL through the wrapper.
+        ok, notes = mod._apply_value_threshold(
+            ok=True, notes="", value=0.05, threshold=0.1,
+            label="overshoot", op="lt", units="PSU",
+            n_samples=0)
+        assert ok is False
+        assert "0 sample" in notes
+
+    def test_iter130_modular_value_threshold_wrapper_accepts_n_samples(self):
+        """iter-130 codex iter-129-followup HIGH-2: same
+        guard for the modular ``_apply_value_threshold`` wrapper
+        in ``scripts/ocean_test_matrix/timeloop.py``.
+        """
+        import importlib.util
+        import sys
+        from pathlib import Path
+        scripts_dir = (Path(__file__).resolve().parent.parent
+                       / "scripts")
+        sys.path.insert(0, str(scripts_dir))
+        try:
+            from ocean_test_matrix.timeloop import (
+                _apply_value_threshold,
+            )
+            ok, notes = _apply_value_threshold(
+                ok=True, notes="", value=0.05, threshold=0.1,
+                label="overshoot", op="lt", units="PSU",
+                n_samples=10)
+            assert ok is True
+            ok, notes = _apply_value_threshold(
+                ok=True, notes="", value=0.05, threshold=0.1,
+                label="overshoot", op="lt", units="PSU",
+                n_samples=0)
+            assert ok is False
+        finally:
+            sys.path.remove(str(scripts_dir))
+
+    def test_iter130_monolithic_pe_sign_wrapper_works(self):
+        """iter-130 codex iter-129-followup HIGH-1: behavior
+        test that ``_apply_pe_rel_sign`` actually works through
+        the wrapper chain (would have caught the iter-129
+        TypeError regression).
+        """
+        mod = self._import_monolithic_runner()
+        # PASS case: pe_rel_final < 0.
+        ok, _ = mod._apply_pe_rel_sign(
+            True, "", -0.5, label="PE_rel_final", n_samples=10)
+        assert ok is True
+        # FAIL case: pe_rel_final = 0.0 (must be strictly <).
+        ok, notes = mod._apply_pe_rel_sign(
+            True, "", 0.0, label="PE_rel_final", n_samples=10)
+        assert ok is False
+        # FAIL case: missing series (n_samples=0).
+        ok, notes = mod._apply_pe_rel_sign(
+            True, "", 0.0, label="PE_rel_final", n_samples=0)
+        assert ok is False
+        assert "0 sample" in notes
+
+    def test_iter130_modular_pe_sign_wrapper_works(self):
+        """iter-130 codex iter-129-followup HIGH-2: same
+        behavior test for the modular wrapper.
+        """
+        import sys
+        from pathlib import Path
+        scripts_dir = (Path(__file__).resolve().parent.parent
+                       / "scripts")
+        sys.path.insert(0, str(scripts_dir))
+        try:
+            from ocean_test_matrix.timeloop import _apply_pe_rel_sign
+            ok, _ = _apply_pe_rel_sign(
+                True, "", -0.5, label="PE_rel_final",
+                n_samples=10)
+            assert ok is True
+            ok, notes = _apply_pe_rel_sign(
+                True, "", 0.0, label="PE_rel_final", n_samples=0)
+            assert ok is False
+            assert "0 sample" in notes
+        finally:
+            sys.path.remove(str(scripts_dir))
+
+    def test_iter130_stommel_uses_per_extremum_sample_count(self):
+        """iter-130 codex iter-129-followup LOW-1: Stommel
+        overshoot uses ``len(S_max_series)`` and undershoot
+        uses ``len(S_min_series)`` — not a single shared count.
+        This way a partial S_max diagnostic doesn't bypass the
+        overshoot guard (and vice versa).
+        """
+        from pathlib import Path
+        for rel in (
+            "scripts/run_ocean_test_matrix.py",
+            "scripts/ocean_test_matrix/experiments.py",
+        ):
+            text = (Path(__file__).resolve().parent.parent
+                    / rel).read_text()
+            import re
+            m = re.search(
+                r"def run_stommel_gyre_tracer\b"
+                r".*?(?=\ndef \w|\nRUNNERS)",
+                text, re.DOTALL,
+            )
+            assert m is not None
+            body = m.group(0)
+            # overshoot must use S_max sample count.
+            assert (
+                'label="S overshoot"' in body
+                and "n_samples=len(S_max_series)" in body
+            ), (
+                f"iter-130: {rel}: Stommel overshoot must use "
+                f"len(S_max_series) for n_samples.")
+            # undershoot must use S_min sample count.
+            assert (
+                'label="S undershoot"' in body
+                and "n_samples=len(S_min_series)" in body
+            ), (
+                f"iter-130: {rel}: Stommel undershoot must use "
+                f"len(S_min_series) for n_samples.")
+
+    def test_iter130_no_stale_doc_line_numbers(self):
+        """iter-130 codex iter-129-followup LOW-2: doc line
+        numbers in code comments drift as the doc is edited.
+        For PE-sign-related references, prefer named-section
+        callouts.  This test enforces no stale ``:575`` or
+        ``:626`` references survive.
+        """
+        from pathlib import Path
+        for rel in (
+            "scripts/run_ocean_test_matrix.py",
+            "scripts/ocean_test_matrix/experiments.py",
+        ):
+            text = (Path(__file__).resolve().parent.parent
+                    / rel).read_text()
+            for stale_line in (":575", ":626"):
+                marker = f"ocean_experiments_reference.md{stale_line}"
+                assert marker not in text, (
+                    f"iter-130: {rel} has stale doc line "
+                    f"reference {marker!r}; the actual line "
+                    f"numbers drifted to 581 (lock_exchange) "
+                    f"and 632 (overflow) after iter-128 edits. "
+                    f"Replace with a section-name callout.")
+
     def test_iter128_geostrophic_doc_documents_tighter_gate(self):
         """iter-128 codex iter-127-followup MEDIUM-1: the doc
         threshold of 1e-3 is the loose contract; the runner uses
