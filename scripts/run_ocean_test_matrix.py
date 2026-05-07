@@ -1973,7 +1973,8 @@ def _parse_resolution(tc: TestCase):
 def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
                         H_max: float | None = None, physics=None,
                         A_h: float | None = None,
-                        A_v: float | None = None):
+                        A_v: float | None = None,
+                        bottom_drag_r: float | None = None):
     """Create grid, z_coord, and rest-state for any grid type.
 
     Parameters
@@ -1986,6 +1987,13 @@ def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
         (e.g. prescribed surface forcing for wind-driven experiments).
     A_h : float or None
         Override horizontal viscosity [m^2/s]. If None, uses config default.
+    bottom_drag_r : float or None
+        iter-136 (codex iter-124-followup HIGH-1, deferred):
+        model-config-level linear bottom-drag rate [s^-1] (replaces
+        the deprecated physics-level ``BottomDragConfig(scheme='linear')``).
+        ``OceanConfig``, ``LatLonCGridOceanConfig``, and ``MPASOceanConfig``
+        all expose this field; passing it via _create_ocean_setup keeps
+        the wind-driven gyre experiments runnable.
 
     Returns (grid, z_coord, config, model, coord_kind, lon_deg, lat_deg).
     """
@@ -2010,6 +2018,8 @@ def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
             kw["A_h"] = A_h
         if A_v is not None:
             kw["A_v"] = A_v
+        if bottom_drag_r is not None:
+            kw["bottom_drag_r"] = bottom_drag_r
         config = OceanConfig(**kw)
         model = OceanModel(grid, z_coord, config)
         coord_kind = "cube"
@@ -2028,6 +2038,8 @@ def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
             kw["A_h"] = A_h
         if A_v is not None:
             kw["A_v"] = A_v
+        if bottom_drag_r is not None:
+            kw["bottom_drag_r"] = bottom_drag_r
         config = LatLonCGridOceanConfig(**kw)
         model = LatLonCGridOceanModel(grid, z_coord, config)
         coord_kind = "latlon"
@@ -2046,6 +2058,8 @@ def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
             kw["A_h"] = A_h
         if A_v is not None:
             kw["A_v"] = A_v
+        if bottom_drag_r is not None:
+            kw["bottom_drag_r"] = bottom_drag_r
         config = MPASOceanConfig(**kw)
         model = MPASOceanModel(mesh, z_coord, config)
         coord_kind = "mpas"
@@ -3280,13 +3294,17 @@ def _make_gyre_physics(
     )
     from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
     from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
-    from legoesm.ocean.physics.bottom_drag.config import (
-        BottomDragConfig, LinearDragConfig,
-    )
+    from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
     from legoesm.ocean.physics.convection.config import OceanConvectionConfig
 
-    # Linear bottom drag r = 1e-4 s^-1 (Stommel, design doc §4.2).
-    # Lateral viscosity A_h handled by the base ocean config (see above).
+    # iter-136 (codex iter-124-followup HIGH-1, deferred until
+    # production exercise surfaced it): physics-level bottom
+    # drag (``BottomDragConfig(scheme='linear')``) was deprecated
+    # in favor of model-config ``bottom_drag_r``.  Use scheme="none"
+    # here and let the caller pass ``bottom_drag_r=1e-4`` to the
+    # model config via ``_create_ocean_setup``.  This was
+    # blocking ALL Stommel and Barotropic Gyre runs at runtime
+    # (caught when iter-136 ran the runner end-to-end).
     return OceanPhysicsConfig(
         surface_forcing=SurfaceForcingConfig(
             scheme="prescribed",
@@ -3300,10 +3318,7 @@ def _make_gyre_physics(
         ),
         vertical_mixing=VerticalMixingConfig(scheme="none"),
         lateral_mixing=LateralMixingConfig(scheme="none"),
-        bottom_drag=BottomDragConfig(
-            scheme="linear",
-            linear=LinearDragConfig(r=1e-4),
-        ),
+        bottom_drag=BottomDragConfig(scheme="none"),
         convection=OceanConvectionConfig(scheme="none"),
         shortwave_penetration=None,
     )
@@ -3317,11 +3332,11 @@ def _make_global_wind_physics():
     )
     from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
     from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
-    from legoesm.ocean.physics.bottom_drag.config import (
-        BottomDragConfig, LinearDragConfig,
-    )
+    from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
     from legoesm.ocean.physics.convection.config import OceanConvectionConfig
 
+    # iter-136: same physics-level bottom-drag deprecation fix
+    # as ``_make_gyre_physics``.
     return OceanPhysicsConfig(
         surface_forcing=SurfaceForcingConfig(
             scheme="prescribed",
@@ -3332,10 +3347,7 @@ def _make_global_wind_physics():
         ),
         vertical_mixing=VerticalMixingConfig(scheme="none"),
         lateral_mixing=LateralMixingConfig(scheme="none"),
-        bottom_drag=BottomDragConfig(
-            scheme="linear",
-            linear=LinearDragConfig(r=1e-4),
-        ),
+        bottom_drag=BottomDragConfig(scheme="none"),
         convection=OceanConvectionConfig(scheme="none"),
         shortwave_penetration=None,
     )
@@ -3412,8 +3424,13 @@ def _run_gyre_experiment(tc: TestCase, output_dir: Path, days: float,
     # A_h = 5e5 m^2/s: Munk layer delta_M ~ 300 km, needed to
     # stabilise long integrations at ~5-degree resolution.
     # Default A_v = 1e-3 (higher values destabilise latlon).
+    # iter-136 (codex iter-124-followup HIGH-1): pass linear
+    # bottom drag r=1e-4 s^-1 (Stommel design doc §4.2) via the
+    # MODEL config now that physics-level scheme='linear' is
+    # deprecated.
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
-        _create_ocean_setup(tc, physics=physics, A_h=5e5))
+        _create_ocean_setup(tc, physics=physics, A_h=5e5,
+                            bottom_drag_r=1e-4))
     state = _add_wind_gyre_forcing(
         None, tc.grid_type, grid, z_coord,
         lon_west=0.0, lon_east=120.0, lat_south=15.0, lat_north=75.0,
@@ -3777,8 +3794,11 @@ def run_global_barotropic_wind(tc: TestCase, output_dir: Path, days: float
 
     physics = _make_global_wind_physics()
     nlev_override = tc.run_kwargs.get("nlev", None)
+    # iter-136: pass linear bottom drag via model config (replaces
+    # deprecated physics-level scheme='linear').
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
-        _create_ocean_setup(tc, physics=physics, A_h=5e5, nlev=nlev_override))
+        _create_ocean_setup(tc, physics=physics, A_h=5e5,
+                            nlev=nlev_override, bottom_drag_r=1e-4))
 
     # Build initial state with simplified continent land mask
     # Uniform T/S for a truly barotropic experiment (no baroclinic modes)
@@ -4975,8 +4995,10 @@ def run_stommel_gyre_tracer(tc: TestCase, output_dir: Path, days: float
             f"(no surface forcing support)")
 
     physics = _make_gyre_physics("single_gyre")
+    # iter-136: pass linear bottom drag via model config (replaces
+    # deprecated physics-level scheme='linear').
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
-        _create_ocean_setup(tc, physics=physics))
+        _create_ocean_setup(tc, physics=physics, bottom_drag_r=1e-4))
     rest = _create_rest_state(tc, grid, z_coord)
     state = _init_stommel_gyre_tracer(rest, tc.grid_type, grid, z_coord)
 
