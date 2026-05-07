@@ -1,6 +1,6 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-144 snapshot — atmos latlon: 19/19 PASS; atmos icosahedral: 21/23 PASS (2 NH moist timed out at 25min); ocean latlon: 13/13 PASS; ocean mpas: 11/11 PASS; ocean cube: 6/11 PASS (5 real cube dycore issues handoff). Cross-grid plotting verified (PlateCarrée + shared colorbar). MPI infrastructure structurally validated; MPI distributed tests skip on this host but the CLAUDE.md canonical pathway initialize_distributed→scatter_to_local→rank-local→gather_to_global is intact)
+**Branch**: `simulation_full_check` (iter-145 snapshot — atmos matrix latlon: 19/19 PASS; atmos matrix icosahedral: 21/23 PASS; ocean matrix latlon: 13/13 PASS; ocean matrix mpas: 11/11 PASS; ocean matrix cube: 6/11 (5 cube handoff). RCE latlon PASS (T_sfc 299.94K, precip 0.35 mm/d). OMIP latlon PASS (30-day quick, SST 19.51°C, full physics + RRTMGP + salinity restoring). Cross-grid plotting + MPI infrastructure verified)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
