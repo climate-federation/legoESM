@@ -1,6 +1,6 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-147 snapshot — atmos matrix latlon: 19/19; atmos matrix icosahedral: 21/23; ocean matrix latlon: 13/13; ocean matrix mpas: 11/11; ocean matrix cube: 6/11 (handoff). RCE latlon PASS; RCE mpas BLOWUP (handoff). OMIP latlon SST=19.51°C; OMIP mpas SST=19.59°C (Δ=0.08°C). AMIP with realistic CMIP6 GHG (CO2=415, CH4=1900, N2O=332) + standard ozone PASS. Cross-grid plotting + MPI infrastructure verified)
+**Branch**: `simulation_full_check` (iter-148 snapshot — atmos matrix latlon: 19/19; atmos matrix icosahedral: 21/23; ocean matrix latlon: 13/13; ocean matrix mpas: 11/11; ocean matrix cube: 6/11 (handoff). RCE latlon PASS; RCE mpas BLOWUP (handoff). OMIP latlon SST=19.51°C; OMIP mpas SST=19.59°C (Δ=0.08°C). AMIP with realistic CMIP6 GHG (CO2=415, CH4=1900, N2O=332) + standard ozone + aerosol-reference-AOD PASS. Cross-grid plotting + MPI infrastructure verified)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
