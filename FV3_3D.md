@@ -2597,5 +2597,97 @@ resolution.
 iter 26+: substantive nord >= 2 fidelity restructure (outer-loop
 halo'd intermediate divg_d arrays).
 
+## Iteration 25 (2026-05-07): C48 verification — bigger benefit at higher res
+
+### Scan results (HS hybrid, 30 day)
+
+| label              | grid | max\|u\| | max\|v\| | mid_std | edge_v | mass_drift |
+|:-------------------|------|---------:|---------:|--------:|-------:|-----------:|
+| baseline_d2only    | C36  |    8.54  |    4.27  |  0.236  |  0.188 |   6.88e-10 |
+| d4=0.02 nord=1     | C36  |    7.50  |    3.61  |  0.228  |  0.158 |   3.73e-10 |
+| baseline_d2only    | C48  |   22.38  |   13.61  |  1.810  |  1.819 |   4.41e-09 |
+| d4=0.02 nord=1     | C48  |   18.04  |   10.93  |  0.993  |  0.836 |   2.34e-09 |
+
+### Two important observations
+
+**(1) C48 baseline cube imprint is dramatically larger than C36**:
+
+| metric    | C36 baseline | C48 baseline | C48 / C36 |
+|:----------|-------------:|-------------:|----------:|
+| max\|u\|  |       8.54   |     22.38    |    2.6 x  |
+| max\|v\|  |       4.27   |     13.61    |    3.2 x  |
+| mid_std   |      0.236   |      1.810   |    7.7 x  |
+| edge_v    |      0.188   |      1.819   |    9.7 x  |
+| mass_drift|     6.9e-10  |    4.4e-9    |    6.4 x  |
+
+The matrix's resolution-dependent ``_hyperdiff_cube`` and
+``_div_damp_cube`` tunings do NOT keep cube imprint under control
+at C48 in the absence of corner-divergence damping.  Cube imprint
+amplifies super-linearly with resolution under the iter-17 baseline
+configuration.
+
+**(2) ``d4_bg = 0.02`` reduction is MUCH bigger at C48**:
+
+| metric    | C36 reduction (d=30) | C48 reduction (d=30) |
+|:----------|---------------------:|---------------------:|
+| max\|u\|  |              -12 %   |              -19 %   |
+| max\|v\|  |              -15 %   |              -20 %   |
+| mid_std   |               -3 %   |              -45 %   |
+| edge_v    |              -16 %   |              -54 %   |
+| mass_drift|              -46 %   |              -47 %   |
+
+At C48 the d4_bg=0.02 setting cuts mid_std nearly in half and
+edge_v by more than half — a much larger absolute and relative
+benefit than at C36.
+
+### Interpretation
+
+The dimensional argument from iter-19 predicted d4_bg should have
+WEAKER effect at higher resolution (because ``dd8 = (da_min_c *
+d4_bg)^(nord+1)`` and ``da_min_c`` is smaller at higher resolution).
+The empirical observation is OPPOSITE: d4_bg has STRONGER effect at
+C48.
+
+Plausible explanation: at C48 the cube-vertex artifact is more
+severe (mid_std 7.7x larger than C36 at the same matrix-tuned
+hd / dd / ah).  The corner-divergence damping has more "spurious
+cube-vertex divergence" to attack, so a modest dd8 still produces
+a large absolute reduction.  At C36 the baseline imprint is
+already small, so d4_bg has less to work with.
+
+### Updated production recommendation
+
+The iter-19/24 recommendation (d4_bg=0.02, nord=1, d2_bg=0.0005)
+**generalises to C48** with even bigger relative benefit than at
+C36.  No coefficient adjustment needed for higher resolution in
+this range.
+
+For C72 / C96 / C192 production, the same coefficient should be
+tested empirically — but the trend is reassuring: d4_bg=0.02 is
+not over-tuned for C36; it's a genuinely useful damping that
+scales constructively into the production-resolution range.
+
+### Status
+
+iter 25 confirms the d4_bg=0.02 nord=1 setting:
+
+- generalises to C48 (no NaN, mass-conservative).
+- delivers BIGGER relative cube-imprint reduction at C48 than C36.
+- the matrix's resolution-dependent baseline tuning does NOT
+  control cube imprint at C48 alone — d4 is a genuinely
+  load-bearing component for higher-resolution cubed-sphere runs.
+
+27 unit tests still pass.
+
+### Direction for next iteration
+
+iter 26: substantive nord >= 2 fidelity restructure — extend the
+outer nord-loop to use halo'd intermediate divg_d arrays.  This
+closes the codex iter-18 HIGH-2 gap that becomes load-bearing at
+nord >= 2.
+
+iter 27+: C72 / C96 multi-resolution scan, longer 200-day
+integration once system load permits.
+
 
 
