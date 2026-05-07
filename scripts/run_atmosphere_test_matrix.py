@@ -497,6 +497,20 @@ def _laplacian_visc_cube(n: int, frac: float = 0.05) -> float:
     A modest Laplacian viscosity (frac=0.05) is needed alongside
     biharmonic hyperdiffusion to damp grid-scale energy that the C-D
     grid staggering does not fully resolve.
+
+    .. warning::
+       This heuristic gives ``A_h ∝ 1/n``, which is INSUFFICIENT at
+       C72+ resolutions for the FV3 3D HS hybrid path
+       (`primitive_eq_cdgrid.py`).  iter 33 found C72 NaN at default
+       ``A_h`` but stable at 10x.  iter 32 traced the unstable mode to
+       the interior (synoptic-scale, not grid-scale), which del-2
+       Laplacian viscosity damps better than del-4 hyperdiff or
+       cube-vertex damping.
+
+       For C72+ users: set ``LEGOESM_AH_SCALE=10.0`` (iter 34)
+       when invoking the matrix, OR construct the
+       ``CDGridPrimitiveEquationConfig`` with ``A_h`` ~ 2.0e+07
+       directly.  See ``FV3_3D.md`` iter 33-35 for the full diagnosis.
     """
     import math
     from legoesm import constants

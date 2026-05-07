@@ -134,6 +134,12 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
     """
     g: float = constants.g
     A_h: float = 0.0              # Laplacian viscosity [m^2/s]
+        # FV3_3D iter 33-35 finding: at C72+ resolutions the matrix's
+        # ``_laplacian_visc_cube`` default UNDERESTIMATES A_h by ~10x.
+        # The interior synoptic-scale unstable mode (iter-32 diagnosis)
+        # needs A_h ~ 2.0e+07 at C72.  Iter 33 confirmed stability
+        # with that value; iter 34 added LEGOESM_AH_SCALE env var to
+        # the matrix as a workaround.  See FV3_3D.md iter 33-35.
     hyperdiff_coeff: float = 0.0
     hyperdiff_ps_coeff: float = 0.0
     div_damp_coeff: float = 0.0   # Divergence damping coefficient [m^2/s]
