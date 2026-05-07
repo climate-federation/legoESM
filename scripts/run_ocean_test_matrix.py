@@ -2028,9 +2028,20 @@ def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
             kw["A_h"] = A_h
         if A_v is not None:
             kw["A_v"] = A_v
+        # iter-139 (iter-136 follow-up): the cubed_sphere
+        # ``OceanConfig`` does NOT expose ``bottom_drag_r`` (only
+        # ``LatLonCGridOceanConfig`` and ``MPASOceanConfig`` do —
+        # see src/legoesm/ocean/state.py:486 and
+        # src/legoesm/ocean/mpas_config.py:81).  Silently skip
+        # the kwarg here so wind-driven gyre runs don't crash;
+        # cubed_sphere gyre runs proceed without model-level
+        # linear drag (a known limitation tracked under the
+        # cube-ocean user-handoff items).
         if bottom_drag_r is not None:
             kw["bottom_drag_r"] = bottom_drag_r
-        config = OceanConfig(**kw)
+        config_kw = {k: v for k, v in kw.items()
+                     if k != "bottom_drag_r"}
+        config = OceanConfig(**config_kw)
         model = OceanModel(grid, z_coord, config)
         coord_kind = "cube"
         lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
