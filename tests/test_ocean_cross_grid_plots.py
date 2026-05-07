@@ -3238,6 +3238,40 @@ class TestIter123OceanDriftTolerance:
                 "removed from the cube + drag>0 branch — the "
                 "raise NotImplementedError supersedes it.")
 
+    def test_iter175_modular_setup_cube_bottom_drag_r_raises(self):
+        """iter-175 (parity check after iter-174):
+        ``scripts/ocean_test_matrix/setup.py`` must raise the
+        same ``NotImplementedError`` on cube + drag > 0 as the
+        monolithic ``scripts/run_ocean_test_matrix.py``.  The
+        modular path was previously WORSE than monolithic — it
+        silently dropped ``bottom_drag_r`` without even a
+        warning — so any user running through the modular
+        runner had no signal at all that physics fidelity was
+        being downgraded.
+
+        Both paths now raise ``NotImplementedError`` with a
+        message pointing to latlon/mpas.
+        """
+        from pathlib import Path
+        text = (Path(__file__).resolve().parent.parent
+                / "scripts" / "ocean_test_matrix" / "setup.py").read_text()
+        # Must raise NotImplementedError for cube + drag>0.
+        import re
+        m = re.search(
+            r"if bottom_drag_r is not None and bottom_drag_r > 0\.0:\s*\n"
+            r"\s*raise NotImplementedError",
+            text,
+        )
+        assert m is not None, (
+            "iter-175: scripts/ocean_test_matrix/setup.py must "
+            "raise NotImplementedError on cube + drag > 0 "
+            "(parity with monolithic iter-174 fix).")
+        # Message must point to alternative grids.
+        post_raise = text.split("raise NotImplementedError", 1)[1][:600]
+        assert "latlon" in post_raise or "mpas" in post_raise, (
+            "iter-175: error message must point to alternative "
+            "grids that DO support model-level drag.")
+
     def test_iter138_pe_rel_sign_uses_le_not_lt(self):
         """iter-138 (iter-137 FAIL-2) + iter-152 update:
         _apply_pe_rel_sign now uses op="lt" if days >= 1 else "le"
