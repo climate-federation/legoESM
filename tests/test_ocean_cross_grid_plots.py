@@ -2877,6 +2877,75 @@ class TestIter123OceanDriftTolerance:
                 f"fall back to first finite non-zero max_eta "
                 f"sample as denominator.")
 
+    # ====== iter-133: self-review barotropic experiment gates ======
+
+    def test_iter133_barotropic_wave_gates(self):
+        """iter-133 self-review based on
+        docs/ocean_experiments_reference.md 'Barotropic Wave'
+        Validation Thresholds: gates eta_conservation
+        in [0.8, 1.2], mean_eta_drift < 1e-4 m,
+        min_final_amplitude > 0.1 m.
+        """
+        from pathlib import Path
+        for rel in (
+            "scripts/run_ocean_test_matrix.py",
+            "scripts/ocean_test_matrix/experiments.py",
+        ):
+            text = (Path(__file__).resolve().parent.parent
+                    / rel).read_text()
+            import re
+            m = re.search(
+                r"def run_barotropic_wave\b"
+                r".*?(?=\ndef \w|\nRUNNERS)",
+                text, re.DOTALL,
+            )
+            assert m is not None, f"{rel}: missing"
+            body = m.group(0)
+            code = "\n".join(
+                line for line in body.splitlines()
+                if not line.lstrip().startswith("#"))
+            assert 'label="eta_conservation_lower"' in code
+            assert 'label="eta_conservation_upper"' in code
+            assert "eta_conservation, 0.8" in code
+            assert "eta_conservation, 1.2" in code
+            assert 'label="mean_eta_drift"' in code
+            assert "mean_eta_drift, 1e-4" in code
+            assert 'label="min_final_amplitude"' in code
+            assert "min_final_amplitude, 0.1" in code
+
+    def test_iter133_barotropic_gyre_gates(self):
+        """iter-133 self-review based on
+        docs/ocean_experiments_reference.md 'Barotropic Gyre'
+        Validation Thresholds: gates max_speed_final
+        in [0.05, 0.5] m/s and eta_drift < 1e-3 m absolute.
+        Applied via _run_gyre_experiment shared runner so it
+        covers single + double + sin2 variants.
+        """
+        from pathlib import Path
+        for rel in (
+            "scripts/run_ocean_test_matrix.py",
+            "scripts/ocean_test_matrix/experiments.py",
+        ):
+            text = (Path(__file__).resolve().parent.parent
+                    / rel).read_text()
+            import re
+            m = re.search(
+                r"def _run_gyre_experiment\b"
+                r".*?(?=\ndef \w|\nRUNNERS)",
+                text, re.DOTALL,
+            )
+            assert m is not None, f"{rel}: missing _run_gyre_experiment"
+            body = m.group(0)
+            code = "\n".join(
+                line for line in body.splitlines()
+                if not line.lstrip().startswith("#"))
+            assert 'label="max_speed_final_lower"' in code
+            assert 'label="max_speed_final_upper"' in code
+            assert "max_speed), 0.05" in code
+            assert "max_speed), 0.5" in code
+            assert 'label="eta_drift_absolute"' in code
+            assert "eta_drift), 1e-3" in code
+
     def test_iter128_geostrophic_doc_documents_tighter_gate(self):
         """iter-128 codex iter-127-followup MEDIUM-1: the doc
         threshold of 1e-3 is the loose contract; the runner uses

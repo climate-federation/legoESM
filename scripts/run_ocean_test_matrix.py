@@ -3154,9 +3154,55 @@ def run_barotropic_wave(tc: TestCase, output_dir: Path, days: float
         diag_every, lambda s: _key_array_fn(s, tc.grid_type),
         label=f"Barotropic Wave ({tc.grid_type})", total_days=days)
 
-    # All grids now use same physical units
-    eta_max = diag["max_abs_eta"][-1] if diag.get("max_abs_eta") else 0
-    notes = f"max|eta|={eta_max:.4f} m"
+    # iter-133 (self-review based on docs/ocean_experiments_reference.md
+    # "Barotropic Wave" Validation Thresholds): apply 3 documented
+    # gates that pre-iter-133 were entirely uncomputed.  The
+    # finite-only ``ok`` from _run_timeloop catches NaN/blowup,
+    # but a finite-but-anomalous run (e.g., the spectral T21 case
+    # showing 7 m vs FV ~0.2 m) could still PASS without these.
+    max_eta_series = diag.get("max_abs_eta", [])
+    mean_eta_series = diag.get("mean_eta", [])
+    n_eta = len(max_eta_series)
+    if n_eta >= 2:
+        max_eta_arr = np.asarray(max_eta_series, dtype=np.float64)
+        eta_initial = float(np.nanmax(np.abs(max_eta_arr[:max(1, n_eta // 5)])))
+        eta_final = float(abs(max_eta_arr[-1]))
+        if eta_initial > 1e-12 and np.isfinite(eta_final):
+            eta_conservation = eta_final / eta_initial
+        else:
+            eta_conservation = float("nan")
+        min_final_amplitude = eta_final
+    else:
+        eta_conservation = float("nan")
+        min_final_amplitude = float("nan")
+    if mean_eta_series and len(mean_eta_series) >= 2:
+        mean_eta_drift = float(abs(
+            mean_eta_series[-1] - mean_eta_series[0]))
+    else:
+        mean_eta_drift = float("nan")
+    eta_max = max_eta_series[-1] if max_eta_series else 0
+    notes = (f"max|eta|={eta_max:.4f}m, "
+             f"eta_cons={eta_conservation:.3f}, "
+             f"mean_eta_drift={mean_eta_drift:.2e}m, "
+             f"min_final_amp={min_final_amplitude:.3f}m")
+    ok, notes = _apply_value_threshold(
+        ok, notes, eta_conservation, 0.8,
+        label="eta_conservation_lower", op="ge",
+        n_samples=n_eta)
+    ok, notes = _apply_value_threshold(
+        ok, notes, eta_conservation, 1.2,
+        label="eta_conservation_upper", op="le",
+        n_samples=n_eta)
+    ok, notes = _apply_value_threshold(
+        ok, notes, mean_eta_drift, 1e-4,
+        label="mean_eta_drift", op="le", units="m",
+        n_samples=len(mean_eta_series))
+    # min_final_amplitude > 0.1 m: use op="ge" with 0.1; this
+    # catches over-damped runs that lose all wave amplitude.
+    ok, notes = _apply_value_threshold(
+        ok, notes, min_final_amplitude, 0.1,
+        label="min_final_amplitude", op="ge", units="m",
+        n_samples=n_eta)
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full
@@ -3378,11 +3424,31 @@ def _run_gyre_experiment(tc: TestCase, output_dir: Path, days: float,
         diag_every, lambda s: _key_array_fn(s, tc.grid_type),
         label=f"{label} ({tc.grid_type})", total_days=days)
 
-    max_speed = diag["max_speed"][-1] if diag.get("max_speed") else 0
+    max_speed_series = diag.get("max_speed", [])
+    max_speed = max_speed_series[-1] if max_speed_series else 0
     eta_list = diag.get("mean_eta", [])
     eta_drift = (abs(eta_list[-1] - eta_list[0])
                  if len(eta_list) >= 2 else 0.0)
     notes = f"max speed={max_speed:.4f} m/s, eta drift={eta_drift:.2e}"
+    # iter-133 (self-review based on docs/ocean_experiments_reference.md
+    # "Barotropic Gyre" Validation Thresholds; same applies to
+    # barotropic_double_gyre per the doc's "Same as barotropic_gyre"
+    # callout):
+    #   * max_speed_final in [0.05, 0.5] m/s
+    #   * eta_drift < 1e-3 m absolute
+    n_speed = len(max_speed_series)
+    ok, notes = _apply_value_threshold(
+        ok, notes, float(max_speed), 0.05,
+        label="max_speed_final_lower", op="ge", units="m/s",
+        n_samples=n_speed)
+    ok, notes = _apply_value_threshold(
+        ok, notes, float(max_speed), 0.5,
+        label="max_speed_final_upper", op="le", units="m/s",
+        n_samples=n_speed)
+    ok, notes = _apply_value_threshold(
+        ok, notes, float(eta_drift), 1e-3,
+        label="eta_drift_absolute", op="le", units="m",
+        n_samples=len(eta_list))
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full
