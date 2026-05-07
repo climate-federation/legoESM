@@ -2215,6 +2215,43 @@ class TestHeldSuarezDissipationImbalance:
         assert scale == 5.0
         assert msg is None
 
+    def test_auto_ah_scale_message_format_iter43(self):
+        """iter 55: pin the iter-43 auto-apply MESSAGE format
+        (not just the scale value).  Catches accidental format
+        changes that would confuse users tracking the env vars.
+        """
+        # C72 message should mention iter-33 + the env-var name.
+        scale, msg = M._auto_ah_scale(72, env_value=None)
+        assert msg is not None
+        assert "iter-33" in msg, f"C72 message must reference iter-33: {msg!r}"
+        assert "LEGOESM_AH_SCALE" in msg, (
+            f"C72 message must mention LEGOESM_AH_SCALE: {msg!r}"
+        )
+        assert "10" in msg, (
+            f"C72 message must show scale value 10: {msg!r}"
+        )
+
+        # C48 message should mention iter-37 + the env-var name.
+        scale, msg = M._auto_ah_scale(48, env_value=None)
+        assert msg is not None
+        assert "iter-37" in msg, f"C48 message must reference iter-37: {msg!r}"
+        assert "LEGOESM_AH_SCALE" in msg, (
+            f"C48 message must mention LEGOESM_AH_SCALE: {msg!r}"
+        )
+        assert "2" in msg, (
+            f"C48 message must show scale value 2: {msg!r}"
+        )
+
+        # All messages should include 'override' to inform users they
+        # can opt out via the env var.
+        for n in [48, 72, 96, 144]:
+            _, msg = M._auto_ah_scale(n, env_value=None)
+            if msg is not None:
+                assert "override" in msg.lower(), (
+                    f"C{n} message must say 'override' to inform users "
+                    f"they can opt out: {msg!r}"
+                )
+
     def test_iter43_production_guidance_end_to_end(self):
         """iter 52: end-to-end pin of the iter-43 production
         guidance.  When the matrix calls
