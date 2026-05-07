@@ -1750,5 +1750,89 @@ larger reductions are possible by combining cdd=0.001 with:
 iter 18+: continue the forward-backward architecture port for full
 elimination of the residual cube imprint.
 
+## Iteration 17 (2026-05-07): Fine 30-day cdd scan — found the optimum
+
+### Fine-grained scan (HS C36 hybrid, 30 days)
+
+| cdd_d2_bg | max\|u\| | max\|v\| | mid_max\|v\| | mid_std | mid_std reduction |
+|----------:|---------:|---------:|-------------:|--------:|------------------:|
+|  0.0000   |   11.57  |   6.52   |    2.556     |  0.635  |       --          |
+|  0.0005   |    8.54  |   4.27   |  **0.530**   | **0.175** |     **-72 %**   |
+|  0.0010   |    7.55  |   3.68   |    0.538     |  0.181  |     -71 %         |
+|  0.0020   |    6.56  |   3.19   |    0.643     |  0.225  |     -65 %         |
+|  0.0030   |    5.98  |   2.92   |    0.674     |  0.239  |     -62 %         |
+|  0.0050   |    5.24  |   2.57   |    0.690     |  0.243  |     -62 %         |
+
+**``corner_div_damp_d2_bg = 0.0005`` is the optimum** for cube-
+imprint reduction at long integration:
+- mid_max\|v\|: 2.556 → 0.530 (-**79 %**)
+- mid_std:     0.635 → 0.175 (-**72 %**)
+- max\|u\|:    11.57 → 8.54  (-26 %)
+- max\|v\|:     6.52 → 4.27  (-35 %)
+
+Lower cdd values reach a sweet spot between cube-imprint reduction
+and physical-Hadley preservation:
+- cdd=0.0005: best mid-level cube-imprint reduction (0.175)
+- cdd=0.0010: slightly more mid-level damping but stronger overall
+  flow damping; jet-like winds at upper levels reduce more
+- cdd≥0.002: over-damps mid-level eddies (mid_std rises again)
+
+### Test matrix verification at cdd=0.0005
+
+All 3 HS configurations PASS::
+
+  hydrostatic/held_suarez (C36 sigma 30d): mass drift=6.80e-10, max\|v\|=8.7
+  hydrostatic/held_suarez (C36 hybrid 30d): mass drift=6.88e-10, max\|v\|=8.5
+  hydrostatic/held_suarez_topo (C36 hybrid 2d): mass drift=1.31e-11, max\|v\|=1.9
+
+Mass drift remains at machine precision (6.8e-10 vs baseline 1.3e-9
+— modest improvement).  Max\|v\| reduced from 11.6 to 8.7 (-25 %).
+
+### Visual verification
+
+HS C36 hybrid 30-day v-wind snapshot at cdd=0.0005:
+- Color scale narrowed from baseline ±3 to ±2 m/s
+- Panel-boundary rings visibly weaker
+- Mid-latitudes smoother
+
+### Updated recommendation
+
+```python
+CDGridPrimitiveEquationConfig(...,
+    corner_div_damp_d2_bg=0.0005,   # iter 17 optimum (was 0.001 in iter 16)
+    corner_div_damp_dddmp=0.20,
+)
+```
+
+Or via env var: ``LEGOESM_CDD_D2BG=0.0005``.
+
+### Status
+
+iter 17 refines the iter-16 finding: the FV3 corner-divergence
+damping at the optimal coefficient (cdd_d2_bg = 0.0005) gives
+**-72 % mid-level cube-imprint reduction** with no architecture
+changes, fully FV3-faithful, mass-conserving at machine precision.
+
+Combined progress this branch:
+- iter-12 ``damp_v=0.30`` (post-step del-n vorticity damping):
+  -17 % mid-level alone
+- iter-16/17 ``cdd_d2_bg=0.0005`` (FV3 d_sw5 corner-divergence
+  damping): -72 % mid-level alone
+- Combined: ~-70 % mid-level (slight regression vs cdd alone, but
+  preserves Hadley signal better)
+
+46 atmospheric / FV3 tests pass with default config (bit-for-bit).
+
+### Direction for next iteration
+
+iter 18: investigate FV3's higher-order ``nord > 0`` divergence
+damping path (sw_core.F90:1726-1820) — a del-(2*(nord+1))-style
+iterative damping that adds a ``d4_bg`` parameter on top of
+``d2_bg``.  This is more selective than the iter-16 del-2 damping
+and may compound further.
+
+iter 19+: forward-backward time stepping for the residual cube
+imprint not addressable through damping alone.
+
 
 

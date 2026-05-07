@@ -269,8 +269,12 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         #
         # Default 0.0 preserves baseline.  FV3 production default
         # is 0.0625 with dddmp = 0.2; iter-1009 SW uses (8 * 0.0625,
-        # 0.0) — i.e. background-only without Smagorinsky.  Useful
-        # range: 0.0 to 0.10 for stable HS C36 hybrid.
+        # 0.0) — i.e. background-only without Smagorinsky.  Stable
+        # range for our 3D path: 0.0 to ~0.005 (FV3's 0.0625 default
+        # is too aggressive for our C-D + RK3 architecture).  iter-17
+        # 30-day scan identified ``corner_div_damp_d2_bg = 0.0005``
+        # as the OPTIMUM for HS C36 hybrid: -79 % mid-level cube
+        # imprint, -35 % max\|v\|, mass drift ~6e-10.
     corner_div_damp_dddmp: float = 0.20
         # Companion Smagorinsky coefficient for ``corner_div_damp_d2_bg``.
         # Faithful FV3 default is 0.20 (sw_core.F90).  Active only
