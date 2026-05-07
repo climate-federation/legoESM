@@ -136,11 +136,14 @@ Or via env vars (matrix sets ``A_h`` from ``LEGOESM_AH_SCALE``)::
   ~7.7x relative to C36 baseline.  ``d4=0.02 nord=1`` rescues C48
   stability with -45 % mid_std reduction.
 
-- **At C72 no combination of corner damping and hyperdiff** tested
-  produces a stable 30-day HS run.  The cube-imprint amplification at
-  this resolution exceeds what damping alone can contain.  Suspected
-  CFL or RK3-stability limit — needs smaller ``dt``, forward-backward
-  time stepping, or nord >= 2 fidelity restructure (iter 30+).
+- **At C72 the matrix's default A_h is INSUFFICIENT** — bare
+  d4=0.02 nord=1 NaNs at day 13 (iter 26).  Iter 33 found that
+  scaling ``A_h`` up by 10x rescues C72 stability, while iter
+  31/32 ruled OUT the time-integrator and cube-vertex hypotheses.
+  Iter 32 traced the unstable mode to an INTERIOR synoptic-scale
+  eigenmode that del-2 viscosity damps but del-4 hyperdiff and
+  cube-vertex damping do not reach.  The fix is **``LEGOESM_AH_SCALE=10``
+  at C72** (iter-43 auto-applies this when env var unset).
 
 - **The conservation fixer dominates the iter-19 mass-drift claim**.
   Pre-fixer raw mass drift at d4=0.02 vs baseline differs by only -1 %
