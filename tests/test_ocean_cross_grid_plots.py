@@ -3659,6 +3659,85 @@ class TestIter123OceanDriftTolerance:
             f"drifts).  Found {count}."
         )
 
+    def test_iter157_stommel_gyre_tracer_uses_centralized_helper(self):
+        """iter-157 (post-iter-156 audit, codex-clean cycle):
+        ``stommel_gyre_tracer.compute_diagnostics`` and
+        ``compute_transport_metrics`` previously inlined the
+        iter-78 pathology pattern
+        (``abs(final - init) / abs(init)`` with a stale
+        ``> 1e-30`` floor).  iter-157 migrated both to the
+        centralized ``compute_relative_drift`` helper.
+
+        This structural test pins the migration so the inline
+        pattern cannot regress silently.
+        """
+        import inspect
+        from legoesm.ocean.experiments import stommel_gyre_tracer
+        src = inspect.getsource(stommel_gyre_tracer)
+        # Strip docstrings and comments so we only inspect code.
+        import re
+        text_no_strings = re.sub(r'""".*?"""', "", src, flags=re.DOTALL)
+        text_no_strings = re.sub(r"'''.*?'''", "", text_no_strings, flags=re.DOTALL)
+        code_only = "\n".join(
+            line for line in text_no_strings.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        # No more ``> 1e-30`` floor on baseline (the iter-78
+        # pathology pattern).
+        assert "> 1e-30" not in code_only, (
+            "iter-157: stommel_gyre_tracer must not use the "
+            "stale ``> 1e-30`` baseline floor.  Use the "
+            "centralized ``compute_relative_drift`` helper "
+            "(DEFAULT_MIN_BASELINE = 1.0) instead."
+        )
+        # Must import compute_relative_drift somewhere.
+        assert "compute_relative_drift" in code_only, (
+            "iter-157: stommel_gyre_tracer must use "
+            "``compute_relative_drift`` from "
+            "``legoesm.diagnostics``."
+        )
+
+    def test_iter157_atmosphere_matrix_uses_compute_drift_wrapper(self):
+        """iter-157: ``run_atmosphere_test_matrix.error_fn`` for
+        cosine_bell previously inlined
+        ``abs(mass_final - _mass_init) / abs(_mass_init)``.
+        iter-157 migrated it to the ``_compute_drift`` wrapper
+        (which delegates to ``compute_relative_drift``).
+
+        We do a text-only scan of the file because importing
+        the script triggers heavy argparse/global setup; the
+        structural assertion only needs the source string.
+        """
+        from pathlib import Path
+        scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+        path = scripts_dir / "run_atmosphere_test_matrix.py"
+        text = path.read_text()
+        # Strip docstrings and comments so we only inspect code.
+        import re
+        text_no_strings = re.sub(r'""".*?"""', "", text, flags=re.DOTALL)
+        text_no_strings = re.sub(r"'''.*?'''", "", text_no_strings, flags=re.DOTALL)
+        code_only = "\n".join(
+            line for line in text_no_strings.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        # The iter-78 pathology pattern for cosine_bell mass
+        # drift must not appear in the code (only in comments).
+        assert "abs(mass_final - _mass_init) / abs(_mass_init)" not in code_only, (
+            "iter-157: ``run_atmosphere_test_matrix.error_fn`` "
+            "must use the ``_compute_drift`` wrapper for "
+            "cosine_bell mass drift, not the inline "
+            "``abs(mass_final - _mass_init) / abs(_mass_init)`` "
+            "formula (the iter-78 pathology pattern that was "
+            "systematically removed in iter-90/91/93)."
+        )
+        # And the new pattern must be present.
+        assert "_compute_drift([_mass_init, mass_final])" in code_only, (
+            "iter-157: ``run_atmosphere_test_matrix.error_fn`` "
+            "must call "
+            "``_compute_drift([_mass_init, mass_final])`` for "
+            "cosine_bell mass drift."
+        )
+
 
 class TestIter110CodexReviewFixes:
     """iter-110 (codex iter-104 follow-up review): 3 MEDIUM

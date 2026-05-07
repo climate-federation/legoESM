@@ -2195,9 +2195,20 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
             h_exact = cosine_bell_exact(grid.lon2d, grid.lat2d,
                                         grid.radius, t, beta)
             norms = cosine_bell_error_norms(s.h, h_exact, grid.area)
-            # Report raw mass drift (no correction applied)
+            # Report raw mass drift (no correction applied).
+            #
+            # iter-157: migrated from inline
+            # ``abs(mass_final - _mass_init) / abs(_mass_init)`` to the
+            # ``_compute_drift`` wrapper (which delegates to the centralized
+            # ``legoesm.diagnostics.conservation_drift.compute_relative_drift``).
+            # For cosine_bell ``_mass_init`` is always large positive (cosine
+            # bell has a positive background), so the happy-path numerical
+            # behavior is unchanged.  The helper adds NaN-aware behavior so
+            # that a blown-up run reports NaN explicitly instead of silently
+            # returning a non-finite that downstream comparisons treat as
+            # False.
             mass_final = float(jnp.sum(s.h * grid.area))
-            norms["mass_drift"] = abs(mass_final - _mass_init) / abs(_mass_init)
+            norms["mass_drift"] = _compute_drift([_mass_init, mass_final])
             return norms
 
     elif tc.grid_type == "icosahedral":
