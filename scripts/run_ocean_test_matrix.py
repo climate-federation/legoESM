@@ -2816,7 +2816,13 @@ def run_rest_state(tc: TestCase, output_dir: Path, days: float
     eta_drift = (abs(eta_list[-1] - eta_list[0])
                  if len(eta_list) >= 2 else 0.0)
     T_drift = _compute_drift(diag.get("mean_T", []))
-    notes = f"eta drift={eta_drift:.2e}, T drift={T_drift:.2e}"
+    # iter-131 (codex iter-130-followup MEDIUM-1): also compute
+    # S_drift to gate the documented < 1e-6 contract from
+    # docs/ocean_experiments_reference.md "Rest State"
+    # Validation Thresholds.
+    S_drift = _compute_drift(diag.get("mean_S", []))
+    notes = (f"eta drift={eta_drift:.2e}, T drift={T_drift:.2e}, "
+             f"S drift={S_drift:.2e}")
     # iter-123 (codex iter-119-followup MEDIUM-4): rest_state
     # ocean has zero forcing → drift should be machine precision.
     # Tolerances are generous (1e-10 m for SSH, 1e-8 relative for T)
@@ -2829,6 +2835,11 @@ def run_rest_state(tc: TestCase, output_dir: Path, days: float
     ok, notes = _apply_drift_tolerance(
         ok, notes, T_drift, 1e-8,
         label="T", n_samples=len(diag.get("mean_T", [])))
+    # iter-131 (codex iter-130-followup MEDIUM-1): documented
+    # S_drift < 1e-6 contract (rest_state has no S forcing).
+    ok, notes = _apply_drift_tolerance(
+        ok, notes, S_drift, 1e-6,
+        label="S", n_samples=len(diag.get("mean_S", [])))
 
     # Spectral land-leakage diagnostic: check that eta stays near zero in land cells
     if tc.grid_type == "spectral" and hasattr(state, 'land_mask_grid'):
@@ -2896,7 +2907,13 @@ def run_rest_state_no_land(tc: TestCase, output_dir: Path, days: float
     eta_drift = (abs(eta_list[-1] - eta_list[0])
                  if len(eta_list) >= 2 else 0.0)
     T_drift = _compute_drift(diag.get("mean_T", []))
-    notes = f"eta drift={eta_drift:.2e}, T drift={T_drift:.2e}"
+    # iter-131 (codex iter-130-followup MEDIUM-1): also compute
+    # S_drift to gate the documented < 1e-6 contract from
+    # docs/ocean_experiments_reference.md "Rest State"
+    # Validation Thresholds.
+    S_drift = _compute_drift(diag.get("mean_S", []))
+    notes = (f"eta drift={eta_drift:.2e}, T drift={T_drift:.2e}, "
+             f"S drift={S_drift:.2e}")
     # iter-123 (codex iter-119-followup MEDIUM-4): rest_state
     # ocean has zero forcing → drift should be machine precision.
     # Tolerances are generous (1e-10 m for SSH, 1e-8 relative for T)
@@ -2909,6 +2926,11 @@ def run_rest_state_no_land(tc: TestCase, output_dir: Path, days: float
     ok, notes = _apply_drift_tolerance(
         ok, notes, T_drift, 1e-8,
         label="T", n_samples=len(diag.get("mean_T", [])))
+    # iter-131 (codex iter-130-followup MEDIUM-1): documented
+    # S_drift < 1e-6 contract (rest_state has no S forcing).
+    ok, notes = _apply_drift_tolerance(
+        ok, notes, S_drift, 1e-6,
+        label="S", n_samples=len(diag.get("mean_S", [])))
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full  # positive downward for plotting
@@ -2969,7 +2991,13 @@ def run_rest_state_uniform_ts(tc: TestCase, output_dir: Path, days: float
     eta_drift = (abs(eta_list[-1] - eta_list[0])
                  if len(eta_list) >= 2 else 0.0)
     T_drift = _compute_drift(diag.get("mean_T", []))
-    notes = f"eta drift={eta_drift:.2e}, T drift={T_drift:.2e}"
+    # iter-131 (codex iter-130-followup MEDIUM-1): also compute
+    # S_drift to gate the documented < 1e-6 contract from
+    # docs/ocean_experiments_reference.md "Rest State"
+    # Validation Thresholds.
+    S_drift = _compute_drift(diag.get("mean_S", []))
+    notes = (f"eta drift={eta_drift:.2e}, T drift={T_drift:.2e}, "
+             f"S drift={S_drift:.2e}")
     # iter-123 (codex iter-119-followup MEDIUM-4): rest_state
     # ocean has zero forcing → drift should be machine precision.
     # Tolerances are generous (1e-10 m for SSH, 1e-8 relative for T)
@@ -2982,6 +3010,11 @@ def run_rest_state_uniform_ts(tc: TestCase, output_dir: Path, days: float
     ok, notes = _apply_drift_tolerance(
         ok, notes, T_drift, 1e-8,
         label="T", n_samples=len(diag.get("mean_T", [])))
+    # iter-131 (codex iter-130-followup MEDIUM-1): documented
+    # S_drift < 1e-6 contract (rest_state has no S forcing).
+    ok, notes = _apply_drift_tolerance(
+        ok, notes, S_drift, 1e-6,
+        label="S", n_samples=len(diag.get("mean_S", [])))
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full
@@ -3037,7 +3070,13 @@ def run_rest_state_uniform_ts_no_land(tc: TestCase, output_dir: Path, days: floa
     eta_drift = (abs(eta_list[-1] - eta_list[0])
                  if len(eta_list) >= 2 else 0.0)
     T_drift = _compute_drift(diag.get("mean_T", []))
-    notes = f"eta drift={eta_drift:.2e}, T drift={T_drift:.2e}"
+    # iter-131 (codex iter-130-followup MEDIUM-1): also compute
+    # S_drift to gate the documented < 1e-6 contract from
+    # docs/ocean_experiments_reference.md "Rest State"
+    # Validation Thresholds.
+    S_drift = _compute_drift(diag.get("mean_S", []))
+    notes = (f"eta drift={eta_drift:.2e}, T drift={T_drift:.2e}, "
+             f"S drift={S_drift:.2e}")
     # iter-123 (codex iter-119-followup MEDIUM-4): rest_state
     # ocean has zero forcing → drift should be machine precision.
     # Tolerances are generous (1e-10 m for SSH, 1e-8 relative for T)
@@ -3050,6 +3089,11 @@ def run_rest_state_uniform_ts_no_land(tc: TestCase, output_dir: Path, days: floa
     ok, notes = _apply_drift_tolerance(
         ok, notes, T_drift, 1e-8,
         label="T", n_samples=len(diag.get("mean_T", [])))
+    # iter-131 (codex iter-130-followup MEDIUM-1): documented
+    # S_drift < 1e-6 contract (rest_state has no S forcing).
+    ok, notes = _apply_drift_tolerance(
+        ok, notes, S_drift, 1e-6,
+        label="S", n_samples=len(diag.get("mean_S", [])))
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full
@@ -4043,7 +4087,59 @@ def run_phillips_two_layer(tc: TestCase, output_dir: Path, days: float
 
     # All grids now use same physical units
     T_drift = _compute_drift(diag.get("mean_T", []))
-    notes = f"T drift={T_drift:.2e}"
+    # iter-131 (codex iter-130-followup HIGH-1): Phillips Two-
+    # Layer requires three documented PASS gates that pre-iter-131
+    # were uncomputed and uncheck'd, so ANY finite numerical bad
+    # run could PASS:
+    #   * T_drift_absolute < 5.0 C — bound ABSOLUTE drift, not
+    #     relative.  Phillips has T forcing → larger drifts than
+    #     unforced experiments are expected, but capped at 5 C.
+    #   * eta_growth in [0.8, 10.0] — eta amplitude must grow
+    #     (instability develops) but not blow up.
+    #   * max_eta_amplitude < 5.0 m — absolute blowup ceiling.
+    # See the "Phillips Two-Layer (phillips_two_layer)" section
+    # of docs/ocean_experiments_reference.md.
+    mean_T_series = diag.get("mean_T", [])
+    max_eta_series = diag.get("max_abs_eta", [])
+    n_T = len(mean_T_series)
+    n_eta = len(max_eta_series)
+    if n_T >= 2 and all(np.isfinite(v) for v in (
+            mean_T_series[0], mean_T_series[-1])):
+        T_abs_drift = float(abs(mean_T_series[-1] - mean_T_series[0]))
+    else:
+        T_abs_drift = float("nan")
+    if n_eta >= 2:
+        eta_initial = float(abs(max_eta_series[0]))
+        eta_final = float(abs(max_eta_series[-1]))
+        max_eta_overall = float(np.nanmax(np.asarray(max_eta_series)))
+        if eta_initial > 1e-12 and np.isfinite(eta_final):
+            eta_growth = eta_final / eta_initial
+        else:
+            eta_growth = float("nan")
+    else:
+        eta_initial = float("nan")
+        eta_final = float("nan")
+        max_eta_overall = float("nan")
+        eta_growth = float("nan")
+    notes = (f"T drift={T_drift:.2e}, T_abs_drift={T_abs_drift:.3f}C, "
+             f"eta_growth={eta_growth:.3f}, "
+             f"max_eta={max_eta_overall:.3f}m")
+    ok, notes = _apply_value_threshold(
+        ok, notes, T_abs_drift, 5.0,
+        label="T_abs_drift", op="le", units="C",
+        n_samples=n_T)
+    ok, notes = _apply_value_threshold(
+        ok, notes, eta_growth, 0.8,
+        label="eta_growth_lower", op="ge",
+        n_samples=n_eta)
+    ok, notes = _apply_value_threshold(
+        ok, notes, eta_growth, 10.0,
+        label="eta_growth_upper", op="le",
+        n_samples=n_eta)
+    ok, notes = _apply_value_threshold(
+        ok, notes, max_eta_overall, 5.0,
+        label="max_eta_amplitude", op="le", units="m",
+        n_samples=n_eta)
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full
@@ -4797,7 +4893,8 @@ def run_stommel_gyre_tracer(tc: TestCase, output_dir: Path, days: float
         n_samples=len(diag.get("S_integral", [])))
     # iter-128 (codex iter-127-followup MEDIUM-3): apply the
     # documented overshoot/undershoot < 0.1 PSU thresholds
-    # (docs/ocean_experiments_reference.md:681-682).
+    # (see "Stommel Gyre Tracer" Validation Thresholds in
+    # docs/ocean_experiments_reference.md).
     # iter-129 (codex iter-128-followup LOW-1): switched from
     # ``op="le"`` (PASS at exactly 0.1) to ``op="lt"`` (strict
     # <) to match the documented strict bound.  iter-129 LOW-2:
@@ -4808,14 +4905,27 @@ def run_stommel_gyre_tracer(tc: TestCase, output_dir: Path, days: float
     # iter-130 (codex iter-129-followup LOW-1): use the right
     # series-length per gate (S_max for overshoot, S_min for
     # undershoot) so a partial diagnostic doesn't bypass either.
+    # iter-131 (codex iter-130-followup LOW-3): pre-record the
+    # missing-series state into ``notes`` for BOTH extrema before
+    # mutating ``ok`` — otherwise the first gate's failure short-
+    # circuits the second gate's "missing" annotation, hiding
+    # the second incomplete diagnostic.
+    n_max = len(S_max_series)
+    n_min = len(S_min_series)
+    if n_max < 2:
+        notes += (f" [WARN: S_max series has only {n_max} sample(s); "
+                  f"overshoot gate will FAIL]")
+    if n_min < 2:
+        notes += (f" [WARN: S_min series has only {n_min} sample(s); "
+                  f"undershoot gate will FAIL]")
     ok, notes = _apply_value_threshold(
         ok, notes, overshoot, 0.1,
         label="S overshoot", op="lt", units="PSU",
-        n_samples=len(S_max_series))
+        n_samples=n_max)
     ok, notes = _apply_value_threshold(
         ok, notes, undershoot, 0.1,
         label="S undershoot", op="lt", units="PSU",
-        n_samples=len(S_min_series))
+        n_samples=n_min)
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full

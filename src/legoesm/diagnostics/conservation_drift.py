@@ -282,9 +282,11 @@ def apply_value_threshold(
     ``apply_drift_tolerance`` for tests that gate on non-drift
     quantities — e.g., the documented Stommel
     ``overshoot < 0.1 PSU`` and ``undershoot < 0.1 PSU`` thresholds
-    (``docs/ocean_experiments_reference.md:681-682``), and the
-    Overflow / Lock-Exchange ``pe_rel_final < 0`` sign check
-    (``docs/ocean_experiments_reference.md:626`` and ``:575``).
+    in the "Stommel Gyre Tracer" section, and the Overflow /
+    Lock-Exchange ``pe_rel_final < 0`` sign check in their
+    respective Validation Thresholds blocks (see
+    ``docs/ocean_experiments_reference.md``; iter-131 codex
+    iter-130-followup LOW-2: removed stale line numbers).
 
     iter-129 (codex iter-128-followup LOW-1/3/MEDIUM-1):
       * Removed ``op="lt_zero"`` (one-iteration-old API; replaced
@@ -310,6 +312,10 @@ def apply_value_threshold(
       (or non-finite).  Used for sign checks (e.g., RPE must
       strictly decrease) and any documented ``< X`` strict
       bound.
+    * ``op="ge"`` (greater-than-or-equal): fail if ``value < threshold``
+      (or non-finite).  Used for lower-bound tests (e.g., Phillips
+      ``eta_growth >= 0.8``).  Added iter-131 (codex iter-130-followup
+      HIGH-1) for range checks.
     * Idempotent on already-failed runs (``ok=False`` short-
       circuits).
 
@@ -348,9 +354,17 @@ def apply_value_threshold(
                 f"threshold {threshold:.3g}{units}; "
                 f"expected strictly less-than]"
             )
+    elif op == "ge":
+        if value < threshold:
+            ok = False
+            notes += (
+                f" [FAIL: {label}={value:.3g}{units} < "
+                f"threshold {threshold:.3g}{units}; "
+                f"expected greater-than-or-equal]"
+            )
     else:
         raise ValueError(
             f"apply_value_threshold: unknown op {op!r} "
-            f"(expected 'le' or 'lt')"
+            f"(expected 'le', 'lt', or 'ge')"
         )
     return ok, notes

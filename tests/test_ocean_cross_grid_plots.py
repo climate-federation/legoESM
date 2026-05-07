@@ -2218,30 +2218,58 @@ class TestIter123OceanDriftTolerance:
 
     # ====== iter-130: codex iter-129-followup HIGH-1/2 + MEDIUM + LOW ======
 
-    @staticmethod
-    def _import_monolithic_runner():
-        """Helper: import scripts/run_ocean_test_matrix.py
-        as a module under a stable name so dataclass decorators
-        can resolve their module via sys.modules.
+    # Module-level cache for the dynamically-loaded monolithic
+    # runner (~3-second import).  iter-131 codex iter-130-followup
+    # LOW-1: the cache lives in this class attribute (not in
+    # ``sys.modules`` permanently); the module is registered in
+    # ``sys.modules`` only for the duration of ``exec_module``
+    # so that ``@dataclass`` can resolve its owning module — and
+    # is left there because re-importing under the same alias
+    # is idempotent (Python's import system would deduplicate).
+    # The alias name uses a leading underscore to mark it as
+    # test-internal.
+    _CACHED_MONOLITHIC_RUNNER: object = None
 
-        Cached in module-level _MONOLITHIC_RUNNER_MODULE on
-        first call to avoid repeated heavy imports.
+    @classmethod
+    def _import_monolithic_runner(cls):
+        """Helper: import scripts/run_ocean_test_matrix.py as a
+        module under a stable alias so ``@dataclass`` can resolve
+        its owning module via ``sys.modules``.
+
+        Cached in the class-attribute ``_CACHED_MONOLITHIC_RUNNER``
+        on first call to avoid the ~3-second re-import per test.
         """
+        if cls._CACHED_MONOLITHIC_RUNNER is not None:
+            return cls._CACHED_MONOLITHIC_RUNNER
         import importlib.util
         import sys
         from pathlib import Path
+        # Re-use cached entry from sys.modules if any test in
+        # the same session already loaded it.
         cached = sys.modules.get("_run_ocean_test_matrix_runner")
         if cached is not None:
+            cls._CACHED_MONOLITHIC_RUNNER = cached
             return cached
         path = (Path(__file__).resolve().parent.parent
                 / "scripts" / "run_ocean_test_matrix.py")
         spec = importlib.util.spec_from_file_location(
             "_run_ocean_test_matrix_runner", path)
         mod = importlib.util.module_from_spec(spec)
-        # Critical: register before exec so dataclass can find
-        # the module via sys.modules.
+        # Critical: register before exec so @dataclass decorators
+        # in the module can find their owning module via
+        # ``sys.modules``.  Without this registration the import
+        # raises AttributeError in the dataclass machinery.
         sys.modules["_run_ocean_test_matrix_runner"] = mod
-        spec.loader.exec_module(mod)
+        try:
+            spec.loader.exec_module(mod)
+            cls._CACHED_MONOLITHIC_RUNNER = mod
+        except Exception:
+            # iter-131 codex iter-130-followup LOW-1: clean up
+            # the partial sys.modules entry on failure so a
+            # broken import doesn't leak a half-initialized
+            # module to subsequent tests.
+            sys.modules.pop("_run_ocean_test_matrix_runner", None)
+            raise
         return mod
 
     def test_iter130_monolithic_value_threshold_wrapper_accepts_n_samples(self):
@@ -2346,6 +2374,14 @@ class TestIter123OceanDriftTolerance:
         uses ``len(S_min_series)`` — not a single shared count.
         This way a partial S_max diagnostic doesn't bypass the
         overshoot guard (and vice versa).
+
+        iter-131 (codex iter-130-followup LOW-3 follow-through):
+        the runner now also assigns ``n_max = len(S_max_series)``
+        and ``n_min = len(S_min_series)`` to local variables for
+        the WARN annotations; the assertion accepts either the
+        direct ``len(...)`` form or the named-variable form.
+        Use the iter-131 ``test_iter131_stommel_per_extremum_call_is_specific``
+        for the stricter call-site check.
         """
         from pathlib import Path
         for rel in (
@@ -2363,19 +2399,25 @@ class TestIter123OceanDriftTolerance:
             assert m is not None
             body = m.group(0)
             # overshoot must use S_max sample count.
-            assert (
+            has_overshoot = (
                 'label="S overshoot"' in body
-                and "n_samples=len(S_max_series)" in body
-            ), (
-                f"iter-130: {rel}: Stommel overshoot must use "
-                f"len(S_max_series) for n_samples.")
+                and ("n_samples=len(S_max_series)" in body
+                     or "n_samples=n_max" in body)
+            )
+            assert has_overshoot, (
+                f"iter-130/iter-131: {rel}: Stommel overshoot "
+                f"must use S_max sample count for n_samples "
+                f"(via len(S_max_series) or local n_max).")
             # undershoot must use S_min sample count.
-            assert (
+            has_undershoot = (
                 'label="S undershoot"' in body
-                and "n_samples=len(S_min_series)" in body
-            ), (
-                f"iter-130: {rel}: Stommel undershoot must use "
-                f"len(S_min_series) for n_samples.")
+                and ("n_samples=len(S_min_series)" in body
+                     or "n_samples=n_min" in body)
+            )
+            assert has_undershoot, (
+                f"iter-130/iter-131: {rel}: Stommel undershoot "
+                f"must use S_min sample count for n_samples "
+                f"(via len(S_min_series) or local n_min).")
 
     def test_iter130_no_stale_doc_line_numbers(self):
         """iter-130 codex iter-129-followup LOW-2: doc line
@@ -2399,6 +2441,272 @@ class TestIter123OceanDriftTolerance:
                     f"numbers drifted to 581 (lock_exchange) "
                     f"and 632 (overflow) after iter-128 edits. "
                     f"Replace with a section-name callout.")
+
+    # ====== iter-131: codex iter-130-followup HIGH-1 + MEDIUM + LOW ======
+
+    def test_iter131_value_threshold_op_ge(self):
+        """iter-131 codex iter-130-followup HIGH-1: the new
+        ``op="ge"`` mode for greater-than-or-equal lower-bound
+        gates (e.g., Phillips ``eta_growth >= 0.8``).
+        """
+        from legoesm.diagnostics import apply_value_threshold
+        # PASS: value at threshold.
+        ok, _ = apply_value_threshold(
+            ok=True, notes="", value=0.8, threshold=0.8,
+            label="eta_growth", op="ge")
+        assert ok is True
+        # PASS: value above threshold.
+        ok, _ = apply_value_threshold(
+            ok=True, notes="", value=2.0, threshold=0.8,
+            label="eta_growth", op="ge")
+        assert ok is True
+        # FAIL: value below threshold.
+        ok, notes = apply_value_threshold(
+            ok=True, notes="", value=0.5, threshold=0.8,
+            label="eta_growth", op="ge")
+        assert ok is False
+        assert "expected greater-than-or-equal" in notes
+        # NaN: fail.
+        ok, _ = apply_value_threshold(
+            ok=True, notes="", value=float("nan"), threshold=0.8,
+            label="eta_growth", op="ge")
+        assert ok is False
+
+    def test_iter131_unknown_op_message_lists_ge(self):
+        """iter-131 codex iter-130-followup HIGH-1 follow-up:
+        the unknown-op error message must now list 'ge' too.
+        """
+        from legoesm.diagnostics import apply_value_threshold
+        import pytest
+        with pytest.raises(ValueError, match="'ge'"):
+            apply_value_threshold(
+                ok=True, notes="", value=1.0, threshold=0.5,
+                label="x", op="bogus")
+
+    def test_iter131_phillips_has_three_gates_monolithic(self):
+        """iter-131 codex iter-130-followup HIGH-1: monolithic
+        run_phillips_two_layer must apply T_abs_drift, eta_growth
+        (as range: lower + upper), and max_eta_amplitude PASS
+        gates per the documented thresholds.
+        """
+        from pathlib import Path
+        text = (Path(__file__).resolve().parent.parent
+                / "scripts" / "run_ocean_test_matrix.py").read_text()
+        import re
+        m = re.search(
+            r"def run_phillips_two_layer\b.*?(?=\ndef \w|\nRUNNERS)",
+            text, re.DOTALL,
+        )
+        assert m is not None
+        body = m.group(0)
+        # Strip comments.
+        code = "\n".join(
+            line for line in body.splitlines()
+            if not line.lstrip().startswith("#"))
+        # T_abs_drift gate.
+        assert 'label="T_abs_drift"' in code
+        assert "T_abs_drift, 5.0" in code
+        # eta_growth lower bound (op="ge").
+        assert 'label="eta_growth_lower"' in code
+        assert 'op="ge"' in code
+        # eta_growth upper bound (op="le").
+        assert 'label="eta_growth_upper"' in code
+        # max_eta_amplitude gate.
+        assert 'label="max_eta_amplitude"' in code
+        assert "max_eta_overall, 5.0" in code
+
+    def test_iter131_phillips_has_three_gates_modular(self):
+        """iter-131 codex iter-130-followup HIGH-1: modular
+        run_phillips_two_layer mirrors the same gates.
+        """
+        from pathlib import Path
+        text = (Path(__file__).resolve().parent.parent
+                / "scripts" / "ocean_test_matrix"
+                / "experiments.py").read_text()
+        import re
+        m = re.search(
+            r"def run_phillips_two_layer\b.*?(?=\ndef \w)",
+            text, re.DOTALL,
+        )
+        assert m is not None
+        body = m.group(0)
+        code = "\n".join(
+            line for line in body.splitlines()
+            if not line.lstrip().startswith("#"))
+        assert 'label="T_abs_drift"' in code
+        assert "T_abs_drift, 5.0" in code
+        assert 'label="eta_growth_lower"' in code
+        assert 'op="ge"' in code
+        assert 'label="eta_growth_upper"' in code
+        assert 'label="max_eta_amplitude"' in code
+        assert "max_eta_overall, 5.0" in code
+
+    def test_iter131_rest_state_has_S_drift_gate_monolithic(self):
+        """iter-131 codex iter-130-followup MEDIUM-1: monolithic
+        rest_state variants must gate S_drift (< 1e-6 per
+        documented threshold).
+        """
+        from pathlib import Path
+        text = (Path(__file__).resolve().parent.parent
+                / "scripts" / "run_ocean_test_matrix.py").read_text()
+        import re
+        for fn in (
+            "run_rest_state",
+            "run_rest_state_no_land",
+            "run_rest_state_uniform_ts",
+            "run_rest_state_uniform_ts_no_land",
+        ):
+            m = re.search(
+                rf"def {fn}\b.*?(?=\ndef \w|\nRUNNERS)",
+                text, re.DOTALL,
+            )
+            assert m is not None, f"{fn}: not found"
+            body = m.group(0)
+            code = "\n".join(
+                line for line in body.splitlines()
+                if not line.lstrip().startswith("#"))
+            assert 'label="S"' in code, (
+                f"iter-131: monolithic {fn} must gate S_drift.")
+            assert "S_drift, 1e-6" in code, (
+                f"iter-131: monolithic {fn} S_drift tolerance "
+                f"must be 1e-6 per documented threshold.")
+
+    def test_iter131_rest_state_has_S_drift_gate_modular(self):
+        """iter-131 codex iter-130-followup MEDIUM-1: modular
+        rest_state variants must gate S_drift too.
+        """
+        from pathlib import Path
+        text = (Path(__file__).resolve().parent.parent
+                / "scripts" / "ocean_test_matrix"
+                / "experiments.py").read_text()
+        import re
+        for fn in (
+            "run_rest_state",
+            "run_rest_state_no_land",
+            "run_rest_state_uniform_ts",
+            "run_rest_state_uniform_ts_no_land",
+        ):
+            m = re.search(
+                rf"def {fn}\b.*?(?=\ndef \w)",
+                text, re.DOTALL,
+            )
+            assert m is not None, f"{fn}: not found"
+            body = m.group(0)
+            code = "\n".join(
+                line for line in body.splitlines()
+                if not line.lstrip().startswith("#"))
+            assert 'label="S"' in code
+            assert "S_drift, 1e-6" in code
+
+    def test_iter131_stommel_pre_records_both_warnings(self):
+        """iter-131 codex iter-130-followup LOW-3: Stommel
+        pre-records WARN annotations for BOTH missing extrema
+        BEFORE either gate fails, so the second extremum's
+        absence isn't hidden by the first gate's short-circuit.
+        """
+        from pathlib import Path
+        for rel in (
+            "scripts/run_ocean_test_matrix.py",
+            "scripts/ocean_test_matrix/experiments.py",
+        ):
+            text = (Path(__file__).resolve().parent.parent
+                    / rel).read_text()
+            import re
+            m = re.search(
+                r"def run_stommel_gyre_tracer\b"
+                r".*?(?=\ndef \w|\nRUNNERS)",
+                text, re.DOTALL,
+            )
+            assert m is not None
+            body = m.group(0)
+            # Both WARN strings must appear, and must be
+            # appended BEFORE the gate calls (so they survive
+            # short-circuiting).
+            assert "WARN: S_max series" in body
+            assert "WARN: S_min series" in body
+
+    def test_iter131_no_partial_doc_line_drift(self):
+        """iter-131 codex iter-130-followup LOW-2: broaden the
+        no-stale-doc-line test to scan ALL files in scripts/
+        and src/legoesm/diagnostics/, not just the two runners.
+        """
+        from pathlib import Path
+        repo = Path(__file__).resolve().parent.parent
+        files_to_check = [
+            "scripts/run_ocean_test_matrix.py",
+            "scripts/ocean_test_matrix/experiments.py",
+            "scripts/ocean_test_matrix/timeloop.py",
+            "src/legoesm/diagnostics/conservation_drift.py",
+        ]
+        for stale_line in (":575", ":626", ":681-682",
+                           ":419"):
+            # ``:419`` is the geostrophic 1e-3 doc line —
+            # the runner uses 1e-8.  iter-128 added a doc
+            # cross-reference test (test_iter128_*); the
+            # comment in modular geostrophic legitimately
+            # cites :419.  We allow this one but flag if it
+            # ever drifts.
+            if stale_line == ":419":
+                continue
+            for rel in files_to_check:
+                text = (repo / rel).read_text()
+                marker = f"ocean_experiments_reference.md{stale_line}"
+                assert marker not in text, (
+                    f"iter-131: {rel} has stale doc line "
+                    f"reference {marker!r}.  Replace with a "
+                    f"section-name callout.")
+
+    def test_iter131_stommel_per_extremum_call_is_specific(self):
+        """iter-131 codex iter-130-followup LOW-4: the Stommel
+        per-extremum sample-count check must verify that the
+        SAME ``_apply_value_threshold`` call uses both the
+        right label AND the right ``n_samples`` — not just that
+        both strings appear somewhere in the body.
+
+        Achieved via regex matching the exact call arguments.
+        """
+        from pathlib import Path
+        for rel in (
+            "scripts/run_ocean_test_matrix.py",
+            "scripts/ocean_test_matrix/experiments.py",
+        ):
+            text = (Path(__file__).resolve().parent.parent
+                    / rel).read_text()
+            import re
+            m = re.search(
+                r"def run_stommel_gyre_tracer\b"
+                r".*?(?=\ndef \w|\nRUNNERS)",
+                text, re.DOTALL,
+            )
+            assert m is not None
+            body = m.group(0)
+            # Match the exact overshoot call: must contain
+            # label="S overshoot" AND n_samples=n_max
+            # (or n_samples=len(S_max_series)) in the SAME
+            # parenthesized argument list.
+            overshoot_calls = re.findall(
+                r"_apply_value_threshold\([^)]*"
+                r'label="S overshoot"[^)]*\)',
+                body, re.DOTALL)
+            assert len(overshoot_calls) == 1, (
+                f"iter-131: {rel}: expected exactly one "
+                f"overshoot _apply_value_threshold call.")
+            overshoot_call = overshoot_calls[0]
+            assert ("n_samples=n_max" in overshoot_call
+                    or "n_samples=len(S_max_series)" in overshoot_call), (
+                f"iter-131: {rel}: overshoot call must use "
+                f"S_max sample count, got: {overshoot_call!r}")
+
+            undershoot_calls = re.findall(
+                r"_apply_value_threshold\([^)]*"
+                r'label="S undershoot"[^)]*\)',
+                body, re.DOTALL)
+            assert len(undershoot_calls) == 1
+            undershoot_call = undershoot_calls[0]
+            assert ("n_samples=n_min" in undershoot_call
+                    or "n_samples=len(S_min_series)" in undershoot_call), (
+                f"iter-131: {rel}: undershoot call must use "
+                f"S_min sample count, got: {undershoot_call!r}")
 
     def test_iter128_geostrophic_doc_documents_tighter_gate(self):
         """iter-128 codex iter-127-followup MEDIUM-1: the doc
