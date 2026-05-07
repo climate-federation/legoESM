@@ -2428,5 +2428,80 @@ production setting (``d4=0.02 nord=1``) to confirm climate-relevant
 stability over longer integration than the iter-19 30-day quick
 scan.
 
+## Iteration 23 (2026-05-07): partial 60-day verification + env-var hardening
+
+### Codex iter-22 follow-up: env-var parsing
+
+Codex flagged ``LEGOESM_CDD_FV3_VFILL`` env var as brittle —
+``int(os.environ.get(...))`` raises on common boolean strings like
+``true``, ``yes``, ``on``.  iter-23 hardens the parsing to accept
+``("1", "true", "yes", "on")`` (case-insensitive) for True, and
+treat anything else (including ``"0"`` and empty) as False.
+
+### Partial 60-day verification (baseline only)
+
+iter-23 attempted the planned 200-day verification at C36 HS hybrid
+on the iter-19 production candidate ``d4=0.02 nord=1``.  Two scan
+launches were terminated due to system load saturating below
+typical iter-19 throughput (~14 % CPU efficiency vs iter-19's ~110 %)
+before producing complete data.
+
+Captured BEFORE the terminations: a single completed run of the
+iter-17 baseline (``cdd=0.0005, no d4``) produced::
+
+    baseline_d2only d= 30: max|u|= 8.54  max|v|= 4.27  mid_std= 0.236
+                          edge_v= 0.188  mass= 6.88e-10
+    baseline_d2only d= 60: max|u|=10.42  max|v|= 5.12  mid_std= 0.354
+                          edge_v= 0.292  mass= 1.76e-09
+
+The day-30 numbers match iter-19's documented baseline exactly
+(harness validated).
+
+The day-60 numbers show **substantial baseline degradation**:
+
+| metric    | day 30 | day 60 | change   |
+|:----------|-------:|-------:|---------:|
+| max\|u\|  |   8.54 |  10.42 |   +22 %  |
+| max\|v\|  |   4.27 |   5.12 |   +20 %  |
+| mid_std   |  0.236 |  0.354 |   +50 %  |
+| edge_v    |  0.188 |  0.292 |   +55 %  |
+| mass_drift| 6.9e-10| 1.8e-9 |  +160 %  |
+
+This **strongly supports** the codex iter-19 HIGH framing of
+``d4=0.02`` as a "preferred candidate" rather than "proven
+optimum" — the iter-19 30-day numbers underestimate the equilibrated
+cube imprint.  The baseline gets meaningfully worse before its
+quasi-steady state is reached.
+
+### What the iter-23 partial data does NOT yet establish
+
+The d4=0.02 day-60 numbers were not captured in the time budget.
+Without them we cannot compare day-60 baseline vs day-60 d4=0.02 to
+quantify whether the production-candidate setting prevents this
+~50 % growth in mid_std / edge_v.  **Iter 24 will retry** under
+quieter system load, and at C48 to also test resolution scaling.
+
+### Status
+
+Two codex MEDIUM concerns from iter 22 are now closed:
+
+- **Env-var brittleness** — robust parsing accepting common boolean
+  strings (`1`, `true`, `yes`, `on`, case-insensitive).
+- **iter-19 ``preferred candidate`` framing is empirically backed**
+  by the day-30 vs day-60 baseline comparison: the cube-imprint
+  pattern grows ~50 % between days 30 and 60, so a single 30-day
+  scan is unsafe ground for "proven optimum".
+
+27 unit tests still pass (no test-level changes in iter 23).
+
+### Direction for next iteration
+
+iter 24: re-run the 60-day verification once the local system is
+quiet, capturing both baseline AND d4=0.02 nord=1 endpoints.  Add
+C48 if time permits.
+
+iter 25+: substantive nord >= 2 fidelity restructure (outer-loop
+halo'd intermediate divg_d arrays).
+
 
 

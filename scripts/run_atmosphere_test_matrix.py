@@ -2497,8 +2497,11 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         # vertex fill (sw_core.F90:1762).  At nord=1 it is a
         # mathematical no-op (bit-for-bit preserves iter-18); flagged
         # here for users who want to verify FV3 fidelity end-to-end.
-        # Set LEGOESM_CDD_FV3_VFILL=1 to opt in.
-        _cdd_fv3_vfill_env = bool(int(os.environ.get("LEGOESM_CDD_FV3_VFILL", "0")))
+        # Set LEGOESM_CDD_FV3_VFILL=1 (or 'true', 'yes', 'on') to opt in.
+        _cdd_fv3_vfill_env = (
+            os.environ.get("LEGOESM_CDD_FV3_VFILL", "0").strip().lower()
+            in ("1", "true", "yes", "on")
+        )
         config = PrimitiveEquationConfig(
             hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
             div_damp_coeff=dd, A_h=ah,
