@@ -84,6 +84,13 @@ def parse_args():
                    help="WOA18 temperature NetCDF path")
     p.add_argument("--woa-s", type=str, default=None,
                    help="WOA18 salinity NetCDF path")
+    p.add_argument("--woa-init", action="store_true",
+                   help="Initialize T/S from WOA18 instead of rest state. "
+                        "Requires --woa-t and --woa-s.")
+    p.add_argument("--nudge-woa-tau", type=float, default=0.0,
+                   help="Nudge T toward WOA18 with this restoring timescale [days]. "
+                        "Applied after each block step. 0=disabled. "
+                        "Typical 90-180 days for gentle spinup.")
     p.add_argument("--bathymetry", type=str, default=None,
                    help=(
                        "Path to ETOPO/GEBCO NetCDF bathymetry file. "
@@ -129,6 +136,10 @@ def parse_args():
                    help="Eq A_h boost Gaussian half-width [degrees]. Typical 3-7.")
     p.add_argument("--C-smag", type=float, default=None,
                    help="Smagorinsky biharmonic coefficient (dimensionless, OM4 uses 0.06).")
+    p.add_argument("--C-smag-lap", type=float, default=0.15,
+                   help="Laplacian Smagorinsky coefficient (dimensionless, default 0.15).")
+    p.add_argument("--A-h-floor", type=float, default=2000.0,
+                   help="Minimum effective A_h after latitude scaling [m²/s] (default 2000).")
     p.add_argument("--C-leith", type=float, default=None,
                    help="Leith biharmonic coefficient (dimensionless, typical 1.0-2.0).")
     p.add_argument("--pgf-scheme", type=str, default=None,
@@ -299,6 +310,8 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                   A_h_eq_boost: float = 1.0,
                   A_h_eq_sigma_deg: float = 5.0,
                   C_smag: float = None,
+                  C_smag_lap: float = 0.15,
+                  A_h_floor: float = 2000.0,
                   C_leith: float = None,
                   pgf_scheme: str = None,
                   slope_foot_alpha: float = 0.0,
@@ -422,11 +435,13 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
             _C_leith = C_leith if C_leith is not None else 0.0
             config = LatLonCGridOceanConfig(
                 A_h=_A_h, A_h_lat_scaling=(not no_lat_scaling),
+                A_h_floor=A_h_floor,
                 A_h_eq_boost=A_h_eq_boost,
                 A_h_eq_sigma_deg=A_h_eq_sigma_deg,
                 K_h=_K_h, A_v=A_v, K_v=K_v,
                 B_h=_B_h,
                 C_smag=_C_smag,
+                C_smag_lap=C_smag_lap,
                 C_leith=_C_leith,
                 C_leith_modified=(_C_leith > 0),
                 slope_foot_alpha=slope_foot_alpha,
@@ -458,7 +473,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                 # blowup from WBC intensification at coarse resolution.
                 # MOM6 default is 6.0 m/s; we use 3.0 since realistic
                 # currents at 1° shouldn't exceed ~2 m/s.
-                maxvel_barotropic=3.0,
+                maxvel_barotropic=0.0,  # disabled — let physics handle it
             )
         else:
             config = LatLonCGridOceanConfig(
@@ -1424,7 +1439,8 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                    restoring_targets=None, restoring_tau_s=None,
                    jra55_state=None,
                    checkpoint_days=None, checkpoint_dir=None,
-                   start_step=0):
+                   start_step=0,
+                   nudge_woa_tau=0.0, T_woa_3d=None):
     """Run time loop with diagnostics.
 
     Two forcing paths, mutually exclusive:
@@ -1530,6 +1546,16 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                 print(f"  BLOWUP at step {step}")
                 blown_up = True
                 break
+
+            # WOA T nudging: dT/dt += (T_woa - T) / tau
+            if nudge_woa_tau > 0 and T_woa_3d is not None:
+                nudge_per_step = dt / (nudge_woa_tau * 86400.0)
+                daily_frac = 1.0 - (1.0 - nudge_per_step) ** actual
+                mask_3d = state.land_mask.data[..., jnp.newaxis]
+                T_nudged = state.T.data + daily_frac * (
+                    T_woa_3d - state.T.data) * mask_3d
+                state = state._replace(
+                    T=state.T.replace(data=T_nudged.astype(state.T.data.dtype)))
 
             scalars = _extract_scalars(state, grid_type, grid, z_coord)
 
@@ -1811,6 +1837,8 @@ def run_omip_single(grid_type: str, args) -> dict:
         A_h_eq_boost=args.A_h_eq_boost,
         A_h_eq_sigma_deg=args.A_h_eq_sigma,
         C_smag=args.C_smag,
+        C_smag_lap=args.C_smag_lap,
+        A_h_floor=args.A_h_floor,
         C_leith=args.C_leith,
         pgf_scheme=args.pgf_scheme,
         slope_foot_alpha=args.slope_foot_alpha,
@@ -2137,12 +2165,25 @@ def run_omip_single(grid_type: str, args) -> dict:
         # The scan body calls model._step_impl() (no inner JIT) so
         # partial-cell + lax.scan now works correctly.
 
-    # Initial state: from restart or rest.
+    # Initial state: from restart, WOA, or rest.
     start_step = 0
     state = _init_rest_state(
         grid_type, grid, z_coord, args.H_max,
         H_bathy=H_bathy_init, land_mask=land_mask_init,
     )
+    if args.woa_init and T_woa is not None and S_woa is not None:
+        # Replace rest-state T/S with WOA18 climatology.
+        # Keep zero velocity, zero eta — let the model adjust.
+        T_woa_masked = T_woa * state.land_mask.data[..., jnp.newaxis]
+        S_woa_masked = S_woa * state.land_mask.data[..., jnp.newaxis]
+        state = state._replace(
+            T=state.T.replace(data=T_woa_masked.astype(state.T.data.dtype)),
+            S=state.S.replace(data=S_woa_masked.astype(state.S.data.dtype)),
+        )
+        print(f"  WOA18 initialization: T=[{float(T_woa_masked[state.land_mask.data > 0.5].min()):.1f}, "
+              f"{float(T_woa_masked[state.land_mask.data > 0.5].max()):.1f}]°C, "
+              f"S=[{float(S_woa_masked[state.land_mask.data > 0.5].min()):.1f}, "
+              f"{float(S_woa_masked[state.land_mask.data > 0.5].max()):.1f}] PSU")
     if args.restart is not None:
         state, restart_day, restart_step = _load_restart(
             args.restart, state,
@@ -2218,6 +2259,9 @@ def run_omip_single(grid_type: str, args) -> dict:
         checkpoint_days=checkpoint_days,
         checkpoint_dir=checkpoint_dir,
         start_step=start_step,
+        nudge_woa_tau=args.nudge_woa_tau,
+        T_woa_3d=(T_woa * state.land_mask.data[..., jnp.newaxis]).astype(
+            state.T.data.dtype) if args.nudge_woa_tau > 0 and T_woa is not None else None,
     )
 
     status = "PASS" if ok else "FAIL"
