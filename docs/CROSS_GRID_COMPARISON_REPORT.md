@@ -1,6 +1,6 @@
 # legoESM Cross-Grid Comparison Report
 
-**Branch**: `simulation_full_check` (iter-141 snapshot — atmos latlon: 19/19 PASS; ocean latlon: 13/13 PASS; ocean mpas: 11/11 PASS; ocean cube: 6/11 PASS + 5 real cube ocean dycore issues surfaced as user-handoff)
+**Branch**: `simulation_full_check` (iter-142 snapshot — atmos latlon: 19/19 PASS; atmos icosahedral: 21/23 PASS (2 NH moist timed out at 25min); ocean latlon: 13/13 PASS; ocean mpas: 11/11 PASS; ocean cube: 6/11 PASS + 5 real cube ocean dycore issues surfaced as user-handoff)
 **Scope**: end-to-end cross-grid comparison across the user's prompt
 items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
 test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
