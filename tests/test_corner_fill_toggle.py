@@ -26,6 +26,7 @@ jax.config.update("jax_enable_x64", True)
 
 from legoesm.grids.halo import (
     _fill_corners_h1,
+    _fill_corners_h2,
     get_corner_fill_mode,
     set_corner_fill_mode,
 )
@@ -123,3 +124,72 @@ def test_round_trip_mode_change_restores_legacy():
     out_after = _fill_corners_h1(padded)
 
     np.testing.assert_array_equal(out_before, out_after)
+
+
+# --- iter 8: h2 toggle ---
+
+
+def test_h2_default_mode_is_avg_legacy():
+    """h2 default mode reproduces the inside-out 2-point average."""
+    set_corner_fill_mode("avg")
+    n = 6
+    # Random halo strip values; corner block initially zero.
+    rng = np.random.default_rng(seed=23)
+    padded_np = rng.uniform(-1.0, 1.0, size=(6, n + 4, n + 4))
+    # Zero out the SW 2x2 block to verify the fill writes them.
+    padded_np[:, 0:2, 0:2] = 0.0
+    padded = jnp.asarray(padded_np)
+    out = _fill_corners_h2(padded)
+    out_np = np.asarray(out)
+
+    # Inside-out: (1,1) ← 0.5*(padded[1,2] + padded[2,1])
+    # Then (0,1) ← 0.5*(padded[0,2] + (1,1)_filled)
+    # Then (1,0) ← 0.5*(padded[2,0] + (1,1)_filled)
+    # Finally (0,0) ← 0.5*((0,1)_filled + (1,0)_filled)
+    f = 0
+    inner = 0.5 * (padded_np[f, 1, 2] + padded_np[f, 2, 1])
+    np.testing.assert_allclose(out_np[f, 1, 1], inner)
+    expected_01 = 0.5 * (padded_np[f, 0, 2] + inner)
+    np.testing.assert_allclose(out_np[f, 0, 1], expected_01)
+    expected_10 = 0.5 * (padded_np[f, 2, 0] + inner)
+    np.testing.assert_allclose(out_np[f, 1, 0], expected_10)
+    expected_00 = 0.5 * (expected_01 + expected_10)
+    np.testing.assert_allclose(out_np[f, 0, 0], expected_00)
+
+
+def test_h2_xdir_mode_uses_diagonal_mirror():
+    """h2 XDir mode SW block uses FV3 AGRID-XDir for ng=2."""
+    set_corner_fill_mode("fv3_agrid_xdir")
+    n = 6
+    rng = np.random.default_rng(seed=23)
+    padded_np = rng.uniform(-1.0, 1.0, size=(6, n + 4, n + 4))
+    padded = jnp.asarray(padded_np)
+    out = _fill_corners_h2(padded)
+    out_np = np.asarray(out)
+
+    # FV3 AGRID-XDir for ng=2 (Fortran q(1-i, 1-j) = q(1-j, i)
+    # with i,j in {1,2}; padded index = Fortran index + 1):
+    #   (1, 1) ← (1, 2)
+    #   (1, 0) ← (0, 2)
+    #   (0, 1) ← (1, 3)
+    #   (0, 0) ← (0, 3)
+    np.testing.assert_array_equal(out_np[:, 1, 1], padded_np[:, 1, 2])
+    np.testing.assert_array_equal(out_np[:, 1, 0], padded_np[:, 0, 2])
+    np.testing.assert_array_equal(out_np[:, 0, 1], padded_np[:, 1, 3])
+    np.testing.assert_array_equal(out_np[:, 0, 0], padded_np[:, 0, 3])
+
+
+def test_h2_modes_differ_on_random_input():
+    """h2 avg and fv3_agrid_xdir must produce different results."""
+    n = 8
+    rng = np.random.default_rng(seed=99)
+    padded = jnp.asarray(rng.uniform(-1.0, 1.0, size=(6, n + 4, n + 4)))
+
+    set_corner_fill_mode("avg")
+    out_avg = _fill_corners_h2(padded)
+
+    set_corner_fill_mode("fv3_agrid_xdir")
+    out_xdir = _fill_corners_h2(padded)
+
+    diff = float(jnp.max(jnp.abs(out_avg - out_xdir)))
+    assert diff > 0.0, "h2 modes must differ on random input"

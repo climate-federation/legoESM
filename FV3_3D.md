@@ -836,5 +836,108 @@ iter 9+: forward-backward time stepping (the multi-iteration
 architecture port that iter-2 identified as the only path to full
 elimination).
 
+## Iteration 8 (2026-05-07): Extend XDir toggle to ``_fill_corners_h2``
+
+### Probe first, wire second
+
+Before extending the toggle to ``_fill_corners_h2`` (the halo=2 path
+used by PPM transport), I probed via monkey-patching: apply the FV3
+AGRID XDir formula for ng=2 to the 2×2 cube-vertex L-block, run HS
+C36 hybrid 30-day with **both h1 and h2** XDir, compare to **h1 only**
+XDir from iter 7.
+
+| metric (max over all levels)   | h1 only XDir | h1 + h2 XDir | delta |
+|--------------------------------|-------------:|-------------:|------:|
+| day 10 max\|u\|                |     6.35     |     6.35     |   0   |
+| day 10 max\|v\|                |     3.29     |     3.29     |   0   |
+| day 10 max speed               |     6.35     |     6.35     |   0   |
+| day 30 max\|u\|                |    15.80     |    15.80     |   0   |
+| day 30 max\|v\|                |    10.18     |    10.18     |   0   |
+| day 30 max speed               |    16.03     |    16.03     |   0   |
+| day 30 mid-level zonal_std     |     —        |     1.294    |   —   |
+| day 30 mid-level eddy_std      |     —        |     0.847    |   —   |
+
+**Adding h2 XDir on top of h1 XDir gives BIT-FOR-BIT identical max
+metrics.**  The h2 corner fill is a **no-op for HS C36 hybrid**:
+no operator in the 3D atmospheric tendency function reads cells in
+the 2×2 cube-vertex halo block.  This is consistent with the
+iter-69 review note in ``halo.py:_fill_corners_h1``: "operator-split
+PPM slices q_full to keep EITHER i-halo OR j-halo (...), never
+simultaneously — so cube-vertex corner cells at (i_halo, j_halo)
+are never referenced by any PPM stencil."
+
+### Implementation (despite the no-op)
+
+Even though h2 XDir is currently a no-op, I extended the toggle to
+``_fill_corners_h2`` for **FV3-fidelity symmetry** with h1 and to
+prepare for iter 9+ forward-backward operators that DO use 2×2
+corner halos (specifically, the FV3 ``a2b_ord4`` interpolation in
+``a2b_edge.F90`` reads up to 2 cells of halo at cube vertices).
+
+The h2 XDir formula in our 0-based padded representation, port of
+``fv_mp_mod.F90:1077`` AGRID-XDir for ng=2 (i, j ∈ {1, 2}):
+
+```
+SW block:
+  (1, 1) ← (1, 2)
+  (1, 0) ← (0, 2)
+  (0, 1) ← (1, 3)
+  (0, 0) ← (0, 3)
+NW block (mirror in j): analogous
+SE block (mirror in i): analogous
+NE block (both mirrors): analogous
+```
+
+The ``avg`` mode preserves the legacy inside-out 2-point averaging
+exactly (existing tests pass bit-for-bit).
+
+### Unit tests: extended ``tests/test_corner_fill_toggle.py``
+
+Added 3 new tests (9 total now):
+
+| test | property | result |
+|------|----------|--------|
+| h2 ``avg`` default mode | inside-out 2-point average matches legacy formula | ✓ |
+| h2 ``fv3_agrid_xdir`` mode | diagonal mirror matches FV3 indexing | ✓ |
+| h2 modes give DIFFERENT results on random input | regression guard | ✓ |
+
+### Status
+
+iter 8 is **defensive completeness** — the toggle is now consistent
+across h1 and h2 paths even though h2's contribution to HS is zero
+today.  When the forward-backward c_sw + d_sw chain (iter 9+) adds
+operators that read 2×2 cube-vertex halo (a2b_ord4-style
+interpolation), the toggle will be active without further wiring.
+
+32 atmospheric tests pass with default mode (bit-for-bit unchanged).
+6 iter1039 3D edge sentinels pass with the toggle ON
+(LEGOESM_CORNER_FILL=fv3_agrid_xdir).  No regressions.
+
+### Conclusion
+
+iter 8 is a small but FV3-faithful step.  The visible numbers in HS
+C36 are unchanged from iter 7; the value is in **completeness**:
+both h1 and h2 corner fills now have FV3-faithful options exposed
+through the same toggle.  The infrastructure is ready for the
+forward-backward operators that will activate the h2 path.
+
+### Direction for next iteration
+
+iter 9+: forward-backward time stepping (the multi-iteration
+architecture port that iter-2 identified as the only path to full
+cube-imprint elimination).  Per iter-4 plan:
+
+(a) Add ``time_integrator = "fv3_forward_backward"`` config option.
+(b) Implement c_sw skeleton: D-grid winds → A-grid → C-grid via
+    ``fv3_sw_core._d2a2c_vect`` (existing FV3-faithful for SW path,
+    needs adapter for our 3D state).
+(c) Use Lin (1997) PGF (iter-3 helper) at C-grid faces.
+(d) Use a2b_ord4 to interpolate gz, pkc to corners (iter 9-10 work).
+(e) d_sw5: vorticity transport on D-grid using c_sw output.
+(f) Full HS C36 hybrid 30-day with FB scheme, compare to baseline.
+
+This is multi-iteration; each piece is a separate iteration with
+unit tests and regression guards.
+
 
 

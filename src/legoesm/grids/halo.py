@@ -1580,10 +1580,33 @@ def _fill_corners_h1(padded: jax.Array) -> jax.Array:
 def _fill_corners_h2(padded: jax.Array) -> jax.Array:
     """Fill L-shaped corner regions of halo=2 padded array.
 
-    Each face has 4 corner regions of 2×2 = 4 cells that are not
-    filled by the edge-strip exchange.  We fill inside-out: the cell
-    closest to the interior first (average of its two filled neighbours),
-    then propagate outward.
+    Two modes via :func:`set_corner_fill_mode`:
+
+    - ``"avg"`` (default): legacy inside-out 2-point averaging.  Each
+      cube-vertex 2×2 halo block (4 cells per corner × 4 corners ×
+      6 faces = 96 cells) is filled inside-out: inner corner first
+      (average of its two halo-strip neighbours), then propagate
+      outward.
+
+    - ``"fv3_agrid_xdir"``: FV3-faithful AGRID ``XDir`` diagonal
+      mirror for ng=2, faithful port of ``fv_mp_mod.F90:1077``
+      (``q(1-i, 1-j) = q(1-j, i)`` for i, j in {1, 2}).  In our
+      0-based padded representation the SW 2×2 block is::
+
+          (1, 1) ← (1, 2)
+          (1, 0) ← (0, 2)
+          (0, 1) ← (1, 3)
+          (0, 0) ← (0, 3)
+
+      Empirical: in the iter-7 HS C36 hybrid 30-day diagnostic, the
+      h2 toggle ALONE produces zero change vs the avg path because
+      the Held-Suarez dycore does not exercise any operator that
+      reads the cube-vertex 2×2 halo block (PPM 1D sweeps slice to
+      keep either i-halo or j-halo, never both — see iter-69 review
+      note above).  The h2 toggle is wired here for FV3-fidelity
+      symmetry with h1, but is currently a no-op for the 3D HS
+      case.  Will become active in iter 9+ once a forward-backward
+      operator that uses 2x2 corner halos is added.
 
     Parameters
     ----------
@@ -1593,6 +1616,31 @@ def _fill_corners_h2(padded: jax.Array) -> jax.Array:
     -------
     jax.Array, shape (6, n+4, n+4)
     """
+    if _corner_fill_mode == "fv3_agrid_xdir":
+        # Vectorised FV3 AGRID-XDir for ng=2 (4 cells × 4 corners × 6 faces).
+        # SW block (0..1, 0..1).
+        padded = padded.at[:, 1, 1].set(padded[:, 1, 2])
+        padded = padded.at[:, 1, 0].set(padded[:, 0, 2])
+        padded = padded.at[:, 0, 1].set(padded[:, 1, 3])
+        padded = padded.at[:, 0, 0].set(padded[:, 0, 3])
+        # NW block (0..1, -2..-1) — mirror of SW in the j direction.
+        padded = padded.at[:, 1, -2].set(padded[:, 1, -3])
+        padded = padded.at[:, 1, -1].set(padded[:, 0, -3])
+        padded = padded.at[:, 0, -2].set(padded[:, 1, -4])
+        padded = padded.at[:, 0, -1].set(padded[:, 0, -4])
+        # SE block (-2..-1, 0..1).
+        padded = padded.at[:, -2, 1].set(padded[:, -2, 2])
+        padded = padded.at[:, -2, 0].set(padded[:, -1, 2])
+        padded = padded.at[:, -1, 1].set(padded[:, -2, 3])
+        padded = padded.at[:, -1, 0].set(padded[:, -1, 3])
+        # NE block (-2..-1, -2..-1).
+        padded = padded.at[:, -2, -2].set(padded[:, -2, -3])
+        padded = padded.at[:, -2, -1].set(padded[:, -1, -3])
+        padded = padded.at[:, -1, -2].set(padded[:, -2, -4])
+        padded = padded.at[:, -1, -1].set(padded[:, -1, -4])
+        return padded
+
+    # Legacy inside-out 2-point average path.
     for f in range(6):
         # --- SW corner (rows 0-1, cols 0-1) ---
         # Inner corner (1,1): adjacent cells (1,2) and (2,1) are filled
