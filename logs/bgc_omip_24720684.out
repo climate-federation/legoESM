@@ -1,0 +1,36 @@
+============================================
+Step 1: Applying BGC patches
+============================================
+Patched: /work/bd1083/b309178/diffESM/legoESM/src/legoesm/ocean/state.py
+OK: biogeo field added to OceanState and OceanConfig
+
+********************************************************************************
+*                                                                              *
+*  This is the automated job summary provided by DKRZ.                         *
+*  If you encounter problems, need assistance or have any suggestion, please   *
+*  write an email to                                                           *
+*                                                                              *
+*  --  support@dkrz.de --                                                      *
+*                                                                              *
+*                       We hope you enjoyed the DKRZ supercomputer LEVANTE ... *
+*
+* JobID            : 24720684
+* JobName          : bgc_omip_test                                     
+* Account          : bd1179
+* User             : b384036 (203421), bd1179 (200285)                 
+* Partition        : interactive
+* QOS              : normal
+* Nodelist         : l40053 (1)                                                
+* Submit date      : 2026-05-06T14:52:44
+* Start time       : 2026-05-06T14:52:47
+* End time         : 2026-05-06T14:52:48
+* Elapsed time     : 00:00:01 (Timelimit=00:30:00)                     
+* Command          : /work/bd1083/b309178/diffESM/legoESM/run_bgc_omip.sbatch
+* WorkDir          : /work/bd1083/b309178/diffESM/legoESM
+*
+* StepID | JobName      NodeHours    MaxRSS [Byte] (@task)
+* ------------------------------------------------------------------------------
+* batch  | batch            2e-05
+* extern | extern           2e-05                 856K (0)
+* ------------------------------------------------------------------------------
+
