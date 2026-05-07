@@ -74,6 +74,10 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     min_cell_to_vface,
     curl_vertex_cgrid,
     smagorinsky_biharmonic_tendency_cgrid,
+    smagorinsky_viscosity_cgrid,
+    smagorinsky_viscosity_q_cgrid,
+    strain_rate_cgrid,
+    viscous_tendency_cgrid,
     leith_biharmonic_tendency_cgrid,
     _compute_vertex_mask,
     compute_face_masks_3d,
@@ -1443,6 +1447,30 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         diag_Cs_smag_u, diag_Cs_smag_v = _apply_slope_foot(diag_Cs_smag_u, diag_Cs_smag_v)
         du_dt = du_dt + diag_Cs_smag_u
         dv_dt = dv_dt + diag_Cs_smag_v
+
+    if getattr(config, "C_smag_lap", 0.0) > 0:
+        # Laplacian Smagorinsky: flow-adaptive viscosity via the
+        # energy-stable stress-tensor operator.  A_smag = (C·dx)²·|D|
+        # at both h-points (cell centers) and q-points (vertices).
+        # Uses viscous_tendency_cgrid which is the exact discrete
+        # adjoint of the strain rate — guarantees energy dissipation
+        # for any non-negative spatially varying coefficient.
+        D_T, D_S = strain_rate_cgrid(u_prime, v_prime, grid,
+                                      mask=mask, u_mask=u_mask, v_mask=v_mask)
+        A_smag_h = smagorinsky_viscosity_cgrid(
+            u_prime, v_prime, grid, config.C_smag_lap,
+            mask=mask, u_mask=u_mask, v_mask=v_mask)
+        A_smag_q = smagorinsky_viscosity_q_cgrid(
+            D_T, D_S, grid, config.C_smag_lap, mask=mask)
+        _smag_lap_u, _smag_lap_v = viscous_tendency_cgrid(
+            u_prime, v_prime, grid, A_smag_h, A_smag_q,
+            mask=mask, u_mask=u_mask, v_mask=v_mask)
+        _smag_lap_u, _smag_lap_v = _apply_slope_foot(_smag_lap_u, _smag_lap_v)
+        du_dt = du_dt + _smag_lap_u
+        dv_dt = dv_dt + _smag_lap_v
+        # Accumulate into the Smagorinsky diagnostic bucket
+        diag_Cs_smag_u = diag_Cs_smag_u + _smag_lap_u
+        diag_Cs_smag_v = diag_Cs_smag_v + _smag_lap_v
 
     if getattr(config, "C_leith", 0.0) > 0:
         leith_u, leith_v = leith_biharmonic_tendency_cgrid(
