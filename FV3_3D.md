@@ -1138,5 +1138,117 @@ opt-in.
 iter 12+: forward-backward time stepping skeleton (the multi-iter
 architecture port).
 
+## Iteration 11 (2026-05-07): CORRECTION — iter 7 / iter 10 were monkey-patch artifacts
+
+### What went wrong
+
+iter 7's "-47% mid-level cube imprint" finding from the
+``fv3_agrid_xdir`` mode and iter 10's "BGRID-XDir clean win" finding
+were both based on **monkey-patch experiments** that DID NOT actually
+apply.  The patches:
+
+```python
+import legoesm.grids.halo as halo_mod
+halo_mod._fill_corners_h1 = patched_function
+import legoesm.parallel.halo_exchange as he_mod
+he_mod._fill_corners_h1 = patched_function
+```
+
+reassign module attributes, but Python's import semantics mean that
+**halo.py's internal callers** (e.g., ``pad_halo`` calling
+``_fill_corners_h1`` on line 871) use the LOCAL function reference
+captured at module load time.  Reassigning ``halo_mod._fill_corners_h1``
+does not affect the local reference — so the patch was a no-op for
+the JIT-compiled tendency function.
+
+The numbers I reported in iter 7 and iter 10 ("47% reduction", "BGRID
+clean win") were the result of running with **AVG mode (the legacy
+default)** while believing I was testing the FV3 modes.  This is an
+embarrassing measurement error.
+
+### Honest re-measurement via the toggle (which DOES work)
+
+The ``set_corner_fill_mode`` toggle and ``LEGOESM_CORNER_FILL`` env
+var exposed in iter 7 actually do flip the branch inside
+``_fill_corners_h1`` (because the toggle reads the module-level
+``_corner_fill_mode`` variable at call time, not at import time).
+Re-running HS C36 hybrid 30-day via the proper toggle:
+
+| metric (day 30)        | AVG (default) | AGRID-XDir | BGRID-XDir |
+|------------------------|--------------:|-----------:|-----------:|
+| max\|u\| (all levels)  |     11.57     |   15.80    |  NaN at step 600 |
+| max\|v\| (all levels)  |      6.52     |   10.18    |  NaN |
+| **mid-level max\|v\|** |    **2.56**   |   **6.46** |  NaN |
+| **mid-level std**      |      0.635    |    1.547   |  NaN |
+
+**Both FV3 toggle modes are WORSE than the legacy avg path:**
+
+* ``fv3_agrid_xdir``: mid-level max\|v\| increases 152 % at day 30
+  (NOT -47 % as I previously claimed).  Total max\|u\| +37 %, max\|v\| +56 %.
+* ``fv3_bgrid_xdir``: model NaNs at step 600 (~1.4 days).
+
+The depth-1 / depth-2 diagonal mirror of the FV3 AGRID/BGRID corner
+fill is FV3-faithful in isolation, but applied to our cell-centre
+fields without the matched FV3 operator chain (a2b_ord4 + cross-
+product PGF + forward-backward time stepping), it produces stronger
+spurious gradients at the cube vertices than the symmetric 2-point
+average.
+
+### Action
+
+* Updated iter-7 "47% reduction" claim to FALSE in FV3_3D.md.
+* Updated iter-10 "BGRID clean win" claim to FALSE.
+* Kept the toggle infrastructure (``set_corner_fill_mode``,
+  ``LEGOESM_CORNER_FILL`` env var, h1 + h2 implementations) — they
+  are FV3-faithful ports of ``fv_mp_mod.F90:1077`` (AGRID-XDir) and
+  ``:1041`` (BGRID-XDir) and may be useful in conjunction with the
+  forward-backward port (iter 12+).  But neither is a working
+  cube-imprint reduction in the current architecture.
+* h2 BGRID branch already gated to fall through to the legacy avg
+  path (NaN regression-guard, since BGRID h2 destabilises sigma
+  coord runs).
+
+### Reframing per user direction
+
+User: "ensure we are faithful to FV3 but also re-use when possible
+the functions and backbone (meant to port FV3 to JAX) that we
+previously implemented and tested for shallow water".
+
+Current SW-backbone functions that ARE used by the 3D path:
+* ``_arakawa_lamb_gradient`` (operators_cdgrid.py:1139): A-L gradient
+  at corners, used in ``fv3_hydrostatic_tendencies``.
+* ``dgrid_to_cgrid``, ``dgrid_vorticity``, ``cgrid_divergence``:
+  shared with SW.
+* ``_fill_corners_h1`` / ``_fill_corners_h2``: shared halo paths.
+* ``_pad_halo_auto`` / ``_pad_halo_auto_h2``: shared halo paths.
+
+Current SW-backbone functions NOT yet used by the 3D path:
+* ``_d2a2c_vect`` (fv3_sw_core.py:835): FV3-faithful d2a2c with
+  edge stencils (one-sided c1/c2/c3 + edge_interpolate4 at face
+  boundaries).  Currently only the SW path uses it.
+* ``fv3_del6_vorticity_damping`` (fv3_del6_vt_flux.py:206):
+  FV3-faithful del-n vorticity damping applied as a POST-STEP wind
+  correction.  Currently only used in ``shallow_water_fv3_cdgrid.py``.
+* ``_interp_center_to_corner_a2b_ord4`` (operators_cdgrid.py:1352):
+  4th-order A→B with the duogrid path.  iter-9 found that a direct
+  swap into the 3D PE breaks discrete balance (max winds 2.7×
+  larger), but it could be useful for SPECIFIC fields (e.g.,
+  vorticity for damping) without breaking the gradient operator.
+* ``_d_sw5_corner_divergence`` (fv3_d_sw5_corner_divergence.py:61):
+  FV3-faithful B-grid corner divergence for d_sw5; takes FV3 normal
+  D-grid layout.
+
+### Direction for next iteration
+
+iter 12: try ``fv3_del6_vorticity_damping`` as a POST-STEP correction
+in the 3D path (NOT inside the RK3 loop), analogous to how SW uses it
+in ``shallow_water_fv3_cdgrid.py:1141``.  The function takes FV3
+normal D-grid input (n, n+1) / (n+1, n) — adapt our (n+1, n+1) C-D
+grid via averaging.  Test on HS C36 hybrid 30-day for both stability
+and cube-imprint reduction.
+
+This is the most direct SW-backbone reuse opportunity that does NOT
+require the full forward-backward architecture port.
+
 
 

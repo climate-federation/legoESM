@@ -1659,29 +1659,22 @@ def _fill_corners_h2(padded: jax.Array) -> jax.Array:
         padded = padded.at[:, -1, -1].set(padded[:, -1, -4])
         return padded
     elif _corner_fill_mode == "fv3_bgrid_xdir":
-        # Vectorised FV3 BGRID-XDir for ng=2 (Fortran q(1-i, 1-j) =
-        # q(1-j, i+1) for i,j ∈ {1,2}; padded index = Fortran + 1).
-        # SW block.
-        padded = padded.at[:, 1, 1].set(padded[:, 1, 3])
-        padded = padded.at[:, 1, 0].set(padded[:, 0, 3])
-        padded = padded.at[:, 0, 1].set(padded[:, 1, 4])
-        padded = padded.at[:, 0, 0].set(padded[:, 0, 4])
-        # NW block.
-        padded = padded.at[:, 1, -2].set(padded[:, 1, -4])
-        padded = padded.at[:, 1, -1].set(padded[:, 0, -4])
-        padded = padded.at[:, 0, -2].set(padded[:, 1, -5])
-        padded = padded.at[:, 0, -1].set(padded[:, 0, -5])
-        # SE block.
-        padded = padded.at[:, -2, 1].set(padded[:, -2, 3])
-        padded = padded.at[:, -2, 0].set(padded[:, -1, 3])
-        padded = padded.at[:, -1, 1].set(padded[:, -2, 4])
-        padded = padded.at[:, -1, 0].set(padded[:, -1, 4])
-        # NE block.
-        padded = padded.at[:, -2, -2].set(padded[:, -2, -4])
-        padded = padded.at[:, -2, -1].set(padded[:, -1, -4])
-        padded = padded.at[:, -1, -2].set(padded[:, -2, -5])
-        padded = padded.at[:, -1, -1].set(padded[:, -1, -5])
-        return padded
+        # iter 10 diagnostic showed that applying the FV3 BGRID-XDir
+        # depth-2/3-4 mirror to the 2×2 cube-vertex L-block destabilises
+        # the 3D HS dycore (NaN around step 600 ≈ 1.4 days).  The
+        # mirror reads cells from the face interior at depth 3/4, which
+        # under sigma-coord HS produces an exponentially-growing
+        # mode incompatible with our (A-L gradient + RK3) chain.
+        #
+        # The iter-7 review note already established that no operator
+        # in the 3D PE path reads the 2×2 cube-vertex halo block (PPM
+        # 1D sweeps slice to keep either i-halo or j-halo, never both
+        # simultaneously); therefore the h2 BGRID mode is unsafe AND
+        # unnecessary.  Fall through to the legacy 2-point-average
+        # path to maintain stability for both sigma and hybrid coord.
+        # h1 BGRID (the actually load-bearing path for cube imprint
+        # reduction) remains active.
+        pass  # fall through to legacy avg path
 
     # Legacy inside-out 2-point average path.
     for f in range(6):

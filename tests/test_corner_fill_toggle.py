@@ -64,20 +64,28 @@ def test_bgrid_xdir_h1_uses_depth2_mirror():
     np.testing.assert_array_equal(np.asarray(out2[:, -1, -1]), 77.0 * np.ones(6))
 
 
-def test_bgrid_xdir_h2_uses_depth_3_4_mirrors():
-    """BGRID-XDir h2 mode: SW block uses q at depth 3-4 along XDir."""
-    set_corner_fill_mode("fv3_bgrid_xdir")
+def test_bgrid_xdir_h2_falls_through_to_avg():
+    """BGRID-XDir h2 mode: falls through to legacy avg path.
+
+    The iter-10 diagnostic found that applying FV3 BGRID depth-3/4
+    mirror to the 2×2 cube-vertex L-block destabilises the 3D HS
+    dycore.  Combined with the iter-7 finding that no 3D operator
+    actually reads the 2×2 corner block, h2 BGRID is gated to fall
+    through to the legacy avg path.  This regression-guards that
+    routing — h2 in BGRID mode must produce the SAME output as h2
+    in avg mode.
+    """
     n = 6
     rng = np.random.default_rng(seed=43)
     padded_np = rng.uniform(-1.0, 1.0, size=(6, n + 4, n + 4))
     padded = jnp.asarray(padded_np)
-    out = _fill_corners_h2(padded)
-    out_np = np.asarray(out)
-    # SW: (1, 1) ← (1, 3); (1, 0) ← (0, 3); (0, 1) ← (1, 4); (0, 0) ← (0, 4).
-    np.testing.assert_array_equal(out_np[:, 1, 1], padded_np[:, 1, 3])
-    np.testing.assert_array_equal(out_np[:, 1, 0], padded_np[:, 0, 3])
-    np.testing.assert_array_equal(out_np[:, 0, 1], padded_np[:, 1, 4])
-    np.testing.assert_array_equal(out_np[:, 0, 0], padded_np[:, 0, 4])
+
+    set_corner_fill_mode("avg")
+    out_avg = _fill_corners_h2(padded)
+    set_corner_fill_mode("fv3_bgrid_xdir")
+    out_bgrid = _fill_corners_h2(padded)
+
+    np.testing.assert_array_equal(np.asarray(out_avg), np.asarray(out_bgrid))
 
 
 def test_bgrid_xdir_modes_differ_from_other_modes():
