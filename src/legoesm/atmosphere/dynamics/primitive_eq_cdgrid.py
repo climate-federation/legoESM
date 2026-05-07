@@ -171,6 +171,29 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # points after.  Overhead: boundary fraction (~8% at C96,
         # ~17% at C48) of redundant compute.  Benefit: hides MPI
         # latency behind interior compute.  Off by default.
+    use_fv3_lin_pgf: bool = False
+        # FV3-faithful Lin (1997) cross-product hydrostatic
+        # pressure-gradient force.  When True, the standard
+        # ``(dB/dx + pg_corr_x)`` block (where ``B = KE + Φ`` and
+        # ``pg_corr_x = R_d*T_corner*∇(ln p_s)``) is replaced by:
+        #   1. Compute KE-only Bernoulli ``B_KE = KE``.
+        #   2. ``dKE/dx, dKE/dy_perp`` via the existing A-L gradient.
+        #   3. Compute the Lin (1997) cross-product PGF at C-grid faces
+        #      via ``_fv3_lin_pgf.fv3_lin1997_pgf_3d_cgrid`` (faithful
+        #      port of GFDL FV3 ``dyn_core.F90:p_grad_c``).
+        #   4. Project to D-grid corners via the 2-point average in
+        #      ``project_cgrid_pgf_to_dgrid_corners``.
+        #   5. ``du_d/dt = ζ_corner*v_d - dKE/dx + pgf_x_d`` (the
+        #      cross-product carries the correct Fortran sign so it is
+        #      ADDED, not subtracted).
+        # The Lin formulation gives EXACT hydrostatic cancellation by
+        # construction — the cross-product is identically zero in any
+        # column where (gz_W, pkc_W) = (gz_E, pkc_E), regardless of
+        # discretisation.  Our existing split formulation cancels in
+        # continuum but not at panel boundaries where halo
+        # interpolation amplifies via the A-L Cartesian matrix.
+        # FV3_3D iter 4. Default OFF preserves bit-for-bit existing
+        # 3D atmospheric behaviour.
 
 
 # ==============================================================================
@@ -256,6 +279,18 @@ def fv3_hydrostatic_tendencies(
     KE = 0.5 * (u_cell ** 2 + v_cell ** 2)
 
     # --- 5. Bernoulli function B = KE + Phi (cell centres) ---
+    # FV3_3D iter 4 attempt: setting ``B = KE`` (drop Φ) and replacing
+    # the split (∇B + pg_corr) with FV3 Lin (1997) cross-product PGF
+    # gave a CFL-incompatible scheme — the cross-product PGF at C-grid
+    # faces (projected to D-grid corners via 2-point average) is not in
+    # discrete balance with the rotational ζ × v term computed at
+    # corners with the A-L gradient.  Result on HS C36 hybrid: max\|v\|
+    # 8 m/s by day 10 (vs 0.6 baseline), 27 m/s by day 15, NaN by day
+    # 30.  See FV3_3D.md iteration 4 for detail.  Lin PGF requires
+    # forward-backward time stepping (FV3's native scheme) for
+    # stability with this 2-step balance — RK3 cannot recover the
+    # cross-step cancellation.  ``config.use_fv3_lin_pgf`` is retained
+    # for forward use but does not currently affect this function.
     B = KE + Phi
 
     # --- 6. D-grid vorticity at cell centres via circulation ---

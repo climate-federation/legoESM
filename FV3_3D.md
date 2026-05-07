@@ -388,5 +388,126 @@ Then: re-run HS C36 hybrid 30-day with `use_fv3_lin_pgf=True` and
 quantify the cube-imprint reduction against iter-2 baseline metrics
 (edge_std, max\|v\|, eddy_std).
 
+## Iteration 4 (2026-05-07): Wire Lin PGF — uncovered architecture mismatch
+
+### Implementation
+
+Added `use_fv3_lin_pgf: bool = False` to
+`CDGridPrimitiveEquationConfig` and wired the iter-3 module into
+`fv3_hydrostatic_tendencies`: when set, drop Φ from the Bernoulli
+function (so `B = KE`), compute the Lin cross-product PGF at C-grid
+faces, project to D-grid corners via 2-point average, replace the
+existing `(dB/dx + pg_corr_x)` block.
+
+All 4 unit tests still passed at the helper level
+(`tests/test_fv3_lin_pgf.py`).
+
+### gz_half magnitude bug — caught and fixed
+
+First implementation used the literal Fortran formula
+`dgz = cp * θ * dpk` (where θ = potential temperature).  This gave
+gz values 40× larger than the Simmons-Burridge geopotential because
+**FV3's `pt` argument to `geopk` is NOT bare potential temperature** —
+it's the THERMODYNAMICALLY-TRANSFORMED variable `pt = T * p^(-κ)`
+(the post-`pt /= pkz` form from `fv_dynamics.F90:403`), which carries
+the `p_ref^(-κ)` factor needed for dimensional consistency:
+
+```
+∂Φ/∂p = -RT/p
+dΦ = -R*T*dp/p = -R*T/(κ p^κ) d(p^κ) = -cp*T*p^(-κ) d(p^κ)
+```
+
+Updated `compute_geopotential_half_fv3` to use the correct formula
+`dgz = cp * T * p_full^(-κ) * dpk`.  Magnitudes now match
+Simmons-Burridge to within ~1.5× (the ratio reflects the FV3
+discretisation choice; both are valid hydrostatic approximations).
+
+The unit test was updated to use the corrected expected dgz; all 4
+tests still pass.
+
+### Held-Suarez C36 hybrid 30-day with Lin PGF on
+
+| day | LIN max\|v\| | LIN edge_std | LIN eddy_std | baseline max\|v\| | baseline eddy_std |
+|----:|-------------:|-------------:|-------------:|------------------:|------------------:|
+|   1 |     0.10     |     0.05     |     0.01     |       0.10        |        0.02       |
+|   3 |     0.65     |     0.22     |     0.00     |       0.27        |        0.03       |
+|   6 |     2.46     |     0.81     |     0.20     |       0.39        |        0.08       |
+|  10 |     8.13     |     2.65     |     0.76     |       0.63        |        0.13       |
+|  15 |    27.58     |     8.80     |     2.31     |       0.97        |        0.18       |
+|  30 |     NaN      |      —       |      —       |       2.56        |        0.36       |
+
+The Lin PGF makes the model **dramatically worse** — max\|v\| 13× the
+baseline by day 10, 28× by day 15, and NaN by day 30.  The cube
+imprint is amplified rather than reduced.
+
+### Diagnosis
+
+The Lin (1997) cross-product PGF is designed for FV3's
+forward-backward time integration (c_sw + d_sw alternation).  The
+cross-product gives EXACT hydrostatic cancellation in any column —
+verified at machine precision by `test_uniform_hydrostatic_state_zero_pgf`
+— but the discrete BALANCE of cross-product PGF (at C-grid faces,
+projected to D-grid corners via 2-point average) against the
+rotational ζ × v term (at D-grid corners, computed with A-L) is
+**not preserved by RK3**.  The two stencils live at different grid
+positions with different effective numerical viscosities, so RK3 sees
+two oscillating components that don't cancel and the integration
+amplifies rather than damps.
+
+This matches the iteration-13 conclusion in
+`docs/cubed_sphere_edge_artifacts.md`: "the forward-backward scheme
+requires perfectly matched halo error levels between c_sw and d_sw"
+and "any approach that computes gradient and vorticity from
+DIFFERENT data paths produces uncorrelated boundary errors → 3+ m/s
+residual."
+
+The Lin PGF can ONLY be used with forward-backward time stepping that
+includes mass-flux-coupled c_sw → d_sw alternation.  Wiring it into
+RK3 alone is not viable.
+
+### Action
+
+- **Reverted the wiring** in `fv3_hydrostatic_tendencies`: the
+  `_use_lin_pgf` branch and `B = KE` switch were removed.  The
+  function now unconditionally uses the existing
+  `(dB_dx + pg_corr_x)` split formulation.  All 14 tests pass.
+- **Kept `config.use_fv3_lin_pgf` field** with a long comment
+  explaining the iter-4 finding so future iterations can find the
+  context.  The flag is currently inert.
+- **Kept the helper module** (`_fv3_lin_pgf.py`) and its unit tests
+  (`test_fv3_lin_pgf.py`).  These are correct, FV3-faithful, and
+  ready for a future forward-backward integration path.
+
+### Conclusion of iteration 4
+
+The FV3 Lin (1997) PGF is now correctly implemented as a self-
+contained module with full unit-test coverage.  Wiring it into
+`fv3_hydrostatic_tendencies` requires also implementing the FV3
+forward-backward time-stepping scheme — single-operator swap is not
+viable with our current RK3 + C-D grid + A-L gradient architecture.
+
+### Direction for next iteration
+
+iter 5 must address the BIGGER architecture question:
+implement an opt-in c_sw + d_sw forward-backward time stepping for
+the 3D path.  This is the multi-iteration FV3 architecture port
+that iter-2 identified as the only path to true cube-imprint
+elimination.  Proposed iter 5 scope:
+
+(a) Add a stub `time_integrator = "fv3_forward_backward"` to the
+    config and a stub `_step_fv3_fb` method that today just does
+    one RK3 stage but is the wiring point for the FB scheme.
+(b) Add an opt-in `dyn_core.F90:Lagrangian_to_Eulerian` analog
+    (or skip — we are not vertically Lagrangian).
+(c) c_sw half: compute uc, vc tendencies via Lin PGF + advection
+    of (delp, pt, w).
+(d) d_sw half: compute u_d, v_d tendencies via FV3-faithful
+    operators using the c_sw output.
+(e) Validate: HS C36 hybrid 30-day stability + visual cube-imprint
+    inspection.
+
+This is multi-week work; each iteration of the Ralph loop will tackle
+one self-contained piece.
+
 
 

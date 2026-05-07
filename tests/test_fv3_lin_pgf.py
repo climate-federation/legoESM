@@ -113,9 +113,13 @@ def test_geopotential_half_recurrence_consistency(small_cube):
     pk_half = compute_pkappa_half(p_s, coord)
 
     p_full = coord.A_full * coord.p_ref + coord.B_full * p_s[..., None]
-    theta = T * (constants.p_ref / jnp.maximum(p_full, 1.0)) ** constants.kappa
+    p_full_safe = jnp.maximum(p_full, 1.0)
     dpk = pk_half[..., 1:] - pk_half[..., :-1]
-    dgz_expected = constants.c_pd * theta * dpk
+    # Correct dgz uses cp*T*p^(-kappa)*dpk (see compute_geopotential_half_fv3
+    # docstring).  This matches the hydrostatic ∂Φ/∂p = -RT/p relation.
+    dgz_expected = (
+        constants.c_pd * T * p_full_safe ** (-constants.kappa) * dpk
+    )
 
     # Recurrence: gz_half(k) - gz_half(k+1) = dgz(k).
     dgz_actual = gz_half[..., :-1] - gz_half[..., 1:]

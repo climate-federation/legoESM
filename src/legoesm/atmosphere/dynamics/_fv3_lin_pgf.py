@@ -94,19 +94,33 @@ def compute_geopotential_half_fv3(
 ) -> jax.Array:
     """FV3-style geopotential at half-levels (cell centres).
 
-    Faithful to ``dyn_core.F90:2767-2778`` (bottom-up integration with
-    ``cp * θ * δp^κ`` where θ is potential temperature).  This is the
-    geopotential consistent with the Lin (1997) cross-product PGF: in
-    any pure hydrostatic column ``gz(k) - gz(k+1) = -cp*θ(k)*δpk(k)``
-    by construction, which is the exact discrete relation the
-    cross-product PGF inverts.
+    Derived from the hydrostatic relation ``∂Φ/∂p = -RT/p`` rewritten
+    in p^κ coordinates:
 
-    Our state stores absolute temperature ``T``, not potential
-    temperature θ.  We convert internally::
+        dΦ = -R*T * dp/p
+           = -R*T * (1/κ) * d(p^κ)/p^κ      (since dp = (1/κ)*p^(1-κ)*dpk)
+           = -cp*T*p^(-κ) * d(p^κ)         (since R/κ = cp)
 
-        θ(k) = T(k) * (p_ref / p_full(k))^κ
+    so the bottom-up half-level recurrence is::
 
-    where ``p_full(k) = A_full(k)*p_ref + B_full(k)*p_s``.
+        gz(k) = gz(k+1) + cp * T(k) * p_full(k)^(-κ) * (pk(k+1) - pk(k))
+
+    and ``gz_half[..., nlev] = phis`` (surface).
+
+    This is mathematically equivalent to FV3's ``dyn_core.F90:2775``
+    formula ``gz(k) = gz(k+1) + cp*pt*(pk(k+1)-pk(k))`` *if* FV3's
+    ``pt`` is the THERMODYNAMICALLY TRANSFORMED variable
+    ``pt = T * p^(-κ)`` (after the line-403 `pt /= pkz` transform in
+    ``fv_dynamics.F90``), NOT the bare potential temperature.  Our
+    state stores absolute temperature ``T``, so we apply the
+    ``p_full^(-κ)`` factor explicitly here.
+
+    A naive port that uses ``cp * θ * dpk`` (where θ is bare
+    potential temperature) gives a gz that is WRONG by a factor of
+    ``p_ref^κ ≈ 21`` (verified by an iter-4 magnitude check against
+    Simmons-Burridge geopotential — the bare-θ formula gave
+    9.5e6 m²/s² while the correct one matches Simmons-Burridge ~2e5
+    m²/s² for a uniform 300 K column).
 
     Parameters
     ----------
@@ -130,15 +144,14 @@ def compute_geopotential_half_fv3(
     pk_half = compute_pkappa_half(p_s, coord)  # (6, n, n, nlev+1)
     dpk = pk_half[..., 1:] - pk_half[..., :-1]  # (6, n, n, nlev)
 
-    # θ at full levels.
+    # p_full at layer mid-pressures (used as the p^(-κ) weight).
     p_full = coord.A_full * p_ref + coord.B_full * p_s[..., None]
     p_full_safe = jnp.clip(p_full, 1.0, None)
-    theta = T * (p_ref / p_full_safe) ** kappa  # (6, n, n, nlev)
 
     # δgz per layer (positive — gz increases upward, layer index k
-    # increases downward).  Bottom-up recurrence
-    # ``gz(k) = gz(k+1) + cp*θ(k)*δpk(k)``.
-    dgz = cp * theta * dpk  # (6, n, n, nlev)
+    # increases downward).  ``cp * T * p_full^(-κ) * dpk`` per the
+    # hydrostatic relation derivation above.
+    dgz = cp * T * p_full_safe ** (-kappa) * dpk  # (6, n, n, nlev)
 
     # Cumsum from the SURFACE upward.  Reverse along level axis,
     # cumsum, reverse back.
