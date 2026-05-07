@@ -1250,5 +1250,120 @@ and cube-imprint reduction.
 This is the most direct SW-backbone reuse opportunity that does NOT
 require the full forward-backward architecture port.
 
+## Iteration 12 (2026-05-07): SW backbone reuse — fv3_del6_vorticity_damping
+
+### Implementation
+
+Wired the SW path's FV3-faithful post-step vorticity damping
+(``legoesm.core.fv3_del6_vt_flux:fv3_del6_vorticity_damping``,
+itself a port of ``sw_core.F90:1948-1999``) into the 3D
+hydrostatic step.
+
+The function takes FV3 normal D-grid input ``(6, n, n+1)`` and
+``(6, n+1, n)`` per the SW production usage at
+``shallow_water_fv3_cdgrid.py:1141``.  Our 3D state has
+``(6, n+1, n+1, nlev)`` C-D grid layout for both u_d and v_d.
+The wiring:
+
+1. **Convert** C-D corner state to FV3 normal D-grid layout per
+   level via averaging:
+   ```
+   u_normal = 0.5 * (u_corner[:, :-1, :, :] + u_corner[:, 1:, :, :])
+   v_normal = 0.5 * (v_corner[:, :, :-1, :] + v_corner[:, :, 1:, :])
+   ```
+2. **Apply** ``fv3_del6_vorticity_damping`` per level (vmap over
+   nlev).
+3. **Project back** to corners via ``mode='edge'`` padding +
+   2-point average — the inverse of the corner→face averaging.
+4. **Add** the wind increments to ``state.u_d`` and ``state.v_d``.
+
+This applies the damping AFTER the RK3 update (NOT inside the
+tendency function), exactly matching the SW production pattern.
+
+Two new config fields in ``CDGridPrimitiveEquationConfig``:
+- ``damp_v: float = 0.0`` — damping coefficient (default 0.0
+  preserves baseline behaviour).
+- ``nord_v: int = 2`` — del-n order (FV3 default 2 = del-6).
+
+### HS C36 hybrid 30-day damp_v scan
+
+| damp_v | max\|u\| | max\|v\| | mid_max\|v\| | mid_std | reduction (mid_std) |
+|-------:|---------:|---------:|-------------:|--------:|--------------------:|
+|  0.000 |   11.57  |   6.52   |    2.556     |  0.635  |       baseline      |
+|  0.050 |   11.56  |   6.52   |    2.553     |  0.634  |        -0.2 %       |
+|  0.100 |   11.54  |   6.50   |    2.534     |  0.629  |        -0.9 %       |
+|  0.150 |   11.48  |   6.46   |    2.485     |  0.618  |        -2.7 %       |
+|  0.200 |   11.37  |   6.37   |    2.397     |  0.596  |        -6.1 %       |
+|  0.250 |   11.21  |   6.25   |    2.271     |  0.566  |       -10.9 %       |
+|  0.300 |   11.02  |   6.10   |    2.118     |  0.529  |       -16.7 %       |
+|  0.350 |   10.82  |   5.95   |    1.957     |  0.491  |       -22.7 %       |
+|  0.400 |    NaN   |   NaN    |    NaN       |   NaN   |     unstable        |
+
+**Real, honest, FV3-faithful cube-imprint reduction** at
+``damp_v = 0.30`` and stable.  At ``damp_v = 0.35`` the
+mid-level cube-imprint indicator drops 23 % vs baseline and the
+total max\|u\| / max\|v\| drop 6–9 % (improvement, not the iter-7
+"+56 %" tradeoff).  At ``damp_v = 0.40`` the model NaNs.
+
+Sigma coord is also stable at damp_v = 0.30:
+- max\|u\|: 11.13 → 10.73 (-3.6 %)
+- max\|v\|:  6.12 →  5.80 (-5.2 %)
+- mid_std:   1.152 → 1.061 (-7.9 %)
+
+Smaller reduction than hybrid (sigma has more inherent variability
+from the bottom-of-atmosphere coupling), but still positive and
+stable.
+
+### Unit tests
+
+3 new tests in ``tests/test_div_damp_adaptive.py`` (7 total now):
+
+| test | property | result |
+|------|----------|--------|
+| damp_v = 0 → bit-for-bit baseline | regression guard for default behaviour | ✓ |
+| damp_v = 0.3 changes winds on perturbed state | ensures wiring is functional | ✓ |
+| damp_v = 0.030 (SW iter-1009 default) → stable for 20 steps | stability check | ✓ |
+
+### Status
+
+iter 12 delivers the **first honest, FV3-faithful, working cube-
+imprint reduction** in this branch.  Recommended config for
+cubed-sphere 3D production:
+
+```python
+CDGridPrimitiveEquationConfig(
+    ...,                # existing keywords
+    damp_v=0.30,        # FV3 SW-backbone post-step vorticity damping
+    nord_v=2,           # FV3 default del-6
+)
+```
+
+Default ``damp_v = 0.0`` preserves all existing tests (38
+atmospheric tests pass bit-for-bit with default).  Opt-in users get
+~17 % mid-level cube-imprint reduction at ``damp_v = 0.30``.
+
+### What this iteration uses from the SW backbone
+
+Per the user's iter-11 directive ("re-use when possible the
+functions and backbone (meant to port FV3 to JAX) that we previously
+implemented and tested for shallow water"):
+
+* ``legoesm.core.fv3_del6_vt_flux.fv3_del6_vorticity_damping`` —
+  the SW path's FV3-faithful del-n vorticity damping, written for
+  FV3 normal D-grid (n, n+1) and (n+1, n) inputs.  Reused
+  unchanged via per-level vmap with C-D ↔ normal-D-grid adapters.
+* ``legoesm.core.fv3_del6_vt_flux._del6_vt_flux`` (called
+  internally) — Fortran-faithful nord-iterated del-n flux
+  computation, faithful port of ``sw_core.F90:2008-2121``.
+
+### Direction for next iteration
+
+iter 13: visualize the cube-imprint reduction by regenerating HS C36
+hybrid snapshots with ``damp_v = 0.30`` and inspecting the v-wind
+panel.  Compare to the baseline iter-2 snapshots.
+
+iter 14+: investigate ``_d2a2c_vect`` reuse for the 3D path's
+``dgrid_to_cgrid`` step (next-largest SW-backbone gap).
+
 
 

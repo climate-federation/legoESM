@@ -215,6 +215,26 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # iter1009 dual-target SW calibration uses 0.0625 + factor 8
         # (no Smagorinsky).  Useful range for HS C36 hybrid:
         # 0.05-0.20 (test before raising).  FV3_3D iter 5.
+    damp_v: float = 0.0
+        # FV3-faithful POST-STEP del-n vorticity damping coefficient,
+        # reusing the SW backbone ``fv3_del6_vorticity_damping`` from
+        # ``legoesm.core.fv3_del6_vt_flux``.  Faithful port of
+        # ``sw_core.F90:1948-1999``: applied ONCE per full timestep,
+        # AFTER the main RK3 update, as a discrete wind correction
+        # ``u += fy2 / dx``.  Same pattern as
+        # ``shallow_water_fv3_cdgrid.py:1141``.  When ``damp_v > 0``,
+        # the 3D step calls ``fv3_del6_vorticity_damping`` per level
+        # (vmap over nlev) on FV3 normal-D-grid layout (averaging from
+        # our (n+1, n+1) C-D corner state to (n, n+1) and (n+1, n)
+        # FV3 face midpoints), then projects the resulting wind
+        # increments back to corners by mode='edge' padding.  Default
+        # 0.0 preserves the legacy 3D dycore behaviour.  Iter1009 SW
+        # production uses ``damp_v=0.030``.  FV3_3D iter 12 adopts
+        # this opt-in mechanism for the 3D path.
+    nord_v: int = 2
+        # Order of the post-step vorticity damping (0=del-2, 1=del-4,
+        # 2=del-6).  FV3 default is 2 (del-6).  Used only when
+        # ``damp_v > 0``.
 
 
 # ==============================================================================
@@ -1043,6 +1063,68 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
 
         # Synchronize D-grid boundary corners across cubed-sphere faces
         state_new = self._sync_dgrid_boundary(state_new)
+
+        # FV3_3D iter 12: optional post-step del-n vorticity damping
+        # reusing the SW backbone ``fv3_del6_vorticity_damping``.
+        # Faithful port of FV3 ``sw_core.F90:1948-1999``: applied ONCE
+        # per full timestep AFTER the RK3 update, NOT inside the RK3
+        # tendency function.  Same pattern as
+        # ``shallow_water_fv3_cdgrid.py:1141``.
+        if self.config.damp_v > 0.0:
+            from legoesm.core.fv3_del6_vt_flux import (
+                fv3_del6_vorticity_damping,
+            )
+            # Convert C-D grid winds at corners (6, n+1, n+1, nlev) to
+            # FV3 normal D-grid layout per level: u at v-interfaces
+            # (6, n, n+1, nlev), v at u-interfaces (6, n+1, n, nlev).
+            # Average pairs of corners along the appropriate axis.
+            u_corner = state_new.u_d.data
+            v_corner = state_new.v_d.data
+            u_normal = 0.5 * (u_corner[:, :-1, :, :] + u_corner[:, 1:, :, :])
+            v_normal = 0.5 * (v_corner[:, :, :-1, :] + v_corner[:, :, 1:, :])
+
+            # Compute the FV3 damp coefficient (matches SW pattern).
+            # da_min_c = global min of B-grid corner area.
+            da_min_c = jnp.min(self.cdgrid.area_corner)
+            damp_step = (self.config.damp_v * da_min_c) ** (
+                self.config.nord_v + 1
+            )
+
+            # Apply per-level via vmap.  The 2D del6_vt_flux function
+            # operates on (6, n, n+1) and (6, n+1, n) per call.
+            def _per_level(args):
+                u_lev, v_lev = args
+                return fv3_del6_vorticity_damping(
+                    u_lev, v_lev, damp=damp_step,
+                    nord=self.config.nord_v, cdgrid=self.cdgrid,
+                )
+
+            u_normal_t = jnp.moveaxis(u_normal, -1, 0)  # (nlev, 6, n, n+1)
+            v_normal_t = jnp.moveaxis(v_normal, -1, 0)  # (nlev, 6, n+1, n)
+            du_normal_t, dv_normal_t = jax.vmap(_per_level)(
+                (u_normal_t, v_normal_t),
+            )
+            du_normal = jnp.moveaxis(du_normal_t, 0, -1)
+            dv_normal = jnp.moveaxis(dv_normal_t, 0, -1)
+
+            # Project wind increments from FV3 normal D-grid back to
+            # corners (6, n+1, n+1, nlev) by mode='edge' padding then
+            # averaging — the inverse of the corner→face averaging
+            # used at the start.  At the cube-face boundary the edge
+            # repeat preserves the increment magnitude.
+            du_pad = jnp.pad(
+                du_normal, [(0, 0), (1, 1), (0, 0), (0, 0)], mode="edge",
+            )
+            du_corner = 0.5 * (du_pad[:, :-1, :, :] + du_pad[:, 1:, :, :])
+            dv_pad = jnp.pad(
+                dv_normal, [(0, 0), (0, 0), (1, 1), (0, 0)], mode="edge",
+            )
+            dv_corner = 0.5 * (dv_pad[:, :, :-1, :] + dv_pad[:, :, 1:, :])
+
+            state_new = state_new._replace(
+                u_d=state_new.u_d.replace(data=u_corner + du_corner),
+                v_d=state_new.v_d.replace(data=v_corner + dv_corner),
+            )
 
         # Implicit gravity wave damping — post-step Laplacian diffusion on p_s.
         if self.config.implicit_grav_wave_damping > 0:
