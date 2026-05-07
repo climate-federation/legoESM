@@ -1493,19 +1493,29 @@ def set_corner_fill_mode(mode: str) -> None:
 
     Parameters
     ----------
-    mode : {"avg", "fv3_agrid_xdir"}
-        - "avg": legacy 2-point average (the symmetric combination of
-          FV3's XDir and YDir variants).  Default.
-        - "fv3_agrid_xdir": FV3-faithful diagonal mirror in the XDir
-          direction (``fv_mp_mod.F90:1077`` AGRID-XDir branch).
-          Reduces 3D atmospheric cube imprint on HS C36 hybrid by
-          ~47 percent at day 30.
+    mode : {"avg", "fv3_agrid_xdir", "fv3_bgrid_xdir"}
+        - ``"avg"`` (default): legacy 2-point average — direction-
+          invariant; symmetric combination of FV3's XDir and YDir.
+        - ``"fv3_agrid_xdir"``: FV3-faithful AGRID-XDir diagonal
+          mirror (``fv_mp_mod.F90:1077``).  Each cube-vertex halo
+          takes its value from the IMMEDIATELY-ADJACENT halo strip
+          (depth-1 mirror).  Reduces HS C36 mid-level cube imprint
+          by 47 % at day 30, but increases max-over-all-levels
+          max abs v by 56 % (extreme-level jet release).
+        - ``"fv3_bgrid_xdir"``: FV3-faithful BGRID-XDir diagonal
+          mirror (``fv_mp_mod.F90:1041``).  Each cube-vertex halo
+          takes its value from the FACE-INTERIOR cell at depth 2
+          along the XDir direction.  Reduces HS C36 mid-level cube
+          imprint by 41 % at day 30 AND reduces max-over-all-levels
+          max abs v by 15 %.  **Cleanest win** of the three modes.
+          See FV3_3D.md iter 10.
     """
     global _corner_fill_mode
-    if mode not in ("avg", "fv3_agrid_xdir"):
+    valid_modes = ("avg", "fv3_agrid_xdir", "fv3_bgrid_xdir")
+    if mode not in valid_modes:
         raise ValueError(
             f"Unknown corner fill mode: {mode!r}.  "
-            f"Choose from 'avg', 'fv3_agrid_xdir'."
+            f"Choose from {valid_modes}."
         )
     _corner_fill_mode = mode
 
@@ -1556,14 +1566,23 @@ def _fill_corners_h1(padded: jax.Array) -> jax.Array:
     cj = jnp.tile(jnp.array([0, 0, n2i, n2i]), 6)
 
     if _corner_fill_mode == "fv3_agrid_xdir":
-        # FV3 AGRID-XDir: diagonal mirror in XDir direction.
+        # FV3 AGRID-XDir: depth-1 mirror in XDir direction.
         # SW: q[0, 0] = q[0, 1]
         # NW: q[0, -1] = q[0, -2]
         # SE: q[-1, 0] = q[-1, 1]
         # NE: q[-1, -1] = q[-1, -2]
-        # i.e. sample at (ci, ci != 0 ? cj-1 : cj+1) — same i, mirrored j.
-        si = ci  # same i
+        si = ci
         sj = jnp.tile(jnp.array([1, 1, n2i - 1, n2i - 1]), 6)
+        corner_vals = padded[cf, si, sj]
+    elif _corner_fill_mode == "fv3_bgrid_xdir":
+        # FV3 BGRID-XDir (fv_mp_mod.F90:1041): depth-2 mirror — sample
+        # at the FACE-INTERIOR cell two steps in the XDir direction.
+        # SW: q[0, 0] = q[0, 2]
+        # NW: q[0, -1] = q[0, -3]
+        # SE: q[-1, 0] = q[-1, 2]
+        # NE: q[-1, -1] = q[-1, -3]
+        si = ci
+        sj = jnp.tile(jnp.array([2, 2, n2i - 2, n2i - 2]), 6)
         corner_vals = padded[cf, si, sj]
     else:
         # Legacy 2-point average.
@@ -1638,6 +1657,30 @@ def _fill_corners_h2(padded: jax.Array) -> jax.Array:
         padded = padded.at[:, -2, -1].set(padded[:, -1, -3])
         padded = padded.at[:, -1, -2].set(padded[:, -2, -4])
         padded = padded.at[:, -1, -1].set(padded[:, -1, -4])
+        return padded
+    elif _corner_fill_mode == "fv3_bgrid_xdir":
+        # Vectorised FV3 BGRID-XDir for ng=2 (Fortran q(1-i, 1-j) =
+        # q(1-j, i+1) for i,j ∈ {1,2}; padded index = Fortran + 1).
+        # SW block.
+        padded = padded.at[:, 1, 1].set(padded[:, 1, 3])
+        padded = padded.at[:, 1, 0].set(padded[:, 0, 3])
+        padded = padded.at[:, 0, 1].set(padded[:, 1, 4])
+        padded = padded.at[:, 0, 0].set(padded[:, 0, 4])
+        # NW block.
+        padded = padded.at[:, 1, -2].set(padded[:, 1, -4])
+        padded = padded.at[:, 1, -1].set(padded[:, 0, -4])
+        padded = padded.at[:, 0, -2].set(padded[:, 1, -5])
+        padded = padded.at[:, 0, -1].set(padded[:, 0, -5])
+        # SE block.
+        padded = padded.at[:, -2, 1].set(padded[:, -2, 3])
+        padded = padded.at[:, -2, 0].set(padded[:, -1, 3])
+        padded = padded.at[:, -1, 1].set(padded[:, -2, 4])
+        padded = padded.at[:, -1, 0].set(padded[:, -1, 4])
+        # NE block.
+        padded = padded.at[:, -2, -2].set(padded[:, -2, -4])
+        padded = padded.at[:, -2, -1].set(padded[:, -1, -4])
+        padded = padded.at[:, -1, -2].set(padded[:, -2, -5])
+        padded = padded.at[:, -1, -1].set(padded[:, -1, -5])
         return padded
 
     # Legacy inside-out 2-point average path.

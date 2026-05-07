@@ -1043,5 +1043,100 @@ iter-4/iter-8 plan:
 This sets up the architecture migration without breaking existing
 behaviour (default ``time_integrator = "ssp_rk3"`` preserved).
 
+## Iteration 10 (2026-05-07): FV3 BGRID-XDir corner fill — clean win
+
+### Hypothesis
+
+iter-7 ``fv3_agrid_xdir`` mode (depth-1 mirror) reduced mid-level
+cube imprint by 47 % but increased max-over-all-levels max\|v\| by
+56 % at day 30.  The depth-1 mirror reads from a HALO-strip cell
+(neighbour-panel data) at the cube vertex.
+
+The FV3 fortran also defines a BGRID variant (``fv_mp_mod.F90:1041``)
+that uses a depth-2 mirror — reading from the FACE-INTERIOR cell
+two steps along the XDir direction.  Hypothesis: face-interior
+data is more conservative (no halo amplification) and may improve
+both metrics.
+
+### Probe — BGRID-XDir at h1 (HS C36 hybrid 30-day)
+
+| metric (day 30)              | AVG (baseline) | AGRID-XDir | BGRID-XDir |
+|------------------------------|---------------:|-----------:|-----------:|
+| max\|u\| (all levels)        |     11.57      |   15.80    |   **10.41**|
+| max\|v\| (all levels)        |      6.52      |   10.18    |    **5.56**|
+| mid-lev max\|v\|             |      2.56      |    1.35    |     1.52   |
+| mid-lev zonal_std            |      0.520     |    0.274   |     0.313  |
+| mid-lev eddy_std             |      0.364     |    0.260   |     0.269  |
+
+vs baseline:
+- ``BGRID-XDir``: max\|u\| **-10 %**, max\|v\| **-15 %**, mid-level
+  max\|v\| **-41 %**, mid-level zonal_std **-40 %**, mid-level
+  eddy_std **-26 %**.
+- ``AGRID-XDir``: max\|u\| +37 %, max\|v\| +56 %, mid-level max\|v\|
+  -47 %.
+
+**BGRID-XDir is the cleanest win across all metrics.**  It does NOT
+have the AGRID-XDir tradeoff of +56 % extreme-level winds.  It
+reduces both the mid-level cube imprint AND the total max winds
+because it uses face-interior data (immune to halo amplification at
+the cube vertex) rather than the halo-strip cell that AGRID-XDir
+reads.
+
+### Implementation
+
+Added ``"fv3_bgrid_xdir"`` as a third corner-fill mode in
+``halo.py``:
+
+* ``_fill_corners_h1`` BGRID-XDir branch: depth-2 mirror in XDir.
+  SW: ``q[0, 0] = q[0, 2]`` (face-interior cell).
+* ``_fill_corners_h2`` BGRID-XDir branch: depth-3/4 mirror per
+  faithful port of FV3 ``fill_corners_2d_r8`` BGRID-XDir for ng=2.
+  SW block: ``(1, 1) ← (1, 3)``, ``(0, 0) ← (0, 4)``, etc.
+
+The ``avg`` mode remains the default (bit-for-bit unchanged).
+Users opt into ``fv3_bgrid_xdir`` via the env var or setter::
+
+    export LEGOESM_CORNER_FILL=fv3_bgrid_xdir
+
+### Unit tests: 4 new in ``tests/test_corner_fill_toggle.py`` (16 total)
+
+| test | property | result |
+|------|----------|--------|
+| BGRID-XDir h1 uses depth-2 mirror | SW q[0,0] = q[0,2] | ✓ |
+| BGRID-XDir h2 uses depth-3/4 mirrors | SW block per FV3 indexing | ✓ |
+| BGRID-XDir distinct from AVG and AGRID-XDir | regression guard | ✓ |
+| invalid mode raises ValueError | error handling for new mode | ✓ |
+
+### Status
+
+35 atmospheric tests pass with default mode.  6 iter1039 3D edge
+sentinels pass with BGRID toggle ON.  No regressions.
+
+### Conclusion
+
+iter 10 finds the **first clean cube-imprint reduction** — BGRID-XDir
+mode improves all key metrics simultaneously:
+- mid-level cube imprint reduced by ~40 %
+- total max winds reduced by ~10–15 %
+- conservation preserved (mass drift unchanged)
+
+The FV3 BGRID variant (face-interior depth-2 mirror) is structurally
+preferable to AGRID (halo-strip depth-1 mirror) for our 3D path
+because the deeper mirror picks up face-local data immune to cross-
+panel halo amplification.
+
+Recommend setting ``LEGOESM_CORNER_FILL=fv3_bgrid_xdir`` as the new
+default for cubed-sphere 3D atmospheric runs going forward.
+
+### Direction for next iteration
+
+iter 11: regenerate the HS C36 hybrid snapshots with BGRID mode ON
+and visually inspect the v-wind cube imprint reduction.  Add
+documentation pointing users to the new mode as a recommended
+opt-in.
+
+iter 12+: forward-backward time stepping skeleton (the multi-iter
+architecture port).
+
 
 

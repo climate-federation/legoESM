@@ -49,6 +49,55 @@ def test_invalid_mode_raises():
         set_corner_fill_mode("not_a_real_mode")
 
 
+def test_bgrid_xdir_h1_uses_depth2_mirror():
+    """BGRID-XDir h1 mode: SW corner = q[0, 2] (depth-2 mirror)."""
+    set_corner_fill_mode("fv3_bgrid_xdir")
+    n = 6
+    padded = jnp.zeros((6, n + 2, n + 2))
+    padded = padded.at[:, 0, 2].set(33.0)   # depth-2 along XDir
+    out = _fill_corners_h1(padded)
+    np.testing.assert_array_equal(np.asarray(out[:, 0, 0]), 33.0 * np.ones(6))
+    # NE corner: q[-1, -1] = q[-1, -3]
+    padded2 = jnp.zeros((6, n + 2, n + 2))
+    padded2 = padded2.at[:, -1, -3].set(77.0)
+    out2 = _fill_corners_h1(padded2)
+    np.testing.assert_array_equal(np.asarray(out2[:, -1, -1]), 77.0 * np.ones(6))
+
+
+def test_bgrid_xdir_h2_uses_depth_3_4_mirrors():
+    """BGRID-XDir h2 mode: SW block uses q at depth 3-4 along XDir."""
+    set_corner_fill_mode("fv3_bgrid_xdir")
+    n = 6
+    rng = np.random.default_rng(seed=43)
+    padded_np = rng.uniform(-1.0, 1.0, size=(6, n + 4, n + 4))
+    padded = jnp.asarray(padded_np)
+    out = _fill_corners_h2(padded)
+    out_np = np.asarray(out)
+    # SW: (1, 1) ← (1, 3); (1, 0) ← (0, 3); (0, 1) ← (1, 4); (0, 0) ← (0, 4).
+    np.testing.assert_array_equal(out_np[:, 1, 1], padded_np[:, 1, 3])
+    np.testing.assert_array_equal(out_np[:, 1, 0], padded_np[:, 0, 3])
+    np.testing.assert_array_equal(out_np[:, 0, 1], padded_np[:, 1, 4])
+    np.testing.assert_array_equal(out_np[:, 0, 0], padded_np[:, 0, 4])
+
+
+def test_bgrid_xdir_modes_differ_from_other_modes():
+    """BGRID-XDir must produce results distinct from both AVG and AGRID-XDir."""
+    n = 8
+    rng = np.random.default_rng(seed=44)
+    padded = jnp.asarray(rng.uniform(-1.0, 1.0, size=(6, n + 2, n + 2)))
+
+    set_corner_fill_mode("avg")
+    out_avg = np.asarray(_fill_corners_h1(padded))
+    set_corner_fill_mode("fv3_agrid_xdir")
+    out_agrid = np.asarray(_fill_corners_h1(padded))
+    set_corner_fill_mode("fv3_bgrid_xdir")
+    out_bgrid = np.asarray(_fill_corners_h1(padded))
+
+    assert float(np.max(np.abs(out_avg - out_bgrid))) > 0
+    assert float(np.max(np.abs(out_agrid - out_bgrid))) > 0
+    assert float(np.max(np.abs(out_avg - out_agrid))) > 0
+
+
 def test_avg_mode_preserves_legacy_2point_average():
     """In ``avg`` mode, SW corner = 0.5*(adjacent_west + adjacent_south)."""
     set_corner_fill_mode("avg")
