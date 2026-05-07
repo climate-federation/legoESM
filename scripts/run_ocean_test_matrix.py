@@ -431,7 +431,10 @@ def _apply_value_threshold(
     )
 
 
-_DAYS_REQUIRED = object()  # sentinel for required-but-unset days
+# iter-154 (codex iter-153 review LOW-2): import the centralized
+# sentinel from legoesm.diagnostics so the same singleton is used
+# across both monolithic and modular runners.
+from legoesm.diagnostics import DAYS_REQUIRED as _DAYS_REQUIRED
 
 
 def _apply_pe_rel_sign(
@@ -468,9 +471,13 @@ def _apply_pe_rel_sign(
 
     iter-153 (codex iter-152 review MEDIUM-1): ``days`` is now
     REQUIRED (sentinel default raises TypeError if omitted).
-    Pre-iter-153 ``days=None`` defaulted to quick-mode
-    ``op="le"``, so a caller forgetting the kwarg would
-    silently weaken the documented full-mode strict gate.
+
+    iter-154 (codex iter-153 review MEDIUM-1): explicitly
+    reject ``days=None`` and non-finite/non-positive values
+    too — pre-iter-154 a caller passing ``days=None`` (or
+    ``days=NaN``) would silently get quick-mode ``op="le"``,
+    weakening the documented full-mode strict gate.  Now
+    every code path requires a finite positive ``days``.
     """
     if days is _DAYS_REQUIRED:
         raise TypeError(
@@ -479,7 +486,17 @@ def _apply_pe_rel_sign(
             f"in days so the gate can select op='lt' (full "
             f"mode, days>=1) vs op='le' (quick mode)."
         )
-    op = "lt" if (days is not None and days >= 1.0) else "le"
+    import math as _math
+    if days is None or not isinstance(days, (int, float)) or \
+            not _math.isfinite(days) or days <= 0:
+        raise ValueError(
+            f"_apply_pe_rel_sign: 'days' must be a finite "
+            f"positive number, got {days!r} "
+            f"(label={label!r}).  Pass days=None is rejected "
+            f"to prevent silent quick-mode weakening; pass an "
+            f"explicit experiment duration."
+        )
+    op = "lt" if days >= 1.0 else "le"
     return _apply_value_threshold(
         ok, notes, pe_rel_final, 0.0,
         label=label, op=op, n_samples=n_samples,

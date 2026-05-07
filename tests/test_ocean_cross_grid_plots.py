@@ -3265,6 +3265,67 @@ class TestIter123OceanDriftTolerance:
                     f"call line must use op='lt'/'le'/op variable; "
                     f"got: {line.strip()!r}")
 
+    def test_iter154_pe_sign_days_none_rejected(self):
+        """iter-154 (codex iter-153 review MEDIUM-1): explicit
+        ``days=None`` must also be rejected — pre-iter-154 it
+        silently selected quick-mode ``op="le"``, weakening
+        the documented full-mode strict gate.  Now requires a
+        finite positive number.
+        """
+        import pytest
+        mod = self._import_monolithic_runner()
+        # days=None must raise.
+        with pytest.raises(ValueError, match="finite positive number"):
+            mod._apply_pe_rel_sign(
+                True, "", -0.5, label="PE_rel_final",
+                n_samples=10, days=None)
+        # days=NaN must raise.
+        with pytest.raises(ValueError, match="finite positive number"):
+            mod._apply_pe_rel_sign(
+                True, "", -0.5, label="PE_rel_final",
+                n_samples=10, days=float("nan"))
+        # days=0 must raise (no time means no gate).
+        with pytest.raises(ValueError, match="finite positive number"):
+            mod._apply_pe_rel_sign(
+                True, "", -0.5, label="PE_rel_final",
+                n_samples=10, days=0)
+        # days=-1 must raise.
+        with pytest.raises(ValueError, match="finite positive number"):
+            mod._apply_pe_rel_sign(
+                True, "", -0.5, label="PE_rel_final",
+                n_samples=10, days=-1)
+        # Valid finite positive days works.
+        ok, _ = mod._apply_pe_rel_sign(
+            True, "", -0.5, label="PE_rel_final",
+            n_samples=10, days=2.0)
+        assert ok is True
+
+    def test_iter154_days_required_sentinel_centralized(self):
+        """iter-154 (codex iter-153 review LOW-2): the
+        ``DAYS_REQUIRED`` sentinel is now centralized in
+        ``legoesm.diagnostics``.  Both monolithic and modular
+        runners import the SAME singleton (``is`` check).
+        """
+        from legoesm.diagnostics import DAYS_REQUIRED
+        # Monolithic uses the centralized sentinel.
+        mod = self._import_monolithic_runner()
+        assert mod._DAYS_REQUIRED is DAYS_REQUIRED, (
+            "iter-154: monolithic _DAYS_REQUIRED must be the "
+            "centralized legoesm.diagnostics.DAYS_REQUIRED.")
+        # Modular too.
+        import sys
+        from pathlib import Path
+        scripts_dir = (Path(__file__).resolve().parent.parent
+                       / "scripts")
+        sys.path.insert(0, str(scripts_dir))
+        try:
+            from ocean_test_matrix import timeloop
+            assert timeloop._DAYS_REQUIRED is DAYS_REQUIRED, (
+                "iter-154: modular _DAYS_REQUIRED must be the "
+                "centralized legoesm.diagnostics.DAYS_REQUIRED.")
+        finally:
+            sys.path.remove(str(scripts_dir))
+
     def test_iter153_pe_sign_days_required(self):
         """iter-153 (codex iter-152 review MEDIUM-1): ``days``
         kwarg is now REQUIRED on ``_apply_pe_rel_sign`` — omitting

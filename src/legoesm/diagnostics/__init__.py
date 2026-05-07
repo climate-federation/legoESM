@@ -2,6 +2,7 @@
 
 from legoesm.diagnostics.column_integrals import column_water_vapor
 from legoesm.diagnostics.conservation_drift import (
+    DAYS_REQUIRED,
     DEFAULT_MIN_BASELINE,
     apply_drift_tolerance,
     apply_value_threshold,

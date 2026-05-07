@@ -171,8 +171,23 @@ def relative_drift_series(
 
     Non-finite inputs
     -----------------
-    Same NaN/inf propagation rules as ``compute_relative_drift`` —
-    see that function's docstring.
+    iter-153 (codex iter-152 review MEDIUM-2): if ANY sample in
+    ``values`` is non-finite (NaN or Inf), the WHOLE returned
+    array is filled with NaN.  This mirrors
+    ``compute_relative_drift``'s iter-152 all-finite contract:
+    a non-finite sample means the diagnostic was broken at some
+    point during the run, and the returned series is no longer
+    a meaningful per-step drift trace.
+
+    iter-154 (codex iter-153 review LOW-1): the all-NaN approach
+    is INTENTIONAL — pre-iter-153 the per-step series preserved
+    endpoint locality (``[1.0, NaN, 1.0] → [0, NaN, 0]``), so a
+    plotter using ``abs(series[-1])`` could still silently report
+    "drift = 0" despite the transient blowup.  The trade-off is
+    losing the visual cue of WHERE in time the breakage
+    occurred; callers needing that information should inspect
+    the source ``values`` array directly with
+    ``np.isfinite(values)``.
 
     Parameters
     ----------
@@ -306,6 +321,18 @@ def apply_drift_tolerance(
                 f"tolerance {tol:.0e}]"
             )
     return ok, notes
+
+
+DAYS_REQUIRED = object()
+"""Sentinel for required ``days`` kwargs in days-aware helpers.
+
+iter-154 (codex iter-153 review LOW-2): centralized so the
+monolithic and modular runners can both ``import`` the same
+singleton and ``is`` checks work cross-module.  Pre-iter-154
+each runner had its own private sentinel — fine for default
+detection but brittle if a caller wanted to forward the
+sentinel between modules.
+"""
 
 
 def apply_value_threshold(
