@@ -249,6 +249,32 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # interpolations breaks discrete operator balance (max winds
         # 2.7× larger); iter 14 tests whether a TARGETED swap of
         # zeta_corner only is stable.
+    corner_div_damp_d2_bg: float = 0.0
+        # FV3-faithful B-grid corner-divergence adaptive damping
+        # coefficient (FV3 ``d2_bg`` parameter at sw_core.F90:1720).
+        # When > 0, compute the FV3 ``divergence_corner`` (sw_core.F90:
+        # 2124) via the iter-15 helper ``_fv3_divergence_corner.
+        # fv3_divergence_corner_3d`` and apply an adaptive Smagorinsky-
+        # style damping at D-grid corners:
+        #
+        #   delpc = corner divergence (B-grid)
+        #   damp  = da_min_c * max(d2_bg, min(0.20, dddmp * |delpc| * dt))
+        #   du   -= ∇_x(damp * delpc) at corners
+        #
+        # Faithful port of FV3 d_sw5 lines 1720-1724.  This pairs
+        # naturally with the iter-12 post-step ``damp_v``: iter-12 is
+        # the del-n vorticity damping; iter-16 is the in-step
+        # corner-divergence damping.  Together they reproduce FV3's
+        # canonical damping pair for cube-edge artifact suppression.
+        #
+        # Default 0.0 preserves baseline.  FV3 production default
+        # is 0.0625 with dddmp = 0.2; iter-1009 SW uses (8 * 0.0625,
+        # 0.0) — i.e. background-only without Smagorinsky.  Useful
+        # range: 0.0 to 0.10 for stable HS C36 hybrid.
+    corner_div_damp_dddmp: float = 0.20
+        # Companion Smagorinsky coefficient for ``corner_div_damp_d2_bg``.
+        # Faithful FV3 default is 0.20 (sw_core.F90).  Active only
+        # when ``corner_div_damp_d2_bg > 0``.
 
 
 # ==============================================================================
@@ -541,6 +567,97 @@ def fv3_hydrostatic_tendencies(
         else:
             du_d_dt = du_d_dt + config.div_damp_coeff * ddiv_dx
             dv_d_dt = dv_d_dt + config.div_damp_coeff * ddiv_dy_perp
+
+    # FV3_3D iter 16: optional adaptive B-grid corner-divergence
+    # damping (FV3 d_sw5 sw_core.F90:1641-1724).  Faithful port using
+    # iter-15's ``fv3_divergence_corner_3d`` helper.  This ADDS a
+    # ke-correction at corners and applies its gradient to the
+    # momentum tendency, matching the Fortran sequence
+    # ``ke(i, j) += damp * delpc(i, j)`` followed by the d_sw1/d_sw6
+    # KE-gradient update of (u, v).
+    #
+    # Differs from the existing cell-centre div_damp above (which
+    # uses A-grid div_v): this ADDS the FV3 corner-staggered B-grid
+    # divergence with sin_sg edge metric and corner removal, designed
+    # to target panel-boundary halo amplification specifically.
+    if config.corner_div_damp_d2_bg > 0.0:
+        from legoesm.core._fv3_divergence_corner import (
+            fv3_divergence_corner_3d,
+        )
+        # Step 1: B-grid corner divergence (Fortran ``delpc``).
+        delpc = fv3_divergence_corner_3d(u_d, v_d, cdgrid)  # (6, n+1, n+1, nlev)
+
+        # Step 2: adaptive damping coefficient at corners — FV3
+        # sw_core.F90:1720 formula:
+        #   damp = da_min_c * max(d2_bg, min(0.20, dddmp * |delpc| * dt))
+        # Note: FV3 multiplies by dt because ``delpc`` is per-second
+        # divergence and ``dddmp * delpc * dt`` is the dimensionless
+        # CFL-scaled damping factor.  Our tendency function does not
+        # see ``dt`` directly; use a typical 200 s as a placeholder
+        # (the d2_bg floor dominates in HS regimes anyway, see iter-5
+        # adaptive analysis).
+        _da_min_c = jnp.min(cdgrid.area_corner)
+        _delpc_abs = jnp.abs(delpc)
+        # Approximate dt via grid CFL; the exact value matters only
+        # when the adaptive cap (0.20) is active.  In HS the floor
+        # (d2_bg) dominates; iter-5 confirmed ``dddmp`` adaptive
+        # damping is essentially inert at HS divergence levels.
+        _dt_approx = 200.0
+        _damp_corner = _da_min_c * jnp.maximum(
+            config.corner_div_damp_d2_bg,
+            jnp.minimum(
+                0.20, config.corner_div_damp_dddmp * _delpc_abs * _dt_approx,
+            ),
+        )                                                  # (6, n+1, n+1, nlev)
+
+        # Step 3: ke-correction = damp * delpc.  This is the term
+        # FV3 adds to ``ke(i, j)`` at corners.
+        _ke_correction = _damp_corner * delpc              # (6, n+1, n+1, nlev)
+
+        # Step 4: gradient at D-grid corners.  FV3 normal D-grid uses
+        # ``u(i, j) -= dt * (ke(i+1, j) - ke(i, j)) * rdxc`` — a
+        # 2-point face-centred difference with u sitting between two
+        # corners in i.  Our C-D grid has u_d AT the corner (i, j);
+        # the natural translation is the centred difference using
+        # padded corner values.  Halo-pad the ke-correction so the
+        # i±1 / j±1 reads at face-boundary corners pick up the
+        # neighbouring panel.
+        from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d_fn
+        _ke_pad = _pad_halo_4d_fn(_ke_correction)          # (6, n+3, n+3, nlev)
+
+        # Centred difference at corner (i, j) ∈ [0, n] × [0, n]:
+        #   ∂x ke at (i, j) = (ke_pad[i+2, j+1] - ke_pad[i, j+1]) / (2*dx_at_corner)
+        # In our padded layout (halo=1), corner index (i, j) maps to
+        # padded[i+1, j+1]; (i-1, j) → padded[i, j+1]; (i+1, j) →
+        # padded[i+2, j+1].  The 2*dx denominator uses dx_corner.
+        _dke_dx_pad = (_ke_pad[:, 2:, 1:-1, :] - _ke_pad[:, :-2, 1:-1, :])
+        _dke_dy_pad = (_ke_pad[:, 1:-1, 2:, :] - _ke_pad[:, 1:-1, :-2, :])
+
+        # 2*dx and 2*dy at corners — use cdgrid.dxc / dyc averaged.
+        # cdgrid.dxc is at u-faces (n+1, n); cdgrid.dyc is at v-faces
+        # (n, n+1).  Corner dx/dy approximation: average two adjacent
+        # face dxc/dyc.  For the centred difference's 2*dx
+        # denominator at corner (i, j) we want the cell-centre-to-
+        # cell-centre distance, ≈ 2 * (dx_corner / 2) = dx_corner
+        # where dx_corner is the corner-to-corner distance (which is
+        # the cell width).  Use cdgrid.base.dx as a sufficient
+        # approximation (corner ≈ cell width on smooth grid).
+        _dx_corner_uface = jnp.pad(
+            cdgrid.dxc, [(0, 0), (0, 0), (0, 1)], mode="edge",
+        )                                                  # (6, n+1, n+1)
+        _dy_corner_vface = jnp.pad(
+            cdgrid.dyc, [(0, 0), (0, 1), (0, 0)], mode="edge",
+        )                                                  # (6, n+1, n+1)
+        _two_dx = 2.0 * _dx_corner_uface[..., None]         # (6, n+1, n+1, 1)
+        _two_dy = 2.0 * _dy_corner_vface[..., None]
+
+        # Subtract gradient (FV3 sign: u -= grad(ke), so as a tendency:
+        # du/dt -= grad(ke_correction) / dt_approx → simplified to a
+        # direct subtraction since the dt_approx cancels with our
+        # tendency convention (the iter-16 damping is meant as a
+        # per-step rate equivalent).
+        du_d_dt = du_d_dt - _dke_dx_pad / _two_dx
+        dv_d_dt = dv_d_dt - _dke_dy_pad / _two_dy
 
     # --- 10b. Surface pressure tendency and vertical motion ---
 

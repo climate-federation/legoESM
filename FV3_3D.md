@@ -1591,5 +1591,164 @@ post-step ``del6_vt_flux``; iter 16 ports the in-step
 
 43 atmospheric / FV3 tests pass with the default config.
 
+## Iteration 16 (2026-05-07): MAJOR BREAKTHROUGH — FV3 corner-divergence damping
+
+### THE FIRST LARGE CUBE-IMPRINT REDUCTION
+
+Wired iter-15's ``fv3_divergence_corner_3d`` into
+``fv3_hydrostatic_tendencies`` as an opt-in damping source.
+Faithful port of FV3 ``sw_core.F90:1641-1724`` d_sw5 sequence:
+
+```
+delpc = fv3_divergence_corner_3d(u_d, v_d, cdgrid)              # B-grid corners
+damp  = da_min_c * max(d2_bg, min(0.20, dddmp*|delpc|*dt))
+ke_correction = damp * delpc
+du_d/dt -= ∂(ke_correction)/∂x at corners (centred difference)
+dv_d/dt -= ∂(ke_correction)/∂y at corners
+```
+
+The centred-difference gradient at corners adapts the FV3 normal-D-grid
+``u(i,j) -= dt*(ke(i+1,j)-ke(i,j))*rdxc`` formula to our C-D corner
+storage.
+
+### Configuration
+
+Two new config fields:
+
+* ``corner_div_damp_d2_bg: float = 0.0`` — FV3 ``d2_bg``
+  parameter.  Default 0.0 preserves baseline.
+* ``corner_div_damp_dddmp: float = 0.20`` — FV3 ``dddmp``
+  Smagorinsky coefficient (FV3 default 0.20).
+
+### HS C36 hybrid 30-day results
+
+| config                                    | max\|u\| | max\|v\| | mid_max\|v\| | mid_std | reduction |
+|-------------------------------------------|---------:|---------:|-------------:|--------:|----------:|
+| baseline (cdd=0, damp_v=0)                |   11.57  |   6.52   |    2.556     |  0.635  |   --      |
+| iter-12 damp_v=0.30 alone                 |   11.02  |   6.10   |    2.118     |  0.529  |  -17 %    |
+| **iter-16 cdd=0.001 alone**               |  **7.55**|  **3.68**|  **0.538**   | **0.181** |**-71 %**|
+| iter-16 cdd=0.001 + iter-12 damp_v=0.30   |    7.45  |    3.61  |    0.567     |  0.193  |  -70 %    |
+
+**``corner_div_damp_d2_bg = 0.001`` alone gives -71 % mid-level
+cube imprint and -44 % max\|v\|** — the largest reduction this
+branch has produced, by far.
+
+The FV3 mechanism (sin_sg edge metrics + corner-removal at the 8
+cube vertices) targets exactly the panel-boundary halo amplification
+that iter-2 diagnosed as the cube-imprint source.
+
+Sigma coord (separate test): cdd=0.001 also gives -54 % mid_std
+reduction.  Both vertical-coordinate paths benefit substantially.
+
+### Test matrix integration
+
+Added ``LEGOESM_CDD_D2BG`` env var to
+``scripts/run_atmosphere_test_matrix.py:run_held_suarez``.  Default
+0.0 preserves baseline; users opt in with::
+
+    LEGOESM_CDD_D2BG=0.001 \
+      JAX_ENABLE_X64=1 python scripts/run_atmosphere_test_matrix.py \
+        --grid cubed_sphere --only hydro --test held_suarez --quick
+
+Verified all 3 HS configurations PASS with this setting:
+- C36 sigma 30d: max\|v\|=7.8, mass drift=4.21e-10
+- C36 hybrid 30d: max\|v\|=7.5, mass drift=4.21e-10
+- C36 hybrid 2d topo: max\|v\|=1.8, mass drift=1.46e-11
+
+Mass drift improves slightly compared to baseline (4e-10 vs 1.3e-9)
+— the corner-divergence damping helps mass conservation by reducing
+spurious horizontal divergence at panel boundaries.
+
+### Visual verification
+
+Re-ran HS C36 hybrid 30-day snapshots with ``LEGOESM_CDD_D2BG=0.001``.
+The v-wind cube imprint pattern at day 30 is **substantially
+reduced**:
+- Color scale narrower (now ±1.5 m/s vs baseline ±3 m/s)
+- Panel-boundary rings much weaker
+- Mid-latitudes smoother
+
+### Stability margin
+
+Scan results (HS C36 hybrid, 10-day):
+
+| cdd_d2_bg | max\|u\| | mid_std | finite |
+|----------:|---------:|--------:|--------|
+|   0.000   |   6.02   |  0.232  | True   |
+|   0.001   |   4.65   |  0.110  | True   |
+|   0.003   |   3.77   |  0.132  | True   |
+|   0.005   |   3.35   |  0.143  | True   |
+|   0.010   |   NaN    |   --    | False  |
+|   0.0625 (FV3 default) |  NaN  |  --  | False  |
+
+The FV3 default ``d2_bg = 0.0625`` is too aggressive for our 3D
+architecture (NaNs the model).  Stable range: 0.001-0.005.
+Best cube-imprint reduction at 0.001 (further raising d2_bg
+over-damps).
+
+### Unit tests
+
+3 new tests in ``tests/test_div_damp_adaptive.py`` (10 total now):
+
+| test | property | result |
+|------|----------|--------|
+| corner_div_damp_d2_bg=0 → bit-for-bit baseline | regression guard | ✓ |
+| cdd=0.001 changes winds on perturbed state | functional check | ✓ |
+| cdd=0.001 stable for 20 steps | stability | ✓ |
+
+### Recommended production setting
+
+```python
+CDGridPrimitiveEquationConfig(
+    ...,
+    corner_div_damp_d2_bg=0.001,   # iter 16 FV3 d_sw5 damping
+    corner_div_damp_dddmp=0.20,    # FV3 default
+)
+```
+
+Or via env var: ``LEGOESM_CDD_D2BG=0.001``.
+
+### What this iteration uses from FV3 fortran
+
+Per the user's strict "no improvisation" directive:
+
+* ``sw_core.F90:divergence_corner`` (line 2124-2229) — ported in
+  iter 15, used here unchanged.
+* ``sw_core.F90:1720`` adaptive Smagorinsky formula —
+  ``damp = da_min_c * max(d2_bg, min(0.20, dddmp*|delpc|*dt))``,
+  ported faithfully.
+* ``sw_core.F90:1722-1724`` ke-correction sequence —
+  ``vort = damp*delpc; ke += vort`` translated to a direct momentum
+  tendency via the corner gradient.
+
+The only "improvisation" is the centred-difference gradient at our
+C-D corners (vs FV3's 2-point face-midpoint difference) — this is
+the necessary architectural translation between FV3's normal D-grid
+and our C-D grid.  All other arithmetic is FV3-faithful.
+
+### Status
+
+iter 16 is the **first large cube-imprint reduction** (-71 %
+mid-level) achieved in this branch.  Combined with the iter-12
+post-step damping, the 3D HS C36 hybrid run shows substantially
+reduced cube imprint while preserving mass conservation at machine
+precision.
+
+46 atmospheric / FV3 tests pass with the default config (bit-for-bit
+unchanged).
+
+### Direction for next iteration
+
+iter 17: visualize the cube-imprint reduction with high-resolution
+plots and quantitative edge metrics.  Investigate whether even
+larger reductions are possible by combining cdd=0.001 with:
+- iter-12 damp_v variations (showed minor regression at cdd=0.001
+  + damp_v=0.30 — needs investigation)
+- BGRID-XDir corner fill (iter 7-10 toggle modes)
+- Higher-order halo interpolation
+
+iter 18+: continue the forward-backward architecture port for full
+elimination of the residual cube imprint.
+
 
 

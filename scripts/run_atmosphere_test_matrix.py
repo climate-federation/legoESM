@@ -2479,10 +2479,18 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         # damping (SW backbone reuse).  Set LEGOESM_DAMP_V=0.30 to
         # opt in (~17 % mid-level cube-imprint reduction at C36).
         _damp_v_env = float(os.environ.get("LEGOESM_DAMP_V", "0.0"))
+        # FV3_3D iter 16: optional FV3-faithful B-grid corner-divergence
+        # damping (port of sw_core.F90:divergence_corner + d_sw5
+        # adaptive damping).  Set LEGOESM_CDD_D2BG=0.001 to opt in
+        # (~71 % mid-level cube-imprint reduction at C36 — best result
+        # to date).  Use values 0.001-0.005; 0.010 destabilises.
+        _cdd_d2_bg_env = float(os.environ.get("LEGOESM_CDD_D2BG", "0.0"))
         config = PrimitiveEquationConfig(
             hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
             div_damp_coeff=dd, A_h=ah,
             damp_v=_damp_v_env, nord_v=2,
+            corner_div_damp_d2_bg=_cdd_d2_bg_env,
+            corner_div_damp_dddmp=0.20,
             use_conservation_fixer=True, fix_mass=True)
         model = PrimitiveEquationModel(grid, sigma, config)
         if _topo:
