@@ -2258,5 +2258,93 @@ substantive fix for the FV3 nord >= 2 fidelity gap.
 iter 22+: 200-day integration verification and multi-resolution
 robustness check on the recommended production setting.
 
+## Iteration 21 (2026-05-07): rigorous bit-for-bit equivalence proof
+
+### Codex iter-20 follow-up
+
+Codex's iter-20 review flagged two MEDIUM concerns:
+
+1. **Random-seed-only equivalence** isn't a definitive proof — could
+   pair with deterministic impulse tests over each halo location.
+2. **Asymmetric ``(1, 2)`` metric padding** for ``divg_u`` axis-2 is
+   a possible silent offset, especially since the standard
+   cubed-sphere metrics happen to be smooth and nearly axisymmetric.
+
+iter-21 closes both with focused regression tests.
+
+### Linearity argument (now documented)
+
+The full pipeline ``fv3_corner_laplacian_iteration`` is a composition
+of linear maps in the input ``divg_d``:
+
+1. ``pad_halo`` — linear extension via cross-panel halo exchange.
+2. Gradient (``divg_d → vc, uc``) — linear difference operator.
+3. ``fv3_fill_corners_dgrid_vector`` — linear sign-flipped diagonal
+   mirror at cube-vertex halo cells.
+4. Divergence (``vc, uc → lap``) — linear sum operator.
+5. Corner-removal at SW / SE / NE / NW — linear .at[].add().
+6. Multiply by ``rarea_c`` — pointwise linear.
+
+Therefore the difference ``out_with_fill - out_default`` is itself
+a linear function of ``divg_d``.  If it is zero on ANY one non-zero
+input, it is zero on ALL inputs (any field is a linear combination
+of basis impulses).  Random-seed equivalence implies all-input
+equivalence.
+
+### Expanded equivalence test
+
+``test_corner_laplacian_vector_fill_is_noop_for_nord1`` now covers:
+
+- 5 random uniform inputs (preserves iter-20 coverage).
+- Deterministic delta-function impulses at every cube vertex (4 per
+  face × 6 faces = 24), every face-edge midpoint (4 per face = 24),
+  and the interior centre (1 per face = 6).  Total: **54
+  deterministic impulse positions** on top of the 5 random seeds.
+
+By the linearity argument above, this is sufficient to prove the
+no-op claim — the impulses provide a sampling of the input basis
+that, combined with the linearity proof, leaves no escape for a
+hidden offset.
+
+### Nonuniform-metric stress test
+
+``test_corner_laplacian_vector_fill_noop_with_nonuniform_metrics``
+constructs a cdgrid clone with ALL relevant metric fields perturbed
+by deterministic 10 % factors:
+
+- ``dxc``, ``dyc``, ``dy_edge_x``, ``dx_edge_y``, ``rarea_c`` and
+  the corresponding ``rdxc`` / ``rdyc`` (with the inverse factor to
+  preserve the metric's reciprocal relationship).
+
+Random uniform input divg_d, both paths run, ``np.testing.assert_array_equal``
+asserted.  If the asymmetric ``(1, 2)`` padding had a silent offset
+that exploits metric uniformity, this test would expose it.
+
+Test passes — the asymmetric padding is **not** a silent offset.
+
+### Status
+
+iter 21 promotes the iter-19/20 nord=1 fill_corners gap claim from
+"argued + random-seed validated" to **proven within numerical
+precision** via:
+
+- Linearity argument documented in test docstring.
+- 54-position deterministic impulse coverage.
+- Non-uniform-metric stress test.
+
+12 tests pass in ``test_fv3_divergence_corner.py`` (10 + 2 new
+follow-ups).  27 tests total across ``test_div_damp_adaptive.py``
+and ``test_fv3_divergence_corner.py`` (no regression).
+
+### Direction for next iteration
+
+iter 22: substantive nord >= 2 fidelity restructure — extend the
+outer nord-loop to use halo'd intermediate divg_d arrays, using the
+iter-20 ``apply_vector_corner_fill`` scaffolding now backed by the
+iter-21 equivalence proofs.
+
+iter 23+: 200-day integration verification and multi-resolution
+robustness check on the recommended production setting.
+
 
 

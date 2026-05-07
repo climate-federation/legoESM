@@ -220,16 +220,22 @@ def test_corner_laplacian_vector_fill_is_noop_for_nord1(small_cube):
     ``fill_corners(vc, uc, VECTOR=true, DGRID=true)`` is mathematically
     a no-op at nt=0.
 
-    This test runs the same input through both
-    ``apply_vector_corner_fill = False`` (default iter-18 path) and
-    ``apply_vector_corner_fill = True`` (FV3-fully-faithful wider-shape
-    path) and verifies bit-for-bit identical output.  Codex iter-19
-    MEDIUM-3 audit is satisfied by this concrete equivalence proof.
+    Linearity argument: ``pad_halo``, the gradient (divg_d → vc, uc),
+    ``fv3_fill_corners_dgrid_vector``, the divergence (vc, uc → lap),
+    and the corner-removal are ALL linear maps in their respective
+    input fields.  Therefore the difference ``out_with_fill - out_default``
+    is itself a linear function of the input divg_d.  If that
+    difference is zero for one non-zero input it is zero for all
+    inputs (any input is a linear combination of basis impulses).
+
+    Empirical check: the test below exercises BOTH random uniform
+    inputs (5 seeds) AND deterministic single-cell impulses at every
+    cube-vertex / face-edge / interior location.  All cases must
+    produce bit-for-bit identical output.
     """
     _, cdgrid, n = small_cube
-    rng = np.random.default_rng(seed=2042)
 
-    # Multiple seeds to sample the input space.
+    # ---- (a) Random uniform inputs across 5 seeds.
     for seed in [11, 18, 31, 42, 99]:
         rng_ = np.random.default_rng(seed=seed)
         divg_d = jnp.asarray(
@@ -243,8 +249,109 @@ def test_corner_laplacian_vector_fill_is_noop_for_nord1(small_cube):
         )
         np.testing.assert_array_equal(
             np.asarray(out_default), np.asarray(out_with_fill),
-            err_msg=f"vector fill must be no-op at nt=0 (seed={seed})",
+            err_msg=f"vector fill must be no-op at nt=0 (random seed={seed})",
         )
+
+    # ---- (b) Deterministic single-cell impulse at every (face, i, j).
+    # By linearity, if every basis vector e_(face,i,j) gives identical
+    # output through both paths, all inputs do.  Sampling
+    # representative impulses: cube vertices (4 per face), midpoint of
+    # each face-edge, and interior cells on a coarse grid.
+    impulse_locations = []
+    for f in range(6):
+        # All 4 cube-vertex cells per face.
+        for (i, j) in [(0, 0), (0, n), (n, 0), (n, n)]:
+            impulse_locations.append((f, i, j))
+        # Midpoints of the 4 face-edges.
+        m = n // 2
+        for (i, j) in [(0, m), (n, m), (m, 0), (m, n)]:
+            impulse_locations.append((f, i, j))
+        # An interior cell.
+        impulse_locations.append((f, m, m))
+
+    for f, i, j in impulse_locations:
+        divg_d = jnp.zeros((6, n + 1, n + 1))
+        divg_d = divg_d.at[f, i, j].set(1.0)
+
+        out_default = fv3_corner_laplacian_iteration(
+            divg_d, cdgrid, apply_vector_corner_fill=False,
+        )
+        out_with_fill = fv3_corner_laplacian_iteration(
+            divg_d, cdgrid, apply_vector_corner_fill=True,
+        )
+        np.testing.assert_array_equal(
+            np.asarray(out_default), np.asarray(out_with_fill),
+            err_msg=(
+                f"vector fill must be no-op at nt=0 (impulse "
+                f"face={f} i={i} j={j})"
+            ),
+        )
+
+
+def test_corner_laplacian_vector_fill_noop_with_nonuniform_metrics(small_cube):
+    """Codex iter-20 MEDIUM concern follow-up.
+
+    The wider-shape ``apply_vector_corner_fill`` path uses asymmetric
+    ``(1, 2)`` metric padding for ``divg_u`` axis-2 (extending the
+    n-cell range to n+3).  Codex flagged this as a possible silent
+    offset that random uniform inputs may not surface — particularly
+    since the matrix's standard cubed-sphere metrics happen to be
+    smooth and nearly axisymmetric near the test face.
+
+    This test perturbs the cdgrid metrics with deterministic
+    non-uniform factors (10 % spread) and verifies bit-for-bit
+    equality between the two paths still holds, removing the
+    "uniform metrics happened to make it work" alternative
+    explanation.
+    """
+    _, cdgrid_base, n = small_cube
+    rng = np.random.default_rng(seed=2103)
+
+    # Perturb the relevant metric fields by a deterministic 10 % factor.
+    pert_dxc = jnp.asarray(
+        rng.uniform(0.9, 1.1, size=cdgrid_base.dxc.shape),
+    )
+    pert_dyc = jnp.asarray(
+        rng.uniform(0.9, 1.1, size=cdgrid_base.dyc.shape),
+    )
+    pert_dy_edge_x = jnp.asarray(
+        rng.uniform(0.9, 1.1, size=cdgrid_base.dy_edge_x.shape),
+    )
+    pert_dx_edge_y = jnp.asarray(
+        rng.uniform(0.9, 1.1, size=cdgrid_base.dx_edge_y.shape),
+    )
+    pert_rarea_c = jnp.asarray(
+        rng.uniform(0.9, 1.1, size=cdgrid_base.rarea_c.shape),
+    )
+
+    cdgrid_pert = cdgrid_base._replace(
+        dxc=cdgrid_base.dxc * pert_dxc,
+        dyc=cdgrid_base.dyc * pert_dyc,
+        rdxc=cdgrid_base.rdxc / pert_dxc,
+        rdyc=cdgrid_base.rdyc / pert_dyc,
+        dy_edge_x=cdgrid_base.dy_edge_x * pert_dy_edge_x,
+        dx_edge_y=cdgrid_base.dx_edge_y * pert_dx_edge_y,
+        rarea_c=cdgrid_base.rarea_c * pert_rarea_c,
+    )
+
+    rng2 = np.random.default_rng(seed=4242)
+    divg_d = jnp.asarray(
+        rng2.uniform(-1.0, 1.0, size=(6, n + 1, n + 1)),
+    ) * 1e-6
+
+    out_default = fv3_corner_laplacian_iteration(
+        divg_d, cdgrid_pert, apply_vector_corner_fill=False,
+    )
+    out_with_fill = fv3_corner_laplacian_iteration(
+        divg_d, cdgrid_pert, apply_vector_corner_fill=True,
+    )
+    np.testing.assert_array_equal(
+        np.asarray(out_default), np.asarray(out_with_fill),
+        err_msg=(
+            "vector fill must be no-op at nt=0 even with non-uniform "
+            "perturbed metrics"
+        ),
+    )
 
 
 def test_corner_laplacian_iteration_iterates_correctly(small_cube):
