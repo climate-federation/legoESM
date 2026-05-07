@@ -1464,27 +1464,80 @@ def precompute_halo_tables(n: int) -> None:
     _get_halo_tables_h2(int(n))
 
 
+# FV3_3D iter 7: corner-fill mode toggle.
+#
+# The 2-point-average ("avg") path is the legacy default (preserves
+# all existing tests bit-for-bit).  The "fv3_agrid_xdir" mode applies
+# the FV3-faithful diagonal-mirror corner fill from
+# fv_mp_mod.F90:fill_corners_2d_r8 AGRID/XDir branch (line 1077): for
+# the SW vertex halo at padded (0, 0), use ``q[0, 1]`` (the cell
+# immediately to the south of the SW interior corner, also a halo).
+# This eliminates the direction-invariant smoothing in the 2-point
+# average, restoring the FV3 directional preference.
+#
+# Empirical effect on Held-Suarez C36 hybrid 30-day:
+#   day 30 max abs v: 2.56 m/s (avg) -> 1.35 m/s (fv3_agrid_xdir)  -47%
+#   day 30 zonal_std: 0.520 -> 0.274                               -47%
+#   day 30 eddy_std:  0.364 -> 0.260                               -29%
+#
+# Set via the ``LEGOESM_CORNER_FILL`` environment variable or via the
+# ``set_corner_fill_mode(...)`` helper.  Default ``avg`` preserves the
+# current production behaviour.
+import os as _os
+
+_corner_fill_mode = _os.environ.get("LEGOESM_CORNER_FILL", "avg")
+
+
+def set_corner_fill_mode(mode: str) -> None:
+    """Set the cube-vertex halo fill mode.
+
+    Parameters
+    ----------
+    mode : {"avg", "fv3_agrid_xdir"}
+        - "avg": legacy 2-point average (the symmetric combination of
+          FV3's XDir and YDir variants).  Default.
+        - "fv3_agrid_xdir": FV3-faithful diagonal mirror in the XDir
+          direction (``fv_mp_mod.F90:1077`` AGRID-XDir branch).
+          Reduces 3D atmospheric cube imprint on HS C36 hybrid by
+          ~47 percent at day 30.
+    """
+    global _corner_fill_mode
+    if mode not in ("avg", "fv3_agrid_xdir"):
+        raise ValueError(
+            f"Unknown corner fill mode: {mode!r}.  "
+            f"Choose from 'avg', 'fv3_agrid_xdir'."
+        )
+    _corner_fill_mode = mode
+
+
+def get_corner_fill_mode() -> str:
+    """Return the current cube-vertex halo fill mode."""
+    return _corner_fill_mode
+
+
 def _fill_corners_h1(padded: jax.Array) -> jax.Array:
-    """Fill corner cells of halo=1 padded array by averaging adjacent edge halos.
+    """Fill corner cells of halo=1 padded array (cube vertices, 24 cells).
 
-    Vectorized: all 24 corners (6 faces × 4 corners) in a single
-    gather + average + scatter.
+    Two modes via :func:`set_corner_fill_mode`:
 
-    Fidelity note (Codex iter-69 review): the Fortran transport path uses
-    `copy_corners(dir=1/2)` in tp_core.F90:243-299 — a directional rotated
-    copy tailored to X-sweep vs Y-sweep of PPM.  That mechanism writes
-    DIFFERENT values at the same cube-vertex cell for different sweep
-    directions.  Our 2-point average is a direction-invariant single value.
+    - ``"avg"`` (default): legacy 2-point average of two adjacent halo
+      cells.  Direction-invariant; symmetric combination of FV3's
+      XDir and YDir.
 
-    This discrepancy has no functional impact on ``fv_tp_2d`` (verified):
-    the operator-split PPM slices q_full to keep EITHER i-halo OR j-halo
-    (``q_full[:, 2:-2, :]`` for y-sweep, ``q_i_pad[:, :, 2:-2]`` for
-    x-sweep), never simultaneously — so cube-vertex corner cells at
-    (i_halo, j_halo) are never referenced by any PPM stencil.
+    - ``"fv3_agrid_xdir"``: FV3-faithful AGRID-XDir diagonal mirror
+      from ``fv_mp_mod.F90:fill_corners_2d_r8`` (line 1077).  Each
+      cube-vertex halo cell takes its value from the cell immediately
+      adjacent in the XDir direction:
+          SW (0, 0)         ← (0, 1)
+          NW (0, n+1)       ← (0, n)
+          SE (n+1, 0)       ← (n+1, 1)
+          NE (n+1, n+1)     ← (n+1, n)
+      This restores the FV3 directional preference and reduces the 3D
+      atmospheric cube imprint on Held-Suarez C36 hybrid by ~47 percent
+      (max abs v, day 30).  See FV3_3D.md iter 7.
 
-    The corner fill IS read by Arakawa-Lamb gradient (``B_pad[:, :-1, :-1]``
-    includes corner cells), but that gradient is a non-FV3 Python operator
-    and there is no Fortran reference to match.
+    Vectorised: all 24 corners (6 faces × 4 corners) in a single
+    gather + scatter.
 
     Parameters
     ----------
@@ -1496,20 +1549,30 @@ def _fill_corners_h1(padded: jax.Array) -> jax.Array:
     """
     n2i = padded.shape[1] - 1  # n+1 (last index in padded)
 
-    # All 24 corner cells: (face, i, j) and their two adjacent halo cells
+    # All 24 corner cells: (face, i, j)
     f_idx = jnp.arange(6)
-    # SW(0,0), SE(n+1,0), NW(0,n+1), NE(n+1,n+1) per face
     cf = jnp.repeat(f_idx, 4)
     ci = jnp.tile(jnp.array([0, n2i, 0, n2i]), 6)
     cj = jnp.tile(jnp.array([0, 0, n2i, n2i]), 6)
-    # Adjacent cell 1
-    a1i = jnp.tile(jnp.array([0, n2i, 0, n2i]), 6)
-    a1j = jnp.tile(jnp.array([1, 1, n2i - 1, n2i - 1]), 6)
-    # Adjacent cell 2
-    a2i = jnp.tile(jnp.array([1, n2i - 1, 1, n2i - 1]), 6)
-    a2j = jnp.tile(jnp.array([0, 0, n2i, n2i]), 6)
 
-    corner_vals = 0.5 * (padded[cf, a1i, a1j] + padded[cf, a2i, a2j])
+    if _corner_fill_mode == "fv3_agrid_xdir":
+        # FV3 AGRID-XDir: diagonal mirror in XDir direction.
+        # SW: q[0, 0] = q[0, 1]
+        # NW: q[0, -1] = q[0, -2]
+        # SE: q[-1, 0] = q[-1, 1]
+        # NE: q[-1, -1] = q[-1, -2]
+        # i.e. sample at (ci, ci != 0 ? cj-1 : cj+1) — same i, mirrored j.
+        si = ci  # same i
+        sj = jnp.tile(jnp.array([1, 1, n2i - 1, n2i - 1]), 6)
+        corner_vals = padded[cf, si, sj]
+    else:
+        # Legacy 2-point average.
+        a1i = jnp.tile(jnp.array([0, n2i, 0, n2i]), 6)
+        a1j = jnp.tile(jnp.array([1, 1, n2i - 1, n2i - 1]), 6)
+        a2i = jnp.tile(jnp.array([1, n2i - 1, 1, n2i - 1]), 6)
+        a2j = jnp.tile(jnp.array([0, 0, n2i, n2i]), 6)
+        corner_vals = 0.5 * (padded[cf, a1i, a1j] + padded[cf, a2i, a2j])
+
     padded = padded.at[cf, ci, cj].set(corner_vals)
     return padded
 

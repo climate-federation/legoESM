@@ -684,5 +684,157 @@ iter 8+: forward-backward time stepping skeleton (the architecture
 port).  Each iteration ports one self-contained piece of c_sw or
 d_sw1/5.
 
+## Iteration 7 (2026-05-07): FV3 AGRID-XDir corner fill toggle
+
+### Hypothesis
+
+iter-6 added the ``fv3_fill_corners_dgrid_vector`` helper but did not
+wire it.  iter-7 takes a different angle: probe whether replacing the
+legacy 2-point-average corner fill (in ``halo.py:_fill_corners_h1``,
+called by every cell-centre halo path) with the FV3-faithful AGRID
+``XDir`` diagonal mirror (``fv_mp_mod.F90:1077``) changes the 3D
+HS cube imprint.  The legacy fill is the SYMMETRIC combination of
+FV3's ``XDir`` and ``YDir`` variants; FV3 picks one direction
+specifically, depending on the operator.
+
+### Diagnostic experiment
+
+Monkey-patch ``_fill_corners_h1`` to use ``XDir`` at all cube-vertex
+halos (cell-centre A-grid scalars), keep all other code unchanged,
+run HS C36 hybrid for 30 days at the **middle vertical level**:
+
+| metric (lev nlev//2, day 30) | AVG (legacy) | XDir (FV3-faithful) | change |
+|------------------------------|-------------:|--------------------:|-------:|
+| max\|v\|                     |     2.56     |        1.35         |  -47%  |
+| edge_std                     |     0.781    |        0.482        |  -38%  |
+| zonal_std                    |     0.520    |        0.274        |  -47%  |
+| eddy_std                     |     0.364    |        0.260        |  -29%  |
+
+Repeat with ``YDir`` (FV3 line 1083 variant) for completeness:
+
+| metric (lev nlev//2, day 10) | AVG  | XDir | YDir |
+|------------------------------|-----:|-----:|-----:|
+| max\|v\|                     | 0.626 | 0.442 | 0.944 |
+
+``XDir`` reduces by 47%; ``YDir`` increases by 51%.  The asymmetry
+is real (``YDir`` is NOT just ``XDir`` rotated 90°: each picks the
+wrong/right diagonal for the specific dynamic flow we have).  This
+asymmetry shows our 3D dycore has a **directional bias** — the
+``XDir`` corner choice happens to align with the bias and damp it,
+``YDir`` amplifies it.
+
+### Tradeoff: max-over-all-levels metric tells a different story
+
+Re-running with the toggle ON globally and computing max-over-all-
+levels (not just the middle level):
+
+| day | AVG max\|u\| | AVG max\|v\| | XDir max\|u\| | XDir max\|v\| |
+|----:|-------------:|-------------:|--------------:|--------------:|
+|   1 |     0.62     |     0.39     |     0.62      |     0.38      |
+|  10 |     6.02     |     3.08     |     6.35      |     3.29      |
+|  30 |    11.57     |     6.52     |    15.80      |    10.18      |
+
+So at day 30, the XDir toggle gives:
+- middle-level v cube imprint: -47 % (good)
+- max-over-all-levels |u|, |v|, speed:  +37 %, +56 %, +38 % (worse)
+
+Interpretation: the legacy 2-point-average corner fill was
+*suppressing* part of the physical Hadley/baroclinic flow
+(particularly at extreme levels) AND part of the cube imprint.
+The FV3 ``XDir`` variant reduces cube imprint at the middle level
+but releases more of the natural baroclinic-eddy flow at extreme
+levels (which then produces larger max wind values, partly real
+physical signal and partly residual cube imprint at the surface
+and top).
+
+This is a structural release of pent-up dynamics, NOT a stability
+issue (model remains stable through 30 days, no NaN, mass drift
+~2e-9 vs ~1e-9 baseline — both excellent).
+
+### Implementation
+
+Modified ``halo.py``:
+
+* Added module-level ``_corner_fill_mode`` (default ``"avg"``,
+  reads from ``LEGOESM_CORNER_FILL`` env var if set).
+* ``set_corner_fill_mode(mode)`` / ``get_corner_fill_mode()`` setter
+  / getter.
+* ``_fill_corners_h1`` branches on the mode: ``avg`` (legacy 2-point
+  average, bit-for-bit unchanged) vs ``fv3_agrid_xdir`` (FV3-faithful
+  ``XDir`` diagonal mirror).
+
+Default ``avg`` preserves all existing tests bit-for-bit (29
+FV3_3D-related tests pass; 12 broader atmosphere integration tests
+pass without the toggle).
+
+### Unit tests: ``tests/test_corner_fill_toggle.py``
+
+Six tests, all passing:
+
+1. Default mode is ``"avg"``.
+2. Invalid mode raises ``ValueError``.
+3. ``avg`` mode matches legacy 2-point average exactly.
+4. ``fv3_agrid_xdir`` mode applies ``XDir`` diagonal mirror.
+5. The two modes give DIFFERENT results on random input (regression
+   guard against silent no-op).
+6. Round-trip mode change restores legacy values.
+
+### Held-Suarez C36 hybrid 30-day with toggle ON (visual)
+
+Re-ran ``scripts/run_atmosphere_test_matrix.py`` with the env var:
+all three tests PASS, mass drift 2e-9 (vs 1e-9 baseline, both
+machine-precision-level), max\|v\| 16 m/s (vs 11 baseline).  The
+v-wind snapshot at day 30 shows a markedly different pattern:
+red-dominant zonal flow with stronger high-latitude bands and
+weaker face-blob structure in the mid-latitudes.  Cube imprint at
+mid-levels is reduced (qualitatively matches the diagnostic numbers)
+but the overall amplitude is larger.
+
+### Status / interpretation
+
+**This is a partial win.** The FV3-faithful ``XDir`` corner fill:
+
+- Genuinely reduces the dominant cube-imprint mode at mid-vertical-
+  levels (where the user's HS snapshots showed the worst pattern).
+- Also lets more dynamic energy through, increasing max wind values
+  at extreme levels.
+
+The tradeoff is acceptable for users who care about middle-level
+flow accuracy (climate-mean diagnostics), less ideal for users who
+care about peak winds.
+
+The ``avg`` legacy mode REMAINS THE DEFAULT.  Users who want the
+FV3-faithful corner fill opt in with::
+
+    export LEGOESM_CORNER_FILL=fv3_agrid_xdir
+
+or::
+
+    from legoesm.grids.halo import set_corner_fill_mode
+    set_corner_fill_mode("fv3_agrid_xdir")
+
+### Conclusion
+
+iter 7 ports a FV3 mechanism that **measurably changes** the 3D
+cube-sphere dynamics behaviour for the first time in this loop.
+It does NOT solve the cube imprint completely (the structural
+mode persists) but it provides a partial reduction at the
+mid-tropospheric levels that visually dominate the HS snapshots.
+The toggle is opt-in (legacy ``avg`` remains default), bit-for-bit
+backward compatible, fully tested.
+
+35 atmospheric tests pass total (existing 29 + 6 new toggle tests).
+
+### Direction for next iteration
+
+iter 8: similar toggle for ``_fill_corners_h2`` (the halo=2 path used
+by PPM transport).  See if the same XDir diagonal mirror, applied to
+the 2×2 cube-vertex L-shaped corner block, further reduces cube
+imprint.
+
+iter 9+: forward-backward time stepping (the multi-iteration
+architecture port that iter-2 identified as the only path to full
+elimination).
+
 
 

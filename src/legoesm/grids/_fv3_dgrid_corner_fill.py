@@ -145,6 +145,99 @@ def fv3_fill_corners_dgrid_vector(
     return x, y
 
 
+def fv3_fill_corners_cdgrid_vector(
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    n: int,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """FV3-style cube-vertex halo fill adapted for the legoESM C-D grid.
+
+    Our C-D grid puts BOTH wind components at cell corners, shape
+    ``(6, n+1, n+1, ...)``.  After halo padding the shape is
+    ``(6, n+3, n+3, ...)``.  This function overwrites the 4 cube-
+    vertex halo cells per face with a sign-flipped diagonal mirror
+    of the OTHER component, mirroring FV3's
+    ``fill_corners_dgrid_r8`` philosophy adapted for the C-D layout.
+
+    The cube vertex of face ``F`` lives at the corner shared by
+    three faces (the "3-faces-meet" point).  In our padded
+    representation:
+
+    * SW cube vertex halo: padded ``(0, 0)``
+    * NW cube vertex halo: padded ``(0, -1)``
+    * SE cube vertex halo: padded ``(-1, 0)``
+    * NE cube vertex halo: padded ``(-1, -1)``
+
+    The interior diagonal-mirror source is the corner one cell INSIDE
+    diagonally — in our 0-based padding with halo=1 those are the
+    interior corners adjacent to the cube vertex (i.e. padded ``(1, 1)``,
+    ``(1, -2)``, ``(-2, 1)``, ``(-2, -2)``).
+
+    The sign convention follows the Fortran fv_mp_mod.F90:1270-1273
+    pattern: SW and NE corners flip sign, NW and SE do not.  This
+    captures the local-basis 90°-rotation between adjacent panels.
+
+    Trailing axes (e.g., a vertical level dimension) are passed through
+    unchanged — the function vectorises automatically over them.
+
+    Parameters
+    ----------
+    u : jnp.ndarray, shape ``(6, n+3, n+3, ...)``
+        Padded x-component at corners.  Must be at corner positions
+        (NOT cell centres) — the cube-vertex halo cells live at the
+        outer ring of the padded array.
+    v : jnp.ndarray, same shape as u.
+    n : int
+        Cell count per face edge.  Should match ``u.shape[1] - 3``
+        and ``u.shape[2] - 3`` (interior n+1 corners + halo=1).
+
+    Returns
+    -------
+    u_filled, v_filled : jnp.ndarray
+        Same shape as inputs, with cube-vertex halo cells replaced
+        by the sign-flipped diagonal mirror.
+
+    Notes
+    -----
+    The interior diagonal-mirror is one cell INSIDE the corner —
+    e.g., for the SW cube vertex, the mirror is at padded (1, 1)
+    rather than (0, 1).  This differs from FV3's ``fill_corners_dgrid``
+    indexing because our layout has both components at the SAME
+    grid positions (corners), so the mirror must be at the diagonal
+    interior point (not the off-component-adjacent point that FV3
+    uses).
+    """
+    sign = -1.0  # Vector sign flip per FV3 fv_mp_mod.F90:1124.
+
+    # SW cube vertex (padded (0, 0)): sign-flipped mirror from interior (1, 1).
+    # Use the value of u at the diagonal mirror to fill v at the corner,
+    # and vice versa, so that the rotation between u and v is captured.
+    u_sw_src = v[:, 1, 1]   # interior diagonal mirror of cube vertex
+    v_sw_src = u[:, 1, 1]
+    u = u.at[:, 0, 0].set(sign * u_sw_src)
+    v = v.at[:, 0, 0].set(sign * v_sw_src)
+
+    # NW cube vertex (padded (0, -1)): no sign flip per FV3 line 1271.
+    u_nw_src = v[:, 1, -2]
+    v_nw_src = u[:, 1, -2]
+    u = u.at[:, 0, -1].set(u_nw_src)
+    v = v.at[:, 0, -1].set(v_nw_src)
+
+    # SE cube vertex (padded (-1, 0)): no sign flip per FV3 line 1272.
+    u_se_src = v[:, -2, 1]
+    v_se_src = u[:, -2, 1]
+    u = u.at[:, -1, 0].set(u_se_src)
+    v = v.at[:, -1, 0].set(v_se_src)
+
+    # NE cube vertex (padded (-1, -1)): sign flip per FV3 line 1273.
+    u_ne_src = v[:, -2, -2]
+    v_ne_src = u[:, -2, -2]
+    u = u.at[:, -1, -1].set(sign * u_ne_src)
+    v = v.at[:, -1, -1].set(sign * v_ne_src)
+
+    return u, v
+
+
 def fv3_fill_corners_agrid_scalar(
     q: jnp.ndarray,
     n: int,
