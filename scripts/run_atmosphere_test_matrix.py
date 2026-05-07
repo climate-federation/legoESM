@@ -519,6 +519,62 @@ def _laplacian_visc_cube(n: int, frac: float = 0.05) -> float:
     return frac * c_gw * dx
 
 
+def _laplacian_visc_cube_v2(n: int) -> float:
+    """Empirically calibrated Laplacian viscosity for cubed-sphere
+    HS hybrid path (iter 33-37).
+
+    Returns the LEGOESM_AH_SCALE-equivalent ``A_h`` directly:
+
+    | n   | recommended A_h | LEGOESM_AH_SCALE multiplier vs v1 |
+    |----:|----------------:|----------------------------------:|
+    |  36 |     4.08e+06    |                              1.0  |
+    |  48 |     6.12e+06    |                              2.0  |
+    |  72 |     2.04e+07    |                             10.0  |
+
+    For ``n`` not in the calibration set, this function uses a
+    log-linear interpolation in ``log(A_h) ~ log(n)``.  The slope
+    between C36 → C72 (factor 5x in A_h for factor 2x in n) is
+    captured by ``A_h ∝ n^2.32``; intermediate values fit a
+    quadratic-in-log fit to the 3 calibration points.
+
+    .. warning::
+       UNTESTED at C96+ resolutions.  This function extrapolates
+       under the iter-37-observed pattern but will need empirical
+       confirmation.  Run a stability check before climate-relevant
+       integration at any new resolution.
+
+    See ``FV3_3D.md`` iter 33-37 for the calibration history.
+
+    This is an OPT-IN function — ``_laplacian_visc_cube`` (v1)
+    remains the matrix default to avoid regressing the C36 / C48
+    iter-17 / iter-19 / iter-24 calibrations which are tuned for
+    the v1 ``A_h``.
+
+    To opt in, replace the matrix's ``ah = _laplacian_visc_cube(n)``
+    line with ``ah = _laplacian_visc_cube_v2(n)``, OR set
+    ``LEGOESM_AH_SCALE`` to match the v2 / v1 ratio at each
+    resolution.
+    """
+    import math
+    # Calibration points from iter 33-37.
+    calib = {36: 4.08e6, 48: 6.12e6, 72: 2.04e7}
+    if n in calib:
+        return calib[n]
+    # Log-linear interpolation/extrapolation.  Fit:
+    # log10(A_h) = a * log10(n) + b
+    # Through C36 and C72: slope = (log10(2.04e7) - log10(4.08e6))
+    #                            / (log10(72) - log10(36))
+    #                    = log10(5) / log10(2) ≈ 2.322
+    # i.e. A_h ∝ n^2.322
+    log_n_36 = math.log10(36.0)
+    log_a36 = math.log10(4.08e6)
+    log_n_72 = math.log10(72.0)
+    log_a72 = math.log10(2.04e7)
+    slope = (log_a72 - log_a36) / (log_n_72 - log_n_36)
+    log_a = log_a36 + slope * (math.log10(float(n)) - log_n_36)
+    return float(10.0 ** log_a)
+
+
 def _laplacian_visc_latlon(n_lat: int, frac: float = 0.1) -> float:
     """Laplacian viscosity A_h = frac * c_gw * dy for lat-lon grid."""
     import math

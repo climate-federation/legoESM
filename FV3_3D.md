@@ -3568,5 +3568,82 @@ iter 39+: implement a corrected ``_laplacian_visc_cube`` with the
 proper resolution scaling — but only as an opt-in (e.g.,
 ``_laplacian_visc_cube_v2``) so existing tests are not regressed.
 
+## Iteration 39 (2026-05-07): _laplacian_visc_cube_v2 with empirical calibration
+
+### New opt-in helper
+
+Added ``_laplacian_visc_cube_v2(n)`` to ``run_atmosphere_test_matrix.py``:
+
+```python
+def _laplacian_visc_cube_v2(n: int) -> float:
+    calib = {36: 4.08e6, 48: 6.12e6, 72: 2.04e7}
+    if n in calib:
+        return calib[n]
+    # Log-linear interpolation: A_h ∝ n^2.32 from C36→C72.
+    ...
+```
+
+Verification table::
+
+    | n   | v1          | v2          | v2/v1 ratio |
+    |  24 |  6.118e+06  |  1.591e+06  |       0.26x |
+    |  36 |  4.079e+06  |  4.080e+06  |       1.00x |
+    |  48 |  3.059e+06  |  6.120e+06  |       2.00x |
+    |  72 |  2.039e+06  |  2.040e+07  |      10.00x |
+    |  96 |  1.530e+06  |  3.979e+07  |      26.01x |
+    | 144 |  1.020e+06  |  1.020e+08  |     100.03x |
+
+The v2 captures the iter-37 finding that A_h_recommended grows as
+``n^2.32`` between C36 and C72, opposite the v1's ``A_h ∝ 1/n``
+slope.
+
+The v2 is **opt-in** — the matrix still uses v1 by default to avoid
+regressing C36/C48 climatologies tuned to the v1 default.  Users
+can either:
+
+- Swap in v2 at the call site: ``ah = _laplacian_visc_cube_v2(n)``.
+- Continue with v1 + ``LEGOESM_AH_SCALE`` env var (no source
+  changes needed).
+
+### Test compatibility fix
+
+The iter-34 ``LEGOESM_AH_SCALE`` env-var addition added a second
+``ah = ...`` assignment in the matrix (after the helper call), which
+broke the iter-60 ``test_cube_branch_config_wires_helpers_via_local_aliases``
+test.  That test inspected the LAST ``ah = ...`` assignment via AST
+and expected it to be a call to ``_laplacian_visc_cube``.
+
+Fixed the test to walk ALL ``ah = ...`` assignments and accept any
+that invokes ``_laplacian_visc_cube`` somewhere in the chain (mirrors
+the existing ``test_latlon_branch_config_wires_A_h_via_local_alias``
+pattern).  All 162 tests in
+``test_atmosphere_cross_grid_plots.py`` now pass.
+
+### Status
+
+iter 39 makes the iter-37 calibration available as a function
+(``_laplacian_visc_cube_v2``) for users who want the empirically
+tuned A_h without env vars, and fixes the silent test break that
+the iter-34 env-var addition introduced.
+
+The matrix's resolution-scaling story is now consistent:
+- v1: ``A_h ∝ 1/n`` (matrix default, tuned for C36/C48 grid-scale).
+- v2: ``A_h ∝ n^2.32`` (empirical, tuned for synoptic-scale at C72).
+- ``LEGOESM_AH_SCALE``: env-var multiplier on top of v1.
+
+162 tests in ``test_atmosphere_cross_grid_plots.py`` pass.
+27 tests in ``test_div_damp_adaptive.py`` and
+``test_fv3_divergence_corner.py`` pass.
+
+### Direction for next iteration
+
+iter 40: actually wire the matrix to use v2 by default for cube_sphere
+HS at higher resolutions, but only when ``LEGOESM_AH_SCALE``
+unset (so users can still override).  This makes C72+ work
+out-of-the-box.
+
+iter 41+: empirical calibration scan at C96 to validate the
+v2 extrapolation.
+
 
 

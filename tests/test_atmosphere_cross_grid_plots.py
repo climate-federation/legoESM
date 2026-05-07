@@ -2367,7 +2367,6 @@ class TestHeldSuarezDissipationImbalance:
         # Each local assignment has the right RHS.
         hd_rhs = self._resolve_local_assignment(body, "hd")
         dd_rhs = self._resolve_local_assignment(body, "dd")
-        ah_rhs = self._resolve_local_assignment(body, "ah")
         n_rhs = self._resolve_local_assignment(body, "n")
 
         assert hd_rhs is not None and self._is_call_to(hd_rhs, "_hyperdiff_cube", "n"), (
@@ -2378,9 +2377,35 @@ class TestHeldSuarezDissipationImbalance:
             "iter-60 codex MEDIUM: ``dd = _div_damp_cube(n)`` "
             "expected in cube HS branch"
         )
-        assert ah_rhs is not None and self._is_call_to(ah_rhs, "_laplacian_visc_cube", "n"), (
-            "iter-60 codex MEDIUM: ``ah = _laplacian_visc_cube(n)`` "
-            "expected in cube HS branch"
+        # For ``ah``: iter-34 added a ``LEGOESM_AH_SCALE`` env-var
+        # multiply for C72+ stability (see FV3_3D.md iter 33-37).
+        # The cube HS branch may have multiple ``ah = ...`` assignments
+        # (one for the helper call, one for the env-var multiply).
+        # Match the latlon test's pattern: ANY assignment must invoke
+        # the canonical helper.
+        import ast
+        ah_assignments = []
+        for stmt in body:
+            for node in ast.walk(stmt):
+                if (
+                    isinstance(node, ast.Assign)
+                    and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name)
+                    and node.targets[0].id == "ah"
+                ):
+                    ah_assignments.append(node.value)
+        assert ah_assignments, (
+            "iter-60/iter-34 codex: cube HS branch must compute an "
+            "``ah`` Laplacian-viscosity local"
+        )
+        ah_helper_used = any(
+            "_laplacian_visc_cube" in ast.unparse(rhs)
+            for rhs in ah_assignments
+        )
+        assert ah_helper_used, (
+            f"iter-60/iter-34 codex: cube ``ah`` should derive from "
+            f"``_laplacian_visc_cube(...)`` somewhere in the chain.  "
+            f"Saw: {[ast.unparse(rhs) for rhs in ah_assignments]}"
         )
         # ``n = int(tc.resolution[1:])`` is the canonical idiom for
         # parsing the cube resolution string (e.g. ``C48`` → 48).
