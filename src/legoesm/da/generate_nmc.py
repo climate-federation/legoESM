@@ -500,6 +500,12 @@ def _run_forecast_with_physics(
     )
     lat_col_local = lat_2d.reshape(-1)
     S_0_local = driver.config.S_0
+    # iter-169: import daily_mean_insolation here — F821 NameError
+    # on this branch otherwise (the line-310 import inside
+    # ``_build_spectral_physics_fn`` does not reach this scope).
+    from legoesm.atmosphere.physics.radiation.solar import (
+        daily_mean_insolation,
+    )
     for step in range(n_steps):
         current_day = start_day + (step + 1) * dt / 86400.0
         day_ref.day = current_day  # backward-compat: keep _DayRef synced

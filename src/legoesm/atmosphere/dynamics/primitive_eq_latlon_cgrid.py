@@ -420,8 +420,10 @@ def cgrid_latlon_hydrostatic_tendencies(
         # share one halo pad + PPM reconstruction across all levels.
         # Pre-pad T once so both gradient calls share the halo.
         _T_pad_h2 = pad_halo_latlon_3d(T, halo=2)
-        dT_dx = fv_gradient_lon_3d(T, grid, padded=_T_pad_h2)
-        dT_dy = fv_gradient_lat_3d(T, grid, padded=_T_pad_h2)
+        # iter-169: use the imported aliases (lines 92-93) — bare
+        # ``fv_gradient_lon_3d`` would F821 NameError at runtime.
+        dT_dx = _fv_gradient_lon_3d(T, grid, padded=_T_pad_h2)
+        dT_dy = _fv_gradient_lat_3d(T, grid, padded=_T_pad_h2)
         horiz_adv_T = -(u_c * dT_dx + v_c * dT_dy)
 
     # Adiabatic heating: κ T (ω/p + v·∇_η(ln p))
@@ -498,8 +500,9 @@ def cgrid_latlon_hydrostatic_tendencies(
             # share the halo pad — saves one redundant pad_halo_latlon_3d
             # call per timestep.
             _q_pad_h2 = pad_halo_latlon_3d(tracer_flat, halo=2)
-            dq_dx_flat = fv_gradient_lon_3d(tracer_flat, grid, padded=_q_pad_h2)
-            dq_dy_flat = fv_gradient_lat_3d(tracer_flat, grid, padded=_q_pad_h2)
+            # iter-169: aliased import (line 92-93).
+            dq_dx_flat = _fv_gradient_lon_3d(tracer_flat, grid, padded=_q_pad_h2)
+            dq_dy_flat = _fv_gradient_lat_3d(tracer_flat, grid, padded=_q_pad_h2)
             dq_dx_stack = dq_dx_flat.reshape(n_lat_t, n_lon_t, nlev_t, n_tracers)
             dq_dy_stack = dq_dy_flat.reshape(n_lat_t, n_lon_t, nlev_t, n_tracers)
             horiz_q_stack = -(

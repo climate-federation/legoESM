@@ -226,7 +226,13 @@ class DiagnosticCollector:
                 ref_date=f"{start_year:04d}-01-01",
             )
             if not monthly_means:
-                from legoesm.diagnostics.monthly_means import MonthlyAccumulator
+                # iter-169: removed redundant local import that
+                # caused F823 "referenced before assignment" — the
+                # local import shadows the module-level
+                # ``MonthlyAccumulator`` (line 19) for the entire
+                # function scope, making the line-206 reference
+                # inside the same ``__init__`` block invalid.  Use
+                # the module-level import directly.
                 self.monthly_means = True
                 self.monthly_accum = MonthlyAccumulator(nlev=nlev, n_lat_bins=90)
             # Full spatial accumulator for CMIP NetCDF output
