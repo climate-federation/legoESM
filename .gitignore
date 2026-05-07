@@ -29,6 +29,10 @@ checkpoints/
 data/
 wandb/
 
+# sbatch output files
+*.out
+*.err
+
 # Exceptions: the `.nc` files under
 # `src/legoesm/atmosphere/physics/radiation/rrtmgp/optics/rrtmgp_data/`
 # are package-bundled optics tables that must be tracked for RRTMGP
