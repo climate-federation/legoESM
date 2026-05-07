@@ -31,6 +31,9 @@ Or via env vars::
     LEGOESM_CDD_D4BG=0.02 \
     LEGOESM_CDD_NORD=1
 
+For C72+ also set ``LEGOESM_AH_SCALE=10.0`` (iter 33/34) — the
+matrix's ``_laplacian_visc_cube`` default is INSUFFICIENT at C72.
+
 ### What this setting does (and where it works)
 
 | resolution | result                                            |
@@ -3297,6 +3300,58 @@ correctly?
 iter 36+: update the matrix's resolution-scaling for ``A_h`` to
 catch this class of instability automatically at higher
 resolutions.
+
+## Iteration 34 (2026-05-07): LEGOESM_AH_SCALE env var
+
+### Goal
+
+Make the iter-33 A_h fix accessible to users without code edits.
+
+### Changes
+
+``scripts/run_atmosphere_test_matrix.py``: each ``ah =
+_laplacian_visc_cube(n)`` site now multiplies by
+``LEGOESM_AH_SCALE`` (default 1.0).  Three call sites in the matrix
+(HS, baroclinic, dcmip_transport) all updated consistently.
+
+### Verification
+
+```python
+LEGOESM_AH_SCALE=10.0
+C72 default ah = 2.04e+06
+C72 scaled ah  = 2.04e+07   # matches iter-33 stable value
+```
+
+27 unit tests still pass (default LEGOESM_AH_SCALE=1.0 preserves
+iter-17/24 C36/C48 behaviour bit-for-bit).
+
+### User invocation for C72
+
+```bash
+LEGOESM_CDD_D2BG=0.0005 \
+LEGOESM_CDD_D4BG=0.02 \
+LEGOESM_CDD_NORD=1 \
+LEGOESM_AH_SCALE=10.0 \
+  JAX_ENABLE_X64=1 python scripts/run_atmosphere_test_matrix.py \
+    --grid cubed_sphere --only hydro --test held_suarez
+```
+
+### Status
+
+iter 34 makes the iter-33 breakthrough accessible.  Users at C72+
+no longer need a custom script — they can opt in via env var.
+
+The Quick Reference at the top of this document is updated with
+the C72 LEGOESM_AH_SCALE recommendation.
+
+### Direction for next iteration
+
+iter 35: scan ``LEGOESM_AH_SCALE`` ∈ {3.0, 5.0, 7.0} at C72 to
+find the smallest stable value.  Lower A_h → better climatology.
+
+iter 36+: investigate WHY ``_laplacian_visc_cube`` at C72 needs a
+factor of 10 boost.  Update the heuristic at the source so users
+don't need the env var.
 
 
 

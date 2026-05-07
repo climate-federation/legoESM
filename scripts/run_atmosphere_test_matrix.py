@@ -2447,6 +2447,11 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         hd = _hyperdiff_cube(n)
         dd = _div_damp_cube(n)
         ah = _laplacian_visc_cube(n)
+        # FV3_3D iter 33/34: scale A_h via env var.  matrix default
+        # is INSUFFICIENT at C72+ (iter 33 found C72 NaN at default
+        # A_h but stable at 10x).  Default 1.0 preserves iter-17/24
+        # C36/C48 behaviour; set LEGOESM_AH_SCALE=10.0 at C72.
+        ah = ah * float(os.environ.get("LEGOESM_AH_SCALE", "1.0"))
         dt = 200.0
         # Iter-15 NOTE on the cubed-sphere upper-atmosphere sponge:
         # The default ``sponge_tau_sec = 3600`` (1 hour) is FAR more
@@ -2916,6 +2921,11 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         hd = _hyperdiff_cube(n)
         dd = _div_damp_cube(n)
         ah = _laplacian_visc_cube(n)
+        # FV3_3D iter 33/34: scale A_h via env var.  matrix default
+        # is INSUFFICIENT at C72+ (iter 33 found C72 NaN at default
+        # A_h but stable at 10x).  Default 1.0 preserves iter-17/24
+        # C36/C48 behaviour; set LEGOESM_AH_SCALE=10.0 at C72.
+        ah = ah * float(os.environ.get("LEGOESM_AH_SCALE", "1.0"))
         dt = 200.0
         config = PrimitiveEquationConfig(
             hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
@@ -3496,6 +3506,11 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         hd = _hyperdiff_cube(n)
         dd = _div_damp_cube(n)
         ah = _laplacian_visc_cube(n)
+        # FV3_3D iter 33/34: scale A_h via env var.  matrix default
+        # is INSUFFICIENT at C72+ (iter 33 found C72 NaN at default
+        # A_h but stable at 10x).  Default 1.0 preserves iter-17/24
+        # C36/C48 behaviour; set LEGOESM_AH_SCALE=10.0 at C72.
+        ah = ah * float(os.environ.get("LEGOESM_AH_SCALE", "1.0"))
         dt = 300.0
         config = PrimitiveEquationConfig(
             hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
