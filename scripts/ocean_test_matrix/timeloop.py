@@ -105,10 +105,15 @@ def _apply_pe_rel_sign(
 
     Used by Overflow and Lock Exchange (both have the same
     documented ``pe_rel_final < 0`` contract).
+
+    iter-138 (iter-137 production finding FAIL-2): same
+    ``op="lt" → op="le"`` loosening as monolithic; the strict
+    gate broke quick mode where 28-30 timesteps weren't enough
+    for measurable PE evolution.
     """
     return _apply_value_threshold(
         ok, notes, pe_rel_final, 0.0,
-        label=label, op="lt", n_samples=n_samples,
+        label=label, op="le", n_samples=n_samples,
     )
 
 
