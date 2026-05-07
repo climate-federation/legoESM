@@ -1332,7 +1332,7 @@ def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
     # ``run_lock_exchange``.
     ok, notes = _apply_pe_rel_sign(
         ok, notes, pe_rel_final, label="PE_rel_final",
-        n_samples=len(diag.get("PE_rel", [])))
+        n_samples=len(diag.get("PE_rel", [])), days=days)
     ok, notes = _apply_value_threshold(
         ok, notes, T_min_final, -200.0,
         label="T_min_final", op="ge", units="C")
@@ -1465,7 +1465,7 @@ def run_overflow(tc: TestCase, output_dir: Path, days: float
     # default ``pe_rel_final = 0.0`` placeholder above.
     ok, notes = _apply_pe_rel_sign(
         ok, notes, pe_rel_final, label="PE_rel_final",
-        n_samples=len(diag.get("PE_rel", [])))
+        n_samples=len(diag.get("PE_rel", [])), days=days)
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full

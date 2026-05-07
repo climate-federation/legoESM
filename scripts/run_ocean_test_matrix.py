@@ -433,7 +433,7 @@ def _apply_value_threshold(
 
 def _apply_pe_rel_sign(
     ok: bool, notes: str, pe_rel_final: float, *, label: str,
-    n_samples: int | None = None,
+    n_samples: int | None = None, days: float | None = None,
 ) -> tuple[bool, str]:
     """Apply the documented ``pe_rel_final < 0`` sign constraint
     via the centralized value-threshold helper.
@@ -454,13 +454,19 @@ def _apply_pe_rel_sign(
     for measurable PE evolution (lock_exchange/latlon/36x72 at
     0.1 days = 28 steps yielded ``pe_rel_final = 0.0`` exactly,
     failing the strict gate even though the run is healthy).
-    The PHYSICAL contract is "RPE must not INCREASE" → ≤ 0
-    captures it; the strict < 0 was a too-tight reading of
-    the doc that broke quick mode.
+
+    iter-152 (codex iter-151 review MEDIUM-2): days-aware
+    op selection — the documented contract IS strict ``< 0``;
+    we restore it for full mode (days >= 1.0) and only
+    relax to ``≤ 0`` for quick mode where the timestep
+    budget genuinely cannot exercise PE evolution.  This
+    keeps the documented sign-check semantic for production
+    runs while not false-failing quick runs.
     """
+    op = "lt" if (days is not None and days >= 1.0) else "le"
     return _apply_value_threshold(
         ok, notes, pe_rel_final, 0.0,
-        label=label, op="le", n_samples=n_samples,
+        label=label, op=op, n_samples=n_samples,
     )
 
 
@@ -4824,7 +4830,7 @@ def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
     # numerical mixing.
     ok, notes = _apply_pe_rel_sign(
         ok, notes, pe_rel_final, label="PE_rel_final",
-        n_samples=len(diag.get("PE_rel", [])))
+        n_samples=len(diag.get("PE_rel", [])), days=days)
     ok, notes = _apply_value_threshold(
         ok, notes, T_min_final, -200.0,
         label="T_min_final", op="ge", units="C")
@@ -5030,7 +5036,7 @@ def run_overflow(tc: TestCase, output_dir: Path, days: float
     # default ``pe_rel_final = 0.0`` placeholder above.
     ok, notes = _apply_pe_rel_sign(
         ok, notes, pe_rel_final, label="PE_rel_final",
-        n_samples=len(diag.get("PE_rel", [])))
+        n_samples=len(diag.get("PE_rel", [])), days=days)
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full

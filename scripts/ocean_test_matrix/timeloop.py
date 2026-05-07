@@ -94,7 +94,7 @@ def _apply_value_threshold(
 
 def _apply_pe_rel_sign(
     ok: bool, notes: str, pe_rel_final: float, *, label: str,
-    n_samples: int | None = None,
+    n_samples: int | None = None, days: float | None = None,
 ) -> tuple[bool, str]:
     """Apply the documented ``pe_rel_final < 0`` sign
     constraint (iter-128 codex iter-127-followup MEDIUM-2).
@@ -110,10 +110,15 @@ def _apply_pe_rel_sign(
     ``op="lt" → op="le"`` loosening as monolithic; the strict
     gate broke quick mode where 28-30 timesteps weren't enough
     for measurable PE evolution.
+
+    iter-152 (codex iter-151 review MEDIUM-2): days-aware op
+    selection — strict ``< 0`` for full mode, ``≤ 0`` for
+    quick (matches monolithic).
     """
+    op = "lt" if (days is not None and days >= 1.0) else "le"
     return _apply_value_threshold(
         ok, notes, pe_rel_final, 0.0,
-        label=label, op="le", n_samples=n_samples,
+        label=label, op=op, n_samples=n_samples,
     )
 
 

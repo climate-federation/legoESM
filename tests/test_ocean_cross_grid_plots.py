@@ -2331,40 +2331,51 @@ class TestIter123OceanDriftTolerance:
             sys.path.remove(str(scripts_dir))
 
     def test_iter130_monolithic_pe_sign_wrapper_works(self):
-        """iter-130 codex iter-129-followup HIGH-1: behavior
-        test that ``_apply_pe_rel_sign`` actually works through
-        the wrapper chain (would have caught the iter-129
-        TypeError regression).
-
-        iter-138 update: the strict ``op="lt"`` check (FAIL on
-        pe_rel_final = 0.0) was loosened to ``op="le"``
-        (PASS on pe_rel_final ≤ 0) to handle the quick-mode
-        "no time for PE evolution" case.  See
-        ``_apply_pe_rel_sign`` docstring for the iter-138
-        reasoning.
+        """iter-130/iter-138/iter-152 behavior test for
+        ``_apply_pe_rel_sign``.  iter-152 (codex iter-151
+        review MEDIUM-2) made the gate days-aware:
+        * full mode (days >= 1.0): strict ``op="lt"`` (PE_rel = 0
+          FAILS, matches documented contract)
+        * quick mode (days < 1.0 or omitted): ``op="le"`` (PE_rel = 0
+          PASSES, accommodates timestep-budget realities)
         """
         mod = self._import_monolithic_runner()
         # PASS case: pe_rel_final < 0 (RPE decreased).
         ok, _ = mod._apply_pe_rel_sign(
-            True, "", -0.5, label="PE_rel_final", n_samples=10)
+            True, "", -0.5, label="PE_rel_final", n_samples=10,
+            days=2.0)
         assert ok is True
-        # PASS case (post-iter-138): pe_rel_final = 0 (no
-        # measurable change; quick-mode tolerance).
+        # FULL mode (days=2.0): pe_rel_final = 0 must FAIL
+        # (strict < 0 contract).
         ok, notes = mod._apply_pe_rel_sign(
-            True, "", 0.0, label="PE_rel_final", n_samples=10)
+            True, "", 0.0, label="PE_rel_final", n_samples=10,
+            days=2.0)
+        assert ok is False, (
+            "iter-152: full mode (days >= 1.0) must enforce "
+            "strict pe_rel_final < 0.")
+        # QUICK mode (days=0.1): pe_rel_final = 0 must PASS
+        # (timestep budget too tight for measurable PE evolution).
+        ok, notes = mod._apply_pe_rel_sign(
+            True, "", 0.0, label="PE_rel_final", n_samples=10,
+            days=0.1)
         assert ok is True, (
-            "iter-138: pe_rel_final = 0.0 must PASS now (quick "
-            "mode may not have time for measurable PE evolution); "
-            "the gate enforces 'RPE did not increase' via op='le'.")
+            "iter-152: quick mode (days < 1.0) must allow "
+            "pe_rel_final = 0 (no time for PE evolution).")
         # FAIL case: pe_rel_final > 0 (RPE INCREASED — spurious
         # PE creation by numerical mixing; physically wrong).
+        # Both full and quick modes should fail this.
         ok, notes = mod._apply_pe_rel_sign(
-            True, "", 0.5, label="PE_rel_final", n_samples=10)
+            True, "", 0.5, label="PE_rel_final", n_samples=10,
+            days=2.0)
         assert ok is False
-        assert ">" in notes  # threshold exceeded
+        ok, notes = mod._apply_pe_rel_sign(
+            True, "", 0.5, label="PE_rel_final", n_samples=10,
+            days=0.1)
+        assert ok is False
         # FAIL case: missing series (n_samples=0).
         ok, notes = mod._apply_pe_rel_sign(
-            True, "", 0.0, label="PE_rel_final", n_samples=0)
+            True, "", 0.0, label="PE_rel_final", n_samples=0,
+            days=2.0)
         assert ok is False
         assert "0 sample" in notes
 
@@ -3199,10 +3210,11 @@ class TestIter123OceanDriftTolerance:
             "grids that DO support model-level drag.")
 
     def test_iter138_pe_rel_sign_uses_le_not_lt(self):
-        """iter-138 (iter-137 FAIL-2): _apply_pe_rel_sign uses
-        op="le" (≤ 0) not op="lt" (< 0) so a quick-mode run
-        with no measurable PE evolution PASSes.  The strict
-        op="lt" was failing lock_exchange/latlon at 0.1 days.
+        """iter-138 (iter-137 FAIL-2) + iter-152 update:
+        _apply_pe_rel_sign now uses op="lt" if days >= 1 else "le"
+        (days-aware per codex iter-151 review MEDIUM-2 — restore
+        strict < 0 semantic for full mode while keeping quick
+        mode PE-evolution-budget-tolerant).
         """
         from pathlib import Path
         for rel in (
@@ -3239,10 +3251,112 @@ class TestIter123OceanDriftTolerance:
                 f"a single explicit 'label=label, op=...' kwarg "
                 f"line (the actual call to _apply_value_threshold).")
             for line in actual_op_lines:
-                assert 'op="le"' in line, (
-                    f"iter-138: {rel}: _apply_pe_rel_sign call "
-                    f"line must use op='le' post-iter-138; "
+                # iter-152: op is now ``op=op`` (a variable) where
+                # ``op`` is selected days-aware as ``"lt" if days >= 1.0
+                # else "le"``.  Either ``op=op`` or the literal
+                # ``op="le"`` (legacy) is acceptable.
+                assert ('op=op' in line or 'op="le"' in line
+                        or 'op="lt"' in line), (
+                    f"iter-138/iter-152: {rel}: _apply_pe_rel_sign "
+                    f"call line must use op='lt'/'le'/op variable; "
                     f"got: {line.strip()!r}")
+
+    def test_iter152_pe_sign_days_aware(self):
+        """iter-152 (codex iter-151 review MEDIUM-2): the PE-sign
+        gate is days-aware — strict ``op="lt"`` for full mode,
+        ``op="le"`` for quick mode.  Verify the wrapper code
+        contains the days-aware op selection logic.
+        """
+        from pathlib import Path
+        for rel in (
+            "scripts/run_ocean_test_matrix.py",
+            "scripts/ocean_test_matrix/timeloop.py",
+        ):
+            text = (Path(__file__).resolve().parent.parent
+                    / rel).read_text()
+            import re
+            m = re.search(
+                r"def _apply_pe_rel_sign\b.*?(?=\ndef \w)",
+                text, re.DOTALL,
+            )
+            assert m is not None
+            body = m.group(0)
+            code_lines = [
+                line for line in body.splitlines()
+                if not line.lstrip().startswith("#")
+            ]
+            code_only = "\n".join(code_lines)
+            # Must have days-aware op selection.
+            assert ('days is not None and days >= 1.0' in code_only
+                    or 'op = "lt" if' in code_only), (
+                f"iter-152: {rel}: _apply_pe_rel_sign must have "
+                f"days-aware op selection (op='lt' for "
+                f"full mode, op='le' for quick).")
+            # Must accept ``days`` kwarg.
+            sig_match = re.search(
+                r"def _apply_pe_rel_sign\([^)]*days[^)]*\)",
+                code_only, re.DOTALL,
+            )
+            assert sig_match is not None, (
+                f"iter-152: {rel}: _apply_pe_rel_sign signature "
+                f"must include ``days`` kwarg.")
+
+    def test_iter152_compute_relative_drift_nan_in_middle_fails(self):
+        """iter-152 (codex iter-151 review HIGH-1): a NaN anywhere
+        in the conservation series must surface as NaN drift, not
+        silently pass via the ``arr[0]`` and ``arr[-1]`` only check.
+        """
+        from legoesm.diagnostics import compute_relative_drift
+        import math
+        # NaN in the middle, finite at endpoints — pre-iter-152
+        # this would yield drift=0.0.
+        result = compute_relative_drift([1.0, float("nan"), 1.0])
+        assert math.isnan(result), (
+            "iter-152: NaN in middle of series must surface as "
+            "NaN result (not silently pass via endpoints-only check).")
+        # Inf in middle: same behavior expected.
+        result = compute_relative_drift([1.0, float("inf"), 1.0])
+        assert math.isnan(result) or math.isinf(result), (
+            "iter-152: Inf in middle of series must surface as "
+            "non-finite result.")
+        # Healthy series still works.
+        result = compute_relative_drift([1.0, 1.0001, 1.0002])
+        assert math.isclose(result, 2e-4, rel_tol=1e-3)
+
+    def test_iter152_apply_drift_tolerance_rejects_nan_tol(self):
+        """iter-152 (codex iter-151 review MEDIUM-3): tol=NaN must
+        raise ValueError, not silently pass via NaN-comparison.
+        """
+        from legoesm.diagnostics import apply_drift_tolerance
+        import pytest
+        with pytest.raises(ValueError, match="tol must be finite"):
+            apply_drift_tolerance(
+                ok=True, notes="", drift=0.5, tol=float("nan"),
+                label="test")
+        with pytest.raises(ValueError, match="tol must be finite"):
+            apply_drift_tolerance(
+                ok=True, notes="", drift=0.5, tol=float("inf"),
+                label="test")
+        # Sanity: finite tol still works.
+        ok, _ = apply_drift_tolerance(
+            ok=True, notes="", drift=0.5, tol=1.0, label="test")
+        assert ok is True
+
+    def test_iter152_apply_value_threshold_rejects_nan_threshold(self):
+        """iter-152 (codex iter-151 review MEDIUM-3): threshold=NaN
+        must raise ValueError on the value-threshold helper too.
+        """
+        from legoesm.diagnostics import apply_value_threshold
+        import pytest
+        with pytest.raises(ValueError, match="threshold must be finite"):
+            apply_value_threshold(
+                ok=True, notes="", value=0.5, threshold=float("nan"),
+                label="test", op="lt")
+        # Sanity: finite threshold still works.
+        ok, _ = apply_value_threshold(
+            ok=True, notes="", value=-0.5, threshold=0.0,
+            label="test", op="lt")
+        assert ok is True
 
     def test_iter128_geostrophic_doc_documents_tighter_gate(self):
         """iter-128 codex iter-127-followup MEDIUM-1: the doc

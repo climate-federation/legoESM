@@ -224,29 +224,41 @@ class TestNonFiniteValueInputs:
     diagnostic" signal rather than a plausible-looking number.
     """
 
-    def test_inf_endpoint_returns_inf(self):
-        # CFL violation produces inf at last sample.
+    def test_inf_endpoint_returns_nan(self):
+        # iter-152 (codex iter-151 review HIGH-1): the all-finite
+        # check now returns NaN for ANY non-finite sample
+        # (including endpoints).  Pre-iter-152 this returned
+        # ``inf``; the contract was tightened so the downstream
+        # gate's ``not isfinite(drift)`` branch handles both
+        # NaN and Inf uniformly via a single "non-finite" path.
         result = compute_relative_drift([1.0e19, float("inf")])
-        assert result == float("inf")
+        assert result != result  # NaN (was inf pre-iter-152)
 
     def test_nan_endpoint_returns_nan(self):
         result = compute_relative_drift([1.0e19, float("nan")])
         assert result != result  # NaN != NaN
 
     def test_nan_baseline_returns_nan(self):
-        # iter-90 codex MEDIUM-3: NaN baseline propagates because
-        # max(NaN, 1.0) returns NaN under Python's stdlib max.
-        # Documenting this contract; not a regression vs legacy.
+        # iter-90 codex MEDIUM-3 + iter-152 update: NaN baseline
+        # surfaces as NaN.  Pre-iter-152 propagated via
+        # ``max(NaN, 1.0)`` → NaN; post-iter-152 the all-finite
+        # check fails first and returns NaN explicitly.  Same
+        # observable result.
         result = compute_relative_drift([float("nan"), 1.0e19])
         assert result != result  # NaN
 
     def test_inf_in_middle_does_not_affect_scalar(self):
-        # The scalar API only reads [0] and [-1] — middle inf is
-        # ignored.  Pins the "endpoints only" contract.
+        # iter-152 (codex iter-151 review HIGH-1): renamed test
+        # contract — pre-iter-152 the scalar API only read
+        # ``arr[0]`` and ``arr[-1]``, so a middle Inf was IGNORED,
+        # letting a transient blowup silently PASS the drift gate
+        # (the codex finding).  Post-iter-152 the helper checks
+        # ``np.all(np.isfinite(arr))`` and returns NaN, surfacing
+        # the transient.  Old test name kept for git-blame-ability.
         result = compute_relative_drift(
             [1.0e19, float("inf"), 1.01e19]
         )
-        assert result == pytest.approx(1.0e-2)
+        assert result != result  # NaN (was 1.0e-2 pre-iter-152)
 
     def test_inf_in_middle_does_affect_series(self):
         # The series API computes per-step drift, so an inf in the

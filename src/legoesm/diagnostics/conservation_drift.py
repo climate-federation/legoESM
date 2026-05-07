@@ -126,6 +126,15 @@ def compute_relative_drift(
     if len(values) < 2:
         return 0.0
     arr = np.asarray(values, dtype=np.float64)
+    # iter-152 (codex iter-151 review HIGH-1): if ANY sample
+    # in the series is non-finite (NaN or Inf), surface it as a
+    # NaN result so the downstream gate fails explicitly.  Pre-
+    # iter-152 the function only inspected arr[0] and arr[-1],
+    # so a series like ``[1.0, NaN, 1.0]`` would yield drift=0.0
+    # and PASS the gate even though the simulation went transiently
+    # unstable mid-run.  This was a real silent-pass failure mode.
+    if not np.all(np.isfinite(arr)):
+        return float("nan")
     denom = max(abs(float(arr[0])), float(min_baseline))
     return float(abs(arr[-1] - arr[0]) / denom)
 
@@ -249,6 +258,17 @@ def apply_drift_tolerance(
     (ok, notes): tuple of updated values.
     """
     import numpy as _np
+    # iter-152 (codex iter-151 review MEDIUM-3): validate the
+    # tolerance itself is finite — otherwise ``drift > NaN`` is
+    # always False and a finite-but-broken drift would silently
+    # PASS.  Raise on tol=NaN/Inf rather than fail-quietly so
+    # callers get a clear ``ValueError`` traceback at the
+    # invocation site.
+    if not _np.isfinite(tol):
+        raise ValueError(
+            f"apply_drift_tolerance: tol must be finite, got "
+            f"{tol!r} (label={label!r})"
+        )
     if ok and n_samples is not None and n_samples < 2:
         ok = False
         notes += (
@@ -324,6 +344,15 @@ def apply_value_threshold(
     (ok, notes): tuple of updated values.
     """
     import numpy as _np
+    # iter-152 (codex iter-151 review MEDIUM-3): validate the
+    # threshold itself is finite — otherwise comparisons against
+    # NaN/Inf threshold are always False and a finite-but-broken
+    # value would silently PASS.  Raise rather than fail-quietly.
+    if not _np.isfinite(threshold):
+        raise ValueError(
+            f"apply_value_threshold: threshold must be finite, got "
+            f"{threshold!r} (label={label!r}, op={op!r})"
+        )
     if not ok:
         return ok, notes
     if n_samples is not None and n_samples < 2:
