@@ -2118,6 +2118,50 @@ class TestHeldSuarezDissipationImbalance:
             f"CROSS_GRID_COMPARISON_REPORT.md and this test."
         )
 
+    def test_laplacian_visc_cube_v2_calibration(self):
+        """iter 33-39: ``_laplacian_visc_cube_v2`` returns the
+        empirically calibrated A_h values at C36, C48, C72 — the 3
+        resolutions tested in iter-33 (C72), iter-25 (C48), and
+        iter-19/24 (C36).  These values are LOAD-BEARING for the
+        production setting recommendations in ``FV3_3D.md``.
+        """
+        # The calibration table is the iter-37 finding.
+        for n, expected in [(36, 4.08e+06), (48, 6.12e+06), (72, 2.04e+07)]:
+            actual = M._laplacian_visc_cube_v2(n)
+            assert abs(actual - expected) < 1e3, (
+                f"iter-37/39 calibration: _laplacian_visc_cube_v2({n}) "
+                f"expected {expected:.3e}, got {actual:.3e}.  This is "
+                f"the empirically calibrated value from FV3_3D.md "
+                f"iter 33-37.  Updating it requires retesting."
+            )
+
+    def test_laplacian_visc_cube_v2_extrapolation_monotonic(self):
+        """iter 39: the v2 extrapolation must be MONOTONICALLY
+        INCREASING with n in the C36-C192 range.  This is the
+        opposite trend from v1 (which has A_h ∝ 1/n).
+        """
+        ns = [24, 36, 48, 60, 72, 96, 144, 192]
+        v2_values = [M._laplacian_visc_cube_v2(n) for n in ns]
+        for i in range(1, len(ns)):
+            assert v2_values[i] > v2_values[i - 1], (
+                f"v2 calibration must be monotonic in n.  At n={ns[i-1]} "
+                f"got {v2_values[i-1]:.3e}; at n={ns[i]} got "
+                f"{v2_values[i]:.3e}."
+            )
+
+    def test_laplacian_visc_cube_v2_extrapolation_powerlaw(self):
+        """iter 39: the v2 log-linear extrapolation should produce
+        ``A_h ∝ n^2.32`` between C36 and C72.  Pin the slope.
+        """
+        import math
+        a36 = M._laplacian_visc_cube_v2(36)
+        a72 = M._laplacian_visc_cube_v2(72)
+        slope = math.log10(a72 / a36) / math.log10(72.0 / 36.0)
+        assert abs(slope - 2.322) < 0.01, (
+            f"iter 39 extrapolation slope: expected ~2.322 (i.e. "
+            f"A_h ~ n^2.322), got {slope:.4f}.  See FV3_3D.md iter 39."
+        )
+
     def test_cube_has_strict_superset_of_latlon_dissipation(self):
         """Cube uses 4 dissipation terms; latlon uses 1.
 
