@@ -192,8 +192,29 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # discretisation.  Our existing split formulation cancels in
         # continuum but not at panel boundaries where halo
         # interpolation amplifies via the A-L Cartesian matrix.
-        # FV3_3D iter 4. Default OFF preserves bit-for-bit existing
-        # 3D atmospheric behaviour.
+        # FV3_3D iter 4 found that wiring this into RK3 produces a
+        # CFL-incompatible scheme (max\|v\| 13× baseline by day 10,
+        # NaN by day 30) because the cross-product PGF at C-grid
+        # faces (projected to corners) is not in discrete balance
+        # with the rotational ζ × v term at corners with the A-L
+        # gradient.  The Lin PGF requires forward-backward time
+        # stepping (FV3's native scheme) to be stable.  Currently
+        # INERT — flag retained for the future forward-backward
+        # iteration.
+    div_damp_dddmp: float = 0.0
+        # FV3-faithful adaptive Smagorinsky-style divergence damping
+        # coefficient.  Faithful port of FV3 sw_core.F90:1720 formula
+        # ``damp = da_min_c * max(d2_bg, min(0.20, dddmp * abs(div)))``
+        # where ``d2_bg = div_damp_coeff / da_min_c`` is the
+        # dimensionless background coefficient.  When ``dddmp > 0``,
+        # divergence damping becomes ADAPTIVE: stronger where local
+        # divergence is large (e.g., spurious divergence at panel
+        # boundary cells from halo amplification) and weaker in the
+        # smooth interior.  Default 0.0 preserves the existing
+        # constant-coefficient behaviour.  FV3 default is 0.2; the
+        # iter1009 dual-target SW calibration uses 0.0625 + factor 8
+        # (no Smagorinsky).  Useful range for HS C36 hybrid:
+        # 0.05-0.20 (test before raising).  FV3_3D iter 5.
 
 
 # ==============================================================================
@@ -441,8 +462,33 @@ def fv3_hydrostatic_tendencies(
             ddiv_dx, ddiv_dy_perp = _arakawa_lamb_gradient(
                 div_v, cdgrid, padded=_div_v_pad,
             )
-        du_d_dt = du_d_dt + config.div_damp_coeff * ddiv_dx
-        dv_d_dt = dv_d_dt + config.div_damp_coeff * ddiv_dy_perp
+        # FV3_3D iter 5: optional adaptive Smagorinsky-style damping.
+        # Faithful port of sw_core.F90:1720
+        # ``damp = da_min_c * max(d2_bg, min(0.20, dddmp * abs(div)))``.
+        # When ``dddmp > 0``, the constant ``div_damp_coeff`` is
+        # replaced by a per-cell coefficient that boosts damping at
+        # cells with large |div| (typically the panel-boundary halo-
+        # error cells driving the cube imprint).  Background floor
+        # preserves smooth-interior behaviour.
+        if config.div_damp_dddmp > 0:
+            # Match the SW path's Fortran-faithful formulation in
+            # ``cdgrid_momentum_tendencies`` (operators_cdgrid.py:1732).
+            # ``da_min_c`` is the global minimum corner area
+            # (Fortran ``gridstruct%da_min_c``); broadcast over levels.
+            _da_min_c = jnp.min(cdgrid.area_corner)
+            _d2_bg = config.div_damp_coeff / _da_min_c
+            _div_abs_corner = _interp_center_to_corner(
+                jnp.abs(div_v), cdgrid,
+            )                                                  # (6, n+1, n+1, nlev)
+            _adaptive_coeff = _da_min_c * jnp.maximum(
+                _d2_bg,
+                jnp.minimum(0.20, config.div_damp_dddmp * _div_abs_corner),
+            )                                                  # (6, n+1, n+1, nlev)
+            du_d_dt = du_d_dt + _adaptive_coeff * ddiv_dx
+            dv_d_dt = dv_d_dt + _adaptive_coeff * ddiv_dy_perp
+        else:
+            du_d_dt = du_d_dt + config.div_damp_coeff * ddiv_dx
+            dv_d_dt = dv_d_dt + config.div_damp_coeff * ddiv_dy_perp
 
     # --- 10b. Surface pressure tendency and vertical motion ---
 

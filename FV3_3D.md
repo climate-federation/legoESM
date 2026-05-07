@@ -509,5 +509,92 @@ elimination.  Proposed iter 5 scope:
 This is multi-week work; each iteration of the Ralph loop will tackle
 one self-contained piece.
 
+## Iteration 5 (2026-05-07): FV3 adaptive Smagorinsky divergence damping
+
+### Motivation
+
+iter 4 attempted the FV3 Lin PGF and found it incompatible with RK3.
+The forward-backward port is multi-iteration.  For iter 5, port a
+SMALLER FV3-faithful piece that can wire into the existing RK3 path
+without architecture changes: the **adaptive Smagorinsky-style
+divergence damping** from `sw_core.F90:1720`::
+
+    damp = da_min_c * max(d2_bg, min(0.20, dddmp * abs(div)))
+
+where `d2_bg = div_damp_coeff / da_min_c` is the dimensionless
+background coefficient.  When `dddmp > 0`, divergence damping becomes
+ADAPTIVE: stronger where local |div| is large (the panel-boundary
+halo-error cells suspected to drive cube imprint per iter-2), weaker
+in smooth interiors.
+
+### Implementation
+
+Added `div_damp_dddmp: float = 0.0` field to
+`CDGridPrimitiveEquationConfig`.  Modified the `if config.div_damp_coeff
+> 0` block in `fv3_hydrostatic_tendencies` to compute an adaptive
+per-cell coefficient when `dddmp > 0`, using the Fortran-faithful
+formula above.  Default 0.0 preserves bit-for-bit existing behaviour.
+
+The implementation directly mirrors the SW path's
+`cdgrid_momentum_tendencies` adaptive block (operators_cdgrid.py:1732
+onwards), adapted for 3D inputs (per-level evaluation).
+
+### Unit tests: `tests/test_div_damp_adaptive.py`
+
+Four tests, all passing:
+
+| test | property | result |
+|------|----------|--------|
+| dddmp = 0 (default) | bit-for-bit identical to constant path | array_equal ✓ |
+| dddmp = 1e-30 | below d2_bg floor → matches constant path | rtol < 1e-12 ✓ |
+| dddmp = 1e10 on perturbed state | adaptive cap (0.20) hits → tendencies differ | |Δdu| > 0.1 * |base| ✓ |
+| dddmp = 0.20 (FV3 default) on HS init | stable for 10 RK3 steps | finite ✓ |
+
+### Held-Suarez C36 hybrid 10-day metric scan
+
+| dddmp | max\|v\| | edge_std | int_std | zonal_std | eddy_std |
+|------:|---------:|---------:|--------:|----------:|---------:|
+|  0    |   0.626  |   0.278  |  0.226  |   0.195   |  0.125   |
+|  0.05 |   0.626  |   0.278  |  0.226  |   0.195   |  0.125   |
+|  0.10 |   0.626  |   0.278  |  0.226  |   0.195   |  0.125   |
+|  0.20 |   0.626  |   0.278  |  0.226  |   0.195   |  0.125   |
+|  200  |   0.624  |   0.278  |  0.225  |   0.195   |  0.125   |
+| 2000  |   NaN    |    —     |    —    |     —     |    —     |
+
+The adaptive damping kicks in only at very large `dddmp`.  Reason: in
+HS C36, typical |div| ~ 1e-5 s⁻¹.  For adaptive to dominate over the
+background floor:
+
+    dddmp * |div| > d2_bg = div_damp_coeff / da_min_c
+    => dddmp > d2_bg / |div| = 3.45e-4 / 1e-5 = 35
+
+So FV3 default `dddmp = 0.20` and SW iter1009-tuned `dddmp = 0.0625`
+NEVER trigger adaptive in the HS regime (verified above).  The
+mechanism would be useful in regimes with strong divergence (frontal
+zones, tropical cyclones, gravity waves).  At `dddmp = 2000` the
+mechanism over-damps and the model NaNs.
+
+### Conclusion
+
+iter 5 ports a **genuinely missing FV3 mechanism** (adaptive
+Smagorinsky div_damp) into the 3D atmospheric path with full
+unit-test coverage.  The mechanism is correctly implemented (verified
+by the dddmp=1e10 test that confirms cap-hitting tendencies differ
+from the constant path).  It does NOT reduce the HS cube imprint
+because typical HS divergence is below the adaptive trigger
+threshold — consistent with the iter-2 conclusion that the cube
+imprint is structural, not driven by extreme divergence spikes.
+
+Net effect on cube imprint: **none** (HS regime).  Net effect on FV3
+fidelity: **positive** — one more FV3 mechanism faithfully ported
+and gated behind a config flag for future use cases (DCMIP TC,
+mountain wave, frontal-zone tests) where divergence is large.
+
+### Direction for next iteration
+
+The cube imprint problem requires the architecture port.  iter 6+
+should start the forward-backward time-stepping skeleton.  See
+iter-4 conclusion for the proposed sub-iteration plan (a)-(e).
+
 
 
