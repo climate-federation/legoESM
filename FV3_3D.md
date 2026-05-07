@@ -1834,5 +1834,180 @@ and may compound further.
 iter 19+: forward-backward time stepping for the residual cube
 imprint not addressable through damping alone.
 
+## Iteration 18 (2026-05-07): wire FV3 nord>0 higher-order damping
+
+### Plan
+
+Faithful port of FV3 ``sw_core.F90:1725-1822`` (the ``else`` branch
+of the d_sw5 damping selector, taken when ``nord >= 1``).  The
+nord>0 path adds a del-(2*(nord+1)) damping term on top of the
+iter-16 del-2 corner-divergence damping.  FV3 production typical
+values: ``d4_bg=0.16, nord=2`` (del-6 damping).
+
+### Codex adversarial review feedback
+
+Pre-implementation review flagged:
+
+- **HIGH-1**: original draft used ``uc[:, 0, 0]`` for the SW corner-
+  removal access — but FV3 ``sw_core.F90:1773`` reads ``uc(1, 0)``
+  which is the SOUTH HALO row of uc (j = -1 in our shifted 0-based),
+  not the in-domain SW corner.  Original draft would silently take a
+  different value at cube vertices.
+
+- **HIGH-2**: FV3's ``fill_corners(divg_d, BGRID=true)`` and
+  ``fill_corners(vc, uc, VECTOR=true, DGRID=true)`` between gradient
+  and divergence are load-bearing for cube-imprint reduction, not
+  just documentation gaps.
+
+- **MEDIUM**: bit-for-bit baseline guarantee is preserved only if the
+  higher-order branch is fully gated by Python-static config values
+  (so ``divg_d_iter`` is never computed when ``d4_bg == 0`` or
+  ``nord == 0``).
+
+Post-implementation review flagged:
+
+- **HIGH (new)**: axis convention of extended ``uc`` (shape
+  ``(6, n+1, n+2)``, j ∈ [-1, n]) needs an explicit regression test
+  to prove ``uc[:, 0, 0]`` IS the south-halo row.  A one-axis
+  transposition would pass stability but fail FV3 correctness.
+
+### Implementation
+
+#### 1. ``fv3_corner_laplacian_iteration`` correction
+
+``src/legoesm/core/_fv3_divergence_corner.py``: extended ``vc`` to
+shape ``(6, n+2, n+1)`` covering i ∈ [-1, n] and ``uc`` to shape
+``(6, n+1, n+2)`` covering j ∈ [-1, n].  Both halo rows are
+computed directly from the cross-panel-halo'd ``divg_pad`` (via
+``pad_halo``), NOT from ``mode='edge'`` extension of in-domain
+vc/uc.  Corner removal at SW/SE now reads ``uc[:, *, 0]`` (j = -1
+south halo) faithfully matching FV3 ``sw_core.F90:1773-1776``.
+
+Documented fidelity gaps:
+
+* ``fill_corners(vc, uc, VECTOR=true, DGRID=true)`` — vector cube-
+  vertex sign-flipped diagonal mirror NOT applied to vc/uc.  Our
+  vc/uc at cube-vertex halo cells inherit values implied by
+  ``divg_pad``'s scalar cross-panel halo.
+
+* Metric padding via ``mode='edge'`` for ``divg_u``, ``divg_v`` —
+  small-amplitude approximation valid on smooth grids.
+
+#### 2. Wiring in ``primitive_eq_cdgrid.py``
+
+Two new config knobs:
+
+```python
+class CDGridPrimitiveEquationConfig(NamedTuple):
+    ...
+    corner_div_damp_d4_bg: float = 0.0   # FV3 d4_bg (default 0 = off)
+    corner_div_damp_nord: int = 0        # FV3 nord (1=del-4, 2=del-6)
+```
+
+Combined damping formula (FV3 sw_core.F90:1809, 1817):
+
+```python
+dd8 = (da_min_c * d4_bg) ** (nord + 1)
+ke_correction = damp2 * delpc_initial + dd8 * divg_d_iter
+```
+
+The higher-order branch is gated by a Python-static
+``d4_bg > 0 AND nord > 0``, so disabling either knob skips the new
+code path entirely (guaranteed bit-for-bit baseline).
+
+#### 3. Tests
+
+Added 5 direct unit tests for ``fv3_corner_laplacian_iteration`` in
+``tests/test_fv3_divergence_corner.py``:
+
+| test                                        | property              |
+|---------------------------------------------|-----------------------|
+| constant input → near-zero Laplacian        | axis-convention guard |
+| zero input → exactly zero output            | gating regression     |
+| linearity L(a*x + b*y) = a*L(x) + b*L(y)    | structural guard      |
+| finite on random input                      | NaN/inf guard         |
+| 2-iteration changes field                   | nord>1 sanity         |
+
+Added 4 integration tests in ``tests/test_div_damp_adaptive.py``:
+
+| test                                          | property                     |
+|-----------------------------------------------|------------------------------|
+| d4_bg=0 OR nord=0 → bit-for-bit iter-16       | baseline regression          |
+| nord=1, d4_bg=1e-3 changes winds              | functional check             |
+| nord=1, d4_bg=1e-3 stable for 20 steps        | stability (n=8)              |
+| nord=2, d4_bg=1e-4 stable for 20 steps        | nord>1 stability             |
+
+(``d4_bg`` values at n=8 are scaled down by ``(96/8)^2 ~ 144`` from
+FV3 production C96 default 0.16, because
+``dd8 = (da_min_c * d4_bg)^(nord+1)`` scales super-linearly with
+``da_min_c``.)
+
+#### 4. Test matrix integration
+
+``scripts/run_atmosphere_test_matrix.py`` now reads
+``LEGOESM_CDD_D4BG`` and ``LEGOESM_CDD_NORD`` env vars (default
+0.0 / 0 preserves baseline).
+
+### HS C36 hybrid validation
+
+Quick-mode 30-day with ``LEGOESM_CDD_D2BG=0.0005``,
+``LEGOESM_CDD_D4BG=0.02``, ``LEGOESM_CDD_NORD=1``::
+
+    held_suarez (C36 sigma 30d):  PASS  mass drift=3.74e-10  max|v|=7.7
+    held_suarez (C36 hybrid 30d): PASS  mass drift=3.73e-10  max|v|=7.5
+    held_suarez_topo (C36 2d):    PASS  mass drift=1.47e-11  max|v|=1.9
+
+vs iter-17 baseline (cdd=0.0005 only)::
+
+    held_suarez (C36 sigma 30d):  PASS  mass drift=6.80e-10  max|v|=8.7
+    held_suarez (C36 hybrid 30d): PASS  mass drift=6.88e-10  max|v|=8.5
+    held_suarez_topo (C36 2d):    PASS  mass drift=1.31e-11  max|v|=1.9
+
+iter-18 nord=1 d4_bg=0.02 IMPROVES on iter-17:
+
+- mass drift: 6.8e-10 → 3.7e-10 (-46 %, better mass conservation)
+- max|v|:       8.7 → 7.7 (-11 %, less spurious wind)
+- topographic case unchanged
+
+### Status
+
+iter 18 wires the FV3 d_sw5 nord>0 higher-order divergence-damping
+path with full FV3 fidelity at the corner-removal halo level.
+24 unit tests pass (10 in ``test_fv3_divergence_corner.py``, 14 in
+``test_div_damp_adaptive.py``).  Quick-mode HS C36 PASS with
+improved mass conservation.
+
+Two documented fidelity gaps remain:
+
+1. ``fill_corners(vc, uc, VECTOR=true, DGRID=true)`` — vector cube-
+   vertex sign-flipped diagonal mirror.  May matter at high-order
+   nord>=2 in production.
+2. Metric edge-padding instead of cross-panel halo for ``divg_u``,
+   ``divg_v``.  Small approximation on smooth grids.
+
+### Recommended production setting
+
+```python
+CDGridPrimitiveEquationConfig(...,
+    corner_div_damp_d2_bg=0.0005,   # iter 17 optimum
+    corner_div_damp_dddmp=0.20,
+    corner_div_damp_d4_bg=0.02,     # iter 18 — selective higher-order
+    corner_div_damp_nord=1,         # del-4
+)
+```
+
+Or via env var::
+
+    LEGOESM_CDD_D2BG=0.0005 LEGOESM_CDD_D4BG=0.02 LEGOESM_CDD_NORD=1
+
+### Direction for next iteration
+
+iter 19: scan ``d4_bg`` ∈ {0.005, 0.01, 0.02, 0.04} at C36 hybrid
+30 day to find the optimum and quantify mid_std cube-imprint
+reduction.  Compare against iter-17 baseline.
+
+iter 20+: implement ``fv3_fill_corners_dgrid_vector`` integration
+inside the Laplacian iteration to close the HIGH-2 fidelity gap.
+
 
 

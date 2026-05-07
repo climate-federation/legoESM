@@ -279,6 +279,34 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # Companion Smagorinsky coefficient for ``corner_div_damp_d2_bg``.
         # Faithful FV3 default is 0.20 (sw_core.F90).  Active only
         # when ``corner_div_damp_d2_bg > 0``.
+    corner_div_damp_d4_bg: float = 0.0
+        # FV3-faithful HIGHER-ORDER corner-divergence damping
+        # coefficient (FV3 ``d4_bg``, sw_core.F90:1809-1817).  When
+        # > 0 AND ``corner_div_damp_nord > 0``, the iter-16 del-2
+        # corner-divergence damping is supplemented with a del-
+        # ``(2*(nord+1))`` term:
+        #
+        #   delpc = corner divergence (B-grid) at full-step
+        #   divg_d = (Laplacian)^nord(delpc)
+        #   damp2 = da_min_c * max(d2_bg, min(0.20, dddmp*|delpc|*dt))
+        #   dd8   = (da_min_c * d4_bg)^(nord+1)
+        #   vort  = damp2 * delpc + dd8 * divg_d
+        #   du   -= grad(vort)
+        #
+        # The Laplacian iteration is taken at the corner-staggered
+        # B-grid, faithful to FV3's d_sw5 inner-loop sequence
+        # (sw_core.F90:1747-1769): take gradient of divg_d to face
+        # midpoints, take divergence back to corners, with
+        # corner-removal at sw/se/ne/nw at each iteration.
+        # FV3 production typical values: d4_bg=0.16, nord=2 (del-6
+        # damping).  Default 0.0 + nord=0 preserves the iter-16
+        # del-2-only behaviour.
+    corner_div_damp_nord: int = 0
+        # Order of the higher-order corner-divergence damping
+        # iteration.  0 = del-2 only (iter-16 behaviour);
+        # 1 = del-4 (one Laplacian iteration);
+        # 2 = del-6 (two Laplacian iterations, FV3 d_sw5 default).
+        # Active only when ``corner_div_damp_d4_bg > 0``.
 
 
 # ==============================================================================
@@ -614,9 +642,52 @@ def fv3_hydrostatic_tendencies(
             ),
         )                                                  # (6, n+1, n+1, nlev)
 
-        # Step 3: ke-correction = damp * delpc.  This is the term
-        # FV3 adds to ``ke(i, j)`` at corners.
-        _ke_correction = _damp_corner * delpc              # (6, n+1, n+1, nlev)
+        # FV3_3D iter 18: optional higher-order del-(2*(nord+1))
+        # damping (FV3 d_sw5 ``nord > 0`` path, sw_core.F90:1725-1822).
+        # The corner-staggered ``delpc`` is iterated through a
+        # B-grid Laplacian operator ``nord`` times, then mixed back
+        # into the ke-correction with coefficient ``dd8``.
+        #
+        # FV3 formula (sw_core.F90:1809, 1817):
+        #   dd8       = (da_min_c * d4_bg) ** (nord + 1)
+        #   damp2     = da_min_c * max(d2_bg, min(0.20, dddmp * vort_smag))
+        #   ke_corr   = damp2 * delpc_initial + dd8 * divg_d_iterated
+        #
+        # Bit-for-bit baseline guarantee: this branch is gated by a
+        # Python-static ``and`` of two config knobs, so when EITHER
+        # ``corner_div_damp_d4_bg == 0`` OR ``corner_div_damp_nord == 0``
+        # the iter-16 del-2-only path runs unchanged.  No new code is
+        # traced when the higher-order path is disabled.
+        if config.corner_div_damp_d4_bg > 0.0 and config.corner_div_damp_nord > 0:
+            from legoesm.core._fv3_divergence_corner import (
+                fv3_corner_laplacian_iteration,
+            )
+            # Lift the per-level vmapped helper outside the loop so
+            # the same compiled XLA primitive is reused across the
+            # ``nord`` Python iterations.
+            def _lap_per_level(field_3d):
+                return jax.vmap(
+                    lambda lev: fv3_corner_laplacian_iteration(lev, cdgrid),
+                    in_axes=-1, out_axes=-1,
+                )(field_3d)
+
+            _delpc_initial = delpc                          # FV3 ``delpc`` saved
+            _divg_d_iter = delpc
+            for _ in range(config.corner_div_damp_nord):
+                _divg_d_iter = _lap_per_level(_divg_d_iter)
+            # ``dd8`` follows the FV3 formulation exactly.  Cast through
+            # delpc's dtype so that f32 / f64 paths stay consistent.
+            _dd8 = jnp.asarray(
+                (_da_min_c * config.corner_div_damp_d4_bg)
+                ** (config.corner_div_damp_nord + 1),
+                dtype=delpc.dtype,
+            )
+            _ke_correction = (
+                _damp_corner * _delpc_initial + _dd8 * _divg_d_iter
+            )                                               # (6, n+1, n+1, nlev)
+        else:
+            # iter-16 del-2 only path.  Bit-for-bit unchanged.
+            _ke_correction = _damp_corner * delpc          # (6, n+1, n+1, nlev)
 
         # Step 4: gradient at D-grid corners.  FV3 normal D-grid uses
         # ``u(i, j) -= dt * (ke(i+1, j) - ke(i, j)) * rdxc`` — a

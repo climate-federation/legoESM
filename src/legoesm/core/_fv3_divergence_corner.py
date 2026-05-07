@@ -453,3 +453,159 @@ def fv3_divergence_corner_3d(
         lambda args: fv3_divergence_corner_2d(args[0], args[1], cdgrid),
     )((u_t, v_t))
     return jnp.moveaxis(divg_t, 0, -1)
+
+
+def fv3_corner_laplacian_iteration(
+    divg_d: jnp.ndarray,
+    cdgrid: CubedSphereCDGrid,
+) -> jnp.ndarray:
+    """Apply one Laplacian iteration on a B-grid corner-staggered field.
+
+    Faithful port of FV3 ``sw_core.F90:1746-1782`` inner block of the
+    higher-order ``nord > 0`` divergence-damping path.  One iteration
+    (``do n=1, nord`` body) on the corner-staggered ``divg_d`` field.
+
+    The Fortran sequence (sw_core.F90:1748-1785, 1-based)::
+
+        do j=js-nt,je+1+nt
+           do i=is-1-nt,ie+1+nt
+              vc(i,j) = (divg_d(i+1,j)-divg_d(i,j))*divg_u(i,j)   ! x-flux
+           enddo
+        enddo
+        do j=js-1-nt,je+1+nt
+           do i=is-nt,ie+1+nt
+              uc(i,j) = (divg_d(i,j+1)-divg_d(i,j))*divg_v(i,j)   ! y-flux
+           enddo
+        enddo
+        do j=js-nt,je+1+nt
+           do i=is-nt,ie+1+nt
+              divg_d(i,j) = uc(i,j-1) - uc(i,j) + vc(i-1,j) - vc(i,j)
+           enddo
+        enddo
+        ! Cube-vertex corner-removal (sw_core.F90:1773-1776):
+        if (sw_corner) divg_d(1,    1)   -= uc(1,    0)     ! uc south halo
+        if (se_corner) divg_d(npx,  1)   -= uc(npx,  0)     ! uc south halo
+        if (ne_corner) divg_d(npx,npy)   += uc(npx,npy)     ! uc interior NE
+        if (nw_corner) divg_d(1,  npy)   += uc(1,  npy)     ! uc interior NW
+        divg_d(:,:) = divg_d(:,:) * rarea_c(:,:)
+
+    Parameters
+    ----------
+    divg_d : jnp.ndarray, shape ``(6, n+1, n+1)``
+        Corner-staggered divergence (or its iterated Laplacian).
+    cdgrid : CubedSphereCDGrid
+
+    Returns
+    -------
+    lap_divg : jnp.ndarray, same shape — Laplacian of the input at
+        corner staggering.
+
+    Notes
+    -----
+    Halo provenance:
+
+    * ``divg_d`` is padded with the legoESM halo (``pad_halo``) to
+      provide cross-panel values at i = -1 / i = n+1 / j = -1 / j = n+1
+      (in our 0-based shifted convention).  The default
+      ``set_corner_fill_mode = "avg"`` (iter-7) handles the cube-vertex
+      halo of the scalar.
+
+    * ``vc`` is computed at i ∈ [-1, n] (shape ``(6, n+2, n+1)``) so
+      that the divergence at the WEST corner (i = 0) sees the
+      cross-panel value at i = -1.
+
+    * ``uc`` is computed at j ∈ [-1, n] (shape ``(6, n+1, n+2)``) so
+      that the divergence at the SOUTH corner (j = 0) AND the cube-
+      vertex corner-removal at SW / SE both pick up the cross-panel
+      south-halo value (FV3's ``uc(:, 0)`` row in 1-based).
+
+    Documented fidelity gaps relative to FV3:
+
+    * FV3's ``fill_corners(vc, uc, VECTOR=.true., DGRID=.true.)`` between
+      the gradient and divergence steps (sw_core.F90:1762) is NOT
+      applied to the corner-vertex halo cells of ``vc`` / ``uc``.  Our
+      vc / uc at cube-vertex halo cells inherit the value implied by
+      ``divg_pad``'s scalar cross-panel halo, NOT the FV3 sign-flipped
+      vector diagonal mirror (see ``fv3_fill_corners_dgrid_vector``).
+      For HS-style flow the residual cube-vertex error is small; this
+      gap is acknowledged and may be tightened in a future iteration.
+
+    * FV3 calls ``fill_corners(divg_d, ..., FILL=XDir, BGRID=.true.)``
+      and ``YDir`` separately before each gradient (sw_core.F90:1746,
+      1754) for direction-aware cube-vertex completion.  We use a
+      single ``pad_halo`` with the iter-7 average corner mode; this is
+      direction-agnostic but consistent with the iter-15 / iter-16
+      port philosophy.
+    """
+    n = cdgrid.n
+
+    # Step 1: cross-panel halo of divg_d.  divg_pad shape (6, n+3, n+3).
+    # Padded index 0 = west halo (i = -1 in shifted 0-based); padded
+    # index n+2 = east halo (i = n+1).  Cube-vertex halo follows
+    # ``set_corner_fill_mode`` (default "avg" since iter-7).
+    from legoesm.grids.halo import pad_halo
+    divg_pad = pad_halo(divg_d)                            # (6, n+3, n+3)
+
+    # Step 2: x-flux ``vc(i, j) = (divg_d(i+1, j) - divg_d(i, j)) * divg_u``
+    # at i ∈ [-1, n], j ∈ [0, n] — shape (6, n+2, n+1).
+    # Padded index translation: i (shifted) = -1..n → padded index 0..n+1.
+    # divg_d(i+1) at i = -1..n → padded 1..n+2.
+    # divg_d(i)   at i = -1..n → padded 0..n+1.
+    vc_raw = (
+        divg_pad[:, 1:n + 3, 1:n + 2]   # divg_d(i+1, j), i ∈ [-1, n]
+        - divg_pad[:, 0:n + 2, 1:n + 2]  # divg_d(i,   j)
+    )                                                       # (6, n+2, n+1)
+    # FV3 ``divg_u = dy / dxc`` at u-face.  Our equivalent:
+    # ``dy_edge_x * rdxc``, shape (6, n+1, n) at u-face.  Pad to
+    # (6, n+2, n+1) via edge mode (the metric is geometric and varies
+    # smoothly across panel boundaries; the i = -1 west-halo strip is
+    # well-approximated by the i = 0 interior strip).
+    divg_u = cdgrid.dy_edge_x * cdgrid.rdxc                  # (6, n+1, n)
+    divg_u_pad = jnp.pad(
+        divg_u, [(0, 0), (1, 0), (0, 1)], mode="edge",
+    )                                                       # (6, n+2, n+1)
+    vc = vc_raw * divg_u_pad                                # (6, n+2, n+1)
+
+    # Step 3: y-flux ``uc(i, j) = (divg_d(i, j+1) - divg_d(i, j)) * divg_v``
+    # at i ∈ [0, n], j ∈ [-1, n] — shape (6, n+1, n+2).
+    uc_raw = (
+        divg_pad[:, 1:n + 2, 1:n + 3]   # divg_d(i, j+1), j ∈ [-1, n]
+        - divg_pad[:, 1:n + 2, 0:n + 2]  # divg_d(i, j)
+    )                                                       # (6, n+1, n+2)
+    divg_v = cdgrid.dx_edge_y * cdgrid.rdyc                  # (6, n, n+1)
+    divg_v_pad = jnp.pad(
+        divg_v, [(0, 0), (0, 1), (1, 0)], mode="edge",
+    )                                                       # (6, n+1, n+2)
+    uc = uc_raw * divg_v_pad                                # (6, n+1, n+2)
+
+    # Step 4: divergence of (vc, uc) back at corners.
+    #   divg_d_new(i, j) = uc(i, j-1) - uc(i, j) + vc(i-1, j) - vc(i, j)
+    # In our extended uc (j ∈ [-1, n], padded slice 0..n+1):
+    #   uc(i, j-1) for j ∈ [0, n] → uc[..., 0:n+1]
+    #   uc(i, j)   for j ∈ [0, n] → uc[..., 1:n+2]
+    # In our extended vc (i ∈ [-1, n], padded slice 0..n+1):
+    #   vc(i-1, j) for i ∈ [0, n] → vc[..., 0:n+1, :]
+    #   vc(i,   j) for i ∈ [0, n] → vc[..., 1:n+2, :]
+    lap_divg_raw = (
+        uc[:, :, 0:n + 1]
+        - uc[:, :, 1:n + 2]
+        + vc[:, 0:n + 1, :]
+        - vc[:, 1:n + 2, :]
+    )                                                       # (6, n+1, n+1)
+
+    # Step 5: corner-removal at the 4 cube vertices — FV3 lines
+    # 1773-1776.  In our extended uc (j ∈ [-1, n], shape (n+1, n+2)):
+    #   FV3 uc(:, j=js-1=0) = SW/SE south-halo row → our uc[..., 0]
+    #   FV3 uc(:, j=npy)    = NE/NW interior row  → our uc[..., n+1]
+    sw = uc[:, 0, 0]            # uc at (i = 0,  j = -1) — south halo
+    se = uc[:, n, 0]            # uc at (i = n,  j = -1) — south halo
+    ne = uc[:, n, n + 1]        # uc at (i = n,  j = n)  — interior
+    nw = uc[:, 0, n + 1]        # uc at (i = 0,  j = n)  — interior
+    lap_divg = lap_divg_raw
+    lap_divg = lap_divg.at[:, 0, 0].add(-sw)
+    lap_divg = lap_divg.at[:, n, 0].add(-se)
+    lap_divg = lap_divg.at[:, n, n].add(ne)
+    lap_divg = lap_divg.at[:, 0, n].add(nw)
+
+    # Step 6: normalise by rarea_c (Fortran line 1782).
+    return lap_divg * cdgrid.rarea_c

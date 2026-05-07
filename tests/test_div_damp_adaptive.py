@@ -402,3 +402,190 @@ def test_corner_div_damp_stable_short_run(small_3d_state):
 
     assert jnp.all(jnp.isfinite(s.u_d.data))
     assert jnp.all(jnp.isfinite(s.v_d.data))
+
+
+# --- iter 18: higher-order corner-divergence damping (FV3 d_sw5 nord>0) ---
+
+
+def test_corner_div_damp_d4_disabled_bit_for_bit_with_d2(small_3d_state):
+    """When d4_bg=0 OR nord=0, iter-18 is bit-for-bit identical to iter-16.
+
+    The higher-order block in ``primitive_eq_cdgrid.py`` is gated by a
+    Python-static ``d4_bg > 0 AND nord > 0`` test, so disabling either
+    config knob skips the new code path entirely.  This guards against
+    any accidental fall-through that would change the iter-16 baseline.
+    """
+    grid, cdgrid, coord, _ = small_3d_state
+
+    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        CDGridPrimitiveEquationModel,
+    )
+
+    s = held_suarez_init(grid, coord)
+    s = hydrostatic_to_fv3(s, cdgrid)
+
+    # Baseline: iter-16 del-2 only.
+    cfg_d2_only = CDGridPrimitiveEquationConfig(
+        div_damp_coeff=1e7,
+        corner_div_damp_d2_bg=0.0005,
+        corner_div_damp_dddmp=0.20,
+    )
+    # nord=0: gate is False (d4_bg defaults to 0 too).
+    cfg_nord0 = CDGridPrimitiveEquationConfig(
+        div_damp_coeff=1e7,
+        corner_div_damp_d2_bg=0.0005,
+        corner_div_damp_dddmp=0.20,
+        corner_div_damp_d4_bg=0.16,    # set, but nord=0 disables
+        corner_div_damp_nord=0,
+    )
+    # d4_bg=0: gate is False (nord set, but d4_bg disables).
+    cfg_d4_zero = CDGridPrimitiveEquationConfig(
+        div_damp_coeff=1e7,
+        corner_div_damp_d2_bg=0.0005,
+        corner_div_damp_dddmp=0.20,
+        corner_div_damp_d4_bg=0.0,
+        corner_div_damp_nord=2,
+    )
+
+    m_base = CDGridPrimitiveEquationModel(grid, coord, cfg_d2_only)
+    m_n0 = CDGridPrimitiveEquationModel(grid, coord, cfg_nord0)
+    m_d40 = CDGridPrimitiveEquationModel(grid, coord, cfg_d4_zero)
+
+    s_base, s_n0, s_d40 = s, s, s
+    for _ in range(3):
+        s_base = m_base.step(s_base, 200.0)
+        s_n0 = m_n0.step(s_n0, 200.0)
+        s_d40 = m_d40.step(s_d40, 200.0)
+
+    np.testing.assert_array_equal(
+        np.asarray(s_base.u_d.data), np.asarray(s_n0.u_d.data),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(s_base.u_d.data), np.asarray(s_d40.u_d.data),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(s_base.v_d.data), np.asarray(s_n0.v_d.data),
+    )
+
+
+def test_corner_div_damp_d4_changes_winds(small_3d_state):
+    """Active higher-order damping (nord=1, d4_bg=1e-3) changes winds.
+
+    Note: ``dd8 = (da_min_c * d4_bg)^(nord+1)`` scales super-linearly
+    with ``da_min_c``, which is large at the n=8 test resolution (~1.25e12
+    m^2).  FV3 production uses ``d4_bg=0.16`` at C96 (n=96 with much
+    smaller da_min_c).  At n=8 we need ``d4_bg <= 1e-2`` for stability;
+    the ratio of (da_min @ n=8) to (da_min @ C96) is ~ (96/8)^2 ~ 144,
+    so ``0.16/144`` ~ 1e-3 is the unit-equivalent test coefficient.
+    """
+    grid, cdgrid, coord, _ = small_3d_state
+
+    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        CDGridPrimitiveEquationModel,
+    )
+
+    s = held_suarez_init(grid, coord)
+    s = hydrostatic_to_fv3(s, cdgrid)
+    n = grid.n
+    nlev = s.u_d.data.shape[-1]
+    rng = np.random.default_rng(seed=181)
+    u_p = rng.uniform(-3.0, 3.0, size=(6, n + 1, n + 1, nlev))
+    v_p = rng.uniform(-3.0, 3.0, size=(6, n + 1, n + 1, nlev))
+    s = s._replace(
+        u_d=s.u_d.replace(data=jnp.asarray(u_p)),
+        v_d=s.v_d.replace(data=jnp.asarray(v_p)),
+    )
+
+    cfg_d2_only = CDGridPrimitiveEquationConfig(
+        div_damp_coeff=1e7,
+        corner_div_damp_d2_bg=0.0005,
+        corner_div_damp_dddmp=0.20,
+    )
+    cfg_d4_active = CDGridPrimitiveEquationConfig(
+        div_damp_coeff=1e7,
+        corner_div_damp_d2_bg=0.0005,
+        corner_div_damp_dddmp=0.20,
+        corner_div_damp_d4_bg=1e-3,
+        corner_div_damp_nord=1,
+    )
+
+    m_d2 = CDGridPrimitiveEquationModel(grid, coord, cfg_d2_only)
+    m_d4 = CDGridPrimitiveEquationModel(grid, coord, cfg_d4_active)
+
+    s_d2 = m_d2.step(s, 100.0)
+    s_d4 = m_d4.step(s, 100.0)
+
+    diff = float(jnp.max(jnp.abs(s_d2.u_d.data - s_d4.u_d.data)))
+    base = float(jnp.max(jnp.abs(s_d2.u_d.data)))
+    assert diff > 1e-6 * base, "d4_bg>0 + nord=1 must change winds"
+    assert jnp.all(jnp.isfinite(s_d4.u_d.data))
+    assert jnp.all(jnp.isfinite(s_d4.v_d.data))
+
+
+def test_corner_div_damp_d4_stable_short_run_nord1(small_3d_state):
+    """nord=1, d4_bg=1e-3 is finite for 20 steps from HS init at n=8.
+
+    See ``test_corner_div_damp_d4_changes_winds`` for the rationale on
+    the n=8-equivalent ``d4_bg`` value vs FV3 production C96 default.
+    """
+    grid, cdgrid, coord, _ = small_3d_state
+
+    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        CDGridPrimitiveEquationModel,
+    )
+
+    cfg = CDGridPrimitiveEquationConfig(
+        div_damp_coeff=1e6,
+        corner_div_damp_d2_bg=0.0005,
+        corner_div_damp_dddmp=0.20,
+        corner_div_damp_d4_bg=1e-3,
+        corner_div_damp_nord=1,
+        use_conservation_fixer=False,
+        fix_mass=False,
+    )
+    model = CDGridPrimitiveEquationModel(grid, coord, cfg)
+
+    s = held_suarez_init(grid, coord)
+    s = hydrostatic_to_fv3(s, cdgrid)
+    for _ in range(20):
+        s = model.step(s, 200.0)
+
+    assert jnp.all(jnp.isfinite(s.u_d.data))
+    assert jnp.all(jnp.isfinite(s.v_d.data))
+    assert jnp.all(jnp.isfinite(s.T.data))
+    assert jnp.all(jnp.isfinite(s.p_s.data))
+
+
+def test_corner_div_damp_d4_stable_short_run_nord2(small_3d_state):
+    """nord=2 (FV3 production default for del-6) is finite for 20 steps.
+
+    With ``nord=2`` we have ``dd8 = (da_min_c * d4_bg)^3``, which is
+    even more sensitive to ``da_min_c``.  We use ``d4_bg=1e-4`` at n=8
+    (one decade below the nord=1 setting) to keep the iteration stable.
+    """
+    grid, cdgrid, coord, _ = small_3d_state
+
+    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        CDGridPrimitiveEquationModel,
+    )
+
+    cfg = CDGridPrimitiveEquationConfig(
+        div_damp_coeff=1e6,
+        corner_div_damp_d2_bg=0.0005,
+        corner_div_damp_dddmp=0.20,
+        corner_div_damp_d4_bg=1e-4,
+        corner_div_damp_nord=2,
+        use_conservation_fixer=False,
+        fix_mass=False,
+    )
+    model = CDGridPrimitiveEquationModel(grid, coord, cfg)
+
+    s = held_suarez_init(grid, coord)
+    s = hydrostatic_to_fv3(s, cdgrid)
+    for _ in range(20):
+        s = model.step(s, 200.0)
+
+    assert jnp.all(jnp.isfinite(s.u_d.data))
+    assert jnp.all(jnp.isfinite(s.v_d.data))
+    assert jnp.all(jnp.isfinite(s.T.data))
+    assert jnp.all(jnp.isfinite(s.p_s.data))

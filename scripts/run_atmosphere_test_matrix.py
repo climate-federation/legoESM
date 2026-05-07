@@ -2485,12 +2485,22 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         # (~71 % mid-level cube-imprint reduction at C36 — best result
         # to date).  Use values 0.001-0.005; 0.010 destabilises.
         _cdd_d2_bg_env = float(os.environ.get("LEGOESM_CDD_D2BG", "0.0"))
+        # FV3_3D iter 18: optional higher-order del-(2*(nord+1)) corner-
+        # divergence damping (port of sw_core.F90:1725-1822 nord>0
+        # branch).  Active only when BOTH LEGOESM_CDD_D4BG > 0 AND
+        # LEGOESM_CDD_NORD > 0.  Typical FV3 production: d4_bg=0.16,
+        # nord=2.  At C36 the unit-equivalent values scale down by
+        # (96/36)^2 ~ 7.1, so d4_bg ~ 0.02 for nord=1 / nord=2.
+        _cdd_d4_bg_env = float(os.environ.get("LEGOESM_CDD_D4BG", "0.0"))
+        _cdd_nord_env = int(os.environ.get("LEGOESM_CDD_NORD", "0"))
         config = PrimitiveEquationConfig(
             hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
             div_damp_coeff=dd, A_h=ah,
             damp_v=_damp_v_env, nord_v=2,
             corner_div_damp_d2_bg=_cdd_d2_bg_env,
             corner_div_damp_dddmp=0.20,
+            corner_div_damp_d4_bg=_cdd_d4_bg_env,
+            corner_div_damp_nord=_cdd_nord_env,
             use_conservation_fixer=True, fix_mass=True)
         model = PrimitiveEquationModel(grid, sigma, config)
         if _topo:
