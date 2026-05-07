@@ -11,6 +11,44 @@ visible cube imprint (concentric blobs at face centres bordered by
 red/blue rings at panel boundaries) in u/v wind snapshots from
 Held-Suarez and baroclinic test cases.
 
+## Investigation summary (iter 51 codex meta-review consolidation)
+
+The FV3_3D investigation has produced **two complementary
+mechanisms** — they address different failure modes and their
+contributions should not be confused:
+
+1. **``corner_div_damp_d4_bg=0.02 nord=1``** (iter 18-25): FV3-
+   faithful B-grid corner-divergence damping (port of FV3
+   ``sw_core.F90:1725-1822``).  Reduces cube-vertex artifacts
+   most visibly at C36 (-3 % mid_std at d=30, -7 % at d=60) and
+   C48 (-45 %).  At C72 it ALONE produces NaN at day 13 (iter 26).
+
+2. **``LEGOESM_AH_SCALE`` per-resolution multiplier** (iter 33-46):
+   Laplacian viscosity calibration.  The matrix's
+   ``_laplacian_visc_cube(n) = 0.05 * c_gw * dx`` heuristic
+   underestimates ``A_h`` at C48 (~2x too low) and dramatically at
+   C72 (~10x too low).  iter-32 traced the C72 unstable mode to an
+   INTERIOR synoptic-scale eigenmode that del-2 viscosity damps but
+   del-4 hyperdiff and cube-vertex damping do NOT reach.
+
+**Critical clarification** (per codex iter-51 meta-review): mechanism
+(1) alone is NOT sufficient for C72+ stability.  Mechanism (2)
+alone produces a stable run at C72 even without mechanism (1).
+Both together give the recommended production config, but the
+LOAD-BEARING piece for C72+ is **A_h scaling**, not nord>0.
+
+Early commits (iter 18-25) framed nord>0 as "the FV3_3D fix".  That
+framing is INCOMPLETE — it solves the C36/C48 cube-imprint but
+not the C72 spatial instability.  Iter 33 found A_h scaling is the
+actual stability mechanism.  The current Quick Reference below
+combines both correctly.
+
+**Open generalization gap** (codex iter-51 meta-review): the iter-33
+``10x A_h`` is a CASE CALIBRATION at C72, not a defensible
+production rule across resolutions / timesteps / physics / forecast
+lengths.  The iter-39 ``_laplacian_visc_cube_v2`` is the empirical
+extrapolation but UNTESTED at C96+.
+
 ## Quick Reference (iter 38 summary)
 
 ### Production-recommended setting per resolution
