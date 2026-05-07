@@ -307,6 +307,20 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # 1 = del-4 (one Laplacian iteration);
         # 2 = del-6 (two Laplacian iterations, FV3 d_sw5 default).
         # Active only when ``corner_div_damp_d4_bg > 0``.
+    corner_div_damp_fv3_vector_fill: bool = False
+        # FV3-fully-faithful vector cube-vertex fill
+        # (``fill_corners(vc, uc, VECTOR=true, DGRID=true)``,
+        # sw_core.F90:1762).  Active path uses the wider FV3 D-grid
+        # layout for vc / uc inside ``fv3_corner_laplacian_iteration``.
+        # At ``nord = 1`` (the only currently-supported active path)
+        # the cells fill_corners writes to are NOT read by the
+        # divergence operator at nt = 0, so this flag is mathematically
+        # a no-op and bit-for-bit preserves iter-18 behaviour
+        # (proven by ``test_corner_laplacian_vector_fill_is_noop_for_nord1``
+        # via 5 random seeds + 54 deterministic impulse positions +
+        # nonuniform-metric stress test).  Iter 23+ may extend this
+        # to nord >= 2 where the flag would have functional effect.
+        # Default False — gives bit-for-bit iter-18.
 
 
 # ==============================================================================
@@ -665,9 +679,13 @@ def fv3_hydrostatic_tendencies(
             # Lift the per-level vmapped helper outside the loop so
             # the same compiled XLA primitive is reused across the
             # ``nord`` Python iterations.
+            _vfill = config.corner_div_damp_fv3_vector_fill
+
             def _lap_per_level(field_3d):
                 return jax.vmap(
-                    lambda lev: fv3_corner_laplacian_iteration(lev, cdgrid),
+                    lambda lev: fv3_corner_laplacian_iteration(
+                        lev, cdgrid, apply_vector_corner_fill=_vfill,
+                    ),
                     in_axes=-1, out_axes=-1,
                 )(field_3d)
 

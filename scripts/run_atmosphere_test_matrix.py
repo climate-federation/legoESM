@@ -2493,6 +2493,12 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         # (96/36)^2 ~ 7.1, so d4_bg ~ 0.02 for nord=1 / nord=2.
         _cdd_d4_bg_env = float(os.environ.get("LEGOESM_CDD_D4BG", "0.0"))
         _cdd_nord_env = int(os.environ.get("LEGOESM_CDD_NORD", "0"))
+        # FV3_3D iter 22: optional FV3-fully-faithful vector cube-
+        # vertex fill (sw_core.F90:1762).  At nord=1 it is a
+        # mathematical no-op (bit-for-bit preserves iter-18); flagged
+        # here for users who want to verify FV3 fidelity end-to-end.
+        # Set LEGOESM_CDD_FV3_VFILL=1 to opt in.
+        _cdd_fv3_vfill_env = bool(int(os.environ.get("LEGOESM_CDD_FV3_VFILL", "0")))
         config = PrimitiveEquationConfig(
             hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
             div_damp_coeff=dd, A_h=ah,
@@ -2501,6 +2507,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
             corner_div_damp_dddmp=0.20,
             corner_div_damp_d4_bg=_cdd_d4_bg_env,
             corner_div_damp_nord=_cdd_nord_env,
+            corner_div_damp_fv3_vector_fill=_cdd_fv3_vfill_env,
             use_conservation_fixer=True, fix_mass=True)
         model = PrimitiveEquationModel(grid, sigma, config)
         if _topo:

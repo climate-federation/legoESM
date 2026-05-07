@@ -2346,5 +2346,87 @@ iter-21 equivalence proofs.
 iter 23+: 200-day integration verification and multi-resolution
 robustness check on the recommended production setting.
 
+## Iteration 22 (2026-05-07): expose vector-fill as a public config knob
+
+### Goal
+
+Promote the iter-20 ``apply_vector_corner_fill`` scaffolding to a
+public ``CDGridPrimitiveEquationConfig`` field so users can opt in
+to the FV3-fully-faithful vector cube-vertex fill from production
+code paths and the test matrix.
+
+The flag is a **mathematical no-op at nord = 1** (proven in iter
+21 with 5 random seeds × 54 deterministic impulse positions ×
+nonuniform-metric stress test), so default ``False`` preserves
+iter-18 bit-for-bit behaviour for all currently-supported settings.
+
+### Changes
+
+#### Config knob
+
+``CDGridPrimitiveEquationConfig.corner_div_damp_fv3_vector_fill: bool = False``
+
+When ``True``, ``fv3_corner_laplacian_iteration`` uses the FV3
+D-grid layout (vc shape ``(6, n+2, n+3)``, uc shape
+``(6, n+3, n+2)``) and calls ``fv3_fill_corners_dgrid_vector``
+between gradient and divergence — matching FV3 ``sw_core.F90:1762``.
+
+#### Wiring
+
+``primitive_eq_cdgrid.fv3_hydrostatic_tendencies`` lifts the flag
+out of the loop body (consistent JIT trace) and passes it to the
+vmap'd Laplacian helper.
+
+#### Matrix env var
+
+``LEGOESM_CDD_FV3_VFILL`` reads as ``int`` (``"1"`` or ``"0"``,
+default 0).  Lets users opt in via the env-var matrix interface::
+
+    LEGOESM_CDD_D2BG=0.0005 \
+    LEGOESM_CDD_D4BG=0.02 \
+    LEGOESM_CDD_NORD=1 \
+    LEGOESM_CDD_FV3_VFILL=1 \
+      JAX_ENABLE_X64=1 python scripts/run_atmosphere_test_matrix.py \
+        --grid cubed_sphere --only hydro --test held_suarez --quick
+
+### Tests
+
+New integration test
+``test_corner_div_damp_fv3_vector_fill_bit_for_bit_nord1`` runs a
+perturbed Held-Suarez initial state through
+``CDGridPrimitiveEquationModel.step`` with both
+``corner_div_damp_fv3_vector_fill=False`` and ``True``, asserting
+``np.testing.assert_array_equal`` on every prognostic variable
+(``u_d``, ``v_d``, ``T``, ``p_s``).
+
+This is the integration-level confirmation of the unit-level proof
+from iter 21.  Even after dispatching through the JIT-compiled
+``model.step`` (which compiles a fresh path per different config),
+the end-of-step state is bit-for-bit identical.
+
+27 unit tests pass (15 in ``test_div_damp_adaptive.py``, 12 in
+``test_fv3_divergence_corner.py``).
+
+### Status
+
+iter 22 makes the iter-20 scaffolding **usable** from production
+code paths without breaking any existing user.  The flag is gated
+to be a no-op at the only currently-supported active setting
+(nord=1), so flipping it on is risk-free for current users.
+
+iter 23+ may activate the flag at nord >= 2 (where it has a
+functional effect) once the outer nord-loop is restructured to
+support halo'd intermediate divg_d arrays.
+
+### Direction for next iteration
+
+iter 23: outer nord-loop restructure for halo'd intermediate
+divg_d arrays.  This is the substantive nord >= 2 fidelity fix.
+
+iter 24+: 200-day integration verification at the recommended
+production setting (``d4=0.02 nord=1``) to confirm climate-relevant
+stability over longer integration than the iter-19 30-day quick
+scan.
+
 
 

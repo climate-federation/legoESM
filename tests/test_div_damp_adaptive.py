@@ -556,6 +556,72 @@ def test_corner_div_damp_d4_stable_short_run_nord1(small_3d_state):
     assert jnp.all(jnp.isfinite(s.p_s.data))
 
 
+def test_corner_div_damp_fv3_vector_fill_bit_for_bit_nord1(small_3d_state):
+    """iter-22: ``corner_div_damp_fv3_vector_fill = True`` is a
+    mathematical no-op at nord=1 — bit-for-bit identical end-to-end
+    integration as iter-18 nord=1 (vector fill OFF).
+
+    This is the integration-level confirmation of the unit-level
+    proof in ``test_corner_laplacian_vector_fill_is_noop_for_nord1``.
+    Even after dispatching through ``CDGridPrimitiveEquationModel.step``
+    (which JIT-compiles a fresh path for each different config), the
+    end-of-step state must be bit-for-bit identical.
+    """
+    grid, cdgrid, coord, _ = small_3d_state
+
+    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        CDGridPrimitiveEquationModel,
+    )
+
+    s = held_suarez_init(grid, coord)
+    s = hydrostatic_to_fv3(s, cdgrid)
+    n = grid.n
+    nlev = s.u_d.data.shape[-1]
+    rng = np.random.default_rng(seed=222)
+    u_p = rng.uniform(-3.0, 3.0, size=(6, n + 1, n + 1, nlev))
+    v_p = rng.uniform(-3.0, 3.0, size=(6, n + 1, n + 1, nlev))
+    s = s._replace(
+        u_d=s.u_d.replace(data=jnp.asarray(u_p)),
+        v_d=s.v_d.replace(data=jnp.asarray(v_p)),
+    )
+
+    cfg_no_fill = CDGridPrimitiveEquationConfig(
+        div_damp_coeff=1e7,
+        corner_div_damp_d2_bg=0.0005,
+        corner_div_damp_dddmp=0.20,
+        corner_div_damp_d4_bg=1e-3,
+        corner_div_damp_nord=1,
+        corner_div_damp_fv3_vector_fill=False,
+    )
+    cfg_with_fill = CDGridPrimitiveEquationConfig(
+        div_damp_coeff=1e7,
+        corner_div_damp_d2_bg=0.0005,
+        corner_div_damp_dddmp=0.20,
+        corner_div_damp_d4_bg=1e-3,
+        corner_div_damp_nord=1,
+        corner_div_damp_fv3_vector_fill=True,    # the iter-22 knob
+    )
+
+    m_no = CDGridPrimitiveEquationModel(grid, coord, cfg_no_fill)
+    m_yes = CDGridPrimitiveEquationModel(grid, coord, cfg_with_fill)
+
+    s_no = m_no.step(s, 100.0)
+    s_yes = m_yes.step(s, 100.0)
+
+    np.testing.assert_array_equal(
+        np.asarray(s_no.u_d.data), np.asarray(s_yes.u_d.data),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(s_no.v_d.data), np.asarray(s_yes.v_d.data),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(s_no.T.data), np.asarray(s_yes.T.data),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(s_no.p_s.data), np.asarray(s_yes.p_s.data),
+    )
+
+
 def test_corner_div_damp_d4_stable_short_run_nord2(small_3d_state):
     """nord=2 (FV3 production default for del-6) is finite for 20 steps.
 
