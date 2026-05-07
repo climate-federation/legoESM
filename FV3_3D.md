@@ -40,7 +40,11 @@ CDGridPrimitiveEquationConfig(
 
 Or via env vars (matrix sets ``A_h`` from ``LEGOESM_AH_SCALE``)::
 
-    # C36
+    # iter 43 update: matrix auto-applies the recommended A_h scale
+    # when LEGOESM_AH_SCALE is unset.  Only needed for explicit
+    # override.
+
+    # C36 (iter 18-24, no auto needed since scale=1)
     LEGOESM_CDD_D2BG=0.0005 LEGOESM_CDD_D4BG=0.02 LEGOESM_CDD_NORD=1 \
       python scripts/run_atmosphere_test_matrix.py --grid cubed_sphere
 

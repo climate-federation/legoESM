@@ -2521,31 +2521,32 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         # is INSUFFICIENT at C72+ (iter 33 found C72 NaN at default
         # A_h but stable at 10x).  Default 1.0 preserves iter-17/24
         # C36/C48 behaviour; set LEGOESM_AH_SCALE=10.0 at C72.
-        _ah_scale = float(os.environ.get("LEGOESM_AH_SCALE", "1.0"))
+        # FV3_3D iter 43: auto-apply resolution-dependent A_h scale
+        # when LEGOESM_AH_SCALE is unset, based on iter-33 (C72) and
+        # iter-37 (C48) findings.  Explicit env var overrides.
+        _ah_scale_env = os.environ.get("LEGOESM_AH_SCALE")
+        if _ah_scale_env is None:
+            if n >= 72:
+                _ah_scale = 10.0
+                print(
+                    f"[FV3_3D iter 43 auto] At C{n} auto-applying "
+                    f"LEGOESM_AH_SCALE=10 (iter-33).  Set env var to "
+                    f"override.",
+                    flush=True,
+                )
+            elif n >= 48:
+                _ah_scale = 2.0
+                print(
+                    f"[FV3_3D iter 43 auto] At C{n} auto-applying "
+                    f"LEGOESM_AH_SCALE=2 (iter-37 sweet spot).  Set "
+                    f"env var to override.",
+                    flush=True,
+                )
+            else:
+                _ah_scale = 1.0
+        else:
+            _ah_scale = float(_ah_scale_env)
         ah = ah * _ah_scale
-        # FV3_3D iter 41/42: print a stability or quality tip when
-        # the user has NOT set a sufficient LEGOESM_AH_SCALE.
-        #   C72+: stability tip — default A_h NaNs ~day 13 (iter-33).
-        #   C48:  quality tip — default A_h has 2x worse mid_std
-        #         vs ah_scale=2 (iter-37 sweet spot).
-        if n >= 72 and _ah_scale < 5.0:
-            print(
-                f"[FV3_3D iter 41 stability tip] At C{n} the matrix "
-                f"default A_h={ah:.2e} is INSUFFICIENT and the run "
-                f"will likely NaN around day 13.  Recommended: set "
-                f"LEGOESM_AH_SCALE=10.0 (or use _laplacian_visc_cube_v2(n) "
-                f"directly) per FV3_3D.md iter 33-39.",
-                flush=True,
-            )
-        elif n >= 48 and n < 72 and _ah_scale < 1.5:
-            print(
-                f"[FV3_3D iter 42 quality tip] At C{n} the matrix "
-                f"default A_h={ah:.2e} is stable but produces "
-                f"~2x larger cube imprint than ah_scale=2.  Optional: "
-                f"set LEGOESM_AH_SCALE=2.0 for sweet-spot climatology "
-                f"per FV3_3D.md iter 37.",
-                flush=True,
-            )
         dt = 200.0
         # Iter-15 NOTE on the cubed-sphere upper-atmosphere sponge:
         # The default ``sponge_tau_sec = 3600`` (1 hour) is FAR more
@@ -3019,31 +3020,32 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         # is INSUFFICIENT at C72+ (iter 33 found C72 NaN at default
         # A_h but stable at 10x).  Default 1.0 preserves iter-17/24
         # C36/C48 behaviour; set LEGOESM_AH_SCALE=10.0 at C72.
-        _ah_scale = float(os.environ.get("LEGOESM_AH_SCALE", "1.0"))
+        # FV3_3D iter 43: auto-apply resolution-dependent A_h scale
+        # when LEGOESM_AH_SCALE is unset, based on iter-33 (C72) and
+        # iter-37 (C48) findings.  Explicit env var overrides.
+        _ah_scale_env = os.environ.get("LEGOESM_AH_SCALE")
+        if _ah_scale_env is None:
+            if n >= 72:
+                _ah_scale = 10.0
+                print(
+                    f"[FV3_3D iter 43 auto] At C{n} auto-applying "
+                    f"LEGOESM_AH_SCALE=10 (iter-33).  Set env var to "
+                    f"override.",
+                    flush=True,
+                )
+            elif n >= 48:
+                _ah_scale = 2.0
+                print(
+                    f"[FV3_3D iter 43 auto] At C{n} auto-applying "
+                    f"LEGOESM_AH_SCALE=2 (iter-37 sweet spot).  Set "
+                    f"env var to override.",
+                    flush=True,
+                )
+            else:
+                _ah_scale = 1.0
+        else:
+            _ah_scale = float(_ah_scale_env)
         ah = ah * _ah_scale
-        # FV3_3D iter 41/42: print a stability or quality tip when
-        # the user has NOT set a sufficient LEGOESM_AH_SCALE.
-        #   C72+: stability tip — default A_h NaNs ~day 13 (iter-33).
-        #   C48:  quality tip — default A_h has 2x worse mid_std
-        #         vs ah_scale=2 (iter-37 sweet spot).
-        if n >= 72 and _ah_scale < 5.0:
-            print(
-                f"[FV3_3D iter 41 stability tip] At C{n} the matrix "
-                f"default A_h={ah:.2e} is INSUFFICIENT and the run "
-                f"will likely NaN around day 13.  Recommended: set "
-                f"LEGOESM_AH_SCALE=10.0 (or use _laplacian_visc_cube_v2(n) "
-                f"directly) per FV3_3D.md iter 33-39.",
-                flush=True,
-            )
-        elif n >= 48 and n < 72 and _ah_scale < 1.5:
-            print(
-                f"[FV3_3D iter 42 quality tip] At C{n} the matrix "
-                f"default A_h={ah:.2e} is stable but produces "
-                f"~2x larger cube imprint than ah_scale=2.  Optional: "
-                f"set LEGOESM_AH_SCALE=2.0 for sweet-spot climatology "
-                f"per FV3_3D.md iter 37.",
-                flush=True,
-            )
         dt = 200.0
         config = PrimitiveEquationConfig(
             hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
@@ -3628,31 +3630,32 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         # is INSUFFICIENT at C72+ (iter 33 found C72 NaN at default
         # A_h but stable at 10x).  Default 1.0 preserves iter-17/24
         # C36/C48 behaviour; set LEGOESM_AH_SCALE=10.0 at C72.
-        _ah_scale = float(os.environ.get("LEGOESM_AH_SCALE", "1.0"))
+        # FV3_3D iter 43: auto-apply resolution-dependent A_h scale
+        # when LEGOESM_AH_SCALE is unset, based on iter-33 (C72) and
+        # iter-37 (C48) findings.  Explicit env var overrides.
+        _ah_scale_env = os.environ.get("LEGOESM_AH_SCALE")
+        if _ah_scale_env is None:
+            if n >= 72:
+                _ah_scale = 10.0
+                print(
+                    f"[FV3_3D iter 43 auto] At C{n} auto-applying "
+                    f"LEGOESM_AH_SCALE=10 (iter-33).  Set env var to "
+                    f"override.",
+                    flush=True,
+                )
+            elif n >= 48:
+                _ah_scale = 2.0
+                print(
+                    f"[FV3_3D iter 43 auto] At C{n} auto-applying "
+                    f"LEGOESM_AH_SCALE=2 (iter-37 sweet spot).  Set "
+                    f"env var to override.",
+                    flush=True,
+                )
+            else:
+                _ah_scale = 1.0
+        else:
+            _ah_scale = float(_ah_scale_env)
         ah = ah * _ah_scale
-        # FV3_3D iter 41/42: print a stability or quality tip when
-        # the user has NOT set a sufficient LEGOESM_AH_SCALE.
-        #   C72+: stability tip — default A_h NaNs ~day 13 (iter-33).
-        #   C48:  quality tip — default A_h has 2x worse mid_std
-        #         vs ah_scale=2 (iter-37 sweet spot).
-        if n >= 72 and _ah_scale < 5.0:
-            print(
-                f"[FV3_3D iter 41 stability tip] At C{n} the matrix "
-                f"default A_h={ah:.2e} is INSUFFICIENT and the run "
-                f"will likely NaN around day 13.  Recommended: set "
-                f"LEGOESM_AH_SCALE=10.0 (or use _laplacian_visc_cube_v2(n) "
-                f"directly) per FV3_3D.md iter 33-39.",
-                flush=True,
-            )
-        elif n >= 48 and n < 72 and _ah_scale < 1.5:
-            print(
-                f"[FV3_3D iter 42 quality tip] At C{n} the matrix "
-                f"default A_h={ah:.2e} is stable but produces "
-                f"~2x larger cube imprint than ah_scale=2.  Optional: "
-                f"set LEGOESM_AH_SCALE=2.0 for sweet-spot climatology "
-                f"per FV3_3D.md iter 37.",
-                flush=True,
-            )
         dt = 300.0
         config = PrimitiveEquationConfig(
             hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
