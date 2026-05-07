@@ -2708,6 +2708,175 @@ class TestIter123OceanDriftTolerance:
                 f"iter-131: {rel}: undershoot call must use "
                 f"S_min sample count, got: {undershoot_call!r}")
 
+    # ====== iter-132: codex iter-131-followup HIGH-1 + MEDIUM ======
+
+    def test_iter132_igw_has_l2_and_amplitude_gates_monolithic(self):
+        """iter-132 codex iter-131-followup HIGH-1: monolithic
+        run_inertia_gravity_wave applies the documented L2_err
+        and amplitude_conservation gates.  Pre-iter-132 these
+        were COMPUTED but never gated; an analytically wrong
+        finite IGW run could PASS.
+        """
+        from pathlib import Path
+        text = (Path(__file__).resolve().parent.parent
+                / "scripts" / "run_ocean_test_matrix.py").read_text()
+        import re
+        m = re.search(
+            r"def run_inertia_gravity_wave\b.*?(?=\ndef \w|\nRUNNERS)",
+            text, re.DOTALL,
+        )
+        assert m is not None
+        body = m.group(0)
+        code = "\n".join(
+            line for line in body.splitlines()
+            if not line.lstrip().startswith("#"))
+        # L2 error gate (op="lt" 0.1).
+        assert 'label="IGW L2 vs analytical"' in code
+        assert "l2_err, 0.1" in code
+        # amplitude_ratio range gate (>=0.8 and <=1.2).
+        assert 'label="IGW amplitude_ratio_lower"' in code
+        assert "amplitude_ratio, 0.8" in code
+        assert 'op="ge"' in code
+        assert 'label="IGW amplitude_ratio_upper"' in code
+        assert "amplitude_ratio, 1.2" in code
+
+    def test_iter132_igw_has_l2_and_amplitude_gates_modular(self):
+        """iter-132 codex iter-131-followup HIGH-1: modular
+        IGW mirrors the same gates.
+        """
+        from pathlib import Path
+        text = (Path(__file__).resolve().parent.parent
+                / "scripts" / "ocean_test_matrix"
+                / "experiments.py").read_text()
+        import re
+        m = re.search(
+            r"def run_inertia_gravity_wave\b.*?(?=\ndef \w)",
+            text, re.DOTALL,
+        )
+        assert m is not None
+        body = m.group(0)
+        code = "\n".join(
+            line for line in body.splitlines()
+            if not line.lstrip().startswith("#"))
+        assert 'label="IGW L2 vs analytical"' in code
+        assert "l2_err, 0.1" in code
+        assert 'label="IGW amplitude_ratio_lower"' in code
+        assert 'op="ge"' in code
+        assert 'label="IGW amplitude_ratio_upper"' in code
+
+    def test_iter132_geostrophic_max_speed_gate(self):
+        """iter-132 codex iter-131-followup MEDIUM-1: both
+        monolithic and modular geostrophic_adjustment gate the
+        documented ``max_speed_final < 1.0 m/s``.
+        """
+        from pathlib import Path
+        for rel in (
+            "scripts/run_ocean_test_matrix.py",
+            "scripts/ocean_test_matrix/experiments.py",
+        ):
+            text = (Path(__file__).resolve().parent.parent
+                    / rel).read_text()
+            import re
+            m = re.search(
+                r"def run_geostrophic_adjustment\b"
+                r".*?(?=\ndef \w|\nRUNNERS)",
+                text, re.DOTALL,
+            )
+            assert m is not None
+            body = m.group(0)
+            code = "\n".join(
+                line for line in body.splitlines()
+                if not line.lstrip().startswith("#"))
+            assert 'label="max_speed_final"' in code, (
+                f"iter-132: {rel}: geostrophic must gate "
+                f"max_speed_final.")
+            assert "max_speed_final, 1.0" in code, (
+                f"iter-132: {rel}: max_speed_final tolerance "
+                f"must be 1.0 m/s.")
+
+    def test_iter132_overflow_t_bounds_gate(self):
+        """iter-132 codex iter-131-followup MEDIUM-2: both
+        monolithic and modular run_overflow gate the documented
+        ``Temperature within [-200, 200] C`` bounds.
+        """
+        from pathlib import Path
+        for rel in (
+            "scripts/run_ocean_test_matrix.py",
+            "scripts/ocean_test_matrix/experiments.py",
+        ):
+            text = (Path(__file__).resolve().parent.parent
+                    / rel).read_text()
+            import re
+            m = re.search(
+                r"def run_overflow\b.*?(?=\ndef \w|\nRUNNERS)",
+                text, re.DOTALL,
+            )
+            assert m is not None
+            body = m.group(0)
+            code = "\n".join(
+                line for line in body.splitlines()
+                if not line.lstrip().startswith("#"))
+            assert 'label="T_min_final"' in code
+            assert "T_min_final, -200.0" in code
+            assert 'label="T_max_final"' in code
+            assert "T_max_final, 200.0" in code
+
+    def test_iter132_lock_exchange_t_bounds_gate(self):
+        """iter-132 codex iter-131-followup MEDIUM-2: both
+        monolithic and modular run_lock_exchange gate the
+        documented ``Temperature within [-200, 200] C`` bounds.
+        """
+        from pathlib import Path
+        for rel in (
+            "scripts/run_ocean_test_matrix.py",
+            "scripts/ocean_test_matrix/experiments.py",
+        ):
+            text = (Path(__file__).resolve().parent.parent
+                    / rel).read_text()
+            import re
+            m = re.search(
+                r"def run_lock_exchange\b.*?(?=\ndef \w|\nRUNNERS)",
+                text, re.DOTALL,
+            )
+            assert m is not None
+            body = m.group(0)
+            code = "\n".join(
+                line for line in body.splitlines()
+                if not line.lstrip().startswith("#"))
+            assert 'label="T_min_final"' in code
+            assert "T_min_final, -200.0" in code
+            assert 'label="T_max_final"' in code
+            assert "T_max_final, 200.0" in code
+
+    def test_iter132_phillips_eta_initial_zero_fallback(self):
+        """iter-132 codex iter-131-followup MEDIUM-3: when the
+        first max_eta sample is zero (initial perturbation
+        before forcing kicks in), fall back to the first
+        finite non-zero sample as denominator instead of
+        producing NaN eta_growth.
+        """
+        from pathlib import Path
+        for rel in (
+            "scripts/run_ocean_test_matrix.py",
+            "scripts/ocean_test_matrix/experiments.py",
+        ):
+            text = (Path(__file__).resolve().parent.parent
+                    / rel).read_text()
+            import re
+            m = re.search(
+                r"def run_phillips_two_layer\b"
+                r".*?(?=\ndef \w|\nRUNNERS)",
+                text, re.DOTALL,
+            )
+            assert m is not None
+            body = m.group(0)
+            # Must reference a "finite_nonzero" array selection
+            # or equivalent to find the first valid baseline.
+            assert "finite_nonzero" in body, (
+                f"iter-132: {rel}: Phillips eta_growth must "
+                f"fall back to first finite non-zero max_eta "
+                f"sample as denominator.")
+
     def test_iter128_geostrophic_doc_documents_tighter_gate(self):
         """iter-128 codex iter-127-followup MEDIUM-1: the doc
         threshold of 1e-3 is the loose contract; the runner uses
