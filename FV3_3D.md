@@ -11,13 +11,26 @@ visible cube imprint (concentric blobs at face centres bordered by
 red/blue rings at panel boundaries) in u/v wind snapshots from
 Held-Suarez and baroclinic test cases.
 
-## Quick Reference (iter 29 summary)
+## Quick Reference (iter 38 summary)
 
-### Production-recommended setting (C36 / C48 only)
+### Production-recommended setting per resolution
+
+The full damping configuration combines four iter-18-25 corner-
+divergence damping settings + per-resolution ``A_h`` scaling
+(iter 33-37):
+
+| resolution | LEGOESM_AH_SCALE | recommended A_h | status                              |
+|:----------:|:-----------------|:----------------|:------------------------------------|
+| C36        | ``1.0`` (default)| 4.08e+06        | iter 19/24 production               |
+| C48        | ``2.0`` (iter 37)| 6.12e+06        | sweet-spot scan, mid_std -48 %      |
+| C72        | ``10.0`` (iter 33)| 2.04e+07       | smallest stable scale               |
+| C96+       | UNTESTED         | unknown         | likely needs ≥ 10.0; calibrate first|
 
 ```python
+# iter-38 production config (set A_h per the table above)
 CDGridPrimitiveEquationConfig(
     ...,
+    A_h=...,                             # 4.08e+06 (C36) / 6.12e+06 (C48) / 2.04e+07 (C72)
     corner_div_damp_d2_bg=0.0005,        # iter-17 optimum
     corner_div_damp_dddmp=0.20,          # FV3 default
     corner_div_damp_d4_bg=0.02,          # iter-19/24 — best long-run
@@ -25,27 +38,33 @@ CDGridPrimitiveEquationConfig(
 )
 ```
 
-Or via env vars::
+Or via env vars (matrix sets ``A_h`` from ``LEGOESM_AH_SCALE``)::
 
-    LEGOESM_CDD_D2BG=0.0005 \
-    LEGOESM_CDD_D4BG=0.02 \
-    LEGOESM_CDD_NORD=1
+    # C36
+    LEGOESM_CDD_D2BG=0.0005 LEGOESM_CDD_D4BG=0.02 LEGOESM_CDD_NORD=1 \
+      python scripts/run_atmosphere_test_matrix.py --grid cubed_sphere
 
-For C72+ also set ``LEGOESM_AH_SCALE=10.0`` (iter 33/34) — the
-matrix's ``_laplacian_visc_cube`` default is INSUFFICIENT at C72.
+    # C48
+    LEGOESM_CDD_D2BG=0.0005 LEGOESM_CDD_D4BG=0.02 LEGOESM_CDD_NORD=1 \
+    LEGOESM_AH_SCALE=2.0 \
+      python scripts/run_atmosphere_test_matrix.py --grid cubed_sphere
 
-### What this setting does (and where it works)
+    # C72
+    LEGOESM_CDD_D2BG=0.0005 LEGOESM_CDD_D4BG=0.02 LEGOESM_CDD_NORD=1 \
+    LEGOESM_AH_SCALE=10.0 \
+      python scripts/run_atmosphere_test_matrix.py --grid cubed_sphere
 
-| resolution | result                                            |
-|:----------:|:--------------------------------------------------|
-| C36        | Stable 30 day, mid_std reduced -3% / edge_v -16% / mass_drift -46% vs iter-17 baseline |
-| C36 60 day | mid_std growth-rate reduced -44%; edge_v growth-rate reduced -73%; absolute mid_std -18%, edge_v -38% |
-| C48        | Stable 30 day, mid_std -45% / edge_v -54% / mass_drift -47% — BIGGER benefit than at C36 |
-| **C72**    | **NaN at ~13 days with default A_h** — needs **10x A_h** |
-| C72 (d4 sweep, default A_h)  | NaN at all d4_bg ∈ [0.02, 0.04, 0.08] |
-| C72 (16x hd, default A_h)    | Still NaN at ~13 days — hyperdiff ineffective|
-| C72 (smaller dt, default A_h)| Untested in budget (iter 29 incomplete)      |
-| **C72 with A_h x10** (iter 33) | **STABLE 30d** (mid_std=6.8, ~30x C36 imprint but stable) |
+### What this delivers (HS hybrid 30 day)
+
+| resolution | mid_std | edge_v | mass_drift | comment                          |
+|:----------:|--------:|-------:|-----------:|:---------------------------------|
+| C36 baseline (no d4)       | 0.236 | 0.188 | 6.88e-10 | iter-17 reference            |
+| C36 d4=0.02                | 0.228 | 0.158 | 3.73e-10 | iter-19/24 -3 % mid_std       |
+| C48 default A_h + d4=0.02  | 0.993 | 0.836 | 2.34e-09 | iter-25 stable but cube-imprinted |
+| **C48 ah_x2 + d4=0.02**    | **0.517** | **0.470** | **1.51e-09** | iter-37 sweet spot, -48 % mid_std |
+| C48 ah_x5 + d4=0.02        | 0.166 | 0.141 | 5.36e-10 | over-damps jet (max\|u\|=4.7)    |
+| C72 default A_h + d4=0.02  |  NaN  |  NaN  |   NaN    | iter-26, dies at day 13        |
+| **C72 ah_x10 + d4=0.02**   | **6.815** | **5.775** | **1.54e-09** | iter-33 first stable C72 setting |
 
 ### Key empirical findings
 
@@ -78,20 +97,34 @@ matrix's ``_laplacian_visc_cube`` default is INSUFFICIENT at C72.
 
 ### How this rescues use cases
 
-- **Production HS / baroclinic at C36 / C48**: enable d4=0.02 nord=1.
-- **Production at C72+**: NOT yet supported by this branch.  Fall
-  back to alternatives: lat-lon CGrid, icosahedral, or wait for
-  iter 30+ nord >= 2 / forward-backward.
+- **Production HS / baroclinic at C36**: enable d4=0.02 nord=1
+  (default A_h).
+- **Production at C48**: enable d4=0.02 nord=1 + ``LEGOESM_AH_SCALE=2.0``
+  (iter 37 sweet spot).
+- **Production at C72**: enable d4=0.02 nord=1 + ``LEGOESM_AH_SCALE=10.0``
+  (iter 33).  Stable but imprint ~30x C36; further A_h tuning may
+  improve.
+- **Production at C96+**: UNTESTED.  The iter-37 scaling pattern
+  (C36→1.0, C48→2.0, C72→10.0) suggests calibrating ≥ 10x at
+  higher resolutions.  Run a stability check before climate-
+  relevant integration.
 - **Differentiable-model gradient flow**: bit-for-bit baseline path
-  preserved, so existing trained weights remain valid.
+  preserved (when LEGOESM_AH_SCALE=1, LEGOESM_CDD_*=0), so existing
+  trained weights remain valid.
 
-### Open follow-ups (iter 30+)
+### Open follow-ups (iter 38+)
 
+- Finer A_h calibration at C48 (ah_x1.5, ah_x3) and C72 (ah_x5,
+  ah_x7, ah_x15).
+- C96 and C192 stability + A_h calibration.
 - Substantive nord >= 2 fidelity restructure (halo'd intermediate
   divg_d arrays, vector corner fill at nt > 0).
 - ``dt = 100 s`` re-test at C72 under quieter system load.
 - 200-day climate-relevant integration verification.
-- C96 / C192 production-resolution scaling.
+- Smagorinsky-style adaptive ``A_h = c * dx² * |D|`` to auto-scale
+  with resolution.
+- Corrected ``_laplacian_visc_cube_v2`` heuristic with the
+  empirically observed scaling pattern.
 
 ---
 
