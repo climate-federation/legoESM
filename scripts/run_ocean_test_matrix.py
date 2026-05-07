@@ -431,9 +431,12 @@ def _apply_value_threshold(
     )
 
 
+_DAYS_REQUIRED = object()  # sentinel for required-but-unset days
+
+
 def _apply_pe_rel_sign(
     ok: bool, notes: str, pe_rel_final: float, *, label: str,
-    n_samples: int | None = None, days: float | None = None,
+    n_samples: int | None = None, days=_DAYS_REQUIRED,
 ) -> tuple[bool, str]:
     """Apply the documented ``pe_rel_final < 0`` sign constraint
     via the centralized value-threshold helper.
@@ -462,7 +465,20 @@ def _apply_pe_rel_sign(
     budget genuinely cannot exercise PE evolution.  This
     keeps the documented sign-check semantic for production
     runs while not false-failing quick runs.
+
+    iter-153 (codex iter-152 review MEDIUM-1): ``days`` is now
+    REQUIRED (sentinel default raises TypeError if omitted).
+    Pre-iter-153 ``days=None`` defaulted to quick-mode
+    ``op="le"``, so a caller forgetting the kwarg would
+    silently weaken the documented full-mode strict gate.
     """
+    if days is _DAYS_REQUIRED:
+        raise TypeError(
+            f"_apply_pe_rel_sign: 'days' kwarg is required "
+            f"(label={label!r}). Pass the experiment duration "
+            f"in days so the gate can select op='lt' (full "
+            f"mode, days>=1) vs op='le' (quick mode)."
+        )
     op = "lt" if (days is not None and days >= 1.0) else "le"
     return _apply_value_threshold(
         ok, notes, pe_rel_final, 0.0,

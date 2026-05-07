@@ -92,9 +92,12 @@ def _apply_value_threshold(
     )
 
 
+_DAYS_REQUIRED = object()  # sentinel for required-but-unset days
+
+
 def _apply_pe_rel_sign(
     ok: bool, notes: str, pe_rel_final: float, *, label: str,
-    n_samples: int | None = None, days: float | None = None,
+    n_samples: int | None = None, days=_DAYS_REQUIRED,
 ) -> tuple[bool, str]:
     """Apply the documented ``pe_rel_final < 0`` sign
     constraint (iter-128 codex iter-127-followup MEDIUM-2).
@@ -114,7 +117,15 @@ def _apply_pe_rel_sign(
     iter-152 (codex iter-151 review MEDIUM-2): days-aware op
     selection — strict ``< 0`` for full mode, ``≤ 0`` for
     quick (matches monolithic).
+
+    iter-153 (codex iter-152 review MEDIUM-1): ``days`` is
+    REQUIRED.
     """
+    if days is _DAYS_REQUIRED:
+        raise TypeError(
+            f"_apply_pe_rel_sign: 'days' kwarg is required "
+            f"(label={label!r})."
+        )
     op = "lt" if (days is not None and days >= 1.0) else "le"
     return _apply_value_threshold(
         ok, notes, pe_rel_final, 0.0,

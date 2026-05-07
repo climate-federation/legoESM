@@ -261,14 +261,23 @@ class TestNonFiniteValueInputs:
         assert result != result  # NaN (was 1.0e-2 pre-iter-152)
 
     def test_inf_in_middle_does_affect_series(self):
-        # The series API computes per-step drift, so an inf in the
-        # middle will appear as inf in the series.
+        # iter-153 (codex iter-152 review MEDIUM-2): the series
+        # API now propagates non-finite samples to the WHOLE
+        # output array (mirroring the iter-152 scalar fix), not
+        # just the affected element.  Pre-iter-153 the series
+        # was ``[0, inf, 1e-2]`` so a caller using
+        # ``abs(series[-1])`` could still silently PASS the
+        # transient case.  Post-iter-153 the entire array is NaN
+        # if ANY sample is non-finite, surfacing the broken
+        # diagnostic uniformly.
+        import numpy as np
         result = relative_drift_series(
             [1.0e19, float("inf"), 1.01e19]
         )
-        assert result[0] == pytest.approx(0.0)
-        assert result[1] == float("inf")
-        assert result[2] == pytest.approx(1.0e-2, rel=1e-9)
+        assert result.shape == (3,)
+        assert np.all(np.isnan(result)), (
+            "iter-153: any non-finite sample must produce all-NaN "
+            "output array.")
 
 
 class TestEmptyArrayAliasing:

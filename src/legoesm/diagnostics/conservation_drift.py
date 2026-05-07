@@ -192,6 +192,16 @@ def relative_drift_series(
         # so callers can't accidentally mutate their input via the
         # returned alias.
         return np.empty(0, dtype=np.float64)
+    # iter-153 (codex iter-152 review MEDIUM-2): mirror
+    # ``compute_relative_drift``'s iter-152 NaN-anywhere check
+    # — if ANY sample is non-finite, return an all-NaN array of
+    # the same shape.  Pre-iter-153 a series like
+    # ``[1.0, NaN, 1.0]`` produced ``[0, NaN, 0]``, so a caller
+    # using ``abs(series[-1])`` would still silently PASS the
+    # transient-NaN case the iter-152 scalar fix was meant to
+    # catch.
+    if not np.all(np.isfinite(arr)):
+        return np.full(arr.shape, np.nan, dtype=np.float64)
     denom = max(abs(float(arr[0])), float(min_baseline))
     return (arr - arr[0]) / denom
 
@@ -258,12 +268,19 @@ def apply_drift_tolerance(
     (ok, notes): tuple of updated values.
     """
     import numpy as _np
+    # iter-153 (codex iter-152 review MEDIUM-3): preserve
+    # idempotency.  When ``ok`` is already ``False``, return
+    # immediately WITHOUT validating ``tol`` — otherwise a
+    # caller that already failed an earlier gate and is just
+    # passing through with a placeholder ``tol=float('nan')``
+    # would get a spurious ValueError on the second helper call.
+    if not ok:
+        return ok, notes
     # iter-152 (codex iter-151 review MEDIUM-3): validate the
-    # tolerance itself is finite — otherwise ``drift > NaN`` is
-    # always False and a finite-but-broken drift would silently
-    # PASS.  Raise on tol=NaN/Inf rather than fail-quietly so
-    # callers get a clear ``ValueError`` traceback at the
-    # invocation site.
+    # tolerance for ACTIVE gates.  ``drift > NaN`` is always
+    # False, so a NaN tol would silently let any finite drift
+    # PASS.  Raise rather than fail-quietly so callers get a
+    # clear ValueError traceback at the invocation site.
     if not _np.isfinite(tol):
         raise ValueError(
             f"apply_drift_tolerance: tol must be finite, got "
@@ -344,17 +361,19 @@ def apply_value_threshold(
     (ok, notes): tuple of updated values.
     """
     import numpy as _np
+    # iter-153 (codex iter-152 review MEDIUM-3): preserve
+    # idempotency — short-circuit BEFORE validating threshold.
+    if not ok:
+        return ok, notes
     # iter-152 (codex iter-151 review MEDIUM-3): validate the
-    # threshold itself is finite — otherwise comparisons against
-    # NaN/Inf threshold are always False and a finite-but-broken
-    # value would silently PASS.  Raise rather than fail-quietly.
+    # threshold for ACTIVE gates.  Comparisons against NaN/Inf
+    # threshold are always False, silently letting any finite-but-
+    # broken value PASS.  Raise rather than fail-quietly.
     if not _np.isfinite(threshold):
         raise ValueError(
             f"apply_value_threshold: threshold must be finite, got "
             f"{threshold!r} (label={label!r}, op={op!r})"
         )
-    if not ok:
-        return ok, notes
     if n_samples is not None and n_samples < 2:
         ok = False
         notes += (

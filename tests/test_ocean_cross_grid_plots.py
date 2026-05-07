@@ -2380,8 +2380,9 @@ class TestIter123OceanDriftTolerance:
         assert "0 sample" in notes
 
     def test_iter130_modular_pe_sign_wrapper_works(self):
-        """iter-130 codex iter-129-followup HIGH-2: same
-        behavior test for the modular wrapper.
+        """iter-130 codex iter-129-followup HIGH-2 + iter-153:
+        same behavior test for the modular wrapper, with the
+        iter-153 ``days`` kwarg.
         """
         import sys
         from pathlib import Path
@@ -2390,12 +2391,15 @@ class TestIter123OceanDriftTolerance:
         sys.path.insert(0, str(scripts_dir))
         try:
             from ocean_test_matrix.timeloop import _apply_pe_rel_sign
+            # PASS case: pe_rel_final < 0 (RPE decreased).
             ok, _ = _apply_pe_rel_sign(
                 True, "", -0.5, label="PE_rel_final",
-                n_samples=10)
+                n_samples=10, days=2.0)
             assert ok is True
+            # FAIL case: missing series (n_samples=0).
             ok, notes = _apply_pe_rel_sign(
-                True, "", 0.0, label="PE_rel_final", n_samples=0)
+                True, "", 0.0, label="PE_rel_final",
+                n_samples=0, days=0.1)
             assert ok is False
             assert "0 sample" in notes
         finally:
@@ -3260,6 +3264,124 @@ class TestIter123OceanDriftTolerance:
                     f"iter-138/iter-152: {rel}: _apply_pe_rel_sign "
                     f"call line must use op='lt'/'le'/op variable; "
                     f"got: {line.strip()!r}")
+
+    def test_iter153_pe_sign_days_required(self):
+        """iter-153 (codex iter-152 review MEDIUM-1): ``days``
+        kwarg is now REQUIRED on ``_apply_pe_rel_sign`` — omitting
+        it raises TypeError instead of silently defaulting to
+        quick-mode ``op="le"``.  Behavior test that actually
+        invokes the wrapper.
+        """
+        import pytest
+        mod = self._import_monolithic_runner()
+        # Omitting ``days`` must raise.
+        with pytest.raises(TypeError, match="'days' kwarg is required"):
+            mod._apply_pe_rel_sign(
+                True, "", -0.5, label="PE_rel_final",
+                n_samples=10)
+        # Same for modular.
+        import sys
+        from pathlib import Path
+        scripts_dir = (Path(__file__).resolve().parent.parent
+                       / "scripts")
+        sys.path.insert(0, str(scripts_dir))
+        try:
+            from ocean_test_matrix.timeloop import (
+                _apply_pe_rel_sign as modular_pe_rel_sign,
+            )
+            with pytest.raises(TypeError, match="'days' kwarg is required"):
+                modular_pe_rel_sign(
+                    True, "", -0.5, label="PE_rel_final",
+                    n_samples=10)
+        finally:
+            sys.path.remove(str(scripts_dir))
+
+    def test_iter153_pe_sign_behavior_full_vs_quick(self):
+        """iter-153 (codex iter-152 review LOW-1): tighter
+        behavior test — actually invoke both wrapper modules
+        with days=2.0 (full) and days=0.1 (quick), assert
+        pe_rel_final=0 fails in full mode and passes in quick.
+        """
+        mod = self._import_monolithic_runner()
+        # Full mode (days=2): PE_rel_final = 0 must FAIL.
+        ok, notes = mod._apply_pe_rel_sign(
+            True, "", 0.0, label="PE_rel_final",
+            n_samples=10, days=2.0)
+        assert ok is False, (
+            "iter-153: full-mode PE_rel_final=0 must FAIL "
+            "(strict <0 contract).")
+        # Quick mode (days=0.1): PE_rel_final = 0 must PASS.
+        ok, _ = mod._apply_pe_rel_sign(
+            True, "", 0.0, label="PE_rel_final",
+            n_samples=10, days=0.1)
+        assert ok is True, (
+            "iter-153: quick-mode PE_rel_final=0 must PASS "
+            "(no time for PE evolution).")
+        # Same dual check on the modular wrapper.
+        import sys
+        from pathlib import Path
+        scripts_dir = (Path(__file__).resolve().parent.parent
+                       / "scripts")
+        sys.path.insert(0, str(scripts_dir))
+        try:
+            from ocean_test_matrix.timeloop import (
+                _apply_pe_rel_sign as modular_pe_rel_sign,
+            )
+            ok, _ = modular_pe_rel_sign(
+                True, "", 0.0, label="PE_rel_final",
+                n_samples=10, days=2.0)
+            assert ok is False
+            ok, _ = modular_pe_rel_sign(
+                True, "", 0.0, label="PE_rel_final",
+                n_samples=10, days=0.1)
+            assert ok is True
+        finally:
+            sys.path.remove(str(scripts_dir))
+
+    def test_iter153_relative_drift_series_nan_anywhere(self):
+        """iter-153 (codex iter-152 review MEDIUM-2):
+        ``relative_drift_series`` must propagate NaN from any
+        sample to the WHOLE returned array, mirroring the
+        iter-152 scalar fix.  Pre-iter-153 a NaN in the middle
+        produced ``[0, NaN, 0]`` so a caller using
+        ``abs(series[-1])`` could still silently PASS a
+        transient blowup.
+        """
+        from legoesm.diagnostics import relative_drift_series
+        import numpy as np
+        result = relative_drift_series([1.0, float("nan"), 1.0])
+        assert result.shape == (3,)
+        assert np.all(np.isnan(result)), (
+            "iter-153: NaN anywhere in series must produce "
+            "all-NaN output array.")
+        # Healthy series still works.
+        result = relative_drift_series([1.0, 1.0001, 1.0002])
+        assert np.allclose(result, [0.0, 1e-4, 2e-4], rtol=1e-3)
+
+    def test_iter153_idempotent_when_ok_false(self):
+        """iter-153 (codex iter-152 review MEDIUM-3): when
+        ``ok=False``, the helpers must return immediately
+        WITHOUT validating tol/threshold.  Otherwise a caller
+        chaining gates with placeholder tols (e.g., NaN to
+        signal "skip this gate") gets spurious ValueErrors.
+        """
+        from legoesm.diagnostics import (
+            apply_drift_tolerance, apply_value_threshold,
+        )
+        # ok=False must short-circuit BEFORE the NaN-tol check.
+        ok, notes = apply_drift_tolerance(
+            ok=False, notes="prior FAIL",
+            drift=1e-3, tol=float("nan"),  # NaN tol
+            label="test")
+        assert ok is False
+        assert notes == "prior FAIL"
+
+        ok, notes = apply_value_threshold(
+            ok=False, notes="prior FAIL",
+            value=0.5, threshold=float("nan"),  # NaN threshold
+            label="test", op="lt")
+        assert ok is False
+        assert notes == "prior FAIL"
 
     def test_iter152_pe_sign_days_aware(self):
         """iter-152 (codex iter-151 review MEDIUM-2): the PE-sign
