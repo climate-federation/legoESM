@@ -448,7 +448,7 @@ opposing flows in upper and lower layers, and eddy development is expected.
 
 | Variable | Value | Notes |
 |---|---|---|
-| eta (SSH) | Small perturbation | `0.05 m * sin(3 * lon) * sin(2 * lat)` to seed instability. Spectral: area-weighted mean removed before SH transform. |
+| eta (SSH) | Small perturbation | `0.05 m * sin(3 * lon) * cos(2 * lat)` to seed instability (iter-135 self-review fix: prior doc said `sin(2 * lat)` but both spectral and FV code paths in `scripts/run_ocean_test_matrix.py:_add_phillips_perturbation` and `src/legoesm/ocean/experiments/phillips_two_layer.py:_add_phillips_perturbation_*` use `cos(2*lat)` — the doc was stale, code is canonical). Spectral: area-weighted mean removed before SH transform. |
 | u, v (velocity) | Opposing zonal jets | Upper: 0.30 m/s eastward. Lower: -0.06 m/s westward. Gaussian jet centered at 45 deg lat, 14 deg width. Spectral: converted to vor_hat/div_hat via spectral transforms. |
 | T (temperature) | Meridional gradient | Upper: 16 C (equator) to 6 C (pole), gradient 10 C. Lower: 8 C (equator) to 4 C (pole), gradient 4 C. |
 | S (salinity) | 35.0 PSU | Uniform |
