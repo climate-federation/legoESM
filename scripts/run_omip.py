@@ -2057,7 +2057,9 @@ def run_omip_single(grid_type: str, args) -> dict:
         lat_c = np.asarray(grid.lat) if hasattr(grid, 'lat') else None
         if lat_c is not None:
             # taper alpha(lat): quadratic, 1 at eq, 0 at ±eq_band
-            x = np.clip(np.abs(lat_c) / eq_band, 0.0, 1.0)
+            # grid.lat is in radians; convert eq_band to radians
+            eq_band_rad = np.deg2rad(eq_band)
+            x = np.clip(np.abs(lat_c) / eq_band_rad, 0.0, 1.0)
             taper = (1.0 - x**2)                # (n_lat,)
             taper2d = np.broadcast_to(taper[:, None], H_np.shape)
             n_lat_g, n_lon_g = H_np.shape

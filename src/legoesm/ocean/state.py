@@ -510,7 +510,12 @@ class LatLonCGridOceanConfig(NamedTuple):
                                    # baroclinic geostrophy (which lives
                                    # in u' = u_3d - U_bar).  HIM/MOM6
                                    # BIHARMONIC_BAROTROPIC analog.
-    C_smag: float = 0.0
+    C_smag: float = 0.0            # Biharmonic Smagorinsky coefficient
+    C_smag_lap: float = 0.0        # Laplacian Smagorinsky coefficient.
+                                    # When > 0, adds flow-adaptive Laplacian
+                                    # viscosity A_smag = (C·dx)²·|D| via the
+                                    # energy-stable stress-tensor operator.
+                                    # MOM6 OM4 uses 0.15. Additive with A_h.
     bottom_drag_r: float = 0.0
     bottom_drag_bbl_thickness: float = 0.0
     bottom_drag_bg_velocity: float = 0.0  # MOM6 DRAG_BG_VEL [m/s]; when >0,
