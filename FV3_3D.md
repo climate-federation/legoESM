@@ -2689,5 +2689,74 @@ nord >= 2.
 iter 27+: C72 / C96 multi-resolution scan, longer 200-day
 integration once system load permits.
 
+## Iteration 26 (2026-05-07): C72 reveals d4_bg alone is insufficient
+
+### Scan results (HS hybrid 30 day)
+
+| label              | grid | result                                |
+|:-------------------|:----:|:--------------------------------------|
+| baseline_d2only    | C72  | **NaN at step 5373** (~12.4 days)    |
+| d4=0.02 nord=1     | C72  | **NaN at step 5732** (~13.3 days)    |
+
+C72 setup: ``hd=1.98e+15``, ``dd=6.67e+06``, ``ah=2.04e+06``,
+``da_min_c=1.40e+10``.
+
+### Critical finding: d4_bg=0.02 is insufficient at C72
+
+Both the iter-17 baseline AND the iter-19/24 production
+recommendation **fail to complete 30 days at C72** with the
+matrix's default ``_hyperdiff_cube`` / ``_div_damp_cube`` /
+``_laplacian_visc_cube`` tuning.
+
+The d4=0.02 setting only delays NaN by ~1 day vs the baseline
+(13.3 vs 12.4 days).  This is **not enough** to make C72 stable.
+
+This means the iter-19/24 production recommendation is
+**incomplete**: it works at C36 / C48 but not at C72 alone.  At
+production resolutions, C72+ runs need either:
+
+- **(a)** stronger baseline diffusion (``hd``, ``dd``, ``ah``)
+  retuning;
+- **(b)** much larger ``d4_bg`` (with appropriate scaling for
+  ``(da_min_c)^2``);
+- **(c)** the FV3 nord >= 2 path (currently structurally limited
+  in our impl);
+- **(d)** smaller ``dt`` (200 s may be CFL-marginal at C72).
+
+### Implications for users
+
+The earlier "preferred candidate" / "recommended" framing of
+``d4_bg = 0.02 nord = 1`` should be qualified:
+
+- **C36 / C48**: confirmed beneficial, the recommendation stands.
+- **C72+**: **the recommendation is NOT sufficient** — additional
+  diffusion / damping tuning is required for stability.
+
+This is a more honest characterization than iter-25's optimistic
+projection that "the same coefficient should be tested empirically
+but the trend is reassuring".  The empirical test at C72 reveals
+the trend does NOT smoothly extend.
+
+### Status
+
+iter 26 closes the iter-25 open question on whether d4_bg=0.02
+generalises to higher resolution: it does not extend to C72
+without additional tuning.  The C36/C48 recommendation remains
+valid.
+
+27 unit tests still pass.
+
+### Direction for next iteration
+
+iter 27: investigate the C72 instability — is it (a) a new
+numerical issue, (b) the matrix's ``hd/dd/ah`` tuning being too
+weak at C72, or (c) a fundamental limit of the iter-17 / iter-18
+configuration at higher resolution?  Try larger ``d4_bg`` (e.g.,
+0.05, 0.10) and see if it stabilises.
+
+iter 28+: substantive nord >= 2 fidelity restructure (the
+deferred priority, now potentially relevant if C72 stability needs
+del-6).
+
 
 
