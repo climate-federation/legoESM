@@ -38,10 +38,11 @@ Or via env vars::
 | C36        | Stable 30 day, mid_std reduced -3% / edge_v -16% / mass_drift -46% vs iter-17 baseline |
 | C36 60 day | mid_std growth-rate reduced -44%; edge_v growth-rate reduced -73%; absolute mid_std -18%, edge_v -38% |
 | C48        | Stable 30 day, mid_std -45% / edge_v -54% / mass_drift -47% — BIGGER benefit than at C36 |
-| **C72**    | **NaN at ~13 days — recommendation INSUFFICIENT** |
-| C72 (d4 sweep)  | NaN at all d4_bg ∈ [0.02, 0.04, 0.08]        |
-| C72 (16x hd)    | Still NaN at ~13 days — hyperdiff ineffective|
-| C72 (smaller dt)| Untested in budget (iter 29 incomplete)      |
+| **C72**    | **NaN at ~13 days with default A_h** — needs **10x A_h** |
+| C72 (d4 sweep, default A_h)  | NaN at all d4_bg ∈ [0.02, 0.04, 0.08] |
+| C72 (16x hd, default A_h)    | Still NaN at ~13 days — hyperdiff ineffective|
+| C72 (smaller dt, default A_h)| Untested in budget (iter 29 incomplete)      |
+| **C72 with A_h x10** (iter 33) | **STABLE 30d** (mid_std=6.8, ~30x C36 imprint but stable) |
 
 ### Key empirical findings
 
@@ -3212,6 +3213,90 @@ iter 35+: try a much larger hyperdiff (1000x default) — if THAT
 stabilises C72, the issue is the matrix's hd tuning being
 shockingly off; if NOT, hyperdiff doesn't reach the unstable
 interior mode at all.
+
+## Iteration 33 (2026-05-07): BREAKTHROUGH — 10x A_h stabilises C72
+
+### Result (HS C72 hybrid 30 day)
+
+| label   | A_h          | result                          |
+|:--------|:-------------|:--------------------------------|
+| iter 26 | 2.04e+06 (default) | NaN at step 5732 (~13.27 d)|
+| iter 28 | hd × 16            | NaN at step 5753 (~13.32 d)|
+| iter 31 | ssp_rk54 instead   | NaN at step 5761 (~13.34 d)|
+| **iter 33: ah × 10** | **2.04e+07** | **STABLE 30 d** (max\|u\|=45.88, mid_std=6.815, mass=1.54e-9) |
+
+### What was learned
+
+The C72 instability is fixed by **10x larger Laplacian (del-2)
+viscosity** ``A_h`` — not by stronger hyperdiff (del-4), not by
+larger ``d4_bg``, not by a stiffer time integrator.
+
+This is consistent with the iter-32 finding that the unstable mode
+is INTERIOR.  Del-2 Laplacian viscosity damps SYNOPTIC-scale modes
+better than del-4 hyperdiff (which targets grid-scale).  At the
+default ``A_h = _laplacian_visc_cube(72) = 2.04e6``, del-2 damping
+of synoptic-scale interior modes is too weak.  Increasing it 10x
+to 2.04e7 catches the unstable mode.
+
+### Caveats
+
+- **Cube imprint is much higher with stronger A_h**: mid_std=6.815
+  (vs C36 baseline 0.236, ~30x larger).  The simulation is stable
+  but has degraded climatology.  C72 needs further work on
+  cube-imprint suppression.
+- **Mass drift slightly elevated**: 1.54e-9 (vs C36 baseline
+  6.88e-10).  Acceptable but not as good as C36/C48.
+- **A_h x100 untested**: iter-33 budget was killed by system load
+  before ``ah_x100`` completed.  Worth retrying to find optimal A_h.
+
+### Updated production recommendation
+
+For C72:
+
+```python
+CDGridPrimitiveEquationConfig(
+    ...,
+    A_h=2.04e+07,                       # 10x default _laplacian_visc_cube(72)
+    corner_div_damp_d2_bg=0.0005,       # iter-17
+    corner_div_damp_dddmp=0.20,         # FV3 default
+    corner_div_damp_d4_bg=0.02,         # iter-19/24
+    corner_div_damp_nord=1,
+)
+```
+
+The matrix's ``_laplacian_visc_cube`` heuristic is **insufficient
+at C72** (and likely all higher resolutions).  The
+resolution-scaling factor in that function should be revisited.
+
+### Status
+
+iter 33 produces the **first working C72 setting** for HS hybrid
+30 day.  The fix is **10x A_h**, not corner-divergence damping or
+time integrator changes.
+
+This explains why iters 26-31 all failed: they targeted the WRONG
+mechanism.  The C72 instability is an interior synoptic-scale
+unstable mode that needs Laplacian viscosity, not biharmonic
+hyperdiff or cube-vertex damping.
+
+The iter-29 Quick Reference recommendation should be updated with
+this C72 setting.
+
+27 unit tests still pass.
+
+### Direction for next iteration
+
+iter 34: re-run ``ah_x100`` and intermediate values (ah_x3, ah_x5)
+at C72 to find the smallest stable A_h (less aggressive damping
+preserves better climatology).
+
+iter 35: investigate WHY ``_laplacian_visc_cube`` at C72 is too
+weak.  Check the heuristic — does it scale with grid spacing
+correctly?
+
+iter 36+: update the matrix's resolution-scaling for ``A_h`` to
+catch this class of instability automatically at higher
+resolutions.
 
 
 
