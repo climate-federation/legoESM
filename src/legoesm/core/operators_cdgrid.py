@@ -542,14 +542,16 @@ def dgrid_to_cgrid(u_d, v_d, cdgrid):
     Works for both 2D (6, n+1, n+1) and 3D (6, n+1, n+1, nlev).
     """
     # x-face (at constant i): average along j, then project onto face normal
-    u_avg = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])    # (6, n+1, n[, nlev])
-    v_avg_x = 0.5 * (v_d[:, :, :-1] + v_d[:, :, 1:])  # (6, n+1, n[, nlev])
+    _u = u_d.data if hasattr(u_d, 'data') else u_d
+    _v = v_d.data if hasattr(v_d, 'data') else v_d
+    u_avg = 0.5 * (_u[:, :, :-1] + _u[:, :, 1:])    # (6, n+1, n[, nlev])
+    v_avg_x = 0.5 * (_v[:, :, :-1] + _v[:, :, 1:])  # (6, n+1, n[, nlev])
     cosa_u = _broadcast_metric(cdgrid.cosa_u, u_avg)
     sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u**2, _EPS))
     u_c = u_avg * sina_u - v_avg_x * cosa_u
 
     # y-face (at constant j): e_perp is the outward normal, so v_c = v_d
-    v_c = 0.5 * (v_d[:, :-1] + v_d[:, 1:])             # (6, n, n+1[, nlev])
+    v_c = 0.5 * (_v[:, :-1, :] + _v[:, 1:, :])      # (6, n, n+1[, nlev])
     return u_c, v_c
 
 
