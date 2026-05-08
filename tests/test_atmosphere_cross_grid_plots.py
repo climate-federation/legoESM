@@ -2118,6 +2118,58 @@ class TestHeldSuarezDissipationImbalance:
             f"CROSS_GRID_COMPARISON_REPORT.md and this test."
         )
 
+    def test_cfl_safe_dt_cube_calibration(self):
+        """iter 66: ``_cfl_safe_dt_cube`` returns the calibrated dt
+        per resolution.  At C36/C48/C72 default safety preserves
+        ``dt=200`` (iter-19/iter-37/iter-33 reference); at C96 it
+        reduces to ``dt=150`` (iter-65 empirical threshold).
+        """
+        # Calibration table: must match iter-65/66 doc.
+        for n, expected_dt in [(36, 200.0), (48, 200.0), (72, 200.0)]:
+            actual = M._cfl_safe_dt_cube(n)
+            assert actual == 200.0, (
+                f"iter-66 CFL dt: at C{n} expected dt=200.0 (iter-33/37 "
+                f"reference preservation), got dt={actual:.1f}.  This "
+                f"would change the iter-33 reference numbers."
+            )
+        # C96 must reduce by exactly the iter-65 empirical threshold.
+        # safety=0.422 calibrated so dt(C96) ≈ 150.
+        dt_c96 = M._cfl_safe_dt_cube(96)
+        assert 145.0 <= dt_c96 <= 155.0, (
+            f"iter-66 CFL dt: at C96 expected dt ≈ 150 (iter-65 "
+            f"empirical threshold), got dt={dt_c96:.1f}."
+        )
+        # Higher resolutions must reduce monotonically.
+        dt_c144 = M._cfl_safe_dt_cube(144)
+        assert dt_c144 < dt_c96, (
+            f"CFL dt must decrease with n: dt(C144)={dt_c144:.1f} "
+            f">= dt(C96)={dt_c96:.1f}"
+        )
+
+    def test_cfl_safe_dt_cube_explicit_overrides(self):
+        """iter 66: explicit ``base_dt``, ``c_max``, ``safety`` args
+        override the defaults — pin the API surface so future
+        callers can dial these per-test-case.
+        """
+        # Larger base_dt cap allows finer resolution to use dt > 200.
+        dt = M._cfl_safe_dt_cube(36, base_dt=500.0)
+        assert 350.0 < dt < 450.0, (
+            f"With base_dt=500 at C36, dt should be the CFL "
+            f"value (~399), got {dt:.1f}"
+        )
+        # Smaller safety factor reduces dt proportionally.
+        dt_a = M._cfl_safe_dt_cube(96, safety=0.422)
+        dt_b = M._cfl_safe_dt_cube(96, safety=0.211)
+        assert abs(dt_b - 0.5 * dt_a) < 1.0, (
+            f"safety=0.211 should give dt = 0.5 * dt(safety=0.422) at C96"
+        )
+        # Larger c_max reduces dt proportionally.
+        dt_c = M._cfl_safe_dt_cube(96, c_max=320.0)
+        dt_d = M._cfl_safe_dt_cube(96, c_max=640.0)
+        assert abs(dt_d - 0.5 * dt_c) < 1.0, (
+            f"c_max=640 should give dt = 0.5 * dt(c_max=320) at C96"
+        )
+
     def test_laplacian_visc_cube_v2_calibration(self):
         """iter 33-39: ``_laplacian_visc_cube_v2`` returns the
         empirically calibrated A_h values at C36, C48, C72 — the 3

@@ -3746,6 +3746,79 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
 
+## Iteration 66 (2026-05-07): opt-in CFL-aware dt for cubed-sphere HS
+
+### Goal
+
+iter 65 found C96 NaNs at the matrix's hardcoded ``dt = 200.0``
+regardless of ``LEGOESM_AH_SCALE``.  iter 65 also identified that
+the matrix's lat-lon HS path uses CFL-aware dt
+(``dt = min(200.0, 0.5 * _dx_pole / 300.0)``) but the cube path
+does NOT.  iter 66 implements the analog for the cube path —
+opt-in via env var to preserve all pre-iter-66 reference numbers.
+
+### Implementation
+
+Added helper ``_cfl_safe_dt_cube(n, base_dt=200, c_max=320,
+safety=0.462)`` to ``scripts/run_atmosphere_test_matrix.py``.
+Calibration::
+
+    safety=0.462 chosen so:
+      C72: dt = 0.462 * (pi*R/(2*72)) / 320 = 200.6 -> capped to 200
+      C96: dt = 0.462 * (pi*R/(2*96)) / 320 = 150.5
+
+This preserves the iter-33 C72 reference (dt=200) while reducing
+to 150.5 at C96 — within the iter-65 empirical safety band
+(dt=150 stable, dt=160 NaN).
+
+Per-resolution table (default args)::
+
+    C36: dt_cfl=399 -> capped to 200 (no change)
+    C48: dt_cfl=300 -> 200 (no change)
+    C72: dt_cfl=200 -> 200 (no change, iter-33 reference preserved)
+    C96: dt_cfl=150.5 (iter-65 threshold matched)
+    C144: dt_cfl=100.3
+    C192: dt_cfl=75.3
+
+Wired at:
+- ``run_held_suarez`` cubed-sphere branch (line ~2681).
+- ``run_baroclinic_3d`` cubed-sphere branch (line ~3197).
+
+### Opt-in
+
+The default behavior is unchanged.  To enable::
+
+    LEGOESM_HS_CUBE_DT_CFL=1 \
+      JAX_ENABLE_X64=1 \
+      .venv/bin/python scripts/run_atmosphere_test_matrix.py \
+      --quick --only hs --grid cubed_sphere
+
+The env var accepts ``1, true, yes, on`` (case-insensitive).
+When active, the matrix prints a one-line message indicating the
+reduced dt.
+
+### Validation
+
+Ran ``scripts/_iter65_c96_smoke.py`` with ``ITER65_DT=150.5``:
+- 1-day C96 stable, max|u|=0.81 m/s — matches the iter-65
+  ``dt=150`` finding (the 0.5 s extra has no observable effect).
+
+Added 2 tests to ``test_atmosphere_cross_grid_plots.py``:
+- ``test_cfl_safe_dt_cube_calibration``: pins the table above.
+- ``test_cfl_safe_dt_cube_explicit_overrides``: pins the API
+  surface (``base_dt``, ``c_max``, ``safety`` overrides).
+
+All 18 helper tests pass.
+
+### Status
+
+C96+ stability is now solvable through the matrix without manual
+``CDGridPrimitiveEquationConfig`` construction.  Default behavior
+preserved at C36/C48/C72.  Open work: extend to nonhydrostatic
+and AMIP cube paths.
+
+250 tests now pass (was 248).
+
 ## Iteration 65 (2026-05-07): C96 stability — dt is the limiting factor
 
 ### Goal

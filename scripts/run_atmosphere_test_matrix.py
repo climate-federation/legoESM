@@ -519,6 +519,53 @@ def _laplacian_visc_cube(n: int, frac: float = 0.05) -> float:
     return frac * c_gw * dx
 
 
+def _cfl_safe_dt_cube(
+    n: int,
+    base_dt: float = 200.0,
+    c_max: float = 320.0,
+    safety: float = 0.462,
+) -> float:
+    """iter 65/66: CFL-aware ``dt`` for cubed-sphere HS path.
+
+    Returns ``min(base_dt, safety * dx_face_center / c_max)``.
+
+    The default safety factor 0.462 is calibrated to:
+    -   Preserve ``dt=200`` at C72 (iter-33 reference setting):
+        ``0.462 * (pi*R/(2*72)) / 320 = 200.6 -> capped to 200``.
+    -   Reduce to ``dt=150`` at C96 (iter-65 empirical stability
+        threshold; ``dt=160`` NaNs at 6 h, ``dt=150`` survives):
+        ``0.462 * (pi*R/(2*96)) / 320 = 150.5 -> 150``.
+
+    Computation::
+
+        dx_face_center = pi * R_earth / (2 * n)
+        dt_cfl = safety * dx_face_center / c_max
+
+    where ``c_max`` is a representative upper bound for advection
+    + acoustic-mode wave speed (HS is hydrostatic so we cap at
+    ``c_max ~ 320 m/s`` for jet-stream + gravity-wave combination
+    rather than the 850 m/s sound speed).
+
+    Per-resolution table (default args)::
+
+        C36: dt_cfl=399 -> capped to 200
+        C48: dt_cfl=300 -> capped to 200
+        C72: dt_cfl=200 -> 200 (iter-33 reference preserved)
+        C96: dt_cfl=150 -> 150 (iter-65 empirical threshold)
+        C144: dt_cfl=100 -> 100
+
+    This helper does NOT auto-apply.  The matrix HS / baroclinic
+    paths only call this helper when ``LEGOESM_HS_CUBE_DT_CFL=1``
+    is set (iter-66 opt-in to preserve all pre-iter-66 reference
+    timings; default behavior is unchanged).
+    """
+    import math
+    from legoesm import constants
+    dx_face = math.pi * constants.R_earth / (2.0 * n)
+    dt_cfl = safety * dx_face / c_max
+    return min(base_dt, dt_cfl)
+
+
 def _auto_ah_scale(
     n: int,
     env_value: str | None = None,
@@ -2633,7 +2680,26 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         if _ah_msg is not None:
             print(_ah_msg, flush=True)
         ah = ah * _ah_scale
-        dt = 200.0
+        # FV3_3D iter 66: opt-in CFL-aware dt for the cubed-sphere
+        # HS path (iter 65 found the matrix's hardcoded dt=200 NaNs
+        # at C96 regardless of LEGOESM_AH_SCALE; the limiting lever
+        # is dt, not A_h).  Default off — preserves all pre-iter-66
+        # reference numbers (iter-33 C72, iter-19 C36/C48, etc.).
+        # When LEGOESM_HS_CUBE_DT_CFL=1, dt is capped at the
+        # CFL-safe value; the helper is calibrated to preserve dt=200
+        # at C72 and reduce to dt=150 at C96.
+        _hs_cube_dt_cfl = (
+            os.environ.get("LEGOESM_HS_CUBE_DT_CFL", "0").strip().lower()
+            in ("1", "true", "yes", "on")
+        )
+        dt = _cfl_safe_dt_cube(n) if _hs_cube_dt_cfl else 200.0
+        if _hs_cube_dt_cfl and dt < 200.0:
+            print(
+                f"[FV3_3D iter 66 CFL-aware dt] At C{n} reducing dt "
+                f"to {dt:.1f} s (was 200.0).  iter-65 found C96 NaNs "
+                f"at dt=200 regardless of A_h.",
+                flush=True,
+            )
         # Iter-15 NOTE on the cubed-sphere upper-atmosphere sponge:
         # The default ``sponge_tau_sec = 3600`` (1 hour) is FAR more
         # aggressive than the FV3 Fortran reference
@@ -3129,7 +3195,20 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         if _ah_msg is not None:
             print(_ah_msg, flush=True)
         ah = ah * _ah_scale
-        dt = 200.0
+        # FV3_3D iter 66: opt-in CFL-aware dt (mirrors the HS path
+        # at line 2681).  Default off — preserves all pre-iter-66
+        # baroclinic reference numbers.
+        _hs_cube_dt_cfl = (
+            os.environ.get("LEGOESM_HS_CUBE_DT_CFL", "0").strip().lower()
+            in ("1", "true", "yes", "on")
+        )
+        dt = _cfl_safe_dt_cube(n) if _hs_cube_dt_cfl else 200.0
+        if _hs_cube_dt_cfl and dt < 200.0:
+            print(
+                f"[FV3_3D iter 66 CFL-aware dt] At C{n} reducing dt "
+                f"to {dt:.1f} s (was 200.0).",
+                flush=True,
+            )
         config = PrimitiveEquationConfig(
             hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
             div_damp_coeff=dd, A_h=ah,
