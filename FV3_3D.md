@@ -642,6 +642,13 @@ Key iterations:
   uses nord_w=1.  w-perturbation IC respecting w=0 BC, +
   damp_w + damp_w_d_con: mean(dT_eq) > 0 with nord_w=2.
   1/1 pass in 19 s.
+- Iter 278: scaling test for the iter-12 PE damp_v wiring.
+  Verifies the FV3-faithful damp coefficient formula
+  ``damp4 = (damp_v * da_min_c)^(nord_v + 1)`` by checking
+  that doubling damp_v scales the wind change by
+  ``2^(nord+1)``.  3 cases: nord_v=0/1/2 → factor=2/4/8.
+  Pins the EXACT exponent in the damp4 formula.  3/3 pass
+  in 23 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
