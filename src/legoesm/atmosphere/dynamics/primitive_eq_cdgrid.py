@@ -363,6 +363,7 @@ def fv3_hydrostatic_tendencies(
     config: CDGridPrimitiveEquationConfig = CDGridPrimitiveEquationConfig(),
     physics_tendency: FV3HydrostaticTendencies | None = None,
     physics_tendency_cc: HydrostaticTendencies | None = None,
+    dt_actual: float | jax.Array | None = None,
 ) -> FV3HydrostaticTendencies:
     """Compute tendencies for the FV3 hydrostatic PE with D-grid winds.
 
@@ -666,19 +667,27 @@ def fv3_hydrostatic_tendencies(
         #   damp = da_min_c * max(d2_bg, min(0.20, dddmp * |delpc| * dt))
         # Note: FV3 multiplies by dt because ``delpc`` is per-second
         # divergence and ``dddmp * delpc * dt`` is the dimensionless
-        # CFL-scaled damping factor.  Our tendency function does not
-        # see ``dt`` directly; iter-188 added ``corner_div_damp_dt_proxy``
-        # (default 200.0, matching the previously hardcoded value) for
-        # parity with the NH path.  The d2_bg floor dominates in HS
-        # regimes anyway (see iter-5 adaptive analysis).
+        # CFL-scaled damping factor.  iter-189 plumbs the actual
+        # integration ``dt`` (passed by ``model.step`` as
+        # ``dt_actual=dt``) into both the iter-16 nord=0 cap and the
+        # iter-187 nord >= 1 smag_vort cap.  Direct callers that
+        # don't pass ``dt_actual`` fall back to the iter-188
+        # ``config.corner_div_damp_dt_proxy`` (default 200.0, matching
+        # the previously hardcoded value) — preserves backward
+        # compatibility for unit tests calling the tendency function
+        # directly.  The d2_bg floor dominates in HS regimes anyway
+        # (see iter-5 adaptive analysis).
         _da_min_c = jnp.min(cdgrid.area_corner)
         _delpc_abs = jnp.abs(delpc)
-        # Approximate dt via the config-tunable ``dt_proxy`` (iter
-        # 188); the exact value matters only when the adaptive cap
-        # (0.20) is active.  In HS the floor (d2_bg) dominates;
-        # iter-5 confirmed ``dddmp`` adaptive damping is essentially
-        # inert at HS divergence levels.
-        _dt_approx = config.corner_div_damp_dt_proxy
+        # iter-189: prefer the actual integration dt when provided.
+        # The ``is not None`` check happens at trace time — production
+        # callers always pass a value; direct test callers always pass
+        # None.  No mixed call pattern, so JIT trace cache stays
+        # single-entry per caller.
+        if dt_actual is not None:
+            _dt_approx = dt_actual
+        else:
+            _dt_approx = config.corner_div_damp_dt_proxy
         _damp_corner = _da_min_c * jnp.maximum(
             config.corner_div_damp_d2_bg,
             jnp.minimum(
@@ -1394,11 +1403,15 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                 _phys_result = physics_fn(s_cc, self.grid, self.sigma_coord)
                 phys_cc = _phys_result[0] if type(_phys_result) is tuple else _phys_result
 
+            # FV3_3D iter 189: pass the actual integration dt so
+            # the iter-16 / iter-187 corner-div damping adaptive cap
+            # uses the real dt instead of ``config.corner_div_damp_dt_proxy``.
             tend = fv3_hydrostatic_tendencies(
                 s, self.grid, self.sigma_coord, cdgrid,
                 self.config,
                 physics_tendency=None,
                 physics_tendency_cc=phys_cc,
+                dt_actual=dt,
             )
             # Return an FV3HydrostaticState-shaped pytree with tendency data
             # so that the time integrator's tree_map works correctly.

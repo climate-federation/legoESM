@@ -188,6 +188,7 @@ def cdgrid_compressible_euler_slow_tendencies(
     cdgrid: CubedSphereCDGrid,
     config: CDGridCompressibleEulerConfig,
     physics_tendency: NonHydrostaticTendencies | None = None,
+    dt_actual: float | jax.Array | None = None,
 ) -> NonHydrostaticTendencies:
     """Compute slow (advective) tendencies using C-D grid operators.
 
@@ -451,9 +452,16 @@ def cdgrid_compressible_euler_slow_tendencies(
         # defaults to 10.0 (vs 200.0 in PE) to keep the adaptive cap
         # active at the right scale.  d2_bg floor dominates in HS-like
         # regimes regardless.
+        # iter-189: prefer the actual integration ``dt`` (passed by
+        # ``model.step`` as ``dt_actual=dt``) when provided.  Direct
+        # callers without ``dt_actual`` fall back to ``config.dt_proxy``
+        # — preserves backward compatibility for unit tests.
         _da_min_c = jnp.min(cdgrid.area_corner)
         _delpc_abs = jnp.abs(delpc)
-        _dt_approx = config.corner_div_damp_dt_proxy
+        if dt_actual is not None:
+            _dt_approx = dt_actual
+        else:
+            _dt_approx = config.corner_div_damp_dt_proxy
         _damp_corner = _da_min_c * jnp.maximum(
             config.corner_div_damp_d2_bg,
             jnp.minimum(
@@ -869,9 +877,12 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
                     s, self.grid, self.height_coord, self.terrain_metric,
                 )
                 phys = _phys_result[0] if type(_phys_result) is tuple else _phys_result
+            # FV3_3D iter 189: pass the actual integration dt so
+            # the iter-168 / iter-187 corner-div damping adaptive cap
+            # uses the real dt instead of ``config.corner_div_damp_dt_proxy``.
             tend = cdgrid_compressible_euler_slow_tendencies(
                 s, self.grid, self.height_coord, self.terrain_metric,
-                self.cdgrid, self.config, phys,
+                self.cdgrid, self.config, phys, dt_actual=dt,
             )
             return NonHydrostaticState(
                 u=s.u.replace(data=tend.du_dt.data),

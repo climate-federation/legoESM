@@ -189,6 +189,15 @@ Key iterations:
   with default = 200.0 (preserves existing iter-18 behaviour) and
   a comprehensive PE-side AST guard test with iter-178-style
   self-check.
+- Iter 189: plumb the actual integration ``dt`` to the corner-div
+  damping adaptive cap in BOTH PE and NH 3D paths.  iter 187/188
+  used ``config.corner_div_damp_dt_proxy`` (a constant approximation)
+  for the FV3 ``min(0.20, dddmp * dt * smag_vort)`` cap.  FV3
+  ``d_sw5`` uses the actual integration dt.  iter-189 threads the
+  real dt from ``model.step`` → ``tendency_fn`` →
+  ``fv3_hydrostatic_tendencies`` (PE) and analogous NH path, with
+  fallback to the existing config dt-proxy when no dt is passed
+  (preserves backward compatibility for direct-call tests).
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
@@ -4071,6 +4080,160 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
+
+## Iteration 189 (2026-05-08): plumb actual integration dt to corner-div damp cap (PE + NH)
+
+### Goal
+
+Close a residual fidelity gap left open by iter 187/188.  FV3
+``sw_core.F90:d_sw5`` uses the ACTUAL sub-cycle dt in the
+adaptive damping cap (``min(0.20, dddmp * dt * |delpc|)`` for
+nord=0 and ``min(0.20, dddmp * dt * sqrt(delpc² + ζ²))`` for
+nord >= 1).  legoESM iter-16/iter-18/iter-168/iter-187 use a
+config-tunable approximation (``corner_div_damp_dt_proxy``,
+default 200.0 for PE / 10.0 for NH).  This is FV3-faithful when
+the user runs at exactly that dt but mis-scales the cap when the
+integration dt differs (e.g., C96 production runs at dt=50 with
+PE dt_proxy=200).
+
+### Why now
+
+iter-187's smag_vort cap depends on dt linearly: a 4× over-
+estimate of dt at C96 (dt=50 vs dt_proxy=200) means the
+``min(0.20, dddmp * dt * smag_vort)`` cap engages 4× MORE often
+than FV3 would at the same physical state.  In HS-typical regimes
+the d2_bg floor dominates so iter-99's 30-day stability result is
+not affected, but in transient strong-divergence regimes the
+cap-engagement difference is real.
+
+### Plan
+
+1.  Add ``dt_actual: float | None = None`` keyword to the PE
+    ``fv3_hydrostatic_tendencies`` signature (line 358) and the
+    NH ``cdgrid_compressible_euler_slow_tendencies`` signature
+    (line 183).
+2.  Inside both functions, in the corner-div damping block,
+    compute::
+
+        _dt_approx = (
+            dt_actual if dt_actual is not None
+            else config.corner_div_damp_dt_proxy
+        )
+
+    This propagates automatically to BOTH the iter-16/iter-168
+    nord=0 cap and the iter-187 nord >= 1 smag_vort cap (both
+    reuse the same ``_dt_approx`` local).
+3.  In ``CDGridPrimitiveEquationModel.step`` (around line 1397)
+    and ``CDGridCompressibleEulerModel.step`` (around line 872),
+    pass ``dt_actual=dt`` to the tendency call.
+4.  Add tests verifying:
+    * Default behaviour (no dt_actual) uses config.dt_proxy
+      → existing iter-18 / iter-187 baselines bit-for-bit
+      unchanged.
+    * With ``dt_actual=N``, the smag_vort cap engages
+      proportionally to N (verified at the model.step level
+      with two configs differing only in dt).
+5.  Update FV3_3D.md.
+
+### Backward compatibility
+
+* All existing direct callers of ``fv3_hydrostatic_tendencies(...)``
+  / ``cdgrid_compressible_euler_slow_tendencies(...)`` (which
+  don't pass dt_actual) continue to use ``config.corner_div_damp_dt_proxy``
+  → bit-for-bit unchanged.
+* model.step path now uses the actual dt → fidelity-corrected.
+  At dt = config.corner_div_damp_dt_proxy (the existing PE
+  default 200.0 = the iter-33 ah_x10+dt=200 reference) the new
+  behaviour is bit-for-bit identical to iter-188.
+
+### Implementation
+
+PE (``primitive_eq_cdgrid.py``):
+
+1. Added ``dt_actual: float | jax.Array | None = None`` keyword to
+   ``fv3_hydrostatic_tendencies`` signature.
+2. Inside the corner-div damping block (line ~681) replaced::
+
+       _dt_approx = config.corner_div_damp_dt_proxy
+
+   with::
+
+       if dt_actual is not None:
+           _dt_approx = dt_actual
+       else:
+           _dt_approx = config.corner_div_damp_dt_proxy
+
+3. ``CDGridPrimitiveEquationModel.step``'s ``tendency_fn`` closure
+   now passes ``dt_actual=dt`` to ``fv3_hydrostatic_tendencies``.
+
+NH (``compressible_euler_cdgrid.py``):
+
+1. Added the same kwarg to ``cdgrid_compressible_euler_slow_tendencies``.
+2. Same ``_dt_approx`` resolution change at the iter-168 site.
+3. ``CDGridCompressibleEulerModel._step_jitted``'s ``slow_tendency_fn``
+   closure now passes ``dt_actual=dt``.
+
+### Tests
+
+New file ``tests/test_corner_div_damp_dt_actual_iter189.py`` (6 tests,
+no production-only test, no new helpers):
+
+1. ``test_pe_dt_actual_default_matches_dt_proxy_fallback`` — direct
+   call without ``dt_actual`` matches an explicit ``dt_actual=
+   config.corner_div_damp_dt_proxy`` call bit-for-bit (backward
+   compat sentinel).
+2. ``test_pe_dt_actual_changes_smag_vort_cap`` — different
+   ``dt_actual`` values produce different states when the cap is
+   engaged (proves the wiring is exercised).
+3. ``test_nh_dt_actual_default_matches_dt_proxy_fallback`` — NH
+   counterpart of test 1.
+4. ``test_nh_dt_actual_changes_smag_vort_cap`` — NH counterpart
+   of test 2.
+5. ``test_pe_step_passes_dt_actual_ast_regression`` — AST guard
+   that ``CDGridPrimitiveEquationModel.step`` passes ``dt_actual=dt``.
+6. ``test_nh_step_passes_dt_actual_ast_regression`` — NH counterpart.
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_corner_div_damp_dt_actual_iter189.py
+    => 6 passed
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_div_damp_adaptive.py \
+        tests/test_corner_div_damp_smag_vort_iter187.py \
+        tests/test_corner_div_damp_nh.py \
+        tests/test_div_damp_quantitative_iter174.py \
+        --deselect tests/test_div_damp_adaptive.py::test_corner_div_damp_fv3_vector_fill_bit_for_bit_nord1
+    => 32 passed (PE iter-18 + iter-187 + NH iter-168 + iter-174
+       baselines preserved bit-for-bit; deselected test is the
+       pre-existing 1-ULP iter-22 flake)
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_fv3_full_toolkit_ad_at_rest_iter184.py \
+        tests/test_fv3_nh_toolkit_iter172.py \
+        tests/test_fv3_pe_toolkit_iter188.py
+    => 10 passed (umbrella AD-at-rest + NH/PE AST guards
+       preserved)
+
+### Status
+
+The iter-187 smag_vort cap and the iter-16/iter-168 nord=0 cap now
+use the actual integration dt (passed by ``model.step``) instead of
+a config-tunable approximation.  Backward compatibility is exact:
+direct callers without ``dt_actual`` use the iter-188 fallback.
+The seventh iter-187 codex review concern (dt fidelity) is resolved.
+
+### Why this iteration was meaningful
+
+iter-187/iter-188 closed the smag_vort formula gap and the dt-proxy
+parity gap, but the dt scale itself was still an approximation.
+FV3 ``d_sw5`` uses the actual integration dt — at C96 production
+(dt=50 s with PE dt_proxy=200 s default) the previous cap was 4×
+over-engaged.  This iter resolves that.  The fix is ~5 LOC each in
+PE / NH plus a one-line keyword pass at the model.step closures.
 
 ## Iteration 188 (2026-05-08): PE / NH parity + PE AST regression guard
 
