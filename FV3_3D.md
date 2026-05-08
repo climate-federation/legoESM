@@ -367,6 +367,15 @@ Key iterations:
   config field (FV3 production default 1.0).  PE-only mirror of
   the iter-203 NH ``damp_w_d_con``.  Default off; gated INSIDE
   the iter-12 ``damp_v > 0`` block.
+- Iter 209: port FV3 ``d_con`` for NH iter-169 damp_v (NH mirror
+  of PE iter-208).  Same KE→heat formula at cell centres (NH stores
+  u, v at cell centres, so no corner→center projection needed):
+  ``Δθ_p = -damp_v_d_con * ΔKE_cc / (c_pd * Π_ref)``.  Π_ref via
+  ``HeightCoordinate.exner_ref`` matches the iter-207 refinement
+  pattern.  Adds ``damp_v_d_con: float = 0.0`` to NH config
+  (default off; FV3 production default 1.0).  Both 3D paths now
+  have d_con coverage for both damping mechanisms (PE: damp_v;
+  NH: damp_v + damp_w).
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::

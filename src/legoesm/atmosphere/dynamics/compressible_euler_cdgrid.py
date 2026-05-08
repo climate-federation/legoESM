@@ -136,6 +136,18 @@ class CDGridCompressibleEulerConfig(NamedTuple):
     # Order of the post-step vorticity damping (0=del-2, 1=del-4,
     # 2=del-6).  FV3 default is 2 (del-6).  Only active when
     # ``damp_v > 0``.
+    # FV3-faithful KE→heat conversion for iter-169 damp_v (FV3_3D
+    # iter 209, NH mirror of PE iter-208).  When ``damp_v`` removes
+    # KE from (u, v) cell-centre winds via the post-step (du_cc,
+    # dv_cc) increments, the lost KE is converted to heat in θ_p
+    # for energy conservation:
+    #   ΔKE_cc = u * du + 0.5*du² + v * dv + 0.5*dv²
+    #   Δθ_p = -damp_v_d_con * ΔKE_cc / (c_pd * Π_ref)
+    # Π_ref comes from ``HeightCoordinate.exner_ref`` (matches
+    # iter-207 refinement of the iter-203 damp_w_d_con).  Default
+    # 0.0 preserves baseline (gated INSIDE iter-169 ``damp_v > 0``).
+    # FV3 production default is 1.0.
+    damp_v_d_con: float = 0.0
     # FV3-faithful 4th-order A→B interpolation for ζ corner
     # (FV3_3D iter 170).  Mirrors the iter-14 wiring in
     # ``CDGridPrimitiveEquationConfig``.  Reuses the SW backbone
@@ -1057,10 +1069,35 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
             du_cc = _duv_cc[..., 0]
             dv_cc = _duv_cc[..., 1]
 
-            state_new = state_new._replace(
-                u=state_new.u.replace(data=u_cc_new + du_cc),
-                v=state_new.v.replace(data=v_cc_new + dv_cc),
-            )
+            # FV3_3D iter 209: optional KE→heat conversion for the
+            # iter-169 damp_v wind increments (NH mirror of PE
+            # iter-208).  ΔKE_cc = u*du + 0.5*du² + v*dv + 0.5*dv²;
+            # heat = -damp_v_d_con * ΔKE_cc; Δθ_p = heat / (c_pd *
+            # Π_ref) using exner_ref (matches iter-207 refinement).
+            if self.config.damp_v_d_con > 0.0:
+                from legoesm import constants
+                dKE_cc = (
+                    u_cc_new * du_cc + 0.5 * du_cc ** 2
+                    + v_cc_new * dv_cc + 0.5 * dv_cc ** 2
+                )
+                _exner_ref_broadcast = self.height_coord.exner_ref[
+                    None, None, None, :
+                ]
+                dtheta_p = -self.config.damp_v_d_con * dKE_cc / (
+                    constants.c_pd * _exner_ref_broadcast
+                )
+                state_new = state_new._replace(
+                    u=state_new.u.replace(data=u_cc_new + du_cc),
+                    v=state_new.v.replace(data=v_cc_new + dv_cc),
+                    theta_prime=state_new.theta_prime.replace(
+                        data=state_new.theta_prime.data + dtheta_p,
+                    ),
+                )
+            else:
+                state_new = state_new._replace(
+                    u=state_new.u.replace(data=u_cc_new + du_cc),
+                    v=state_new.v.replace(data=v_cc_new + dv_cc),
+                )
 
         # FV3_3D iter 193: optional post-step del-(2*(nord_w+1))
         # damping of vertical velocity ``w``.  Faithful port of FV3

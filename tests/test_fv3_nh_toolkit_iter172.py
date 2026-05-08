@@ -240,6 +240,9 @@ def test_nh_fv3_config_fields_ast_regression():
         "nord_w": 2,
         # iter-203 KE→heat conversion for damp_w (FV3 d_sw1 d_con).
         "damp_w_d_con": 0.0,
+        # iter-209 KE→heat conversion for damp_v (NH mirror of PE
+        # iter-208).
+        "damp_v_d_con": 0.0,
     }
 
     missing = []
