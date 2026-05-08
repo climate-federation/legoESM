@@ -602,6 +602,11 @@ Key iterations:
   over-time).
 - Iter 270: NH AD-at-rest gradient with d4_bg=0.02 (mirror
   of PE iter-261).  jax.grad finite + 10-iter ToC compaction.
+- Iter 271: NH stability sweep across ``n_acoustic_substeps``
+  values {2, 4, 8} with full d_con stack.  All 3 produce
+  finite u + theta_p over 10 NH steps.  Validates that the
+  NH acoustic substepping is robust to substep-count choice
+  with the iter-184 + d_con stack engaged.  3/3 pass in 38 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
