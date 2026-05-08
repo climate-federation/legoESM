@@ -91,6 +91,8 @@ Key iterations:
 - Iter 106-113: stretch-goal documentation + small refinements
   (C144/C192 deferred budget note, jet-spinup clarification,
   test-count audit, C72 mid_std in Final state table)
+- Iter 114-118: minor maintenance (ToC counts, Final state
+  heading, mixed-ordering convention note, trajectory observation)
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
