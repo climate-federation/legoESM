@@ -623,6 +623,14 @@ Key iterations:
   d_con (closes PE per-mechanism direction trio with
   iter-272/273).  Mean(dT_d_con) > 0 when iter-57/58 A_h
   Laplacian removes KE.  1/1 pass in 13 s.
+- Iter 275: NH counterparts of the iter-272/273/274 PE
+  direction trio.  Mean(dT_eq = Π_ref * dθ_p_d_con) > 0 for
+  each NH tendency-based d_con site (iter-222 corner-div,
+  iter-224 cell-centre div_damp, iter-226 A_h).  Closes the
+  NH per-mechanism direction-test trio.  3/3 pass in 39 s.
+  All 6 d_con sites (3 PE + 3 NH tendency-based) now have
+  explicit net-heating direction tests in addition to bit-
+  for-bit / linearity formula tests.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
