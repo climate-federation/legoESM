@@ -152,6 +152,20 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # 10x-A_h calibration is case-specific.  Default 0.0 = off,
         # bit-for-bit baseline.  See FV3_3D.md iter 57/58 for the
         # closure derivation.
+    ah_d_con: float = 0.0
+        # FV3-faithful KE→heat conversion for the iter-57/58
+        # Smagorinsky-augmented A_h Laplacian on (u_d, v_d)
+        # (FV3_3D iter 225).  Mirrors iter-208/221/223 d_con but
+        # for the A_h tendency.  Heat tendency formula (per
+        # second, leading order in dt):
+        #
+        #     dKE/dt_corner = u_d * du_d_dt_ah + v_d * dv_d_dt_ah
+        #     dT/dt += -ah_d_con * (dKE/dt) / c_pd
+        #
+        # at corners, projected to cell centres via
+        # ``_interp_corner_to_center``.  Default 0.0 preserves
+        # bit-for-bit baseline; gated INSIDE ``A_h > 0``.  FV3
+        # production default is 1.0.
     hyperdiff_coeff: float = 0.0
     hyperdiff_ps_coeff: float = 0.0
     div_damp_coeff: float = 0.0   # Divergence damping coefficient [m^2/s]
@@ -1341,8 +1355,10 @@ def fv3_hydrostatic_tendencies(
             # _lap_uv_d is at corners (same shape).  Combined:
             #   du/dt += (A_h + ah_smag) * lap_u
             _ah_eff_corner = config.A_h + _ah_smag_corner
-            du_d_dt = du_d_dt + _ah_eff_corner * _lap_uv_d[..., 0]
-            dv_d_dt = dv_d_dt + _ah_eff_corner * _lap_uv_d[..., 1]
+            _du_d_dt_ah = _ah_eff_corner * _lap_uv_d[..., 0]
+            _dv_d_dt_ah = _ah_eff_corner * _lap_uv_d[..., 1]
+            du_d_dt = du_d_dt + _du_d_dt_ah
+            dv_d_dt = dv_d_dt + _dv_d_dt_ah
             # T is at cell centers.  Interpolate ah_smag from corners
             # via 4-point average; add to static A_h for cell-centred
             # T tendency.
@@ -1355,9 +1371,33 @@ def fv3_hydrostatic_tendencies(
             _ah_eff_cell = config.A_h + _ah_smag_cell
             dT_dt_data = dT_dt_data + _ah_eff_cell * lap_uvT[..., 2]
         else:
-            du_d_dt = du_d_dt + config.A_h * _lap_uv_d[..., 0]
-            dv_d_dt = dv_d_dt + config.A_h * _lap_uv_d[..., 1]
+            _du_d_dt_ah = config.A_h * _lap_uv_d[..., 0]
+            _dv_d_dt_ah = config.A_h * _lap_uv_d[..., 1]
+            du_d_dt = du_d_dt + _du_d_dt_ah
+            dv_d_dt = dv_d_dt + _dv_d_dt_ah
             dT_dt_data = dT_dt_data + config.A_h * lap_uvT[..., 2]
+
+        # FV3_3D iter 225: optional KE→heat d_con conversion for
+        # the iter-57/58 Smagorinsky-A_h Laplacian on (u_d, v_d).
+        # Mirrors iter-208/221/223 d_con but for the A_h tendency.
+        # Heat tendency formula (per second, leading order):
+        #
+        #     dKE/dt_corner = u_d * du_d_dt_ah + v_d * dv_d_dt_ah
+        #     dT/dt += -ah_d_con * (dKE/dt) / c_pd
+        #
+        # at corners, projected to cell centres via
+        # ``_interp_corner_to_center``.  Default 0.0 preserves
+        # bit-for-bit baseline; gated INSIDE ``A_h > 0``.  FV3
+        # production default is 1.0.
+        if config.ah_d_con > 0.0:
+            _dKE_dt_corner_ah = (
+                u_d * _du_d_dt_ah + v_d * _dv_d_dt_ah
+            )
+            dT_dt_data = dT_dt_data + (
+                -config.ah_d_con
+                * _interp_corner_to_center(_dKE_dt_corner_ah)
+                / constants.c_pd
+            )
 
     if config.hyperdiff_coeff > 0:
         du_d_dt = du_d_dt + _hd_uv_d[..., 0]

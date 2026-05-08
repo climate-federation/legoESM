@@ -540,6 +540,19 @@ Key iterations:
   iter-223.  4/4 NH tests pass in 49 s.  Closes the cell-centre
   div_damp d_con asymmetry between PE and NH; only Smagorinsky-
   A_h d_con remains.
+- Iter 225: port FV3 ``d_con`` for the iter-57/58 Smagorinsky-A_h
+  Laplacian on (u_d, v_d) (PE).  Closes the LAST PE-side d_con
+  asymmetry called out in iter-208 (cell-centre div_damp d_con
+  was iter-223; this is A_h d_con).  When iter-57/58 A_h
+  Laplacian removes KE from (u_d, v_d) via
+  ``du_d_dt += A_h * lap_u``, the lost KE is converted to heat
+  in T:
+  ``dT/dt += -ah_d_con * (u_d * du_d_dt_ah + v_d * du_d_dt_ah) /
+  c_pd``, projected to cell centres.  Adds ``ah_d_con: float =
+  0.0`` config knob.  Default preserves bit-for-bit baseline.
+  Gated INSIDE ``A_h > 0``.  Four-test fixture: off-baseline,
+  T-changes-when-active, no-op-when-ah-off, AD-safe-at-rest.
+  4/4 pass in 30 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
