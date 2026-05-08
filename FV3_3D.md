@@ -11,7 +11,7 @@ visible cube imprint (concentric blobs at face centres bordered by
 red/blue rings at panel boundaries) in u/v wind snapshots from
 Held-Suarez and baroclinic test cases.
 
-## Final state (iter 100 close-out)
+## Final state (iter 100 close-out, table updated through iter 103)
 
 Core deliverable RESOLVED at iter 99: HS at C96 30 days completes
 finite under the canonical setting::
