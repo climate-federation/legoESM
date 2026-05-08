@@ -688,6 +688,14 @@ Key iterations:
   helper (a2b_ord4, divergence, laplacian, _interp_*)
   inherits.  18/18 pass in 1.5 s.  Plus 10-iter ToC
   compaction (iters 300-309).
+- Iter 311: ``pad_halo_vector`` zero + linearity in (u, v).
+  pad(0, 0) → (0_padded, 0_padded) exactly.  Linearity
+  (rtol=1e-13) for (α, β) ∈ {(1,1), (2,-3), (0.5,0.5),
+  (-1,7)}.  Vector halo chain (rotation → scalar pad →
+  inverse rotation) is linear at fixed grid angles.  Extends
+  iter-310 scalar halo characterization to the vector path
+  used by every (u, v) cubed-sphere operator.  5/5 pass in
+  4.4 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
