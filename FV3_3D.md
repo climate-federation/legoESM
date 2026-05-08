@@ -516,6 +516,16 @@ Key iterations:
   errors in any single NH d_con site that the iter-230
   linearity tests cannot expose (linearity is preserved
   regardless of sign).  1/1 pass in 22 s.
+- Iter 233: cube-imprint regression for the full PE d_con
+  stack.  iter-217 verified the iter-19 PE toolkit measurably
+  changes the imprint ratio without strongly amplifying it.
+  iter 233 extends that check: with the full PE d_con stack ON
+  (4 knobs at 1.0 each), the imprint ratio must remain within
+  50 % of the d_con-OFF baseline.  d_con only modifies dT_dt
+  at cell centres (no edge stencil) so the v_d edge structure
+  should be essentially unchanged from d_con's direct effect.
+  Catches d_con-induced edge artifacts that would propagate
+  through PGF feedback.  1/1 pass in 21 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
