@@ -44,7 +44,11 @@ restructure.  See [Open follow-ups](#open-follow-ups-iter-38-status-updated-thro
 
 This document tracks 100+ investigation iterations.  For most
 users the relevant sections are at the top; the iteration log
-preserves the diagnostic chain for future maintainers.
+preserves the diagnostic chain for future maintainers.  The
+iteration log itself uses MIXED ordering: iter 1-46 are in
+chronological order at the bottom (oldest first); iter 48+ are
+in REVERSE chronological order (newest first) so latest
+findings are immediately visible.
 
 - [**Lessons learned**](#lessons-learned-iter-84-synthesis-of-iter-18-83) — 7-point synthesis from 65+ cycles of investigation.
 - [**Investigation summary**](#investigation-summary-iter-51-codex-meta-review-consolidation) — two-mechanism story (corner-divergence damping vs Laplacian viscosity calibration).
