@@ -619,6 +619,10 @@ Key iterations:
   div_damp_d_con (mirror of iter-272).  Mean(dT_d_con) > 0
   when iter-5 cell-centre div_damp is removing KE.  1/1 pass
   in 13 s.
+- Iter 274: explicit direction test for iter-225 PE A_h
+  d_con (closes PE per-mechanism direction trio with
+  iter-272/273).  Mean(dT_d_con) > 0 when iter-57/58 A_h
+  Laplacian removes KE.  1/1 pass in 13 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
