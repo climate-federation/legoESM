@@ -2205,15 +2205,27 @@ class TestHeldSuarezDissipationImbalance:
                 f"than long_time dt={dt_lt:.1f}"
             )
 
-    def test_resolve_dt_cube_very_long_time_env_var(self, monkeypatch):
-        """iter 80: ``LEGOESM_HS_CUBE_DT_CFL=very_long_time`` selects
-        the iter-80 calibration.
+    def test_resolve_dt_cube_very_long_time_env_var(
+            self, monkeypatch, capsys):
+        """iter 80 / iter 93: ``LEGOESM_HS_CUBE_DT_CFL=very_long_time``
+        selects the iter-80 calibration AND prints a notice mentioning
+        the mode.
+
+        iter 93 expanded to verify the printed notice includes
+        ``very_long_time`` so users can confirm which calibration
+        mode is active from the matrix output.
         """
         for val in ("very_long_time", "verylongtime", "VERY_LONG_TIME"):
             monkeypatch.setenv("LEGOESM_HS_CUBE_DT_CFL", val)
+            capsys.readouterr()  # clear
             dt_96 = M._resolve_dt_cube(96)
+            captured = capsys.readouterr().out
             assert 47.0 <= dt_96 <= 53.0, (
                 f"very_long_time at C96 expected dt ≈ 50, got {dt_96:.1f}"
+            )
+            assert "very_long_time" in captured, (
+                f"iter-93: notice for env var {val!r} must mention "
+                f"'very_long_time'.  Got: {captured!r}"
             )
 
     def test_resolve_dt_cube_long_time_env_var(self, monkeypatch, capsys):
