@@ -48,7 +48,13 @@ def _run_c96_smoke(
     smag_cs: float = 0.0,
     n: int = 96,
 ) -> dict:
-    """Run HS C96 for ``days`` and return a diagnostic dict."""
+    """Run HS at the cube resolution ``n`` for ``days`` and return
+    a diagnostic dict.
+
+    Despite the legacy ``_c96_`` name and ``n=96`` default, the
+    probe accepts ``n`` as an explicit argument so the same script
+    handles C36, C48, C72, C96, C144, etc.
+    """
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel,
