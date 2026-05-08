@@ -573,6 +573,17 @@ Key iterations:
   100×dt=10 complete with all fields finite + max|u| < 100
   m/s.  2/2 pass in 33 s.  Independent test file (does not
   modify iter-242, so iter-242 keeps its fast 33s coverage).
+- Iter 245: PE iter-19 PRODUCTION values (d4_bg=0.02 + nord=1,
+  the C36 30-day cube-imprint sweet spot from iter-19) + d_con
+  stack at C36 production resolution.  iter-242/244 used softer
+  d4_bg=1e-3 (iter-192-style for AD-friendly umbrellas).
+  iter-245 runs 20 steps × dt=200 = 1 hour at C36 with the
+  iter-19 PRODUCTION setting + all 4 PE d_con knobs at 1.0 +
+  delt_max=1.0 + A_h=1e7 (iter-33 calibration scaled to C36).
+  Validates that the d_con stack composes stably with the
+  production damping at the actual production grid.  Also adds
+  physical-bounds sanity (100 K < T < 400 K).  1/1 pass in
+  17 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
