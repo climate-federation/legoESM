@@ -3969,6 +3969,17 @@ auto-mode at the highest canonical resolution C192.
 
 C192 auto-mode is empirically stable for at least 1 day.
 
+### Note on jet spinup
+
+The iter-99 C96 30-day max|u|=20.14 m/s and the iter-103 C192
+1-day max|u|=0.84 m/s are consistent with HS jet SPINUP, not
+equilibrium climatology.  Typical HS climate-equilibrium jets
+are 30-50 m/s; reaching that takes ~150-200 days of integration.
+The 30-day quick spin-up is sufficient to verify stability but
+not to characterize the equilibrium climatology.  See iter-13
+sponge note in the cube HS branch for the cross-grid mean_T gap
+calibration that uses 30-day spin-up.
+
 ### Status
 
 iter-72/81 auto-mode now validated end-to-end at all canonical
