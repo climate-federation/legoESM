@@ -537,6 +537,14 @@ Key iterations:
   bit equal).  Also compacts ToC entries iter-230..239 from
   ~115-line block to ~40 lines (saves ~75 lines for context
   budget).
+- Iter 241: extend iter-188 PE and iter-172 NH AST guards to
+  cover the iter-239/240 aggregate-cap pattern.  Adds 1 new
+  pair to each guard list — gate ``_d_con_sum is not None``
+  paired with PE helper ``_cap_per_level`` / NH helper
+  ``_sponge_factor``.  Catches refactors that drop or rewrite
+  the aggregate-cap block while leaving per-mechanism
+  ``config.X_d_con > 0`` checks intact.  8/8 AST tests pass
+  in 82 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::

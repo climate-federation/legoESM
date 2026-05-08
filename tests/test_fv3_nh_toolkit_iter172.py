@@ -329,6 +329,11 @@ NH_GATE_HELPER_PAIRS = [
     ("config.div_damp_d_con > 0.0", "_dKE_dt_corner_dd"),
     # iter-226: Smagorinsky-A_h d_con.
     ("config.ah_d_con > 0.0", "_dKE_dt_corner_ah"),
+    # iter-240: NH mirror of iter-239 aggregate cap.  Sums the 3
+    # NH tendency-based d_con contributions and applies the
+    # iter-219 sponge-aware cap (k=0 → 0.1×, k=1 → 0.5×, k≥2 → 1×)
+    # before adding to ``dtheta_p_dt``.
+    ("_d_con_sum is not None", "_sponge_factor"),
 ]
 
 

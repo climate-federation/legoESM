@@ -171,6 +171,12 @@ _PE_GATE_HELPER_PAIRS = [
     ("config.div_damp_d_con > 0.0", "_dKE_dt_corner_dd"),
     # iter-225: Smagorinsky-A_h d_con.
     ("config.ah_d_con > 0.0", "_dKE_dt_corner_ah"),
+    # iter-239: aggregate cap on the 3 PE tendency-based d_con
+    # contributions.  The aggregation builds ``_d_con_sum`` by
+    # summing the (None-aware) per-mechanism contributions then
+    # applies ``jnp.clip`` with a sponge-aware per-level cap
+    # before adding to ``dT_dt_data``.
+    ("_d_con_sum is not None", "_cap_per_level"),
 ]
 
 
