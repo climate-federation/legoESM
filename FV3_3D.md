@@ -607,6 +607,14 @@ Key iterations:
   finite u + theta_p over 10 NH steps.  Validates that the
   NH acoustic substepping is robust to substep-count choice
   with the iter-184 + d_con stack engaged.  3/3 pass in 38 s.
+- Iter 272: explicit direction test for iter-221 corner_div_
+  damp_d_con (PE).  iter-228 verifies bit-for-bit formula
+  (including sign); iter-272 adds the explicit mean-direction
+  sanity: with corner-div damping ON, mean(dT_d_con) > 0
+  (NET heating from KE→heat conversion).  Catches a global
+  sign error that the iter-228 per-cell test would also
+  catch but with less direct interpretation.  1/1 pass in
+  14 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
