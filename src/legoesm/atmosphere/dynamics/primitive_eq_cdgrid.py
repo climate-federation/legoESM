@@ -339,6 +339,16 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # nonuniform-metric stress test).  Iter 23+ may extend this
         # to nord >= 2 where the flag would have functional effect.
         # Default False — gives bit-for-bit iter-18.
+    corner_div_damp_dt_proxy: float = 200.0
+        # FV3_3D iter 188: parity with NH ``corner_div_damp_dt_proxy``
+        # field.  PE outer dt is typically 50-200s for HS production
+        # (see iter-72 LEGOESM_HS_CUBE_DT_CFL auto-mode); 200.0 was
+        # the hardcoded value at the iter-16 wiring site (line 669)
+        # since this default is the iter-33 ah_x10+dt=200 reference.
+        # Used in BOTH the iter-16 nord=0 cap (``dddmp * |delpc * dt|``)
+        # and the iter-187 nord >= 1 smag_vort cap
+        # (``dddmp * |dt| * sqrt(delpc² + ζ²)``).  Default 200.0
+        # preserves existing behaviour bit-for-bit.
 
 
 # ==============================================================================
@@ -657,16 +667,18 @@ def fv3_hydrostatic_tendencies(
         # Note: FV3 multiplies by dt because ``delpc`` is per-second
         # divergence and ``dddmp * delpc * dt`` is the dimensionless
         # CFL-scaled damping factor.  Our tendency function does not
-        # see ``dt`` directly; use a typical 200 s as a placeholder
-        # (the d2_bg floor dominates in HS regimes anyway, see iter-5
-        # adaptive analysis).
+        # see ``dt`` directly; iter-188 added ``corner_div_damp_dt_proxy``
+        # (default 200.0, matching the previously hardcoded value) for
+        # parity with the NH path.  The d2_bg floor dominates in HS
+        # regimes anyway (see iter-5 adaptive analysis).
         _da_min_c = jnp.min(cdgrid.area_corner)
         _delpc_abs = jnp.abs(delpc)
-        # Approximate dt via grid CFL; the exact value matters only
-        # when the adaptive cap (0.20) is active.  In HS the floor
-        # (d2_bg) dominates; iter-5 confirmed ``dddmp`` adaptive
-        # damping is essentially inert at HS divergence levels.
-        _dt_approx = 200.0
+        # Approximate dt via the config-tunable ``dt_proxy`` (iter
+        # 188); the exact value matters only when the adaptive cap
+        # (0.20) is active.  In HS the floor (d2_bg) dominates;
+        # iter-5 confirmed ``dddmp`` adaptive damping is essentially
+        # inert at HS divergence levels.
+        _dt_approx = config.corner_div_damp_dt_proxy
         _damp_corner = _da_min_c * jnp.maximum(
             config.corner_div_damp_d2_bg,
             jnp.minimum(

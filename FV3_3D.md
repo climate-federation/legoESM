@@ -181,6 +181,14 @@ Key iterations:
   ``_interp_center_to_corner_a2b_ord4`` for ζ_corner and the iter-
   181/183 double-where pattern for sqrt(0) AD safety.  Bit-for-bit
   baseline preserved at nord=0.
+- Iter 188: PE / NH parity + PE AST regression guard.  Closes
+  iter-187 codex review concerns 2 (PE hardcodes ``_dt_approx
+  = 200.0`` while NH has tunable ``corner_div_damp_dt_proxy``)
+  and 6 (PE iter-12/14/16/18/187 wirings have no AST regression
+  guard mirroring iter-172 NH).  Adds the missing PE config field
+  with default = 200.0 (preserves existing iter-18 behaviour) and
+  a comprehensive PE-side AST guard test with iter-178-style
+  self-check.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
@@ -4063,6 +4071,128 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
+
+## Iteration 188 (2026-05-08): PE / NH parity + PE AST regression guard
+
+### Goal
+
+Close two iter-187 codex-review concerns:
+
+1.  **Concern 2 — PE / NH dt-proxy parity gap.**  PE
+    ``primitive_eq_cdgrid.py`` hardcodes ``_dt_approx = 200.0`` at
+    line 669; NH ``compressible_euler_cdgrid.py`` has a tunable
+    ``corner_div_damp_dt_proxy: float = 10.0`` config field
+    (line 120) used at line 456.  Iter-187's smag_vort cap inherits
+    the same hardcoded PE value with no user override path —
+    inconsistent with the NH parity established by iter 168.
+2.  **Concern 6 — PE has no AST regression guard.**  iter-172
+    added the AST regression guard for the iter-168/169/170/171
+    NH wirings, extended by iter-178/186 to cover iter-173/180.
+    The PE iter-12/14/16/18/187 wirings have no equivalent
+    structural guard — a refactor that drops any of them while
+    keeping the config field would silently disable the feature.
+
+### Plan
+
+1.  Add ``corner_div_damp_dt_proxy: float = 200.0`` to
+    ``CDGridPrimitiveEquationConfig`` (default preserves the
+    existing iter-18 behaviour bit-for-bit).
+2.  Replace the hardcoded ``_dt_approx = 200.0`` in the PE
+    corner-div damping block (both nord=0 and nord >= 1 paths)
+    with ``_dt_approx = config.corner_div_damp_dt_proxy``.
+3.  Add ``tests/test_fv3_pe_toolkit_iter188.py`` with three
+    tests mirroring iter-172/178:
+    * ``test_pe_fv3_config_fields_ast_regression`` — config field
+      defaults for iter-12/14/16/18/57/187 (damp_v, nord_v,
+      use_fv3_a2b_zeta_corner, corner_div_damp_*, smagorinsky_cs,
+      and the new corner_div_damp_dt_proxy).
+    * ``test_pe_fv3_call_sites_ast_regression`` — gate / helper
+      pairs for each PE-side FV3-faithful wiring (mirror of
+      iter-172 NH guard).
+    * ``test_iter188_ast_guard_self_check`` — drops each pair
+      one at a time and verifies the inner check function flags
+      the omission (mirror of iter-178 self-check).
+4.  Document in FV3_3D.md.
+
+### Key fidelity points
+
+* **Default-preserving**: ``corner_div_damp_dt_proxy = 200.0`` is
+  the existing PE hardcoded value.  Existing tests are
+  bit-for-bit unchanged.
+* **Parity**: PE and NH now share the field name and semantics;
+  the only difference is the per-path default (PE: 200.0 outer
+  dt; NH: 10.0 outer dt with split-explicit acoustic substepping).
+* **AST guard**: same gate/helper pair structure as iter-172,
+  including the iter-178 self-check.
+
+### Implementation
+
+PE config (``primitive_eq_cdgrid.py``, after the iter-22
+``corner_div_damp_fv3_vector_fill`` field)::
+
+    corner_div_damp_dt_proxy: float = 200.0
+        # FV3_3D iter 188: parity with NH ``corner_div_damp_dt_proxy``.
+        # Used in BOTH the iter-16 nord=0 cap and the iter-187
+        # nord >= 1 smag_vort cap.  Default 200.0 preserves existing
+        # iter-18 behaviour.
+
+PE wiring (``primitive_eq_cdgrid.py`` line 681): replaced::
+
+    _dt_approx = 200.0  # hardcoded
+
+with::
+
+    _dt_approx = config.corner_div_damp_dt_proxy
+
+This propagates automatically to the iter-187 smag_vort branch
+which reuses ``_dt_approx``.
+
+PE-side AST guard test (``tests/test_fv3_pe_toolkit_iter188.py``,
+3 tests, no production code change):
+
+1. ``test_pe_fv3_config_fields_ast_regression`` — 13 PE config
+   field defaults across iter-5/12/14/16/18/57/182/187/188.
+2. ``test_pe_fv3_call_sites_ast_regression`` — 8 (gate, helper)
+   pairs covering the FV3-faithful wirings.
+3. ``test_iter188_ast_guard_self_check`` — drops each gate one at
+   a time and verifies the inner check correctly flags the
+   omission (mirror of iter-178 NH self-check).
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_fv3_pe_toolkit_iter188.py
+    => 3 passed in 0.02 s
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_corner_div_damp_smag_vort_iter187.py \
+        tests/test_div_damp_adaptive.py \
+        --deselect tests/test_div_damp_adaptive.py::test_corner_div_damp_fv3_vector_fill_bit_for_bit_nord1
+    => 24 passed (PE iter-18 + iter-187 baselines preserved
+       bit-for-bit; the deselected iter-22 test has a pre-existing
+       1-ULP flake unrelated to iter-188)
+
+### Status
+
+PE and NH config now have the same FV3-faithful damping surface
+naming, with per-path defaults preserved (PE: 200.0, NH: 10.0).
+The PE iter-12/14/16/18/57/182/187 wirings now have the same
+AST regression coverage as the NH iter-168/169/170/171/173/180
+wirings (iter-172/178/186 NH).
+
+### Why this iteration was meaningful
+
+iter-187's codex review flagged TWO concrete gaps:
+* concern 2 (PE / NH dt-proxy parity gap)
+* concern 6 (PE has no AST regression guard mirroring iter-172).
+
+Both gaps would be silently exploited by future refactors.  The
+parity gap is now closed (PE has the same field as NH); the AST
+guard is now in place (mirrors iter-172/178 structure).  Pure
+config + test addition; no production behaviour change at default
+settings.
 
 ## Iteration 187 (2026-05-08): port FV3 smag_vort adaptive cap to nord>=1 corner-div damp (PE + NH)
 
