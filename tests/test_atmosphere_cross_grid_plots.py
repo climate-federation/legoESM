@@ -2208,6 +2208,37 @@ class TestHeldSuarezDissipationImbalance:
             assert 95.0 <= dt_96 <= 105.0
             assert "long_time" in captured
 
+    def test_matrix_help_documents_iter_env_vars(self):
+        """iter 73: matrix --help epilog must document the iter 33-72
+        env vars so users discover them without reading FV3_3D.md.
+        """
+        epilog = M._ENV_VAR_EPILOG
+        # iter 33/43: A_h scale.
+        assert "LEGOESM_AH_SCALE" in epilog
+        assert "iter 33" in epilog or "iter-33" in epilog
+        # iter 66/71/72: CFL-aware dt.
+        assert "LEGOESM_HS_CUBE_DT_CFL" in epilog
+        assert "auto" in epilog, (
+            "iter 72 added 'auto' as the recommended mode; epilog must "
+            "mention it"
+        )
+        # iter 57-59: Smagorinsky.
+        assert "LEGOESM_SMAG_CS" in epilog
+        # iter 16-25: corner divergence damping.
+        assert "LEGOESM_CDD_D2BG" in epilog
+        # iter 13: vorticity damping.
+        assert "LEGOESM_DAMP_V" in epilog
+        # Pointer to the full investigation doc.
+        assert "FV3_3D.md" in epilog
+
+    def test_matrix_help_renders_with_epilog(self):
+        """iter 73: argparse builder must include the epilog so
+        ``--help`` actually shows the env-var docs.
+        """
+        parser = M.build_parser()
+        assert parser.epilog is not None
+        assert "LEGOESM_HS_CUBE_DT_CFL" in parser.epilog
+
     def test_resolve_dt_cube_auto_mode(self, monkeypatch, capsys):
         """iter 72: ``LEGOESM_HS_CUBE_DT_CFL=auto`` picks short_time
         at n<96 (preserves iter-33 C72 reference dt=200) and

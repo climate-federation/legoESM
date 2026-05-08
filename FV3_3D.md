@@ -3771,6 +3771,37 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
 
+## Iteration 74 (2026-05-07): test guards for iter-73 help epilog
+
+### Goal
+
+iter 73 added the env-var documentation epilog to the matrix's
+argparse, but the documentation could silently drift if a future
+edit forgets to update the epilog when adding/removing env vars.
+Add regression guards.
+
+### Implementation
+
+Added 2 tests to ``TestHeldSuarezDissipationImbalance``:
+
+- ``test_matrix_help_documents_iter_env_vars``: asserts the
+  ``_ENV_VAR_EPILOG`` string contains all 6 documented env vars
+  (``LEGOESM_AH_SCALE``, ``LEGOESM_HS_CUBE_DT_CFL``, etc.) plus
+  the recommended value ``auto`` and the ``FV3_3D.md`` pointer.
+- ``test_matrix_help_renders_with_epilog``: asserts
+  ``build_parser()`` actually wires the epilog into the
+  argparse object (so ``--help`` displays it).
+
+### Test results
+
+29 tests in ``TestHeldSuarezDissipationImbalance`` pass (was 27).
+261 tests overall.
+
+### Status
+
+iter 73 documentation epilog is now AST-guarded against silent
+drift.
+
 ## Iteration 73 (2026-05-07): document env vars in matrix --help
 
 ### Goal
