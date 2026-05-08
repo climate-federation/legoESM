@@ -696,6 +696,15 @@ Key iterations:
   iter-310 scalar halo characterization to the vector path
   used by every (u, v) cubed-sphere operator.  5/5 pass in
   4.4 s.
+- Iter 312: iter-187 smag_vort cap saturation at the 0.20
+  ceiling.  When ``inner = dddmp*|dt|*sqrt(delpc²+ζ²)`` <
+  0.20, cap output = inner (rtol=1e-13).  When inner > 0.20,
+  cap output = 0.20 exactly (array-equal).  At threshold
+  (inner == 0.20 by construction with dddmp=1, dt=1,
+  delpc=0.20, ζ=0), cap = 0.20.  Pure helper-formula test
+  pinning the FV3 ``min(0.20, ...)`` saturation behaviour
+  that protects against runaway damping at intense
+  divergence.  3/3 pass in 0.4 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
