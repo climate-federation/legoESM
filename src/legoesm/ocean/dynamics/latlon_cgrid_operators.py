@@ -27,7 +27,11 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-from legoesm.grids.latlon import LatLonGrid
+from legoesm.grids.latlon import LatLonGrid  # noqa: F401 — kept for type compat
+# Operators accept LatLonGrid or LatLonCGridGeometry via duck typing.
+# When geometry fields (dx_u, dy_v, etc.) are available they are used
+# directly; otherwise the legacy inline computation from cos_lat/dlon
+# is the fallback.  See ensure_geometry() in latlon.py.
 
 
 # =============================================================================
@@ -178,10 +182,6 @@ def gradient_x_cgrid(
     -------
     df_dx : array, shape (n_lat, n_lon+1, ...) at u-points.
     """
-    R = grid.radius
-    dlon = grid.dlon
-    cos_lat = grid.cos_lat  # (n_lat,)
-
     # Face j sits between cell (j-1) mod n_lon (west) and cell j (east),
     # matching the divergence convention (cell j: west=face j, east=face j+1).
     # Gradient at face j: (f[j] - f[(j-1) mod n_lon]) / dx
@@ -195,12 +195,21 @@ def gradient_x_cgrid(
     else:
         df_full = jnp.concatenate([df, df_wrap], axis=1)
 
-    # dx at u-point: R * dlon * cos(lat)  (single cell width)
-    dx_u = R * dlon * cos_lat
-    if f.ndim == 2:
-        return df_full / dx_u[:, jnp.newaxis]
+    # dx at u-point.  On a regular lat-lon grid (dlat > 0), use the
+    # legacy 1D path for bit-exact backward compat.  On a tripolar
+    # grid (dlat == 0 sentinel), use the pre-computed 2D metric.
+    if hasattr(grid, "dx_u") and grid.dlat == 0.0:
+        dx_u = grid.dx_u  # (n_lat, n_lon+1)
+        if f.ndim == 2:
+            return df_full / dx_u
+        else:
+            return df_full / dx_u[:, :, jnp.newaxis]
     else:
-        return df_full / dx_u[:, jnp.newaxis, jnp.newaxis]
+        dx_u = grid.radius * grid.dlon * grid.cos_lat
+        if f.ndim == 2:
+            return df_full / dx_u[:, jnp.newaxis]
+        else:
+            return df_full / dx_u[:, jnp.newaxis, jnp.newaxis]
 
 
 def gradient_y_cgrid(
@@ -223,14 +232,18 @@ def gradient_y_cgrid(
     -------
     df_dy : array, shape (n_lat+1, n_lon, ...) at v-points.
     """
-    R = grid.radius
-    dlat = grid.dlat
-
-    # dy at v-point: R * dlat (single cell height)
-    dy_v = R * dlat
+    # dy at v-point: on a regular lat-lon grid this is the scalar
+    # R*dlat; on a tripolar grid it varies per cell.  Use the scalar
+    # when dlat > 0 (regular grid) for bit-exact backward compat.
+    if hasattr(grid, "dy_v") and grid.dlat == 0.0:
+        # Tripolar: per-cell meridional spacing
+        dy_v_int = grid.dy_v[1:-1]  # (n_lat-1, n_lon)
+        dy_v_interior = dy_v_int if f.ndim == 2 else dy_v_int[:, :, jnp.newaxis]
+    else:
+        dy_v_interior = grid.radius * grid.dlat
 
     # Interior v-faces: i=1..n_lat-1
-    df_interior = (f[1:] - f[:-1]) / dy_v  # (n_lat-1, n_lon, ...)
+    df_interior = (f[1:] - f[:-1]) / dy_v_interior  # (n_lat-1, n_lon, ...)
 
     # Boundary faces at poles: zero gradient (wall BC).
     # Single Pad HLO op replaces alloc-zeros + concatenate-of-three.
@@ -296,11 +309,6 @@ def divergence_cgrid(
     -------
     div : array, shape (n_lat, n_lon) or (n_lat, n_lon, nlev)
     """
-    R = grid.radius
-    dlon = grid.dlon
-    dlat = grid.dlat
-    cos_lat = grid.cos_lat  # (n_lat,)
-
     u_eff = u
     v_eff = v
     if u_mask is not None:
@@ -310,52 +318,54 @@ def divergence_cgrid(
         vm = v_mask[..., jnp.newaxis] if v.ndim == 3 and v_mask.ndim == 2 else v_mask
         v_eff = v * vm
 
-    # Zonal face length (meridional extent): R * dlat
-    face_dy = R * dlat
+    # --- Zonal face length (meridional extent of u-face) ---
+    if hasattr(grid, "dy_u") and grid.dlat == 0.0:
+        face_dy = grid.dy_u[:, 0:1]  # (n_lat, 1) — constant along lon
+    else:
+        face_dy = grid.radius * grid.dlat
 
     # East face flux - west face flux
-    # u[:, j+1] is east face of cell j, u[:, j] is west face
     if u.ndim == 2:
-        u_east = u_eff[:, 1:]   # shape (n_lat, n_lon)  -- but n_lon+1-1 = n_lon
-        u_west = u_eff[:, :-1]  # shape (n_lat, n_lon)
+        u_east = u_eff[:, 1:]
+        u_west = u_eff[:, :-1]
     else:
         u_east = u_eff[:, 1:, :]
         u_west = u_eff[:, :-1, :]
 
-    # But we have n_lon+1 faces. East face of cell j is face j+1,
-    # west face of cell j is face j. So for n_lon cells:
-    # cell j has east face at j+1, west face at j.
-    # u_east[:, j] = u[:, j+1], u_west[:, j] = u[:, j]
-    # With periodic wrap, u[:, n_lon] = u[:, 0] (already included).
-    net_zonal = (u_east - u_west) * face_dy  # (n_lat, n_lon, ...)
+    net_zonal = (u_east - u_west) * face_dy  # preserve arithmetic order
 
-    # Meridional face length (zonal extent) at lat interface:
-    # R * cos(lat_face) * dlon
-    lat = grid.lat  # (n_lat,)
-    # v-point latitudes: at interfaces between cells.  cos(±π/2) is
-    # exactly 0 analytically (and roundoff-level in finite precision),
-    # so build cos_lat_v directly via Pad — pole rows are exactly 0
-    # regardless of dtype, and this avoids the alloc-2-singleton +
-    # concatenate-of-three + cos tower (4 HLO ops → 2 HLO ops).
-    lat_interior = 0.5 * (lat[:-1] + lat[1:])  # (n_lat-1,)
-    cos_lat_v_interior = jnp.cos(lat_interior)  # (n_lat-1,)
-    cos_lat_v = jnp.pad(cos_lat_v_interior, (1, 1))  # (n_lat+1,)
-
-    face_dx = R * cos_lat_v * dlon  # (n_lat+1,)
+    # --- Meridional face length (zonal extent of v-face) ---
+    # On a regular lat-lon grid this is the 1D array
+    # R*cos(lat_v)*dlon; on a tripolar grid (dlat==0 sentinel) it
+    # is the 2D array grid.dx_v.
+    if hasattr(grid, "dx_v") and grid.dlat == 0.0:
+        face_dx = grid.dx_v  # (n_lat+1, n_lon) — 2D for tripolar
+    else:
+        lat = grid.lat
+        lat_interior = 0.5 * (lat[:-1] + lat[1:])
+        cos_lat_v_interior = jnp.cos(lat_interior)
+        cos_lat_v = jnp.pad(cos_lat_v_interior, (1, 1))
+        face_dx = grid.radius * cos_lat_v * grid.dlon  # (n_lat+1,)
 
     # North face flux - south face flux
-    # v[i+1, :] is north face of cell i, v[i, :] is south face
     if v.ndim == 2:
-        v_north = v_eff[1:]   # (n_lat, n_lon)
-        v_south = v_eff[:-1]  # (n_lat, n_lon)
+        v_north = v_eff[1:]
+        v_south = v_eff[:-1]
         fd = face_dx
-        net_merid = v_north * fd[1:, jnp.newaxis] - v_south * fd[:-1, jnp.newaxis]
+        if fd.ndim == 1:
+            net_merid = v_north * fd[1:, jnp.newaxis] - v_south * fd[:-1, jnp.newaxis]
+        else:
+            net_merid = v_north * fd[1:] - v_south * fd[:-1]
     else:
         v_north = v_eff[1:, :, :]
         v_south = v_eff[:-1, :, :]
         fd = face_dx
-        net_merid = (v_north * fd[1:, jnp.newaxis, jnp.newaxis]
-                     - v_south * fd[:-1, jnp.newaxis, jnp.newaxis])
+        if fd.ndim == 1:
+            net_merid = (v_north * fd[1:, jnp.newaxis, jnp.newaxis]
+                         - v_south * fd[:-1, jnp.newaxis, jnp.newaxis])
+        else:
+            net_merid = (v_north * fd[1:, :, jnp.newaxis]
+                         - v_south * fd[:-1, :, jnp.newaxis])
 
     # Cell area
     area = grid.area  # (n_lat, n_lon)

@@ -26,7 +26,7 @@ import numpy as np
 
 from legoesm.core.field import Field
 from legoesm.core.precision import cast_pytree
-from legoesm.grids.latlon import LatLonGrid
+from legoesm.grids.latlon import LatLonGrid, ensure_geometry
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     OceanPartialCellCoordinate,
@@ -424,7 +424,12 @@ class LatLonCGridOceanModel:
         z_coord: OceanZStarCoordinate,
         config: LatLonCGridOceanConfig | None = None,
     ):
-        self.grid = grid
+        # Convert LatLonGrid -> LatLonCGridGeometry once at construction.
+        # All downstream operators see the enriched geometry with per-cell
+        # metric arrays.  For a plain LatLonGrid this is a no-op on field
+        # access (legacy fields are identical); for a tripolar grid the
+        # geometry carries fold descriptor and rotation angles.
+        self.grid = ensure_geometry(grid)
         self.z_coord = z_coord
         self.config = config or LatLonCGridOceanConfig()
         self._validate_config(self.config)
