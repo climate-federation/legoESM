@@ -618,67 +618,31 @@ Key iterations:
 - Iter 278: PE damp_v scaling — damp4 = (damp_v *
   da_min_c)^(nord+1) verified by 2x scaling at nord=0/1/2.
 - Iter 279: NH counterpart of iter-278 (damp_v scaling).
-- Iter 280: NH damp_w scaling — same (nord+1) exponent
-  formula verified for damp_w via 2x scaling at nord=0/1/2.
-  Closes the (damp_v + damp_w) × (PE + NH) × nord-scaling
-  matrix.  3/3 pass in 50 s.  Plus 10-iter ToC compaction.
-- Iter 281: ``corner_div_damp_d2_bg`` linear scaling test
-  (FV3 d2_bg formula).  When dddmp=0, FV3 form is
-  ``damp = da_min_c * d2_bg`` — LINEAR in d2_bg.  Verifies
-  2x d2_bg → 2x wind change for both PE and NH.  2/2 pass
-  in 31 s.  Pins the FV3-faithful linear-in-d2_bg coefficient
-  on the iter-16/iter-168 nord=0 corner-div damping paths.
-- Iter 282: ``corner_div_damp_d4_bg`` power scaling test
-  for the iter-18/iter-187 nord >= 1 branch.  FV3 formula
-  at sw_core.F90:1809: ``dd8 = (da_min_c * d4_bg)^(nord+1)``.
-  Verifies 2x d4_bg → 2^(nord+1)x wind change for nord=1
-  (factor=4) and nord=2 (factor=8).  Pins the (nord+1)
-  exponent in the d4_bg formula.  2/2 PE pass in 34 s.
-- Iter 283: NH counterpart of iter-282 — corner_div d4_bg
-  power scaling for NH (iter-168 branch).  Same 2x d4_bg →
-  2^(nord+1)x at nord=1/2.  2/2 NH pass in 55 s.  PE+NH
-  d4_bg formula now has (nord+1) exponent pinned by
-  numerical regression on both 3D paths.
-- Iter 284: precise test for the ``cosa_corner`` metric at
-  cube vertices.  At a cube vertex (where 3 panels meet at
-  60°), the angle between i and j tangents is exactly 60°,
-  so |cosa| = cos(60°) = 0.5.  iter-266 verified the looser
-  bound |cosa| ≤ 0.6; iter-284 pins the EXACT 0.5 value
-  within FP tolerance (rtol=1e-6, atol=1e-6).  Plus checks
-  the sign mix (4 corners per face have orientation-
-  dependent +0.5 and -0.5).  1/1 pass in 9 s.
-- Iter 285: range sanity for the iter-187 ``smag_vort`` cap
-  formula.  ``|dt|*sqrt(delpc²+ζ²)`` is non-negative by
-  construction (sqrt of non-neg).  Verifies the iter-183
-  AD-safe double-where pattern: (1) smag_vort = 0 exactly at
-  rest with finite gradient w.r.t. delpc, ζ; (2) smag_vort
-  > 0 at non-rest matches naive sqrt at rtol=1e-12.  Pure
-  helper-formula test (no model integration).  2/2 pass in
-  0.6 s.
-- Iter 286: float32 sanity test for PE d_con stack.  All
-  other d_con tests use jax_enable_x64=True (float64).
-  iter-286 verifies the PE iter-19 toolkit + full d_con
-  stack runs at JAX default float32 precision without NaN
-  for 5 steps × dt=100.  Validates that the d_con stack
-  doesn't have float64-only assumptions.  1/1 pass in 15 s.
-- Iter 287: NH float32 sanity (mirror of iter-286).  NH
-  iter-184 toolkit + 5-knob d_con stack + delt_max=1.0 at
-  JAX default float32.  All fields finite + dtype verified
-  jnp.float32.  1/1 pass in 18 s.  PE+NH d_con stacks both
-  validated for ML/training-style float32 workflows.
-- Iter 288: 50-step PE d_con float32 long-run stability
-  (extends iter-286 5-step → 50 steps × dt=100).  PE iter-19
-  toolkit + d_con stack at default float32.  All fields
-  finite, dtype verified jnp.float32, max|u_d| < 100 m/s
-  bound holds.  1/1 pass in 14.6 s.  Catches any slow-growth
-  numerical instability that 5-step iter-286 wouldn't see.
-- Iter 289: 50-step NH d_con float32 long-run stability (NH
-  counterpart of iter-288).  NH iter-184 toolkit + 5-knob
-  d_con stack + delt_max=1.0 at default float32, 50 steps ×
-  dt=10.  All fields (u, v, w, theta_prime, rho_prime)
-  finite, dtype jnp.float32, max|u|<100 + max|w|<50 bounds
-  hold.  1/1 pass in 18.2 s.  PE+NH d_con stacks both
-  float32-stable for 50-step long-run scenarios.
+- Iters 280-289 (compacted iter 290): scaling, metrics, and
+  float32 coverage.
+  - 280: NH damp_w (nord+1)-exponent 2x scaling.  Closes
+    (damp_v + damp_w) × (PE + NH) × nord scaling matrix.
+  - 281: corner_div_damp_d2_bg LINEAR scaling (PE+NH) — pins
+    FV3-faithful nord=0 coefficient.
+  - 282: PE corner_div_damp_d4_bg (nord+1)-power scaling for
+    nord >= 1 branch (FV3 sw_core.F90:1809).
+  - 283: NH counterpart of 282 — d4_bg (nord+1) power
+    scaling at nord=1/2.
+  - 284: cosa_corner = ±0.5 EXACT at cube vertices (3 panels
+    at 60°), sign-mix (+/- per orientation).
+  - 285: iter-187 smag_vort cap range sanity — non-neg,
+    sqrt(0)=0 with finite grad, matches naive sqrt at rtol
+    1e-12.
+  - 286: PE d_con stack 5-step float32 sanity (no x64).
+  - 287: NH counterpart of 286.
+  - 288: PE d_con float32 50-step long-run stability.
+  - 289: NH counterpart of 288.
+- Iter 290: PE iter-19 PRODUCTION AD-at-rest at default
+  float32 (mirror of iter-261 which is x64).  Confirms
+  iter-183 sqrt(0) double-where AD-safety + iter-19 d_con
+  stack work at float32 precision.  jax.grad finite, dtype
+  verified jnp.float32.  1/1 pass in 57 s.  Plus 10-iter ToC
+  compaction (iters 280-289).
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
