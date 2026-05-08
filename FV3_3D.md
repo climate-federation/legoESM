@@ -650,6 +650,13 @@ Key iterations:
   dtype jnp.float32.  1/1 pass in 78 s.  PE+NH iter-183
   sqrt(0) AD-safety now verified at both x64 and float32 on
   both 3D paths under FV3 production damping coefficients.
+- Iter 292: linear-in-c_s scaling for the iter-180/iter-57
+  Smagorinsky-adaptive A_h helper (legoESM form
+  A_h_smag = c_s * dx² * |D|).  At fixed (u, v), 2x c_s →
+  exactly 2x A_h_smag (rtol=1e-14 bit-for-bit), c_s=0 →
+  zero.  Pure helper-formula test; pins the linear-in-c_s
+  contract that iter-180's off/on/no-A_h tests don't cover.
+  2/2 pass in 9.4 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
