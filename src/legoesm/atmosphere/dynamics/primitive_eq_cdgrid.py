@@ -1556,12 +1556,23 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                 )
                 dKE_cc = _interp_corner_to_center(dKE_corner)
                 dT = -self.config.damp_v_d_con * dKE_cc / constants.c_pd
-                # FV3_3D iter 218: optional per-step cap on |dT|.
-                # FV3 dyn_core.F90:1774 caps |dtmp| to bdt*delt_max
-                # (default 1.0 K/s).  delt_max=0 disables the cap.
+                # FV3_3D iter 218/219: optional per-step cap on |dT|.
+                # FV3 dyn_core.F90:1764-1776 (cp_air branch) skips
+                # the cap entirely for the top 2 sponge layers
+                # (``k<3`` in FV3's 1-based indexing, ``k<2`` in our
+                # 0-based indexing where ``k=0`` is the model top).
+                # delt_max=0 disables the cap globally.
                 if self.config.delt_max > 0.0:
-                    delt = dt * self.config.delt_max
-                    dT = jnp.clip(dT, -delt, delt)
+                    nlev = dT.shape[-1]
+                    k_idx = jnp.arange(nlev)
+                    # Top 2 sponge layers get an effectively infinite
+                    # cap (no clipping); the rest get dt*delt_max.
+                    cap_per_level = jnp.where(
+                        k_idx < 2, jnp.inf,
+                        dt * self.config.delt_max,
+                    )
+                    cap_b = cap_per_level[None, None, None, :]
+                    dT = jnp.clip(dT, -cap_b, cap_b)
                 state_new = state_new._replace(
                     u_d=state_new.u_d.replace(data=u_corner + du_corner),
                     v_d=state_new.v_d.replace(data=v_corner + dv_corner),

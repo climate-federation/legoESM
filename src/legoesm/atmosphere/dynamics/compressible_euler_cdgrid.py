@@ -1097,14 +1097,30 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
                 dtheta_p = -self.config.damp_v_d_con * dKE_cc / (
                     constants.c_pd * _exner_ref_broadcast
                 )
-                # FV3_3D iter 218: optional per-step cap on |Δθ_p*Π|
-                # (equivalent to capping |ΔT| to dt*delt_max in T-
-                # space).  delt_max=0 disables the cap.
+                # FV3_3D iter 218/219: optional per-step cap on
+                # |Δθ_p*Π| (equivalent to capping |ΔT| to
+                # dt*delt_max in T-space).  FV3 dyn_core.F90:1782-
+                # 1786 (cv_air branch) tightens the cap on the top
+                # 2 sponge layers: k=1 → 0.1*delt, k=2 → 0.5*delt
+                # (FV3 1-based; our 0-based: k=0 → 0.1*, k=1 → 0.5*).
                 if self.config.delt_max > 0.0:
-                    delt_theta = (
-                        dt * self.config.delt_max / _exner_ref_broadcast
+                    nlev = dtheta_p.shape[-1]
+                    k_idx = jnp.arange(nlev)
+                    sponge_factor = jnp.where(
+                        k_idx == 0, 0.1,
+                        jnp.where(k_idx == 1, 0.5, 1.0),
                     )
-                    dtheta_p = jnp.clip(dtheta_p, -delt_theta, delt_theta)
+                    delt_theta_per_level = (
+                        dt * self.config.delt_max
+                        * sponge_factor
+                        / self.height_coord.exner_ref
+                    )
+                    delt_theta_b = delt_theta_per_level[
+                        None, None, None, :
+                    ]
+                    dtheta_p = jnp.clip(
+                        dtheta_p, -delt_theta_b, delt_theta_b,
+                    )
                 state_new = state_new._replace(
                     u=state_new.u.replace(data=u_cc_new + du_cc),
                     v=state_new.v.replace(data=v_cc_new + dv_cc),
@@ -1197,12 +1213,28 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
                 dtheta_p = heat_full / (
                     constants.c_pd * _exner_ref_broadcast
                 )
-                # FV3_3D iter 218: optional per-step cap on |Δθ_p*Π|.
+                # FV3_3D iter 218/219: optional per-step cap on
+                # |Δθ_p*Π|.  Sponge-layer factors per FV3
+                # dyn_core.F90:1782-1786 (cv_air branch):
+                # k=0 → 0.1*delt, k=1 → 0.5*delt, else 1.0*delt.
                 if self.config.delt_max > 0.0:
-                    delt_theta = (
-                        dt * self.config.delt_max / _exner_ref_broadcast
+                    nlev = dtheta_p.shape[-1]
+                    k_idx = jnp.arange(nlev)
+                    sponge_factor = jnp.where(
+                        k_idx == 0, 0.1,
+                        jnp.where(k_idx == 1, 0.5, 1.0),
                     )
-                    dtheta_p = jnp.clip(dtheta_p, -delt_theta, delt_theta)
+                    delt_theta_per_level = (
+                        dt * self.config.delt_max
+                        * sponge_factor
+                        / self.height_coord.exner_ref
+                    )
+                    delt_theta_b = delt_theta_per_level[
+                        None, None, None, :
+                    ]
+                    dtheta_p = jnp.clip(
+                        dtheta_p, -delt_theta_b, delt_theta_b,
+                    )
                 state_new = state_new._replace(
                     w=state_new.w.replace(data=w_new_data + dw),
                     theta_prime=state_new.theta_prime.replace(

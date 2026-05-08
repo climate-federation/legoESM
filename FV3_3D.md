@@ -462,6 +462,21 @@ Key iterations:
   iter 39-167 prose (kept ToC + Investigation summary +
   Lessons learned + Quick Reference + iter 168-193 prose) to
   save ~5300 lines for context-window budget.
+- Iter 219: refine iter-218 with FV3 sponge-layer-aware cap.
+  iter-218 applied a flat per-level cap; FV3 ``dyn_core.F90:
+  1764-1786`` actually treats the top-2 sponge layers specially:
+  PE ``cp_air`` branch SKIPS the cap for k<3 (FV3 1-based) and
+  applies the full heat increment; NH ``cv_air`` branch tightens
+  the cap to 0.1×delt at k=1 and 0.5×delt at k=2.  In legoESM's
+  0-based level convention (k=0 = model top): PE k=0,1 are
+  uncapped; NH k=0 → 0.1× cap, k=1 → 0.5× cap, k≥2 → 1× cap.
+  Updates iter-218's PE damp_v_d_con block to mask cap with
+  jnp.where, and NH damp_v_d_con + damp_w_d_con blocks to scale
+  cap by per-level sponge_factor.  Four-test fixture: PE top-2
+  uncapped (bit-for-bit equal to delt_max=0 at k=0,1); PE k≥2
+  bounded to dt*delt_max; NH k=0 |ΔT_eq| ≤ 0.1*dt*delt_max;
+  NH k=1 cap is 0.5×, k≥2 is 1×.  Also retunes iter-218
+  quantitative cap test to evaluate over interior layers only.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::

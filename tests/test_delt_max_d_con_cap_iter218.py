@@ -182,24 +182,30 @@ def test_pe_delt_max_caps_per_step_dT():
 
     # d_con-only contribution: difference between the run with d_con
     # active and the reference run with d_con off.  The cap acts on
-    # exactly this signal.
+    # exactly this signal.  iter 219 adds sponge-layer awareness:
+    # PE k=0,1 are intentionally NOT capped, so we test only the
+    # interior layers (k>=2).
     d_con_uncapped = s_uncapped.T.data - s_no_dcon.T.data
     d_con_capped = s_capped.T.data - s_no_dcon.T.data
 
     cap = dt * delt_max
-    # Uncapped d_con contribution must EXCEED the cap somewhere.
-    assert float(jnp.max(jnp.abs(d_con_uncapped))) > cap, (
+    # Uncapped d_con contribution must EXCEED the cap somewhere
+    # (we evaluate over interior layers since iter-219 leaves the
+    # top-2 sponge layers uncapped by design).
+    assert float(jnp.max(jnp.abs(d_con_uncapped[..., 2:]))) > cap, (
         f"Uncapped d_con max|ΔT|="
-        f"{float(jnp.max(jnp.abs(d_con_uncapped))):.4e} ≤ cap="
-        f"{cap:.4e} — IC too quiet to test the cap."
+        f"{float(jnp.max(jnp.abs(d_con_uncapped[..., 2:]))):.4e} ≤ "
+        f"cap={cap:.4e} — IC too quiet to test the cap."
     )
 
-    # Capped d_con contribution must respect the cap (with a small
-    # tolerance for FP roundoff in the difference).
-    max_capped = float(jnp.max(jnp.abs(d_con_capped)))
-    assert max_capped <= cap * 1.0 + 1e-12, (
-        f"Capped d_con max|ΔT|={max_capped:.4e} > cap={cap:.4e} — "
-        f"jnp.clip is not bounding the d_con tendency."
+    # Capped d_con contribution at INTERIOR levels must respect the
+    # cap (PE sponge layers k=0,1 are uncapped — see iter 219).
+    max_capped_interior = float(
+        jnp.max(jnp.abs(d_con_capped[..., 2:])),
+    )
+    assert max_capped_interior <= cap * 1.0 + 1e-12, (
+        f"Capped d_con max|ΔT[k>=2]|={max_capped_interior:.4e} > "
+        f"cap={cap:.4e} — jnp.clip is not bounding the interior."
     )
 
 
