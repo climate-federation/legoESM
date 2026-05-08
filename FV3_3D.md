@@ -458,9 +458,12 @@ STILL OPEN (post-iter-99 stretch goals):
   iter-33 reference numbers).
 - 200-day climate-relevant integration (matrix HS uses 30 days
   quick spin-up).
-- C144 / C192 empirical stability validation.  iter-85 1/dt
-  scaling predicts dt=66 stable to day 30 at C144 and dt=50
-  stable to day 25 at C192 — both UNTESTED.
+- C144 30-day empirical validation.  iter-85 1/dt scaling
+  predicts NaN ~day 68 at C144 dt=33; iter-121 confirmed 5-day
+  stability.  30-day projects ~6 hours wall.
+- C192 5-day / 30-day empirical validation.  iter-103 confirmed
+  1-day; iter-85 predicts NaN ~day 90 at dt=25; 30-day projects
+  ~12 hours wall.
 - Substantive ``nord >= 2`` fidelity restructure (halo'd
   intermediate ``divg_d`` arrays, vector corner fill at nt > 0)
   — iter 32 found the C72 mode is interior, NOT cube-vertex, so
