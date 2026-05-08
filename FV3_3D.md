@@ -657,6 +657,14 @@ Key iterations:
   zero.  Pure helper-formula test; pins the linear-in-c_s
   contract that iter-180's off/on/no-A_h tests don't cover.
   2/2 pass in 9.4 s.
+- Iter 293: linear-in-(u, v) scaling of Smagorinsky strain
+  magnitude.  At fixed c_s, scaling (u, v) → (αu, αv)
+  produces |α| × A_h_smag (rtol=1e-12) for α ∈ {0.5, 2.0,
+  3.7}.  Plus rest-state sanity: A_h_smag = 0 exactly at
+  (u=v=0) and jax.grad finite (validates iter-181 sqrt(0)
+  AD-safety in the helper).  4/4 pass in 10.7 s.  Pins the
+  linear-in-(u, v) axis orthogonal to iter-292's linear-in-
+  c_s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
