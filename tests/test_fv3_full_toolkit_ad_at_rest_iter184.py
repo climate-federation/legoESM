@@ -112,6 +112,9 @@ def _full_toolkit_cfg():
         # iter-203 KE→heat conversion for damp_w (added to umbrella
         # in iter-204).  FV3 production default ``d_con = 1.0``.
         damp_w_d_con=1.0,
+        # iter-209 KE→heat conversion for damp_v (NH mirror of PE
+        # iter-208).  Added to umbrella in iter-210.
+        damp_v_d_con=1.0,
     )
 
 

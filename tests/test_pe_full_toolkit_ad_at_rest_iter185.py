@@ -90,6 +90,9 @@ def _full_pe_toolkit_cfg():
         # at AD-at-rest.
         corner_div_damp_d4_bg=1e-3,
         corner_div_damp_nord=1,
+        # iter-208 KE→heat conversion for damp_v (added to umbrella
+        # in iter-210).  FV3 production default ``d_con = 1.0``.
+        damp_v_d_con=1.0,
         # Velocity-dependent T_diss (iter-182 fix)
         T_diss_coeff=0.05,
         # Disable conservation fixers to keep AD focused on the

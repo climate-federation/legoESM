@@ -376,6 +376,11 @@ Key iterations:
   (default off; FV3 production default 1.0).  Both 3D paths now
   have d_con coverage for both damping mechanisms (PE: damp_v;
   NH: damp_v + damp_w).
+- Iter 210: extend both umbrellas to engage iter-208/209 ``damp_v_d_con``.
+  iter-184 NH umbrella now exercises BOTH ``damp_v_d_con`` (iter-209)
+  and ``damp_w_d_con`` (iter-203/204); iter-185 PE umbrella now
+  exercises ``damp_v_d_con`` (iter-208).  Both umbrellas pass
+  ``jax.grad`` at rest with the full energy-conserving toolkit.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
