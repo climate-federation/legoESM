@@ -195,7 +195,7 @@ divergence damping settings + per-resolution ``A_h`` scaling
 | C36        | ``1.0`` (default)| 4.08e+06        | 200 (no change)| iter 19/24 production               |
 | C48        | ``2.0`` (iter 37)| 6.12e+06        | 200 (no change)| sweet-spot scan, mid_std -48 %      |
 | C72        | ``10.0`` (iter 33)| 2.04e+07       | 200 (iter-33 ref)| smallest stable scale at dt=200   |
-| C96        | ``10.0`` (auto)  | 1.53e+07        | 100 (iter-70/72)| stable past day 15 at dt=100; iter-74 30d in progress |
+| C96        | ``10.0`` (auto)  | 1.53e+07        | 100 (iter-70/72)| stable to ~22 days; 30d NaN at day 22.5 (iter 79); 30+ day still OPEN |
 | C144       | ``10.0`` (auto)  | 1.02e+07        | 67 (auto extrap)| empirically untested                |
 | C192       | ``10.0`` (auto)  | 7.65e+06        | 50 (auto extrap)| empirically untested                |
 
@@ -3824,6 +3824,74 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
+
+## Iteration 79 (2026-05-07): CRITICAL — C96 30d auto-mode NaNs at day 22.5
+
+The iter-72/74 in-progress 30-day C96 run at ``ah_x10 + dt=100``
+(the iter-72 auto-mode setting) COMPLETED::
+
+    [iter65] step 19440/25920  max|u|=nan
+    [iter65] RESULT: {'finite': False, 'step_blowup': 19440,
+                      'wall': 664.1389172077179}
+
+NaN at step 19440 = day 22.5 physical.
+
+**iter-72's auto-mode does NOT fully solve the C96 eigenmode**.
+It delays the NaN from day 15 (iter-69 dt=150.5) to day 22.5
+(iter-70/72 dt=100), but does NOT eliminate it.
+
+iter-70's "stable for 20 days" claim was empirically correct for
+20 days but extrapolated incorrectly to 30 days.
+
+### Eigenmode time-scale table
+
+::
+
+    config              eigenmode NaN time     step
+    dt=150.5 + ah_x10   day 15.0 (iter 69)     8611
+    dt=100   + ah_x10   day 22.5 (iter 79)     19440
+
+NaN-step ratio: 19440 / 8611 = 2.26.  dt ratio: 100/150.5 = 0.665.
+If NaN scaled as wall-clock (iter-65 6h pattern), the smaller dt
+would NaN at the same physical time → step ratio = dt ratio
+inverse = 1.505.  Observed 2.26 ≠ 1.505 — so the eigenmode is
+NEITHER wall-clock-fixed NOR step-count-fixed but somewhere in
+between.
+
+### Updated user expectations
+
+C96 30-day climatology runs are STILL NOT YET supported with
+the iter-66/71/72 machinery alone.  Maximum tested stable
+window: ~22 days.
+
+Options for genuine 30+ day stability (UNTESTED):
+- Smaller ``dt`` (e.g. ``dt=50`` extrapolation from auto formula).
+- Combine ``smag_cs > 0`` with ``dt=100`` at C96 30d (iter 70
+  tested ``smag_cs=0.2 + dt=150.5`` insufficient; the C96
+  combination at ``dt=100 + smag_cs=0.2`` is UNTESTED for 30 d).
+- Implicit / forward-backward time stepping for the eigenmode
+  (deferred — larger architectural change).
+
+### Quick Reference correction
+
+The iter-75 Quick Reference table claimed C96 ``stable past day
+15``.  This claim STILL HOLDS (verified at day 15 explicitly via
+the iter-79 step-12960 diagnostic, max|u|=28.17 m/s).  But it
+was WRITTEN with the implication of "and therefore 30-day stable"
+which is FALSE.
+
+Updated row text in iter 80+: "stable to ~22 days at ``dt=100``;
+30-day NaN at day 22.5".
+
+### Status
+
+iter 80+ tasks:
+- Update Quick Reference text to reflect iter 79 finding.
+- Try ``dt=50`` at C96 (a third calibration mode "very_long_time"?).
+- Try ``smag_cs > 0`` + ``dt=100`` at C96 for 30 d.
+
+261 tests pass; iter 79 is empirical characterisation only.
+No code changes.
 
 ## Iteration 74 (2026-05-07): test guards for iter-73 help epilog
 
