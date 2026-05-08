@@ -692,6 +692,16 @@ Key iterations:
   for α ∈ {-2.5, 0.5, 3.0, 1e-6}.  Pins the helper used by
   iter-16 (PE) / iter-168 (NH) corner-div damping as a
   linear operator on (u, v).  9/9 pass in 12 s.
+- Iter 304: ``fv3_corner_laplacian_iteration`` linearity.
+  lap(0) = 0 exactly + superposition (rtol=1e-12) for (α,
+  β) ∈ {(1,1), (2,-3), (0.5,0.5), (-1,7)} + homogeneity for
+  α ∈ {-2.5, 0.5, 3.0, 1e-6}.  Pins the iter-18/iter-187
+  inner Laplacian iteration (used in nord>=1 ``for _ in
+  range(nord): div = lap(div)`` loop) as a linear operator.
+  9/9 pass in 10 s.  Together iter-303/304 characterize the
+  full nord>=1 corner-div damping pipeline (delpc + lap^k)
+  as a linear operator on (u, v) — strong structural
+  correctness for the iter-187 smag_vort cap path.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
