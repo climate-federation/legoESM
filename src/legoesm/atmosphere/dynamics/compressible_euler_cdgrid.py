@@ -205,6 +205,18 @@ class CDGridCompressibleEulerConfig(NamedTuple):
     # helper.  Default 0.0 preserves baseline; PE-tested useful range
     # ~0.1-0.4 (iter 60).  No effect when ``A_h == 0``.
     smagorinsky_cs: float = 0.0
+    ah_d_con: float = 0.0
+        # NH mirror of PE iter-225 Smagorinsky-A_h d_con (FV3_3D
+        # iter 226).  When iter-180 A_h Laplacian removes KE from
+        # (u_d, v_d) via ``du_d_dt += A_h_eff * lap_u``, the lost
+        # KE is converted to heat in θ_p:
+        #
+        #     dKE/dt_corner = u_d * du_d_dt_ah + v_d * dv_d_dt_ah
+        #     dθ_p/dt += -ah_d_con * (dKE/dt) / (c_pd * Π_ref)
+        #
+        # at corners, projected to cell centres via
+        # ``_interp_corner_to_center``.  Default 0.0 preserves
+        # bit-for-bit baseline; gated INSIDE ``A_h > 0``.
     # FV3-faithful post-step del-(2*(nord_w+1)) damping for vertical
     # velocity ``w`` (FV3_3D iter 193).  Faithful port of FV3
     # ``sw_core.F90:1080-1086`` (in ``d_sw1``)::
@@ -556,11 +568,40 @@ def cdgrid_compressible_euler_slow_tendencies(
                 u_d, v_d, cdgrid, config.smagorinsky_cs,
             )                                              # (6, n+1, n+1, nlev)
             _ah_eff_corner = config.A_h + _ah_smag_corner
-            du_d_dt = du_d_dt + _ah_eff_corner * _uv_d_lap_out[..., 0]
-            dv_d_dt = dv_d_dt + _ah_eff_corner * _uv_d_lap_out[..., 1]
+            _du_d_dt_ah = _ah_eff_corner * _uv_d_lap_out[..., 0]
+            _dv_d_dt_ah = _ah_eff_corner * _uv_d_lap_out[..., 1]
         else:
-            du_d_dt = du_d_dt + config.A_h * _uv_d_lap_out[..., 0]
-            dv_d_dt = dv_d_dt + config.A_h * _uv_d_lap_out[..., 1]
+            _du_d_dt_ah = config.A_h * _uv_d_lap_out[..., 0]
+            _dv_d_dt_ah = config.A_h * _uv_d_lap_out[..., 1]
+        du_d_dt = du_d_dt + _du_d_dt_ah
+        dv_d_dt = dv_d_dt + _dv_d_dt_ah
+
+        # FV3_3D iter 226: NH mirror of PE iter-225 A_h d_con.
+        # Compute heat tendency and stash for accumulation into
+        # dtheta_p_dt later.  Heat tendency formula (per second,
+        # leading order; iter-207 Π_ref refinement):
+        #
+        #     dKE/dt_corner = u_d * du_d_dt_ah + v_d * dv_d_dt_ah
+        #     dθ_p/dt += -ah_d_con * (dKE/dt) / (c_pd * Π_ref)
+        if config.ah_d_con > 0.0:
+            _dKE_dt_corner_ah = (
+                u_d * _du_d_dt_ah + v_d * _dv_d_dt_ah
+            )
+            _dKE_dt_cc_ah = _interp_corner_to_center(
+                _dKE_dt_corner_ah,
+            )
+            _exner_ref_b_ah = height_coord.exner_ref[
+                None, None, None, :
+            ]
+            _dtheta_p_dt_ah_cc = (
+                -config.ah_d_con
+                * _dKE_dt_cc_ah
+                / (constants.c_pd * _exner_ref_b_ah)
+            )
+        else:
+            _dtheta_p_dt_ah_cc = None
+    else:
+        _dtheta_p_dt_ah_cc = None
 
     # FV3_3D iter 168: optional FV3-faithful B-grid corner-divergence
     # damping (FV3 d_sw5 sw_core.F90:1641-1822).  Direct port of the
@@ -808,6 +849,10 @@ def cdgrid_compressible_euler_slow_tendencies(
     # captured in the iter-171 div_damp block.
     if _dtheta_p_dt_dd_cc is not None:
         dtheta_p_dt = dtheta_p_dt + _dtheta_p_dt_dd_cc
+
+    # FV3_3D iter 226: add A_h Smagorinsky d_con heat tendency.
+    if _dtheta_p_dt_ah_cc is not None:
+        dtheta_p_dt = dtheta_p_dt + _dtheta_p_dt_ah_cc
     # Rho uses pure flux form: -∇·(ρv) + 0 (continuity).
     drho_p_dt = flux_combined[..., 1]
 

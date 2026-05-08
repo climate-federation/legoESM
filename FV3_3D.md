@@ -553,6 +553,18 @@ Key iterations:
   Gated INSIDE ``A_h > 0``.  Four-test fixture: off-baseline,
   T-changes-when-active, no-op-when-ah-off, AD-safe-at-rest.
   4/4 pass in 30 s.
+- Iter 226: NH mirror of iter-225.  Port Smagorinsky-A_h d_con
+  KE→heat to the compressible-Euler 3D path.  Same formula as
+  iter-225 with iter-207 Π_ref refinement:
+  ``dθ_p/dt += -ah_d_con * (u_d * du_d_dt_ah + v_d * dv_d_dt_ah)
+  / (c_pd * Π_ref)``, projected to cell centres.  Adds
+  ``ah_d_con: float = 0.0`` to NH config (PE/NH parity).  Default
+  preserves bit-for-bit baseline.  Four-test fixture mirrors
+  iter-225.  4/4 NH tests pass in 51 s.  **CLOSES ALL d_con
+  ASYMMETRIES**: every FV3 KE-removing mechanism on both 3D
+  paths (corner-div, cell-centre div_damp, damp_v, damp_w,
+  Smagorinsky-A_h) now converts KE to heat with d_con knobs
+  (default off; FV3 production = 1.0).
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
