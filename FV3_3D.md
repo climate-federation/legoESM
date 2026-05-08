@@ -596,6 +596,15 @@ Key iterations:
   regression test that pins the no-pkz formula at rtol=1e-10
   AND verifies a synthetic pkz-scaled variant does NOT match
   (non-vacuous check).  1/1 pass in 15 s.
+- Iter 247: regression sweep checkpoint of all iter 240-246
+  tests after the iter-239/240 aggregate-cap refactor.  13/13
+  pass: iter-240 (NH aggregate cap, 2 tests), iter-242
+  (PE+NH 50-step, 2), iter-243 (4 conservation tests), iter-244
+  (PE+NH 100-step, 2), iter-245 (C36 production, 1), iter-246
+  (T-convention, 1).  Confirms the iter-239/240 refactor
+  preserves bit-for-bit baseline at delt_max=0 across the
+  entire d_con stack.  No new test file (housekeeping
+  iteration).
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
