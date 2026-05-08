@@ -575,6 +575,17 @@ Key iterations:
   test verification: PE umbrella 57 s, NH umbrella 79 s.  No new
   test files; in-place config update.  Closes the iter-220 setup
   pattern: every d_con site is now under umbrella regression.
+- Iter 228: quantitative formula test for the iter-221 PE
+  corner-div d_con (mirrors iter-205/211 pattern for damp_w/v).
+  Calls ``fv3_hydrostatic_tendencies`` directly and verifies the
+  d_con contribution to ``dT_dt`` matches the expected formula
+  ``-d_con * project_cc(u_d * du_d_dt_cdd + v_d * dv_d_dt_cdd) /
+  c_pd`` at machine precision (rtol=1e-10).  Uses 3-config
+  triangulation: (no corner-div) → baseline du_d_dt; (corner-div
+  on, d_con=0) → du_d_dt_cdd via subtraction; (corner-div on,
+  d_con=1) → measured dT_dt change.  Catches sign errors and
+  index errors in the iter-221 wiring at machine precision.
+  1/1 pass in 15 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
