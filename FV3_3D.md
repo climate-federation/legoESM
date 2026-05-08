@@ -576,85 +576,32 @@ Key iterations:
   stability with full d_con stack.  PE+NH 20 steps both
   bounded.
 - Iter 260: regression sweep checkpoint + 10-iter compaction.
-  Verifies all 11 iter-250..259 tests pass together (12/12
-  total cases) — confirms no regression after the iter-258
-  conservation closure on the iter-203 damp_w_d_con post-step.
-  Also compacts iter-250..259 ToC entries from ~100 lines to
-  ~25 lines for context budget at the user-requested 10-iter
-  compaction boundary.  No new test file (housekeeping iter).
-- Iter 261: AD-at-rest gradient with iter-19 PRODUCTION
-  d4_bg=0.02 (vs iter-184/185 umbrellas' softer 1e-3).
-  Stronger d4_bg amplifies the iter-187 smag_vort cap path;
-  could expose any sqrt-at-zero hazard.  PE 3 steps at rest
-  with full d_con stack + delt_max=1.0 + A_h + smag_cs +
-  T_diss + d4_bg=0.02: jax.grad finite.  Validates the
-  iter-183 sqrt(0) double-where fix holds under stronger
-  damping coefficients.  1/1 pass in 59 s.  Also fixes
-  obsolete "PE-only" docstring note in iter-208 PE damp_v
-  d_con (NH actually has its own iter-209 damp_v_d_con).
+  12/12 iter-250..259 tests pass together.
+- Iter 261: PE AD-at-rest gradient with iter-19 PRODUCTION
+  d4_bg=0.02 (stronger than iter-184/185 umbrellas' 1e-3) +
+  full d_con stack.  jax.grad finite.  Validates iter-183
+  sqrt(0) fix under stronger damping.  Also fixes obsolete
+  "PE-only" iter-208 docstring note.
 - Iter 262: extend iter-245 PE C36 production stability test
-  from 20 to 50 steps × dt=200 = ~2.8 hours integrated.
-  Catches slow-growth instability at C36 production
-  resolution that the 20-step iter-245 might miss.  Full
-  iter-19 production toolkit + full PE d_con stack + delt_max
-  =1.0 + A_h=1e7 + T_diss=0.05.  All fields finite + bounded
-  growth (max|u| < 100 m/s) + physical T bounds (100 < T <
-  400 K).  1/1 pass in 18 s.
-- Iter 263: NH counterpart of iter-262 — NH C36 production
-  50-step stability.  iter-251 covered 10 steps; iter-263
-  extends to 50 steps × dt=10 = 500 s integrated.  Full NH
-  iter-184 toolkit + 5-knob d_con stack + delt_max=1.0.  All
-  fields finite + bounded growth (max|u| < 50 m/s) + physical
-  θ_p bounds (|θ_p| < 100 K).  1/1 pass in 22 s.  Closes the
-  PE/NH parity gap on multi-step production stability at C36
-  with the full d_con stack.
-- Iter 264: cube-imprint reduction validation at C16
-  (intermediate between C8 tests and C36 production).
-  iter-217/253 cover C8; iter-254 covers C36.  iter-264 fills
-  the gap.  At C16 with iter-19 PRODUCTION toolkit (d4_bg=0.02
-  + nord=1 + a2b_zeta_corner) vs iter-168 nord=0 baseline,
-  the v_d edge_std/interior_std ratio must NOT amplify by
-  >50%.  Validates that the iter-19 production toolkit's
-  edge-suppression behavior holds at intermediate resolution.
-  1/1 pass in 25 s.
-- Iter 265: NH counterpart of iter-264 — NH C16 cube-imprint
-  validation.  C16 NH with iter-184-style toolkit + iter-187
-  + iter-190 paths vs iter-168 nord=0 baseline.  v cell-
-  centre ratio within 50 % of baseline.  1/1 pass in 24 s.
-  PE+NH cube-imprint regression coverage now spans C8 / C16
-  / C36 (production) for both 3D paths.
+  from 20 to 50 steps × dt=200.  Catches slow-growth
+  instability.  Full iter-19 toolkit + d_con stack.
+- Iter 263: NH counterpart of iter-262 (NH C36 50-step).
+- Iter 264: PE C16 cube-imprint validation with iter-19
+  PRODUCTION toolkit vs iter-168 nord=0 baseline.  Within
+  50 % of baseline.  Fills C8 / C36 resolution gap.
+- Iter 265: NH counterpart of iter-264 (NH C16 cube-imprint).
 - Iter 266: cubed-sphere non-orthogonality metrics sanity
-  test (cosa_corner, rsin2_corner, cosa_cell, sina_cell,
-  rsin2_cell).  These metrics are used by FV3-faithful d_sw5
-  paths and would be needed for a future port of the
-  iter-238 metric-aware d_con form.  Pins the structural
-  properties: |cosa| ≤ 0.6 (cube-vertex bound = 0.5 =
-  cos(60°) where 3 panels meet at 60°); rsin2 ≥ 0.99
-  (sin² ≤ 1).  Plus verifies cosa concentrates at cube
-  vertices (mean(|cosa| at 4 corner cells per face) > mean
-  (|cosa| in panel interior).  2/2 pass in 9 s.
-- Iter 267: explicit numerical test for the iter-219 NH
-  sponge factor values (FV3 sw_core.F90:1782-1786).  iter-219
-  tests verify the cap acts asymmetrically per layer; iter-267
-  pins the EXACT factor values: 0.1 at k=0, 0.5 at k=1, 1.0
-  at k≥2.  With delt_max=1e-6 + extreme damp_v_d_con=100, the
-  T-equivalent ΔT at each layer is bounded by sponge[k] * dt
-  * delt_max.  Catches accidental factor swap or sign error
-  in the iter-219 cap formula.  2/2 pass in 27 s.
-- Iter 268: cube-imprint metric OVER TIME for PE production
-  toolkit + d_con stack.  iter-242/244 multi-step stability
-  tests check max|u| / finiteness.  iter-254 imprint after
-  5 steps.  iter-268 ties them together: track imprint ratio
-  every 10 steps over 50 PE steps with full toolkit + d_con.
-  All sampled ratios stay in (0.1, 5.0) sanity bound +
-  growth_factor < 5x over 50 steps.  Catches slow-growth
-  edge-artifact accumulation that single-step / final-state
-  checks miss.  1/1 pass in 22 s.
-- Iter 269: NH counterpart of iter-268 — track NH cube-
-  imprint ratio every 10 steps over 50 NH steps with full
-  iter-184 toolkit + 5-knob d_con stack.  Same bounded-
-  growth criteria.  1/1 pass in 20 s.  PE+NH cube-imprint
-  over-time coverage symmetric.
+  (cosa_corner/cell, rsin2_corner/cell, sina_cell).  |cosa|
+  ≤ 0.6, rsin2 ≥ 0.99, cosa concentrates at cube vertices.
+- Iter 267: numerical regression for iter-219 NH sponge
+  factor values (k=0 → 0.1×, k=1 → 0.5×, k≥2 → 1×).
+- Iter 268: PE cube-imprint OVER TIME (50-step integration
+  with full toolkit + d_con).  All samples in (0.1, 5.0) +
+  growth_factor < 5×.
+- Iter 269: NH counterpart of iter-268 (NH cube-imprint
+  over-time).
+- Iter 270: NH AD-at-rest gradient with d4_bg=0.02 (mirror
+  of PE iter-261).  jax.grad finite + 10-iter ToC compaction.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
