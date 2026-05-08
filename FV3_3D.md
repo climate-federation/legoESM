@@ -25,7 +25,7 @@ Verified results (HS hybrid 30 days, ``ah_x10`` auto-applied):
 |:---:|:---------:|:-------------------:|:----:|
 | C36 | 200       | stable, mid_std=0.228 | 19/24 |
 | C48 | 200       | stable, mid_std=0.517 | 37   |
-| C72 | 200       | stable               | 33   |
+| C72 | 200       | stable, mid_std=6.815, max\|u\|=45.88 | 33 |
 | C96 | 50        | finite at day 30, max\|u\|=20.14 m/s | 99 |
 | C144| 33        | finite at day 1 smoke, max\|u\|=0.75 m/s | 102 |
 | C192| 25        | finite at day 1 smoke, max\|u\|=0.84 m/s | 103 |
