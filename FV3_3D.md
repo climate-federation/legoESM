@@ -592,6 +592,14 @@ Key iterations:
   damping coefficients.  1/1 pass in 59 s.  Also fixes
   obsolete "PE-only" docstring note in iter-208 PE damp_v
   d_con (NH actually has its own iter-209 damp_v_d_con).
+- Iter 262: extend iter-245 PE C36 production stability test
+  from 20 to 50 steps × dt=200 = ~2.8 hours integrated.
+  Catches slow-growth instability at C36 production
+  resolution that the 20-step iter-245 might miss.  Full
+  iter-19 production toolkit + full PE d_con stack + delt_max
+  =1.0 + A_h=1e7 + T_diss=0.05.  All fields finite + bounded
+  growth (max|u| < 100 m/s) + physical T bounds (100 < T <
+  400 K).  1/1 pass in 18 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
