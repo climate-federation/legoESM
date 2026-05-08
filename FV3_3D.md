@@ -355,6 +355,18 @@ Key iterations:
   reference-state linearization — FV3-faithful for the heat
   partition across the column.  iter-205 quantitative test
   updated to include the exner_ref factor in its expected formula.
+- Iter 208: port FV3 ``d_con`` KE→heat conversion for the iter-12
+  PE ``damp_v`` post-step damping.  Faithful (simplified) port of
+  FV3 ``sw_core.F90:1953-1990`` restricted to the damp_v
+  contribution alone.  When ``damp_v`` removes KE from
+  (u_d, v_d) via the post-step (du_corner, dv_corner) wind
+  increments, the lost KE is converted to heat in T (energy
+  conservation):  ΔT = -damp_v_d_con * (u*du + 0.5*du² + v*dv +
+  0.5*dv²) / c_pd, projected from corners to cell centres via
+  ``_interp_corner_to_center``.  Adds ``damp_v_d_con: float = 0.0``
+  config field (FV3 production default 1.0).  PE-only mirror of
+  the iter-203 NH ``damp_w_d_con``.  Default off; gated INSIDE
+  the iter-12 ``damp_v > 0`` block.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::

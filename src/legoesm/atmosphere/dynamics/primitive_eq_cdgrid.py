@@ -253,6 +253,23 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # Order of the post-step vorticity damping (0=del-2, 1=del-4,
         # 2=del-6).  FV3 default is 2 (del-6).  Used only when
         # ``damp_v > 0``.
+    damp_v_d_con: float = 0.0
+        # FV3-faithful KE→heat conversion for iter-12 ``damp_v``
+        # damping (FV3_3D iter 208).  Faithful port of the d_con
+        # block in FV3 ``sw_core.F90:1953-1990``: when ``damp_v``
+        # removes KE from (u_d, v_d) via the post-step wind
+        # increments (du_corner, dv_corner), the lost KE is
+        # converted to heat in T (energy conservation):
+        #
+        #     ΔKE_per_mass = u_d * du + 0.5*du² + v_d * dv + 0.5*dv²
+        #     ΔT = -damp_v_d_con * ΔKE / c_pd
+        #
+        # Computed at corners then projected to cell centres
+        # via ``_interp_corner_to_center`` (4-point average) for
+        # the T (cell-centre) update.  Default 0.0 preserves
+        # baseline bit-for-bit (gated INSIDE the iter-12
+        # ``damp_v > 0`` block).  FV3 production default is 1.0.
+        # PE-only (NH has its own iter-203 damp_w_d_con).
     use_fv3_a2b_zeta_corner: bool = False
         # FV3-faithful 4th-order A→B interpolation for the relative
         # vorticity ``ζ`` from cell centres to D-grid corners (the
@@ -1504,10 +1521,37 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
             )
             dv_corner = 0.5 * (dv_pad[:, :, :-1, :] + dv_pad[:, :, 1:, :])
 
-            state_new = state_new._replace(
-                u_d=state_new.u_d.replace(data=u_corner + du_corner),
-                v_d=state_new.v_d.replace(data=v_corner + dv_corner),
-            )
+            # FV3_3D iter 208: optional KE→heat conversion for the
+            # iter-12 damp_v wind increments.  Faithful port of FV3
+            # sw_core.F90:1953-1990 d_con block (simplified to just
+            # the damp_v contribution; the corner-div damping
+            # contribution is a future iteration).
+            #
+            # KE change per unit mass at corners:
+            #     ΔKE = u_d * du + 0.5*du² + v_d * dv + 0.5*dv²
+            # Heat = -ΔKE; ΔT = -damp_v_d_con * ΔKE / c_pd.
+            # T is at cell centres → project ΔKE_corner via
+            # ``_interp_corner_to_center``.
+            if self.config.damp_v_d_con > 0.0:
+                from legoesm.core.operators_cdgrid import (
+                    _interp_corner_to_center,
+                )
+                dKE_corner = (
+                    u_corner * du_corner + 0.5 * du_corner ** 2
+                    + v_corner * dv_corner + 0.5 * dv_corner ** 2
+                )
+                dKE_cc = _interp_corner_to_center(dKE_corner)
+                dT = -self.config.damp_v_d_con * dKE_cc / constants.c_pd
+                state_new = state_new._replace(
+                    u_d=state_new.u_d.replace(data=u_corner + du_corner),
+                    v_d=state_new.v_d.replace(data=v_corner + dv_corner),
+                    T=state_new.T.replace(data=state_new.T.data + dT),
+                )
+            else:
+                state_new = state_new._replace(
+                    u_d=state_new.u_d.replace(data=u_corner + du_corner),
+                    v_d=state_new.v_d.replace(data=v_corner + dv_corner),
+                )
 
         # Implicit gravity wave damping — post-step Laplacian diffusion on p_s.
         if self.config.implicit_grav_wave_damping > 0:

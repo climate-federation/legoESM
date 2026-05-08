@@ -94,6 +94,8 @@ def test_pe_fv3_config_fields_ast_regression():
         # iter-188: PE / NH parity.  Default 200.0 = the previously
         # hardcoded ``_dt_approx`` at iter-16 wiring.
         "corner_div_damp_dt_proxy": 200.0,
+        # iter-208: KE→heat conversion for damp_v (FV3 d_con port).
+        "damp_v_d_con": 0.0,
     }
 
     missing = []
