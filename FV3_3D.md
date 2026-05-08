@@ -584,6 +584,18 @@ Key iterations:
   production damping at the actual production grid.  Also adds
   physical-bounds sanity (100 K < T < 400 K).  1/1 pass in
   17 s.
+- Iter 246: audit + regression test for the PE T-convention
+  in d_con.  FV3 ``dyn_core.F90:1768`` divides ``heat_source``
+  by ``c_pd * delp * pkz`` because FV3's prognostic ``pt`` is
+  ``c_p*T/pkz``.  legoESM PE T is actual temperature directly,
+  so our iter-208 d_con formula uses just ``-d_con * dKE /
+  c_pd`` (no pkz factor).  Updates iter-208 docstring
+  documenting this convention difference (NOT a fidelity gap
+  — both produce the same physical ΔT for a given heat
+  input, just different state-variable conventions).  Adds a
+  regression test that pins the no-pkz formula at rtol=1e-10
+  AND verifies a synthetic pkz-scaled variant does NOT match
+  (non-vacuous check).  1/1 pass in 15 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::

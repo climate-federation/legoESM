@@ -310,6 +310,18 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # the metric-aware form would require adding rsin2 /
         # cosa_s arrays to ``CubedSphereCDGrid``; tracked for a
         # future iteration.
+        # **iter 246 audit (PE pkz factor)**: FV3 ``dyn_core.F90:
+        # 1768`` divides ``heat_source`` by ``c_pd * delp * pkz``
+        # to compute the per-step ΔT, where ``pkz`` is the local
+        # Exner.  Our PE iter-208 port divides only by ``c_pd``
+        # — no pkz factor, since PE's prognostic T is the actual
+        # temperature (FV3's ``pt`` is ``c_p*T/pkz`` so the
+        # division cancels the pkz internally).  The legoESM
+        # PE T is layer-mean temperature directly, so no Exner
+        # division is needed.  Verified consistent through
+        # iter-228 bit-for-bit formula tests + iter-243 global
+        # energy conservation.  No fidelity gap; the pkz factor
+        # in FV3 is a state-variable convention difference.
         # PE-only (NH has its own iter-203 damp_w_d_con).
     delt_max: float = 0.0
         # FV3-faithful per-step cap on dissipative heating magnitude
