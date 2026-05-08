@@ -641,6 +641,9 @@ def _resolve_dt_cube(
     -   ``long_time`` / ``longtime``: iter-70 long-time calibration
         (``safety=0.307``).  Stable to 20+ days at C96.  CHANGES
         ``dt`` at C72 from 200 to 133 (no longer iter-33 reference).
+    -   ``auto`` (iter-72): RECOMMENDED.  Picks ``short_time`` for
+        ``n < 96`` (preserves iter-33 C72 reference) and
+        ``long_time`` for ``n >= 96`` (uses iter-70 C96 stability).
 
     The ``label`` argument is used in the printed notice to
     distinguish HS vs baroclinic vs other call sites; the
@@ -656,13 +659,19 @@ def _resolve_dt_cube(
         return 200.0
     if raw in ("long_time", "longtime"):
         mode = "long_time"
+    elif raw == "auto":
+        # iter-72: auto-pick mode based on resolution.
+        # n<96 keeps short_time (preserves iter-33 C72 reference);
+        # n>=96 promotes to long_time (iter-70 C96 stability).
+        mode = "long_time" if n >= 96 else "short_time"
     elif raw in ("1", "true", "yes", "on", "short_time"):
         mode = "short_time"
     else:
         raise ValueError(
             f"LEGOESM_HS_CUBE_DT_CFL: unrecognised value {raw!r}.  "
             f"Use 0/false/off (default), 1/true/short_time (iter-66), "
-            f"or long_time (iter-71)."
+            f"long_time (iter-71), or auto (iter-72: short_time at "
+            f"n<96, long_time at n>=96)."
         )
     dt = _cfl_safe_dt_cube(n, mode=mode)
     if dt < 200.0:

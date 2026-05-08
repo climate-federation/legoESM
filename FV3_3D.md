@@ -3771,6 +3771,60 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
 
+## Iteration 72 (2026-05-07): auto-mode + 30d C96 long_time validation
+
+### Goal
+
+iter 71 added ``LEGOESM_HS_CUBE_DT_CFL=long_time`` but the user
+faces a trade-off: short_time preserves iter-33 C72 reference
+(dt=200) but breaks at C96 long-time; long_time fixes C96 but
+changes C72 dt to 133.  iter 72 adds a third option ``auto``
+that auto-picks per resolution.
+
+### Implementation
+
+Added ``LEGOESM_HS_CUBE_DT_CFL=auto`` value to ``_resolve_dt_cube``:
+- ``n < 96``: ``short_time`` mode (preserves iter-33 C72 reference).
+- ``n >= 96``: ``long_time`` mode (iter-70 C96 stability).
+
+Per-resolution table for ``auto``::
+
+    C36: short_time -> dt=200
+    C48: short_time -> dt=200
+    C72: short_time -> dt=200  (iter-33 reference preserved)
+    C96: long_time  -> dt=100  (iter-70 stable)
+    C144: long_time -> dt=66
+    C192: long_time -> dt=50
+
+Auto is the RECOMMENDED setting since users at any resolution
+get the right calibration without manual choice.
+
+### Tests
+
+Added ``test_resolve_dt_cube_auto_mode``: pins the per-resolution
+auto-pick logic.  Updated ``test_resolve_dt_cube_invalid_env_value_raises``
+to remove ``auto`` from the bad list.
+
+27 tests in ``TestHeldSuarezDissipationImbalance`` pass (was 26).
+
+### Empirical 30d validation (pending)
+
+A 30-day HS C96 run at ``ah_x10 + dt=100 + smag=0`` (the
+``auto`` setting at C96) was started in the iter-72 cycle but
+did not complete in the iter-72 wall-time budget.  Result will
+be appended in iter 73 once the run completes.
+
+### Status
+
+Single recommended invocation for HS at any cubed-sphere
+resolution::
+
+    JAX_ENABLE_X64=1 LEGOESM_HS_CUBE_DT_CFL=auto \
+      .venv/bin/python scripts/run_atmosphere_test_matrix.py \
+      --quick --only hs --grid cubed_sphere
+
+259 tests pass (was 258).
+
 ## Iteration 71 (2026-05-07): expose iter-70 fix via long_time mode
 
 ### Goal

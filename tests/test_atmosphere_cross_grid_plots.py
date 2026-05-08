@@ -2208,12 +2208,55 @@ class TestHeldSuarezDissipationImbalance:
             assert 95.0 <= dt_96 <= 105.0
             assert "long_time" in captured
 
+    def test_resolve_dt_cube_auto_mode(self, monkeypatch, capsys):
+        """iter 72: ``LEGOESM_HS_CUBE_DT_CFL=auto`` picks short_time
+        at n<96 (preserves iter-33 C72 reference dt=200) and
+        long_time at n>=96 (iter-70 C96 stability dt=100).
+        """
+        monkeypatch.setenv("LEGOESM_HS_CUBE_DT_CFL", "auto")
+
+        # n<96: short_time mode -> C72 stays at 200 (iter-33 ref).
+        capsys.readouterr()  # clear
+        dt_72 = M._resolve_dt_cube(72)
+        captured = capsys.readouterr().out
+        assert dt_72 == 200.0, (
+            f"auto at C72 must use short_time (dt=200, iter-33 ref), "
+            f"got dt={dt_72:.1f}"
+        )
+        assert captured == "", (
+            "auto at C72 should not print (dt unchanged from 200)"
+        )
+
+        # n=48: also short_time -> dt=200.
+        assert M._resolve_dt_cube(48) == 200.0
+
+        # n=96: long_time mode -> dt=100 (iter-70).
+        capsys.readouterr()
+        dt_96 = M._resolve_dt_cube(96)
+        captured = capsys.readouterr().out
+        assert 95.0 <= dt_96 <= 105.0, (
+            f"auto at C96 must use long_time (dt=100), got "
+            f"dt={dt_96:.1f}"
+        )
+        # Notice should print since dt < 200.
+        assert "long_time" in captured
+
+        # n=144: also long_time -> even smaller dt.
+        dt_144 = M._resolve_dt_cube(144)
+        assert dt_144 < dt_96, (
+            f"auto at C144 must give smaller dt than C96, "
+            f"got dt(C144)={dt_144:.1f}, dt(C96)={dt_96:.1f}"
+        )
+
     def test_resolve_dt_cube_invalid_env_value_raises(self, monkeypatch):
         """iter 71: unrecognised env values (other than known truthy
         / falsy / mode names) must raise rather than silently default.
+
+        iter 72: ``auto`` was added as a valid value, so it is no
+        longer in the ``bad`` list.
         """
         import pytest
-        for bad in ("foo", "2", "short", "auto"):
+        for bad in ("foo", "2", "short", "automatic"):
             monkeypatch.setenv("LEGOESM_HS_CUBE_DT_CFL", bad)
             with pytest.raises(ValueError, match="unrecognised value"):
                 M._resolve_dt_cube(72)
