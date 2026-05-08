@@ -159,6 +159,16 @@ class CDGridCompressibleEulerConfig(NamedTuple):
     # Default 0.0 preserves baseline (no div damping at all in NH).
     div_damp_coeff: float = 0.0
     div_damp_dddmp: float = 0.0
+    # FV3_3D iter 173: opt-in async halo overlap for the
+    # ``_arakawa_lamb_gradient(div_v)`` call in the iter-171
+    # cell-centre div damping block.  Mirrors the PE wiring at
+    # ``primitive_eq_cdgrid.py:594-598``.  When True AND the halo
+    # backend is "mpi", dispatches to
+    # ``_overlapped_arakawa_lamb_gradient`` which overlaps the halo
+    # exchange with local computation; falls through to the standard
+    # ``_arakawa_lamb_gradient`` on single-device or SPMD backends.
+    # Default False preserves baseline.  No effect unless ``div_damp_coeff > 0``.
+    use_async_halo: bool = False
 
 
 def cdgrid_compressible_euler_slow_tendencies(
@@ -329,7 +339,19 @@ def cdgrid_compressible_euler_slow_tendencies(
     _need_div_damp = config.div_damp_coeff > 0.0
     if _need_div_damp:
         div_v = cgrid_divergence(u_c, v_c, cdgrid)         # (6, n, n, nlev)
-        ddiv_dx, ddiv_dy_perp = _arakawa_lamb_gradient(div_v, cdgrid)
+        # iter-173: opt-in async-halo overlap on the gradient call
+        # under MPI; falls through to the standard A-L gradient on
+        # single-device / SPMD.  Mirrors the PE wiring.
+        from legoesm.grids.halo import _halo_backend as _hb_div
+        if config.use_async_halo and _hb_div == "mpi":
+            from legoesm.core.operators_cdgrid import (
+                _overlapped_arakawa_lamb_gradient,
+            )
+            ddiv_dx, ddiv_dy_perp = _overlapped_arakawa_lamb_gradient(
+                div_v, cdgrid,
+            )
+        else:
+            ddiv_dx, ddiv_dy_perp = _arakawa_lamb_gradient(div_v, cdgrid)
         if config.div_damp_dddmp > 0.0:
             # FV3 sw_core.F90:1720 adaptive Smagorinsky formulation.
             # ``da_min_c`` = global min B-grid corner area.

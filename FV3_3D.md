@@ -117,6 +117,9 @@ Key iterations:
   168/169/170/171 knobs ON simultaneously) + AST regression
   guards on config defaults and call-site presence; closes the
   silent-regression risk for the four new wirings
+- Iter 173: NH async-halo overlap for the iter-171 div-damp
+  gradient call (mirror of PE ``use_async_halo`` field); MPI
+  optimization, single-device fall-through bit-for-bit baseline
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
@@ -3999,6 +4002,65 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
+
+## Iteration 173 (2026-05-08): NH async-halo overlap for div damp gradient
+
+### Goal
+
+Bring the NH iter-171 cell-centre div-damping wiring to parity with
+PE on one MPI-optimization gap: the PE path's
+``primitive_eq_cdgrid.py:594-598`` dispatches to
+``_overlapped_arakawa_lamb_gradient`` when both ``use_async_halo``
+is set and the halo backend is MPI; the NH path lacked this dispatch.
+
+This is not an FV3 fidelity change (the underlying numerics are
+identical) but a documented PE feature now also exposed in NH for
+production MPI runs.
+
+### Implementation
+
+- File: ``src/legoesm/atmosphere/dynamics/compressible_euler_cdgrid.py``.
+- 1 new ``CDGridCompressibleEulerConfig`` field (default off):
+  ``use_async_halo: bool = False``.
+- In the iter-171 div-damp block, gate the
+  ``_arakawa_lamb_gradient(div_v, cdgrid)`` call on
+  ``config.use_async_halo and _hb_div == "mpi"``: when True,
+  dispatches to ``_overlapped_arakawa_lamb_gradient`` (lazy import
+  inside the gated branch); otherwise calls the standard helper.
+- Local / SPMD backends fall through to the standard helper —
+  bit-for-bit equivalent to ``use_async_halo=False`` on those
+  backends.
+
+### Tests added
+
+New file ``tests/test_async_halo_nh.py`` (3 tests):
+
+1. ``test_nh_async_halo_single_device_equivalence`` — bit-for-bit
+   equivalence of ``use_async_halo=True`` vs False on the local
+   backend.  This is the testable surface; the MPI path requires
+   MPI-enabled CI.
+2. ``test_nh_async_halo_differentiable`` — ``jax.grad`` flows
+   through 5 steps with the field set.
+3. ``test_nh_async_halo_ast_regression`` — AST guard for the
+   field declaration, the dispatch gate expression, and the
+   ``_overlapped_arakawa_lamb_gradient`` helper name appearing
+   in the source.
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest tests/test_async_halo_nh.py
+    => 3 passed in 49.54 s
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_fv3_nh_toolkit_iter172.py tests/test_div_damp_nh.py
+    => 9 passed (iter-171/172 unchanged after the iter-173 addition)
+
+### Status
+
+Default-off; opt-in for production MPI runs.  Closes the only
+PE feature gap in the iter-171 NH div-damp block.
 
 ## Iteration 172 (2026-05-08): NH FV3 toolkit composition + AST regression guard
 
