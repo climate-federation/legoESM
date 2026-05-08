@@ -708,6 +708,16 @@ Key iterations:
   iter-189 contract: dt_actual present → real dt wins; dt_
   actual absent → proxy wins.  Catches refactors that
   silently hardcode one path.  1/1 pass in 18 s.
+- Iter 299: NH counterpart of iter-298 (NH dt-proxy
+  fallback semantics).  Direct
+  ``cdgrid_compressible_euler_slow_tendencies`` calls
+  without ``dt_actual`` read ``corner_div_damp_dt_proxy`` —
+  proxy 10 vs 1000 with stronger ±15 m/s perturbations
+  produces measurable tendency difference (NH d2_bg floor
+  + smag_vort 0.20 ceiling mask the proxy at small delpc,
+  hence wider spread vs PE iter-298).  Together iter-297 +
+  iter-299 form the complete NH iter-189 contract.  1/1
+  pass in 20 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
