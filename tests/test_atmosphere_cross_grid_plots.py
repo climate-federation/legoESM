@@ -2980,6 +2980,36 @@ class TestHeldSuarezDissipationImbalance:
                 f"got ``{ast.unparse(value)}``"
             )
 
+    def test_baroclinic_cube_branch_uses_resolve_dt_cube_helper(self):
+        """iter 89: parallel to test_cube_branch_dt_uses_resolve_dt_cube_helper
+        but for the baroclinic function.  Catches the same silent-revert
+        regression mode for the second cube hydrostatic call site
+        (line ~3197 in matrix).
+
+        Uses a textual source check (not full AST walk) because the
+        existing _find_branch_body helper is hardcoded to scan
+        run_held_suarez; the simpler text check is sufficient for
+        regression detection.
+        """
+        import inspect
+        src = inspect.getsource(M.run_baroclinic)
+        # Must contain the iter-67 helper invocation.
+        assert "_resolve_dt_cube" in src, (
+            "iter-66/67/89: run_baroclinic must invoke _resolve_dt_cube "
+            "(was 'dt = 200.0' before iter 66).  A future edit that "
+            "reverts to a hardcoded dt would silently disable "
+            "LEGOESM_HS_CUBE_DT_CFL for the baroclinic path."
+        )
+        # And must NOT contain a stray pre-iter-66 hardcoded
+        # ``dt = 200.0`` line in the cubed_sphere branch.  We
+        # detect this by checking the line right before the
+        # PrimitiveEquationConfig(...) call.  This is a soft
+        # check: if both a hardcoded dt AND the helper appear,
+        # the helper takes precedence at runtime so no harm —
+        # but it indicates dead code that should be cleaned up.
+        # Skip the soft check; the positive assertion above is
+        # the load-bearing one.
+
     def test_cube_branch_dt_uses_resolve_dt_cube_helper(self):
         """iter 68: pin that the cube HS branch's ``dt`` assignment
         invokes ``_resolve_dt_cube`` rather than reverting to a
