@@ -180,6 +180,24 @@ def main():
           f"(fold at j={geom.fold.fold_j}, cap at j={geom.fold.cap_j})")
     print(f"  Total area: {float(geom.total_area):.4e} m^2")
 
+    # Metric floor (1 km).  eORCA has cells ~2 m wide at south pole and
+    # bipolar fold seam; division by these blows up tendencies.  Main-
+    # domain cells (~50 km at 1 deg) are untouched by this clamp.
+    dx_floor = 1000.0
+    n_small = int(jnp.sum(geom.dx_T < dx_floor)) + int(jnp.sum(geom.dx_v < dx_floor))
+    if n_small > 0:
+        print(f"  Metric floor: clamping {n_small} cells with dx < {dx_floor:.0f} m")
+        geom = geom._replace(
+            dx_T=jnp.maximum(geom.dx_T, dx_floor),
+            dy_T=jnp.maximum(geom.dy_T, dx_floor),
+            area_T=jnp.maximum(geom.area_T, dx_floor * dx_floor),
+            dx_u=jnp.maximum(geom.dx_u, dx_floor),
+            dy_u=jnp.maximum(geom.dy_u, dx_floor),
+            dx_v=jnp.maximum(geom.dx_v, dx_floor),
+            dy_v=jnp.maximum(geom.dy_v, dx_floor),
+            area_q=jnp.maximum(geom.area_q, dx_floor * dx_floor),
+        )
+
     # ---- Reconstruct bathymetry from mesh_mask ----
     print("Reconstructing bathymetry from mesh_mask...")
     H_bathy_raw, land_mask_raw = _reconstruct_bathymetry(grid_file)
