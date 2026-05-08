@@ -631,6 +631,17 @@ Key iterations:
   at rtol=1e-10.  Per-cell pointwise + global sum.  1/1 pass
   in 23 s.  Closes the conservation regression gap on the NH
   damp_v_d_con post-step.
+- Iter 258: global-energy-conservation regression for the
+  iter-203 damp_w_d_con post-step (NH).  iter-205 verified
+  per-cell heat formula bit-for-bit; iter-258 verifies global
+  conservation: ``Σ c_pd * Π_ref * Δθ_p_full = -Σ ΔKE_w_half``
+  at rtol=1e-10.  damp_w heat is computed at half-levels then
+  averaged to full levels; with w=0 BC at boundaries the
+  boundary correction terms vanish so ``Σ heat_full =
+  Σ heat_half``.  Test uses w-perturbation IC respecting the
+  BC.  ALL 6 d_con sites (4 PE via iter-243+256 + 5 NH via
+  iter-230+257+258) now have global-energy-conservation
+  regression coverage at machine precision.  1/1 pass in 23 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
