@@ -126,42 +126,47 @@ def main():
     mask_u = np.asarray(state.u_mask.data)
     mask_v = np.asarray(state.v_mask.data)
 
+    # NOTE: "Rel.vort" is the relative vorticity advection ζ×F/h, NOT
+    # the planetary Coriolis f×u.  Coriolis is applied in the
+    # forward-backward step function and is not captured here.
+    # The "PE Total" therefore excludes Coriolis — it is the tendency
+    # returned by the PE function, not the full du/dt.
     terms_u = {
         "KE+PGF": np.asarray(mom_diag.KE_PGF_u.data),
-        "Vort+Cor": np.asarray(mom_diag.vortcor_u.data),
+        "Rel.vort": np.asarray(mom_diag.vortcor_u.data),
         "D-term": np.asarray(mom_diag.Dterm_u.data),
         "Vert adv": np.asarray(mom_diag.vertadv_u.data),
-        "Wind/phys": np.asarray(mom_diag.phys_u.data),
-        "A_h visc": np.asarray(mom_diag.Ah_lap_u.data),
-        "B_h visc": np.asarray(mom_diag.Bh_bilap_u.data),
+        "KPP+Wind": np.asarray(mom_diag.phys_u.data),
+        "A_h": np.asarray(mom_diag.Ah_lap_u.data),
+        "B_h": np.asarray(mom_diag.Bh_bilap_u.data),
         "Smag": np.asarray(mom_diag.Cs_smag_u.data),
         "Leith": np.asarray(mom_diag.Cl_leith_u.data),
         "Bot drag": np.asarray(mom_diag.botdrag_u.data),
-        "A_v visc": np.asarray(mom_diag.Av_vert_u.data),
+        "A_v(bg)": np.asarray(mom_diag.Av_vert_u.data),
         "Sponge": np.asarray(mom_diag.sponge_u.data),
-        "Total": np.asarray(mom_diag.total_u.data),
+        "PE Total": np.asarray(mom_diag.total_u.data),
     }
     terms_v = {
         "KE+PGF": np.asarray(mom_diag.KE_PGF_v.data),
-        "Vort+Cor": np.asarray(mom_diag.vortcor_v.data),
+        "Rel.vort": np.asarray(mom_diag.vortcor_v.data),
         "D-term": np.asarray(mom_diag.Dterm_v.data),
         "Vert adv": np.asarray(mom_diag.vertadv_v.data),
-        "Wind/phys": np.asarray(mom_diag.phys_v.data),
-        "A_h visc": np.asarray(mom_diag.Ah_lap_v.data),
-        "B_h visc": np.asarray(mom_diag.Bh_bilap_v.data),
+        "KPP+Wind": np.asarray(mom_diag.phys_v.data),
+        "A_h": np.asarray(mom_diag.Ah_lap_v.data),
+        "B_h": np.asarray(mom_diag.Bh_bilap_v.data),
         "Smag": np.asarray(mom_diag.Cs_smag_v.data),
         "Leith": np.asarray(mom_diag.Cl_leith_v.data),
         "Bot drag": np.asarray(mom_diag.botdrag_v.data),
-        "A_v visc": np.asarray(mom_diag.Av_vert_v.data),
+        "A_v(bg)": np.asarray(mom_diag.Av_vert_v.data),
         "Sponge": np.asarray(mom_diag.sponge_v.data),
-        "Total": np.asarray(mom_diag.total_v.data),
+        "PE Total": np.asarray(mom_diag.total_v.data),
     }
 
-    # ---- Check 1: Budget closure ----
-    sum_components_u = sum(v for k, v in terms_u.items() if k != "Total")
-    sum_components_v = sum(v for k, v in terms_v.items() if k != "Total")
-    residual_u = terms_u["Total"] - sum_components_u
-    residual_v = terms_v["Total"] - sum_components_v
+    # ---- Check 1: Budget closure (PE terms only, excludes Coriolis) ----
+    sum_components_u = sum(v for k, v in terms_u.items() if k != "PE Total")
+    sum_components_v = sum(v for k, v in terms_v.items() if k != "PE Total")
+    residual_u = terms_u["PE Total"] - sum_components_u
+    residual_v = terms_v["PE Total"] - sum_components_v
     max_res_u = float(np.max(np.abs(residual_u)))
     max_res_v = float(np.max(np.abs(residual_v)))
     print(f"\n=== Budget closure ===")
@@ -178,17 +183,18 @@ def main():
         rms_v = float(np.sqrt(np.mean(terms_v[name][:, :, 0]**2)))
         print(f"  {name:<12} {rms_u:12.4e} {rms_v:12.4e}")
 
-    # ---- Check 3: Geostrophic balance ratio ----
-    # In the interior, |KE+PGF| ≈ |Vort+Cor| (geostrophic balance)
-    # The ratio |KE+PGF| / |Vort+Cor| should be ~1
-    pgf_rms_u = np.sqrt(np.mean(terms_u["KE+PGF"][:, :, 0]**2))
-    cor_rms_u = np.sqrt(np.mean(terms_u["Vort+Cor"][:, :, 0]**2))
-    pgf_rms_v = np.sqrt(np.mean(terms_v["KE+PGF"][:, :, 0]**2))
-    cor_rms_v = np.sqrt(np.mean(terms_v["Vort+Cor"][:, :, 0]**2))
-    print(f"\n=== Geostrophic balance (surface layer) ===")
-    print(f"  |PGF|/|Cor| ratio (u): {pgf_rms_u/max(cor_rms_u,1e-30):.3f}")
-    print(f"  |PGF|/|Cor| ratio (v): {pgf_rms_v/max(cor_rms_v,1e-30):.3f}")
-    print(f"  (should be ~1 in geostrophic balance)")
+    # ---- Check 3: Geostrophic balance note ----
+    # NOTE: the "Rel.vort" term is ζ×F/h (relative vorticity advection),
+    # NOT the planetary Coriolis f×u.  Coriolis is applied in the
+    # forward-backward step function and is not in these diagnostics.
+    # To check geostrophy, compute f×v from the restart velocities
+    # and compare with KE+PGF.  Use diagnose_omip_momentum.py for
+    # a complete budget including Coriolis.
+    print(f"\n=== Geostrophic balance note ===")
+    print(f"  'Rel.vort' is relative vorticity advection (ζ×F/h),")
+    print(f"  NOT Coriolis (f×u).  Coriolis is applied in the step")
+    print(f"  function and is not captured in these diagnostics.")
+    print(f"  Use diagnose_omip_momentum.py for full budget with Coriolis.")
 
     # ---- Check 4: Volume conservation ----
     print(f"\n=== Volume conservation (mean η across restarts) ===")
@@ -203,7 +209,7 @@ def main():
         print(f"  day {rday:>6} (yr {rday/365:5.1f}): mean η = {mean_eta:.6e} m")
 
     # ---- Plot 1: Surface momentum balance maps (u-component) ----
-    plot_terms = [k for k in terms_u if k != "Total"]
+    plot_terms = [k for k in terms_u if k != "PE Total"]
     n_terms = len(plot_terms)
     fig, axes = plt.subplots(2, (n_terms + 1) // 2, figsize=(5 * ((n_terms + 1) // 2), 8))
     axes = axes.flatten()

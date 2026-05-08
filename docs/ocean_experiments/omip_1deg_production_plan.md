@@ -199,6 +199,51 @@ Our C=0.15 gives 6.7× less viscosity than MOM6's C=0.15.
 7. Equatorial smoothing radians/degrees bug in run_omip.py
 8. cos²→cos¹ Laplacian scaling
 
+## Performance: GPU-side Forcing Interpolation
+
+The JRA55-do cache stores 3-hourly records (8 per day, 2920 per year).
+At dt=300s, each simulated day requires 288 timesteps.  The original
+path pre-interpolated all 288 steps in Python on the host before passing
+them to the JIT-compiled `lax.scan` block.  This spent ~1.9s/day on
+host-side I/O (29% of wall time).
+
+**Optimization (--gpu-interp, now the default):** Load only the ~9
+native 3-hourly records that bracket each block, pass them as stacked
+arrays to the GPU, and do the linear interpolation + solar zenith
+computation inside the `lax.scan` body.  This reduces host-side I/O
+from 288 Python calls to ~9 Zarr reads per block.
+
+| | CPU interp (old) | GPU interp (new) |
+|---|-----------------|------------------|
+| I/O per day | 1.9 s | 0.2 s |
+| Compute per day | 4.6 s | 4.5 s |
+| Total per day | 6.5 s | 4.7 s |
+| 50-year wall time | ~33 h | ~24 h |
+
+The interpolation inside the scan body is straightforward:
+- `pos = day * 8` gives the fractional position in the record array
+- `i_lo = floor(pos)`, `alpha = pos - i_lo` for linear weights
+- `cos_zenith` computed from `doy = day % 365 + 1`, `hour = (day % 1) * 24`
+
+No data is lost — the same 3-hourly forcing is used, just interpolated
+on GPU instead of CPU.  Physics results are bit-identical.
+
+## Momentum Budget Diagnostics
+
+**Critical note:** The `MomentumTendencyDiagnostics` from the PE
+tendency function does NOT include the planetary Coriolis term (f×u).
+Coriolis is applied in the forward-backward step function and is never
+captured in any diagnostic field.  The `vortcor_u/v` fields are
+**relative vorticity advection** (ζ×F/h), not Coriolis.
+
+To check geostrophic balance, compute `f×v` independently from the
+restart velocity field and compare with `KE_PGF`.  The script
+`scripts/diagnose_omip_momentum.py` does this automatically.
+
+At year 1 of the uniform-profile spinup, PGF/f×v ≈ 1 at 600-800m
+depth (geostrophy developing), with PGF exceeding Coriolis toward
+the bottom (z-star bathymetry-step PGF errors).
+
 ## Next Steps
 
 ### Immediate

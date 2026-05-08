@@ -408,7 +408,9 @@ class MomentumTendencyDiagnostics(NamedTuple):
     KE_PGF_u, KE_PGF_v : Field
         −∂(KE)/∂x − (1/ρ_0)·∂p/∂x   (kinetic-energy gradient + pressure gradient)
     vortcor_u, vortcor_v : Field
-        ζ × v_at_u  /  −ζ × u_at_v   (vorticity-Coriolis advection)
+        ζ × v_at_u  /  −ζ × u_at_v   (RELATIVE vorticity advection only;
+        the planetary Coriolis f×u is applied in the forward-backward step
+        function and is NOT included in these diagnostics)
     vertadv_u, vertadv_v : Field
         Flux-form 1st-order upwind ∂(w·u)/∂z, ∂(w·v)/∂z
     Ah_lap_u, Ah_lap_v : Field
@@ -432,9 +434,11 @@ class MomentumTendencyDiagnostics(NamedTuple):
     sponge_u, sponge_v : Field
         Sponge restoring (0 when no sponge)
     total_u, total_v : Field
-        The actually-applied du_dt / dv_dt (after mask multiplication).
-        Sanity check: ``total ≡ Σ components`` to machine precision —
-        enforced by ``test_momentum_diagnostics_closure``.
+        The du_dt / dv_dt returned by the PE tendency function (after
+        mask multiplication).  **Excludes Coriolis** (f×u), which is
+        applied in the forward-backward step function.  Sanity check:
+        ``total ≡ Σ PE components`` to machine precision — enforced by
+        ``test_momentum_diagnostics_closure``.
     """
 
     KE_PGF_u: Field
