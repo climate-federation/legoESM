@@ -622,6 +622,12 @@ Key iterations:
   formula verified for damp_w via 2x scaling at nord=0/1/2.
   Closes the (damp_v + damp_w) × (PE + NH) × nord-scaling
   matrix.  3/3 pass in 50 s.  Plus 10-iter ToC compaction.
+- Iter 281: ``corner_div_damp_d2_bg`` linear scaling test
+  (FV3 d2_bg formula).  When dddmp=0, FV3 form is
+  ``damp = da_min_c * d2_bg`` — LINEAR in d2_bg.  Verifies
+  2x d2_bg → 2x wind change for both PE and NH.  2/2 pass
+  in 31 s.  Pins the FV3-faithful linear-in-d2_bg coefficient
+  on the iter-16/iter-168 nord=0 corner-div damping paths.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
