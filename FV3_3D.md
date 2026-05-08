@@ -163,20 +163,29 @@ Recommended C96+ recipe:
    regression testing across C36/C48/C72 to ensure existing
    reference numbers don't shift.  Deferred to a future iteration.
 
-## Quick Reference (iter 38 summary)
+## Quick Reference (iter 38 summary, updated iter 72)
 
 ### Production-recommended setting per resolution
 
 The full damping configuration combines four iter-18-25 corner-
 divergence damping settings + per-resolution ``A_h`` scaling
-(iter 33-37):
+(iter 33-37) + iter-72 CFL-aware ``dt``:
 
-| resolution | LEGOESM_AH_SCALE | recommended A_h | status                              |
-|:----------:|:-----------------|:----------------|:------------------------------------|
-| C36        | ``1.0`` (default)| 4.08e+06        | iter 19/24 production               |
-| C48        | ``2.0`` (iter 37)| 6.12e+06        | sweet-spot scan, mid_std -48 %      |
-| C72        | ``10.0`` (iter 33)| 2.04e+07       | smallest stable scale               |
-| C96+       | UNTESTED         | unknown         | likely needs ≥ 10.0; calibrate first|
+| resolution | LEGOESM_AH_SCALE | recommended A_h | dt (auto-mode) | status                              |
+|:----------:|:-----------------|:----------------|:---------------|:------------------------------------|
+| C36        | ``1.0`` (default)| 4.08e+06        | 200 (no change)| iter 19/24 production               |
+| C48        | ``2.0`` (iter 37)| 6.12e+06        | 200 (no change)| sweet-spot scan, mid_std -48 %      |
+| C72        | ``10.0`` (iter 33)| 2.04e+07       | 200 (iter-33 ref)| smallest stable scale at dt=200   |
+| C96        | ``10.0`` (auto)  | 1.53e+07        | 100 (iter-70/72)| stable to 20+ days at dt=100; iter-74 30d in progress |
+| C144+      | ``10.0`` (auto)  | depends         | 66 (auto extrap)| empirically untested                |
+
+**RECOMMENDED env var setting** (iter 72)::
+
+    LEGOESM_HS_CUBE_DT_CFL=auto
+
+This auto-picks ``dt=200`` at C36-C72 (preserves iter-33 ref) and
+``dt=100`` at C96+ (iter-70 long-time stable).  See iter 65-72 for
+the empirical history.
 
 ```python
 # iter-38 production config (set A_h per the table above)
@@ -263,10 +272,13 @@ Or via env vars (matrix sets ``A_h`` from ``LEGOESM_AH_SCALE``)::
 - **Production at C72**: enable d4=0.02 nord=1 + ``LEGOESM_AH_SCALE=10.0``
   (iter 33).  Stable but imprint ~30x C36; further A_h tuning may
   improve.
-- **Production at C96+**: UNTESTED.  The iter-37 scaling pattern
-  (C36→1.0, C48→2.0, C72→10.0) suggests calibrating ≥ 10x at
-  higher resolutions.  Run a stability check before climate-
-  relevant integration.
+- **Production at C96**: enable d4=0.02 nord=1 + ``LEGOESM_AH_SCALE=10.0``
+  + ``LEGOESM_HS_CUBE_DT_CFL=auto`` (iter 72).  ``auto`` reduces
+  ``dt`` to 100 s at C96 (iter-70 empirical stable threshold for the
+  day-15 interior eigenmode iter-69 identified).  Stable to 20+ days
+  empirically; 30-day in progress (iter-74).
+- **Production at C144+**: ``LEGOESM_AH_SCALE=10.0 LEGOESM_HS_CUBE_DT_CFL=auto``
+  is the projected setting; not empirically validated.
 - **Differentiable-model gradient flow**: bit-for-bit baseline path
   preserved (when LEGOESM_AH_SCALE=1, LEGOESM_CDD_*=0), so existing
   trained weights remain valid.
