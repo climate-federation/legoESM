@@ -99,11 +99,6 @@ from legoesm.ocean.vertical import (
     flux_form_vertical_tracer_advection_tvd as _flux_form_vertical_advection_tvd,
     compute_centroid_depth,
 )
-from legoesm.core.weno import weno_reconstruct_split, weno_upwind
-from legoesm.ocean.advection import (
-    flux_form_vertical_tracer_advection_weno5,
-    flux_form_vertical_tracer_advection_weno7,
-)
 
 
 # interp_cell_to_uface is imported from latlon_cgrid_operators (shared).

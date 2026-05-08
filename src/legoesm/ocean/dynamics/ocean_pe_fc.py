@@ -28,7 +28,6 @@ from legoesm.core.operators_fc_3d import (
     fc_divergence_damping_3d,
 )
 from legoesm.grids.cubed_sphere import CubedSphereGrid
-from legoesm.grids.halo import pad_halo_4d
 from legoesm.ocean.eos import wright_eos, compute_hydrostatic_pressure
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,

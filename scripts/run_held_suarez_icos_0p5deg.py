@@ -100,6 +100,13 @@ def main():
 
     logger.info("status=%s  setup=%.1fs  run=%.1fs", status, t_setup, t_run)
 
+    # iter-109 (codex iter-104 MEDIUM-8): propagate status to
+    # exit code so wrappers / automation can detect BLOWUP via
+    # ``$?``.
+    from legoesm.driver.run_status import status_to_exit_code
+    return status_to_exit_code(status)
+
 
 if __name__ == "__main__":
-    main()
+    import sys
+    sys.exit(main())

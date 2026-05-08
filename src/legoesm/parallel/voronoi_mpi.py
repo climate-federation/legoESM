@@ -369,7 +369,8 @@ def make_voronoi_mpi_step(
         ``exchange_cell_field`` call instead of two.  ``phis`` is static
         and is no longer halo-exchanged here — its halo is filled at
         setup time and left alone (the prognostic state still carries
-        ``state.phis`` unchanged).
+        ``state.phis`` unchanged).  See iter 4: this drops the per-RK-
+        stage cell collective from 3 (T, p_s, phis) to 1 (T+p_s pack).
         """
         u_ex = halo_ex.exchange_edge_field(state.u.data)
         # Pack T (nlev) + p_s (1) along the trailing axis for one exchange.
@@ -385,7 +386,7 @@ def make_voronoi_mpi_step(
             u=state.u.replace(data=u_ex),
             T=state.T.replace(data=T_ex),
             p_s=state.p_s.replace(data=ps_ex),
-            phis=state.phis,
+            phis=state.phis,  # static after scatter; halos already correct
         )
 
     def _mpi_tendency_fn(state: MPASHydrostaticState) -> MPASHydrostaticState:

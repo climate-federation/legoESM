@@ -402,8 +402,18 @@ def precision_health_report(
         _eh = np.asarray(_energy_pair)
         energy_now = float(_eh[0]) / g
         energy_prev = float(_eh[1]) / g
-        dE = abs(energy_now - energy_prev)
-        dE_rel = dE / max(abs(energy_prev), 1e-30)
+        # iter-92 audit followup: this used to inline
+        # ``max(abs(energy_prev), 1e-30)`` — the iter-78/80
+        # pathology pattern.  In production atmospheric energy
+        # ~5e+24 J so the 1e-30 floor never bit, but for
+        # consistency with the iter-88 ``conservation_drift``
+        # helper (and to keep the ``legoesm.diagnostics``
+        # package's drift-normalization conventions in one
+        # place), delegate to the canonical helper.
+        from legoesm.diagnostics.conservation_drift import (
+            compute_relative_drift,
+        )
+        dE_rel = compute_relative_drift([energy_prev, energy_now])
         # Scale to per-day rate
         steps_per_day = 86400.0 / dt
         dE_per_day = dE_rel * steps_per_day

@@ -1,8 +1,0 @@
-Iter-775 W5 cross-test of iter-774's alpha=0.98 c10
-correction at 16 peak-updating D-grid corners.
-C36, dt=300s, 1-day integration, same matrix config.
-
-   alpha    mass_drift   |h-h_ic|_Linf        h_range (min, max)
----------------------------------------------------------------------------
-   1.000     1.151e-06       1.964e+02  (3.9040e+03, 5.9667e+03) [default]
-   0.980     3.835e-07       1.964e+02  (3.9040e+03, 5.9667e+03) [iter-774 cand]

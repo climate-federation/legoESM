@@ -473,17 +473,41 @@ class MPASOceanModel:
         # only removes numerical drift, not the forcing itself)
         if config.use_conservation_fixer:
             _f64 = jnp.float64
-            wa = mask.astype(_f64)[:, jnp.newaxis] * mesh.areaCell.astype(_f64)[:, jnp.newaxis]
-            expected_dHeat = jnp.sum(
+            # Owned-cell mask: under MPI partitioning, halo cells are
+            # also stored on neighbouring ranks; including them in the
+            # local sums double-counts after the global allreduce.
+            # ``self._owned_mask`` is set by the MPI-aware constructor
+            # (``MPASPrimitiveEquationModel`` / ``MPASOceanModel``)
+            # when running distributed; defaults to ``None`` (single-
+            # rank, all cells owned) otherwise.
+            owned_mask = getattr(self, "_owned_mask", None)
+            if owned_mask is None:
+                eff_mask = mask
+            else:
+                eff_mask = mask * owned_mask.astype(mask.dtype)
+            wa = eff_mask.astype(_f64)[:, jnp.newaxis] * mesh.areaCell.astype(_f64)[:, jnp.newaxis]
+            expected_dHeat_local = jnp.sum(
                 tend.dT_dt.data.astype(_f64) * h_k_old.astype(_f64) * wa
             ) * dt
-            expected_dSalt = jnp.sum(
+            expected_dSalt_local = jnp.sum(
                 tend.dS_dt.data.astype(_f64) * h_k_old.astype(_f64) * wa
             ) * dt
+            # Globally sum the locally-masked expected forcing so the
+            # comparison against the globally-summed ``heat_old`` /
+            # ``salt_old`` inside the fixer is consistent.
+            from legoesm.ocean.conservation_mpas import _is_multi_process
+            if _is_multi_process():
+                from legoesm.parallel.reductions import global_sum_mpi
+                expected_dHeat = global_sum_mpi(expected_dHeat_local)
+                expected_dSalt = global_sum_mpi(expected_dSalt_local)
+            else:
+                expected_dHeat = expected_dHeat_local
+                expected_dSalt = expected_dSalt_local
             state_new = mpas_ocean_conservation_fixer(
                 state_new, state, mesh, z_coord, config,
                 expected_dHeat=expected_dHeat,
                 expected_dSalt=expected_dSalt,
+                owned_mask=owned_mask,
             )
 
         return cast_pytree(state_new, None, "storage")

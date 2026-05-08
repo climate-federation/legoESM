@@ -34,7 +34,7 @@ class KPPConfig(NamedTuple):
     velocity scales can be computed correctly.  If these are not
     provided, simplified proxies from the ocean state are used.
     """
-    Ri_crit: float = 0.25   # Critical bulk Richardson number (LMD94)
+    Ri_crit: float = 0.3    # Critical bulk Richardson number (Large, McWilliams & Doney 1994; matches NCAR POP2 / MOM6 default)
     Cv: float = 1.6          # Unresolved shear coefficient
     kappa_vk: float = 0.4    # von Karman constant
     K_max: float = 1.0       # Maximum diffusivity [m^2/s]

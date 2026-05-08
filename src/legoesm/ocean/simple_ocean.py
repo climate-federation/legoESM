@@ -55,9 +55,19 @@ class SimpleOceanConfig(NamedTuple):
 # ============================================================================
 
 class SlabOceanState(NamedTuple):
-    """State for slab and two-layer ocean modes."""
+    """State for slab and two-layer ocean modes.
+
+    ``Q_freeze`` is a diagnostic field [W/m²] populated when the
+    freezing clamp fires.  It captures the energy that would have
+    pushed SST below ``T_freeze`` and represents the latent heat
+    released to ice formation; consumers wishing to close the
+    sea-ice freezing budget should integrate this term.  Defaults
+    to ``None`` so legacy callers that ignore freezing energy keep
+    working unchanged.
+    """
     T_sfc: Field    # SST [K], shape (6, n, n)
     T_deep: Field   # Deep layer temperature [K], shape (6, n, n)
+    Q_freeze: Field | None = None  # latent-heat-of-fusion flux at freezing clamp
 
 
 # ============================================================================
@@ -72,7 +82,13 @@ def init_slab_state(
     T_sfc_init: float = 300.0,
     T_deep_init: float = 278.0,
 ) -> SlabOceanState:
-    """Initialize a SlabOceanState with uniform temperatures."""
+    """Initialize a SlabOceanState with uniform temperatures.
+
+    ``Q_freeze`` is initialised to a zero Field so the pytree shape
+    is invariant across timesteps (matches ``LakeState.Q_freeze``
+    convention).  Step functions update the values in place via
+    ``state.Q_freeze.replace(data=...)``.
+    """
     return SlabOceanState(
         T_sfc=Field(
             jnp.full(shape, T_sfc_init),
@@ -81,6 +97,10 @@ def init_slab_state(
         T_deep=Field(
             jnp.full(shape, T_deep_init),
             name="T_deep", dims=DIMS_2D, units="K",
+        ),
+        Q_freeze=Field(
+            jnp.zeros(shape),
+            name="Q_freeze", dims=DIMS_2D, units="W/m2",
         ),
     )
 
@@ -119,14 +139,25 @@ def _slab_step(
     # Energy balance
     C_mix = config.rho_ocean * config.c_ocean * config.h_mix
     dT_dt = (sw_net + lw_net - shflx - lhflx + config.Q_flux) / C_mix
-    T_sfc_new = T_sfc + dt * dT_dt
+    T_sfc_trial = T_sfc + dt * dT_dt
 
-    # Freezing clamp
-    T_sfc_new = jnp.maximum(T_sfc_new, config.T_freeze)
+    # Freezing clamp.  When the trial SST is below T_freeze, the energy
+    # the column would have lost to push it below freezing is the heat
+    # that *should* go into latent heat of fusion (creating sea ice).
+    # Diagnose this as ``Q_freeze`` on the new state instead of letting
+    # the clamp silently destroy the energy.  The two-layer lake uses
+    # the same pattern (two_layer_lake.py:84-99).  Coupler-conservation
+    # audit F6.
+    T_sfc_new = jnp.maximum(T_sfc_trial, config.T_freeze)
+    Q_freeze = C_mix * jnp.maximum(config.T_freeze - T_sfc_trial, 0.0) / dt
 
     new_state = SlabOceanState(
         T_sfc=state.T_sfc.replace(data=T_sfc_new),
         T_deep=state.T_deep,  # unchanged in slab mode
+        Q_freeze=(state.Q_freeze.replace(data=Q_freeze)
+                  if state.Q_freeze is not None
+                  else Field(data=Q_freeze, name="Q_freeze",
+                             dims=state.T_sfc.dims, units="W/m2")),
     )
     u_sfc = jnp.zeros_like(T_sfc)
     v_sfc = jnp.zeros_like(T_sfc)
@@ -173,7 +204,7 @@ def _two_layer_step(
     # Mixed layer energy balance
     C_mix = config.rho_ocean * config.c_ocean * config.h_mix
     dT_sfc_dt = (sw_net + lw_net - shflx - lhflx + config.Q_flux - F_mix) / C_mix
-    T_sfc_new = T_sfc + dt * dT_sfc_dt
+    T_sfc_trial = T_sfc + dt * dT_sfc_dt
 
     # Deep layer
     C_deep = config.rho_ocean * config.c_ocean * config.h_deep
@@ -185,12 +216,18 @@ def _two_layer_step(
     dT_deep_dt = (F_mix - restore) / C_deep
     T_deep_new = T_deep + dt * dT_deep_dt
 
-    # Freezing clamp on surface
-    T_sfc_new = jnp.maximum(T_sfc_new, config.T_freeze)
+    # Freezing clamp on surface — diagnose Q_freeze (see _slab_step
+    # docstring + audit F6).
+    T_sfc_new = jnp.maximum(T_sfc_trial, config.T_freeze)
+    Q_freeze = C_mix * jnp.maximum(config.T_freeze - T_sfc_trial, 0.0) / dt
 
     new_state = SlabOceanState(
         T_sfc=state.T_sfc.replace(data=T_sfc_new),
         T_deep=state.T_deep.replace(data=T_deep_new),
+        Q_freeze=(state.Q_freeze.replace(data=Q_freeze)
+                  if state.Q_freeze is not None
+                  else Field(data=Q_freeze, name="Q_freeze",
+                             dims=state.T_sfc.dims, units="W/m2")),
     )
     u_sfc = jnp.zeros_like(T_sfc)
     v_sfc = jnp.zeros_like(T_sfc)

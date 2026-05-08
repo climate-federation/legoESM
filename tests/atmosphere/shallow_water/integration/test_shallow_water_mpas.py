@@ -122,7 +122,10 @@ class TestWilliamsonTC5:
             s = model.step(s, dt)
 
         mass_final = float(jnp.sum(s.h.data.astype(jnp.float64) * area))
-        rel_drift = abs(mass_final - mass_init) / abs(mass_init)
+        # iter-164: centralized helper (NaN-aware, completes
+        # iter-157/159 sweep across the entire codebase).
+        from legoesm.diagnostics import compute_relative_drift
+        rel_drift = compute_relative_drift([mass_init, mass_final])
 
         assert rel_drift < 1e-10, (
             f"Mass drift {rel_drift:.2e} exceeds 1e-10"
@@ -175,7 +178,9 @@ class TestMassConservation:
             s = model.step(s, dt)
 
         mass_final = float(jnp.sum(s.h.data.astype(jnp.float64) * area))
-        rel_drift = abs(mass_final - mass_init) / abs(mass_init)
+        # iter-164: centralized helper.
+        from legoesm.diagnostics import compute_relative_drift
+        rel_drift = compute_relative_drift([mass_init, mass_final])
 
         assert rel_drift < 1e-13, (
             f"Mass drift {rel_drift:.2e} exceeds 1e-13"
@@ -188,8 +193,12 @@ class TestEnergyConservation:
     def test_energy_bounded(self, mesh):
         """Total energy should stay bounded over 50 steps."""
         from legoesm.core.operators_voronoi import kinetic_energy_cell
+        # iter-166: replaced literal 9.80616 with constants.g per
+        # CLAUDE.md "Tests and scripts must follow the constant-
+        # hygiene rule too."
+        from legoesm import constants
 
-        g = 9.80616
+        g = constants.g
         config = MPASShallowWaterConfig(
             g=g,
             pv_scheme="energy",
@@ -217,7 +226,10 @@ class TestEnergyConservation:
             s = model.step(s, dt)
 
         E_final = total_energy(s)
-        rel_drift = abs(E_final - E_init) / abs(E_init)
+        # iter-164: centralized helper (energy drift, same
+        # iter-78 pattern).
+        from legoesm.diagnostics import compute_relative_drift
+        rel_drift = compute_relative_drift([E_init, E_final])
 
         assert rel_drift < 1e-10, (
             f"Energy drift {rel_drift:.2e} exceeds 1e-10"

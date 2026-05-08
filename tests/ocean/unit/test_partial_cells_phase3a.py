@@ -29,6 +29,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm import constants
 from legoesm.ocean.dynamics.ocean_tendency_common import (
     iterate_eos_and_pressure_anomaly,
 )
@@ -77,11 +78,11 @@ class TestBaroclinicAnomalyHActualBackcompat:
         mask = jnp.ones((n_lat, n_lon))
         rho_a, rhop_a, pp_a = iterate_eos_and_pressure_anomaly(
             T, S, mask, _identity_fill, wright_eos,
-            z20.dz_ref, rho_0, 9.80616, n_iter=2,
+            z20.dz_ref, rho_0, constants.g, n_iter=2,
         )
         rho_b, rhop_b, pp_b = iterate_eos_and_pressure_anomaly(
             T, S, mask, _identity_fill, wright_eos,
-            z20.dz_ref, rho_0, 9.80616, n_iter=2,
+            z20.dz_ref, rho_0, constants.g, n_iter=2,
             h_actual=None,
         )
         np.testing.assert_array_equal(np.asarray(rho_a), np.asarray(rho_b))
@@ -101,11 +102,11 @@ class TestBaroclinicAnomalyHActualBackcompat:
         )
         _, _, pp_legacy = iterate_eos_and_pressure_anomaly(
             T, S, mask, _identity_fill, wright_eos,
-            z20.dz_ref, rho_0, 9.80616,
+            z20.dz_ref, rho_0, constants.g,
         )
         _, _, pp_explicit = iterate_eos_and_pressure_anomaly(
             T, S, mask, _identity_fill, wright_eos,
-            z20.dz_ref, rho_0, 9.80616,
+            z20.dz_ref, rho_0, constants.g,
             h_actual=h_actual_dz,
         )
         np.testing.assert_array_equal(
@@ -136,11 +137,11 @@ class TestBaroclinicAnomalyPartialCells:
 
         _, _, pp_legacy = iterate_eos_and_pressure_anomaly(
             T, S, mask, _identity_fill, wright_eos,
-            z20.dz_ref, rho_0, 9.80616,
+            z20.dz_ref, rho_0, constants.g,
         )
         _, _, pp_partial = iterate_eos_and_pressure_anomaly(
             T, S, mask, _identity_fill, wright_eos,
-            z20.dz_ref, rho_0, 9.80616,
+            z20.dz_ref, rho_0, constants.g,
             h_actual=partial.h_partial,
         )
         np.testing.assert_array_equal(
@@ -169,12 +170,12 @@ class TestBaroclinicAnomalyPartialCells:
 
         _, _, pp_partial = iterate_eos_and_pressure_anomaly(
             T, S, mask, _identity_fill, wright_eos,
-            z20.dz_ref, rho_0, 9.80616,
+            z20.dz_ref, rho_0, constants.g,
             h_actual=partial.h_partial,
         )
         _, _, pp_legacy = iterate_eos_and_pressure_anomaly(
             T, S, mask, _identity_fill, wright_eos,
-            z20.dz_ref, rho_0, 9.80616,
+            z20.dz_ref, rho_0, constants.g,
         )
 
         # The partial path should have a smaller p_prime at the bottom
@@ -207,7 +208,7 @@ class TestBaroclinicAnomalyPartialCells:
 
         _, _, pp_partial = iterate_eos_and_pressure_anomaly(
             T, S, mask, _identity_fill, wright_eos,
-            z20.dz_ref, rho_0, 9.80616,
+            z20.dz_ref, rho_0, constants.g,
             h_actual=partial.h_partial,
         )
 
@@ -246,7 +247,7 @@ class TestRestStatePGFFlatBottom:
         partial = create_partial_cell_coordinate(z20, H)
         _, _, pp = iterate_eos_and_pressure_anomaly(
             T, S, mask, _identity_fill, wright_eos,
-            z20.dz_ref, rho_0, 9.80616,
+            z20.dz_ref, rho_0, constants.g,
             h_actual=partial.h_partial,
         )
         # Per level k, pp is horizontally uniform → max - min = 0 to round-off

@@ -19,6 +19,10 @@ class LakeConfig(NamedTuple):
     Cd_lake: float = 1.5e-3         # Drag coefficient (constant scheme)
     Ch_lake: float = 1.5e-3         # Heat transfer coefficient (constant)
     T_freeze: float = 273.15        # Freezing point [K] (= constants.T_freeze)
+    # Freshwater EOS parameters (T_freshwater_max_density and
+    # rho_freshwater_curvature) live in legoesm.constants and are not
+    # repeated here — physical constants belong in the constants
+    # module per CLAUDE.md.
     bulk_scheme: str = "constant"   # "constant" or "most"
     z_ref: float = 10.0             # Reference height for MOST [m]
     bulk_n_iter: int = 5            # MOST iterations

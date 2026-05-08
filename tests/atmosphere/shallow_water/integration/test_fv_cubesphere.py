@@ -93,7 +93,9 @@ class TestFVShallowWater:
         assert jnp.all(jnp.isfinite(s.v_d))
         h_mean_init = float(jnp.mean(state.h))
         h_mean_final = float(jnp.mean(s.h))
-        assert abs(h_mean_final - h_mean_init) / h_mean_init < 1e-3
+        # iter-164: centralized helper (NaN-aware).
+        from legoesm.diagnostics import compute_relative_drift
+        assert compute_relative_drift([h_mean_init, h_mean_final]) < 1e-3
 
     def test_mass_conservation(self, model_and_state, grid_sw):
         """Mass should be conserved to near machine precision over 50 steps."""
@@ -104,7 +106,10 @@ class TestFVShallowWater:
         for _ in range(50):
             s = model.step(s, dt)
         mass_final = float(jnp.sum(s.h.astype(jnp.float64) * area.astype(jnp.float64)))
-        mass_drift = abs(mass_final - mass_init) / abs(mass_init)
+        # iter-164: centralized helper (NaN-aware, same migration
+        # as iter-157 / iter-159 sweep).
+        from legoesm.diagnostics import compute_relative_drift
+        mass_drift = compute_relative_drift([mass_init, mass_final])
         # The conservation fixer anchors to the CDGrid state mass.
         # Machine-precision conservation (< 1e-10) requires a flux-form
         # scheme; the CDGrid scheme achieves ~1e-6 relative drift over 50 steps.

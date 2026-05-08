@@ -179,7 +179,9 @@ class TestMassConservation:
             state = model.step(state, dt, target_mass=target_mass)
 
         mass_final = float(jnp.sum(state.h.astype(jnp.float64) * area64))
-        rel_err = abs(mass_final - mass_init) / abs(mass_init)
+        # iter-164: centralized helper.
+        from legoesm.diagnostics import compute_relative_drift
+        rel_err = compute_relative_drift([mass_init, mass_final])
         assert rel_err < 1e-6, f"Mass conservation error: {rel_err}"
 
 

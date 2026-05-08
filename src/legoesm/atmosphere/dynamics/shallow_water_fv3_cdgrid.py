@@ -50,23 +50,14 @@ from legoesm.grids.cubed_sphere_cdgrid import (
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
-from legoesm.core.precision import cast_pytree
 from legoesm.core.conservation import _accumulation_dtype
 from legoesm.core.fv3_sw_core import (
     _d2a2c_vect,
     _d_sw5_corner_divergence,
     fv3_csw_tendencies,
-    fv3_fb_sw_step,
 )
 from legoesm.core.fv_tp_2d import transport_step
 from legoesm.core.fv3_del6_vt_flux import fv3_del6_vorticity_damping
-from legoesm.grids.halo import (
-    CONNECTIVITY,
-    EAST,
-    NORTH,
-    SOUTH,
-    WEST,
-)
 from legoesm import constants
 
 

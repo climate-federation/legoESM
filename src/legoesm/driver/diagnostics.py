@@ -226,7 +226,13 @@ class DiagnosticCollector:
                 ref_date=f"{start_year:04d}-01-01",
             )
             if not monthly_means:
-                from legoesm.diagnostics.monthly_means import MonthlyAccumulator
+                # iter-169: removed redundant local import that
+                # caused F823 "referenced before assignment" — the
+                # local import shadows the module-level
+                # ``MonthlyAccumulator`` (line 19) for the entire
+                # function scope, making the line-206 reference
+                # inside the same ``__init__`` block invalid.  Use
+                # the module-level import directly.
                 self.monthly_means = True
                 self.monthly_accum = MonthlyAccumulator(nlev=nlev, n_lat_bins=90)
             # Full spatial accumulator for CMIP NetCDF output
@@ -419,34 +425,35 @@ class DiagnosticCollector:
         log_p_model = np.log(np.maximum(p_model, 1e-10))
         log_plev = np.log(plev_target)
 
-        # For each target level, find bracketing model levels and interpolate
+        # Vectorise over the target-pressure axis instead of looping
+        # ``n_target`` times.  Each target level only needed two
+        # bracketing model levels and a log-linear interp; we can do
+        # all target levels in a single ``take_along_axis`` by
+        # broadcasting the searchsorted indices to ``(..., n_target)``.
+        # Iter 11: 19 full-grid NumPy passes per 3-D field → 1 vectorised
+        # pass per field.
         n_target = len(plev_target)
-        out_shape = field_np.shape[:-1] + (n_target,)
-        result = np.empty(out_shape, dtype=np.float64)
 
-        for k in range(n_target):
-            log_pt = log_plev[k]
-            # searchsorted on the last axis of log_p_model
-            # p_model is ascending (sigma is ascending: top→bottom)
-            idx_hi = np.searchsorted(
-                sigma, plev_target[k] / np.maximum(p_s_np, 1e-10),
-            )
-            idx_hi = np.clip(idx_hi, 1, len(sigma) - 1)
-            idx_lo = idx_hi - 1
+        # target_sigma shape: (..., n_target).  ``sigma`` is the ascending
+        # 1-D array of model layer-mid sigmas; for each cell we want the
+        # model-level index whose sigma first exceeds the target.
+        target_sigma = (
+            plev_target.reshape((1,) * p_s_np.ndim + (n_target,))
+            / np.maximum(p_s_np[..., None], 1e-10)
+        )
+        idx_hi = np.searchsorted(sigma, target_sigma)
+        idx_hi = np.clip(idx_hi, 1, len(sigma) - 1)
+        idx_lo = idx_hi - 1
 
-            # Gather bracket values using advanced indexing
-            flat_shape = field_np.shape[:-1]
-            f_lo = np.take_along_axis(field_np, idx_lo[..., None], axis=-1)[..., 0]
-            f_hi = np.take_along_axis(field_np, idx_hi[..., None], axis=-1)[..., 0]
-            lp_lo = np.take_along_axis(log_p_model, idx_lo[..., None], axis=-1)[..., 0]
-            lp_hi = np.take_along_axis(log_p_model, idx_hi[..., None], axis=-1)[..., 0]
+        f_lo = np.take_along_axis(field_np, idx_lo, axis=-1)
+        f_hi = np.take_along_axis(field_np, idx_hi, axis=-1)
+        lp_lo = np.take_along_axis(log_p_model, idx_lo, axis=-1)
+        lp_hi = np.take_along_axis(log_p_model, idx_hi, axis=-1)
 
-            denom = lp_hi - lp_lo
-            denom = np.where(denom == 0.0, 1.0, denom)
-            alpha = np.clip((log_pt - lp_lo) / denom, 0.0, 1.0)
-            result[..., k] = f_lo + alpha * (f_hi - f_lo)
-
-        return result
+        log_pt = log_plev.reshape((1,) * p_s_np.ndim + (n_target,))
+        denom = np.where(lp_hi == lp_lo, 1.0, lp_hi - lp_lo)
+        alpha = np.clip((log_pt - lp_lo) / denom, 0.0, 1.0)
+        return f_lo + alpha * (f_hi - f_lo)
 
     def collect(
         self,

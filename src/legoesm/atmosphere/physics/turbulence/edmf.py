@@ -109,8 +109,12 @@ def edmf_turbulence(
     dv_dz = (v[:, :-1] - v[:, 1:]) / dz_half
     S2_half = du_dz ** 2 + dv_dz ** 2
 
-    exner = (constants.p_ref / jnp.clip(p_full, 1.0, None)) ** constants.kappa
-    theta_v = virtual_temperature(T, q_v) * exner
+    # ``exner_pref`` = (p_ref / p)^κ multiplies T to get θ.
+    # Distinct from ``exner_inv`` = (p / p_ref)^κ used below to invert θ
+    # back to T.  Variable shadowing was a fragility hazard — keep them
+    # distinctly named.
+    exner_pref = (constants.p_ref / jnp.clip(p_full, 1.0, None)) ** constants.kappa
+    theta_v = virtual_temperature(T, q_v) * exner_pref
     theta_v_bar = 0.5 * (theta_v[:, :-1] + theta_v[:, 1:])
     dtheta_v_dz = (theta_v[:, :-1] - theta_v[:, 1:]) / dz_half
     N2_half = (constants.g / jnp.clip(theta_v_bar, 1.0, None)) * dtheta_v_dz
@@ -150,9 +154,13 @@ def edmf_turbulence(
     )
     ustar = jnp.clip(ustar, 1e-4, None)
 
-    # Potential temperature for updraft
-    exner = (jnp.clip(p_full, 1.0, None) / constants.p_ref) ** constants.kappa
-    theta = T / jnp.clip(exner, 1.0e-8, None)
+    # Potential temperature for updraft.
+    # ``exner_inv`` = (p / p_ref)^κ — divides T to give θ, multiplies
+    # dθ to give dT.  Distinct from ``exner_pref`` = (p_ref / p)^κ
+    # above.  Keeping the two names separate avoids the fragility
+    # of reassigning a single ``exner`` to its reciprocal mid-function.
+    exner_inv = (jnp.clip(p_full, 1.0, None) / constants.p_ref) ** constants.kappa
+    theta = T / jnp.clip(exner_inv, 1.0e-8, None)
 
     # Initialize updraft at surface (bottom level = index nlev-1).  Pin
     # the carry dtype to the input field dtype so the scan body cannot
@@ -237,7 +245,18 @@ def edmf_turbulence(
     theta_u = theta_u_full[::-1].T
     q_u = q_u_full[::-1].T
 
-    # Mass flux: M = a_updraft * rho * w_u
+    # Mass flux: M = a_updraft * rho * w_u.
+    # Note on column conservation: in this simplified-EDMF formulation
+    # the BC is M[surface] = a_updraft·ρ·w_u_init > 0 (with surface
+    # mass-source matched to the bulk-formula shflx/lhflx wired through
+    # the implicit ED solve), and M smoothly decays via the active
+    # gate (line 213) above the PBL top so M[top] ≈ 0 naturally.
+    # Strict MF-only column closure is approximate; the small residual
+    # is folded into the existing ED + bulk-formula surface-flux
+    # accounting (similar to CAM EDMF).  Hard-zeroing M at boundaries
+    # would zero the legitimate surface-coupled MF transport — the
+    # iter-50 audit attempt to do so broke
+    # ``test_mass_flux_active`` and was reverted.
     M = config.a_updraft * rho * w_u  # (ncol, nlev)
 
     # MF tendencies: d(phi)/dt_mf = -(1/rho) * d(M * (phi_u - phi_env)) / dz
@@ -253,7 +272,7 @@ def edmf_turbulence(
         return -dflux_dz / jnp.clip(rho, 0.01, None)
 
     dtheta_dt_mf = _mf_tendency(theta, theta_u)
-    dT_dt_mf = dtheta_dt_mf * exner
+    dT_dt_mf = dtheta_dt_mf * exner_inv
     dq_dt_mf = _mf_tendency(q_v, q_u)
 
     # ===== ED tendencies via implicit diffusion =====

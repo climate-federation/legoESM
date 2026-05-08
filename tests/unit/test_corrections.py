@@ -782,51 +782,43 @@ class TestKPP:
             f"in_bl_full mask re-introduced?"
         )
 
-    def test_b_f_proxy_sign_for_stable_column(self):
-        """The B_f proxy (used when caller passes B_f=None) must produce
-        a NEGATIVE B_f for a statically-stable surface layer.
+    def test_b_f_none_fallback_is_zero(self):
+        """Calling kpp_vertical_mixing with ``B_f=None`` must use
+        B_f = 0 (no convective non-local transport) rather than a
+        wrong-magnitude diffusive proxy.
 
-        Convention: ``B_f > 0 = unstable``.  The diffusive proxy
-        ``B_f = +g/rho_0 * K_bg * drho_dz_sfc`` (with
-        ``drho_dz_sfc = (rho[0] - rho[1]) / dz``) gives:
-            stable column   (rho[0] < rho[1] ⇒ drho_dz_sfc < 0) → B_f < 0  ✓
-            unstable column (rho[0] > rho[1] ⇒ drho_dz_sfc > 0) → B_f > 0  ✓
+        Iter-47 replaced the prior ``g/ρ₀ · K_bg · drho_dz_sfc`` proxy
+        (which underestimates realistic B_f by 2-4 orders of magnitude)
+        with B_f = 0 — fail-closed semantics that prevent silent
+        non-local transport activation when surface forcing is missing.
 
-        Regression guard: an earlier version had a leading minus sign
-        on the proxy which inverted the stability classification.
+        Regression guard: this test asserts that ``B_f=None`` and an
+        explicit ``B_f = 0`` produce IDENTICAL output.  Under the prior
+        diffusive-proxy behavior, the two would disagree by
+        ~O(1e-5) K/s in dT_dt (the magnitude of the spurious proxy).
         """
         from legoesm.ocean.physics.vertical_mixing.kpp import kpp_vertical_mixing
         from legoesm.ocean.physics.vertical_mixing.config import KPPConfig
         u, v, T, S, rho, eta, z_coord, J = self._make_kpp_inputs()
         cfg = KPPConfig()
 
-        # T monotone-decreasing → STABLE column.  Provide an explicit
-        # negative B_f for the reference case.
-        B_f_stable = jnp.full((6, 4, 4), -1e-7, dtype=jnp.float64)
         Q_sfc_T = jnp.full((6, 4, 4), 1e-3, dtype=jnp.float64)
         Q_sfc_S = jnp.zeros((6, 4, 4), dtype=jnp.float64)
+        B_f_zero = jnp.zeros((6, 4, 4), dtype=jnp.float64)
 
-        out_explicit = kpp_vertical_mixing(
+        out_explicit_zero = kpp_vertical_mixing(
             u, v, T, S, rho, eta, z_coord, J, cfg,
-            B_f=B_f_stable, Q_sfc_T=Q_sfc_T, Q_sfc_S=Q_sfc_S,
+            B_f=B_f_zero, Q_sfc_T=Q_sfc_T, Q_sfc_S=Q_sfc_S,
         )
-        out_proxy = kpp_vertical_mixing(
+        out_none = kpp_vertical_mixing(
             u, v, T, S, rho, eta, z_coord, J, cfg,
             Q_sfc_T=Q_sfc_T, Q_sfc_S=Q_sfc_S,
         )
 
-        # If the proxy is correctly STABLE (B_f<0), non-local
-        # transport stays inactive and the proxy run agrees with the
-        # explicit-negative-B_f run.  Under the buggy +g/rho_0 →
-        # -g/rho_0 sign flip, the proxy would report B_f>0, fire
-        # non-local transport, and the two outputs would disagree.
-        diff = float(jnp.max(jnp.abs(out_proxy.dT_dt - out_explicit.dT_dt)))
+        diff = float(jnp.max(jnp.abs(out_none.dT_dt - out_explicit_zero.dT_dt)))
         assert diff < 1e-12, (
-            f"B_f proxy sign regression: stable-column proxy run differs "
-            f"from explicit-negative-B_f run by {diff:.3e}.  This "
-            f"indicates the proxy is producing the WRONG SIGN of B_f "
-            f"and incorrectly firing non-local transport in stable "
-            f"columns."
+            f"B_f=None fallback differs from B_f=0 by {diff:.3e}; iter-47 "
+            f"expected fail-closed identity."
         )
 
     def test_b_salt_sign_freshening_is_stabilizing(self):

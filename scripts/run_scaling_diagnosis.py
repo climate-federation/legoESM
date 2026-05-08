@@ -70,12 +70,31 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 def _configure_env(precision: str = "float64"):
-    """Set JAX env vars before import."""
+    """Set JAX env vars before import.
+
+    Iter 24: stop forcing ``JAX_PLATFORMS=gpu,cpu`` (rejected by JAX
+    0.10+, see iter 21 fix in ``run_levante_gpu_scaling.py``).  Wrappers
+    that need a specific backend should ``export JAX_PLATFORMS=cuda,cpu``
+    (NVIDIA) or ``rocm,cpu`` (AMD) before invoking the script.
+
+    Also ensure the project root is on ``sys.path`` so that
+    ``tests.test_cases`` (canonical IC location) imports cleanly when
+    the script is run as a standalone executable rather than via
+    ``pytest`` from the repo root.
+    """
     if precision == "float64":
         os.environ["JAX_ENABLE_X64"] = "1"
-    os.environ.setdefault("JAX_PLATFORMS", "gpu,cpu")
     os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
     os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.90")
+
+    # Make the repository root importable so ``tests.test_cases`` works
+    # when the script is launched as ``python scripts/...`` (no
+    # ``PYTHONPATH=$PWD``).
+    import sys
+    from pathlib import Path
+    _repo_root = Path(__file__).resolve().parent.parent
+    if str(_repo_root) not in sys.path:
+        sys.path.insert(0, str(_repo_root))
 
     # GPU affinity for MPI
     local_rank = (
@@ -86,9 +105,16 @@ def _configure_env(precision: str = "float64"):
     if local_rank is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = local_rank
 
-    # Enable profiling-friendly XLA flags
-    platforms = os.environ.get("JAX_PLATFORMS", "gpu,cpu")
-    if "gpu" in platforms:
+    # Enable profiling-friendly XLA flags when running on GPU (or
+    # auto-detect / unset).  Skip when ``JAX_PLATFORMS`` is explicitly
+    # ``cpu`` or ``tpu`` to avoid pinging GPU-specific flags that the
+    # chosen backend rejects.
+    platforms = os.environ.get("JAX_PLATFORMS", "")
+    is_gpu_run = (
+        not platforms
+        or any(tok in platforms for tok in ("gpu", "cuda", "rocm"))
+    )
+    if is_gpu_run:
         xla_flags = os.environ.get("XLA_FLAGS", "")
         for flag in [
             "--xla_gpu_enable_latency_hiding_scheduler=true",
@@ -188,48 +214,72 @@ def _env_snapshot() -> dict:
 
 def _setup_cubed_sphere(n: int, nlev: int, dt: float, precision: str,
                         physics_level: str, rank: int, world_size: int):
-    """Set up cubed-sphere benchmark case. Returns (step_fn, state, config_info)."""
+    """Set up cubed-sphere benchmark case. Returns (step_fn, state, config_info).
+
+    Iter 23 cleanup: ported from the legacy
+    ``create_cubed_sphere_grid`` / ``SigmaCoordinate`` /
+    ``PrimitiveEquationModel`` / ``jablonowski_williamson_ic`` API
+    surface to the current modules.  The diagnosis script had bit-
+    rotted; codex iter 23 quick-smoke confirmed import-time crashes
+    on a clean install before reaching any benchmark code.
+    """
     import jax
     import jax.numpy as jnp
-    from legoesm.grids.cubed_sphere import create_cubed_sphere_grid
-    from legoesm.grids.sigma import SigmaCoordinate
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+    from legoesm.grids.vertical import create_sigma_coordinate
 
     dtype = jnp.float64 if precision == "float64" else jnp.float32
 
-    grid = create_cubed_sphere_grid(n, dtype=dtype)
-    sigma = SigmaCoordinate(nlev)
+    grid = create_cubed_sphere(n)
+    cdgrid = create_cubed_sphere_cdgrid(grid)
+    sigma = create_sigma_coordinate(nlev)
 
-    # Jablonowski-Williamson baroclinic wave IC
-    from legoesm.atmosphere.initial_conditions import jablonowski_williamson_ic
-    state = jablonowski_williamson_ic(grid, sigma, dtype=dtype)
-
-    # Build dycore
-    from legoesm.atmosphere.dynamics.primitive_equations import (
-        PrimitiveEquationModel,
-        PrimitiveEquationConfig,
+    # Jablonowski-Williamson baroclinic wave IC (canonical helper now
+    # lives under tests/test_cases — same routine the GPU/CPU scaling
+    # drivers use).
+    from tests.test_cases.baroclinic_wave import baroclinic_wave_init
+    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        CDGridPrimitiveEquationModel,
+        CDGridPrimitiveEquationConfig,
+        hydrostatic_to_fv3,
     )
-    config = PrimitiveEquationConfig()
-    model = PrimitiveEquationModel(grid, sigma, config=config)
+    state_cc = baroclinic_wave_init(grid, sigma, perturbed=True)
 
-    # Physics
+    config = CDGridPrimitiveEquationConfig()
+    model = CDGridPrimitiveEquationModel(grid, sigma, config)
+    state = hydrostatic_to_fv3(state_cc, cdgrid)
+
+    # Physics: Held-Suarez forcing not wired here; the diagnosis script
+    # focuses on parallel-runtime bottlenecks (halo bandwidth, reduction
+    # latency, etc.) rather than physics throughput.  ``physics_level``
+    # is accepted for API compatibility but ignored.
     physics_fn = None
-    if physics_level != "none":
-        from legoesm.atmosphere.physics.integration import make_held_suarez_physics
-        physics_fn = make_held_suarez_physics(grid, sigma)
 
-    # Distributed step function
-    from legoesm.parallel.device_config import create_device_config
-    dev_config = create_device_config()
+    # Distributed step function.  Iter 23 cleanup: the legacy
+    # ``create_device_config`` factory is gone; use ``detect_devices`` +
+    # ``configure_jax_for_device`` (the canonical entry point in
+    # ``parallel.device_config``).  When more than one device is
+    # visible *and* we are not under MPI, route through the sharded
+    # step; under MPI use the bare model step (each rank handles its
+    # own JAX devices).
+    from legoesm.parallel.device_config import detect_devices
+    dev_config = detect_devices()
+    n_local_devices = dev_config.devices_per_host
 
     if world_size > 1:
         step_fn = model.step
-    elif dev_config.n_devices > 1:
+    elif n_local_devices > 1:
         from legoesm.parallel.sharded_dynamics import make_sharded_step
-        step_fn = make_sharded_step(model, dev_config, n=n, nlev=nlev)
+        from legoesm.parallel.mesh import create_device_mesh
+        step_fn = make_sharded_step(
+            model, create_device_mesh(n_devices=n_local_devices),
+            n=n, nlev=nlev,
+        )
     else:
         step_fn = model.step
 
-    # Wrap physics
+    # Wrap physics (currently unused; left for forward compatibility).
     if physics_fn is not None:
         _step = step_fn
         _phys = physics_fn

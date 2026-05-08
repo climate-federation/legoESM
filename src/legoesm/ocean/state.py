@@ -167,7 +167,7 @@ class SpectralOceanState(NamedTuple):
 class SpectralOceanConfig(NamedTuple):
     """Configuration for the spectral ocean model."""
     g: float = 9.80616  # = constants.g
-    rho_0: float = 1025.0
+    rho_0: float = 1025.0        # = eos.rho_0
     A_h: float = 1.0e4
     K_h: float = 0.0
     A_v: float = 1.0e-3
@@ -240,7 +240,7 @@ class LatLonOceanTendencies(NamedTuple):
 class LatLonOceanConfig(NamedTuple):
     """Configuration for the lat-lon FV ocean model."""
     g: float = 9.80616  # = constants.g
-    rho_0: float = 1025.0
+    rho_0: float = 1025.0        # = eos.rho_0
     A_h: float = 1.0e4           # Horizontal viscosity [m^2/s]
     K_h: float = 0.0           # Horizontal tracer diffusivity [m^2/s]
     A_v: float = 1.0e-3          # Vertical viscosity [m^2/s]
@@ -478,7 +478,7 @@ class LatLonCGridOceanConfig(NamedTuple):
     """
 
     g: float = 9.80616  # = constants.g
-    rho_0: float = 1025.0
+    rho_0: float = 1025.0        # = eos.rho_0
     A_h: float = 1.0e4
     A_h_lat_scaling: bool = False  # When True, A_h is scaled by cos(lat) to
                                     # keep the grid Reynolds number latitude-

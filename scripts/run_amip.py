@@ -60,8 +60,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stretching", type=float, default=None)
     parser.add_argument("--grid-type", type=str, default="cubed_sphere",
                         choices=["cubed_sphere", "gaussian", "latlon", "voronoi"])
+    # The canonical names in `supported_matrix.py` are:
+    #   - centered       (cubed_sphere, latlon)
+    #   - finite_volume  (cubed_sphere, latlon)
+    #   - cdgrid         (cubed_sphere only)
+    #   - latlon_cgrid   (latlon only)  — was 'cgrid' below; alias kept
+    #   - mpas           (voronoi only)
+    #   - spectral       (gaussian only)
+    # Both 'cgrid' (legacy) and 'latlon_cgrid' (canonical) are accepted;
+    # the postprocessor canonicalises 'cgrid' → 'latlon_cgrid' so the
+    # downstream factory finds a matching ``(model_type, discretization,
+    # grid_type)`` triple.
     parser.add_argument("--discretization", type=str, default="centered",
-                        choices=["centered", "finite_volume", "cgrid", "mpas", "spectral"])
+                        choices=["centered", "finite_volume", "cgrid",
+                                  "latlon_cgrid", "cdgrid", "mpas", "spectral"])
     parser.add_argument("--truncation", type=int, default=None,
                         help="Spectral truncation (T21, T42, etc.). Sets grid_type=gaussian.")
 
@@ -367,7 +379,72 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
         if args.truncation is not None:
             args.resolution = args.truncation
 
+    # Canonicalise legacy ``cgrid`` → ``latlon_cgrid`` so the dycore
+    # factory finds a matching (model_type, discretization, grid_type)
+    # triple.  ``cdgrid`` is the cubed-sphere C-D grid; keep it as-is.
+    if args.discretization == "cgrid" and args.grid_type == "latlon":
+        args.discretization = "latlon_cgrid"
+
     return args
+
+
+def _check_run_state_finite(driver) -> tuple[bool, str | None]:
+    """Inspect ``driver.state`` for NaN/Inf in primary fields.
+
+    iter-100: the standalone ``run_amip.py`` previously had no
+    finiteness check.  This helper inspects the final state
+    after ``driver.run(...)`` returns and reports the first
+    field with a non-finite value.
+
+    iter-104 (codex HIGH-2): the original iter-100 implementation
+    only checked grid-space fields (T, u, v, p_s).  Spectral
+    AMIP states (when ``run_amip.py --grid-type gaussian
+    --discretization spectral``) use a different attribute
+    layout — ``T_hat``, ``vor_hat``, ``div_hat``, ``lnps_hat``
+    — and would silently bypass the iter-100 check (returning
+    ``(True, None)``).  iter-104 extends the field list to cover
+    both grid-space AND spectral attribute names; the helper
+    iterates through every field name and skips the ones not
+    present, so the same helper handles both layouts.
+
+    Returns
+    -------
+    (ok, bad_field): tuple
+        ``ok`` is False when any field in the union of
+        ``{T, u, v, p_s, T_hat, vor_hat, div_hat, lnps_hat}``
+        contains NaN/Inf; ``bad_field`` is the name of the
+        first such field (in iteration order, grid-space first
+        then spectral) or None when all present fields are
+        finite.
+    """
+    import jax.numpy as jnp
+
+    state = getattr(driver, "state", None)
+    if state is None:
+        return True, None
+    # iter-104 codex HIGH-2: union of grid-space and spectral
+    # field names so this helper covers both AMIP execution
+    # paths.  Order: grid-space first (most common AMIP),
+    # then spectral.  ``getattr(..., None)`` short-circuits
+    # missing attributes.
+    field_names = (
+        "T", "u", "v", "p_s",
+        "T_hat", "vor_hat", "div_hat", "lnps_hat",
+    )
+    for fname in field_names:
+        f = getattr(state, fname, None)
+        if f is None:
+            continue
+        data = getattr(f, "data", None)
+        if data is None:
+            continue
+        try:
+            ok = bool(jnp.all(jnp.isfinite(data)))
+        except Exception:
+            continue
+        if not ok:
+            return False, fname
+    return True, None
 
 
 def main(argv: list[str] | None = None):
@@ -415,11 +492,38 @@ def main(argv: list[str] | None = None):
     if _is_root:
         print("Running...")
     driver.run(start_step=start_step, start_day=start_day)
+
+    # iter-100: post-run finiteness check.  Pre-iter-100,
+    # ``run_amip.py`` had ZERO blowup detection (``grep -c
+    # isfinite`` = 0 in 450 lines).  A NaN-producing AMIP run
+    # would silently complete and print "Complete." while
+    # writing garbage to the output directory.  iter-98's audit
+    # of the OMIP/atmosphere-matrix BLOWUP-reporting bug flagged
+    # this as a separate gap; iter-100 closes it.
+    #
+    # The check inspects the final ``driver.state`` for NaN/Inf
+    # in the primary atmospheric fields (T, u, v, p_s).  When
+    # non-finite, the run is flagged FAIL with a clear message
+    # and the script exits with code 1 so wrappers
+    # (``run_amip_cross_grid.sh``) can detect failure.
+    state_ok, bad_field = _check_run_state_finite(driver)
     if _is_root:
-        print(f"Complete. Output: {driver.output_dir}")
+        if state_ok:
+            print(f"Complete. Output: {driver.output_dir}")
+        else:
+            print(
+                f"FAIL: final state contains NaN/Inf in field "
+                f"``{bad_field}``.  Output (with garbage): "
+                f"{driver.output_dir}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     if args.plot and _is_root:
-        sys.path.insert(0, str(Path(__file__).parent))
+        # Iter 34: ``plot_amip`` lives under ``scripts/diagnostic/``
+        # (moved in an earlier reorg).  ``--plot`` previously inserted
+        # ``scripts/`` and crashed with ``ModuleNotFoundError``.
+        sys.path.insert(0, str(Path(__file__).parent / "diagnostic"))
         from plot_amip import plot_amip as _plot_amip
 
         _plot_amip(driver.output_dir, show=False)

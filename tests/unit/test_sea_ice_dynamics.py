@@ -221,17 +221,59 @@ class TestEVPStressUpdate:
         Delta = delta_deformation(eps_11, eps_22, eps_12)
         s11_vp, s22_vp, s12_vp = vp_stress(eps_11, eps_22, eps_12, P, Delta)
 
-        # Start from zero stress and iterate
+        # Start from zero stress and iterate.  N_evp is the EVP
+        # subcycle count; the relaxation factor scales as 1/(2·T_evp·N_evp),
+        # so converging to within 5% of the VP target requires roughly
+        # ~5·T_evp·N_evp iterations.  Use N_evp=1 here to keep the
+        # convergence test compact.
         s11, s22, s12 = jnp.array(0.0), jnp.array(0.0), jnp.array(0.0)
         for _ in range(200):
             s11, s22, s12 = evp_stress_update(
                 s11, s22, s12, eps_11, eps_22, eps_12,
-                P, e_yield=2.0, T_evp=0.36, dt_s=100.0,
+                P, e_yield=2.0, T_evp=0.36, dt_s=100.0, N_evp=1,
             )
 
         assert float(s11) == pytest.approx(float(s11_vp), rel=0.05)
         assert float(s22) == pytest.approx(float(s22_vp), rel=0.05)
         assert float(s12) == pytest.approx(float(s12_vp), rel=0.05)
+
+    def test_e_factor_scales_with_N_evp(self):
+        """Hunke-Dukowicz 1997: E_factor = 1/(2·T_evp·N_evp).
+
+        With production defaults T_evp=0.36, N_evp=120 the per-subcycle
+        relaxation is ~1.16% toward the VP target.  Verify the closed
+        form directly against the implementation so a regression that
+        drops the ``N_evp`` factor (the original bug) is caught.
+        """
+        T_evp = 0.36
+        N_evp = 120
+        s11, s22, s12 = jnp.array(0.0), jnp.array(0.0), jnp.array(0.0)
+        eps_11 = jnp.array(1e-6)
+        eps_22 = jnp.array(-5e-7)
+        eps_12 = jnp.array(2e-7)
+        P = jnp.array(1e4)
+
+        # One subcycle from sigma_old = 0 should give
+        # sigma_new = E·sigma_VP / (1+E)  with  E = 1/(2·T_evp·N_evp).
+        Delta = delta_deformation(eps_11, eps_22, eps_12)
+        s11_vp, s22_vp, _ = vp_stress(eps_11, eps_22, eps_12, P, Delta)
+        E_expected = 1.0 / (2.0 * T_evp * N_evp)
+        s11_expected = float(E_expected * s11_vp / (1.0 + E_expected))
+
+        s11_new, _, _ = evp_stress_update(
+            s11, s22, s12, eps_11, eps_22, eps_12,
+            P, e_yield=2.0, T_evp=T_evp, dt_s=100.0, N_evp=N_evp,
+        )
+        assert float(s11_new) == pytest.approx(s11_expected, rel=1e-6)
+
+        # Cross-check: with a different N_evp, the relaxation factor
+        # must change in the expected direction.
+        s11_n240, _, _ = evp_stress_update(
+            s11, s22, s12, eps_11, eps_22, eps_12,
+            P, e_yield=2.0, T_evp=T_evp, dt_s=100.0, N_evp=240,
+        )
+        # Larger N_evp → smaller per-subcycle relaxation → smaller stress.
+        assert abs(float(s11_n240)) < abs(float(s11_new))
 
 
 # ==============================================================================
@@ -478,6 +520,48 @@ class TestLinearRemap:
         h_remap, a_remap = linear_remap(h, a, h_new, a_new, n_cat)
         assert jnp.all(a_remap >= 0.0)
         assert jnp.all(a_remap <= 1.0)
+
+    @pytest.mark.xfail(
+        reason=(
+            "Iter-85 audit: linear_remap leaks 1-4% volume per call when "
+            "h_new straddles category bounds.  The naive lo/hi clamp "
+            "overwrites h_remap without adjusting a_remap, so the post-"
+            "clamp volume differs from the pre-clamp volume.  Proper fix "
+            "requires CICE-style Lipscomb piecewise-linear g(h) remapping "
+            "— deferred to future structural work.  This xfail test "
+            "documents the expected post-fix behavior so future "
+            "maintainers see the contract."
+        ),
+        strict=True,
+    )
+    def test_strict_volume_conservation_under_clamping(self):
+        """Volume drift through linear_remap should be < 0.1% even when
+        category bounds activate the clamp.
+
+        Construction: each category's mean thickness is just slightly
+        above its upper bound, so the partial-promotion + clamp cascade
+        fires.  Audit probe shows 1.68% drift in this case.
+        """
+        n_cat = 5
+        # CICE-standard category bounds
+        lo = jnp.array([0.0, 0.6, 1.4, 2.4, 3.6])  # noqa: F841 (visible to fix)
+        hi = jnp.array([0.6, 1.4, 2.4, 3.6, 100.0])  # noqa: F841
+
+        # h_new just above each hi → triggers cascade clamping
+        h_old = jnp.array([0.3, 1.0, 2.0, 3.0, 5.0])
+        a_old = jnp.array([0.1, 0.1, 0.1, 0.1, 0.1])
+        h_new = jnp.array([0.7, 1.5, 2.5, 3.7, 5.0])
+        a_new = a_old
+
+        vol_before = float(jnp.sum(h_new * a_new))
+        h_remap, a_remap = linear_remap(h_old, a_old, h_new, a_new, n_cat)
+        vol_after = float(jnp.sum(h_remap * a_remap))
+
+        rel_drift = abs(vol_after - vol_before) / vol_before
+        assert rel_drift < 0.001, (
+            f"linear_remap leaked {rel_drift*100:.3f}% volume when "
+            f"h_new straddles category bounds.  Expected < 0.1%."
+        )
 
 
 # ==============================================================================

@@ -25,9 +25,16 @@ from legoesm.core.precision import _resolve_dtype
 # ==============================================================================
 # Ocean constants
 # ==============================================================================
-rho_0 = 1025.0          # Reference seawater density [kg/m^3]
-c_sw = 3994.0           # Specific heat of seawater [J/(kg*K)]
-T_freeze_ocean = constants.T_freeze_ocean  # re-export from central constants
+# Re-export central physical constants so existing call sites
+# (``from legoesm.ocean.eos import rho_0, c_sw, ...``) keep working.
+# Per CLAUDE.md the canonical values live in ``legoesm.constants``;
+# the prior literal definitions here violated the
+# constant-discipline rule and could silently drift from the central
+# values.  Module-level binding to ``constants.X`` keeps a single
+# source of truth.
+rho_0 = constants.rho_ocean         # Reference seawater density [kg/m^3]
+c_sw = constants.c_sw               # Specific heat of seawater [J/(kg*K)]
+T_freeze_ocean = constants.T_freeze_ocean  # Freezing point of seawater [K]
 scale_depth = 1000.0     # Reference e-folding depth for stratification [m]
 
 # ==============================================================================
@@ -208,7 +215,7 @@ class LinearEOSConfig(NamedTuple):
 
     ρ = rho_ref * [1 - alpha_T * (T - T_ref) + beta_S * (S - S_ref)]
     """
-    rho_ref: float = 1025.0    # Reference density [kg/m³]
+    rho_ref: float = 1025.0    # = eos.rho_0
     alpha_T: float = 2.0e-4    # Thermal expansion coefficient [1/K]
     beta_S: float = 7.4e-4     # Haline contraction coefficient [1/PSU]
     T_ref: float = 10.0        # Reference temperature [°C]
@@ -219,7 +226,7 @@ def linear_eos(
     T: jnp.ndarray,
     S: jnp.ndarray,
     p: jnp.ndarray,
-    rho_ref: float = 1025.0,
+    rho_ref: float = rho_0,
     alpha_T: float = 2.0e-4,
     beta_S: float = 7.4e-4,
     T_ref: float = 10.0,

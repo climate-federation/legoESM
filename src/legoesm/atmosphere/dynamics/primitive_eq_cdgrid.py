@@ -64,6 +64,8 @@ from legoesm.core.conservation import (
     zero_mean_tendency,
     fix_mass_hydrostatic,
     fix_mass_hydrostatic_target,
+    fix_ps_mass,
+    fix_ps_mass_target,
 )
 from legoesm.core.operators import (
     global_integral,
@@ -101,18 +103,7 @@ from legoesm.grids.vertical import (
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
-from legoesm.core.precision import _resolve_dtype, cast_pytree
-from legoesm.core.operators import (
-    global_integral,
-    hyperdiffusion,
-    laplacian_compact,
-)
 from legoesm.core.operators_cdgrid import _overlapped_arakawa_lamb_gradient
-from legoesm.core.conservation import (
-    fix_mass_hydrostatic,
-    fix_mass_hydrostatic_target,
-)
-from legoesm.core.state import HydrostaticTendencies
 from legoesm.grids.halo import (
     pad_halo_4d as _pad_halo_4d_module,
     pad_halo_vector,
@@ -320,6 +311,19 @@ def fv3_hydrostatic_tendencies(
     else:
         _zeta_pad = _B_pad = _invT_pad = None  # operators do own exchange
 
+    # Pre-pad slots for fields whose merged-stage exchange now happens
+    # in section 11 (T / ln_ps_3d / u_cell / v_cell) and for the hybrid-
+    # factor / div_v halos that are no longer packed at this point in
+    # the function.  Initialising to ``None`` lets each downstream
+    # operator fall back to its own standalone halo collective via
+    # ``_pad_halo_auto`` — same numerical result, one extra exchange.
+    # Without these defaults the references at lines ~343/~366/~403
+    # raise ``UnboundLocalError`` (regression introduced when the
+    # iter-58/60 merged-stage halo was split apart).
+    _lnps_pad = None
+    _hf_pad = None
+    _div_v_pad = None
+
     # Vorticity interpolated to D-grid corners, absolute vorticity = ζ_corner + f_corner
     zeta_corner = (_interp_center_to_corner(zeta, cdgrid, padded=_zeta_pad)
                    + cdgrid.f_corner[..., None])
@@ -407,6 +411,16 @@ def fv3_hydrostatic_tendencies(
 
     # --- 10b. Surface pressure tendency and vertical motion ---
 
+    # Iter 1 gating (re-applied after merge): skip per-stage
+    # ``zero_mean_tendency`` when end-step ``fix_mass`` is active.
+    # The end-step mass fixer enforces conservation per step in a
+    # single allreduce; per-stage zero-mean would add 3-4 allreduces
+    # per SSP-RK3 step for an effect the end-step fixer corrects.
+    _apply_zero_mean_per_stage = (
+        config.zero_mean_ps_tendency
+        and not (config.use_conservation_fixer and config.fix_mass)
+    )
+
     if _hybrid:
         # Reuse the column-sum that ``compute_mass_flux_hybrid``
         # already produces internally instead of recomputing
@@ -417,7 +431,7 @@ def fv3_hydrostatic_tendencies(
             div_v, p_s, sigma_coord,
         )
         dp_s_dt_data = -_D_total_p_full[..., 0] / sigma_coord.B_range
-        if config.zero_mean_ps_tendency:
+        if _apply_zero_mean_per_stage:
             dp_s_dt_data = zero_mean_tendency(dp_s_dt_data, grid)
 
         # Vertical advection of D-grid winds: interpolate (u_d, v_d)
@@ -468,7 +482,7 @@ def fv3_hydrostatic_tendencies(
             div_v, sigma_coord,
         )
         dp_s_dt_data = -p_s * _D_total_full[..., 0] / sigma_range
-        if config.zero_mean_ps_tendency:
+        if _apply_zero_mean_per_stage:
             dp_s_dt_data = zero_mean_tendency(dp_s_dt_data, grid)
 
         # Vertical advection of D-grid winds via cell-centre interpolation.
@@ -959,26 +973,28 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                 p_s=state_new.p_s.replace(data=p_s_damped),
             )
 
-        # Conservation fixer (operates on p_s which is at cell centres).
-        # ``fix_mass_hydrostatic_target`` / ``fix_mass_hydrostatic`` only
-        # touch ``state.p_s`` and call ``state._replace(p_s=...)``, so
-        # we can pass the FV3 state directly.  Going through
-        # ``fv3_to_hydrostatic`` ran a corner-to-centre halo exchange +
-        # 4-point average on (u_d, v_d) just to throw the wind result
-        # away — wasted compute and an extra collective on the SPMD
-        # cubed-sphere path.
+        # Conservation fixer (operates on p_s which is at cell centres,
+        # in *both* hydrostatic and FV3 D-grid layouts).  Iter 2 routes
+        # through the raw-array ``fix_ps_mass`` / ``fix_ps_mass_target``
+        # helpers in :mod:`legoesm.core.conservation`, which act
+        # directly on the surface-pressure data and skip the
+        # ``fv3_to_hydrostatic`` round-trip — that round-trip would run
+        # an expensive corner-to-centre halo exchange + 4-point average
+        # on (u_d, v_d) only to discard the wind result, since only
+        # ``p_s`` is fixed here.
         if self.config.use_conservation_fixer and self.config.fix_mass:
             if self.config.anchor_mass_to_initial:
                 # _target_mass is precomputed in step() outside the JIT boundary.
-                state_new = fix_mass_hydrostatic_target(
-                    state_new, self._target_mass, self.grid,
+                p_s_fixed = fix_ps_mass_target(
+                    state_new.p_s.data, self._target_mass, self.grid,
                 )
             else:
-                state_h_new = fv3_to_hydrostatic(state_new, cdgrid)
-                state_h_old = fv3_to_hydrostatic(state, cdgrid)
-                state_h_fixed = fix_mass_hydrostatic(
-                    state_h_new, state_h_old, self.grid,
+                p_s_fixed = fix_ps_mass(
+                    state_new.p_s.data, state.p_s.data, self.grid,
                 )
+            state_new = state_new._replace(
+                p_s=state_new.p_s.replace(data=p_s_fixed),
+            )
 
         return cast_pytree(state_new, None, "storage")
 

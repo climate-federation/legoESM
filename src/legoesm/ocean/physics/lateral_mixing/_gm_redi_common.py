@@ -168,6 +168,12 @@ def compute_visbeck_kappa_gm(
 
     # Depth-weighted average of sigma_Eady (and N, when needed) — fuse
     # the column reductions that share the ``dz_half`` weight.
+    # Dry-column safeguard: when ``dz_half`` is all zero (jacobian = 0
+    # over land or in dry cells), ``w_total = 0`` and the eps-floor in
+    # the denominator yielded a garbage ``sigma_bar`` that was only
+    # masked by the final ``clip(kappa, ..., kappa_max)``.  Explicitly
+    # zero the column average when there's no wet water, so the wet
+    # mask propagates cleanly through gradients and forward values.
     if cfg.use_rossby_radius:
         # 3 reductions over the same axis with weight ``dz_half``:
         # ``w_total``, ``sigma * dz_half`` and ``N * dz_half``.
@@ -175,8 +181,9 @@ def compute_visbeck_kappa_gm(
         _col = jnp.sum(_stack * dz_half[..., None], axis=-2)
         w_total = _col[..., 0]
         w_safe = jnp.maximum(w_total, eps)
-        sigma_bar = _col[..., 1] / w_safe
-        N_bar = _col[..., 2] / w_safe
+        wet_col = w_total > eps
+        sigma_bar = jnp.where(wet_col, _col[..., 1] / w_safe, 0.0)
+        N_bar = jnp.where(wet_col, _col[..., 2] / w_safe, 0.0)
         H_col = jnp.sum(dz_actual, axis=-1)
         f_safe = jnp.maximum(jnp.abs(f_coriolis), cfg.f_min)
         L = jnp.clip(N_bar * H_col / f_safe, cfg.L_min, cfg.L_max)
@@ -185,8 +192,15 @@ def compute_visbeck_kappa_gm(
         _stack = jnp.stack([jnp.ones_like(sigma), sigma], axis=-1)
         _col = jnp.sum(_stack * dz_half[..., None], axis=-2)
         w_total = _col[..., 0]
-        sigma_bar = _col[..., 1] / jnp.maximum(w_total, eps)
+        wet_col = w_total > eps
+        sigma_bar = jnp.where(
+            wet_col, _col[..., 1] / jnp.maximum(w_total, eps), 0.0,
+        )
         L = jnp.full_like(sigma_bar, cfg.L_fixed)
 
-    kappa = cfg.alpha * L ** 2 * sigma_bar
-    return jnp.clip(kappa, cfg.kappa_min, cfg.kappa_max)
+    # Apply the wet-column mask AFTER clipping — otherwise dry columns
+    # get lifted to ``kappa_min`` rather than 0 (Codex review caught
+    # this).  A dry column should contribute exactly zero diffusivity
+    # so it cannot leak gradients through the GM/Redi tendencies.
+    kappa = jnp.clip(cfg.alpha * L ** 2 * sigma_bar, cfg.kappa_min, cfg.kappa_max)
+    return jnp.where(wet_col, kappa, 0.0)

@@ -63,7 +63,6 @@ from legoesm.timestepping.split_explicit import (
     SplitExplicitConfig,
 )
 from legoesm.atmosphere.dynamics.compressible_euler import (
-    CompressibleEulerConfig,
     compute_exner_perturbation,
     _sponge_profile,
     acoustic_substeps,
@@ -394,10 +393,15 @@ def cdgrid_compressible_euler_slow_tendencies(
         _lap1 = laplacian_compact_3d(_hyper_flat, grid)
         # Outer ∇² = div(grad).  Pad ``_lap1`` once and feed it to
         # both gradient ops (saves 1 ``pad_halo_4d`` per call).
-        _pad_halo_4d_uvtr = _pad_halo_4d_module
+        # iter-169: use the imported ``_pad_halo_4d_module`` alias —
+        # the bare ``pad_halo_4d`` call below was an F821 NameError
+        # (no top-level import) that would crash this branch when
+        # ``_lap_uvT_div2 > 0``.  The previous local alias
+        # ``_pad_halo_4d_uvtr = _pad_halo_4d_module`` was assigned
+        # but never used.
         _dg = getattr(grid, 'duogrid', None)
         _offsets = None if _dg is not None else grid.halo_interp_offsets
-        _lap1_pad = pad_halo_4d(_lap1, interp_offsets=_offsets, duogrid=_dg)
+        _lap1_pad = _pad_halo_4d_module(_lap1, interp_offsets=_offsets, duogrid=_dg)
         _gx = gradient_x_3d(_lap1, grid, padded=_lap1_pad)
         _gy = gradient_y_3d(_lap1, grid, padded=_lap1_pad)
         _lap2 = divergence_3d(_gx, _gy, grid).reshape(
@@ -444,10 +448,11 @@ def cdgrid_compressible_euler_slow_tendencies(
     # Pre-pad ``w_full`` once and pass to both gradient_x_3d /
     # gradient_y_3d via ``padded=`` so they share the halo MPI exchange.
     w_full = 0.5 * (w[..., :-1] + w[..., 1:])
-    _pad_halo_4d = _pad_halo_4d_module
+    # iter-169: same F821 fix as above — bare ``pad_halo_4d`` would
+    # NameError; use the imported ``_pad_halo_4d_module`` directly.
     _dg_w = getattr(grid, 'duogrid', None)
     _offsets_w = None if _dg_w is not None else grid.halo_interp_offsets
-    _w_full_pad = pad_halo_4d(w_full, interp_offsets=_offsets_w, duogrid=_dg_w)
+    _w_full_pad = _pad_halo_4d_module(w_full, interp_offsets=_offsets_w, duogrid=_dg_w)
     dw_dx = gradient_x_3d(w_full, grid, padded=_w_full_pad)
     dw_dy = gradient_y_3d(w_full, grid, padded=_w_full_pad)
     horiz_adv_w = -(u * dw_dx + v * dw_dy)
