@@ -40,11 +40,11 @@ Stretch goals beyond original scope: C144/C192 30-day empirical
 (deferred per above), 200-day climatology, nord>=2 fidelity
 restructure.  See [Open follow-ups](#open-follow-ups-iter-38-status-updated-through-iter-75).
 
-## Table of Contents (iter 53, updated iter 88)
+## Table of Contents (iter 53, updated iter 88, iter 115 count fix)
 
-This document tracks 70+ investigation iterations.  For most users
-the relevant sections are at the top; the iteration log preserves
-the diagnostic chain for future maintainers.
+This document tracks 100+ investigation iterations.  For most
+users the relevant sections are at the top; the iteration log
+preserves the diagnostic chain for future maintainers.
 
 - [**Lessons learned**](#lessons-learned-iter-84-synthesis-of-iter-18-83) — 7-point synthesis from 65+ cycles of investigation.
 - [**Investigation summary**](#investigation-summary-iter-51-codex-meta-review-consolidation) — two-mechanism story (corner-divergence damping vs Laplacian viscosity calibration).
