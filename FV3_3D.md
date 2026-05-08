@@ -339,6 +339,14 @@ Key iterations:
   failed because the test extracted dw against the wrong baseline
   (pre-step state instead of post-acoustic state); the fix
   introduced the third "acoustic-only" run.
+- Iter 206: extend iter-179 NH cube-imprint test to verify iter-203
+  ``damp_w_d_con`` heat injection does not regress the iter-168/
+  169/170/171 toolkit's edge suppression.  Mirrors iter-197 (which
+  added iter-193 damp_w to the imprint test).  iter-203 modifies
+  θ_p (not winds), so we expect d_con to be NEUTRAL for the
+  v-imprint metric — but cross-coupling through buoyancy → w →
+  acoustic → wind could in principle disrupt the toolkit, so
+  explicit regression coverage is warranted.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::

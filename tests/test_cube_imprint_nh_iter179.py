@@ -271,3 +271,61 @@ def test_full_toolkit_with_damp_w_does_not_regress(small_random_nh_state):
         f"edge suppression — if this fails, damp_w may be "
         f"interacting badly with the horizontal damping toolkit."
     )
+
+
+def test_full_toolkit_with_damp_w_d_con_does_not_regress(small_random_nh_state):
+    """FV3_3D iter 206: adding iter-203 ``damp_w_d_con`` (KE→heat
+    conversion) on top of iter-193 ``damp_w`` must NOT regress the
+    iter-179 cube-imprint ratio.
+
+    iter-204 added damp_w_d_con to the iter-184 NH umbrella
+    (AD-at-rest) and iter-205 quantitatively validated the heat
+    formula against the FV3 sw_core.F90:1086 reference — but the
+    iter-179 cube-imprint metric did not include iter-203.  This
+    test extends iter-197 to also engage the d_con heat conversion.
+
+    iter-203's heat source modifies θ_p (not winds directly).  The
+    cube imprint is a wind-field artifact, so we expect d_con to be
+    NEUTRAL for the v-imprint metric.  A regression would indicate
+    the heat injection is destabilising the iter-168/169/170/171
+    toolkit through θ_p → buoyancy → w → acoustic coupling."""
+    grid, height_coord, terrain_metric, state = small_random_nh_state
+
+    cfg_baseline = CDGridCompressibleEulerConfig(
+        hyperdiff_coeff=0.0, n_acoustic_substeps=4,
+        sponge_coeff=0.0,
+    )
+    cfg_toolkit_with_damp_w_d_con = CDGridCompressibleEulerConfig(
+        hyperdiff_coeff=0.0, n_acoustic_substeps=4,
+        sponge_coeff=0.0,
+        # iter-179 toolkit
+        corner_div_damp_d2_bg=0.001,
+        corner_div_damp_dddmp=0.20,
+        damp_v=0.030, nord_v=0,    # del-2 for visible C8 effect
+        use_fv3_a2b_zeta_corner=True,
+        div_damp_coeff=1e10, div_damp_dddmp=0.0,
+        # iter-193 + iter-203 additions
+        damp_w=0.030, nord_w=1,
+        damp_w_d_con=1.0,            # FV3 production default
+    )
+
+    model_baseline = CDGridCompressibleEulerModel(
+        grid, height_coord, terrain_metric, cfg_baseline,
+    )
+    model_toolkit = CDGridCompressibleEulerModel(
+        grid, height_coord, terrain_metric, cfg_toolkit_with_damp_w_d_con,
+    )
+
+    s_baseline = _step_n(model_baseline, state, n_steps=10)
+    s_toolkit = _step_n(model_toolkit, state, n_steps=10)
+
+    ratio_baseline, _, _ = _edge_interior_std_ratio(s_baseline)
+    ratio_toolkit, _, _ = _edge_interior_std_ratio(s_toolkit)
+
+    assert ratio_toolkit < ratio_baseline, (
+        f"iter-179+iter-193+iter-203 toolkit must still reduce "
+        f"cube-imprint ratio vs baseline: "
+        f"baseline={ratio_baseline:.3f}, "
+        f"toolkit_with_d_con={ratio_toolkit:.3f}.  Adding iter-203 "
+        f"d_con heat injection should not destabilise the toolkit."
+    )
