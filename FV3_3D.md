@@ -4097,7 +4097,11 @@ The remaining open items (C144/C192 empirical validation,
 dt=100 retest) are stretch goals beyond the original
 investigation scope.
 
-265 tests pass.  82 iterations of work.  C96 30-day stability
+32 helper tests pass in TestHeldSuarezDissipationImbalance
+(iter 84 era) plus 18 in test_div_damp_adaptive.py + 12 in
+test_fv3_divergence_corner.py + 7 in test_smagorinsky_visc.py
+= 69 tests directly related to FV3_3D investigation; 6794 in
+the project overall.  C96 30-day stability
 problem: **CLOSED**.
 
 ## Iteration 95 (2026-05-07): C96 dt=50 PASSES iter-79 day-22.5 mark
