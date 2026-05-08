@@ -637,87 +637,36 @@ Key iterations:
   - 287: NH counterpart of 286.
   - 288: PE d_con float32 50-step long-run stability.
   - 289: NH counterpart of 288.
-- Iter 290: PE iter-19 PRODUCTION AD-at-rest at default
-  float32 (mirror of iter-261 which is x64).  Confirms
-  iter-183 sqrt(0) double-where AD-safety + iter-19 d_con
-  stack work at float32 precision.  jax.grad finite, dtype
-  verified jnp.float32.  1/1 pass in 57 s.  Plus 10-iter ToC
-  compaction (iters 280-289).
-- Iter 291: NH counterpart of iter-290 (NH iter-184
-  PRODUCTION d4_bg=0.02 + full 5-knob d_con stack +
-  delt_max=1.0 AD-at-rest at default float32; mirror of NH
-  iter-270 at x64).  jax.grad w.r.t. theta_prime finite,
-  dtype jnp.float32.  1/1 pass in 78 s.  PE+NH iter-183
-  sqrt(0) AD-safety now verified at both x64 and float32 on
-  both 3D paths under FV3 production damping coefficients.
-- Iter 292: linear-in-c_s scaling for the iter-180/iter-57
-  Smagorinsky-adaptive A_h helper (legoESM form
-  A_h_smag = c_s * dx² * |D|).  At fixed (u, v), 2x c_s →
-  exactly 2x A_h_smag (rtol=1e-14 bit-for-bit), c_s=0 →
-  zero.  Pure helper-formula test; pins the linear-in-c_s
-  contract that iter-180's off/on/no-A_h tests don't cover.
-  2/2 pass in 9.4 s.
-- Iter 293: linear-in-(u, v) scaling of Smagorinsky strain
-  magnitude.  At fixed c_s, scaling (u, v) → (αu, αv)
-  produces |α| × A_h_smag (rtol=1e-12) for α ∈ {0.5, 2.0,
-  3.7}.  Plus rest-state sanity: A_h_smag = 0 exactly at
-  (u=v=0) and jax.grad finite (validates iter-181 sqrt(0)
-  AD-safety in the helper).  4/4 pass in 10.7 s.  Pins the
-  linear-in-(u, v) axis orthogonal to iter-292's linear-in-
-  c_s.
-- Iter 294: Galilean translation invariance of Smagorinsky
-  helper.  A_h_smag(u + c, v + c) = A_h_smag(u, v) bit-for-
-  bit (rtol=1e-14) for uniform offsets c ∈ {-5, 1, 100} and
-  separate-component offsets (c1, c2) ∈ {(-3, 7), (10, -2)}.
-  Strain magnitude depends on velocity GRADIENTS, so adding
-  constants must cancel under centered FD even with cubed-
-  sphere halo cross-panel exchange.  5/5 pass in 9.2 s.
-  Third orthogonal helper-formula axis (after iter-292
-  linear-in-c_s and iter-293 linear-in-(u, v)).
-- Iter 295: linear-in-|dt| scaling and sign-symmetry of the
-  iter-187 smag_vort cap formula
-  ``smag_vort = |dt|*sqrt(delpc² + ζ²)``.  α*dt → |α|×
-  smag_vort (rtol=1e-14) for α ∈ {-2.5, 0.5, 1.0, 3.0}.
-  smag_vort(±delpc, ±ζ) array-equal across all 4 sign
-  combinations (squared inputs).  Pure helper-formula test
-  mirroring iter-285's pattern; fills scaling/symmetry
-  slots iter-285 didn't cover.  5/5 pass in 0.2 s.
-- Iter 296: PE iter-189 dt-plumbing regression guard.
-  Two PE configs differing ONLY in
-  ``corner_div_damp_dt_proxy`` (50 vs 500) produce bit-for-
-  bit identical state from ``model.step(state, dt=100)``.
-  Confirms iter-189's actual-integration-dt plumbing
-  overrides the config proxy; if the plumbing ever
-  regresses (proxy silently engages), the divergent proxies
-  → different damping → different state, and this test
-  fails.  1/1 pass in 22 s.
-- Iter 297: NH counterpart of iter-296 dt-plumbing guard.
-  Two NH configs differing ONLY in
-  ``corner_div_damp_dt_proxy`` (2.0 vs 50.0) produce bit-
-  for-bit identical state from ``model.step(state,
-  dt=10.0)``.  PE+NH dt-plumbing on the iter-189 corner-div
-  cap path now both pinned by regression guards — different
-  proxy defaults (PE 200, NH 10) confirm separate plumbing.
-  1/1 pass in 28 s.
-- Iter 298: PE iter-189 dt-proxy FALLBACK semantics
-  (complement of iter-296).  Direct
-  ``fv3_hydrostatic_tendencies`` calls WITHOUT ``dt_actual``
-  must read ``corner_div_damp_dt_proxy`` — confirmed by
-  measurable tendency difference between proxy=50 and
-  proxy=500.  Together iter-296/iter-298 form the complete
-  iter-189 contract: dt_actual present → real dt wins; dt_
-  actual absent → proxy wins.  Catches refactors that
-  silently hardcode one path.  1/1 pass in 18 s.
-- Iter 299: NH counterpart of iter-298 (NH dt-proxy
-  fallback semantics).  Direct
-  ``cdgrid_compressible_euler_slow_tendencies`` calls
-  without ``dt_actual`` read ``corner_div_damp_dt_proxy`` —
-  proxy 10 vs 1000 with stronger ±15 m/s perturbations
-  produces measurable tendency difference (NH d2_bg floor
-  + smag_vort 0.20 ceiling mask the proxy at small delpc,
-  hence wider spread vs PE iter-298).  Together iter-297 +
-  iter-299 form the complete NH iter-189 contract.  1/1
-  pass in 20 s.
+- Iters 290-299 (compacted iter 300): float32 AD, helper-
+  formula scaling/invariance, and dt-plumbing semantics.
+  - 290: PE iter-19 PRODUCTION AD-at-rest at default float32
+    (mirror of iter-261 x64).  Confirms iter-183 sqrt(0)
+    AD-safety doesn't depend on x64.
+  - 291: NH counterpart (mirror of NH iter-270 x64).
+  - 292: Smagorinsky helper linear-in-c_s scaling (rtol
+    1e-14 bit-for-bit, c_s=0 → 0).
+  - 293: Smagorinsky helper linear-in-(u, v) scaling at α ∈
+    {0.5, 2.0, 3.7}, plus rest-state grad finite.
+  - 294: Smagorinsky helper Galilean translation invariance
+    (uniform + separate-component offsets, rtol 1e-14).
+  - 295: smag_vort cap linear-in-|dt| (α ∈ {-2.5, 0.5, 1.0,
+    3.0}) + sign-symmetry across 4 sign combos.
+  - 296: PE iter-189 dt-plumbing — model.step beats proxy
+    (proxy 50 vs 500 → bit-for-bit identical state).
+  - 297: NH counterpart of 296 (proxy 2 vs 50).
+  - 298: PE iter-189 fallback — direct tendency call without
+    dt_actual reads proxy (proxy 50 vs 500 → tendencies
+    differ).  Together 296+298 = complete PE contract.
+  - 299: NH counterpart of 298 (proxy 10 vs 1000 + ±15 m/s
+    perturbations to escape d2_bg floor).
+- Iter 300: AST regression guard for ``dt_actual`` param
+  on both PE+NH tendency signatures.  Pins the keyword name
+  + default=None on ``fv3_hydrostatic_tendencies`` and
+  ``cdgrid_compressible_euler_slow_tendencies``.  Catches
+  silent renames that runtime tests would miss (callers
+  using ``dt_actual=...`` keyword break, but positional
+  callers continue to work).  2/2 pass in 0.3 s.  Plus
+  10-iter ToC compaction (iters 290-299).
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
