@@ -691,6 +691,14 @@ Key iterations:
   regresses (proxy silently engages), the divergent proxies
   → different damping → different state, and this test
   fails.  1/1 pass in 22 s.
+- Iter 297: NH counterpart of iter-296 dt-plumbing guard.
+  Two NH configs differing ONLY in
+  ``corner_div_damp_dt_proxy`` (2.0 vs 50.0) produce bit-
+  for-bit identical state from ``model.step(state,
+  dt=10.0)``.  PE+NH dt-plumbing on the iter-189 corner-div
+  cap path now both pinned by regression guards — different
+  proxy defaults (PE 200, NH 10) confirm separate plumbing.
+  1/1 pass in 28 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
