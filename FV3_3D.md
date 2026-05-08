@@ -467,7 +467,9 @@ STILL OPEN (post-iter-99 stretch goals):
   stability.  30-day projects ~6 hours wall.
 - C192 5-day / 30-day empirical validation.  iter-103 confirmed
   1-day; iter-85 predicts NaN ~day 90 at dt=25; 30-day projects
-  ~12 hours wall.  iter-123 launched C192 5-day in background.
+  ~12 hours wall.  iter-123 launched C192 5-day in background;
+  iter-134 killed it after 9.5 minutes with no progress past
+  step 0 (system at 5-9% CPU made wall projection ~7 hours).
 - Substantive ``nord >= 2`` fidelity restructure (halo'd
   intermediate ``divg_d`` arrays, vector corner fill at nt > 0)
   — iter 32 found the C72 mode is interior, NOT cube-vertex, so
