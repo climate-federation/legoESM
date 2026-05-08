@@ -84,6 +84,9 @@ Key iterations:
 - Iter 102: C144 1-day smoke stable
 - Iter 103: C192 1-day smoke stable
 - Iter 104-105: ToC + epilog updates with iter 99 confirmation
+- Iter 106-113: stretch-goal documentation + small refinements
+  (C144/C192 deferred budget note, jet-spinup clarification,
+  test-count audit, C72 mid_std in Final state table)
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
