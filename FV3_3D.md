@@ -381,6 +381,16 @@ Key iterations:
   and ``damp_w_d_con`` (iter-203/204); iter-185 PE umbrella now
   exercises ``damp_v_d_con`` (iter-208).  Both umbrellas pass
   ``jax.grad`` at rest with the full energy-conserving toolkit.
+- Iter 211: quantitative formula validation for iter-208/209
+  ``damp_v_d_con`` (mirrors iter-205 pattern for damp_w).  3-run
+  extraction (no-damp_v / damp_v / damp_v + d_con) verifies the
+  actual ΔT (PE) and Δθ_p (NH) increments match the expected
+  formula (-d_con * ΔKE / c_pd, with corner→center projection for
+  PE and × 1/Π_ref for NH) within machine precision.  PE tolerance
+  is 1e-8 (vs 1e-10 for NH) because the model's
+  ``_interp_corner_to_center`` call inside the JIT graph fuses
+  ops differently than the test's external call, producing a few
+  ULPs of difference in the 4-point average.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
