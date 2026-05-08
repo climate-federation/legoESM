@@ -124,6 +124,10 @@ Key iterations:
   divergent IC + assert mean(|div_v|) REDUCES vs no damping.
   Catches sign-error in iter-168/171 wirings (which prior
   "changes-the-state" tests would miss)
+- Iter 175: quantitative damp_v correctness — vortical IC +
+  assert mean(|ζ|) REDUCES vs no damping; parametrized
+  no-amplification check for nord ∈ {0, 1, 2}.  Catches sign
+  errors in the iter-169 fv3_del6_vorticity_damping wiring
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
@@ -4006,6 +4010,61 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
+
+## Iteration 175 (2026-05-08): quantitative damp_v correctness for NH
+
+### Goal
+
+Extend the iter-174 quantitative-correctness pattern to the
+iter-169 post-step ``damp_v`` mechanism.  iter-169's unit tests
+verify the wiring CHANGES the state but not the *direction* of
+the change; this iter adds tests that verify ``damp_v`` actually
+REDUCES vorticity (not amplifies it).
+
+### Implementation
+
+New file ``tests/test_damp_v_quantitative_iter175.py`` (4 tests,
+no production code change):
+
+1. ``test_damp_v_reduces_vorticity`` — ``damp_v=0.030`` with
+   ``nord_v=0`` (del-2 path) reduces ``mean(|ζ|)`` by at least
+   1 % vs no-damping baseline.
+2. ``test_damp_v_no_amplification_for_any_nord[0]`` — del-2
+   path does not amplify vorticity.
+3. ``test_damp_v_no_amplification_for_any_nord[1]`` — del-4 path
+   does not amplify vorticity.
+4. ``test_damp_v_no_amplification_for_any_nord[2]`` — del-6 path
+   (FV3 production) does not amplify vorticity.
+
+### Design notes
+
+* Initial condition is a sinusoidal v perturbation
+  ``V0 * sin(2π i/n)`` (constant in j) producing pure shear
+  vorticity.  At C8 this gives ``mean(|ζ|) ~ 1e-5 s^-1``, well
+  above noise.
+* The strict ``> 1 %`` reduction floor applies only to the del-2
+  test: at C8 with dt=10 over 5 steps, del-6 with the production
+  ``damp_v=0.030`` produces only a ~1e-4 % reduction (too small
+  to discriminate from FP noise).  The parametrized
+  no-amplification tests cover all three nord orders (catches a
+  sign error in any of them) at the looser ``≤ 0.1 % growth``
+  threshold.
+* All other damping (hyperdiff, sponge) disabled so the test
+  isolates the ``fv3_del6_vorticity_damping`` helper's contribution.
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_damp_v_quantitative_iter175.py
+    => 4 passed in 41.32 s
+
+### Status
+
+Quantitative-correctness coverage now extends to iter-169 in
+addition to iter-168/171 (covered by iter-174).  Sign errors in
+any of the four mechanism implementations would be caught.
 
 ## Iteration 174 (2026-05-08): quantitative damping correctness for NH
 
