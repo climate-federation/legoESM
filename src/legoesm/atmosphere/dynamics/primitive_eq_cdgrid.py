@@ -1194,16 +1194,12 @@ def fv3_hydrostatic_tendencies(
 
     dT_dt_data = horiz_adv_T + vert_adv_T + adiabatic
 
-    # FV3_3D iter 221: add the corner-divergence-damp KE→heat
-    # tendency captured in section 10a.  Default 0.0 preserves
-    # bit-for-bit baseline.
-    if _dT_dt_cdd_cc is not None:
-        dT_dt_data = dT_dt_data + _dT_dt_cdd_cc
-
-    # FV3_3D iter 223: add the cell-centre div_damp KE→heat
-    # tendency captured in the iter-5 div_damp block.
-    if _dT_dt_dd_cc is not None:
-        dT_dt_data = dT_dt_data + _dT_dt_dd_cc
+    # FV3_3D iter 239: aggregation moved to after the A_h block
+    # so all 3 tendency-based d_con contributions
+    # (corner-div, cell-centre div_damp, A_h) sum up and the
+    # iter-218/219 sponge-aware ``delt_max`` cap is applied to
+    # the AGGREGATE (FV3 sw_core.F90 + dyn_core.F90:1764-1779
+    # accumulate heat_source from all sources then cap once).
 
     # --- 12. Diffusion ---
     # 12a. Laplacian viscosity on D-grid winds
@@ -1406,11 +1402,44 @@ def fv3_hydrostatic_tendencies(
             _dKE_dt_corner_ah = (
                 u_d * _du_d_dt_ah + v_d * _dv_d_dt_ah
             )
-            dT_dt_data = dT_dt_data + (
+            _dT_dt_ah_cc = (
                 -config.ah_d_con
                 * _interp_corner_to_center(_dKE_dt_corner_ah)
                 / constants.c_pd
             )
+        else:
+            _dT_dt_ah_cc = None
+    else:
+        _dT_dt_ah_cc = None
+
+    # FV3_3D iter 239: aggregate the 3 tendency-based d_con
+    # contributions (iter-221 corner-div, iter-223 cell-centre
+    # div_damp, iter-225 A_h) and apply the iter-218/219 sponge-
+    # aware ``delt_max`` cap on the AGGREGATE.  Matches the FV3
+    # heat_source pattern: all KE-removal mechanisms accumulate
+    # into a single heat_source then dyn_core.F90 caps once with
+    # the per-level (sponge-aware) ``delt_max`` limiter.
+    _d_con_sum = None
+    for _contrib in (_dT_dt_cdd_cc, _dT_dt_dd_cc, _dT_dt_ah_cc):
+        if _contrib is not None:
+            _d_con_sum = (
+                _contrib if _d_con_sum is None
+                else _d_con_sum + _contrib
+            )
+    if _d_con_sum is not None:
+        if config.delt_max > 0.0:
+            # Sponge-aware tendency cap: PE k=0,1 are uncapped
+            # (jnp.inf), k>=2 are capped to ``delt_max`` K/s.
+            # Equivalent to a per-step ΔT cap of
+            # ``dt * delt_max`` after the integrator advances.
+            _nlev = _d_con_sum.shape[-1]
+            _k_idx = jnp.arange(_nlev)
+            _cap_per_level = jnp.where(
+                _k_idx < 2, jnp.inf, config.delt_max,
+            )
+            _cap_b = _cap_per_level[None, None, None, :]
+            _d_con_sum = jnp.clip(_d_con_sum, -_cap_b, _cap_b)
+        dT_dt_data = dT_dt_data + _d_con_sum
 
     if config.hyperdiff_coeff > 0:
         du_d_dt = du_d_dt + _hd_uv_d[..., 0]

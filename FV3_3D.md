@@ -579,6 +579,23 @@ Key iterations:
   precision for the corner-div d_con block.  Acts as a
   regression target for any future metric-aware port.  1/1
   pass in 15 s.
+- Iter 239: extend the iter-218/219 sponge-aware ``delt_max``
+  cap to the AGGREGATE tendency-based d_con stack (PE).
+  Previously the cap only acted on the iter-208 damp_v
+  POST-STEP block; the iter-221 corner-div, iter-223
+  cell-centre div_damp, and iter-225 A_h tendency-based d_con
+  contributions bypassed it.  Refactor: stash all 3 tendency
+  contributions (``_dT_dt_cdd_cc``, ``_dT_dt_dd_cc``,
+  ``_dT_dt_ah_cc``), aggregate after the A_h block, then apply
+  per-level cap (k=0,1 → ``jnp.inf`` uncapped, k≥2 →
+  ``delt_max`` K/s) before adding to ``dT_dt_data``.  Mirrors
+  FV3 ``dyn_core.F90:1764-1779`` which accumulates
+  ``heat_source`` from all sources and caps once.  3-test
+  fixture: off-baseline (delt_max=0 bit-for-bit), interior
+  bounded to ``delt_max``, top-2 sponge uncapped (bit-for-bit
+  with delt_max=0).  PE umbrella iter-185 still passes (57 s).
+  16/16 PE d_con regression tests pass (no behavior change for
+  delt_max=0 baseline).
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
