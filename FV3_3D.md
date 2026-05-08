@@ -3996,6 +3996,17 @@ resolutions::
 iter-85 1/dt prediction at C192: dt=25 should NaN at ~day 90,
 so 30-day stability is expected.  Empirical validation deferred.
 
+iter-117 trajectory observation: HS C144 spin-up max|u| grows
+roughly linearly with time during the first ~5 days::
+
+    day 1.25: max|u|=0.961
+    day 2.5:  max|u|=2.212
+    day 3.75: max|u|=3.777
+
+Extrapolation predicts day 5: max|u|~5.3 m/s.  This is normal
+HS jet spinup behaviour and consistent with C96's iter-99
+trajectory (max|u| ~20 m/s at day 30, still spinning up).
+
 ## Iteration 102 (2026-05-07): C144 auto-mode 1-day smoke — stable
 
 ### Goal
