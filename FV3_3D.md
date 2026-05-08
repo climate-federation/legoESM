@@ -141,6 +141,10 @@ Key iterations:
   that drops each gate substring and asserts the missing-detection
   logic flags it.  Closes the gap that iter-172 predates
   iter-173 and the silent-typo failure mode
+- Iter 179: NH-equivalent cube-imprint metric (PE iter-2 analogue).
+  Toolkit ON reduces edge_std/interior_std vs no-damping baseline.
+  Most-direct quantitative validation of the FV3 toolkit's
+  cube-imprint suppression purpose, modulo C8 wall-time constraints
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
@@ -4023,6 +4027,56 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
+
+## Iteration 179 (2026-05-08): NH-equivalent cube-imprint metric
+
+### Goal
+
+PE iter 2 introduced the quantitative cube-imprint metric: ratio
+of std(v) at panel edges vs std(v) in the face interior.  PE
+iter 17 measured -79 % mid-level cube imprint at HS C36 with the
+optimal corner-div damping setting.  NH had no analogous metric,
+making it impossible to claim quantitative imprint reduction
+for the iter-168/169/170/171 toolkit ports.
+
+This iter introduces the NH analogue and validates that the
+toolkit reduces the metric vs the no-damping baseline.
+
+### Implementation
+
+New file ``tests/test_cube_imprint_nh_iter179.py`` (2 tests, no
+production code change):
+
+1. ``test_imprint_metric_is_finite_and_positive`` — sanity check
+   that the metric (edge_std / interior_std with edge_width=2)
+   produces a finite positive value on the no-damping baseline.
+   Documents the C8 scale where the absolute imprint magnitude
+   is small (ratio ~ 1, comparable to noise) — PE's HS C36
+   30-day case showed ratio ~ 1.27 at day 30, but that's well
+   beyond the wall-time budget for a unit test.
+2. ``test_full_toolkit_reduces_edge_imprint_ratio`` — with the
+   full FV3 toolkit ON (all four iter-168/169/170/171 mechanisms
+   + 4th-order ζ corner), the ratio is STRICTLY LOWER than the
+   no-damping baseline.  This is the most-direct quantitative
+   validation of the toolkit's intended purpose: suppress
+   spurious wind amplification at cube-face boundaries.
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_cube_imprint_nh_iter179.py
+    => 2 passed in 24.90 s
+
+### Status
+
+The NH path now has the same quantitative imprint metric coverage
+as the PE path, modulo grid-resolution / wall-time constraints.
+The toolkit-reduction comparison is structural (lower ratio
+under full toolkit vs no damping) rather than absolute (specific
+percentage reduction), reflecting the small-grid signal-to-noise
+constraint at C8.
 
 ## Iteration 178 (2026-05-08): extend iter-172 AST guards + self-check
 
