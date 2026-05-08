@@ -62,7 +62,9 @@ auto-apply (1.0 / 2.0 / 10.0 by resolution bucket), this is a
 single env var pair recommended for cube HS.
 
 C96 30-day empirical validation of the iter-81 dt=50 setting is
-**still pending** as of iter 82.
+**partially confirmed** as of iter 95: the run passed the iter-79
+day-22.5 NaN point with max|u|=14.04 m/s.  Full 30-day completion
+imminent (final 7.5 days remaining at iter-96 stop hook).
 
 The full iteration log follows.
 
@@ -267,7 +269,7 @@ divergence damping settings + per-resolution ``A_h`` scaling
 | C36        | ``1.0`` (default)| 4.08e+06        | 200 (no change)| iter 19/24 production               |
 | C48        | ``2.0`` (iter 37)| 6.12e+06        | 200 (no change)| sweet-spot scan, mid_std -48 %      |
 | C72        | ``10.0`` (iter 33)| 2.04e+07       | 200 (iter-33 ref)| smallest stable scale at dt=200   |
-| C96        | ``10.0`` (auto)  | 1.53e+07        | 50 (iter-81 auto promoted to very_long_time)| 30d STILL PENDING empirical validation |
+| C96        | ``10.0`` (auto)  | 1.53e+07        | 50 (iter-81 auto promoted to very_long_time)| past day 22.5 verified (iter 95); full 30d in final stage |
 | C144       | ``10.0`` (auto)  | 1.02e+07        | 33 (auto)       | empirically untested                |
 | C192       | ``10.0`` (auto)  | 7.65e+06        | 25 (auto)       | empirically untested                |
 
