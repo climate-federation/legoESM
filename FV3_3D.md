@@ -633,6 +633,14 @@ Key iterations:
   (sin² ≤ 1).  Plus verifies cosa concentrates at cube
   vertices (mean(|cosa| at 4 corner cells per face) > mean
   (|cosa| in panel interior).  2/2 pass in 9 s.
+- Iter 267: explicit numerical test for the iter-219 NH
+  sponge factor values (FV3 sw_core.F90:1782-1786).  iter-219
+  tests verify the cap acts asymmetrically per layer; iter-267
+  pins the EXACT factor values: 0.1 at k=0, 0.5 at k=1, 1.0
+  at k≥2.  With delt_max=1e-6 + extreme damp_v_d_con=100, the
+  T-equivalent ΔT at each layer is bounded by sponge[k] * dt
+  * delt_max.  Catches accidental factor swap or sign error
+  in the iter-219 cap formula.  2/2 pass in 27 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
