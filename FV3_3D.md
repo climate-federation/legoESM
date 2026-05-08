@@ -602,6 +602,15 @@ Key iterations:
   25 s.  Validates that the d_con stack composes with the
   iter-19 production damping at production-grade resolution
   WITHOUT introducing edge artifacts.
+- Iter 255: NH counterpart of iter-254 cube-imprint
+  diagnostic at C36 production resolution.  iter-179/234
+  cover NH cube-imprint at C8; iter-251 covers NH C36
+  stability; iter-255 ties them together.  C36 NH + iter-184-
+  style toolkit + full 5-knob NH d_con stack + delt_max=1.0,
+  5 steps × dt=10 from a perturbation IC.  v ratio stays in
+  (0.1, 10.0) sanity bound.  edge_width=4 same as iter-254.
+  1/1 pass in 21 s.  Closes the PE/NH parity gap on C36
+  cube-imprint diagnostic with the full d_con stack engaged.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
