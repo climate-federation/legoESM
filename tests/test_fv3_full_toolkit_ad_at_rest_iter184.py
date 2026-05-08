@@ -86,9 +86,17 @@ def _full_toolkit_cfg():
     """All NH FV3 toolkit knobs ON at PE-tested-or-default values."""
     return CDGridCompressibleEulerConfig(
         hyperdiff_coeff=1e14, n_acoustic_substeps=4,
-        # iter-168 corner-divergence damping
+        # iter-168 corner-divergence damping (del-2)
         corner_div_damp_d2_bg=0.0005,
         corner_div_damp_dddmp=0.20,
+        # iter-187 nord >= 1 smag_vort branch + iter-190 dedup
+        # (extended in iter-192 to engage these in the umbrella).
+        # d4_bg + nord > 0 turns on the smag_vort cap formula, and
+        # combined with use_fv3_a2b_zeta_corner=True it exercises
+        # the iter-190 dedup'd ``_zeta_a2b_ord4`` shared between
+        # the iter-170 ζ_corner site and the iter-187 site.
+        corner_div_damp_d4_bg=1e-3,
+        corner_div_damp_nord=1,
         # iter-169 post-step vorticity damping
         damp_v=0.030, nord_v=2,
         # iter-170 4th-order ζ corner

@@ -82,6 +82,14 @@ def _full_pe_toolkit_cfg():
         # Corner-divergence damping del-2 + del-(2*(nord+1)) (iter 16/18)
         corner_div_damp_d2_bg=0.0005,
         corner_div_damp_dddmp=0.20,
+        # iter-187 smag_vort cap + iter-190 dedup with iter-170
+        # (extended in iter-192 to engage these in the umbrella).
+        # d4_bg + nord > 0 turns on the FV3 ``smag_vort = |dt|*sqrt(
+        # delpc² + ζ²)`` cap; combined with use_fv3_a2b_zeta_corner=
+        # True (set above), iter-190 dedup is exercised end-to-end
+        # at AD-at-rest.
+        corner_div_damp_d4_bg=1e-3,
+        corner_div_damp_nord=1,
         # Velocity-dependent T_diss (iter-182 fix)
         T_diss_coeff=0.05,
         # Disable conservation fixers to keep AD focused on the

@@ -213,6 +213,15 @@ Key iterations:
   PE + NH integration tests verifying finite output, ``differs
   from iter-170-only``, ``differs from iter-187-only``, and
   ``jax.grad`` AD-at-rest safety with both flags ON.
+- Iter 192: extend the iter-184/185 umbrella AD-at-rest tests to
+  ALSO engage iter-187 (``d4_bg=1e-3`` + ``nord=1``) on top of
+  iter-170 (``use_fv3_a2b_zeta_corner=True``).  Previously the
+  umbrellas left the iter-187 smag_vort branch dormant
+  (``corner_div_damp_nord=0`` default).  After iter-192 both
+  umbrellas exercise the iter-190 dedup'd ``_zeta_a2b_ord4``
+  shared between iter-170 and iter-187 sites under ``jax.grad``
+  at the rest state.  Future AD hazards in the smag_vort branch
+  now caught by the umbrella regression.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
@@ -4095,6 +4104,62 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
+
+## Iteration 192 (2026-05-08): extend iter-184/185 umbrellas to engage iter-187 + iter-190
+
+### Goal
+
+Tighten the umbrella AD-at-rest regression coverage.  iter-184
+(NH) and iter-185 (PE) ``test_full_*_toolkit_grad_at_rest`` are the
+catch-all regressions for AD hazards in the FV3 toolkit at rest
+state.  Both umbrellas set ``use_fv3_a2b_zeta_corner=True``
+(iter-170) AND ``corner_div_damp_d2_bg=0.0005 + dddmp=0.20``
+(iter-16/iter-168) but leave ``d4_bg=0`` and ``nord=0`` —
+gating the iter-187 smag_vort branch and the iter-190
+``_zeta_a2b_ord4`` dedup OFF.
+
+A future AD hazard introduced specifically in the iter-187
+smag_vort code (e.g., a new sqrt-without-double-where) would
+NOT be caught by the existing umbrellas.
+
+### Plan
+
+Add ``corner_div_damp_d4_bg=1e-3 + corner_div_damp_nord=1`` to
+the umbrella ``cfg`` in BOTH iter-184 and iter-185 so the smag_vort
+branch is exercised under ``jax.grad`` at rest.  Combined with
+the existing ``use_fv3_a2b_zeta_corner=True``, this also engages
+the iter-190 dedup pattern where ``_zeta_a2b_ord4`` is consumed
+at TWO downstream sites.
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_fv3_full_toolkit_ad_at_rest_iter184.py \
+        tests/test_pe_full_toolkit_ad_at_rest_iter185.py
+    => 4 passed in 239.58 s
+
+The wall-time grew (~240 s vs the previous ~155 s) because the
+JIT trace now includes the iter-187 smag_vort branch with the
+iter-190 dedup wiring.  This is one-time JIT cost; subsequent
+test invocations re-use the XLA cache.
+
+### Status
+
+The umbrella regression now covers:
+
+* iter-181 Smagorinsky sqrt(0) fix
+* iter-182 PE T_diss wind_speed sqrt(0) fix
+* iter-183 SW d_sw5 smag_vort sqrt(0) fix
+* iter-187 corner_div_damp nord >= 1 smag_vort branch (new)
+* iter-190 ``_zeta_a2b_ord4`` shared-array dataflow (new)
+
+Combined with iter-191 (focused integration test of iter-170 +
+iter-187 simultaneously) and iter-186 (AST regression with
+self-check), the iter-187/190 wirings are protected against
+silent regressions at three layers: AST structure, focused
+integration, and umbrella AD safety.
 
 ## Iteration 191 (2026-05-08): coverage tests for iter-190 dedup with both flags ON
 
