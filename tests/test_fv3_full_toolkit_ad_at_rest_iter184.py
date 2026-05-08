@@ -105,6 +105,10 @@ def _full_toolkit_cfg():
         div_damp_coeff=1e6, div_damp_dddmp=0.20,
         # iter-180 Smagorinsky-adaptive A_h (relies on iter-181 fix)
         A_h=1e6, smagorinsky_cs=0.20,
+        # iter-193 post-step damp_w + nord_w (FV3 d_sw1 port,
+        # added to the umbrella in iter-194).  Reuses the
+        # _del6_vt_flux backbone applied per half-level via vmap.
+        damp_w=0.030, nord_w=1,
     )
 
 

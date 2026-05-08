@@ -231,6 +231,12 @@ Key iterations:
   AM4 production default is ``damp_w=0.30 + nord_w=2``.
   Complementary to the legoESM-native ``hyperdiff_w_coeff``
   biharmonic.
+- Iter 194: extend the iter-184 NH umbrella to ALSO engage iter-193
+  ``damp_w + nord_w``.  Previously the umbrella exercised iter
+  168/169/170/171/180/187/190 toolkit knobs but left iter-193 ``damp_w``
+  dormant (``damp_w=0.0`` default).  After iter-194 the umbrella
+  exercises ALL FV3-faithful damping mechanisms in NH at AD-at-rest,
+  including the iter-193 ``_del6_vt_flux`` chain on ``w``.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
