@@ -132,6 +132,10 @@ Key iterations:
   over 10-step window, FINAL max|div_v| reduced by >=5 % vs
   no-damping baseline; KE bounded within 2x IC.  Validates the
   toolkit's intended behavioral effect at trajectory level
+- Iter 177: cube-vertex corner fill mode reaches NH — regression
+  test that fv3_bgrid_xdir / fv3_agrid_xdir modes produce a
+  measurably different NH state vs avg.  Closes silent-ignore
+  risk for the documented FV3-faithful corner fill modes
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
@@ -4014,6 +4018,62 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
+
+## Iteration 177 (2026-05-08): cube-vertex corner fill mode reaches NH
+
+### Goal
+
+The legoESM halo machinery has three documented cube-vertex fill
+modes (``"avg"`` default, ``"fv3_agrid_xdir"``,
+``"fv3_bgrid_xdir"``) set via the ``LEGOESM_CORNER_FILL`` env var
+or ``set_corner_fill_mode()``.  PE iter 10 documented the
+``fv3_bgrid_xdir`` mode as the cleanest win for HS C36
+(-41 % cube imprint, -15 % max\|v\| vs ``avg``).  But the NH path
+never had a test that the corner fill mode actually REACHES NH's
+transport / damping halos — a silent-ignore bug would only show
+up under deep visual inspection.
+
+This iter closes that gap with a regression test that the FV3
+modes produce a measurably different NH trajectory than ``avg``
+mode.
+
+### Implementation
+
+New file ``tests/test_corner_fill_mode_nh_iter177.py`` (3 tests,
+no production code change):
+
+1. ``test_fv3_bgrid_xdir_changes_nh_state`` — bit-for-bit
+   different NH state after 3 steps with ``fv3_bgrid_xdir`` vs
+   ``avg``.
+2. ``test_fv3_agrid_xdir_changes_nh_state`` — same for the
+   AGRID-XDir mode.
+3. ``test_corner_fill_mode_round_trip`` — set/get round-trip
+   for the three valid modes + ``ValueError`` on invalid input.
+
+### Implementation notes
+
+* The ``set_corner_fill_mode`` function manipulates a module-level
+  global (``halo._corner_fill_mode``) — tests save and restore
+  the global to avoid leaking state between tests.
+* Models are constructed AFTER setting the mode so any
+  module-level caching observes the right setting.
+* ``s.u.data.block_until_ready()`` forces JAX trace
+  finalisation before the mode is restored.
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_corner_fill_mode_nh_iter177.py
+    => 3 passed in 25.80 s
+
+### Status
+
+The PE-documented cube-vertex fill modes are now confirmed
+reachable from the NH path.  Future iterations may extend with
+quantitative cube-imprint reduction tests (NH-equivalent of PE
+iter 10's HS C36 metric).
 
 ## Iteration 176 (2026-05-08): NH FV3 toolkit transient damping
 
