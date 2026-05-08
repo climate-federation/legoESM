@@ -600,60 +600,28 @@ Key iterations:
   growth_factor < 5×.
 - Iter 269: NH counterpart of iter-268 (NH cube-imprint
   over-time).
-- Iter 270: NH AD-at-rest gradient with d4_bg=0.02 (mirror
-  of PE iter-261).  jax.grad finite + 10-iter ToC compaction.
-- Iter 271: NH stability sweep across ``n_acoustic_substeps``
-  values {2, 4, 8} with full d_con stack.  All 3 produce
-  finite u + theta_p over 10 NH steps.  Validates that the
-  NH acoustic substepping is robust to substep-count choice
-  with the iter-184 + d_con stack engaged.  3/3 pass in 38 s.
-- Iter 272: explicit direction test for iter-221 corner_div_
-  damp_d_con (PE).  iter-228 verifies bit-for-bit formula
-  (including sign); iter-272 adds the explicit mean-direction
-  sanity: with corner-div damping ON, mean(dT_d_con) > 0
-  (NET heating from KE→heat conversion).  Catches a global
-  sign error that the iter-228 per-cell test would also
-  catch but with less direct interpretation.  1/1 pass in
-  14 s.
-- Iter 273: explicit direction test for iter-223 PE
-  div_damp_d_con (mirror of iter-272).  Mean(dT_d_con) > 0
-  when iter-5 cell-centre div_damp is removing KE.  1/1 pass
-  in 13 s.
-- Iter 274: explicit direction test for iter-225 PE A_h
-  d_con (closes PE per-mechanism direction trio with
-  iter-272/273).  Mean(dT_d_con) > 0 when iter-57/58 A_h
-  Laplacian removes KE.  1/1 pass in 13 s.
-- Iter 275: NH counterparts of the iter-272/273/274 PE
-  direction trio.  Mean(dT_eq = Π_ref * dθ_p_d_con) > 0 for
-  each NH tendency-based d_con site (iter-222 corner-div,
-  iter-224 cell-centre div_damp, iter-226 A_h).  Closes the
-  NH per-mechanism direction-test trio.  3/3 pass in 39 s.
-  All 6 d_con sites (3 PE + 3 NH tendency-based) now have
-  explicit net-heating direction tests in addition to bit-
-  for-bit / linearity formula tests.
-- Iter 276: damp_v_d_con direction tests with FV3 production
-  nord_v=2 (del-6 vorticity damping).  iter-208/209 direction
-  tests use nord_v=1; FV3 production default is 2.  iter-276
-  adds explicit nord_v=2 cases for both PE and NH:
-  mean(dT_d_con) > 0 holds with the production nord.  2/2
-  pass in 23 s.
-- Iter 277: damp_w_d_con direction with FV3 production
-  nord_w=2 (mirror of iter-276 for w).  iter-203 direction
-  uses nord_w=1.  w-perturbation IC respecting w=0 BC, +
-  damp_w + damp_w_d_con: mean(dT_eq) > 0 with nord_w=2.
-  1/1 pass in 19 s.
-- Iter 278: scaling test for the iter-12 PE damp_v wiring.
-  Verifies the FV3-faithful damp coefficient formula
-  ``damp4 = (damp_v * da_min_c)^(nord_v + 1)`` by checking
-  that doubling damp_v scales the wind change by
-  ``2^(nord+1)``.  3 cases: nord_v=0/1/2 → factor=2/4/8.
-  Pins the EXACT exponent in the damp4 formula.  3/3 pass
-  in 23 s.
-- Iter 279: NH counterpart of iter-278 — damp_v scaling test
-  for NH.  Same 3 cases (nord=0/1/2 → 2x/4x/8x).  3/3 NH
-  tests pass in 50 s.  Both PE+NH iter-12/iter-169 damp_v
-  formulas now have the (nord+1) exponent pinned by
-  numerical regression.
+- Iter 270: NH AD-at-rest with d4_bg=0.02 (mirror PE
+  iter-261) + 10-iter ToC compaction.
+- Iter 271: NH stability sweep across n_acoustic_substeps
+  ∈ {2, 4, 8}; 3/3 finite.
+- Iter 272: PE corner_div d_con net-heating direction (mean
+  dT_d_con > 0).
+- Iter 273: PE div_damp d_con net-heating direction.
+- Iter 274: PE ah_d_con net-heating direction (closes PE
+  trio).
+- Iter 275: NH d_con direction trio (iter-222/224/226).
+  All 6 d_con sites have direction tests.
+- Iter 276: damp_v_d_con direction at FV3 production
+  nord_v=2 (PE+NH).
+- Iter 277: damp_w_d_con direction at FV3 production
+  nord_w=2 (NH).
+- Iter 278: PE damp_v scaling — damp4 = (damp_v *
+  da_min_c)^(nord+1) verified by 2x scaling at nord=0/1/2.
+- Iter 279: NH counterpart of iter-278 (damp_v scaling).
+- Iter 280: NH damp_w scaling — same (nord+1) exponent
+  formula verified for damp_w via 2x scaling at nord=0/1/2.
+  Closes the (damp_v + damp_w) × (PE + NH) × nord-scaling
+  matrix.  3/3 pass in 50 s.  Plus 10-iter ToC compaction.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
