@@ -617,6 +617,12 @@ Key iterations:
   >50%.  Validates that the iter-19 production toolkit's
   edge-suppression behavior holds at intermediate resolution.
   1/1 pass in 25 s.
+- Iter 265: NH counterpart of iter-264 — NH C16 cube-imprint
+  validation.  C16 NH with iter-184-style toolkit + iter-187
+  + iter-190 paths vs iter-168 nord=0 baseline.  v cell-
+  centre ratio within 50 % of baseline.  1/1 pass in 24 s.
+  PE+NH cube-imprint regression coverage now spans C8 / C16
+  / C36 (production) for both 3D paths.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
