@@ -608,6 +608,15 @@ Key iterations:
   θ_p bounds (|θ_p| < 100 K).  1/1 pass in 22 s.  Closes the
   PE/NH parity gap on multi-step production stability at C36
   with the full d_con stack.
+- Iter 264: cube-imprint reduction validation at C16
+  (intermediate between C8 tests and C36 production).
+  iter-217/253 cover C8; iter-254 covers C36.  iter-264 fills
+  the gap.  At C16 with iter-19 PRODUCTION toolkit (d4_bg=0.02
+  + nord=1 + a2b_zeta_corner) vs iter-168 nord=0 baseline,
+  the v_d edge_std/interior_std ratio must NOT amplify by
+  >50%.  Validates that the iter-19 production toolkit's
+  edge-suppression behavior holds at intermediate resolution.
+  1/1 pass in 25 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
