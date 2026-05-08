@@ -739,6 +739,13 @@ Key iterations:
   Combined with iter-303 (corner divergence), every
   divergence helper in the d_con cluster is now
   characterized as linear.  7/7 pass in 9.7 s.
+- Iter 317: AST config-default parity guard between PE and
+  NH for 12 shared d_con cluster knobs (corner_div_damp_*
+  d2_bg/dddmp/d4_bg/nord, damp_v/nord_v/damp_v_d_con,
+  corner_div_damp_d_con/div_damp_d_con/ah_d_con/delt_max,
+  use_fv3_a2b_zeta_corner, smagorinsky_cs/A_h).  Catches
+  silent default drift on one side without runtime
+  simulation.  5/5 pass in 0.3 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
