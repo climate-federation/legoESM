@@ -169,6 +169,15 @@ class CDGridCompressibleEulerConfig(NamedTuple):
     # ``_arakawa_lamb_gradient`` on single-device or SPMD backends.
     # Default False preserves baseline.  No effect unless ``div_damp_coeff > 0``.
     use_async_halo: bool = False
+    # FV3-style adaptive Smagorinsky A_h (FV3_3D iter 180).  Mirrors
+    # the PE iter 57-59 wiring in ``CDGridPrimitiveEquationConfig``.
+    # When > 0 AND ``A_h > 0``, an adaptive Smagorinsky coefficient
+    # (proportional to the local strain rate × dx²) is added to the
+    # static ``A_h`` value at each corner cell.  Reuses the existing
+    # ``legoesm.core._smagorinsky_visc.compute_smagorinsky_ah_3d``
+    # helper.  Default 0.0 preserves baseline; PE-tested useful range
+    # ~0.1-0.4 (iter 60).  No effect when ``A_h == 0``.
+    smagorinsky_cs: float = 0.0
 
 
 def cdgrid_compressible_euler_slow_tendencies(
@@ -390,8 +399,24 @@ def cdgrid_compressible_euler_slow_tendencies(
         _uv_d_lap_out = _laplacian_dgrid(_uv_d_lap_flat, cdgrid).reshape(
             n_face_vl, n_id_vl, n_jd_vl, nlev_vl, 2,
         )
-        du_d_dt = du_d_dt + config.A_h * _uv_d_lap_out[..., 0]
-        dv_d_dt = dv_d_dt + config.A_h * _uv_d_lap_out[..., 1]
+        # FV3_3D iter 180: optional Smagorinsky-style adaptive A_h
+        # added on top of the static coefficient.  Same wiring as
+        # PE iter 58.  When ``smagorinsky_cs > 0``, compute the
+        # per-cell adaptive field at corners via the existing
+        # ``compute_smagorinsky_ah_3d`` helper and combine.
+        if config.smagorinsky_cs > 0.0:
+            from legoesm.core._smagorinsky_visc import (
+                compute_smagorinsky_ah_3d,
+            )
+            _ah_smag_corner = compute_smagorinsky_ah_3d(
+                u_d, v_d, cdgrid, config.smagorinsky_cs,
+            )                                              # (6, n+1, n+1, nlev)
+            _ah_eff_corner = config.A_h + _ah_smag_corner
+            du_d_dt = du_d_dt + _ah_eff_corner * _uv_d_lap_out[..., 0]
+            dv_d_dt = dv_d_dt + _ah_eff_corner * _uv_d_lap_out[..., 1]
+        else:
+            du_d_dt = du_d_dt + config.A_h * _uv_d_lap_out[..., 0]
+            dv_d_dt = dv_d_dt + config.A_h * _uv_d_lap_out[..., 1]
 
     # FV3_3D iter 168: optional FV3-faithful B-grid corner-divergence
     # damping (FV3 d_sw5 sw_core.F90:1641-1822).  Direct port of the

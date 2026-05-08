@@ -145,6 +145,10 @@ Key iterations:
   Toolkit ON reduces edge_std/interior_std vs no-damping baseline.
   Most-direct quantitative validation of the FV3 toolkit's
   cube-imprint suppression purpose, modulo C8 wall-time constraints
+- Iter 180: port FV3 Smagorinsky-adaptive A_h to NH (mirror of
+  PE iter 57-59); reuses compute_smagorinsky_ah_3d helper.
+  Adaptive A_h paired with iter-171's adaptive cell-centre
+  div_damp_dddmp completes the FV3 adaptive-damping toolkit on NH
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
@@ -4027,6 +4031,79 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
+
+## Iteration 180 (2026-05-08): port FV3 Smagorinsky-adaptive A_h to NH
+
+### Goal
+
+The PE path has FV3-style adaptive Smagorinsky A_h (PE iter 57-59):
+when ``smagorinsky_cs > 0`` AND ``A_h > 0``, an adaptive coefficient
+proportional to the local strain rate × dx² is added to the static
+``A_h``.  NH had only a constant ``A_h`` — no adaptive component.
+
+This iter ports the PE iter-58 wiring to NH, reusing the existing
+``compute_smagorinsky_ah_3d`` helper.
+
+### FV3 anchor
+
+- Lin 2004; FV3 Smagorinsky-style constant×strain×dx² formulation.
+- Helper: ``legoesm.core._smagorinsky_visc.compute_smagorinsky_ah_3d``
+  (already in production, used by PE path).
+
+### Implementation
+
+- File: ``src/legoesm/atmosphere/dynamics/compressible_euler_cdgrid.py``.
+- 1 new ``CDGridCompressibleEulerConfig`` field (default off):
+  ``smagorinsky_cs: float = 0.0``.
+- Modify the existing ``A_h > 0`` Laplacian block: when
+  ``smagorinsky_cs > 0`` ALSO, compute the adaptive coefficient
+  via ``compute_smagorinsky_ah_3d`` and add to the static A_h.
+- The Smagorinsky branch is gated INSIDE the ``A_h > 0`` block,
+  so when A_h is off the branch is unreachable (mirrors PE iter-58
+  semantics: Smagorinsky is added on TOP of A_h, not in place of).
+- Default ``smagorinsky_cs=0.0`` preserves baseline bit-for-bit.
+
+### Tests added
+
+New file ``tests/test_smagorinsky_ah_nh_iter180.py`` (5 tests):
+
+1. ``test_nh_smag_zero_is_baseline`` — Python-static gate guard.
+2. ``test_nh_smag_changes_winds_when_ah_positive`` — perturbation
+   response with smag=0.20 (PE-tested useful range).
+3. ``test_nh_smag_no_effect_when_ah_zero`` — Smagorinsky is gated
+   inside the A_h block; bit-for-bit baseline when A_h=0.
+4. ``test_nh_smag_differentiable`` — ``jax.grad`` flows through 5
+   steps with smag ON.  Note: Smagorinsky helper computes
+   ``sqrt(strain_mag)`` whose gradient is singular at zero strain;
+   test starts from a non-rest perturbed IC to avoid the
+   sqrt-at-zero singularity.  Documents this as a known limitation
+   for differentiable training touching the rest state.
+5. ``test_nh_smag_rest_state_smoke`` — 20 steps from rest stay
+   finite.  At rest, strain is exactly zero so Smagorinsky
+   contributes 0 to the tendency — but the FORWARD pass works
+   (only the gradient is singular).
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_smagorinsky_ah_nh_iter180.py
+    => 5 passed in 74.82 s
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_fv3_nh_toolkit_iter172.py
+    => 5 passed (iter-172 AST guard unchanged after iter-180
+       config addition)
+
+### Status
+
+Closes another PE-vs-NH FV3-fidelity gap: NH now has the same
+adaptive Smagorinsky A_h infrastructure as PE.  The
+``smagorinsky_cs`` field complements the iter-171
+``div_damp_dddmp`` (which is the cell-centre divergence-damping
+Smagorinsky) as the matched pair of FV3 adaptive damping
+coefficients.
 
 ## Iteration 179 (2026-05-08): NH-equivalent cube-imprint metric
 
