@@ -285,6 +285,16 @@ Key iterations:
   A_h > 0 produces SMALLER ``max|u|`` than A_h-only baseline.
   Parametrized over ``smag_cs`` in {0.1, 0.2, 0.4} (PE iter-60
   tested range).
+- Iter 200: direction-correctness test for the PE
+  ``T_diss_coeff`` velocity-dependent Laplacian dissipation of T.
+  Existing iter-182 tests verify wiring + AD-safety + state
+  changes when winds nonzero, but not direction.  T_diss adds
+  Laplacian DIFFUSION on T: ``dT/dt += T_diss_coeff * |v| * dx
+  * lap(T)``.  A sign-flipped wiring would AMPLIFY T variance
+  instead of damping.  iter 200 mirrors the
+  iter-174/175/195/198/199 pattern: sinusoidal T pattern + uniform
+  wind → T_diss > 0 reduces ``std(T - T_mean)`` more than baseline.
+  Parametrized over T_diss_coeff in {0.1, 0.3, 0.5}.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
