@@ -699,6 +699,15 @@ Key iterations:
   cap path now both pinned by regression guards — different
   proxy defaults (PE 200, NH 10) confirm separate plumbing.
   1/1 pass in 28 s.
+- Iter 298: PE iter-189 dt-proxy FALLBACK semantics
+  (complement of iter-296).  Direct
+  ``fv3_hydrostatic_tendencies`` calls WITHOUT ``dt_actual``
+  must read ``corner_div_damp_dt_proxy`` — confirmed by
+  measurable tendency difference between proxy=50 and
+  proxy=500.  Together iter-296/iter-298 form the complete
+  iter-189 contract: dt_actual present → real dt wins; dt_
+  actual absent → proxy wins.  Catches refactors that
+  silently hardcode one path.  1/1 pass in 18 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
