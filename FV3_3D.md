@@ -727,6 +727,14 @@ Key iterations:
   / c_pd``).  Tested at both 2D (6, n+1, n+1) and 3D shapes
   with c ∈ {-3.5, 0, 1, 1e-6, 1e6} and (α, β) ∈ {(1,1),
   (2,-3), (0.5,0.5), (-1,7)}.  9/9 pass in 0.3 s.
+- Iter 308: ``fv3_del6_vorticity_damping`` linearity in the
+  ``damp`` coefficient.  damp=0 → (du, dv) = 0 exactly across
+  nord ∈ {0, 1, 2}; damp=α*d → α × (du, dv) bit-for-bit
+  (rtol=1e-13) for α ∈ {-2.5, 0.5, 3.0, 1e-6}.  Pins the
+  scalar prefactor structure of the iter-12 (PE) /
+  iter-169 (NH) post-step damp_v helper — confirms damp4 =
+  (damp_v * da_min_c)^(nord+1) enters as a pure scalar
+  multiply on F(u, v, nord, cdgrid).  15/15 pass in 11 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
