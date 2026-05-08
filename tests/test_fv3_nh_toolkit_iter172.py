@@ -233,6 +233,9 @@ def test_nh_fv3_config_fields_ast_regression():
         # Added by iter-186 to extend the guard for the latest
         # config addition.
         "smagorinsky_cs": 0.0,
+        # iter-193 post-step damp_w + nord_w (FV3 d_sw1 port).
+        "damp_w": 0.0,
+        "nord_w": 2,
     }
 
     missing = []
@@ -302,9 +305,14 @@ def test_nh_fv3_call_sites_ast_regression():
         # iter-187 site; ``_interp_center_to_corner_a2b_ord4`` is
         # shared with iter-170 but its presence is required for
         # the smag_vort to use FV3-faithful 4th-order ζ_corner
-        # (sw_core.F90:1795).
-        ("_zeta_smag_corner = jax.vmap",
-         "_interp_center_to_corner_a2b_ord4"),
+        # (sw_core.F90:1795).  iter-190 changed the assignment from
+        # a local jax.vmap to ``= _zeta_a2b_ord4`` (precomputed at
+        # the iter-170 site for dedup), so the marker shifted.
+        ("_zeta_smag_corner =", "_interp_center_to_corner_a2b_ord4"),
+        # iter-193: post-step damp_w + nord_w (FV3 d_sw1 port,
+        # sw_core.F90:1080-1086).  Reuses the SW backbone
+        # ``_del6_vt_flux``.
+        ("self.config.damp_w > 0.0", "_del6_vt_flux"),
     ]
 
     missing = []

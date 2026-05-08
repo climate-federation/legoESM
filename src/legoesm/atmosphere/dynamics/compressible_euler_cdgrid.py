@@ -178,6 +178,25 @@ class CDGridCompressibleEulerConfig(NamedTuple):
     # helper.  Default 0.0 preserves baseline; PE-tested useful range
     # ~0.1-0.4 (iter 60).  No effect when ``A_h == 0``.
     smagorinsky_cs: float = 0.0
+    # FV3-faithful post-step del-(2*(nord_w+1)) damping for vertical
+    # velocity ``w`` (FV3_3D iter 193).  Faithful port of FV3
+    # ``sw_core.F90:1080-1086`` (in ``d_sw1``)::
+    #
+    #     damp4 = (damp_w * da_min_c) ** (nord_w + 1)
+    #     call del6_vt_flux(nord_w, ..., damp4, w, wk, fx2, fy2, ...)
+    #     dw = (fx2[i,j] - fx2[i+1,j] + fy2[i,j] - fy2[i,j+1]) * rarea
+    #     w += dw
+    #
+    # Reuses the SW backbone ``_del6_vt_flux`` from
+    # ``legoesm.core.fv3_del6_vt_flux``.  Applied ONCE per full
+    # timestep AFTER the split-explicit acoustic update (mirrors
+    # iter-169 ``damp_v`` post-step pattern).  Default 0.0 preserves
+    # baseline bit-for-bit (Python-static branch).  FV3 AM4 production
+    # default is ``damp_w=0.30 + nord_w=2`` (del-6).  Complementary to
+    # the legoESM-native ``hyperdiff_w_coeff`` biharmonic — users
+    # typically choose one mechanism, not both.
+    damp_w: float = 0.0
+    nord_w: int = 2
 
 
 def cdgrid_compressible_euler_slow_tendencies(
@@ -1012,6 +1031,54 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
             state_new = state_new._replace(
                 u=state_new.u.replace(data=u_cc_new + du_cc),
                 v=state_new.v.replace(data=v_cc_new + dv_cc),
+            )
+
+        # FV3_3D iter 193: optional post-step del-(2*(nord_w+1))
+        # damping of vertical velocity ``w``.  Faithful port of FV3
+        # ``sw_core.F90:1080-1086`` (``d_sw1``):
+        #     damp4 = (damp_w * da_min_c) ** (nord_w + 1)
+        #     call del6_vt_flux(nord_w, ..., damp4, w, ..., fx2, fy2, ...)
+        #     dw = (fx2[i,j] - fx2[i+1,j] + fy2[i,j] - fy2[i,j+1]) * rarea
+        #     w += dw
+        # Mirrors the iter-169 ``damp_v`` post-step pattern.  ``w`` in
+        # the NH path is on half-levels (shape ``(6, n, n, nlev+1)``);
+        # we vmap ``_del6_vt_flux`` over that axis.
+        if self.config.damp_w > 0.0:
+            from legoesm.core.fv3_del6_vt_flux import (
+                compute_del6_metrics, _del6_vt_flux,
+            )
+            del6_u_w, del6_v_w = compute_del6_metrics(self.cdgrid)
+            rarea_w = 1.0 / self.cdgrid.base.area    # (6, n, n)
+            da_min_c_w = jnp.min(self.cdgrid.area_corner)
+            damp_step_w = (self.config.damp_w * da_min_c_w) ** (
+                self.config.nord_w + 1
+            )
+
+            def _per_half_level(w_2d):
+                # w_2d shape (6, n, n).  Returns (fx2, fy2).
+                return _del6_vt_flux(
+                    w_2d, damp=damp_step_w, nord=self.config.nord_w,
+                    del6_u=del6_u_w, del6_v=del6_v_w, rarea=rarea_w,
+                    cdgrid=self.cdgrid,
+                )
+
+            # Vmap over half-level axis.  state_new.w has shape
+            # ``(6, n, n, nlev_half)``; move axis to leading.
+            w_new_data = state_new.w.data        # (6, n, n, nlev_half)
+            w_t = jnp.moveaxis(w_new_data, -1, 0)
+            fx2_t, fy2_t = jax.vmap(_per_half_level)(w_t)
+            # Reconstruct shapes per FV3 convention:
+            #   fx2 shape (n+1, n)  → fx2[west] - fx2[east]
+            #   fy2 shape (n, n+1)  → fy2[south] - fy2[north]
+            # Both fluxes already include the ``damp`` factor (per
+            # iter-937 in `_del6_vt_flux`).
+            dw_t = (
+                fx2_t[..., :-1, :] - fx2_t[..., 1:, :]
+                + fy2_t[..., :-1] - fy2_t[..., 1:]
+            ) * rarea_w[None, ...]               # (nlev_half, 6, n, n)
+            dw = jnp.moveaxis(dw_t, 0, -1)       # (6, n, n, nlev_half)
+            state_new = state_new._replace(
+                w=state_new.w.replace(data=w_new_data + dw),
             )
 
         if self.config.fix_mass:

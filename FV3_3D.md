@@ -222,6 +222,15 @@ Key iterations:
   shared between iter-170 and iter-187 sites under ``jax.grad``
   at the rest state.  Future AD hazards in the smag_vort branch
   now caught by the umbrella regression.
+- Iter 193: port FV3 ``damp_w + nord_w`` post-step del-(2*(nord_w+1))
+  damping for vertical velocity ``w`` to the NH 3D path.  Faithful
+  port of FV3 ``sw_core.F90:1080-1086`` (in ``d_sw1``).  Reuses the
+  SW backbone ``_del6_vt_flux`` (already imported via iter-169 for
+  ``damp_v``).  Mirrors the iter-169 post-step pattern but applied
+  to a scalar (w) instead of the (u, v) vector.  Default-off; FV3
+  AM4 production default is ``damp_w=0.30 + nord_w=2``.
+  Complementary to the legoESM-native ``hyperdiff_w_coeff``
+  biharmonic.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
@@ -4104,6 +4113,106 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
+
+## Iteration 193 (2026-05-08): port FV3 damp_w + nord_w to NH path
+
+### Goal
+
+Port FV3 ``sw_core.F90:1080-1086`` (in ``d_sw1``) — del-(2*(nord_w+1))
+post-step damping for vertical velocity ``w`` — to the NH 3D path.
+Mirrors the iter-169 ``damp_v`` post-step pattern but applied to a
+scalar (w) instead of the (u, v) vector.
+
+### FV3 anchor
+
+::
+
+    damp4 = (damp_w * gridstruct%da_min_c) ** (nord_w + 1)
+    call del6_vt_flux(nord_w, npx, npy, damp4, w, wk, fx2, fy2,
+                      gridstruct, bd)
+    do j=js,je
+       do i=is,ie
+          dw(i,j) = (fx2(i,j) - fx2(i+1,j) + fy2(i,j) - fy2(i,j+1))
+                    * rarea(i,j)
+          ...
+          w(i,j) = w(i,j) + dw(i,j)
+       enddo
+    enddo
+
+FV3 AM4 production default: ``damp_w = 0.30, nord_w = 2`` (del-6).
+
+### Plan
+
+1.  Add ``damp_w: float = 0.0`` and ``nord_w: int = 2`` to
+    ``CDGridCompressibleEulerConfig`` (default off).
+2.  Insert post-step block in ``CDGridCompressibleEulerModel._step_jitted``
+    after the iter-169 ``damp_v`` close (~line 1015) and before
+    ``fix_mass``.  Reuse the SW backbone helpers
+    ``compute_del6_metrics`` and ``_del6_vt_flux`` from
+    ``legoesm.core.fv3_del6_vt_flux`` (already imported by iter-169).
+3.  ``w`` lives on half-levels (shape ``(6, n, n, nlev+1)``); vmap
+    ``_del6_vt_flux`` over that axis.
+4.  Compute ``dw`` from the discrete divergence of ``(fx2, fy2)``::
+
+        dw = (fx2[i,j] - fx2[i+1,j] + fy2[i,j] - fy2[i,j+1]) * rarea
+
+    apply ``w_new = w + dw``.
+
+### Tests
+
+New file ``tests/test_damp_w_nh_iter193.py`` (5 tests, no production-
+only test):
+
+1. ``test_nh_damp_w_zero_is_baseline`` — Python-static gate guard.
+2. ``test_nh_damp_w_changes_w`` — measurable change on perturbed w.
+3. ``test_nh_damp_w_differentiable`` — ``jax.grad`` finite through
+   5 steps with damp_w active.
+4. ``test_nh_damp_w_rest_state_smoke`` — 20 steps from rest stay
+   finite.
+5. ``test_nh_damp_w_nord2_fv3_default_finite`` — del-6 path runs
+   with FV3 AM4 default ``damp_w=0.30 + nord_w=2``.
+
+Plus extends ``tests/test_fv3_nh_toolkit_iter172.py`` AST guard:
+
+* config fields: ``damp_w: 0.0, nord_w: 2``.
+* call site: ``self.config.damp_w > 0.0`` → ``_del6_vt_flux`` helper.
+
+(The iter-187 marker substring also tightened from
+``"_zeta_smag_corner = jax.vmap"`` to just ``"_zeta_smag_corner ="``
+since iter-190 changed the assignment to ``= _zeta_a2b_ord4``.)
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_damp_w_nh_iter193.py
+    => 5 passed in 68.91 s
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_fv3_nh_toolkit_iter172.py
+    => 5 passed in 82.34 s (iter-187 substring fix + iter-193 guard
+       added)
+
+### Status
+
+The NH path now has FV3-faithful w damping via ``damp_w + nord_w``
+in addition to the legoESM-native ``hyperdiff_w_coeff`` (generic
+biharmonic).  Users targeting full FV3 fidelity can use ``damp_w +
+nord_w`` (auto-scales with grid resolution via
+``(damp_w * da_min_c)^(nord_w+1)``); users on the legoESM default
+path continue using ``hyperdiff_w_coeff`` unchanged.
+
+### Why this iteration was meaningful
+
+This closes another PE-NH symmetry gap: PE has had several FV3
+damping mechanisms ported (corner_div_damp, damp_v,
+use_fv3_a2b_zeta_corner, smagorinsky, T_diss, smag_vort cap, dt
+plumbing).  NH had matched all of those except the d_sw1 ``damp_w``
+specifically for w.  iter-193 closes the gap with ~30 LOC reusing
+the existing SW backbone, default-off, with comprehensive test
+coverage including AD-at-rest and FV3 AM4 production-default
+finiteness.
 
 ## Iteration 192 (2026-05-08): extend iter-184/185 umbrellas to engage iter-187 + iter-190
 
