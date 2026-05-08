@@ -543,6 +543,16 @@ Key iterations:
   "future iteration" corner-div d_con is now ported (iter-221
   PE / iter-222 NH).  Catches refactors that drop or rename
   d_con knobs.  8/8 AST tests pass in 82 s.
+- Iter 236: extend the call-site AST guards in iter-188 PE and
+  iter-172 NH to cover the iter-218-226 wirings (gate
+  substring + helper symbol pairs).  PE: 5 new pairs (iter-208
+  damp_v_d_con, iter-218/219 delt_max, iter-221 corner-div
+  d_con, iter-223 div_damp d_con, iter-225 A_h d_con).  NH: 7
+  new pairs (iter-203 damp_w_d_con, iter-209 damp_v_d_con,
+  iter-218/219 delt_max, iter-222/224/226 d_con).  Catches
+  refactors that drop the wiring INSIDE the
+  ``if config.X > 0`` gate even when the field stays
+  declared.  8/8 AST tests pass in 82 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
