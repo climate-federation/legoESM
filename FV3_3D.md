@@ -3719,6 +3719,51 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
 
+## Iteration 64 (2026-05-07): combined-path multistep stability test
+
+### Goal
+
+iter 62 attempted to validate the combined ``LEGOESM_AH_SCALE=10 +
+LEGOESM_SMAG_CS=0.2`` setting at C72 30d but the run did not
+complete in the wall-time budget.  Cost-effective alternative: a
+unit-test-level multistep stability check at n=8 that exercises
+the iter-58 combined wiring path, addressing the missing
+multi-step coverage of the production-recommended combination.
+
+### What was missing
+
+``test_smagorinsky_cs_active_changes_winds`` (iter 58) only ran
+ONE step.  No multi-step integration test exercised the combined
+``A_h>0 + smagorinsky_cs>0`` path, leaving regression risk for
+the iter-58 corner/center wiring under repeated invocation.
+
+### Implementation
+
+Added ``test_smagorinsky_combined_with_ah_stable_multistep`` to
+``tests/test_div_damp_adaptive.py``:
+
+- Uses ``A_h=1e6`` + ``smagorinsky_cs=0.2`` (production-recommended
+  combination from iter-62).
+- Runs 20 steps at dt=200s on a perturbed Held-Suarez n=8 state.
+- Verifies all of u_d, v_d, T, p_s remain finite.
+- Bounds final ``max|u|`` to 5x the initial perturbation magnitude
+  (sanity check that combined damping does not let winds explode).
+
+### Result
+
+Test passes in 19 s.  Full ``test_div_damp_adaptive.py`` suite is
+now 18 tests (was 17), all passing in 2 m 13 s.
+
+### Status
+
+The iter-58 combined ``A_h + smagorinsky_cs`` wiring is now pinned
+as multi-step-stable in CI at n=8.  The iter-62 C72 30-day combined
+run is still TODO under quieter system load — the unit test
+exercises the wiring but does not characterise climate-relevant
+behaviour at production resolution.
+
+248 tests now pass (was 247).
+
 ## Iteration 62 (2026-05-07): partial validation — iter-33 reproduces
 
 ### Goal
