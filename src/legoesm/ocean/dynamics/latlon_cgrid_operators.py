@@ -502,7 +502,9 @@ def divergence_cgrid(
 
     # --- Zonal face length (meridional extent of u-face) ---
     if hasattr(grid, "dy_u") and grid.dlat == 0.0:
-        face_dy = grid.dy_u[:, 0:1]  # (n_lat, 1) — constant along lon
+        # Tripolar: use per-cell dy_u.  Take column 0 (uniform along lon
+        # for regular lat-lon; potentially variable for tripolar cap).
+        face_dy = grid.dy_u[:, 0]  # (n_lat,)
     else:
         face_dy = grid.radius * grid.dlat
 
@@ -510,9 +512,13 @@ def divergence_cgrid(
     if u.ndim == 2:
         u_east = u_eff[:, 1:]
         u_west = u_eff[:, :-1]
+        if hasattr(face_dy, 'ndim') and face_dy.ndim == 1:
+            face_dy = face_dy[:, jnp.newaxis]
     else:
         u_east = u_eff[:, 1:, :]
         u_west = u_eff[:, :-1, :]
+        if hasattr(face_dy, 'ndim') and face_dy.ndim == 1:
+            face_dy = face_dy[:, jnp.newaxis, jnp.newaxis]
 
     net_zonal = (u_east - u_west) * face_dy  # preserve arithmetic order
 
