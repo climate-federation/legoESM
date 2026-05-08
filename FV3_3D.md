@@ -507,6 +507,15 @@ Key iterations:
   IC at C8.  Catches sign errors that the per-site formula
   tests would miss in cross-cancellation, and validates energy
   conservation (KE→heat) at the aggregate.  1/1 pass in 21 s.
+- Iter 232: NH mirror of iter-231 aggregate direction test.
+  Verifies that the AGGREGATE NH d_con stack (5 knobs:
+  damp_v_d_con, damp_w_d_con, corner_div_damp_d_con,
+  div_damp_d_con, ah_d_con) ON simultaneously heats the column
+  more than OFF.  Strong (u, v, w) perturbation IC at C8 + 10
+  NH steps → ``mean(θ_p)_ON > mean(θ_p)_OFF``.  Catches sign
+  errors in any single NH d_con site that the iter-230
+  linearity tests cannot expose (linearity is preserved
+  regardless of sign).  1/1 pass in 22 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
