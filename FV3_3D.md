@@ -641,6 +641,15 @@ Key iterations:
   T-equivalent ΔT at each layer is bounded by sponge[k] * dt
   * delt_max.  Catches accidental factor swap or sign error
   in the iter-219 cap formula.  2/2 pass in 27 s.
+- Iter 268: cube-imprint metric OVER TIME for PE production
+  toolkit + d_con stack.  iter-242/244 multi-step stability
+  tests check max|u| / finiteness.  iter-254 imprint after
+  5 steps.  iter-268 ties them together: track imprint ratio
+  every 10 steps over 50 PE steps with full toolkit + d_con.
+  All sampled ratios stay in (0.1, 5.0) sanity bound +
+  growth_factor < 5x over 50 steps.  Catches slow-growth
+  edge-artifact accumulation that single-step / final-state
+  checks miss.  1/1 pass in 22 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
