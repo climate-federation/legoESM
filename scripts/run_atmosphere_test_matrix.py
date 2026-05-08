@@ -522,7 +522,12 @@ def _laplacian_visc_cube(n: int, frac: float = 0.05) -> float:
 _CFL_SAFETY_SHORT_TIME: float = 0.462
 """iter 66 calibration: preserves dt=200 at C72 (iter-33 reference)
 and reduces to 150.5 at C96.  Stable for ~10-15 days at C96 but
-NaNs at day 15 due to interior synoptic-scale eigenmode (iter 69)."""
+NaNs at day 15 due to interior synoptic-scale eigenmode (iter 69).
+
+Note (iter 120): the three safety constants form an approximate
+1 : 2/3 : 1/3 ratio (short_time → long_time → very_long_time),
+giving roughly 1× : 1.5× : 3× the eigenmode survival time at any
+given resolution per iter-85 1/dt scaling."""
 
 _CFL_SAFETY_LONG_TIME: float = 0.307
 """iter 70 calibration: dt=100 at C96 stable for 20 days.
