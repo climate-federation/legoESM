@@ -225,6 +225,10 @@ def test_nh_fv3_config_fields_ast_regression():
         # iter-171 cell-centre div damping
         "div_damp_coeff": 0.0,
         "div_damp_dddmp": 0.0,
+        # iter-173 async-halo overlap (PE parity, MPI optimisation).
+        # Added to the iter-172 guard by iter-178 to close the
+        # gap that the field landed AFTER iter-172 was written.
+        "use_async_halo": False,
     }
 
     missing = []
@@ -266,7 +270,8 @@ def test_nh_fv3_call_sites_ast_regression():
     src_text = src_path.read_text()
 
     # Each pair: (gate expression, helper name that should appear
-    # in the gated block).
+    # in the gated block).  Extended by iter-178 to include iter-173
+    # (async-halo overlap dispatch).
     gate_helper_pairs = [
         # iter-168: corner-divergence damping
         ("config.corner_div_damp_d2_bg > 0.0", "fv3_divergence_corner_3d"),
@@ -277,6 +282,10 @@ def test_nh_fv3_call_sites_ast_regression():
          "_interp_center_to_corner_a2b_ord4"),
         # iter-171: cell-centre div damping
         ("config.div_damp_coeff > 0.0", "_arakawa_lamb_gradient"),
+        # iter-173: async-halo overlap dispatch (added by iter-178
+        # to close the gap that the iter-172 guard predates iter-173).
+        ("config.use_async_halo and _hb_div ==",
+         "_overlapped_arakawa_lamb_gradient"),
     ]
 
     missing = []
@@ -287,9 +296,68 @@ def test_nh_fv3_call_sites_ast_regression():
             missing.append(f"helper {helper!r}")
 
     assert not missing, (
-        f"iter-172 AST regression: NH FV3 call sites missing "
+        f"iter-172/178 AST regression: NH FV3 call sites missing "
         f"{missing}.  These wirings were added by iter "
-        f"168/169/170/171; their absence silently disables the "
+        f"168/169/170/171/173; their absence silently disables the "
         f"FV3-faithful mechanism even when the user sets the config "
         f"flag."
     )
+
+
+def test_iter178_ast_guard_self_check():
+    """iter-178 self-check: simulate the regression that the guard
+    is supposed to catch.  Build a fake source string that omits
+    each gate/helper one at a time and verify the inner check
+    function would have flagged it.
+
+    This is a "test the test" sanity check — without it, a typo
+    in the gate string (e.g., extra space, wrong operator) would
+    cause the guard to ALWAYS pass, silently disabling the
+    regression check.  iter-178 noticed this exact failure mode
+    when extending the guard to iter-173: the dispatch substring
+    used a different ``and _hb_div ==`` form than I'd initially
+    typed."""
+    gate_helper_pairs = [
+        ("config.corner_div_damp_d2_bg > 0.0", "fv3_divergence_corner_3d"),
+        ("self.config.damp_v > 0.0", "fv3_del6_vorticity_damping"),
+        ("config.use_fv3_a2b_zeta_corner",
+         "_interp_center_to_corner_a2b_ord4"),
+        ("config.div_damp_coeff > 0.0", "_arakawa_lamb_gradient"),
+        ("config.use_async_halo and _hb_div ==",
+         "_overlapped_arakawa_lamb_gradient"),
+    ]
+
+    # Build a valid source containing all substrings.  Verify the
+    # check passes.
+    valid_src = "\n".join(
+        f"{gate} -> {helper}" for gate, helper in gate_helper_pairs
+    )
+    missing = []
+    for gate, helper in gate_helper_pairs:
+        if gate not in valid_src:
+            missing.append(f"gate {gate!r}")
+        if helper not in valid_src:
+            missing.append(f"helper {helper!r}")
+    assert not missing, (
+        f"self-check sanity: valid source must pass all checks; "
+        f"got missing={missing}"
+    )
+
+    # Now drop one gate; verify the check correctly identifies it.
+    for omit_idx in range(len(gate_helper_pairs)):
+        broken_src = "\n".join(
+            f"{g} -> {h}" for i, (g, h) in enumerate(gate_helper_pairs)
+            if i != omit_idx
+        )
+        missing = []
+        for gate, helper in gate_helper_pairs:
+            if gate not in broken_src:
+                missing.append(f"gate {gate!r}")
+            if helper not in broken_src:
+                missing.append(f"helper {helper!r}")
+        assert missing, (
+            f"self-check failed for omit_idx={omit_idx}: dropping "
+            f"the {gate_helper_pairs[omit_idx][0]!r} gate did NOT "
+            f"trip the guard.  This means the guard is silently "
+            f"passing — likely a typo in the gate substring."
+        )

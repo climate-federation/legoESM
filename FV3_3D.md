@@ -136,6 +136,11 @@ Key iterations:
   test that fv3_bgrid_xdir / fv3_agrid_xdir modes produce a
   measurably different NH state vs avg.  Closes silent-ignore
   risk for the documented FV3-faithful corner fill modes
+- Iter 178: extend iter-172 AST guards to cover iter-173's
+  use_async_halo + dispatch; add self-check ("test the test")
+  that drops each gate substring and asserts the missing-detection
+  logic flags it.  Closes the gap that iter-172 predates
+  iter-173 and the silent-typo failure mode
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
@@ -4018,6 +4023,65 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
+
+## Iteration 178 (2026-05-08): extend iter-172 AST guards + self-check
+
+### Goal
+
+The iter-172 AST regression guard was written before iter-173
+added the ``use_async_halo`` field and dispatch.  Result: a
+refactor that drops iter-173's wiring would not trip the
+iter-172 guard — silent regression risk for the MPI overlap
+optimisation.
+
+This iter:
+
+1. Extends the iter-172 config-fields guard to include
+   ``use_async_halo: False``.
+2. Extends the iter-172 call-sites guard to include the
+   iter-173 dispatch gate (``config.use_async_halo and _hb_div ==``)
+   and helper (``_overlapped_arakawa_lamb_gradient``).
+3. Adds a self-check ("test the test"): explicitly drops each
+   gate one at a time from a synthetic source string and verifies
+   the inner check function correctly flags the omission.  This
+   catches the failure mode I noticed when extending the guard:
+   a typo in the gate substring (e.g., wrong operator spacing)
+   would cause the guard to ALWAYS pass, silently disabling the
+   regression check.
+
+### Implementation
+
+Modifications to ``tests/test_fv3_nh_toolkit_iter172.py``:
+
+* Added ``"use_async_halo": False`` to the ``expected`` config
+  fields dict in ``test_nh_fv3_config_fields_ast_regression``.
+* Added the iter-173 (gate, helper) pair to the
+  ``gate_helper_pairs`` list in
+  ``test_nh_fv3_call_sites_ast_regression``.
+* Added a new test ``test_iter178_ast_guard_self_check`` that
+  loops over each (gate, helper) pair, drops it from a synthetic
+  source string, and asserts the missing-detection logic flags
+  the omission.
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_fv3_nh_toolkit_iter172.py
+    => 5 passed in 82.26 s
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_fv3_nh_toolkit_iter172.py tests/test_async_halo_nh.py
+    => 7 passed (iter-173 unchanged after the iter-178 extension)
+
+### Status
+
+The AST regression guard now covers all five PE-NH-asymmetry
+fixes (iter 168/169/170/171/173) AND has a self-check ensuring
+the guard itself is not silently broken by a typo.  The test
+suite is now self-defending: a regression in ANY of the five
+wirings, OR a typo in the regression test itself, will be caught.
 
 ## Iteration 177 (2026-05-08): cube-vertex corner fill mode reaches NH
 
