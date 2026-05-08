@@ -43,6 +43,10 @@ Key iterations:
 - Iter 84: 7-point Lessons learned synthesis
 - Iter 85: linear-in-1/dt eigenmode scaling, predicts dt=50 stable to day 45
 - Iter 86-87: auto threshold rationale + probe docstring tidy
+- Iter 88: ToC update for iter 79-87
+- Iter 89: regression guard for baroclinic cube path dt wiring
+- Iter 90: clarify _run_c96_smoke n parameterization
+- Iter 91: matrix --help epilog includes very_long_time + iter-81 auto
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
