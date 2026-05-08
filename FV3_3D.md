@@ -605,6 +605,18 @@ Key iterations:
   preserves bit-for-bit baseline at delt_max=0 across the
   entire d_con stack.  No new test file (housekeeping
   iteration).
+- Iter 248: stress test the delt_max cap with EXTREME damping
+  values.  Default tests use FV3 production (delt_max=1.0,
+  d_con=1.0) where the cap rarely engages.  iter-248 uses
+  100x d_con multipliers + tight delt_max=1e-5 to FORCE the
+  iter-239 aggregate cap to actively bound the per-step ΔT.
+  Tests: (1) cap engages — capped d_con max|ΔT| < uncapped
+  max|ΔT| at interior layers; (2) capped run remains stable
+  for 20 steps; (3) extreme d_con multipliers produce >5x
+  more heat than normal (1x) — confirms the test is non-
+  vacuous.  2/2 pass in 27 s.  Validates that the cap
+  mechanism actually works under the extreme transients it
+  was designed to bound.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
