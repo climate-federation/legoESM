@@ -2239,8 +2239,9 @@ class TestHeldSuarezDissipationImbalance:
             assert "long_time" in captured
 
     def test_matrix_help_documents_iter_env_vars(self):
-        """iter 73: matrix --help epilog must document the iter 33-72
-        env vars so users discover them without reading FV3_3D.md.
+        """iter 73 / iter 91: matrix --help epilog must document the
+        iter 33-91 env vars so users discover them without reading
+        FV3_3D.md.
         """
         epilog = M._ENV_VAR_EPILOG
         # iter 33/43: A_h scale.
@@ -2251,6 +2252,10 @@ class TestHeldSuarezDissipationImbalance:
         assert "auto" in epilog, (
             "iter 72 added 'auto' as the recommended mode; epilog must "
             "mention it"
+        )
+        # iter 80: very_long_time mode.
+        assert "very_long_time" in epilog, (
+            "iter 80 added very_long_time mode; epilog must mention it"
         )
         # iter 57-59: Smagorinsky.
         assert "LEGOESM_SMAG_CS" in epilog

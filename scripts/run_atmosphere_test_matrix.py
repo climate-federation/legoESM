@@ -6090,7 +6090,7 @@ def _walk_atmosphere_test_cases(output_base: Path) -> list[Path]:
 # ===========================================================================
 
 _ENV_VAR_EPILOG = """\
-Environment variables (FV3_3D investigation, iter 33-72):
+Environment variables (FV3_3D investigation, iter 33-91):
 
   LEGOESM_AH_SCALE              Multiply default A_h on cube HS path
                                 (iter 33).  Auto-applies per-resolution
@@ -6100,19 +6100,26 @@ Environment variables (FV3_3D investigation, iter 33-72):
                                 out.
 
   LEGOESM_HS_CUBE_DT_CFL        Opt-in CFL-aware dt for cube hydrostatic
-                                paths (iter 66/71/72).  Values:
+                                paths (iter 66/71/72/80/81).  Values:
                                   0/false/off    pre-iter-66 default
                                                  (dt=200 always)
                                   1/short_time   iter-66 (preserves
                                                  iter-33 C72 ref;
-                                                 dt=150.5 at C96)
-                                  long_time      iter-70 (more
-                                                 conservative;
-                                                 dt=133 at C72,
-                                                 dt=100 at C96)
+                                                 dt=150.5 at C96; NaN
+                                                 day 15 at C96 30d)
+                                  long_time      iter-70 (dt=133 at
+                                                 C72, dt=100 at C96;
+                                                 NaN day 22.5 at C96
+                                                 30d per iter 79)
+                                  very_long_time iter-80 (dt=67 at
+                                                 C72, dt=50 at C96;
+                                                 30d empirical
+                                                 validation pending)
                                   auto           RECOMMENDED: short_time
-                                                 at n<96, long_time at
-                                                 n>=96.
+                                                 at n<96, very_long_time
+                                                 at n>=96 (iter 81
+                                                 promoted from long_time
+                                                 after iter-79 finding).
 
   LEGOESM_SMAG_CS               Smagorinsky-style adaptive A_h (iter
                                 57-59).  Default 0.0 (off).  Typical
