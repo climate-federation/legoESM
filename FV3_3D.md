@@ -672,6 +672,13 @@ Key iterations:
   finite, dtype verified jnp.float32, max|u_d| < 100 m/s
   bound holds.  1/1 pass in 14.6 s.  Catches any slow-growth
   numerical instability that 5-step iter-286 wouldn't see.
+- Iter 289: 50-step NH d_con float32 long-run stability (NH
+  counterpart of iter-288).  NH iter-184 toolkit + 5-knob
+  d_con stack + delt_max=1.0 at default float32, 50 steps ×
+  dt=10.  All fields (u, v, w, theta_prime, rho_prime)
+  finite, dtype jnp.float32, max|u|<100 + max|w|<50 bounds
+  hold.  1/1 pass in 18.2 s.  PE+NH d_con stacks both
+  float32-stable for 50-step long-run scenarios.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
