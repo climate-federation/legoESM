@@ -460,8 +460,9 @@ STILL OPEN (post-iter-99 stretch goals):
 - C72 ``dt=100`` re-test under quieter system load (would
   validate the iter-72 long_time mode at C72, currently changes
   iter-33 reference numbers).  iter-135 ran a 1-day smoke at
-  C72 dt=100: stable, max|u|=0.633, 34s wall.  Confirms dt=100
-  doesn't break stability at C72; full 30-day not done.
+  C72 dt=100: stable, max|u|=0.633, 34s wall.  iter-136 extended
+  to 5 days: stable, max|u|=3.20, 97s wall.  Confirms dt=100
+  produces realistic HS spinup at C72; full 30-day not done.
 - 200-day climate-relevant integration (matrix HS uses 30 days
   quick spin-up).
 - C144 30-day empirical validation.  iter-85 1/dt scaling
