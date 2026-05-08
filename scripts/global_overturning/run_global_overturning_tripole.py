@@ -271,12 +271,23 @@ def main():
     )
 
     # Apply ORCA bathymetry and land mask.
-    # Clamp H_bathy: upper bound is our z-coordinate range, lower bound
-    # is the first vertical level thickness (cells shallower than this
-    # would have near-zero layer thickness, causing division blow-up).
-    H_min = float(z_coord.dz_ref[0]) * 1.1  # 10% margin
     H_bathy_clamped = np.clip(H_bathy_raw, 0, config.H_max)
-    # Mask out cells shallower than H_min (treat as land)
+
+    # Southern polar cap: eORCA's extended grid has cells only ~2m wide
+    # near Antarctica.  Mask cells south of 75°S as land to avoid the
+    # southern polar singularity (the tripolar grid fixes the NORTH pole
+    # but the south pole still has converging meridians).
+    lat_deg_2d = np.asarray(geom.lat_T) * 180 / np.pi
+    south_cap_mask = lat_deg_2d < -75.0
+    n_south = int(np.sum(south_cap_mask & (land_mask_raw > 0)))
+    if n_south > 0:
+        print(f"  Southern polar cap: masking {n_south} cells south of 75°S")
+        H_bathy_clamped[south_cap_mask] = 0.0
+        land_mask_raw[south_cap_mask] = 0.0
+
+    # Mask out cells shallower than the first vertical level (near-zero
+    # layer thickness causes division blow-up).
+    H_min = float(z_coord.dz_ref[0]) * 1.1
     too_shallow = (H_bathy_clamped > 0) & (H_bathy_clamped < H_min)
     n_masked = int(np.sum(too_shallow))
     if n_masked > 0:
