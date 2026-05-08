@@ -12,6 +12,10 @@ Env vars:
     ITER65_DT        timestep in seconds (default 200.0)
     ITER65_N         cube face count (default 96)
 
+Diagnostic prints fire at i in (0, nsteps//4, nsteps//2,
+3*nsteps//4) plus a final RESULT line; if NaN appears at any
+diagnostic, the run halts early and reports step_blowup.
+
 Usage examples::
 
     # iter-65 1-day smoke at C96 dt=200 default
