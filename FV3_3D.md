@@ -639,6 +639,14 @@ Key iterations:
   2^(nord+1)x at nord=1/2.  2/2 NH pass in 55 s.  PE+NH
   d4_bg formula now has (nord+1) exponent pinned by
   numerical regression on both 3D paths.
+- Iter 284: precise test for the ``cosa_corner`` metric at
+  cube vertices.  At a cube vertex (where 3 panels meet at
+  60°), the angle between i and j tangents is exactly 60°,
+  so |cosa| = cos(60°) = 0.5.  iter-266 verified the looser
+  bound |cosa| ≤ 0.6; iter-284 pins the EXACT 0.5 value
+  within FP tolerance (rtol=1e-6, atol=1e-6).  Plus checks
+  the sign mix (4 corners per face have orientation-
+  dependent +0.5 and -0.5).  1/1 pass in 9 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
