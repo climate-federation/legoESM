@@ -198,7 +198,8 @@ class CDGridCompressibleEulerConfig(NamedTuple):
     damp_w: float = 0.0
     nord_w: int = 2
     # FV3-faithful KE→heat conversion for iter-193 ``damp_w`` damping
-    # (FV3_3D iter 203).  Faithful port of FV3 ``sw_core.F90:1086``::
+    # (FV3_3D iter 203, refined in iter-207 with Π Exner factor).
+    # Faithful port of FV3 ``sw_core.F90:1086``::
     #
     #     heat_source = -d_con * dw * (w + 0.5*dw)
     #
@@ -208,12 +209,18 @@ class CDGridCompressibleEulerConfig(NamedTuple):
     # heat_source is POSITIVE — the lost KE is deposited as heat in
     # the temperature field, preserving total energy.
     #
-    # Conversion to ``θ_p`` (NH prognostic temperature) uses the
-    # simplified ``Δθ_p = heat / c_pd`` formula (Π Exner factor
-    # approximated as 1.0; valid in the lower troposphere, error
-    # ~30 % aloft where Π drops to 0.5).  Heat is computed at
-    # half-levels (where ``w`` and ``dw`` live) and averaged to
-    # full-levels for the ``θ_p`` increment.
+    # Conversion to ``θ_p`` (NH prognostic temperature):
+    # ``ΔE_internal = c_pd * ΔT``; ``θ = T / Π``; therefore
+    # ``Δθ ≈ ΔT / Π = heat / (c_pd * Π)``.  iter-207 uses
+    # ``exner_ref`` (Π_ref at full levels from ``HeightCoordinate``)
+    # for the conversion — FV3-faithful within the reference-state
+    # linearization.  Π_ref is exact at p=p_ref (surface) and drops
+    # to ~0.5 at the model top, so this refinement gives the right
+    # heat partition across the column (vs the iter-203 Π=1
+    # approximation that under-heated aloft).
+    #
+    # Heat is computed at half-levels (where ``w`` and ``dw`` live)
+    # and averaged to full-levels for the ``θ_p`` increment.
     #
     # Default 0.0 preserves baseline bit-for-bit (Python-static
     # gate).  FV3 production default is ``d_con = 1.0``.  Active
@@ -1122,7 +1129,18 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
                 heat_full = 0.5 * (
                     heat_half[..., :-1] + heat_half[..., 1:]
                 )                                  # (6, n, n, nlev)
-                dtheta_p = heat_full / constants.c_pd
+                # iter-207: divide by Π_ref (exner_ref from
+                # height_coord) in addition to c_pd, so ``Δθ ≈ ΔT/Π``
+                # is FV3-faithful within the reference-state
+                # linearization.  exner_ref is shape (nlev,);
+                # broadcast to (6, n, n, nlev) by adding three
+                # leading singleton axes.
+                _exner_ref_broadcast = self.height_coord.exner_ref[
+                    None, None, None, :
+                ]
+                dtheta_p = heat_full / (
+                    constants.c_pd * _exner_ref_broadcast
+                )
                 state_new = state_new._replace(
                     w=state_new.w.replace(data=w_new_data + dw),
                     theta_prime=state_new.theta_prime.replace(

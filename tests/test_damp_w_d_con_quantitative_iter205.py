@@ -177,8 +177,10 @@ def test_damp_w_d_con_heat_matches_formula(small_nh_state_with_w):
     heat_half = -1.0 * dw * (w_after_acoustic + 0.5 * dw)
     # Average half-level heat to full-levels.
     heat_full = 0.5 * (heat_half[..., :-1] + heat_half[..., 1:])
-    # Convert to θ_p increment.
-    expected_dtheta_p = heat_full / constants.c_pd
+    # iter-207: convert to θ_p increment using the Π Exner factor
+    # (exner_ref from height_coord) — Δθ = heat / (c_pd * Π).
+    exner_ref = height_coord.exner_ref[None, None, None, :]
+    expected_dtheta_p = heat_full / (constants.c_pd * exner_ref)
 
     # Cross-check: confirm dw is non-trivial (test sanity).
     max_dw = float(jnp.max(jnp.abs(dw)))

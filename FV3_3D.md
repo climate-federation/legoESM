@@ -347,6 +347,14 @@ Key iterations:
   v-imprint metric — but cross-coupling through buoyancy → w →
   acoustic → wind could in principle disrupt the toolkit, so
   explicit regression coverage is warranted.
+- Iter 207: refine iter-203 d_con heat formula with the Π Exner
+  factor.  iter-203 used the simplified ``Δθ_p = heat / c_pd``
+  (Π=1 approximation, ~30 % under-heating aloft).  iter-207
+  divides by ``c_pd * exner_ref`` (using ``HeightCoordinate.
+  exner_ref`` at full levels), giving ``Δθ ≈ ΔT/Π`` within the
+  reference-state linearization — FV3-faithful for the heat
+  partition across the column.  iter-205 quantitative test
+  updated to include the exner_ref factor in its expected formula.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
