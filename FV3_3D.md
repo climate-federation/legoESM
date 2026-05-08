@@ -477,6 +477,16 @@ Key iterations:
   bounded to dt*delt_max; NH k=0 |ΔT_eq| ≤ 0.1*dt*delt_max;
   NH k=1 cap is 0.5×, k≥2 is 1×.  Also retunes iter-218
   quantitative cap test to evaluate over interior layers only.
+- Iter 220: extend iter-184 NH and iter-185 PE umbrellas to ALSO
+  engage iter-218/219 ``delt_max=1.0`` (FV3 production default).
+  Validates that the sponge-aware cap composes safely with EVERY
+  other FV3 toolkit knob simultaneously and preserves AD-safety
+  at the rest state — the path most likely to expose new
+  jnp.clip / sqrt-at-zero hazards.  No new test file; in-place
+  config update.  Both umbrellas pass jax.grad through 5 NH /
+  3 PE steps with all knobs ON.  4/4 umbrella tests pass in
+  247 s (close to baseline 222 s, no significant regression
+  from the per-level cap mask).
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::

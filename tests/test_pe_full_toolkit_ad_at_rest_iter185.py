@@ -93,6 +93,13 @@ def _full_pe_toolkit_cfg():
         # iter-208 KE→heat conversion for damp_v (added to umbrella
         # in iter-210).  FV3 production default ``d_con = 1.0``.
         damp_v_d_con=1.0,
+        # iter-218/219 sponge-aware delt_max cap on dissipative
+        # heating (added to umbrella in iter-220).  FV3 production
+        # default 1.0 K/s; engages PE-specific top-2 sponge skip
+        # (k=0,1 uncapped) and interior k≥2 dt*delt_max cap.
+        # Verifies AD safety through jnp.clip with the per-level
+        # cap-mask.
+        delt_max=1.0,
         # Velocity-dependent T_diss (iter-182 fix)
         T_diss_coeff=0.05,
         # Disable conservation fixers to keep AD focused on the

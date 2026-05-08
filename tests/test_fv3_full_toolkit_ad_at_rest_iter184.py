@@ -115,6 +115,12 @@ def _full_toolkit_cfg():
         # iter-209 KE→heat conversion for damp_v (NH mirror of PE
         # iter-208).  Added to umbrella in iter-210.
         damp_v_d_con=1.0,
+        # iter-218/219 sponge-aware delt_max cap on dissipative
+        # heating (added to umbrella in iter-220).  FV3 production
+        # default 1.0 K/s; engages the per-level sponge_factor path
+        # (k=0 → 0.1×, k=1 → 0.5×, k≥2 → 1×) and verifies AD
+        # safety through jnp.clip with sponge masking.
+        delt_max=1.0,
     )
 
 
