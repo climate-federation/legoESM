@@ -28,6 +28,7 @@ Verified results (HS hybrid 30 days, ``ah_x10`` auto-applied):
 | C72 | 200       | stable               | 33   |
 | C96 | 50        | finite at day 30, max\|u\|=20.14 m/s | 99 |
 | C144| 33        | finite at day 1 smoke, max\|u\|=0.75 m/s | 102 |
+| C192| 25        | finite at day 1 smoke, max\|u\|=0.84 m/s | 103 |
 
 Stretch goals beyond original scope remain (C144/C192 empirical,
 200-day, nord>=2).  See [Open follow-ups](#open-follow-ups-iter-38-status-updated-through-iter-75).
@@ -3930,6 +3931,41 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
+
+## Iteration 103 (2026-05-07): C192 auto-mode 1-day smoke — stable
+
+### Goal
+
+Continue from iter-102 (C144 1-day stable) to validate
+auto-mode at the highest canonical resolution C192.
+
+### Result
+
+::
+
+    HS C192 hybrid 1 day, ah_x10 (auto), dt=25 (auto, very_long_time)
+    [iter65] RESULT: {
+        'finite': True,
+        'max_u': 0.838,
+        'max_v': 0.515,
+        'wall': 506 s,
+        'steps': 3456,
+    }
+
+C192 auto-mode is empirically stable for at least 1 day.
+
+### Status
+
+iter-72/81 auto-mode now validated end-to-end at all canonical
+resolutions::
+
+    C36 / C48 / C72: 30 days (iter 19/24/33/37)
+    C96:             30 days (iter 99)
+    C144:             1 day  (iter 102)
+    C192:             1 day  (iter 103)
+
+iter-85 1/dt prediction at C192: dt=25 should NaN at ~day 90,
+so 30-day stability is expected.  Empirical validation deferred.
 
 ## Iteration 102 (2026-05-07): C144 auto-mode 1-day smoke — stable
 
