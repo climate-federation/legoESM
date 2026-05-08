@@ -589,6 +589,19 @@ Key iterations:
   ON stays within 50 % of the iter-168 nord=0 baseline.
   Both PE and NH iter-187/190 paths now have cube-imprint
   regression coverage.  1/1 pass in 24 s.
+- Iter 254: cube-imprint diagnostic on a PE C36 production-
+  style run with the full d_con stack.  iter-217/253 cover
+  cube-imprint at C8 (small grid, fast); iter-245 covers PE
+  C36 stability; iter-254 ties both together.  C36 + iter-19
+  production toolkit + full d_con stack + delt_max=1.0,
+  integrated for 5 steps × dt=200 from HS init + small
+  perturbation IC.  Verifies imprint ratio stays in sanity
+  bound (0.1, 10.0) — no runaway edge artifact at the actual
+  production resolution.  Uses edge_width=4 (vs edge_width=2
+  at C8) to match C36's larger panel size.  1/1 pass in
+  25 s.  Validates that the d_con stack composes with the
+  iter-19 production damping at production-grade resolution
+  WITHOUT introducing edge artifacts.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
