@@ -746,6 +746,12 @@ Key iterations:
   use_fv3_a2b_zeta_corner, smagorinsky_cs/A_h).  Catches
   silent default drift on one side without runtime
   simulation.  5/5 pass in 0.3 s.
+- Iter 318: AST guard for NH-only knob defaults (damp_w,
+  nord_w, damp_w_d_con).  damp_w/damp_w_d_con default to 0
+  (off-baseline contract); nord_w defaults to 2 (FV3
+  production).  Catches accidental rename/removal of fields
+  that iter-203/258/275/277/280 runtime tests depend on.
+  4/4 pass in 0.3 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
