@@ -6121,9 +6121,10 @@ Environment variables (FV3_3D investigation, iter 33-91):
                                                  max|u|=20.14)
                                   auto           RECOMMENDED: short_time
                                                  at n<96, very_long_time
-                                                 at n>=96 (iter 81
-                                                 promoted from long_time
-                                                 after iter-79 finding).
+                                                 at n>=96.  Validated
+                                                 30d at C96 (iter 99);
+                                                 1d smoke at C144/C192
+                                                 (iter 102/103).
 
   LEGOESM_SMAG_CS               Smagorinsky-style adaptive A_h (iter
                                 57-59).  Default 0.0 (off).  Typical
