@@ -545,6 +545,15 @@ Key iterations:
   the aggregate-cap block while leaving per-mechanism
   ``config.X_d_con > 0`` checks intact.  8/8 AST tests pass
   in 82 s.
+- Iter 242: 50-step multi-step stability test for the full
+  PE+NH toolkit + d_con stack at FV3 production defaults
+  (delt_max=1.0 + all 5 d_con knobs at 1.0 + corner-div nord=1
+  + cell-centre div_damp + damp_v + damp_w + A_h smag_cs=0.20).
+  Catches slow-growth instabilities that single-step iter-184/
+  185 / 3-5-step iter-237 + 10-step iter-231/232 tests don't
+  expose.  All fields remain finite + bounded growth
+  (max|u| < 100 m/s) at step 50 from random IC.  PE 50 × dt=100
+  + NH 50 × dt=10 both pass in 33 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
