@@ -3771,6 +3771,43 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
 
+## Iteration 73 (2026-05-07): document env vars in matrix --help
+
+### Goal
+
+Iter 33-72 added many env vars (``LEGOESM_AH_SCALE``,
+``LEGOESM_HS_CUBE_DT_CFL``, ``LEGOESM_SMAG_CS``,
+``LEGOESM_CDD_D2BG``, ``LEGOESM_CDD_D4BG``, ``LEGOESM_CDD_NORD``,
+``LEGOESM_DAMP_V``).  These are documented in ``FV3_3D.md`` but
+NOT in the matrix's ``--help`` output.  A user running
+``--help`` sees no mention of any of these, leading to silent
+defaults and missed stability fixes.
+
+### Implementation
+
+Added a multi-line ``epilog`` to the matrix's argparse with one
+section per env var, including:
+- iter reference for each
+- recommended values
+- gotchas (e.g., "smag insufficient alone at C72+")
+- pointer to ``FV3_3D.md`` for detailed history
+
+### Verification
+
+Ran ``run_atmosphere_test_matrix.py --help``: the env vars
+section appears at the bottom of the help output with all 6
+documented env vars formatted as a table.
+
+### Status
+
+User-facing discoverability of the iter 33-72 env-var system is
+now solved.  ``--help`` is the natural first stop for new users;
+they will now see ``LEGOESM_HS_CUBE_DT_CFL=auto`` recommended
+inline.
+
+259 tests still pass; no test changes (this iter is
+documentation only).
+
 ## Iteration 72 (2026-05-07): auto-mode + 30d C96 long_time validation
 
 ### Goal

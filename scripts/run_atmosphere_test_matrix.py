@@ -6060,9 +6060,58 @@ def _walk_atmosphere_test_cases(output_base: Path) -> list[Path]:
 # CLI
 # ===========================================================================
 
+_ENV_VAR_EPILOG = """\
+Environment variables (FV3_3D investigation, iter 33-72):
+
+  LEGOESM_AH_SCALE              Multiply default A_h on cube HS path
+                                (iter 33).  Auto-applies per-resolution
+                                (iter 43): 1.0 at C36, 2.0 at C48, 10.0
+                                at C72+.  Override with explicit float
+                                or set LEGOESM_AH_AUTO_DISABLE=1 to opt
+                                out.
+
+  LEGOESM_HS_CUBE_DT_CFL        Opt-in CFL-aware dt for cube hydrostatic
+                                paths (iter 66/71/72).  Values:
+                                  0/false/off    pre-iter-66 default
+                                                 (dt=200 always)
+                                  1/short_time   iter-66 (preserves
+                                                 iter-33 C72 ref;
+                                                 dt=150.5 at C96)
+                                  long_time      iter-70 (more
+                                                 conservative;
+                                                 dt=133 at C72,
+                                                 dt=100 at C96)
+                                  auto           RECOMMENDED: short_time
+                                                 at n<96, long_time at
+                                                 n>=96.
+
+  LEGOESM_SMAG_CS               Smagorinsky-style adaptive A_h (iter
+                                57-59).  Default 0.0 (off).  Typical
+                                0.1-0.4.  Note iter 60: insufficient
+                                alone for C72+ stability — use as
+                                COMPLEMENT to LEGOESM_AH_SCALE.
+
+  LEGOESM_CDD_D2BG              FV3 corner-divergence damping d2_bg
+                                coefficient (iter 16-25).  Typical
+                                0.001-0.005.  Reduces cube-vertex
+                                imprint at C36-C48.
+
+  LEGOESM_CDD_D4BG / NORD       FV3 nord>0 corner-divergence damping
+                                (iter 18).  d4_bg ~ 0.02 nord=1 typical
+                                at C36-C48.
+
+  LEGOESM_DAMP_V                FV3 vorticity damping (iter 13).
+                                Typical 0.30 to opt in at C36.
+
+See FV3_3D.md for the full investigation log and per-resolution
+recommended settings.
+"""
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="Atmosphere test matrix for legoESM dynamical cores.",
+        epilog=_ENV_VAR_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument(
         "--only", type=str, default="all",
