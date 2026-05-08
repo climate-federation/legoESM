@@ -667,6 +667,16 @@ Key iterations:
   using ``dt_actual=...`` keyword break, but positional
   callers continue to work).  2/2 pass in 0.3 s.  Plus
   10-iter ToC compaction (iters 290-299).
+- Iter 301: ``a2b_ord4`` 4th-order A→B corner interpolation
+  helper preserves constants exactly.  4-point Lagrange
+  weights satisfy b1+b2 = a1+a2 = 0.5 → constant input
+  reproduces at corners (rtol=1e-14).  Tested across c ∈
+  {-3.5, 0, 1, 1e-6, 1e6} and resolutions {C4, C8, C16,
+  C36}.  Holds even at panel edges where halo-2 cross-panel
+  exchange operates (constants are rotation-invariant).
+  Pins the most basic interpolation correctness invariant
+  for the helper used by iter-170 (NH zeta_corner) and
+  iter-187 (smag_vort cap).  9/9 pass in 38 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
