@@ -69,6 +69,13 @@ Key iterations:
 - Iter 89: regression guard for baroclinic cube path dt wiring
 - Iter 90: clarify _run_c96_smoke n parameterization
 - Iter 91: matrix --help epilog includes very_long_time + iter-81 auto
+- Iter 92-94: small refinements + AST guards
+- Iter 95: C96 dt=50 PASSES iter-79 day-22.5 mark
+- Iter 96-98: doc propagation of iter-95 confirmation
+- Iter 99: 🎉 C96 dt=50 30-DAY FINITE (max|u|=20.14, 1755s wall)
+- Iter 100-101: closeout cleanup + Final state summary
+- Iter 102: C144 1-day smoke stable
+- Iter 103: C192 1-day smoke stable
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
