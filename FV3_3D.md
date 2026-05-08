@@ -160,6 +160,10 @@ Key iterations:
   gradient singularity (same iter-181/182 double-where pattern).
   iter-962 SW W2 sentinel preserved bit-for-bit; AD through SW
   rest state with adaptive Smagorinsky now works
+- Iter 184: umbrella AD-at-rest regression for the full NH toolkit
+  (all 5 iter-168/169/170/171/180 knobs ON simultaneously).
+  Catches any future helper that introduces a new sqrt-at-zero
+  or other AD-hazard in the NH AD-critical path
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
@@ -4042,6 +4046,55 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
+
+## Iteration 184 (2026-05-08): NH full-toolkit AD-at-rest umbrella regression
+
+### Goal
+
+iter 181/182/183 fixed three sqrt-at-zero gradient hazards
+(Smagorinsky helper, PE T_diss wind_speed, SW d_sw5 smag_vort).
+Each iter added a focused test for ITS specific helper, but no
+test exercises ``jax.grad`` through the full NH toolkit at rest
+state simultaneously.
+
+This iter adds an umbrella regression: ``jax.grad`` through 5 NH
+steps with ALL FIVE iter-168/169/170/171/180 knobs ON at rest
+state.  The umbrella catches future AD hazards introduced by
+helpers that are added to the NH path beyond the iter-181/182/183
+fixes.
+
+### Implementation
+
+New file ``tests/test_fv3_full_toolkit_ad_at_rest_iter184.py``
+(2 tests, no production code change):
+
+1. ``test_full_nh_toolkit_grad_at_rest`` — every NH FV3 knob ON
+   simultaneously (corner_div_damp + damp_v + a2b zeta + cell-
+   centre div_damp + Smagorinsky A_h), 5 steps from EXACTLY rest
+   state, ``jax.grad`` w.r.t. ``theta_prime`` is finite.
+   Differentiating w.r.t. ``theta_prime`` (not winds) avoids
+   perturbing winds away from zero, so the sqrt-at-zero hazards
+   in iter-181/182/183 are genuinely exercised.
+2. ``test_full_nh_toolkit_grad_at_perturbed`` — sanity that the
+   rest-state path is the challenging case and the perturbed
+   path is a regular regression.
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_fv3_full_toolkit_ad_at_rest_iter184.py
+    => 2 passed in 144.38 s
+
+### Status
+
+The iter-181/182/183 differentiability fixes now have an umbrella
+regression test that covers the "all toolkit knobs ON, rest state"
+combination.  Future iterations adding new mechanisms to the NH
+tendency function should rerun this test to catch any AD-hazard
+regression at the integration level (in addition to the focused
+per-helper tests added in iter-181/182/183).
 
 ## Iteration 183 (2026-05-08): fix smag_vort sqrt(0) in fv3_sw_core
 
