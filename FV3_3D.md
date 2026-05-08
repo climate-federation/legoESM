@@ -526,6 +526,12 @@ Key iterations:
   should be essentially unchanged from d_con's direct effect.
   Catches d_con-induced edge artifacts that would propagate
   through PGF feedback.  1/1 pass in 21 s.
+- Iter 234: NH mirror of iter-233 cube-imprint d_con regression.
+  Verifies the full NH d_con stack (5 knobs ON) does not
+  amplify v cube-imprint ratio more than 50% relative to OFF
+  baseline.  Same edge_width=2 metric as iter-179.  Catches
+  d_con-induced edge artifacts on the NH path.  1/1 pass in
+  22 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
