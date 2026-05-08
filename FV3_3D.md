@@ -705,6 +705,15 @@ Key iterations:
   pinning the FV3 ``min(0.20, ...)`` saturation behaviour
   that protects against runaway damping at intense
   divergence.  3/3 pass in 0.4 s.
+- Iter 313: corner-div damp ``d2_bg`` floor (orthogonal to
+  iter-312's 0.20 ceiling).  Full coefficient
+  ``damp = max(d2_bg, min(0.20, dddmp*|dt|*sqrt(delpc²+ζ²)))``.
+  When cap < d2_bg, damp = d2_bg exactly (array-equal).
+  When cap > d2_bg AND cap < 0.20, damp = cap (rtol=1e-13).
+  At threshold (cap = d2_bg by construction), damp = d2_bg.
+  Pins the FV3 sw_core.F90:1801 ``max(d2_bg, ...)`` operator
+  that ensures non-zero baseline damping at quiescent flow.
+  3/3 pass in 0.4 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
