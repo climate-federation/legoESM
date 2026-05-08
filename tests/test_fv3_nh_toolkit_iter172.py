@@ -229,6 +229,10 @@ def test_nh_fv3_config_fields_ast_regression():
         # Added to the iter-172 guard by iter-178 to close the
         # gap that the field landed AFTER iter-172 was written.
         "use_async_halo": False,
+        # iter-180 Smagorinsky-adaptive A_h (PE iter 57-58 parity).
+        # Added by iter-186 to extend the guard for the latest
+        # config addition.
+        "smagorinsky_cs": 0.0,
     }
 
     missing = []
@@ -286,6 +290,12 @@ def test_nh_fv3_call_sites_ast_regression():
         # to close the gap that the iter-172 guard predates iter-173).
         ("config.use_async_halo and _hb_div ==",
          "_overlapped_arakawa_lamb_gradient"),
+        # iter-180: Smagorinsky-adaptive A_h dispatch (added by
+        # iter-186 to extend the guard).  When ``smagorinsky_cs > 0``
+        # AND ``A_h > 0``, the adaptive coefficient is computed via
+        # the existing helper.  Both gates required since
+        # Smagorinsky is gated INSIDE the ``A_h > 0`` block.
+        ("config.smagorinsky_cs > 0.0", "compute_smagorinsky_ah_3d"),
     ]
 
     missing = []
@@ -325,6 +335,7 @@ def test_iter178_ast_guard_self_check():
         ("config.div_damp_coeff > 0.0", "_arakawa_lamb_gradient"),
         ("config.use_async_halo and _hb_div ==",
          "_overlapped_arakawa_lamb_gradient"),
+        ("config.smagorinsky_cs > 0.0", "compute_smagorinsky_ah_3d"),
     ]
 
     # Build a valid source containing all substrings.  Verify the

@@ -168,6 +168,10 @@ Key iterations:
   regression for the full PE toolkit (8 PE damping knobs ON
   simultaneously, including T_diss_coeff that iter-182 fixed).
   Both 3D paths now have integration-level AD-hazard guards
+- Iter 186: extend iter-172/178 AST guards to cover iter-180's
+  smagorinsky_cs field and compute_smagorinsky_ah_3d dispatch.
+  Self-check loop also extended.  Closes silent-regression risk
+  for the most recent NH config addition
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
@@ -4050,6 +4054,45 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
+
+## Iteration 186 (2026-05-08): extend AST guards for iter-180 smagorinsky_cs
+
+### Goal
+
+The iter-172 AST guard was extended by iter-178 to cover iter-173
+(``use_async_halo``).  But iter-180 added another NH config field
+(``smagorinsky_cs``) and a dispatch (``compute_smagorinsky_ah_3d``)
+which are NOT yet covered.  A regression that drops iter-180's
+wiring would still pass the iter-172/178 guard.
+
+This iter extends the guard to cover iter-180 as well.
+
+### Implementation
+
+Modifications to ``tests/test_fv3_nh_toolkit_iter172.py``:
+
+* Added ``"smagorinsky_cs": 0.0`` to the config-fields ``expected``
+  dict in ``test_nh_fv3_config_fields_ast_regression``.
+* Added the iter-180 (gate, helper) pair
+  ``("config.smagorinsky_cs > 0.0", "compute_smagorinsky_ah_3d")``
+  to ``test_nh_fv3_call_sites_ast_regression``.
+* Same pair added to the iter-178 self-check loop so the "test
+  the test" coverage extends to the new gate.
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_fv3_nh_toolkit_iter172.py
+    => 5 passed in 82.10 s
+
+### Status
+
+The AST regression guard now covers all six PE-NH-asymmetry
+fixes (iter 168/169/170/171/173/180) AND has a self-check
+(iter 178) ensuring the guard isn't silently broken by a typo.
+Coverage extends with each new field-+-dispatch addition.
 
 ## Iteration 185 (2026-05-08): PE full-toolkit AD-at-rest umbrella regression
 
