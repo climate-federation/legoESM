@@ -283,19 +283,33 @@ Or via env vars (matrix sets ``A_h`` from ``LEGOESM_AH_SCALE``)::
   preserved (when LEGOESM_AH_SCALE=1, LEGOESM_CDD_*=0), so existing
   trained weights remain valid.
 
-### Open follow-ups (iter 38+)
+### Open follow-ups (iter 38+, status updated through iter 75)
 
-- Finer A_h calibration at C48 (ah_x1.5, ah_x3) and C72 (ah_x5,
-  ah_x7, ah_x15).
-- C96 and C192 stability + A_h calibration.
-- Substantive nord >= 2 fidelity restructure (halo'd intermediate
-  divg_d arrays, vector corner fill at nt > 0).
-- ``dt = 100 s`` re-test at C72 under quieter system load.
-- 200-day climate-relevant integration verification.
-- Smagorinsky-style adaptive ``A_h = c * dx² * |D|`` to auto-scale
-  with resolution.
-- Corrected ``_laplacian_visc_cube_v2`` heuristic with the
-  empirically observed scaling pattern.
+DONE (iter 39-75):
+- ✅ ``_laplacian_visc_cube_v2`` heuristic (iter 39): 3-point
+  empirical calibration + log-linear extrapolation.
+- ✅ Smagorinsky-style adaptive ``A_h`` (iter 57-59):
+  ``compute_smagorinsky_ah_{2d,3d}`` + ``LEGOESM_SMAG_CS`` env var.
+  Note iter 60: insufficient as standalone fix; works as
+  complement.
+- ✅ C96 stability (iter 65-72): empirical sweep, CFL-aware ``dt``
+  helper with short_time/long_time/auto modes,
+  ``LEGOESM_HS_CUBE_DT_CFL=auto`` recommended.
+- ✅ Finer A_h calibration at C48 (iter 37 sweet spot ah_x2 = 6.12e+06).
+
+STILL OPEN:
+- C72 ``dt=100`` re-test under quieter system load (would
+  validate the iter-72 long_time mode at C72, currently changes
+  iter-33 reference numbers).
+- 200-day climate-relevant integration (matrix HS uses 30 days
+  quick spin-up).
+- C144 / C192 empirical stability validation (extrapolated only).
+- Substantive ``nord >= 2`` fidelity restructure (halo'd
+  intermediate ``divg_d`` arrays, vector corner fill at nt > 0)
+  — iter 32 found the C72 mode is interior, NOT cube-vertex, so
+  this is lower priority than originally thought.
+- Cube long-time integration with combined Smagorinsky + ah_x10
+  + auto dt at C96+ (iter 70 tested at 20 days; 30+ pending).
 
 ---
 
