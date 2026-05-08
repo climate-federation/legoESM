@@ -702,6 +702,14 @@ Key iterations:
   full nord>=1 corner-div damping pipeline (delpc + lap^k)
   as a linear operator on (u, v) — strong structural
   correctness for the iter-187 smag_vort cap path.
+- Iter 305: ``fv3_corner_laplacian_iteration`` zeros
+  constants (strictly stronger than iter-304's lap(0) = 0).
+  At c ∈ {-3.5, 1, 1e-6, 1e6} and resolutions {C4, C8, C16},
+  lap(c-field) = 0 exactly (array-equal).  Pins constants-
+  in-kernel property of the discrete Laplacian — gradient
+  of a constant is 0 by construction, including the cube-
+  vertex corner-removal terms (uc/vc = 0 propagates).
+  12/12 pass in 26 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
