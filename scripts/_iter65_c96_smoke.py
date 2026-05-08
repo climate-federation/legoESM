@@ -30,7 +30,12 @@ jax.config.update("jax_enable_x64", True)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
-def _run_c96_smoke(days: float = 1.0, ah_scale: float = 10.0) -> dict:
+def _run_c96_smoke(
+    days: float = 1.0,
+    ah_scale: float = 10.0,
+    smag_cs: float = 0.0,
+    n: int = 96,
+) -> dict:
     """Run HS C96 for ``days`` and return a diagnostic dict."""
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
@@ -43,7 +48,6 @@ def _run_c96_smoke(days: float = 1.0, ah_scale: float = 10.0) -> dict:
     )
     import run_atmosphere_test_matrix as M
 
-    n = 96
     nlev = M.DEFAULT_NLEV
     grid = create_cubed_sphere(n)
     sigma = M._create_vertical(nlev, "hybrid")
@@ -55,7 +59,8 @@ def _run_c96_smoke(days: float = 1.0, ah_scale: float = 10.0) -> dict:
 
     print(
         f"[iter65] n={n} nlev={nlev} hd={hd:.3e} dd={dd:.3e} "
-        f"ah_base={ah_base:.3e} ah_scale={ah_scale} ah={ah:.3e}",
+        f"ah_base={ah_base:.3e} ah_scale={ah_scale} ah={ah:.3e} "
+        f"smag_cs={smag_cs}",
         flush=True,
     )
 
@@ -63,6 +68,7 @@ def _run_c96_smoke(days: float = 1.0, ah_scale: float = 10.0) -> dict:
     config = CDGridPrimitiveEquationConfig(
         hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
         div_damp_coeff=dd, A_h=ah,
+        smagorinsky_cs=smag_cs,
         use_conservation_fixer=True, fix_mass=True,
     )
     model = CDGridPrimitiveEquationModel(grid, sigma, config)
@@ -112,5 +118,9 @@ def _run_c96_smoke(days: float = 1.0, ah_scale: float = 10.0) -> dict:
 if __name__ == "__main__":
     days = float(os.environ.get("ITER65_DAYS", "1.0"))
     scale = float(os.environ.get("ITER65_AH_SCALE", "10.0"))
-    res = _run_c96_smoke(days=days, ah_scale=scale)
+    smag_cs = float(os.environ.get("ITER65_SMAG_CS", "0.0"))
+    n_cube = int(os.environ.get("ITER65_N", "96"))
+    res = _run_c96_smoke(
+        days=days, ah_scale=scale, smag_cs=smag_cs, n=n_cube,
+    )
     print(f"\n[iter65] RESULT: {res}", flush=True)

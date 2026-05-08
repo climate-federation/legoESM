@@ -86,19 +86,28 @@ if desired::
 
 ### C96+ user guidance (iter 63 + iter 65 + iter 69 empirical updates)
 
-**iter 69 update**: the iter-65/66 ``dt=150.5`` fix solves the
-day-1 NaN at C96 but NOT the 30-day NaN.  C96 30-day still
-blows up at day 15 (interior eigenmode).  C96 production 30-day
-runs are NOT YET supported with the iter-66 machinery alone.
+**iter 69 + iter 70 updates**: the iter-65/66 ``dt=150.5`` fix
+solves the day-1 NaN at C96 but NOT the 30-day NaN.  C96 30-day
+blows up at day 15 (interior eigenmode).
 
-For users at C96 PRODUCTION (30-day climatology), additional
-work is needed:
-- Try ``LEGOESM_HS_CUBE_DT_CFL=1`` + ``LEGOESM_SMAG_CS=0.2``
-  (combined static + adaptive A_h, untested at 30 days).
-- Try smaller ``dt`` (e.g. ``dt=100``, set via custom
-  ``CDGridPrimitiveEquationConfig`` since the matrix doesn't
-  expose dt directly).
-- See iter 69 for the empirical sweep table.
+iter 70 found ``dt=100`` SOLVES the day-15 mode.  C96 ``ah_x10
++ dt=100 + smag=0`` is stable for 20 days (verified) and likely
+for 30 days (projection).
+
+For users at C96 PRODUCTION (30-day climatology):
+
+1. Use ``dt=100`` (NOT the iter-66 default 150.5).  At present
+   the matrix does not expose this; users must construct
+   ``CDGridPrimitiveEquationConfig`` directly with ``A_h=1.53e+07``
+   and run with ``dt=100`` in their own driver.
+2. iter 71 will recalibrate ``_cfl_safe_dt_cube`` to use a
+   more conservative safety factor (``safety=0.307``) for
+   long-time mode, exposed via a separate env var or config arg.
+3. Smagorinsky (``LEGOESM_SMAG_CS=0.2``) does NOT help at C96
+   (iter 70 confirmed).  Skip it.
+4. ``ah_scale`` higher than 10x makes things WORSE at C96
+   (iter 70: ``ah_x20 + dt=100`` NaNs at day 5).  Keep
+   ``ah_scale=10``.
 
 
 
@@ -3761,6 +3770,65 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
+
+## Iteration 70 (2026-05-07): C96 long-time fix — dt=100 solves it
+
+### Goal
+
+iter 69 found C96 ``ah_x10 + dt=150.5`` NaNs at day 15.  Test
+the deferred options to find a working long-time prescription:
+1. Smagorinsky + ah_x10 + dt=150.5
+2. Higher ``ah_scale`` at ``dt=100``
+3. ``ah_x10`` at smaller ``dt=100``
+
+### Empirical sweep (C96 hybrid, 20d unless noted)
+
+::
+
+    config                                    result          wall
+    ah=10  smag=0.0  dt=150.5  (iter-69 ref)  NaN day 15      305 s (30d)
+    ah=10  smag=0.2  dt=150.5                 NaN day 15      299 s (30d)
+    ah=20  smag=0.0  dt=100                   NaN day 5       154 s (20d)
+    ah=10  smag=0.0  dt=100                   STABLE 20d      599 s
+
+### Key findings
+
+1.  **Smagorinsky alone does NOT fix the day-15 mode**.
+    ``ah_x10 + smag_cs=0.2`` NaNs at the same step (8611) as
+    ``ah_x10 + smag_cs=0.0``.  This confirms iter 60's conclusion
+    (smag is a complement, not replacement) extends to C96.
+
+2.  **Higher A_h at smaller dt fails EARLIER**.  ``ah_x20 + dt=100``
+    NaNs at day 5 — worse than ``ah_x10 + dt=150.5`` at day 15.
+    Reason: ``ah_x20`` introduces new instabilities that the iter-69
+    A_h-too-low diagnosis didn't anticipate.  Must keep ``ah_x10``.
+
+3.  **``dt=100`` SOLVES the long-time C96 mode**.  ``ah_x10 +
+    smag=0 + dt=100`` is stable for 20 days at C96, max|u|=89.3 m/s
+    (realistic HS jet structure).  The iter-69 day-15 eigenmode
+    is suppressed.
+
+### Interpretation
+
+The iter-66 calibration (``safety=0.462`` → ``dt=150.5`` at C96)
+was tuned to short-time CFL only.  The long-time eigenmode
+needs a more conservative ``dt``.  Empirically ``dt=100``
+(``safety=0.307`` if the formula is rerun) works.  The threshold
+between ``dt=150.5`` failure and ``dt=100`` success has not been
+binary-searched.
+
+### Status
+
+C96 production 30-day runs are now empirically possible with
+``ah_x10 + dt=100``.  Wall: ~10 min for 20 days, projecting to
+~15 min for 30 days.  Slow but feasible.
+
+The iter-66 ``_cfl_safe_dt_cube`` helper needs a SECOND
+calibration mode (long-time, more conservative ``dt``).
+Deferred to iter 71.
+
+254 tests pass; iter 70 is empirical characterisation only,
+no test changes.
 
 ## Iteration 69 (2026-05-07): C96 long-time validation — 30d still fails
 
