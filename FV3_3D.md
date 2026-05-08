@@ -565,6 +565,16 @@ Key iterations:
   paths (corner-div, cell-centre div_damp, damp_v, damp_w,
   Smagorinsky-A_h) now converts KE to heat with d_con knobs
   (default off; FV3 production = 1.0).
+- Iter 227: extend iter-184 NH and iter-185 PE umbrellas to
+  ALSO engage all 3 new d_con knobs from iter 221-226
+  (corner_div_damp_d_con, div_damp_d_con, ah_d_con) at FV3
+  production value 1.0.  Validates that the FULL d_con stack
+  composes safely with every other FV3 toolkit knob at the rest
+  state — the AD-critical regime.  Both umbrellas pass jax.grad
+  finite through 5 NH / 3 PE steps with all knobs ON.  Single-
+  test verification: PE umbrella 57 s, NH umbrella 79 s.  No new
+  test files; in-place config update.  Closes the iter-220 setup
+  pattern: every d_con site is now under umbrella regression.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::

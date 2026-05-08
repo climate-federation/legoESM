@@ -100,6 +100,17 @@ def _full_pe_toolkit_cfg():
         # Verifies AD safety through jnp.clip with the per-level
         # cap-mask.
         delt_max=1.0,
+        # iter-221 corner-div damp d_con (added to umbrella in
+        # iter-227).  FV3 production default 1.0.  Adds heat
+        # tendency to dT_dt at cell centres.
+        corner_div_damp_d_con=1.0,
+        # iter-223 cell-centre div_damp d_con (added in iter-227).
+        div_damp_d_con=1.0,
+        # iter-225 Smagorinsky-A_h d_con (added in iter-227).
+        # Closes the LAST PE d_con asymmetry — every PE KE-removing
+        # mechanism (corner-div, cell-centre div_damp, damp_v, A_h)
+        # now contributes to dT_dt simultaneously.
+        ah_d_con=1.0,
         # Velocity-dependent T_diss (iter-182 fix)
         T_diss_coeff=0.05,
         # Disable conservation fixers to keep AD focused on the

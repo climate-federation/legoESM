@@ -121,6 +121,17 @@ def _full_toolkit_cfg():
         # (k=0 → 0.1×, k=1 → 0.5×, k≥2 → 1×) and verifies AD
         # safety through jnp.clip with sponge masking.
         delt_max=1.0,
+        # iter-222 corner-div damp d_con (added to umbrella in
+        # iter-227).  FV3 production default 1.0.  Adds heat
+        # tendency to dθ_p_dt via the iter-207 Π_ref refinement.
+        corner_div_damp_d_con=1.0,
+        # iter-224 cell-centre div_damp d_con (added in iter-227).
+        div_damp_d_con=1.0,
+        # iter-226 Smagorinsky-A_h d_con (added in iter-227).
+        # Closes the LAST d_con asymmetry — every NH KE-removing
+        # mechanism (corner-div, cell-centre div_damp, damp_v,
+        # damp_w, A_h) now contributes to dθ_p_dt simultaneously.
+        ah_d_con=1.0,
     )
 
 
