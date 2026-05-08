@@ -714,6 +714,15 @@ Key iterations:
   Pins the FV3 sw_core.F90:1801 ``max(d2_bg, ...)`` operator
   that ensures non-zero baseline damping at quiescent flow.
   3/3 pass in 0.4 s.
+- Iter 314: PE iter-218/219 sponge cap layer pattern.
+  Per-level cap array = [∞, ∞, delt_max, delt_max, ...]
+  (k=0, 1 uncapped; k>=2 capped).  Large values at k=0, 1
+  pass through ``jnp.clip`` unchanged regardless of
+  magnitude.  Values at k>=2 with magnitude > delt_max are
+  clipped to ±delt_max.  Within-cap values pass unchanged.
+  Pins the iter-218 PE sponge-skip-cap pattern (PE skips
+  cap entirely at k=0, 1) by helper-formula numerical
+  regression.  3/3 pass in 0.2 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
