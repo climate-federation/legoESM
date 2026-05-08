@@ -275,6 +275,16 @@ Key iterations:
   would not catch.  Also adds a nord=2 finiteness test on the
   divergent IC (complementing iter-187's perturbed-from-rest
   nord=2 test).
+- Iter 199: quantitative direction test for the iter-180
+  Smagorinsky-adaptive A_h on the NH path.  Existing iter-180
+  tests verify smag_cs > 0 CHANGES winds vs the baseline but not
+  the *direction*.  A sign-flipped Smagorinsky (subtracting
+  ``c_s * dx² * |D|`` instead of adding) would still pass
+  "changes-winds" but AMPLIFY winds at high-strain regions.
+  iter 199 adds a high-strain shear IC and asserts smag_cs > 0 +
+  A_h > 0 produces SMALLER ``max|u|`` than A_h-only baseline.
+  Parametrized over ``smag_cs`` in {0.1, 0.2, 0.4} (PE iter-60
+  tested range).
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
