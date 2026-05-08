@@ -153,6 +153,9 @@ Key iterations:
   singularity at zero strain via JAX double-where trick.  Forward
   pass bit-for-bit unchanged; backward pass finite at rest state.
   Closes the iter-180 known limitation; PE iter-58 also benefits
+- Iter 182: fix PE T_diss wind_speed = sqrt(u² + v²) sqrt(0)
+  gradient singularity (same iter-181 double-where pattern).
+  PE rest-state differentiability through T_diss now works
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
@@ -4035,6 +4038,70 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
+
+## Iteration 182 (2026-05-08): fix wind_speed sqrt(0) in PE T_diss
+
+### Goal
+
+iter 181 fixed the sqrt-at-zero singularity in
+``compute_smagorinsky_ah_2d``.  An audit pass found another
+instance in ``primitive_eq_cdgrid.py`` line 1005::
+
+    wind_speed = jnp.sqrt(u_cell**2 + v_cell**2)
+
+Used inside the velocity-dependent T-dissipation block
+(``T_diss_coeff > 0``) to compute ``nu_T = T_diss_coeff *
+wind_speed * dx``.  At rest state (u_cell = v_cell = 0) the
+gradient ``d sqrt(0) / d u`` is undefined → NaN propagates into
+``dT_dt`` and breaks ``jax.grad`` through the PE rest state
+when T_diss is active.
+
+iter 182 applies the same JAX double-where trick from iter 181.
+
+### Implementation
+
+File: ``src/legoesm/atmosphere/dynamics/primitive_eq_cdgrid.py``,
+inside the ``if config.T_diss_coeff > 0:`` block.  Replaced the
+single-line ``jnp.sqrt(u_cell**2 + v_cell**2)`` with the same
+double-where pattern:
+
+* Forward pass: bit-for-bit unchanged at any nonzero wind;
+  exactly 0 at zero winds.
+* Backward pass: gradient finite (zero) at rest state instead
+  of NaN.
+
+### Tests added
+
+New file ``tests/test_T_diss_grad_at_zero_iter182.py`` (3 tests):
+
+1. ``test_pe_T_diss_off_baseline`` — Python-static gate guard
+   (T_diss_coeff=0.0 matches field-unset).
+2. ``test_pe_T_diss_changes_T_when_winds_nonzero`` — sanity that
+   the iter-182 fix didn't accidentally make T_diss inert.
+3. ``test_pe_T_diss_differentiable_at_rest`` — model-level
+   ``jax.grad`` through 3 PE steps with ``T_diss_coeff=0.05``
+   starting from EXACTLY the rest state.  Was NaN before iter 182.
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_T_diss_grad_at_zero_iter182.py
+    => 3 passed in 23.27 s
+
+    Regression suite (existing PE / NH tests):
+    => 33 passed (unchanged); 1 pre-existing 1-ULP FP-noise
+       failure in test_corner_div_damp_fv3_vector_fill_bit_for_bit_nord1
+       not caused by iter 182.
+
+### Status
+
+Two sqrt-at-zero gradient hazards now closed (iter 181 + iter 182).
+PE and NH paths both differentiable through rest state.  Future
+audits may surface more hazards in less-exercised helpers (e.g.,
+sina_u via ``sqrt(jnp.maximum(1 - cosa**2, _EPS))`` already uses
+the safer pattern).
 
 ## Iteration 181 (2026-05-08): fix Smagorinsky sqrt(0) gradient singularity
 

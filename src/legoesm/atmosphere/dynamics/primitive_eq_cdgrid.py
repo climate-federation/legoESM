@@ -1002,7 +1002,17 @@ def fv3_hydrostatic_tendencies(
     # call (i.e. one extra ∇² over T standalone).  When the (u, v, T)
     # batch did not run, fall back to a standalone ``∇²(T)``.
     if config.T_diss_coeff > 0:
-        wind_speed = jnp.sqrt(u_cell**2 + v_cell**2)
+        # FV3_3D iter 182: use the same JAX double-where trick as
+        # iter 181 to make the gradient through ``sqrt`` finite at
+        # zero strain (rest state).  Forward pass bit-for-bit
+        # unchanged: at any nonzero ``u² + v²`` the result is exactly
+        # ``sqrt(u²+v²)``; at zero exactly 0.  Backward pass:
+        # gradient finite (zero) at rest state instead of NaN.
+        _ws_sq = u_cell ** 2 + v_cell ** 2
+        _safe_ws_sq = jnp.where(_ws_sq > 0.0, _ws_sq, 1.0)
+        wind_speed = jnp.where(
+            _ws_sq > 0.0, jnp.sqrt(_safe_ws_sq), 0.0,
+        )
         dx_local = grid.dx[..., None]
         nu_T = config.T_diss_coeff * wind_speed * dx_local
         if _lap_flat is not None:
