@@ -3771,6 +3771,76 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
 
+## Iteration 71 (2026-05-07): expose iter-70 fix via long_time mode
+
+### Goal
+
+iter 70 found C96 ``ah_x10 + dt=100`` stable for 20 days
+(suppresses the iter-69 day-15 eigenmode).  iter 71 exposes
+this through the matrix's existing ``LEGOESM_HS_CUBE_DT_CFL``
+env var so users can opt in without writing a custom driver.
+
+### Implementation
+
+1.  Added ``mode`` argument to ``_cfl_safe_dt_cube``:
+    - ``mode="short_time"`` (default): ``safety=0.462`` (iter-66).
+    - ``mode="long_time"``: ``safety=0.307`` (iter-70).
+
+2.  Added ``_CFL_SAFETY_SHORT_TIME = 0.462`` and
+    ``_CFL_SAFETY_LONG_TIME = 0.307`` module-level constants
+    with docstrings explaining the calibration.
+
+3.  Extended ``_resolve_dt_cube`` to honor new env-var values:
+    - ``LEGOESM_HS_CUBE_DT_CFL=long_time`` (or ``longtime``):
+      iter-70 calibration (``dt=100`` at C96).
+    - ``LEGOESM_HS_CUBE_DT_CFL=short_time`` (alias for ``1``):
+      iter-66 calibration (``dt=150.5`` at C96).
+    - Invalid values raise ``ValueError`` (was: silent default).
+
+### Per-resolution table (long_time mode)
+
+::
+
+    C36: dt_cfl=265 -> capped to 200 (no change)
+    C48: dt_cfl=199 (just barely under cap)
+    C72: dt_cfl=133  CHANGES iter-33 reference (200 -> 133)
+    C96: dt_cfl=100  iter-70 long-time stable
+    C144: dt_cfl=66
+    C192: dt_cfl=50
+
+**Caveat**: long_time mode CHANGES C72 dt from 200 to 133.
+This will perturb the iter-33 reference numbers at C72.  Users
+who want short-time C72 reference behaviour should use
+``short_time`` mode (or unset the env var entirely).
+
+### Tests
+
+Added 4 tests:
+- ``test_cfl_safe_dt_cube_long_time_mode``: pins long_time
+  calibration at C36/C48/C72/C96/C144 and asserts
+  long_time < short_time at every n>=72.
+- ``test_cfl_safe_dt_cube_invalid_mode_raises``: ``ValueError``
+  for ``mode='invalid'`` or ``mode=''``.
+- ``test_resolve_dt_cube_long_time_env_var``: env var value
+  ``long_time`` (case-insensitive, also ``longtime``) selects
+  the iter-70 calibration end-to-end.
+- ``test_resolve_dt_cube_invalid_env_value_raises``:
+  unrecognised env values (e.g. ``foo``, ``2``) raise.
+
+26 tests in ``TestHeldSuarezDissipationImbalance`` pass (was 22).
+
+### Status
+
+Users can now run C96 long-time-stable HS via::
+
+    JAX_ENABLE_X64=1 LEGOESM_HS_CUBE_DT_CFL=long_time \
+      .venv/bin/python scripts/run_atmosphere_test_matrix.py \
+      --quick --only hs --grid cubed_sphere
+
+The matrix prints a notice indicating the dt reduction.
+
+258 tests now pass (was 254).
+
 ## Iteration 70 (2026-05-07): C96 long-time fix — dt=100 solves it
 
 ### Goal

@@ -2146,6 +2146,78 @@ class TestHeldSuarezDissipationImbalance:
             f">= dt(C96)={dt_c96:.1f}"
         )
 
+    def test_cfl_safe_dt_cube_long_time_mode(self):
+        """iter 71: long_time mode reduces dt further than short_time
+        for C96+ stability.  Pin the iter-70 calibration table.
+        """
+        # mode='long_time' -> safety=0.307
+        # C36/C48: still capped to 200 (large dx).
+        assert M._cfl_safe_dt_cube(36, mode="long_time") == 200.0
+        # C48 just barely fits (safety=0.307 * dx48 / 320 ~ 199.6).
+        dt_48_lt = M._cfl_safe_dt_cube(48, mode="long_time")
+        assert 195.0 < dt_48_lt <= 200.0
+        # C72: NOT 200 in long_time (CHANGE from short_time).
+        dt_72_lt = M._cfl_safe_dt_cube(72, mode="long_time")
+        assert 130.0 <= dt_72_lt <= 140.0, (
+            f"long_time at C72 should give dt ~ 133 (iter-70 calibration), "
+            f"got {dt_72_lt:.1f}"
+        )
+        # C96: dt ~ 100 (iter-70 empirical stable threshold).
+        dt_96_lt = M._cfl_safe_dt_cube(96, mode="long_time")
+        assert 95.0 <= dt_96_lt <= 105.0, (
+            f"long_time at C96 should give dt ~ 100 (iter-70 stable), "
+            f"got {dt_96_lt:.1f}"
+        )
+        # long_time is strictly more conservative than short_time.
+        for n in (72, 96, 144):
+            dt_st = M._cfl_safe_dt_cube(n, mode="short_time")
+            dt_lt = M._cfl_safe_dt_cube(n, mode="long_time")
+            assert dt_lt < dt_st, (
+                f"At C{n} long_time dt={dt_lt:.1f} must be smaller "
+                f"than short_time dt={dt_st:.1f}"
+            )
+
+    def test_cfl_safe_dt_cube_invalid_mode_raises(self):
+        """iter 71: ``mode`` must be ``short_time`` or ``long_time``.
+        """
+        import pytest
+        with pytest.raises(ValueError, match="mode must be"):
+            M._cfl_safe_dt_cube(72, mode="invalid")
+        with pytest.raises(ValueError, match="mode must be"):
+            M._cfl_safe_dt_cube(72, mode="")
+
+    def test_resolve_dt_cube_long_time_env_var(self, monkeypatch, capsys):
+        """iter 71: ``LEGOESM_HS_CUBE_DT_CFL=long_time`` selects the
+        iter-70 calibration.
+        """
+        for val in ("long_time", "longtime", "LONG_TIME", "Longtime"):
+            monkeypatch.setenv("LEGOESM_HS_CUBE_DT_CFL", val)
+            capsys.readouterr()  # clear
+            dt_72 = M._resolve_dt_cube(72)
+            captured = capsys.readouterr().out
+            assert 130.0 <= dt_72 <= 140.0, (
+                f"long_time at C72: expected ~133, got {dt_72:.1f}"
+            )
+            # Notice should print at C72 since dt < 200.
+            assert "[FV3_3D iter 66/71" in captured
+            assert "long_time" in captured
+            # C96: dt ~ 100.
+            capsys.readouterr()  # clear
+            dt_96 = M._resolve_dt_cube(96)
+            captured = capsys.readouterr().out
+            assert 95.0 <= dt_96 <= 105.0
+            assert "long_time" in captured
+
+    def test_resolve_dt_cube_invalid_env_value_raises(self, monkeypatch):
+        """iter 71: unrecognised env values (other than known truthy
+        / falsy / mode names) must raise rather than silently default.
+        """
+        import pytest
+        for bad in ("foo", "2", "short", "auto"):
+            monkeypatch.setenv("LEGOESM_HS_CUBE_DT_CFL", bad)
+            with pytest.raises(ValueError, match="unrecognised value"):
+                M._resolve_dt_cube(72)
+
     def test_cfl_safe_dt_cube_invalid_inputs_raise(self):
         """iter 67: ``_cfl_safe_dt_cube`` rejects bad inputs.
 

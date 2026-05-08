@@ -519,22 +519,41 @@ def _laplacian_visc_cube(n: int, frac: float = 0.05) -> float:
     return frac * c_gw * dx
 
 
+_CFL_SAFETY_SHORT_TIME: float = 0.462
+"""iter 66 calibration: preserves dt=200 at C72 (iter-33 reference)
+and reduces to 150.5 at C96.  Stable for ~10-15 days at C96 but
+NaNs at day 15 due to interior synoptic-scale eigenmode (iter 69)."""
+
+_CFL_SAFETY_LONG_TIME: float = 0.307
+"""iter 70 calibration: dt=100 at C96 stable for 20 days (and
+likely 30+).  More conservative than short_time so suppresses the
+iter-69 day-15 eigenmode.  CHANGES C72 dt from 200 to 133 (does
+NOT preserve iter-33 reference)."""
+
+
 def _cfl_safe_dt_cube(
     n: int,
     base_dt: float = 200.0,
     c_max: float = 320.0,
-    safety: float = 0.462,
+    safety: float | None = None,
+    mode: str = "short_time",
 ) -> float:
-    """iter 65/66: CFL-aware ``dt`` for cubed-sphere HS path.
+    """iter 65/66/70: CFL-aware ``dt`` for cubed-sphere HS path.
 
     Returns ``min(base_dt, safety * dx_face_center / c_max)``.
 
-    The default safety factor 0.462 is calibrated to:
-    -   Preserve ``dt=200`` at C72 (iter-33 reference setting):
-        ``0.462 * (pi*R/(2*72)) / 320 = 200.6 -> capped to 200``.
-    -   Reduce to ``dt=150`` at C96 (iter-65 empirical stability
-        threshold; ``dt=160`` NaNs at 6 h, ``dt=150`` survives):
-        ``0.462 * (pi*R/(2*96)) / 320 = 150.5 -> 150``.
+    ``mode`` selects the calibration profile:
+
+    -   ``"short_time"`` (default): ``safety=0.462``.  Preserves
+        ``dt=200`` at C72 (iter-33 reference).  ``dt=150.5`` at C96
+        is stable for ~10 days but NaNs at day 15 (iter 69).
+    -   ``"long_time"``: ``safety=0.307``.  More conservative.
+        ``dt=100`` at C96 is stable for 20+ days (iter 70).
+        CHANGES ``dt`` at C72 from 200 to 133 — does NOT preserve
+        iter-33 reference.
+
+    The ``safety`` argument, when explicitly provided as a float,
+    overrides ``mode``.
 
     Computation::
 
@@ -546,7 +565,9 @@ def _cfl_safe_dt_cube(
     ``c_max ~ 320 m/s`` for jet-stream + gravity-wave combination
     rather than the 850 m/s sound speed).
 
-    Per-resolution table (default args)::
+    Per-resolution tables:
+
+    ``mode="short_time"`` (iter 66)::
 
         C36: dt_cfl=399 -> capped to 200
         C48: dt_cfl=300 -> capped to 200
@@ -554,17 +575,26 @@ def _cfl_safe_dt_cube(
         C96: dt_cfl=150 -> 150 (iter-65 empirical threshold)
         C144: dt_cfl=100 -> 100
 
+    ``mode="long_time"`` (iter 70)::
+
+        C36: dt_cfl=265 -> capped to 200
+        C48: dt_cfl=199 -> 199
+        C72: dt_cfl=133 -> 133  (CHANGES iter-33 reference)
+        C96: dt_cfl=100 -> 100  (iter-70 long-time stable)
+        C144: dt_cfl=66 -> 66
+
     This helper does NOT auto-apply.  The matrix HS / baroclinic
-    paths only call this helper when ``LEGOESM_HS_CUBE_DT_CFL=1``
-    is set (iter-66 opt-in to preserve all pre-iter-66 reference
-    timings; default behavior is unchanged).
+    paths only call this helper when ``LEGOESM_HS_CUBE_DT_CFL`` is
+    truthy.  ``LEGOESM_HS_CUBE_DT_CFL=long_time`` selects the
+    long-time mode (iter 71).
 
     Raises
     ------
     ValueError
         If ``n <= 0`` (gnomonic projection requires positive cube
-        face count) or ``c_max <= 0`` (would give negative or
-        infinite dt).  iter-67 self-review.
+        face count), ``c_max <= 0`` (would give negative or
+        infinite dt), or ``mode`` is not in
+        ``{"short_time", "long_time"}``.
     """
     import math
     from legoesm import constants
@@ -578,6 +608,16 @@ def _cfl_safe_dt_cube(
             f"_cfl_safe_dt_cube: c_max must be positive (representative "
             f"wave speed in m/s), got c_max={c_max}"
         )
+    if safety is None:
+        if mode == "short_time":
+            safety = _CFL_SAFETY_SHORT_TIME
+        elif mode == "long_time":
+            safety = _CFL_SAFETY_LONG_TIME
+        else:
+            raise ValueError(
+                f"_cfl_safe_dt_cube: mode must be 'short_time' "
+                f"or 'long_time', got {mode!r}"
+            )
     dx_face = math.pi * constants.R_earth / (2.0 * n)
     dt_cfl = safety * dx_face / c_max
     return min(base_dt, dt_cfl)
@@ -588,35 +628,47 @@ def _resolve_dt_cube(
     *,
     label: str = "cube path",
 ) -> float:
-    """iter 67: factored env-var parser for ``LEGOESM_HS_CUBE_DT_CFL``.
+    """iter 67/71: factored env-var parser for ``LEGOESM_HS_CUBE_DT_CFL``.
 
     Returns the ``dt`` to use for the cubed-sphere HS / baroclinic
-    paths.  When the env var is set to a truthy value (``1``,
-    ``true``, ``yes``, ``on``, case-insensitive), returns
-    ``_cfl_safe_dt_cube(n)`` and prints a one-line notice.
-    Otherwise returns the iter-pre-66 default ``dt = 200.0``.
+    paths.  Honored values for ``LEGOESM_HS_CUBE_DT_CFL``:
+
+    -   Unset / ``0`` / ``false`` / ``no`` / ``off`` / ``""``:
+        ``dt = 200.0`` (iter-pre-66 default).
+    -   ``1`` / ``true`` / ``yes`` / ``on`` / ``short_time``:
+        iter-66 short-time calibration (``safety=0.462``).
+        Stable to ~10 days at C96; NaNs at day 15 (iter 69).
+    -   ``long_time`` / ``longtime``: iter-70 long-time calibration
+        (``safety=0.307``).  Stable to 20+ days at C96.  CHANGES
+        ``dt`` at C72 from 200 to 133 (no longer iter-33 reference).
 
     The ``label`` argument is used in the printed notice to
     distinguish HS vs baroclinic vs other call sites; the
-    underlying calibration is identical.
+    underlying calibration depends only on ``mode``.
 
     iter-67 factor-out: previously this 10-line env-var pattern
     was duplicated at both HS (line 2683) and baroclinic (line
     3197) call sites.  CLAUDE.md forbids copy-paste with only
     naming changes; this helper consolidates them.
     """
-    cube_dt_cfl_active = (
-        os.environ.get("LEGOESM_HS_CUBE_DT_CFL", "0").strip().lower()
-        in ("1", "true", "yes", "on")
-    )
-    if not cube_dt_cfl_active:
+    raw = os.environ.get("LEGOESM_HS_CUBE_DT_CFL", "0").strip().lower()
+    if raw in ("0", "false", "no", "off", ""):
         return 200.0
-    dt = _cfl_safe_dt_cube(n)
+    if raw in ("long_time", "longtime"):
+        mode = "long_time"
+    elif raw in ("1", "true", "yes", "on", "short_time"):
+        mode = "short_time"
+    else:
+        raise ValueError(
+            f"LEGOESM_HS_CUBE_DT_CFL: unrecognised value {raw!r}.  "
+            f"Use 0/false/off (default), 1/true/short_time (iter-66), "
+            f"or long_time (iter-71)."
+        )
+    dt = _cfl_safe_dt_cube(n, mode=mode)
     if dt < 200.0:
         print(
-            f"[FV3_3D iter 66 CFL-aware dt] At C{n} ({label}) reducing dt "
-            f"to {dt:.1f} s (was 200.0).  iter-65 found C96 NaNs "
-            f"at dt=200 regardless of A_h.",
+            f"[FV3_3D iter 66/71 CFL-aware dt mode={mode}] At C{n} "
+            f"({label}) reducing dt to {dt:.1f} s (was 200.0).",
             flush=True,
         )
     return dt
