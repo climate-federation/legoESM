@@ -56,6 +56,62 @@ C96 30-day empirical validation of the iter-81 dt=50 setting is
 
 The full iteration log follows.
 
+## Lessons learned (iter 84 synthesis of iter 18-83)
+
+For future maintainers, here are the load-bearing insights from
+65+ cycles of investigation:
+
+1.  **The C36/C48/C72 cube imprint and the C96+ long-time
+    eigenmode are TWO DIFFERENT problems.**  The first is a
+    SPATIAL artifact at face boundaries (cube-vertex residuals);
+    the second is a TEMPORAL instability (eigenmode growing
+    over physical time).  They need different fixes:
+    - Spatial: ``corner_div_damp_d4_bg=0.02 nord=1`` (iter 18-25).
+    - Temporal: ``LEGOESM_AH_SCALE`` (iter 33) + small ``dt``
+      (iter 65-81).
+
+2.  **More damping is not always better.**  iter-70 found
+    ``ah_x20`` at C96 NaNs EARLIER than ``ah_x10`` because the
+    diffusive CFL ``A_h × dt / dx²`` exceeds 0.5.  The right
+    response to instability is sometimes SMALLER ``dt``, not
+    larger ``A_h``.
+
+3.  **Smaller ``dt`` only DELAYS the eigenmode.**  iter-69
+    (``dt=150``: NaN day 15) → iter-79 (``dt=100``: NaN day
+    22.5) → iter-82 (``dt=50``: pending).  The physical-time
+    growth rate scales weakly with ``dt`` — this is consistent
+    with the eigenmode being a real climate instability that the
+    dycore artificially excites at high resolution, NOT a
+    numerical CFL violation.
+
+4.  **Smagorinsky is a complement, not a replacement, for static
+    A_h.**  iter-60 found C72 ``smag_cs=0.4`` alone insufficient.
+    iter-70 found C96 ``smag_cs=0.2 + dt=150.5`` no better than
+    ``dt=150.5`` alone.  Smagorinsky helps where strain is high;
+    the C96 eigenmode is interior + synoptic-scale, where strain
+    is moderate.
+
+5.  **Test for the FAILURE MODE, not just the success path.**
+    iter-65 verified C96 stable for 1 day, which iter-69 found
+    insufficient for 30 days, which iter-79 found insufficient
+    even at dt=100.  Each "stable to N days" claim should
+    include "tested at N days" not "extrapolated".
+
+6.  **The matrix's hardcoded ``dt=200`` doesn't scale.**  The
+    lat-lon HS path has CFL-aware ``dt``; the cube path didn't.
+    iter-66 added it (opt-in).  Future audits: any time you see
+    a hardcoded numeric constant in a per-resolution path, ask
+    whether the calibration was empirically validated at all
+    resolutions.
+
+7.  **Always include a regression guard at the AST level for
+    dataflow that depends on a helper.**  iter-68 added an AST
+    guard for ``dt = _resolve_dt_cube(...)`` because reverting
+    to ``dt = 200.0`` would silently disable the env var without
+    breaking unit tests.
+
+The full iteration log follows.
+
 ## Investigation summary (iter 51 codex meta-review consolidation)
 
 The FV3_3D investigation has produced **two complementary
