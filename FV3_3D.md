@@ -637,6 +637,11 @@ Key iterations:
   adds explicit nord_v=2 cases for both PE and NH:
   mean(dT_d_con) > 0 holds with the production nord.  2/2
   pass in 23 s.
+- Iter 277: damp_w_d_con direction with FV3 production
+  nord_w=2 (mirror of iter-276 for w).  iter-203 direction
+  uses nord_w=1.  w-perturbation IC respecting w=0 BC, +
+  damp_w + damp_w_d_con: mean(dT_eq) > 0 with nord_w=2.
+  1/1 pass in 19 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
