@@ -262,13 +262,56 @@ def test_nh_fv3_config_fields_ast_regression():
     )
 
 
+# FV3_3D iter 196: factor out as a module-level constant so the
+# outer ``test_nh_fv3_call_sites_ast_regression`` and the inner
+# ``test_iter178_ast_guard_self_check`` consume the SAME source of
+# truth.  Previously each test maintained its own local copy and the
+# two could drift apart silently — iter 193 added a pair to the outer
+# test only, leaving the self-check stale.  iter 196 closes that
+# maintenance hazard with a shared constant.
+NH_GATE_HELPER_PAIRS = [
+    # iter-168: corner-divergence damping
+    ("config.corner_div_damp_d2_bg > 0.0", "fv3_divergence_corner_3d"),
+    # iter-169: post-step vorticity damping
+    ("self.config.damp_v > 0.0", "fv3_del6_vorticity_damping"),
+    # iter-170: a2b zeta corner
+    ("config.use_fv3_a2b_zeta_corner",
+     "_interp_center_to_corner_a2b_ord4"),
+    # iter-171: cell-centre div damping
+    ("config.div_damp_coeff > 0.0", "_arakawa_lamb_gradient"),
+    # iter-173: async-halo overlap dispatch (added by iter-178
+    # to close the gap that the iter-172 guard predates iter-173).
+    ("config.use_async_halo and _hb_div ==",
+     "_overlapped_arakawa_lamb_gradient"),
+    # iter-180: Smagorinsky-adaptive A_h dispatch (added by
+    # iter-186 to extend the guard).  When ``smagorinsky_cs > 0``
+    # AND ``A_h > 0``, the adaptive coefficient is computed via
+    # the existing helper.  Both gates required since
+    # Smagorinsky is gated INSIDE the ``A_h > 0`` block.
+    ("config.smagorinsky_cs > 0.0", "compute_smagorinsky_ah_3d"),
+    # iter-187: smag_vort cap recomputation inside the
+    # ``corner_div_damp_d4_bg > 0 AND nord > 0`` branch.  The
+    # marker variable ``_zeta_smag_corner`` is unique to the
+    # iter-187 site; ``_interp_center_to_corner_a2b_ord4`` is
+    # shared with iter-170 but its presence is required for
+    # the smag_vort to use FV3-faithful 4th-order ζ_corner
+    # (sw_core.F90:1795).  iter-190 changed the assignment from
+    # a local jax.vmap to ``= _zeta_a2b_ord4`` (precomputed at
+    # the iter-170 site for dedup), so the marker shifted.
+    ("_zeta_smag_corner =", "_interp_center_to_corner_a2b_ord4"),
+    # iter-193: post-step damp_w + nord_w (FV3 d_sw1 port,
+    # sw_core.F90:1080-1086).  Reuses the SW backbone
+    # ``_del6_vt_flux``.
+    ("self.config.damp_w > 0.0", "_del6_vt_flux"),
+]
+
+
 def test_nh_fv3_call_sites_ast_regression():
-    """AST regression guard: the four iter-168/169/170/171 wiring
-    points must remain present in the source.  Searches the source
-    text for the Python-static gate expressions that activate each
-    mechanism.  Catches a regression where the config field stays
-    but the call-site is dropped (e.g., during a refactor that
-    moves the block but forgets to re-import a helper)."""
+    """AST regression guard: the FV3-faithful wirings in iter
+    168/169/170/171/173/180/187/193 must remain present in the
+    source.  Searches the source text for the Python-static gate
+    expressions that activate each mechanism.  Catches a regression
+    where the config field stays but the call-site is dropped."""
     src_path = (
         Path(__file__).resolve().parent.parent
         / "src" / "legoesm" / "atmosphere" / "dynamics"
@@ -276,47 +319,8 @@ def test_nh_fv3_call_sites_ast_regression():
     )
     src_text = src_path.read_text()
 
-    # Each pair: (gate expression, helper name that should appear
-    # in the gated block).  Extended by iter-178 to include iter-173
-    # (async-halo overlap dispatch).
-    gate_helper_pairs = [
-        # iter-168: corner-divergence damping
-        ("config.corner_div_damp_d2_bg > 0.0", "fv3_divergence_corner_3d"),
-        # iter-169: post-step vorticity damping
-        ("self.config.damp_v > 0.0", "fv3_del6_vorticity_damping"),
-        # iter-170: a2b zeta corner
-        ("config.use_fv3_a2b_zeta_corner",
-         "_interp_center_to_corner_a2b_ord4"),
-        # iter-171: cell-centre div damping
-        ("config.div_damp_coeff > 0.0", "_arakawa_lamb_gradient"),
-        # iter-173: async-halo overlap dispatch (added by iter-178
-        # to close the gap that the iter-172 guard predates iter-173).
-        ("config.use_async_halo and _hb_div ==",
-         "_overlapped_arakawa_lamb_gradient"),
-        # iter-180: Smagorinsky-adaptive A_h dispatch (added by
-        # iter-186 to extend the guard).  When ``smagorinsky_cs > 0``
-        # AND ``A_h > 0``, the adaptive coefficient is computed via
-        # the existing helper.  Both gates required since
-        # Smagorinsky is gated INSIDE the ``A_h > 0`` block.
-        ("config.smagorinsky_cs > 0.0", "compute_smagorinsky_ah_3d"),
-        # iter-187: smag_vort cap recomputation inside the
-        # ``corner_div_damp_d4_bg > 0 AND nord > 0`` branch.  The
-        # marker variable ``_zeta_smag_corner`` is unique to the
-        # iter-187 site; ``_interp_center_to_corner_a2b_ord4`` is
-        # shared with iter-170 but its presence is required for
-        # the smag_vort to use FV3-faithful 4th-order ζ_corner
-        # (sw_core.F90:1795).  iter-190 changed the assignment from
-        # a local jax.vmap to ``= _zeta_a2b_ord4`` (precomputed at
-        # the iter-170 site for dedup), so the marker shifted.
-        ("_zeta_smag_corner =", "_interp_center_to_corner_a2b_ord4"),
-        # iter-193: post-step damp_w + nord_w (FV3 d_sw1 port,
-        # sw_core.F90:1080-1086).  Reuses the SW backbone
-        # ``_del6_vt_flux``.
-        ("self.config.damp_w > 0.0", "_del6_vt_flux"),
-    ]
-
     missing = []
-    for gate, helper in gate_helper_pairs:
+    for gate, helper in NH_GATE_HELPER_PAIRS:
         if gate not in src_text:
             missing.append(f"gate {gate!r}")
         if helper not in src_text:
@@ -344,18 +348,12 @@ def test_iter178_ast_guard_self_check():
     when extending the guard to iter-173: the dispatch substring
     used a different ``and _hb_div ==`` form than I'd initially
     typed."""
-    gate_helper_pairs = [
-        ("config.corner_div_damp_d2_bg > 0.0", "fv3_divergence_corner_3d"),
-        ("self.config.damp_v > 0.0", "fv3_del6_vorticity_damping"),
-        ("config.use_fv3_a2b_zeta_corner",
-         "_interp_center_to_corner_a2b_ord4"),
-        ("config.div_damp_coeff > 0.0", "_arakawa_lamb_gradient"),
-        ("config.use_async_halo and _hb_div ==",
-         "_overlapped_arakawa_lamb_gradient"),
-        ("config.smagorinsky_cs > 0.0", "compute_smagorinsky_ah_3d"),
-        ("_zeta_smag_corner = jax.vmap",
-         "_interp_center_to_corner_a2b_ord4"),
-    ]
+    # FV3_3D iter 196: use the shared ``NH_GATE_HELPER_PAIRS``
+    # constant so the self-check and the outer test cannot drift
+    # apart.  Prior versions kept a local copy here that became stale
+    # when iter-190 changed the iter-187 substring and iter-193 added
+    # the damp_w pair.
+    gate_helper_pairs = NH_GATE_HELPER_PAIRS
 
     # Build a valid source containing all substrings.  Verify the
     # check passes.

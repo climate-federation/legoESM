@@ -244,6 +244,18 @@ Key iterations:
   wiring (e.g., ``w_new = w - dw`` instead of ``+= dw``) which the
   existing iter-193 unit tests would not catch.  Parametrized over
   ``nord_w`` in {0, 1, 2} (del-2 / del-4 / del-6).
+- Iter 196: fix iter-178 self-check drift hazard.  Real bug: the
+  iter-172/178 self-check kept its OWN local copy of the
+  ``gate_helper_pairs`` list, separate from the outer
+  ``test_nh_fv3_call_sites_ast_regression`` list.  When iter-190
+  changed the iter-187 marker substring AND iter-193 added the
+  damp_w pair, only the OUTER test was updated — leaving the
+  self-check stale (still validating against ``"_zeta_smag_corner =
+  jax.vmap"`` which iter-190 deleted, and missing iter-193's
+  damp_w pair entirely).  iter-196 factors the list into a single
+  module-level constant ``NH_GATE_HELPER_PAIRS`` consumed by both
+  tests.  Future additions automatically extend the self-check
+  coverage.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
