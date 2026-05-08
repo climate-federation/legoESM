@@ -256,6 +256,13 @@ Key iterations:
   module-level constant ``NH_GATE_HELPER_PAIRS`` consumed by both
   tests.  Future additions automatically extend the self-check
   coverage.
+- Iter 197: extend iter-179 NH cube-imprint metric to verify
+  iter-193 ``damp_w + nord_w`` does not regress the iter-168/169/
+  170/171 toolkit's edge suppression.  Adds a third test
+  ``test_full_toolkit_with_damp_w_does_not_regress`` that runs
+  the full toolkit + damp_w on the iter-179 random-perturbation
+  fixture and asserts the edge_std/interior_std ratio is still
+  strictly below baseline.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::

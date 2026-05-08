@@ -212,3 +212,62 @@ def test_full_toolkit_reduces_edge_imprint_ratio(small_random_nh_state):
         f"(toolkit ratio is HIGHER — would indicate the toolkit is "
         f"AMPLIFYING the imprint)"
     )
+
+
+def test_full_toolkit_with_damp_w_does_not_regress(small_random_nh_state):
+    """FV3_3D iter 197: adding iter-193 ``damp_w + nord_w`` to the
+    iter-179 toolkit must NOT regress the cube-imprint ratio.
+
+    iter-194 added damp_w to the iter-184 NH umbrella (AD-at-rest)
+    but the iter-179 quantitative cube-imprint test did not include
+    iter-193.  This test extends that coverage: the toolkit-with-
+    damp_w ratio must be no higher than the baseline (and ideally
+    not significantly higher than the iter-179 toolkit-without-damp_w
+    ratio).
+
+    iter-193's damp_w acts on ``w`` (vertical velocity); cube imprint
+    is a HORIZONTAL-wind artifact.  We expect damp_w to be neutral
+    (or mildly beneficial via cross-coupling through the acoustic
+    update) for the v-imprint.  A regression would indicate damp_w
+    is destabilising the iter-168/169/170/171 toolkit's edge
+    suppression."""
+    grid, height_coord, terrain_metric, state = small_random_nh_state
+
+    cfg_baseline = CDGridCompressibleEulerConfig(
+        hyperdiff_coeff=0.0, n_acoustic_substeps=4,
+        sponge_coeff=0.0,
+    )
+    cfg_toolkit_with_damp_w = CDGridCompressibleEulerConfig(
+        hyperdiff_coeff=0.0, n_acoustic_substeps=4,
+        sponge_coeff=0.0,
+        # iter-179 toolkit
+        corner_div_damp_d2_bg=0.001,
+        corner_div_damp_dddmp=0.20,
+        damp_v=0.030, nord_v=0,    # del-2 for visible C8 effect
+        use_fv3_a2b_zeta_corner=True,
+        div_damp_coeff=1e10, div_damp_dddmp=0.0,
+        # iter-193 addition
+        damp_w=0.030, nord_w=1,
+    )
+
+    model_baseline = CDGridCompressibleEulerModel(
+        grid, height_coord, terrain_metric, cfg_baseline,
+    )
+    model_toolkit = CDGridCompressibleEulerModel(
+        grid, height_coord, terrain_metric, cfg_toolkit_with_damp_w,
+    )
+
+    s_baseline = _step_n(model_baseline, state, n_steps=10)
+    s_toolkit = _step_n(model_toolkit, state, n_steps=10)
+
+    ratio_baseline, _, _ = _edge_interior_std_ratio(s_baseline)
+    ratio_toolkit, _, _ = _edge_interior_std_ratio(s_toolkit)
+
+    assert ratio_toolkit < ratio_baseline, (
+        f"iter-179+iter-193 toolkit must still reduce cube-imprint "
+        f"ratio vs baseline: baseline={ratio_baseline:.3f}, "
+        f"toolkit_with_damp_w={ratio_toolkit:.3f}.  Adding iter-193 "
+        f"damp_w should not destabilise the iter-168/169/170/171 "
+        f"edge suppression — if this fails, damp_w may be "
+        f"interacting badly with the horizontal damping toolkit."
+    )
