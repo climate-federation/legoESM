@@ -29,6 +29,25 @@ Key iterations:
 - Iter 34-46: env vars, helpers, auto-apply, escape hatches
 - Iter 48-52: e2e validation, codex review iterations, regression tests
 - Iter 51: codex meta-review insights (open generalization gap)
+- Iter 57-59: Smagorinsky-style adaptive A_h
+- Iter 60-61: Smagorinsky generalization gap
+- Iter 64: combined-path multi-step stability test
+- Iter 65: C96 stability EMPIRICAL — dt is the lever, not A_h
+- Iter 66-67: opt-in CFL-aware dt (short_time mode)
+- Iter 69-70: C96 day-15 eigenmode + dt=100 fix (long_time mode)
+- Iter 71-72: long_time / auto modes for ``LEGOESM_HS_CUBE_DT_CFL``
+- Iter 73-77: docs, tests, Quick Reference updates
+
+**TL;DR** (iter 78 summary): For HS at any cube resolution, set::
+
+    LEGOESM_HS_CUBE_DT_CFL=auto
+    LEGOESM_AH_SCALE   (auto-applies per resolution; explicit override OK)
+
+This auto-picks ``dt=200`` at C36-C72 (preserves iter-33 reference)
+and ``dt=100`` at C96+ (iter-70 long-time stable).  Combined with
+the iter-43 ``LEGOESM_AH_SCALE`` auto-apply (1.0 / 2.0 / 10.0 by
+resolution bucket), this is a single env var pair that solves the
+cube HS path across resolutions.
 
 The full iteration log follows.
 
