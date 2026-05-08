@@ -81,14 +81,32 @@ def pad_ns_scalar(interior: jnp.ndarray, grid) -> jnp.ndarray:
     """
     fold = getattr(grid, "fold", None)
     if fold is not None and fold.is_active:
-        # Tripolar fold: south wall, north = fold-reflected scalar
-        pad_axes = ((0, 0),) * (interior.ndim - 1)
         south = jnp.zeros_like(interior[:1])
-        # Fold: last interior row, i-reversed
-        north = interior[-1:, :][...,]  # (1, n_lon, ...)
-        north = north[:, fold.perm_T]
+        # Fold: last interior row, i-reversed via perm_T.
+        # Handle the wrap column: fields with n_lon+1 columns have a
+        # periodic wrap at column n_lon (== column 0).  Fold the first
+        # n_lon columns, then append the wrap.
+        last_row = interior[-1:]                     # (1, n_cols, ...)
+        n_cols = last_row.shape[1]
+        n_lon = fold.perm_T.shape[0]
+        if n_cols == n_lon:
+            north = last_row[:, fold.perm_T]
+        else:
+            # n_cols == n_lon + 1 (vertex or u-face field with wrap column)
+            core = last_row[:, :n_lon][:, fold.perm_T]
+            north = jnp.concatenate([core, core[:, 0:1]], axis=1)
         return jnp.concatenate([south, interior, north], axis=0)
     return _pad_ns_zero(interior)
+
+
+def _fold_row(last_row, perm, sign, n_lon):
+    """Apply fold permutation with optional sign flip to one row."""
+    n_cols = last_row.shape[1]
+    if n_cols == n_lon:
+        return sign * last_row[:, perm]
+    else:
+        core = sign * last_row[:, :n_lon][:, perm]
+        return jnp.concatenate([core, core[:, 0:1]], axis=1)
 
 
 def pad_ns_vector_u(interior: jnp.ndarray, grid) -> jnp.ndarray:
@@ -100,8 +118,8 @@ def pad_ns_vector_u(interior: jnp.ndarray, grid) -> jnp.ndarray:
     fold = getattr(grid, "fold", None)
     if fold is not None and fold.is_active:
         south = jnp.zeros_like(interior[:1])
-        north = interior[-1:, :]
-        north = fold.vector_sign_u * north[:, fold.perm_T]
+        n_lon = fold.perm_T.shape[0]
+        north = _fold_row(interior[-1:], fold.perm_T, fold.vector_sign_u, n_lon)
         return jnp.concatenate([south, interior, north], axis=0)
     return _pad_ns_zero(interior)
 
@@ -115,8 +133,8 @@ def pad_ns_vector_v(interior: jnp.ndarray, grid) -> jnp.ndarray:
     fold = getattr(grid, "fold", None)
     if fold is not None and fold.is_active:
         south = jnp.zeros_like(interior[:1])
-        north = interior[-1:, :]
-        north = fold.vector_sign_v * north[:, fold.perm_v]
+        n_lon = fold.perm_v.shape[0]
+        north = _fold_row(interior[-1:], fold.perm_v, fold.vector_sign_v, n_lon)
         return jnp.concatenate([south, interior, north], axis=0)
     return _pad_ns_zero(interior)
 
