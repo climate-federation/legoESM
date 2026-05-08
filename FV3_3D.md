@@ -710,6 +710,15 @@ Key iterations:
   of a constant is 0 by construction, including the cube-
   vertex corner-removal terms (uc/vc = 0 propagates).
   12/12 pass in 26 s.
+- Iter 306: ``_interp_center_to_corner`` (2nd-order 4-pt
+  average) preserves constants + linear.  Constant c → c at
+  corners (rtol=1e-14) for c ∈ {-3.5, 0, 1, 1e-6, 1e6}.
+  Superposition (rtol=1e-14) for (α, β) ∈ {(1,1), (2,-3),
+  (0.5,0.5), (-1,7)}.  Pins the affine-operator contract on
+  the 2nd-order helper used as production fallback when
+  ``use_fv3_a2b_zeta_corner=False`` and for non-zeta scalars
+  (theta_corner, T_corner reciprocal, ah_smag fallback).
+  9/9 pass in 9.4 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
