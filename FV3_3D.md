@@ -665,6 +665,15 @@ Key iterations:
   AD-safety in the helper).  4/4 pass in 10.7 s.  Pins the
   linear-in-(u, v) axis orthogonal to iter-292's linear-in-
   c_s.
+- Iter 294: Galilean translation invariance of Smagorinsky
+  helper.  A_h_smag(u + c, v + c) = A_h_smag(u, v) bit-for-
+  bit (rtol=1e-14) for uniform offsets c ∈ {-5, 1, 100} and
+  separate-component offsets (c1, c2) ∈ {(-3, 7), (10, -2)}.
+  Strain magnitude depends on velocity GRADIENTS, so adding
+  constants must cancel under centered FD even with cubed-
+  sphere halo cross-panel exchange.  5/5 pass in 9.2 s.
+  Third orthogonal helper-formula axis (after iter-292
+  linear-in-c_s and iter-293 linear-in-(u, v)).
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
