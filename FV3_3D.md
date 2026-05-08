@@ -108,27 +108,27 @@ if desired::
 
     LEGOESM_AH_SCALE=10.0 LEGOESM_SMAG_CS=0.2  # C72: static + adaptive
 
-### C96+ user guidance (iter 63 + iter 65 + iter 69 empirical updates)
+### C96+ user guidance (iter 63/65/69/79/81 empirical history)
 
-**iter 69 + iter 70 updates**: the iter-65/66 ``dt=150.5`` fix
-solves the day-1 NaN at C96 but NOT the 30-day NaN.  C96 30-day
-blows up at day 15 (interior eigenmode).
+**Time-line of C96 30-day stability findings**:
 
-iter 70 found ``dt=100`` SOLVES the day-15 mode.  C96 ``ah_x10
-+ dt=100 + smag=0`` is stable for 20 days (verified) and likely
-for 30 days (projection).
+- iter-65/66 ``dt=150.5``: day-1 NaN solved, but 30-day NaN at day 15.
+- iter-70 ``dt=100``: day-15 NaN solved, but 30-day NaN at day 22.5
+  (iter 79).
+- iter-81 ``dt=50`` (auto-mode default): EMPIRICAL VALIDATION
+  PENDING (iter 82-83 in progress).
 
 For users at C96 PRODUCTION (30-day climatology):
 
-1. Use ``dt=100`` (NOT the iter-66 default 150.5).  At present
-   the matrix does not expose this; users must construct
-   ``CDGridPrimitiveEquationConfig`` directly with ``A_h=1.53e+07``
-   and run with ``dt=100`` in their own driver.
-2. iter 71 will recalibrate ``_cfl_safe_dt_cube`` to use a
-   more conservative safety factor (``safety=0.307``) for
-   long-time mode, exposed via a separate env var or config arg.
+1. **Recommended**: ``LEGOESM_HS_CUBE_DT_CFL=auto`` (iter 72/81).
+   This auto-picks ``dt=50`` at C96.  EMPIRICAL 30-day validation
+   pending; iter 79 invalidated the prior ``dt=100`` recommendation.
+2. **Avoid**: ``LEGOESM_HS_CUBE_DT_CFL=long_time`` at C96 — iter
+   79 found NaN at day 22.5.  Use ``very_long_time`` or ``auto``
+   instead.
 3. Smagorinsky (``LEGOESM_SMAG_CS=0.2``) does NOT help at C96
-   (iter 70 confirmed).  Skip it.
+   (iter 70 confirmed).  Skip it (without ``ah_x10`` it's no use;
+   with it it doesn't extend stability).
 4. ``ah_scale`` higher than 10x makes things WORSE at C96
    (iter 70: ``ah_x20 + dt=100`` NaNs at day 5).  Keep
    ``ah_scale=10``.
@@ -306,10 +306,10 @@ Or via env vars (matrix sets ``A_h`` from ``LEGOESM_AH_SCALE``)::
   (iter 33).  Stable but imprint ~30x C36; further A_h tuning may
   improve.
 - **Production at C96**: enable d4=0.02 nord=1 + ``LEGOESM_AH_SCALE=10.0``
-  + ``LEGOESM_HS_CUBE_DT_CFL=auto`` (iter 72).  ``auto`` reduces
-  ``dt`` to 100 s at C96 (iter-70 empirical stable threshold for the
-  day-15 interior eigenmode iter-69 identified).  Stable to 20+ days
-  empirically; 30-day in progress (iter-74).
+  + ``LEGOESM_HS_CUBE_DT_CFL=auto`` (iter 72/81).  ``auto`` reduces
+  ``dt`` to 50 s at C96 after iter-79 found ``dt=100`` insufficient
+  at 30 days (NaN at day 22.5).  Empirical validation of the
+  iter-81 ``dt=50`` setting at 30 days is PENDING.
 - **Production at C144+**: ``LEGOESM_AH_SCALE=10.0 LEGOESM_HS_CUBE_DT_CFL=auto``
   is the projected setting; not empirically validated.
 - **Differentiable-model gradient flow**: bit-for-bit baseline path
