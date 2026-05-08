@@ -84,7 +84,23 @@ if desired::
 
     LEGOESM_AH_SCALE=10.0 LEGOESM_SMAG_CS=0.2  # C72: static + adaptive
 
-### C96+ user guidance (iter 63 + iter 65 empirical update)
+### C96+ user guidance (iter 63 + iter 65 + iter 69 empirical updates)
+
+**iter 69 update**: the iter-65/66 ``dt=150.5`` fix solves the
+day-1 NaN at C96 but NOT the 30-day NaN.  C96 30-day still
+blows up at day 15 (interior eigenmode).  C96 production 30-day
+runs are NOT YET supported with the iter-66 machinery alone.
+
+For users at C96 PRODUCTION (30-day climatology), additional
+work is needed:
+- Try ``LEGOESM_HS_CUBE_DT_CFL=1`` + ``LEGOESM_SMAG_CS=0.2``
+  (combined static + adaptive A_h, untested at 30 days).
+- Try smaller ``dt`` (e.g. ``dt=100``, set via custom
+  ``CDGridPrimitiveEquationConfig`` since the matrix doesn't
+  expose dt directly).
+- See iter 69 for the empirical sweep table.
+
+
 
 iter 65 EMPIRICALLY tested C96 stability via
 ``scripts/_iter65_c96_smoke.py``.  Findings overrode the iter-63
@@ -3745,6 +3761,64 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
+
+## Iteration 69 (2026-05-07): C96 long-time validation — 30d still fails
+
+### Goal
+
+Validate the iter-66/67 CFL-aware ``dt=150.5`` for C96 beyond the
+1-day smoke test in iter 65.
+
+### Empirical sweep (HS C96 hybrid, LEGOESM_AH_SCALE=10, dt=150.5)
+
+::
+
+    days  result        max|u|   step_blowup   wall
+    1     STABLE        0.81     -             36 s
+    5     STABLE        5.71     -             111 s
+    10    STABLE        17.56    -             208 s
+    30    NaN @ day 15  -        8611          305 s
+
+The ``LEGOESM_AH_SCALE=10`` + ``dt=150.5`` combination is stable
+for ~15 days physical time, then blows up.  Higher ``ah_scale``
+makes things WORSE: at ``ah_scale=26`` (the iter-37 v2 calibration
+for C96) the run NaNs even earlier (day 7.5, step 4305) because
+the diffusive CFL ``A_h × dt / dx²`` exceeds 0.55 at this setting.
+
+### Comparison to C72
+
+C72 iter-33 baseline (default A_h, dt=200): NaN at day 13.
+C72 iter-33 with ah_x10 (dt=200): stable to 30+ days.
+
+C96 iter-69 (ah_x10, dt=150.5): NaN at day 15.
+The iter-33 ah_x10 prescription delays the C72 mode by 30+ days
+but at C96 it only delays by ~2 days (13 → 15).  The same eigenmode
+appears to be ~15x more vigorous at C96.
+
+### Implication
+
+iter-66/67's CFL-aware ``dt`` solves the SHORT-TIME (≤ 6h) C96
+NaN that the matrix's hardcoded ``dt=200`` produced.  It does
+NOT solve the long-time interior synoptic-scale eigenmode
+(iter-26-32 finding) — that still NaNs the C96 30-day run.
+
+C96 long-time stability needs further work.  Options:
+- Smaller ``dt`` (dt=100 untried at 30d).
+- ``ah_scale=10`` + ``smag_cs > 0`` (combined adaptive A_h, may help).
+- ``nord >= 2`` corner-divergence damping (deferred since iter 32).
+- Forward-backward time stepping for the eigenmode (deferred).
+
+These are deferred to future iterations.
+
+### Status
+
+Iter 65 (1-day) smoke test was misleading: short-time stability
+does NOT imply 30-day stability.  The iter-66 wiring is still
+useful (catches the day-1 NaN) but is INSUFFICIENT for production
+30-day C96 runs.  Updated user expectations.
+
+254 tests pass; no test changes (this iter is empirical
+characterisation only).
 
 ## Iteration 68 (2026-05-07): AST regression guard for iter-66/67 wiring
 
