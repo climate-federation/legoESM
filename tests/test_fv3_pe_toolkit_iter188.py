@@ -27,6 +27,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._iter187_marker import ITER187_GATE, ITER187_HELPER
+
 
 _PE_SRC_PATH = (
     Path(__file__).resolve().parent.parent
@@ -141,12 +143,10 @@ _PE_GATE_HELPER_PAIRS = [
     # iter-182: T_diss velocity-dependent dissipation
     ("config.T_diss_coeff > 0", "wind_speed"),
     # iter-187: smag_vort cap recomputation (FV3 sw_core.F90:1797).
-    # Marker variable ``_zeta_smag_corner`` is unique to this site.
-    # iter-190 changed the assignment from a local jax.vmap to
-    # ``= _zeta_a2b_ord4`` (precomputed at the iter-170 site for
-    # dedup); the marker substring shifted accordingly.
-    ("_zeta_smag_corner =",
-     "_interp_center_to_corner_a2b_ord4"),
+    # iter-202 extracted this pair into ``tests/_iter187_marker.py``
+    # so PE and NH AST guards share a single source-of-truth and
+    # future substring changes (like iter-190's) cannot drift.
+    (ITER187_GATE, ITER187_HELPER),
 ]
 
 

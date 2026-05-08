@@ -39,6 +39,8 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
+from tests._iter187_marker import ITER187_GATE, ITER187_HELPER
+
 from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
     CDGridCompressibleEulerConfig,
     CDGridCompressibleEulerModel,
@@ -290,15 +292,11 @@ NH_GATE_HELPER_PAIRS = [
     # Smagorinsky is gated INSIDE the ``A_h > 0`` block.
     ("config.smagorinsky_cs > 0.0", "compute_smagorinsky_ah_3d"),
     # iter-187: smag_vort cap recomputation inside the
-    # ``corner_div_damp_d4_bg > 0 AND nord > 0`` branch.  The
-    # marker variable ``_zeta_smag_corner`` is unique to the
-    # iter-187 site; ``_interp_center_to_corner_a2b_ord4`` is
-    # shared with iter-170 but its presence is required for
-    # the smag_vort to use FV3-faithful 4th-order ζ_corner
-    # (sw_core.F90:1795).  iter-190 changed the assignment from
-    # a local jax.vmap to ``= _zeta_a2b_ord4`` (precomputed at
-    # the iter-170 site for dedup), so the marker shifted.
-    ("_zeta_smag_corner =", "_interp_center_to_corner_a2b_ord4"),
+    # ``corner_div_damp_d4_bg > 0 AND nord > 0`` branch.  iter-202
+    # extracted this pair into ``tests/_iter187_marker.py`` so
+    # PE and NH AST guards share a single source-of-truth and
+    # future substring changes (like iter-190's) cannot drift.
+    (ITER187_GATE, ITER187_HELPER),
     # iter-193: post-step damp_w + nord_w (FV3 d_sw1 port,
     # sw_core.F90:1080-1086).  Reuses the SW backbone
     # ``_del6_vt_flux``.

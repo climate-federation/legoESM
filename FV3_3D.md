@@ -304,6 +304,12 @@ Key iterations:
   between iter-190 and iter-201 (the PE guard was not in any
   recent test run).  iter-201 updates the PE pair list to match
   the iter-190 source.
+- Iter 202: share the iter-187 marker substring between PE and NH
+  AST guards via ``tests/_iter187_marker.py`` to prevent the
+  iter-201 drift hazard from recurring.  Both PE iter-188 and NH
+  iter-172 now import ``ITER187_GATE`` and ``ITER187_HELPER`` from
+  the shared helper, so a future substring change is made in ONE
+  place and automatically propagates to both guards.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
