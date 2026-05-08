@@ -36,9 +36,10 @@ reasonable Ralph-loop iteration budget.  iter-85's 1/dt scaling
 predicts 30-day stable for both (NaN ~day 68 at C144 dt=33,
 ~day 90 at C192 dt=25).
 
-Stretch goals beyond original scope: C144/C192 30-day empirical
-(deferred per above), 200-day climatology, nord>=2 fidelity
-restructure.  See [Open follow-ups](#open-follow-ups-iter-38-status-updated-through-iter-75).
+Stretch goals beyond original scope: C144 30-day, C192 5/30-day
+(iter 121 confirmed C144 5-day; iter 123 launched C192 5-day),
+200-day climatology, nord>=2 fidelity restructure.  See
+[Open follow-ups](#open-follow-ups-iter-38-status-updated-through-iter-75).
 
 ## Table of Contents (iter 53, updated iter 88, iter 115 count fix)
 
