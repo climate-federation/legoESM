@@ -205,6 +205,14 @@ Key iterations:
   iter-187 are active, factor the computation into a single
   ``_zeta_a2b_ord4`` local computed at most once, reused at both
   sites.  Bit-for-bit baseline preserved at all flag combinations.
+- Iter 191: coverage tests for the iter-190 dedup path.  Prior
+  to iter-191 NO test exercised BOTH iter-170
+  (``use_fv3_a2b_zeta_corner=True``) AND iter-187 (``corner_div_damp_d4_bg
+  > 0`` + ``corner_div_damp_nord > 0``) simultaneously — the
+  case iter-190 dedup actually combines.  iter-191 adds focused
+  PE + NH integration tests verifying finite output, ``differs
+  from iter-170-only``, ``differs from iter-187-only``, and
+  ``jax.grad`` AD-at-rest safety with both flags ON.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
@@ -4087,6 +4095,85 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
+
+## Iteration 191 (2026-05-08): coverage tests for iter-190 dedup with both flags ON
+
+### Goal
+
+Close a coverage gap left open by iter-187/190.  Prior to iter-191
+NO test exercises BOTH iter-170 (``use_fv3_a2b_zeta_corner=True``)
+AND iter-187 (``corner_div_damp_d4_bg > 0`` + ``corner_div_damp_nord
+> 0``) simultaneously — the exact combination iter-190 dedup
+combines.
+
+Existing tests cover only one flag at a time:
+
+* ``test_div_damp_adaptive.py`` (PE iter-18): nord >= 1 + d4_bg > 0
+  but ``use_fv3_a2b_zeta_corner=False`` (default).
+* ``test_corner_div_damp_smag_vort_iter187.py``: nord >= 1 +
+  d4_bg > 0 but ``use_fv3_a2b_zeta_corner`` not set.
+* ``test_fv3_full_toolkit_ad_at_rest_iter184/185.py``:
+  ``use_fv3_a2b_zeta_corner=True`` but ``corner_div_damp_nord=0``
+  (default), so the iter-187 smag_vort branch is dormant.
+
+The iter-190 dedup wiring is therefore exercised at unit-test level
+ONLY by iter-187 tests (which don't enable iter-170) and iter-170
+tests (which don't enable iter-187).  A regression that breaks the
+combined path (e.g., the iter-187 site dropping the ``_zeta_a2b_ord4``
+reference and silently using the iter-170 version of zeta_corner
+as smag_vort, or vice-versa) would NOT be caught.
+
+### Implementation
+
+New file ``tests/test_iter190_dedup_both_flags_iter191.py`` (4 tests,
+no production code change):
+
+1. ``test_pe_both_flags_finite_and_differs_from_each_alone`` —
+   PE.  Three configs: iter-170 only, iter-187 only, BOTH.  All
+   produce finite output; the ``BOTH`` state DIFFERS from each
+   single-flag state by ``> 1e-8 * |max state|``.  Proves both
+   wirings are exercised when the combined gate triggers iter-190
+   dedup.
+2. ``test_pe_both_flags_grad_at_rest`` — PE.  ``jax.grad``
+   through 3 steps with both flags ON at the rest state stays
+   finite.  Catches a hypothetical AD hazard from the
+   ``_zeta_a2b_ord4`` reuse pattern (single array consumed at two
+   downstream sites) — iter-181/183 double-where pattern guards
+   sqrt(0).
+3. ``test_nh_both_flags_finite_and_differs_from_each_alone`` —
+   NH counterpart of test 1.
+4. ``test_nh_both_flags_grad_at_rest`` — NH counterpart of
+   test 2.
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_iter190_dedup_both_flags_iter191.py
+    => 4 passed in 149.44 s
+
+### Status
+
+iter-187/190 wirings now have integration-test coverage at every
+flag combination of iter-170 × iter-187:
+
+| iter-170 | iter-187 | covered by |
+|:--------:|:--------:|:----------|
+|   off    |   off    | default baseline guards (iter-168, iter-172) |
+|   on     |   off    | iter-184/185 umbrella, iter-170 unit tests |
+|   off    |   on     | iter-187 tests, iter-189 tests |
+|   on     |   on     | iter-191 (NEW) — closes the iter-190 dedup coverage gap |
+
+### Why this iteration was meaningful
+
+iter-190 introduced a refactor with subtle dataflow (one array
+reused at two sites).  Without explicit coverage of the combined
+flag case, a future refactor of the iter-187 site (e.g., dropping
+the ``_zeta_smag_corner = _zeta_a2b_ord4`` line) could pass all
+existing tests yet silently use the wrong value.  iter-191 closes
+that gap with 4 focused integration tests (~150 s wall total) and
+no production code change.
 
 ## Iteration 190 (2026-05-08): dedup a2b_ord4(zeta) halo exchange between iter-170 + iter-187 sites
 
