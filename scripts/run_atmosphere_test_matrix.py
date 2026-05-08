@@ -6116,8 +6116,9 @@ Environment variables (FV3_3D investigation, iter 33-91):
                                                  30d per iter 79)
                                   very_long_time iter-80 (dt=67 at
                                                  C72, dt=50 at C96;
-                                                 30d empirical
-                                                 validation pending)
+                                                 iter-99 CONFIRMED
+                                                 30d finite at C96
+                                                 max|u|=20.14)
                                   auto           RECOMMENDED: short_time
                                                  at n<96, very_long_time
                                                  at n>=96 (iter 81
