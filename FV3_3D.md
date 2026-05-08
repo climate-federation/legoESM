@@ -30,6 +30,12 @@ Verified results (HS hybrid 30 days, ``ah_x10`` auto-applied):
 | C144| 33        | finite at day 1 smoke, max\|u\|=0.75 m/s | 102 |
 | C192| 25        | finite at day 1 smoke, max\|u\|=0.84 m/s | 103 |
 
+C144/C192 30-day empirical validation deferred: C192 1-day takes
+~8.5 min wall (iter 103); 30-day projects to ~4 hours wall, beyond
+reasonable Ralph-loop iteration budget.  iter-85's 1/dt scaling
+predicts 30-day stable for both (NaN ~day 68 at C144 dt=33,
+~day 90 at C192 dt=25).
+
 Stretch goals beyond original scope remain (C144/C192 empirical,
 200-day, nord>=2).  See [Open follow-ups](#open-follow-ups-iter-38-status-updated-through-iter-75).
 
