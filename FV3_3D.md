@@ -647,6 +647,14 @@ Key iterations:
   within FP tolerance (rtol=1e-6, atol=1e-6).  Plus checks
   the sign mix (4 corners per face have orientation-
   dependent +0.5 and -0.5).  1/1 pass in 9 s.
+- Iter 285: range sanity for the iter-187 ``smag_vort`` cap
+  formula.  ``|dt|*sqrt(delpc²+ζ²)`` is non-negative by
+  construction (sqrt of non-neg).  Verifies the iter-183
+  AD-safe double-where pattern: (1) smag_vort = 0 exactly at
+  rest with finite gradient w.r.t. delpc, ζ; (2) smag_vort
+  > 0 at non-rest matches naive sqrt at rtol=1e-12.  Pure
+  helper-formula test (no model integration).  2/2 pass in
+  0.6 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
