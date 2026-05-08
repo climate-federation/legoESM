@@ -661,6 +661,11 @@ Key iterations:
   stack runs at JAX default float32 precision without NaN
   for 5 steps × dt=100.  Validates that the d_con stack
   doesn't have float64-only assumptions.  1/1 pass in 15 s.
+- Iter 287: NH float32 sanity (mirror of iter-286).  NH
+  iter-184 toolkit + 5-knob d_con stack + delt_max=1.0 at
+  JAX default float32.  All fields finite + dtype verified
+  jnp.float32.  1/1 pass in 18 s.  PE+NH d_con stacks both
+  validated for ML/training-style float32 workflows.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
