@@ -284,6 +284,32 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # disables the cap (preserves baseline bit-for-bit when
         # ``damp_v_d_con > 0``).  FV3 production default is 1.0
         # K/s.  Differentiable everywhere via ``jnp.clip``.
+        # iter-219 added FV3 sponge-aware behavior: PE skips the
+        # cap entirely for k=0,1 (top 2 sponge layers, FV3 cp_air
+        # branch) while applying it to k>=2; NH applies a tighter
+        # cap (0.1*delt_max at k=0, 0.5* at k=1, 1* at k>=2).
+    corner_div_damp_d_con: float = 0.0
+        # FV3-faithful KE→heat conversion for the iter-16/18
+        # corner-divergence damping (FV3_3D iter 221).  When the
+        # corner-div mechanism removes KE from (u_d, v_d) via the
+        # tendency ``du_d_dt -= ∇x(damp*delpc) / 2dx``, the lost KE
+        # is converted to heat in T (energy conservation).  Mirrors
+        # the iter-208 pattern but for corner-div instead of
+        # damp_v.  Heat tendency formula (per second, leading
+        # order; the 0.5*du² term is O(dt) and dropped in the
+        # tendency form):
+        #
+        #     dKE/dt = u_d * du_d_dt_cdd + v_d * dv_d_dt_cdd
+        #     dT/dt += -corner_div_damp_d_con * (dKE/dt) / c_pd
+        #
+        # where du_d_dt_cdd, dv_d_dt_cdd are the corner-div damp
+        # contribution to the wind tendency.  Computed at corners
+        # then projected to cell centres via
+        # ``_interp_corner_to_center``.  Default 0.0 preserves
+        # bit-for-bit baseline; gated INSIDE the iter-16
+        # ``corner_div_damp_d2_bg > 0`` block.  FV3 production
+        # default is ``d_con = 1.0``.  The iter-218/219 sponge-
+        # aware ``delt_max`` cap also applies to this heating term.
     use_fv3_a2b_zeta_corner: bool = False
         # FV3-faithful 4th-order A→B interpolation for the relative
         # vorticity ``ζ`` from cell centres to D-grid corners (the
@@ -879,8 +905,38 @@ def fv3_hydrostatic_tendencies(
         # direct subtraction since the dt_approx cancels with our
         # tendency convention (the iter-16 damping is meant as a
         # per-step rate equivalent).
-        du_d_dt = du_d_dt - _dke_dx_pad / _two_dx
-        dv_d_dt = dv_d_dt - _dke_dy_pad / _two_dy
+        _du_d_dt_cdd = -_dke_dx_pad / _two_dx
+        _dv_d_dt_cdd = -_dke_dy_pad / _two_dy
+        du_d_dt = du_d_dt + _du_d_dt_cdd
+        dv_d_dt = dv_d_dt + _dv_d_dt_cdd
+
+        # FV3_3D iter 221: optional KE→heat conversion for the
+        # corner-divergence damping wind tendency.  FV3 sw_core.F90
+        # line 1085-1086 accumulates ``ke_correction * delpc`` into
+        # ``heat_source`` which then appears in ``dyn_core.F90``
+        # line 1764-1779's d_con block.  Mirror in our tendency
+        # form: heat tendency = -d_con * (u_d * du_dt + v_d * dv_dt)
+        # / c_pd at corners, then projected to cell centres for the
+        # T tendency.  Leading-order in dt; the 0.5*du² term that
+        # FV3 carries in the discrete form is O(dt) and dropped in
+        # this RK3-compatible tendency port.  Default 0.0
+        # preserves bit-for-bit baseline.  The iter-218/219 sponge-
+        # aware ``delt_max`` cap is applied below in the ``T``
+        # tendency builder (section 12) where dT_dt is finalized.
+        if config.corner_div_damp_d_con > 0.0:
+            _dKE_dt_corner_cdd = (
+                u_d * _du_d_dt_cdd + v_d * _dv_d_dt_cdd
+            )
+            _dT_dt_cdd_cc = (
+                -config.corner_div_damp_d_con
+                * _interp_corner_to_center(_dKE_dt_corner_cdd)
+                / constants.c_pd
+            )
+        else:
+            _dT_dt_cdd_cc = None
+
+    else:
+        _dT_dt_cdd_cc = None
 
     # --- 10b. Surface pressure tendency and vertical motion ---
 
@@ -1067,6 +1123,12 @@ def fv3_hydrostatic_tendencies(
     adiabatic = adiabatic + kappa * T * v_dot_grad_lnps
 
     dT_dt_data = horiz_adv_T + vert_adv_T + adiabatic
+
+    # FV3_3D iter 221: add the corner-divergence-damp KE→heat
+    # tendency captured in section 10a.  Default 0.0 preserves
+    # bit-for-bit baseline.
+    if _dT_dt_cdd_cc is not None:
+        dT_dt_data = dT_dt_data + _dT_dt_cdd_cc
 
     # --- 12. Diffusion ---
     # 12a. Laplacian viscosity on D-grid winds

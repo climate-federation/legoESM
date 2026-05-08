@@ -487,6 +487,25 @@ Key iterations:
   3 PE steps with all knobs ON.  4/4 umbrella tests pass in
   247 s (close to baseline 222 s, no significant regression
   from the per-level cap mask).
+- Iter 221: port FV3 ``d_con`` KE→heat conversion for the iter-16/
+  18 corner-divergence damping (PE).  iter-208 ported d_con for
+  damp_v but the docstring noted "the corner-div damping
+  contribution is a future iteration".  iter-221 closes that gap
+  on the PE side: when corner-div removes KE from (u_d, v_d) via
+  the tendency ``du_d_dt -= ∇x(damp*delpc) / 2dx_corner``, the
+  lost KE is converted to heat in T (FV3 sw_core.F90:1085-1086 +
+  dyn_core.F90:1764-1779).  Heat tendency formula (per second,
+  leading order; the 0.5*du² term is O(dt) and dropped in the
+  RK3-compatible tendency form):
+  ``dT/dt = -corner_div_damp_d_con * (u_d * du_d_dt_cdd + v_d *
+  dv_d_dt_cdd) / c_pd``, computed at corners then projected to
+  cell centres via ``_interp_corner_to_center``.  Adds
+  ``corner_div_damp_d_con: float = 0.0`` config knob; default
+  preserves bit-for-bit baseline.  Gated INSIDE
+  ``corner_div_damp_d2_bg > 0``.  Four-test fixture:
+  off-baseline, T-changes-when-active, no-op-when-corner-div-off,
+  AD-safe-at-rest.  16/16 PE regression tests pass (incl.
+  iter-185 umbrella, iter-188 AST guards).
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
