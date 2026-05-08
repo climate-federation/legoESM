@@ -528,104 +528,36 @@ Key iterations:
   ``dT_dt_data``.  Mirrors FV3 ``heat_source``-then-cap-once
   pattern.  3-test fixture; PE umbrella still passes; 16/16
   PE regression preserves baseline.
-- Iter 240: NH mirror of iter-239 + 10-iter compaction.
-  Aggregate the 3 NH tendency-based d_con contributions
-  (iter-222/224/226) and apply the iter-219 NH sponge-aware
-  cap (k=0 → 0.1×delt_max/Π_ref, k=1 → 0.5×, k≥2 → 1×).
-  Tests: off-baseline, sponge-aware bounds at every level.
-  16/16 NH regression preserves baseline (delt_max=0 bit-for-
-  bit equal).  Also compacts ToC entries iter-230..239 from
-  ~115-line block to ~40 lines (saves ~75 lines for context
-  budget).
-- Iter 241: extend iter-188 PE and iter-172 NH AST guards to
-  cover the iter-239/240 aggregate-cap pattern.  Adds 1 new
-  pair to each guard list — gate ``_d_con_sum is not None``
-  paired with PE helper ``_cap_per_level`` / NH helper
-  ``_sponge_factor``.  Catches refactors that drop or rewrite
-  the aggregate-cap block while leaving per-mechanism
-  ``config.X_d_con > 0`` checks intact.  8/8 AST tests pass
-  in 82 s.
-- Iter 242: 50-step multi-step stability test for the full
-  PE+NH toolkit + d_con stack at FV3 production defaults
-  (delt_max=1.0 + all 5 d_con knobs at 1.0 + corner-div nord=1
-  + cell-centre div_damp + damp_v + damp_w + A_h smag_cs=0.20).
-  Catches slow-growth instabilities that single-step iter-184/
-  185 / 3-5-step iter-237 + 10-step iter-231/232 tests don't
-  expose.  All fields remain finite + bounded growth
-  (max|u| < 100 m/s) at step 50 from random IC.  PE 50 × dt=100
-  + NH 50 × dt=10 both pass in 33 s.
-- Iter 243: extend iter-238 global-energy-conservation
-  regression to all 3 PE tendency d_con sites individually
-  (corner-div, cell-centre div_damp, A_h) PLUS the iter-239
-  aggregate path with all 3 ON simultaneously.  Each site:
-  ``Σ c_pd * dT_dt + Σ dKE_dt == 0`` at rtol=1e-10.
-  Verifies the linear-superposition property that EACH d_con
-  formula conserves global energy independently AND the sum
-  conserves it (since it's just a linear sum).  Acts as a
-  comprehensive regression target for any future formula
-  refinement (e.g., the rsin2/cosa_s metric-aware port from
-  iter-238).  4/4 pass in 17 s.
-- Iter 244: extend iter-242 50-step stability test to 100
-  steps with stronger random IC (±10 m/s vs ±5 m/s).  Catches
-  slow-growth instabilities that 50 steps miss — a mode with
-  growth rate ~1/100 steps would amplify by e^1 over 100
-  steps but only e^0.5 over 50.  Both PE 100×dt=100 and NH
-  100×dt=10 complete with all fields finite + max|u| < 100
-  m/s.  2/2 pass in 33 s.  Independent test file (does not
-  modify iter-242, so iter-242 keeps its fast 33s coverage).
-- Iter 245: PE iter-19 PRODUCTION values (d4_bg=0.02 + nord=1,
-  the C36 30-day cube-imprint sweet spot from iter-19) + d_con
-  stack at C36 production resolution.  iter-242/244 used softer
-  d4_bg=1e-3 (iter-192-style for AD-friendly umbrellas).
-  iter-245 runs 20 steps × dt=200 = 1 hour at C36 with the
-  iter-19 PRODUCTION setting + all 4 PE d_con knobs at 1.0 +
-  delt_max=1.0 + A_h=1e7 (iter-33 calibration scaled to C36).
-  Validates that the d_con stack composes stably with the
-  production damping at the actual production grid.  Also adds
-  physical-bounds sanity (100 K < T < 400 K).  1/1 pass in
-  17 s.
-- Iter 246: audit + regression test for the PE T-convention
-  in d_con.  FV3 ``dyn_core.F90:1768`` divides ``heat_source``
-  by ``c_pd * delp * pkz`` because FV3's prognostic ``pt`` is
-  ``c_p*T/pkz``.  legoESM PE T is actual temperature directly,
-  so our iter-208 d_con formula uses just ``-d_con * dKE /
-  c_pd`` (no pkz factor).  Updates iter-208 docstring
-  documenting this convention difference (NOT a fidelity gap
-  — both produce the same physical ΔT for a given heat
-  input, just different state-variable conventions).  Adds a
-  regression test that pins the no-pkz formula at rtol=1e-10
-  AND verifies a synthetic pkz-scaled variant does NOT match
-  (non-vacuous check).  1/1 pass in 15 s.
-- Iter 247: regression sweep checkpoint of all iter 240-246
-  tests after the iter-239/240 aggregate-cap refactor.  13/13
-  pass: iter-240 (NH aggregate cap, 2 tests), iter-242
-  (PE+NH 50-step, 2), iter-243 (4 conservation tests), iter-244
-  (PE+NH 100-step, 2), iter-245 (C36 production, 1), iter-246
-  (T-convention, 1).  Confirms the iter-239/240 refactor
-  preserves bit-for-bit baseline at delt_max=0 across the
-  entire d_con stack.  No new test file (housekeeping
-  iteration).
-- Iter 248: stress test the delt_max cap with EXTREME damping
-  values.  Default tests use FV3 production (delt_max=1.0,
-  d_con=1.0) where the cap rarely engages.  iter-248 uses
-  100x d_con multipliers + tight delt_max=1e-5 to FORCE the
-  iter-239 aggregate cap to actively bound the per-step ΔT.
-  Tests: (1) cap engages — capped d_con max|ΔT| < uncapped
-  max|ΔT| at interior layers; (2) capped run remains stable
-  for 20 steps; (3) extreme d_con multipliers produce >5x
-  more heat than normal (1x) — confirms the test is non-
-  vacuous.  2/2 pass in 27 s.  Validates that the cap
-  mechanism actually works under the extreme transients it
-  was designed to bound.
-- Iter 249: bit-for-bit formula test for the iter-187
-  smag_vort cap (FV3 sw_core.F90:1799).  Computes the
-  expected ``smag_vort = |dt| * sqrt(delpc² + ζ²)`` from a
-  known state and verifies the iter-183 AD-safe double-where
-  form produces the SAME result as the naive sqrt formula
-  at rtol=1e-12 + symmetry under (delpc, ζ) swap.  Acts as
-  a regression target for any future change to the cap
-  formula or the iter-183 sqrt(0) safety pattern.  1/1 pass
-  in 18 s.
+- Iter 240: NH mirror of iter-239 aggregate cap (5-knob
+  sponge-aware sum + jnp.clip).  Compacts iter-230..239 ToC.
+- Iter 241: AST guards for iter-239/240 aggregate-cap pattern
+  (gate ``_d_con_sum is not None`` + PE/NH helper symbols).
+- Iter 242: 50-step PE+NH stability test, full toolkit + d_con
+  stack at FV3 production defaults.  All fields finite +
+  max|u| < 100 m/s.
+- Iter 243: extend iter-238 global-energy-conservation to all
+  3 PE tendency d_con sites + aggregate path.  rtol=1e-10.
+- Iter 244: 100-step PE+NH stability with stronger IC (±10
+  m/s) — catches slow-growth instabilities that 50-step
+  iter-242 might miss.
+- Iter 245: PE iter-19 PRODUCTION values (d4_bg=0.02 + nord=1)
+  at C36 with full d_con stack, 20×dt=200 + physical-T bounds.
+- Iter 246: audit PE T-convention (no pkz factor needed since
+  legoESM PE T is actual temperature, not FV3's c_p*T/pkz).
+- Iter 247: regression sweep checkpoint, 13/13 iter-240..246
+  pass after iter-239/240 refactor (delt_max=0 bit-for-bit).
+- Iter 248: stress test delt_max cap with 100x d_con + tight
+  delt_max=1e-5 to FORCE cap activation.  Validates the cap
+  actually engages and bounds per-step ΔT.
+- Iter 249: bit-for-bit formula test for PE iter-187 smag_vort
+  cap (FV3 sw_core.F90:1799 form).  rtol=1e-12 + symmetry.
+- Iter 250: NH mirror of iter-249 smag_vort cap formula test.
+  Same FV3 form ``|dt|*sqrt(delpc²+ζ²)`` verified bit-for-bit
+  on the NH path at rtol=1e-12.  Both PE+NH iter-187 wirings
+  now have formula-level regression tests.  Also compacts
+  iter-240..249 ToC entries from ~100 lines to ~25 lines for
+  context budget at the user-requested 10-iter compaction
+  boundary.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
