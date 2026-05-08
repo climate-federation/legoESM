@@ -156,6 +156,10 @@ Key iterations:
 - Iter 182: fix PE T_diss wind_speed = sqrt(u² + v²) sqrt(0)
   gradient singularity (same iter-181 double-where pattern).
   PE rest-state differentiability through T_diss now works
+- Iter 183: fix SW d_sw5 smag_vort = sqrt(delpc² + wk²) sqrt(0)
+  gradient singularity (same iter-181/182 double-where pattern).
+  iter-962 SW W2 sentinel preserved bit-for-bit; AD through SW
+  rest state with adaptive Smagorinsky now works
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
@@ -4038,6 +4042,84 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
+
+## Iteration 183 (2026-05-08): fix smag_vort sqrt(0) in fv3_sw_core
+
+### Goal
+
+Continue the iter-181/182 differentiability audit.  An audit pass
+of FV3 helpers found a third instance of the sqrt-at-zero gradient
+hazard in ``fv3_sw_core.py:1797``::
+
+    smag_vort = jnp.abs(dt) * jnp.sqrt(delpc ** 2 + wk_corner ** 2)
+
+This is inside ``_d_sw5_corner_divergence``'s adaptive Smagorinsky
+branch (``dddmp > 0``).  At rest state both ``delpc`` and
+``wk_corner`` are 0; the gradient through ``sqrt(0+0)`` is
+undefined.  This breaks ``jax.grad`` through any rest-state SW
+shallow-water model with adaptive Smagorinsky enabled (e.g., the
+iter-962 SW W2 calibration).
+
+iter 183 applies the same JAX double-where trick from iter 181/182.
+
+### Implementation
+
+File: ``src/legoesm/core/fv3_sw_core.py``, lines ~1797-1801.
+Replaced::
+
+    smag_vort = jnp.abs(dt) * jnp.sqrt(delpc ** 2 + wk_corner ** 2)
+
+with::
+
+    _smag_arg = delpc ** 2 + wk_corner ** 2
+    _safe_smag_arg = jnp.where(_smag_arg > 0.0, _smag_arg, 1.0)
+    _smag_root = jnp.where(
+        _smag_arg > 0.0, jnp.sqrt(_safe_smag_arg), 0.0,
+    )
+    smag_vort = jnp.abs(dt) * _smag_root
+
+Properties:
+
+* **Forward pass**: bit-for-bit unchanged at any nonzero
+  ``delpc² + wk_corner²``; exactly 0 at rest.  Verified by the
+  iter-962 SW W2 sentinel still passing.
+* **Backward pass**: gradient finite (zero) at rest state instead
+  of NaN.
+
+### Tests added
+
+New file ``tests/test_smag_vort_grad_iter183.py`` (2 tests):
+
+1. ``test_d_sw5_smag_dddmp_zero_baseline`` — sanity that
+   ``dddmp = 0`` gives reproducible finite output (no Smagorinsky
+   branch).
+2. ``test_d_sw5_smag_grad_finite_at_rest`` — direct test of
+   ``_d_sw5_corner_divergence`` with ``dddmp = 0.05`` at rest
+   state (zero u_d, v_d, ua, va).  ``jax.grad`` w.r.t. both u_d
+   and v_d gives finite gradients.  Was NaN before iter 183.
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_smag_vort_grad_iter183.py
+    => 2 passed in 11.18 s
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_iter962_smagorinsky_tweak.py \
+        tests/test_smagorinsky_visc.py \
+        tests/test_smagorinsky_grad_at_zero_iter181.py
+    => 13 passed (iter-962 SW W2 sentinel + Smagorinsky helper
+       tests unchanged after iter-183 fix)
+
+### Status
+
+Three sqrt-at-zero gradient hazards now closed (iter 181, 182, 183).
+The full FV3 fidelity damping toolkit is differentiable through
+the rest state on all three known affected helpers
+(compute_smagorinsky_ah_2d, primitive_eq T_diss wind_speed,
+fv3_sw_core d_sw5 smag_vort).
 
 ## Iteration 182 (2026-05-08): fix wind_speed sqrt(0) in PE T_diss
 
