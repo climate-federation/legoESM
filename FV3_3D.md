@@ -433,6 +433,17 @@ Key iterations:
   IC.  PE iter-12 damp_v has the same backbone
   (``fv3_del6_vorticity_damping``) but no analogous direction test.
   iter 216 mirrors iter-175 for PE.
+- Iter 217: PE counterpart of iter-179 cube-imprint metric.
+  Adds the PE-side equivalent of iter-179's edge_std/interior_std
+  ratio metric using PE D-grid corner storage for v_d.  Two tests:
+  metric is well-defined on baseline; toolkit measurably changes
+  the ratio (within sanity bounds).  At C8 with random IC over
+  5 PE steps the toolkit does not necessarily REDUCE the ratio
+  (random IC has comparable signal at edge and interior), so the
+  test relaxes from "must reduce" to "must change without strongly
+  amplifying".  For quantitative PE edge-suppression validation
+  see iter-1039 (uniform u, deterministic IC) and the matrix HS
+  C36 hybrid 30-day reference (iter-19 Quick Reference table).
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
