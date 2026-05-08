@@ -164,6 +164,10 @@ Key iterations:
   (all 5 iter-168/169/170/171/180 knobs ON simultaneously).
   Catches any future helper that introduces a new sqrt-at-zero
   or other AD-hazard in the NH AD-critical path
+- Iter 185: PE counterpart to iter-184 — umbrella AD-at-rest
+  regression for the full PE toolkit (8 PE damping knobs ON
+  simultaneously, including T_diss_coeff that iter-182 fixed).
+  Both 3D paths now have integration-level AD-hazard guards
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
@@ -4046,6 +4050,57 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
+
+## Iteration 185 (2026-05-08): PE full-toolkit AD-at-rest umbrella regression
+
+### Goal
+
+iter 184 added the umbrella AD-at-rest regression for the NH 3D
+path.  This iter adds the PE counterpart, exercising every PE
+damping knob simultaneously at rest state to catch any future
+AD hazard in ``primitive_eq_cdgrid.py``.
+
+The PE path has more knobs than NH: PE-only ``T_diss_coeff``
+(iter-182 fix) is included along with the iter-12/14/16/18/57-58
+mechanisms that the NH path mirrors via iter 168/169/170/180.
+
+### Implementation
+
+New file ``tests/test_pe_full_toolkit_ad_at_rest_iter185.py``
+(2 tests, no production code change):
+
+1. ``test_full_pe_toolkit_grad_at_rest`` — every PE damping knob
+   ON simultaneously at exactly the rest state, ``jax.grad``
+   w.r.t. T gives finite gradients.  Exercises:
+
+   * ``A_h`` + ``smagorinsky_cs`` (Smagorinsky A_h — iter-181 fix)
+   * ``hyperdiff_coeff`` (4th-order biharmonic)
+   * ``div_damp_coeff`` (cell-centre divergence damping, iter 5)
+   * ``use_fv3_a2b_zeta_corner`` (iter 14)
+   * ``damp_v`` + ``nord_v`` (iter 12 post-step vorticity damping)
+   * ``corner_div_damp_d2_bg`` + ``corner_div_damp_dddmp``
+     (iter 16/18 corner-divergence damping)
+   * ``T_diss_coeff`` (velocity-dependent T dissipation —
+     iter-182 fix)
+
+2. ``test_full_pe_toolkit_grad_at_perturbed`` — sanity that
+   perturbed state works (rest is the challenging case).
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_pe_full_toolkit_ad_at_rest_iter185.py
+    => 2 passed in 92.85 s
+
+### Status
+
+iter-184 covered NH; iter-185 covers PE.  Both 3D paths now have
+umbrella AD-at-rest regression tests that catch any future
+AD-hazard regression at the integration level.  Combined with
+the focused per-helper tests from iter 181/182/183, the
+differentiability surface is comprehensively guarded.
 
 ## Iteration 184 (2026-05-08): NH full-toolkit AD-at-rest umbrella regression
 
