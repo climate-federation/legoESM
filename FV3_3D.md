@@ -674,6 +674,14 @@ Key iterations:
   sphere halo cross-panel exchange.  5/5 pass in 9.2 s.
   Third orthogonal helper-formula axis (after iter-292
   linear-in-c_s and iter-293 linear-in-(u, v)).
+- Iter 295: linear-in-|dt| scaling and sign-symmetry of the
+  iter-187 smag_vort cap formula
+  ``smag_vort = |dt|*sqrt(delpc² + ζ²)``.  α*dt → |α|×
+  smag_vort (rtol=1e-14) for α ∈ {-2.5, 0.5, 1.0, 3.0}.
+  smag_vort(±delpc, ±ζ) array-equal across all 4 sign
+  combinations (squared inputs).  Pure helper-formula test
+  mirroring iter-285's pattern; fills scaling/symmetry
+  slots iter-285 didn't cover.  5/5 pass in 0.2 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
