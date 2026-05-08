@@ -617,6 +617,15 @@ Key iterations:
   vacuous.  2/2 pass in 27 s.  Validates that the cap
   mechanism actually works under the extreme transients it
   was designed to bound.
+- Iter 249: bit-for-bit formula test for the iter-187
+  smag_vort cap (FV3 sw_core.F90:1799).  Computes the
+  expected ``smag_vort = |dt| * sqrt(delpc² + ζ²)`` from a
+  known state and verifies the iter-183 AD-safe double-where
+  form produces the SAME result as the naive sqrt formula
+  at rtol=1e-12 + symmetry under (delpc, ζ) swap.  Acts as
+  a regression target for any future change to the cap
+  formula or the iter-183 sqrt(0) safety pattern.  1/1 pass
+  in 18 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
