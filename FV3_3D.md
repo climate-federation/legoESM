@@ -394,24 +394,33 @@ DONE (iter 39-75):
   ``compute_smagorinsky_ah_{2d,3d}`` + ``LEGOESM_SMAG_CS`` env var.
   Note iter 60: insufficient as standalone fix; works as
   complement.
-- ✅ C96 stability (iter 65-72): empirical sweep, CFL-aware ``dt``
-  helper with short_time/long_time/auto modes,
-  ``LEGOESM_HS_CUBE_DT_CFL=auto`` recommended.
+- ✅ C96 short-time stability (iter 65-72): empirical sweep,
+  CFL-aware ``dt`` helper.
+- ✅ C96 long-time stability investigation (iter 79-95): identified
+  day-22.5 NaN at dt=100 (iter 79); iter-80 added very_long_time
+  mode (dt=50); iter-81 promoted auto to very_long_time at n>=96;
+  iter-95 empirically confirmed dt=50 passes day 22.5; full 30-day
+  validation in progress at iter 96.
 - ✅ Finer A_h calibration at C48 (iter 37 sweet spot ah_x2 = 6.12e+06).
 
-STILL OPEN:
+STILL OPEN (post-iter-95):
+- C96 dt=50 30-day FINAL completion (iter-95 confirmed past day
+  22.5; final ~7.5 days expected to complete in iter 97).
 - C72 ``dt=100`` re-test under quieter system load (would
   validate the iter-72 long_time mode at C72, currently changes
   iter-33 reference numbers).
 - 200-day climate-relevant integration (matrix HS uses 30 days
   quick spin-up).
-- C144 / C192 empirical stability validation (extrapolated only).
+- C144 / C192 empirical stability validation.  iter-85 1/dt
+  scaling predicts dt=66 stable to day 30 at C144 and dt=50
+  stable to day 25 at C192 — both UNTESTED.
 - Substantive ``nord >= 2`` fidelity restructure (halo'd
   intermediate ``divg_d`` arrays, vector corner fill at nt > 0)
   — iter 32 found the C72 mode is interior, NOT cube-vertex, so
   this is lower priority than originally thought.
 - Cube long-time integration with combined Smagorinsky + ah_x10
-  + auto dt at C96+ (iter 70 tested at 20 days; 30+ pending).
+  + auto dt at C96+ (iter 70 tested at 20 days; iter 95 dt=50
+  alone past 22.5 — combined likely unnecessary now).
 
 ---
 
