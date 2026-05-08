@@ -655,6 +655,12 @@ Key iterations:
   > 0 at non-rest matches naive sqrt at rtol=1e-12.  Pure
   helper-formula test (no model integration).  2/2 pass in
   0.6 s.
+- Iter 286: float32 sanity test for PE d_con stack.  All
+  other d_con tests use jax_enable_x64=True (float64).
+  iter-286 verifies the PE iter-19 toolkit + full d_con
+  stack runs at JAX default float32 precision without NaN
+  for 5 steps × dt=100.  Validates that the d_con stack
+  doesn't have float64-only assumptions.  1/1 pass in 15 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
