@@ -1,0 +1,411 @@
+diff --git a/docs/CROSS_GRID_COMPARISON_REPORT.md b/docs/CROSS_GRID_COMPARISON_REPORT.md
+index c91c1d56..34219ae4 100644
+--- a/docs/CROSS_GRID_COMPARISON_REPORT.md
++++ b/docs/CROSS_GRID_COMPARISON_REPORT.md
+@@ -1,6 +1,6 @@
+ # legoESM Cross-Grid Comparison Report
+ 
+-**Branch**: `simulation_full_check` (iter-126 snapshot)
++**Branch**: `simulation_full_check` (iter-127 snapshot)
+ **Scope**: end-to-end cross-grid comparison across the user's prompt
+ items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
+ test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
+diff --git a/scripts/ocean_test_matrix/experiments.py b/scripts/ocean_test_matrix/experiments.py
+index b7030511..5ec3d801 100644
+--- a/scripts/ocean_test_matrix/experiments.py
++++ b/scripts/ocean_test_matrix/experiments.py
+@@ -721,6 +721,11 @@ def run_geostrophic_adjustment(tc: TestCase, output_dir: Path, days: float
+     # All grids now use same physical units
+     T_drift = _compute_drift(diag.get("mean_T", []))
+     notes = f"T drift={T_drift:.2e}"
++    # iter-127 (codex iter-126-followup MEDIUM-2): apply
++    # T-drift gate (mirrors monolithic geostrophic_adjustment).
++    ok, notes = _apply_drift_tolerance(
++        ok, notes, T_drift, 1e-8,
++        label="T", n_samples=len(diag.get("mean_T", [])))
+ 
+     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+     depth = -z_full
+@@ -1192,6 +1197,12 @@ def run_overflow(tc: TestCase, output_dir: Path, days: float
+     T_drift = _compute_drift(diag.get("mean_T", []))
+     notes = (f"PE drift={pe_drift:.2e}, PE_rel={pe_rel_final:.4e}, "
+              f"T drift={T_drift:.2e}")
++    # iter-127 (codex iter-126-followup MEDIUM-2): apply
++    # T-drift gate to overflow.  Mirrors monolithic at 1e-2.
++    # PE drift NOT gated since PE evolves physically.
++    ok, notes = _apply_drift_tolerance(
++        ok, notes, T_drift, 1e-2,
++        label="T", n_samples=len(diag.get("mean_T", [])))
+ 
+     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+     depth = -z_full
+@@ -1304,6 +1315,13 @@ def run_stommel_gyre_tracer(tc: TestCase, output_dir: Path, days: float
+     undershoot = max(0, S_min_init - S_min_final)
+     notes = (f"S integral drift={S_int_drift:.2e}, "
+              f"overshoot={overshoot:.3f}, undershoot={undershoot:.3f}")
++    # iter-127 (codex iter-126-followup MEDIUM-2): apply
++    # S_integral-drift gate at 1e-3 (documented in
++    # ocean_experiments_reference.md) — mirrors monolithic.
++    ok, notes = _apply_drift_tolerance(
++        ok, notes, S_int_drift, 1e-3,
++        label="S_integral",
++        n_samples=len(diag.get("S_integral", [])))
+ 
+     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+     depth = -z_full
+diff --git a/scripts/ocean_test_matrix/timeloop.py b/scripts/ocean_test_matrix/timeloop.py
+index 23c39493..14d6b4df 100644
+--- a/scripts/ocean_test_matrix/timeloop.py
++++ b/scripts/ocean_test_matrix/timeloop.py
+@@ -56,44 +56,17 @@ def _apply_drift_tolerance(
+     ok: bool, notes: str, drift: float, tol: float,
+     *, label: str, n_samples: int | None = None,
+ ) -> tuple[bool, str]:
+-    """Apply a drift PASS tolerance to an ocean test case.
+-
+-    iter-126 (codex iter-124-followup MEDIUM-3): mirror copy
+-    of the iter-123/124 helper from
+-    ``scripts/run_ocean_test_matrix.py`` so the modular
+-    ``ocean_test_matrix`` package can use the same gating
+-    contract.  Identical semantics:
+-
+-    * NaN/Inf gate (iter-118)
+-    * n_samples >= 2 gate (iter-120)
+-    * Idempotent on already-failed runs
+-    * label keyword-only (iter-124 LOW-4)
+-
+-    Returns
+-    -------
+-    (ok, notes): tuple of updated values.
++    """Thin wrapper that delegates to the centralized
++    ``legoesm.diagnostics.conservation_drift.apply_drift_tolerance``
++    helper (iter-127 codex iter-126-followup LOW-5).
+     """
+-    import numpy as _np
+-    if ok and n_samples is not None and n_samples < 2:
+-        ok = False
+-        notes += (
+-            f" [FAIL: {label} series has only {n_samples} "
+-            f"sample(s); need >= 2 for a valid drift]"
+-        )
+-        return ok, notes
+-    if ok and (not _np.isfinite(drift) or drift > tol):
+-        ok = False
+-        if not _np.isfinite(drift):
+-            notes += (
+-                f" [FAIL: {label} drift is non-finite "
+-                f"({drift!r})]"
+-            )
+-        else:
+-            notes += (
+-                f" [FAIL: {label} drift {drift:.2e} > "
+-                f"tolerance {tol:.0e}]"
+-            )
+-    return ok, notes
++    from legoesm.diagnostics.conservation_drift import (
++        apply_drift_tolerance,
++    )
++    return apply_drift_tolerance(
++        ok, notes, drift, tol,
++        label=label, n_samples=n_samples,
++    )
+ 
+ 
+ # ===========================================================================
+diff --git a/scripts/run_ocean_test_matrix.py b/scripts/run_ocean_test_matrix.py
+index 2229842a..fdf5e8c0 100644
+--- a/scripts/run_ocean_test_matrix.py
++++ b/scripts/run_ocean_test_matrix.py
+@@ -387,48 +387,23 @@ def _apply_drift_tolerance(
+     ok: bool, notes: str, drift: float, tol: float,
+     *, label: str, n_samples: int | None = None,
+ ) -> tuple[bool, str]:
+-    """Apply a drift PASS tolerance to an ocean test case.
+-
+-    iter-123 (codex iter-119-followup MEDIUM-4): ocean
+-    matrix cases compute conservation-like drifts
+-    (``eta_drift``, ``T_drift``, ``PE_drift``,
+-    ``S_integral_drift``) but pre-iter-123 ``status`` was
+-    only set from ``ok = is_finite and not blown_up``.
+-    This made the cross-grid PASS column meaningless for
+-    conservation tests like ``rest_state``.
+-
+-    Mirrors the atmosphere matrix's ``_apply_mass_drift_tolerance``
+-    (iter-117/118/120) but generalized over the diagnostic
+-    label so the same helper handles eta/T/S/PE drifts.
+-
+-    Returns
+-    -------
+-    (ok, notes): tuple of updated values.  When ``drift`` is
+-    non-finite, n_samples < 2, or > tol, ``ok`` is set to
+-    False and a ``[FAIL: <label> drift ...]`` annotation is
+-    appended to ``notes``.
++    """Thin wrapper that delegates to the centralized
++    ``legoesm.diagnostics.conservation_drift.apply_drift_tolerance``
++    helper (iter-127 codex iter-126-followup LOW-5).
++
++    Pre-iter-127, the helper was duplicated in this module
++    AND in ``scripts/ocean_test_matrix/timeloop.py``.  iter-127
++    consolidates so future fixes flow through one place.
++    The wrapper exists for backward compatibility with the
++    existing callsites in this module.
+     """
+-    import numpy as _np
+-    if ok and n_samples is not None and n_samples < 2:
+-        ok = False
+-        notes += (
+-            f" [FAIL: {label} series has only {n_samples} "
+-            f"sample(s); need >= 2 for a valid drift]"
+-        )
+-        return ok, notes
+-    if ok and (not _np.isfinite(drift) or drift > tol):
+-        ok = False
+-        if not _np.isfinite(drift):
+-            notes += (
+-                f" [FAIL: {label} drift is non-finite "
+-                f"({drift!r})]"
+-            )
+-        else:
+-            notes += (
+-                f" [FAIL: {label} drift {drift:.2e} > "
+-                f"tolerance {tol:.0e}]"
+-            )
+-    return ok, notes
++    from legoesm.diagnostics.conservation_drift import (
++        apply_drift_tolerance,
++    )
++    return apply_drift_tolerance(
++        ok, notes, drift, tol,
++        label=label, n_samples=n_samples,
++    )
+ 
+ 
+ def _compute_drift(values: list[float]) -> float:
+diff --git a/src/legoesm/diagnostics/__init__.py b/src/legoesm/diagnostics/__init__.py
+index 64e71678..c8179520 100644
+--- a/src/legoesm/diagnostics/__init__.py
++++ b/src/legoesm/diagnostics/__init__.py
+@@ -3,6 +3,7 @@
+ from legoesm.diagnostics.column_integrals import column_water_vapor
+ from legoesm.diagnostics.conservation_drift import (
+     DEFAULT_MIN_BASELINE,
++    apply_drift_tolerance,
+     compute_relative_drift,
+     relative_drift_series,
+ )
+diff --git a/src/legoesm/diagnostics/conservation_drift.py b/src/legoesm/diagnostics/conservation_drift.py
+index a9e971cf..3bcfb90a 100644
+--- a/src/legoesm/diagnostics/conservation_drift.py
++++ b/src/legoesm/diagnostics/conservation_drift.py
+@@ -185,3 +185,85 @@ def relative_drift_series(
+         return np.empty(0, dtype=np.float64)
+     denom = max(abs(float(arr[0])), float(min_baseline))
+     return (arr - arr[0]) / denom
++
++
++def apply_drift_tolerance(
++    ok: bool, notes: str, drift: float, tol: float,
++    *, label: str, n_samples: int | None = None,
++) -> tuple[bool, str]:
++    """Apply a drift PASS tolerance to a test case.
++
++    iter-127 (codex iter-126-followup LOW-5/maintainability):
++    centralized version of the helper introduced in iter-117
++    for the atmosphere matrix runner (HS) and ported in iter-123/
++    124/125/126 to the ocean matrix monolithic + modular
++    runners.  Pre-iter-127 there were 2 byte-near-identical
++    copies (one in each runner) plus a third in the
++    atmosphere matrix.  iter-127 centralizes here so future
++    fixes flow through a single source of truth.
++
++    Behaviour:
++
++    * If the input series has fewer than ``n_samples=2`` samples
++      (when ``n_samples`` is provided), fail with a clear
++      ``[FAIL: <label> series has only N sample(s); ...]``
++      annotation (iter-120 fix).
++    * If ``drift`` is non-finite (NaN or Inf), fail with a
++      ``[FAIL: <label> drift is non-finite ...]`` annotation
++      (iter-118 fix).
++    * If ``drift > tol``, fail with a
++      ``[FAIL: <label> drift X.YYe-ZZ > tolerance ...]``
++      annotation (iter-117 baseline behaviour).
++    * Idempotent on already-failed runs (``ok=False`` short-
++      circuits all of the above).
++
++    The atmosphere matrix runner has a ``_apply_mass_drift_tolerance``
++    that is a thin wrapper over this helper specialized for
++    label="mass"; it remains for backward compatibility with
++    its existing callers.
++
++    Parameters
++    ----------
++    ok
++        Current PASS state of the test case.  False short-
++        circuits (idempotent).
++    notes
++        Per-test-case ``notes`` string that gets appended to.
++    drift
++        Computed drift magnitude.
++    tol
++        PASS tolerance.  Drift > tol or non-finite fails.
++    label
++        Diagnostic label (e.g., ``"mass"``, ``"eta"``,
++        ``"T"``, ``"S_integral"``).  Keyword-only per
++        iter-124 LOW-4.
++    n_samples
++        Optional length of the underlying series.  When
++        provided and < 2, fail with a "too few samples"
++        annotation.
++
++    Returns
++    -------
++    (ok, notes): tuple of updated values.
++    """
++    import numpy as _np
++    if ok and n_samples is not None and n_samples < 2:
++        ok = False
++        notes += (
++            f" [FAIL: {label} series has only {n_samples} "
++            f"sample(s); need >= 2 for a valid drift]"
++        )
++        return ok, notes
++    if ok and (not _np.isfinite(drift) or drift > tol):
++        ok = False
++        if not _np.isfinite(drift):
++            notes += (
++                f" [FAIL: {label} drift is non-finite "
++                f"({drift!r})]"
++            )
++        else:
++            notes += (
++                f" [FAIL: {label} drift {drift:.2e} > "
++                f"tolerance {tol:.0e}]"
++            )
++    return ok, notes
+diff --git a/tests/test_ocean_cross_grid_plots.py b/tests/test_ocean_cross_grid_plots.py
+index 66860cc3..0bbae084 100644
+--- a/tests/test_ocean_cross_grid_plots.py
++++ b/tests/test_ocean_cross_grid_plots.py
+@@ -1568,6 +1568,121 @@ class TestIter123OceanDriftTolerance:
+             "and use ``_apply_drift_tolerance``."
+         )
+ 
++    def test_iter127_helper_centralized(self):
++        """iter-127 codex iter-126-followup LOW-5: the
++        ``apply_drift_tolerance`` helper is now centralized
++        in ``legoesm.diagnostics.conservation_drift`` and
++        re-exported.  Both runner copies are thin delegating
++        wrappers.
++        """
++        from legoesm.diagnostics import apply_drift_tolerance
++        # Centralized helper exists and is callable.
++        ok, notes = apply_drift_tolerance(
++            ok=True, notes="initial",
++            drift=1e-3, tol=1e-2, label="test",
++            n_samples=2,
++        )
++        assert ok is True
++
++        # Both runner wrappers delegate to the centralized one.
++        from pathlib import Path
++        for rel in (
++            "scripts/run_ocean_test_matrix.py",
++            "scripts/ocean_test_matrix/timeloop.py",
++        ):
++            text = (
++                Path(__file__).resolve().parent.parent / rel
++            ).read_text()
++            assert "apply_drift_tolerance" in text, (
++                f"iter-127: {rel} must use the centralized helper."
++            )
++
++    def test_iter127_modular_geostrophic_uses_gate(self):
++        from pathlib import Path
++        path = (Path(__file__).resolve().parent.parent
++                / "scripts" / "ocean_test_matrix"
++                / "experiments.py")
++        text = path.read_text()
++        # Find run_geostrophic_adjustment and verify it has
++        # a _apply_drift_tolerance call.
++        import re
++        m = re.search(
++            r"def run_geostrophic_adjustment\b.*?(?=\ndef \w)",
++            text, re.DOTALL,
++        )
++        assert m is not None, (
++            "iter-127: could not find run_geostrophic_adjustment "
++            "in modular experiments.py"
++        )
++        body = m.group(0)
++        assert "_apply_drift_tolerance" in body, (
++            "iter-127: modular run_geostrophic_adjustment must "
++            "apply T-drift tolerance."
++        )
++
++    def test_iter127_modular_overflow_uses_gate(self):
++        from pathlib import Path
++        path = (Path(__file__).resolve().parent.parent
++                / "scripts" / "ocean_test_matrix"
++                / "experiments.py")
++        text = path.read_text()
++        import re
++        m = re.search(
++            r"def run_overflow\b.*?(?=\ndef \w)",
++            text, re.DOTALL,
++        )
++        assert m is not None
++        body = m.group(0)
++        assert "_apply_drift_tolerance" in body
++        assert 'label="T"' in body, (
++            "iter-127: modular run_overflow must gate on T "
++            "(passive scalar), not PE (which evolves physically)."
++        )
++
++    def test_iter127_modular_stommel_uses_gate(self):
++        from pathlib import Path
++        path = (Path(__file__).resolve().parent.parent
++                / "scripts" / "ocean_test_matrix"
++                / "experiments.py")
++        text = path.read_text()
++        import re
++        m = re.search(
++            r"def run_stommel_gyre_tracer\b.*?(?=\ndef \w|$)",
++            text, re.DOTALL,
++        )
++        assert m is not None
++        body = m.group(0)
++        assert "_apply_drift_tolerance" in body
++        assert 'label="S_integral"' in body
++        # Verify tolerance is the documented 1e-3 (not 1e-2).
++        m2 = re.search(
++            r"_apply_drift_tolerance\(\s*ok,\s*notes,\s*"
++            r"S_int_drift,\s*([\d.eE+-]+)",
++            body,
++        )
++        assert m2 is not None
++        assert float(m2.group(1)) <= 1e-3
++
++    def test_iter127_save_csv_handles_only_private_keys(self, tmp_path):
++        """iter-127 codex iter-126-followup LOW-4: when ALL
++        diag keys are private (underscore-prefixed), the CSV
++        writer should return cleanly without writing anything.
++        """
++        m = self._import_module()
++        diag = {
++            "steps": [0, 100, 200],
++            "times": [0.0, 0.5, 1.0],
++            "_blowup_info": {"step": 200},
++            # No legitimate timeseries columns.
++        }
++        m._save_timeseries_csv(tmp_path, diag, dt=300.0)
++        # CSV file should NOT exist (no legitimate keys).
++        csv_path = tmp_path / "mean_timeseries.csv"
++        assert not csv_path.exists(), (
++            "iter-127: when ALL diag keys are private, no CSV "
++            "should be written.  Got an empty CSV."
++        )
++
+     def test_modular_rest_state_uses_drift_tolerance(self):
+         """All 4 modular rest_state variants apply
+         ``_apply_drift_tolerance`` for both eta and T.

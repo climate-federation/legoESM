@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 import time
@@ -496,12 +497,345 @@ def _laplacian_visc_cube(n: int, frac: float = 0.05) -> float:
     A modest Laplacian viscosity (frac=0.05) is needed alongside
     biharmonic hyperdiffusion to damp grid-scale energy that the C-D
     grid staggering does not fully resolve.
+
+    .. warning::
+       This heuristic gives ``A_h ∝ 1/n``, which is INSUFFICIENT at
+       C72+ resolutions for the FV3 3D HS hybrid path
+       (`primitive_eq_cdgrid.py`).  iter 33 found C72 NaN at default
+       ``A_h`` but stable at 10x.  iter 32 traced the unstable mode to
+       the interior (synoptic-scale, not grid-scale), which del-2
+       Laplacian viscosity damps better than del-4 hyperdiff or
+       cube-vertex damping.
+
+       For C72+ users: the iter-43 ``_auto_ah_scale`` helper
+       auto-applies ``LEGOESM_AH_SCALE=10.0`` at n>=72 (no env var
+       needed).  Explicit override is still possible via the env
+       var.  See ``FV3_3D.md`` iter 33-43 for the full diagnosis.
     """
     import math
     from legoesm import constants
     dx = math.pi * constants.R_earth / (2.0 * n)
     c_gw = math.sqrt(constants.R_d * 300.0)
     return frac * c_gw * dx
+
+
+_CFL_SAFETY_SHORT_TIME: float = 0.462
+"""iter 66 calibration: preserves dt=200 at C72 (iter-33 reference)
+and reduces to 150.5 at C96.  Stable for ~10-15 days at C96 but
+NaNs at day 15 due to interior synoptic-scale eigenmode (iter 69).
+
+Note (iter 120): the three safety constants form an approximate
+1 : 2/3 : 1/3 ratio (short_time → long_time → very_long_time),
+giving roughly 1× : 1.5× : 3× the eigenmode survival time at any
+given resolution per iter-85 1/dt scaling."""
+
+_CFL_SAFETY_LONG_TIME: float = 0.307
+"""iter 70 calibration: dt=100 at C96 stable for 20 days.
+More conservative than short_time so DELAYS (but does not
+eliminate per iter 79) the C96 eigenmode.  CHANGES C72 dt from
+200 to 133 (does NOT preserve iter-33 reference).  iter 79 found
+this NaNs at day 22.5 — STILL INSUFFICIENT for 30-day."""
+
+_CFL_SAFETY_VERY_LONG_TIME: float = 0.154
+"""iter 80 calibration: dt=50 at C96.  iter-79 found dt=100 NaN's
+at day 22.5; this halves dt further as the next attempt at 30-day
+stability.  iter 99 EMPIRICALLY CONFIRMED full 30-day finite at
+C96 (max|u|=20.14 m/s, max|v|=11.84 m/s, 51840 steps, 1755 s
+wall).  iter-85 linear-in-1/dt prediction held: dt=50 was
+predicted to NaN at day 45; never reached because the 30-day run
+completed finite at day 30."""
+
+
+def _cfl_safe_dt_cube(
+    n: int,
+    base_dt: float = 200.0,
+    c_max: float = 320.0,
+    safety: float | None = None,
+    mode: str = "short_time",
+) -> float:
+    """iter 65/66/70: CFL-aware ``dt`` for cubed-sphere HS path.
+
+    Returns ``min(base_dt, safety * dx_face_center / c_max)``.
+
+    ``mode`` selects the calibration profile:
+
+    -   ``"short_time"`` (default): ``safety=0.462``.  Preserves
+        ``dt=200`` at C72 (iter-33 reference).  ``dt=150.5`` at C96
+        is stable for ~10 days but NaNs at day 15 (iter 69).
+    -   ``"long_time"``: ``safety=0.307``.  More conservative.
+        ``dt=100`` at C96 stable for 20 days (iter 70).
+        CHANGES ``dt`` at C72 from 200 to 133 — does NOT preserve
+        iter-33 reference.  iter 79 found this NaNs at day 22.5
+        — STILL INSUFFICIENT for 30-day C96.
+    -   ``"very_long_time"``: ``safety=0.154``.  Even more
+        conservative.  ``dt=50`` at C96.  Untested at 30 days
+        (iter 80, deferred for empirical validation).  CHANGES
+        ``dt`` at C72 from 200 to 67.
+
+    The ``safety`` argument, when explicitly provided as a float,
+    overrides ``mode``.
+
+    Computation::
+
+        dx_face_center = pi * R_earth / (2 * n)
+        dt_cfl = safety * dx_face_center / c_max
+
+    where ``c_max`` is a representative upper bound for advection
+    + acoustic-mode wave speed (HS is hydrostatic so we cap at
+    ``c_max ~ 320 m/s`` for jet-stream + gravity-wave combination
+    rather than the 850 m/s sound speed).
+
+    Per-resolution tables:
+
+    ``mode="short_time"`` (iter 66)::
+
+        C36: dt_cfl=399 -> capped to 200
+        C48: dt_cfl=300 -> capped to 200
+        C72: dt_cfl=200 -> 200 (iter-33 reference preserved)
+        C96: dt_cfl=150 -> 150 (iter-65 empirical threshold)
+        C144: dt_cfl=100 -> 100
+
+    ``mode="long_time"`` (iter 70)::
+
+        C36: dt_cfl=265 -> capped to 200
+        C48: dt_cfl=199 -> 199
+        C72: dt_cfl=133 -> 133  (CHANGES iter-33 reference)
+        C96: dt_cfl=100 -> 100  (iter-70 long-time stable)
+        C144: dt_cfl=66 -> 66
+
+    This helper does NOT auto-apply.  The matrix HS / baroclinic
+    paths only call this helper when ``LEGOESM_HS_CUBE_DT_CFL`` is
+    truthy.  ``LEGOESM_HS_CUBE_DT_CFL=long_time`` selects the
+    long-time mode (iter 71).
+
+    Raises
+    ------
+    ValueError
+        If ``n <= 0`` (gnomonic projection requires positive cube
+        face count), ``c_max <= 0`` (would give negative or
+        infinite dt), or ``mode`` is not in
+        ``{"short_time", "long_time"}``.
+    """
+    import math
+    from legoesm import constants
+    if n <= 0:
+        raise ValueError(
+            f"_cfl_safe_dt_cube: n must be a positive cube face count, "
+            f"got n={n}"
+        )
+    if c_max <= 0:
+        raise ValueError(
+            f"_cfl_safe_dt_cube: c_max must be positive (representative "
+            f"wave speed in m/s), got c_max={c_max}"
+        )
+    if safety is None:
+        if mode == "short_time":
+            safety = _CFL_SAFETY_SHORT_TIME
+        elif mode == "long_time":
+            safety = _CFL_SAFETY_LONG_TIME
+        elif mode == "very_long_time":
+            safety = _CFL_SAFETY_VERY_LONG_TIME
+        else:
+            raise ValueError(
+                f"_cfl_safe_dt_cube: mode must be 'short_time', "
+                f"'long_time', or 'very_long_time', got {mode!r}"
+            )
+    dx_face = math.pi * constants.R_earth / (2.0 * n)
+    dt_cfl = safety * dx_face / c_max
+    return min(base_dt, dt_cfl)
+
+
+def _resolve_dt_cube(
+    n: int,
+    *,
+    label: str = "cube path",
+) -> float:
+    """iter 67/71: factored env-var parser for ``LEGOESM_HS_CUBE_DT_CFL``.
+
+    Returns the ``dt`` to use for the cubed-sphere HS / baroclinic
+    paths.  Honored values for ``LEGOESM_HS_CUBE_DT_CFL``:
+
+    -   Unset / ``0`` / ``false`` / ``no`` / ``off`` / ``""``:
+        ``dt = 200.0`` (iter-pre-66 default).
+    -   ``1`` / ``true`` / ``yes`` / ``on`` / ``short_time``:
+        iter-66 short-time calibration (``safety=0.462``).
+        Stable to ~10 days at C96; NaNs at day 15 (iter 69).
+    -   ``long_time`` / ``longtime``: iter-70 long-time calibration
+        (``safety=0.307``).  Stable to ~22 days at C96 (iter 79).
+        CHANGES ``dt`` at C72 from 200 to 133 (no longer iter-33
+        reference).
+    -   ``very_long_time`` / ``verylongtime``: iter-80 calibration
+        (``safety=0.154``).  ``dt=50`` at C96.  Untested at 30 d.
+    -   ``auto`` (iter-72): RECOMMENDED for short runs.  Picks
+        ``short_time`` for ``n < 96`` (preserves iter-33 C72
+        reference) and ``long_time`` for ``n >= 96`` (iter-70
+        C96 stability good for ~20 days, NaN at day 22.5 per
+        iter 79).
+
+    The ``label`` argument is used in the printed notice to
+    distinguish HS vs baroclinic vs other call sites; the
+    underlying calibration depends only on ``mode``.
+
+    iter-67 factor-out: previously this 10-line env-var pattern
+    was duplicated at both HS (line 2683) and baroclinic (line
+    3197) call sites.  CLAUDE.md forbids copy-paste with only
+    naming changes; this helper consolidates them.
+    """
+    raw = os.environ.get("LEGOESM_HS_CUBE_DT_CFL", "0").strip().lower()
+    if raw in ("0", "false", "no", "off", ""):
+        return 200.0
+    if raw in ("very_long_time", "verylongtime"):
+        mode = "very_long_time"
+    elif raw in ("long_time", "longtime"):
+        mode = "long_time"
+    elif raw == "auto":
+        # iter-72/81/86: auto-pick mode based on resolution.
+        # The threshold n=96 is empirical:
+        # - C72 short_time (dt=200) is iter-33 stable for 30 d.
+        # - C96 short_time (dt=150) NaNs in 6h (iter 65).
+        #   long_time (dt=100) NaNs at day 22.5 (iter 79).
+        #   very_long_time (dt=50) projected stable to day 45
+        #   (iter 85 linear-in-1/dt extrapolation).
+        # No empirical data exists for C80, C84, etc. — those
+        # would need short_time → long_time transition between
+        # C72 and C96 if ever tested.  For canonical (C36, C48,
+        # C72, C96, C144, C192) workflows, n=96 is the right cut.
+        mode = "very_long_time" if n >= 96 else "short_time"
+    elif raw in ("1", "true", "yes", "on", "short_time"):
+        mode = "short_time"
+    else:
+        raise ValueError(
+            f"LEGOESM_HS_CUBE_DT_CFL: unrecognised value {raw!r}.  "
+            f"Use 0/false/off (default), 1/true/short_time (iter-66), "
+            f"long_time (iter-71), very_long_time (iter-80), or auto "
+            f"(iter-72: short_time at n<96, long_time at n>=96)."
+        )
+    dt = _cfl_safe_dt_cube(n, mode=mode)
+    if dt < 200.0:
+        print(
+            f"[FV3_3D iter 66/71 CFL-aware dt mode={mode}] At C{n} "
+            f"({label}) reducing dt to {dt:.1f} s (was 200.0).",
+            flush=True,
+        )
+    return dt
+
+
+def _auto_ah_scale(
+    n: int,
+    env_value: str | None = None,
+    auto_disable: bool = False,
+) -> tuple[float, str | None]:
+    """Resolve the iter-43 ``LEGOESM_AH_SCALE`` auto-apply for cube res ``n``.
+
+    Returns ``(scale, message_or_none)``.  ``message`` is non-None when
+    the auto-apply fires (so the matrix can ``print`` it once).
+
+    Auto-apply rules (when ``env_value`` is None or empty string AND
+    ``auto_disable`` is False):
+    -   n  <  48  → scale=1.0 (no change, iter-19 default)
+    -   n  ∈ [48, 72) → scale=2.0 (iter-37 sweet spot, EXTRAPOLATED
+        from C48 stability data — C60 is inferred, not directly
+        validated; codex iter-45 review caveat)
+    -   n  >= 72  → scale=10.0 (iter-33 stability fix at C72; C96+
+        EXTRAPOLATED, not validated)
+
+    When ``env_value`` is provided (string) and non-empty, it is
+    parsed as a float and used unchanged — this is the explicit-
+    override path.  Validation: must be finite positive; 0, NaN,
+    inf, and negative values raise ``ValueError``.
+
+    When ``auto_disable=True`` AND env_value is unset, returns
+    scale=1.0 with no message regardless of ``n``.  This is the
+    iter-46 escape hatch (controlled by ``LEGOESM_AH_AUTO_DISABLE``
+    env var) for users who want pre-iter-43 baseline behavior
+    (e.g., regression tests that expect C72 to NaN at default A_h).
+
+    See ``FV3_3D.md`` iter 33-46 for the calibration history.
+    """
+    import math
+    # iter-45 codex feedback: treat '' (empty env var) as unset.
+    if env_value is not None and env_value.strip() != "":
+        scale = float(env_value)
+        # iter-45 codex feedback: validate finite positive.
+        if not math.isfinite(scale) or scale <= 0.0:
+            raise ValueError(
+                f"LEGOESM_AH_SCALE must be a finite positive float, "
+                f"got {env_value!r} (parsed as {scale}).  Unset the "
+                f"env var to use the iter-43 auto-apply default."
+            )
+        return scale, None
+    # iter-46 codex feedback: auto-disable escape hatch for
+    # backwards-compat with pre-iter-43 baseline expectations.
+    if auto_disable:
+        return 1.0, None
+    if n >= 72:
+        return 10.0, (
+            f"[FV3_3D iter 43 auto] At C{n} auto-applying "
+            f"LEGOESM_AH_SCALE=10 (iter-33).  Set env var to override."
+        )
+    if n >= 48:
+        return 2.0, (
+            f"[FV3_3D iter 43 auto] At C{n} auto-applying "
+            f"LEGOESM_AH_SCALE=2 (iter-37 sweet spot).  Set env var "
+            f"to override."
+        )
+    return 1.0, None
+
+
+def _laplacian_visc_cube_v2(n: int) -> float:
+    """Empirically calibrated Laplacian viscosity for cubed-sphere
+    HS hybrid path (iter 33-37).
+
+    Returns the LEGOESM_AH_SCALE-equivalent ``A_h`` directly:
+
+    | n   | recommended A_h | LEGOESM_AH_SCALE multiplier vs v1 |
+    |----:|----------------:|----------------------------------:|
+    |  36 |     4.08e+06    |                              1.0  |
+    |  48 |     6.12e+06    |                              2.0  |
+    |  72 |     2.04e+07    |                             10.0  |
+
+    For ``n`` not in the calibration set, this function uses a
+    log-linear interpolation in ``log(A_h) ~ log(n)``.  The slope
+    between C36 → C72 (factor 5x in A_h for factor 2x in n) is
+    captured by ``A_h ∝ n^2.32``; intermediate values fit a
+    quadratic-in-log fit to the 3 calibration points.
+
+    .. warning::
+       UNTESTED at C96+ resolutions.  This function extrapolates
+       under the iter-37-observed pattern but will need empirical
+       confirmation.  Run a stability check before climate-relevant
+       integration at any new resolution.
+
+    See ``FV3_3D.md`` iter 33-37 for the calibration history.
+
+    This is an OPT-IN function — ``_laplacian_visc_cube`` (v1)
+    remains the matrix default to avoid regressing the C36 / C48
+    iter-17 / iter-19 / iter-24 calibrations which are tuned for
+    the v1 ``A_h``.
+
+    To opt in, replace the matrix's ``ah = _laplacian_visc_cube(n)``
+    line with ``ah = _laplacian_visc_cube_v2(n)``, OR set
+    ``LEGOESM_AH_SCALE`` to match the v2 / v1 ratio at each
+    resolution.
+    """
+    import math
+    # Calibration points from iter 33-37.
+    calib = {36: 4.08e6, 48: 6.12e6, 72: 2.04e7}
+    if n in calib:
+        return calib[n]
+    # Log-linear interpolation/extrapolation.  Fit:
+    # log10(A_h) = a * log10(n) + b
+    # Through C36 and C72: slope = (log10(2.04e7) - log10(4.08e6))
+    #                            / (log10(72) - log10(36))
+    #                    = log10(5) / log10(2) ≈ 2.322
+    # i.e. A_h ∝ n^2.322
+    log_n_36 = math.log10(36.0)
+    log_a36 = math.log10(4.08e6)
+    log_n_72 = math.log10(72.0)
+    log_a72 = math.log10(2.04e7)
+    slope = (log_a72 - log_a36) / (log_n_72 - log_n_36)
+    log_a = log_a36 + slope * (math.log10(float(n)) - log_n_36)
+    return float(10.0 ** log_a)
 
 
 def _laplacian_visc_latlon(n_lat: int, frac: float = 0.1) -> float:
@@ -2424,6 +2758,41 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
 
 def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
                     radiation: str = "gray") -> tuple[str, float, str]:
+    """Run a Held-Suarez test on the given test case.
+
+    .. rubric:: User-facing env vars (FV3_3D iter 13-46 history)
+
+    The cubed-sphere HS branch reads these env vars at runtime to
+    activate the FV3-fidelity damping path.  All are OPTIONAL with
+    sensible auto-applied defaults.  See ``FV3_3D.md`` for full
+    calibration history.
+
+    | env var                  | default | iter | what                |
+    |:-------------------------|--------:|-----:|:--------------------|
+    | LEGOESM_DAMP_V           | 0.0     |   13 | post-step vorticity |
+    | LEGOESM_CDD_D2BG         | 0.0     |   16 | corner-div damp d2  |
+    | LEGOESM_CDD_D4BG         | 0.0     |   18 | corner-div damp d4  |
+    | LEGOESM_CDD_NORD         | 0       |   18 | nord (1=del-4)      |
+    | LEGOESM_CDD_FV3_VFILL    | 0       |   22 | vector corner fill  |
+    | LEGOESM_AH_SCALE         | auto    |   34 | A_h multiplier      |
+    | LEGOESM_AH_AUTO_DISABLE  | 0       |   46 | disable iter-43 auto|
+    | LEGOESM_SMAG_CS          | 0.0     |   59 | Smagorinsky c_s     |
+
+    .. rubric:: Recommended invocations
+
+    ``LEGOESM_AH_SCALE`` auto-applies per resolution when unset:
+    C36→1.0, C48→2.0, C72→10.0 (iter 33/37/43).
+
+    ``LEGOESM_CDD_*`` are off by default; the iter-19/24 production
+    setting opts in via env::
+
+        LEGOESM_CDD_D2BG=0.0005 LEGOESM_CDD_D4BG=0.02 \\
+        LEGOESM_CDD_NORD=1
+
+    For pre-iter-43 baseline behavior (e.g., regression test that
+    expects C72 to NaN at default A_h), set
+    ``LEGOESM_AH_AUTO_DISABLE=1``.
+    """
     nlev = DEFAULT_NLEV
     # When tc.case == "held_suarez_topo" we swap the init for the
     # topography-aware version (forcing function is unchanged — see
@@ -2446,7 +2815,30 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         hd = _hyperdiff_cube(n)
         dd = _div_damp_cube(n)
         ah = _laplacian_visc_cube(n)
-        dt = 200.0
+        # FV3_3D iter 33/34: scale A_h via env var.  matrix default
+        # is INSUFFICIENT at C72+ (iter 33 found C72 NaN at default
+        # A_h but stable at 10x).  Default 1.0 preserves iter-17/24
+        # C36/C48 behaviour; set LEGOESM_AH_SCALE=10.0 at C72.
+        # FV3_3D iter 43/44/46: auto-apply resolution-dependent A_h
+        # scale via _auto_ah_scale helper.  Explicit env var overrides;
+        # LEGOESM_AH_AUTO_DISABLE=1 disables the auto-apply entirely
+        # (iter-46 codex backwards-compat opt-out).
+        _ah_auto_disable = (
+            os.environ.get("LEGOESM_AH_AUTO_DISABLE", "0").strip().lower()
+            in ("1", "true", "yes", "on")
+        )
+        _ah_scale, _ah_msg = _auto_ah_scale(
+            n, os.environ.get("LEGOESM_AH_SCALE"),
+            auto_disable=_ah_auto_disable,
+        )
+        if _ah_msg is not None:
+            print(_ah_msg, flush=True)
+        ah = ah * _ah_scale
+        # FV3_3D iter 66 / 67: opt-in CFL-aware dt for cube paths
+        # via LEGOESM_HS_CUBE_DT_CFL (default off; preserves
+        # pre-iter-66 reference numbers).  See _resolve_dt_cube and
+        # _cfl_safe_dt_cube for the full calibration story.
+        dt = _resolve_dt_cube(n, label="HS")
         # Iter-15 NOTE on the cubed-sphere upper-atmosphere sponge:
         # The default ``sponge_tau_sec = 3600`` (1 hour) is FAR more
         # aggressive than the FV3 Fortran reference
@@ -2474,9 +2866,50 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         # or 200-day spin-up — those may have different optimal τ.
         # Keep the 1-h default for this HS test until a more
         # principled retuning is done.
+        # FV3_3D iter 13: optional FV3-faithful post-step vorticity
+        # damping (SW backbone reuse).  Set LEGOESM_DAMP_V=0.30 to
+        # opt in (~17 % mid-level cube-imprint reduction at C36).
+        _damp_v_env = float(os.environ.get("LEGOESM_DAMP_V", "0.0"))
+        # FV3_3D iter 16: optional FV3-faithful B-grid corner-divergence
+        # damping (port of sw_core.F90:divergence_corner + d_sw5
+        # adaptive damping).  Set LEGOESM_CDD_D2BG=0.001 to opt in
+        # (~71 % mid-level cube-imprint reduction at C36 — best result
+        # to date).  Use values 0.001-0.005; 0.010 destabilises.
+        _cdd_d2_bg_env = float(os.environ.get("LEGOESM_CDD_D2BG", "0.0"))
+        # FV3_3D iter 18: optional higher-order del-(2*(nord+1)) corner-
+        # divergence damping (port of sw_core.F90:1725-1822 nord>0
+        # branch).  Active only when BOTH LEGOESM_CDD_D4BG > 0 AND
+        # LEGOESM_CDD_NORD > 0.  Typical FV3 production: d4_bg=0.16,
+        # nord=2.  At C36 the unit-equivalent values scale down by
+        # (96/36)^2 ~ 7.1, so d4_bg ~ 0.02 for nord=1 / nord=2.
+        _cdd_d4_bg_env = float(os.environ.get("LEGOESM_CDD_D4BG", "0.0"))
+        _cdd_nord_env = int(os.environ.get("LEGOESM_CDD_NORD", "0"))
+        # FV3_3D iter 22: optional FV3-fully-faithful vector cube-
+        # vertex fill (sw_core.F90:1762).  At nord=1 it is a
+        # mathematical no-op (bit-for-bit preserves iter-18); flagged
+        # here for users who want to verify FV3 fidelity end-to-end.
+        # Set LEGOESM_CDD_FV3_VFILL=1 (or 'true', 'yes', 'on') to opt in.
+        _cdd_fv3_vfill_env = (
+            os.environ.get("LEGOESM_CDD_FV3_VFILL", "0").strip().lower()
+            in ("1", "true", "yes", "on")
+        )
+        # FV3_3D iter 59: optional Smagorinsky-style adaptive A_h
+        # (iter 57/58).  When > 0 (typical 0.1-0.4), an adaptive
+        # ``A_h_smag = c_s * dx² * |D|`` is added on top of the static
+        # config.A_h.  Auto-scales with local flow strain — addresses
+        # the iter-51 codex meta-review concern that the iter-33
+        # 10x-A_h is case-specific.  Default 0.0 = off.
+        _smag_cs_env = float(os.environ.get("LEGOESM_SMAG_CS", "0.0"))
         config = PrimitiveEquationConfig(
             hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
             div_damp_coeff=dd, A_h=ah,
+            damp_v=_damp_v_env, nord_v=2,
+            corner_div_damp_d2_bg=_cdd_d2_bg_env,
+            corner_div_damp_dddmp=0.20,
+            corner_div_damp_d4_bg=_cdd_d4_bg_env,
+            corner_div_damp_nord=_cdd_nord_env,
+            corner_div_damp_fv3_vector_fill=_cdd_fv3_vfill_env,
+            smagorinsky_cs=_smag_cs_env,
             use_conservation_fixer=True, fix_mass=True)
         model = PrimitiveEquationModel(grid, sigma, config)
         if _topo:
@@ -2882,7 +3315,27 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         hd = _hyperdiff_cube(n)
         dd = _div_damp_cube(n)
         ah = _laplacian_visc_cube(n)
-        dt = 200.0
+        # FV3_3D iter 33/34: scale A_h via env var.  matrix default
+        # is INSUFFICIENT at C72+ (iter 33 found C72 NaN at default
+        # A_h but stable at 10x).  Default 1.0 preserves iter-17/24
+        # C36/C48 behaviour; set LEGOESM_AH_SCALE=10.0 at C72.
+        # FV3_3D iter 43/44/46: auto-apply resolution-dependent A_h
+        # scale via _auto_ah_scale helper.  Explicit env var overrides;
+        # LEGOESM_AH_AUTO_DISABLE=1 disables the auto-apply entirely
+        # (iter-46 codex backwards-compat opt-out).
+        _ah_auto_disable = (
+            os.environ.get("LEGOESM_AH_AUTO_DISABLE", "0").strip().lower()
+            in ("1", "true", "yes", "on")
+        )
+        _ah_scale, _ah_msg = _auto_ah_scale(
+            n, os.environ.get("LEGOESM_AH_SCALE"),
+            auto_disable=_ah_auto_disable,
+        )
+        if _ah_msg is not None:
+            print(_ah_msg, flush=True)
+        ah = ah * _ah_scale
+        # FV3_3D iter 66 / 67: opt-in CFL-aware dt (factored helper).
+        dt = _resolve_dt_cube(n, label="baroclinic")
         config = PrimitiveEquationConfig(
             hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
             div_damp_coeff=dd, A_h=ah,
@@ -3462,6 +3915,25 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         hd = _hyperdiff_cube(n)
         dd = _div_damp_cube(n)
         ah = _laplacian_visc_cube(n)
+        # FV3_3D iter 33/34: scale A_h via env var.  matrix default
+        # is INSUFFICIENT at C72+ (iter 33 found C72 NaN at default
+        # A_h but stable at 10x).  Default 1.0 preserves iter-17/24
+        # C36/C48 behaviour; set LEGOESM_AH_SCALE=10.0 at C72.
+        # FV3_3D iter 43/44/46: auto-apply resolution-dependent A_h
+        # scale via _auto_ah_scale helper.  Explicit env var overrides;
+        # LEGOESM_AH_AUTO_DISABLE=1 disables the auto-apply entirely
+        # (iter-46 codex backwards-compat opt-out).
+        _ah_auto_disable = (
+            os.environ.get("LEGOESM_AH_AUTO_DISABLE", "0").strip().lower()
+            in ("1", "true", "yes", "on")
+        )
+        _ah_scale, _ah_msg = _auto_ah_scale(
+            n, os.environ.get("LEGOESM_AH_SCALE"),
+            auto_disable=_ah_auto_disable,
+        )
+        if _ah_msg is not None:
+            print(_ah_msg, flush=True)
+        ah = ah * _ah_scale
         dt = 300.0
         config = PrimitiveEquationConfig(
             hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
@@ -5625,9 +6097,67 @@ def _walk_atmosphere_test_cases(output_base: Path) -> list[Path]:
 # CLI
 # ===========================================================================
 
+_ENV_VAR_EPILOG = """\
+Environment variables (FV3_3D investigation, iter 33-91):
+
+  LEGOESM_AH_SCALE              Multiply default A_h on cube HS path
+                                (iter 33).  Auto-applies per-resolution
+                                (iter 43): 1.0 at C36, 2.0 at C48, 10.0
+                                at C72+.  Override with explicit float
+                                or set LEGOESM_AH_AUTO_DISABLE=1 to opt
+                                out.
+
+  LEGOESM_HS_CUBE_DT_CFL        Opt-in CFL-aware dt for cube hydrostatic
+                                paths (iter 66/71/72/80/81).  Values:
+                                  0/false/off    pre-iter-66 default
+                                                 (dt=200 always)
+                                  1/short_time   iter-66 (preserves
+                                                 iter-33 C72 ref;
+                                                 dt=150.5 at C96; NaN
+                                                 day 15 at C96 30d)
+                                  long_time      iter-70 (dt=133 at
+                                                 C72, dt=100 at C96;
+                                                 NaN day 22.5 at C96
+                                                 30d per iter 79)
+                                  very_long_time iter-80 (dt=67 at
+                                                 C72, dt=50 at C96;
+                                                 iter-99 CONFIRMED
+                                                 30d finite at C96
+                                                 max|u|=20.14)
+                                  auto           RECOMMENDED: short_time
+                                                 at n<96, very_long_time
+                                                 at n>=96.  Validated
+                                                 30d at C96 (iter 99);
+                                                 1d smoke at C144/C192
+                                                 (iter 102/103).
+
+  LEGOESM_SMAG_CS               Smagorinsky-style adaptive A_h (iter
+                                57-59).  Default 0.0 (off).  Typical
+                                0.1-0.4.  Note iter 60: insufficient
+                                alone for C72+ stability — use as
+                                COMPLEMENT to LEGOESM_AH_SCALE.
+
+  LEGOESM_CDD_D2BG              FV3 corner-divergence damping d2_bg
+                                coefficient (iter 16-25).  Typical
+                                0.001-0.005.  Reduces cube-vertex
+                                imprint at C36-C48.
+
+  LEGOESM_CDD_D4BG / NORD       FV3 nord>0 corner-divergence damping
+                                (iter 18).  d4_bg ~ 0.02 nord=1 typical
+                                at C36-C48.
+
+  LEGOESM_DAMP_V                FV3 vorticity damping (iter 13).
+                                Typical 0.30 to opt in at C36.
+
+See FV3_3D.md for the full investigation log and per-resolution
+recommended settings.
+"""
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="Atmosphere test matrix for legoESM dynamical cores.",
+        epilog=_ENV_VAR_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument(
         "--only", type=str, default="all",

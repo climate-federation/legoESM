@@ -134,6 +134,38 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
     """
     g: float = constants.g
     A_h: float = 0.0              # Laplacian viscosity [m^2/s]
+        # FV3_3D iter 33-35 finding: at C72+ resolutions the matrix's
+        # ``_laplacian_visc_cube`` default UNDERESTIMATES A_h by ~10x.
+        # The interior synoptic-scale unstable mode (iter-32 diagnosis)
+        # needs A_h ~ 2.0e+07 at C72.  Iter 33 confirmed stability
+        # with that value; iter 34 added LEGOESM_AH_SCALE env var to
+        # the matrix as a workaround.  See FV3_3D.md iter 33-35.
+    smagorinsky_cs: float = 0.0
+        # FV3_3D iter 57/58 finding: opt-in Smagorinsky-style adaptive
+        # Laplacian viscosity.  When > 0 (typical 0.1-0.4), an
+        # additional A_h field is computed from the local strain-
+        # rate tensor of (u, v) and added to the static ``A_h``:
+        #   A_h_total(i,j) = A_h + smagorinsky_cs * dx² * |D|(i,j)
+        # where ``|D| = sqrt(D11² + 2*D12² + D22²)``.  The adaptive
+        # term auto-scales with local flow strain, addressing the
+        # iter-51 codex meta-review concern that the iter-33
+        # 10x-A_h calibration is case-specific.  Default 0.0 = off,
+        # bit-for-bit baseline.  See FV3_3D.md iter 57/58 for the
+        # closure derivation.
+    ah_d_con: float = 0.0
+        # FV3-faithful KE→heat conversion for the iter-57/58
+        # Smagorinsky-augmented A_h Laplacian on (u_d, v_d)
+        # (FV3_3D iter 225).  Mirrors iter-208/221/223 d_con but
+        # for the A_h tendency.  Heat tendency formula (per
+        # second, leading order in dt):
+        #
+        #     dKE/dt_corner = u_d * du_d_dt_ah + v_d * dv_d_dt_ah
+        #     dT/dt += -ah_d_con * (dKE/dt) / c_pd
+        #
+        # at corners, projected to cell centres via
+        # ``_interp_corner_to_center``.  Default 0.0 preserves
+        # bit-for-bit baseline; gated INSIDE ``A_h > 0``.  FV3
+        # production default is 1.0.
     hyperdiff_coeff: float = 0.0
     hyperdiff_ps_coeff: float = 0.0
     div_damp_coeff: float = 0.0   # Divergence damping coefficient [m^2/s]
@@ -171,6 +203,237 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # points after.  Overhead: boundary fraction (~8% at C96,
         # ~17% at C48) of redundant compute.  Benefit: hides MPI
         # latency behind interior compute.  Off by default.
+    use_fv3_lin_pgf: bool = False
+        # FV3-faithful Lin (1997) cross-product hydrostatic
+        # pressure-gradient force.  When True, the standard
+        # ``(dB/dx + pg_corr_x)`` block (where ``B = KE + Φ`` and
+        # ``pg_corr_x = R_d*T_corner*∇(ln p_s)``) is replaced by:
+        #   1. Compute KE-only Bernoulli ``B_KE = KE``.
+        #   2. ``dKE/dx, dKE/dy_perp`` via the existing A-L gradient.
+        #   3. Compute the Lin (1997) cross-product PGF at C-grid faces
+        #      via ``_fv3_lin_pgf.fv3_lin1997_pgf_3d_cgrid`` (faithful
+        #      port of GFDL FV3 ``dyn_core.F90:p_grad_c``).
+        #   4. Project to D-grid corners via the 2-point average in
+        #      ``project_cgrid_pgf_to_dgrid_corners``.
+        #   5. ``du_d/dt = ζ_corner*v_d - dKE/dx + pgf_x_d`` (the
+        #      cross-product carries the correct Fortran sign so it is
+        #      ADDED, not subtracted).
+        # The Lin formulation gives EXACT hydrostatic cancellation by
+        # construction — the cross-product is identically zero in any
+        # column where (gz_W, pkc_W) = (gz_E, pkc_E), regardless of
+        # discretisation.  Our existing split formulation cancels in
+        # continuum but not at panel boundaries where halo
+        # interpolation amplifies via the A-L Cartesian matrix.
+        # FV3_3D iter 4 found that wiring this into RK3 produces a
+        # CFL-incompatible scheme (max\|v\| 13× baseline by day 10,
+        # NaN by day 30) because the cross-product PGF at C-grid
+        # faces (projected to corners) is not in discrete balance
+        # with the rotational ζ × v term at corners with the A-L
+        # gradient.  The Lin PGF requires forward-backward time
+        # stepping (FV3's native scheme) to be stable.  Currently
+        # INERT — flag retained for the future forward-backward
+        # iteration.
+    div_damp_dddmp: float = 0.0
+        # FV3-faithful adaptive Smagorinsky-style divergence damping
+        # coefficient.  Faithful port of FV3 sw_core.F90:1720 formula
+        # ``damp = da_min_c * max(d2_bg, min(0.20, dddmp * abs(div)))``
+        # where ``d2_bg = div_damp_coeff / da_min_c`` is the
+        # dimensionless background coefficient.  When ``dddmp > 0``,
+        # divergence damping becomes ADAPTIVE: stronger where local
+        # divergence is large (e.g., spurious divergence at panel
+        # boundary cells from halo amplification) and weaker in the
+        # smooth interior.  Default 0.0 preserves the existing
+        # constant-coefficient behaviour.  FV3 default is 0.2; the
+        # iter1009 dual-target SW calibration uses 0.0625 + factor 8
+        # (no Smagorinsky).  Useful range for HS C36 hybrid:
+        # 0.05-0.20 (test before raising).  FV3_3D iter 5.
+    div_damp_d_con: float = 0.0
+        # FV3-faithful KE→heat conversion for the iter-5 cell-
+        # centre divergence damping (FV3_3D iter 223).  Mirrors
+        # iter-208/221 d_con but for the cell-centre div_damp
+        # tendency.  Heat tendency formula (per second, leading
+        # order in dt):
+        #
+        #     dKE/dt = u_d * du_d_dt_dd + v_d * dv_d_dt_dd
+        #     dT/dt += -div_damp_d_con * (dKE/dt) / c_pd
+        #
+        # at corners, then projected to cell centres via
+        # ``_interp_corner_to_center``.  Default 0.0 preserves
+        # bit-for-bit baseline; gated INSIDE
+        # ``div_damp_coeff > 0``.  FV3 production default is 1.0.
+    damp_v: float = 0.0
+        # FV3-faithful POST-STEP del-n vorticity damping coefficient,
+        # reusing the SW backbone ``fv3_del6_vorticity_damping`` from
+        # ``legoesm.core.fv3_del6_vt_flux``.  Faithful port of
+        # ``sw_core.F90:1948-1999``: applied ONCE per full timestep,
+        # AFTER the main RK3 update, as a discrete wind correction
+        # ``u += fy2 / dx``.  Same pattern as
+        # ``shallow_water_fv3_cdgrid.py:1141``.  When ``damp_v > 0``,
+        # the 3D step calls ``fv3_del6_vorticity_damping`` per level
+        # (vmap over nlev) on FV3 normal-D-grid layout (averaging from
+        # our (n+1, n+1) C-D corner state to (n, n+1) and (n+1, n)
+        # FV3 face midpoints), then projects the resulting wind
+        # increments back to corners by mode='edge' padding.  Default
+        # 0.0 preserves the legacy 3D dycore behaviour.  Iter1009 SW
+        # production uses ``damp_v=0.030``.  FV3_3D iter 12 adopts
+        # this opt-in mechanism for the 3D path.
+    nord_v: int = 2
+        # Order of the post-step vorticity damping (0=del-2, 1=del-4,
+        # 2=del-6).  FV3 default is 2 (del-6).  Used only when
+        # ``damp_v > 0``.
+    damp_v_d_con: float = 0.0
+        # FV3-faithful KE→heat conversion for iter-12 ``damp_v``
+        # damping (FV3_3D iter 208).  Faithful port of the d_con
+        # block in FV3 ``sw_core.F90:1953-1990``: when ``damp_v``
+        # removes KE from (u_d, v_d) via the post-step wind
+        # increments (du_corner, dv_corner), the lost KE is
+        # converted to heat in T (energy conservation):
+        #
+        #     ΔKE_per_mass = u_d * du + 0.5*du² + v_d * dv + 0.5*dv²
+        #     ΔT = -damp_v_d_con * ΔKE / c_pd
+        #
+        # Computed at corners then projected to cell centres
+        # via ``_interp_corner_to_center`` (4-point average) for
+        # the T (cell-centre) update.  Default 0.0 preserves
+        # baseline bit-for-bit (gated INSIDE the iter-12
+        # ``damp_v > 0`` block).  FV3 production default is 1.0.
+        # PE-only (NH has its own iter-203 damp_w_d_con).
+    delt_max: float = 0.0
+        # FV3-faithful per-step cap on dissipative heating magnitude
+        # (FV3_3D iter 218).  Faithful port of the FV3 ``delt_max``
+        # limiter in ``dyn_core.F90:1774`` (cp branch):
+        #
+        #     pt += sign(min(|bdt*delt_max|, |dtmp|), dtmp) / pkz
+        #
+        # which clips the per-step temperature change ``dtmp`` to
+        # magnitude ``bdt * delt_max`` (Kelvin), preserving the sign
+        # of dtmp.  ``bdt`` is the model big timestep ``dt``.  Acts
+        # on the iter-208 ``damp_v_d_con`` block.  Default 0.0
+        # disables the cap (preserves baseline bit-for-bit when
+        # ``damp_v_d_con > 0``).  FV3 production default is 1.0
+        # K/s.  Differentiable everywhere via ``jnp.clip``.
+        # iter-219 added FV3 sponge-aware behavior: PE skips the
+        # cap entirely for k=0,1 (top 2 sponge layers, FV3 cp_air
+        # branch) while applying it to k>=2; NH applies a tighter
+        # cap (0.1*delt_max at k=0, 0.5* at k=1, 1* at k>=2).
+    corner_div_damp_d_con: float = 0.0
+        # FV3-faithful KE→heat conversion for the iter-16/18
+        # corner-divergence damping (FV3_3D iter 221).  When the
+        # corner-div mechanism removes KE from (u_d, v_d) via the
+        # tendency ``du_d_dt -= ∇x(damp*delpc) / 2dx``, the lost KE
+        # is converted to heat in T (energy conservation).  Mirrors
+        # the iter-208 pattern but for corner-div instead of
+        # damp_v.  Heat tendency formula (per second, leading
+        # order; the 0.5*du² term is O(dt) and dropped in the
+        # tendency form):
+        #
+        #     dKE/dt = u_d * du_d_dt_cdd + v_d * dv_d_dt_cdd
+        #     dT/dt += -corner_div_damp_d_con * (dKE/dt) / c_pd
+        #
+        # where du_d_dt_cdd, dv_d_dt_cdd are the corner-div damp
+        # contribution to the wind tendency.  Computed at corners
+        # then projected to cell centres via
+        # ``_interp_corner_to_center``.  Default 0.0 preserves
+        # bit-for-bit baseline; gated INSIDE the iter-16
+        # ``corner_div_damp_d2_bg > 0`` block.  FV3 production
+        # default is ``d_con = 1.0``.  The iter-218/219 sponge-
+        # aware ``delt_max`` cap also applies to this heating term.
+    use_fv3_a2b_zeta_corner: bool = False
+        # FV3-faithful 4th-order A→B interpolation for the relative
+        # vorticity ``ζ`` from cell centres to D-grid corners (the
+        # rotational ζ × v term in the momentum tendency).  Reuses the
+        # SW backbone ``_interp_center_to_corner_a2b_ord4`` from
+        # ``operators_cdgrid.py`` (port of FV3 ``a2b_edge.F90:a2b_ord4``
+        # — tensor-product 4th-order Lagrange).  When True, only the
+        # ζ_corner step uses a2b_ord4; T_corner, hybrid_factor and
+        # other corner interpolations stay with the legacy 2nd-order
+        # 4-point average.  Default False preserves the legacy
+        # behaviour.  iter-9 established that swapping ALL corner
+        # interpolations breaks discrete operator balance (max winds
+        # 2.7× larger); iter 14 tests whether a TARGETED swap of
+        # zeta_corner only is stable.
+    corner_div_damp_d2_bg: float = 0.0
+        # FV3-faithful B-grid corner-divergence adaptive damping
+        # coefficient (FV3 ``d2_bg`` parameter at sw_core.F90:1720).
+        # When > 0, compute the FV3 ``divergence_corner`` (sw_core.F90:
+        # 2124) via the iter-15 helper ``_fv3_divergence_corner.
+        # fv3_divergence_corner_3d`` and apply an adaptive Smagorinsky-
+        # style damping at D-grid corners:
+        #
+        #   delpc = corner divergence (B-grid)
+        #   damp  = da_min_c * max(d2_bg, min(0.20, dddmp * |delpc| * dt))
+        #   du   -= ∇_x(damp * delpc) at corners
+        #
+        # Faithful port of FV3 d_sw5 lines 1720-1724.  This pairs
+        # naturally with the iter-12 post-step ``damp_v``: iter-12 is
+        # the del-n vorticity damping; iter-16 is the in-step
+        # corner-divergence damping.  Together they reproduce FV3's
+        # canonical damping pair for cube-edge artifact suppression.
+        #
+        # Default 0.0 preserves baseline.  FV3 production default
+        # is 0.0625 with dddmp = 0.2; iter-1009 SW uses (8 * 0.0625,
+        # 0.0) — i.e. background-only without Smagorinsky.  Stable
+        # range for our 3D path: 0.0 to ~0.005 (FV3's 0.0625 default
+        # is too aggressive for our C-D + RK3 architecture).  iter-17
+        # 30-day scan identified ``corner_div_damp_d2_bg = 0.0005``
+        # as the OPTIMUM for HS C36 hybrid: -79 % mid-level cube
+        # imprint, -35 % max\|v\|, mass drift ~6e-10.
+    corner_div_damp_dddmp: float = 0.20
+        # Companion Smagorinsky coefficient for ``corner_div_damp_d2_bg``.
+        # Faithful FV3 default is 0.20 (sw_core.F90).  Active only
+        # when ``corner_div_damp_d2_bg > 0``.
+    corner_div_damp_d4_bg: float = 0.0
+        # FV3-faithful HIGHER-ORDER corner-divergence damping
+        # coefficient (FV3 ``d4_bg``, sw_core.F90:1809-1817).  When
+        # > 0 AND ``corner_div_damp_nord > 0``, the iter-16 del-2
+        # corner-divergence damping is supplemented with a del-
+        # ``(2*(nord+1))`` term:
+        #
+        #   delpc = corner divergence (B-grid) at full-step
+        #   divg_d = (Laplacian)^nord(delpc)
+        #   damp2 = da_min_c * max(d2_bg, min(0.20, dddmp*|delpc|*dt))
+        #   dd8   = (da_min_c * d4_bg)^(nord+1)
+        #   vort  = damp2 * delpc + dd8 * divg_d
+        #   du   -= grad(vort)
+        #
+        # The Laplacian iteration is taken at the corner-staggered
+        # B-grid, faithful to FV3's d_sw5 inner-loop sequence
+        # (sw_core.F90:1747-1769): take gradient of divg_d to face
+        # midpoints, take divergence back to corners, with
+        # corner-removal at sw/se/ne/nw at each iteration.
+        # FV3 production typical values: d4_bg=0.16, nord=2 (del-6
+        # damping).  Default 0.0 + nord=0 preserves the iter-16
+        # del-2-only behaviour.
+    corner_div_damp_nord: int = 0
+        # Order of the higher-order corner-divergence damping
+        # iteration.  0 = del-2 only (iter-16 behaviour);
+        # 1 = del-4 (one Laplacian iteration);
+        # 2 = del-6 (two Laplacian iterations, FV3 d_sw5 default).
+        # Active only when ``corner_div_damp_d4_bg > 0``.
+    corner_div_damp_fv3_vector_fill: bool = False
+        # FV3-fully-faithful vector cube-vertex fill
+        # (``fill_corners(vc, uc, VECTOR=true, DGRID=true)``,
+        # sw_core.F90:1762).  Active path uses the wider FV3 D-grid
+        # layout for vc / uc inside ``fv3_corner_laplacian_iteration``.
+        # At ``nord = 1`` (the only currently-supported active path)
+        # the cells fill_corners writes to are NOT read by the
+        # divergence operator at nt = 0, so this flag is mathematically
+        # a no-op and bit-for-bit preserves iter-18 behaviour
+        # (proven by ``test_corner_laplacian_vector_fill_is_noop_for_nord1``
+        # via 5 random seeds + 54 deterministic impulse positions +
+        # nonuniform-metric stress test).  Iter 23+ may extend this
+        # to nord >= 2 where the flag would have functional effect.
+        # Default False — gives bit-for-bit iter-18.
+    corner_div_damp_dt_proxy: float = 200.0
+        # FV3_3D iter 188: parity with NH ``corner_div_damp_dt_proxy``
+        # field.  PE outer dt is typically 50-200s for HS production
+        # (see iter-72 LEGOESM_HS_CUBE_DT_CFL auto-mode); 200.0 was
+        # the hardcoded value at the iter-16 wiring site (line 669)
+        # since this default is the iter-33 ah_x10+dt=200 reference.
+        # Used in BOTH the iter-16 nord=0 cap (``dddmp * |delpc * dt|``)
+        # and the iter-187 nord >= 1 smag_vort cap
+        # (``dddmp * |dt| * sqrt(delpc² + ζ²)``).  Default 200.0
+        # preserves existing behaviour bit-for-bit.
 
 
 # ==============================================================================
@@ -185,6 +448,7 @@ def fv3_hydrostatic_tendencies(
     config: CDGridPrimitiveEquationConfig = CDGridPrimitiveEquationConfig(),
     physics_tendency: FV3HydrostaticTendencies | None = None,
     physics_tendency_cc: HydrostaticTendencies | None = None,
+    dt_actual: float | jax.Array | None = None,
 ) -> FV3HydrostaticTendencies:
     """Compute tendencies for the FV3 hydrostatic PE with D-grid winds.
 
@@ -256,6 +520,18 @@ def fv3_hydrostatic_tendencies(
     KE = 0.5 * (u_cell ** 2 + v_cell ** 2)
 
     # --- 5. Bernoulli function B = KE + Phi (cell centres) ---
+    # FV3_3D iter 4 attempt: setting ``B = KE`` (drop Φ) and replacing
+    # the split (∇B + pg_corr) with FV3 Lin (1997) cross-product PGF
+    # gave a CFL-incompatible scheme — the cross-product PGF at C-grid
+    # faces (projected to D-grid corners via 2-point average) is not in
+    # discrete balance with the rotational ζ × v term computed at
+    # corners with the A-L gradient.  Result on HS C36 hybrid: max\|v\|
+    # 8 m/s by day 10 (vs 0.6 baseline), 27 m/s by day 15, NaN by day
+    # 30.  See FV3_3D.md iteration 4 for detail.  Lin PGF requires
+    # forward-backward time stepping (FV3's native scheme) for
+    # stability with this 2-step balance — RK3 cannot recover the
+    # cross-step cancellation.  ``config.use_fv3_lin_pgf`` is retained
+    # for forward use but does not currently affect this function.
     B = KE + Phi
 
     # --- 6. D-grid vorticity at cell centres via circulation ---
@@ -325,8 +601,42 @@ def fv3_hydrostatic_tendencies(
     _div_v_pad = None
 
     # Vorticity interpolated to D-grid corners, absolute vorticity = ζ_corner + f_corner
-    zeta_corner = (_interp_center_to_corner(zeta, cdgrid, padded=_zeta_pad)
-                   + cdgrid.f_corner[..., None])
+    # FV3_3D iter 14: optionally use FV3-faithful 4th-order A→B for
+    # the zeta corner interpolation (SW-backbone reuse).  Default
+    # uses the legacy 2nd-order 4-point average.
+    #
+    # FV3_3D iter 190: factor the a2b_ord4(zeta) into a single local
+    # so the iter-170 ``zeta_corner_relative`` site AND the iter-187
+    # ``_zeta_smag_corner`` site (FV3 smag_vort cap, sw_core.F90:1795)
+    # share one halo-2 exchange when BOTH flags are active.  Closes
+    # iter-187 codex review concern 3 (extra unmerged halo).
+    _need_zeta_a2b_for_smag = (
+        config.corner_div_damp_d2_bg > 0.0
+        and config.corner_div_damp_d4_bg > 0.0
+        and config.corner_div_damp_nord > 0
+    )
+    _need_zeta_a2b = config.use_fv3_a2b_zeta_corner or _need_zeta_a2b_for_smag
+    _zeta_a2b_ord4: jax.Array | None = None
+    if _need_zeta_a2b:
+        from legoesm.core.operators_cdgrid import (
+            _interp_center_to_corner_a2b_ord4,
+        )
+        # a2b_ord4 takes 3D shape (6, n, n) — vmap over level axis.
+        if zeta.ndim == 4:
+            _zeta_a2b_ord4 = jax.vmap(
+                lambda lev: _interp_center_to_corner_a2b_ord4(lev, cdgrid),
+                in_axes=-1, out_axes=-1,
+            )(zeta)
+        else:
+            _zeta_a2b_ord4 = _interp_center_to_corner_a2b_ord4(zeta, cdgrid)
+
+    if config.use_fv3_a2b_zeta_corner:
+        zeta_corner_relative = _zeta_a2b_ord4
+    else:
+        zeta_corner_relative = _interp_center_to_corner(
+            zeta, cdgrid, padded=_zeta_pad,
+        )
+    zeta_corner = zeta_corner_relative + cdgrid.f_corner[..., None]
 
     # --- 7. Bernoulli gradient at D-grid corners (Arakawa-Lamb) ---
     dB_dx, dB_dy_perp = _arakawa_lamb_gradient(B, cdgrid, padded=_B_pad)
@@ -406,8 +716,284 @@ def fv3_hydrostatic_tendencies(
             ddiv_dx, ddiv_dy_perp = _arakawa_lamb_gradient(
                 div_v, cdgrid, padded=_div_v_pad,
             )
-        du_d_dt = du_d_dt + config.div_damp_coeff * ddiv_dx
-        dv_d_dt = dv_d_dt + config.div_damp_coeff * ddiv_dy_perp
+        # FV3_3D iter 5: optional adaptive Smagorinsky-style damping.
+        # Faithful port of sw_core.F90:1720
+        # ``damp = da_min_c * max(d2_bg, min(0.20, dddmp * abs(div)))``.
+        # When ``dddmp > 0``, the constant ``div_damp_coeff`` is
+        # replaced by a per-cell coefficient that boosts damping at
+        # cells with large |div| (typically the panel-boundary halo-
+        # error cells driving the cube imprint).  Background floor
+        # preserves smooth-interior behaviour.
+        if config.div_damp_dddmp > 0:
+            # Match the SW path's Fortran-faithful formulation in
+            # ``cdgrid_momentum_tendencies`` (operators_cdgrid.py:1732).
+            # ``da_min_c`` is the global minimum corner area
+            # (Fortran ``gridstruct%da_min_c``); broadcast over levels.
+            _da_min_c = jnp.min(cdgrid.area_corner)
+            _d2_bg = config.div_damp_coeff / _da_min_c
+            _div_abs_corner = _interp_center_to_corner(
+                jnp.abs(div_v), cdgrid,
+            )                                                  # (6, n+1, n+1, nlev)
+            _adaptive_coeff = _da_min_c * jnp.maximum(
+                _d2_bg,
+                jnp.minimum(0.20, config.div_damp_dddmp * _div_abs_corner),
+            )                                                  # (6, n+1, n+1, nlev)
+            _du_d_dt_dd = _adaptive_coeff * ddiv_dx
+            _dv_d_dt_dd = _adaptive_coeff * ddiv_dy_perp
+        else:
+            _du_d_dt_dd = config.div_damp_coeff * ddiv_dx
+            _dv_d_dt_dd = config.div_damp_coeff * ddiv_dy_perp
+        du_d_dt = du_d_dt + _du_d_dt_dd
+        dv_d_dt = dv_d_dt + _dv_d_dt_dd
+
+        # FV3_3D iter 223: optional KE→heat d_con conversion for
+        # the iter-5 cell-centre div_damp wind tendency (FV3
+        # sw_core.F90 cell-centre div_damp d_con contribution).
+        # Mirrors iter-221 corner-div d_con but uses the cell-
+        # centre div_damp tendency instead.  Heat tendency formula
+        # (per second, leading order in dt):
+        #
+        #     dKE/dt = u_d * du_d_dt_dd + v_d * dv_d_dt_dd
+        #     dT/dt += -div_damp_d_con * (dKE/dt) / c_pd
+        #
+        # Default 0.0 preserves bit-for-bit baseline; gated INSIDE
+        # the iter-5 ``div_damp_coeff > 0`` block.  FV3 production
+        # default is 1.0.
+        if config.div_damp_d_con > 0.0:
+            _dKE_dt_corner_dd = (
+                u_d * _du_d_dt_dd + v_d * _dv_d_dt_dd
+            )
+            _dT_dt_dd_cc = (
+                -config.div_damp_d_con
+                * _interp_corner_to_center(_dKE_dt_corner_dd)
+                / constants.c_pd
+            )
+        else:
+            _dT_dt_dd_cc = None
+    else:
+        _dT_dt_dd_cc = None
+
+    # FV3_3D iter 16: optional adaptive B-grid corner-divergence
+    # damping (FV3 d_sw5 sw_core.F90:1641-1724).  Faithful port using
+    # iter-15's ``fv3_divergence_corner_3d`` helper.  This ADDS a
+    # ke-correction at corners and applies its gradient to the
+    # momentum tendency, matching the Fortran sequence
+    # ``ke(i, j) += damp * delpc(i, j)`` followed by the d_sw1/d_sw6
+    # KE-gradient update of (u, v).
+    #
+    # Differs from the existing cell-centre div_damp above (which
+    # uses A-grid div_v): this ADDS the FV3 corner-staggered B-grid
+    # divergence with sin_sg edge metric and corner removal, designed
+    # to target panel-boundary halo amplification specifically.
+    if config.corner_div_damp_d2_bg > 0.0:
+        from legoesm.core._fv3_divergence_corner import (
+            fv3_divergence_corner_3d,
+        )
+        # Step 1: B-grid corner divergence (Fortran ``delpc``).
+        delpc = fv3_divergence_corner_3d(u_d, v_d, cdgrid)  # (6, n+1, n+1, nlev)
+
+        # Step 2: adaptive damping coefficient at corners — FV3
+        # sw_core.F90:1720 formula:
+        #   damp = da_min_c * max(d2_bg, min(0.20, dddmp * |delpc| * dt))
+        # Note: FV3 multiplies by dt because ``delpc`` is per-second
+        # divergence and ``dddmp * delpc * dt`` is the dimensionless
+        # CFL-scaled damping factor.  iter-189 plumbs the actual
+        # integration ``dt`` (passed by ``model.step`` as
+        # ``dt_actual=dt``) into both the iter-16 nord=0 cap and the
+        # iter-187 nord >= 1 smag_vort cap.  Direct callers that
+        # don't pass ``dt_actual`` fall back to the iter-188
+        # ``config.corner_div_damp_dt_proxy`` (default 200.0, matching
+        # the previously hardcoded value) — preserves backward
+        # compatibility for unit tests calling the tendency function
+        # directly.  The d2_bg floor dominates in HS regimes anyway
+        # (see iter-5 adaptive analysis).
+        _da_min_c = jnp.min(cdgrid.area_corner)
+        _delpc_abs = jnp.abs(delpc)
+        # iter-189: prefer the actual integration dt when provided.
+        # The ``is not None`` check happens at trace time — production
+        # callers always pass a value; direct test callers always pass
+        # None.  No mixed call pattern, so JIT trace cache stays
+        # single-entry per caller.
+        if dt_actual is not None:
+            _dt_approx = dt_actual
+        else:
+            _dt_approx = config.corner_div_damp_dt_proxy
+        _damp_corner = _da_min_c * jnp.maximum(
+            config.corner_div_damp_d2_bg,
+            jnp.minimum(
+                0.20, config.corner_div_damp_dddmp * _delpc_abs * _dt_approx,
+            ),
+        )                                                  # (6, n+1, n+1, nlev)
+
+        # FV3_3D iter 18: optional higher-order del-(2*(nord+1))
+        # damping (FV3 d_sw5 ``nord > 0`` path, sw_core.F90:1725-1822).
+        # The corner-staggered ``delpc`` is iterated through a
+        # B-grid Laplacian operator ``nord`` times, then mixed back
+        # into the ke-correction with coefficient ``dd8``.
+        #
+        # FV3 formula (sw_core.F90:1809, 1817):
+        #   dd8       = (da_min_c * d4_bg) ** (nord + 1)
+        #   damp2     = da_min_c * max(d2_bg, min(0.20, dddmp * vort_smag))
+        #   ke_corr   = damp2 * delpc_initial + dd8 * divg_d_iterated
+        #
+        # Bit-for-bit baseline guarantee: this branch is gated by a
+        # Python-static ``and`` of two config knobs, so when EITHER
+        # ``corner_div_damp_d4_bg == 0`` OR ``corner_div_damp_nord == 0``
+        # the iter-16 del-2-only path runs unchanged.  No new code is
+        # traced when the higher-order path is disabled.
+        if config.corner_div_damp_d4_bg > 0.0 and config.corner_div_damp_nord > 0:
+            from legoesm.core._fv3_divergence_corner import (
+                fv3_corner_laplacian_iteration,
+            )
+            # Lift the per-level vmapped helper outside the loop so
+            # the same compiled XLA primitive is reused across the
+            # ``nord`` Python iterations.
+            _vfill = config.corner_div_damp_fv3_vector_fill
+
+            def _lap_per_level(field_3d):
+                return jax.vmap(
+                    lambda lev: fv3_corner_laplacian_iteration(
+                        lev, cdgrid, apply_vector_corner_fill=_vfill,
+                    ),
+                    in_axes=-1, out_axes=-1,
+                )(field_3d)
+
+            _delpc_initial = delpc                          # FV3 ``delpc`` saved
+            _divg_d_iter = delpc
+            for _ in range(config.corner_div_damp_nord):
+                _divg_d_iter = _lap_per_level(_divg_d_iter)
+
+            # FV3_3D iter 187: faithful port of FV3 sw_core.F90:1797-1809
+            # smag_vort adaptive cap for the nord >= 1 branch.  FV3
+            # uses TWO different formulas for ``damp2``:
+            #   nord = 0 (line 1722): damp = ... dddmp * |delpc * dt|
+            #   nord >= 1 (line 1797-1809):
+            #       wk_corner = a2b_ord4(zeta_relative)
+            #       smag_vort = |dt| * sqrt(delpc² + wk_corner²)
+            #       damp2     = ... dddmp * smag_vort
+            # The legoESM 3D path previously used the nord=0 form for
+            # ALL nord — faithful for nord=0 but NOT for nord >= 1.
+            #
+            # Uses RELATIVE vorticity ``zeta`` (line 442) — NOT the
+            # absolute ``zeta_corner = zeta_relative + f_corner``
+            # later in the tendency function.  FV3 ``wk`` is relative
+            # vorticity (sw_core.F90:1789-1793 ``wk = circulation /
+            # area``).  ``a2b_ord4`` lifts it to corners exactly as
+            # FV3 does (sw_core.F90:1795 ``a2b_ord4(wk, vort, ...)``),
+            # independent of the user-facing ``use_fv3_a2b_zeta_corner``
+            # flag (which controls only the rotational term).
+            #
+            # Iter-181/183 double-where pattern: ``sqrt(0+0)`` has an
+            # undefined gradient, breaking ``jax.grad`` at the rest
+            # state.  Mask the branch so the backward pass passes
+            # through the safe value.
+            #
+            # FV3_3D iter 190: reuse the ``_zeta_a2b_ord4`` computed
+            # earlier (line ~528) — the iter-170 site and this iter-187
+            # site share the same a2b_ord4(zeta) under bit-for-bit
+            # equivalence.  When ``_need_zeta_a2b_for_smag`` is True
+            # (which the surrounding gates establish) the variable is
+            # guaranteed to be non-None at this site.
+            _zeta_smag_corner = _zeta_a2b_ord4              # (6, n+1, n+1, nlev)
+            _smag_arg = _delpc_initial ** 2 + _zeta_smag_corner ** 2
+            _safe_smag_arg = jnp.where(_smag_arg > 0.0, _smag_arg, 1.0)
+            _smag_root = jnp.where(
+                _smag_arg > 0.0, jnp.sqrt(_safe_smag_arg), 0.0,
+            )
+            _smag_vort = jnp.abs(_dt_approx) * _smag_root    # (6, n+1, n+1, nlev)
+            _damp_corner = _da_min_c * jnp.maximum(
+                config.corner_div_damp_d2_bg,
+                jnp.minimum(0.20, config.corner_div_damp_dddmp * _smag_vort),
+            )                                                # (6, n+1, n+1, nlev)
+
+            # ``dd8`` follows the FV3 formulation exactly.  Cast through
+            # delpc's dtype so that f32 / f64 paths stay consistent.
+            _dd8 = jnp.asarray(
+                (_da_min_c * config.corner_div_damp_d4_bg)
+                ** (config.corner_div_damp_nord + 1),
+                dtype=delpc.dtype,
+            )
+            _ke_correction = (
+                _damp_corner * _delpc_initial + _dd8 * _divg_d_iter
+            )                                               # (6, n+1, n+1, nlev)
+        else:
+            # iter-16 del-2 only path.  Bit-for-bit unchanged.
+            _ke_correction = _damp_corner * delpc          # (6, n+1, n+1, nlev)
+
+        # Step 4: gradient at D-grid corners.  FV3 normal D-grid uses
+        # ``u(i, j) -= dt * (ke(i+1, j) - ke(i, j)) * rdxc`` — a
+        # 2-point face-centred difference with u sitting between two
+        # corners in i.  Our C-D grid has u_d AT the corner (i, j);
+        # the natural translation is the centred difference using
+        # padded corner values.  Halo-pad the ke-correction so the
+        # i±1 / j±1 reads at face-boundary corners pick up the
+        # neighbouring panel.
+        from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d_fn
+        _ke_pad = _pad_halo_4d_fn(_ke_correction)          # (6, n+3, n+3, nlev)
+
+        # Centred difference at corner (i, j) ∈ [0, n] × [0, n]:
+        #   ∂x ke at (i, j) = (ke_pad[i+2, j+1] - ke_pad[i, j+1]) / (2*dx_at_corner)
+        # In our padded layout (halo=1), corner index (i, j) maps to
+        # padded[i+1, j+1]; (i-1, j) → padded[i, j+1]; (i+1, j) →
+        # padded[i+2, j+1].  The 2*dx denominator uses dx_corner.
+        _dke_dx_pad = (_ke_pad[:, 2:, 1:-1, :] - _ke_pad[:, :-2, 1:-1, :])
+        _dke_dy_pad = (_ke_pad[:, 1:-1, 2:, :] - _ke_pad[:, 1:-1, :-2, :])
+
+        # 2*dx and 2*dy at corners — use cdgrid.dxc / dyc averaged.
+        # cdgrid.dxc is at u-faces (n+1, n); cdgrid.dyc is at v-faces
+        # (n, n+1).  Corner dx/dy approximation: average two adjacent
+        # face dxc/dyc.  For the centred difference's 2*dx
+        # denominator at corner (i, j) we want the cell-centre-to-
+        # cell-centre distance, ≈ 2 * (dx_corner / 2) = dx_corner
+        # where dx_corner is the corner-to-corner distance (which is
+        # the cell width).  Use cdgrid.base.dx as a sufficient
+        # approximation (corner ≈ cell width on smooth grid).
+        _dx_corner_uface = jnp.pad(
+            cdgrid.dxc, [(0, 0), (0, 0), (0, 1)], mode="edge",
+        )                                                  # (6, n+1, n+1)
+        _dy_corner_vface = jnp.pad(
+            cdgrid.dyc, [(0, 0), (0, 1), (0, 0)], mode="edge",
+        )                                                  # (6, n+1, n+1)
+        _two_dx = 2.0 * _dx_corner_uface[..., None]         # (6, n+1, n+1, 1)
+        _two_dy = 2.0 * _dy_corner_vface[..., None]
+
+        # Subtract gradient (FV3 sign: u -= grad(ke), so as a tendency:
+        # du/dt -= grad(ke_correction) / dt_approx → simplified to a
+        # direct subtraction since the dt_approx cancels with our
+        # tendency convention (the iter-16 damping is meant as a
+        # per-step rate equivalent).
+        _du_d_dt_cdd = -_dke_dx_pad / _two_dx
+        _dv_d_dt_cdd = -_dke_dy_pad / _two_dy
+        du_d_dt = du_d_dt + _du_d_dt_cdd
+        dv_d_dt = dv_d_dt + _dv_d_dt_cdd
+
+        # FV3_3D iter 221: optional KE→heat conversion for the
+        # corner-divergence damping wind tendency.  FV3 sw_core.F90
+        # line 1085-1086 accumulates ``ke_correction * delpc`` into
+        # ``heat_source`` which then appears in ``dyn_core.F90``
+        # line 1764-1779's d_con block.  Mirror in our tendency
+        # form: heat tendency = -d_con * (u_d * du_dt + v_d * dv_dt)
+        # / c_pd at corners, then projected to cell centres for the
+        # T tendency.  Leading-order in dt; the 0.5*du² term that
+        # FV3 carries in the discrete form is O(dt) and dropped in
+        # this RK3-compatible tendency port.  Default 0.0
+        # preserves bit-for-bit baseline.  The iter-218/219 sponge-
+        # aware ``delt_max`` cap is applied below in the ``T``
+        # tendency builder (section 12) where dT_dt is finalized.
+        if config.corner_div_damp_d_con > 0.0:
+            _dKE_dt_corner_cdd = (
+                u_d * _du_d_dt_cdd + v_d * _dv_d_dt_cdd
+            )
+            _dT_dt_cdd_cc = (
+                -config.corner_div_damp_d_con
+                * _interp_corner_to_center(_dKE_dt_corner_cdd)
+                / constants.c_pd
+            )
+        else:
+            _dT_dt_cdd_cc = None
+
+    else:
+        _dT_dt_cdd_cc = None
 
     # --- 10b. Surface pressure tendency and vertical motion ---
 
@@ -595,6 +1181,17 @@ def fv3_hydrostatic_tendencies(
 
     dT_dt_data = horiz_adv_T + vert_adv_T + adiabatic
 
+    # FV3_3D iter 221: add the corner-divergence-damp KE→heat
+    # tendency captured in section 10a.  Default 0.0 preserves
+    # bit-for-bit baseline.
+    if _dT_dt_cdd_cc is not None:
+        dT_dt_data = dT_dt_data + _dT_dt_cdd_cc
+
+    # FV3_3D iter 223: add the cell-centre div_damp KE→heat
+    # tendency captured in the iter-5 div_damp block.
+    if _dT_dt_dd_cc is not None:
+        dT_dt_data = dT_dt_data + _dT_dt_dd_cc
+
     # --- 12. Diffusion ---
     # 12a. Laplacian viscosity on D-grid winds
     #
@@ -641,7 +1238,17 @@ def fv3_hydrostatic_tendencies(
     # call (i.e. one extra ∇² over T standalone).  When the (u, v, T)
     # batch did not run, fall back to a standalone ``∇²(T)``.
     if config.T_diss_coeff > 0:
-        wind_speed = jnp.sqrt(u_cell**2 + v_cell**2)
+        # FV3_3D iter 182: use the same JAX double-where trick as
+        # iter 181 to make the gradient through ``sqrt`` finite at
+        # zero strain (rest state).  Forward pass bit-for-bit
+        # unchanged: at any nonzero ``u² + v²`` the result is exactly
+        # ``sqrt(u²+v²)``; at zero exactly 0.  Backward pass:
+        # gradient finite (zero) at rest state instead of NaN.
+        _ws_sq = u_cell ** 2 + v_cell ** 2
+        _safe_ws_sq = jnp.where(_ws_sq > 0.0, _ws_sq, 1.0)
+        wind_speed = jnp.where(
+            _ws_sq > 0.0, jnp.sqrt(_safe_ws_sq), 0.0,
+        )
         dx_local = grid.dx[..., None]
         nu_T = config.T_diss_coeff * wind_speed * dx_local
         if _lap_flat is not None:
@@ -734,9 +1341,63 @@ def fv3_hydrostatic_tendencies(
     dv_d_dt = dv_d_dt + _vert_adv_uv_d[..., 1]
 
     if config.A_h > 0:
-        du_d_dt = du_d_dt + config.A_h * _lap_uv_d[..., 0]
-        dv_d_dt = dv_d_dt + config.A_h * _lap_uv_d[..., 1]
-        dT_dt_data = dT_dt_data + config.A_h * lap_uvT[..., 2]
+        # FV3_3D iter 58: optional Smagorinsky-style adaptive A_h
+        # added on top of the static ``config.A_h`` constant.  When
+        # ``config.smagorinsky_cs > 0``, compute the per-cell adaptive
+        # field at corners and add it to the static value.
+        if config.smagorinsky_cs > 0.0:
+            from legoesm.core._smagorinsky_visc import (
+                compute_smagorinsky_ah_3d,
+            )
+            _ah_smag_corner = compute_smagorinsky_ah_3d(
+                u_d, v_d, cdgrid, config.smagorinsky_cs,
+            )                                              # (6, n+1, n+1, nlev)
+            # _lap_uv_d is at corners (same shape).  Combined:
+            #   du/dt += (A_h + ah_smag) * lap_u
+            _ah_eff_corner = config.A_h + _ah_smag_corner
+            _du_d_dt_ah = _ah_eff_corner * _lap_uv_d[..., 0]
+            _dv_d_dt_ah = _ah_eff_corner * _lap_uv_d[..., 1]
+            du_d_dt = du_d_dt + _du_d_dt_ah
+            dv_d_dt = dv_d_dt + _dv_d_dt_ah
+            # T is at cell centers.  Interpolate ah_smag from corners
+            # via 4-point average; add to static A_h for cell-centred
+            # T tendency.
+            _ah_smag_cell = 0.25 * (
+                _ah_smag_corner[:, :-1, :-1, :]
+                + _ah_smag_corner[:, 1:, :-1, :]
+                + _ah_smag_corner[:, :-1, 1:, :]
+                + _ah_smag_corner[:, 1:, 1:, :]
+            )                                              # (6, n, n, nlev)
+            _ah_eff_cell = config.A_h + _ah_smag_cell
+            dT_dt_data = dT_dt_data + _ah_eff_cell * lap_uvT[..., 2]
+        else:
+            _du_d_dt_ah = config.A_h * _lap_uv_d[..., 0]
+            _dv_d_dt_ah = config.A_h * _lap_uv_d[..., 1]
+            du_d_dt = du_d_dt + _du_d_dt_ah
+            dv_d_dt = dv_d_dt + _dv_d_dt_ah
+            dT_dt_data = dT_dt_data + config.A_h * lap_uvT[..., 2]
+
+        # FV3_3D iter 225: optional KE→heat d_con conversion for
+        # the iter-57/58 Smagorinsky-A_h Laplacian on (u_d, v_d).
+        # Mirrors iter-208/221/223 d_con but for the A_h tendency.
+        # Heat tendency formula (per second, leading order):
+        #
+        #     dKE/dt_corner = u_d * du_d_dt_ah + v_d * dv_d_dt_ah
+        #     dT/dt += -ah_d_con * (dKE/dt) / c_pd
+        #
+        # at corners, projected to cell centres via
+        # ``_interp_corner_to_center``.  Default 0.0 preserves
+        # bit-for-bit baseline; gated INSIDE ``A_h > 0``.  FV3
+        # production default is 1.0.
+        if config.ah_d_con > 0.0:
+            _dKE_dt_corner_ah = (
+                u_d * _du_d_dt_ah + v_d * _dv_d_dt_ah
+            )
+            dT_dt_data = dT_dt_data + (
+                -config.ah_d_con
+                * _interp_corner_to_center(_dKE_dt_corner_ah)
+                / constants.c_pd
+            )
 
     if config.hyperdiff_coeff > 0:
         du_d_dt = du_d_dt + _hd_uv_d[..., 0]
@@ -940,11 +1601,15 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                 _phys_result = physics_fn(s_cc, self.grid, self.sigma_coord)
                 phys_cc = _phys_result[0] if type(_phys_result) is tuple else _phys_result
 
+            # FV3_3D iter 189: pass the actual integration dt so
+            # the iter-16 / iter-187 corner-div damping adaptive cap
+            # uses the real dt instead of ``config.corner_div_damp_dt_proxy``.
             tend = fv3_hydrostatic_tendencies(
                 s, self.grid, self.sigma_coord, cdgrid,
                 self.config,
                 physics_tendency=None,
                 physics_tendency_cc=phys_cc,
+                dt_actual=dt,
             )
             # Return an FV3HydrostaticState-shaped pytree with tendency data
             # so that the time integrator's tree_map works correctly.
@@ -962,6 +1627,112 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
 
         # Synchronize D-grid boundary corners across cubed-sphere faces
         state_new = self._sync_dgrid_boundary(state_new)
+
+        # FV3_3D iter 12: optional post-step del-n vorticity damping
+        # reusing the SW backbone ``fv3_del6_vorticity_damping``.
+        # Faithful port of FV3 ``sw_core.F90:1948-1999``: applied ONCE
+        # per full timestep AFTER the RK3 update, NOT inside the RK3
+        # tendency function.  Same pattern as
+        # ``shallow_water_fv3_cdgrid.py:1141``.
+        if self.config.damp_v > 0.0:
+            from legoesm.core.fv3_del6_vt_flux import (
+                fv3_del6_vorticity_damping,
+            )
+            # Convert C-D grid winds at corners (6, n+1, n+1, nlev) to
+            # FV3 normal D-grid layout per level: u at v-interfaces
+            # (6, n, n+1, nlev), v at u-interfaces (6, n+1, n, nlev).
+            # Average pairs of corners along the appropriate axis.
+            u_corner = state_new.u_d.data
+            v_corner = state_new.v_d.data
+            u_normal = 0.5 * (u_corner[:, :-1, :, :] + u_corner[:, 1:, :, :])
+            v_normal = 0.5 * (v_corner[:, :, :-1, :] + v_corner[:, :, 1:, :])
+
+            # Compute the FV3 damp coefficient (matches SW pattern).
+            # da_min_c = global min of B-grid corner area.
+            da_min_c = jnp.min(self.cdgrid.area_corner)
+            damp_step = (self.config.damp_v * da_min_c) ** (
+                self.config.nord_v + 1
+            )
+
+            # Apply per-level via vmap.  The 2D del6_vt_flux function
+            # operates on (6, n, n+1) and (6, n+1, n) per call.
+            def _per_level(args):
+                u_lev, v_lev = args
+                return fv3_del6_vorticity_damping(
+                    u_lev, v_lev, damp=damp_step,
+                    nord=self.config.nord_v, cdgrid=self.cdgrid,
+                )
+
+            u_normal_t = jnp.moveaxis(u_normal, -1, 0)  # (nlev, 6, n, n+1)
+            v_normal_t = jnp.moveaxis(v_normal, -1, 0)  # (nlev, 6, n+1, n)
+            du_normal_t, dv_normal_t = jax.vmap(_per_level)(
+                (u_normal_t, v_normal_t),
+            )
+            du_normal = jnp.moveaxis(du_normal_t, 0, -1)
+            dv_normal = jnp.moveaxis(dv_normal_t, 0, -1)
+
+            # Project wind increments from FV3 normal D-grid back to
+            # corners (6, n+1, n+1, nlev) by mode='edge' padding then
+            # averaging — the inverse of the corner→face averaging
+            # used at the start.  At the cube-face boundary the edge
+            # repeat preserves the increment magnitude.
+            du_pad = jnp.pad(
+                du_normal, [(0, 0), (1, 1), (0, 0), (0, 0)], mode="edge",
+            )
+            du_corner = 0.5 * (du_pad[:, :-1, :, :] + du_pad[:, 1:, :, :])
+            dv_pad = jnp.pad(
+                dv_normal, [(0, 0), (0, 0), (1, 1), (0, 0)], mode="edge",
+            )
+            dv_corner = 0.5 * (dv_pad[:, :, :-1, :] + dv_pad[:, :, 1:, :])
+
+            # FV3_3D iter 208: optional KE→heat conversion for the
+            # iter-12 damp_v wind increments.  Faithful port of FV3
+            # sw_core.F90:1953-1990 d_con block (simplified to just
+            # the damp_v contribution; the corner-div damping
+            # contribution is a future iteration).
+            #
+            # KE change per unit mass at corners:
+            #     ΔKE = u_d * du + 0.5*du² + v_d * dv + 0.5*dv²
+            # Heat = -ΔKE; ΔT = -damp_v_d_con * ΔKE / c_pd.
+            # T is at cell centres → project ΔKE_corner via
+            # ``_interp_corner_to_center``.
+            if self.config.damp_v_d_con > 0.0:
+                from legoesm.core.operators_cdgrid import (
+                    _interp_corner_to_center,
+                )
+                dKE_corner = (
+                    u_corner * du_corner + 0.5 * du_corner ** 2
+                    + v_corner * dv_corner + 0.5 * dv_corner ** 2
+                )
+                dKE_cc = _interp_corner_to_center(dKE_corner)
+                dT = -self.config.damp_v_d_con * dKE_cc / constants.c_pd
+                # FV3_3D iter 218/219: optional per-step cap on |dT|.
+                # FV3 dyn_core.F90:1764-1776 (cp_air branch) skips
+                # the cap entirely for the top 2 sponge layers
+                # (``k<3`` in FV3's 1-based indexing, ``k<2`` in our
+                # 0-based indexing where ``k=0`` is the model top).
+                # delt_max=0 disables the cap globally.
+                if self.config.delt_max > 0.0:
+                    nlev = dT.shape[-1]
+                    k_idx = jnp.arange(nlev)
+                    # Top 2 sponge layers get an effectively infinite
+                    # cap (no clipping); the rest get dt*delt_max.
+                    cap_per_level = jnp.where(
+                        k_idx < 2, jnp.inf,
+                        dt * self.config.delt_max,
+                    )
+                    cap_b = cap_per_level[None, None, None, :]
+                    dT = jnp.clip(dT, -cap_b, cap_b)
+                state_new = state_new._replace(
+                    u_d=state_new.u_d.replace(data=u_corner + du_corner),
+                    v_d=state_new.v_d.replace(data=v_corner + dv_corner),
+                    T=state_new.T.replace(data=state_new.T.data + dT),
+                )
+            else:
+                state_new = state_new._replace(
+                    u_d=state_new.u_d.replace(data=u_corner + du_corner),
+                    v_d=state_new.v_d.replace(data=v_corner + dv_corner),
+                )
 
         # Implicit gravity wave damping — post-step Laplacian diffusion on p_s.
         if self.config.implicit_grav_wave_damping > 0:

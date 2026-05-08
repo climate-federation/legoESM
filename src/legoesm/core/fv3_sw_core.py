@@ -1794,8 +1794,17 @@ def _d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
             # interpolation (matching sw_core.F90:1795 `a2b_ord4` call)
             # instead of the 2nd-order `_interp_center_to_corner`.
             wk_corner = _interp_center_to_corner_a2b_ord4(wk, cdgrid)
-            smag_vort = jnp.abs(dt) * jnp.sqrt(
-                delpc ** 2 + wk_corner ** 2)
+            # FV3_3D iter 183: use the JAX double-where trick (same
+            # pattern as iter 181) to make the gradient through
+            # ``sqrt`` finite at rest state.  Forward pass bit-for-bit
+            # unchanged at any nonzero ``delpc² + wk² > 0``; exactly
+            # 0 at rest.  Backward pass: gradient finite everywhere.
+            _smag_arg = delpc ** 2 + wk_corner ** 2
+            _safe_smag_arg = jnp.where(_smag_arg > 0.0, _smag_arg, 1.0)
+            _smag_root = jnp.where(
+                _smag_arg > 0.0, jnp.sqrt(_safe_smag_arg), 0.0,
+            )
+            smag_vort = jnp.abs(dt) * _smag_root
             damp2 = da_min_c * jnp.maximum(
                 d2_bg, jnp.minimum(0.20, dddmp * smag_vort))
         else:

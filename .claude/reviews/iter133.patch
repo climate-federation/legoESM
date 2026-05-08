@@ -1,0 +1,277 @@
+diff --git a/docs/CROSS_GRID_COMPARISON_REPORT.md b/docs/CROSS_GRID_COMPARISON_REPORT.md
+index 1e224dad..85dbf070 100644
+--- a/docs/CROSS_GRID_COMPARISON_REPORT.md
++++ b/docs/CROSS_GRID_COMPARISON_REPORT.md
+@@ -1,6 +1,6 @@
+ # legoESM Cross-Grid Comparison Report
+ 
+-**Branch**: `simulation_full_check` (iter-132 snapshot)
++**Branch**: `simulation_full_check` (iter-133 snapshot)
+ **Scope**: end-to-end cross-grid comparison across the user's prompt
+ items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
+ test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
+diff --git a/scripts/ocean_test_matrix/experiments.py b/scripts/ocean_test_matrix/experiments.py
+index 704ec19e..3007aa55 100644
+--- a/scripts/ocean_test_matrix/experiments.py
++++ b/scripts/ocean_test_matrix/experiments.py
+@@ -392,9 +392,50 @@ def run_barotropic_wave(tc: TestCase, output_dir: Path, days: float
+         diag_every, lambda s: _key_array_fn(s, tc.grid_type),
+         label=f"Barotropic Wave ({tc.grid_type})", total_days=days)
+ 
+-    # All grids now use same physical units
+-    eta_max = diag["max_abs_eta"][-1] if diag.get("max_abs_eta") else 0
+-    notes = f"max|eta|={eta_max:.4f} m"
++    # iter-133 (self-review based on docs/ocean_experiments_reference.md
++    # "Barotropic Wave" Validation Thresholds): same gates as
++    # monolithic.
++    max_eta_series = diag.get("max_abs_eta", [])
++    mean_eta_series = diag.get("mean_eta", [])
++    n_eta = len(max_eta_series)
++    if n_eta >= 2:
++        max_eta_arr = np.asarray(max_eta_series, dtype=np.float64)
++        eta_initial = float(np.nanmax(np.abs(max_eta_arr[:max(1, n_eta // 5)])))
++        eta_final = float(abs(max_eta_arr[-1]))
++        if eta_initial > 1e-12 and np.isfinite(eta_final):
++            eta_conservation = eta_final / eta_initial
++        else:
++            eta_conservation = float("nan")
++        min_final_amplitude = eta_final
++    else:
++        eta_conservation = float("nan")
++        min_final_amplitude = float("nan")
++    if mean_eta_series and len(mean_eta_series) >= 2:
++        mean_eta_drift = float(abs(
++            mean_eta_series[-1] - mean_eta_series[0]))
++    else:
++        mean_eta_drift = float("nan")
++    eta_max = max_eta_series[-1] if max_eta_series else 0
++    notes = (f"max|eta|={eta_max:.4f}m, "
++             f"eta_cons={eta_conservation:.3f}, "
++             f"mean_eta_drift={mean_eta_drift:.2e}m, "
++             f"min_final_amp={min_final_amplitude:.3f}m")
++    ok, notes = _apply_value_threshold(
++        ok, notes, eta_conservation, 0.8,
++        label="eta_conservation_lower", op="ge",
++        n_samples=n_eta)
++    ok, notes = _apply_value_threshold(
++        ok, notes, eta_conservation, 1.2,
++        label="eta_conservation_upper", op="le",
++        n_samples=n_eta)
++    ok, notes = _apply_value_threshold(
++        ok, notes, mean_eta_drift, 1e-4,
++        label="mean_eta_drift", op="le", units="m",
++        n_samples=len(mean_eta_series))
++    ok, notes = _apply_value_threshold(
++        ok, notes, min_final_amplitude, 0.1,
++        label="min_final_amplitude", op="ge", units="m",
++        n_samples=n_eta)
+ 
+     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+     depth = -z_full
+@@ -465,11 +506,29 @@ def _run_gyre_experiment(tc: TestCase, output_dir: Path, days: float,
+         diag_every, lambda s: _key_array_fn(s, tc.grid_type),
+         label=f"{label} ({tc.grid_type})", total_days=days)
+ 
+-    max_speed = diag["max_speed"][-1] if diag.get("max_speed") else 0
++    max_speed_series = diag.get("max_speed", [])
++    max_speed = max_speed_series[-1] if max_speed_series else 0
+     eta_list = diag.get("mean_eta", [])
+     eta_drift = (abs(eta_list[-1] - eta_list[0])
+                  if len(eta_list) >= 2 else 0.0)
+     notes = f"max speed={max_speed:.4f} m/s, eta drift={eta_drift:.2e}"
++    # iter-133 (self-review based on docs/ocean_experiments_reference.md
++    # "Barotropic Gyre" Validation Thresholds; same gates apply to
++    # barotropic_double_gyre and barotropic_double_gyre_sin2 per
++    # the doc's "Same as barotropic_gyre" callout).
++    n_speed = len(max_speed_series)
++    ok, notes = _apply_value_threshold(
++        ok, notes, float(max_speed), 0.05,
++        label="max_speed_final_lower", op="ge", units="m/s",
++        n_samples=n_speed)
++    ok, notes = _apply_value_threshold(
++        ok, notes, float(max_speed), 0.5,
++        label="max_speed_final_upper", op="le", units="m/s",
++        n_samples=n_speed)
++    ok, notes = _apply_value_threshold(
++        ok, notes, float(eta_drift), 1e-3,
++        label="eta_drift_absolute", op="le", units="m",
++        n_samples=len(eta_list))
+ 
+     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+     depth = -z_full
+diff --git a/scripts/run_ocean_test_matrix.py b/scripts/run_ocean_test_matrix.py
+index b4e0813c..1ecf4806 100644
+--- a/scripts/run_ocean_test_matrix.py
++++ b/scripts/run_ocean_test_matrix.py
+@@ -3154,9 +3154,55 @@ def run_barotropic_wave(tc: TestCase, output_dir: Path, days: float
+         diag_every, lambda s: _key_array_fn(s, tc.grid_type),
+         label=f"Barotropic Wave ({tc.grid_type})", total_days=days)
+ 
+-    # All grids now use same physical units
+-    eta_max = diag["max_abs_eta"][-1] if diag.get("max_abs_eta") else 0
+-    notes = f"max|eta|={eta_max:.4f} m"
++    # iter-133 (self-review based on docs/ocean_experiments_reference.md
++    # "Barotropic Wave" Validation Thresholds): apply 3 documented
++    # gates that pre-iter-133 were entirely uncomputed.  The
++    # finite-only ``ok`` from _run_timeloop catches NaN/blowup,
++    # but a finite-but-anomalous run (e.g., the spectral T21 case
++    # showing 7 m vs FV ~0.2 m) could still PASS without these.
++    max_eta_series = diag.get("max_abs_eta", [])
++    mean_eta_series = diag.get("mean_eta", [])
++    n_eta = len(max_eta_series)
++    if n_eta >= 2:
++        max_eta_arr = np.asarray(max_eta_series, dtype=np.float64)
++        eta_initial = float(np.nanmax(np.abs(max_eta_arr[:max(1, n_eta // 5)])))
++        eta_final = float(abs(max_eta_arr[-1]))
++        if eta_initial > 1e-12 and np.isfinite(eta_final):
++            eta_conservation = eta_final / eta_initial
++        else:
++            eta_conservation = float("nan")
++        min_final_amplitude = eta_final
++    else:
++        eta_conservation = float("nan")
++        min_final_amplitude = float("nan")
++    if mean_eta_series and len(mean_eta_series) >= 2:
++        mean_eta_drift = float(abs(
++            mean_eta_series[-1] - mean_eta_series[0]))
++    else:
++        mean_eta_drift = float("nan")
++    eta_max = max_eta_series[-1] if max_eta_series else 0
++    notes = (f"max|eta|={eta_max:.4f}m, "
++             f"eta_cons={eta_conservation:.3f}, "
++             f"mean_eta_drift={mean_eta_drift:.2e}m, "
++             f"min_final_amp={min_final_amplitude:.3f}m")
++    ok, notes = _apply_value_threshold(
++        ok, notes, eta_conservation, 0.8,
++        label="eta_conservation_lower", op="ge",
++        n_samples=n_eta)
++    ok, notes = _apply_value_threshold(
++        ok, notes, eta_conservation, 1.2,
++        label="eta_conservation_upper", op="le",
++        n_samples=n_eta)
++    ok, notes = _apply_value_threshold(
++        ok, notes, mean_eta_drift, 1e-4,
++        label="mean_eta_drift", op="le", units="m",
++        n_samples=len(mean_eta_series))
++    # min_final_amplitude > 0.1 m: use op="ge" with 0.1; this
++    # catches over-damped runs that lose all wave amplitude.
++    ok, notes = _apply_value_threshold(
++        ok, notes, min_final_amplitude, 0.1,
++        label="min_final_amplitude", op="ge", units="m",
++        n_samples=n_eta)
+ 
+     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+     depth = -z_full
+@@ -3378,11 +3424,31 @@ def _run_gyre_experiment(tc: TestCase, output_dir: Path, days: float,
+         diag_every, lambda s: _key_array_fn(s, tc.grid_type),
+         label=f"{label} ({tc.grid_type})", total_days=days)
+ 
+-    max_speed = diag["max_speed"][-1] if diag.get("max_speed") else 0
++    max_speed_series = diag.get("max_speed", [])
++    max_speed = max_speed_series[-1] if max_speed_series else 0
+     eta_list = diag.get("mean_eta", [])
+     eta_drift = (abs(eta_list[-1] - eta_list[0])
+                  if len(eta_list) >= 2 else 0.0)
+     notes = f"max speed={max_speed:.4f} m/s, eta drift={eta_drift:.2e}"
++    # iter-133 (self-review based on docs/ocean_experiments_reference.md
++    # "Barotropic Gyre" Validation Thresholds; same applies to
++    # barotropic_double_gyre per the doc's "Same as barotropic_gyre"
++    # callout):
++    #   * max_speed_final in [0.05, 0.5] m/s
++    #   * eta_drift < 1e-3 m absolute
++    n_speed = len(max_speed_series)
++    ok, notes = _apply_value_threshold(
++        ok, notes, float(max_speed), 0.05,
++        label="max_speed_final_lower", op="ge", units="m/s",
++        n_samples=n_speed)
++    ok, notes = _apply_value_threshold(
++        ok, notes, float(max_speed), 0.5,
++        label="max_speed_final_upper", op="le", units="m/s",
++        n_samples=n_speed)
++    ok, notes = _apply_value_threshold(
++        ok, notes, float(eta_drift), 1e-3,
++        label="eta_drift_absolute", op="le", units="m",
++        n_samples=len(eta_list))
+ 
+     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+     depth = -z_full
+diff --git a/tests/test_ocean_cross_grid_plots.py b/tests/test_ocean_cross_grid_plots.py
+index c991303d..07c93978 100644
+--- a/tests/test_ocean_cross_grid_plots.py
++++ b/tests/test_ocean_cross_grid_plots.py
+@@ -2877,6 +2877,75 @@ class TestIter123OceanDriftTolerance:
+                 f"fall back to first finite non-zero max_eta "
+                 f"sample as denominator.")
+ 
++    # ====== iter-133: self-review barotropic experiment gates ======
++
++    def test_iter133_barotropic_wave_gates(self):
++        """iter-133 self-review based on
++        docs/ocean_experiments_reference.md 'Barotropic Wave'
++        Validation Thresholds: gates eta_conservation
++        in [0.8, 1.2], mean_eta_drift < 1e-4 m,
++        min_final_amplitude > 0.1 m.
++        """
++        from pathlib import Path
++        for rel in (
++            "scripts/run_ocean_test_matrix.py",
++            "scripts/ocean_test_matrix/experiments.py",
++        ):
++            text = (Path(__file__).resolve().parent.parent
++                    / rel).read_text()
++            import re
++            m = re.search(
++                r"def run_barotropic_wave\b"
++                r".*?(?=\ndef \w|\nRUNNERS)",
++                text, re.DOTALL,
++            )
++            assert m is not None, f"{rel}: missing"
++            body = m.group(0)
++            code = "\n".join(
++                line for line in body.splitlines()
++                if not line.lstrip().startswith("#"))
++            assert 'label="eta_conservation_lower"' in code
++            assert 'label="eta_conservation_upper"' in code
++            assert "eta_conservation, 0.8" in code
++            assert "eta_conservation, 1.2" in code
++            assert 'label="mean_eta_drift"' in code
++            assert "mean_eta_drift, 1e-4" in code
++            assert 'label="min_final_amplitude"' in code
++            assert "min_final_amplitude, 0.1" in code
++
++    def test_iter133_barotropic_gyre_gates(self):
++        """iter-133 self-review based on
++        docs/ocean_experiments_reference.md 'Barotropic Gyre'
++        Validation Thresholds: gates max_speed_final
++        in [0.05, 0.5] m/s and eta_drift < 1e-3 m absolute.
++        Applied via _run_gyre_experiment shared runner so it
++        covers single + double + sin2 variants.
++        """
++        from pathlib import Path
++        for rel in (
++            "scripts/run_ocean_test_matrix.py",
++            "scripts/ocean_test_matrix/experiments.py",
++        ):
++            text = (Path(__file__).resolve().parent.parent
++                    / rel).read_text()
++            import re
++            m = re.search(
++                r"def _run_gyre_experiment\b"
++                r".*?(?=\ndef \w|\nRUNNERS)",
++                text, re.DOTALL,
++            )
++            assert m is not None, f"{rel}: missing _run_gyre_experiment"
++            body = m.group(0)
++            code = "\n".join(
++                line for line in body.splitlines()
++                if not line.lstrip().startswith("#"))
++            assert 'label="max_speed_final_lower"' in code
++            assert 'label="max_speed_final_upper"' in code
++            assert "max_speed), 0.05" in code
++            assert "max_speed), 0.5" in code
++            assert 'label="eta_drift_absolute"' in code
++            assert "eta_drift), 1e-3" in code
++
+     def test_iter128_geostrophic_doc_documents_tighter_gate(self):
+         """iter-128 codex iter-127-followup MEDIUM-1: the doc
+         threshold of 1e-3 is the loose contract; the runner uses
