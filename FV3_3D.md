@@ -643,6 +643,13 @@ Key iterations:
   stack work at float32 precision.  jax.grad finite, dtype
   verified jnp.float32.  1/1 pass in 57 s.  Plus 10-iter ToC
   compaction (iters 280-289).
+- Iter 291: NH counterpart of iter-290 (NH iter-184
+  PRODUCTION d4_bg=0.02 + full 5-knob d_con stack +
+  delt_max=1.0 AD-at-rest at default float32; mirror of NH
+  iter-270 at x64).  jax.grad w.r.t. theta_prime finite,
+  dtype jnp.float32.  1/1 pass in 78 s.  PE+NH iter-183
+  sqrt(0) AD-safety now verified at both x64 and float32 on
+  both 3D paths under FV3 production damping coefficients.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
