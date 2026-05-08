@@ -551,106 +551,37 @@ Key iterations:
   actually engages and bounds per-step ΔT.
 - Iter 249: bit-for-bit formula test for PE iter-187 smag_vort
   cap (FV3 sw_core.F90:1799 form).  rtol=1e-12 + symmetry.
-- Iter 250: NH mirror of iter-249 smag_vort cap formula test.
-  Same FV3 form ``|dt|*sqrt(delpc²+ζ²)`` verified bit-for-bit
-  on the NH path at rtol=1e-12.  Both PE+NH iter-187 wirings
-  now have formula-level regression tests.  Also compacts
-  iter-240..249 ToC entries from ~100 lines to ~25 lines for
-  context budget at the user-requested 10-iter compaction
-  boundary.
-- Iter 251: NH C36 production stability test with d_con stack
-  (NH mirror of PE iter-245).  Modest IC (±2 m/s u/v, ±0.2
-  m/s w) at C36 production resolution + full NH iter-184
-  toolkit + all 5 NH d_con knobs at 1.0 + delt_max=1.0.  10
-  steps × dt=10 = 100 s integrated.  All fields finite +
-  bounded growth (max|u| < 50 m/s, max|θ_p| < 100 K).  1/1
-  pass in 21 s.  Closes the PE/NH parity gap from iter-245
-  by validating production-grade NH integration with the
-  full d_con stack at the same production resolution.
-- Iter 252: cube-imprint regression for iter-187 smag_vort
-  cap + iter-190 dedup'd a2b ζ corner path.  iter-179
-  cube-imprint metric tests engage iter-168 nord=0 only;
-  iter-197/206/212 extend to damp_w + d_con sites; iter-217
-  PE adds toolkit ratio.  But the iter-187 smag_vort cap
-  (``nord=1 + d4_bg>0`` activates ``|dt|*sqrt(delpc²+ζ²)``
-  cap) and the iter-190 dedup'd ``_zeta_a2b_ord4`` path were
-  NOT covered by any cube-imprint test.  iter 252 closes
-  that gap on NH: with iter-187 + iter-190 ON, the v
-  edge-std/interior-std ratio stays within 50 % of the
-  baseline (iter-168 nord=0).  Catches edge artifacts that
-  could be introduced by the smag_vort cap formula or the
-  dedup path.  1/1 pass in 23 s.
-- Iter 253: PE counterpart of iter-252.  iter-217 PE
-  cube-imprint engages iter-190 (use_fv3_a2b_zeta_corner=
-  True) but NOT iter-187 (corner_div_damp_d4_bg=0 in
-  iter-217 cfg_toolkit).  iter 253 closes the PE gap with
-  the same baseline-vs-iter187 comparison: PE v_d
-  edge-std/interior-std ratio at C8 with iter-187 + iter-190
-  ON stays within 50 % of the iter-168 nord=0 baseline.
-  Both PE and NH iter-187/190 paths now have cube-imprint
-  regression coverage.  1/1 pass in 24 s.
-- Iter 254: cube-imprint diagnostic on a PE C36 production-
-  style run with the full d_con stack.  iter-217/253 cover
-  cube-imprint at C8 (small grid, fast); iter-245 covers PE
-  C36 stability; iter-254 ties both together.  C36 + iter-19
-  production toolkit + full d_con stack + delt_max=1.0,
-  integrated for 5 steps × dt=200 from HS init + small
-  perturbation IC.  Verifies imprint ratio stays in sanity
-  bound (0.1, 10.0) — no runaway edge artifact at the actual
-  production resolution.  Uses edge_width=4 (vs edge_width=2
-  at C8) to match C36's larger panel size.  1/1 pass in
-  25 s.  Validates that the d_con stack composes with the
-  iter-19 production damping at production-grade resolution
-  WITHOUT introducing edge artifacts.
-- Iter 255: NH counterpart of iter-254 cube-imprint
-  diagnostic at C36 production resolution.  iter-179/234
-  cover NH cube-imprint at C8; iter-251 covers NH C36
-  stability; iter-255 ties them together.  C36 NH + iter-184-
-  style toolkit + full 5-knob NH d_con stack + delt_max=1.0,
-  5 steps × dt=10 from a perturbation IC.  v ratio stays in
-  (0.1, 10.0) sanity bound.  edge_width=4 same as iter-254.
-  1/1 pass in 21 s.  Closes the PE/NH parity gap on C36
-  cube-imprint diagnostic with the full d_con stack engaged.
-- Iter 256: global-energy-conservation regression for the
-  iter-208 damp_v_d_con POST-STEP block (PE).  iter-243
-  covered all 3 PE TENDENCY-based d_con sites (corner-div,
-  cell-centre div_damp, A_h) but iter-208 damp_v_d_con is
-  structurally different — discrete post-step block — so it
-  wasn't included.  iter-256 verifies the same property
-  ``Σ c_pd * ΔT_d_con + Σ ΔKE = 0`` at rtol=1e-10 for the
-  post-step path with the EXACT discrete formula (including
-  the 0.5*du² + 0.5*dv² nonlinear terms FV3 carries in the
-  discrete form).  Per-cell pointwise check + global sum.
-  All 4 PE d_con sites now have global-energy-conservation
-  regression coverage.  1/1 pass in 14 s.
-- Iter 257: NH counterpart of iter-256 — global energy
-  conservation for iter-209 damp_v_d_con post-step (NH).
-  NH stores winds at cc; iter-209 uses ``Δθ_p = -d_con *
-  ΔKE_cc / (c_pd * Π_ref)`` (iter-207 refinement).
-  Conservation property ``Σ c_pd * Π_ref * Δθ_p + Σ ΔKE = 0``
-  at rtol=1e-10.  Per-cell pointwise + global sum.  1/1 pass
-  in 23 s.  Closes the conservation regression gap on the NH
-  damp_v_d_con post-step.
-- Iter 258: global-energy-conservation regression for the
-  iter-203 damp_w_d_con post-step (NH).  iter-205 verified
-  per-cell heat formula bit-for-bit; iter-258 verifies global
-  conservation: ``Σ c_pd * Π_ref * Δθ_p_full = -Σ ΔKE_w_half``
-  at rtol=1e-10.  damp_w heat is computed at half-levels then
-  averaged to full levels; with w=0 BC at boundaries the
-  boundary correction terms vanish so ``Σ heat_full =
-  Σ heat_half``.  Test uses w-perturbation IC respecting the
-  BC.  ALL 6 d_con sites (4 PE via iter-243+256 + 5 NH via
-  iter-230+257+258) now have global-energy-conservation
-  regression coverage at machine precision.  1/1 pass in 23 s.
-- Iter 259: nord=2 (FV3 production default for damp_v) multi-
-  step stability test.  iter-187's nord=2 finite tests cover
-  single-step; iter-184/185 umbrellas use nord_v=2 for damp_v
-  but nord=1 for corner-div damp.  iter-259 runs PE+NH 20
-  steps with corner_div_damp_nord=2 + d4_bg=1e-4 + nord_v=2
-  + nord_w=2 + full d_con stack.  Both paths complete with
-  bounded growth (max|u| < 50 m/s).  2/2 pass in 33 s.
-  Catches slow-growth instability that single-step nord=2
-  finite tests would miss.
+- Iter 250: NH smag_vort cap formula bit-for-bit test
+  (mirror of PE iter-249) + 10-iter ToC compaction.
+- Iter 251: NH C36 production stability with d_con stack
+  (NH mirror of PE iter-245).  10×dt=10, all fields finite,
+  bounded growth.
+- Iter 252: cube-imprint regression for NH iter-187 +
+  iter-190 paths.  Imprint ratio within 50 % of baseline.
+- Iter 253: PE counterpart of iter-252.  PE iter-187 +
+  iter-190 imprint ratio within 50 % of baseline.
+- Iter 254: PE C36 cube-imprint diagnostic with full d_con
+  stack.  edge_width=4 metric stays in (0.1, 10.0).
+- Iter 255: NH counterpart of iter-254 (C36 cube-imprint).
+- Iter 256: global energy conservation for iter-208 PE
+  damp_v_d_con post-step.  Σ c_pd*ΔT + Σ ΔKE = 0 at
+  rtol=1e-10.
+- Iter 257: NH counterpart for iter-209 damp_v_d_con
+  post-step.  Σ c_pd*Π_ref*Δθ_p + Σ ΔKE = 0.
+- Iter 258: global energy conservation for iter-203
+  damp_w_d_con (NH, half-level heat with w=0 BC).  ALL 6
+  d_con sites now have machine-precision conservation
+  regression coverage.
+- Iter 259: nord=2 (FV3 default for damp_v) multi-step
+  stability with full d_con stack.  PE+NH 20 steps both
+  bounded.
+- Iter 260: regression sweep checkpoint + 10-iter compaction.
+  Verifies all 11 iter-250..259 tests pass together (12/12
+  total cases) — confirms no regression after the iter-258
+  conservation closure on the iter-203 damp_w_d_con post-step.
+  Also compacts iter-250..259 ToC entries from ~100 lines to
+  ~25 lines for context budget at the user-requested 10-iter
+  compaction boundary.  No new test file (housekeeping iter).
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
