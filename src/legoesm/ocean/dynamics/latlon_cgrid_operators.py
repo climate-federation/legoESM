@@ -139,6 +139,90 @@ def pad_ns_vector_v(interior: jnp.ndarray, grid) -> jnp.ndarray:
     return _pad_ns_zero(interior)
 
 
+def pad_ns_vector_pair(
+    u_interior: jnp.ndarray,
+    v_interior: jnp.ndarray,
+    grid,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Pad both vector components with fold + rotation at the north boundary.
+
+    On a regular lat-lon grid (fold inactive), this is equivalent to
+    calling ``pad_ns_vector_u`` and ``pad_ns_vector_v`` independently.
+
+    On a tripolar grid with rotation angles in the bipolar cap, the
+    fold halo exchange must rotate the vector from the source cell's
+    local frame to the destination cell's frame.  The combined
+    transformation for the north ghost row is:
+
+        u_dest = -cos(Δα) * u_src - sin(Δα) * v_src
+        v_dest =  sin(Δα) * u_src - cos(Δα) * v_src
+
+    where Δα = α_dest - α_source is the rotation-angle difference
+    between the destination cell and the fold-partner source cell.
+    When all rotation angles are zero (regular lat-lon or synthetic
+    tripolar), this reduces to ``(u_d, v_d) = (-u_s, -v_s)``.
+
+    Parameters
+    ----------
+    u_interior : (n_lat-1, n_lon, ...) — u-component at interior v-face rows.
+    v_interior : (n_lat-1, n_lon, ...) — v-component at interior v-face rows.
+    grid : LatLonGrid or LatLonCGridGeometry.
+
+    Returns
+    -------
+    (u_padded, v_padded) : each (n_lat+1, n_lon, ...)
+    """
+    fold = getattr(grid, "fold", None)
+    if fold is None or not fold.is_active:
+        return _pad_ns_zero(u_interior), _pad_ns_zero(v_interior)
+
+    n_lon = fold.perm_T.shape[0]
+    south_u = jnp.zeros_like(u_interior[:1])
+    south_v = jnp.zeros_like(v_interior[:1])
+
+    # Source values at the fold partner: i-reversed last interior row
+    u_src = _fold_row(u_interior[-1:], fold.perm_T, 1.0, n_lon)
+    v_src = _fold_row(v_interior[-1:], fold.perm_v, 1.0, n_lon)
+
+    # Check if rotation angles are available and non-trivial.
+    # cos_alpha_v has shape (n_lat+1, n_lon); the north ghost row
+    # corresponds to the last row.
+    cos_alpha_v = getattr(grid, "cos_alpha_v", None)
+    sin_alpha_v = getattr(grid, "sin_alpha_v", None)
+
+    if cos_alpha_v is not None and sin_alpha_v is not None:
+        # Destination rotation angles at the north ghost row
+        cos_d = cos_alpha_v[-1:, :]  # (1, n_lon)
+        sin_d = sin_alpha_v[-1:, :]
+
+        # Source rotation angles (fold-partner's row, i-reversed)
+        cos_s_row = cos_alpha_v[-2:-1, :]  # last interior row
+        sin_s_row = sin_alpha_v[-2:-1, :]
+        cos_s = cos_s_row[:, fold.perm_v]
+        sin_s = sin_s_row[:, fold.perm_v]
+
+        # Rotation angle difference: cos(Δα) and sin(Δα)
+        cos_da = cos_d * cos_s + sin_d * sin_s
+        sin_da = sin_d * cos_s - cos_d * sin_s
+
+        # Broadcast for 3D fields
+        if u_interior.ndim == 3:
+            cos_da = cos_da[:, :, jnp.newaxis]
+            sin_da = sin_da[:, :, jnp.newaxis]
+
+        # Combined fold + rotation: negate + rotate
+        north_u = -cos_da * u_src - sin_da * v_src
+        north_v = sin_da * u_src - cos_da * v_src
+    else:
+        # No rotation angles — simple sign flip (regular lat-lon fold)
+        north_u = -u_src
+        north_v = -v_src
+
+    u_padded = jnp.concatenate([south_u, u_interior, north_u], axis=0)
+    v_padded = jnp.concatenate([south_v, v_interior, north_v], axis=0)
+    return u_padded, v_padded
+
+
 # =============================================================================
 # Cell-center ↔ face interpolation (shared by atmosphere and ocean)
 # =============================================================================

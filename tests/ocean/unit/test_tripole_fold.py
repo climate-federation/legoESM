@@ -15,6 +15,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     pad_ns_scalar,
     pad_ns_vector_u,
     pad_ns_vector_v,
+    pad_ns_vector_pair,
     gradient_y_cgrid,
     divergence_cgrid,
     curl_vertex_cgrid,
@@ -207,3 +208,133 @@ class TestRegularLatLonBackwardCompat:
         result = pad_ns_scalar(interior, regular_grid)
         expected = jnp.pad(interior, ((1, 1), (0, 0), (0, 0)))
         assert jnp.all(result == expected)
+
+
+# =========================================================================
+# Phase 3: Vector rotation in bipolar cap
+# =========================================================================
+
+
+def _make_rotated_tripole(n_lat=36, n_lon=72, max_angle_deg=30.0):
+    """Create a synthetic tripolar grid with non-trivial rotation angles.
+
+    In the bipolar cap, the rotation angle varies linearly with longitude
+    from -max_angle_deg to +max_angle_deg.  This means the fold partner
+    at ``perm[i] = n_lon - 1 - i`` has a DIFFERENT rotation angle than
+    cell ``i``, mimicking the asymmetry of a real bipolar cap.
+    """
+    from legoesm.grids.tripole import create_synthetic_tripole
+    geom = create_synthetic_tripole(n_lat, n_lon)
+
+    cap_j = geom.fold.cap_j
+
+    # Longitude-varying angle: -max at i=0, +max at i=n_lon-1
+    # So cell i has angle α(i) and fold partner perm[i]=n_lon-1-i
+    # has angle α(n_lon-1-i) = -α(i).  The difference Δα = 2α(i).
+    i_frac = jnp.linspace(-1.0, 1.0, n_lon)
+    alpha_1d = jnp.deg2rad(max_angle_deg) * i_frac  # (n_lon,)
+
+    # Build 2D rotation angles for v-points (n_lat+1, n_lon)
+    cos_alpha_v = jnp.ones((n_lat + 1, n_lon))
+    sin_alpha_v = jnp.zeros((n_lat + 1, n_lon))
+    mask_v = (jnp.arange(n_lat + 1) >= cap_j)[:, jnp.newaxis]
+    cos_alpha_v = jnp.where(mask_v, jnp.cos(alpha_1d), cos_alpha_v)
+    sin_alpha_v = jnp.where(mask_v, jnp.sin(alpha_1d), sin_alpha_v)
+
+    # u-points (n_lat, n_lon+1) — use alpha at cell center
+    cos_alpha_u = jnp.ones((n_lat, n_lon + 1))
+    sin_alpha_u = jnp.zeros((n_lat, n_lon + 1))
+    alpha_u = jnp.concatenate([alpha_1d, alpha_1d[0:1]])  # wrap
+    mask_u = (jnp.arange(n_lat) >= cap_j)[:, jnp.newaxis]
+    cos_alpha_u = jnp.where(mask_u, jnp.cos(alpha_u), cos_alpha_u)
+    sin_alpha_u = jnp.where(mask_u, jnp.sin(alpha_u), sin_alpha_u)
+
+    return geom._replace(
+        cos_alpha_u=cos_alpha_u,
+        sin_alpha_u=sin_alpha_u,
+        cos_alpha_v=cos_alpha_v,
+        sin_alpha_v=sin_alpha_v,
+    )
+
+
+class TestVectorRotation:
+    """Test vector rotation in the bipolar cap (Phase 3)."""
+
+    def test_pair_fold_zero_rotation_matches_individual(self, tripole_grid):
+        """With zero rotation, pad_ns_vector_pair should match individual pads."""
+        u_int = jax.random.normal(jax.random.PRNGKey(1), (35, 72))
+        v_int = jax.random.normal(jax.random.PRNGKey(2), (35, 72))
+
+        u_pair, v_pair = pad_ns_vector_pair(u_int, v_int, tripole_grid)
+        u_ind = pad_ns_vector_u(u_int, tripole_grid)
+        v_ind = pad_ns_vector_v(v_int, tripole_grid)
+
+        assert jnp.allclose(u_pair, u_ind), "u mismatch between pair and individual"
+        assert jnp.allclose(v_pair, v_ind), "v mismatch between pair and individual"
+
+    def test_pair_fold_regular_latlon_is_zero(self, regular_grid):
+        """On regular lat-lon, pad_ns_vector_pair gives zero at boundaries."""
+        u_int = jax.random.normal(jax.random.PRNGKey(1), (35, 72))
+        v_int = jax.random.normal(jax.random.PRNGKey(2), (35, 72))
+
+        u_pad, v_pad = pad_ns_vector_pair(u_int, v_int, regular_grid)
+        assert jnp.all(u_pad[0] == 0.0)
+        assert jnp.all(u_pad[-1] == 0.0)
+        assert jnp.all(v_pad[0] == 0.0)
+        assert jnp.all(v_pad[-1] == 0.0)
+
+    def test_rotated_fold_differs_from_unrotated(self):
+        """With non-zero rotation, the fold ghost row should differ from
+        the simple sign-flip result."""
+        grid_rot = _make_rotated_tripole(max_angle_deg=30.0)
+        grid_norot = create_synthetic_tripole(36, 72)
+
+        u_int = jax.random.normal(jax.random.PRNGKey(1), (35, 72))
+        v_int = jax.random.normal(jax.random.PRNGKey(2), (35, 72))
+
+        u_rot, v_rot = pad_ns_vector_pair(u_int, v_int, grid_rot)
+        u_norot, v_norot = pad_ns_vector_pair(u_int, v_int, grid_norot)
+
+        # Interior should be identical (rotation only affects the fold row)
+        assert jnp.all(u_rot[1:-1] == u_norot[1:-1])
+        assert jnp.all(v_rot[1:-1] == v_norot[1:-1])
+
+        # North fold row should differ (rotation mixes u and v)
+        assert not jnp.allclose(u_rot[-1], u_norot[-1]), (
+            "Expected rotated fold to differ from unrotated"
+        )
+
+    def test_rotation_orthogonality(self):
+        """The combined fold+rotation transformation should be orthogonal:
+        |u_d|^2 + |v_d|^2 = |u_s|^2 + |v_s|^2."""
+        grid_rot = _make_rotated_tripole(max_angle_deg=45.0)
+
+        u_int = jax.random.normal(jax.random.PRNGKey(1), (35, 72))
+        v_int = jax.random.normal(jax.random.PRNGKey(2), (35, 72))
+
+        u_pad, v_pad = pad_ns_vector_pair(u_int, v_int, grid_rot)
+
+        # Energy at the last interior row (source)
+        energy_src = u_int[-1]**2 + v_int[-1]**2
+        # Energy at the north fold row (destination)
+        # Note: the fold reverses i, so compare with i-reversed source
+        perm = grid_rot.fold.perm_T
+        energy_src_folded = u_int[-1, perm]**2 + v_int[-1, perm]**2
+        energy_dst = u_pad[-1]**2 + v_pad[-1]**2
+
+        assert jnp.allclose(energy_dst, energy_src_folded, atol=1e-6), (
+            f"Rotation should preserve energy. Max diff: "
+            f"{float(jnp.max(jnp.abs(energy_dst - energy_src_folded)))}"
+        )
+
+    def test_pair_fold_3d(self):
+        """pad_ns_vector_pair should work on 3D fields."""
+        grid = create_synthetic_tripole(36, 72)
+        u_int = jax.random.normal(jax.random.PRNGKey(1), (35, 72, 5))
+        v_int = jax.random.normal(jax.random.PRNGKey(2), (35, 72, 5))
+
+        u_pad, v_pad = pad_ns_vector_pair(u_int, v_int, grid)
+        assert u_pad.shape == (37, 72, 5)
+        assert v_pad.shape == (37, 72, 5)
+        assert jnp.all(jnp.isfinite(u_pad))
+        assert jnp.all(jnp.isfinite(v_pad))
