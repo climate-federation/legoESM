@@ -93,6 +93,9 @@ Key iterations:
   test-count audit, C72 mid_std in Final state table)
 - Iter 114-118: minor maintenance (ToC counts, Final state
   heading, mixed-ordering convention note, trajectory observation)
+- Iter 119-124: minor maintenance + C144 5-day completion (iter
+  121) + safety constants 1:2/3:1/3 ratio note (iter 120) + C192
+  5-day launch (iter 123)
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
