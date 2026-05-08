@@ -263,6 +263,18 @@ Key iterations:
   the full toolkit + damp_w on the iter-179 random-perturbation
   fixture and asserts the edge_std/interior_std ratio is still
   strictly below baseline.
+- Iter 198: quantitative test for the iter-187 nord >= 1
+  corner-divergence damping path.  iter-174 verified the iter-168
+  nord=0 path reduces ``mean(|div_v|)`` on a divergent IC; iter-187
+  added the smag_vort cap for nord >= 1 with finiteness tests but
+  no quantitative direction test.  iter 198 mirrors iter-174:
+  asserts nord=1 + d4_bg > 0 reduces ``mean(|div_v|)`` MORE than
+  the nord=0 path with same d2_bg.  Catches a silent no-op in the
+  iter-18-equivalent higher-order branch (e.g., dd8 coefficient
+  bug, divg_d_iter wired wrong) that the iter-187 finiteness tests
+  would not catch.  Also adds a nord=2 finiteness test on the
+  divergent IC (complementing iter-187's perturbed-from-rest
+  nord=2 test).
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
