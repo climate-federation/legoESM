@@ -149,6 +149,10 @@ Key iterations:
   PE iter 57-59); reuses compute_smagorinsky_ah_3d helper.
   Adaptive A_h paired with iter-171's adaptive cell-centre
   div_damp_dddmp completes the FV3 adaptive-damping toolkit on NH
+- Iter 181: fix Smagorinsky sqrt(strain_mag_sq) gradient
+  singularity at zero strain via JAX double-where trick.  Forward
+  pass bit-for-bit unchanged; backward pass finite at rest state.
+  Closes the iter-180 known limitation; PE iter-58 also benefits
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
@@ -4031,6 +4035,80 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
+
+## Iteration 181 (2026-05-08): fix Smagorinsky sqrt(0) gradient singularity
+
+### Goal
+
+iter 180 documented a known limitation of the
+``compute_smagorinsky_ah_2d`` helper: ``jnp.sqrt(strain_mag_sq)``
+has a singular gradient at zero strain (``d sqrt(x) / d x`` is
+infinite at ``x=0``).  The iter-180 NH differentiability test
+worked around this by using a non-rest perturbed IC.  This iter
+fixes the helper at the source so any caller (PE iter-58, NH
+iter-180, future training-mode users) can backprop through the
+rest state.
+
+### Implementation
+
+File: ``src/legoesm/core/_smagorinsky_visc.py``,
+``compute_smagorinsky_ah_2d``.  Replaced::
+
+    strain_mag = jnp.sqrt(D11**2 + 2*D12**2 + D22**2)
+
+with the JAX "double-where" trick::
+
+    strain_mag_sq = D11**2 + 2*D12**2 + D22**2
+    safe_strain_sq = jnp.where(strain_mag_sq > 0.0, strain_mag_sq, 1.0)
+    strain_mag = jnp.where(
+        strain_mag_sq > 0.0, jnp.sqrt(safe_strain_sq), 0.0,
+    )
+
+Properties:
+
+* **Forward pass bit-for-bit unchanged**: at any strain > 0 the
+  result is exactly ``jnp.sqrt(strain_mag_sq)``; at strain = 0
+  the result is exactly 0 (preserves the existing
+  ``test_smagorinsky_zero_winds`` contract).
+* **Backward pass finite at zero**: the inner ``sqrt`` is
+  evaluated at ``safe_strain_sq >= 1`` so its derivative is
+  finite; the outer ``where`` mask sets the gradient to 0 at
+  zero-strain cells (instead of NaN from the singular
+  ``d sqrt(0)``).
+
+### Tests added
+
+New file ``tests/test_smagorinsky_grad_at_zero_iter181.py``
+(4 tests):
+
+1. ``test_smag_grad_finite_at_zero_strain`` — gradient at
+   exactly-zero strain input is finite (was NaN before iter 181).
+2. ``test_smag_grad_finite_on_partial_zero_strain`` — mixed
+   zero / nonzero strain cells produce finite gradient
+   everywhere; no NaN propagation from zero cells.
+3. ``test_smag_forward_at_zero_winds_still_zero`` — sanity that
+   the iter-58 zero-winds-zero-output contract is preserved.
+4. ``test_nh_smag_differentiable_at_rest`` — model-level
+   ``jax.grad`` through 5 NH steps starting from EXACTLY the
+   rest state with smag ON.  This is the iter-180 failure mode
+   that motivated this iter.
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_smagorinsky_visc.py \
+        tests/test_smagorinsky_ah_nh_iter180.py \
+        tests/test_smagorinsky_grad_at_zero_iter181.py
+    => 16 passed (existing 12 unchanged + 4 new)
+
+### Status
+
+iter-180's documented "known limitation" is closed at the helper
+level.  Any caller (current: PE iter-58, NH iter-180; future:
+training modes that touch rest state, ML-coupled inference) gets
+finite gradients through the Smagorinsky path now.
 
 ## Iteration 180 (2026-05-08): port FV3 Smagorinsky-adaptive A_h to NH
 

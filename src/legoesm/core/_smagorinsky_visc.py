@@ -135,7 +135,20 @@ def compute_smagorinsky_ah_2d(
     D12 = 0.5 * (du_dy + dv_dx)
 
     # |D| = sqrt(D11^2 + 2*D12^2 + D22^2).
-    strain_mag = jnp.sqrt(D11 * D11 + 2.0 * D12 * D12 + D22 * D22)
+    # FV3_3D iter 181: use the JAX "double-where" trick so the
+    # gradient through ``sqrt`` is finite at zero strain.  Forward
+    # pass returns sqrt(strain_mag_sq) where positive, exactly 0
+    # where zero (preserves the existing bit-for-bit zero-winds
+    # contract pinned by ``test_smagorinsky_zero_winds``).  Backward
+    # pass evaluates ``sqrt`` at ``safe_x >= 1`` so its derivative
+    # ``1 / (2*sqrt(safe_x))`` is finite; the outer ``where`` then
+    # masks out the zero-strain contribution to give a 0 gradient
+    # there (instead of NaN from the singular ``d sqrt(0)``).
+    strain_mag_sq = D11 * D11 + 2.0 * D12 * D12 + D22 * D22
+    safe_strain_sq = jnp.where(strain_mag_sq > 0.0, strain_mag_sq, 1.0)
+    strain_mag = jnp.where(
+        strain_mag_sq > 0.0, jnp.sqrt(safe_strain_sq), 0.0,
+    )
 
     # dx² weighting using mean of dxc * dyc at corner.
     dx_squared = dxc * dyc
