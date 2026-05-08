@@ -171,6 +171,21 @@ class CDGridCompressibleEulerConfig(NamedTuple):
     # Default 0.0 preserves baseline (no div damping at all in NH).
     div_damp_coeff: float = 0.0
     div_damp_dddmp: float = 0.0
+    div_damp_d_con: float = 0.0
+        # NH mirror of PE iter-223 cell-centre div_damp d_con
+        # (FV3_3D iter 224).  When iter-171 cell-centre div_damp
+        # removes KE from (u_d, v_d) via
+        # ``du_d_dt += coeff * ddiv_dx``, the lost KE is converted
+        # to heat in θ_p.  Heat tendency formula:
+        #
+        #     dKE/dt_corner = u_d * du_d_dt_dd + v_d * dv_d_dt_dd
+        #     dθ_p/dt += -div_damp_d_con * (dKE/dt) /
+        #                (c_pd * Π_ref)
+        #
+        # at corners, projected to cell centres via
+        # ``_interp_corner_to_center``.  Default 0.0 preserves
+        # bit-for-bit baseline; gated INSIDE
+        # ``div_damp_coeff > 0``.
     # FV3_3D iter 173: opt-in async halo overlap for the
     # ``_arakawa_lamb_gradient(div_v)`` call in the iter-171
     # cell-centre div damping block.  Mirrors the PE wiring at
@@ -480,13 +495,37 @@ def cdgrid_compressible_euler_slow_tendencies(
                     0.20, config.div_damp_dddmp * _div_abs_corner,
                 ),
             )
-            du_d_dt = du_d_dt + _adaptive_coeff * ddiv_dx
-            dv_d_dt = dv_d_dt + _adaptive_coeff * ddiv_dy_perp
+            _du_d_dt_dd = _adaptive_coeff * ddiv_dx
+            _dv_d_dt_dd = _adaptive_coeff * ddiv_dy_perp
         else:
-            du_d_dt = du_d_dt + config.div_damp_coeff * ddiv_dx
-            dv_d_dt = dv_d_dt + config.div_damp_coeff * ddiv_dy_perp
+            _du_d_dt_dd = config.div_damp_coeff * ddiv_dx
+            _dv_d_dt_dd = config.div_damp_coeff * ddiv_dy_perp
+        du_d_dt = du_d_dt + _du_d_dt_dd
+        dv_d_dt = dv_d_dt + _dv_d_dt_dd
+
+        # FV3_3D iter 224: NH mirror of PE iter-223 cell-centre
+        # div_damp d_con.  Compute heat tendency and stash for
+        # accumulation into dtheta_p_dt later.
+        if config.div_damp_d_con > 0.0:
+            _dKE_dt_corner_dd = (
+                u_d * _du_d_dt_dd + v_d * _dv_d_dt_dd
+            )
+            _dKE_dt_cc_dd = _interp_corner_to_center(
+                _dKE_dt_corner_dd,
+            )
+            _exner_ref_b_dd = height_coord.exner_ref[
+                None, None, None, :
+            ]
+            _dtheta_p_dt_dd_cc = (
+                -config.div_damp_d_con
+                * _dKE_dt_cc_dd
+                / (constants.c_pd * _exner_ref_b_dd)
+            )
+        else:
+            _dtheta_p_dt_dd_cc = None
     else:
         div_v = None  # computed lazily by theta block below
+        _dtheta_p_dt_dd_cc = None
 
     # Laplacian viscosity — batch (u_d, v_d) into a single
     # ``_laplacian_dgrid`` call by stacking along a trailing axis and
@@ -764,6 +803,11 @@ def cdgrid_compressible_euler_slow_tendencies(
     # captured in section 7.  Default 0.0 preserves baseline.
     if _dtheta_p_dt_cdd_cc is not None:
         dtheta_p_dt = dtheta_p_dt + _dtheta_p_dt_cdd_cc
+
+    # FV3_3D iter 224: add cell-centre div_damp d_con heat tendency
+    # captured in the iter-171 div_damp block.
+    if _dtheta_p_dt_dd_cc is not None:
+        dtheta_p_dt = dtheta_p_dt + _dtheta_p_dt_dd_cc
     # Rho uses pure flux form: -∇·(ρv) + 0 (continuity).
     drho_p_dt = flux_combined[..., 1]
 

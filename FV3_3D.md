@@ -530,6 +530,16 @@ Key iterations:
   ``div_damp_coeff > 0``.  Four-test fixture: off-baseline,
   T-changes-when-active, no-op-when-div-damp-off, AD-safe-at-
   rest.  4/4 pass in 28 s.
+- Iter 224: NH mirror of iter-223.  Port cell-centre div_damp
+  d_con KE→heat to the compressible-Euler 3D path.  Same formula
+  as iter-223 with iter-207 Π_ref refinement:
+  ``dθ_p/dt += -div_damp_d_con * (u_d * du_d_dt_dd + v_d *
+  dv_d_dt_dd) / (c_pd * Π_ref)``, projected to cell centres.
+  Adds ``div_damp_d_con: float = 0.0`` to NH config.  Default
+  preserves bit-for-bit baseline.  Four-test fixture mirrors
+  iter-223.  4/4 NH tests pass in 49 s.  Closes the cell-centre
+  div_damp d_con asymmetry between PE and NH; only Smagorinsky-
+  A_h d_con remains.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
