@@ -534,10 +534,11 @@ this NaNs at day 22.5 — STILL INSUFFICIENT for 30-day."""
 _CFL_SAFETY_VERY_LONG_TIME: float = 0.154
 """iter 80 calibration: dt=50 at C96.  iter-79 found dt=100 NaN's
 at day 22.5; this halves dt further as the next attempt at 30-day
-stability.  iter 95 EMPIRICALLY VALIDATED past day 22.5 at C96
-(max|u|=14.04 m/s at step 38880); full 30-day run completing as
-of iter 96.  iter-85 linear-in-1/dt prediction supports stability
-through ~day 45."""
+stability.  iter 99 EMPIRICALLY CONFIRMED full 30-day finite at
+C96 (max|u|=20.14 m/s, max|v|=11.84 m/s, 51840 steps, 1755 s
+wall).  iter-85 linear-in-1/dt prediction held: dt=50 was
+predicted to NaN at day 45; never reached because the 30-day run
+completed finite at day 30."""
 
 
 def _cfl_safe_dt_cube(

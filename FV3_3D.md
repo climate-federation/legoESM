@@ -403,12 +403,10 @@ DONE (iter 39-75):
   day-22.5 NaN at dt=100 (iter 79); iter-80 added very_long_time
   mode (dt=50); iter-81 promoted auto to very_long_time at n>=96;
   iter-95 empirically confirmed dt=50 passes day 22.5; full 30-day
-  validation in progress at iter 96.
+  validation COMPLETE at iter 99 (max|u|=20.14, 1755s wall).
 - ✅ Finer A_h calibration at C48 (iter 37 sweet spot ah_x2 = 6.12e+06).
 
-STILL OPEN (post-iter-95):
-- C96 dt=50 30-day FINAL completion (iter-95 confirmed past day
-  22.5; final ~7.5 days expected to complete in iter 97).
+STILL OPEN (post-iter-99 stretch goals):
 - C72 ``dt=100`` re-test under quieter system load (would
   validate the iter-72 long_time mode at C72, currently changes
   iter-33 reference numbers).
@@ -421,9 +419,10 @@ STILL OPEN (post-iter-95):
   intermediate ``divg_d`` arrays, vector corner fill at nt > 0)
   — iter 32 found the C72 mode is interior, NOT cube-vertex, so
   this is lower priority than originally thought.
-- Cube long-time integration with combined Smagorinsky + ah_x10
-  + auto dt at C96+ (iter 70 tested at 20 days; iter 95 dt=50
-  alone past 22.5 — combined likely unnecessary now).
+
+DONE in iter 99:
+- ✅ C96 dt=50 30-day FULL completion (iter-99: max|u|=20.14
+  m/s, 51840 steps, 1755s wall).
 
 ---
 
