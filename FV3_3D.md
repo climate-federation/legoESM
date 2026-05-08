@@ -445,158 +445,58 @@ Key iterations:
   see iter-1039 (uniform u, deterministic IC) and the matrix HS
   C36 hybrid 30-day reference (iter-19 Quick Reference table).
 - Iter 218: port FV3 ``delt_max`` per-step dissipative-heating
-  cap (``dyn_core.F90:1774``) to PE and NH.  iter-203/207/208/209
-  ported the ``d_con`` KE→heat conversion but left out the FV3
-  ``sign(min(|bdt*delt_max|, |dtmp|), dtmp)`` limiter that bounds
-  the per-step ΔT magnitude — an extreme transient (model spinup
-  or large damp_v_d_con) could otherwise drive a thermodynamic
-  instability.  Adds ``delt_max: float = 0.0`` config knob to
-  both PE and NH; default 0.0 disables the cap (preserves
-  baseline bit-for-bit), FV3 production = 1.0 K/s.  PE clips
-  ``ΔT`` directly; NH clips ``Δθ_p`` against ``dt*delt_max/Π_ref``
-  (equivalent to bounding ΔT in T-space).  AD-safe at rest via
-  ``jnp.clip``.  Five-test fixture covers PE/NH off-baseline
-  (bit-for-bit), PE damp_v_d_con cap bounds d_con-only ΔT to
-  ``dt*delt_max``, NH damp_w_d_con cap reduces max|Δθ_p|, and
-  AD-at-rest finite-grad check.  Also compacts iter 1-48 +
-  iter 39-167 prose (kept ToC + Investigation summary +
-  Lessons learned + Quick Reference + iter 168-193 prose) to
-  save ~5300 lines for context-window budget.
+  cap (``dyn_core.F90:1774``) to PE+NH.  Adds ``delt_max=0.0``
+  knob (FV3 prod 1.0 K/s); default off bit-for-bit; AD-safe via
+  ``jnp.clip``.  Compacts older prose to save ~5300 lines.
 - Iter 219: refine iter-218 with FV3 sponge-layer-aware cap.
-  iter-218 applied a flat per-level cap; FV3 ``dyn_core.F90:
-  1764-1786`` actually treats the top-2 sponge layers specially:
-  PE ``cp_air`` branch SKIPS the cap for k<3 (FV3 1-based) and
-  applies the full heat increment; NH ``cv_air`` branch tightens
-  the cap to 0.1×delt at k=1 and 0.5×delt at k=2.  In legoESM's
-  0-based level convention (k=0 = model top): PE k=0,1 are
-  uncapped; NH k=0 → 0.1× cap, k=1 → 0.5× cap, k≥2 → 1× cap.
-  Updates iter-218's PE damp_v_d_con block to mask cap with
-  jnp.where, and NH damp_v_d_con + damp_w_d_con blocks to scale
-  cap by per-level sponge_factor.  Four-test fixture: PE top-2
-  uncapped (bit-for-bit equal to delt_max=0 at k=0,1); PE k≥2
-  bounded to dt*delt_max; NH k=0 |ΔT_eq| ≤ 0.1*dt*delt_max;
-  NH k=1 cap is 0.5×, k≥2 is 1×.  Also retunes iter-218
-  quantitative cap test to evaluate over interior layers only.
-- Iter 220: extend iter-184 NH and iter-185 PE umbrellas to ALSO
-  engage iter-218/219 ``delt_max=1.0`` (FV3 production default).
-  Validates that the sponge-aware cap composes safely with EVERY
-  other FV3 toolkit knob simultaneously and preserves AD-safety
-  at the rest state — the path most likely to expose new
-  jnp.clip / sqrt-at-zero hazards.  No new test file; in-place
-  config update.  Both umbrellas pass jax.grad through 5 NH /
-  3 PE steps with all knobs ON.  4/4 umbrella tests pass in
-  247 s (close to baseline 222 s, no significant regression
-  from the per-level cap mask).
-- Iter 221: port FV3 ``d_con`` KE→heat conversion for the iter-16/
-  18 corner-divergence damping (PE).  iter-208 ported d_con for
-  damp_v but the docstring noted "the corner-div damping
-  contribution is a future iteration".  iter-221 closes that gap
-  on the PE side: when corner-div removes KE from (u_d, v_d) via
-  the tendency ``du_d_dt -= ∇x(damp*delpc) / 2dx_corner``, the
-  lost KE is converted to heat in T (FV3 sw_core.F90:1085-1086 +
-  dyn_core.F90:1764-1779).  Heat tendency formula (per second,
-  leading order; the 0.5*du² term is O(dt) and dropped in the
-  RK3-compatible tendency form):
-  ``dT/dt = -corner_div_damp_d_con * (u_d * du_d_dt_cdd + v_d *
-  dv_d_dt_cdd) / c_pd``, computed at corners then projected to
-  cell centres via ``_interp_corner_to_center``.  Adds
-  ``corner_div_damp_d_con: float = 0.0`` config knob; default
-  preserves bit-for-bit baseline.  Gated INSIDE
-  ``corner_div_damp_d2_bg > 0``.  Four-test fixture:
-  off-baseline, T-changes-when-active, no-op-when-corner-div-off,
-  AD-safe-at-rest.  16/16 PE regression tests pass (incl.
-  iter-185 umbrella, iter-188 AST guards).
-- Iter 222: NH mirror of iter-221.  Port corner-div damp d_con
-  KE→heat to the compressible-Euler 3D path.  Same formula as
-  iter-221 with the iter-207 Π_ref refinement:
-  ``dθ_p/dt += -corner_div_damp_d_con * (u_d * du_d_dt_cdd +
-  v_d * dv_d_dt_cdd) / (c_pd * Π_ref)`` projected to cell centres.
-  Adds ``corner_div_damp_d_con: float = 0.0`` to NH config (PE/NH
-  parity).  Default preserves bit-for-bit baseline.  Four-test
-  fixture mirrors iter-221: off-baseline, θ_p-changes-when-active,
-  no-op-when-corner-div-off, AD-safe-at-rest.  4/4 NH tests pass
-  in 52 s.  Closes the second of the iter-208-deferred d_con
-  asymmetries (corner-div on PE+NH); cell-centre div_damp d_con
-  and Smagorinsky-A_h d_con remain.
-- Iter 223: port FV3 ``d_con`` for the iter-5 cell-centre
-  divergence damping (PE).  Mirrors iter-208/221 d_con but for
-  the cell-centre div_damp tendency
-  (``du_d_dt += coeff * ddiv_dx``).  Heat tendency formula
-  (per second, leading order):
-  ``dT/dt += -div_damp_d_con * (u_d * du_d_dt_dd + v_d *
-  dv_d_dt_dd) / c_pd`` at corners, projected to cell centres.
-  Adds ``div_damp_d_con: float = 0.0`` config knob.  Default
-  preserves bit-for-bit baseline.  Gated INSIDE
-  ``div_damp_coeff > 0``.  Four-test fixture: off-baseline,
-  T-changes-when-active, no-op-when-div-damp-off, AD-safe-at-
-  rest.  4/4 pass in 28 s.
-- Iter 224: NH mirror of iter-223.  Port cell-centre div_damp
-  d_con KE→heat to the compressible-Euler 3D path.  Same formula
-  as iter-223 with iter-207 Π_ref refinement:
-  ``dθ_p/dt += -div_damp_d_con * (u_d * du_d_dt_dd + v_d *
-  dv_d_dt_dd) / (c_pd * Π_ref)``, projected to cell centres.
-  Adds ``div_damp_d_con: float = 0.0`` to NH config.  Default
-  preserves bit-for-bit baseline.  Four-test fixture mirrors
-  iter-223.  4/4 NH tests pass in 49 s.  Closes the cell-centre
-  div_damp d_con asymmetry between PE and NH; only Smagorinsky-
-  A_h d_con remains.
-- Iter 225: port FV3 ``d_con`` for the iter-57/58 Smagorinsky-A_h
-  Laplacian on (u_d, v_d) (PE).  Closes the LAST PE-side d_con
-  asymmetry called out in iter-208 (cell-centre div_damp d_con
-  was iter-223; this is A_h d_con).  When iter-57/58 A_h
-  Laplacian removes KE from (u_d, v_d) via
-  ``du_d_dt += A_h * lap_u``, the lost KE is converted to heat
-  in T:
-  ``dT/dt += -ah_d_con * (u_d * du_d_dt_ah + v_d * du_d_dt_ah) /
-  c_pd``, projected to cell centres.  Adds ``ah_d_con: float =
-  0.0`` config knob.  Default preserves bit-for-bit baseline.
-  Gated INSIDE ``A_h > 0``.  Four-test fixture: off-baseline,
-  T-changes-when-active, no-op-when-ah-off, AD-safe-at-rest.
-  4/4 pass in 30 s.
-- Iter 226: NH mirror of iter-225.  Port Smagorinsky-A_h d_con
-  KE→heat to the compressible-Euler 3D path.  Same formula as
-  iter-225 with iter-207 Π_ref refinement:
-  ``dθ_p/dt += -ah_d_con * (u_d * du_d_dt_ah + v_d * dv_d_dt_ah)
-  / (c_pd * Π_ref)``, projected to cell centres.  Adds
-  ``ah_d_con: float = 0.0`` to NH config (PE/NH parity).  Default
-  preserves bit-for-bit baseline.  Four-test fixture mirrors
-  iter-225.  4/4 NH tests pass in 51 s.  **CLOSES ALL d_con
-  ASYMMETRIES**: every FV3 KE-removing mechanism on both 3D
-  paths (corner-div, cell-centre div_damp, damp_v, damp_w,
-  Smagorinsky-A_h) now converts KE to heat with d_con knobs
-  (default off; FV3 production = 1.0).
-- Iter 227: extend iter-184 NH and iter-185 PE umbrellas to
-  ALSO engage all 3 new d_con knobs from iter 221-226
-  (corner_div_damp_d_con, div_damp_d_con, ah_d_con) at FV3
-  production value 1.0.  Validates that the FULL d_con stack
-  composes safely with every other FV3 toolkit knob at the rest
-  state — the AD-critical regime.  Both umbrellas pass jax.grad
-  finite through 5 NH / 3 PE steps with all knobs ON.  Single-
-  test verification: PE umbrella 57 s, NH umbrella 79 s.  No new
-  test files; in-place config update.  Closes the iter-220 setup
-  pattern: every d_con site is now under umbrella regression.
-- Iter 228: quantitative formula test for the iter-221 PE
-  corner-div d_con (mirrors iter-205/211 pattern for damp_w/v).
-  Calls ``fv3_hydrostatic_tendencies`` directly and verifies the
-  d_con contribution to ``dT_dt`` matches the expected formula
-  ``-d_con * project_cc(u_d * du_d_dt_cdd + v_d * dv_d_dt_cdd) /
-  c_pd`` at machine precision (rtol=1e-10).  Uses 3-config
-  triangulation: (no corner-div) → baseline du_d_dt; (corner-div
-  on, d_con=0) → du_d_dt_cdd via subtraction; (corner-div on,
-  d_con=1) → measured dT_dt change.  Catches sign errors and
-  index errors in the iter-221 wiring at machine precision.
-  1/1 pass in 15 s.
-- Iter 229: bit-for-bit formula tests for the two remaining PE
-  d_con sites (cell-centre div_damp d_con iter-223 and
-  Smagorinsky-A_h d_con iter-225).  Same triangulation pattern
-  as iter-228: 3-config setup extracts du_d_dt contribution from
-  the mechanism, then verifies dT_dt change matches
-  ``-d_con * project_cc(u_d * du_d_dt + v_d * dv_d_dt) / c_pd``
-  at rtol=1e-10.  Catches index/sign errors in iter-223 and
-  iter-225 wiring at machine precision.  2/2 pass in 15 s.
-  All 3 PE d_con sites (corner-div, cell-centre div_damp, A_h)
-  are now bit-for-bit verified against the FV3 energy-
-  conservation formula.
+  PE skips top-2 layers (k=0,1); NH applies 0.1×/0.5×/1× per-level
+  scaling.  4-test sponge regression.
+- Iter 220: extend iter-184/185 umbrellas to engage
+  ``delt_max=1.0`` alongside full toolkit.  4/4 umbrella pass.
+- Iter 221: port d_con KE→heat for iter-16/18 corner-div damping
+  (PE).  Adds ``corner_div_damp_d_con=0.0``; gated INSIDE
+  ``corner_div_damp_d2_bg > 0``.  Closes the iter-208-deferred
+  PE corner-div d_con gap.  4/4 pass.
+- Iter 222: NH mirror of iter-221 (corner-div d_con on
+  compressible-Euler path) with iter-207 Π_ref refinement.  4/4
+  pass.
+- Iter 223: port d_con for iter-5 cell-centre div_damp (PE).
+  Adds ``div_damp_d_con=0.0`` knob.  Gated INSIDE
+  ``div_damp_coeff > 0``.  4/4 pass.
+- Iter 224: NH mirror of iter-223 with Π_ref.  4/4 pass.
+- Iter 225: port d_con for iter-57/58 Smagorinsky-A_h Laplacian
+  (PE).  Adds ``ah_d_con=0.0`` knob.  Closes LAST PE-side d_con
+  asymmetry.  4/4 pass.
+- Iter 226: NH mirror of iter-225 with Π_ref.  **CLOSES ALL
+  d_con ASYMMETRIES**: every FV3 KE-removing mechanism on both
+  3D paths (corner-div, cell-centre div_damp, damp_v, damp_w,
+  Smagorinsky-A_h) converts KE to heat (default off; FV3 prod
+  1.0).  4/4 pass.
+- Iter 227: extend PE+NH umbrellas to ALSO engage all 3 new
+  d_con knobs from iter 221-226 at FV3 production value 1.0.
+  PE umbrella 57 s, NH umbrella 79 s; both AD-finite through 5
+  NH / 3 PE steps with full d_con stack ON.
+- Iter 228: bit-for-bit formula test for iter-221 PE corner-div
+  d_con — calls ``fv3_hydrostatic_tendencies`` directly and
+  verifies dT_dt contribution matches expected formula at
+  rtol=1e-10 via 3-config triangulation.  1/1 pass in 15 s.
+- Iter 229: bit-for-bit formula tests for PE iter-223
+  (cell-centre div_damp) and PE iter-225 (A_h) d_con sites.
+  All 3 PE d_con sites now bit-for-bit verified against FV3
+  energy-conservation formula.  2/2 pass.
+- Iter 230: linearity tests for the 3 NH d_con sites (iter-222
+  corner-div, iter-224 cell-centre div_damp, iter-226 A_h).
+  ``NonHydrostaticTendencies`` doesn't expose D-grid wind
+  tendency in its public return, so PE-style bit-for-bit
+  triangulation is not available.  Verifies that the dθ_p/dt
+  contribution scales linearly with the d_con knob via 3-config
+  evaluation (d_con ∈ {0.5, 1.0, 2.0}): assert ``Δ@2.0 - Δ@0.5
+  == 3.0 * (Δ@1.0 - Δ@0.5)`` at rtol=1e-10.  Catches non-linear
+  mistakes (e.g., accidental d_con² coupling).  3/3 pass in
+  20 s.  Also compacts ToC entries iter-218..229 from
+  ~150-line prose blocks to 1-3 line summaries (saves ~110
+  lines for context budget at the user-requested 10-iter
+  compaction boundary).
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
