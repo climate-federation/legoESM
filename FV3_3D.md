@@ -565,6 +565,14 @@ Key iterations:
   comprehensive regression target for any future formula
   refinement (e.g., the rsin2/cosa_s metric-aware port from
   iter-238).  4/4 pass in 17 s.
+- Iter 244: extend iter-242 50-step stability test to 100
+  steps with stronger random IC (±10 m/s vs ±5 m/s).  Catches
+  slow-growth instabilities that 50 steps miss — a mode with
+  growth rate ~1/100 steps would amplify by e^1 over 100
+  steps but only e^0.5 over 50.  Both PE 100×dt=100 and NH
+  100×dt=10 complete with all fields finite + max|u| < 100
+  m/s.  2/2 pass in 33 s.  Independent test file (does not
+  modify iter-242, so iter-242 keeps its fast 33s coverage).
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
