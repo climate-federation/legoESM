@@ -467,7 +467,10 @@ STILL OPEN (post-iter-99 stretch goals):
   quick spin-up).
 - C144 30-day empirical validation.  iter-85 1/dt scaling
   predicts NaN ~day 68 at C144 dt=33; iter-121 confirmed 5-day
-  stability.  30-day projects ~6 hours wall.
+  stability.  30-day projects ~6 hours wall.  iter-168 launched
+  C144 10-day in background; iter-198 killed it after 8 min
+  of no progress (system too slow).  Future: try when system
+  load is genuinely free.
 - C192 5-day / 30-day empirical validation.  iter-103 confirmed
   1-day; iter-85 predicts NaN ~day 90 at dt=25; 30-day projects
   ~12 hours wall.  iter-123 launched C192 5-day in background;
