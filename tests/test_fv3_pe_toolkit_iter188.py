@@ -96,6 +96,18 @@ def test_pe_fv3_config_fields_ast_regression():
         "corner_div_damp_dt_proxy": 200.0,
         # iter-208: KE→heat conversion for damp_v (FV3 d_con port).
         "damp_v_d_con": 0.0,
+        # iter-218/219: per-step dissipative-heating cap with FV3
+        # sponge-layer awareness.  Default 0.0 disables the cap.
+        "delt_max": 0.0,
+        # iter-221: KE→heat conversion for the iter-16/18
+        # corner-divergence damping.
+        "corner_div_damp_d_con": 0.0,
+        # iter-223: KE→heat conversion for the iter-5 cell-centre
+        # divergence damping.
+        "div_damp_d_con": 0.0,
+        # iter-225: KE→heat conversion for the iter-57/58
+        # Smagorinsky-A_h Laplacian.
+        "ah_d_con": 0.0,
     }
 
     missing = []

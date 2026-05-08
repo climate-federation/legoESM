@@ -532,6 +532,17 @@ Key iterations:
   baseline.  Same edge_width=2 metric as iter-179.  Catches
   d_con-induced edge artifacts on the NH path.  1/1 pass in
   22 s.
+- Iter 235: extend iter-188 PE and iter-172 NH AST regression
+  guards to cover the iter-218-226 config additions.  Adds
+  4 new field defaults to PE guard
+  (delt_max=0.0, corner_div_damp_d_con=0.0,
+  div_damp_d_con=0.0, ah_d_con=0.0) and 4 to NH guard
+  (delt_max=0.0, corner_div_damp_d_con=0.0,
+  div_damp_d_con=0.0, ah_d_con=0.0).  Also updates iter-208
+  PE damp_v_d_con docstring to reflect that the iter-208-noted
+  "future iteration" corner-div d_con is now ported (iter-221
+  PE / iter-222 NH).  Catches refactors that drop or rename
+  d_con knobs.  8/8 AST tests pass in 82 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::

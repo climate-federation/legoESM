@@ -1687,9 +1687,11 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
 
             # FV3_3D iter 208: optional KE→heat conversion for the
             # iter-12 damp_v wind increments.  Faithful port of FV3
-            # sw_core.F90:1953-1990 d_con block (simplified to just
-            # the damp_v contribution; the corner-div damping
-            # contribution is a future iteration).
+            # sw_core.F90:1953-1990 d_con block.  Corner-div, cell-
+            # centre div_damp, and Smagorinsky-A_h d_con are now
+            # also ported (iter-221, iter-223, iter-225 PE; iter-222,
+            # iter-224, iter-226 NH); see the d_con knob cluster in
+            # ``CDGridPrimitiveEquationConfig`` / ``...EulerConfig``.
             #
             # KE change per unit mass at corners:
             #     ΔKE = u_d * du + 0.5*du² + v_d * dv + 0.5*dv²
