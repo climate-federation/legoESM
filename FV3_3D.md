@@ -506,6 +506,18 @@ Key iterations:
   off-baseline, T-changes-when-active, no-op-when-corner-div-off,
   AD-safe-at-rest.  16/16 PE regression tests pass (incl.
   iter-185 umbrella, iter-188 AST guards).
+- Iter 222: NH mirror of iter-221.  Port corner-div damp d_con
+  KE→heat to the compressible-Euler 3D path.  Same formula as
+  iter-221 with the iter-207 Π_ref refinement:
+  ``dθ_p/dt += -corner_div_damp_d_con * (u_d * du_d_dt_cdd +
+  v_d * dv_d_dt_cdd) / (c_pd * Π_ref)`` projected to cell centres.
+  Adds ``corner_div_damp_d_con: float = 0.0`` to NH config (PE/NH
+  parity).  Default preserves bit-for-bit baseline.  Four-test
+  fixture mirrors iter-221: off-baseline, θ_p-changes-when-active,
+  no-op-when-corner-div-off, AD-safe-at-rest.  4/4 NH tests pass
+  in 52 s.  Closes the second of the iter-208-deferred d_con
+  asymmetries (corner-div on PE+NH); cell-centre div_damp d_con
+  and Smagorinsky-A_h d_con remain.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::

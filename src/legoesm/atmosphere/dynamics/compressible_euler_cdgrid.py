@@ -249,6 +249,23 @@ class CDGridCompressibleEulerConfig(NamedTuple):
         # ``damp_v_d_con`` blocks.  Default 0.0 disables the cap
         # (preserves baseline bit-for-bit).  FV3 production default
         # is 1.0 K/s.  Differentiable via ``jnp.clip``.
+    corner_div_damp_d_con: float = 0.0
+        # NH mirror of PE iter-221 corner-div damp d_con (FV3_3D
+        # iter 222).  When the iter-168 corner-divergence damping
+        # removes KE from (u_d, v_d) via the tendency
+        # ``du_d_dt -= ∇x(damp*delpc) / 2dx_corner``, the lost KE
+        # is converted to heat in θ_p.  Heat tendency formula:
+        #
+        #     dKE/dt_corner = u_d * du_d_dt_cdd + v_d * dv_d_dt_cdd
+        #     dθ_p/dt += -corner_div_damp_d_con * (dKE/dt) /
+        #                (c_pd * Π_ref)
+        #
+        # computed at corners then projected to cell centres via
+        # ``_interp_corner_to_center``.  Π_ref from
+        # ``HeightCoordinate.exner_ref`` (matches iter-207
+        # refinement).  Default 0.0 preserves bit-for-bit baseline;
+        # gated INSIDE ``corner_div_damp_d2_bg > 0``.  FV3
+        # production default is 1.0.
 
 
 def cdgrid_compressible_euler_slow_tendencies(
@@ -632,8 +649,35 @@ def cdgrid_compressible_euler_slow_tendencies(
         _two_dx = 2.0 * _dx_corner_uface[..., None]
         _two_dy = 2.0 * _dy_corner_vface[..., None]
 
-        du_d_dt = du_d_dt - _dke_dx_pad / _two_dx
-        dv_d_dt = dv_d_dt - _dke_dy_pad / _two_dy
+        _du_d_dt_cdd = -_dke_dx_pad / _two_dx
+        _dv_d_dt_cdd = -_dke_dy_pad / _two_dy
+        du_d_dt = du_d_dt + _du_d_dt_cdd
+        dv_d_dt = dv_d_dt + _dv_d_dt_cdd
+
+        # FV3_3D iter 222: NH mirror of PE iter-221 corner-div
+        # damp KE→heat conversion.  Compute heat tendency at
+        # corners then project to cell centres for later
+        # accumulation into dtheta_p_dt.
+        if config.corner_div_damp_d_con > 0.0:
+            _dKE_dt_corner_cdd = (
+                u_d * _du_d_dt_cdd + v_d * _dv_d_dt_cdd
+            )
+            _dKE_dt_cc_cdd = _interp_corner_to_center(
+                _dKE_dt_corner_cdd,
+            )
+            _exner_ref_b = height_coord.exner_ref[
+                None, None, None, :
+            ]
+            _dtheta_p_dt_cdd_cc = (
+                -config.corner_div_damp_d_con
+                * _dKE_dt_cc_cdd
+                / (constants.c_pd * _exner_ref_b)
+            )
+        else:
+            _dtheta_p_dt_cdd_cc = None
+
+    else:
+        _dtheta_p_dt_cdd_cc = None
 
     # --- 8. Convert back to cell-centre ---
     # Batch (du_d_dt, dv_d_dt) corner-to-center interp.  Same
@@ -715,6 +759,11 @@ def cdgrid_compressible_euler_slow_tendencies(
     )
     # Theta uses advective form: -∇·(θv) + θ·∇·v.
     dtheta_p_dt = flux_combined[..., 0] + theta_total * div_v
+
+    # FV3_3D iter 222: add corner-div damp d_con heat tendency
+    # captured in section 7.  Default 0.0 preserves baseline.
+    if _dtheta_p_dt_cdd_cc is not None:
+        dtheta_p_dt = dtheta_p_dt + _dtheta_p_dt_cdd_cc
     # Rho uses pure flux form: -∇·(ρv) + 0 (continuity).
     drho_p_dt = flux_combined[..., 1]
 
