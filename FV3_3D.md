@@ -650,6 +650,11 @@ Key iterations:
   growth_factor < 5x over 50 steps.  Catches slow-growth
   edge-artifact accumulation that single-step / final-state
   checks miss.  1/1 pass in 22 s.
+- Iter 269: NH counterpart of iter-268 — track NH cube-
+  imprint ratio every 10 steps over 50 NH steps with full
+  iter-184 toolkit + 5-knob d_con stack.  Same bounded-
+  growth criteria.  1/1 pass in 20 s.  PE+NH cube-imprint
+  over-time coverage symmetric.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
