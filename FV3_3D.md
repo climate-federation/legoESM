@@ -666,6 +666,12 @@ Key iterations:
   JAX default float32.  All fields finite + dtype verified
   jnp.float32.  1/1 pass in 18 s.  PE+NH d_con stacks both
   validated for ML/training-style float32 workflows.
+- Iter 288: 50-step PE d_con float32 long-run stability
+  (extends iter-286 5-step → 50 steps × dt=100).  PE iter-19
+  toolkit + d_con stack at default float32.  All fields
+  finite, dtype verified jnp.float32, max|u_d| < 100 m/s
+  bound holds.  1/1 pass in 14.6 s.  Catches any slow-growth
+  numerical instability that 5-step iter-286 wouldn't see.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
