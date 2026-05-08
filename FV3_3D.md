@@ -580,6 +580,15 @@ Key iterations:
   baseline (iter-168 nord=0).  Catches edge artifacts that
   could be introduced by the smag_vort cap formula or the
   dedup path.  1/1 pass in 23 s.
+- Iter 253: PE counterpart of iter-252.  iter-217 PE
+  cube-imprint engages iter-190 (use_fv3_a2b_zeta_corner=
+  True) but NOT iter-187 (corner_div_damp_d4_bg=0 in
+  iter-217 cfg_toolkit).  iter 253 closes the PE gap with
+  the same baseline-vs-iter187 comparison: PE v_d
+  edge-std/interior-std ratio at C8 with iter-187 + iter-190
+  ON stays within 50 % of the iter-168 nord=0 baseline.
+  Both PE and NH iter-187/190 paths now have cube-imprint
+  regression coverage.  1/1 pass in 24 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
