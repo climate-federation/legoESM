@@ -84,32 +84,59 @@ if desired::
 
     LEGOESM_AH_SCALE=10.0 LEGOESM_SMAG_CS=0.2  # C72: static + adaptive
 
-### C96+ user guidance (iter 63)
+### C96+ user guidance (iter 63 + iter 65 empirical update)
 
-For users at resolutions higher than C72 (UNTESTED in this branch):
+iter 65 EMPIRICALLY tested C96 stability via
+``scripts/_iter65_c96_smoke.py``.  Findings overrode the iter-63
+guidance:
 
-1. **First try the C72 setting**: ``LEGOESM_AH_SCALE=10.0`` is the
-   iter-43 auto-default at n>=72.  It MAY be sufficient at C96 but
-   the empirical pattern (C36→1, C48→2, C72→10) suggests the
-   required scale grows non-linearly.
+**The matrix default ``dt=200.0`` is the limiting factor at C96, NOT
+``LEGOESM_AH_SCALE``.**  At C96 with the matrix defaults
+(``dt=200``, ``LEGOESM_AH_SCALE=10`` auto-applied), the run NaNs
+at ~6 hours wall-clock REGARDLESS of ``LEGOESM_AH_SCALE`` (tested
+10x, 20x, 50x, 200x — all blow up at same physical 6h).
+Increasing A_h does NOT rescue this case; the diffusive CFL
+limits how high ``A_h`` can go (200x → diffusive CFL = 0.35 which
+itself violates stability).
 
-2. **If NaN**: try larger scales empirically:
-   ``LEGOESM_AH_SCALE=15.0`` then ``20.0`` then ``30.0``.
+Survival at C96 1-day depends on **shrinking ``dt``**::
 
-3. **Run a 5-day stability check first**: a short run is much
-   cheaper than a 30-day run and exposes the iter-30-style
-   exponential growth (NaN-by-day-13 mode) by day 5 if present.
+    dt=200 (matrix default): NaN at 6h regardless of ah_scale
+    dt=180: NaN at 6h
+    dt=160: NaN at 6h
+    dt=150: stable to 1 day
+    dt=100: stable to 1 day
 
-4. **If long-time integration is the goal**: use
-   ``_laplacian_visc_cube_v2(n)`` (iter 39) directly via
-   ``CDGridPrimitiveEquationConfig(A_h=...)`` to bypass the
-   matrix's ``_laplacian_visc_cube`` heuristic that has the wrong
-   slope.  At C96, v2 returns 3.98e+07 (~ 26x v1).
+Recommended C96+ recipe:
 
-5. **If still unstable**: the iter-26-32 analysis suggests the
-   issue is structural and may require ``nord >= 2`` or forward-
-   backward time stepping (deferred work).  Falls outside the
-   iter 18-62 scope.
+1. **Reduce ``dt``** in your driver from 200 to ≤ 150 s.  The
+   matrix's ``dt = 200.0`` (line 2636 / 3132) is hard-coded for
+   the cubed-sphere HS path and does NOT scale with resolution.
+   Compare the lat-lon HS path (line 2761):
+   ``dt = min(200.0, 0.5 * _dx_pole / 300.0)`` — CFL-aware.  The
+   cubed-sphere path has the same need but no scaling.
+
+2. Keep ``LEGOESM_AH_SCALE=10.0`` (iter-43 auto-default).
+   ``A_h`` calibration is correct at C96 once ``dt`` is reduced;
+   raising it further does not help.
+
+3. **Run the smoke test first**::
+
+       JAX_ENABLE_X64=1 ITER65_DT=150.0 ITER65_DAYS=1.0 \
+         .venv/bin/python scripts/_iter65_c96_smoke.py
+
+   Confirms stability before committing to a 30-day run.
+
+4. The iter-26-32 analysis identifying an interior synoptic-scale
+   exponential eigenmode at C72 is consistent with what we see at
+   C96 (same physical-time blowup, fixed-wall-clock-time mode).
+   The mode is more severe at higher resolution; ``dt`` must
+   scale down to avoid integrating it.
+
+5. **Open work**: introduce CFL-aware ``dt`` scaling in the
+   cubed-sphere HS path (matrix line 2636 / 3132).  Requires
+   regression testing across C36/C48/C72 to ensure existing
+   reference numbers don't shift.  Deferred to a future iteration.
 
 ## Quick Reference (iter 38 summary)
 
@@ -3718,6 +3745,74 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
+
+## Iteration 65 (2026-05-07): C96 stability — dt is the limiting factor
+
+### Goal
+
+iter 63 added user guidance for C96+ but C96 was empirically
+UNTESTED.  This iter writes
+``scripts/_iter65_c96_smoke.py`` and runs HS C96 1-day under
+several ``LEGOESM_AH_SCALE`` and ``dt`` combinations to determine
+the actual stability lever.
+
+### Empirical findings
+
+At HS C96 hybrid 1 day::
+
+    ah_scale=10  dt=200: NaN at step 108 (6h)
+    ah_scale=20  dt=200: NaN at step 108 (6h)
+    ah_scale=50  dt=200: NaN at step 108 (6h)
+    ah_scale=200 dt=200: NaN at step 108 (6h)
+    ah_scale=10  dt=180: NaN at step 120 (6h)
+    ah_scale=10  dt=160: NaN at step 135 (6h)
+    ah_scale=10  dt=150: STABLE to 1 day, max|u|=0.81
+    ah_scale=10  dt=100: STABLE to 1 day, max|u|=0.75
+
+### Interpretation
+
+iter-63 guidance ("if NaN, increase ah_scale") is **WRONG** at C96.
+``LEGOESM_AH_SCALE`` is the right lever at C72 (iter 33) but at
+C96 the limit becomes ``dt`` itself.  Going to ``ah_scale=200`` at
+``dt=200`` makes the diffusive CFL = 0.35 which is itself unstable.
+
+The blowup happens at exactly **6 hours physical time** at every
+``dt`` value where it fails.  This indicates a fixed wall-clock
+mode growing exponentially, *not* a CFL violation per se.  At
+``dt <= 150 s`` the integration survives the 6h mark and stays
+stable for at least 1 day.
+
+This is consistent with the iter-26-32 finding that the C72
+instability is an interior synoptic-scale exponential eigenmode
+(NOT cube-vertex).  At C96 the mode appears at the same physical
+time scale but is more severe; ``dt`` must reduce to integrate
+through it.
+
+### Implementation
+
+- Added ``scripts/_iter65_c96_smoke.py`` (kept as a reusable C96+
+  validation tool — users can run it before a 30-day production).
+- Updated the C96+ user guidance section in this document to
+  recommend ``dt <= 150 s`` rather than larger ``ah_scale``.
+- Identified an open issue: matrix's ``dt = 200.0`` for
+  cubed-sphere HS (line 2636 / 3132) does NOT scale with
+  resolution, unlike the lat-lon HS path (line 2761) which uses
+  ``dt = min(200.0, 0.5 * _dx_pole / 300.0)``.  Adding equivalent
+  CFL-aware ``dt`` scaling for the cube path is deferred.
+
+### Test results
+
+No new tests added; the probe is a one-off characterisation.
+248 existing tests still pass.
+
+### Status
+
+iter 63 user guidance was DEMONSTRABLY WRONG at C96 (the
+``ah_scale`` lever does not work).  Updated guidance now reflects
+the empirical finding: reduce ``dt`` instead.  C96 is now
+empirically validated as stable for HS at ``ah_scale=10`` +
+``dt=150``.  C96 30-day not yet run; only 1-day stability
+checked.
 
 ## Iteration 64 (2026-05-07): combined-path multistep stability test
 
