@@ -418,6 +418,16 @@ Key iterations:
   full field rather than sampling the max, which on the PE HS-init
   fixture is sensitive to single-cell jet response not correlated
   with smag damping.  Parametrized over smag_cs in {0.1, 0.2, 0.4}.
+- Iter 215: PE counterpart of iter-174 cell-centre div_damp
+  direction test.  iter-174 verified that NH ``div_damp_coeff > 0``
+  reduces ``mean(|div_v|)`` on a divergent IC; PE has the same
+  iter-5 wiring but no direction test.  iter 215 mirrors iter-174
+  for PE.  Used ``div_damp_coeff=1e8`` (vs NH's 1e10) because PE
+  outer dt is ~10× NH so the per-step damping factor is
+  proportionally larger; 1e10 over-damps PE.  Threshold relaxed to
+  0.1% reduction (vs NH's 1%) because PE HS-init residual divergence
+  baseline is small (~1e-6 1/s) so the % reduction is modest even
+  with strong damping.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
