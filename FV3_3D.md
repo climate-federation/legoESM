@@ -634,6 +634,11 @@ Key iterations:
   Verifies 2x d4_bg → 2^(nord+1)x wind change for nord=1
   (factor=4) and nord=2 (factor=8).  Pins the (nord+1)
   exponent in the d4_bg formula.  2/2 PE pass in 34 s.
+- Iter 283: NH counterpart of iter-282 — corner_div d4_bg
+  power scaling for NH (iter-168 branch).  Same 2x d4_bg →
+  2^(nord+1)x at nord=1/2.  2/2 NH pass in 55 s.  PE+NH
+  d4_bg formula now has (nord+1) exponent pinned by
+  numerical regression on both 3D paths.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
