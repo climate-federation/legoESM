@@ -623,6 +623,16 @@ Key iterations:
   centre ratio within 50 % of baseline.  1/1 pass in 24 s.
   PE+NH cube-imprint regression coverage now spans C8 / C16
   / C36 (production) for both 3D paths.
+- Iter 266: cubed-sphere non-orthogonality metrics sanity
+  test (cosa_corner, rsin2_corner, cosa_cell, sina_cell,
+  rsin2_cell).  These metrics are used by FV3-faithful d_sw5
+  paths and would be needed for a future port of the
+  iter-238 metric-aware d_con form.  Pins the structural
+  properties: |cosa| ≤ 0.6 (cube-vertex bound = 0.5 =
+  cos(60°) where 3 panels meet at 60°); rsin2 ≥ 0.99
+  (sin² ≤ 1).  Plus verifies cosa concentrates at cube
+  vertices (mean(|cosa| at 4 corner cells per face) > mean
+  (|cosa| in panel interior).  2/2 pass in 9 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
