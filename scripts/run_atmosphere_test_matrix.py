@@ -681,10 +681,13 @@ def _resolve_dt_cube(
     elif raw in ("long_time", "longtime"):
         mode = "long_time"
     elif raw == "auto":
-        # iter-72: auto-pick mode based on resolution.
+        # iter-72/81: auto-pick mode based on resolution.
         # n<96 keeps short_time (preserves iter-33 C72 reference);
-        # n>=96 promotes to long_time (iter-70 C96 stability).
-        mode = "long_time" if n >= 96 else "short_time"
+        # n>=96 promotes to very_long_time (iter-79 found long_time
+        # NaNs at day 22.5 at C96; very_long_time dt=50 is the
+        # next-attempt 30d-stable target — empirically pending
+        # validation as of iter 81 but the SAFER default).
+        mode = "very_long_time" if n >= 96 else "short_time"
     elif raw in ("1", "true", "yes", "on", "short_time"):
         mode = "short_time"
     else:

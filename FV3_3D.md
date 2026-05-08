@@ -195,9 +195,9 @@ divergence damping settings + per-resolution ``A_h`` scaling
 | C36        | ``1.0`` (default)| 4.08e+06        | 200 (no change)| iter 19/24 production               |
 | C48        | ``2.0`` (iter 37)| 6.12e+06        | 200 (no change)| sweet-spot scan, mid_std -48 %      |
 | C72        | ``10.0`` (iter 33)| 2.04e+07       | 200 (iter-33 ref)| smallest stable scale at dt=200   |
-| C96        | ``10.0`` (auto)  | 1.53e+07        | 100 (iter-70/72)| stable to ~22 days; 30d NaN at day 22.5 (iter 79); 30+ day still OPEN |
-| C144       | ``10.0`` (auto)  | 1.02e+07        | 67 (auto extrap)| empirically untested                |
-| C192       | ``10.0`` (auto)  | 7.65e+06        | 50 (auto extrap)| empirically untested                |
+| C96        | ``10.0`` (auto)  | 1.53e+07        | 50 (iter-81 auto promoted to very_long_time)| 30d STILL PENDING empirical validation |
+| C144       | ``10.0`` (auto)  | 1.02e+07        | 33 (auto)       | empirically untested                |
+| C192       | ``10.0`` (auto)  | 7.65e+06        | 25 (auto)       | empirically untested                |
 
 Note: at C72+ the auto-applied ``ah_scale=10`` gives a constant
 ``A_h ≈ 1.5e+07`` in absolute terms (because the v1 helper returns
@@ -3824,6 +3824,60 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
+
+## Iteration 81 (2026-05-07): auto mode promoted to very_long_time at n>=96
+
+### Goal
+
+iter 79 found auto-mode at C96 (which used long_time / dt=100) NaNs
+at day 22.5.  iter 80 added very_long_time mode (dt=50 at C96).
+iter 81 updates auto-mode to use very_long_time at n>=96 — the
+SAFER default given iter-79's evidence that long_time is
+insufficient for 30-day C96.
+
+### Changes
+
+``_resolve_dt_cube`` auto-mode dispatch:
+-   Before iter 81: ``mode = "long_time" if n >= 96 else "short_time"``
+-   After iter 81:  ``mode = "very_long_time" if n >= 96 else "short_time"``
+
+Per-resolution auto-mode dt table after iter 81:
+
+::
+
+    C36: dt=200  (short_time, iter-19/24)
+    C48: dt=200  (short_time, iter-37 sweet spot)
+    C72: dt=200  (short_time, iter-33 reference)
+    C96: dt=50   (very_long_time, iter-79/80/81)
+    C144: dt=33  (very_long_time)
+    C192: dt=25  (very_long_time)
+
+### Tests
+
+Updated ``test_resolve_dt_cube_auto_mode``: at C96, auto must now
+return dt~50 (not dt~100) and the printed notice must mention
+``very_long_time`` (not ``long_time``).  31 tests pass (was 31
+before — this is an in-place update, not new tests).
+
+### Empirical validation in progress
+
+A 30-day C96 run at the new auto-mode setting (dt=50) was
+launched at iter 81 start.  Step 0 reached at start; full run
+projected ~22 minutes.  Result will be appended in a future
+iteration.
+
+### Status
+
+Auto-mode is now configured for the SAFER default at C96+.
+Users following ``LEGOESM_HS_CUBE_DT_CFL=auto`` from FV3_3D.md
+will get dt=50 at C96 — empirically untested for 30 d but more
+conservative than the iter-79-failed dt=100.
+
+If iter-81's empirical 30d validation succeeds: auto is correct.
+If iter-81 also fails at 30d: requires combining with smag_cs or
+implicit stepping (deferred).
+
+264 tests pass.
 
 ## Iteration 80 (2026-05-07): very_long_time mode (dt=50) for C96 30d
 

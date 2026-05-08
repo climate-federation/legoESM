@@ -2270,9 +2270,10 @@ class TestHeldSuarezDissipationImbalance:
         assert "LEGOESM_HS_CUBE_DT_CFL" in parser.epilog
 
     def test_resolve_dt_cube_auto_mode(self, monkeypatch, capsys):
-        """iter 72: ``LEGOESM_HS_CUBE_DT_CFL=auto`` picks short_time
+        """iter 72/81: ``LEGOESM_HS_CUBE_DT_CFL=auto`` picks short_time
         at n<96 (preserves iter-33 C72 reference dt=200) and
-        long_time at n>=96 (iter-70 C96 stability dt=100).
+        very_long_time at n>=96 (iter-79 found long_time NaNs at day
+        22.5; very_long_time dt=50 is the safer default).
         """
         monkeypatch.setenv("LEGOESM_HS_CUBE_DT_CFL", "auto")
 
@@ -2291,18 +2292,18 @@ class TestHeldSuarezDissipationImbalance:
         # n=48: also short_time -> dt=200.
         assert M._resolve_dt_cube(48) == 200.0
 
-        # n=96: long_time mode -> dt=100 (iter-70).
+        # n=96: very_long_time mode -> dt~50 (iter-81).
         capsys.readouterr()
         dt_96 = M._resolve_dt_cube(96)
         captured = capsys.readouterr().out
-        assert 95.0 <= dt_96 <= 105.0, (
-            f"auto at C96 must use long_time (dt=100), got "
+        assert 47.0 <= dt_96 <= 53.0, (
+            f"auto at C96 must use very_long_time (dt=50, iter-81), got "
             f"dt={dt_96:.1f}"
         )
         # Notice should print since dt < 200.
-        assert "long_time" in captured
+        assert "very_long_time" in captured
 
-        # n=144: also long_time -> even smaller dt.
+        # n=144: also very_long_time -> even smaller dt.
         dt_144 = M._resolve_dt_cube(144)
         assert dt_144 < dt_96, (
             f"auto at C144 must give smaller dt than C96, "
