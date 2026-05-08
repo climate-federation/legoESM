@@ -400,6 +400,15 @@ Key iterations:
   explicit regression coverage is warranted.  Test exercises the
   full energy-conserving toolkit (iter-179 + iter-193 damp_w +
   iter-203 damp_w_d_con + iter-209 damp_v_d_con).
+- Iter 213: PE counterpart of iter-198 quantitative test.  iter-198
+  verified that nord >= 1 corner-div damp reduces ``mean(|div_v|)``
+  MORE than nord=0 alone for the NH path; PE has the same iter-187
+  smag_vort wiring but no analogous quantitative test.  iter 213
+  mirrors iter-198 for PE — same divergent IC pattern, asserts
+  nord=1 + d4_bg > 0 reduces div more than nord=0 alone.  Catches
+  silent no-op in the iter-18-equivalent higher-order branch on
+  the hydrostatic path that iter-187 finiteness tests would not
+  catch.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
