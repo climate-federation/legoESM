@@ -682,6 +682,15 @@ Key iterations:
   combinations (squared inputs).  Pure helper-formula test
   mirroring iter-285's pattern; fills scaling/symmetry
   slots iter-285 didn't cover.  5/5 pass in 0.2 s.
+- Iter 296: PE iter-189 dt-plumbing regression guard.
+  Two PE configs differing ONLY in
+  ``corner_div_damp_dt_proxy`` (50 vs 500) produce bit-for-
+  bit identical state from ``model.step(state, dt=100)``.
+  Confirms iter-189's actual-integration-dt plumbing
+  overrides the config proxy; if the plumbing ever
+  regresses (proxy silently engages), the divergent proxies
+  → different damping → different state, and this test
+  fails.  1/1 pass in 22 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
