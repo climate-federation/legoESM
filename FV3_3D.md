@@ -623,6 +623,14 @@ Key iterations:
   discrete form).  Per-cell pointwise check + global sum.
   All 4 PE d_con sites now have global-energy-conservation
   regression coverage.  1/1 pass in 14 s.
+- Iter 257: NH counterpart of iter-256 — global energy
+  conservation for iter-209 damp_v_d_con post-step (NH).
+  NH stores winds at cc; iter-209 uses ``Δθ_p = -d_con *
+  ΔKE_cc / (c_pd * Π_ref)`` (iter-207 refinement).
+  Conservation property ``Σ c_pd * Π_ref * Δθ_p + Σ ΔKE = 0``
+  at rtol=1e-10.  Per-cell pointwise + global sum.  1/1 pass
+  in 23 s.  Closes the conservation regression gap on the NH
+  damp_v_d_con post-step.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
