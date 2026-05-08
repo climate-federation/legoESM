@@ -731,6 +731,14 @@ Key iterations:
   values pass unchanged (array-equal), above-cap values
   clipped to ±cap[k].  Combined with iter-267, the NH
   sponge cap is fully characterized.  3/3 pass in 0.4 s.
+- Iter 316: ``cgrid_divergence`` zero + linearity in (u_c,
+  v_c).  div(0, 0) = 0 at both 2D and 3D shapes.
+  Superposition (rtol=1e-13) for (α, β) ∈ {(1,1), (2,-3),
+  (0.5,0.5), (-1,7)} at 2D and {(1,1), (2,-3)} at 3D.  Pins
+  the helper used by PE div_damp path as a linear operator.
+  Combined with iter-303 (corner divergence), every
+  divergence helper in the d_con cluster is now
+  characterized as linear.  7/7 pass in 9.7 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
