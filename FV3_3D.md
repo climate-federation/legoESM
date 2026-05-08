@@ -11,6 +11,26 @@ visible cube imprint (concentric blobs at face centres bordered by
 red/blue rings at panel boundaries) in u/v wind snapshots from
 Held-Suarez and baroclinic test cases.
 
+## Final state (iter 100 close-out)
+
+Core deliverable RESOLVED at iter 99: HS at C96 30 days completes
+finite under the canonical setting::
+
+    LEGOESM_HS_CUBE_DT_CFL=auto
+    LEGOESM_AH_SCALE      # auto-applies per resolution
+
+Verified results (HS hybrid 30 days, ``ah_x10`` auto-applied):
+
+| n   | dt (auto) | result              | iter |
+|:---:|:---------:|:-------------------:|:----:|
+| C36 | 200       | stable, mid_std=0.228 | 19/24 |
+| C48 | 200       | stable, mid_std=0.517 | 37   |
+| C72 | 200       | stable               | 33   |
+| C96 | 50        | finite at day 30, max\|u\|=20.14 m/s | 99 |
+
+Stretch goals beyond original scope remain (C144/C192 empirical,
+200-day, nord>=2).  See [Open follow-ups](#open-follow-ups-iter-38-status-updated-through-iter-75).
+
 ## Table of Contents (iter 53, updated iter 88)
 
 This document tracks 70+ investigation iterations.  For most users
