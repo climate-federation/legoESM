@@ -310,6 +310,16 @@ Key iterations:
   iter-172 now import ``ITER187_GATE`` and ``ITER187_HELPER`` from
   the shared helper, so a future substring change is made in ONE
   place and automatically propagates to both guards.
+- Iter 203: port FV3 ``d_con`` KE→heat conversion for the iter-193
+  ``damp_w`` post-step damping.  Faithful port of FV3 ``sw_core.F90:
+  1086``: ``heat_source = -d_con * dw * (w + 0.5*dw) = -d_con *
+  ΔKE_w``.  When ``damp_w`` removes KE from ``w``, the lost KE is
+  deposited as heat in θ_p (energy conservation).  Conversion to
+  θ_p uses the simplified ``Δθ_p = heat / c_pd`` formula (Π Exner
+  factor approximated as 1.0; ~30 % error aloft, valid in the lower
+  troposphere).  Adds ``damp_w_d_con: float = 0.0`` config field
+  (FV3 production default 1.0).  Default off; gated INSIDE the
+  iter-193 ``damp_w > 0`` block.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::

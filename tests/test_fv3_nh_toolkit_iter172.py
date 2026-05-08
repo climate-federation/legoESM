@@ -238,6 +238,8 @@ def test_nh_fv3_config_fields_ast_regression():
         # iter-193 post-step damp_w + nord_w (FV3 d_sw1 port).
         "damp_w": 0.0,
         "nord_w": 2,
+        # iter-203 KE→heat conversion for damp_w (FV3 d_sw1 d_con).
+        "damp_w_d_con": 0.0,
     }
 
     missing = []

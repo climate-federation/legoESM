@@ -197,6 +197,28 @@ class CDGridCompressibleEulerConfig(NamedTuple):
     # typically choose one mechanism, not both.
     damp_w: float = 0.0
     nord_w: int = 2
+    # FV3-faithful KE→heat conversion for iter-193 ``damp_w`` damping
+    # (FV3_3D iter 203).  Faithful port of FV3 ``sw_core.F90:1086``::
+    #
+    #     heat_source = -d_con * dw * (w + 0.5*dw)
+    #
+    # which represents the negative of the change in kinetic energy
+    # density per unit mass (``-ΔKE_w = -(w*dw + 0.5*dw²)``).  When
+    # ``damp_w`` removes KE from ``w`` (``dw`` opposite sign to ``w``),
+    # heat_source is POSITIVE — the lost KE is deposited as heat in
+    # the temperature field, preserving total energy.
+    #
+    # Conversion to ``θ_p`` (NH prognostic temperature) uses the
+    # simplified ``Δθ_p = heat / c_pd`` formula (Π Exner factor
+    # approximated as 1.0; valid in the lower troposphere, error
+    # ~30 % aloft where Π drops to 0.5).  Heat is computed at
+    # half-levels (where ``w`` and ``dw`` live) and averaged to
+    # full-levels for the ``θ_p`` increment.
+    #
+    # Default 0.0 preserves baseline bit-for-bit (Python-static
+    # gate).  FV3 production default is ``d_con = 1.0``.  Active
+    # only when ``damp_w > 0``.
+    damp_w_d_con: float = 0.0
 
 
 def cdgrid_compressible_euler_slow_tendencies(
@@ -1077,9 +1099,40 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
                 + fy2_t[..., :-1] - fy2_t[..., 1:]
             ) * rarea_w[None, ...]               # (nlev_half, 6, n, n)
             dw = jnp.moveaxis(dw_t, 0, -1)       # (6, n, n, nlev_half)
-            state_new = state_new._replace(
-                w=state_new.w.replace(data=w_new_data + dw),
-            )
+
+            # FV3_3D iter 203: optional KE→heat conversion for the
+            # damp_w wind change.  Faithful port of FV3
+            # ``sw_core.F90:1086``::
+            #
+            #     heat_source = -d_con * dw * (w + 0.5*dw)
+            #
+            # which is the negative of ΔKE_w = w*dw + 0.5*dw².  When
+            # damp_w removes KE from w, heat_source is positive and
+            # the lost KE is added as heat to the temperature field
+            # (energy conservation).  Conversion to θ_p uses the
+            # simplified Δθ_p = heat / c_pd (Π Exner factor approxed
+            # as 1.0; see iter-203 docstring for the trade-off).
+            # Heat is at half-levels (with w, dw); average to
+            # full-levels for the θ_p increment.
+            if self.config.damp_w_d_con > 0.0:
+                from legoesm import constants
+                heat_half = -self.config.damp_w_d_con * dw * (
+                    w_new_data + 0.5 * dw
+                )                                  # (6, n, n, nlev_half)
+                heat_full = 0.5 * (
+                    heat_half[..., :-1] + heat_half[..., 1:]
+                )                                  # (6, n, n, nlev)
+                dtheta_p = heat_full / constants.c_pd
+                state_new = state_new._replace(
+                    w=state_new.w.replace(data=w_new_data + dw),
+                    theta_prime=state_new.theta_prime.replace(
+                        data=state_new.theta_prime.data + dtheta_p,
+                    ),
+                )
+            else:
+                state_new = state_new._replace(
+                    w=state_new.w.replace(data=w_new_data + dw),
+                )
 
         if self.config.fix_mass:
             # _target_mass is precomputed in step() outside the JIT boundary.
