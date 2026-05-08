@@ -686,6 +686,12 @@ Key iterations:
   preservation, pins the helper as an AFFINE OPERATOR with
   the unique identity for constants — strong structural
   correctness.  8/8 pass in 11 s.
+- Iter 303: ``fv3_divergence_corner_3d`` linearity in (u, v).
+  div(0, 0) = 0 exactly + superposition (rtol=1e-13) for
+  (α, β) ∈ {(1,1), (2,-3), (0.5,0.5), (-1,7)} + homogeneity
+  for α ∈ {-2.5, 0.5, 3.0, 1e-6}.  Pins the helper used by
+  iter-16 (PE) / iter-168 (NH) corner-div damping as a
+  linear operator on (u, v).  9/9 pass in 12 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
