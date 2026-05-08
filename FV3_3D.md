@@ -677,6 +677,15 @@ Key iterations:
   Pins the most basic interpolation correctness invariant
   for the helper used by iter-170 (NH zeta_corner) and
   iter-187 (smag_vort cap).  9/9 pass in 38 s.
+- Iter 302: ``a2b_ord4`` linearity / superposition.  Every
+  step (qx, qy, qxx, qyy, qout, halo) is a fixed-weight
+  linear combination → ``a2b_ord4(αf1 + βf2) = α a2b_ord4(f1)
+  + β a2b_ord4(f2)`` (rtol=1e-14) for (α, β) ∈ {(1,1),
+  (2,-3), (0.5,0.5), (-1,7)}, plus homogeneity for α ∈
+  {-2.5, 0.5, 3.0, 1e-6}.  Combined with iter-301 constant-
+  preservation, pins the helper as an AFFINE OPERATOR with
+  the unique identity for constants — strong structural
+  correctness.  8/8 pass in 11 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
