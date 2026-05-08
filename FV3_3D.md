@@ -128,6 +128,10 @@ Key iterations:
   assert mean(|ζ|) REDUCES vs no damping; parametrized
   no-amplification check for nord ∈ {0, 1, 2}.  Catches sign
   errors in the iter-169 fv3_del6_vorticity_damping wiring
+- Iter 176: NH FV3 toolkit transient damping — full toolkit ON
+  over 10-step window, FINAL max|div_v| reduced by >=5 % vs
+  no-damping baseline; KE bounded within 2x IC.  Validates the
+  toolkit's intended behavioral effect at trajectory level
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
@@ -4010,6 +4014,50 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
+
+## Iteration 176 (2026-05-08): NH FV3 toolkit transient damping
+
+### Goal
+
+iter 174/175 verified that single FV3 mechanisms reduce
+``mean(|div_v|)`` and ``mean(|ζ|)`` at a single 5-step horizon.
+This iter validates the *transient* behavior with the FULL toolkit
+ON: over a 10-step window, the trajectory's FINAL ``max|div_v|``
+should be lower than the no-damping baseline (compounded damping
+effect).  This is the property a user actually cares about — does
+the toolkit suppress divergence over time?
+
+### Implementation
+
+New file ``tests/test_fv3_toolkit_transient_iter176.py`` (2 tests,
+no production code change):
+
+1. ``test_full_toolkit_reduces_final_divergence`` — turns ON ALL
+   FOUR iter-168/169/170/171 mechanisms, runs 10 steps from
+   divergent IC, asserts FINAL ``max|div_v|`` is at least 5 %
+   lower than the no-damping baseline.  Note: PEAK
+   ``max|div_v|`` occurs at t=0 in both runs (IC dominates), so
+   the comparison is at the FINAL step where compounded damping
+   shows.
+2. ``test_full_toolkit_keeps_kinetic_energy_bounded`` — over the
+   same window the volume-mean KE stays within 2× the IC KE
+   (catches a sign-flip in any mechanism that would inject
+   energy rather than remove it).
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_fv3_toolkit_transient_iter176.py
+    => 2 passed in 29.93 s
+
+### Status
+
+The FV3 toolkit's intended behavioral effect (suppress divergence
+over time) is now quantitatively validated at the integrated-
+trajectory level, complementing the single-step quantitative
+correctness from iter 174/175.
 
 ## Iteration 175 (2026-05-08): quantitative damp_v correctness for NH
 
