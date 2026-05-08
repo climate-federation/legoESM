@@ -567,6 +567,19 @@ Key iterations:
   pass in 21 s.  Closes the PE/NH parity gap from iter-245
   by validating production-grade NH integration with the
   full d_con stack at the same production resolution.
+- Iter 252: cube-imprint regression for iter-187 smag_vort
+  cap + iter-190 dedup'd a2b ζ corner path.  iter-179
+  cube-imprint metric tests engage iter-168 nord=0 only;
+  iter-197/206/212 extend to damp_w + d_con sites; iter-217
+  PE adds toolkit ratio.  But the iter-187 smag_vort cap
+  (``nord=1 + d4_bg>0`` activates ``|dt|*sqrt(delpc²+ζ²)``
+  cap) and the iter-190 dedup'd ``_zeta_a2b_ord4`` path were
+  NOT covered by any cube-imprint test.  iter 252 closes
+  that gap on NH: with iter-187 + iter-190 ON, the v
+  edge-std/interior-std ratio stays within 50 % of the
+  baseline (iter-168 nord=0).  Catches edge artifacts that
+  could be introduced by the smag_vort cap formula or the
+  dedup path.  1/1 pass in 23 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
