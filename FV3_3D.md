@@ -27,7 +27,7 @@ Verified results (HS hybrid 30 days, ``ah_x10`` auto-applied):
 | C48 | 200       | stable, mid_std=0.517 | 37   |
 | C72 | 200       | stable, mid_std=6.815, max\|u\|=45.88 | 33 |
 | C96 | 50        | finite at day 30, max\|u\|=20.14 m/s | 99 |
-| C144| 33        | finite at day 1 smoke, max\|u\|=0.75 m/s | 102 |
+| C144| 33        | finite at day 5, max\|u\|=5.56 m/s (iter 121) | 102/121 |
 | C192| 25        | finite at day 1 smoke, max\|u\|=0.84 m/s | 103 |
 
 C144/C192 30-day empirical validation deferred: C192 1-day takes
@@ -3955,6 +3955,43 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
+
+## Iteration 121 (2026-05-07): C144 5-day completion — auto-mode validated past day 1
+
+### Goal
+
+iter 102 ran C144 1-day smoke.  iter 121 extends to 5 days to
+validate the auto-mode at C144 past the iter-102 short window.
+
+### Result
+
+::
+
+    HS C144 hybrid 5 days, ah_x10 (auto), dt=33 (auto, very_long_time)
+    [iter65] RESULT: {
+        'finite': True,
+        'max_u': 5.563,
+        'max_v': 3.183,
+        'wall': 1042.6 s = 17.4 min,
+        'steps': 13091,
+    }
+
+The iter-117 trajectory observation (linear in time during
+spinup) predicted day 5 max|u| ~ 5.3 m/s.  Actual: 5.56.  Very
+close — confirms HS jet spinup is approximately linear during
+the first 5 days at C144.
+
+### Status
+
+iter-72/81 auto-mode now empirically validated at::
+
+    C36 / C48 / C72: 30 days (iter 19/24/33/37)
+    C96:             30 days (iter 99)
+    C144:             5 days  (iter 121)
+    C192:             1 day   (iter 103)
+
+iter-85 1/dt prediction at C144 (NaN ~day 68) supports 30-day
+stability.  C144 30-day deferred for budget reasons.
 
 ## Iteration 103 (2026-05-07): C192 auto-mode 1-day smoke — stable
 
