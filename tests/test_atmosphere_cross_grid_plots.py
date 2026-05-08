@@ -2803,6 +2803,45 @@ class TestHeldSuarezDissipationImbalance:
                 f"got ``{ast.unparse(value)}``"
             )
 
+    def test_cube_branch_dt_uses_resolve_dt_cube_helper(self):
+        """iter 68: pin that the cube HS branch's ``dt`` assignment
+        invokes ``_resolve_dt_cube`` rather than reverting to a
+        hardcoded ``200.0``.
+
+        The iter-66/67 wiring depends on this dataflow: a future
+        edit that replaces ``dt = _resolve_dt_cube(n, ...)`` with
+        ``dt = 200.0`` would silently disable the
+        ``LEGOESM_HS_CUBE_DT_CFL`` env var without changing any
+        other test result.  This catches that regression.
+        """
+        import ast
+        body = self._find_branch_body("cubed_sphere")
+        # Walk for any ``dt = ...`` assignment in the cube branch.
+        dt_assignments = []
+        for stmt in body:
+            for node in ast.walk(stmt):
+                if (
+                    isinstance(node, ast.Assign)
+                    and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name)
+                    and node.targets[0].id == "dt"
+                ):
+                    dt_assignments.append(node.value)
+        assert dt_assignments, (
+            "iter-66/67: cube HS branch must compute a ``dt`` local"
+        )
+        # At least one assignment must invoke the iter-67 helper.
+        helper_used = any(
+            "_resolve_dt_cube" in ast.unparse(rhs)
+            for rhs in dt_assignments
+        )
+        assert helper_used, (
+            f"iter-66/67: cube HS branch's ``dt`` must derive from "
+            f"``_resolve_dt_cube(...)`` (which honors "
+            f"LEGOESM_HS_CUBE_DT_CFL).  Saw: "
+            f"{[ast.unparse(rhs) for rhs in dt_assignments]}"
+        )
+
     def test_latlon_branch_config_wires_A_h_via_local_alias(self):
         """iter-60 codex HIGH: pin that the latlon HS branch
         actually instantiates

@@ -3746,6 +3746,42 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
 
+## Iteration 68 (2026-05-07): AST regression guard for iter-66/67 wiring
+
+### Goal
+
+The iter-66/67 wiring depends on the dataflow
+``dt = _resolve_dt_cube(n, label='HS')`` (or analog) at the matrix's
+cube HS / baroclinic branches.  A future edit could silently
+revert this to ``dt = 200.0`` without breaking any existing test
+— the ``LEGOESM_HS_CUBE_DT_CFL`` env var would simply have no
+effect, going unnoticed in CI.  Add an AST-level regression
+guard.
+
+### Implementation
+
+Added ``test_cube_branch_dt_uses_resolve_dt_cube_helper`` to
+``test_atmosphere_cross_grid_plots.py``:
+
+- Walks the cube HS branch AST (via the existing
+  ``_find_branch_body`` / ``_resolve_local_assignment`` infra).
+- Collects ALL ``dt = ...`` assignments in the cube branch.
+- Asserts at least one invokes ``_resolve_dt_cube``.
+
+This mirrors the iter-60 ``ah = _laplacian_visc_cube(n)`` AST
+regression guard pattern.  If a future edit hardcodes
+``dt = 200.0`` again, this test will fail with a clear message.
+
+### Test results
+
+22 tests in ``TestHeldSuarezDissipationImbalance`` pass (was 21).
+254 tests overall.
+
+### Status
+
+iter-66/67 CFL-aware dt wiring is now AST-guarded.  Future edits
+that drop the helper invocation will surface as test failures.
+
 ## Iteration 67 (2026-05-07): self-review — factor duplicate, validate inputs
 
 ### Goal
