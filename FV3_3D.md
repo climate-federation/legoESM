@@ -723,6 +723,14 @@ Key iterations:
   Pins the iter-218 PE sponge-skip-cap pattern (PE skips
   cap entirely at k=0, 1) by helper-formula numerical
   regression.  3/3 pass in 0.2 s.
+- Iter 315: NH iter-219 sponge cap CLIP behavior with full
+  per-level formula ``cap[k] = delt_max * factor[k] /
+  exner_ref[k]``.  iter-267 pinned factor VALUES (0.1, 0.5,
+  1.0); iter-315 pins the actual clip behavior: per-level
+  cap matches expected values (rtol=1e-14), below-cap
+  values pass unchanged (array-equal), above-cap values
+  clipped to ±cap[k].  Combined with iter-267, the NH
+  sponge cap is fully characterized.  3/3 pass in 0.4 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
