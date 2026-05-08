@@ -391,6 +391,15 @@ Key iterations:
   ``_interp_corner_to_center`` call inside the JIT graph fuses
   ops differently than the test's external call, producing a few
   ULPs of difference in the 4-point average.
+- Iter 212: extend iter-179 cube-imprint test to verify iter-209
+  NH ``damp_v_d_con`` heat injection does not regress the iter-168/
+  169/170/171 toolkit's edge suppression (mirror of iter-206 for
+  damp_w_d_con).  iter-209's heat source modifies θ_p (not winds
+  directly), like iter-203 but driven by damp_v's du, dv.  Cross-
+  coupling through θ_p → buoyancy → wind could disrupt the toolkit;
+  explicit regression coverage is warranted.  Test exercises the
+  full energy-conserving toolkit (iter-179 + iter-193 damp_w +
+  iter-203 damp_w_d_con + iter-209 damp_v_d_con).
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
