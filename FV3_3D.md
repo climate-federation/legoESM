@@ -649,6 +649,11 @@ Key iterations:
   ``2^(nord+1)``.  3 cases: nord_v=0/1/2 → factor=2/4/8.
   Pins the EXACT exponent in the damp4 formula.  3/3 pass
   in 23 s.
+- Iter 279: NH counterpart of iter-278 — damp_v scaling test
+  for NH.  Same 3 cases (nord=0/1/2 → 2x/4x/8x).  3/3 NH
+  tests pass in 50 s.  Both PE+NH iter-12/iter-169 damp_v
+  formulas now have the (nord+1) exponent pinned by
+  numerical regression.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
