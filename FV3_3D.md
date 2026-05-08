@@ -198,6 +198,13 @@ Key iterations:
   ``fv3_hydrostatic_tendencies`` (PE) and analogous NH path, with
   fallback to the existing config dt-proxy when no dt is passed
   (preserves backward compatibility for direct-call tests).
+- Iter 190: dedup the ``a2b_ord4(zeta)`` halo-2 exchange between
+  the iter-170 ``zeta_corner`` site and the iter-187
+  ``_zeta_smag_corner`` site.  Closes iter-187 codex review
+  concern 3 (extra unmerged halo).  When BOTH iter-170 and
+  iter-187 are active, factor the computation into a single
+  ``_zeta_a2b_ord4`` local computed at most once, reused at both
+  sites.  Bit-for-bit baseline preserved at all flag combinations.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
@@ -4080,6 +4087,92 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
+
+## Iteration 190 (2026-05-08): dedup a2b_ord4(zeta) halo exchange between iter-170 + iter-187 sites
+
+### Goal
+
+Close iter-187 codex review concern 3 (extra unmerged halo
+exchange).  iter-170 (``use_fv3_a2b_zeta_corner``) and iter-187
+(``smag_vort`` cap when nord >= 1) BOTH compute
+``_interp_center_to_corner_a2b_ord4(zeta, cdgrid)``.  This call
+internally pads the halo with depth-2 (``_pad_halo_auto_h2``).
+When both flags are active, the same input ``zeta`` is sent
+through TWO halo-2 exchanges in distributed mode — wasteful and
+not FV3-faithful (FV3 ``d_sw5`` computes ``a2b_ord4(wk)`` once at
+sw_core.F90:1795 and reuses it for the smag_vort cap).
+
+### Plan
+
+1.  In PE ``fv3_hydrostatic_tendencies`` (line ~518): introduce a
+    single ``_zeta_a2b_ord4`` local computed at most once when
+    EITHER iter-170 OR iter-187 is active::
+
+        _need_zeta_a2b_for_smag = (
+            config.corner_div_damp_d2_bg > 0.0
+            and config.corner_div_damp_d4_bg > 0.0
+            and config.corner_div_damp_nord > 0
+        )
+        _need_zeta_a2b = (
+            config.use_fv3_a2b_zeta_corner
+            or _need_zeta_a2b_for_smag
+        )
+        _zeta_a2b_ord4 = None
+        if _need_zeta_a2b:
+            _zeta_a2b_ord4 = jax.vmap(
+                lambda lev: _interp_center_to_corner_a2b_ord4(lev, cdgrid),
+                in_axes=-1, out_axes=-1,
+            )(zeta)
+
+2.  Iter-170 site reuses ``_zeta_a2b_ord4`` (when
+    ``use_fv3_a2b_zeta_corner`` is True).
+3.  Iter-187 site reuses ``_zeta_a2b_ord4`` directly (drops its own
+    local a2b_ord4 call).
+4.  Same change in NH ``cdgrid_compressible_euler_slow_tendencies``
+    (mirror of PE).
+
+### Backward compatibility
+
+Bit-for-bit baseline at all flag combinations:
+* Default (neither iter-170 nor iter-187): ``_need_zeta_a2b=False``,
+  no extra computation.  No-op.
+* iter-170 only: ``_zeta_a2b_ord4`` computed once → reused for
+  zeta_corner.  Same as before.
+* iter-187 only: ``_zeta_a2b_ord4`` computed once → reused for
+  smag_vort.  Same number of a2b_ord4 calls as iter-187 stand-alone.
+* iter-170 + iter-187: ``_zeta_a2b_ord4`` computed ONCE (was twice).
+  Saves 1 halo-2 exchange.  Bit-for-bit identical (same input →
+  same output).
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_corner_div_damp_smag_vort_iter187.py \
+        tests/test_corner_div_damp_dt_actual_iter189.py
+    => 13 passed (all iter-187 + iter-189 tests preserved)
+
+The iter-187 AST regression (``test_smag_vort_uses_relative_vorticity_via_a2b_ord4``)
+still passes because the iter-187 site's ``_smag_arg = _delpc_initial ** 2 +
+_zeta_smag_corner ** 2`` substring is unchanged; only the
+``_zeta_smag_corner`` assignment line moves from a local
+``jax.vmap`` call to the precomputed ``_zeta_a2b_ord4`` reference.
+
+### Status
+
+The iter-187 a2b_ord4(zeta) duplicate halo exchange is closed.
+Distributed runs with both iter-170 + iter-187 active now incur
+ONE halo-2 collective per timestep instead of two for the FV3
+smag_vort cap path.
+
+### Why this iteration was meaningful
+
+iter-187 codex review concern 3 was a real distributed-mode
+performance bug.  The fix is targeted (~15 LOC each in PE / NH)
+and preserves bit-for-bit baseline behaviour at all flag
+combinations.  No new tests required (existing iter-187 tests
+already exercise both flag combinations).
 
 ## Iteration 189 (2026-05-08): plumb actual integration dt to corner-div damp cap (PE + NH)
 

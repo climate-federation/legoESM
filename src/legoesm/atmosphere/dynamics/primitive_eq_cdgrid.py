@@ -519,18 +519,34 @@ def fv3_hydrostatic_tendencies(
     # FV3_3D iter 14: optionally use FV3-faithful 4th-order A→B for
     # the zeta corner interpolation (SW-backbone reuse).  Default
     # uses the legacy 2nd-order 4-point average.
-    if config.use_fv3_a2b_zeta_corner:
+    #
+    # FV3_3D iter 190: factor the a2b_ord4(zeta) into a single local
+    # so the iter-170 ``zeta_corner_relative`` site AND the iter-187
+    # ``_zeta_smag_corner`` site (FV3 smag_vort cap, sw_core.F90:1795)
+    # share one halo-2 exchange when BOTH flags are active.  Closes
+    # iter-187 codex review concern 3 (extra unmerged halo).
+    _need_zeta_a2b_for_smag = (
+        config.corner_div_damp_d2_bg > 0.0
+        and config.corner_div_damp_d4_bg > 0.0
+        and config.corner_div_damp_nord > 0
+    )
+    _need_zeta_a2b = config.use_fv3_a2b_zeta_corner or _need_zeta_a2b_for_smag
+    _zeta_a2b_ord4: jax.Array | None = None
+    if _need_zeta_a2b:
         from legoesm.core.operators_cdgrid import (
             _interp_center_to_corner_a2b_ord4,
         )
         # a2b_ord4 takes 3D shape (6, n, n) — vmap over level axis.
         if zeta.ndim == 4:
-            zeta_corner_relative = jax.vmap(
+            _zeta_a2b_ord4 = jax.vmap(
                 lambda lev: _interp_center_to_corner_a2b_ord4(lev, cdgrid),
                 in_axes=-1, out_axes=-1,
             )(zeta)
         else:
-            zeta_corner_relative = _interp_center_to_corner_a2b_ord4(zeta, cdgrid)
+            _zeta_a2b_ord4 = _interp_center_to_corner_a2b_ord4(zeta, cdgrid)
+
+    if config.use_fv3_a2b_zeta_corner:
+        zeta_corner_relative = _zeta_a2b_ord4
     else:
         zeta_corner_relative = _interp_center_to_corner(
             zeta, cdgrid, padded=_zeta_pad,
@@ -757,13 +773,14 @@ def fv3_hydrostatic_tendencies(
             # undefined gradient, breaking ``jax.grad`` at the rest
             # state.  Mask the branch so the backward pass passes
             # through the safe value.
-            from legoesm.core.operators_cdgrid import (
-                _interp_center_to_corner_a2b_ord4,
-            )
-            _zeta_smag_corner = jax.vmap(
-                lambda lev: _interp_center_to_corner_a2b_ord4(lev, cdgrid),
-                in_axes=-1, out_axes=-1,
-            )(zeta)                                          # (6, n+1, n+1, nlev)
+            #
+            # FV3_3D iter 190: reuse the ``_zeta_a2b_ord4`` computed
+            # earlier (line ~528) — the iter-170 site and this iter-187
+            # site share the same a2b_ord4(zeta) under bit-for-bit
+            # equivalence.  When ``_need_zeta_a2b_for_smag`` is True
+            # (which the surrounding gates establish) the variable is
+            # guaranteed to be non-None at this site.
+            _zeta_smag_corner = _zeta_a2b_ord4              # (6, n+1, n+1, nlev)
             _smag_arg = _delpc_initial ** 2 + _zeta_smag_corner ** 2
             _safe_smag_arg = jnp.where(_smag_arg > 0.0, _smag_arg, 1.0)
             _smag_root = jnp.where(
