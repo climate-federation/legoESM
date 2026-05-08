@@ -11,14 +11,15 @@ visible cube imprint (concentric blobs at face centres bordered by
 red/blue rings at panel boundaries) in u/v wind snapshots from
 Held-Suarez and baroclinic test cases.
 
-## Table of Contents (iter 53)
+## Table of Contents (iter 53, updated iter 88)
 
-This document tracks 50+ investigation iterations.  For most users
+This document tracks 70+ investigation iterations.  For most users
 the relevant sections are at the top; the iteration log preserves
 the diagnostic chain for future maintainers.
 
-- [**Investigation summary**](#investigation-summary-iter-51-codex-meta-review-consolidation) — two-mechanism story (corner-divergence damping vs Laplacian viscosity calibration), open generalization gap.
-- [**Quick Reference**](#quick-reference-iter-38-summary) — production setting per resolution, env vars, recommended invocations.
+- [**Lessons learned**](#lessons-learned-iter-84-synthesis-of-iter-18-83) — 7-point synthesis from 65+ cycles of investigation.
+- [**Investigation summary**](#investigation-summary-iter-51-codex-meta-review-consolidation) — two-mechanism story (corner-divergence damping vs Laplacian viscosity calibration).
+- [**Quick Reference**](#quick-reference-iter-38-summary-updated-iter-72) — production setting per resolution, env vars, recommended invocations.
 - [**Reference oracle**](#reference-oracle-read-only-never-modify) — pointer into the FV3 Fortran source for FV3-fidelity work.
 
 Key iterations:
@@ -37,6 +38,11 @@ Key iterations:
 - Iter 69-70: C96 day-15 eigenmode + dt=100 fix (long_time mode)
 - Iter 71-72: long_time / auto modes for ``LEGOESM_HS_CUBE_DT_CFL``
 - Iter 73-77: docs, tests, Quick Reference updates
+- Iter 79: CRITICAL — C96 dt=100 still NaNs at day 22.5
+- Iter 80-81: very_long_time mode (dt=50) + auto-mode promoted
+- Iter 84: 7-point Lessons learned synthesis
+- Iter 85: linear-in-1/dt eigenmode scaling, predicts dt=50 stable to day 45
+- Iter 86-87: auto threshold rationale + probe docstring tidy
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
