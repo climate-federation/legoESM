@@ -283,11 +283,11 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # ``damp_v > 0``.
     damp_v_d_con: float = 0.0
         # FV3-faithful KE→heat conversion for iter-12 ``damp_v``
-        # damping (FV3_3D iter 208).  Faithful port of the d_con
-        # block in FV3 ``sw_core.F90:1953-1990``: when ``damp_v``
-        # removes KE from (u_d, v_d) via the post-step wind
-        # increments (du_corner, dv_corner), the lost KE is
-        # converted to heat in T (energy conservation):
+        # damping (FV3_3D iter 208).  Port of the d_con block in
+        # FV3 ``sw_core.F90:1953-1990``: when ``damp_v`` removes
+        # KE from (u_d, v_d) via the post-step wind increments
+        # (du_corner, dv_corner), the lost KE is converted to
+        # heat in T (energy conservation):
         #
         #     ΔKE_per_mass = u_d * du + 0.5*du² + v_d * dv + 0.5*dv²
         #     ΔT = -damp_v_d_con * ΔKE / c_pd
@@ -297,6 +297,19 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # the T (cell-centre) update.  Default 0.0 preserves
         # baseline bit-for-bit (gated INSIDE the iter-12
         # ``damp_v > 0`` block).  FV3 production default is 1.0.
+        # **Known fidelity gap (iter 238 audit)**: FV3's actual
+        # d_con formula at sw_core.F90:1980 uses a metric-aware
+        # variant: ``heat = -damp * rsin2 * (sum(ub², vb²) +
+        # 2*(gx+gy fluxes) - cosa_s * cross_terms)`` where rsin2
+        # and cosa_s are the cubed-sphere C-grid non-orthogonality
+        # metrics.  Our simpler ``u·du + 0.5·du²`` form is
+        # equivalent in the orthogonal-grid limit and conserves
+        # GLOBAL energy exactly; LOCAL heat distribution differs
+        # at cube edges where cosa_s ≠ 0.  For HS/climate-mean
+        # diagnostics this distinction is invisible.  Porting
+        # the metric-aware form would require adding rsin2 /
+        # cosa_s arrays to ``CubedSphereCDGrid``; tracked for a
+        # future iteration.
         # PE-only (NH has its own iter-203 damp_w_d_con).
     delt_max: float = 0.0
         # FV3-faithful per-step cap on dissipative heating magnitude

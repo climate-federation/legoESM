@@ -563,6 +563,22 @@ Key iterations:
   PE pass in 64 s; NH pass in 85 s.  Both ``jax.grad`` finite
   through 3 PE / 5 NH steps with full toolkit + all 5 d_con
   knobs at 1.0.
+- Iter 238: audit + document the iter-208/209 d_con KE-formula
+  fidelity gap.  FV3's actual d_con block at sw_core.F90:1980
+  uses a metric-aware ``rsin2 / cosa_s`` formulation that
+  accounts for cubed-sphere C-grid non-orthogonality at panel
+  edges.  Our iter-208/209 ports use the simpler ``u·du +
+  0.5·du²`` form which is equivalent in the orthogonal-grid
+  limit and conserves GLOBAL energy exactly; LOCAL heat
+  distribution differs at cube edges.  Updates iter-208
+  config docstring with this audit note (a future port to the
+  metric-aware form would require adding rsin2 / cosa_s arrays
+  to ``CubedSphereCDGrid``).  Also adds a global-energy-
+  balance regression test that pins down the conservation
+  property: ``Σ c_pd * dT/dt + Σ dKE/dt == 0`` at machine
+  precision for the corner-div d_con block.  Acts as a
+  regression target for any future metric-aware port.  1/1
+  pass in 15 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
