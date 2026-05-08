@@ -27,6 +27,7 @@ Verified results (HS hybrid 30 days, ``ah_x10`` auto-applied):
 | C48 | 200       | stable, mid_std=0.517 | 37   |
 | C72 | 200       | stable               | 33   |
 | C96 | 50        | finite at day 30, max\|u\|=20.14 m/s | 99 |
+| C144| 33        | finite at day 1 smoke, max\|u\|=0.75 m/s | 102 |
 
 Stretch goals beyond original scope remain (C144/C192 empirical,
 200-day, nord>=2).  See [Open follow-ups](#open-follow-ups-iter-38-status-updated-through-iter-75).
@@ -3929,6 +3930,43 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
+
+## Iteration 102 (2026-05-07): C144 auto-mode 1-day smoke — stable
+
+### Goal
+
+iter 99 closed C96 30-day stability.  C144 had been listed as
+'extrapolated only, untested'.  iter 102 runs a quick 1-day
+smoke test at C144 to validate the iter-72/81 auto-mode wiring
+at higher resolution.
+
+### Result
+
+::
+
+    HS C144 hybrid 1 day, ah_x10 (auto), dt=33 (auto, very_long_time)
+    [iter65] RESULT: {
+        'finite': True,
+        'max_u': 0.754,
+        'max_v': 0.458,
+        'wall': 224 s = 3.7 min,
+        'steps': 2618,
+    }
+
+The auto-mode setting works end-to-end at C144.  iter-85's
+1/dt prediction (dt=33 should NaN at ~day 68 under the
+discretization-error eigenmode hypothesis) is consistent with
+30-day stability, but explicit 30-day C144 validation is
+deferred.
+
+### Status
+
+iter-72/81 auto-mode is now empirically validated at:
+- C36, C48, C72: stable for 30 days (iter 19/24/33/37)
+- C96: stable for 30 days (iter 99)
+- C144: stable for 1 day (iter 102)
+
+Remaining stretch: C144 30-day, C192 anything.
 
 ## Iteration 99 (2026-05-07): 🎉 C96 dt=50 30-DAY COMPLETE — investigation closed
 
