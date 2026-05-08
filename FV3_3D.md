@@ -558,6 +558,15 @@ Key iterations:
   iter-240..249 ToC entries from ~100 lines to ~25 lines for
   context budget at the user-requested 10-iter compaction
   boundary.
+- Iter 251: NH C36 production stability test with d_con stack
+  (NH mirror of PE iter-245).  Modest IC (±2 m/s u/v, ±0.2
+  m/s w) at C36 production resolution + full NH iter-184
+  toolkit + all 5 NH d_con knobs at 1.0 + delt_max=1.0.  10
+  steps × dt=10 = 100 s integrated.  All fields finite +
+  bounded growth (max|u| < 50 m/s, max|θ_p| < 100 K).  1/1
+  pass in 21 s.  Closes the PE/NH parity gap from iter-245
+  by validating production-grade NH integration with the
+  full d_con stack at the same production resolution.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
