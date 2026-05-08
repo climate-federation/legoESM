@@ -2794,22 +2794,27 @@ class TestHeldSuarezDissipationImbalance:
                 f"requires a Fortran-reference operator."
             )
 
-    def _find_branch_body(self, branch_grid: str):
+    def _find_branch_body(self, branch_grid: str, fn_name: str = "run_held_suarez"):
         """Return the AST nodes that make up the branch body for
-        ``tc.grid_type == <branch_grid>`` inside ``run_held_suarez``.
-        Used by iter-60 to walk the actual config-call AST.
+        ``tc.grid_type == <branch_grid>`` inside ``M.<fn_name>``.
+
+        iter-60: scans run_held_suarez.
+        iter-94: parameterized to also support run_baroclinic.
         """
         import ast
         import inspect
-        src = inspect.getsource(M.run_held_suarez)
+        fn = getattr(M, fn_name)
+        src = inspect.getsource(fn)
         tree = ast.parse(src)
-        # Find run_held_suarez.
+        # Find the function.
         run_hs = None
         for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == "run_held_suarez":
+            if isinstance(node, ast.FunctionDef) and node.name == fn_name:
                 run_hs = node
                 break
-        assert run_hs is not None
+        assert run_hs is not None, (
+            f"could not locate function {fn_name!r} in module"
+        )
 
         # Walk if-elif chain.
         def _matches(test, value):
@@ -2998,34 +3003,43 @@ class TestHeldSuarezDissipationImbalance:
             )
 
     def test_baroclinic_cube_branch_uses_resolve_dt_cube_helper(self):
-        """iter 89: parallel to test_cube_branch_dt_uses_resolve_dt_cube_helper
-        but for the baroclinic function.  Catches the same silent-revert
+        """iter 89 / iter 94: parallel to
+        test_cube_branch_dt_uses_resolve_dt_cube_helper but for the
+        baroclinic function.  Catches the same silent-revert
         regression mode for the second cube hydrostatic call site
         (line ~3197 in matrix).
 
-        Uses a textual source check (not full AST walk) because the
-        existing _find_branch_body helper is hardcoded to scan
-        run_held_suarez; the simpler text check is sufficient for
-        regression detection.
+        iter 94 upgraded from textual to AST walk after extending
+        _find_branch_body to support multiple functions.
         """
-        import inspect
-        src = inspect.getsource(M.run_baroclinic)
-        # Must contain the iter-67 helper invocation.
-        assert "_resolve_dt_cube" in src, (
-            "iter-66/67/89: run_baroclinic must invoke _resolve_dt_cube "
-            "(was 'dt = 200.0' before iter 66).  A future edit that "
-            "reverts to a hardcoded dt would silently disable "
-            "LEGOESM_HS_CUBE_DT_CFL for the baroclinic path."
+        import ast
+        body = self._find_branch_body("cubed_sphere", fn_name="run_baroclinic")
+        # Walk all dt assignments in the cube branch.
+        dt_assignments = []
+        for stmt in body:
+            for node in ast.walk(stmt):
+                if (
+                    isinstance(node, ast.Assign)
+                    and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name)
+                    and node.targets[0].id == "dt"
+                ):
+                    dt_assignments.append(node.value)
+        assert dt_assignments, (
+            "iter-66/67/89/94: run_baroclinic cube branch must compute "
+            "a ``dt`` local"
         )
-        # And must NOT contain a stray pre-iter-66 hardcoded
-        # ``dt = 200.0`` line in the cubed_sphere branch.  We
-        # detect this by checking the line right before the
-        # PrimitiveEquationConfig(...) call.  This is a soft
-        # check: if both a hardcoded dt AND the helper appear,
-        # the helper takes precedence at runtime so no harm —
-        # but it indicates dead code that should be cleaned up.
-        # Skip the soft check; the positive assertion above is
-        # the load-bearing one.
+        helper_used = any(
+            "_resolve_dt_cube" in ast.unparse(rhs)
+            for rhs in dt_assignments
+        )
+        assert helper_used, (
+            f"iter-66/67/89/94: run_baroclinic cube branch's ``dt`` "
+            f"must derive from ``_resolve_dt_cube(...)`` (which honors "
+            f"LEGOESM_HS_CUBE_DT_CFL).  A future edit that reverts to "
+            f"``dt = 200.0`` would silently disable the env var.  "
+            f"Saw: {[ast.unparse(rhs) for rhs in dt_assignments]}"
+        )
 
     def test_cube_branch_dt_uses_resolve_dt_cube_helper(self):
         """iter 68: pin that the cube HS branch's ``dt`` assignment
