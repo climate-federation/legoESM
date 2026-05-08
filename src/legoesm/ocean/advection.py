@@ -115,9 +115,12 @@ def dst3_to_u_points(
     eps = 1e-30
     n_lon = f.shape[1]
 
-    # Cell-width at u-face latitudes: dx = R * dlon * cos(lat)
-    dx = grid.radius * grid.dlon * grid.cos_lat  # (n_lat,)
-    dx_3d = dx[:, jnp.newaxis, jnp.newaxis]  # broadcast to (n_lat, 1, 1)
+    # Cell-width at u-face latitudes
+    if hasattr(grid, "dx_u") and grid.dlat == 0.0:
+        dx_3d = grid.dx_u[:, :, jnp.newaxis]  # (n_lat, n_lon+1, 1)
+    else:
+        dx = grid.radius * grid.dlon * grid.cos_lat  # (n_lat,)
+        dx_3d = dx[:, jnp.newaxis, jnp.newaxis]
 
     # Velocity and CFL at interior faces (n_lat, n_lon, nlev)
     # Face j sits between cell (j-1) mod n_lon and cell j.
@@ -204,8 +207,11 @@ def dst3_to_v_points(
     eps = 1e-30
     n_lat = f.shape[0]
 
-    # Cell height: dy = R * dlat (uniform)
-    dy = grid.radius * grid.dlat
+    # Cell height
+    if hasattr(grid, "dy_v") and grid.dlat == 0.0:
+        dy = grid.dy_v[1, 0]  # scalar from interior row
+    else:
+        dy = grid.radius * grid.dlat
 
     # Interior v-faces: indices 1 to n_lat-1 (between cells 0..n_lat-2 and 1..n_lat-1)
     # Face i sits between cell i-1 (south) and cell i (north).
@@ -1229,18 +1235,19 @@ def _zalesak_signsplit_face_alphas(
     F_w_neg = jnp.maximum(-ad_vert_int, 0.0)
 
     # Spherical face metrics (mirroring divergence_cgrid).
-    R_planet = grid.radius
-    dlon = grid.dlon
-    dlat = grid.dlat
-    face_dy = R_planet * dlat
-    lat = grid.lat
-    # cos(±π/2) ≈ 0; build cos_lat_v directly via Pad of cos(interior).
-    # Single Pad HLO op replaces alloc-2-singletons + concatenate-of-three
-    # + cos tower.
-    lat_interior = 0.5 * (lat[:-1] + lat[1:])
-    face_dx = R_planet * dlon * jnp.pad(
-        jnp.cos(lat_interior), (1, 1),
-    )  # (n_lat+1,)
+    if hasattr(grid, "dy_u") and grid.dlat == 0.0:
+        face_dy = grid.dy_u[0, 0]                        # scalar
+        face_dx = grid.dx_v[:, 0]                         # (n_lat+1,)
+    else:
+        R_planet = grid.radius
+        dlon = grid.dlon
+        dlat = grid.dlat
+        face_dy = R_planet * dlat
+        lat = grid.lat
+        lat_interior = 0.5 * (lat[:-1] + lat[1:])
+        face_dx = R_planet * dlon * jnp.pad(
+            jnp.cos(lat_interior), (1, 1),
+        )  # (n_lat+1,)
     area = grid.area[..., jnp.newaxis]            # (n_lat, n_lon, 1)
 
     # Per-cell magnitudes of incoming / outgoing horizontal flux.

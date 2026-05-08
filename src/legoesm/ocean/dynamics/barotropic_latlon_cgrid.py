@@ -171,13 +171,15 @@ def barotropic_substeps_latlon_cgrid(
     )
 
     # Semi-implicit Coriolis parameter at face points
-    f_cell = grid.f.astype(eta.dtype)
-    # f at u-points: face j is between cell (j-1) mod n_lon and cell j
-    f_u = 0.5 * (jnp.roll(f_cell, 1, axis=1) + f_cell)
-    f_u = jnp.concatenate([f_u, f_u[:, 0:1]], axis=1)
-    # f at v-points
-    f_v_interior = 0.5 * (f_cell[:-1] + f_cell[1:])
-    f_v = jnp.concatenate([f_cell[0:1], f_v_interior, f_cell[-1:]], axis=0)
+    if hasattr(grid, "f_u") and hasattr(grid, "f_v"):
+        f_u = grid.f_u.astype(eta.dtype)
+        f_v = grid.f_v.astype(eta.dtype)
+    else:
+        f_cell = grid.f.astype(eta.dtype)
+        f_u = 0.5 * (jnp.roll(f_cell, 1, axis=1) + f_cell)
+        f_u = jnp.concatenate([f_u, f_u[:, 0:1]], axis=1)
+        f_v_interior = 0.5 * (f_cell[:-1] + f_cell[1:])
+        f_v = jnp.concatenate([f_cell[0:1], f_v_interior, f_cell[-1:]], axis=0)
 
     # Barotropic diffusion — flux-form with face-centered coefficient.
     # Using div(nu_face * grad(eta)) instead of nu_cell * div(grad(eta))

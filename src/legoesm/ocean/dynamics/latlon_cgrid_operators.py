@@ -565,22 +565,24 @@ def curl_vertex_cgrid(
     # axis when needed.  Eliminates the prior moveaxis + vmap +
     # moveaxis round-trip.
     is_3d = u.ndim == 3
-    R = grid.radius
-    dlon = grid.dlon
-    dlat = grid.dlat
-    lat = grid.lat  # cell-center latitudes (n_lat,)
-    cos_lat = grid.cos_lat  # (n_lat,)
 
-    # Vertex area: A_v(i) = R^2 * dlon * |sin(lat_cell[i]) - sin(lat_cell[i-1])|
-    # with lat_cell[-1] = -pi/2 (south pole), lat_cell[n_lat] = +pi/2 (north pole).
-    sin_lat = jnp.sin(lat)
-    sin_ext = jnp.pad(sin_lat, (1, 1), constant_values=(-1.0, 1.0))
-    A_vertex_all = R**2 * dlon * jnp.abs(sin_ext[1:] - sin_ext[:-1])  # (n_lat+1,)
-    A_vertex_interior = A_vertex_all[1:-1]  # (n_lat-1,)
-
-    # Edge lengths
-    dx_cell = R * cos_lat * dlon  # (n_lat,) zonal edge at each cell latitude
-    dy_edge = R * dlat             # scalar, meridional edge length
+    if hasattr(grid, "area_q") and grid.dlat == 0.0:
+        # Tripolar: use pre-computed vertex area and edge lengths
+        A_vertex_interior = grid.area_q[1:-1, 0]      # (n_lat-1,)
+        dx_cell = grid.dx_T[:, 0]                      # (n_lat,)
+        dy_edge = grid.dy_v[1, 0]                       # scalar
+    else:
+        R = grid.radius
+        dlon = grid.dlon
+        dlat = grid.dlat
+        lat = grid.lat
+        cos_lat = grid.cos_lat
+        sin_lat = jnp.sin(lat)
+        sin_ext = jnp.pad(sin_lat, (1, 1), constant_values=(-1.0, 1.0))
+        A_vertex_all = R**2 * dlon * jnp.abs(sin_ext[1:] - sin_ext[:-1])
+        A_vertex_interior = A_vertex_all[1:-1]
+        dx_cell = R * cos_lat * dlon
+        dy_edge = R * dlat
 
     # v contribution: v[i, j]*dy - v[i, (j-1)%n_lon]*dy.  Works for 2D
     # and 3D directly.
@@ -636,9 +638,10 @@ def _gradient_curl_to_u(
     -------
     grad : (n_lat, n_lon+1) or (n_lat, n_lon+1, nlev)
     """
-    R = grid.radius
-    dlat = grid.dlat
-    dy = R * dlat
+    if hasattr(grid, "dy_v") and grid.dlat == 0.0:
+        dy = grid.dy_v[1, 0]  # scalar from interior row
+    else:
+        dy = grid.radius * grid.dlat
     return (zeta[1:] - zeta[:-1]) / dy
 
 
@@ -659,14 +662,15 @@ def _gradient_curl_to_v(
     -------
     grad : (n_lat+1, n_lon) or (n_lat+1, n_lon, nlev)
     """
-    R = grid.radius
-    dlon = grid.dlon
-    lat = grid.lat
-
-    # v-face latitudes — interior only (issue #173: avoid pole division)
-    lat_interior = 0.5 * (lat[:-1] + lat[1:])  # (n_lat-1,)
-    cos_lat_v_int = jnp.cos(lat_interior)  # nonzero for interior rows
-    dx_v_int = R * cos_lat_v_int * dlon  # (n_lat-1,)
+    if hasattr(grid, "dx_v") and grid.dlat == 0.0:
+        dx_v_int = grid.dx_v[1:-1, 0]  # (n_lat-1,) interior rows
+    else:
+        R = grid.radius
+        dlon = grid.dlon
+        lat = grid.lat
+        lat_interior = 0.5 * (lat[:-1] + lat[1:])
+        cos_lat_v_int = jnp.cos(lat_interior)
+        dx_v_int = R * cos_lat_v_int * dlon
 
     # zeta[:, j+1] - zeta[:, j] for j=0..n_lon-1
     dzeta = zeta[:, 1:] - zeta[:, :-1]  # (n_lat+1, n_lon [, nlev])
@@ -1080,6 +1084,9 @@ def strain_rate_cgrid(
     # level axis when needed.  Eliminates the prior moveaxis + vmap +
     # moveaxis round-trip.
     is_3d = u.ndim == 3
+    # Extract metrics — legacy scalar/1D path for regular lat-lon,
+    # per-cell arrays for tripolar (via the same field names, but the
+    # operators below use R/dlon/dlat/cos_lat so we keep those aliases).
     R = grid.radius
     dlon = grid.dlon
     dlat = grid.dlat
@@ -2166,10 +2173,6 @@ def partial_cell_pgf_correction_x(
     Output shape matches ``gradient_x_cgrid``: ``(n_lat, n_lon+1, nlev)``,
     with face j=n_lon wrapping around to face j=0.
     """
-    R = grid.radius
-    dlon = grid.dlon
-    cos_lat = grid.cos_lat
-
     centroid_east = centroid_depth                     # (n_lat, n_lon, nlev)
     centroid_west = jnp.roll(centroid_depth, 1, axis=1)
     rho_prime_east = rho_prime
@@ -2190,8 +2193,11 @@ def partial_cell_pgf_correction_x(
         [correction, correction[:, 0:1, :]], axis=1,
     )
 
-    dx_u = R * dlon * cos_lat
-    return correction_full / dx_u[:, jnp.newaxis, jnp.newaxis]
+    if hasattr(grid, "dx_u") and grid.dlat == 0.0:
+        return correction_full / grid.dx_u[:, :, jnp.newaxis]
+    else:
+        dx_u = grid.radius * grid.dlon * grid.cos_lat
+        return correction_full / dx_u[:, jnp.newaxis, jnp.newaxis]
 
 
 def partial_cell_pgf_correction_y(
@@ -2208,9 +2214,10 @@ def partial_cell_pgf_correction_y(
 
     Output shape: ``(n_lat+1, n_lon, nlev)``.
     """
-    R = grid.radius
-    dlat = grid.dlat
-    dy_v = R * dlat
+    if hasattr(grid, "dy_v") and grid.dlat == 0.0:
+        dy_v = grid.dy_v[1, 0]
+    else:
+        dy_v = grid.radius * grid.dlat
 
     # Interior v-faces: between cell i and cell i+1 in latitude
     centroid_north = centroid_depth[1:]                 # (n_lat-1, n_lon, nlev)
@@ -2527,11 +2534,11 @@ def density_jacobian_pgf_smc03_x(
     diff_interior = P_E - P_W
     diff = jnp.concatenate([diff_interior, diff_interior[:, 0:1, :]], axis=1)
 
-    R = grid.radius
-    dlon = grid.dlon
-    cos_lat = grid.cos_lat
-    dx_u = R * dlon * cos_lat                           # (n_lat,)
-    return diff / dx_u[:, jnp.newaxis, jnp.newaxis]
+    if hasattr(grid, "dx_u") and grid.dlat == 0.0:
+        return diff / grid.dx_u[:, :, jnp.newaxis]
+    else:
+        dx_u = grid.radius * grid.dlon * grid.cos_lat
+        return diff / dx_u[:, jnp.newaxis, jnp.newaxis]
 
 
 def density_jacobian_pgf_smc03_y(
@@ -2578,9 +2585,10 @@ def density_jacobian_pgf_smc03_y(
     pad_axes = ((0, 0),) * (diff_interior.ndim - 1)
     diff = jnp.pad(diff_interior, ((1, 1), *pad_axes))
 
-    R = grid.radius
-    dlat = grid.dlat
-    dy_v = R * dlat
+    if hasattr(grid, "dy_v") and grid.dlat == 0.0:
+        dy_v = grid.dy_v[1, 0]
+    else:
+        dy_v = grid.radius * grid.dlat
     return diff / dy_v
 
 

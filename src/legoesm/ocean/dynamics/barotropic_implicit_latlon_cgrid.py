@@ -209,25 +209,31 @@ def _make_diag_preconditioner(
         - (H_u(j,i+1) + H_u(j,i)) · dy_u / (dx_u(j) · A_cell(j,i))
         - (H_v(j+1,i)·dx_v(j+1) + H_v(j,i)·dx_v(j)) / (dy_v · A_cell(j,i))
     """
-    R = grid.radius
-    dlon = grid.dlon
-    dlat = grid.dlat
-    cos_lat_c = grid.cos_lat
-    dx_u = R * dlon * cos_lat_c                         # (n_lat,)
-    dy_v = R * dlat                                     # scalar
-    dy_u = R * dlat                                     # u-face meridional extent
+    if hasattr(grid, "dx_u") and grid.dlat == 0.0:
+        # Tripolar: use pre-computed 2D metrics
+        dx_u = grid.dx_u[:, 0]                           # (n_lat,)
+        dy_v = grid.dy_v[0, 0]                           # scalar
+        dy_u = grid.dy_u[0, 0]                           # scalar
+        dx_v = grid.dx_v[:, 0]                           # (n_lat+1,)
+    else:
+        R = grid.radius
+        dlon = grid.dlon
+        dlat = grid.dlat
+        cos_lat_c = grid.cos_lat
+        dx_u = R * dlon * cos_lat_c                      # (n_lat,)
+        dy_v = R * dlat                                  # scalar
+        dy_u = R * dlat                                  # scalar
+        lat = grid.lat
+        lat_v_int = 0.5 * (lat[:-1] + lat[1:])
+        lat_v = jnp.concatenate([
+            jnp.array([-jnp.pi / 2], dtype=lat.dtype),
+            lat_v_int,
+            jnp.array([jnp.pi / 2], dtype=lat.dtype),
+        ])
+        cos_lat_v = jnp.cos(lat_v)                      # (n_lat+1,)
+        dx_v = R * cos_lat_v * dlon                      # (n_lat+1,)
 
-    lat = grid.lat
-    lat_v_int = 0.5 * (lat[:-1] + lat[1:])
-    lat_v = jnp.concatenate([
-        jnp.array([-jnp.pi / 2], dtype=lat.dtype),
-        lat_v_int,
-        jnp.array([jnp.pi / 2], dtype=lat.dtype),
-    ])
-    cos_lat_v = jnp.cos(lat_v)                          # (n_lat+1,)
-    dx_v = R * cos_lat_v * dlon                         # (n_lat+1,)
-
-    area = grid.area                                    # (n_lat, n_lon)
+    area = grid.area                                     # (n_lat, n_lon)
 
     H_u_E = H_u[:, 1:]   # east face of cell j: u-face (j, i+1)
     H_u_W = H_u[:, :-1]  # west face of cell j: u-face (j, i)
@@ -340,11 +346,15 @@ def barotropic_implicit_latlon_cgrid(
     )
 
     # ----- Step 3: Coriolis face values ---------------------------------
-    f_cell = grid.f.astype(eta_dtype)
-    f_u = 0.5 * (jnp.roll(f_cell, 1, axis=1) + f_cell)
-    f_u = jnp.concatenate([f_u, f_u[:, 0:1]], axis=1)
-    f_v_int = 0.5 * (f_cell[:-1] + f_cell[1:])
-    f_v = jnp.concatenate([f_cell[0:1], f_v_int, f_cell[-1:]], axis=0)
+    if hasattr(grid, "f_u") and hasattr(grid, "f_v"):
+        f_u = grid.f_u.astype(eta_dtype)
+        f_v = grid.f_v.astype(eta_dtype)
+    else:
+        f_cell = grid.f.astype(eta_dtype)
+        f_u = 0.5 * (jnp.roll(f_cell, 1, axis=1) + f_cell)
+        f_u = jnp.concatenate([f_u, f_u[:, 0:1]], axis=1)
+        f_v_int = 0.5 * (f_cell[:-1] + f_cell[1:])
+        f_v = jnp.concatenate([f_cell[0:1], f_v_int, f_cell[-1:]], axis=0)
 
     # ----- Step 4: predictor (FB Coriolis, OLD eta gradient) -----------
     grad_x_eta_old = gradient_x_cgrid(eta_old, grid).astype(eta_dtype)

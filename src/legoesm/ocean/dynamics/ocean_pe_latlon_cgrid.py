@@ -531,23 +531,28 @@ def _split_velocity_divergence(
     dU_di_cell : (n_lat, n_lon, nlev)  zonal divergence component at cells.
     dV_dj_cell : (n_lat, n_lon, nlev)  meridional divergence component.
     """
-    R = grid.radius
-    dlon = grid.dlon
-    dlat = grid.dlat
-    lat = grid.lat
+    if hasattr(grid, "dy_u") and grid.dlat == 0.0:
+        face_dy = grid.dy_u[:, 0:1, jnp.newaxis]       # (n_lat, 1, 1)
+        face_dx = grid.dx_v                              # (n_lat+1, n_lon)
+        fd = face_dx[:, :, jnp.newaxis]
+    else:
+        R = grid.radius
+        dlon = grid.dlon
+        dlat = grid.dlat
+        lat = grid.lat
+        face_dy = R * dlat
+        lat_south_pole = jnp.array([-jnp.pi / 2], dtype=lat.dtype)
+        lat_north_pole = jnp.array([jnp.pi / 2], dtype=lat.dtype)
+        lat_interior = 0.5 * (lat[:-1] + lat[1:])
+        lat_v = jnp.concatenate([lat_south_pole, lat_interior, lat_north_pole])
+        cos_lat_v = jnp.cos(lat_v)
+        face_dx = R * cos_lat_v * dlon                  # (n_lat+1,)
+        fd = face_dx[:, jnp.newaxis, jnp.newaxis]
 
     # Zonal flux divergence at cells.
-    face_dy = R * dlat
     net_zonal = (u[:, 1:, :] - u[:, :-1, :]) * face_dy
 
-    # Meridional flux divergence at cells (with cos(lat) at v-faces).
-    lat_south_pole = jnp.array([-jnp.pi / 2], dtype=lat.dtype)
-    lat_north_pole = jnp.array([jnp.pi / 2], dtype=lat.dtype)
-    lat_interior = 0.5 * (lat[:-1] + lat[1:])
-    lat_v = jnp.concatenate([lat_south_pole, lat_interior, lat_north_pole])
-    cos_lat_v = jnp.cos(lat_v)
-    face_dx = R * cos_lat_v * dlon                     # (n_lat+1,)
-    fd = face_dx[:, jnp.newaxis, jnp.newaxis]
+    # Meridional flux divergence at cells.
     net_merid = v[1:, :, :] * fd[1:] - v[:-1, :, :] * fd[:-1]
 
     area = grid.area[..., jnp.newaxis]                  # (n_lat, n_lon, 1)
@@ -886,9 +891,13 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
 
         # Convert "δ across one cell" → "gradient at face" by dividing
         # by dx_u (cell width at u-face latitude) and dy_v (constant).
-        R = grid.radius
-        dx_u_at_face = (R * grid.dlon * grid.cos_lat)[:, jnp.newaxis, jnp.newaxis]  # (n_lat,1,1)
-        dy_v = R * grid.dlat
+        if hasattr(grid, "dx_u") and grid.dlat == 0.0:
+            dx_u_at_face = grid.dx_u[:, :, jnp.newaxis]      # (n_lat, n_lon+1, 1)
+            dy_v = grid.dy_v[1, 0]                            # scalar (interior row)
+        else:
+            R = grid.radius
+            dx_u_at_face = (R * grid.dlon * grid.cos_lat)[:, jnp.newaxis, jnp.newaxis]
+            dy_v = R * grid.dlat
         # Gradient of <u²>_i at u-face (WENO upwind version).
         dKE_u2_dx_at_uface = 0.5 * delta_u_sq_at_uface / dx_u_at_face
         # Gradient of <v²>_j at v-face (WENO upwind version).
