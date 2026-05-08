@@ -518,6 +518,18 @@ Key iterations:
   in 52 s.  Closes the second of the iter-208-deferred d_con
   asymmetries (corner-div on PE+NH); cell-centre div_damp d_con
   and Smagorinsky-A_h d_con remain.
+- Iter 223: port FV3 ``d_con`` for the iter-5 cell-centre
+  divergence damping (PE).  Mirrors iter-208/221 d_con but for
+  the cell-centre div_damp tendency
+  (``du_d_dt += coeff * ddiv_dx``).  Heat tendency formula
+  (per second, leading order):
+  ``dT/dt += -div_damp_d_con * (u_d * du_d_dt_dd + v_d *
+  dv_d_dt_dd) / c_pd`` at corners, projected to cell centres.
+  Adds ``div_damp_d_con: float = 0.0`` config knob.  Default
+  preserves bit-for-bit baseline.  Gated INSIDE
+  ``div_damp_coeff > 0``.  Four-test fixture: off-baseline,
+  T-changes-when-active, no-op-when-div-damp-off, AD-safe-at-
+  rest.  4/4 pass in 28 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::

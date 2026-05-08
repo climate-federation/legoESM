@@ -233,6 +233,20 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # iter1009 dual-target SW calibration uses 0.0625 + factor 8
         # (no Smagorinsky).  Useful range for HS C36 hybrid:
         # 0.05-0.20 (test before raising).  FV3_3D iter 5.
+    div_damp_d_con: float = 0.0
+        # FV3-faithful KE→heat conversion for the iter-5 cell-
+        # centre divergence damping (FV3_3D iter 223).  Mirrors
+        # iter-208/221 d_con but for the cell-centre div_damp
+        # tendency.  Heat tendency formula (per second, leading
+        # order in dt):
+        #
+        #     dKE/dt = u_d * du_d_dt_dd + v_d * dv_d_dt_dd
+        #     dT/dt += -div_damp_d_con * (dKE/dt) / c_pd
+        #
+        # at corners, then projected to cell centres via
+        # ``_interp_corner_to_center``.  Default 0.0 preserves
+        # bit-for-bit baseline; gated INSIDE
+        # ``div_damp_coeff > 0``.  FV3 production default is 1.0.
     damp_v: float = 0.0
         # FV3-faithful POST-STEP del-n vorticity damping coefficient,
         # reusing the SW backbone ``fv3_del6_vorticity_damping`` from
@@ -710,11 +724,40 @@ def fv3_hydrostatic_tendencies(
                 _d2_bg,
                 jnp.minimum(0.20, config.div_damp_dddmp * _div_abs_corner),
             )                                                  # (6, n+1, n+1, nlev)
-            du_d_dt = du_d_dt + _adaptive_coeff * ddiv_dx
-            dv_d_dt = dv_d_dt + _adaptive_coeff * ddiv_dy_perp
+            _du_d_dt_dd = _adaptive_coeff * ddiv_dx
+            _dv_d_dt_dd = _adaptive_coeff * ddiv_dy_perp
         else:
-            du_d_dt = du_d_dt + config.div_damp_coeff * ddiv_dx
-            dv_d_dt = dv_d_dt + config.div_damp_coeff * ddiv_dy_perp
+            _du_d_dt_dd = config.div_damp_coeff * ddiv_dx
+            _dv_d_dt_dd = config.div_damp_coeff * ddiv_dy_perp
+        du_d_dt = du_d_dt + _du_d_dt_dd
+        dv_d_dt = dv_d_dt + _dv_d_dt_dd
+
+        # FV3_3D iter 223: optional KE→heat d_con conversion for
+        # the iter-5 cell-centre div_damp wind tendency (FV3
+        # sw_core.F90 cell-centre div_damp d_con contribution).
+        # Mirrors iter-221 corner-div d_con but uses the cell-
+        # centre div_damp tendency instead.  Heat tendency formula
+        # (per second, leading order in dt):
+        #
+        #     dKE/dt = u_d * du_d_dt_dd + v_d * dv_d_dt_dd
+        #     dT/dt += -div_damp_d_con * (dKE/dt) / c_pd
+        #
+        # Default 0.0 preserves bit-for-bit baseline; gated INSIDE
+        # the iter-5 ``div_damp_coeff > 0`` block.  FV3 production
+        # default is 1.0.
+        if config.div_damp_d_con > 0.0:
+            _dKE_dt_corner_dd = (
+                u_d * _du_d_dt_dd + v_d * _dv_d_dt_dd
+            )
+            _dT_dt_dd_cc = (
+                -config.div_damp_d_con
+                * _interp_corner_to_center(_dKE_dt_corner_dd)
+                / constants.c_pd
+            )
+        else:
+            _dT_dt_dd_cc = None
+    else:
+        _dT_dt_dd_cc = None
 
     # FV3_3D iter 16: optional adaptive B-grid corner-divergence
     # damping (FV3 d_sw5 sw_core.F90:1641-1724).  Faithful port using
@@ -1129,6 +1172,11 @@ def fv3_hydrostatic_tendencies(
     # bit-for-bit baseline.
     if _dT_dt_cdd_cc is not None:
         dT_dt_data = dT_dt_data + _dT_dt_cdd_cc
+
+    # FV3_3D iter 223: add the cell-centre div_damp KE→heat
+    # tendency captured in the iter-5 div_damp block.
+    if _dT_dt_dd_cc is not None:
+        dT_dt_data = dT_dt_data + _dT_dt_dd_cc
 
     # --- 12. Diffusion ---
     # 12a. Laplacian viscosity on D-grid winds
