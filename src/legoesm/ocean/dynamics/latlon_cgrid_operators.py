@@ -314,8 +314,7 @@ def min_cell_to_vface(f: jnp.ndarray) -> jnp.ndarray:
     f_v : (n_lat+1, n_lon, ...) at v-faces.
     """
     f_v_interior = jnp.minimum(f[:-1], f[1:])
-    pad_axes = ((0, 0),) * (f_v_interior.ndim - 1)
-    return jnp.pad(f_v_interior, ((1, 1), *pad_axes))
+    return _pad_ns_zero(f_v_interior)
 
 
 def cell_to_cgrid_winds(
@@ -339,11 +338,7 @@ def cell_to_cgrid_winds(
     u_face = interp_cell_to_uface(u_cell)
     # v at poles is zero (wall BC), not the average of adjacent cells.
     v_interior = 0.5 * (v_cell[:-1] + v_cell[1:])
-    # ``jnp.pad`` with zero fill is one Pad HLO op; the previous form
-    # alloc-zeros + concatenate-of-three is two HLO ops.  Wall-BC at
-    # poles is preserved (pole rows are zero).
-    pad_axes = ((0, 0),) * (v_interior.ndim - 1)
-    v_face = jnp.pad(v_interior, ((1, 1), *pad_axes))
+    v_face = _pad_ns_zero(v_interior)
     return u_face, v_face
 
 
@@ -1339,8 +1334,8 @@ def strain_rate_cgrid(
                - u_south * dx_south[lat_bcast])
 
     D_S = (dv_circ_full + du_circ) / A_vertex[lat_bcast]
-    # Pole rows zero (wall BC).
-    D_S = jnp.pad(D_S[1:-1], ((1, 1), (0, 0), *pad_extra))
+    # Boundary: wall BC on regular lat-lon; fold on tripolar.
+    D_S = _pad_ns_zero(D_S[1:-1])
 
     if mask is not None:
         vmask = _compute_vertex_mask(mask)
@@ -1505,9 +1500,7 @@ def stress_divergence_cgrid(
     # pole rows zero (wall BC).
     dsh_merid = stress_h[:-1] - stress_h[1:]
     tend_v_DT_interior = dx_v[1:-1][lat_bcast] * dsh_merid
-    # Single Pad HLO op replaces alloc-zeros + concatenate-of-three.
-    pad_axes = ((0, 0),) * (tend_v_DT_interior.ndim - 1)
-    tend_v_DT = jnp.pad(tend_v_DT_interior, ((1, 1), *pad_axes))
+    tend_v_DT = _pad_ns_zero(tend_v_DT_interior)
 
     # =====================================================================
     # tend_v: contribution from D_S adjoint
@@ -1706,9 +1699,7 @@ def smagorinsky_viscosity_q_cgrid(
     D_T_q = 0.25 * (D_T[:-1] + D_T[1:] + D_T_roll[:-1] + D_T_roll[1:])
 
     # D_T_q shape: (n_lat-1, n_lon, ...). Need (n_lat+1, n_lon+1, ...).
-    # Pad pole rows with zero (degenerate vertices).
-    pad_axes = ((0, 0),) * (D_T_q.ndim - 1)
-    D_T_q = jnp.pad(D_T_q, ((1, 1), *pad_axes))
+    D_T_q = _pad_ns_zero(D_T_q)
     # Append periodic wrap column
     D_T_q = jnp.concatenate(
         [D_T_q, D_T_q[:, 0:1]], axis=1)  # (n_lat+1, n_lon+1, ...)
@@ -2083,9 +2074,7 @@ def leith_viscosity_q_cgrid(
             + gd_roll[:-1] + gd_roll[1:]
         )
         # Pole rows zero; single Pad HLO op replaces alloc-zeros +
-        # concatenate-of-three.
-        pad_axes = ((0, 0),) * (gd_q_int.ndim - 1)
-        grad_div_q = jnp.pad(gd_q_int, ((1, 1), *pad_axes))
+        grad_div_q = _pad_ns_zero(gd_q_int)
         grad_div_q = jnp.concatenate(
             [grad_div_q, grad_div_q[:, 0:1]], axis=1)
         total_sq = total_sq + grad_div_q ** 2
@@ -2100,9 +2089,7 @@ def leith_viscosity_q_cgrid(
 
     # Zero at pole vertices, matching smagorinsky_viscosity_q_cgrid.
     # Slice + single Pad HLO op replaces zeros_like-of-slice ×2 +
-    # concatenate-of-three.
-    pad_axes = ((0, 0),) * (A_leith_q.ndim - 1)
-    A_leith_q = jnp.pad(A_leith_q[1:-1], ((1, 1), *pad_axes))
+    A_leith_q = _pad_ns_zero(A_leith_q[1:-1])
 
     if mask is not None:
         vmask = _compute_vertex_mask(mask)
@@ -2273,9 +2260,7 @@ def _compute_vertex_mask(land_mask: jnp.ndarray) -> jnp.ndarray:
     interior_full = jnp.concatenate(
         [interior, interior[:, 0:1]], axis=1)  # (n_lat-1, n_lon+1)
 
-    # Pole rows zero (degenerate vertices); single Pad HLO op replaces
-    # alloc-zeros + concatenate-of-three.
-    return jnp.pad(interior_full, ((1, 1), (0, 0)))
+    return _pad_ns_zero(interior_full)
 
 
 # =============================================================================
@@ -2318,8 +2303,7 @@ def compute_face_masks_3d(
     # v-face i is between cell i-1 (south) and cell i (north).  Pole
     # boundaries (i=0 and i=n_lat) are always wall.
     v_mask_interior = a[:-1] * a[1:]
-    pad_axes = ((0, 0),) * (v_mask_interior.ndim - 1)
-    v_mask = jnp.pad(v_mask_interior, ((1, 1), *pad_axes))
+    v_mask = _pad_ns_zero(v_mask_interior)
     return u_mask, v_mask
 
 
@@ -2416,9 +2400,7 @@ def partial_cell_pgf_correction_y(
         - rho_prime_south * excess_south
     )
 
-    # Pad pole faces with zero (wall BC: no v-flux through poles)
-    pad_axes = ((0, 0),) * (correction_interior.ndim - 1)
-    correction = jnp.pad(correction_interior, ((1, 1), *pad_axes))
+    correction = _pad_ns_zero(correction_interior)
 
     return correction / dy_v
 
@@ -2764,8 +2746,7 @@ def density_jacobian_pgf_smc03_y(
     )
     diff_interior = P_N - P_S
 
-    pad_axes = ((0, 0),) * (diff_interior.ndim - 1)
-    diff = jnp.pad(diff_interior, ((1, 1), *pad_axes))
+    diff = _pad_ns_zero(diff_interior)
 
     if hasattr(grid, "dy_v") and grid.dlat == 0.0:
         dy_v = grid.dy_v[1, 0]
@@ -3147,6 +3128,6 @@ def compute_face_masks(
     # Pole boundaries: v=0 (always masked).  Single Pad HLO op replaces
     # alloc-zeros + concatenate-of-three.
     v_mask_interior = land_mask[:-1] * land_mask[1:]
-    v_mask = jnp.pad(v_mask_interior, ((1, 1), (0, 0)))
+    v_mask = _pad_ns_zero(v_mask_interior)
 
     return u_mask, v_mask

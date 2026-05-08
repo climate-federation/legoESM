@@ -215,6 +215,53 @@ class TestRegularLatLonBackwardCompat:
 # =========================================================================
 
 
+class TestTripoleRestState:
+    """Phase 4 gate: rest state preserved on tripolar grid."""
+
+    def test_rest_state_single_step(self, tripole_grid):
+        """One timestep from rest should stay at machine precision."""
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+        from legoesm.ocean.vertical import create_ocean_z_star
+        from legoesm.ocean.state import LatLonCGridOceanConfig
+
+        z_coord = create_ocean_z_star(n_levels=5, H_max=4000.0)
+        config = LatLonCGridOceanConfig(
+            barotropic_solver="implicit_cn",
+            A_h=1000.0,
+            K_h=500.0,
+            A_v=1e-3,
+            K_v=1e-5,
+            n_barotropic_substeps=10,
+        )
+        model = LatLonCGridOceanModel(tripole_grid, z_coord, config)
+        state = rest_state_latlon_cgrid_ocean(
+            tripole_grid, z_coord,
+            T_surface=20.0, T_deep=2.0, S_uniform=35.0, H_max=4000.0,
+        )
+        state_new = model.step(state, dt=600.0)
+
+        eta = state_new.eta.data if hasattr(state_new.eta, 'data') else state_new.eta
+        u = state_new.u.data if hasattr(state_new.u, 'data') else state_new.u
+        v = state_new.v.data if hasattr(state_new.v, 'data') else state_new.v
+        assert float(jnp.max(jnp.abs(eta))) < 1e-10, (
+            f"eta drift: {float(jnp.max(jnp.abs(eta))):.2e}"
+        )
+        assert float(jnp.max(jnp.abs(u))) < 1e-10, (
+            f"u drift: {float(jnp.max(jnp.abs(u))):.2e}"
+        )
+        assert float(jnp.max(jnp.abs(v))) < 1e-10, (
+            f"v drift: {float(jnp.max(jnp.abs(v))):.2e}"
+        )
+
+
+# =========================================================================
+# Phase 3: Vector rotation in bipolar cap
+# =========================================================================
+
+
 def _make_rotated_tripole(n_lat=36, n_lon=72, max_angle_deg=30.0):
     """Create a synthetic tripolar grid with non-trivial rotation angles.
 

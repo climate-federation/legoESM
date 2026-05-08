@@ -211,8 +211,9 @@ def barotropic_substeps_latlon_cgrid(
         diff_u_mask = jnp.concatenate(
             [diff_u_mask, diff_u_mask[:, 0:1]], axis=1,
         )
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import _pad_ns_zero
         diff_v_mask_interior = mask[:-1] * mask[1:]
-        diff_v_mask = jnp.pad(diff_v_mask_interior, ((1, 1), (0, 0)))
+        diff_v_mask = _pad_ns_zero(diff_v_mask_interior)
 
     # Divergence damping on barotropic velocity: grad(div(u_bar)).
     # Targets the divergent mode that creates the eta checkerboard,
@@ -285,7 +286,7 @@ def barotropic_substeps_latlon_cgrid(
         # Pole rows are zero (wall BC); single Pad HLO op replaces
         # alloc-zeros + concatenate-of-three (called every substep).
         H_v_interior = jnp.minimum(H_total_c[:-1], H_total_c[1:])
-        H_v = jnp.pad(H_v_interior, ((1, 1), (0, 0)))
+        H_v = _pad_ns_zero(H_v_interior)
 
         flux_u = H_u * U_bar_c * u_mask
         flux_v = H_v * V_bar_c * v_mask
@@ -320,7 +321,7 @@ def barotropic_substeps_latlon_cgrid(
             U_bar_c[:-1, :-1] + U_bar_c[:-1, 1:]
             + U_bar_c[1:, :-1] + U_bar_c[1:, 1:]
         )
-        U_at_v = jnp.pad(U_at_v_interior, ((1, 1), (0, 0)))
+        U_at_v = _pad_ns_zero(U_at_v_interior)
 
         # Forward-backward Coriolis (Matsuno) + PGF + slow forcing
         U_bar_new = (U_bar_c + dt_s * (
@@ -331,8 +332,7 @@ def barotropic_substeps_latlon_cgrid(
             U_bar_new[:-1, :-1] + U_bar_new[:-1, 1:]
             + U_bar_new[1:, :-1] + U_bar_new[1:, 1:]
         )
-        # Pole rows are zero; single Pad HLO op (substep hot path).
-        U_new_at_v = jnp.pad(U_new_at_v_interior, ((1, 1), (0, 0)))
+        U_new_at_v = _pad_ns_zero(U_new_at_v_interior)
         V_bar_new = (V_bar_c + dt_s * (
             -f_v * U_new_at_v - g * deta_dy + F_slow_v
         )) * v_mask

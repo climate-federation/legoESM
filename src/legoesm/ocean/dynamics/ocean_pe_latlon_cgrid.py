@@ -115,10 +115,9 @@ def _interp_to_v_points(f: jnp.ndarray) -> jnp.ndarray:
     -------
     f_v : array, shape (n_lat+1, n_lon, ...) at v-points.
     """
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import _pad_ns_zero
     f_interior = 0.5 * (f[:-1] + f[1:])  # (n_lat-1, n_lon, ...)
-    # Pole rows zero (wall BC); single Pad HLO op.
-    pad_axes = ((0, 0),) * (f_interior.ndim - 1)
-    return jnp.pad(f_interior, ((1, 1), *pad_axes))
+    return _pad_ns_zero(f_interior)
 
 
 def _van_leer_limiter(r: jnp.ndarray) -> jnp.ndarray:
@@ -159,10 +158,9 @@ def _tvd_to_v_points(f: jnp.ndarray, mass_flux_v: jnp.ndarray) -> jnp.ndarray:
     r_neg = (f_north2 - f_north) / jnp.where(jnp.abs(delta_neg) > eps, delta_neg, eps)
     f_pos = f_south + 0.5 * _van_leer_limiter(r_pos) * delta_pos
     f_neg = f_north + 0.5 * _van_leer_limiter(r_neg) * delta_neg
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import _pad_ns_zero
     f_tvd = jnp.where(mass_flux_v[1:-1] > 0, f_pos, f_neg)
-    # Pole rows zero (wall BC); single Pad HLO op.
-    pad_axes = ((0, 0),) * (f_tvd.ndim - 1)
-    return jnp.pad(f_tvd, ((1, 1), *pad_axes))
+    return _pad_ns_zero(f_tvd)
 
 
 def _upwind_to_u_points(
@@ -225,9 +223,8 @@ def _upwind_to_v_points(
     mf_interior = mass_flux_v[1:-1]
     f_upwind = jnp.where(mf_interior > 0, f_south, f_north)
 
-    # Pole rows zero (wall BC); single Pad HLO op.
-    pad_axes = ((0, 0),) * (f_upwind.ndim - 1)
-    return jnp.pad(f_upwind, ((1, 1), *pad_axes))
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import _pad_ns_zero
+    return _pad_ns_zero(f_upwind)
 
 
 def _neumann_fill_cgrid(
