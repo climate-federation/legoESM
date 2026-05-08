@@ -176,8 +176,17 @@ divergence damping settings + per-resolution ``A_h`` scaling
 | C36        | ``1.0`` (default)| 4.08e+06        | 200 (no change)| iter 19/24 production               |
 | C48        | ``2.0`` (iter 37)| 6.12e+06        | 200 (no change)| sweet-spot scan, mid_std -48 %      |
 | C72        | ``10.0`` (iter 33)| 2.04e+07       | 200 (iter-33 ref)| smallest stable scale at dt=200   |
-| C96        | ``10.0`` (auto)  | 1.53e+07        | 100 (iter-70/72)| stable to 20+ days at dt=100; iter-74 30d in progress |
-| C144+      | ``10.0`` (auto)  | depends         | 66 (auto extrap)| empirically untested                |
+| C96        | ``10.0`` (auto)  | 1.53e+07        | 100 (iter-70/72)| stable past day 15 at dt=100; iter-74 30d in progress |
+| C144       | ``10.0`` (auto)  | 1.02e+07        | 67 (auto extrap)| empirically untested                |
+| C192       | ``10.0`` (auto)  | 7.65e+06        | 50 (auto extrap)| empirically untested                |
+
+Note: at C72+ the auto-applied ``ah_scale=10`` gives a constant
+``A_h ≈ 1.5e+07`` in absolute terms (because the v1 helper returns
+``A_h ∝ 1/n`` and we scale by 10).  The iter-37 v2 extrapolation
+suggests higher resolutions might want larger absolute ``A_h``
+(see iter 39), but iter 70 empirically found ``ah_x20`` at C96
+NaNs EARLIER than ``ah_x10``.  Stick with ``ah_x10`` until
+empirical higher-resolution validation says otherwise.
 
 **RECOMMENDED env var setting** (iter 72)::
 
