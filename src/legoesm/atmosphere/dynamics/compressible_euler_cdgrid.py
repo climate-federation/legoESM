@@ -136,6 +136,16 @@ class CDGridCompressibleEulerConfig(NamedTuple):
     # Order of the post-step vorticity damping (0=del-2, 1=del-4,
     # 2=del-6).  FV3 default is 2 (del-6).  Only active when
     # ``damp_v > 0``.
+    # FV3-faithful 4th-order A→B interpolation for ζ corner
+    # (FV3_3D iter 170).  Mirrors the iter-14 wiring in
+    # ``CDGridPrimitiveEquationConfig``.  Reuses the SW backbone
+    # ``_interp_center_to_corner_a2b_ord4`` (port of FV3
+    # ``a2b_edge.F90:a2b_ord4``).  When True, only the ζ_corner
+    # step uses a2b_ord4; θ_corner stays with the legacy 2nd-order
+    # 4-point average (iter-9 in PE established that swapping ALL
+    # corner interpolations breaks discrete operator balance).
+    # Default False preserves baseline.
+    use_fv3_a2b_zeta_corner: bool = False
 
 
 def cdgrid_compressible_euler_slow_tendencies(
@@ -270,7 +280,24 @@ def cdgrid_compressible_euler_slow_tendencies(
     # the 4-point interpolator is linear but sin(lat) is not,
     # interp(f_cc) ≠ f_corner introduced an O(dx²) Coriolis error at corners.
     # Matches iter-74 fix in cdgrid_momentum_tendencies.
-    zeta_corner = _interp_center_to_corner(zeta, cdgrid)
+    # FV3_3D iter 170: optionally use FV3-faithful 4th-order A→B
+    # interpolation for ζ_corner (port of FV3 ``a2b_edge.F90:a2b_ord4``).
+    # When False (default), use the legacy 2nd-order 4-point average.
+    # Mirrors PE iter-14.
+    if config.use_fv3_a2b_zeta_corner:
+        from legoesm.core.operators_cdgrid import (
+            _interp_center_to_corner_a2b_ord4,
+        )
+        # a2b_ord4 takes 3D shape (6, n, n) — vmap over level axis.
+        if zeta.ndim == 4:
+            zeta_corner = jax.vmap(
+                lambda lev: _interp_center_to_corner_a2b_ord4(lev, cdgrid),
+                in_axes=-1, out_axes=-1,
+            )(zeta)
+        else:
+            zeta_corner = _interp_center_to_corner_a2b_ord4(zeta, cdgrid)
+    else:
+        zeta_corner = _interp_center_to_corner(zeta, cdgrid)
     if config.use_coriolis:
         abs_vor_corner = zeta_corner + cdgrid.f_corner[..., None]
     else:

@@ -105,6 +105,10 @@ Key iterations:
   (sw_core.F90:1948-1999, ``damp_v`` / ``nord_v``) to the
   non-hydrostatic 3D path; second of three documented PE-vs-NH
   asymmetries closed
+- Iter 170: port FV3 4th-order A→B (cell-centre → corner)
+  interpolation for ζ_corner (a2b_edge.F90:a2b_ord4,
+  ``use_fv3_a2b_zeta_corner``) to the non-hydrostatic 3D path;
+  third corner-fidelity PE-vs-NH asymmetry closed
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
@@ -488,16 +492,16 @@ STILL OPEN (post-iter-99 stretch goals):
   intermediate ``divg_d`` arrays, vector corner fill at nt > 0)
   — iter 32 found the C72 mode is interior, NOT cube-vertex, so
   this is lower priority than originally thought.
-- iter-168/169 documented PE-vs-NH FV3-fidelity asymmetries:
+- iter-168/169/170 documented PE-vs-NH FV3-fidelity asymmetries:
   * ✅ corner-divergence damping (PE iter 16/18) — closed iter 168
   * ✅ ``damp_v`` post-step vorticity damping (PE iter 12) —
     closed iter 169
+  * ✅ ``use_fv3_a2b_zeta_corner`` 4th-order ζ corner interp
+    (PE iter 14) — closed iter 170
   * cell-centre constant ``div_damp_coeff`` + adaptive
-    ``div_damp_dddmp`` (PE iter 5) — STILL open
-  * ``use_fv3_a2b_zeta_corner`` 4th-order ζ corner interp
-    (PE iter 14) — STILL open
-  These are PE-only knobs that the NH path lacks; same FV3
-  fidelity umbrella as iter-168/169.
+    ``div_damp_dddmp`` (PE iter 5) — STILL open (substantive
+    addition: NH lacks the underlying cell-centre divergence
+    damping infrastructure that PE has).
 
 DONE in iter 99:
 - ✅ C96 dt=50 30-day FULL completion (iter-99: max|u|=20.14
@@ -3988,6 +3992,80 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
+
+## Iteration 170 (2026-05-08): port FV3 4th-order A→B ζ corner interp to NH 3D path
+
+### Goal
+
+Continue the iter-168/169 sequence closing PE-vs-NH FV3-fidelity
+asymmetries.  This iter ports the iter-14 PE wiring of
+``use_fv3_a2b_zeta_corner`` — the FV3-faithful 4th-order A→B
+(cell-centre → corner) interpolation for the relative vorticity
+at D-grid corners — to the NH 3D path.  Reuses the SW backbone
+helper ``_interp_center_to_corner_a2b_ord4`` (port of FV3
+``a2b_edge.F90:a2b_ord4``).  No new core code.
+
+### FV3 anchor
+
+- ``a2b_edge.F90:a2b_ord4`` (lines 50-330): 4th-order A→B Lagrange
+  interpolation with constants ``a1=9/16, a2=-1/16`` (Lagrange
+  4-point) and ``b1=7/12, b2=-1/12`` (PPM volume mean).
+- Used by FV3 d_sw5 callers wherever the 2nd-order 4-point
+  centre→corner average is insufficient for Smagorinsky-tuned
+  damping (Lin 2004).
+
+### Implementation
+
+- File: ``src/legoesm/atmosphere/dynamics/compressible_euler_cdgrid.py``.
+- 1 new ``CDGridCompressibleEulerConfig`` field (default off):
+  ``use_fv3_a2b_zeta_corner: bool = False``.
+- In the tendency function step 7 (D-grid momentum tendencies),
+  swap the ``zeta_corner = _interp_center_to_corner(zeta, cdgrid)``
+  call for the FV3 4th-order ``_interp_center_to_corner_a2b_ord4``
+  when the flag is set.  ``a2b_ord4`` operates on 2D ``(6, n, n)``
+  fields, so the 3D ``zeta`` is vmapped over the level axis (same
+  pattern as the PE wrapper at iter-14).
+- The ``θ_corner`` interpolation stays with the 2nd-order
+  4-point average — iter-9 in PE established that swapping ALL
+  corner interpolations breaks discrete operator balance
+  (max winds 2.7× larger).  Only the targeted ζ swap is exposed.
+- Default ``use_fv3_a2b_zeta_corner=False`` preserves baseline
+  bit-for-bit (Python-static branch).
+
+### Tests added
+
+New file ``tests/test_a2b_zeta_corner_nh.py`` (4 tests):
+
+1. ``test_nh_a2b_zeta_corner_off_is_baseline`` — Python-static
+   gate guard.
+2. ``test_nh_a2b_zeta_corner_on_changes_winds`` — perturbation
+   response.
+3. ``test_nh_a2b_zeta_corner_differentiable`` — ``jax.grad`` flows
+   through 5 steps.
+4. ``test_nh_a2b_zeta_corner_rest_state_smoke`` — 20 steps from
+   rest stay finite, no spurious mass growth.
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest tests/test_a2b_zeta_corner_nh.py
+    => 4 passed in 92.64 s
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/atmosphere/nonhydrostatic/integration/test_fv_cubesphere.py \
+        tests/atmosphere/nonhydrostatic/unit/test_compressible_euler.py \
+        tests/test_corner_div_damp_nh.py tests/test_damp_v_nh.py
+    => 46 passed (NH baseline + iter-168/169 unchanged)
+
+### Status
+
+Default-off; opt-in.  Three of three documented "corner-fidelity"
+PE-vs-NH asymmetries are now closed (corner-div, damp_v, a2b ζ
+corner).  Remaining: the cell-centre constant ``div_damp_coeff``
++ adaptive ``div_damp_dddmp`` (PE iter 5) is a more substantive
+addition (introduces a new mechanism in NH rather than mirroring
+existing infrastructure) and is deferred for future iterations.
 
 ## Iteration 169 (2026-05-08): port FV3 post-step vorticity damping (damp_v) to NH 3D path
 
