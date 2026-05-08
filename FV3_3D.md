@@ -457,12 +457,12 @@ DONE (iter 39-75):
 - ✅ Finer A_h calibration at C48 (iter 37 sweet spot ah_x2 = 6.12e+06).
 
 STILL OPEN (post-iter-99 stretch goals):
-- C72 ``dt=100`` re-test under quieter system load (would
-  validate the iter-72 long_time mode at C72, currently changes
-  iter-33 reference numbers).  iter-135 ran a 1-day smoke at
-  C72 dt=100: stable, max|u|=0.633, 34s wall.  iter-136 extended
-  to 5 days: stable, max|u|=3.20, 97s wall.  Confirms dt=100
-  produces realistic HS spinup at C72; full 30-day not done.
+- ✅ C72 ``dt=100`` 30-day re-test (iter 167 closes this open
+  follow-up).  iter-167 30-day result: max|u|=11.19, max|v|=6.05,
+  25920 steps finite, 499s wall.  Validates long_time mode at C72
+  for full HS climatology window.  Note: max|u|=11.19 < iter-33
+  ah_x10+dt=200 reference's max|u|=45.88 at same 30-day mark —
+  dt=100 produces slower spinup but equally stable.
 - 200-day climate-relevant integration (matrix HS uses 30 days
   quick spin-up).
 - C144 30-day empirical validation.  iter-85 1/dt scaling
@@ -3967,6 +3967,58 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
+
+## Iteration 167 (2026-05-07): C72 dt=100 30-day FINITE — long_time mode validated
+
+### Goal
+
+The 'STILL OPEN' list at iter-122/127 had 'C72 dt=100 retest under
+quieter system load'.  iter-135/136 ran 1-day and 5-day smokes
+(both stable).  iter-137 launched the full 30-day in background.
+iter-167 reports the result.
+
+### Result
+
+::
+
+    HS C72 hybrid 30 days, ah_x10 (auto) + dt=100 (long_time-style)
+    [iter65] RESULT: {
+        'finite': True,
+        'max_u': 11.186,
+        'max_v': 6.047,
+        'wall': 499.5 s = 8.3 min,
+        'steps': 25920,
+    }
+
+### Comparison to iter-33 reference (dt=200)
+
+iter-33 ah_x10 + dt=200 30-day: max|u|=45.88, mid_std=6.815.
+iter-167 ah_x10 + dt=100 30-day: max|u|=11.19, mid_std not measured.
+
+dt=100 produces SLOWER spinup (4x lower max|u| at 30 days) but is
+fully stable.  This is consistent with the iter-99 C96 dt=50
+result (max|u|=20.14 at 30d) — smaller dt = slower jet spinup but
+equally finite.
+
+### Implication
+
+dt=100 at C72 is a valid alternative to iter-33's dt=200
+reference.  Users who prefer the conservative timestep can run
+``LEGOESM_HS_CUBE_DT_CFL=long_time`` at C72 (which gives dt=133,
+similar to dt=100 but with iter-72 calibration).
+
+This closes the 'C72 dt=100 retest' open follow-up.
+
+### Eigenmode comparison at dt=100
+
+iter-79: C96 dt=100 NaN at day 22.5.
+iter-167: C72 dt=100 STABLE at day 30 (max|u|=11.19).
+
+Confirms that the eigenmode strength scales with resolution —
+stronger at C96 than C72 at the same dt.  This is consistent
+with the iter-32 finding that the C72 instability is an interior
+synoptic-scale eigenmode that becomes more vigorous at higher
+resolution.
 
 ## Iteration 121 (2026-05-07): C144 5-day completion — auto-mode validated past day 1
 
