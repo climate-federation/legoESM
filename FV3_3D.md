@@ -497,6 +497,16 @@ Key iterations:
   ~150-line prose blocks to 1-3 line summaries (saves ~110
   lines for context budget at the user-requested 10-iter
   compaction boundary).
+- Iter 231: aggregate direction test for the full PE d_con stack.
+  iter-228/229 verified each PE d_con site bit-for-bit; iter-231
+  verifies that the AGGREGATE behaves correctly under
+  integration: 10 PE steps with all 4 PE d_con knobs
+  (damp_v_d_con + corner_div_damp_d_con + div_damp_d_con +
+  ah_d_con) ON simultaneously and damping mechanisms removing
+  KE → ``mean(T)_ON > mean(T)_OFF``.  Strong wind perturbation
+  IC at C8.  Catches sign errors that the per-site formula
+  tests would miss in cross-cancellation, and validates energy
+  conservation (KE→heat) at the aggregate.  1/1 pass in 21 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
