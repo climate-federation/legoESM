@@ -76,6 +76,7 @@ Key iterations:
 - Iter 100-101: closeout cleanup + Final state summary
 - Iter 102: C144 1-day smoke stable
 - Iter 103: C192 1-day smoke stable
+- Iter 104-105: ToC + epilog updates with iter 99 confirmation
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
