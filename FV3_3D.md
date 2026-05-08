@@ -719,6 +719,14 @@ Key iterations:
   ``use_fv3_a2b_zeta_corner=False`` and for non-zeta scalars
   (theta_corner, T_corner reciprocal, ah_smag fallback).
   9/9 pass in 9.4 s.
+- Iter 307: ``_interp_corner_to_center`` (D-corner →
+  cell-centre 4-pt average) preserves constants + linear.
+  Mirror of iter-306 in opposite direction.  Helper used by
+  every iter-22[1-6] tendency-form d_con KE→heat path
+  (``dT_dt_cc = -d_con * interp_corner_to_center(dKE_dt)
+  / c_pd``).  Tested at both 2D (6, n+1, n+1) and 3D shapes
+  with c ∈ {-3.5, 0, 1, 1e-6, 1e6} and (α, β) ∈ {(1,1),
+  (2,-3), (0.5,0.5), (-1,7)}.  9/9 pass in 0.3 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
