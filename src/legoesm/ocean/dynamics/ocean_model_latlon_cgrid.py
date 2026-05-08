@@ -377,13 +377,13 @@ def _forward_backward_coriolis_3d(
 
     # --- Backward step: update v' using NEW u' ---
     # Average u'_new to v-points (Sadourny 4-point average).
-    # Pole rows are zero (wall BC); single Pad HLO op replaces
-    # alloc-zeros + concatenate-of-three.
+    # Boundary: wall BC on regular lat-lon; fold halo on tripolar.
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import pad_ns_vector_u
     u_at_v_interior = 0.25 * (
         u_prime_new[:-1, :-1] + u_prime_new[:-1, 1:]
         + u_prime_new[1:, :-1] + u_prime_new[1:, 1:]
     )
-    u_at_v = jnp.pad(u_at_v_interior, ((1, 1), (0, 0), (0, 0)))
+    u_at_v = pad_ns_vector_u(u_at_v_interior, grid)
 
     v_prime_new = (v_prime - dt * f_v[:, :, jnp.newaxis] * u_at_v) * v_mask_3d
 

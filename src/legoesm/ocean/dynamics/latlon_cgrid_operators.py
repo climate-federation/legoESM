@@ -35,6 +35,93 @@ from legoesm.grids.latlon import LatLonGrid  # noqa: F401 — kept for type comp
 
 
 # =============================================================================
+# North/south boundary padding helpers (Phase 1B)
+# =============================================================================
+#
+# On a regular lat-lon grid, v-face and vertex quantities are zero-padded
+# at the north and south poles (wall BC).  On a tripolar grid, the south
+# pole remains a wall, but the north boundary is a fold seam where data
+# comes from the opposite side of the fold.
+#
+# These helpers abstract the padding so operators don't need to know
+# whether the grid has a fold.  For regular lat-lon grids (fold inactive),
+# they reduce to jnp.pad — bit-exact to the current code.
+
+
+def _pad_ns_zero(interior: jnp.ndarray) -> jnp.ndarray:
+    """Zero-pad south and north rows (wall BC).
+
+    Parameters
+    ----------
+    interior : (..., n_interior, n_lon, ...) — missing the first and last
+        rows along the latitude axis (axis 0 for 2D/3D fields).
+
+    Returns
+    -------
+    padded : (..., n_interior+2, n_lon, ...)
+    """
+    pad_axes = ((0, 0),) * (interior.ndim - 1)
+    return jnp.pad(interior, ((1, 1), *pad_axes))
+
+
+def pad_ns_scalar(interior: jnp.ndarray, grid) -> jnp.ndarray:
+    """Pad south/north rows for a v-face or vertex scalar quantity.
+
+    On regular lat-lon: zero-pad (wall BC).
+    On tripolar (fold.is_active): south = zero, north = fold-reflected.
+
+    Parameters
+    ----------
+    interior : (n_lat-1, n_lon, ...) — interior v-face or vertex rows.
+    grid : LatLonGrid or LatLonCGridGeometry.
+
+    Returns
+    -------
+    padded : (n_lat+1, n_lon, ...)
+    """
+    fold = getattr(grid, "fold", None)
+    if fold is not None and fold.is_active:
+        # Tripolar fold: south wall, north = fold-reflected scalar
+        pad_axes = ((0, 0),) * (interior.ndim - 1)
+        south = jnp.zeros_like(interior[:1])
+        # Fold: last interior row, i-reversed
+        north = interior[-1:, :][...,]  # (1, n_lon, ...)
+        north = north[:, fold.perm_T]
+        return jnp.concatenate([south, interior, north], axis=0)
+    return _pad_ns_zero(interior)
+
+
+def pad_ns_vector_u(interior: jnp.ndarray, grid) -> jnp.ndarray:
+    """Pad south/north for a u-component at v-face latitudes.
+
+    On regular lat-lon: zero-pad.
+    On tripolar: south = zero, north = fold-reflected with sign flip.
+    """
+    fold = getattr(grid, "fold", None)
+    if fold is not None and fold.is_active:
+        south = jnp.zeros_like(interior[:1])
+        north = interior[-1:, :]
+        north = fold.vector_sign_u * north[:, fold.perm_T]
+        return jnp.concatenate([south, interior, north], axis=0)
+    return _pad_ns_zero(interior)
+
+
+def pad_ns_vector_v(interior: jnp.ndarray, grid) -> jnp.ndarray:
+    """Pad south/north for a v-component at v-face latitudes.
+
+    On regular lat-lon: zero-pad.
+    On tripolar: south = zero, north = fold-reflected with sign flip.
+    """
+    fold = getattr(grid, "fold", None)
+    if fold is not None and fold.is_active:
+        south = jnp.zeros_like(interior[:1])
+        north = interior[-1:, :]
+        north = fold.vector_sign_v * north[:, fold.perm_v]
+        return jnp.concatenate([south, interior, north], axis=0)
+    return _pad_ns_zero(interior)
+
+
+# =============================================================================
 # Cell-center ↔ face interpolation (shared by atmosphere and ocean)
 # =============================================================================
 
@@ -245,10 +332,8 @@ def gradient_y_cgrid(
     # Interior v-faces: i=1..n_lat-1
     df_interior = (f[1:] - f[:-1]) / dy_v_interior  # (n_lat-1, n_lon, ...)
 
-    # Boundary faces at poles: zero gradient (wall BC).
-    # Single Pad HLO op replaces alloc-zeros + concatenate-of-three.
-    pad_axes = ((0, 0),) * (df_interior.ndim - 1)
-    df_dy = jnp.pad(df_interior, ((1, 1), *pad_axes))
+    # Boundary: wall BC (zero) on regular lat-lon; fold halo on tripolar.
+    df_dy = pad_ns_scalar(df_interior, grid)
     return df_dy
 
 
@@ -449,10 +534,8 @@ def coriolis_cgrid(
     # Average: u_at_v = 0.25 * (u[i,j] + u[i,j+1] + u[i+1,j] + u[i+1,j+1])
     u_avg_interior = 0.25 * (u[:-1, :-1] + u[:-1, 1:] + u[1:, :-1] + u[1:, 1:])
     # u_avg_interior shape: (n_lat-1, n_lon, ...)
-    # Boundary: at poles, u_at_v = 0 (v=0 at poles anyway).
-    # Single Pad HLO op replaces alloc-zeros + concatenate-of-three.
-    pad_axes = ((0, 0),) * (u_avg_interior.ndim - 1)
-    u_at_v = jnp.pad(u_avg_interior, ((1, 1), *pad_axes))
+    # Boundary: wall BC (zero) on regular lat-lon; fold halo on tripolar.
+    u_at_v = pad_ns_vector_u(u_avg_interior, grid)
 
     # --- Coriolis terms ---
     # Reshape 2D ``f_u``/``f_v`` to broadcast over the trailing level
@@ -514,10 +597,9 @@ def laplacian_cgrid(
         # Zero gradient at land-ocean boundaries
         u_mask = mask * jnp.roll(mask, 1, axis=1)
         u_mask = jnp.concatenate([u_mask, u_mask[:, 0:1]], axis=1)
-        # Pole rows of v_mask are zero (wall BC); single Pad HLO op
-        # replaces alloc-zeros + concatenate-of-three.
+        # Boundary: wall BC on regular lat-lon; fold on tripolar.
         v_mask_interior = mask[:-1] * mask[1:]
-        v_mask = jnp.pad(v_mask_interior, ((1, 1), (0, 0)))
+        v_mask = pad_ns_scalar(v_mask_interior, grid)
         if is_3d:
             grad_x = grad_x * u_mask[..., jnp.newaxis]
             grad_y = grad_y * v_mask[..., jnp.newaxis]
@@ -614,9 +696,8 @@ def curl_vertex_cgrid(
     # construction; avoids 1/0 division — issue #173).
     circ_interior = circ[1:-1]
     zeta_interior = circ_interior / A_vertex_interior[bcast]
-    # Pad pole rows with zero along the lat axis (extra (0, 0) pads
-    # for trailing dims if 3D).
-    zeta = jnp.pad(zeta_interior, ((1, 1), (0, 0), *pad_extra))
+    # Boundary: wall BC (zero) on regular lat-lon; fold halo on tripolar.
+    zeta = pad_ns_scalar(zeta_interior, grid)
 
     return zeta
 
@@ -683,8 +764,7 @@ def _gradient_curl_to_v(
         grad_int = dzeta_int / dx_v_int[:, jnp.newaxis]
     else:
         grad_int = dzeta_int / dx_v_int[:, jnp.newaxis, jnp.newaxis]
-    pad_axes = ((0, 0),) * (grad_int.ndim - 1)
-    return jnp.pad(grad_int, ((1, 1), *pad_axes))
+    return pad_ns_scalar(grad_int, grid)
 
 
 def vector_laplacian_cgrid(
