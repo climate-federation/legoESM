@@ -2178,13 +2178,43 @@ class TestHeldSuarezDissipationImbalance:
             )
 
     def test_cfl_safe_dt_cube_invalid_mode_raises(self):
-        """iter 71: ``mode`` must be ``short_time`` or ``long_time``.
+        """iter 71/80: ``mode`` must be ``short_time``,
+        ``long_time``, or ``very_long_time``.
         """
         import pytest
         with pytest.raises(ValueError, match="mode must be"):
             M._cfl_safe_dt_cube(72, mode="invalid")
         with pytest.raises(ValueError, match="mode must be"):
             M._cfl_safe_dt_cube(72, mode="")
+
+    def test_cfl_safe_dt_cube_very_long_time_mode(self):
+        """iter 80: very_long_time mode reduces dt further than
+        long_time.  At C96 dt should be ~50.
+        """
+        # very_long_time at C96: safety=0.154 -> dt ≈ 50.
+        dt_96_vlt = M._cfl_safe_dt_cube(96, mode="very_long_time")
+        assert 47.0 <= dt_96_vlt <= 53.0, (
+            f"very_long_time at C96 should give dt ≈ 50, got {dt_96_vlt:.1f}"
+        )
+        # very_long_time strictly more conservative than long_time.
+        for n in (72, 96, 144):
+            dt_lt = M._cfl_safe_dt_cube(n, mode="long_time")
+            dt_vlt = M._cfl_safe_dt_cube(n, mode="very_long_time")
+            assert dt_vlt < dt_lt, (
+                f"At C{n} very_long_time dt={dt_vlt:.1f} must be smaller "
+                f"than long_time dt={dt_lt:.1f}"
+            )
+
+    def test_resolve_dt_cube_very_long_time_env_var(self, monkeypatch):
+        """iter 80: ``LEGOESM_HS_CUBE_DT_CFL=very_long_time`` selects
+        the iter-80 calibration.
+        """
+        for val in ("very_long_time", "verylongtime", "VERY_LONG_TIME"):
+            monkeypatch.setenv("LEGOESM_HS_CUBE_DT_CFL", val)
+            dt_96 = M._resolve_dt_cube(96)
+            assert 47.0 <= dt_96 <= 53.0, (
+                f"very_long_time at C96 expected dt ≈ 50, got {dt_96:.1f}"
+            )
 
     def test_resolve_dt_cube_long_time_env_var(self, monkeypatch, capsys):
         """iter 71: ``LEGOESM_HS_CUBE_DT_CFL=long_time`` selects the

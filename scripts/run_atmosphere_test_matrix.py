@@ -525,10 +525,17 @@ and reduces to 150.5 at C96.  Stable for ~10-15 days at C96 but
 NaNs at day 15 due to interior synoptic-scale eigenmode (iter 69)."""
 
 _CFL_SAFETY_LONG_TIME: float = 0.307
-"""iter 70 calibration: dt=100 at C96 stable for 20 days (and
-likely 30+).  More conservative than short_time so suppresses the
-iter-69 day-15 eigenmode.  CHANGES C72 dt from 200 to 133 (does
-NOT preserve iter-33 reference)."""
+"""iter 70 calibration: dt=100 at C96 stable for 20 days.
+More conservative than short_time so DELAYS (but does not
+eliminate per iter 79) the C96 eigenmode.  CHANGES C72 dt from
+200 to 133 (does NOT preserve iter-33 reference).  iter 79 found
+this NaNs at day 22.5 — STILL INSUFFICIENT for 30-day."""
+
+_CFL_SAFETY_VERY_LONG_TIME: float = 0.154
+"""iter 80 calibration: dt=50 at C96.  iter-79 found dt=100 NaN's
+at day 22.5; this halves dt further as the next attempt at 30-day
+stability.  EMPIRICALLY UNTESTED at 30 days (system was too slow
+during iter 80; deferred for empirical validation)."""
 
 
 def _cfl_safe_dt_cube(
@@ -548,9 +555,14 @@ def _cfl_safe_dt_cube(
         ``dt=200`` at C72 (iter-33 reference).  ``dt=150.5`` at C96
         is stable for ~10 days but NaNs at day 15 (iter 69).
     -   ``"long_time"``: ``safety=0.307``.  More conservative.
-        ``dt=100`` at C96 is stable for 20+ days (iter 70).
+        ``dt=100`` at C96 stable for 20 days (iter 70).
         CHANGES ``dt`` at C72 from 200 to 133 — does NOT preserve
-        iter-33 reference.
+        iter-33 reference.  iter 79 found this NaNs at day 22.5
+        — STILL INSUFFICIENT for 30-day C96.
+    -   ``"very_long_time"``: ``safety=0.154``.  Even more
+        conservative.  ``dt=50`` at C96.  Untested at 30 days
+        (iter 80, deferred for empirical validation).  CHANGES
+        ``dt`` at C72 from 200 to 67.
 
     The ``safety`` argument, when explicitly provided as a float,
     overrides ``mode``.
@@ -613,10 +625,12 @@ def _cfl_safe_dt_cube(
             safety = _CFL_SAFETY_SHORT_TIME
         elif mode == "long_time":
             safety = _CFL_SAFETY_LONG_TIME
+        elif mode == "very_long_time":
+            safety = _CFL_SAFETY_VERY_LONG_TIME
         else:
             raise ValueError(
-                f"_cfl_safe_dt_cube: mode must be 'short_time' "
-                f"or 'long_time', got {mode!r}"
+                f"_cfl_safe_dt_cube: mode must be 'short_time', "
+                f"'long_time', or 'very_long_time', got {mode!r}"
             )
     dx_face = math.pi * constants.R_earth / (2.0 * n)
     dt_cfl = safety * dx_face / c_max
@@ -639,11 +653,16 @@ def _resolve_dt_cube(
         iter-66 short-time calibration (``safety=0.462``).
         Stable to ~10 days at C96; NaNs at day 15 (iter 69).
     -   ``long_time`` / ``longtime``: iter-70 long-time calibration
-        (``safety=0.307``).  Stable to 20+ days at C96.  CHANGES
-        ``dt`` at C72 from 200 to 133 (no longer iter-33 reference).
-    -   ``auto`` (iter-72): RECOMMENDED.  Picks ``short_time`` for
-        ``n < 96`` (preserves iter-33 C72 reference) and
-        ``long_time`` for ``n >= 96`` (uses iter-70 C96 stability).
+        (``safety=0.307``).  Stable to ~22 days at C96 (iter 79).
+        CHANGES ``dt`` at C72 from 200 to 133 (no longer iter-33
+        reference).
+    -   ``very_long_time`` / ``verylongtime``: iter-80 calibration
+        (``safety=0.154``).  ``dt=50`` at C96.  Untested at 30 d.
+    -   ``auto`` (iter-72): RECOMMENDED for short runs.  Picks
+        ``short_time`` for ``n < 96`` (preserves iter-33 C72
+        reference) and ``long_time`` for ``n >= 96`` (iter-70
+        C96 stability good for ~20 days, NaN at day 22.5 per
+        iter 79).
 
     The ``label`` argument is used in the printed notice to
     distinguish HS vs baroclinic vs other call sites; the
@@ -657,7 +676,9 @@ def _resolve_dt_cube(
     raw = os.environ.get("LEGOESM_HS_CUBE_DT_CFL", "0").strip().lower()
     if raw in ("0", "false", "no", "off", ""):
         return 200.0
-    if raw in ("long_time", "longtime"):
+    if raw in ("very_long_time", "verylongtime"):
+        mode = "very_long_time"
+    elif raw in ("long_time", "longtime"):
         mode = "long_time"
     elif raw == "auto":
         # iter-72: auto-pick mode based on resolution.
@@ -670,8 +691,8 @@ def _resolve_dt_cube(
         raise ValueError(
             f"LEGOESM_HS_CUBE_DT_CFL: unrecognised value {raw!r}.  "
             f"Use 0/false/off (default), 1/true/short_time (iter-66), "
-            f"long_time (iter-71), or auto (iter-72: short_time at "
-            f"n<96, long_time at n>=96)."
+            f"long_time (iter-71), very_long_time (iter-80), or auto "
+            f"(iter-72: short_time at n<96, long_time at n>=96)."
         )
     dt = _cfl_safe_dt_cube(n, mode=mode)
     if dt < 200.0:

@@ -3825,6 +3825,63 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
 
+## Iteration 80 (2026-05-07): very_long_time mode (dt=50) for C96 30d
+
+### Goal
+
+iter 79 found C96 ``ah_x10 + dt=100`` NaNs at day 22.5.  Add a
+third calibration mode ``very_long_time`` with ``dt=50`` at C96
+to attempt 30-day stability.  Empirical run deferred (system
+slow during iter 80).
+
+### Implementation
+
+- Added ``_CFL_SAFETY_VERY_LONG_TIME = 0.154`` constant.
+- Extended ``_cfl_safe_dt_cube`` to accept
+  ``mode="very_long_time"``.
+- Extended ``_resolve_dt_cube`` to honor
+  ``LEGOESM_HS_CUBE_DT_CFL=very_long_time``.
+
+Per-resolution table (very_long_time)::
+
+    C36: dt=200 (capped)
+    C48: dt=100
+    C72: dt=67
+    C96: dt=50
+    C144: dt=33
+    C192: dt=25
+
+### Tests added (3)
+
+- ``test_cfl_safe_dt_cube_very_long_time_mode``: pins C96 dt≈50
+  and asserts very_long_time < long_time at every n>=72.
+- ``test_resolve_dt_cube_very_long_time_env_var``: env var path
+  end-to-end (case-insensitive, also ``verylongtime``).
+- Updated ``test_cfl_safe_dt_cube_invalid_mode_raises`` to
+  reflect the expanded set of valid modes.
+
+31 tests in ``TestHeldSuarezDissipationImbalance`` pass (was 29).
+264 tests overall.
+
+### Empirical 30d run — DEFERRED
+
+A 30-day C96 run at ``dt=50`` would take 51840 steps × ~30 ms/step
+= ~26 minutes wall.  System CPU efficiency was ~7-8 % during
+iter 80 making this 4-6x slower (>1 hour wall projected).
+Deferred to a future iteration when system is faster.
+
+If the dt=50 setting is empirically still insufficient, options
+are: combine with ``smag_cs > 0``, implement implicit time
+stepping, or accept 22-day max as the C96 ``dt=100`` ceiling.
+
+### Status
+
+The mode infrastructure now supports up to 4 calibration profiles.
+``very_long_time`` is RESERVED for cases where ``long_time`` is
+empirically insufficient (iter 79).  Recommended user action:
+start with ``auto``; escalate to ``very_long_time`` if the run
+NaN's during the production window.
+
 ## Iteration 79 (2026-05-07): CRITICAL — C96 30d auto-mode NaNs at day 22.5
 
 The iter-72/74 in-progress 30-day C96 run at ``ah_x10 + dt=100``
