@@ -840,19 +840,47 @@ def cdgrid_compressible_euler_slow_tendencies(
     # Theta uses advective form: -∇·(θv) + θ·∇·v.
     dtheta_p_dt = flux_combined[..., 0] + theta_total * div_v
 
-    # FV3_3D iter 222: add corner-div damp d_con heat tendency
-    # captured in section 7.  Default 0.0 preserves baseline.
-    if _dtheta_p_dt_cdd_cc is not None:
-        dtheta_p_dt = dtheta_p_dt + _dtheta_p_dt_cdd_cc
-
-    # FV3_3D iter 224: add cell-centre div_damp d_con heat tendency
-    # captured in the iter-171 div_damp block.
-    if _dtheta_p_dt_dd_cc is not None:
-        dtheta_p_dt = dtheta_p_dt + _dtheta_p_dt_dd_cc
-
-    # FV3_3D iter 226: add A_h Smagorinsky d_con heat tendency.
-    if _dtheta_p_dt_ah_cc is not None:
-        dtheta_p_dt = dtheta_p_dt + _dtheta_p_dt_ah_cc
+    # FV3_3D iter 240 (NH mirror of PE iter-239): aggregate the
+    # 3 tendency-based d_con contributions (iter-222 corner-div,
+    # iter-224 cell-centre div_damp, iter-226 A_h) and apply the
+    # iter-218/219 sponge-aware ``delt_max`` cap on the
+    # AGGREGATE.  Mirrors FV3 ``dyn_core.F90:1764-1779``: all
+    # KE-removal sources accumulate into a single heat_source
+    # then dyn_core.F90 caps once with the per-level
+    # (sponge-aware) ``delt_max`` limiter.  NH cap policy:
+    # k=0 → 0.1× delt_max, k=1 → 0.5×, k≥2 → 1× (FV3 cv_air
+    # branch sw_core.F90:1782-1786).  Cap is in θ_p space, so
+    # divide by ``Π_ref`` to convert from a T-space ``delt_max``
+    # bound (matches the iter-219 single-mechanism pattern).
+    _d_con_sum = None
+    for _contrib in (
+        _dtheta_p_dt_cdd_cc, _dtheta_p_dt_dd_cc, _dtheta_p_dt_ah_cc,
+    ):
+        if _contrib is not None:
+            _d_con_sum = (
+                _contrib if _d_con_sum is None
+                else _d_con_sum + _contrib
+            )
+    if _d_con_sum is not None:
+        if config.delt_max > 0.0:
+            _nlev_d = _d_con_sum.shape[-1]
+            _k_idx = jnp.arange(_nlev_d)
+            _sponge_factor = jnp.where(
+                _k_idx == 0, 0.1,
+                jnp.where(_k_idx == 1, 0.5, 1.0),
+            )
+            _delt_theta_per_level = (
+                config.delt_max
+                * _sponge_factor
+                / height_coord.exner_ref
+            )
+            _delt_theta_b = _delt_theta_per_level[
+                None, None, None, :
+            ]
+            _d_con_sum = jnp.clip(
+                _d_con_sum, -_delt_theta_b, _delt_theta_b,
+            )
+        dtheta_p_dt = dtheta_p_dt + _d_con_sum
     # Rho uses pure flux form: -∇·(ρv) + 0 (continuity).
     drho_p_dt = flux_combined[..., 1]
 

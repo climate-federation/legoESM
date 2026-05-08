@@ -96,6 +96,18 @@ def test_pe_fv3_config_fields_ast_regression():
         "corner_div_damp_dt_proxy": 200.0,
         # iter-208: KE→heat conversion for damp_v (FV3 d_con port).
         "damp_v_d_con": 0.0,
+        # iter-218/219: per-step dissipative-heating cap with FV3
+        # sponge-layer awareness.  Default 0.0 disables the cap.
+        "delt_max": 0.0,
+        # iter-221: KE→heat conversion for the iter-16/18
+        # corner-divergence damping.
+        "corner_div_damp_d_con": 0.0,
+        # iter-223: KE→heat conversion for the iter-5 cell-centre
+        # divergence damping.
+        "div_damp_d_con": 0.0,
+        # iter-225: KE→heat conversion for the iter-57/58
+        # Smagorinsky-A_h Laplacian.
+        "ah_d_con": 0.0,
     }
 
     missing = []
@@ -149,6 +161,22 @@ _PE_GATE_HELPER_PAIRS = [
     # so PE and NH AST guards share a single source-of-truth and
     # future substring changes (like iter-190's) cannot drift.
     (ITER187_GATE, ITER187_HELPER),
+    # iter-208: KE→heat conversion for damp_v.
+    ("self.config.damp_v_d_con > 0.0", "_interp_corner_to_center"),
+    # iter-218/219: per-step dissipative-heating cap.
+    ("self.config.delt_max > 0.0", "jnp.clip"),
+    # iter-221: corner-div damping d_con.
+    ("config.corner_div_damp_d_con > 0.0", "_dKE_dt_corner_cdd"),
+    # iter-223: cell-centre div_damp d_con.
+    ("config.div_damp_d_con > 0.0", "_dKE_dt_corner_dd"),
+    # iter-225: Smagorinsky-A_h d_con.
+    ("config.ah_d_con > 0.0", "_dKE_dt_corner_ah"),
+    # iter-239: aggregate cap on the 3 PE tendency-based d_con
+    # contributions.  The aggregation builds ``_d_con_sum`` by
+    # summing the (None-aware) per-mechanism contributions then
+    # applies ``jnp.clip`` with a sponge-aware per-level cap
+    # before adding to ``dT_dt_data``.
+    ("_d_con_sum is not None", "_cap_per_level"),
 ]
 
 

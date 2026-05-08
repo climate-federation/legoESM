@@ -243,6 +243,17 @@ def test_nh_fv3_config_fields_ast_regression():
         # iter-209 KE→heat conversion for damp_v (NH mirror of PE
         # iter-208).
         "damp_v_d_con": 0.0,
+        # iter-218/219: per-step dissipative-heating cap with FV3
+        # sponge-layer awareness.  Default 0.0 disables the cap.
+        "delt_max": 0.0,
+        # iter-222: NH mirror of PE iter-221 corner-div d_con.
+        "corner_div_damp_d_con": 0.0,
+        # iter-224: NH mirror of PE iter-223 cell-centre div_damp
+        # d_con.
+        "div_damp_d_con": 0.0,
+        # iter-226: NH mirror of PE iter-225 Smagorinsky-A_h
+        # d_con.
+        "ah_d_con": 0.0,
     }
 
     missing = []
@@ -306,6 +317,23 @@ NH_GATE_HELPER_PAIRS = [
     # sw_core.F90:1080-1086).  Reuses the SW backbone
     # ``_del6_vt_flux``.
     ("self.config.damp_w > 0.0", "_del6_vt_flux"),
+    # iter-203: damp_w KE→heat (d_con).
+    ("self.config.damp_w_d_con > 0.0", "heat_half"),
+    # iter-209: damp_v KE→heat (d_con NH mirror of PE iter-208).
+    ("self.config.damp_v_d_con > 0.0", "_exner_ref_broadcast"),
+    # iter-218/219: per-step dissipative-heating cap.
+    ("self.config.delt_max > 0.0", "jnp.clip"),
+    # iter-222: corner-div damping d_con.
+    ("config.corner_div_damp_d_con > 0.0", "_dKE_dt_corner_cdd"),
+    # iter-224: cell-centre div_damp d_con.
+    ("config.div_damp_d_con > 0.0", "_dKE_dt_corner_dd"),
+    # iter-226: Smagorinsky-A_h d_con.
+    ("config.ah_d_con > 0.0", "_dKE_dt_corner_ah"),
+    # iter-240: NH mirror of iter-239 aggregate cap.  Sums the 3
+    # NH tendency-based d_con contributions and applies the
+    # iter-219 sponge-aware cap (k=0 → 0.1×, k=1 → 0.5×, k≥2 → 1×)
+    # before adding to ``dtheta_p_dt``.
+    ("_d_con_sum is not None", "_sponge_factor"),
 ]
 
 
