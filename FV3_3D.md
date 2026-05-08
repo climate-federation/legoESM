@@ -327,6 +327,18 @@ Key iterations:
   umbrella exercises ALL FV3-faithful damping mechanisms in NH
   including the ``d_con`` KE→heat conversion, with ``jax.grad``
   flowing through the heat formula at AD-at-rest.
+- Iter 205: quantitative energy-conservation test for the iter-203
+  ``damp_w_d_con`` heat formula.  Method: run THREE configs
+  (acoustic-only, damp_w-only, damp_w + d_con); extract dw =
+  damp_w-only.w − acoustic-only.w; compute expected heat from
+  ``-d_con * dw * (w_after_acoustic + 0.5*dw) / c_pd`` averaged
+  half→full; assert ``θ_p(d_con) − θ_p(no-d_con)`` matches the
+  expected formula within machine precision.  Catches numerical
+  bugs in the formula (wrong factor of 0.5, sign error, wrong
+  half-to-full averaging, missing c_pd).  iter-205 originally
+  failed because the test extracted dw against the wrong baseline
+  (pre-step state instead of post-acoustic state); the fix
+  introduced the third "acoustic-only" run.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
