@@ -109,6 +109,9 @@ def _full_toolkit_cfg():
         # added to the umbrella in iter-194).  Reuses the
         # _del6_vt_flux backbone applied per half-level via vmap.
         damp_w=0.030, nord_w=1,
+        # iter-203 KE→heat conversion for damp_w (added to umbrella
+        # in iter-204).  FV3 production default ``d_con = 1.0``.
+        damp_w_d_con=1.0,
     )
 
 

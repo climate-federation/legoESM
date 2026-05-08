@@ -320,6 +320,13 @@ Key iterations:
   troposphere).  Adds ``damp_w_d_con: float = 0.0`` config field
   (FV3 production default 1.0).  Default off; gated INSIDE the
   iter-193 ``damp_w > 0`` block.
+- Iter 204: extend the iter-184 NH umbrella to ALSO engage iter-203
+  ``damp_w_d_con``.  Previously the umbrella exercised iter
+  168/169/170/171/180/187/190/193 toolkit knobs but left iter-203
+  ``damp_w_d_con`` dormant (default off).  After iter-204 the
+  umbrella exercises ALL FV3-faithful damping mechanisms in NH
+  including the ``d_con`` KE→heat conversion, with ``jax.grad``
+  flowing through the heat formula at AD-at-rest.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
