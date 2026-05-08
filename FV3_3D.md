@@ -735,6 +735,14 @@ Key iterations:
   iter-169 (NH) post-step damp_v helper — confirms damp4 =
   (damp_v * da_min_c)^(nord+1) enters as a pure scalar
   multiply on F(u, v, nord, cdgrid).  15/15 pass in 11 s.
+- Iter 309: ``fv3_del6_vorticity_damping`` linearity in
+  (u, v) at fixed damp / nord (orthogonal to iter-308's
+  linearity in damp).  (u=0, v=0) → (du, dv) = 0 across
+  nord ∈ {0, 1, 2}; superposition (rtol=1e-13) for (α, β)
+  ∈ {(1,1), (2,-3), (0.5,0.5), (-1,7)} × nord ∈ {0, 1, 2}.
+  Combined with iter-308, the helper is BILINEAR — linear
+  in damp at fixed (u, v) AND linear in (u, v) at fixed
+  damp.  15/15 pass in 11 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
