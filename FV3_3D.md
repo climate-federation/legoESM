@@ -631,6 +631,12 @@ Key iterations:
   All 6 d_con sites (3 PE + 3 NH tendency-based) now have
   explicit net-heating direction tests in addition to bit-
   for-bit / linearity formula tests.
+- Iter 276: damp_v_d_con direction tests with FV3 production
+  nord_v=2 (del-6 vorticity damping).  iter-208/209 direction
+  tests use nord_v=1; FV3 production default is 2.  iter-276
+  adds explicit nord_v=2 cases for both PE and NH:
+  mean(dT_d_con) > 0 holds with the production nord.  2/2
+  pass in 23 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
