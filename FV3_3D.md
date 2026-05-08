@@ -615,6 +615,10 @@ Key iterations:
   sign error that the iter-228 per-cell test would also
   catch but with less direct interpretation.  1/1 pass in
   14 s.
+- Iter 273: explicit direction test for iter-223 PE
+  div_damp_d_con (mirror of iter-272).  Mean(dT_d_con) > 0
+  when iter-5 cell-centre div_damp is removing KE.  1/1 pass
+  in 13 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
