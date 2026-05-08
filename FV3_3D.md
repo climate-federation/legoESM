@@ -611,6 +611,18 @@ Key iterations:
   (0.1, 10.0) sanity bound.  edge_width=4 same as iter-254.
   1/1 pass in 21 s.  Closes the PE/NH parity gap on C36
   cube-imprint diagnostic with the full d_con stack engaged.
+- Iter 256: global-energy-conservation regression for the
+  iter-208 damp_v_d_con POST-STEP block (PE).  iter-243
+  covered all 3 PE TENDENCY-based d_con sites (corner-div,
+  cell-centre div_damp, A_h) but iter-208 damp_v_d_con is
+  structurally different — discrete post-step block — so it
+  wasn't included.  iter-256 verifies the same property
+  ``Σ c_pd * ΔT_d_con + Σ ΔKE = 0`` at rtol=1e-10 for the
+  post-step path with the EXACT discrete formula (including
+  the 0.5*du² + 0.5*dv² nonlinear terms FV3 carries in the
+  discrete form).  Per-cell pointwise check + global sum.
+  All 4 PE d_con sites now have global-energy-conservation
+  regression coverage.  1/1 pass in 14 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
