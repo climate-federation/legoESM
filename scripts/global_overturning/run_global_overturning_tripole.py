@@ -201,9 +201,49 @@ def main():
     )
 
     # ---- Physics / forcing ----
-    # The forcing functions (wind, T-restoring) are latitude-dependent
-    # analytical profiles that work on any grid.
-    physics = create_forcings("latlon", geom, config)
+    # Build the physics config directly rather than using create_forcings(),
+    # because the lat-lon C-grid model handles vertical mixing (A_v, K_v)
+    # internally in the baroclinic tendency — the physics-level vertical
+    # mixing function assumes u/v have the same shape (cubed-sphere),
+    # which fails on C-grid staggering.
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.physics.surface_forcing.config import (
+        PrescribedForcingConfig, RestoringConfig, SurfaceForcingConfig,
+    )
+    from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
+    from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
+    from legoesm.ocean.physics.convection.config import (
+        EnhancedDiffusionConfig, OceanConvectionConfig,
+    )
+
+    tau_T_seconds = config.tau_T_days * 86400.0
+    physics = OceanPhysicsConfig(
+        surface_forcing=SurfaceForcingConfig(
+            scheme="combined",
+            prescribed=PrescribedForcingConfig(
+                wind_profile="two_belt",
+                tau_max=config.tau_max,
+            ),
+            restoring=RestoringConfig(
+                tau_T=tau_T_seconds,
+                tau_S=1e30,
+                T_star_eq=config.T_star_eq,
+                T_star_pole=config.T_star_pole,
+                S_star=config.S_uniform,
+                T_profile="cosine",
+            ),
+        ),
+        # Vertical mixing handled by the dynamics (A_v, K_v on model config)
+        vertical_mixing=VerticalMixingConfig(scheme="none"),
+        lateral_mixing=LateralMixingConfig(scheme="none"),
+        convection=OceanConvectionConfig(
+            scheme="enhanced_diffusion",
+            enhanced_diffusion=EnhancedDiffusionConfig(
+                K_conv=1.0, K_bg=1e-5,
+            ),
+        ),
+        shortwave_penetration=None,
+    )
     eos_config = create_eos_config(config)
     gm_redi_cfg = create_gm_redi_config(config)
 
@@ -230,9 +270,19 @@ def main():
         S_uniform=config.S_uniform,
     )
 
-    # Apply ORCA bathymetry and land mask
-    # Clamp H_bathy to our z-coordinate range
+    # Apply ORCA bathymetry and land mask.
+    # Clamp H_bathy: upper bound is our z-coordinate range, lower bound
+    # is the first vertical level thickness (cells shallower than this
+    # would have near-zero layer thickness, causing division blow-up).
+    H_min = float(z_coord.dz_ref[0]) * 1.1  # 10% margin
     H_bathy_clamped = np.clip(H_bathy_raw, 0, config.H_max)
+    # Mask out cells shallower than H_min (treat as land)
+    too_shallow = (H_bathy_clamped > 0) & (H_bathy_clamped < H_min)
+    n_masked = int(np.sum(too_shallow))
+    if n_masked > 0:
+        print(f"  Masking {n_masked} shallow cells (H < {H_min:.0f} m) as land")
+        H_bathy_clamped[too_shallow] = 0.0
+        land_mask_raw[too_shallow] = 0.0
     state = state._replace(
         H_bathy=Field(jnp.array(H_bathy_clamped)),
     )
