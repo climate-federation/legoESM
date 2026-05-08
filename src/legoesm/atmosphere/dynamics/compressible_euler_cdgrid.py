@@ -146,6 +146,19 @@ class CDGridCompressibleEulerConfig(NamedTuple):
     # corner interpolations breaks discrete operator balance).
     # Default False preserves baseline.
     use_fv3_a2b_zeta_corner: bool = False
+    # FV3-faithful cell-centre divergence damping (FV3_3D iter 171).
+    # Mirrors the iter-5 wiring in ``CDGridPrimitiveEquationConfig``.
+    # Faithful port of FV3 ``sw_core.F90:1720``::
+    #
+    #     damp = da_min_c * max(d2_bg, min(0.20, dddmp * |div|))
+    #
+    # where ``d2_bg = div_damp_coeff / da_min_c``.  When ``dddmp == 0``,
+    # the damping is constant (``div_damp_coeff``) — matches the
+    # legacy SW production path.  When ``dddmp > 0``, it becomes
+    # adaptive (stronger at panel-boundary cells with large |div|).
+    # Default 0.0 preserves baseline (no div damping at all in NH).
+    div_damp_coeff: float = 0.0
+    div_damp_dddmp: float = 0.0
 
 
 def cdgrid_compressible_euler_slow_tendencies(
@@ -307,6 +320,38 @@ def cdgrid_compressible_euler_slow_tendencies(
     du_d_dt = abs_vor_corner * v_d - dK_dx - c_p * theta_corner * dpi_dx
     dv_d_dt = -abs_vor_corner * u_d - dK_dy_perp - c_p * theta_corner * dpi_dy_perp
 
+    # FV3_3D iter 171: optional cell-centre divergence damping
+    # (FV3 sw_core.F90:1720).  Mirrors the PE iter-5 wiring.  ``div_v``
+    # is also used by the theta-equation advective-form correction
+    # below (line ~520 in legacy ordering); compute once here so the
+    # downstream consumer can reuse it.  Lazy: skip when neither
+    # consumer needs it.
+    _need_div_damp = config.div_damp_coeff > 0.0
+    if _need_div_damp:
+        div_v = cgrid_divergence(u_c, v_c, cdgrid)         # (6, n, n, nlev)
+        ddiv_dx, ddiv_dy_perp = _arakawa_lamb_gradient(div_v, cdgrid)
+        if config.div_damp_dddmp > 0.0:
+            # FV3 sw_core.F90:1720 adaptive Smagorinsky formulation.
+            # ``da_min_c`` = global min B-grid corner area.
+            _da_min_c = jnp.min(cdgrid.area_corner)
+            _d2_bg = config.div_damp_coeff / _da_min_c
+            _div_abs_corner = _interp_center_to_corner(
+                jnp.abs(div_v), cdgrid,
+            )
+            _adaptive_coeff = _da_min_c * jnp.maximum(
+                _d2_bg,
+                jnp.minimum(
+                    0.20, config.div_damp_dddmp * _div_abs_corner,
+                ),
+            )
+            du_d_dt = du_d_dt + _adaptive_coeff * ddiv_dx
+            dv_d_dt = dv_d_dt + _adaptive_coeff * ddiv_dy_perp
+        else:
+            du_d_dt = du_d_dt + config.div_damp_coeff * ddiv_dx
+            dv_d_dt = dv_d_dt + config.div_damp_coeff * ddiv_dy_perp
+    else:
+        div_v = None  # computed lazily by theta block below
+
     # Laplacian viscosity — batch (u_d, v_d) into a single
     # ``_laplacian_dgrid`` call by stacking along a trailing axis and
     # folding into the level dim.  ``_laplacian_dgrid`` is now
@@ -457,7 +502,10 @@ def cdgrid_compressible_euler_slow_tendencies(
     # The θ equation uses advective form (not divergence/flux form) because
     # θ is NOT a conserved density — it satisfies dθ/dt = 0, not ∂(ρθ)/∂t = -∇·(ρθv).
     # Advective form = flux divergence + θ·div(v):  -v·∇θ = -∇·(θv) + θ∇·v
-    div_v = cgrid_divergence(u_c, v_c, cdgrid)
+    # iter-171: reuse div_v from the cell-centre div_damp block above
+    # if it was already computed; otherwise compute lazily here.
+    if div_v is None:
+        div_v = cgrid_divergence(u_c, v_c, cdgrid)
 
     # --- 10/11/12. (theta, rho, tracers) flux divergence (batched) ---
     # ``cgrid_mass_flux_divergence`` issues a ``pad_halo_4d`` on its

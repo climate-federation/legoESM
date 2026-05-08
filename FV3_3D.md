@@ -109,6 +109,10 @@ Key iterations:
   interpolation for ζ_corner (a2b_edge.F90:a2b_ord4,
   ``use_fv3_a2b_zeta_corner``) to the non-hydrostatic 3D path;
   third corner-fidelity PE-vs-NH asymmetry closed
+- Iter 171: port FV3 cell-centre constant + adaptive Smagorinsky
+  divergence damping (sw_core.F90:1720, ``div_damp_coeff`` /
+  ``div_damp_dddmp``) to the non-hydrostatic 3D path; fourth and
+  last documented PE-vs-NH FV3-fidelity asymmetry closed
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
@@ -492,16 +496,15 @@ STILL OPEN (post-iter-99 stretch goals):
   intermediate ``divg_d`` arrays, vector corner fill at nt > 0)
   — iter 32 found the C72 mode is interior, NOT cube-vertex, so
   this is lower priority than originally thought.
-- iter-168/169/170 documented PE-vs-NH FV3-fidelity asymmetries:
+- iter-168/169/170/171 documented PE-vs-NH FV3-fidelity asymmetries
+  ALL CLOSED:
   * ✅ corner-divergence damping (PE iter 16/18) — closed iter 168
   * ✅ ``damp_v`` post-step vorticity damping (PE iter 12) —
     closed iter 169
   * ✅ ``use_fv3_a2b_zeta_corner`` 4th-order ζ corner interp
     (PE iter 14) — closed iter 170
-  * cell-centre constant ``div_damp_coeff`` + adaptive
-    ``div_damp_dddmp`` (PE iter 5) — STILL open (substantive
-    addition: NH lacks the underlying cell-centre divergence
-    damping infrastructure that PE has).
+  * ✅ cell-centre constant ``div_damp_coeff`` + adaptive
+    ``div_damp_dddmp`` (PE iter 5) — closed iter 171
 
 DONE in iter 99:
 - ✅ C96 dt=50 30-day FULL completion (iter-99: max|u|=20.14
@@ -3992,6 +3995,101 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
+
+## Iteration 171 (2026-05-08): port FV3 cell-centre divergence damping to NH 3D path
+
+### Goal
+
+Close the last documented PE-vs-NH FV3-fidelity asymmetry: the
+cell-centre constant ``div_damp_coeff`` + adaptive Smagorinsky
+``div_damp_dddmp`` (PE iter 5).  Unlike iter-168/169/170, this is
+not a port of an existing helper but a substantive ADDITION to the
+NH path's damping infrastructure — NH had no cell-centre divergence
+damping at all.
+
+### FV3 anchor
+
+- ``sw_core.F90:1720`` adaptive Smagorinsky formula::
+
+      damp = da_min_c * max(d2_bg, min(0.20, dddmp * |div|))
+
+  with ``d2_bg = div_damp_coeff / da_min_c``.  When ``dddmp == 0``
+  the damping degenerates to the constant ``div_damp_coeff`` path.
+- Implementation matches the PE iter-5 wiring at
+  ``primitive_eq_cdgrid.py:594-633`` — same arithmetic, same
+  Arakawa-Lamb gradient at D-grid corners, same adaptive coefficient
+  computed from cell-centre |div_v| interpolated to corners.
+
+### Implementation
+
+- File: ``src/legoesm/atmosphere/dynamics/compressible_euler_cdgrid.py``.
+- 2 new ``CDGridCompressibleEulerConfig`` fields (default off):
+  ``div_damp_coeff: float = 0.0``, ``div_damp_dddmp: float = 0.0``.
+- Block inserted after step 7 (D-grid momentum tendencies) and
+  before the existing A_h Laplacian, computing
+  ``div_v = cgrid_divergence(u_c, v_c, cdgrid)`` and the gradient
+  ``ddiv_dx, ddiv_dy_perp = _arakawa_lamb_gradient(div_v, cdgrid)``,
+  then adding the damping contribution to ``du_d_dt``, ``dv_d_dt``.
+- ``div_v`` is HOISTED out of the existing theta-equation block to
+  avoid duplicate computation when both consumers (div_damp + theta)
+  need it.  The theta block now reuses ``div_v`` if already
+  computed; otherwise computes lazily.
+- Default both knobs at 0.0 preserves baseline bit-for-bit
+  (Python-static branch).
+
+### Tests added
+
+New file ``tests/test_div_damp_nh.py`` (5 tests):
+
+1. ``test_nh_div_damp_zero_is_baseline`` — Python-static gate
+   guard.  ``div_damp_coeff=0.0`` matches field-unset baseline
+   bit-for-bit (even when ``dddmp`` is set, since the gate is on
+   ``coeff > 0``).
+2. ``test_nh_div_damp_constant_changes_winds`` — constant path
+   (``dddmp=0``) measurably changes winds.
+3. ``test_nh_div_damp_adaptive_differs_from_constant`` — adaptive
+   path (huge ``dddmp=1e6`` to engage the cap) produces a
+   different state from the constant path.  Mirrors the PE-side
+   ``test_huge_dddmp_changes_tendencies``: at realistic divergence
+   levels the cap doesn't engage so the test forces it via a huge
+   coefficient.
+4. ``test_nh_div_damp_differentiable`` — ``jax.grad`` flows through
+   5 steps with adaptive damping.
+5. ``test_nh_div_damp_rest_state_smoke`` — 20 steps from rest stay
+   finite, no spurious mass growth.
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest tests/test_div_damp_nh.py
+    => 5 passed in 72.73 s
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/atmosphere/nonhydrostatic/integration/test_fv_cubesphere.py \
+        tests/atmosphere/nonhydrostatic/unit/test_compressible_euler.py \
+        tests/test_corner_div_damp_nh.py tests/test_damp_v_nh.py \
+        tests/test_a2b_zeta_corner_nh.py
+    => 50 passed (NH baseline + iter-168/169/170 unchanged)
+
+### Status
+
+Default-off; opt-in.  All FOUR documented PE-vs-NH FV3-fidelity
+asymmetries in the iter-168 audit are now closed.  The NH 3D path
+has the same FV3-faithful damping toolkit as the PE 3D path:
+
+- corner-divergence damping (iter 168, FV3 d_sw5)
+- post-step del-n vorticity damping (iter 169, FV3 d_sw6)
+- 4th-order A→B ζ corner interp (iter 170, FV3 a2b_ord4)
+- cell-centre constant + adaptive Smagorinsky div damp
+  (iter 171, FV3 sw_core.F90:1720)
+
+Future iterations: long-time empirical validation of these knobs
+on cube HS (deferred for system load), and any further
+FV3-fidelity gaps that surface from in-depth audit (e.g., FV3
+``a2b_ord4`` for additional corner interps beyond ζ — currently
+PE-only via iter-9 finding that swapping ALL corner interps
+breaks operator balance).
 
 ## Iteration 170 (2026-05-08): port FV3 4th-order A→B ζ corner interp to NH 3D path
 
