@@ -4042,6 +4042,11 @@ resolutions::
 iter-85 1/dt prediction at C192: dt=25 should NaN at ~day 90,
 so 30-day stability is expected.  Empirical validation deferred.
 
+iter-123 launched a C192 5-day run.  iter-117 trajectory model
+extrapolates iter-103's day 1 max|u|=0.838 to day 5 max|u| ~
+4.2 m/s under linear-in-time spinup.  Result pending in iter
+124+.
+
 iter-117 trajectory observation: HS C144 spin-up max|u| grows
 roughly linearly with time during the first ~5 days::
 
