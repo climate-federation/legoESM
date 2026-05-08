@@ -553,6 +553,16 @@ Key iterations:
   refactors that drop the wiring INSIDE the
   ``if config.X > 0`` gate even when the field stays
   declared.  8/8 AST tests pass in 82 s.
+- Iter 237: AD-at-rest gradient w.r.t. u perturbation amplitude
+  with the full toolkit + d_con stack ON.  iter-184/185
+  differentiate w.r.t. theta_p / T (cell-centre scalar
+  field); iter-237 differentiates w.r.t. a SCALAR uniform-u
+  perturbation amplitude — orthogonal direction more sensitive
+  to sqrt-at-zero hazards in wind-dependent helpers
+  (Smagorinsky strain, T_diss wind speed, smag_vort cap).
+  PE pass in 64 s; NH pass in 85 s.  Both ``jax.grad`` finite
+  through 3 PE / 5 NH steps with full toolkit + all 5 d_con
+  knobs at 1.0.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
