@@ -409,6 +409,15 @@ Key iterations:
   silent no-op in the iter-18-equivalent higher-order branch on
   the hydrostatic path that iter-187 finiteness tests would not
   catch.
+- Iter 214: PE counterpart of iter-199 Smagorinsky-A_h direction
+  test.  iter-199 verified that NH smag_cs > 0 + A_h > 0 produces
+  smaller max|u| than A_h-only on a high-strain IC; PE iter-57/58
+  Smagorinsky has bit-for-bit/changes-winds tests but no direction
+  test.  iter 214 mirrors iter-199 for PE using ``std|u_d|``
+  (rather than max) as the strain proxy — std integrates over the
+  full field rather than sampling the max, which on the PE HS-init
+  fixture is sensitive to single-cell jet response not correlated
+  with smag damping.  Parametrized over smag_cs in {0.1, 0.2, 0.4}.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
