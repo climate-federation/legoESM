@@ -659,90 +659,35 @@ Key iterations:
     differ).  Together 296+298 = complete PE contract.
   - 299: NH counterpart of 298 (proxy 10 vs 1000 + ±15 m/s
     perturbations to escape d2_bg floor).
-- Iter 300: AST regression guard for ``dt_actual`` param
-  on both PE+NH tendency signatures.  Pins the keyword name
-  + default=None on ``fv3_hydrostatic_tendencies`` and
-  ``cdgrid_compressible_euler_slow_tendencies``.  Catches
-  silent renames that runtime tests would miss (callers
-  using ``dt_actual=...`` keyword break, but positional
-  callers continue to work).  2/2 pass in 0.3 s.  Plus
-  10-iter ToC compaction (iters 290-299).
-- Iter 301: ``a2b_ord4`` 4th-order A→B corner interpolation
-  helper preserves constants exactly.  4-point Lagrange
-  weights satisfy b1+b2 = a1+a2 = 0.5 → constant input
-  reproduces at corners (rtol=1e-14).  Tested across c ∈
-  {-3.5, 0, 1, 1e-6, 1e6} and resolutions {C4, C8, C16,
-  C36}.  Holds even at panel edges where halo-2 cross-panel
-  exchange operates (constants are rotation-invariant).
-  Pins the most basic interpolation correctness invariant
-  for the helper used by iter-170 (NH zeta_corner) and
-  iter-187 (smag_vort cap).  9/9 pass in 38 s.
-- Iter 302: ``a2b_ord4`` linearity / superposition.  Every
-  step (qx, qy, qxx, qyy, qout, halo) is a fixed-weight
-  linear combination → ``a2b_ord4(αf1 + βf2) = α a2b_ord4(f1)
-  + β a2b_ord4(f2)`` (rtol=1e-14) for (α, β) ∈ {(1,1),
-  (2,-3), (0.5,0.5), (-1,7)}, plus homogeneity for α ∈
-  {-2.5, 0.5, 3.0, 1e-6}.  Combined with iter-301 constant-
-  preservation, pins the helper as an AFFINE OPERATOR with
-  the unique identity for constants — strong structural
-  correctness.  8/8 pass in 11 s.
-- Iter 303: ``fv3_divergence_corner_3d`` linearity in (u, v).
-  div(0, 0) = 0 exactly + superposition (rtol=1e-13) for
-  (α, β) ∈ {(1,1), (2,-3), (0.5,0.5), (-1,7)} + homogeneity
-  for α ∈ {-2.5, 0.5, 3.0, 1e-6}.  Pins the helper used by
-  iter-16 (PE) / iter-168 (NH) corner-div damping as a
-  linear operator on (u, v).  9/9 pass in 12 s.
-- Iter 304: ``fv3_corner_laplacian_iteration`` linearity.
-  lap(0) = 0 exactly + superposition (rtol=1e-12) for (α,
-  β) ∈ {(1,1), (2,-3), (0.5,0.5), (-1,7)} + homogeneity for
-  α ∈ {-2.5, 0.5, 3.0, 1e-6}.  Pins the iter-18/iter-187
-  inner Laplacian iteration (used in nord>=1 ``for _ in
-  range(nord): div = lap(div)`` loop) as a linear operator.
-  9/9 pass in 10 s.  Together iter-303/304 characterize the
-  full nord>=1 corner-div damping pipeline (delpc + lap^k)
-  as a linear operator on (u, v) — strong structural
-  correctness for the iter-187 smag_vort cap path.
-- Iter 305: ``fv3_corner_laplacian_iteration`` zeros
-  constants (strictly stronger than iter-304's lap(0) = 0).
-  At c ∈ {-3.5, 1, 1e-6, 1e6} and resolutions {C4, C8, C16},
-  lap(c-field) = 0 exactly (array-equal).  Pins constants-
-  in-kernel property of the discrete Laplacian — gradient
-  of a constant is 0 by construction, including the cube-
-  vertex corner-removal terms (uc/vc = 0 propagates).
-  12/12 pass in 26 s.
-- Iter 306: ``_interp_center_to_corner`` (2nd-order 4-pt
-  average) preserves constants + linear.  Constant c → c at
-  corners (rtol=1e-14) for c ∈ {-3.5, 0, 1, 1e-6, 1e6}.
-  Superposition (rtol=1e-14) for (α, β) ∈ {(1,1), (2,-3),
-  (0.5,0.5), (-1,7)}.  Pins the affine-operator contract on
-  the 2nd-order helper used as production fallback when
-  ``use_fv3_a2b_zeta_corner=False`` and for non-zeta scalars
-  (theta_corner, T_corner reciprocal, ah_smag fallback).
-  9/9 pass in 9.4 s.
-- Iter 307: ``_interp_corner_to_center`` (D-corner →
-  cell-centre 4-pt average) preserves constants + linear.
-  Mirror of iter-306 in opposite direction.  Helper used by
-  every iter-22[1-6] tendency-form d_con KE→heat path
-  (``dT_dt_cc = -d_con * interp_corner_to_center(dKE_dt)
-  / c_pd``).  Tested at both 2D (6, n+1, n+1) and 3D shapes
-  with c ∈ {-3.5, 0, 1, 1e-6, 1e6} and (α, β) ∈ {(1,1),
-  (2,-3), (0.5,0.5), (-1,7)}.  9/9 pass in 0.3 s.
-- Iter 308: ``fv3_del6_vorticity_damping`` linearity in the
-  ``damp`` coefficient.  damp=0 → (du, dv) = 0 exactly across
-  nord ∈ {0, 1, 2}; damp=α*d → α × (du, dv) bit-for-bit
-  (rtol=1e-13) for α ∈ {-2.5, 0.5, 3.0, 1e-6}.  Pins the
-  scalar prefactor structure of the iter-12 (PE) /
-  iter-169 (NH) post-step damp_v helper — confirms damp4 =
-  (damp_v * da_min_c)^(nord+1) enters as a pure scalar
-  multiply on F(u, v, nord, cdgrid).  15/15 pass in 11 s.
-- Iter 309: ``fv3_del6_vorticity_damping`` linearity in
-  (u, v) at fixed damp / nord (orthogonal to iter-308's
-  linearity in damp).  (u=0, v=0) → (du, dv) = 0 across
-  nord ∈ {0, 1, 2}; superposition (rtol=1e-13) for (α, β)
-  ∈ {(1,1), (2,-3), (0.5,0.5), (-1,7)} × nord ∈ {0, 1, 2}.
-  Combined with iter-308, the helper is BILINEAR — linear
-  in damp at fixed (u, v) AND linear in (u, v) at fixed
-  damp.  15/15 pass in 11 s.
+- Iters 300-309 (compacted iter 310): AST guard + helper-
+  formula scaling/linearity coverage.
+  - 300: AST guard for ``dt_actual`` keyword name + default
+    on PE+NH tendency signatures.
+  - 301: ``a2b_ord4`` preserves constants (rtol=1e-14) at
+    {C4, C8, C16, C36} × {-3.5, 0, 1, 1e-6, 1e6}.
+  - 302: ``a2b_ord4`` linearity / superposition (rtol=1e-14).
+  - 303: ``fv3_divergence_corner_3d`` linearity in (u, v) +
+    div(0, 0) = 0.
+  - 304: ``fv3_corner_laplacian_iteration`` linearity + lap(0)
+    = 0.
+  - 305: corner_laplacian zeros constants (kernel property).
+  - 306: ``_interp_center_to_corner`` (2nd-order 4-pt avg)
+    preserves constants + linear.
+  - 307: ``_interp_corner_to_center`` (mirror direction) at
+    both 2D and 3D shapes.
+  - 308: ``fv3_del6_vorticity_damping`` linear in damp at
+    nord ∈ {0, 1, 2}.
+  - 309: ``fv3_del6_vorticity_damping`` linear in (u, v) at
+    fixed damp/nord.  Combined w/ 308: BILINEAR.
+- Iter 310: ``pad_halo`` (scalar) preserves constants +
+  linearity.  Constant c-field → constant c-field across
+  halo widths {1, 2} and c ∈ {-3.5, 0, 1, 1e-6, 1e6}
+  (rtol=1e-14).  Superposition holds for (α, β) ∈ {(1,1),
+  (2,-3), (0.5,0.5), (-1,7)} (rtol=1e-14).  Pins the
+  foundational halo invariants that every downstream FV3
+  helper (a2b_ord4, divergence, laplacian, _interp_*)
+  inherits.  18/18 pass in 1.5 s.  Plus 10-iter ToC
+  compaction (iters 300-309).
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
