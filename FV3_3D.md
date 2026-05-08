@@ -428,6 +428,11 @@ Key iterations:
   0.1% reduction (vs NH's 1%) because PE HS-init residual divergence
   baseline is small (~1e-6 1/s) so the % reduction is modest even
   with strong damping.
+- Iter 216: PE counterpart of iter-175 ``damp_v`` direction test.
+  iter-175 verified NH damp_v reduces ``mean(|ζ|)`` on a vortical
+  IC.  PE iter-12 damp_v has the same backbone
+  (``fv3_del6_vorticity_damping``) but no analogous direction test.
+  iter 216 mirrors iter-175 for PE.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
