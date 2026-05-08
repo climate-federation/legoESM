@@ -582,6 +582,16 @@ Key iterations:
   Also compacts iter-250..259 ToC entries from ~100 lines to
   ~25 lines for context budget at the user-requested 10-iter
   compaction boundary.  No new test file (housekeeping iter).
+- Iter 261: AD-at-rest gradient with iter-19 PRODUCTION
+  d4_bg=0.02 (vs iter-184/185 umbrellas' softer 1e-3).
+  Stronger d4_bg amplifies the iter-187 smag_vort cap path;
+  could expose any sqrt-at-zero hazard.  PE 3 steps at rest
+  with full d_con stack + delt_max=1.0 + A_h + smag_cs +
+  T_diss + d4_bg=0.02: jax.grad finite.  Validates the
+  iter-183 sqrt(0) double-where fix holds under stronger
+  damping coefficients.  1/1 pass in 59 s.  Also fixes
+  obsolete "PE-only" docstring note in iter-208 PE damp_v
+  d_con (NH actually has its own iter-209 damp_v_d_con).
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::

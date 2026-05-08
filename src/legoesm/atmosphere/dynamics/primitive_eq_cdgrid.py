@@ -322,7 +322,8 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # iter-228 bit-for-bit formula tests + iter-243 global
         # energy conservation.  No fidelity gap; the pkz factor
         # in FV3 is a state-variable convention difference.
-        # PE-only (NH has its own iter-203 damp_w_d_con).
+        # NH has its own iter-209 damp_v_d_con + iter-203
+        # damp_w_d_con (no PE w field, hydrostatic).
     delt_max: float = 0.0
         # FV3-faithful per-step cap on dissipative heating magnitude
         # (FV3_3D iter 218).  Faithful port of the FV3 ``delt_max``
