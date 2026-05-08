@@ -554,6 +554,17 @@ Key iterations:
   expose.  All fields remain finite + bounded growth
   (max|u| < 100 m/s) at step 50 from random IC.  PE 50 × dt=100
   + NH 50 × dt=10 both pass in 33 s.
+- Iter 243: extend iter-238 global-energy-conservation
+  regression to all 3 PE tendency d_con sites individually
+  (corner-div, cell-centre div_damp, A_h) PLUS the iter-239
+  aggregate path with all 3 ON simultaneously.  Each site:
+  ``Σ c_pd * dT_dt + Σ dKE_dt == 0`` at rtol=1e-10.
+  Verifies the linear-superposition property that EACH d_con
+  formula conserves global energy independently AND the sum
+  conserves it (since it's just a linear sum).  Acts as a
+  comprehensive regression target for any future formula
+  refinement (e.g., the rsin2/cosa_s metric-aware port from
+  iter-238).  4/4 pass in 17 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
