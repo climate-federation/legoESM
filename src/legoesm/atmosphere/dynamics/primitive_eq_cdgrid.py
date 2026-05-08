@@ -270,6 +270,20 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # baseline bit-for-bit (gated INSIDE the iter-12
         # ``damp_v > 0`` block).  FV3 production default is 1.0.
         # PE-only (NH has its own iter-203 damp_w_d_con).
+    delt_max: float = 0.0
+        # FV3-faithful per-step cap on dissipative heating magnitude
+        # (FV3_3D iter 218).  Faithful port of the FV3 ``delt_max``
+        # limiter in ``dyn_core.F90:1774`` (cp branch):
+        #
+        #     pt += sign(min(|bdt*delt_max|, |dtmp|), dtmp) / pkz
+        #
+        # which clips the per-step temperature change ``dtmp`` to
+        # magnitude ``bdt * delt_max`` (Kelvin), preserving the sign
+        # of dtmp.  ``bdt`` is the model big timestep ``dt``.  Acts
+        # on the iter-208 ``damp_v_d_con`` block.  Default 0.0
+        # disables the cap (preserves baseline bit-for-bit when
+        # ``damp_v_d_con > 0``).  FV3 production default is 1.0
+        # K/s.  Differentiable everywhere via ``jnp.clip``.
     use_fv3_a2b_zeta_corner: bool = False
         # FV3-faithful 4th-order A→B interpolation for the relative
         # vorticity ``ζ`` from cell centres to D-grid corners (the
@@ -1542,6 +1556,12 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                 )
                 dKE_cc = _interp_corner_to_center(dKE_corner)
                 dT = -self.config.damp_v_d_con * dKE_cc / constants.c_pd
+                # FV3_3D iter 218: optional per-step cap on |dT|.
+                # FV3 dyn_core.F90:1774 caps |dtmp| to bdt*delt_max
+                # (default 1.0 K/s).  delt_max=0 disables the cap.
+                if self.config.delt_max > 0.0:
+                    delt = dt * self.config.delt_max
+                    dT = jnp.clip(dT, -delt, delt)
                 state_new = state_new._replace(
                     u_d=state_new.u_d.replace(data=u_corner + du_corner),
                     v_d=state_new.v_d.replace(data=v_corner + dv_corner),

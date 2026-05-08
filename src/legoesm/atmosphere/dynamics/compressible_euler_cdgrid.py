@@ -238,6 +238,17 @@ class CDGridCompressibleEulerConfig(NamedTuple):
     # gate).  FV3 production default is ``d_con = 1.0``.  Active
     # only when ``damp_w > 0``.
     damp_w_d_con: float = 0.0
+    delt_max: float = 0.0
+        # FV3-faithful per-step cap on dissipative heating magnitude
+        # (FV3_3D iter 218).  Faithful port of the FV3 ``delt_max``
+        # limiter in ``dyn_core.F90:1774`` (cp branch).  In the NH
+        # path our state stores potential temperature perturbation
+        # ``θ_p ≈ T/Π`` rather than T, so the cap is applied
+        # equivalently as ``|Δθ_p * Π_ref| ≤ dt * delt_max``.  Acts
+        # on the iter-203 ``damp_w_d_con`` and iter-209
+        # ``damp_v_d_con`` blocks.  Default 0.0 disables the cap
+        # (preserves baseline bit-for-bit).  FV3 production default
+        # is 1.0 K/s.  Differentiable via ``jnp.clip``.
 
 
 def cdgrid_compressible_euler_slow_tendencies(
@@ -1086,6 +1097,14 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
                 dtheta_p = -self.config.damp_v_d_con * dKE_cc / (
                     constants.c_pd * _exner_ref_broadcast
                 )
+                # FV3_3D iter 218: optional per-step cap on |Δθ_p*Π|
+                # (equivalent to capping |ΔT| to dt*delt_max in T-
+                # space).  delt_max=0 disables the cap.
+                if self.config.delt_max > 0.0:
+                    delt_theta = (
+                        dt * self.config.delt_max / _exner_ref_broadcast
+                    )
+                    dtheta_p = jnp.clip(dtheta_p, -delt_theta, delt_theta)
                 state_new = state_new._replace(
                     u=state_new.u.replace(data=u_cc_new + du_cc),
                     v=state_new.v.replace(data=v_cc_new + dv_cc),
@@ -1178,6 +1197,12 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
                 dtheta_p = heat_full / (
                     constants.c_pd * _exner_ref_broadcast
                 )
+                # FV3_3D iter 218: optional per-step cap on |Δθ_p*Π|.
+                if self.config.delt_max > 0.0:
+                    delt_theta = (
+                        dt * self.config.delt_max / _exner_ref_broadcast
+                    )
+                    dtheta_p = jnp.clip(dtheta_p, -delt_theta, delt_theta)
                 state_new = state_new._replace(
                     w=state_new.w.replace(data=w_new_data + dw),
                     theta_prime=state_new.theta_prime.replace(
