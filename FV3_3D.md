@@ -486,116 +486,57 @@ Key iterations:
   energy-conservation formula.  2/2 pass.
 - Iter 230: linearity tests for the 3 NH d_con sites (iter-222
   corner-div, iter-224 cell-centre div_damp, iter-226 A_h).
-  ``NonHydrostaticTendencies`` doesn't expose D-grid wind
-  tendency in its public return, so PE-style bit-for-bit
-  triangulation is not available.  Verifies that the dθ_p/dt
-  contribution scales linearly with the d_con knob via 3-config
-  evaluation (d_con ∈ {0.5, 1.0, 2.0}): assert ``Δ@2.0 - Δ@0.5
-  == 3.0 * (Δ@1.0 - Δ@0.5)`` at rtol=1e-10.  Catches non-linear
-  mistakes (e.g., accidental d_con² coupling).  3/3 pass in
-  20 s.  Also compacts ToC entries iter-218..229 from
-  ~150-line prose blocks to 1-3 line summaries (saves ~110
-  lines for context budget at the user-requested 10-iter
-  compaction boundary).
-- Iter 231: aggregate direction test for the full PE d_con stack.
-  iter-228/229 verified each PE d_con site bit-for-bit; iter-231
-  verifies that the AGGREGATE behaves correctly under
-  integration: 10 PE steps with all 4 PE d_con knobs
-  (damp_v_d_con + corner_div_damp_d_con + div_damp_d_con +
-  ah_d_con) ON simultaneously and damping mechanisms removing
-  KE → ``mean(T)_ON > mean(T)_OFF``.  Strong wind perturbation
-  IC at C8.  Catches sign errors that the per-site formula
-  tests would miss in cross-cancellation, and validates energy
-  conservation (KE→heat) at the aggregate.  1/1 pass in 21 s.
-- Iter 232: NH mirror of iter-231 aggregate direction test.
-  Verifies that the AGGREGATE NH d_con stack (5 knobs:
-  damp_v_d_con, damp_w_d_con, corner_div_damp_d_con,
-  div_damp_d_con, ah_d_con) ON simultaneously heats the column
-  more than OFF.  Strong (u, v, w) perturbation IC at C8 + 10
-  NH steps → ``mean(θ_p)_ON > mean(θ_p)_OFF``.  Catches sign
-  errors in any single NH d_con site that the iter-230
-  linearity tests cannot expose (linearity is preserved
-  regardless of sign).  1/1 pass in 22 s.
-- Iter 233: cube-imprint regression for the full PE d_con
-  stack.  iter-217 verified the iter-19 PE toolkit measurably
-  changes the imprint ratio without strongly amplifying it.
-  iter 233 extends that check: with the full PE d_con stack ON
-  (4 knobs at 1.0 each), the imprint ratio must remain within
-  50 % of the d_con-OFF baseline.  d_con only modifies dT_dt
-  at cell centres (no edge stencil) so the v_d edge structure
-  should be essentially unchanged from d_con's direct effect.
-  Catches d_con-induced edge artifacts that would propagate
-  through PGF feedback.  1/1 pass in 21 s.
-- Iter 234: NH mirror of iter-233 cube-imprint d_con regression.
-  Verifies the full NH d_con stack (5 knobs ON) does not
-  amplify v cube-imprint ratio more than 50% relative to OFF
-  baseline.  Same edge_width=2 metric as iter-179.  Catches
-  d_con-induced edge artifacts on the NH path.  1/1 pass in
-  22 s.
-- Iter 235: extend iter-188 PE and iter-172 NH AST regression
-  guards to cover the iter-218-226 config additions.  Adds
-  4 new field defaults to PE guard
-  (delt_max=0.0, corner_div_damp_d_con=0.0,
-  div_damp_d_con=0.0, ah_d_con=0.0) and 4 to NH guard
-  (delt_max=0.0, corner_div_damp_d_con=0.0,
-  div_damp_d_con=0.0, ah_d_con=0.0).  Also updates iter-208
-  PE damp_v_d_con docstring to reflect that the iter-208-noted
-  "future iteration" corner-div d_con is now ported (iter-221
-  PE / iter-222 NH).  Catches refactors that drop or rename
-  d_con knobs.  8/8 AST tests pass in 82 s.
-- Iter 236: extend the call-site AST guards in iter-188 PE and
-  iter-172 NH to cover the iter-218-226 wirings (gate
-  substring + helper symbol pairs).  PE: 5 new pairs (iter-208
-  damp_v_d_con, iter-218/219 delt_max, iter-221 corner-div
-  d_con, iter-223 div_damp d_con, iter-225 A_h d_con).  NH: 7
-  new pairs (iter-203 damp_w_d_con, iter-209 damp_v_d_con,
-  iter-218/219 delt_max, iter-222/224/226 d_con).  Catches
-  refactors that drop the wiring INSIDE the
-  ``if config.X > 0`` gate even when the field stays
-  declared.  8/8 AST tests pass in 82 s.
-- Iter 237: AD-at-rest gradient w.r.t. u perturbation amplitude
-  with the full toolkit + d_con stack ON.  iter-184/185
-  differentiate w.r.t. theta_p / T (cell-centre scalar
-  field); iter-237 differentiates w.r.t. a SCALAR uniform-u
-  perturbation amplitude — orthogonal direction more sensitive
-  to sqrt-at-zero hazards in wind-dependent helpers
-  (Smagorinsky strain, T_diss wind speed, smag_vort cap).
-  PE pass in 64 s; NH pass in 85 s.  Both ``jax.grad`` finite
-  through 3 PE / 5 NH steps with full toolkit + all 5 d_con
-  knobs at 1.0.
+  d_con ∈ {0.5, 1.0, 2.0}: ``Δ@2.0 - Δ@0.5 == 3.0 * (Δ@1.0 -
+  Δ@0.5)`` at rtol=1e-10.  Catches non-linear coupling errors.
+  Also compacts iter-218..229 ToC entries (~110 lines saved).
+- Iter 231: aggregate direction test for full PE d_con stack
+  (4 knobs ON).  10 PE steps strong-wind IC →
+  ``mean(T)_ON > mean(T)_OFF``.  Catches sign errors.  1/1.
+- Iter 232: NH mirror of iter-231 (5 knobs ON).
+  ``mean(θ_p)_ON > mean(θ_p)_OFF``.  1/1.
+- Iter 233: PE cube-imprint regression — full d_con stack ON
+  must not amplify v_d edge_std/interior_std ratio by >50 %.
+  d_con has no edge stencil so should be near-baseline.  1/1.
+- Iter 234: NH mirror of iter-233 (cube-imprint with all 5
+  d_con knobs ON).  1/1.
+- Iter 235: extend iter-188 PE and iter-172 NH config-field AST
+  regression guards to include iter-218..226 d_con knobs +
+  delt_max.  Catches refactors that drop fields silently.
+  8/8 AST tests.
+- Iter 236: extend call-site AST guards (gate-substring +
+  helper-symbol pairs) for the same iter-218..226 wirings.
+  Catches refactors that drop the body INSIDE
+  ``if config.X > 0``.  8/8 AST tests.
+- Iter 237: AD-at-rest grad w.r.t. uniform-u perturbation
+  amplitude with full toolkit + all 5 d_con knobs at 1.0.
+  Orthogonal direction to iter-184/185's T/θ_p direction;
+  more sensitive to sqrt-at-zero hazards in wind-dependent
+  helpers.  PE 64 s + NH 85 s.
 - Iter 238: audit + document the iter-208/209 d_con KE-formula
-  fidelity gap.  FV3's actual d_con block at sw_core.F90:1980
-  uses a metric-aware ``rsin2 / cosa_s`` formulation that
-  accounts for cubed-sphere C-grid non-orthogonality at panel
-  edges.  Our iter-208/209 ports use the simpler ``u·du +
-  0.5·du²`` form which is equivalent in the orthogonal-grid
-  limit and conserves GLOBAL energy exactly; LOCAL heat
-  distribution differs at cube edges.  Updates iter-208
-  config docstring with this audit note (a future port to the
-  metric-aware form would require adding rsin2 / cosa_s arrays
-  to ``CubedSphereCDGrid``).  Also adds a global-energy-
-  balance regression test that pins down the conservation
-  property: ``Σ c_pd * dT/dt + Σ dKE/dt == 0`` at machine
-  precision for the corner-div d_con block.  Acts as a
-  regression target for any future metric-aware port.  1/1
-  pass in 15 s.
-- Iter 239: extend the iter-218/219 sponge-aware ``delt_max``
-  cap to the AGGREGATE tendency-based d_con stack (PE).
-  Previously the cap only acted on the iter-208 damp_v
-  POST-STEP block; the iter-221 corner-div, iter-223
-  cell-centre div_damp, and iter-225 A_h tendency-based d_con
-  contributions bypassed it.  Refactor: stash all 3 tendency
-  contributions (``_dT_dt_cdd_cc``, ``_dT_dt_dd_cc``,
-  ``_dT_dt_ah_cc``), aggregate after the A_h block, then apply
-  per-level cap (k=0,1 → ``jnp.inf`` uncapped, k≥2 →
-  ``delt_max`` K/s) before adding to ``dT_dt_data``.  Mirrors
-  FV3 ``dyn_core.F90:1764-1779`` which accumulates
-  ``heat_source`` from all sources and caps once.  3-test
-  fixture: off-baseline (delt_max=0 bit-for-bit), interior
-  bounded to ``delt_max``, top-2 sponge uncapped (bit-for-bit
-  with delt_max=0).  PE umbrella iter-185 still passes (57 s).
-  16/16 PE d_con regression tests pass (no behavior change for
-  delt_max=0 baseline).
+  fidelity gap vs FV3's metric-aware ``rsin2/cosa_s`` form
+  (sw_core.F90:1980).  Equivalent in orthogonal-grid limit;
+  GLOBAL energy conserved, LOCAL distribution differs at cube
+  edges.  Adds a global-energy-balance regression test
+  ``Σ c_pd * dT/dt + Σ dKE/dt == 0`` at machine precision.
+  Tracks the metric-aware form for a future iteration.  1/1.
+- Iter 239: extend iter-218/219 sponge-aware ``delt_max`` cap
+  to the AGGREGATE PE tendency-based d_con stack.  Previously
+  cap acted only on damp_v post-step; iter-221/223/225
+  bypassed it.  Refactor: stash all 3 contributions, aggregate
+  after the A_h block, sponge-aware ``jnp.clip``
+  (k=0,1 uncapped, k≥2 → ``delt_max``) before adding to
+  ``dT_dt_data``.  Mirrors FV3 ``heat_source``-then-cap-once
+  pattern.  3-test fixture; PE umbrella still passes; 16/16
+  PE regression preserves baseline.
+- Iter 240: NH mirror of iter-239 + 10-iter compaction.
+  Aggregate the 3 NH tendency-based d_con contributions
+  (iter-222/224/226) and apply the iter-219 NH sponge-aware
+  cap (k=0 → 0.1×delt_max/Π_ref, k=1 → 0.5×, k≥2 → 1×).
+  Tests: off-baseline, sponge-aware bounds at every level.
+  16/16 NH regression preserves baseline (delt_max=0 bit-for-
+  bit equal).  Also compacts ToC entries iter-230..239 from
+  ~115-line block to ~40 lines (saves ~75 lines for context
+  budget).
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
