@@ -1,17 +1,29 @@
-"""FV3_3D iter 65: C96 1-day stability smoke test.
+"""FV3_3D C96+ stability probe (iter 65, expanded through iter 84).
 
-iter 63 added user guidance for C96+ but C96 was empirically
-UNTESTED.  This probe runs HS C96 with the iter-43 default scale
-(LEGOESM_AH_SCALE=10.0 auto-applied at n>=72) for 1 day and reports
-whether the integration completes finite.
+Originally written for iter 65 to validate C96 1-day stability
+under the iter-43 ``LEGOESM_AH_SCALE=10`` default.  Expanded
+through iter 70/82/85 to support the full iter 65-85 sweep across
+``dt``, ``ah_scale``, ``smag_cs``, and ``n``.
 
-Usage::
+Env vars:
+    ITER65_DAYS      run length in days (default 1.0)
+    ITER65_AH_SCALE  multiplier on the v1 helper A_h (default 10.0)
+    ITER65_SMAG_CS   Smagorinsky c_s (default 0.0)
+    ITER65_DT        timestep in seconds (default 200.0)
+    ITER65_N         cube face count (default 96)
 
-    JAX_ENABLE_X64=1 .venv/bin/python scripts/_iter65_c96_smoke.py
+Usage examples::
+
+    # iter-65 1-day smoke at C96 dt=200 default
+    .venv/bin/python scripts/_iter65_c96_smoke.py
+
+    # iter-79 / iter-82 30-day C96 dt=50 long-time validation
+    JAX_ENABLE_X64=1 ITER65_DAYS=30.0 ITER65_DT=50.0 \\
+      .venv/bin/python scripts/_iter65_c96_smoke.py
 
 The probe lifts the matrix's HS-3D setup verbatim (grid, vertical
-coord, init, config) and runs only the time-stepping; expected
-wall time ~30-60 s based on C72 scaling.
+coord, init, config) and runs only the time-stepping with quartile
+diagnostics + final RESULT line.
 """
 from __future__ import annotations
 
