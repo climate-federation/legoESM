@@ -101,6 +101,10 @@ Key iterations:
 - Iter 168: port FV3 corner-divergence damping (sw_core.F90:1641-1822)
   to the non-hydrostatic 3D path (compressible_euler_cdgrid.py),
   closing FV3-fidelity asymmetry between the two 3D paths
+- Iter 169: port FV3 post-step del-n vorticity damping
+  (sw_core.F90:1948-1999, ``damp_v`` / ``nord_v``) to the
+  non-hydrostatic 3D path; second of three documented PE-vs-NH
+  asymmetries closed
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
@@ -484,15 +488,16 @@ STILL OPEN (post-iter-99 stretch goals):
   intermediate ``divg_d`` arrays, vector corner fill at nt > 0)
   — iter 32 found the C72 mode is interior, NOT cube-vertex, so
   this is lower priority than originally thought.
-- iter-168 documented PE-vs-NH FV3-fidelity asymmetries STILL
-  open after the corner-div port:
+- iter-168/169 documented PE-vs-NH FV3-fidelity asymmetries:
+  * ✅ corner-divergence damping (PE iter 16/18) — closed iter 168
+  * ✅ ``damp_v`` post-step vorticity damping (PE iter 12) —
+    closed iter 169
   * cell-centre constant ``div_damp_coeff`` + adaptive
-    ``div_damp_dddmp`` (PE iter 5)
-  * ``damp_v`` post-step vorticity damping (PE iter 12)
+    ``div_damp_dddmp`` (PE iter 5) — STILL open
   * ``use_fv3_a2b_zeta_corner`` 4th-order ζ corner interp
-    (PE iter 14)
+    (PE iter 14) — STILL open
   These are PE-only knobs that the NH path lacks; same FV3
-  fidelity umbrella as iter-168.
+  fidelity umbrella as iter-168/169.
 
 DONE in iter 99:
 - ✅ C96 dt=50 30-day FULL completion (iter-99: max|u|=20.14
@@ -3983,6 +3988,75 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
+
+## Iteration 169 (2026-05-08): port FV3 post-step vorticity damping (damp_v) to NH 3D path
+
+### Goal
+
+Continue closing the FV3-fidelity asymmetry between the two 3D
+atmospheric paths.  iter-168 ported corner-divergence damping; this
+iter ports the FV3 post-step del-n vorticity damping (FV3
+``sw_core.F90:1948-1999``) from PE iter-12 to the NH path.  Same
+mechanism, same SW-backbone helper
+(``fv3_del6_vorticity_damping``), now reachable from the NH config.
+
+### FV3 anchor
+
+- ``sw_core.F90:1948-1999`` — post-step ``u += fy2 / dx`` correction
+  where ``fy2`` is the del-n flux of the relative vorticity.
+- ``sw_core.F90:1582-1597`` — circulation/vorticity construction.
+- Same helper as PE iter-12 and SW iter-1009:
+  ``legoesm.core.fv3_del6_vt_flux.fv3_del6_vorticity_damping``.
+
+### Implementation
+
+- File: ``src/legoesm/atmosphere/dynamics/compressible_euler_cdgrid.py``.
+- 2 new ``CDGridCompressibleEulerConfig`` fields (default off):
+  ``damp_v: float = 0.0``, ``nord_v: int = 2``.
+- Block inserted in ``_step_jitted`` AFTER ``split_explicit_step``
+  and BEFORE ``fix_mass_nonhydrostatic``.  Reuses the existing
+  ``fv3_del6_vorticity_damping`` helper — no new core code.
+- NH-specific adjustment vs PE iter-12: NH stores u/v at CELL
+  CENTRES, so the block additionally lifts (u, v) to D-grid corners
+  via ``_interp_center_to_corner`` and projects increments back via
+  ``_interp_corner_to_center``.  PE stores at corners and skips
+  these two interpolations.  The FV3-normal-D-grid damping core is
+  identical to PE.
+- Default ``damp_v=0.0`` preserves baseline bit-for-bit
+  (Python-static branch).
+
+### Tests added
+
+New file ``tests/test_damp_v_nh.py`` (4 tests):
+
+1. ``test_nh_damp_v_zero_is_baseline`` — Python-static gate guard.
+2. ``test_nh_damp_v_changes_winds`` — perturbation response with
+   ``damp_v=0.030`` (iter-1009 SW production setting).
+3. ``test_nh_damp_v_differentiable`` — ``jax.grad`` flows through
+   5 steps with damping active.
+4. ``test_nh_damp_v_rest_state_smoke`` — 20 steps from rest stay
+   finite, no spurious mass growth.
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest tests/test_damp_v_nh.py
+    => 4 passed in 63.08 s
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/atmosphere/nonhydrostatic/integration/test_fv_cubesphere.py \
+        tests/atmosphere/nonhydrostatic/unit/test_compressible_euler.py \
+        tests/test_corner_div_damp_nh.py
+    => 42 passed (NH baseline + iter-168 unchanged)
+
+### Status
+
+Default-off; opt-in.  Two of the three documented PE-vs-NH
+FV3-fidelity asymmetries (corner-div, damp_v) are now closed.
+Remaining: ``use_fv3_a2b_zeta_corner`` 4th-order ζ corner interp
+(PE iter 14) and the cell-centre constant ``div_damp_coeff`` +
+adaptive ``div_damp_dddmp`` (PE iter 5).
 
 ## Iteration 168 (2026-05-08): port FV3 corner-divergence damping to NH 3D path
 

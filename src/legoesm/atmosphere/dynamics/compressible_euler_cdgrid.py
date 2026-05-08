@@ -124,6 +124,18 @@ class CDGridCompressibleEulerConfig(NamedTuple):
     # substepping, so the default here is 10.0 (typical NH outer dt).
     # The d2_bg floor dominates in HS-like regimes regardless; this
     # constant matters only when the adaptive cap is active.
+    # FV3-faithful post-step del-n vorticity damping (FV3_3D iter 169).
+    # Mirrors the iter-12 wiring in ``CDGridPrimitiveEquationConfig``.
+    # Faithful port of FV3 ``sw_core.F90:1948-1999``: applied ONCE per
+    # full timestep, AFTER the split-explicit acoustic update, as a
+    # discrete wind correction ``u += fy2 / dx``.  Reuses the SW
+    # backbone ``fv3_del6_vorticity_damping`` from
+    # ``legoesm.core.fv3_del6_vt_flux``.
+    damp_v: float = 0.0
+    nord_v: int = 2
+    # Order of the post-step vorticity damping (0=del-2, 1=del-4,
+    # 2=del-6).  FV3 default is 2 (del-6).  Only active when
+    # ``damp_v > 0``.
 
 
 def cdgrid_compressible_euler_slow_tendencies(
@@ -736,6 +748,97 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
         state_new = split_explicit_step(
             state, slow_tendency_fn, acoustic_update_fn, dt, se_config,
         )
+
+        # FV3_3D iter 169: optional post-step del-n vorticity damping
+        # (FV3 sw_core.F90:1948-1999).  Direct port of the iter-12
+        # wiring in ``primitive_eq_cdgrid.py:1361-1415``.  Reuses the
+        # SW backbone ``fv3_del6_vorticity_damping``.  NH-specific
+        # adjustment: NH stores u/v at CELL CENTRES, so we lift to
+        # D-grid corners, run the FV3-normal-D-grid damping, then
+        # project back to cell centres (PE stores at corners and skips
+        # the cell-centre lift/project).  Default ``damp_v=0.0``
+        # preserves baseline bit-for-bit (Python-static branch).
+        if self.config.damp_v > 0.0:
+            from legoesm.core.fv3_del6_vt_flux import (
+                fv3_del6_vorticity_damping,
+            )
+            # Lift cell-centre (u, v) to D-grid corners for the FV3
+            # vorticity-damping step.  Stack & batch the corner interp
+            # for a single halo collective + single 4-point average.
+            u_cc_new = state_new.u.data
+            v_cc_new = state_new.v.data
+            n_face_dv, n_id_dv, n_jd_dv, nlev_dv = u_cc_new.shape
+            _uv_cc_stack = jnp.stack([u_cc_new, v_cc_new], axis=-1)
+            _uv_cc_flat = _uv_cc_stack.reshape(
+                n_face_dv, n_id_dv, n_jd_dv, nlev_dv * 2,
+            )
+            _uv_d_flat = _interp_center_to_corner(_uv_cc_flat, self.cdgrid)
+            _uv_d = _uv_d_flat.reshape(
+                _uv_d_flat.shape[0], _uv_d_flat.shape[1],
+                _uv_d_flat.shape[2], nlev_dv, 2,
+            )
+            u_corner = _uv_d[..., 0]            # (6, n+1, n+1, nlev)
+            v_corner = _uv_d[..., 1]
+
+            # Convert C-D corners (6, n+1, n+1, nlev) to FV3 normal
+            # D-grid layout per level: u at v-interfaces (6, n, n+1,
+            # nlev), v at u-interfaces (6, n+1, n, nlev).
+            u_normal = 0.5 * (u_corner[:, :-1, :, :] + u_corner[:, 1:, :, :])
+            v_normal = 0.5 * (v_corner[:, :, :-1, :] + v_corner[:, :, 1:, :])
+
+            # FV3 damp coefficient (matches PE/SW pattern).
+            da_min_c = jnp.min(self.cdgrid.area_corner)
+            damp_step = (self.config.damp_v * da_min_c) ** (
+                self.config.nord_v + 1
+            )
+
+            # Apply per-level via vmap.
+            def _per_level(args):
+                u_lev, v_lev = args
+                return fv3_del6_vorticity_damping(
+                    u_lev, v_lev, damp=damp_step,
+                    nord=self.config.nord_v, cdgrid=self.cdgrid,
+                )
+
+            u_normal_t = jnp.moveaxis(u_normal, -1, 0)
+            v_normal_t = jnp.moveaxis(v_normal, -1, 0)
+            du_normal_t, dv_normal_t = jax.vmap(_per_level)(
+                (u_normal_t, v_normal_t),
+            )
+            du_normal = jnp.moveaxis(du_normal_t, 0, -1)
+            dv_normal = jnp.moveaxis(dv_normal_t, 0, -1)
+
+            # Project wind increments from FV3 normal D-grid back to
+            # corners (mode='edge' padding then averaging — inverse of
+            # the corner→face averaging used at the start).
+            du_pad = jnp.pad(
+                du_normal, [(0, 0), (1, 1), (0, 0), (0, 0)], mode="edge",
+            )
+            du_corner = 0.5 * (du_pad[:, :-1, :, :] + du_pad[:, 1:, :, :])
+            dv_pad = jnp.pad(
+                dv_normal, [(0, 0), (0, 0), (1, 1), (0, 0)], mode="edge",
+            )
+            dv_corner = 0.5 * (dv_pad[:, :, :-1, :] + dv_pad[:, :, 1:, :])
+
+            # Project corner wind increments back to cell centres for
+            # NH state storage.  Batch (du, dv) into a single
+            # ``_interp_corner_to_center`` call.
+            _duv_corner = jnp.stack([du_corner, dv_corner], axis=-1)
+            _duv_corner_flat = _duv_corner.reshape(
+                _duv_corner.shape[0], _duv_corner.shape[1],
+                _duv_corner.shape[2], nlev_dv * 2,
+            )
+            _duv_cc_flat = _interp_corner_to_center(_duv_corner_flat)
+            _duv_cc = _duv_cc_flat.reshape(
+                n_face_dv, n_id_dv, n_jd_dv, nlev_dv, 2,
+            )
+            du_cc = _duv_cc[..., 0]
+            dv_cc = _duv_cc[..., 1]
+
+            state_new = state_new._replace(
+                u=state_new.u.replace(data=u_cc_new + du_cc),
+                v=state_new.v.replace(data=v_cc_new + dv_cc),
+            )
 
         if self.config.fix_mass:
             # _target_mass is precomputed in step() outside the JIT boundary.
