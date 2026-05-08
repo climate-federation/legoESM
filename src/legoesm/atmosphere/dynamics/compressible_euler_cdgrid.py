@@ -107,6 +107,23 @@ class CDGridCompressibleEulerConfig(NamedTuple):
     anchor_mass_to_initial: bool = False
     acoustic_off_centering: float = 0.0   # Off-centering beta for acoustic damping
                                           # 0.0 = centered, 0.1 = recommended for long runs
+    # FV3-faithful corner-divergence damping (FV3_3D iter 168).
+    # Mirrors the iter-16/iter-18 wiring in
+    # ``CDGridPrimitiveEquationConfig`` so the same FV3 mechanism
+    # (sw_core.F90:1641-1822, ``d_sw5``) is available on the
+    # non-hydrostatic 3D path.  Default 0.0 preserves baseline.
+    corner_div_damp_d2_bg: float = 0.0
+    corner_div_damp_dddmp: float = 0.20
+    corner_div_damp_d4_bg: float = 0.0
+    corner_div_damp_nord: int = 0
+    corner_div_damp_fv3_vector_fill: bool = False
+    corner_div_damp_dt_proxy: float = 10.0
+    # Adaptive-cap dt scale for the FV3 ``min(0.20, dddmp*|delpc|*dt)``
+    # branch.  PE path uses 200.0 (typical HS hybrid dt); the NH path
+    # runs with much smaller outer dt under split-explicit acoustic
+    # substepping, so the default here is 10.0 (typical NH outer dt).
+    # The d2_bg floor dominates in HS-like regimes regardless; this
+    # constant matters only when the adaptive cap is active.
 
 
 def cdgrid_compressible_euler_slow_tendencies(
@@ -269,6 +286,103 @@ def cdgrid_compressible_euler_slow_tendencies(
         )
         du_d_dt = du_d_dt + config.A_h * _uv_d_lap_out[..., 0]
         dv_d_dt = dv_d_dt + config.A_h * _uv_d_lap_out[..., 1]
+
+    # FV3_3D iter 168: optional FV3-faithful B-grid corner-divergence
+    # damping (FV3 d_sw5 sw_core.F90:1641-1822).  Direct port of the
+    # iter-16/iter-18 wiring in
+    # ``primitive_eq_cdgrid.py::fv3_hydrostatic_tendencies`` (lines
+    # 635-771).  Uses the existing iter-15 helper
+    # ``_fv3_divergence_corner.fv3_divergence_corner_3d`` and the
+    # iter-18 ``fv3_corner_laplacian_iteration`` for the higher-order
+    # nord >= 1 path.  Shares the exact FV3 formula:
+    #
+    #   delpc       = corner divergence (B-grid, sin_sg + corner removal)
+    #   damp        = da_min_c * max(d2_bg, min(0.20, dddmp*|delpc|*dt))
+    #   divg_d_iter = (Laplacian)^nord(delpc)            [if nord > 0]
+    #   dd8         = (da_min_c * d4_bg) ** (nord + 1)   [if d4_bg > 0]
+    #   ke_corr     = damp * delpc + dd8 * divg_d_iter
+    #   du -= grad_x(ke_corr) ; dv -= grad_y(ke_corr)
+    #
+    # Default ``corner_div_damp_d2_bg=0.0`` preserves baseline
+    # bit-for-bit (Python-static branch).
+    if config.corner_div_damp_d2_bg > 0.0:
+        from legoesm.core._fv3_divergence_corner import (
+            fv3_divergence_corner_3d,
+        )
+        # Step 1: B-grid corner divergence (Fortran ``delpc``).
+        delpc = fv3_divergence_corner_3d(u_d, v_d, cdgrid)  # (6, n+1, n+1, nlev)
+
+        # Step 2: adaptive damping coefficient at corners — FV3
+        # sw_core.F90:1720 formula:
+        #   damp = da_min_c * max(d2_bg, min(0.20, dddmp * |delpc| * dt))
+        # NH path uses split-explicit acoustic substepping with much
+        # smaller outer dt than the PE path; ``corner_div_damp_dt_proxy``
+        # defaults to 10.0 (vs 200.0 in PE) to keep the adaptive cap
+        # active at the right scale.  d2_bg floor dominates in HS-like
+        # regimes regardless.
+        _da_min_c = jnp.min(cdgrid.area_corner)
+        _delpc_abs = jnp.abs(delpc)
+        _dt_approx = config.corner_div_damp_dt_proxy
+        _damp_corner = _da_min_c * jnp.maximum(
+            config.corner_div_damp_d2_bg,
+            jnp.minimum(
+                0.20, config.corner_div_damp_dddmp * _delpc_abs * _dt_approx,
+            ),
+        )                                                  # (6, n+1, n+1, nlev)
+
+        # Step 3: optional higher-order del-(2*(nord+1)) damping (FV3
+        # ``nord > 0`` path, sw_core.F90:1725-1822).  Same Python-static
+        # gate (``and``) as the PE path so when EITHER d4_bg == 0 OR
+        # nord == 0 the iter-16-equivalent del-2-only path runs.
+        if config.corner_div_damp_d4_bg > 0.0 and config.corner_div_damp_nord > 0:
+            from legoesm.core._fv3_divergence_corner import (
+                fv3_corner_laplacian_iteration,
+            )
+            _vfill = config.corner_div_damp_fv3_vector_fill
+
+            def _lap_per_level(field_3d):
+                return jax.vmap(
+                    lambda lev: fv3_corner_laplacian_iteration(
+                        lev, cdgrid, apply_vector_corner_fill=_vfill,
+                    ),
+                    in_axes=-1, out_axes=-1,
+                )(field_3d)
+
+            _delpc_initial = delpc
+            _divg_d_iter = delpc
+            for _ in range(config.corner_div_damp_nord):
+                _divg_d_iter = _lap_per_level(_divg_d_iter)
+            _dd8 = jnp.asarray(
+                (_da_min_c * config.corner_div_damp_d4_bg)
+                ** (config.corner_div_damp_nord + 1),
+                dtype=delpc.dtype,
+            )
+            _ke_correction = (
+                _damp_corner * _delpc_initial + _dd8 * _divg_d_iter
+            )                                              # (6, n+1, n+1, nlev)
+        else:
+            _ke_correction = _damp_corner * delpc          # (6, n+1, n+1, nlev)
+
+        # Step 4: gradient at D-grid corners.  Halo-pad the
+        # ke-correction so the i±1 / j±1 reads at face-boundary corners
+        # pick up the neighbouring panel.  Centred difference at
+        # corner (i, j); 2*dx denominator uses dxc / dyc averaged.
+        _ke_pad = _pad_halo_4d_module(_ke_correction)      # (6, n+3, n+3, nlev)
+
+        _dke_dx_pad = (_ke_pad[:, 2:, 1:-1, :] - _ke_pad[:, :-2, 1:-1, :])
+        _dke_dy_pad = (_ke_pad[:, 1:-1, 2:, :] - _ke_pad[:, 1:-1, :-2, :])
+
+        _dx_corner_uface = jnp.pad(
+            cdgrid.dxc, [(0, 0), (0, 0), (0, 1)], mode="edge",
+        )                                                  # (6, n+1, n+1)
+        _dy_corner_vface = jnp.pad(
+            cdgrid.dyc, [(0, 0), (0, 1), (0, 0)], mode="edge",
+        )                                                  # (6, n+1, n+1)
+        _two_dx = 2.0 * _dx_corner_uface[..., None]
+        _two_dy = 2.0 * _dy_corner_vface[..., None]
+
+        du_d_dt = du_d_dt - _dke_dx_pad / _two_dx
+        dv_d_dt = dv_d_dt - _dke_dy_pad / _two_dy
 
     # --- 8. Convert back to cell-centre ---
     # Batch (du_d_dt, dv_d_dt) corner-to-center interp.  Same

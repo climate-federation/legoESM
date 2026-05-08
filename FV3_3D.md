@@ -97,6 +97,10 @@ Key iterations:
 - Iter 119-124: minor maintenance + C144 5-day completion (iter
   121) + safety constants 1:2/3:1/3 ratio note (iter 120) + C192
   5-day launch (iter 123)
+- Iter 167: C72 dt=100 30-day FINITE — long_time mode validated
+- Iter 168: port FV3 corner-divergence damping (sw_core.F90:1641-1822)
+  to the non-hydrostatic 3D path (compressible_euler_cdgrid.py),
+  closing FV3-fidelity asymmetry between the two 3D paths
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
@@ -480,6 +484,15 @@ STILL OPEN (post-iter-99 stretch goals):
   intermediate ``divg_d`` arrays, vector corner fill at nt > 0)
   — iter 32 found the C72 mode is interior, NOT cube-vertex, so
   this is lower priority than originally thought.
+- iter-168 documented PE-vs-NH FV3-fidelity asymmetries STILL
+  open after the corner-div port:
+  * cell-centre constant ``div_damp_coeff`` + adaptive
+    ``div_damp_dddmp`` (PE iter 5)
+  * ``damp_v`` post-step vorticity damping (PE iter 12)
+  * ``use_fv3_a2b_zeta_corner`` 4th-order ζ corner interp
+    (PE iter 14)
+  These are PE-only knobs that the NH path lacks; same FV3
+  fidelity umbrella as iter-168.
 
 DONE in iter 99:
 - ✅ C96 dt=50 30-day FULL completion (iter-99: max|u|=20.14
@@ -3970,6 +3983,108 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
+
+## Iteration 168 (2026-05-08): port FV3 corner-divergence damping to NH 3D path
+
+### Goal
+
+Close the FV3-fidelity asymmetry between the two 3D atmospheric
+paths.  The hydrostatic PE path (``primitive_eq_cdgrid.py``) has had
+the FV3 corner-divergence damping mechanism wired since iter 16
+(del-2) and iter 18 (del-(2*(nord+1))).  The non-hydrostatic
+compressible Euler path (``compressible_euler_cdgrid.py``) had no
+corner-staggered FV3-faithful mechanism — only a generic cell-centre
+``hyperdiff_coeff`` and a sponge.  This iter ports the iter-16/18
+mechanism to the NH path so users have the same cube-imprint
+suppression knob on both 3D code paths.
+
+### FV3 anchor
+
+- ``sw_core.F90:1641-1822`` (subroutine ``d_sw5``) — full d_sw5
+  divergence-damping block.
+- ``sw_core.F90:1720`` — adaptive Smagorinsky formula
+  ``damp = da_min_c * max(d2_bg, min(0.20, dddmp*|delpc|*dt))``.
+- ``sw_core.F90:1809-1817`` — higher-order ``dd8`` mixing.
+- ``sw_core.F90:2124`` (subroutine ``divergence_corner``) — B-grid
+  corner divergence with sin_sg + cube-vertex corner removal.
+
+### Implementation
+
+- File: ``src/legoesm/atmosphere/dynamics/compressible_euler_cdgrid.py``.
+- 6 new ``CDGridCompressibleEulerConfig`` fields (default off):
+  ``corner_div_damp_d2_bg``, ``corner_div_damp_dddmp``,
+  ``corner_div_damp_d4_bg``, ``corner_div_damp_nord``,
+  ``corner_div_damp_fv3_vector_fill``, ``corner_div_damp_dt_proxy``.
+- Block inserted between step 7 (D-grid momentum tendencies) and
+  step 8 (corner-to-center back-interp).  Reuses the existing
+  helpers ``legoesm.core._fv3_divergence_corner.
+  fv3_divergence_corner_3d`` and ``fv3_corner_laplacian_iteration``
+  — no new core code.
+- Mirrors the PE path block at ``primitive_eq_cdgrid.py:635-771``
+  with one NH-specific adjustment: ``corner_div_damp_dt_proxy``
+  defaults to ``10.0`` (vs ``200.0`` in PE) because the NH path
+  runs split-explicit acoustic substepping with much smaller outer
+  dt.  The ``d2_bg`` floor dominates in HS-like regimes regardless;
+  the ``dt_proxy`` constant matters only when the adaptive cap is
+  active.
+- Default ``corner_div_damp_d2_bg=0.0`` preserves baseline
+  bit-for-bit (Python-static branch).
+
+### Tests added
+
+New file ``tests/test_corner_div_damp_nh.py`` (5 tests):
+
+1. ``test_nh_corner_div_damp_zero_is_baseline`` — Python-static
+   gate guard.  ``d2_bg=0.0`` and field-unset path produce
+   bit-for-bit identical 5-step output.
+2. ``test_nh_corner_div_damp_changes_winds`` — perturbation
+   response.  ``d2_bg=0.001`` measurably changes wind tendencies.
+3. ``test_nh_corner_div_damp_d4_disabled_bit_for_bit_with_d2`` —
+   higher-order gate guard.  ``d4_bg=0.16, nord=0`` matches the
+   d2-only path bit-for-bit.
+4. ``test_nh_corner_div_damp_differentiable`` — AD safety.
+   ``jax.grad`` flows through 5 steps with damping active.
+5. ``test_nh_corner_div_damp_rest_state_smoke`` — stability.
+   20 steps from rest with ``d2_bg=0.001`` stay finite, no
+   spurious mass growth.
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest tests/test_corner_div_damp_nh.py
+    => 5 passed in 79.86 s
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/atmosphere/nonhydrostatic/integration/test_fv_cubesphere.py
+    => 4 passed (NH baseline unchanged)
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/atmosphere/nonhydrostatic/unit/test_compressible_euler.py
+    => 33 passed (NH unit tests unchanged)
+
+### Status
+
+Default-off; opt-in for users who want corner-imprint suppression
+in the NH path.  Same FV3 fidelity guarantee as the PE path: exact
+``d_sw5`` formula, exact ``divergence_corner`` arithmetic, same
+helper code as iter 15-18 (already verified by
+``tests/test_fv3_divergence_corner.py``).
+
+Documented gap remaining for the NH path: cell-centre constant
+``div_damp_coeff``, ``damp_v`` post-step vorticity damping, and
+``use_fv3_a2b_zeta_corner`` are still PE-only.  These are tracked
+for future iterations under the same FV3 fidelity umbrella.
+
+### Why this iteration was meaningful
+
+The 'Open follow-ups' list was dominated by stretch-goal cube-runs
+that the local hardware can't sustain (C144/C192 multi-day in
+~hours-of-wall budget).  This iter takes a different angle —
+narrow the FV3-fidelity asymmetry between the two 3D paths, which
+is verifiable with unit tests in seconds rather than wall-time
+sweeps.  Users running the NH compressible-Euler 3D path now have
+the same cube-imprint defense as users running the PE 3D path.
 
 ## Iteration 167 (2026-05-07): C72 dt=100 30-day FINITE — long_time mode validated
 
