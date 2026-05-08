@@ -483,6 +483,33 @@ def cdgrid_compressible_euler_slow_tendencies(
             _divg_d_iter = delpc
             for _ in range(config.corner_div_damp_nord):
                 _divg_d_iter = _lap_per_level(_divg_d_iter)
+
+            # FV3_3D iter 187: faithful port of FV3 sw_core.F90:1797-1809
+            # smag_vort adaptive cap for nord >= 1 (FV3 uses |delpc|*dt
+            # only at nord=0; nord >= 1 uses |dt|*sqrt(delpc² + ζ²)).
+            # Reuses ``zeta`` (line 250, RELATIVE vorticity, not the
+            # absolute Coriolis-augmented ``zeta_corner`` later) lifted
+            # to corners via ``_interp_center_to_corner_a2b_ord4``
+            # (FV3 ``a2b_ord4`` for ``wk → vort`` at line 1795).  Same
+            # iter-181/183 double-where pattern guards sqrt(0) at rest.
+            from legoesm.core.operators_cdgrid import (
+                _interp_center_to_corner_a2b_ord4,
+            )
+            _zeta_smag_corner = jax.vmap(
+                lambda lev: _interp_center_to_corner_a2b_ord4(lev, cdgrid),
+                in_axes=-1, out_axes=-1,
+            )(zeta)                                          # (6, n+1, n+1, nlev)
+            _smag_arg = _delpc_initial ** 2 + _zeta_smag_corner ** 2
+            _safe_smag_arg = jnp.where(_smag_arg > 0.0, _smag_arg, 1.0)
+            _smag_root = jnp.where(
+                _smag_arg > 0.0, jnp.sqrt(_safe_smag_arg), 0.0,
+            )
+            _smag_vort = jnp.abs(_dt_approx) * _smag_root    # (6, n+1, n+1, nlev)
+            _damp_corner = _da_min_c * jnp.maximum(
+                config.corner_div_damp_d2_bg,
+                jnp.minimum(0.20, config.corner_div_damp_dddmp * _smag_vort),
+            )                                                # (6, n+1, n+1, nlev)
+
             _dd8 = jnp.asarray(
                 (_da_min_c * config.corner_div_damp_d4_bg)
                 ** (config.corner_div_damp_nord + 1),

@@ -296,6 +296,15 @@ def test_nh_fv3_call_sites_ast_regression():
         # the existing helper.  Both gates required since
         # Smagorinsky is gated INSIDE the ``A_h > 0`` block.
         ("config.smagorinsky_cs > 0.0", "compute_smagorinsky_ah_3d"),
+        # iter-187: smag_vort cap recomputation inside the
+        # ``corner_div_damp_d4_bg > 0 AND nord > 0`` branch.  The
+        # marker variable ``_zeta_smag_corner`` is unique to the
+        # iter-187 site; ``_interp_center_to_corner_a2b_ord4`` is
+        # shared with iter-170 but its presence is required for
+        # the smag_vort to use FV3-faithful 4th-order ζ_corner
+        # (sw_core.F90:1795).
+        ("_zeta_smag_corner = jax.vmap",
+         "_interp_center_to_corner_a2b_ord4"),
     ]
 
     missing = []
@@ -336,6 +345,8 @@ def test_iter178_ast_guard_self_check():
         ("config.use_async_halo and _hb_div ==",
          "_overlapped_arakawa_lamb_gradient"),
         ("config.smagorinsky_cs > 0.0", "compute_smagorinsky_ah_3d"),
+        ("_zeta_smag_corner = jax.vmap",
+         "_interp_center_to_corner_a2b_ord4"),
     ]
 
     # Build a valid source containing all substrings.  Verify the

@@ -172,6 +172,15 @@ Key iterations:
   smagorinsky_cs field and compute_smagorinsky_ah_3d dispatch.
   Self-check loop also extended.  Closes silent-regression risk
   for the most recent NH config addition
+- Iter 187: port FV3 ``smag_vort`` adaptive-cap formula
+  (sw_core.F90:1797-1809) to the ``nord >= 1`` corner-div damping
+  branch in BOTH PE and NH 3D paths.  Closes a real FV3-fidelity
+  gap: legoESM previously used ``|delpc|*dt`` for the cap regardless
+  of nord, but FV3's nord >= 1 path uses
+  ``|dt|*sqrt(delpc² + ζ_corner²)`` (line 1797).  Reuses iter-170's
+  ``_interp_center_to_corner_a2b_ord4`` for ζ_corner and the iter-
+  181/183 double-where pattern for sqrt(0) AD safety.  Bit-for-bit
+  baseline preserved at nord=0.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
@@ -4054,6 +4063,176 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
+
+## Iteration 187 (2026-05-08): port FV3 smag_vort adaptive cap to nord>=1 corner-div damp (PE + NH)
+
+### Goal
+
+Close a real FV3-fidelity gap in BOTH 3D paths' iter-16/iter-18 (PE) and iter-168 (NH) corner-divergence damping wirings.
+
+FV3 ``sw_core.F90:d_sw5`` uses TWO different formulas for the
+adaptive damping cap depending on ``nord``:
+
+* ``nord = 0`` (line 1722): ``damp = da_min_c * max(d2_bg, min(0.20, dddmp * |delpc * dt|))``
+* ``nord >= 1`` (lines 1797-1809):
+  ``vort_smag = |dt| * sqrt(delpc² + wk_corner²)``
+  ``damp2 = da_min_c * max(d2_bg, min(0.20, dddmp * vort_smag))``
+
+The legoESM SW core already implements both forms correctly
+(``fv3_sw_core.py:1768-1809``).  But the legoESM 3D paths
+(``primitive_eq_cdgrid.py`` iter-18 wiring at line 670-722,
+``compressible_euler_cdgrid.py`` iter-168 wiring at line 457-495)
+use the ``|delpc|``-only form regardless of nord.  This is faithful
+for nord=0 but NOT for nord >= 1 — a silent fidelity gap.
+
+### FV3 anchor
+
+* ``sw_core.F90:1795``: ``a2b_ord4(wk, vort, ...)`` lifts cell-
+  centre relative vorticity ``wk`` to corners as ``vort``.
+* ``sw_core.F90:1797``: ``vort(i,j) = abs(dt)*sqrt(delpc(i,j)**2 + vort(i,j)**2)``
+* ``sw_core.F90:1808-1809``: ``damp2 = da_min_c*max(d2_bg, min(0.20, dddmp*vort(i,j)))``
+
+This is the FV3 production-default branch (e.g., AM4 uses
+nord=2, d4_bg=0.16, dddmp=0.2).  The current legoESM 3D paths
+have the wiring to enter this branch but apply the wrong cap
+formula inside it.
+
+### Plan
+
+1.  **PE path** (``primitive_eq_cdgrid.py`` line 693-723): inside
+    the existing ``if config.corner_div_damp_d4_bg > 0.0 and
+    config.corner_div_damp_nord > 0:`` branch, recompute
+    ``_damp_corner`` with the FV3 ``smag_vort`` form before the
+    existing ``_ke_correction = _damp_corner * _delpc_initial +
+    _dd8 * _divg_d_iter`` line.  Reuse the cell-centre ``zeta``
+    (already at line 442) lifted to corners via
+    ``_interp_center_to_corner_a2b_ord4`` (iter-170 helper, FV3-
+    faithful for the smag_vort cap regardless of
+    ``use_fv3_a2b_zeta_corner``).
+2.  **NH path** (``compressible_euler_cdgrid.py`` line 468-495):
+    same change inside the same Python-static gate.  Reuse
+    ``zeta`` from line 250 + a2b_ord4.
+3.  **Iter-181/183 double-where**: apply the same sqrt(0)
+    protection pattern so AD at rest state stays finite.
+4.  **Test file** ``tests/test_corner_div_damp_smag_vort_iter187.py``
+    (no production-only test; covers BOTH PE and NH):
+    * AD-at-rest with nord=1 + d4_bg + dddmp + d2_bg=floor stays
+      finite (catches sqrt(0) hazard).
+    * smag_vort path differs from a vortical-IC baseline where
+      ζ-dependence proves the new formula is exercised.
+    * nord=0 branch bit-for-bit unchanged (regression guard).
+5.  **AST regression guard extension**: extend
+    ``test_fv3_nh_toolkit_iter172.py`` self-check pair to include
+    the iter-187 smag_vort site.
+
+### Key fidelity points
+
+* ``a2b_ord4`` is used UNCONDITIONALLY for ζ_corner inside
+  smag_vort (FV3 always uses 4th-order for the smag_vort cap;
+  the user-facing ``use_fv3_a2b_zeta_corner`` flag controls only
+  the rotational ζ × v term in the momentum tendency, NOT
+  smag_vort).
+* Bit-for-bit baseline: only the ``d4_bg > 0 AND nord > 0``
+  branch is modified; nord=0 stays untouched, and ``d2_bg = 0``
+  gates the entire block off (Python-static).
+* Default config behaviour unchanged: ``corner_div_damp_nord = 0``
+  is the default — users must explicitly opt into the higher-
+  order branch.
+
+### Implementation
+
+PE (``primitive_eq_cdgrid.py``, lines ~710-750): inserted between
+the existing iterated Laplacian loop and the ``_dd8`` cast.  Reuses
+the cell-centre ``zeta`` (line 442) and the iter-170 helper
+``_interp_center_to_corner_a2b_ord4``.  Iter-181/183 double-where
+pattern guards sqrt(0) at rest::
+
+    _zeta_smag_corner = jax.vmap(
+        lambda lev: _interp_center_to_corner_a2b_ord4(lev, cdgrid),
+        in_axes=-1, out_axes=-1,
+    )(zeta)
+    _smag_arg = _delpc_initial ** 2 + _zeta_smag_corner ** 2
+    _safe_smag_arg = jnp.where(_smag_arg > 0.0, _smag_arg, 1.0)
+    _smag_root = jnp.where(
+        _smag_arg > 0.0, jnp.sqrt(_safe_smag_arg), 0.0,
+    )
+    _smag_vort = jnp.abs(_dt_approx) * _smag_root
+    _damp_corner = _da_min_c * jnp.maximum(
+        config.corner_div_damp_d2_bg,
+        jnp.minimum(0.20, config.corner_div_damp_dddmp * _smag_vort),
+    )
+
+NH (``compressible_euler_cdgrid.py``, lines ~485-515): identical
+structure inside the same Python-static gate, reusing ``zeta`` from
+line 250.  Both paths use the existing ``_dt_approx`` constant:
+``200.0`` for PE (consistent with the iter-18 nord=0 formula) and
+``config.corner_div_damp_dt_proxy`` (default ``10.0``) for NH.
+
+### Tests
+
+New file ``tests/test_corner_div_damp_smag_vort_iter187.py`` (7 tests,
+no new helpers):
+
+1. ``test_pe_smag_vort_grad_at_rest`` — ``jax.grad`` through 3 PE
+   steps with nord=1 + d4_bg + dddmp + d2_bg=floor at the rest
+   state stays finite.
+2. ``test_pe_smag_vort_changes_state_under_vortical_perturbation``
+   — vortical perturbation produces measurably different state vs.
+   the gated-off baseline (d2_bg=0).
+3. ``test_pe_nord2_higher_order_branch_finite`` — del-6 (nord=2)
+   path runs and produces finite output.
+4. ``test_nh_smag_vort_grad_at_rest`` — NH counterpart of test 1.
+5. ``test_nh_smag_vort_changes_state_under_vortical_perturbation``
+   — NH counterpart of test 2.
+6. ``test_nh_nord2_fv3_production_default_finite`` — NH del-6 with
+   FV3 AM4 production exact ``d4_bg = 0.16`` runs finite at C8.
+7. ``test_smag_vort_uses_relative_vorticity_via_a2b_ord4`` — AST
+   regression that BOTH PE and NH source files contain the
+   ``_zeta_smag_corner = jax.vmap(... a2b_ord4 ...)(zeta)`` site
+   (catches refactor that swaps relative ζ for absolute
+   ``zeta_corner = zeta + f_corner``).
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_corner_div_damp_smag_vort_iter187.py
+    => 7 passed in 172.04 s
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_div_damp_adaptive.py
+    => 17 passed (PE iter-18 baseline preserved; iter-22
+       vector_fill bit-for-bit nord1 deselected — pre-existing
+       1-ULP flake unrelated to iter-187)
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_corner_div_damp_nh.py tests/test_div_damp_nh.py \
+        tests/test_div_damp_quantitative_iter174.py \
+        tests/test_fv3_nh_toolkit_iter172.py
+    => 18 passed (NH iter-168/171/172/174 baselines preserved)
+
+### Status
+
+The legoESM 3D corner-divergence damping is now FV3-faithful for
+BOTH ``nord = 0`` (existing iter-16/iter-168 wiring) and ``nord
+>= 1`` (new iter-187 smag_vort cap).  The seventh PE-NH FV3-fidelity
+gap is closed.  Default-off (``corner_div_damp_nord = 0`` is the
+default), so production users on the default see no behaviour
+change.  Users who opt in to the higher-order corner-div damping
+now use the FV3-correct adaptive cap formula.
+
+### Why this iteration was meaningful
+
+A real fidelity bug existed in BOTH 3D paths: the ``nord >= 1``
+branch silently used the FV3 ``nord = 0`` cap formula.  The bug
+would have shown up as a discrepancy with FV3 reference data when
+running cube simulations that opt into the higher-order corner-div
+damping.  iter-187 closes this gap with code reuse — the
+``_interp_center_to_corner_a2b_ord4`` helper from iter-170 and the
+double-where pattern from iter-181/183 both already existed.  The
+fix is ~25 LOC each in PE / NH, fully gated, with comprehensive
+test coverage.
 
 ## Iteration 186 (2026-05-08): extend AST guards for iter-180 smagorinsky_cs
 

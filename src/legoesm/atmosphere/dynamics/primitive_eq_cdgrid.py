@@ -711,6 +711,49 @@ def fv3_hydrostatic_tendencies(
             _divg_d_iter = delpc
             for _ in range(config.corner_div_damp_nord):
                 _divg_d_iter = _lap_per_level(_divg_d_iter)
+
+            # FV3_3D iter 187: faithful port of FV3 sw_core.F90:1797-1809
+            # smag_vort adaptive cap for the nord >= 1 branch.  FV3
+            # uses TWO different formulas for ``damp2``:
+            #   nord = 0 (line 1722): damp = ... dddmp * |delpc * dt|
+            #   nord >= 1 (line 1797-1809):
+            #       wk_corner = a2b_ord4(zeta_relative)
+            #       smag_vort = |dt| * sqrt(delpc² + wk_corner²)
+            #       damp2     = ... dddmp * smag_vort
+            # The legoESM 3D path previously used the nord=0 form for
+            # ALL nord — faithful for nord=0 but NOT for nord >= 1.
+            #
+            # Uses RELATIVE vorticity ``zeta`` (line 442) — NOT the
+            # absolute ``zeta_corner = zeta_relative + f_corner``
+            # later in the tendency function.  FV3 ``wk`` is relative
+            # vorticity (sw_core.F90:1789-1793 ``wk = circulation /
+            # area``).  ``a2b_ord4`` lifts it to corners exactly as
+            # FV3 does (sw_core.F90:1795 ``a2b_ord4(wk, vort, ...)``),
+            # independent of the user-facing ``use_fv3_a2b_zeta_corner``
+            # flag (which controls only the rotational term).
+            #
+            # Iter-181/183 double-where pattern: ``sqrt(0+0)`` has an
+            # undefined gradient, breaking ``jax.grad`` at the rest
+            # state.  Mask the branch so the backward pass passes
+            # through the safe value.
+            from legoesm.core.operators_cdgrid import (
+                _interp_center_to_corner_a2b_ord4,
+            )
+            _zeta_smag_corner = jax.vmap(
+                lambda lev: _interp_center_to_corner_a2b_ord4(lev, cdgrid),
+                in_axes=-1, out_axes=-1,
+            )(zeta)                                          # (6, n+1, n+1, nlev)
+            _smag_arg = _delpc_initial ** 2 + _zeta_smag_corner ** 2
+            _safe_smag_arg = jnp.where(_smag_arg > 0.0, _smag_arg, 1.0)
+            _smag_root = jnp.where(
+                _smag_arg > 0.0, jnp.sqrt(_safe_smag_arg), 0.0,
+            )
+            _smag_vort = jnp.abs(_dt_approx) * _smag_root    # (6, n+1, n+1, nlev)
+            _damp_corner = _da_min_c * jnp.maximum(
+                config.corner_div_damp_d2_bg,
+                jnp.minimum(0.20, config.corner_div_damp_dddmp * _smag_vort),
+            )                                                # (6, n+1, n+1, nlev)
+
             # ``dd8`` follows the FV3 formulation exactly.  Cast through
             # delpc's dtype so that f32 / f64 paths stay consistent.
             _dd8 = jnp.asarray(
