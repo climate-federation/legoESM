@@ -628,6 +628,12 @@ Key iterations:
   2x d2_bg → 2x wind change for both PE and NH.  2/2 pass
   in 31 s.  Pins the FV3-faithful linear-in-d2_bg coefficient
   on the iter-16/iter-168 nord=0 corner-div damping paths.
+- Iter 282: ``corner_div_damp_d4_bg`` power scaling test
+  for the iter-18/iter-187 nord >= 1 branch.  FV3 formula
+  at sw_core.F90:1809: ``dd8 = (da_min_c * d4_bg)^(nord+1)``.
+  Verifies 2x d4_bg → 2^(nord+1)x wind change for nord=1
+  (factor=4) and nord=2 (factor=8).  Pins the (nord+1)
+  exponent in the d4_bg formula.  2/2 PE pass in 34 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
