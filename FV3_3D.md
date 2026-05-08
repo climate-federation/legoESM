@@ -600,6 +600,14 @@ Key iterations:
   =1.0 + A_h=1e7 + T_diss=0.05.  All fields finite + bounded
   growth (max|u| < 100 m/s) + physical T bounds (100 < T <
   400 K).  1/1 pass in 18 s.
+- Iter 263: NH counterpart of iter-262 — NH C36 production
+  50-step stability.  iter-251 covered 10 steps; iter-263
+  extends to 50 steps × dt=10 = 500 s integrated.  Full NH
+  iter-184 toolkit + 5-knob d_con stack + delt_max=1.0.  All
+  fields finite + bounded growth (max|u| < 50 m/s) + physical
+  θ_p bounds (|θ_p| < 100 K).  1/1 pass in 22 s.  Closes the
+  PE/NH parity gap on multi-step production stability at C36
+  with the full d_con stack.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
