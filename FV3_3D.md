@@ -237,6 +237,13 @@ Key iterations:
   dormant (``damp_w=0.0`` default).  After iter-194 the umbrella
   exercises ALL FV3-faithful damping mechanisms in NH at AD-at-rest,
   including the iter-193 ``_del6_vt_flux`` chain on ``w``.
+- Iter 195: quantitative correctness test for iter-193 ``damp_w``.
+  Mirrors the iter-174 (div_damp) / iter-175 (damp_v) pattern: with
+  a sinusoidal ``w`` perturbation, ``damp_w > 0`` must REDUCE
+  ``max|w|`` (not amplify it).  Catches a sign error in the iter-193
+  wiring (e.g., ``w_new = w - dw`` instead of ``+= dw``) which the
+  existing iter-193 unit tests would not catch.  Parametrized over
+  ``nord_w`` in {0, 1, 2} (del-2 / del-4 / del-6).
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
