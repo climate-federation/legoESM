@@ -752,6 +752,13 @@ Key iterations:
   production).  Catches accidental rename/removal of fields
   that iter-203/258/275/277/280 runtime tests depend on.
   4/4 pass in 0.3 s.
+- Iter 319: AST guard for d_con knob count.  PE has exactly
+  4 d_con knobs (damp_v, corner_div_damp, div_damp, ah);
+  NH has 5 (PE + damp_w_d_con).  NH-only knob is exactly
+  {damp_w_d_con}; PE knobs are a subset of NH.  Catches
+  accidental addition/removal of a d_con site without
+  updating runtime test matrix (iter-272-280).  4/4 pass
+  in 0.3 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
