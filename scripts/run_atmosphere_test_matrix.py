@@ -507,10 +507,10 @@ def _laplacian_visc_cube(n: int, frac: float = 0.05) -> float:
        Laplacian viscosity damps better than del-4 hyperdiff or
        cube-vertex damping.
 
-       For C72+ users: set ``LEGOESM_AH_SCALE=10.0`` (iter 34)
-       when invoking the matrix, OR construct the
-       ``CDGridPrimitiveEquationConfig`` with ``A_h`` ~ 2.0e+07
-       directly.  See ``FV3_3D.md`` iter 33-35 for the full diagnosis.
+       For C72+ users: the iter-43 ``_auto_ah_scale`` helper
+       auto-applies ``LEGOESM_AH_SCALE=10.0`` at n>=72 (no env var
+       needed).  Explicit override is still possible via the env
+       var.  See ``FV3_3D.md`` iter 33-43 for the full diagnosis.
     """
     import math
     from legoesm import constants
