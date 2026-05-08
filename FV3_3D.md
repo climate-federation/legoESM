@@ -586,6 +586,17 @@ Key iterations:
   d_con=1) → measured dT_dt change.  Catches sign errors and
   index errors in the iter-221 wiring at machine precision.
   1/1 pass in 15 s.
+- Iter 229: bit-for-bit formula tests for the two remaining PE
+  d_con sites (cell-centre div_damp d_con iter-223 and
+  Smagorinsky-A_h d_con iter-225).  Same triangulation pattern
+  as iter-228: 3-config setup extracts du_d_dt contribution from
+  the mechanism, then verifies dT_dt change matches
+  ``-d_con * project_cc(u_d * du_d_dt + v_d * dv_d_dt) / c_pd``
+  at rtol=1e-10.  Catches index/sign errors in iter-223 and
+  iter-225 wiring at machine precision.  2/2 pass in 15 s.
+  All 3 PE d_con sites (corner-div, cell-centre div_damp, A_h)
+  are now bit-for-bit verified against the FV3 energy-
+  conservation formula.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
