@@ -295,6 +295,15 @@ Key iterations:
   iter-174/175/195/198/199 pattern: sinusoidal T pattern + uniform
   wind → T_diss > 0 reduces ``std(T - T_mean)`` more than baseline.
   Parametrized over T_diss_coeff in {0.1, 0.3, 0.5}.
+- Iter 201: fix PE iter-188 AST guard regression from iter-190.
+  REAL BUG: iter-190 changed the iter-187 marker substring from
+  ``"_zeta_smag_corner = jax.vmap"`` to ``"_zeta_smag_corner ="``
+  in the PE source.  iter-190 updated the NH iter-172 AST guard
+  but missed the PE iter-188 guard, leaving the PE
+  ``test_pe_fv3_call_sites_ast_regression`` failing silently
+  between iter-190 and iter-201 (the PE guard was not in any
+  recent test run).  iter-201 updates the PE pair list to match
+  the iter-190 source.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::

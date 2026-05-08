@@ -142,7 +142,10 @@ _PE_GATE_HELPER_PAIRS = [
     ("config.T_diss_coeff > 0", "wind_speed"),
     # iter-187: smag_vort cap recomputation (FV3 sw_core.F90:1797).
     # Marker variable ``_zeta_smag_corner`` is unique to this site.
-    ("_zeta_smag_corner = jax.vmap",
+    # iter-190 changed the assignment from a local jax.vmap to
+    # ``= _zeta_a2b_ord4`` (precomputed at the iter-170 site for
+    # dedup); the marker substring shifted accordingly.
+    ("_zeta_smag_corner =",
      "_interp_center_to_corner_a2b_ord4"),
 ]
 
