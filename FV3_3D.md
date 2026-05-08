@@ -113,6 +113,10 @@ Key iterations:
   divergence damping (sw_core.F90:1720, ``div_damp_coeff`` /
   ``div_damp_dddmp``) to the non-hydrostatic 3D path; fourth and
   last documented PE-vs-NH FV3-fidelity asymmetry closed
+- Iter 172: NH FV3 toolkit composition test (all four iter-
+  168/169/170/171 knobs ON simultaneously) + AST regression
+  guards on config defaults and call-site presence; closes the
+  silent-regression risk for the four new wirings
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
@@ -3995,6 +3999,80 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
+
+## Iteration 172 (2026-05-08): NH FV3 toolkit composition + AST regression guard
+
+### Goal
+
+iter-168/169/170/171 each added one FV3-faithful damping mechanism
+to the NH 3D path with its own focused test file (4-5 tests per
+mechanism).  Two safety gaps remain after this:
+
+* **Composition risk**: each mechanism was tested in isolation; no
+  test verifies they all compose without conflict (e.g., a shared
+  intermediate like ``div_v`` being computed inconsistently across
+  consumers, or one mechanism overwriting another's contribution).
+* **Regression risk**: the four new config fields are silently
+  defaulted to off; a future refactor that drops a wiring or
+  changes a default would silently disable the FV3 mechanism
+  without breaking unit tests.
+
+### Implementation
+
+New file ``tests/test_fv3_nh_toolkit_iter172.py`` (4 tests, no
+production code change):
+
+1. ``test_nh_full_fv3_toolkit_composes`` — turns ON ALL FOUR
+   iter-168/169/170/171 knobs at once on a perturbed NH state,
+   runs 20 steps × 10 s, asserts winds stay finite and bounded
+   (max\|u\|, max\|v\| < 100 m/s).
+2. ``test_nh_full_fv3_toolkit_differentiable`` — ``jax.grad``
+   flows through 5 steps with all four knobs ON.
+3. ``test_nh_fv3_config_fields_ast_regression`` — walks the
+   AST of ``CDGridCompressibleEulerConfig`` and asserts the
+   12 expected field/default pairs (corner_div_damp_d2_bg=0.0,
+   corner_div_damp_dddmp=0.20, corner_div_damp_d4_bg=0.0,
+   corner_div_damp_nord=0, corner_div_damp_fv3_vector_fill=False,
+   corner_div_damp_dt_proxy=10.0, damp_v=0.0, nord_v=2,
+   use_fv3_a2b_zeta_corner=False, div_damp_coeff=0.0,
+   div_damp_dddmp=0.0).  Catches "field renamed", "default
+   silently changed", and "field dropped" regressions.
+4. ``test_nh_fv3_call_sites_ast_regression`` — searches the
+   source text for the four Python-static gate expressions AND
+   the helper names that should appear inside each gated block.
+   Catches "block dropped during refactor but config field
+   retained" — a particularly silent failure mode where the user
+   sets the config flag and gets no warning despite the FV3
+   mechanism being inert.
+
+### Why these guards matter
+
+The PE path's iter-68 added an analogous AST guard for the
+``LEGOESM_HS_CUBE_DT_CFL`` env-var dataflow ("a regression that
+reverts ``dt = _resolve_dt_cube(...)`` to ``dt = 200.0`` would
+silently disable the env var without breaking unit tests").  The
+iter-172 guard generalises that pattern to the four NH FV3 wirings.
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_fv3_nh_toolkit_iter172.py
+    => 4 passed in 81.72 s
+
+    Full NH suite (baseline + iter-168/169/170/171/172):
+    => 59 passed in 420.55 s
+
+### Status
+
+All four iter-168 audit asymmetries are closed (iter 171), the
+mechanisms compose without conflict (iter 172.1), they remain
+AD-safe under composition (iter 172.2), and the wiring is
+guarded against silent regression (iter 172.3-4).  Net result:
+the NH 3D path now has the same FV3-faithful damping toolkit as
+the PE 3D path, with the same level of AST-level fidelity
+guarantees.
 
 ## Iteration 171 (2026-05-08): port FV3 cell-centre divergence damping to NH 3D path
 
