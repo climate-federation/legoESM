@@ -256,6 +256,76 @@ class TestTripoleRestState:
             f"v drift: {float(jnp.max(jnp.abs(v))):.2e}"
         )
 
+    def test_wind_forced_stable(self, tripole_grid):
+        """Model should remain stable and finite under wind forcing."""
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+        from legoesm.ocean.vertical import create_ocean_z_star
+        from legoesm.ocean.state import LatLonCGridOceanConfig
+        from legoesm.core.field import Field
+
+        z_coord = create_ocean_z_star(n_levels=5, H_max=4000.0)
+        config = LatLonCGridOceanConfig(
+            barotropic_solver="implicit_cn",
+            A_h=1000.0, K_h=500.0, A_v=1e-3, K_v=1e-5,
+            n_barotropic_substeps=10,
+        )
+        model = LatLonCGridOceanModel(tripole_grid, z_coord, config)
+        state = rest_state_latlon_cgrid_ocean(
+            tripole_grid, z_coord,
+            T_surface=20.0, T_deep=2.0, S_uniform=35.0, H_max=4000.0,
+        )
+        # Apply a zonal velocity kick
+        u_data = state.u.data
+        cos_lat = tripole_grid.cos_lat
+        u_kicked = u_data.at[:, :, 0].set(0.01 * cos_lat[:, jnp.newaxis])
+        state = state._replace(u=Field(u_kicked))
+
+        for _ in range(5):
+            state = model.step(state, dt=600.0)
+
+        eta = state.eta.data
+        u = state.u.data
+        v = state.v.data
+        assert jnp.all(jnp.isfinite(eta)), "eta has non-finite values"
+        assert jnp.all(jnp.isfinite(u)), "u has non-finite values"
+        assert jnp.all(jnp.isfinite(v)), "v has non-finite values"
+
+    def test_differentiability(self, tripole_grid):
+        """jax.grad through a tripolar timestep should produce finite grads."""
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+        from legoesm.ocean.vertical import create_ocean_z_star
+        from legoesm.ocean.state import LatLonCGridOceanConfig
+
+        z_coord = create_ocean_z_star(n_levels=5, H_max=4000.0)
+        config = LatLonCGridOceanConfig(
+            barotropic_solver="implicit_cn",
+            A_h=1000.0, K_h=500.0, A_v=1e-3, K_v=1e-5,
+            n_barotropic_substeps=10,
+        )
+        model = LatLonCGridOceanModel(tripole_grid, z_coord, config)
+        state = rest_state_latlon_cgrid_ocean(
+            tripole_grid, z_coord,
+            T_surface=20.0, T_deep=2.0, S_uniform=35.0, H_max=4000.0,
+        )
+
+        def loss_fn(T_init):
+            s = state._replace(T=T_init)
+            s_new = model.step(s, dt=600.0)
+            T_out = s_new.T.data if hasattr(s_new.T, "data") else s_new.T
+            return jnp.sum(T_out ** 2)
+
+        grad_T = jax.grad(loss_fn)(state.T)
+        grad_arr = grad_T.data if hasattr(grad_T, "data") else grad_T
+        assert jnp.all(jnp.isfinite(grad_arr)), (
+            "Gradient through tripolar timestep has non-finite values"
+        )
+
 
 # =========================================================================
 # Phase 3: Vector rotation in bipolar cap
