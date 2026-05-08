@@ -88,14 +88,16 @@ For future maintainers, here are the load-bearing insights from
     response to instability is sometimes SMALLER ``dt``, not
     larger ``A_h``.
 
-3.  **Smaller ``dt`` DELAYS the eigenmode in proportion to 1/dt.**
-    iter-69 (``dt=150``: NaN day 15), iter-79 (``dt=100``: NaN
-    day 22.5).  Note ``15 × 1.5 = 22.5`` — exactly proportional.
-    Linear extrapolation: ``dt=50`` should NaN at day 45
-    (survives 30 d), ``dt=25`` at day 90.  This proportionality
-    suggests the eigenmode is an artifact of discretization error
-    that the dycore excites; smaller dt = less excitation =
-    delayed onset.  iter-85 will validate the dt=50 prediction.
+3.  **Smaller ``dt`` DELAYS the eigenmode in proportion to 1/dt
+    (iter-95 EMPIRICALLY CONFIRMED).**  iter-69 (``dt=150``: NaN
+    day 15), iter-79 (``dt=100``: NaN day 22.5).  Note
+    ``15 × 1.5 = 22.5`` — exactly proportional.  iter-85
+    extrapolated: ``dt=50`` should NaN at ~day 45 (survives 30 d).
+    iter-95 EMPIRICALLY VALIDATED this: C96 dt=50 ran past day
+    22.5 (max|u|=14.04 m/s at step 38880), proving the eigenmode
+    is an artifact of discretization error that the dycore
+    artificially excites; smaller dt = less excitation =
+    proportionally delayed onset.
 
 4.  **Smagorinsky is a complement, not a replacement, for static
     A_h.**  iter-60 found C72 ``smag_cs=0.4`` alone insufficient.
