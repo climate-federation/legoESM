@@ -3746,6 +3746,59 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
 
+## Iteration 67 (2026-05-07): self-review — factor duplicate, validate inputs
+
+### Goal
+
+Self-review iter 65-66 (codex shell access failed; manual review
+instead).  Identified three issues: (1) 12-line env-var-parse
+block duplicated between HS and baroclinic call sites
+(CLAUDE.md forbids copy-paste with only naming changes);
+(2) ``_cfl_safe_dt_cube(0)`` would divide by zero; (3) print
+messages inconsistent between the two paths.
+
+### Implementation
+
+1.  Added ``_resolve_dt_cube(n, label)`` helper that consolidates
+    the env-var parsing, CFL helper invocation, and one-line
+    notice print from iter-66.  The ``label`` arg distinguishes
+    HS vs baroclinic in the printed notice without duplicating
+    the parsing logic.
+
+2.  Added input validation to ``_cfl_safe_dt_cube``:
+    - ``n <= 0`` → ``ValueError`` (was silent ``ZeroDivisionError``
+      at ``n=0``).
+    - ``c_max <= 0`` → ``ValueError`` (was silent negative dt).
+
+3.  Replaced both 12-line duplicated blocks (HS line 2683 and
+    baroclinic line 3197) with a single ``_resolve_dt_cube(n,
+    label="...")`` call.  Net delta: -22 lines of duplication.
+
+### Tests
+
+Added 3 tests:
+- ``test_cfl_safe_dt_cube_invalid_inputs_raise``: bad ``n`` and
+  bad ``c_max`` both raise ``ValueError``.
+- ``test_resolve_dt_cube_off_returns_200``: default-off behavior
+  preserves ``dt=200.0`` regardless of n.
+- ``test_resolve_dt_cube_on_uses_cfl_helper``: env-var truthy
+  values activate the CFL helper, and the print notice fires
+  only when dt < 200.
+
+All 21 tests in TestHeldSuarezDissipationImbalance pass.
+
+### Validation
+
+Re-ran ``scripts/_iter65_c96_smoke.py`` with ITER65_DT=150.5: bit-
+identical result to iter-66 (max|u|=0.81 m/s).  Refactor preserved
+behavior.
+
+### Status
+
+iter-65/66 work consolidated and hardened.  No external codex
+review obtained (shell access failed); manual self-review
+sufficed for the catch-list.  253 tests now pass (was 250).
+
 ## Iteration 66 (2026-05-07): opt-in CFL-aware dt for cubed-sphere HS
 
 ### Goal

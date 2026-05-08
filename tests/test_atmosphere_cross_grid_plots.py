@@ -2146,6 +2146,61 @@ class TestHeldSuarezDissipationImbalance:
             f">= dt(C96)={dt_c96:.1f}"
         )
 
+    def test_cfl_safe_dt_cube_invalid_inputs_raise(self):
+        """iter 67: ``_cfl_safe_dt_cube`` rejects bad inputs.
+
+        ``n=0`` would divide-by-zero in ``pi*R/(2*n)``; ``n<0``
+        gives negative dx; ``c_max <= 0`` gives negative or
+        infinite dt.  All of these must raise ``ValueError``,
+        not silently return garbage.  iter-67 self-review caught
+        this as a missing input-validation gap.
+        """
+        import pytest
+        with pytest.raises(ValueError, match="positive cube face count"):
+            M._cfl_safe_dt_cube(0)
+        with pytest.raises(ValueError, match="positive cube face count"):
+            M._cfl_safe_dt_cube(-72)
+        with pytest.raises(ValueError, match="c_max must be positive"):
+            M._cfl_safe_dt_cube(72, c_max=0.0)
+        with pytest.raises(ValueError, match="c_max must be positive"):
+            M._cfl_safe_dt_cube(72, c_max=-320.0)
+
+    def test_resolve_dt_cube_off_returns_200(self, monkeypatch):
+        """iter 67: when ``LEGOESM_HS_CUBE_DT_CFL`` is unset or 0,
+        ``_resolve_dt_cube`` returns the iter-pre-66 default 200.0
+        regardless of ``n``.  Pin the default-off behavior.
+        """
+        monkeypatch.delenv("LEGOESM_HS_CUBE_DT_CFL", raising=False)
+        for n in (36, 48, 72, 96, 144):
+            assert M._resolve_dt_cube(n) == 200.0
+        # Explicit 0 / false / off — all should be off.
+        for val in ("0", "false", "no", "off", ""):
+            monkeypatch.setenv("LEGOESM_HS_CUBE_DT_CFL", val)
+            assert M._resolve_dt_cube(96) == 200.0
+
+    def test_resolve_dt_cube_on_uses_cfl_helper(self, monkeypatch, capsys):
+        """iter 67: when env var truthy, returns the CFL-aware dt
+        and prints a one-line notice when the dt is reduced.
+        """
+        for val in ("1", "true", "yes", "on", "TRUE", "Yes"):
+            monkeypatch.setenv("LEGOESM_HS_CUBE_DT_CFL", val)
+            # C72 still preserved at 200 (no notice).
+            capsys.readouterr()  # clear
+            dt_72 = M._resolve_dt_cube(72)
+            captured = capsys.readouterr().out
+            assert dt_72 == 200.0
+            assert captured == "", (
+                f"At C72 the dt is unchanged; no notice should print, "
+                f"but got {captured!r}"
+            )
+            # C96 reduced — must print.
+            dt_96 = M._resolve_dt_cube(96, label="HS")
+            captured = capsys.readouterr().out
+            assert 145.0 <= dt_96 <= 155.0
+            assert "[FV3_3D iter 66" in captured
+            assert "C96" in captured
+            assert "HS" in captured
+
     def test_cfl_safe_dt_cube_explicit_overrides(self):
         """iter 66: explicit ``base_dt``, ``c_max``, ``safety`` args
         override the defaults — pin the API surface so future

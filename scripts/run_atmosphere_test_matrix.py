@@ -558,12 +558,68 @@ def _cfl_safe_dt_cube(
     paths only call this helper when ``LEGOESM_HS_CUBE_DT_CFL=1``
     is set (iter-66 opt-in to preserve all pre-iter-66 reference
     timings; default behavior is unchanged).
+
+    Raises
+    ------
+    ValueError
+        If ``n <= 0`` (gnomonic projection requires positive cube
+        face count) or ``c_max <= 0`` (would give negative or
+        infinite dt).  iter-67 self-review.
     """
     import math
     from legoesm import constants
+    if n <= 0:
+        raise ValueError(
+            f"_cfl_safe_dt_cube: n must be a positive cube face count, "
+            f"got n={n}"
+        )
+    if c_max <= 0:
+        raise ValueError(
+            f"_cfl_safe_dt_cube: c_max must be positive (representative "
+            f"wave speed in m/s), got c_max={c_max}"
+        )
     dx_face = math.pi * constants.R_earth / (2.0 * n)
     dt_cfl = safety * dx_face / c_max
     return min(base_dt, dt_cfl)
+
+
+def _resolve_dt_cube(
+    n: int,
+    *,
+    label: str = "cube path",
+) -> float:
+    """iter 67: factored env-var parser for ``LEGOESM_HS_CUBE_DT_CFL``.
+
+    Returns the ``dt`` to use for the cubed-sphere HS / baroclinic
+    paths.  When the env var is set to a truthy value (``1``,
+    ``true``, ``yes``, ``on``, case-insensitive), returns
+    ``_cfl_safe_dt_cube(n)`` and prints a one-line notice.
+    Otherwise returns the iter-pre-66 default ``dt = 200.0``.
+
+    The ``label`` argument is used in the printed notice to
+    distinguish HS vs baroclinic vs other call sites; the
+    underlying calibration is identical.
+
+    iter-67 factor-out: previously this 10-line env-var pattern
+    was duplicated at both HS (line 2683) and baroclinic (line
+    3197) call sites.  CLAUDE.md forbids copy-paste with only
+    naming changes; this helper consolidates them.
+    """
+    cube_dt_cfl_active = (
+        os.environ.get("LEGOESM_HS_CUBE_DT_CFL", "0").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
+    if not cube_dt_cfl_active:
+        return 200.0
+    dt = _cfl_safe_dt_cube(n)
+    if dt < 200.0:
+        print(
+            f"[FV3_3D iter 66 CFL-aware dt] At C{n} ({label}) reducing dt "
+            f"to {dt:.1f} s (was 200.0).  iter-65 found C96 NaNs "
+            f"at dt=200 regardless of A_h.",
+            flush=True,
+        )
+    return dt
 
 
 def _auto_ah_scale(
@@ -2680,26 +2736,11 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         if _ah_msg is not None:
             print(_ah_msg, flush=True)
         ah = ah * _ah_scale
-        # FV3_3D iter 66: opt-in CFL-aware dt for the cubed-sphere
-        # HS path (iter 65 found the matrix's hardcoded dt=200 NaNs
-        # at C96 regardless of LEGOESM_AH_SCALE; the limiting lever
-        # is dt, not A_h).  Default off — preserves all pre-iter-66
-        # reference numbers (iter-33 C72, iter-19 C36/C48, etc.).
-        # When LEGOESM_HS_CUBE_DT_CFL=1, dt is capped at the
-        # CFL-safe value; the helper is calibrated to preserve dt=200
-        # at C72 and reduce to dt=150 at C96.
-        _hs_cube_dt_cfl = (
-            os.environ.get("LEGOESM_HS_CUBE_DT_CFL", "0").strip().lower()
-            in ("1", "true", "yes", "on")
-        )
-        dt = _cfl_safe_dt_cube(n) if _hs_cube_dt_cfl else 200.0
-        if _hs_cube_dt_cfl and dt < 200.0:
-            print(
-                f"[FV3_3D iter 66 CFL-aware dt] At C{n} reducing dt "
-                f"to {dt:.1f} s (was 200.0).  iter-65 found C96 NaNs "
-                f"at dt=200 regardless of A_h.",
-                flush=True,
-            )
+        # FV3_3D iter 66 / 67: opt-in CFL-aware dt for cube paths
+        # via LEGOESM_HS_CUBE_DT_CFL (default off; preserves
+        # pre-iter-66 reference numbers).  See _resolve_dt_cube and
+        # _cfl_safe_dt_cube for the full calibration story.
+        dt = _resolve_dt_cube(n, label="HS")
         # Iter-15 NOTE on the cubed-sphere upper-atmosphere sponge:
         # The default ``sponge_tau_sec = 3600`` (1 hour) is FAR more
         # aggressive than the FV3 Fortran reference
@@ -3195,20 +3236,8 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         if _ah_msg is not None:
             print(_ah_msg, flush=True)
         ah = ah * _ah_scale
-        # FV3_3D iter 66: opt-in CFL-aware dt (mirrors the HS path
-        # at line 2681).  Default off — preserves all pre-iter-66
-        # baroclinic reference numbers.
-        _hs_cube_dt_cfl = (
-            os.environ.get("LEGOESM_HS_CUBE_DT_CFL", "0").strip().lower()
-            in ("1", "true", "yes", "on")
-        )
-        dt = _cfl_safe_dt_cube(n) if _hs_cube_dt_cfl else 200.0
-        if _hs_cube_dt_cfl and dt < 200.0:
-            print(
-                f"[FV3_3D iter 66 CFL-aware dt] At C{n} reducing dt "
-                f"to {dt:.1f} s (was 200.0).",
-                flush=True,
-            )
+        # FV3_3D iter 66 / 67: opt-in CFL-aware dt (factored helper).
+        dt = _resolve_dt_cube(n, label="baroclinic")
         config = PrimitiveEquationConfig(
             hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
             div_damp_coeff=dd, A_h=ah,
