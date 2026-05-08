@@ -642,6 +642,15 @@ Key iterations:
   BC.  ALL 6 d_con sites (4 PE via iter-243+256 + 5 NH via
   iter-230+257+258) now have global-energy-conservation
   regression coverage at machine precision.  1/1 pass in 23 s.
+- Iter 259: nord=2 (FV3 production default for damp_v) multi-
+  step stability test.  iter-187's nord=2 finite tests cover
+  single-step; iter-184/185 umbrellas use nord_v=2 for damp_v
+  but nord=1 for corner-div damp.  iter-259 runs PE+NH 20
+  steps with corner_div_damp_nord=2 + d4_bg=1e-4 + nord_v=2
+  + nord_w=2 + full d_con stack.  Both paths complete with
+  bounded growth (max|u| < 50 m/s).  2/2 pass in 33 s.
+  Catches slow-growth instability that single-step nord=2
+  finite tests would miss.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
