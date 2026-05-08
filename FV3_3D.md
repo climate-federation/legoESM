@@ -38,16 +38,21 @@ Key iterations:
 - Iter 71-72: long_time / auto modes for ``LEGOESM_HS_CUBE_DT_CFL``
 - Iter 73-77: docs, tests, Quick Reference updates
 
-**TL;DR** (iter 78 summary): For HS at any cube resolution, set::
+**TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
+resolution, set::
 
     LEGOESM_HS_CUBE_DT_CFL=auto
     LEGOESM_AH_SCALE   (auto-applies per resolution; explicit override OK)
 
-This auto-picks ``dt=200`` at C36-C72 (preserves iter-33 reference)
-and ``dt=100`` at C96+ (iter-70 long-time stable).  Combined with
-the iter-43 ``LEGOESM_AH_SCALE`` auto-apply (1.0 / 2.0 / 10.0 by
-resolution bucket), this is a single env var pair that solves the
-cube HS path across resolutions.
+This auto-picks (iter 81): ``dt=200`` at C36-C72 (preserves iter-33
+reference), ``dt=50`` at C96+ (iter-79 found ``dt=100``
+insufficient at 30 d so iter-81 promoted auto-mode to
+very_long_time).  Combined with the iter-43 ``LEGOESM_AH_SCALE``
+auto-apply (1.0 / 2.0 / 10.0 by resolution bucket), this is a
+single env var pair recommended for cube HS.
+
+C96 30-day empirical validation of the iter-81 dt=50 setting is
+**still pending** as of iter 82.
 
 The full iteration log follows.
 
