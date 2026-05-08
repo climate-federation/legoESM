@@ -120,6 +120,10 @@ Key iterations:
 - Iter 173: NH async-halo overlap for the iter-171 div-damp
   gradient call (mirror of PE ``use_async_halo`` field); MPI
   optimization, single-device fall-through bit-for-bit baseline
+- Iter 174: quantitative damping correctness test for NH —
+  divergent IC + assert mean(|div_v|) REDUCES vs no damping.
+  Catches sign-error in iter-168/171 wirings (which prior
+  "changes-the-state" tests would miss)
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
@@ -4002,6 +4006,70 @@ auto-fixing C48 (scale=2) and C72+ (scale=10) where users opt in.
 
 iter 49+: Smagorinsky-style adaptive A_h, longer integration
 verification, OR substantive nord >= 2 fidelity restructure.
+
+## Iteration 174 (2026-05-08): quantitative damping correctness for NH
+
+### Goal
+
+iter-168/171 each have unit tests verifying the damping wiring
+CHANGES the state on a perturbed input ("changes-the-state"
+guards), but neither verifies the change is in the *correct*
+direction.  A sign-flipped damping (e.g., ``du -= grad`` where it
+should be ``+= grad``) would still pass "changes-the-state" but
+would AMPLIFY divergence rather than damp it — the worst-case
+silent failure for a damping mechanism.
+
+This iter adds a quantitative correctness test that initialises
+the NH state with a sinusoidal divergent perturbation and verifies
+each damping mechanism REDUCES post-step ``mean(|div_v|)`` vs the
+no-damping baseline.
+
+### Implementation
+
+New file ``tests/test_div_damp_quantitative_iter174.py`` (3 tests,
+no production code change):
+
+1. ``test_corner_div_damp_reduces_divergence`` — corner-div
+   damping (iter 168) reduces ``mean(|div_v|)`` by at least 1 %
+   vs no damping.  1 % floor catches a sign error while staying
+   insensitive to coefficient calibration.
+2. ``test_cell_centre_div_damp_reduces_divergence`` — cell-centre
+   ``div_damp_coeff=1e10`` (iter 171, constant path) reduces
+   ``mean(|div_v|)`` by at least 1 %.
+3. ``test_combined_div_damp_at_least_as_strong_as_either`` — both
+   mechanisms ON should produce reduction at least as strong as
+   either alone (allowing 5 % cushion for nonlinear interaction).
+   Catches a sign mismatch where one mechanism partially undoes
+   the other's damping.
+
+### Design notes
+
+* Initial condition is a sinusoidal monopole in u
+  ``(U0 * sin(2π i/n) * cos(2π j/n))`` rather than random noise.
+  Random noise has high-frequency content that doesn't engage the
+  d2_bg div_damp floor; the sinusoidal pattern produces a
+  ``div_v`` with peak ~3e-5 s^-1 at C8, well above noise.
+* ``div_v`` is recomputed independently of the model's internal
+  cache (lift cell-centre to corners, project to C-grid,
+  ``cgrid_divergence``) so the test is robust to internal API
+  changes.
+* All other damping (hyperdiff, sponge) is disabled so the test
+  measures ONLY the FV3-faithful div damp's contribution.
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_div_damp_quantitative_iter174.py
+    => 3 passed in 39.25 s
+
+### Status
+
+The four NH FV3-faithful damping mechanisms now have quantitative
+correctness coverage.  A sign error in any of corner-div, cell-
+centre constant, or combined paths would now be caught — not just
+the "doesn't crash" coverage from iter 168/171/172.
 
 ## Iteration 173 (2026-05-08): NH async-halo overlap for div damp gradient
 
