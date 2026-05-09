@@ -303,13 +303,24 @@ def main():
         H_bathy_clamped[south_cap_mask] = 0.0
         land_mask_raw[south_cap_mask] = 0.0
 
-    # Mask out cells shallower than the first vertical level (near-zero
-    # layer thickness causes division blow-up).
-    H_min = float(z_coord.dz_ref[0]) * 1.1
-    too_shallow = (H_bathy_clamped > 0) & (H_bathy_clamped < H_min)
+    # Mask out shelf cells.  z-star first-layer thickness scales as
+    # ``dz_ref[0] * H_bathy / H_max``; on a shallow shelf cell (e.g.
+    # H_bathy = 27 m, H_max = 5500 m) this gives dz_0 = 0.13 m, which
+    # makes surface wind forcing du/dt = tau / (rho * dz_0) ~ 200x too
+    # large and the model blows up.  The proper fix is a hybrid z/z-star
+    # coordinate or partial cells; for now we mask shelf cells deeper
+    # than a threshold so dz_0 stays >= ~5 m.
+    H_shelf_min = max(
+        float(z_coord.dz_ref[0]) * 1.1,         # at least the 1st layer
+        config.H_max * 5.0 / float(z_coord.dz_ref[0]) * 0.05,  # dz_0 >= 5 m guard
+    )
+    # Practical floor: 500 m bathymetry.  Shelf-process resolution will
+    # be revisited when we add partial cells / hybrid vertical coordinate.
+    H_shelf_min = 500.0
+    too_shallow = (H_bathy_clamped > 0) & (H_bathy_clamped < H_shelf_min)
     n_masked = int(np.sum(too_shallow))
     if n_masked > 0:
-        print(f"  Masking {n_masked} shallow cells (H < {H_min:.0f} m) as land")
+        print(f"  Masking {n_masked} shelf cells (H < {H_shelf_min:.0f} m) as land")
         H_bathy_clamped[too_shallow] = 0.0
         land_mask_raw[too_shallow] = 0.0
     state = state._replace(

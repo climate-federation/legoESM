@@ -209,13 +209,39 @@ def _make_diag_preconditioner(
         - (H_u(j,i+1) + H_u(j,i)) · dy_u / (dx_u(j) · A_cell(j,i))
         - (H_v(j+1,i)·dx_v(j+1) + H_v(j,i)·dx_v(j)) / (dy_v · A_cell(j,i))
     """
+    area = grid.area                                     # (n_lat, n_lon)
+    inv_area = 1.0 / area
+
+    H_u_E = H_u[:, 1:]   # east face of cell j: u-face (j, i+1)
+    H_u_W = H_u[:, :-1]  # west face of cell j: u-face (j, i)
+    H_v_N = H_v[1:, :]   # north face of cell j: v-face (j+1, i)
+    H_v_S = H_v[:-1, :]  # south face of cell j: v-face (j, i)
+
     if hasattr(grid, "dx_u") and grid.dlat == 0.0:
-        # Tripolar: use pre-computed 2D metrics
-        dx_u = grid.dx_u[:, 0]                           # (n_lat,)
-        dy_v = grid.dy_v[0, 0]                           # scalar
-        dy_u = grid.dy_u[0, 0]                           # scalar
-        dx_v = grid.dx_v[:, 0]                           # (n_lat+1,)
+        # Tripolar: use full per-face 2D metrics so the preconditioner
+        # captures the longitude variation of cell sizes in the bipolar
+        # cap.  Taking only column 0 (as the previous version did) gives
+        # an unrepresentative preconditioner that makes PCG diverge.
+        dy_u_E = grid.dy_u[:, 1:]    # (n_lat, n_lon)
+        dy_u_W = grid.dy_u[:, :-1]
+        dx_u_E = grid.dx_u[:, 1:]
+        dx_u_W = grid.dx_u[:, :-1]
+        dx_v_N = grid.dx_v[1:, :]    # (n_lat, n_lon)
+        dx_v_S = grid.dx_v[:-1, :]
+        dy_v_N = grid.dy_v[1:, :]
+        dy_v_S = grid.dy_v[:-1, :]
+
+        diag_zonal = (
+            H_u_E * dy_u_E / jnp.maximum(dx_u_E, 1.0e-30)
+            + H_u_W * dy_u_W / jnp.maximum(dx_u_W, 1.0e-30)
+        ) * inv_area
+        diag_merid = (
+            H_v_N * dx_v_N / jnp.maximum(dy_v_N, 1.0e-30)
+            + H_v_S * dx_v_S / jnp.maximum(dy_v_S, 1.0e-30)
+        ) * inv_area
     else:
+        # Regular lat-lon: dy_u, dy_v constant; dx_u 1D in lat;
+        # dx_v 1D in lat with poles=0.  Bit-exact with prior code.
         R = grid.radius
         dlon = grid.dlon
         dlat = grid.dlat
@@ -233,20 +259,12 @@ def _make_diag_preconditioner(
         cos_lat_v = jnp.cos(lat_v)                      # (n_lat+1,)
         dx_v = R * cos_lat_v * dlon                      # (n_lat+1,)
 
-    area = grid.area                                     # (n_lat, n_lon)
-
-    H_u_E = H_u[:, 1:]   # east face of cell j: u-face (j, i+1)
-    H_u_W = H_u[:, :-1]  # west face of cell j: u-face (j, i)
-    H_v_N = H_v[1:, :]   # north face of cell j: v-face (j+1, i)
-    H_v_S = H_v[:-1, :]  # south face of cell j: v-face (j, i)
-
-    inv_area = 1.0 / area
-    diag_zonal = (
-        (H_u_E + H_u_W) * dy_u / dx_u[:, None]
-    ) * inv_area
-    diag_merid = (
-        H_v_N * dx_v[1:, None] + H_v_S * dx_v[:-1, None]
-    ) / dy_v * inv_area
+        diag_zonal = (
+            (H_u_E + H_u_W) * dy_u / dx_u[:, None]
+        ) * inv_area
+        diag_merid = (
+            H_v_N * dx_v[1:, None] + H_v_S * dx_v[:-1, None]
+        ) / dy_v * inv_area
 
     # Diagonal of the Helmholtz operator A = I - coeff·∇·(H·∇):
     # diag(A) = 1 + coeff · (diag_zonal + diag_merid)

@@ -39,14 +39,23 @@ def prescribed_surface_forcing(
     nlev = u.shape[-1]
     dtype = u.dtype
 
-    # Top layer thickness
-    dz_0 = z_coord.dz_ref[0] * jacobian  # T-point shape
-    inv_rho_dz = 1.0 / (rho_0_ref * jnp.maximum(dz_0, 1e-10))
+    # Top layer thickness — zero on land cells (where jacobian = 0).
+    # Use jnp.where to set inv_rho_dz to 0 on land, preventing huge values
+    # (~1e7) that would contaminate ocean cells via interpolation to u/v
+    # faces.  The previous jnp.maximum(dz_0, 1e-10) clamp produced large
+    # but finite values on land — fine when du_dt is masked at point of
+    # use, but catastrophic when du_dt is interpolated to neighbouring
+    # u/v faces (T->u, T->v) where the ocean side gets contaminated.
+    dz_0 = z_coord.dz_ref[0] * jacobian  # T-point shape; 0 on land
+    is_ocean = dz_0 > 1.0e-3   # > 1 mm cell thickness ⇒ ocean
+    inv_rho_dz = jnp.where(
+        is_ocean, 1.0 / (rho_0_ref * jnp.maximum(dz_0, 1.0e-10)), 0.0,
+    )
 
     # Wind stress from shared grid-agnostic computation (T-point shape)
     tau_x, tau_y = compute_wind_stress(grid.grid_lat, cfg)
 
-    # T-point tendencies (cell-center stagger)
+    # T-point tendencies (cell-center stagger).  Zero on land via inv_rho_dz.
     du_dt_T = tau_x * inv_rho_dz   # T-point shape
     dv_dt_T = tau_y * inv_rho_dz   # T-point shape
 
@@ -91,14 +100,18 @@ def prescribed_surface_forcing(
 
     # Heat flux: dT/dt = Q_net / (rho_0 * c_sw * dz_0)  — T-point
     Q_net = jnp.full_like(dz_0, cfg.Q_net, dtype=dtype)
-    inv_rho_csw_dz = 1.0 / (rho_0_ref * c_sw * jnp.maximum(dz_0, 1e-10))
+    inv_rho_csw_dz = jnp.where(
+        is_ocean,
+        1.0 / (rho_0_ref * c_sw * jnp.maximum(dz_0, 1.0e-10)),
+        0.0,
+    )
     dT_dt = jnp.pad(
         (Q_net * inv_rho_csw_dz)[..., None], (*pad_axes_T, (0, nlev - 1)),
     )
 
     # Freshwater (virtual salt flux): T-point
     if cfg.E_minus_P != 0.0:
-        inv_dz = 1.0 / jnp.maximum(dz_0, 1e-10)
+        inv_dz = jnp.where(is_ocean, 1.0 / jnp.maximum(dz_0, 1.0e-10), 0.0)
         dS_dt = jnp.pad(
             (S[..., 0] * cfg.E_minus_P * inv_dz)[..., None],
             (*pad_axes_T, (0, nlev - 1)),
