@@ -32,6 +32,17 @@ class MPASOceanConfig(NamedTuple):
         at the bottom level in the baroclinic tendency and as
         ``-r * U_bar / H`` in the barotropic substeps.  Matches MITgcm's
         ``bottomDragLinear`` convention.
+    bottom_drag_bbl_thickness : float
+        BBL (bottom boundary layer) thickness [m] for distributed-drag
+        formulation (Killworth & Edwards 1999 / MOM6 ``BBL_thick_min``).
+        When > 0, the bottom drag stress is spread over the band
+        ``[z_seafloor, z_seafloor + H_BBL]`` instead of being applied
+        to a single (possibly very thin) partial cell.  At the thinnest
+        partial cells (~0.3 m on ETOPO+ico4), the legacy single-cell
+        drag CFL-violates explicitly; the BBL formulation bounds the
+        per-cell tendency by ``r·u/H_BBL``.  Default ``0.0`` keeps the
+        legacy single-cell drag for back-compat; **for realistic
+        bathymetry use 50.0 m or so** (matches the lat-lon convention).
     K_h : float
         Horizontal tracer diffusivity [m²/s].
     K_bih : float
@@ -79,6 +90,7 @@ class MPASOceanConfig(NamedTuple):
     B_h: float = 0.0
     C_smag: float = 0.0
     bottom_drag_r: float = 0.0
+    bottom_drag_bbl_thickness: float = 0.0
     K_h: float = 0.0
     K_bih: float = 0.0
     A_v: float = 1.0e-3
@@ -123,6 +135,68 @@ class MPASOceanConfig(NamedTuple):
                                          # diffusion and divergence damping.
                                          # 0 = disabled; typical 1e3-1e4 m²/s
                                          # for global ico4 (~460 km) meshes.
+                                         # PARTIAL-CELL ETOPO: prefer
+                                         # barotropic_u_biharmonic instead —
+                                         # del2 at the magnitudes needed to
+                                         # damp the partial-cell rotational
+                                         # null mode (~3e6) over-damps real
+                                         # mesoscale flow.
+    equatorial_visc_boost: float = 0.0  # Multiplicative boost on
+                                         # lateral viscosity at low
+                                         # latitudes, applied per-edge as
+                                         # ``A_eff = A · (1 + boost ·
+                                         # cos²(lat_edge))``.  Affects
+                                         # BOTH ``A_h`` (3D momentum) and
+                                         # ``barotropic_u_viscosity``
+                                         # (depth-mean).  Targets the
+                                         # equatorial f→0 mode that the
+                                         # implicit-CN solver's Coriolis
+                                         # predictor-corrector cannot
+                                         # damp (project_mpas_etopo_
+                                         # instability.md §"equatorial
+                                         # mode").  Mirrors the lat-lon
+                                         # ``A_h_lat_scaling`` mechanism
+                                         # but with controllable strength.
+                                         # Typical 3-10 for ico4 ETOPO.
+                                         # 0 = uniform viscosity.
+    use_h_actual_pgf: bool = False         # When True, the baroclinic
+                                            # pressure cumsum integrates
+                                            # against the actual partial-
+                                            # cell thickness h_k rather
+                                            # than the reference dz_ref.
+                                            # Matches NEMO ``ln_hpg_zps``
+                                            # and MITgcm conventions for
+                                            # z* + partial cells.  Off by
+                                            # default for back-compat.
+    use_baroclinic_rho_ref: bool = False  # DYNAMIC (legacy / discouraged):
+                                           # subtracts ρ_ref(z) computed
+                                           # as wet-cell mean of ρ on
+                                           # EVERY tendency call.  NaN'd
+                                           # at day 60 on ETOPO+ico4
+                                           # because ρ_ref chases T,S
+                                           # drift (positive feedback).
+                                           # Use ``use_static_baroclinic
+                                           # _rho_ref`` instead.  Kept
+                                           # only for back-compat /
+                                           # diagnostic comparison.
+    use_static_baroclinic_rho_ref: bool = False
+        # STATIC (preferred):
+        # at init, compute ρ_ref(z) from EOS(T_init, S_init) averaged
+        # over wet cells per level, FREEZE it on ``state.rho_ref_z``,
+        # and use it as ``ρ' = ρ − ρ_ref(z)`` in every PGF call.  Cuts
+        # the partial-cell PGF residual (the seed of the bottom-trapped
+        # rotational mode) ~24× without the dynamic version's drift
+        # feedback (project_mpas_etopo_instability.md §8g — Option B).
+        # Off by default (back-compat: ρ' = ρ − ρ_0).  Mutually
+        # exclusive with ``use_baroclinic_rho_ref``.
+    barotropic_u_biharmonic: float = 0.0  # Biharmonic ∇⁴ damping on u_bar
+                                          # [m⁴/s].  Scale-selective: damps
+                                          # grid-scale modes much harder than
+                                          # mesoscale, so safe to use at
+                                          # production strength on partial-
+                                          # cell topography.  Wired in the
+                                          # implicit-CN path only.  Typical
+                                          # 1e15-1e17 m⁴/s for ico4.
     bebt: float = 0.2               # Semi-implicit barotropic PGF [0,1]. 0=forward-backward, 0.2=MOM6 default.
     maxvel_barotropic: float = 0.0  # Velocity clipping [m/s]. 0=disabled.
     barotropic_time_filter: str = "cosine"  # "box" or "cosine"
@@ -171,6 +245,50 @@ class MPASOceanConfig(NamedTuple):
     # relied on at MPAS call sites.
     C_leith: float = 0.0
     C_leith_modified: bool = False
+    # Pressure-gradient scheme (P3 of MPAS realistic-geometry plan;
+    # see ``docs/ocean_experiments/realistic_geometry_mpas_plan.md``).
+    # ``"centered"`` (default) is the legacy bare-gradient
+    # ``gradient_edge(p'/rho_0)`` — correct for flat-bottom z-star but
+    # produces O(1 cm/s) spurious shelf-break currents on partial cells.
+    # ``"adcroft"`` adds the Adcroft & Campin (2004) face correction
+    # that shifts each cell's pressure to the shallower of the two
+    # cell centroids before differencing — bit-exact zero on full
+    # cells, eliminates the partial-cell PGF cancellation error.
+    # CVT mesh required for ``"adcroft"`` (see helper docstring).
+    # ``"smc03"`` enables the Shchepetkin & McWilliams (2003)
+    # density-Jacobian PGF (per-column harmonic-slope ρ(z)
+    # reconstruction evaluated at a face-reference depth) — required
+    # for stability on real bathymetry; see
+    # ``docs/ocean_experiments/density_jacobian_pgf_mpas.md``.  Only
+    # meaningful with ``OceanPartialCellCoordinate``; falls back to
+    # centered on z-star.
+    # ``"ahh08"`` enables the Adcroft, Hallberg & Hill (2008) analytic
+    # finite-volume PGF: closed-form ``∫p dz`` per cell using the
+    # Wright EOS rational form, then face-averaged-pressure
+    # differencing over the common wet face on each edge.  Gives
+    # machine-zero rest-state PGF residual on partial cells regardless
+    # of step structure (the property SMC03 only achieves on linear
+    # ρ(z)).  Requires ``eos='wright'``.  Only meaningful with
+    # ``OceanPartialCellCoordinate``.  See plan-doc §8i.
+    # ``"zero"`` zeros both ``p'/rho_0`` and any partial-cell correction
+    # — diagnostic only (per §8f / §8j PGF=0 tests).  Should never run
+    # in production: removes the PGF entirely.
+    # Allowed values: ``"centered" | "adcroft" | "smc03" | "ahh08" | "zero"``.
+    pgf_scheme: str = "centered"
+    # Threshold for the ``vertex_thickness_hybrid`` min-rule fallback in
+    # the TRiSK PV term ``q = ζ/h_v``.  At each (vertex, level), if
+    # ``min_wet_h < alpha * max_wet_h`` the function returns the min-
+    # over-active cell thickness (MITgcm hFacZ convention); otherwise
+    # the active-renormalized kite-area mean (Petersen 2015 / MPAS-O
+    # production).  ``alpha=0.5`` (legacy) was added on a previous
+    # internal audit's recommendation; the 2026-05-04 audit found the
+    # min-rule branch *amplifies* ``q`` at deep partial-cell step
+    # vertices by O(h_max/h_min) — exactly the topographic-step regime
+    # where the bottom-trapped instability lives.  ``alpha=0.0``
+    # disables the min branch entirely (always uses kite-mean) and is
+    # the recommended setting for partial-cell ETOPO runs.
+    # Only meaningful with ``OceanPartialCellCoordinate``.
+    vertex_thickness_alpha: float = 0.5
 
 
 class MPASSimpleOceanConfig(NamedTuple):

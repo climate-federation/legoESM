@@ -13,7 +13,10 @@ from legoesm.core.precision import get_policy
 from legoesm.core.state import MPASOceanState
 from legoesm.grids.voronoi import VoronoiMesh
 from legoesm.ocean.eos import scale_depth as _SCALE_DEPTH
-from legoesm.ocean.vertical import OceanZStarCoordinate
+from legoesm.ocean.vertical import (
+    OceanPartialCellCoordinate,
+    OceanZStarCoordinate,
+)
 
 
 def idealized_bathymetry_mpas(
@@ -56,6 +59,7 @@ def rest_state_mpas_ocean(
     S_uniform: float = 35.0,
     H_max: float = 5500.0,
     land_lat_threshold: float = 80.0,
+    bathymetry=None,
 ) -> MPASOceanState:
     """Create a rest-state initial condition on Voronoi mesh.
 
@@ -73,9 +77,18 @@ def rest_state_mpas_ocean(
     S_uniform : float
         Uniform salinity [PSU].
     H_max : float
-        Ocean depth [m].
+        Ocean depth [m]. Used by the idealized bathymetry path.
     land_lat_threshold : float
-        Land above this latitude [deg].
+        Land above this latitude [deg]. Used by the idealized
+        bathymetry path.
+    bathymetry : BathymetryConfig or None, optional
+        Realistic bathymetry config. When provided with
+        ``source="file"``, ``H_bathy`` and ``land_mask`` are loaded
+        from a NetCDF file (ETOPO/GEBCO style) via
+        :func:`load_bathymetry_mpas` instead of the idealized path.
+        ``H_max``/``land_lat_threshold`` are ignored in that case.
+        Default ``None`` keeps the idealized behavior for backwards
+        compatibility.
 
     Returns
     -------
@@ -85,7 +98,17 @@ def rest_state_mpas_ocean(
     nEdges = mesh.nEdges
     nlev = z_coord.n_levels
 
-    H_bathy, land_mask = idealized_bathymetry_mpas(mesh, H_max, land_lat_threshold)
+    use_realistic = (
+        bathymetry is not None and getattr(bathymetry, "source", None) == "file"
+    )
+    if use_realistic:
+        # Lazy import to avoid pulling xarray into idealized-only callers.
+        from legoesm.ocean.bathymetry import load_bathymetry_mpas
+        H_bathy, land_mask = load_bathymetry_mpas(mesh, bathymetry)
+    else:
+        H_bathy, land_mask = idealized_bathymetry_mpas(
+            mesh, H_max, land_lat_threshold,
+        )
 
     dtype = get_policy().storage
 
@@ -194,6 +217,114 @@ def wind_driven_gyre_mpas(
         H_bathy=Field(data=H_bathy, name="H_bathy", dims=("nCells",), units="m"),
         land_mask=Field(data=land_mask, name="land_mask", dims=("nCells",), units="1"),
     )
+
+
+def attach_static_rho_ref_z(
+    state: MPASOceanState,
+    mesh: VoronoiMesh,
+    z_coord,
+    config,
+) -> MPASOceanState:
+    """Compute and freeze a per-level reference density profile on the state.
+
+    Runs the same 2-pass EOS+hydrostatic-pressure iteration that the
+    runtime baroclinic tendency uses (via
+    :func:`iterate_eos_and_pressure_anomaly`) on the *initial* T and S,
+    averages the resulting in-situ density over wet cells per level,
+    and writes the resulting ``(nlev,)`` profile to ``state.rho_ref_z``.
+
+    Once attached, the runtime baroclinic PGF iteration uses
+    ``ρ' = ρ − ρ_ref(z)`` instead of ``ρ' = ρ − ρ_0``.  The profile is
+    NEVER recomputed during integration — that was the
+    positive-feedback failure mode of the dynamic recomputed-mean
+    version (``use_baroclinic_rho_ref=True``).  See
+    project_mpas_etopo_instability.md §"Option B" for context.
+
+    Parameters
+    ----------
+    state : MPASOceanState
+        Must already carry the initial T, S, ``H_bathy``, ``land_mask``.
+    mesh : VoronoiMesh
+    z_coord : OceanZStarCoordinate or OceanPartialCellCoordinate
+        On a partial-cell coordinate, ``is_active`` and ``h_actual`` are
+        used so that step-edge cells (zero-thickness layers below the
+        seafloor) do not pollute the per-level wet-cell mean.
+    config : MPASOceanConfig
+        Used for ``eos``, ``eos_linear``, ``rho_0``, ``g``,
+        ``min_water_column_m`` (for the partial-cell h_actual), and the
+        switches ``use_h_actual_pgf`` / ``use_static_baroclinic_rho_ref``.
+        When ``use_static_baroclinic_rho_ref`` is False, returns
+        ``state`` unchanged (no-op).
+
+    Returns
+    -------
+    MPASOceanState
+        A new state with ``rho_ref_z`` populated when the config switch
+        is on; otherwise the input state unchanged.
+    """
+    if not getattr(config, "use_static_baroclinic_rho_ref", False):
+        return state
+    if getattr(config, "use_baroclinic_rho_ref", False):
+        raise ValueError(
+            "use_static_baroclinic_rho_ref and use_baroclinic_rho_ref "
+            "are mutually exclusive: the static frozen profile and the "
+            "dynamic recomputed-mean profile cannot both be active. "
+            "Set only one of them in MPASOceanConfig."
+        )
+
+    # Lazy imports to avoid a hard dependency from the init module on
+    # the dynamics tendency stack.
+    from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas
+    from legoesm.ocean.dynamics.ocean_tendency_common import (
+        compute_static_rho_ref_z,
+    )
+    from legoesm.ocean.eos import make_eos_fn
+    from legoesm.ocean.vertical import compute_layer_thickness
+
+    T_3d = state.T.data
+    S_3d = state.S.data
+    eta_2d = state.eta.data
+    H_bathy = state.H_bathy.data
+    mask = state.land_mask.data
+
+    c1 = mesh.cellsOnEdge[0]
+    c2 = mesh.cellsOnEdge[1]
+
+    def _fill(field_cell):
+        return fill_land_cells_mpas(field_cell, mask, c1, c2)
+
+    eos_fn = make_eos_fn(
+        config.eos, getattr(config, "eos_linear", None),
+    )
+
+    if isinstance(z_coord, OceanPartialCellCoordinate):
+        is_active_3d = z_coord.is_active.astype(T_3d.dtype)
+        if getattr(config, "use_h_actual_pgf", False):
+            h_actual = compute_layer_thickness(
+                eta_2d, H_bathy, z_coord,
+                min_water_column_m=config.min_water_column_m,
+            )
+        else:
+            h_actual = None
+    else:
+        is_active_3d = None
+        h_actual = None
+
+    rho_ref_z = compute_static_rho_ref_z(
+        T_3d, S_3d, mask, _fill, eos_fn,
+        z_coord.dz_ref, config.rho_0, config.g,
+        n_iter=2,
+        h_actual=h_actual,
+        is_active_3d=is_active_3d,
+    )
+
+    rho_ref_field = Field(
+        data=rho_ref_z,
+        name="rho_ref_z",
+        dims=("nlev",),
+        units="kg/m^3",
+    )
+    return state._replace(rho_ref_z=rho_ref_field)
 
 
 def reconstruct_cell_velocity(u_edge, mesh):
