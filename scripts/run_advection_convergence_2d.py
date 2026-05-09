@@ -437,7 +437,12 @@ def _run_single_2d(scheme, n_lat, n_lon, output_dir, time_integrator="euler",
 
     mass_init = float(np.sum(tracer_init * area))
     mass_final = float(np.sum(tracer_final * area))
-    mass_drift = abs(mass_final - mass_init) / abs(mass_init)
+    # iter-93 audit followup: previously
+    # ``abs(mass_final - mass_init) / abs(mass_init)`` had no
+    # floor and would NaN if mass_init = 0 (e.g., a tracer that
+    # is zero everywhere at t=0).  Migrate to the shared helper.
+    from legoesm.diagnostics.conservation_drift import compute_relative_drift
+    mass_drift = compute_relative_drift([mass_init, mass_final])
 
     result = {
         "scheme": scheme, "n_lat": n_lat, "n_lon": n_lon,

@@ -134,7 +134,9 @@ class TestMassConservation:
             s = model.step(s, dt)
 
         mass_final = float(jnp.sum(s.h.astype(jnp.float64) * area.astype(jnp.float64)))
-        rel_drift = abs(mass_final - mass_init) / abs(mass_init)
+        # iter-164: centralized helper.
+        from legoesm.diagnostics import compute_relative_drift
+        rel_drift = compute_relative_drift([mass_init, mass_final])
 
         # The PPM reconstruction across cube-face boundaries introduces
         # O(1e-6) asymmetry that prevents exact telescoping. With the

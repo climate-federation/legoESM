@@ -345,7 +345,16 @@ def compute_cin(
     dp = p_half[:, 1:] - p_half[:, :-1]
     inhibiting_buoyancy = jnp.maximum(0.0, T_env - T_parcel_ma)
 
-    return constants.R_d * jnp.sum(window * inhibiting_buoyancy * dp / p_full, axis=-1)
+    # Use the half-level midpoint pressure for the discrete ``∫ dlnp``
+    # approximation (matches ``compute_cape`` after audit cycle iter-39
+    # HIGH #1 fix and every sister physics helper —
+    # ``_shared.compute_layer_dz``, ``mass_flux``, ``dca``).  The earlier
+    # code used ``p_full`` (a layer-mean pressure on hybrid-sigma grids)
+    # which produced a 0.5–2 % CIN bias relative to the matching CAPE.
+    p_mid = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+    return constants.R_d * jnp.sum(
+        window * inhibiting_buoyancy * dp / p_mid, axis=-1,
+    )
 
 
 # ---------------------------------------------------------------------------

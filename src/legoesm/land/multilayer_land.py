@@ -37,7 +37,6 @@ from legoesm.coupler.bulk_flux import simple_bulk_fluxes, compute_most_fluxes
 from legoesm.coupler.coupling_fields import AtmToSurface, TileResponse
 from legoesm.land.soil_hydraulics import psi_from_theta
 from legoesm.coupler.surface_energy import surface_radiation_fluxes
-from legoesm.land.soil_hydraulics import psi_from_theta
 from legoesm.land.carbon.config import CarbonState
 from legoesm.land.carbon.carbon_cycle import step_carbon
 from legoesm.land.config import MultiLayerLandConfig
@@ -131,14 +130,25 @@ def step_multilayer_land(
         root_frac = jnp.exp(-z_centers / root_depth)
         root_frac = root_frac / jnp.sum(root_frac)
 
+    # Wilting-point / field-capacity range guard.  Using ``+ 1e-10``
+    # only protects against exact equality; a misconfigured cell with
+    # ``theta_fc <= theta_wp`` still produced exploding ``beta_root``
+    # values because the denominator goes near-zero on the same scale
+    # as theta itself (~0.1).  Floor the range at 1e-3 m³/m³ (~1 % of
+    # theta_sat) so even pathological PFT lookup tables produce sane
+    # ``beta_root ∈ [0, 1]``.  Audit finding #6.
     if lp is not None:
+        denom = jnp.maximum(
+            theta_fc[:, None] - theta_wp[:, None], 1e-3,
+        )
         beta_root = jnp.clip(
-            (theta - theta_wp[:, None]) / (theta_fc[:, None] - theta_wp[:, None] + 1e-10),
+            (theta - theta_wp[:, None]) / denom,
             0.0, 1.0,
         )
     else:
+        denom = jnp.maximum(theta_fc - theta_wp, 1e-3)
         beta_root = jnp.clip(
-            (theta - theta_wp) / (theta_fc - theta_wp + 1e-10),
+            (theta - theta_wp) / denom,
             0.0, 1.0,
         )
 
@@ -169,7 +179,25 @@ def step_multilayer_land(
     # --- Surface saturation humidity: use ice saturation over snow ---
     q_sat_liq = saturation_mixing_ratio(T_surface, forcing.p_surface)
     q_sat_ice = saturation_mixing_ratio_ice(T_surface, forcing.p_surface)
-    has_snow = snow > 1e-6  # kg/m2 threshold
+    # Treat a column as snow-covered when:
+    #   (a) Existing snowpack > 1e-6 kg/m² (always snow regardless of
+    #       fresh accumulation OR melt), OR
+    #   (b) Fresh snowfall is happening AND the surface is below
+    #       freezing (so the new snow will survive — won't melt
+    #       immediately during this step).
+    # Rule (b) prevents the "warm-surface snowfall" anti-pattern that
+    # the iter-67 first-pass fix introduced: a snow-free warm column
+    # receiving precip_snow would have been routed as L_s
+    # sublimation over an ice qsat surface for the whole turbulent
+    # step even though the snow melts away in seconds.  By gating
+    # on T_surface < T_freeze we only switch to snow phase when the
+    # snow can survive.  Existing snow always uses snow phase
+    # regardless of surface temperature (snow_budget handles melt
+    # energy correctly).  Iter-68 audit fix.
+    fresh_snow_mass = forcing.precip_snow * dt
+    has_existing_snow = snow > 1e-6
+    has_surviving_fresh_snow = (fresh_snow_mass > 1e-6) & (T_surface < constants.T_freeze)
+    has_snow = has_existing_snow | has_surviving_fresh_snow
     q_sat_sfc = jnp.where(has_snow, q_sat_ice, q_sat_liq)
     # Over snow, moisture is freely available from the snowpack (beta=1)
     beta_effective = jnp.where(has_snow, 1.0, beta)
@@ -201,10 +229,20 @@ def step_multilayer_land(
             L_latent=L_eff,
         )
 
-    # --- Surface albedo (from current snow state) ---
+    # --- Surface albedo (snow-mass dependent) ---
+    # Use the SAME effective snow mass as the bulk-flux phase decision
+    # (iter-68 fix): existing snow always counts; fresh snow counts
+    # only when T_surface < T_freeze (it survives the step).  Without
+    # this consistency, SW absorption would lag the LH/SH phase
+    # transition by one step on every fresh-snow event.  Iter-71 fix.
+    snow_effective = jnp.where(
+        has_existing_snow | has_surviving_fresh_snow,
+        snow + jnp.where(has_surviving_fresh_snow, fresh_snow_mass, 0.0),
+        snow,
+    )
     if config.snow_albedo_feedback and lat is not None:
         alpha = compute_land_albedo(
-            lat, snow, snow_age, config.land_albedo,
+            lat, snow_effective, snow_age, config.land_albedo,
         )
     else:
         alpha = jnp.full(T_surface.shape, albedo_land, dtype=T_surface.dtype)
@@ -347,15 +385,27 @@ def step_multilayer_land(
     # Recompute q_surface with updated temperature and root-zone moisture.
     # Apply stomatal_ratio so q_surface reflects both soil moisture
     # availability AND stomatal limitation (same as slab land).
+    # Use the same ``jnp.maximum(theta_fc - theta_wp, 1e-3)`` floor as
+    # the pre-step computation above (lines 142-150) so degenerate PFT
+    # lookup-table cells (theta_fc ≈ theta_wp) cannot blow up the
+    # post-step ``beta_root_new``.  The previous ``+ 1e-10`` floor was
+    # too small relative to the typical theta scale (~0.1), so a
+    # pathological PFT cell would produce O(1e7) beta_root_new values
+    # — propagating into ``q_sfc_new`` reported back to the atmosphere.
+    # Iter-65 audit fix.
     theta_new = richards_out.theta_new
     if lp is not None:
+        denom_new = jnp.maximum(
+            theta_fc[:, None] - theta_wp[:, None], 1e-3,
+        )
         beta_root_new = jnp.clip(
-            (theta_new - theta_wp[:, None]) / (theta_fc[:, None] - theta_wp[:, None] + 1e-10),
+            (theta_new - theta_wp[:, None]) / denom_new,
             0.0, 1.0,
         )
     else:
+        denom_new = jnp.maximum(theta_fc - theta_wp, 1e-3)
         beta_root_new = jnp.clip(
-            (theta_new - theta_wp) / (theta_fc - theta_wp + 1e-10),
+            (theta_new - theta_wp) / denom_new,
             0.0, 1.0,
         )
     # See comment above ``w_frac_rz``: broadcasting handles both
@@ -405,6 +455,20 @@ def step_multilayer_land(
         u_ocean_sfc=jnp.zeros(ncol),
         v_ocean_sfc=jnp.zeros(ncol),
         co2_flux=co2_flux,
+        # Multilayer land: total freshwater to ocean is surface +
+        # subsurface runoff.  Both already kg/m²/s.
+        freshwater_flux=(
+            richards_out.runoff_surface + richards_out.runoff_subsurface
+        ),
+        # Land does not extract heat directly from the ocean.
+        ocean_heat_extraction=jnp.zeros(ncol),
+        # Land does not exert stress on the ocean.
+        ocean_stress_x=jnp.zeros(ncol),
+        ocean_stress_y=jnp.zeros(ncol),
+        # Phase-aware moisture mass flux (evap_rate already accounts
+        # for L_eff switch and water-limit in the columnar Richards
+        # solve).  Audit F3.
+        surface_mass_flux=evap_rate,
     )
 
     return new_state, response, carbon_state_new

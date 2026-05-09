@@ -274,9 +274,15 @@ def jarvis_gs(
     dT = (T_C - config.T_opt_jarvis) / config.T_range_jarvis
     f_T = jnp.maximum(1.0 - dT ** 2, 0.0)
 
-    # VPD response (linear decrease)
+    # VPD response (linear decrease).
+    # ``q_air`` is specific humidity (kg vapour / kg moist air), so
+    # ``e_air = q · p / (ε + (1 − ε) · q)`` is the correct formula.
+    # The earlier ``q · p / (ε + q)`` is the *mixing-ratio* form
+    # (kg vapour / kg dry air) and biases e_air by ~1% for typical
+    # tropical q ≈ 0.02 — small but propagates into VPD-driven
+    # stomatal closure.  Audit cycle 2026-05-05 finding #24.
     e_sat = saturation_vapor_pressure(T)
-    e_air = q_air * p_surface / (constants.epsilon + q_air)
+    e_air = q_air * p_surface / (constants.epsilon + (1.0 - constants.epsilon) * q_air)
     VPD_hPa = jnp.maximum(e_sat - e_air, 0.0) / 100.0
     f_VPD = jnp.clip(1.0 - config.a_vpd * VPD_hPa, config.f_VPD_min, 1.0)
 
@@ -336,9 +342,11 @@ def coupled_farquhar_stomata(
     Ca = jnp.broadcast_to(
         jnp.asarray(co2_ppmv, dtype=T_leaf.dtype), T_leaf.shape)
 
-    # Vapour pressure deficit and relative humidity
+    # Vapour pressure deficit and relative humidity.  ``q_air`` is
+    # specific humidity, so use ``e = q · p / (ε + (1 − ε) · q)``;
+    # see VPD comment in jarvis_gs above.  Audit finding #24.
     e_sat = saturation_vapor_pressure(T_leaf)
-    e_air = q_air * p_surface / (constants.epsilon + q_air)
+    e_air = q_air * p_surface / (constants.epsilon + (1.0 - constants.epsilon) * q_air)
     VPD_kPa = jnp.maximum(e_sat - e_air, 0.0) / 1000.0
     RH = jnp.clip(e_air / jnp.maximum(e_sat, 1.0), 0.0, 1.0)
 

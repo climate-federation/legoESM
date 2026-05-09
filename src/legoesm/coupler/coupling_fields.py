@@ -40,6 +40,13 @@ class TileResponse(NamedTuple):
     time-step-averaged exchange.  This is standard practice in land
     surface models (the fluxes drove the state update, so they are
     self-consistent with the energy/water budget over the step).
+
+    **freshwater_flux** (kg/m²/s, positive INTO ocean / surface) is
+    the net liquid-water mass flux from this tile to the ocean — for
+    land it is `runoff_surface + runoff_subsurface`, for sea-ice it is
+    melt + brine + sublimation mass, for ocean it is `precip - evap`.
+    Tiles that do not produce a freshwater channel return zeros.
+    Added in the Physical_Consistency cycle (audit F4).
     """
     T_surface: jax.Array         # [end-of-step] Surface skin temperature [K]
     albedo: jax.Array            # [end-of-step] Surface albedo [0-1]
@@ -54,6 +61,42 @@ class TileResponse(NamedTuple):
     u_ocean_sfc: jax.Array       # Ocean surface zonal current [m/s]
     v_ocean_sfc: jax.Array       # Ocean surface meridional current [m/s]
     co2_flux: jax.Array          # CO2 flux [kg/m2/s] (positive up)
+    # Net liquid-water mass flux delivered by this tile [kg/m²/s,
+    # positive into the ocean / receiving body].  Zero for tiles that
+    # do not produce a freshwater channel — but must always be a
+    # populated array, never None, so the structure is pytree-uniform
+    # across all four tiles (jax.tree.map otherwise raises a
+    # tree-prefix mismatch when one tile has None and others have
+    # arrays).
+    freshwater_flux: jax.Array
+    # Heat flux extracted from the ocean by this tile [W/m²,
+    # positive = ocean LOSES energy to this tile].  Sea-ice draws
+    # heat from the warm ocean to melt at its base (F_ocean), and
+    # latent heat of fusion is removed from the ocean when open
+    # water freezes — both should be subtracted from the ocean
+    # column heat budget.  Land/lake tiles return zeros (no direct
+    # ocean exchange).  Ocean tile reports zero (it is the source,
+    # not a sink).  Audit F8.
+    ocean_heat_extraction: jax.Array
+    # Stress applied by this tile back onto the ocean surface [Pa,
+    # positive = eastward / northward force on the ocean].  By
+    # Newton's third law, the air→ice and ocean→ice stresses produce
+    # an equal-and-opposite reaction force on the ocean column under
+    # the ice.  Sea-ice tiles deliver −tau_ocean_from_ice (the
+    # ocean→ice drag inverted).  Land/lake tiles return zeros.
+    # Ocean tile returns zero (its own wind stress is already in
+    # tau_x/tau_y).  Audit F9.
+    ocean_stress_x: jax.Array
+    ocean_stress_y: jax.Array
+    # Phase-aware surface moisture mass flux [kg/m²/s, positive = up
+    # = drying].  Each tile populates this directly using the
+    # appropriate phase latent heat (L_v for liquid surfaces, L_s
+    # for frozen surfaces, mixed for snow-on-land).  Consumers
+    # should use this field rather than back-deriving evaporation
+    # from ``lhflx / L_v`` — the latter under-counts mass by ~13%
+    # over any tile that sublimates rather than evaporates.
+    # Audit F3.
+    surface_mass_flux: jax.Array
 
 
 class SurfaceToAtm(NamedTuple):
@@ -71,3 +114,19 @@ class SurfaceToAtm(NamedTuple):
     u_ocean_sfc: jax.Array
     v_ocean_sfc: jax.Array
     co2_flux: jax.Array
+    # Net freshwater flux from blended surface tiles to the receiving
+    # body [kg/m²/s, positive into the ocean / surface].  Always a
+    # populated array (zeros if no tile reports a freshwater channel).
+    freshwater_flux: jax.Array
+    # Tile-blended heat flux extracted from the ocean [W/m²,
+    # positive = ocean LOSES energy to surface tiles].  See
+    # ``TileResponse.ocean_heat_extraction``.
+    ocean_heat_extraction: jax.Array
+    # Tile-blended stress applied to the ocean surface [Pa,
+    # positive = eastward / northward force on the ocean].  See
+    # ``TileResponse.ocean_stress_x / y``.
+    ocean_stress_x: jax.Array
+    ocean_stress_y: jax.Array
+    # Tile-blended phase-aware surface moisture mass flux
+    # [kg/m²/s, positive up].  See ``TileResponse.surface_mass_flux``.
+    surface_mass_flux: jax.Array

@@ -24,9 +24,16 @@ from legoesm.land.tridiag import thomas_solve_batch
 
 
 class SoilThermalConfig(NamedTuple):
-    """Configuration for soil thermal properties."""
+    """Configuration for soil thermal properties.
+
+    All heat capacities are **volumetric** (J/m³/K), not specific
+    (J/kg/K).  ``C_water = 4.18e6`` derives from
+    ``constants.rho_water · constants.c_pw = 1000 · 4180 ≈ 4.18e6``.
+    Storing volumetric values directly avoids per-cell multiplication
+    by density inside the heat-capacity mixing formula.
+    """
     C_soil: float = 2.0e6         # mineral soil heat capacity [J/m3/K]
-    C_water: float = 4.18e6       # water heat capacity [J/m3/K]
+    C_water: float = 4.18e6       # water heat capacity [J/m3/K] (= rho_water · c_pw)
     C_air: float = 1.25e3         # air heat capacity [J/m3/K]
     k_solid: float = 2.0          # mineral soil thermal conductivity [W/m/K]
     k_water: float = 0.57         # water thermal conductivity [W/m/K]

@@ -1,5 +1,0 @@
-[OFF (unablated, default)   ]  h_L2=2.069e-04  h_Linf=1.530e-03  v_ll_Linf=1.585e-01
-[ON  (c10=0 at peak corners)]  h_L2=2.177e-03  h_Linf=1.538e-02  v_ll_Linf=4.962e+00
-
-Canonical OFF baseline (iter-768 commit-time):
-  h_L2=2.07e-04  h_Linf=1.53e-03  v_ll_Linf=1.59e-01

@@ -254,7 +254,9 @@ class TestMassConservation:
             state = model.step(state, dt, target_mass=target_mass)
 
         mass_final = float(jnp.sum(state.p_s.astype(jnp.float64) * area64))
-        rel_err = abs(mass_final - mass_init) / abs(mass_init)
+        # iter-164: centralized helper (NaN-aware).
+        from legoesm.diagnostics import compute_relative_drift
+        rel_err = compute_relative_drift([mass_init, mass_final])
         assert rel_err < 1e-5, f"Mass conservation error: {rel_err}"
 
     def test_pfloor_preserved_after_mass_correction(self, grid, sigma):
@@ -1026,7 +1028,9 @@ class TestTracerMassConservation:
         mass_final = self._tracer_mass(
             state.tracers["q_v"], state.p_s, sigma, grid)
 
-        rel_err = abs(mass_final - mass_init) / abs(mass_init)
+        # iter-164: centralized helper.
+        from legoesm.diagnostics import compute_relative_drift
+        rel_err = compute_relative_drift([mass_init, mass_final])
         assert rel_err < 1e-3, (
             f"Tracer mass conservation error: {rel_err:.4e} "
             f"(init={mass_init:.6e}, final={mass_final:.6e})"
@@ -1067,7 +1071,9 @@ class TestTracerMassConservation:
             (state.tracers["q_v"] * dp_final).astype(jnp.float64)
             * grid.area.astype(jnp.float64)[:, :, None]))
 
-        rel_err = abs(mass_final - mass_init) / abs(mass_init)
+        # iter-164: centralized helper.
+        from legoesm.diagnostics import compute_relative_drift
+        rel_err = compute_relative_drift([mass_init, mass_final])
         assert rel_err < 1e-3, (
             f"Hybrid tracer mass conservation error: {rel_err:.4e} "
             f"(init={mass_init:.6e}, final={mass_final:.6e})"

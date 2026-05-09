@@ -46,38 +46,62 @@ def _global_sum(x):
     return x
 
 
-def _ocean_area_sum_mpas(field_2d, mask, mesh):
+def _ownership_weight(mask, owned_mask):
+    """Combine land mask with optional owned-cell mask.
+
+    Under MPI partitioning each rank holds owned + halo cells.  Halo
+    cells are also stored on neighbouring ranks, so summing them on
+    every rank double-counts.  ``owned_mask`` (1.0 for owned cells,
+    0.0 for halo cells) zeros out halo contributions in the local sum
+    *before* the global allreduce.
+
+    For single-rank or shard-replicated runs ``owned_mask`` is None
+    and we return ``mask`` unchanged.
+    """
+    if owned_mask is None:
+        return mask
+    return mask * owned_mask.astype(mask.dtype)
+
+
+def _ocean_area_sum_mpas(field_2d, mask, mesh, owned_mask=None):
     """Area-weighted sum over ocean cells. MPI-aware (#177)."""
     field_acc = cast(field_2d, _ACC_MODULE, "accumulate")
-    mask_acc = cast(mask, _ACC_MODULE, "accumulate")
+    eff_mask = _ownership_weight(mask, owned_mask)
+    mask_acc = cast(eff_mask, _ACC_MODULE, "accumulate")
     area_acc = cast(mesh.areaCell, _ACC_MODULE, "accumulate")
     return _global_sum(jnp.sum(field_acc * mask_acc * area_acc))
 
 
-def _ocean_volume_sum_mpas(field_3d, h_k, mask, mesh):
+def _ocean_volume_sum_mpas(field_3d, h_k, mask, mesh, owned_mask=None):
     """Volume-weighted sum over ocean cells. MPI-aware (#177)."""
     field_acc = cast(field_3d, _ACC_MODULE, "accumulate")
     h_k_acc = cast(h_k, _ACC_MODULE, "accumulate")
-    mask_acc = cast(mask, _ACC_MODULE, "accumulate")
+    eff_mask = _ownership_weight(mask, owned_mask)
+    mask_acc = cast(eff_mask, _ACC_MODULE, "accumulate")
     area_acc = cast(mesh.areaCell, _ACC_MODULE, "accumulate")
     return _global_sum(jnp.sum(
         field_acc * h_k_acc * mask_acc[:, jnp.newaxis] * area_acc[:, jnp.newaxis]
     ))
 
 
-def _ocean_volume_sums_old_new(field_old, h_k_old, field_new, h_k_new, mask, mesh):
+def _ocean_volume_sums_old_new(field_old, h_k_old, field_new, h_k_new,
+                                mask, mesh, owned_mask=None):
     """Stack the 3 (old / new / volume) volume-weighted scalar sums into
     a single ``_global_sum`` allreduce.
 
     The old leg uses ``h_k_old``; both new legs share ``h_k_new``, so
     the new pair is fused into one column reduction first, then the 3
     scalars are stacked for a single ``_global_sum``.
+
+    ``owned_mask`` (optional) zeros out halo cells in the local sum
+    before the global allreduce — see :func:`_ownership_weight`.
     """
     fold_acc = cast(field_old, _ACC_MODULE, "accumulate")
     fnew_acc = cast(field_new, _ACC_MODULE, "accumulate")
     h_old_acc = cast(h_k_old, _ACC_MODULE, "accumulate")
     h_new_acc = cast(h_k_new, _ACC_MODULE, "accumulate")
-    mask_acc = cast(mask, _ACC_MODULE, "accumulate")
+    eff_mask = _ownership_weight(mask, owned_mask)
+    mask_acc = cast(eff_mask, _ACC_MODULE, "accumulate")
     area_acc = cast(mesh.areaCell, _ACC_MODULE, "accumulate")
     weighted = mask_acc[:, jnp.newaxis] * area_acc[:, jnp.newaxis]
     # ``new`` pair shares ``h_new_acc * weighted`` weight — fuse first
@@ -91,8 +115,14 @@ def _ocean_volume_sums_old_new(field_old, h_k_old, field_new, h_k_new, mask, mes
     return _global_sum(jnp.stack([field_old_sum, _new_pair[..., 0], _new_pair[..., 1]]))
 
 
-def fix_volume_mpas(state_new, state_old, mesh, z_coord, min_water_column_m=None):
-    """Fix volume conservation via uniform eta correction."""
+def fix_volume_mpas(state_new, state_old, mesh, z_coord,
+                    min_water_column_m=None, owned_mask=None):
+    """Fix volume conservation via uniform eta correction.
+
+    ``owned_mask`` (optional, shape ``(n_local_cells,)``) restricts the
+    local accumulators to owned cells before the global allreduce so
+    halo cells are not double-counted under MPI partitioning.
+    """
     mask = state_old.land_mask.data
 
     # Three area-weighted scalars (eta_old, eta_new, ocean_area) share
@@ -100,7 +130,8 @@ def fix_volume_mpas(state_new, state_old, mesh, z_coord, min_water_column_m=None
     # the local column reduction and the allreduce.
     eta_old_acc = cast(state_old.eta.data, _ACC_MODULE, "accumulate")
     eta_new_acc = cast(state_new.eta.data, _ACC_MODULE, "accumulate")
-    mask_acc = cast(mask, _ACC_MODULE, "accumulate")
+    eff_mask = _ownership_weight(mask, owned_mask)
+    mask_acc = cast(eff_mask, _ACC_MODULE, "accumulate")
     area_acc = cast(mesh.areaCell, _ACC_MODULE, "accumulate")
     weighted = mask_acc * area_acc
     _local = jnp.sum(
@@ -125,8 +156,12 @@ def fix_volume_mpas(state_new, state_old, mesh, z_coord, min_water_column_m=None
     )
 
 
-def fix_heat_mpas(state_new, state_old, mesh, z_coord, min_water_column_m=None):
-    """Fix heat conservation via uniform T correction."""
+def fix_heat_mpas(state_new, state_old, mesh, z_coord,
+                  min_water_column_m=None, owned_mask=None):
+    """Fix heat conservation via uniform T correction.
+
+    ``owned_mask`` (optional) — see :func:`fix_volume_mpas`.
+    """
     mask = state_old.land_mask.data
     H_bathy = state_old.H_bathy.data
 
@@ -141,6 +176,7 @@ def fix_heat_mpas(state_new, state_old, mesh, z_coord, min_water_column_m=None):
 
     heat_old, heat_new, vol_new = _ocean_volume_sums_old_new(
         state_old.T.data, h_k_old, state_new.T.data, h_k_new, mask, mesh,
+        owned_mask=owned_mask,
     )
 
     correction = (heat_old - heat_new) / jnp.maximum(vol_new, 1.0)
@@ -151,8 +187,12 @@ def fix_heat_mpas(state_new, state_old, mesh, z_coord, min_water_column_m=None):
     )
 
 
-def fix_salt_mpas(state_new, state_old, mesh, z_coord, min_water_column_m=None):
-    """Fix salt conservation via uniform S correction."""
+def fix_salt_mpas(state_new, state_old, mesh, z_coord,
+                  min_water_column_m=None, owned_mask=None):
+    """Fix salt conservation via uniform S correction.
+
+    ``owned_mask`` (optional) — see :func:`fix_volume_mpas`.
+    """
     mask = state_old.land_mask.data
     H_bathy = state_old.H_bathy.data
 
@@ -167,6 +207,7 @@ def fix_salt_mpas(state_new, state_old, mesh, z_coord, min_water_column_m=None):
 
     salt_old, salt_new, vol_new = _ocean_volume_sums_old_new(
         state_old.S.data, h_k_old, state_new.S.data, h_k_new, mask, mesh,
+        owned_mask=owned_mask,
     )
 
     correction = (salt_old - salt_new) / jnp.maximum(vol_new, 1.0)
@@ -181,11 +222,16 @@ def mpas_ocean_conservation_fixer(
     state_new, state_old, mesh, z_coord, config,
     expected_dHeat: float = 0.0,
     expected_dSalt: float = 0.0,
+    owned_mask=None,
 ):
     """Apply all conservation fixers simultaneously (#166, #177).
 
-    expected_dHeat/dSalt: expected forcing change [tracer*m³].
-    The fixer only removes numerical drift beyond this expected change.
+    expected_dHeat/dSalt: expected forcing change [tracer*m³] **as a
+    global quantity** (caller is responsible for the cross-rank sum).
+
+    owned_mask : optional (n_local_cells,) array.  Under MPI, restricts
+    the local accumulators to owned cells before the global allreduce
+    so halo cells are not double-counted across neighbouring ranks.
     """
     mask = state_old.land_mask.data
     min_col = config.min_water_column_m
@@ -199,7 +245,8 @@ def mpas_ocean_conservation_fixer(
     # (float64 in mixed mode, float32 in pure fp32 or on Metal). See
     # issue #167 — the previous code hard-coded float64 which crashed
     # on backends without x64 support.
-    mask_acc = cast(mask, _ACC_MODULE, "accumulate")
+    eff_mask = _ownership_weight(mask, owned_mask)
+    mask_acc = cast(eff_mask, _ACC_MODULE, "accumulate")
     area_acc = cast(mesh.areaCell, _ACC_MODULE, "accumulate")
     weighted_area_acc = mask_acc * area_acc
 

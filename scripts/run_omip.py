@@ -1639,7 +1639,23 @@ def _check_finite(state, grid_type):
     if not ok_finite:
         return False
 
-    return bool(jnp.max(jnp.abs(T_ocean)) < 100.0)
+    # Bound checks: ocean SSH variations are < 10 m even with
+    # tsunamis (Mariana Trench depth ~11 km but η is the surface
+    # elevation, not depth).  Use 1000 m as the sanity threshold —
+    # well above any realistic dynamic range, but catches the
+    # iter-71 cube C24 OMIP BLOWUP (eta_max=2677 m at step 500).
+    # iter-79 added the η bound; previously only T was bounded
+    # (< 100 °C), so an η-only blowup could in principle escape
+    # detection (T might still be reasonable while η diverged).
+    # The iter-71 BLOWUP was caught via the T bound at step 500
+    # but the η bound is defensive.
+    #
+    # iter-81 codex LOW: state must remain below the threshold
+    # (strict ``<``).  Exactly 1000 m would trigger a BLOWUP —
+    # acceptable since 1000 m is already absurd for SSH.
+    if not bool(jnp.max(jnp.abs(T_ocean)) < 100.0):
+        return False
+    return bool(jnp.max(jnp.abs(eta_ocean)) < 1000.0)
 
 
 # ===========================================================================
@@ -1782,6 +1798,16 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
     snap_steps = {0, n_steps}
     for i in range(1, min(10, n_steps)):
         snap_steps.add(max(1, int(i * n_steps / 10)))
+
+    # iter-97: capture BLOWUP details so ``results.txt`` can
+    # surface them rather than just reporting the last *clean*
+    # diagnostic (which masks BLOWUPs as "PASS-shaped FAIL").
+    # The iter-96 cube OMIP smoke saw SST=19.76 in
+    # results.txt, and only by re-running with verbose output
+    # was it visible that max|T|=8.3M K and η=2678 m had
+    # actually blown up.  The BLOWUP info now lives in
+    # ``blowup_info`` and is emitted in results.txt.
+    blowup_info: dict | None = None
 
     # Initial diagnostics
     scalars = _extract_scalars(state, grid_type, grid, z_coord)
@@ -2009,11 +2035,58 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                     mask = state.land_mask.data
                     m3 = mask[:, jnp.newaxis] if grid_type == "mpas" else mask[..., jnp.newaxis]
                     T_oc = jnp.where(m3 > 0.5, state.T.data, 0.0)
-                    print(f"  BLOWUP step {step}: max|T|={float(jnp.max(jnp.abs(T_oc))):.1f}"
-                          f" T_finite={bool(jnp.all(jnp.isfinite(T_oc)))}"
-                          f" eta_max={float(jnp.max(jnp.abs(state.eta.data))):.2f}")
+                    eta_max = float(jnp.max(jnp.abs(state.eta.data)))
+                    eta_finite = bool(jnp.all(jnp.isfinite(state.eta.data)))
+                    T_max = float(jnp.max(jnp.abs(T_oc)))
+                    T_finite = bool(jnp.all(jnp.isfinite(T_oc)))
+                    print(
+                        f"  BLOWUP step {step}: "
+                        f"max|T|={T_max:.1f} "
+                        f"T_finite={T_finite} "
+                        f"eta_max={eta_max:.2f} "
+                        f"eta_finite={eta_finite}"
+                    )
+                    # iter-81 codex LOW: report Reason for BOTH T
+                    # and η triggers (iter-79 reported only η).
+                    # Multiple conditions can fire simultaneously
+                    # (e.g., a NaN cascade hits both T and η).
+                    reasons = []
+                    if not T_finite:
+                        msg = "T contains NaN/Inf"
+                        print(f"    Reason: {msg}")
+                        reasons.append(msg)
+                    elif T_max >= 100.0:
+                        msg = (f"|T| reached {T_max:.1f} °C "
+                               f"(sanity threshold 100 °C)")
+                        print(f"    Reason: {msg}")
+                        reasons.append(msg)
+                    if not eta_finite:
+                        msg = "η contains NaN/Inf"
+                        print(f"    Reason: {msg}")
+                        reasons.append(msg)
+                    elif eta_max >= 1000.0:
+                        msg = (f"|η| reached {eta_max:.0f} m "
+                               f"(iter-79 sanity threshold 1000 m)")
+                        print(f"    Reason: {msg}")
+                        reasons.append(msg)
+                    # iter-97: persist BLOWUP info so the report
+                    # can surface it in results.txt.
+                    blowup_info = {
+                        "step": step,
+                        "day": step * dt / 86400.0,
+                        "T_max": T_max,
+                        "T_finite": T_finite,
+                        "eta_max": eta_max,
+                        "eta_finite": eta_finite,
+                        "reasons": reasons,
+                    }
                 else:
                     print(f"  BLOWUP at step {step}")
+                    blowup_info = {
+                        "step": step,
+                        "day": step * dt / 86400.0,
+                        "reasons": ["spectral state non-finite"],
+                    }
                 blown_up = True
                 break
 
@@ -2054,15 +2127,24 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
 
     wall = time.time() - t0
     ok = not blown_up and _check_finite(state, grid_type)
-    return state, diag, wall, ok
+    return state, diag, wall, ok, blowup_info
 
 
 # ===========================================================================
 # Output
 # ===========================================================================
 
-def _save_output(output_dir: Path, diag, args, grid_type, wall_time, ok):
-    """Save diagnostics and metadata."""
+def _save_output(output_dir: Path, diag, args, grid_type, wall_time, ok,
+                 blowup_info: dict | None = None):
+    """Save diagnostics and metadata.
+
+    iter-97: ``blowup_info`` (added kwarg) carries the BLOWUP
+    step / max|T| / max|η| / reasons captured at the time the
+    state went non-finite, so ``results.txt`` can clearly mark
+    BLOWUP runs as such instead of silently reporting the last
+    *clean* SST/SSS/SSH (which led to a false-improvement claim
+    in iter-96).
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Timeseries CSV
@@ -2072,6 +2154,31 @@ def _save_output(output_dir: Path, diag, args, grid_type, wall_time, ok):
     with open(csv_path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(keys)
+        n_rows = len(diag[keys[0]])
+        for i in range(n_rows):
+            w.writerow([diag[k][i] if i < len(diag[k]) else "" for k in keys])
+
+    # iter-25: also write a matrix-compatible ``mean_timeseries.csv``
+    # so ``run_ocean_test_matrix.py --replot`` (and the cross-grid
+    # plotter generally) can pick this up.  The ocean-matrix
+    # plotter expects ``time_days`` column + a set of mean_*
+    # diagnostics; rename columns appropriately and write a
+    # parallel CSV.  Don't replace ``timeseries.csv`` since that
+    # filename + ``results.json`` is the existing OMIP output
+    # contract.
+    mean_csv_path = output_dir / "mean_timeseries.csv"
+    column_renames = {
+        "day": "time_days",
+        "SST": "mean_SST",
+        "SSS": "mean_SSS",
+        "SSH": "mean_eta",
+        "max_speed": "max_speed",
+        "step": "step",
+    }
+    out_keys = [column_renames.get(k, k) for k in keys]
+    with open(mean_csv_path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(out_keys)
         n_rows = len(diag[keys[0]])
         for i in range(n_rows):
             w.writerow([diag[k][i] if i < len(diag[k]) else "" for k in keys])
@@ -2092,9 +2199,61 @@ def _save_output(output_dir: Path, diag, args, grid_type, wall_time, ok):
         "final_SSS": diag["SSS"][-1] if diag["SSS"] else None,
         "final_SSH": diag["SSH"][-1] if diag["SSH"] else None,
         "cli_args": vars(args),
+        # iter-97: include BLOWUP info in results.json so the
+        # CLI summary table can label BLOWUP rows distinctly
+        # rather than displaying the last-clean SST.
+        "blowup_info": blowup_info,
     }
     with open(output_dir / "results.json", "w") as f:
         json.dump(results, f, indent=2, default=str)
+
+    # iter-25: also write a matrix-compatible ``results.txt`` next to
+    # the existing ``results.json`` so the ocean cross-grid plotter
+    # (which parses ``key: value`` lines from results.txt) can pick
+    # this up.
+    final_sst = diag["SST"][-1] if diag.get("SST") else None
+    final_sss = diag["SSS"][-1] if diag.get("SSS") else None
+    final_ssh = diag["SSH"][-1] if diag.get("SSH") else None
+    notes_parts = []
+    # iter-97: lead with BLOWUP marker when the run failed
+    # because a BLOWUP was detected.  This is unambiguous —
+    # readers no longer mistake "SST=19.76 (last clean diag)"
+    # for a healthy run.
+    if blowup_info is not None:
+        notes_parts.append(
+            f"BLOWUP at step {blowup_info['step']} "
+            f"(day {blowup_info.get('day', 0):.2f})"
+        )
+        if "T_max" in blowup_info:
+            notes_parts.append(f"max|T|={blowup_info['T_max']:.3e} °C")
+        if "eta_max" in blowup_info:
+            notes_parts.append(f"max|η|={blowup_info['eta_max']:.0f} m")
+        for reason in blowup_info.get("reasons", []):
+            notes_parts.append(f"reason: {reason}")
+        # Also keep the last clean diagnostic so a reader can
+        # see what the system looked like at the last sane
+        # state — but mark it as such.
+        if final_sst is not None:
+            notes_parts.append(f"last clean SST={final_sst:.3f}")
+    else:
+        if final_sst is not None:
+            notes_parts.append(f"SST={final_sst:.3f}")
+        if final_sss is not None:
+            notes_parts.append(f"SSS={final_sss:.3f}")
+        if final_ssh is not None:
+            notes_parts.append(f"SSH={final_ssh:.3e}")
+    notes_str = ", ".join(notes_parts) if notes_parts else "OMIP complete"
+    with open(output_dir / "results.txt", "w") as f:
+        f.write(f"test: omip\n")
+        f.write(f"grid: {grid_type}\n")
+        f.write(f"resolution: {results['resolution']}\n")
+        f.write(f"days: {results['days']}\n")
+        f.write(f"dt: {results['dt']}\n")
+        f.write(f"levels: {results['nlev']}\n")
+        f.write(f"physics: {results['physics']}\n")
+        f.write(f"status: {results['status']}\n")
+        f.write(f"notes: {notes_str}\n")
+        f.write(f"wall_time: {wall_time:.1f}s\n")
 
     # Plot timeseries
     try:
@@ -2129,7 +2288,27 @@ def _save_output(output_dir: Path, diag, args, grid_type, wall_time, ok):
 
 def run_omip_single(grid_type: str, args) -> dict:
     """Run OMIP simulation on a single grid type."""
-    resolution = args.resolution or GRID_DEFAULTS[grid_type]["resolution"]
+    # iter-115 codex iter-114-followup HIGH-1: pre-iter-115,
+    # ``--resolution 16`` was applied verbatim to every grid
+    # type.  Cube/spectral parsed it (silently wrong: cube
+    # ``int("16"[1:]) = 6``); latlon errored; mpas
+    # interpreted as level 16 (4.29e+10 cells).  Now use the
+    # iter-115 shared dispatch helper.
+    if args.resolution is not None:
+        from legoesm.driver.cli_resolution import (
+            expand_cli_resolution, validate_cli_resolution,
+        )
+        N = validate_cli_resolution(
+            args.resolution,
+            additional_examples="'C24', 'ico3', '36x72', 'T21', '50km'",
+        )
+        if N is not None:
+            resolution = expand_cli_resolution(N, grid_type)
+        else:
+            # Pre-formatted per-grid string — pass through.
+            resolution = args.resolution
+    else:
+        resolution = GRID_DEFAULTS[grid_type]["resolution"]
     dt = args.dt or GRID_DEFAULTS[grid_type]["dt"]
     days = 30.0 if args.quick else args.days
     n_steps = int(days * 86400.0 / dt)
@@ -2609,7 +2788,7 @@ def run_omip_single(grid_type: str, args) -> dict:
         )
 
     # Run time loop
-    state, diag, wall_time, ok = _run_omip_loop(
+    state, diag, wall_time, ok, blowup_info = _run_omip_loop(
         model, state, grid_type, grid, z_coord,
         dt, n_steps, diag_every,
         label=f"{grid_type}/{resolution}",
@@ -2627,12 +2806,21 @@ def run_omip_single(grid_type: str, args) -> dict:
     status = "PASS" if ok else "FAIL"
     icon = "  " if ok else "**"
     sst_str = f"SST={diag['SST'][-1]:.2f}" if diag["SST"] else ""
+    # iter-97: when the run blew up, ``diag['SST'][-1]`` is the
+    # last *clean* diagnostic from BEFORE the BLOWUP, which can
+    # mislead the reader into thinking the run is healthy.
+    # Show the BLOWUP marker explicitly.
+    if blowup_info is not None:
+        sst_str = f"BLOWUP at step {blowup_info['step']}"
     print(f"\n  {icon} {status} | {grid_type}/{resolution} | "
           f"{wall_time:.1f}s | {sst_str}")
 
     # Save output
     output_dir = Path(args.output) / grid_type / resolution
-    results = _save_output(output_dir, diag, args, grid_type, wall_time, ok)
+    results = _save_output(
+        output_dir, diag, args, grid_type, wall_time, ok,
+        blowup_info=blowup_info,
+    )
 
     ALL_RESULTS.append(results)
     return results
@@ -2655,7 +2843,16 @@ def print_summary():
     print(f"  {'-'*15} {'-'*10} {'-'*8} {'-'*10} {'-'*10}")
 
     for r in ALL_RESULTS:
-        sst = f"{r['final_SST']:.2f}" if r["final_SST"] is not None else "N/A"
+        # iter-97: when the run blew up, show "BLOWUP@N" instead
+        # of the last-clean SST (which misled the iter-96 audit
+        # into a false-improvement claim).
+        blowup = r.get("blowup_info")
+        if blowup is not None:
+            sst = f"BLOWUP@{blowup['step']}"
+        elif r["final_SST"] is not None:
+            sst = f"{r['final_SST']:.2f}"
+        else:
+            sst = "N/A"
         print(f"  {r['grid_type']:<15s} {r['resolution']:<10s} "
               f"{r['status']:<8s} {r['wall_time_s']:<10.1f} {sst:<10s}")
 

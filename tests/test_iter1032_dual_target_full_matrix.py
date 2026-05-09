@@ -144,7 +144,13 @@ def test_iter1032_cosine_bell_mass_conserves(cdgrid_setup):
             apply_fortran_xppm_boundary=True,
         )
     mass_final = float(jnp.sum(h * np.asarray(grid.area)))
-    drift = abs(mass_final - mass_init) / mass_init
+    # iter-164: migrated from inline ``abs(final - init) / init``
+    # (note: lacked ``abs()`` on denom — would silently pass for
+    # negative ``mass_init``).  Centralized helper uses
+    # ``abs(baseline)`` and is NaN-aware.  Same migration as
+    # iter-157 / iter-159 sweep.
+    from legoesm.diagnostics import compute_relative_drift
+    drift = compute_relative_drift([mass_init, mass_final])
     assert drift < 5e-7, (
         f"Cosine bell mass drift = {drift:.3e} > 5e-7.  "
         f"iter-1030 measured ~3.2e-7.")

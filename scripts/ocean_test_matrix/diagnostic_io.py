@@ -91,14 +91,22 @@ def _save_conservation(output_dir: Path, case_name: str, diag: dict,
     vol = np.array(vol_vals, dtype=np.float64)
     heat = np.array(heat_vals, dtype=np.float64)
     t = np.array(times, dtype=np.float64)
-    vol_rel = (vol - vol[0]) / max(abs(vol[0]), 1e-30)
-    heat_rel = (heat - heat[0]) / max(abs(heat[0]), 1e-30)
+    # iter-91: this duplicate of ``run_ocean_test_matrix._save_conservation``
+    # in the ``ocean_test_matrix`` sibling package was missed in
+    # iter-88 / iter-90.  Same iter-78/80 pathology pattern (1e-30
+    # denominator floor amplifying machine epsilon to spurious 1e+13
+    # drifts for rest-state baselines).  Migrated to delegate to
+    # the canonical ``relative_drift_series`` helper from
+    # ``legoesm.diagnostics.conservation_drift``.
+    from legoesm.diagnostics.conservation_drift import relative_drift_series
+    vol_rel = relative_drift_series(vol)
+    heat_rel = relative_drift_series(heat)
 
     n_panels = 2
     has_salt = len(salt_vals) == len(times)
     if has_salt:
         salt = np.array(salt_vals, dtype=np.float64)
-        salt_rel = (salt - salt[0]) / max(abs(salt[0]), 1e-30)
+        salt_rel = relative_drift_series(salt)
         n_panels = 3
 
     with open(output_dir / "conservation_timeseries.csv", "w") as f:
@@ -335,6 +343,18 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
                 if field_key in ("SST", "speed_sfc") and "u_sfc" in snapshots[step] and "v_sfc" in snapshots[step]:
                     u_raw = np.asarray(snapshots[step]["u_sfc"], dtype=np.float64)
                     v_raw = np.asarray(snapshots[step]["v_sfc"], dtype=np.float64)
+                    # iter-21: fix the same staggered-velocity shape
+                    # mismatch as iter-19 patched in
+                    # ``run_ocean_test_matrix.py``.  Average u along
+                    # the +1 lon faces and v along the +1 lat faces
+                    # to cell centres before regridding.
+                    if u_raw.shape != v_raw.shape:
+                        if u_raw.shape[1] == v_raw.shape[1] + 1:
+                            u_raw = 0.5 * (u_raw[:, :-1] + u_raw[:, 1:])
+                        if v_raw.shape[0] == u_raw.shape[0] + 1:
+                            v_raw = 0.5 * (v_raw[:-1, :] + v_raw[1:, :])
+                    if u_raw.shape != v_raw.shape:
+                        continue  # non-canonical, skip quiver
                     _lm = (np.asarray(snapshots[step]["land_mask"], dtype=np.float64)
                             if "land_mask" in snapshots[step] else None)
                     u_reg = _regrid_2d(u_raw, lon_deg, lat_deg, coord_kind,

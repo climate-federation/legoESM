@@ -149,7 +149,12 @@ def main():
             apply_fortran_xppm_boundary=True,
         )
     mass_final = float(jnp.sum(h * np.asarray(grid.area)))
-    drift = abs(mass_final - mass_init) / mass_init
+    # iter-93 audit followup: previously
+    # ``abs(mass_final - mass_init) / mass_init`` would NaN if
+    # mass_init = 0 (degenerate test case).  Migrate to the
+    # shared helper for consistency with iter-88 conventions.
+    from legoesm.diagnostics.conservation_drift import compute_relative_drift
+    drift = compute_relative_drift([mass_init, mass_final])
     cb_pass = drift < 5e-7
     print(f"      mass_drift = {drift:.3e}  "
           f"({'PASS <5e-7' if cb_pass else 'FAIL ≥5e-7'})")

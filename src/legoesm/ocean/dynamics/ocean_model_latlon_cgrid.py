@@ -125,17 +125,6 @@ def _compute_advection_flux_div(
     AB2 linear combination is NOT guaranteed monotone.  This is a
     known limitation shared with MITgcm.
     """
-    from legoesm.ocean.dynamics.latlon_cgrid_operators import divergence_cgrid
-    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
-        _upwind_to_u_points,
-        _upwind_to_v_points,
-        _tvd_to_u_points,
-        _tvd_to_v_points,
-    )
-    from legoesm.ocean.vertical import (
-        flux_form_vertical_tracer_advection,
-        flux_form_vertical_tracer_advection_tvd,
-    )
 
     if tracer_advection == "ppm_fct":
         from legoesm.ocean.advection import fct_tracer_advection
@@ -816,9 +805,6 @@ class LatLonCGridOceanModel:
         # (Hallberg & Adcroft 2009, Shchepetkin & McWilliams 2005).
         _min_uface_op = min_cell_to_uface
         _min_vface_op = min_cell_to_vface
-        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
-            _interp_to_v_points,
-        )
         from legoesm.ocean.dynamics.latlon_cgrid_operators import (
             divergence_cgrid, interp_cell_to_uface,
         )
@@ -897,7 +883,6 @@ class LatLonCGridOceanModel:
         # The horizontal flux integrates to zero by the 2D divergence theorem.
         # The vertical flux telescopes to surface/bottom (both zero).
         # Total conservation is exact.
-        from legoesm.ocean.vertical import diagnose_w_from_flux_div
 
 
         h_k_new = compute_layer_thickness(

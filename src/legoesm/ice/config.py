@@ -33,8 +33,8 @@ class SeaIceConfig(NamedTuple):
     # Transport
     drag_ocean: float = 5.5e-3      # Ocean-ice drag coefficient
     drag_atm: float = 1.3e-3        # Air-ice drag coefficient
-    rho_air_ref: float = 1.225      # Reference air density [kg/m3]
-    rho_ocean_ref: float = 1025.0   # Reference ocean density [kg/m3] (= eos.rho_0)
+    rho_air_ref: float = 1.225      # Reference air density [kg/m3] (= constants.rho_air)
+    rho_ocean_ref: float = 1025.0   # Reference ocean density [kg/m3] (= constants.rho_ocean = eos.rho_0)
     T_freeze_ocean: float = 271.35  # Ocean freezing point [K] (= constants.T_freeze_ocean)
     T_ice_min: float = 180.0        # Lower bound for numerical stability [K]
     ocean_heat_transfer_coeff: float = 20.0  # Ocean-ice heat transfer [W/m^2/K]
