@@ -37,47 +37,74 @@ def prescribed_surface_forcing(
     SurfaceForcingOutput
     """
     nlev = u.shape[-1]
-    shape_3d = u.shape
     dtype = u.dtype
 
     # Top layer thickness
-    dz_0 = z_coord.dz_ref[0] * jacobian  # (6, n, n)
+    dz_0 = z_coord.dz_ref[0] * jacobian  # T-point shape
     inv_rho_dz = 1.0 / (rho_0_ref * jnp.maximum(dz_0, 1e-10))
 
-    # Wind stress from shared grid-agnostic computation
+    # Wind stress from shared grid-agnostic computation (T-point shape)
     tau_x, tau_y = compute_wind_stress(grid.grid_lat, cfg)
 
-    # Build top-layer-only tendencies via ``jnp.pad`` along the
-    # trailing axis instead of allocating a fresh full ``(*, nlev)``
-    # zero buffer per field and scattering the surface row.  Single
-    # Pad HLO op each — this physics fires every ocean step in
-    # configurations that use the prescribed surface forcing.
-    nlev = shape_3d[-1]
-    pad_axes = ((0, 0),) * (len(shape_3d) - 1)
-    du_dt = jnp.pad(
-        (tau_x * inv_rho_dz)[..., None], (*pad_axes, (0, nlev - 1)),
+    # T-point tendencies (cell-center stagger)
+    du_dt_T = tau_x * inv_rho_dz   # T-point shape
+    dv_dt_T = tau_y * inv_rho_dz   # T-point shape
+
+    # Detect C-grid staggering: lat-lon C-grid has u at (n_lat, n_lon+1)
+    # and v at (n_lat+1, n_lon), while T is at (n_lat, n_lon).  On A-grid
+    # or cubed-sphere, u and v share T's shape — no interpolation needed.
+    T_2d_shape = inv_rho_dz.shape
+    u_2d_shape = u.shape[:-1]
+    v_2d_shape = v.shape[:-1]
+    is_cgrid_u = (
+        len(u_2d_shape) == 2 and len(T_2d_shape) == 2
+        and u_2d_shape[0] == T_2d_shape[0]
+        and u_2d_shape[1] == T_2d_shape[1] + 1
     )
-    dv_dt = jnp.pad(
-        (tau_y * inv_rho_dz)[..., None], (*pad_axes, (0, nlev - 1)),
+    is_cgrid_v = (
+        len(v_2d_shape) == 2 and len(T_2d_shape) == 2
+        and v_2d_shape[0] == T_2d_shape[0] + 1
+        and v_2d_shape[1] == T_2d_shape[1]
     )
 
-    # Heat flux: dT/dt = Q_net / (rho_0 * c_sw * dz_0)
+    # Interpolate du_dt to u-faces (lon-stagger, periodic wrap)
+    if is_cgrid_u:
+        du_dt_uf = 0.5 * (du_dt_T + jnp.roll(du_dt_T, 1, axis=1))
+        du_dt_uf = jnp.concatenate([du_dt_uf, du_dt_uf[:, 0:1]], axis=1)
+    else:
+        du_dt_uf = du_dt_T
+
+    # Interpolate dv_dt to v-faces (lat-stagger, zero at poles)
+    if is_cgrid_v:
+        dv_dt_int = 0.5 * (dv_dt_T[:-1] + dv_dt_T[1:])  # (n_lat-1, n_lon)
+        dv_dt_vf = jnp.pad(dv_dt_int, ((1, 1), (0, 0)))
+    else:
+        dv_dt_vf = dv_dt_T
+
+    # Build top-layer-only tendencies via jnp.pad along the trailing axis
+    pad_axes_u = ((0, 0),) * (len(u.shape) - 1)
+    pad_axes_v = ((0, 0),) * (len(v.shape) - 1)
+    pad_axes_T = ((0, 0),) * (len(T.shape) - 1)
+
+    du_dt = jnp.pad(du_dt_uf[..., None], (*pad_axes_u, (0, nlev - 1)))
+    dv_dt = jnp.pad(dv_dt_vf[..., None], (*pad_axes_v, (0, nlev - 1)))
+
+    # Heat flux: dT/dt = Q_net / (rho_0 * c_sw * dz_0)  — T-point
     Q_net = jnp.full_like(dz_0, cfg.Q_net, dtype=dtype)
     inv_rho_csw_dz = 1.0 / (rho_0_ref * c_sw * jnp.maximum(dz_0, 1e-10))
     dT_dt = jnp.pad(
-        (Q_net * inv_rho_csw_dz)[..., None], (*pad_axes, (0, nlev - 1)),
+        (Q_net * inv_rho_csw_dz)[..., None], (*pad_axes_T, (0, nlev - 1)),
     )
 
-    # Freshwater (virtual salt flux): dS/dt = +S * E_minus_P / dz_0
-    # Positive E-P means net evaporation → water leaves → salt concentrates → dS/dt > 0
+    # Freshwater (virtual salt flux): T-point
     if cfg.E_minus_P != 0.0:
         inv_dz = 1.0 / jnp.maximum(dz_0, 1e-10)
         dS_dt = jnp.pad(
             (S[..., 0] * cfg.E_minus_P * inv_dz)[..., None],
-            (*pad_axes, (0, nlev - 1)),
+            (*pad_axes_T, (0, nlev - 1)),
         )
     else:
-        dS_dt = jnp.zeros(shape_3d, dtype=dtype)
+        dS_dt = jnp.zeros(T.shape, dtype=dtype)
 
     return SurfaceForcingOutput(
         du_dt=du_dt, dv_dt=dv_dt, dT_dt=dT_dt, dS_dt=dS_dt,
