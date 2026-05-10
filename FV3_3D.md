@@ -816,6 +816,18 @@ Key iterations:
   Combined with iter-320 (post-acoustic damp_v / damp_w) +
   iter-321 (damp_w global) + iter-322 (damp_v global), ALL 5 NH
   d_con sites now have cv-flag verification.  3/3.
+- Iter 326: quantitative cube-imprint reduction from iter-325
+  duogrid wiring on the NH 3D path.  iter-325 verified the
+  wiring CHANGES NH state when ``use_duogrid=True``; iter-326
+  pins the directional impact: with FV3 toolkit OFF (isolating
+  the halo effect), the duogrid path's NH cube-imprint ratio
+  ``edge_std/interior_std`` ≤ no-duogrid path ratio × 1.05
+  (5 % slack absorbs C8 noise).  Plus the wind diff
+  ``s_duo.v - s_plain.v`` concentrates at panel edges with
+  ``edge_max > 1.5 × interior_max`` — proves the halo
+  correction lands at the cube-edge halo cells (not a global
+  shift no-op).  Most-direct quantitative evidence that
+  iter-325 actually reduces NH cube-edge artifacts.  2/2.
 - Iter 325: thread duogrid kinked-to-extended remap through the
   3 NH halo sites that previously bypassed it.  PE 3D path
   (``primitive_eq_cdgrid.py``) threads ``grid.duogrid`` through
