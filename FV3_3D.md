@@ -759,6 +759,26 @@ Key iterations:
   accidental addition/removal of a d_con site without
   updating runtime test matrix (iter-272-280).  4/4 pass
   in 0.3 s.
+- Iter 320: port FV3 ``cv_air`` heat-capacity factor for the
+  NH ``d_con`` KE→heat conversion (FV3 ``dyn_core.F90:1795``
+  ``hydrostatic = .false.`` branch).  FV3 divides
+  ``heat_source`` by ``cv_air * delp`` in the NH branch
+  because compressible NH dynamics conserves total energy via
+  internal energy ``c_v · T`` (constant volume) — not enthalpy
+  ``c_p · T`` (constant pressure, hydrostatic limit).
+  legoESM's iter-203/207/209/222/224/226 NH ports inherited the
+  ``c_pd`` denominator from PE, which UNDER-HEATS by
+  ``c_v / c_p ≈ 0.714`` (~40 % under-heating relative to FV3 NH).
+  iter-320 adds the opt-in ``use_fv3_d_con_cv: bool = False``
+  config field that swaps ``c_pd → c_vd`` at ALL 5 NH d_con
+  sites (damp_v, damp_w, corner_div, cell-centre div_damp, ah).
+  Default ``False`` preserves bit-for-bit baseline; opt in for
+  FV3-faithful heating partition.  PE path unaffected (PE
+  ``c_pd`` matches FV3 ``cp_air`` branch).  4-test pass set
+  pinning bit-for-bit baseline + element-wise ``c_pd · Δθ_p_cp
+  == c_vd · Δθ_p_cv`` invariant (rtol=1e-12) + (c_p/c_v) ≈ 1.40
+  amplification ratio + AD-at-rest with full d_con stack ON.
+  iter-318 AST guard extended.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::

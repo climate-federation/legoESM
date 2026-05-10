@@ -293,6 +293,24 @@ class CDGridCompressibleEulerConfig(NamedTuple):
         # refinement).  Default 0.0 preserves bit-for-bit baseline;
         # gated INSIDE ``corner_div_damp_d2_bg > 0``.  FV3
         # production default is 1.0.
+    use_fv3_d_con_cv: bool = False
+        # FV3-faithful heat-capacity factor for the NH d_con KE→heat
+        # conversion (FV3_3D iter 320).  FV3 ``dyn_core.F90:1795``
+        # divides ``heat_source`` by ``cv_air * delp`` in the
+        # ``hydrostatic = .false.`` branch (cv = c_p − R_d ≈ 717 J/kg/K)
+        # because compressible NH dynamics conserves total energy with
+        # internal energy ``c_v · T`` (constant volume) — not enthalpy
+        # ``c_p · T`` (constant pressure, hydrostatic limit).  legoESM
+        # NH iter-203/207/209/222/224/226 ports inherited the simpler
+        # ``c_pd`` denominator from PE, which UNDER-HEATS by ``c_v/c_p
+        # ≈ 0.714`` (~40 % under-heating relative to FV3 NH).  When
+        # ``True``, all 5 NH d_con sites (damp_w, damp_v, corner_div,
+        # cell-centre div_damp, ah) divide by ``c_vd`` instead of
+        # ``c_pd``, matching FV3's NH-branch convention.  Default
+        # ``False`` preserves bit-for-bit baseline; opt in for
+        # FV3-faithful heating partition.  PE path is unaffected (PE
+        # uses ``c_pd`` which is FV3-faithful for the hydrostatic
+        # branch ``cp_air``).
 
 
 def cdgrid_compressible_euler_slow_tendencies(
@@ -528,10 +546,14 @@ def cdgrid_compressible_euler_slow_tendencies(
             _exner_ref_b_dd = height_coord.exner_ref[
                 None, None, None, :
             ]
+            _cx_dd = (
+                constants.c_vd if config.use_fv3_d_con_cv
+                else constants.c_pd
+            )
             _dtheta_p_dt_dd_cc = (
                 -config.div_damp_d_con
                 * _dKE_dt_cc_dd
-                / (constants.c_pd * _exner_ref_b_dd)
+                / (_cx_dd * _exner_ref_b_dd)
             )
         else:
             _dtheta_p_dt_dd_cc = None
@@ -593,10 +615,14 @@ def cdgrid_compressible_euler_slow_tendencies(
             _exner_ref_b_ah = height_coord.exner_ref[
                 None, None, None, :
             ]
+            _cx_ah = (
+                constants.c_vd if config.use_fv3_d_con_cv
+                else constants.c_pd
+            )
             _dtheta_p_dt_ah_cc = (
                 -config.ah_d_con
                 * _dKE_dt_cc_ah
-                / (constants.c_pd * _exner_ref_b_ah)
+                / (_cx_ah * _exner_ref_b_ah)
             )
         else:
             _dtheta_p_dt_ah_cc = None
@@ -748,10 +774,14 @@ def cdgrid_compressible_euler_slow_tendencies(
             _exner_ref_b = height_coord.exner_ref[
                 None, None, None, :
             ]
+            _cx_cdd = (
+                constants.c_vd if config.use_fv3_d_con_cv
+                else constants.c_pd
+            )
             _dtheta_p_dt_cdd_cc = (
                 -config.corner_div_damp_d_con
                 * _dKE_dt_cc_cdd
-                / (constants.c_pd * _exner_ref_b)
+                / (_cx_cdd * _exner_ref_b)
             )
         else:
             _dtheta_p_dt_cdd_cc = None
@@ -1260,8 +1290,12 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
                 _exner_ref_broadcast = self.height_coord.exner_ref[
                     None, None, None, :
                 ]
+                _cx_dv = (
+                    constants.c_vd if self.config.use_fv3_d_con_cv
+                    else constants.c_pd
+                )
                 dtheta_p = -self.config.damp_v_d_con * dKE_cc / (
-                    constants.c_pd * _exner_ref_broadcast
+                    _cx_dv * _exner_ref_broadcast
                 )
                 # FV3_3D iter 218/219: optional per-step cap on
                 # |Δθ_p*Π| (equivalent to capping |ΔT| to
@@ -1376,8 +1410,12 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
                 _exner_ref_broadcast = self.height_coord.exner_ref[
                     None, None, None, :
                 ]
+                _cx_dw = (
+                    constants.c_vd if self.config.use_fv3_d_con_cv
+                    else constants.c_pd
+                )
                 dtheta_p = heat_full / (
-                    constants.c_pd * _exner_ref_broadcast
+                    _cx_dw * _exner_ref_broadcast
                 )
                 # FV3_3D iter 218/219: optional per-step cap on
                 # |Δθ_p*Π|.  Sponge-layer factors per FV3

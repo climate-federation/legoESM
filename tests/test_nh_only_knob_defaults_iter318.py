@@ -66,3 +66,22 @@ def test_nh_only_knobs_present_in_signature():
             f"NH config must expose {field} field — iter-203/"
             f"258/275/277/280 callers depend on this name."
         )
+
+
+def test_use_fv3_d_con_cv_default_off():
+    """``use_fv3_d_con_cv`` defaults to False (FV3_3D iter 320).
+    The opt-in flag swaps c_pd → c_vd at all 5 NH d_con sites for
+    FV3-faithful heating partition (FV3 dyn_core.F90:1795 cv_air
+    branch).  Default False preserves bit-for-bit baseline; users
+    opt in for FV3-faithful NH heat capacity."""
+    cfg = CDGridCompressibleEulerConfig()
+    assert cfg.use_fv3_d_con_cv is False, (
+        f"use_fv3_d_con_cv default must be False (preserves "
+        f"bit-for-bit baseline); got {cfg.use_fv3_d_con_cv}.  "
+        f"A True default would silently change the heat partition "
+        f"of every NH d_con site by a factor of c_pd/c_vd ≈ 1.40."
+    )
+    assert hasattr(cfg, "use_fv3_d_con_cv"), (
+        "NH config must expose use_fv3_d_con_cv field — "
+        "iter-320 wiring depends on this name."
+    )
