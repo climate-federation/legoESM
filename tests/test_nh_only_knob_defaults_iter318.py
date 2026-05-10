@@ -68,6 +68,26 @@ def test_nh_only_knobs_present_in_signature():
         )
 
 
+def test_use_fv3_dynamic_exner_default_off():
+    """``use_fv3_dynamic_exner`` defaults to False (FV3_3D iter 336).
+    The opt-in flag swaps frozen ``Π_ref`` for dynamic
+    ``Π_total = Π_ref + π'`` at the 3 NH slow-tendency d_con sites
+    (corner_div / div_damp / ah).  FV3 ``dyn_core.F90`` uses live
+    ``pkz`` from current pressure.  Default False preserves
+    bit-for-bit baseline."""
+    cfg = CDGridCompressibleEulerConfig()
+    assert cfg.use_fv3_dynamic_exner is False, (
+        f"use_fv3_dynamic_exner default must be False (preserves "
+        f"bit-for-bit baseline); got {cfg.use_fv3_dynamic_exner}.  "
+        f"A True default would silently introduce ~30 % heating "
+        f"variation in the slow-tendency d_con sites."
+    )
+    assert hasattr(cfg, "use_fv3_dynamic_exner"), (
+        "NH config must expose use_fv3_dynamic_exner field — "
+        "iter-336 wiring depends on this name."
+    )
+
+
 def test_use_fv3_vector_halo_uv_default_off():
     """``use_fv3_vector_halo_uv`` defaults to False (FV3_3D iter 328).
     The opt-in flag switches NH cell-centre → D-grid corner

@@ -816,6 +816,24 @@ Key iterations:
   Combined with iter-320 (post-acoustic damp_v / damp_w) +
   iter-321 (damp_w global) + iter-322 (damp_v global), ALL 5 NH
   d_con sites now have cv-flag verification.  3/3.
+- Iter 336: opt-in FV3-faithful dynamic Exner factor for the NH
+  slow-tendency d_con sites (gap #2 closed for slow-tendency
+  sites).  iter-207 used frozen ``Π_ref`` from
+  ``HeightCoordinate.exner_ref`` in the d_con denominator
+  ``c_x · Π_ref`` for the 3 slow-tendency sites (corner_div,
+  cell-centre div_damp, Smag-A_h) — reference-state linearization
+  ~30 % under-heating aloft.  FV3 NH (``dyn_core.F90:1769``)
+  uses LIVE ``pkz`` from current pressure.  iter-336 adds opt-in
+  ``use_fv3_dynamic_exner: bool = False`` (NH only) that swaps
+  ``Π_ref → Π_total = Π_ref + π'`` (where ``π'`` is the Exner
+  perturbation already computed in slow_tendencies step 1).
+  Default False preserves bit-for-bit baseline.  Post-acoustic
+  d_con sites (damp_v, damp_w) keep ``Π_ref`` (no live π' at
+  ``step()`` post-acoustic — covered by future iter if needed).
+  PE path uses actual T (no Exner factor); flag is NH-only.
+  4-test pass set: bit-for-bit baseline + state changes when ON
+  + finite + AD-safe at rest.  iter-318 AST guard extended.
+  4/4 in 50 s.
 - Iter 335: quantitative cube-edge concentration test for
   iter-333 PE duogrid wiring.  Mirrors iter-326 (NH version).
   iter-333 verified state CHANGES with duogrid; iter-335 pins

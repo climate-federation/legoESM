@@ -294,6 +294,25 @@ class CDGridCompressibleEulerConfig(NamedTuple):
         # refinement).  Default 0.0 preserves bit-for-bit baseline;
         # gated INSIDE ``corner_div_damp_d2_bg > 0``.  FV3
         # production default is 1.0.
+    use_fv3_dynamic_exner: bool = False
+        # FV3-faithful DYNAMIC Exner factor for the NH d_con KE→heat
+        # conversion (FV3_3D iter 336).  iter-207 used frozen
+        # ``exner_ref`` (Π_ref at full levels from ``HeightCoordinate``)
+        # in the d_con denominator ``c_x · Π_ref`` for the iter-203 /
+        # 209 / 222 / 224 / 226 NH d_con sites — a reference-state
+        # linearization that is ~30 % under-heating aloft (where
+        # actual p deviates from p_ref).  FV3 NH path
+        # (``dyn_core.F90:1769`` cv branch + line 1796) uses live
+        # ``pkz`` computed from current pressure (``rdg * delp /
+        # delz * pt``).  When True, the 3 SLOW-TENDENCY d_con sites
+        # (corner_div, cell-centre div_damp, A_h) replace ``Π_ref``
+        # with ``Π_total = Π_ref + π_prime`` where ``π_prime`` is
+        # the Exner perturbation already computed at slow_tendencies
+        # step 1 (line 382).  Default False preserves bit-for-bit
+        # baseline.  Post-acoustic d_con sites (damp_v, damp_w) keep
+        # ``Π_ref`` (no live π_prime in scope at step()-method post-
+        # acoustic site without recomputation).  PE path uses actual
+        # T (no Exner factor), so flag is NH-only.
     use_fv3_vector_halo_uv: bool = False
         # FV3-faithful vector halo for the cell-centre → D-grid corner
         # interpolation of (u, v) (FV3_3D iter 328).  Default False
@@ -380,6 +399,20 @@ def cdgrid_compressible_euler_slow_tendencies(
 
     # --- 1. Exner perturbation and horizontal PGF ---
     pi_prime = compute_exner_perturbation(rho_p, theta_p, height_coord)
+    # FV3_3D iter 336: optional FV3-faithful dynamic Exner Π_total =
+    # Π_ref + π' for the SLOW-TENDENCY d_con denominators.  When
+    # ``use_fv3_dynamic_exner = False`` (default), keep frozen
+    # ``Π_ref`` (iter-207 refinement); when True, use
+    # ``Π_ref + π'`` per FV3 ``dyn_core.F90:1769`` ``cv_air`` /
+    # ``cp_air`` branches that divide by live ``pkz``.  Cell-centre
+    # broadcast for slow-tendency 4D sites.
+    if config.use_fv3_dynamic_exner:
+        _exner_eff_b = (
+            height_coord.exner_ref[None, None, None, :]
+            + pi_prime
+        )
+    else:
+        _exner_eff_b = height_coord.exner_ref[None, None, None, :]
 
     # --- 2. Convert to D-grid ---
     # Stack (u, v) along a trailing axis and fold into the level dim so
@@ -580,9 +613,6 @@ def cdgrid_compressible_euler_slow_tendencies(
             _dKE_dt_cc_dd = _interp_corner_to_center(
                 _dKE_dt_corner_dd,
             )
-            _exner_ref_b_dd = height_coord.exner_ref[
-                None, None, None, :
-            ]
             _cx_dd = (
                 constants.c_vd if config.use_fv3_d_con_cv
                 else constants.c_pd
@@ -590,7 +620,7 @@ def cdgrid_compressible_euler_slow_tendencies(
             _dtheta_p_dt_dd_cc = (
                 -config.div_damp_d_con
                 * _dKE_dt_cc_dd
-                / (_cx_dd * _exner_ref_b_dd)
+                / (_cx_dd * _exner_eff_b)
             )
         else:
             _dtheta_p_dt_dd_cc = None
@@ -649,9 +679,6 @@ def cdgrid_compressible_euler_slow_tendencies(
             _dKE_dt_cc_ah = _interp_corner_to_center(
                 _dKE_dt_corner_ah,
             )
-            _exner_ref_b_ah = height_coord.exner_ref[
-                None, None, None, :
-            ]
             _cx_ah = (
                 constants.c_vd if config.use_fv3_d_con_cv
                 else constants.c_pd
@@ -659,7 +686,7 @@ def cdgrid_compressible_euler_slow_tendencies(
             _dtheta_p_dt_ah_cc = (
                 -config.ah_d_con
                 * _dKE_dt_cc_ah
-                / (_cx_ah * _exner_ref_b_ah)
+                / (_cx_ah * _exner_eff_b)
             )
         else:
             _dtheta_p_dt_ah_cc = None
@@ -818,9 +845,6 @@ def cdgrid_compressible_euler_slow_tendencies(
             _dKE_dt_cc_cdd = _interp_corner_to_center(
                 _dKE_dt_corner_cdd,
             )
-            _exner_ref_b = height_coord.exner_ref[
-                None, None, None, :
-            ]
             _cx_cdd = (
                 constants.c_vd if config.use_fv3_d_con_cv
                 else constants.c_pd
@@ -828,7 +852,7 @@ def cdgrid_compressible_euler_slow_tendencies(
             _dtheta_p_dt_cdd_cc = (
                 -config.corner_div_damp_d_con
                 * _dKE_dt_cc_cdd
-                / (_cx_cdd * _exner_ref_b)
+                / (_cx_cdd * _exner_eff_b)
             )
         else:
             _dtheta_p_dt_cdd_cc = None
