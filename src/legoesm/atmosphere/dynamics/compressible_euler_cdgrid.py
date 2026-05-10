@@ -41,6 +41,7 @@ from legoesm.core.operators_3d import (
     vertical_advection_height,
 )
 from legoesm.core.operators_cdgrid import (
+    center_to_dgrid_vector,
     dgrid_to_cgrid,
     dgrid_to_center_vector,
     dgrid_vorticity,
@@ -293,6 +294,26 @@ class CDGridCompressibleEulerConfig(NamedTuple):
         # refinement).  Default 0.0 preserves bit-for-bit baseline;
         # gated INSIDE ``corner_div_damp_d2_bg > 0``.  FV3
         # production default is 1.0.
+    use_fv3_vector_halo_uv: bool = False
+        # FV3-faithful vector halo for the cell-centre → D-grid corner
+        # interpolation of (u, v) (FV3_3D iter 328).  Default False
+        # uses ``_interp_center_to_corner`` on a passive stacked
+        # ``(u, v)`` axis — this applies SCALAR halo (with duogrid
+        # routing if active) but does NOT rotate the (u, v) face-local
+        # components across cube-face boundaries.  At cube edges the
+        # neighbouring face's e_x / e_y basis differs from the local
+        # face's, so a scalar halo treats the components as untransformed
+        # field values, leaving an O(1) basis-mismatch error at cube
+        # edges that contributes directly to NH cube imprint in u, v.
+        # When True, switches to ``center_to_dgrid_vector`` which uses
+        # ``pad_halo_vector`` (FV3 ``ext_vector`` analogue at
+        # ``fv_duogrid.F90:626-975``): rotates the (u, v) components
+        # to the neighbouring face's basis BEFORE the 4-point average
+        # to corners, preserving discrete vector continuity at cube
+        # edges.  Default False preserves bit-for-bit baseline; opt
+        # in for FV3-faithful vector halo at cube edges.  PE path
+        # already stores winds at corners (no center-to-corner
+        # interpolation, no vector halo gap).
     use_fv3_d_con_cv: bool = False
         # FV3-faithful heat-capacity factor for the NH d_con KE→heat
         # conversion (FV3_3D iter 320).  FV3 ``dyn_core.F90:1795``
@@ -366,16 +387,25 @@ def cdgrid_compressible_euler_slow_tendencies(
     # 4-point average) handles both components, replacing two separate
     # calls each with their own halo.  Same passive-trailing-axis
     # pattern as the SH and divergence batching loops.
+    # FV3_3D iter 328: when ``use_fv3_vector_halo_uv = True``, switch
+    # to the vector-aware ``center_to_dgrid_vector`` which rotates
+    # (u, v) face-local components across cube-face boundaries via
+    # ``pad_halo_vector`` (FV3 ``ext_vector`` analogue at
+    # ``fv_duogrid.F90:626-975``).  Default False preserves the
+    # passive-stack scalar halo path bit-for-bit.
     n_face_uv, n_i_uv, n_j_uv, nlev_uv = u.shape
-    _uv_stack = jnp.stack([u, v], axis=-1)  # (6, n, n, nlev, 2)
-    _uv_flat = _uv_stack.reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv * 2)
-    _uv_d_flat = _interp_center_to_corner(_uv_flat, cdgrid)
-    _uv_d = _uv_d_flat.reshape(
-        _uv_d_flat.shape[0], _uv_d_flat.shape[1], _uv_d_flat.shape[2],
-        nlev_uv, 2,
-    )
-    u_d = _uv_d[..., 0]
-    v_d = _uv_d[..., 1]
+    if config.use_fv3_vector_halo_uv:
+        u_d, v_d = center_to_dgrid_vector(u, v, cdgrid)
+    else:
+        _uv_stack = jnp.stack([u, v], axis=-1)  # (6, n, n, nlev, 2)
+        _uv_flat = _uv_stack.reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv * 2)
+        _uv_d_flat = _interp_center_to_corner(_uv_flat, cdgrid)
+        _uv_d = _uv_d_flat.reshape(
+            _uv_d_flat.shape[0], _uv_d_flat.shape[1], _uv_d_flat.shape[2],
+            nlev_uv, 2,
+        )
+        u_d = _uv_d[..., 0]
+        v_d = _uv_d[..., 1]
 
     # --- 3. C-grid velocities ---
     u_c, v_c = dgrid_to_cgrid(u_d, v_d, cdgrid)

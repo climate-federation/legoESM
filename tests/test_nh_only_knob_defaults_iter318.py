@@ -68,6 +68,28 @@ def test_nh_only_knobs_present_in_signature():
         )
 
 
+def test_use_fv3_vector_halo_uv_default_off():
+    """``use_fv3_vector_halo_uv`` defaults to False (FV3_3D iter 328).
+    The opt-in flag switches NH cell-centre → D-grid corner
+    interpolation of (u, v) from scalar halo (with duogrid routing)
+    to vector-aware ``center_to_dgrid_vector`` which rotates
+    components across cube-face boundaries (FV3 ``ext_vector``
+    analogue at ``fv_duogrid.F90:626-975``).  Default False
+    preserves bit-for-bit baseline; users opt in for FV3-faithful
+    cube-edge vector halo."""
+    cfg = CDGridCompressibleEulerConfig()
+    assert cfg.use_fv3_vector_halo_uv is False, (
+        f"use_fv3_vector_halo_uv default must be False (preserves "
+        f"bit-for-bit baseline); got {cfg.use_fv3_vector_halo_uv}.  "
+        f"A True default would silently change the (u, v) → D-grid "
+        f"corner halo behaviour at cube-face boundaries."
+    )
+    assert hasattr(cfg, "use_fv3_vector_halo_uv"), (
+        "NH config must expose use_fv3_vector_halo_uv field — "
+        "iter-328 wiring depends on this name."
+    )
+
+
 def test_use_fv3_d_con_cv_default_off():
     """``use_fv3_d_con_cv`` defaults to False (FV3_3D iter 320).
     The opt-in flag swaps c_pd → c_vd at all 5 NH d_con sites for

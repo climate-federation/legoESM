@@ -816,6 +816,33 @@ Key iterations:
   Combined with iter-320 (post-acoustic damp_v / damp_w) +
   iter-321 (damp_w global) + iter-322 (damp_v global), ALL 5 NH
   d_con sites now have cv-flag verification.  3/3.
+- Iter 328: opt-in FV3-faithful vector halo for the NH cell-
+  centre → D-grid corner interpolation of (u, v).  NH state
+  stores winds at cell centres + interpolates to corners via
+  ``_interp_center_to_corner`` on a passive-stacked (u, v, lev)
+  axis — this applies SCALAR halo (with duogrid routing if
+  active) but does NOT rotate the (u, v) face-local components
+  across cube-face boundaries.  At cube edges the neighbouring
+  face's e_x / e_y basis differs, so a scalar halo treats the
+  components as untransformed scalars, leaving an O(1) basis-
+  mismatch error at cube edges that contributes directly to NH
+  cube imprint in u, v.  FV3 ``ext_vector``
+  (``fv_duogrid.F90:626-975``) rotates (u, v) to the
+  neighbouring face's basis BEFORE the 4-pt average; legoESM's
+  ``pad_halo_vector`` / ``center_to_dgrid_vector`` implements
+  the same.  PE 3D path stores winds at corners (no center-to-
+  corner interp), so this gap is NH-only.  iter-328 adds opt-in
+  ``use_fv3_vector_halo_uv: bool = False`` config field that
+  switches NH step 2 from scalar
+  ``_interp_center_to_corner(stack(u, v))`` to vector-aware
+  ``center_to_dgrid_vector(u, v, cdgrid)``.  Default False
+  preserves bit-for-bit baseline; opt in for FV3-faithful
+  cube-edge vector halo.  6-test pass set: bit-for-bit
+  baseline + state-changes-with-flag + finite + diff
+  concentrated at panel edges (edge_max > 1.5×interior_max,
+  proves rotation lands at cube boundaries) + AD-safe at rest +
+  composes with duogrid.  iter-318 AST guard extended to cover
+  the new flag default.  6/6.
 - Iter 327: AST regression guard for iter-325 duogrid wiring on
   the NH 3D path.  Without an AST guard a future refactor could
   silently drop one of the 3 ``duogrid=_nh_dg`` kwargs, restoring
