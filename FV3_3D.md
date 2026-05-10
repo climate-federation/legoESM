@@ -803,6 +803,19 @@ Key iterations:
   (damp_v + damp_w) now have c_vd-balance regression coverage
   matching the existing c_pd-balance coverage at iter-257/258.
   2/2.
+- Iter 323: tendency-level c_pd/c_vd ratio invariant for the 3
+  NH SLOW-TENDENCY d_con sites under iter-320's cv flag
+  (corner_div_damp / div_damp / ah).  These sites feed acoustic
+  substepping so a full-step state comparison sees feedback
+  noise; iter-323 extracts ``dθ_p/dt`` BEFORE acoustic via
+  ``cdgrid_compressible_euler_slow_tendencies`` and asserts the
+  bit-for-bit invariant:
+  ``c_pd · dθ_p/dt|_cp == c_vd · dθ_p/dt|_cv`` (rtol=1e-12)
+  at every cell.  Only the heat-capacity denominator differs
+  between paths, so the invariant is exact at machine precision.
+  Combined with iter-320 (post-acoustic damp_v / damp_w) +
+  iter-321 (damp_w global) + iter-322 (damp_v global), ALL 5 NH
+  d_con sites now have cv-flag verification.  3/3.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
