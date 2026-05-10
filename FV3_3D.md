@@ -816,6 +816,17 @@ Key iterations:
   Combined with iter-320 (post-acoustic damp_v / damp_w) +
   iter-321 (damp_w global) + iter-322 (damp_v global), ALL 5 NH
   d_con sites now have cv-flag verification.  3/3.
+- Iter 327: AST regression guard for iter-325 duogrid wiring on
+  the NH 3D path.  Without an AST guard a future refactor could
+  silently drop one of the 3 ``duogrid=_nh_dg`` kwargs, restoring
+  the iter-325 cube-edge halo bypass without any direct test
+  failure (the no-duogrid path stays bit-for-bit baseline + the
+  iter-326 impact tests use ``use_duogrid=True``).  iter-327
+  parses the NH source via regex and asserts: (1) ``_nh_dg =
+  grid.duogrid`` helper assignment present, (2) ``packed_pad_halo_4d``
+  call for (K, π_prime) passes ``duogrid=_nh_dg``, (3) MPI
+  counterpart same, (4) ``_pad_halo_4d_module(_ke_correction, ...)``
+  passes ``duogrid=_nh_dg``.  4/4 in 0.03 s.
 - Iter 326: quantitative cube-imprint reduction from iter-325
   duogrid wiring on the NH 3D path.  iter-325 verified the
   wiring CHANGES NH state when ``use_duogrid=True``; iter-326
