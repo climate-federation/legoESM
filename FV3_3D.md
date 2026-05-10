@@ -816,6 +816,12 @@ Key iterations:
   Combined with iter-320 (post-acoustic damp_v / damp_w) +
   iter-321 (damp_w global) + iter-322 (damp_v global), ALL 5 NH
   d_con sites now have cv-flag verification.  3/3.
+- Iter 334: AST regression guard for iter-333 PE duogrid wiring.
+  Mirrors iter-327 NH AST guard pattern.  Pins the
+  ``_pe_dg_ke = grid.duogrid`` helper assignment + the
+  ``_pad_halo_4d_fn(_ke_correction, ..., duogrid=_pe_dg_ke)``
+  call pattern.  Catches refactor that drops kwarg silently.
+  2/2 in 0.03 s.
 - Iter 333: PE-side mirror of iter-325's duogrid wiring fix.
   iter-325 fixed 3 NH halo bypass sites; auditing PE found the
   SAME bypass at ``primitive_eq_cdgrid.py:964`` — the FV3
