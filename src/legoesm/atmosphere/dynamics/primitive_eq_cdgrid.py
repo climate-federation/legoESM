@@ -297,19 +297,25 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # the T (cell-centre) update.  Default 0.0 preserves
         # baseline bit-for-bit (gated INSIDE the iter-12
         # ``damp_v > 0`` block).  FV3 production default is 1.0.
-        # **Known fidelity gap (iter 238 audit)**: FV3's actual
-        # d_con formula at sw_core.F90:1980 uses a metric-aware
-        # variant: ``heat = -damp * rsin2 * (sum(ub², vb²) +
-        # 2*(gx+gy fluxes) - cosa_s * cross_terms)`` where rsin2
-        # and cosa_s are the cubed-sphere C-grid non-orthogonality
-        # metrics.  Our simpler ``u·du + 0.5·du²`` form is
-        # equivalent in the orthogonal-grid limit and conserves
-        # GLOBAL energy exactly; LOCAL heat distribution differs
-        # at cube edges where cosa_s ≠ 0.  For HS/climate-mean
-        # diagnostics this distinction is invisible.  Porting
-        # the metric-aware form would require adding rsin2 /
-        # cosa_s arrays to ``CubedSphereCDGrid``; tracked for a
-        # future iteration.
+        # **Known fidelity gap (iter 238 audit, iter 324 update)**:
+        # FV3's actual d_con formula at sw_core.F90:1980 uses a
+        # metric-aware variant:
+        # ``heat = -damp * rsin2 * (sum(ub², vb²) + 2*(gx+gy fluxes)
+        # - cosa_s * cross_terms)`` where ``rsin2`` and ``cosa_s``
+        # are the cubed-sphere C-grid non-orthogonality metrics.
+        # Our simpler ``u·du + 0.5·du²`` form is equivalent in the
+        # orthogonal-grid limit and conserves GLOBAL energy
+        # exactly; LOCAL heat distribution differs at cube edges
+        # where ``cosa_s ≠ 0``.  For HS/climate-mean diagnostics
+        # this distinction is invisible.
+        # **Prerequisites NOW available** (iter 324):
+        # ``CubedSphereCDGrid.cosa_cell`` (FV3 ``cosa_s``) and
+        # ``rsin2_cell`` (FV3 ``rsin2``) exist as cell-centre
+        # fields; ``rdxa``/``rdya`` (FV3 ``rdx``/``rdy`` at
+        # A-grid cells) likewise.  A future iteration can wire
+        # the metric-aware form using these existing fields
+        # without grid-construction changes.  See iter-323 for
+        # the symmetric c_pd→c_vd FV3-fidelity port (NH only).
         # **iter 246 audit (PE pkz factor)**: FV3 ``dyn_core.F90:
         # 1768`` divides ``heat_source`` by ``c_pd * delp * pkz``
         # to compute the per-step ΔT, where ``pkz`` is the local

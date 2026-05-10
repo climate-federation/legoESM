@@ -816,6 +816,21 @@ Key iterations:
   Combined with iter-320 (post-acoustic damp_v / damp_w) +
   iter-321 (damp_w global) + iter-322 (damp_v global), ALL 5 NH
   d_con sites now have cv-flag verification.  3/3.
+- Iter 324: pin grid prerequisites for the iter-238 metric-aware
+  d_con port.  iter-238 audit comment in
+  ``primitive_eq_cdgrid.py`` claimed ``rsin2``/``cosa_s`` arrays
+  were absent from ``CubedSphereCDGrid`` — STALE, they exist as
+  ``cosa_cell``/``rsin2_cell`` (FV3 cell-centre names) plus
+  ``rdxa``/``rdya`` for FV3 ``rdx``/``rdy`` A-grid widths.
+  iter-324 updates the source comment for accuracy and adds a
+  pinning test (``test_metric_aware_d_con_prereqs_iter324.py``,
+  6 tests) asserting field existence, ``(6, n, n)`` cell-centre
+  shape, ``rsin2_cell > 0`` everywhere, and the FV3
+  ``|cosa_cell| ≤ 0.6`` non-orthogonality bound.  Catches future
+  grid refactors that drop the metric fields silently and
+  unblocks a future iteration to wire the metric-aware d_con
+  form (FV3 ``sw_core.F90:1980``) without grid construction
+  changes.  6/6 in 8 s.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
