@@ -816,6 +816,27 @@ Key iterations:
   Combined with iter-320 (post-acoustic damp_v / damp_w) +
   iter-321 (damp_w global) + iter-322 (damp_v global), ALL 5 NH
   d_con sites now have cv-flag verification.  3/3.
+- Iter 325: thread duogrid kinked-to-extended remap through the
+  3 NH halo sites that previously bypassed it.  PE 3D path
+  (``primitive_eq_cdgrid.py``) threads ``grid.duogrid`` through
+  every K-quantity halo (iter-84 / iter-1184/1188).  NH 3D path
+  (``compressible_euler_cdgrid.py``) had THREE halo sites that
+  silently bypassed duogrid even when ``use_duogrid=True``:
+  packed K + π_prime halo (lines 398/403, Arakawa-Lamb gradient)
+  + ``_pad_halo_4d_module(_ke_correction)`` (line 744, FV3
+  corner-divergence damping site).  Without duogrid, cube-edge
+  gradient at panel boundaries saw cube-projected halo cells
+  instead of FV3 ``fv_duogrid.F90`` Lagrange-extended halo —
+  O(dx²) bias contributing directly to NH cube imprint at
+  panel edges.  iter-325 passes ``duogrid=grid.duogrid``
+  through all three sites mirroring the PE pattern.  4-test
+  pass set: no-duogrid path bit-for-bit preserved (regression
+  guard), duogrid path measurably changes state vs no-duogrid
+  (proves wiring active not silent no-op), duogrid path finite
+  (no NaN), AD-safe at rest.  Direct cube-edge artifact
+  reduction on the NH path; FV3-faithful halo behaviour now
+  matches the FV3 Oracle ``fv_duogrid.F90`` for both
+  hydrostatic and non-hydrostatic 3D paths.  4/4.
 - Iter 324: pin grid prerequisites for the iter-238 metric-aware
   d_con port.  iter-238 audit comment in
   ``primitive_eq_cdgrid.py`` claimed ``rsin2``/``cosa_s`` arrays

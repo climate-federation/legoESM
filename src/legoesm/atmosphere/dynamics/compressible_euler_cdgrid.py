@@ -392,16 +392,23 @@ def cdgrid_compressible_euler_slow_tendencies(
     # under the local backend each operator does its own exchange (same
     # as before).  ``_arakawa_lamb_gradient`` takes ``padded=`` to skip
     # its internal halo when supplied.
+    # FV3_3D iter 325: thread the duogrid kinked-to-extended remap
+    # through the K + pi_prime packed halo so cube-edge gradient
+    # values match the PE iter-84 path.  Without this the NH K and
+    # pi_prime halos silently bypassed duogrid while PE applied it,
+    # leaving the FV3 ``a2b_edge`` 4th-order corner accuracy partial
+    # on the NH path (a real cube-imprint contributor at edges).
+    _nh_dg = grid.duogrid
     from legoesm.grids.halo import _halo_backend as _hb_step6
     if _hb_step6 == "spmd":
         from legoesm.parallel.cubesphere_exchange import _spmd_mesh as _spmd_mesh_step6
         _K_pad_step6, _pi_pad_step6 = packed_pad_halo_4d(
-            K, pi_prime, mesh=_spmd_mesh_step6,
+            K, pi_prime, mesh=_spmd_mesh_step6, duogrid=_nh_dg,
         )
     elif _hb_step6 == "mpi":
         from legoesm.grids.halo import _mpi_topology as _mpi_topo_step6
         _K_pad_step6, _pi_pad_step6 = packed_pad_halo_mpi_4d(
-            K, pi_prime, topology=_mpi_topo_step6,
+            K, pi_prime, topology=_mpi_topo_step6, duogrid=_nh_dg,
         )
     else:
         _K_pad_step6 = _pi_pad_step6 = None
@@ -741,7 +748,17 @@ def cdgrid_compressible_euler_slow_tendencies(
         # ke-correction so the i±1 / j±1 reads at face-boundary corners
         # pick up the neighbouring panel.  Centred difference at
         # corner (i, j); 2*dx denominator uses dxc / dyc averaged.
-        _ke_pad = _pad_halo_4d_module(_ke_correction)      # (6, n+3, n+3, nlev)
+        # FV3_3D iter 325: route the ke_correction halo through the
+        # duogrid kinked-to-extended remap so the cube-edge gradient
+        # at the FV3 corner-divergence damping site matches the PE
+        # iter-84 + iter-1184/1188 path.  Without duogrid, the corner
+        # i+1 / i-1 reads at the cube edge see the cube-projected
+        # halo cell instead of the duogrid-corrected value, leaving
+        # an O(dx²) bias at panel boundaries that contributes to
+        # cube imprint in u/v.
+        _ke_pad = _pad_halo_4d_module(
+            _ke_correction, duogrid=_nh_dg,
+        )                                                   # (6, n+3, n+3, nlev)
 
         _dke_dx_pad = (_ke_pad[:, 2:, 1:-1, :] - _ke_pad[:, :-2, 1:-1, :])
         _dke_dy_pad = (_ke_pad[:, 1:-1, 2:, :] - _ke_pad[:, 1:-1, :-2, :])
