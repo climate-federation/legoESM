@@ -779,6 +779,17 @@ Key iterations:
   == c_vd · Δθ_p_cv`` invariant (rtol=1e-12) + (c_p/c_v) ≈ 1.40
   amplification ratio + AD-at-rest with full d_con stack ON.
   iter-318 AST guard extended.
+- Iter 321: global energy conservation under iter-320's cv flag.
+  iter-258 verified the ``c_pd``-balance for iter-203
+  ``damp_w_d_con`` (``Σ c_pd · Π_ref · Δθ_p ≈ -Σ ΔKE_w``).
+  iter-320 swapped ``c_pd → c_vd`` for FV3-faithful (``cv_air``)
+  branch, so the c_vd-balance must hold instead:
+  ``Σ c_vd · Π_ref · Δθ_p ≈ -Σ ΔKE_w`` when
+  ``use_fv3_d_con_cv = True``.  Mirrors iter-258's fixture (w=0
+  BC w-perturbation, single NH step, isolated damp_w block) but
+  asserts the c_vd identity (rtol=1e-10) + per-cell formula
+  match (rtol=1e-10).  Pins iter-320's heat partition under the
+  FV3-correct constant-volume thermodynamic accounting.  2/2.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
