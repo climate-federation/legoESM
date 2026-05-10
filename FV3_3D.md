@@ -816,6 +816,20 @@ Key iterations:
   Combined with iter-320 (post-acoustic damp_v / damp_w) +
   iter-321 (damp_w global) + iter-322 (damp_v global), ALL 5 NH
   d_con sites now have cv-flag verification.  3/3.
+- Iter 333: PE-side mirror of iter-325's duogrid wiring fix.
+  iter-325 fixed 3 NH halo bypass sites; auditing PE found the
+  SAME bypass at ``primitive_eq_cdgrid.py:964`` — the FV3
+  corner-div damping ``ke_correction`` halo did NOT pass
+  ``duogrid=grid.duogrid``.  Without duogrid, cube-edge gradient
+  at panel boundaries used cube-projected halo cells instead of
+  FV3 ``fv_duogrid.F90`` Lagrange-extended halo — same O(dx²)
+  bias as the NH iter-325 fix.  iter-333 threads
+  ``duogrid=grid.duogrid`` through the PE call.  Both 3D paths
+  (PE + NH) now have the FV3 corner-div damp ``ke_correction``
+  halo duogrid-aware.  3/3: no-duogrid path finite (regression
+  guard) + duogrid path differs measurably from no-duogrid
+  (proves wiring active) + duogrid path finite.  PE d_con
+  regression (iter-238, iter-243) still passes (5/5).
 - Iter 332: parametrized AD-at-rest regression for the
   iter-320 / 325 / 328 NH FV3-fidelity flag COMBINATIONS.
   iter-184 covers default-default; iter-330 covers all-on; the

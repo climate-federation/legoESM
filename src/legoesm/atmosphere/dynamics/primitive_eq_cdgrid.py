@@ -960,8 +960,19 @@ def fv3_hydrostatic_tendencies(
         # padded corner values.  Halo-pad the ke-correction so the
         # i±1 / j±1 reads at face-boundary corners pick up the
         # neighbouring panel.
+        # FV3_3D iter 333: route the PE ke_correction halo through
+        # the duogrid kinked-to-extended remap so the cube-edge
+        # gradient at the FV3 corner-divergence damping site matches
+        # the FV3 ``fv_duogrid.F90`` Lagrange-extended halo.  PE-side
+        # mirror of the NH iter-325 fix (same bypass: silent
+        # cube-projected halo cells contributing O(dx²) bias at panel
+        # boundaries).  Closes the symmetric PE/NH ke_correction halo
+        # gap.
+        _pe_dg_ke = grid.duogrid
         from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d_fn
-        _ke_pad = _pad_halo_4d_fn(_ke_correction)          # (6, n+3, n+3, nlev)
+        _ke_pad = _pad_halo_4d_fn(
+            _ke_correction, duogrid=_pe_dg_ke,
+        )                                                  # (6, n+3, n+3, nlev)
 
         # Centred difference at corner (i, j) ∈ [0, n] × [0, n]:
         #   ∂x ke at (i, j) = (ke_pad[i+2, j+1] - ke_pad[i, j+1]) / (2*dx_at_corner)
