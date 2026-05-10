@@ -816,6 +816,20 @@ Key iterations:
   Combined with iter-320 (post-acoustic damp_v / damp_w) +
   iter-321 (damp_w global) + iter-322 (damp_v global), ALL 5 NH
   d_con sites now have cv-flag verification.  3/3.
+- Iter 330: full-stack FV3-faithful integration regression for
+  the NH 3D path.  Validates the COMBINED effect of every
+  iter-320 / 325 / 328 opt-in FV3-fidelity flag with the full
+  damping toolkit + d_con stack.  At C8 random-IC the absolute
+  imprint magnitude is small (per iter-179 finding), so the
+  toolkit's reduction signal is below noise.  iter-330 pins the
+  weaker but verifiable property: full FV3 stack does NOT
+  AMPLIFY ``edge_std/interior_std`` vs the bare baseline (≤ 5 %
+  slack).  For quantitative reduction see iter-326 (duogrid
+  alone) and iter-179 / iter-265 (toolkit alone).  Plus all
+  fields finite + AD-safe at rest under combined flags.  Closes
+  the integration-level coverage gap: iter-320/325/328 each
+  have isolated tests but no test verifies they compose
+  destructively.  3/3 in 188 s.
 - Iter 329: AST regression guard for iter-328 vector halo wiring
   on the NH 3D path.  Without an AST guard a future refactor
   could silently swap the body for an equivalent-on-iter-328-
