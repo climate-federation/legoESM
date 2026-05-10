@@ -816,6 +816,18 @@ Key iterations:
   Combined with iter-320 (post-acoustic damp_v / damp_w) +
   iter-321 (damp_w global) + iter-322 (damp_v global), ALL 5 NH
   d_con sites now have cv-flag verification.  3/3.
+- Iter 331: pin the intentional PE / NH flag asymmetry for
+  iter-320 ``use_fv3_d_con_cv`` and iter-328
+  ``use_fv3_vector_halo_uv``.  Both are NH-only (PE doesn't need
+  them): cv flag is for compressible NH internal-energy
+  accounting (PE cp_air is FV3-faithful for hydrostatic);
+  vector halo is for cell-centre→corner interpolation (PE
+  stores winds at corners natively).  iter-331 asserts PE
+  config does NOT expose either flag and NH config exposes
+  both, so a future "parity" refactor doesn't blindly add the
+  NH flags to PE.  iter-317 already pins the SHARED-knob
+  defaults match; iter-331 pins the deliberate divergence.
+  4/4 in 0.3 s.
 - Iter 330: full-stack FV3-faithful integration regression for
   the NH 3D path.  Validates the COMBINED effect of every
   iter-320 / 325 / 328 opt-in FV3-fidelity flag with the full
