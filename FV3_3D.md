@@ -816,6 +816,16 @@ Key iterations:
   Combined with iter-320 (post-acoustic damp_v / damp_w) +
   iter-321 (damp_w global) + iter-322 (damp_v global), ALL 5 NH
   d_con sites now have cv-flag verification.  3/3.
+- Iter 335: quantitative cube-edge concentration test for
+  iter-333 PE duogrid wiring.  Mirrors iter-326 (NH version).
+  iter-333 verified state CHANGES with duogrid; iter-335 pins
+  the directional impact: PE wind-tendency diff (duogrid -
+  no_duogrid) at the corner-stagger u_d field concentrates at
+  panel edges with ``edge_max > 1.5 × interior_max`` — proves
+  the halo correction lands at cube-boundary cells not bulk
+  shift.  Both 3D paths (PE iter-326-equivalent + NH iter-326)
+  now have quantitative edge-concentration coverage.  1/1 in
+  18 s.
 - Iter 334: AST regression guard for iter-333 PE duogrid wiring.
   Mirrors iter-327 NH AST guard pattern.  Pins the
   ``_pe_dg_ke = grid.duogrid`` helper assignment + the
