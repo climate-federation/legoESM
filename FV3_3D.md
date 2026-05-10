@@ -816,6 +816,16 @@ Key iterations:
   Combined with iter-320 (post-acoustic damp_v / damp_w) +
   iter-321 (damp_w global) + iter-322 (damp_v global), ALL 5 NH
   d_con sites now have cv-flag verification.  3/3.
+- Iter 332: parametrized AD-at-rest regression for the
+  iter-320 / 325 / 328 NH FV3-fidelity flag COMBINATIONS.
+  iter-184 covers default-default; iter-330 covers all-on; the
+  6 intermediate combinations (cv × duogrid × vector_halo)
+  were uncovered.  A future AD hazard could lurk at the flag
+  interaction surface that the all-on path masks via averaging
+  or cancellation.  iter-332 explicitly tests every flag combo
+  under the full FV3 toolkit + d_con stack at AD-at-rest;
+  ``jax.grad`` finite for all 6.  Closes flag-interaction AD
+  coverage gap.  6/6 in 11 min.
 - Iter 331: pin the intentional PE / NH flag asymmetry for
   iter-320 ``use_fv3_d_con_cv`` and iter-328
   ``use_fv3_vector_halo_uv``.  Both are NH-only (PE doesn't need
