@@ -816,6 +816,18 @@ Key iterations:
   Combined with iter-320 (post-acoustic damp_v / damp_w) +
   iter-321 (damp_w global) + iter-322 (damp_v global), ALL 5 NH
   d_con sites now have cv-flag verification.  3/3.
+- Iter 329: AST regression guard for iter-328 vector halo wiring
+  on the NH 3D path.  Without an AST guard a future refactor
+  could silently swap the body for an equivalent-on-iter-328-
+  fixture path that happens to produce different floats but
+  passes the iter-328 "state changes" test.  Defense-in-depth.
+  iter-329 parses NH source via regex and asserts: (1)
+  ``center_to_dgrid_vector`` import present, (2) ``if
+  config.use_fv3_vector_halo_uv:`` gate present, (3)
+  ``center_to_dgrid_vector(u, v, cdgrid)`` call inside gate, (4)
+  legacy scalar-halo else branch (``_uv_stack = jnp.stack([u,
+  v]...`` + ``_interp_center_to_corner(_uv_flat, cdgrid)``) still
+  present so flag=False stays bit-for-bit baseline.  4/4 in 0.03 s.
 - Iter 328: opt-in FV3-faithful vector halo for the NH cell-
   centre → D-grid corner interpolation of (u, v).  NH state
   stores winds at cell centres + interpolates to corners via
