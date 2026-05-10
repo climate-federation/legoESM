@@ -790,6 +790,19 @@ Key iterations:
   asserts the c_vd identity (rtol=1e-10) + per-cell formula
   match (rtol=1e-10).  Pins iter-320's heat partition under the
   FV3-correct constant-volume thermodynamic accounting.  2/2.
+- Iter 322: cv-flag global energy conservation for the
+  iter-209 NH ``damp_v_d_con`` post-step block.  Mirrors
+  iter-321 (which covered ``damp_w_d_con``) but for the wind
+  damping site.  iter-257 verified c_pd-balance; iter-322
+  verifies the c_vd-balance under ``use_fv3_d_con_cv=True``:
+  ``Σ c_vd · Π_ref · Δθ_p_d_con + Σ ΔKE_cc == 0`` at rtol=1e-10
+  via 3-run triangulation (no-damp / damp / damp+d_con) on a
+  strong-wind IC.  Per-cell formula ``Δθ_p = -d_con · ΔKE_cc /
+  (c_vd · Π_ref)`` also pinned (rtol=1e-10).  Closes the
+  symmetric coverage gap: both post-acoustic d_con sites
+  (damp_v + damp_w) now have c_vd-balance regression coverage
+  matching the existing c_pd-balance coverage at iter-257/258.
+  2/2.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
