@@ -816,6 +816,15 @@ Key iterations:
   Combined with iter-320 (post-acoustic damp_v / damp_w) +
   iter-321 (damp_w global) + iter-322 (damp_v global), ALL 5 NH
   d_con sites now have cv-flag verification.  3/3.
+- Iter 355: AD-at-rest umbrella for the FULL PE FV3-fidelity
+  stack.  PE counterpart of NH iter-346.  Engages every PE
+  FV3-fidelity flag + full toolkit + all 4 d_con knobs:
+  ``use_duogrid=True`` + ``use_fv3_a2b_zeta_corner=True`` +
+  ``use_fv3_metric_aware_d_con=True`` + iter-12/14/16/18/57-59/
+  187 damping + iter-208/221/223/225 d_con at production 1.0 +
+  iter-218 delt_max.  1/1 jax.grad finite through 3 PE steps at
+  rest.  Closes PE FV3-fidelity full-stack AD coverage gap.
+  1/1 in 137 s.
 - Iter 354: source-comment closure for iter-238 metric-aware
   fidelity gap.  iter-324's source comment in
   ``primitive_eq_cdgrid.py:316-323`` marked the metric gap as
