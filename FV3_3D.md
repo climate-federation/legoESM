@@ -860,6 +860,10 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 377: PE counterpart of iter-376 at C16.  All 3 PE flags
+  (a2b_zeta, metric, cross_face) + duogrid + full toolkit + 4
+  d_con knobs: does-not-amplify T-imprint + state changes
+  measurably.  2/2 in 88 s.
 - Iter 376: C16 NH full FV3-fidelity stack including iter-370
   cross_face flag.  Extends iter-358/360 (predated cross_face).
   All 5 NH flags + duogrid + full toolkit at C16: (1) does-not-
