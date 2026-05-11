@@ -2005,47 +2005,29 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
             du_normal = jnp.moveaxis(du_normal_t, 0, -1)
             dv_normal = jnp.moveaxis(dv_normal_t, 0, -1)
 
-            # FV3_3D iter 443: PE mirror of NH iter-442 sponge
-            # boost of damp_v at top levels.  Linear scaling
-            # trick: ``(du, dv) *= (0.5 * boosted / damp_v)^
-            # (nord_v+1)`` at sponge levels k=0, k=1 (FV3 does
-            # NOT boost k=2 for damp_v).
+            # FV3_3D iter 443/447: PE mirror of NH iter-442 via
+            # shared helper.  FV3 ``damp_vt = 0.5 * d2_divg`` at
+            # k=0, k=1 (NOT k=2).
             if self.config.use_fv3_sponge_damp_v:
-                _nord_p1_pv = self.config.nord_v + 1
-                _nlev_pv = du_normal.shape[-1]
-                _k_idx_pv = jnp.arange(_nlev_pv)
-                if self.config.corner_div_damp_d2_bg_k1 > 0.0:
-                    _boosted_pk1_v = 0.5 * jnp.maximum(
-                        self.config.corner_div_damp_d2_bg,
-                        self.config.corner_div_damp_d2_bg_k1,
-                    )
-                    _scale_pk1_v = (
-                        _boosted_pk1_v / self.config.damp_v
-                    ) ** _nord_p1_pv
-                    du_normal = jnp.where(
-                        _k_idx_pv == 0,
-                        du_normal * _scale_pk1_v, du_normal,
-                    )
-                    dv_normal = jnp.where(
-                        _k_idx_pv == 0,
-                        dv_normal * _scale_pk1_v, dv_normal,
-                    )
-                if self.config.corner_div_damp_d2_bg_k2 > 0.01:
-                    _boosted_pk2_v = 0.5 * jnp.maximum(
-                        self.config.corner_div_damp_d2_bg,
-                        self.config.corner_div_damp_d2_bg_k2,
-                    )
-                    _scale_pk2_v = (
-                        _boosted_pk2_v / self.config.damp_v
-                    ) ** _nord_p1_pv
-                    du_normal = jnp.where(
-                        _k_idx_pv == 1,
-                        du_normal * _scale_pk2_v, du_normal,
-                    )
-                    dv_normal = jnp.where(
-                        _k_idx_pv == 1,
-                        dv_normal * _scale_pk2_v, dv_normal,
-                    )
+                from legoesm.core.fv3_sponge_boost import (
+                    apply_top_sponge_field_scale as _shared_pscale_v,
+                )
+                du_normal = _shared_pscale_v(
+                    du_normal, self.config.damp_v,
+                    self.config.nord_v, factor=0.5,
+                    d2_bg=self.config.corner_div_damp_d2_bg,
+                    d2_bg_k1=self.config.corner_div_damp_d2_bg_k1,
+                    d2_bg_k2=self.config.corner_div_damp_d2_bg_k2,
+                    apply_at_k2=False,
+                )
+                dv_normal = _shared_pscale_v(
+                    dv_normal, self.config.damp_v,
+                    self.config.nord_v, factor=0.5,
+                    d2_bg=self.config.corner_div_damp_d2_bg,
+                    d2_bg_k1=self.config.corner_div_damp_d2_bg_k1,
+                    d2_bg_k2=self.config.corner_div_damp_d2_bg_k2,
+                    apply_at_k2=False,
+                )
 
             # Project wind increments from FV3 normal D-grid back to
             # corners (6, n+1, n+1, nlev) by mode='edge' padding then

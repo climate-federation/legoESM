@@ -919,6 +919,17 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 447: factor linear-scaling FV3 sponge trick (iter-441
+  damp_w + iter-442 NH damp_v + iter-443 PE damp_v) into
+  shared core helper ``apply_top_sponge_field_scale``.  Three
+  duplicate inline blocks (~40 lines each) collapse to one
+  helper call per site.  Helper parametrized by ``factor``
+  (1.0 damp_w vs 0.5 damp_v) and ``apply_at_k2`` (True damp_w
+  vs False damp_v).  iter-445 AST guards updated for new
+  shared-helper pattern (factor=..., apply_at_k2=...).  All
+  iter-441/442/443 numerical tests still pass.  Wired into
+  iter-383 sweep (now 43).  6/6 new + 12/12 regressions in
+  134 s.
 - Iter 446: factor FV3 sponge boost into shared core helper.
   New module ``legoesm.core.fv3_sponge_boost`` with public
   ``apply_top_sponge_damp_boost``.  Replaces duplicated impl in

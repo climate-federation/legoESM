@@ -1569,46 +1569,30 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
             du_normal = jnp.moveaxis(du_normal_t, 0, -1)
             dv_normal = jnp.moveaxis(dv_normal_t, 0, -1)
 
-            # FV3_3D iter 442: FV3-faithful sponge boost of
-            # damp_v at top levels (k=0, k=1).  Linear scaling
-            # trick: at sponge levels,
-            # ``(du, dv) *= (0.5 * boosted / damp_v)^(nord_v+1)``
-            # — exactly equivalent to recomputing del-n flux with
-            # ``damp_v = 0.5 * d2_divg`` per FV3
-            # ``dyn_core.F90:787, 797``.
+            # FV3_3D iter 442/447: FV3-faithful sponge boost of
+            # damp_v at top levels (k=0, k=1; FV3 does NOT
+            # extend to k=2).  Factor 0.5 (FV3 ``damp_vt = 0.5
+            # * d2_divg``).  Shared core helper.
             if self.config.use_fv3_sponge_damp_v:
-                _nord_p1_v = self.config.nord_v + 1
-                _nlev_v = du_normal.shape[-1]
-                _k_idx_v = jnp.arange(_nlev_v)
-                if self.config.corner_div_damp_d2_bg_k1 > 0.0:
-                    _boosted_k1_v = 0.5 * jnp.maximum(
-                        self.config.corner_div_damp_d2_bg,
-                        self.config.corner_div_damp_d2_bg_k1,
-                    )
-                    _scale_k1_v = (
-                        _boosted_k1_v / self.config.damp_v
-                    ) ** _nord_p1_v
-                    # du_normal shape (6, n, n+1, nlev); apply at k=0
-                    du_normal = jnp.where(
-                        _k_idx_v == 0, du_normal * _scale_k1_v, du_normal,
-                    )
-                    dv_normal = jnp.where(
-                        _k_idx_v == 0, dv_normal * _scale_k1_v, dv_normal,
-                    )
-                if self.config.corner_div_damp_d2_bg_k2 > 0.01:
-                    _boosted_k2_v = 0.5 * jnp.maximum(
-                        self.config.corner_div_damp_d2_bg,
-                        self.config.corner_div_damp_d2_bg_k2,
-                    )
-                    _scale_k2_v = (
-                        _boosted_k2_v / self.config.damp_v
-                    ) ** _nord_p1_v
-                    du_normal = jnp.where(
-                        _k_idx_v == 1, du_normal * _scale_k2_v, du_normal,
-                    )
-                    dv_normal = jnp.where(
-                        _k_idx_v == 1, dv_normal * _scale_k2_v, dv_normal,
-                    )
+                from legoesm.core.fv3_sponge_boost import (
+                    apply_top_sponge_field_scale as _shared_scale_v,
+                )
+                du_normal = _shared_scale_v(
+                    du_normal, self.config.damp_v,
+                    self.config.nord_v, factor=0.5,
+                    d2_bg=self.config.corner_div_damp_d2_bg,
+                    d2_bg_k1=self.config.corner_div_damp_d2_bg_k1,
+                    d2_bg_k2=self.config.corner_div_damp_d2_bg_k2,
+                    apply_at_k2=False,
+                )
+                dv_normal = _shared_scale_v(
+                    dv_normal, self.config.damp_v,
+                    self.config.nord_v, factor=0.5,
+                    d2_bg=self.config.corner_div_damp_d2_bg,
+                    d2_bg_k1=self.config.corner_div_damp_d2_bg_k1,
+                    d2_bg_k2=self.config.corner_div_damp_d2_bg_k2,
+                    apply_at_k2=False,
+                )
 
             # Project wind increments from FV3 normal D-grid back to
             # corners (mode='edge' padding then averaging — inverse of
@@ -1827,56 +1811,22 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
             ) * rarea_w[None, ...]               # (nlev_half, 6, n, n)
             dw = jnp.moveaxis(dw_t, 0, -1)       # (6, n, n, nlev_half)
 
-            # FV3_3D iter 441: FV3-faithful sponge boost of damp_w
-            # at top levels.  Linear ``damp^(nord+1)`` scaling
-            # trick swaps the effective coefficient at sponge
-            # levels without recomputing del-n flux.  Half-level
-            # damp_w shape (6, n, n, nlev_half = nlev+1); top
-            # sponge levels correspond to k=0,1,2 in full-level
-            # (and same indices in half-level w / dw).
+            # FV3_3D iter 441/447: FV3-faithful sponge boost of
+            # damp_w at top levels via shared core helper.
+            # Factor 1.0 (FV3 ``damp_w = d2_divg``), applied at
+            # k=0/1/2.
             if self.config.use_fv3_sponge_damp_w:
-                _nord_p1 = self.config.nord_w + 1
-                _nlev_w = dw.shape[-1]
-                _k_idx_w = jnp.arange(_nlev_w)
-                if self.config.corner_div_damp_d2_bg_k1 > 0.0:
-                    _boosted_k1 = jnp.maximum(
-                        self.config.corner_div_damp_d2_bg,
-                        self.config.corner_div_damp_d2_bg_k1,
-                    )
-                    _scale_k1 = (
-                        _boosted_k1 / self.config.damp_w
-                    ) ** _nord_p1
-                    dw = jnp.where(
-                        _k_idx_w == 0,
-                        dw * _scale_k1,
-                        dw,
-                    )
-                if self.config.corner_div_damp_d2_bg_k2 > 0.01:
-                    _boosted_k2 = jnp.maximum(
-                        self.config.corner_div_damp_d2_bg,
-                        self.config.corner_div_damp_d2_bg_k2,
-                    )
-                    _scale_k2 = (
-                        _boosted_k2 / self.config.damp_w
-                    ) ** _nord_p1
-                    dw = jnp.where(
-                        _k_idx_w == 1,
-                        dw * _scale_k2,
-                        dw,
-                    )
-                    if self.config.corner_div_damp_d2_bg_k2 > 0.05:
-                        _boosted_k3 = jnp.maximum(
-                            self.config.corner_div_damp_d2_bg,
-                            0.2 * self.config.corner_div_damp_d2_bg_k2,
-                        )
-                        _scale_k3 = (
-                            _boosted_k3 / self.config.damp_w
-                        ) ** _nord_p1
-                        dw = jnp.where(
-                            _k_idx_w == 2,
-                            dw * _scale_k3,
-                            dw,
-                        )
+                from legoesm.core.fv3_sponge_boost import (
+                    apply_top_sponge_field_scale as _shared_scale,
+                )
+                dw = _shared_scale(
+                    dw, self.config.damp_w, self.config.nord_w,
+                    factor=1.0,
+                    d2_bg=self.config.corner_div_damp_d2_bg,
+                    d2_bg_k1=self.config.corner_div_damp_d2_bg_k1,
+                    d2_bg_k2=self.config.corner_div_damp_d2_bg_k2,
+                    apply_at_k2=True,
+                )
 
             # FV3_3D iter 203: optional KE→heat conversion for the
             # damp_w wind change.  Faithful port of FV3

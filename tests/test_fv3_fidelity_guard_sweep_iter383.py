@@ -66,6 +66,7 @@ _GUARD_MODULES = (
     "test_factory_sponge_defaults_iter444",          # iter-444 add
     "test_sponge_boost_ast_guard_iter445",           # iter-445 add
     "test_fv3_sponge_boost_shared_iter446",          # iter-446 add
+    "test_fv3_sponge_field_scale_iter447",           # iter-447 add
 )
 
 

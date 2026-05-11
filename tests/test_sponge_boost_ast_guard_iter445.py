@@ -98,30 +98,33 @@ def test_nh_config_sponge_damp_v_present(nh_text):
     )
 
 
-def test_pe_iter438_k1_override_wired(pe_text):
-    """iter-438 PE k=0 override at corner-div site."""
-    pat = (
-        r"if\s+config\.corner_div_damp_d2_bg_k1\s*>\s*0\.0\s*:"
-        r"[\s\S]{0,600}?_damp_k1\s*=\s*_da_min_c\s*\*\s*jnp\.maximum"
-        r"[\s\S]{0,400}?_damp_corner\s*=\s*jnp\.where"
-    )
-    assert re.search(pat, pe_text), (
-        "iter-438 PE corner_div_damp_d2_bg_k1 override missing."
-    )
+def test_pe_iter438_439_446_call_shared_helper(pe_text):
+    """iter-438/439/446: PE corner-div site now calls the
+    shared ``apply_top_sponge_damp_boost`` helper for k=0/k=1/
+    k=2 sponge overrides.
 
-
-def test_pe_iter439_k2_override_wired(pe_text):
-    """iter-439 PE k=1/k=2 override with 0.01 / 0.05 thresholds."""
+    Catches a refactor that drops the call while leaving the
+    config fields declared.
+    """
     pat = (
-        r"if\s+config\.corner_div_damp_d2_bg_k2\s*>\s*0\.01\s*:"
-        r"[\s\S]{0,400}?_damp_k2\s*=\s*_da_min_c\s*\*\s*jnp\.maximum"
+        r"apply_top_sponge_damp_boost"
         r"[\s\S]{0,500}?"
-        r"if\s+config\.corner_div_damp_d2_bg_k2\s*>\s*0\.05\s*:"
-        r"[\s\S]{0,200}?0\.2\s*\*\s*config\.corner_div_damp_d2_bg_k2"
+        r"_damp_corner\s*,\s*_da_min_c\s*,\s*"
+        r"config\.corner_div_damp_d2_bg\s*,\s*"
+        r"config\.corner_div_damp_d2_bg_k1\s*,\s*"
+        r"config\.corner_div_damp_d2_bg_k2"
     )
     assert re.search(pat, pe_text), (
-        "iter-439 PE k=1 (>0.01) + k=2 (>0.05) overrides missing."
+        "iter-438/439/446 PE call to shared helper missing."
     )
+
+
+def test_shared_helper_definition(pe_text):
+    """The shared helper itself must exist (in core/)."""
+    from legoesm.core.fv3_sponge_boost import (
+        apply_top_sponge_damp_boost,
+    )
+    assert callable(apply_top_sponge_damp_boost)
 
 
 def test_nh_iter440_helper_defined(nh_text):
@@ -142,33 +145,44 @@ def test_nh_iter440_helper_called_twice(nh_text):
 
 
 def test_nh_iter441_damp_w_scaling_wired(nh_text):
+    """iter-441/447: damp_w sponge boost via shared helper with
+    factor=1.0, apply_at_k2=True."""
     pat = (
         r"if\s+self\.config\.use_fv3_sponge_damp_w\s*:"
-        r"[\s\S]{0,800}?_scale_k1\s*="
-        r"[\s\S]{0,200}?dw\s*=\s*jnp\.where"
+        r"[\s\S]{0,500}?apply_top_sponge_field_scale"
+        r"[\s\S]{0,500}?factor\s*=\s*1\.0"
+        r"[\s\S]{0,500}?apply_at_k2\s*=\s*True"
     )
     assert re.search(pat, nh_text), (
-        "iter-441 NH use_fv3_sponge_damp_w scaling missing."
+        "iter-441/447 NH use_fv3_sponge_damp_w shared-helper "
+        "call missing (factor=1.0, apply_at_k2=True)."
     )
 
 
 def test_nh_iter442_damp_v_scaling_wired(nh_text):
+    """iter-442/447: damp_v sponge boost via shared helper with
+    factor=0.5, apply_at_k2=False."""
     pat = (
         r"if\s+self\.config\.use_fv3_sponge_damp_v\s*:"
-        r"[\s\S]{0,800}?_boosted_k1_v\s*=\s*0\.5\s*\*"
-        r"[\s\S]{0,400}?du_normal\s*=\s*jnp\.where"
+        r"[\s\S]{0,500}?apply_top_sponge_field_scale"
+        r"[\s\S]{0,500}?factor\s*=\s*0\.5"
+        r"[\s\S]{0,500}?apply_at_k2\s*=\s*False"
     )
     assert re.search(pat, nh_text), (
-        "iter-442 NH use_fv3_sponge_damp_v 0.5 scaling missing."
+        "iter-442/447 NH use_fv3_sponge_damp_v shared-helper "
+        "call missing (factor=0.5, apply_at_k2=False)."
     )
 
 
 def test_pe_iter443_damp_v_scaling_wired(pe_text):
+    """iter-443/447: PE damp_v sponge boost via shared helper."""
     pat = (
         r"if\s+self\.config\.use_fv3_sponge_damp_v\s*:"
-        r"[\s\S]{0,800}?_boosted_pk1_v\s*=\s*0\.5\s*\*"
-        r"[\s\S]{0,400}?du_normal\s*=\s*jnp\.where"
+        r"[\s\S]{0,500}?apply_top_sponge_field_scale"
+        r"[\s\S]{0,500}?factor\s*=\s*0\.5"
+        r"[\s\S]{0,500}?apply_at_k2\s*=\s*False"
     )
     assert re.search(pat, pe_text), (
-        "iter-443 PE use_fv3_sponge_damp_v 0.5 scaling missing."
+        "iter-443/447 PE use_fv3_sponge_damp_v shared-helper "
+        "call missing."
     )
