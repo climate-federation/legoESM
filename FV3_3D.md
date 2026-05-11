@@ -938,6 +938,25 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 471: **duogrid is the regime-changing factor.** Same
+  NH factory, ONLY toggle ``use_duogrid``:
+    factory + duogrid=ON  θ′ ratio: 4.7939
+    factory + duogrid=OFF θ′ ratio: 0.9369
+    ratio ON/OFF = 5.12×
+  Duogrid INCREASES NH θ′ edge metric by 5.1× at C8 +
+  identical factory flags.  Counterintuitive: duogrid is
+  designed to REDUCE cube-edge artifacts via better halo
+  treatment, but in legoESM at C8 it actively MAKES the
+  edge-vs-interior variance ratio worse.  Possible
+  explanations to investigate: (1) bug in duogrid impl;
+  (2) regime difference (duogrid helps at higher resolution
+  but hurts at C8); (3) metric misinterpretation — duogrid
+  may change spatial structure in a way our edge-variance
+  ratio penalizes but that is visually less artifactual.
+  Most consequential single empirical finding in the loop.
+  Reveals that the iter-465/466 "factory hurts" results were
+  largely the duogrid effect, NOT the individual factory
+  flags.  1/1 in 102 s.  Wired into iter-383 sweep (now 66).
 - Iter 470: compact iter 455-464 doc block + **PE per-flag
   u_d edge-ratio decomposition**.  Doc shrinks ~125 lines.
   iter-368 guard now covers 9 compaction blocks.  PE u_d

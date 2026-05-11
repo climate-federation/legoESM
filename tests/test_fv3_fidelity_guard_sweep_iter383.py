@@ -89,6 +89,7 @@ _GUARD_MODULES = (
     "test_make_legoesm_pe_min_edge_config_iter468",  # iter-468 add
     "test_pe_per_flag_edge_ratio_iter469",           # iter-469 add
     "test_pe_per_flag_u_d_edge_iter470",             # iter-470 add
+    "test_nh_duogrid_effect_iter471",                # iter-471 add
 )
 
 
