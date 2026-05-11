@@ -117,6 +117,27 @@ class CDGridCompressibleEulerConfig(NamedTuple):
     corner_div_damp_dddmp: float = 0.20
     corner_div_damp_d4_bg: float = 0.0
     corner_div_damp_nord: int = 0
+    heat_source_del2_iters: int = 0
+        # FV3-faithful del-2 smoothing of the aggregate
+        # ``_d_con_sum`` heat source (FV3_3D iter 457).  Port of
+        # FV3 ``dyn_core.F90:1755-1756``::
+        #
+        #     nf_ke = min(3, flagstruct%nord+1)
+        #     call del2_cubed(heat_source, cnst_0p20 * da_min,
+        #                     ..., nf_ke, ...)
+        #
+        # Applies ``nf_ke`` Laplacian-smoothing iterations to
+        # the aggregate heat_source field before adding to
+        # ``dtheta_p_dt``.  When > 0, executes
+        # ``heat_source += coeff * area_min * ∇²heat_source``
+        # ``heat_source_del2_iters`` times.  Default 0 = no
+        # smoothing = bit-for-bit baseline.  FV3 production
+        # value for ``nord=1`` is ``nf_ke=2``.
+    heat_source_del2_coeff: float = 0.20
+        # FV3 ``cnst_0p20`` relaxation coefficient for
+        # iter-457 heat_source smoothing.  Default 0.20
+        # matches FV3 ``dyn_core.F90`` parameter.  No effect
+        # when ``heat_source_del2_iters == 0``.
     rf_tau_days: float = 0.0
         # FV3-faithful fast Rayleigh friction timescale (FV3_3D
         # iter 448).  Port of FV3 ``dyn_core.F90:2922`` ``Ray_fast``::
@@ -1222,6 +1243,18 @@ def cdgrid_compressible_euler_slow_tendencies(
                 0.0, 1.0,
             )
             _d_con_sum = _d_con_sum * _d_con_mask_s[None, None, None, :]
+        # FV3_3D iter 457: optional FV3-faithful del-2 smoothing
+        # of aggregate heat_source.  Port of FV3 ``dyn_core.F90:
+        # 1755-1756`` ``del2_cubed(heat_source, cnst_0p20*da_min,
+        # ..., nf_ke)``.  Each iteration:
+        # ``heat_source += coeff * da_min * ∇²heat_source``
+        # which is a forward-Euler diffusion step.
+        if config.heat_source_del2_iters > 0:
+            _da_min_hs = jnp.min(cdgrid.area_corner)
+            _cd_hs = config.heat_source_del2_coeff * _da_min_hs
+            for _ in range(config.heat_source_del2_iters):
+                _lap_hs = laplacian_compact_3d(_d_con_sum, grid)
+                _d_con_sum = _d_con_sum + _cd_hs * _lap_hs
         if config.delt_max > 0.0:
             _nlev_d = _d_con_sum.shape[-1]
             _k_idx = jnp.arange(_nlev_d)

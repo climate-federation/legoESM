@@ -938,6 +938,19 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 457: FV3-faithful del-2 smoothing of the aggregate
+  ``_d_con_sum`` heat source.  Port of FV3 ``dyn_core.F90:
+  1755-1756`` ``del2_cubed(heat_source, cnst_0p20*da_min,
+  ..., nf_ke)``.  Two new NH config fields:
+  ``heat_source_del2_iters: int = 0`` (default off = bit-for-
+  bit baseline; FV3 ``nf_ke=2`` at ``nord=1``) +
+  ``heat_source_del2_coeff: float = 0.20`` (FV3
+  ``cnst_0p20``).  Wired in ``slow_tendencies`` between the
+  iter-432 mask and the iter-218/219 delt_max cap.  Reuses
+  existing ``laplacian_compact_3d`` from core/operators_3d.
+  Closes a real FV3 fidelity gap (heat smoothing was
+  completely missing).  4/4 in 29 s.  Wired into iter-383
+  sweep (now 52).
 - Iter 456: introduce quantitative cube-edge artifact metric
   ``edge_var / interior_var`` over v-wind at face boundaries
   vs interior cells.  4 tests compute the metric for NH +
