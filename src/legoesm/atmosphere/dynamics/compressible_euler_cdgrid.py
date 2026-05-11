@@ -1861,6 +1861,10 @@ def make_fv3_faithful_nh_config(**overrides) -> CDGridCompressibleEulerConfig:
         * ``d_con_top_zero_levels = 2`` (iter-431/432/434)
         * ``delt_max = 1.0`` (FV3 ``fv_arrays.F90`` production
           default — iter-436)
+        * ``nord_v = 1`` (FV3 ``nord=1`` del-4 vorticity damping
+          production default — iter-437)
+        * ``corner_div_damp_nord = 1`` (FV3 ``nord=1`` del-4
+          corner-div damping production default — iter-437)
 
     The ``d_con_top_zero_levels=2`` matches FV3 production
     behaviour under the typical sponge namelist
@@ -1888,6 +1892,8 @@ def make_fv3_faithful_nh_config(**overrides) -> CDGridCompressibleEulerConfig:
         use_fv3_cross_face_du_proj=True,
         d_con_top_zero_levels=2,
         delt_max=1.0,
+        nord_v=1,
+        corner_div_damp_nord=1,
     )
     defaults.update(overrides)
     return CDGridCompressibleEulerConfig(**defaults)

@@ -919,6 +919,14 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 437: factory defaults expose FV3 production ``nord=1``
+  for both vorticity damping (``nord_v=1``) and corner-div
+  damping (``corner_div_damp_nord=1``) — matches FV3
+  ``fv_arrays.F90`` ``integer :: nord=1``.  Was previously
+  ``nord_v=2`` (del-6) / ``corner_div_damp_nord=0`` (del-2),
+  diverging from FV3 production.  Override to recover other
+  orders.  iter-427 factory step test still passes (8/8 + 7/7).
+  Wired into iter-383 sweep (now 33).  5/5 in 0.7 s.
 - Iter 436: set ``delt_max = 1.0`` in both factory defaults
   (FV3 ``fv_arrays.F90`` production default — "limiter for
   dissipative heating rate").  Combines with iter-434's
