@@ -4,11 +4,23 @@ from __future__ import annotations
 
 from typing import Callable
 
+import jax.numpy as jnp
+
+from legoesm import constants
 from legoesm.grids.cubed_sphere import CubedSphereGrid
-from legoesm.ocean.eos import compute_ocean_rho as _compute_rho
+from legoesm.ocean.eos import (
+    compute_ocean_rho as _compute_rho,
+    rho_0 as _RHO_0,
+    c_sw as _C_SW,
+    thermal_expansion_coeff,
+    haline_contraction_coeff,
+)
 from legoesm.ocean.state import OceanState, OceanTendencies
 from legoesm.ocean.vertical import OceanZStarCoordinate, compute_ocean_jacobian
 from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
+from legoesm.ocean.physics.vertical_mixing.constant import constant_vertical_mixing
+from legoesm.ocean.physics.vertical_mixing.richardson import richardson_vertical_mixing
+from legoesm.ocean.physics.vertical_mixing.kpp import kpp_vertical_mixing
 
 
 def make_vertical_mixing_physics(
@@ -47,7 +59,6 @@ def _make_none() -> Callable:
 
 
 def _make_constant(config: VerticalMixingConfig) -> Callable:
-    from legoesm.ocean.physics.vertical_mixing.constant import constant_vertical_mixing
     cfg = config.constant
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
@@ -63,7 +74,6 @@ def _make_constant(config: VerticalMixingConfig) -> Callable:
 
 
 def _make_richardson(config: VerticalMixingConfig) -> Callable:
-    from legoesm.ocean.physics.vertical_mixing.richardson import richardson_vertical_mixing
     cfg = config.richardson
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
@@ -80,16 +90,6 @@ def _make_richardson(config: VerticalMixingConfig) -> Callable:
 
 
 def _make_kpp(config: VerticalMixingConfig) -> Callable:
-    from legoesm import constants
-    from legoesm.ocean.eos import (
-        rho_0 as _RHO_0,
-        c_sw as _C_SW,
-        thermal_expansion_coeff,
-        haline_contraction_coeff,
-    )
-    from legoesm.ocean.physics.vertical_mixing.kpp import kpp_vertical_mixing
-    import jax.numpy as jnp
-
     cfg = config.kpp
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
@@ -138,10 +138,15 @@ def _make_kpp(config: VerticalMixingConfig) -> Callable:
             p_sfc = jnp.zeros_like(T_sfc)
             beta = haline_contraction_coeff(T_sfc, S_sfc, p_sfc)
             Q_sfc_S = -S_sfc * fw / _RHO_0
-            # Salt-driven buoyancy flux: B_salt = -g * beta * Q_S
-            # (freshening = lighter = stabilizing → negative contribution
-            # to B_f under the >0=unstable convention).
-            B_salt = -constants.g * beta * Q_sfc_S
+            # Salt-driven surface buoyancy flux (KPP convention,
+            # B_f > 0 = unstable):
+            #   B_f = -g*(alpha*Q_T - beta*Q_S) = -g*alpha*Q_T + g*beta*Q_S
+            # so the salt contribution is +g*beta*Q_S, NOT -g*beta*Q_S.
+            # Sanity check: freshening (fw>0) gives Q_sfc_S<0 (salt flux
+            # INTO ocean is negative) → B_salt = +g*beta*(neg) < 0
+            # (stabilizing, lighter water on top).  Brine rejection
+            # (fw<0) gives Q_sfc_S>0 → B_salt > 0 (destabilizing).
+            B_salt = constants.g * beta * Q_sfc_S
             B_f = B_salt if B_f is None else (B_f + B_salt)
 
         out = kpp_vertical_mixing(

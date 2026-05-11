@@ -1035,8 +1035,7 @@ Shared thermodynamic utilities: saturation vapor pressure, virtual temperature, 
 
 | Forcing | File | Description |
 |---------|------|-------------|
-| **Held-Suarez** | `held_suarez.py` | Newtonian relaxation + Rayleigh friction (spectral + cubed-sphere) |
-| **Held-Suarez (lat-lon)** | `held_suarez_latlon.py` | Held-Suarez adapted for lat-lon grid |
+| **Held-Suarez** | `held_suarez.py` | Newtonian relaxation + Rayleigh friction for spectral, cubed-sphere, MPAS, and lat-lon grids |
 | **Baroclinic wave** | `baroclinic_wave.py` | Jablonowski-Williamson initial conditions |
 
 ### 4.2 Ocean
@@ -2276,14 +2275,16 @@ legoESM/
 │   │   ├── state.py                        # State containers
 │   │   ├── operators.py                    # 2D centered operators (cubed-sphere)
 │   │   ├── operators_3d.py                 # 3D centered operators (cubed-sphere)
+│   │   ├── operators_cdgrid.py             # FV3 C-D grid operators (cubed-sphere)
 │   │   ├── operators_latlon.py             # 2D centered operators (lat-lon)
 │   │   ├── operators_latlon_3d.py          # 3D centered operators (lat-lon)
 │   │   ├── operators_fv.py                 # 2D FV/PPM operators (cubed-sphere)
-│   │   ├── operators_fv_3d.py              # 3D FV/PPM operators (cubed-sphere)
+│   │   ├── operators_fv_cubed.py           # FV cubed-sphere damping utilities
 │   │   ├── operators_fv_latlon.py          # 2D FV/PPM operators (lat-lon)
 │   │   ├── operators_fv_latlon_3d.py       # 3D FV/PPM operators (lat-lon)
 │   │   ├── operators_fc.py                 # 2D FC-Gram operators (cubed-sphere)
 │   │   ├── operators_fc_3d.py              # 3D FC-Gram operators (cubed-sphere)
+│   │   ├── operators_voronoi.py            # MPAS/Voronoi mesh operators
 │   │   ├── fc_gram.py                      # FC-Gram basis and differentiation
 │   │   ├── conservation.py                 # Conservation fixers
 │   │   ├── smooth.py                       # Smooth approximations
@@ -2311,40 +2312,30 @@ legoESM/
 │   ├── atmosphere/                         # Atmosphere component
 │   │   ├── dynamics/
 │   │   │   ├── __init__.py                 # Factory: make_model(equations, discretization)
-│   │   │   ├── shallow_water.py            # Centered SW (cubed-sphere)
-│   │   │   ├── shallow_water_fv.py         # FV SW (cubed-sphere)
-│   │   │   ├── shallow_water_fv_latlon.py  # FV SW (lat-lon)
-│   │   │   ├── primitive_eq.py             # Centered PE (cubed-sphere)
-│   │   │   ├── primitive_eq_fv.py          # FV PE (cubed-sphere)
-│   │   │   ├── primitive_eq_latlon.py      # Centered PE (lat-lon)
-│   │   │   ├── primitive_eq_fv_latlon.py   # FV PE (lat-lon)
-│   │   │   ├── compressible_euler.py       # Centered CE (cubed-sphere)
-│   │   │   ├── compressible_euler_fv.py    # FV CE (cubed-sphere)
-│   │   │   ├── compressible_euler_fv_latlon.py  # FV CE (lat-lon)
-│   │   │   ├── spectral_sw.py             # Spectral SW (Gaussian)
-│   │   │   ├── spectral_pe.py             # Spectral PE (Gaussian)
-│   │   │   ├── spectral_nh.py             # Spectral NH (Gaussian)
-│   │   │   ├── sfno_sw.py                 # Learned SW (SFNO)
-│   │   │   ├── sfno_pe.py                 # Learned PE (SFNO)
-│   │   │   ├── shallow_water_fc.py        # FC-Gram SW (cubed-sphere)
-│   │   │   ├── shallow_water_fc_cgrid.py  # FC-Gram SW + div damping
-│   │   │   ├── primitive_eq_fc.py         # FC-Gram PE (cubed-sphere)
-│   │   │   ├── primitive_eq_fc_cgrid.py   # FC-Gram PE + div damping
-│   │   │   ├── compressible_euler_fc.py   # FC-Gram CE (cubed-sphere)
-│   │   │   ├── compressible_euler_fc_cgrid.py  # FC-Gram CE + div damping
-│   │   │   ├── shallow_water_cgrid_latlon.py   # True C-grid SW (lat-lon)
-│   │   │   ├── shallow_water_cgrid.py     # A-grid SW + div damping (cubed-sphere)
-│   │   │   ├── primitive_eq_cgrid.py      # A-grid PE + div damping (cubed-sphere)
-│   │   │   ├── compressible_euler_cgrid.py # A-grid CE + div damping (cubed-sphere)
-│   │   │   ├── tracer_transport.py        # Passive tracer advection
-│   │   │   └── edge_blending.py           # Face boundary blending
+│   │   │   ├── shallow_water_fv3_cdgrid.py # FV3 C-D grid SW (cubed-sphere)
+│   │   │   ├── shallow_water_latlon_cgrid.py # C-grid SW (lat-lon)
+│   │   │   ├── shallow_water_mpas.py       # TRiSK SW (MPAS Voronoi)
+│   │   │   ├── primitive_eq_cdgrid.py      # FV3 C-D grid PE (cubed-sphere)
+│   │   │   ├── primitive_eq_latlon_cgrid.py # C-grid PE (lat-lon)
+│   │   │   ├── primitive_eq_mpas.py        # TRiSK PE (MPAS Voronoi)
+│   │   │   ├── compressible_euler.py       # CE shared utilities
+│   │   │   ├── compressible_euler_cdgrid.py # FV3 C-D grid CE (cubed-sphere)
+│   │   │   ├── compressible_euler_mpas.py  # TRiSK CE (MPAS Voronoi)
+│   │   │   ├── spectral_sw.py              # Spectral SW (Gaussian)
+│   │   │   ├── spectral_pe.py              # Spectral PE (Gaussian)
+│   │   │   ├── spectral_nh.py              # Spectral NH (Gaussian)
+│   │   │   ├── sfno_sw.py                  # Learned SW (SFNO)
+│   │   │   ├── sfno_pe.py                  # Learned PE (SFNO)
+│   │   │   ├── tracer_transport.py         # Passive tracer advection (shared)
+│   │   │   ├── tracer_transport_latlon.py  # Passive tracer advection (lat-lon)
+│   │   │   └── tracer_transport_mpas.py    # Passive tracer advection (MPAS)
+│   │   │
+│   │   ├── held_suarez.py                  # Held-Suarez forcing (all grids)
 │   │   │
 │   │   └── physics/
 │   │       ├── __init__.py                 # Physics exports
 │   │       ├── combined.py                 # Physics suite combiner
 │   │       ├── thermodynamics.py           # Thermodynamic utilities
-│   │       ├── held_suarez.py              # Held-Suarez forcing
-│   │       ├── held_suarez_latlon.py       # Held-Suarez (lat-lon)
 │   │       ├── baroclinic_wave.py          # Baroclinic wave init
 │   │       ├── kessler.py                  # Legacy Kessler wrapper
 │   │       │
@@ -2514,20 +2505,17 @@ legoESM/
 │   └── test_cases/                         # Williamson, DCMIP, DCMIP-2025
 │
 ├── scripts/                                # Research & experiment scripts
-│   ├── run_amip.py                         # AMIP simulation (gray/RRTMG, checkpoint)
-│   ├── run_amip_spectral.py                # AMIP spectral PE simulation
-│   ├── run_100day.py                       # 100-day atmospheric simulation
-│   ├── run_amip.py                         # Production AMIP CLI (ModelDriver)
+│   ├── run_amip.py                         # Production AMIP CLI (gray/RRTMG, checkpoint)
 │   ├── run_atmosphere_test_matrix.py       # Master atmosphere test suite (64+ cases)
 │   ├── run_ocean_test_matrix.py            # Master ocean test suite (4 grids × 9 cases)
 │   ├── run_ocean_spectral_tests.py         # Spectral ocean (Gaussian grid)
 │   ├── run_baroclinic_wave_benchmark.py    # Publication figures (CliMA Fig 3)
-│   ├── validate_cubed_sphere_fv3_atmos.py  # FV3 C-D grid edge validation
+│   ├── diagnostic/validate_cubed_sphere_fv3_atmos.py  # FV3 C-D grid edge validation
 │   ├── run_levante_gpu_scaling.py          # GPU scaling benchmarks
 │   ├── run_levante_gpu_scaling.sh          # SLURM batch driver
 │   ├── run_w2_mpas_convergence.py          # MPAS convergence study
-│   ├── run_sfno_campaign.py                # ML inference campaign
-│   └── sfno_slab.py                        # SFNO slab-ocean CLI wrapper
+│   ├── s2s/run_sfno_campaign.py            # ML inference campaign
+│   └── s2s/sfno_slab.py                    # SFNO slab-ocean CLI wrapper
 │
 ├── config/                                 # Configuration templates
 │   ├── williamson_test2.yaml
@@ -2559,7 +2547,7 @@ R_earth = 6.371229e6       # Earth mean radius [m]
 # Dry air
 R_d = 287.05               # Gas constant for dry air [J/(kg*K)]
 c_pd = 1004.64             # Specific heat at const pressure [J/(kg*K)]
-c_vd = 717.56              # Specific heat at const volume [J/(kg*K)]
+c_vd = c_pd - R_d          # = 717.59  (enforces R_d = c_pd - c_vd identity, audit iter-39)
 kappa = R_d / c_pd         # Poisson constant (~0.2857)
 p_ref = 1.0e5              # Reference pressure [Pa]
 

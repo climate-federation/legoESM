@@ -227,8 +227,28 @@ def main():
         return
 
     if args.resolution:
+        # iter-115 (codex iter-114-followup): use the shared
+        # ``legoesm.driver.cli_resolution`` helpers for both
+        # validation and expansion.  See atmosphere matrix
+        # runner for the rationale.
+        from legoesm.driver.cli_resolution import (
+            validate_cli_resolution as _validate,
+            expand_cli_resolution as _expand_shared,
+        )
+        cli_res = args.resolution
+        N = _validate(
+            cli_res,
+            additional_examples="'C24', 'ico3', '36x72', 'T21', '50km'",
+        )
+        is_bare_int = N is not None
+
+        def _expand_cli_res(grid_type: str) -> str:
+            if not is_bare_int:
+                return cli_res
+            return _expand_shared(N, grid_type)
+
         tests = [TestCase(
-            t.case, t.grid_type, args.resolution,
+            t.case, t.grid_type, _expand_cli_res(t.grid_type),
             t.duration_days, t.quick_days, t.run_kwargs)
             for t in tests]
 

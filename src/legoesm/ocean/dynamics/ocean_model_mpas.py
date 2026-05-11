@@ -18,12 +18,14 @@ from legoesm.core.state import MPASOceanState, MPASOceanTendencies
 from legoesm.grids.voronoi import VoronoiMesh
 from legoesm.ocean.mpas_config import MPASOceanConfig
 from legoesm.ocean.vertical import (
+    OceanPartialCellCoordinate,
     OceanZStarCoordinate,
     compute_layer_thickness,
     diagnose_w_from_flux_div,
     flux_form_vertical_tracer_advection,
     flux_form_vertical_tracer_advection_tvd,
 )
+from legoesm.ocean.dynamics.mpas_partial_cell_helpers import min_cell_to_edge
 from legoesm.ocean.dynamics.advection_mpas import (
     compute_upup_cells,
     tvd_tracer_to_edges,
@@ -85,16 +87,27 @@ def _forward_backward_coriolis_mpas_3d(
     c2 = mesh.cellsOnEdge[1]
     edge_mask = (mask[c1] * mask[c2])[:, jnp.newaxis]  # (nEdges, 1)
 
-    # Layer thickness at edges for depth averaging
+    # Layer thickness at edges for depth averaging.
+    # On partial cells, MUST use min-rule so the u_bar computed here
+    # matches the barotropic solver's u_bar — otherwise the depth-mean
+    # we strip in u_prime = u - u_bar disagrees with what the barotropic
+    # step adds back at the next iteration, and the inconsistency
+    # accumulates as a phantom kick on every step edge.
     h_k = compute_layer_thickness(
         eta, H_bathy, z_coord,
         min_water_column_m=config.min_water_column_m,
     )
-    h_e = 0.5 * (h_k[c1] + h_k[c2])  # (nEdges, nlev)
-    H_e = jnp.maximum(jnp.sum(h_e, axis=1, keepdims=True), config.min_water_column_m)
-
-    # Depth-averaged velocity
-    u_bar = jnp.sum(u_3d * h_e, axis=1, keepdims=True) / H_e  # (nEdges, 1)
+    if isinstance(z_coord, OceanPartialCellCoordinate):
+        h_e = min_cell_to_edge(h_k, mesh)
+    else:
+        h_e = 0.5 * (h_k[c1] + h_k[c2])  # (nEdges, nlev)
+    # ``H_e = sum(h_e)`` and ``u_bar`` numerator ``sum(u_3d * h_e)``
+    # share the level axis and h_e weight — fuse into one stacked sum.
+    _u_pair = jnp.sum(
+        jnp.stack([h_e, u_3d * h_e], axis=-1), axis=1, keepdims=True,
+    )
+    H_e = jnp.maximum(_u_pair[..., 0], config.min_water_column_m)
+    u_bar = _u_pair[..., 1] / H_e  # (nEdges, 1)
     u_bar = u_bar * edge_mask
 
     # Perturbation velocity
@@ -242,6 +255,21 @@ class MPASOceanModel:
         z_coord = self.z_coord
         mask = state.land_mask.data
 
+        # Per-level active mask.  On partial-cell coords, below-seafloor
+        # cells have ``h_partial = 0`` (vertical.py:267).  The tracer
+        # update divides by ``jnp.maximum(h_k_new, 1e-10)``; using only
+        # the 2D land mask there lets a float-precision residual in
+        # ``hT_new`` amplify to ~1e10 tracer values below the seafloor
+        # — the same bug that caused step-1 blowup on lat-lon
+        # (PR #231).  Even though the MPAS PGF stencils gate the
+        # corrupted ρ from the active dynamics, the values still feed
+        # the GM/Redi tendency and any non-active-aware diagnostic.
+        # Audit 2026-05-04.
+        if isinstance(z_coord, OceanPartialCellCoordinate):
+            active_3d = z_coord.is_active.astype(state.T.data.dtype)
+        else:
+            active_3d = mask[:, jnp.newaxis]
+
         # 1. Compute baroclinic tendencies
         tend = self.tendencies(state, freshwater=freshwater,
                                surface_forcing=surface_forcing,
@@ -272,9 +300,8 @@ class MPASOceanModel:
                 eos=config.eos, eos_linear=config.eos_linear,
                 mask=mask,
             )
-            mask_3d = mask[:, jnp.newaxis]
-            T_new = T_new + dt * dT_gm * mask_3d
-            S_new = S_new + dt * dS_gm * mask_3d
+            T_new = T_new + dt * dT_gm * active_3d
+            S_new = S_new + dt * dS_gm * active_3d
 
         # 3. Update 3D velocity with baroclinic perturbation tendency.
         # tend.du_dt uses RELATIVE vorticity in the PV flux only (no
@@ -348,10 +375,23 @@ class MPASOceanModel:
         # 6. Reconcile 3D velocity
         # Compute u_bar_old from the UPDATED state (state_for_baro),
         # not the original. This ensures depth_avg(u_3d_new) = u_bar_new.
-        h_e_k = 0.5 * (h_k_old[c1] + h_k_old[c2])  # (nEdges, nlev)
-        H_total = jnp.maximum(state.eta.data + state.H_bathy.data,
+        # On partial cells, MUST use the same min-rule per-level edge
+        # thickness as the implicit-CN solver (barotropic_implicit_mpas).
+        # If we used a centered 0.5*(h[c1]+h[c2]) here, u_bar_old and
+        # u_bar_new would be on different bases and reconcile_3d_velocity
+        # would inject the difference into u_3d as a phantom barotropic
+        # kick at every step edge — drove the seamount rest-state
+        # explosion at step 2.
+        partial_cells = isinstance(z_coord, OceanPartialCellCoordinate)
+        if partial_cells:
+            h_e_k = min_cell_to_edge(h_k_old, mesh)
+            H_e = jnp.maximum(jnp.sum(h_e_k, axis=1),
                               config.min_water_column_m)
-        H_e = 0.5 * (H_total[c1] + H_total[c2])
+        else:
+            h_e_k = 0.5 * (h_k_old[c1] + h_k_old[c2])  # (nEdges, nlev)
+            H_total = jnp.maximum(state.eta.data + state.H_bathy.data,
+                                  config.min_water_column_m)
+            H_e = 0.5 * (H_total[c1] + H_total[c2])
         u_bar_old = jnp.sum(u_baro * h_e_k, axis=1) / jnp.maximum(H_e, 1e-10)
 
         u_3d_new = reconcile_3d_velocity(
@@ -370,8 +410,12 @@ class MPASOceanModel:
         #   delta_u = (Hu_avg - sum_k(u_3d * h_e)) / H_e
         # This preserves baroclinic shear while matching Hu_avg.
         edge_mask = mask[c1] * mask[c2]
-        H_e_old = jnp.sum(h_e_k, axis=1)  # (nEdges,)
-        Hu_3d = jnp.sum(u_3d_new * h_e_k, axis=1)  # (nEdges,)
+        # Fuse the two h_e_k-weighted column reductions into one stack.
+        _hu_pair = jnp.sum(
+            jnp.stack([h_e_k, u_3d_new * h_e_k], axis=-1), axis=1,
+        )
+        H_e_old = _hu_pair[..., 0]  # (nEdges,)
+        Hu_3d = _hu_pair[..., 1]    # (nEdges,)
         delta_u = (Hu_avg - Hu_3d) / jnp.maximum(H_e_old, 1e-10)
         u_transport = u_3d_new + delta_u[:, jnp.newaxis]  # (nEdges, nlev)
 
@@ -402,7 +446,7 @@ class MPASOceanModel:
         # T_mid contains diffusion+physics from the Euler step (step 2).
         # Advection (horizontal + vertical) is applied here.
         # This matches the latlon C-grid algorithm (ocean_model_latlon_cgrid.py).
-        mask_3d = mask[:, jnp.newaxis]  # (nCells, 1)
+        # ``active_3d`` (built above) is per-level on partial cells.
 
         use_tvd = config.tracer_advection == "tvd"
 
@@ -441,7 +485,10 @@ class MPASOceanModel:
             # cold/fresh front that propagated into the interior
             # one-cell-per-step. See issue #164. Matches the lat-lon
             # pattern in ocean_model_latlon_cgrid.py:493.
-            tr_new = jnp.where(mask_3d > 0.5, tr_new, tr)
+            # On partial-cell coordinates ``active_3d`` is per-level
+            # and additionally preserves pre-step values in below-
+            # seafloor cells (audit 2026-05-04).
+            tr_new = jnp.where(active_3d > 0.5, tr_new, tr)
 
             if tr_name == 'T':
                 T_corrected = tr_new
@@ -460,23 +507,48 @@ class MPASOceanModel:
             w=state.w.replace(data=w),
             H_bathy=state.H_bathy,
             land_mask=state.land_mask,
+            rho_ref_z=state.rho_ref_z,
         )
 
         # 10. Conservation fixers (#166: pass expected forcing so fixer
         # only removes numerical drift, not the forcing itself)
         if config.use_conservation_fixer:
             _f64 = jnp.float64
-            wa = mask.astype(_f64)[:, jnp.newaxis] * mesh.areaCell.astype(_f64)[:, jnp.newaxis]
-            expected_dHeat = jnp.sum(
+            # Owned-cell mask: under MPI partitioning, halo cells are
+            # also stored on neighbouring ranks; including them in the
+            # local sums double-counts after the global allreduce.
+            # ``self._owned_mask`` is set by the MPI-aware constructor
+            # (``MPASPrimitiveEquationModel`` / ``MPASOceanModel``)
+            # when running distributed; defaults to ``None`` (single-
+            # rank, all cells owned) otherwise.
+            owned_mask = getattr(self, "_owned_mask", None)
+            if owned_mask is None:
+                eff_mask = mask
+            else:
+                eff_mask = mask * owned_mask.astype(mask.dtype)
+            wa = eff_mask.astype(_f64)[:, jnp.newaxis] * mesh.areaCell.astype(_f64)[:, jnp.newaxis]
+            expected_dHeat_local = jnp.sum(
                 tend.dT_dt.data.astype(_f64) * h_k_old.astype(_f64) * wa
             ) * dt
-            expected_dSalt = jnp.sum(
+            expected_dSalt_local = jnp.sum(
                 tend.dS_dt.data.astype(_f64) * h_k_old.astype(_f64) * wa
             ) * dt
+            # Globally sum the locally-masked expected forcing so the
+            # comparison against the globally-summed ``heat_old`` /
+            # ``salt_old`` inside the fixer is consistent.
+            from legoesm.ocean.conservation_mpas import _is_multi_process
+            if _is_multi_process():
+                from legoesm.parallel.reductions import global_sum_mpi
+                expected_dHeat = global_sum_mpi(expected_dHeat_local)
+                expected_dSalt = global_sum_mpi(expected_dSalt_local)
+            else:
+                expected_dHeat = expected_dHeat_local
+                expected_dSalt = expected_dSalt_local
             state_new = mpas_ocean_conservation_fixer(
                 state_new, state, mesh, z_coord, config,
                 expected_dHeat=expected_dHeat,
                 expected_dSalt=expected_dSalt,
+                owned_mask=owned_mask,
             )
 
         return cast_pytree(state_new, None, "storage")

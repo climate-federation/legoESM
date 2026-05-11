@@ -557,19 +557,30 @@ def spectral_state_vs_carry_loss(
 
     loss = jnp.float32(0.0)
 
+    # Per-variable scale denominators — same convention as carry_mse
+    # (iter-69 fix carried over to the spectral path so identical
+    # LossConfigs behave consistently across spectral and grid losses).
+    if config.normalize_by_scale:
+        T_norm = config.T_scale ** 2
+        wind_norm = config.wind_scale ** 2
+        q_norm = config.q_scale ** 2
+        ps_norm = config.ps_scale ** 2
+    else:
+        T_norm = wind_norm = q_norm = ps_norm = 1.0
+
     # Temperature: (n_lat, n_lon, nlev)
     dT = fields['T'].astype(jnp.float32) - target_carry.T
-    loss = loss + config.w_T * jnp.mean(dT ** 2 * lev_w)
+    loss = loss + config.w_T * jnp.mean(dT ** 2 * lev_w) / T_norm
 
     # Winds: (n_lat, n_lon, nlev)
     du = fields['u'].astype(jnp.float32) - target_carry.u
     dv = fields['v'].astype(jnp.float32) - target_carry.v
-    loss = loss + config.w_u * jnp.mean(du ** 2 * lev_w)
-    loss = loss + config.w_v * jnp.mean(dv ** 2 * lev_w)
+    loss = loss + config.w_u * jnp.mean(du ** 2 * lev_w) / wind_norm
+    loss = loss + config.w_v * jnp.mean(dv ** 2 * lev_w) / wind_norm
 
     # Surface pressure: (n_lat, n_lon)
     dp = fields['p_s'].astype(jnp.float32) - target_carry.p_s
-    loss = loss + config.w_ps * jnp.mean(dp ** 2)
+    loss = loss + config.w_ps * jnp.mean(dp ** 2) / ps_norm
 
     # Specific humidity (q_v): contribute to the loss only when the
     # predicted state actually carries a ``q_v`` tracer (i.e., the
@@ -585,7 +596,7 @@ def spectral_state_vs_carry_loss(
             _qv_raw.data if hasattr(_qv_raw, "data") else _qv_raw
         ).astype(jnp.float32)
         dq = qv_grid - target_carry.q_v
-        loss = loss + config.w_q * jnp.mean(dq ** 2 * lev_w)
+        loss = loss + config.w_q * jnp.mean(dq ** 2 * lev_w) / q_norm
 
     return loss
 

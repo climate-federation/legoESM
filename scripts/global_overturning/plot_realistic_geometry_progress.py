@@ -84,85 +84,10 @@ def _record_diagnostics(d):
     }
 
 
-def _moc_streamfunction(v, h_partial, eta, H_bathy, mask, grid):
-    """Eulerian-mean meridional overturning streamfunction [Sv].
-
-    ψ(j, k) = - ∫_{lat[j]} ∫_{z[k]}^0 V(lat', z') · dx dz'
-
-    where V is zonally-integrated thickness-weighted v.  Integration
-    starts at z=0 (surface) and goes downward; sign convention: positive
-    ψ = clockwise circulation (warm rising, cold sinking) in lat-z plot.
-
-    Returns
-    -------
-    psi : (n_lat+1, n_levels)  in Sverdrups
-    """
-    n_lat_v, n_lon, nlev = v.shape  # n_lat_v = n_lat + 1
-    R = grid.radius if hasattr(grid, "radius") else 6.371e6
-    cos_lat_v = np.cos(np.linspace(-np.pi / 2, np.pi / 2, n_lat_v))
-    dlon = 2.0 * np.pi / n_lon
-    dx_v = R * dlon * cos_lat_v[:, None]                        # (n_lat+1, 1)
-
-    # h at v-faces: average of north/south cells (interior); zero at poles
-    h_v = np.zeros_like(v)                                      # (n_lat+1, n_lon, nlev)
-    h_v[1:-1] = 0.5 * (h_partial[:-1] + h_partial[1:])
-    # Note: this is (interface i: north - south) — pole rows stay zero.
-
-    # v-face mask: both adjacent cells must be ocean
-    v_mask = np.zeros((n_lat_v, n_lon))
-    if n_lat_v >= 2:
-        v_mask[1:-1] = mask[:-1] * mask[1:]
-    v_mask = v_mask[:, :, None]                                  # (n_lat+1, n_lon, 1)
-
-    # Zonal mass flux per level: V_lat_k = Σ_lon h_v · v · dx
-    Vh = (v * h_v * v_mask) * dx_v[:, :, None]                   # (n_lat+1, n_lon, nlev)
-    V_zonal = Vh.sum(axis=1)                                     # (n_lat+1, nlev)
-
-    # ψ(lat, z) = ∫_z^0 V_zonal(lat, z') dz' (downward integral from surface)
-    # In array order: level 0 is surface, level -1 is bottom.  Streamfunction
-    # at level k = - sum_{j<=k} V_zonal[:, j]  (so that ψ at surface = 0
-    # because nothing has been accumulated; ψ at depth k = total flow above).
-    psi = -np.cumsum(V_zonal, axis=1)                            # (n_lat+1, nlev)
-    psi = psi / 1.0e6                                            # m^3/s -> Sv
-
-    return psi
-
-
-def _barotropic_streamfunction(u, h_partial, mask, grid):
-    """Barotropic streamfunction ψ_bt(lat, lon) [Sv].
-
-    ψ_bt = ∫_{south_wall}^{lat} U_zonal(lat') · dy
-
-    where U_zonal = Σ_z h_u · u (depth-integrated zonal transport at u-face).
-    Resulting streamfunction has units of Sv (1 Sv = 1e6 m^3/s).
-    """
-    n_lat, n_lon_u, nlev = u.shape
-    n_lon = n_lon_u - 1
-    R = grid.radius if hasattr(grid, "radius") else 6.371e6
-    dlat = np.pi / n_lat
-    dy = R * dlat                                                # uniform
-
-    # h at u-faces: min-rule (matches MOM6/MITgcm convention)
-    h_E = h_partial                                              # (n_lat, n_lon, nlev)
-    h_W = np.roll(h_partial, 1, axis=1)
-    h_u_int = np.minimum(h_E, h_W)                               # (n_lat, n_lon, nlev)
-    h_u = np.concatenate([h_u_int, h_u_int[:, 0:1, :]], axis=1)  # periodic wrap
-
-    # u-face mask
-    mask_E = mask
-    mask_W = np.roll(mask, 1, axis=1)
-    u_mask_int = (mask_E * mask_W) > 0.5
-    u_mask = np.concatenate([u_mask_int, u_mask_int[:, 0:1]], axis=1)
-
-    # Depth-integrated zonal transport at u-faces (m^2/s)
-    U_dz = np.sum(u * h_u, axis=-1) * u_mask                     # (n_lat, n_lon+1)
-
-    # ψ_bt(j, i) = - ∫_{south}^{lat_j} U(j', i) dy  (south-wall reference 0)
-    # Convention: positive ψ_bt = clockwise circulation when viewed from above.
-    psi_bt = -np.cumsum(U_dz, axis=0) * dy / 1.0e6               # (n_lat, n_lon+1) in Sv
-
-    # Drop the wrap column for plotting at cell centres
-    return psi_bt[:, :-1]
+from legoesm.ocean.diagnostics_streamfunction import (
+    barotropic_streamfunction as _barotropic_streamfunction,
+    moc_streamfunction as _moc_streamfunction,
+)
 
 
 def main():

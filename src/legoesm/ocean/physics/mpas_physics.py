@@ -17,6 +17,8 @@ from legoesm.core.state import MPASOceanState, MPASOceanTendencies
 from legoesm.grids.voronoi import VoronoiMesh
 from legoesm.ocean.eos import rho_0 as rho_0_ref
 from legoesm.ocean.vertical import OceanZStarCoordinate, compute_ocean_jacobian
+from legoesm.ocean.physics.surface_forcing.config import SurfaceForcingConfig
+from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
 
 
 def make_mpas_ocean_physics(config) -> Callable:
@@ -32,9 +34,6 @@ def make_mpas_ocean_physics(config) -> Callable:
         ``physics_fn(state, mesh, z_coord, surface_forcing=None)``
         returning ``MPASOceanTendencies``.
     """
-    from legoesm.ocean.physics.surface_forcing.config import SurfaceForcingConfig
-    from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
-
     sf_config = config.surface_forcing
     bd_config = config.bottom_drag
 

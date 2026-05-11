@@ -352,12 +352,6 @@ def _interp_strip(strip: jax.Array, offsets_1d: jax.Array) -> jax.Array:
     extra_dims = strip.ndim - 1
     broadcast_shape = (n,) + (1,) * extra_dims
 
-    # Reshape interpolation weights so they broadcast against ``strip``'s
-    # trailing axes.  For 1D ``strip`` this is a no-op; for 2D/3D inputs
-    # (e.g. native 4D halo on lat-lon-extended levels) it inserts the
-    # right number of singleton axes so weights broadcast.
-    bcast = (slice(None),) + (None,) * (strip.ndim - 1)
-
     if n < 3:
         # Fall back to linear for very coarse grids
         lo = jnp.clip(jnp.floor(idx).astype(jnp.int32), 0, n - 2)
@@ -558,7 +552,12 @@ def pad_halo(
     offsets = None if duogrid is not None else interp_offsets
 
     # Single-face (regional panel) dispatch: wall boundary conditions.
-    if data.shape[0] == 1:
+    # Iter 29: gate the wall-BC fast path on the *non-MPI* backends.
+    # When MPI is active and a rank owns exactly one face (compact
+    # local layout), ``data.shape[0] == 1`` is the *normal* state and
+    # we still need to exchange halos with neighbouring ranks — taking
+    # the wall-BC branch silently zeroed out the inter-face coupling.
+    if data.shape[0] == 1 and _halo_backend != "mpi":
         return _pad_halo_wall(data, halo)
 
     # MPI dispatch.
@@ -596,7 +595,9 @@ def pad_halo(
                 "SPMD halo=3 exchange not yet implemented; "
                 "halo=3 is only available on the single-node local path.")
         from legoesm.parallel.cubesphere_exchange import explicit_pad_halo
-        padded = explicit_pad_halo(data, _spmd_mesh, halo=halo)
+        padded = explicit_pad_halo(
+            data, _spmd_mesh, halo=halo, interp_offsets=offsets,
+        )
     elif halo == 1:
         padded = _pad_halo_local(data, offsets)
     elif halo == 2:
@@ -619,6 +620,80 @@ def pad_halo(
         padded = fill_corner_region(padded, duogrid, halo)
 
     return padded
+
+
+def pad_halo_pair_h2(
+    q1: jax.Array,
+    q2: jax.Array,
+    interp_offsets: jax.Array | None = None,
+    duogrid=None,
+) -> tuple[jax.Array, jax.Array]:
+    """Halo=2 exchange a pair of independent ``(6, n, n)`` fields.
+
+    Under the SPMD backend, the two fields ride a single
+    ``packed_pad_halo_4d(halo=2)`` collective — dropping per-call halo=2
+    cross-device collective count from 2 → 1 when both fields can be
+    exchanged together (e.g. PPM transport's ``q_i`` and ``q_j``,
+    which depend only on the already-padded ``q``).  Under the
+    local / MPI backends this falls through to two sequential
+    ``pad_halo(halo=2)`` calls — same arithmetic, no extra overhead.
+
+    Parameters
+    ----------
+    q1, q2 : jax.Array, shape ``(6, n, n)``
+    interp_offsets : optional
+        Forwarded to the underlying SPMD / local kernels (3D h2
+        offsets shaped ``(6, 4, 2, n)`` when ``duogrid is None``).
+    duogrid : DuoGridData or None
+
+    Returns
+    -------
+    (q1_pad, q2_pad) : tuple of jax.Array, each shape ``(6, n+4, n+4)``.
+    """
+    if _halo_backend == "spmd" and _spmd_mesh is not None:
+        from legoesm.parallel.cubesphere_exchange import packed_pad_halo_4d
+        offsets = None if duogrid is not None else interp_offsets
+        # Add a singleton trailing axis so the SPMD packed kernel —
+        # which targets 4D ``(6, n, n, C)`` inputs — can ride the same
+        # all_gather.  Squeeze the channel axis off on return.
+        q1_4d = q1[..., None]
+        q2_4d = q2[..., None]
+        q1_pad_4d, q2_pad_4d = packed_pad_halo_4d(
+            q1_4d, q2_4d, mesh=_spmd_mesh,
+            duogrid=duogrid, interp_offsets=offsets, halo=2,
+        )
+        return q1_pad_4d[..., 0], q2_pad_4d[..., 0]
+    if _halo_backend == "mpi" and _mpi_topology is not None:
+        # MPI: ``packed_pad_halo_mpi_4d`` already supports halo=2 and
+        # halves the MPI message count from 2 → 1 by stacking the two
+        # fields along the trailing axis.  Same singleton-channel trick
+        # as the SPMD path.  ``packed_pad_halo_mpi_4d`` does not
+        # currently support ``interp_offsets`` (the underlying MPI
+        # exchange ignores them — see the explicit guard in
+        # ``pad_halo_mpi_4d``); when offsets are requested, fall back
+        # to the per-field unpacked ``pad_halo`` path which raises a
+        # clear NotImplementedError so callers know to either run with
+        # duogrid (preferred) or accept the unpacked MPI path until
+        # offset-aware MPI exchange lands.
+        if interp_offsets is None:
+            from legoesm.parallel.halo_exchange import packed_pad_halo_mpi_4d
+            q1_4d = q1[..., None]
+            q2_4d = q2[..., None]
+            q1_pad_4d, q2_pad_4d = packed_pad_halo_mpi_4d(
+                q1_4d, q2_4d, topology=_mpi_topology,
+                halo=2, duogrid=duogrid,
+            )
+            return q1_pad_4d[..., 0], q2_pad_4d[..., 0]
+        # offsets requested under MPI — `pad_halo` already raises a
+        # clear NotImplementedError on this combination.  Let the
+        # per-field path do that for a sharper error than ours.
+    # Local backend (or MPI-with-offsets — handled above): two
+    # sequential pad_halo calls with identical arithmetic.
+    q1_pad = pad_halo(q1, halo=2, interp_offsets=interp_offsets,
+                      duogrid=duogrid)
+    q2_pad = pad_halo(q2, halo=2, interp_offsets=interp_offsets,
+                      duogrid=duogrid)
+    return q1_pad, q2_pad
 
 
 def pad_halo_4d(
@@ -681,7 +756,8 @@ def pad_halo_4d(
     offsets = None if duogrid is not None else interp_offsets
 
     # Single-face (regional panel) dispatch: wall boundary conditions.
-    if data.shape[0] == 1:
+    # Iter 29: gate on non-MPI backends (see pad_halo above).
+    if data.shape[0] == 1 and _halo_backend != "mpi":
         return _pad_halo_wall(data, halo)
 
     # MPI dispatch.
@@ -711,7 +787,9 @@ def pad_halo_4d(
                 "SPMD 4D halo=3 exchange not yet implemented; "
                 "halo=3 is only available on MPI and single-node paths.")
         from legoesm.parallel.cubesphere_exchange import explicit_pad_halo_4d
-        padded = explicit_pad_halo_4d(data, _spmd_mesh, halo=halo)
+        padded = explicit_pad_halo_4d(
+            data, _spmd_mesh, halo=halo, interp_offsets=offsets,
+        )
     elif halo == 1:
         padded = _pad_halo_local_4d(data, offsets)
     elif halo == 2:
@@ -956,11 +1034,20 @@ def pad_halo_vector_4d(
         from legoesm.parallel.cubesphere_exchange import (
             explicit_pad_halo_vector_4d,
         )
+        # Iter-31: forward ``interp_offsets`` to the SPMD vector kernel.
+        # Without this, the dycore's hyperdiffusion path
+        # (``hyperdiffusion_3d`` → ``divergence_3d`` → here) silently
+        # drops the Lagrange correction under SPMD, producing ~6e-4
+        # relative drift on u/v after a single SSP-RK3 step at C24/L8.
+        # ``duogrid``-on-grid runs already handle this through the
+        # post-exchange remap; ``interp_offsets``-with-no-duogrid runs
+        # need the explicit forwarding.
+        offsets = None if duogrid is not None else interp_offsets
         return explicit_pad_halo_vector_4d(
             u_data, v_data,
             cos_angle, sin_angle,
             cos_angle_padded, sin_angle_padded,
-            _spmd_mesh, halo=halo,
+            _spmd_mesh, halo=halo, interp_offsets=offsets,
         )
 
     # Broadcast 2D angles to match 4D data
@@ -1377,27 +1464,90 @@ def precompute_halo_tables(n: int) -> None:
     _get_halo_tables_h2(int(n))
 
 
+# FV3_3D iter 7: corner-fill mode toggle.
+#
+# The 2-point-average ("avg") path is the legacy default (preserves
+# all existing tests bit-for-bit).  The "fv3_agrid_xdir" mode applies
+# the FV3-faithful diagonal-mirror corner fill from
+# fv_mp_mod.F90:fill_corners_2d_r8 AGRID/XDir branch (line 1077): for
+# the SW vertex halo at padded (0, 0), use ``q[0, 1]`` (the cell
+# immediately to the south of the SW interior corner, also a halo).
+# This eliminates the direction-invariant smoothing in the 2-point
+# average, restoring the FV3 directional preference.
+#
+# Empirical effect on Held-Suarez C36 hybrid 30-day:
+#   day 30 max abs v: 2.56 m/s (avg) -> 1.35 m/s (fv3_agrid_xdir)  -47%
+#   day 30 zonal_std: 0.520 -> 0.274                               -47%
+#   day 30 eddy_std:  0.364 -> 0.260                               -29%
+#
+# Set via the ``LEGOESM_CORNER_FILL`` environment variable or via the
+# ``set_corner_fill_mode(...)`` helper.  Default ``avg`` preserves the
+# current production behaviour.
+import os as _os
+
+_corner_fill_mode = _os.environ.get("LEGOESM_CORNER_FILL", "avg")
+
+
+def set_corner_fill_mode(mode: str) -> None:
+    """Set the cube-vertex halo fill mode.
+
+    Parameters
+    ----------
+    mode : {"avg", "fv3_agrid_xdir", "fv3_bgrid_xdir"}
+        - ``"avg"`` (default): legacy 2-point average — direction-
+          invariant; symmetric combination of FV3's XDir and YDir.
+        - ``"fv3_agrid_xdir"``: FV3-faithful AGRID-XDir diagonal
+          mirror (``fv_mp_mod.F90:1077``).  Each cube-vertex halo
+          takes its value from the IMMEDIATELY-ADJACENT halo strip
+          (depth-1 mirror).  Reduces HS C36 mid-level cube imprint
+          by 47 % at day 30, but increases max-over-all-levels
+          max abs v by 56 % (extreme-level jet release).
+        - ``"fv3_bgrid_xdir"``: FV3-faithful BGRID-XDir diagonal
+          mirror (``fv_mp_mod.F90:1041``).  Each cube-vertex halo
+          takes its value from the FACE-INTERIOR cell at depth 2
+          along the XDir direction.  Reduces HS C36 mid-level cube
+          imprint by 41 % at day 30 AND reduces max-over-all-levels
+          max abs v by 15 %.  **Cleanest win** of the three modes.
+          See FV3_3D.md iter 10.
+    """
+    global _corner_fill_mode
+    valid_modes = ("avg", "fv3_agrid_xdir", "fv3_bgrid_xdir")
+    if mode not in valid_modes:
+        raise ValueError(
+            f"Unknown corner fill mode: {mode!r}.  "
+            f"Choose from {valid_modes}."
+        )
+    _corner_fill_mode = mode
+
+
+def get_corner_fill_mode() -> str:
+    """Return the current cube-vertex halo fill mode."""
+    return _corner_fill_mode
+
+
 def _fill_corners_h1(padded: jax.Array) -> jax.Array:
-    """Fill corner cells of halo=1 padded array by averaging adjacent edge halos.
+    """Fill corner cells of halo=1 padded array (cube vertices, 24 cells).
 
-    Vectorized: all 24 corners (6 faces × 4 corners) in a single
-    gather + average + scatter.
+    Two modes via :func:`set_corner_fill_mode`:
 
-    Fidelity note (Codex iter-69 review): the Fortran transport path uses
-    `copy_corners(dir=1/2)` in tp_core.F90:243-299 — a directional rotated
-    copy tailored to X-sweep vs Y-sweep of PPM.  That mechanism writes
-    DIFFERENT values at the same cube-vertex cell for different sweep
-    directions.  Our 2-point average is a direction-invariant single value.
+    - ``"avg"`` (default): legacy 2-point average of two adjacent halo
+      cells.  Direction-invariant; symmetric combination of FV3's
+      XDir and YDir.
 
-    This discrepancy has no functional impact on ``fv_tp_2d`` (verified):
-    the operator-split PPM slices q_full to keep EITHER i-halo OR j-halo
-    (``q_full[:, 2:-2, :]`` for y-sweep, ``q_i_pad[:, :, 2:-2]`` for
-    x-sweep), never simultaneously — so cube-vertex corner cells at
-    (i_halo, j_halo) are never referenced by any PPM stencil.
+    - ``"fv3_agrid_xdir"``: FV3-faithful AGRID-XDir diagonal mirror
+      from ``fv_mp_mod.F90:fill_corners_2d_r8`` (line 1077).  Each
+      cube-vertex halo cell takes its value from the cell immediately
+      adjacent in the XDir direction:
+          SW (0, 0)         ← (0, 1)
+          NW (0, n+1)       ← (0, n)
+          SE (n+1, 0)       ← (n+1, 1)
+          NE (n+1, n+1)     ← (n+1, n)
+      This restores the FV3 directional preference and reduces the 3D
+      atmospheric cube imprint on Held-Suarez C36 hybrid by ~47 percent
+      (max abs v, day 30).  See FV3_3D.md iter 7.
 
-    The corner fill IS read by Arakawa-Lamb gradient (``B_pad[:, :-1, :-1]``
-    includes corner cells), but that gradient is a non-FV3 Python operator
-    and there is no Fortran reference to match.
+    Vectorised: all 24 corners (6 faces × 4 corners) in a single
+    gather + scatter.
 
     Parameters
     ----------
@@ -1409,20 +1559,39 @@ def _fill_corners_h1(padded: jax.Array) -> jax.Array:
     """
     n2i = padded.shape[1] - 1  # n+1 (last index in padded)
 
-    # All 24 corner cells: (face, i, j) and their two adjacent halo cells
+    # All 24 corner cells: (face, i, j)
     f_idx = jnp.arange(6)
-    # SW(0,0), SE(n+1,0), NW(0,n+1), NE(n+1,n+1) per face
     cf = jnp.repeat(f_idx, 4)
     ci = jnp.tile(jnp.array([0, n2i, 0, n2i]), 6)
     cj = jnp.tile(jnp.array([0, 0, n2i, n2i]), 6)
-    # Adjacent cell 1
-    a1i = jnp.tile(jnp.array([0, n2i, 0, n2i]), 6)
-    a1j = jnp.tile(jnp.array([1, 1, n2i - 1, n2i - 1]), 6)
-    # Adjacent cell 2
-    a2i = jnp.tile(jnp.array([1, n2i - 1, 1, n2i - 1]), 6)
-    a2j = jnp.tile(jnp.array([0, 0, n2i, n2i]), 6)
 
-    corner_vals = 0.5 * (padded[cf, a1i, a1j] + padded[cf, a2i, a2j])
+    if _corner_fill_mode == "fv3_agrid_xdir":
+        # FV3 AGRID-XDir: depth-1 mirror in XDir direction.
+        # SW: q[0, 0] = q[0, 1]
+        # NW: q[0, -1] = q[0, -2]
+        # SE: q[-1, 0] = q[-1, 1]
+        # NE: q[-1, -1] = q[-1, -2]
+        si = ci
+        sj = jnp.tile(jnp.array([1, 1, n2i - 1, n2i - 1]), 6)
+        corner_vals = padded[cf, si, sj]
+    elif _corner_fill_mode == "fv3_bgrid_xdir":
+        # FV3 BGRID-XDir (fv_mp_mod.F90:1041): depth-2 mirror — sample
+        # at the FACE-INTERIOR cell two steps in the XDir direction.
+        # SW: q[0, 0] = q[0, 2]
+        # NW: q[0, -1] = q[0, -3]
+        # SE: q[-1, 0] = q[-1, 2]
+        # NE: q[-1, -1] = q[-1, -3]
+        si = ci
+        sj = jnp.tile(jnp.array([2, 2, n2i - 2, n2i - 2]), 6)
+        corner_vals = padded[cf, si, sj]
+    else:
+        # Legacy 2-point average.
+        a1i = jnp.tile(jnp.array([0, n2i, 0, n2i]), 6)
+        a1j = jnp.tile(jnp.array([1, 1, n2i - 1, n2i - 1]), 6)
+        a2i = jnp.tile(jnp.array([1, n2i - 1, 1, n2i - 1]), 6)
+        a2j = jnp.tile(jnp.array([0, 0, n2i, n2i]), 6)
+        corner_vals = 0.5 * (padded[cf, a1i, a1j] + padded[cf, a2i, a2j])
+
     padded = padded.at[cf, ci, cj].set(corner_vals)
     return padded
 
@@ -1430,10 +1599,33 @@ def _fill_corners_h1(padded: jax.Array) -> jax.Array:
 def _fill_corners_h2(padded: jax.Array) -> jax.Array:
     """Fill L-shaped corner regions of halo=2 padded array.
 
-    Each face has 4 corner regions of 2×2 = 4 cells that are not
-    filled by the edge-strip exchange.  We fill inside-out: the cell
-    closest to the interior first (average of its two filled neighbours),
-    then propagate outward.
+    Two modes via :func:`set_corner_fill_mode`:
+
+    - ``"avg"`` (default): legacy inside-out 2-point averaging.  Each
+      cube-vertex 2×2 halo block (4 cells per corner × 4 corners ×
+      6 faces = 96 cells) is filled inside-out: inner corner first
+      (average of its two halo-strip neighbours), then propagate
+      outward.
+
+    - ``"fv3_agrid_xdir"``: FV3-faithful AGRID ``XDir`` diagonal
+      mirror for ng=2, faithful port of ``fv_mp_mod.F90:1077``
+      (``q(1-i, 1-j) = q(1-j, i)`` for i, j in {1, 2}).  In our
+      0-based padded representation the SW 2×2 block is::
+
+          (1, 1) ← (1, 2)
+          (1, 0) ← (0, 2)
+          (0, 1) ← (1, 3)
+          (0, 0) ← (0, 3)
+
+      Empirical: in the iter-7 HS C36 hybrid 30-day diagnostic, the
+      h2 toggle ALONE produces zero change vs the avg path because
+      the Held-Suarez dycore does not exercise any operator that
+      reads the cube-vertex 2×2 halo block (PPM 1D sweeps slice to
+      keep either i-halo or j-halo, never both — see iter-69 review
+      note above).  The h2 toggle is wired here for FV3-fidelity
+      symmetry with h1, but is currently a no-op for the 3D HS
+      case.  Will become active in iter 9+ once a forward-backward
+      operator that uses 2x2 corner halos is added.
 
     Parameters
     ----------
@@ -1443,6 +1635,48 @@ def _fill_corners_h2(padded: jax.Array) -> jax.Array:
     -------
     jax.Array, shape (6, n+4, n+4)
     """
+    if _corner_fill_mode == "fv3_agrid_xdir":
+        # Vectorised FV3 AGRID-XDir for ng=2 (4 cells × 4 corners × 6 faces).
+        # SW block (0..1, 0..1).
+        padded = padded.at[:, 1, 1].set(padded[:, 1, 2])
+        padded = padded.at[:, 1, 0].set(padded[:, 0, 2])
+        padded = padded.at[:, 0, 1].set(padded[:, 1, 3])
+        padded = padded.at[:, 0, 0].set(padded[:, 0, 3])
+        # NW block (0..1, -2..-1) — mirror of SW in the j direction.
+        padded = padded.at[:, 1, -2].set(padded[:, 1, -3])
+        padded = padded.at[:, 1, -1].set(padded[:, 0, -3])
+        padded = padded.at[:, 0, -2].set(padded[:, 1, -4])
+        padded = padded.at[:, 0, -1].set(padded[:, 0, -4])
+        # SE block (-2..-1, 0..1).
+        padded = padded.at[:, -2, 1].set(padded[:, -2, 2])
+        padded = padded.at[:, -2, 0].set(padded[:, -1, 2])
+        padded = padded.at[:, -1, 1].set(padded[:, -2, 3])
+        padded = padded.at[:, -1, 0].set(padded[:, -1, 3])
+        # NE block (-2..-1, -2..-1).
+        padded = padded.at[:, -2, -2].set(padded[:, -2, -3])
+        padded = padded.at[:, -2, -1].set(padded[:, -1, -3])
+        padded = padded.at[:, -1, -2].set(padded[:, -2, -4])
+        padded = padded.at[:, -1, -1].set(padded[:, -1, -4])
+        return padded
+    elif _corner_fill_mode == "fv3_bgrid_xdir":
+        # iter 10 diagnostic showed that applying the FV3 BGRID-XDir
+        # depth-2/3-4 mirror to the 2×2 cube-vertex L-block destabilises
+        # the 3D HS dycore (NaN around step 600 ≈ 1.4 days).  The
+        # mirror reads cells from the face interior at depth 3/4, which
+        # under sigma-coord HS produces an exponentially-growing
+        # mode incompatible with our (A-L gradient + RK3) chain.
+        #
+        # The iter-7 review note already established that no operator
+        # in the 3D PE path reads the 2×2 cube-vertex halo block (PPM
+        # 1D sweeps slice to keep either i-halo or j-halo, never both
+        # simultaneously); therefore the h2 BGRID mode is unsafe AND
+        # unnecessary.  Fall through to the legacy 2-point-average
+        # path to maintain stability for both sigma and hybrid coord.
+        # h1 BGRID (the actually load-bearing path for cube imprint
+        # reduction) remains active.
+        pass  # fall through to legacy avg path
+
+    # Legacy inside-out 2-point average path.
     for f in range(6):
         # --- SW corner (rows 0-1, cols 0-1) ---
         # Inner corner (1,1): adjacent cells (1,2) and (2,1) are filled

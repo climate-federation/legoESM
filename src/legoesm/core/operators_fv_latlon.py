@@ -318,7 +318,6 @@ def fv_gradient_lon_3d(q_3d, grid, padded=None):
     -------
     jax.Array, shape (n_lat, n_lon, nlev)
     """
-
     if padded is None:
         # Pad once for all levels.
         padded = pad_halo_latlon_3d(q_3d, halo=2)        # (n_lat+4, n_lon+4, nlev)
@@ -350,7 +349,6 @@ def fv_gradient_lat_3d(q_3d, grid, padded=None):
     -------
     jax.Array, shape (n_lat, n_lon, nlev)
     """
-
     if padded is None:
         padded = pad_halo_latlon_3d(q_3d, halo=2)        # (n_lat+4, n_lon+4, nlev)
     # Strip longitude halo.  ``_ppm_edge_values`` operates on axis -2,

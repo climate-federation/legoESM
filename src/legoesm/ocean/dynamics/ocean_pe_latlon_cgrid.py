@@ -328,11 +328,18 @@ def _weno_zeta_at_u(
     v_at_vtx = jnp.concatenate(
         [v_at_vtx, v_at_vtx[:, 0:1, :]], axis=1)  # (n_lat+1, n_lon+1, nlev)
 
+    # Convert point values to cell averages along the meridional
+    # reconstruction axis before WENO.
+    from legoesm.core.weno import point_to_cellavg_bounded
+    conv_order = {5: 6, 7: 8}[order]
+    phi_avg = point_to_cellavg_bounded(phi, axis=0, order=conv_order)
+    v_at_vtx_avg = point_to_cellavg_bounded(v_at_vtx, axis=0, order=conv_order)
+
     # Ghost cells (Neumann BC) along axis 0 for the meridional stencil
     phi_ext = jnp.concatenate(
-        [phi[:1, :, :]] * hw + [phi] + [phi[-1:, :, :]] * hw, axis=0)
+        [phi_avg[:1, :, :]] * hw + [phi_avg] + [phi_avg[-1:, :, :]] * hw, axis=0)
     v_ext = jnp.concatenate(
-        [v_at_vtx[:1, :, :]] * hw + [v_at_vtx] + [v_at_vtx[-1:, :, :]] * hw,
+        [v_at_vtx_avg[:1, :, :]] * hw + [v_at_vtx_avg] + [v_at_vtx_avg[-1:, :, :]] * hw,
         axis=0)
 
     phi_stencil = [phi_ext[1 + j: n_lat + 1 + j, :, :]
@@ -353,8 +360,9 @@ def _weno_zeta_at_u(
     u_ext_lat = jnp.concatenate([zero_u, u_smooth, zero_u], axis=0)
     u_at_vtx = 0.5 * (u_ext_lat[:-1, :, :] + u_ext_lat[1:, :, :])
 
+    u_at_vtx_avg = point_to_cellavg_bounded(u_at_vtx, axis=0, order=conv_order)
     u_ext = jnp.concatenate(
-        [u_at_vtx[:1, :, :]] * hw + [u_at_vtx] + [u_at_vtx[-1:, :, :]] * hw,
+        [u_at_vtx_avg[:1, :, :]] * hw + [u_at_vtx_avg] + [u_at_vtx_avg[-1:, :, :]] * hw,
         axis=0)
     psi_u_stencil = [u_ext[1 + j: n_lat + 1 + j, :, :]
                      for j in range(2 * hw)]
@@ -406,12 +414,19 @@ def _weno_zeta_at_v(
         [zero_u, u_smooth, zero_u], axis=0)
     u_at_vtx = 0.5 * (u_ext_lat[:-1, :, :] + u_ext_lat[1:, :, :])
 
+    # Convert point values to cell averages along zonal axis (periodic).
+    from legoesm.core.weno import point_to_cellavg_periodic
+    conv_order = {5: 6, 7: 8}[order]
+
     phi_core = phi[:, :n_lon, :]
     u_core = u_at_vtx[:, :n_lon, :]
 
-    phi_stencil = [jnp.roll(phi_core, hw - 1 - j, axis=1)
+    phi_core_avg = point_to_cellavg_periodic(phi_core, axis=1, order=conv_order)
+    u_core_avg = point_to_cellavg_periodic(u_core, axis=1, order=conv_order)
+
+    phi_stencil = [jnp.roll(phi_core_avg, hw - 1 - j, axis=1)
                    for j in range(2 * hw)]
-    psi_u_stencil = [jnp.roll(u_core, hw - 1 - j, axis=1)
+    psi_u_stencil = [jnp.roll(u_core_avg, hw - 1 - j, axis=1)
                      for j in range(2 * hw)]
 
     phi_plus_u, phi_minus_u = weno_reconstruct_split(
@@ -428,7 +443,8 @@ def _weno_zeta_at_v(
         [v_at_vtx, v_at_vtx[:, 0:1, :]], axis=1)
 
     v_core = v_at_vtx[:, :n_lon, :]
-    psi_v_stencil = [jnp.roll(v_core, hw - 1 - j, axis=1)
+    v_core_avg = point_to_cellavg_periodic(v_core, axis=1, order=conv_order)
+    psi_v_stencil = [jnp.roll(v_core_avg, hw - 1 - j, axis=1)
                      for j in range(2 * hw)]
 
     phi_plus_v, phi_minus_v = weno_reconstruct_split(
@@ -576,14 +592,20 @@ def _weno_cell_to_uface(
     hw = {5: 3, 7: 4}[order]
     n_lon = phi.shape[1]
 
+    # Convert point values to cell averages before WENO reconstruction.
+    from legoesm.core.weno import point_to_cellavg_periodic
+    conv_order = {5: 6, 7: 8}[order]
+    phi_avg = point_to_cellavg_periodic(phi, axis=1, order=conv_order)
+    psi_avg = point_to_cellavg_periodic(psi, axis=1, order=conv_order)
+
     # Periodic stencil along axis 1 (longitude).
     # U-face j is between cell j-1 and cell j.  WENO at the face between
     # cells (j-1) and j needs cells j-hw, ..., j+hw-1.
     # Roll offset for stencil position s: hw - s places cell j-hw+s at
     # position j.
-    phi_stencil = [jnp.roll(phi, hw - s, axis=1)
+    phi_stencil = [jnp.roll(phi_avg, hw - s, axis=1)
                    for s in range(2 * hw)]
-    psi_stencil = [jnp.roll(psi, hw - s, axis=1)
+    psi_stencil = [jnp.roll(psi_avg, hw - s, axis=1)
                    for s in range(2 * hw)]
 
     phi_plus, phi_minus = weno_reconstruct_split(
@@ -627,11 +649,17 @@ def _weno_cell_to_vface(
     nlev = phi.shape[2]
     n_lon = phi.shape[1]
 
+    # Convert point values to cell averages before WENO reconstruction.
+    from legoesm.core.weno import point_to_cellavg_bounded
+    conv_order = {5: 6, 7: 8}[order]
+    phi_avg = point_to_cellavg_bounded(phi, axis=0, order=conv_order)
+    psi_avg = point_to_cellavg_bounded(psi, axis=0, order=conv_order)
+
     # Ghost cells (Neumann BC) along axis 0 for meridional stencil.
     phi_ext = jnp.concatenate(
-        [phi[:1, :, :]] * hw + [phi] + [phi[-1:, :, :]] * hw, axis=0)
+        [phi_avg[:1, :, :]] * hw + [phi_avg] + [phi_avg[-1:, :, :]] * hw, axis=0)
     psi_ext = jnp.concatenate(
-        [psi[:1, :, :]] * hw + [psi] + [psi[-1:, :, :]] * hw, axis=0)
+        [psi_avg[:1, :, :]] * hw + [psi_avg] + [psi_avg[-1:, :, :]] * hw, axis=0)
 
     # V-face i (i=1,...,n_lat-1) sits between cell i-1 and cell i.
     # WENO needs cells i-hw, ..., i+hw-1.
@@ -760,6 +788,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         lambda field: _neumann_fill_cgrid(field, mask),
         eos_fn, z_coord.dz_ref, rho_0, g_val,
         n_iter=2,
+        hi_precision_pressure=True,
         h_actual=_h_actual_pprime,
     )
 
@@ -787,10 +816,12 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # The barotropic solver handles the depth-averaged momentum.
     # The baroclinic step must operate on the PERTURBATION velocity
     # u' = u - U_bar to avoid double-counting the barotropic tendency.
-    U_bar = jnp.sum(u * h_u, axis=-1) / jnp.maximum(
-        jnp.sum(h_u, axis=-1), 1e-10) * u_mask  # (n_lat, n_lon+1)
-    V_bar = jnp.sum(v * h_v, axis=-1) / jnp.maximum(
-        jnp.sum(h_v, axis=-1), 1e-10) * v_mask  # (n_lat+1, n_lon)
+    # Fuse num/denom reductions per face — both share their h_u/h_v
+    # weight on the level axis.
+    _u_pair = jnp.sum(jnp.stack([u * h_u, h_u], axis=-1), axis=-2)
+    U_bar = _u_pair[..., 0] / jnp.maximum(_u_pair[..., 1], 1e-10) * u_mask  # (n_lat, n_lon+1)
+    _v_pair = jnp.sum(jnp.stack([v * h_v, h_v], axis=-1), axis=-2)
+    V_bar = _v_pair[..., 0] / jnp.maximum(_v_pair[..., 1], 1e-10) * v_mask  # (n_lat+1, n_lon)
     u_prime = u - U_bar[..., jnp.newaxis]
     v_prime = v - V_bar[..., jnp.newaxis]
 
@@ -1359,6 +1390,22 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         # floor sees the total flow.  Consistent with MPAS and MOM6.
         # r is in [m/s]: du/dt = -r * u / dz_bottom  (resolution-independent stress).
         H_BBL = getattr(config, "bottom_drag_bbl_thickness", 0.0)
+        # MOM6-style background-velocity floor (DRAG_BG_VEL).  When >0,
+        # the linear-in-u drag is upgraded to quadratic-with-floor:
+        #   r_eff = (bottom_drag_r / u_bg) · √(u² + u_bg²)
+        # which (a) recovers linear ``bottom_drag_r`` at |u| → 0 (so
+        # legacy weak-flow behaviour is preserved) and (b) scales as
+        # quadratic Cd · |u| at |u| ≫ u_bg (production-equivalent
+        # to MOM6 OM4's `BOTTOMDRAGLAW="quadratic"` with `DRAG_BG_VEL`).
+        # u_bg=0 → exactly the legacy linear formula (bit-exact path).
+        u_bg = float(getattr(config, "bottom_drag_bg_velocity", 0.0))
+        if u_bg > 0.0:
+            Cd_eq = config.bottom_drag_r / u_bg
+            r_eff_u = Cd_eq * jnp.sqrt(u * u + u_bg * u_bg)
+            r_eff_v = Cd_eq * jnp.sqrt(v * v + u_bg * u_bg)
+        else:
+            r_eff_u = config.bottom_drag_r
+            r_eff_v = config.bottom_drag_r
         if H_BBL > 0:
             # Distributed BBL drag (Killworth & Edwards 1999, MOM6 BBL_thick_min):
             # spread drag over a fixed Ekman thickness ``H_BBL`` near the
@@ -1383,7 +1430,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             # along the level axis.  For the seafloor, ``z_seafloor =
             # -sum(h_u, axis=-1)`` (face's wet depth = sum of per-level
             # face thickness, partial-aware via min h).
-            def _bbl_drag_for_face(u_field, h_face):
+            def _bbl_drag_for_face(u_field, h_face, r_eff):
                 pad_axes = ((0, 0),) * (h_face.ndim - 1)
                 z_half = jnp.concatenate([
                     jnp.zeros(h_face.shape[:-1] + (1,), dtype=h_face.dtype),
@@ -1399,11 +1446,9 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
                     - jnp.maximum(z_bot, z_seafloor),
                 )
                 h_safe = jnp.maximum(h_face, 1e-10)
-                return -config.bottom_drag_r * u_field * overlap / (
-                    h_safe * H_BBL
-                )
-            diag_botdrag_u = _bbl_drag_for_face(u, h_u)
-            diag_botdrag_v = _bbl_drag_for_face(v, h_v)
+                return -r_eff * u_field * overlap / (h_safe * H_BBL)
+            diag_botdrag_u = _bbl_drag_for_face(u, h_u, r_eff_u)
+            diag_botdrag_v = _bbl_drag_for_face(v, h_v, r_eff_v)
         elif isinstance(z_coord, OceanPartialCellCoordinate):
             # Partial cells: apply drag at each column's actual seafloor
             # (the lowest active level, ``bottom_level[i,j]``), using the
@@ -1439,19 +1484,21 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             h_u_drag = jnp.maximum(h_u, 1e-10)
             h_v_drag = jnp.maximum(h_v, 1e-10)
             diag_botdrag_u = (
-                -config.bottom_drag_r * u / h_u_drag * is_bot_u_3d
+                -r_eff_u * u / h_u_drag * is_bot_u_3d
             )
             diag_botdrag_v = (
-                -config.bottom_drag_r * v / h_v_drag * is_bot_v_3d
+                -r_eff_v * v / h_v_drag * is_bot_v_3d
             )
         else:
             dz_bot_u = z_coord.dz_ref[-1] * jnp.maximum(interp_cell_to_uface(J), 1e-10)
             dz_bot_v = z_coord.dz_ref[-1] * jnp.maximum(_interp_to_v_points(J), 1e-10)
             # Capture only at the bottom level; zeros elsewhere.
+            r_eff_u_bot = r_eff_u[..., -1] if u_bg > 0.0 else r_eff_u
+            r_eff_v_bot = r_eff_v[..., -1] if u_bg > 0.0 else r_eff_v
             diag_botdrag_u = diag_botdrag_u.at[..., -1].set(
-                -config.bottom_drag_r * u[..., -1] / dz_bot_u)
+                -r_eff_u_bot * u[..., -1] / dz_bot_u)
             diag_botdrag_v = diag_botdrag_v.at[..., -1].set(
-                -config.bottom_drag_r * v[..., -1] / dz_bot_v)
+                -r_eff_v_bot * v[..., -1] / dz_bot_v)
         du_dt = du_dt + diag_botdrag_u
         dv_dt = dv_dt + diag_botdrag_v
 

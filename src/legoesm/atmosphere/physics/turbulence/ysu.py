@@ -118,7 +118,10 @@ def ysu_turbulence(
     # Transition-zone weighting: peaks at Ri_crit crossing, not centroid
     sigma_pbl = jax.nn.sigmoid(config.pbl_smooth_sharpness * (config.Ri_crit - Ri_bulk))
     w_pbl = sigma_pbl * (1.0 - sigma_pbl) + 1e-20
-    h_pbl = jnp.sum(z_full * w_pbl, axis=1) / jnp.sum(w_pbl, axis=1)
+    # Numerator and denominator share the level axis — fuse into one
+    # stacked reduction.
+    _h_pair = jnp.sum(jnp.stack([z_full * w_pbl, w_pbl], axis=-1), axis=1)
+    h_pbl = _h_pair[..., 0] / _h_pair[..., 1]
     h_pbl = jnp.clip(h_pbl, 100.0, None)
 
     # ----- K-profile -----
@@ -134,15 +137,24 @@ def ysu_turbulence(
     l_mix = constants.kappa_vk * z_abs / (
         1.0 + constants.kappa_vk * z_abs / config.l_mix_max
     )
-    b_louis = 5.0
+    # Louis (1982) stability constants come from config; the previous
+    # hardcoded ``b_louis = 5.0`` and ``5.0`` literals violated the
+    # constant-discipline rule (CLAUDE.md).  Note that Louis (1982)
+    # distinguishes three coefficients (b, c, d): ``b`` enters both
+    # branches, ``d`` is the stable-branch sqrt coefficient, and ``c``
+    # is the unstable-branch denominator coefficient — the repository's
+    # louis.py already follows this split, and YSU now does too.
+    b_louis = config.louis_b
+    c_louis = config.louis_c
+    d_louis = config.louis_d
     Ri_pos = jnp.maximum(Ri, 0.0)
-    f_stable = 1.0 / (1.0 + 2.0 * b_louis * Ri_pos / jnp.sqrt(1.0 + 5.0 * Ri_pos))
+    f_stable = 1.0 / (1.0 + 2.0 * b_louis * Ri_pos / jnp.sqrt(1.0 + d_louis * Ri_pos))
     Ri_neg = jnp.minimum(Ri, 0.0)
     f_unstable = 1.0 - 2.0 * b_louis * Ri_neg / (
-        1.0 + 3.0 * b_louis * 5.0 * l_mix ** 2
+        1.0 + 3.0 * b_louis * c_louis * l_mix ** 2
         * jnp.sqrt(jnp.abs(Ri_neg) + 1e-10) / (dz_half ** 2 + 1e-10)
     )
-    blend_ri = jax.nn.sigmoid(100.0 * Ri)
+    blend_ri = jax.nn.sigmoid(config.blend_ri_sharpness * Ri)
     f_m = (1.0 - blend_ri) * f_unstable + blend_ri * f_stable
     Km_local = l_mix ** 2 * S * f_m
 

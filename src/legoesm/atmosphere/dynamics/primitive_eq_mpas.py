@@ -60,6 +60,7 @@ from legoesm.grids.vertical import (
     compute_geopotential,
     compute_geopotential_hybrid,
     compute_sigma_dot,
+    compute_sigma_dot_and_total,
     compute_mass_flux_hybrid,
     vertical_advection,
     vertical_advection_hybrid,
@@ -331,18 +332,24 @@ def mpas_hydrostatic_tendencies(
         div_dp_3d = div_dp_3d_pre  # (nCells, nlev)
         dp_s_dt = -jnp.sum(div_dp_3d, axis=-1) / sigma_coord.B_range
 
-        mass_flux = compute_mass_flux_hybrid(div_3d, p_s, sigma_coord)
+        mass_flux, _ = compute_mass_flux_hybrid(div_3d, p_s, sigma_coord)
         vert_adv_T = vertical_advection_hybrid(T_3d, mass_flux, p_s, sigma_coord)
         omega = compute_omega_hybrid(mass_flux, p_s, dp_s_dt, sigma_coord)
     else:
-        dsigma = sigma_coord.dsigma
         sigma_top = sigma_coord.sigma_half[0]
         sigma_range = 1.0 - sigma_top
 
-        D_total = jnp.sum(div_3d * dsigma, axis=-1)  # (nCells,)
-        dp_s_dt = -p_s * D_total / sigma_range
+        # Iter-53: share the cumsum between σ̇ and ``D_total`` rather
+        # than running ``jnp.sum(div_3d * dsigma)`` separately and
+        # ``compute_sigma_dot`` doing its own cumsum.  Saves one
+        # cross-cell-shard reduction per RK3 stage on the MPAS
+        # non-hybrid σ-coordinate path (mirrors iter-52's cubed-sphere
+        # FV3 PE refactor).
+        sigma_dot, _D_total_full = compute_sigma_dot_and_total(
+            div_3d, sigma_coord,
+        )
+        dp_s_dt = -p_s * _D_total_full[..., 0] / sigma_range
 
-        sigma_dot = compute_sigma_dot(div_3d, sigma_coord)
         vert_adv_T = vertical_advection(T_3d, sigma_dot, sigma_coord)
         omega = compute_pressure_velocity(sigma_dot, p_s, dp_s_dt, sigma_coord)
 
@@ -441,6 +448,14 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
         self.mesh = mesh
         self.sigma_coord = sigma_coord
         self.config = config or MPASPrimitiveEquationConfig()
+        # Pre-compute the global total area once at construction time so
+        # the per-step mass fixer does not include this constant in its
+        # cross-device reduction payload (drops 3-element allreduce → 2).
+        # ``mesh`` here is the full global mesh (the MPI-partitioned step
+        # lives in ``parallel/voronoi_mpi.py`` and has its own constant);
+        # under SPMD sharding XLA folds this value as a compile-time
+        # constant and avoids the live-time reduction.
+        self._total_area = float(jnp.sum(mesh.areaCell))
 
     def tendencies(
         self,
@@ -503,32 +518,43 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
             )
 
         if self.config.fix_mass:
-            state_new = _fix_mass_mpas_hydro(state_new, state, self.mesh)
+            state_new = _fix_mass_mpas_hydro(
+                state_new, state, self.mesh, total_area=self._total_area,
+            )
 
         return cast_pytree(state_new, None, "storage")
 
     # integrate() and integrate_scan() inherited from IntegrationMixin
 
 
-def _fix_mass_mpas_hydro(state_new, state_old, mesh):
+def _fix_mass_mpas_hydro(state_new, state_old, mesh, total_area=None):
     """Fix mass conservation: uniform additive correction to p_s.
 
-    The 3 sums (mass_old, mass_new, total_area) are computed locally
-    and reduced together — this collapses 3 MPI allreduces into 1
-    when the MPAS mesh is sharded across ranks.  ``total_area`` is
-    constant per mesh; reduce it alongside the masses to keep the
-    helper signature simple, and rely on XLA constant-folding for
-    the case where it can.
+    The two ps mass sums are stacked into a single ``jnp.sum`` so XLA
+    can emit one cross-device reduction when sharded.  ``total_area``
+    is a state-independent constant — pass it in (precomputed once at
+    setup) so we drop it from the per-step reduction payload.
+
+    Parameters
+    ----------
+    total_area : float or jax.Array, optional
+        Pre-allreduced global ``sum(areaCell)``.  Defaults to a fresh
+        ``jnp.sum(mesh.areaCell)`` (correct for single-rank /
+        non-sharded; redundant work under MPI when *total_area* is
+        already known at the call site).
     """
     area = mesh.areaCell
-    local = jnp.stack([
-        jnp.sum(state_old.p_s.data * area),
-        jnp.sum(state_new.p_s.data * area),
-        jnp.sum(area),
-    ])
+    if total_area is None:
+        total_area = jnp.sum(area)
+    # Both p_s mass sums share the ``* area`` weight on the same axes —
+    # stack the two fields and reduce once locally before the allreduce.
+    _ps_stack = jnp.stack(
+        [state_old.p_s.data, state_new.p_s.data], axis=-1,
+    ) * area[..., None]
+    local = jnp.sum(_ps_stack, axis=tuple(range(area.ndim)))
     if jax.process_count() > 1:
         local = global_sum_mpi(local)
-    mass_old, mass_new, total_area = local[0], local[1], local[2]
+    mass_old, mass_new = local[0], local[1]
     correction = (mass_old - mass_new) / total_area
     p_s_fixed = state_new.p_s.replace(data=state_new.p_s.data + correction)
     return state_new._replace(p_s=p_s_fixed)

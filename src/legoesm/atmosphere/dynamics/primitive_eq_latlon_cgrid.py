@@ -81,13 +81,21 @@ from legoesm.grids.vertical import (
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
-from legoesm.core.conservation import zero_mean_tendency, _accumulation_dtype
-from legoesm.core.operators_fv_latlon import (
-    fv_gradient_lon_3d,
-    fv_gradient_lat_3d,
-)
 from legoesm.core.cfl import pole_cell_dx, cfl_max_dt
+from legoesm.core.conservation import (
+    zero_mean_tendency,
+    _accumulation_dtype,
+    _batch_global_area_sums,
+)
 from legoesm.core.precision import cast_pytree
+from legoesm.core.operators_fv_latlon import (
+    fv_gradient_lon_3d as _fv_gradient_lon_3d,
+    fv_gradient_lat_3d as _fv_gradient_lat_3d,
+)
+from legoesm.grids.halo_latlon import (
+    pad_halo_latlon_3d as _pad_halo_latlon_3d,
+)
+
 from legoesm.grids.halo_latlon import pad_halo_latlon_3d
 from legoesm import constants
 import inspect
@@ -326,12 +334,18 @@ def cgrid_latlon_hydrostatic_tendencies(
     # This differs from the advective form p_s * div(v) when p_s has
     # horizontal gradients (which is always the case in practice).
 
+    # Iter-54: precompute the cumsum of ``div_dp`` once and reuse it
+    # both for ``D_total_p = sum(div_dp)`` (the surface-pressure
+    # tendency) and for the sigma_dot / mass_flux integration below.
+    # Saves one cross-shard reduction per RK3 stage in each branch on
+    # any horizontal sharding (lat-lon mesh).
     if _hybrid:
         # Hybrid closure: dp = dA + dB * p_s varies horizontally.
         dp_u = interp_cell_to_uface(dp)  # (n_lat, n_lon+1, nlev)
         dp_v = interp_cell_to_vface(dp)  # (n_lat+1, n_lon, nlev)
         div_dp = divergence_cgrid(dp_u * u, dp_v * v, grid)  # (n_lat, n_lon, nlev)
-        D_total_p = jnp.sum(div_dp, axis=-1)
+        _cumsum_dp = jnp.cumsum(div_dp, axis=-1)  # (n_lat, n_lon, nlev)
+        D_total_p = _cumsum_dp[..., -1]
         dp_s_dt = -D_total_p / sigma_coord.B_range
     else:
         dsigma = sigma_coord.dsigma
@@ -342,7 +356,8 @@ def cgrid_latlon_hydrostatic_tendencies(
         dp_u = interp_cell_to_uface(dp)  # (n_lat, n_lon+1, nlev)
         dp_v = interp_cell_to_vface(dp)  # (n_lat+1, n_lon, nlev)
         div_dp = divergence_cgrid(dp_u * u, dp_v * v, grid)  # (n_lat, n_lon, nlev)
-        D_total_p = jnp.sum(div_dp, axis=-1)
+        _cumsum_dp = jnp.cumsum(div_dp, axis=-1)  # (n_lat, n_lon, nlev)
+        D_total_p = _cumsum_dp[..., -1]
         dp_s_dt = -D_total_p / sigma_range
 
     # Apply zero-mean correction only when the post-step mass fixer is OFF.
@@ -361,8 +376,8 @@ def cgrid_latlon_hydrostatic_tendencies(
         # F_{k+1/2} = (B_{k+1/2}-B_top)/B_range * D_total_p - cumsum(div_dp)
         _B_top = sigma_coord.B_half[0]
         _frac_B = (sigma_coord.B_half[1:] - _B_top) / sigma_coord.B_range
-        _cumsum = jnp.cumsum(div_dp, axis=-1)
-        _mf_inner = _frac_B * D_total_p[..., jnp.newaxis] - _cumsum
+        # Iter-54: reuse the cumsum precomputed for D_total_p above.
+        _mf_inner = _frac_B * D_total_p[..., jnp.newaxis] - _cumsum_dp
         # Top BC: F=0; bottom BC: zero by construction
         # (frac_B[-1]=1, cumsum[-1]=D_total_p → _mf_inner[-1]=0).  Drop
         # the trailing (∼0) element + pad both ends in one Pad HLO op
@@ -380,7 +395,7 @@ def cgrid_latlon_hydrostatic_tendencies(
         # Flux-form sigma_dot consistent with mass-flux continuity:
         # σ̇_{k+1/2} = [frac_k · D_total_p - cumsum_k(div(dp·v))] / p_s
         _frac = sigma_coord.fractional_sigma  # (nlev,)
-        _cumsum_dp = jnp.cumsum(div_dp, axis=-1)  # (n_lat, n_lon, nlev)
+        # Iter-54: reuse the cumsum precomputed for D_total_p above.
         sigma_dot_inner = (
             _frac * D_total_p[..., jnp.newaxis] - _cumsum_dp
         ) / (p_s[..., jnp.newaxis] + 1e-10)
@@ -403,8 +418,10 @@ def cgrid_latlon_hydrostatic_tendencies(
         # share one halo pad + PPM reconstruction across all levels.
         # Pre-pad T once so both gradient calls share the halo.
         _T_pad_h2 = pad_halo_latlon_3d(T, halo=2)
-        dT_dx = fv_gradient_lon_3d(T, grid, padded=_T_pad_h2)
-        dT_dy = fv_gradient_lat_3d(T, grid, padded=_T_pad_h2)
+        # iter-169: use the imported aliases (lines 92-93) — bare
+        # ``fv_gradient_lon_3d`` would F821 NameError at runtime.
+        dT_dx = _fv_gradient_lon_3d(T, grid, padded=_T_pad_h2)
+        dT_dy = _fv_gradient_lat_3d(T, grid, padded=_T_pad_h2)
         horiz_adv_T = -(u_c * dT_dx + v_c * dT_dy)
 
     # Adiabatic heating: κ T (ω/p + v·∇_η(ln p))
@@ -481,8 +498,9 @@ def cgrid_latlon_hydrostatic_tendencies(
             # share the halo pad — saves one redundant pad_halo_latlon_3d
             # call per timestep.
             _q_pad_h2 = pad_halo_latlon_3d(tracer_flat, halo=2)
-            dq_dx_flat = fv_gradient_lon_3d(tracer_flat, grid, padded=_q_pad_h2)
-            dq_dy_flat = fv_gradient_lat_3d(tracer_flat, grid, padded=_q_pad_h2)
+            # iter-169: aliased import (line 92-93).
+            dq_dx_flat = _fv_gradient_lon_3d(tracer_flat, grid, padded=_q_pad_h2)
+            dq_dy_flat = _fv_gradient_lat_3d(tracer_flat, grid, padded=_q_pad_h2)
             dq_dx_stack = dq_dx_flat.reshape(n_lat_t, n_lon_t, nlev_t, n_tracers)
             dq_dy_stack = dq_dy_flat.reshape(n_lat_t, n_lon_t, nlev_t, n_tracers)
             horiz_q_stack = -(
@@ -720,19 +738,30 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         # Conservation fixer for mass
         if self.config.fix_mass:
             acc = _accumulation_dtype()
-            area = self.grid.area.astype(acc)
             # ``grid_total_area`` is a precomputed scalar on the grid;
             # avoids recomputing ``jnp.sum(area)`` every step (one
             # extra reduction in serial, one extra allreduce under
             # latlon SPMD sharding).
             total_area = self.grid.grid_total_area.astype(acc)
             if target_mass is not None:
+                # Closure-constant target → only ``mass_new`` is reduced.
+                area = self.grid.area.astype(acc)
                 mass_target = target_mass
+                mass_new = jnp.sum(state.p_s.astype(acc) * area)
             elif pre_state is not None:
-                mass_target = jnp.sum(pre_state.p_s.astype(acc) * area)
+                # Iter-57: batch the two area-weighted sums into a
+                # single MPI allreduce / cross-shard reduction (the
+                # cubed-sphere ``fix_mass_hydrostatic`` already does
+                # this via ``_batch_global_area_sums``).
+                mass_target, mass_new = _batch_global_area_sums(
+                    [pre_state.p_s, state.p_s], self.grid,
+                )
             else:
-                mass_target = jnp.sum(state.p_s.astype(acc) * area)
-            mass_new = jnp.sum(state.p_s.astype(acc) * area)
+                # Degenerate case: mass_target == mass_new → correction=0.
+                # Skip the redundant second reduction.
+                area = self.grid.area.astype(acc)
+                mass_new = jnp.sum(state.p_s.astype(acc) * area)
+                mass_target = mass_new
             correction = (mass_target - mass_new) / total_area
 
             # Preserve tracer mass: ∫ q·dp·dA must be invariant when the

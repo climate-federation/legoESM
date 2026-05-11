@@ -68,8 +68,11 @@ def _depth_average_to_faces(
     h_u = 0.5 * (h_west + h_east)  # (n_lat, n_lon, nlev)
     h_u = jnp.concatenate([h_u, h_u[:, 0:1, :]], axis=1)  # (n_lat, n_lon+1, nlev)
 
-    H_u = jnp.maximum(jnp.sum(h_u, axis=-1), min_water_col)
-    U_bar = jnp.sum(u_3d * h_u, axis=-1) / H_u * u_mask
+    # Fuse the per-face thickness + barotropic-mean column reductions —
+    # both reduce ``... * h`` over the same level axis.
+    _u_pair = jnp.sum(jnp.stack([h_u, u_3d * h_u], axis=-1), axis=-2)
+    H_u = jnp.maximum(_u_pair[..., 0], min_water_col)
+    U_bar = _u_pair[..., 1] / H_u * u_mask
 
     # h at v-faces: average of adjacent cell h.
     # Pole rows are zero (wall BC); single Pad HLO op replaces
@@ -79,8 +82,9 @@ def _depth_average_to_faces(
     h_v_interior = 0.5 * (h_south + h_north)  # (n_lat-1, n_lon, nlev)
     h_v = jnp.pad(h_v_interior, ((1, 1), (0, 0), (0, 0)))
 
-    H_v = jnp.maximum(jnp.sum(h_v, axis=-1), min_water_col)
-    V_bar = jnp.sum(v_3d * h_v, axis=-1) / H_v * v_mask
+    _v_pair = jnp.sum(jnp.stack([h_v, v_3d * h_v], axis=-1), axis=-2)
+    H_v = jnp.maximum(_v_pair[..., 0], min_water_col)
+    V_bar = _v_pair[..., 1] / H_v * v_mask
 
     return U_bar, V_bar
 
@@ -263,11 +267,14 @@ def barotropic_substeps_latlon_cgrid(
         H_total_c = jnp.maximum(eta_c + H_bathy, min_water_col) * mask
 
         # Forward: update eta from continuity (C-grid divergence)
-        H_u = 0.5 * (jnp.roll(H_total_c, 1, axis=1) + H_total_c)
+        # Min-rule face depth (consistent with implicit solver and PE
+        # tendency).  Arithmetic mean overestimates face depth at
+        # topographic steps, creating a transport mismatch.
+        H_u = jnp.minimum(jnp.roll(H_total_c, 1, axis=1), H_total_c)
         H_u = jnp.concatenate([H_u, H_u[:, 0:1]], axis=1)
         # Pole rows are zero (wall BC); single Pad HLO op replaces
         # alloc-zeros + concatenate-of-three (called every substep).
-        H_v_interior = 0.5 * (H_total_c[:-1] + H_total_c[1:])
+        H_v_interior = jnp.minimum(H_total_c[:-1], H_total_c[1:])
         H_v = jnp.pad(H_v_interior, ((1, 1), (0, 0)))
 
         flux_u = H_u * U_bar_c * u_mask

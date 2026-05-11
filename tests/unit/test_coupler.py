@@ -6,6 +6,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
+from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.coupler.config import CouplerConfig, TileConfig
 from legoesm.coupler.coupling_fields import AtmToSurface, SurfaceToAtm, TileResponse
@@ -102,11 +103,16 @@ def test_coupling_fields_shapes():
     assert forcing.sw_down.shape == SHAPE
 
     z = jnp.zeros(SHAPE)
-    sfc = SurfaceToAtm(z, z, z, z, z, z, z, z, z, z, z, z, z)
-    assert len(sfc) == 13
+    # SurfaceToAtm and TileResponse gained ``freshwater_flux`` (F4),
+    # ``ocean_heat_extraction`` (F8), ``ocean_stress_x``/``y`` (F9),
+    # and ``surface_mass_flux`` (F3) slots in the Physical_Consistency
+    # cycle for tile-blended water, ice→ocean heat, ice→ocean stress
+    # reaction, and phase-aware moisture mass closure.
+    sfc = SurfaceToAtm(z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z)
+    assert len(sfc) == 18  # 13 → 14 (F4) → 15 (F8) → 17 (F9 +2) → 18 (F3 +1)
 
-    tile = TileResponse(z, z, z, z, z, z, z, z, z, z, z, z, z)
-    assert len(tile) == 13
+    tile = TileResponse(z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z)
+    assert len(tile) == 18
 
 
 # ==============================================================================
@@ -220,6 +226,236 @@ def test_sea_ice_no_spurious_growth_from_open_water():
     assert jnp.allclose(new_state.concentration.data, 0.0, atol=1e-8)
 
 
+def test_sea_ice_sublimation_mass_term_is_included():
+    """Audit F7 (HIGH): ice mass budget must include
+    ``dh_dt_sublim = -lhflx / (rho_ice · L_s)`` over ice cells.
+
+    Run the same forcing twice — once with the production lhflx,
+    once with lhflx=0 (no sublimation) — and verify that the
+    delta in dh/dt matches the expected sublimation contribution.
+
+    Strategy: rather than zeroing lhflx (which requires bypassing
+    the bulk-flux call), use a *very dry* atmosphere to maximise
+    lhflx, run two cases differing only in q_lowest, and check
+    that the difference in dh_dt is consistent with the
+    ``-Δlhflx / (rho_ice · L_s)`` sublim-mass term.
+
+    Without the iter-11 fix, ``dh/dt`` would be invariant under
+    q_lowest changes (energy budget closes via lhflx but mass
+    budget ignores sublimation), so the delta would be zero.
+    """
+    from legoesm import constants
+
+    state = _make_ice_state(h=2.0, conc=1.0, T=265.0)
+    # Two forcings differing only in q_lowest: dry vs more moist.
+    base_forcing = _make_forcing(T_lowest=240.0, sw=0.0, lw=200.0)
+    forcing_dry = base_forcing._replace(q_lowest=jnp.full(SHAPE, 1e-5))
+    forcing_moist = base_forcing._replace(q_lowest=jnp.full(SHAPE, 5e-3))
+    config = SeaIceConfig()
+    ocean_sst = jnp.full(SHAPE, 271.35)
+
+    # Run both cases.
+    state_dry, resp_dry = step_sea_ice(
+        state, forcing_dry, ocean_sst, jnp.zeros(SHAPE), jnp.zeros(SHAPE),
+        config, U_min=1.0, dt=DT,
+    )
+    state_moist, resp_moist = step_sea_ice(
+        state, forcing_moist, ocean_sst, jnp.zeros(SHAPE), jnp.zeros(SHAPE),
+        config, U_min=1.0, dt=DT,
+    )
+
+    # lhflx must be larger under dry conditions (more sublimation).
+    dlhflx = float(jnp.mean(resp_dry.lhflx - resp_moist.lhflx))
+    assert dlhflx > 0.0, (
+        f"dry case should give larger lhflx (more sublimation); "
+        f"Δlhflx = {dlhflx:.2e}"
+    )
+
+    # Predicted Δ(dh/dt) from sublimation term alone:
+    # Δdh_dt_sublim = -Δlhflx / (rho_ice · L_s)  (negative — more sublim
+    # in dry case → more mass loss → MORE NEGATIVE dh/dt).
+    expected_d_dh_dt = -dlhflx / (config.rho_ice * constants.L_s)
+
+    dh_dt_dry = float(jnp.mean(state_dry.h_ice.data - state.h_ice.data) / DT)
+    dh_dt_moist = float(jnp.mean(state_moist.h_ice.data - state.h_ice.data) / DT)
+    actual_d_dh_dt = dh_dt_dry - dh_dt_moist
+
+    # Without iter-11 fix this would be ~0 (mass budget ignores
+    # the lhflx-driven mass loss).  With the fix, actual_d_dh_dt
+    # should match expected_d_dh_dt.  The shflx ALSO changes a
+    # little between the two runs because the sensible-heat
+    # transfer responds to T_ice via the surface energy budget,
+    # so allow a generous tolerance.
+    assert abs(actual_d_dh_dt - expected_d_dh_dt) < 0.5 * abs(expected_d_dh_dt), (
+        f"Δ(dh/dt) = {actual_d_dh_dt:.2e} does not match expected "
+        f"sublim contribution {expected_d_dh_dt:.2e} — iter-11 fix "
+        f"may be missing."
+    )
+    # Must be a NEGATIVE delta (dry case loses more mass).
+    assert actual_d_dh_dt < 0.0, (
+        f"Δ(dh/dt) should be negative (dry case loses more mass); "
+        f"saw {actual_d_dh_dt:.2e}"
+    )
+
+
+def test_slab_ocean_Q_freeze_diagnostic_populated():
+    """Audit F6 (MEDIUM): slab ocean freezing clamp must diagnose
+    ``Q_freeze`` (latent heat of fusion implicitly extracted from
+    the surface budget when SST clamps at T_freeze) instead of
+    silently destroying the energy.  The iter-11 fix adds this
+    diagnostic; iter-12 ensures it's a populated zero Field at
+    init so the pytree shape is invariant.
+
+    Test asserts:
+    - Cold-forcing column drives SST below T_freeze → Q_freeze > 0.
+    - Warm-forcing column → Q_freeze = 0 (no clamping).
+    """
+    from legoesm.ocean.simple_ocean import (
+        _slab_step, init_slab_state, SimpleOceanConfig,
+    )
+
+    config = SimpleOceanConfig()
+    state = init_slab_state(SHAPE, T_sfc_init=271.5)  # very near freezing
+    # Cold forcing — net heat loss large enough to drive below freezing
+    cold_forcing = _make_forcing(T_lowest=200.0, sw=0.0, lw=150.0)
+    new_state, _, _, _ = _slab_step(state, cold_forcing, config, dt=86400.0)
+    # Q_freeze must be populated and POSITIVE in cells where SST
+    # would have dropped below T_freeze.
+    assert new_state.Q_freeze is not None
+    assert float(jnp.max(new_state.Q_freeze.data)) > 0.0, (
+        "Q_freeze should be positive when SST clamps at T_freeze"
+    )
+
+    # Warm forcing — no clamping → Q_freeze should be zero.
+    warm_state = init_slab_state(SHAPE, T_sfc_init=290.0)
+    warm_forcing = _make_forcing(T_lowest=290.0, sw=300.0, lw=350.0)
+    new_warm_state, _, _, _ = _slab_step(
+        warm_state, warm_forcing, config, dt=86400.0,
+    )
+    assert float(jnp.max(new_warm_state.Q_freeze.data)) == 0.0
+
+
+# ==============================================================================
+# Coupler-conservation regression tests (audit F3/F4/F8/F9 channels)
+# ==============================================================================
+
+def test_sea_ice_freshwater_flux_balances_ice_mass_change():
+    """Sea-ice TileResponse.freshwater_flux must equal -rho_ice·dh/dt
+    minus the sublimation contribution (audit F4).
+
+    With realistic warm forcing the ice is melting → freshwater INTO
+    ocean → flux > 0.
+    """
+    from legoesm import constants
+    state = _make_ice_state(h=0.5, conc=0.9, T=271.35)
+    forcing = _make_forcing(T_lowest=280.0, sw=400.0, lw=350.0)
+    config = SeaIceConfig()
+    ocean_sst = jnp.full(SHAPE, 275.0)
+
+    new_state, resp = step_sea_ice(
+        state, forcing, ocean_sst, jnp.zeros(SHAPE), jnp.zeros(SHAPE),
+        config, U_min=1.0, dt=DT,
+    )
+
+    # Total ice mass change rate
+    dh_dt = (new_state.h_ice.data - state.h_ice.data) / DT
+    # Sublimation contribution (over ice cells only)
+    sublim_rate = jnp.where(
+        state.h_ice.data > config.h_ice_min,
+        -resp.lhflx / (config.rho_ice * constants.L_s),
+        0.0,
+    )
+    expected_fw = -config.rho_ice * (dh_dt - sublim_rate)
+    assert jnp.allclose(resp.freshwater_flux, expected_fw, rtol=1e-6, atol=1e-12)
+    # Sanity: ice melting should yield positive freshwater into ocean
+    assert float(jnp.mean(resp.freshwater_flux)) > 0.0, (
+        "Warm-forcing scenario should melt ice → freshwater_flux > 0"
+    )
+
+
+def test_sea_ice_ocean_heat_extraction_positive_under_warm_ocean():
+    """Sea-ice TileResponse.ocean_heat_extraction > 0 when ocean is
+    warm above T_freeze_ocean (audit F8 — ocean LOSES heat to melt
+    ice base).
+    """
+    state = _make_ice_state(h=1.0, conc=1.0, T=270.0)
+    forcing = _make_forcing()
+    config = SeaIceConfig()
+    # Warm ocean (4 K above freezing) drives basal melt
+    ocean_sst = jnp.full(SHAPE, 275.35)
+
+    _, resp = step_sea_ice(
+        state, forcing, ocean_sst, jnp.zeros(SHAPE), jnp.zeros(SHAPE),
+        config, U_min=1.0, dt=DT,
+    )
+
+    expected_F_ocean = config.ocean_heat_transfer_coeff * 4.0  # SST - T_freeze_ocean
+    # Tolerance generous: ocean_heat_extraction may include a small
+    # open_freeze_flux contribution from any cells where ice grew.
+    assert float(jnp.min(resp.ocean_heat_extraction)) > 0.5 * expected_F_ocean
+    assert jnp.all(resp.ocean_heat_extraction >= 0.0)
+
+
+def test_sea_ice_ocean_stress_opposes_ocean_ice_drag():
+    """Sea-ice TileResponse.ocean_stress_x/y is the negative of
+    rho_ocean·C_oi·|U_w − U_i|·(U_w − U_i), weighted by concentration
+    (audit F9).
+    """
+    state = _make_ice_state(h=2.0, conc=0.8, T=265.0)
+    # Use _make_forcing default winds (u=5, v=-3) — strong enough to
+    # exercise the back-reaction stress.
+    forcing = _make_forcing()
+    config = SeaIceConfig()
+    ocean_sst = jnp.full(SHAPE, 271.35)
+    ocean_u = jnp.zeros(SHAPE)
+    ocean_v = jnp.zeros(SHAPE)
+
+    _, resp = step_sea_ice(
+        state, forcing, ocean_sst, ocean_u, ocean_v,
+        config, U_min=1.0, dt=DT,
+    )
+
+    # Ice velocity from free-drift formula uses drag_atm·rho_air/rho_ice·wind
+    rho_air_ratio = config.rho_air_ref / config.rho_ice
+    u_ice_expected = (
+        config.drag_ocean * 0.0  # ocean at rest contributes 0
+        + config.drag_atm * rho_air_ratio * 5.0
+    )
+    # Relative velocity ocean - ice = -u_ice (ocean at rest)
+    du_oi = -u_ice_expected
+    v_ice_expected = config.drag_atm * rho_air_ratio * (-3.0)
+    dv_oi = -v_ice_expected
+    speed_oi = float(jnp.sqrt(du_oi ** 2 + dv_oi ** 2 + 1e-10))
+    tau_oi_x = config.rho_ocean_ref * config.drag_ocean * speed_oi * du_oi
+    expected_stress_x = -tau_oi_x * 0.8  # weighted by concentration
+
+    assert jnp.allclose(resp.ocean_stress_x, expected_stress_x, rtol=1e-2)
+    # Wind is eastward → ice moves east → ocean→ice drag pulls ice
+    # westward (tau_oi_x < 0) → reaction on ocean is +tau_oi (eastward),
+    # so ocean_stress_x is POSITIVE.
+    assert float(jnp.mean(resp.ocean_stress_x)) > 0.0
+
+
+def test_sea_ice_surface_mass_flux_equals_lhflx_over_Ls():
+    """Sea-ice TileResponse.surface_mass_flux = lhflx / L_s exactly
+    (audit F3 — phase-aware mass flux uses sublimation latent heat
+    over ice).
+    """
+    from legoesm import constants
+    state = _make_ice_state(h=1.0, conc=0.7, T=263.0)
+    forcing = _make_forcing()
+    config = SeaIceConfig()
+    ocean_sst = jnp.full(SHAPE, 271.35)
+
+    _, resp = step_sea_ice(
+        state, forcing, ocean_sst, jnp.zeros(SHAPE), jnp.zeros(SHAPE),
+        config, U_min=1.0, dt=DT,
+    )
+
+    expected = resp.lhflx / constants.L_s
+    assert jnp.allclose(resp.surface_mass_flux, expected, rtol=1e-12)
+
+
 # ==============================================================================
 # Test lake
 # ==============================================================================
@@ -247,6 +483,69 @@ def test_lake_mixing_direction():
 
     # Hypolimnion should warm, epilimnion should cool (from mixing alone)
     assert jnp.all(new_state.T_hypo.data > 275.0)
+
+
+def test_lake_surface_mass_flux_uses_phase_aware_L():
+    """Lake TileResponse.surface_mass_flux = lhflx / L_eff, where
+    L_eff = L_s for frozen lakes (T_epi <= T_freeze) and L_v
+    otherwise (audit F3 + iter-11).
+    """
+    from legoesm import constants
+    config = LakeConfig()
+
+    # Warm liquid lake: L_eff = L_v
+    state_warm = _make_lake_state(T_epi=285.0, T_hypo=280.0)
+    forcing_warm = _make_forcing(T_lowest=290.0)
+    _, resp_warm = step_lake(state_warm, forcing_warm, config, U_min=1.0, dt=DT)
+    expected_warm = resp_warm.lhflx / constants.L_v
+    assert jnp.allclose(resp_warm.surface_mass_flux, expected_warm, rtol=1e-6)
+
+    # Frozen lake: L_eff = L_s
+    state_cold = _make_lake_state(T_epi=270.0, T_hypo=270.0)
+    forcing_cold = _make_forcing(T_lowest=240.0, sw=0.0, lw=200.0)
+    _, resp_cold = step_lake(state_cold, forcing_cold, config, U_min=1.0, dt=DT)
+    expected_cold = resp_cold.lhflx / constants.L_s
+    assert jnp.allclose(resp_cold.surface_mass_flux, expected_cold, rtol=1e-6)
+
+
+def test_lake_freshwater_flux_is_P_minus_E():
+    """Lake TileResponse.freshwater_flux = precip_total − E
+    (audit F4).
+    """
+    state = _make_lake_state(T_epi=285.0, T_hypo=280.0)
+    forcing = _make_forcing(precip=2e-5)  # nontrivial precip
+    config = LakeConfig()
+
+    _, resp = step_lake(state, forcing, config, U_min=1.0, dt=DT)
+
+    expected = forcing.precip_total - resp.surface_mass_flux
+    assert jnp.allclose(resp.freshwater_flux, expected, rtol=1e-6)
+
+
+def test_land_freshwater_flux_equals_runoff():
+    """Slab land TileResponse.freshwater_flux equals the bucket
+    overflow runoff (audit F4).  ``LandConfig.W_max = 150 kg/m²`` —
+    saturate the bucket and apply heavy precip with cool dry forcing
+    (so evap doesn't drain the bucket within the step) to force
+    overflow.
+    """
+    from legoesm.land.config import LandConfig
+    state = _make_land_state(W=149.99)  # right at saturation
+    # Cool, dry, low-wind forcing keeps evap minimal; very heavy
+    # precip forces overflow regardless.
+    forcing = _make_forcing(
+        T_lowest=275.0, sw=0.0, lw=200.0, precip=1.0,
+    )
+    config = LandConfig()
+
+    new_state, resp, _ = step_land(state, forcing, config, U_min=1.0, dt=DT)
+
+    # The bucket overflow becomes runoff, which is freshwater_flux.
+    # ``LandState.runoff`` is a bare jax.Array (not a Field), so use
+    # it directly.
+    assert jnp.allclose(resp.freshwater_flux, new_state.runoff, rtol=1e-6)
+    # Heavy precip on a saturated bucket → positive runoff.
+    assert float(jnp.mean(resp.freshwater_flux)) > 0.0
 
 
 # ==============================================================================
@@ -292,6 +591,9 @@ def test_blending_is_area_weighted():
             albedo=z, emissivity=z, z0=z, q_surface=z,
             shflx=z, lhflx=z, tau_x=z, tau_y=z, lw_up=z,
             u_ocean_sfc=z, v_ocean_sfc=z, co2_flux=z,
+            freshwater_flux=z, ocean_heat_extraction=z,
+            ocean_stress_x=z, ocean_stress_y=z,
+            surface_mass_flux=z,
         )
 
     fracs = TileFractions(
@@ -336,6 +638,9 @@ def test_accumulator_mean():
         shflx=jnp.full(SHAPE, 10.0), lhflx=z,
         tau_x=z, tau_y=z, lw_up=z,
         u_ocean_sfc=z, v_ocean_sfc=z, co2_flux=z,
+        freshwater_flux=z, ocean_heat_extraction=z,
+        ocean_stress_x=z, ocean_stress_y=z,
+        surface_mass_flux=z,
     )
     acc = accumulate(acc, sfc1, 100.0)
 
@@ -972,7 +1277,7 @@ def test_coupler_with_fv_ocean_tracer_transport():
 
     new_sfc, blended = step_fn(
         sfc_state, forcing, tile_cfg,
-        sst + 273.15,
+        sst + constants.T_freeze,  # iter-166: was 273.15 literal
         jnp.zeros(shape), jnp.zeros(shape), DT,
     )
     assert jnp.all(jnp.isfinite(blended.T_surface))

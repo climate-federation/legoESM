@@ -111,8 +111,10 @@ def _voronoi_neumann_fill(
         m_nbr = m[coc_safe] * valid              # (maxEdges, nCells)
 
         if filled.ndim == 1:
-            nbr_sum = jnp.sum(f_nbr * m_nbr, axis=0)         # (nCells,)
-            nbr_count = jnp.sum(m_nbr, axis=0)               # (nCells,)
+            # Both reductions share ``m_nbr`` weight on axis 0 — fuse.
+            _pair = jnp.sum(jnp.stack([f_nbr * m_nbr, m_nbr], axis=-1), axis=0)
+            nbr_sum = _pair[..., 0]                         # (nCells,)
+            nbr_count = _pair[..., 1]                       # (nCells,)
         else:
             nbr_sum = jnp.sum(f_nbr * m_nbr[:, :, None], axis=0)  # (nCells, nlev)
             nbr_count = jnp.sum(m_nbr, axis=0)               # (nCells,)
@@ -461,7 +463,9 @@ def _visbeck_kappa_gm_mpas(
     kappa : (nCells,) clamped GM coefficient [m²/s].
     """
     S_sq_cell = _perot_inner_product_cell(S_n, S_n, mesh)         # (nCells, nlev-1)
-    S_mag_cell = jnp.sqrt(jnp.maximum(S_sq_cell, 0.0))            # (nCells, nlev-1)
+    # Tiny positive floor before sqrt to avoid NaN gradients at S²=0.
+    # See _gm_redi_common.py:154 for the analogous Visbeck N² fix.
+    S_mag_cell = jnp.sqrt(jnp.maximum(S_sq_cell, 1e-30))           # (nCells, nlev-1)
     S_x_proxy = S_mag_cell
     S_y_proxy = jnp.zeros_like(S_mag_cell)
     return compute_visbeck_kappa_gm(

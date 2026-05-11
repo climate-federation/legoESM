@@ -208,6 +208,16 @@ class HoltslagBovilleConfig(NamedTuple):
     gamma_m: float = 0.0
     Ri_crit: float = 0.25
     b_louis: float = 5.0
+    # Sigmoid sharpness for the Ri_crit transition-zone weighting
+    # used in the bulk-Ri PBL-height diagnostic (default 20.0 1/Ri).
+    pbl_sharpness: float = 20.0
+    # Sigmoid sharpness for stable/unstable Ri-branch blend in the
+    # local Louis Km calculation (default 100.0 1/Ri).
+    blend_ri_sharpness: float = 100.0
+    # Sigmoid sharpness for the smooth profile-to-local transition
+    # at the PBL top in the Km blend (default 10.0; sigmoid(10·1) ≈ 1
+    # one PBL-height above the top, sigmoid(10·-1) ≈ 5e-5 below).
+    blend_pbl_sharpness: float = 10.0
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
 
@@ -226,6 +236,22 @@ class YSUConfig(NamedTuple):
         Critical Richardson number (default 0.25).
     pbl_smooth_sharpness : float
         Sigmoid sharpness for smooth PBL-top detection (default 20.0).
+    louis_b : float
+        Louis (1982) stability-function ``b`` constant
+        (default 5.0).  Used in YSU local-Ri f_stable / f_unstable.
+    louis_c : float
+        Louis (1982) UNSTABLE-branch denominator coefficient
+        (default 5.0).  Multiplies the ``b · l_mix² · sqrt(|Ri|)``
+        denominator term in f_unstable.  The repository's louis.py
+        distinguishes this from louis_d; YSU now follows the same
+        convention.
+    louis_d : float
+        Louis (1982) STABLE-branch sqrt coefficient (a.k.a. ``b'``)
+        (default 5.0).  Appears only in ``sqrt(1 + d · Ri)`` of
+        f_stable.
+    blend_ri_sharpness : float
+        Sigmoid sharpness for stable / unstable blend in
+        Richardson-number space (default 100.0 1/Ri).
     surface : SurfaceLayerConfig
         Surface layer parameters.
     """
@@ -234,6 +260,10 @@ class YSUConfig(NamedTuple):
     entrainment_coeff: float = 0.2
     Ri_crit: float = 0.25
     pbl_smooth_sharpness: float = 20.0
+    louis_b: float = 5.0
+    louis_c: float = 5.0
+    louis_d: float = 5.0
+    blend_ri_sharpness: float = 100.0
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
 

@@ -56,7 +56,8 @@ def _create_ocean_setup(tc, nlev: int | None = None,
                         C_leith: float | None = None,
                         C_leith_modified: bool | None = None,
                         momentum_advection: str | None = None,
-                        weno_d_term: bool | None = None):
+                        weno_d_term: bool | None = None,
+                        barotropic_solver: str | None = None):
     """Create grid, z_coord, and rest-state for any grid type.
 
     Parameters
@@ -85,6 +86,31 @@ def _create_ocean_setup(tc, nlev: int | None = None,
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.ocean.dynamics.ocean_model import OceanModel
         from legoesm.ocean.state import OceanConfig
+
+        # iter-175 parity with iter-174 monolithic fix:
+        # cubed_sphere ``OceanConfig`` does not expose
+        # ``bottom_drag_r``.  Previously the modular path
+        # silently dropped the parameter without even a
+        # warning (worse than the monolithic path which at
+        # least emitted ``warnings.warn``).  Codex iter-173
+        # MEDIUM-1 flagged the same issue in the monolithic
+        # path: a silent drop lets cube gyre runs produce
+        # ``PASS`` results in cross-grid comparisons that
+        # are NOT physically comparable to lat-lon / MPAS
+        # because bottom drag is missing.
+        #
+        # Same fix as iter-174 (monolithic): raise
+        # ``NotImplementedError`` so the main runner's
+        # exception handler converts the case to ``SKIP``
+        # with the reason in the notes field.
+        if bottom_drag_r is not None and bottom_drag_r > 0.0:
+            raise NotImplementedError(
+                f"cubed_sphere OceanConfig does not expose "
+                f"bottom_drag_r (requested {bottom_drag_r:g}); "
+                f"cube ocean dycore lacks linear bottom drag "
+                f"(deferred per user). Use latlon or mpas for "
+                f"this case to get cross-grid-comparable results."
+            )
 
         n = params["n"]
         grid = create_cubed_sphere(n)
@@ -301,6 +327,8 @@ def _create_ocean_setup(tc, nlev: int | None = None,
             kw["momentum_advection"] = momentum_advection
         if weno_d_term is not None:
             kw["weno_d_term"] = weno_d_term
+        if barotropic_solver is not None:
+            kw["barotropic_solver"] = barotropic_solver
         cfg = LatLonCGridOceanConfig(**kw)
         model = LatLonCGridOceanModel(grid, z_coord, cfg)
         coord_kind = "latlon"

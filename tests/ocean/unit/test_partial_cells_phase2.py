@@ -27,6 +27,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm import constants
 from legoesm.ocean.eos import (
     compute_hydrostatic_pressure,
     compute_ocean_rho,
@@ -83,7 +84,7 @@ class TestHydrostaticBalance:
         rho_2d = jnp.broadcast_to(rho[None, :], (2, nlev))
 
         # Compute pressure
-        g = 9.80616
+        g = constants.g
         p = compute_hydrostatic_pressure(
             rho_2d, eta, z20.dz_ref, jnp.ones((2,)),
             rho_ref=rho_0, g=g, h_actual=h_actual,

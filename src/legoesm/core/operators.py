@@ -350,12 +350,17 @@ def global_integral(field: Field, grid: CubedSphereGrid) -> jax.Array:
     -------
     scalar : The global integral.
     """
-    from legoesm.core.conservation import _accumulation_dtype
-    acc = _accumulation_dtype()
+    from legoesm.core.conservation import _conservation_accumulator
+    acc = _conservation_accumulator()
     prod = field.data.astype(acc) * grid.area.astype(acc)
     local_sum = jnp.sum(prod)
 
     if _is_distributed():
+        # iter-169: deferred import (avoids eager top-level
+        # cross-package import per CLAUDE.md "Audit lessons —
+        # 2026-05-03 cycle" — and fixes the F821 lint failure
+        # that the previous code path would hit at runtime as
+        # NameError).
         from legoesm.parallel.reductions import global_sum_mpi
         return global_sum_mpi(local_sum)
 
@@ -373,6 +378,9 @@ def _is_distributed() -> bool:
 
 def _get_device_config():
     """Return the active DeviceConfig, or None."""
+    # iter-169: deferred import (CLAUDE.md "Audit lessons":
+    # avoid eager top-level cross-package imports from low-level
+    # ``core/`` modules into higher-level ``parallel/``).
     from legoesm.parallel.mesh import get_active_config
     return get_active_config()
 

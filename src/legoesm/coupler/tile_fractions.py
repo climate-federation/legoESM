@@ -93,4 +93,33 @@ def blend_tiles(
                            land_resp.v_ocean_sfc, lake_resp.v_ocean_sfc),
         co2_flux=_blend(ocean_resp.co2_flux, ice_resp.co2_flux,
                         land_resp.co2_flux, lake_resp.co2_flux),
+        # Tile-blended freshwater flux to the ocean.  Each tile
+        # populates freshwater_flux as a populated array (zeros for
+        # tiles that don't deliver freshwater), so this blend is a
+        # straight area-weighted sum.
+        freshwater_flux=_blend(
+            ocean_resp.freshwater_flux, ice_resp.freshwater_flux,
+            land_resp.freshwater_flux, lake_resp.freshwater_flux,
+        ),
+        # Tile-blended heat extracted from the ocean by ice.  Audit F8.
+        ocean_heat_extraction=_blend(
+            ocean_resp.ocean_heat_extraction,
+            ice_resp.ocean_heat_extraction,
+            land_resp.ocean_heat_extraction,
+            lake_resp.ocean_heat_extraction,
+        ),
+        # Tile-blended back-reaction stress on the ocean.  Audit F9.
+        ocean_stress_x=_blend(
+            ocean_resp.ocean_stress_x, ice_resp.ocean_stress_x,
+            land_resp.ocean_stress_x, lake_resp.ocean_stress_x,
+        ),
+        ocean_stress_y=_blend(
+            ocean_resp.ocean_stress_y, ice_resp.ocean_stress_y,
+            land_resp.ocean_stress_y, lake_resp.ocean_stress_y,
+        ),
+        # Phase-aware blended surface mass flux.  Audit F3.
+        surface_mass_flux=_blend(
+            ocean_resp.surface_mass_flux, ice_resp.surface_mass_flux,
+            land_resp.surface_mass_flux, lake_resp.surface_mass_flux,
+        ),
     )

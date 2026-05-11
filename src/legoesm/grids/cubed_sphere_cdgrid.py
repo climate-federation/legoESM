@@ -32,7 +32,16 @@ _EPS = float(jnp.finfo(jnp.float32).eps)    # Float32 machine epsilon (~1.19e-7)
 
 from legoesm import constants
 from legoesm.grids.cubed_sphere import CubedSphereGrid
-from legoesm.grids.halo import _face_gnomonic_to_lonlat
+from legoesm.grids.halo import (
+    CONNECTIVITY,
+    EAST,
+    NORTH,
+    SOUTH,
+    WEST,
+    _face_gnomonic_to_lonlat,
+    _fill_corners_h1,
+    pad_halo,
+)
 
 
 class CubedSphereCDGrid(NamedTuple):
@@ -528,7 +537,7 @@ def _compute_supergrid_metrics(n, face_gnomonic_to_lonlat, radius):
 
 def create_cubed_sphere_cdgrid(
     base: CubedSphereGrid,
-    omega: float = constants.Omega,
+    omega: float | None = None,
     metric_dtype=None,
 ) -> CubedSphereCDGrid:
     """Create a C-D grid from an existing cell-centre grid.
@@ -540,8 +549,10 @@ def create_cubed_sphere_cdgrid(
     omega : float or None
         Planetary rotation rate [rad/s].  If ``None`` (default), the
         effective omega is inferred from ``base.f`` and ``base.sin_lat``
-        so that `cdgrid.f_corner` is consistent with `base.f` under
-        small-earth scaling (see ``scale_cubed_sphere_metrics``).
+        so that ``cdgrid.f_corner`` is consistent with ``base.f`` under
+        any rescaling (small-earth, non-rotating §3-1, …).  Pass an
+        explicit float only when you specifically need to *override*
+        the base grid's Coriolis at the corners (rare).
     metric_dtype : dtype or None
         Dtype for corner-critical metrics (gradient matrix, rsin, rarea,
         cosa, sin_sg, dxc/dyc).  Defaults to float32.
@@ -682,8 +693,6 @@ def create_cubed_sphere_cdgrid(
     # angle between that face's i-tangent and geographic east), and is
     # therefore inherently different on each face even at shared points.
     # ------------------------------------------------------------------
-    from legoesm.grids.halo import CONNECTIVITY, WEST, EAST, SOUTH, NORTH
-
     def _get_strip_corner(arr, face, edge, n_):
         if edge == WEST:    return arr[face, 0, :]
         elif edge == EAST:  return arr[face, n_, :]
@@ -738,7 +747,6 @@ def create_cubed_sphere_cdgrid(
                 lat_corner = arr
 
     # --- area_corner from FV3 supergrid (sum of 4 supergrid quadrilaterals) ---
-    from legoesm.grids.halo import pad_halo, _fill_corners_h1
     area_corner = area_c_sg  # (6, n+1, n+1)
 
     # Infer omega from base.f when not explicitly provided so that
@@ -757,11 +765,11 @@ def create_cubed_sphere_cdgrid(
             if abs(sl_probe) > 1e-6:
                 omega = f_probe / (2.0 * sl_probe)
             else:
-                omega = 7.292e-5  # fallback: sin_lat ~ 0 everywhere
+                omega = constants.Omega  # fallback: sin_lat ~ 0 everywhere
         except (TypeError, jax.errors.ConcretizationTypeError):
             # base.f or base.sin_lat is a JAX tracer (e.g. JIT-time
             # grid construction). Fall back to the Earth default.
-            omega = 7.292e-5
+            omega = constants.Omega
     f_corner = 2.0 * omega * jnp.sin(lat_corner)
     cos_angle_corner = jnp.cos(angle_corner)
     sin_angle_corner = jnp.sin(angle_corner)

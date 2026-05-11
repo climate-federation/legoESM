@@ -93,6 +93,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Initial isothermal temperature [K] (default 300)")
     parser.add_argument("--rh-init", type=float, default=None,
                         help="Initial relative humidity (default 0.7); lower for drier IC")
+    parser.add_argument("--ic", type=str, default="default",
+                        choices=["default", "era5"],
+                        help="Initial condition source: 'default' uses held_suarez_init; "
+                             "'era5' loads reanalysis from --ic-path")
+    parser.add_argument("--ic-path", type=str, default="",
+                        help="Path to ERA5 Zarr store for --ic era5")
 
     # Radiation
     parser.add_argument("--radiation", type=str, default="gray",
@@ -333,6 +339,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         gradient_checkpoint=args.gradient_checkpoint,
         distributed=args.distributed,
         ensemble_size=args.ensemble_size,
+        ic=args.ic,
+        ic_path=args.ic_path,
         **({"T_init": args.t_init} if args.t_init is not None else {}),
         **({"RH_init": args.rh_init} if args.rh_init is not None else {}),
     )
@@ -357,6 +365,8 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
         parser.error("--forcing-path required (unless --dataset analytical or --restart-from)")
     if args.solar_source in ("file", "spectral_file") and not args.solar_file:
         parser.error("--solar-file required when --solar-source is file/spectral_file")
+    if args.ic == "era5" and not args.ic_path:
+        parser.error("--ic-path required when --ic era5")
     if args.ghg_forcing == "external" and not args.ghg_file:
         parser.error("--ghg-file required when --ghg-forcing is external")
     if args.physics_parameterization == "ml":
@@ -386,6 +396,65 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
         args.discretization = "latlon_cgrid"
 
     return args
+
+
+def _check_run_state_finite(driver) -> tuple[bool, str | None]:
+    """Inspect ``driver.state`` for NaN/Inf in primary fields.
+
+    iter-100: the standalone ``run_amip.py`` previously had no
+    finiteness check.  This helper inspects the final state
+    after ``driver.run(...)`` returns and reports the first
+    field with a non-finite value.
+
+    iter-104 (codex HIGH-2): the original iter-100 implementation
+    only checked grid-space fields (T, u, v, p_s).  Spectral
+    AMIP states (when ``run_amip.py --grid-type gaussian
+    --discretization spectral``) use a different attribute
+    layout — ``T_hat``, ``vor_hat``, ``div_hat``, ``lnps_hat``
+    — and would silently bypass the iter-100 check (returning
+    ``(True, None)``).  iter-104 extends the field list to cover
+    both grid-space AND spectral attribute names; the helper
+    iterates through every field name and skips the ones not
+    present, so the same helper handles both layouts.
+
+    Returns
+    -------
+    (ok, bad_field): tuple
+        ``ok`` is False when any field in the union of
+        ``{T, u, v, p_s, T_hat, vor_hat, div_hat, lnps_hat}``
+        contains NaN/Inf; ``bad_field`` is the name of the
+        first such field (in iteration order, grid-space first
+        then spectral) or None when all present fields are
+        finite.
+    """
+    import jax.numpy as jnp
+
+    state = getattr(driver, "state", None)
+    if state is None:
+        return True, None
+    # iter-104 codex HIGH-2: union of grid-space and spectral
+    # field names so this helper covers both AMIP execution
+    # paths.  Order: grid-space first (most common AMIP),
+    # then spectral.  ``getattr(..., None)`` short-circuits
+    # missing attributes.
+    field_names = (
+        "T", "u", "v", "p_s",
+        "T_hat", "vor_hat", "div_hat", "lnps_hat",
+    )
+    for fname in field_names:
+        f = getattr(state, fname, None)
+        if f is None:
+            continue
+        data = getattr(f, "data", None)
+        if data is None:
+            continue
+        try:
+            ok = bool(jnp.all(jnp.isfinite(data)))
+        except Exception:
+            continue
+        if not ok:
+            return False, fname
+    return True, None
 
 
 def main(argv: list[str] | None = None):
@@ -433,11 +502,38 @@ def main(argv: list[str] | None = None):
     if _is_root:
         print("Running...")
     driver.run(start_step=start_step, start_day=start_day)
+
+    # iter-100: post-run finiteness check.  Pre-iter-100,
+    # ``run_amip.py`` had ZERO blowup detection (``grep -c
+    # isfinite`` = 0 in 450 lines).  A NaN-producing AMIP run
+    # would silently complete and print "Complete." while
+    # writing garbage to the output directory.  iter-98's audit
+    # of the OMIP/atmosphere-matrix BLOWUP-reporting bug flagged
+    # this as a separate gap; iter-100 closes it.
+    #
+    # The check inspects the final ``driver.state`` for NaN/Inf
+    # in the primary atmospheric fields (T, u, v, p_s).  When
+    # non-finite, the run is flagged FAIL with a clear message
+    # and the script exits with code 1 so wrappers
+    # (``run_amip_cross_grid.sh``) can detect failure.
+    state_ok, bad_field = _check_run_state_finite(driver)
     if _is_root:
-        print(f"Complete. Output: {driver.output_dir}")
+        if state_ok:
+            print(f"Complete. Output: {driver.output_dir}")
+        else:
+            print(
+                f"FAIL: final state contains NaN/Inf in field "
+                f"``{bad_field}``.  Output (with garbage): "
+                f"{driver.output_dir}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     if args.plot and _is_root:
-        sys.path.insert(0, str(Path(__file__).parent))
+        # Iter 34: ``plot_amip`` lives under ``scripts/diagnostic/``
+        # (moved in an earlier reorg).  ``--plot`` previously inserted
+        # ``scripts/`` and crashed with ``ModuleNotFoundError``.
+        sys.path.insert(0, str(Path(__file__).parent / "diagnostic"))
         from plot_amip import plot_amip as _plot_amip
 
         _plot_amip(driver.output_dir, show=False)

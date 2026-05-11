@@ -89,7 +89,17 @@ def sbm_convection(
     # 3. Identify the convective layer: only levels where the moist adiabat
     #    is warmer than the environment (conditional instability).
     #    This prevents adjusting the stable stratosphere (Frierson 2007).
-    cloud_mask = (T_moist >= T).astype(T.dtype)  # (ncol, nlev)
+    #
+    #    A pure ``(T_moist >= T).astype(...)`` boolean breaks
+    #    differentiability (∂mask/∂T = 0 a.e.), but a pure sigmoid changes
+    #    the FORWARD semantics — at the surface the moist adiabat is
+    #    initialized from T[:,-1] so ``T_moist - T = 0`` gives mask = 0.5
+    #    instead of the prior mask = 1.  Use a straight-through estimator:
+    #    forward = hard step (preserve prior numerics exactly), backward =
+    #    sigmoid' (keep gradients alive across layer membership).
+    soft = jax.nn.sigmoid(config.cloud_mask_sharpness * (T_moist - T))
+    hard = (T_moist >= T).astype(T.dtype)
+    cloud_mask = soft + jax.lax.stop_gradient(hard - soft)  # (ncol, nlev)
 
     # 4. Compute CAPE from the RAW moist adiabat (before enthalpy correction)
     #    to avoid artificial CAPE from the Newton correction.
@@ -146,11 +156,14 @@ def sbm_convection(
     # dq_c_conv_dt = 0 everywhere, mirroring the legacy
     # ``clip(-col_dq_v, 0)`` behavior.
     local_cond = jnp.maximum(-dq_v_dt, 0.0)
-    col_local_cond = jnp.sum(local_cond * dp / constants.g, axis=-1, keepdims=True)
-    col_net_drying = jnp.clip(
-        -jnp.sum(dq_v_dt * dp / constants.g, axis=-1, keepdims=True),
-        0.0, None,
+    # Both column reductions share the ``* dp / g`` weight on the level
+    # axis — stack the two integrands and reduce once.
+    _col_pair = jnp.sum(
+        jnp.stack([local_cond, dq_v_dt], axis=-1) * (dp / constants.g)[..., None],
+        axis=-2,
     )
+    col_local_cond = _col_pair[..., 0:1]
+    col_net_drying = jnp.clip(-_col_pair[..., 1:2], 0.0, None)
     dq_c_conv_dt = local_cond * (
         col_net_drying / jnp.clip(col_local_cond, 1e-30, None)
     )  # (ncol, nlev) [kg/kg/s]

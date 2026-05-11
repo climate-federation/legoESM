@@ -430,6 +430,62 @@ class ModelDriver:
         else:
             logger.info(f"  State init: T={cfg.T_init}K (dry spectral)")
 
+        # ERA5 IC override — replace held-suarez rest state with ERA5 reanalysis.
+        # Applied after the default moisture init so the Field metadata (dims,
+        # units, names) from held_suarez_init is preserved as the template.
+        if cfg.ic == "era5" and cfg.ic_path:
+            from legoesm.training.era5_to_state import (
+                load_era5_ic,
+                era5_to_cubedsphere_carry,
+                era5_to_spectral_carry,
+            )
+            logger.info(
+                f"  IC: loading ERA5 from {cfg.ic_path} "
+                f"(year={cfg.start_year})"
+            )
+            era5_slice = load_era5_ic(cfg.ic_path, cfg.start_year)
+
+            if cfg.grid.grid_type == "cubed_sphere":
+                carry = era5_to_cubedsphere_carry(
+                    era5_slice, self.grid, self.sigma
+                )
+            elif cfg.dycore.discretization == "spectral":
+                carry = era5_to_spectral_carry(
+                    era5_slice, self.grid, self.sigma
+                )
+            else:
+                raise NotImplementedError(
+                    f"ERA5 IC not yet supported for "
+                    f"grid_type={cfg.grid.grid_type!r} / "
+                    f"discretization={cfg.dycore.discretization!r}. "
+                    "Use --grid-type cubed_sphere or --discretization spectral."
+                )
+
+            self.state = self.state._replace(
+                u=self.state.u.replace(data=carry.u),
+                v=self.state.v.replace(data=carry.v),
+                T=self.state.T.replace(data=carry.T),
+                p_s=self.state.p_s.replace(data=carry.p_s),
+                phis=self.state.phis.replace(data=carry.phis),
+            )
+            self.tracers["q_v"] = jnp.asarray(carry.q_v)
+
+            _stats_era5 = jnp.stack([
+                jnp.mean(self.tracers["q_v"]),
+                jnp.mean(column_water_vapor(
+                    self.tracers["q_v"], self.state.p_s.data,
+                    self.sigma.dsigma,
+                )),
+                jnp.mean(self.state.T.data),
+            ])
+            _h2 = np.asarray(_stats_era5)
+            logger.info(
+                f"  State init (ERA5 {cfg.start_year}): "
+                f"T_mean={_h2[2]:.1f}K, "
+                f"q_v={_h2[0]*1000:.2f} g/kg, "
+                f"CWV={_h2[1]:.1f} kg/m2"
+            )
+
     def _create_ensemble(self) -> None:
         """Create ensemble members if ensemble_size > 1.
 
@@ -1332,7 +1388,7 @@ class ModelDriver:
         gray_config = GrayRadiationConfig()
         shape_2d = (self.grid.n_lat, self.grid.n_lon)
         shape_3d = (*shape_2d, cfg.grid.nlev)
-        S_0 = 1361.0
+        S_0 = constants.S_0
         T_ice = cfg.T_ice
 
         # Precompute spectral transform constants
@@ -1340,15 +1396,32 @@ class ModelDriver:
         _one_over_a = 1.0 / a
         cos_lat_3d = self.grid.cos_lat[:, None, None]
 
-        def _spectral_physics_fn(state, grid, sigma_coord):
-            """Compute physics tendencies and return spectral tendencies."""
+        def _spectral_physics_fn(state, grid, sigma_coord, forcing_data=None):
+            """Compute physics tendencies and return spectral tendencies.
+
+            Iter-97 migration: when ``forcing_data`` is supplied (the
+            new iter-92/95 API), reads ``day``, ``sst``, ``sic``,
+            ``insol`` from the TRACED pytree.  Closes the iter-74
+            ``_DayRef`` JIT-cache stale-day pathology for production
+            spectral runs with diurnal/seasonal forcing.  Falls back
+            to closure-captured ``self._current_day`` for backward
+            compat with the legacy 3-arg call.
+            """
             fields = spectral_pe_to_grid(state, grid, sigma_coord)
             T_g = fields['T']
             u_g = fields['u']
             v_g = fields['v']
             p_s_g = fields['p_s']
 
-            sst, sic = self.get_sst_sic(self._current_day)
+            # SST/SIC: prefer TRACED forcing_data (iter-97 fix); fall
+            # back to closure-captured day for legacy callers.
+            if forcing_data is not None and "sst" in forcing_data:
+                sst = forcing_data["sst"]
+                sic = forcing_data["sic"]
+                current_day = forcing_data["day"]
+            else:
+                sst, sic = self.get_sst_sic(self._current_day)
+                current_day = self._current_day
             # Broadcast from (n_lat,) to (n_lat, n_lon) if needed
             if sst.ndim == 1 and len(shape_2d) == 2:
                 sst = jnp.broadcast_to(sst[:, None], shape_2d)
@@ -1369,7 +1442,11 @@ class ModelDriver:
                 lat_2d = self._grid_lat
             lat_col = lat_2d.reshape(-1)
 
-            insol = daily_mean_insolation(lat_col, self._current_day, S_0)
+            # Insolation: TRACED from forcing_data when supplied
+            if forcing_data is not None and "insol" in forcing_data:
+                insol = forcing_data["insol"]
+            else:
+                insol = daily_mean_insolation(lat_col, current_day, S_0)
             rad_out = gray_radiation(
                 T=T_col, p_full=p_full_col, p_half=p_half_col,
                 sfc_temperature=T_sfc_col, lat=lat_col,
@@ -1412,6 +1489,23 @@ class ModelDriver:
         run_status = "COMPLETED"
         logger.info(f"Starting spectral: {n_steps_total - start_step} steps, {N_DAYS} days")
 
+        # Iter-97 migration: build TRACED forcing_data each step
+        # (day, sst, sic, insol as JAX arrays) and pass through the
+        # iter-92/95 ``model.step(forcing_data=...)`` API.  Single
+        # JIT compile (physics_fn identity stable) + dynamic forcing
+        # values (no retrace, no cache leak).  Closes the iter-74
+        # ``_DayRef`` JIT-cache stale-day pathology for production
+        # spectral runs with diurnal/seasonal cycle.
+
+        # Pre-compute lat_col_local for insolation (constant across steps)
+        if self._grid_lat.ndim == 1:
+            _lat_2d_loop = jnp.broadcast_to(
+                self._grid_lat[:, None], shape_2d,
+            )
+        else:
+            _lat_2d_loop = self._grid_lat
+        _lat_col_loop = _lat_2d_loop.reshape(-1)
+
         # Light-weight time series for AMIP / validation.  The spectral
         # path is otherwise diagnostic-free; without these arrays the
         # `validate_amip_run.py` post-run check rejects the run for
@@ -1426,8 +1520,19 @@ class ModelDriver:
         for step in range(start_step, n_steps_total):
             self._current_day = START_DAY + (step + 1) * DT / 86400.0
 
+            # Build TRACED forcing_data
+            sst_step, sic_step = self.get_sst_sic(self._current_day)
+            insol_step = daily_mean_insolation(_lat_col_loop, self._current_day, S_0)
+            forcing_data = {
+                "day": jnp.asarray(self._current_day),
+                "sst": sst_step,
+                "sic": sic_step,
+                "insol": insol_step,
+            }
             self.state = self.model.step(
-                self.state, DT, physics_fn=_spectral_physics_fn,
+                self.state, DT,
+                physics_fn=_spectral_physics_fn,
+                forcing_data=forcing_data,
             )
 
             if DIAG_INTERVAL > 0 and (step + 1) % DIAG_INTERVAL == 0:

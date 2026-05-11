@@ -25,6 +25,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm import constants
+from legoesm.diagnostics.column_integrals import column_water_vapor
 
 
 # ======================================================================
@@ -530,8 +531,6 @@ class MoistureBudgetTracker:
         -------
         MoistureBudget
         """
-        from legoesm.diagnostics.column_integrals import column_water_vapor
-
         W = column_water_vapor(q_v, p_s, dsigma)
         # Fuse the column-water-vapor + precipitation means into one
         # host transfer.

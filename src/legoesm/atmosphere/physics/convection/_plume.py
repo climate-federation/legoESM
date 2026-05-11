@@ -266,15 +266,6 @@ def compute_lfc_lnb(
         sharpness=GATE_SHARPNESS,
         direction="below",
     )
-    # Drive ``-buoyancy`` strongly negative below the LFC so that the
-    # smooth-crossing primitive does not register near-zero spurious
-    # crossings produced by multiplicative masking ``buoyancy * weight``
-    # (where ``-masked_buoyancy ≈ 0`` for an entire stretch of levels
-    # near the surface).  ``LARGE = 1e6 K`` is far below any physical
-    # buoyancy magnitude (which is bounded by the moist-adiabat /
-    # environmental temperature difference, ~tens of K), so a smooth
-    # blend is safe.  Above LFC altitude the offset vanishes and the
-    # crossing detector sees the genuine ``-buoyancy`` profile.
     LARGE = jnp.asarray(1.0e6, dtype=buoyancy.dtype)
     guarded_neg_buoyancy = -buoyancy - LARGE * (1.0 - above_lfc_weight)
     k_lnb = smooth_lowest_crossing_index(guarded_neg_buoyancy, 0.0, sharpness)
@@ -354,7 +345,16 @@ def compute_cin(
     dp = p_half[:, 1:] - p_half[:, :-1]
     inhibiting_buoyancy = jnp.maximum(0.0, T_env - T_parcel_ma)
 
-    return constants.R_d * jnp.sum(window * inhibiting_buoyancy * dp / p_full, axis=-1)
+    # Use the half-level midpoint pressure for the discrete ``∫ dlnp``
+    # approximation (matches ``compute_cape`` after audit cycle iter-39
+    # HIGH #1 fix and every sister physics helper —
+    # ``_shared.compute_layer_dz``, ``mass_flux``, ``dca``).  The earlier
+    # code used ``p_full`` (a layer-mean pressure on hybrid-sigma grids)
+    # which produced a 0.5–2 % CIN bias relative to the matching CAPE.
+    p_mid = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+    return constants.R_d * jnp.sum(
+        window * inhibiting_buoyancy * dp / p_mid, axis=-1,
+    )
 
 
 # ---------------------------------------------------------------------------

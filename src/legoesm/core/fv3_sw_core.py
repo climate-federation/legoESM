@@ -1794,8 +1794,17 @@ def _d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
             # interpolation (matching sw_core.F90:1795 `a2b_ord4` call)
             # instead of the 2nd-order `_interp_center_to_corner`.
             wk_corner = _interp_center_to_corner_a2b_ord4(wk, cdgrid)
-            smag_vort = jnp.abs(dt) * jnp.sqrt(
-                delpc ** 2 + wk_corner ** 2)
+            # FV3_3D iter 183: use the JAX double-where trick (same
+            # pattern as iter 181) to make the gradient through
+            # ``sqrt`` finite at rest state.  Forward pass bit-for-bit
+            # unchanged at any nonzero ``delpc² + wk² > 0``; exactly
+            # 0 at rest.  Backward pass: gradient finite everywhere.
+            _smag_arg = delpc ** 2 + wk_corner ** 2
+            _safe_smag_arg = jnp.where(_smag_arg > 0.0, _smag_arg, 1.0)
+            _smag_root = jnp.where(
+                _smag_arg > 0.0, jnp.sqrt(_safe_smag_arg), 0.0,
+            )
+            smag_vort = jnp.abs(dt) * _smag_root
             damp2 = da_min_c * jnp.maximum(
                 d2_bg, jnp.minimum(0.20, dddmp * smag_vort))
         else:
@@ -2218,14 +2227,27 @@ def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=constants.g,
     duc = fy1 * vort_x + dB_x    # (6, n+1, n)
     dvc = -fx1 * vort_y + dB_y   # (6, n, n+1)
 
-    # 8. Divergence damping (optional)
+    # 8. Divergence damping (optional).
+    # The momentum equation with divergence damping is
+    #     ∂u/∂t = ... + K_d · ∂D/∂x
+    # so that taking the divergence gives ∂D/∂t = K_d · ∇²D — high-k
+    # divergence noise decays as exp(-K_d·k²·t).  ``ddiv_x`` here
+    # uses the same negated-gradient stencil as ``dB_x`` above
+    # (``(D[:-1] - D[1:])/dxc = -∂D/∂x``), so to add ``+K_d · ∂D/∂x``
+    # to ``duc`` we must SUBTRACT ``div_damp * ddiv_x``.  The prior
+    # iter-57 audit found ``+ div_damp * ddiv_x`` (anti-damping):
+    # ∂D/∂t = -K_d · ∇²D → exp(+K_d·k²·t) → grid-scale divergence
+    # noise GROWS exponentially.  This path is reachable only via
+    # ``shallow_water_fv3_cdgrid.use_experimental_csw=True`` (legacy
+    # RK3 wrapper); the production FB chain uses a separate
+    # divergence-damping formulation in ``_d_sw5_corner_divergence``.
     if div_damp > 0:
         div_field = cgrid_divergence(uc, vc, cdgrid)
         div_pad = _pad_halo_auto(div_field, cdgrid)
         ddiv_x = cdgrid.rdxc * (div_pad[:, :-1, 1:-1] - div_pad[:, 1:, 1:-1])
         ddiv_y = cdgrid.rdyc * (div_pad[:, 1:-1, :-1] - div_pad[:, 1:-1, 1:])
-        duc = duc + div_damp * ddiv_x
-        dvc = dvc + div_damp * ddiv_y
+        duc = duc - div_damp * ddiv_x
+        dvc = dvc - div_damp * ddiv_y
 
     # 9. Project TOTAL C-grid tendency → D-grid edge midpoints via
     # halo-exchanged cell-centre averaging. The previous edge-copy padding

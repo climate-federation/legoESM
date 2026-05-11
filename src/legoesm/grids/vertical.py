@@ -311,11 +311,13 @@ def compute_sigma_dot(
     # Weighted divergence: D_k * Δσ_k
     div_dsigma = div_3d * dsigma  # (...,nlev)
 
-    # Column-integrated divergence: D_total = Σ D_k * Δσ_k
-    D_total = jnp.sum(div_dsigma, axis=-1, keepdims=True)  # (...,1)
-
     # Cumulative sum from top: Σ_{k'=0}^{k} D_k' * Δσ_k'
+    # ``cumsum_div[..., -1]`` is exactly ``Σ D_k * Δσ_k`` — extract it
+    # rather than calling ``jnp.sum`` independently.  Under any sharding
+    # of the level (axis -1) this drops the per-call cross-level
+    # collective from 2 to 1.  Mirrors iter-50/51 in the spectral PE.
     cumsum_div = jnp.cumsum(div_dsigma, axis=-1)  # (...,nlev)
+    D_total = cumsum_div[..., -1:]  # (...,1)
 
     # σ̇ at interfaces 1..nlev:
     # σ̇_{k+1/2} = (σ_{k+1/2} - σ_top) / (1 - σ_top) · D_total - cumsum_div[k]
@@ -334,6 +336,41 @@ def compute_sigma_dot(
     sigma_dot = jnp.pad(sigma_dot_inner[..., :-1], (*pad_axes, (1, 1)))
 
     return sigma_dot
+
+
+def compute_sigma_dot_and_total(
+    div_3d: jax.Array,
+    sigma_coord: SigmaCoordinate,
+) -> tuple[jax.Array, jax.Array]:
+    """Diagnose sigma-dot AND return the column-integrated divergence.
+
+    Identical to :func:`compute_sigma_dot` for the σ̇ output, but also
+    returns the column-integrated divergence ``D_total = Σ div_k · Δσ_k``
+    (shape ``(..., 1)``).  Callers that need both σ̇ and ``D_total``
+    (e.g. the cubed-sphere FV3 PE non-hybrid path, which uses the
+    column sum for ``dp_s/dt = -p_s · D_total / (1 - σ_top)``) can use
+    this single call instead of running both ``jnp.sum`` and
+    ``compute_sigma_dot`` — saving one cross-level collective per call.
+
+    See :func:`compute_sigma_dot` for full documentation.
+
+    Returns
+    -------
+    sigma_dot : jax.Array, shape (..., nlev+1)
+    D_total : jax.Array, shape (..., 1)
+    """
+    dsigma = sigma_coord.dsigma  # (nlev,)
+    div_dsigma = div_3d * dsigma  # (..., nlev)
+    cumsum_div = jnp.cumsum(div_dsigma, axis=-1)  # (..., nlev)
+    D_total = cumsum_div[..., -1:]  # (..., 1)
+
+    fractional_sigma = sigma_coord.fractional_sigma  # (nlev,)
+    sigma_dot_inner = fractional_sigma * D_total - cumsum_div
+
+    pad_axes = ((0, 0),) * (sigma_dot_inner.ndim - 1)
+    sigma_dot = jnp.pad(sigma_dot_inner[..., :-1], (*pad_axes, (1, 1)))
+
+    return sigma_dot, D_total
 
 
 def vertical_advection(
@@ -426,7 +463,7 @@ def vertical_advection_theta(
     """
     kappa = constants.kappa
     sigma_full = sigma_coord.sigma_full  # (nlev,)
-    P_0 = 1.0e5
+    P_0 = constants.p_ref
 
     # Pressure at full levels
     p_full = sigma_full * p_s[..., None]  # (..., nlev)
@@ -621,7 +658,7 @@ def create_hybrid_coordinate(
     n_levels: int,
     A_half: jax.Array,
     B_half: jax.Array,
-    p_ref: float = 1e5,
+    p_ref: float = constants.p_ref,
     dtype=None,
 ) -> HybridSigmaPressureCoordinate:
     """Create a hybrid sigma-pressure coordinate from A/B coefficients.
@@ -692,7 +729,7 @@ def create_hybrid_coordinate(
 def make_hybrid_levels(
     n_levels: int,
     p_top_Pa: float = 200.0,
-    p_ref: float = 1e5,
+    p_ref: float = constants.p_ref,
     transition_exponent: int = 3,
     stretching: float = 0.0,
 ) -> HybridSigmaPressureCoordinate:
@@ -742,7 +779,7 @@ def make_hybrid_levels(
 
 def standard_hybrid_levels(
     n_levels: int = 40,
-    p_ref: float = 1e5,
+    p_ref: float = constants.p_ref,
 ) -> HybridSigmaPressureCoordinate:
     """Create standard hybrid levels with good defaults for any resolution.
 
@@ -791,7 +828,7 @@ def standard_hybrid_levels(
 
 def hybrid_from_sigma(
     sigma_coord: SigmaCoordinate,
-    p_ref: float = 1e5,
+    p_ref: float = constants.p_ref,
 ) -> HybridSigmaPressureCoordinate:
     """Convert a SigmaCoordinate to hybrid form (A=0, B=sigma).
 
@@ -930,16 +967,19 @@ def compute_mass_flux_hybrid(
     div_3d: jax.Array,
     p_s: jax.Array,
     coord: HybridSigmaPressureCoordinate,
-) -> jax.Array:
+) -> tuple[jax.Array, jax.Array]:
     """Compute vertical mass flux at half-levels for hybrid coordinates.
 
-    Returns the pressure mass flux F at interfaces (analogous to
-    p_s * sigma_dot in sigma coordinates):
+    Returns ``(mass_flux, D_total_p)``:
 
         F_{k+1/2} = B_{k+1/2} * D_total_p - cumsum(D_k * dp_k)[k]
+        D_total_p = sum(D_k * dp_k)
 
-    where D_total_p = sum(div_k * dp_k) and dp_k is the layer pressure
-    thickness.
+    where dp_k is the layer pressure thickness.  ``D_total_p`` is
+    returned so the caller (e.g. ``spectral_pe_tendencies`` step 8)
+    can reuse it for the surface-pressure tendency without recomputing
+    the column sum — saves one cross-level collective per RK3 stage
+    under spectral level-sharding.
 
     Boundary conditions: F = 0 at top and surface.
 
@@ -953,19 +993,22 @@ def compute_mass_flux_hybrid(
 
     Returns
     -------
-    jax.Array
+    mass_flux : jax.Array
         Mass flux at half-levels, shape (..., nlev+1). Units: Pa/s.
+    D_total_p : jax.Array
+        Column-integrated mass-weighted divergence, shape (..., 1).
     """
     dp = dp_from_hybrid(coord, p_s)  # (..., nlev)
 
     # Mass-weighted divergence
     div_dp = div_3d * dp  # (..., nlev)
 
-    # Column-integrated divergence
-    D_total_p = jnp.sum(div_dp, axis=-1, keepdims=True)  # (..., 1)
-
-    # Cumulative sum from top
+    # Cumulative sum from top — its last entry is ``D_total_p``, so we
+    # extract that rather than calling ``jnp.sum`` independently.  Under
+    # level-sharding this drops the per-stage cross-level collective from
+    # 2 (sum + cumsum) to 1 (cumsum reuses its own last index).
     cumsum_div = jnp.cumsum(div_dp, axis=-1)  # (..., nlev)
+    D_total_p = cumsum_div[..., -1:]  # (..., 1)
 
     # Mass flux at interfaces 1..nlev
     # F_{k+1/2} = (B_{k+1/2} - B_top) / B_range * D_total_p - cumsum_k
@@ -980,7 +1023,7 @@ def compute_mass_flux_hybrid(
     pad_axes = ((0, 0),) * (mass_flux_inner.ndim - 1)
     mass_flux = jnp.pad(mass_flux_inner[..., :-1], (*pad_axes, (1, 1)))
 
-    return mass_flux
+    return mass_flux, D_total_p
 
 
 def vertical_advection_hybrid(

@@ -225,26 +225,27 @@ def gather_state_voronoi(
 def _fix_mass_mpi(
     state_new: MPASHydrostaticState,
     state_old: MPASHydrostaticState,
-    mesh: VoronoiMesh,
-    owned_mask: jnp.ndarray,
+    owned_area: jnp.ndarray,
+    total_area: float,
 ) -> MPASHydrostaticState:
     """Global mass fixer: sum only owned cells, allreduce across ranks.
 
     Parameters
     ----------
     state_new, state_old : MPASHydrostaticState
-    mesh : VoronoiMesh (local)
-    owned_mask : jax.Array, shape (n_local_cells,), bool
-        True for owned cells, False for halos.
+    owned_area : jax.Array, shape (n_local_cells,)
+        Per-cell area masked to zero on halo cells.  Pre-computed in
+        :func:`make_voronoi_mpi_step` so the per-step path does not pay
+        for the (state-independent) ``where`` and the wasted scalar in
+        the batch allreduce.
+    total_area : float
+        Globally-allreduced total area.  Pre-computed once at setup; do
+        not include it in the per-step batch allreduce.
     """
-    area = mesh.areaCell
-    owned_area = jnp.where(owned_mask, area, 0.0)
-
     local_mass_old = jnp.sum(state_old.p_s.data * owned_area)
     local_mass_new = jnp.sum(state_new.p_s.data * owned_area)
-    local_total_area = jnp.sum(owned_area)
-    mass_old, mass_new, total_area = batch_allreduce_mpi(
-        [local_mass_old, local_mass_new, local_total_area], op="sum",
+    mass_old, mass_new = batch_allreduce_mpi(
+        [local_mass_old, local_mass_new], op="sum",
     )
 
     correction = (mass_old - mass_new) / total_area
@@ -335,20 +336,57 @@ def make_voronoi_mpi_step(
     halo_ex = layout.halo_exchange
     owned_mask = layout.owned_mask_cells
 
+    # Pre-compute the owned-area mask and the global total area once at
+    # setup time.  Both are state-independent constants:
+    #   * ``owned_area`` keeps the per-step ``jnp.where`` out of the JIT
+    #     hot path.
+    #   * ``total_area`` is allreduced once (via Python MPI, not on the
+    #     XLA stream) and closed over, so the per-step batch allreduce
+    #     in ``_fix_mass_mpi`` shrinks from 3 scalars (mass_old, mass_new,
+    #     total_area) to 2.
+    _owned_area = jnp.where(owned_mask, local_mesh.areaCell, 0.0)
+    _local_total_area = float(jnp.sum(_owned_area))
+    try:
+        from mpi4py import MPI
+        _total_area_global = MPI.COMM_WORLD.allreduce(
+            _local_total_area, op=MPI.SUM,
+        )
+    except ImportError:
+        # Single-rank fallback (no MPI): the local sum *is* the global sum.
+        _total_area_global = _local_total_area
+
+    # phis (surface geopotential) is set at initialisation and never
+    # changes during the integration.  The caller is responsible for
+    # ensuring ``state.phis.data`` already has its halo filled (the
+    # initial-condition path does this); we simply pass it through here
+    # rather than paying for a per-step ``exchange_cell_field``.
+
     def _exchange_mpas_state(state: MPASHydrostaticState) -> MPASHydrostaticState:
-        """Exchange halos for all prognostic MPAS fields."""
+        """Exchange halos for u, T, p_s.
+
+        ``T`` and ``p_s`` are stacked into a single
+        ``(n_local_cells, nlev + 1)`` tensor so we issue **one**
+        ``exchange_cell_field`` call instead of two.  ``phis`` is static
+        and is no longer halo-exchanged here — its halo is filled at
+        setup time and left alone (the prognostic state still carries
+        ``state.phis`` unchanged).  See iter 4: this drops the per-RK-
+        stage cell collective from 3 (T, p_s, phis) to 1 (T+p_s pack).
+        """
         u_ex = halo_ex.exchange_edge_field(state.u.data)
-        T_ex = halo_ex.exchange_cell_field(state.T.data)
-        ps_ex = halo_ex.exchange_cell_field(state.p_s.data)
-        # phis is static — exchange once is enough, but for simplicity
-        # we exchange every time (cost is negligible)
-        phis_ex = halo_ex.exchange_cell_field(state.phis.data)
+        # Pack T (nlev) + p_s (1) along the trailing axis for one exchange.
+        Tp_packed = jnp.concatenate(
+            [state.T.data, state.p_s.data[..., None]], axis=-1,
+        )
+        Tp_ex = halo_ex.exchange_cell_field(Tp_packed)
+        nlev = state.T.data.shape[-1]
+        T_ex = Tp_ex[..., :nlev]
+        ps_ex = Tp_ex[..., nlev]
 
         return MPASHydrostaticState(
             u=state.u.replace(data=u_ex),
             T=state.T.replace(data=T_ex),
             p_s=state.p_s.replace(data=ps_ex),
-            phis=state.phis.replace(data=phis_ex),
+            phis=state.phis,  # static after scatter; halos already correct
         )
 
     def _mpi_tendency_fn(state: MPASHydrostaticState) -> MPASHydrostaticState:
@@ -378,7 +416,9 @@ def make_voronoi_mpi_step(
 
         # Global mass fixer
         if config.fix_mass:
-            state_new = _fix_mass_mpi(state_new, state, local_mesh, owned_mask)
+            state_new = _fix_mass_mpi(
+                state_new, state, _owned_area, _total_area_global,
+            )
 
         return state_new
 

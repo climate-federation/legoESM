@@ -26,6 +26,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
+from legoesm.core.operators_3d import hyperdiffusion_3d
 from legoesm.core.operators_cdgrid import (
     center_to_dgrid_vector,
     dgrid_to_center_vector,
@@ -63,7 +64,6 @@ from legoesm.ocean.vertical import (
 from legoesm.ocean.dynamics.barotropic import fill_land_cells
 from legoesm.ocean.physics.mixing import laplacian_viscosity_3d, vertical_diffusion
 from legoesm.grids.halo import pad_halo_4d
-from legoesm.core.operators_3d import hyperdiffusion_3d
 
 
 # ==============================================================================
@@ -219,9 +219,14 @@ def ocean_baroclinic_tendencies_cdgrid(
     # --- 12. Baroclinic Coriolis split ---
     # Planetary Coriolis: barotropic part (f*v_bar) handled by barotropic
     # substeps; here only the baroclinic deviation is included.
-    H_total = jnp.maximum(jnp.sum(h_k, axis=-1), min_water_col)
-    U_bar_a = jnp.sum(u_a * h_k, axis=-1) / H_total * mask
-    V_bar_a = jnp.sum(v_a * h_k, axis=-1) / H_total * mask
+    # H_total + U_bar + V_bar all reduce ``... * h_k`` over the level
+    # axis — fuse into one stacked column reduction.
+    _bar_triple = jnp.sum(
+        jnp.stack([h_k, u_a * h_k, v_a * h_k], axis=-1), axis=-2,
+    )
+    H_total = jnp.maximum(_bar_triple[..., 0], min_water_col)
+    U_bar_a = _bar_triple[..., 1] / H_total * mask
+    V_bar_a = _bar_triple[..., 2] / H_total * mask
     u_prime_a = (u_a - U_bar_a[..., jnp.newaxis]) * mask_3d
     v_prime_a = (v_a - V_bar_a[..., jnp.newaxis]) * mask_3d
     u_prime_d, v_prime_d = center_to_dgrid_vector(u_prime_a, v_prime_a, cdgrid)

@@ -48,6 +48,25 @@ def _accumulation_dtype():
     return target
 
 
+def _conservation_accumulator():
+    """Accumulator dtype for *budget* sums (mass, energy, tracer).
+
+    Distinct from :func:`_accumulation_dtype` — promotes to ``float64``
+    whenever JAX has x64 enabled, regardless of the active precision
+    policy.  Mass/energy budgets involve subtracting two near-equal
+    extensive quantities (e.g. ``mass_old - mass_new``), so even when
+    storage/compute are intentionally float32 we want the budget sum
+    to use the highest precision JAX is willing to give us.  This
+    restores end-step :func:`fix_mass_hydrostatic` to ~machine
+    precision and lets the "skip per-stage ``zero_mean_tendency`` when
+    end-step fixer is on" scaling optimisation be lossless even in
+    float32 storage/compute mode.
+    """
+    if jax.config.read("jax_enable_x64"):
+        return jnp.float64
+    return _accumulation_dtype()
+
+
 def _global_area_sum(
     array: jax.Array,
     grid,
@@ -82,7 +101,7 @@ def _global_area_sum(
     - **MPI distributed** (replicated dynamics): mask to owned faces,
       local sum, then ``allreduce(SUM)``.
     """
-    acc = _accumulation_dtype()
+    acc = _conservation_accumulator()
     prod = array.astype(acc) * grid.area.astype(acc)
     if owned_mask is not None:
         # Broadcast (n_faces,) → match prod shape: (6,) → (6,1,1,...)
@@ -109,20 +128,23 @@ def _batch_global_area_sums(
 
     Falls back to individual ``jnp.sum`` when not distributed.
     """
-    acc = _accumulation_dtype()
+    acc = _conservation_accumulator()
     area_acc = grid.area.astype(acc)
-    mask = None
+    weight = area_acc
     if owned_mask is not None:
         mask = owned_mask.astype(acc)
         while mask.ndim < area_acc.ndim:
             mask = mask[..., None]
+        weight = area_acc * mask
 
-    local_sums = []
-    for arr in arrays:
-        prod = arr.astype(acc) * area_acc
-        if mask is not None:
-            prod = prod * mask
-        local_sums.append(jnp.sum(prod))
+    # All inputs share the same horizontal axes and weight ``weight``;
+    # stack them along a new trailing axis and reduce once locally so
+    # XLA fuses the N independent sum kernels into one.
+    stacked = jnp.stack([arr.astype(acc) for arr in arrays], axis=-1)
+    summed = jnp.sum(
+        stacked * weight[..., None], axis=tuple(range(area_acc.ndim)),
+    )
+    local_sums = [summed[..., i] for i in range(len(arrays))]
 
     if _is_distributed():
         return batch_allreduce_mpi(local_sums, op="sum")
@@ -346,7 +368,7 @@ def zero_mean_tendency(
     -------
     jax.Array : Corrected tendency with zero global integral.
     """
-    acc = _accumulation_dtype()
+    acc = _conservation_accumulator()
     area = grid.area
     area_acc = area.astype(acc)
     total_area_acc = jnp.sum(area_acc)
@@ -450,6 +472,41 @@ def fix_moisture_hydrostatic(
     return q_v * scale
 
 
+def diagnose_moisture_correction(
+    q_v: jax.Array,
+    target_moisture: jax.Array,
+    p_s: jax.Array,
+    dsigma: jax.Array,
+    grid,
+    owned_mask: jax.Array | None = None,
+) -> dict[str, jax.Array]:
+    """Diagnose the moisture correction that ``fix_moisture_hydrostatic``
+    would apply, without actually applying it.
+
+    Returns a dict of:
+      - ``current_mass`` [kg]: current global column water-vapor integral
+      - ``target_mass`` [kg]: prescribed target
+      - ``correction_mass`` [kg]: target - current (positive = mass added by
+        the fixer; negative = mass removed)
+      - ``scale``: multiplicative factor that ``fix_moisture_hydrostatic``
+        would multiply q_v by.  Equals 1.0 when target == current.
+
+    Use to track silent corrections that would otherwise compound with
+    other untracked sources/sinks (advection clipping, microphysics
+    saturation adjustment, etc.) and bias the moist energy budget.
+    Iter-87 audit follow-up to the deferred multiplicative-fixer
+    tracking finding.
+    """
+    current = compute_global_moisture(q_v, p_s, dsigma, grid, owned_mask=owned_mask)
+    scale = jnp.where(current > _tiny(current), target_moisture / current, 1.0)
+    return {
+        "current_mass": current,
+        "target_mass": target_moisture,
+        "correction_mass": target_moisture - current,
+        "scale": scale,
+    }
+
+
 def fix_total_water(
     tracers: dict[str, jax.Array],
     target_total_water: jax.Array,
@@ -496,6 +553,7 @@ def fix_mass_hydrostatic_target(
     state_new: HydrostaticState,
     target_mass: jax.Array,
     grid: CubedSphereGrid,
+    owned_mask: jax.Array | None = None,
 ) -> HydrostaticState:
     """Fix mass conservation anchored to a fixed target mass.
 
@@ -510,15 +568,57 @@ def fix_mass_hydrostatic_target(
     target_mass : jax.Array
         Target global mass integral (∫ p_s * dA at t=0).
     grid : CubedSphereGrid
+    owned_mask : jax.Array, optional
+        Shape ``(n_faces,)`` for MPI replicated dynamics — pass-through
+        to ``fix_ps_mass_target`` so the mass integral correctly
+        avoids double-counting under replicated MPI.  Iter-99 audit
+        fix: previously this function called the Field-API
+        ``global_integral`` directly without an owned_mask escape
+        hatch.
 
     Returns
     -------
     HydrostaticState : Mass-conserving state.
     """
+    if owned_mask is not None:
+        # Use the raw-array path that handles owned_mask for MPI
+        # replicated dynamics.  Same correction formula but the
+        # global integral correctly weights by owned_mask.
+        p_s_fixed_data = fix_ps_mass_target(
+            state_new.p_s.data, target_mass, grid, owned_mask=owned_mask,
+        )
+        return state_new._replace(
+            p_s=state_new.p_s.replace(data=p_s_fixed_data),
+        )
     mass_new = global_integral(state_new.p_s, grid)
     correction = (target_mass - mass_new) / grid.total_area
     p_s_fixed = state_new.p_s.replace(data=state_new.p_s.data + correction)
     return state_new._replace(p_s=p_s_fixed)
+
+
+def fix_ps_mass(
+    p_s_new: jax.Array,
+    p_s_old: jax.Array,
+    grid: CubedSphereGrid,
+    owned_mask: jax.Array | None = None,
+) -> jax.Array:
+    """Fix dry mass on raw p_s arrays — non-anchor variant.
+
+    Raw-array equivalent of :func:`fix_mass_hydrostatic`.  Lets
+    callers (e.g. the FV3 D-grid dycore) avoid round-tripping the
+    full prognostic state through ``fv3_to_hydrostatic`` just to
+    extract ``p_s``: D-grid → cell-centre wind interpolation is
+    expensive and gets thrown away because only ``p_s`` is touched.
+
+    Both ``mass_old`` and ``mass_new`` are computed in one
+    batched allreduce, matching :func:`fix_mass_hydrostatic`'s
+    communication pattern.
+    """
+    mass_old, mass_new = _batch_global_area_sums(
+        [p_s_old, p_s_new], grid, owned_mask=owned_mask,
+    )
+    correction = (mass_old - mass_new) / grid.total_area
+    return p_s_new + correction
 
 
 def fix_ps_mass_target(
@@ -657,18 +757,22 @@ def compute_hydrostatic_energy(
     # (6, n, n, nlev) and lat-lon (n_lat, n_lon, nlev) state shapes.
     mass_weight = p_s[..., None] * dsigma / g
 
-    # Kinetic energy
-    ke_3d = 0.5 * (u**2 + v**2) * mass_weight
-    ke_col = jnp.sum(ke_3d, axis=-1)
-
-    # Internal energy
-    ie_3d = c_v * T * mass_weight
-    ie_col = jnp.sum(ie_3d, axis=-1)
-
-    # Potential energy
+    # Kinetic + internal + potential energy column reductions all share
+    # the level axis and ``mass_weight``; stack the integrands and reduce
+    # once.  ``mass_weight`` is factored into the stack so each integrand
+    # contributes only its own value field.
     Phi = compute_geopotential(T, p_s, sigma_coord, phis)
-    pe_3d = Phi * mass_weight
-    pe_col = jnp.sum(pe_3d, axis=-1)
+    _ke_intg = 0.5 * (u**2 + v**2)
+    _ie_intg = c_v * T
+    _pe_intg = Phi
+    _col_triple = jnp.sum(
+        jnp.stack([_ke_intg, _ie_intg, _pe_intg], axis=-1)
+        * mass_weight[..., None],
+        axis=-2,
+    )
+    ke_col = _col_triple[..., 0]
+    ie_col = _col_triple[..., 1]
+    pe_col = _col_triple[..., 2]
 
     ke, ie, pe = _batch_global_area_sums([ke_col, ie_col, pe_col], grid)
 
@@ -721,17 +825,19 @@ def compute_nh_energy(
 
     weight = J[..., None] * dz[None, None, None, :] * rho_total  # (6,n,n,nlev)
 
-    # Kinetic
-    ke_3d = 0.5 * (u**2 + v**2 + w_full**2) * weight
-    ke_col = jnp.sum(ke_3d, axis=-1)
-
-    # Internal
-    ie_3d = c_v * T * weight
-    ie_col = jnp.sum(ie_3d, axis=-1)
-
-    # Potential
-    pe_3d = g * z_full[None, None, None, :] * weight
-    pe_col = jnp.sum(pe_3d, axis=-1)
+    # KE+IE+PE column reductions all share the level axis and
+    # ``weight``; stack the integrands and reduce once.
+    _ke_intg = 0.5 * (u**2 + v**2 + w_full**2)
+    _ie_intg = c_v * T
+    _pe_intg = g * jnp.broadcast_to(z_full[None, None, None, :], T.shape)
+    _col_triple = jnp.sum(
+        jnp.stack([_ke_intg, _ie_intg, _pe_intg], axis=-1)
+        * weight[..., None],
+        axis=-2,
+    )
+    ke_col = _col_triple[..., 0]
+    ie_col = _col_triple[..., 1]
+    pe_col = _col_triple[..., 2]
 
     ke, ie, pe = _batch_global_area_sums([ke_col, ie_col, pe_col], grid)
 
@@ -790,7 +896,7 @@ def global_integral_voronoi(field, mesh) -> jax.Array:
     -------
     jax.Array : scalar
     """
-    acc = _accumulation_dtype()
+    acc = _conservation_accumulator()
     return jnp.sum(field.astype(acc) * mesh.areaCell.astype(acc))
 
 
@@ -846,10 +952,14 @@ def fix_energy_mpas(state, target_energy, mesh, g=constants.g):
     area = mesh.areaCell
 
     KE_cells = kinetic_energy_cell(u, mesh)
-    energy_terms = jnp.stack([
-        jnp.sum(KE_cells * h * area),
-        jnp.sum(0.5 * g * (h + h_s) ** 2 * area),
-    ])
+    # Both KE and PE share the ``area`` weight on the horizontal axes —
+    # stack the two integrands and reduce once locally so XLA fires one
+    # sum kernel; the stacked result still yields a 2-vector for the
+    # downstream ``KE / PE`` split (and a future allreduce, if any).
+    _energy_intg = jnp.stack(
+        [KE_cells * h, 0.5 * g * (h + h_s) ** 2], axis=-1,
+    ) * area[..., None]
+    energy_terms = jnp.sum(_energy_intg, axis=tuple(range(area.ndim)))
     KE, PE = energy_terms[0], energy_terms[1]
 
     KE_target = jnp.maximum(target_energy - PE, _EPS_ENERGY)

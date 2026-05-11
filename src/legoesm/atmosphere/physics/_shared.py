@@ -10,13 +10,25 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.grids.vertical import pressure_from_sigma
+from legoesm.atmosphere.physics.thermodynamics import (
+    pressure_from_eos,
+    reconstruct_half_level_pressure_hydrostatic,
+    sanitize_theta_rho,
+)
+from legoesm.core.field import Field
+from legoesm.core.state import HydrostaticTendencies, NonHydrostaticTendencies
+from legoesm.grids.cubed_sphere import CubedSphereGrid
+from legoesm.core.operators_3d import fv_flux_divergence_3d
+from legoesm.grids.gaussian import sh_synthesis_3d, vordiv_from_uv_3d
+from legoesm.core.operators_fv_latlon_3d import fv_flux_divergence_latlon_3d
 
 
 # ---------------------------------------------------------------------------
 # Height / thickness from hydrostatic balance
 # ---------------------------------------------------------------------------
 
-def compute_heights_from_sigma(T, p_half):
+def compute_heights_from_sigma(T, p_half, q_v=None):
     """Approximate full- and half-level heights from hydrostatic balance.
 
     Parameters
@@ -25,6 +37,13 @@ def compute_heights_from_sigma(T, p_half):
         Temperature at full levels [K].
     p_half : array (ncol, nlev+1)
         Pressure at half levels [Pa], TOA-first.
+    q_v : array (ncol, nlev) or None, optional
+        Water-vapour specific humidity [kg/kg].  When provided, the
+        hypsometric integral uses the **virtual temperature**
+        ``T_v = T · (1 + (1/ε − 1) · q_v)`` — ~1 % thicker layers in
+        tropical moist columns.  Default ``None`` keeps the legacy
+        dry-T behaviour for callers that don't have q_v handy.
+        Audit cycle iter-35 finding F2.
 
     Returns
     -------
@@ -37,8 +56,9 @@ def compute_heights_from_sigma(T, p_half):
 
     dp = p_half[:, 1:] - p_half[:, :-1]
     p_mid = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+    T_eff = T if q_v is None else virtual_temperature(T, q_v)
     dz = jnp.abs(
-        constants.R_d * T * dp / (constants.g * jnp.clip(p_mid, 1.0, None))
+        constants.R_d * T_eff * dp / (constants.g * jnp.clip(p_mid, 1.0, None))
     )
 
     # Integrate from surface upward.  Use ``jnp.pad`` to append the
@@ -54,7 +74,7 @@ def compute_heights_from_sigma(T, p_half):
     return z_full, z_half
 
 
-def compute_layer_dz(T, p_half):
+def compute_layer_dz(T, p_half, q_v=None):
     """Approximate layer thicknesses from hydrostatic balance.
 
     Parameters
@@ -63,6 +83,10 @@ def compute_layer_dz(T, p_half):
         Temperature at full levels [K].
     p_half : array (ncol, nlev+1)
         Pressure at half levels [Pa], TOA-first.
+    q_v : array (ncol, nlev) or None, optional
+        Water-vapour specific humidity [kg/kg].  When provided, uses
+        virtual temperature in the hypsometric integral — ~1 %
+        thicker layers in moist columns.  Audit iter-35 F2.
 
     Returns
     -------
@@ -71,8 +95,9 @@ def compute_layer_dz(T, p_half):
     """
     dp = p_half[:, 1:] - p_half[:, :-1]
     p_mid = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+    T_eff = T if q_v is None else virtual_temperature(T, q_v)
     return jnp.abs(
-        constants.R_d * T * dp / (constants.g * jnp.clip(p_mid, 1.0, None))
+        constants.R_d * T_eff * dp / (constants.g * jnp.clip(p_mid, 1.0, None))
     )
 
 
@@ -80,8 +105,19 @@ def compute_layer_dz(T, p_half):
 # Density from ideal-gas law
 # ---------------------------------------------------------------------------
 
-def compute_rho(T, p_full):
-    """Compute air density from the ideal gas law: rho = p / (R_d * T).
+def compute_rho(T, p_full, q_v=None):
+    """Compute air density from the ideal gas law.
+
+    Without ``q_v`` returns the dry-air density ``rho = p / (R_d · T)``.
+    With ``q_v`` returns the moist density ``rho = p / (R_d · T_v)``
+    where ``T_v = T · (1 + (1/ε − 1) · q_v)``.
+
+    The moist form is consistent with ``diagnose_grid_w_from_omega``
+    (which has always used T_v when ``q_v`` is provided) and
+    avoids the ~1 % drift between dry-rho and moist-rho in tropical
+    columns.  Default ``q_v=None`` preserves the legacy dry-T
+    behaviour for callers that don't have q_v handy.  Audit cycle
+    iter-35 finding F6.
 
     Parameters
     ----------
@@ -89,12 +125,16 @@ def compute_rho(T, p_full):
         Temperature [K].
     p_full : array
         Pressure at full levels [Pa].
+    q_v : array or None, optional
+        Water-vapour specific humidity [kg/kg].  When provided, uses
+        virtual temperature in the ideal-gas law.
 
     Returns
     -------
     array : Density [kg/m^3].
     """
-    return p_full / (constants.R_d * jnp.clip(T, 1.0, None))
+    T_eff = T if q_v is None else virtual_temperature(T, q_v)
+    return p_full / (constants.R_d * jnp.clip(T_eff, 1.0, None))
 
 
 def virtual_temperature(T, q_v):
@@ -142,8 +182,6 @@ def extract_hydrostatic_columns(state, sigma_coord):
     dict with keys: T_col, p_full_col, p_half_col, q_v_col, ncol, nlev,
         shape_3d, shape_2d
     """
-    from legoesm.grids.vertical import pressure_from_sigma
-
     T = state.T.data
     p_s = state.p_s.data
     nlev = sigma_coord.n_levels
@@ -190,11 +228,6 @@ def extract_nonhydrostatic_columns(state, height_coord, terrain_metric):
         ncol, nlev, shape_3d, shape_2d, shape_w, tracers, n_tracers,
         exner, theta_total, rho_total, z_full, z_half
     """
-    from legoesm.atmosphere.physics.thermodynamics import (
-        pressure_from_eos, reconstruct_half_level_pressure_hydrostatic,
-        sanitize_theta_rho,
-    )
-
     theta_p = state.theta_prime.data
     rho_p = state.rho_prime.data
     tracers = state.tracers.data
@@ -302,9 +335,6 @@ def make_zero_hydrostatic_tendencies(shape_3d, shape_2d, prefix=""):
     -------
     HydrostaticTendencies
     """
-    from legoesm.core.field import Field
-    from legoesm.core.state import HydrostaticTendencies
-
     dims_3d = ("face", "x", "y", "level")
     dims_2d = ("face", "x", "y")
     sfx = f"_{prefix}" if prefix else ""
@@ -337,9 +367,6 @@ def make_zero_nonhydrostatic_tendencies(shape_3d, shape_2d, shape_w, tracers, pr
     -------
     NonHydrostaticTendencies
     """
-    from legoesm.core.field import Field
-    from legoesm.core.state import NonHydrostaticTendencies
-
     dims_3d = ("face", "x", "y", "level")
     dims_w = ("face", "x", "y", "level_half")
     dims_2d = ("face", "x", "y")
@@ -438,17 +465,22 @@ def compute_moisture_convergence(
     advection in the dycore proper still uses the limiter; this is a
     closure diagnostic, not an advected quantity.
     """
-    from legoesm.grids.cubed_sphere import CubedSphereGrid
-
     if isinstance(grid, CubedSphereGrid):
-        from legoesm.core.operators_3d import fv_flux_divergence_3d
-        # q_v_grid shape (6, n, n, nlev)
-        flux_div = fv_flux_divergence_3d(
+        # q_v_grid shape (6, n, n, nlev).  ``fv_flux_divergence_3d``
+        # already returns the tendency form ``-div(q·V)`` (see its
+        # docstring "dq/dt = -div(q*v)"), which IS the moisture
+        # convergence — no extra sign flip needed.  Audit cycle
+        # iter-35 finding F1 (CRITICAL): the previous implementation
+        # double-negated, returning ``+div(q·V)`` (moisture
+        # DIVERGENCE) for cubed-sphere and lat-lon while the spectral
+        # branch was correct.  This silently inverted convective
+        # forcing on cubed-sphere/lat-lon runs.
+        mc = fv_flux_divergence_3d(
             q_v_grid, u_grid, v_grid, grid, limiter=False,
         )
         # Reshape to (ncol, nlev)
         face, n, _, nlev = q_v_grid.shape
-        return -flux_div.reshape(face * n * n, nlev)
+        return mc.reshape(face * n * n, nlev)
 
     # Gaussian grid (spectral PE).  Compute the divergence of
     # (q_v u, q_v v) via the transform method: synthesize the grid
@@ -458,9 +490,6 @@ def compute_moisture_convergence(
     # the standard transform pathway for spectral models and stays
     # smooth / differentiable.
     if hasattr(grid, "n_max") and hasattr(grid, "Pnm"):
-        from legoesm.grids.gaussian import (
-            sh_synthesis_3d, vordiv_from_uv_3d,
-        )
         flux_x = q_v_grid * u_grid    # (n_lat, n_lon, nlev)
         flux_y = q_v_grid * v_grid
         # ``vordiv_from_uv_3d`` returns spectral (vor, div).  We only
@@ -474,14 +503,13 @@ def compute_moisture_convergence(
     # Try lat-lon — duck-typed by attribute presence so we don't
     # introduce an import dependency for users who never touch lat-lon.
     if hasattr(grid, "dlat") and hasattr(grid, "dlon"):
-        from legoesm.core.operators_fv_latlon_3d import (
-            fv_flux_divergence_latlon_3d,
-        )
-        flux_div = fv_flux_divergence_latlon_3d(
+        # Same convention as cubed-sphere — the FV operator already
+        # returns ``-div(q·V)`` = MC.  Audit F1.
+        mc = fv_flux_divergence_latlon_3d(
             q_v_grid, u_grid, v_grid, grid, limiter=False,
         )
         n_lat, n_lon, nlev = q_v_grid.shape
-        return -flux_div.reshape(n_lat * n_lon, nlev)
+        return mc.reshape(n_lat * n_lon, nlev)
 
     raise TypeError(
         f"compute_moisture_convergence: unsupported grid type "

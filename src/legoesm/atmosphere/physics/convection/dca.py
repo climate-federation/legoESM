@@ -147,9 +147,24 @@ def _adjust_one_iteration(
         q_adj_below = q_below + blend * (q_new_below - q_below)
 
         # Accumulate precipitation from moisture removal
-        dq_upper = (q_upper - q_adj_upper) * dp_upper
-        dq_below = (q_below - q_adj_below) * dp_below
-        precip_new = precip_accum + (dq_upper + dq_below) / constants.g
+        dq_upper_pa = (q_upper - q_adj_upper) * dp_upper  # kg/kg · Pa
+        dq_below_pa = (q_below - q_adj_below) * dp_below  # kg/kg · Pa
+        precip_new = precip_accum + (dq_upper_pa + dq_below_pa) / constants.g
+
+        # Moist static energy conservation: condensed water releases L_v
+        # energy per unit mass.  The previous implementation conserved
+        # only dry static energy (mass-weighted T preserved), losing
+        # L_v · ⟨Δq⟩ ≈ 2.5 K per g/kg of column-mean condensed water.
+        # Adding the latent warming uniformly to the pair preserves the
+        # moist-adiabatic lapse rate just imposed via T_target while
+        # closing the moist static energy budget:
+        #   c_p ⟨ΔT⟩ + L_v ⟨Δq⟩ = 0  (column mean over the pair).
+        delta_T_lh = (
+            constants.L_v * (dq_upper_pa + dq_below_pa)
+            / (constants.c_pd * (dp_below + dp_upper))
+        )
+        T_adj_upper = T_adj_upper + delta_T_lh
+        T_adj_below = T_adj_below + delta_T_lh
 
         T_work = T_work.at[:, k - 1].set(T_adj_below)
         T_work = T_work.at[:, k].set(T_adj_upper)
@@ -255,11 +270,14 @@ def dca_convection(
     # precipitation diagnostic.
     del precip_total
     local_cond = jnp.maximum(-dq_v_dt, 0.0)
-    col_local_cond = jnp.sum(local_cond * dp / constants.g, axis=-1, keepdims=True)
-    col_net_drying = jnp.clip(
-        -jnp.sum(dq_v_dt * dp / constants.g, axis=-1, keepdims=True),
-        0.0, None,
+    # Both column reductions share the ``* dp / g`` weight on the level
+    # axis — stack the two integrands and reduce once.
+    _col_pair = jnp.sum(
+        jnp.stack([local_cond, dq_v_dt], axis=-1) * (dp / constants.g)[..., None],
+        axis=-2,
     )
+    col_local_cond = _col_pair[..., 0:1]
+    col_net_drying = jnp.clip(-_col_pair[..., 1:2], 0.0, None)
     dq_c_conv_dt = local_cond * (
         col_net_drying / jnp.clip(col_local_cond, 1e-30, None)
     )  # (ncol, nlev) [kg/kg/s]

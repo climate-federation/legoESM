@@ -167,7 +167,7 @@ class SpectralOceanState(NamedTuple):
 class SpectralOceanConfig(NamedTuple):
     """Configuration for the spectral ocean model."""
     g: float = 9.80616  # = constants.g
-    rho_0: float = 1025.0
+    rho_0: float = 1025.0        # = eos.rho_0
     A_h: float = 1.0e4
     K_h: float = 0.0
     A_v: float = 1.0e-3
@@ -240,7 +240,7 @@ class LatLonOceanTendencies(NamedTuple):
 class LatLonOceanConfig(NamedTuple):
     """Configuration for the lat-lon FV ocean model."""
     g: float = 9.80616  # = constants.g
-    rho_0: float = 1025.0
+    rho_0: float = 1025.0        # = eos.rho_0
     A_h: float = 1.0e4           # Horizontal viscosity [m^2/s]
     K_h: float = 0.0           # Horizontal tracer diffusivity [m^2/s]
     A_v: float = 1.0e-3          # Vertical viscosity [m^2/s]
@@ -325,6 +325,8 @@ class LatLonCGridOceanState(NamedTuple):
     w: Field
     T_som: object = None
     S_som: object = None
+    T_flux_div_prev: object = None  # Previous advection flux divergence for T (AB2 only)
+    S_flux_div_prev: object = None  # Previous advection flux divergence for S (AB2 only)
 
 
 class LatLonCGridOceanDiagnostics(NamedTuple):
@@ -472,7 +474,7 @@ class LatLonCGridOceanConfig(NamedTuple):
     """
 
     g: float = 9.80616  # = constants.g
-    rho_0: float = 1025.0
+    rho_0: float = 1025.0        # = eos.rho_0
     A_h: float = 1.0e4
     A_h_lat_scaling: bool = False  # When True, A_h is multiplied by cos²(lat)
                                     # to keep viscous CFL latitude-independent on
@@ -480,9 +482,24 @@ class LatLonCGridOceanConfig(NamedTuple):
                                     # convention.  Default False to preserve
                                     # bit-exact regression on legacy configs.
     B_h: float = 0.0
+    B_h_barotropic: float = 0.0  # Biharmonic hyperviscosity coeff [m^4/s]
+                                   # applied to the DEPTH-MEAN (U_bar,
+                                   # V_bar) only, via the F_slow channel
+                                   # of the implicit-CN barotropic
+                                   # solver.  Damps the barotropic
+                                   # standing mode at deep cells next
+                                   # to steep slopes without touching
+                                   # baroclinic geostrophy (which lives
+                                   # in u' = u_3d - U_bar).  HIM/MOM6
+                                   # BIHARMONIC_BAROTROPIC analog.
     C_smag: float = 0.0
     bottom_drag_r: float = 0.0
     bottom_drag_bbl_thickness: float = 0.0
+    bottom_drag_bg_velocity: float = 0.0  # MOM6 DRAG_BG_VEL [m/s]; when >0,
+                                           # drag is quadratic-with-floor:
+                                           # tau ∝ √(u²+v²+u_bg²) · u, with
+                                           # the linear-in-u limit set to
+                                           # bottom_drag_r at |u|→0.
     K_h: float = 0.0
     K_bih: float = 0.0
     A_v: float = 1.0e-3
@@ -553,3 +570,17 @@ class LatLonCGridOceanConfig(NamedTuple):
     # docs/ocean_experiments/density_jacobian_pgf_plan.md.  Pure-z*
     # runs ignore this field (the existing path is identical).
     pgf_scheme: str = "adcroft"
+    # Tracer time integration for the flux-form advection step.
+    # "euler" (default): forward Euler (1st-order).
+    # "ab2": Adams-Bashforth 2 with stabilization (MITgcm convention).
+    #   Formally 1st-order when ab2_epsilon > 0, but error constant is
+    #   ~epsilon * dt, much smaller than Euler's ~dt.  Set ab2_epsilon=0
+    #   for pure 2nd-order (less stable).  CFL limit is ~0.72 (tighter
+    #   than Euler's ~1.0).
+    # "rk3": RK3 in Butcher-tableau form (3rd-order, 3x advection cost).
+    #   Uses effective tendency F_eff = F0/6 + F1/6 + 2*F2/3 for exact
+    #   conservation.  Note: the Shu-Osher SSP (monotonicity) property
+    #   is NOT preserved in this form — new extrema may appear with
+    #   nonlinear limiters (TVD, WENO, FCT).
+    tracer_time_integrator: str = "euler"
+    ab2_epsilon: float = 0.1  # AB2 stabilization (MITgcm ABepsBar)

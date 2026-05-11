@@ -49,6 +49,19 @@ import logging
 import jax
 import jax.numpy as jnp
 
+from legoesm.parallel.layout import (
+    SingleRankLayout,
+    gather,
+    make_layout,
+    scatter,
+)
+from legoesm.parallel.mesh import DeviceConfig, create_device_mesh
+from legoesm.parallel.reductions import (
+    global_max_mpi,
+    global_min_mpi,
+    global_sum_mpi,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -264,9 +277,6 @@ class ParallelRuntime:
             validate_device_count(total_devices, grid_type)
 
         # Create device mesh for local devices
-        from legoesm.parallel.mesh import create_device_mesh, DeviceConfig
-        from legoesm.parallel.layout import SingleRankLayout, make_layout
-
         _gn = grid_n or 1  # default grid_n for layout construction
 
         if n_local <= 1 and not is_mpi:
@@ -436,11 +446,9 @@ class ParallelRuntime:
             axis_names = self._mesh_axis_names()
             if axis_names is not None:
                 local_value = jax.lax.psum(local_value, axis_name=axis_names)
-            from legoesm.parallel.reductions import global_sum_mpi
             return global_sum_mpi(local_value)
 
         # MPI
-        from legoesm.parallel.reductions import global_sum_mpi
         return global_sum_mpi(local_value)
 
     def global_max(self, local_value):
@@ -461,10 +469,8 @@ class ParallelRuntime:
             axis_names = self._mesh_axis_names()
             if axis_names is not None:
                 local_value = jax.lax.pmax(local_value, axis_name=axis_names)
-            from legoesm.parallel.reductions import global_max_mpi
             return global_max_mpi(local_value)
 
-        from legoesm.parallel.reductions import global_max_mpi
         return global_max_mpi(local_value)
 
     def global_min(self, local_value):
@@ -485,10 +491,8 @@ class ParallelRuntime:
             axis_names = self._mesh_axis_names()
             if axis_names is not None:
                 local_value = jax.lax.pmin(local_value, axis_name=axis_names)
-            from legoesm.parallel.reductions import global_min_mpi
             return global_min_mpi(local_value)
 
-        from legoesm.parallel.reductions import global_min_mpi
         return global_min_mpi(local_value)
 
     # ------------------------------------------------------------------
@@ -497,14 +501,12 @@ class ParallelRuntime:
 
     def scatter(self, global_data):
         """Extract this rank's portion from a global array."""
-        from legoesm.parallel.layout import scatter, SingleRankLayout
         if isinstance(self.layout, SingleRankLayout):
             return global_data
         return scatter(global_data, self.layout)
 
     def gather(self, local_data, root_only: bool = False):
         """Reconstruct global array from rank-local data."""
-        from legoesm.parallel.layout import gather, SingleRankLayout
         if isinstance(self.layout, SingleRankLayout):
             return local_data
         return gather(local_data, self.layout, root_only=root_only)

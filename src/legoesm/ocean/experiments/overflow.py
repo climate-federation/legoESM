@@ -96,7 +96,7 @@ class OverflowConfig:
     depth_decay_factor: float = 0.5  # Temperature decay with depth
 
     # Physical parameters for RPE calculation
-    rho_reference: float = 1025.0   # Reference density [kg/m³]
+    rho_reference: float = 1025.0   # = eos.rho_0
     alpha_T: float = 2.0e-4         # Thermal expansion coefficient [1/K]
     T_reference: float = 12.5       # Reference temperature [°C]
 

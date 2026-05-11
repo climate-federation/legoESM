@@ -6,18 +6,23 @@ Monin-Obukhov similarity theory (MOST). Three schemes:
 1. ``constant`` — Fixed neutral transfer coefficients (no iteration)
 2. ``coare3`` — COARE 3.0 (Fairall et al. 2003): Charnock + smooth-flow
    roughness, Businger-Dyer stability functions
-3. ``large_yeager`` — Large & Yeager 2004 (CORE): empirical C_DN(U_10N),
-   stability-dependent Stanton/Dalton number
+3. ``large_yeager`` — Large & Yeager 2009 (CORE/OMIP): empirical C_DN(U_10N)
+   with high-wind quintic correction, stability-dependent Stanton/Dalton
+   numbers
 
 The iterative Obukhov length loop uses ``jax.lax.fori_loop`` for
 full JAX differentiability (compatible with jax.grad, jax.jit).
+
+The ``large_yeager`` path is the OMIP-2 protocol bulk formula (Griffies
+2016 §2.2 mandates Large & Yeager 2009).
 
 References
 ----------
 - Fairall, C. W., et al. (2003). Bulk parameterization of air-sea fluxes:
   Updates and verification for the COARE algorithm. J. Climate, 16, 571-591.
-- Large, W. G., & Yeager, S. G. (2004). Diurnal to decadal global forcing
-  for ocean and sea-ice models. NCAR Tech. Note, NCAR/TN-460+STR.
+- Large, W. G., & Yeager, S. G. (2009). The global climatology of an
+  interannually varying air-sea flux data set. Climate Dynamics, 33,
+  341-364. doi:10.1007/s00382-008-0441-3.
 - Businger, J. A., et al. (1971). Flux-profile relationships in the
   atmospheric surface layer. J. Atmos. Sci., 28, 181-189.
 """
@@ -32,7 +37,7 @@ from legoesm import constants
 # Physical constants
 KAPPA = constants.kappa_vk  # von Kármán constant (0.4)
 G = constants.g
-NU_AIR = 1.5e-5  # kinematic viscosity of air [m²/s]
+NU_AIR = constants.nu_air  # kinematic viscosity of air [m²/s]
 
 
 # ============================================================================
@@ -100,6 +105,8 @@ def compute_most_fluxes(
     q_sfc,
     rho,
     z_ref=10.0,
+    z_t=None,
+    z_q=None,
     z0_init=1e-4,
     scheme="coare3",
     n_iter=5,
@@ -114,19 +121,26 @@ def compute_most_fluxes(
     Parameters
     ----------
     u_rel, v_rel : array
-        Wind components relative to surface [m/s].
+        Wind components relative to z_ref [m/s].
     T_atm : array
-        Atmospheric temperature at reference height [K].
+        Atmospheric temperature at z_t [K].
     q_atm : array
-        Atmospheric specific humidity at reference height [kg/kg].
+        Atmospheric specific humidity at z_q [kg/kg].
     T_sfc : array
         Surface temperature [K].
     q_sfc : array
         Surface saturation specific humidity [kg/kg].
     rho : array
-        Air density at reference height [kg/m³].
+        Air density at z_t [kg/m³].
     z_ref : float
-        Reference height for bulk formulas [m] (default 10).
+        Reference height for the wind / momentum [m] (default 10).
+    z_t : float or None
+        Reference height for atmospheric temperature [m]. Defaults to
+        ``z_ref`` (single-height mode). For OMIP / JRA55-do, set to 2.0
+        — JRA55-do delivers ``tas`` at 2 m while ``uas, vas`` are at 10 m.
+    z_q : float or None
+        Reference height for atmospheric specific humidity [m]. Defaults
+        to ``z_ref`` (single-height mode). Typically 2.0 for OMIP.
     z0_init : float
         Initial momentum roughness length [m] (default 1e-4).
     scheme : str
@@ -147,21 +161,34 @@ def compute_most_fluxes(
     ustar : array
         Friction velocity [m/s].
     """
+    # Resolve scalar reference heights. ``z_ref`` is the wind/momentum
+    # height (always = z_u in the formulas below); z_t, z_q default to
+    # z_ref so that single-height callers (lake, idealized adapter,
+    # legacy tests) keep their existing behaviour bit-identically.
+    z_u = z_ref
+    if z_t is None:
+        z_t = z_ref
+    if z_q is None:
+        z_q = z_ref
+
     wind_speed = jnp.sqrt(u_rel ** 2 + v_rel ** 2 + 1e-4)
     dT = T_sfc - T_atm
     dq = q_sfc - q_atm
-    T_v = T_atm * (1.0 + 0.61 * q_atm)
+    # Virtual-T moisture coefficient = 1/ε − 1 ≈ 0.6078 (canonical, not 0.61).
+    _vT_coef = 1.0 / constants.epsilon - 1.0
+    T_v = T_atm * (1.0 + _vT_coef * q_atm)
 
     # Initialize with neutral log-law profile
     z0 = jnp.full_like(wind_speed, z0_init)
     z0_t = z0 * 0.1
     z0_q = z0_t
 
-    ln_z_z0 = jnp.log(z_ref / jnp.maximum(z0, 1e-12))
-    denom_init = jnp.maximum(ln_z_z0, 0.5)
-    u_star = KAPPA * wind_speed / denom_init
-    theta_star = KAPPA * dT / denom_init
-    q_star_val = KAPPA * dq / denom_init
+    ln_zu_z0 = jnp.log(z_u / jnp.maximum(z0, 1e-12))
+    ln_zt_z0t = jnp.log(z_t / jnp.maximum(z0_t, 1e-12))
+    ln_zq_z0q = jnp.log(z_q / jnp.maximum(z0_q, 1e-12))
+    u_star = KAPPA * wind_speed / jnp.maximum(ln_zu_z0, 0.5)
+    theta_star = KAPPA * dT / jnp.maximum(ln_zt_z0t, 0.5)
+    q_star_val = KAPPA * dq / jnp.maximum(ln_zq_z0q, 0.5)
 
     carry = (u_star, z0, z0_t, z0_q, theta_star, q_star_val)
 
@@ -169,8 +196,8 @@ def compute_most_fluxes(
         u_star, z0, z0_t, z0_q, theta_star, q_star_val = carry
         u_star_safe = jnp.maximum(u_star, 1e-6)
 
-        # Virtual potential temperature scale
-        theta_v_star = theta_star + 0.61 * T_atm * q_star_val
+        # Virtual potential temperature scale (1/ε − 1 ≈ 0.6078)
+        theta_v_star = theta_star + _vT_coef * T_atm * q_star_val
 
         # Obukhov length: L = −u*² T_v / (κ g θ_v*)
         L_denom = KAPPA * G * theta_v_star
@@ -180,9 +207,16 @@ def compute_most_fluxes(
             jnp.where(L_denom > 0.0, -1e6, 1e6),
         )
 
-        zeta = jnp.clip(z_ref / L, -10.0, 10.0)
-        psi_m_val = psi_m(zeta)
-        psi_h_val = psi_h(zeta)
+        # Stability parameters and ψ functions evaluated at each
+        # measurement height. When z_t == z_q == z_u (single-height),
+        # zeta_t == zeta_q == zeta_u and psi_h_t == psi_h_q (so the
+        # legacy formula path is bit-identical).
+        zeta_u = jnp.clip(z_u / L, -10.0, 10.0)
+        zeta_t = jnp.clip(z_t / L, -10.0, 10.0)
+        zeta_q = jnp.clip(z_q / L, -10.0, 10.0)
+        psi_m_u = psi_m(zeta_u)
+        psi_h_t = psi_h(zeta_t)
+        psi_h_q = psi_h(zeta_q)
 
         # --- Roughness update (Python if resolved at trace time) ---
         if scheme == "coare3":
@@ -199,45 +233,57 @@ def compute_most_fluxes(
             z0_q_new = z0_t_new
 
         elif scheme == "large_yeager":
-            # Large & Yeager 2004 (CORE): iterate in coefficient space.
+            # Large & Yeager 2009 (CORE/OMIP): iterate in coefficient space.
             # 1) Neutral 10-m wind from current u_star and z0
             U_10N = u_star_safe / KAPPA * jnp.log(
                 10.0 / jnp.maximum(z0, 1e-12)
             )
             U_10N = jnp.clip(U_10N, 0.5, 50.0)
 
-            # 2) Empirical neutral 10-m drag coefficient C_DN(U_10N)
-            C_DN = (2.7 / U_10N + 0.142 + 0.0764 * U_10N) * 1e-3
+            # 2) LY09 neutral 10-m drag coefficient (Large & Yeager 2009 Eq. 6).
+            # The −3.14807e-10·U⁶ term is LY09's high-wind correction; LY04
+            # lacked it and over-estimated drag at U > 30 m/s. Required by
+            # the OMIP-2 protocol (Griffies 2016 §2.2).
+            C_DN = (
+                2.7 / U_10N
+                + 0.142
+                + U_10N / 13.09
+                - 3.14807e-10 * U_10N ** 6
+            ) * 1e-3
             C_DN = jnp.clip(C_DN, 0.5e-3, 3.0e-3)
 
             # 3) Neutral exchange coefficients at 10 m
             rdn = jnp.sqrt(C_DN)
-            # Stability-dependent 10-m Stanton/Dalton number
-            CHN10 = jnp.where(zeta < 0.0, 32.7e-3, 18.0e-3) * rdn
+            # Stability-dependent 10-m Stanton/Dalton number (LY09 Table 4).
+            # Use the wind-height stability for the unstable/stable branch.
+            CHN10 = jnp.where(zeta_u < 0.0, 32.7e-3, 18.0e-3) * rdn
             CEN10 = 34.6e-3 * rdn
             rhn = CHN10 / rdn  # = ch_coeff
             ren = CEN10 / rdn  # = ce_coeff
 
-            # 4) Shift coefficients from 10 m to measurement height z_ref
-            #    with stability corrections (LY04 Eq. 9-11):
-            #    rd = rdn / (1 + rdn/kappa * (ln(z_ref/10) - psi_m))
-            #    rh = rhn / (1 + rhn/kappa * (ln(z_ref/10) - psi_h))
-            ln_z_ratio = jnp.log(z_ref / 10.0)
+            # 4) Shift coefficients from 10 m to the appropriate
+            #    measurement height per variable (LY09 §3 / LY04 Eq. 9-11):
+            #    rd = rdn / (1 + rdn/κ · (ln(z_u/10) − Δψ_m))
+            #    rh = rhn / (1 + rhn/κ · (ln(z_t/10) − Δψ_h_t))
+            #    re = ren / (1 + ren/κ · (ln(z_q/10) − Δψ_h_q))
+            ln_zr_u = jnp.log(z_u / 10.0)
+            ln_zr_t = jnp.log(z_t / 10.0)
+            ln_zr_q = jnp.log(z_q / 10.0)
             zeta_10 = jnp.clip(10.0 / L, -10.0, 10.0)
             psi_m_10 = psi_m(zeta_10)
             psi_h_10 = psi_h(zeta_10)
-            # Stability correction difference between z_ref and 10 m
-            dpsi_m = psi_m_val - psi_m_10
-            dpsi_h = psi_h_val - psi_h_10
+            dpsi_m = psi_m_u - psi_m_10
+            dpsi_h_t = psi_h_t - psi_h_10
+            dpsi_h_q = psi_h_q - psi_h_10
 
             rd = rdn / jnp.maximum(
-                1.0 + rdn / KAPPA * (ln_z_ratio - dpsi_m), 0.2
+                1.0 + rdn / KAPPA * (ln_zr_u - dpsi_m), 0.2
             )
             rh = rhn / jnp.maximum(
-                1.0 + rhn / KAPPA * (ln_z_ratio - dpsi_h), 0.2
+                1.0 + rhn / KAPPA * (ln_zr_t - dpsi_h_t), 0.2
             )
             re = ren / jnp.maximum(
-                1.0 + ren / KAPPA * (ln_z_ratio - dpsi_h), 0.2
+                1.0 + ren / KAPPA * (ln_zr_q - dpsi_h_q), 0.2
             )
 
             # 5) Update scaling parameters directly from coefficients
@@ -246,7 +292,7 @@ def compute_most_fluxes(
             q_star_new = re * dq
 
             # Still need z0 for the next iteration's U_10N estimate
-            z0_new = z_ref / jnp.exp(KAPPA / rd + psi_m_val)
+            z0_new = z_u / jnp.exp(KAPPA / rd + psi_m_u)
             z0_new = jnp.clip(z0_new, 1e-12, 1.0)
             z0_t_new = z0_t  # not used in coefficient path
             z0_q_new = z0_q  # not used in coefficient path
@@ -259,14 +305,15 @@ def compute_most_fluxes(
             z0_t_new = z0_t
             z0_q_new = z0_q
 
-        # For COARE and constant: transfer coefficients via log-law + stability
-        ln_z_z0 = jnp.log(z_ref / jnp.maximum(z0_new, 1e-12))
-        ln_z_z0t = jnp.log(z_ref / jnp.maximum(z0_t_new, 1e-12))
-        ln_z_z0q = jnp.log(z_ref / jnp.maximum(z0_q_new, 1e-12))
+        # For COARE and constant: transfer coefficients via log-law + stability,
+        # with each variable referenced to its own measurement height.
+        ln_zu_z0 = jnp.log(z_u / jnp.maximum(z0_new, 1e-12))
+        ln_zt_z0t = jnp.log(z_t / jnp.maximum(z0_t_new, 1e-12))
+        ln_zq_z0q = jnp.log(z_q / jnp.maximum(z0_q_new, 1e-12))
 
-        denom_m = jnp.maximum(ln_z_z0 - psi_m_val, 0.5)
-        denom_h = jnp.maximum(ln_z_z0t - psi_h_val, 0.5)
-        denom_q = jnp.maximum(ln_z_z0q - psi_h_val, 0.5)
+        denom_m = jnp.maximum(ln_zu_z0 - psi_m_u, 0.5)
+        denom_h = jnp.maximum(ln_zt_z0t - psi_h_t, 0.5)
+        denom_q = jnp.maximum(ln_zq_z0q - psi_h_q, 0.5)
 
         u_star_new = KAPPA * wind_speed / denom_m
         theta_star_new = KAPPA * dT / denom_h

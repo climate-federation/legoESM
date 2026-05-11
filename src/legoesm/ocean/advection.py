@@ -22,6 +22,7 @@ where:
 
 import jax.numpy as jnp
 
+from legoesm.core.weno import weno5_z, weno7_z, weno_upwind
 from legoesm.grids.latlon import LatLonGrid
 
 
@@ -936,16 +937,22 @@ def _weno_to_u_points(
     f_u : array, shape (n_lat, n_lon+1, nlev)
         WENO face values at u-points.
     """
-    from legoesm.core.weno import weno5_z, weno7_z, weno_upwind
-
     weno_fn = {5: weno5_z, 7: weno7_z}[order]
     hw = {5: 3, 7: 4}[order]
     n_lon = f.shape[1]
 
+    # Convert point values to cell averages. WENO reconstruction is
+    # a finite-volume method expecting cell-average inputs; passing
+    # point values caps the order at O(dx^3). Conversion order must
+    # match or exceed the WENO order for full accuracy.
+    from legoesm.core.weno import point_to_cellavg_periodic
+    conv_order = {5: 6, 7: 8}[order]
+    f_avg = point_to_cellavg_periodic(f, axis=1, order=conv_order)
+
     # Build stencil for all faces simultaneously (periodic longitude).
     # Face j between cell j-1 and cell j: WENO face at I+1/2 where I=j-1.
     # Need cells j-hw to j+(hw-1), obtained via roll offsets hw..-(hw-1).
-    stencil = [jnp.roll(f, hw - j, axis=1) for j in range(2 * hw)]
+    stencil = [jnp.roll(f_avg, hw - j, axis=1) for j in range(2 * hw)]
 
     f_plus, f_minus = weno_fn(stencil)
 
@@ -980,15 +987,18 @@ def _weno_to_v_points(
     f_v : array, shape (n_lat+1, n_lon, nlev)
         WENO face values at v-points. Zero at pole boundaries.
     """
-    from legoesm.core.weno import weno5_z, weno7_z, weno_upwind
-
     weno_fn = {5: weno5_z, 7: weno7_z}[order]
     hw = {5: 3, 7: 4}[order]
     n_lat = f.shape[0]
 
+    # Convert point values to cell averages (meridional, bounded).
+    from legoesm.core.weno import point_to_cellavg_bounded
+    conv_order = {5: 6, 7: 8}[order]
+    f_avg = point_to_cellavg_bounded(f, axis=0, order=conv_order)
+
     # Ghost cells (Neumann BC: copy boundary value)
     f_ext = jnp.concatenate(
-        [f[:1, :, :]] * hw + [f] + [f[-1:, :, :]] * hw, axis=0
+        [f_avg[:1, :, :]] * hw + [f_avg] + [f_avg[-1:, :, :]] * hw, axis=0
     )
 
     # Stencil for interior faces i=1..n_lat-1.
@@ -1037,8 +1047,6 @@ def _flux_form_vertical_tracer_advection_weno(
     vert_flux_div : array, shape (..., nlev)
         Vertical flux divergence F_top[k] - F_bot[k] for each level.
     """
-    from legoesm.core.weno import weno5_z, weno7_z
-
     weno_fn = {5: weno5_z, 7: weno7_z}[order]
     hw = {5: 3, 7: 4}[order]
     nlev = field.shape[-1]

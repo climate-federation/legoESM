@@ -1,0 +1,511 @@
+diff --git a/docs/CROSS_GRID_COMPARISON_REPORT.md b/docs/CROSS_GRID_COMPARISON_REPORT.md
+index 7de518e1..1e224dad 100644
+--- a/docs/CROSS_GRID_COMPARISON_REPORT.md
++++ b/docs/CROSS_GRID_COMPARISON_REPORT.md
+@@ -1,6 +1,6 @@
+ # legoESM Cross-Grid Comparison Report
+ 
+-**Branch**: `simulation_full_check` (iter-131 snapshot)
++**Branch**: `simulation_full_check` (iter-132 snapshot)
+ **Scope**: end-to-end cross-grid comparison across the user's prompt
+ items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
+ test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
+diff --git a/scripts/ocean_test_matrix/experiments.py b/scripts/ocean_test_matrix/experiments.py
+index 81c9df6d..704ec19e 100644
+--- a/scripts/ocean_test_matrix/experiments.py
++++ b/scripts/ocean_test_matrix/experiments.py
+@@ -765,7 +765,15 @@ def run_geostrophic_adjustment(tc: TestCase, output_dir: Path, days: float
+ 
+     # All grids now use same physical units
+     T_drift = _compute_drift(diag.get("mean_T", []))
+-    notes = f"T drift={T_drift:.2e}"
++    # iter-132 (codex iter-131-followup MEDIUM-1): also gate
++    # documented ``max_speed_final < 1.0 m/s`` (same as
++    # monolithic).
++    max_speed_series = diag.get("max_speed", [])
++    if max_speed_series:
++        max_speed_final = float(max_speed_series[-1])
++    else:
++        max_speed_final = float("nan")
++    notes = f"T drift={T_drift:.2e}, max_speed_final={max_speed_final:.4f}m/s"
+     # iter-127 (codex iter-126-followup MEDIUM-2): apply
+     # T-drift gate.  geostrophic_adjustment has zero T tendency
+     # (no surface fluxes, no diffusion in this setup), so any
+@@ -778,6 +786,10 @@ def run_geostrophic_adjustment(tc: TestCase, output_dir: Path, days: float
+     ok, notes = _apply_drift_tolerance(
+         ok, notes, T_drift, 1e-8,
+         label="T", n_samples=len(diag.get("mean_T", [])))
++    ok, notes = _apply_value_threshold(
++        ok, notes, max_speed_final, 1.0,
++        label="max_speed_final", op="lt", units="m/s",
++        n_samples=len(max_speed_series))
+ 
+     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+     depth = -z_full
+@@ -930,12 +942,21 @@ def run_phillips_two_layer(tc: TestCase, output_dir: Path, days: float
+     else:
+         T_abs_drift = float("nan")
+     if n_eta >= 2:
+-        eta_initial = float(abs(max_eta_series[0]))
+-        eta_final = float(abs(max_eta_series[-1]))
+-        max_eta_overall = float(np.nanmax(np.asarray(max_eta_series)))
+-        if eta_initial > 1e-12 and np.isfinite(eta_final):
++        # iter-132 (codex iter-131-followup MEDIUM-3):
++        # fall back to the first finite non-zero max_eta sample
++        # as the denominator (Phillips initial perturbation can
++        # round to ~0 if the snapshot captures a zero-mean
++        # state).
++        max_eta_arr = np.asarray(max_eta_series, dtype=np.float64)
++        eta_final = float(abs(max_eta_arr[-1]))
++        max_eta_overall = float(np.nanmax(np.abs(max_eta_arr)))
++        finite_nonzero = max_eta_arr[
++            (np.isfinite(max_eta_arr)) & (np.abs(max_eta_arr) > 1e-12)]
++        if finite_nonzero.size > 0 and np.isfinite(eta_final):
++            eta_initial = float(abs(finite_nonzero[0]))
+             eta_growth = eta_final / eta_initial
+         else:
++            eta_initial = float("nan")
+             eta_growth = float("nan")
+     else:
+         max_eta_overall = float("nan")
+@@ -1073,7 +1094,24 @@ def run_inertia_gravity_wave(tc: TestCase, output_dir: Path, days: float
+     l2_err = float(np.sqrt(np.mean((eta_final - eta_exact)**2)) /
+                    max(np.sqrt(np.mean(eta_exact**2)), 1e-30))
+     max_eta = float(np.max(np.abs(eta_final)))
+-    notes = f"L2={l2_err:.4f}, max|eta|={max_eta:.3f}m, omega={omega:.2e}"
++    max_eta_init = float(np.max(np.abs(eta_init)))
++    if max_eta_init > 1e-12 and np.isfinite(max_eta):
++        amplitude_ratio = max_eta / max_eta_init
++    else:
++        amplitude_ratio = float("nan")
++    notes = (f"L2={l2_err:.4f}, max|eta|={max_eta:.3f}m, "
++             f"amp_ratio={amplitude_ratio:.3f}, omega={omega:.2e}")
++    # iter-132 (codex iter-131-followup HIGH-1): apply
++    # documented IGW PASS gates.  Same as monolithic.
++    ok, notes = _apply_value_threshold(
++        ok, notes, l2_err, 0.1,
++        label="IGW L2 vs analytical", op="lt")
++    ok, notes = _apply_value_threshold(
++        ok, notes, amplitude_ratio, 0.8,
++        label="IGW amplitude_ratio_lower", op="ge")
++    ok, notes = _apply_value_threshold(
++        ok, notes, amplitude_ratio, 1.2,
++        label="IGW amplitude_ratio_upper", op="le")
+ 
+     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+     _write_results_txt(output_dir, {
+@@ -1081,6 +1119,7 @@ def run_inertia_gravity_wave(tc: TestCase, output_dir: Path, days: float
+         "days": days, "dt": dt, "H_max": H_max,
+         "reference": "Bishnu et al. 2024, DOI:10.1029/2022MS003545",
+         "L2_error": l2_err, "omega_analytical": omega,
++        "amplitude_ratio": amplitude_ratio,
+         "status": "PASS" if ok else "FAIL", "notes": notes,
+         "wall_time": f"{wall:.1f}s"})
+     _save_case_diagnostics(
+@@ -1200,7 +1239,15 @@ def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
+ 
+     pe_drift = _compute_drift(diag.get("PE", []))
+     pe_rel_final = diag["PE_rel"][-1] if diag.get("PE_rel") else 0.0
+-    notes = f"PE drift={pe_drift:.2e}, PE_rel_final={pe_rel_final:.4e}"
++    # iter-132 (codex iter-131-followup MEDIUM-2): also gate
++    # documented ``Temperature within [-200, 200] C``.  Same
++    # as monolithic.
++    T_data = np.asarray(state.T.data, dtype=np.float64)
++    T_min_final, T_max_final = (
++        (float(np.nanmin(T_data)), float(np.nanmax(T_data)))
++        if T_data.size else (float("nan"), float("nan")))
++    notes = (f"PE drift={pe_drift:.2e}, PE_rel_final={pe_rel_final:.4e}, "
++             f"T range=[{T_min_final:.2f},{T_max_final:.2f}]C")
+     # iter-129 (codex iter-128-followup MEDIUM-2): apply the
+     # documented ``pe_rel_final < 0`` sign check to Lock Exchange
+     # (see the "Lock Exchange (lock_exchange)" Validation
+@@ -1211,6 +1258,12 @@ def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
+     ok, notes = _apply_pe_rel_sign(
+         ok, notes, pe_rel_final, label="PE_rel_final",
+         n_samples=len(diag.get("PE_rel", [])))
++    ok, notes = _apply_value_threshold(
++        ok, notes, T_min_final, -200.0,
++        label="T_min_final", op="ge", units="C")
++    ok, notes = _apply_value_threshold(
++        ok, notes, T_max_final, 200.0,
++        label="T_max_final", op="le", units="C")
+ 
+     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+     depth = -z_full
+@@ -1301,8 +1354,15 @@ def run_overflow(tc: TestCase, output_dir: Path, days: float
+     pe_rel_final = diag["PE_rel"][-1] if diag.get("PE_rel") else 0.0
+     # All grids now use same physical units
+     T_drift = _compute_drift(diag.get("mean_T", []))
++    # iter-132 (codex iter-131-followup MEDIUM-2): also gate
++    # documented ``Temperature within [-200, 200] C``.
++    T_data = np.asarray(state.T.data, dtype=np.float64)
++    T_min_final, T_max_final = (
++        (float(np.nanmin(T_data)), float(np.nanmax(T_data)))
++        if T_data.size else (float("nan"), float("nan")))
+     notes = (f"PE drift={pe_drift:.2e}, PE_rel={pe_rel_final:.4e}, "
+-             f"T drift={T_drift:.2e}")
++             f"T drift={T_drift:.2e}, "
++             f"T range=[{T_min_final:.2f},{T_max_final:.2f}]C")
+     # iter-127 (codex iter-126-followup MEDIUM-2): apply
+     # T-drift gate to overflow.  Applies the same gate as
+     # monolithic at 1e-2.
+@@ -1316,6 +1376,12 @@ def run_overflow(tc: TestCase, output_dir: Path, days: float
+     ok, notes = _apply_drift_tolerance(
+         ok, notes, T_drift, 1e-2,
+         label="T", n_samples=len(diag.get("mean_T", [])))
++    ok, notes = _apply_value_threshold(
++        ok, notes, T_min_final, -200.0,
++        label="T_min_final", op="ge", units="C")
++    ok, notes = _apply_value_threshold(
++        ok, notes, T_max_final, 200.0,
++        label="T_max_final", op="le", units="C")
+     # iter-128 (codex iter-127-followup MEDIUM-2): apply the
+     # documented ``pe_rel_final < 0`` sign check.
+     # iter-129 (codex iter-128-followup MEDIUM-1): pass
+diff --git a/scripts/run_ocean_test_matrix.py b/scripts/run_ocean_test_matrix.py
+index 00e613d5..b4e0813c 100644
+--- a/scripts/run_ocean_test_matrix.py
++++ b/scripts/run_ocean_test_matrix.py
+@@ -3830,13 +3830,27 @@ def run_geostrophic_adjustment(tc: TestCase, output_dir: Path, days: float
+ 
+     # All grids now use same physical units
+     T_drift = _compute_drift(diag.get("mean_T", []))
+-    notes = f"T drift={T_drift:.2e}"
++    # iter-132 (codex iter-131-followup MEDIUM-1): also gate
++    # documented ``max_speed_final < 1.0 m/s`` per
++    # docs/ocean_experiments_reference.md "Geostrophic
++    # Adjustment" Validation Thresholds.  Pre-iter-132 only
++    # T was gated, so a runaway-velocity bug could PASS.
++    max_speed_series = diag.get("max_speed", [])
++    if max_speed_series:
++        max_speed_final = float(max_speed_series[-1])
++    else:
++        max_speed_final = float("nan")
++    notes = f"T drift={T_drift:.2e}, max_speed_final={max_speed_final:.4f}m/s"
+     # iter-124 (codex iter-123-followup MEDIUM-1):
+     # geostrophic_adjustment has no T forcing → T should be
+     # conserved.  Apply 1e-8 relative T-drift tolerance.
+     ok, notes = _apply_drift_tolerance(
+         ok, notes, T_drift, 1e-8,
+         label="T", n_samples=len(diag.get("mean_T", [])))
++    ok, notes = _apply_value_threshold(
++        ok, notes, max_speed_final, 1.0,
++        label="max_speed_final", op="lt", units="m/s",
++        n_samples=len(max_speed_series))
+ 
+     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+     depth = -z_full
+@@ -4109,12 +4123,26 @@ def run_phillips_two_layer(tc: TestCase, output_dir: Path, days: float
+     else:
+         T_abs_drift = float("nan")
+     if n_eta >= 2:
+-        eta_initial = float(abs(max_eta_series[0]))
+-        eta_final = float(abs(max_eta_series[-1]))
+-        max_eta_overall = float(np.nanmax(np.asarray(max_eta_series)))
+-        if eta_initial > 1e-12 and np.isfinite(eta_final):
++        # iter-132 (codex iter-131-followup MEDIUM-3):
++        # iter-131 used max_eta_series[0] as the eta_growth
++        # denominator, but the Phillips initial perturbation
++        # is intentionally tiny (~5e-2 m via 0.05*sin*sin)
++        # and could even round to zero if the initial sample
++        # captures a zero-mean state before the perturbation
++        # is applied.  Fall back to the first finite non-zero
++        # max_eta sample as the denominator so eta_growth
++        # remains meaningful.  Fail explicitly only if no
++        # finite non-zero baseline exists at all.
++        max_eta_arr = np.asarray(max_eta_series, dtype=np.float64)
++        eta_final = float(abs(max_eta_arr[-1]))
++        max_eta_overall = float(np.nanmax(np.abs(max_eta_arr)))
++        finite_nonzero = max_eta_arr[
++            (np.isfinite(max_eta_arr)) & (np.abs(max_eta_arr) > 1e-12)]
++        if finite_nonzero.size > 0 and np.isfinite(eta_final):
++            eta_initial = float(abs(finite_nonzero[0]))
+             eta_growth = eta_final / eta_initial
+         else:
++            eta_initial = float("nan")
+             eta_growth = float("nan")
+     else:
+         eta_initial = float("nan")
+@@ -4347,7 +4375,29 @@ def run_inertia_gravity_wave(tc: TestCase, output_dir: Path, days: float
+     l2_err = float(np.sqrt(np.mean((eta_final - eta_exact)**2)) /
+                    max(np.sqrt(np.mean(eta_exact**2)), 1e-30))
+     max_eta = float(np.max(np.abs(eta_final)))
+-    notes = f"L2={l2_err:.4f}, max|eta|={max_eta:.3f}m, omega={omega:.2e}"
++    max_eta_init = float(np.max(np.abs(eta_init)))
++    if max_eta_init > 1e-12 and np.isfinite(max_eta):
++        amplitude_ratio = max_eta / max_eta_init
++    else:
++        amplitude_ratio = float("nan")
++    notes = (f"L2={l2_err:.4f}, max|eta|={max_eta:.3f}m, "
++             f"amp_ratio={amplitude_ratio:.3f}, omega={omega:.2e}")
++    # iter-132 (codex iter-131-followup HIGH-1): apply the
++    # documented IGW PASS gates — pre-iter-132 ``l2_err`` and
++    # ``amplitude_conservation`` were COMPUTED but never gated,
++    # so any analytically wrong finite IGW run could PASS.
++    # See "Inertia-Gravity Wave (inertia_gravity_wave)"
++    # Validation Thresholds in
++    # docs/ocean_experiments_reference.md.
++    ok, notes = _apply_value_threshold(
++        ok, notes, l2_err, 0.1,
++        label="IGW L2 vs analytical", op="lt")
++    ok, notes = _apply_value_threshold(
++        ok, notes, amplitude_ratio, 0.8,
++        label="IGW amplitude_ratio_lower", op="ge")
++    ok, notes = _apply_value_threshold(
++        ok, notes, amplitude_ratio, 1.2,
++        label="IGW amplitude_ratio_upper", op="le")
+ 
+     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+     _write_results_txt(output_dir, {
+@@ -4355,6 +4405,7 @@ def run_inertia_gravity_wave(tc: TestCase, output_dir: Path, days: float
+         "days": days, "dt": dt, "H_max": H_max,
+         "reference": "Bishnu et al. 2024, DOI:10.1029/2022MS003545",
+         "L2_error": l2_err, "omega_analytical": omega,
++        "amplitude_ratio": amplitude_ratio,
+         "status": "PASS" if ok else "FAIL", "notes": notes,
+         "wall_time": f"{wall:.1f}s"},
+         diag=diag)  # iter-105: surface BLOWUP info if any
+@@ -4511,7 +4562,17 @@ def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
+ 
+     pe_drift = _compute_drift(diag.get("PE", []))
+     pe_rel_final = diag["PE_rel"][-1] if diag.get("PE_rel") else 0.0
+-    notes = f"PE drift={pe_drift:.2e}, PE_rel_final={pe_rel_final:.4e}"
++    # iter-132 (codex iter-131-followup MEDIUM-2): also gate
++    # documented ``Temperature within [-200, 200] C`` blowup
++    # check.  The runtime blowup_threshold uses max|eta| not
++    # T, so an out-of-range temperature blowup could still
++    # PASS.  Compute T_min/T_max from the final state.
++    T_data = np.asarray(state.T.data, dtype=np.float64)
++    T_min_final, T_max_final = (
++        (float(np.nanmin(T_data)), float(np.nanmax(T_data)))
++        if T_data.size else (float("nan"), float("nan")))
++    notes = (f"PE drift={pe_drift:.2e}, PE_rel_final={pe_rel_final:.4e}, "
++             f"T range=[{T_min_final:.2f},{T_max_final:.2f}]C")
+     # iter-129 (codex iter-128-followup MEDIUM-2): apply the
+     # documented ``pe_rel_final < 0`` sign check to Lock Exchange
+     # (see the "Lock Exchange (lock_exchange)" Validation
+@@ -4524,6 +4585,12 @@ def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
+     ok, notes = _apply_pe_rel_sign(
+         ok, notes, pe_rel_final, label="PE_rel_final",
+         n_samples=len(diag.get("PE_rel", [])))
++    ok, notes = _apply_value_threshold(
++        ok, notes, T_min_final, -200.0,
++        label="T_min_final", op="ge", units="C")
++    ok, notes = _apply_value_threshold(
++        ok, notes, T_max_final, 200.0,
++        label="T_max_final", op="le", units="C")
+ 
+     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+     depth = -z_full
+@@ -4678,8 +4745,17 @@ def run_overflow(tc: TestCase, output_dir: Path, days: float
+     pe_rel_final = diag["PE_rel"][-1] if diag.get("PE_rel") else 0.0
+     # All grids now use same physical units
+     T_drift = _compute_drift(diag.get("mean_T", []))
++    # iter-132 (codex iter-131-followup MEDIUM-2): also gate
++    # documented ``Temperature within [-200, 200] C`` blowup
++    # check (see "Overflow" Validation Thresholds in
++    # docs/ocean_experiments_reference.md).
++    T_data = np.asarray(state.T.data, dtype=np.float64)
++    T_min_final, T_max_final = (
++        (float(np.nanmin(T_data)), float(np.nanmax(T_data)))
++        if T_data.size else (float("nan"), float("nan")))
+     notes = (f"PE drift={pe_drift:.2e}, PE_rel={pe_rel_final:.4e}, "
+-             f"T drift={T_drift:.2e}")
++             f"T drift={T_drift:.2e}, "
++             f"T range=[{T_min_final:.2f},{T_max_final:.2f}]C")
+     # iter-125 (codex iter-124-followup MEDIUM-2): apply
+     # T-drift gate to overflow.  T should be conserved
+     # (passive scalar in adiabatic regime); empirical quick
+@@ -4694,6 +4770,12 @@ def run_overflow(tc: TestCase, output_dir: Path, days: float
+     ok, notes = _apply_drift_tolerance(
+         ok, notes, T_drift, 1e-2,
+         label="T", n_samples=len(diag.get("mean_T", [])))
++    ok, notes = _apply_value_threshold(
++        ok, notes, T_min_final, -200.0,
++        label="T_min_final", op="ge", units="C")
++    ok, notes = _apply_value_threshold(
++        ok, notes, T_max_final, 200.0,
++        label="T_max_final", op="le", units="C")
+     # iter-128 (codex iter-127-followup MEDIUM-2): apply the
+     # documented ``pe_rel_final < 0`` sign check.  Overflow is
+     # a gravity-current experiment — RPE must decrease.  A
+diff --git a/tests/test_ocean_cross_grid_plots.py b/tests/test_ocean_cross_grid_plots.py
+index cb155fa3..c991303d 100644
+--- a/tests/test_ocean_cross_grid_plots.py
++++ b/tests/test_ocean_cross_grid_plots.py
+@@ -2708,6 +2708,175 @@ class TestIter123OceanDriftTolerance:
+                 f"iter-131: {rel}: undershoot call must use "
+                 f"S_min sample count, got: {undershoot_call!r}")
+ 
++    # ====== iter-132: codex iter-131-followup HIGH-1 + MEDIUM ======
++
++    def test_iter132_igw_has_l2_and_amplitude_gates_monolithic(self):
++        """iter-132 codex iter-131-followup HIGH-1: monolithic
++        run_inertia_gravity_wave applies the documented L2_err
++        and amplitude_conservation gates.  Pre-iter-132 these
++        were COMPUTED but never gated; an analytically wrong
++        finite IGW run could PASS.
++        """
++        from pathlib import Path
++        text = (Path(__file__).resolve().parent.parent
++                / "scripts" / "run_ocean_test_matrix.py").read_text()
++        import re
++        m = re.search(
++            r"def run_inertia_gravity_wave\b.*?(?=\ndef \w|\nRUNNERS)",
++            text, re.DOTALL,
++        )
++        assert m is not None
++        body = m.group(0)
++        code = "\n".join(
++            line for line in body.splitlines()
++            if not line.lstrip().startswith("#"))
++        # L2 error gate (op="lt" 0.1).
++        assert 'label="IGW L2 vs analytical"' in code
++        assert "l2_err, 0.1" in code
++        # amplitude_ratio range gate (>=0.8 and <=1.2).
++        assert 'label="IGW amplitude_ratio_lower"' in code
++        assert "amplitude_ratio, 0.8" in code
++        assert 'op="ge"' in code
++        assert 'label="IGW amplitude_ratio_upper"' in code
++        assert "amplitude_ratio, 1.2" in code
++
++    def test_iter132_igw_has_l2_and_amplitude_gates_modular(self):
++        """iter-132 codex iter-131-followup HIGH-1: modular
++        IGW mirrors the same gates.
++        """
++        from pathlib import Path
++        text = (Path(__file__).resolve().parent.parent
++                / "scripts" / "ocean_test_matrix"
++                / "experiments.py").read_text()
++        import re
++        m = re.search(
++            r"def run_inertia_gravity_wave\b.*?(?=\ndef \w)",
++            text, re.DOTALL,
++        )
++        assert m is not None
++        body = m.group(0)
++        code = "\n".join(
++            line for line in body.splitlines()
++            if not line.lstrip().startswith("#"))
++        assert 'label="IGW L2 vs analytical"' in code
++        assert "l2_err, 0.1" in code
++        assert 'label="IGW amplitude_ratio_lower"' in code
++        assert 'op="ge"' in code
++        assert 'label="IGW amplitude_ratio_upper"' in code
++
++    def test_iter132_geostrophic_max_speed_gate(self):
++        """iter-132 codex iter-131-followup MEDIUM-1: both
++        monolithic and modular geostrophic_adjustment gate the
++        documented ``max_speed_final < 1.0 m/s``.
++        """
++        from pathlib import Path
++        for rel in (
++            "scripts/run_ocean_test_matrix.py",
++            "scripts/ocean_test_matrix/experiments.py",
++        ):
++            text = (Path(__file__).resolve().parent.parent
++                    / rel).read_text()
++            import re
++            m = re.search(
++                r"def run_geostrophic_adjustment\b"
++                r".*?(?=\ndef \w|\nRUNNERS)",
++                text, re.DOTALL,
++            )
++            assert m is not None
++            body = m.group(0)
++            code = "\n".join(
++                line for line in body.splitlines()
++                if not line.lstrip().startswith("#"))
++            assert 'label="max_speed_final"' in code, (
++                f"iter-132: {rel}: geostrophic must gate "
++                f"max_speed_final.")
++            assert "max_speed_final, 1.0" in code, (
++                f"iter-132: {rel}: max_speed_final tolerance "
++                f"must be 1.0 m/s.")
++
++    def test_iter132_overflow_t_bounds_gate(self):
++        """iter-132 codex iter-131-followup MEDIUM-2: both
++        monolithic and modular run_overflow gate the documented
++        ``Temperature within [-200, 200] C`` bounds.
++        """
++        from pathlib import Path
++        for rel in (
++            "scripts/run_ocean_test_matrix.py",
++            "scripts/ocean_test_matrix/experiments.py",
++        ):
++            text = (Path(__file__).resolve().parent.parent
++                    / rel).read_text()
++            import re
++            m = re.search(
++                r"def run_overflow\b.*?(?=\ndef \w|\nRUNNERS)",
++                text, re.DOTALL,
++            )
++            assert m is not None
++            body = m.group(0)
++            code = "\n".join(
++                line for line in body.splitlines()
++                if not line.lstrip().startswith("#"))
++            assert 'label="T_min_final"' in code
++            assert "T_min_final, -200.0" in code
++            assert 'label="T_max_final"' in code
++            assert "T_max_final, 200.0" in code
++
++    def test_iter132_lock_exchange_t_bounds_gate(self):
++        """iter-132 codex iter-131-followup MEDIUM-2: both
++        monolithic and modular run_lock_exchange gate the
++        documented ``Temperature within [-200, 200] C`` bounds.
++        """
++        from pathlib import Path
++        for rel in (
++            "scripts/run_ocean_test_matrix.py",
++            "scripts/ocean_test_matrix/experiments.py",
++        ):
++            text = (Path(__file__).resolve().parent.parent
++                    / rel).read_text()
++            import re
++            m = re.search(
++                r"def run_lock_exchange\b.*?(?=\ndef \w|\nRUNNERS)",
++                text, re.DOTALL,
++            )
++            assert m is not None
++            body = m.group(0)
++            code = "\n".join(
++                line for line in body.splitlines()
++                if not line.lstrip().startswith("#"))
++            assert 'label="T_min_final"' in code
++            assert "T_min_final, -200.0" in code
++            assert 'label="T_max_final"' in code
++            assert "T_max_final, 200.0" in code
++
++    def test_iter132_phillips_eta_initial_zero_fallback(self):
++        """iter-132 codex iter-131-followup MEDIUM-3: when the
++        first max_eta sample is zero (initial perturbation
++        before forcing kicks in), fall back to the first
++        finite non-zero sample as denominator instead of
++        producing NaN eta_growth.
++        """
++        from pathlib import Path
++        for rel in (
++            "scripts/run_ocean_test_matrix.py",
++            "scripts/ocean_test_matrix/experiments.py",
++        ):
++            text = (Path(__file__).resolve().parent.parent
++                    / rel).read_text()
++            import re
++            m = re.search(
++                r"def run_phillips_two_layer\b"
++                r".*?(?=\ndef \w|\nRUNNERS)",
++                text, re.DOTALL,
++            )
++            assert m is not None
++            body = m.group(0)
++            # Must reference a "finite_nonzero" array selection
++            # or equivalent to find the first valid baseline.
++            assert "finite_nonzero" in body, (
++                f"iter-132: {rel}: Phillips eta_growth must "
++                f"fall back to first finite non-zero max_eta "
++                f"sample as denominator.")
++
+     def test_iter128_geostrophic_doc_documents_tighter_gate(self):
+         """iter-128 codex iter-127-followup MEDIUM-1: the doc
+         threshold of 1e-3 is the loose contract; the runner uses

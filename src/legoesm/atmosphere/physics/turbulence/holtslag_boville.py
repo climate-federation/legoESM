@@ -117,11 +117,19 @@ def holtslag_boville_turbulence(
         dtheta_v_bulk * dz_from_sfc / dV2
     )  # (ncol, nlev)
 
-    # Transition-zone weighting: peaks at Ri_crit crossing, not centroid
-    sharpness = 20.0
-    sigma_pbl = jax.nn.sigmoid(sharpness * (config.Ri_crit - Ri_bulk))  # (ncol, nlev)
+    # Transition-zone weighting: peaks at Ri_crit crossing, not centroid.
+    # Sharpness moved from a hardcoded 20.0 literal to
+    # ``config.pbl_sharpness`` per the strengthened CLAUDE.md
+    # constant-discipline rule (tunable scheme parameters belong in
+    # the scheme's config NamedTuple).
+    sigma_pbl = jax.nn.sigmoid(
+        config.pbl_sharpness * (config.Ri_crit - Ri_bulk)
+    )  # (ncol, nlev)
     w_pbl = sigma_pbl * (1.0 - sigma_pbl) + 1e-20
-    h_pbl = jnp.sum(z_full * w_pbl, axis=1) / jnp.sum(w_pbl, axis=1)  # (ncol,)
+    # Numerator and denominator share the level axis — fuse into one
+    # stacked reduction.
+    _h_pair = jnp.sum(jnp.stack([z_full * w_pbl, w_pbl], axis=-1), axis=1)
+    h_pbl = _h_pair[..., 0] / _h_pair[..., 1]  # (ncol,)
     h_pbl = jnp.clip(h_pbl, 100.0, None)
 
     # ----- K-profile inside PBL -----
@@ -148,12 +156,14 @@ def holtslag_boville_turbulence(
         1.0 + 3.0 * b_louis * b_louis * l_mix ** 2
         * jnp.sqrt(jnp.abs(Ri_neg) + 1e-10) / (dz_half ** 2 + 1e-10)
     )
-    blend_ri = jax.nn.sigmoid(100.0 * Ri)
+    blend_ri = jax.nn.sigmoid(config.blend_ri_sharpness * Ri)
     f_m = (1.0 - blend_ri) * f_unstable + blend_ri * f_stable
     Km_local = l_mix ** 2 * S * f_m  # (ncol, nlev-1)
 
     # Smooth transition from profile (inside PBL) to local (above)
-    blend_pbl = jax.nn.sigmoid(10.0 * (z_norm - 1.0))  # 0 inside PBL, 1 above
+    blend_pbl = jax.nn.sigmoid(
+        config.blend_pbl_sharpness * (z_norm - 1.0)
+    )  # 0 inside PBL, 1 above
     Km_half = (1.0 - blend_pbl) * Km_profile + blend_pbl * Km_local
     Kh_half = Km_half / config.Pr_t
 

@@ -46,7 +46,10 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio as _q_sat
+from legoesm.thermo import (
+    saturation_mixing_ratio as _q_sat,
+    saturation_mixing_ratio_dT as _dqsat_dT,
+)
 from legoesm.atmosphere.physics._shared import virtual_temperature
 from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
@@ -57,15 +60,6 @@ from legoesm.atmosphere.physics.turbulence.surface_layer import (
 from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
     implicit_vertical_diffusion,
 )
-
-
-def _dqsat_dT(T: jax.Array, p: jax.Array) -> jax.Array:
-    """d(q_sat)/dT for the Gaussian PDF width scaling."""
-    e_sat = 611.2 * jnp.exp(17.67 * (T - constants.T_freeze) /
-                             (T - constants.T_freeze + 243.5))
-    de_dT = e_sat * 17.67 * 243.5 / (T - constants.T_freeze + 243.5) ** 2
-    p_eff = jnp.clip(p - e_sat, 1.0)
-    return constants.epsilon * de_dT * p / p_eff ** 2
 
 
 # ---------------------------------------------------------------------------
@@ -150,8 +144,9 @@ def clubb_lite_turbulence(
     )  # (ncol, nlev)
     l_mix_safe = jnp.clip(l_mix, 1.0, None)
 
-    # Turbulence timescale
-    tau_turb = l_mix_safe / jnp.clip(sqrt_wp2, 1e-6, None)  # (ncol, nlev)
+    # iter-172 F841: removed unused ``tau_turb`` (consumed
+    # only by the dead higher-moment / cloud-fraction block
+    # — see comment block below).
 
     # ===== Eddy diffusivities =====
     Km_full = config.C_K * l_mix * sqrt_wp2  # (ncol, nlev)
@@ -172,14 +167,10 @@ def clubb_lite_turbulence(
     dtheta_v_dz = (theta_v[:, :-1] - theta_v[:, 1:]) / dz_half
     N2_half = (constants.g / jnp.clip(theta_v_bar, 1.0, None)) * dtheta_v_dz
 
-    # Liquid water potential temperature (simplified: theta_l ~ theta - L_v*q_c/c_pd*Pi)
-    # Without explicit q_c, use theta_l ~ theta
-    exner = (jnp.clip(p_full, 1.0, None) / constants.p_ref) ** constants.kappa
-    theta = T / jnp.clip(exner, 1e-8, None)
-    dtheta_dz = (theta[:, :-1] - theta[:, 1:]) / dz_half
-
-    # Total water gradient (using q_v as proxy for r_t without condensate)
-    drt_dz = (q_v[:, :-1] - q_v[:, 1:]) / dz_half
+    # iter-172 F841: removed ``exner`` / ``theta`` /
+    # ``dtheta_dz`` / ``drt_dz`` — only consumed by the dead
+    # higher-moment + cloud-fraction block (see comment after
+    # the eddy-diffusivity section).
 
     # Interpolate to full levels
     def _half_to_full(field_half):
@@ -191,8 +182,9 @@ def clubb_lite_turbulence(
 
     S2 = _half_to_full(S2_half)
     N2 = _half_to_full(N2_half)
-    dtheta_dz_full = _half_to_full(dtheta_dz)
-    drt_dz_full = _half_to_full(drt_dz)
+    # iter-172 F841: removed unused ``dtheta_dz_full`` /
+    # ``drt_dz_full`` (consumed only by the removed dead
+    # higher-moment + cloud-fraction block).
 
     # ===== Moment budgets (semi-implicit) =====
 
@@ -217,47 +209,39 @@ def clubb_lite_turbulence(
     )
     wp2_new = jnp.maximum(wp2_new, config.tke_min)
 
-    # --- Diagnose higher moments from updated wp2 and gradients ---
-    # w'theta_l' budget (steady-state diagnostic):
-    #   wpthlp = (-wp2 * dtheta/dz + (g/theta_v)*thlp2) * tau / C4
-    # thlp2 budget (steady-state):
-    #   thlp2 = -2*wpthlp * dtheta/dz * tau / C5
-    # Combining these yields the down-gradient approximation plus
-    # buoyancy correction. For the lite version, use K-theory:
-    #   wpthlp ~ -Kh * dtheta/dz
-    #   wprtp  ~ -Kh * drt/dz
-
-    wpthlp = -Kh_full * dtheta_dz_full   # (ncol, nlev)
-    wprtp = -Kh_full * drt_dz_full        # (ncol, nlev)
-
-    # Scalar variances from flux-gradient closure:
-    #   thlp2 = 2 * |wpthlp| * |dtheta/dz| * tau / C5
-    tau_safe = jnp.clip(tau_turb, 1.0, None)
-    thlp2 = 2.0 * jnp.abs(wpthlp) * jnp.abs(dtheta_dz_full) * tau_safe / config.C5
-    thlp2 = jnp.maximum(thlp2, config.var_min)
-    rtp2 = 2.0 * jnp.abs(wprtp) * jnp.abs(drt_dz_full) * tau_safe / config.C5
-    rtp2 = jnp.maximum(rtp2, config.var_min)
-
-    # ===== Cloud fraction from Gaussian PDF =====
-    # Saturation deficit: s = q_v - q_sat(T, p)
-    q_sat_val = _q_sat(T, p_full)
-    s_mean = q_v - q_sat_val   # >0 means supersaturated
-
-    # PDF width from total water variance
-    sigma_s = jnp.sqrt(rtp2)
-
-    # Include temperature contribution to saturation variability:
-    # sigma_s_eff^2 = rtp2 + (dqsat/dT)^2 * thlp2 * exner^2
-    dqs_dT = _dqsat_dT(T, p_full)
-    sigma_s_eff = jnp.sqrt(
-        rtp2 + (dqs_dT * exner) ** 2 * thlp2
-    )
-    sigma_s_eff = jnp.clip(sigma_s_eff, 1e-10, None)
-
-    # Cloud fraction: cf = 0.5 * erfc(-s / (sqrt(2) * sigma))
-    cloud_fraction = 0.5 * jax.scipy.special.erfc(
-        -s_mean / (jnp.sqrt(2.0) * sigma_s_eff)
-    )
+    # iter-172 (F841 audit): removed dead higher-moment +
+    # cloud-fraction diagnostics that were computed every
+    # timestep but never returned through ``TurbulenceOutput``.
+    # The dead blocks were:
+    #   * ``wpthlp = -Kh_full * dtheta_dz_full`` (line ~224)
+    #   * ``wprtp  = -Kh_full * drt_dz_full``    (line ~225)
+    #   * ``thlp2`` / ``rtp2`` flux-gradient variances (used
+    #     only inside the discarded cloud-fraction block)
+    #   * ``sigma_s = sqrt(rtp2)`` (overridden by sigma_s_eff)
+    #   * Full Gaussian-PDF cloud fraction with ``erfc`` /
+    #     ``q_sat_val`` / ``s_mean`` / ``dqs_dT`` /
+    #     ``sigma_s_eff`` (lines ~249-268).
+    #
+    # These are real physics that someone intended to wire up
+    # to a unified CLUBB-style cloud scheme, but the
+    # ``TurbulenceOutput`` NamedTuple has never carried
+    # ``cloud_fraction`` and downstream cloud-scheme dispatch
+    # uses Sundqvist / Xu-Randall instead.  Removing the dead
+    # computations saves ~6 jnp ops + 1 ``erfc`` per timestep
+    # per AMIP-active column with no behavioural change.
+    #
+    # If a future CLUBB unified scheme is wired in, restore
+    # by:
+    #   1. Adding ``cloud_fraction: jax.Array`` to
+    #      ``TurbulenceOutput`` (output.py).
+    #   2. Re-introducing the PDF block here.
+    #   3. Wiring the cloud scheme dispatch to consume
+    #      ``turbulence_output.cloud_fraction`` when
+    #      ``cloud_scheme == "clubb"``.
+    # The block was: ``s_mean = q_v - _q_sat(T, p_full);
+    # sigma_s_eff = sqrt(rtp2 + (dqs_dT * exner)**2 * thlp2);
+    # cloud_fraction = 0.5 * erfc(-s_mean / (sqrt(2) *
+    # sigma_s_eff))``.
 
     # ===== Surface fluxes =====
     tau_x, tau_y, shflx, lhflx, ustar = compute_surface_fluxes(

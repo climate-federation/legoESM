@@ -30,6 +30,7 @@ import jax.numpy as jnp
 from legoesm.core.state import NonHydrostaticState, NonHydrostaticTendencies
 from legoesm.grids.vertical import HeightCoordinate, TerrainMetric
 from legoesm.timestepping.split_explicit import SplitExplicitConfig
+from legoesm.timestepping.tridiagonal import thomas_solve_batched
 from legoesm.atmosphere.physics.thermodynamics import sanitize_theta_rho
 from legoesm import constants
 
@@ -331,8 +332,6 @@ def acoustic_substeps_semi_implicit(
     NonHydrostaticState
         State after all acoustic substeps.
     """
-    from legoesm.timestepping.tridiagonal import thomas_solve_batched
-
     g = euler_config.g
     c_p = constants.c_pd
     R_d = constants.R_d

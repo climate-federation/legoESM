@@ -156,12 +156,48 @@ def detect_devices() -> HardwareConfig:
     """Auto-detect hardware and return configuration.
 
     Queries JAX for available devices and infers backend capabilities.
-    This function does not modify any JAX state.
+
+    Side-effect: applies environment-variable-only XLA scheduler flags
+    *before* the first ``jax.devices()`` query.  Setting XLA flags
+    after PJRT initialisation is silently ineffective on most JAX
+    versions, which would defeat the latency-hiding scheduler flag
+    that is critical for multi-GPU strong scaling.  We therefore
+    sniff the GPU vendor from env-vars only (no ``jax.*`` calls)
+    and prime ``XLA_FLAGS`` here, before the device query.  The
+    follow-up :func:`configure_jax_for_device` call still sets
+    backend-specific JAX-level options (matmul precision, SPMD mode,
+    etc.) which are safe to set post-init.
 
     Returns
     -------
     HardwareConfig
     """
+    # Pre-init: set XLA scheduler flags based on env-var-only vendor
+    # detection, before jax.devices() is called.  After PJRT init,
+    # mutating XLA_FLAGS is silently ineffective on most JAX versions.
+    try:
+        from legoesm.runtime.backend import (
+            _detect_gpu_vendor_pre_init,
+            _NVIDIA_GPU_XLA_FLAGS,
+            _AMD_GPU_XLA_FLAGS,
+            _TPU_XLA_FLAGS,
+            _set_xla_flags,
+        )
+
+        _platforms = os.environ.get("JAX_PLATFORMS", "").lower()
+        if "tpu" in _platforms:
+            _set_xla_flags(_TPU_XLA_FLAGS)
+        else:
+            _vendor = _detect_gpu_vendor_pre_init()
+            if _vendor == "nvidia":
+                _set_xla_flags(_NVIDIA_GPU_XLA_FLAGS)
+            elif _vendor == "amd":
+                _set_xla_flags(_AMD_GPU_XLA_FLAGS)
+    except Exception:
+        # Non-fatal: if the runtime helpers are unavailable for any
+        # reason, fall through to plain JAX detection.
+        pass
+
     backend = jax.default_backend().lower()
     devices = jax.devices()
     device_count = len(devices)
@@ -309,24 +345,23 @@ def _configure_metal(config: HardwareConfig) -> None:
     automatically.  We enable multi-threading for CPU fallback operations
     to ensure the spectral transforms (which run on CPU) use all cores.
     """
-    if "XLA_FLAGS" not in os.environ:
-        try:
-            # NOTE: the legacy `intra_op_parallelism_threads=N` XLA flag
-            # is NOT recognized by current XLA and crashes JAX at first
-            # use with a fatal `Unknown flag in XLA_FLAGS` error from
-            # parse_flags_from_env.cc.  Drop it; rely on XLA's default
-            # CPU thread-pool autoscaling from os.cpu_count().
-            _set_xla_flags({
-                "xla_cpu_multi_thread_eigen": "true",
-            })
-        except Exception:
-            pass  # Non-critical; XLA will use defaults.
+    _enable_cpu_multithreading()
 
 
 def _configure_cpu(config: HardwareConfig) -> None:
     """Apply CPU-specific JAX configuration."""
-    # Set intra-op parallelism to use all available cores unless
-    # the user has already set it.
+    _enable_cpu_multithreading()
+
+
+def _enable_cpu_multithreading() -> None:
+    """Enable multi-threaded Eigen on the CPU backend.
+
+    XLA dropped the ``--intra_op_parallelism_threads`` flag in jaxlib
+    0.10; passing it now aborts the process at backend init.  Multi-thread
+    Eigen is still enabled via ``--xla_cpu_multi_thread_eigen``, and the
+    Eigen worker count is controlled by ``OMP_NUM_THREADS`` (defaults to
+    hardware concurrency).
+    """
     if "XLA_FLAGS" not in os.environ:
         try:
             # NOTE: the legacy `intra_op_parallelism_threads=N` XLA flag
@@ -334,11 +369,14 @@ def _configure_cpu(config: HardwareConfig) -> None:
             # use with a fatal `Unknown flag in XLA_FLAGS` error from
             # parse_flags_from_env.cc.  Drop it; rely on XLA's default
             # CPU thread-pool autoscaling from os.cpu_count().
-            _set_xla_flags({
-                "xla_cpu_multi_thread_eigen": "true",
-            })
+            _set_xla_flags({"xla_cpu_multi_thread_eigen": "true"})
         except Exception:
             pass  # Non-critical; XLA will use defaults.
+    if "OMP_NUM_THREADS" not in os.environ:
+        try:
+            os.environ["OMP_NUM_THREADS"] = str(os.cpu_count() or 4)
+        except Exception:
+            pass
 
 
 # ============================================================================

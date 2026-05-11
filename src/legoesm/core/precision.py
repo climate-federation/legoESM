@@ -33,6 +33,15 @@ from typing import NamedTuple, Sequence
 import jax
 import jax.numpy as jnp
 
+# Deferred import to break cycle: runtime/__init__.py imports
+# runtime.precision, which re-exports from this module — so
+# importing runtime.backend at module load time would mid-init
+# this very file. Both helpers are only called from function
+# bodies, so a lazy import is safe.
+def _backend():
+    from legoesm.runtime import backend as _b
+    return _b
+
 
 # ---------------------------------------------------------------------------
 # Dtype parsing helper
@@ -194,8 +203,7 @@ def validate_policy(policy: PrecisionPolicy | None = None) -> None:
     )
     if not needs_x64:
         return
-    from legoesm.runtime.backend import supports_float64
-    if not supports_float64():
+    if not _backend().supports_float64():
         # Backend cannot do float64; _resolve_dtype will clamp to float32.
         return
     if not jax.config.jax_enable_x64:
@@ -260,8 +268,8 @@ def _clamp_to_backend(dtype: jnp.dtype) -> jnp.dtype:
     the precision policy never requests an impossible dtype.
     """
     if dtype == jnp.float64:
-        from legoesm.runtime.backend import supports_float64, is_x64_enabled
-        if not (supports_float64() and is_x64_enabled()):
+        b = _backend()
+        if not (b.supports_float64() and b.is_x64_enabled()):
             return jnp.float32
     return dtype
 

@@ -29,6 +29,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.core.operators import gradient_x, gradient_y
 from legoesm.grids.cubed_sphere import CubedSphereGrid
@@ -108,8 +109,8 @@ def free_drift_velocity(
     wind_v: jnp.ndarray,
     drag_ocean: float = 5.5e-3,
     drag_atm: float = 1.3e-3,
-    rho_air: float = 1.225,
-    rho_ice: float = 917.0,
+    rho_air: float = constants.rho_air,
+    rho_ice: float = constants.rho_ice,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Compute diagnostic ice velocity via linear drag combination.
 
@@ -151,7 +152,7 @@ def air_ice_stress(
     v_ice: jnp.ndarray,
     wind_u: jnp.ndarray,
     wind_v: jnp.ndarray,
-    rho_air: float = 1.225,
+    rho_air: float = constants.rho_air,
     C_ai: float = 1.3e-3,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Compute air-ice drag stress.
@@ -186,7 +187,7 @@ def ocean_ice_stress(
     v_ice: jnp.ndarray,
     ocean_u: jnp.ndarray,
     ocean_v: jnp.ndarray,
-    rho_ocean: float = 1025.0,
+    rho_ocean: float = constants.rho_ocean,
     C_oi: float = 5.5e-3,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Compute ocean-ice drag stress.
@@ -239,9 +240,9 @@ def evp_solver(
     P_star: float = 2.75e4,
     C_strength: float = 20.0,
     T_evp: float = 0.36,
-    rho_ice: float = 917.0,
-    rho_air: float = 1.225,
-    rho_ocean: float = 1025.0,
+    rho_ice: float = constants.rho_ice,
+    rho_air: float = constants.rho_air,
+    rho_ocean: float = constants.rho_ocean,
     C_ai: float = 1.3e-3,
     C_oi: float = 5.5e-3,
     differentiable: bool = False,
@@ -295,7 +296,17 @@ def evp_solver(
     """
     dt_s = dt / N_evp  # subcycle timestep
 
-    # Ice mass per unit area
+    # Ice mass per unit ice-covered area: rho_ice · h.  In the CICE
+    # equation of motion, both the wind/ocean stress AND the mass scale
+    # by concentration A: m_grid · du/dt = A · tau_a + A · tau_o + ...,
+    # which simplifies to rho_ice · h · du/dt = tau_a + tau_o + ...
+    # because air_ice_stress / ocean_ice_stress already return stress
+    # per unit ice-covered area (no A factor).  Including concentration
+    # in m_ice without also weighting the stresses introduces a 1/A
+    # over-acceleration in the marginal-ice zone.  An earlier audit
+    # iteration claimed the original ``rho_ice · max(h, 0.01)`` was
+    # missing concentration weighting; Codex GPT-5 review caught the
+    # bookkeeping mistake, and the original form is correct.
     m_ice = rho_ice * jnp.maximum(h_ice, 0.01)
 
     # Ice strength (constant during subcycling)
@@ -319,7 +330,7 @@ def evp_solver(
         s11_new, s22_new, s12_new = evp_stress_update(
             s11_c, s22_c, s12_c,
             eps_11, eps_22, eps_12,
-            P, e_yield, T_evp, dt_s,
+            P, e_yield, T_evp, dt_s, N_evp,
         )
 
         # 3. Stress divergence

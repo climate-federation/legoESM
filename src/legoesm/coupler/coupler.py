@@ -36,6 +36,12 @@ from legoesm.coupler.coupling_fields import (
     SurfaceToAtm,
     TileResponse,
 )
+
+# LY09 sea-surface saturation reduction for typical seawater salinity (~35 PSU).
+# The saturation vapor pressure over saline water is ~2 % lower than over
+# fresh water; q_sat at the air-sea interface is correspondingly reduced.
+# Required by OMIP-2 protocol (Griffies 2016 §2.2 → Large & Yeager 2009 §3).
+_Q_SAT_SALINE_FACTOR = 0.98
 from legoesm.coupler.lake import LakeConfig, LakeState, step_lake
 from legoesm.coupler.tile_fractions import (
     blend_tiles,
@@ -115,7 +121,6 @@ def init_surface_state(
 
     if isinstance(land_config, MultiLayerLandConfig):
         # For multi-layer land, ncol = product of spatial dims
-        import math
         ncol = math.prod(shape)
         land = init_multilayer_land_state(
             ncol, land_config, T_init=T_soil_init,
@@ -130,6 +135,11 @@ def init_surface_state(
                              name="snow_depth", dims=dims_2d, units="kg/m2"),
             snow_age=Field(data=jnp.zeros(shape, dtype=_sd),
                            name="snow_age", dims=dims_2d, units="s"),
+            # Initialise runoff to zeros so the pytree shape is
+            # invariant across timesteps (slab_land sets it to a
+            # populated array after every step; matches LakeState.Q_freeze
+            # convention).  Audit F13.
+            runoff=jnp.zeros(shape, dtype=_sd),
         )
 
     ice = SeaIceState(
@@ -149,6 +159,11 @@ def init_surface_state(
                     name="T_epi", dims=dims_2d, units="K"),
         T_hypo=Field(data=jnp.full(shape, T_hypo_init, dtype=_sd),
                      name="T_hypo", dims=dims_2d, units="K"),
+        # Initialise Q_freeze to zeros so the pytree shape is
+        # invariant across timesteps (two_layer_lake populates this
+        # at every step).  Audit F14.
+        Q_freeze=Field(data=jnp.zeros(shape, dtype=_sd),
+                       name="Q_freeze", dims=dims_2d, units="W/m2"),
     )
 
     acc = reset_accumulator(shape)
@@ -181,7 +196,9 @@ def ocean_tile_response(
     MOST algorithms (COARE 3.0 or Large & Yeager 2004).
     """
     shape = ocean_sst.shape
-    q_sfc = saturation_mixing_ratio(ocean_sst, forcing.p_surface)
+    q_sfc = _Q_SAT_SALINE_FACTOR * saturation_mixing_ratio(
+        ocean_sst, forcing.p_surface,
+    )
     rho = forcing.rho_lowest
 
     if config.bulk_scheme in ("coare3", "large_yeager"):
@@ -194,6 +211,8 @@ def ocean_tile_response(
             ocean_sst, q_sfc,
             rho,
             z_ref=config.z_ref,
+            z_t=config.z_t_atm,
+            z_q=config.z_q_atm,
             z0_init=config.ocean_z0,
             scheme=config.bulk_scheme,
             n_iter=config.bulk_n_iter,
@@ -238,6 +257,11 @@ def ocean_tile_response(
     # — same per-coupler-step micro-optimisation as the loop-18 lake
     # rewrite.
     _ssh_dtype = ocean_sst.dtype
+    # Ocean tile freshwater: P − E, where evap is back-derived from
+    # lhflx using L_v (ocean is liquid, never sublimes).  Positive =
+    # freshwater INTO ocean.
+    evap_rate = lhflx / constants.L_v   # kg/m²/s, positive = up (ocean → atm)
+    freshwater_flux = forcing.precip_total - evap_rate
     return TileResponse(
         T_surface=ocean_sst,
         albedo=alpha_ocean,
@@ -252,6 +276,19 @@ def ocean_tile_response(
         u_ocean_sfc=ocean_u,
         v_ocean_sfc=ocean_v,
         co2_flux=jnp.zeros(shape, dtype=_ssh_dtype),
+        freshwater_flux=freshwater_flux,
+        # Ocean tile is itself the source of ocean heat — does not
+        # extract from the ocean.  Sea-ice tiles report their
+        # extraction; the ocean column treats the sum across tiles
+        # (after blending) as a heat-budget sink.
+        ocean_heat_extraction=jnp.zeros(shape, dtype=_ssh_dtype),
+        # Ocean tile contributes its own wind stress (already in
+        # tau_x/tau_y) — back-reaction is the ice tile's job.
+        ocean_stress_x=jnp.zeros(shape, dtype=_ssh_dtype),
+        ocean_stress_y=jnp.zeros(shape, dtype=_ssh_dtype),
+        # Ocean evaporation: lhflx already used L_v, so evap_rate
+        # is the correct mass flux.
+        surface_mass_flux=evap_rate,
     )
 
 

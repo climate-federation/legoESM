@@ -34,6 +34,7 @@ import jax
 import jax.numpy as jnp
 import equinox as eqx
 
+from legoesm import constants
 from legoesm.driver.physics_pipeline import PhysicsOutput
 from legoesm.driver.grid_adapters import ColumnAdapter
 
@@ -206,7 +207,7 @@ def _pack_column_features(
         u / 30.0,
         v / 30.0,
         q_v * 1e3,
-        jnp.atleast_1d(p_s / 1e5),
+        jnp.atleast_1d(p_s / constants.p_ref),
         jnp.atleast_1d(solar / 1400.0),
     ])
 

@@ -107,8 +107,11 @@ class AMIPExperimentConfig(NamedTuple):
     topo_smoothing: int = 4  # Laplacian smoothing passes
     topo_edge_blend: float = 0.3  # edge blending strength for cubed-sphere
 
-    # Sea ice
-    T_ice: float = 271.35
+    # Sea ice.  ``T_ice`` is the seawater freezing point used as the
+    # SST floor / SIC ramp threshold — NOT the ice surface
+    # temperature.  Legacy name preserved for AMIP config
+    # compatibility.
+    T_ice: float = 271.35           # = constants.T_freeze_ocean
     albedo_ice: float = 0.65
     albedo_ocean: float = 0.06
 

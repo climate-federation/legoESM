@@ -151,24 +151,56 @@ def compute_visbeck_kappa_gm(
     N2 = compute_buoyancy_frequency(
         rho, z_coord.dz_ref, jacobian, rho_ref=rho_ref, g=constants.g,
     )
-    N = jnp.sqrt(jnp.maximum(N2, 0.0))
+    # Use a small positive floor on N² before sqrt, NOT a hard zero.
+    # ``sqrt(0)`` has an infinite gradient in JAX; combined with the
+    # ``maximum(N²,0)`` mask whose gradient is zero on the unstable
+    # side, the backward pass evaluates ``inf * 0`` and produces NaN.
+    # ``maximum(N², 1e-30)`` keeps N tiny but positive in unstable
+    # layers, so ``sqrt`` has a finite (but very large) derivative
+    # which is then multiplied by zero from ``maximum``'s VJP — a
+    # well-defined zero rather than NaN.  Forward effect is at most
+    # ``sqrt(1e-30) ≈ 1e-15``, negligible.
+    N = jnp.sqrt(jnp.maximum(N2, 1e-30))
     # Regularise sqrt at zero slope — 1e-30 avoids spurious |S| ~ 3e-4
     # that the float32 eps (~1.19e-7) would produce.
     S_mag = jnp.sqrt(S_x ** 2 + S_y ** 2 + 1e-30)
     sigma = N * S_mag
 
-    # Depth-weighted average of sigma_Eady.
-    w_total = jnp.sum(dz_half, axis=-1)
-    sigma_bar = jnp.sum(sigma * dz_half, axis=-1) / jnp.maximum(w_total, eps)
-
-    # Mixing length L.
+    # Depth-weighted average of sigma_Eady (and N, when needed) — fuse
+    # the column reductions that share the ``dz_half`` weight.
+    # Dry-column safeguard: when ``dz_half`` is all zero (jacobian = 0
+    # over land or in dry cells), ``w_total = 0`` and the eps-floor in
+    # the denominator yielded a garbage ``sigma_bar`` that was only
+    # masked by the final ``clip(kappa, ..., kappa_max)``.  Explicitly
+    # zero the column average when there's no wet water, so the wet
+    # mask propagates cleanly through gradients and forward values.
     if cfg.use_rossby_radius:
-        N_bar = jnp.sum(N * dz_half, axis=-1) / jnp.maximum(w_total, eps)
+        # 3 reductions over the same axis with weight ``dz_half``:
+        # ``w_total``, ``sigma * dz_half`` and ``N * dz_half``.
+        _stack = jnp.stack([jnp.ones_like(sigma), sigma, N], axis=-1)
+        _col = jnp.sum(_stack * dz_half[..., None], axis=-2)
+        w_total = _col[..., 0]
+        w_safe = jnp.maximum(w_total, eps)
+        wet_col = w_total > eps
+        sigma_bar = jnp.where(wet_col, _col[..., 1] / w_safe, 0.0)
+        N_bar = jnp.where(wet_col, _col[..., 2] / w_safe, 0.0)
         H_col = jnp.sum(dz_actual, axis=-1)
         f_safe = jnp.maximum(jnp.abs(f_coriolis), cfg.f_min)
         L = jnp.clip(N_bar * H_col / f_safe, cfg.L_min, cfg.L_max)
     else:
+        # 2 reductions over the same axis with weight ``dz_half``.
+        _stack = jnp.stack([jnp.ones_like(sigma), sigma], axis=-1)
+        _col = jnp.sum(_stack * dz_half[..., None], axis=-2)
+        w_total = _col[..., 0]
+        wet_col = w_total > eps
+        sigma_bar = jnp.where(
+            wet_col, _col[..., 1] / jnp.maximum(w_total, eps), 0.0,
+        )
         L = jnp.full_like(sigma_bar, cfg.L_fixed)
 
-    kappa = cfg.alpha * L ** 2 * sigma_bar
-    return jnp.clip(kappa, cfg.kappa_min, cfg.kappa_max)
+    # Apply the wet-column mask AFTER clipping — otherwise dry columns
+    # get lifted to ``kappa_min`` rather than 0 (Codex review caught
+    # this).  A dry column should contribute exactly zero diffusivity
+    # so it cannot leak gradients through the GM/Redi tendencies.
+    kappa = jnp.clip(cfg.alpha * L ** 2 * sigma_bar, cfg.kappa_min, cfg.kappa_max)
+    return jnp.where(wet_col, kappa, 0.0)

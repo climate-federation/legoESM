@@ -501,3 +501,90 @@ def weno_upwind(
         Upwind face value.
     """
     return jnp.where(velocity >= 0, f_plus, f_minus)
+
+
+# ===================================================================
+#  Point-value → cell-average conversion for finite-volume WENO
+# ===================================================================
+
+def point_to_cellavg_periodic(f, axis, order=6):
+    """Convert point values to cell averages along a periodic axis.
+
+    WENO reconstruction assumes cell-average inputs. Passing point
+    values caps the effective order at O(dx^3). This function uses
+    symmetric stencil weights derived by matching the Taylor series of
+    the cell average (1/h) ∫_{x-h/2}^{x+h/2} f(t)dt against the
+    stencil sum c_k * f(x + k*h).
+
+    Parameters
+    ----------
+    f : array
+        Point values at cell centers.
+    axis : int
+        Axis along which to apply the conversion (periodic).
+    order : {4, 6}
+        Accuracy order of the conversion.
+        4: 3-point stencil (sufficient for WENO3)
+        6: 5-point stencil (sufficient for WENO5/7)
+
+    Returns
+    -------
+    f_avg : array
+        Cell-average values (same shape as f).
+    """
+    fm1 = jnp.roll(f, 1, axis=axis)
+    fp1 = jnp.roll(f, -1, axis=axis)
+
+    if order <= 4:
+        # 3-point: f_avg = (11/12)*f + (1/24)*(f_{-1} + f_{+1})
+        # Matches moments p=0,2; 4th-order accurate.
+        return (11.0 / 12.0) * f + (1.0 / 24.0) * (fm1 + fp1)
+    else:
+        # 5-point: f_avg = (863/960)*f + (77/1440)*(f_{±1}) - (17/5760)*(f_{±2})
+        # Matches moments p=0,2,4; 6th-order accurate.
+        fm2 = jnp.roll(f, 2, axis=axis)
+        fp2 = jnp.roll(f, -2, axis=axis)
+        return ((863.0 / 960.0) * f
+                + (77.0 / 1440.0) * (fm1 + fp1)
+                - (17.0 / 5760.0) * (fm2 + fp2))
+
+
+def point_to_cellavg_bounded(f, axis, order=6):
+    """Convert point values to cell averages along a bounded axis.
+
+    Same as ``point_to_cellavg_periodic`` but uses Neumann (copy boundary)
+    ghost cells instead of periodic wrapping. Accuracy degrades near
+    boundaries where ghost cells are used.
+
+    Parameters
+    ----------
+    f : array
+        Point values at cell centers.
+    axis : int
+        Axis along which to apply the conversion (bounded).
+    order : {4, 6}
+        Accuracy order of the conversion in the interior.
+
+    Returns
+    -------
+    f_avg : array
+        Cell-average values (same shape as f).
+    """
+    n = f.shape[axis]
+    pad_width = {4: 1, 6: 2}.get(order, 2)
+
+    def _pad_neumann(arr, width):
+        slc_lo = [slice(None)] * arr.ndim
+        slc_hi = [slice(None)] * arr.ndim
+        slc_lo[axis] = slice(0, 1)
+        slc_hi[axis] = slice(-1, None)
+        pads = [arr[tuple(slc_lo)]] * width + [arr] + [arr[tuple(slc_hi)]] * width
+        return jnp.concatenate(pads, axis=axis)
+
+    f_padded = _pad_neumann(f, pad_width)
+    # Apply the periodic formula on the padded array, extract interior.
+    f_avg_padded = point_to_cellavg_periodic(f_padded, axis=axis, order=order)
+
+    slc = [slice(None)] * f.ndim
+    slc[axis] = slice(pad_width, pad_width + n)
+    return f_avg_padded[tuple(slc)]

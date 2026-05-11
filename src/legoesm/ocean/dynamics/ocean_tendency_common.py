@@ -55,6 +55,9 @@ def iterate_eos_and_pressure_anomaly(
     n_iter: int = 2,
     hi_precision_pressure: bool = False,
     h_actual: jnp.ndarray | None = None,
+    use_depth_dependent_ref: bool = False,
+    is_active_3d: jnp.ndarray | None = None,
+    rho_ref_z_static: jnp.ndarray | None = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Run the standard 2-pass EOS iteration and form ``p_prime``.
 
@@ -138,7 +141,40 @@ def iterate_eos_and_pressure_anomaly(
         )
         rho = eos_fn(T_filled, S_filled, p_hydro)
 
-    rho_prime = rho - rho_0
+    if rho_ref_z_static is not None:
+        # STATIC reference profile (preferred): a frozen-at-init
+        # ρ_ref(z) computed from the initial T, S over wet cells.
+        # ``ρ' = ρ − ρ_ref_z_static`` cuts the partial-cell PGF residual
+        # (the seed of the bottom-trapped rotational mode) by ~24× in
+        # offline probes without the positive-feedback drift that broke
+        # the dynamic recomputed-mean version (the dynamic version
+        # NaN'd at day 60 because ρ_ref_z chases T,S drift; see
+        # project_mpas_etopo_instability.md §8c).  Broadcasts on the
+        # trailing axis.
+        rho_ref_static = jnp.asarray(rho_ref_z_static, dtype=rho.dtype)
+        rho_prime = rho - rho_ref_static
+    elif use_depth_dependent_ref:
+        # DYNAMIC reference profile (legacy / discouraged): recompute
+        # the wet-cell mean every call.  Subtracts horizontally-uniform
+        # per-level ρ_ref(z) = mean over wet cells at each level.  In
+        # principle reduces the PGF residual; in practice creates a
+        # positive feedback as T,S drift over a long run, leading to
+        # NaN around day 60 on ETOPO + ico-4.  Kept for back-compat
+        # comparison only.
+        if is_active_3d is not None:
+            wet = is_active_3d.astype(rho.dtype)
+        else:
+            wet = jnp.broadcast_to(
+                mask[..., None].astype(rho.dtype), rho.shape,
+            )
+        # Reduce over all axes except the trailing vertical one.
+        horiz_axes = tuple(range(rho.ndim - 1))
+        wet_count = jnp.maximum(jnp.sum(wet, axis=horiz_axes), 1.0)
+        rho_ref_z = jnp.sum(rho * wet, axis=horiz_axes) / wet_count
+        # Broadcast back across horizontal axes.
+        rho_prime = rho - rho_ref_z
+    else:
+        rho_prime = rho - rho_0
 
     # Layer-thickness array used in the baroclinic-anomaly cumsum.
     # When ``h_actual`` is None, use the reference ``dz_ref`` (legacy z*
@@ -161,6 +197,79 @@ def iterate_eos_and_pressure_anomaly(
     p_prime = p_prime + 0.5 * dp_layer
 
     return rho, rho_prime, p_prime
+
+
+def compute_static_rho_ref_z(
+    T: jnp.ndarray,
+    S: jnp.ndarray,
+    mask: jnp.ndarray,
+    fill_fn: Callable[[jnp.ndarray], jnp.ndarray],
+    eos_fn: Callable[[jnp.ndarray, jnp.ndarray, jnp.ndarray], jnp.ndarray],
+    dz_ref: jnp.ndarray,
+    rho_0: float,
+    g: float,
+    *,
+    n_iter: int = 2,
+    h_actual: jnp.ndarray | None = None,
+    is_active_3d: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """Compute a frozen horizontally-uniform reference density profile.
+
+    Runs the same 2-pass EOS+hydrostatic-pressure iteration that
+    :func:`iterate_eos_and_pressure_anomaly` uses, then averages the
+    resulting in-situ density over wet cells at each level to produce a
+    ``(nlev,)`` profile.  Used at init time on ``T_init``, ``S_init`` to
+    build a STATIC ``ρ_ref(z)`` that is then passed to every call of
+    :func:`iterate_eos_and_pressure_anomaly` via the
+    ``rho_ref_z_static`` argument.
+
+    Why a separate helper rather than reusing the dynamic path: the
+    runtime path mixes two distinct concerns — computing ``ρ`` and
+    forming ``ρ' = ρ − ρ_ref``.  At init we want only the first plus the
+    horizontal mean.  Reusing the same EOS iteration here guarantees
+    that ``ρ_ref_z(T_init, S_init)`` is identical to what the dynamic
+    path would have computed on the initial state, so the static and
+    dynamic versions agree at ``t = 0`` and any divergence later is
+    purely from the recomputed-mean drift in the dynamic path.
+
+    Parameters mirror :func:`iterate_eos_and_pressure_anomaly`.
+    ``is_active_3d`` (when provided, e.g. by the partial-cell path)
+    takes precedence over the 2-D ``mask``: cells flagged inactive by
+    the partial-cell coordinate are excluded from the per-level mean
+    even when their column-mask says ``ocean``.
+
+    Returns
+    -------
+    rho_ref_z : jax.Array
+        Shape ``(nlev,)`` (always, regardless of T's horizontal shape).
+        Wet-cell mean of ``ρ`` after the 2-pass iteration.  Cast to
+        ``T.dtype``.
+    """
+    T_filled = fill_fn(T)
+    S_filled = fill_fn(S)
+
+    horiz_shape = T.shape[:-1]
+    J_ref = jnp.ones(horiz_shape, dtype=T.dtype)
+    eta_ref = jnp.zeros(horiz_shape, dtype=T.dtype)
+
+    rho = eos_fn(T_filled, S_filled, jnp.zeros_like(T))
+    for _ in range(n_iter):
+        p_hydro = compute_hydrostatic_pressure(
+            rho, eta_ref, dz_ref, J_ref, rho_0, g,
+            h_actual=h_actual,
+        )
+        rho = eos_fn(T_filled, S_filled, p_hydro)
+
+    if is_active_3d is not None:
+        wet = is_active_3d.astype(rho.dtype)
+    else:
+        wet = jnp.broadcast_to(
+            mask[..., None].astype(rho.dtype), rho.shape,
+        )
+    horiz_axes = tuple(range(rho.ndim - 1))
+    wet_count = jnp.maximum(jnp.sum(wet, axis=horiz_axes), 1.0)
+    rho_ref_z = jnp.sum(rho * wet, axis=horiz_axes) / wet_count
+    return rho_ref_z.astype(T.dtype)
 
 
 def apply_sponge_tracer_relaxation(
@@ -266,12 +375,36 @@ def implicit_bottom_drag_factor(
     *,
     eps: float = 1e-10,
 ) -> jnp.ndarray:
-    """Per-substep bottom-drag multiplier ``1 - dt · r / max(H, eps)``.
+    """Per-substep bottom-drag multiplier ``1 / (1 + dt·r / max(H, eps))``.
 
-    Used by both the lat-lon C-grid and MPAS barotropic substeps to
-    apply a linear bottom drag on the depth-averaged velocity.  The
-    floor on ``H`` prevents the drag from blowing up over very thin
-    water columns (≈ inundation).
+    Backward-Euler implicit form that, *as a standalone update* of
+    ``dU/dt = -r·U/H``, solves ``U_new = U_old - dt·r·U_new / H`` for
+    ``U_new / U_old``.  The result is in ``(0, 1]`` for any positive
+    ``dt``, ``r``, ``H`` — unconditionally stable, never flips velocity
+    sign.  Equivalent to the explicit form ``1 - dt·r/H`` to first
+    order; finite and bounded for arbitrary ``dt·r/H`` (the explicit
+    form would diverge for ``dt·r/H > 2``, a hazard in shallow-shelf
+    and inundation configurations).
+
+    Known limitation — combined drag application
+    --------------------------------------------
+    The explicit barotropic substep loops in this codebase apply this
+    factor *in addition to* a depth-mean bottom drag carried by
+    ``F_slow_u`` / ``F_slow_v`` (the depth-average of the 3D PE solver's
+    ``du_dt``, which already contains a bottom-cell drag of magnitude
+    ``-r·u_bot / dz_bot`` whose depth-average is ``-r·u_bot / H``).
+    The Crank-Nicolson implicit barotropic solver
+    (``barotropic_implicit_*``) intentionally relies on ``F_slow``
+    alone and does *not* apply this factor.  Effective barotropic-mode
+    drag in the explicit path is therefore ``≈ 2·r/H`` rather than
+    ``r/H`` (codex adversarial review iter-2 finding #1).  Resolving
+    this requires single-owner drag plumbing: either subtract the
+    depth-mean bottom drag from ``F_slow_u`` before the barotropic
+    substep, or remove the bottom-drag contribution from the 3D
+    solver's ``du_dt`` for the barotropic-explicit path.  Tracked as
+    open architectural debt; do not silently change call-site
+    semantics without a paired update to ``F_slow`` construction in
+    ``ocean_model_*.py``.
 
     Parameters
     ----------
@@ -288,4 +421,102 @@ def implicit_bottom_drag_factor(
     -------
     jax.Array, same shape as ``H``.
     """
-    return 1.0 - dt * drag_r / jnp.maximum(H, eps)
+    return 1.0 / (1.0 + dt * drag_r / jnp.maximum(H, eps))
+
+
+def bbl_distributed_drag_face_column(
+    u_field: jnp.ndarray,
+    h_face: jnp.ndarray,
+    drag_r: float,
+    H_BBL: float,
+    *,
+    eps: float = 1e-10,
+) -> jnp.ndarray:
+    """Killworth & Edwards (1999) / MOM6 ``BBL_thick_min`` distributed
+    bottom drag, per face-column.
+
+    On a partial-cell coordinate the deepest active cell can be O(1) m
+    thick.  Applying a linear drag of the form ``-r · u / h`` to that
+    single cell makes the bottom-cell drag tendency 100× the deep-ocean
+    value, blows up the explicit-CFL criterion ``r·dt < h``, and (per
+    the 2026-05-03 MPAS+ETOPO diagnostic) sign-reverses ``u`` for any
+    realistic ``dt``.  This helper instead spreads the same total drag
+    stress over a fixed Ekman-thickness BBL ``H_BBL`` near the
+    seafloor, distributing the drag tendency across whichever cells
+    overlap the BBL band.
+
+    Algorithm (per face column, vectorised over all face indices):
+
+    1. Build interface depths from ``cumsum(h_face)`` along the level
+       axis, with ``z = 0`` at the surface and depths *negative-downward*
+       (lat-lon convention; sign cancels in the ``min/max`` below).
+    2. Define the BBL band as ``[z_seafloor, z_seafloor + H_BBL]``.
+    3. For each cell ``k``, compute its overlap with the BBL band:
+       ``overlap_k = max(0, min(z_top_k, bbl_top) − max(z_bot_k,
+       z_seafloor))``.
+    4. Distribute drag stress proportionally:
+       ``dudt_k = −r · u_k · overlap_k / (h_k · H_BBL)``.
+
+    Limits:
+
+    - ``h_bot ≥ H_BBL`` (deep ocean): bottom-cell overlap = ``H_BBL``,
+      cell drag = ``−r·u/h_bot`` (recovers legacy single-cell form).
+      Cells above the bottom: zero overlap, zero drag contribution.
+    - ``h_bot < H_BBL`` (thin partial cell): bottom-cell drag =
+      ``−r·u/H_BBL`` (much weaker than ``−r·u/h_bot``; bounded by the
+      BBL thickness so explicit-CFL is dt-stable for any reasonable
+      ``r·dt < H_BBL``).  Cells above absorb the rest of the BBL band
+      with overlap-weighted drag.
+
+    The function is grid-agnostic — it operates per-face-column on
+    arrays of shape ``(face_dim..., nlev)``.  Same logic used by both
+    the lat-lon C-grid and MPAS Voronoi PE entries.
+
+    Parameters
+    ----------
+    u_field : array, shape (face_dim..., nlev)
+        Edge-normal velocity at the face for each level [m/s].
+    h_face : array, shape (face_dim..., nlev)
+        Per-level layer thickness at the face [m].  Inactive cells
+        have ``h = 0`` and contribute zero overlap.
+    drag_r : float
+        Linear drag coefficient [m/s].
+    H_BBL : float
+        BBL thickness [m] (typical ocean: 10–100 m; ``MOM6 BBL_thick_min``
+        defaults to 10 m).  Must be > 0.
+    eps : float
+        Safety floor on ``h_face`` to keep the divide finite at fully
+        dry cells; ``h = 0`` inactive cells get ``overlap = 0`` so the
+        choice of ``eps`` does not affect the answer.
+
+    Returns
+    -------
+    array, shape (face_dim..., nlev)
+        Drag tendency [m/s²] at each face-level.
+
+    References
+    ----------
+    Killworth & Edwards (1999), JPO 29, 1221–1238.
+    MOM6 ``BBL_thick_min`` (Adcroft et al. 2019, JAMES).
+
+    See ``docs/ocean_experiments/density_jacobian_pgf_mpas.md`` §8a
+    for the MPAS+ETOPO diagnostic that motivated the cross-grid port.
+    """
+    pad_axes = ((0, 0),) * (h_face.ndim - 1)  # noqa: F841 (parity with lat-lon)
+    z_half = jnp.concatenate(
+        [
+            jnp.zeros(h_face.shape[:-1] + (1,), dtype=h_face.dtype),
+            -jnp.cumsum(h_face, axis=-1),
+        ],
+        axis=-1,
+    )
+    z_top = z_half[..., :-1]                          # (..., nlev)
+    z_bot = z_half[..., 1:]                           # (..., nlev)
+    z_seafloor = z_half[..., -1:]                     # (..., 1)
+    bbl_top = z_seafloor + H_BBL
+    overlap = jnp.maximum(
+        0.0,
+        jnp.minimum(z_top, bbl_top) - jnp.maximum(z_bot, z_seafloor),
+    )
+    h_safe = jnp.maximum(h_face, eps)
+    return -drag_r * u_field * overlap / (h_safe * H_BBL)

@@ -75,7 +75,9 @@ def plot_global_field(
     # Convert to numpy
     lon_np = np.asarray(grid.lon) * 180.0 / np.pi  # Convert to degrees
     lat_np = np.asarray(grid.lat) * 180.0 / np.pi
-    data_np = np.asarray(field.data)
+    #data_np = np.asarray(field.data)
+    field_new=field.data if hasattr(field, 'data') else field
+    data_np = np.asarray(field_new)
 
     # Plot each face as a scatter plot
     if vmin is None:

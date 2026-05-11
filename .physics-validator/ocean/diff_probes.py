@@ -388,8 +388,9 @@ def probe_bottom_drag_factor():
     r = 1.0e-3
 
     f = implicit_bottom_drag_factor(dt, r, H)
-    # 1 - 600 * 1e-3 / H = 1 - 0.6/H. For H=10, f=1-0.06=0.94; H=5000, ~1-1.2e-4.
-    expected = 1.0 - dt * r / H
+    # Backward-Euler implicit form: f = 1 / (1 + dt*r/H).
+    # H=10: dt*r/H=0.06, f=1/1.06=0.9434; H=5000: dt*r/H=1.2e-4, f≈1.
+    expected = 1.0 / (1.0 + dt * r / H)
     ok = bool(jnp.allclose(f, expected, rtol=1e-12))
     report(
         "implicit_bottom_drag_factor",

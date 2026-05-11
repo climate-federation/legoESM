@@ -91,6 +91,42 @@ def test_convergent_flow_positive_mc_somewhere():
     assert float(jnp.max(mc)) > 0.0
 
 
+def test_mc_sign_matches_dycore_tracer_tendency():
+    """Audit cycle iter-35 finding F1 (CRITICAL): the cubed-sphere
+    branch of ``compute_moisture_convergence`` had been
+    double-negating ``fv_flux_divergence_3d``'s output, returning
+    ``+div(q·V)`` (moisture DIVERGENCE) instead of ``-div(q·V)``
+    (moisture CONVERGENCE).  The dycore tracer tendency uses the
+    convention ``dq/dt = -div(q·V)`` (see ``fv_flux_divergence_3d``
+    docstring).  After the iter-35 fix, ``compute_moisture_convergence``
+    must return the SAME quantity (up to per-column reshape) as the
+    underlying flux-divergence operator — both represent
+    ``dq/dt = -div(q·V)``.
+
+    Pin this by comparing the two outputs directly.
+    """
+    from legoesm.core.operators_3d import fv_flux_divergence_3d
+    grid, q_v = _cubed_sphere_field(n=8, nlev=2, fill=1.0e-2)
+    n = 8; nlev = 2
+    u = jnp.linspace(-5.0, 5.0, n)
+    u = jnp.broadcast_to(u[None, None, :, None], (6, n, n, nlev))
+    v = jnp.zeros_like(u)
+
+    mc = compute_moisture_convergence(q_v, u, v, grid)
+    fv_tendency = fv_flux_divergence_3d(
+        q_v, u, v, grid, limiter=False,
+    ).reshape(6 * n * n, nlev)
+
+    # The two arrays must be IDENTICAL.  Pre-fix the cubed-sphere
+    # branch returned -fv_tendency; this assertion would have
+    # caught the regression.
+    assert jnp.allclose(mc, fv_tendency, rtol=1e-12), (
+        "compute_moisture_convergence must return the same value "
+        "as fv_flux_divergence_3d (both = dq/dt = -div(q·V) = MC). "
+        "The iter-35 F1 fix removed a stale double-negation."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Differentiability — gradient through q_v
 # ---------------------------------------------------------------------------

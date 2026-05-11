@@ -6,6 +6,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
+from legoesm.coupler.bulk_flux import compute_most_fluxes
 from legoesm.ocean.eos import rho_0 as rho_0_ref, c_sw
 from legoesm.ocean.physics.surface_forcing.config import BulkFormulaConfig
 from legoesm.ocean.physics.surface_forcing.output import SurfaceForcingOutput
@@ -51,7 +52,6 @@ def bulk_formula_surface_forcing(
     Q_lw_up = cfg.emissivity * constants.sigma_sb * T_s ** 4
 
     if cfg.bulk_scheme in ("coare3", "large_yeager"):
-        from legoesm.coupler.bulk_flux import compute_most_fluxes
         # Wind is zonal only (prescribed), zero meridional
         u_a = jnp.full_like(T_s, cfg.U_a, dtype=dtype)
         v_a = jnp.zeros_like(T_s)
@@ -71,11 +71,18 @@ def bulk_formula_surface_forcing(
     else:
         # Constant coefficients: wind is zonal-only (u_a = U_a, v_a = 0)
         # to match the directional convention used in the MOST path.
-        Q_sh = cfg.rho_a * cfg.c_pa * cfg.C_H * cfg.U_a * (T_s - cfg.T_a)
-        Q_lh = cfg.rho_a * cfg.L_v * cfg.C_E * cfg.U_a * (q_sat - cfg.q_a)
+        # Heat fluxes scale with WIND SPEED |U_a| (the air-sea exchange
+        # rate is set by how vigorously the air is moving, not by the
+        # signed zonal component).  The previous code used signed
+        # ``cfg.U_a``, which would invert the sign of Q_sh and Q_lh
+        # under easterlies (cfg.U_a < 0) — i.e. a strong easterly would
+        # falsely *warm* a cool ocean.  Stress, on the other hand, IS
+        # directional: tau_x = rho_a · C_D · |U| · u.
+        U_a_speed = jnp.abs(cfg.U_a)
+        Q_sh = cfg.rho_a * cfg.c_pa * cfg.C_H * U_a_speed * (T_s - cfg.T_a)
+        Q_lh = cfg.rho_a * cfg.L_v * cfg.C_E * U_a_speed * (q_sat - cfg.q_a)
 
         # tau = rho_a * C_D * |U_a| * (u_a, v_a)  — directional stress
-        U_a_speed = jnp.abs(cfg.U_a)
         tau_x = jnp.full_like(T_s, cfg.rho_a * cfg.C_D * U_a_speed * cfg.U_a, dtype=dtype)
         tau_y = jnp.zeros_like(T_s)
 

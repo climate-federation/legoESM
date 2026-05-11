@@ -213,11 +213,15 @@ def barotropic_substeps(
     h_k = compute_layer_thickness(
         eta, H_bathy, z_coord, min_water_column_m=config.min_water_column_m,
     )
-    H_total = jnp.sum(h_k, axis=-1)                        # (6, n, n)
+    # H_total + U_bar + V_bar all reduce ``... * h_k`` over the level
+    # axis — fuse into one stacked column reduction.
+    _bar_triple = jnp.sum(
+        jnp.stack([h_k, u * h_k, v * h_k], axis=-1), axis=-2,
+    )
     # Keep depth averages finite if a column becomes too thin.
-    H_total = jnp.maximum(H_total, min_water_col)
-    U_bar = jnp.sum(u * h_k, axis=-1) / H_total * mask     # (6, n, n)
-    V_bar = jnp.sum(v * h_k, axis=-1) / H_total * mask
+    H_total = jnp.maximum(_bar_triple[..., 0], min_water_col)
+    U_bar = _bar_triple[..., 1] / H_total * mask           # (6, n, n)
+    V_bar = _bar_triple[..., 2] / H_total * mask
 
     # No explicit F_slow here: the 3D slow tendency has already been applied
     # to u, v by _pytree_axpy in split_explicit_step before this function is

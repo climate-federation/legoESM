@@ -59,6 +59,18 @@ from typing import Callable, NamedTuple, TYPE_CHECKING
 import jax
 import jax.numpy as jnp
 
+from legoesm.grids.halo import (
+    CONNECTIVITY,
+    EAST,
+    NORTH,
+    SOUTH,
+    WEST,
+    pad_halo,
+    pad_halo_vector,
+)
+from legoesm.parallel.halo_exchange import pad_halo_mpi, pad_halo_vector_mpi
+from legoesm.parallel.mesh import get_active_config
+
 if TYPE_CHECKING:
     from legoesm.parallel.comm import CommTopology
 
@@ -113,7 +125,6 @@ def jax_native_halo_exchange(data, grid, mesh=None):
         import warnings
         # ppermute path only works for face-only sharding (6 faces, no tiles).
         # Reject sub-face tiling to prevent silent incorrect results.
-        from legoesm.parallel.mesh import get_active_config
         active_cfg = get_active_config()
         if active_cfg is not None and getattr(active_cfg, 'tiling', (1, 1)) != (1, 1):
             warnings.warn(
@@ -123,7 +134,6 @@ def jax_native_halo_exchange(data, grid, mesh=None):
                 RuntimeWarning,
                 stacklevel=2,
             )
-            from legoesm.grids.halo import pad_halo
             return pad_halo(data)
         warnings.warn(
             "jax_native_halo_exchange: the ppermute-based code path is "
@@ -135,7 +145,6 @@ def jax_native_halo_exchange(data, grid, mesh=None):
         return _ppermute_halo_exchange(data, grid, mesh)
     # Fall back to the standard local halo pad (no MPI needed for
     # single-node multi-GPU when XLA handles data movement via sharding).
-    from legoesm.grids.halo import pad_halo
     return pad_halo(data)
 
 
@@ -166,10 +175,7 @@ def _ppermute_halo_exchange(data, grid, mesh):
     jax.Array
         Halo-padded field.
     """
-    from legoesm.grids.halo import (
-        CONNECTIVITY, WEST, EAST, SOUTH, NORTH,
-        _extract_edge_strip, pad_halo,
-    )
+    from legoesm.grids.halo import _extract_edge_strip
 
     n_devices = mesh.shape["face"] if "face" in mesh.axis_names else 1
     if n_devices <= 1:
@@ -573,7 +579,6 @@ def overlapped_halo_compute(
     # ------------------------------------------------------------------
     # Step 3: Full (blocking) halo exchange.
     # ------------------------------------------------------------------
-    from legoesm.grids.halo import pad_halo
     padded_full = pad_halo(field, halo=h, interp_offsets=interp_offsets)
 
     # ------------------------------------------------------------------
@@ -646,7 +651,6 @@ def overlapped_halo_compute_vector(
     u_int, v_int = compute_fn(u_partial, v_partial)
 
     # Step 3: Full halo exchange with rotation
-    from legoesm.grids.halo import pad_halo_vector
     u_full, v_full = pad_halo_vector(
         u_field, v_field,
         cos_angle, sin_angle,
@@ -788,12 +792,17 @@ def start_halo_exchange(
 ) -> jax.Array:
     """Initiate MPI halo exchange and return the padded result.
 
-    Since mpi4jax exposes only blocking ``sendrecv``, this function
-    performs the full synchronous MPI halo exchange.  It is provided as
-    a named entry point so that callers can structure their code in the
-    ``start / compute_interior / finish`` pattern.  XLA may still
-    overlap the host-side MPI scheduling with device-side interior
-    kernels when the computation graph is structured this way.
+    .. warning::
+        **This is currently a blocking pass-through to** :func:`pad_halo_mpi`,
+        not a non-blocking primitive.  ``mpi4jax`` does not yet expose
+        ``Isend`` / ``Irecv``, so the ``start / compute_interior / finish``
+        idiom this function suggests cannot deliver real overlap on top of
+        it.  The packed 4D halo exchange (``packed_pad_halo_mpi_4d``)
+        coalesces multiple fields into one collective and is the path
+        production code should use.  This API is preserved for back-
+        compat and as a hook for a future ``mpi4jax`` non-blocking
+        upgrade — its current performance profile is identical to
+        ``pad_halo_mpi``.
 
     Parameters
     ----------
@@ -809,7 +818,6 @@ def start_halo_exchange(
     jax.Array, shape ``(6, n+2h, n+2h)``
         Halo-padded field with correct neighbor data on all edges.
     """
-    from legoesm.parallel.halo_exchange import pad_halo_mpi
     return pad_halo_mpi(field, topology, halo=halo_width)
 
 
@@ -1089,7 +1097,6 @@ def async_halo_step_vector(
     )
 
     # Step 2: Full MPI vector halo exchange with rotation.
-    from legoesm.parallel.halo_exchange import pad_halo_vector_mpi
     u_full, v_full = pad_halo_vector_mpi(
         u_field, v_field,
         cos_angle, sin_angle,

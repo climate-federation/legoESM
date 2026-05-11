@@ -1,0 +1,698 @@
+diff --git a/docs/CROSS_GRID_COMPARISON_REPORT.md b/docs/CROSS_GRID_COMPARISON_REPORT.md
+index 34219ae4..999497e9 100644
+--- a/docs/CROSS_GRID_COMPARISON_REPORT.md
++++ b/docs/CROSS_GRID_COMPARISON_REPORT.md
+@@ -1,6 +1,6 @@
+ # legoESM Cross-Grid Comparison Report
+ 
+-**Branch**: `simulation_full_check` (iter-127 snapshot)
++**Branch**: `simulation_full_check` (iter-128 snapshot)
+ **Scope**: end-to-end cross-grid comparison across the user's prompt
+ items: shallow water → hydrostatic (Held-Suarez, RCE, AMIP) → ocean
+ test cases → OMIP, on lat-lon FV / cubed sphere / icosahedral / spectral
+diff --git a/docs/ocean_experiments_reference.md b/docs/ocean_experiments_reference.md
+index beb00efe..99ed80f9 100644
+--- a/docs/ocean_experiments_reference.md
++++ b/docs/ocean_experiments_reference.md
+@@ -416,7 +416,13 @@ None. Free adjustment.
+ 
+ ### Validation Thresholds
+ 
+-- T_drift_relative < 1e-3
++- T_drift_relative < 1e-3 (loose contract)
++- **T_drift_relative < 1e-8 (test-matrix runner gate)** — geostrophic_adjustment has no T forcing or T diffusion, so the
++  test-matrix runner gate is tightened to 1e-8 in both
++  `scripts/run_ocean_test_matrix.py:run_geostrophic_adjustment` and
++  `scripts/ocean_test_matrix/experiments.py:run_geostrophic_adjustment`.  Empirically observed drift is roundoff-level
++  (~1e-16 to 1e-12) on all supported grids; 1e-8 leaves a wide safety margin and catches numerical bugs that the loose
++  1e-3 contract would miss.
+ - T_drift_absolute < 0.1 C (fallback)
+ - max_speed_final < 1.0 m/s
+ - min_adjustment_speed > 0.001 m/s
+diff --git a/scripts/ocean_test_matrix/experiments.py b/scripts/ocean_test_matrix/experiments.py
+index 5ec3d801..9d9d9099 100644
+--- a/scripts/ocean_test_matrix/experiments.py
++++ b/scripts/ocean_test_matrix/experiments.py
+@@ -16,6 +16,7 @@ from ocean_test_matrix import config
+ from ocean_test_matrix.setup import _create_ocean_setup
+ from ocean_test_matrix.timeloop import (
+     _run_timeloop, _compute_drift, _apply_drift_tolerance,
++    _apply_value_threshold, _apply_pe_rel_sign,
+ )
+ from ocean_test_matrix.extraction import (
+     _make_check_fn, _make_scalar_fn, _make_extract_fn, _key_array_fn,
+@@ -722,7 +723,14 @@ def run_geostrophic_adjustment(tc: TestCase, output_dir: Path, days: float
+     T_drift = _compute_drift(diag.get("mean_T", []))
+     notes = f"T drift={T_drift:.2e}"
+     # iter-127 (codex iter-126-followup MEDIUM-2): apply
+-    # T-drift gate (mirrors monolithic geostrophic_adjustment).
++    # T-drift gate.  geostrophic_adjustment has zero T tendency
++    # (no surface fluxes, no diffusion in this setup), so any
++    # measurable drift is a numerical bug.  1e-8 is empirically
++    # validated and tighter than the documented 1e-3 in
++    # ``docs/ocean_experiments_reference.md:419`` — see
++    # iter-128 update of that doc.  Same gate as monolithic
++    # ``run_geostrophic_adjustment`` in
++    # ``scripts/run_ocean_test_matrix.py:3745``.
+     ok, notes = _apply_drift_tolerance(
+         ok, notes, T_drift, 1e-8,
+         label="T", n_samples=len(diag.get("mean_T", [])))
+@@ -1198,11 +1206,20 @@ def run_overflow(tc: TestCase, output_dir: Path, days: float
+     notes = (f"PE drift={pe_drift:.2e}, PE_rel={pe_rel_final:.4e}, "
+              f"T drift={T_drift:.2e}")
+     # iter-127 (codex iter-126-followup MEDIUM-2): apply
+-    # T-drift gate to overflow.  Mirrors monolithic at 1e-2.
+-    # PE drift NOT gated since PE evolves physically.
++    # T-drift gate to overflow.  Applies the same gate as
++    # monolithic at 1e-2.
++    # PE drift magnitude is NOT gated because RPE decreases
++    # physically (PE → KE conversion); instead the iter-128
++    # block below applies the documented sign constraint
++    # ``pe_rel_final < 0`` (docs/ocean_experiments_reference.md:626).
+     ok, notes = _apply_drift_tolerance(
+         ok, notes, T_drift, 1e-2,
+         label="T", n_samples=len(diag.get("mean_T", [])))
++    # iter-128 (codex iter-127-followup MEDIUM-2): apply the
++    # documented ``pe_rel_final < 0`` sign check.
++    if len(diag.get("PE_rel", [])) >= 2:
++        ok, notes = _apply_pe_rel_sign(
++            ok, notes, pe_rel_final, label="PE_rel_final")
+ 
+     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+     depth = -z_full
+@@ -1317,11 +1334,23 @@ def run_stommel_gyre_tracer(tc: TestCase, output_dir: Path, days: float
+              f"overshoot={overshoot:.3f}, undershoot={undershoot:.3f}")
+     # iter-127 (codex iter-126-followup MEDIUM-2): apply
+     # S_integral-drift gate at 1e-3 (documented in
+-    # ocean_experiments_reference.md) — mirrors monolithic.
++    # ocean_experiments_reference.md:680) — same gate as
++    # monolithic.
+     ok, notes = _apply_drift_tolerance(
+         ok, notes, S_int_drift, 1e-3,
+         label="S_integral",
+         n_samples=len(diag.get("S_integral", [])))
++    # iter-128 (codex iter-127-followup MEDIUM-3): apply the
++    # documented overshoot/undershoot < 0.1 PSU thresholds
++    # (docs/ocean_experiments_reference.md:681-682) — these
++    # catch monotonicity violations that the integral
++    # conservation gate misses.
++    ok, notes = _apply_value_threshold(
++        ok, notes, overshoot, 0.1,
++        label="S overshoot", op="le", units="PSU")
++    ok, notes = _apply_value_threshold(
++        ok, notes, undershoot, 0.1,
++        label="S undershoot", op="le", units="PSU")
+ 
+     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+     depth = -z_full
+diff --git a/scripts/ocean_test_matrix/timeloop.py b/scripts/ocean_test_matrix/timeloop.py
+index 14d6b4df..6c6aeffd 100644
+--- a/scripts/ocean_test_matrix/timeloop.py
++++ b/scripts/ocean_test_matrix/timeloop.py
+@@ -69,6 +69,35 @@ def _apply_drift_tolerance(
+     )
+ 
+ 
++def _apply_value_threshold(
++    ok: bool, notes: str, value: float, threshold: float,
++    *, label: str, op: str = "le", units: str = "",
++) -> tuple[bool, str]:
++    """Thin wrapper for non-drift PASS thresholds.  Delegates
++    to ``legoesm.diagnostics.conservation_drift.apply_value_threshold``
++    (iter-128 codex iter-127-followup MEDIUM-2/3).
++    """
++    from legoesm.diagnostics.conservation_drift import (
++        apply_value_threshold,
++    )
++    return apply_value_threshold(
++        ok, notes, value, threshold,
++        label=label, op=op, units=units,
++    )
++
++
++def _apply_pe_rel_sign(
++    ok: bool, notes: str, pe_rel_final: float, *, label: str,
++) -> tuple[bool, str]:
++    """Apply the documented Overflow ``pe_rel_final < 0`` sign
++    constraint (iter-128 codex iter-127-followup MEDIUM-2).
++    """
++    return _apply_value_threshold(
++        ok, notes, pe_rel_final, 0.0,
++        label=label, op="lt_zero",
++    )
++
++
+ # ===========================================================================
+ # Generic time loop
+ # ===========================================================================
+diff --git a/scripts/run_atmosphere_test_matrix.py b/scripts/run_atmosphere_test_matrix.py
+index 0f9979e1..f25e27d7 100644
+--- a/scripts/run_atmosphere_test_matrix.py
++++ b/scripts/run_atmosphere_test_matrix.py
+@@ -245,58 +245,24 @@ def _apply_mass_drift_tolerance(
+     ok: bool, notes: str, mass_drift: float, tol: float,
+     *, n_samples: int | None = None,
+ ) -> tuple[bool, str]:
+-    """Apply a mass-drift PASS tolerance to a test case.
+-
+-    iter-117 introduced ``HELD_SUAREZ_MASS_DRIFT_TOL`` for the HS
+-    runner.  iter-118 codex iter-117-followup MEDIUM-2/3
+-    factored this into a shared helper because:
+-
+-    * The HS gate ``mass_drift > tol`` was False for NaN drift,
+-      so a NaN-but-finite-checked run could PASS.  iter-118
+-      gates on ``not np.isfinite(...) or > tol``.
+-    * Other runners (baroclinic, AMIP) compute mass_drift but
+-      did not gate on it; codex iter-117 followup MEDIUM-3
+-      flagged this as making the cross-grid PASS column
+-      meaningless.  The helper makes it cheap to apply the
+-      same gate across all of them.
+-
+-    iter-120 (codex iter-119-followup MEDIUM-1): added the
+-    optional ``n_samples`` kwarg.  When the mass series has
+-    fewer than 2 samples, ``compute_relative_drift`` returns
+-    0.0 sentinel (not actually drift) — pre-iter-120 this
+-    silently passed the gate.  When ``n_samples`` is provided
+-    and < 2, the gate now fails explicitly with a clear note.
+-    Backward-compatible default ``n_samples=None`` skips the
+-    sample-count check (existing callsites still work).
+-
+-    Returns
+-    -------
+-    (ok, notes): tuple of updated values.  When ``mass_drift``
+-    is non-finite or exceeds ``tol`` (or n_samples < 2),
+-    ``ok`` is set to False and a ``[FAIL: ...]`` annotation
+-    is appended to ``notes``.
++    """Thin wrapper that delegates to the centralized
++    ``legoesm.diagnostics.conservation_drift.apply_drift_tolerance``
++    helper specialized for ``label="mass"``
++    (iter-128 codex iter-127-followup LOW-1: previously the
++    atmosphere runner had its own near-identical copy of the
++    same gate logic; iter-128 collapses to a single source of
++    truth in the diagnostics package).
++
++    Behaviour and signature are unchanged from iter-117–iter-120:
++    NaN-aware, n_samples-aware, idempotent on already-failed runs.
+     """
+-    import numpy as _np
+-    if ok and n_samples is not None and n_samples < 2:
+-        ok = False
+-        notes += (
+-            f" [FAIL: mass series has only {n_samples} "
+-            f"sample(s); need >= 2 for a valid drift]"
+-        )
+-        return ok, notes
+-    if ok and (not _np.isfinite(mass_drift) or mass_drift > tol):
+-        ok = False
+-        if not _np.isfinite(mass_drift):
+-            notes += (
+-                f" [FAIL: mass drift is non-finite "
+-                f"({mass_drift!r})]"
+-            )
+-        else:
+-            notes += (
+-                f" [FAIL: mass drift {mass_drift:.2e} > "
+-                f"tolerance {tol:.0e}]"
+-            )
+-    return ok, notes
++    from legoesm.diagnostics.conservation_drift import (
++        apply_drift_tolerance,
++    )
++    return apply_drift_tolerance(
++        ok, notes, mass_drift, tol,
++        label="mass", n_samples=n_samples,
++    )
+ 
+ 
+ def _grid_cell_area(grid_or_mesh):
+diff --git a/scripts/run_ocean_test_matrix.py b/scripts/run_ocean_test_matrix.py
+index fdf5e8c0..d3174340 100644
+--- a/scripts/run_ocean_test_matrix.py
++++ b/scripts/run_ocean_test_matrix.py
+@@ -406,6 +406,36 @@ def _apply_drift_tolerance(
+     )
+ 
+ 
++def _apply_value_threshold(
++    ok: bool, notes: str, value: float, threshold: float,
++    *, label: str, op: str = "le", units: str = "",
++) -> tuple[bool, str]:
++    """Thin wrapper for non-drift PASS thresholds (overshoot,
++    undershoot, sign checks).  Delegates to the centralized
++    ``legoesm.diagnostics.conservation_drift.apply_value_threshold``
++    helper (iter-128 codex iter-127-followup MEDIUM-2/3).
++    """
++    from legoesm.diagnostics.conservation_drift import (
++        apply_value_threshold,
++    )
++    return apply_value_threshold(
++        ok, notes, value, threshold,
++        label=label, op=op, units=units,
++    )
++
++
++def _apply_pe_rel_sign(
++    ok: bool, notes: str, pe_rel_final: float, *, label: str,
++) -> tuple[bool, str]:
++    """Apply the documented Overflow ``pe_rel_final < 0`` sign
++    constraint via the centralized value-threshold helper.
++    """
++    return _apply_value_threshold(
++        ok, notes, pe_rel_final, 0.0,
++        label=label, op="lt_zero",
++    )
++
++
+ def _compute_drift(values: list[float]) -> float:
+     """Scalar drift wrapper.
+ 
+@@ -4528,11 +4558,23 @@ def run_overflow(tc: TestCase, output_dir: Path, days: float
+     # T-drift gate to overflow.  T should be conserved
+     # (passive scalar in adiabatic regime); empirical quick
+     # runs show T drift ~1e-16 (latlon) to ~3e-4 (cube), well
+-    # below 1e-2.  PE drift is NOT gated because PE evolves
+-    # physically per codex iter-119-followup MEDIUM-4 caveat.
++    # below 1e-2.  PE drift magnitude is NOT gated because RPE
++    # decreases physically (the overflow CONVERTS PE → KE);
++    # docs/ocean_experiments_reference.md:626 instead asserts
++    # the SIGN constraint pe_rel_final < 0.
+     ok, notes = _apply_drift_tolerance(
+         ok, notes, T_drift, 1e-2,
+         label="T", n_samples=len(diag.get("mean_T", [])))
++    # iter-128 (codex iter-127-followup MEDIUM-2): apply the
++    # documented ``pe_rel_final < 0`` sign check.  Overflow is
++    # a gravity-current experiment — RPE must decrease.  A
++    # positive pe_rel_final indicates spurious PE creation
++    # (numerical mixing increasing the basin RPE), which is
++    # the opposite of the expected dynamics.
++    pe_n_samples = len(diag.get("PE_rel", []))
++    if pe_n_samples >= 2:
++        ok, notes = _apply_pe_rel_sign(
++            ok, notes, pe_rel_final, label="PE_rel_final")
+ 
+     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+     depth = -z_full
+@@ -4702,6 +4744,19 @@ def run_stommel_gyre_tracer(tc: TestCase, output_dir: Path, days: float
+         ok, notes, S_int_drift, 1e-3,
+         label="S_integral",
+         n_samples=len(diag.get("S_integral", [])))
++    # iter-128 (codex iter-127-followup MEDIUM-3): apply the
++    # documented overshoot/undershoot < 0.1 PSU thresholds
++    # (docs/ocean_experiments_reference.md:681-682).  A
++    # tracer-conservative scheme can pass the integral
++    # conservation check (S_int_drift < 1e-3) while still
++    # producing local extrema that exceed the initial
++    # range — these gates catch monotonicity violations.
++    ok, notes = _apply_value_threshold(
++        ok, notes, overshoot, 0.1,
++        label="S overshoot", op="le", units="PSU")
++    ok, notes = _apply_value_threshold(
++        ok, notes, undershoot, 0.1,
++        label="S undershoot", op="le", units="PSU")
+ 
+     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+     depth = -z_full
+diff --git a/src/legoesm/diagnostics/__init__.py b/src/legoesm/diagnostics/__init__.py
+index c8179520..63d65b17 100644
+--- a/src/legoesm/diagnostics/__init__.py
++++ b/src/legoesm/diagnostics/__init__.py
+@@ -4,6 +4,7 @@ from legoesm.diagnostics.column_integrals import column_water_vapor
+ from legoesm.diagnostics.conservation_drift import (
+     DEFAULT_MIN_BASELINE,
+     apply_drift_tolerance,
++    apply_value_threshold,
+     compute_relative_drift,
+     relative_drift_series,
+ )
+diff --git a/src/legoesm/diagnostics/conservation_drift.py b/src/legoesm/diagnostics/conservation_drift.py
+index 3bcfb90a..6e7fb95d 100644
+--- a/src/legoesm/diagnostics/conservation_drift.py
++++ b/src/legoesm/diagnostics/conservation_drift.py
+@@ -217,10 +217,12 @@ def apply_drift_tolerance(
+     * Idempotent on already-failed runs (``ok=False`` short-
+       circuits all of the above).
+ 
+-    The atmosphere matrix runner has a ``_apply_mass_drift_tolerance``
+-    that is a thin wrapper over this helper specialized for
+-    label="mass"; it remains for backward compatibility with
+-    its existing callers.
++    The atmosphere matrix runner ``_apply_mass_drift_tolerance``
++    delegates to this helper specialized for ``label="mass"``
++    (post-iter-128 codex iter-127-followup LOW-1).  The two ocean
++    runners (monolithic ``scripts/run_ocean_test_matrix.py`` and
++    modular ``scripts/ocean_test_matrix/timeloop.py``) likewise
++    delegate via thin ``_apply_drift_tolerance`` wrappers.
+ 
+     Parameters
+     ----------
+@@ -267,3 +269,64 @@ def apply_drift_tolerance(
+                 f"tolerance {tol:.0e}]"
+             )
+     return ok, notes
++
++
++def apply_value_threshold(
++    ok: bool, notes: str, value: float, threshold: float,
++    *, label: str, op: str = "le", units: str = "",
++) -> tuple[bool, str]:
++    """Apply a non-drift PASS threshold (overshoot, sign-check, etc.).
++
++    iter-128 (codex iter-127-followup MEDIUM-2/3): companion to
++    ``apply_drift_tolerance`` for tests that gate on non-drift
++    quantities — e.g., the documented Stommel
++    ``overshoot < 0.1 PSU`` and ``undershoot < 0.1 PSU`` thresholds
++    (``docs/ocean_experiments_reference.md:681-682``) and the
++    Overflow ``pe_rel_final < 0`` sign check
++    (``docs/ocean_experiments_reference.md:626``).
++
++    Behaviour:
++
++    * ``op="le"`` (less-than-or-equal): fail if ``value > threshold``
++      (or non-finite).  Used for overshoot/undershoot/absolute
++      magnitude tests.
++    * ``op="lt_zero"``: fail if ``value >= 0`` (or non-finite).
++      Used for the Overflow ``pe_rel_final < 0`` sign check; the
++      ``threshold`` argument is ignored in this mode but kept in
++      the signature for caller symmetry.
++    * Idempotent on already-failed runs (``ok=False`` short-
++      circuits).
++
++    Returns
++    -------
++    (ok, notes): tuple of updated values.
++    """
++    import numpy as _np
++    if not ok:
++        return ok, notes
++    if not _np.isfinite(value):
++        ok = False
++        notes += (
++            f" [FAIL: {label} is non-finite ({value!r})]"
++        )
++        return ok, notes
++    if op == "le":
++        if value > threshold:
++            ok = False
++            notes += (
++                f" [FAIL: {label}={value:.3g}{units} > "
++                f"threshold {threshold:.3g}{units}]"
++            )
++    elif op == "lt_zero":
++        if value >= 0.0:
++            ok = False
++            notes += (
++                f" [FAIL: {label}={value:.3g}{units} >= 0; "
++                f"expected strictly negative]"
++            )
++    else:
++        raise ValueError(
++            f"apply_value_threshold: unknown op {op!r} "
++            f"(expected 'le' or 'lt_zero')"
++        )
++    return ok, notes
+diff --git a/tests/test_ocean_cross_grid_plots.py b/tests/test_ocean_cross_grid_plots.py
+index 0bbae084..2219fe27 100644
+--- a/tests/test_ocean_cross_grid_plots.py
++++ b/tests/test_ocean_cross_grid_plots.py
+@@ -1683,6 +1683,281 @@ class TestIter123OceanDriftTolerance:
+             "should be written.  Got an empty CSV."
+         )
+ 
++    # ====== iter-128: codex iter-127-followup MEDIUM-1/2/3 + LOW-1/2 ======
++
++    def test_iter128_value_threshold_helper_le(self):
++        """iter-128 codex iter-127-followup MEDIUM-2/3: the new
++        ``apply_value_threshold`` helper enforces ``<= threshold``
++        with NaN handling.
++        """
++        from legoesm.diagnostics import apply_value_threshold
++        # Pass case: value below threshold.
++        ok, notes = apply_value_threshold(
++            ok=True, notes="", value=0.05, threshold=0.1,
++            label="overshoot", units="PSU")
++        assert ok is True
++        # Fail case: value above threshold.
++        ok, notes = apply_value_threshold(
++            ok=True, notes="", value=0.15, threshold=0.1,
++            label="overshoot", units="PSU")
++        assert ok is False
++        assert "0.15" in notes
++        assert "PSU" in notes
++        # NaN case: any non-finite value fails.
++        ok, notes = apply_value_threshold(
++            ok=True, notes="", value=float("nan"), threshold=0.1,
++            label="overshoot")
++        assert ok is False
++        assert "non-finite" in notes
++        # Idempotent on already-failed: ``ok=False`` short-circuits.
++        ok, notes = apply_value_threshold(
++            ok=False, notes="prior", value=0.05, threshold=0.1,
++            label="overshoot")
++        assert ok is False
++        assert notes == "prior"
++
++    def test_iter128_value_threshold_helper_lt_zero(self):
++        """iter-128 codex iter-127-followup MEDIUM-2: the
++        ``op="lt_zero"`` mode for sign-check gates (Overflow
++        ``pe_rel_final < 0``).
++        """
++        from legoesm.diagnostics import apply_value_threshold
++        # Pass case: strictly negative.
++        ok, _ = apply_value_threshold(
++            ok=True, notes="", value=-0.5, threshold=0.0,
++            label="PE_rel_final", op="lt_zero")
++        assert ok is True
++        # Fail case: zero (must be strictly less than zero).
++        ok, notes = apply_value_threshold(
++            ok=True, notes="", value=0.0, threshold=0.0,
++            label="PE_rel_final", op="lt_zero")
++        assert ok is False
++        assert "expected strictly negative" in notes
++        # Fail case: positive (spurious PE creation).
++        ok, notes = apply_value_threshold(
++            ok=True, notes="", value=0.1, threshold=0.0,
++            label="PE_rel_final", op="lt_zero")
++        assert ok is False
++        # NaN case.
++        ok, notes = apply_value_threshold(
++            ok=True, notes="", value=float("inf"), threshold=0.0,
++            label="PE_rel_final", op="lt_zero")
++        assert ok is False
++        assert "non-finite" in notes
++
++    def test_iter128_value_threshold_unknown_op_raises(self):
++        from legoesm.diagnostics import apply_value_threshold
++        import pytest
++        with pytest.raises(ValueError, match="unknown op"):
++            apply_value_threshold(
++                ok=True, notes="", value=1.0, threshold=0.5,
++                label="x", op="bogus")
++
++    def test_iter128_atmosphere_wrapper_delegates(self):
++        """iter-128 codex iter-127-followup LOW-1: the atmosphere
++        matrix's ``_apply_mass_drift_tolerance`` is now a thin
++        delegating wrapper over the centralized helper, just
++        like the two ocean wrappers.
++        """
++        from pathlib import Path
++        text = (
++            Path(__file__).resolve().parent.parent
++            / "scripts" / "run_atmosphere_test_matrix.py"
++        ).read_text()
++        # Grab the wrapper body.
++        import re
++        m = re.search(
++            r"def _apply_mass_drift_tolerance\b.*?(?=\ndef \w)",
++            text, re.DOTALL,
++        )
++        assert m is not None, (
++            "iter-128: could not find _apply_mass_drift_tolerance "
++            "in atmosphere matrix.")
++        body = m.group(0)
++        # Body must IMPORT and CALL the centralized helper.
++        assert "apply_drift_tolerance" in body
++        assert "from legoesm.diagnostics" in body
++        assert 'label="mass"' in body
++        # Wrapper must NOT redefine the gate logic inline.
++        # (The pre-iter-128 inline body had `_np.isfinite` —
++        # the new delegating body does not.)
++        assert "_np.isfinite" not in body, (
++            "iter-128: atmosphere wrapper still has inline "
++            "gate logic — did the iter-128 delegation revert?")
++
++    def test_iter128_monolithic_overflow_pe_sign_gate(self):
++        """iter-128 codex iter-127-followup MEDIUM-2: monolithic
++        run_overflow gates the documented ``pe_rel_final < 0``
++        sign constraint.
++        """
++        from pathlib import Path
++        path = (Path(__file__).resolve().parent.parent
++                / "scripts" / "run_ocean_test_matrix.py")
++        text = path.read_text()
++        import re
++        m = re.search(
++            r"def run_overflow\b.*?(?=\ndef \w|^\s*RUNNERS)",
++            text, re.DOTALL | re.MULTILINE,
++        )
++        assert m is not None
++        body = m.group(0)
++        assert "_apply_pe_rel_sign" in body, (
++            "iter-128: monolithic run_overflow must apply the "
++            "documented pe_rel_final < 0 sign gate.")
++        # Verify the sign gate uses the correct label.
++        assert 'label="PE_rel_final"' in body
++
++    def test_iter128_modular_overflow_pe_sign_gate(self):
++        """iter-128 codex iter-127-followup MEDIUM-2: modular
++        run_overflow ports the same pe_rel_final sign gate.
++        """
++        from pathlib import Path
++        path = (Path(__file__).resolve().parent.parent
++                / "scripts" / "ocean_test_matrix"
++                / "experiments.py")
++        text = path.read_text()
++        import re
++        m = re.search(
++            r"def run_overflow\b.*?(?=\ndef \w)",
++            text, re.DOTALL,
++        )
++        assert m is not None
++        body = m.group(0)
++        assert "_apply_pe_rel_sign" in body
++        assert 'label="PE_rel_final"' in body
++
++    def test_iter128_monolithic_stommel_overshoot_undershoot(self):
++        """iter-128 codex iter-127-followup MEDIUM-3: monolithic
++        run_stommel_gyre_tracer gates the documented
++        overshoot/undershoot < 0.1 PSU thresholds.
++        """
++        from pathlib import Path
++        path = (Path(__file__).resolve().parent.parent
++                / "scripts" / "run_ocean_test_matrix.py")
++        text = path.read_text()
++        import re
++        m = re.search(
++            r"def run_stommel_gyre_tracer\b.*?(?=\ndef \w|^\s*RUNNERS)",
++            text, re.DOTALL | re.MULTILINE,
++        )
++        assert m is not None
++        body = m.group(0)
++        assert 'label="S overshoot"' in body
++        assert 'label="S undershoot"' in body
++        # Both gates must use threshold 0.1 and units PSU.
++        assert "overshoot, 0.1" in body
++        assert "undershoot, 0.1" in body
++        assert 'units="PSU"' in body
++
++    def test_iter128_modular_stommel_overshoot_undershoot(self):
++        """iter-128 codex iter-127-followup MEDIUM-3: modular
++        run_stommel_gyre_tracer mirrors the same gates.
++        """
++        from pathlib import Path
++        path = (Path(__file__).resolve().parent.parent
++                / "scripts" / "ocean_test_matrix"
++                / "experiments.py")
++        text = path.read_text()
++        import re
++        m = re.search(
++            r"def run_stommel_gyre_tracer\b.*?(?=\ndef \w|$)",
++            text, re.DOTALL,
++        )
++        assert m is not None
++        body = m.group(0)
++        assert 'label="S overshoot"' in body
++        assert 'label="S undershoot"' in body
++        assert "overshoot, 0.1" in body
++        assert "undershoot, 0.1" in body
++
++    def test_iter128_modular_geostrophic_tolerance_pinned(self):
++        """iter-128 codex iter-127-followup LOW-2: tighten the
++        modular geostrophic gate test by pinning the EXACT
++        tolerance (1e-8) and label, not just the helper name.
++        """
++        from pathlib import Path
++        path = (Path(__file__).resolve().parent.parent
++                / "scripts" / "ocean_test_matrix"
++                / "experiments.py")
++        text = path.read_text()
++        import re
++        m = re.search(
++            r"def run_geostrophic_adjustment\b.*?(?=\ndef \w)",
++            text, re.DOTALL,
++        )
++        assert m is not None
++        body = m.group(0)
++        # Find the tolerance argument to _apply_drift_tolerance.
++        m2 = re.search(
++            r"_apply_drift_tolerance\(\s*ok,\s*notes,\s*"
++            r"T_drift,\s*([\d.eE+-]+)",
++            body,
++        )
++        assert m2 is not None, (
++            "iter-128: modular geostrophic must call "
++            "_apply_drift_tolerance with T_drift.")
++        tol = float(m2.group(1))
++        assert tol == 1e-8, (
++            f"iter-128: modular geostrophic tolerance must be "
++            f"1e-8 (tighter than doc's 1e-3 — see "
++            f"docs/ocean_experiments_reference.md:419).  "
++            f"Got {tol}.")
++        assert 'label="T"' in body
++
++    def test_iter128_modular_overflow_T_tolerance_pinned(self):
++        """iter-128 codex iter-127-followup LOW-2: pin the
++        EXACT modular overflow T-drift tolerance to 1e-2.
++        """
++        from pathlib import Path
++        path = (Path(__file__).resolve().parent.parent
++                / "scripts" / "ocean_test_matrix"
++                / "experiments.py")
++        text = path.read_text()
++        import re
++        m = re.search(
++            r"def run_overflow\b.*?(?=\ndef \w)",
++            text, re.DOTALL,
++        )
++        assert m is not None
++        body = m.group(0)
++        m2 = re.search(
++            r"_apply_drift_tolerance\(\s*ok,\s*notes,\s*"
++            r"T_drift,\s*([\d.eE+-]+)",
++            body,
++        )
++        assert m2 is not None
++        tol = float(m2.group(1))
++        assert tol == 1e-2, (
++            f"iter-128: modular overflow T tolerance must be "
++            f"1e-2 (matches docs/ocean_experiments_reference.md:625). "
++            f"Got {tol}.")
++
++    def test_iter128_geostrophic_doc_documents_tighter_gate(self):
++        """iter-128 codex iter-127-followup MEDIUM-1: the doc
++        threshold of 1e-3 is the loose contract; the runner uses
++        1e-8.  The doc must explicitly document this discrepancy
++        so future readers don't try to "loosen" the runner gate
++        to match the doc.
++        """
++        from pathlib import Path
++        doc = (Path(__file__).resolve().parent.parent
++               / "docs" / "ocean_experiments_reference.md")
++        text = doc.read_text()
++        # Find the geostrophic_adjustment validation thresholds
++        # section.
++        idx = text.find("geostrophic_adjustment")
++        assert idx >= 0
++        # The "test-matrix runner gate" callout must appear in
++        # the same section (within 2000 chars after the heading).
++        section = text[idx: idx + 2000]
++        assert "1e-8" in section, (
++            "iter-128: geostrophic_adjustment doc section must "
++            "mention the 1e-8 runner gate (tighter than 1e-3 "
++            "loose contract).")
++        assert "test-matrix runner gate" in section, (
++            "iter-128: doc must explicitly mark 1e-8 as the "
++            "test-matrix runner gate.")
++
+     def test_modular_rest_state_uses_drift_tolerance(self):
+         """All 4 modular rest_state variants apply
+         ``_apply_drift_tolerance`` for both eta and T.

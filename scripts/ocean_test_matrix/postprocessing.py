@@ -43,7 +43,48 @@ def _collect_grid_results(test_case_dir: Path) -> dict:
         resolution_dirs = [d for d in grid_dir.iterdir() if d.is_dir()]
         if not resolution_dirs:
             continue
-        resolution_dir = resolution_dirs[0]  # Take first (should be only one)
+        # iter-112 codex LOW-3: port the iter-108/110 collector
+        # logic to this modular postprocessing path:
+        # 1) filter hidden / internal dirs
+        # 2) prefer grid-typed format over bare-numeric
+        # 3) graceful fallback for legacy trees
+        _BAD_DIRNAMES = {"__pycache__", ".ipynb_checkpoints"}
+        resolution_dirs = [
+            d for d in resolution_dirs
+            if not d.name.startswith(".")
+            and d.name not in _BAD_DIRNAMES
+        ]
+        if not resolution_dirs:
+            continue
+        grid_typed_pattern = {
+            "cubed_sphere": lambda n: n.startswith("C") and n[1:].isdigit(),
+            "latlon": lambda n: "x" in n and all(p.isdigit() for p in n.split("x") if p),
+            "mpas": lambda n: n.startswith("ico") and n[3:].isdigit(),
+            "spectral": lambda n: n.startswith("T") and n[1:].isdigit(),
+            "mpas_regional": lambda n: n.endswith("km") and n[:-2].isdigit(),
+            "latlon_regional": lambda n: "x" in n and all(p.isdigit() for p in n.split("x") if p),
+            "cs_regional": lambda n: n.startswith("C") and n[1:].isdigit(),
+        }
+        matcher = grid_typed_pattern.get(grid_dir.name)
+        if matcher is not None:
+            typed = [d for d in resolution_dirs if matcher(d.name)]
+            if typed:
+                resolution_dir = sorted(typed)[0]
+            else:
+                # iter-115 codex iter-114-followup MEDIUM-3:
+                # prefer bare-numeric isdigit() dirs over
+                # arbitrary names (e.g., ``_archive`` legacy
+                # dirs).  Mirrors the iter-112 fix for the
+                # monolithic ocean collector.
+                bare_numeric = [
+                    d for d in resolution_dirs if d.name.isdigit()
+                ]
+                if bare_numeric:
+                    resolution_dir = sorted(bare_numeric)[0]
+                else:
+                    resolution_dir = resolution_dirs[0]
+        else:
+            resolution_dir = resolution_dirs[0]
 
         # Check for required files
         csv_file = resolution_dir / "mean_timeseries.csv"

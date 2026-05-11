@@ -849,6 +849,13 @@ class TestCouplerAdapter:
             lhflx=ones * 100.0,  # 100 W/m2
             tau_x=z, tau_y=z, lw_up=z,
             u_ocean_sfc=z, v_ocean_sfc=z, co2_flux=z,
+            # Coupler-conservation channels added in iter-13/14/15/16.
+            # Set freshwater/ocean_heat/stress to zero, but populate
+            # surface_mass_flux from lhflx so the F22 path can use it.
+            freshwater_flux=z,
+            ocean_heat_extraction=z,
+            ocean_stress_x=z, ocean_stress_y=z,
+            surface_mass_flux=ones * 100.0 / 2.5e6,
         )
         mask = ones
 

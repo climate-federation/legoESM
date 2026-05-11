@@ -18,6 +18,8 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
+
 
 def interp_pressure_to_sigma(
     field_plev: jax.Array,
@@ -55,7 +57,7 @@ def interp_pressure_to_hybrid(
     p_s: jax.Array,
     A_full: jax.Array,
     B_full: jax.Array,
-    p_ref: float = 1e5,
+    p_ref: float = constants.p_ref,
 ) -> jax.Array:
     """Interpolate a 3D field from pressure levels to hybrid levels.
 
@@ -162,7 +164,7 @@ def compute_model_pressures_hybrid(
     p_s: jax.Array,
     A_full: jax.Array,
     B_full: jax.Array,
-    p_ref: float = 1e5,
+    p_ref: float = constants.p_ref,
 ) -> jax.Array:
     """Compute pressure at model hybrid levels.
 

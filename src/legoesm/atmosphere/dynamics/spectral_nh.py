@@ -32,6 +32,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
+from legoesm.runtime.backend import check_spectral_backend, get_backend
 from legoesm.core.operators_3d import (
     vertical_advection_height,
 )
@@ -54,7 +55,6 @@ from legoesm.grids.vertical import (
     create_height_coordinate,
     compute_terrain_metric,
 )
-from legoesm.runtime.backend import get_backend, check_spectral_backend
 from legoesm.thermo import saturation_mixing_ratio
 from legoesm.timestepping.tridiagonal import thomas_solve_batched
 from legoesm.atmosphere.dynamics.compressible_euler import (

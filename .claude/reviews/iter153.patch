@@ -1,0 +1,336 @@
+diff --git a/scripts/ocean_test_matrix/timeloop.py b/scripts/ocean_test_matrix/timeloop.py
+index f11bd3a7..76c3aaea 100644
+--- a/scripts/ocean_test_matrix/timeloop.py
++++ b/scripts/ocean_test_matrix/timeloop.py
+@@ -92,9 +92,12 @@ def _apply_value_threshold(
+     )
+ 
+ 
++_DAYS_REQUIRED = object()  # sentinel for required-but-unset days
++
++
+ def _apply_pe_rel_sign(
+     ok: bool, notes: str, pe_rel_final: float, *, label: str,
+-    n_samples: int | None = None, days: float | None = None,
++    n_samples: int | None = None, days=_DAYS_REQUIRED,
+ ) -> tuple[bool, str]:
+     """Apply the documented ``pe_rel_final < 0`` sign
+     constraint (iter-128 codex iter-127-followup MEDIUM-2).
+@@ -114,7 +117,15 @@ def _apply_pe_rel_sign(
+     iter-152 (codex iter-151 review MEDIUM-2): days-aware op
+     selection — strict ``< 0`` for full mode, ``≤ 0`` for
+     quick (matches monolithic).
++
++    iter-153 (codex iter-152 review MEDIUM-1): ``days`` is
++    REQUIRED.
+     """
++    if days is _DAYS_REQUIRED:
++        raise TypeError(
++            f"_apply_pe_rel_sign: 'days' kwarg is required "
++            f"(label={label!r})."
++        )
+     op = "lt" if (days is not None and days >= 1.0) else "le"
+     return _apply_value_threshold(
+         ok, notes, pe_rel_final, 0.0,
+diff --git a/scripts/run_ocean_test_matrix.py b/scripts/run_ocean_test_matrix.py
+index 8e051ac0..723dca32 100644
+--- a/scripts/run_ocean_test_matrix.py
++++ b/scripts/run_ocean_test_matrix.py
+@@ -431,9 +431,12 @@ def _apply_value_threshold(
+     )
+ 
+ 
++_DAYS_REQUIRED = object()  # sentinel for required-but-unset days
++
++
+ def _apply_pe_rel_sign(
+     ok: bool, notes: str, pe_rel_final: float, *, label: str,
+-    n_samples: int | None = None, days: float | None = None,
++    n_samples: int | None = None, days=_DAYS_REQUIRED,
+ ) -> tuple[bool, str]:
+     """Apply the documented ``pe_rel_final < 0`` sign constraint
+     via the centralized value-threshold helper.
+@@ -462,7 +465,20 @@ def _apply_pe_rel_sign(
+     budget genuinely cannot exercise PE evolution.  This
+     keeps the documented sign-check semantic for production
+     runs while not false-failing quick runs.
++
++    iter-153 (codex iter-152 review MEDIUM-1): ``days`` is now
++    REQUIRED (sentinel default raises TypeError if omitted).
++    Pre-iter-153 ``days=None`` defaulted to quick-mode
++    ``op="le"``, so a caller forgetting the kwarg would
++    silently weaken the documented full-mode strict gate.
+     """
++    if days is _DAYS_REQUIRED:
++        raise TypeError(
++            f"_apply_pe_rel_sign: 'days' kwarg is required "
++            f"(label={label!r}). Pass the experiment duration "
++            f"in days so the gate can select op='lt' (full "
++            f"mode, days>=1) vs op='le' (quick mode)."
++        )
+     op = "lt" if (days is not None and days >= 1.0) else "le"
+     return _apply_value_threshold(
+         ok, notes, pe_rel_final, 0.0,
+diff --git a/src/legoesm/diagnostics/conservation_drift.py b/src/legoesm/diagnostics/conservation_drift.py
+index 8e995c93..1ba36555 100644
+--- a/src/legoesm/diagnostics/conservation_drift.py
++++ b/src/legoesm/diagnostics/conservation_drift.py
+@@ -192,6 +192,16 @@ def relative_drift_series(
+         # so callers can't accidentally mutate their input via the
+         # returned alias.
+         return np.empty(0, dtype=np.float64)
++    # iter-153 (codex iter-152 review MEDIUM-2): mirror
++    # ``compute_relative_drift``'s iter-152 NaN-anywhere check
++    # — if ANY sample is non-finite, return an all-NaN array of
++    # the same shape.  Pre-iter-153 a series like
++    # ``[1.0, NaN, 1.0]`` produced ``[0, NaN, 0]``, so a caller
++    # using ``abs(series[-1])`` would still silently PASS the
++    # transient-NaN case the iter-152 scalar fix was meant to
++    # catch.
++    if not np.all(np.isfinite(arr)):
++        return np.full(arr.shape, np.nan, dtype=np.float64)
+     denom = max(abs(float(arr[0])), float(min_baseline))
+     return (arr - arr[0]) / denom
+ 
+@@ -258,12 +268,19 @@ def apply_drift_tolerance(
+     (ok, notes): tuple of updated values.
+     """
+     import numpy as _np
++    # iter-153 (codex iter-152 review MEDIUM-3): preserve
++    # idempotency.  When ``ok`` is already ``False``, return
++    # immediately WITHOUT validating ``tol`` — otherwise a
++    # caller that already failed an earlier gate and is just
++    # passing through with a placeholder ``tol=float('nan')``
++    # would get a spurious ValueError on the second helper call.
++    if not ok:
++        return ok, notes
+     # iter-152 (codex iter-151 review MEDIUM-3): validate the
+-    # tolerance itself is finite — otherwise ``drift > NaN`` is
+-    # always False and a finite-but-broken drift would silently
+-    # PASS.  Raise on tol=NaN/Inf rather than fail-quietly so
+-    # callers get a clear ``ValueError`` traceback at the
+-    # invocation site.
++    # tolerance for ACTIVE gates.  ``drift > NaN`` is always
++    # False, so a NaN tol would silently let any finite drift
++    # PASS.  Raise rather than fail-quietly so callers get a
++    # clear ValueError traceback at the invocation site.
+     if not _np.isfinite(tol):
+         raise ValueError(
+             f"apply_drift_tolerance: tol must be finite, got "
+@@ -344,17 +361,19 @@ def apply_value_threshold(
+     (ok, notes): tuple of updated values.
+     """
+     import numpy as _np
++    # iter-153 (codex iter-152 review MEDIUM-3): preserve
++    # idempotency — short-circuit BEFORE validating threshold.
++    if not ok:
++        return ok, notes
+     # iter-152 (codex iter-151 review MEDIUM-3): validate the
+-    # threshold itself is finite — otherwise comparisons against
+-    # NaN/Inf threshold are always False and a finite-but-broken
+-    # value would silently PASS.  Raise rather than fail-quietly.
++    # threshold for ACTIVE gates.  Comparisons against NaN/Inf
++    # threshold are always False, silently letting any finite-but-
++    # broken value PASS.  Raise rather than fail-quietly.
+     if not _np.isfinite(threshold):
+         raise ValueError(
+             f"apply_value_threshold: threshold must be finite, got "
+             f"{threshold!r} (label={label!r}, op={op!r})"
+         )
+-    if not ok:
+-        return ok, notes
+     if n_samples is not None and n_samples < 2:
+         ok = False
+         notes += (
+diff --git a/tests/test_ocean_cross_grid_plots.py b/tests/test_ocean_cross_grid_plots.py
+index d54444a8..9b20fd75 100644
+--- a/tests/test_ocean_cross_grid_plots.py
++++ b/tests/test_ocean_cross_grid_plots.py
+@@ -2380,8 +2380,9 @@ class TestIter123OceanDriftTolerance:
+         assert "0 sample" in notes
+ 
+     def test_iter130_modular_pe_sign_wrapper_works(self):
+-        """iter-130 codex iter-129-followup HIGH-2: same
+-        behavior test for the modular wrapper.
++        """iter-130 codex iter-129-followup HIGH-2 + iter-153:
++        same behavior test for the modular wrapper, with the
++        iter-153 ``days`` kwarg.
+         """
+         import sys
+         from pathlib import Path
+@@ -2390,12 +2391,15 @@ class TestIter123OceanDriftTolerance:
+         sys.path.insert(0, str(scripts_dir))
+         try:
+             from ocean_test_matrix.timeloop import _apply_pe_rel_sign
++            # PASS case: pe_rel_final < 0 (RPE decreased).
+             ok, _ = _apply_pe_rel_sign(
+                 True, "", -0.5, label="PE_rel_final",
+-                n_samples=10)
++                n_samples=10, days=2.0)
+             assert ok is True
++            # FAIL case: missing series (n_samples=0).
+             ok, notes = _apply_pe_rel_sign(
+-                True, "", 0.0, label="PE_rel_final", n_samples=0)
++                True, "", 0.0, label="PE_rel_final",
++                n_samples=0, days=0.1)
+             assert ok is False
+             assert "0 sample" in notes
+         finally:
+@@ -3261,6 +3265,124 @@ class TestIter123OceanDriftTolerance:
+                     f"call line must use op='lt'/'le'/op variable; "
+                     f"got: {line.strip()!r}")
+ 
++    def test_iter153_pe_sign_days_required(self):
++        """iter-153 (codex iter-152 review MEDIUM-1): ``days``
++        kwarg is now REQUIRED on ``_apply_pe_rel_sign`` — omitting
++        it raises TypeError instead of silently defaulting to
++        quick-mode ``op="le"``.  Behavior test that actually
++        invokes the wrapper.
++        """
++        import pytest
++        mod = self._import_monolithic_runner()
++        # Omitting ``days`` must raise.
++        with pytest.raises(TypeError, match="'days' kwarg is required"):
++            mod._apply_pe_rel_sign(
++                True, "", -0.5, label="PE_rel_final",
++                n_samples=10)
++        # Same for modular.
++        import sys
++        from pathlib import Path
++        scripts_dir = (Path(__file__).resolve().parent.parent
++                       / "scripts")
++        sys.path.insert(0, str(scripts_dir))
++        try:
++            from ocean_test_matrix.timeloop import (
++                _apply_pe_rel_sign as modular_pe_rel_sign,
++            )
++            with pytest.raises(TypeError, match="'days' kwarg is required"):
++                modular_pe_rel_sign(
++                    True, "", -0.5, label="PE_rel_final",
++                    n_samples=10)
++        finally:
++            sys.path.remove(str(scripts_dir))
++
++    def test_iter153_pe_sign_behavior_full_vs_quick(self):
++        """iter-153 (codex iter-152 review LOW-1): tighter
++        behavior test — actually invoke both wrapper modules
++        with days=2.0 (full) and days=0.1 (quick), assert
++        pe_rel_final=0 fails in full mode and passes in quick.
++        """
++        mod = self._import_monolithic_runner()
++        # Full mode (days=2): PE_rel_final = 0 must FAIL.
++        ok, notes = mod._apply_pe_rel_sign(
++            True, "", 0.0, label="PE_rel_final",
++            n_samples=10, days=2.0)
++        assert ok is False, (
++            "iter-153: full-mode PE_rel_final=0 must FAIL "
++            "(strict <0 contract).")
++        # Quick mode (days=0.1): PE_rel_final = 0 must PASS.
++        ok, _ = mod._apply_pe_rel_sign(
++            True, "", 0.0, label="PE_rel_final",
++            n_samples=10, days=0.1)
++        assert ok is True, (
++            "iter-153: quick-mode PE_rel_final=0 must PASS "
++            "(no time for PE evolution).")
++        # Same dual check on the modular wrapper.
++        import sys
++        from pathlib import Path
++        scripts_dir = (Path(__file__).resolve().parent.parent
++                       / "scripts")
++        sys.path.insert(0, str(scripts_dir))
++        try:
++            from ocean_test_matrix.timeloop import (
++                _apply_pe_rel_sign as modular_pe_rel_sign,
++            )
++            ok, _ = modular_pe_rel_sign(
++                True, "", 0.0, label="PE_rel_final",
++                n_samples=10, days=2.0)
++            assert ok is False
++            ok, _ = modular_pe_rel_sign(
++                True, "", 0.0, label="PE_rel_final",
++                n_samples=10, days=0.1)
++            assert ok is True
++        finally:
++            sys.path.remove(str(scripts_dir))
++
++    def test_iter153_relative_drift_series_nan_anywhere(self):
++        """iter-153 (codex iter-152 review MEDIUM-2):
++        ``relative_drift_series`` must propagate NaN from any
++        sample to the WHOLE returned array, mirroring the
++        iter-152 scalar fix.  Pre-iter-153 a NaN in the middle
++        produced ``[0, NaN, 0]`` so a caller using
++        ``abs(series[-1])`` could still silently PASS a
++        transient blowup.
++        """
++        from legoesm.diagnostics import relative_drift_series
++        import numpy as np
++        result = relative_drift_series([1.0, float("nan"), 1.0])
++        assert result.shape == (3,)
++        assert np.all(np.isnan(result)), (
++            "iter-153: NaN anywhere in series must produce "
++            "all-NaN output array.")
++        # Healthy series still works.
++        result = relative_drift_series([1.0, 1.0001, 1.0002])
++        assert np.allclose(result, [0.0, 1e-4, 2e-4], rtol=1e-3)
++
++    def test_iter153_idempotent_when_ok_false(self):
++        """iter-153 (codex iter-152 review MEDIUM-3): when
++        ``ok=False``, the helpers must return immediately
++        WITHOUT validating tol/threshold.  Otherwise a caller
++        chaining gates with placeholder tols (e.g., NaN to
++        signal "skip this gate") gets spurious ValueErrors.
++        """
++        from legoesm.diagnostics import (
++            apply_drift_tolerance, apply_value_threshold,
++        )
++        # ok=False must short-circuit BEFORE the NaN-tol check.
++        ok, notes = apply_drift_tolerance(
++            ok=False, notes="prior FAIL",
++            drift=1e-3, tol=float("nan"),  # NaN tol
++            label="test")
++        assert ok is False
++        assert notes == "prior FAIL"
++
++        ok, notes = apply_value_threshold(
++            ok=False, notes="prior FAIL",
++            value=0.5, threshold=float("nan"),  # NaN threshold
++            label="test", op="lt")
++        assert ok is False
++        assert notes == "prior FAIL"
++
+     def test_iter152_pe_sign_days_aware(self):
+         """iter-152 (codex iter-151 review MEDIUM-2): the PE-sign
+         gate is days-aware — strict ``op="lt"`` for full mode,
+diff --git a/tests/unit/test_conservation_drift.py b/tests/unit/test_conservation_drift.py
+index 577b928d..6cd4b41f 100644
+--- a/tests/unit/test_conservation_drift.py
++++ b/tests/unit/test_conservation_drift.py
+@@ -261,14 +261,23 @@ class TestNonFiniteValueInputs:
+         assert result != result  # NaN (was 1.0e-2 pre-iter-152)
+ 
+     def test_inf_in_middle_does_affect_series(self):
+-        # The series API computes per-step drift, so an inf in the
+-        # middle will appear as inf in the series.
++        # iter-153 (codex iter-152 review MEDIUM-2): the series
++        # API now propagates non-finite samples to the WHOLE
++        # output array (mirroring the iter-152 scalar fix), not
++        # just the affected element.  Pre-iter-153 the series
++        # was ``[0, inf, 1e-2]`` so a caller using
++        # ``abs(series[-1])`` could still silently PASS the
++        # transient case.  Post-iter-153 the entire array is NaN
++        # if ANY sample is non-finite, surfacing the broken
++        # diagnostic uniformly.
++        import numpy as np
+         result = relative_drift_series(
+             [1.0e19, float("inf"), 1.01e19]
+         )
+-        assert result[0] == pytest.approx(0.0)
+-        assert result[1] == float("inf")
+-        assert result[2] == pytest.approx(1.0e-2, rel=1e-9)
++        assert result.shape == (3,)
++        assert np.all(np.isnan(result)), (
++            "iter-153: any non-finite sample must produce all-NaN "
++            "output array.")
+ 
+ 
+ class TestEmptyArrayAliasing:

@@ -32,7 +32,14 @@ class CouplerConfig(NamedTuple):
     Cd_ocean: float = 1.5e-3          # Ocean drag coefficient
     Ch_ocean: float = 1.5e-3          # Ocean heat transfer coefficient
     bulk_scheme: str = "constant"     # "constant", "coare3", "large_yeager"
-    z_ref: float = 10.0               # Reference height for bulk formulas [m]
+    z_ref: float = 10.0               # Wind reference height [m]
+    # Air temperature / specific humidity reference heights. Default to
+    # z_ref for legacy single-height callers (lake, idealized adapter,
+    # AMIP-style runs that read from the lowest atm level). For OMIP /
+    # JRA55-do, set both to 2.0 — the reanalysis delivers ``tas`` and
+    # ``huss`` at 2 m while ``uas, vas`` are at 10 m.
+    z_t_atm: float = 10.0             # Air-temperature reference height [m]
+    z_q_atm: float = 10.0             # Specific-humidity reference height [m]
     bulk_n_iter: int = 5              # MOST iterations (coare3/large_yeager)
     # Zenith-dependent ocean albedo (Task 10)
     ocean_albedo_config: OceanAlbedoConfig = OceanAlbedoConfig()

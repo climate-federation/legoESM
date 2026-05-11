@@ -419,17 +419,43 @@ def compare_results(results: dict, output_dir: Path):
           f"{'max_wind':<12} {'mass_drift':<14} {'wall(s)':<10}")
     print("-" * 70)
 
+    # iter-119 codex iter-118-followup MEDIUM-2: apply the
+    # iter-117 mass-drift tolerance to this 4-grid HS+RRTMGP
+    # runner too.  Pre-iter-119 ``status = "PASS" if ok else
+    # "FAIL"`` only checked finiteness + non-blown-up,
+    # allowing arbitrary mass drift to PASS — same gap that
+    # iter-117 closed for the matrix runner's HS branch.
+    HS_RRTMGP_MASS_DRIFT_TOL = 1e-2
+    import numpy as _np_iter119
+
     summary = {}
     for grid_name, (state, diag, wall, ok) in results.items():
-        status = "PASS" if ok else "FAIL"
         mean_T = diag.get("mean_T", [0])[-1] if diag.get("mean_T") else 0
         max_wind = diag.get("max_wind", [0])[-1] if diag.get("max_wind") else 0
 
-        mass_vals = diag.get("mass", [])
-        if len(mass_vals) >= 2:
-            mass_drift = abs(mass_vals[-1] - mass_vals[0]) / abs(mass_vals[0] + 1e-30)
-        else:
-            mass_drift = 0
+        # iter-88: delegate to the shared baseline-zero-safe
+        # helper (factored out of the iter-83 / iter-87 inline
+        # implementations).  See
+        # ``legoesm.diagnostics.conservation_drift`` for history.
+        from legoesm.diagnostics.conservation_drift import compute_relative_drift
+        mass_drift = compute_relative_drift(diag.get("mass", []))
+
+        # iter-119 mass-drift gate: NaN- and threshold-aware.
+        # Update both the local ``ok`` AND the entry in
+        # ``results`` because ``main()`` aggregates via
+        # ``all(r[3] for r in results.values())`` — relying on
+        # ``r[3]`` (the original ok) to reflect the iter-119
+        # mass-drift gate too.
+        if ok and (
+            not _np_iter119.isfinite(mass_drift)
+            or mass_drift > HS_RRTMGP_MASS_DRIFT_TOL
+        ):
+            ok = False
+            # Persist back to the results dict so main()'s
+            # all_ok aggregation picks up the iter-119 fail.
+            results[grid_name] = (state, diag, wall, ok)
+
+        status = "PASS" if ok else "FAIL"
 
         print(f"  {grid_name:<20} {status:<8} {mean_T:<12.2f} "
               f"{max_wind:<12.1f} {mass_drift:<14.2e} {wall:<10.1f}")
