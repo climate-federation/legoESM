@@ -860,6 +860,10 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 393: runtime smoke for iter-392 FV3-faithful factories.
+  Both PE + NH factory-built configs (with full damping toolkit
+  + duogrid grid) produce finite output through one model step.
+  2/2 in 99 s.
 - Iter 392: user-facing FV3-faithful config factories.  Adds
   ``make_fv3_faithful_pe_config(**overrides)`` +
   ``make_fv3_faithful_nh_config(**overrides)`` that return
