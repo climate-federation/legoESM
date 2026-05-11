@@ -938,6 +938,19 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 470: compact iter 455-464 doc block + **PE per-flag
+  u_d edge-ratio decomposition**.  Doc shrinks ~125 lines.
+  iter-368 guard now covers 9 compaction blocks.  PE u_d
+  sweep finding: baseline 1.0309, all factory flags have
+  effect |Δ| < 0.007 — even u_d (winds) is essentially
+  insensitive to FV3 factory flags at PE + C8.  Only
+  ``cross_face_du_proj`` shows non-zero effect (Δ=−0.0065 =
+  flag slightly hurts u_d ratio).  Combined with iter-469
+  (PE T insensitive): PE is much less responsive than NH
+  to factory flag tuning at C8.  iter-465 NH found Δ values
+  up to 5.0 — NH is the right empirical target for tuning.
+  1/1 sweep + 24/24 compaction tests in 665 s + 0.05 s.
+  Wired into iter-383 sweep (now 65).
 - Iter 469: **PE per-flag T edge-ratio decomposition** at C8
   + duogrid.  Baseline factory T edge ratio: 0.9776.  Per-flag
   deltas ALL essentially ZERO (max |Δ| = 0.0001):
@@ -1014,122 +1027,29 @@ Key iterations:
   duogrid; (4) factory combination is NOT a strict improvement.
   1/1 in 518 s (8 configs × 3 seeds × 3 steps).  Wired into
   iter-383 sweep (now 60).
-- Iter 464: **first positive empirical finding** — del-2
-  smoothing of NH heat_source (iter-457) actively reduces
-  cube-edge variance in θ′ field at C8.  Sweep over
-  ``heat_source_del2_iters`` in {0, 1, 2, 4, 8}:
-  * NH θ′: 1.0975 → 0.9584 (14% reduction at iters=1)
-  * NH v:  1.0233 (unchanged — del-2 only acts on θ tendency)
-  * PE T:  0.9771 → 0.9773 (~no change at this scale)
-  * PE v_d: 0.9567 (unchanged)
-  Confirms the iter-463 hypothesis: SPATIAL operations move
-  the metric, per-level scalar scaling does not.  FV3
-  ``nf_ke=2`` (iter-459 factory default) gives ratio 0.9614 —
-  in the working range, validating the FV3-faithful default.
-  iters=1 gives the strongest single-step reduction; iters≥4
-  approach 1.0 (full smoothing → uniform field).  Most
-  significant evidence to date that an iter-431..460 flag
-  affects cube-edge artifact directly.  2/2 in 340 s.  Wired
-  into iter-383 sweep (now 59).
-- Iter 463: **second diagnostic finding** — ``rf_tau_days``
-  sweep {0, 1, 5, 30} at C8 produces ZERO change in edge
-  ratio for both NH (1.0199) and PE (0.9760).  Explanation:
-  Rayleigh friction is a per-level SCALAR multiplier
-  (``u *= rff[k]``), which scales edge and interior cells
-  identically at each level → variance ratio is invariant.
-  Same insight applies to iter-441/442/443 sponge linear-
-  scaling (also per-level scalar).  These mechanisms damp
-  amplitude but cannot change SPATIAL distribution within a
-  level.  Real diagnostic insight: most of our FV3-fidelity
-  flags affect the level-mean magnitude, not the cube-edge
-  spatial structure.  At C8 with 3 steps the edge metric is
-  essentially level-mean dynamics + intrinsic C-D grid
-  structure — neither responds to our sponge knobs.  Cube
-  imprint suppression likely needs HIGHER resolution (C36+)
-  + LONGER integration before signals emerge.  2/2 in 267 s.
-  Wired into iter-383 sweep (now 58).
-- Iter 462: **diagnostic finding** — ``d2_bg_k1`` sweep over
-  4 decades {0, 1e-5, 1e-4, 1e-3} at C8 produces ZERO change
-  in NH edge_var/interior_var ratio (1.0143 at all 4 values)
-  and only ~3e-4 change in PE ratio.  Conclusion: the cube-
-  edge metric at C8 is INSENSITIVE to corner-div sponge boost
-  at legoESM-compatible scales.  Edge artifact signature is
-  dominated by another mechanism (likely intrinsic C-D grid
-  edge structure, not corner-div coefficient).  Per iter-455
-  the FV3 0.01 threshold prevents k=1 override at these
-  scales — d2_bg_k1=1e-3 IS above d2_bg=5e-4 (so override at
-  k=0 IS active) but ratio still unchanged.  Suggests future
-  sponge-tuning work must look ELSEWHERE — RF tau, d_con
-  zeroing levels, or non-sponge mechanisms.  2/2 in 270 s.
-  Wired into iter-383 sweep (now 57).
-- Iter 461: **first empirical numerical evidence** of FV3
-  factory effect on cube-edge artifacts.  3-seed C8 3-step
-  comparison of edge_var/interior_var ratio over v-wind:
-  * NH: default=0.9695, factory=1.0057 → factory/default=1.037
-    (factory slightly WORSENS by 3.7% at this calibration —
-    suggests NH needs different sponge tuning)
-  * PE: default=1.0015, factory=0.9762 → factory/default=0.975
-    (factory REDUCES edge ratio by 2.5% — small but in right
-    direction)
-  Ratios near 1.0 mean edge ≈ interior variance — not
-  catastrophic.  Small differences (~3-4%) suggest the
-  factory stack is wired correctly but the legoESM-scale
-  d2_bg_k1=1e-4 calibration is too weak to dominate the
-  intrinsic numerics.  Provides quantitative baseline for
-  future tuning.  2/2 in 103 s.  Wired into iter-383 sweep
-  (now 56).
-- Iter 460: compact iter 445-454 doc block (10 sub-entries) +
-  AST regression guard for iter-457/458/459 heat_source del-2
-  wirings.  Doc shrinks ~80 lines.  iter-368 guard now covers
-  8 compaction blocks (365/380/390/400/420/430/440/450/460).
-  New iter-460 AST guard: 8 tests (4 config fields, 2 wiring
-  sites NH+PE, 2 factory defaults).  30/30 in 0.08 s.  Wired
-  into iter-383 sweep (now 55).
-- Iter 459: factory defaults expose FV3 production
-  ``heat_source_del2_iters=2`` (FV3 ``nf_ke=min(3, nord+1)=2``
-  at nord=1 — combined with iter-437 ``nord_v=1``).  Both NH +
-  PE factories.  iter-427 step test still finite.  5/5 in
-  46 s.  Wired into iter-383 sweep (now 54).
-- Iter 458: PE mirror of NH iter-457 heat_source del-2
-  smoothing.  Same FV3 ``dyn_core.F90:1755-1756`` port,
-  applied to PE ``_d_con_sum`` aggregate.  Two new PE config
-  fields (``heat_source_del2_iters``, ``heat_source_del2_coeff
-  = 0.20``).  Default 0 = bit-for-bit baseline.  Reuses
-  already-imported ``_laplacian_compact_3d``.  4/4 in 20 s.
-  Wired into iter-383 sweep (now 53).
-- Iter 457: FV3-faithful del-2 smoothing of the aggregate
-  ``_d_con_sum`` heat source.  Port of FV3 ``dyn_core.F90:
-  1755-1756`` ``del2_cubed(heat_source, cnst_0p20*da_min,
-  ..., nf_ke)``.  Two new NH config fields:
-  ``heat_source_del2_iters: int = 0`` (default off = bit-for-
-  bit baseline; FV3 ``nf_ke=2`` at ``nord=1``) +
-  ``heat_source_del2_coeff: float = 0.20`` (FV3
-  ``cnst_0p20``).  Wired in ``slow_tendencies`` between the
-  iter-432 mask and the iter-218/219 delt_max cap.  Reuses
-  existing ``laplacian_compact_3d`` from core/operators_3d.
-  Closes a real FV3 fidelity gap (heat smoothing was
-  completely missing).  4/4 in 29 s.  Wired into iter-383
-  sweep (now 52).
-- Iter 456: introduce quantitative cube-edge artifact metric
-  ``edge_var / interior_var`` over v-wind at face boundaries
-  vs interior cells.  4 tests compute the metric for NH +
-  PE × default + factory configurations (2 steps at C8).
-  Asserts metric is finite + positive — does NOT gate on
-  factory-beats-default ratio because that would be a false
-  positive in some regimes (default may have less spatial
-  structure to discriminate).  Provides infrastructure for
-  future empirical verification of edge-artifact reduction.
-  4/4 in 40 s.  Wired into iter-383 sweep (now 51).
-- Iter 455: document legoESM-scale calibration caveat on
-  ``corner_div_damp_d2_bg_k1/k2`` config fields (NH + PE) +
-  5-step stability regression at known-good calibration
-  ``d2_bg=5e-4`` paired ``d2_bg_k1=1e-4``.  Docstrings now
-  explicitly note FV3 namelist values 4.0/2.0 are NOT directly
-  portable to legoESM.  Also documents that legoESM-scale
-  d2_bg_k2 values BELOW the FV3 0.01 threshold will never
-  trigger the k=1 override — a known semantic compromise from
-  porting Python-static FV3 thresholds.  2/2 in 20 s.  Wired
-  into iter-383 sweep (now 50).
+- **Iters 455-464 (compacted iter 470)**: edge-artifact
+  empirical investigation phase 1 (single-flag sweeps).
+  - iter 455: legoESM-scale calibration doc + 5-step
+    stability at known-good d2_bg_k1=1e-4.
+  - iter 456: introduce edge_var/interior_var metric infra.
+  - iter 457: NH heat_source del-2 smoothing (FV3 del2_cubed
+    port).
+  - iter 458: PE mirror of iter-457.
+  - iter 459: factory default heat_source_del2_iters=2
+    (FV3 ``nf_ke``).
+  - iter 460: compact iter 445-454 + AST guard for iter-
+    457/458/459.
+  - iter 461: first empirical edge-metric data (3-seed C8):
+    NH factory worsens 3.7%; PE improves 2.5% — both ratios
+    near 1.0.
+  - iter 462: d2_bg_k1 sweep over 4 decades → ZERO change in
+    NH ratio at C8; sponge boost is per-level scalar
+    invariant.
+  - iter 463: rf_tau_days sweep → ZERO change at C8; same
+    invariance insight (RF is per-level scalar).
+  - iter 464: **first positive finding** — del-2 smoothing
+    reduces NH θ′ edge ratio 1.10 → 0.96 (14% drop at
+    iters=1); SPATIAL operations DO move the metric.
 - **Iters 445-454 (compacted iter 460)**: sponge boost shared
   helper + Rayleigh friction + AST hardening + doc updates.
   - iter 445: AST guard for iter-438..443 sponge wirings.
