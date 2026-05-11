@@ -816,6 +816,14 @@ Key iterations:
   Combined with iter-320 (post-acoustic damp_v / damp_w) +
   iter-321 (damp_w global) + iter-322 (damp_v global), ALL 5 NH
   d_con sites now have cv-flag verification.  3/3.
+- Iter 351 + 352: extend metric-aware d_con flag to PE iter-225
+  + NH iter-226 A_h d_con (Smagorinsky-A_h slow-tendency) sites.
+  **GAP #1 FULLY CLOSED**: all 8 PE+NH d_con sites now have
+  metric-aware option (damp_v + corner_div + div_damp + A_h × PE
+  + NH × all sites).  6/6 in 70 s.  Single
+  ``use_fv3_metric_aware_d_con`` flag drives all sites; default
+  False bit-for-bit baseline.  PE 8/8 + NH 9/9 + iter-338 5/5 +
+  iter-339 5/5 regressions preserved.
 - Iter 349 + 350: extend metric-aware d_con flag to PE iter-223
   + NH iter-224 div_damp_d_con (cell-centre slow-tendency)
   sites.  Same metric form structure as iter-347/348.  6/6 in

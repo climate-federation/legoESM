@@ -721,12 +721,46 @@ def cdgrid_compressible_euler_slow_tendencies(
         #     dKE/dt_corner = u_d * du_d_dt_ah + v_d * dv_d_dt_ah
         #     dθ_p/dt += -ah_d_con * (dKE/dt) / (c_pd * Π_ref)
         if config.ah_d_con > 0.0:
-            _dKE_dt_corner_ah = (
-                u_d * _du_d_dt_ah + v_d * _dv_d_dt_ah
-            )
-            _dKE_dt_cc_ah = _interp_corner_to_center(
-                _dKE_dt_corner_ah,
-            )
+            if config.use_fv3_metric_aware_d_con:
+                # FV3_3D iter 352: NH mirror of PE iter-351 metric
+                # form at A_h d_con site.
+                _u_d_n = 0.5 * (u_d[:, :-1, :, :] + u_d[:, 1:, :, :])
+                _v_d_n = 0.5 * (v_d[:, :, :-1, :] + v_d[:, :, 1:, :])
+                _du_n = 0.5 * (
+                    _du_d_dt_ah[:, :-1, :, :] + _du_d_dt_ah[:, 1:, :, :]
+                )
+                _dv_n = 0.5 * (
+                    _dv_d_dt_ah[:, :, :-1, :] + _dv_d_dt_ah[:, :, 1:, :]
+                )
+                _ubs = _du_n[:, :, :-1, :]
+                _ubn = _du_n[:, :, 1:, :]
+                _vbw = _dv_n[:, :-1, :, :]
+                _vbe = _dv_n[:, 1:, :, :]
+                _us = _u_d_n[:, :, :-1, :]
+                _un = _u_d_n[:, :, 1:, :]
+                _vw = _v_d_n[:, :-1, :, :]
+                _ve = _v_d_n[:, 1:, :, :]
+                _u2 = _us + _un
+                _du2 = _ubs + _ubn
+                _v2 = _vw + _ve
+                _dv2 = _vbw + _vbe
+                _cosa_ah = cdgrid.cosa_cell[..., None]
+                _rsin2_ah = cdgrid.rsin2_cell[..., None]
+                _dKE_dt_cc_ah = 0.25 * _rsin2_ah * (
+                    _ubs ** 2 + _ubn ** 2 + _vbw ** 2 + _vbe ** 2
+                    + 2.0 * (
+                        _us * _ubs + _un * _ubn
+                        + _vw * _vbw + _ve * _vbe
+                    )
+                    - _cosa_ah * (_u2 * _dv2 + _v2 * _du2 + _du2 * _dv2)
+                )
+            else:
+                _dKE_dt_corner_ah = (
+                    u_d * _du_d_dt_ah + v_d * _dv_d_dt_ah
+                )
+                _dKE_dt_cc_ah = _interp_corner_to_center(
+                    _dKE_dt_corner_ah,
+                )
             _cx_ah = (
                 constants.c_vd if config.use_fv3_d_con_cv
                 else constants.c_pd
