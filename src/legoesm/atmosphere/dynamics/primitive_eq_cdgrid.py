@@ -549,8 +549,14 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # overridden with ``da_min_c * max(d2_bg, d2_bg_k2)``.
         # When > 0.05, the k=2 level is also overridden with
         # ``da_min_c * max(d2_bg, 0.2 * d2_bg_k2)``.  FV3
-        # production value is 2.0.  Default 0.0 preserves
-        # bit-for-bit baseline.  Wired on PE only (NH pending).
+        # production value 2.0 assumes FV3 normalization — same
+        # iter-452 caveat as d2_bg_k1; use a value scaled to
+        # legoESM's ``corner_div_damp_d2_bg`` (typically d2_bg_k2
+        # ≈ 5e-5 to 1e-4 when d2_bg = 0.0005).  Default 0.0 =
+        # baseline.  The 0.01 / 0.05 thresholds are absolute
+        # (FV3 namelist-scale conditions), so legoESM-scale
+        # d2_bg_k2 values BELOW 0.01 will NEVER trigger any
+        # override — this is a known semantic compromise.
     corner_div_damp_d2_bg_k1: float = 0.0
         # FV3-faithful per-level sponge boost of the corner-
         # divergence d2_bg coefficient at the topmost level
@@ -563,9 +569,15 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # damping coefficient is OVERRIDDEN with
         # ``max(corner_div_damp_d2_bg, corner_div_damp_d2_bg_k1)`` —
         # ignoring the adaptive ``dddmp*|delpc|*dt`` term and the
-        # 0.20 cap.  FV3 production default value is 4.0 (large
-        # boost over typical interior d2_bg = 0.0625).  Default
-        # 0.0 here preserves bit-for-bit baseline (no boost).
+        # 0.20 cap.  FV3 production value 4.0 assumes FV3's
+        # specific ``da_min_c × d2`` normalization which legoESM
+        # does NOT match (iter-452 finding): setting 4.0 in
+        # legoESM produces ~10⁸×-too-aggressive damping at the
+        # top → blow-up.  For legoESM use a value
+        # SMALL RELATIVE to ``corner_div_damp_d2_bg`` (typical
+        # legoESM d2_bg = 0.0005, paired d2_bg_k1 ≈ 1e-4
+        # produces measurable but stable sponge — see iter-452
+        # e2e test).  Default 0.0 preserves bit-for-bit baseline.
         # Future iters: extend to k=1 (``d2_bg_k2``), then to NH.
     corner_div_damp_fv3_vector_fill: bool = False
         # FV3-fully-faithful vector cube-vertex fill

@@ -938,6 +938,16 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 455: document legoESM-scale calibration caveat on
+  ``corner_div_damp_d2_bg_k1/k2`` config fields (NH + PE) +
+  5-step stability regression at known-good calibration
+  ``d2_bg=5e-4`` paired ``d2_bg_k1=1e-4``.  Docstrings now
+  explicitly note FV3 namelist values 4.0/2.0 are NOT directly
+  portable to legoESM.  Also documents that legoESM-scale
+  d2_bg_k2 values BELOW the FV3 0.01 threshold will never
+  trigger the k=1 override — a known semantic compromise from
+  porting Python-static FV3 thresholds.  2/2 in 20 s.  Wired
+  into iter-383 sweep (now 50).
 - Iter 454: update iter-417 production-usage doc section with
   all factory-default flags from iter-431..453.  Doc now lists
   ``d_con_top_zero_levels``, ``delt_max``, ``nord_v``,

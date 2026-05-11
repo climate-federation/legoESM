@@ -171,15 +171,18 @@ class CDGridCompressibleEulerConfig(NamedTuple):
         # Default False preserves bit-for-bit baseline.
     corner_div_damp_d2_bg_k1: float = 0.0
         # NH mirror of PE iter-438 sponge boost at k=0.
-        # See PE config for FV3 ``dyn_core.F90:780`` port details.
+        # See PE config for FV3 ``dyn_core.F90:780`` port details
+        # and iter-452 scale-mismatch caveat (FV3 namelist 4.0
+        # is too large for legoESM; use ~1e-4 with d2_bg=5e-4).
         # Default 0.0 = baseline.  Wired at NH corner-div site
         # (FV3_3D iter 440).
     corner_div_damp_d2_bg_k2: float = 0.0
         # NH mirror of PE iter-439 sponge boost at k=1, k=2.
         # See PE config for FV3 ``dyn_core.F90:792, 802`` port
-        # details (Python-static 0.01 / 0.05 thresholds).
-        # Default 0.0 = baseline.  Wired at NH corner-div site
-        # (FV3_3D iter 440).
+        # details (Python-static 0.01 / 0.05 thresholds — note
+        # legoESM-scale values BELOW 0.01 will not trigger any
+        # override).  Default 0.0 = baseline.  Wired at NH
+        # corner-div site (FV3_3D iter 440).
     corner_div_damp_fv3_vector_fill: bool = False
     corner_div_damp_dt_proxy: float = 10.0
     # Adaptive-cap dt scale for the FV3 ``min(0.20, dddmp*|delpc|*dt)``
