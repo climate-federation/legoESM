@@ -912,25 +912,6 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
-- Iter 408: multi-step stability for iter-392 factories.
-  Extends iter-393 single-step smoke to 5 NH + 5 PE steps with
-  full damping toolkit at production values.  Both factory-
-  built configs stay finite + bounded (max|u| < 100-200 m/s)
-  through 5 steps.  2/2 in 140 s.
-- Iter 407: extend iter-368 doc-structure regression for
-  iter-400 compacted block.  9-test guard now covers all 4
-  compaction blocks (iter-365/380/390/400) — adds (1)
-  iter-400 marker, (2) all 9 iter-385-394 topic groups
-  present.  Mirror of iter-381/391 extension pattern.  9/9
-  in 0.08 s.
-- Iter 406: docstring-content regression for iter-392
-  factories.  Asserts PE + NH factory docstrings mention (1)
-  every FV3-fidelity flag they enable, (2) duogrid pairing
-  requirement, (3) overrides kwarg support.  2/2 in 0.76 s.
-- Iter 405: cross-check FV3-fidelity flag-set inventory in
-  iter-369 guard matches actual ``use_fv3_*`` field count in
-  PE + NH source.  Catches drift when a new flag is added to
-  source without updating iter-369 lists.  2/2 in 0.77 s.
 - Iter 419: extend iter-368 doc-structure guard for iter-417
   production-usage section.  Pins (1) section header present,
   (2) both factory names mentioned, (3) duogrid pairing
@@ -946,24 +927,17 @@ Key iterations:
 - Iter 415: no-duplicate regression for iter-383 guard-sweep
   inventory.  Catches duplicate entries (importability would
   silently pass while sweep weakens).  1/1 in 0.07 s.
-- Iter 414: extend iter-383 guard-sweep inventory with 3 more
-  guard modules (iter-405 flag count, iter-406 factory
-  docstring, iter-412 factory pass-through).  18 guard
-  modules total in sweep.  2/2 in 0.9 s.
-- Iter 413: gradient-flow test through iter-336/337 dynamic
-  Exner ``Π_total``.  jax.grad w.r.t. ρ' + θ' perturbation
-  amplitudes finite AND non-zero, confirming dyn_exner wiring
-  doesn't break differentiability.  2/2 in 3 s.
-- Iter 412: pass-through verification for iter-392 factories.
-  (1) PE factory passes hyperdiff settings, (2) NH factory
-  passes ``n_acoustic_substeps`` + other knobs, (3) user
-  overrides take precedence over factory defaults (e.g.,
-  disabling a flag via override wins).  3/3 in 0.75 s.
-- Iter 409: AD-at-rest through 5 PE + 5 NH steps with iter-392
-  factories.  Extends iter-408 multi-step stability with
-  jax.grad.  Both PE + NH factory configs (all FV3-fidelity
-  flags ON + full toolkit) produce finite gradient through 5
-  steps from rest state.  2/2 in 11.5 min.
+- **Iters 405-414 (compacted iter 420)**: factory-extension
+  audit/regression infrastructure.
+  - iter 405: FV3-flag inventory consistency check.
+  - iter 406: factory docstring content regression.
+  - iter 407: doc-structure guard for iter-400 compaction.
+  - iter 408: factory 5-step stability smoke.
+  - iter 409: factory 5-step AD-at-rest (11.5 min).
+  - iter 412: factory pass-through verification.
+  - iter 413: gradient-flow test through dyn_exner.
+  - iter 414: extend iter-383 sweep for 3 new guards (iter-
+    405/406/412).
 - **Iters 395-404 (compacted iter 410)**: post-iter-400
   regression infrastructure.
   - iter 395: pkz-equivalence docstring regression for iter-394.
