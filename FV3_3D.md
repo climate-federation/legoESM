@@ -860,6 +860,9 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 389: extend iter-383 guard-sweep inventory to include
+  iter-388 docstring-content regression.  13 guard modules now
+  covered.  2/2 in 0.8 s.
 - Iter 388: regression that iter-385 source comments document
   the iter-384 cross_face/duogrid pairing requirement.  Asserts
   PE + NH ``use_fv3_cross_face_du_proj`` docstrings contain

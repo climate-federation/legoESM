@@ -36,6 +36,7 @@ _GUARD_MODULES = (
     "test_fv3_3d_doc_compaction_iter368",
     "test_fv3_fidelity_flag_set_iter369",
     "test_cross_face_du_proj_ast_iter373",
+    "test_cross_face_duogrid_pairing_doc_iter388",   # iter-389 add
 )
 
 
