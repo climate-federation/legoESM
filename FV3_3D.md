@@ -856,6 +856,10 @@ Key iterations:
   Combined with iter-320 (post-acoustic damp_v / damp_w) +
   iter-321 (damp_w global) + iter-322 (damp_v global), ALL 5 NH
   d_con sites now have cv-flag verification.  3/3.
+- Iter 360: NH counterpart of iter-359.  Full NH FV3-fidelity
+  stack at C16 measurably differs from default flags + same
+  toolkit in θ_p field (>1e-6).  1/1 in 41 s.  Closes PE+NH C16
+  "wiring-active-at-production-resolution" coverage.
 - Iter 359: PE full FV3-fidelity stack at C16 changes T
   measurably (>1e-6) from default flags + same toolkit.
   Confirms wiring active at production resolution (not just
