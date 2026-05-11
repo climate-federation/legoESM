@@ -114,6 +114,12 @@ def make_ocean_physics(
             return _zero_tendencies(state)
 
         # Sum tendencies from all enabled sub-physics modules.
+        # When implicit vertical mixing is active, the vertical-mixing
+        # and convection modules populate K_v / A_v on the returned
+        # OceanTendencies; collect and sum them here so the dynamics
+        # step can use the profiles without re-running KPP.
+        K_v_sum = None
+        A_v_sum = None
         if fns:
             first = fns[0](state, grid, z_coord, surface_forcing)
             du_dt = first.du_dt.data
@@ -121,6 +127,10 @@ def make_ocean_physics(
             dT_dt = first.dT_dt.data
             dS_dt = first.dS_dt.data
             deta_dt = first.deta_dt.data
+            if first.K_v is not None:
+                K_v_sum = first.K_v
+            if first.A_v is not None:
+                A_v_sum = first.A_v
 
             for fn in fns[1:]:
                 t = fn(state, grid, z_coord, surface_forcing)
@@ -129,6 +139,10 @@ def make_ocean_physics(
                 dT_dt = dT_dt + t.dT_dt.data
                 dS_dt = dS_dt + t.dS_dt.data
                 deta_dt = deta_dt + t.deta_dt.data
+                if t.K_v is not None:
+                    K_v_sum = t.K_v if K_v_sum is None else K_v_sum + t.K_v
+                if t.A_v is not None:
+                    A_v_sum = t.A_v if A_v_sum is None else A_v_sum + t.A_v
         else:
             z3 = jnp.zeros_like(state.u.data)
             z2 = jnp.zeros_like(state.eta.data)
@@ -169,6 +183,8 @@ def make_ocean_physics(
                 data=jnp.zeros_like(state.eta.data),
                 name="dland_mask_dt", dims=dims_2d, units="1/s",
             ),
+            K_v=K_v_sum,
+            A_v=A_v_sum,
         )
 
     return physics_fn

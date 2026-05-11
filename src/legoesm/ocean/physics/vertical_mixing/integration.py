@@ -78,7 +78,9 @@ def _make_constant(config: VerticalMixingConfig,
             z_coord, J, cfg,
             apply_diffusion=apply_diffusion,
         )
-        return _wrap_tendencies(out.du_dt, out.dv_dt, out.dT_dt, out.dS_dt, state)
+        return _wrap_tendencies(out.du_dt, out.dv_dt, out.dT_dt, out.dS_dt, state,
+                                K_v=out.K_v if not apply_diffusion else None,
+                                A_v=out.A_v if not apply_diffusion else None)
     return physics_fn
 
 
@@ -96,7 +98,9 @@ def _make_richardson(config: VerticalMixingConfig,
             rho, z_coord, J, cfg,
             apply_diffusion=apply_diffusion,
         )
-        return _wrap_tendencies(out.du_dt, out.dv_dt, out.dT_dt, out.dS_dt, state)
+        return _wrap_tendencies(out.du_dt, out.dv_dt, out.dT_dt, out.dS_dt, state,
+                                K_v=out.K_v if not apply_diffusion else None,
+                                A_v=out.A_v if not apply_diffusion else None)
     return physics_fn
 
 
@@ -168,7 +172,9 @@ def _make_kpp(config: VerticalMixingConfig,
             Q_sfc_T=Q_sfc_T, Q_sfc_S=Q_sfc_S,
             apply_diffusion=apply_diffusion,
         )
-        return _wrap_tendencies(out.du_dt, out.dv_dt, out.dT_dt, out.dS_dt, state)
+        return _wrap_tendencies(out.du_dt, out.dv_dt, out.dT_dt, out.dS_dt, state,
+                                K_v=out.K_v if not apply_diffusion else None,
+                                A_v=out.A_v if not apply_diffusion else None)
     return physics_fn
 
 
@@ -178,6 +184,10 @@ def _zero_tendencies(state):
     return zero_ocean_tendencies(state)
 
 
-def _wrap_tendencies(du_dt, dv_dt, dT_dt, dS_dt, state):
+def _wrap_tendencies(du_dt, dv_dt, dT_dt, dS_dt, state,
+                     K_v=None, A_v=None):
     from legoesm.ocean.physics.combined import wrap_ocean_tendencies
-    return wrap_ocean_tendencies(du_dt, dv_dt, dT_dt, dS_dt, state)
+    t = wrap_ocean_tendencies(du_dt, dv_dt, dT_dt, dS_dt, state)
+    if K_v is not None or A_v is not None:
+        t = t._replace(K_v=K_v, A_v=A_v)
+    return t

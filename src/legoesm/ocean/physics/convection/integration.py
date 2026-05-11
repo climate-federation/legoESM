@@ -73,7 +73,13 @@ def _make_enhanced_diffusion(config: OceanConvectionConfig,
             apply_diffusion=apply_diffusion,
         )
         z3 = jnp.zeros_like(state.u.data)
-        return _wrap_tendencies(z3, z3, out.dT_dt, out.dS_dt, state)
+        t = _wrap_tendencies(z3, z3, out.dT_dt, out.dS_dt, state)
+        # When implicit, pass convection K_v through for downstream
+        # use by the tridiagonal solve (avoids re-running EOS/N² in
+        # compute_vertical_K_profiles).
+        if not apply_diffusion and out.K_v is not None:
+            t = t._replace(K_v=out.K_v)
+        return t
     return physics_fn
 
 

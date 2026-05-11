@@ -1099,6 +1099,7 @@ class LatLonCGridOceanModel:
         if self.config.implicit_vertical_mixing:
             state_new = self._apply_implicit_vertical_mixing(
                 state_new, dt, surface_forcing,
+                K_v_phys=tend.K_v, A_v_phys=tend.A_v,
             )
 
         # 9. Conservation fixers
@@ -1114,16 +1115,22 @@ class LatLonCGridOceanModel:
         state: LatLonCGridOceanState,
         dt: float,
         surface_forcing,
+        K_v_phys=None,
+        A_v_phys=None,
     ) -> LatLonCGridOceanState:
         """Backward-Euler vertical diffusion for ``u, v, T, S``.
 
-        Computes the combined K_v / A_v profile from the configured
-        vertical-mixing scheme + ``enhanced_diffusion`` convection +
-        the ``LatLonCGridOceanConfig.A_v`` / ``K_v`` floors, and
-        applies one tridiagonal solve per column to each prognostic
+        Uses the K_v / A_v profiles already computed by the physics
+        function (passed via ``K_v_phys`` / ``A_v_phys``), adds the
+        ``LatLonCGridOceanConfig.A_v`` / ``K_v`` background floors,
+        and applies one tridiagonal solve per column to each prognostic
         field.  The solver enforces zero-flux boundary conditions, so
         the column-mean (and hence the barotropic mode for u, v) is
         preserved exactly.
+
+        When K_v_phys / A_v_phys are None (no physics function, or
+        physics that doesn't produce K profiles), falls back to
+        ``compute_vertical_K_profiles`` for a fresh computation.
 
         Called only when ``config.implicit_vertical_mixing == True``.
         """
@@ -1136,41 +1143,39 @@ class LatLonCGridOceanModel:
             interp_cell_to_uface,
         )
 
-        # No physics → nothing to do beyond the (zero) background.  The
-        # background floor still runs even without a physics config so
-        # users opting into implicit mode for stability get the
-        # ``config.A_v / K_v`` diffusion they asked for.
-        physics_config = self.config.physics
-        if physics_config is None:
-            from legoesm.ocean.physics.combined import OceanPhysicsConfig
-            from legoesm.ocean.physics.vertical_mixing.config import (
-                VerticalMixingConfig,
+        if K_v_phys is not None and A_v_phys is not None:
+            # Fast path: use K profiles already computed by the physics
+            # function, just add the config background floors.
+            nlev = state.T.data.shape[-1]
+            dtype = state.T.data.dtype
+            K_v_cell = K_v_phys + jnp.asarray(self.config.K_v, dtype=dtype)
+            A_v_cell = A_v_phys + jnp.asarray(self.config.A_v, dtype=dtype)
+        else:
+            # Fallback: recompute K profiles (expensive for KPP).
+            physics_config = self.config.physics
+            if physics_config is None:
+                from legoesm.ocean.physics.combined import OceanPhysicsConfig
+                from legoesm.ocean.physics.vertical_mixing.config import (
+                    VerticalMixingConfig,
+                )
+                from legoesm.ocean.physics.convection.config import (
+                    OceanConvectionConfig,
+                )
+                physics_config = OceanPhysicsConfig(
+                    vertical_mixing=VerticalMixingConfig(scheme="none"),
+                    convection=OceanConvectionConfig(scheme="none"),
+                )
+            u_cell = 0.5 * (state.u.data[:, :-1, :] + state.u.data[:, 1:, :])
+            v_cell = 0.5 * (state.v.data[:-1, :, :] + state.v.data[1:, :, :])
+            cc_state = state._replace(
+                u=state.u.replace(data=u_cell),
+                v=state.v.replace(data=v_cell),
             )
-            from legoesm.ocean.physics.convection.config import (
-                OceanConvectionConfig,
+            K_v_cell, A_v_cell = compute_vertical_K_profiles(
+                cc_state, self.z_coord, surface_forcing, physics_config,
+                A_v_background=float(self.config.A_v),
+                K_v_background=float(self.config.K_v),
             )
-            physics_config = OceanPhysicsConfig(
-                vertical_mixing=VerticalMixingConfig(scheme="none"),
-                convection=OceanConvectionConfig(scheme="none"),
-            )
-
-        # KPP / Richardson / convection schemes expect collocated u, v
-        # at cell centers (the same proxy state the PE tendency builds
-        # before calling physics_fn).  C-grid staggering puts u on lon
-        # interfaces (n_lat, n_lon+1, nlev) and v on lat interfaces
-        # (n_lat+1, n_lon, nlev), so average to cell centers.
-        u_cell = 0.5 * (state.u.data[:, :-1, :] + state.u.data[:, 1:, :])
-        v_cell = 0.5 * (state.v.data[:-1, :, :] + state.v.data[1:, :, :])
-        cc_state = state._replace(
-            u=state.u.replace(data=u_cell),
-            v=state.v.replace(data=v_cell),
-        )
-
-        K_v_cell, A_v_cell = compute_vertical_K_profiles(
-            cc_state, self.z_coord, surface_forcing, physics_config,
-            A_v_background=float(self.config.A_v),
-            K_v_background=float(self.config.K_v),
-        )
 
         # dz at cell centers (jacobian-corrected so the eta-stretched
         # column heights match the partial-cell / z* layer thicknesses

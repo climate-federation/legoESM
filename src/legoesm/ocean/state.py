@@ -53,6 +53,11 @@ class OceanTendencies(NamedTuple):
 
     Same structure as OceanState. Static fields (H_bathy, land_mask)
     have zero tendencies, matching the phis pattern in the atmosphere.
+
+    K_v / A_v are optional interface-level diffusivity / viscosity
+    profiles populated by the physics function when
+    ``implicit_vertical_mixing`` is enabled.  Shape
+    ``(..., nlev-1)`` at interior interfaces, or None.
     """
     du_dt: Field
     dv_dt: Field
@@ -61,6 +66,8 @@ class OceanTendencies(NamedTuple):
     deta_dt: Field
     dH_bathy_dt: Field
     dland_mask_dt: Field
+    K_v: object = None   # tracer diffusivity at interfaces [m²/s]
+    A_v: object = None   # momentum viscosity at interfaces [m²/s]
 
 
 class OceanSurfaceForcing(NamedTuple):
@@ -374,8 +381,11 @@ class LatLonCGridOceanDiagnostics(NamedTuple):
 
 
 class LatLonCGridOceanTendencies(NamedTuple):
-    """Tendencies for the lat-lon C-grid ocean primitive equations."""
+    """Tendencies for the lat-lon C-grid ocean primitive equations.
 
+    K_v / A_v are optional interface-level diffusivity / viscosity
+    profiles populated when ``implicit_vertical_mixing`` is enabled.
+    """
     du_dt: Field
     dv_dt: Field
     dT_dt: Field
@@ -383,6 +393,8 @@ class LatLonCGridOceanTendencies(NamedTuple):
     deta_dt: Field
     dH_bathy_dt: Field
     dland_mask_dt: Field
+    K_v: object = None
+    A_v: object = None
 
 
 class MomentumTendencyDiagnostics(NamedTuple):
