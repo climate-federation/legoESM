@@ -860,6 +860,11 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 388: regression that iter-385 source comments document
+  the iter-384 cross_face/duogrid pairing requirement.  Asserts
+  PE + NH ``use_fv3_cross_face_du_proj`` docstrings contain
+  ``iter 384`` marker + ``use_duogrid=True`` mention.  Catches
+  refactors that drop the warning.  2/2 in 0.07 s.
 - Iter 387: NH counterpart of iter-386.  cross_face flag at
   C16 WITH duogrid: (1) changes u measurably (>1e-8) vs
   False, (2) does not amplify v-imprint.  2/2 in 138 s.
