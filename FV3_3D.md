@@ -919,6 +919,14 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 439: extend iter-438 corner-div sponge boost to k=1 +
+  k=2 (PE).  New config field ``corner_div_damp_d2_bg_k2: float
+  = 0.0`` ports FV3 ``dyn_core.F90:792, 802`` ::
+  ``if d2_bg_k2 > 0.01: k=1 override = max(d2_bg, d2_bg_k2)``
+  ``if d2_bg_k2 > 0.05: k=2 override = max(d2_bg, 0.2*d2_bg_k2)``
+  Faithful Python-static threshold gating.  FV3 production
+  value 2.0.  Default 0.0 preserves baseline.  4/4 in 38 s.
+  Wired into iter-383 sweep (now 35).
 - Iter 438: per-level sponge BOOST of corner-div damping at
   k=0 (PE).  New config field ``corner_div_damp_d2_bg_k1: float
   = 0.0`` ports FV3 ``dyn_core.F90:780``::
