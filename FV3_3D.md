@@ -816,6 +816,14 @@ Key iterations:
   Combined with iter-320 (post-acoustic damp_v / damp_w) +
   iter-321 (damp_w global) + iter-322 (damp_v global), ALL 5 NH
   d_con sites now have cv-flag verification.  3/3.
+- Iter 340: AST regression guard for iter-338 + iter-339
+  metric-aware d_con wiring on PE + NH ``damp_v_d_con`` sites.
+  Mirrors iter-327 / iter-329 AST guard pattern.  Asserts: (1)
+  PE + NH source have ``if self.config.use_fv3_metric_aware_d_con:``
+  gate, (2) metric impl branches reference both
+  ``cosa_cell`` (FV3 cosa_s) + ``rsin2_cell`` (FV3 rsin2), (3)
+  legacy else branches preserve simpler iter-208 / iter-209
+  forms bit-for-bit.  6/6 in 0.03 s.
 - Iter 339: opt-in FV3 metric-aware d_con form for NH
   ``damp_v_d_con`` site.  NH mirror of PE iter-338.  Adds
   ``use_fv3_metric_aware_d_con`` to NH config; when True, the
