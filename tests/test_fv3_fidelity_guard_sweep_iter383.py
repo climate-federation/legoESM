@@ -96,6 +96,7 @@ _GUARD_MODULES = (
     "test_pad_halo_4d_duogrid_linear_iter475",       # iter-475 add
     "test_pad_halo_vector_4d_duogrid_iter476",       # iter-476 add
     "test_laplacian_compact_3d_duogrid_amplification_iter477",  # iter-477 add
+    "test_nh_duogrid_n_step_growth_iter478",         # iter-478 add
 )
 
 

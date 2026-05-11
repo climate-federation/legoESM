@@ -938,6 +938,21 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 478: **per-step bisection** of duogrid edge-std growth:
+  step 0 (initial) → 0
+  step 1 → 3.67× (75% of final penalty arrives in step 1!)
+  step 2 → 4.26×
+  step 3 → 4.91×
+  Duogrid penalty fires IMMEDIATELY in a single step.  Bug is
+  in single-step dynamics (slow_tendencies + RK3 + 4 acoustic
+  substeps + post-step damp_v/w), not multi-step accumulation.
+  Since iter-474..477 already ruled out individual halo ops
+  and Laplacian iter in isolation, the bug must be a
+  COMPOSITE single-step op (e.g., divergence_corner +
+  vector halo + corner_div damping in one acoustic substep)
+  whose duogrid version differs from no-duogrid only
+  numerically.  1/1 in 101 s.  Wired into iter-383 sweep
+  (now 73).
 - Iter 477: **iter-476 hypothesis REFUTED** — isolated test
   of ``laplacian_compact_3d`` iterated 2× on a linear field
   with duogrid vs no-duogrid produces IDENTICAL edge change
