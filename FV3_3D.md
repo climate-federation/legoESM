@@ -860,6 +860,11 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 404: jax.jit smoke for iter-392 factory-built models.
+  Both PE + NH factory configs (all FV3-fidelity flags ON)
+  JIT-trace cleanly through model.step.  Catches dynamic-
+  Python constructs added by future flag wirings that would
+  break JIT.  2/2 in 104 s.
 - Iter 403: extend iter-383 guard-sweep inventory for iter-402
   factory signature regression.  15 guard modules now covered.
   2/2 in 0.9 s.
