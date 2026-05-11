@@ -938,6 +938,23 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 464: **first positive empirical finding** — del-2
+  smoothing of NH heat_source (iter-457) actively reduces
+  cube-edge variance in θ′ field at C8.  Sweep over
+  ``heat_source_del2_iters`` in {0, 1, 2, 4, 8}:
+  * NH θ′: 1.0975 → 0.9584 (14% reduction at iters=1)
+  * NH v:  1.0233 (unchanged — del-2 only acts on θ tendency)
+  * PE T:  0.9771 → 0.9773 (~no change at this scale)
+  * PE v_d: 0.9567 (unchanged)
+  Confirms the iter-463 hypothesis: SPATIAL operations move
+  the metric, per-level scalar scaling does not.  FV3
+  ``nf_ke=2`` (iter-459 factory default) gives ratio 0.9614 —
+  in the working range, validating the FV3-faithful default.
+  iters=1 gives the strongest single-step reduction; iters≥4
+  approach 1.0 (full smoothing → uniform field).  Most
+  significant evidence to date that an iter-431..460 flag
+  affects cube-edge artifact directly.  2/2 in 340 s.  Wired
+  into iter-383 sweep (now 59).
 - Iter 463: **second diagnostic finding** — ``rf_tau_days``
   sweep {0, 1, 5, 30} at C8 produces ZERO change in edge
   ratio for both NH (1.0199) and PE (0.9760).  Explanation:
