@@ -860,6 +860,12 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 399: extend iter-342 dyn_exner AST guard for iter-397/
+  398 cap-site wirings.  Adds 3 new assertions: (1) aggregate
+  cap uses ``_sf_b`` + ``_exner_eff_b``, (2) damp_v cap uses
+  ``_exner_eff_dv``, (3) damp_w cap uses ``_exner_eff_dw``.
+  Catches refactors that drop cap-site dyn_exner wiring.  7/7
+  in 0.08 s.
 - Iter 398: extend dynamic Exner to the 2 POST-ACOUSTIC NH
   delt_max sponge caps (damp_v + damp_w sites in step()).
   iter-397 wired the aggregate slow-tendency cap; iter-398
