@@ -860,6 +860,10 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 372: C16 cube-imprint does-not-amplify regression for
+  iter-370 ``use_fv3_cross_face_du_proj`` (PE+NH).  At C16
+  enabling cross_face flag must not amplify imprint by > 10 %
+  vs default mode='edge' baseline.  2/2 in 40 s.
 - Iter 371: extend iter-331 + iter-369 flag-set guards for
   iter-370 ``use_fv3_cross_face_du_proj`` (SHARED PE+NH).  9/9
   pass — confirms cross_face flag wired on BOTH paths +
