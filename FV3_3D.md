@@ -938,6 +938,18 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 482: **combined iter-466 + iter-481 paths reach 1.42×**:
+    A. factory full:              3.504×
+    B. min-edge (iter-466 path):  1.748×  (-50.1%)
+    C. min-edge + d2_bg=5e-2:     **1.421×**  (-59.5%, +18.7% beyond B)
+  The two mitigations are COMPOSITIONAL — combining them
+  yields 18.7% additional reduction beyond either alone.
+  Updated floor estimate: ~1.42× rather than the 2.25× I
+  initially thought after iter-481.  Suggests the duogrid
+  bug may be further suppressible with more comprehensive
+  parameter tuning + composite-flag stacking.  3 seeds × 1
+  step × 3 configs.  Pinned as guard regression.  1/1 in
+  275 s.  Wired into iter-383 sweep (now 77).
 - Iter 481: **corner_div_damp_d2_bg tuning sweep at duogrid**:
     d2_bg = 1e-04 : edge ratio 3.493×
     d2_bg = 5e-04 : edge ratio 3.473×  (factory default)

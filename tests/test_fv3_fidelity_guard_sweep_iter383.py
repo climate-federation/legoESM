@@ -100,6 +100,7 @@ _GUARD_MODULES = (
     "test_nh_duogrid_op_bisection_iter479",          # iter-479 add
     "test_nh_duogrid_in_step_bisection_iter480",     # iter-480 add
     "test_corner_div_d2_bg_sweep_duogrid_iter481",   # iter-481 add
+    "test_combined_iter466_iter481_iter482",         # iter-482 add
 )
 
 
