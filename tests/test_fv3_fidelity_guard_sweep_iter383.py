@@ -46,6 +46,8 @@ _GUARD_MODULES = (
     "test_iter417_doc_example_iter418",              # iter-422 add
     "test_dyn_exner_gradient_flow_iter413",          # iter-422 add
     "test_dyn_exner_equals_pkz_iter401",             # iter-422 add
+    "test_iter392_factory_module_exports_iter426",   # iter-427 add
+    "test_iter392_factory_step_runs_iter427",        # iter-427 add
 )
 
 

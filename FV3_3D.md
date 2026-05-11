@@ -919,6 +919,13 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 427: integration test — factory-driven 1-step run at C8
+  produces finite state for both NH (u/v/w/θ′/ρ′) and PE
+  (u_d/v_d/T/p_s).  Closes loop iter-417/418 (config-construct
+  only) → iter-426 (factory-import only) → iter-427 (factory
+  actually drives finite dycore step).  Catches flag-induced NaN
+  in step path.  Wired into iter-383 guard sweep (now 24 modules,
+  was 23).  2/2 in 90 s.
 - Iter 426: verify iter-392 factories are importable + callable
   from dycore modules at module level.  2/2 in 0.8 s.
 - Iter 425: end-to-end smoke verification of all flag/doc
