@@ -860,6 +860,10 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 405: cross-check FV3-fidelity flag-set inventory in
+  iter-369 guard matches actual ``use_fv3_*`` field count in
+  PE + NH source.  Catches drift when a new flag is added to
+  source without updating iter-369 lists.  2/2 in 0.77 s.
 - Iter 404: jax.jit smoke for iter-392 factory-built models.
   Both PE + NH factory configs (all FV3-fidelity flags ON)
   JIT-trace cleanly through model.step.  Catches dynamic-
