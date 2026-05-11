@@ -860,6 +860,11 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 402: AST signature regression for iter-392 factories.
+  Asserts (1)+(2) PE+NH factories accept ``**overrides``,
+  (3)+(4) return correct config type, (5) default factory
+  result enables every FV3-fidelity flag (3 PE + 5 NH).  5/5
+  in 0.76 s.
 - Iter 401: quantitative regression that ``Π_total =
   Π_ref + π'`` equals FV3 ``pkz``.  At rest (ρ'=θ'=0)
   ``Π_total = Π_ref`` exactly (rtol=1e-14).  With small
