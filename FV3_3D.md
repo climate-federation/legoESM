@@ -856,6 +856,13 @@ Key iterations:
   Combined with iter-320 (post-acoustic damp_v / damp_w) +
   iter-321 (damp_w global) + iter-322 (damp_v global), ALL 5 NH
   d_con sites now have cv-flag verification.  3/3.
+- Iter 361: AST flag-coverage guard for all 5 NH d_con sites.
+  Asserts: (1) 4 metric gates (damp_v + corner_div + div_damp +
+  A_h; damp_w is scalar - no metric), (2) 5 cv-vs-cp selectors
+  (one per site), (3) ``_exner_eff_b`` at slow-tendency sites,
+  (4) ``_exner_eff_dv`` + ``_exner_eff_dw`` at post-acoustic.
+  Catches refactors dropping flag wiring from any single site.
+  4/4 in 0.03 s.
 - Iter 360: NH counterpart of iter-359.  Full NH FV3-fidelity
   stack at C16 measurably differs from default flags + same
   toolkit in θ_p field (>1e-6).  1/1 in 41 s.  Closes PE+NH C16
