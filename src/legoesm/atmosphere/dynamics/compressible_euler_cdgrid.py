@@ -853,12 +853,49 @@ def cdgrid_compressible_euler_slow_tendencies(
         # corners then project to cell centres for later
         # accumulation into dtheta_p_dt.
         if config.corner_div_damp_d_con > 0.0:
-            _dKE_dt_corner_cdd = (
-                u_d * _du_d_dt_cdd + v_d * _dv_d_dt_cdd
-            )
-            _dKE_dt_cc_cdd = _interp_corner_to_center(
-                _dKE_dt_corner_cdd,
-            )
+            if config.use_fv3_metric_aware_d_con:
+                # FV3_3D iter 348: NH mirror of PE iter-347 metric
+                # form at corner_div_d_con site.  Project corners
+                # to edge stagger via 2-pt average, apply iter-339
+                # metric form structure at tendency rate.
+                _u_d_n = 0.5 * (u_d[:, :-1, :, :] + u_d[:, 1:, :, :])
+                _v_d_n = 0.5 * (v_d[:, :, :-1, :] + v_d[:, :, 1:, :])
+                _du_n = 0.5 * (
+                    _du_d_dt_cdd[:, :-1, :, :] + _du_d_dt_cdd[:, 1:, :, :]
+                )
+                _dv_n = 0.5 * (
+                    _dv_d_dt_cdd[:, :, :-1, :] + _dv_d_dt_cdd[:, :, 1:, :]
+                )
+                _ubs = _du_n[:, :, :-1, :]
+                _ubn = _du_n[:, :, 1:, :]
+                _vbw = _dv_n[:, :-1, :, :]
+                _vbe = _dv_n[:, 1:, :, :]
+                _us = _u_d_n[:, :, :-1, :]
+                _un = _u_d_n[:, :, 1:, :]
+                _vw = _v_d_n[:, :-1, :, :]
+                _ve = _v_d_n[:, 1:, :, :]
+                _gys = _us * _ubs
+                _gyn = _un * _ubn
+                _gxw = _vw * _vbw
+                _gxe = _ve * _vbe
+                _u2 = _us + _un
+                _du2 = _ubs + _ubn
+                _v2 = _vw + _ve
+                _dv2 = _vbw + _vbe
+                _cosa_cdd = cdgrid.cosa_cell[..., None]
+                _rsin2_cdd = cdgrid.rsin2_cell[..., None]
+                _dKE_dt_cc_cdd = 0.25 * _rsin2_cdd * (
+                    _ubs ** 2 + _ubn ** 2 + _vbw ** 2 + _vbe ** 2
+                    + 2.0 * (_gys + _gyn + _gxw + _gxe)
+                    - _cosa_cdd * (_u2 * _dv2 + _v2 * _du2 + _du2 * _dv2)
+                )
+            else:
+                _dKE_dt_corner_cdd = (
+                    u_d * _du_d_dt_cdd + v_d * _dv_d_dt_cdd
+                )
+                _dKE_dt_cc_cdd = _interp_corner_to_center(
+                    _dKE_dt_corner_cdd,
+                )
             _cx_cdd = (
                 constants.c_vd if config.use_fv3_d_con_cv
                 else constants.c_pd
