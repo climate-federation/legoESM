@@ -860,6 +860,16 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 384: independence test for iter-370 cross_face flag +
+  iter-338/339 metric flag.  Verifies flags affect state via
+  INDEPENDENT mechanisms (metric changes T via d_con heat
+  formula; cross_face changes u_d via halo at cube edges).
+  Test compares ``s_both`` against ``s_metric_only`` (using
+  u_d field) AND against ``s_cross_only`` (using T field).
+  Both > 1e-12 confirms no double-cancellation.  Also
+  caught documentation gap: cross_face requires
+  ``use_duogrid=True`` to have any effect (no-op when grid
+  has duogrid=None).  2/2 in 159 s.
 - Iter 383: meta-test inventory + import sweep of every FV3-
   fidelity AST/structure guard.  Catches iter-382-style suffix
   collisions / cross-guard interactions at CI time.  Inventories
