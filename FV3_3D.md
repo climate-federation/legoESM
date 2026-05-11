@@ -931,6 +931,9 @@ Key iterations:
   iter-369 guard matches actual ``use_fv3_*`` field count in
   PE + NH source.  Catches drift when a new flag is added to
   source without updating iter-369 lists.  2/2 in 0.77 s.
+- Iter 418: executable test verifying iter-417 production-usage
+  doc example actually runs.  Catches doc drift if factory API
+  changes but example isn't updated.  2/2 in 7 s.
 - Iter 416: extend iter-383 sweep inventory with iter-415
   no-duplicates regression itself.  Self-referential (sweep
   includes the no-duplicates guard).  19 guard modules now.
