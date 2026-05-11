@@ -938,6 +938,14 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 485: AST regression guard for the 4 user-facing
+  legoESM-min-edge factories (iter-467 NH min_edge, iter-468
+  PE min_edge, iter-483 NH aggressive, iter-484 PE aggressive).
+  8 tests: 4 function defs + 2 NH/PE min_edge override sets
+  + 2 NH/PE aggressive override sets including d2_bg=5e-2.
+  Catches a silent regression where a maintainer drops an
+  override.  8/8 in 0.04 s.  Wired into iter-383 sweep
+  (now 80).
 - Iter 484: PE mirror of NH iter-483 ``make_legoesm_pe_min_
   edge_aggressive_config``.  Same flag drops + d2_bg=5e-2
   stacking, applied to PE.  Caveat: iter-469/470 showed PE
