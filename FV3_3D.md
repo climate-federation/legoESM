@@ -938,6 +938,23 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 481: **corner_div_damp_d2_bg tuning sweep at duogrid**:
+    d2_bg = 1e-04 : edge ratio 3.493×
+    d2_bg = 5e-04 : edge ratio 3.473×  (factory default)
+    d2_bg = 1e-03 : edge ratio 3.449×
+    d2_bg = 5e-03 : edge ratio 3.270×
+    d2_bg = 1e-02 : edge ratio 3.080×
+    d2_bg = 5e-02 : edge ratio **2.248×**  (-36% vs factory)
+  Higher corner_div_damp suppresses duogrid penalty
+  monotonically.  At d2_bg=5e-2 (100× factory) the residual
+  edge ratio is 2.25 — same as iter-466's "drop 3 flags"
+  minimal config.  Two paths to ~2.25× duogrid edge ratio:
+  (a) iter-466 drop iter-465 hurting flags; (b) iter-481
+  boost corner_div_damp 100×.  Both achieve same containment.
+  Trade-off: higher d2_bg over-damps physical waves.  Could
+  combine both paths for ~50% × 36% ≈ 70% reduction in
+  future tuning work.  1/1 in 384 s.  Wired into iter-383
+  sweep (now 76).
 - Iter 480: **in-step op bisection** + compact iter 465-474:
     A. factory baseline:    edge ratio  3.511×
     B. -corner_div_damp:    edge ratio 109.024×  ← +30× when disabled
