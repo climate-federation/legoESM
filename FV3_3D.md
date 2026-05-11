@@ -919,6 +919,16 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 448: NH FV3 ``Ray_fast`` (fast Rayleigh friction).  Port
+  of FV3 ``dyn_core.F90:2922-3020`` column Rayleigh damping at
+  model top.  New config fields ``rf_tau_days: float = 0.0``
+  (default 0 = OFF) + ``rf_cutoff_pa: float = 3000.0`` (FV3
+  default 30 hPa).  Helper ``compute_rff_profile`` in new
+  ``core/fv3_rayleigh_fast.py``.  Applied to u, v, w at end of
+  ``step()`` after fix_mass.  Distinct from iter-431..447
+  divergence-damping sponge — RF is explicit column Rayleigh.
+  7/7 in 52 s.  Wired into iter-383 sweep (now 44).  Closes a
+  real remaining FV3 gap (column RF was completely missing).
 - Iter 447: factor linear-scaling FV3 sponge trick (iter-441
   damp_w + iter-442 NH damp_v + iter-443 PE damp_v) into
   shared core helper ``apply_top_sponge_field_scale``.  Three

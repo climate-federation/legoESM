@@ -117,6 +117,27 @@ class CDGridCompressibleEulerConfig(NamedTuple):
     corner_div_damp_dddmp: float = 0.20
     corner_div_damp_d4_bg: float = 0.0
     corner_div_damp_nord: int = 0
+    rf_tau_days: float = 0.0
+        # FV3-faithful fast Rayleigh friction timescale (FV3_3D
+        # iter 448).  Port of FV3 ``dyn_core.F90:2922`` ``Ray_fast``::
+        #
+        #     rff(k) = dt/tau0 * sin²(π/2 ·
+        #         log(rf_cutoff/pfull(k)) /
+        #         log(rf_cutoff/ptop))
+        #     rff(k) = 1.0 / (1.0 + rff(k))
+        #     u *= rff(k), v *= rff(k), w *= rff(k)
+        #
+        # for ``pfull(k) < rf_cutoff_pa``.  Provides explicit
+        # column Rayleigh damping at the model top, distinct
+        # from the divergence-damping sponge (iter-431..447).
+        # ``tau`` is in DAYS (matches FV3 namelist convention).
+        # Default 0.0 disables RF entirely (bit-for-bit
+        # baseline).  FV3 production default is 0.0 (RF off).
+        # Typical values 5-15 days.
+    rf_cutoff_pa: float = 3000.0
+        # Cutoff pressure for Rayleigh friction (FV3_3D iter 448,
+        # FV3 ``rf_cutoff = 3.0E2`` Pa = 30 hPa default).  Levels
+        # with ``pfull < rf_cutoff_pa`` get the RF damping.
     use_fv3_sponge_damp_v: bool = False
         # FV3-faithful sponge boost of the NH ``damp_v``
         # (vorticity damping) coefficient at top levels (FV3_3D
@@ -1943,6 +1964,43 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
             state_new = fix_mass_nonhydrostatic(
                 state_new, target, self.height_coord,
                 self.terrain_metric, self.grid,
+            )
+
+        # FV3_3D iter 448: optional FV3 ``Ray_fast`` (fast
+        # Rayleigh friction).  Applied to u, v, w at end of
+        # step.  Default ``rf_tau_days = 0`` skips entirely.
+        if self.config.rf_tau_days > 0.0:
+            from legoesm.core.fv3_rayleigh_fast import (
+                compute_rff_profile, pfull_from_exner,
+            )
+            _pfull = pfull_from_exner(self.height_coord.exner_ref)
+            _ptop = _pfull[0]   # traced scalar (top reference pressure)
+            _rff = compute_rff_profile(
+                _pfull, ptop=_ptop,
+                rf_cutoff=self.config.rf_cutoff_pa,
+                tau_days=self.config.rf_tau_days,
+                dt=dt,
+            )
+            _rff_b = _rff[None, None, None, :]  # (1,1,1,nlev)
+            state_new = state_new._replace(
+                u=state_new.u.replace(
+                    data=state_new.u.data * _rff_b,
+                ),
+                v=state_new.v.replace(
+                    data=state_new.v.data * _rff_b,
+                ),
+            )
+            # w shape (6, n, n, nlev+1); apply rff[k] to w[k+1]
+            # (half-level just below full level k).  Top half-
+            # level w[0] stays unchanged (model-top BC).
+            _rff_half = jnp.concatenate(
+                [jnp.ones((1,)), _rff], axis=0,
+            )                              # (nlev+1,)
+            _rff_half_b = _rff_half[None, None, None, :]
+            state_new = state_new._replace(
+                w=state_new.w.replace(
+                    data=state_new.w.data * _rff_half_b,
+                ),
             )
 
         return state_new
