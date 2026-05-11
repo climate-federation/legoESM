@@ -509,6 +509,17 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # 1 = del-4 (one Laplacian iteration);
         # 2 = del-6 (two Laplacian iterations, FV3 d_sw5 default).
         # Active only when ``corner_div_damp_d4_bg > 0``.
+    use_fv3_sponge_damp_v: bool = False
+        # FV3-faithful sponge boost of PE ``damp_v`` (vorticity
+        # damping) at top sponge levels (FV3_3D iter 443, PE
+        # mirror of NH iter-442).  Ports FV3
+        # ``dyn_core.F90:786-787, 796-797`` ``damp_vt = 0.5 *
+        # d2_divg`` at sponge layers k=0, k=1 (FV3 does NOT
+        # extend to k=2).  Linear ``damp^(nord_v+1)`` scaling
+        # trick: ``(du, dv) *= (0.5 * boosted / damp_v)^
+        # (nord_v+1)``.  Gated on ``corner_div_damp_d2_bg_k1``
+        # (k=0) and ``corner_div_damp_d2_bg_k2 > 0.01`` (k=1).
+        # Default False = bit-for-bit baseline.
     corner_div_damp_d2_bg_k2: float = 0.0
         # FV3-faithful per-level sponge boost of the corner-
         # divergence d2_bg coefficient at k=1 and k=2 (FV3_3D
@@ -2023,6 +2034,48 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
             )
             du_normal = jnp.moveaxis(du_normal_t, 0, -1)
             dv_normal = jnp.moveaxis(dv_normal_t, 0, -1)
+
+            # FV3_3D iter 443: PE mirror of NH iter-442 sponge
+            # boost of damp_v at top levels.  Linear scaling
+            # trick: ``(du, dv) *= (0.5 * boosted / damp_v)^
+            # (nord_v+1)`` at sponge levels k=0, k=1 (FV3 does
+            # NOT boost k=2 for damp_v).
+            if self.config.use_fv3_sponge_damp_v:
+                _nord_p1_pv = self.config.nord_v + 1
+                _nlev_pv = du_normal.shape[-1]
+                _k_idx_pv = jnp.arange(_nlev_pv)
+                if self.config.corner_div_damp_d2_bg_k1 > 0.0:
+                    _boosted_pk1_v = 0.5 * jnp.maximum(
+                        self.config.corner_div_damp_d2_bg,
+                        self.config.corner_div_damp_d2_bg_k1,
+                    )
+                    _scale_pk1_v = (
+                        _boosted_pk1_v / self.config.damp_v
+                    ) ** _nord_p1_pv
+                    du_normal = jnp.where(
+                        _k_idx_pv == 0,
+                        du_normal * _scale_pk1_v, du_normal,
+                    )
+                    dv_normal = jnp.where(
+                        _k_idx_pv == 0,
+                        dv_normal * _scale_pk1_v, dv_normal,
+                    )
+                if self.config.corner_div_damp_d2_bg_k2 > 0.01:
+                    _boosted_pk2_v = 0.5 * jnp.maximum(
+                        self.config.corner_div_damp_d2_bg,
+                        self.config.corner_div_damp_d2_bg_k2,
+                    )
+                    _scale_pk2_v = (
+                        _boosted_pk2_v / self.config.damp_v
+                    ) ** _nord_p1_pv
+                    du_normal = jnp.where(
+                        _k_idx_pv == 1,
+                        du_normal * _scale_pk2_v, du_normal,
+                    )
+                    dv_normal = jnp.where(
+                        _k_idx_pv == 1,
+                        dv_normal * _scale_pk2_v, dv_normal,
+                    )
 
             # Project wind increments from FV3 normal D-grid back to
             # corners (6, n+1, n+1, nlev) by mode='edge' padding then

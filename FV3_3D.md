@@ -919,6 +919,11 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 443: PE mirror of iter-442 sponge boost of ``damp_v``.
+  Same opt-in flag pattern ``use_fv3_sponge_damp_v: bool =
+  False`` on ``CDGridPrimitiveEquationConfig``.  Same linear
+  scaling at k=0 + k=1 (FV3 does NOT extend to k=2 for damp_v).
+  4/4 in 40 s.  Wired into iter-383 sweep (now 39).
 - Iter 442: FV3 sponge boost of NH ``damp_v`` (vorticity
   damping) coefficient at top levels.  Ports FV3
   ``dyn_core.F90:786-787, 796-797`` ``damp_vt = 0.5 *

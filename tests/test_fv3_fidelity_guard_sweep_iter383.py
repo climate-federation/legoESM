@@ -62,6 +62,7 @@ _GUARD_MODULES = (
     "test_nh_corner_div_d2_bg_sponge_iter440",       # iter-440 add
     "test_nh_sponge_damp_w_iter441",                 # iter-441 add
     "test_nh_sponge_damp_v_iter442",                 # iter-442 add
+    "test_pe_sponge_damp_v_iter443",                 # iter-443 add
 )
 
 
