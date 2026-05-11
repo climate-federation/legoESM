@@ -856,6 +856,11 @@ Key iterations:
   Combined with iter-320 (post-acoustic damp_v / damp_w) +
   iter-321 (damp_w global) + iter-322 (damp_v global), ALL 5 NH
   d_con sites now have cv-flag verification.  3/3.
+- Iter 363: safety regression for iter-336/337 dynamic Exner.
+  Π_total = Π_ref + π' could go non-positive under strong π'.
+  iter-363 verifies under strong perturbation (±15 K θ', ±0.2
+  kg/m³ ρ', ±10 m/s wind) all state fields stay finite (no
+  NaN/Inf) at NH d_con denominators.  1/1 in 16 s.
 - Iter 362: PE counterpart of iter-361 flag-coverage guard.
   PE has 4 metric d_con gates (damp_v + corner_div + div_damp +
   A_h); NO cv selectors (PE uses cp_air); NO ``_exner_eff_b``
