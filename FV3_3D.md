@@ -938,6 +938,19 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 474: **first negative diagnostic** — ``pad_halo_4d`` with
+  duogrid preserves constants to machine precision (5.1e-13
+  deviation on a constant input).  This **rules out** "scalar
+  halo operator alone broken" as the root cause of iter-473's
+  edge-std 4.77× increase.  The duogrid bug must come from
+  interaction with non-trivial fields (gradients across face
+  boundaries) or from vector halo / corner interpolation.
+  Remaining iter-473 candidates after iter-474:
+    ✗ pad_halo_4d scalar with duogrid (PASSED constant test)
+    ? Vector halo pad_halo_vector_4d (used for u/v)
+    ? Cube-vertex (corner) interpolation
+    ? Higher-order halo treatment under gradients
+  2/2 in 5 s.  Wired into iter-383 sweep (now 69).
 - Iter 473: **CONCLUSIVE duogrid root-cause decomposition**:
   the 5× edge-ratio increase is driven ENTIRELY by an edge
   std increase, NOT by an interior std decrease.

@@ -92,6 +92,7 @@ _GUARD_MODULES = (
     "test_nh_duogrid_effect_iter471",                # iter-471 add
     "test_nh_duogrid_effect_c16_iter472",            # iter-472 add
     "test_nh_duogrid_raw_std_iter473",               # iter-473 add
+    "test_pad_halo_4d_duogrid_constant_iter474",     # iter-474 add
 )
 
 
