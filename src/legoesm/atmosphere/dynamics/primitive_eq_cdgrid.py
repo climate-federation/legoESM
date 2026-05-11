@@ -382,6 +382,20 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # ``corner_div_damp_d2_bg > 0`` block.  FV3 production
         # default is ``d_con = 1.0``.  The iter-218/219 sponge-
         # aware ``delt_max`` cap also applies to this heating term.
+    use_fv3_cross_face_du_proj: bool = False
+        # FV3-faithful cross-face halo for the iter-12 ``damp_v``
+        # post-step wind-increment projection back to corners
+        # (FV3_3D iter 370).  Default ``mode='edge'`` (same-face
+        # extension) leaves an O(dx) bias at cube edges where the
+        # neighbor face's du/dv value differs from the local face's.
+        # When True, swaps to ``pad_halo_4d`` (with duogrid routing
+        # if active) which reads the neighbor face's adjacent
+        # column.  Approximation: pad_halo_4d's interpolation
+        # assumes cell-centre stagger but du_normal is at edge
+        # stagger — the cross-face value is off by 0.5 cell.
+        # Better than mode='edge' (cross-face VALUE-aware) but not
+        # bit-for-bit FV3 (which uses edge-native cubed_a2d_halo).
+        # Default False preserves bit-for-bit baseline.
     use_fv3_metric_aware_d_con: bool = False
         # FV3-faithful metric-aware d_con KE→heat form for the
         # iter-208 ``damp_v_d_con`` site (FV3_3D iter 338).  Port of
@@ -1905,13 +1919,28 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
             # averaging — the inverse of the corner→face averaging
             # used at the start.  At the cube-face boundary the edge
             # repeat preserves the increment magnitude.
-            du_pad = jnp.pad(
-                du_normal, [(0, 0), (1, 1), (0, 0), (0, 0)], mode="edge",
-            )
+            # FV3_3D iter 370: optional cross-face halo for
+            # du_normal/dv_normal via pad_halo_4d (duogrid-aware)
+            # instead of same-face mode='edge'.
+            if self.config.use_fv3_cross_face_du_proj:
+                from legoesm.grids.halo import pad_halo_4d as _pad_h4
+                _dg = self.grid.duogrid
+                du_full = _pad_h4(du_normal, duogrid=_dg)
+                # (6, n+2, n+3, nlev) → slice axis=2 to (n+1)
+                du_pad = du_full[:, :, 1:-1, :]
+                dv_full = _pad_h4(dv_normal, duogrid=_dg)
+                # (6, n+3, n+2, nlev) → slice axis=1 to (n+1)
+                dv_pad = dv_full[:, 1:-1, :, :]
+            else:
+                du_pad = jnp.pad(
+                    du_normal, [(0, 0), (1, 1), (0, 0), (0, 0)],
+                    mode="edge",
+                )
+                dv_pad = jnp.pad(
+                    dv_normal, [(0, 0), (0, 0), (1, 1), (0, 0)],
+                    mode="edge",
+                )
             du_corner = 0.5 * (du_pad[:, :-1, :, :] + du_pad[:, 1:, :, :])
-            dv_pad = jnp.pad(
-                dv_normal, [(0, 0), (0, 0), (1, 1), (0, 0)], mode="edge",
-            )
             dv_corner = 0.5 * (dv_pad[:, :, :-1, :] + dv_pad[:, :, 1:, :])
 
             # FV3_3D iter 208: optional KE→heat conversion for the

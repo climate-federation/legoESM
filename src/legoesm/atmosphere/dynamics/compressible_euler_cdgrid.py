@@ -294,6 +294,12 @@ class CDGridCompressibleEulerConfig(NamedTuple):
         # refinement).  Default 0.0 preserves bit-for-bit baseline;
         # gated INSIDE ``corner_div_damp_d2_bg > 0``.  FV3
         # production default is 1.0.
+    use_fv3_cross_face_du_proj: bool = False
+        # FV3-faithful cross-face halo for iter-169 damp_v
+        # post-step wind-increment projection back to corners
+        # (FV3_3D iter 370, NH mirror of PE iter-370).  Default
+        # mode='edge' (same-face); True uses pad_halo_4d
+        # (duogrid-aware) for cross-face value.
     use_fv3_metric_aware_d_con: bool = False
         # FV3-faithful metric-aware d_con KE→heat form for the
         # NH iter-209 ``damp_v_d_con`` site (FV3_3D iter 339, mirror
@@ -1442,13 +1448,24 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
             # Project wind increments from FV3 normal D-grid back to
             # corners (mode='edge' padding then averaging — inverse of
             # the corner→face averaging used at the start).
-            du_pad = jnp.pad(
-                du_normal, [(0, 0), (1, 1), (0, 0), (0, 0)], mode="edge",
-            )
+            # FV3_3D iter 370: optional cross-face halo (mirror of
+            # PE iter-370 wiring).
+            if self.config.use_fv3_cross_face_du_proj:
+                _dg = self.grid.duogrid
+                du_full = _pad_halo_4d_module(du_normal, duogrid=_dg)
+                du_pad = du_full[:, :, 1:-1, :]
+                dv_full = _pad_halo_4d_module(dv_normal, duogrid=_dg)
+                dv_pad = dv_full[:, 1:-1, :, :]
+            else:
+                du_pad = jnp.pad(
+                    du_normal, [(0, 0), (1, 1), (0, 0), (0, 0)],
+                    mode="edge",
+                )
+                dv_pad = jnp.pad(
+                    dv_normal, [(0, 0), (0, 0), (1, 1), (0, 0)],
+                    mode="edge",
+                )
             du_corner = 0.5 * (du_pad[:, :-1, :, :] + du_pad[:, 1:, :, :])
-            dv_pad = jnp.pad(
-                dv_normal, [(0, 0), (0, 0), (1, 1), (0, 0)], mode="edge",
-            )
             dv_corner = 0.5 * (dv_pad[:, :, :-1, :] + dv_pad[:, :, 1:, :])
 
             # Project corner wind increments back to cell centres for

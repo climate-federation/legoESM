@@ -860,6 +860,19 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 370: opt-in cross-face halo for damp_v post-step
+  wind-increment projection back to corners (PE + NH).  Closes
+  real 3D gap: ``jnp.pad(du_normal, mode='edge')`` at cube
+  boundary uses same-face value; iter-370 adds
+  ``use_fv3_cross_face_du_proj: bool = False`` (PE+NH) that
+  swaps to ``pad_halo_4d`` (duogrid-aware) for cross-face
+  value at cube edges.  Approximation: pad_halo_4d's interp
+  assumes cell-centre stagger but du_normal is at edge stagger
+  → cross-face value off by 0.5 cell.  Better than mode='edge'
+  but not bit-for-bit FV3 (which uses edge-native
+  ``cubed_a2d_halo``).  Default False bit-for-bit baseline.
+  6-test pass set (3 PE + 3 NH): baseline + state changes +
+  AD-safe.  6/6 in 117 s.
 - Iter 369: consolidated FV3-fidelity flag-set presence guard.
   Asserts NH has 4 flags (cv, vector_halo, dyn_exner, metric)
   + PE has 2 flags (a2b_zeta, metric); all default False.
