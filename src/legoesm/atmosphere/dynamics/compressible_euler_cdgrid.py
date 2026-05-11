@@ -300,6 +300,10 @@ class CDGridCompressibleEulerConfig(NamedTuple):
         # (FV3_3D iter 370, NH mirror of PE iter-370).  Default
         # mode='edge' (same-face); True uses pad_halo_4d
         # (duogrid-aware) for cross-face value.
+        # **iter 384 finding**: flag is a NO-OP when grid was
+        # constructed with ``use_duogrid=False`` (pair with
+        # ``create_cubed_sphere(..., use_duogrid=True)`` for
+        # actual cross-face VALUE transfer).
     use_fv3_metric_aware_d_con: bool = False
         # FV3-faithful metric-aware d_con KE→heat form for the
         # NH iter-209 ``damp_v_d_con`` site (FV3_3D iter 339, mirror

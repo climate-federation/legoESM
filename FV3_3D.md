@@ -860,6 +860,12 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 385: document iter-384 finding in iter-370 source
+  comments (PE + NH).  Flag ``use_fv3_cross_face_du_proj``
+  is a NO-OP when ``use_duogrid=False``; users must pair with
+  ``create_cubed_sphere(..., use_duogrid=True)`` for cross-face
+  VALUE transfer.  14/14 cross_face tests still pass post-
+  comment update.
 - Iter 384: independence test for iter-370 cross_face flag +
   iter-338/339 metric flag.  Verifies flags affect state via
   INDEPENDENT mechanisms (metric changes T via d_con heat

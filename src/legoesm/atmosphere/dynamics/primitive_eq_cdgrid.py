@@ -396,6 +396,12 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # Better than mode='edge' (cross-face VALUE-aware) but not
         # bit-for-bit FV3 (which uses edge-native cubed_a2d_halo).
         # Default False preserves bit-for-bit baseline.
+        # **iter 384 finding**: flag is a NO-OP when grid was
+        # constructed with ``use_duogrid=False`` because non-duogrid
+        # pad_halo's interp_offsets at edge stagger don't differ
+        # from mode='edge' at this site.  For cross-face VALUES to
+        # actually transfer across faces, pair with
+        # ``create_cubed_sphere(..., use_duogrid=True)``.
     use_fv3_metric_aware_d_con: bool = False
         # FV3-faithful metric-aware d_con KE→heat form for the
         # iter-208 ``damp_v_d_con`` site (FV3_3D iter 338).  Port of
