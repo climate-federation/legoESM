@@ -2077,9 +2077,12 @@ def make_fv3_faithful_nh_config(**overrides) -> CDGridCompressibleEulerConfig:
         nord_v=1,
         corner_div_damp_nord=1,
         corner_div_damp_d4_bg=0.16,
-        corner_div_damp_d2_bg_k1=4.0,
-        corner_div_damp_d2_bg_k2=2.0,
-        use_fv3_sponge_damp_w=True,
+        # iter-452: d2_bg_k1/k2 left at 0.0 — FV3 production values
+        # (4.0 / 2.0) assume FV3's specific da_min_c × d2 normalization
+        # which legoESM does not match dimensionally.  Set them
+        # together with a paired ``corner_div_damp_d2_bg`` to avoid
+        # blow-up in the top sponge level.
+        use_fv3_sponge_damp_w=True,    # harmless when d2_bg_k* = 0
         use_fv3_sponge_damp_v=True,
     )
     defaults.update(overrides)

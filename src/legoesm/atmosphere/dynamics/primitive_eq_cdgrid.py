@@ -2471,8 +2471,7 @@ def make_fv3_faithful_pe_config(**overrides) -> CDGridPrimitiveEquationConfig:
         nord_v=1,
         corner_div_damp_nord=1,
         corner_div_damp_d4_bg=0.16,
-        corner_div_damp_d2_bg_k1=4.0,
-        corner_div_damp_d2_bg_k2=2.0,
+        # iter-452: d2_bg_k1/k2 left at 0.0 — see NH factory note.
         use_fv3_sponge_damp_v=True,
     )
     defaults.update(overrides)

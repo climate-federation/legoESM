@@ -919,6 +919,19 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 452: scale-honest sponge calibration.  Empirical
+  finding: FV3 production values ``d2_bg_k1=4.0`` /
+  ``d2_bg_k2=2.0`` (iter-444 defaults) assume FV3's specific
+  ``da_min_c × d2`` normalization; in legoESM same numeric
+  values produce ~10⁸×-too-aggressive damping at top → blow-
+  up.  Rolled back factory defaults to 0.0 (sponge flags stay
+  True but no-op without paired k values).  User must set
+  d2_bg_k* explicitly at legoESM-scale-compatible value (e.g.,
+  1e-4).  New iter-452 e2e test verifies sponge boost
+  mechanism IS functional with appropriately small k1 and
+  produces detectable but non-blowup damping.  13/13 (iter-
+  444 + iter-427 still pass, new iter-452 pass) in 75 s.
+  Wired into iter-383 sweep (now 48).
 - Iter 451: factory defaults expose FV3 production
   ``corner_div_damp_d4_bg = 0.16`` (FV3 ``fv_arrays.F90``
   ``d4_bg``).  Combined with iter-437 ``nord=1`` (del-4), the

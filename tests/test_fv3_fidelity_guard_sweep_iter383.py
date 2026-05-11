@@ -71,6 +71,7 @@ _GUARD_MODULES = (
     "test_pe_rayleigh_fast_iter449",                 # iter-449 add
     "test_rayleigh_fast_ast_guard_iter450",          # iter-450 add
     "test_factory_d4_bg_default_iter451",            # iter-451 add
+    "test_factory_sponge_e2e_damping_iter452",       # iter-452 add
 )
 
 

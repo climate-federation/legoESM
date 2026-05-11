@@ -39,13 +39,16 @@ from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
 
 
 def test_nh_factory_default_d2_bg_k1():
+    """iter-452: rolled back from 4.0 → 0.0; FV3 production
+    value assumes FV3's da_min_c × d2 normalization which
+    legoESM does not match."""
     cfg = make_fv3_faithful_nh_config()
-    assert cfg.corner_div_damp_d2_bg_k1 == 4.0
+    assert cfg.corner_div_damp_d2_bg_k1 == 0.0
 
 
 def test_nh_factory_default_d2_bg_k2():
     cfg = make_fv3_faithful_nh_config()
-    assert cfg.corner_div_damp_d2_bg_k2 == 2.0
+    assert cfg.corner_div_damp_d2_bg_k2 == 0.0
 
 
 def test_nh_factory_default_sponge_damp_w_flag():
@@ -60,12 +63,12 @@ def test_nh_factory_default_sponge_damp_v_flag():
 
 def test_pe_factory_default_d2_bg_k1():
     cfg = make_fv3_faithful_pe_config()
-    assert cfg.corner_div_damp_d2_bg_k1 == 4.0
+    assert cfg.corner_div_damp_d2_bg_k1 == 0.0
 
 
 def test_pe_factory_default_d2_bg_k2():
     cfg = make_fv3_faithful_pe_config()
-    assert cfg.corner_div_damp_d2_bg_k2 == 2.0
+    assert cfg.corner_div_damp_d2_bg_k2 == 0.0
 
 
 def test_pe_factory_default_sponge_damp_v_flag():
