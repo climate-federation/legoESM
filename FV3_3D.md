@@ -860,6 +860,11 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 383: meta-test inventory + import sweep of every FV3-
+  fidelity AST/structure guard.  Catches iter-382-style suffix
+  collisions / cross-guard interactions at CI time.  Inventories
+  12 guard modules (iter-317/318/319/331/340/342/353/361/362/
+  368/369/373).  2/2 in 0.8 s.
 - Iter 382: **BUG FIX** iter-319 d_con knob count regression
   caught by full guard sweep.  iter-339 added
   ``use_fv3_metric_aware_d_con`` field — ends in ``_d_con``
