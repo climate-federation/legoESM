@@ -11,6 +11,46 @@ visible cube imprint (concentric blobs at face centres bordered by
 red/blue rings at panel boundaries) in u/v wind snapshots from
 Held-Suarez and baroclinic test cases.
 
+## FV3-fidelity stack (iter 356 update)
+
+By iter-356 the FV3-fidelity opt-in stack closes the major
+documented audit gaps on the 3D paths.
+
+NH config exposes 4 opt-in fidelity flags + duogrid grid:
+
+| Flag                              | What            | Iter |
+|-----------------------------------|-----------------|:----:|
+| ``use_fv3_d_con_cv``              | cv_air branch   | 320 |
+| ``use_fv3_vector_halo_uv``        | vector halo (u, v) center→corner | 328 |
+| ``use_fv3_dynamic_exner``         | live Π=Π_ref+π' at all 5 d_con sites | 336/337 |
+| ``use_fv3_metric_aware_d_con``    | cosa_s/rsin2 form at all 5 d_con sites | 339/344/348/350/352 |
+| ``use_duogrid=True`` (grid)       | Lagrange-extended halo at 3 NH sites | 325 |
+
+PE config exposes 2 opt-in fidelity flags + duogrid grid:
+
+| Flag                              | What            | Iter |
+|-----------------------------------|-----------------|:----:|
+| ``use_fv3_a2b_zeta_corner``       | 4th-order A→B ζ corner | 14 |
+| ``use_fv3_metric_aware_d_con``    | cosa_s/rsin2 form at all 4 d_con sites | 338/344/347/349/351 |
+| ``use_duogrid=True`` (grid)       | duogrid wiring at PE ke_correction halo | 333 |
+
+PE-NH asymmetry (iter-331/343): PE doesn't need cv (PE uses
+cp_air which is FV3-faithful for hydrostatic), vector halo (PE
+stores winds at corners, no center→corner interp), or dynamic
+Exner (PE uses actual T, no Π factor).
+
+All flags default ``False`` (preserves bit-for-bit baseline).
+AD-at-rest coverage: NH iter-346 + PE iter-355 (full stacks).
+
+Closed gaps:
+- Gap #1 metric d_con cosa_s/rsin2 (8 sites): iter-338-352
+- Gap #2 dynamic Exner (5 NH sites): iter-336/337
+
+Documented residual gaps (lower priority, SW-only or non-duogrid):
+- Gap #4/5 d_sw5 polar/boundary (SW solver, not 3D paths)
+- Gap #6 vort/ptc edge halo (fv3_sw_core SW path only)
+- Gap #7 fv_tp_2d s11/s14/s15 (non-duogrid path only)
+
 ## Final state (iter 100 close-out, table updated through iter 103)
 
 Core deliverable RESOLVED at iter 99: HS at C96 30 days completes
