@@ -904,6 +904,62 @@ def smagorinsky_biharmonic_3d(u_edge_3d, mesh, C_smag):
     return -vector_laplacian_del2_3d(intermediate, mesh)  # (nEdges, nlev)
 
 
+def smagorinsky_laplacian_3d(u_edge_3d, mesh, C_smag_lap):
+    """Smagorinsky Laplacian viscosity: ``A_smag * del2(u)``.
+
+    Flow-dependent Laplacian viscosity using the Smagorinsky (1963)
+    formulation.  Unlike the biharmonic variant, this applies the
+    spatially varying coefficient directly to a single Laplacian —
+    stronger dissipation at all scales where strain is large.
+
+    The effective viscosity at each edge is::
+
+        A_smag = (C_smag_lap · Δ)² · |D|
+
+    where Δ is the geometric-mean grid scale and |D| is the total
+    deformation (strain rate magnitude = sqrt(tension² + shearing²)).
+
+    This is the MPAS Voronoi equivalent of the lat-lon ``C_smag_lap``
+    scheme in ``ocean_pe_latlon_cgrid.py``.
+
+    Parameters
+    ----------
+    u_edge_3d : jax.Array, shape (nEdges, nlev)
+        Normal velocity at edges.
+    mesh : VoronoiMesh
+    C_smag_lap : float
+        Dimensionless Smagorinsky coefficient (typical 0.1-0.3 for
+        Laplacian; higher than biharmonic because it's less scale-
+        selective).
+
+    Returns
+    -------
+    jax.Array, shape (nEdges, nlev)
+        Viscous tendency (to be ADDED to du/dt).
+    """
+    # --- Strain rate at native TRiSK locations ---
+    div_c = divergence_cell_3d(u_edge_3d, mesh)   # (nCells, nlev) — tension
+    curl_v = curl_vertex_3d(u_edge_3d, mesh)       # (nVertices, nlev) — shearing
+
+    # --- Average to edges ---
+    c1, c2 = mesh.cellsOnEdge[0], mesh.cellsOnEdge[1]
+    D_T_edge = 0.5 * (div_c[c1] + div_c[c2])      # (nEdges, nlev)
+
+    v0, v1 = mesh.verticesOnEdge[0], mesh.verticesOnEdge[1]
+    D_S_edge = 0.5 * (curl_v[v0] + curl_v[v1])    # (nEdges, nlev)
+
+    # Small epsilon prevents NaN gradient of sqrt at zero.
+    deformation = jnp.sqrt(D_T_edge**2 + D_S_edge**2 + 1e-30)
+
+    # --- Smagorinsky coefficient [m²/s] at edges ---
+    delta_edge = jnp.sqrt(mesh.dcEdge * mesh.dvEdge)  # (nEdges,)
+    A_smag = (C_smag_lap * delta_edge[:, None]) ** 2 * deformation  # (nEdges, nlev)
+
+    # --- Single-pass Laplacian: A_smag * del2(u) ---
+    del2_u = vector_laplacian_del2_3d(u_edge_3d, mesh)  # (nEdges, nlev)
+    return A_smag * del2_u  # (nEdges, nlev)
+
+
 # ---------------------------------------------------------------------------
 # Leith viscosity for MPAS TRiSK C-grid (Leith 1996;
 # Fox-Kemper & Menemenlis 2008).

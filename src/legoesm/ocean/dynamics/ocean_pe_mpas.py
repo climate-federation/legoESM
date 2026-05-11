@@ -51,6 +51,7 @@ from legoesm.core.operators_voronoi import (
     pv_flux_energy_conserving_3d,
     pv_flux_enstrophy_conserving_3d,
     smagorinsky_biharmonic_3d,
+    smagorinsky_laplacian_3d,
     leith_biharmonic_3d,
     vector_laplacian_del2_3d,
     vector_laplacian_del4_3d,
@@ -263,11 +264,19 @@ def mpas_ocean_baroclinic_tendencies(
     )  # (nCells, nlev+1)
 
     # ---- Momentum tendencies (batched 3D) ----
-    # MOM6-style split (#160): compute the FULL nonlinear tendency with
-    # TOTAL velocity and TOTAL PV = (f + ζ) / h.  Coriolis enters
-    # exclusively through the PV flux — no separate substep needed.
-    # The depth-mean → F_slow_u for the barotropic solver; the
-    # baroclinic perturbation gets the deviation.
+    # Split-explicit Coriolis approach: the PV flux below uses ONLY
+    # relative vorticity q = ζ/h (zero_f at line 454), NOT the full
+    # PV (f+ζ)/h.  Planetary Coriolis f×u is applied SEPARATELY:
+    #   - f×u_bar: online in the barotropic solver (Heun scheme)
+    #   - f×u_prime: forward-backward Matsuno in step()
+    # This is the standard split-explicit convention (matches POP,
+    # MPAS-Ocean production).  F_slow_u therefore contains NO
+    # planetary Coriolis — see comment at line ~643.
+    #
+    # NOTE: issue #160 tracks a potential future refactor to the
+    # MOM6-style approach where full PV = (f+ζ)/h enters through
+    # the PV flux and no separate Coriolis substep is needed.
+    # That is NOT what is currently implemented.
 
     # Kinetic energy from TOTAL velocity.  Multiply by edge_mask first
     # (defense-in-depth per the ocean-modeling audit) so dry-edge u
@@ -515,8 +524,16 @@ def mpas_ocean_baroclinic_tendencies(
     # cluster at mean |lat|=22°, peaking in equatorial Pacific.
     _eq_boost = getattr(config, "equatorial_visc_boost", 0.0)
     if _eq_boost > 0:
-        _cos2 = jnp.cos(mesh.latEdge.astype(u_prime_3d.dtype)) ** 2
-        _lat_factor = (1.0 + _eq_boost * _cos2)[:, jnp.newaxis]  # (nEdges, 1)
+        # Tight Gaussian centered at equator (sigma=5° matches lat-lon
+        # production config).  Previous cos²(lat) was too wide — it
+        # overdamped real mid-latitude dynamics while the instability is
+        # confined to |lat| < 10°.
+        _sigma_rad = jnp.radians(
+            getattr(config, "equatorial_visc_sigma_deg", 5.0)
+        )
+        _lat_e = mesh.latEdge.astype(u_prime_3d.dtype)
+        _gauss = jnp.exp(-0.5 * (_lat_e / _sigma_rad) ** 2)
+        _lat_factor = (1.0 + _eq_boost * _gauss)[:, jnp.newaxis]  # (nEdges, 1)
     else:
         _lat_factor = 1.0
     if config.A_h > 0 and config.B_h > 0:
@@ -533,6 +550,15 @@ def mpas_ocean_baroclinic_tendencies(
     # Flow-dependent Smagorinsky biharmonic viscosity
     if config.C_smag > 0:
         visc = visc + smagorinsky_biharmonic_3d(u_prime_3d, mesh, config.C_smag)
+
+    # Flow-dependent Smagorinsky Laplacian viscosity
+    # Unlike the biharmonic variant, this damps ALL scales where strain
+    # is large (not just grid-scale).  Effective at coarse resolution
+    # (~120 km) where the biharmonic Smagorinsky produces zero.
+    # Matches the lat-lon ``C_smag_lap`` scheme.
+    if getattr(config, "C_smag_lap", 0.0) > 0:
+        visc = visc + _lat_factor * smagorinsky_laplacian_3d(
+            u_prime_3d, mesh, config.C_smag_lap)
 
     # Flow-dependent Leith biharmonic viscosity
     if getattr(config, "C_leith", 0.0) > 0:
@@ -576,8 +602,27 @@ def mpas_ocean_baroclinic_tendencies(
     # 1e-10 floor masks the divide and the drag tendency is ~0). P3.5
     # of the realistic-geometry plan: scatter the drag to each edge's
     # actual bottom level via a one-hot expansion.
+    # Bottom drag is always applied explicitly here so that its
+    # depth-mean enters F_slow_u (the barotropic forcing).  The
+    # implicit vertical path in step() does NOT double-count —
+    # it handles only vertical viscosity/diffusivity, not drag.
     if config.bottom_drag_r > 0:
         H_BBL = getattr(config, "bottom_drag_bbl_thickness", 0.0)
+        # Quadratic-with-floor drag (MOM6 DRAG_BG_VEL).  When
+        # ``bottom_drag_bg_velocity > 0``, the effective drag coefficient
+        # scales with velocity: ``r_eff = (r/u_bg) * sqrt(u² + u_bg²)``.
+        # Recovers linear ``r`` at |u|→0, quadratic ``Cd·|u|`` at high
+        # speed.  u_bg=0 → bit-exact legacy linear drag.
+        _u_bg = float(getattr(config, "bottom_drag_bg_velocity", 0.0))
+        if _u_bg > 0.0:
+            _Cd_eq = config.bottom_drag_r / _u_bg
+            # Compute per-edge, per-level effective r from the speed at
+            # each level (the drag sees the FULL velocity, not just bottom).
+            _speed_sq = u_3d ** 2  # edge-normal component squared
+            _r_eff = _Cd_eq * jnp.sqrt(_speed_sq + _u_bg ** 2)  # (nEdges, nlev)
+        else:
+            _r_eff = config.bottom_drag_r  # scalar, legacy linear
+
         if H_BBL > 0:
             # Distributed BBL drag (Killworth & Edwards 1999, MOM6
             # ``BBL_thick_min``): spread drag over a fixed Ekman thickness
@@ -590,12 +635,27 @@ def mpas_ocean_baroclinic_tendencies(
             # the 2026-05-03 diagnostic).  Bounds per-cell drag by
             # ``r·u/H_BBL``.  Grid-agnostic helper shared with lat-lon
             # C-grid PE.  Multiply by ``edge_mask`` to zero dry edges.
-            from legoesm.ocean.dynamics.ocean_tendency_common import (
-                bbl_distributed_drag_face_column,
-            )
-            drag_3d = bbl_distributed_drag_face_column(
-                u_3d, h_e_3d, config.bottom_drag_r, H_BBL,
-            )
+            #
+            # For quadratic drag (_r_eff is per-edge-level), we inline
+            # the BBL computation instead of calling the scalar-r helper.
+            if isinstance(_r_eff, jnp.ndarray) and _r_eff.ndim >= 2:
+                # Per-level r_eff — inline the BBL overlap computation
+                z_half = jnp.concatenate(
+                    [jnp.zeros((h_e_3d.shape[0], 1), dtype=h_e_3d.dtype),
+                     -jnp.cumsum(h_e_3d, axis=-1)], axis=-1)
+                z_top = z_half[:, :-1]; z_bot = z_half[:, 1:]
+                z_seafloor = z_half[:, -1:]; bbl_top = z_seafloor + H_BBL
+                overlap = jnp.maximum(0.0,
+                    jnp.minimum(z_top, bbl_top) - jnp.maximum(z_bot, z_seafloor))
+                h_safe_bbl = jnp.maximum(h_e_3d, 1e-10)
+                drag_3d = -_r_eff * u_3d * overlap / (h_safe_bbl * H_BBL)
+            else:
+                from legoesm.ocean.dynamics.ocean_tendency_common import (
+                    bbl_distributed_drag_face_column,
+                )
+                drag_3d = bbl_distributed_drag_face_column(
+                    u_3d, h_e_3d, _r_eff, H_BBL,
+                )
             du_dt_full = du_dt_full + drag_3d * edge_mask[:, jnp.newaxis]
         elif isinstance(z_coord, OceanPartialCellCoordinate):
             # Legacy single-cell drag at maxLevelEdgeBot.
@@ -620,8 +680,13 @@ def mpas_ocean_baroclinic_tendencies(
                 jnp.where(is_bot, u_3d, 0.0), axis=1,
             )
             dz_bot_e = jnp.maximum(h_at_bot, 1.0e-10)
+            # For quadratic drag, compute r_eff at the bottom level
+            if isinstance(_r_eff, jnp.ndarray) and _r_eff.ndim >= 2:
+                _r_at_bot = jnp.sum(jnp.where(is_bot, _r_eff, 0.0), axis=1)
+            else:
+                _r_at_bot = _r_eff
             drag_at_bot = (
-                -config.bottom_drag_r * u_at_bot / dz_bot_e * valid_edge_dt
+                -_r_at_bot * u_at_bot / dz_bot_e * valid_edge_dt
             )
             du_dt_full = du_dt_full + (
                 drag_at_bot[:, None] * is_bot.astype(du_dt_full.dtype)
@@ -629,8 +694,12 @@ def mpas_ocean_baroclinic_tendencies(
         else:
             # Legacy z-star: every column has a full bottom cell at nlev-1.
             dz_bot_e = jnp.maximum(h_e_3d[:, -1], 1e-10)
+            if isinstance(_r_eff, jnp.ndarray) and _r_eff.ndim >= 2:
+                _r_bot = _r_eff[:, -1]
+            else:
+                _r_bot = _r_eff
             du_dt_full = du_dt_full.at[:, -1].add(
-                -config.bottom_drag_r * u_3d[:, -1] / dz_bot_e * edge_mask)
+                -_r_bot * u_3d[:, -1] / dz_bot_e * edge_mask)
 
     # Depth-mean → slow forcing for barotropic solver.
     # du_dt_full now carries only (PGF + relative-vorticity PV flux +
@@ -680,7 +749,16 @@ def mpas_ocean_baroclinic_tendencies(
     # Loop 135 exploit as the latlon ocean K_h+K_bih sharing.
     _inner_lap_div: jnp.ndarray | None = None
     if config.K_h > 0 or config.K_bih > 0:
-        grad_flat = _tracer_grad_flat_pre * edge_mask[:, jnp.newaxis]
+        # Use per-level edge mask on partial cells: zero the tracer
+        # gradient at levels below the shallower neighbor's seafloor.
+        # Without this, the gradient sees T_active vs T=0 (inactive
+        # levels are zero-filled) and injects a massive spurious flux
+        # into thin partial cells at step edges.
+        # ``_tracer_grad_flat_pre`` is (nEdges, nlev*n_tracers) with
+        # interleaved layout [gradT_0, gradS_0, gradT_1, gradS_1, ...].
+        # Repeat mask per-level to match: [mask_0, mask_0, mask_1, mask_1, ...].
+        _tracer_edge_mask = jnp.repeat(edge_mask_3d, n_tracers, axis=1)  # (nEdges, nlev*2)
+        grad_flat = _tracer_grad_flat_pre * _tracer_edge_mask
         _inner_lap_div = divergence_cell_3d(grad_flat, mesh)
     if config.K_h > 0:
         # Reshape to (nCells, nlev, 2) so h_safe and h_k broadcast via [:, :, None].
@@ -697,12 +775,12 @@ def mpas_ocean_baroclinic_tendencies(
     # ``/ h_safe * h_k`` factor is ≈1 on wet cells and a dry-cell safety
     # guard where h_k → 0.
     if config.K_bih > 0:
-        # Inline the bilaplacian: inner = ``div(grad*edge_mask) *
+        # Inline the bilaplacian: inner = ``div(grad*edge_mask_3d) *
         # cell_mask`` (already partially computed above as
         # ``_inner_lap_div``); outer = ``laplacian_cell_3d(inner,
         # mask=mask)``.
         inner_lap_masked = _inner_lap_div * mask[:, jnp.newaxis]
-        outer_grad = gradient_edge_3d(inner_lap_masked, mesh) * edge_mask[:, jnp.newaxis]
+        outer_grad = gradient_edge_3d(inner_lap_masked, mesh) * _tracer_edge_mask
         outer_div = divergence_cell_3d(outer_grad, mesh)
         bilap_flat = outer_div * mask[:, jnp.newaxis]
         bilap_stack = bilap_flat.reshape(nCells_t, nlev_t, n_tracers)
@@ -716,32 +794,54 @@ def mpas_ocean_baroclinic_tendencies(
     dS_dt_3d = diff_stack[..., 1]
 
     # ---- Vertical mixing ----
-    dz_half = z_coord.dz_half_ref  # (nlev-1,)
-    dz = z_coord.dz_ref  # (nlev,)
+    # When ``implicit_vertical_mixing`` is enabled (default), vertical
+    # viscosity/diffusivity is applied as a backward-Euler implicit solve
+    # in ``step()`` (unconditionally stable).  The explicit tendency here
+    # is skipped.  The legacy explicit path is kept for back-compat when
+    # the flag is False.
+    if not config.implicit_vertical_mixing:
+        dz_half = z_coord.dz_half_ref  # (nlev-1,)
+        dz = z_coord.dz_ref  # (nlev,)
 
-    # Vertical viscosity on perturbation velocity: d/dz(A_v * du'/dz)
-    du_dt_3d = du_dt_3d + _vertical_diffusion(
-        u_prime_3d, dz_half, dz, jacobian=jacobian, coeff=config.A_v, is_edge=True,
-        mesh=mesh,
-    )
+        # Vertical viscosity on perturbation velocity: d/dz(A_v * du'/dz)
+        # Mask by edge_mask_3d to zero sub-seafloor levels on partial cells.
+        # Without this, the diffusion operator sees the full dz_ref*J metric
+        # (nonzero at all levels) and injects momentum below the seafloor at
+        # step edges, creating a positive feedback that drives SSH blow-up
+        # when A_v is large (e.g., KPP-produced viscosity).
+        du_dt_3d = du_dt_3d + _vertical_diffusion(
+            u_prime_3d, dz_half, dz, jacobian=jacobian, coeff=config.A_v,
+            is_edge=True, mesh=mesh,
+        ) * edge_mask_3d
 
-    # Vertical tracer diffusion (per-tracer; axis -1 of the input is nlev,
-    # so vmap over the trailing tracer axis to get one batched kernel).
-    def _vdiff(q):
-        return _vertical_diffusion(
-            q, dz_half, dz, jacobian=jacobian, coeff=config.K_v, is_edge=False,
-            mesh=mesh,
-        )
+        # Vertical tracer diffusion (per-tracer; axis -1 of the input is nlev,
+        # so vmap over the trailing tracer axis to get one batched kernel).
+        def _vdiff(q):
+            return _vertical_diffusion(
+                q, dz_half, dz, jacobian=jacobian, coeff=config.K_v,
+                is_edge=False, mesh=mesh,
+            )
 
-    vdiff_stack = jax.vmap(_vdiff, in_axes=-1, out_axes=-1)(tracer_stack)
-    vdiff_stack = vdiff_stack * mask[:, jnp.newaxis, jnp.newaxis]
-    dT_dt_3d = dT_dt_3d + vdiff_stack[..., 0]
-    dS_dt_3d = dS_dt_3d + vdiff_stack[..., 1]
+        vdiff_stack = jax.vmap(_vdiff, in_axes=-1, out_axes=-1)(tracer_stack)
+        vdiff_stack = vdiff_stack * mask[:, jnp.newaxis, jnp.newaxis]
+        dT_dt_3d = dT_dt_3d + vdiff_stack[..., 0]
+        dS_dt_3d = dS_dt_3d + vdiff_stack[..., 1]
 
     # ---- Physics (surface forcing, bottom drag, etc.) ----
     if physics_fn is not None:
         phys = physics_fn(state, mesh, z_coord, surface_forcing)
-        du_dt_3d = du_dt_3d + phys.du_dt.data
+        # Mask physics du_dt by edge_mask_3d: KPP (and any future physics
+        # producing edge tendencies) uses dz_ref*J_edge as its vertical
+        # metric, which is nonzero at ALL levels including below the
+        # shallower neighbor's seafloor on partial cells.  Without this
+        # mask, the diffusion leaks momentum into sub-seafloor levels at
+        # step edges.  That leaked momentum is not removed by any
+        # subsequent masking (Coriolis and reconciliation use 2D
+        # edge_mask only), accumulates exponentially via the KPP
+        # diffusion feedback (sub-seafloor u creates gradients that
+        # feed the next step's diffusion), and ultimately drives the
+        # SSH explosion observed when KPP is activated on ETOPO.
+        du_dt_3d = du_dt_3d + phys.du_dt.data * edge_mask_3d
         dT_dt_3d = dT_dt_3d + phys.dT_dt.data
         dS_dt_3d = dS_dt_3d + phys.dS_dt.data
 
