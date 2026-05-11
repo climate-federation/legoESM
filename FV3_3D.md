@@ -938,6 +938,20 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 462: **diagnostic finding** — ``d2_bg_k1`` sweep over
+  4 decades {0, 1e-5, 1e-4, 1e-3} at C8 produces ZERO change
+  in NH edge_var/interior_var ratio (1.0143 at all 4 values)
+  and only ~3e-4 change in PE ratio.  Conclusion: the cube-
+  edge metric at C8 is INSENSITIVE to corner-div sponge boost
+  at legoESM-compatible scales.  Edge artifact signature is
+  dominated by another mechanism (likely intrinsic C-D grid
+  edge structure, not corner-div coefficient).  Per iter-455
+  the FV3 0.01 threshold prevents k=1 override at these
+  scales — d2_bg_k1=1e-3 IS above d2_bg=5e-4 (so override at
+  k=0 IS active) but ratio still unchanged.  Suggests future
+  sponge-tuning work must look ELSEWHERE — RF tau, d_con
+  zeroing levels, or non-sponge mechanisms.  2/2 in 270 s.
+  Wired into iter-383 sweep (now 57).
 - Iter 461: **first empirical numerical evidence** of FV3
   factory effect on cube-edge artifacts.  3-seed C8 3-step
   comparison of edge_var/interior_var ratio over v-wind:
