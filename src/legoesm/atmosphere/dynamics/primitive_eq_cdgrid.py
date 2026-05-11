@@ -509,6 +509,22 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # 1 = del-4 (one Laplacian iteration);
         # 2 = del-6 (two Laplacian iterations, FV3 d_sw5 default).
         # Active only when ``corner_div_damp_d4_bg > 0``.
+    corner_div_damp_d2_bg_k1: float = 0.0
+        # FV3-faithful per-level sponge boost of the corner-
+        # divergence d2_bg coefficient at the topmost level
+        # (FV3_3D iter 438).  Port of FV3 ``dyn_core.F90:780``::
+        #
+        #     d2_divg = max(0.01, d2_bg, d2_bg_k1)   ! k=1
+        #
+        # When > 0 (and ``corner_div_damp_d2_bg > 0``), the k=0
+        # level (model top) of the corner-divergence adaptive
+        # damping coefficient is OVERRIDDEN with
+        # ``max(corner_div_damp_d2_bg, corner_div_damp_d2_bg_k1)`` —
+        # ignoring the adaptive ``dddmp*|delpc|*dt`` term and the
+        # 0.20 cap.  FV3 production default value is 4.0 (large
+        # boost over typical interior d2_bg = 0.0625).  Default
+        # 0.0 here preserves bit-for-bit baseline (no boost).
+        # Future iters: extend to k=1 (``d2_bg_k2``), then to NH.
     corner_div_damp_fv3_vector_fill: bool = False
         # FV3-fully-faithful vector cube-vertex fill
         # (``fill_corners(vc, uc, VECTOR=true, DGRID=true)``,
@@ -963,6 +979,25 @@ def fv3_hydrostatic_tendencies(
                 0.20, config.corner_div_damp_dddmp * _delpc_abs * _dt_approx,
             ),
         )                                                  # (6, n+1, n+1, nlev)
+
+        # FV3_3D iter 438: per-level sponge boost at k=0 (FV3
+        # ``dyn_core.F90:780`` ``d2_divg = max(0.01, d2_bg,
+        # d2_bg_k1)``).  Override the adaptive ``_damp_corner``
+        # value at k=0 with ``da_min_c * max(d2_bg, d2_bg_k1)``
+        # — bypass the 0.20 / Smagorinsky cap at the top level.
+        # Default 0.0 = no boost = bit-for-bit baseline.
+        if config.corner_div_damp_d2_bg_k1 > 0.0:
+            _damp_k1 = _da_min_c * jnp.maximum(
+                config.corner_div_damp_d2_bg,
+                config.corner_div_damp_d2_bg_k1,
+            )
+            _nlev_dc = _damp_corner.shape[-1]
+            _k_idx_dc = jnp.arange(_nlev_dc)
+            _damp_corner = jnp.where(
+                _k_idx_dc == 0,
+                _damp_k1,
+                _damp_corner,
+            )
 
         # FV3_3D iter 18: optional higher-order del-(2*(nord+1))
         # damping (FV3 d_sw5 ``nord > 0`` path, sw_core.F90:1725-1822).

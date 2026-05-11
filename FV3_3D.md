@@ -919,6 +919,17 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 438: per-level sponge BOOST of corner-div damping at
+  k=0 (PE).  New config field ``corner_div_damp_d2_bg_k1: float
+  = 0.0`` ports FV3 ``dyn_core.F90:780``::
+  ``d2_divg = max(0.01, d2_bg, d2_bg_k1)``.  When > 0, the k=0
+  level damping coefficient is overridden with
+  ``da_min_c * max(d2_bg, d2_bg_k1)``, bypassing the 0.20 /
+  Smagorinsky cap.  Default 0.0 = bit-for-bit baseline.
+  Currently wired on PE only.  Future iters: extend to k=1
+  via ``d2_bg_k2``, then to NH.  4/4 in 27 s.  Wired into
+  iter-383 sweep (now 34).  Begins closing the "partially
+  closed: sponge mechanism — has zeroing, missing boost" gap.
 - Iter 437: factory defaults expose FV3 production ``nord=1``
   for both vorticity damping (``nord_v=1``) and corner-div
   damping (``corner_div_damp_nord=1``) — matches FV3
