@@ -879,6 +879,10 @@ Key iterations:
   iter-369 guard matches actual ``use_fv3_*`` field count in
   PE + NH source.  Catches drift when a new flag is added to
   source without updating iter-369 lists.  2/2 in 0.77 s.
+- Iter 413: gradient-flow test through iter-336/337 dynamic
+  Exner ``Π_total``.  jax.grad w.r.t. ρ' + θ' perturbation
+  amplitudes finite AND non-zero, confirming dyn_exner wiring
+  doesn't break differentiability.  2/2 in 3 s.
 - Iter 412: pass-through verification for iter-392 factories.
   (1) PE factory passes hyperdiff settings, (2) NH factory
   passes ``n_acoustic_substeps`` + other knobs, (3) user
