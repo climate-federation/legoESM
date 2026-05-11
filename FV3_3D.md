@@ -860,6 +860,12 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 374: AD-at-rest umbrella for NH full FV3-fidelity stack
+  INCLUDING iter-370 cross_face flag (extends iter-346 which
+  predated cross_face).  All 5 NH flags ON + duogrid + full
+  toolkit + all 5 d_con knobs.  jax.grad finite through 3 NH
+  steps at rest.  Closes full-FV3-stack AD coverage gap.  1/1
+  in 383 s.
 - Iter 373: AST regression guard for iter-370 cross-face du
   projection wiring (PE + NH).  6 assertions: (1)+(2) PE+NH
   gates present, (3)+(4) pad_halo_4d applied to du_normal +
