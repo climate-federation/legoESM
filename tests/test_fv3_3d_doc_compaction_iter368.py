@@ -47,6 +47,32 @@ def test_doc_size_below_3600_lines(doc_text):
     )
 
 
+def test_iter400_compaction_present(doc_text):
+    """iter-400 compacted iter 385-394 into a single block."""
+    assert "**Iters 385-394 (compacted iter 400)**" in doc_text, (
+        "iter-400 compaction block missing — doc re-expanded."
+    )
+
+
+def test_iter400_compaction_covers_topics(doc_text):
+    section_start = doc_text.find(
+        "**Iters 385-394 (compacted iter 400)**"
+    )
+    section_end = doc_text.find(
+        "- **Iters 375-384", section_start,
+    )
+    assert section_start >= 0 and section_end > section_start
+    section = doc_text[section_start:section_end]
+    required = [
+        "iter 385", "iter 386/387", "iter 388", "iter 389",
+        "iter 390", "iter 391", "iter 392", "iter 393", "iter 394",
+    ]
+    for marker in required:
+        assert marker in section, (
+            f"iter-400 compacted block missing topic ``{marker}``."
+        )
+
+
 def test_iter390_compaction_present(doc_text):
     """iter-390 compacted iter 375-384 into a single block."""
     assert "**Iters 375-384 (compacted iter 390)**" in doc_text, (

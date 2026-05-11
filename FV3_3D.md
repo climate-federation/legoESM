@@ -860,6 +860,12 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 407: extend iter-368 doc-structure regression for
+  iter-400 compacted block.  9-test guard now covers all 4
+  compaction blocks (iter-365/380/390/400) — adds (1)
+  iter-400 marker, (2) all 9 iter-385-394 topic groups
+  present.  Mirror of iter-381/391 extension pattern.  9/9
+  in 0.08 s.
 - Iter 406: docstring-content regression for iter-392
   factories.  Asserts PE + NH factory docstrings mention (1)
   every FV3-fidelity flag they enable, (2) duogrid pairing
