@@ -938,6 +938,11 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 468: PE mirror of NH iter-467 ``make_legoesm_pe_min_
+  edge_config``.  Same 3 hurting-flag overrides + same
+  disclaimer (PE not directly measured in iter-465/466 sweep;
+  applying NH-derived overrides as best guess).  5/5 in 23 s.
+  Wired into iter-383 sweep (now 63).
 - Iter 467: new factory ``make_legoesm_nh_min_edge_config``
   exposing the iter-466 empirical finding via a single-call
   user-facing API.  Disables the 3 iter-466 hurting flags

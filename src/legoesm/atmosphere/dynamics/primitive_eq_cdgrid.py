@@ -2509,3 +2509,44 @@ def make_fv3_faithful_pe_config(**overrides) -> CDGridPrimitiveEquationConfig:
     )
     defaults.update(overrides)
     return CDGridPrimitiveEquationConfig(**defaults)
+
+
+def make_legoesm_pe_min_edge_config(**overrides) -> CDGridPrimitiveEquationConfig:
+    """FV3_3D iter 468: PE mirror of iter-467 NH min-edge
+    factory.
+
+    Applies the iter-465/466 finding (NH-derived) to PE: turn
+    OFF the 3 FV3-faithful flags that empirically HURT NH cube-
+    edge θ′ ratio in the factory + duogrid configuration:
+
+        * ``use_fv3_metric_aware_d_con  = False``
+        * ``heat_source_del2_iters      = 0``
+        * ``d_con_top_zero_levels       = 0``
+
+    PE has no ``use_fv3_d_con_cv`` (PE always uses c_pd) and
+    no ``damp_w`` (no w prognostic).
+
+    DISCLAIMER: This is the PE MIRROR of an NH-tuned config.
+    PE edge artifact characteristics may differ from NH (iter-
+    466 only measured NH).  An iter-465-equivalent per-flag
+    sweep on PE has not been done — apply this factory only
+    if it empirically reduces PE edge artifacts in your
+    workload.  For strict FV3-faithful behaviour use
+    ``make_fv3_faithful_pe_config``.
+
+    Parameters
+    ----------
+    **overrides
+        Any config field can be overridden.
+
+    Returns
+    -------
+    CDGridPrimitiveEquationConfig
+    """
+    edge_min_overrides = dict(
+        use_fv3_metric_aware_d_con=False,
+        heat_source_del2_iters=0,
+        d_con_top_zero_levels=0,
+    )
+    edge_min_overrides.update(overrides)
+    return make_fv3_faithful_pe_config(**edge_min_overrides)
