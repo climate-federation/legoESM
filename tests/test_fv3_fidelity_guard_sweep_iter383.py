@@ -59,6 +59,7 @@ _GUARD_MODULES = (
     "test_factory_nord_defaults_iter437",            # iter-437 add
     "test_pe_corner_div_d2_bg_k1_iter438",           # iter-438 add
     "test_pe_corner_div_d2_bg_k2_iter439",           # iter-439 add
+    "test_nh_corner_div_d2_bg_sponge_iter440",       # iter-440 add
 )
 
 

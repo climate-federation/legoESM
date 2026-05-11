@@ -117,6 +117,17 @@ class CDGridCompressibleEulerConfig(NamedTuple):
     corner_div_damp_dddmp: float = 0.20
     corner_div_damp_d4_bg: float = 0.0
     corner_div_damp_nord: int = 0
+    corner_div_damp_d2_bg_k1: float = 0.0
+        # NH mirror of PE iter-438 sponge boost at k=0.
+        # See PE config for FV3 ``dyn_core.F90:780`` port details.
+        # Default 0.0 = baseline.  Wired at NH corner-div site
+        # (FV3_3D iter 440).
+    corner_div_damp_d2_bg_k2: float = 0.0
+        # NH mirror of PE iter-439 sponge boost at k=1, k=2.
+        # See PE config for FV3 ``dyn_core.F90:792, 802`` port
+        # details (Python-static 0.01 / 0.05 thresholds).
+        # Default 0.0 = baseline.  Wired at NH corner-div site
+        # (FV3_3D iter 440).
     corner_div_damp_fv3_vector_fill: bool = False
     corner_div_damp_dt_proxy: float = 10.0
     # Adaptive-cap dt scale for the FV3 ``min(0.20, dddmp*|delpc|*dt)``
@@ -400,6 +411,48 @@ class CDGridCompressibleEulerConfig(NamedTuple):
         # FV3-faithful heating partition.  PE path is unaffected (PE
         # uses ``c_pd`` which is FV3-faithful for the hydrostatic
         # branch ``cp_air``).
+
+
+def _apply_top_sponge_damp_boost(damp_corner, da_min_c, config):
+    """FV3_3D iter 440: NH per-level sponge boost of corner-
+    divergence damping coefficient, mirror of PE iter-438 / 439.
+
+    Port of FV3 ``dyn_core.F90:780, 792, 802``:
+    * k=0 (FV3 k=1): override = da_min_c * max(d2_bg, d2_bg_k1)
+    * k=1 (FV3 k=2): override = da_min_c * max(d2_bg, d2_bg_k2)
+        (gated on d2_bg_k2 > 0.01)
+    * k=2 (FV3 k=3): override = da_min_c * max(d2_bg, 0.2 *
+        d2_bg_k2)  (gated on d2_bg_k2 > 0.05)
+
+    Default config values 0.0 → no override → bit-for-bit
+    baseline.  Python-static gates (no trace cost when disabled).
+    """
+    if (
+        config.corner_div_damp_d2_bg_k1 <= 0.0
+        and config.corner_div_damp_d2_bg_k2 <= 0.01
+    ):
+        return damp_corner
+    nlev = damp_corner.shape[-1]
+    k_idx = jnp.arange(nlev)
+    if config.corner_div_damp_d2_bg_k1 > 0.0:
+        damp_k1 = da_min_c * jnp.maximum(
+            config.corner_div_damp_d2_bg,
+            config.corner_div_damp_d2_bg_k1,
+        )
+        damp_corner = jnp.where(k_idx == 0, damp_k1, damp_corner)
+    if config.corner_div_damp_d2_bg_k2 > 0.01:
+        damp_k2 = da_min_c * jnp.maximum(
+            config.corner_div_damp_d2_bg,
+            config.corner_div_damp_d2_bg_k2,
+        )
+        damp_corner = jnp.where(k_idx == 1, damp_k2, damp_corner)
+        if config.corner_div_damp_d2_bg_k2 > 0.05:
+            damp_k3 = da_min_c * jnp.maximum(
+                config.corner_div_damp_d2_bg,
+                0.2 * config.corner_div_damp_d2_bg_k2,
+            )
+            damp_corner = jnp.where(k_idx == 2, damp_k3, damp_corner)
+    return damp_corner
 
 
 def cdgrid_compressible_euler_slow_tendencies(
@@ -859,6 +912,9 @@ def cdgrid_compressible_euler_slow_tendencies(
                 0.20, config.corner_div_damp_dddmp * _delpc_abs * _dt_approx,
             ),
         )                                                  # (6, n+1, n+1, nlev)
+        _damp_corner = _apply_top_sponge_damp_boost(
+            _damp_corner, _da_min_c, config,
+        )
 
         # Step 3: optional higher-order del-(2*(nord+1)) damping (FV3
         # ``nord > 0`` path, sw_core.F90:1725-1822).  Same Python-static
@@ -906,6 +962,9 @@ def cdgrid_compressible_euler_slow_tendencies(
                 config.corner_div_damp_d2_bg,
                 jnp.minimum(0.20, config.corner_div_damp_dddmp * _smag_vort),
             )                                                # (6, n+1, n+1, nlev)
+            _damp_corner = _apply_top_sponge_damp_boost(
+                _damp_corner, _da_min_c, config,
+            )
 
             _dd8 = jnp.asarray(
                 (_da_min_c * config.corner_div_damp_d4_bg)

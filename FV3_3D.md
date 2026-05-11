@@ -919,6 +919,15 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 440: NH mirror of iter-438/439 corner-div sponge boost
+  + compact iter 425-434 doc block.  New helper
+  ``_apply_top_sponge_damp_boost`` factors the per-level
+  override (k=0 via d2_bg_k1; k=1+k=2 via d2_bg_k2 with
+  thresholds 0.01 / 0.05) and is called at BOTH NH corner-div
+  sites (adaptive |delpc|·dt + Smag/nord branch).  Two NH
+  config fields added; default 0 = bit-for-bit baseline.  4/4
+  NH in 67 s + 17/17 doc compaction.  Wired into iter-383
+  sweep (now 36).  doc shrinks ~50 lines.
 - Iter 439: extend iter-438 corner-div sponge boost to k=1 +
   k=2 (PE).  New config field ``corner_div_damp_d2_bg_k2: float
   = 0.0`` ports FV3 ``dyn_core.F90:792, 802`` ::
@@ -960,70 +969,24 @@ Key iterations:
   regression where a refactor drops a mask application at one
   site while keeping the flag declared.  7/7 in 0.08 s.  Wired
   into iter-383 sweep (now 31).
-- Iter 434: set ``d_con_top_zero_levels = 2`` in both factory
-  defaults (``make_fv3_faithful_nh_config``,
-  ``make_fv3_faithful_pe_config``).  Matches FV3 production
-  sponge namelist (``d2_bg_k1=0.16, d2_bg_k2=0.05``): FV3
-  zeros d_con_k at k=1 (always) and k=2 (d2_bg_k2>0.01) but
-  NOT k=3.  Override with ``d_con_top_zero_levels=0`` to
-  recover the iter-209/207/208/221 baseline.  Regression test
-  pins factory defaults to 2 for both NH + PE; existing
-  factory tests (iter-417/418/427/402) still pass post-change.
-  4/4 in 0.7 s + 9/9 regression suite in 78 s.  Wired into
-  iter-383 sweep (now 30).
-- Iter 433: PE mirror of iter-431/432 ``d_con_top_zero_levels``.
-  Add field to ``CDGridPrimitiveEquationConfig`` (default 0 =
-  bit-for-bit baseline) + wire at all 4 PE d_con sites: post-
-  acoustic damp_v + aggregate ``_d_con_sum`` covering 3 slow-
-  tendency contributions.  Effect concentrated in top levels
-  (>10× top-vs-bottom ratio).  3/3 in 30 s.  Wired into iter-
-  383 sweep (now 29).
-- Iter 432: extend iter-431 ``d_con_top_zero_levels`` mask to
-  the remaining 4 NH d_con sites: post-acoustic damp_w + 3
-  slow-tendency contributions (corner_div, div_damp, A_h) via
-  the aggregate ``_d_con_sum`` mask.  Now matches FV3
-  ``dyn_core.F90`` ``d_con_k = 0`` uniform zeroing across all
-  damping mechanisms in sponge layers.  New tests verify damp_w
-  site + slow-tendency aggregate effect is concentrated in top
-  levels.  2/2 in 60 s.  Wired into iter-383 sweep (now 28).
-- Iter 431: FV3-faithful sponge zeroing of d_con KE→heat in
-  top N levels (FV3 ``dyn_core.F90:790/800/804`` ``d_con_k=0``
-  for k=1/2/3 sponge layers).  New config field
-  ``d_con_top_zero_levels: int = 0`` (default 0 = no zeroing =
-  bit-for-bit baseline).  Wired at NH post-acoustic damp_v
-  d_con site.  3/3 in 55 s.  Wired into iter-383 sweep (now 27).
-- Iter 430: compact iter 415-424 into single block (8 sub-
-  entries) + regression test for the new marker.  doc shrinks
-  ~25 lines; iter-368 guard now covers 6 compaction blocks
-  (iter-365/380/390/400/420/430).  15/15 in 0.10 s.
-- Iter 429: factory-driven multi-step stability.  3 NH + 3 PE
-  steps with factory configs at C8 — assert each step finite,
-  |u| stays within 100× initial, |θ′| < 50 K, |T| within 2×.
-  Closes iter-427 (1-step finite) → iter-428 (1-step grad
-  finite) → iter-429 (3-step trajectory bounded).  Catches slow
-  exponential growth that single-step misses.  Wired into iter-
-  383 sweep (now 26 modules).  2/2 in 141 s.
-- Iter 428: factory-driven AD-at-rest umbrella.  jax.grad
-  through 1 NH step + 1 PE step with factory configs must be
-  finite — catches factory-default flag combination introducing
-  AD hazard.  Closes iter-427 (factory drives finite *forward*
-  step) → iter-428 (factory preserves *grad*).  Reduced to 1
-  step because 3-step grad path compiles >12 min / >11 GB at C8.
-  Wired into iter-383 sweep (now 25 modules).  2/2 in 310 s.
-- Iter 427: integration test — factory-driven 1-step run at C8
-  produces finite state for both NH (u/v/w/θ′/ρ′) and PE
-  (u_d/v_d/T/p_s).  Closes loop iter-417/418 (config-construct
-  only) → iter-426 (factory-import only) → iter-427 (factory
-  actually drives finite dycore step).  Catches flag-induced NaN
-  in step path.  Wired into iter-383 guard sweep (now 24 modules,
-  was 23).  2/2 in 90 s.
-- Iter 426: verify iter-392 factories are importable + callable
-  from dycore modules at module level.  2/2 in 0.8 s.
-- Iter 425: end-to-end smoke verification of all flag/doc
-  regression guards.  27/27 guard tests pass across 6 modules
-  (iter-368/369/331/383/405/415).  Confirms post-iter-420
-  compaction + iter-423 table-update + 5+ NH flag set + factory
-  exposure all consistent.  27/27 in 1.2 s.
+- **Iters 425-434 (compacted iter 440)**: factory hardening +
+  FV3 sponge d_con zeroing.
+  - iter 425: end-to-end smoke of 6 guard modules (27/27).
+  - iter 426: factory module-exports test.
+  - iter 427: factory drives finite 1-step at C8.
+  - iter 428: factory preserves grad through 1-step (310 s).
+  - iter 429: factory 3-step trajectory bounded (stability).
+  - iter 430: compact iter 415-424 into single block + iter-
+    368 regression for the new marker.
+  - iter 431: FV3 sponge zeroing of d_con KE→heat — new field
+    ``d_con_top_zero_levels: int = 0`` wired at NH damp_v.
+  - iter 432: extend iter-431 mask to NH damp_w + aggregate
+    (3 slow-tendency sites).  All 5 NH d_con sites covered.
+  - iter 433: PE mirror — field on PE config + wire at 4 PE
+    d_con sites (damp_v + aggregate covering 3 slow-tend).
+  - iter 434: factory defaults expose
+    ``d_con_top_zero_levels=2`` — matches FV3 production
+    sponge (``d2_bg_k1=0.16, d2_bg_k2=0.05``).
 - **Iters 415-424 (compacted iter 430)**: factory-regression
   guard hardening + doc-drift catches.
   - iter 415: no-duplicate regression for iter-383 guard-sweep
