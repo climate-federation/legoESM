@@ -860,6 +860,12 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 382: **BUG FIX** iter-319 d_con knob count regression
+  caught by full guard sweep.  iter-339 added
+  ``use_fv3_metric_aware_d_con`` field — ends in ``_d_con``
+  substring → iter-319's ``f.endswith('_d_con')`` filter
+  matched it, inflating NH count 5 → 6 + PE count 4 → 5.  Fix
+  filter to exclude ``use_fv3_*`` opt-in flags.  4/4 pass.
 - Iter 381: extend iter-368 doc-structure regression for iter-
   380 compaction.  Adds (1) iter-380 compaction marker present,
   (2) all 14 iter-360-374 topics present in compacted block,
