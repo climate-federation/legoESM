@@ -879,55 +879,21 @@ Key iterations:
   iter-369 guard matches actual ``use_fv3_*`` field count in
   PE + NH source.  Catches drift when a new flag is added to
   source without updating iter-369 lists.  2/2 in 0.77 s.
-- Iter 404: jax.jit smoke for iter-392 factory-built models.
-  Both PE + NH factory configs (all FV3-fidelity flags ON)
-  JIT-trace cleanly through model.step.  Catches dynamic-
-  Python constructs added by future flag wirings that would
-  break JIT.  2/2 in 104 s.
-- Iter 403: extend iter-383 guard-sweep inventory for iter-402
-  factory signature regression.  15 guard modules now covered.
-  2/2 in 0.9 s.
-- Iter 402: AST signature regression for iter-392 factories.
-  Asserts (1)+(2) PE+NH factories accept ``**overrides``,
-  (3)+(4) return correct config type, (5) default factory
-  result enables every FV3-fidelity flag (3 PE + 5 NH).  5/5
-  in 0.76 s.
-- Iter 401: quantitative regression that ``Π_total =
-  Π_ref + π'`` equals FV3 ``pkz``.  At rest (ρ'=θ'=0)
-  ``Π_total = Π_ref`` exactly (rtol=1e-14).  With small
-  perturbations (±0.05 ρ', ±5K θ'), ``Π_total`` matches
-  ``(R_d·ρ_total·θ_total/p_0)^(R_d/c_v)`` (= FV3 pkz under
-  EOS) at rtol=1e-10.  Closes the iter-394 audit with numeric
-  proof.  2/2 in 2.4 s.
-- Iter 399: extend iter-342 dyn_exner AST guard for iter-397/
-  398 cap-site wirings.  Adds 3 new assertions: (1) aggregate
-  cap uses ``_sf_b`` + ``_exner_eff_b``, (2) damp_v cap uses
-  ``_exner_eff_dv``, (3) damp_w cap uses ``_exner_eff_dw``.
-  Catches refactors that drop cap-site dyn_exner wiring.  7/7
-  in 0.08 s.
-- Iter 398: extend dynamic Exner to the 2 POST-ACOUSTIC NH
-  delt_max sponge caps (damp_v + damp_w sites in step()).
-  iter-397 wired the aggregate slow-tendency cap; iter-398
-  closes the post-acoustic counterparts.  Default False
-  bit-for-bit baseline preserved.  13/13 post-acoustic dyn-
-  exner + iter-209 + iter-203 regressions still pass.
-- Iter 397: extend iter-336/337 dynamic Exner to the NH
-  aggregate delt_max sponge cap.  iter-336/337 wired
-  ``Π_total`` at d_con denominators but the aggregate cap
-  derivation ``|Δθ_p · Π| ≤ delt_max · dt`` still used
-  ``Π_ref``.  iter-397 makes the cap consistent: under
-  ``use_fv3_dynamic_exner=True`` the cap uses ``Π_total``
-  (matches FV3 NH sponge cap using live ``pkz``).  2/2 in 35 s.
-- Iter 396: iter-392 factory override edge cases.  Verifies
-  ``make_fv3_faithful_*_config(**overrides)`` factories: (1)
-  allow disabling single FV3 flag while keeping others ON,
-  (2) allow opt-out from ALL flags via overrides, (3) accept
-  d_con knob overrides alongside flag enables.  4/4 in 0.7 s.
-- Iter 395: docstring-content regression for iter-394 audit.
-  Pins NH dyn_exner docstring mentions (1) ``iter 394`` marker,
-  (2) FV3 ``pkz`` equivalence, (3) ``FULL NONLINEAR``
-  clarification.  Added to iter-383 guard-sweep inventory (14
-  modules total now).  1/1 doc test + sweep regression pass.
+- **Iters 395-404 (compacted iter 410)**: post-iter-400
+  regression infrastructure.
+  - iter 395: pkz-equivalence docstring regression for iter-394.
+  - iter 396: factory override edge cases.
+  - **iter 397/398**: extend dyn_exner to ALL delt_max caps
+    (aggregate slow-tendency + damp_v + damp_w post-acoustic).
+    Closes inconsistency where d_con denominator used Π_total
+    but cap derivation still used frozen Π_ref.
+  - iter 399: AST guard for iter-397/398 cap wiring.
+  - iter 400: ToC compaction (iter 385-394 → 1 block).
+  - iter 401: quantitative ``Π_total = FV3 pkz`` numeric
+    regression (rtol=1e-10 with perturbation, 1e-14 at rest).
+  - iter 402: AST signature regression for iter-392 factories.
+  - iter 403: extend iter-383 sweep for iter-402.
+  - iter 404: jax.jit smoke for iter-392 factory models.
 - **Iters 385-394 (compacted iter 400)**: post-iter-380 doc-
   audit follow-ups + factory work + dyn_exner audit.
   - iter 385: document iter-384 finding in iter-370 source.
