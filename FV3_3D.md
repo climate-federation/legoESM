@@ -816,6 +816,17 @@ Key iterations:
   Combined with iter-320 (post-acoustic damp_v / damp_w) +
   iter-321 (damp_w global) + iter-322 (damp_v global), ALL 5 NH
   d_con sites now have cv-flag verification.  3/3.
+- Iter 337: extend iter-336 dynamic Exner to the 2 POST-ACOUSTIC
+  NH d_con sites (``damp_v_d_con``, ``damp_w_d_con``).  iter-336
+  closed slow-tendency sites where ``pi_prime`` is in scope;
+  iter-337 closes post-acoustic sites in ``step()`` method by
+  recomputing ``π'`` via ``compute_exner_perturbation`` on the
+  current post-acoustic state.  Gap #2 (dynamic Exner) FULLY
+  CLOSED across all 5 NH d_con sites under
+  ``use_fv3_dynamic_exner=True``.  Default False preserves
+  bit-for-bit baseline.  5/5: damp_v + damp_w bit-for-bit
+  baselines + damp_v + damp_w state-changes-when-flag-on +
+  full stack finite.
 - Iter 336: opt-in FV3-faithful dynamic Exner factor for the NH
   slow-tendency d_con sites (gap #2 closed for slow-tendency
   sites).  iter-207 used frozen ``Π_ref`` from

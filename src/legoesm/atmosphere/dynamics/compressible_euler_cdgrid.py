@@ -1358,15 +1358,30 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
                     u_cc_new * du_cc + 0.5 * du_cc ** 2
                     + v_cc_new * dv_cc + 0.5 * dv_cc ** 2
                 )
-                _exner_ref_broadcast = self.height_coord.exner_ref[
+                # FV3_3D iter 337: optional dynamic Exner at the
+                # post-acoustic damp_v_d_con site.  Mirrors iter-336
+                # slow-tendency wiring but recomputes ``π'`` from the
+                # current post-acoustic state (theta_p + rho_p) since
+                # the slow_tendencies fn's ``pi_prime`` is out of
+                # scope in ``step()``.
+                _exner_ref_b1 = self.height_coord.exner_ref[
                     None, None, None, :
                 ]
+                if self.config.use_fv3_dynamic_exner:
+                    _pi_prime_dv = compute_exner_perturbation(
+                        state_new.rho_prime.data,
+                        state_new.theta_prime.data,
+                        self.height_coord,
+                    )
+                    _exner_eff_dv = _exner_ref_b1 + _pi_prime_dv
+                else:
+                    _exner_eff_dv = _exner_ref_b1
                 _cx_dv = (
                     constants.c_vd if self.config.use_fv3_d_con_cv
                     else constants.c_pd
                 )
                 dtheta_p = -self.config.damp_v_d_con * dKE_cc / (
-                    _cx_dv * _exner_ref_broadcast
+                    _cx_dv * _exner_eff_dv
                 )
                 # FV3_3D iter 218/219: optional per-step cap on
                 # |Δθ_p*Π| (equivalent to capping |ΔT| to
@@ -1478,15 +1493,29 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
                 # linearization.  exner_ref is shape (nlev,);
                 # broadcast to (6, n, n, nlev) by adding three
                 # leading singleton axes.
-                _exner_ref_broadcast = self.height_coord.exner_ref[
+                # FV3_3D iter 337: optional dynamic Exner at the
+                # post-acoustic damp_w_d_con site.  Mirrors the
+                # damp_v_d_con wiring above; recomputes ``π'`` from
+                # the current state since slow_tendencies' pi_prime
+                # is out of scope in ``step()``.
+                _exner_ref_b2 = self.height_coord.exner_ref[
                     None, None, None, :
                 ]
+                if self.config.use_fv3_dynamic_exner:
+                    _pi_prime_dw = compute_exner_perturbation(
+                        state_new.rho_prime.data,
+                        state_new.theta_prime.data,
+                        self.height_coord,
+                    )
+                    _exner_eff_dw = _exner_ref_b2 + _pi_prime_dw
+                else:
+                    _exner_eff_dw = _exner_ref_b2
                 _cx_dw = (
                     constants.c_vd if self.config.use_fv3_d_con_cv
                     else constants.c_pd
                 )
                 dtheta_p = heat_full / (
-                    _cx_dw * _exner_ref_broadcast
+                    _cx_dw * _exner_eff_dw
                 )
                 # FV3_3D iter 218/219: optional per-step cap on
                 # |Δθ_p*Π|.  Sponge-layer factors per FV3
