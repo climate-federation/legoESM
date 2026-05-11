@@ -860,6 +860,13 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 401: quantitative regression that ``Π_total =
+  Π_ref + π'`` equals FV3 ``pkz``.  At rest (ρ'=θ'=0)
+  ``Π_total = Π_ref`` exactly (rtol=1e-14).  With small
+  perturbations (±0.05 ρ', ±5K θ'), ``Π_total`` matches
+  ``(R_d·ρ_total·θ_total/p_0)^(R_d/c_v)`` (= FV3 pkz under
+  EOS) at rtol=1e-10.  Closes the iter-394 audit with numeric
+  proof.  2/2 in 2.4 s.
 - Iter 399: extend iter-342 dyn_exner AST guard for iter-397/
   398 cap-site wirings.  Adds 3 new assertions: (1) aggregate
   cap uses ``_sf_b`` + ``_exner_eff_b``, (2) damp_v cap uses
