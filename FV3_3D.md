@@ -879,6 +879,11 @@ Key iterations:
   iter-369 guard matches actual ``use_fv3_*`` field count in
   PE + NH source.  Catches drift when a new flag is added to
   source without updating iter-369 lists.  2/2 in 0.77 s.
+- Iter 409: AD-at-rest through 5 PE + 5 NH steps with iter-392
+  factories.  Extends iter-408 multi-step stability with
+  jax.grad.  Both PE + NH factory configs (all FV3-fidelity
+  flags ON + full toolkit) produce finite gradient through 5
+  steps from rest state.  2/2 in 11.5 min.
 - **Iters 395-404 (compacted iter 410)**: post-iter-400
   regression infrastructure.
   - iter 395: pkz-equivalence docstring regression for iter-394.
