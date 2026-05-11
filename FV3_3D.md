@@ -860,6 +860,11 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 373: AST regression guard for iter-370 cross-face du
+  projection wiring (PE + NH).  6 assertions: (1)+(2) PE+NH
+  gates present, (3)+(4) pad_halo_4d applied to du_normal +
+  dv_normal inside gate, (5)+(6) legacy ``jnp.pad(mode='edge')``
+  else branch preserved for bit-for-bit baseline.  6/6 in 0.06 s.
 - Iter 372: C16 cube-imprint does-not-amplify regression for
   iter-370 ``use_fv3_cross_face_du_proj`` (PE+NH).  At C16
   enabling cross_face flag must not amplify imprint by > 10 %
