@@ -860,6 +860,12 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 366: composition test for iter-218/219 delt_max sponge
+  cap + iter-320 cv flag at NH damp_v_d_con post-step site.
+  Verifies (1) baseline bit-for-bit at flags off, (2) cv +
+  loose cap differs from cp + loose cap (cv path heats c_p/c_v
+  larger), (3) cv + tight cap (delt_max=1e-4) produces finite
+  state (clips heating without NaN).  3/3 in 38 s.
 - Iter 365: ToC compaction — 40 iters (320-359) compressed into
   a single block above (~370 lines saved).  Iter 360-364
   verbose entries retained at the top of this section.  Mirror
