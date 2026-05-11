@@ -860,6 +860,13 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 378: tendency-level bit-for-bit linearity for the 3 PE
+  slow-tendency d_con sites under metric form (iter-347/349/
+  351).  iter-347 had to relax linearity rtol to 1e-2 at step()
+  level because slow-tendency d_con feeds acoustic
+  substepping; iter-378 extracts ``dT_dt`` via
+  ``fv3_hydrostatic_tendencies`` BEFORE acoustic and pins exact
+  linearity (``rtol=1e-10``).  3/3 in 33 s.
 - Iter 377: PE counterpart of iter-376 at C16.  All 3 PE flags
   (a2b_zeta, metric, cross_face) + duogrid + full toolkit + 4
   d_con knobs: does-not-amplify T-imprint + state changes
