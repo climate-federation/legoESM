@@ -938,6 +938,11 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 459: factory defaults expose FV3 production
+  ``heat_source_del2_iters=2`` (FV3 ``nf_ke=min(3, nord+1)=2``
+  at nord=1 — combined with iter-437 ``nord_v=1``).  Both NH +
+  PE factories.  iter-427 step test still finite.  5/5 in
+  46 s.  Wired into iter-383 sweep (now 54).
 - Iter 458: PE mirror of NH iter-457 heat_source del-2
   smoothing.  Same FV3 ``dyn_core.F90:1755-1756`` port,
   applied to PE ``_d_con_sum`` aggregate.  Two new PE config

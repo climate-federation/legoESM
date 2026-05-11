@@ -2070,6 +2070,8 @@ def make_fv3_faithful_nh_config(**overrides) -> CDGridCompressibleEulerConfig:
           corner-div damping production default — iter-437)
         * ``corner_div_damp_d4_bg = 0.16`` (FV3 ``d4_bg``
           production default — iter-451)
+        * ``heat_source_del2_iters = 2`` (FV3 ``nf_ke =
+          min(3, nord+1) = 2`` at nord=1 — iter-459)
         * ``corner_div_damp_d2_bg_k1 = 4.0`` (FV3
           ``fv_arrays.F90`` production sponge boost — iter-444)
         * ``corner_div_damp_d2_bg_k2 = 2.0`` (FV3 production
@@ -2113,6 +2115,7 @@ def make_fv3_faithful_nh_config(**overrides) -> CDGridCompressibleEulerConfig:
         nord_v=1,
         corner_div_damp_nord=1,
         corner_div_damp_d4_bg=0.16,
+        heat_source_del2_iters=2,   # FV3 nf_ke at nord=1
         # iter-452: d2_bg_k1/k2 left at 0.0 — FV3 production values
         # (4.0 / 2.0) assume FV3's specific da_min_c × d2 normalization
         # which legoESM does not match dimensionally.  Set them
