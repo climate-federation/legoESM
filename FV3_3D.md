@@ -856,6 +856,12 @@ Key iterations:
   Combined with iter-320 (post-acoustic damp_v / damp_w) +
   iter-321 (damp_w global) + iter-322 (damp_v global), ALL 5 NH
   d_con sites now have cv-flag verification.  3/3.
+- Iter 362: PE counterpart of iter-361 flag-coverage guard.
+  PE has 4 metric d_con gates (damp_v + corner_div + div_damp +
+  A_h); NO cv selectors (PE uses cp_air); NO ``_exner_eff_b``
+  (PE uses actual T).  Pins PE/NH asymmetry at code level
+  (mirror of iter-331/343 default-asymmetry guard).  3/3 in
+  0.03 s.
 - Iter 361: AST flag-coverage guard for all 5 NH d_con sites.
   Asserts: (1) 4 metric gates (damp_v + corner_div + div_damp +
   A_h; damp_w is scalar - no metric), (2) 5 cv-vs-cp selectors
