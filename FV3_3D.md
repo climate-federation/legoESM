@@ -938,6 +938,21 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 475: extend iter-474 isolation to LINEAR-in-index
+  field on cubed sphere.  Test ``f(i,j)=i+j`` (independent of
+  face / level), measure halo max-abs:
+    interior max-abs:         14.0000
+    no-duogrid halo max-abs:  13.5187
+    duogrid    halo max-abs:  14.4907
+  Both finite + stable.  Duogrid produces ~7% larger halo
+  values than no-duogrid (14.49 vs 13.52), with duogrid
+  slightly OVERSHOOTING interior max — small extrapolation
+  bias.  Not catastrophic alone; doesn't explain iter-473's
+  4.77× edge-std jump.  Suggests the bug is in either (a)
+  vector halo (``pad_halo_vector_4d``) used for u/v, or (b)
+  downstream operators that read the halo and amplify the
+  small overshoot.  2/2 in 5 s.  Wired into iter-383 sweep
+  (now 70).
 - Iter 474: **first negative diagnostic** — ``pad_halo_4d`` with
   duogrid preserves constants to machine precision (5.1e-13
   deviation on a constant input).  This **rules out** "scalar
