@@ -816,6 +816,15 @@ Key iterations:
   Combined with iter-320 (post-acoustic damp_v / damp_w) +
   iter-321 (damp_w global) + iter-322 (damp_v global), ALL 5 NH
   d_con sites now have cv-flag verification.  3/3.
+- Iter 347: extend metric-aware d_con flag to PE iter-221
+  corner_div_damp_d_con (slow-tendency) site.  Projects corner-
+  stored tendencies (u_d, v_d, du_dt_cdd, dv_dt_cdd) to edge
+  stagger via 2-pt average, then applies iter-338/344 metric
+  form structure.  Default False bit-for-bit baseline.  4/4:
+  baseline + state changes + linearity (rtol=1e-2 because slow-
+  tendency site has acoustic feedback) + AD-safe at rest.  Gap
+  #1 closure progress: PE damp_v + PE corner_div sites done (5
+  remaining: NH corner_div, PE+NH div_damp, PE+NH A_h).
 - Iter 346: AD-at-rest umbrella for the FULL NH FV3-fidelity
   stack (all 4 opt-in flags + duogrid grid + full toolkit +
   d_con).  Combines iter-320 cv + iter-325 duogrid + iter-328
