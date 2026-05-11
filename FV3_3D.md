@@ -58,7 +58,7 @@ Documented residual gaps (lower priority, SW-only or non-duogrid):
 - Gap #6 vort/ptc edge halo (fv3_sw_core SW path only)
 - Gap #7 fv_tp_2d s11/s14/s15 (non-duogrid path only)
 
-## Production usage (iter 417)
+## Production usage (iter 417, updated iter 454)
 
 For FV3-faithful 3D production runs, use the iter-392 factories:
 
@@ -77,31 +77,50 @@ grid = create_cubed_sphere(n=96, use_duogrid=True)
 
 # NH (compressible Euler):
 nh_cfg = make_fv3_faithful_nh_config(
-    damp_v=0.030, nord_v=1, damp_v_d_con=1.0,
+    damp_v=0.030, damp_v_d_con=1.0,
     corner_div_damp_d2_bg=0.0005, corner_div_damp_d_con=1.0,
     div_damp_coeff=1e6, div_damp_d_con=1.0,
     A_h=1e6, ah_d_con=1.0,
     damp_w=0.030, damp_w_d_con=1.0,
-    delt_max=1.0,
-    # All 5 FV3-fidelity flags enabled by factory:
-    #   use_fv3_d_con_cv
-    #   use_fv3_vector_halo_uv
-    #   use_fv3_dynamic_exner
-    #   use_fv3_metric_aware_d_con
-    #   use_fv3_cross_face_du_proj
+    # All factory-default FV3 fidelity flags / values exposed:
+    #   use_fv3_d_con_cv             (iter-320 cv branch)
+    #   use_fv3_vector_halo_uv       (iter-328)
+    #   use_fv3_dynamic_exner        (iter-336/337)
+    #   use_fv3_metric_aware_d_con   (iter-339/344)
+    #   use_fv3_cross_face_du_proj   (iter-370)
+    #   d_con_top_zero_levels = 2    (iter-434 sponge d_con zero)
+    #   delt_max = 1.0               (iter-436 FV3 production)
+    #   nord_v = 1                   (iter-437 FV3 del-4)
+    #   corner_div_damp_nord = 1     (iter-437 FV3 del-4)
+    #   corner_div_damp_d4_bg = 0.16 (iter-451 FV3 production)
+    #   use_fv3_sponge_damp_w = True (iter-441 sponge boost)
+    #   use_fv3_sponge_damp_v = True (iter-442 sponge boost)
+    # NOTE: corner_div_damp_d2_bg_k* are NOT factory-set (iter-
+    # 452 rollback — FV3 d2_bg_k1=4.0 / k2=2.0 require FV3-
+    # specific da_min_c normalization).  Set them explicitly at
+    # a value compatible with your ``corner_div_damp_d2_bg``,
+    # e.g. d2_bg_k1=1e-4 when d2_bg=0.0005.
+    # For column Rayleigh friction at top, add ``rf_tau_days``
+    # (e.g. 5.0 days; iter-448).
 )
 
 # PE (hydrostatic):
 pe_cfg = make_fv3_faithful_pe_config(
-    damp_v=0.030, nord_v=1, damp_v_d_con=1.0,
+    damp_v=0.030, damp_v_d_con=1.0,
     corner_div_damp_d2_bg=0.0005, corner_div_damp_d_con=1.0,
     div_damp_coeff=1e6, div_damp_d_con=1.0,
     A_h=1e6, ah_d_con=1.0,
-    delt_max=1.0,
-    # All 3 PE FV3-fidelity flags enabled by factory:
-    #   use_fv3_a2b_zeta_corner
-    #   use_fv3_metric_aware_d_con
-    #   use_fv3_cross_face_du_proj
+    # All factory-default FV3 fidelity flags / values:
+    #   use_fv3_a2b_zeta_corner      (iter-14)
+    #   use_fv3_metric_aware_d_con   (iter-338/344)
+    #   use_fv3_cross_face_du_proj   (iter-370)
+    #   d_con_top_zero_levels = 2    (iter-434)
+    #   delt_max = 1.0               (iter-436)
+    #   nord_v = 1                   (iter-437)
+    #   corner_div_damp_nord = 1     (iter-437)
+    #   corner_div_damp_d4_bg = 0.16 (iter-451)
+    #   use_fv3_sponge_damp_v = True (iter-443)
+    # PE has no damp_w (no w prognostic).
 )
 ```
 
@@ -919,6 +938,16 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 454: update iter-417 production-usage doc section with
+  all factory-default flags from iter-431..453.  Doc now lists
+  ``d_con_top_zero_levels``, ``delt_max``, ``nord_v``,
+  ``corner_div_damp_nord``, ``corner_div_damp_d4_bg``,
+  ``use_fv3_sponge_damp_w/v``, ``rf_tau_days`` in factory
+  inline comments.  iter-418 doc-example test extended to
+  assert all 12 new factory defaults.  New iter-368 regression
+  ``test_iter454_doc_example_lists_new_flags``.  Doc size cap
+  bumped 3600 → 3650 lines for expanded section.  22/22 in
+  0.5 s.
 - Iter 453: AST regression guard pinning iter-451 factory
   ``d4_bg=0.16`` and iter-452 ``d2_bg_k*=0`` rollback.  6
   tests: 2 assert ``d4_bg=0.16`` present in factory defaults

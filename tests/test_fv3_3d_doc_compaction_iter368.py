@@ -38,12 +38,12 @@ def test_iter365_compaction_present(doc_text):
     )
 
 
-def test_doc_size_below_3600_lines(doc_text):
+def test_doc_size_below_3650_lines(doc_text):
     n_lines = len(doc_text.splitlines())
-    assert n_lines < 3600, (
-        f"FV3_3D.md has {n_lines} lines (post-iter-365 compaction "
-        f"target was < 3600).  Check for re-expansion or missing "
-        f"compaction."
+    assert n_lines < 3650, (
+        f"FV3_3D.md has {n_lines} lines (target < 3650 after iter-"
+        f"454 production-usage expansion).  Check for "
+        f"re-expansion or missing compaction."
     )
 
 
@@ -69,15 +69,38 @@ def test_iter423_summary_table_accurate(doc_text):
     assert "make_fv3_faithful_nh_config" in section
 
 
+def test_iter454_doc_example_lists_new_flags(doc_text):
+    """iter-454: production usage doc example mentions the
+    new factory-default flags from iter-431..453."""
+    section_start = doc_text.find("## Production usage")
+    section_end = doc_text.find("## Final state", section_start)
+    assert section_start >= 0 and section_end > section_start
+    section = doc_text[section_start:section_end]
+    expected_markers = [
+        "d_con_top_zero_levels = 2",
+        "delt_max = 1.0",
+        "nord_v = 1",
+        "corner_div_damp_nord = 1",
+        "corner_div_damp_d4_bg = 0.16",
+        "use_fv3_sponge_damp_w = True",
+        "use_fv3_sponge_damp_v = True",
+        "rf_tau_days",
+    ]
+    for marker in expected_markers:
+        assert marker in section, (
+            f"iter-454 doc-update missing ``{marker}`` in "
+            f"production-usage section."
+        )
+
+
 def test_iter417_production_section_present(doc_text):
-    """iter-417 added a production-usage section.  Pin it so
-    future maintenance doesn't drop the user-facing instructions."""
-    assert "## Production usage (iter 417)" in doc_text, (
+    """iter-417 added a production-usage section (header
+    updated by iter-454 to include update marker)."""
+    assert "## Production usage (iter 417" in doc_text, (
         "iter-417 production-usage section missing — users lose "
         "the factory-based recommended setup recipe."
     )
-    # Section should mention both factories
-    section_start = doc_text.find("## Production usage (iter 417)")
+    section_start = doc_text.find("## Production usage")
     section_end = doc_text.find("## Final state", section_start)
     section = doc_text[section_start:section_end]
     assert "make_fv3_faithful_pe_config" in section
