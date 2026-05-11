@@ -11,6 +11,46 @@ visible cube imprint (concentric blobs at face centres bordered by
 red/blue rings at panel boundaries) in u/v wind snapshots from
 Held-Suarez and baroclinic test cases.
 
+## FV3-fidelity stack (iter 356 update)
+
+By iter-356 the FV3-fidelity opt-in stack closes the major
+documented audit gaps on the 3D paths.
+
+NH config exposes 4 opt-in fidelity flags + duogrid grid:
+
+| Flag                              | What            | Iter |
+|-----------------------------------|-----------------|:----:|
+| ``use_fv3_d_con_cv``              | cv_air branch   | 320 |
+| ``use_fv3_vector_halo_uv``        | vector halo (u, v) center→corner | 328 |
+| ``use_fv3_dynamic_exner``         | live Π=Π_ref+π' at all 5 d_con sites | 336/337 |
+| ``use_fv3_metric_aware_d_con``    | cosa_s/rsin2 form at all 5 d_con sites | 339/344/348/350/352 |
+| ``use_duogrid=True`` (grid)       | Lagrange-extended halo at 3 NH sites | 325 |
+
+PE config exposes 2 opt-in fidelity flags + duogrid grid:
+
+| Flag                              | What            | Iter |
+|-----------------------------------|-----------------|:----:|
+| ``use_fv3_a2b_zeta_corner``       | 4th-order A→B ζ corner | 14 |
+| ``use_fv3_metric_aware_d_con``    | cosa_s/rsin2 form at all 4 d_con sites | 338/344/347/349/351 |
+| ``use_duogrid=True`` (grid)       | duogrid wiring at PE ke_correction halo | 333 |
+
+PE-NH asymmetry (iter-331/343): PE doesn't need cv (PE uses
+cp_air which is FV3-faithful for hydrostatic), vector halo (PE
+stores winds at corners, no center→corner interp), or dynamic
+Exner (PE uses actual T, no Π factor).
+
+All flags default ``False`` (preserves bit-for-bit baseline).
+AD-at-rest coverage: NH iter-346 + PE iter-355 (full stacks).
+
+Closed gaps:
+- Gap #1 metric d_con cosa_s/rsin2 (8 sites): iter-338-352
+- Gap #2 dynamic Exner (5 NH sites): iter-336/337
+
+Documented residual gaps (lower priority, SW-only or non-duogrid):
+- Gap #4/5 d_sw5 polar/boundary (SW solver, not 3D paths)
+- Gap #6 vort/ptc edge halo (fv3_sw_core SW path only)
+- Gap #7 fv_tp_2d s11/s14/s15 (non-duogrid path only)
+
 ## Final state (iter 100 close-out, table updated through iter 103)
 
 Core deliverable RESOLVED at iter 99: HS at C96 30 days completes
@@ -746,6 +786,132 @@ Key iterations:
   use_fv3_a2b_zeta_corner, smagorinsky_cs/A_h).  Catches
   silent default drift on one side without runtime
   simulation.  5/5 pass in 0.3 s.
+- Iter 318: AST guard for NH-only knob defaults (damp_w,
+  nord_w, damp_w_d_con).  damp_w/damp_w_d_con default to 0
+  (off-baseline contract); nord_w defaults to 2 (FV3
+  production).  Catches accidental rename/removal of fields
+  that iter-203/258/275/277/280 runtime tests depend on.
+  4/4 pass in 0.3 s.
+- Iter 319: AST guard for d_con knob count.  PE has exactly
+  4 d_con knobs (damp_v, corner_div_damp, div_damp, ah);
+  NH has 5 (PE + damp_w_d_con).  NH-only knob is exactly
+  {damp_w_d_con}; PE knobs are a subset of NH.  Catches
+  accidental addition/removal of a d_con site without
+  updating runtime test matrix (iter-272-280).  4/4 pass
+  in 0.3 s.
+- **Iters 320-359 (compacted iter 365)**: FV3-fidelity opt-in
+  flag stack + comprehensive coverage.
+  - **iter 320**: opt-in ``use_fv3_d_con_cv`` (NH) — swaps
+    ``c_pd → c_vd`` at all 5 NH d_con sites for FV3-faithful
+    ``cv_air`` branch (FV3 ``dyn_core.F90:1795``).  Default
+    False bit-for-bit baseline preserved.  Closes ~40 %
+    under-heating relative to FV3.
+  - **iter 321-323**: cv-flag energy-conservation + tendency-
+    level c_pd*Δθ_p_cp == c_vd*Δθ_p_cv (rtol=1e-12) at all 5
+    NH d_con sites (damp_v + damp_w post-acoustic; corner_div
+    + cell-div_damp + A_h slow-tendency).
+  - **iter 324**: pin grid prerequisites for metric-aware d_con
+    (cosa_cell, rsin2_cell, rdxa, rdya present on
+    ``CubedSphereCDGrid``).
+  - **iter 325/326/327**: thread duogrid through 3 NH halo
+    bypass sites (K + π_prime packed halo + ke_correction).
+    Quantitative C8 imprint reduction + diff concentrated at
+    panel edges + AST guard.  Direct cube-edge artifact fix
+    matching FV3 ``fv_duogrid.F90``.
+  - **iter 328/329**: opt-in ``use_fv3_vector_halo_uv`` (NH)
+    via ``center_to_dgrid_vector`` (FV3 ``ext_vector``
+    analogue).  Bit-for-bit baseline + diff concentrated at
+    panel edges + AST guard.
+  - **iter 330**: NH full-stack integration regression (all
+    flags ON).
+  - **iter 331/343**: PE/NH flag-asymmetry guard.  cv +
+    vector_halo + dyn_exner are NH-only (PE uses cp_air,
+    stores winds at corners, uses actual T).  metric flag is
+    SHARED.
+  - **iter 332**: 6-flag-combo AD-at-rest parametrized
+    umbrella.
+  - **iter 333/334/335**: PE-side duogrid wiring at
+    ke_correction halo + AST guard + edge concentration.
+  - **iter 336/337**: opt-in ``use_fv3_dynamic_exner`` (NH) —
+    swaps frozen ``Π_ref`` for live ``Π_total = Π_ref + π'``
+    at all 5 NH d_con sites (3 slow-tendency + 2 post-acoustic).
+    Closes ~30 % under-heating aloft.
+  - **iter 338/339/344/347/348/349/350/351/352**: opt-in
+    ``use_fv3_metric_aware_d_con`` (PE + NH) — wires FV3
+    ``sw_core.F90:1980`` ``cosa_s``/``rsin2`` metric form at
+    all 8 PE+NH d_con sites.  iter-344 fixed magnitude bug
+    (dropped FV3 rdx/rdy normalization which underresolved at
+    C8 → numerical zero).  Equivalent to iter-208/209 simpler
+    form in orthogonal-grid limit; adds cube-edge non-
+    orthogonality correction via cosa_s ≠ 0 + rsin2 > 1.
+  - **iter 340/342/353/361/362**: AST regression guards (all
+    metric gates, dyn Exner wiring, 5-site NH coverage + 4-site
+    PE coverage, PE/NH flag asymmetry at code level).
+  - **iter 341/346/355**: full-stack PE + NH AD-at-rest
+    umbrellas (every fidelity flag + full toolkit at rest).
+  - **iter 345**: re-pin cube-edge concentration of metric
+    diff after iter-344 fix.
+  - **iter 354**: close source-comment for iter-238 metric gap.
+  - **iter 356**: doc summary section (FV3-fidelity stack).
+  - **iter 357/358/359/360**: C16 cube-imprint does-not-amplify
+    + changes-state-measurably regressions for PE+NH full FV3
+    stack.
+  - **GAP #1 CLOSED**: metric d_con (8 sites).
+  - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
+  - **Per-flag default**: all False (preserves bit-for-bit).
+
+- Iter 369: consolidated FV3-fidelity flag-set presence guard.
+  Asserts NH has 4 flags (cv, vector_halo, dyn_exner, metric)
+  + PE has 2 flags (a2b_zeta, metric); all default False.
+  Single test mirroring iter-318/331/343/362 default-asymmetry
+  guards.  3/3 in 0.6 s.
+- Iter 368: doc-structure regression for iter-365 compaction.
+  Pins (1) compaction marker present, (2) doc size < 3600 lines,
+  (3) all 17 iter-group topic markers present in compacted
+  block.  Catches accidental re-expansion of compacted entries.
+  3/3 in 0.05 s.
+- Iter 367: C16 cv-vs-cp heating ratio test for NH post-acoustic
+  d_con sites (damp_v + damp_w).  iter-320 verified c_p/c_v
+  ≈ 1.40 at C8; iter-367 confirms ratio holds at C16
+  (production resolution).  ``mean(|Δθ_p_cv|) /
+  mean(|Δθ_p_cp|) == c_pd/c_vd`` at rtol=1e-4.  1/1 in 41 s.
+- Iter 366: composition test for iter-218/219 delt_max sponge
+  cap + iter-320 cv flag at NH damp_v_d_con post-step site.
+  Verifies (1) baseline bit-for-bit at flags off, (2) cv +
+  loose cap differs from cp + loose cap (cv path heats c_p/c_v
+  larger), (3) cv + tight cap (delt_max=1e-4) produces finite
+  state (clips heating without NaN).  3/3 in 38 s.
+- Iter 365: ToC compaction — 40 iters (320-359) compressed into
+  a single block above (~370 lines saved).  Iter 360-364
+  verbose entries retained at the top of this section.  Mirror
+  of iter-260/290/300/310 compaction pattern.  Doc size 3691 →
+  3327 lines.
+- Iter 364: composition test for NH damp_w_d_con + iter-337
+  dynamic Exner.  Verifies (1) baseline bit-for-bit, (2)
+  flag=True changes θ_p, (3) damp_w_d_con + dyn_exner + cv
+  combination finite.  3/3 in 32 s.
+- Iter 363: safety regression for iter-336/337 dynamic Exner.
+  Π_total = Π_ref + π' could go non-positive under strong π'.
+  iter-363 verifies under strong perturbation (±15 K θ', ±0.2
+  kg/m³ ρ', ±10 m/s wind) all state fields stay finite (no
+  NaN/Inf) at NH d_con denominators.  1/1 in 16 s.
+- Iter 362: PE counterpart of iter-361 flag-coverage guard.
+  PE has 4 metric d_con gates (damp_v + corner_div + div_damp +
+  A_h); NO cv selectors (PE uses cp_air); NO ``_exner_eff_b``
+  (PE uses actual T).  Pins PE/NH asymmetry at code level
+  (mirror of iter-331/343 default-asymmetry guard).  3/3 in
+  0.03 s.
+- Iter 361: AST flag-coverage guard for all 5 NH d_con sites.
+  Asserts: (1) 4 metric gates (damp_v + corner_div + div_damp +
+  A_h; damp_w is scalar - no metric), (2) 5 cv-vs-cp selectors
+  (one per site), (3) ``_exner_eff_b`` at slow-tendency sites,
+  (4) ``_exner_eff_dv`` + ``_exner_eff_dw`` at post-acoustic.
+  Catches refactors dropping flag wiring from any single site.
+  4/4 in 0.03 s.
+- Iter 360: NH counterpart of iter-359.  Full NH FV3-fidelity
+  stack at C16 measurably differs from default flags + same
+  toolkit in θ_p field (>1e-6).  1/1 in 41 s.  Closes PE+NH C16
+  "wiring-active-at-production-resolution" coverage.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::

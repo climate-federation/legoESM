@@ -41,6 +41,7 @@ from legoesm.core.operators_3d import (
     vertical_advection_height,
 )
 from legoesm.core.operators_cdgrid import (
+    center_to_dgrid_vector,
     dgrid_to_cgrid,
     dgrid_to_center_vector,
     dgrid_vorticity,
@@ -293,6 +294,77 @@ class CDGridCompressibleEulerConfig(NamedTuple):
         # refinement).  Default 0.0 preserves bit-for-bit baseline;
         # gated INSIDE ``corner_div_damp_d2_bg > 0``.  FV3
         # production default is 1.0.
+    use_fv3_metric_aware_d_con: bool = False
+        # FV3-faithful metric-aware d_con KE→heat form for the
+        # NH iter-209 ``damp_v_d_con`` site (FV3_3D iter 339, mirror
+        # of PE iter-338).  Port of FV3 ``sw_core.F90:1956-1985``
+        # metric form using cell-centre ``cosa_cell`` /
+        # ``rsin2_cell`` non-orthogonality metrics + cell-centre
+        # ``rdxa`` / ``rdya`` broadcast to edge stagger (1st-order;
+        # FV3 has edge-native ``rdx`` / ``rdy``).  When True, the
+        # NH damp_v_d_con site swaps the iter-209 simpler form for
+        # the FV3-faithful metric form (FV3-faithful LOCAL heat
+        # distribution at cube edges where ``cosa_s ≠ 0``).
+        # Composes with ``use_fv3_d_con_cv`` (cv heat capacity) +
+        # ``use_fv3_dynamic_exner`` (live Π).  Default False
+        # preserves bit-for-bit baseline.
+    use_fv3_dynamic_exner: bool = False
+        # FV3-faithful DYNAMIC Exner factor for the NH d_con KE→heat
+        # conversion (FV3_3D iter 336).  iter-207 used frozen
+        # ``exner_ref`` (Π_ref at full levels from ``HeightCoordinate``)
+        # in the d_con denominator ``c_x · Π_ref`` for the iter-203 /
+        # 209 / 222 / 224 / 226 NH d_con sites — a reference-state
+        # linearization that is ~30 % under-heating aloft (where
+        # actual p deviates from p_ref).  FV3 NH path
+        # (``dyn_core.F90:1769`` cv branch + line 1796) uses live
+        # ``pkz`` computed from current pressure (``rdg * delp /
+        # delz * pt``).  When True, the 3 SLOW-TENDENCY d_con sites
+        # (corner_div, cell-centre div_damp, A_h) replace ``Π_ref``
+        # with ``Π_total = Π_ref + π_prime`` where ``π_prime`` is
+        # the Exner perturbation already computed at slow_tendencies
+        # step 1 (line 382).  Default False preserves bit-for-bit
+        # baseline.  Post-acoustic d_con sites (damp_v, damp_w) keep
+        # ``Π_ref`` (no live π_prime in scope at step()-method post-
+        # acoustic site without recomputation).  PE path uses actual
+        # T (no Exner factor), so flag is NH-only.
+    use_fv3_vector_halo_uv: bool = False
+        # FV3-faithful vector halo for the cell-centre → D-grid corner
+        # interpolation of (u, v) (FV3_3D iter 328).  Default False
+        # uses ``_interp_center_to_corner`` on a passive stacked
+        # ``(u, v)`` axis — this applies SCALAR halo (with duogrid
+        # routing if active) but does NOT rotate the (u, v) face-local
+        # components across cube-face boundaries.  At cube edges the
+        # neighbouring face's e_x / e_y basis differs from the local
+        # face's, so a scalar halo treats the components as untransformed
+        # field values, leaving an O(1) basis-mismatch error at cube
+        # edges that contributes directly to NH cube imprint in u, v.
+        # When True, switches to ``center_to_dgrid_vector`` which uses
+        # ``pad_halo_vector`` (FV3 ``ext_vector`` analogue at
+        # ``fv_duogrid.F90:626-975``): rotates the (u, v) components
+        # to the neighbouring face's basis BEFORE the 4-point average
+        # to corners, preserving discrete vector continuity at cube
+        # edges.  Default False preserves bit-for-bit baseline; opt
+        # in for FV3-faithful vector halo at cube edges.  PE path
+        # already stores winds at corners (no center-to-corner
+        # interpolation, no vector halo gap).
+    use_fv3_d_con_cv: bool = False
+        # FV3-faithful heat-capacity factor for the NH d_con KE→heat
+        # conversion (FV3_3D iter 320).  FV3 ``dyn_core.F90:1795``
+        # divides ``heat_source`` by ``cv_air * delp`` in the
+        # ``hydrostatic = .false.`` branch (cv = c_p − R_d ≈ 717 J/kg/K)
+        # because compressible NH dynamics conserves total energy with
+        # internal energy ``c_v · T`` (constant volume) — not enthalpy
+        # ``c_p · T`` (constant pressure, hydrostatic limit).  legoESM
+        # NH iter-203/207/209/222/224/226 ports inherited the simpler
+        # ``c_pd`` denominator from PE, which UNDER-HEATS by ``c_v/c_p
+        # ≈ 0.714`` (~40 % under-heating relative to FV3 NH).  When
+        # ``True``, all 5 NH d_con sites (damp_w, damp_v, corner_div,
+        # cell-centre div_damp, ah) divide by ``c_vd`` instead of
+        # ``c_pd``, matching FV3's NH-branch convention.  Default
+        # ``False`` preserves bit-for-bit baseline; opt in for
+        # FV3-faithful heating partition.  PE path is unaffected (PE
+        # uses ``c_pd`` which is FV3-faithful for the hydrostatic
+        # branch ``cp_air``).
 
 
 def cdgrid_compressible_euler_slow_tendencies(
@@ -341,6 +413,20 @@ def cdgrid_compressible_euler_slow_tendencies(
 
     # --- 1. Exner perturbation and horizontal PGF ---
     pi_prime = compute_exner_perturbation(rho_p, theta_p, height_coord)
+    # FV3_3D iter 336: optional FV3-faithful dynamic Exner Π_total =
+    # Π_ref + π' for the SLOW-TENDENCY d_con denominators.  When
+    # ``use_fv3_dynamic_exner = False`` (default), keep frozen
+    # ``Π_ref`` (iter-207 refinement); when True, use
+    # ``Π_ref + π'`` per FV3 ``dyn_core.F90:1769`` ``cv_air`` /
+    # ``cp_air`` branches that divide by live ``pkz``.  Cell-centre
+    # broadcast for slow-tendency 4D sites.
+    if config.use_fv3_dynamic_exner:
+        _exner_eff_b = (
+            height_coord.exner_ref[None, None, None, :]
+            + pi_prime
+        )
+    else:
+        _exner_eff_b = height_coord.exner_ref[None, None, None, :]
 
     # --- 2. Convert to D-grid ---
     # Stack (u, v) along a trailing axis and fold into the level dim so
@@ -348,16 +434,25 @@ def cdgrid_compressible_euler_slow_tendencies(
     # 4-point average) handles both components, replacing two separate
     # calls each with their own halo.  Same passive-trailing-axis
     # pattern as the SH and divergence batching loops.
+    # FV3_3D iter 328: when ``use_fv3_vector_halo_uv = True``, switch
+    # to the vector-aware ``center_to_dgrid_vector`` which rotates
+    # (u, v) face-local components across cube-face boundaries via
+    # ``pad_halo_vector`` (FV3 ``ext_vector`` analogue at
+    # ``fv_duogrid.F90:626-975``).  Default False preserves the
+    # passive-stack scalar halo path bit-for-bit.
     n_face_uv, n_i_uv, n_j_uv, nlev_uv = u.shape
-    _uv_stack = jnp.stack([u, v], axis=-1)  # (6, n, n, nlev, 2)
-    _uv_flat = _uv_stack.reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv * 2)
-    _uv_d_flat = _interp_center_to_corner(_uv_flat, cdgrid)
-    _uv_d = _uv_d_flat.reshape(
-        _uv_d_flat.shape[0], _uv_d_flat.shape[1], _uv_d_flat.shape[2],
-        nlev_uv, 2,
-    )
-    u_d = _uv_d[..., 0]
-    v_d = _uv_d[..., 1]
+    if config.use_fv3_vector_halo_uv:
+        u_d, v_d = center_to_dgrid_vector(u, v, cdgrid)
+    else:
+        _uv_stack = jnp.stack([u, v], axis=-1)  # (6, n, n, nlev, 2)
+        _uv_flat = _uv_stack.reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv * 2)
+        _uv_d_flat = _interp_center_to_corner(_uv_flat, cdgrid)
+        _uv_d = _uv_d_flat.reshape(
+            _uv_d_flat.shape[0], _uv_d_flat.shape[1], _uv_d_flat.shape[2],
+            nlev_uv, 2,
+        )
+        u_d = _uv_d[..., 0]
+        v_d = _uv_d[..., 1]
 
     # --- 3. C-grid velocities ---
     u_c, v_c = dgrid_to_cgrid(u_d, v_d, cdgrid)
@@ -374,16 +469,23 @@ def cdgrid_compressible_euler_slow_tendencies(
     # under the local backend each operator does its own exchange (same
     # as before).  ``_arakawa_lamb_gradient`` takes ``padded=`` to skip
     # its internal halo when supplied.
+    # FV3_3D iter 325: thread the duogrid kinked-to-extended remap
+    # through the K + pi_prime packed halo so cube-edge gradient
+    # values match the PE iter-84 path.  Without this the NH K and
+    # pi_prime halos silently bypassed duogrid while PE applied it,
+    # leaving the FV3 ``a2b_edge`` 4th-order corner accuracy partial
+    # on the NH path (a real cube-imprint contributor at edges).
+    _nh_dg = grid.duogrid
     from legoesm.grids.halo import _halo_backend as _hb_step6
     if _hb_step6 == "spmd":
         from legoesm.parallel.cubesphere_exchange import _spmd_mesh as _spmd_mesh_step6
         _K_pad_step6, _pi_pad_step6 = packed_pad_halo_4d(
-            K, pi_prime, mesh=_spmd_mesh_step6,
+            K, pi_prime, mesh=_spmd_mesh_step6, duogrid=_nh_dg,
         )
     elif _hb_step6 == "mpi":
         from legoesm.grids.halo import _mpi_topology as _mpi_topo_step6
         _K_pad_step6, _pi_pad_step6 = packed_pad_halo_mpi_4d(
-            K, pi_prime, topology=_mpi_topo_step6,
+            K, pi_prime, topology=_mpi_topo_step6, duogrid=_nh_dg,
         )
     else:
         _K_pad_step6 = _pi_pad_step6 = None
@@ -519,19 +621,54 @@ def cdgrid_compressible_euler_slow_tendencies(
         # div_damp d_con.  Compute heat tendency and stash for
         # accumulation into dtheta_p_dt later.
         if config.div_damp_d_con > 0.0:
-            _dKE_dt_corner_dd = (
-                u_d * _du_d_dt_dd + v_d * _dv_d_dt_dd
+            if config.use_fv3_metric_aware_d_con:
+                # FV3_3D iter 350: NH mirror of PE iter-349 metric
+                # form at cell-centre div_damp d_con site.
+                _u_d_n = 0.5 * (u_d[:, :-1, :, :] + u_d[:, 1:, :, :])
+                _v_d_n = 0.5 * (v_d[:, :, :-1, :] + v_d[:, :, 1:, :])
+                _du_n = 0.5 * (
+                    _du_d_dt_dd[:, :-1, :, :] + _du_d_dt_dd[:, 1:, :, :]
+                )
+                _dv_n = 0.5 * (
+                    _dv_d_dt_dd[:, :, :-1, :] + _dv_d_dt_dd[:, :, 1:, :]
+                )
+                _ubs = _du_n[:, :, :-1, :]
+                _ubn = _du_n[:, :, 1:, :]
+                _vbw = _dv_n[:, :-1, :, :]
+                _vbe = _dv_n[:, 1:, :, :]
+                _us = _u_d_n[:, :, :-1, :]
+                _un = _u_d_n[:, :, 1:, :]
+                _vw = _v_d_n[:, :-1, :, :]
+                _ve = _v_d_n[:, 1:, :, :]
+                _u2 = _us + _un
+                _du2 = _ubs + _ubn
+                _v2 = _vw + _ve
+                _dv2 = _vbw + _vbe
+                _cosa_dd = cdgrid.cosa_cell[..., None]
+                _rsin2_dd = cdgrid.rsin2_cell[..., None]
+                _dKE_dt_cc_dd = 0.25 * _rsin2_dd * (
+                    _ubs ** 2 + _ubn ** 2 + _vbw ** 2 + _vbe ** 2
+                    + 2.0 * (
+                        _us * _ubs + _un * _ubn
+                        + _vw * _vbw + _ve * _vbe
+                    )
+                    - _cosa_dd * (_u2 * _dv2 + _v2 * _du2 + _du2 * _dv2)
+                )
+            else:
+                _dKE_dt_corner_dd = (
+                    u_d * _du_d_dt_dd + v_d * _dv_d_dt_dd
+                )
+                _dKE_dt_cc_dd = _interp_corner_to_center(
+                    _dKE_dt_corner_dd,
+                )
+            _cx_dd = (
+                constants.c_vd if config.use_fv3_d_con_cv
+                else constants.c_pd
             )
-            _dKE_dt_cc_dd = _interp_corner_to_center(
-                _dKE_dt_corner_dd,
-            )
-            _exner_ref_b_dd = height_coord.exner_ref[
-                None, None, None, :
-            ]
             _dtheta_p_dt_dd_cc = (
                 -config.div_damp_d_con
                 * _dKE_dt_cc_dd
-                / (constants.c_pd * _exner_ref_b_dd)
+                / (_cx_dd * _exner_eff_b)
             )
         else:
             _dtheta_p_dt_dd_cc = None
@@ -584,19 +721,54 @@ def cdgrid_compressible_euler_slow_tendencies(
         #     dKE/dt_corner = u_d * du_d_dt_ah + v_d * dv_d_dt_ah
         #     dθ_p/dt += -ah_d_con * (dKE/dt) / (c_pd * Π_ref)
         if config.ah_d_con > 0.0:
-            _dKE_dt_corner_ah = (
-                u_d * _du_d_dt_ah + v_d * _dv_d_dt_ah
+            if config.use_fv3_metric_aware_d_con:
+                # FV3_3D iter 352: NH mirror of PE iter-351 metric
+                # form at A_h d_con site.
+                _u_d_n = 0.5 * (u_d[:, :-1, :, :] + u_d[:, 1:, :, :])
+                _v_d_n = 0.5 * (v_d[:, :, :-1, :] + v_d[:, :, 1:, :])
+                _du_n = 0.5 * (
+                    _du_d_dt_ah[:, :-1, :, :] + _du_d_dt_ah[:, 1:, :, :]
+                )
+                _dv_n = 0.5 * (
+                    _dv_d_dt_ah[:, :, :-1, :] + _dv_d_dt_ah[:, :, 1:, :]
+                )
+                _ubs = _du_n[:, :, :-1, :]
+                _ubn = _du_n[:, :, 1:, :]
+                _vbw = _dv_n[:, :-1, :, :]
+                _vbe = _dv_n[:, 1:, :, :]
+                _us = _u_d_n[:, :, :-1, :]
+                _un = _u_d_n[:, :, 1:, :]
+                _vw = _v_d_n[:, :-1, :, :]
+                _ve = _v_d_n[:, 1:, :, :]
+                _u2 = _us + _un
+                _du2 = _ubs + _ubn
+                _v2 = _vw + _ve
+                _dv2 = _vbw + _vbe
+                _cosa_ah = cdgrid.cosa_cell[..., None]
+                _rsin2_ah = cdgrid.rsin2_cell[..., None]
+                _dKE_dt_cc_ah = 0.25 * _rsin2_ah * (
+                    _ubs ** 2 + _ubn ** 2 + _vbw ** 2 + _vbe ** 2
+                    + 2.0 * (
+                        _us * _ubs + _un * _ubn
+                        + _vw * _vbw + _ve * _vbe
+                    )
+                    - _cosa_ah * (_u2 * _dv2 + _v2 * _du2 + _du2 * _dv2)
+                )
+            else:
+                _dKE_dt_corner_ah = (
+                    u_d * _du_d_dt_ah + v_d * _dv_d_dt_ah
+                )
+                _dKE_dt_cc_ah = _interp_corner_to_center(
+                    _dKE_dt_corner_ah,
+                )
+            _cx_ah = (
+                constants.c_vd if config.use_fv3_d_con_cv
+                else constants.c_pd
             )
-            _dKE_dt_cc_ah = _interp_corner_to_center(
-                _dKE_dt_corner_ah,
-            )
-            _exner_ref_b_ah = height_coord.exner_ref[
-                None, None, None, :
-            ]
             _dtheta_p_dt_ah_cc = (
                 -config.ah_d_con
                 * _dKE_dt_cc_ah
-                / (constants.c_pd * _exner_ref_b_ah)
+                / (_cx_ah * _exner_eff_b)
             )
         else:
             _dtheta_p_dt_ah_cc = None
@@ -715,7 +887,17 @@ def cdgrid_compressible_euler_slow_tendencies(
         # ke-correction so the i±1 / j±1 reads at face-boundary corners
         # pick up the neighbouring panel.  Centred difference at
         # corner (i, j); 2*dx denominator uses dxc / dyc averaged.
-        _ke_pad = _pad_halo_4d_module(_ke_correction)      # (6, n+3, n+3, nlev)
+        # FV3_3D iter 325: route the ke_correction halo through the
+        # duogrid kinked-to-extended remap so the cube-edge gradient
+        # at the FV3 corner-divergence damping site matches the PE
+        # iter-84 + iter-1184/1188 path.  Without duogrid, the corner
+        # i+1 / i-1 reads at the cube edge see the cube-projected
+        # halo cell instead of the duogrid-corrected value, leaving
+        # an O(dx²) bias at panel boundaries that contributes to
+        # cube imprint in u/v.
+        _ke_pad = _pad_halo_4d_module(
+            _ke_correction, duogrid=_nh_dg,
+        )                                                   # (6, n+3, n+3, nlev)
 
         _dke_dx_pad = (_ke_pad[:, 2:, 1:-1, :] - _ke_pad[:, :-2, 1:-1, :])
         _dke_dy_pad = (_ke_pad[:, 1:-1, 2:, :] - _ke_pad[:, 1:-1, :-2, :])
@@ -739,19 +921,57 @@ def cdgrid_compressible_euler_slow_tendencies(
         # corners then project to cell centres for later
         # accumulation into dtheta_p_dt.
         if config.corner_div_damp_d_con > 0.0:
-            _dKE_dt_corner_cdd = (
-                u_d * _du_d_dt_cdd + v_d * _dv_d_dt_cdd
+            if config.use_fv3_metric_aware_d_con:
+                # FV3_3D iter 348: NH mirror of PE iter-347 metric
+                # form at corner_div_d_con site.  Project corners
+                # to edge stagger via 2-pt average, apply iter-339
+                # metric form structure at tendency rate.
+                _u_d_n = 0.5 * (u_d[:, :-1, :, :] + u_d[:, 1:, :, :])
+                _v_d_n = 0.5 * (v_d[:, :, :-1, :] + v_d[:, :, 1:, :])
+                _du_n = 0.5 * (
+                    _du_d_dt_cdd[:, :-1, :, :] + _du_d_dt_cdd[:, 1:, :, :]
+                )
+                _dv_n = 0.5 * (
+                    _dv_d_dt_cdd[:, :, :-1, :] + _dv_d_dt_cdd[:, :, 1:, :]
+                )
+                _ubs = _du_n[:, :, :-1, :]
+                _ubn = _du_n[:, :, 1:, :]
+                _vbw = _dv_n[:, :-1, :, :]
+                _vbe = _dv_n[:, 1:, :, :]
+                _us = _u_d_n[:, :, :-1, :]
+                _un = _u_d_n[:, :, 1:, :]
+                _vw = _v_d_n[:, :-1, :, :]
+                _ve = _v_d_n[:, 1:, :, :]
+                _gys = _us * _ubs
+                _gyn = _un * _ubn
+                _gxw = _vw * _vbw
+                _gxe = _ve * _vbe
+                _u2 = _us + _un
+                _du2 = _ubs + _ubn
+                _v2 = _vw + _ve
+                _dv2 = _vbw + _vbe
+                _cosa_cdd = cdgrid.cosa_cell[..., None]
+                _rsin2_cdd = cdgrid.rsin2_cell[..., None]
+                _dKE_dt_cc_cdd = 0.25 * _rsin2_cdd * (
+                    _ubs ** 2 + _ubn ** 2 + _vbw ** 2 + _vbe ** 2
+                    + 2.0 * (_gys + _gyn + _gxw + _gxe)
+                    - _cosa_cdd * (_u2 * _dv2 + _v2 * _du2 + _du2 * _dv2)
+                )
+            else:
+                _dKE_dt_corner_cdd = (
+                    u_d * _du_d_dt_cdd + v_d * _dv_d_dt_cdd
+                )
+                _dKE_dt_cc_cdd = _interp_corner_to_center(
+                    _dKE_dt_corner_cdd,
+                )
+            _cx_cdd = (
+                constants.c_vd if config.use_fv3_d_con_cv
+                else constants.c_pd
             )
-            _dKE_dt_cc_cdd = _interp_corner_to_center(
-                _dKE_dt_corner_cdd,
-            )
-            _exner_ref_b = height_coord.exner_ref[
-                None, None, None, :
-            ]
             _dtheta_p_dt_cdd_cc = (
                 -config.corner_div_damp_d_con
                 * _dKE_dt_cc_cdd
-                / (constants.c_pd * _exner_ref_b)
+                / (_cx_cdd * _exner_eff_b)
             )
         else:
             _dtheta_p_dt_cdd_cc = None
@@ -1253,15 +1473,72 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
             # Π_ref) using exner_ref (matches iter-207 refinement).
             if self.config.damp_v_d_con > 0.0:
                 from legoesm import constants
-                dKE_cc = (
-                    u_cc_new * du_cc + 0.5 * du_cc ** 2
-                    + v_cc_new * dv_cc + 0.5 * dv_cc ** 2
-                )
-                _exner_ref_broadcast = self.height_coord.exner_ref[
+                # FV3_3D iter 339: optional metric-aware d_con form
+                # (mirror of PE iter-338).  Uses edge-stagger
+                # normalized variables + cell-centre rsin2 /
+                # cosa_s metrics.  Edge-rdx/rdy approximated by
+                # cell-centre rdxa/rdya broadcast (1st-order).
+                if self.config.use_fv3_metric_aware_d_con:
+                    # FV3_3D iter 339 (iter-344 scaling fix):
+                    # metric-aware form using cell-centre rsin2 +
+                    # cosa metrics directly on (du, dv) — drops
+                    # the FV3 rdx/rdy normalization (cell-centre
+                    # rdxa/rdya broadcast under-resolves at ~1e-6
+                    # → numerical zero in float64).  Retains the
+                    # FV3-faithful metric structure (cube-edge
+                    # cosa_s correction).
+                    ub_s = du_normal[:, :, :-1, :]
+                    ub_n = du_normal[:, :, 1:, :]
+                    vb_w = dv_normal[:, :-1, :, :]
+                    vb_e = dv_normal[:, 1:, :, :]
+                    u_s = u_normal[:, :, :-1, :]
+                    u_n = u_normal[:, :, 1:, :]
+                    v_w = v_normal[:, :-1, :, :]
+                    v_e = v_normal[:, 1:, :, :]
+                    gy_s = u_s * ub_s
+                    gy_n = u_n * ub_n
+                    gx_w = v_w * vb_w
+                    gx_e = v_e * vb_e
+                    u2 = u_s + u_n
+                    du2 = ub_s + ub_n
+                    v2 = v_w + v_e
+                    dv2 = vb_w + vb_e
+                    cosa_b = self.cdgrid.cosa_cell[..., None]
+                    rsin2_b = self.cdgrid.rsin2_cell[..., None]
+                    dKE_cc = 0.25 * rsin2_b * (
+                        ub_s ** 2 + ub_n ** 2 + vb_w ** 2 + vb_e ** 2
+                        + 2.0 * (gy_s + gy_n + gx_w + gx_e)
+                        - cosa_b * (u2 * dv2 + v2 * du2 + du2 * dv2)
+                    )
+                else:
+                    dKE_cc = (
+                        u_cc_new * du_cc + 0.5 * du_cc ** 2
+                        + v_cc_new * dv_cc + 0.5 * dv_cc ** 2
+                    )
+                # FV3_3D iter 337: optional dynamic Exner at the
+                # post-acoustic damp_v_d_con site.  Mirrors iter-336
+                # slow-tendency wiring but recomputes ``π'`` from the
+                # current post-acoustic state (theta_p + rho_p) since
+                # the slow_tendencies fn's ``pi_prime`` is out of
+                # scope in ``step()``.
+                _exner_ref_b1 = self.height_coord.exner_ref[
                     None, None, None, :
                 ]
+                if self.config.use_fv3_dynamic_exner:
+                    _pi_prime_dv = compute_exner_perturbation(
+                        state_new.rho_prime.data,
+                        state_new.theta_prime.data,
+                        self.height_coord,
+                    )
+                    _exner_eff_dv = _exner_ref_b1 + _pi_prime_dv
+                else:
+                    _exner_eff_dv = _exner_ref_b1
+                _cx_dv = (
+                    constants.c_vd if self.config.use_fv3_d_con_cv
+                    else constants.c_pd
+                )
                 dtheta_p = -self.config.damp_v_d_con * dKE_cc / (
-                    constants.c_pd * _exner_ref_broadcast
+                    _cx_dv * _exner_eff_dv
                 )
                 # FV3_3D iter 218/219: optional per-step cap on
                 # |Δθ_p*Π| (equivalent to capping |ΔT| to
@@ -1373,11 +1650,29 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
                 # linearization.  exner_ref is shape (nlev,);
                 # broadcast to (6, n, n, nlev) by adding three
                 # leading singleton axes.
-                _exner_ref_broadcast = self.height_coord.exner_ref[
+                # FV3_3D iter 337: optional dynamic Exner at the
+                # post-acoustic damp_w_d_con site.  Mirrors the
+                # damp_v_d_con wiring above; recomputes ``π'`` from
+                # the current state since slow_tendencies' pi_prime
+                # is out of scope in ``step()``.
+                _exner_ref_b2 = self.height_coord.exner_ref[
                     None, None, None, :
                 ]
+                if self.config.use_fv3_dynamic_exner:
+                    _pi_prime_dw = compute_exner_perturbation(
+                        state_new.rho_prime.data,
+                        state_new.theta_prime.data,
+                        self.height_coord,
+                    )
+                    _exner_eff_dw = _exner_ref_b2 + _pi_prime_dw
+                else:
+                    _exner_eff_dw = _exner_ref_b2
+                _cx_dw = (
+                    constants.c_vd if self.config.use_fv3_d_con_cv
+                    else constants.c_pd
+                )
                 dtheta_p = heat_full / (
-                    constants.c_pd * _exner_ref_broadcast
+                    _cx_dw * _exner_eff_dw
                 )
                 # FV3_3D iter 218/219: optional per-step cap on
                 # |Δθ_p*Π|.  Sponge-layer factors per FV3
