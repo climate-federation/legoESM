@@ -879,6 +879,11 @@ Key iterations:
   iter-369 guard matches actual ``use_fv3_*`` field count in
   PE + NH source.  Catches drift when a new flag is added to
   source without updating iter-369 lists.  2/2 in 0.77 s.
+- Iter 412: pass-through verification for iter-392 factories.
+  (1) PE factory passes hyperdiff settings, (2) NH factory
+  passes ``n_acoustic_substeps`` + other knobs, (3) user
+  overrides take precedence over factory defaults (e.g.,
+  disabling a flag via override wins).  3/3 in 0.75 s.
 - Iter 409: AD-at-rest through 5 PE + 5 NH steps with iter-392
   factories.  Extends iter-408 multi-step stability with
   jax.grad.  Both PE + NH factory configs (all FV3-fidelity
