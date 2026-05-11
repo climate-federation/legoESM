@@ -117,6 +117,24 @@ class CDGridCompressibleEulerConfig(NamedTuple):
     corner_div_damp_dddmp: float = 0.20
     corner_div_damp_d4_bg: float = 0.0
     corner_div_damp_nord: int = 0
+    use_fv3_sponge_damp_w: bool = False
+        # FV3-faithful sponge boost of the NH ``damp_w``
+        # coefficient at top levels (FV3_3D iter 441).  FV3
+        # ``dyn_core.F90:782, 793, 803`` sets ``damp_w = d2_divg``
+        # at sponge levels, meaning damp_w receives the SAME
+        # boosted coefficient as the corner-divergence damping
+        # at those levels.  When True (and ``damp_w > 0``), the
+        # post-step ``dw`` increment is scaled per-level at the
+        # top sponge layers by ``(boosted_damp_w / damp_w)**
+        # (nord_w + 1)`` — exploiting the linear ``damp ^
+        # (nord+1)`` dependence of del-n flux to swap the
+        # effective damping coefficient without recomputing the
+        # flux.  Levels affected match the corner-div sponge
+        # fields:
+        # * k=0 if ``corner_div_damp_d2_bg_k1 > 0``
+        # * k=1 if ``corner_div_damp_d2_bg_k2 > 0.01``
+        # * k=2 if ``corner_div_damp_d2_bg_k2 > 0.05``
+        # Default False preserves bit-for-bit baseline.
     corner_div_damp_d2_bg_k1: float = 0.0
         # NH mirror of PE iter-438 sponge boost at k=0.
         # See PE config for FV3 ``dyn_core.F90:780`` port details.
@@ -1777,6 +1795,57 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
                 + fy2_t[..., :-1] - fy2_t[..., 1:]
             ) * rarea_w[None, ...]               # (nlev_half, 6, n, n)
             dw = jnp.moveaxis(dw_t, 0, -1)       # (6, n, n, nlev_half)
+
+            # FV3_3D iter 441: FV3-faithful sponge boost of damp_w
+            # at top levels.  Linear ``damp^(nord+1)`` scaling
+            # trick swaps the effective coefficient at sponge
+            # levels without recomputing del-n flux.  Half-level
+            # damp_w shape (6, n, n, nlev_half = nlev+1); top
+            # sponge levels correspond to k=0,1,2 in full-level
+            # (and same indices in half-level w / dw).
+            if self.config.use_fv3_sponge_damp_w:
+                _nord_p1 = self.config.nord_w + 1
+                _nlev_w = dw.shape[-1]
+                _k_idx_w = jnp.arange(_nlev_w)
+                if self.config.corner_div_damp_d2_bg_k1 > 0.0:
+                    _boosted_k1 = jnp.maximum(
+                        self.config.corner_div_damp_d2_bg,
+                        self.config.corner_div_damp_d2_bg_k1,
+                    )
+                    _scale_k1 = (
+                        _boosted_k1 / self.config.damp_w
+                    ) ** _nord_p1
+                    dw = jnp.where(
+                        _k_idx_w == 0,
+                        dw * _scale_k1,
+                        dw,
+                    )
+                if self.config.corner_div_damp_d2_bg_k2 > 0.01:
+                    _boosted_k2 = jnp.maximum(
+                        self.config.corner_div_damp_d2_bg,
+                        self.config.corner_div_damp_d2_bg_k2,
+                    )
+                    _scale_k2 = (
+                        _boosted_k2 / self.config.damp_w
+                    ) ** _nord_p1
+                    dw = jnp.where(
+                        _k_idx_w == 1,
+                        dw * _scale_k2,
+                        dw,
+                    )
+                    if self.config.corner_div_damp_d2_bg_k2 > 0.05:
+                        _boosted_k3 = jnp.maximum(
+                            self.config.corner_div_damp_d2_bg,
+                            0.2 * self.config.corner_div_damp_d2_bg_k2,
+                        )
+                        _scale_k3 = (
+                            _boosted_k3 / self.config.damp_w
+                        ) ** _nord_p1
+                        dw = jnp.where(
+                            _k_idx_w == 2,
+                            dw * _scale_k3,
+                            dw,
+                        )
 
             # FV3_3D iter 203: optional KE→heat conversion for the
             # damp_w wind change.  Faithful port of FV3

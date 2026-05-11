@@ -919,6 +919,17 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 441: FV3 sponge boost of NH ``damp_w`` coefficient at
+  top levels.  Ports FV3 ``dyn_core.F90:782, 793, 803``
+  ``damp_w = d2_divg`` at sponge layers.  New opt-in flag
+  ``use_fv3_sponge_damp_w: bool = False`` (default OFF =
+  baseline).  When True, exploits linear ``damp^(nord+1)``
+  dependence: ``dw_top *= (boosted/damp_w)^(nord+1)`` at each
+  sponge level — equivalent to recomputing del-n flux with
+  boosted coefficient.  Levels gated on the existing
+  ``corner_div_damp_d2_bg_k1/k2`` fields (k=0 / k=1 / k=2
+  with the same 0.01 / 0.05 thresholds).  4/4 in 67 s.  Wired
+  into iter-383 sweep (now 37).
 - Iter 440: NH mirror of iter-438/439 corner-div sponge boost
   + compact iter 425-434 doc block.  New helper
   ``_apply_top_sponge_damp_boost`` factors the per-level
