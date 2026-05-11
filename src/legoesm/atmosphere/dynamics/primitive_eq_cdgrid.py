@@ -425,6 +425,18 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # Uses cell-centre ``rdxa / rdya`` broadcast to edge stagger
         # (1st-order approximation; FV3 has edge-native ``rdx /
         # rdy``).  Default False preserves bit-for-bit baseline.
+    d_con_top_zero_levels: int = 0
+        # FV3-faithful sponge-layer zeroing of d_con KE→heat
+        # (FV3_3D iter 433, PE mirror of NH iter-431/432).
+        # Port of FV3 ``dyn_core.F90:790/800/804`` ``d_con_k = 0``
+        # for the top sponge levels.  When > 0, zeros the d_con
+        # heat tendency for the top N vertical levels (model-
+        # top = lowest k-index).  Default 0 preserves bit-for-
+        # bit baseline.  Wired at all 4 PE d_con sites:
+        # post-acoustic damp_v (mirror of NH iter-431) +
+        # aggregate ``_d_con_sum`` covering 3 slow-tendency
+        # contributions (corner_div, div_damp, A_h; mirror of
+        # NH iter-432).
     use_fv3_a2b_zeta_corner: bool = False
         # FV3-faithful 4th-order A→B interpolation for the relative
         # vorticity ``ζ`` from cell centres to D-grid corners (the
@@ -1634,6 +1646,18 @@ def fv3_hydrostatic_tendencies(
                 else _d_con_sum + _contrib
             )
     if _d_con_sum is not None:
+        # FV3_3D iter 433: optional FV3-faithful sponge zeroing
+        # of d_con heating in top N levels — aggregate covers
+        # 3 slow-tendency PE sites (corner_div, div_damp, A_h)
+        # via single mask, mirror of NH iter-432.
+        if config.d_con_top_zero_levels > 0:
+            _nlev_zsp = _d_con_sum.shape[-1]
+            _k_idx_zsp = jnp.arange(_nlev_zsp)
+            _d_con_mask_sp = jnp.where(
+                _k_idx_zsp < config.d_con_top_zero_levels,
+                0.0, 1.0,
+            )
+            _d_con_sum = _d_con_sum * _d_con_mask_sp[None, None, None, :]
         if config.delt_max > 0.0:
             # Sponge-aware tendency cap: PE k=0,1 are uncapped
             # (jnp.inf), k>=2 are capped to ``delt_max`` K/s.
@@ -2015,6 +2039,17 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                     )
                     dKE_cc = _interp_corner_to_center(dKE_corner)
                     dT = -self.config.damp_v_d_con * dKE_cc / constants.c_pd
+                # FV3_3D iter 433: optional FV3-faithful sponge
+                # zeroing of d_con heating in top N levels (PE
+                # mirror of NH iter-431).
+                if self.config.d_con_top_zero_levels > 0:
+                    _nlev_zv = dT.shape[-1]
+                    _k_idx_zv = jnp.arange(_nlev_zv)
+                    _d_con_mask_v = jnp.where(
+                        _k_idx_zv < self.config.d_con_top_zero_levels,
+                        0.0, 1.0,
+                    )
+                    dT = dT * _d_con_mask_v[None, None, None, :]
                 # FV3_3D iter 218/219: optional per-step cap on |dT|.
                 # FV3 dyn_core.F90:1764-1776 (cp_air branch) skips
                 # the cap entirely for the top 2 sponge layers

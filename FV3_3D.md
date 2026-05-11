@@ -919,6 +919,13 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 433: PE mirror of iter-431/432 ``d_con_top_zero_levels``.
+  Add field to ``CDGridPrimitiveEquationConfig`` (default 0 =
+  bit-for-bit baseline) + wire at all 4 PE d_con sites: post-
+  acoustic damp_v + aggregate ``_d_con_sum`` covering 3 slow-
+  tendency contributions.  Effect concentrated in top levels
+  (>10× top-vs-bottom ratio).  3/3 in 30 s.  Wired into iter-
+  383 sweep (now 29).
 - Iter 432: extend iter-431 ``d_con_top_zero_levels`` mask to
   the remaining 4 NH d_con sites: post-acoustic damp_w + 3
   slow-tendency contributions (corner_div, div_damp, A_h) via
