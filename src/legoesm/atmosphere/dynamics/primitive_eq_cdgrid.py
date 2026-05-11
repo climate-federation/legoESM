@@ -509,6 +509,19 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # 1 = del-4 (one Laplacian iteration);
         # 2 = del-6 (two Laplacian iterations, FV3 d_sw5 default).
         # Active only when ``corner_div_damp_d4_bg > 0``.
+    rf_tau_days: float = 0.0
+        # FV3-faithful fast Rayleigh friction timescale (PE
+        # mirror of NH iter-448).  Port of FV3
+        # ``dyn_core.F90:2922-3020`` ``Ray_fast``::
+        #     rff(k) = dt/(tau*86400) * sin²(π/2 · log(...))²
+        #     rff(k) = 1 / (1 + rff(k))
+        #     u_d, v_d *= rff   for pfull(k) < rf_cutoff_pa
+        # ``tau`` in DAYS.  Default 0.0 = bit-for-bit baseline.
+        # FV3 production default 0.0 (RF off); typical 5-15 days.
+        # PE has no w; only u_d, v_d are damped.
+    rf_cutoff_pa: float = 3000.0
+        # Cutoff pressure for PE Rayleigh friction (FV3 default
+        # ``rf_cutoff = 3.0e2`` Pa = 30 hPa).
     use_fv3_sponge_damp_v: bool = False
         # FV3-faithful sponge boost of PE ``damp_v`` (vorticity
         # damping) at top sponge levels (FV3_3D iter 443, PE
@@ -2194,6 +2207,32 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                 )
             state_new = state_new._replace(
                 p_s=state_new.p_s.replace(data=p_s_fixed),
+            )
+
+        # FV3_3D iter 449: optional PE FV3 ``Ray_fast`` (PE
+        # mirror of NH iter-448).  Reference profile pfull(k)
+        # = (A_full[k] + B_full[k]) * p_ref.
+        if self.config.rf_tau_days > 0.0:
+            from legoesm.core.fv3_rayleigh_fast import (
+                compute_rff_profile,
+            )
+            _coord = self.sigma_coord
+            _pfull_pe = (_coord.A_full + _coord.B_full) * _coord.p_ref
+            _ptop_pe = _pfull_pe[0]
+            _rff_pe = compute_rff_profile(
+                _pfull_pe, ptop=_ptop_pe,
+                rf_cutoff=self.config.rf_cutoff_pa,
+                tau_days=self.config.rf_tau_days,
+                dt=dt,
+            )
+            _rff_pe_b = _rff_pe[None, None, None, :]
+            state_new = state_new._replace(
+                u_d=state_new.u_d.replace(
+                    data=state_new.u_d.data * _rff_pe_b,
+                ),
+                v_d=state_new.v_d.replace(
+                    data=state_new.v_d.data * _rff_pe_b,
+                ),
             )
 
         return cast_pytree(state_new, None, "storage")

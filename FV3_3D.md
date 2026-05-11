@@ -919,6 +919,13 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 449: PE FV3 ``Ray_fast`` (mirror of NH iter-448).  Same
+  ports + helper.  PE has no w; only u_d, v_d are damped.
+  Reference profile: ``pfull = (A_full + B_full) * p_ref``.
+  Two new PE config fields ``rf_tau_days = 0.0``,
+  ``rf_cutoff_pa = 3000.0`` (FV3 production defaults).  Default
+  off = bit-for-bit baseline.  5/5 in 24 s.  Wired into iter-
+  383 sweep (now 45).
 - Iter 448: NH FV3 ``Ray_fast`` (fast Rayleigh friction).  Port
   of FV3 ``dyn_core.F90:2922-3020`` column Rayleigh damping at
   model top.  New config fields ``rf_tau_days: float = 0.0``
