@@ -860,6 +860,11 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 367: C16 cv-vs-cp heating ratio test for NH post-acoustic
+  d_con sites (damp_v + damp_w).  iter-320 verified c_p/c_v
+  ≈ 1.40 at C8; iter-367 confirms ratio holds at C16
+  (production resolution).  ``mean(|Δθ_p_cv|) /
+  mean(|Δθ_p_cp|) == c_pd/c_vd`` at rtol=1e-4.  1/1 in 41 s.
 - Iter 366: composition test for iter-218/219 delt_max sponge
   cap + iter-320 cv flag at NH damp_v_d_con post-step site.
   Verifies (1) baseline bit-for-bit at flags off, (2) cv +
