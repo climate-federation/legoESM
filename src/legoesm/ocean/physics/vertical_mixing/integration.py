@@ -25,12 +25,19 @@ from legoesm.ocean.physics.vertical_mixing.kpp import kpp_vertical_mixing
 
 def make_vertical_mixing_physics(
     config: VerticalMixingConfig,
+    apply_diffusion: bool = True,
 ) -> Callable:
     """Create a vertical mixing physics function.
 
     Parameters
     ----------
     config : VerticalMixingConfig
+    apply_diffusion : bool
+        If False, the scheme returns zero local-diffusion tendency for
+        momentum and tracers but still computes the K_v/A_v profiles and
+        (for KPP) the non-local counter-gradient flux.  Use this with the
+        implicit backward-Euler vertical diffusion solver in the
+        dynamics step.
 
     Returns
     -------
@@ -41,11 +48,11 @@ def make_vertical_mixing_physics(
     if scheme == "none":
         return _make_none()
     elif scheme == "constant":
-        return _make_constant(config)
+        return _make_constant(config, apply_diffusion=apply_diffusion)
     elif scheme == "richardson":
-        return _make_richardson(config)
+        return _make_richardson(config, apply_diffusion=apply_diffusion)
     elif scheme == "kpp":
-        return _make_kpp(config)
+        return _make_kpp(config, apply_diffusion=apply_diffusion)
     else:
         raise ValueError(f"Unknown vertical mixing scheme: {scheme!r}")
 
@@ -58,7 +65,8 @@ def _make_none() -> Callable:
     return physics_fn
 
 
-def _make_constant(config: VerticalMixingConfig) -> Callable:
+def _make_constant(config: VerticalMixingConfig,
+                   apply_diffusion: bool = True) -> Callable:
     cfg = config.constant
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
@@ -68,12 +76,14 @@ def _make_constant(config: VerticalMixingConfig) -> Callable:
         out = constant_vertical_mixing(
             state.u.data, state.v.data, state.T.data, state.S.data,
             z_coord, J, cfg,
+            apply_diffusion=apply_diffusion,
         )
         return _wrap_tendencies(out.du_dt, out.dv_dt, out.dT_dt, out.dS_dt, state)
     return physics_fn
 
 
-def _make_richardson(config: VerticalMixingConfig) -> Callable:
+def _make_richardson(config: VerticalMixingConfig,
+                     apply_diffusion: bool = True) -> Callable:
     cfg = config.richardson
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
@@ -84,12 +94,14 @@ def _make_richardson(config: VerticalMixingConfig) -> Callable:
         out = richardson_vertical_mixing(
             state.u.data, state.v.data, state.T.data, state.S.data,
             rho, z_coord, J, cfg,
+            apply_diffusion=apply_diffusion,
         )
         return _wrap_tendencies(out.du_dt, out.dv_dt, out.dT_dt, out.dS_dt, state)
     return physics_fn
 
 
-def _make_kpp(config: VerticalMixingConfig) -> Callable:
+def _make_kpp(config: VerticalMixingConfig,
+              apply_diffusion: bool = True) -> Callable:
     cfg = config.kpp
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
@@ -154,6 +166,7 @@ def _make_kpp(config: VerticalMixingConfig) -> Callable:
             rho, state.eta.data, z_coord, J, cfg,
             tau_x=tau_x, tau_y=tau_y, B_f=B_f,
             Q_sfc_T=Q_sfc_T, Q_sfc_S=Q_sfc_S,
+            apply_diffusion=apply_diffusion,
         )
         return _wrap_tendencies(out.du_dt, out.dv_dt, out.dT_dt, out.dS_dt, state)
     return physics_fn

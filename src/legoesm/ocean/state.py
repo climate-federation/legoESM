@@ -620,3 +620,20 @@ class LatLonCGridOceanConfig(NamedTuple):
     #   nonlinear limiters (TVD, WENO, FCT).
     tracer_time_integrator: str = "euler"
     ab2_epsilon: float = 0.1  # AB2 stabilization (MITgcm ABepsBar)
+    # Implicit (backward-Euler) vertical mixing.  When True:
+    #   1. The PE tendency function skips the explicit ``A_v`` viscous
+    #      block (lines tagged ``if config.A_v > 0 ...``).
+    #   2. The vertical-mixing and ``enhanced_diffusion`` convection
+    #      schemes are called with ``apply_diffusion=False`` — they
+    #      return zero local-diffusion tendency but still produce the
+    #      K_v / A_v profile and (for KPP) the non-local counter-
+    #      gradient flux.
+    #   3. After the barotropic step, tracer advection, and GM/Redi,
+    #      the model step applies an unconditionally-stable backward-
+    #      Euler tridiagonal solve to ``T, S, u, v`` using the summed
+    #      K_v / A_v profiles.
+    # Removes the explicit-diffusion CFL limit ``dt < dz² / (2 K)``,
+    # which becomes binding when ``K_conv = 1 m²/s`` is active with
+    # surface dz < 30 m or when vertical resolution is increased.
+    # MOM6 / NEMO / POP / MITgcm all use this approach.
+    implicit_vertical_mixing: bool = False

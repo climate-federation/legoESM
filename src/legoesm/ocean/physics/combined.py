@@ -47,7 +47,10 @@ class OceanPhysicsConfig(NamedTuple):
     shortwave_penetration: ShortwavePenetrationConfig | None = ShortwavePenetrationConfig()
 
 
-def make_ocean_physics(config: OceanPhysicsConfig) -> Callable:
+def make_ocean_physics(
+    config: OceanPhysicsConfig,
+    apply_vertical_diffusion: bool = True,
+) -> Callable:
     """Create a combined ocean physics function.
 
     The returned function calls each enabled physics module and sums
@@ -56,6 +59,14 @@ def make_ocean_physics(config: OceanPhysicsConfig) -> Callable:
     Parameters
     ----------
     config : OceanPhysicsConfig
+    apply_vertical_diffusion : bool
+        If False, vertical mixing and the ``enhanced_diffusion``
+        convection scheme return zero local-diffusion tendency; the
+        dynamics step is responsible for applying their K_v/A_v
+        profiles via an implicit backward-Euler solve.  Non-local
+        terms (KPP counter-gradient flux) are still applied
+        explicitly.  This is the mode required for
+        ``LatLonCGridOceanConfig(implicit_vertical_mixing=True)``.
 
     Returns
     -------
@@ -64,7 +75,10 @@ def make_ocean_physics(config: OceanPhysicsConfig) -> Callable:
     fns = []
 
     if config.vertical_mixing.scheme != "none":
-        fns.append(make_vertical_mixing_physics(config.vertical_mixing))
+        fns.append(make_vertical_mixing_physics(
+            config.vertical_mixing,
+            apply_diffusion=apply_vertical_diffusion,
+        ))
     if config.lateral_mixing.scheme != "none":
         fns.append(make_lateral_mixing_physics(config.lateral_mixing))
     if config.surface_forcing.scheme != "none":
@@ -83,7 +97,10 @@ def make_ocean_physics(config: OceanPhysicsConfig) -> Callable:
             "in your OceanPhysicsConfig."
         )
     if config.convection.scheme != "none":
-        fns.append(make_convection_physics(config.convection))
+        fns.append(make_convection_physics(
+            config.convection,
+            apply_diffusion=apply_vertical_diffusion,
+        ))
 
     sw_config = config.shortwave_penetration
 

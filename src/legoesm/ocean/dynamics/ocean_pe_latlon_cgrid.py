@@ -1294,7 +1294,11 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # pipeline's vertical_mixing module is a separate concept (e.g.,
     # KPP).  Baseline K_v diffusion should always be active when K_v > 0.
     # (Fixes #150.)
-    if config.K_v > 0 and nlev_t >= 2:
+    #
+    # Skipped when ``implicit_vertical_mixing`` is enabled — the
+    # K_v floor is folded into the implicit K profile in the model step.
+    if (config.K_v > 0 and nlev_t >= 2
+            and not getattr(config, "implicit_vertical_mixing", False)):
         jac_v = jnp.maximum(J[..., jnp.newaxis], 1e-10)  # (n_lat, n_lon, 1)
         dz_actual_loc = z_coord.dz_ref * jac_v           # (n_lat, n_lon, nlev)
 
@@ -1595,7 +1599,15 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         du_dt = du_dt + diag_botdrag_u
         dv_dt = dv_dt + diag_botdrag_v
 
-    if config.A_v > 0 and u.shape[-1] >= 2:
+    # Skip the explicit background vertical viscosity when the host
+    # dynamics requested an implicit (backward-Euler) vertical solve —
+    # the LatLonCGridOceanConfig.A_v floor is folded into the implicit
+    # K profile downstream and applied unconditionally-stable.  The
+    # KPP / Richardson / Constant scheme branches above are already
+    # ``apply_diffusion=False`` in that mode.
+    if (config.A_v > 0
+            and u.shape[-1] >= 2
+            and not getattr(config, "implicit_vertical_mixing", False)):
         jac_v_u = jnp.maximum(interp_cell_to_uface(J)[..., jnp.newaxis], 1e-10)
         jac_v_v = jnp.maximum(_interp_to_v_points(J)[..., jnp.newaxis], 1e-10)
         for vel, jac, is_u in [(u_prime, jac_v_u, True), (v_prime, jac_v_v, False)]:

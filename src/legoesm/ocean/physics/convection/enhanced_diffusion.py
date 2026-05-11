@@ -22,6 +22,7 @@ def enhanced_diffusion_convection(
     z_coord: OceanZStarCoordinate,
     jacobian: jnp.ndarray,
     cfg: EnhancedDiffusionConfig,
+    apply_diffusion: bool = True,
 ) -> OceanConvectionOutput:
     """Apply enhanced diffusion where the water column is unstable.
 
@@ -55,15 +56,25 @@ def enhanced_diffusion_convection(
     else:
         flag = jnp.where(N2 < 0.0, 1.0, 0.0)
 
-    # Apply variable-K vertical diffusion to T and S
-    tracers = jnp.stack([T, S], axis=0)
-    tr_tend = jax.vmap(
-        lambda q: vertical_diffusion_variable_K(q, z_coord, jacobian, K),
-        in_axes=0, out_axes=0,
-    )(tracers)
+    # Apply variable-K vertical diffusion to T and S.  When
+    # ``apply_diffusion`` is False, return zero tendencies; the caller
+    # will apply K (combined with KPP / background diffusivities) via
+    # an unconditionally-stable backward-Euler implicit solve.
+    if apply_diffusion:
+        tracers = jnp.stack([T, S], axis=0)
+        tr_tend = jax.vmap(
+            lambda q: vertical_diffusion_variable_K(q, z_coord, jacobian, K),
+            in_axes=0, out_axes=0,
+        )(tracers)
+        dT_dt = tr_tend[0]
+        dS_dt = tr_tend[1]
+    else:
+        dT_dt = jnp.zeros_like(T)
+        dS_dt = jnp.zeros_like(S)
 
     return OceanConvectionOutput(
-        dT_dt=tr_tend[0],
-        dS_dt=tr_tend[1],
+        dT_dt=dT_dt,
+        dS_dt=dS_dt,
         convection_flag=flag,
+        K_v=K,
     )
