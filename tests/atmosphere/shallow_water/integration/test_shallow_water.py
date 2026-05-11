@@ -97,7 +97,9 @@ class TestShallowWaterModel:
             state = model.step(state, dt=600.0)
 
         mass_final = float(jnp.sum(state.h * area))
-        rel_change = abs(mass_final - mass_init) / abs(mass_init)
+        # iter-164: centralized helper.
+        from legoesm.diagnostics import compute_relative_drift
+        rel_change = compute_relative_drift([mass_init, mass_final])
         assert rel_change < 1e-4, f"Mass relative change: {rel_change:.2e}"
 
     def test_topography_preserved(self, model, grid, cdgrid):

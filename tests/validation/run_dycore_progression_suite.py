@@ -135,8 +135,13 @@ def _derive_conservation_from_mean(case_dir: Path) -> None:
 
     mass = data[:, idx[mass_key]] if mass_key is not None else np.ones_like(t_days)
     energy = data[:, idx[energy_key]] if energy_key is not None else np.ones_like(t_days)
-    mass_rel = (mass - mass[0]) / max(abs(mass[0]), 1.0e-30)
-    energy_rel = (energy - energy[0]) / max(abs(energy[0]), 1.0e-30)
+    # iter-106 (codex iter-104 MEDIUM-5): the iter-78/80
+    # baseline-zero floor pathology lurks in the ``1.0e-30``
+    # decimal form too, not just ``1e-30``.  Migrated to the
+    # canonical ``relative_drift_series`` helper.
+    from legoesm.diagnostics.conservation_drift import relative_drift_series
+    mass_rel = relative_drift_series(mass)
+    energy_rel = relative_drift_series(energy)
 
     out_csv = case_dir / "conservation_timeseries.csv"
     with out_csv.open("w") as f:

@@ -17,7 +17,7 @@ from legoesm.forcing.time_utils import day_to_calendar
 def analytical_sst_sic(
     lat_deg: np.ndarray,
     day: float,
-    T_ice: float = 271.35,
+    T_ice: float = constants.T_freeze_ocean,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Compute SST and SIC for a given day using an analytical seasonal cycle.
 
@@ -28,7 +28,10 @@ def analytical_sst_sic(
     day : float
         Simulation day (uses day % 365 for seasonal cycle).
     T_ice : float
-        Sea-ice temperature threshold [K] (default 271.35).
+        SST floor / SIC ramp threshold [K] — typically the seawater
+        freezing point, ``constants.T_freeze_ocean`` (271.35 K).
+        Despite the legacy name this is NOT the ice surface
+        temperature.
 
     Returns
     -------
@@ -47,7 +50,11 @@ def analytical_sst_sic(
         2.0 * np.pi * day_of_year / 365.0
     )
     sst = sst + seasonal_amp
-    sst = np.maximum(sst, T_ice - 1.8)
+    # Floor SST at the seawater freezing depression below T_freeze_ocean.
+    # The 1.8 K offset is the freshwater/seawater freezing-point
+    # difference (constants.T_freeze - constants.T_freeze_ocean = 1.8 K).
+    sst_min = T_ice - (constants.T_freeze - constants.T_freeze_ocean)
+    sst = np.maximum(sst, sst_min)
 
     # SIC: ramp from 0 to 1 as SST drops below T_ice
     sic = np.clip(((T_ice + 0.5) - sst) / 3.0, 0.0, 1.0)

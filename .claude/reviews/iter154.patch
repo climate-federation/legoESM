@@ -1,0 +1,227 @@
+diff --git a/scripts/ocean_test_matrix/timeloop.py b/scripts/ocean_test_matrix/timeloop.py
+index 76c3aaea..8e3fa98b 100644
+--- a/scripts/ocean_test_matrix/timeloop.py
++++ b/scripts/ocean_test_matrix/timeloop.py
+@@ -92,7 +92,10 @@ def _apply_value_threshold(
+     )
+ 
+ 
+-_DAYS_REQUIRED = object()  # sentinel for required-but-unset days
++# iter-154: import the centralized sentinel from
++# legoesm.diagnostics so the same singleton is used here and
++# in scripts/run_ocean_test_matrix.py.
++from legoesm.diagnostics import DAYS_REQUIRED as _DAYS_REQUIRED
+ 
+ 
+ def _apply_pe_rel_sign(
+@@ -120,13 +123,24 @@ def _apply_pe_rel_sign(
+ 
+     iter-153 (codex iter-152 review MEDIUM-1): ``days`` is
+     REQUIRED.
++
++    iter-154 (codex iter-153 review MEDIUM-1): also reject
++    ``days=None`` and non-finite/non-positive — see monolithic
++    docstring for full rationale.
+     """
+     if days is _DAYS_REQUIRED:
+         raise TypeError(
+             f"_apply_pe_rel_sign: 'days' kwarg is required "
+             f"(label={label!r})."
+         )
+-    op = "lt" if (days is not None and days >= 1.0) else "le"
++    import math as _math
++    if days is None or not isinstance(days, (int, float)) or \
++            not _math.isfinite(days) or days <= 0:
++        raise ValueError(
++            f"_apply_pe_rel_sign: 'days' must be a finite "
++            f"positive number, got {days!r} (label={label!r})."
++        )
++    op = "lt" if days >= 1.0 else "le"
+     return _apply_value_threshold(
+         ok, notes, pe_rel_final, 0.0,
+         label=label, op=op, n_samples=n_samples,
+diff --git a/scripts/run_ocean_test_matrix.py b/scripts/run_ocean_test_matrix.py
+index 723dca32..bd14f8ed 100644
+--- a/scripts/run_ocean_test_matrix.py
++++ b/scripts/run_ocean_test_matrix.py
+@@ -431,7 +431,10 @@ def _apply_value_threshold(
+     )
+ 
+ 
+-_DAYS_REQUIRED = object()  # sentinel for required-but-unset days
++# iter-154 (codex iter-153 review LOW-2): import the centralized
++# sentinel from legoesm.diagnostics so the same singleton is used
++# across both monolithic and modular runners.
++from legoesm.diagnostics import DAYS_REQUIRED as _DAYS_REQUIRED
+ 
+ 
+ def _apply_pe_rel_sign(
+@@ -468,9 +471,13 @@ def _apply_pe_rel_sign(
+ 
+     iter-153 (codex iter-152 review MEDIUM-1): ``days`` is now
+     REQUIRED (sentinel default raises TypeError if omitted).
+-    Pre-iter-153 ``days=None`` defaulted to quick-mode
+-    ``op="le"``, so a caller forgetting the kwarg would
+-    silently weaken the documented full-mode strict gate.
++
++    iter-154 (codex iter-153 review MEDIUM-1): explicitly
++    reject ``days=None`` and non-finite/non-positive values
++    too — pre-iter-154 a caller passing ``days=None`` (or
++    ``days=NaN``) would silently get quick-mode ``op="le"``,
++    weakening the documented full-mode strict gate.  Now
++    every code path requires a finite positive ``days``.
+     """
+     if days is _DAYS_REQUIRED:
+         raise TypeError(
+@@ -479,7 +486,17 @@ def _apply_pe_rel_sign(
+             f"in days so the gate can select op='lt' (full "
+             f"mode, days>=1) vs op='le' (quick mode)."
+         )
+-    op = "lt" if (days is not None and days >= 1.0) else "le"
++    import math as _math
++    if days is None or not isinstance(days, (int, float)) or \
++            not _math.isfinite(days) or days <= 0:
++        raise ValueError(
++            f"_apply_pe_rel_sign: 'days' must be a finite "
++            f"positive number, got {days!r} "
++            f"(label={label!r}).  Pass days=None is rejected "
++            f"to prevent silent quick-mode weakening; pass an "
++            f"explicit experiment duration."
++        )
++    op = "lt" if days >= 1.0 else "le"
+     return _apply_value_threshold(
+         ok, notes, pe_rel_final, 0.0,
+         label=label, op=op, n_samples=n_samples,
+diff --git a/src/legoesm/diagnostics/__init__.py b/src/legoesm/diagnostics/__init__.py
+index 63d65b17..6688c3ae 100644
+--- a/src/legoesm/diagnostics/__init__.py
++++ b/src/legoesm/diagnostics/__init__.py
+@@ -2,6 +2,7 @@
+ 
+ from legoesm.diagnostics.column_integrals import column_water_vapor
+ from legoesm.diagnostics.conservation_drift import (
++    DAYS_REQUIRED,
+     DEFAULT_MIN_BASELINE,
+     apply_drift_tolerance,
+     apply_value_threshold,
+diff --git a/src/legoesm/diagnostics/conservation_drift.py b/src/legoesm/diagnostics/conservation_drift.py
+index 1ba36555..b8513632 100644
+--- a/src/legoesm/diagnostics/conservation_drift.py
++++ b/src/legoesm/diagnostics/conservation_drift.py
+@@ -171,8 +171,23 @@ def relative_drift_series(
+ 
+     Non-finite inputs
+     -----------------
+-    Same NaN/inf propagation rules as ``compute_relative_drift`` —
+-    see that function's docstring.
++    iter-153 (codex iter-152 review MEDIUM-2): if ANY sample in
++    ``values`` is non-finite (NaN or Inf), the WHOLE returned
++    array is filled with NaN.  This mirrors
++    ``compute_relative_drift``'s iter-152 all-finite contract:
++    a non-finite sample means the diagnostic was broken at some
++    point during the run, and the returned series is no longer
++    a meaningful per-step drift trace.
++
++    iter-154 (codex iter-153 review LOW-1): the all-NaN approach
++    is INTENTIONAL — pre-iter-153 the per-step series preserved
++    endpoint locality (``[1.0, NaN, 1.0] → [0, NaN, 0]``), so a
++    plotter using ``abs(series[-1])`` could still silently report
++    "drift = 0" despite the transient blowup.  The trade-off is
++    losing the visual cue of WHERE in time the breakage
++    occurred; callers needing that information should inspect
++    the source ``values`` array directly with
++    ``np.isfinite(values)``.
+ 
+     Parameters
+     ----------
+@@ -308,6 +323,18 @@ def apply_drift_tolerance(
+     return ok, notes
+ 
+ 
++DAYS_REQUIRED = object()
++"""Sentinel for required ``days`` kwargs in days-aware helpers.
++
++iter-154 (codex iter-153 review LOW-2): centralized so the
++monolithic and modular runners can both ``import`` the same
++singleton and ``is`` checks work cross-module.  Pre-iter-154
++each runner had its own private sentinel — fine for default
++detection but brittle if a caller wanted to forward the
++sentinel between modules.
++"""
++
++
+ def apply_value_threshold(
+     ok: bool, notes: str, value: float, threshold: float,
+     *, label: str, op: str = "le", units: str = "",
+diff --git a/tests/test_ocean_cross_grid_plots.py b/tests/test_ocean_cross_grid_plots.py
+index 9b20fd75..f5e3a59a 100644
+--- a/tests/test_ocean_cross_grid_plots.py
++++ b/tests/test_ocean_cross_grid_plots.py
+@@ -3265,6 +3265,67 @@ class TestIter123OceanDriftTolerance:
+                     f"call line must use op='lt'/'le'/op variable; "
+                     f"got: {line.strip()!r}")
+ 
++    def test_iter154_pe_sign_days_none_rejected(self):
++        """iter-154 (codex iter-153 review MEDIUM-1): explicit
++        ``days=None`` must also be rejected — pre-iter-154 it
++        silently selected quick-mode ``op="le"``, weakening
++        the documented full-mode strict gate.  Now requires a
++        finite positive number.
++        """
++        import pytest
++        mod = self._import_monolithic_runner()
++        # days=None must raise.
++        with pytest.raises(ValueError, match="finite positive number"):
++            mod._apply_pe_rel_sign(
++                True, "", -0.5, label="PE_rel_final",
++                n_samples=10, days=None)
++        # days=NaN must raise.
++        with pytest.raises(ValueError, match="finite positive number"):
++            mod._apply_pe_rel_sign(
++                True, "", -0.5, label="PE_rel_final",
++                n_samples=10, days=float("nan"))
++        # days=0 must raise (no time means no gate).
++        with pytest.raises(ValueError, match="finite positive number"):
++            mod._apply_pe_rel_sign(
++                True, "", -0.5, label="PE_rel_final",
++                n_samples=10, days=0)
++        # days=-1 must raise.
++        with pytest.raises(ValueError, match="finite positive number"):
++            mod._apply_pe_rel_sign(
++                True, "", -0.5, label="PE_rel_final",
++                n_samples=10, days=-1)
++        # Valid finite positive days works.
++        ok, _ = mod._apply_pe_rel_sign(
++            True, "", -0.5, label="PE_rel_final",
++            n_samples=10, days=2.0)
++        assert ok is True
++
++    def test_iter154_days_required_sentinel_centralized(self):
++        """iter-154 (codex iter-153 review LOW-2): the
++        ``DAYS_REQUIRED`` sentinel is now centralized in
++        ``legoesm.diagnostics``.  Both monolithic and modular
++        runners import the SAME singleton (``is`` check).
++        """
++        from legoesm.diagnostics import DAYS_REQUIRED
++        # Monolithic uses the centralized sentinel.
++        mod = self._import_monolithic_runner()
++        assert mod._DAYS_REQUIRED is DAYS_REQUIRED, (
++            "iter-154: monolithic _DAYS_REQUIRED must be the "
++            "centralized legoesm.diagnostics.DAYS_REQUIRED.")
++        # Modular too.
++        import sys
++        from pathlib import Path
++        scripts_dir = (Path(__file__).resolve().parent.parent
++                       / "scripts")
++        sys.path.insert(0, str(scripts_dir))
++        try:
++            from ocean_test_matrix import timeloop
++            assert timeloop._DAYS_REQUIRED is DAYS_REQUIRED, (
++                "iter-154: modular _DAYS_REQUIRED must be the "
++                "centralized legoesm.diagnostics.DAYS_REQUIRED.")
++        finally:
++            sys.path.remove(str(scripts_dir))
++
+     def test_iter153_pe_sign_days_required(self):
+         """iter-153 (codex iter-152 review MEDIUM-1): ``days``
+         kwarg is now REQUIRED on ``_apply_pe_rel_sign`` — omitting

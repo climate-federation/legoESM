@@ -447,6 +447,135 @@ def _r_factor_max(H_bathy, ocean_mask):
     return r_max
 
 
+def _r_factor_max_voronoi(H_bathy, ocean_mask, cells_on_edge):
+    """Maximum r-factor over ocean-ocean edges on a Voronoi mesh.
+
+    r_e = |H[c1] - H[c2]| / max(H[c1], H[c2])  for each edge (c1, c2)
+    where both adjacent cells are ocean.
+
+    Parameters
+    ----------
+    H_bathy : (nCells,)
+    ocean_mask : (nCells,)  1=ocean, 0=land
+    cells_on_edge : (2, nEdges)  c1, c2 indices per edge
+    """
+    H = np.asarray(H_bathy, dtype=np.float64)
+    ocean = np.asarray(ocean_mask) > 0.5
+    c1 = np.asarray(cells_on_edge[0], dtype=np.int64)
+    c2 = np.asarray(cells_on_edge[1], dtype=np.int64)
+    valid = ocean[c1] & ocean[c2]
+    if not valid.any():
+        return 0.0
+    H1 = H[c1]
+    H2 = H[c2]
+    diff = np.abs(H1 - H2)
+    denom = np.fmax(H1, H2)
+    denom_safe = np.where(denom > 0.0, denom, 1.0)
+    r = np.where(valid, diff / denom_safe, 0.0)
+    return float(r.max())
+
+
+def apply_meo_r_factor_cap_voronoi(
+    H_bathy,
+    ocean_mask,
+    mesh,
+    r_factor_max,
+    *,
+    max_iter: int = 200,
+    tol: float = 1.0e-6,
+):
+    """Mellor-Ezer-Oey r-factor cap on a Voronoi/MPAS mesh.
+
+    Edge-list analog of :func:`apply_meo_r_factor_cap`.  For each
+    ocean-ocean edge with ``r_e = |H[c1]-H[c2]| / max(H[c1],H[c2])``
+    above ``r_factor_max``, deepens the shallower cell to
+    ``H_deep * (1 - r_factor_max)``.  Jacobi iteration: each pass
+    uses the previous pass's H as the source.  Cells only get
+    deeper, so ``max_r`` is non-increasing.
+
+    Sikiric et al. 2009 LSC2 / FESOM2 / MPAS-O Hoch 2020 use this
+    edge-based selective deepening — not a 2D Cartesian Laplacian
+    ``np.roll`` rule, which is meaningless on an unstructured mesh.
+
+    Parameters
+    ----------
+    H_bathy : (nCells,)
+        Ocean depth [m], positive downward.
+    ocean_mask : (nCells,)
+        1 = ocean, 0 = land.
+    mesh : VoronoiMesh
+        Provides ``cellsOnEdge`` (shape (2, nEdges)).
+    r_factor_max : float
+        Target cap (typically 0.2 for sigma-like; 0.3 acceptable
+        for z-star).
+    max_iter, tol : convergence controls.
+
+    Returns
+    -------
+    H_new : np.ndarray  (nCells,)
+    info : dict  same keys as the Cartesian variant.
+    """
+    if r_factor_max <= 0.0 or r_factor_max >= 1.0:
+        raise ValueError(
+            f"r_factor_max must be in (0, 1), got {r_factor_max!r}",
+        )
+    H = np.asarray(H_bathy, dtype=np.float64).copy()
+    ocean = np.asarray(ocean_mask) > 0.5
+    c1 = np.asarray(mesh.cellsOnEdge[0], dtype=np.int64)
+    c2 = np.asarray(mesh.cellsOnEdge[1], dtype=np.int64)
+    edge_active = ocean[c1] & ocean[c2]
+    factor = 1.0 - r_factor_max
+
+    H_initial = H.copy()
+    initial_r = _r_factor_max_voronoi(H, ocean, mesh.cellsOnEdge)
+
+    iterations = 0
+    for it in range(max_iter):
+        H_old = H.copy()
+        H1 = H_old[c1]
+        H2 = H_old[c2]
+        # For each active edge, the shallower cell must be at least
+        # ``factor * deeper``.  Compute the required floor and scatter
+        # to both endpoints (np.maximum.at supports unbuffered update).
+        deeper = np.fmax(H1, H2)
+        required = deeper * factor
+        H_new = H_old.copy()
+        # Active edges only.
+        active_idx = np.where(edge_active)[0]
+        # Scatter the floor to both endpoints; the deeper cell's
+        # required <= its current depth, so its update is a no-op.
+        np.maximum.at(H_new, c1[active_idx], required[active_idx])
+        np.maximum.at(H_new, c2[active_idx], required[active_idx])
+        # Land cells unchanged.
+        H_new = np.where(ocean, H_new, H_initial)
+        delta_max = float(np.max(np.abs(H_new - H_old)))
+        H = H_new
+        iterations = it + 1
+        if delta_max < tol:
+            break
+
+    final_r = _r_factor_max_voronoi(H, ocean, mesh.cellsOnEdge)
+    vol_change = float(np.sum(np.where(ocean, H - H_initial, 0.0)))
+    vol_initial = float(np.sum(np.where(ocean, H_initial, 0.0)))
+    vol_change_frac = vol_change / vol_initial if vol_initial > 0 else 0.0
+    cells_modified = int(
+        np.sum(np.where(ocean, np.abs(H - H_initial) > tol, 0))
+    )
+    max_change = float(
+        np.max(np.where(ocean, np.abs(H - H_initial), 0.0))
+    )
+
+    info = {
+        "iterations": iterations,
+        "initial_r_max": initial_r,
+        "final_r_max": final_r,
+        "volume_change_frac": vol_change_frac,
+        "max_depth_change_m": max_change,
+        "cells_modified": cells_modified,
+    }
+    return H, info
+
+
 def apply_meo_r_factor_cap(
     H_bathy,
     ocean_mask,
@@ -955,8 +1084,16 @@ def load_bathymetry_mpas(
     ocean_mask = np.where(depth < cfg.H_min, 0.0, ocean_mask)
     depth = np.where(ocean_mask > 0.5, depth, 0.0)
 
-    # MEO r-factor cap (after smoothing).
-    depth = _maybe_apply_meo(depth, ocean_mask, cfg)
+    # MEO r-factor cap on the Voronoi mesh (edge-based, Sikiric 2009 LSC2 /
+    # MPAS-O Hoch 2020 / FESOM2 Danilov 2017).  The 2D Cartesian
+    # ``apply_meo_r_factor_cap`` is meaningless on a 1D unstructured
+    # array — uses ``np.roll`` on the cell-index axis.
+    if cfg.r_factor_max is not None:
+        depth, meo_info = apply_meo_r_factor_cap_voronoi(
+            depth, ocean_mask, mesh, cfg.r_factor_max,
+            max_iter=cfg.meo_max_iter,
+        )
+        _LAST_MEO_INFO.update(meo_info)
 
     H_bathy = np.where(ocean_mask > 0.5, depth, 0.0)
 

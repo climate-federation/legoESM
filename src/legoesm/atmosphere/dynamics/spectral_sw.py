@@ -46,7 +46,6 @@ from legoesm.grids.gaussian import (
     spectral_hyperdiffusion_3d,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
-from legoesm.runtime.backend import get_backend, check_spectral_backend
 from legoesm import constants
 
 
@@ -550,6 +549,7 @@ def compute_spectral_diagnostics(
     u = fields['u']
     v = fields['v']
     vor = fields['vor']
+    h_s = fields['h_s']
 
     w = grid.weights[:, None]  # (n_lat, 1)
     dlon = 2.0 * jnp.pi / grid.n_lon
@@ -559,14 +559,18 @@ def compute_spectral_diagnostics(
     # Gaussian weights integrate over μ=sin(lat), so dA = a² dμ dλ = a² w dlon
     dA = w * dlon * a2
 
-    # All three diagnostics share the ``dA`` weight on the same
-    # horizontal axes — stack the integrands and reduce locally once
-    # so XLA fires one sum kernel.
+    # Total mechanical energy density per unit horizontal area:
+    #   E = 0.5·h·|v|² + ∫_{h_s}^{h_s+h} g·z dz
+    #     = 0.5·h·|v|² + 0.5·g·h² + g·h·h_s
+    # The ``g·h·h_s`` topography PE term is essential for any test with
+    # non-zero h_s (e.g. Williamson Test 5 isolated mountain) — without
+    # it the diagnostic shows spurious "energy non-conservation" even
+    # when the prognostic equations conserve total energy exactly.
     abs_vor = vor + grid.f
     _intg = jnp.stack(
         [
             h,
-            0.5 * h * (u**2 + v**2) + 0.5 * g * h**2,
+            0.5 * h * (u**2 + v**2) + 0.5 * g * h**2 + g * h * h_s,
             abs_vor**2 / (2.0 * h),
         ],
         axis=-1,

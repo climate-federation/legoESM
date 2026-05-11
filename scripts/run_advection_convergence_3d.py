@@ -356,9 +356,16 @@ def _run_single_3d(scheme, n_lat, n_lon, n_lev, output_dir,
                        np.sum(tracer_init_np**2 * vol)))
     linf = float(np.max(np.abs(error)) / np.max(np.abs(tracer_init_np)))
 
+    # Conservation drift via the centralized helper (iter-159
+    # — same migration as iter-157 cosine_bell).  The inline
+    # ``abs(mass_final - mass_init) / abs(mass_init)`` pattern
+    # is the iter-78 pathology that returns NaN-as-False on
+    # blown-up runs.  The helper is NaN-aware and uses a
+    # ``DEFAULT_MIN_BASELINE = 1.0`` floor.
     mass_init = float(np.sum(tracer_init_np * vol))
     mass_final = float(np.sum(tracer_final * vol))
-    mass_drift = abs(mass_final - mass_init) / abs(mass_init)
+    from legoesm.diagnostics import compute_relative_drift
+    mass_drift = compute_relative_drift([mass_init, mass_final])
 
     result = {
         "scheme": scheme, "time_integrator": time_integrator,

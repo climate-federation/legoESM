@@ -29,6 +29,7 @@ from functools import lru_cache
 
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.core.field import Field
 
 
@@ -127,7 +128,7 @@ def aggregate_state(
 
     # Area-weighted mean temperature
     T_agg = _agg[..., 2] / conc_safe
-    T_agg = jnp.where(conc_total > 0.0, T_agg, 271.35)
+    T_agg = jnp.where(conc_total > 0.0, T_agg, constants.T_freeze_ocean)
 
     return h_agg, T_agg, conc_total
 
@@ -177,7 +178,7 @@ def distribute_to_categories(
     in_cat_f = in_cat.astype(h_ice.dtype)
 
     h_mc = h_exp * in_cat_f          # (..., n_cat)
-    T_mc = T_ice[..., jnp.newaxis] * in_cat_f + 271.35 * (1.0 - in_cat_f)
+    T_mc = T_ice[..., jnp.newaxis] * in_cat_f + constants.T_freeze_ocean * (1.0 - in_cat_f)
     conc_mc = concentration[..., jnp.newaxis] * in_cat_f
 
     return h_mc, T_mc, conc_mc
@@ -195,7 +196,7 @@ def linear_remap(
     n_cat: int,
     T_new: jnp.ndarray | None = None,
     T_ice_min: float = 180.0,
-    T_freeze_ocean: float = 271.35,
+    T_freeze_ocean: float = constants.T_freeze_ocean,
 ) -> tuple[jnp.ndarray, jnp.ndarray] | tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Redistribute ice across categories after thermodynamic changes.
 
@@ -289,8 +290,17 @@ def linear_remap(
     h_remap = jnp.where(a_remap > 0.0, vol_remap / a_safe, 0.0)
     h_remap = jnp.maximum(h_remap, 0.0)
 
-    # Post-remap: clamp category mean thickness to bounds.
-    # Last category has no finite upper bound (100 m sentinel).
+    # KNOWN ISSUE (iter-85 audit): clamp at lo/hi without adjusting
+    # ``a_remap`` silently leaks volume — production probes show
+    # 1–4 % drift per call.  Naively scaling a by h_pre/h_clamp
+    # explodes at the upper-bound sentinel (hi=100 m for the last
+    # category) and at the lower bound where h_clamped → 0.  The
+    # proper fix requires Lipscomb piecewise-linear g(h) remapping
+    # (CICE convention) where the moved sliver between categories
+    # is analytically integrated and redistributed across category
+    # bounds.  This is a substantial structural refactor deferred
+    # to future cycle work.  Affects multi-day integration sea-ice
+    # mass budget by O(10–100 %) drift on long runs.
     h_remap = jnp.where(
         (a_remap > 0.0) & (h_remap < lo),
         lo,

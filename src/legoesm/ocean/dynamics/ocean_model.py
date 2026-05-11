@@ -38,7 +38,6 @@ from legoesm.core.precision import cast_pytree
 from legoesm.ocean.dynamics.barotropic import barotropic_substeps
 from legoesm.ocean.dynamics.ocean_pe_cdgrid import ocean_baroclinic_tendencies_cdgrid
 from legoesm.ocean.dynamics.barotropic_cgrid import barotropic_substeps_cgrid
-from legoesm.ocean.dynamics.ocean_pe_cdgrid import ocean_baroclinic_tendencies_cdgrid
 from legoesm.ocean.conservation import ocean_conservation_fixer
 from legoesm.ocean.physics.combined import make_ocean_physics
 

@@ -80,6 +80,10 @@ class MorrisonConfig(NamedTuple):
     ice_sigmoid_sharpness: float = 5.0  # Sharpness for ice-liquid partition
     # Depositional growth
     dep_coeff: float = 1e-3          # Deposition growth coefficient
+    # Floor on q_i used inside the diffusional-growth term so freshly
+    # nucleated particles (N_i > 0, q_i ≈ 0) can grow.  ~10 µm-sized
+    # crystals at N_i ~ 5e3 m^-3 correspond to q_i ~ 1e-9 kg/kg.
+    q_i_min_growth: float = 1e-9     # Minimum effective q_i for deposition [kg/kg]
     # Bergeron
     bergeron_rate: float = 1e-3      # Bergeron conversion rate [1/s]
     T_center: float = 258.0          # Bergeron T window center [K]
@@ -118,6 +122,7 @@ class ThompsonConfig(NamedTuple):
     cooper_T_act: float = 265.0
     ice_sigmoid_sharpness: float = 5.0
     dep_coeff: float = 1e-3
+    q_i_min_growth: float = 1e-9
     bergeron_rate: float = 1e-3
     T_center: float = 258.0
     T_width: float = 10.0

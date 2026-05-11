@@ -17,7 +17,11 @@ class PlumeConfig(NamedTuple):
     """Entraining mass-flux convective plume."""
     epsilon: float = 1e-3       # Entrainment rate [1/m]
     alpha_plume: float = 0.1    # Detrainment tendency scaling
-    w_plume_min: float = 0.01   # Minimum plume velocity [m/s]
+    # Plume vertical velocity [m/s].  Used directly as ``w_p`` in
+    # dT/dt = w_p · α · ε · (T_p − T_env).  Despite the legacy
+    # ``_min`` suffix, this is the actual plume speed for the
+    # unresolved-plume detrainment closure (see plume.py:75-88).
+    w_plume_min: float = 0.01
     T_excess: float = 0.05      # Initial plume temperature excess [K]
 
 

@@ -35,6 +35,11 @@ from legoesm.driver.kernel_registry import (
 )
 from legoesm.driver.diagnostics import DiagnosticCollector
 from legoesm.driver.model_driver import ModelDriver
+from legoesm.driver.run_status import status_to_exit_code
+from legoesm.driver.cli_resolution import (
+    expand_cli_resolution,
+    validate_cli_resolution,
+)
 from legoesm.driver.earth_system_driver import EarthSystemDriver
 from legoesm.driver.coupled_esm_driver import CoupledESMDriver
 from legoesm.driver.coupled_config import CoupledConfig, PRESETS as COUPLED_PRESETS

@@ -97,13 +97,22 @@ def morrison_microphysics(
     ) / jnp.clip(rho, 0.1)
     dN_i_nuc = jnp.clip(N_i_target - N_i, 0.0) / jnp.clip(dt, 1.0)
 
-    # 2. Depositional growth
+    # 2. Depositional growth.
+    # Heuristic Morrison form: dq_i/dt ∝ S_i · q_i · N_i^(1/3) · f_ice.
+    # The full diffusional-growth scaling is q_i^(1/3) · N_i^(2/3),
+    # but switching to that scaling without re-tuning ``dep_coeff``
+    # changes the deposition magnitude by O(10^3) at typical mid-cloud
+    # values — a calibration change beyond the scope of this audit.
+    # We keep the heuristic form here and only add a ``q_i_min_growth``
+    # floor so freshly-nucleated ice (N_i > 0, q_i ≈ 0) can begin to
+    # grow at all instead of being pinned to zero deposition.
     q_sat_i = _saturation_mixing_ratio_ice(T, p_full)
     S_i = q_v / jnp.clip(q_sat_i, 1e-10) - 1.0
+    q_i_eff = jnp.maximum(jnp.clip(q_i, 0.0), config.q_i_min_growth)
     dq_i_dep = (
         config.dep_coeff
         * jnp.maximum(S_i, 0.0)
-        * jnp.clip(q_i, 0.0)
+        * q_i_eff
         * safe_pow(N_i, 1.0 / 3.0)
         * f_ice
     )
@@ -132,6 +141,33 @@ def morrison_microphysics(
         config.melt_rate * jnp.clip(q_s, 0.0) * melt_frac,
         jnp.clip(q_s, 0.0) / jnp.maximum(dt, 1e-10),
     )
+
+    # === DONOR CLAMP for q_i sinks ===
+    # Mirror of the q_c donor clamp: aggregation and melt_ice are q_i
+    # sinks that share the same explicit-Euler step with riming_i (a
+    # q_i source from q_c).  Without this clamp, the combined
+    # (aggregation + melt_ice) · dt can exceed available q_i, sending
+    # q_i negative.  Mass is conserved because each sink rate appears
+    # once in dq_i_dt as a sink and once elsewhere as a source — a
+    # uniform rescale of both pieces preserves the budget.
+    qi_sink_total = aggregation + melt_ice
+    qi_avail = jnp.clip(q_i, 0.0)
+    qi_scale = jnp.minimum(
+        1.0,
+        qi_avail / jnp.maximum(qi_sink_total * jnp.maximum(dt, 1e-10), 1e-30),
+    )
+    aggregation = aggregation * qi_scale
+    melt_ice = melt_ice * qi_scale
+
+    # === DONOR CLAMP for q_s sinks ===
+    # melt_snow is a q_s sink.  Same logic as the q_i clamp.
+    qs_sink_total = melt_snow
+    qs_avail = jnp.clip(q_s, 0.0)
+    qs_scale = jnp.minimum(
+        1.0,
+        qs_avail / jnp.maximum(qs_sink_total * jnp.maximum(dt, 1e-10), 1e-30),
+    )
+    melt_snow = melt_snow * qs_scale
 
     # === DONOR CLAMP for q_c sinks ===
     # Scale q_c-consuming processes (autoconversion, accretion, Bergeron,

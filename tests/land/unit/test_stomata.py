@@ -248,6 +248,82 @@ class TestJarvis(unittest.TestCase):
         gs = jarvis_gs(T, sw, q, p, beta, self.cfg)
         self.assertEqual(gs.shape, (3,))
 
+    def test_VPD_uses_specific_humidity_form(self):
+        """``e_air = q · p / (ε + (1−ε)·q)`` is the correct form when
+        q is specific humidity (iter-22 fix).  The earlier
+        mixing-ratio form ``q · p / (ε + q)`` biases e_air upward by
+        ~1.5 % at q = 0.02 — biasing VPD downward and falsely
+        *opening* stomata.
+
+        Regression strategy: pin the live ``jarvis_gs`` output at
+        precise inputs against the expected value derived from the
+        corrected formula.  Then assert the same inputs would have
+        produced a *different* (larger) ``gs`` under the buggy
+        mixing-ratio formula — proving the test would catch a
+        regression.
+        """
+        from legoesm import constants
+        from legoesm.thermo import saturation_vapor_pressure
+        # Pick inputs that put the VPD response solidly in its linear
+        # regime (not clipped at f_VPD_min=0.01 nor saturated at 1):
+        #   T = 305 K  →  e_sat ≈ 4720 Pa
+        #   q = 0.012  →  e_air ≈ 1907 Pa (corrected) / 1928 Pa (buggy)
+        #   VPD ≈ 28-29 hPa, with cfg.a_vpd = 0.05/hPa → f_VPD ≈ -0.4
+        #   clipped at f_VPD_min so the diff is observable in the
+        #   linear region just above the clip threshold.
+        # Use cfg with a_vpd small enough to stay above the clip.
+        cfg = StomataConfig(a_vpd=0.01, f_VPD_min=0.001)
+        q = 0.012
+        p = 101325.0
+        T = 305.0
+        eps = constants.epsilon
+
+        # CORRECTED formula (specific-humidity)
+        e_corrected = q * p / (eps + (1.0 - eps) * q)
+        # BUGGY formula (mixing-ratio applied to specific humidity)
+        e_buggy = q * p / (eps + q)
+        # The corrected denom is smaller (because (1−ε)·q < q for q>0
+        # and ε<1), so e_corrected > e_buggy.  Therefore the buggy
+        # version under-reports e_air, OVER-reports VPD, and
+        # UNDER-reports f_VPD → smaller gs.
+        assert e_corrected > e_buggy
+
+        # Compute expected gs analytically from the corrected formula
+        e_sat = float(saturation_vapor_pressure(jnp.array(T)))
+        VPD_corrected_hPa = max(e_sat - e_corrected, 0.0) / 100.0
+        VPD_buggy_hPa = max(e_sat - e_buggy, 0.0) / 100.0
+        f_VPD_corrected = max(min(1.0 - cfg.a_vpd * VPD_corrected_hPa, 1.0), cfg.f_VPD_min)
+        f_VPD_buggy = max(min(1.0 - cfg.a_vpd * VPD_buggy_hPa, 1.0), cfg.f_VPD_min)
+        # f_PAR and f_T at saturating PAR and near-optimal T should
+        # be ≈ 1 each, but compute them exactly via the same formulas
+        # used in jarvis_gs to keep the comparison bit-faithful.
+        T_C = T - constants.T_freeze
+        dT_norm = (T_C - cfg.T_opt_jarvis) / cfg.T_range_jarvis
+        f_T = max(1.0 - dT_norm ** 2, 0.0)
+        PAR_FRAC = 0.48  # _PAR_FRAC in stomata.py
+        PAR = PAR_FRAC * 2000.0
+        f_PAR = PAR / (PAR + cfg.K_PAR + 1e-10)
+        f_soil = 1.0  # beta = 1
+        gs_expected_corrected = cfg.gs_max * f_PAR * f_T * f_VPD_corrected * f_soil
+        gs_expected_buggy = cfg.gs_max * f_PAR * f_T * f_VPD_buggy * f_soil
+
+        # Live code under the corrected formula
+        gs_live = float(jarvis_gs(
+            jnp.array(T), jnp.array(2000.0), jnp.array(q),
+            jnp.array(p), jnp.array(1.0), cfg,
+        ))
+
+        # Live code MUST agree with the corrected expected value
+        # (within float tolerance), and MUST disagree with the buggy
+        # expected value by more than that tolerance — otherwise this
+        # test is vacuous.
+        self.assertAlmostEqual(gs_live, gs_expected_corrected, places=8)
+        self.assertNotAlmostEqual(
+            gs_live, gs_expected_buggy, places=6,
+            msg="Live gs matched the buggy mixing-ratio formula — "
+            "this test would not catch the iter-22 regression.",
+        )
+
 
 class TestCoupledFarquharStomata(unittest.TestCase):
     """Coupled Farquhar-stomata solver."""

@@ -389,6 +389,14 @@ class MPASOceanState(NamedTuple):
         Bathymetry depth [m]. Shape (nCells,). Positive downward. Static.
     land_mask : Field
         Ocean mask. Shape (nCells,). 1=ocean, 0=land. Static.
+    rho_ref_z : Field or None
+        Optional horizontally-uniform reference density profile [kg/m³].
+        Shape (nlev,). Frozen at init time from ``EOS(T_init, S_init,
+        p_hydro)`` averaged over wet cells.  When present, the
+        baroclinic PGF uses ``ρ' = ρ − ρ_ref(z)`` instead of
+        ``ρ' = ρ − ρ_0``, attacking the partial-cell PGF residual at
+        the seed (project_mpas_etopo_instability.md §"Option B").
+        Static — never updated during integration.  None disables.
     """
     u: Field
     T: Field
@@ -397,6 +405,7 @@ class MPASOceanState(NamedTuple):
     w: Field
     H_bathy: Field
     land_mask: Field
+    rho_ref_z: Field | None = None
 
 
 class MPASOceanTendencies(NamedTuple):

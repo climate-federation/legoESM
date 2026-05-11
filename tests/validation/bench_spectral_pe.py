@@ -288,7 +288,12 @@ def main():
     min_ps_ts = np.array(min_ps_ts)
     KE_ts = np.array(KE_ts)
 
-    mass_drift = abs(mass_ts[-1] - mass_ts[0]) / abs(mass_ts[0])
+    # iter-92 audit followup: previously
+    # ``abs(mass_ts[-1] - mass_ts[0]) / abs(mass_ts[0])`` would
+    # NaN if ``mass_ts[0] = 0`` (rest state).  Migrate to the
+    # shared helper for the iter-78/80 floor convention.
+    from legoesm.diagnostics.conservation_drift import compute_relative_drift
+    mass_drift = compute_relative_drift(mass_ts)
     final_max_wind = max_wind_ts[-1]
     final_min_ps = min_ps_ts[-1] / 100.0  # hPa
 
@@ -313,14 +318,25 @@ def main():
     sigma_full = np.array(sigma.sigma_full)
 
     # 1. Conservation
+    # iter-92 audit followup: previously inlined
+    # ``(KE_ts - KE_ts[0]) / max(abs(KE_ts[0]), 1e-30)`` (the
+    # iter-78/80 pathology pattern) and
+    # ``(mass_ts - mass_ts[0]) / abs(mass_ts[0])`` (NaN if
+    # mass_ts[0] = 0).  Both replaced by the shared
+    # ``relative_drift_series`` helper which uses a 1.0 floor and
+    # returns absolute drift in natural units when the baseline is
+    # near zero.  For JW06 atmosphere (mass_ts[0] ~ 5e+19 Pa·m²,
+    # KE_ts[0] > 0) the floor never bites; this is a
+    # single-source-of-truth unification.
+    from legoesm.diagnostics.conservation_drift import relative_drift_series
     fig, axes = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
-    axes[0].plot(times, (mass_ts - mass_ts[0]) / abs(mass_ts[0]), "b-", lw=1.5)
+    axes[0].plot(times, relative_drift_series(mass_ts), "b-", lw=1.5)
     axes[0].set_ylabel("Rel. mass error")
     axes[0].set_title("Spectral PE — JW06 Baroclinic Wave: Conservation")
     axes[0].ticklabel_format(style="sci", axis="y", scilimits=(-3, 3))
     axes[0].grid(True, alpha=0.3)
 
-    axes[1].plot(times, (KE_ts - KE_ts[0]) / max(abs(KE_ts[0]), 1e-30), "r-", lw=1.5)
+    axes[1].plot(times, relative_drift_series(KE_ts), "r-", lw=1.5)
     axes[1].set_ylabel("Rel. KE change")
     axes[1].set_xlabel("Time [days]")
     axes[1].ticklabel_format(style="sci", axis="y", scilimits=(-3, 3))

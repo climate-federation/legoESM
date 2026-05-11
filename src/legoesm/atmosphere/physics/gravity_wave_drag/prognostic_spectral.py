@@ -150,16 +150,18 @@ def prognostic_spectral_gwd(
     drag_4d = drag_stack.T.reshape(ncol, n_az, n_wn, nlev)
     drag_4d = drag_4d[:, :, :, ::-1]  # reverse to top-first
 
-    # Sum over spectrum to get (ncol, nlev) tendencies
-    # Weight by azimuthal direction for du/dv
-    # drag is stress gradient -> acceleration = -drag_deposit (already divided by dp)
-    # Convert from dp-based to dz-based: multiply by dp/(rho*dz) -> just -drag
-    # Both ``du_dt`` and ``dv_dt`` reduce ``-drag_4d * trig`` over
-    # (n_az, n_wn) — fuse by stacking the cos/sin azimuth weights along
-    # a trailing axis so the spectrum reduction runs once.
+    # Sum over spectrum to get (ncol, nlev) tendencies.
+    # ``drag_deposit = (F_carry - F_new) / dp`` is dimensionless
+    # (both F and dp are in Pa).  To convert to a per-mass force we
+    # use the hydrostatic identity ``dp = -ρ·g·dz`` to get
+    # ``F/(ρ·dz) = F·g/(-dp)`` → the conversion factor is ``g``,
+    # not ``1`` as the earlier comment claimed.  Audit cycle iter-26
+    # finding P0: missing this factor under-counted GWD acceleration
+    # by a factor of ~9.8 in the prognostic-spectral path.
+    # Weight by azimuthal direction for du/dv.
     _trig_stack = jnp.stack([cos_az, sin_az], axis=-1)[None, :, None, None, :]
     _duv_spec = -drag_4d[..., None] * _trig_stack
-    _duv = jnp.sum(_duv_spec, axis=(1, 2))  # (ncol, nlev, 2)
+    _duv = jnp.sum(_duv_spec, axis=(1, 2)) * constants.g  # (ncol, nlev, 2)
     du_dt = _duv[..., 0]
     dv_dt = _duv[..., 1]
 

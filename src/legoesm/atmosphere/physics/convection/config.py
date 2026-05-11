@@ -51,6 +51,13 @@ class SBMConfig(NamedTuple):
     # — gating leaks).  0.1 gives ``sigmoid(-7) ≈ 9e-4`` (effectively 0)
     # while preserving smoothness near the threshold.
     smooth_trigger_sharpness: float = 0.1
+    # Sigmoid sharpness for the cloud-layer mask (T_moist - T) [1/K].
+    # Hard ``T_moist >= T`` boolean masks kill ``jax.grad`` through layer
+    # top/bottom transitions; the smoothed sigmoid keeps gradients alive.
+    # 5/K gives ~0.5 at T_moist == T and ~0.01 at T_moist - T = -1 K, which
+    # is sharp enough to behave like a hard mask in forward integration but
+    # differentiable for training.
+    cloud_mask_sharpness: float = 5.0
 
 
 class DCAConfig(NamedTuple):

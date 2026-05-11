@@ -114,7 +114,7 @@ class PhysicsPipeline:
         convection_fn,
         convection_config,
         radiation_fn,
-        T_ice=271.35,
+        T_ice=constants.T_freeze_ocean,
         C_H=0.0044,
         C_E=0.0044,
         albedo_ice=0.65,

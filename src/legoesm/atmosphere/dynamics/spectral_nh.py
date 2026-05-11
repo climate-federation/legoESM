@@ -55,7 +55,6 @@ from legoesm.grids.vertical import (
     create_height_coordinate,
     compute_terrain_metric,
 )
-from legoesm.runtime.backend import get_backend, check_spectral_backend
 from legoesm.thermo import saturation_mixing_ratio
 from legoesm.timestepping.tridiagonal import thomas_solve_batched
 from legoesm.atmosphere.dynamics.compressible_euler import (
@@ -67,7 +66,6 @@ from legoesm.timestepping.split_explicit import (
     split_explicit_step,
     SplitExplicitConfig,
 )
-from legoesm.timestepping.tridiagonal import thomas_solve_batched
 from legoesm import constants
 
 _COS_LAT_MIN = 1.0e-6

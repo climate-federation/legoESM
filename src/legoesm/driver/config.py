@@ -92,7 +92,7 @@ class ExperimentConfig(NamedTuple):
     co2_ppmv: float = 415.0
     ch4_ppbv: float = 1900.0
     n2o_ppbv: float = 332.0
-    S_0: float = 1361.0
+    S_0: float = 1361.0                    # = constants.S_0
     ozone_source: str = "standard"
     ozone_forcing: str = "inline"       # inline, external, off
     ozone_file: str = ""
@@ -135,6 +135,10 @@ class ExperimentConfig(NamedTuple):
     dynamic_albedo: bool = False
     carbon_cycle: str = "none"
 
+    # Initial conditions
+    ic: str = "default"   # "default" (held_suarez_init) or "era5"
+    ic_path: str = ""     # ERA5 Zarr path when ic="era5"
+
     # CMIP
     experiment: str = ""
     start_year: int = 1979
@@ -142,7 +146,10 @@ class ExperimentConfig(NamedTuple):
     # Surface parameters
     C_H: float = 0.0044
     C_E: float = 0.0044
-    T_ice: float = 271.35
+    # T_ice is the seawater freezing point used as the SST floor /
+    # SIC ramp threshold — NOT the ice surface temperature.  Legacy
+    # name kept for AMIP config compatibility.
+    T_ice: float = 271.35                  # = constants.T_freeze_ocean
     albedo_ice: float = 0.65
     albedo_ocean: float = 0.06
     sfc_emissivity: float = 0.97
@@ -237,6 +244,11 @@ class ExperimentConfig(NamedTuple):
                 f"ModelDriver is atmosphere-only with prescribed SST/SIC. "
                 f"Set carbon_cycle='none' or use a coupled driver."
             )
+        _valid_ic = ("default", "era5")
+        if self.ic not in _valid_ic:
+            errors.append(f"ic must be one of {_valid_ic}, got {self.ic!r}")
+        if self.ic == "era5" and not self.ic_path:
+            errors.append("ic='era5' requires ic_path to be set")
 
         if errors:
             raise ValueError(
@@ -265,9 +277,21 @@ class ExperimentConfig(NamedTuple):
                 "set radiation='rrtmgp' for cloud-radiation coupling"
             )
         if self.fix_moisture and self.microphysics != "none":
+            # The current ``fix_moisture_hydrostatic`` implementation only
+            # rescales ``q_v``, not prognostic condensate (``q_c``/``q_r``)
+            # nor cumulative precipitation flux at the surface.  When a
+            # precipitating microphysics scheme is active, the fixer
+            # multiplies q_v back up after each precipitation event — an
+            # unphysical source of water vapor that compounds with the
+            # microphysical condensation/heating loop and drives the
+            # column unstable (catalogued under AMIP.md "Known issues").
             warns.append(
-                "fix_moisture with active microphysics may conflict "
-                "with microphysical moisture sources/sinks"
+                "fix_moisture with prognostic-condensate microphysics "
+                f"({self.microphysics}) is INCORRECT: the current "
+                "implementation rescales only q_v, not q_c/q_r/precip — "
+                "spurious vapor sources will accumulate and may drive the "
+                "column unstable.  Disable --fix-moisture or replace it "
+                "with a fix_total_water path that tracks precipitation."
             )
         if (self.output.cmip_output
                 and self.output.diagnostics_perf_mode == "always"):

@@ -64,7 +64,6 @@ from legoesm.ocean.vertical import (
 from legoesm.ocean.dynamics.barotropic import fill_land_cells
 from legoesm.ocean.physics.mixing import laplacian_viscosity_3d, vertical_diffusion
 from legoesm.grids.halo import pad_halo_4d
-from legoesm.core.operators_3d import hyperdiffusion_3d
 
 
 # ==============================================================================

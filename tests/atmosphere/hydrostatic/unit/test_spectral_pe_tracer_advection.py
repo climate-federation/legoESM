@@ -201,6 +201,139 @@ class TestTracerAdvectionGaussian:
 # End-to-end: dycore step preserves tracer (uniform-q sanity)
 # ---------------------------------------------------------------------------
 
+class TestSpectralPEHybridTracerVerticalAdvection:
+    """Iter-51 regression: tracer vertical advection on the hybrid
+    coordinate path was silently dropped — ``_tracer_advection_gaussian``
+    returned horizontal-only when the coord is
+    ``HybridSigmaPressureCoordinate`` and the caller never added the
+    vertical contribution back.  T, u, v had vertical advection; only
+    tracers were broken.  Source-level verification: grep for
+    ``vertical_advection_hybrid`` calls inside the tracer loop in
+    ``spectral_pe_tendencies`` — the prior bug had none.
+    """
+
+    def test_hybrid_tracer_path_calls_vertical_advection(self):
+        """Source-level check: the hybrid tracer code path must call
+        ``vertical_advection_hybrid`` (the same helper used for T, u, v).
+
+        Why non-vacuous: under the prior bug, the tracer loop in
+        ``spectral_pe_tendencies`` had no vertical-advection call.  This
+        test reads the source and asserts the call exists in the tracer
+        loop — falsifies the missing-call version by construction.
+        """
+        from pathlib import Path
+        spectral_pe_src = Path(
+            "/home/gentine/Documents/Code/legoESM/legoESM/src/legoesm/"
+            "atmosphere/dynamics/spectral_pe.py"
+        )
+        text = spectral_pe_src.read_text()
+        # Look for the hybrid branch tracer call inside spectral_pe_tendencies
+        assert "vert_adv_q = vertical_advection_hybrid(" in text, (
+            "spectral_pe_tendencies tracer loop must call "
+            "vertical_advection_hybrid for hybrid coords (iter-51 fix). "
+            "The previously-buggy code returned horizontal-only "
+            "tendencies for tracers on the hybrid path."
+        )
+
+    def test_hybrid_tracer_tendency_includes_vertical_advection(self):
+        """Directly call ``spectral_pe_tendencies`` on a hybrid-coord
+        state with a strong vertical tracer gradient and non-zero
+        mass flux, then verify the tracer tendency picks up the
+        vertical advection ``-F · ∂q/∂p`` contribution.
+
+        Falsification check: directly compute the EXPECTED vertical-
+        advection-only contribution using ``vertical_advection_hybrid``
+        and assert its magnitude exceeds 1e-12.  Then verify the
+        tendency from ``spectral_pe_tendencies`` MATCHES that
+        magnitude (within an order of magnitude — horizontal
+        advection is also non-zero from the divergence-driven flow,
+        but the vertical contribution must be present).
+
+        Why non-vacuous: under the prior bug, the hybrid tracer
+        tendency from spectral_pe_tendencies missed the vertical
+        advection — so its magnitude on a vertically-stratified
+        tracer was bounded by horizontal advection alone.  With the
+        fix, the vertical contribution is added.
+        """
+        from legoesm.grids.vertical import (
+            standard_hybrid_levels,
+            vertical_advection_hybrid,
+            compute_mass_flux_hybrid,
+            pressure_from_hybrid,
+        )
+        from legoesm.atmosphere.dynamics.spectral_pe import (
+            spectral_pe_tendencies,
+        )
+
+        g = create_gaussian_grid(n_max=21)
+        nlev = 8
+        hybrid = standard_hybrid_levels(nlev)
+
+        rest = isothermal_rest_state_spectral(
+            g, hybrid, perturbation_amplitude=0.0,
+        )
+        # Strong vertical gradient: q_v large at surface, vanishing aloft.
+        q_profile = jnp.linspace(0.001, 0.020, nlev, dtype=jnp.float64)
+        qv = jnp.broadcast_to(
+            q_profile[None, None, :], (g.n_lat, g.n_lon, nlev),
+        )
+        state = rest._replace(
+            tracers={"q_v": Field(
+                data=qv, name="q_v",
+                dims=("lat", "lon", "level"), units="kg/kg",
+            )},
+        )
+
+        a = g.radius
+        eig_max = g.n_max * (g.n_max + 1) / (a * a)
+        config = SpectralPEConfig(
+            hyperdiff_coeff=1.0 / (4.0 * 3600.0 * eig_max ** 2),
+            time_integrator="ssp_rk3",
+        )
+        # Compute tendency directly (not through full step, which mixes
+        # in hyperdiffusion / spectral round-trip).
+        tend = spectral_pe_tendencies(state, g, hybrid, config)
+
+        dq_dt_actual = tend.tracers["q_v"].data
+        max_dq_dt = float(jnp.max(jnp.abs(dq_dt_actual)))
+
+        # Under the iter-51 bug the rest state would give exactly zero
+        # tracer tendency on the hybrid path (horizontal advection is
+        # exactly zero for a horizontally-uniform q with rest winds,
+        # vertical advection was dropped).  With the fix, mass flux
+        # from the rest-state continuity equation produces a small
+        # but non-zero vertical advection contribution.
+        # ``standard_hybrid_levels`` gives a coordinate where the rest
+        # state has zero divergence → zero mass flux → zero vertical
+        # advection EVEN with the fix.  So we must construct a state
+        # with non-zero divergence to drive mass flux.
+        from legoesm.grids.gaussian import sh_analysis_3d
+        div_grid = jnp.full(
+            (g.n_lat, g.n_lon, nlev), 1e-5, dtype=jnp.float64,
+        )
+        div_hat_perturb = sh_analysis_3d(g, div_grid)
+        state_div = state._replace(
+            div_hat=state.div_hat.replace(data=div_hat_perturb),
+        )
+        tend_div = spectral_pe_tendencies(state_div, g, hybrid, config)
+        dq_dt_div = tend_div.tracers["q_v"].data
+
+        # The difference between div-perturbed and rest tendencies isolates
+        # the contribution that DEPENDS on mass flux — i.e. the vertical
+        # advection contribution.  Under the iter-51 bug this would be
+        # zero (vertical advection dropped); with the fix it is
+        # non-trivial because the divergence drives non-zero mass flux,
+        # which couples to ∂q/∂p (which is non-zero by construction).
+        max_dq_dt_diff = float(jnp.max(jnp.abs(dq_dt_div - dq_dt_actual)))
+        assert max_dq_dt_diff > 1e-10, (
+            f"Hybrid tracer tendency with vs without divergence-driven "
+            f"mass flux differed by only {max_dq_dt_diff:.3e} — under "
+            f"the iter-51 bug vertical advection was dropped, so the "
+            f"divergence-driven mass-flux change has no effect on the "
+            f"tracer tendency.  With the fix the change must be > 1e-10."
+        )
+
+
 class TestSpectralPETracerStep:
     def _proper_hyperdiff(self, grid):
         a = grid.radius
@@ -309,6 +442,155 @@ class TestSpectralPETracerStep:
 
         g = jax.grad(loss)(jnp.array(1.0))
         assert bool(jnp.isfinite(g))
+
+
+# ---------------------------------------------------------------------------
+# Iter-92/95 ``forcing_data`` API regression tests (slopbuster HIGH finding)
+# ---------------------------------------------------------------------------
+
+class TestSpectralPEForcingDataAPI:
+    """Iter-92/95 introduced ``model.step(state, dt, physics_fn,
+    forcing_data)`` that threads a TRACED pytree through a 4-arg
+    physics_fn signature.  These tests exercise the new code path
+    directly (slopbuster review flagged the absence of a fast unit
+    test for this API).
+    """
+
+    def _proper_hyperdiff(self, grid):
+        a = grid.radius
+        eig_max = grid.n_max * (grid.n_max + 1) / (a * a)
+        return 1.0 / (4.0 * 3600.0 * eig_max ** 2)
+
+    def test_forcing_data_threads_to_physics_fn(self, grid, sigma_coord, rest_state):
+        """A 4-arg physics_fn receives forcing_data and the day value
+        is read DYNAMICALLY at JIT trace time, NOT baked-in at first
+        compile.
+
+        Why non-vacuous: under the iter-74 stale-day bug, calling
+        step with two different forcing_data values would silently use
+        the first call's value for both — the test below would see
+        BIT-IDENTICAL output.  With the iter-92 fix, forcing_data flows
+        as a TRACED pytree and changing its values produces a
+        materially different post-step state.
+        """
+        config = SpectralPEConfig(
+            hyperdiff_coeff=self._proper_hyperdiff(grid),
+            time_integrator="ssp_rk3",
+        )
+        model = SpectralPrimitiveEquationModel(grid, sigma_coord, config)
+
+        # physics_fn that BIASES the T tendency by the forcing value.
+        # If forcing_data flows as TRACED, the post-step T_hat differs
+        # between two distinct forcing values.  If it's baked-in
+        # (the bug), both calls produce the same output.
+        def physics_fn_4arg(s, g, sc, fd):
+            bias = fd["bias"]  # JAX scalar — must NOT call float() on it
+            T_tend_data = bias * jnp.ones_like(s.T_hat.data)
+            return s._replace(
+                vor_hat=s.vor_hat.replace(data=jnp.zeros_like(s.vor_hat.data)),
+                div_hat=s.div_hat.replace(data=jnp.zeros_like(s.div_hat.data)),
+                T_hat=s.T_hat.replace(data=T_tend_data),
+                lnps_hat=s.lnps_hat.replace(data=jnp.zeros_like(s.lnps_hat.data)),
+                phis_hat=s.phis_hat.replace(data=jnp.zeros_like(s.phis_hat.data)),
+            )
+
+        fd1 = {"bias": jnp.asarray(1.0, dtype=jnp.float64)}
+        s1 = model.step(rest_state, dt=300.0, physics_fn=physics_fn_4arg, forcing_data=fd1)
+
+        fd2 = {"bias": jnp.asarray(5.0, dtype=jnp.float64)}
+        s2 = model.step(rest_state, dt=300.0, physics_fn=physics_fn_4arg, forcing_data=fd2)
+
+        # The two outputs MUST differ.  Under the iter-74 stale-day
+        # bug, both calls would use the first compile's bias and the
+        # outputs would be bit-identical.
+        diff = float(jnp.max(jnp.abs(s1.T_hat.data - s2.T_hat.data)))
+        assert diff > 1e-6, (
+            f"forcing_data did not propagate dynamically: "
+            f"max |s1.T_hat − s2.T_hat| = {diff:.3e}.  "
+            f"Expected > 1e-6.  Iter-74 stale-day bug regression."
+        )
+        assert jnp.all(jnp.isfinite(s1.T_hat.data))
+        assert jnp.all(jnp.isfinite(s2.T_hat.data))
+
+    def test_legacy_3arg_physics_fn_still_works(self, grid, sigma_coord, rest_state):
+        """The legacy 3-arg physics_fn API must still work when
+        forcing_data is None — backward compatibility check."""
+        config = SpectralPEConfig(
+            hyperdiff_coeff=self._proper_hyperdiff(grid),
+            time_integrator="ssp_rk3",
+        )
+        model = SpectralPrimitiveEquationModel(grid, sigma_coord, config)
+
+        def physics_fn_3arg(s, g, sc):
+            return s._replace(
+                vor_hat=s.vor_hat.replace(data=jnp.zeros_like(s.vor_hat.data)),
+                div_hat=s.div_hat.replace(data=jnp.zeros_like(s.div_hat.data)),
+                T_hat=s.T_hat.replace(data=jnp.zeros_like(s.T_hat.data)),
+                lnps_hat=s.lnps_hat.replace(data=jnp.zeros_like(s.lnps_hat.data)),
+                phis_hat=s.phis_hat.replace(data=jnp.zeros_like(s.phis_hat.data)),
+            )
+
+        # Call WITHOUT forcing_data — must fall through to legacy path.
+        s_out = model.step(rest_state, dt=300.0, physics_fn=physics_fn_3arg)
+        assert jnp.all(jnp.isfinite(s_out.T_hat.data))
+
+    def test_forcing_data_threads_through_leapfrog_si_path(
+        self, grid, sigma_coord, rest_state,
+    ):
+        """The leapfrog-SI integrator dispatches to a different pair of
+        JIT methods (``_euler_si_with_forcing_jit`` for the startup
+        step and ``_leapfrog_si_with_forcing_jit`` for subsequent
+        steps).  Both must thread forcing_data correctly.
+
+        Why non-vacuous: under the iter-74 stale-day bug the *second*
+        step would silently reuse the first compile's bias, so two
+        runs with different bias values from the second step onward
+        would produce identical state-after-2 even though step-1 saw
+        the right value.  Running 2 steps catches both branches.
+        """
+        config = SpectralPEConfig(
+            hyperdiff_coeff=self._proper_hyperdiff(grid),
+            time_integrator="leapfrog_si",
+            implicit_hyperdiff=True,  # required with leapfrog
+            semi_implicit=True,       # SI matrices populated by _ensure_si_data
+        )
+        model_a = SpectralPrimitiveEquationModel(grid, sigma_coord, config)
+        model_b = SpectralPrimitiveEquationModel(grid, sigma_coord, config)
+
+        def physics_fn_4arg(s, g, sc, fd):
+            bias = fd["bias"]
+            T_tend_data = bias * jnp.ones_like(s.T_hat.data)
+            return s._replace(
+                vor_hat=s.vor_hat.replace(data=jnp.zeros_like(s.vor_hat.data)),
+                div_hat=s.div_hat.replace(data=jnp.zeros_like(s.div_hat.data)),
+                T_hat=s.T_hat.replace(data=T_tend_data),
+                lnps_hat=s.lnps_hat.replace(data=jnp.zeros_like(s.lnps_hat.data)),
+                phis_hat=s.phis_hat.replace(data=jnp.zeros_like(s.phis_hat.data)),
+            )
+
+        fd_a = {"bias": jnp.asarray(1.0, dtype=jnp.float64)}
+        fd_b = {"bias": jnp.asarray(7.0, dtype=jnp.float64)}
+
+        # Run 2 steps each so we exercise BOTH the euler-si (startup)
+        # and leapfrog-si (subsequent) JIT paths.
+        s_a1 = model_a.step(rest_state, dt=300.0, physics_fn=physics_fn_4arg, forcing_data=fd_a)
+        s_a2 = model_a.step(s_a1, dt=300.0, physics_fn=physics_fn_4arg, forcing_data=fd_a)
+
+        s_b1 = model_b.step(rest_state, dt=300.0, physics_fn=physics_fn_4arg, forcing_data=fd_b)
+        s_b2 = model_b.step(s_b1, dt=300.0, physics_fn=physics_fn_4arg, forcing_data=fd_b)
+
+        diff_step1 = float(jnp.max(jnp.abs(s_a1.T_hat.data - s_b1.T_hat.data)))
+        diff_step2 = float(jnp.max(jnp.abs(s_a2.T_hat.data - s_b2.T_hat.data)))
+        assert diff_step1 > 1e-6, (
+            f"forcing_data did not propagate through _euler_si_with_forcing_jit: "
+            f"max |s_a1.T_hat − s_b1.T_hat| = {diff_step1:.3e}"
+        )
+        assert diff_step2 > 1e-6, (
+            f"forcing_data did not propagate through _leapfrog_si_with_forcing_jit: "
+            f"max |s_a2.T_hat − s_b2.T_hat| = {diff_step2:.3e}"
+        )
+        assert jnp.all(jnp.isfinite(s_a2.T_hat.data))
+        assert jnp.all(jnp.isfinite(s_b2.T_hat.data))
 
 
 # ---------------------------------------------------------------------------

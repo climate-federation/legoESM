@@ -114,10 +114,19 @@ def step_land(
     # so it can be applied to updated soil moisture later.
     stomatal_ratio = beta / jnp.maximum(beta_soil, 1e-10)
 
-    # Surface saturation humidity: use ice saturation over snow-covered ground
+    # Surface saturation humidity: use ice saturation over snow-covered ground.
+    # ``has_snow`` includes fresh snowfall when the surface is below
+    # freezing (so the snow survives the step) — same rule as
+    # multilayer_land.py iter-68 fix.  Without this, a warm-surface
+    # column receiving precip_snow would have routed L_v vapour with
+    # a liquid q_sat for the whole step even though the surface is
+    # snow-covered.
     q_sat_liq = saturation_mixing_ratio(T_soil, forcing.p_surface)
     q_sat_ice = saturation_mixing_ratio_ice(T_soil, forcing.p_surface)
-    has_snow = snow > 1e-6  # kg/m2 threshold
+    fresh_snow_mass = forcing.precip_snow * dt
+    has_existing_snow = snow > 1e-6
+    has_surviving_fresh_snow = (fresh_snow_mass > 1e-6) & (T_soil < constants.T_freeze)
+    has_snow = has_existing_snow | has_surviving_fresh_snow
     q_sat_sfc = jnp.where(has_snow, q_sat_ice, q_sat_liq)
     # Over snow, moisture is freely available from the snowpack (beta=1);
     # water-limiting is applied later via snow mass.  Over bare soil,
@@ -288,6 +297,19 @@ def step_land(
         u_ocean_sfc=jnp.zeros_like(T_soil),
         v_ocean_sfc=jnp.zeros_like(T_soil),
         co2_flux=co2_flux,
+        # Slab land: freshwater leaving the column to the ocean is the
+        # bucket overflow ``runoff`` (kg/m²/s).  This closes the water
+        # budget through the coupler if a downstream consumer wires it.
+        freshwater_flux=runoff,
+        # Land does not extract heat directly from the ocean.
+        ocean_heat_extraction=jnp.zeros_like(T_soil),
+        # Land does not exert stress on the ocean.
+        ocean_stress_x=jnp.zeros_like(T_soil),
+        ocean_stress_y=jnp.zeros_like(T_soil),
+        # Phase-aware moisture mass flux: lhflx_actual was computed
+        # using L_eff (L_s if snow-covered, L_v otherwise) so dividing
+        # by L_eff recovers the correct mass.
+        surface_mass_flux=lhflx_actual / L_eff,
     )
 
     return new_state, response, carbon_state_new
