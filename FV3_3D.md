@@ -919,6 +919,10 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 430: compact iter 415-424 into single block (8 sub-
+  entries) + regression test for the new marker.  doc shrinks
+  ~25 lines; iter-368 guard now covers 6 compaction blocks
+  (iter-365/380/390/400/420/430).  15/15 in 0.10 s.
 - Iter 429: factory-driven multi-step stability.  3 NH + 3 PE
   steps with factory configs at C8 — assert each step finite,
   |u| stays within 100× initial, |θ′| < 50 K, |T| within 2×.
@@ -947,34 +951,25 @@ Key iterations:
   (iter-368/369/331/383/405/415).  Confirms post-iter-420
   compaction + iter-423 table-update + 5+ NH flag set + factory
   exposure all consistent.  27/27 in 1.2 s.
-- Iter 424: extend iter-368 doc-structure regression for iter-
-  423 summary-table update.  Asserts (1) all 5 NH FV3-fidelity
-  flags mentioned, (2) PE-specific flag mentioned, (3) factory
-  function names mentioned.  Catches table drift.  13/13 in
-  0.09 s.
-- Iter 422: extend iter-383 sweep with iter-401/iter-413/
-  iter-418 (numeric pkz proof, gradient flow, doc-example).
-  22 guard modules total.  3/3 in 1 s.
-- Iter 421: extend iter-368 doc-structure regression for iter-
-  420 compacted block.  Adds (1) iter-420 marker present, (2)
-  all 8 iter-405-414 topics present.  12-test guard now covers
-  5 compaction blocks (iter-365/380/390/400/420).  12/12 in
-  0.09 s.
-- Iter 419: extend iter-368 doc-structure guard for iter-417
-  production-usage section.  Pins (1) section header present,
-  (2) both factory names mentioned, (3) duogrid pairing
-  instruction.  Catches doc maintenance that drops user-facing
-  setup recipe.  10/10 in 0.08 s.
-- Iter 418: executable test verifying iter-417 production-usage
-  doc example actually runs.  Catches doc drift if factory API
-  changes but example isn't updated.  2/2 in 7 s.
-- Iter 416: extend iter-383 sweep inventory with iter-415
-  no-duplicates regression itself.  Self-referential (sweep
-  includes the no-duplicates guard).  19 guard modules now.
-  3/3 in 0.96 s (sweep + no-duplicates).
-- Iter 415: no-duplicate regression for iter-383 guard-sweep
-  inventory.  Catches duplicate entries (importability would
-  silently pass while sweep weakens).  1/1 in 0.07 s.
+- **Iters 415-424 (compacted iter 430)**: factory-regression
+  guard hardening + doc-drift catches.
+  - iter 415: no-duplicate regression for iter-383 guard-sweep
+    inventory (catches silent inventory weakening).
+  - iter 416: wire iter-415 into iter-383 sweep
+    (self-referential, 19 guard modules).
+  - iter 418: executable test that iter-417 production-usage
+    doc example actually runs (catches API drift).
+  - iter 419: doc-structure guard for iter-417 production-usage
+    section (header + factories + duogrid pairing).
+  - iter 421: doc-structure regression for iter-420 compacted
+    block (marker + 8 topics; 5 compaction blocks now guarded).
+  - iter 422: extend iter-383 sweep with iter-401/413/418
+    (numeric pkz proof, gradient flow, doc example) → 22
+    modules total.
+  - iter 423: FV3-fidelity-stack summary table update (5 NH +
+    3 PE flag panel + factory rows).
+  - iter 424: doc-structure regression for iter-423 summary
+    table (flag names, PE-specific flag, factory rows).
 - **Iters 405-414 (compacted iter 420)**: factory-extension
   audit/regression infrastructure.
   - iter 405: FV3-flag inventory consistency check.
