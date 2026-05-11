@@ -889,53 +889,24 @@ Key iterations:
   (2) FV3 ``pkz`` equivalence, (3) ``FULL NONLINEAR``
   clarification.  Added to iter-383 guard-sweep inventory (14
   modules total now).  1/1 doc test + sweep regression pass.
-- Iter 394: audit + clarify iter-336/337 dynamic Exner =
-  FV3 ``pkz``.  ``compute_exner_perturbation`` returns
-  FULL NONLINEAR ``Π_total = (R_d · ρ · θ / p_0)^(R_d/c_v)``
-  which under EOS ``p = R_d · ρ · T`` equals ``(p/p_0)^kappa``
-  = FV3 ``pkz``.  Resolves previously-flagged "gap #2 dynamic
-  pkz" — iter-336/337 wiring IS the FV3 pkz form, not a
-  linearization.  Source comment updated; 13/13 dyn_exner
-  tests still pass.
-- Iter 393: runtime smoke for iter-392 FV3-faithful factories.
-  Both PE + NH factory-built configs (with full damping toolkit
-  + duogrid grid) produce finite output through one model step.
-  2/2 in 99 s.
-- Iter 392: user-facing FV3-faithful config factories.  Adds
-  ``make_fv3_faithful_pe_config(**overrides)`` +
-  ``make_fv3_faithful_nh_config(**overrides)`` that return
-  configs with every FV3-fidelity flag enabled at production-
-  recommended values (pair with
-  ``create_cubed_sphere(..., use_duogrid=True)``).  Convenience
-  for production users who want FV3-faithful 3D path without
-  manually setting 3-5 flags.  3/3 in 0.7 s.
-- Iter 391: extend iter-368 doc-structure regression for
-  iter-390 compacted block.  Adds (1) iter-390 marker present,
-  (2) all 8 iter-375-384 topic groups present.  Mirror of iter-
-  381 extension pattern.  7/7 in 0.08 s.
-- Iter 389: extend iter-383 guard-sweep inventory to include
-  iter-388 docstring-content regression.  13 guard modules now
-  covered.  2/2 in 0.8 s.
-- Iter 388: regression that iter-385 source comments document
-  the iter-384 cross_face/duogrid pairing requirement.  Asserts
-  PE + NH ``use_fv3_cross_face_du_proj`` docstrings contain
-  ``iter 384`` marker + ``use_duogrid=True`` mention.  Catches
-  refactors that drop the warning.  2/2 in 0.07 s.
-- Iter 387: NH counterpart of iter-386.  cross_face flag at
-  C16 WITH duogrid: (1) changes u measurably (>1e-8) vs
-  False, (2) does not amplify v-imprint.  2/2 in 138 s.
-- Iter 386: cross_face flag at C16 WITH duogrid grid.  iter-372
-  used default (non-duogrid) where flag is a no-op per iter-
-  384.  iter-386 re-runs with ``use_duogrid=True`` so flag has
-  actual effect: (1) cross_face=True changes u_d measurably
-  (>1e-8) vs False, (2) does not amplify T-imprint vs default.
-  2/2 in 86 s.
-- Iter 385: document iter-384 finding in iter-370 source
-  comments (PE + NH).  Flag ``use_fv3_cross_face_du_proj``
-  is a NO-OP when ``use_duogrid=False``; users must pair with
-  ``create_cubed_sphere(..., use_duogrid=True)`` for cross-face
-  VALUE transfer.  14/14 cross_face tests still pass post-
-  comment update.
+- **Iters 385-394 (compacted iter 400)**: post-iter-380 doc-
+  audit follow-ups + factory work + dyn_exner audit.
+  - iter 385: document iter-384 finding in iter-370 source.
+  - iter 386/387: PE+NH C16 cross_face with duogrid grid
+    (meaningful regression coverage; iter-372 was no-op).
+  - iter 388: docstring-content regression for iter-385.
+  - iter 389: extend guard-sweep inventory for iter-388.
+  - iter 390: ToC compaction (iter 375-384 → 1 block).
+  - iter 391: extend doc-structure regression for iter-390.
+  - **iter 392**: user-facing ``make_fv3_faithful_*_config``
+    factories.  Enable all FV3-fidelity flags at production
+    values.  PE 3 flags + NH 5 flags.
+  - iter 393: factory runtime smoke (finite step PE+NH).
+  - iter 394: **AUDIT** dynamic Exner = FV3 pkz.
+    ``compute_exner_perturbation`` returns FULL NONLINEAR
+    ``Π_total = (R_d·ρ·θ/p_0)^(R_d/c_v)``, algebraically equals
+    ``(p/p_0)^kappa = pkz`` under EOS.  Resolves earlier
+    "linearization" concern.
 - **Iters 375-384 (compacted iter 390)**: cross_face follow-ups
   + audit/regression infrastructure.
   - iter 375: PE full-stack AD umbrella with cross_face.
