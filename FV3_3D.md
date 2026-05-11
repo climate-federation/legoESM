@@ -962,6 +962,19 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 487: **duogrid penalty plateaus across resolutions**
+  (not monotonically decreasing).  C24 measurement extends
+  iter-471/472 scan:
+    C8:  5.12×
+    C16: 4.12×
+    C24: **4.72×**  (back up from C16!)
+  Trend is NOT monotonic.  Penalty stays in 4-5× range across
+  C8/C16/C24.  Refutes the "duogrid helps at higher
+  resolution C36+" hypothesis — the penalty is a persistent
+  implementation issue, not a regime/scaling artifact.
+  Future investigation (beyond this loop) should focus on
+  the duogrid op itself rather than waiting for resolution
+  to fix it.  1/1 in 71 s.  Wired into iter-383 sweep (now 81).
 - Iter 486: document the 4 legoESM-min-edge factories in the
   production-usage section.  New "Edge-artifact-minimized
   factories" subsection lists all 4 (iter-467/468/483/484),
