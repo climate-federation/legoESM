@@ -938,6 +938,25 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 466: **50.4% edge-ratio reduction** via iter-465-
+  guided minimal-flag config.  5-seed comparison at C8 +
+  duogrid:
+  * factory full (all FV3 flags): θ′ ratio = 4.5361
+  * factory minimal-for-edge (only vector_halo_uv + d_con_cv
+    + dynamic_exner kept; metric_aware_d_con, heat_source_del2,
+    d_con_top_zero_levels DROPPED): θ′ ratio = **2.2520**
+  * Reduction = 50.4%
+  This is the **strongest empirical finding** in the loop:
+  selectively turning OFF some FV3-faithful flags REDUCES
+  cube-edge artifact ratio by half.  Implication: there's a
+  divergence between "FV3-faithful" and "legoESM-edge-
+  optimized" — our impl of metric_aware_d_con / heat_source_
+  del2 / d_con_top_zero may deviate from FV3 semantics enough
+  to hurt at our scale.  Factory defaults remain FV3-faithful
+  per CLAUDE.md "do not improvise"; users who want minimal
+  edge artifacts should apply the iter-466 overrides.
+  Pinned as guard regression (assertion: min < full).  1/1
+  in 212 s.  Wired into iter-383 sweep (now 61).
 - Iter 465: **per-flag NH edge-ratio decomposition** at C8 +
   duogrid + factory.  Baseline factory ratio θ′: **4.3676**
   (4× higher than no-duogrid baseline from iter-464!  Duogrid

@@ -84,6 +84,7 @@ _GUARD_MODULES = (
     "test_rf_tau_calibration_sweep_iter463",         # iter-463 add
     "test_heat_source_del2_sweep_iter464",           # iter-464 add
     "test_per_flag_edge_ratio_iter465",              # iter-465 add
+    "test_factory_minimal_edge_iter466",             # iter-466 add
 )
 
 
