@@ -860,6 +860,12 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 381: extend iter-368 doc-structure regression for iter-
+  380 compaction.  Adds (1) iter-380 compaction marker present,
+  (2) all 14 iter-360-374 topics present in compacted block,
+  (3) fix iter-365 section-bounds finder (used to look for
+  ``- Iter 364`` which is now inside iter-380 compacted block).
+  5/5 in 0.07 s.
 - Iter 379: NH counterpart of iter-378.  Tendency-level
   bit-for-bit linearity for the 3 NH slow-tendency d_con sites
   under metric form (iter-348/350/352).  Uses
