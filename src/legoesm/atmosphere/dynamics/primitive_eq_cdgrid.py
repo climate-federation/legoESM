@@ -2436,6 +2436,8 @@ def make_fv3_faithful_pe_config(**overrides) -> CDGridPrimitiveEquationConfig:
           production default — iter-437)
         * ``corner_div_damp_nord = 1`` (FV3 ``nord=1`` del-4
           corner-div damping production default — iter-437)
+        * ``corner_div_damp_d4_bg = 0.16`` (FV3 ``d4_bg``
+          production default — iter-451)
         * ``corner_div_damp_d2_bg_k1 = 4.0`` (FV3 sponge boost
           — iter-444)
         * ``corner_div_damp_d2_bg_k2 = 2.0`` (FV3 sponge boost
@@ -2468,6 +2470,7 @@ def make_fv3_faithful_pe_config(**overrides) -> CDGridPrimitiveEquationConfig:
         delt_max=1.0,
         nord_v=1,
         corner_div_damp_nord=1,
+        corner_div_damp_d4_bg=0.16,
         corner_div_damp_d2_bg_k1=4.0,
         corner_div_damp_d2_bg_k2=2.0,
         use_fv3_sponge_damp_v=True,

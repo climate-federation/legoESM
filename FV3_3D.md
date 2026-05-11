@@ -919,6 +919,13 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 451: factory defaults expose FV3 production
+  ``corner_div_damp_d4_bg = 0.16`` (FV3 ``fv_arrays.F90``
+  ``d4_bg``).  Combined with iter-437 ``nord=1`` (del-4), the
+  FV3 higher-order divergence damping is now active by default.
+  Default 0.0 (no del-4) recoverable via override.  iter-427
+  factory step test still finite.  4/4 in 61 s.  Wired into
+  iter-383 sweep (now 47).
 - Iter 450: compact iter 435-444 doc block (10 sub-entries) +
   AST regression guard for iter-448/449 Ray_fast wirings.  Doc
   shrinks ~80 lines.  iter-368 guard now covers 7 compaction
