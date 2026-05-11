@@ -860,6 +860,10 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 406: docstring-content regression for iter-392
+  factories.  Asserts PE + NH factory docstrings mention (1)
+  every FV3-fidelity flag they enable, (2) duogrid pairing
+  requirement, (3) overrides kwarg support.  2/2 in 0.76 s.
 - Iter 405: cross-check FV3-fidelity flag-set inventory in
   iter-369 guard matches actual ``use_fv3_*`` field count in
   PE + NH source.  Catches drift when a new flag is added to
