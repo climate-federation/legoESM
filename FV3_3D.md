@@ -938,6 +938,26 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 477: **iter-476 hypothesis REFUTED** — isolated test
+  of ``laplacian_compact_3d`` iterated 2× on a linear field
+  with duogrid vs no-duogrid produces IDENTICAL edge change
+  (× 0.634 both ways, agreeing to 0.4%).  The composition of
+  "iter-475 halo overshoot + iter-457 iterated Laplacian
+  amplification" does NOT explain iter-473's 4.77× edge-std
+  jump in isolation.
+    initial: edge std 4.06, interior 2.42
+    no-duogrid: edge 2.58, interior 2.29  (× 0.634 edge)
+    duogrid:    edge 2.58, interior 2.29  (× 0.634 edge)
+  Bisection-by-elimination is now exhausted on individual
+  operators — bug must come from the FULL dycore + duogrid
+  composition (acoustic substeps + RK3 stages + halo +
+  smoothing all interacting), not isolable to any single
+  operator.  This is a real-world example of "the whole
+  produces a worse result than the sum of parts".
+  Diagnostic infrastructure (iter-471/472/473/474/475/476/
+  477) now provides 7 regression tests + clear narrative for
+  whoever investigates the full-pipeline interaction.  1/1
+  in 11 s.  Wired into iter-383 sweep (now 72).
 - Iter 476: **second negative diagnostic** — ``pad_halo_
   vector_4d`` with duogrid preserves a zero vector field
   EXACTLY (u_max = 0, v_max = 0).  Combined with iter-474
