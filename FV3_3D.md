@@ -860,6 +860,11 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 395: docstring-content regression for iter-394 audit.
+  Pins NH dyn_exner docstring mentions (1) ``iter 394`` marker,
+  (2) FV3 ``pkz`` equivalence, (3) ``FULL NONLINEAR``
+  clarification.  Added to iter-383 guard-sweep inventory (14
+  modules total now).  1/1 doc test + sweep regression pass.
 - Iter 394: audit + clarify iter-336/337 dynamic Exner =
   FV3 ``pkz``.  ``compute_exner_perturbation`` returns
   FULL NONLINEAR ``Π_total = (R_d · ρ · θ / p_0)^(R_d/c_v)``
