@@ -1747,3 +1747,38 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
         return self.step(state, dt, physics_fn=physics_fn)
 
     # integrate() and integrate_scan() inherited from IntegrationMixin
+
+
+def make_fv3_faithful_nh_config(**overrides) -> CDGridCompressibleEulerConfig:
+    """FV3_3D iter 392: factory for FV3-faithful NH config.
+
+    Enables every NH FV3-fidelity flag at production-recommended
+    values.  Pair with ``create_cubed_sphere(..., use_duogrid=True)``
+    so the iter-325 NH halo wiring + iter-370 cross_face flag
+    actually transfer cross-face values.
+
+    Includes:
+        * ``use_fv3_d_con_cv = True`` (iter-320)
+        * ``use_fv3_vector_halo_uv = True`` (iter-328)
+        * ``use_fv3_dynamic_exner = True`` (iter-336/337)
+        * ``use_fv3_metric_aware_d_con = True`` (iter-339/344)
+        * ``use_fv3_cross_face_du_proj = True`` (iter-370)
+
+    Parameters
+    ----------
+    **overrides
+        Any config field can be overridden.
+
+    Returns
+    -------
+    CDGridCompressibleEulerConfig
+    """
+    defaults = dict(
+        use_fv3_d_con_cv=True,
+        use_fv3_vector_halo_uv=True,
+        use_fv3_dynamic_exner=True,
+        use_fv3_metric_aware_d_con=True,
+        use_fv3_cross_face_du_proj=True,
+    )
+    defaults.update(overrides)
+    return CDGridCompressibleEulerConfig(**defaults)

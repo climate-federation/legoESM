@@ -2256,3 +2256,34 @@ def hydrostatic_to_fv3(
         phis=state.phis,
         tracers=getattr(state, 'tracers', None),
     )
+
+
+def make_fv3_faithful_pe_config(**overrides) -> CDGridPrimitiveEquationConfig:
+    """FV3_3D iter 392: factory for FV3-faithful PE config.
+
+    Enables every PE FV3-fidelity flag at production-recommended
+    values.  Pair with ``create_cubed_sphere(..., use_duogrid=True)``
+    so the iter-370 ``use_fv3_cross_face_du_proj`` flag has effect
+    (per iter-384 finding).
+
+    Includes:
+        * ``use_fv3_a2b_zeta_corner = True`` (iter-14)
+        * ``use_fv3_metric_aware_d_con = True`` (iter-338/344)
+        * ``use_fv3_cross_face_du_proj = True`` (iter-370)
+
+    Parameters
+    ----------
+    **overrides
+        Any config field can be overridden.
+
+    Returns
+    -------
+    CDGridPrimitiveEquationConfig
+    """
+    defaults = dict(
+        use_fv3_a2b_zeta_corner=True,
+        use_fv3_metric_aware_d_con=True,
+        use_fv3_cross_face_du_proj=True,
+    )
+    defaults.update(overrides)
+    return CDGridPrimitiveEquationConfig(**defaults)

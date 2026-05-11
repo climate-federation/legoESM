@@ -860,6 +860,14 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 392: user-facing FV3-faithful config factories.  Adds
+  ``make_fv3_faithful_pe_config(**overrides)`` +
+  ``make_fv3_faithful_nh_config(**overrides)`` that return
+  configs with every FV3-fidelity flag enabled at production-
+  recommended values (pair with
+  ``create_cubed_sphere(..., use_duogrid=True)``).  Convenience
+  for production users who want FV3-faithful 3D path without
+  manually setting 3-5 flags.  3/3 in 0.7 s.
 - Iter 391: extend iter-368 doc-structure regression for
   iter-390 compacted block.  Adds (1) iter-390 marker present,
   (2) all 8 iter-375-384 topic groups present.  Mirror of iter-
