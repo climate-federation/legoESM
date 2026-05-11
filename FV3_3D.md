@@ -938,6 +938,23 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 476: **second negative diagnostic** — ``pad_halo_
+  vector_4d`` with duogrid preserves a zero vector field
+  EXACTLY (u_max = 0, v_max = 0).  Combined with iter-474
+  (scalar+constant exact) + iter-475 (scalar+linear 3.5%
+  overshoot): both halo operators pass invariance tests.
+  Final hypothesis: the iter-473 4.77× edge-std jump comes
+  from DOWNSTREAM AMPLIFICATION of iter-475's small overshoot
+  through the iter-457 ``heat_source_del2_iters=2`` Laplacian
+  smoothing — each Laplacian iteration includes a halo pad,
+  so 2 iters * 3.5% per halo pass compounds the edge
+  artifact.  Consistent with iter-465 finding that
+  ``heat_source_del2_iters=0`` reduces the edge ratio.
+  Bisection conclusion: the duogrid halo OPERATORS are
+  correct; the bug is the COMPOSITION of (a) duogrid's 3.5%
+  linear-extrapolation overshoot + (b) iterated Laplacian
+  smoothing that amplifies it.  2/2 in 5 s.  Wired into iter-
+  383 sweep (now 71).
 - Iter 475: extend iter-474 isolation to LINEAR-in-index
   field on cubed sphere.  Test ``f(i,j)=i+j`` (independent of
   face / level), measure halo max-abs:
