@@ -998,6 +998,21 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 491: **random field reveals 76% halo overshoot**
+  (vs iter-475's 3.5% on linear).  Robustness test for
+  iter-490 ``monotone_clip``:
+    Random Gaussian (μ=2, σ=1.5):
+      interior max-abs:    7.34
+      halo max no clip:   12.90  (+76% overshoot!)
+      halo max clip on:    6.74  (under interior max)
+  The duogrid halo overshoot depends STRONGLY on field
+  smoothness — random fields produce 20× larger overshoot
+  than linear.  This explains why iter-471 measured 5×
+  dycore edge penalty rather than the ~3.5% iter-475
+  predicted: dycore generates noisy fields after a few steps.
+  ``monotone_clip=True`` cuts the overshoot dramatically and
+  also passes large-magnitude (1e6) and mixed-sign field
+  tests.  3/3 in 5 s.  Wired into iter-383 sweep (now 84).
 - Iter 490: **TARGETED FIX of iter-489 corner overshoot** +
   compact iter 475-484.  Add ``monotone_clip: bool = False``
   arg to ``pad_halo_4d`` plumbing through to existing iter-802
