@@ -316,11 +316,18 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # **Prerequisites NOW available** (iter 324):
         # ``CubedSphereCDGrid.cosa_cell`` (FV3 ``cosa_s``) and
         # ``rsin2_cell`` (FV3 ``rsin2``) exist as cell-centre
-        # fields; ``rdxa``/``rdya`` (FV3 ``rdx``/``rdy`` at
-        # A-grid cells) likewise.  A future iteration can wire
-        # the metric-aware form using these existing fields
-        # without grid-construction changes.  See iter-323 for
-        # the symmetric c_pd→c_vd FV3-fidelity port (NH only).
+        # fields.  See iter-323 for the symmetric c_pd→c_vd
+        # FV3-fidelity port (NH only).
+        # **FIDELITY GAP CLOSED** (iter 338/344 + iter 347-352):
+        # opt-in ``use_fv3_metric_aware_d_con: bool = False`` flag
+        # now wires the FV3-faithful ``cosa_cell``/``rsin2_cell``
+        # metric form at ALL 8 PE+NH d_con sites (damp_v +
+        # corner_div + div_damp + A_h × PE+NH).  Default False
+        # preserves bit-for-bit iter-208 simpler form.  Edge-rdx /
+        # rdy normalization dropped (cell-centre rdxa/rdya
+        # numerical zero at C8); equivalent to iter-208 in the
+        # orthogonal limit, adds cosa_s edge correction at cube
+        # vertices.
         # **iter 246 audit (PE pkz factor)**: FV3 ``dyn_core.F90:
         # 1768`` divides ``heat_source`` by ``c_pd * delp * pkz``
         # to compute the per-step ΔT, where ``pkz`` is the local

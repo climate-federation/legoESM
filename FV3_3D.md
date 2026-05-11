@@ -816,6 +816,13 @@ Key iterations:
   Combined with iter-320 (post-acoustic damp_v / damp_w) +
   iter-321 (damp_w global) + iter-322 (damp_v global), ALL 5 NH
   d_con sites now have cv-flag verification.  3/3.
+- Iter 354: source-comment closure for iter-238 metric-aware
+  fidelity gap.  iter-324's source comment in
+  ``primitive_eq_cdgrid.py:316-323`` marked the metric gap as
+  "future iteration"; iter-338/344/347-352 closed it.  iter-354
+  updates the comment to note **FIDELITY GAP CLOSED** with the
+  ``use_fv3_metric_aware_d_con`` flag wired at all 8 d_con sites
+  (PE + NH × damp_v / corner_div / div_damp / A_h).
 - Iter 353: AST regression guard for metric-aware d_con wiring
   at ALL 8 PE+NH d_con sites (iter-338/339/347/348/349/350/351/
   352).  Mirrors iter-340 pattern.  Asserts: (1) PE source has
