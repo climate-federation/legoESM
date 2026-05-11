@@ -79,6 +79,7 @@ _GUARD_MODULES = (
     "test_pe_heat_source_del2_iter458",              # iter-458 add
     "test_factory_heat_source_del2_default_iter459", # iter-459 add
     "test_heat_source_del2_ast_iter460",             # iter-460 add
+    "test_factory_reduces_edge_artifact_iter461",    # iter-461 add
 )
 
 

@@ -938,6 +938,22 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 461: **first empirical numerical evidence** of FV3
+  factory effect on cube-edge artifacts.  3-seed C8 3-step
+  comparison of edge_var/interior_var ratio over v-wind:
+  * NH: default=0.9695, factory=1.0057 → factory/default=1.037
+    (factory slightly WORSENS by 3.7% at this calibration —
+    suggests NH needs different sponge tuning)
+  * PE: default=1.0015, factory=0.9762 → factory/default=0.975
+    (factory REDUCES edge ratio by 2.5% — small but in right
+    direction)
+  Ratios near 1.0 mean edge ≈ interior variance — not
+  catastrophic.  Small differences (~3-4%) suggest the
+  factory stack is wired correctly but the legoESM-scale
+  d2_bg_k1=1e-4 calibration is too weak to dominate the
+  intrinsic numerics.  Provides quantitative baseline for
+  future tuning.  2/2 in 103 s.  Wired into iter-383 sweep
+  (now 56).
 - Iter 460: compact iter 445-454 doc block (10 sub-entries) +
   AST regression guard for iter-457/458/459 heat_source del-2
   wirings.  Doc shrinks ~80 lines.  iter-368 guard now covers
