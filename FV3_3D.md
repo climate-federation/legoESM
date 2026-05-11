@@ -919,6 +919,13 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 435: AST regression guard pinning every iter-431/432/
+  433 mask wiring site.  Five wiring sites pinned: NH damp_v,
+  NH damp_w, NH aggregate, PE damp_v, PE aggregate (plus two
+  config-field present checks).  Catches a silent fidelity
+  regression where a refactor drops a mask application at one
+  site while keeping the flag declared.  7/7 in 0.08 s.  Wired
+  into iter-383 sweep (now 31).
 - Iter 434: set ``d_con_top_zero_levels = 2`` in both factory
   defaults (``make_fv3_faithful_nh_config``,
   ``make_fv3_faithful_pe_config``).  Matches FV3 production

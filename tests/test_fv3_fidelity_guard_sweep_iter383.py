@@ -54,6 +54,7 @@ _GUARD_MODULES = (
     "test_d_con_top_zero_levels_full_iter432",       # iter-432 add
     "test_d_con_top_zero_levels_pe_iter433",         # iter-433 add
     "test_factory_d_con_top_zero_default_iter434",   # iter-434 add
+    "test_d_con_top_zero_ast_guard_iter435",         # iter-435 add
 )
 
 
