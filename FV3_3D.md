@@ -153,6 +153,42 @@ from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
 * PE variants are API-symmetric; iter-469/470 showed PE is
   largely insensitive to these flag changes at C8.
 
+## Duogrid investigation summary (iter 461-487 synthesis, iter 488)
+
+A 27-iter empirical investigation of cube-edge artifacts at
+C8 + duogrid + NH factory.  Key data points:
+
+| Iter | Finding |
+|------|---------|
+| 461 | First empirical edge-metric data: NH factory worsens 3.7%, PE improves 2.5%; both near 1.0 |
+| 462 | d2_bg_k1 sweep over 4 decades → ZERO change in NH ratio (corner-div sponge is per-level scalar invariant) |
+| 463 | rf_tau_days sweep → ZERO change (RF is per-level scalar invariant) |
+| 464 | heat_source_del2 reduces NH θ′ ratio 1.10 → 0.96 (14% drop) WITHOUT duogrid (positive control) |
+| 465 | NH per-flag at C8+duogrid: baseline 4.37; vector_halo_uv biggest helper (Δ+5.0); 3 flags HURT |
+| 466 | **50.4% reduction** dropping 3 hurting flags (4.54 → 2.25, 5 seeds) |
+| 469 | PE T edge ratio INSENSITIVE to all factory flags (max |Δ| < 1e-4) |
+| 470 | PE u_d also insensitive — PE is much less responsive than NH at C8 |
+| 471 | **Duogrid alone is the regime-changing factor** — same factory ON/OFF = 5.12× |
+| 472 | Duogrid penalty persists at C16 (4.12×) → not a low-res artifact |
+| 473 | duogrid INCREASES edge std 4.77× while interior std unchanged — bug at edges |
+| 474 | pad_halo_4d scalar+constant PASSES (5e-13) → rules out simple halo broken |
+| 475 | Linear field shows 3.5% overshoot in duogrid halo (not catastrophic alone) |
+| 476 | Vector halo + zero field PASSES exactly → rules out vector halo broken |
+| 477 | Laplacian iter alone doesn't amplify (×0.634 both grids) → refutes iter-476 hypothesis |
+| 478 | Penalty arrives in step 1 (3.67×); single-step composite, not multi-step accumulation |
+| 479 | Post-step damp_v/damp_w NOT the culprit (3.50→3.54× unchanged when disabled) |
+| 480 | **corner_div_damp is the key MITIGATOR** — without it, penalty explodes 30× to 109× |
+| 481 | corner_div_damp_d2_bg sweep: 100× boost → 36% reduction |
+| 482 | **Composite iter-466+iter-481: 59.5% reduction (3.50 → 1.42×)** |
+| 487 | Resolution scan: C8=5.12×, C16=4.12×, C24=4.72× → penalty plateaus 4-5× |
+
+**Bottom line**: duogrid bug is real and persistent (~4-5× edge
+penalty at all tested resolutions).  Bisected to composite
+single-step dycore + duogrid interaction (not isolable to any
+individual operator).  Two mitigation paths (drop hurting flags,
+boost corner_div) compose to give 60% reduction.  Below 1.42×
+likely needs operator-level fix.
+
 ## Final state (iter 100 close-out, table updated through iter 103)
 
 Core deliverable RESOLVED at iter 99: HS at C96 30 days completes

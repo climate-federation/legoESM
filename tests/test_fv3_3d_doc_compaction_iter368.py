@@ -38,12 +38,12 @@ def test_iter365_compaction_present(doc_text):
     )
 
 
-def test_doc_size_below_3800_lines(doc_text):
+def test_doc_size_below_3850_lines(doc_text):
     n_lines = len(doc_text.splitlines())
-    assert n_lines < 3800, (
-        f"FV3_3D.md has {n_lines} lines (target < 3800 after iter-"
-        f"486 production-usage section expansion).  Check for "
-        f"re-expansion or missing compaction."
+    assert n_lines < 3850, (
+        f"FV3_3D.md has {n_lines} lines (target < 3850 after iter-"
+        f"488 duogrid investigation synthesis section).  Check "
+        f"for re-expansion or missing compaction."
     )
 
 
@@ -67,6 +67,26 @@ def test_iter423_summary_table_accurate(doc_text):
     # Factory mention
     assert "make_fv3_faithful_pe_config" in section
     assert "make_fv3_faithful_nh_config" in section
+
+
+def test_iter488_duogrid_investigation_summary(doc_text):
+    """iter-488: synthesis section ``Duogrid investigation
+    summary`` exists + mentions key iter numbers."""
+    section_start = doc_text.find(
+        "## Duogrid investigation summary"
+    )
+    section_end = doc_text.find("## Final state", section_start)
+    assert section_start >= 0 and section_end > section_start, (
+        "iter-488 Duogrid investigation summary section "
+        "missing."
+    )
+    section = doc_text[section_start:section_end]
+    # Table uses bare iter numbers in first column.
+    for it_num in ["461", "466", "471", "473", "480", "482", "487"]:
+        assert f"| {it_num} |" in section, (
+            f"iter-488 summary table missing row for iter "
+            f"{it_num}."
+        )
 
 
 def test_iter486_edge_min_factories_doc_section(doc_text):
