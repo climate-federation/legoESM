@@ -69,6 +69,7 @@ _GUARD_MODULES = (
     "test_fv3_sponge_field_scale_iter447",           # iter-447 add
     "test_nh_rayleigh_fast_iter448",                 # iter-448 add
     "test_pe_rayleigh_fast_iter449",                 # iter-449 add
+    "test_rayleigh_fast_ast_guard_iter450",          # iter-450 add
 )
 
 

@@ -919,6 +919,13 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 450: compact iter 435-444 doc block (10 sub-entries) +
+  AST regression guard for iter-448/449 Ray_fast wirings.  Doc
+  shrinks ~80 lines.  iter-368 guard now covers 7 compaction
+  blocks (365/380/390/400/420/430/440/450).  New iter-450 AST
+  guard: 7 tests (helper module, 4 config fields, NH+PE step
+  wiring).  Wired into iter-383 sweep (now 46).  26/26 in
+  0.11 s.
 - Iter 449: PE FV3 ``Ray_fast`` (mirror of NH iter-448).  Same
   ports + helper.  PE has no w; only u_d, v_d are damped.
   Reference profile: ``pfull = (A_full + B_full) * p_ref``.
@@ -964,91 +971,29 @@ Key iterations:
   iter-441/442/443 linear scaling sites.  Catches silent
   drop of a wiring while config field stays declared.  14/14
   in 0.07 s.  Wired into iter-383 sweep (now 41).
-- Iter 444: factory defaults expose FV3 production sponge
-  boost values.  Per FV3 ``fv_arrays.F90``::
-  ``d2_bg_k1 = 4.0``, ``d2_bg_k2 = 2.0``.  NH factory now
-  defaults to ``corner_div_damp_d2_bg_k1=4.0``,
-  ``corner_div_damp_d2_bg_k2=2.0``, ``use_fv3_sponge_damp_w=
-  True``, ``use_fv3_sponge_damp_v=True``.  PE factory the
-  same minus damp_w (PE has no w).  Together with iter-434
-  d_con zeroing + iter-436/437 delt_max/nord defaults, the
-  factory configs now MATCH FV3 production sponge end-to-end.
-  iter-427 step test still passes.  9/9 factory tests + 2/2
-  step test in 70 s.  Wired into iter-383 sweep (now 40).
-- Iter 443: PE mirror of iter-442 sponge boost of ``damp_v``.
-  Same opt-in flag pattern ``use_fv3_sponge_damp_v: bool =
-  False`` on ``CDGridPrimitiveEquationConfig``.  Same linear
-  scaling at k=0 + k=1 (FV3 does NOT extend to k=2 for damp_v).
-  4/4 in 40 s.  Wired into iter-383 sweep (now 39).
-- Iter 442: FV3 sponge boost of NH ``damp_v`` (vorticity
-  damping) coefficient at top levels.  Ports FV3
-  ``dyn_core.F90:786-787, 796-797`` ``damp_vt = 0.5 *
-  d2_divg`` at sponge layers k=0 + k=1 (FV3 does NOT extend
-  to k=2 — only damp_w + d_con zeroing apply there).  New
-  opt-in flag ``use_fv3_sponge_damp_v: bool = False``.  Same
-  linear scaling trick as iter-441 with the FV3-faithful 0.5
-  factor.  4/4 in 69 s.  Wired into iter-383 sweep (now 38).
-- Iter 441: FV3 sponge boost of NH ``damp_w`` coefficient at
-  top levels.  Ports FV3 ``dyn_core.F90:782, 793, 803``
-  ``damp_w = d2_divg`` at sponge layers.  New opt-in flag
-  ``use_fv3_sponge_damp_w: bool = False`` (default OFF =
-  baseline).  When True, exploits linear ``damp^(nord+1)``
-  dependence: ``dw_top *= (boosted/damp_w)^(nord+1)`` at each
-  sponge level — equivalent to recomputing del-n flux with
-  boosted coefficient.  Levels gated on the existing
-  ``corner_div_damp_d2_bg_k1/k2`` fields (k=0 / k=1 / k=2
-  with the same 0.01 / 0.05 thresholds).  4/4 in 67 s.  Wired
-  into iter-383 sweep (now 37).
-- Iter 440: NH mirror of iter-438/439 corner-div sponge boost
-  + compact iter 425-434 doc block.  New helper
-  ``_apply_top_sponge_damp_boost`` factors the per-level
-  override (k=0 via d2_bg_k1; k=1+k=2 via d2_bg_k2 with
-  thresholds 0.01 / 0.05) and is called at BOTH NH corner-div
-  sites (adaptive |delpc|·dt + Smag/nord branch).  Two NH
-  config fields added; default 0 = bit-for-bit baseline.  4/4
-  NH in 67 s + 17/17 doc compaction.  Wired into iter-383
-  sweep (now 36).  doc shrinks ~50 lines.
-- Iter 439: extend iter-438 corner-div sponge boost to k=1 +
-  k=2 (PE).  New config field ``corner_div_damp_d2_bg_k2: float
-  = 0.0`` ports FV3 ``dyn_core.F90:792, 802`` ::
-  ``if d2_bg_k2 > 0.01: k=1 override = max(d2_bg, d2_bg_k2)``
-  ``if d2_bg_k2 > 0.05: k=2 override = max(d2_bg, 0.2*d2_bg_k2)``
-  Faithful Python-static threshold gating.  FV3 production
-  value 2.0.  Default 0.0 preserves baseline.  4/4 in 38 s.
-  Wired into iter-383 sweep (now 35).
-- Iter 438: per-level sponge BOOST of corner-div damping at
-  k=0 (PE).  New config field ``corner_div_damp_d2_bg_k1: float
-  = 0.0`` ports FV3 ``dyn_core.F90:780``::
-  ``d2_divg = max(0.01, d2_bg, d2_bg_k1)``.  When > 0, the k=0
-  level damping coefficient is overridden with
-  ``da_min_c * max(d2_bg, d2_bg_k1)``, bypassing the 0.20 /
-  Smagorinsky cap.  Default 0.0 = bit-for-bit baseline.
-  Currently wired on PE only.  Future iters: extend to k=1
-  via ``d2_bg_k2``, then to NH.  4/4 in 27 s.  Wired into
-  iter-383 sweep (now 34).  Begins closing the "partially
-  closed: sponge mechanism — has zeroing, missing boost" gap.
-- Iter 437: factory defaults expose FV3 production ``nord=1``
-  for both vorticity damping (``nord_v=1``) and corner-div
-  damping (``corner_div_damp_nord=1``) — matches FV3
-  ``fv_arrays.F90`` ``integer :: nord=1``.  Was previously
-  ``nord_v=2`` (del-6) / ``corner_div_damp_nord=0`` (del-2),
-  diverging from FV3 production.  Override to recover other
-  orders.  iter-427 factory step test still passes (8/8 + 7/7).
-  Wired into iter-383 sweep (now 33).  5/5 in 0.7 s.
-- Iter 436: set ``delt_max = 1.0`` in both factory defaults
-  (FV3 ``fv_arrays.F90`` production default — "limiter for
-  dissipative heating rate").  Combines with iter-434's
-  ``d_con_top_zero_levels=2`` so factory configs match FV3
-  production sponge behaviour without per-call magic values.
-  Override with ``delt_max=0.0`` to disable cap.  4/4 in 0.7 s.
-  Wired into iter-383 sweep (now 32).
-- Iter 435: AST regression guard pinning every iter-431/432/
-  433 mask wiring site.  Five wiring sites pinned: NH damp_v,
-  NH damp_w, NH aggregate, PE damp_v, PE aggregate (plus two
-  config-field present checks).  Catches a silent fidelity
-  regression where a refactor drops a mask application at one
-  site while keeping the flag declared.  7/7 in 0.08 s.  Wired
-  into iter-383 sweep (now 31).
+- **Iters 435-444 (compacted iter 450)**: FV3 sponge boost
+  (damping-coefficient side) + factory production defaults.
+  - iter 435: AST regression guard for iter-431/432/433 mask
+    wirings (7 tests).
+  - iter 436: factory default ``delt_max = 1.0`` (FV3
+    ``fv_arrays.F90`` production default).
+  - iter 437: factory default ``nord_v = 1`` /
+    ``corner_div_damp_nord = 1`` (FV3 ``nord=1`` del-4).
+  - iter 438: new PE field ``corner_div_damp_d2_bg_k1`` (FV3
+    ``dyn_core.F90:780`` k=0 sponge boost).
+  - iter 439: new PE field ``corner_div_damp_d2_bg_k2`` (FV3
+    lines 792/802 k=1/k=2 boost with 0.01 / 0.05 thresholds).
+  - iter 440: NH mirror — both fields wired via shared helper
+    ``_apply_top_sponge_damp_boost`` at 2 NH corner-div sites.
+  - iter 441: NH ``use_fv3_sponge_damp_w`` flag — FV3 line
+    782/793/803 ``damp_w = d2_divg``.  Linear ``damp^(nord+1)``
+    scaling trick at sponge levels.
+  - iter 442: NH ``use_fv3_sponge_damp_v`` flag — FV3 lines
+    786-797 ``damp_vt = 0.5 * d2_divg`` (k=0/1 only).
+  - iter 443: PE mirror of iter-442 ``use_fv3_sponge_damp_v``.
+  - iter 444: factory defaults expose FV3 production sponge:
+    ``d2_bg_k1=4.0``, ``d2_bg_k2=2.0``, ``sponge_damp_v=True``
+    (NH+PE), ``sponge_damp_w=True`` (NH).
 - **Iters 425-434 (compacted iter 440)**: factory hardening +
   FV3 sponge d_con zeroing.
   - iter 425: end-to-end smoke of 6 guard modules (27/27).

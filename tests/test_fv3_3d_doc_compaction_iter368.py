@@ -163,6 +163,33 @@ def test_iter390_compaction_covers_topics(doc_text):
         )
 
 
+def test_iter450_compaction_present(doc_text):
+    """iter-450 compacted iter 435-444 into a single block."""
+    assert "**Iters 435-444 (compacted iter 450)**" in doc_text, (
+        "iter-450 compaction block missing — doc re-expanded."
+    )
+
+
+def test_iter450_compaction_covers_topics(doc_text):
+    section_start = doc_text.find(
+        "**Iters 435-444 (compacted iter 450)**"
+    )
+    section_end = doc_text.find(
+        "**Iters 425-434", section_start,
+    )
+    assert section_start >= 0 and section_end > section_start
+    section = doc_text[section_start:section_end]
+    required = [
+        "iter 435", "iter 436", "iter 437", "iter 438",
+        "iter 439", "iter 440", "iter 441", "iter 442",
+        "iter 443", "iter 444",
+    ]
+    for marker in required:
+        assert marker in section, (
+            f"iter-450 compacted block missing topic ``{marker}``."
+        )
+
+
 def test_iter440_compaction_present(doc_text):
     """iter-440 compacted iter 425-434 into a single block."""
     assert "**Iters 425-434 (compacted iter 440)**" in doc_text, (
