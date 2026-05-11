@@ -860,6 +860,11 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 396: iter-392 factory override edge cases.  Verifies
+  ``make_fv3_faithful_*_config(**overrides)`` factories: (1)
+  allow disabling single FV3 flag while keeping others ON,
+  (2) allow opt-out from ALL flags via overrides, (3) accept
+  d_con knob overrides alongside flag enables.  4/4 in 0.7 s.
 - Iter 395: docstring-content regression for iter-394 audit.
   Pins NH dyn_exner docstring mentions (1) ``iter 394`` marker,
   (2) FV3 ``pkz`` equivalence, (3) ``FULL NONLINEAR``
