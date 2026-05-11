@@ -919,6 +919,13 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 429: factory-driven multi-step stability.  3 NH + 3 PE
+  steps with factory configs at C8 — assert each step finite,
+  |u| stays within 100× initial, |θ′| < 50 K, |T| within 2×.
+  Closes iter-427 (1-step finite) → iter-428 (1-step grad
+  finite) → iter-429 (3-step trajectory bounded).  Catches slow
+  exponential growth that single-step misses.  Wired into iter-
+  383 sweep (now 26 modules).  2/2 in 141 s.
 - Iter 428: factory-driven AD-at-rest umbrella.  jax.grad
   through 1 NH step + 1 PE step with factory configs must be
   finite — catches factory-default flag combination introducing
