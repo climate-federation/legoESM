@@ -51,6 +51,58 @@ Documented residual gaps (lower priority, SW-only or non-duogrid):
 - Gap #6 vort/ptc edge halo (fv3_sw_core SW path only)
 - Gap #7 fv_tp_2d s11/s14/s15 (non-duogrid path only)
 
+## Production usage (iter 417)
+
+For FV3-faithful 3D production runs, use the iter-392 factories:
+
+```python
+from legoesm.grids.cubed_sphere import create_cubed_sphere
+from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+    CDGridCompressibleEulerModel, make_fv3_faithful_nh_config,
+)
+from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    CDGridPrimitiveEquationModel, make_fv3_faithful_pe_config,
+)
+
+# Pair factory with duogrid grid (REQUIRED for iter-370
+# cross_face flag to take effect — per iter-384 finding).
+grid = create_cubed_sphere(n=96, use_duogrid=True)
+
+# NH (compressible Euler):
+nh_cfg = make_fv3_faithful_nh_config(
+    damp_v=0.030, nord_v=1, damp_v_d_con=1.0,
+    corner_div_damp_d2_bg=0.0005, corner_div_damp_d_con=1.0,
+    div_damp_coeff=1e6, div_damp_d_con=1.0,
+    A_h=1e6, ah_d_con=1.0,
+    damp_w=0.030, damp_w_d_con=1.0,
+    delt_max=1.0,
+    # All 5 FV3-fidelity flags enabled by factory:
+    #   use_fv3_d_con_cv
+    #   use_fv3_vector_halo_uv
+    #   use_fv3_dynamic_exner
+    #   use_fv3_metric_aware_d_con
+    #   use_fv3_cross_face_du_proj
+)
+
+# PE (hydrostatic):
+pe_cfg = make_fv3_faithful_pe_config(
+    damp_v=0.030, nord_v=1, damp_v_d_con=1.0,
+    corner_div_damp_d2_bg=0.0005, corner_div_damp_d_con=1.0,
+    div_damp_coeff=1e6, div_damp_d_con=1.0,
+    A_h=1e6, ah_d_con=1.0,
+    delt_max=1.0,
+    # All 3 PE FV3-fidelity flags enabled by factory:
+    #   use_fv3_a2b_zeta_corner
+    #   use_fv3_metric_aware_d_con
+    #   use_fv3_cross_face_du_proj
+)
+```
+
+For non-faithful (baseline) behavior, use the bare config
+constructors (``CDGridCompressibleEulerConfig(...)`` /
+``CDGridPrimitiveEquationConfig(...)``) — all flags default
+``False`` for bit-for-bit pre-iter-320 behavior.
+
 ## Final state (iter 100 close-out, table updated through iter 103)
 
 Core deliverable RESOLVED at iter 99: HS at C96 30 days completes
