@@ -816,6 +816,19 @@ Key iterations:
   Combined with iter-320 (post-acoustic damp_v / damp_w) +
   iter-321 (damp_w global) + iter-322 (damp_v global), ALL 5 NH
   d_con sites now have cv-flag verification.  3/3.
+- Iter 341: PE full-stack FV3-fidelity integration regression.
+  PE counterpart of iter-330 NH.  Engages every PE FV3-fidelity
+  flag + full damping toolkit:
+  ``use_duogrid=True`` + ``use_fv3_metric_aware_d_con=True`` +
+  ``use_fv3_a2b_zeta_corner=True`` + iter-12 damp_v + iter-16/18
+  corner-div + iter-5 cell-div_damp + iter-57/58 Smag-A_h + all
+  PE d_con sites + iter-218 delt_max.  PE has fewer flags than
+  NH (per iter-331 PE/NH asymmetry: no cv, no vector halo, no
+  dyn Exner since PE is hydrostatic + corner winds + actual T).
+  2/2: all fields finite + AD-safe at rest under combined
+  stack.  Closes integration-level gap between PE iter-338
+  isolation test and the full PE FV3-faithful production
+  config.  2/2 in 129 s.
 - Iter 340: AST regression guard for iter-338 + iter-339
   metric-aware d_con wiring on PE + NH ``damp_v_d_con`` sites.
   Mirrors iter-327 / iter-329 AST guard pattern.  Asserts: (1)
