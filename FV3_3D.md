@@ -919,6 +919,11 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 424: extend iter-368 doc-structure regression for iter-
+  423 summary-table update.  Asserts (1) all 5 NH FV3-fidelity
+  flags mentioned, (2) PE-specific flag mentioned, (3) factory
+  function names mentioned.  Catches table drift.  13/13 in
+  0.09 s.
 - Iter 422: extend iter-383 sweep with iter-401/iter-413/
   iter-418 (numeric pkz proof, gradient flow, doc-example).
   22 guard modules total.  3/3 in 1 s.

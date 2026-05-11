@@ -47,6 +47,28 @@ def test_doc_size_below_3600_lines(doc_text):
     )
 
 
+def test_iter423_summary_table_accurate(doc_text):
+    """iter-423 summary table mentions all current flags."""
+    section_start = doc_text.find("## FV3-fidelity stack")
+    section_end = doc_text.find("## Production usage", section_start)
+    assert section_start >= 0 and section_end > section_start
+    section = doc_text[section_start:section_end]
+    # All 5 NH flags
+    for flag in [
+        "use_fv3_d_con_cv",
+        "use_fv3_vector_halo_uv",
+        "use_fv3_dynamic_exner",
+        "use_fv3_metric_aware_d_con",
+        "use_fv3_cross_face_du_proj",
+    ]:
+        assert flag in section, f"NH flag {flag} missing from table"
+    # PE-specific flag
+    assert "use_fv3_a2b_zeta_corner" in section
+    # Factory mention
+    assert "make_fv3_faithful_pe_config" in section
+    assert "make_fv3_faithful_nh_config" in section
+
+
 def test_iter417_production_section_present(doc_text):
     """iter-417 added a production-usage section.  Pin it so
     future maintenance doesn't drop the user-facing instructions."""
