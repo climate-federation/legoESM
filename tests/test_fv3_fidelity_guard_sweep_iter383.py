@@ -78,6 +78,7 @@ _GUARD_MODULES = (
     "test_heat_source_del2_iter457",                 # iter-457 add
     "test_pe_heat_source_del2_iter458",              # iter-458 add
     "test_factory_heat_source_del2_default_iter459", # iter-459 add
+    "test_heat_source_del2_ast_iter460",             # iter-460 add
 )
 
 

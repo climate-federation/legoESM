@@ -938,6 +938,13 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 460: compact iter 445-454 doc block (10 sub-entries) +
+  AST regression guard for iter-457/458/459 heat_source del-2
+  wirings.  Doc shrinks ~80 lines.  iter-368 guard now covers
+  8 compaction blocks (365/380/390/400/420/430/440/450/460).
+  New iter-460 AST guard: 8 tests (4 config fields, 2 wiring
+  sites NH+PE, 2 factory defaults).  30/30 in 0.08 s.  Wired
+  into iter-383 sweep (now 55).
 - Iter 459: factory defaults expose FV3 production
   ``heat_source_del2_iters=2`` (FV3 ``nf_ke=min(3, nord+1)=2``
   at nord=1 — combined with iter-437 ``nord_v=1``).  Both NH +
@@ -983,95 +990,24 @@ Key iterations:
   trigger the k=1 override — a known semantic compromise from
   porting Python-static FV3 thresholds.  2/2 in 20 s.  Wired
   into iter-383 sweep (now 50).
-- Iter 454: update iter-417 production-usage doc section with
-  all factory-default flags from iter-431..453.  Doc now lists
-  ``d_con_top_zero_levels``, ``delt_max``, ``nord_v``,
-  ``corner_div_damp_nord``, ``corner_div_damp_d4_bg``,
-  ``use_fv3_sponge_damp_w/v``, ``rf_tau_days`` in factory
-  inline comments.  iter-418 doc-example test extended to
-  assert all 12 new factory defaults.  New iter-368 regression
-  ``test_iter454_doc_example_lists_new_flags``.  Doc size cap
-  bumped 3600 → 3650 lines for expanded section.  22/22 in
-  0.5 s.
-- Iter 453: AST regression guard pinning iter-451 factory
-  ``d4_bg=0.16`` and iter-452 ``d2_bg_k*=0`` rollback.  6
-  tests: 2 assert ``d4_bg=0.16`` present in factory defaults
-  block (NH+PE); 4 assert ``d2_bg_k1`` / ``d2_bg_k2`` NOT
-  present (FV3 normalization mismatch causes blow-up).
-  Catches silent re-introduction of unsafe defaults.  6/6 in
-  0.04 s.  Wired into iter-383 sweep (now 49).
-- Iter 452: scale-honest sponge calibration.  Empirical
-  finding: FV3 production values ``d2_bg_k1=4.0`` /
-  ``d2_bg_k2=2.0`` (iter-444 defaults) assume FV3's specific
-  ``da_min_c × d2`` normalization; in legoESM same numeric
-  values produce ~10⁸×-too-aggressive damping at top → blow-
-  up.  Rolled back factory defaults to 0.0 (sponge flags stay
-  True but no-op without paired k values).  User must set
-  d2_bg_k* explicitly at legoESM-scale-compatible value (e.g.,
-  1e-4).  New iter-452 e2e test verifies sponge boost
-  mechanism IS functional with appropriately small k1 and
-  produces detectable but non-blowup damping.  13/13 (iter-
-  444 + iter-427 still pass, new iter-452 pass) in 75 s.
-  Wired into iter-383 sweep (now 48).
-- Iter 451: factory defaults expose FV3 production
-  ``corner_div_damp_d4_bg = 0.16`` (FV3 ``fv_arrays.F90``
-  ``d4_bg``).  Combined with iter-437 ``nord=1`` (del-4), the
-  FV3 higher-order divergence damping is now active by default.
-  Default 0.0 (no del-4) recoverable via override.  iter-427
-  factory step test still finite.  4/4 in 61 s.  Wired into
-  iter-383 sweep (now 47).
-- Iter 450: compact iter 435-444 doc block (10 sub-entries) +
-  AST regression guard for iter-448/449 Ray_fast wirings.  Doc
-  shrinks ~80 lines.  iter-368 guard now covers 7 compaction
-  blocks (365/380/390/400/420/430/440/450).  New iter-450 AST
-  guard: 7 tests (helper module, 4 config fields, NH+PE step
-  wiring).  Wired into iter-383 sweep (now 46).  26/26 in
-  0.11 s.
-- Iter 449: PE FV3 ``Ray_fast`` (mirror of NH iter-448).  Same
-  ports + helper.  PE has no w; only u_d, v_d are damped.
-  Reference profile: ``pfull = (A_full + B_full) * p_ref``.
-  Two new PE config fields ``rf_tau_days = 0.0``,
-  ``rf_cutoff_pa = 3000.0`` (FV3 production defaults).  Default
-  off = bit-for-bit baseline.  5/5 in 24 s.  Wired into iter-
-  383 sweep (now 45).
-- Iter 448: NH FV3 ``Ray_fast`` (fast Rayleigh friction).  Port
-  of FV3 ``dyn_core.F90:2922-3020`` column Rayleigh damping at
-  model top.  New config fields ``rf_tau_days: float = 0.0``
-  (default 0 = OFF) + ``rf_cutoff_pa: float = 3000.0`` (FV3
-  default 30 hPa).  Helper ``compute_rff_profile`` in new
-  ``core/fv3_rayleigh_fast.py``.  Applied to u, v, w at end of
-  ``step()`` after fix_mass.  Distinct from iter-431..447
-  divergence-damping sponge — RF is explicit column Rayleigh.
-  7/7 in 52 s.  Wired into iter-383 sweep (now 44).  Closes a
-  real remaining FV3 gap (column RF was completely missing).
-- Iter 447: factor linear-scaling FV3 sponge trick (iter-441
-  damp_w + iter-442 NH damp_v + iter-443 PE damp_v) into
-  shared core helper ``apply_top_sponge_field_scale``.  Three
-  duplicate inline blocks (~40 lines each) collapse to one
-  helper call per site.  Helper parametrized by ``factor``
-  (1.0 damp_w vs 0.5 damp_v) and ``apply_at_k2`` (True damp_w
-  vs False damp_v).  iter-445 AST guards updated for new
-  shared-helper pattern (factor=..., apply_at_k2=...).  All
-  iter-441/442/443 numerical tests still pass.  Wired into
-  iter-383 sweep (now 43).  6/6 new + 12/12 regressions in
-  134 s.
-- Iter 446: factor FV3 sponge boost into shared core helper.
-  New module ``legoesm.core.fv3_sponge_boost`` with public
-  ``apply_top_sponge_damp_boost``.  Replaces duplicated impl in
-  iter-440 NH (helper now thin wrapper) and iter-438/439 PE
-  (was inline).  Single source of truth for FV3
-  ``dyn_core.F90:780, 792, 802`` semantics.  All 13 iter-438/
-  439/440 existing tests still pass after refactor — pure
-  factoring, no behavior change.  6/6 new (helper unit tests +
-  NH/PE step sanity) in 125 s.  Wired into iter-383 sweep (now
-  42).
-- Iter 445: AST regression guard for iter-438 through 443 FV3
-  sponge boost wirings.  14 tests: config field presence (7
-  fields across NH+PE), PE iter-438 k=0 / iter-439 k=1+k=2
-  overrides, NH iter-440 helper definition + 2 call sites,
-  iter-441/442/443 linear scaling sites.  Catches silent
-  drop of a wiring while config field stays declared.  14/14
-  in 0.07 s.  Wired into iter-383 sweep (now 41).
+- **Iters 445-454 (compacted iter 460)**: sponge boost shared
+  helper + Rayleigh friction + AST hardening + doc updates.
+  - iter 445: AST guard for iter-438..443 sponge wirings.
+  - iter 446: factor sponge boost to shared core helper
+    ``apply_top_sponge_damp_boost``.
+  - iter 447: factor linear-scaling sponge trick to shared
+    helper ``apply_top_sponge_field_scale``.
+  - iter 448: NH FV3 ``Ray_fast`` column Rayleigh friction.
+  - iter 449: PE mirror of iter-448.
+  - iter 450: compact iter 435-444 doc + AST guard for
+    iter-448/449 RF.
+  - iter 451: factory ``corner_div_damp_d4_bg = 0.16`` (FV3
+    production).
+  - iter 452: rolled back factory ``d2_bg_k*=4.0/2.0`` to 0.0
+    (FV3 normalization mismatch — caused blow-up).
+  - iter 453: AST guard for iter-451/452 factory defaults.
+  - iter 454: update iter-417 doc + iter-418 test for iter-
+    431..453 factory flags.
 - **Iters 435-444 (compacted iter 450)**: FV3 sponge boost
   (damping-coefficient side) + factory production defaults.
   - iter 435: AST regression guard for iter-431/432/433 mask
