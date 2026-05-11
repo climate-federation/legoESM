@@ -919,6 +919,13 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 436: set ``delt_max = 1.0`` in both factory defaults
+  (FV3 ``fv_arrays.F90`` production default — "limiter for
+  dissipative heating rate").  Combines with iter-434's
+  ``d_con_top_zero_levels=2`` so factory configs match FV3
+  production sponge behaviour without per-call magic values.
+  Override with ``delt_max=0.0`` to disable cap.  4/4 in 0.7 s.
+  Wired into iter-383 sweep (now 32).
 - Iter 435: AST regression guard pinning every iter-431/432/
   433 mask wiring site.  Five wiring sites pinned: NH damp_v,
   NH damp_w, NH aggregate, PE damp_v, PE aggregate (plus two

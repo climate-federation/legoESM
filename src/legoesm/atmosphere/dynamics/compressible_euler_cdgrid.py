@@ -1859,6 +1859,8 @@ def make_fv3_faithful_nh_config(**overrides) -> CDGridCompressibleEulerConfig:
         * ``use_fv3_metric_aware_d_con = True`` (iter-339/344)
         * ``use_fv3_cross_face_du_proj = True`` (iter-370)
         * ``d_con_top_zero_levels = 2`` (iter-431/432/434)
+        * ``delt_max = 1.0`` (FV3 ``fv_arrays.F90`` production
+          default — iter-436)
 
     The ``d_con_top_zero_levels=2`` matches FV3 production
     behaviour under the typical sponge namelist
@@ -1885,6 +1887,7 @@ def make_fv3_faithful_nh_config(**overrides) -> CDGridCompressibleEulerConfig:
         use_fv3_metric_aware_d_con=True,
         use_fv3_cross_face_du_proj=True,
         d_con_top_zero_levels=2,
+        delt_max=1.0,
     )
     defaults.update(overrides)
     return CDGridCompressibleEulerConfig(**defaults)
