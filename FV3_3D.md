@@ -860,6 +860,11 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 368: doc-structure regression for iter-365 compaction.
+  Pins (1) compaction marker present, (2) doc size < 3600 lines,
+  (3) all 17 iter-group topic markers present in compacted
+  block.  Catches accidental re-expansion of compacted entries.
+  3/3 in 0.05 s.
 - Iter 367: C16 cv-vs-cp heating ratio test for NH post-acoustic
   d_con sites (damp_v + damp_w).  iter-320 verified c_p/c_v
   ≈ 1.40 at C8; iter-367 confirms ratio holds at C16
