@@ -919,6 +919,14 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 442: FV3 sponge boost of NH ``damp_v`` (vorticity
+  damping) coefficient at top levels.  Ports FV3
+  ``dyn_core.F90:786-787, 796-797`` ``damp_vt = 0.5 *
+  d2_divg`` at sponge layers k=0 + k=1 (FV3 does NOT extend
+  to k=2 — only damp_w + d_con zeroing apply there).  New
+  opt-in flag ``use_fv3_sponge_damp_v: bool = False``.  Same
+  linear scaling trick as iter-441 with the FV3-faithful 0.5
+  factor.  4/4 in 69 s.  Wired into iter-383 sweep (now 38).
 - Iter 441: FV3 sponge boost of NH ``damp_w`` coefficient at
   top levels.  Ports FV3 ``dyn_core.F90:782, 793, 803``
   ``damp_w = d2_divg`` at sponge layers.  New opt-in flag

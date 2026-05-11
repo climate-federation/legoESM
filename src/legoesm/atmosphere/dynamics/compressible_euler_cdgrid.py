@@ -117,6 +117,19 @@ class CDGridCompressibleEulerConfig(NamedTuple):
     corner_div_damp_dddmp: float = 0.20
     corner_div_damp_d4_bg: float = 0.0
     corner_div_damp_nord: int = 0
+    use_fv3_sponge_damp_v: bool = False
+        # FV3-faithful sponge boost of the NH ``damp_v``
+        # (vorticity damping) coefficient at top levels (FV3_3D
+        # iter 442).  FV3 ``dyn_core.F90:786-787, 796-797``
+        # sets ``damp_vt(k) = 0.5 * d2_divg`` at sponge layers
+        # k=1 + k=2 (1-based; our 0-based k=0, k=1).  Note FV3
+        # does NOT extend this to k=3 (only damp_w + d_con
+        # zeroing applies there); the 0.01 / 0.05 gating
+        # follows the corner-div sponge thresholds.
+        # Implementation uses the same ``damp^(nord+1)`` linear
+        # scaling trick as iter-441 (damp_w): at sponge levels,
+        # ``(du, dv) *= (0.5 * boosted / damp_v)^(nord_v+1)``.
+        # Default False preserves bit-for-bit baseline.
     use_fv3_sponge_damp_w: bool = False
         # FV3-faithful sponge boost of the NH ``damp_w``
         # coefficient at top levels (FV3_3D iter 441).  FV3
@@ -1578,6 +1591,47 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
             )
             du_normal = jnp.moveaxis(du_normal_t, 0, -1)
             dv_normal = jnp.moveaxis(dv_normal_t, 0, -1)
+
+            # FV3_3D iter 442: FV3-faithful sponge boost of
+            # damp_v at top levels (k=0, k=1).  Linear scaling
+            # trick: at sponge levels,
+            # ``(du, dv) *= (0.5 * boosted / damp_v)^(nord_v+1)``
+            # — exactly equivalent to recomputing del-n flux with
+            # ``damp_v = 0.5 * d2_divg`` per FV3
+            # ``dyn_core.F90:787, 797``.
+            if self.config.use_fv3_sponge_damp_v:
+                _nord_p1_v = self.config.nord_v + 1
+                _nlev_v = du_normal.shape[-1]
+                _k_idx_v = jnp.arange(_nlev_v)
+                if self.config.corner_div_damp_d2_bg_k1 > 0.0:
+                    _boosted_k1_v = 0.5 * jnp.maximum(
+                        self.config.corner_div_damp_d2_bg,
+                        self.config.corner_div_damp_d2_bg_k1,
+                    )
+                    _scale_k1_v = (
+                        _boosted_k1_v / self.config.damp_v
+                    ) ** _nord_p1_v
+                    # du_normal shape (6, n, n+1, nlev); apply at k=0
+                    du_normal = jnp.where(
+                        _k_idx_v == 0, du_normal * _scale_k1_v, du_normal,
+                    )
+                    dv_normal = jnp.where(
+                        _k_idx_v == 0, dv_normal * _scale_k1_v, dv_normal,
+                    )
+                if self.config.corner_div_damp_d2_bg_k2 > 0.01:
+                    _boosted_k2_v = 0.5 * jnp.maximum(
+                        self.config.corner_div_damp_d2_bg,
+                        self.config.corner_div_damp_d2_bg_k2,
+                    )
+                    _scale_k2_v = (
+                        _boosted_k2_v / self.config.damp_v
+                    ) ** _nord_p1_v
+                    du_normal = jnp.where(
+                        _k_idx_v == 1, du_normal * _scale_k2_v, du_normal,
+                    )
+                    dv_normal = jnp.where(
+                        _k_idx_v == 1, dv_normal * _scale_k2_v, dv_normal,
+                    )
 
             # Project wind increments from FV3 normal D-grid back to
             # corners (mode='edge' padding then averaging — inverse of
