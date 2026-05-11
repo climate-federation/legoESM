@@ -938,6 +938,16 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 467: new factory ``make_legoesm_nh_min_edge_config``
+  exposing the iter-466 empirical finding via a single-call
+  user-facing API.  Disables the 3 iter-466 hurting flags
+  (metric_aware_d_con, heat_source_del2, d_con_top_zero) but
+  keeps all other FV3-faithful flags ON.  Documented as a
+  DIVERGENCE from strict FV3-faithful (factory remains FV3-
+  faithful per CLAUDE.md "do not improvise"; this is a
+  separate opt-in for users prioritizing legoESM-scale edge
+  artifact reduction over strict FV3-fidelity).  5/5 in 28 s.
+  Wired into iter-383 sweep (now 62).
 - Iter 466: **50.4% edge-ratio reduction** via iter-465-
   guided minimal-flag config.  5-seed comparison at C8 +
   duogrid:

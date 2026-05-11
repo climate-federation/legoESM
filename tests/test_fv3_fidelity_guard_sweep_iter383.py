@@ -85,6 +85,7 @@ _GUARD_MODULES = (
     "test_heat_source_del2_sweep_iter464",           # iter-464 add
     "test_per_flag_edge_ratio_iter465",              # iter-465 add
     "test_factory_minimal_edge_iter466",             # iter-466 add
+    "test_make_legoesm_nh_min_edge_config_iter467",  # iter-467 add
 )
 
 

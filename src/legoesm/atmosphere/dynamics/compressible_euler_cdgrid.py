@@ -2126,3 +2126,54 @@ def make_fv3_faithful_nh_config(**overrides) -> CDGridCompressibleEulerConfig:
     )
     defaults.update(overrides)
     return CDGridCompressibleEulerConfig(**defaults)
+
+
+def make_legoesm_nh_min_edge_config(**overrides) -> CDGridCompressibleEulerConfig:
+    """FV3_3D iter 467: NH config optimized for minimum
+    cube-edge artifact in legoESM.
+
+    Applies the iter-466 empirical finding: at C8 + duogrid,
+    the following FV3-faithful flags HURT the edge_var/
+    interior_var θ′ ratio when composed with each other and
+    are therefore turned OFF here:
+
+        * ``use_fv3_metric_aware_d_con  = False`` (Δ = −1.6)
+        * ``heat_source_del2_iters      = 0``      (Δ = −1.4)
+        * ``d_con_top_zero_levels       = 0``      (Δ = −0.6)
+
+    Other FV3-faithful flags (vector_halo_uv, d_con_cv,
+    dynamic_exner, cross_face_du_proj) are retained from the
+    iter-392 factory.
+
+    Empirical effect: iter-466 measured θ′ edge ratio of
+    2.2520 with this config vs 4.5361 with the full FV3
+    factory — a **50.4% reduction** at C8 + duogrid + 3 steps
+    averaged over 5 seeds.
+
+    DISCLAIMER: This is a legoESM-specific calibration based
+    on the iter-465/466 per-flag decomposition at C8.  It
+    represents a DIVERGENCE from FV3 production defaults.  Use
+    ``make_fv3_faithful_nh_config`` for strict FV3-faithful
+    behaviour.  Use this factory only if minimizing cube-edge
+    artifact magnitude at legoESM scale is the priority.
+
+    Parameters
+    ----------
+    **overrides
+        Any config field can be overridden.
+
+    Returns
+    -------
+    CDGridCompressibleEulerConfig
+    """
+    # Start from full FV3-faithful factory, then override the
+    # 3 flags identified by iter-466 as edge-artifact hurters.
+    edge_min_overrides = dict(
+        use_fv3_metric_aware_d_con=False,
+        heat_source_del2_iters=0,
+        d_con_top_zero_levels=0,
+    )
+    # User overrides take precedence over iter-466 overrides,
+    # which take precedence over factory defaults.
+    edge_min_overrides.update(overrides)
+    return make_fv3_faithful_nh_config(**edge_min_overrides)
