@@ -938,6 +938,13 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 483: new user-facing factory
+  ``make_legoesm_nh_min_edge_aggressive_config`` that stacks
+  iter-466 hurting-flag drops + iter-481 d2_bg=5e-2 boost in
+  one call.  Documented as a divergence from FV3-faithful
+  with trade-off (over-damps physical waves) clearly stated.
+  Single-call API for users wanting the 1.42× edge ratio
+  result.  5/5 in 28 s.  Wired into iter-383 sweep (now 78).
 - Iter 482: **combined iter-466 + iter-481 paths reach 1.42×**:
     A. factory full:              3.504×
     B. min-edge (iter-466 path):  1.748×  (-50.1%)
