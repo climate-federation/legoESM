@@ -912,6 +912,9 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 422: extend iter-383 sweep with iter-401/iter-413/
+  iter-418 (numeric pkz proof, gradient flow, doc-example).
+  22 guard modules total.  3/3 in 1 s.
 - Iter 421: extend iter-368 doc-structure regression for iter-
   420 compacted block.  Adds (1) iter-420 marker present, (2)
   all 8 iter-405-414 topics present.  12-test guard now covers

@@ -43,6 +43,9 @@ _GUARD_MODULES = (
     "test_fv3_faithful_factory_docstring_iter406",   # iter-414 add
     "test_fv3_faithful_passes_through_overrides_iter412",  # iter-414 add
     "test_guard_sweep_no_duplicates_iter415",        # iter-416 add
+    "test_iter417_doc_example_iter418",              # iter-422 add
+    "test_dyn_exner_gradient_flow_iter413",          # iter-422 add
+    "test_dyn_exner_equals_pkz_iter401",             # iter-422 add
 )
 
 
