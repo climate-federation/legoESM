@@ -919,6 +919,13 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 445: AST regression guard for iter-438 through 443 FV3
+  sponge boost wirings.  14 tests: config field presence (7
+  fields across NH+PE), PE iter-438 k=0 / iter-439 k=1+k=2
+  overrides, NH iter-440 helper definition + 2 call sites,
+  iter-441/442/443 linear scaling sites.  Catches silent
+  drop of a wiring while config field stays declared.  14/14
+  in 0.07 s.  Wired into iter-383 sweep (now 41).
 - Iter 444: factory defaults expose FV3 production sponge
   boost values.  Per FV3 ``fv_arrays.F90``::
   ``d2_bg_k1 = 4.0``, ``d2_bg_k2 = 2.0``.  NH factory now
