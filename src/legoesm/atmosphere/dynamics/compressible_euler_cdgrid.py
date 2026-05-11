@@ -356,11 +356,12 @@ class CDGridCompressibleEulerConfig(NamedTuple):
         # levels (model-top = lowest k-index after flip).  Default
         # 0 preserves bit-for-bit baseline (no zeroing).  FV3
         # production behaviour is N=1-3 depending on sponge
-        # configuration.  Currently wired ONLY at the post-
-        # acoustic damp_v d_con site (iter-209 mirror); remaining
-        # 4 sites (damp_w, corner_div, div_damp, A_h) pending in
-        # future iters to match FV3's ``d_con_k`` uniform
-        # zeroing semantics.
+        # configuration.  Wired at all 5 NH d_con sites: post-
+        # acoustic damp_v (iter-431) + post-acoustic damp_w + 3
+        # slow-tendency contributions (corner_div, div_damp,
+        # A_h) via the aggregate ``_d_con_sum`` mask (iter-432).
+        # Matches FV3 ``d_con_k`` uniform zeroing across all
+        # damping mechanisms.
     use_fv3_vector_halo_uv: bool = False
         # FV3-faithful vector halo for the cell-centre → D-grid corner
         # interpolation of (u, v) (FV3_3D iter 328).  Default False
@@ -1116,6 +1117,20 @@ def cdgrid_compressible_euler_slow_tendencies(
                 else _d_con_sum + _contrib
             )
     if _d_con_sum is not None:
+        # FV3_3D iter 432: optional FV3-faithful sponge zeroing
+        # of d_con heating in top N levels.  Aggregate cover the
+        # 3 slow-tendency sites (corner_div / div_damp / A_h)
+        # since FV3 ``d_con_k = 0`` zeros ALL d_con sources
+        # uniformly per level — masking the AGGREGATE matches the
+        # FV3 semantics exactly with one mask application.
+        if config.d_con_top_zero_levels > 0:
+            _nlev_zs = _d_con_sum.shape[-1]
+            _k_idx_zs = jnp.arange(_nlev_zs)
+            _d_con_mask_s = jnp.where(
+                _k_idx_zs < config.d_con_top_zero_levels,
+                0.0, 1.0,
+            )
+            _d_con_sum = _d_con_sum * _d_con_mask_s[None, None, None, :]
         if config.delt_max > 0.0:
             _nlev_d = _d_con_sum.shape[-1]
             _k_idx = jnp.arange(_nlev_d)
@@ -1756,6 +1771,17 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
                 dtheta_p = heat_full / (
                     _cx_dw * _exner_eff_dw
                 )
+                # FV3_3D iter 432: optional FV3-faithful sponge
+                # zeroing of d_con heating in top N levels.
+                # Mirror of iter-431 NH damp_v site.
+                if self.config.d_con_top_zero_levels > 0:
+                    _nlev_zw = dtheta_p.shape[-1]
+                    _k_idx_zw = jnp.arange(_nlev_zw)
+                    _d_con_mask_w = jnp.where(
+                        _k_idx_zw < self.config.d_con_top_zero_levels,
+                        0.0, 1.0,
+                    )
+                    dtheta_p = dtheta_p * _d_con_mask_w[None, None, None, :]
                 # FV3_3D iter 218/219: optional per-step cap on
                 # |Δθ_p*Π|.  Sponge-layer factors per FV3
                 # dyn_core.F90:1782-1786 (cv_air branch):

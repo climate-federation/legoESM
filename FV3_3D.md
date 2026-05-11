@@ -919,14 +919,20 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 432: extend iter-431 ``d_con_top_zero_levels`` mask to
+  the remaining 4 NH d_con sites: post-acoustic damp_w + 3
+  slow-tendency contributions (corner_div, div_damp, A_h) via
+  the aggregate ``_d_con_sum`` mask.  Now matches FV3
+  ``dyn_core.F90`` ``d_con_k = 0`` uniform zeroing across all
+  damping mechanisms in sponge layers.  New tests verify damp_w
+  site + slow-tendency aggregate effect is concentrated in top
+  levels.  2/2 in 60 s.  Wired into iter-383 sweep (now 28).
 - Iter 431: FV3-faithful sponge zeroing of d_con KE→heat in
   top N levels (FV3 ``dyn_core.F90:790/800/804`` ``d_con_k=0``
   for k=1/2/3 sponge layers).  New config field
   ``d_con_top_zero_levels: int = 0`` (default 0 = no zeroing =
   bit-for-bit baseline).  Wired at NH post-acoustic damp_v
-  d_con site.  Remaining 4 d_con sites (damp_w post-acoustic
-  + 3 slow-tendency: corner_div, div_damp, A_h) pending future
-  iters.  3/3 in 55 s.  Wired into iter-383 sweep (now 27).
+  d_con site.  3/3 in 55 s.  Wired into iter-383 sweep (now 27).
 - Iter 430: compact iter 415-424 into single block (8 sub-
   entries) + regression test for the new marker.  doc shrinks
   ~25 lines; iter-368 guard now covers 6 compaction blocks

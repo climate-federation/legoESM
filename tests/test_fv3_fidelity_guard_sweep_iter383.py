@@ -51,6 +51,7 @@ _GUARD_MODULES = (
     "test_iter392_factory_ad_umbrella_iter428",      # iter-428 add
     "test_iter392_factory_stability_iter429",        # iter-429 add
     "test_d_con_top_zero_levels_iter431",            # iter-431 add
+    "test_d_con_top_zero_levels_full_iter432",       # iter-432 add
 )
 
 
