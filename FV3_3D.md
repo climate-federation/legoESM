@@ -860,6 +860,10 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 391: extend iter-368 doc-structure regression for
+  iter-390 compacted block.  Adds (1) iter-390 marker present,
+  (2) all 8 iter-375-384 topic groups present.  Mirror of iter-
+  381 extension pattern.  7/7 in 0.08 s.
 - Iter 389: extend iter-383 guard-sweep inventory to include
   iter-388 docstring-content regression.  13 guard modules now
   covered.  2/2 in 0.8 s.
