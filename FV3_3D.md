@@ -938,6 +938,29 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 465: **per-flag NH edge-ratio decomposition** at C8 +
+  duogrid + factory.  Baseline factory ratio θ′: **4.3676**
+  (4× higher than no-duogrid baseline from iter-464!  Duogrid
+  CHANGES the edge metric significantly).  Per-flag deltas
+  (flag OFF − baseline):
+  * ``use_fv3_vector_halo_uv`` OFF:  Δ = +5.02 (flag REDUCES
+    ratio by 5.0 — biggest single contributor)
+  * ``use_fv3_d_con_cv`` OFF:        Δ = +1.65 (cv_air helps)
+  * ``use_fv3_metric_aware_d_con`` OFF: Δ = −1.62 (flag is
+    HURTING — counterintuitive!)
+  * ``heat_source_del2_iters=0``:    Δ = −1.42 (smoothing
+    HURTS at this config — opposite of iter-464 finding
+    without duogrid!)
+  * ``d_con_top_zero_levels=0``:     Δ = −0.58 (zero hurts)
+  * ``use_fv3_cross_face_du_proj`` OFF: Δ ≈ 0
+  * ``use_fv3_dynamic_exner`` OFF:   Δ ≈ 0
+  Major takeaways: (1) duogrid changes the regime fundamentally;
+  (2) ``vector_halo_uv`` is the biggest helper; (3) some flags
+  (metric_aware_d_con, heat_source_del2) HURT in factory+duogrid
+  combination — different from individual-flag finding without
+  duogrid; (4) factory combination is NOT a strict improvement.
+  1/1 in 518 s (8 configs × 3 seeds × 3 steps).  Wired into
+  iter-383 sweep (now 60).
 - Iter 464: **first positive empirical finding** — del-2
   smoothing of NH heat_source (iter-457) actively reduces
   cube-edge variance in θ′ field at C8.  Sweep over
