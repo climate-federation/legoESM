@@ -938,6 +938,16 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 456: introduce quantitative cube-edge artifact metric
+  ``edge_var / interior_var`` over v-wind at face boundaries
+  vs interior cells.  4 tests compute the metric for NH +
+  PE × default + factory configurations (2 steps at C8).
+  Asserts metric is finite + positive — does NOT gate on
+  factory-beats-default ratio because that would be a false
+  positive in some regimes (default may have less spatial
+  structure to discriminate).  Provides infrastructure for
+  future empirical verification of edge-artifact reduction.
+  4/4 in 40 s.  Wired into iter-383 sweep (now 51).
 - Iter 455: document legoESM-scale calibration caveat on
   ``corner_div_damp_d2_bg_k1/k2`` config fields (NH + PE) +
   5-step stability regression at known-good calibration

@@ -74,6 +74,7 @@ _GUARD_MODULES = (
     "test_factory_sponge_e2e_damping_iter452",       # iter-452 add
     "test_factory_d4_bg_d2_bg_k_ast_iter453",        # iter-453 add
     "test_sponge_calibration_5step_iter455",         # iter-455 add
+    "test_cube_edge_artifact_metric_iter456",        # iter-456 add
 )
 
 
