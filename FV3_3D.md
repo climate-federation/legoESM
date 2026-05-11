@@ -938,6 +938,25 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 469: **PE per-flag T edge-ratio decomposition** at C8
+  + duogrid.  Baseline factory T edge ratio: 0.9776.  Per-flag
+  deltas ALL essentially ZERO (max |Δ| = 0.0001):
+    no a2b_zeta_corner          : Δ = +0.0000
+    no metric_aware_d_con       : Δ = +0.0001
+    no cross_face_du_proj       : Δ = −0.0000
+    no heat_source_del2         : Δ = −0.0000
+    no d_con_top_zero           : Δ = +0.0000
+    no sponge_damp_v            : Δ = +0.0000
+  **PE T field is INSENSITIVE to all factory FV3 flags** —
+  opposite of NH iter-465 where flags moved ratio by 1-5
+  units.  Implications: (1) PE T artifact at C8 is dominated
+  by something OTHER than the factory flags (likely intrinsic
+  D-grid corner structure or held_suarez init); (2) iter-468
+  PE min-edge factory is essentially a no-op for T — keep it
+  for API symmetry but warn users.  (iter-461 separately
+  showed PE v_d factory gives 2.5% reduction — PE edge
+  signature is in WINDS, not temperature.)  1/1 in 656 s.
+  Wired into iter-383 sweep (now 64).
 - Iter 468: PE mirror of NH iter-467 ``make_legoesm_pe_min_
   edge_config``.  Same 3 hurting-flag overrides + same
   disclaimer (PE not directly measured in iter-465/466 sweep;

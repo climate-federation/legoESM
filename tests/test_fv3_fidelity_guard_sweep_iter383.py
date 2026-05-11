@@ -87,6 +87,7 @@ _GUARD_MODULES = (
     "test_factory_minimal_edge_iter466",             # iter-466 add
     "test_make_legoesm_nh_min_edge_config_iter467",  # iter-467 add
     "test_make_legoesm_pe_min_edge_config_iter468",  # iter-468 add
+    "test_pe_per_flag_edge_ratio_iter469",           # iter-469 add
 )
 
 
