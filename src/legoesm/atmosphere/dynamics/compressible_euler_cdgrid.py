@@ -347,6 +347,20 @@ class CDGridCompressibleEulerConfig(NamedTuple):
         # SAME quantity as FV3's ``pkz``; no fidelity gap once
         # enabled (iter-336 / iter-337 sites also extended to
         # post-acoustic).
+    d_con_top_zero_levels: int = 0
+        # FV3-faithful sponge-layer zeroing of d_con KE→heat
+        # (FV3_3D iter 431).  Port of FV3 ``dyn_core.F90:773-805``
+        # ``d_con_k = 0`` for the top sponge levels (k=1,2,3
+        # conditional on ``d2_bg_k1``/``d2_bg_k2``).  When > 0,
+        # zeros the d_con heat tendency for the top N vertical
+        # levels (model-top = lowest k-index after flip).  Default
+        # 0 preserves bit-for-bit baseline (no zeroing).  FV3
+        # production behaviour is N=1-3 depending on sponge
+        # configuration.  Currently wired ONLY at the post-
+        # acoustic damp_v d_con site (iter-209 mirror); remaining
+        # 4 sites (damp_w, corner_div, div_damp, A_h) pending in
+        # future iters to match FV3's ``d_con_k`` uniform
+        # zeroing semantics.
     use_fv3_vector_halo_uv: bool = False
         # FV3-faithful vector halo for the cell-centre → D-grid corner
         # interpolation of (u, v) (FV3_3D iter 328).  Default False
@@ -1585,6 +1599,20 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
                 dtheta_p = -self.config.damp_v_d_con * dKE_cc / (
                     _cx_dv * _exner_eff_dv
                 )
+                # FV3_3D iter 431: optional FV3-faithful sponge
+                # zeroing of d_con heating in top N levels.
+                # Mirrors FV3 ``dyn_core.F90:790/800/804``
+                # ``d_con_k = 0`` for k=1,2,3 sponge levels.
+                # ``d_con_top_zero_levels = 0`` (default) → no
+                # change.
+                if self.config.d_con_top_zero_levels > 0:
+                    _nlev_zd = dtheta_p.shape[-1]
+                    _k_idx_zd = jnp.arange(_nlev_zd)
+                    _d_con_mask = jnp.where(
+                        _k_idx_zd < self.config.d_con_top_zero_levels,
+                        0.0, 1.0,
+                    )
+                    dtheta_p = dtheta_p * _d_con_mask[None, None, None, :]
                 # FV3_3D iter 218/219: optional per-step cap on
                 # |Δθ_p*Π| (equivalent to capping |ΔT| to
                 # dt*delt_max in T-space).  FV3 dyn_core.F90:1782-
