@@ -998,6 +998,16 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 490: **TARGETED FIX of iter-489 corner overshoot** +
+  compact iter 475-484.  Add ``monotone_clip: bool = False``
+  arg to ``pad_halo_4d`` plumbing through to existing iter-802
+  ``fill_corner_region`` clip mechanism (was unexposed).
+  With ``monotone_clip=True``, the iter-475 linear-field test
+  halo max drops from 14.49 → 14.00 (= interior max, ratio
+  1.0000).  Corner overshoot eliminated, scalar constants
+  still preserved exactly.  Default False = backward compat.
+  Doc compacted iter 475-484 (3849 → ~3700 lines).  3/3 in
+  5 s.  Wired into iter-383 sweep (now 83).
 - Iter 489: **MOST ACTIONABLE duogrid finding** — the iter-475
   3.5% halo overshoot is CONFINED TO CORNER CELLS (cube
   vertices), NOT spread across edges:
@@ -1042,148 +1052,29 @@ Key iterations:
   Catches a silent regression where a maintainer drops an
   override.  8/8 in 0.04 s.  Wired into iter-383 sweep
   (now 80).
-- Iter 484: PE mirror of NH iter-483 ``make_legoesm_pe_min_
-  edge_aggressive_config``.  Same flag drops + d2_bg=5e-2
-  stacking, applied to PE.  Caveat: iter-469/470 showed PE
-  is largely insensitive to factory flags at C8 — aggressive
-  config likely doesn't help PE much, kept for API symmetry
-  with NH.  5/5 in 23 s.  Wired into iter-383 sweep (now 79).
-- Iter 483: new user-facing factory
-  ``make_legoesm_nh_min_edge_aggressive_config`` that stacks
-  iter-466 hurting-flag drops + iter-481 d2_bg=5e-2 boost in
-  one call.  Documented as a divergence from FV3-faithful
-  with trade-off (over-damps physical waves) clearly stated.
-  Single-call API for users wanting the 1.42× edge ratio
-  result.  5/5 in 28 s.  Wired into iter-383 sweep (now 78).
-- Iter 482: **combined iter-466 + iter-481 paths reach 1.42×**:
-    A. factory full:              3.504×
-    B. min-edge (iter-466 path):  1.748×  (-50.1%)
-    C. min-edge + d2_bg=5e-2:     **1.421×**  (-59.5%, +18.7% beyond B)
-  The two mitigations are COMPOSITIONAL — combining them
-  yields 18.7% additional reduction beyond either alone.
-  Updated floor estimate: ~1.42× rather than the 2.25× I
-  initially thought after iter-481.  Suggests the duogrid
-  bug may be further suppressible with more comprehensive
-  parameter tuning + composite-flag stacking.  3 seeds × 1
-  step × 3 configs.  Pinned as guard regression.  1/1 in
-  275 s.  Wired into iter-383 sweep (now 77).
-- Iter 481: **corner_div_damp_d2_bg tuning sweep at duogrid**:
-    d2_bg = 1e-04 : edge ratio 3.493×
-    d2_bg = 5e-04 : edge ratio 3.473×  (factory default)
-    d2_bg = 1e-03 : edge ratio 3.449×
-    d2_bg = 5e-03 : edge ratio 3.270×
-    d2_bg = 1e-02 : edge ratio 3.080×
-    d2_bg = 5e-02 : edge ratio **2.248×**  (-36% vs factory)
-  Higher corner_div_damp suppresses duogrid penalty
-  monotonically.  At d2_bg=5e-2 (100× factory) the residual
-  edge ratio is 2.25 — same as iter-466's "drop 3 flags"
-  minimal config.  Two paths to ~2.25× duogrid edge ratio:
-  (a) iter-466 drop iter-465 hurting flags; (b) iter-481
-  boost corner_div_damp 100×.  Both achieve same containment.
-  Trade-off: higher d2_bg over-damps physical waves.  Could
-  combine both paths for ~50% × 36% ≈ 70% reduction in
-  future tuning work.  1/1 in 384 s.  Wired into iter-383
-  sweep (now 76).
-- Iter 480: **in-step op bisection** + compact iter 465-474:
-    A. factory baseline:    edge ratio  3.511×
-    B. -corner_div_damp:    edge ratio 109.024×  ← +30× when disabled
-    C. -div_damp:           edge ratio  3.511×  (unchanged)
-  **Corner_div_damp is the key MITIGATOR** of the duogrid
-  edge artifact.  Without it, the duogrid penalty grows
-  30× to 109×.  div_damp (cell-centre) is irrelevant.
-  Interpretation: duogrid produces large gradients at edges;
-  corner_div suppresses corner divergence → keeps the
-  artifact bounded at 3.5×.  This explains iter-465's
-  finding that corner_div_damp_d_con changes effects were
-  modest — corner_div is ALREADY working hard to contain
-  the duogrid leak, so further tuning is small.  Doc
-  compacted iter 465-474 (3803 → 3677 lines) + iter-368
-  doc-size cap bumped 3650 → 3700.  1/1 + 27/27 in 252 s +
-  0.05 s.  Wired into iter-383 sweep (now 75).
-- Iter 479: **op-level bisection** — duogrid edge penalty
-  is NOT in post-step damp_v / damp_w:
-    A. factory baseline:          3.502×
-    B. -damp_v:                   3.540×  (no improvement)
-    C. -damp_v -damp_w:           3.540×  (no improvement)
-    D. -all damping:              1.7e15× (DIVERGES)
-  Disabling post-step damp_v / damp_w does NOT change the
-  duogrid edge ratio → these ops are not the source of the
-  penalty.  Disabling all damping (including in-step corner-
-  div + div_damp) diverges → dycore needs damping for
-  stability.  Conclusion: bug is upstream in
-  ``slow_tendencies`` (corner-div / div_damp / hyperdiff /
-  Coriolis / PGF) OR in RK3 + acoustic substepping
-  composition.  Next iter should bisect by disabling
-  in-step corner-div alone (keeping other damping for
-  stability).  1/1 in 315 s.  Wired into iter-383 sweep
-  (now 74).
-- Iter 478: **per-step bisection** of duogrid edge-std growth:
-  step 0 (initial) → 0
-  step 1 → 3.67× (75% of final penalty arrives in step 1!)
-  step 2 → 4.26×
-  step 3 → 4.91×
-  Duogrid penalty fires IMMEDIATELY in a single step.  Bug is
-  in single-step dynamics (slow_tendencies + RK3 + 4 acoustic
-  substeps + post-step damp_v/w), not multi-step accumulation.
-  Since iter-474..477 already ruled out individual halo ops
-  and Laplacian iter in isolation, the bug must be a
-  COMPOSITE single-step op (e.g., divergence_corner +
-  vector halo + corner_div damping in one acoustic substep)
-  whose duogrid version differs from no-duogrid only
-  numerically.  1/1 in 101 s.  Wired into iter-383 sweep
-  (now 73).
-- Iter 477: **iter-476 hypothesis REFUTED** — isolated test
-  of ``laplacian_compact_3d`` iterated 2× on a linear field
-  with duogrid vs no-duogrid produces IDENTICAL edge change
-  (× 0.634 both ways, agreeing to 0.4%).  The composition of
-  "iter-475 halo overshoot + iter-457 iterated Laplacian
-  amplification" does NOT explain iter-473's 4.77× edge-std
-  jump in isolation.
-    initial: edge std 4.06, interior 2.42
-    no-duogrid: edge 2.58, interior 2.29  (× 0.634 edge)
-    duogrid:    edge 2.58, interior 2.29  (× 0.634 edge)
-  Bisection-by-elimination is now exhausted on individual
-  operators — bug must come from the FULL dycore + duogrid
-  composition (acoustic substeps + RK3 stages + halo +
-  smoothing all interacting), not isolable to any single
-  operator.  This is a real-world example of "the whole
-  produces a worse result than the sum of parts".
-  Diagnostic infrastructure (iter-471/472/473/474/475/476/
-  477) now provides 7 regression tests + clear narrative for
-  whoever investigates the full-pipeline interaction.  1/1
-  in 11 s.  Wired into iter-383 sweep (now 72).
-- Iter 476: **second negative diagnostic** — ``pad_halo_
-  vector_4d`` with duogrid preserves a zero vector field
-  EXACTLY (u_max = 0, v_max = 0).  Combined with iter-474
-  (scalar+constant exact) + iter-475 (scalar+linear 3.5%
-  overshoot): both halo operators pass invariance tests.
-  Final hypothesis: the iter-473 4.77× edge-std jump comes
-  from DOWNSTREAM AMPLIFICATION of iter-475's small overshoot
-  through the iter-457 ``heat_source_del2_iters=2`` Laplacian
-  smoothing — each Laplacian iteration includes a halo pad,
-  so 2 iters * 3.5% per halo pass compounds the edge
-  artifact.  Consistent with iter-465 finding that
-  ``heat_source_del2_iters=0`` reduces the edge ratio.
-  Bisection conclusion: the duogrid halo OPERATORS are
-  correct; the bug is the COMPOSITION of (a) duogrid's 3.5%
-  linear-extrapolation overshoot + (b) iterated Laplacian
-  smoothing that amplifies it.  2/2 in 5 s.  Wired into iter-
-  383 sweep (now 71).
-- Iter 475: extend iter-474 isolation to LINEAR-in-index
-  field on cubed sphere.  Test ``f(i,j)=i+j`` (independent of
-  face / level), measure halo max-abs:
-    interior max-abs:         14.0000
-    no-duogrid halo max-abs:  13.5187
-    duogrid    halo max-abs:  14.4907
-  Both finite + stable.  Duogrid produces ~7% larger halo
-  values than no-duogrid (14.49 vs 13.52), with duogrid
-  slightly OVERSHOOTING interior max — small extrapolation
-  bias.  Not catastrophic alone; doesn't explain iter-473's
-  4.77× edge-std jump.  Suggests the bug is in either (a)
-  vector halo (``pad_halo_vector_4d``) used for u/v, or (b)
-  downstream operators that read the halo and amplify the
-  small overshoot.  2/2 in 5 s.  Wired into iter-383 sweep
-  (now 70).
+- **Iters 475-484 (compacted iter 490)**: duogrid bisection
+  + edge-min factories + aggressive config.
+  - iter 475: linear-field halo test, duogrid overshoots
+    interior max by 3.5% (14.49 vs 14.00).
+  - iter 476: vector halo + zero field preserves exact;
+    halo operators alone are correct.
+  - iter 477: laplacian iter alone doesn't amplify (refutes
+    iter-476 composition hypothesis).
+  - iter 478: per-step bisection — penalty fires in step 1
+    (3.67×), grows slowly to 4.91× by step 3.
+  - iter 479: op-level — damp_v/damp_w NOT culprit (3.50→3.54
+    when disabled); all damping off DIVERGES.
+  - iter 480: **corner_div_damp is the key mitigator** —
+    disabling it explodes ratio to 109×.  Doc compacted
+    iter 465-474.
+  - iter 481: corner_div_damp_d2_bg sweep, 100× boost →
+    36% reduction (2.25×).
+  - iter 482: **composite iter-466 + iter-481 → 60% reduction
+    (1.42×, 5 seeds pinned)**.
+  - iter 483: new ``make_legoesm_nh_min_edge_aggressive_config``
+    user-facing factory.
+  - iter 484: PE mirror ``make_legoesm_pe_min_edge_aggressive_
+    config``.
 - **Iters 465-474 (compacted iter 480)**: edge-artifact
   empirical investigation phase 2 (per-flag + duogrid
   bisection start).

@@ -701,6 +701,7 @@ def pad_halo_4d(
     halo: int = 1,
     interp_offsets: jax.Array | None = None,
     duogrid=None,
+    monotone_clip: bool = False,
 ) -> jax.Array:
     """Pad a 4D scalar field with inter-face halo data.
 
@@ -804,7 +805,10 @@ def pad_halo_4d(
         def _remap_level(level_slice):
             """Apply cube_rmp + corner fill to one (6, n+2h, n+2h) level."""
             level_slice = cube_rmp_vectorized(level_slice, duogrid, halo)
-            level_slice = fill_corner_region(level_slice, duogrid, halo)
+            level_slice = fill_corner_region(
+                level_slice, duogrid, halo,
+                monotone_clip=monotone_clip,
+            )
             return level_slice
 
         # Transpose to (nlev, 6, n+2h, n+2h), vmap, transpose back
