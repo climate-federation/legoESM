@@ -816,6 +816,15 @@ Key iterations:
   Combined with iter-320 (post-acoustic damp_v / damp_w) +
   iter-321 (damp_w global) + iter-322 (damp_v global), ALL 5 NH
   d_con sites now have cv-flag verification.  3/3.
+- Iter 353: AST regression guard for metric-aware d_con wiring
+  at ALL 8 PE+NH d_con sites (iter-338/339/347/348/349/350/351/
+  352).  Mirrors iter-340 pattern.  Asserts: (1) PE source has
+  exactly 4 ``if config.use_fv3_metric_aware_d_con:`` gates,
+  (2) NH source has 4 gates, (3) PE iter markers (338, 347,
+  349, 351) present, (4) NH iter markers (339, 348, 350, 352)
+  present, (5) each metric branch references both
+  ``cosa_cell`` + ``rsin2_cell``.  Catches refactors that drop
+  metric wiring from any site.  5/5 in 0.03 s.
 - Iter 351 + 352: extend metric-aware d_con flag to PE iter-225
   + NH iter-226 A_h d_con (Smagorinsky-A_h slow-tendency) sites.
   **GAP #1 FULLY CLOSED**: all 8 PE+NH d_con sites now have
