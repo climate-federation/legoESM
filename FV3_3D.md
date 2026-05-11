@@ -11,28 +11,35 @@ visible cube imprint (concentric blobs at face centres bordered by
 red/blue rings at panel boundaries) in u/v wind snapshots from
 Held-Suarez and baroclinic test cases.
 
-## FV3-fidelity stack (iter 356 update)
+## FV3-fidelity stack (iter 356/423 update)
 
-By iter-356 the FV3-fidelity opt-in stack closes the major
+By iter-423 the FV3-fidelity opt-in stack closes the major
 documented audit gaps on the 3D paths.
 
-NH config exposes 4 opt-in fidelity flags + duogrid grid:
+NH config exposes 5 opt-in fidelity flags + duogrid grid:
 
 | Flag                              | What            | Iter |
 |-----------------------------------|-----------------|:----:|
-| ``use_fv3_d_con_cv``              | cv_air branch   | 320 |
+| ``use_fv3_d_con_cv``              | cv_air branch (c_pd → c_vd)   | 320 |
 | ``use_fv3_vector_halo_uv``        | vector halo (u, v) center→corner | 328 |
-| ``use_fv3_dynamic_exner``         | live Π=Π_ref+π' at all 5 d_con sites | 336/337 |
+| ``use_fv3_dynamic_exner``         | live Π=Π_ref+π' at all 5 d_con sites + 3 delt_max caps | 336/337/397/398 |
 | ``use_fv3_metric_aware_d_con``    | cosa_s/rsin2 form at all 5 d_con sites | 339/344/348/350/352 |
-| ``use_duogrid=True`` (grid)       | Lagrange-extended halo at 3 NH sites | 325 |
+| ``use_fv3_cross_face_du_proj``    | cross-face halo at damp_v post-step (PAIR with use_duogrid=True per iter 384/385) | 370 |
+| ``use_duogrid=True`` (grid)       | Lagrange-extended halo at 3 NH halo sites | 325 |
 
-PE config exposes 2 opt-in fidelity flags + duogrid grid:
+PE config exposes 3 opt-in fidelity flags + duogrid grid:
 
 | Flag                              | What            | Iter |
 |-----------------------------------|-----------------|:----:|
 | ``use_fv3_a2b_zeta_corner``       | 4th-order A→B ζ corner | 14 |
 | ``use_fv3_metric_aware_d_con``    | cosa_s/rsin2 form at all 4 d_con sites | 338/344/347/349/351 |
+| ``use_fv3_cross_face_du_proj``    | cross-face halo at damp_v post-step | 370 |
 | ``use_duogrid=True`` (grid)       | duogrid wiring at PE ke_correction halo | 333 |
+
+User-facing factory functions (iter-392):
+- ``make_fv3_faithful_pe_config(**overrides)``
+- ``make_fv3_faithful_nh_config(**overrides)``
+return configs with every FV3-fidelity flag enabled.
 
 PE-NH asymmetry (iter-331/343): PE doesn't need cv (PE uses
 cp_air which is FV3-faithful for hydrostatic), vector halo (PE
