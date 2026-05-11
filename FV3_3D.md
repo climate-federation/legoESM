@@ -883,59 +883,24 @@ Key iterations:
   ``create_cubed_sphere(..., use_duogrid=True)`` for cross-face
   VALUE transfer.  14/14 cross_face tests still pass post-
   comment update.
-- Iter 384: independence test for iter-370 cross_face flag +
-  iter-338/339 metric flag.  Verifies flags affect state via
-  INDEPENDENT mechanisms (metric changes T via d_con heat
-  formula; cross_face changes u_d via halo at cube edges).
-  Test compares ``s_both`` against ``s_metric_only`` (using
-  u_d field) AND against ``s_cross_only`` (using T field).
-  Both > 1e-12 confirms no double-cancellation.  Also
-  caught documentation gap: cross_face requires
-  ``use_duogrid=True`` to have any effect (no-op when grid
-  has duogrid=None).  2/2 in 159 s.
-- Iter 383: meta-test inventory + import sweep of every FV3-
-  fidelity AST/structure guard.  Catches iter-382-style suffix
-  collisions / cross-guard interactions at CI time.  Inventories
-  12 guard modules (iter-317/318/319/331/340/342/353/361/362/
-  368/369/373).  2/2 in 0.8 s.
-- Iter 382: **BUG FIX** iter-319 d_con knob count regression
-  caught by full guard sweep.  iter-339 added
-  ``use_fv3_metric_aware_d_con`` field — ends in ``_d_con``
-  substring → iter-319's ``f.endswith('_d_con')`` filter
-  matched it, inflating NH count 5 → 6 + PE count 4 → 5.  Fix
-  filter to exclude ``use_fv3_*`` opt-in flags.  4/4 pass.
-- Iter 381: extend iter-368 doc-structure regression for iter-
-  380 compaction.  Adds (1) iter-380 compaction marker present,
-  (2) all 14 iter-360-374 topics present in compacted block,
-  (3) fix iter-365 section-bounds finder (used to look for
-  ``- Iter 364`` which is now inside iter-380 compacted block).
-  5/5 in 0.07 s.
-- Iter 379: NH counterpart of iter-378.  Tendency-level
-  bit-for-bit linearity for the 3 NH slow-tendency d_con sites
-  under metric form (iter-348/350/352).  Uses
-  ``cdgrid_compressible_euler_slow_tendencies`` directly to
-  bypass acoustic feedback.  ``rtol=1e-10``.  3/3 in 39 s.
-- Iter 378: tendency-level bit-for-bit linearity for the 3 PE
-  slow-tendency d_con sites under metric form (iter-347/349/
-  351).  iter-347 had to relax linearity rtol to 1e-2 at step()
-  level because slow-tendency d_con feeds acoustic
-  substepping; iter-378 extracts ``dT_dt`` via
-  ``fv3_hydrostatic_tendencies`` BEFORE acoustic and pins exact
-  linearity (``rtol=1e-10``).  3/3 in 33 s.
-- Iter 377: PE counterpart of iter-376 at C16.  All 3 PE flags
-  (a2b_zeta, metric, cross_face) + duogrid + full toolkit + 4
-  d_con knobs: does-not-amplify T-imprint + state changes
-  measurably.  2/2 in 88 s.
-- Iter 376: C16 NH full FV3-fidelity stack including iter-370
-  cross_face flag.  Extends iter-358/360 (predated cross_face).
-  All 5 NH flags + duogrid + full toolkit at C16: (1) does-not-
-  amplify v-imprint, (2) state changes measurably (> 1e-6) vs
-  default flags.  2/2 in 103 s.
-- Iter 375: PE counterpart of iter-374.  Full PE FV3-fidelity
-  stack with iter-370 cross_face flag.  All 3 PE flags
-  (a2b_zeta, metric, cross_face) + duogrid + full toolkit + 4
-  d_con knobs.  jax.grad finite through 3 PE steps at rest.
-  1/1 in 213 s.
+- **Iters 375-384 (compacted iter 390)**: cross_face follow-ups
+  + audit/regression infrastructure.
+  - iter 375: PE full-stack AD umbrella with cross_face.
+  - iter 376/377: PE+NH C16 full FV3 stack with cross_face
+    (does-not-amplify + changes-state).
+  - iter 378/379: PE+NH tendency-level metric d_con linearity
+    (bit-for-bit rtol=1e-10, bypasses acoustic feedback).
+  - iter 380: ToC compaction for iter 360-374.
+  - iter 381: extend iter-368 doc-structure regression for
+    iter-380 compaction.
+  - iter 382: **BUG FIX** iter-319 d_con knob count had suffix
+    collision with iter-339's ``use_fv3_metric_aware_d_con``;
+    filter to exclude ``use_fv3_*`` prefix.  Caught by full
+    guard sweep.
+  - iter 383: FV3-fidelity guard sweep meta-test inventories
+    13 guard modules.
+  - iter 384: cross_face + metric flag independence test.
+    Caught no-op-without-duogrid behavior.
 - **Iters 360-374 (compacted iter 380)**: post-iter-365 follow-
   ups + iter-370 cross_face flag wiring.
   - iter 360: NH C16 wiring-active-at-production-resolution.
