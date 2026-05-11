@@ -121,13 +121,20 @@ def _analytical_woa_profiles(
 
 
 def _open_woa_dataset(path: str | Path):
-    """Open a WOA18 file as xarray Dataset (Zarr or NetCDF)."""
+    """Open a WOA18 file as xarray Dataset (Zarr or NetCDF).
+
+    Uses ``decode_times=False`` because the NCEI WOA18 distribution
+    encodes the time axis as ``"months since 1955-01-01"``, which
+    xarray cannot decode without ``cftime`` and which is irrelevant
+    for our use (we only read the annual-mean climatology, which is
+    a single time slice we treat as static).
+    """
     import os
     import xarray as xr
     path_str = str(path)
     if os.path.isdir(path_str) or path_str.endswith(".zarr"):
-        return xr.open_zarr(path_str)
-    return xr.open_dataset(path_str)
+        return xr.open_zarr(path_str, decode_times=False)
+    return xr.open_dataset(path_str, decode_times=False)
 
 
 def load_woa18(

@@ -213,7 +213,7 @@ def _ssp_rk3_tracer_step(
     h_v_old: jnp.ndarray,
     grid,
     dt: float,
-    mask_3d: jnp.ndarray,
+    active_3d: jnp.ndarray,
 ) -> jnp.ndarray:
     """RK3 flux-form tracer advection step (Butcher-tableau form).
 
@@ -253,12 +253,12 @@ def _ssp_rk3_tracer_step(
     # Stage 1
     fd0 = _flux_div(tr)
     tr1 = (h_k_old * tr - dt * fd0) / h_safe
-    tr1 = jnp.where(mask_3d > 0.5, tr1, tr)
+    tr1 = jnp.where(active_3d > 0.5, tr1, tr)
 
     # Stage 2
     fd1 = _flux_div(tr1)
     tr1_adv = (h_k_old * tr1 - dt * fd1) / h_safe
-    tr1_adv = jnp.where(mask_3d > 0.5, tr1_adv, tr)
+    tr1_adv = jnp.where(active_3d > 0.5, tr1_adv, tr)
     tr2 = 0.75 * tr + 0.25 * tr1_adv
 
     # Stage 3 — conservative final update via effective flux
@@ -266,7 +266,7 @@ def _ssp_rk3_tracer_step(
     F_eff = (1.0 / 6.0) * fd0 + (1.0 / 6.0) * fd1 + (2.0 / 3.0) * fd2
     hT_new = h_k_old * tr - dt * F_eff
     tr_new = hT_new / jnp.maximum(h_k_new, 1e-10)
-    tr_new = jnp.where(mask_3d > 0.5, tr_new, tr)
+    tr_new = jnp.where(active_3d > 0.5, tr_new, tr)
 
     return tr_new
 
@@ -609,25 +609,16 @@ class LatLonCGridOceanModel:
             diagnose_momentum=True,
         )
 
-    @partial(jax.jit, static_argnums=(0,))
-    def step(self, state: LatLonCGridOceanState, dt: float,
-             freshwater=None, surface_forcing=None,
-             sponge=None) -> LatLonCGridOceanState:
-        """Advance one time step using split-explicit stepping.
+    def _step_impl(self, state: LatLonCGridOceanState, dt: float,
+                   freshwater=None, surface_forcing=None,
+                   sponge=None) -> LatLonCGridOceanState:
+        """Core step logic — no JIT wrapper.
 
-        Parameters
-        ----------
-        state : LatLonCGridOceanState
-        dt : float
-            Time step [seconds].
-        freshwater : FreshwaterForcing or None
-            Freshwater forcing (P, E, runoff, ice).  If None, no
-            freshwater mass/salt flux is applied.
-        surface_forcing : OceanSurfaceForcing or None
-
-        Returns
-        -------
-        LatLonCGridOceanState
+        Use this directly inside an outer ``@jax.jit`` context (e.g.
+        ``lax.scan`` block functions) to avoid nested JIT boundaries
+        that can cause numerical divergence with partial-cell
+        coordinates.  For standalone calls, use ``step()`` which wraps
+        this in ``@jax.jit``.
         """
         state = cast_pytree(state, None, "compute")
 
@@ -672,13 +663,14 @@ class LatLonCGridOceanModel:
             state.eta.data, state.H_bathy.data, self.z_coord,
             min_water_column_m=self.config.min_water_column_m,
         )
-        # h at u-faces
-        h_u_pre = 0.5 * (jnp.roll(h_k_pre, 1, axis=1) + h_k_pre)
-        h_u_pre = jnp.concatenate([h_u_pre, h_u_pre[:, 0:1, :]], axis=1)
-        # h at v-faces (zero at poles for wall BC).  Single Pad HLO op
-        # replaces alloc-zeros + concatenate-of-three.
-        h_v_pre_int = 0.5 * (h_k_pre[:-1] + h_k_pre[1:])
-        h_v_pre = jnp.pad(h_v_pre_int, ((1, 1), (0, 0), (0, 0)))
+        # h at u-faces — min-rule (MOM6/MITgcm hFacW convention).
+        # Must match the PE tendency which uses min_cell_to_uface, so
+        # that F_slow = depth_avg(du_dt, h_u) is consistent with the
+        # 3D tendency.  Arithmetic mean overestimates face depth at
+        # topographic steps, creating a barotropic-baroclinic residual.
+        h_u_pre = min_cell_to_uface(h_k_pre)
+        # h at v-faces — same min-rule for meridional direction.
+        h_v_pre = min_cell_to_vface(h_k_pre)
 
         # H + F_slow share the per-face h weight on the level axis —
         # fuse the two reductions per face into one stacked sum.
@@ -689,9 +681,49 @@ class LatLonCGridOceanModel:
         H_v_pre = jnp.maximum(_v_pair[..., 0], 1e-10)
         F_slow_v = _v_pair[..., 1] / H_v_pre * state.v_mask.data
 
-        # Perturbation tendency (depth-mean removed) → applied to 3D
+        # Perturbation tendency (depth-mean removed) → applied to 3D.
+        # MUST be computed from the *baroclinic-only* F_slow (before A2 is
+        # added below) so that the depth-mean biharmonic damping acts only
+        # on U_bar, not on the perturbation u' = u - U_bar.
         du_dt_pert = du_dt - F_slow_u[..., jnp.newaxis]
         dv_dt_pert = dv_dt - F_slow_v[..., jnp.newaxis]
+
+        # A2 — depth-mean biharmonic hyperviscosity on (U_bar, V_bar).
+        # Damps the barotropic standing mode at deep cells next to steep
+        # slopes (Rhines 1969 bottom-trapped wave with f≈0) without
+        # touching the baroclinic perturbation u' (already finalized
+        # above as du_dt_pert / dv_dt_pert).  Applied as an additional
+        # slow forcing on the implicit-CN barotropic solver:
+        #   ∂U_bar/∂t |_diss = -ν₄ · ∇⁴ U_bar.
+        # MOM6/HIM BIHARMONIC_BAROTROPIC analog.  No-op at default
+        # ``B_h_barotropic = 0`` (bit-exact backward compat).
+        if getattr(self.config, "B_h_barotropic", 0.0) > 0.0:
+            from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+                vector_bilaplacian_cgrid, biharmonic_scaling_factor,
+            )
+            U_bar = jnp.sum(state.u.data * h_u_pre, axis=-1) / H_u_pre
+            V_bar = jnp.sum(state.v.data * h_v_pre, axis=-1) / H_v_pre
+            U_bar = U_bar * state.u_mask.data
+            V_bar = V_bar * state.v_mask.data
+            bilap_U, bilap_V = vector_bilaplacian_cgrid(
+                U_bar, V_bar, self.grid,
+                mask=state.land_mask.data,
+                u_mask=state.u_mask.data,
+                v_mask=state.v_mask.data,
+            )
+            # cos^4(lat) scaling: lat-lon grid spacing shrinks as
+            # cos(lat) near the poles, so a constant ν₄ would violate
+            # biharmonic CFL there.  Same convention as the layered B_h.
+            scale_u, scale_v = biharmonic_scaling_factor(self.grid)
+            nu4 = jnp.asarray(
+                self.config.B_h_barotropic, dtype=F_slow_u.dtype,
+            )
+            scale_u_b = scale_u.astype(F_slow_u.dtype)[:, None]
+            scale_v_b = scale_v.astype(F_slow_v.dtype)[:, None]
+            F_slow_u = F_slow_u - nu4 * scale_u_b * bilap_U.astype(F_slow_u.dtype)
+            F_slow_v = F_slow_v - nu4 * scale_v_b * bilap_V.astype(F_slow_v.dtype)
+            F_slow_u = F_slow_u * state.u_mask.data
+            F_slow_v = F_slow_v * state.v_mask.data
 
         u_star = state.u.data + dt * du_dt_pert
         v_star = state.v.data + dt * dv_dt_pert
@@ -954,7 +986,7 @@ class LatLonCGridOceanModel:
                         tr, _adv,
                         mass_flux_u, mass_flux_v, w_baro,
                         h_k_old, h_k_new, h_u_old, h_v_old,
-                        self.grid, dt, mask_3d,
+                        self.grid, dt, active_3d,
                     )
                 else:
                     # Compute flux divergence (single evaluation for Euler/AB2)
@@ -985,7 +1017,7 @@ class LatLonCGridOceanModel:
                         hT_new = h_k_old * tr - dt * total_flux_div
 
                     tr_new = hT_new / jnp.maximum(h_k_new, 1e-10)
-                    tr_new = jnp.where(mask_3d > 0.5, tr_new, tr)
+                    tr_new = jnp.where(active_3d > 0.5, tr_new, tr)
 
                     # Store current flux divergence for AB2 carry
                     if _tti == "ab2":
@@ -1054,6 +1086,34 @@ class LatLonCGridOceanModel:
             )
 
         return cast_pytree(state_new, None, "storage")
+
+    @partial(jax.jit, static_argnums=(0,))
+    def step(self, state: LatLonCGridOceanState, dt: float,
+             freshwater=None, surface_forcing=None,
+             sponge=None) -> LatLonCGridOceanState:
+        """Advance one time step using split-explicit stepping.
+
+        JIT-compiled wrapper around ``_step_impl``.  For use inside an
+        outer JIT context (e.g. ``lax.scan``), call ``_step_impl``
+        directly to avoid nested JIT boundaries.
+
+        Parameters
+        ----------
+        state : LatLonCGridOceanState
+        dt : float
+            Time step [seconds].
+        freshwater : FreshwaterForcing or None
+            Freshwater forcing (P, E, runoff, ice).  If None, no
+            freshwater mass/salt flux is applied.
+        surface_forcing : OceanSurfaceForcing or None
+
+        Returns
+        -------
+        LatLonCGridOceanState
+        """
+        return self._step_impl(state, dt, freshwater=freshwater,
+                               surface_forcing=surface_forcing,
+                               sponge=sponge)
 
     def step_checked(
         self,

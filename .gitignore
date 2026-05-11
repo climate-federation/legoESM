@@ -29,6 +29,10 @@ checkpoints/
 data/
 wandb/
 
+# Local-only research-PDF stash (papers consulted while planning).
+# See CLAUDE.md "Code Hygiene Rules" — never committed.
+docs/references/
+
 # Exceptions: the `.nc` files under
 # `src/legoesm/atmosphere/physics/radiation/rrtmgp/optics/rrtmgp_data/`
 # are package-bundled optics tables that must be tracked for RRTMGP
