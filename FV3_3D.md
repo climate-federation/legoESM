@@ -919,6 +919,11 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 425: end-to-end smoke verification of all flag/doc
+  regression guards.  27/27 guard tests pass across 6 modules
+  (iter-368/369/331/383/405/415).  Confirms post-iter-420
+  compaction + iter-423 table-update + 5+ NH flag set + factory
+  exposure all consistent.  27/27 in 1.2 s.
 - Iter 424: extend iter-368 doc-structure regression for iter-
   423 summary-table update.  Asserts (1) all 5 NH FV3-fidelity
   flags mentioned, (2) PE-specific flag mentioned, (3) factory
