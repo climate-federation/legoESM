@@ -81,6 +81,7 @@ _GUARD_MODULES = (
     "test_heat_source_del2_ast_iter460",             # iter-460 add
     "test_factory_reduces_edge_artifact_iter461",    # iter-461 add
     "test_d2_bg_k1_calibration_sweep_iter462",       # iter-462 add
+    "test_rf_tau_calibration_sweep_iter463",         # iter-463 add
 )
 
 

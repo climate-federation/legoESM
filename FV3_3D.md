@@ -938,6 +938,23 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 463: **second diagnostic finding** — ``rf_tau_days``
+  sweep {0, 1, 5, 30} at C8 produces ZERO change in edge
+  ratio for both NH (1.0199) and PE (0.9760).  Explanation:
+  Rayleigh friction is a per-level SCALAR multiplier
+  (``u *= rff[k]``), which scales edge and interior cells
+  identically at each level → variance ratio is invariant.
+  Same insight applies to iter-441/442/443 sponge linear-
+  scaling (also per-level scalar).  These mechanisms damp
+  amplitude but cannot change SPATIAL distribution within a
+  level.  Real diagnostic insight: most of our FV3-fidelity
+  flags affect the level-mean magnitude, not the cube-edge
+  spatial structure.  At C8 with 3 steps the edge metric is
+  essentially level-mean dynamics + intrinsic C-D grid
+  structure — neither responds to our sponge knobs.  Cube
+  imprint suppression likely needs HIGHER resolution (C36+)
+  + LONGER integration before signals emerge.  2/2 in 267 s.
+  Wired into iter-383 sweep (now 58).
 - Iter 462: **diagnostic finding** — ``d2_bg_k1`` sweep over
   4 decades {0, 1e-5, 1e-4, 1e-3} at C8 produces ZERO change
   in NH edge_var/interior_var ratio (1.0143 at all 4 values)
