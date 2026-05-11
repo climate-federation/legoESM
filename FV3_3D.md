@@ -816,6 +816,14 @@ Key iterations:
   Combined with iter-320 (post-acoustic damp_v / damp_w) +
   iter-321 (damp_w global) + iter-322 (damp_v global), ALL 5 NH
   d_con sites now have cv-flag verification.  3/3.
+- Iter 345: re-pin cube-edge concentration of iter-338/339
+  metric d_con form AFTER iter-344's magnitude bug fix.  iter-338
+  originally had an edge-concentration test that passed under
+  the buggy (numerical-zero) impl.  iter-345 re-pins it on the
+  fixed impl: diff ``T(metric) - T(simple)`` concentrates at
+  panel edges with ``edge_max > 1.2 × interior_max`` for both
+  PE + NH.  Proves the cosa_s metric correction lands at cube
+  boundaries (where cosa_s ≠ 0), not bulk shift.  2/2 in 23 s.
 - Iter 344: linearity-in-damp_v_d_con scaling test for iter-338
   PE + iter-339 NH metric forms.  **CAUGHT BUG**: original iter-
   338/339 impl used FV3 ``rdx/rdy`` normalization with cell-
