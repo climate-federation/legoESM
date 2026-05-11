@@ -2047,6 +2047,19 @@ def make_fv3_faithful_nh_config(**overrides) -> CDGridCompressibleEulerConfig:
           production default — iter-437)
         * ``corner_div_damp_nord = 1`` (FV3 ``nord=1`` del-4
           corner-div damping production default — iter-437)
+        * ``corner_div_damp_d2_bg_k1 = 4.0`` (FV3
+          ``fv_arrays.F90`` production sponge boost — iter-444)
+        * ``corner_div_damp_d2_bg_k2 = 2.0`` (FV3 production
+          sponge boost — iter-444)
+        * ``use_fv3_sponge_damp_w = True`` (iter-441/444)
+        * ``use_fv3_sponge_damp_v = True`` (iter-442/444)
+
+    The 4 sponge values together port FV3
+    ``dyn_core.F90:778-805`` ``d2_divg = max(d2_bg, d2_bg_k*)``
+    + ``damp_w = d2_divg`` + ``damp_vt = 0.5 * d2_divg`` at top
+    sponge levels.  Pair with ``damp_v > 0``, ``damp_w > 0``,
+    and ``corner_div_damp_d2_bg > 0`` for the boost to take
+    effect.
 
     The ``d_con_top_zero_levels=2`` matches FV3 production
     behaviour under the typical sponge namelist
@@ -2076,6 +2089,10 @@ def make_fv3_faithful_nh_config(**overrides) -> CDGridCompressibleEulerConfig:
         delt_max=1.0,
         nord_v=1,
         corner_div_damp_nord=1,
+        corner_div_damp_d2_bg_k1=4.0,
+        corner_div_damp_d2_bg_k2=2.0,
+        use_fv3_sponge_damp_w=True,
+        use_fv3_sponge_damp_v=True,
     )
     defaults.update(overrides)
     return CDGridCompressibleEulerConfig(**defaults)

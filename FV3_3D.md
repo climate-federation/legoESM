@@ -919,6 +919,17 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 444: factory defaults expose FV3 production sponge
+  boost values.  Per FV3 ``fv_arrays.F90``::
+  ``d2_bg_k1 = 4.0``, ``d2_bg_k2 = 2.0``.  NH factory now
+  defaults to ``corner_div_damp_d2_bg_k1=4.0``,
+  ``corner_div_damp_d2_bg_k2=2.0``, ``use_fv3_sponge_damp_w=
+  True``, ``use_fv3_sponge_damp_v=True``.  PE factory the
+  same minus damp_w (PE has no w).  Together with iter-434
+  d_con zeroing + iter-436/437 delt_max/nord defaults, the
+  factory configs now MATCH FV3 production sponge end-to-end.
+  iter-427 step test still passes.  9/9 factory tests + 2/2
+  step test in 70 s.  Wired into iter-383 sweep (now 40).
 - Iter 443: PE mirror of iter-442 sponge boost of ``damp_v``.
   Same opt-in flag pattern ``use_fv3_sponge_damp_v: bool =
   False`` on ``CDGridPrimitiveEquationConfig``.  Same linear

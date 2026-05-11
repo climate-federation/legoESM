@@ -63,6 +63,7 @@ _GUARD_MODULES = (
     "test_nh_sponge_damp_w_iter441",                 # iter-441 add
     "test_nh_sponge_damp_v_iter442",                 # iter-442 add
     "test_pe_sponge_damp_v_iter443",                 # iter-443 add
+    "test_factory_sponge_defaults_iter444",          # iter-444 add
 )
 
 
