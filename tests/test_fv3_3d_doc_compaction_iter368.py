@@ -63,6 +63,32 @@ def test_iter417_production_section_present(doc_text):
     assert "use_duogrid=True" in section
 
 
+def test_iter420_compaction_present(doc_text):
+    """iter-420 compacted iter 405-414."""
+    assert "**Iters 405-414 (compacted iter 420)**" in doc_text, (
+        "iter-420 compaction block missing — doc re-expanded."
+    )
+
+
+def test_iter420_compaction_covers_topics(doc_text):
+    section_start = doc_text.find(
+        "**Iters 405-414 (compacted iter 420)**"
+    )
+    section_end = doc_text.find(
+        "- **Iters 395-404", section_start,
+    )
+    assert section_start >= 0 and section_end > section_start
+    section = doc_text[section_start:section_end]
+    required = [
+        "iter 405", "iter 406", "iter 407", "iter 408",
+        "iter 409", "iter 412", "iter 413", "iter 414",
+    ]
+    for marker in required:
+        assert marker in section, (
+            f"iter-420 compacted block missing topic ``{marker}``."
+        )
+
+
 def test_iter400_compaction_present(doc_text):
     """iter-400 compacted iter 385-394 into a single block."""
     assert "**Iters 385-394 (compacted iter 400)**" in doc_text, (

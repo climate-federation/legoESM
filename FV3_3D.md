@@ -912,6 +912,11 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 421: extend iter-368 doc-structure regression for iter-
+  420 compacted block.  Adds (1) iter-420 marker present, (2)
+  all 8 iter-405-414 topics present.  12-test guard now covers
+  5 compaction blocks (iter-365/380/390/400/420).  12/12 in
+  0.09 s.
 - Iter 419: extend iter-368 doc-structure guard for iter-417
   production-usage section.  Pins (1) section header present,
   (2) both factory names mentioned, (3) duogrid pairing
