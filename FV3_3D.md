@@ -938,6 +938,23 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 473: **CONCLUSIVE duogrid root-cause decomposition**:
+  the 5× edge-ratio increase is driven ENTIRELY by an edge
+  std increase, NOT by an interior std decrease.
+    duogrid OFF: edge std = 3.4e-4, interior std = 3.7e-4
+    duogrid ON:  edge std = 1.6e-3, interior std = 3.7e-4
+    duogrid effect: edge × 4.77, interior × 1.00
+  Interior is unaffected; edge std jumps 4.77×.  Refutes the
+  "benign metric artifact" hypothesis — duogrid genuinely
+  makes edges NOISIER in θ′ at C8.  Combined with iter-472
+  (effect persists at C16): a real legoESM-duogrid impl
+  issue affecting cube edges.  Most actionable single finding
+  in the loop — narrows root-cause search to: (a)
+  ``pad_halo_4d`` with duogrid argument; (b) cube-vertex
+  (corner) interpolation in duogrid; (c) higher-order halo
+  treatment at cube edges.  Future investigation should
+  bisect these candidates with targeted unit tests.  1/1
+  in 102 s.  Wired into iter-383 sweep (now 68).
 - Iter 472: **duogrid penalty persists at C16** (4.1× ON/OFF
   vs 5.1× at C8 — only 20% smaller).  Refutes the "regime
   hypothesis" that duogrid only hurts at low resolution.

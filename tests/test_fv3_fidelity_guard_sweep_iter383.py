@@ -91,6 +91,7 @@ _GUARD_MODULES = (
     "test_pe_per_flag_u_d_edge_iter470",             # iter-470 add
     "test_nh_duogrid_effect_iter471",                # iter-471 add
     "test_nh_duogrid_effect_c16_iter472",            # iter-472 add
+    "test_nh_duogrid_raw_std_iter473",               # iter-473 add
 )
 
 
