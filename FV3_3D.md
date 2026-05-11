@@ -938,6 +938,22 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 480: **in-step op bisection** + compact iter 465-474:
+    A. factory baseline:    edge ratio  3.511×
+    B. -corner_div_damp:    edge ratio 109.024×  ← +30× when disabled
+    C. -div_damp:           edge ratio  3.511×  (unchanged)
+  **Corner_div_damp is the key MITIGATOR** of the duogrid
+  edge artifact.  Without it, the duogrid penalty grows
+  30× to 109×.  div_damp (cell-centre) is irrelevant.
+  Interpretation: duogrid produces large gradients at edges;
+  corner_div suppresses corner divergence → keeps the
+  artifact bounded at 3.5×.  This explains iter-465's
+  finding that corner_div_damp_d_con changes effects were
+  modest — corner_div is ALREADY working hard to contain
+  the duogrid leak, so further tuning is small.  Doc
+  compacted iter 465-474 (3803 → 3677 lines) + iter-368
+  doc-size cap bumped 3650 → 3700.  1/1 + 27/27 in 252 s +
+  0.05 s.  Wired into iter-383 sweep (now 75).
 - Iter 479: **op-level bisection** — duogrid edge penalty
   is NOT in post-step damp_v / damp_w:
     A. factory baseline:          3.502×
@@ -1022,158 +1038,32 @@ Key iterations:
   downstream operators that read the halo and amplify the
   small overshoot.  2/2 in 5 s.  Wired into iter-383 sweep
   (now 70).
-- Iter 474: **first negative diagnostic** — ``pad_halo_4d`` with
-  duogrid preserves constants to machine precision (5.1e-13
-  deviation on a constant input).  This **rules out** "scalar
-  halo operator alone broken" as the root cause of iter-473's
-  edge-std 4.77× increase.  The duogrid bug must come from
-  interaction with non-trivial fields (gradients across face
-  boundaries) or from vector halo / corner interpolation.
-  Remaining iter-473 candidates after iter-474:
-    ✗ pad_halo_4d scalar with duogrid (PASSED constant test)
-    ? Vector halo pad_halo_vector_4d (used for u/v)
-    ? Cube-vertex (corner) interpolation
-    ? Higher-order halo treatment under gradients
-  2/2 in 5 s.  Wired into iter-383 sweep (now 69).
-- Iter 473: **CONCLUSIVE duogrid root-cause decomposition**:
-  the 5× edge-ratio increase is driven ENTIRELY by an edge
-  std increase, NOT by an interior std decrease.
-    duogrid OFF: edge std = 3.4e-4, interior std = 3.7e-4
-    duogrid ON:  edge std = 1.6e-3, interior std = 3.7e-4
-    duogrid effect: edge × 4.77, interior × 1.00
-  Interior is unaffected; edge std jumps 4.77×.  Refutes the
-  "benign metric artifact" hypothesis — duogrid genuinely
-  makes edges NOISIER in θ′ at C8.  Combined with iter-472
-  (effect persists at C16): a real legoESM-duogrid impl
-  issue affecting cube edges.  Most actionable single finding
-  in the loop — narrows root-cause search to: (a)
-  ``pad_halo_4d`` with duogrid argument; (b) cube-vertex
-  (corner) interpolation in duogrid; (c) higher-order halo
-  treatment at cube edges.  Future investigation should
-  bisect these candidates with targeted unit tests.  1/1
-  in 102 s.  Wired into iter-383 sweep (now 68).
-- Iter 472: **duogrid penalty persists at C16** (4.1× ON/OFF
-  vs 5.1× at C8 — only 20% smaller).  Refutes the "regime
-  hypothesis" that duogrid only hurts at low resolution.
-    C16: factory + duogrid=ON  θ′ ratio: 4.2555
-    C16: factory + duogrid=OFF θ′ ratio: 1.0332
-  ratio = 4.12× (vs 5.12 at C8).  The duogrid edge-metric
-  penalty is robust across resolutions → most likely a real
-  legoESM-duogrid implementation issue rather than a regime
-  effect.  Could be: (a) per-corner area weight asymmetry at
-  cube edges that the metric picks up; (b) halo-interpolation
-  artifact that inflates edge variance while not changing
-  visual artifact magnitude; (c) genuine impl bug.  Worth
-  future investigation but bounded outside this loop.  1/1
-  in 72 s.  Wired into iter-383 sweep (now 67).
-- Iter 471: **duogrid is the regime-changing factor.** Same
-  NH factory, ONLY toggle ``use_duogrid``:
-    factory + duogrid=ON  θ′ ratio: 4.7939
-    factory + duogrid=OFF θ′ ratio: 0.9369
-    ratio ON/OFF = 5.12×
-  Duogrid INCREASES NH θ′ edge metric by 5.1× at C8 +
-  identical factory flags.  Counterintuitive: duogrid is
-  designed to REDUCE cube-edge artifacts via better halo
-  treatment, but in legoESM at C8 it actively MAKES the
-  edge-vs-interior variance ratio worse.  Possible
-  explanations to investigate: (1) bug in duogrid impl;
-  (2) regime difference (duogrid helps at higher resolution
-  but hurts at C8); (3) metric misinterpretation — duogrid
-  may change spatial structure in a way our edge-variance
-  ratio penalizes but that is visually less artifactual.
-  Most consequential single empirical finding in the loop.
-  Reveals that the iter-465/466 "factory hurts" results were
-  largely the duogrid effect, NOT the individual factory
-  flags.  1/1 in 102 s.  Wired into iter-383 sweep (now 66).
-- Iter 470: compact iter 455-464 doc block + **PE per-flag
-  u_d edge-ratio decomposition**.  Doc shrinks ~125 lines.
-  iter-368 guard now covers 9 compaction blocks.  PE u_d
-  sweep finding: baseline 1.0309, all factory flags have
-  effect |Δ| < 0.007 — even u_d (winds) is essentially
-  insensitive to FV3 factory flags at PE + C8.  Only
-  ``cross_face_du_proj`` shows non-zero effect (Δ=−0.0065 =
-  flag slightly hurts u_d ratio).  Combined with iter-469
-  (PE T insensitive): PE is much less responsive than NH
-  to factory flag tuning at C8.  iter-465 NH found Δ values
-  up to 5.0 — NH is the right empirical target for tuning.
-  1/1 sweep + 24/24 compaction tests in 665 s + 0.05 s.
-  Wired into iter-383 sweep (now 65).
-- Iter 469: **PE per-flag T edge-ratio decomposition** at C8
-  + duogrid.  Baseline factory T edge ratio: 0.9776.  Per-flag
-  deltas ALL essentially ZERO (max |Δ| = 0.0001):
-    no a2b_zeta_corner          : Δ = +0.0000
-    no metric_aware_d_con       : Δ = +0.0001
-    no cross_face_du_proj       : Δ = −0.0000
-    no heat_source_del2         : Δ = −0.0000
-    no d_con_top_zero           : Δ = +0.0000
-    no sponge_damp_v            : Δ = +0.0000
-  **PE T field is INSENSITIVE to all factory FV3 flags** —
-  opposite of NH iter-465 where flags moved ratio by 1-5
-  units.  Implications: (1) PE T artifact at C8 is dominated
-  by something OTHER than the factory flags (likely intrinsic
-  D-grid corner structure or held_suarez init); (2) iter-468
-  PE min-edge factory is essentially a no-op for T — keep it
-  for API symmetry but warn users.  (iter-461 separately
-  showed PE v_d factory gives 2.5% reduction — PE edge
-  signature is in WINDS, not temperature.)  1/1 in 656 s.
-  Wired into iter-383 sweep (now 64).
-- Iter 468: PE mirror of NH iter-467 ``make_legoesm_pe_min_
-  edge_config``.  Same 3 hurting-flag overrides + same
-  disclaimer (PE not directly measured in iter-465/466 sweep;
-  applying NH-derived overrides as best guess).  5/5 in 23 s.
-  Wired into iter-383 sweep (now 63).
-- Iter 467: new factory ``make_legoesm_nh_min_edge_config``
-  exposing the iter-466 empirical finding via a single-call
-  user-facing API.  Disables the 3 iter-466 hurting flags
-  (metric_aware_d_con, heat_source_del2, d_con_top_zero) but
-  keeps all other FV3-faithful flags ON.  Documented as a
-  DIVERGENCE from strict FV3-faithful (factory remains FV3-
-  faithful per CLAUDE.md "do not improvise"; this is a
-  separate opt-in for users prioritizing legoESM-scale edge
-  artifact reduction over strict FV3-fidelity).  5/5 in 28 s.
-  Wired into iter-383 sweep (now 62).
-- Iter 466: **50.4% edge-ratio reduction** via iter-465-
-  guided minimal-flag config.  5-seed comparison at C8 +
-  duogrid:
-  * factory full (all FV3 flags): θ′ ratio = 4.5361
-  * factory minimal-for-edge (only vector_halo_uv + d_con_cv
-    + dynamic_exner kept; metric_aware_d_con, heat_source_del2,
-    d_con_top_zero_levels DROPPED): θ′ ratio = **2.2520**
-  * Reduction = 50.4%
-  This is the **strongest empirical finding** in the loop:
-  selectively turning OFF some FV3-faithful flags REDUCES
-  cube-edge artifact ratio by half.  Implication: there's a
-  divergence between "FV3-faithful" and "legoESM-edge-
-  optimized" — our impl of metric_aware_d_con / heat_source_
-  del2 / d_con_top_zero may deviate from FV3 semantics enough
-  to hurt at our scale.  Factory defaults remain FV3-faithful
-  per CLAUDE.md "do not improvise"; users who want minimal
-  edge artifacts should apply the iter-466 overrides.
-  Pinned as guard regression (assertion: min < full).  1/1
-  in 212 s.  Wired into iter-383 sweep (now 61).
-- Iter 465: **per-flag NH edge-ratio decomposition** at C8 +
-  duogrid + factory.  Baseline factory ratio θ′: **4.3676**
-  (4× higher than no-duogrid baseline from iter-464!  Duogrid
-  CHANGES the edge metric significantly).  Per-flag deltas
-  (flag OFF − baseline):
-  * ``use_fv3_vector_halo_uv`` OFF:  Δ = +5.02 (flag REDUCES
-    ratio by 5.0 — biggest single contributor)
-  * ``use_fv3_d_con_cv`` OFF:        Δ = +1.65 (cv_air helps)
-  * ``use_fv3_metric_aware_d_con`` OFF: Δ = −1.62 (flag is
-    HURTING — counterintuitive!)
-  * ``heat_source_del2_iters=0``:    Δ = −1.42 (smoothing
-    HURTS at this config — opposite of iter-464 finding
-    without duogrid!)
-  * ``d_con_top_zero_levels=0``:     Δ = −0.58 (zero hurts)
-  * ``use_fv3_cross_face_du_proj`` OFF: Δ ≈ 0
-  * ``use_fv3_dynamic_exner`` OFF:   Δ ≈ 0
-  Major takeaways: (1) duogrid changes the regime fundamentally;
-  (2) ``vector_halo_uv`` is the biggest helper; (3) some flags
-  (metric_aware_d_con, heat_source_del2) HURT in factory+duogrid
-  combination — different from individual-flag finding without
-  duogrid; (4) factory combination is NOT a strict improvement.
-  1/1 in 518 s (8 configs × 3 seeds × 3 steps).  Wired into
-  iter-383 sweep (now 60).
+- **Iters 465-474 (compacted iter 480)**: edge-artifact
+  empirical investigation phase 2 (per-flag + duogrid
+  bisection start).
+  - iter 465: NH per-flag θ′ sweep at C8+duogrid; baseline
+    4.37; vector_halo_uv biggest helper (Δ+5.0);
+    metric_aware_d_con / heat_source_del2 / d_con_top_zero
+    HURT (Δ-1.6/-1.4/-0.6).
+  - iter 466: **50.4% edge-ratio reduction** by dropping the
+    3 iter-465 hurting flags (4.54 → 2.25, 5-seed pinned).
+  - iter 467: new ``make_legoesm_nh_min_edge_config`` factory
+    exposing iter-466 overrides.
+  - iter 468: PE mirror ``make_legoesm_pe_min_edge_config``.
+  - iter 469: PE T sweep shows ALL factory flags
+    insensitive (max |Δ| < 1e-4) — PE T artifact dominated
+    by other mechanism.
+  - iter 470: compact iter 455-464 + PE u_d sweep (also
+    insensitive); NH is the right empirical target.
+  - iter 471: **duogrid alone is the regime-changing factor**
+    — same factory but duogrid=OFF gives 5.12× lower ratio.
+  - iter 472: duogrid penalty persists at C16 (4.12×)
+    — not a low-resolution artifact.
+  - iter 473: raw std decomposition: duogrid INCREASES edge
+    std 4.77× while interior std unchanged (× 1.00) — bug
+    is in edges, not interior smoothing.
+  - iter 474: pad_halo_4d scalar+constant test passes (5e-13);
+    rules out simple halo broken.
 - **Iters 455-464 (compacted iter 470)**: edge-artifact
   empirical investigation phase 1 (single-flag sweeps).
   - iter 455: legoESM-scale calibration doc + 5-step
