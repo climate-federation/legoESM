@@ -816,6 +816,15 @@ Key iterations:
   Combined with iter-320 (post-acoustic damp_v / damp_w) +
   iter-321 (damp_w global) + iter-322 (damp_v global), ALL 5 NH
   d_con sites now have cv-flag verification.  3/3.
+- Iter 346: AD-at-rest umbrella for the FULL NH FV3-fidelity
+  stack (all 4 opt-in flags + duogrid grid + full toolkit +
+  d_con).  Combines iter-320 cv + iter-325 duogrid + iter-328
+  vector halo + iter-336/337 dynamic Exner + iter-339 (iter-344
+  fixed) metric-aware d_con.  Catches AD hazards at the new
+  combined-flag surface that iter-332's 6-combo (without metric)
+  and iter-330's all-on-without-metric didn't engage.  1/1
+  jax.grad finite through 3 NH steps at rest.  Closes
+  FV3-fidelity full-stack AD-coverage gap.  1/1 in 212 s.
 - Iter 345: re-pin cube-edge concentration of iter-338/339
   metric d_con form AFTER iter-344's magnitude bug fix.  iter-338
   originally had an edge-concentration test that passed under
