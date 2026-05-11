@@ -860,6 +860,14 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 394: audit + clarify iter-336/337 dynamic Exner =
+  FV3 ``pkz``.  ``compute_exner_perturbation`` returns
+  FULL NONLINEAR ``Π_total = (R_d · ρ · θ / p_0)^(R_d/c_v)``
+  which under EOS ``p = R_d · ρ · T`` equals ``(p/p_0)^kappa``
+  = FV3 ``pkz``.  Resolves previously-flagged "gap #2 dynamic
+  pkz" — iter-336/337 wiring IS the FV3 pkz form, not a
+  linearization.  Source comment updated; 13/13 dyn_exner
+  tests still pass.
 - Iter 393: runtime smoke for iter-392 FV3-faithful factories.
   Both PE + NH factory-built configs (with full damping toolkit
   + duogrid grid) produce finite output through one model step.

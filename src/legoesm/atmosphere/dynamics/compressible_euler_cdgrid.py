@@ -337,6 +337,16 @@ class CDGridCompressibleEulerConfig(NamedTuple):
         # ``Π_ref`` (no live π_prime in scope at step()-method post-
         # acoustic site without recomputation).  PE path uses actual
         # T (no Exner factor), so flag is NH-only.
+        # **iter 394 audit**: ``Π_total = Π_ref + π'`` from
+        # ``compute_exner_perturbation`` (in
+        # ``atmosphere/dynamics/compressible_euler.py``) returns
+        # the FULL NONLINEAR Exner — not a linearization.
+        # ``π_total = (R_d · ρ · θ / p_0)^(R_d/c_v)`` algebraically
+        # equals ``(p/p_0)^kappa`` (= FV3 ``pkz``) under EOS
+        # ``p = R_d · ρ · T``.  So this flag's ``Π_total`` is the
+        # SAME quantity as FV3's ``pkz``; no fidelity gap once
+        # enabled (iter-336 / iter-337 sites also extended to
+        # post-acoustic).
     use_fv3_vector_halo_uv: bool = False
         # FV3-faithful vector halo for the cell-centre → D-grid corner
         # interpolation of (u, v) (FV3_3D iter 328).  Default False
