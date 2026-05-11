@@ -860,6 +860,11 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 375: PE counterpart of iter-374.  Full PE FV3-fidelity
+  stack with iter-370 cross_face flag.  All 3 PE flags
+  (a2b_zeta, metric, cross_face) + duogrid + full toolkit + 4
+  d_con knobs.  jax.grad finite through 3 PE steps at rest.
+  1/1 in 213 s.
 - Iter 374: AD-at-rest umbrella for NH full FV3-fidelity stack
   INCLUDING iter-370 cross_face flag (extends iter-346 which
   predated cross_face).  All 5 NH flags ON + duogrid + full
