@@ -938,6 +938,23 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 479: **op-level bisection** — duogrid edge penalty
+  is NOT in post-step damp_v / damp_w:
+    A. factory baseline:          3.502×
+    B. -damp_v:                   3.540×  (no improvement)
+    C. -damp_v -damp_w:           3.540×  (no improvement)
+    D. -all damping:              1.7e15× (DIVERGES)
+  Disabling post-step damp_v / damp_w does NOT change the
+  duogrid edge ratio → these ops are not the source of the
+  penalty.  Disabling all damping (including in-step corner-
+  div + div_damp) diverges → dycore needs damping for
+  stability.  Conclusion: bug is upstream in
+  ``slow_tendencies`` (corner-div / div_damp / hyperdiff /
+  Coriolis / PGF) OR in RK3 + acoustic substepping
+  composition.  Next iter should bisect by disabling
+  in-step corner-div alone (keeping other damping for
+  stability).  1/1 in 315 s.  Wired into iter-383 sweep
+  (now 74).
 - Iter 478: **per-step bisection** of duogrid edge-std growth:
   step 0 (initial) → 0
   step 1 → 3.67× (75% of final penalty arrives in step 1!)
