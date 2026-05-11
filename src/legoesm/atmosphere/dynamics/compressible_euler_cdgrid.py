@@ -1598,14 +1598,23 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
                         k_idx == 0, 0.1,
                         jnp.where(k_idx == 1, 0.5, 1.0),
                     )
-                    delt_theta_per_level = (
-                        dt * self.config.delt_max
-                        * sponge_factor
-                        / self.height_coord.exner_ref
-                    )
-                    delt_theta_b = delt_theta_per_level[
-                        None, None, None, :
-                    ]
+                    # FV3_3D iter 398: dyn_exner-aware cap (mirror
+                    # of iter-397 aggregate cap fix).
+                    if self.config.use_fv3_dynamic_exner:
+                        sf_b = sponge_factor[None, None, None, :]
+                        delt_theta_b = (
+                            dt * self.config.delt_max
+                            * sf_b / _exner_eff_dv
+                        )
+                    else:
+                        delt_theta_per_level = (
+                            dt * self.config.delt_max
+                            * sponge_factor
+                            / self.height_coord.exner_ref
+                        )
+                        delt_theta_b = delt_theta_per_level[
+                            None, None, None, :
+                        ]
                     dtheta_p = jnp.clip(
                         dtheta_p, -delt_theta_b, delt_theta_b,
                     )
@@ -1730,14 +1739,22 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
                         k_idx == 0, 0.1,
                         jnp.where(k_idx == 1, 0.5, 1.0),
                     )
-                    delt_theta_per_level = (
-                        dt * self.config.delt_max
-                        * sponge_factor
-                        / self.height_coord.exner_ref
-                    )
-                    delt_theta_b = delt_theta_per_level[
-                        None, None, None, :
-                    ]
+                    # FV3_3D iter 398: dyn_exner-aware cap.
+                    if self.config.use_fv3_dynamic_exner:
+                        sf_b = sponge_factor[None, None, None, :]
+                        delt_theta_b = (
+                            dt * self.config.delt_max
+                            * sf_b / _exner_eff_dw
+                        )
+                    else:
+                        delt_theta_per_level = (
+                            dt * self.config.delt_max
+                            * sponge_factor
+                            / self.height_coord.exner_ref
+                        )
+                        delt_theta_b = delt_theta_per_level[
+                            None, None, None, :
+                        ]
                     dtheta_p = jnp.clip(
                         dtheta_p, -delt_theta_b, delt_theta_b,
                     )

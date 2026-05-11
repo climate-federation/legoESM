@@ -860,6 +860,12 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 398: extend dynamic Exner to the 2 POST-ACOUSTIC NH
+  delt_max sponge caps (damp_v + damp_w sites in step()).
+  iter-397 wired the aggregate slow-tendency cap; iter-398
+  closes the post-acoustic counterparts.  Default False
+  bit-for-bit baseline preserved.  13/13 post-acoustic dyn-
+  exner + iter-209 + iter-203 regressions still pass.
 - Iter 397: extend iter-336/337 dynamic Exner to the NH
   aggregate delt_max sponge cap.  iter-336/337 wired
   ``Π_total`` at d_con denominators but the aggregate cap
