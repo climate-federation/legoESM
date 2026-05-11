@@ -816,6 +816,25 @@ Key iterations:
   Combined with iter-320 (post-acoustic damp_v / damp_w) +
   iter-321 (damp_w global) + iter-322 (damp_v global), ALL 5 NH
   d_con sites now have cv-flag verification.  3/3.
+- Iter 344: linearity-in-damp_v_d_con scaling test for iter-338
+  PE + iter-339 NH metric forms.  **CAUGHT BUG**: original iter-
+  338/339 impl used FV3 ``rdx/rdy`` normalization with cell-
+  centre ``rdxa/rdya`` broadcast (~1e-6 at C8) — produced
+  numerical zero in float64 (below T's round-off).  iter-338's
+  ``test_metric_changes_T`` only saw the diff between metric=
+  zero output vs simple form's non-zero — passed for the wrong
+  reason.  iter-344 ``δT(d=2.0) - δT(d=0.5) == 3 · (δT(d=1.0)
+  - δT(d=0.5))`` failed because dT itself was zero.
+  **FIX**: drop FV3 ``rdx/rdy`` normalization; apply
+  ``rsin2_cell``/``cosa_cell`` directly on ``(du, dv)`` at edge
+  stagger.  Equivalent to iter-208/209 in orthogonal limit
+  (cosa=0, rsin2=1); adds cube-edge non-orthogonality
+  correction via cosa_s ≠ 0 + rsin2 > 1 at cube edges.  Both
+  PE + NH linearity now pin ``rtol=1e-10`` exact scaling.
+  Closes magnitude bug in iter-338/339.  18/18 pre-existing
+  tests still pass + 9/9 damp_v_d_con baseline preserved.
+  2/2 iter-344 + iter-338 5/5 + iter-339 5/5 + iter-340 6/6
+  pass.
 - Iter 343: extend iter-331 PE/NH flag-asymmetry guard for
   iter-336/337 ``use_fv3_dynamic_exner`` (NH-only since PE
   uses actual T — no Exner factor) + iter-338/339

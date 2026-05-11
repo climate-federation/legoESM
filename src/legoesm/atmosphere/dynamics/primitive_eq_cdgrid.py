@@ -1803,52 +1803,47 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                     _interp_corner_to_center,
                 )
                 if self.config.use_fv3_metric_aware_d_con:
-                    # FV3_3D iter 338: metric-aware d_con form
-                    # (sw_core.F90:1956-1985).  Uses edge-stagger
-                    # normalized variables + cell-centre rsin2 /
-                    # cosa_s metrics for the FV3-faithful local
-                    # heat distribution.  Edge-rdx / rdy approximated
-                    # by cell-centre rdxa / rdya broadcast (1st-
-                    # order; FV3 has edge-native rdx / rdy).
-                    rdxa_b = self.cdgrid.rdxa[..., None]   # (6,n,n,1)
-                    rdya_b = self.cdgrid.rdya[..., None]
-                    rdya_u = jnp.pad(
-                        rdya_b, [(0,0),(0,0),(0,1),(0,0)],
-                        mode='edge',
-                    )                                        # (6,n,n+1,1)
-                    rdxa_v = jnp.pad(
-                        rdxa_b, [(0,0),(0,1),(0,0),(0,0)],
-                        mode='edge',
-                    )                                        # (6,n+1,n,1)
-
-                    ub_norm = du_normal * rdya_u             # (6,n,n+1,nlev)
-                    fy = u_normal * rdya_u
-                    gy = fy * ub_norm
-                    vb_norm = dv_normal * rdxa_v             # (6,n+1,n,nlev)
-                    fx = v_normal * rdxa_v
-                    gx = fx * vb_norm
-
-                    ub_s = ub_norm[:, :, :-1, :]             # (6,n,n,nlev)
-                    ub_n = ub_norm[:, :, 1:, :]
-                    vb_w = vb_norm[:, :-1, :, :]
-                    vb_e = vb_norm[:, 1:, :, :]
-                    gy_s = gy[:, :, :-1, :]
-                    gy_n = gy[:, :, 1:, :]
-                    gx_w = gx[:, :-1, :, :]
-                    gx_e = gx[:, 1:, :, :]
-                    u2 = fy[:, :, :-1, :] + fy[:, :, 1:, :]
+                    # FV3_3D iter 338 (iter-344 scaling fix):
+                    # metric-aware d_con form using cell-centre
+                    # ``rsin2_cell`` + ``cosa_cell`` non-orthogonality
+                    # correction.  Drops the FV3 rdx/rdy normalization
+                    # (which our cell-centre rdxa/rdya broadcast
+                    # under-resolves at ~1e-6 magnitude → numerical
+                    # zero in float64).  Retains the
+                    # FV3-faithful metric structure:
+                    #     dKE = rsin2 * (
+                    #         sum_4_edges(du², dv²) +
+                    #         2*sum_4_edges(u·du, v·dv) -
+                    #         cosa_s * (u*dv + v*du + du*dv crosses))
+                    # Equivalent to iter-208 simpler form in the
+                    # orthogonal-grid limit (cosa_s = 0, rsin2 = 1);
+                    # adds cube-edge non-orthogonality correction
+                    # via cosa_s ≠ 0 + rsin2 > 1.
+                    ub_s = du_normal[:, :, :-1, :]   # (6,n,n,nlev)
+                    ub_n = du_normal[:, :, 1:, :]
+                    vb_w = dv_normal[:, :-1, :, :]
+                    vb_e = dv_normal[:, 1:, :, :]
+                    u_s = u_normal[:, :, :-1, :]
+                    u_n = u_normal[:, :, 1:, :]
+                    v_w = v_normal[:, :-1, :, :]
+                    v_e = v_normal[:, 1:, :, :]
+                    gy_s = u_s * ub_s
+                    gy_n = u_n * ub_n
+                    gx_w = v_w * vb_w
+                    gx_e = v_e * vb_e
+                    u2 = u_s + u_n
                     du2 = ub_s + ub_n
-                    v2 = fx[:, :-1, :, :] + fx[:, 1:, :, :]
+                    v2 = v_w + v_e
                     dv2 = vb_w + vb_e
                     cosa_b = self.cdgrid.cosa_cell[..., None]
                     rsin2_b = self.cdgrid.rsin2_cell[..., None]
 
-                    heat_cc = -0.25 * self.config.damp_v_d_con * rsin2_b * (
+                    dKE_cc_metric = 0.25 * rsin2_b * (
                         ub_s ** 2 + ub_n ** 2 + vb_w ** 2 + vb_e ** 2
                         + 2.0 * (gy_s + gy_n + gx_w + gx_e)
                         - cosa_b * (u2 * dv2 + v2 * du2 + du2 * dv2)
                     )
-                    dT = heat_cc / constants.c_pd
+                    dT = -self.config.damp_v_d_con * dKE_cc_metric / constants.c_pd
                 else:
                     dKE_corner = (
                         u_corner * du_corner + 0.5 * du_corner ** 2
