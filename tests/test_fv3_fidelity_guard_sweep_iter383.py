@@ -39,6 +39,9 @@ _GUARD_MODULES = (
     "test_cross_face_duogrid_pairing_doc_iter388",   # iter-389 add
     "test_dyn_exner_pkz_equivalence_doc_iter395",    # iter-395 add
     "test_fv3_faithful_factory_signature_iter402",   # iter-403 add
+    "test_fv3_flag_count_consistency_iter405",       # iter-414 add
+    "test_fv3_faithful_factory_docstring_iter406",   # iter-414 add
+    "test_fv3_faithful_passes_through_overrides_iter412",  # iter-414 add
 )
 
 
