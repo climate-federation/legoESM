@@ -856,6 +856,13 @@ Key iterations:
   Combined with iter-320 (post-acoustic damp_v / damp_w) +
   iter-321 (damp_w global) + iter-322 (damp_v global), ALL 5 NH
   d_con sites now have cv-flag verification.  3/3.
+- Iter 357: C16 cube-imprint regression for PE metric flag.
+  Bounded "does-not-amplify" check at C16 (where signal is
+  bigger than C8 per iter-179): full PE FV3 toolkit + metric=
+  True must not amplify ``edge_std/interior_std`` (T-field) by
+  > 10 % vs full toolkit + metric=False.  1/1 in 22 s.  Closes
+  basic regression coverage for the new metric flag at a
+  resolution with measurable imprint.
 - Iter 355: AD-at-rest umbrella for the FULL PE FV3-fidelity
   stack.  PE counterpart of NH iter-346.  Engages every PE
   FV3-fidelity flag + full toolkit + all 4 d_con knobs:
