@@ -294,6 +294,16 @@ class CDGridCompressibleEulerConfig(NamedTuple):
         # refinement).  Default 0.0 preserves bit-for-bit baseline;
         # gated INSIDE ``corner_div_damp_d2_bg > 0``.  FV3
         # production default is 1.0.
+    use_fv3_cross_face_du_proj: bool = False
+        # FV3-faithful cross-face halo for iter-169 damp_v
+        # post-step wind-increment projection back to corners
+        # (FV3_3D iter 370, NH mirror of PE iter-370).  Default
+        # mode='edge' (same-face); True uses pad_halo_4d
+        # (duogrid-aware) for cross-face value.
+        # **iter 384 finding**: flag is a NO-OP when grid was
+        # constructed with ``use_duogrid=False`` (pair with
+        # ``create_cubed_sphere(..., use_duogrid=True)`` for
+        # actual cross-face VALUE transfer).
     use_fv3_metric_aware_d_con: bool = False
         # FV3-faithful metric-aware d_con KE→heat form for the
         # NH iter-209 ``damp_v_d_con`` site (FV3_3D iter 339, mirror
@@ -327,6 +337,16 @@ class CDGridCompressibleEulerConfig(NamedTuple):
         # ``Π_ref`` (no live π_prime in scope at step()-method post-
         # acoustic site without recomputation).  PE path uses actual
         # T (no Exner factor), so flag is NH-only.
+        # **iter 394 audit**: ``Π_total = Π_ref + π'`` from
+        # ``compute_exner_perturbation`` (in
+        # ``atmosphere/dynamics/compressible_euler.py``) returns
+        # the FULL NONLINEAR Exner — not a linearization.
+        # ``π_total = (R_d · ρ · θ / p_0)^(R_d/c_v)`` algebraically
+        # equals ``(p/p_0)^kappa`` (= FV3 ``pkz``) under EOS
+        # ``p = R_d · ρ · T``.  So this flag's ``Π_total`` is the
+        # SAME quantity as FV3's ``pkz``; no fidelity gap once
+        # enabled (iter-336 / iter-337 sites also extended to
+        # post-acoustic).
     use_fv3_vector_halo_uv: bool = False
         # FV3-faithful vector halo for the cell-centre → D-grid corner
         # interpolation of (u, v) (FV3_3D iter 328).  Default False
@@ -1442,13 +1462,24 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
             # Project wind increments from FV3 normal D-grid back to
             # corners (mode='edge' padding then averaging — inverse of
             # the corner→face averaging used at the start).
-            du_pad = jnp.pad(
-                du_normal, [(0, 0), (1, 1), (0, 0), (0, 0)], mode="edge",
-            )
+            # FV3_3D iter 370: optional cross-face halo (mirror of
+            # PE iter-370 wiring).
+            if self.config.use_fv3_cross_face_du_proj:
+                _dg = self.grid.duogrid
+                du_full = _pad_halo_4d_module(du_normal, duogrid=_dg)
+                du_pad = du_full[:, :, 1:-1, :]
+                dv_full = _pad_halo_4d_module(dv_normal, duogrid=_dg)
+                dv_pad = dv_full[:, 1:-1, :, :]
+            else:
+                du_pad = jnp.pad(
+                    du_normal, [(0, 0), (1, 1), (0, 0), (0, 0)],
+                    mode="edge",
+                )
+                dv_pad = jnp.pad(
+                    dv_normal, [(0, 0), (0, 0), (1, 1), (0, 0)],
+                    mode="edge",
+                )
             du_corner = 0.5 * (du_pad[:, :-1, :, :] + du_pad[:, 1:, :, :])
-            dv_pad = jnp.pad(
-                dv_normal, [(0, 0), (0, 0), (1, 1), (0, 0)], mode="edge",
-            )
             dv_corner = 0.5 * (dv_pad[:, :, :-1, :] + dv_pad[:, :, 1:, :])
 
             # Project corner wind increments back to cell centres for
@@ -1726,3 +1757,38 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
         return self.step(state, dt, physics_fn=physics_fn)
 
     # integrate() and integrate_scan() inherited from IntegrationMixin
+
+
+def make_fv3_faithful_nh_config(**overrides) -> CDGridCompressibleEulerConfig:
+    """FV3_3D iter 392: factory for FV3-faithful NH config.
+
+    Enables every NH FV3-fidelity flag at production-recommended
+    values.  Pair with ``create_cubed_sphere(..., use_duogrid=True)``
+    so the iter-325 NH halo wiring + iter-370 cross_face flag
+    actually transfer cross-face values.
+
+    Includes:
+        * ``use_fv3_d_con_cv = True`` (iter-320)
+        * ``use_fv3_vector_halo_uv = True`` (iter-328)
+        * ``use_fv3_dynamic_exner = True`` (iter-336/337)
+        * ``use_fv3_metric_aware_d_con = True`` (iter-339/344)
+        * ``use_fv3_cross_face_du_proj = True`` (iter-370)
+
+    Parameters
+    ----------
+    **overrides
+        Any config field can be overridden.
+
+    Returns
+    -------
+    CDGridCompressibleEulerConfig
+    """
+    defaults = dict(
+        use_fv3_d_con_cv=True,
+        use_fv3_vector_halo_uv=True,
+        use_fv3_dynamic_exner=True,
+        use_fv3_metric_aware_d_con=True,
+        use_fv3_cross_face_du_proj=True,
+    )
+    defaults.update(overrides)
+    return CDGridCompressibleEulerConfig(**defaults)

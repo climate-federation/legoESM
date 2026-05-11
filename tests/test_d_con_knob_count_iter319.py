@@ -44,10 +44,13 @@ from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
 
 
 def _d_con_field_names(config_cls):
-    """Return all field names ending in '_d_con'."""
+    """Return all field names ending in '_d_con' (exclude
+    ``use_fv3_*`` opt-in flags that happen to contain the
+    ``_d_con`` substring — iter-339 added
+    ``use_fv3_metric_aware_d_con``)."""
     return {
         f for f in config_cls._fields
-        if f.endswith("_d_con")
+        if f.endswith("_d_con") and not f.startswith("use_fv3_")
     }
 
 

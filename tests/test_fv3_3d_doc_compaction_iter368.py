@@ -47,6 +47,60 @@ def test_doc_size_below_3600_lines(doc_text):
     )
 
 
+def test_iter390_compaction_present(doc_text):
+    """iter-390 compacted iter 375-384 into a single block."""
+    assert "**Iters 375-384 (compacted iter 390)**" in doc_text, (
+        "iter-390 compaction block missing — doc re-expanded."
+    )
+
+
+def test_iter390_compaction_covers_topics(doc_text):
+    section_start = doc_text.find(
+        "**Iters 375-384 (compacted iter 390)**"
+    )
+    section_end = doc_text.find(
+        "- **Iters 360-374", section_start,
+    )
+    assert section_start >= 0 and section_end > section_start
+    section = doc_text[section_start:section_end]
+    required = [
+        "iter 375", "iter 376/377", "iter 378/379", "iter 380",
+        "iter 381", "iter 382", "iter 383", "iter 384",
+    ]
+    for marker in required:
+        assert marker in section, (
+            f"iter-390 compacted block missing topic ``{marker}``."
+        )
+
+
+def test_iter380_compaction_present(doc_text):
+    """iter-380 compacted iter 360-374 into a single block."""
+    assert "**Iters 360-374 (compacted iter 380)**" in doc_text, (
+        "iter-380 compaction block missing — doc re-expanded."
+    )
+
+
+def test_iter380_compaction_covers_topics(doc_text):
+    """iter-380 block lists every iter 360-374 topic."""
+    section_start = doc_text.find(
+        "**Iters 360-374 (compacted iter 380)**"
+    )
+    section_end = doc_text.find("**TL;DR**", section_start)
+    assert section_start >= 0 and section_end > section_start, (
+        "Could not locate iter-380 compacted section."
+    )
+    section = doc_text[section_start:section_end]
+    required = [
+        "iter 360", "iter 361/362", "iter 363", "iter 364",
+        "iter 365", "iter 366", "iter 367", "iter 368", "iter 369",
+        "iter 370", "iter 371", "iter 372", "iter 373", "iter 374",
+    ]
+    for marker in required:
+        assert marker in section, (
+            f"iter-380 compacted block missing topic ``{marker}``."
+        )
+
+
 def test_iter365_compaction_covers_all_topics(doc_text):
     """Compacted block lists every iter 320-359 topic group."""
     required_markers = [
@@ -72,7 +126,13 @@ def test_iter365_compaction_covers_all_topics(doc_text):
     section_start = doc_text.find(
         "**Iters 320-359 (compacted iter 365)**"
     )
-    section_end = doc_text.find("- Iter 364", section_start)
+    # iter-380 compacted iter 364 into a block; section_end now
+    # bounds at the next compaction block start.
+    section_end = doc_text.find(
+        "- **Iters 360-374", section_start,
+    )
+    if section_end < 0:
+        section_end = len(doc_text)
     assert section_start >= 0 and section_end > section_start, (
         "Could not locate compacted section bounds."
     )

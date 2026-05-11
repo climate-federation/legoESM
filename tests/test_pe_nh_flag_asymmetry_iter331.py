@@ -52,8 +52,12 @@ _NH_ONLY_FV3_FLAGS = (
     "use_fv3_vector_halo_uv",
     "use_fv3_dynamic_exner",   # iter-336/337
 )
-# Flags PE + NH BOTH expose (iter-338 + iter-339 metric-aware).
-_SHARED_FV3_FLAGS = ("use_fv3_metric_aware_d_con",)
+# Flags PE + NH BOTH expose (iter-338 + iter-339 metric-aware,
+# iter-370 cross-face du projection).
+_SHARED_FV3_FLAGS = (
+    "use_fv3_metric_aware_d_con",
+    "use_fv3_cross_face_du_proj",
+)
 
 
 def test_pe_does_not_expose_use_fv3_dynamic_exner():

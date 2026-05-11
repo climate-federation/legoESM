@@ -41,10 +41,12 @@ _NH_FLAGS = (
     "use_fv3_vector_halo_uv",
     "use_fv3_dynamic_exner",
     "use_fv3_metric_aware_d_con",
+    "use_fv3_cross_face_du_proj",   # iter-370
 )
 _PE_FLAGS = (
     "use_fv3_a2b_zeta_corner",
     "use_fv3_metric_aware_d_con",
+    "use_fv3_cross_face_du_proj",   # iter-370
 )
 
 
