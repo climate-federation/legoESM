@@ -297,6 +297,11 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # the T (cell-centre) update.  Default 0.0 preserves
         # baseline bit-for-bit (gated INSIDE the iter-12
         # ``damp_v > 0`` block).  FV3 production default is 1.0.
+        # **iter 338 update**: opt-in port of the FV3 metric-aware
+        # d_con form is now available via
+        # ``use_fv3_metric_aware_d_con`` (see field below).  The
+        # default ``False`` retains the iter-208 simpler form for
+        # bit-for-bit baseline.
         # **Known fidelity gap (iter 238 audit, iter 324 update)**:
         # FV3's actual d_con formula at sw_core.F90:1980 uses a
         # metric-aware variant:
@@ -370,6 +375,29 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # ``corner_div_damp_d2_bg > 0`` block.  FV3 production
         # default is ``d_con = 1.0``.  The iter-218/219 sponge-
         # aware ``delt_max`` cap also applies to this heating term.
+    use_fv3_metric_aware_d_con: bool = False
+        # FV3-faithful metric-aware d_con KE→heat form for the
+        # iter-208 ``damp_v_d_con`` site (FV3_3D iter 338).  Port of
+        # FV3 ``sw_core.F90:1956-1985`` block:
+        #
+        #     heat_cc = -0.25 * d_con * rsin2 * (
+        #         sum_4_edges(ub², vb²) + 2*sum_4_edges(gy, gx)
+        #         - cosa_s * (u2*dv2 + v2*du2 + du2*dv2))
+        #
+        # where ub = du * rdx, fy = u * rdx, gy = fy * ub (analogous
+        # for vb, gx) and rsin2 / cosa_s are the cubed-sphere C-grid
+        # non-orthogonality metrics at the cell centre.  The simpler
+        # iter-208 form ``ΔKE = u·du + 0.5·du² + ...`` is equivalent
+        # in the orthogonal-grid limit and conserves GLOBAL energy
+        # exactly; the metric-aware form gives the FV3-faithful
+        # LOCAL distribution at cube edges where ``cosa_s ≠ 0``.
+        # When True, swaps the iter-208 form for the metric-aware
+        # form at the damp_v_d_con site only (corner_div /
+        # div_damp / A_h d_con sites stay with the simpler form
+        # since FV3 has separate KE accounting paths for those).
+        # Uses cell-centre ``rdxa / rdya`` broadcast to edge stagger
+        # (1st-order approximation; FV3 has edge-native ``rdx /
+        # rdy``).  Default False preserves bit-for-bit baseline.
     use_fv3_a2b_zeta_corner: bool = False
         # FV3-faithful 4th-order A→B interpolation for the relative
         # vorticity ``ζ`` from cell centres to D-grid corners (the
@@ -1774,12 +1802,60 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                 from legoesm.core.operators_cdgrid import (
                     _interp_corner_to_center,
                 )
-                dKE_corner = (
-                    u_corner * du_corner + 0.5 * du_corner ** 2
-                    + v_corner * dv_corner + 0.5 * dv_corner ** 2
-                )
-                dKE_cc = _interp_corner_to_center(dKE_corner)
-                dT = -self.config.damp_v_d_con * dKE_cc / constants.c_pd
+                if self.config.use_fv3_metric_aware_d_con:
+                    # FV3_3D iter 338: metric-aware d_con form
+                    # (sw_core.F90:1956-1985).  Uses edge-stagger
+                    # normalized variables + cell-centre rsin2 /
+                    # cosa_s metrics for the FV3-faithful local
+                    # heat distribution.  Edge-rdx / rdy approximated
+                    # by cell-centre rdxa / rdya broadcast (1st-
+                    # order; FV3 has edge-native rdx / rdy).
+                    rdxa_b = self.cdgrid.rdxa[..., None]   # (6,n,n,1)
+                    rdya_b = self.cdgrid.rdya[..., None]
+                    rdya_u = jnp.pad(
+                        rdya_b, [(0,0),(0,0),(0,1),(0,0)],
+                        mode='edge',
+                    )                                        # (6,n,n+1,1)
+                    rdxa_v = jnp.pad(
+                        rdxa_b, [(0,0),(0,1),(0,0),(0,0)],
+                        mode='edge',
+                    )                                        # (6,n+1,n,1)
+
+                    ub_norm = du_normal * rdya_u             # (6,n,n+1,nlev)
+                    fy = u_normal * rdya_u
+                    gy = fy * ub_norm
+                    vb_norm = dv_normal * rdxa_v             # (6,n+1,n,nlev)
+                    fx = v_normal * rdxa_v
+                    gx = fx * vb_norm
+
+                    ub_s = ub_norm[:, :, :-1, :]             # (6,n,n,nlev)
+                    ub_n = ub_norm[:, :, 1:, :]
+                    vb_w = vb_norm[:, :-1, :, :]
+                    vb_e = vb_norm[:, 1:, :, :]
+                    gy_s = gy[:, :, :-1, :]
+                    gy_n = gy[:, :, 1:, :]
+                    gx_w = gx[:, :-1, :, :]
+                    gx_e = gx[:, 1:, :, :]
+                    u2 = fy[:, :, :-1, :] + fy[:, :, 1:, :]
+                    du2 = ub_s + ub_n
+                    v2 = fx[:, :-1, :, :] + fx[:, 1:, :, :]
+                    dv2 = vb_w + vb_e
+                    cosa_b = self.cdgrid.cosa_cell[..., None]
+                    rsin2_b = self.cdgrid.rsin2_cell[..., None]
+
+                    heat_cc = -0.25 * self.config.damp_v_d_con * rsin2_b * (
+                        ub_s ** 2 + ub_n ** 2 + vb_w ** 2 + vb_e ** 2
+                        + 2.0 * (gy_s + gy_n + gx_w + gx_e)
+                        - cosa_b * (u2 * dv2 + v2 * du2 + du2 * dv2)
+                    )
+                    dT = heat_cc / constants.c_pd
+                else:
+                    dKE_corner = (
+                        u_corner * du_corner + 0.5 * du_corner ** 2
+                        + v_corner * dv_corner + 0.5 * dv_corner ** 2
+                    )
+                    dKE_cc = _interp_corner_to_center(dKE_corner)
+                    dT = -self.config.damp_v_d_con * dKE_cc / constants.c_pd
                 # FV3_3D iter 218/219: optional per-step cap on |dT|.
                 # FV3 dyn_core.F90:1764-1776 (cp_air branch) skips
                 # the cap entirely for the top 2 sponge layers

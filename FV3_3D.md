@@ -816,6 +816,25 @@ Key iterations:
   Combined with iter-320 (post-acoustic damp_v / damp_w) +
   iter-321 (damp_w global) + iter-322 (damp_v global), ALL 5 NH
   d_con sites now have cv-flag verification.  3/3.
+- Iter 338: opt-in FV3 metric-aware d_con form for PE
+  ``damp_v_d_con`` site (gap #1 partial closure).  iter-238
+  audit documented the iter-208 simpler form ``ΔKE = u·du + 0.5·
+  du² + v·dv + 0.5·dv²`` as a fidelity gap vs FV3 ``sw_core.F90:
+  1980`` metric-aware form ``-0.25 · d_con · rsin2 · (sum_4_edges
+  (ub², vb²) + 2*sum_4_edges(gy, gx) - cosa_s · cross_terms)``.
+  Global energy conserved both ways; LOCAL distribution differs
+  at cube edges where ``cosa_s ≠ 0``.  iter-324 verified the
+  metric prereqs (``cosa_cell``, ``rsin2_cell``, ``rdxa``,
+  ``rdya``) available on ``CubedSphereCDGrid``.  iter-338 adds
+  opt-in ``use_fv3_metric_aware_d_con: bool = False`` to PE
+  config; when True the damp_v_d_con site uses FV3-faithful
+  metric form.  Edge ``rdx/rdy`` approximated via cell-centre
+  ``rdxa/rdya`` (1st-order; FV3 has edge-native).  Default False
+  preserves bit-for-bit baseline.  5-test pass set: bit-for-bit
+  + state changes + diff concentrated at edges + finite +
+  AD-safe at rest.  Closes gap #1 for the PE damp_v_d_con site;
+  NH damp_v + 6 other d_con sites pending future iter.  5/5 in
+  28 s.
 - Iter 337: extend iter-336 dynamic Exner to the 2 POST-ACOUSTIC
   NH d_con sites (``damp_v_d_con``, ``damp_w_d_con``).  iter-336
   closed slow-tendency sites where ``pi_prime`` is in scope;
