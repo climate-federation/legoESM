@@ -938,6 +938,12 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 484: PE mirror of NH iter-483 ``make_legoesm_pe_min_
+  edge_aggressive_config``.  Same flag drops + d2_bg=5e-2
+  stacking, applied to PE.  Caveat: iter-469/470 showed PE
+  is largely insensitive to factory flags at C8 — aggressive
+  config likely doesn't help PE much, kept for API symmetry
+  with NH.  5/5 in 23 s.  Wired into iter-383 sweep (now 79).
 - Iter 483: new user-facing factory
   ``make_legoesm_nh_min_edge_aggressive_config`` that stacks
   iter-466 hurting-flag drops + iter-481 d2_bg=5e-2 boost in
