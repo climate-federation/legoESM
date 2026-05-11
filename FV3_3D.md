@@ -860,6 +860,13 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 397: extend iter-336/337 dynamic Exner to the NH
+  aggregate delt_max sponge cap.  iter-336/337 wired
+  ``Π_total`` at d_con denominators but the aggregate cap
+  derivation ``|Δθ_p · Π| ≤ delt_max · dt`` still used
+  ``Π_ref``.  iter-397 makes the cap consistent: under
+  ``use_fv3_dynamic_exner=True`` the cap uses ``Π_total``
+  (matches FV3 NH sponge cap using live ``pkz``).  2/2 in 35 s.
 - Iter 396: iter-392 factory override edge cases.  Verifies
   ``make_fv3_faithful_*_config(**overrides)`` factories: (1)
   allow disabling single FV3 flag while keeping others ON,

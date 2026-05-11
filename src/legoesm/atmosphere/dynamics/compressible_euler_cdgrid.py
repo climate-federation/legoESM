@@ -1109,14 +1109,28 @@ def cdgrid_compressible_euler_slow_tendencies(
                 _k_idx == 0, 0.1,
                 jnp.where(_k_idx == 1, 0.5, 1.0),
             )
-            _delt_theta_per_level = (
-                config.delt_max
-                * _sponge_factor
-                / height_coord.exner_ref
-            )
-            _delt_theta_b = _delt_theta_per_level[
-                None, None, None, :
-            ]
+            # FV3_3D iter 397: use Π_total (= Π_ref + π') under
+            # ``use_fv3_dynamic_exner=True`` for the per-step ΔT
+            # cap derivation ``|Δθ_p · Π| ≤ delt_max · dt``.
+            # Consistent with iter-336/337 d_con denominator
+            # wiring.  Default False keeps frozen exner_ref.
+            if config.use_fv3_dynamic_exner:
+                # _exner_eff_b is shape (6, n, n, nlev) — cell-
+                # centred Π_total.  Apply sponge factor as 1D
+                # mask along the nlev axis.
+                _sf_b = _sponge_factor[None, None, None, :]
+                _delt_theta_b = (
+                    config.delt_max * _sf_b / _exner_eff_b
+                )
+            else:
+                _delt_theta_per_level = (
+                    config.delt_max
+                    * _sponge_factor
+                    / height_coord.exner_ref
+                )
+                _delt_theta_b = _delt_theta_per_level[
+                    None, None, None, :
+                ]
             _d_con_sum = jnp.clip(
                 _d_con_sum, -_delt_theta_b, _delt_theta_b,
             )
