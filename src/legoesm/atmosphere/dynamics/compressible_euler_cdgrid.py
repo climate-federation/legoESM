@@ -294,6 +294,20 @@ class CDGridCompressibleEulerConfig(NamedTuple):
         # refinement).  Default 0.0 preserves bit-for-bit baseline;
         # gated INSIDE ``corner_div_damp_d2_bg > 0``.  FV3
         # production default is 1.0.
+    use_fv3_metric_aware_d_con: bool = False
+        # FV3-faithful metric-aware d_con KE→heat form for the
+        # NH iter-209 ``damp_v_d_con`` site (FV3_3D iter 339, mirror
+        # of PE iter-338).  Port of FV3 ``sw_core.F90:1956-1985``
+        # metric form using cell-centre ``cosa_cell`` /
+        # ``rsin2_cell`` non-orthogonality metrics + cell-centre
+        # ``rdxa`` / ``rdya`` broadcast to edge stagger (1st-order;
+        # FV3 has edge-native ``rdx`` / ``rdy``).  When True, the
+        # NH damp_v_d_con site swaps the iter-209 simpler form for
+        # the FV3-faithful metric form (FV3-faithful LOCAL heat
+        # distribution at cube edges where ``cosa_s ≠ 0``).
+        # Composes with ``use_fv3_d_con_cv`` (cv heat capacity) +
+        # ``use_fv3_dynamic_exner`` (live Π).  Default False
+        # preserves bit-for-bit baseline.
     use_fv3_dynamic_exner: bool = False
         # FV3-faithful DYNAMIC Exner factor for the NH d_con KE→heat
         # conversion (FV3_3D iter 336).  iter-207 used frozen
@@ -1354,10 +1368,58 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
             # Π_ref) using exner_ref (matches iter-207 refinement).
             if self.config.damp_v_d_con > 0.0:
                 from legoesm import constants
-                dKE_cc = (
-                    u_cc_new * du_cc + 0.5 * du_cc ** 2
-                    + v_cc_new * dv_cc + 0.5 * dv_cc ** 2
-                )
+                # FV3_3D iter 339: optional metric-aware d_con form
+                # (mirror of PE iter-338).  Uses edge-stagger
+                # normalized variables + cell-centre rsin2 /
+                # cosa_s metrics.  Edge-rdx/rdy approximated by
+                # cell-centre rdxa/rdya broadcast (1st-order).
+                if self.config.use_fv3_metric_aware_d_con:
+                    rdxa_b = self.cdgrid.rdxa[..., None]
+                    rdya_b = self.cdgrid.rdya[..., None]
+                    rdya_u = jnp.pad(
+                        rdya_b, [(0,0),(0,0),(0,1),(0,0)],
+                        mode='edge',
+                    )
+                    rdxa_v = jnp.pad(
+                        rdxa_b, [(0,0),(0,1),(0,0),(0,0)],
+                        mode='edge',
+                    )
+                    ub_norm = du_normal * rdya_u
+                    fy = u_normal * rdya_u
+                    gy = fy * ub_norm
+                    vb_norm = dv_normal * rdxa_v
+                    fx = v_normal * rdxa_v
+                    gx = fx * vb_norm
+
+                    ub_s = ub_norm[:, :, :-1, :]
+                    ub_n = ub_norm[:, :, 1:, :]
+                    vb_w = vb_norm[:, :-1, :, :]
+                    vb_e = vb_norm[:, 1:, :, :]
+                    gy_s = gy[:, :, :-1, :]
+                    gy_n = gy[:, :, 1:, :]
+                    gx_w = gx[:, :-1, :, :]
+                    gx_e = gx[:, 1:, :, :]
+                    u2 = fy[:, :, :-1, :] + fy[:, :, 1:, :]
+                    du2 = ub_s + ub_n
+                    v2 = fx[:, :-1, :, :] + fx[:, 1:, :, :]
+                    dv2 = vb_w + vb_e
+                    cosa_b = self.cdgrid.cosa_cell[..., None]
+                    rsin2_b = self.cdgrid.rsin2_cell[..., None]
+                    # dKE_cc here represents the positive energy
+                    # magnitude (0.25 * rsin2 * (...)).  The iter-209
+                    # formula ``dtheta = -d_con * dKE_cc / (c_x *
+                    # exner)`` preserves the heat = -d_con * ΔKE
+                    # contract.
+                    dKE_cc = 0.25 * rsin2_b * (
+                        ub_s ** 2 + ub_n ** 2 + vb_w ** 2 + vb_e ** 2
+                        + 2.0 * (gy_s + gy_n + gx_w + gx_e)
+                        - cosa_b * (u2 * dv2 + v2 * du2 + du2 * dv2)
+                    )
+                else:
+                    dKE_cc = (
+                        u_cc_new * du_cc + 0.5 * du_cc ** 2
+                        + v_cc_new * dv_cc + 0.5 * dv_cc ** 2
+                    )
                 # FV3_3D iter 337: optional dynamic Exner at the
                 # post-acoustic damp_v_d_con site.  Mirrors iter-336
                 # slow-tendency wiring but recomputes ``π'`` from the

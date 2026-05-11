@@ -816,6 +816,20 @@ Key iterations:
   Combined with iter-320 (post-acoustic damp_v / damp_w) +
   iter-321 (damp_w global) + iter-322 (damp_v global), ALL 5 NH
   d_con sites now have cv-flag verification.  3/3.
+- Iter 339: opt-in FV3 metric-aware d_con form for NH
+  ``damp_v_d_con`` site.  NH mirror of PE iter-338.  Adds
+  ``use_fv3_metric_aware_d_con`` to NH config; when True, the
+  iter-209 simpler form is replaced by the FV3 metric-aware form
+  using cell-centre ``cosa_cell``/``rsin2_cell`` non-orthogonality
+  metrics + cell-centre ``rdxa``/``rdya`` broadcast to edge
+  stagger (1st-order approximation).  Composes with iter-320 cv
+  flag + iter-336/337 dynamic Exner.  Default False preserves
+  bit-for-bit baseline.  5-test pass set: bit-for-bit baseline +
+  state changes + finite + AD-safe at rest + full stack (metric
+  + cv + dyn Exner) finite.  iter-318 AST guard extended.  Gap
+  #1 closure: PE + NH ``damp_v_d_con`` sites done; 6 other
+  d_con sites (corner_div PE+NH, div_damp PE+NH, A_h PE+NH)
+  pending future iter.  5/5 in 63 s.
 - Iter 338: opt-in FV3 metric-aware d_con form for PE
   ``damp_v_d_con`` site (gap #1 partial closure).  iter-238
   audit documented the iter-208 simpler form ``ΔKE = u·du + 0.5·

@@ -68,6 +68,23 @@ def test_nh_only_knobs_present_in_signature():
         )
 
 
+def test_use_fv3_metric_aware_d_con_default_off():
+    """``use_fv3_metric_aware_d_con`` defaults to False (iter 339).
+    The opt-in flag swaps the iter-209 simpler ΔKE form for the
+    FV3-faithful metric-aware form (cosa_s / rsin2 cross-terms)
+    at the NH damp_v_d_con site.  Default False preserves
+    bit-for-bit baseline."""
+    cfg = CDGridCompressibleEulerConfig()
+    assert cfg.use_fv3_metric_aware_d_con is False, (
+        f"use_fv3_metric_aware_d_con default must be False; got "
+        f"{cfg.use_fv3_metric_aware_d_con}."
+    )
+    assert hasattr(cfg, "use_fv3_metric_aware_d_con"), (
+        "NH config must expose use_fv3_metric_aware_d_con field — "
+        "iter-339 wiring depends on this name."
+    )
+
+
 def test_use_fv3_dynamic_exner_default_off():
     """``use_fv3_dynamic_exner`` defaults to False (FV3_3D iter 336).
     The opt-in flag swaps frozen ``Π_ref`` for dynamic
