@@ -856,6 +856,10 @@ Key iterations:
   Combined with iter-320 (post-acoustic damp_v / damp_w) +
   iter-321 (damp_w global) + iter-322 (damp_v global), ALL 5 NH
   d_con sites now have cv-flag verification.  3/3.
+- Iter 364: composition test for NH damp_w_d_con + iter-337
+  dynamic Exner.  Verifies (1) baseline bit-for-bit, (2)
+  flag=True changes θ_p, (3) damp_w_d_con + dyn_exner + cv
+  combination finite.  3/3 in 32 s.
 - Iter 363: safety regression for iter-336/337 dynamic Exner.
   Π_total = Π_ref + π' could go non-positive under strong π'.
   iter-363 verifies under strong perturbation (±15 K θ', ±0.2
