@@ -886,90 +886,31 @@ Key iterations:
   (a2b_zeta, metric, cross_face) + duogrid + full toolkit + 4
   d_con knobs.  jax.grad finite through 3 PE steps at rest.
   1/1 in 213 s.
-- Iter 374: AD-at-rest umbrella for NH full FV3-fidelity stack
-  INCLUDING iter-370 cross_face flag (extends iter-346 which
-  predated cross_face).  All 5 NH flags ON + duogrid + full
-  toolkit + all 5 d_con knobs.  jax.grad finite through 3 NH
-  steps at rest.  Closes full-FV3-stack AD coverage gap.  1/1
-  in 383 s.
-- Iter 373: AST regression guard for iter-370 cross-face du
-  projection wiring (PE + NH).  6 assertions: (1)+(2) PE+NH
-  gates present, (3)+(4) pad_halo_4d applied to du_normal +
-  dv_normal inside gate, (5)+(6) legacy ``jnp.pad(mode='edge')``
-  else branch preserved for bit-for-bit baseline.  6/6 in 0.06 s.
-- Iter 372: C16 cube-imprint does-not-amplify regression for
-  iter-370 ``use_fv3_cross_face_du_proj`` (PE+NH).  At C16
-  enabling cross_face flag must not amplify imprint by > 10 %
-  vs default mode='edge' baseline.  2/2 in 40 s.
-- Iter 371: extend iter-331 + iter-369 flag-set guards for
-  iter-370 ``use_fv3_cross_face_du_proj`` (SHARED PE+NH).  9/9
-  pass — confirms cross_face flag wired on BOTH paths +
-  defaults False.
-- Iter 370: opt-in cross-face halo for damp_v post-step
-  wind-increment projection back to corners (PE + NH).  Closes
-  real 3D gap: ``jnp.pad(du_normal, mode='edge')`` at cube
-  boundary uses same-face value; iter-370 adds
-  ``use_fv3_cross_face_du_proj: bool = False`` (PE+NH) that
-  swaps to ``pad_halo_4d`` (duogrid-aware) for cross-face
-  value at cube edges.  Approximation: pad_halo_4d's interp
-  assumes cell-centre stagger but du_normal is at edge stagger
-  → cross-face value off by 0.5 cell.  Better than mode='edge'
-  but not bit-for-bit FV3 (which uses edge-native
-  ``cubed_a2d_halo``).  Default False bit-for-bit baseline.
-  6-test pass set (3 PE + 3 NH): baseline + state changes +
-  AD-safe.  6/6 in 117 s.
-- Iter 369: consolidated FV3-fidelity flag-set presence guard.
-  Asserts NH has 4 flags (cv, vector_halo, dyn_exner, metric)
-  + PE has 2 flags (a2b_zeta, metric); all default False.
-  Single test mirroring iter-318/331/343/362 default-asymmetry
-  guards.  3/3 in 0.6 s.
-- Iter 368: doc-structure regression for iter-365 compaction.
-  Pins (1) compaction marker present, (2) doc size < 3600 lines,
-  (3) all 17 iter-group topic markers present in compacted
-  block.  Catches accidental re-expansion of compacted entries.
-  3/3 in 0.05 s.
-- Iter 367: C16 cv-vs-cp heating ratio test for NH post-acoustic
-  d_con sites (damp_v + damp_w).  iter-320 verified c_p/c_v
-  ≈ 1.40 at C8; iter-367 confirms ratio holds at C16
-  (production resolution).  ``mean(|Δθ_p_cv|) /
-  mean(|Δθ_p_cp|) == c_pd/c_vd`` at rtol=1e-4.  1/1 in 41 s.
-- Iter 366: composition test for iter-218/219 delt_max sponge
-  cap + iter-320 cv flag at NH damp_v_d_con post-step site.
-  Verifies (1) baseline bit-for-bit at flags off, (2) cv +
-  loose cap differs from cp + loose cap (cv path heats c_p/c_v
-  larger), (3) cv + tight cap (delt_max=1e-4) produces finite
-  state (clips heating without NaN).  3/3 in 38 s.
-- Iter 365: ToC compaction — 40 iters (320-359) compressed into
-  a single block above (~370 lines saved).  Iter 360-364
-  verbose entries retained at the top of this section.  Mirror
-  of iter-260/290/300/310 compaction pattern.  Doc size 3691 →
-  3327 lines.
-- Iter 364: composition test for NH damp_w_d_con + iter-337
-  dynamic Exner.  Verifies (1) baseline bit-for-bit, (2)
-  flag=True changes θ_p, (3) damp_w_d_con + dyn_exner + cv
-  combination finite.  3/3 in 32 s.
-- Iter 363: safety regression for iter-336/337 dynamic Exner.
-  Π_total = Π_ref + π' could go non-positive under strong π'.
-  iter-363 verifies under strong perturbation (±15 K θ', ±0.2
-  kg/m³ ρ', ±10 m/s wind) all state fields stay finite (no
-  NaN/Inf) at NH d_con denominators.  1/1 in 16 s.
-- Iter 362: PE counterpart of iter-361 flag-coverage guard.
-  PE has 4 metric d_con gates (damp_v + corner_div + div_damp +
-  A_h); NO cv selectors (PE uses cp_air); NO ``_exner_eff_b``
-  (PE uses actual T).  Pins PE/NH asymmetry at code level
-  (mirror of iter-331/343 default-asymmetry guard).  3/3 in
-  0.03 s.
-- Iter 361: AST flag-coverage guard for all 5 NH d_con sites.
-  Asserts: (1) 4 metric gates (damp_v + corner_div + div_damp +
-  A_h; damp_w is scalar - no metric), (2) 5 cv-vs-cp selectors
-  (one per site), (3) ``_exner_eff_b`` at slow-tendency sites,
-  (4) ``_exner_eff_dv`` + ``_exner_eff_dw`` at post-acoustic.
-  Catches refactors dropping flag wiring from any single site.
-  4/4 in 0.03 s.
-- Iter 360: NH counterpart of iter-359.  Full NH FV3-fidelity
-  stack at C16 measurably differs from default flags + same
-  toolkit in θ_p field (>1e-6).  1/1 in 41 s.  Closes PE+NH C16
-  "wiring-active-at-production-resolution" coverage.
+- **Iters 360-374 (compacted iter 380)**: post-iter-365 follow-
+  ups + iter-370 cross_face flag wiring.
+  - iter 360: NH C16 wiring-active-at-production-resolution.
+  - iter 361/362: AST flag-coverage guards (all 5 NH + 4 PE
+    d_con sites).
+  - iter 363: dynamic-Exner safety regression under strong
+    perturbation.
+  - iter 364: damp_w_d_con + dynamic_exner composition.
+  - iter 365: ToC compaction (40 iters into 1 block).
+  - iter 366: delt_max sponge cap + cv flag composition.
+  - iter 367: C16 cv-vs-cp heating ratio (c_pd/c_vd ≈ 1.40).
+  - iter 368: doc-structure regression for iter-365.
+  - iter 369: consolidated FV3-fidelity flag-set presence
+    guard.
+  - **iter 370**: opt-in ``use_fv3_cross_face_du_proj``
+    (PE+NH).  Closes mode='edge' gap at damp_v post-step
+    wind-increment projection back to corners.  Default False
+    bit-for-bit baseline.  pad_halo_4d (duogrid-aware) used at
+    flag=True; off by 0.5 cell from edge-native FV3
+    cubed_a2d_halo.  6/6 baseline + state-changes + AD-safe.
+  - iter 371: extend iter-331/369 guards for cross_face SHARED
+    flag.
+  - iter 372: C16 cross_face does-not-amplify regression.
+  - iter 373: AST guard for iter-370 wiring.
+  - iter 374: full NH AD umbrella with cross_face flag ON.
 
 **TL;DR** (iter 81 update of iter 78 summary): For HS at any cube
 resolution, set::
