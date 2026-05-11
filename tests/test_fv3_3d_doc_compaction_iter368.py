@@ -47,6 +47,22 @@ def test_doc_size_below_3600_lines(doc_text):
     )
 
 
+def test_iter417_production_section_present(doc_text):
+    """iter-417 added a production-usage section.  Pin it so
+    future maintenance doesn't drop the user-facing instructions."""
+    assert "## Production usage (iter 417)" in doc_text, (
+        "iter-417 production-usage section missing — users lose "
+        "the factory-based recommended setup recipe."
+    )
+    # Section should mention both factories
+    section_start = doc_text.find("## Production usage (iter 417)")
+    section_end = doc_text.find("## Final state", section_start)
+    section = doc_text[section_start:section_end]
+    assert "make_fv3_faithful_pe_config" in section
+    assert "make_fv3_faithful_nh_config" in section
+    assert "use_duogrid=True" in section
+
+
 def test_iter400_compaction_present(doc_text):
     """iter-400 compacted iter 385-394 into a single block."""
     assert "**Iters 385-394 (compacted iter 400)**" in doc_text, (
