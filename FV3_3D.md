@@ -816,6 +816,15 @@ Key iterations:
   Combined with iter-320 (post-acoustic damp_v / damp_w) +
   iter-321 (damp_w global) + iter-322 (damp_v global), ALL 5 NH
   d_con sites now have cv-flag verification.  3/3.
+- Iter 342: AST regression guard for iter-336 + iter-337
+  dynamic Exner wiring on NH 3D path.  Mirrors
+  iter-327/329/334/340 pattern.  Asserts: (1) slow_tendencies
+  computes ``_exner_eff_b`` via ``if config.use_fv3_dynamic_exner:``
+  gate, (2) >= 3 slow-tendency d_con denominators use
+  ``_exner_eff_b`` (corner_div / div_damp / A_h), (3)+(4)
+  post-acoustic damp_v / damp_w sites compute
+  ``_pi_prime_d{v,w} = compute_exner_perturbation(...)`` inside
+  the gate.  4/4 in 0.03 s.
 - Iter 341: PE full-stack FV3-fidelity integration regression.
   PE counterpart of iter-330 NH.  Engages every PE FV3-fidelity
   flag + full damping toolkit:
