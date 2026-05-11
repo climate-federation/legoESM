@@ -816,6 +816,12 @@ Key iterations:
   Combined with iter-320 (post-acoustic damp_v / damp_w) +
   iter-321 (damp_w global) + iter-322 (damp_v global), ALL 5 NH
   d_con sites now have cv-flag verification.  3/3.
+- Iter 349 + 350: extend metric-aware d_con flag to PE iter-223
+  + NH iter-224 div_damp_d_con (cell-centre slow-tendency)
+  sites.  Same metric form structure as iter-347/348.  6/6 in
+  72 s.  Gap #1 closure progress: PE+NH damp_v +
+  PE+NH corner_div + PE+NH div_damp done (iter-338/339/347/348/
+  349/350).  2 remaining: PE+NH A_h sites.
 - Iter 348: NH mirror of iter-347 metric flag at corner_div_d_con
   slow-tendency site.  4/4 in 63 s.  Gap #1 closure progress:
   PE+NH damp_v_d_con (iter-338/339) + PE+NH corner_div_d_con

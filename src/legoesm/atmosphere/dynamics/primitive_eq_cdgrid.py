@@ -820,14 +820,54 @@ def fv3_hydrostatic_tendencies(
         # the iter-5 ``div_damp_coeff > 0`` block.  FV3 production
         # default is 1.0.
         if config.div_damp_d_con > 0.0:
-            _dKE_dt_corner_dd = (
-                u_d * _du_d_dt_dd + v_d * _dv_d_dt_dd
-            )
-            _dT_dt_dd_cc = (
-                -config.div_damp_d_con
-                * _interp_corner_to_center(_dKE_dt_corner_dd)
-                / constants.c_pd
-            )
+            if config.use_fv3_metric_aware_d_con:
+                # FV3_3D iter 349: metric-aware form at PE
+                # cell-centre div_damp d_con site.  Same pattern as
+                # iter-347 corner_div.
+                _u_d_n = 0.5 * (u_d[:, :-1, :, :] + u_d[:, 1:, :, :])
+                _v_d_n = 0.5 * (v_d[:, :, :-1, :] + v_d[:, :, 1:, :])
+                _du_n = 0.5 * (
+                    _du_d_dt_dd[:, :-1, :, :] + _du_d_dt_dd[:, 1:, :, :]
+                )
+                _dv_n = 0.5 * (
+                    _dv_d_dt_dd[:, :, :-1, :] + _dv_d_dt_dd[:, :, 1:, :]
+                )
+                _ubs = _du_n[:, :, :-1, :]
+                _ubn = _du_n[:, :, 1:, :]
+                _vbw = _dv_n[:, :-1, :, :]
+                _vbe = _dv_n[:, 1:, :, :]
+                _us = _u_d_n[:, :, :-1, :]
+                _un = _u_d_n[:, :, 1:, :]
+                _vw = _v_d_n[:, :-1, :, :]
+                _ve = _v_d_n[:, 1:, :, :]
+                _u2 = _us + _un
+                _du2 = _ubs + _ubn
+                _v2 = _vw + _ve
+                _dv2 = _vbw + _vbe
+                _cosa = cdgrid.cosa_cell[..., None]
+                _rsin2 = cdgrid.rsin2_cell[..., None]
+                _dKE_dt_cc_m = 0.25 * _rsin2 * (
+                    _ubs ** 2 + _ubn ** 2 + _vbw ** 2 + _vbe ** 2
+                    + 2.0 * (
+                        _us * _ubs + _un * _ubn
+                        + _vw * _vbw + _ve * _vbe
+                    )
+                    - _cosa * (_u2 * _dv2 + _v2 * _du2 + _du2 * _dv2)
+                )
+                _dT_dt_dd_cc = (
+                    -config.div_damp_d_con
+                    * _dKE_dt_cc_m
+                    / constants.c_pd
+                )
+            else:
+                _dKE_dt_corner_dd = (
+                    u_d * _du_d_dt_dd + v_d * _dv_d_dt_dd
+                )
+                _dT_dt_dd_cc = (
+                    -config.div_damp_d_con
+                    * _interp_corner_to_center(_dKE_dt_corner_dd)
+                    / constants.c_pd
+                )
         else:
             _dT_dt_dd_cc = None
     else:
