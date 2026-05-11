@@ -860,6 +860,11 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 379: NH counterpart of iter-378.  Tendency-level
+  bit-for-bit linearity for the 3 NH slow-tendency d_con sites
+  under metric form (iter-348/350/352).  Uses
+  ``cdgrid_compressible_euler_slow_tendencies`` directly to
+  bypass acoustic feedback.  ``rtol=1e-10``.  3/3 in 39 s.
 - Iter 378: tendency-level bit-for-bit linearity for the 3 PE
   slow-tendency d_con sites under metric form (iter-347/349/
   351).  iter-347 had to relax linearity rtol to 1e-2 at step()
