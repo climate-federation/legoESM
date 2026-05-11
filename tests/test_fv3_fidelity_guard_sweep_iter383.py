@@ -105,6 +105,7 @@ _GUARD_MODULES = (
     "test_make_legoesm_pe_min_edge_aggressive_iter484",  # iter-484 add
     "test_legoesm_min_edge_factories_ast_iter485",   # iter-485 add
     "test_nh_duogrid_resolution_scan_iter487",       # iter-487 add
+    "test_pad_halo_4d_duogrid_overshoot_location_iter489",  # iter-489 add
 )
 
 

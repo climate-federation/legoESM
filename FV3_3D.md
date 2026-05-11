@@ -998,6 +998,20 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 489: **MOST ACTIONABLE duogrid finding** — the iter-475
+  3.5% halo overshoot is CONFINED TO CORNER CELLS (cube
+  vertices), NOT spread across edges:
+    interior max-abs:           14.0000
+    edge-cell halo max-abs:     13.5282  (UNDER interior)
+    corner-cell halo max-abs:   14.4907  (3.5% over)
+    edge cells > interior_max:   0
+    corner cells > interior_max: 1
+  Only 24 cells per level globally have the overshoot (4
+  corners × 6 faces).  This is a HIGHLY TARGETED FIX
+  OPPORTUNITY: future work can specifically address duogrid
+  corner-cell (cube-vertex) interpolation rather than the
+  general halo path.  1/1 in 4.6 s.  Wired into iter-383
+  sweep (now 82).
 - Iter 487: **duogrid penalty plateaus across resolutions**
   (not monotonically decreasing).  C24 measurement extends
   iter-471/472 scan:
