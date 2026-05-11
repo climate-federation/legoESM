@@ -938,6 +938,13 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 458: PE mirror of NH iter-457 heat_source del-2
+  smoothing.  Same FV3 ``dyn_core.F90:1755-1756`` port,
+  applied to PE ``_d_con_sum`` aggregate.  Two new PE config
+  fields (``heat_source_del2_iters``, ``heat_source_del2_coeff
+  = 0.20``).  Default 0 = bit-for-bit baseline.  Reuses
+  already-imported ``_laplacian_compact_3d``.  4/4 in 20 s.
+  Wired into iter-383 sweep (now 53).
 - Iter 457: FV3-faithful del-2 smoothing of the aggregate
   ``_d_con_sum`` heat source.  Port of FV3 ``dyn_core.F90:
   1755-1756`` ``del2_cubed(heat_source, cnst_0p20*da_min,

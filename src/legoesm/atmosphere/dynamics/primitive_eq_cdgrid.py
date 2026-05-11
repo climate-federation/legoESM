@@ -522,6 +522,16 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
     rf_cutoff_pa: float = 3000.0
         # Cutoff pressure for PE Rayleigh friction (FV3 default
         # ``rf_cutoff = 3.0e2`` Pa = 30 hPa).
+    heat_source_del2_iters: int = 0
+        # FV3-faithful del-2 smoothing of the aggregate
+        # ``_d_con_sum`` heat source (FV3_3D iter 458, PE
+        # mirror of NH iter-457).  See NH config for FV3
+        # ``dyn_core.F90:1755-1756`` port details.  Default
+        # 0 = no smoothing = bit-for-bit baseline.
+    heat_source_del2_coeff: float = 0.20
+        # FV3 ``cnst_0p20`` relaxation coefficient for
+        # iter-458 PE heat_source smoothing.  No effect when
+        # ``heat_source_del2_iters == 0``.
     use_fv3_sponge_damp_v: bool = False
         # FV3-faithful sponge boost of PE ``damp_v`` (vorticity
         # damping) at top sponge levels (FV3_3D iter 443, PE
@@ -1744,6 +1754,14 @@ def fv3_hydrostatic_tendencies(
                 0.0, 1.0,
             )
             _d_con_sum = _d_con_sum * _d_con_mask_sp[None, None, None, :]
+        # FV3_3D iter 458: PE mirror of NH iter-457 del-2
+        # smoothing of aggregate heat_source.
+        if config.heat_source_del2_iters > 0:
+            _da_min_hs_pe = jnp.min(cdgrid.area_corner)
+            _cd_hs_pe = config.heat_source_del2_coeff * _da_min_hs_pe
+            for _ in range(config.heat_source_del2_iters):
+                _lap_hs_pe = _laplacian_compact_3d(_d_con_sum, grid)
+                _d_con_sum = _d_con_sum + _cd_hs_pe * _lap_hs_pe
         if config.delt_max > 0.0:
             # Sponge-aware tendency cap: PE k=0,1 are uncapped
             # (jnp.inf), k>=2 are capped to ``delt_max`` K/s.
