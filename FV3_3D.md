@@ -919,6 +919,13 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 428: factory-driven AD-at-rest umbrella.  jax.grad
+  through 1 NH step + 1 PE step with factory configs must be
+  finite — catches factory-default flag combination introducing
+  AD hazard.  Closes iter-427 (factory drives finite *forward*
+  step) → iter-428 (factory preserves *grad*).  Reduced to 1
+  step because 3-step grad path compiles >12 min / >11 GB at C8.
+  Wired into iter-383 sweep (now 25 modules).  2/2 in 310 s.
 - Iter 427: integration test — factory-driven 1-step run at C8
   produces finite state for both NH (u/v/w/θ′/ρ′) and PE
   (u_d/v_d/T/p_s).  Closes loop iter-417/418 (config-construct

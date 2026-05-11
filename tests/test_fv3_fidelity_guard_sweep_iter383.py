@@ -48,6 +48,7 @@ _GUARD_MODULES = (
     "test_dyn_exner_equals_pkz_iter401",             # iter-422 add
     "test_iter392_factory_module_exports_iter426",   # iter-427 add
     "test_iter392_factory_step_runs_iter427",        # iter-427 add
+    "test_iter392_factory_ad_umbrella_iter428",      # iter-428 add
 )
 
 
