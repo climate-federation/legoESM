@@ -425,6 +425,18 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # Uses cell-centre ``rdxa / rdya`` broadcast to edge stagger
         # (1st-order approximation; FV3 has edge-native ``rdx /
         # rdy``).  Default False preserves bit-for-bit baseline.
+    d_con_top_zero_levels: int = 0
+        # FV3-faithful sponge-layer zeroing of d_con KE→heat
+        # (FV3_3D iter 433, PE mirror of NH iter-431/432).
+        # Port of FV3 ``dyn_core.F90:790/800/804`` ``d_con_k = 0``
+        # for the top sponge levels.  When > 0, zeros the d_con
+        # heat tendency for the top N vertical levels (model-
+        # top = lowest k-index).  Default 0 preserves bit-for-
+        # bit baseline.  Wired at all 4 PE d_con sites:
+        # post-acoustic damp_v (mirror of NH iter-431) +
+        # aggregate ``_d_con_sum`` covering 3 slow-tendency
+        # contributions (corner_div, div_damp, A_h; mirror of
+        # NH iter-432).
     use_fv3_a2b_zeta_corner: bool = False
         # FV3-faithful 4th-order A→B interpolation for the relative
         # vorticity ``ζ`` from cell centres to D-grid corners (the
@@ -497,6 +509,86 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # 1 = del-4 (one Laplacian iteration);
         # 2 = del-6 (two Laplacian iterations, FV3 d_sw5 default).
         # Active only when ``corner_div_damp_d4_bg > 0``.
+    rf_tau_days: float = 0.0
+        # FV3-faithful fast Rayleigh friction timescale (PE
+        # mirror of NH iter-448).  Port of FV3
+        # ``dyn_core.F90:2922-3020`` ``Ray_fast``::
+        #     rff(k) = dt/(tau*86400) * sin²(π/2 · log(...))²
+        #     rff(k) = 1 / (1 + rff(k))
+        #     u_d, v_d *= rff   for pfull(k) < rf_cutoff_pa
+        # ``tau`` in DAYS.  Default 0.0 = bit-for-bit baseline.
+        # FV3 production default 0.0 (RF off); typical 5-15 days.
+        # PE has no w; only u_d, v_d are damped.
+    rf_cutoff_pa: float = 3000.0
+        # Cutoff pressure for PE Rayleigh friction (FV3 default
+        # ``rf_cutoff = 3.0e2`` Pa = 30 hPa).
+    heat_source_del2_iters: int = 0
+        # FV3-faithful del-2 smoothing of the aggregate
+        # ``_d_con_sum`` heat source (FV3_3D iter 458, PE
+        # mirror of NH iter-457).  See NH config for FV3
+        # ``dyn_core.F90:1755-1756`` port details.  Default
+        # 0 = no smoothing = bit-for-bit baseline.
+    heat_source_del2_coeff: float = 0.20
+        # FV3 ``cnst_0p20`` relaxation coefficient for
+        # iter-458 PE heat_source smoothing.  No effect when
+        # ``heat_source_del2_iters == 0``.
+    use_fv3_sponge_damp_v: bool = False
+        # FV3-faithful sponge boost of PE ``damp_v`` (vorticity
+        # damping) at top sponge levels (FV3_3D iter 443, PE
+        # mirror of NH iter-442).  Ports FV3
+        # ``dyn_core.F90:786-787, 796-797`` ``damp_vt = 0.5 *
+        # d2_divg`` at sponge layers k=0, k=1 (FV3 does NOT
+        # extend to k=2).  Linear ``damp^(nord_v+1)`` scaling
+        # trick: ``(du, dv) *= (0.5 * boosted / damp_v)^
+        # (nord_v+1)``.  Gated on ``corner_div_damp_d2_bg_k1``
+        # (k=0) and ``corner_div_damp_d2_bg_k2 > 0.01`` (k=1).
+        # Default False = bit-for-bit baseline.
+    corner_div_damp_d2_bg_k2: float = 0.0
+        # FV3-faithful per-level sponge boost of the corner-
+        # divergence d2_bg coefficient at k=1 and k=2 (FV3_3D
+        # iter 439).  Port of FV3 ``dyn_core.F90:792, 802``::
+        #
+        #     ! k=2 (1-based, our k=1 0-based):
+        #     if (d2_bg_k2 > 0.01)
+        #         d2_divg = max(d2_bg, d2_bg_k2)
+        #     ! k=3 (1-based, our k=2 0-based):
+        #     if (d2_bg_k2 > 0.05)
+        #         d2_divg = max(d2_bg, 0.2 * d2_bg_k2)
+        #
+        # When > 0.01, the k=1 level damping coefficient is
+        # overridden with ``da_min_c * max(d2_bg, d2_bg_k2)``.
+        # When > 0.05, the k=2 level is also overridden with
+        # ``da_min_c * max(d2_bg, 0.2 * d2_bg_k2)``.  FV3
+        # production value 2.0 assumes FV3 normalization — same
+        # iter-452 caveat as d2_bg_k1; use a value scaled to
+        # legoESM's ``corner_div_damp_d2_bg`` (typically d2_bg_k2
+        # ≈ 5e-5 to 1e-4 when d2_bg = 0.0005).  Default 0.0 =
+        # baseline.  The 0.01 / 0.05 thresholds are absolute
+        # (FV3 namelist-scale conditions), so legoESM-scale
+        # d2_bg_k2 values BELOW 0.01 will NEVER trigger any
+        # override — this is a known semantic compromise.
+    corner_div_damp_d2_bg_k1: float = 0.0
+        # FV3-faithful per-level sponge boost of the corner-
+        # divergence d2_bg coefficient at the topmost level
+        # (FV3_3D iter 438).  Port of FV3 ``dyn_core.F90:780``::
+        #
+        #     d2_divg = max(0.01, d2_bg, d2_bg_k1)   ! k=1
+        #
+        # When > 0 (and ``corner_div_damp_d2_bg > 0``), the k=0
+        # level (model top) of the corner-divergence adaptive
+        # damping coefficient is OVERRIDDEN with
+        # ``max(corner_div_damp_d2_bg, corner_div_damp_d2_bg_k1)`` —
+        # ignoring the adaptive ``dddmp*|delpc|*dt`` term and the
+        # 0.20 cap.  FV3 production value 4.0 assumes FV3's
+        # specific ``da_min_c × d2`` normalization which legoESM
+        # does NOT match (iter-452 finding): setting 4.0 in
+        # legoESM produces ~10⁸×-too-aggressive damping at the
+        # top → blow-up.  For legoESM use a value
+        # SMALL RELATIVE to ``corner_div_damp_d2_bg`` (typical
+        # legoESM d2_bg = 0.0005, paired d2_bg_k1 ≈ 1e-4
+        # produces measurable but stable sponge — see iter-452
+        # e2e test).  Default 0.0 preserves bit-for-bit baseline.
+        # Future iters: extend to k=1 (``d2_bg_k2``), then to NH.
     corner_div_damp_fv3_vector_fill: bool = False
         # FV3-fully-faithful vector cube-vertex fill
         # (``fill_corners(vc, uc, VECTOR=true, DGRID=true)``,
@@ -951,6 +1043,22 @@ def fv3_hydrostatic_tendencies(
                 0.20, config.corner_div_damp_dddmp * _delpc_abs * _dt_approx,
             ),
         )                                                  # (6, n+1, n+1, nlev)
+
+        # FV3_3D iter 438/439/446: per-level sponge boost at
+        # k=0 / k=1 / k=2 via shared helper.  See
+        # ``legoesm.core.fv3_sponge_boost`` for the FV3
+        # ``dyn_core.F90:780, 792, 802`` port (k=0 from
+        # d2_bg_k1; k=1 if d2_bg_k2>0.01; k=2 if d2_bg_k2>0.05
+        # with 0.2 factor).
+        from legoesm.core.fv3_sponge_boost import (
+            apply_top_sponge_damp_boost as _shared_boost,
+        )
+        _damp_corner = _shared_boost(
+            _damp_corner, _da_min_c,
+            config.corner_div_damp_d2_bg,
+            config.corner_div_damp_d2_bg_k1,
+            config.corner_div_damp_d2_bg_k2,
+        )
 
         # FV3_3D iter 18: optional higher-order del-(2*(nord+1))
         # damping (FV3 d_sw5 ``nord > 0`` path, sw_core.F90:1725-1822).
@@ -1634,6 +1742,26 @@ def fv3_hydrostatic_tendencies(
                 else _d_con_sum + _contrib
             )
     if _d_con_sum is not None:
+        # FV3_3D iter 433: optional FV3-faithful sponge zeroing
+        # of d_con heating in top N levels — aggregate covers
+        # 3 slow-tendency PE sites (corner_div, div_damp, A_h)
+        # via single mask, mirror of NH iter-432.
+        if config.d_con_top_zero_levels > 0:
+            _nlev_zsp = _d_con_sum.shape[-1]
+            _k_idx_zsp = jnp.arange(_nlev_zsp)
+            _d_con_mask_sp = jnp.where(
+                _k_idx_zsp < config.d_con_top_zero_levels,
+                0.0, 1.0,
+            )
+            _d_con_sum = _d_con_sum * _d_con_mask_sp[None, None, None, :]
+        # FV3_3D iter 458: PE mirror of NH iter-457 del-2
+        # smoothing of aggregate heat_source.
+        if config.heat_source_del2_iters > 0:
+            _da_min_hs_pe = jnp.min(cdgrid.area_corner)
+            _cd_hs_pe = config.heat_source_del2_coeff * _da_min_hs_pe
+            for _ in range(config.heat_source_del2_iters):
+                _lap_hs_pe = _laplacian_compact_3d(_d_con_sum, grid)
+                _d_con_sum = _d_con_sum + _cd_hs_pe * _lap_hs_pe
         if config.delt_max > 0.0:
             # Sponge-aware tendency cap: PE k=0,1 are uncapped
             # (jnp.inf), k>=2 are capped to ``delt_max`` K/s.
@@ -1920,6 +2048,30 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
             du_normal = jnp.moveaxis(du_normal_t, 0, -1)
             dv_normal = jnp.moveaxis(dv_normal_t, 0, -1)
 
+            # FV3_3D iter 443/447: PE mirror of NH iter-442 via
+            # shared helper.  FV3 ``damp_vt = 0.5 * d2_divg`` at
+            # k=0, k=1 (NOT k=2).
+            if self.config.use_fv3_sponge_damp_v:
+                from legoesm.core.fv3_sponge_boost import (
+                    apply_top_sponge_field_scale as _shared_pscale_v,
+                )
+                du_normal = _shared_pscale_v(
+                    du_normal, self.config.damp_v,
+                    self.config.nord_v, factor=0.5,
+                    d2_bg=self.config.corner_div_damp_d2_bg,
+                    d2_bg_k1=self.config.corner_div_damp_d2_bg_k1,
+                    d2_bg_k2=self.config.corner_div_damp_d2_bg_k2,
+                    apply_at_k2=False,
+                )
+                dv_normal = _shared_pscale_v(
+                    dv_normal, self.config.damp_v,
+                    self.config.nord_v, factor=0.5,
+                    d2_bg=self.config.corner_div_damp_d2_bg,
+                    d2_bg_k1=self.config.corner_div_damp_d2_bg_k1,
+                    d2_bg_k2=self.config.corner_div_damp_d2_bg_k2,
+                    apply_at_k2=False,
+                )
+
             # Project wind increments from FV3 normal D-grid back to
             # corners (6, n+1, n+1, nlev) by mode='edge' padding then
             # averaging — the inverse of the corner→face averaging
@@ -2015,6 +2167,17 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                     )
                     dKE_cc = _interp_corner_to_center(dKE_corner)
                     dT = -self.config.damp_v_d_con * dKE_cc / constants.c_pd
+                # FV3_3D iter 433: optional FV3-faithful sponge
+                # zeroing of d_con heating in top N levels (PE
+                # mirror of NH iter-431).
+                if self.config.d_con_top_zero_levels > 0:
+                    _nlev_zv = dT.shape[-1]
+                    _k_idx_zv = jnp.arange(_nlev_zv)
+                    _d_con_mask_v = jnp.where(
+                        _k_idx_zv < self.config.d_con_top_zero_levels,
+                        0.0, 1.0,
+                    )
+                    dT = dT * _d_con_mask_v[None, None, None, :]
                 # FV3_3D iter 218/219: optional per-step cap on |dT|.
                 # FV3 dyn_core.F90:1764-1776 (cp_air branch) skips
                 # the cap entirely for the top 2 sponge layers
@@ -2074,6 +2237,32 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                 )
             state_new = state_new._replace(
                 p_s=state_new.p_s.replace(data=p_s_fixed),
+            )
+
+        # FV3_3D iter 449: optional PE FV3 ``Ray_fast`` (PE
+        # mirror of NH iter-448).  Reference profile pfull(k)
+        # = (A_full[k] + B_full[k]) * p_ref.
+        if self.config.rf_tau_days > 0.0:
+            from legoesm.core.fv3_rayleigh_fast import (
+                compute_rff_profile,
+            )
+            _coord = self.sigma_coord
+            _pfull_pe = (_coord.A_full + _coord.B_full) * _coord.p_ref
+            _ptop_pe = _pfull_pe[0]
+            _rff_pe = compute_rff_profile(
+                _pfull_pe, ptop=_ptop_pe,
+                rf_cutoff=self.config.rf_cutoff_pa,
+                tau_days=self.config.rf_tau_days,
+                dt=dt,
+            )
+            _rff_pe_b = _rff_pe[None, None, None, :]
+            state_new = state_new._replace(
+                u_d=state_new.u_d.replace(
+                    data=state_new.u_d.data * _rff_pe_b,
+                ),
+                v_d=state_new.v_d.replace(
+                    data=state_new.v_d.data * _rff_pe_b,
+                ),
             )
 
         return cast_pytree(state_new, None, "storage")
@@ -2270,6 +2459,31 @@ def make_fv3_faithful_pe_config(**overrides) -> CDGridPrimitiveEquationConfig:
         * ``use_fv3_a2b_zeta_corner = True`` (iter-14)
         * ``use_fv3_metric_aware_d_con = True`` (iter-338/344)
         * ``use_fv3_cross_face_du_proj = True`` (iter-370)
+        * ``d_con_top_zero_levels = 2`` (iter-433/434)
+        * ``delt_max = 1.0`` (FV3 ``fv_arrays.F90`` production
+          default — iter-436)
+        * ``nord_v = 1`` (FV3 ``nord=1`` del-4 vorticity damping
+          production default — iter-437)
+        * ``corner_div_damp_nord = 1`` (FV3 ``nord=1`` del-4
+          corner-div damping production default — iter-437)
+        * ``corner_div_damp_d4_bg = 0.16`` (FV3 ``d4_bg``
+          production default — iter-451)
+        * ``heat_source_del2_iters = 2`` (FV3 ``nf_ke =
+          min(3, nord+1) = 2`` at nord=1 — iter-459)
+        * ``corner_div_damp_d2_bg_k1 = 4.0`` (FV3 sponge boost
+          — iter-444)
+        * ``corner_div_damp_d2_bg_k2 = 2.0`` (FV3 sponge boost
+          — iter-444)
+        * ``use_fv3_sponge_damp_v = True`` (iter-443/444; PE
+          has no damp_w)
+
+    The ``d_con_top_zero_levels=2`` matches FV3 production
+    behaviour under the typical sponge namelist
+    (``d2_bg_k1=0.16, d2_bg_k2=0.05``): FV3
+    ``dyn_core.F90:790/800/804`` zeros ``d_con_k`` at the top
+    2 levels.  Set ``d_con_top_zero_levels=0`` explicitly to
+    recover the iter-208/221/223/225 baseline (no sponge
+    zeroing).
 
     Parameters
     ----------
@@ -2284,6 +2498,55 @@ def make_fv3_faithful_pe_config(**overrides) -> CDGridPrimitiveEquationConfig:
         use_fv3_a2b_zeta_corner=True,
         use_fv3_metric_aware_d_con=True,
         use_fv3_cross_face_du_proj=True,
+        d_con_top_zero_levels=2,
+        delt_max=1.0,
+        nord_v=1,
+        corner_div_damp_nord=1,
+        corner_div_damp_d4_bg=0.16,
+        heat_source_del2_iters=2,   # FV3 nf_ke at nord=1
+        # iter-452: d2_bg_k1/k2 left at 0.0 — see NH factory note.
+        use_fv3_sponge_damp_v=True,
     )
     defaults.update(overrides)
     return CDGridPrimitiveEquationConfig(**defaults)
+
+
+def make_legoesm_pe_min_edge_config(**overrides) -> CDGridPrimitiveEquationConfig:
+    """FV3_3D iter 468: PE mirror of iter-467 NH min-edge
+    factory.
+
+    Applies the iter-465/466 finding (NH-derived) to PE: turn
+    OFF the 3 FV3-faithful flags that empirically HURT NH cube-
+    edge θ′ ratio in the factory + duogrid configuration:
+
+        * ``use_fv3_metric_aware_d_con  = False``
+        * ``heat_source_del2_iters      = 0``
+        * ``d_con_top_zero_levels       = 0``
+
+    PE has no ``use_fv3_d_con_cv`` (PE always uses c_pd) and
+    no ``damp_w`` (no w prognostic).
+
+    DISCLAIMER: This is the PE MIRROR of an NH-tuned config.
+    PE edge artifact characteristics may differ from NH (iter-
+    466 only measured NH).  An iter-465-equivalent per-flag
+    sweep on PE has not been done — apply this factory only
+    if it empirically reduces PE edge artifacts in your
+    workload.  For strict FV3-faithful behaviour use
+    ``make_fv3_faithful_pe_config``.
+
+    Parameters
+    ----------
+    **overrides
+        Any config field can be overridden.
+
+    Returns
+    -------
+    CDGridPrimitiveEquationConfig
+    """
+    edge_min_overrides = dict(
+        use_fv3_metric_aware_d_con=False,
+        heat_source_del2_iters=0,
+        d_con_top_zero_levels=0,
+    )
+    edge_min_overrides.update(overrides)
+    return make_fv3_faithful_pe_config(**edge_min_overrides)

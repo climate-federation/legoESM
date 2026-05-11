@@ -11,28 +11,35 @@ visible cube imprint (concentric blobs at face centres bordered by
 red/blue rings at panel boundaries) in u/v wind snapshots from
 Held-Suarez and baroclinic test cases.
 
-## FV3-fidelity stack (iter 356 update)
+## FV3-fidelity stack (iter 356/423 update)
 
-By iter-356 the FV3-fidelity opt-in stack closes the major
+By iter-423 the FV3-fidelity opt-in stack closes the major
 documented audit gaps on the 3D paths.
 
-NH config exposes 4 opt-in fidelity flags + duogrid grid:
+NH config exposes 5 opt-in fidelity flags + duogrid grid:
 
 | Flag                              | What            | Iter |
 |-----------------------------------|-----------------|:----:|
-| ``use_fv3_d_con_cv``              | cv_air branch   | 320 |
+| ``use_fv3_d_con_cv``              | cv_air branch (c_pd → c_vd)   | 320 |
 | ``use_fv3_vector_halo_uv``        | vector halo (u, v) center→corner | 328 |
-| ``use_fv3_dynamic_exner``         | live Π=Π_ref+π' at all 5 d_con sites | 336/337 |
+| ``use_fv3_dynamic_exner``         | live Π=Π_ref+π' at all 5 d_con sites + 3 delt_max caps | 336/337/397/398 |
 | ``use_fv3_metric_aware_d_con``    | cosa_s/rsin2 form at all 5 d_con sites | 339/344/348/350/352 |
-| ``use_duogrid=True`` (grid)       | Lagrange-extended halo at 3 NH sites | 325 |
+| ``use_fv3_cross_face_du_proj``    | cross-face halo at damp_v post-step (PAIR with use_duogrid=True per iter 384/385) | 370 |
+| ``use_duogrid=True`` (grid)       | Lagrange-extended halo at 3 NH halo sites | 325 |
 
-PE config exposes 2 opt-in fidelity flags + duogrid grid:
+PE config exposes 3 opt-in fidelity flags + duogrid grid:
 
 | Flag                              | What            | Iter |
 |-----------------------------------|-----------------|:----:|
 | ``use_fv3_a2b_zeta_corner``       | 4th-order A→B ζ corner | 14 |
 | ``use_fv3_metric_aware_d_con``    | cosa_s/rsin2 form at all 4 d_con sites | 338/344/347/349/351 |
+| ``use_fv3_cross_face_du_proj``    | cross-face halo at damp_v post-step | 370 |
 | ``use_duogrid=True`` (grid)       | duogrid wiring at PE ke_correction halo | 333 |
+
+User-facing factory functions (iter-392):
+- ``make_fv3_faithful_pe_config(**overrides)``
+- ``make_fv3_faithful_nh_config(**overrides)``
+return configs with every FV3-fidelity flag enabled.
 
 PE-NH asymmetry (iter-331/343): PE doesn't need cv (PE uses
 cp_air which is FV3-faithful for hydrostatic), vector halo (PE
@@ -50,6 +57,77 @@ Documented residual gaps (lower priority, SW-only or non-duogrid):
 - Gap #4/5 d_sw5 polar/boundary (SW solver, not 3D paths)
 - Gap #6 vort/ptc edge halo (fv3_sw_core SW path only)
 - Gap #7 fv_tp_2d s11/s14/s15 (non-duogrid path only)
+
+## Production usage (iter 417, updated iter 454)
+
+For FV3-faithful 3D production runs, use the iter-392 factories:
+
+```python
+from legoesm.grids.cubed_sphere import create_cubed_sphere
+from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+    CDGridCompressibleEulerModel, make_fv3_faithful_nh_config,
+)
+from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    CDGridPrimitiveEquationModel, make_fv3_faithful_pe_config,
+)
+
+# Pair factory with duogrid grid (REQUIRED for iter-370
+# cross_face flag to take effect — per iter-384 finding).
+grid = create_cubed_sphere(n=96, use_duogrid=True)
+
+# NH (compressible Euler):
+nh_cfg = make_fv3_faithful_nh_config(
+    damp_v=0.030, damp_v_d_con=1.0,
+    corner_div_damp_d2_bg=0.0005, corner_div_damp_d_con=1.0,
+    div_damp_coeff=1e6, div_damp_d_con=1.0,
+    A_h=1e6, ah_d_con=1.0,
+    damp_w=0.030, damp_w_d_con=1.0,
+    # All factory-default FV3 fidelity flags / values exposed:
+    #   use_fv3_d_con_cv             (iter-320 cv branch)
+    #   use_fv3_vector_halo_uv       (iter-328)
+    #   use_fv3_dynamic_exner        (iter-336/337)
+    #   use_fv3_metric_aware_d_con   (iter-339/344)
+    #   use_fv3_cross_face_du_proj   (iter-370)
+    #   d_con_top_zero_levels = 2    (iter-434 sponge d_con zero)
+    #   delt_max = 1.0               (iter-436 FV3 production)
+    #   nord_v = 1                   (iter-437 FV3 del-4)
+    #   corner_div_damp_nord = 1     (iter-437 FV3 del-4)
+    #   corner_div_damp_d4_bg = 0.16 (iter-451 FV3 production)
+    #   use_fv3_sponge_damp_w = True (iter-441 sponge boost)
+    #   use_fv3_sponge_damp_v = True (iter-442 sponge boost)
+    # NOTE: corner_div_damp_d2_bg_k* are NOT factory-set (iter-
+    # 452 rollback — FV3 d2_bg_k1=4.0 / k2=2.0 require FV3-
+    # specific da_min_c normalization).  Set them explicitly at
+    # a value compatible with your ``corner_div_damp_d2_bg``,
+    # e.g. d2_bg_k1=1e-4 when d2_bg=0.0005.
+    # For column Rayleigh friction at top, add ``rf_tau_days``
+    # (e.g. 5.0 days; iter-448).
+)
+
+# PE (hydrostatic):
+pe_cfg = make_fv3_faithful_pe_config(
+    damp_v=0.030, damp_v_d_con=1.0,
+    corner_div_damp_d2_bg=0.0005, corner_div_damp_d_con=1.0,
+    div_damp_coeff=1e6, div_damp_d_con=1.0,
+    A_h=1e6, ah_d_con=1.0,
+    # All factory-default FV3 fidelity flags / values:
+    #   use_fv3_a2b_zeta_corner      (iter-14)
+    #   use_fv3_metric_aware_d_con   (iter-338/344)
+    #   use_fv3_cross_face_du_proj   (iter-370)
+    #   d_con_top_zero_levels = 2    (iter-434)
+    #   delt_max = 1.0               (iter-436)
+    #   nord_v = 1                   (iter-437)
+    #   corner_div_damp_nord = 1     (iter-437)
+    #   corner_div_damp_d4_bg = 0.16 (iter-451)
+    #   use_fv3_sponge_damp_v = True (iter-443)
+    # PE has no damp_w (no w prognostic).
+)
+```
+
+For non-faithful (baseline) behavior, use the bare config
+constructors (``CDGridCompressibleEulerConfig(...)`` /
+``CDGridPrimitiveEquationConfig(...)``) — all flags default
+``False`` for bit-for-bit pre-iter-320 behavior.
 
 ## Final state (iter 100 close-out, table updated through iter 103)
 
@@ -860,58 +938,355 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
-- Iter 395: docstring-content regression for iter-394 audit.
-  Pins NH dyn_exner docstring mentions (1) ``iter 394`` marker,
-  (2) FV3 ``pkz`` equivalence, (3) ``FULL NONLINEAR``
-  clarification.  Added to iter-383 guard-sweep inventory (14
-  modules total now).  1/1 doc test + sweep regression pass.
-- Iter 394: audit + clarify iter-336/337 dynamic Exner =
-  FV3 ``pkz``.  ``compute_exner_perturbation`` returns
-  FULL NONLINEAR ``Π_total = (R_d · ρ · θ / p_0)^(R_d/c_v)``
-  which under EOS ``p = R_d · ρ · T`` equals ``(p/p_0)^kappa``
-  = FV3 ``pkz``.  Resolves previously-flagged "gap #2 dynamic
-  pkz" — iter-336/337 wiring IS the FV3 pkz form, not a
-  linearization.  Source comment updated; 13/13 dyn_exner
-  tests still pass.
-- Iter 393: runtime smoke for iter-392 FV3-faithful factories.
-  Both PE + NH factory-built configs (with full damping toolkit
-  + duogrid grid) produce finite output through one model step.
-  2/2 in 99 s.
-- Iter 392: user-facing FV3-faithful config factories.  Adds
-  ``make_fv3_faithful_pe_config(**overrides)`` +
-  ``make_fv3_faithful_nh_config(**overrides)`` that return
-  configs with every FV3-fidelity flag enabled at production-
-  recommended values (pair with
-  ``create_cubed_sphere(..., use_duogrid=True)``).  Convenience
-  for production users who want FV3-faithful 3D path without
-  manually setting 3-5 flags.  3/3 in 0.7 s.
-- Iter 391: extend iter-368 doc-structure regression for
-  iter-390 compacted block.  Adds (1) iter-390 marker present,
-  (2) all 8 iter-375-384 topic groups present.  Mirror of iter-
-  381 extension pattern.  7/7 in 0.08 s.
-- Iter 389: extend iter-383 guard-sweep inventory to include
-  iter-388 docstring-content regression.  13 guard modules now
-  covered.  2/2 in 0.8 s.
-- Iter 388: regression that iter-385 source comments document
-  the iter-384 cross_face/duogrid pairing requirement.  Asserts
-  PE + NH ``use_fv3_cross_face_du_proj`` docstrings contain
-  ``iter 384`` marker + ``use_duogrid=True`` mention.  Catches
-  refactors that drop the warning.  2/2 in 0.07 s.
-- Iter 387: NH counterpart of iter-386.  cross_face flag at
-  C16 WITH duogrid: (1) changes u measurably (>1e-8) vs
-  False, (2) does not amplify v-imprint.  2/2 in 138 s.
-- Iter 386: cross_face flag at C16 WITH duogrid grid.  iter-372
-  used default (non-duogrid) where flag is a no-op per iter-
-  384.  iter-386 re-runs with ``use_duogrid=True`` so flag has
-  actual effect: (1) cross_face=True changes u_d measurably
-  (>1e-8) vs False, (2) does not amplify T-imprint vs default.
-  2/2 in 86 s.
-- Iter 385: document iter-384 finding in iter-370 source
-  comments (PE + NH).  Flag ``use_fv3_cross_face_du_proj``
-  is a NO-OP when ``use_duogrid=False``; users must pair with
-  ``create_cubed_sphere(..., use_duogrid=True)`` for cross-face
-  VALUE transfer.  14/14 cross_face tests still pass post-
-  comment update.
+- Iter 477: **iter-476 hypothesis REFUTED** — isolated test
+  of ``laplacian_compact_3d`` iterated 2× on a linear field
+  with duogrid vs no-duogrid produces IDENTICAL edge change
+  (× 0.634 both ways, agreeing to 0.4%).  The composition of
+  "iter-475 halo overshoot + iter-457 iterated Laplacian
+  amplification" does NOT explain iter-473's 4.77× edge-std
+  jump in isolation.
+    initial: edge std 4.06, interior 2.42
+    no-duogrid: edge 2.58, interior 2.29  (× 0.634 edge)
+    duogrid:    edge 2.58, interior 2.29  (× 0.634 edge)
+  Bisection-by-elimination is now exhausted on individual
+  operators — bug must come from the FULL dycore + duogrid
+  composition (acoustic substeps + RK3 stages + halo +
+  smoothing all interacting), not isolable to any single
+  operator.  This is a real-world example of "the whole
+  produces a worse result than the sum of parts".
+  Diagnostic infrastructure (iter-471/472/473/474/475/476/
+  477) now provides 7 regression tests + clear narrative for
+  whoever investigates the full-pipeline interaction.  1/1
+  in 11 s.  Wired into iter-383 sweep (now 72).
+- Iter 476: **second negative diagnostic** — ``pad_halo_
+  vector_4d`` with duogrid preserves a zero vector field
+  EXACTLY (u_max = 0, v_max = 0).  Combined with iter-474
+  (scalar+constant exact) + iter-475 (scalar+linear 3.5%
+  overshoot): both halo operators pass invariance tests.
+  Final hypothesis: the iter-473 4.77× edge-std jump comes
+  from DOWNSTREAM AMPLIFICATION of iter-475's small overshoot
+  through the iter-457 ``heat_source_del2_iters=2`` Laplacian
+  smoothing — each Laplacian iteration includes a halo pad,
+  so 2 iters * 3.5% per halo pass compounds the edge
+  artifact.  Consistent with iter-465 finding that
+  ``heat_source_del2_iters=0`` reduces the edge ratio.
+  Bisection conclusion: the duogrid halo OPERATORS are
+  correct; the bug is the COMPOSITION of (a) duogrid's 3.5%
+  linear-extrapolation overshoot + (b) iterated Laplacian
+  smoothing that amplifies it.  2/2 in 5 s.  Wired into iter-
+  383 sweep (now 71).
+- Iter 475: extend iter-474 isolation to LINEAR-in-index
+  field on cubed sphere.  Test ``f(i,j)=i+j`` (independent of
+  face / level), measure halo max-abs:
+    interior max-abs:         14.0000
+    no-duogrid halo max-abs:  13.5187
+    duogrid    halo max-abs:  14.4907
+  Both finite + stable.  Duogrid produces ~7% larger halo
+  values than no-duogrid (14.49 vs 13.52), with duogrid
+  slightly OVERSHOOTING interior max — small extrapolation
+  bias.  Not catastrophic alone; doesn't explain iter-473's
+  4.77× edge-std jump.  Suggests the bug is in either (a)
+  vector halo (``pad_halo_vector_4d``) used for u/v, or (b)
+  downstream operators that read the halo and amplify the
+  small overshoot.  2/2 in 5 s.  Wired into iter-383 sweep
+  (now 70).
+- Iter 474: **first negative diagnostic** — ``pad_halo_4d`` with
+  duogrid preserves constants to machine precision (5.1e-13
+  deviation on a constant input).  This **rules out** "scalar
+  halo operator alone broken" as the root cause of iter-473's
+  edge-std 4.77× increase.  The duogrid bug must come from
+  interaction with non-trivial fields (gradients across face
+  boundaries) or from vector halo / corner interpolation.
+  Remaining iter-473 candidates after iter-474:
+    ✗ pad_halo_4d scalar with duogrid (PASSED constant test)
+    ? Vector halo pad_halo_vector_4d (used for u/v)
+    ? Cube-vertex (corner) interpolation
+    ? Higher-order halo treatment under gradients
+  2/2 in 5 s.  Wired into iter-383 sweep (now 69).
+- Iter 473: **CONCLUSIVE duogrid root-cause decomposition**:
+  the 5× edge-ratio increase is driven ENTIRELY by an edge
+  std increase, NOT by an interior std decrease.
+    duogrid OFF: edge std = 3.4e-4, interior std = 3.7e-4
+    duogrid ON:  edge std = 1.6e-3, interior std = 3.7e-4
+    duogrid effect: edge × 4.77, interior × 1.00
+  Interior is unaffected; edge std jumps 4.77×.  Refutes the
+  "benign metric artifact" hypothesis — duogrid genuinely
+  makes edges NOISIER in θ′ at C8.  Combined with iter-472
+  (effect persists at C16): a real legoESM-duogrid impl
+  issue affecting cube edges.  Most actionable single finding
+  in the loop — narrows root-cause search to: (a)
+  ``pad_halo_4d`` with duogrid argument; (b) cube-vertex
+  (corner) interpolation in duogrid; (c) higher-order halo
+  treatment at cube edges.  Future investigation should
+  bisect these candidates with targeted unit tests.  1/1
+  in 102 s.  Wired into iter-383 sweep (now 68).
+- Iter 472: **duogrid penalty persists at C16** (4.1× ON/OFF
+  vs 5.1× at C8 — only 20% smaller).  Refutes the "regime
+  hypothesis" that duogrid only hurts at low resolution.
+    C16: factory + duogrid=ON  θ′ ratio: 4.2555
+    C16: factory + duogrid=OFF θ′ ratio: 1.0332
+  ratio = 4.12× (vs 5.12 at C8).  The duogrid edge-metric
+  penalty is robust across resolutions → most likely a real
+  legoESM-duogrid implementation issue rather than a regime
+  effect.  Could be: (a) per-corner area weight asymmetry at
+  cube edges that the metric picks up; (b) halo-interpolation
+  artifact that inflates edge variance while not changing
+  visual artifact magnitude; (c) genuine impl bug.  Worth
+  future investigation but bounded outside this loop.  1/1
+  in 72 s.  Wired into iter-383 sweep (now 67).
+- Iter 471: **duogrid is the regime-changing factor.** Same
+  NH factory, ONLY toggle ``use_duogrid``:
+    factory + duogrid=ON  θ′ ratio: 4.7939
+    factory + duogrid=OFF θ′ ratio: 0.9369
+    ratio ON/OFF = 5.12×
+  Duogrid INCREASES NH θ′ edge metric by 5.1× at C8 +
+  identical factory flags.  Counterintuitive: duogrid is
+  designed to REDUCE cube-edge artifacts via better halo
+  treatment, but in legoESM at C8 it actively MAKES the
+  edge-vs-interior variance ratio worse.  Possible
+  explanations to investigate: (1) bug in duogrid impl;
+  (2) regime difference (duogrid helps at higher resolution
+  but hurts at C8); (3) metric misinterpretation — duogrid
+  may change spatial structure in a way our edge-variance
+  ratio penalizes but that is visually less artifactual.
+  Most consequential single empirical finding in the loop.
+  Reveals that the iter-465/466 "factory hurts" results were
+  largely the duogrid effect, NOT the individual factory
+  flags.  1/1 in 102 s.  Wired into iter-383 sweep (now 66).
+- Iter 470: compact iter 455-464 doc block + **PE per-flag
+  u_d edge-ratio decomposition**.  Doc shrinks ~125 lines.
+  iter-368 guard now covers 9 compaction blocks.  PE u_d
+  sweep finding: baseline 1.0309, all factory flags have
+  effect |Δ| < 0.007 — even u_d (winds) is essentially
+  insensitive to FV3 factory flags at PE + C8.  Only
+  ``cross_face_du_proj`` shows non-zero effect (Δ=−0.0065 =
+  flag slightly hurts u_d ratio).  Combined with iter-469
+  (PE T insensitive): PE is much less responsive than NH
+  to factory flag tuning at C8.  iter-465 NH found Δ values
+  up to 5.0 — NH is the right empirical target for tuning.
+  1/1 sweep + 24/24 compaction tests in 665 s + 0.05 s.
+  Wired into iter-383 sweep (now 65).
+- Iter 469: **PE per-flag T edge-ratio decomposition** at C8
+  + duogrid.  Baseline factory T edge ratio: 0.9776.  Per-flag
+  deltas ALL essentially ZERO (max |Δ| = 0.0001):
+    no a2b_zeta_corner          : Δ = +0.0000
+    no metric_aware_d_con       : Δ = +0.0001
+    no cross_face_du_proj       : Δ = −0.0000
+    no heat_source_del2         : Δ = −0.0000
+    no d_con_top_zero           : Δ = +0.0000
+    no sponge_damp_v            : Δ = +0.0000
+  **PE T field is INSENSITIVE to all factory FV3 flags** —
+  opposite of NH iter-465 where flags moved ratio by 1-5
+  units.  Implications: (1) PE T artifact at C8 is dominated
+  by something OTHER than the factory flags (likely intrinsic
+  D-grid corner structure or held_suarez init); (2) iter-468
+  PE min-edge factory is essentially a no-op for T — keep it
+  for API symmetry but warn users.  (iter-461 separately
+  showed PE v_d factory gives 2.5% reduction — PE edge
+  signature is in WINDS, not temperature.)  1/1 in 656 s.
+  Wired into iter-383 sweep (now 64).
+- Iter 468: PE mirror of NH iter-467 ``make_legoesm_pe_min_
+  edge_config``.  Same 3 hurting-flag overrides + same
+  disclaimer (PE not directly measured in iter-465/466 sweep;
+  applying NH-derived overrides as best guess).  5/5 in 23 s.
+  Wired into iter-383 sweep (now 63).
+- Iter 467: new factory ``make_legoesm_nh_min_edge_config``
+  exposing the iter-466 empirical finding via a single-call
+  user-facing API.  Disables the 3 iter-466 hurting flags
+  (metric_aware_d_con, heat_source_del2, d_con_top_zero) but
+  keeps all other FV3-faithful flags ON.  Documented as a
+  DIVERGENCE from strict FV3-faithful (factory remains FV3-
+  faithful per CLAUDE.md "do not improvise"; this is a
+  separate opt-in for users prioritizing legoESM-scale edge
+  artifact reduction over strict FV3-fidelity).  5/5 in 28 s.
+  Wired into iter-383 sweep (now 62).
+- Iter 466: **50.4% edge-ratio reduction** via iter-465-
+  guided minimal-flag config.  5-seed comparison at C8 +
+  duogrid:
+  * factory full (all FV3 flags): θ′ ratio = 4.5361
+  * factory minimal-for-edge (only vector_halo_uv + d_con_cv
+    + dynamic_exner kept; metric_aware_d_con, heat_source_del2,
+    d_con_top_zero_levels DROPPED): θ′ ratio = **2.2520**
+  * Reduction = 50.4%
+  This is the **strongest empirical finding** in the loop:
+  selectively turning OFF some FV3-faithful flags REDUCES
+  cube-edge artifact ratio by half.  Implication: there's a
+  divergence between "FV3-faithful" and "legoESM-edge-
+  optimized" — our impl of metric_aware_d_con / heat_source_
+  del2 / d_con_top_zero may deviate from FV3 semantics enough
+  to hurt at our scale.  Factory defaults remain FV3-faithful
+  per CLAUDE.md "do not improvise"; users who want minimal
+  edge artifacts should apply the iter-466 overrides.
+  Pinned as guard regression (assertion: min < full).  1/1
+  in 212 s.  Wired into iter-383 sweep (now 61).
+- Iter 465: **per-flag NH edge-ratio decomposition** at C8 +
+  duogrid + factory.  Baseline factory ratio θ′: **4.3676**
+  (4× higher than no-duogrid baseline from iter-464!  Duogrid
+  CHANGES the edge metric significantly).  Per-flag deltas
+  (flag OFF − baseline):
+  * ``use_fv3_vector_halo_uv`` OFF:  Δ = +5.02 (flag REDUCES
+    ratio by 5.0 — biggest single contributor)
+  * ``use_fv3_d_con_cv`` OFF:        Δ = +1.65 (cv_air helps)
+  * ``use_fv3_metric_aware_d_con`` OFF: Δ = −1.62 (flag is
+    HURTING — counterintuitive!)
+  * ``heat_source_del2_iters=0``:    Δ = −1.42 (smoothing
+    HURTS at this config — opposite of iter-464 finding
+    without duogrid!)
+  * ``d_con_top_zero_levels=0``:     Δ = −0.58 (zero hurts)
+  * ``use_fv3_cross_face_du_proj`` OFF: Δ ≈ 0
+  * ``use_fv3_dynamic_exner`` OFF:   Δ ≈ 0
+  Major takeaways: (1) duogrid changes the regime fundamentally;
+  (2) ``vector_halo_uv`` is the biggest helper; (3) some flags
+  (metric_aware_d_con, heat_source_del2) HURT in factory+duogrid
+  combination — different from individual-flag finding without
+  duogrid; (4) factory combination is NOT a strict improvement.
+  1/1 in 518 s (8 configs × 3 seeds × 3 steps).  Wired into
+  iter-383 sweep (now 60).
+- **Iters 455-464 (compacted iter 470)**: edge-artifact
+  empirical investigation phase 1 (single-flag sweeps).
+  - iter 455: legoESM-scale calibration doc + 5-step
+    stability at known-good d2_bg_k1=1e-4.
+  - iter 456: introduce edge_var/interior_var metric infra.
+  - iter 457: NH heat_source del-2 smoothing (FV3 del2_cubed
+    port).
+  - iter 458: PE mirror of iter-457.
+  - iter 459: factory default heat_source_del2_iters=2
+    (FV3 ``nf_ke``).
+  - iter 460: compact iter 445-454 + AST guard for iter-
+    457/458/459.
+  - iter 461: first empirical edge-metric data (3-seed C8):
+    NH factory worsens 3.7%; PE improves 2.5% — both ratios
+    near 1.0.
+  - iter 462: d2_bg_k1 sweep over 4 decades → ZERO change in
+    NH ratio at C8; sponge boost is per-level scalar
+    invariant.
+  - iter 463: rf_tau_days sweep → ZERO change at C8; same
+    invariance insight (RF is per-level scalar).
+  - iter 464: **first positive finding** — del-2 smoothing
+    reduces NH θ′ edge ratio 1.10 → 0.96 (14% drop at
+    iters=1); SPATIAL operations DO move the metric.
+- **Iters 445-454 (compacted iter 460)**: sponge boost shared
+  helper + Rayleigh friction + AST hardening + doc updates.
+  - iter 445: AST guard for iter-438..443 sponge wirings.
+  - iter 446: factor sponge boost to shared core helper
+    ``apply_top_sponge_damp_boost``.
+  - iter 447: factor linear-scaling sponge trick to shared
+    helper ``apply_top_sponge_field_scale``.
+  - iter 448: NH FV3 ``Ray_fast`` column Rayleigh friction.
+  - iter 449: PE mirror of iter-448.
+  - iter 450: compact iter 435-444 doc + AST guard for
+    iter-448/449 RF.
+  - iter 451: factory ``corner_div_damp_d4_bg = 0.16`` (FV3
+    production).
+  - iter 452: rolled back factory ``d2_bg_k*=4.0/2.0`` to 0.0
+    (FV3 normalization mismatch — caused blow-up).
+  - iter 453: AST guard for iter-451/452 factory defaults.
+  - iter 454: update iter-417 doc + iter-418 test for iter-
+    431..453 factory flags.
+- **Iters 435-444 (compacted iter 450)**: FV3 sponge boost
+  (damping-coefficient side) + factory production defaults.
+  - iter 435: AST regression guard for iter-431/432/433 mask
+    wirings (7 tests).
+  - iter 436: factory default ``delt_max = 1.0`` (FV3
+    ``fv_arrays.F90`` production default).
+  - iter 437: factory default ``nord_v = 1`` /
+    ``corner_div_damp_nord = 1`` (FV3 ``nord=1`` del-4).
+  - iter 438: new PE field ``corner_div_damp_d2_bg_k1`` (FV3
+    ``dyn_core.F90:780`` k=0 sponge boost).
+  - iter 439: new PE field ``corner_div_damp_d2_bg_k2`` (FV3
+    lines 792/802 k=1/k=2 boost with 0.01 / 0.05 thresholds).
+  - iter 440: NH mirror — both fields wired via shared helper
+    ``_apply_top_sponge_damp_boost`` at 2 NH corner-div sites.
+  - iter 441: NH ``use_fv3_sponge_damp_w`` flag — FV3 line
+    782/793/803 ``damp_w = d2_divg``.  Linear ``damp^(nord+1)``
+    scaling trick at sponge levels.
+  - iter 442: NH ``use_fv3_sponge_damp_v`` flag — FV3 lines
+    786-797 ``damp_vt = 0.5 * d2_divg`` (k=0/1 only).
+  - iter 443: PE mirror of iter-442 ``use_fv3_sponge_damp_v``.
+  - iter 444: factory defaults expose FV3 production sponge:
+    ``d2_bg_k1=4.0``, ``d2_bg_k2=2.0``, ``sponge_damp_v=True``
+    (NH+PE), ``sponge_damp_w=True`` (NH).
+- **Iters 425-434 (compacted iter 440)**: factory hardening +
+  FV3 sponge d_con zeroing.
+  - iter 425: end-to-end smoke of 6 guard modules (27/27).
+  - iter 426: factory module-exports test.
+  - iter 427: factory drives finite 1-step at C8.
+  - iter 428: factory preserves grad through 1-step (310 s).
+  - iter 429: factory 3-step trajectory bounded (stability).
+  - iter 430: compact iter 415-424 into single block + iter-
+    368 regression for the new marker.
+  - iter 431: FV3 sponge zeroing of d_con KE→heat — new field
+    ``d_con_top_zero_levels: int = 0`` wired at NH damp_v.
+  - iter 432: extend iter-431 mask to NH damp_w + aggregate
+    (3 slow-tendency sites).  All 5 NH d_con sites covered.
+  - iter 433: PE mirror — field on PE config + wire at 4 PE
+    d_con sites (damp_v + aggregate covering 3 slow-tend).
+  - iter 434: factory defaults expose
+    ``d_con_top_zero_levels=2`` — matches FV3 production
+    sponge (``d2_bg_k1=0.16, d2_bg_k2=0.05``).
+- **Iters 415-424 (compacted iter 430)**: factory-regression
+  guard hardening + doc-drift catches.
+  - iter 415: no-duplicate regression for iter-383 guard-sweep
+    inventory (catches silent inventory weakening).
+  - iter 416: wire iter-415 into iter-383 sweep
+    (self-referential, 19 guard modules).
+  - iter 418: executable test that iter-417 production-usage
+    doc example actually runs (catches API drift).
+  - iter 419: doc-structure guard for iter-417 production-usage
+    section (header + factories + duogrid pairing).
+  - iter 421: doc-structure regression for iter-420 compacted
+    block (marker + 8 topics; 5 compaction blocks now guarded).
+  - iter 422: extend iter-383 sweep with iter-401/413/418
+    (numeric pkz proof, gradient flow, doc example) → 22
+    modules total.
+  - iter 423: FV3-fidelity-stack summary table update (5 NH +
+    3 PE flag panel + factory rows).
+  - iter 424: doc-structure regression for iter-423 summary
+    table (flag names, PE-specific flag, factory rows).
+- **Iters 405-414 (compacted iter 420)**: factory-extension
+  audit/regression infrastructure.
+  - iter 405: FV3-flag inventory consistency check.
+  - iter 406: factory docstring content regression.
+  - iter 407: doc-structure guard for iter-400 compaction.
+  - iter 408: factory 5-step stability smoke.
+  - iter 409: factory 5-step AD-at-rest (11.5 min).
+  - iter 412: factory pass-through verification.
+  - iter 413: gradient-flow test through dyn_exner.
+  - iter 414: extend iter-383 sweep for 3 new guards (iter-
+    405/406/412).
+- **Iters 395-404 (compacted iter 410)**: post-iter-400
+  regression infrastructure.
+  - iter 395: pkz-equivalence docstring regression for iter-394.
+  - iter 396: factory override edge cases.
+  - **iter 397/398**: extend dyn_exner to ALL delt_max caps
+    (aggregate slow-tendency + damp_v + damp_w post-acoustic).
+    Closes inconsistency where d_con denominator used Π_total
+    but cap derivation still used frozen Π_ref.
+  - iter 399: AST guard for iter-397/398 cap wiring.
+  - iter 400: ToC compaction (iter 385-394 → 1 block).
+  - iter 401: quantitative ``Π_total = FV3 pkz`` numeric
+    regression (rtol=1e-10 with perturbation, 1e-14 at rest).
+  - iter 402: AST signature regression for iter-392 factories.
+  - iter 403: extend iter-383 sweep for iter-402.
+  - iter 404: jax.jit smoke for iter-392 factory models.
+- **Iters 385-394 (compacted iter 400)**: post-iter-380 doc-
+  audit follow-ups + factory work + dyn_exner audit.
+  - iter 385: document iter-384 finding in iter-370 source.
+  - iter 386/387: PE+NH C16 cross_face with duogrid grid
+    (meaningful regression coverage; iter-372 was no-op).
+  - iter 388: docstring-content regression for iter-385.
+  - iter 389: extend guard-sweep inventory for iter-388.
+  - iter 390: ToC compaction (iter 375-384 → 1 block).
+  - iter 391: extend doc-structure regression for iter-390.
+  - **iter 392**: user-facing ``make_fv3_faithful_*_config``
+    factories.  Enable all FV3-fidelity flags at production
+    values.  PE 3 flags + NH 5 flags.
+  - iter 393: factory runtime smoke (finite step PE+NH).
+  - iter 394: **AUDIT** dynamic Exner = FV3 pkz.
+    ``compute_exner_perturbation`` returns FULL NONLINEAR
+    ``Π_total = (R_d·ρ·θ/p_0)^(R_d/c_v)``, algebraically equals
+    ``(p/p_0)^kappa = pkz`` under EOS.  Resolves earlier
+    "linearization" concern.
 - **Iters 375-384 (compacted iter 390)**: cross_face follow-ups
   + audit/regression infrastructure.
   - iter 375: PE full-stack AD umbrella with cross_face.
