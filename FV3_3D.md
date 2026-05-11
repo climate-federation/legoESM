@@ -816,6 +816,14 @@ Key iterations:
   Combined with iter-320 (post-acoustic damp_v / damp_w) +
   iter-321 (damp_w global) + iter-322 (damp_v global), ALL 5 NH
   d_con sites now have cv-flag verification.  3/3.
+- Iter 343: extend iter-331 PE/NH flag-asymmetry guard for
+  iter-336/337 ``use_fv3_dynamic_exner`` (NH-only since PE
+  uses actual T — no Exner factor) + iter-338/339
+  ``use_fv3_metric_aware_d_con`` (SHARED — both paths' damp_v
+  d_con sites affected).  PE-only-doesn't-have, NH-only-has,
+  and SHARED-both-have flag sets pinned to catch future
+  refactors that leak NH-only flags to PE or drop shared
+  flags from either side.  6/6 in 0.3 s.
 - Iter 342: AST regression guard for iter-336 + iter-337
   dynamic Exner wiring on NH 3D path.  Mirrors
   iter-327/329/334/340 pattern.  Asserts: (1) slow_tendencies

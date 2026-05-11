@@ -47,7 +47,25 @@ from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
 )
 
 
-_NH_ONLY_FV3_FLAGS = ("use_fv3_d_con_cv", "use_fv3_vector_halo_uv")
+_NH_ONLY_FV3_FLAGS = (
+    "use_fv3_d_con_cv",
+    "use_fv3_vector_halo_uv",
+    "use_fv3_dynamic_exner",   # iter-336/337
+)
+# Flags PE + NH BOTH expose (iter-338 + iter-339 metric-aware).
+_SHARED_FV3_FLAGS = ("use_fv3_metric_aware_d_con",)
+
+
+def test_pe_does_not_expose_use_fv3_dynamic_exner():
+    """PE uses actual T (no Exner factor); dynamic Exner flag is
+    NH-only.  iter-343 extension of iter-331 PE/NH asymmetry guard."""
+    pe_cfg = CDGridPrimitiveEquationConfig()
+    assert not hasattr(pe_cfg, "use_fv3_dynamic_exner"), (
+        "CDGridPrimitiveEquationConfig must NOT expose "
+        "use_fv3_dynamic_exner — PE is hydrostatic with actual T "
+        "prognostic.  No Π factor in PE d_con denominator, so "
+        "dynamic-vs-frozen-Π_ref flag has no PE meaning."
+    )
 
 
 def test_pe_does_not_expose_use_fv3_d_con_cv():
@@ -96,3 +114,21 @@ def test_nh_only_flags_default_off():
             f"NH config field {field} default is {val}; must be "
             f"False to preserve bit-for-bit baseline."
         )
+
+
+def test_pe_and_nh_both_expose_shared_fv3_flags():
+    """Shared FV3-fidelity flags (iter-338/339 metric-aware) live
+    on BOTH PE and NH configs since the gap (cosa_s/rsin2 metric)
+    affects both paths' damp_v_d_con sites."""
+    pe_cfg = CDGridPrimitiveEquationConfig()
+    nh_cfg = CDGridCompressibleEulerConfig()
+    for field in _SHARED_FV3_FLAGS:
+        assert hasattr(pe_cfg, field), (
+            f"PE config must expose {field} (iter-338 wiring)."
+        )
+        assert hasattr(nh_cfg, field), (
+            f"NH config must expose {field} (iter-339 wiring)."
+        )
+        # Both default False
+        assert getattr(pe_cfg, field) is False
+        assert getattr(nh_cfg, field) is False
