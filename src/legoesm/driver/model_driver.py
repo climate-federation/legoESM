@@ -430,6 +430,62 @@ class ModelDriver:
         else:
             logger.info(f"  State init: T={cfg.T_init}K (dry spectral)")
 
+        # ERA5 IC override — replace held-suarez rest state with ERA5 reanalysis.
+        # Applied after the default moisture init so the Field metadata (dims,
+        # units, names) from held_suarez_init is preserved as the template.
+        if cfg.ic == "era5" and cfg.ic_path:
+            from legoesm.training.era5_to_state import (
+                load_era5_ic,
+                era5_to_cubedsphere_carry,
+                era5_to_spectral_carry,
+            )
+            logger.info(
+                f"  IC: loading ERA5 from {cfg.ic_path} "
+                f"(year={cfg.start_year})"
+            )
+            era5_slice = load_era5_ic(cfg.ic_path, cfg.start_year)
+
+            if cfg.grid.grid_type == "cubed_sphere":
+                carry = era5_to_cubedsphere_carry(
+                    era5_slice, self.grid, self.sigma
+                )
+            elif cfg.dycore.discretization == "spectral":
+                carry = era5_to_spectral_carry(
+                    era5_slice, self.grid, self.sigma
+                )
+            else:
+                raise NotImplementedError(
+                    f"ERA5 IC not yet supported for "
+                    f"grid_type={cfg.grid.grid_type!r} / "
+                    f"discretization={cfg.dycore.discretization!r}. "
+                    "Use --grid-type cubed_sphere or --discretization spectral."
+                )
+
+            self.state = self.state._replace(
+                u=self.state.u.replace(data=carry.u),
+                v=self.state.v.replace(data=carry.v),
+                T=self.state.T.replace(data=carry.T),
+                p_s=self.state.p_s.replace(data=carry.p_s),
+                phis=self.state.phis.replace(data=carry.phis),
+            )
+            self.tracers["q_v"] = jnp.asarray(carry.q_v)
+
+            _stats_era5 = jnp.stack([
+                jnp.mean(self.tracers["q_v"]),
+                jnp.mean(column_water_vapor(
+                    self.tracers["q_v"], self.state.p_s.data,
+                    self.sigma.dsigma,
+                )),
+                jnp.mean(self.state.T.data),
+            ])
+            _h2 = np.asarray(_stats_era5)
+            logger.info(
+                f"  State init (ERA5 {cfg.start_year}): "
+                f"T_mean={_h2[2]:.1f}K, "
+                f"q_v={_h2[0]*1000:.2f} g/kg, "
+                f"CWV={_h2[1]:.1f} kg/m2"
+            )
+
     def _create_ensemble(self) -> None:
         """Create ensemble members if ensemble_size > 1.
 
