@@ -938,6 +938,20 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 472: **duogrid penalty persists at C16** (4.1× ON/OFF
+  vs 5.1× at C8 — only 20% smaller).  Refutes the "regime
+  hypothesis" that duogrid only hurts at low resolution.
+    C16: factory + duogrid=ON  θ′ ratio: 4.2555
+    C16: factory + duogrid=OFF θ′ ratio: 1.0332
+  ratio = 4.12× (vs 5.12 at C8).  The duogrid edge-metric
+  penalty is robust across resolutions → most likely a real
+  legoESM-duogrid implementation issue rather than a regime
+  effect.  Could be: (a) per-corner area weight asymmetry at
+  cube edges that the metric picks up; (b) halo-interpolation
+  artifact that inflates edge variance while not changing
+  visual artifact magnitude; (c) genuine impl bug.  Worth
+  future investigation but bounded outside this loop.  1/1
+  in 72 s.  Wired into iter-383 sweep (now 67).
 - Iter 471: **duogrid is the regime-changing factor.** Same
   NH factory, ONLY toggle ``use_duogrid``:
     factory + duogrid=ON  θ′ ratio: 4.7939
