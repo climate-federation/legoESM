@@ -860,6 +860,11 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 369: consolidated FV3-fidelity flag-set presence guard.
+  Asserts NH has 4 flags (cv, vector_halo, dyn_exner, metric)
+  + PE has 2 flags (a2b_zeta, metric); all default False.
+  Single test mirroring iter-318/331/343/362 default-asymmetry
+  guards.  3/3 in 0.6 s.
 - Iter 368: doc-structure regression for iter-365 compaction.
   Pins (1) compaction marker present, (2) doc size < 3600 lines,
   (3) all 17 iter-group topic markers present in compacted
