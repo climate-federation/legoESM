@@ -919,6 +919,17 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 434: set ``d_con_top_zero_levels = 2`` in both factory
+  defaults (``make_fv3_faithful_nh_config``,
+  ``make_fv3_faithful_pe_config``).  Matches FV3 production
+  sponge namelist (``d2_bg_k1=0.16, d2_bg_k2=0.05``): FV3
+  zeros d_con_k at k=1 (always) and k=2 (d2_bg_k2>0.01) but
+  NOT k=3.  Override with ``d_con_top_zero_levels=0`` to
+  recover the iter-209/207/208/221 baseline.  Regression test
+  pins factory defaults to 2 for both NH + PE; existing
+  factory tests (iter-417/418/427/402) still pass post-change.
+  4/4 in 0.7 s + 9/9 regression suite in 78 s.  Wired into
+  iter-383 sweep (now 30).
 - Iter 433: PE mirror of iter-431/432 ``d_con_top_zero_levels``.
   Add field to ``CDGridPrimitiveEquationConfig`` (default 0 =
   bit-for-bit baseline) + wire at all 4 PE d_con sites: post-

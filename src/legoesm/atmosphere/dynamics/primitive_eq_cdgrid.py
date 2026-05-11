@@ -2305,6 +2305,15 @@ def make_fv3_faithful_pe_config(**overrides) -> CDGridPrimitiveEquationConfig:
         * ``use_fv3_a2b_zeta_corner = True`` (iter-14)
         * ``use_fv3_metric_aware_d_con = True`` (iter-338/344)
         * ``use_fv3_cross_face_du_proj = True`` (iter-370)
+        * ``d_con_top_zero_levels = 2`` (iter-433/434)
+
+    The ``d_con_top_zero_levels=2`` matches FV3 production
+    behaviour under the typical sponge namelist
+    (``d2_bg_k1=0.16, d2_bg_k2=0.05``): FV3
+    ``dyn_core.F90:790/800/804`` zeros ``d_con_k`` at the top
+    2 levels.  Set ``d_con_top_zero_levels=0`` explicitly to
+    recover the iter-208/221/223/225 baseline (no sponge
+    zeroing).
 
     Parameters
     ----------
@@ -2319,6 +2328,7 @@ def make_fv3_faithful_pe_config(**overrides) -> CDGridPrimitiveEquationConfig:
         use_fv3_a2b_zeta_corner=True,
         use_fv3_metric_aware_d_con=True,
         use_fv3_cross_face_du_proj=True,
+        d_con_top_zero_levels=2,
     )
     defaults.update(overrides)
     return CDGridPrimitiveEquationConfig(**defaults)
