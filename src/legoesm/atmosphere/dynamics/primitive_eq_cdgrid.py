@@ -1009,51 +1009,21 @@ def fv3_hydrostatic_tendencies(
             ),
         )                                                  # (6, n+1, n+1, nlev)
 
-        # FV3_3D iter 438: per-level sponge boost at k=0 (FV3
-        # ``dyn_core.F90:780`` ``d2_divg = max(0.01, d2_bg,
-        # d2_bg_k1)``).  Override the adaptive ``_damp_corner``
-        # value at k=0 with ``da_min_c * max(d2_bg, d2_bg_k1)``
-        # — bypass the 0.20 / Smagorinsky cap at the top level.
-        # Default 0.0 = no boost = bit-for-bit baseline.
-        if config.corner_div_damp_d2_bg_k1 > 0.0:
-            _damp_k1 = _da_min_c * jnp.maximum(
-                config.corner_div_damp_d2_bg,
-                config.corner_div_damp_d2_bg_k1,
-            )
-            _nlev_dc = _damp_corner.shape[-1]
-            _k_idx_dc = jnp.arange(_nlev_dc)
-            _damp_corner = jnp.where(
-                _k_idx_dc == 0,
-                _damp_k1,
-                _damp_corner,
-            )
-        # FV3_3D iter 439: per-level sponge boost at k=1 / k=2
-        # (FV3 ``dyn_core.F90:792, 802``).  Conditions on the
-        # config value (Python-static thresholds) — bit-for-bit
-        # FV3 semantics: k=1 (FV3 k=2) override when
-        # d2_bg_k2 > 0.01; k=2 (FV3 k=3) when d2_bg_k2 > 0.05.
-        if config.corner_div_damp_d2_bg_k2 > 0.01:
-            _nlev_dc2 = _damp_corner.shape[-1]
-            _k_idx_dc2 = jnp.arange(_nlev_dc2)
-            _damp_k2 = _da_min_c * jnp.maximum(
-                config.corner_div_damp_d2_bg,
-                config.corner_div_damp_d2_bg_k2,
-            )
-            _damp_corner = jnp.where(
-                _k_idx_dc2 == 1,
-                _damp_k2,
-                _damp_corner,
-            )
-            if config.corner_div_damp_d2_bg_k2 > 0.05:
-                _damp_k3 = _da_min_c * jnp.maximum(
-                    config.corner_div_damp_d2_bg,
-                    0.2 * config.corner_div_damp_d2_bg_k2,
-                )
-                _damp_corner = jnp.where(
-                    _k_idx_dc2 == 2,
-                    _damp_k3,
-                    _damp_corner,
-                )
+        # FV3_3D iter 438/439/446: per-level sponge boost at
+        # k=0 / k=1 / k=2 via shared helper.  See
+        # ``legoesm.core.fv3_sponge_boost`` for the FV3
+        # ``dyn_core.F90:780, 792, 802`` port (k=0 from
+        # d2_bg_k1; k=1 if d2_bg_k2>0.01; k=2 if d2_bg_k2>0.05
+        # with 0.2 factor).
+        from legoesm.core.fv3_sponge_boost import (
+            apply_top_sponge_damp_boost as _shared_boost,
+        )
+        _damp_corner = _shared_boost(
+            _damp_corner, _da_min_c,
+            config.corner_div_damp_d2_bg,
+            config.corner_div_damp_d2_bg_k1,
+            config.corner_div_damp_d2_bg_k2,
+        )
 
         # FV3_3D iter 18: optional higher-order del-(2*(nord+1))
         # damping (FV3 d_sw5 ``nord > 0`` path, sw_core.F90:1725-1822).

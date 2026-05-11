@@ -445,45 +445,22 @@ class CDGridCompressibleEulerConfig(NamedTuple):
 
 
 def _apply_top_sponge_damp_boost(damp_corner, da_min_c, config):
-    """FV3_3D iter 440: NH per-level sponge boost of corner-
-    divergence damping coefficient, mirror of PE iter-438 / 439.
+    """FV3_3D iter 446: thin wrapper over the shared core helper.
 
-    Port of FV3 ``dyn_core.F90:780, 792, 802``:
-    * k=0 (FV3 k=1): override = da_min_c * max(d2_bg, d2_bg_k1)
-    * k=1 (FV3 k=2): override = da_min_c * max(d2_bg, d2_bg_k2)
-        (gated on d2_bg_k2 > 0.01)
-    * k=2 (FV3 k=3): override = da_min_c * max(d2_bg, 0.2 *
-        d2_bg_k2)  (gated on d2_bg_k2 > 0.05)
-
-    Default config values 0.0 → no override → bit-for-bit
-    baseline.  Python-static gates (no trace cost when disabled).
+    Adapts the config-based call (legacy iter-440 NH callers)
+    to the shared module
+    ``legoesm.core.fv3_sponge_boost.apply_top_sponge_damp_boost``
+    which now also serves the PE corner-div site.
     """
-    if (
-        config.corner_div_damp_d2_bg_k1 <= 0.0
-        and config.corner_div_damp_d2_bg_k2 <= 0.01
-    ):
-        return damp_corner
-    nlev = damp_corner.shape[-1]
-    k_idx = jnp.arange(nlev)
-    if config.corner_div_damp_d2_bg_k1 > 0.0:
-        damp_k1 = da_min_c * jnp.maximum(
-            config.corner_div_damp_d2_bg,
-            config.corner_div_damp_d2_bg_k1,
-        )
-        damp_corner = jnp.where(k_idx == 0, damp_k1, damp_corner)
-    if config.corner_div_damp_d2_bg_k2 > 0.01:
-        damp_k2 = da_min_c * jnp.maximum(
-            config.corner_div_damp_d2_bg,
-            config.corner_div_damp_d2_bg_k2,
-        )
-        damp_corner = jnp.where(k_idx == 1, damp_k2, damp_corner)
-        if config.corner_div_damp_d2_bg_k2 > 0.05:
-            damp_k3 = da_min_c * jnp.maximum(
-                config.corner_div_damp_d2_bg,
-                0.2 * config.corner_div_damp_d2_bg_k2,
-            )
-            damp_corner = jnp.where(k_idx == 2, damp_k3, damp_corner)
-    return damp_corner
+    from legoesm.core.fv3_sponge_boost import (
+        apply_top_sponge_damp_boost as _shared,
+    )
+    return _shared(
+        damp_corner, da_min_c,
+        config.corner_div_damp_d2_bg,
+        config.corner_div_damp_d2_bg_k1,
+        config.corner_div_damp_d2_bg_k2,
+    )
 
 
 def cdgrid_compressible_euler_slow_tendencies(

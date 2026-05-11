@@ -919,6 +919,16 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 446: factor FV3 sponge boost into shared core helper.
+  New module ``legoesm.core.fv3_sponge_boost`` with public
+  ``apply_top_sponge_damp_boost``.  Replaces duplicated impl in
+  iter-440 NH (helper now thin wrapper) and iter-438/439 PE
+  (was inline).  Single source of truth for FV3
+  ``dyn_core.F90:780, 792, 802`` semantics.  All 13 iter-438/
+  439/440 existing tests still pass after refactor — pure
+  factoring, no behavior change.  6/6 new (helper unit tests +
+  NH/PE step sanity) in 125 s.  Wired into iter-383 sweep (now
+  42).
 - Iter 445: AST regression guard for iter-438 through 443 FV3
   sponge boost wirings.  14 tests: config field presence (7
   fields across NH+PE), PE iter-438 k=0 / iter-439 k=1+k=2
