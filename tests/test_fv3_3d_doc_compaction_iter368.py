@@ -38,12 +38,12 @@ def test_iter365_compaction_present(doc_text):
     )
 
 
-def test_doc_size_below_3700_lines(doc_text):
+def test_doc_size_below_3800_lines(doc_text):
     n_lines = len(doc_text.splitlines())
-    assert n_lines < 3700, (
-        f"FV3_3D.md has {n_lines} lines (target < 3700 after iter-"
-        f"480 compaction).  Check for re-expansion or missing "
-        f"compaction."
+    assert n_lines < 3800, (
+        f"FV3_3D.md has {n_lines} lines (target < 3800 after iter-"
+        f"486 production-usage section expansion).  Check for "
+        f"re-expansion or missing compaction."
     )
 
 
@@ -67,6 +67,31 @@ def test_iter423_summary_table_accurate(doc_text):
     # Factory mention
     assert "make_fv3_faithful_pe_config" in section
     assert "make_fv3_faithful_nh_config" in section
+
+
+def test_iter486_edge_min_factories_doc_section(doc_text):
+    """iter-486: production usage doc section for the 4
+    legoESM-min-edge factories (iter-467/468/483/484) exists +
+    mentions each factory by name."""
+    section_start = doc_text.find(
+        "### Edge-artifact-minimized factories"
+    )
+    section_end = doc_text.find("## Final state", section_start)
+    assert section_start >= 0 and section_end > section_start, (
+        "iter-486 min-edge factories doc section missing."
+    )
+    section = doc_text[section_start:section_end]
+    expected_names = [
+        "make_legoesm_nh_min_edge_config",
+        "make_legoesm_nh_min_edge_aggressive_config",
+        "make_legoesm_pe_min_edge_config",
+        "make_legoesm_pe_min_edge_aggressive_config",
+    ]
+    for name in expected_names:
+        assert name in section, (
+            f"iter-486 min-edge doc section missing "
+            f"factory name ``{name}``."
+        )
 
 
 def test_iter454_doc_example_lists_new_flags(doc_text):

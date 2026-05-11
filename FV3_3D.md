@@ -129,6 +129,30 @@ constructors (``CDGridCompressibleEulerConfig(...)`` /
 ``CDGridPrimitiveEquationConfig(...)``) — all flags default
 ``False`` for bit-for-bit pre-iter-320 behavior.
 
+### Edge-artifact-minimized factories (iter 467/468/483/484)
+
+For users prioritizing cube-edge artifact suppression over strict
+FV3-fidelity, two divergence-from-FV3 factories are provided:
+
+```python
+from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+    make_legoesm_nh_min_edge_config,             # iter-467: 50% reduction
+    make_legoesm_nh_min_edge_aggressive_config,  # iter-483: 60% reduction
+)
+from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    make_legoesm_pe_min_edge_config,             # iter-468 (PE mirror)
+    make_legoesm_pe_min_edge_aggressive_config,  # iter-484 (PE mirror)
+)
+```
+
+* ``min_edge`` factory: drops 3 hurting flags (iter-466 finding)
+  — 50% θ′ edge ratio reduction at C8+duogrid (4.54 → 2.25).
+* ``aggressive`` factory: above + ``corner_div_damp_d2_bg=5e-2``
+  (iter-482) — 60% reduction (3.50 → 1.42×).  Trade-off:
+  over-damps physical waves more than factory default.
+* PE variants are API-symmetric; iter-469/470 showed PE is
+  largely insensitive to these flag changes at C8.
+
 ## Final state (iter 100 close-out, table updated through iter 103)
 
 Core deliverable RESOLVED at iter 99: HS at C96 30 days completes
@@ -938,6 +962,15 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 486: document the 4 legoESM-min-edge factories in the
+  production-usage section.  New "Edge-artifact-minimized
+  factories" subsection lists all 4 (iter-467/468/483/484),
+  their measured reductions (50% min_edge, 60% aggressive),
+  and the over-damping trade-off.  New iter-368 regression
+  ``test_iter486_edge_min_factories_doc_section`` pins the
+  section presence + 4 factory-name mentions.  Doc-size cap
+  bumped 3700 → 3800.  27/27 in 0.06 s.  Wired into iter-383
+  sweep (already in via test_fv3_3d_doc_compaction_iter368).
 - Iter 485: AST regression guard for the 4 user-facing
   legoESM-min-edge factories (iter-467 NH min_edge, iter-468
   PE min_edge, iter-483 NH aggressive, iter-484 PE aggressive).
