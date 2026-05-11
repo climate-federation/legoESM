@@ -879,6 +879,9 @@ Key iterations:
   iter-369 guard matches actual ``use_fv3_*`` field count in
   PE + NH source.  Catches drift when a new flag is added to
   source without updating iter-369 lists.  2/2 in 0.77 s.
+- Iter 415: no-duplicate regression for iter-383 guard-sweep
+  inventory.  Catches duplicate entries (importability would
+  silently pass while sweep weakens).  1/1 in 0.07 s.
 - Iter 414: extend iter-383 guard-sweep inventory with 3 more
   guard modules (iter-405 flag count, iter-406 factory
   docstring, iter-412 factory pass-through).  18 guard
