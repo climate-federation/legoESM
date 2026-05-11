@@ -860,6 +860,11 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 408: multi-step stability for iter-392 factories.
+  Extends iter-393 single-step smoke to 5 NH + 5 PE steps with
+  full damping toolkit at production values.  Both factory-
+  built configs stay finite + bounded (max|u| < 100-200 m/s)
+  through 5 steps.  2/2 in 140 s.
 - Iter 407: extend iter-368 doc-structure regression for
   iter-400 compacted block.  9-test guard now covers all 4
   compaction blocks (iter-365/380/390/400) — adds (1)
