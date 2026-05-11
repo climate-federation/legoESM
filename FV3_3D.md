@@ -860,6 +860,12 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 386: cross_face flag at C16 WITH duogrid grid.  iter-372
+  used default (non-duogrid) where flag is a no-op per iter-
+  384.  iter-386 re-runs with ``use_duogrid=True`` so flag has
+  actual effect: (1) cross_face=True changes u_d measurably
+  (>1e-8) vs False, (2) does not amplify T-imprint vs default.
+  2/2 in 86 s.
 - Iter 385: document iter-384 finding in iter-370 source
   comments (PE + NH).  Flag ``use_fv3_cross_face_du_proj``
   is a NO-OP when ``use_duogrid=False``; users must pair with
