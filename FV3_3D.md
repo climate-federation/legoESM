@@ -919,6 +919,13 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 453: AST regression guard pinning iter-451 factory
+  ``d4_bg=0.16`` and iter-452 ``d2_bg_k*=0`` rollback.  6
+  tests: 2 assert ``d4_bg=0.16`` present in factory defaults
+  block (NH+PE); 4 assert ``d2_bg_k1`` / ``d2_bg_k2`` NOT
+  present (FV3 normalization mismatch causes blow-up).
+  Catches silent re-introduction of unsafe defaults.  6/6 in
+  0.04 s.  Wired into iter-383 sweep (now 49).
 - Iter 452: scale-honest sponge calibration.  Empirical
   finding: FV3 production values ``d2_bg_k1=4.0`` /
   ``d2_bg_k2=2.0`` (iter-444 defaults) assume FV3's specific
