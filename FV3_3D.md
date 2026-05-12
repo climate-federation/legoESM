@@ -1195,6 +1195,30 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 763: **``lcl_temperature_fv3``** — lifting-condensation-level T (Bolton 1980).
+
+  Bolton (1980) eq. 21:
+
+      r     = q/(1−q) · 1000           (g/kg)
+      e     = p_mb · r / (622 + r)     (mb)
+      T_LCL = 2840 / (3.5·ln(T) − ln(e) − 4.805) + 55
+
+  Extracted from iter-716 ``eqv_pot_bolton_fv3`` inline use.
+  Standalone helper for SRH / supercell workflows that need T_LCL
+  independently.
+
+  iter-716 refactored to delegate; output preserved (iter-716 8/8
+  tests still pass).
+
+  Tests (6/6 in <3 s):
+  1. T_LCL < T (saturation requires cooling).
+  2. Known case T=290, p=1000, q=0.005 → T_LCL ∈ (270, 285).
+  3. Higher q → T_LCL closer to T.
+  4. iter-716 Bolton unchanged after refactor.
+  5. 3-D shapes.
+  6. No NaN/Inf.
+
+  Wired into iter-383 sweep (now 327).
 - Iter 762: **``saturation_deficit_column_fv3``** — column moisture deficit.
 
       Q_sat_col = column_integral(q_sat, delp)

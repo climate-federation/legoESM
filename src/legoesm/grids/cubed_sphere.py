@@ -3960,6 +3960,42 @@ def compute_brn_fv3(
     return brn, shear06
 
 
+def lcl_temperature_fv3(
+    pt: jax.Array,
+    p_mb: jax.Array,
+    q_sphum: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 763: lifting-condensation-level temperature (Bolton 1980).
+
+    Bolton (1980) eq. 21 LCL temperature formula:
+
+        r     = q/(1−q) · 1000          (dry mixing ratio, g/kg)
+        e     = p_mb · r / (622 + r)    (vapor pressure, mb)
+        T_LCL = 2840 / (3.5·ln(T) − ln(e) − 4.805) + 55
+
+    Used by iter-716 ``eqv_pot_bolton_fv3`` inline.  Extracted as
+    standalone helper for SRH / supercell workflows that need T_LCL
+    independently.
+
+    Parameters
+    ----------
+    pt : jax.Array
+        Temperature (K).
+    p_mb : jax.Array
+        Pressure (mb).
+    q_sphum : jax.Array
+        Specific humidity (kg/kg).
+
+    Returns
+    -------
+    t_lcl : jax.Array
+        LCL temperature (K).
+    """
+    r = jnp.maximum(1e-10, q_sphum / (1.0 - q_sphum) * 1000.0)
+    e = p_mb * r / (622.0 + r)
+    return 2840.0 / (3.5 * jnp.log(pt) - jnp.log(e) - 4.805) + 55.0
+
+
 def saturation_deficit_column_fv3(
     p_full: jax.Array,
     t: jax.Array,
@@ -4485,14 +4521,11 @@ def eqv_pot_bolton_fv3(
         p_mb = 0.01 * rdg * delp / delz * pt * (1.0 + zvir * q)
 
     if moist:
-        # Moist exponent cappa (iter-723: delegate to cappa_moist_fv3)
         cappa = cappa_moist_fv3(q, zvir=zvir)
-        # Dry mixing ratio r (g/kg)
+        # iter-763: delegate T_LCL to lcl_temperature_fv3
+        t_l = lcl_temperature_fv3(pt, p_mb, q)
+        # Dry mixing ratio r (g/kg) — also needed in the θ_e prefactor
         r = jnp.maximum(1e-10, q / (1.0 - q) * 1000.0)
-        # Water vapor pressure (mb)
-        e = p_mb * r / (622.0 + r)
-        # Bolton 1980 eq. 21 T_LCL
-        t_l = 2840.0 / (3.5 * jnp.log(pt) - jnp.log(e) - 4.805) + 55.0
         capa = cappa * (1.0 - r * 0.28e-3)
         return jnp.exp(
             (3.376 / t_l - 0.00254) * r * (1.0 + r * 0.81e-3)
