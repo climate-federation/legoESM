@@ -1195,84 +1195,43 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
-- Iter 763: **``lcl_temperature_fv3``** — lifting-condensation-level T (Bolton 1980).
+- **Iters 760-769 (compacted iter 770)**: column-mean + saturation
+  diagnostics + LCL state triad + moisture-chain helpers + iter-770
+  dew-point depression.
 
-  Bolton (1980) eq. 21:
+  | Iter | What                                              | Note                                                                  |
+  |------|---------------------------------------------------|-----------------------------------------------------------------------|
+  | 760  | ``column_mean_rh_fv3``                            | mass-weighted column RH (composes iter-715 rh_calc + column_integral) |
+  | 761  | ``column_mean_field_fv3`` + iter-760 refactor     | generic mass-weighted column mean ⟨field⟩ = Σ delp·field / Σ delp     |
+  | 762  | ``saturation_deficit_column_fv3``                 | column moisture deficit Q_sat_col − PWV (kg/m²); CMIP es blend opt-in |
+  | 763  | ``lcl_temperature_fv3`` + iter-716 refactor       | Bolton 1980 eq. 21 T_LCL = 2840/(3.5·ln(T)−ln(e)−4.805) + 55          |
+  | 764  | ``lcl_pressure_fv3``                              | Poisson p_LCL = p·(T_LCL/T)^(1/κ); uses ``constants.kappa``           |
+  | 765  | ``lcl_height_fv3``                                | z_LCL = z + (c_pd/g)·(T − T_LCL); completes (T,p,z) LCL triad         |
+  | 766  | ``vapor_pressure_from_q_fv3`` + iter-763 refactor | e = p·q/(ε + q·(1−ε)); replaces 622 literal with ``constants.epsilon`` |
+  | 767  | ``dew_point_fv3``                                 | Bolton 1980 eq. 11 T_d_C = 243.5·γ/(17.67−γ), γ = ln(e/6.112)         |
+  | 768  | ``relative_humidity_fv3``                         | WMO RH [%] = 100·e/e_sat; delegates to ``thermo.saturation_vapor_pressure`` |
+  | 769  | ``lcl_state_fv3``                                 | single-call (T,p,q,z) → (T_LCL,p_LCL,z_LCL) + MSE/DSE conservation guard |
+  | 770  | ``dewpoint_depression_fv3`` + this compaction     | T − T_d stability proxy; compacts iters 760-769 into this block       |
 
-      r     = q/(1−q) · 1000           (g/kg)
-      e     = p_mb · r / (622 + r)     (mb)
-      T_LCL = 2840 / (3.5·ln(T) − ln(e) − 4.805) + 55
+  **LCL state triad complete**: T_LCL (763), p_LCL (764), z_LCL (765),
+  single-call API (769).  Cross-cutting fidelity guard: MSE(parcel) ≡
+  MSE(LCL) within < 1e−6 J/kg of ~3·10⁵ J/kg (dry-adiabatic
+  conservation by iter-765 construction).
 
-  Extracted from iter-716 ``eqv_pot_bolton_fv3`` inline use.
-  Standalone helper for SRH / supercell workflows that need T_LCL
-  independently.
+  **Moisture diagnostic chain complete**:
+    * (p, q) → e (iter-766)
+    * e → T_d (iter-767)
+    * (T, p, q) → RH (iter-768)
+    * (T, p, q) → T − T_d (iter-770)
+    * Saturation curve via shared ``thermo.saturation_vapor_pressure``
 
-  iter-716 refactored to delegate; output preserved (iter-716 8/8
-  tests still pass).
+  **Constant hygiene**: iter-766 replaced inline ``622`` literal with
+  ``constants.epsilon``; iter-763 refactored to delegate.  All new
+  helpers reference ``constants.kappa``, ``constants.c_pd``,
+  ``constants.g``, ``constants.epsilon``, ``constants.T_freeze`` —
+  no new physical constants introduced.
 
-  Tests (6/6 in <3 s):
-  1. T_LCL < T (saturation requires cooling).
-  2. Known case T=290, p=1000, q=0.005 → T_LCL ∈ (270, 285).
-  3. Higher q → T_LCL closer to T.
-  4. iter-716 Bolton unchanged after refactor.
-  5. 3-D shapes.
-  6. No NaN/Inf.
-
-  Wired into iter-383 sweep (now 327).
-- Iter 762: **``saturation_deficit_column_fv3``** — column moisture deficit.
-
-      Q_sat_col = column_integral(q_sat, delp)
-      SatDef = Q_sat_col − PWV    (kg/m²)
-
-  Indicator of additional water vapor capacity before saturation.
-  Mass-equivalent of (100 − RH) integrated over column.
-
-  Composes iter-742 column_integral + iter-756 PWV + legoesm.thermo
-  saturation (with optional CMIP es-over-liq-and-ice blend).
-
-  Tests (5/5 in <2 s):
-  1. qv = q_sat → SatDef = 0.
-  2. Dry (qv=0) → SatDef = full column q_sat.
-  3. do_cmip branch differs from liquid-only at sub-freezing T.
-  4. 3-D shapes.
-  5. No NaN/Inf.
-
-  Wired into iter-383 sweep (now 326).
-- Iter 761: **``column_mean_field_fv3``** — generic mass-weighted column mean.
-
-      <field> = Σ_k delp · field / Σ_k delp
-
-  Generic helper for any mass-weighted column average (T, RH, q,
-  θ_e, etc.).  Mass cancellation: ratio of two delp integrals is
-  g-independent.
-
-  iter-760 ``column_mean_rh_fv3`` refactored to delegate.  Output
-  preserved (iter-760 5/5 tests still pass).
-
-  Tests (6/6 in <2 s):
-  1. Uniform field=C → mean=C.
-  2. Two-layer weighted average analytical.
-  3. Column-mean T = arithmetic mean for uniform delp.
-  4. iter-760 RH unchanged after refactor.
-  5. 3-D shapes.
-  6. No NaN/Inf.
-
-  Wired into iter-383 sweep (now 325).
-- Iter 760: **``column_mean_rh_fv3``** — mass-weighted column RH.
-
-      RH_col = Σ_k delp · RH_layer / Σ_k delp
-
-  Mass-weighted (ratio cancels g).  Composes iter-715 ``rh_calc_fv3``
-  (with optional do_cmip) + iter-742 column_integral.
-
-  Tests (5/5 in <2 s):
-  1. Uniform per-layer RH=50 → column RH=50.
-  2. Two layers RH=80 + RH=20 equal delp → mean=50.
-  3. do_cmip branch differs from liquid-only at sub-freezing T.
-  4. 3-D shapes.
-  5. No NaN/Inf.
-
-  Wired into iter-383 sweep (now 324).
+  Wired into iter-383 sweep: 323 → 334 modules.
 - **Iters 751-759 (compacted iter 760)**: mass+energy budget diagnostic
   helpers + iter-694/705 area-weighted-mean refactor.
 
@@ -4946,208 +4905,4 @@ narrow the FV3-fidelity asymmetry between the two 3D paths, which
 is verifiable with unit tests in seconds rather than wall-time
 sweeps.  Users running the NH compressible-Euler 3D path now have
 the same cube-imprint defense as users running the PE 3D path.
-
-## Iter 764 — LCL pressure helper (Poisson lift companion to iter 763)
-
-Added `lcl_pressure_fv3(pt, p, t_lcl, cappa=None)` to
-`grids/cubed_sphere.py`. Algorithm: pressure at LCL via the
-Poisson relation conserved along a dry adiabat:
-
-```
-p_LCL = p · (T_LCL / T)^(1/κ)
-```
-
-Composes with iter-763 `lcl_temperature_fv3` and iter-736 Exner
-to give the full LCL state (T_LCL, p_LCL) for parcel-lift
-diagnostics.  Defaults `cappa=constants.kappa` per the constant-
-hygiene rule.  Test: `tests/test_fv3_lcl_pressure_iter764.py`
-(6 tests: dry case identity, p_LCL<p when cooling required,
-iter-763 cross-check for supercell parcel, 3-D shapes, finite,
-explicit cappa override).  Sweep entry added.  Cap bumped to
-4965.
-
-### Why this iteration was meaningful
-
-iter-763 added `T_LCL` (Bolton 1980 eq. 21) but to localize a
-parcel's LCL in pressure coordinates (needed for CAPE/CIN level-
-of-free-convection integrals and the parcel-source layer used
-in storm-mode diagnostics), one also needs `p_LCL`.  This iter
-ports that companion.  Total iter-763+764 cost: ~6 lines of
-source plus two extracted helpers.  Both are pure JAX, vmap-
-compatible, and compose with the iter-715 saturation-blend /
-iter-720 helper / iter-736 Exner stack.  No new physical
-constants — `constants.kappa` suffices.
-
-## Iter 765 — LCL height helper (completes the LCL state triad)
-
-Added `lcl_height_fv3(z_parcel, pt, t_lcl, cp_air=None, g=None)`
-to `grids/cubed_sphere.py`.  Algorithm: geopotential height of
-LCL from dry-adiabatic + hydrostatic + ideal-gas:
-
-```
-dz/dT = (dz/dp) · (dp/dT) = (−RT/(p·g)) · (p/(κT)) = −cp/g
-⇒ z_LCL = z_parcel + (cp_d / g) · (T − T_LCL)
-```
-
-Since T_LCL < T (cooling required to reach saturation), z_LCL >
-z_parcel (LCL always above parcel source).  Completes the
-(T_LCL, p_LCL, z_LCL) triad together with iter-763 + iter-764.
-Defaults `cp_air = constants.c_pd`, `g = constants.g`.  Test:
-`tests/test_fv3_lcl_height_iter765.py` (6 tests: dry case
-identity, z_LCL>z_parcel cooling case + analytic Δz check,
-iter-763 + iter-764 + iter-765 triad cross-check, 3-D shapes,
-finite, explicit cp_air+g overrides match defaults).  Sweep
-entry added.
-
-### Why this iteration was meaningful
-
-The (T, p, z) LCL state is needed for: (1) CAPE/CIN integrals
-over the parcel ascent column where the LCL marks the transition
-from dry- to moist-adiabatic lapse; (2) supercell helicity
-metrics that integrate over a fixed-height layer requiring LCL-
-relative geometry; (3) storm-relative parcel sources where the
-LCL height directly enters as a vertical scale.  Total cost: ~3
-lines of source.  Pure JAX, vmap-compatible.  No new physical
-constants — `constants.c_pd` and `constants.g` suffice.
-
-## Iter 766 — vapor_pressure_from_q helper + iter-763 refactor
-
-Extracted `vapor_pressure_from_q_fv3(p_mb, q_sphum)` in
-`grids/cubed_sphere.py` from the inline Bolton-paper formula in
-iter-763.  Algorithm uses the kg/kg native identity:
-
-```
-e = p · q / (ε + q·(1−ε))     with ε = constants.epsilon
-```
-
-This replaces the hardcoded `622.0` literal (= ε·1000 in Bolton's
-mb·g/kg form) with `constants.epsilon = R_d/R_v = 0.621980`,
-satisfying the CLAUDE.md constant-hygiene rule.  Numerical drift
-versus pre-refactor iter-763: |Δe/e| ≈ 3·10⁻⁵, |ΔT_LCL| < 0.1 K
-(well within iter-763 test 2's 270-285 K range).  iter-763 6/6
-tests still pass post-refactor.
-
-Test: `tests/test_fv3_vapor_pressure_from_q_iter766.py` (6 tests:
-q→0 linear regime, monotonic ∂e/∂q>0, e∝p scaling, iter-763
-refactor consistency <0.1 K vs old 622-literal, 3-D shapes,
-finite + non-negative).
-
-### Why this iteration was meaningful
-
-Two wins in one ~7-line change: (1) constant-hygiene cleanup that
-moves 622 from inline literal into the `constants.epsilon`
-audit-enforced single source of truth; (2) a reusable helper for
-any moisture diagnostic that needs vapor partial pressure from
-specific humidity (dew-point, RH, theta_e blends, saturation
-adjustment cross-checks).  Pure JAX, vmap-compatible.  No new
-physical constants introduced.
-
-## Iter 767 — dew_point_fv3 (Bolton 1980 eq. 11)
-
-Added `dew_point_fv3(e_mb)` to `grids/cubed_sphere.py`.
-Algorithm:
-
-```
-γ      = ln(e / 6.112)
-T_d_C  = 243.5 · γ / (17.67 − γ)
-T_d_K  = T_d_C + constants.T_freeze
-```
-
-Bolton-paper fitted coefficients (243.5, 17.67, 6.112) kept as
-literals — these are empirical Magnus-curve fit constants from
-the paper, not generic physical constants.  The 6.112 mb is
-saturation vapor pressure at 0 °C.
-
-Composes with iter-766 `vapor_pressure_from_q_fv3` to give the
-(p, q) → T_d chain for relative-humidity diagnostics, dew-point
-depression, and moisture-frontal analysis.  Note that by Bolton
-construction T_d(6.112 mb) = T_freeze exactly — verified in test.
-
-Test: `tests/test_fv3_dew_point_iter767.py` (6 tests: saturation-
-at-freezing identity, monotonic ∂T_d/∂e>0, T_d<T_env for unsat
-air, iter-766 chain composition, 3-D shapes, finite).
-
-### Why this iteration was meaningful
-
-Dew-point temperature is one of the canonical moisture diagnostics
-in synoptic and mesoscale analysis (used directly in dew-point
-depression for stability, in 850-mb dew-point ridges for moisture
-fluxes, in T-T_d as a proxy for RH).  The iter-766 → iter-767 chain
-closes the (p, q) → e → T_d pipeline using only the Bolton 1980
-paper coefficients + `constants.epsilon` + `constants.T_freeze`.
-~6 lines of source.  Pure JAX, vmap-compatible.  No new physical
-constants introduced (Bolton paper coefficients only).
-
-## Iter 768 — relative_humidity_fv3 (WMO vapor-pressure definition)
-
-Added `relative_humidity_fv3(t, p_pa, q_sphum)` to
-`grids/cubed_sphere.py`.  Algorithm:
-
-```
-RH [%] = 100 · e(p, q) / e_sat(T)
-       = 100 · vapor_pressure_from_q_fv3(p, q) / thermo.saturation_vapor_pressure(T)
-```
-
-WMO/ICAO-standard RH definition (vapor-pressure ratio).  Composes
-iter-766 with the existing canonical
-`thermo.saturation_vapor_pressure` curve.  Pressure in Pa
-throughout (consistent units between numerator and denominator).
-Uses local import of `thermo` per established pattern in this
-module (deferred to function scope to avoid circular import).
-
-Test: `tests/test_fv3_relative_humidity_iter768.py` (6 tests:
-q = q_sat → RH ≈ 100% within 1%, dry q → RH < 1%, monotonic ∂RH/∂q,
-RH decreases with T at fixed (p, q) per Clausius-Clapeyron, 3-D
-shapes, finite + non-negative).
-
-### Why this iteration was meaningful
-
-RH is the most-used moisture diagnostic in atmospheric science.
-This iteration plugs the iter-766 / iter-767 chain into the
-canonical `thermo` saturation curve via local import, exposing a
-single-call diagnostic without duplicating any saturation math.
-Per CLAUDE.md: "Saturation thermodynamics: use legoesm.thermo for
-all saturation computations — never re-implement Tetens / Magnus /
-Clausius–Clapeyron in any file."  This iter explicitly honors that
-rule by delegating to `thermo.saturation_vapor_pressure`.  ~5
-lines of source.  Pure JAX, vmap-compatible.  No new physical
-constants introduced.
-
-## Iter 769 — lcl_state_fv3 (single-call LCL triad + MSE-conservation guard)
-
-Added `lcl_state_fv3(pt, p_pa, q_sphum, z_parcel)` to
-`grids/cubed_sphere.py`.  Single-call API that composes:
-
-  * iter-763 `lcl_temperature_fv3`  → T_LCL (Bolton 1980 eq. 21)
-  * iter-764 `lcl_pressure_fv3`     → p_LCL = p·(T_LCL/T)^(1/κ)
-  * iter-765 `lcl_height_fv3`       → z_LCL = z + (c_pd/g)·(T − T_LCL)
-
-Returns the (T_LCL, p_LCL, z_LCL) tuple.  Caller passes parcel
-state once instead of three separate helper calls.
-
-**Key consistency property** verified in regression test: on the
-dry adiabat below LCL, both DSE = c_pd·T + g·z (by construction
-of iter-765) and q (no condensation below LCL) are conserved →
-MSE = DSE + L_v·q is conserved → `moist_static_energy_fv3` of
-parcel matches that of LCL endpoint to float64 roundoff
-(< 1e−6 J/kg of ~3·10⁵ J/kg MSE).  This is a powerful end-to-end
-guard: any future modification to iter-763/764/765 that breaks
-this conservation property fails the test.
-
-Test: `tests/test_fv3_lcl_state_iter769.py` (6 tests: bit-identity
-vs separate iter-763/764/765 calls, MSE conservation < 1e−6 J/kg,
-DSE conservation < 1e−6 J/kg, 3-D shapes for all three outputs,
-finite, physical sanity z_LCL>z & p_LCL<p & T_LCL<T).
-
-### Why this iteration was meaningful
-
-(1) Single-call LCL-state API consolidates the iter-763/764/765
-sequence — CAPE/CIN integrators, SRH parcel helpers, and
-convective-trigger schemes now call one function instead of three.
-(2) The MSE-conservation regression test is an end-to-end
-consistency guard for the entire LCL triad: it exercises iter-753
-MSE, iter-754 DSE, and iter-763/764/765 together, catching any
-future drift that would break the dry-adiabatic conservation
-identity.  This is the type of cross-cutting fidelity test that
-the per-helper unit tests cannot provide.
 

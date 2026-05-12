@@ -357,6 +357,7 @@ _GUARD_MODULES = (
     "test_fv3_dew_point_iter767",                    # iter-767 add
     "test_fv3_relative_humidity_iter768",            # iter-768 add
     "test_fv3_lcl_state_iter769",                    # iter-769 add
+    "test_fv3_dewpoint_depression_iter770",          # iter-770 add
 )
 
 

@@ -38,11 +38,11 @@ def test_iter365_compaction_present(doc_text):
     )
 
 
-def test_doc_size_below_5160_lines(doc_text):
+def test_doc_size_below_4920_lines(doc_text):
     n_lines = len(doc_text.splitlines())
-    assert n_lines < 5160, (
-        f"FV3_3D.md has {n_lines} lines (target < 5160).  "
-        f"Next compaction at iter 770."
+    assert n_lines < 4920, (
+        f"FV3_3D.md has {n_lines} lines (target < 4920).  "
+        f"Next compaction at iter 780."
     )
 
 
@@ -440,6 +440,35 @@ def test_iter670_compaction_covers_topics(doc_text):
     for marker in required:
         assert marker in section, (
             f"iter-670 compacted block missing topic ``{marker}``."
+        )
+
+
+def test_iter770_compaction_present(doc_text):
+    """iter-770 compacted iter 760-769 into single block."""
+    assert "**Iters 760-769 (compacted iter 770)**" in doc_text, (
+        "iter-770 compaction block missing — doc re-expanded."
+    )
+
+
+def test_iter770_compaction_covers_topics(doc_text):
+    section_start = doc_text.find(
+        "**Iters 760-769 (compacted iter 770)**"
+    )
+    section_end = doc_text.find(
+        "**Iters 751-759", section_start,
+    )
+    assert section_start >= 0 and section_end > section_start
+    section = doc_text[section_start:section_end]
+    required = [
+        "760", "761", "762", "763", "764",
+        "765", "766", "767", "768", "769",
+        "lcl_temperature", "lcl_pressure", "lcl_height",
+        "vapor_pressure_from_q", "dew_point", "relative_humidity",
+        "lcl_state", "MSE", "Bolton",
+    ]
+    for marker in required:
+        assert marker in section, (
+            f"iter-770 compacted block missing topic ``{marker}``."
         )
 
 

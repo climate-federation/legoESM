@@ -4228,6 +4228,43 @@ def lcl_state_fv3(
     return t_lcl, p_lcl, z_lcl
 
 
+def dewpoint_depression_fv3(
+    t: jax.Array,
+    p_pa: jax.Array,
+    q_sphum: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 770: dew-point depression (T − T_d).
+
+    Composes iter-766 ``vapor_pressure_from_q_fv3`` and iter-767
+    ``dew_point_fv3`` to give the canonical moisture-saturation gap:
+
+        T − T_d ≥ 0   (zero at saturation, positive in subsaturated air).
+
+    Used as a stability / cloud-base proxy in synoptic and severe-
+    weather analysis.  Small T − T_d at 850 mb indicates moist
+    boundary-layer air; large T − T_d above the cloud base indicates
+    dry-air intrusion (entrainment / capping).
+
+    Parameters
+    ----------
+    t : jax.Array
+        Temperature (K).
+    p_pa : jax.Array
+        Pressure (Pa).
+    q_sphum : jax.Array
+        Specific humidity (kg/kg).
+
+    Returns
+    -------
+    depression : jax.Array
+        T − T_d (K, non-negative for physical subsaturated air).
+    """
+    p_mb = p_pa / 100.0
+    e = vapor_pressure_from_q_fv3(p_mb, q_sphum)
+    t_d = dew_point_fv3(e)
+    return t - t_d
+
+
 def saturation_deficit_column_fv3(
     p_full: jax.Array,
     t: jax.Array,
