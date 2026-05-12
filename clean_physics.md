@@ -138,6 +138,47 @@ Compression iteration.  Folded iter-30 through iter-40 entries into the
 auto-loaded MEMORY.md / context envelope.  Detailed per-iteration narratives
 remain in the commit messages on `clean_physics`.
 
+### Iteration 47 — 2026-05-13
+
+**Inspection iteration on `src/legoesm/atmosphere/physics/gravity_wave_drag/`
+(no code changes).**
+
+Codex narrow review skipped (3 consecutive iters lost to exit 144;
+overhead exceeds the value at this point).  Direct inspection of
+`rayleigh.py`, `lindzen.py`, `mcfarlane.py`, `hines.py`,
+`integration.py`:
+
+- **Rayleigh sponge** — `sin²(π/2 · arg)` ramp with `arg = clip((sponge_top − σ)/sponge_top, 0, 1)` activates above `σ < sponge_top`; ramps smoothly to `k_max` at the model top.
+- **Lindzen / McFarlane orographic** — launch stress
+  `ρ_sfc · N_sfc · k_wave · h_topo² · U_ll` (correct units after
+  iter-30 fix).  Both schemes correctly use `cos_a = u_sfc/U_ll`,
+  `sin_a = v_sfc/U_ll` so the wave direction is fixed at the
+  surface direction; column drag projected back to (du/dt, dv/dt).
+- **Lindzen / McFarlane scan direction** — `k_rev = nlev-1-k`
+  iterates UP from surface to top; `drag_stack.T[:, ::-1]`
+  reverses to top-first ordering matching the input wind arrays.
+  Verified: `drag_all[:, 0]` is the top-level drag.
+- **Hines per-step ρ ratio** — `rho_ratio_step[:, k] = sqrt(rho[k+1] / rho[k])`
+  is the inter-level WKB growth (per-step, not cumulative); the
+  surface step (`k = nlev-1`) is fixed at 1.0 by `jnp.ones_like(rho)`
+  initialization.
+- **Spectral PE projection** (`dvor_hat = im/a · oc2(dv·cos) +
+  1/a · dmu(du·cos)`) — matches the standard
+  `ζ = (im·v + ∂(u·cos)/∂μ) / (a·cos)` with `sh_oc2` carrying the
+  1/cos² factor.
+
+Local "frictional heating" `dT_dt = -(u·du_dt + v·dv_dt)/c_pd` can
+be locally negative under shear-reversal (when du_dt is along the
+upper-level u, the work is positive), but the column-integrated
+`eps_gwd = -Σ ρ(u·du_dt + v·dv_dt)·dz` remains positive in typical
+flows.  This is a physical KE-budget accounting choice rather than
+a sign bug.
+
+Softmin underflow note (McFarlane line 140): for very small
+`tau_carry, tau_sat ~ 0.01 Pa` the softmin can dip below the true
+min by ~`log(2)/alpha`.  At realistic stratospheric scales
+`tau_sat ~ 1 Pa` so this is dormant.
+
 ### Iteration 46 — 2026-05-13
 
 **Inspection iteration on `src/legoesm/ocean/physics/lateral_mixing/`
