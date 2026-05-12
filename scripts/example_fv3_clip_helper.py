@@ -33,7 +33,11 @@ from legoesm.grids.cubed_sphere import (
     create_cubed_sphere,
     rotate_winds_geo_to_grid,
 )
-from legoesm.grids.halo import make_clipped_step, make_clipped_scan_step
+from legoesm.grids.halo import (
+    compute_edge_artifact_metric,
+    make_clipped_step,
+    make_clipped_scan_step,
+)
 from legoesm.grids.vertical import (
     create_height_coordinate,
     compute_terrain_metric,
@@ -124,24 +128,12 @@ def main():
     print(f"  scan final state.theta_prime.data.max() = "
           f"{float(jnp.abs(s_scan.theta_prime.data).max()):.3e}")
 
-    # === 5. Edge / interior std diagnostic ===
-    arr = np.asarray(s.theta_prime.data)
-    n_face, n_x, n_y, n_lev = arr.shape
-    edge_mask = np.zeros((n_x, n_y), dtype=bool)
-    edge_mask[0, :] = True
-    edge_mask[-1, :] = True
-    edge_mask[:, 0] = True
-    edge_mask[:, -1] = True
-    edge_mask_b = np.broadcast_to(
-        edge_mask[None, :, :, None], arr.shape,
-    )
-    interior_mask = ~edge_mask_b
-    edge_std = float(arr[edge_mask_b].std())
-    int_std = float(arr[interior_mask].std())
+    # === 5. Edge / interior std diagnostic (iter-581 helper) ===
+    metrics = compute_edge_artifact_metric(s.theta_prime.data)
     print(f"\nθ′ statistics after 10 steps:")
-    print(f"  edge_std     = {edge_std:.3e}")
-    print(f"  interior_std = {int_std:.3e}")
-    print(f"  ratio        = {edge_std / max(int_std, 1e-30):.3f}×")
+    print(f"  edge_std     = {metrics['edge_std']:.3e}")
+    print(f"  interior_std = {metrics['interior_std']:.3e}")
+    print(f"  ratio        = {metrics['ratio']:.3f}×")
     print(f"\nExpected at C16 SBR (iter-521): edge_std ~ 6e-2, "
           f"int_std ~ 1e-2.")
     print("The clip helper reduces both vs the unclipped baseline.")
