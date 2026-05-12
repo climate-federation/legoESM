@@ -338,6 +338,7 @@ _GUARD_MODULES = (
     "test_fv3_nh_total_energy_refactor_iter748",     # iter-748 add
     "test_fv3_total_water_column_iter749",           # iter-749 add
     "test_fv3_area_weighted_mean_iter750",           # iter-750 add
+    "test_fv3_area_weighted_refactor_iter751",       # iter-751 add
 )
 
 

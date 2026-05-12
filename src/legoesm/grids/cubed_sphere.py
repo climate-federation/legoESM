@@ -3753,18 +3753,15 @@ def prt_mass_fv3(
     diag : dict[str, float]
         Mass-budget summary.  All values float.
     """
-    total_area = jnp.sum(area)
-    inv_area = 1.0 / total_area
+    # iter-751: delegate area-weighted means to area_weighted_mean_fv3
     g = constants.g
-
-    ps_mean = float(jnp.sum(area * ps) * inv_area)
+    ps_mean = float(area_weighted_mean_fv3(ps, area))
 
     diag: dict[str, float] = {"ps_mean": ps_mean}
     total_water_col_mean = 0.0
     for name, q in q_tracers.items():
-        # iter-743: delegate column-mass integral to column_integral_delp_fv3
-        col_mass = column_integral_delp_fv3(q, delp)         # (n_x, n_y) kg/m²
-        col_mean = float(jnp.sum(area * col_mass) * inv_area)
+        col_mass = column_integral_delp_fv3(q, delp)
+        col_mean = float(area_weighted_mean_fv3(col_mass, area))
         diag[name] = col_mean
         total_water_col_mean += col_mean
     diag["total_water"] = total_water_col_mean
@@ -5089,25 +5086,16 @@ def prt_gb_nh_sh_fv3(
         Keys: ``gb``, ``nh``, ``sh``, ``eq``.  Missing bands
         return ``-1.0`` (FV3 bugfix for non-global domains).
     """
+    # iter-751: delegate area-weighted means to area_weighted_mean_fv3
     lat_deg = lat * (180.0 / jnp.pi)
     mask_eq = (lat_deg > -20.0) & (lat_deg < 20.0)
     mask_nh = (lat_deg >= 20.0) & (lat_deg < 80.0)
     mask_sh = (lat_deg <= -20.0) & (lat_deg > -80.0)
-
-    def _band_mean(mask):
-        area_band = jnp.sum(area * mask)
-        t_band = jnp.sum(a2 * area * mask)
-        # FV3 bugfix: empty band yields -1.0
-        return jnp.where(area_band > 1.0, t_band / area_band, -1.0)
-
-    gb_area = jnp.sum(area)
-    gb_t = jnp.sum(a2 * area)
-    gb = jnp.where(gb_area > 1.0, gb_t / gb_area, -1.0)
     return {
-        "gb": float(gb),
-        "nh": float(_band_mean(mask_nh)),
-        "sh": float(_band_mean(mask_sh)),
-        "eq": float(_band_mean(mask_eq)),
+        "gb": float(area_weighted_mean_fv3(a2, area)),
+        "nh": float(area_weighted_mean_fv3(a2, area, mask=mask_nh)),
+        "sh": float(area_weighted_mean_fv3(a2, area, mask=mask_sh)),
+        "eq": float(area_weighted_mean_fv3(a2, area, mask=mask_eq)),
     }
 
 

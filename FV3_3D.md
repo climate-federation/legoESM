@@ -1195,6 +1195,32 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 751: **refactor iter-694/705 to delegate to iter-750 area_weighted_mean**.
+
+  Two callsites had inline area-weighted-mean patterns matching
+  iter-750 helper:
+
+      iter-694 prt_mass_fv3 (4 sites: ps_mean + tracer means)
+        → ``area_weighted_mean_fv3(ps, area)``,
+          ``area_weighted_mean_fv3(col_mass, area)``
+
+      iter-705 prt_gb_nh_sh_fv3 (4 lat-band means: gb/nh/sh/eq)
+        → ``area_weighted_mean_fv3(a2, area)`` and 3 masked calls
+
+  Output bit-identical to before refactor (pinned by regression
+  tests; iter-694 6/6 + iter-705 5/5 tests still pass).
+
+  Removed inline ``_band_mean`` lambda + manual ``sum/inv_area``
+  bookkeeping.  Now both functions just specify the (mask, sentinel)
+  conditions per call.
+
+  Tests (4/4 in <1 s):
+  1. prt_mass refactor: ps_mean + sphum mean correct via iter-750.
+  2. prt_gb_nh_sh refactor: 4 band means uniform → all 5.0.
+  3. iter-694 multi-tracer total_water sum preserved.
+  4. iter-705 empty band sentinel −1.0 preserved.
+
+  Wired into iter-383 sweep (now 315).
 - Iter 750: **``area_weighted_mean_fv3`` helper**.
 
   Standard FV3 area-weighted mean pattern with optional mask + FV3
