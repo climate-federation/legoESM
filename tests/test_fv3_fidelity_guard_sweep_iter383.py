@@ -324,6 +324,7 @@ _GUARD_MODULES = (
     "test_fv3_air_density_iter734",                  # iter-734 add
     "test_fv3_theta_dry_iter735",                    # iter-735 add
     "test_fv3_exner_iter736",                        # iter-736 add
+    "test_fv3_T_from_theta_iter737",                 # iter-737 add
 )
 
 

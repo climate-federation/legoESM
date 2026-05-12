@@ -1195,6 +1195,28 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 737: **``temperature_from_theta_fv3``** — inverse of iter-735.
+
+  Recovers air temperature from potential temperature + pressure:
+
+      T = θ · (p/p_ref)^κ = θ · Π
+
+  Inverse of iter-735 ``theta_dry_fv3``.  Equivalent to
+  ``θ · exner_fv3(p)`` (composition with iter-736).
+
+  Completes the (θ, T, Π) trio of point-wise thermodynamic
+  helpers: iter-735 θ_dry, iter-736 Exner, iter-737 T-from-θ.
+
+  Tests (7/7 in <1 s):
+  1. p = p_ref → T = θ exactly.
+  2. p > p_ref (subsidence) → T > θ.
+  3. Round-trip with iter-735: T_in → θ → T_out = T_in.
+  4. Composition via iter-736: T = θ · Exner(p).
+  5. Custom moist cappa.
+  6. 3-D shapes.
+  7. No NaN/Inf.
+
+  Wired into iter-383 sweep (now 301).
 - Iter 736: **``exner_fv3``** — point-wise Exner function.
 
   Standard Exner:

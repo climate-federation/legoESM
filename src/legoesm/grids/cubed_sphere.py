@@ -2806,6 +2806,42 @@ def get_pressure_given_height_fv3(
     return p
 
 
+def temperature_from_theta_fv3(
+    theta: jax.Array,
+    p: jax.Array,
+    p_ref: float = 1.0e5,
+    cappa: float | jax.Array | None = None,
+) -> jax.Array:
+    """FV3_3D iter 737: temperature from potential temperature.
+
+    Inverse of iter-735 ``theta_dry_fv3``:
+
+        T = θ · Π = θ · (p / p_ref)^κ
+
+    Pairs with iter-735 ``theta_dry_fv3`` and iter-736
+    ``exner_fv3``.  Composes:
+
+        T = theta_dry_fv3⁻¹ → temperature_from_theta_fv3
+        T = θ · exner_fv3(p)            (using iter-736)
+
+    Parameters
+    ----------
+    theta : jax.Array
+        Potential temperature (K).
+    p : jax.Array
+        Pressure (Pa).
+    p_ref : float, default 1e5.
+    cappa : float or jax.Array, optional.  Default ``constants.kappa``.
+
+    Returns
+    -------
+    T : jax.Array
+        Air temperature (K).
+    """
+    kap = constants.kappa if cappa is None else cappa
+    return theta * (p / p_ref) ** kap
+
+
 def exner_fv3(
     p: jax.Array,
     p_ref: float = 1.0e5,
