@@ -2987,6 +2987,43 @@ def theta_dry_fv3(
     return pt * (p_ref / p) ** kap
 
 
+def latent_energy_column_fv3(
+    q_sphum: jax.Array,
+    delp: jax.Array,
+    L: float | None = None,
+) -> jax.Array:
+    """FV3_3D iter 746: column-integrated latent energy.
+
+        LE_col = L_v · Σ_k delp[k] · q_sphum[k] / g
+               = L_v · column_water_vapor (kg/m²)
+
+    Standard component of FV3 total-energy budget (iter-693
+    ``nh_total_energy_fv3`` uses ``L_v · q_sphum`` in moist branch).
+    Composes iter-742 column_integral.
+
+    Companion to iter-744 ``internal_energy_column_fv3`` +
+    iter-745 ``kinetic_energy_column_fv3``.
+
+    Parameters
+    ----------
+    q_sphum : jax.Array, shape (..., km)
+        Specific humidity (kg/kg).
+    delp : jax.Array, shape (..., km)
+        Pressure thickness (Pa).
+    L : float, optional
+        Latent heat (J/kg).  Default ``constants.L_v`` (vaporization,
+        2.501e6 J/kg).  Use ``constants.L_s`` for ice sublimation.
+
+    Returns
+    -------
+    le : jax.Array, shape (...,)
+        Column latent energy (J/m²).
+    """
+    if L is None:
+        L = constants.L_v
+    return L * column_integral_delp_fv3(q_sphum, delp)
+
+
 def kinetic_energy_column_fv3(
     ua: jax.Array,
     va: jax.Array,

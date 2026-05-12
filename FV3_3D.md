@@ -1195,6 +1195,28 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 746: **``latent_energy_column_fv3``** — column LE diagnostic.
+
+      LE_col = L_v · Σ_k delp · q_sphum / g
+             = L_v · column_water_vapor (kg/m²)
+
+  Default ``L = constants.L_v`` (vaporization).  Accepts L_s for
+  sublimation.  Composes iter-742 column_integral_delp_fv3.
+
+  Standard component of FV3 total-energy budget (iter-693
+  nh_total_energy uses ``L_v·q_sphum`` in moist branch).
+
+  Completes the column-energy-component trio: iter-744 IE +
+  iter-745 KE + iter-746 LE.
+
+  Tests (5/5 in <1 s):
+  1. q=0 → LE=0.
+  2. q=0.01, p_s=1e5 → LE ≈ 2.55e8 J/m² (analytical).
+  3. L override (L_s/L_v ratio scales LE correctly).
+  4. 3-D shapes.
+  5. No NaN/Inf.
+
+  Wired into iter-383 sweep (now 310).
 - Iter 745: **``kinetic_energy_column_fv3``** — column KE diagnostic.
 
       KE_col = Σ_k delp · 0.5·(ua² + va² [+ w²]) / g
