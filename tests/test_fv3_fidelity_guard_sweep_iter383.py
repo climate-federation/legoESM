@@ -117,6 +117,7 @@ _GUARD_MODULES = (
     "test_center_to_dgrid_vector_with_clip_iter499", # iter-499 add
     "test_monotone_clip_slack_iter501",              # iter-501 add
     "test_monotone_clip_slack_sweep_iter502",        # iter-502 add
+    "test_nh_dycore_clip_slack_iter503",             # iter-503 add
 )
 
 

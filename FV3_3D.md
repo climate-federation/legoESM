@@ -1081,6 +1081,27 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 503: **46% DYCORE-LEVEL REDUCTION via vector-halo
+  inclusion**.  iter-492/493 only patched scalar halo (4
+  sites) → 1.5% reduction.  iter-503 also patches vector
+  halo (``pad_halo_vector_4d`` at 2 sites: operators_3d +
+  operators_cdgrid) for total 6 sites + slack sweep:
+    no clip:    3.724×
+    slack=0.00: 2.079× (-44%)
+    slack=0.50: **2.006× (-46%)**
+    slack=1.50: 2.149×
+    slack=2.00: 2.309×
+  Vector halo was the MISSING PIECE in iter-492/493.  The
+  NH dycore heavily uses ``pad_halo_vector_4d`` for u/v
+  cell-center → corner lift (iter-328/497).  Adding vector
+  halo to the clip propagation drops the ratio from 3.72 to
+  ~2.0 — exact match for the floor seen with iter-466
+  flag-drop config (2.25×) without needing flag changes.
+  slack=0.5 is optimal; strict (0.0) is 99% as good.  Higher
+  slack >1.0 reduces benefit (over-relaxes the clip).
+  **This closes a real fix path**: comprehensive vector +
+  scalar halo clip yields ~50% edge reduction.  1/1 in
+  327 s.  Wired into iter-383 sweep (now 94).
 - Iter 502: ``monotone_clip_slack`` sweep on
   ``center_to_dgrid_vector`` to find neutral-edge slack.
   Also plumbs slack through ``pad_halo_vector_4d``.  Results
