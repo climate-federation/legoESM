@@ -1195,146 +1195,34 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
-- Iter 589: **``cube_transform`` revised Schmidt variant**.
-  Faithful port of FV3 ``cube_transform`` (fv_grid_utils.F90:
-  920-980).  Same as ``schmidt_transform`` (iter 586) plus
-  one critical line: ``lon += π`` before pole rotation (FV3
-  line 963: "rotate around first to get final orientation
-  correct").  Selected by FV3 ``do_cube_transform=.true.``
-  namelist flag.
-  New ``cube_transform()`` in ``legoesm.grids.cubed_sphere``.
-  ``create_cubed_sphere(...)`` gains ``do_cube_transform``
-  kwarg (default False = use ``schmidt_transform`` per
-  iter-586).  Tests (4/4 in 4 s):
-  1. cube_transform produces finite output.
-  2. Differs from schmidt_transform on same params (π-shift
-     non-trivial).
-  3. Full grid creation @ c=2 + do_cube_transform=True valid.
-  4. do_cube_transform=False matches schmidt_transform default.
-  Wired into iter-383 sweep (now 164).
-- Iter 588: **FV3 ``consv_am`` correction** (extends iter 587).
-  Faithful port of FV3 ``fv_dynamics.F90:774-794``.  Enforces
-  AAM conservation by adding a solid-body-rotation correction:
-
-      u0 = -R · amdt / M_fac_total
-      u_east_corr = u0 · cos(lat)
-      Δu_face = cos(angle) · u_east_corr
-      Δv_face = -sin(angle) · u_east_corr
-
-  Uniform across vertical (broadcast).  Mountain torque ``zxg``
-  not subtracted — for flat-surface adiabatic runs ``amdt`` is
-  the pure dycore drift and the correction restores AM exactly.
-
-  Verified at C8 (3/3 tests in 4 s):
-  - Drift before correction: 4.05e+25 kg·m²/s
-  - Drift after correction:  -9.9e+17 kg·m²/s
-  - Reduction factor: **2.4e-8** (~8 orders of magnitude →
-    float64 precision)
-  - Identical states → no-op (within float roundoff).
-  - All fields finite.
-
-  New ``apply_aam_correction_nh(state_old, state_new, grid, hc)``
-  in ``legoesm.diagnostics``.  Differentiable.  Wired into
-  iter-383 sweep (now 163).
-- Iter 587: **AAM drift from NH state** (extends iter 583).
-  iter-583 ``compute_atmospheric_angular_momentum`` takes raw
-  arrays; users had to manually rotate face-local u → u_east.
-  Two new convenience functions in ``legoesm.diagnostics``:
-  - ``aam_from_nh_state(state, grid, hc)``: handles rotation
-    internally via ``u_east = cos(angle)·u_face - sin(angle)·v_face``,
-    builds ``rho_full = rho_ref + rho_prime``, returns AAM column
-    + total.
-  - ``aam_drift_nh(state_old, state_new, grid, hc)``: returns
-    ``amdt = AAM_new - AAM_old`` (FV3 fv_dynamics.F90:768 form,
-    without mountain torque ``zxg``).
-  Diagnostic only; the ``consv_am`` correction (apply u0 to
-  conserve AM) is the natural follow-up.  3/3 in 4 s.
-  Wired into iter-383 sweep (now 162).
-- Iter 586: **Schmidt transformation / stretched grid** (user
-  audit item #1 partial).  Faithful port of FV3
-  ``direct_transform`` (fv_grid_utils.F90:870-917):
-  1. Latitude stretching:
-     ``lat_t = asin((c²-1 + (c²+1)·sin_lat) / (c²+1 + (c²-1)·sin_lat))``
-  2. Pole rotation to (target_lon, target_lat).
-  New public function ``schmidt_transform(lon, lat, stretch_fac,
-  target_lon, target_lat)`` in ``legoesm.grids.cubed_sphere``.
-  ``create_cubed_sphere(...)`` gains 3 new kwargs:
-  ``stretch_fac=1.0`` (default = no stretch), ``target_lon=0.0``,
-  ``target_lat=-π/2`` (default = no rotation).  Skipped when
-  defaults (preserves bit-for-bit pre-iter-586 grid).
-  Tests (4/4 in 4 s):
-  1. c=1 + default target → identity transformation.
-  2. c=3 at equator target → finite + stable.
-  3. Full grid creation @ c=2 → valid (area=4πR² within 5%).
-  4. Default unchanged matches pre-iter-586 grid bit-for-bit.
-  Closes user audit item #1 (stretched grid).  Nested grid
-  (2-way refinement) deferred — much larger scope.
-  Wired into iter-383 sweep (now 161).
-- Iter 585: **FV3 iord=8 PPM limiter utility** (user audit
-  item #3 partial).  FV3 ``tp_core.F90:548-553`` Lin (1996)
-  monotonicity bound: ``bl, br ∈ ±2|dm|`` with sign tied to
-  monotone-slope direction.  legoESM had only iord=9
-  (``_pert_ppm``) and iord=12 (``_pert_ppm_iv0``); adds
-  ``apply_hord8_limiter(bl, br, dm)`` as a public utility
-  exposing the iord=8 variant.  Default transport path
-  unchanged (iord=9); users can swap in iord=8 manually for
-  tracers via post-PPM limiter override.  Full ``hord``
-  parameter plumbing through ``_xppm``, ``_yppm``,
-  ``transport_step`` deferred — would touch ~5 call sites.
-  3 tests (3/3 in 0.5 s):
-  1. Returns finite values.
-  2. dm=0 → bl=br=0 (no flux).
-  3. |bl|, |br| ≤ 2|dm| always.
-  Wired into iter-383 sweep (now 160).
-- Iter 584: **w-safety cap** (user audit item #2). FV3's
-  ``w_limiter`` (fv_mapz.F90:51) caps |w| at 90/-60 m/s during
-  Lagrangian-to-Eulerian remap.  legoESM uses Eulerian z*
-  (no remap) so direct port doesn't fit; added FV3-inspired
-  standalone post-step clip instead.
-  - Config: ``w_safety_cap: float = 0.0`` (disabled default),
-    ``w_safety_cap_min: float = 0.0`` (=use symmetric cap).
-  - When >0: clip w_half ∈ [-w_safety_cap, +w_safety_cap]
-    (or [-w_safety_cap_min, +w_safety_cap] if asymmetric).
-  - Applied post-Rayleigh in step.
-  - Tests:
-    1. Default 0.0 → no-op.
-    2. cap=50: bounds |w| ≤ 50 m/s after step.
-    3. Asymmetric (cap=90, cap_min=60): w ∈ [-60, +90].
-  NOTE: simple clip, NOT FV3's momentum-conserving cascade —
-  FV3 transfers excess to neighboring full-level via dp2[k];
-  half-level w + Eulerian context makes direct port unwieldy.
-  Documented as practical safety filter not "FV3-faithful".
-  3/3 in 70 s.  Wired into iter-383 sweep (now 159).
-- Iter 583: **atmospheric angular momentum (AAM) diagnostic**.
-  Faithful port of FV3 ``compute_aam`` (fv_dynamics.F90:1264-
-  1307).  New ``compute_atmospheric_angular_momentum(u_center,
-  rho_full, grid, hc)`` in ``legoesm.diagnostics``.  Formula:
-
-      aam[i,j] = sum_k ( (r²·Ω + r·u) · rho·dz·area )
-      where r = R · cos(lat)
-
-  Returns per-column AAM + total scalar.  3 tests:
-  1. AAM at rest is finite, positive.
-  2. At rest matches closed form ρ·Ω·R²·∫cos²(lat)·dV
-     to float32 precision (1.5e-7 rel_err).
-  3. +1 m/s uniform u increases AAM by R·∫cos(lat)·dm.
-  Useful for users to monitor AM drift in long runs.  This
-  closes one of the audit gaps identified in iter-582
-  user response.  3/3 in 4 s.  Wired into iter-383 sweep
-  (now 158).
-- Iter 581: **``compute_edge_artifact_metric()`` diagnostic helper**.
-  Adds a public-facing utility in ``legoesm.grids.halo`` that
-  computes edge_std / interior_std / ratio for a 4D ``(face,
-  x, y, level)`` field — same metric used throughout iter
-  466-580.  Usage::
-
-      from legoesm.grids.halo import compute_edge_artifact_metric
-      metrics = compute_edge_artifact_metric(state.theta_prime.data)
-      print(f"edge_std={metrics['edge_std']:.3e}, "
-            f"ratio={metrics['ratio']:.2f}x")
-
-  Useful for users to verify their own runs.  2/2 in <1 s.
-  Wired into iter-383 sweep (now 157).
+- **Iters 581-589 (compacted iter 590)**: user-audit response
+  + FV3-faithful feature ports + stretched-grid + AAM stack.
+  - iter 581: ``compute_edge_artifact_metric()`` public diag.
+  - iter 583: ``compute_atmospheric_angular_momentum()``
+    faithful port of FV3 ``compute_aam`` (fv_dynamics.F90:
+    1264-1307).  Formula: ``aam = Σ_k (r²·Ω + r·u)·rho·dz·area``.
+  - iter 584: ``w_safety_cap`` config (user audit item #2).
+    FV3 ``w_limiter`` lives in fv_mapz only; legoESM port is
+    a post-step clip (NOT mass-conserving cascade — Eulerian
+    context).  Default disabled.
+  - iter 585: ``apply_hord8_limiter(bl, br, dm)`` utility
+    (user audit item #3 partial — iord=8 Lin 1996 mono).
+  - iter 586: ``schmidt_transform()`` faithful port of FV3
+    ``direct_transform`` + ``create_cubed_sphere`` kwargs
+    ``stretch_fac`` / ``target_lon`` / ``target_lat`` (user
+    audit item #1).  Defaults preserve bit-for-bit pre-grid.
+  - iter 587: ``aam_from_nh_state()`` + ``aam_drift_nh()``
+    convenience functions — handle face-local→u_east rotation
+    + rho_full reconstruction internally.
+  - iter 588: ``apply_aam_correction_nh()`` faithful port of
+    FV3 ``consv_am`` (fv_dynamics.F90:774-794).  Reduces AM
+    drift by 8 orders of magnitude (4.05e+25 → 9.9e+17).
+  - iter 589: ``cube_transform()`` — FV3 revised Schmidt
+    (fv_grid_utils.F90:920-980).  Adds ``do_cube_transform``
+    kwarg.  Same as iter 586 plus ``lon += π`` pre-rotation.
+  Net: user audit items 1/2/3 all addressed; nested grid +
+  full hord plumbing deferred (huge scope).  Currently 164
+  guards in iter-383 sweep.
 - **Iters 571-579 (compacted iter 580)**: dycore mathematical
   consistency + amplitude/time scaling + linearity.
   - iter 571: PE δT ~ n_steps¹·⁸⁹ on HS but absolute ≤1 mK
