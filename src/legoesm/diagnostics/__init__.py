@@ -6,6 +6,9 @@ from legoesm.diagnostics.angular_momentum import (
     apply_aam_correction_nh,
     compute_atmospheric_angular_momentum,
 )
+from legoesm.diagnostics.total_energy_nh import (
+    compute_total_energy_nh,
+)
 from legoesm.diagnostics.column_integrals import column_water_vapor
 from legoesm.diagnostics.conservation_drift import (
     DAYS_REQUIRED,

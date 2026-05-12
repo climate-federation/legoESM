@@ -1195,6 +1195,24 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 597: **NH total-energy diagnostic** (FV3 ``compute_total_energy``
+  NH branch port).  Faithful port of fv_mapz.F90:1154-1183.
+  Computes mass-weighted column integral of:
+
+      cv·T + 0.5·(u² + v² + w²) + g·z
+
+  For legoESM NH: ``T = theta · exner_ref``, ``rho_full = rho_ref +
+  rho_prime``, ``theta_full = theta_ref + theta_prime``; KE uses
+  w_full (mid-level avg of w_half).
+  New ``compute_total_energy_nh(state, grid, hc)`` in
+  ``legoesm.diagnostics``.  Returns ``(te_column, te_total)``.
+  Tests (3/3 in 4 s):
+  1. At rest, TE finite + positive (cv·T + g·z dominate).
+  2. Adding 10 m/s u → ΔTE > 0 (KE term).
+  3. Adding 10 K θ' → ΔTE > 0 (IE term).
+  Companion to iter 583/587 AAM diagnostic — users can now
+  monitor BOTH AM and energy budget for NH conservation tests.
+  Wired into iter-383 sweep (now 171).
 - Iter 596: **``hord`` plumbed through ``fv_tp_2d`` and
   ``transport_step``**.  Closes iter-595 follow-up; ``hord``
   now reaches the TOP-LEVEL public transport API.
