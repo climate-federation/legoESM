@@ -172,6 +172,7 @@ _GUARD_MODULES = (
     "test_combined_best_c32_iter565",                # iter-565 add
     "test_combined_best_30step_iter566",             # iter-566 add
     "test_iters_vs_growth_iter567",                  # iter-567 add
+    "test_helpers_match_iter568",                    # iter-568 add
 )
 
 

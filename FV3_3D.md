@@ -1185,6 +1185,15 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 568: **two clip helpers produce identical results**.
+  Confirm ``monotone_halo_clip_context`` (iter-505) and
+  ``make_clipped_step`` (iter-526) give bit-identical
+  output after 3 steps:
+  - max|diff| < 1e-10 on u, v, theta_prime, rho_prime, w
+  Both use the same underlying ``unittest.mock.patch``
+  mechanism with the same target list.  Confirms users can
+  pick either API based on JIT preference without affecting
+  numerics.  1/1 in 50 s.  Wired into iter-383 sweep (now 149).
 - Iter 567: **iters=2 vs iters=8 growth-rate comparison**.
   Counter-intuitive finding at C24 SBR:
   - iters=2: 10-step=1.09e-2, 30-step=4.23e-2 (growth 3.88×)
