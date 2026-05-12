@@ -169,6 +169,32 @@ the "Iterations 1-19 — Summary" section above so the working log stays
 under the auto-loaded MEMORY.md / context envelope.  All previous detailed
 entries remain in the commit messages on `clean_physics`.
 
+### Iteration 26 — 2026-05-12
+
+**Revert iter-25 sea-ice FW change.**
+
+Codex stop-time review flagged that the `d(h·conc)/dt` formulation
+introduced a different bookkeeping bug.  In legoESM's slab sea-ice
+path, ``h`` and ``conc`` evolve semi-independently:
+
+- Melt-retreat shrinks ``conc`` AND ``h`` simultaneously, so
+  ``d(h·conc)/dt`` ≈ ``2 · conc · basal_rate`` (double-counts loss).
+- Lead-freeze adds area but does not update ``h``, so ``h · Δconc``
+  over-counts the new ice volume by ``h / h_new_ice`` (≈20× for thick
+  existing ice with new lead ice at h_new_ice).
+
+The proper fix requires the deferred CICE V=h·A state-variable
+refactor (codex iter-22 #1).  Until then, revert to the per-ice-area
+``dh/dt`` formulation which integrates correctly when ``conc`` is
+constant.  Slab and dynamic-path FW paths both reverted; the
+`conc_old` plumbing through `_build_response` removed.
+
+The harmonic mask (iter-25 #2) and Morrison vapor donor clamp (iter-25
+#3) are kept — they were independent fixes unrelated to the FW
+bookkeeping.
+
+Tests (post iter-26): 79 / 79 sea-ice unit tests pass.
+
 ### Iteration 25 — 2026-05-12
 
 **Codex iter-24 review returned 3 findings; this iteration applies all 3.**
@@ -178,6 +204,7 @@ entries remain in the commit messages on `clean_physics`.
   not ``dh/dt``.  Sublimation contribution is also ice-area-weighted
   (`dh_dt_sublim · conc`).  Threaded `conc_old` (pre-step / post-
   transport aggregated concentration) through `_build_response`.
+  *(REVERTED in iter-26 — see above.)*
 - [x] `ocean/physics/lateral_mixing/harmonic.py:84` — tracer
   Laplacian output is now multiplied by the land `mask_3d` so land
   cells receive zero tendency.  Full no-flux BC (replicating ocean
