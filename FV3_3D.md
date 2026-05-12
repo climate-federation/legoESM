@@ -5143,6 +5143,48 @@ mean θ_e, mean RH over any [z_bot, z_top] layer) compose
 directly without re-deriving the midpoint-mask integral.  Pure
 JAX, vmap-compatible.  No new physical constants introduced.
 
+## Iter 822 — mixed_layer_height_fv3 (θ-jump detection)
+
+Added `mixed_layer_height_fv3(theta, z, theta_jump_thresh=0.5)`
+to `grids/cubed_sphere.py`.  Well-mixed-layer top from θ-jump:
+
+```
+h_ML = z[k*]   where k* = argmin{ k : θ(k) − θ(surface) > τ }
+```
+
+Default τ = 0.5 K (Stull 1988 daytime convective BL convention).
+
+Distinct from iter-775 ``pbl_height_fv3`` (Ri-based) — this
+helper uses pure θ-jump detection, complementary in:
+  * Convective BL daytime sounding (θ uniform → jump well-defined,
+    Ri less reliable in deep mixing).
+  * Free-convective PBL where shear is weak.
+  * Climate-model output without explicit u, v columns.
+
+Fallback: no level exceeds threshold (deeply mixed column) →
+return z at top of column.
+
+JAX-compatible threshold detection via ``jnp.argmax`` + ``jnp.any``
++ ``jnp.take_along_axis`` — matches the iter-775/796/797 pattern.
+
+Used by: WRF/HRRR boundary-layer height diagnostic, ARL HYSPLIT
+trajectory model, CAM/GEOS5 dry mixed-layer height output,
+surface-based parcel-source layer estimation for CAPE/CIN
+integrators.
+
+Test: `tests/test_fv3_mixed_layer_height_iter822.py` (5 tests:
+well-mixed then jump → catches at jump, no-jump → top, custom
+threshold (0.1 vs 0.5) picks earlier level, large surface
+inversion → bottom layer, 3-D batched).
+
+### Why this iteration was meaningful
+
+Closes the **PBL/ML-height diagnostic pair**: Ri-based (iter-775)
++ θ-jump-based (iter-822).  The two methods complement: Ri works
+in shear-driven PBLs (nighttime, sloping fronts), θ-jump works
+in convective PBLs (daytime free convection, cumulus).  Pure
+JAX, vmap-compatible.  No new physical constants introduced.
+
 
 
 

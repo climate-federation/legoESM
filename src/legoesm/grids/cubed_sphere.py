@@ -6309,6 +6309,65 @@ def mean_layer_temperature_fv3(
     return mean_layer_field_fv3(t, z, z_bot, z_top, weight_floor)
 
 
+def mixed_layer_height_fv3(
+    theta: jax.Array,
+    z: jax.Array,
+    theta_jump_thresh: float = 0.5,
+) -> jax.Array:
+    """FV3_3D iter 822: well-mixed layer top via θ-jump detection.
+
+    Find the lowest level where the potential-temperature departure
+    from the surface exceeds a threshold:
+
+        h_ML = z[k*]    where k* = argmin{ k : θ(k) − θ(surface) > τ }
+
+    Default τ = 0.5 K (Stull 1988 convention for daytime
+    well-mixed PBL).  Variants in the literature use τ ∈ [0.1, 1.5]
+    depending on regime.
+
+    Distinct from iter-775 ``pbl_height_fv3`` (Ri-based) — this
+    helper uses pure θ-jump detection, complementary in:
+      * Convective BL daytime sounding (θ uniform → θ-jump
+        well-defined; Ri less reliable).
+      * Free-convective PBL where shear is weak.
+      * Climate-model output without explicit u, v columns.
+
+    Fallback: if no level exceeds the threshold (deeply mixed
+    column extending to the top), return z at the top of the
+    column.
+
+    JAX-compatible threshold detection via ``jnp.argmax(above,
+    axis=-1)`` + ``jnp.any`` + ``jnp.take_along_axis`` — fully
+    vmap-compatible.  Matches the iter-775/796/797 pattern.
+
+    Used by: WRF/HRRR boundary-layer height diagnostic, ARL
+    HYSPLIT trajectory model, CAM/GEOS5 dry mixed-layer height
+    output, surface-based parcel-source layer estimation for
+    CAPE/CIN integrators.
+
+    Parameters
+    ----------
+    theta : jax.Array, shape (..., km)
+        Potential temperature (K), surface→top oriented.
+    z : jax.Array, shape (..., km)
+        Geopotential height at the same levels (m).
+    theta_jump_thresh : float
+        θ-departure threshold (K) above surface; default 0.5 K.
+
+    Returns
+    -------
+    h_ml : jax.Array, shape (...,)
+        Mixed-layer top height (m).
+    """
+    delta_theta = theta - theta[..., 0:1]
+    above = delta_theta > theta_jump_thresh
+    any_above = jnp.any(above, axis=-1)
+    idx = jnp.argmax(above, axis=-1)
+    top_idx = theta.shape[-1] - 1
+    idx_safe = jnp.where(any_above, idx, top_idx)
+    return jnp.take_along_axis(z, idx_safe[..., None], axis=-1)[..., 0]
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,
