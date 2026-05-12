@@ -2606,6 +2606,85 @@ def dcmip16_bc_pressure(
     return p0 * jnp.exp(-g / Rdgas * (Ti1 - Ti2 * IT))
 
 
+def dcmip16_tc_uwind_pert(
+    z: jax.Array, r: jax.Array,
+    lon: jax.Array, lat: jax.Array,
+    Tv0: float | None = None,
+    lapse: float = 7.0e-3,
+    zt: float = 15000.0,
+    rp: float = 282000.0,
+    zp: float = 7000.0,
+    pb: float = 101500.0,
+    dp: float = 1115.0,
+    q0: float = 0.021,
+    lamp: float = None,
+    phip: float | None = None,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 672: DCMIP16 TC vortex wind perturbation.
+
+    Faithful JAX port of FV3 ``DCMIP16_TC_uwind_pert``
+    (tools/test_cases.F90:7168-7197).
+
+    Algorithm (z ≤ zt):
+        rfac = (r/rp)^1.5
+        fr5  = 0.5·fc·r              # fc = 2·Ω·sin(phip)
+        Tvrd = (Tv0 - lapse·z)·R_d
+        vt = -fr5 + sqrt(fr5² - 1.5·rfac·Tvrd /
+                          (1 + 2·Tvrd·z/(g·zp²) - (pb/dp)·exp(rfac + (z/zp)²)))
+        d1  = sin(phip)·cos(lat) - cos(phip)·sin(lat)·cos(lon - lamp)
+        d2  = cos(phip)·sin(lon - lamp)
+        d   = max(1e-25, sqrt(d1² + d2²))
+        uu = vt · d1 / d
+        vv = vt · d2 / d
+    z > zt: uu = vv = 0
+
+    Default FV3 constants:
+        lamp = π (TC center longitude)
+        phip = π/18 (TC center latitude, ~10°N)
+        Tv0  = 302.15·(1+0.608·q0)
+        fc   = 2·Ω·sin(phip)
+
+    Used in FV3 DCMIP16 Test 411 (TC).  With iter-666/669/671:
+    full TC IC stack available.
+
+    Returns (uu, vv) wind perturbation components.
+    """
+    pi = jnp.pi
+    if Tv0 is None:
+        Tv0 = 302.15 * (1.0 + 0.608 * q0)
+    if lamp is None:
+        lamp = pi
+    if phip is None:
+        phip = pi / 18.0
+    g = constants.g
+    Rdgas = constants.R_d
+    omega = constants.Omega
+    fc = 2.0 * omega * jnp.sin(jnp.asarray(phip))
+    rfac = jnp.sqrt(r / rp) ** 3
+    fr5 = 0.5 * fc * r
+    Tv = Tv0 - lapse * z
+    Tvrd = Tv * Rdgas
+    denom = (
+        1.0
+        + 2.0 * Tvrd * z / (g * zp * zp)
+        - (pb / dp) * jnp.exp(rfac + (z / zp) ** 2)
+    )
+    safe_denom = jnp.where(jnp.abs(denom) > 1e-30, denom, 1.0)
+    radicand = fr5 ** 2 - (1.5 * rfac * Tvrd) / safe_denom
+    vt = -fr5 + jnp.sqrt(jnp.maximum(radicand, 0.0))
+    d1 = (
+        jnp.sin(phip) * jnp.cos(lat)
+        - jnp.cos(phip) * jnp.sin(lat) * jnp.cos(lon - lamp)
+    )
+    d2 = jnp.cos(phip) * jnp.sin(lon - lamp)
+    d = jnp.maximum(1.0e-25, jnp.sqrt(d1 * d1 + d2 * d2))
+    uu_below = vt * d1 / d
+    vv_below = vt * d2 / d
+    uu = jnp.where(z > zt, 0.0, uu_below)
+    vv = jnp.where(z > zt, 0.0, vv_below)
+    return uu, vv
+
+
 def dcmip16_tc_temperature(
     z: jax.Array, r: jax.Array,
     Tv0: float | None = None,

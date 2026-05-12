@@ -1195,6 +1195,39 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 672: **FV3 ``dcmip16_tc_uwind_pert``** — TC vortex wind perturbation.
+  Faithful JAX port of FV3 ``DCMIP16_TC_uwind_pert``
+  (tools/test_cases.F90:7168-7197).
+
+  Algorithm (z ≤ zt):
+
+      rfac = (r/rp)^1.5
+      fr5  = 0.5·fc·r                     # fc = 2·Ω·sin(phip)
+      Tvrd = (Tv0 - lapse·z)·R_d
+      vt = -fr5 + sqrt(fr5² - 1.5·rfac·Tvrd /
+                       (1 + 2·Tvrd·z/(g·zp²) - (pb/dp)·exp(rfac + (z/zp)²)))
+      d1 = sin(phip)·cos(lat) - cos(phip)·sin(lat)·cos(lon - lamp)
+      d2 = cos(phip)·sin(lon - lamp)
+      d  = max(1e-25, sqrt(d1² + d2²))
+      uu = vt · d1 / d
+      vv = vt · d2 / d
+
+  z > zt: uu = vv = 0.
+
+  Default constants: lamp = π (TC center longitude), phip = π/18
+  (~10°N), fc = 2·Ω·sin(phip).
+
+  Used in FV3 DCMIP16 Test 411 (TC).  With iter-666/669/671:
+  full TC IC stack complete (T, p, q, u_pert).
+
+  Tests (5/5 in 1 s):
+  1. z > zt → (uu, vv) = (0, 0).
+  2. At TC center → finite (regularized).
+  3. No NaN/Inf on random inputs.
+  4. Far-field perturbation small (< 100 m/s).
+  5. Vectorized shapes preserved.
+
+  Wired into iter-383 sweep (now 238).
 - Iter 671: **FV3 ``dcmip16_bc_uwind_pert``** — BC perturbation trigger.
   Faithful JAX port of FV3 ``DCMIP16_BC_uwind_pert``
   (tools/test_cases.F90:6823-6838).  Localized
