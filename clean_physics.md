@@ -96,6 +96,48 @@ Branch: `clean_physics`. Driven by Ralph loop + `/codex:adversarial-review`.
   75 / 75 land carbon + multilayer + diff_land; 140 / 140 land (post iter-44);
   100 / 100 ocean MPAS + surface_forcing + emanuel + atmosphere convection.
 
+## Iteration 51 — 2026-05-13
+
+**Inspection iteration on `src/legoesm/land/multilayer_land.py`
+(no code changes).**
+
+Codex still timing out — direct inspection only.
+
+- **Snow / latent-heat phase decision** (`multilayer_land.py:197-200`):
+  `has_snow = (snow > 1e-6) | ((precip_snow·dt > 1e-6) & (T_surface < T_freeze))`.
+  Surviving-fresh-snow guard prevents warm-column snowfall from
+  spending the whole turbulent step over L_s/ice qsat.
+
+- **Energy budget closure** (`multilayer_land.py:271-272, 375`):
+  `G_surface` accounting:
+  `G = SW_net + LW_net − shflx − lhflx_demand`,
+  then `G −= melt_energy` (latent of fusion paid by snowmelt),
+  then `G += evap_excess_energy` (water-limited evap returns
+  unused latent heat to the soil thermal step).  Final
+  `G_final = SW_net + LW_net − shflx − lhflx_actual − melt_energy`.
+  Energy conserved.
+
+- **Sublimation cap** (`multilayer_land.py:281-286`):
+  `max_sublim = snow_new/dt` so `sublim_actual ≤ available snow / dt`.
+  For deposition (sublim_demand < 0), `sublim_actual = sublim_demand`
+  (full deposition); `snow_new − sublim_actual·dt` correctly ADDS
+  the deposition because `sublim_actual < 0`.
+
+- **Soil water-budget partition** (`multilayer_land.py:336-343`):
+  When `has_snow=False`, surface flux splits into bare-soil
+  `(1 − f_veg)·evap_rate` and transpiration `f_veg·evap_rate`.
+  Dew (`evap_rate < 0`) routed entirely to bare-soil (`evap_bare =
+  evap_rate`, `evap_transp = 0`) so the column water budget closes.
+
+- **Root sink normalisation** (`multilayer_land.py:350-354`):
+  `sink = (root_frac·β_root / Σ(root_frac·β_root)) · E_pot_transp / dz`.
+  Vertical integral over the column exactly equals `E_pot_transp`,
+  preserving the transpiration water budget through Richards.
+
+Note: bulk-flux dispatch (`compute_most_fluxes` vs `simple_bulk_fluxes`)
+duplicates `_bulk_flux_dispatch` pattern from sea-ice but is inline
+here.  Future refactor could centralise via shared helper.
+
 ## Iterations 41-50 — Detail (compressed 2026-05-13)
 
 - **iter-41**: compression milestone (iter-30..40 folded).
