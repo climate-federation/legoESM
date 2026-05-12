@@ -1195,219 +1195,51 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
-- Iter 609: **``terrain_filter`` mass-preservation regression**.
-  Verifies that iter-606's del-2 / del-4 terrain filter preserves
-  the area-weighted mean of phis exactly on a closed cubed sphere
-  (divergence-theorem property: ∫Δq·dA = 0 since fluxes form a
-  closed-surface integral that cancels).
-  Tests (3/3 in 5 s):
-  1. del-2 filter, C16, 4 iters: rel drift in mean(phis·area)/
-     sum(area) < 1e-3.
-  2. del-4 filter, C16, 4 iters: rel drift < 1e-3.
-  3. Constant field (∇²·const = 0) → exactly preserved.
-  This is a regression guard for iter-606 ensuring the filter
-  doesn't accidentally drift the global terrain mean (which
-  would break mass-conservation-like properties).  Wired into
-  iter-383 sweep (now 182).
-- Iter 608: **``mid_pt_sphere``** great-circle midpoint helper.
-  Faithful port of FV3 ``mid_pt_sphere`` (fv_grid_utils.F90:
-  1981-1992).  Algorithm:
-    1. (lon, lat) → 3D Cartesian unit vector e
-    2. e_mid = (e1 + e2) / 2 (Cartesian midpoint)
-    3. Normalize e_mid → unit sphere
-    4. Cartesian → (lon, lat)
-
-  Returns the great-circle midpoint of two points — NOT the
-  (lon, lat) average, which gives wrong results across the
-  dateline or poles.
-
-  legoESM already had ``great_circle_distance`` but no GC
-  midpoint.  Useful for users porting FV3 grid-generation code.
-
-  Tests (4/4 in <1 s):
-  1. Equator midpoint: (0,0) ↔ (π/2, 0) → (π/4, 0) exact.
-  2. Antipodal points across hemisphere → finite result.
-  3. (0, π/4) ↔ (π, π/4) → north pole (lat=π/2).
-  4. 5 random pairs: |d1m - d2m| < 1e-6 and d1m+d2m = d12.
-  Wired into iter-383 sweep (now 181).
-- Iter 607: **``cubed_to_latlon`` utility** (FV3 c2l_ord2 alias).
-  Faithful port of FV3 ``cubed_to_latlon`` (fv_grid_utils.F90:
-  2386) and ``c2l_ord2`` (line 2547) naming/semantics.  D-grid
-  (u, v) on corners → cell-center (ua, va) in geographic
-  (east, north) frame.  legoESM had ``dgrid_to_center_geographic``
-  (operators_cdgrid.py:278) but only 2D; iter 607:
-  - Extends ``dgrid_to_center_geographic`` to handle 3D
-    ((6, n+1, n+1, nlev)) D-grid arrays.
-  - Adds ``cubed_to_latlon`` alias matching FV3 naming so users
-    porting FV3 code find the expected entry point.
-  - Documents semantics match FV3 c2l_ord4 (covariant→latlon
-    with rotation matrix) for the grid_type<4 cubed-sphere
-    branch via iter-326's corner rotation.
-  Tests (3/3 in 9 s):
-  1. Alias matches direct call bit-for-bit.
-  2. 3D D-grid winds produce 3D cell-center output (finite).
-  3. Sanity check: uniform u_d → finite ua, va.
-  Wired into iter-383 sweep (now 180).
-- Iter 606: **terrain_filter** (FV3 del2/del4_cubed_sphere port).
-  Faithful port of FV3 ``del2_cubed_sphere`` and
-  ``del4_cubed_sphere`` from ``tools/fv_surf_map.F90:817+``.
-  Applied at IC load time to smooth surface geopotential phis
-  before the dycore reads it — prevents stair-step terrain
-  artifacts and improves dycore stability.
-
-      from legoesm.grids.terrain_filter import terrain_filter
-      phis_smooth = terrain_filter(phis, grid, n_iter=4, nord=2)
-
-  Parameters match FV3 namelist:
-  - ``n_iter`` = ``n_zs_filter`` (default 4).
-  - ``nord`` = ``nord_zs_filter`` (2 = del-2, 4 = del-4).
-  - ``cd`` defaults to ``0.20·min(grid.area)`` matching FV3
-    ``cnst_0p20·da_min`` at ``external_ic.F90:609``.
-  Uses legoESM ``laplacian_compact`` as the Laplacian (matches
-  FV3 metric-aware flux-form to discretization order for smooth
-  fields).
-  Tests (4/4 in 5 s):
-  1. n_iter=0 → no-op.
-  2. Sharp step → variance reduced.
-  3. Constant field → preserved (Δ²·const = 0).
-  4. del-4 produces finite output (different from del-2).
-  Wired into iter-383 sweep (now 179).
-- Iter 605: **``column_d_ext_field`` / ``column_mass_weighted_mean``
-  utilities** (FV3 d_ext external-mode damping support).
-  Faithful port of FV3 ``dyn_core.F90:1310-1326``:
-
-      if d_ext > 0:
-          d2_divg = d_ext · da_min_c
-          divg2[i,j] = d2_divg · Σ_k(ptc·vt) / Σ_k(ptc)
-
-  divg2 then feeds into ``one_grad_p`` to add a column-mean
-  divergence-damping term to the pressure-gradient force —
-  damping the external (barotropic) mode.
-  Two utilities in ``legoesm.diagnostics.column_integrals``:
-  - ``column_mass_weighted_mean(field, mass_per_cell)``: generic,
-    returns mass-weighted column mean.  Zero-mass safe.
-  - ``column_d_ext_field(vt, delp, d_ext, da_min_c)``: the
-    specific d_ext field.  Returns zeros if d_ext ≤ 0.
-  NOT yet wired into the NH dycore (one_grad_p plumbing is
-  complex); standalone utility makes the computation available
-  for users, tests, and future plumbing.
-  4 tests (4/4 in <1 s):
-  1. Constant field → mean = constant.
-  2. Zero mass → returns 0 safely.
-  3. d_ext=0 → returns 0.
-  4. Formula divg2 = d_ext·da_min_c·column_mean(vt) verified.
-  Wired into iter-383 sweep (now 178).
-- Iter 604: **PE AAM stack** (mirror NH iter 583/587/588).
-  3 new functions in ``legoesm.diagnostics``:
-  - ``aam_from_pe_state(state, grid, coord)``: cell-center
-    u_c/v_c from 4-point average of D-grid u_d/v_d; rotate to
-    u_east; FV3 AAM formula with column_mass = delp·area/g
-    from hybrid coord.
-  - ``aam_drift_pe(state_old, state_new, ...)``: companion
-    drift diagnostic.
-  - ``apply_aam_correction_pe(state_old, state_new, ...)``:
-    Newton iteration (5 steps) since D-grid edge-padding of
-    the cell-center solid-body correction introduces a
-    discretization mismatch (single-step gives ~100× reduction;
-    Newton converges to ~17000×).
-  Verified at C8 (4/4 tests in 12 s):
-  - PE AAM at Held-Suarez → finite + positive.
-  - Identical PE states → drift ≈ 0.
-  - +1 m/s u_d → drift 1.98e+25 reduces to 1.18e+21 (1.7e-5
-    ratio — Newton-converged ~5 orders of magnitude).
-    Limited by D-grid ↔ cell-center discretization mismatch;
-    NH version (iter 588) had 8 orders since no D-grid mismatch.
-  - T, p_s, phis UNCHANGED; only u_d, v_d adjusted.
-
-  **PE conservation stack now COMPLETE**:
-  - AAM: aam_from_pe_state / aam_drift_pe / apply_aam_correction_pe
-  - TE:  compute_total_energy_pe / te_drift_pe / apply_te_correction_pe
-
-  Both NH and PE now have full {AAM, TE} × {static, drift,
-  correct} diagnostic stacks.  Major FV3 conservation features
-  end-to-end.  Wired into iter-383 sweep (now 177).
-- Iter 603: **PE TE boundary-work sign fix** (iter-598 latent bug).
-  Iter 602 surfaced this via numerical-Jacobian Newton: the
-  iter-598 PE TE formula had the boundary-work term inverted:
-
-      iter-598 (buggy): te = pe_top·phi_top - pe_sfc·phi_sfc
-      iter-603 (fix):   te = pe_sfc·phi_sfc - pe_top·phi_top
-
-  FV3 fv_mapz.F90:1142 specifies:
-  ``te_2d = pe(km+1)·phiz(km+1) - pe(1)·phiz(1)`` where k=1 is
-  top, k=km+1 is surface.
-
-  iter-598 tests still passed because they only checked positivity
-  and θ-monotonicity, which are dominated by Σ cp·T·delp (the
-  boundary term is ~0.1% of total).  New regression test:
-  - Raise phis from 0 → 1000 m²/s² → TE should INCREASE (since
-    ϕ_sfc gains 1000 and pe_sfc > pe_top).
-  - iter-598 buggy sign would give ΔTE < 0; iter-603 fixed
-    sign gives ΔTE > 0.
-  All iter-598/599/602 tests still pass after fix.  1/1 in
-  11 s.  Wired into iter-383 sweep (now 176).
-- Iter 602: **PE TE-conserving correction** (mirror iter 601).
-  Faithful port of FV3 ``consv_te > 0`` for hydrostatic branch.
-  Differs from NH version: PE total-energy has a hydrostatic
-  boundary-work term ``pe_sfc·ϕ_sfc - pe_top·ϕ_top`` that
-  depends nonlinearly on T (via hydrostatic integration of ϕ).
-  Effective heat capacity is NOT simply ``cp·M`` — single
-  Newton step underconverges (only 30× reduction).
-  Solution: Newton iteration (5 steps max) with numerical-
-  Jacobian dTE/dT probe:
-
-      for k=1..5:
-          dTE/dT = (TE(T+ε) - TE(T)) / ε
-          ΔT = -(TE_curr - TE_target) / (dTE/dT)
-          T ← T + ΔT
-          if |residual| < 1e-2 J: break
-
-  Verified at C8 (3/3 tests in 12 s):
-  - Drift before: 5.14e+23 J
-  - Drift after:  **0.0 J** (exact convergence)
-  - Identical states → no-op.
-  - u_d, v_d, p_s, phis UNCHANGED; only T adjusted.
-  New ``apply_te_correction_pe(state_old, state_new, grid, coord)``
-  in ``legoesm.diagnostics``.
-
-  **PE conservation stack now COMPLETE for TE**:
-  - compute_total_energy_pe / te_drift_pe / apply_te_correction_pe
-
-  Bonus: surfaced a latent bug in iter-598's PE TE formula
-  (boundary-work sign was inverted; the numerical-Jacobian
-  Newton approach is robust to that since it measures dTE/dT
-  empirically rather than analytically).  Iter-598 tests still
-  pass since they only check sign/positivity, not absolute
-  value vs FV3 reference.  Worth fixing in a follow-up.
-  Wired into iter-383 sweep (now 175).
-- Iter 601: **NH TE-conserving correction** (FV3 ``consv_te > 0``
-  analog).  Faithful port of FV3 fv_dynamics.F90 consv_te logic
-  (Lagrangian_to_Eulerian energy-correcting branch).  Adjusts
-  θ′ uniformly across all cells to compensate exact dycore TE
-  drift:
-
-      te_dt = TE(state_new) - TE(state_old)
-      ΔT = -te_dt / (cv · total_dry_mass)
-      Δθ′ = ΔT / exner_ref(k)  (level-dependent)
-
-  KE/PE NOT redistributed — only IE adjusted via θ′ (matches
-  FV3 design: thermodynamic correction, not wind correction).
-  Verified at C8 (3/3 tests in 4 s):
-  - Drift before correction: 7.16e+22 J
-  - Drift after correction:  -1.07e+09 J
-  - Reduction factor: **1.5e-14** (~14 orders of magnitude →
-    float64 precision).  Cleaner than iter 588's AAM correction
-    (8 orders) because IE is linear in T.
-  - Identical states → no-op (max|Δθ′|<1e-10).
-  - u, v, w, rho_prime UNCHANGED; only theta_prime adjusted.
-  New ``apply_te_correction_nh(state_old, state_new, grid, hc)``
-  in ``legoesm.diagnostics``.  Differentiable.
-
-  **NH conservation stack now COMPLETE**:
-  - AAM: aam_from_nh_state / aam_drift_nh / apply_aam_correction_nh
-  - TE:  compute_total_energy_nh / te_drift_nh / apply_te_correction_nh
-  PE-side TE correction is the natural follow-up.
-  Wired into iter-383 sweep (now 174).
+- **Iters 601-609 (compacted iter 610)**: full NH+PE conservation
+  matrix + FV3 utility ports (grid, ops, filter, diagnostics).
+  - iter 601: **NH TE-conserving correction** (FV3 consv_te NH).
+    ``apply_te_correction_nh`` adjusts θ′ uniformly using ΔT =
+    -te_dt / (cv · total_dry_mass).  Verified at C8: drift
+    7.16e+22 J → -1.07e+09 J (14 orders, float64 floor).
+    **NH conservation stack COMPLETE** (AAM + TE).
+  - iter 602: **PE TE-conserving correction** (FV3 consv_te PE).
+    Newton iteration (5 steps) with numerical-Jacobian
+    dTE/dT = (TE(T+ε) - TE(T))/ε since PE TE has a hydrostatic
+    boundary-work term nonlinear in T.  Verified at C8: drift
+    5.14e+23 J → 0.0 J (exact).  New ``apply_te_correction_pe``.
+  - iter 603: **PE TE boundary-work sign fix** (iter-598 bug).
+    iter-598 had ``te = pe_top·phi_top - pe_sfc·phi_sfc``;
+    FV3 fv_mapz.F90:1142 specifies ``pe(km+1)·phiz(km+1) -
+    pe(1)·phiz(1)`` (sfc - top).  Surfaced by iter-602's
+    numerical-Jacobian probe; iter-598 tests passed only
+    because boundary term is ~0.1% of total.  Regression test:
+    raise phis → TE should increase.
+  - iter 604: **PE AAM stack** (mirror NH iter 583/587/588).
+    ``aam_from_pe_state`` / ``aam_drift_pe`` /
+    ``apply_aam_correction_pe`` (Newton iteration, 5 steps).
+    Verified at C8: +1 m/s u_d drift 1.98e+25 → 1.18e+21
+    (~5 orders, limited by D-grid ↔ cell-center mismatch;
+    NH version had 8 orders since no D-grid mismatch).
+    **PE conservation stack COMPLETE** (AAM + TE).
+  - iter 605: **``column_d_ext_field`` / ``column_mass_weighted_mean``**
+    utilities (FV3 dyn_core.F90:1310-1326 d_ext support).
+    ``divg2 = d_ext·da_min_c·Σ_k(ptc·vt)/Σ_k(ptc)``.
+    Standalone; not yet wired into ``one_grad_p`` (complex).
+  - iter 606: **terrain_filter** (FV3 del2/del4_cubed_sphere port
+    from tools/fv_surf_map.F90:817+).  Smooths phis at IC load.
+    Params: ``n_iter`` (=n_zs_filter, default 4), ``nord``
+    (=nord_zs_filter, 2=del-2, 4=del-4), ``cd`` default
+    0.20·min(grid.area).
+  - iter 607: **``cubed_to_latlon``** utility (FV3 c2l_ord2 alias).
+    Extended ``dgrid_to_center_geographic`` to 3D
+    ((6,n+1,n+1,nlev)) and added FV3-named alias.
+  - iter 608: **``mid_pt_sphere``** great-circle midpoint
+    (FV3 fv_grid_utils.F90:1981-1992).  Cartesian midpoint +
+    normalize, NOT lon/lat average (wrong near dateline/poles).
+  - iter 609: **``terrain_filter`` mass-preservation regression**.
+    Verifies del-2/del-4 preserves area-weighted mean(phis) on
+    closed sphere (divergence theorem, rel drift < 1e-3 at C16).
+  All wired into iter-383 sweep (now 182).
 - **Iters 591-599 (compacted iter 600)**: grid shift + complete
   PPM stack + transport plumbing + NH/PE total-energy stack.
   - iter 591: ``shift_fac`` longitude shift (FV3
