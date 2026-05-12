@@ -5067,6 +5067,45 @@ is verifiable with unit tests in seconds rather than wall-time
 sweeps.  Users running the NH compressible-Euler 3D path now have
 the same cube-imprint defense as users running the PE 3D path.
 
+## Iter 811 — k_index_fv3 (George 1960 thunderstorm K-index)
+
+Added `k_index_fv3(t850, td850, t700, td700, t500)` to
+`grids/cubed_sphere.py`.  George (1960) severe-thunderstorm
+instability index:
+
+```
+K = (T_850 − T_500) + T_d850 − (T_700 − T_d700)
+```
+
+Combines mid-tropospheric lapse rate (T_850 − T_500), low-level
+moisture content (T_d850), and mid-tropospheric dryness
+(T_700 − T_d700).
+
+NWS/SPC thresholds:
+  * K < 20      — no thunderstorms
+  * 20 ≤ K < 26 — isolated
+  * 26 ≤ K < 31 — widely scattered
+  * 31 ≤ K < 36 — scattered
+  * K ≥ 36      — numerous
+
+Composes iter-767 dew_point + level-extracted temperatures.
+Complements iter-810 Lifted Index — together (LI, K) span the
+canonical pre-CAPE-era thunderstorm-instability indices still
+in routine operational use (NWS/SPC convective outlooks).
+
+Test: `tests/test_fv3_k_index_iter811.py` (5 tests: analytic
+case, three-profile threshold span, dry mid-trop lowers K,
+moist Td_850 raises K, 3-D shapes + finite).
+
+### Why this iteration was meaningful
+
+Closes the **pre-CAPE-era severe-storm index triplet**
+(LI, K, with totals-totals deferred).  All three are still
+prominently displayed on NWS/SPC operational charts despite the
+rise of CAPE/CIN as primary metrics — they remain useful single-
+number summaries.  Pure JAX, vmap-compatible.  No new physical
+constants introduced.
+
 
 
 

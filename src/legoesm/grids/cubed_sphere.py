@@ -5668,6 +5668,65 @@ def lifted_index_fv3(
     return t_env_500 - t_parcel_500
 
 
+def k_index_fv3(
+    t850: jax.Array,
+    td850: jax.Array,
+    t700: jax.Array,
+    td700: jax.Array,
+    t500: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 811: George (1960) K-index.
+
+        K = (T_850 − T_500) + T_d850 − (T_700 − T_d700)
+
+    All temperatures in K (or °C — output is invariant under K
+    ↔ °C shift since only temperature differences enter).
+
+    Severe-thunderstorm probability index combining mid-tropospheric
+    lapse rate (T_850 − T_500), low-level moisture content (T_d850),
+    and mid-tropospheric dryness (T_700 − T_d700).  High K requires
+    steep lapse rate + moist boundary layer + dry middle troposphere
+    — the classic Great Plains severe-storm setup.
+
+    NWS / SPC convective-outlook thresholds (US convention):
+      * K < 20      — no thunderstorm activity
+      * 20 ≤ K < 26 — isolated thunderstorms
+      * 26 ≤ K < 31 — widely scattered
+      * 31 ≤ K < 36 — scattered
+      * K ≥ 36      — numerous
+
+    Caller supplies pre-extracted level temperatures and dew
+    points (e.g., via vertical interpolation onto 850/700/500 mb
+    surfaces).  Caller computes dew points via iter-767 ``dew_point_fv3``
+    from (p, q) at the same levels.
+
+    Used by: NWS / SPC severe-weather diagnostics, ECMWF EPS
+    severe-storm probability product, mesoscale model post-
+    processing for convective outlooks, climate-model
+    severe-storm-frequency studies.
+
+    Complements iter-810 Lifted Index — together (LI, K) span
+    the canonical pre-CAPE-era thunderstorm-instability indices
+    still in routine operational use.
+
+    Parameters
+    ----------
+    t850, td850 : jax.Array
+        Temperature and dew point at 850 mb (K).
+    t700, td700 : jax.Array
+        Temperature and dew point at 700 mb (K).
+    t500 : jax.Array
+        Temperature at 500 mb (K).
+
+    Returns
+    -------
+    k : jax.Array
+        K-index (K; same units as input, but most operational
+        products quote °C — caller converts if desired).
+    """
+    return (t850 - t500) + td850 - (t700 - td700)
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,
