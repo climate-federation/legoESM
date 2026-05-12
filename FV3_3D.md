@@ -1195,6 +1195,34 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 649: **FV3 ``grid_area_fv3``** — 2D vectorized cell-area
+  computation.  Faithful JAX port of FV3 ``grid_area``
+  (tools/fv_grid_tools.F90:2512-2620, spherical-excess branch).
+
+  Algorithm:
+
+      For each cell (i, j) in [0, n_x-1] × [0, n_y-1]:
+          p_lL = grid[..., i,   j  ]   # SW corner
+          p_uL = grid[..., i,   j+1]   # NW
+          p_lR = grid[..., i+1, j  ]   # SE
+          p_uR = grid[..., i+1, j+1]   # NE
+          area[i, j] = get_area(p_lL, p_uL, p_lR, p_uR, radius)
+
+  Uses iter-614 ``get_area`` (Gauss-Bonnet spherical excess).
+  Broadcasts on leading axes (e.g., 6-face cube).
+
+  Pairs with iter-629 ``make_fv3_native_grid`` to produce both
+  corner positions and cell areas.  6-face sum verified to
+  match 4π·R² to <1e-9 rel at C24.
+
+  Tests (5/5 in 13 s):
+  1. Output shape (6, n, n) from (6, n+1, n+1).
+  2. All cell areas > 0.
+  3. 6-face total ≈ 4π·R² (full sphere).
+  4. Area scales as R² (radius doubling → 4×).
+  5. Area max/min ratio < 2.5 (consistent with dx, dy each √2).
+
+  Wired into iter-383 sweep (now 218).
 - Iter 648: **FV3 ``cartesian_to_spherical_fv3`` +
   ``spherical_to_cartesian_fv3``**.  Radius-aware coord conversions
   from FV3 ``fv_grid_tools.F90:2373-2402``.

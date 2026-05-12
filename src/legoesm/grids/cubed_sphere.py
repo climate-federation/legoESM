@@ -2304,6 +2304,49 @@ def gnomonic_dist(im: int) -> tuple[jax.Array, jax.Array]:
     return xyz2latlon(p1, p2, p3)
 
 
+def grid_area_fv3(
+    grid_lon: jax.Array, grid_lat: jax.Array,
+    radius: float = constants.R_earth,
+) -> jax.Array:
+    """FV3_3D iter 649: 2D vectorized cell-area computation via FV3 get_area.
+
+    Faithful JAX port of FV3 ``grid_area`` (tools/fv_grid_tools.F90:
+    2512-2620, spherical-excess branch).  Computes cell areas
+    over a 2D corner grid using iter-614 ``get_area``:
+
+        For each cell (i, j) in [0, n_x-1] × [0, n_y-1]:
+            p_lL = grid[i,   j  ]  # SW corner
+            p_uL = grid[i,   j+1]  # NW
+            p_lR = grid[i+1, j  ]  # SE
+            p_uR = grid[i+1, j+1]  # NE
+            area[i, j] = get_area(p_lL, p_uL, p_lR, p_uR, radius)
+
+    Parameters
+    ----------
+    grid_lon : jax.Array, shape ``(..., n_x+1, n_y+1)``
+        Corner-grid longitudes.
+    grid_lat : jax.Array, shape ``(..., n_x+1, n_y+1)``
+        Corner-grid latitudes.
+    radius : float, default constants.R_earth
+
+    Returns
+    -------
+    area : jax.Array, shape ``(..., n_x, n_y)``
+        Cell areas (m²).  Reuses iter-614 ``get_area``'s
+        spherical-excess Gauss-Bonnet formula.
+    """
+    # Slice 4 corners; pass to vectorized iter-614 get_area
+    sw_lon = grid_lon[..., :-1, :-1]; sw_lat = grid_lat[..., :-1, :-1]
+    se_lon = grid_lon[..., 1:, :-1];  se_lat = grid_lat[..., 1:, :-1]
+    ne_lon = grid_lon[..., 1:, 1:];   ne_lat = grid_lat[..., 1:, 1:]
+    nw_lon = grid_lon[..., :-1, 1:];  nw_lat = grid_lat[..., :-1, 1:]
+    return get_area(
+        sw_lon, sw_lat, se_lon, se_lat,
+        ne_lon, ne_lat, nw_lon, nw_lat,
+        radius=radius,
+    )
+
+
 def cartesian_to_spherical_fv3(
     x: jax.Array, y: jax.Array, z: jax.Array,
     eps: float = 1.0e-10,
