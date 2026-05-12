@@ -156,6 +156,32 @@ Compression iteration.  Folded iter-20 through iter-29 into the
 "Iterations 1-29 — Summary" section.  Detailed per-iteration narratives
 remain in the commit messages on `clean_physics`.
 
+### Iteration 38 — 2026-05-13
+
+**Add Kessler total-water-conservation test, audit clamp consistency.**
+
+Audited the iter-35 ``donor_clamp_scale`` consolidation: every clamp
+scales sinks AND their matched sources (autoconv as q_c sink + q_r
+source; condensation as q_v sink + q_c source; etc.) by the SAME
+factor, so mass conservation holds.
+
+Added regression test `TestKessler::test_total_water_conservation_under_heavy_clamp` that:
+- Sets up a hydrostatic column (`dz = dp / (ρ g)` so the layer mass
+  ``ρ·dz`` matches the coupler's ``dp/g``).
+- Drives the q_c clamp heavily by saturated air + thin cloud water +
+  rain.
+- Asserts ``∫(dq_v_dt + dq_c_dt + dq_r_dt)·dp/g + precipitation = 0``
+  to machine precision (residual < 1e-12).
+
+Caught a test-construction trap along the way: my first version used
+`dz = 500` (constant) which was NOT hydrostatic with the prescribed
+`p_half`, producing a fake ~7e-3 kg/m²/s residual that looked like a
+real conservation bug.  Using `dz = dp/(ρ·g)` makes the test
+mathematically meaningful.
+
+**Tests (post iter-38):** 7 / 7 conservation + clamp regression tests
+pass.
+
 ### Iteration 37 — 2026-05-12
 
 **Fix iter-36 test + apply codex iter-36 findings.**

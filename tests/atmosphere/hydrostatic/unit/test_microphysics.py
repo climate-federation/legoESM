@@ -264,6 +264,45 @@ class TestKessler:
         residual = constants.c_pd * out.dT_dt + constants.L_v * out.dq_v_dt
         assert float(jnp.max(jnp.abs(residual))) < 1e-6
 
+    def test_total_water_conservation_under_heavy_clamp(self):
+        """Total water ``q_v + q_c + q_r`` is conserved by the
+        in-scheme tendencies in a HYDROSTATIC column (``dz = dp /
+        (ρ g)``).  Sedimentation redistributes vertically and the
+        column total changes only through the surface precipitation
+        flux.  Constructed so accretion drives the q_c clamp.  Locks
+        in the conservation-respecting scaling of matched sink/source
+        pairs added by the iter-35 consolidation onto
+        ``donor_clamp_scale`` — without it, scaled sinks and unscaled
+        sources would lose mass.
+        """
+        ncol, nlev = 2, 10
+        T = jnp.full((ncol, nlev), 290.0)
+        p_half = jnp.linspace(1e4, 1e5, nlev + 1)[None, :].repeat(ncol, axis=0)
+        p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+        rho = p_full / (constants.R_d * T)
+        dp = p_half[:, 1:] - p_half[:, :-1]
+        # Hydrostatic layer thickness: dp = ρ g dz so the layer mass
+        # ``ρ·dz`` matches the coupler's ``dp/g``.  A non-hydrostatic
+        # mismatch would produce a fake conservation residual that
+        # has nothing to do with the scheme.
+        dz = dp / (rho * constants.g)
+        q_sat = saturation_mixing_ratio(T, p_full)
+        q_v = q_sat * 1.001
+        h = make_zero_hydrometeors(ncol, nlev)
+        h = h._replace(
+            q_c=jnp.full_like(T, 1e-4),
+            q_r=jnp.full_like(T, 5e-3),
+        )
+        dt = 1200.0
+        out = kessler_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=dt)
+        col_tend = jnp.sum(
+            (out.dq_v_dt + out.dq_c_dt + out.dq_r_dt) * dp / constants.g,
+            axis=-1,
+        )
+        residual = col_tend + out.precipitation
+        # Machine-precision conservation
+        assert float(jnp.max(jnp.abs(residual))) < 1.0e-12
+
 
 # ======================================================================
 # Sundqvist tests
