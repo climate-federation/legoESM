@@ -38,11 +38,11 @@ def test_iter365_compaction_present(doc_text):
     )
 
 
-def test_doc_size_below_5345_lines(doc_text):
+def test_doc_size_below_4990_lines(doc_text):
     n_lines = len(doc_text.splitlines())
-    assert n_lines < 5345, (
-        f"FV3_3D.md has {n_lines} lines (target < 5345).  "
-        f"Next compaction at iter 790."
+    assert n_lines < 4990, (
+        f"FV3_3D.md has {n_lines} lines (target < 4990).  "
+        f"Next compaction at iter 800."
     )
 
 
@@ -440,6 +440,36 @@ def test_iter670_compaction_covers_topics(doc_text):
     for marker in required:
         assert marker in section, (
             f"iter-670 compacted block missing topic ``{marker}``."
+        )
+
+
+def test_iter790_compaction_present(doc_text):
+    """iter-790 compacted iter 781-789 into single block."""
+    assert "**Iters 781-789 (compacted iter 790)**" in doc_text, (
+        "iter-790 compaction block missing — doc re-expanded."
+    )
+
+
+def test_iter790_compaction_covers_topics(doc_text):
+    section_start = doc_text.find(
+        "**Iters 781-789 (compacted iter 790)**"
+    )
+    section_end = doc_text.find(
+        "**Iters 771-779", section_start,
+    )
+    assert section_start >= 0 and section_end > section_start
+    section = doc_text[section_start:section_end]
+    required = [
+        "781", "782", "783", "784", "785",
+        "786", "787", "788", "789", "790",
+        "rossby_radius", "rhines_scale", "equatorial_rossby_radius",
+        "gravity_wave_speed", "froude_number", "rossby_number",
+        "burger_number", "ekman_layer_depth", "ekman_transport",
+        "geostrophic_wind",
+    ]
+    for marker in required:
+        assert marker in section, (
+            f"iter-790 compacted block missing topic ``{marker}``."
         )
 
 

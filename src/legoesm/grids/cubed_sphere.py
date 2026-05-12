@@ -4255,6 +4255,61 @@ def ekman_transport_fv3(
     return M_x, M_y
 
 
+def geostrophic_wind_fv3(
+    dphi_dx: jax.Array,
+    dphi_dy: jax.Array,
+    f: jax.Array,
+    f_floor: float = 1e-12,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 790: geostrophic wind from geopotential gradient.
+
+    Steady, frictionless balance between pressure-gradient and
+    Coriolis forces:
+
+        u_g = − (1/f) · ∂Φ/∂y
+        v_g = + (1/f) · ∂Φ/∂x
+
+    Equivalent vector form: V_g = (k̂ × ∇Φ) / f.
+
+    In Northern Hemisphere (f > 0), geostrophic flow has high
+    pressure (high Φ) on the **right**; in Southern Hemisphere
+    (f < 0), high pressure on the **left**.
+
+    Used by: geostrophic adjustment theory, thermal-wind balance
+    derivations (∂V_g/∂z from ∂Φ_z/∂x,y), DA observation
+    operators (NWP increments are often added to geostrophic
+    components), Charney-Eady baroclinic-instability eigenmodes,
+    ageostrophic-wind decomposition for jet-streak diagnostics.
+
+    ``f_floor`` clamps |f| with sign preservation — at f = 0 the
+    geostrophic approximation itself breaks down (winds diverge);
+    helper keeps output large-but-finite rather than NaN.
+
+    Parameters
+    ----------
+    dphi_dx : jax.Array
+        Zonal geopotential gradient ∂Φ/∂x (m·s⁻²).  Caller is
+        responsible for differentiating Φ on the cubed-sphere
+        cell-center grid (use existing grid operators).
+    dphi_dy : jax.Array
+        Meridional geopotential gradient ∂Φ/∂y (m·s⁻²).
+    f : jax.Array
+        Coriolis parameter (s⁻¹) from iter-778.
+    f_floor : float
+        Lower bound on |f| (s⁻¹); default 1e-12.
+
+    Returns
+    -------
+    (u_g, v_g) : tuple of jax.Array
+        Geostrophic zonal and meridional wind (m/s).
+    """
+    f_abs = jnp.maximum(jnp.abs(f), f_floor)
+    f_safe = jnp.where(f >= 0, f_abs, -f_abs)
+    u_g = -dphi_dy / f_safe
+    v_g = dphi_dx / f_safe
+    return u_g, v_g
+
+
 def kinetic_energy_fv3(
     ua: jax.Array,
     va: jax.Array,

@@ -1195,6 +1195,46 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- **Iters 781-789 (compacted iter 790)**: rotation-stratification
+  length-scale hierarchy + dimensional-analysis closure triplet +
+  Ekman-spinup pair + iter-790 geostrophic wind.
+
+  | Iter | What                                              | Note                                                                |
+  |------|---------------------------------------------------|---------------------------------------------------------------------|
+  | 781  | ``rossby_radius_fv3``                             | L_R = N·H/|f|; synoptic mid-lat ≈ 1.37 Mm at 30°N                  |
+  | 782  | ``rhines_scale_fv3``                              | L_β = √(U/β); Rhines β-arrest; jet-spacing on rapidly rot. planets  |
+  | 783  | ``equatorial_rossby_radius_fv3``                  | L_eq = √(c/(2β)); Matsuno equatorial-wave trapping (Kelvin, MRG)    |
+  | 784  | ``gravity_wave_speed_fv3``                        | c = N·H baroclinic mode-1 phase speed; π-less convention            |
+  | 785  | ``froude_number_fv3``                             | Fr = U/c; subcritical/critical/supercritical regime                 |
+  | 786  | ``rossby_number_fv3``                             | Ro = U/(|f|·L); QG/semi-geo/inertial regime                         |
+  | 787  | ``burger_number_fv3``                             | B = (L_R/L)²; barotropic/QG/stratified regime — closes (Ro,Fr,B)   |
+  | 788  | ``ekman_layer_depth_fv3``                         | δ_E = √(2K_v/|f|); laminar Ekman BL depth                           |
+  | 789  | ``ekman_transport_fv3``                           | (M_x, M_y) = (τ_y, −τ_x)/(ρf); depth-integrated transport           |
+  | 790  | ``geostrophic_wind_fv3`` + this compaction        | V_g = (k̂×∇Φ)/f; sign-preserving f_floor; hemisphere correct        |
+
+  **QG length-scale hierarchy complete** (poles → equator):
+    * iter-781 L_R = N·H/|f|         — mid-lat synoptic-scale
+    * iter-782 L_β = √(U/β)          — Rhines β-arrest / jet spacing
+    * iter-783 L_eq = √(c/(2β))      — equatorial-wave trapping
+    * iter-784 c = N·H               — gravity-wave phase speed feeder
+
+  **Dimensional-analysis closure triplet (Ro, Fr, B)**:
+    * iter-785 Fr  — inertia/gravity (wave-breaking regime)
+    * iter-786 Ro  — inertia/rotation (QG validity)
+    * iter-787 B   — rotation/stratification balance
+    * QG ⇔ Ro ≪ 1 ∧ B ~ 1.
+
+  **Ekman-spinup pair**:
+    * iter-788 δ_E   — laminar boundary-layer depth
+    * iter-789 M_x,y — depth-integrated wind-stress transport
+    * iter-790 V_g   — geostrophic wind from ∇Φ (Sverdrup-balance closure)
+
+  All composing on iter-778 (Coriolis) + iter-780 (β).  All use
+  sign-preserving ``f_floor`` / ``beta_floor`` at the equator for
+  large-but-finite output rather than NaN.  Pure JAX, vmap-
+  compatible.  No new physical constants introduced.
+
+  Wired into iter-383 sweep: 344 → 354 modules.
 - **Iters 771-779 (compacted iter 780)**: stability stack +
   kinematic decomposition + planetary rotation helpers + iter-780
   β = df/dy.
@@ -4938,404 +4978,5 @@ is verifiable with unit tests in seconds rather than wall-time
 sweeps.  Users running the NH compressible-Euler 3D path now have
 the same cube-imprint defense as users running the PE 3D path.
 
-## Iter 781 — rossby_radius_fv3 (barotropic L_R = N·H/|f|)
-
-Added `rossby_radius_fv3(n_brunt, f, H, f_floor=1e-12)` to
-`grids/cubed_sphere.py`.  Computes:
-
-```
-L_R = N · H / max(|f|, f_floor)        [m]
-```
-
-Caller passes `N = √max(0, N²)` from iter-772 + `f` from iter-778.
-``f_floor`` clamp prevents div-by-0 at equator (default 1e-12 →
-L_R ≈ 6.3·10¹³ m).
-
-Physical interpretation:
-  * Synoptic mid-lat (N=0.01, H=10 km, 30°N |f|=Ω): L_R ≈ 1.37 Mm
-    (textbook synoptic-scale Rossby radius).
-  * Pole (|f|=2·Ω): L_R = N·H/(2·Ω); narrower than mid-lat.
-  * Equator: rotational constraint vanishes; equatorial-Rossby-
-    radius √(N·H/(2·β)) is the appropriate replacement and would
-    use iter-780 β.
-
-Used by: baroclinic-instability eddy length-scale predictions,
-model eddy-permitting/resolving criterion (Δx < L_R/4 ≡ "eddy
-resolving"), mesoscale energy spectra, Rhines transition scale
-to zonal jets.
-
-Test: `tests/test_fv3_rossby_radius_iter781.py` (7 tests: 30°N
-synoptic ≈ 1.37 Mm, equator floored finite, pole L_R = N·H/(2·Ω),
-monotone in N, monotone in H, full pipeline (θ, q, z, lat, H) →
-N² → N → f → L_R via iter-772 + iter-778 composition,
-3-D shapes + finite + positive).
-
-### Why this iteration was meaningful
-
-L_R is the canonical horizontal scale of stratified rotating
-flow.  It directly enters: (1) eddy-resolving model design (Δx <
-L_R/4); (2) baroclinic-instability theory (most unstable mode at
-wavenumber k ~ 1/L_R); (3) Rhines transition L_β = √(U/β) vs L_R
-ratio for jet formation; (4) mesoscale energy spectra in QG
-turbulence.  Composes iter-772 + iter-778 + iter-780 to close the
-rotation-stratification diagnostic suite.  Pure JAX, vmap-
-compatible.  No new physical constants introduced.
-
-## Iter 782 — rhines_scale_fv3 (L_β = √(U/β))
-
-Added `rhines_scale_fv3(u_eddy, beta, beta_floor=1e-15)` to
-`grids/cubed_sphere.py`.  Rhines (1975) transition scale:
-
-```
-L_β = √(U / max(|β|, beta_floor))     [m]
-```
-
-Below L_β: isotropic 2-D turbulence dominates.  Above L_β: the
-β-effect breaks isotropy → zonal banded jets and Rossby waves
-take over (the "Rhines β-arrest" of the inverse cascade).
-
-Sets jet-spacing scale on rapidly rotating planets (Jupiter,
-Saturn) and the meridional eddy-mixing length in QG turbulence
-theory.  ``beta_floor`` prevents div-by-0 at poles (β→0 there).
-
-Used by: jet-formation criterion in QG turbulence models, eddy-
-permitting ocean parameterization scales, planetary-rotation
-effects on cascade, mesoscale energy spectra.
-
-Composes iter-780 ``beta_plane_fv3``.
-
-Test: `tests/test_fv3_rhines_scale_iter782.py` (7 tests: 20 m/s
-+ equatorial β → 935 km, U=0 → L_β=0, monotone U, monotone β,
-pole floored, full iter-780 (lat=45°, U=20) → β → L_β ≈ 1.1 Mm
-composition, 3-D shapes + finite + non-negative).
-
-### Why this iteration was meaningful
-
-L_β is the canonical scale separating eddy turbulence from
-zonal-banded β-plane dynamics.  Critical for: (1) prediction of
-banded-jet formation on planetary atmospheres; (2) eddy-mixing
-length parameterization in GFDL-style ocean lateral-mixing
-schemes; (3) understanding the inverse-cascade arrest in QG
-turbulence (Maltrud-Vallis 1991 / Rhines 1975); (4) interpreting
-the L_β vs L_R hierarchy for jet vs eddy regime transitions.
-Together with iter-781 L_R, this closes the canonical
-length-scale pair for rotating stratified flow.  Pure JAX, vmap-
-compatible.  No new physical constants introduced.
-
-## Iter 783 — equatorial_rossby_radius_fv3 (L_eq = √(c/(2β)))
-
-Added `equatorial_rossby_radius_fv3(c_wave, beta,
-beta_floor=1e-15)` to `grids/cubed_sphere.py`.  Equatorial
-trapping length scale:
-
-```
-L_eq = √(c / (2·max(|β|, beta_floor)))     [m]
-```
-
-Complements iter-781 L_R = N·H/|f|, which diverges as f → 0 at
-the equator.  L_eq uses β (the leading-order rotational term on
-the equatorial β-plane) instead of f.
-
-Typical values:
-  * Atmospheric Kelvin wave (c=30 m/s, β_eq=2.29·10⁻¹¹): L_eq ≈ 810 km
-  * Tropical baroclinic mode 1 (c=60 m/s): L_eq ≈ 1145 km
-  * Ocean baroclinic mode 1 (c=2.7 m/s): L_eq ≈ 243 km
-
-Used by equatorial-wave dispersion analysis (Matsuno 1966
-spectrum: Kelvin, equatorial Rossby, mixed Rossby-gravity /
-Yanai, inertia-gravity), Madden-Julian Oscillation theory,
-El Niño coupled Kelvin-Rossby dynamics, equatorial-trapping
-diagnosis.
-
-Caller passes c_wave derived from N·H for baroclinic modes, or
-√(g·H_eff) for shallow-water external mode.
-
-Test: `tests/test_fv3_equatorial_rossby_radius_iter783.py` (7
-tests: atmospheric Kelvin ≈ 810 km, ocean baroclinic ≈ 243 km,
-c=0 → L=0, monotone c, monotone β, full iter-780 pipeline at
-equator, 3-D shapes + finite + non-negative).
-
-### Why this iteration was meaningful
-
-The mid-latitude L_R from iter-781 breaks down at the equator
-(f → 0).  L_eq fills the gap: it sets the Gaussian-trapping
-envelope width of the entire Matsuno equatorial-wave spectrum
-(Kelvin, Rossby, MRG, IG).  Critical for: (1) MJO theoretical
-length-scale predictions; (2) Pacific Niño 3.4 region Kelvin-
-wave propagation diagnostics; (3) tropical-channel model
-boundary-condition decisions (channel must be wider than several
-L_eq to avoid spurious reflection); (4) cross-equatorial mode
-analysis.  Together with iter-781 (mid-lat L_R), iter-782 (L_β),
-the QG length-scale hierarchy is now complete from poles to
-equator.  Pure JAX, vmap-compatible.  No new physical constants
-introduced.
-
-## Iter 784 — gravity_wave_speed_fv3 (c = N·H)
-
-Added `gravity_wave_speed_fv3(n_brunt, H)` to
-`grids/cubed_sphere.py`.  Internal gravity-wave phase speed:
-
-```
-c = max(N, 0) · H     [m/s]
-```
-
-Baroclinic mode-1 (equivalent-depth) phase speed; the π-less form
-matches iter-781 convention L_R = N·H/|f| ≡ c/|f|.  Callers
-wanting Matsuno eigenmode value should divide by π.
-
-Typical values:
-  * Atmospheric tropical (N=0.01, H=3 km): c ≈ 30 m/s
-  * Ocean baroclinic mode 1 (N=0.005, H=540 m): c ≈ 2.7 m/s
-  * Synoptic mid-lat (N=0.01, H=10 km): c ≈ 100 m/s
-
-Composes iter-781 / iter-783: caller computes c once via this
-helper, then passes c to both ``rossby_radius_fv3(c, f, 1)`` (or
-keeps the explicit N·H form there) and
-``equatorial_rossby_radius_fv3(c, β)``.  Avoids re-deriving the
-gravity-wave-speed scalar in both call sites.
-
-Test: `tests/test_fv3_gravity_wave_speed_iter784.py` (7 tests:
-atmospheric Kelvin c=30 m/s, ocean baroclinic c=2.7 m/s, N=0 →
-c=0, monotone in N and H, full pipeline (N, H, β_eq) → c → L_eq,
-identity check L_R = c/|f| matches iter-781 direct, 3-D shapes +
-finite + non-negative).
-
-### Why this iteration was meaningful
-
-Closes the c-derivation step in the length-scale stack: callers
-now compute c once via `gravity_wave_speed_fv3(N, H)` and feed
-the same c to both mid-lat (iter-781) and equatorial (iter-783)
-Rossby-radius helpers.  Eliminates inline `N·H` redundancy.
-Critical for: (1) baroclinic-mode decomposition diagnostics
-(Wunsch & Stammer 1997 oceanographic spectra); (2) Madden-Julian
-Oscillation Kelvin-wave c estimates; (3) gravity-wave-drag
-parameterization (uses c as critical-level filter); (4) eddy-
-permitting model design via L_R = c/|f|.  Pure JAX, vmap-
-compatible.  No new physical constants introduced.
-
-## Iter 785 — froude_number_fv3 (Fr = U/c)
-
-Added `froude_number_fv3(u_speed, c_wave, c_floor=1e-12)` to
-`grids/cubed_sphere.py`.  Dimensionless flow regime indicator:
-
-```
-Fr = max(U, 0) / max(c, c_floor)
-```
-
-Composes iter-784 ``gravity_wave_speed_fv3``: feed c = N·H to
-get Fr = U / (N·H).
-
-Regime interpretation:
-  * Fr < 1   — subcritical (long gravity waves can propagate
-               upstream; smooth-flow regime)
-  * Fr = 1   — critical (hydraulic jump / standing wave)
-  * Fr > 1   — supercritical (upstream blocking, wave breaking,
-               downslope-windstorm regime)
-
-Used by: Lott-Miller (1997) mountain-wave drag scheme (Fr-
-dependent breaking parameterization), downslope-windstorm
-forecasting (Fr > 1 in lee favors windstorms), hydraulic
-flow-regime selection in atmospheric blocking diagnostics,
-gravity-wave critical-level analysis.
-
-``c_floor`` prevents div-by-0 in unstratified columns (c→0).
-
-Test: `tests/test_fv3_froude_number_iter785.py` (7 tests:
-U=0 → Fr=0, subcritical U=10/c=30 → Fr=1/3, critical U=c=30
-→ Fr=1, supercritical U=50/c=30 → Fr=5/3, unstratified c=0
-floored finite, full iter-784 pipeline (U=20, N=0.01, H=3 km)
-→ c=30 → Fr=2/3, 3-D shapes + finite + non-negative).
-
-### Why this iteration was meaningful
-
-Fr is the key diagnostic for mountain-wave drag, downslope
-windstorm forecasting, and hydraulic-flow regime selection.
-Together with iter-784 c, this provides the full Fr =
-U/(N·H) computation in two named, vmap-compatible calls — vs
-the previous inline `u/(n*h)` derivation that lacked
-intermediate-variable visibility.  Closes the gravity-wave-
-regime diagnostic pair (c, Fr).  Pure JAX, vmap-compatible.
-No new physical constants introduced.
-
-## Iter 786 — rossby_number_fv3 (Ro = U/(|f|·L))
-
-Added `rossby_number_fv3(u_speed, L, f, fL_floor=1e-12)` to
-`grids/cubed_sphere.py`.  Dimensionless inertial vs Coriolis
-ratio:
-
-```
-Ro = max(U, 0) / max(|f|·L, fL_floor)
-```
-
-Regime interpretation:
-  * Ro ≪ 1   — quasi-geostrophic (synoptic mid-lat, ocean mesoscale)
-  * Ro ~ 1   — semi-geostrophic (jet streaks, fronts, ARs)
-  * Ro ≫ 1   — inertial (tornadoes, convection, TC eyewall)
-
-Distinct from iter-785 Fr (inertia/gravity); Ro is inertia/
-rotation.  Together (Fr, Ro) close the canonical dimensional-
-analysis pair for rotating-stratified flow regime selection.
-
-Composes iter-778 ``coriolis_parameter_fv3``: (U, L, lat) → f → Ro.
-
-Used by: regime-selection diagnostics (QG validity check),
-convective-vs-synoptic scale separation, ageostrophic-flow
-parameterizations, mesoscale-to-microscale model boundary
-design.
-
-Test: `tests/test_fv3_rossby_number_iter786.py` (7 tests:
-synoptic mid-lat Ro=0.1 (QG), tornado Ro=7000 (inertial), U=0
-→ Ro=0, monotone in U/L/f (each varied independently), equator
-floored finite, iter-778 pipeline at 45°N gives Ro ≈ 0.097,
-3-D shapes + finite + non-negative).
-
-### Why this iteration was meaningful
-
-Ro is the canonical regime-selection number: it tells you when
-a flow is QG (synoptic), semi-geostrophic (fronts/jets), or
-inertial (mesoscale/microscale).  Used everywhere from
-parameterization scheme selection to model-design choices.
-Together with iter-785 Fr, the dimensional-analysis pair
-(Ro, Fr) is complete — these two numbers classify any flow as
-{rotation, stratification, inertia}-dominated.  Pure JAX, vmap-
-compatible.  No new physical constants introduced.
-
-## Iter 787 — burger_number_fv3 (B = (L_R/L)²)
-
-Added `burger_number_fv3(L_R, L, L_floor=1e-6)` to
-`grids/cubed_sphere.py`.  Dimensionless Rossby-radius vs length-
-scale squared:
-
-```
-B = (L_R / max(L, L_floor))²
-```
-
-Regime interpretation:
-  * B ≪ 1   — barotropic (L ≫ L_R; rotation dominates)
-  * B ~ 1   — classical QG (L ~ L_R; geostrophic + thermal-wind
-              closure)
-  * B ≫ 1   — fully stratified (L ≪ L_R; non-rotating Boussinesq)
-
-Completes the (Ro, Fr, B) regime-selection triplet:
-  * iter-785 Fr = U/c        — inertia/gravity
-  * iter-786 Ro = U/(|f|·L)  — inertia/rotation
-  * iter-787 B  = (L_R/L)²   — rotation/stratification balance
-
-Quasi-geostrophy ⇔ Ro ≪ 1 AND B ~ 1.
-
-Composes iter-781 ``rossby_radius_fv3``: caller computes
-L_R = N·H/|f| then passes here.
-
-Used by: QG validity checks, baroclinic-instability mode
-selection (most unstable mode at B ~ 1), eddy-resolving model
-design (resolve features near B = 1), mesoscale parameterization
-regime detection.
-
-Test: `tests/test_fv3_burger_number_iter787.py` (7 tests:
-QG classical L_R=L=1000 km → B=1, stratified L_R/L=10 → B=100,
-barotropic L_R/L=0.1 → B=0.01, L=0 floored finite, monotone in
-L_R and L, full iter-781 pipeline at 30°N gives B ≈ 1.88 (near-
-QG), 3-D shapes + finite + non-negative).
-
-### Why this iteration was meaningful
-
-Closes the QG-closure dimensional-analysis triplet (Ro, Fr, B).
-This trio classifies any rotating-stratified flow into its
-canonical regime: B alone separates barotropic from QG from
-fully stratified; combined with Ro it isolates true QG (Ro ≪ 1,
-B ~ 1) from semi-geostrophic and inertial regimes.  Foundation
-of: baroclinic-instability theory, eddy-mixing parameter-
-izations, multi-scale model design.  Pure JAX, vmap-compatible.
-No new physical constants introduced.
-
-## Iter 788 — ekman_layer_depth_fv3 (δ_E = √(2K_v/|f|))
-
-Added `ekman_layer_depth_fv3(K_v, f, f_floor=1e-12)` to
-`grids/cubed_sphere.py`.  Laminar Ekman boundary-layer depth:
-
-```
-δ_E = √(2·max(K_v, 0) / max(|f|, f_floor))
-```
-
-Penetration depth of the steady, laminar Ekman spiral driven by
-surface stress with vertical eddy viscosity K_v.  Within
-0 < z < δ_E the spiral rotates with depth; below δ_E the
-boundary-layer effect vanishes.
-
-Typical values:
-  * Atmospheric PBL (K_v ≈ 10 m²/s, |f|=1e-4): δ_E ≈ 447 m
-  * Ocean mixed layer (K_v ≈ 0.01 m²/s, |f|=1e-4): δ_E ≈ 14 m
-
-Used by: surface-stress / wind-stress curl ocean spinup theory,
-Sverdrup-balance derivations, atmospheric PBL height baseline
-(the unstratified analog of iter-775 Ri_b-based PBL height),
-surface drag-coefficient calibration.
-
-Composes iter-778 ``coriolis_parameter_fv3``.
-
-Test: `tests/test_fv3_ekman_layer_depth_iter788.py` (7 tests:
-atmospheric PBL ≈ 447 m, ocean ML ≈ 14 m, K_v=0 → δ_E=0, monotone
-in K_v and |f|, equator floored finite, full iter-778 pipeline
-at 45°N gives δ_E ≈ 441 m, 3-D shapes + finite + non-negative).
-
-### Why this iteration was meaningful
-
-Ekman depth is the canonical analytic boundary-layer scale —
-the rotating-fluid analog of the molecular Stokes boundary
-layer.  Used in: (1) wind-stress curl → Sverdrup-balance ocean
-gyre theory; (2) surface-flux drag coefficient setup; (3)
-unstratified PBL height as null hypothesis vs iter-775 Ri_b-
-based height; (4) atmospheric Charney-Drazin boundary-layer
-filter for Rossby-wave propagation.  Pure JAX, vmap-compatible.
-No new physical constants introduced.
-
-## Iter 789 — ekman_transport_fv3 (M_x, M_y)
-
-Added `ekman_transport_fv3(tau_x, tau_y, f, rho=1025.0,
-f_floor=1e-12)` to `grids/cubed_sphere.py`.  Depth-integrated
-Ekman volume transport (m²/s):
-
-```
-M_x =  τ_y / (ρ·f)
-M_y = −τ_x / (ρ·f)
-```
-
-In Northern Hemisphere (f > 0) Ekman transport is 90° to the
-**right** of surface stress; in Southern Hemisphere (f < 0)
-transport is 90° to the **left**.
-
-Foundational for Sverdrup balance: ∇ × (τ/ρf) gives vertically
-averaged geostrophic flow.
-
-Used by: ocean wind-stress-curl Sverdrup spinup, equatorial
-upwelling (divergence of Ekman transport sets upwelling rate),
-atmospheric surface-momentum-flux budget, coastal-upwelling
-indices (Bakun index).
-
-Composes iter-778 ``coriolis_parameter_fv3``.
-
-``f_floor`` clamps |f| **preserving sign** — Ekman theory
-breaks down at equator (transport diverges); clamp keeps
-output large-but-finite rather than NaN.  Sign-preserving
-clamp via ``jnp.where(f >= 0, +f_abs, -f_abs)`` to maintain
-hemisphere direction.
-
-Test: `tests/test_fv3_ekman_transport_iter789.py` (7 tests:
-NH eastward stress → southward M_y, NH northward stress →
-eastward M_x, SH eastward stress → northward M_y (mirror NH),
-τ=0 → M=0, iter-778 pipeline at 45°N, equator floored finite,
-3-D shapes + finite + both components).
-
-### Why this iteration was meaningful
-
-Ekman transport is the canonical depth-integrated wind-stress
-response.  Used in: (1) Sverdrup-balance wind-driven ocean
-circulation (textbook gyre derivation: ∇ × M_Ekman = wind-stress
-curl); (2) equatorial upwelling (Ekman divergence at the
-equator drives w_up); (3) atmospheric surface-stress momentum
-budget; (4) Bakun-index coastal-upwelling forecasting.
-Together with iter-788 (Ekman depth δ_E), the Ekman-spinup
-diagnostic pair is complete.  Pure JAX, vmap-compatible.  No
-new physical constants introduced.
 
 
