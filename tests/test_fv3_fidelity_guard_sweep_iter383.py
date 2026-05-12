@@ -390,6 +390,7 @@ _GUARD_MODULES = (
     "test_fv3_relative_humidity_ice_iter800",        # iter-800 add
     "test_fv3_ice_supersaturation_iter801",          # iter-801 add
     "test_fv3_contrail_appleman_iter802",            # iter-802 add
+    "test_fv3_frost_point_iter803",                  # iter-803 add
 )
 
 

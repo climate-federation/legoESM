@@ -5614,6 +5614,55 @@ def dew_point_fv3(
     return t_dew_c + constants.T_freeze
 
 
+def frost_point_temperature_fv3(
+    p_pa: jax.Array,
+    q_sphum: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 803: frost-point temperature (Lawrence 2005 Magnus-ice).
+
+    Inverse of saturation-over-ice curve.  Closed-form Magnus
+    approximation (Lawrence 2005, BAMS):
+
+        γ      = ln(e / 6.112)
+        T_f_C  = 272.62 · γ / (22.46 − γ)
+        T_f_K  = T_f_C + 273.15
+
+    Valid range −80 °C ≤ T_f ≤ 0 °C.  Distinct from iter-767
+    ``dew_point_fv3`` (Magnus liquid).  For subfreezing air
+    T_frost > T_dew at the same q (e_sat_ice < e_sat_liquid).
+
+    The ice and liquid Magnus curves both pass through
+    e = 6.112 mb at T = T_freeze (0 °C), so T_frost(6.112) = T_dew
+    (6.112) = T_freeze exactly.
+
+    Used by: aviation icing forecasts (frost / hoar-frost
+    deposition needs T < T_frost), polar stratospheric cloud
+    (PSC) NAT/STS formation thresholds, cirrus cloud-base height
+    estimation (T_frost is where ice first saturates), satellite-
+    retrieval calibration (frost-point hygrometer reference).
+
+    Composes iter-766 ``vapor_pressure_from_q_fv3``.
+
+    Parameters
+    ----------
+    p_pa : jax.Array
+        Pressure (Pa).
+    q_sphum : jax.Array
+        Specific humidity (kg/kg).
+
+    Returns
+    -------
+    t_frost : jax.Array
+        Frost-point temperature (K).
+    """
+    p_mb = p_pa / 100.0
+    e = vapor_pressure_from_q_fv3(p_mb, q_sphum)
+    e_safe = jnp.maximum(1e-12, e)
+    gamma = jnp.log(e_safe / 6.112)
+    t_f_c = 272.62 * gamma / (22.46 - gamma)
+    return t_f_c + constants.T_freeze
+
+
 def relative_humidity_fv3(
     t: jax.Array,
     p_pa: jax.Array,

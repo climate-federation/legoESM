@@ -5114,6 +5114,47 @@ Together with iter-800 (RH_ice) and iter-801 (ISS), closes the
 Pure JAX, vmap-compatible.  No new physical constants introduced
 (−40 °C is the SA-1953 convention).
 
+## Iter 803 — frost_point_temperature_fv3 (Lawrence-2005 Magnus-ice)
+
+Added `frost_point_temperature_fv3(p_pa, q_sphum)` to
+`grids/cubed_sphere.py`.  Closed-form frost-point temperature
+(Lawrence 2005 BAMS approximation):
+
+```
+γ      = ln(e / 6.112)               (e in mb from iter-766)
+T_f_C  = 272.62 · γ / (22.46 − γ)
+T_f_K  = T_f_C + 273.15
+```
+
+Valid range −80 °C ≤ T_f ≤ 0 °C.  Distinct from iter-767
+``dew_point_fv3`` (Magnus liquid).  Both Magnus curves meet at
+e = 6.112 mb / T = T_freeze, so T_frost(6.112) = T_dew(6.112) =
+T_freeze exactly.  For subfreezing air at fixed q: T_frost > T_dew
+(since e_sat_ice < e_sat_liquid below 0 °C).
+
+Used by: aviation icing forecasts (hoar-frost deposition needs
+T < T_frost), polar stratospheric cloud (PSC) NAT/STS formation
+thresholds, cirrus cloud-base estimation (T_frost is where ice
+first saturates), satellite-retrieval calibration (frost-point
+hygrometer reference).
+
+Composes iter-766 ``vapor_pressure_from_q_fv3``.
+
+Test: `tests/test_fv3_frost_point_iter803.py` (6 tests: e=6.112 mb
+→ T_freeze, subfreezing T_frost > T_dew at same q, monotone in q,
+results in Lawrence-2005 validity range, iter-766 chain, 3-D
+shapes + finite).
+
+### Why this iteration was meaningful
+
+Closes the dew/frost-point pair: iter-767 T_dew (Magnus liquid)
++ iter-803 T_frost (Magnus ice).  Cold-air moisture diagnostics
+need T_frost rather than T_dew — radiosondes report frost-point
+hygrometer measurements below 0 °C, aviation icing uses
+T_frost, and PSC formation thresholds use frost-point depression.
+Pure JAX, vmap-compatible.  No new physical constants introduced
+(272.62, 22.46 are Lawrence-2005 ice-Magnus fit coefficients).
+
 
 
 
