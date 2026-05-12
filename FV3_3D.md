@@ -5188,6 +5188,49 @@ liquid) + iter-804 (T − T_frost, ice).  Together with iter-768
 diagnostics now cover both liquid and ice saturation states.
 Pure JAX, vmap-compatible.  No new physical constants introduced.
 
+## Iter 805 — static_stability_fv3 (S = −∂θ/∂p)
+
+Added `static_stability_fv3(theta, p)` to
+`grids/cubed_sphere.py`.  Pressure-coord static stability:
+
+```
+S = −∂θ/∂p     at layer midpoints  (K/Pa)
+```
+
+Pressure-coord equivalent of iter-772 ``brunt_vaisala_squared_fv3``
+(z-coord).  Sign convention:
+  * S > 0   — stable (θ↑ as p↓)
+  * S = 0   — neutral
+  * S < 0   — unstable
+
+Relation to N² via hydrostatic ∂p/∂z = −ρg:
+
+    N² = (g²·ρ / θ) · S
+
+Used by: QG omega equation (Holton 4th ed. eq. 6.30), Eady-
+model eigenvalue derivation (S enters baroclinic-instability
+dispersion relation), pressure-coord diagnostics (mass-coord
+ESM analyses, ERA5/MERRA2 isobaric-level diagnostics).
+
+Centered finite differences across adjacent layers; output at
+midpoints, shape ``(..., km−1)``.
+
+Test: `tests/test_fv3_static_stability_iter805.py` (6 tests:
+stable θ↑↓p → S>0, unstable → S<0, neutral → S=0, 3-D shapes
+km→km-1, finite, same sign as iter-772 N² in hydrostatic-
+consistent stable column).
+
+### Why this iteration was meaningful
+
+Static stability in pressure coords (S = −∂θ/∂p) is the QG-
+omega-equation's primary stability parameter and the Eady-model
+input.  Many isobaric-coord reanalysis diagnostics (jet-stream
+analyses, QG vertical motion, frontogenesis Q-vectors) use S
+directly rather than the z-coord N².  Together with iter-772
+(N²) the static-stability pair (z, p-coord) is complete.
+Pure JAX, vmap-compatible.  No new physical constants
+introduced.
+
 
 
 

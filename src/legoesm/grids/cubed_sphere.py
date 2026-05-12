@@ -5379,6 +5379,55 @@ def brunt_vaisala_squared_fv3(
     return constants.g * dtheta / (dz * theta_v_mid)
 
 
+def static_stability_fv3(
+    theta: jax.Array,
+    p: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 805: pressure-coord static stability parameter.
+
+        S = − ∂θ/∂p     at layer midpoints
+
+    Pressure-coordinate equivalent of iter-772 ``brunt_vaisala_squared_fv3``
+    (z-coord): in stable stratification, θ increases with height
+    (i.e. as p decreases), so ``−∂θ/∂p > 0`` ⇒ S > 0.
+
+    Computed via centered finite differences across adjacent
+    layers; output at layer midpoints, shape ``(..., km−1)``.
+
+    Sign convention:
+      * S > 0   — stable (θ increases as p decreases)
+      * S = 0   — neutral
+      * S < 0   — unstable
+
+    Used by: QG omega equation (Holton 4th ed. eq. 6.30),
+    Eady-model eigenvalue derivation (S enters baroclinic-
+    instability dispersion relation), pressure-coord
+    diagnostics (mass-coord ESM analyses, ERA5 reanalysis
+    isobaric-level diagnostics).
+
+    Relation to N² (iter-772): N² = (g²·ρ/θ)·S  via
+    hydrostatic ∂p/∂z = −ρg.
+
+    Vertical axis last; ``θ`` and ``p`` surface→top oriented
+    (pressure typically decreasing).
+
+    Parameters
+    ----------
+    theta : jax.Array, shape (..., km)
+        Potential temperature (K).
+    p : jax.Array, shape (..., km)
+        Pressure (Pa) at the same levels.
+
+    Returns
+    -------
+    S : jax.Array, shape (..., km−1)
+        Static stability ``−∂θ/∂p`` (K/Pa).
+    """
+    dtheta = theta[..., 1:] - theta[..., :-1]
+    dp = p[..., 1:] - p[..., :-1]
+    return -dtheta / dp
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

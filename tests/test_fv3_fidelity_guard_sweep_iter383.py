@@ -392,6 +392,7 @@ _GUARD_MODULES = (
     "test_fv3_contrail_appleman_iter802",            # iter-802 add
     "test_fv3_frost_point_iter803",                  # iter-803 add
     "test_fv3_frost_point_depression_iter804",       # iter-804 add
+    "test_fv3_static_stability_iter805",             # iter-805 add
 )
 
 
