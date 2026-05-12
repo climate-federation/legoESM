@@ -109,6 +109,7 @@ _GUARD_MODULES = (
     "test_pad_halo_4d_monotone_clip_iter490",        # iter-490 add
     "test_pad_halo_4d_monotone_clip_robustness_iter491",  # iter-491 add
     "test_nh_duogrid_with_monotone_clip_iter492",    # iter-492 add
+    "test_nh_duogrid_comprehensive_clip_iter493",    # iter-493 add
 )
 
 

@@ -998,6 +998,27 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 493: comprehensive clip propagation refutes iter-492
+  "incomplete plumbing" hypothesis.  Patched 4 ``pad_halo_4d``
+  import aliases simultaneously (compressible_euler_cdgrid +
+  operators_3d + operators_cdgrid + operators_fc):
+    no clip:   edge ratio 3.391×
+    with clip: edge ratio 3.341×  (-1.5%)
+  STILL only 1.5% reduction.  Refutes the iter-492 hypothesis
+  that more comprehensive plumbing would help significantly.
+  **Real conclusion**: ``monotone_clip`` at the halo level is
+  NOT the dominant fix for the dycore edge ratio.  iter-491's
+  76% overshoot was on random noise; dycore intermediate
+  fields are smoother in practice (random noise gets damped
+  fast by hyperdiff/Laplacian smoothing).  The iter-489
+  corner-cell overshoot is real but ITS DOWNSTREAM IMPACT IS
+  SMALLER than predicted from raw-halo measurements.  Closes
+  the duogrid investigation: bug is real, 5× edge ratio is
+  persistent, mitigations exist (iter-466 50% + iter-482 60%
+  via flag/coefficient tuning), but a root-cause halo fix at
+  pad_halo_4d level only buys 1-2%.  Below 1.42× likely
+  requires deeper dycore changes.  1/1 in 134 s.  Wired into
+  iter-383 sweep (now 86).
 - Iter 492: end-to-end test of iter-490 ``monotone_clip`` in
   NH dycore via monkey-patch of ``_pad_halo_4d_module``:
     no clip:   edge ratio 3.470×
