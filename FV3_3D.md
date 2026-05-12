@@ -5106,6 +5106,45 @@ rise of CAPE/CIN as primary metrics — they remain useful single-
 number summaries.  Pure JAX, vmap-compatible.  No new physical
 constants introduced.
 
+## Iter 812 — total_totals_fv3 (Miller 1972)
+
+Added `total_totals_fv3(t850, td850, t500)` to
+`grids/cubed_sphere.py`.  Miller (1972) Total Totals:
+
+```
+TT = (T_850 + T_d850) − 2·T_500
+   = VT + CT
+```
+
+Decomposition: VT = T_850 − T_500 (Vertical Totals, mid-trop
+lapse rate); CT = T_d850 − T_500 (Cross Totals, low-level
+moisture vs mid-trop T).  Unit-invariant under K↔°C shift
+(2·T_freeze cancels).
+
+NWS/SPC thresholds:
+  * TT < 44      — no thunderstorms
+  * 44 ≤ TT < 50 — isolated
+  * 50 ≤ TT < 56 — scattered (severe possible)
+  * 56 ≤ TT < 60 — numerous severe
+  * TT ≥ 60      — very high tornado risk
+
+Test: `tests/test_fv3_total_totals_iter812.py` (5 tests: analytic
+TT=80 for severe sample, K↔°C invariance, ↓T_500 → ↑TT, ↑T_d850
+→ ↑TT, 3-D shapes + finite).
+
+### Why this iteration was meaningful
+
+Closes the **classic severe-storm index triplet (LI, K, TT)**:
+  * iter-810 LI  — Galway 1956
+  * iter-811 K   — George 1960
+  * iter-812 TT  — Miller 1972
+
+All three still appear on NWS/SPC convective-outlook charts
+alongside the modern CAPE/CIN pair (iter-808/809).  Together
+the five form a complete operational deep-convection
+diagnostic kit.  Pure JAX, vmap-compatible.  No new physical
+constants introduced.
+
 
 
 

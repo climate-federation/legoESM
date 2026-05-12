@@ -5727,6 +5727,57 @@ def k_index_fv3(
     return (t850 - t500) + td850 - (t700 - td700)
 
 
+def total_totals_fv3(
+    t850: jax.Array,
+    td850: jax.Array,
+    t500: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 812: Miller (1972) Total Totals index.
+
+        TT = (T_850 + T_d850) − 2·T_500
+           = VT + CT
+
+    Decomposition:
+      * VT = T_850 − T_500     (Vertical Totals — mid-trop lapse rate)
+      * CT = T_d850 − T_500    (Cross Totals — low-level moisture vs
+                               mid-trop temperature)
+
+    Unit-invariant under K ↔ °C shift since both temperatures and
+    T_500 enter via differences after expansion:
+        TT_K = TT_C + (T_freeze + T_freeze − 2·T_freeze) = TT_C.
+
+    NWS/SPC thresholds:
+      * TT < 44      — no thunderstorms
+      * 44 ≤ TT < 50 — isolated
+      * 50 ≤ TT < 56 — scattered (severe possible)
+      * 56 ≤ TT < 60 — numerous severe
+      * TT ≥ 60      — very high tornado risk
+
+    Used by: NWS/SPC convective outlooks, ECMWF severe-storm
+    products, climatological severe-storm-frequency studies.
+
+    Complements iter-810 LI + iter-811 K — together (LI, K, TT)
+    span the classic pre-CAPE-era thunderstorm-instability index
+    triplet still in routine operational use.
+
+    Parameters
+    ----------
+    t850, td850 : jax.Array
+        Temperature and dew point at 850 mb.
+    t500 : jax.Array
+        Temperature at 500 mb.
+
+    All inputs in K (or °C — TT itself is unit-invariant under the
+    K/°C shift).
+
+    Returns
+    -------
+    tt : jax.Array
+        Total Totals index.
+    """
+    return t850 + td850 - 2.0 * t500
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

@@ -399,6 +399,7 @@ _GUARD_MODULES = (
     "test_fv3_cin_column_iter809",                   # iter-809 add
     "test_fv3_lifted_index_iter810",                 # iter-810 add
     "test_fv3_k_index_iter811",                      # iter-811 add
+    "test_fv3_total_totals_iter812",                 # iter-812 add
 )
 
 
