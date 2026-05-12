@@ -4515,6 +4515,45 @@ def range_check_fv3(
     return bad_range, qmin, qmax
 
 
+def omega_diagnostic_fv3(
+    w: jax.Array,
+    delp: jax.Array,
+    delz: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 725: pressure vertical velocity ω = dp/dt diagnostic.
+
+    Hydrostatic-limit approximation used by FV3 in quasi-static
+    atmospheres:
+
+        ρ      = −delp / (g · delz)     (FV3 delz < 0 ⇒ ρ > 0)
+        ω      = −ρ · g · w = w · delp / delz
+
+    Sign convention: ω > 0 means descending air (Lagrangian pressure
+    increases), ω < 0 means ascending air.
+
+    Exact in the quasi-hydrostatic limit where ∂p/∂t and horizontal
+    advection are small.  FV3's true omga (dyn_core.F90:1642) uses
+    ``omga = (pe[k+1] − pem[k+1]) · rdt`` which is the full
+    Lagrangian derivative including all three terms; this diagnostic
+    captures only the dominant w·∂p/∂z piece.
+
+    Parameters
+    ----------
+    w : jax.Array, shape (..., km)
+        Vertical velocity (m/s).
+    delp : jax.Array, shape (..., km)
+        Pressure thickness (Pa, positive).
+    delz : jax.Array, shape (..., km)
+        Layer thickness (NEGATIVE in FV3).
+
+    Returns
+    -------
+    omega : jax.Array, shape (..., km)
+        Pressure vertical velocity (Pa/s).
+    """
+    return w * delp / delz
+
+
 def compute_hybrid_pressure_fv3(
     ak: jax.Array,
     bk: jax.Array,

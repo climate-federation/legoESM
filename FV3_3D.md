@@ -1195,6 +1195,33 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 725: **``omega_diagnostic_fv3``** — pressure vertical velocity.
+
+  Hydrostatic-limit ω = dp/dt:
+
+      ρ      = −delp / (g · delz)              (FV3 delz < 0)
+      ω      = −ρ · g · w = w · delp / delz
+
+  Sign convention: ω > 0 means descending air (pressure increasing
+  Lagrangian), ω < 0 means ascending air.
+
+  Captures dominant w·∂p/∂z term in the omega definition.  FV3's
+  exact omga (dyn_core.F90:1642) uses full Lagrangian
+  ``(pe[k+1] − pem[k+1])·rdt`` including ∂p/∂t + advection;
+  this diagnostic is the quasi-hydrostatic approximation suitable
+  for output snapshots.
+
+  Pairs with iter-693 nh_total_energy KE term + iter-679
+  interpolate_vertical for pressure-level diagnostics.
+
+  Tests (5/5 in <1 s):
+  1. w=0 → ω=0.
+  2. w<0 (descending) → ω>0.
+  3. Known density at delp=1e4 Pa, delz=-1000 m, w=0.01 → analytic ω.
+  4. 3-D input → 3-D output.
+  5. No NaN/Inf.
+
+  Wired into iter-383 sweep (now 289).
 - Iter 724: **``compute_hybrid_pressure_fv3``** — hybrid σ-pressure setup.
   Faithful JAX port of FV3's hybrid-coord pressure pattern
   (test_cases.F90:2941, 5274, 5370, 5479; fv_restart; IC ingestion):
