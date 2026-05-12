@@ -5276,6 +5276,41 @@ q_sat=0 limit), this gives the full parcel-thermodynamic
 trajectory.  Pure JAX, vmap-compatible.  No new physical
 constants introduced.
 
+## Iter 807 — parcel_buoyancy_fv3 (b = g·Δθ_v/θ_v_env)
+
+Added `parcel_buoyancy_fv3(theta_v_parcel, theta_v_env,
+theta_v_floor=1e-12)` to `grids/cubed_sphere.py`:
+
+```
+b = g · (θ_v_parcel − θ_v_env) / θ_v_env
+```
+
+Lagrangian-parcel vertical acceleration relative to env.
+
+Used by: CAPE/CIN parcel-ascent (∫_LFC^EL b dz = CAPE;
+∫_parcel^LFC b dz = CIN), bulk Richardson derivation, convective
+trigger parameterizations, gravity-wave generation diagnostics
+from convection.
+
+Caller supplies pre-computed θ_v (canonically from
+``_shared.virtual_temperature``) — buoyancy is defined on
+virtual θ to capture moisture-driven density contrast.
+
+Test: `tests/test_fv3_parcel_buoyancy_iter807.py` (5 tests:
+neutral → b=0, warm parcel → b>0 with analytic value
+g·Δθ_v/θ_v_env, cool parcel → b<0, ±Δ symmetric magnitude,
+3-D shapes + finite).
+
+### Why this iteration was meaningful
+
+Parcel buoyancy is the integrand of CAPE — the most-quoted
+diagnostic of deep-convection forecasting and severe-weather
+prediction.  Together with iter-806 (Γ_m moist-adiabat),
+iter-769 (LCL state), and iter-720 (saturation-blend), the
+**convective parcel kit is now complete**: LCL state →
+moist-adiabat ascent → buoyancy → CAPE.  Pure JAX, vmap-
+compatible.  No new physical constants introduced.
+
 
 
 

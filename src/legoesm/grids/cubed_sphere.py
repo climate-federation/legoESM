@@ -5478,6 +5478,52 @@ def lapse_rate_moist_fv3(
     return num / den
 
 
+def parcel_buoyancy_fv3(
+    theta_v_parcel: jax.Array,
+    theta_v_env: jax.Array,
+    theta_v_floor: float = 1e-12,
+) -> jax.Array:
+    """FV3_3D iter 807: parcel buoyancy from virtual-θ contrast.
+
+        b = g · (θ_v_parcel − θ_v_env) / θ_v_env
+
+    Local vertical acceleration of a Lagrangian parcel relative
+    to its environment.  Positive b → upward acceleration (warmer
+    parcel rises); negative → downward acceleration (cooler
+    parcel sinks).
+
+    Used by: CAPE/CIN parcel-ascent integration (∫ b dz from LFC
+    to EL = CAPE; from parcel source to LFC = CIN), bulk Richardson
+    derivation (Ri_b = g·Δθ_v·Δz/(θ_v·|V|²)), convective trigger
+    parameterizations, gravity-wave generation from convection.
+
+    Caller supplies pre-computed θ_v (from
+    ``_shared.virtual_temperature``) — buoyancy is canonically
+    defined on virtual θ to capture moisture-driven density
+    contrast.
+
+    ``theta_v_floor`` prevents div-by-0 in degenerate columns
+    (negligible θ_v unphysical).
+
+    Parameters
+    ----------
+    theta_v_parcel : jax.Array
+        Parcel virtual potential temperature (K).
+    theta_v_env : jax.Array
+        Environment virtual potential temperature (K).
+    theta_v_floor : float
+        Lower bound on θ_v_env (K); default 1e-12.
+
+    Returns
+    -------
+    b : jax.Array
+        Buoyancy acceleration (m/s²).
+    """
+    return constants.g * (theta_v_parcel - theta_v_env) / jnp.maximum(
+        theta_v_env, theta_v_floor
+    )
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,
