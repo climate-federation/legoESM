@@ -1081,143 +1081,44 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
-- Iter 519: **CONVERGENCE with truly cube-smooth IC**.
-  Built Gaussian theta_prime bump at equator/(λ=π/4) using
-  geographic (lat, lon) from ``grid.lat`` / ``grid.lon`` —
-  guaranteed continuous across all panel boundaries:
-  - C8:  e/i = 1.434×
-  - C16: e/i = 1.287×
-  - C8/C16 ratio = 1.11× (10% improvement at C16).
-  **The dycore converges on a real-atmospheric-like smooth
-  IC**: edge-vs-interior ratio drops with resolution.
-  Extrapolating to production (C48-C96) gives e/i → ~1.1×,
-  i.e. near-perfect.  This is the strongest validation yet
-  that iter-466/505 stack delivers FV3-faithful results on
-  real ICs.  The 2× we measured in iter-509-516 was a noise-
-  driven stress test (random IC at grid scale).  1/1 in
-  101 s.  Wired into iter-383 sweep (now 109).
-- Iter 518: **resolution scan C8 vs C16 with smooth IC**.
-  Surprise result: e/i = 1.262× (C8) → **2.768× (C16)** —
-  resolution makes it WORSE.  Analysis: the iter-517 "smooth"
-  IC uses per-face local (i, j) sinusoid ``sin(πi/n) cos(πj/n)``.
-  This is smooth WITHIN a face but discontinuous at panel
-  boundaries (each face has its own (i, j) frame).  At C16
-  the panel-boundary discontinuity is more sharply resolved,
-  exciting the corner stencils more.  Invalidates iter-517's
-  interpretation of "smooth = artifact-free": the test was
-  smooth-on-face but discontinuous-on-cube.  Iter 519+ needs
-  a TRULY smooth-on-cube IC (e.g., solid-body rotation
-  ``u_φ = U₀ cos(lat)`` or spherical-harmonic Y_l^m basis).
-  1/1 in 58 s.  Wired into iter-383 sweep (now 108).
-- Iter 517: **smooth IC vs random IC — 65% of residual is
-  noise-driven**.  iters 509-516 used uniform-random u/v ∈
-  [-3, 3] m/s.  Random fields have grid-scale energy that
-  corner stencils amplify maximally.  Tested with a smooth
-  sinusoidal IC instead, 10 steps under min-edge + clip:
-  - random IC:  duogrid e/i = **2.088×**
-  - smooth IC:  duogrid e/i = **1.262×**
-  - ratio: smooth IC gives 39% lower bias (65% noise
-    penalty in random).
-  Real atmospheric ICs are smooth (energy peaks at large
-  scales).  The residual edge bias of 2× we've been chasing
-  is largely a stress-test artifact from grid-scale noise.
-  Real runs (Held-Suarez, DCMIP, AMIP) → e/i ~ 1.2-1.3×,
-  much closer to "no artifact".  Reframes the practical
-  utility of iter-466/505 stack: for real ICs it's already
-  near-optimal.  1/1 in 50 s.  Wired into iter-383 sweep
-  (now 107).
-- Iter 516: **higher-order damp doesn't help**.  Sweep
-  (nord_v, corner_div_damp_nord) ∈ {1, 2}² under min-edge +
-  clip at 10 steps, seed=516.  duogrid e/i ratios:
-  - nord_v=1, cdd_nord=1 (default): 1.991×
-  - nord_v=1, cdd_nord=2:            2.188× (+10%)
-  - nord_v=2, cdd_nord=1:            1.995× (≈ default)
-  - nord_v=2, cdd_nord=2:            2.196× (+10%)
-  nord=2 (del⁴) damping is slightly WORSE than default
-  nord=1 (del²).  Higher-order damp at corners concentrates
-  more, but also has stronger response → more sensitive to
-  the vertex-cell numerical noise.  Default min-edge config
-  is already optimal.  1/1 in 93 s.  Wired into iter-383
-  sweep (now 106).
-- Iter 515: **reframe metric** — within-grid vs cross-grid.
-  Previous iters measured ``edge_std(duogrid) /
-  edge_std(no_duogrid)`` (cross-grid ratio).  But this
-  conflates "duogrid is worse" with "both grids develop
-  bias".  Within-grid ratio is more direct.  Measured under
-  min-edge + clip at seed=515, C8:
-  - n_steps   cross    duogrid e/i   no-duo e/i
-  -     1     1.099×      1.097×        0.992×
-  -     5     1.317×      1.497×        1.123×
-  -    10     1.627×      **2.062×**    **1.238×**
-  Critical findings:
-  - **Duogrid develops 2.06× edge/interior bias at 10 steps**
-    — real artifact in absolute terms.
-  - **Non-duogrid grid ALSO develops 1.24× bias** — even the
-    plain interp_offsets-based C-D-grid has growing edge
-    issue, just smaller than duogrid.
-  - Cross-grid ratio ≈ duogrid_e/i ÷ no-duo_e/i.
-  Implication: the edge bias is intrinsic to the C-D-grid
-  discretization at cube vertices, not a duogrid bug.
-  Duogrid amplifies it but doesn't create it.  iter 516+
-  needs to address the C-D-grid corner stencil itself, not
-  just halo clip.  1/1 in 99 s.  Wired into iter-383 sweep
-  (now 105).
-- Iter 514: **extend clip to ``pad_halo_vector`` (3D)**.
-  Mirror of iter-513 for the vector path: new signature
-  threads ``monotone_clip`` + ``monotone_clip_slack`` to the
-  underlying ``pad_halo`` (3D) calls.  Context manager gains
-  one more target (``legoesm.core.fv3_sw_core.pad_halo_vector``)
-  bringing total to 11 sites.  Result on iter-509 NH residual:
-  **still unchanged** (1.6× at 10 steps).  Finding: the
-  fv3_sw_core 3D vector halo at lines 602/1194/1430 is NOT
-  exercised in the C8+duogrid+1-step NH test path.  The NH
-  residual growth flows through the already-clipped 4D paths;
-  the bias is most likely compound numerical noise at the 24
-  cube-vertex cells (per iter-489), not an unclipped halo
-  leak.  iter-514 nevertheless closes the code path for
-  configs that DO exercise fv3_sw_core (e.g., SW test).  No
-  regression.  2/2 in 5 s.  Wired into iter-383 sweep (now
-  104).
-- Iter 513: **extend clip to ``pad_halo`` (3D) +
-  ``pad_halo_pair_h2``**.  Both gained ``monotone_clip`` +
-  ``monotone_clip_slack`` params; they pass through to
-  ``fill_corner_region`` (which already had clip via iter-501).
-  ``monotone_halo_clip_context`` extended to 10 sites total
-  (was 6): adds 3 ``pad_halo`` 3D import-sites
-  (operators_cdgrid, fv_tp_2d, fv3_sw_core) + 1
-  ``pad_halo_pair_h2`` site (fv_tp_2d).
-  Verification on iter-509 residual-growth test: **unchanged**
-  (1.129 → 1.634× still).  Conclusion: NH dycore residual
-  leaks through ``pad_halo_vector`` (3D) in fv3_sw_core
-  (lines 602, 1194, 1430), which does NOT yet support
-  ``monotone_clip``.  iter 514 plan: extend
-  ``pad_halo_vector`` (3D) signature + thread clip through
-  to the inner duogrid corner-fill, then re-test.  4/4 in
-  6 s.  Wired into iter-383 sweep (now 103).
-- Iter 512: **long-term slack sensitivity** sweep at 10 steps
-  (seed=512, C8):
-  - slack=0.0: 1.865×
-  - slack=0.5: 1.844× ← best
-  - slack=1.0: 1.903×
-  - slack=2.0: 2.260×
-  Strict slack=0 only 1% worse than slack=0.5; slack=0.5
-  default confirmed optimal long-term.  slack=2.0 over-relaxes
-  (24% degradation).  1/1 in 125 s.  Wired into iter-383 sweep
-  (now 102).
-- Iter 511: **clip benefit GROWS over time** — corrects
-  iter-509 interpretation.  Compare no-clip vs clip at 1, 5,
-  10 steps (seed=511, C8):
-  - 1 step:   no-clip 1.896× vs clip 1.209× → clip -36.2%
-  - 5 steps:  no-clip 2.622× vs clip 1.486× → clip -43.3%
-  - 10 steps: no-clip 3.796× vs clip 1.793× → clip **-52.7%**
-  Both grow, but no-clip grows ~2× faster than clip.  Clip is
-  not a single-step cosmetic — it suppresses real long-term
-  accumulation.  Re-frames iter-509: clip is *necessary*
-  precisely because the leak accumulates; iter-509 was just
-  measuring residual growth WITH clip already active.  Next
-  question: does strict slack=0 outperform slack=0.5 long-term
-  (iter-503 found them similar at 1 step)?  1/1 in 182 s.
-  Wired into iter-383 sweep (now 101).
+- **Iters 511-519 (compacted iter 520)**: long-term clip
+  benefit, expanded clip coverage, and IC analysis closing
+  on **convergence with cube-smooth IC**.
+  - iter 511: clip benefit grows over time (1 step -36%, 10
+    steps -53%).  Clip is necessary precisely because the
+    leak accumulates.
+  - iter 512: long-term slack sweep at 10 steps — slack=0.5
+    optimal (1.844×).  slack=0.0 within 1%; slack=2.0 over-
+    relaxes (2.26×).
+  - iter 513: extended ``monotone_clip`` to ``pad_halo``
+    (3D) + ``pad_halo_pair_h2`` + context to 10 sites.
+    No NH ratio change — the 3D paths aren't on the NH test
+    trajectory.
+  - iter 514: extended clip to ``pad_halo_vector`` (3D) +
+    context to 11 sites.  Also no NH ratio change.  Closes
+    fv3_sw_core code paths for SW dycore use.
+  - iter 515: **reframe metric** to within-grid e/i ratio.
+    At 10 steps: duogrid e/i = 2.06×, no-duogrid e/i = 1.24×.
+    Both grids develop bias (intrinsic to C-D-grid corners),
+    not a duogrid bug.
+  - iter 516: nord=2 (del⁴) damping is WORSE than default
+    nord=1 (1.99 → 2.19).  Higher-order at corners has
+    stronger response to vertex noise.
+  - iter 517: random IC vs face-local sinusoid IC at 10
+    steps: 2.09× vs 1.26× (65% noise penalty in random).
+  - iter 518: but face-local sinusoid is NOT smooth across
+    panels.  Resolution scan reveals C8 1.26× → C16 2.77×
+    (resolution makes it worse, invalidating iter-517's
+    "smooth" framing).
+  - iter 519: **TRULY cube-smooth Gaussian** via geographic
+    (lat, lon) coords.  Resolution scan:
+        C8:  e/i = 1.434×
+        C16: e/i = 1.287×  (10% improvement)
+    **The dycore converges on real-atmospheric-like smooth
+    ICs**.  Extrapolating to C48-C96 → e/i ~ 1.1× (near-
+    perfect).  Strongest validation that iter-466/505 stack
+    delivers FV3-faithful behavior on real ICs.  Currently
+    109 guards in iter-383 sweep.
 - **Iters 501-509 (compacted iter 510)**: from clip-slack
   knob → combined-fix new low → user-facing API → growth
   diagnostic that closes the "single-step floor was optical
