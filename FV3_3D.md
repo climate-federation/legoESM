@@ -1195,292 +1195,34 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
-- Iter 669: **FV3 ``dcmip16_tc_temperature`` + ``dcmip16_tc_pressure``**.
-  Faithful JAX ports of FV3 DCMIP16 TC profiles
-  (tools/test_cases.F90:7137-7167).  Pairs with iter-666 TC humidity
-  for full TC IC stack.
-
-  TC temperature:
-
-      z > zt:  T = Tvt
-      else:
-          Tv    = Tv0 - lapse·z
-          rfac  = (r/rp)^1.5
-          term1 = g·zp²·(1 - (pb/dp)·exp(rfac + (z/zp)²))
-          term2 = 2·R_d·Tv·z
-          T     = Tv·(1 + 1/(1 + term2/term1) - 1)
-
-  TC pressure:
-
-      z ≤ zt:
-          p_base = pb·exp(g/(R_d·λ)·ln((Tv0-λ·z)/Tv0))
-          p = p_base - dp·exp(-rfac - (z/zp)²)·exp(g/(R_d·λ)·ln(...))
-      z > zt:
-          p = ptt·exp(g·(zt-z)/(R_d·Tvt))
-
-  Default DCMIP16 TC constants: Tv0=302.15·(1+0.608·q0), q0=0.021,
-  lapse=0.007, zt=15000, rp=282000, zp=7000, pb=101500, dp=1115.
-
-  Used in FV3 DCMIP16 Test 411 (TC).  With iter-666/669/iter-662
-  (rankine_vortex): complete TC IC stack.
-
-  Tests (6/6 in 1 s):
-  1. T far-field finite, positive.
-  2. T stratosphere = Tvt.
-  3. p surface ≈ pb at far-field.
-  4. p monotonic in z.
-  5. p drops at TC center (r=0).
-  6. T, p finite on random (z, r).
-
-  Wired into iter-383 sweep (now 236).
-- Iter 668: **FV3 ``dcmip16_bc_uwind`` + ``dcmip16_bc_sphum``**.
-  Faithful JAX ports of FV3 DCMIP16 BC zonal wind + humidity
-  (tools/test_cases.F90:6807-6852).  Pairs with iter-667 BC T/p.
-
-  ``dcmip16_bc_uwind(z, T, lat)`` — baroclinic wind:
-
-      Tir = z·exp(-(z·g/(b·R_d·T0))²)
-      Ti2 = 0.5·(K+2)·(Te-Tp)/(Te·Tp)·Tir
-      UU  = g·K/R · Ti2 · (cos^(K-1) - cos^(K+1)) · T
-      u   = -Ω·R·cos(lat) + √((Ω·R·cos(lat))² + R·cos(lat)·UU)
-
-  ``dcmip16_bc_sphum(p, ps, lat)`` — humidity profile:
-
-      eta = p / ps
-      if p > ptrop:
-          q = q0·exp(-(lat/phiW)⁴)·exp(-((eta-1)·p0/pw)²)
-      else:
-          q = qt
-
-  Default DCMIP16 BC constants: q0=0.018, qt=1e-12, phiW=2π/9,
-  pw=34000, ptrop=10000 Pa.
-
-  With iter-667 + iter-668: complete IC stack for DCMIP16 Test
-  410 (BC test).
-
-  Tests (6/6 in 1 s):
-  1. u(z=0, equator) = 0.
-  2. u finite across tropospheric range.
-  3. u positive (eastward) jet in midlatitudes.
-  4. q(surface, equator) ≈ q0 = 0.018.
-  5. q(stratosphere) = qt = 1e-12.
-  6. q finite, positive everywhere.
-
-  Wired into iter-383 sweep (now 235).
-- Iter 667: **FV3 ``dcmip16_bc_temperature`` + ``dcmip16_bc_pressure``**.
-  Faithful JAX ports of FV3 DCMIP16 baroclinic-instability test
-  profiles (tools/test_cases.F90:6774-6805).
-
-  Jablonowski-Williamson BC temperature:
-
-      IT = cos(lat)^K - K/(K+2)·cos(lat)^(K+2)
-      zsc = z·g/(b·R_d·T0)
-      Tr = (1 - 2·zsc²)·exp(-zsc²)
-      T1 = (1/T0)·exp(λ·z/T0) + (T0-Tp)/(T0·Tp)·Tr
-      T2 = 0.5·(K+2)·(Te-Tp)/(Te·Tp)·Tr
-      T  = 1/(T1 - T2·IT)
-
-  BC pressure (companion):
-
-      Tir = z·exp(-(z·g/(b·R_d·T0))²)
-      Ti1 = (1/λ)·(exp(λ·z/T0) - 1) + Tir·(T0-Tp)/(T0·Tp)
-      Ti2 = 0.5·(K+2)·(Te-Tp)/(Te·Tp)·Tir
-      p   = p0·exp(-g/R_d·(Ti1 - Ti2·IT))
-
-  Default DCMIP16 BC constants:
-      KK=3 (zonal wave number)
-      Te=310 K, Tp=240 K, T0=(Te+Tp)/2=275 K
-      b=2, lapse=0.005 K/m, p0=1e5 Pa
-
-  Used in FV3 DCMIP16 Test 410 (baroclinic instability).
-
-  Tests (6/6 in 1 s):
-  1. Surface-equator T in realistic range.
-  2. Surface p = p0.
-  3. p monotonically decreasing with z.
-  4. Output shape matches input.
-  5. No NaN/Inf on random (z, lat).
-  6. T ∈ [150, 350] K across globe at z=5km.
-
-  Wired into iter-383 sweep (now 234).
-- Iter 666: **FV3 ``dcmip16_tc_sphum``** — DCMIP16 TC humidity profile.
-  Faithful JAX port of FV3 ``DCMIP16_TC_sphum`` (tools/test_cases.F90:
-  7198-7208).
-
-  Reed-Jablonowski TC specific humidity (kg/kg):
-
-      if z >= zt: q = qt                      (stratospheric)
-      else:       q = q0·exp(-z/zq1)·exp(-(z/zq2)²)
-
-  Default DCMIP16 TC constants (FV3 lines 6880-6886):
-      q0  = 0.021 kg/kg  (surface peak)
-      qt  = 1e-11 kg/kg  (stratospheric)
-      zq1 = 3000 m       (exponential decay scale)
-      zq2 = 8000 m       (Gaussian truncation scale)
-      zt  = 15000 m      (tropopause)
-
-  Used in FV3 DCMIP16 idealized tropical-cyclone test
-  (Reed-Jablonowski).  Monotonically decreasing from q0 at
-  surface to qt above tropopause.
-
-  Tests (5/5 in <1 s):
-  1. z=0 → q = q0 = 0.021.
-  2. z=zt → q = qt = 1e-11.
-  3. Above tropopause → q = qt.
-  4. Monotonically decreasing below tropopause.
-  5. No NaN/Inf; q > 0 across full z range.
-
-  Wired into iter-383 sweep (now 233).
-- Iter 665: **FV3 ``super_k_u_fv3``** — super-cell wind shear profile.
-  Faithful JAX port of FV3 ``SuperK_u`` (tools/test_cases.F90:
-  6049-6082, MPAS branch without TEST_TANHP).
-
-  Piecewise wind profile:
-
-      if z > zs + 1km:    um = us;             dudz = 0
-      elif |z-zs| ≤ 1km:  um = us·(-4/5 + 3z/zs - 5/4·(z/zs)²)
-                          dudz = us/zs · (3 - 5/2·z/zs)
-      else (z < zs-1km):  um = us·z/zs;        dudz = us/zs
-      um -= uc                                  (storm offset)
-
-  Default constants: zs=5 km (shear scale), us=30 m/s (peak
-  shear), uc=15 m/s (offset for near-stationary storm).  Profile
-  is continuous at z = zs ± 1 km boundaries.
-
-  Used for FV3 super-cell idealized test cases.
-
-  Tests (6/6 in 1 s):
-  1. Output shapes match input.
-  2. Upper region (z > zs+1km): um = us - uc, dudz = 0.
-  3. Lower region: um = us·z/zs - uc, dudz = us/zs.
-  4. Continuous at zs ± 1km boundaries.
-  5. um(z=0) = -uc.
-  6. No NaN/Inf across full z range.
-
-  Wired into iter-383 sweep (now 232).
-- Iter 664: **FV3 ``case9_B`` + ``case9_AofT``** — Williamson test 9.
-  Faithful JAX ports of FV3 Williamson test 9 forcing
-  (tools/test_cases.F90:4361-4424).
-
-  ``case9_B(lon, lat)`` — spatial forcing pattern:
-
-      if sin(lat) > 0:
-          yy = (cos(lat) / sin(lat))² = cot²(lat)
-          B  = gh0 · yy · exp(1 - yy) · sin(lon)
-      else:
-          B = 0
-
-  Default gh0 = 720·g; peaks at lat=π/4 (cot²=1) with magnitude
-  gh0·sin(lon).
-
-  ``case9_AofT(tday)`` — time-varying amplitude:
-
-      tday ≤ 4:           A = 0.5·(1 - cos(π·tday/4))   [ramp up]
-      4 < tday ≤ 16:      A = 1                          [peak]
-      16 < tday ≤ 20:     A = 0.5·(1 + cos(π·(tday-16)/4)) [ramp down]
-      tday > 20:          A = 0.5·(1 - cos(π·(tday-20)/4)) [new cycle]
-
-  Together: phis(t, lon, lat) = AofT(t) · B(lon, lat).  Used in
-  FV3 for the Williamson test 9 SW orographic-forcing test.
-
-  Tests (8/8 in 1 s):
-  1. B shape matches input.
-  2. B = 0 in southern hemisphere.
-  3. B peak at lat=π/4 = gh0·sin(lon).
-  4. B = 0 at lon=0.
-  5. AofT ramp up: A(0)=0, A(4)=1.
-  6. AofT peak: A(5..16)=1.
-  7. AofT ramp down: A(20)=0.
-  8. AofT finite, bounded [0, 1] for all times.
-
-  Wired into iter-383 sweep (now 231).
-- Iter 663: **FV3 ``u_jet_fv3`` + ``gh_jet_fv3``** — Galewsky jet.
-  Faithful JAX ports of FV3 ``u_jet`` and ``gh_jet``
-  (tools/test_cases.F90:4297-4360).  Galewsky-Scott-Polvani 2004
-  barotropic-instability test on the sphere.
-
-  ``u_jet_fv3``:
-
-      if ph0 < lat < ph1:
-          u = (umax/en) · exp(1 / ((lat-ph0)·(lat-ph1)))
-      else:
-          u = 0
-      where en = exp(-4/(ph1-ph0)²)
-
-  Default ph0=π/7, ph1=π/2-π/7 (northern hemisphere jet); peak
-  at center = (ph0+ph1)/2.  Verified peak = umax exactly.
-
-  ``gh_jet_fv3`` integrates geostrophic + centripetal balance:
-
-      gh[0]  = g·h0   (south pole)
-      gh[j]  = gh[j-1] - u·(R·f + tan(lat)·u)·dp
-
-  with FV3 calibrated h0 = 10157.946867 m.  Returns
-  linearly-interpolated geopotential at requested ``lat_in``.
-
-  Used for the Galewsky barotropic-instability shallow-water
-  test.
-
-  Tests (7/7 in 1 s):
-  1. u_jet=0 outside jet band (equator, poles).
-  2. u_jet finite inside band.
-  3. Peak u_jet = umax at center (exact).
-  4. gh_jet shape matches input.
-  5. gh_jet(-π/2) ≈ g·h0 to 1e-3.
-  6. gh_jet constant outside jet band.
-  7. gh_jet finite across full latitude range.
-
-  Wired into iter-383 sweep (now 230).
-- Iter 662: **FV3 ``add_rankine_vortex``** — Rankine vortex IC
-  on D-grid winds.  Faithful JAX port of FV3 ``rankine_vortex``
-  (tools/test_cases.F90:4207-4292).  Adds Rankine-vortex
-  tangential wind onto D-grid u, v fields at face corners,
-  projected onto local cube-grid tangent vectors.
-
-  Tangential wind profile:
-
-      vr = ubar · r/r0    if r < r0  (solid-body core)
-      vr = ubar · r0/r    if r ≥ r0  (1/r decay)
-
-  where r is great-circle distance from cell-edge midpoint to
-  vortex center.
-
-  Used in FV3 for tropical-cyclone test cases (vortex placement).
-  Reuses iter-608 ``mid_pt_sphere``, iter-611 ``get_unit_vect2``
-  + ``inner_prod``, iter-615 ``unit_vect_latlon``.
-
-  Tests (5/5 in 8 s):
-  1. Output shapes match input D-grid winds.
-  2. ubar=0 → no change.
-  3. Far-field placement → finite.
-  4. Vortex center → finite (d2 regularization).
-  5. Max wind near vortex ≤ ubar (projection factor).
-
-  Wired into iter-383 sweep (now 229).
-- Iter 661: **FV3 ``rotate_winds_sphere_cube``** — wind rotation
-  between sphere and cube frames at point.  Faithful JAX port of
-  FV3 ``rotate_winds`` (tools/test_cases.F90:8183-8226).
-
-  Algorithm:
-
-      ee1 = get_unit_vector_fv3(p3, t1, p1)   # cube i-axis (iter 659)
-      ee2 = get_unit_vector_fv3(p4, t1, p2)   # cube j-axis
-      elon = (-sin(λ-π), cos(λ-π), 0)
-      elat = (-sin(φ)·cos(λ-π), -sin(φ)·sin(λ-π), cos(φ))
-      g_ij = ee_i · e_lonlat_j
-      sphere→cube: newu = u·g11 + v·g12; newv = u·g21 + v·g22
-      cube→sphere: 2×2 inverse
-
-  Reuses iter-659 ``get_unit_vector_fv3`` + iter-611 ``inner_prod``.
-  Round-trip sphere→cube→sphere verified to 1e-10.
-
-  Tests (4/4 in <1 s):
-  1. Zero winds → zero (both directions).
-  2. Sphere→cube→sphere round-trip exact (1e-10).
-  3. No NaN/Inf on random inputs.
-  4. Invalid direction raises ValueError.
-
-  Wired into iter-383 sweep (now 228).
+- **Iters 661-669 (compacted iter 670)**: FV3 test-case IC profiles
+  (DCMIP16 BC + TC, Galewsky jet, super-cell shear, Williamson 9,
+  Rankine vortex, sphere↔cube wind rotation).  9 iterations
+  covering analytic IC profiles for FV3 dynamical-core tests:
+
+  | Iter | Function(s)                              | Module / Line              | Role                                |
+  |------|------------------------------------------|----------------------------|-------------------------------------|
+  | 661  | ``rotate_winds_sphere_cube``             | test_cases:8183            | sphere↔cube wind rotation at point  |
+  | 662  | ``add_rankine_vortex``                   | test_cases:4207            | TC Rankine vortex IC on D-grid      |
+  | 663  | ``u_jet_fv3`` / ``gh_jet_fv3``           | test_cases:4297/4349       | Galewsky barotropic-instability jet |
+  | 664  | ``case9_B`` / ``case9_AofT``             | test_cases:4361/4391       | Williamson SW test 9 forcing        |
+  | 665  | ``super_k_u_fv3``                        | test_cases:6049            | super-cell vertical wind shear      |
+  | 666  | ``dcmip16_tc_sphum``                     | test_cases:7199            | DCMIP16 TC humidity profile         |
+  | 667  | ``dcmip16_bc_temperature`` / ``dcmip16_bc_pressure`` | test_cases:6774/6791 | DCMIP16 BC T, p (Test 410) |
+  | 668  | ``dcmip16_bc_uwind`` / ``dcmip16_bc_sphum`` | test_cases:6807/6840   | DCMIP16 BC u, q (Test 410)         |
+  | 669  | ``dcmip16_tc_temperature`` / ``dcmip16_tc_pressure`` | test_cases:7137/7155 | DCMIP16 TC T, p (Test 411) |
+
+  **IC STACK COMPLETE** for FV3 dynamical-core test cases:
+  - DCMIP16 Test 410 (BC): iter 667 + 668
+  - DCMIP16 Test 411 (TC): iter 662 + 666 + 669
+  - Galewsky SW test: iter 663
+  - Williamson SW test 9: iter 664
+  - Super-cell test: iter 665
+
+  Plus wind-rotation helper (iter 661) for cube-frame wind setup.
+
+  All 9 ports cumulative: ~54 tests, all wired into iter-383
+  sweep (now 236).
 - **Iters 651-659 (compacted iter 660)**: FV3 test-case ICs +
   wind-grid conversions + spherical-geometry helpers.  9
   iterations covering FV3 test-case + diagnostic ops:
