@@ -3941,45 +3941,42 @@ def bunkers_vector_fv3(
     hydrostatic: bool = False,
     zvir: float | None = None,
     bunkers_d: float = 7.5,
+    right_mover: bool = True,
 ) -> tuple[jax.Array, jax.Array]:
-    """FV3_3D iter 689: Bunkers right-mover storm motion vector.
+    """FV3_3D iter 689/719: Bunkers storm motion vector.
 
     Faithful JAX port of FV3 ``bunkers_vector``
     (tools/fv_diagnostics.F90:4970-5046).
 
-    Bunkers storm motion is the empirical right-mover supercell
-    motion predictor.  Pairs with iter-687 SRH (which expects an
-    explicit storm motion (uc, vc) as input).
+    Empirical supercell storm motion predictor:
+        Right-mover (default, FV3 form):
+            uc = umn + 7.5 · vshr / shrmag
+            vc = vmn − 7.5 · ushr / shrmag
+        Left-mover (iter-719, ``right_mover=False``):
+            uc = umn − 7.5 · vshr / shrmag
+            vc = vmn + 7.5 · ushr / shrmag
 
-    Algorithm:
-
-        umn, vmn = depth-weighted mean wind in 0-6 km layer
-        usfc, vsfc = surface (lowest layer) wind
-        u6km, v6km = linearly-interpolated wind at z = 6000 m
-        (ushr, vshr) = (u6km - usfc, v6km - vsfc)
-        shrmag = ||(ushr, vshr)||
-        uc = umn + 7.5 · vshr / shrmag
-        vc = vmn - 7.5 · ushr / shrmag
-
-    The 7.5 m/s offset to the right of the shear vector is the
-    empirical Bunkers (2000) right-mover constant.
+    Pairs with iter-687/707 SRH (storm motion input).
 
     Parameters
     ----------
     ua, va : jax.Array, shape (..., km)
         A-grid wind components.
     delz : jax.Array, shape (..., km), optional
-        Layer thickness (NEGATIVE in FV3).  Required if not hydrostatic.
+        Layer thickness (NEGATIVE in FV3).
     pt, q, peln, zvir : optional
         Hydrostatic dz reconstruction; required if hydrostatic.
     hydrostatic : bool, default False.
     bunkers_d : float, default 7.5
-        Empirical right-mover offset (m/s).
+        Empirical offset magnitude (m/s).
+    right_mover : bool, default True.
+        iter-719: when False, returns the left-mover storm motion
+        (sign flip on shear-perpendicular offset).
 
     Returns
     -------
     uc, vc : jax.Array, shape (...,)
-        Bunkers right-mover storm motion components (m/s).
+        Bunkers storm motion components (m/s).
     """
     if hydrostatic:
         if pt is None or q is None or peln is None:
@@ -4041,8 +4038,9 @@ def bunkers_vector_fv3(
     vshr = v6km - vsfc
     shrmag = jnp.sqrt(ushr * ushr + vshr * vshr)
     safe_shrmag = jnp.where(shrmag > 0.0, shrmag, 1.0)
-    uc = umn + bunkers_d * vshr / safe_shrmag
-    vc = vmn - bunkers_d * ushr / safe_shrmag
+    sign = 1.0 if right_mover else -1.0
+    uc = umn + sign * bunkers_d * vshr / safe_shrmag
+    vc = vmn - sign * bunkers_d * ushr / safe_shrmag
     return uc, vc
 
 

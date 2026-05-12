@@ -1195,6 +1195,30 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 719: **iter-689 ``bunkers_vector_fv3`` left-mover variant**.
+
+  iter-689 returned Bunkers right-mover storm motion.  iter-719 adds
+  ``right_mover=False`` flag for the left-mover variant:
+
+      Right-mover (FV3 default): uc = umn + 7.5·vshr/|shr|, vc = vmn − 7.5·ushr/|shr|
+      Left-mover  (iter-719):    uc = umn − 7.5·vshr/|shr|, vc = vmn + 7.5·ushr/|shr|
+
+  Left-mover storms occur ~5-15 % of supercell observations; the
+  pair (right, left) brackets the empirical storm-motion space.
+
+  Default ``right_mover=True`` preserves iter-689 backward-compat.
+
+  Tests (5/5 in <3 s):
+  1. Default flag matches iter-689 (backward-compat pin).
+  2. Zero shear → left/right both = mean wind.
+  3. Linear westerly shear → left-mover gives uc=15, vc=+7.5
+     (sign-flipped from iter-689 right-mover).
+  4. (uc_right + uc_left)/2 = umn exactly (offset cancels).
+  5. No NaN/Inf on 3-D random.
+
+  iter-689 6/6 tests still pass.
+
+  Wired into iter-383 sweep (now 283).
 - Iter 718: **FV3 ``get_vorticity_fv3``** — diagnostic relative vorticity.
   Faithful JAX port of FV3 ``get_vorticity``
   (tools/fv_diagnostics.F90:3877-3908).  Circulation-form vorticity

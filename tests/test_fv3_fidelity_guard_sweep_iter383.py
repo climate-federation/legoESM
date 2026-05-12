@@ -306,6 +306,7 @@ _GUARD_MODULES = (
     "test_fv3_eqv_pot_bolton_iter716",               # iter-716 add
     "test_fv3_cs3_ecmwf_iter717",                    # iter-717 add
     "test_fv3_get_vorticity_iter718",                # iter-718 add
+    "test_fv3_bunkers_left_mover_iter719",           # iter-719 add
 )
 
 
