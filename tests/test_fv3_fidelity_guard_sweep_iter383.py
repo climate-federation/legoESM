@@ -176,6 +176,7 @@ _GUARD_MODULES = (
     "test_time_growth_powerlaw_iter569",             # iter-569 add
     "test_pe_time_growth_iter571",                   # iter-571 add
     "test_nh_zero_ic_iter572",                       # iter-572 add
+    "test_low_amplitude_sbr_iter573",                # iter-573 add
 )
 
 

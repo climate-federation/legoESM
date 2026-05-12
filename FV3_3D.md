@@ -1185,6 +1185,20 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 573: **NH SBR amplitude scaling**.  Sweep U_0 ∈
+  {2, 5, 10, 20} m/s @ C16 + iters=8 + clip, 10 steps:
+  - U_0=2:  edge_std=4.10e-4 (0.4 mK — calm)
+  - U_0=5:  edge_std=1.04e-3 (1.0 mK)
+  - U_0=10: edge_std=2.34e-3 (2.3 mK)
+  - U_0=20: edge_std=6.72e-3 (6.7 mK — jet stream)
+  Fit: **edge_std ~ U_0¹·²⁰** (slightly super-linear).
+  For typical mid-latitude winds (~10 m/s) the edge noise
+  is ~2-3 mK.  Calm regions (tropics, polar nights, ocean
+  basins) → effectively zero edge artifact.  Strong winds
+  (jet stream, gust fronts) → up to ~7 mK at C16.  Most
+  atmospheric flows will see mK-level edge noise, well
+  below physical signal.  1/1 in 128 s.  Wired into iter-383
+  sweep (now 153).
 - Iter 572: **NH from truly zero IC → perfect rest preservation**.
   Build NH state with all fields = 0 (u=v=w=θ′=ρ′=phis=0),
   run 10 steps @ C16 with iters=8 + clip.  All fields stay
