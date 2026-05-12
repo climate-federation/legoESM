@@ -5663,6 +5663,51 @@ def frost_point_temperature_fv3(
     return t_f_c + constants.T_freeze
 
 
+def frost_point_depression_fv3(
+    t: jax.Array,
+    p_pa: jax.Array,
+    q_sphum: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 804: frost-point depression (T − T_frost).
+
+    Ice analog of iter-770 ``dewpoint_depression_fv3``.  Composes
+    iter-803 ``frost_point_temperature_fv3`` to give the canonical
+    ice-saturation gap:
+
+        T − T_frost ≥ 0   (zero at ice-saturation, positive in
+                          sub-ice-saturated air).
+
+    Used as a:
+      * Cirrus/PSC cloud-base proxy (low T − T_frost → ice
+        saturation aloft).
+      * Aviation icing severity index (hoar-frost rate scales
+        with T − T_frost gradient).
+      * Polar-night H₂O sink diagnostic (T − T_frost ≈ 0 inside
+        the polar vortex during polar-night cooling).
+
+    Below freezing, T − T_frost < T − T_dew at the same q (since
+    T_frost > T_dew below 0 °C).  Above freezing the two
+    depressions formally coincide (Magnus liquid and ice curves
+    meet at T_freeze).
+
+    Parameters
+    ----------
+    t : jax.Array
+        Temperature (K).
+    p_pa : jax.Array
+        Pressure (Pa).
+    q_sphum : jax.Array
+        Specific humidity (kg/kg).
+
+    Returns
+    -------
+    depression : jax.Array
+        T − T_frost (K, non-negative for physical sub-ice-saturated air).
+    """
+    t_frost = frost_point_temperature_fv3(p_pa, q_sphum)
+    return t - t_frost
+
+
 def relative_humidity_fv3(
     t: jax.Array,
     p_pa: jax.Array,

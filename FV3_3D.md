@@ -5155,6 +5155,39 @@ T_frost, and PSC formation thresholds use frost-point depression.
 Pure JAX, vmap-compatible.  No new physical constants introduced
 (272.62, 22.46 are Lawrence-2005 ice-Magnus fit coefficients).
 
+## Iter 804 — frost_point_depression_fv3 (T − T_frost)
+
+Added `frost_point_depression_fv3(t, p_pa, q_sphum)` to
+`grids/cubed_sphere.py`.  Ice analog of iter-770
+``dewpoint_depression_fv3``:
+
+```
+T − T_frost ≥ 0     (zero at ice-saturation)
+```
+
+Composes iter-803 ``frost_point_temperature_fv3``.  Below
+freezing, T − T_frost < T − T_dew at the same q (since
+T_frost > T_dew below 0 °C).  Above freezing both depressions
+formally coincide (Magnus liquid and ice meet at T_freeze).
+
+Used as: cirrus/PSC cloud-base proxy (low T − T_frost → ice
+saturation aloft), aviation icing severity index, polar-night
+H₂O sink diagnostic (T − T_frost ≈ 0 inside polar vortex
+during polar-night cooling).
+
+Test: `tests/test_fv3_frost_point_depression_iter804.py` (6
+tests: subice-sat air → positive depression, T=T_frost → ≈0,
+below freezing fpd < dpd at same q, monotone ↑q → ↓depression,
+chain identity, 3-D shapes + finite).
+
+### Why this iteration was meaningful
+
+Closes the moisture-saturation gap pair: iter-770 (T − T_dew,
+liquid) + iter-804 (T − T_frost, ice).  Together with iter-768
+(RH_liquid) + iter-800 (RH_ice), the moisture-deficit
+diagnostics now cover both liquid and ice saturation states.
+Pure JAX, vmap-compatible.  No new physical constants introduced.
+
 
 
 
