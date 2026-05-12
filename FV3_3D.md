@@ -1195,6 +1195,43 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 644: **FV3 ``p_var_core``** — pressure-edge diagnostics
+  from (delp, ptop).  Faithful JAX port of FV3 ``p_var`` core
+  algorithm (tools/init_hydro.F90:41-145), excluding dry-mass
+  adjustment + MPI.
+
+  Algorithm:
+
+      pe[0]   = ptop;           pk[0] = ptop^cappa
+      pe[k]   = pe[k-1] + delp[k-1]      for k = 1..km
+      peln[k] = log(pe[k])
+      pk[k]   = pe[k]^cappa
+      ps      = pe[km]
+      # Top-edge peln branch (FV3 lines 116-127):
+      if ptop < ptop_min:
+          peln[0] = peln[1] - (cappa+1)/cappa
+      else:
+          peln[0] = log(ptop)
+      # Hydrostatic pkz (FV3 lines 129-135):
+      pkz[k] = (pk[k+1] - pk[k]) / (cappa · (peln[k+1] - peln[k]))
+
+  Used throughout FV3 for pressure / Exner-function diagnostics
+  given delp + ptop.  Vectorized: ``delp`` of shape ``(..., km)``
+  produces batched outputs on leading axes.
+
+  Lives in ``legoesm.grids.vertical``.
+
+  Tests (8/8 in 2 s):
+  1. Output shapes (km+1, km+1, km+1, km, scalar).
+  2. pe = ptop + cumsum(delp).
+  3. ps = pe[km].
+  4. pk = pe^cappa.
+  5. Normal top-edge branch: peln[0] = log(ptop).
+  6. Small-ptop branch: peln[0] = peln[1] - (cappa+1)/cappa.
+  7. pkz log-mean formula.
+  8. Batched (3, 4, km) input → batched output.
+
+  Wired into iter-383 sweep (now 213).
 - Iter 643: **FV3 ``mount_waves``** — HIWPP mountain-wave hybrid
   coord init.  Faithful JAX port of FV3 ``mount_waves``
   (tools/fv_eta.F90:2346-2479, ``NO_UKMO_HB`` branch).  Builds
