@@ -379,7 +379,21 @@ class PhysicsPipeline:
         # instant-fall assumption.
         dq_c_dt = dq_c_dt + dq_c_dt_conv
 
-        # Boundary layer exchange (grid-agnostic: uses [..., -1] indexing)
+        # Boundary layer surface exchange (grid-agnostic: uses [..., -1] indexing).
+        #
+        # Surface scalar exchange must be applied EXACTLY ONCE per step.
+        # When a turbulence scheme (Smagorinsky/Louis/TKE/YSU/HB/CLUBB-lite/
+        # EDMF) or the joint physics_parameterization is active, surface
+        # heat/moisture flux is the bottom BC of the implicit vertical-
+        # diffusion solve inside turbulence — applying the bulk BL kick
+        # here on top of that double-counts the flux and roughly doubles
+        # the effective surface drag/heating (audit 2026-05-12 HIGH #2).
+        #
+        # Strategy: always compute bulk shflx/lhflx for diagnostics so the
+        # output struct has well-defined values, but only inject the
+        # bottom-layer T/q kick when no turbulence scheme owns surface
+        # exchange.  If turbulence is active, its TurbulenceOutput.shflx /
+        # lhflx overrides the bulk values further below.
         rho_low = (p_s * self.sigma_full[-1]) / (constants.R_d * T[..., -1])
         wind_speed = jnp.sqrt(u[..., -1] ** 2 + v[..., -1] ** 2 + 1.0)
         dp_low = p_s * (self.sigma_half[-1] - self.sigma_half[-2])
@@ -387,16 +401,21 @@ class PhysicsPipeline:
         shflx = rho_low * constants.c_pd * _C_H * wind_speed * (T_sfc - T[..., -1])
         q_sat_sfc = saturation_specific_humidity(T_sfc, p_s)
         lhflx = rho_low * constants.L_v * _C_E * wind_speed * (q_sat_sfc - q_v[..., -1])
-        evap_rate = lhflx / constants.L_v
 
-        dT_BL = constants.g * shflx / (constants.c_pd * dp_low)
-        dq_BL = constants.g * evap_rate / dp_low
+        turb_owns_surface = (
+            self.turbulence_fn is not None
+            or self.physics_parameterization is not None
+        )
 
         dT_dt = dT_dt_rad + dT_dt_conv + dT_dt_micro
-        dT_dt = dT_dt.at[..., -1].add(dT_BL)
-
         dq_v_dt = dq_v_dt_conv + dq_v_dt_micro
-        dq_v_dt = dq_v_dt.at[..., -1].add(dq_BL)
+
+        if not turb_owns_surface:
+            evap_rate = lhflx / constants.L_v
+            dT_BL = constants.g * shflx / (constants.c_pd * dp_low)
+            dq_BL = constants.g * evap_rate / dp_low
+            dT_dt = dT_dt.at[..., -1].add(dT_BL)
+            dq_v_dt = dq_v_dt.at[..., -1].add(dq_BL)
 
         # Momentum tendencies from turbulence and GWD
         du_dt = jnp.zeros(shape_3d, dtype=_sd)
@@ -415,6 +434,13 @@ class PhysicsPipeline:
             dv_dt = dv_dt + ad.unflatten_3d(turb_out.dv_dt)
             dT_dt = dT_dt + ad.unflatten_3d(turb_out.dT_dt)
             dq_v_dt = dq_v_dt + ad.unflatten_3d(turb_out.dq_v_dt)
+            # Surface flux diagnostic comes from the stability-dependent
+            # surface layer inside the turbulence scheme rather than the
+            # bulk-formula placeholder.
+            if getattr(turb_out, 'shflx', None) is not None:
+                shflx = ad.unflatten_2d(turb_out.shflx)
+            if getattr(turb_out, 'lhflx', None) is not None:
+                lhflx = ad.unflatten_2d(turb_out.lhflx)
         elif self.turbulence_fn is not None:
             T_sfc_col = ad.flatten_2d(T_sfc)
             q_sat_sfc_col = ad.flatten_2d(
@@ -431,6 +457,10 @@ class PhysicsPipeline:
             dv_dt = dv_dt + ad.unflatten_3d(turb_out.dv_dt)
             dT_dt = dT_dt + ad.unflatten_3d(turb_out.dT_dt)
             dq_v_dt = dq_v_dt + ad.unflatten_3d(turb_out.dq_v_dt)
+            if getattr(turb_out, 'shflx', None) is not None:
+                shflx = ad.unflatten_2d(turb_out.shflx)
+            if getattr(turb_out, 'lhflx', None) is not None:
+                lhflx = ad.unflatten_2d(turb_out.lhflx)
 
         if self.gwd_fn is not None:
             lat_col = ad.flatten_2d(lat)
@@ -503,6 +533,16 @@ class PhysicsPipeline:
         p_full_col = ad.flatten_3d(p_full)
         p_half_col = p_half.reshape(ad.ncol, nlev + 1)
         q_v_col = ad.flatten_3d(q_v)
+        # Water-vapor unit convention: the prognostic ``q_v`` in
+        # legoESM (and ERA5 ingestion via ``era5_to_state``) is the
+        # **mixing ratio** r = m_v / m_d.  The RRTMGP solver, however,
+        # expects **specific humidity** q = m_v / (m_v + m_d) for its
+        # internal VMR conversion ``h2o_vmr = (M_d/M_w) · q/(1-q)``.
+        # Converting at the boundary keeps both modules internally
+        # consistent (audit 2026-05-12 finding MEDIUM-HIGH #6) — the
+        # ~1 % drift between r and q matters in saturated tropical
+        # columns where RRTMGP's H2O continuum is sensitive to VMR.
+        q_v_specific_col = q_v_col / (1.0 + jnp.clip(q_v_col, 0.0, None))
         T_sfc_col = ad.flatten_2d(T_sfc)
         lat_col = ad.flatten_2d(lat)
         lon_col = ad.flatten_2d(lon)
@@ -511,15 +551,32 @@ class PhysicsPipeline:
 
         # Compute cloud properties for cloud-radiation coupling
         cloud_kwargs = {}
-        if cloud_scheme != "none" and q_c is not None:
+        if cloud_scheme != "none":
             from legoesm.atmosphere.physics.clouds.config import CloudConfig
             from legoesm.atmosphere.physics.clouds.cloud_fraction import (
                 compute_cloud_properties,
             )
             dp_col = p_half_col[:, 1:] - p_half_col[:, :-1]
-            q_c_col = ad.flatten_3d(q_c)
-            q_i_col = None
             cloud_config = CloudConfig(scheme=cloud_scheme)
+            # When no microphysics is wired (``self.micro_fn is None``)
+            # the prognostic ``q_c`` is a zero tracer and feeding it to
+            # ``compute_cloud_properties`` short-circuits the diagnostic
+            # condensate path: explicit-condensate overrides the
+            # ``cf · q_c_diagnostic`` fallback, producing nonzero
+            # cloud fraction but zero LWP/IWP — i.e. an optically inert
+            # cloud (audit 2026-05-12 MEDIUM-HIGH #7).  Pass
+            # ``q_cloud=None`` in that case so the diagnostic scheme
+            # builds in-cloud condensate from the fraction and a
+            # typical value.
+            if self.micro_fn is None or q_c is None:
+                q_c_col = None
+            else:
+                q_c_col = ad.flatten_3d(q_c)
+            q_i_col = None
+            # ``compute_cloud_properties`` is parameterised on mixing
+            # ratio (RH from q_v vs q_sat_mixing_ratio); leave the
+            # mixing-ratio q_v here and only feed the converted
+            # specific humidity to the radiation solver.
             cloud_props = compute_cloud_properties(
                 T=T_col, p_full=p_full_col, q_v=q_v_col, dp=dp_col,
                 config=cloud_config, q_cloud=q_c_col, q_ice=q_i_col,
@@ -533,7 +590,7 @@ class PhysicsPipeline:
             }
 
         rad_out = self.radiation_fn(
-            T_col, p_full_col, p_half_col, q_v_col,
+            T_col, p_full_col, p_half_col, q_v_specific_col,
             T_sfc_col, lat_col, lon_col,
             day_of_year, seconds_of_day,
             albedo_col, emis_col,

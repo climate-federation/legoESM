@@ -86,6 +86,19 @@ def _standard_o3_profile(p_full):
     return jnp.clip(o3, 1.0e-10, None)
 
 
+def standard_o3_profile(p_full):
+    """Public alias of the climatological ozone-VMR profile.
+
+    Use this when an external ozone source is not configured but RRTMGP
+    must still see a realistic ozone column — driver code historically
+    initialised ``o3_vmr`` to zeros, which RRTMGP then clipped to
+    ``1e-10`` and which silently disabled stratospheric heating.  Pass
+    the result of ``standard_o3_profile(p_full)`` instead of zeros, or
+    pass ``None`` to let RRTMGP build the same profile internally.
+    """
+    return _standard_o3_profile(p_full)
+
+
 def _humidity_to_volume_mixing_ratio(
     q_t: Array, q_c: Array
 ) -> Array:

@@ -118,19 +118,7 @@ def make_turbulence_physics(
     elif model_type == "spectral_pe":
         return _make_spectral_pe_turbulence(turbulence_config, dt)
     elif model_type == "mpas":
-        # MPAS dispatch is intentionally NOT supported: the turbulence
-        # bridges read both ``state.u`` and ``state.v`` directly, but
-        # MPAS stores only the normal velocity ``state.u`` on edges
-        # and has ``state.v is None``.  Until an edge→cell wind
-        # interpolator is added, fail fast with a clear message rather
-        # than a confusing ``AttributeError`` deep inside the bridge.
-        raise NotImplementedError(
-            "Turbulence on MPAS Voronoi mesh is not yet supported.  "
-            "The bridge expects cell-centered u and v winds but MPAS "
-            "stores only the normal velocity on edges.  Edge→cell "
-            "interpolation is a follow-up; until then, run MPAS with "
-            "turbulence='none'."
-        )
+        return _make_mpas_turbulence(turbulence_config, dt)
     else:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
@@ -213,9 +201,15 @@ def _make_hydrostatic_turbulence(
                 dphis_dt=Field(data=jnp.zeros(shape_2d, dtype=p_s.dtype), name="dphis_dt_turb", dims=dims_2d, units="m^2/s^3"),
             ), tke_out
 
-        # Heights and density
-        z_full, z_half = _compute_heights_from_sigma(T_col, p_half_col)
-        rho = _compute_rho(T_col, p_full_col)
+        # Heights and density.  Use the moist (virtual-temperature)
+        # forms when q_v is available so that hydrostatic layer
+        # thicknesses and ρ in the diffusion solver are consistent
+        # with the actual column moisture (audit 2026-05-12
+        # MEDIUM #8 — dry forms drift ~1 % in tropical moist
+        # columns and produce inconsistent K · ∂φ/∂z fluxes vs the
+        # mass-weighted surface BC).
+        z_full, z_half = _compute_heights_from_sigma(T_col, p_half_col, q_v=q_v_col)
+        rho = _compute_rho(T_col, p_full_col, q_v=q_v_col)
 
         # Surface conditions
         T_sfc = T_col[:, -1]
@@ -264,6 +258,156 @@ def _make_hydrostatic_turbulence(
             dp_s_dt=Field(data=jnp.zeros(shape_2d, dtype=p_s.dtype), name="dp_s_dt_turb", dims=dims_2d, units="Pa/s"),
             dphis_dt=Field(data=jnp.zeros(shape_2d, dtype=p_s.dtype), name="dphis_dt_turb", dims=dims_2d, units="m^2/s^3"),
             tracer_tendencies=tracer_tends,
+        )
+        return tendencies, tke_out
+
+    def reset_state():
+        return None
+
+    physics_fn.reset_state = reset_state
+    return physics_fn
+
+
+# ===========================================================================
+# MPAS Voronoi (hydrostatic primitive eqn)
+# ===========================================================================
+
+def _make_mpas_turbulence(
+    turbulence_config: TurbulenceConfig,
+    dt: float,
+) -> Callable:
+    """Create turbulence physics_fn for MPASPrimitiveEquationModel.
+
+    Signature: ``(state, mesh, sigma_coord, phys_state=None) -> (HydrostaticTendencies, tke_out)``.
+
+    MPAS stores the prognostic horizontal velocity as the edge-normal
+    component ``state.u`` of shape ``(nEdges, nlev)`` with ``state.v is None``.
+    Column physics needs cell-centered ``u``/``v`` to compute shear and
+    eddy diffusivities.  We use the Perot (2000) area-weighted
+    edge→cell reconstruction (:func:`legoesm.grids.voronoi.reconstruct_cell_velocity`)
+    to recover ``(u_east, v_north)`` at cells, run the existing
+    column turbulence backend, then convert the cell-centered wind
+    tendencies back to edge-normal tendencies via
+    ``du_normal = du_east * cosθ + dv_north * sinθ`` where θ is
+    ``mesh.angleEdge``.  The averaging cells-flanking-edge is the
+    canonical MPAS C-grid projection; round-trip on a uniform field
+    is the identity to within floating-point error.
+
+    Audit 2026-05-12 finding MEDIUM #10.
+    """
+    scheme_name, turb_fn, scheme_config = _get_turbulence_fn(turbulence_config)
+    needs_tke = scheme_name in ("tke", "clubb_lite", "edmf")
+
+    def physics_fn(state, mesh, sigma_coord, phys_state=None):
+        from legoesm.grids.voronoi import reconstruct_cell_velocity
+
+        tke_out = None
+        if turb_fn is None:
+            # Build zero-tendency in MPAS layout (edge-centric u).
+            zero_edges = jnp.zeros_like(state.u.data)
+            zero_cells = jnp.zeros_like(state.T.data)
+            zero_ps = jnp.zeros_like(state.p_s.data)
+            tendencies = HydrostaticTendencies(
+                du_dt=state.u.replace(data=zero_edges),
+                dv_dt=None,
+                dT_dt=state.T.replace(data=zero_cells),
+                dp_s_dt=state.p_s.replace(data=zero_ps),
+                dphis_dt=state.phis.replace(data=zero_ps),
+            )
+            return tendencies, tke_out
+
+        u_edge = state.u.data       # (nEdges, nlev)
+        T = state.T.data            # (nCells, nlev)
+        p_s = state.p_s.data        # (nCells,)
+        nlev = sigma_coord.n_levels
+        nCells = T.shape[0]
+
+        # Edge → cell wind reconstruction (Perot 2000).
+        u_cell, v_cell = reconstruct_cell_velocity(u_edge, mesh)
+
+        # Pressures
+        p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)  # (nCells, nlev)
+        p_half = pressure_from_sigma(sigma_coord.sigma_half, p_s)  # (nCells, nlev+1)
+
+        # Column-format inputs (already 1D × nlev, so reshape is a no-op).
+        T_col = T.reshape(nCells, nlev)
+        u_col = u_cell.reshape(nCells, nlev)
+        v_col = v_cell.reshape(nCells, nlev)
+        p_full_col = p_full.reshape(nCells, nlev)
+        p_half_col = p_half.reshape(nCells, nlev + 1)
+
+        _state_dtype = T.dtype
+        if state.tracers is not None and "q_v" in state.tracers:
+            _qv_raw = state.tracers["q_v"]
+            _qv_data = _qv_raw.data if hasattr(_qv_raw, "data") else _qv_raw
+            q_v_col = _qv_data.reshape(nCells, nlev)
+        else:
+            q_v_col = jnp.zeros((nCells, nlev), dtype=_state_dtype)
+
+        z_full, z_half = _compute_heights_from_sigma(T_col, p_half_col, q_v=q_v_col)
+        rho = _compute_rho(T_col, p_full_col, q_v=q_v_col)
+
+        T_sfc = T_col[:, -1]
+        q_sfc = saturation_mixing_ratio(T_sfc, p_full_col[:, -1])
+
+        if needs_tke:
+            if phys_state is not None:
+                tke_in = phys_state.tke
+                if tke_in.shape != (nCells, nlev):
+                    tke_in = jnp.full((nCells, nlev), scheme_config.tke_min, dtype=_state_dtype)
+            else:
+                tke_in = jnp.full((nCells, nlev), scheme_config.tke_min, dtype=_state_dtype)
+            turb_out, tke_new = turb_fn(
+                u_col, v_col, T_col, q_v_col, tke_in,
+                p_full_col, p_half_col, z_full, z_half,
+                T_sfc, q_sfc, rho, dt, scheme_config,
+            )
+            tke_out = tke_new
+        else:
+            turb_out = turb_fn(
+                u_col, v_col, T_col, q_v_col,
+                p_full_col, p_half_col, z_full, z_half,
+                T_sfc, q_sfc, rho, dt, scheme_config,
+            )
+
+        # Cell → edge tendency projection.  Average the cell tendencies
+        # of the two cells flanking each edge, then project onto the
+        # edge normal via ``angleEdge`` (eastward = 0).
+        # ``mesh.cellsOnEdge`` has shape ``(2, nEdges)`` in the MPAS
+        # layout: slice along axis 0 to get the per-edge cell-index
+        # vectors (``cellsOnEdge[0]`` and ``cellsOnEdge[1]``).
+        du_cell = turb_out.du_dt  # (nCells, nlev)
+        dv_cell = turb_out.dv_dt
+        c0 = mesh.cellsOnEdge[0]  # (nEdges,)
+        c1 = mesh.cellsOnEdge[1]  # (nEdges,)
+        du_e_east = 0.5 * (du_cell[c0] + du_cell[c1])
+        dv_e_north = 0.5 * (dv_cell[c0] + dv_cell[c1])
+        angle = mesh.angleEdge[:, None]
+        du_edge_normal = du_e_east * jnp.cos(angle) + dv_e_north * jnp.sin(angle)
+
+        dT_cell = turb_out.dT_dt
+
+        # Moisture tendency stays at cells (tracer pytree).
+        tracer_tends = {}
+        if state.tracers is not None and "q_v" in state.tracers:
+            _qv_raw = state.tracers["q_v"]
+            _name = "dq_v_dt_turb"
+            if hasattr(_qv_raw, "replace"):
+                tracer_tends["q_v"] = _qv_raw.replace(
+                    data=turb_out.dq_v_dt.reshape(_qv_raw.data.shape),
+                    name=_name,
+                )
+            else:
+                tracer_tends["q_v"] = turb_out.dq_v_dt.reshape(_qv_raw.shape)
+
+        zero_ps = jnp.zeros_like(p_s)
+        tendencies = HydrostaticTendencies(
+            du_dt=state.u.replace(data=du_edge_normal, name="du_dt_turb"),
+            dv_dt=None,
+            dT_dt=state.T.replace(data=dT_cell, name="dT_dt_turb"),
+            dp_s_dt=state.p_s.replace(data=zero_ps, name="dp_s_dt_turb"),
+            dphis_dt=state.phis.replace(data=zero_ps, name="dphis_dt_turb"),
+            tracer_tendencies=tracer_tends if tracer_tends else None,
         )
         return tendencies, tke_out
 
@@ -487,9 +631,9 @@ def _make_spectral_pe_turbulence(
                 phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
             ), tke_out
 
-        # Heights and density
-        z_full, z_half = _compute_heights_from_sigma(T_col, p_half_col)
-        rho = _compute_rho(T_col, p_full_col)
+        # Heights and density (moist form — audit 2026-05-12 MEDIUM #8).
+        z_full, z_half = _compute_heights_from_sigma(T_col, p_half_col, q_v=q_v_col)
+        rho = _compute_rho(T_col, p_full_col, q_v=q_v_col)
 
         T_sfc = T_col[:, -1]
         q_sfc = saturation_mixing_ratio(T_sfc, p_full_col[:, -1])

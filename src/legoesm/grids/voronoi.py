@@ -1724,3 +1724,61 @@ def load_mpas_mesh(path: str) -> VoronoiMesh:
 
     ds.close()
     return VoronoiMesh(**mesh_data)
+
+
+def reconstruct_cell_velocity(u_edge, mesh):
+    """Reconstruct ``(u_east, v_north)`` at cell centers from edge normals.
+
+    Implements the Perot (2000) area-weighted edge-to-cell reconstruction
+    that MPAS uses everywhere it needs cell-centered winds (diagnostics,
+    column physics, coupler exports).  Given the normal velocity
+    ``u_edge`` at each edge and the per-edge angle ``angleEdge`` (the
+    edge normal's azimuth measured from local east), each edge
+    contributes ``(cos α · u_edge, sin α · u_edge)`` weighted by
+    ``dvEdge · dcEdge / (2 · areaCell)``.  The formula is exact for
+    uniform flow on any Voronoi mesh and smoothly differentiable, so it
+    composes cleanly with ``jax.grad`` through column-physics bridges
+    (turbulence, gravity-wave drag, etc.) that previously refused
+    to dispatch on MPAS (audit 2026-05-12 MEDIUM #10).
+
+    Parameters
+    ----------
+    u_edge : jax.Array, shape ``(nEdges,)`` or ``(nEdges, nlev)``
+        Edge-normal velocity [m/s].
+    mesh : VoronoiMesh
+        The MPAS Voronoi mesh providing ``edgesOnCell``, ``dvEdge``,
+        ``dcEdge``, ``angleEdge``, and ``areaCell``.
+
+    Returns
+    -------
+    u_east, v_north : jax.Array
+        Zonal and meridional cell-centered velocity, shape
+        ``(nCells,)`` or ``(nCells, nlev)``.
+    """
+    is_3d = u_edge.ndim == 2
+
+    eoc = mesh.edgesOnCell  # (maxEdges, nCells)
+    mask = (eoc >= 0).astype(u_edge.dtype)
+    eoc_safe = jnp.maximum(eoc, 0)
+
+    dv = mesh.dvEdge[eoc_safe] * mask
+    dc = mesh.dcEdge[eoc_safe] * mask
+    angle = mesh.angleEdge[eoc_safe]
+    weight = dv * dc / (2.0 * mesh.areaCell[jnp.newaxis, :])
+
+    cos_a = jnp.cos(angle)
+    sin_a = jnp.sin(angle)
+
+    if is_3d:
+        u_gathered = u_edge[eoc_safe] * mask[..., jnp.newaxis]
+        w3d = weight[..., jnp.newaxis]
+        contrib = u_gathered * w3d
+        u_east = jnp.sum(contrib * cos_a[..., jnp.newaxis], axis=0)
+        v_north = jnp.sum(contrib * sin_a[..., jnp.newaxis], axis=0)
+    else:
+        u_gathered = u_edge[eoc_safe] * mask
+        contrib = u_gathered * weight
+        u_east = jnp.sum(contrib * cos_a, axis=0)
+        v_north = jnp.sum(contrib * sin_a, axis=0)
+
+    return u_east, v_north

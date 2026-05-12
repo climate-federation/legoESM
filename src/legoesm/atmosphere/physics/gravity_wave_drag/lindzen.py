@@ -31,6 +31,7 @@ def lindzen_gwd(
     lat: jax.Array,
     dt: float,
     config: LindzenConfig,
+    h_topo_col: jax.Array | None = None,
 ) -> GWDOutput:
     """Compute Lindzen orographic GWD tendencies.
 
@@ -38,6 +39,13 @@ def lindzen_gwd(
     ----------
     u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt, config
         Standard GWD backend signature. All column arrays (ncol, nlev).
+    h_topo_col : jax.Array, shape (ncol,) or None
+        Optional per-column subgrid orographic standard deviation [m].
+        When provided, overrides ``config.h_topo`` and produces a
+        spatially varying launch stress ``tau_0 ∝ h_topo^2`` driven by
+        the actual orography rather than a single global value
+        (audit 2026-05-12 MEDIUM #9).  Pass ``None`` to keep the
+        scalar fallback.
 
     Returns
     -------
@@ -74,9 +82,17 @@ def lindzen_gwd(
     U_proj = u * cos_a[:, None] + v * sin_a[:, None]  # (ncol, nlev)
 
     # Source stress at surface: tau_0 = rho * N * k * h^2 * U
+    # ``h_topo_col`` (if provided) supplies a per-column subgrid
+    # orographic stddev so that mountainous columns generate stress
+    # and oceanic columns generate ≈0 stress — replacing the single
+    # global ``config.h_topo`` placeholder.
     rho_sfc = rho[:, -1]
     N_sfc = N_full[:, -1]
-    tau_0 = rho_sfc * N_sfc * config.k_wave * config.h_topo ** 2 * U_ll
+    if h_topo_col is None:
+        h_topo_sq = config.h_topo ** 2
+    else:
+        h_topo_sq = jnp.clip(h_topo_col, 0.0, None) ** 2
+    tau_0 = rho_sfc * N_sfc * config.k_wave * h_topo_sq * U_ll
     tau_0 = jnp.clip(tau_0, 0.0, None)
 
     # Saturation stress per level: tau_sat = rho * U^3 * k / N

@@ -27,6 +27,7 @@ from legoesm.atmosphere.physics.turbulence.surface_layer import (
 )
 from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
     implicit_vertical_diffusion,
+    implicit_vertical_diffusion_theta,
 )
 
 
@@ -283,7 +284,9 @@ def edmf_turbulence(
 
     u_new = implicit_vertical_diffusion(u, Km_half, rho, dz_layer, dz_half, dt, sflx_u)
     v_new = implicit_vertical_diffusion(v, Km_half, rho, dz_layer, dz_half, dt, sflx_v)
-    T_new = implicit_vertical_diffusion(T, Kh_half, rho, dz_layer, dz_half, dt, sflx_T)
+    T_new = implicit_vertical_diffusion_theta(
+        T, Kh_half, rho, dz_layer, dz_half, p_full, dt, sflx_T,
+    )
     q_new = implicit_vertical_diffusion(q_v, Kh_half, rho, dz_layer, dz_half, dt, sflx_q)
 
     # Combined: ED + MF

@@ -536,30 +536,31 @@ class TestMicrophysicsMPAS:
         assert bool(jnp.all(jnp.isfinite(tend.dT_dt.data)))
 
 
-class TestTurbulenceGWDMPASUnsupported:
-    """Turbulence and GWD bridges read both ``state.u`` and ``state.v``
-    directly.  MPAS only stores normal velocity on edges and has
-    ``state.v is None``, so these cannot run on MPAS until edge→cell
-    wind interpolation is added.  PR6 makes the dispatch fail fast
-    with ``NotImplementedError`` instead of a confusing
-    ``AttributeError`` deep inside the column physics."""
+class TestTurbulenceGWDMPASSupported:
+    """Turbulence and GWD bridges now run on MPAS Voronoi meshes via
+    Perot (2000) edge→cell wind reconstruction
+    (:func:`legoesm.grids.voronoi.reconstruct_cell_velocity`).  The
+    factories return callable physics functions for the standard
+    column schemes (audit 2026-05-12 MEDIUM #10).  Prognostic-spectral
+    GWD and the ML-emulator variant still need pytree wiring through
+    the MPAS driver and remain unsupported."""
 
-    def test_turbulence_mpas_raises_not_implemented(self):
+    def test_turbulence_mpas_returns_callable(self):
         from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
         from legoesm.atmosphere.physics.turbulence.integration import (
             make_turbulence_physics,
         )
         cfg = TurbulenceConfig(scheme="louis")
-        with pytest.raises(NotImplementedError, match="MPAS"):
-            make_turbulence_physics(cfg, model_type="mpas", dt=300.0)
+        fn = make_turbulence_physics(cfg, model_type="mpas", dt=300.0)
+        assert callable(fn)
 
-    def test_gwd_mpas_raises_not_implemented(self):
+    def test_gwd_mpas_returns_callable(self):
         from legoesm.atmosphere.physics.gravity_wave_drag.config import (
             GravityWaveDragConfig,
         )
         from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
             make_gwd_physics,
         )
-        cfg = GravityWaveDragConfig(scheme="palmer_dee")
-        with pytest.raises(NotImplementedError, match="MPAS"):
-            make_gwd_physics(cfg, model_type="mpas", dt=300.0)
+        cfg = GravityWaveDragConfig(scheme="lindzen")
+        fn = make_gwd_physics(cfg, model_type="mpas", dt=300.0)
+        assert callable(fn)

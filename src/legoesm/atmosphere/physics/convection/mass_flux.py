@@ -96,18 +96,39 @@ def _compute_cape_diagnostics(
     p_half: jax.Array,
     cape_threshold: float,
     cape_activation_scale: float,
+    q_v: jax.Array | None = None,
 ) -> Tuple[jax.Array, jax.Array, jax.Array]:
-    """Compute moist-adiabat profile, CAPE, and a smooth convective mask.
+    """Compute parcel profile, CAPE, and a smooth convective mask.
 
-    Returns ``(T_moist, cape, convective_mask)``. ``T_moist`` is shape
-    ``(ncol, nlev)``; ``cape`` and ``convective_mask`` are shape
-    ``(ncol,)``. The mask is a sigmoid of ``(cape -
-    cape_threshold) / cape_activation_scale`` and is reused as the
-    smooth activation factor for both schemes.
+    When ``q_v`` is provided the parcel is lifted as **dry adiabat below
+    the LCL, moist adiabat above** (using the surface-layer water-vapor
+    mixing ratio as the launch humidity) and CAPE is computed with
+    **virtual temperature**.  This is the physically correct trigger
+    for unsaturated boundary layers; the legacy ``q_v=None`` path keeps
+    the saturated-from-base assumption for callers that have not been
+    migrated.
+
+    Returns ``(T_moist, cape, convective_mask)``. ``T_moist`` has shape
+    ``(ncol, nlev)``; ``cape`` and ``convective_mask`` are ``(ncol,)``.
+    The mask is a sigmoid of ``(cape - cape_threshold) /
+    cape_activation_scale``.
     """
     T_base = T[:, -1]
-    T_moist = compute_moist_adiabat(T_base, p_full)
-    cape = compute_cape(T, T_moist, p_full, p_half)
+    q_v_base = None if q_v is None else q_v[:, -1]
+    T_moist = compute_moist_adiabat(T_base, p_full, q_v_base=q_v_base)
+    if q_v is None:
+        cape = compute_cape(T, T_moist, p_full, p_half)
+    else:
+        # Parcel q_v: launched humidity below the LCL, saturated above.
+        # We approximate the parcel-vapor profile by ``min(q_v_base,
+        # q_sat(T_moist, p))`` — exact below the LCL (dry-adiabatic
+        # ascent preserves mixing ratio) and tracks q_sat above.
+        q_sat_parcel = saturation_mixing_ratio(T_moist, p_full)
+        q_v_parcel = jnp.minimum(q_v_base[:, None], q_sat_parcel)
+        cape = compute_cape(
+            T, T_moist, p_full, p_half,
+            q_v_env=q_v, q_v_parcel=q_v_parcel,
+        )
     convective_mask = jax.nn.sigmoid(
         (cape - cape_threshold) / cape_activation_scale
     )
@@ -271,11 +292,10 @@ def diagnose_mass_flux_closure(
     config: MassFluxConfig = MassFluxConfig(),
 ) -> MassFluxClosureDiagnostics:
     """Diagnose closure terms before computing mass-flux tendencies."""
-    del q_v  # retained for interface symmetry with full convection call
-
     dz, rho, z = _compute_column_geometry(T, p_full, p_half)
     T_moist, cape, convective_mask = _compute_cape_diagnostics(
         T, p_full, p_half, config.cape_threshold, config.cape_activation_scale,
+        q_v=q_v,
     )
 
     M_eq = convective_mask * config.M_scale
@@ -435,6 +455,7 @@ def edmf_convection(
     dz, rho, z = _compute_column_geometry(T, p_full, p_half)
     T_moist, cape, convective_mask = _compute_cape_diagnostics(
         T, p_full, p_half, config.cape_threshold, config.cape_activation_scale,
+        q_v=q_v,
     )
 
     # Diagnosed equilibrium updraft area fraction; prognostic relaxation
