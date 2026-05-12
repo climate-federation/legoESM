@@ -1162,6 +1162,25 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 544: **``make_clipped_scan_step()``** — JAX scan-based
+  multi-step API for fast long runs.  iter-526's
+  ``make_clipped_step`` returns a single-step function; for
+  100+-step runs the Python loop overhead is non-negligible.
+  iter-544 adds ``make_clipped_scan_step(model, state, dt,
+  n_steps, slack=0.5)`` which compiles the n-step loop as a
+  single ``jax.lax.scan`` — eliminating Python overhead.
+  Verified:
+  1. ``scan_step(state)`` matches Python loop of
+     ``make_clipped_step`` bit-for-bit (max|diff| < 1e-10).
+  2. ``jax.grad`` flows through (differentiable end-to-end).
+  Use::
+
+      scan_step = make_clipped_scan_step(
+          model, state, dt=10.0, n_steps=100, slack=0.5,
+      )
+      final = scan_step(state)
+
+  2/2 in 205 s.  Wired into iter-383 sweep (now 129).
 - Iter 543: **dt sensitivity for the helper**.  ``make_clipped_step``
   traces a new graph per dt.  Run to t_final=100 s with dt
   ∈ {5, 10, 20} s, C8 + SBR:

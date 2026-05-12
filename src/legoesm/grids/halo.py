@@ -2754,3 +2754,54 @@ def make_clipped_step(model, state_template, dt: float, slack: float = 0.5):
         # Force trace + compilation NOW, while context is active.
         _ = step_jit(state_template, dt)
     return step_jit
+
+
+def make_clipped_scan_step(
+    model, state_template, dt: float, n_steps: int, slack: float = 0.5,
+):
+    """FV3_3D iter 544: ``jax.lax.scan``-based multi-step with clip baked in.
+
+    Faster than a Python ``for`` loop over ``make_clipped_step``
+    because the n-step loop is JIT-compiled as a single graph
+    (no Python overhead per step).
+
+    Parameters
+    ----------
+    model : object
+        Has ``.step(state, dt)`` method.
+    state_template : pytree
+        Example state used to force trace.
+    dt : float
+        Per-step size.  Static (baked into the compiled scan).
+    n_steps : int
+        Number of steps in the scan loop.  Static.
+    slack : float
+        ``monotone_clip_slack``.  Default 0.5.
+
+    Returns
+    -------
+    callable
+        ``scan_step(state) -> final_state`` after ``n_steps`` steps.
+
+    Usage
+    -----
+    ::
+
+        scan_step = make_clipped_scan_step(model, state, dt=10.0,
+                                           n_steps=100, slack=0.5)
+        final_state = scan_step(state)
+
+    Differentiable via ``jax.grad`` end-to-end.
+    """
+    with monotone_halo_clip_context(slack=slack):
+        def _body(s, _):
+            return model.step(s, dt), None
+
+        @jax.jit
+        def scan_step(s):
+            final, _ = jax.lax.scan(_body, s, jnp.arange(n_steps))
+            return final
+
+        # Force trace + compilation NOW, while context is active.
+        _ = scan_step(state_template)
+    return scan_step
