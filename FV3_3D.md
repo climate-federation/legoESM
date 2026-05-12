@@ -1120,6 +1120,19 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 537: **clip helper with terrain (2-km mountain)**.
+  Test ``make_clipped_step`` on SBR + Gaussian mountain
+  (2 km height at equator/λ=π/2), 10 steps @ C8.  All fields
+  stay finite with physically realistic magnitudes:
+  - u peak: 30 m/s (SBR 20 + mountain perturbation 10)
+  - v peak: 34 m/s (cross-flow induced by mountain)
+  - θ′ peak: 0.96 K (gravity-wave temp pert)
+  - ρ′ peak: 1.86e-3 kg/m³
+  - w peak: 0.71 m/s (vertical motion over mountain)
+  Helper compatible with non-flat orography.  Confirms
+  iter-526 helper is production-ready for realistic NH runs
+  with mountains.  1/1 in 48 s.  Wired into iter-383 sweep
+  (now 124).
 - Iter 536: **slack sweep at C16 SBR** — confirms slack=0.0
   is marginally better than slack=0.5 under physical IC.
   10 steps, min-edge + clip:
