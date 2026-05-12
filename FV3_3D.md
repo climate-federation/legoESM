@@ -1081,6 +1081,24 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 504: **NEW LOW 1.135× (65.7% reduction)** combining
+  iter-466 flag drops + iter-503 halo clip.  6-config matrix
+  at C8 + duogrid (2 seeds, 1 step):
+    A. factory full:                3.311×  baseline
+    B. min-edge (iter-466):         1.678×  (-49.3%)
+    C. aggressive (iter-483):       1.678×  (same as B)
+    D. factory + clip:              2.049×  (-38.1%)
+    E. **min-edge + clip:           1.135×  (-65.7%)** ← new low
+    F. aggressive + clip:           1.135×  (same as E)
+  The two paths are LARGELY INDEPENDENT and compose:
+  * iter-466 flag-drops: address flag interactions
+  * iter-503 halo-clip: bound per-step overshoot
+  Combined gives -66% reduction.  Below the iter-482 floor
+  (1.42×) by 20%.  At 1.13× the edge ratio is close to
+  neutral (1.0).  Note: aggressive (with d2_bg boost) gives
+  no additional benefit over min-edge at the new clip-
+  enabled regime — d2_bg boost and clip overlap.  1/1 in
+  364 s.  Wired into iter-383 sweep (now 95).
 - Iter 503: **46% DYCORE-LEVEL REDUCTION via vector-halo
   inclusion**.  iter-492/493 only patched scalar halo (4
   sites) → 1.5% reduction.  iter-503 also patches vector
