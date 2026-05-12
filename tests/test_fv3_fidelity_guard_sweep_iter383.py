@@ -127,6 +127,7 @@ _GUARD_MODULES = (
     "test_clip_long_term_effect_iter511",            # iter-511 add
     "test_long_term_slack_iter512",                  # iter-512 add
     "test_pad_halo_3d_clip_iter513",                 # iter-513 add
+    "test_pad_halo_vector_3d_clip_iter514",          # iter-514 add
 )
 
 

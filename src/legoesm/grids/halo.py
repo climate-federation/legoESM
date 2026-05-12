@@ -1940,6 +1940,8 @@ def pad_halo_vector(
     duogrid=None,
     cos_theta: jax.Array | None = None,
     sin_theta: jax.Array | None = None,
+    monotone_clip: bool = False,
+    monotone_clip_slack: float = 0.0,
 ) -> tuple[jax.Array, jax.Array]:
     """Pad vector field components with proper rotation at face boundaries.
 
@@ -2046,8 +2048,16 @@ def pad_halo_vector(
             # messages instead of 1 packed exchange, but exercises
             # `pad_halo`'s validated duogrid post-processing so the
             # kinked→extended remap actually runs.  Drop-in correct.
-            u_east_padded = pad_halo(u_east, halo=halo, duogrid=duogrid)
-            v_north_padded = pad_halo(v_north, halo=halo, duogrid=duogrid)
+            u_east_padded = pad_halo(
+                u_east, halo=halo, duogrid=duogrid,
+                monotone_clip=monotone_clip,
+                monotone_clip_slack=monotone_clip_slack,
+            )
+            v_north_padded = pad_halo(
+                v_north, halo=halo, duogrid=duogrid,
+                monotone_clip=monotone_clip,
+                monotone_clip_slack=monotone_clip_slack,
+            )
         else:
             from legoesm.parallel.halo_exchange import pad_halo_mpi_4d
             packed = jnp.stack([u_east, v_north], axis=-1)  # (6, n, n, 2)
@@ -2055,10 +2065,18 @@ def pad_halo_vector(
             u_east_padded = packed_padded[..., 0]
             v_north_padded = packed_padded[..., 1]
     else:
-        u_east_padded = pad_halo(u_east, halo=halo, interp_offsets=interp_offsets,
-                                  duogrid=duogrid)
-        v_north_padded = pad_halo(v_north, halo=halo, interp_offsets=interp_offsets,
-                                   duogrid=duogrid)
+        u_east_padded = pad_halo(
+            u_east, halo=halo, interp_offsets=interp_offsets,
+            duogrid=duogrid,
+            monotone_clip=monotone_clip,
+            monotone_clip_slack=monotone_clip_slack,
+        )
+        v_north_padded = pad_halo(
+            v_north, halo=halo, interp_offsets=interp_offsets,
+            duogrid=duogrid,
+            monotone_clip=monotone_clip,
+            monotone_clip_slack=monotone_clip_slack,
+        )
 
     # Step 3: Convert back to grid-aligned using padded angle
     cap, sap = cos_angle_padded, sin_angle_padded
@@ -2618,6 +2636,12 @@ def monotone_halo_clip_context(slack: float = 0.5):
     pair_h2_targets = [
         "legoesm.core.fv_tp_2d.pad_halo_pair_h2",
     ]
+    pad_halo_vector_3d_targets = [
+        # FV3_3D iter 514: pad_halo_vector (3D) is used in fv3_sw_core
+        # at 3 sites (line 602, 1194, 1430), called from NH dycore
+        # via C-D coupling. NH residual leaks through this path.
+        "legoesm.core.fv3_sw_core.pad_halo_vector",
+    ]
 
     clipped_scalar = functools.partial(
         pad_halo_4d,
@@ -2636,6 +2660,11 @@ def monotone_halo_clip_context(slack: float = 0.5):
     )
     clipped_pair_h2 = functools.partial(
         pad_halo_pair_h2,
+        monotone_clip=True,
+        monotone_clip_slack=slack,
+    )
+    clipped_pad_halo_vector_3d = functools.partial(
+        pad_halo_vector,
         monotone_clip=True,
         monotone_clip_slack=slack,
     )
@@ -2659,6 +2688,11 @@ def monotone_halo_clip_context(slack: float = 0.5):
     for tgt in pair_h2_targets:
         try:
             stack.enter_context(patch(tgt, clipped_pair_h2))
+        except (AttributeError, ModuleNotFoundError):
+            pass
+    for tgt in pad_halo_vector_3d_targets:
+        try:
+            stack.enter_context(patch(tgt, clipped_pad_halo_vector_3d))
         except (AttributeError, ModuleNotFoundError):
             pass
     return stack

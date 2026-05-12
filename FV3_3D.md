@@ -1081,6 +1081,22 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 514: **extend clip to ``pad_halo_vector`` (3D)**.
+  Mirror of iter-513 for the vector path: new signature
+  threads ``monotone_clip`` + ``monotone_clip_slack`` to the
+  underlying ``pad_halo`` (3D) calls.  Context manager gains
+  one more target (``legoesm.core.fv3_sw_core.pad_halo_vector``)
+  bringing total to 11 sites.  Result on iter-509 NH residual:
+  **still unchanged** (1.6× at 10 steps).  Finding: the
+  fv3_sw_core 3D vector halo at lines 602/1194/1430 is NOT
+  exercised in the C8+duogrid+1-step NH test path.  The NH
+  residual growth flows through the already-clipped 4D paths;
+  the bias is most likely compound numerical noise at the 24
+  cube-vertex cells (per iter-489), not an unclipped halo
+  leak.  iter-514 nevertheless closes the code path for
+  configs that DO exercise fv3_sw_core (e.g., SW test).  No
+  regression.  2/2 in 5 s.  Wired into iter-383 sweep (now
+  104).
 - Iter 513: **extend clip to ``pad_halo`` (3D) +
   ``pad_halo_pair_h2``**.  Both gained ``monotone_clip`` +
   ``monotone_clip_slack`` params; they pass through to
