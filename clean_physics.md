@@ -169,6 +169,25 @@ the "Iterations 1-19 — Summary" section above so the working log stays
 under the auto-loaded MEMORY.md / context envelope.  All previous detailed
 entries remain in the commit messages on `clean_physics`.
 
+### Iteration 29 — 2026-05-12
+
+**Action: centralise universal gas constant in `constants.py`.**
+
+`land/carbon/stomata.py` had a module-level `_R_GAS = 8.314` for the
+Arrhenius temperature-response factors in the Farquhar photosynthesis
+model.  Per CLAUDE.md ("All physical constants live in
+`src/legoesm/constants.py`"), this is a violation.  Added
+`constants.R_universal = 8.314462618 J/(mol·K)` (CODATA 2018 exact
+value) and rewrote `_R_GAS = constants.R_universal` as a module
+alias so existing usages keep working.
+
+The new constant is also available for any other code that needs the
+universal `R` (separate from the gas-specific `R_d`, `R_v` already in
+`constants.py`).
+
+**Tests (post iter-29):** 75 / 75 carbon + diff_land + multilayer_land
+tests pass.
+
 ### Iteration 28 — 2026-05-12
 
 **Inspection iteration (no code changes).**
