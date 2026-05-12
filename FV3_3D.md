@@ -1175,6 +1175,24 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 553: **SURPRISE: FV3-faithful BEATS min-edge on
+  smooth ICs**.  4-config matrix at C16 SBR, 10 steps:
+  - bare config:        edge_std = 0.177 (+0% baseline)
+  - **FV3-faithful:     edge_std = 0.019 (-89.5%)** ← BEST
+  - min-edge factory:   edge_std = 0.063 (-64.4%)
+  - min-edge + clip:    edge_std = 0.059 (-66.8%)
+  iter-466's min-edge factory was optimized for RANDOM-IC
+  stress tests at C8.  On smooth physical ICs at higher
+  resolution, **the full FV3-faithful stack is BEST** —
+  ``use_fv3_metric_aware_d_con``, ``heat_source_del2``, and
+  ``d_con_top_zero_levels`` (which min-edge disables) all
+  HELP at smooth ICs.  Practical guidance updated:
+  - For smooth atmospheric ICs (SBR, HS, AMIP): use
+    ``make_fv3_faithful_nh_config``.
+  - For random/stress-test ICs (training, perturbed runs):
+    use ``make_legoesm_nh_min_edge_config``.
+  - Both compatible with the clip helper stack.
+  1/1 in 81 s.  Wired into iter-383 sweep (now 136).
 - Iter 552: **Held-Suarez-like stratified NH state**.  Test
   with SBR winds + meridional θ′ gradient (−10·sin²(lat)) at
   C8, 10 steps with ``make_clipped_step``.  Results:

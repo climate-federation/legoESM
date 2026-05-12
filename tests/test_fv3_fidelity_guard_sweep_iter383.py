@@ -159,6 +159,7 @@ _GUARD_MODULES = (
     "test_sw_clipped_scan_step_iter549",             # iter-549 add
     "test_clip_helper_perf_c16_iter551",             # iter-551 add
     "test_hs_like_nh_iter552",                       # iter-552 add
+    "test_full_stack_edge_reduction_iter553",        # iter-553 add
 )
 
 
