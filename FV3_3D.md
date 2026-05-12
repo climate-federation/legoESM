@@ -1195,6 +1195,37 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 636: **FV3 ``sm1_edge_fv3``** — 1D del-2 edge smoother.
+  Faithful JAX port of FV3 ``sm1_edge`` (tools/fv_eta.F90:
+  2249-2284).  Smooths a column of layer-interface heights ``ze``
+  via iterated del-2 flux on layer thicknesses.
+
+  Algorithm:
+
+      dz[k] = ze[k+1] - ze[k]
+      for n in 1..ntimes:
+          k1 = 2 + (ntimes - n)         # iteration shrinks top
+          flux[k1] = flux[km] = 0       # boundary
+          flux[k] = 0.25·(dz[k] - dz[k-1])   # interior
+          dz[k] += flux[k+1] - flux[k]
+      rebuild ze from dz bottom-up
+
+  Used in FV3 ``set_hybrid_z`` to smooth oscillations at the top
+  of vertical-coordinate generation.  Flux-form preserves total
+  thickness (mass-conservation analog).
+
+  Lives in ``legoesm.grids.vertical`` alongside iter-634/635
+  vertical helpers.
+
+  Tests (6/6 in 1 s):
+  1. Output shape (km+1,).
+  2. ntimes=0 → no-op.
+  3. Bottom interface preserved.
+  4. Total thickness conserved (flux-form invariant).
+  5. Oscillating dz → smoother dz after pass.
+  6. Uniform dz unchanged.
+
+  Wired into iter-383 sweep (now 206).
 - Iter 635: **FV3 ``compute_dz_fv3`` + ``zflip``**.  Faithful JAX
   ports of FV3 vertical helpers (tools/fv_eta.F90):
 

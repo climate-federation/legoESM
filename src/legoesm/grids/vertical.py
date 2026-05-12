@@ -1044,6 +1044,89 @@ def zflip(q: jax.Array, axis: int = -1) -> jax.Array:
     return jnp.flip(q, axis=axis)
 
 
+def sm1_edge_fv3(
+    ze: jax.Array, ntimes: int,
+) -> jax.Array:
+    """FV3_3D iter 636: 1D del-2 edge smoother on layer interfaces.
+
+    Faithful JAX port of FV3 ``sm1_edge`` (tools/fv_eta.F90:
+    2249-2284).  Smooths a column of layer-interface heights
+    ``ze`` (shape ``(km+1,)``) via iterated del-2 flux on the
+    layer thicknesses.
+
+    Algorithm:
+        dz[k] = ze[k+1] - ze[k]                    # thickness
+        For n in 1..ntimes:
+            k1 = 2 + (ntimes - n)                  # iteration shrinks top
+            flux[k1] = flux[km] = 0                # boundary
+            flux[k] = 0.25 · (dz[k] - dz[k-1])    # interior
+            dz[k] += flux[k+1] - flux[k]
+        ze rebuilt from dz, bottom-up.
+
+    Used in FV3 hybrid-z setup to smooth oscillations at the
+    top of the vertical-coordinate generation.
+
+    Parameters
+    ----------
+    ze : jax.Array, shape ``(km+1,)``
+        Layer interface heights (top-down indexing).
+    ntimes : int
+        Number of smoothing passes.
+
+    Returns
+    -------
+    jax.Array, shape ``(km+1,)``
+        Smoothed interface heights.  Bottom is preserved exactly
+        (ze[km] unchanged); top adjusted by sum of flux changes.
+    """
+    df = 0.25
+    km = ze.shape[0] - 1
+    # Initial thicknesses dz[k] = ze[k+1] - ze[k]
+    dz = ze[1:] - ze[:-1]               # (km,)
+    k2 = km - 1                          # last interior thickness index
+
+    # Iterate ntimes; each pass uses k1 = 2 + (ntimes - n) - 1 in 0-indexed
+    # FV3 1-indexed: k1=2+(ntimes-n), flux range [k1+1, k2].
+    # 0-indexed: k1=1+(ntimes-n), flux range [k1+1, k2] inclusive (but we
+    # work on 0-indexed dz so adjust carefully).
+    for n in range(1, ntimes + 1):
+        k1_0idx = (ntimes - n) + 1     # 0-indexed start of smoothed region
+        # flux[k] defined for k = k1+1 .. k2 (inclusive); FV3 indexing on
+        # interfaces (km+1).  0-indexed: flux[k+1] - flux[k] for the dz
+        # update at k1..k2 (1-indexed) which is k1_0idx..k2 (0-indexed).
+        # Use 0-indexed flux of length km+1 (one per interface).
+        flux = jnp.zeros((km + 1,))
+        # Interior fluxes: flux[k] = df·(dz[k] - dz[k-1])  for k in [k1+1, k2]
+        # In 0-indexed: flux at interface i corresponds to thickness
+        # difference between dz[i] and dz[i-1].  Use indices i ∈
+        # [k1_0idx+1, k2] inclusive.  Numpy-style mask.
+        i_idx = jnp.arange(km + 1)
+        in_range = (i_idx >= (k1_0idx + 1)) & (i_idx <= k2)
+        # dz[k] - dz[k-1]: 0-indexed thicknesses at positions k, k-1
+        # Build per-interface (k+1) lookup safely:
+        # diff[k] = dz[k] - dz[k-1] for k in [1, km-1]; 0 elsewhere.
+        # Pad dz to allow diff at boundaries safely.
+        diff = jnp.zeros((km + 1,))
+        diff = diff.at[1:km].set(dz[1:] - dz[:-1])
+        flux_raw = df * diff
+        flux = jnp.where(in_range, flux_raw, 0.0)
+        # dz[k] update: dz[k] += flux[k+1] - flux[k] for k in [k1_0idx, k2]
+        upd_range = (jnp.arange(km) >= k1_0idx) & (jnp.arange(km) <= k2)
+        dz_upd = flux[1:km + 1] - flux[:km]
+        dz = jnp.where(upd_range, dz + dz_upd, dz)
+
+    # Rebuild ze from dz, bottom-up (ze[km] preserved; FV3 loop k=km..1)
+    ze_new = jnp.zeros((km + 1,))
+    ze_new = ze_new.at[km].set(ze[km])
+    # ze[k] = ze[k+1] - dz[k]; loop top-down using cumulative sum
+    # ze[km-1] = ze[km] - dz[km-1]; ze[km-2] = ze[km-1] - dz[km-2]; ...
+    # = ze[km] - Σ_{j>=k} dz[j].  Use reverse cumsum.
+    cumsum_rev = jnp.cumsum(dz[::-1])[::-1]   # cumsum from bottom up
+    # cumsum_rev[k] = dz[k] + dz[k+1] + ... + dz[km-1]
+    ze_new = ze_new.at[:km].set(ze[km] - cumsum_rev)
+    return ze_new
+
+
 def compute_geopotential_hybrid(
     T: jax.Array,
     p_s: jax.Array,
