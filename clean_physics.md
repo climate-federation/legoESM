@@ -169,6 +169,31 @@ the "Iterations 1-19 — Summary" section above so the working log stays
 under the auto-loaded MEMORY.md / context envelope.  All previous detailed
 entries remain in the commit messages on `clean_physics`.
 
+### Iteration 24 — 2026-05-12
+
+**Fix iter-23 follow-up flagged by codex stop-time review.**
+
+Iter-23 routed all of `evap_rate` through `flux_top` whenever
+`evap_rate < 0`.  But when `has_snow=True` (snow-covered cell), the
+deposition (`sublim_actual < 0`) had already been added to
+`snow_new` upstream (line 286) — sending the same mass through
+`flux_top` to the soil double-counts the deposition.
+
+Fix: gate the soil-side surface flux on `has_snow=False`.  When the
+cell is snow-covered, the soil sees no direct latent flux from the
+surface (the snowpack absorbs the entire latent exchange).  Only in
+the snow-free regime is the bare/veg partition (with dew → bare-
+soil-input) applied.
+
+```python
+soil_flux = jnp.where(has_snow, 0.0, evap_rate)
+is_dew = soil_flux < 0.0
+evap_bare = jnp.where(is_dew, soil_flux, soil_flux * (1.0 - f_veg))
+evap_transp = jnp.where(is_dew, 0.0, soil_flux * f_veg)
+```
+
+Tests: 74/74 land multilayer + diff_land + land_ice_multilayer pass.
+
 ### Iteration 23 — 2026-05-12
 
 **Codex iter-22 review returned 3 findings; this iteration applies 2 of 3.**

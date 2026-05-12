@@ -317,17 +317,26 @@ def step_multilayer_land(
     weight = root_frac * beta_root  # (ncol, n_layers)
     _weight_sum_raw = jnp.sum(weight, axis=-1)  # (ncol,)
     f_veg = jnp.clip(_weight_sum_raw, 0.0, 1.0)  # vegetation cover proxy
-    # Split surface flux between bare-soil and transpiration.  For
-    # ``evap_rate >= 0`` (evaporation upward): bare/veg partition by
-    # ``1 - f_veg`` / ``f_veg``.  For ``evap_rate < 0`` (dew /
-    # deposition downward): route ALL of the negative flux to
-    # ``flux_top`` (treated as bare-soil input) so the column water
-    # budget closes.  Routing the vegetated fraction to a
-    # ``transpiration`` sink would later be clipped at zero (line
-    # below), losing the dew mass — flagged by codex iter-22 #3.
-    is_dew = evap_rate < 0.0
-    evap_bare = jnp.where(is_dew, evap_rate, evap_rate * (1.0 - f_veg))
-    evap_transp = jnp.where(is_dew, 0.0, evap_rate * f_veg)
+    # Split surface flux between bare-soil and transpiration.  The
+    # snowpack already swallowed sublim_actual upstream (line 286), so
+    # the soil should NOT see ANY latent flux when has_snow=True —
+    # routing snow deposition through flux_top double-counts the mass
+    # (codex iter-23 stop-time review).  Only the snow-free regime
+    # exposes the soil to direct latent exchange.
+    #
+    # Within the snow-free regime:
+    #   evap_rate >= 0 (evaporation upward): bare/veg partition by
+    #     ``1 - f_veg`` / ``f_veg``.
+    #   evap_rate < 0 (dew / deposition downward on bare soil):
+    #     route ALL of the negative flux to ``flux_top`` so the column
+    #     water budget closes; transpiration sink set to 0.  The
+    #     vegetated-fraction dew on a snow-free cell is treated as
+    #     bare-soil input (no separate canopy-storage reservoir in
+    #     this model).
+    soil_flux = jnp.where(has_snow, 0.0, evap_rate)
+    is_dew = soil_flux < 0.0
+    evap_bare = jnp.where(is_dew, soil_flux, soil_flux * (1.0 - f_veg))
+    evap_transp = jnp.where(is_dew, 0.0, soil_flux * f_veg)
 
     # Infiltration: rain + snow meltwater enter the soil; snow goes to snowpack.
     # Only bare-soil evap subtracted (transpiration handled by sink).
