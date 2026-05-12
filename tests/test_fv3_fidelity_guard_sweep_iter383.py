@@ -277,6 +277,7 @@ _GUARD_MODULES = (
     "test_fv3_updraft_helicity_iter686",             # iter-686 add
     "test_fv3_helicity_relative_iter687",            # iter-687 add
     "test_fv3_compute_brn_iter688",                  # iter-688 add
+    "test_fv3_bunkers_vector_iter689",               # iter-689 add
 )
 
 

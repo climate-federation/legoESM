@@ -1195,234 +1195,37 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
-- Iter 688: **FV3 ``compute_brn_fv3``** — Bulk Richardson Number.
-  Faithful JAX port of FV3 ``compute_brn``
-  (tools/fv_diagnostics.F90:5574-5645).
+- **Iters 681-689 (compacted iter 690)**: FV3 diagnostic suite —
+  heights, range checks, max/min/mean, and the supercell-triad +
+  storm-motion diagnostics.  9 iterations:
 
-  Completes the supercell triad with iter-686 UH and iter-687 SRH:
+  | Iter | Function                       | Module / Line             | Role                                  |
+  |------|--------------------------------|---------------------------|---------------------------------------|
+  | 681  | ``get_height_field_fv3``       | fv_diagnostics:3911       | geopotential heights from delz/peln   |
+  | 682  | ``range_check_fv3``            | fv_diagnostics:3948/4022  | field-range sanity check              |
+  | 683  | ``get_pressure_given_height_fv3`` | fv_diagnostics:4312    | pressure at requested z               |
+  | 684  | ``get_height_given_pressure_fv3`` | fv_diagnostics:4366    | height at requested p                 |
+  | 685  | ``prt_mxm_fv3``                | fv_diagnostics:4118       | max/min/area-weighted-mean diagnostic |
+  | 686  | ``updraft_helicity_fv3``       | fv_diagnostics:5048       | UH (vort·w·dz) supercell diagnostic   |
+  | 687  | ``helicity_relative_fv3``      | fv_diagnostics:4811       | storm-relative helicity (SRH)         |
+  | 688  | ``compute_brn_fv3``            | fv_diagnostics:5574       | Bulk Richardson Number                |
+  | 689  | ``bunkers_vector_fv3``         | fv_diagnostics:4970       | Bunkers right-mover storm motion      |
 
-      BRN = CAPE / (0.5 · shear06²)
+  Supercell-triad COMPLETE: UH (686) + SRH (687) + BRN (688), plus
+  Bunkers right-mover storm motion vector (689) that feeds SRH.
+  All five fv_diagnostics height / pressure / range helpers (681-685)
+  in place to support diagnostic post-processing pipelines.
 
-  where shear06 is the magnitude of the mass-weighted wind
-  difference between the 0-500 m and 0-6 km layers.
+  All ports faithful to FV3 algorithm with vectorized JAX
+  reformulations (cumulative-zh + clipped partial-layer
+  contributions for UH/SRH/BRN/Bunkers; jnp.take_along_axis +
+  searchsorted-equivalent for vertical interp).  All x64.
 
-  BRN ranges (forecaster usage):
-    < 10:     extreme shear, splitting/short-lived
-    10-45:    classic supercell range
-    > 50:     weak shear, ordinary thunderstorm
+  Each iter ships its own ``tests/test_fv3_<name>_iter<N>.py`` with
+  3-6 unit tests (zero/uniform/known-shear/3-D/finite/edge cases).
+  Total tests added: ~40 in <10 s.
 
-  Algorithm (vectorized):
-
-      ht[k] = layer-midpoint height above surface
-            (half-thickness of lowest layer + cumulative upward)
-      mask06[k]  = (ht[k] <= 6000)
-      mask005[k] = (ht[k] <=  500)
-      u06  = Σ delp·ua·mask06  / Σ delp·mask06
-      u005 = Σ delp·ua·mask005 / Σ delp·mask005
-      shear06 = sqrt((u005-u06)² + (v005-v06)²)
-      brn = CAPE / (0.5 · max(0.1, shear06²))
-
-  Tests (5/5 in <2 s):
-  1. CAPE=0 → BRN=0.
-  2. Uniform wind → shear=0 → BRN=CAPE/0.05.
-  3. Known 12-layer 0-6 km mean with U=20 m/s → analytical BRN.
-  4. 3-D (n_x, n_y, km) input → (n_x, n_y) output.
-  5. No NaN/Inf on random inputs.
-
-  Wired into iter-383 sweep (now 253).
-- Iter 687: **FV3 ``helicity_relative_fv3``** — storm-relative helicity (SRH).
-  Faithful JAX port of FV3 ``helicity_relative``
-  (tools/fv_diagnostics.F90:4811-4895).
-
-  SRH = vertical integral of streamwise vorticity transport in
-  [z_bot, z_top] layer.  NWS standard: 0-3 km layer.
-
-      SRH = Σ_k_in_window (u_k - uc)·dv_dz_k - (v_k - vc)·du_dz_k
-
-  where (uc, vc) = depth-weighted mean wind in the window and
-  du/dz, dv/dz are centered finite differences.
-
-  Pairs with iter-686 UH for supercell-tornado prediction.
-
-  SRH thresholds (per NWS):
-    150-299:    weak tornado possible
-    300-449:    supercells + strong tornadoes
-    > 450:      violent tornadoes
-
-  Algorithm (vectorized like iter-686):
-
-      dz_eff[k] = max(0, min(zh_above, z_top) - max(zh_below, z_bot))
-      uc = Σ ua·dz_eff / Σ dz_eff
-      vc = Σ va·dz_eff / Σ dz_eff
-      du_dz[k] = 0.5·(ua[k-1] - ua[k+1])   (interior centered)
-      dv_dz[k] = 0.5·(va[k-1] - va[k+1])
-      srh = Σ_{k in window} (ua-uc)·dv_dz - (va-vc)·du_dz
-
-  Tests (6/6 in <1 s):
-  1. Zero shear → SRH = 0.
-  2. Zero wind → SRH = 0.
-  3. Empty window (z_top == z_bot) → SRH = 0.
-  4. No NaN/Inf on random 3-D field.
-  5. hydrostatic=True without args raises.
-  6. Linear ua(z), va=0 → SRH = 0 (pure unidirectional shear).
-
-  Wired into iter-383 sweep (now 252).
-- Iter 686: **FV3 ``updraft_helicity_fv3``** — UH supercell diagnostic.
-  Faithful JAX port of FV3 ``updraft_helicity``
-  (tools/fv_diagnostics.F90:5048-5108).
-
-  Vertical integral of ``vort · w · dz`` between z_bot and z_top.
-  NWS standard: 2-5 km layer.  UH > 50 m²/s² → supercell threshold.
-
-  Algorithm (vectorized):
-
-      if hydrostatic:
-          dz = (R_d/g) · pt·(1 + zvir·q)·(peln[k+1] - peln[k])
-      else:
-          dz = -delz                # FV3 delz < 0
-      zh_above = cumsum(dz, from surface up)
-      zh_below = zh_above - dz
-      dz_eff = max(0, min(zh_above, z_top) - max(zh_below, z_bot))
-      uh = sum_k(vort · w · dz_eff)
-
-  Avoids FV3's sequential loop via cumulative-zh + clipped
-  partial-layer contribution.
-
-  Tests (6/6 in <1 s):
-  1. Zero vort → uh = 0.
-  2. Zero w → uh = 0.
-  3. Uniform Ω, W in window → uh = Ω·W·(z_top - z_bot).
-  4. Empty window (z_top == z_bot) → uh = 0.
-  5. hydrostatic=True without args raises.
-  6. No NaN/Inf on random inputs.
-
-  Wired into iter-383 sweep (now 251).
-- Iter 685: **FV3 ``prt_mxm_fv3``** — max/min/area-weighted-mean
-  diagnostic.  Faithful JAX port of FV3 ``prt_mxm``
-  (tools/fv_diagnostics.F90:4118-4161).
-
-  Returns ``(qmin, qmax, gmean)`` × fac:
-    - qmin, qmax : min/max over all cells & levels
-    - gmean : area-weighted global mean of bottom-layer (k=-1)
-              (FV3 bug-fix line 4157: g_sum on q[..., km])
-
-  Used by FV3 for diagnostic print summaries.
-
-  Tests (5/5 in <1 s):
-  1. All outputs scalar.
-  2. qmin/qmax = min/max(q) × fac.
-  3. Uniform field → gmean = constant.
-  4. fac doubles output.
-  5. No NaN/Inf on random inputs.
-
-  Wired into iter-383 sweep (now 250).
-- Iter 684: **FV3 ``get_height_given_pressure_fv3``** — height at p.
-  Faithful JAX port of FV3 ``get_height_given_pressure``
-  (tools/fv_diagnostics.F90:4366-4411).  Inverse of iter-683.
-
-  Algorithm (mirror-method extrapolation for below-surface):
-
-      pn[km+1+i] = 2·peln[km] - peln[km-i-1]  for i=0..k2-1
-      gz[km+1+i] = 2·wz[km] - wz[km-i-1]
-      (k2 = max(12, km/2+1) entries appended)
-
-      Then for target log_p:
-          find k where pn[k] <= log_p <= pn[k+1]
-          height = gz[k] + (gz[k+1] - gz[k]) ·
-                   (log_p - pn[k]) / (pn[k+1] - pn[k])
-
-  Mirror method allows smooth extrapolation below surface
-  pressure.  Used by FV3 for pressure-level diagnostic height
-  lookups.
-
-  Verified iter-683/iter-684 round-trip exact to 1e-8.
-
-  Tests (5/5 in <1 s):
-  1. At log_p=peln[0]: h = wz[0] (top).
-  2. At log_p=peln[km]: h = wz[km] (surface).
-  3. h monotonic decreasing with log_p.
-  4. Round-trip with iter-683: h → p → h.
-  5. Finite over reasonable log_p range.
-
-  Wired into iter-383 sweep (now 249).
-- Iter 683: **FV3 ``get_pressure_given_height_fv3``** — pressure at z.
-  Faithful JAX port of FV3 ``get_pressure_given_height``
-  (tools/fv_diagnostics.F90:4312-4365).  Inverse of iter-681:
-  given target height, find pressure via log-p linear interp.
-
-  Algorithm:
-
-      if h >= surface (above ground):
-          find k with wz[k+1] <= h < wz[k]
-          logp = peln[k] + (peln[k+1] - peln[k]) ·
-                 (wz[k] - h) / (wz[k] - wz[k+1])
-          p = exp(logp)
-      else (below surface, extrapolate):
-          tm = (R_d/g) · (ts + 3.25e-3·(wz[km] - h))   # 6.5 K/km lapse
-          p = exp(peln[km] + (wz[km] - h)/tm)
-
-  Used by FV3 to convert z-level diagnostics to pressure-level.
-  Optional ``fac`` multiplier for unit conversions.
-
-  Tests (6/6 in <1 s):
-  1. At surface: p ≈ p_s.
-  2. Below surface: p > p_s (extrapolation branch).
-  3. At top: p ≈ ptop.
-  4. p monotonic decreasing with h.
-  5. fac doubles output.
-  6. Finite for all reasonable h.
-
-  Wired into iter-383 sweep (now 248).
-- Iter 682: **FV3 ``range_check_fv3``** — field-range sanity check.
-  Faithful JAX port of FV3 ``range_check_3d`` / ``range_check_2d``
-  (tools/fv_diagnostics.F90:3948-4078).  Unified single function
-  for any-shape input.
-
-  Returns ``(bad_range, qmin, qmax)``:
-    - bad_range : bool scalar — True if any value outside [q_low, q_hi]
-    - qmin, qmax : actual min/max of q
-
-  Used by FV3 for diagnostic range sanity checks (catch numerical
-  blowup before NaN propagation).
-
-  Tests (5/5 in <1 s):
-  1. In-range field → bad_range = False; qmin, qmax exact.
-  2. Below q_low → bad_range = True.
-  3. Above q_hi → bad_range = True.
-  4. qmin / qmax match jnp.min/max.
-  5. Works on 2D and 3D inputs identically.
-
-  Wired into iter-383 sweep (now 247).
-- Iter 681: **FV3 ``get_height_field_fv3``** — geopotential heights.
-  Faithful JAX port of FV3 ``get_height_field``
-  (tools/fv_diagnostics.F90:3911-3945).
-
-  Hydrostatic branch:
-
-      wz[km]  = zsurf
-      wz[k]   = wz[k+1] + (R_d/g) · pt[k]·(1+zvir·q[k])·(peln[k+1] - peln[k])
-
-  Non-hydrostatic branch:
-
-      wz[km]  = zsurf
-      wz[k]   = wz[k+1] - delz[k]    (FV3 delz < 0)
-
-  Builds wz top-down from surface upward.  Vectorized via
-  reverse-cumsum.  Verified isothermal hydrostatic exact:
-  wz[0]-wz[km] = (R_d/g)·T·ln(p_s/p_top).
-
-  Used by FV3 for diagnostic z-level lookups and 3D vertical
-  coord conversion.
-
-  Tests (6/6 in <1 s):
-  1. Output shape (..., km+1).
-  2. wz at km = zsurf.
-  3. Monotonic decrease from top to bottom.
-  4. Isothermal hydrostatic exact.
-  5. Non-hydrostatic branch via delz.
-  6. Missing delz when hydrostatic=False raises ValueError.
-
-  Wired into iter-383 sweep (now 246).
+  Wired into iter-383 sweep: 245 → 254 modules.
 - **Iters 671-679 (compacted iter 680)**: FV3 ingestion + diagnostic
   utilities.  9 iterations covering DA increment readers,
   diagnostic helpers, and vertical interp:

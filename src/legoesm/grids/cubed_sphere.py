@@ -2885,6 +2885,119 @@ def compute_brn_fv3(
     return brn, shear06
 
 
+def bunkers_vector_fv3(
+    ua: jax.Array, va: jax.Array,
+    delz: jax.Array | None = None,
+    pt: jax.Array | None = None, q: jax.Array | None = None,
+    peln: jax.Array | None = None,
+    hydrostatic: bool = False,
+    zvir: float | None = None,
+    bunkers_d: float = 7.5,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 689: Bunkers right-mover storm motion vector.
+
+    Faithful JAX port of FV3 ``bunkers_vector``
+    (tools/fv_diagnostics.F90:4970-5046).
+
+    Bunkers storm motion is the empirical right-mover supercell
+    motion predictor.  Pairs with iter-687 SRH (which expects an
+    explicit storm motion (uc, vc) as input).
+
+    Algorithm:
+
+        umn, vmn = depth-weighted mean wind in 0-6 km layer
+        usfc, vsfc = surface (lowest layer) wind
+        u6km, v6km = linearly-interpolated wind at z = 6000 m
+        (ushr, vshr) = (u6km - usfc, v6km - vsfc)
+        shrmag = ||(ushr, vshr)||
+        uc = umn + 7.5 · vshr / shrmag
+        vc = vmn - 7.5 · ushr / shrmag
+
+    The 7.5 m/s offset to the right of the shear vector is the
+    empirical Bunkers (2000) right-mover constant.
+
+    Parameters
+    ----------
+    ua, va : jax.Array, shape (..., km)
+        A-grid wind components.
+    delz : jax.Array, shape (..., km), optional
+        Layer thickness (NEGATIVE in FV3).  Required if not hydrostatic.
+    pt, q, peln, zvir : optional
+        Hydrostatic dz reconstruction; required if hydrostatic.
+    hydrostatic : bool, default False.
+    bunkers_d : float, default 7.5
+        Empirical right-mover offset (m/s).
+
+    Returns
+    -------
+    uc, vc : jax.Array, shape (...,)
+        Bunkers right-mover storm motion components (m/s).
+    """
+    if hydrostatic:
+        if pt is None or q is None or peln is None:
+            raise ValueError("hydrostatic=True requires pt, q, peln")
+        if zvir is None:
+            zvir = constants.R_v / constants.R_d - 1.0
+        rdg = constants.R_d / constants.g
+        dz = rdg * pt * (1.0 + zvir * q) * (peln[..., 1:] - peln[..., :-1])
+    else:
+        if delz is None:
+            raise ValueError("hydrostatic=False requires delz")
+        dz = -delz
+
+    # Layer top/bottom heights above surface (k=0 top, k=-1 surface)
+    dz_reversed = dz[..., ::-1]
+    cumsum_from_surface = jnp.cumsum(dz_reversed, axis=-1)
+    zh_above = cumsum_from_surface[..., ::-1]
+    zh_below = zh_above - dz
+
+    # Mass-weighted mean wind in 0-6 km layer
+    dz_eff = jnp.maximum(
+        0.0,
+        jnp.minimum(zh_above, 6000.0) - jnp.maximum(zh_below, 0.0),
+    )
+    total = jnp.sum(dz_eff, axis=-1)
+    safe_total = jnp.where(total > 0.0, total, 1.0)
+    umn = jnp.sum(ua * dz_eff, axis=-1) / safe_total
+    vmn = jnp.sum(va * dz_eff, axis=-1) / safe_total
+
+    # Surface wind (lowest layer in FV3 = last Python index)
+    usfc = ua[..., -1]
+    vsfc = va[..., -1]
+
+    # Linear interpolation of wind at z = 6 km across bracket layer
+    in_bracket = (zh_below < 6000.0) & (zh_above >= 6000.0)
+    ua_in_b = jnp.sum(ua * in_bracket, axis=-1)
+    va_in_b = jnp.sum(va * in_bracket, axis=-1)
+    zh_bot_b = jnp.sum(zh_below * in_bracket, axis=-1)
+    zh_top_b = jnp.sum(zh_above * in_bracket, axis=-1)
+    dz_b = zh_top_b - zh_bot_b
+    # Layer just below bracket (lower altitude, higher Python index):
+    # shift in_bracket so True moves one position higher
+    in_below = jnp.concatenate(
+        [jnp.zeros_like(in_bracket[..., :1]), in_bracket[..., :-1]],
+        axis=-1,
+    )
+    ua_below = jnp.sum(ua * in_below, axis=-1)
+    va_below = jnp.sum(va * in_below, axis=-1)
+    safe_dz_b = jnp.where(dz_b > 0.0, dz_b, 1.0)
+    frac = (6000.0 - zh_bot_b) / safe_dz_b
+    u6km = ua_below + (ua_in_b - ua_below) * frac
+    v6km = va_below + (va_in_b - va_below) * frac
+    # If column doesn't bracket 6 km, fall back to umn/vmn
+    has_bracket = jnp.any(in_bracket, axis=-1)
+    u6km = jnp.where(has_bracket, u6km, umn)
+    v6km = jnp.where(has_bracket, v6km, vmn)
+
+    ushr = u6km - usfc
+    vshr = v6km - vsfc
+    shrmag = jnp.sqrt(ushr * ushr + vshr * vshr)
+    safe_shrmag = jnp.where(shrmag > 0.0, shrmag, 1.0)
+    uc = umn + bunkers_d * vshr / safe_shrmag
+    vc = vmn - bunkers_d * ushr / safe_shrmag
+    return uc, vc
+
+
 def helicity_relative_fv3(
     ua: jax.Array, va: jax.Array,
     delz: jax.Array | None = None,
