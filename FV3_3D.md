@@ -4906,3 +4906,35 @@ is verifiable with unit tests in seconds rather than wall-time
 sweeps.  Users running the NH compressible-Euler 3D path now have
 the same cube-imprint defense as users running the PE 3D path.
 
+## Iter 771 — mixing_ratio_fv3 helper + iter-716 refactor
+
+Extracted `mixing_ratio_fv3(q_sphum)` to `grids/cubed_sphere.py`
+from the inline q→r conversion in iter-716 ``eqv_pot_bolton_fv3``.
+Identity:
+
+```
+r = q / (1 − q)     [kg/kg]
+```
+
+iter-716 line 4797 used `jnp.maximum(1e-10, q/(1-q) * 1000.0)`
+(g/kg, with floor 1e-10 g/kg = 1e-13 kg/kg).  Refactored to:
+`r = mixing_ratio_fv3(q) * 1000.0`.  The helper uses floor 1e-12
+kg/kg (= 1e-9 g/kg) — 10× larger than the old floor, but well below
+any atmospheric q (typical q ≳ 1e-6 kg/kg).  For all realistic
+sounding inputs the floor never engages → bit-identical θ_e output
+verified by iter-716 8/8 tests pass post-refactor.
+
+Test: `tests/test_fv3_mixing_ratio_iter771.py` (6 tests: r ≈ q
+within 2% for atmospheric q, r > q for any q > 0, floor engages at
+q=0, iter-716 θ_e regression preserved, 3-D shapes, finite).
+
+### Why this iteration was meaningful
+
+Matches the iter-720 / iter-727 / iter-728 / iter-766 helper-
+extraction lineage: pull inline arithmetic into a named, reusable
+helper that future moist-thermo code (DSE-of-mixing-ratio budgets,
+saturation cross-checks, condensate accounting) can call without
+re-deriving.  Eliminates the last remaining inline q/(1-q) in
+cubed_sphere.py.  Pure JAX, vmap-compatible.  No new physical
+constants introduced.
+

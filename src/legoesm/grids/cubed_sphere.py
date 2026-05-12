@@ -4070,6 +4070,42 @@ def vapor_pressure_from_q_fv3(
     return p_mb * q_safe / (eps + q_safe * (1.0 - eps))
 
 
+def mixing_ratio_fv3(
+    q_sphum: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 771: mixing ratio from specific humidity.
+
+    Identity:
+
+        r = q / (1 − q)   [kg/kg]
+
+    The mixing ratio is the mass of water vapor per unit mass of
+    dry air (r), while the specific humidity is the mass of water
+    vapor per unit mass of total moist air (q).  For typical
+    atmospheric q ~ 1e-3 to 2e-2 kg/kg, r ≈ q within ~2 %.
+
+    Used by iter-716 ``eqv_pot_bolton_fv3`` (Bolton 1980 θ_e
+    formula uses r explicitly), and any future moist-thermo helper
+    that needs the dry-air-referenced ratio (e.g. dry static
+    energy budgets, condensate mass-mixing).
+
+    Output uses a small positive floor (1e-12 kg/kg) to keep
+    downstream ``log`` / ``1/r`` paths finite for vanishing q.
+
+    Parameters
+    ----------
+    q_sphum : jax.Array
+        Specific humidity (kg/kg).
+
+    Returns
+    -------
+    r : jax.Array
+        Mixing ratio (kg/kg, ≥ 1e-12).
+    """
+    q_safe = jnp.maximum(1e-12, q_sphum)
+    return q_safe / (1.0 - q_safe)
+
+
 def dew_point_fv3(
     e_mb: jax.Array,
 ) -> jax.Array:
@@ -4793,8 +4829,8 @@ def eqv_pot_bolton_fv3(
         cappa = cappa_moist_fv3(q, zvir=zvir)
         # iter-763: delegate T_LCL to lcl_temperature_fv3
         t_l = lcl_temperature_fv3(pt, p_mb, q)
-        # Dry mixing ratio r (g/kg) — also needed in the θ_e prefactor
-        r = jnp.maximum(1e-10, q / (1.0 - q) * 1000.0)
+        # iter-771: delegate r = q/(1-q) to mixing_ratio_fv3 (×1000 for g/kg)
+        r = mixing_ratio_fv3(q) * 1000.0
         capa = cappa * (1.0 - r * 0.28e-3)
         return jnp.exp(
             (3.376 / t_l - 0.00254) * r * (1.0 + r * 0.81e-3)
