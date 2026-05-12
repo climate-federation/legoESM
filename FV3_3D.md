@@ -1195,6 +1195,38 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 638: **FV3 ``compute_dz_L32``**.  Faithful JAX port of
+  FV3 ``compute_dz_L32`` (tools/fv_eta.F90:2000-2067).  Builds
+  FV3-canonical 32-layer vertical with ztop ≈ 60 km.
+
+  Three blocks (FV3 1-indexed):
+    - k=1, 2 (bottom): dz[0]=75 m, dz[1]=112.5 m (1.5× growth)
+    - k=3..23 (middle, k1=21): linear stretching to z1=10 km
+      dz[k] = dz0 + (k-k0)·dz1
+    - k=24..31 (upper, k2=8): linear stretching to z2=30 km
+      dz[k] = dz0_new + (k-k0-k1)·dz2
+    - k=32 (top): dz[31] = 2·dz[30]
+
+  After construction, dz is zflipped to top→bottom indexing
+  (FV3 final convention).
+
+  Mirror of iter-637 ``compute_dz_L101``.  Together both ports
+  cover FV3's canonical L32 and L101 vertical-coord references
+  for users porting hybrid-z setup code.
+
+  Lives in ``legoesm.grids.vertical`` alongside iter-634/635/636/637
+  vertical helpers.
+
+  Tests (7/7 in <1 s):
+  1. Output shape (32,).
+  2. Bottom layer (after zflip) = 75 m.
+  3. ztop = sum(dz).
+  4. All dz > 0.
+  5. No NaN/Inf.
+  6. Top layer = 2·dz[1] (FV3 construction).
+  7. ztop ≈ 60 km (FV3 documented bound).
+
+  Wired into iter-383 sweep (now 208).
 - Iter 637: **FV3 ``compute_dz_L101`` + ``set_external_eta``**.
   Faithful JAX ports of FV3 vertical helpers (tools/fv_eta.F90):
 

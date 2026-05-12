@@ -1096,6 +1096,76 @@ def set_external_eta(
     return ptop, ks
 
 
+def compute_dz_L32() -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 638: FV3 L32 layer thicknesses + ztop.
+
+    Faithful JAX port of FV3 ``compute_dz_L32``
+    (tools/fv_eta.F90:2000-2067).  Builds the FV3-canonical
+    32-layer vertical structure with ztop ≈ 60 km:
+
+    Three blocks (FV3 1-indexed, see ze/dz arrays):
+      - k=1, 2 (special bottom): dz[0]=75, dz[1]=112.5 m
+      - k=3..23 (middle, k1=21): linear stretching to z1=10 km
+        dz[k] = dz0 + (k-k0)·dz1
+      - k=24..31 (upper, k2=8): linear stretching to z2=30 km
+        dz[k] = dz0_new + (k-k0-k1)·dz2
+      - k=32 (top): dz[31] = 2·dz[30]
+
+    Then ``zflip`` reverses to top-down indexing (FV3 final
+    convention).
+
+    Returns
+    -------
+    dz : jax.Array, shape ``(32,)``
+        Layer thicknesses (top→bottom indexing).
+    ztop : jax.Array (scalar)
+        Total height = sum(dz).
+    """
+    km = 32
+    k0, k1, k2 = 2, 21, 8
+    z1, z2 = 10.0e3, 30.0e3
+    dz0_init = 75.0
+
+    # Build bottom-up dz in 1-indexed style then zflip at end
+    dz = jnp.zeros((km,))
+    # dz[0] = dz0; dz[1] = 1.5*dz0   (FV3 1-indexed k=1, 2)
+    dz = dz.at[0].set(dz0_init)
+    dz_special = 1.5 * dz0_init                       # 112.5
+    dz = dz.at[1].set(dz_special)
+    # ze[2] (1-indexed) = ze[3] in FV3 = dz[0] + dz[1] = 187.5
+    ze3 = dz_special + dz0_init                        # 187.5
+
+    # Middle block (FV3 k = k0+1..k0+k1 = 3..23 → 0-indexed [2, 22])
+    dz0_mid = dz_special                               # 112.5
+    dz1 = 2.0 * (z1 - ze3 - k1 * dz0_mid) / (k1 * (k1 - 1))
+    # FV3 loop: do k = k0+1, k0+k1: dz[k] = dz0 + (k-k0)*dz1
+    # 0-indexed k_python = k_fortran - 1
+    # For k_fortran = 3..23 → k_python = 2..22; (k - k0) = (k_fortran - 2)
+    k_arr = jnp.arange(2, 23)                          # 0-indexed
+    k_minus_k0 = k_arr - 1                             # k_fortran - k0 in 1-indexed
+    # k_fortran = k_python + 1; (k_fortran - k0) = (k_python - 1)
+    dz_mid = dz0_mid + k_minus_k0 * dz1
+    dz = dz.at[2:23].set(dz_mid)
+
+    # After middle, ze[k0+k1+1 (1-indexed) = ze[24] = 0-indexed ze[23]]
+    ze_after_mid = ze3 + float(jnp.sum(dz_mid))
+    # Upper block (FV3 k = k0+k1+1..k0+k1+k2 = 24..31 → 0-indexed [23, 30])
+    dz0_upper = float(dz[22])                          # dz[k1+k0] 1-indexed = dz[23]
+    dz2 = 2.0 * (z2 - ze_after_mid - k2 * dz0_upper) / (k2 * (k2 - 1))
+    k_arr_upper = jnp.arange(23, 31)
+    k_minus_k0_k1 = k_arr_upper - 22                   # (k_fortran - k0 - k1) = (k_python - 22) when k_python = k_fortran - 1, k_fortran = k_python + 1, (k_python + 1 - 2 - 21) = k_python - 22
+    dz_upper = dz0_upper + k_minus_k0_k1 * dz2
+    dz = dz.at[23:31].set(dz_upper)
+
+    # Top (FV3 k=km): dz[km-1] (0-indexed) = 2·dz[km-2]
+    dz = dz.at[km - 1].set(2.0 * dz[km - 2])
+
+    # zflip: FV3 dz was built bottom-up; flip to top-down
+    dz_flipped = jnp.flip(dz)
+    ztop = jnp.sum(dz_flipped)
+    return dz_flipped, ztop
+
+
 def compute_dz_L101(
     stretch_f: float = 1.16,
     dz0: float = 40.0,
