@@ -3022,6 +3022,31 @@ def potential_energy_column_fv3(
     return column_integral_delp_fv3(phi_avg, delp)
 
 
+def column_geopotential_thickness_fv3(
+    delz: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 758: column geopotential thickness (z_top − z_surface).
+
+        thickness = Σ_k (−delz[k]) = total atmospheric depth (m)
+
+    Standard FV3 dimensional check.  Earth troposphere depth at
+    50 layers × ~250 m ≈ 12.5 km.
+
+    Independent of surface elevation phis — only depends on delz.
+
+    Parameters
+    ----------
+    delz : jax.Array, shape (..., km)
+        Layer thickness (NEGATIVE in FV3).
+
+    Returns
+    -------
+    thickness : jax.Array, shape (...,)
+        Column thickness (m, positive).
+    """
+    return jnp.sum(-delz, axis=-1)
+
+
 def total_atmosphere_mass_fv3(
     delp: jax.Array,
 ) -> jax.Array:

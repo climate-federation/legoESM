@@ -1195,6 +1195,23 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 758: **``column_geopotential_thickness_fv3``** — z_top − z_surface.
+
+      thickness = Σ_k (−delz[k])    (m, positive)
+
+  Standard atmospheric dimensional check.  Earth troposphere
+  ~12.5 km from 50 layers × 250 m.  Independent of surface
+  elevation phis — only depends on delz.
+
+  Tests (6/6 in <1 s):
+  1. Uniform delz=-500, km=10 → thickness=5000.
+  2. Σ −delz known sum.
+  3. delz=0 → thickness=0.
+  4. FV3 delz<0 → thickness>0.
+  5. 3-D shapes.
+  6. No NaN/Inf.
+
+  Wired into iter-383 sweep (now 323).
 - Iter 757: **``total_atmosphere_mass_fv3``** — column air mass.
 
       M_col = Σ_k delp / g    (kg/m²)
