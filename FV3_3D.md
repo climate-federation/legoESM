@@ -1195,6 +1195,15 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 578: **dycore linearity at small perturbations**.
+  Apply Gaussian θ′ bump at amplitudes 1 mK and 10 mK,
+  zero winds, 10 steps @ C16 + optimal stack:
+  - amp=1 mK:  max|θ′|=9.85e-4 K, max|u|=1.64e-5 m/s
+  - amp=10 mK: max|θ′|=9.85e-3 K, max|u|=1.64e-4 m/s
+  10× IC → **exactly 10.00× response** in both fields.
+  Perfect linearity at small perturbations.  Confirms dycore
+  has no spurious nonlinear self-excitation at low signal
+  levels.  1/1 in 67 s.  Wired into iter-383 sweep (now 155).
 - Iter 576: **50-step optimal stack — non-linear growth**.
   Extend iter-566 to 50 steps @ C24 + optimal stack:
   - 10 steps: edge_std = 5.83e-3, max|θ′|=0.6, max|u|≈30
