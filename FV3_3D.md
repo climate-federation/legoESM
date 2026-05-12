@@ -1195,6 +1195,28 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 699: **C16 verification of iter-698 reduction**.
+
+  iter-698 measured −25.8 % θ′ edge ratio at C8.  iter-699 verifies
+  at the next resolution step (C16), 2 seeds × 3 dycore steps:
+
+  ```
+  OFF: mean θ′ edge ratio = 5.1496
+  ON : mean θ′ edge ratio = 4.0244
+  delta (ON − OFF) = −1.1252  (−21.9 %)
+  ```
+
+  C16 reduction (−21.9 %) close to C8 (−25.8 %).  Confirms factory
+  default promotion (iter-698) is the right call.  Suggests
+  ``use_fv3_a2b_ord4_vector_uv`` continues to help at higher
+  resolution.  Next: C24-C32 the documented floor regime.
+
+  Note absolute θ′ edge ratio INCREASES with resolution
+  (4.18 → 5.15 from C8 → C16), as expected — finer grid resolves
+  more edge-localized vorticity structure.  But ON-vs-OFF % is
+  comparable.
+
+  Wired into iter-383 sweep (now 263).
 - Iter 698: **EMPIRICAL POSITIVE — 4th-order vector cc→corner
   reduces θ′ edge ratio 25.8 % at C8**.
 
