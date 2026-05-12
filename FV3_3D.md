@@ -1195,6 +1195,24 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 607: **``cubed_to_latlon`` utility** (FV3 c2l_ord2 alias).
+  Faithful port of FV3 ``cubed_to_latlon`` (fv_grid_utils.F90:
+  2386) and ``c2l_ord2`` (line 2547) naming/semantics.  D-grid
+  (u, v) on corners → cell-center (ua, va) in geographic
+  (east, north) frame.  legoESM had ``dgrid_to_center_geographic``
+  (operators_cdgrid.py:278) but only 2D; iter 607:
+  - Extends ``dgrid_to_center_geographic`` to handle 3D
+    ((6, n+1, n+1, nlev)) D-grid arrays.
+  - Adds ``cubed_to_latlon`` alias matching FV3 naming so users
+    porting FV3 code find the expected entry point.
+  - Documents semantics match FV3 c2l_ord4 (covariant→latlon
+    with rotation matrix) for the grid_type<4 cubed-sphere
+    branch via iter-326's corner rotation.
+  Tests (3/3 in 9 s):
+  1. Alias matches direct call bit-for-bit.
+  2. 3D D-grid winds produce 3D cell-center output (finite).
+  3. Sanity check: uniform u_d → finite ua, va.
+  Wired into iter-383 sweep (now 180).
 - Iter 606: **terrain_filter** (FV3 del2/del4_cubed_sphere port).
   Faithful port of FV3 ``del2_cubed_sphere`` and
   ``del4_cubed_sphere`` from ``tools/fv_surf_map.F90:817+``.

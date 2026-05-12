@@ -279,21 +279,63 @@ def dgrid_to_center_geographic(u_d, v_d, cdgrid):
     """D-grid corner → cc east/north (geographic). Rotate BEFORE averaging.
 
     Averaging in face-local then rotating gives spurious v_north (0.85 m/s at C16 for solid-body).
-    2D only.
+    Handles 2D ((6,n+1,n+1)) and 3D ((6,n+1,n+1,nlev)) D-grid arrays — the corner
+    rotation matrices are 2D (per-face), broadcast over the trailing level axis.
     """
     ca = cdgrid.cos_angle_corner  # (6, n+1, n+1)
     sa = cdgrid.sin_angle_corner  # (6, n+1, n+1)
+
+    if u_d.ndim == 4:
+        # 3D D-grid: broadcast 2D angles over the trailing level axis.
+        ca = ca[..., None]
+        sa = sa[..., None]
 
     # Rotate to geographic at each corner
     ue = ca * u_d - sa * v_d  # u_east at corners
     vn = sa * u_d + ca * v_d  # v_north at corners
 
-    # Average geographic winds to cell centres
-    u_east = 0.25 * (ue[:, :-1, :-1] + ue[:, 1:, :-1]
-                      + ue[:, :-1, 1:] + ue[:, 1:, 1:])
-    v_north = 0.25 * (vn[:, :-1, :-1] + vn[:, 1:, :-1]
-                       + vn[:, :-1, 1:] + vn[:, 1:, 1:])
+    # Average geographic winds to cell centres (works for 2D or 3D last-spatial-dim slice).
+    if u_d.ndim == 3:
+        u_east = 0.25 * (ue[:, :-1, :-1] + ue[:, 1:, :-1]
+                          + ue[:, :-1, 1:] + ue[:, 1:, 1:])
+        v_north = 0.25 * (vn[:, :-1, :-1] + vn[:, 1:, :-1]
+                           + vn[:, :-1, 1:] + vn[:, 1:, 1:])
+    else:
+        u_east = 0.25 * (ue[:, :-1, :-1, :] + ue[:, 1:, :-1, :]
+                          + ue[:, :-1, 1:, :] + ue[:, 1:, 1:, :])
+        v_north = 0.25 * (vn[:, :-1, :-1, :] + vn[:, 1:, :-1, :]
+                           + vn[:, :-1, 1:, :] + vn[:, 1:, 1:, :])
     return u_east, v_north
+
+
+def cubed_to_latlon(u_d, v_d, cdgrid):
+    """FV3_3D iter 607: alias for ``dgrid_to_center_geographic``.
+
+    Matches FV3 ``cubed_to_latlon`` (fv_grid_utils.F90:2386) naming
+    so users porting FV3 code find the expected entry point.
+
+    Faithful to FV3 c2l_ord2 (line 2547) semantics: D-grid (u, v)
+    on edges → cell-center (ua, va) in geographic (east, north)
+    frame.  FV3's ``c2l_ord=2`` (2nd order) is the default; ord=4
+    (covariant-to-latlon via a11/a12/a21/a22 matrix) is the more
+    accurate variant per ``c2l_ord4`` at fv_grid_utils.F90:2407 —
+    legoESM's iter-326 ``cos_angle_corner``/``sin_angle_corner``
+    rotation matches the c2l_ord4 metric semantics for the
+    cubed-sphere grid_type<4 branch.
+
+    Parameters
+    ----------
+    u_d, v_d : jax.Array
+        D-grid winds (shape (6, n+1, n+1) or (6, n+1, n+1, nlev)).
+    cdgrid : CubedSphereCDGrid
+        Provides cos_angle_corner / sin_angle_corner.
+
+    Returns
+    -------
+    ua, va : jax.Array
+        Cell-centered geographic winds (east, north).
+    """
+    return dgrid_to_center_geographic(u_d, v_d, cdgrid)
 
 
 # ==============================================================================
