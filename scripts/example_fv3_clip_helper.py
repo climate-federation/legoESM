@@ -87,13 +87,19 @@ def main():
     print(f"  state.u.data.shape = {state.u.data.shape}")
 
     # === 2. Build FV3-faithful config (min-edge variant) ===
-    print("\nBuilding edge-min config (50% reduction baseline)...")
+    #
+    # iter-553/562/564 finding: for SMOOTH atmospheric ICs (production),
+    # boost heat_source_del2_iters to 8 for -89% edge_std reduction.
+    # For RANDOM/STRESS-TEST ICs (training), keep default iters=2.
+    print("\nBuilding min-edge config with heat_source_del2_iters=8 boost...")
     cfg = make_legoesm_nh_min_edge_config(
         n_acoustic_substeps=4,
         damp_v=0.030, damp_v_d_con=1.0,
         corner_div_damp_d2_bg=5e-4, corner_div_damp_d_con=1.0,
         div_damp_coeff=1e6, div_damp_d_con=1.0,
         damp_w=0.030, damp_w_d_con=1.0,
+        heat_source_del2_iters=8,    # iter-562: -89% edge_std
+        heat_source_del2_coeff=0.20,  # iter-563: FV3 default optimal
     )
     model = CDGridCompressibleEulerModel(grid, hc, tm, cfg)
 
