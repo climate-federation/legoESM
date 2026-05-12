@@ -871,6 +871,7 @@ def fill_corner_region(
     duogrid: DuoGridData,
     halo: int,
     monotone_clip: bool = False,
+    monotone_clip_slack: float = 0.0,
 ) -> jax.Array:
     """Fill corner blocks using FV3 Lagrange polynomial interpolation.
 
@@ -955,6 +956,15 @@ def fill_corner_region(
         ], axis=-1)  # (6, 4)
         lo = jnp.min(neighbours, axis=-1)
         hi = jnp.max(neighbours, axis=-1)
+        # iter-501: optional slack — expand clip range by
+        # ``slack * (hi - lo)`` on each side.  slack=0 →
+        # strict iter-802 clip; slack > 0 → softer monotonic
+        # constraint (allows mild overshoot, less aggressive
+        # than strict clip that iter-499 found over-corrects).
+        if monotone_clip_slack > 0.0:
+            band = monotone_clip_slack * (hi - lo)
+            lo = lo - band
+            hi = hi + band
         return jnp.clip(val, lo, hi)
 
     def _fill_one_corner(padded, x_interp, y_interp, x_coefs, y_coefs,

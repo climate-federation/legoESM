@@ -31,3 +31,86 @@ def column_water_vapor(q_v, p_s, dsigma):
         Column water vapor [...], same leading shape as p_s.
     """
     return jnp.sum(q_v * p_s[..., None] * dsigma, axis=-1) / constants.g
+
+
+def column_mass_weighted_mean(field, mass_per_cell, axis: int = -1):
+    """FV3_3D iter 605: column mass-weighted mean of a 3D field.
+
+    Faithful port of FV3 ``dyn_core.F90:1313-1326`` (the d_ext
+    external-mode-damping column-mean computation):
+
+        out(i,j) = Σ_k mass[k] · field[k] / Σ_k mass[k]
+
+    Used by FV3's d_ext > 0 external (barotropic) mode damping
+    branch where ``field = vt`` (divergence-flux) and ``mass =
+    ptc[k]`` (column mass weight per level).  Also useful for
+    other column diagnostics (e.g., mass-weighted-mean potential
+    temperature, mass-weighted divergence).
+
+    Parameters
+    ----------
+    field : jax.Array, shape (..., nlev)
+        Field to average.
+    mass_per_cell : jax.Array, shape (..., nlev)
+        Mass weight per level (delp, rho·dz, etc.).
+    axis : int, default -1
+        Vertical axis.
+
+    Returns
+    -------
+    jax.Array, same shape as field minus the vertical axis.
+        Column mass-weighted mean.
+
+    Notes
+    -----
+    Guards against zero total mass (returns 0 in that case).
+    """
+    weighted_sum = jnp.sum(field * mass_per_cell, axis=axis)
+    total_mass = jnp.sum(mass_per_cell, axis=axis)
+    return jnp.where(
+        jnp.abs(total_mass) > 1e-30,
+        weighted_sum / jnp.where(jnp.abs(total_mass) > 1e-30,
+                                  total_mass, 1.0),
+        0.0,
+    )
+
+
+def column_d_ext_field(vt, delp, d_ext: float, da_min_c: float):
+    """FV3_3D iter 605: compute the d_ext external-mode damping field.
+
+    Faithful port of FV3 ``dyn_core.F90:1310-1326``:
+
+        if d_ext > 0:
+            d2_divg = d_ext · da_min_c
+            divg2(i,j) = d2_divg · Σ_k ptc·vt / Σ_k ptc
+
+    Returns ``divg2``, a 2D field that gets passed to ``one_grad_p``
+    in FV3 to add a column-mean divergence-damping term to the
+    pressure-gradient force.
+
+    legoESM doesn't yet wire d_ext into the NH dycore (the PGF
+    machinery is complex); this utility makes the computation
+    available for users / tests / future plumbing.
+
+    Parameters
+    ----------
+    vt : jax.Array, shape (..., nlev)
+        Divergence-like field (FV3 vt at line 1316).
+    delp : jax.Array, shape (..., nlev)
+        Pressure thickness per cell (FV3 ptc).
+    d_ext : float
+        FV3 namelist d_ext parameter (default 0.02).
+    da_min_c : float
+        Minimum cell area at coarsest grid (FV3 gridstruct%da_min_c).
+
+    Returns
+    -------
+    divg2 : jax.Array, shape (..., )
+        d_ext·da_min_c · column mass-weighted vt.  Returns zeros
+        if ``d_ext <= 0``.
+    """
+    if d_ext <= 0.0:
+        return jnp.zeros(delp.shape[:-1])
+    d2_divg = d_ext * da_min_c
+    column_mean_vt = column_mass_weighted_mean(vt, delp)
+    return d2_divg * column_mean_vt

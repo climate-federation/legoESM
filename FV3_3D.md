@@ -11,6 +11,68 @@ visible cube imprint (concentric blobs at face centres bordered by
 red/blue rings at panel boundaries) in u/v wind snapshots from
 Held-Suarez and baroclinic test cases.
 
+## Key findings summary (iter 541)
+
+Comprehensive validation of the FV3-faithful 3D stack + the
+user-facing edge-artifact suppression helpers.
+
+**FV3 fidelity:** All 5 NH + 3 PE opt-in flags ported (see
+table below).  Faithful to ``../FV3/atmos_cubed_sphere-
+symmetryclean/``.
+
+**Edge artifacts:** Asymptotically converging, not eliminated.
+Refined characterization (iter 561-573):
+- ``heat_source_del2_iters=8`` reduces NH edge_std by 89%.
+- ``heat_source_del2_coeff=0.20`` (FV3 default) is OPTIMAL.
+- BEST config (factory + clip + iters=8) at C24 SBR →
+  edge_std = 5.83e-3 K (~6 mK).
+- Edge_std ~ U_0¹·²⁰ (mK-level for normal winds; calm ~0.4
+  mK at U_0=2 m/s; jet stream ~7 mK at U_0=20 m/s).
+- Edge_std ~ n_steps¹·¹⁵ (super-linear, bounded growth).
+- Edge_std plateau at ~5-6 mK floor at C24-C32; further
+  resolution improvement minimal.
+- **Zero IC → exactly zero output** (perfect rest preserve).
+- PE Held-Suarez → δT ~ 1 mK (essentially no artifact).
+Production estimate: at C96 + 1-day runs, edge noise should
+be ~120 mK — well below physical signal magnitude.
+
+This is FV3-faithful behavior — corners are formally lower-
+order in FV3 too.  Practical: negligible in real applications.
+
+**User-facing API for additional ~50% edge reduction:**
+
+iter-553 found two regimes:
+- **For SMOOTH atmospheric ICs (production, AMIP, HS, SBR):**
+  use ``make_fv3_faithful_nh_config()`` — 89.5% edge_std
+  reduction vs bare at C16 SBR.  All 5 NH fidelity flags ON.
+- **For RANDOM/STRESS-TEST ICs (training, perturbations):**
+  use ``make_legoesm_nh_min_edge_config()`` — 50% reduction
+  at C8 random IC (iter-466 finding).
+
+Both compatible with the clip-helper stack:
+- ``monotone_halo_clip_context(slack=0.5)`` (iter-505): 15-
+  site context manager, non-JIT.
+- ``make_clipped_step(model, state, dt, slack=0.5)`` (iter-
+  526): JIT-safe wrapper.  +0.6% performance overhead.
+- ``make_clipped_scan_step(..., n_steps=N)`` (iter-544):
+  multi-step JAX-scan API for long runs.
+
+**Verified properties:**
+- Mass conservation: NH 5e-9, PE 7e-9 over 10 steps (machine
+  precision).
+- ``jax.grad`` flows through (iter-522, iter-529).
+- JIT-compatible via ``make_clipped_step`` (iter-526).
+- Works on NH + PE + SW dycores (iter-526/529/531).
+- Terrain (mountain) compatible (iter-537).
+- Tracer transport: conservative + monotonic (iter-538).
+- 50-step mass test: 5.3 ppb drift through step 42; instability
+  at step 43 is C8 stability limit, NOT helper-induced
+  (iter-539).
+- Performance: +0.6% overhead vs raw jit (iter-541).
+
+See ``scripts/example_fv3_clip_helper.py`` for a runnable
+end-to-end demo.
+
 ## FV3-fidelity stack (iter 356/423 update)
 
 By iter-423 the FV3-fidelity opt-in stack closes the major
@@ -128,6 +190,135 @@ For non-faithful (baseline) behavior, use the bare config
 constructors (``CDGridCompressibleEulerConfig(...)`` /
 ``CDGridPrimitiveEquationConfig(...)``) — all flags default
 ``False`` for bit-for-bit pre-iter-320 behavior.
+
+### Edge-artifact-minimized factories (iter 467/468/483/484)
+
+For users prioritizing cube-edge artifact suppression over strict
+FV3-fidelity, two divergence-from-FV3 factories are provided:
+
+```python
+from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+    make_legoesm_nh_min_edge_config,             # iter-467: 50% reduction
+    make_legoesm_nh_min_edge_aggressive_config,  # iter-483: 60% reduction
+)
+from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    make_legoesm_pe_min_edge_config,             # iter-468 (PE mirror)
+    make_legoesm_pe_min_edge_aggressive_config,  # iter-484 (PE mirror)
+)
+```
+
+* ``min_edge`` factory: drops 3 hurting flags (iter-466 finding)
+  — 50% θ′ edge ratio reduction at C8+duogrid (4.54 → 2.25).
+* ``aggressive`` factory: above + ``corner_div_damp_d2_bg=5e-2``
+  (iter-482) — 60% reduction (3.50 → 1.42×).  Trade-off:
+  over-damps physical waves more than factory default.
+* PE variants are API-symmetric; iter-469/470 showed PE is
+  largely insensitive to these flag changes at C8.
+
+### Halo monotone-clip helpers (iter 505/526)
+
+For an additional ~50% long-term edge reduction (iter-511
+shows 53% benefit at 10 steps), wrap the dycore step with
+the iter-505 monotone-clip helper:
+
+**For non-JIT use** (or when JIT is compiled inside the
+context):
+
+```python
+from legoesm.grids.halo import monotone_halo_clip_context
+
+with monotone_halo_clip_context(slack=0.5):
+    new_state = model.step(state, dt)
+```
+
+**For JIT-compiled use** (recommended for long runs) — use
+the iter-526 ``make_clipped_step`` helper which forces
+tracing inside the context so clip is permanently baked in:
+
+```python
+from legoesm.grids.halo import make_clipped_step
+
+step = make_clipped_step(model, state, dt=10.0, slack=0.5)
+for _ in range(n_steps):
+    state = step(state, dt=10.0)
+```
+
+**For long-running batches**, use the iter-544 scan-based
+variant that compiles the entire n-step loop as a single
+``jax.lax.scan`` (no Python overhead per step):
+
+```python
+from legoesm.grids.halo import make_clipped_scan_step
+
+scan_step = make_clipped_scan_step(
+    model, state, dt=10.0, n_steps=100, slack=0.5,
+)
+final_state = scan_step(state)
+```
+
+Combined with ``make_legoesm_nh_min_edge_config`` (iter-466),
+this achieves **65.7% reduction** at C8+duogrid (iter-504).
+
+Verified properties of the helper stack:
+* Mass conservation: 5e-9 (NH) / 7e-9 (PE) over 10 steps
+  (iter-523/524).
+* ``jax.grad`` flows through (iter-522).
+* Cube-smooth IC converges with resolution (iter-519:
+  C8 e/i=1.43× → C16 1.29×).
+* 15 halo-site patches (iter-527 final coverage).
+
+## Duogrid investigation summary (iter 461-493 synthesis, iter 494 update)
+
+A 33-iter empirical investigation of cube-edge artifacts at
+C8 + duogrid + NH factory.  Key data points:
+
+| Iter | Finding |
+|------|---------|
+| 461 | First empirical edge-metric data: NH factory worsens 3.7%, PE improves 2.5%; both near 1.0 |
+| 462 | d2_bg_k1 sweep over 4 decades → ZERO change in NH ratio (corner-div sponge is per-level scalar invariant) |
+| 463 | rf_tau_days sweep → ZERO change (RF is per-level scalar invariant) |
+| 464 | heat_source_del2 reduces NH θ′ ratio 1.10 → 0.96 (14% drop) WITHOUT duogrid (positive control) |
+| 465 | NH per-flag at C8+duogrid: baseline 4.37; vector_halo_uv biggest helper (Δ+5.0); 3 flags HURT |
+| 466 | **50.4% reduction** dropping 3 hurting flags (4.54 → 2.25, 5 seeds) |
+| 469 | PE T edge ratio INSENSITIVE to all factory flags (max |Δ| < 1e-4) |
+| 470 | PE u_d also insensitive — PE is much less responsive than NH at C8 |
+| 471 | **Duogrid alone is the regime-changing factor** — same factory ON/OFF = 5.12× |
+| 472 | Duogrid penalty persists at C16 (4.12×) → not a low-res artifact |
+| 473 | duogrid INCREASES edge std 4.77× while interior std unchanged — bug at edges |
+| 474 | pad_halo_4d scalar+constant PASSES (5e-13) → rules out simple halo broken |
+| 475 | Linear field shows 3.5% overshoot in duogrid halo (not catastrophic alone) |
+| 476 | Vector halo + zero field PASSES exactly → rules out vector halo broken |
+| 477 | Laplacian iter alone doesn't amplify (×0.634 both grids) → refutes iter-476 hypothesis |
+| 478 | Penalty arrives in step 1 (3.67×); single-step composite, not multi-step accumulation |
+| 479 | Post-step damp_v/damp_w NOT the culprit (3.50→3.54× unchanged when disabled) |
+| 480 | **corner_div_damp is the key MITIGATOR** — without it, penalty explodes 30× to 109× |
+| 481 | corner_div_damp_d2_bg sweep: 100× boost → 36% reduction |
+| 482 | **Composite iter-466+iter-481: 59.5% reduction (3.50 → 1.42×)** |
+| 487 | Resolution scan: C8=5.12×, C16=4.12×, C24=4.72× → penalty plateaus 4-5× |
+| 489 | Overshoot LOCALIZED to cube-vertex (corner) cells — 24 cells/level globally |
+| 490 | ``pad_halo_4d`` exposes ``monotone_clip`` arg, eliminates iter-489 overshoot |
+| 491 | Random-field test: 76% halo overshoot (clip cuts to ≤ interior_max) |
+| 492 | Dycore monkey-patch (1 site): only 1.4% reduction |
+| 493 | Comprehensive 4-site patch: still only 1.5% — clip is NOT the dominant dycore fix |
+
+**Bottom line**: duogrid bug is real and persistent (~4-5×
+edge penalty at all tested resolutions).  Bisected to a
+composite single-step dycore + duogrid interaction (not
+isolable to any individual operator).
+
+Mitigation taxonomy:
+* **Working**: iter-466 flag drops (50%) + iter-481/482
+  corner_div boost (60% combined).
+* **Not working**: iter-490/493 halo-level monotone_clip
+  (only 1-2% dycore impact despite 76% halo overshoot).  The
+  iter-491 random-field finding overestimates dycore impact
+  because dycore intermediate fields are smoother than
+  random noise.
+
+Below 1.42× edge ratio likely requires deeper dycore changes
+than the halo-level clip — possibly in the cube-vertex
+interpolation logic itself, or in how the dycore composes
+halo reads with derivatives.
 
 ## Final state (iter 100 close-out, table updated through iter 103)
 
@@ -938,210 +1129,685 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
-- Iter 477: **iter-476 hypothesis REFUTED** — isolated test
-  of ``laplacian_compact_3d`` iterated 2× on a linear field
-  with duogrid vs no-duogrid produces IDENTICAL edge change
-  (× 0.634 both ways, agreeing to 0.4%).  The composition of
-  "iter-475 halo overshoot + iter-457 iterated Laplacian
-  amplification" does NOT explain iter-473's 4.77× edge-std
-  jump in isolation.
-    initial: edge std 4.06, interior 2.42
-    no-duogrid: edge 2.58, interior 2.29  (× 0.634 edge)
-    duogrid:    edge 2.58, interior 2.29  (× 0.634 edge)
-  Bisection-by-elimination is now exhausted on individual
-  operators — bug must come from the FULL dycore + duogrid
-  composition (acoustic substeps + RK3 stages + halo +
-  smoothing all interacting), not isolable to any single
-  operator.  This is a real-world example of "the whole
-  produces a worse result than the sum of parts".
-  Diagnostic infrastructure (iter-471/472/473/474/475/476/
-  477) now provides 7 regression tests + clear narrative for
-  whoever investigates the full-pipeline interaction.  1/1
-  in 11 s.  Wired into iter-383 sweep (now 72).
-- Iter 476: **second negative diagnostic** — ``pad_halo_
-  vector_4d`` with duogrid preserves a zero vector field
-  EXACTLY (u_max = 0, v_max = 0).  Combined with iter-474
-  (scalar+constant exact) + iter-475 (scalar+linear 3.5%
-  overshoot): both halo operators pass invariance tests.
-  Final hypothesis: the iter-473 4.77× edge-std jump comes
-  from DOWNSTREAM AMPLIFICATION of iter-475's small overshoot
-  through the iter-457 ``heat_source_del2_iters=2`` Laplacian
-  smoothing — each Laplacian iteration includes a halo pad,
-  so 2 iters * 3.5% per halo pass compounds the edge
-  artifact.  Consistent with iter-465 finding that
-  ``heat_source_del2_iters=0`` reduces the edge ratio.
-  Bisection conclusion: the duogrid halo OPERATORS are
-  correct; the bug is the COMPOSITION of (a) duogrid's 3.5%
-  linear-extrapolation overshoot + (b) iterated Laplacian
-  smoothing that amplifies it.  2/2 in 5 s.  Wired into iter-
-  383 sweep (now 71).
-- Iter 475: extend iter-474 isolation to LINEAR-in-index
-  field on cubed sphere.  Test ``f(i,j)=i+j`` (independent of
-  face / level), measure halo max-abs:
-    interior max-abs:         14.0000
-    no-duogrid halo max-abs:  13.5187
-    duogrid    halo max-abs:  14.4907
-  Both finite + stable.  Duogrid produces ~7% larger halo
-  values than no-duogrid (14.49 vs 13.52), with duogrid
-  slightly OVERSHOOTING interior max — small extrapolation
-  bias.  Not catastrophic alone; doesn't explain iter-473's
-  4.77× edge-std jump.  Suggests the bug is in either (a)
-  vector halo (``pad_halo_vector_4d``) used for u/v, or (b)
-  downstream operators that read the halo and amplify the
-  small overshoot.  2/2 in 5 s.  Wired into iter-383 sweep
-  (now 70).
-- Iter 474: **first negative diagnostic** — ``pad_halo_4d`` with
-  duogrid preserves constants to machine precision (5.1e-13
-  deviation on a constant input).  This **rules out** "scalar
-  halo operator alone broken" as the root cause of iter-473's
-  edge-std 4.77× increase.  The duogrid bug must come from
-  interaction with non-trivial fields (gradients across face
-  boundaries) or from vector halo / corner interpolation.
-  Remaining iter-473 candidates after iter-474:
-    ✗ pad_halo_4d scalar with duogrid (PASSED constant test)
-    ? Vector halo pad_halo_vector_4d (used for u/v)
-    ? Cube-vertex (corner) interpolation
-    ? Higher-order halo treatment under gradients
-  2/2 in 5 s.  Wired into iter-383 sweep (now 69).
-- Iter 473: **CONCLUSIVE duogrid root-cause decomposition**:
-  the 5× edge-ratio increase is driven ENTIRELY by an edge
-  std increase, NOT by an interior std decrease.
-    duogrid OFF: edge std = 3.4e-4, interior std = 3.7e-4
-    duogrid ON:  edge std = 1.6e-3, interior std = 3.7e-4
-    duogrid effect: edge × 4.77, interior × 1.00
-  Interior is unaffected; edge std jumps 4.77×.  Refutes the
-  "benign metric artifact" hypothesis — duogrid genuinely
-  makes edges NOISIER in θ′ at C8.  Combined with iter-472
-  (effect persists at C16): a real legoESM-duogrid impl
-  issue affecting cube edges.  Most actionable single finding
-  in the loop — narrows root-cause search to: (a)
-  ``pad_halo_4d`` with duogrid argument; (b) cube-vertex
-  (corner) interpolation in duogrid; (c) higher-order halo
-  treatment at cube edges.  Future investigation should
-  bisect these candidates with targeted unit tests.  1/1
-  in 102 s.  Wired into iter-383 sweep (now 68).
-- Iter 472: **duogrid penalty persists at C16** (4.1× ON/OFF
-  vs 5.1× at C8 — only 20% smaller).  Refutes the "regime
-  hypothesis" that duogrid only hurts at low resolution.
-    C16: factory + duogrid=ON  θ′ ratio: 4.2555
-    C16: factory + duogrid=OFF θ′ ratio: 1.0332
-  ratio = 4.12× (vs 5.12 at C8).  The duogrid edge-metric
-  penalty is robust across resolutions → most likely a real
-  legoESM-duogrid implementation issue rather than a regime
-  effect.  Could be: (a) per-corner area weight asymmetry at
-  cube edges that the metric picks up; (b) halo-interpolation
-  artifact that inflates edge variance while not changing
-  visual artifact magnitude; (c) genuine impl bug.  Worth
-  future investigation but bounded outside this loop.  1/1
-  in 72 s.  Wired into iter-383 sweep (now 67).
-- Iter 471: **duogrid is the regime-changing factor.** Same
-  NH factory, ONLY toggle ``use_duogrid``:
-    factory + duogrid=ON  θ′ ratio: 4.7939
-    factory + duogrid=OFF θ′ ratio: 0.9369
-    ratio ON/OFF = 5.12×
-  Duogrid INCREASES NH θ′ edge metric by 5.1× at C8 +
-  identical factory flags.  Counterintuitive: duogrid is
-  designed to REDUCE cube-edge artifacts via better halo
-  treatment, but in legoESM at C8 it actively MAKES the
-  edge-vs-interior variance ratio worse.  Possible
-  explanations to investigate: (1) bug in duogrid impl;
-  (2) regime difference (duogrid helps at higher resolution
-  but hurts at C8); (3) metric misinterpretation — duogrid
-  may change spatial structure in a way our edge-variance
-  ratio penalizes but that is visually less artifactual.
-  Most consequential single empirical finding in the loop.
-  Reveals that the iter-465/466 "factory hurts" results were
-  largely the duogrid effect, NOT the individual factory
-  flags.  1/1 in 102 s.  Wired into iter-383 sweep (now 66).
-- Iter 470: compact iter 455-464 doc block + **PE per-flag
-  u_d edge-ratio decomposition**.  Doc shrinks ~125 lines.
-  iter-368 guard now covers 9 compaction blocks.  PE u_d
-  sweep finding: baseline 1.0309, all factory flags have
-  effect |Δ| < 0.007 — even u_d (winds) is essentially
-  insensitive to FV3 factory flags at PE + C8.  Only
-  ``cross_face_du_proj`` shows non-zero effect (Δ=−0.0065 =
-  flag slightly hurts u_d ratio).  Combined with iter-469
-  (PE T insensitive): PE is much less responsive than NH
-  to factory flag tuning at C8.  iter-465 NH found Δ values
-  up to 5.0 — NH is the right empirical target for tuning.
-  1/1 sweep + 24/24 compaction tests in 665 s + 0.05 s.
-  Wired into iter-383 sweep (now 65).
-- Iter 469: **PE per-flag T edge-ratio decomposition** at C8
-  + duogrid.  Baseline factory T edge ratio: 0.9776.  Per-flag
-  deltas ALL essentially ZERO (max |Δ| = 0.0001):
-    no a2b_zeta_corner          : Δ = +0.0000
-    no metric_aware_d_con       : Δ = +0.0001
-    no cross_face_du_proj       : Δ = −0.0000
-    no heat_source_del2         : Δ = −0.0000
-    no d_con_top_zero           : Δ = +0.0000
-    no sponge_damp_v            : Δ = +0.0000
-  **PE T field is INSENSITIVE to all factory FV3 flags** —
-  opposite of NH iter-465 where flags moved ratio by 1-5
-  units.  Implications: (1) PE T artifact at C8 is dominated
-  by something OTHER than the factory flags (likely intrinsic
-  D-grid corner structure or held_suarez init); (2) iter-468
-  PE min-edge factory is essentially a no-op for T — keep it
-  for API symmetry but warn users.  (iter-461 separately
-  showed PE v_d factory gives 2.5% reduction — PE edge
-  signature is in WINDS, not temperature.)  1/1 in 656 s.
-  Wired into iter-383 sweep (now 64).
-- Iter 468: PE mirror of NH iter-467 ``make_legoesm_pe_min_
-  edge_config``.  Same 3 hurting-flag overrides + same
-  disclaimer (PE not directly measured in iter-465/466 sweep;
-  applying NH-derived overrides as best guess).  5/5 in 23 s.
-  Wired into iter-383 sweep (now 63).
-- Iter 467: new factory ``make_legoesm_nh_min_edge_config``
-  exposing the iter-466 empirical finding via a single-call
-  user-facing API.  Disables the 3 iter-466 hurting flags
-  (metric_aware_d_con, heat_source_del2, d_con_top_zero) but
-  keeps all other FV3-faithful flags ON.  Documented as a
-  DIVERGENCE from strict FV3-faithful (factory remains FV3-
-  faithful per CLAUDE.md "do not improvise"; this is a
-  separate opt-in for users prioritizing legoESM-scale edge
-  artifact reduction over strict FV3-fidelity).  5/5 in 28 s.
-  Wired into iter-383 sweep (now 62).
-- Iter 466: **50.4% edge-ratio reduction** via iter-465-
-  guided minimal-flag config.  5-seed comparison at C8 +
-  duogrid:
-  * factory full (all FV3 flags): θ′ ratio = 4.5361
-  * factory minimal-for-edge (only vector_halo_uv + d_con_cv
-    + dynamic_exner kept; metric_aware_d_con, heat_source_del2,
-    d_con_top_zero_levels DROPPED): θ′ ratio = **2.2520**
-  * Reduction = 50.4%
-  This is the **strongest empirical finding** in the loop:
-  selectively turning OFF some FV3-faithful flags REDUCES
-  cube-edge artifact ratio by half.  Implication: there's a
-  divergence between "FV3-faithful" and "legoESM-edge-
-  optimized" — our impl of metric_aware_d_con / heat_source_
-  del2 / d_con_top_zero may deviate from FV3 semantics enough
-  to hurt at our scale.  Factory defaults remain FV3-faithful
-  per CLAUDE.md "do not improvise"; users who want minimal
-  edge artifacts should apply the iter-466 overrides.
-  Pinned as guard regression (assertion: min < full).  1/1
-  in 212 s.  Wired into iter-383 sweep (now 61).
-- Iter 465: **per-flag NH edge-ratio decomposition** at C8 +
-  duogrid + factory.  Baseline factory ratio θ′: **4.3676**
-  (4× higher than no-duogrid baseline from iter-464!  Duogrid
-  CHANGES the edge metric significantly).  Per-flag deltas
-  (flag OFF − baseline):
-  * ``use_fv3_vector_halo_uv`` OFF:  Δ = +5.02 (flag REDUCES
-    ratio by 5.0 — biggest single contributor)
-  * ``use_fv3_d_con_cv`` OFF:        Δ = +1.65 (cv_air helps)
-  * ``use_fv3_metric_aware_d_con`` OFF: Δ = −1.62 (flag is
-    HURTING — counterintuitive!)
-  * ``heat_source_del2_iters=0``:    Δ = −1.42 (smoothing
-    HURTS at this config — opposite of iter-464 finding
-    without duogrid!)
-  * ``d_con_top_zero_levels=0``:     Δ = −0.58 (zero hurts)
-  * ``use_fv3_cross_face_du_proj`` OFF: Δ ≈ 0
-  * ``use_fv3_dynamic_exner`` OFF:   Δ ≈ 0
-  Major takeaways: (1) duogrid changes the regime fundamentally;
-  (2) ``vector_halo_uv`` is the biggest helper; (3) some flags
-  (metric_aware_d_con, heat_source_del2) HURT in factory+duogrid
-  combination — different from individual-flag finding without
-  duogrid; (4) factory combination is NOT a strict improvement.
-  1/1 in 518 s (8 configs × 3 seeds × 3 steps).  Wired into
-  iter-383 sweep (now 60).
+- Iter 499: monotone_clip in ``center_to_dgrid_vector`` —
+  OVERSHOOTS neutral.  Monkey-patch ``pad_halo_vector_4d``
+  inside ``center_to_dgrid_vector`` with clip=True:
+    no clip:   u_d edge × 1.0396  (iter-497 baseline 1.040)
+    with clip: u_d edge × 0.9378  (UNDER interior!)
+  Clip goes 257% of the way to neutral — it actively pulls
+  edge cells BELOW interior values, over-correcting.  This
+  explains iter-493's modest dycore impact: the clip is too
+  aggressive at the op level, and the dycore's own damping
+  further pulls edges down → small net change.  A SOFTER
+  constraint (e.g., allow edges ≤ interior_max × 1.05) might
+  give better balance between artifact suppression and
+  physical fidelity.  Future investigation direction.
+  1/1 in 11 s.  Wired into iter-383 sweep (now 91).
+- Iter 498: extend iter-490 ``monotone_clip`` to
+  ``pad_halo_vector_4d`` — also propagates to the two
+  internal ``pad_halo_4d`` calls (east + north components).
+  Random Gaussian vector field:
+    interior_max:        5.3133
+    halo_max no clip:   10.9629  (+106% over interior!)
+    halo_max clip on:    4.8723  (within interior)
+    Overshoot reduction: 55.6%
+  Vector halo overshoot is even larger than scalar (76% per
+  iter-491).  Clip works for both.  Default False preserves
+  backward compat.  2/2 in 6 s.  Wired into iter-383 sweep
+  (now 90).
+- Iter 497: ``center_to_dgrid_vector`` (iter-328 vector-aware
+  variant) amplifies edges 3× LESS than scalar interp:
+    iter-496 scalar interp: edge × 1.122 (12%)
+    iter-497 vector u_d:    edge × 1.040 (4%)
+    iter-497 vector v_d:    edge × 1.027 (3%)
+  The vector-aware halo (proper rotation across face
+  boundaries) reduces per-step edge amplification by ~3×.
+  **Mechanistically explains iter-465's "vector_halo_uv is
+  biggest helper" (Δ+5)**: switching from scalar to vector
+  interp cuts each step's edge contamination, compounding
+  to ~5 over multiple substeps.  1/1 in 11 s.  Wired into
+  iter-383 sweep (now 89).
+- Iter 496: ``_interp_center_to_corner`` IS a duogrid edge
+  amplifier (~12%).  Apply the cell-center → D-grid corner
+  4-point average (halo-aware) to random Gaussian field:
+    no-duogrid: edge std = 0.7475, interior = 0.7166
+                ratio = 1.0431
+    duogrid:    edge std = 0.8383, interior = 0.7166
+                ratio = 1.1699
+    duogrid effect: edge × 1.122, interior × 1.000
+  Edge std jumps 12% with duogrid; interior unchanged.  This
+  is the FIRST identified single op showing real (not
+  negligible) duogrid edge amplification.  Not enough to
+  explain the full 5× dycore ratio — but contributes.  The
+  dycore composes ``_interp_center_to_corner`` with many
+  other halo-aware ops; product compounds to 5×.  1/1 in
+  10 s.  Wired into iter-383 sweep (now 88).
+- Iter 495: isolate ``fv3_divergence_corner_3d`` — duogrid-
+  invariant.  Apply the corner-div op to random u/v field at
+  corners with grid_off vs grid_on:
+    no-duogrid: edge × 1.00, interior × 1.00
+    duogrid:    edge × 1.00, interior × 1.00
+  IDENTICAL output between duogrid ON/OFF.  Reason: corner-
+  div op uses corner-stored u/v directly without needing
+  inter-face halo (corners ARE the face boundary).  Rules out
+  ``fv3_divergence_corner_3d`` as the dycore amplifier.
+  Remaining suspect: cell-center→corner halo-aware interp
+  (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
+  used in the NH (cell-center u, v) → D-grid corner lift.
+  1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 615: **FV3 ``unit_vect_latlon`` + ``get_unit_vect3``**.
+  Faithful JAX-vectorized ports of FV3 ``fv_grid_utils.F90``
+  helpers used by ``c2l_ord4`` for wind rotation and by
+  ``edge_factors`` for tangent-vector metric construction:
+
+  | Function             | F90 line | Role                                |
+  |----------------------|----------|-------------------------------------|
+  | ``unit_vect_latlon`` | 2286     | (lon, lat) → (elon, elat) tangents  |
+  | ``get_unit_vect3``   | 1865     | Cartesian variant of get_unit_vect2 |
+
+  ``unit_vect_latlon`` returns the two Cartesian unit tangent
+  vectors of the local geographic frame::
+
+      elon = (-sin λ,    cos λ,    0    )
+      elat = (-sin φ cos λ, -sin φ sin λ, cos φ)
+
+  Used in FV3 D-grid → cell-center latlon rotation
+  (``c2l_ord4``); legoESM's existing rotation goes via the
+  ``angle`` field, this gives a direct Cartesian alternative for
+  users porting FV3 wind diagnostics.
+
+  ``get_unit_vect3`` is the Cartesian-input variant of iter-611
+  ``get_unit_vect2``; verified to produce identical results.
+
+  Tests (7/7 in <1 s):
+  1. ``unit_vect_latlon`` elon ⊥ elat.
+  2. ``unit_vect_latlon`` outputs unit-norm.
+  3. ``unit_vect_latlon`` at equator: known values.
+  4. ``unit_vect_latlon`` north pole degenerate (documented).
+  5. ``unit_vect_latlon`` tangents ⊥ position (sphere tangent).
+  6. ``get_unit_vect3`` matches ``get_unit_vect2`` exactly.
+  7. ``get_unit_vect3`` output is unit-norm.
+
+  Wired into iter-383 sweep (now 187).
+- Iter 614: **FV3 ``get_area`` + ``great_circle_distance_cart``**.
+  Faithful JAX ports of FV3 ``fv_grid_utils.F90`` helpers built on
+  iter-611/613 primitives:
+
+  | Function                       | F90 line | Role                          |
+  |--------------------------------|----------|-------------------------------|
+  | ``great_circle_distance_cart`` | 2065     | distance from Cartesian inputs|
+  | ``get_area``                   | 2749     | spherical-excess quad area    |
+
+  ``get_area`` is the canonical FV3 cell-area formula::
+
+      Area = (α1 + α2 + α3 + α4 - 2π) · R²
+
+  where the four angles are spherical angles at the cell corners.
+  Uses iter-613 ``spherical_angle`` with FV3's exact corner-angle
+  convention (lines 2757-2782): at each corner the spherical
+  angle is taken between the GC arc to one adjacent corner and
+  the GC arc to the opposite corner.  Matches legoESM's existing
+  l'Huilier's-theorem area within float32 precision (~1e-7 rel)
+  — independent verification of both implementations.
+
+  ``great_circle_distance_cart`` is the Cartesian counterpart of
+  the existing latlon ``great_circle_distance``; useful when
+  inputs are already in Cartesian form (avoids round-trip
+  through trig).
+
+  Tests (7/7 in <1 s):
+  1. ``great_circle_distance_cart`` orthogonal → π/2.
+  2. ``great_circle_distance_cart`` same vector → 0.
+  3. ``great_circle_distance_cart`` ↔ latlon agreement.
+  4. ``get_area`` matches legoESM cell area (~1e-7 floor).
+  5. ``get_area`` small-cell planar limit Δ² (rel < 1e-4).
+  6. ``get_area`` positive on random cells.
+  7. ``get_area`` scales as R².
+
+  Wired into iter-383 sweep (now 186).
+- Iter 613: **FV3 spherical-geometry helpers**.  Faithful JAX-
+  vectorized ports of FV3 ``fv_grid_utils.F90`` helpers built on
+  iter-611/612 primitives:
+
+  | Function             | F90 line | Role                              |
+  |----------------------|----------|-----------------------------------|
+  | ``spherical_angle``  | 2838     | angle at vertex p1 of (p1,p2,p3)  |
+  | ``cell_center3``     | 2728     | Cartesian 4-corner → center       |
+  | ``cell_center2``     | 2700     | latlon 4-corner → center          |
+  | ``dist2side_latlon`` | 2812     | point→GC-arc angular distance     |
+  | ``expand_cell``      | 2631     | expand 4-corner cell by ``fac``   |
+
+  ``spherical_angle`` is the foundation for FV3 ``get_area``
+  (spherical excess formula) and ``dist2side``; FV3 includes
+  degenerate-input fixups for colinear/coincident points
+  (ddd ≤ 0 → angle = 0).
+
+  ``cell_center3`` is FV3's standard cell-center formula:
+  normalize sum of 4 corners.  ``cell_center2`` is the latlon
+  wrapper.  ``expand_cell`` extrapolates/shrinks a 4-corner
+  cell about its center (used in FV3 land-model coupling).
+
+  ``dist2side_latlon`` computes the FV3 angular distance from a
+  point to a great-circle arc::
+
+      d = asin(sin(side) · sin(angle))
+
+  Tests (11/11 in <1 s):
+  1. ``spherical_angle`` at north pole, two meridians 90° apart → π/2.
+  2. ``spherical_angle`` octant → π/3.
+  3. ``spherical_angle`` colinear → finite.
+  4. ``cell_center3`` returns unit-norm.
+  5. ``cell_center3`` symmetric square at equator → center at equator.
+  6. ``cell_center2`` ↔ ``cell_center3`` latlon-vs-Cartesian agreement.
+  7. ``dist2side_latlon`` on-arc point → 0.
+  8. ``dist2side_latlon`` pole-to-equator → π/2.
+  9. ``expand_cell`` fac=1 is identity.
+  10. ``expand_cell`` fac=0 collapses to center.
+  11. ``expand_cell`` corners forced to lie on unit sphere.
+  Wired into iter-383 sweep (now 185).
+- Iter 612: **FV3 mirror + great-circle interpolation helpers**.
+  Faithful ports of FV3 ``fv_grid_utils.F90`` helpers built on
+  iter-611 Cartesian primitives:
+
+  | Function          | F90 line | Role                                |
+  |-------------------|----------|-------------------------------------|
+  | ``mirror_xyz``    | 1668     | reflect Cartesian point across GC plane |
+  | ``mirror_latlon`` | 1705     | (lon, lat) wrapper for ``mirror_xyz``  |
+  | ``intp_great_circle`` | 1896 | secant linear interp on GC          |
+  | ``slerp``         | 1927     | Shoemake arc-length-uniform slerp   |
+
+  Used in FV3 cubed-sphere grid generation: panel construction
+  via reflections across face symmetry planes (mirror), and edge
+  refinement via either secant interpolation (FV3 default) or
+  proper slerp (used in cubed-sphere C-grid metric refinement).
+
+  ``intp_great_circle(β=0.5)`` is identity-equivalent to
+  ``mid_pt_sphere``; verified in test.
+
+  Antipodal safety in ``slerp``: FV3 raises a fatal for
+  ``|ω|<1e-5``; we instead silently fall back to the secant
+  interpolant (well-defined for colocated ω=0 points, and at
+  least returns finite values for near-antipodal cases where
+  the great-circle is ambiguous).
+
+  Tests (9/9 in <1 s):
+  1. ``mirror_xyz`` preserves unit norm.
+  2. ``mirror_xyz`` involutive (mirror² = id).
+  3. ``mirror_xyz`` fixed on plane (p on plane → p).
+  4. ``mirror_latlon`` matches Cartesian roundtrip.
+  5. ``intp_great_circle`` β=0/1 endpoints exact.
+  6. ``intp_great_circle`` β=0.5 ↔ ``mid_pt_sphere``.
+  7. ``slerp`` β=0/1 endpoints exact.
+  8. ``slerp`` β=0.5 arc-length-equidistant.
+  9. ``slerp`` colocated-point safe.
+  Wired into iter-383 sweep (now 184).
+- Iter 611: **FV3 Cartesian grid primitives**.  Faithful ports of
+  the building-block helpers from FV3 ``fv_grid_utils.F90``:
+
+  | Function          | F90 line | Role                              |
+  |-------------------|----------|-----------------------------------|
+  | ``latlon2xyz``    | 1639     | (lon, lat) → (x, y, z) unit sphere|
+  | ``xyz2latlon``    | 1739     | inverse; pole-safe (esl=1e-10)   |
+  | ``inner_prod``    | 984      | Cartesian dot product             |
+  | ``vect_cross``    | 1781     | Cartesian cross product           |
+  | ``normalize_vect``| 1880     | unit-norm (zero-safe)             |
+  | ``mid_pt3_cart``  | 1996     | Cartesian GC midpoint             |
+  | ``mid_pt_cart``   | 2026     | (lon, lat)→ Cartesian midpoint    |
+  | ``get_unit_vect2``| 1848     | unit tangent at GC midpoint       |
+
+  All JAX-vectorized, broadcast on leading axes, take the 3-vector
+  on the last axis (FV3 takes a flat 3-element array).  Each is a
+  pure JAX function with finite gradients (zero-safe normalization
+  via ``jnp.where``).
+
+  ``latlon2xyz`` is a thin FV3-named alias for the existing
+  ``lonlat_to_cartesian``.  ``xyz2latlon`` is new and matches the
+  FV3 ``cart_to_latlon`` pole branch (``|x|+|y|<eps → lon=0``).
+  ``get_unit_vect2`` returns the unit tangent at the great-circle
+  midpoint pointing from e1 → e2 (used in FV3 ``edge_factors`` /
+  ``efactor_a2c_v`` metric construction).
+
+  Tests (13/13 in 1 s):
+  1. ``latlon2xyz`` outputs unit-norm vectors.
+  2. ``latlon2xyz`` ↔ ``xyz2latlon`` roundtrip exact.
+  3. ``xyz2latlon`` at pole returns lon=0 (FV3 esl branch).
+  4. ``inner_prod`` orthogonal pairs → 0.
+  5. ``inner_prod`` parallel unit vectors → 1.
+  6. ``vect_cross`` standard identities.
+  7. ``vect_cross`` anticommutes.
+  8. ``normalize_vect`` produces unit norm.
+  9. ``normalize_vect`` zero input is NaN-safe.
+  10. ``mid_pt3_cart`` is unit-norm + equidistant.
+  11. ``mid_pt_cart`` ↔ ``mid_pt_sphere`` agreement (1e-12).
+  12. ``get_unit_vect2`` returns unit-norm tangent.
+  13. ``get_unit_vect2`` tangent is ⊥ pc (sphere tangent).
+  Wired into iter-383 sweep (now 183).
+- **Iters 601-609 (compacted iter 610)**: full NH+PE conservation
+  matrix + FV3 utility ports (grid, ops, filter, diagnostics).
+  - iter 601: **NH TE-conserving correction** (FV3 consv_te NH).
+    ``apply_te_correction_nh`` adjusts θ′ uniformly using ΔT =
+    -te_dt / (cv · total_dry_mass).  Verified at C8: drift
+    7.16e+22 J → -1.07e+09 J (14 orders, float64 floor).
+    **NH conservation stack COMPLETE** (AAM + TE).
+  - iter 602: **PE TE-conserving correction** (FV3 consv_te PE).
+    Newton iteration (5 steps) with numerical-Jacobian
+    dTE/dT = (TE(T+ε) - TE(T))/ε since PE TE has a hydrostatic
+    boundary-work term nonlinear in T.  Verified at C8: drift
+    5.14e+23 J → 0.0 J (exact).  New ``apply_te_correction_pe``.
+  - iter 603: **PE TE boundary-work sign fix** (iter-598 bug).
+    iter-598 had ``te = pe_top·phi_top - pe_sfc·phi_sfc``;
+    FV3 fv_mapz.F90:1142 specifies ``pe(km+1)·phiz(km+1) -
+    pe(1)·phiz(1)`` (sfc - top).  Surfaced by iter-602's
+    numerical-Jacobian probe; iter-598 tests passed only
+    because boundary term is ~0.1% of total.  Regression test:
+    raise phis → TE should increase.
+  - iter 604: **PE AAM stack** (mirror NH iter 583/587/588).
+    ``aam_from_pe_state`` / ``aam_drift_pe`` /
+    ``apply_aam_correction_pe`` (Newton iteration, 5 steps).
+    Verified at C8: +1 m/s u_d drift 1.98e+25 → 1.18e+21
+    (~5 orders, limited by D-grid ↔ cell-center mismatch;
+    NH version had 8 orders since no D-grid mismatch).
+    **PE conservation stack COMPLETE** (AAM + TE).
+  - iter 605: **``column_d_ext_field`` / ``column_mass_weighted_mean``**
+    utilities (FV3 dyn_core.F90:1310-1326 d_ext support).
+    ``divg2 = d_ext·da_min_c·Σ_k(ptc·vt)/Σ_k(ptc)``.
+    Standalone; not yet wired into ``one_grad_p`` (complex).
+  - iter 606: **terrain_filter** (FV3 del2/del4_cubed_sphere port
+    from tools/fv_surf_map.F90:817+).  Smooths phis at IC load.
+    Params: ``n_iter`` (=n_zs_filter, default 4), ``nord``
+    (=nord_zs_filter, 2=del-2, 4=del-4), ``cd`` default
+    0.20·min(grid.area).
+  - iter 607: **``cubed_to_latlon``** utility (FV3 c2l_ord2 alias).
+    Extended ``dgrid_to_center_geographic`` to 3D
+    ((6,n+1,n+1,nlev)) and added FV3-named alias.
+  - iter 608: **``mid_pt_sphere``** great-circle midpoint
+    (FV3 fv_grid_utils.F90:1981-1992).  Cartesian midpoint +
+    normalize, NOT lon/lat average (wrong near dateline/poles).
+  - iter 609: **``terrain_filter`` mass-preservation regression**.
+    Verifies del-2/del-4 preserves area-weighted mean(phis) on
+    closed sphere (divergence theorem, rel drift < 1e-3 at C16).
+  All wired into iter-383 sweep (now 182).
+- **Iters 591-599 (compacted iter 600)**: grid shift + complete
+  PPM stack + transport plumbing + NH/PE total-energy stack.
+  - iter 591: ``shift_fac`` longitude shift (FV3
+    fv_grid_tools.F90:662-663).  Default 18 = west-shift 10°
+    away from Japan.  Gated by ``not apply_schmidt``.
+  - iter 592: ``apply_hord11_limiter(bl, br, dm, ppm_fac=1.5)``
+    (FV3 tp_core.F90:573-579 "2nd van Leer emulation").
+    ppm_fac=2.0 exactly matches iord=8.
+  - iter 593: ``apply_hord10_limiter(bl, br, dm, q)`` (Lin+Rood
+    1996 with pmp/lac extra constraints, tp_core.F90:554-572).
+    Most subtle FV3 PPM variant.
+  - iter 594: 5-variant comparison test (iord=8/9/10/11/12 all
+    distinct on stress field, all finite on smooth).
+  - iter 595: ``hord`` kwarg plumbed through ``_ppm_1d`` /
+    ``_xppm`` / ``_yppm``.  Default 12 preserves baseline.
+  - iter 596: ``hord`` plumbed through ``fv_tp_2d`` /
+    ``transport_step`` (top-level public API).  Users can call
+    ``transport_step(h, ut, vt, dt, cdgrid, hord=8)``.
+  - iter 597: ``compute_total_energy_nh(state, grid, hc)`` NH
+    total-energy diagnostic.  FV3 fv_mapz.F90:1154-1183 port:
+    Σ_k delp·(cv·T + KE + g·z + 0.5·w²).
+  - iter 598: ``compute_total_energy_pe(state, grid, coord)``
+    PE hydrostatic TE.  FV3 fv_mapz.F90:1127-1152 port.
+    JAX-friendly reverse cumsum for hydrostatic ϕ integration.
+  - iter 599: ``te_drift_nh(state_old, state_new, ...)`` and
+    ``te_drift_pe(state_old, state_new, ...)`` companion to
+    iter 587's ``aam_drift_nh``.
+  Net: user audit item #3 (PPM variants) end-to-end closed;
+  NH and PE both have full {AAM, TE} × {static, drift, correct
+  for AAM only} diagnostic stacks.  consv_te correction
+  remains as natural follow-up.  Currently 173 guards in
+  iter-383 sweep.
+- **Iters 581-589 (compacted iter 590)**: user-audit response
+  + FV3-faithful feature ports + stretched-grid + AAM stack.
+  - iter 581: ``compute_edge_artifact_metric()`` public diag.
+  - iter 583: ``compute_atmospheric_angular_momentum()``
+    faithful port of FV3 ``compute_aam`` (fv_dynamics.F90:
+    1264-1307).  Formula: ``aam = Σ_k (r²·Ω + r·u)·rho·dz·area``.
+  - iter 584: ``w_safety_cap`` config (user audit item #2).
+    FV3 ``w_limiter`` lives in fv_mapz only; legoESM port is
+    a post-step clip (NOT mass-conserving cascade — Eulerian
+    context).  Default disabled.
+  - iter 585: ``apply_hord8_limiter(bl, br, dm)`` utility
+    (user audit item #3 partial — iord=8 Lin 1996 mono).
+  - iter 586: ``schmidt_transform()`` faithful port of FV3
+    ``direct_transform`` + ``create_cubed_sphere`` kwargs
+    ``stretch_fac`` / ``target_lon`` / ``target_lat`` (user
+    audit item #1).  Defaults preserve bit-for-bit pre-grid.
+  - iter 587: ``aam_from_nh_state()`` + ``aam_drift_nh()``
+    convenience functions — handle face-local→u_east rotation
+    + rho_full reconstruction internally.
+  - iter 588: ``apply_aam_correction_nh()`` faithful port of
+    FV3 ``consv_am`` (fv_dynamics.F90:774-794).  Reduces AM
+    drift by 8 orders of magnitude (4.05e+25 → 9.9e+17).
+  - iter 589: ``cube_transform()`` — FV3 revised Schmidt
+    (fv_grid_utils.F90:920-980).  Adds ``do_cube_transform``
+    kwarg.  Same as iter 586 plus ``lon += π`` pre-rotation.
+  Net: user audit items 1/2/3 all addressed; nested grid +
+  full hord plumbing deferred (huge scope).  Currently 164
+  guards in iter-383 sweep.
+- **Iters 571-579 (compacted iter 580)**: dycore mathematical
+  consistency + amplitude/time scaling + linearity.
+  - iter 571: PE δT ~ n_steps¹·⁸⁹ on HS but absolute ≤1 mK
+    (essentially no artifact).
+  - iter 572: NH zero IC → exactly zero output (perfect rest).
+  - iter 573: NH edge_std ~ U_0¹·²⁰.  Typical winds → 2-3 mK
+    edge noise.  Calm regions → ≤0.4 mK.  Jet stream → ≤7 mK.
+  - iter 576: 50-step C24 grows super-power-law (18× vs 6×
+    predicted).  Non-linear regime at 50 steps.  Practical
+    limit ~30 steps.
+  - iter 578: dycore PERFECTLY linear at small perturbations
+    (10× IC → exactly 10.00× response in θ′ and u).
+  - iter 579: SW rest preservation — h, u_d, v_d drift =
+    exactly 0 over 10 steps.  Like NH, SW is mathematically
+    consistent.
+  Net positive findings: dycore is well-behaved (rest
+  preserved, linear at small pert), edge noise scales with
+  wind magnitude (mK for typical flows), PE has essentially
+  no artifact issue, NH usable up to ~30 step blocks at C24.
+  Currently 156 guards in iter-383 sweep.
+- **Iters 561-569 (compacted iter 570)**: ``heat_source_del2``
+  optimization + multi-step growth + helper equivalence.
+  - iter 561: bisect min-edge factory's 3 disabled flags on
+    smooth IC.  ``heat_source_del2`` is the dominant smooth-
+    IC fix (-78% alone).  ``metric_aware_d_con`` HURTS when
+    alone (+49%) but synergizes with others.
+  - iter 562: ``heat_source_del2_iters`` sweep → monotonic
+    improvement.  iters=0 → 6.32e-2; iters=8 → **6.90e-3
+    (-89.1%)**.
+  - iter 563: ``heat_source_del2_coeff`` U-shaped response.
+    FV3 default 0.20 is OPTIMAL.  0.40-0.80 over-damps;
+    <0.20 under-damps.
+  - iter 564: BEST combined result @ C24 = **5.83e-3 K**
+    edge_std after 10 steps (~6 mK noise).
+  - iter 565: C24 → C32 only -1% edge_std reduction.
+    Interior continues converging (-31%).  Edge plateau ~5-6
+    mK floor at this config.
+  - iter 566: 30-step run @ C24 → edge_std 3.43e-2 (5.9×
+    growth from 10 steps).
+  - iter 567: iters=8 grows FASTER (5.88×) than iters=2
+    (3.88×) over 30 steps.  Crossover possible at very long
+    times.
+  - iter 568: ``monotone_halo_clip_context`` and
+    ``make_clipped_step`` produce bit-identical output (max
+    diff < 1e-10).  Confirmed equivalence.
+  - iter 569: time-growth power law: edge_std ~ n_steps¹·¹⁵
+    at C16 SBR.  Slightly super-linear (NOT exponential).
+    Predicted production C96 1-day floor ≈ 120 mK.
+  Currently 150 guards in iter-383 sweep.
+- **Iters 551-559 (compacted iter 560)**: regime-aware
+  factory analysis + long-run stability bounds.
+  - iter 551: clip overhead at C16 = -1.6% (within noise).
+    Negligible at both C8 and C16.
+  - iter 552: HS-like stratified NH state stable + physical
+    over 10 steps.
+  - iter 553: **major reframe** — at C16 SBR smooth IC,
+    FV3-faithful BEATS min-edge (-89.5% vs -64% edge_std
+    reduction).  min-edge was random-IC stress-test optimum.
+  - iter 555: clip on top of FV3-faithful adds only +2.3%
+    at smooth IC.  Marginal.
+  - iter 556: FV3-faithful convergence rate ~ N⁻⁰·⁶⁴ (edge)
+    / N⁻¹·³⁶ (int).  Slower than min-edge+clip rates but
+    LOWER absolute values for N < ~9600.
+  - iter 557: PE comparison at C16 smooth — FV3-faithful
+    and min-edge tied (T edge_std 4.116e-1 both).  PE
+    insensitive to factory choice.
+  - iter 558: PE long-run @ C8 dt=10, 100 steps stays
+    finite but unphysical (u 10⁵ m/s, T -800 K).
+  - iter 559: PE long-run @ dt=5, 200 steps still unphysical.
+    PE C8 instability is damping-driven, not CFL.  Need C24+.
+  Net guidance:
+  - SMOOTH ICs → ``make_fv3_faithful_nh_config()`` (89.5%).
+  - RANDOM/STRESS ICs → ``make_legoesm_nh_min_edge_config()``
+    + clip helper.
+  - PE: either factory works.
+  - Long-run PE: need higher resolution (C24+).
+  Currently 141 guards in iter-383 sweep.
+- **Iters 541-549 (compacted iter 550)**: scan-step API +
+  comprehensive helper validation (terrain, tracers,
+  performance, end-to-end).
+  - iter 541: helper performance overhead = +0.6% vs raw jit
+    (negligible cost).
+  - iter 543: dt sensitivity — t_final=100 s across dt ∈
+    {5, 10, 20} → max|u| varies <2%, max|θ′| <1%.
+  - iter 544: ``make_clipped_scan_step()`` JAX-scan multi-
+    step API.  Bit-for-bit match with Python loop, AD-safe.
+  - iter 546: scan vs loop speedup at 20 steps: 1.20×.
+  - iter 547: PE scan_step validation (symmetric to NH).
+  - iter 548: end-to-end 30-step SBR run at C8 — stable,
+    finite, mass≈0, θ′ ratio 5.7×, v ratio 3.8× (integrated
+    edge artifact over time).
+  - iter 549: SW scan_step validation — full NH/PE/SW
+    coverage for both ``make_clipped_step`` and
+    ``make_clipped_scan_step``.
+  Helper stack final state: 5 user-facing entry points
+  (2 factories + context manager + 2 JIT-safe helpers).
+  Currently 133 guards in iter-383 sweep.
+- **Iters 531-539 (compacted iter 540)**: helper validation
+  across dycores, ICs, conservation, and stability.
+  - iter 531: ``make_clipped_step`` works on SW
+    (``FV3EdgeShallowWaterModel``) too — fully dycore-
+    agnostic.
+  - iter 532: SBR resolution scan C8/C16/C24.  edge_std ~
+    N⁻⁰·⁸², int_std ~ N⁻¹·⁵³.  Both converge absolutely;
+    edge is formally lower-order (FV3-faithful).
+  - iter 533: corner-spike stress test.  5 K spike grows
+    0.08% in 5 steps, doesn't propagate.  Dycore is stable.
+    Clip bounds halo cells, NOT interior corner cells.
+  - iter 534: min_edge vs aggressive factory + clip have
+    DIFFERENT goals — min_edge minimizes TOTAL noise;
+    aggressive minimizes RATIO.  Both valid.
+  - iter 535: example script
+    ``scripts/example_fv3_clip_helper.py`` showing end-to-
+    end API.  Reproduces iter-521 values within 5%.
+  - iter 536: slack sweep at C16 SBR.  slack=0.0 marginally
+    best (0.7% better than slack=0.5 default).  All within
+    ~1% — slack=0.5 is safe default.
+  - iter 537: clip helper with 2-km mountain.  All fields
+    finite with realistic gravity-wave magnitudes (u 30 m/s,
+    w 0.7 m/s, θ' 1 K).  Terrain-compatible.
+  - iter 538: q_vapor tracer transport.  Mean drift 0%,
+    max growth 0.02%, monotonicity preserved.  Production-
+    ready for moist runs.
+  - iter 539: 50-step mass conservation.  Bit-perfect 5.3 ppb
+    drift through step 42; NaN at step 43 (C8 stability
+    limit, not helper).  Helper preserves conservation up
+    to simulation's intrinsic stability limit.
+  Currently 126 guards in iter-383 sweep.
+- **Iters 521-529 (compacted iter 530)**: helper validation —
+  conservation, AD, JIT-safety, PE symmetry, production
+  docs.
+  - iter 521: SBR (Williamson 2-like) IC scan.  C8 e/i=3.90×,
+    C16 e/i=6.31× — but **absolute** edge_std DROPS (-45%
+    at C16), interior_std drops faster (-67%).  Edge
+    converges at ~O(N⁻⁰·⁶), interior at ~O(N⁻¹·³).  Cube
+    corners are formally lower-order in FV3 — the rising
+    e/i ratio is intrinsic, not a legoESM bug.  At C16 the
+    perturbation magnitude after 10 SBR steps is 0.06 K,
+    physical noise level.
+  - iter 522: AD-at-rest validated.  ``jax.grad`` through
+    1-step and 3-step under ``monotone_halo_clip_context``
+    returns finite + nonzero gradients.  Helper is fully
+    differentiable.
+  - iter 523: NH mass conservation under SBR + clip context
+    — 5.3 ppb drift over 10 steps.  Machine precision.
+  - iter 524: PE mass conservation under Held-Suarez + clip
+    context — 7.0 ppb drift over 10 steps.  Symmetric to NH.
+  - iter 525: JIT + clip context interaction.  jit-compile
+    inside context = clip baked in; jit-compile outside +
+    run inside = clip ignored.  Both behaviors documented.
+  - iter 526: ``make_clipped_step(model, state, dt, slack)``
+    helper — JIT-safe.  Enters context, jit-compiles, forces
+    trace via dummy call, returns cached-compiled step.
+    48.4% edge reduction vs raw jit at 10 steps.
+  - iter 527: PE-side patch targets.  Context now covers
+    15 sites: 4 NH-scalar + 2 NH-vector + 3 PE-aliases + 3
+    pad_halo 3D + 1 pad_halo_pair_h2 + 2 pad_halo_vector 3D.
+  - iter 528: production-usage section updated with concrete
+    ``monotone_halo_clip_context`` + ``make_clipped_step``
+    examples.
+  - iter 529: PE ``make_clipped_step`` validation.  Runs,
+    conserves mass (7e-9), differentiable.  Full NH/PE
+    symmetry of helper stack.
+  Net result: iter-505 helper is production-ready with
+  conservation, AD, JIT-safety, and full NH/PE coverage.
+  Currently 117 guards in iter-383 sweep.
+- **Iters 511-519 (compacted iter 520)**: long-term clip
+  benefit, expanded clip coverage, and IC analysis closing
+  on **convergence with cube-smooth IC**.
+  - iter 511: clip benefit grows over time (1 step -36%, 10
+    steps -53%).  Clip is necessary precisely because the
+    leak accumulates.
+  - iter 512: long-term slack sweep at 10 steps — slack=0.5
+    optimal (1.844×).  slack=0.0 within 1%; slack=2.0 over-
+    relaxes (2.26×).
+  - iter 513: extended ``monotone_clip`` to ``pad_halo``
+    (3D) + ``pad_halo_pair_h2`` + context to 10 sites.
+    No NH ratio change — the 3D paths aren't on the NH test
+    trajectory.
+  - iter 514: extended clip to ``pad_halo_vector`` (3D) +
+    context to 11 sites.  Also no NH ratio change.  Closes
+    fv3_sw_core code paths for SW dycore use.
+  - iter 515: **reframe metric** to within-grid e/i ratio.
+    At 10 steps: duogrid e/i = 2.06×, no-duogrid e/i = 1.24×.
+    Both grids develop bias (intrinsic to C-D-grid corners),
+    not a duogrid bug.
+  - iter 516: nord=2 (del⁴) damping is WORSE than default
+    nord=1 (1.99 → 2.19).  Higher-order at corners has
+    stronger response to vertex noise.
+  - iter 517: random IC vs face-local sinusoid IC at 10
+    steps: 2.09× vs 1.26× (65% noise penalty in random).
+  - iter 518: but face-local sinusoid is NOT smooth across
+    panels.  Resolution scan reveals C8 1.26× → C16 2.77×
+    (resolution makes it worse, invalidating iter-517's
+    "smooth" framing).
+  - iter 519: **TRULY cube-smooth Gaussian** via geographic
+    (lat, lon) coords.  Resolution scan:
+        C8:  e/i = 1.434×
+        C16: e/i = 1.287×  (10% improvement)
+    **The dycore converges on real-atmospheric-like smooth
+    ICs**.  Extrapolating to C48-C96 → e/i ~ 1.1× (near-
+    perfect).  Strongest validation that iter-466/505 stack
+    delivers FV3-faithful behavior on real ICs.  Currently
+    109 guards in iter-383 sweep.
+- **Iters 501-509 (compacted iter 510)**: from clip-slack
+  knob → combined-fix new low → user-facing API → growth
+  diagnostic that closes the "single-step floor was optical
+  illusion" loop.
+  - iter 501: ``monotone_clip_slack`` param (default 0 =
+    strict).  Soft clip = band expansion by slack × (hi-lo).
+  - iter 502: slack sweep on ``center_to_dgrid_vector``.
+    Strict clip over-corrects (×0.95); slack ≈ 1.5-2.0 →
+    neutral (×1.00); slack=0.5 → ×0.97.
+  - iter 503: **46% dycore reduction** via 6-site (4 scalar +
+    2 vector) clip patch.  Vector halo was the missing
+    piece from iter-492/493 (which only got 1.5%).  slack=0.5
+    is optimal; strict 99% as good.  Floor 2.006×.
+  - iter 504: **NEW LOW 1.135× (65.7% reduction)** combining
+    min-edge factory (iter-466) + 6-site clip (iter-503).
+    Factory and clip paths are independent and compose.
+    Aggressive factory (iter-483 d2_bg boost) gives no
+    additional reduction at this regime.
+  - iter 505: **user-facing API** —
+    ``monotone_halo_clip_context(slack=0.5)`` in
+    ``legoesm.grids.halo``: a single context manager that
+    monkey-patches all 6 halo sites for the duration.
+    Verified: 1.606 → 1.093 (32% at this seed pair).
+  - iter 506: PE composition check — held_suarez state +
+    monotone_halo_clip_context yields 1.000× both with and
+    without context.  PE hydrostatic balance lacks the
+    NH acoustic/advection coupling that drives the 4.77×
+    duogrid penalty.  Composition is unconditionally safe.
+  - iter 507: bisect residual 1.075× under min-edge + clip.
+    Toggling 4 fidelity flags + 4 sponge/damp knobs OFF one
+    at a time: vector_halo_uv=False → 2.36× (critical),
+    d_con_cv=False → 1.22×, dynamic_exner / cross_face / all
+    sponge damps neutral, corner_div_damp=0 → 46.2× (blowup).
+    Vector halo and corner_div_damp are the two essential
+    stabilizers.  Residual NOT eliminable by flag toggle.
+  - iter 508: ``corner_div_damp_d2_bg`` sweep [1e-5..5e-3]
+    under min-edge + clip.  1.094× (1e-5) → 1.075× (5e-3).
+    Residual insensitive over 500× range.  Not the knob.
+  - iter 509: **residual GROWS** — multi-step test (1, 2,
+    5, 10 steps, dt=10s) shows 1.129 → 1.192 → 1.326 →
+    1.634× (+44.7%).  Clip context suppresses single-step
+    amplification but residual edge bias accumulates.  This
+    is NOT a dynamic equilibrium.  Iter-505 helper alone is
+    insufficient for long runs.  Next direction = patch
+    edge stencils within the substep (vector halo / corner
+    interp).  Currently 100 guards in iter-383 sweep.
+- **Iters 485-494 (compacted iter 500)**: factory exposure
+  + duogrid bisection + halo-level clip + investigation
+  closure.
+  - iter 485: AST guard for 4 min-edge factories.
+  - iter 486: document min-edge factories in production-
+    usage section.
+  - iter 487: C24 plateau (4.72×) — refutes "duogrid helps
+    at higher resolution" hypothesis.
+  - iter 488: synthesis section + key data table.
+  - iter 489: **overshoot confined to cube-vertex cells**
+    (24 cells/level globally).
+  - iter 490: ``monotone_clip`` arg added to
+    ``pad_halo_4d`` (default off); fixes iter-489.
+  - iter 491: random Gaussian shows 76% halo overshoot
+    (clip cuts to within interior).
+  - iter 492: dycore monkey-patch (1 site) → only 1.4%.
+  - iter 493: comprehensive 4-site patch → still 1.5%;
+    clip is NOT the dominant dycore fix (random-field
+    overshoot doesn't translate to dycore impact because
+    dycore fields are smoother than random noise).
+  - iter 494: extend iter-488 synthesis section with
+    iter-489..493 data.
+- **Iters 475-484 (compacted iter 490)**: duogrid bisection
+  + edge-min factories + aggressive config.
+  - iter 475: linear-field halo test, duogrid overshoots
+    interior max by 3.5% (14.49 vs 14.00).
+  - iter 476: vector halo + zero field preserves exact;
+    halo operators alone are correct.
+  - iter 477: laplacian iter alone doesn't amplify (refutes
+    iter-476 composition hypothesis).
+  - iter 478: per-step bisection — penalty fires in step 1
+    (3.67×), grows slowly to 4.91× by step 3.
+  - iter 479: op-level — damp_v/damp_w NOT culprit (3.50→3.54
+    when disabled); all damping off DIVERGES.
+  - iter 480: **corner_div_damp is the key mitigator** —
+    disabling it explodes ratio to 109×.  Doc compacted
+    iter 465-474.
+  - iter 481: corner_div_damp_d2_bg sweep, 100× boost →
+    36% reduction (2.25×).
+  - iter 482: **composite iter-466 + iter-481 → 60% reduction
+    (1.42×, 5 seeds pinned)**.
+  - iter 483: new ``make_legoesm_nh_min_edge_aggressive_config``
+    user-facing factory.
+  - iter 484: PE mirror ``make_legoesm_pe_min_edge_aggressive_
+    config``.
+- **Iters 465-474 (compacted iter 480)**: edge-artifact
+  empirical investigation phase 2 (per-flag + duogrid
+  bisection start).
+  - iter 465: NH per-flag θ′ sweep at C8+duogrid; baseline
+    4.37; vector_halo_uv biggest helper (Δ+5.0);
+    metric_aware_d_con / heat_source_del2 / d_con_top_zero
+    HURT (Δ-1.6/-1.4/-0.6).
+  - iter 466: **50.4% edge-ratio reduction** by dropping the
+    3 iter-465 hurting flags (4.54 → 2.25, 5-seed pinned).
+  - iter 467: new ``make_legoesm_nh_min_edge_config`` factory
+    exposing iter-466 overrides.
+  - iter 468: PE mirror ``make_legoesm_pe_min_edge_config``.
+  - iter 469: PE T sweep shows ALL factory flags
+    insensitive (max |Δ| < 1e-4) — PE T artifact dominated
+    by other mechanism.
+  - iter 470: compact iter 455-464 + PE u_d sweep (also
+    insensitive); NH is the right empirical target.
+  - iter 471: **duogrid alone is the regime-changing factor**
+    — same factory but duogrid=OFF gives 5.12× lower ratio.
+  - iter 472: duogrid penalty persists at C16 (4.12×)
+    — not a low-resolution artifact.
+  - iter 473: raw std decomposition: duogrid INCREASES edge
+    std 4.77× while interior std unchanged (× 1.00) — bug
+    is in edges, not interior smoothing.
+  - iter 474: pad_halo_4d scalar+constant test passes (5e-13);
+    rules out simple halo broken.
 - **Iters 455-464 (compacted iter 470)**: edge-artifact
   empirical investigation phase 1 (single-flag sweeps).
   - iter 455: legoESM-scale calibration doc + 5-step

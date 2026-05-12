@@ -409,7 +409,9 @@ class MomentumTendencyDiagnostics(NamedTuple):
     KE_PGF_u, KE_PGF_v : Field
         −∂(KE)/∂x − (1/ρ_0)·∂p/∂x   (kinetic-energy gradient + pressure gradient)
     vortcor_u, vortcor_v : Field
-        ζ × v_at_u  /  −ζ × u_at_v   (vorticity-Coriolis advection)
+        ζ × v_at_u  /  −ζ × u_at_v   (RELATIVE vorticity advection only;
+        the planetary Coriolis f×u is applied in the forward-backward step
+        function and is NOT included in these diagnostics)
     vertadv_u, vertadv_v : Field
         Flux-form 1st-order upwind ∂(w·u)/∂z, ∂(w·v)/∂z
     Ah_lap_u, Ah_lap_v : Field
@@ -433,9 +435,11 @@ class MomentumTendencyDiagnostics(NamedTuple):
     sponge_u, sponge_v : Field
         Sponge restoring (0 when no sponge)
     total_u, total_v : Field
-        The actually-applied du_dt / dv_dt (after mask multiplication).
-        Sanity check: ``total ≡ Σ components`` to machine precision —
-        enforced by ``test_momentum_diagnostics_closure``.
+        The du_dt / dv_dt returned by the PE tendency function (after
+        mask multiplication).  **Excludes Coriolis** (f×u), which is
+        applied in the forward-backward step function.  Sanity check:
+        ``total ≡ Σ PE components`` to machine precision — enforced by
+        ``test_momentum_diagnostics_closure``.
     """
 
     KE_PGF_u: Field
@@ -477,11 +481,29 @@ class LatLonCGridOceanConfig(NamedTuple):
     g: float = constants.g
     rho_0: float = constants.rho_ocean
     A_h: float = 1.0e4
-    A_h_lat_scaling: bool = False  # When True, A_h is multiplied by cos²(lat)
-                                    # to keep viscous CFL latitude-independent on
-                                    # lat-lon grids.  Standard MITgcm/MOM6/NEMO
-                                    # convention.  Default False to preserve
-                                    # bit-exact regression on legacy configs.
+    A_h_lat_scaling: bool = False  # When True, A_h is scaled by cos(lat) to
+                                    # keep the grid Reynolds number latitude-
+                                    # independent on lat-lon grids.  Default
+                                    # False to preserve bit-exact regression on
+                                    # legacy configs.
+    A_h_floor: float = 0.0         # Minimum effective A_h [m²/s] after latitude
+                                    # scaling.  Prevents viscosity from vanishing
+                                    # at extreme latitudes.  Recommended 1000.0
+                                    # for grids extending past 85°.
+    A_h_eq_boost: float = 1.0      # Equatorial Laplacian-viscosity boost.  When
+                                    # > 1, multiplies A_h by 1 + (boost-1) *
+                                    # exp(-(lat/sigma)²), so horizontal momentum
+                                    # gets extra dissipation near the equator
+                                    # where f→0 leaves no rotational stiffness.
+                                    # Targets unconstrained equatorial dynamic
+                                    # response at coarse resolution that drives
+                                    # runaway upwelling cold tongues.  Typical
+                                    # production: 3-10.  Only multiplies A_h
+                                    # (momentum); K_h (tracers) is untouched
+                                    # so water masses stay intact.
+    A_h_eq_sigma_deg: float = 5.0  # Gaussian half-width in degrees of the
+                                    # equatorial boost.  Typical 3-7°
+                                    # (~equatorial waveguide width).
     B_h: float = 0.0
     B_h_barotropic: float = 0.0  # Biharmonic hyperviscosity coeff [m^4/s]
                                    # applied to the DEPTH-MEAN (U_bar,
@@ -493,7 +515,12 @@ class LatLonCGridOceanConfig(NamedTuple):
                                    # baroclinic geostrophy (which lives
                                    # in u' = u_3d - U_bar).  HIM/MOM6
                                    # BIHARMONIC_BAROTROPIC analog.
-    C_smag: float = 0.0
+    C_smag: float = 0.0            # Biharmonic Smagorinsky coefficient
+    C_smag_lap: float = 0.0        # Laplacian Smagorinsky coefficient.
+                                    # When > 0, adds flow-adaptive Laplacian
+                                    # viscosity A_smag = (C·dx)²·|D| via the
+                                    # energy-stable stress-tensor operator.
+                                    # MOM6 OM4 uses 0.15. Additive with A_h.
     bottom_drag_r: float = 0.0
     bottom_drag_bbl_thickness: float = 0.0
     bottom_drag_bg_velocity: float = 0.0  # MOM6 DRAG_BG_VEL [m/s]; when >0,
@@ -540,6 +567,15 @@ class LatLonCGridOceanConfig(NamedTuple):
     # keep working.
     C_leith: float = 0.0
     C_leith_modified: bool = False
+    # Slope-foot viscosity enhancement (MOM6 OM4 KH_BG_2D analog).
+    # When > 0, multiplies horizontal viscosity (A_h Laplacian, Smagorinsky,
+    # Leith) in the bottom N levels by 1 + alpha · tanh(|∇H|/H/δ),
+    # locally enhancing dissipation over steep slopes (African shelf,
+    # ITF, equatorial trenches). Targets the f≈0 + steep-bathymetry
+    # instability mode that constant viscosity cannot reach.
+    slope_foot_alpha: float = 0.0       # 0 = disabled; production: 3.0
+    slope_foot_threshold: float = 0.1   # MOM6 default
+    slope_foot_n_levels: int = 5        # bottom 5 levels
     momentum_advection: str = "vector_invariant"  # "vector_invariant", "weno5", or "weno7"
     weno_d_term: bool = True  # Include WENO D-term (divergence flux, Silvestri Eqs. 31-32).
                               # Implemented with proper split: matching-direction divergence
