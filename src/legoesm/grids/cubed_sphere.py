@@ -2806,6 +2806,70 @@ def get_pressure_given_height_fv3(
     return p
 
 
+def geopotential_from_T_peln_fv3(
+    pt: jax.Array,
+    peln: jax.Array,
+    phis: jax.Array,
+    q: jax.Array | None = None,
+    moist: bool = False,
+    zvir: float | None = None,
+) -> jax.Array:
+    """FV3_3D iter 738: geopotential at interfaces from hydrostatic balance.
+
+    Faithful JAX port of FV3's standard hydrostatic Φ integration
+    (used in fv_diagnostics.F90 height-field paths and IC
+    ingestion):
+
+        Φ_surface = phis                                  (k = km)
+        Φ[k] = phis + Σ_{j>=k} R_d · T_v[j] · Δpeln[j]    (upward sum)
+
+    where ``T_v = pt`` (dry) or ``T_v = pt · (1 + zvir·q)`` (moist).
+
+    Returns interface geopotential (m²/s²); divide by g for height
+    (m).  Pairs with iter-727 ``compute_zh_from_delz_fv3`` (heights
+    from delz path), iter-684 ``get_height_given_pressure_fv3``.
+
+    Parameters
+    ----------
+    pt : jax.Array, shape (..., km)
+        Air temperature (K).
+    peln : jax.Array, shape (..., km+1)
+        log(pressure) at interfaces.
+    phis : jax.Array, shape (...,)
+        Surface geopotential (m²/s²).
+    q : jax.Array, shape (..., km), optional
+        Specific humidity — required if moist.
+    moist : bool, default False.
+    zvir : float, optional
+        Virtual-T coefficient.  Default ``R_v/R_d − 1``.
+
+    Returns
+    -------
+    phi : jax.Array, shape (..., km+1)
+        Geopotential at interfaces (m²/s²).
+    """
+    if moist:
+        if q is None:
+            raise ValueError("moist=True requires q")
+        if zvir is None:
+            zvir = constants.R_v / constants.R_d - 1.0
+        t_v = pt * (1.0 + zvir * q)
+    else:
+        t_v = pt
+    d_peln = peln[..., 1:] - peln[..., :-1]
+    # Layer contribution = R_d · T_v · Δpeln  (positive)
+    layer_contrib = constants.R_d * t_v * d_peln                 # (..., km)
+    # Cumulative sum from surface upward: reverse → cumsum → reverse
+    cum_up = jnp.cumsum(layer_contrib[..., ::-1], axis=-1)[..., ::-1]
+    # Φ[..., 0..km-1] = phis + cum_up
+    # Φ[..., km] = phis
+    phi_above = phis[..., None] + cum_up
+    return jnp.concatenate(
+        [phi_above, phis[..., None]],
+        axis=-1,
+    )
+
+
 def temperature_from_theta_fv3(
     theta: jax.Array,
     p: jax.Array,

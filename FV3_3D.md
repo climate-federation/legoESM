@@ -1195,6 +1195,35 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 738: **``geopotential_from_T_peln_fv3``** — Φ at interfaces.
+
+  Hydrostatic integration:
+
+      Φ_surface = phis                              (k = km)
+      Φ[k] = phis + Σ_{j>=k} R_d · T_v[j] · Δpeln[j]
+
+  where ``T_v = pt`` (dry) or ``T_v = pt·(1+zvir·q)`` (moist).
+
+  Standard FV3 hydrostatic Φ pattern (fv_diagnostics.F90 height
+  paths + IC ingestion).  Returns interface geopotential (m²/s²);
+  divide by g for height (m).
+
+  Pairs with iter-727 ``compute_zh_from_delz_fv3`` (alternate
+  height pathway from delz instead of T/peln), iter-684
+  ``get_height_given_pressure_fv3``.
+
+  Vectorized via cumsum on reversed layer contributions.
+
+  Tests (7/7 in <2 s):
+  1. Φ[km] = phis exactly.
+  2. Isothermal dry → ΔΦ = R_d·T·ln(p_bot/p_top) exact.
+  3. Moist column → larger ΔΦ than dry (T_v > T).
+  4. Monotone decreasing top → surface.
+  5. 3-D shapes.
+  6. No NaN/Inf.
+  7. moist=True without q raises.
+
+  Wired into iter-383 sweep (now 302).
 - Iter 737: **``temperature_from_theta_fv3``** — inverse of iter-735.
 
   Recovers air temperature from potential temperature + pressure:
