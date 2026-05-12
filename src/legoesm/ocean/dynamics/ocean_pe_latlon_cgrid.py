@@ -1519,17 +1519,28 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             #     partial cell is 100x stronger than deep ocean" issue).
             #     Cells above bottom_level get partial-overlap drag.
             #
-            # Distributed BBL drag: shared grid-agnostic helper in
-            # ocean_tendency_common (also used by MPAS Voronoi PE).
-            from legoesm.ocean.dynamics.ocean_tendency_common import (
-                bbl_distributed_drag_face_column,
-            )
-            diag_botdrag_u = bbl_distributed_drag_face_column(
-                u, h_u, config.bottom_drag_r, H_BBL,
-            )
-            diag_botdrag_v = bbl_distributed_drag_face_column(
-                v, h_v, config.bottom_drag_r, H_BBL,
-            )
+            # Build z interfaces at u/v faces from the cumulative thickness
+            # along the level axis.  For the seafloor, ``z_seafloor =
+            # -sum(h_u, axis=-1)`` (face's wet depth = sum of per-level
+            # face thickness, partial-aware via min h).
+            def _bbl_drag_for_face(u_field, h_face, r_eff):
+                z_half = jnp.concatenate([
+                    jnp.zeros(h_face.shape[:-1] + (1,), dtype=h_face.dtype),
+                    -jnp.cumsum(h_face, axis=-1),
+                ], axis=-1)
+                z_top = z_half[..., :-1]
+                z_bot = z_half[..., 1:]
+                z_seafloor = z_half[..., -1:]
+                bbl_top = z_seafloor + H_BBL
+                overlap = jnp.maximum(
+                    0.0,
+                    jnp.minimum(z_top, bbl_top)
+                    - jnp.maximum(z_bot, z_seafloor),
+                )
+                h_safe = jnp.maximum(h_face, 1e-10)
+                return -r_eff * u_field * overlap / (h_safe * H_BBL)
+            diag_botdrag_u = _bbl_drag_for_face(u, h_u, r_eff_u)
+            diag_botdrag_v = _bbl_drag_for_face(v, h_v, r_eff_v)
         elif isinstance(z_coord, OceanPartialCellCoordinate):
             # Partial cells: apply drag at each column's actual seafloor
             # (the lowest active level, ``bottom_level[i,j]``), using the

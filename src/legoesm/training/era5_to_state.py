@@ -563,3 +563,64 @@ def regrid_2d_to_gaussian(field_2d, era5_lat, era5_lon, grid):
         method='linear', bounds_error=False, fill_value=None,
     )
     return interp((lat_g, lon_g)).astype(np.float32)
+
+
+def load_era5_ic(
+    zarr_path: str,
+    year: int,
+    month: int = 1,
+    day: int = 1,
+    hour: int = 0,
+) -> ERA5Slice:
+    """Load a single ERA5 time slice for use as AMIP initial conditions.
+
+    Unlike ``load_era5_slice``, this function does not require a
+    ``TrainingERA5Config``.  It auto-detects available pressure levels
+    from the Zarr store and selects the timestamp nearest to the
+    requested date.
+
+    Parameters
+    ----------
+    zarr_path : str
+        Path to a local Zarr store or GCS URI containing ERA5 data.
+    year, month, day, hour : int
+        Target datetime for IC (default: 1 January of *year* at 00:00 UTC).
+
+    Returns
+    -------
+    ERA5Slice
+        Single time slice ready to pass to ``era5_to_cubedsphere_carry``
+        or ``era5_to_spectral_carry``.
+    """
+    import pandas as pd
+
+    ds = _open_era5_zarr(zarr_path)
+
+    # --- locate nearest time index ---
+    times = ds.time.values
+    try:
+        target = pd.Timestamp(year=year, month=month, day=day, hour=hour)
+        time_series = pd.DatetimeIndex(times)
+        time_idx = int(np.argmin(np.abs(time_series - target)))
+    except Exception:
+        # cftime objects (e.g. noleap calendar)
+        import cftime
+        target_cf = cftime.datetime(year, month, day, hour)
+        diffs = np.array(
+            [abs((t - target_cf).total_seconds()) for t in times],
+            dtype=np.float64,
+        )
+        time_idx = int(np.argmin(diffs))
+
+    # --- auto-detect pressure levels ---
+    level_dim = "level" if "level" in ds.dims else "pressure_level"
+    levels_hPa = tuple(
+        int(v) for v in sorted(ds[level_dim].values.tolist())
+    )
+
+    cfg = TrainingERA5Config(
+        zarr_store=zarr_path,
+        levels=levels_hPa,
+        local_cache_dir="",
+    )
+    return load_era5_slice(cfg, time_idx)
