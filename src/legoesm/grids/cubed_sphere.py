@@ -2885,6 +2885,82 @@ def compute_brn_fv3(
     return brn, shear06
 
 
+def nh_total_energy_fv3(
+    ua: jax.Array, va: jax.Array, w: jax.Array,
+    pt: jax.Array, delp: jax.Array, delz: jax.Array,
+    hs: jax.Array,
+    q_sphum: jax.Array | None = None,
+    moist_phys: bool = False,
+) -> jax.Array:
+    """FV3_3D iter 693: vertically-integrated total energy per column.
+
+    Faithful JAX port of FV3 ``nh_total_energy``
+    (tools/fv_diagnostics.F90:5501-5571).
+
+    Per-column total energy (J/m²):
+
+        phiz[km] = hs                               (surface geopot)
+        phiz[k]  = phiz[k+1] − g · delz[k]          (cumul. upward)
+        TE = (1/g) · Σ_k  delp[k] · ( cv · pt[k]
+                                     + L_v · q_sphum[k]            (moist)
+                                     + 0.5·(phiz[k] + phiz[k+1])
+                                     + 0.5·(ua²+va²+w²) )
+
+    where ``cv = c_pd − R_d`` (dry isochoric specific heat).
+    Moist-physics branch (full FV3) uses a moisture-weighted cv via
+    ``moist_cv``; here we use dry cv with an explicit L_v·q term
+    which is the leading-order approximation correct for
+    sphum-only moist energy.
+
+    Parameters
+    ----------
+    ua, va, w : jax.Array, shape (..., km)
+        Wind components (a-grid).
+    pt : jax.Array, shape (..., km)
+        Temperature (K).
+    delp : jax.Array, shape (..., km)
+        Pressure thickness (Pa).
+    delz : jax.Array, shape (..., km)
+        Layer thickness (NEGATIVE in FV3).
+    hs : jax.Array, shape (...,)
+        Surface geopotential height·g (m²/s²).
+    q_sphum : jax.Array, shape (..., km), optional
+        Specific humidity — required if moist_phys=True.
+    moist_phys : bool, default False.
+
+    Returns
+    -------
+    te : jax.Array, shape (...,)
+        Column total energy (J/m²).
+    """
+    g = constants.g
+    cv = constants.c_pd - constants.R_d
+
+    # phiz at km+1 interfaces: phiz[..., km] = hs; cumulative up.
+    # Build via cumsum on (-g·delz) reversed.
+    minus_g_delz = -g * delz                     # positive top-down
+    cum_up = jnp.cumsum(minus_g_delz[..., ::-1], axis=-1)[..., ::-1]
+    # phiz[..., k]   = hs + cum_up[..., k]   for k = 0..km-1
+    # phiz[..., km]  = hs
+    phiz_top = hs[..., None] + cum_up            # shape (..., km)
+    phiz_bot = hs[..., None] + jnp.concatenate(
+        [cum_up[..., 1:], jnp.zeros_like(hs[..., None])],
+        axis=-1,
+    )                                            # phiz[..., k+1]
+    # Layer-mean phi
+    phi_avg = 0.5 * (phiz_top + phiz_bot)
+    # Layer KE
+    ke = 0.5 * (ua * ua + va * va + w * w)
+    if moist_phys:
+        if q_sphum is None:
+            raise ValueError("moist_phys=True requires q_sphum")
+        layer = cv * pt + constants.L_v * q_sphum + phi_avg + ke
+    else:
+        layer = cv * pt + phi_avg + ke
+    te = jnp.sum(delp * layer, axis=-1) / g
+    return te
+
+
 def eqv_pot_fv3(
     pt: jax.Array,
     delp: jax.Array,

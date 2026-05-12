@@ -1195,6 +1195,33 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 693: **FV3 ``nh_total_energy_fv3``** — column total energy.
+  Faithful JAX port of FV3 ``nh_total_energy``
+  (tools/fv_diagnostics.F90:5501-5571).
+
+  Per-column total energy (J/m²):
+
+      phiz[km] = hs                                  (surface)
+      phiz[k]  = phiz[k+1] - g·delz[k]               (cumul. upward)
+      TE = (1/g) · Σ delp · ( cv·pt
+                            + L_v·q_sphum            (moist)
+                            + 0.5·(phiz[k]+phiz[k+1])
+                            + 0.5·(ua²+va²+w²) )
+
+  cv = c_pd - R_d (dry isochoric specific heat).  Moist branch uses
+  L_v·q_sphum for latent contribution (leading-order moisture-only
+  approximation correct for sphum-only moist energy budget).
+
+  Tests (7/7 in <2 s):
+  1. Isothermal at rest, hs=0 → TE matches cv·T·p_s/g + geopot.
+  2. Moist > dry by L_v·Σ delp·q/g exactly.
+  3. Uniform-wind ↑ KE = 0.5·U²·p_s/g exactly.
+  4. Realistic atmosphere column → 1e8 < TE < 1e10 J/m².
+  5. 3-D input → 2-D output.
+  6. No NaN/Inf on random.
+  7. moist_phys=True without q_sphum raises ValueError.
+
+  Wired into iter-383 sweep (now 257).
 - Iter 692: **FV3 ``eqv_pot_fv3``** — equivalent potential temperature.
   Faithful JAX port of FV3 ``eqv_pot``
   (tools/fv_diagnostics.F90:5341-5419).
