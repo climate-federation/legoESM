@@ -1195,6 +1195,35 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 729: **``dry_pressure_fv3`` helper + iter-692 refactor**.
+
+  Extracted FV3's moist-air dry partial pressure pattern from iter-692
+  inline use (matching fv_diagnostics.F90:5375-5391):
+
+      rq = max(0, q) if moist else 0
+      Hydrostatic:    pd = (1 − rq) · delp / (peln[k+1] − peln[k])
+      Non-hydro:      pd = −R_d · pt · (1 − rq) · delp / (g · delz)
+
+  Used in moist Poisson exponent computations and θ_e formulas.
+
+  iter-692 ``eqv_pot_fv3`` refactored to delegate (removed 9 inline
+  lines).  Output bit-identical (pinned by iter-692 7/7 tests still
+  pass).
+
+  iter-716 ``eqv_pot_bolton_fv3`` not refactored: its inline pattern
+  uses (1 + zvir·q) virtual-T factor (not (1 − rq) dry-partial), so
+  different semantics.
+
+  Tests (7/7 in <2 s):
+  1. Dry hydrostatic → pd = delp/Δpeln exactly.
+  2. Moist q=0.01 → pd = 0.99 · delp/Δpeln.
+  3. Non-hydro dry at pt=280, delz=-1000 → analytical pd.
+  4. iter-692 eqv_pot refactor output sanity (T=290, q variable → 290<θ_e<400).
+  5. 3-D shapes.
+  6. No NaN/Inf.
+  7. Missing peln/pt/delz/q raises ValueError as appropriate.
+
+  Wired into iter-383 sweep (now 293).
 - Iter 728: **``compute_zh_above_below_fv3`` helper + 5-iter refactor**.
 
   Extracted cumsum-based per-layer (zh_above, zh_below) pattern

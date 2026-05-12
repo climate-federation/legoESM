@@ -316,6 +316,7 @@ _GUARD_MODULES = (
     "test_fv3_hydrostatic_delz_iter726",             # iter-726 add
     "test_fv3_compute_zh_from_delz_iter727",         # iter-727 add
     "test_fv3_compute_zh_above_below_iter728",       # iter-728 add
+    "test_fv3_dry_pressure_iter729",                 # iter-729 add
 )
 
 
