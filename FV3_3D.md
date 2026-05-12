@@ -5343,5 +5343,52 @@ entry and ozone-recovery feedback diagnostics (Solomon et al.
 2010, Randel-Park 2019).  Pure JAX, vmap-compatible.  No new
 physical constants introduced.
 
+## Iter 799 — stratospheric_h2o_entry_fv3 (cold-trap H₂O entry)
+
+Added `stratospheric_h2o_entry_fv3(t_cpt, p_cpt)` to
+`grids/cubed_sphere.py`.  Saturation specific humidity at the
+cold-point tropopause:
+
+```
+q_v_strat = thermo.saturation_specific_humidity(T_CPT, p_CPT)
+ppmv      = q_v_strat / ε · 10⁶            (ε = R_d/R_v ≈ 0.622)
+```
+
+Returns ``(q_kgkg, q_ppmv)`` tuple — caller picks units.
+
+Sets the lower bound on stratospheric water vapor through the
+Brewer-Dobson "cold trap" mechanism: tropical tropospheric air
+is freeze-dried at the cold point before entering the
+stratosphere, so the stratospheric H₂O entry mixing ratio equals
+the saturation-mixing-ratio at the CPT.
+
+Tropical CPT (T=190 K, p=100 hPa) → ppmv O(1-10), bracketing the
+observed 3-4 ppmv stratospheric "background" from MLS/HALOE.
+
+Used by: Brewer-Dobson stratospheric H₂O budget, ozone-recovery
+feedback diagnostics (CPT cools under CO₂ increase → ppmv drops
+→ less HOₓ → ozone-layer change), CCM/CCMI evaluation against
+ACE-FTS / MLS, methane oxidation "lower-bound minus 2×CH₄"
+inversion for entry mixing ratio.
+
+Composes iter-798 (T_CPT) + canonical
+``thermo.saturation_specific_humidity`` per CLAUDE.md "use
+existing saturation curve" rule.
+
+Test: `tests/test_fv3_stratospheric_h2o_entry_iter799.py` (6
+tests: tropical CPT ppmv in physical range, warmer CPT → more
+H₂O (CC), lower pressure → more H₂O, full iter-798 pipeline,
+tuple shape preserved, 3-D finite + non-negative).
+
+### Why this iteration was meaningful
+
+Closes the **cold-trap H₂O pipeline** iter-715 (saturation) →
+iter-798 (CPT) → iter-799 (stratospheric entry).  The full
+Brewer-Dobson stratospheric water-vapor budget can now be
+computed from any FV3 temperature column in one composition
+chain.  Pure JAX, vmap-compatible.  Uses canonical
+``thermo.saturation_specific_humidity`` — no new saturation
+math.  No new physical constants introduced.
+
 
 

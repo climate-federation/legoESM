@@ -4772,6 +4772,61 @@ def cold_point_tropopause_fv3(
     return z_cpt, t_cpt
 
 
+def stratospheric_h2o_entry_fv3(
+    t_cpt: jax.Array,
+    p_cpt: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 799: stratospheric water-vapor "cold-trap" entry.
+
+    Saturation specific humidity at cold-point tropopause (CPT)
+    conditions:
+
+        q_v_strat = q_sat(T_CPT, p_CPT)
+        ppmv      = q_v_strat / ε · 10⁶   where ε = R_d / R_v
+
+    Sets the lower bound on stratospheric water vapor through the
+    Brewer-Dobson "cold trap" mechanism: tropical tropospheric air
+    is freeze-dried at the cold point before entering the
+    stratosphere, so q_strat is the saturation-mixing-ratio at the
+    CPT.
+
+    Typical tropical CPT (T=190 K, p=100 hPa): q_v ≈ 3 ppmv —
+    matches observed stratospheric "background" water-vapor
+    concentration (3.5–4 ppmv in lower tropical stratosphere from
+    MLS/HALOE).
+
+    Used by: Brewer-Dobson stratospheric H₂O budget, ozone-recovery
+    feedback diagnostics (CPT cools under CO₂ increase → ppmv
+    drops → less HOₓ → ozone-layer change), CCM/CCMI evaluation
+    against ACE-FTS / MLS observations, methane oxidation
+    "lower-bound minus 2×CH₄" inversion for entry mixing ratio.
+
+    Composes iter-798 ``cold_point_tropopause_fv3`` (provides
+    T_CPT) + canonical ``thermo.saturation_specific_humidity``
+    (provides q_sat).
+
+    Returns ``(q_v_strat_kgkg, ppmv)`` tuple — caller picks
+    whichever unit fits the diagnostic context.
+
+    Parameters
+    ----------
+    t_cpt : jax.Array
+        Cold-point tropopause temperature (K), from iter-798.
+    p_cpt : jax.Array
+        Pressure at the cold-point tropopause level (Pa).
+
+    Returns
+    -------
+    (q_strat_kgkg, q_strat_ppmv) : tuple of jax.Array
+        Stratospheric entry mixing ratio (kg/kg and ppmv).
+    """
+    from legoesm import thermo
+
+    q_sat = thermo.saturation_specific_humidity(t_cpt, p_cpt)
+    ppmv = q_sat / constants.epsilon * 1.0e6
+    return q_sat, ppmv
+
+
 def kinetic_energy_fv3(
     ua: jax.Array,
     va: jax.Array,
