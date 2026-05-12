@@ -2806,6 +2806,85 @@ def get_pressure_given_height_fv3(
     return p
 
 
+def compute_brn_fv3(
+    ua: jax.Array, va: jax.Array,
+    delp: jax.Array, delz: jax.Array,
+    cape: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 688: Bulk Richardson Number supercell diagnostic.
+
+    Faithful JAX port of FV3 ``compute_brn``
+    (tools/fv_diagnostics.F90:5574-5645).
+
+    Bulk Richardson Number (BRN) is the classic environmental
+    supercell diagnostic.  Pairs with iter-686 UH and iter-687 SRH:
+
+        BRN = CAPE / (0.5 · shear06²)
+
+    where shear06 is the magnitude of the mass-weighted wind
+    difference between the 0-500 m and 0-6 km layers.
+
+    BRN ranges (per FV3 reference / forecaster usage):
+        < 10    : extreme shear, splitting/short-lived
+        10-45   : classic supercell range
+        > 50    : weak shear, ordinary thunderstorm
+
+    Algorithm (vectorized):
+
+        ht[k] = layer-midpoint height above surface
+              = half-thickness of lowest layer at k=km
+              + cumulative full thicknesses upward
+        mask06[k]  = (ht[k] <= 6000)
+        mask005[k] = (ht[k] <=  500)
+        u06  = Σ delp · ua · mask06  / Σ delp · mask06
+        u005 = Σ delp · ua · mask005 / Σ delp · mask005
+        shear06 = sqrt((u005-u06)² + (v005-v06)²)
+        BRN = CAPE / (0.5 · max(0.1, shear06²))
+
+    Parameters
+    ----------
+    ua, va : jax.Array, shape (..., km)
+        A-grid wind components.
+    delp : jax.Array, shape (..., km)
+        Pressure thickness (positive, FV3 convention).
+    delz : jax.Array, shape (..., km)
+        Layer thickness (NEGATIVE in FV3 — top-down).
+    cape : jax.Array, shape (...,)
+        CAPE (J/kg).
+
+    Returns
+    -------
+    brn : jax.Array, shape (...,)
+        Bulk Richardson Number (dimensionless).
+    shear06 : jax.Array, shape (...,)
+        0-6 km bulk shear magnitude (m/s).
+    """
+    half_thick = -0.5 * delz
+    step = half_thick[..., :-1] + half_thick[..., 1:]
+    step_rev = step[..., ::-1]
+    cum = jnp.cumsum(step_rev, axis=-1)
+    ht_upper = (half_thick[..., -1:] + cum)[..., ::-1]
+    ht = jnp.concatenate(
+        [ht_upper, half_thick[..., -1:]],
+        axis=-1,
+    )
+    mask06 = ht <= 6000.0
+    mask005 = ht <= 500.0
+    u06_num = jnp.sum(delp * ua * mask06, axis=-1)
+    v06_num = jnp.sum(delp * va * mask06, axis=-1)
+    m06 = jnp.sum(delp * mask06, axis=-1)
+    u005_num = jnp.sum(delp * ua * mask005, axis=-1)
+    v005_num = jnp.sum(delp * va * mask005, axis=-1)
+    m005 = jnp.sum(delp * mask005, axis=-1)
+    safe_m06 = jnp.where(m06 > 0.0, m06, 1.0)
+    safe_m005 = jnp.where(m005 > 0.0, m005, 1.0)
+    du = u005_num / safe_m005 - u06_num / safe_m06
+    dv = v005_num / safe_m005 - v06_num / safe_m06
+    shear06 = jnp.sqrt(du * du + dv * dv)
+    brn = cape / (0.5 * jnp.maximum(0.1, shear06 * shear06))
+    return brn, shear06
+
+
 def helicity_relative_fv3(
     ua: jax.Array, va: jax.Array,
     delz: jax.Array | None = None,

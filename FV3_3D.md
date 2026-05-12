@@ -1195,6 +1195,41 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 688: **FV3 ``compute_brn_fv3``** — Bulk Richardson Number.
+  Faithful JAX port of FV3 ``compute_brn``
+  (tools/fv_diagnostics.F90:5574-5645).
+
+  Completes the supercell triad with iter-686 UH and iter-687 SRH:
+
+      BRN = CAPE / (0.5 · shear06²)
+
+  where shear06 is the magnitude of the mass-weighted wind
+  difference between the 0-500 m and 0-6 km layers.
+
+  BRN ranges (forecaster usage):
+    < 10:     extreme shear, splitting/short-lived
+    10-45:    classic supercell range
+    > 50:     weak shear, ordinary thunderstorm
+
+  Algorithm (vectorized):
+
+      ht[k] = layer-midpoint height above surface
+            (half-thickness of lowest layer + cumulative upward)
+      mask06[k]  = (ht[k] <= 6000)
+      mask005[k] = (ht[k] <=  500)
+      u06  = Σ delp·ua·mask06  / Σ delp·mask06
+      u005 = Σ delp·ua·mask005 / Σ delp·mask005
+      shear06 = sqrt((u005-u06)² + (v005-v06)²)
+      brn = CAPE / (0.5 · max(0.1, shear06²))
+
+  Tests (5/5 in <2 s):
+  1. CAPE=0 → BRN=0.
+  2. Uniform wind → shear=0 → BRN=CAPE/0.05.
+  3. Known 12-layer 0-6 km mean with U=20 m/s → analytical BRN.
+  4. 3-D (n_x, n_y, km) input → (n_x, n_y) output.
+  5. No NaN/Inf on random inputs.
+
+  Wired into iter-383 sweep (now 253).
 - Iter 687: **FV3 ``helicity_relative_fv3``** — storm-relative helicity (SRH).
   Faithful JAX port of FV3 ``helicity_relative``
   (tools/fv_diagnostics.F90:4811-4895).
