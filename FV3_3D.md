@@ -1195,6 +1195,27 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 744: **``internal_energy_column_fv3``** — column IE diagnostic.
+
+  Column-integrated internal energy:
+
+      IE = Σ_k delp[k] · cv · pt[k] / g
+
+  Defaults cv = c_pd − R_d (dry isochoric).  Accepts layer-varying
+  cv from iter-713 ``moist_cv_fv3`` for moisture-weighted IE.
+
+  Component of FV3 total-energy budget (iter-693 nh_total_energy
+  uses this as the cv·pt piece).  Delegates integration to
+  iter-742 column_integral_delp_fv3.
+
+  Tests (5/5 in <1 s):
+  1. Dry isothermal at p_s=1e5, T=280 → IE = cv·T·p_s/g exact.
+  2. T=0 → IE=0.
+  3. Custom moist cv from iter-713 → analytical match.
+  4. 3-D shapes.
+  5. No NaN/Inf.
+
+  Wired into iter-383 sweep (now 308).
 - Iter 743: **refactor iter-677/694 to use iter-742 column_integral helper**.
 
   Two callsites had inline ``jnp.sum(delp * q [/ g], axis=-1)``

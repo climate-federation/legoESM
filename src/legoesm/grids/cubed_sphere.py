@@ -2987,6 +2987,45 @@ def theta_dry_fv3(
     return pt * (p_ref / p) ** kap
 
 
+def internal_energy_column_fv3(
+    pt: jax.Array,
+    delp: jax.Array,
+    cv: float | jax.Array | None = None,
+) -> jax.Array:
+    """FV3_3D iter 744: column-integrated internal energy.
+
+        IE = Σ_k delp[k] · cv · pt[k] / g
+
+    where cv defaults to dry isochoric heat ``c_pd − R_d``.  Pass
+    ``cv = moist_cv_fv3(...)`` from iter-713 for moisture-weighted
+    column IE.
+
+    Standard component of FV3 total-energy budget (iter-693
+    ``nh_total_energy_fv3`` uses this as the c_v · pt piece).
+
+    Pairs with iter-742 ``column_integral_delp_fv3`` (delegated
+    integration) and iter-713 ``moist_cv_fv3`` (moist cv).
+
+    Parameters
+    ----------
+    pt : jax.Array, shape (..., km)
+        Temperature (K).
+    delp : jax.Array, shape (..., km)
+        Pressure thickness (Pa).
+    cv : float or jax.Array, optional
+        Isochoric specific heat (J/kg/K).  Default ``c_pd − R_d``.
+        Pass layer-varying array for moist atmosphere.
+
+    Returns
+    -------
+    ie : jax.Array, shape (...,)
+        Column internal energy (J/m²).
+    """
+    if cv is None:
+        cv = constants.c_pd - constants.R_d
+    return column_integral_delp_fv3(cv * pt, delp)
+
+
 def column_integral_delp_fv3(
     field: jax.Array,
     delp: jax.Array,
