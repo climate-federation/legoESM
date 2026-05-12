@@ -5020,5 +5020,50 @@ divergence patterns; every frontogenesis derivation uses Q =
 (∂V_a/∂x, ∂V_a/∂y) Q-vectors.  Pure JAX, vmap-compatible.  No
 new physical constants introduced.
 
+## Iter 792 — thermal_wind_fv3 (∂V_g/∂z from ∇T)
+
+Added `thermal_wind_fv3(dT_dx, dT_dy, f, T_mean, f_floor=1e-12)`
+to `grids/cubed_sphere.py`.  Vertical shear of geostrophic wind
+from horizontal temperature gradient in z-coordinates:
+
+```
+∂u_g/∂z = − (g / (f·T̄)) · ∂T/∂y
+∂v_g/∂z = + (g / (f·T̄)) · ∂T/∂x
+```
+
+Equivalent vector form: ∂V_g/∂z = (g/(f·T̄)) · (k̂ × ∇T).
+
+Physical interpretation: NH cold pole (∂T/∂y < 0) → westerly jet
+aloft (∂u_g/∂z > 0) — the classical baroclinic mid-latitude jet
+mechanism.  SH mirrors.
+
+Used by: baroclinic jet-stream structure analysis, Eady
+baroclinic-instability eigenmodes, Stone-Held atmospheric energy
+cycle (V_T closes the cycle), thermal-wind balance check
+(diagnosed ∂V_g/∂z vs explicit shear), front-genesis Q-vector
+derivation.
+
+Composes iter-778 ``coriolis_parameter_fv3``.  Caller supplies
+horizontal T gradient on isobaric surface via existing grid
+operators and layer-mean ``T_mean``.  Sign-preserving ``f_floor``
+keeps equatorial output large-but-finite (TWB breaks down at
+equator).
+
+Test: `tests/test_fv3_thermal_wind_iter792.py` (7 tests: NH
+cold-pole → westerly aloft, SH mirror, ∇T=0 → 0 shear, zonal
+T gradient → meridional shear, iter-778 pipeline at 45°N gives
+mid-lat jet shear ~3.8 m/s/km, equator floored finite sign-
+preserved, 3-D shapes + finite both components).
+
+### Why this iteration was meaningful
+
+Thermal-wind balance is the diagnostic backbone of mid-latitude
+dynamics: it links horizontal temperature contrasts to vertical
+wind shear and explains the entire mid-latitude jet-stream
+structure.  Together with iter-790 V_g and iter-791 V_a, this
+closes the geostrophic-dynamics triplet (V_g, V_a, ∂V_g/∂z) —
+the QG-balance kit.  Pure JAX, vmap-compatible.  No new physical
+constants introduced.
+
 
 

@@ -4356,6 +4356,70 @@ def ageostrophic_wind_fv3(
     return u - u_g, v - v_g
 
 
+def thermal_wind_fv3(
+    dT_dx: jax.Array,
+    dT_dy: jax.Array,
+    f: jax.Array,
+    T_mean: jax.Array,
+    f_floor: float = 1e-12,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 792: thermal wind ∂V_g/∂z from horizontal T gradient.
+
+    Vertical shear of geostrophic wind in z-coordinates with
+    hydrostatic balance + ideal-gas EOS:
+
+        ∂u_g/∂z = − (g / (f·T̄)) · ∂T/∂y
+        ∂v_g/∂z = + (g / (f·T̄)) · ∂T/∂x
+
+    Equivalent vector form: ∂V_g/∂z = (g/(f·T̄)) · (k̂ × ∇T).
+
+    Physical interpretation: in the Northern Hemisphere with a
+    cold pole (∂T/∂y < 0), the geostrophic wind veers eastward
+    with height → westerly jet aloft (the classical baroclinic
+    mid-latitude jet).  In the SH the sign mirrors.
+
+    Used by: baroclinic jet-stream structure analysis, Eady
+    baroclinic-instability eigenmodes, mass-streamfunction
+    diagnostics (V_T closes the Stone-Held atmospheric energy
+    cycle), thermal-wind balance check (TWB = ∂V_g/∂z vs
+    diagnosed shear), front-genesis Q-vector derivation.
+
+    Composes iter-778 ``coriolis_parameter_fv3``.  Caller computes
+    horizontal T gradient on the cubed-sphere grid via existing
+    operators (e.g. ``divergence_cube_fv3`` or its gradient
+    sibling) and passes layer-mean ``T_mean`` between the two
+    levels of interest.
+
+    ``f_floor`` clamps |f| **preserving sign** — thermal-wind
+    balance breaks down at the equator; helper returns large-but-
+    finite output rather than NaN.
+
+    Parameters
+    ----------
+    dT_dx, dT_dy : jax.Array
+        Horizontal temperature gradients on isobaric surface
+        (K/m).
+    f : jax.Array
+        Coriolis parameter (s⁻¹) from iter-778.
+    T_mean : jax.Array
+        Layer-mean temperature (K) used in the thermal-wind
+        denominator.
+    f_floor : float
+        Lower bound on |f| (s⁻¹); default 1e-12.
+
+    Returns
+    -------
+    (du_g_dz, dv_g_dz) : tuple of jax.Array
+        Vertical shear of geostrophic wind (s⁻¹).
+    """
+    f_abs = jnp.maximum(jnp.abs(f), f_floor)
+    f_safe = jnp.where(f >= 0, f_abs, -f_abs)
+    coeff = constants.g / (f_safe * T_mean)
+    du_g_dz = -coeff * dT_dy
+    dv_g_dz = coeff * dT_dx
+    return du_g_dz, dv_g_dz
+
+
 def kinetic_energy_fv3(
     ua: jax.Array,
     va: jax.Array,
