@@ -1195,6 +1195,35 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 643: **FV3 ``mount_waves``** — HIWPP mountain-wave hybrid
+  coord init.  Faithful JAX port of FV3 ``mount_waves``
+  (tools/fv_eta.F90:2346-2479, ``NO_UKMO_HB`` branch).  Builds
+  hybrid (ak, bk) coords for HIWPP mountain-wave test cases:
+
+      Bottom 20: dz = 500 m (250 m if km > 60)
+      Middle:    dz unchanged (s_fac = 1.0)
+      Top 2:     ze[2] = ze[3] + √2·dz; ze[1] = ze[2] + 2·dz
+      pe[k] from isothermal hydrostatic (T0=300)
+      ptop = pe[0]
+      ks = max k where pint < pe[k]
+      Pure pressure k ≤ ks; hybrid sigma k > ks
+
+  Requires km ≥ 23.  Default ``pint = 300 hPa`` (transition).
+  Returns ``(ak, bk, ptop, ks, pint_out)``.
+
+  Used by FV3 for the HIWPP idealized mountain-wave benchmark.
+
+  Lives in ``legoesm.grids.vertical``.  Uses constants g, R_d.
+
+  Tests (6/6 in <1 s):
+  1. Output shapes (km+1, km+1, int, scalar, scalar).
+  2. ak[0]=ptop, bk[0]=0, ak[km]=0, bk[km]=1.
+  3. Pe = ak + bk·p00 monotone top→bottom.
+  4. Pure-pressure layers (k ≤ ks) have bk = 0.
+  5. No NaN/Inf.
+  6. km < 23 raises ValueError.
+
+  Wired into iter-383 sweep (now 212).
 - Iter 642: **FV3 ``gw_1d``** — gravity-wave 1D vertical-coord init.
   Faithful JAX port of FV3 ``gw_1d`` (tools/fv_eta.F90:2286-2344).
   Sets up uniform-dz vertical coord with isothermal or constant-N²

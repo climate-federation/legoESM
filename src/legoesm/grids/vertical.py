@@ -1166,6 +1166,131 @@ def compute_dz_L32() -> tuple[jax.Array, jax.Array]:
     return dz_flipped, ztop
 
 
+def mount_waves(
+    km: int, pint: float = 300.0e2,
+) -> tuple[jax.Array, jax.Array, jax.Array, int, jax.Array]:
+    """FV3_3D iter 643: HIWPP mountain-wave hybrid-coord init.
+
+    Faithful JAX port of FV3 ``mount_waves``
+    (tools/fv_eta.F90:2346-2479, ``NO_UKMO_HB`` branch).  Builds
+    hybrid (ak, bk) coords for the HIWPP mountain-wave test:
+
+    Algorithm:
+        Bottom 20 layers:  dz = 500 m (250 m if km > 60)
+        Middle layers:     dz unchanged (s_fac = 1.0)
+        Top 2 layers:      ze[2] = ze[3] + √2·dz; ze[1] = ze[2] + 2·dz
+        dlnp[k] = g·dz[k] / (R_d·T0)   (isothermal hydrostatic)
+        pe[k] = p00·exp(Σ above)
+        ptop = pe[0]
+        ks = max k where pint < pe[k]
+        Pure pressure: k ≤ ks+1 → ak[k] = pe[k], bk[k] = 0
+        Hybrid sigma:  k > ks+1 → bk[k] = (pe[k] - pint)/(pe[km] - pint)
+                                  ak[k] = pe[k] - bk[k]·pe[km]
+        bk[km] = 1; ak[km] = 0
+
+    Parameters
+    ----------
+    km : int
+        Number of layers (FV3 expects km > 22).
+    pint : float, default 30000 Pa (300 hPa)
+        Pure-pressure / sigma transition pressure.
+
+    Returns
+    -------
+    ak, bk : jax.Array, shape (km+1,)
+        Hybrid coordinates.
+    ptop : jax.Array (scalar)
+        Top-of-model pressure (Pa).
+    ks : int
+        Number of pure-pressure layers.
+    pint_out : jax.Array (scalar)
+        Adjusted transition pressure pe[ks+1].
+    """
+    if km < 23:
+        raise ValueError(f"mount_waves requires km >= 23, got {km}")
+    g = constants.g
+    rdgas = constants.R_d
+    p00 = 1.0e5
+    t0 = 300.0
+
+    dz0 = 500.0 if km <= 60 else 250.0
+    s_fac = 1.0
+
+    # Build ze bottom-up.  FV3 1-indexed: ze[km+1]=0; bottom 20 (k=km..km-19)
+    # uniform dz0; middle k=km-20..3 stretching by s_fac; top k=2,1 special.
+    # 0-indexed equivalent (ze shape (km+1,), ze[km] = 0):
+    ze = jnp.zeros((km + 1,))
+    # Bottom 20: ze[km-1..km-20] (0-indexed) ascending uniformly by dz0
+    bot_dz = dz0
+    # ze[k] = ze[k+1] + dz0 for k = km-1, km-2, ..., km-20 (0-indexed)
+    # In FV3: k = km, km-1, ..., km-19 (1-indexed) → 0-indexed k = km-1..km-20
+    for i in range(20):
+        ze = ze.at[km - 1 - i].set(ze[km - i] + bot_dz)
+    # Middle: FV3 k = km-20 down to 3 (1-indexed); 0-indexed k = km-21..2
+    # FV3 line 2389-2391: dz0 = s_fac * dz0; ze[k] = ze[k+1] + dz0
+    # So dz0 grows by s_fac each iteration.  With s_fac=1.0, dz0 stays constant.
+    cur_dz = bot_dz
+    for k_python in range(km - 21, 1, -1):    # 0-indexed; stops at k_python=2 (FV3 k=3)
+        cur_dz = s_fac * cur_dz
+        ze = ze.at[k_python].set(ze[k_python + 1] + cur_dz)
+    # Top: ze[1] (1-indexed 2) = ze[2] + √2·dz0; ze[0] (1-indexed 1) = ze[1] + 2·dz0
+    ze = ze.at[1].set(ze[2] + jnp.sqrt(2.0) * cur_dz)
+    ze = ze.at[0].set(ze[1] + 2.0 * cur_dz)
+
+    # Compute dz and dlnp
+    dz = ze[:-1] - ze[1:]                    # 0-indexed (km,); top→bottom
+    dlnp = g * dz / (rdgas * t0)
+    # pe1 from p00 (surface): peln[km] = log(p00); peln[k] = peln[k+1] - dlnp[k]
+    peln = jnp.zeros((km + 1,))
+    peln = peln.at[km].set(jnp.log(p00))
+    # Build top-down via cumulative subtraction
+    # peln[k] = log(p00) - Σ_{j=k}^{km-1} dlnp[j]
+    cumsum_rev = jnp.cumsum(dlnp[::-1])[::-1]   # = Σ dlnp from k..km-1
+    peln = peln.at[:km].set(jnp.log(p00) - cumsum_rev)
+    pe1 = jnp.exp(peln)
+
+    ptop = pe1[0]
+
+    # Find ks (FV3 1-indexed: ks = k - 1 where pint < pe[k], first match)
+    # 0-indexed: ks = j where pint < pe1[j+1] (j+1 is FV3 k); want smallest j.
+    # FV3 loop: k=2..km; ks = 0 if no match.  In 0-indexed: scan pe1[1..km].
+    pint_arr = jnp.asarray(pint)
+    # Find first k_fortran >= 2 with pint < pe1[k_fortran].  0-indexed k_python = k_fortran - 1 >= 1.
+    cond = pint_arr < pe1[1:]                  # pe1[1..km] in 0-indexed
+    # If no True, ks = 0 (FV3 default)
+    first_true = jnp.argmax(cond)
+    any_true = jnp.any(cond)
+    ks_level = jnp.where(any_true, first_true, 0)  # 0-indexed: this is k_python - 1
+    # FV3: ks = k_fortran - 1 = (k_python + 1) - 1 = k_python
+    # k_python where condition is met = first_true + 1 (because we sliced from index 1)
+    # Actually we used pe1[1:] so first_true index 0 corresponds to k_python=1 (FV3 k=2);
+    # FV3 ks = k - 1 = k_python = first_true + 1.  Hmm.  Let me recompute.
+    # If cond[i] = (pint < pe1[i+1]) for i=0..km-1, and FV3 detects at k_fortran = i+2
+    # (where pe1[i+1] in 0-indexed corresponds to pe1(k_fortran) with k_fortran = i+2 in 1-indexed).
+    # Then FV3 ks = k_fortran - 1 = i + 1.  So ks = first_true + 1 (when any_true).
+    ks = int(jnp.where(any_true, first_true + 1, 0))
+    pint_out = pe1[ks + 1] if ks + 1 <= km else pe1[km]
+
+    # Build ak, bk (NO_UKMO_HB branch)
+    ak = jnp.zeros((km + 1,))
+    bk = jnp.zeros((km + 1,))
+    # Pure-pressure: k ∈ [0, ks] (0-indexed; FV3 k=1..ks+1)
+    ak = ak.at[:ks + 1].set(pe1[:ks + 1])
+    # bk already zero
+    # Hybrid: k ∈ [ks+1, km-1]; ak[km] = 0, bk[km] = 1
+    if ks + 1 < km + 1:
+        pe_k = pe1[ks + 1:km + 1]
+        pint_safe = jnp.where(pe1[km] != pint_out, pe1[km] - pint_out, 1.0)
+        bk_int = (pe_k - pint_out) / pint_safe
+        bk = bk.at[ks + 1:km + 1].set(bk_int)
+        ak_int = pe_k - bk_int * pe1[km]
+        ak = ak.at[ks + 1:km + 1].set(ak_int)
+        # Force bottom: bk[km] = 1, ak[km] = 0
+        ak = ak.at[km].set(0.0)
+        bk = bk.at[km].set(1.0)
+    return ak, bk, ptop, ks, pint_out
+
+
 def gw_1d(
     km: int, p0: float, ztop: float,
     isothermal: bool = False, t0: float = 300.0,
