@@ -37,6 +37,7 @@ import numpy as np
 import jax.numpy as jnp
 import pytest
 
+from legoesm import constants
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 from legoesm.core.operators_cdgrid import fv3_sw_tendencies
@@ -63,11 +64,11 @@ def test_boundary_fix_fires_in_legacy_mode():
 
     div_damp = 1.5e7 * (48.0 / n) ** 2
     dh_off, du_off, dv_off = fv3_sw_tendencies(
-        h, u_d, v_d, h_s, cdgrid, g=9.80616,
+        h, u_d, v_d, h_s, cdgrid, g=constants.g,
         div_damp=div_damp, hyperdiff_coeff=0.0,
         boundary_fix=False)
     dh_on, du_on, dv_on = fv3_sw_tendencies(
-        h, u_d, v_d, h_s, cdgrid, g=9.80616,
+        h, u_d, v_d, h_s, cdgrid, g=constants.g,
         div_damp=div_damp, hyperdiff_coeff=0.0,
         boundary_fix=True)
 
@@ -97,11 +98,11 @@ def test_boundary_fix_bypassed_in_duogrid_mode():
 
     div_damp = 1.5e7 * (48.0 / n) ** 2
     dh_off, du_off, dv_off = fv3_sw_tendencies(
-        h, u_d, v_d, h_s, cdgrid, g=9.80616,
+        h, u_d, v_d, h_s, cdgrid, g=constants.g,
         div_damp=div_damp, hyperdiff_coeff=0.0,
         boundary_fix=False)
     dh_on, du_on, dv_on = fv3_sw_tendencies(
-        h, u_d, v_d, h_s, cdgrid, g=9.80616,
+        h, u_d, v_d, h_s, cdgrid, g=constants.g,
         div_damp=div_damp, hyperdiff_coeff=0.0,
         boundary_fix=True)
 
@@ -133,12 +134,12 @@ def test_fortran_vector_corner_fill_bypassed_in_duogrid_mode():
 
     div_damp = 1.5e7 * (48.0 / n) ** 2
     dh_off, du_off, dv_off = fv3_sw_tendencies(
-        h, u_d, v_d, h_s, cdgrid, g=9.80616,
+        h, u_d, v_d, h_s, cdgrid, g=constants.g,
         div_damp=div_damp, hyperdiff_coeff=0.0,
         boundary_fix=False,
         fortran_vector_corner_fill=False)
     dh_on, du_on, dv_on = fv3_sw_tendencies(
-        h, u_d, v_d, h_s, cdgrid, g=9.80616,
+        h, u_d, v_d, h_s, cdgrid, g=constants.g,
         div_damp=div_damp, hyperdiff_coeff=0.0,
         boundary_fix=False,
         fortran_vector_corner_fill=True)
@@ -162,12 +163,12 @@ def test_fortran_vector_corner_fill_active_in_legacy_mode():
 
     div_damp = 1.5e7 * (48.0 / n) ** 2
     dh_off, du_off, dv_off = fv3_sw_tendencies(
-        h, u_d, v_d, h_s, cdgrid, g=9.80616,
+        h, u_d, v_d, h_s, cdgrid, g=constants.g,
         div_damp=div_damp, hyperdiff_coeff=0.0,
         boundary_fix=False,
         fortran_vector_corner_fill=False)
     dh_on, du_on, dv_on = fv3_sw_tendencies(
-        h, u_d, v_d, h_s, cdgrid, g=9.80616,
+        h, u_d, v_d, h_s, cdgrid, g=constants.g,
         div_damp=div_damp, hyperdiff_coeff=0.0,
         boundary_fix=False,
         fortran_vector_corner_fill=True)

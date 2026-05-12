@@ -52,6 +52,7 @@ import numpy as np
 import jax.numpy as jnp
 import pytest
 
+from legoesm import constants
 from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
     CDGridShallowWaterConfig,
 )
@@ -363,7 +364,7 @@ def test_iter872c_cdgrid_momentum_honors_dddmp():
     # Corner-stagger D-grid: u_d, v_d both at corners (6, n+1, n+1)
     u_d = jnp.asarray(rng.normal(size=(6, n + 1, n + 1)))
     v_d = jnp.asarray(rng.normal(size=(6, n + 1, n + 1)))
-    common = dict(g=9.80616, A_h=0.0, hyperdiff_coeff=0.0,
+    common = dict(g=constants.g, A_h=0.0, hyperdiff_coeff=0.0,
                   div_damp=0.01)
 
     du_pt2, dv_pt2 = cdgrid_momentum_tendencies(

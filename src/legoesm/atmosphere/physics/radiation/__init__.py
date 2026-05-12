@@ -39,3 +39,8 @@ from legoesm.atmosphere.physics.radiation.integration import (
 )
 from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import rrtmgp_radiation
 from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+from legoesm.atmosphere.physics.radiation.ozone_ml import (
+    MLOzoneCoefficients,
+    load_ml_ozone_coefficients,
+    predict_ozone_ml,
+)

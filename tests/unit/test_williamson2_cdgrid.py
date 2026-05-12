@@ -18,10 +18,12 @@ import unittest
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
+
 jax.config.update("jax_enable_x64", True)
 
 
-def williamson2_initial_condition(cdgrid, u_0=38.61068276698372, h_0=29400.0 / 9.80616):
+def williamson2_initial_condition(cdgrid, u_0=38.61068276698372, h_0=29400.0 / constants.g):
     """Create the Williamson case 2 initial condition on C-D grid.
 
     Parameters
@@ -40,8 +42,8 @@ def williamson2_initial_condition(cdgrid, u_0=38.61068276698372, h_0=29400.0 / 9
         CDGridShallowWaterState,
     )
 
-    g = 9.80616
-    omega = 7.292e-5
+    g = constants.g
+    omega = constants.Omega
     R = cdgrid.radius
 
     # Height field at cell centres (A-grid)
@@ -155,7 +157,7 @@ class TestWilliamson2CDGrid(unittest.TestCase):
         dt = 600.0
         n_steps = int(5 * 86400 / dt)
 
-        g = 9.80616
+        g = constants.g
         area = self.cdgrid.base.area
 
         def total_energy(state):

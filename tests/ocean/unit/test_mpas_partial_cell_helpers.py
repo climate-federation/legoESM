@@ -25,6 +25,7 @@ import pytest
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 jax.config.update("jax_enable_x64", True)
 
+from legoesm import constants
 from legoesm.grids.voronoi import create_voronoi_mesh
 from legoesm.ocean.dynamics.mpas_partial_cell_helpers import (
     BIG_H,
@@ -337,7 +338,7 @@ def test_ac_pgf_correction_zero_on_full_cells(mesh):
         (nCells, nlev), 0.5, dtype=jnp.float64,
     )  # nonzero rho_prime to rule out trivial passing
     correction = partial_cell_pgf_correction_edge(
-        centroid, rho_prime, mesh, g=9.81, rho_0=1025.0,
+        centroid, rho_prime, mesh, g=constants.g, rho_0=constants.rho_ocean,
     )
     assert correction.shape == (mesh.nEdges, nlev)
     np.testing.assert_array_equal(np.asarray(correction), 0.0)
@@ -355,7 +356,7 @@ def test_ac_pgf_correction_nonzero_on_step(mesh):
     centroid = jnp.asarray(centroid_np, dtype=jnp.float64)
     rho_prime = jnp.full((nCells, nlev), 1.0, dtype=jnp.float64)
 
-    g, rho_0 = 9.81, 1025.0
+    g, rho_0 = constants.g, constants.rho_ocean
     correction = np.asarray(
         partial_cell_pgf_correction_edge(
             centroid, rho_prime, mesh, g, rho_0,
@@ -394,7 +395,7 @@ def test_ac_pgf_correction_dcEdge_inverse_scaling(mesh):
         rng.uniform(50.0, 4000.0, size=(nCells, nlev)), dtype=jnp.float64,
     )
     rho_prime = jnp.full((nCells, nlev), 0.7, dtype=jnp.float64)
-    g, rho_0 = 9.81, 1025.0
+    g, rho_0 = constants.g, constants.rho_ocean
 
     c1_orig = partial_cell_pgf_correction_edge(
         centroid, rho_prime, mesh, g, rho_0,

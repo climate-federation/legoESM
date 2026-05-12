@@ -40,6 +40,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm import constants
 from legoesm.core.operators_cdgrid import (
     _arakawa_lamb_gradient,
     _interp_corner_to_center,
@@ -67,7 +68,7 @@ def _measure_bare_residual(N: int) -> dict:
     # Bare A-L (no div_damp, no boundary_fix)
     u_cc, v_cc = fv3_d2cc(u_d, v_d, cdgrid)
     KE = 0.5 * (u_cc**2 + v_cc**2)
-    B = KE + 9.80616 * (h + h_s)
+    B = KE + constants.g * (h + h_s)
     _, dB_dy_perp = _arakawa_lamb_gradient(B, cdgrid)
 
     grid_obj = cdgrid.base

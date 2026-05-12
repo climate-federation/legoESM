@@ -17,6 +17,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
+from legoesm import constants
 from legoesm.grids.latlon import create_latlon_grid
 from legoesm.ocean.vertical import create_ocean_z_star, compute_ocean_jacobian
 from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig, VisbeckConfig
@@ -67,7 +68,7 @@ def _stratified_with_meridional_tilt(n_lat=10, n_lon=20, nlev=5, slope=1e-4):
         _make_setup(n_lat, n_lon, nlev)
 
     # Vertical profile: stable stratification.
-    rho_z = jnp.linspace(1025.0, 1027.0, nlev)
+    rho_z = jnp.linspace(constants.rho_ocean, 1027.0, nlev)
     # Add meridional gradient.
     H_total = float(jnp.sum(z_coord.dz_ref))
     drho_dz = 2.0 / H_total
@@ -78,7 +79,7 @@ def _stratified_with_meridional_tilt(n_lat=10, n_lon=20, nlev=5, slope=1e-4):
     rho = rho + drho_dy * lat_idx[:, jnp.newaxis, jnp.newaxis] * grid.dy
 
     # T proportional to density (linear EOS: rho ~ 1025 - 0.2*T)
-    T = (1025.0 - rho) / 0.2
+    T = (constants.rho_ocean - rho) / 0.2
     S = jnp.full((n_lat, n_lon, nlev), 35.0, dtype=jnp.float64)
 
     cfg = GMRediConfig(kappa_GM=1000.0, kappa_Redi=1000.0, S_max=0.005)
@@ -163,7 +164,7 @@ class TestZeroTendency:
         grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian = _make_setup()
         nlev = z_coord.n_levels
 
-        rho_z = jnp.linspace(1025.0, 1027.0, nlev)
+        rho_z = jnp.linspace(constants.rho_ocean, 1027.0, nlev)
         rho = jnp.broadcast_to(
             rho_z[jnp.newaxis, jnp.newaxis, :],
             (mask.shape[0], mask.shape[1], nlev),
@@ -364,7 +365,7 @@ class TestVisbeck:
             rho, mask, z_coord, jacobian, grid, cfg,
         )
         vcfg = VisbeckConfig(enabled=True, alpha=0.015, kappa_min=200, kappa_max=2000)
-        f_coriolis = 2.0 * 7.292e-5 * jnp.sin(grid.lat[:, jnp.newaxis])
+        f_coriolis = 2.0 * constants.Omega * jnp.sin(grid.lat[:, jnp.newaxis])
         f_coriolis = jnp.broadcast_to(f_coriolis, mask.shape) + 0.0
 
         kappa = compute_visbeck_kappa_gm(

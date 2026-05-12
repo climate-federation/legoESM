@@ -25,6 +25,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm import constants
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     compute_pressure_at_target_smc03,
     reconstruct_harmonic_slopes,
@@ -39,7 +40,7 @@ def _enable_x64():
     jax.config.update("jax_enable_x64", orig)
 
 
-G = 9.80616
+G = constants.g
 
 
 def _build_uniform_column(nlev, dz, slope, rho_ref=1027.0):

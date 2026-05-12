@@ -11,6 +11,7 @@ import jax.numpy as jnp
 
 jax.config.update("jax_enable_x64", True)
 
+from legoesm import constants
 from legoesm.grids.voronoi import create_voronoi_mesh
 from legoesm.core.conservation import global_integral_voronoi
 from legoesm.core.operators_voronoi import (
@@ -138,7 +139,7 @@ def check_sw_conservation():
     mesh = create_voronoi_mesh(subdivision_level=3)
     print(f"\nMesh: level 3, {mesh.nCells} cells, {mesh.nEdges} edges")
 
-    g = 9.80616
+    g = constants.g
 
     for tc_name, tc_fn, dt, n_steps, fix_mass, fix_energy in [
         ("TC2 (geostrophic, no fixers)", williamson_test2_mpas, 600.0, 100, False, False),

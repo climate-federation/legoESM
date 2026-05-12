@@ -481,6 +481,8 @@ def pad_halo(
     halo: int = 1,
     interp_offsets: jax.Array | None = None,
     duogrid=None,
+    monotone_clip: bool = False,
+    monotone_clip_slack: float = 0.0,
 ) -> jax.Array:
     """Pad a scalar field with inter-face halo data.
 
@@ -617,7 +619,11 @@ def pad_halo(
     if duogrid is not None:
         from legoesm.grids.duogrid import cube_rmp_vectorized, fill_corner_region
         padded = cube_rmp_vectorized(padded, duogrid, halo)
-        padded = fill_corner_region(padded, duogrid, halo)
+        padded = fill_corner_region(
+            padded, duogrid, halo,
+            monotone_clip=monotone_clip,
+            monotone_clip_slack=monotone_clip_slack,
+        )
 
     return padded
 
@@ -627,6 +633,8 @@ def pad_halo_pair_h2(
     q2: jax.Array,
     interp_offsets: jax.Array | None = None,
     duogrid=None,
+    monotone_clip: bool = False,
+    monotone_clip_slack: float = 0.0,
 ) -> tuple[jax.Array, jax.Array]:
     """Halo=2 exchange a pair of independent ``(6, n, n)`` fields.
 
@@ -690,9 +698,13 @@ def pad_halo_pair_h2(
     # Local backend (or MPI-with-offsets — handled above): two
     # sequential pad_halo calls with identical arithmetic.
     q1_pad = pad_halo(q1, halo=2, interp_offsets=interp_offsets,
-                      duogrid=duogrid)
+                      duogrid=duogrid,
+                      monotone_clip=monotone_clip,
+                      monotone_clip_slack=monotone_clip_slack)
     q2_pad = pad_halo(q2, halo=2, interp_offsets=interp_offsets,
-                      duogrid=duogrid)
+                      duogrid=duogrid,
+                      monotone_clip=monotone_clip,
+                      monotone_clip_slack=monotone_clip_slack)
     return q1_pad, q2_pad
 
 
@@ -701,6 +713,8 @@ def pad_halo_4d(
     halo: int = 1,
     interp_offsets: jax.Array | None = None,
     duogrid=None,
+    monotone_clip: bool = False,
+    monotone_clip_slack: float = 0.0,
 ) -> jax.Array:
     """Pad a 4D scalar field with inter-face halo data.
 
@@ -804,7 +818,11 @@ def pad_halo_4d(
         def _remap_level(level_slice):
             """Apply cube_rmp + corner fill to one (6, n+2h, n+2h) level."""
             level_slice = cube_rmp_vectorized(level_slice, duogrid, halo)
-            level_slice = fill_corner_region(level_slice, duogrid, halo)
+            level_slice = fill_corner_region(
+                level_slice, duogrid, halo,
+                monotone_clip=monotone_clip,
+                monotone_clip_slack=monotone_clip_slack,
+            )
             return level_slice
 
         # Transpose to (nlev, 6, n+2h, n+2h), vmap, transpose back
@@ -1018,6 +1036,8 @@ def pad_halo_vector_4d(
     interp_offsets: jax.Array | None = None,
     halo: int = 1,
     duogrid=None,
+    monotone_clip: bool = False,
+    monotone_clip_slack: float = 0.0,
 ) -> tuple[jax.Array, jax.Array]:
     """4D vector halo exchange (rotation + pad for all levels at once).
 
@@ -1079,11 +1099,16 @@ def pad_halo_vector_4d(
                 "this today.")
         if duogrid is not None:
             # Iter-634: per-component scalar `pad_halo_4d` fallback.
-            # Pays 2 MPI messages instead of 1 packed exchange, but
-            # exercises `pad_halo_4d`'s validated duogrid post-
-            # processing so the kinked→extended remap actually runs.
-            u_east_padded = pad_halo_4d(u_east, halo=halo, duogrid=duogrid)
-            v_north_padded = pad_halo_4d(v_north, halo=halo, duogrid=duogrid)
+            u_east_padded = pad_halo_4d(
+                u_east, halo=halo, duogrid=duogrid,
+                monotone_clip=monotone_clip,
+                monotone_clip_slack=monotone_clip_slack,
+            )
+            v_north_padded = pad_halo_4d(
+                v_north, halo=halo, duogrid=duogrid,
+                monotone_clip=monotone_clip,
+                monotone_clip_slack=monotone_clip_slack,
+            )
         else:
             from legoesm.parallel.halo_exchange import pad_halo_mpi_4d
             packed = jnp.concatenate([u_east, v_north], axis=-1)  # (6, n, n, 2*nlev)
@@ -1092,10 +1117,16 @@ def pad_halo_vector_4d(
             u_east_padded = packed_padded[..., :nlev]
             v_north_padded = packed_padded[..., nlev:]
     else:
-        u_east_padded = pad_halo_4d(u_east, halo=halo, interp_offsets=interp_offsets,
-                                     duogrid=duogrid)
-        v_north_padded = pad_halo_4d(v_north, halo=halo, interp_offsets=interp_offsets,
-                                      duogrid=duogrid)
+        u_east_padded = pad_halo_4d(
+            u_east, halo=halo, interp_offsets=interp_offsets,
+            duogrid=duogrid, monotone_clip=monotone_clip,
+            monotone_clip_slack=monotone_clip_slack,
+        )
+        v_north_padded = pad_halo_4d(
+            v_north, halo=halo, interp_offsets=interp_offsets,
+            duogrid=duogrid, monotone_clip=monotone_clip,
+            monotone_clip_slack=monotone_clip_slack,
+        )
     # Step 3: convert back using padded angles
     cap = cos_angle_padded[..., None]
     sap = sin_angle_padded[..., None]
@@ -1909,6 +1940,8 @@ def pad_halo_vector(
     duogrid=None,
     cos_theta: jax.Array | None = None,
     sin_theta: jax.Array | None = None,
+    monotone_clip: bool = False,
+    monotone_clip_slack: float = 0.0,
 ) -> tuple[jax.Array, jax.Array]:
     """Pad vector field components with proper rotation at face boundaries.
 
@@ -2015,8 +2048,16 @@ def pad_halo_vector(
             # messages instead of 1 packed exchange, but exercises
             # `pad_halo`'s validated duogrid post-processing so the
             # kinked→extended remap actually runs.  Drop-in correct.
-            u_east_padded = pad_halo(u_east, halo=halo, duogrid=duogrid)
-            v_north_padded = pad_halo(v_north, halo=halo, duogrid=duogrid)
+            u_east_padded = pad_halo(
+                u_east, halo=halo, duogrid=duogrid,
+                monotone_clip=monotone_clip,
+                monotone_clip_slack=monotone_clip_slack,
+            )
+            v_north_padded = pad_halo(
+                v_north, halo=halo, duogrid=duogrid,
+                monotone_clip=monotone_clip,
+                monotone_clip_slack=monotone_clip_slack,
+            )
         else:
             from legoesm.parallel.halo_exchange import pad_halo_mpi_4d
             packed = jnp.stack([u_east, v_north], axis=-1)  # (6, n, n, 2)
@@ -2024,10 +2065,18 @@ def pad_halo_vector(
             u_east_padded = packed_padded[..., 0]
             v_north_padded = packed_padded[..., 1]
     else:
-        u_east_padded = pad_halo(u_east, halo=halo, interp_offsets=interp_offsets,
-                                  duogrid=duogrid)
-        v_north_padded = pad_halo(v_north, halo=halo, interp_offsets=interp_offsets,
-                                   duogrid=duogrid)
+        u_east_padded = pad_halo(
+            u_east, halo=halo, interp_offsets=interp_offsets,
+            duogrid=duogrid,
+            monotone_clip=monotone_clip,
+            monotone_clip_slack=monotone_clip_slack,
+        )
+        v_north_padded = pad_halo(
+            v_north, halo=halo, interp_offsets=interp_offsets,
+            duogrid=duogrid,
+            monotone_clip=monotone_clip,
+            monotone_clip_slack=monotone_clip_slack,
+        )
 
     # Step 3: Convert back to grid-aligned using padded angle
     cap, sap = cos_angle_padded, sin_angle_padded
@@ -2519,3 +2568,292 @@ def synchronize_bgrid_ne_corner_geo(u, v, cos_ang_c, sin_ang_c, n):
     v_sync = -sin_ang_c * u_east + cos_ang_c * u_north
 
     return u_sync, v_sync
+
+
+def monotone_halo_clip_context(slack: float = 0.5):
+    """FV3_3D iter 505: context manager that monkey-patches 15
+    known halo import aliases in NH/PE/SW dycore + operator
+    modules to use ``monotone_clip=True`` with the given ``slack``.
+
+    Per iter-504, enabling this around a dycore step reduces
+    the duogrid-induced cube-edge θ′ variance ratio by ~65%
+    when combined with iter-466's ``make_legoesm_nh_min_edge_
+    config`` factory.  At smooth atmospheric ICs, the iter-553
+    ``make_fv3_faithful_nh_config`` factory alone gives 89.5%
+    reduction without needing this context.  Use this context
+    when iters>2 boost is enabled (iter-562) for additional
+    edge suppression.
+
+    See also:
+    - ``make_clipped_step(model, state, dt, slack)`` (iter-526):
+      JIT-safe variant that bakes the clip into a cached compiled
+      function.  Required for ``jax.jit`` users.
+    - ``make_clipped_scan_step(model, state, dt, n_steps, slack)``
+      (iter-544): multi-step ``jax.lax.scan`` variant for low
+      Python-overhead long runs.
+
+    Usage::
+
+        from legoesm.grids.halo import monotone_halo_clip_context
+
+        with monotone_halo_clip_context(slack=0.5):
+            new_state = model.step(state, dt)
+
+    Parameters
+    ----------
+    slack : float, default 0.5
+        ``monotone_clip_slack`` value (see ``fill_corner_
+        region`` docs).  0.0 = strict clip; 0.5 = optimal per
+        iter-504; ≥1.0 = over-relaxed.
+
+    Returns
+    -------
+    contextlib.ExitStack
+        Context manager.  Patches are removed on exit.
+
+    Notes
+    -----
+    Implementation: 6 ``unittest.mock.patch`` targets:
+    * scalar halo: 4 sites (compressible_euler_cdgrid,
+      operators_3d, operators_cdgrid, operators_fc).
+    * vector halo: 2 sites (operators_cdgrid, operators_3d).
+
+    May not catch every halo call site in the dycore (e.g.,
+    SPMD ``packed_pad_halo_4d`` is not patched); the 6 sites
+    cover the dominant single-rank paths.
+    """
+    import contextlib
+    import functools
+    from unittest.mock import patch
+
+    scalar_targets = [
+        "legoesm.atmosphere.dynamics.compressible_euler_cdgrid."
+        "_pad_halo_4d_module",
+        "legoesm.core.operators_3d.pad_halo_4d",
+        "legoesm.core.operators_cdgrid.pad_halo_4d",
+        "legoesm.core.operators_fc.pad_halo_4d",
+        # FV3_3D iter 527: PE-side import aliases.
+        "legoesm.atmosphere.dynamics.primitive_eq_cdgrid."
+        "_pad_halo_4d",
+        "legoesm.atmosphere.dynamics.primitive_eq_cdgrid."
+        "_pad_halo_4d_module",
+    ]
+    vector_targets = [
+        "legoesm.core.operators_cdgrid.pad_halo_vector_4d",
+        "legoesm.core.operators_3d.pad_halo_vector_4d",
+        # FV3_3D iter 527: PE-side import alias.
+        "legoesm.atmosphere.dynamics.primitive_eq_cdgrid."
+        "pad_halo_vector_4d",
+    ]
+    pad_halo_3d_targets = [
+        # FV3_3D iter 513: pad_halo (3D) is used by pad_halo_pair_h2
+        # in fv_tp_2d transport, an unpatched leak in iter-505/512.
+        "legoesm.core.operators_cdgrid.pad_halo",
+        "legoesm.core.fv_tp_2d.pad_halo",
+        "legoesm.core.fv3_sw_core.pad_halo",
+    ]
+    pair_h2_targets = [
+        "legoesm.core.fv_tp_2d.pad_halo_pair_h2",
+    ]
+    pad_halo_vector_3d_targets = [
+        # FV3_3D iter 514: pad_halo_vector (3D) is used in fv3_sw_core
+        # at 3 sites (line 602, 1194, 1430), called from NH dycore
+        # via C-D coupling. NH residual leaks through this path.
+        "legoesm.core.fv3_sw_core.pad_halo_vector",
+        # FV3_3D iter 527: PE-side import alias.
+        "legoesm.atmosphere.dynamics.primitive_eq_cdgrid."
+        "pad_halo_vector",
+    ]
+
+    clipped_scalar = functools.partial(
+        pad_halo_4d,
+        monotone_clip=True,
+        monotone_clip_slack=slack,
+    )
+    clipped_vector = functools.partial(
+        pad_halo_vector_4d,
+        monotone_clip=True,
+        monotone_clip_slack=slack,
+    )
+    clipped_pad_halo_3d = functools.partial(
+        pad_halo,
+        monotone_clip=True,
+        monotone_clip_slack=slack,
+    )
+    clipped_pair_h2 = functools.partial(
+        pad_halo_pair_h2,
+        monotone_clip=True,
+        monotone_clip_slack=slack,
+    )
+    clipped_pad_halo_vector_3d = functools.partial(
+        pad_halo_vector,
+        monotone_clip=True,
+        monotone_clip_slack=slack,
+    )
+
+    stack = contextlib.ExitStack()
+    for tgt in scalar_targets:
+        try:
+            stack.enter_context(patch(tgt, clipped_scalar))
+        except (AttributeError, ModuleNotFoundError):
+            pass
+    for tgt in vector_targets:
+        try:
+            stack.enter_context(patch(tgt, clipped_vector))
+        except (AttributeError, ModuleNotFoundError):
+            pass
+    for tgt in pad_halo_3d_targets:
+        try:
+            stack.enter_context(patch(tgt, clipped_pad_halo_3d))
+        except (AttributeError, ModuleNotFoundError):
+            pass
+    for tgt in pair_h2_targets:
+        try:
+            stack.enter_context(patch(tgt, clipped_pair_h2))
+        except (AttributeError, ModuleNotFoundError):
+            pass
+    for tgt in pad_halo_vector_3d_targets:
+        try:
+            stack.enter_context(patch(tgt, clipped_pad_halo_vector_3d))
+        except (AttributeError, ModuleNotFoundError):
+            pass
+    return stack
+
+
+def make_clipped_step(model, state_template, dt: float, slack: float = 0.5):
+    """FV3_3D iter 526: return a JIT-compiled ``model.step`` with the
+    iter-505 clip baked into the compiled graph.
+
+    Solves the iter-525 limitation that ``jax.jit(model.step)`` only
+    picks up the clip if traced inside the context.  This helper
+    enters the context, JIT-compiles ``model.step``, FORCES TRACING by
+    calling the JIT once with ``state_template`` and ``dt``, then exits
+    the context and returns the cached-compiled function.  Subsequent
+    calls reuse the cached compilation (with clip permanently baked
+    into the lowered HLO).
+
+    Parameters
+    ----------
+    model : object
+        Anything with a ``.step(state, dt)`` method (NH or PE dycore).
+    state_template : pytree
+        Example state used to force trace (shapes/dtypes must match
+        all later calls).
+    dt : float
+        Step size used to force trace.
+    slack : float
+        ``monotone_clip_slack``.  Default 0.5 (iter-504 optimum).
+
+    Returns
+    -------
+    callable
+        ``step(state, dt) -> new_state``, JIT-compiled with clip baked in.
+
+    Usage
+    -----
+    ::
+
+        from legoesm.grids.halo import make_clipped_step
+
+        model = CDGridCompressibleEulerModel(grid, hc, tm, cfg)
+        step = make_clipped_step(model, state, dt=10.0, slack=0.5)
+        for _ in range(100):
+            state = step(state, dt=10.0)
+    """
+    with monotone_halo_clip_context(slack=slack):
+        step_jit = jax.jit(model.step)
+        # Force trace + compilation NOW, while context is active.
+        _ = step_jit(state_template, dt)
+    return step_jit
+
+
+def make_clipped_scan_step(
+    model, state_template, dt: float, n_steps: int, slack: float = 0.5,
+):
+    """FV3_3D iter 544: ``jax.lax.scan``-based multi-step with clip baked in.
+
+    Faster than a Python ``for`` loop over ``make_clipped_step``
+    because the n-step loop is JIT-compiled as a single graph
+    (no Python overhead per step).
+
+    Parameters
+    ----------
+    model : object
+        Has ``.step(state, dt)`` method.
+    state_template : pytree
+        Example state used to force trace.
+    dt : float
+        Per-step size.  Static (baked into the compiled scan).
+    n_steps : int
+        Number of steps in the scan loop.  Static.
+    slack : float
+        ``monotone_clip_slack``.  Default 0.5.
+
+    Returns
+    -------
+    callable
+        ``scan_step(state) -> final_state`` after ``n_steps`` steps.
+
+    Usage
+    -----
+    ::
+
+        scan_step = make_clipped_scan_step(model, state, dt=10.0,
+                                           n_steps=100, slack=0.5)
+        final_state = scan_step(state)
+
+    Differentiable via ``jax.grad`` end-to-end.
+    """
+    with monotone_halo_clip_context(slack=slack):
+        def _body(s, _):
+            return model.step(s, dt), None
+
+        @jax.jit
+        def scan_step(s):
+            final, _ = jax.lax.scan(_body, s, jnp.arange(n_steps))
+            return final
+
+        # Force trace + compilation NOW, while context is active.
+        _ = scan_step(state_template)
+    return scan_step
+
+
+def compute_edge_artifact_metric(field_data):
+    """FV3_3D iter 581: edge-artifact diagnostic helper.
+
+    Computes the standard edge-vs-interior std and absolute
+    edge_std for a 4D field of shape ``(face, x, y, level)``.
+    Used throughout iter 466-580 to characterize cube-edge
+    artifacts.
+
+    Returns
+    -------
+    dict with keys ``edge_std``, ``interior_std``, ``ratio``.
+
+    Usage::
+
+        from legoesm.grids.halo import compute_edge_artifact_metric
+
+        metrics = compute_edge_artifact_metric(state.theta_prime.data)
+        print(f"edge_std = {metrics['edge_std']:.3e}")
+        print(f"ratio = {metrics['ratio']:.3f}x")
+    """
+    import numpy as np
+    arr = np.asarray(field_data)
+    n_face, n_x, n_y, n_lev = arr.shape
+    edge_mask = np.zeros((n_x, n_y), dtype=bool)
+    edge_mask[0, :] = True
+    edge_mask[-1, :] = True
+    edge_mask[:, 0] = True
+    edge_mask[:, -1] = True
+    edge_mask_b = np.broadcast_to(
+        edge_mask[None, :, :, None], arr.shape,
+    )
+    interior_mask = ~edge_mask_b
+    e = float(arr[edge_mask_b].std())
+    i = float(arr[interior_mask].std())
+    return {
+        "edge_std": e,
+        "interior_std": i,
+        "ratio": e / max(i, 1e-30),
+    }

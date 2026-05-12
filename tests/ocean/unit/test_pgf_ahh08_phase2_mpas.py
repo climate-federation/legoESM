@@ -24,6 +24,7 @@ jax.config.update("jax_enable_x64", True)
 from legoesm.core.precision import PrecisionPolicy, set_policy
 set_policy(PrecisionPolicy(storage=jnp.float64, compute=jnp.float64))
 
+from legoesm import constants
 from legoesm.grids.voronoi import create_voronoi_mesh
 from legoesm.ocean.dynamics.mpas_partial_cell_helpers import (
     density_jacobian_pgf_ahh08_mpas,
@@ -70,7 +71,7 @@ def test_full_cells_horizontally_uniform_zero():
     T_3d, S_3d = _uniform_rest_T_S(pc)
 
     pgf = density_jacobian_pgf_ahh08_mpas(
-        T_3d, S_3d, pc.h_partial.astype(jnp.float64), mesh, g=9.80616,
+        T_3d, S_3d, pc.h_partial.astype(jnp.float64), mesh, g=constants.g,
     )
     max_pgf = float(jnp.max(jnp.abs(pgf)))
     assert max_pgf < 1e-9, (
@@ -89,7 +90,7 @@ def test_partial_cells_horizontally_uniform_machine_zero():
     T_3d, S_3d = _uniform_rest_T_S(pc)
 
     pgf = density_jacobian_pgf_ahh08_mpas(
-        T_3d, S_3d, pc.h_partial.astype(jnp.float64), mesh, g=9.80616,
+        T_3d, S_3d, pc.h_partial.astype(jnp.float64), mesh, g=constants.g,
     )
     # Mask out below-step edges (h_face = 0) before checking.  These
     # carry whatever the 0/0 protector returns and are filtered by the
@@ -120,7 +121,7 @@ def test_horizontal_T_anomaly_produces_finite_gradient():
     T_3d = T_3d + anomaly[:, None]
 
     pgf = density_jacobian_pgf_ahh08_mpas(
-        T_3d, S_3d, pc.h_partial.astype(jnp.float64), mesh, g=9.80616,
+        T_3d, S_3d, pc.h_partial.astype(jnp.float64), mesh, g=constants.g,
     )
     assert jnp.all(jnp.isfinite(pgf)), "non-finite PGF on a smooth state"
     max_pgf = float(jnp.max(jnp.abs(pgf)))
@@ -141,7 +142,7 @@ def test_grad_flows_through_wrapper():
 
     def loss(T_in):
         pgf = density_jacobian_pgf_ahh08_mpas(
-            T_in, S_3d, h_64, mesh, g=9.80616,
+            T_in, S_3d, h_64, mesh, g=constants.g,
         )
         return jnp.sum(pgf ** 2)
 
