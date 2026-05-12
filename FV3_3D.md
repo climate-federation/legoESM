@@ -1195,6 +1195,27 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 608: **``mid_pt_sphere``** great-circle midpoint helper.
+  Faithful port of FV3 ``mid_pt_sphere`` (fv_grid_utils.F90:
+  1981-1992).  Algorithm:
+    1. (lon, lat) → 3D Cartesian unit vector e
+    2. e_mid = (e1 + e2) / 2 (Cartesian midpoint)
+    3. Normalize e_mid → unit sphere
+    4. Cartesian → (lon, lat)
+
+  Returns the great-circle midpoint of two points — NOT the
+  (lon, lat) average, which gives wrong results across the
+  dateline or poles.
+
+  legoESM already had ``great_circle_distance`` but no GC
+  midpoint.  Useful for users porting FV3 grid-generation code.
+
+  Tests (4/4 in <1 s):
+  1. Equator midpoint: (0,0) ↔ (π/2, 0) → (π/4, 0) exact.
+  2. Antipodal points across hemisphere → finite result.
+  3. (0, π/4) ↔ (π, π/4) → north pole (lat=π/2).
+  4. 5 random pairs: |d1m - d2m| < 1e-6 and d1m+d2m = d12.
+  Wired into iter-383 sweep (now 181).
 - Iter 607: **``cubed_to_latlon`` utility** (FV3 c2l_ord2 alias).
   Faithful port of FV3 ``cubed_to_latlon`` (fv_grid_utils.F90:
   2386) and ``c2l_ord2`` (line 2547) naming/semantics.  D-grid

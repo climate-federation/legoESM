@@ -843,6 +843,60 @@ def great_circle_distance(
     return 2.0 * radius * jnp.arcsin(jnp.sqrt(jnp.clip(a, 0.0, 1.0)))
 
 
+def mid_pt_sphere(
+    lon1: jax.Array, lat1: jax.Array,
+    lon2: jax.Array, lat2: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 608: great-circle midpoint of two (lon, lat) points.
+
+    Faithful port of FV3 ``mid_pt_sphere`` (fv_grid_utils.F90:1981-1992).
+    Algorithm:
+        1. (lon, lat) → 3D Cartesian unit vector e
+        2. e_mid = (e1 + e2) / 2 (Cartesian midpoint)
+        3. Normalize e_mid → unit sphere
+        4. Cartesian → (lon, lat)
+
+    The result is the point on the great circle through (p1, p2)
+    equidistant from both endpoints.  NOT the same as the (lon, lat)
+    average — that gives wrong results across the dateline or poles.
+
+    Parameters
+    ----------
+    lon1, lat1, lon2, lat2 : jax.Array (any shape, broadcastable)
+        Two points on the sphere in radians.
+
+    Returns
+    -------
+    lon_mid, lat_mid : jax.Array
+        Midpoint on the great circle (radians).
+    """
+    # latlon → Cartesian
+    cl1, sl1 = jnp.cos(lat1), jnp.sin(lat1)
+    cl2, sl2 = jnp.cos(lat2), jnp.sin(lat2)
+    x1 = cl1 * jnp.cos(lon1)
+    y1 = cl1 * jnp.sin(lon1)
+    z1 = sl1
+    x2 = cl2 * jnp.cos(lon2)
+    y2 = cl2 * jnp.sin(lon2)
+    z2 = sl2
+    # Cartesian midpoint
+    xm = 0.5 * (x1 + x2)
+    ym = 0.5 * (y1 + y2)
+    zm = 0.5 * (z1 + z2)
+    # Normalize to unit sphere
+    norm = jnp.sqrt(xm * xm + ym * ym + zm * zm)
+    norm = jnp.where(norm > 1e-30, norm, 1.0)
+    xm = xm / norm
+    ym = ym / norm
+    zm = zm / norm
+    # Back to (lon, lat)
+    lat_mid = jnp.arcsin(jnp.clip(zm, -1.0, 1.0))
+    lon_mid = jnp.arctan2(ym, xm)
+    # Wrap lon to [0, 2π)
+    lon_mid = jnp.where(lon_mid < 0.0, lon_mid + 2.0 * jnp.pi, lon_mid)
+    return lon_mid, lat_mid
+
+
 def rotate_winds_geo_to_grid(
     u_east: jax.Array, v_north: jax.Array, angle: jax.Array
 ) -> tuple[jax.Array, jax.Array]:
