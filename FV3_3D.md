@@ -4977,3 +4977,39 @@ relations.  Reuses the existing canonical
 wrapper — satisfies CLAUDE.md "thin dispatch wrappers forbidden".
 Pure JAX, vmap-compatible.  No new physical constants introduced.
 
+## Iter 773 — richardson_number_fv3 (gradient Ri)
+
+Added `richardson_number_fv3(theta, q_sphum, u, v, z,
+shear_floor=1e-12)` to `grids/cubed_sphere.py`.  Computes:
+
+```
+Ri = N² / S²,   S² = (du/dz)² + (dv/dz)²
+```
+
+N² delegates to iter-772 `brunt_vaisala_squared_fv3`; shears are
+centered differences at the same layer midpoints.  Output shape
+``(..., km−1)``.
+
+Classical interpretation: Ri < 0 convectively unstable; 0 ≤ Ri < ¼
+turbulent (Kelvin-Helmholtz); Ri > 1 strongly stable.  Critical
+Ri_c = ¼ from Miles-Howard theorem.
+
+Shear-floor argument (default 1e-12 s⁻²) prevents div-by-0 in
+calm air.  Test verifies that zero shear + stable stratification
+gives huge but finite Ri.
+
+Test: `tests/test_fv3_richardson_iter773.py` (6 tests: calm-air
+floor (Ri > 10⁶, finite), strong shear + neutral → Ri≈0, strong
+stable + weak shear → Ri>1, explicit composition with iter-772
+N², 3-D shapes km→km−1, finite for realistic fields).
+
+### Why this iteration was meaningful
+
+Ri is the canonical shear-stratification ratio used by: (1) PBL
+schemes for turbulence onset/decay (KPP, Mellor-Yamada); (2)
+clear-air turbulence forecasting (CAT advisories key off
+Ri < 0.25 layers); (3) gravity-wave breakdown criteria; (4)
+shear-driven mixing parameterizations.  Composes iter-772 N² with
+shear in one call.  Pure JAX, vmap-compatible.  No new physical
+constants introduced.
+

@@ -4156,6 +4156,64 @@ def brunt_vaisala_squared_fv3(
     return constants.g * dtheta / (dz * theta_v_mid)
 
 
+def richardson_number_fv3(
+    theta: jax.Array,
+    q_sphum: jax.Array,
+    u: jax.Array,
+    v: jax.Array,
+    z: jax.Array,
+    shear_floor: float = 1e-12,
+) -> jax.Array:
+    """FV3_3D iter 773: gradient Richardson number.
+
+    Dimensionless ratio of stratification to vertical shear:
+
+        Ri = N² / S²,    S² = (du/dz)² + (dv/dz)²
+
+    N² is computed via iter-772 ``brunt_vaisala_squared_fv3``;
+    shears are centered differences across the same layer
+    midpoints.  Output is at layer midpoints with shape
+    ``(..., km−1)``.
+
+    Physical interpretation:
+
+      * Ri < 0      — convectively unstable (N² < 0).
+      * 0 ≤ Ri < ¼  — turbulent (Kelvin-Helmholtz instability).
+      * Ri > 1      — strongly stable, turbulence damped.
+
+    The classical critical value is Ri_c = ¼ (Miles-Howard).
+
+    Used by: PBL turbulence onset/decay, KPP-style mixing schemes,
+    clear-air turbulence (CAT) forecasting, gravity-wave breakdown
+    detection.
+
+    Parameters
+    ----------
+    theta : jax.Array, shape (..., km)
+        Potential temperature (K).
+    q_sphum : jax.Array, shape (..., km)
+        Specific humidity (kg/kg); pass 0 for dry Ri.
+    u, v : jax.Array, shape (..., km)
+        Horizontal wind components (m/s).
+    z : jax.Array, shape (..., km)
+        Layer-center geopotential height (m).
+    shear_floor : float
+        Lower bound on |S²| to avoid div-by-0 in calm air.
+        Default 1e-12 s⁻².
+
+    Returns
+    -------
+    ri : jax.Array, shape (..., km−1)
+        Gradient Richardson number at layer midpoints.
+    """
+    n_sq = brunt_vaisala_squared_fv3(theta, q_sphum, z)
+    du = u[..., 1:] - u[..., :-1]
+    dv = v[..., 1:] - v[..., :-1]
+    dz = z[..., 1:] - z[..., :-1]
+    s_sq = (du / dz) ** 2 + (dv / dz) ** 2
+    return n_sq / jnp.maximum(s_sq, shear_floor)
+
+
 def dew_point_fv3(
     e_mb: jax.Array,
 ) -> jax.Array:
