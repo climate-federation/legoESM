@@ -206,3 +206,151 @@ def aam_drift_nh(state_old, state_new, grid, hc) -> float:
     _, aam_old = aam_from_nh_state(state_old, grid, hc)
     _, aam_new = aam_from_nh_state(state_new, grid, hc)
     return aam_new - aam_old
+
+
+# =============================================================================
+# PE (hydrostatic) AAM stack — FV3_3D iter 604
+# =============================================================================
+
+
+def aam_from_pe_state(state, grid, coord) -> tuple[jax.Array, float]:
+    """FV3_3D iter 604: AAM from a FV3HydrostaticState.
+
+    PE mirror of iter-587's ``aam_from_nh_state``.  Differences:
+    - Winds u_d, v_d on D-grid corners (shape (face, n+1, n+1, nlev));
+      averaged to cell-center via 4-point average.
+    - Column mass from hybrid coord: ``delp = A·p_ref + B·p_s``,
+      ``dm = delp · area / g`` (kg per cell).
+    - Face-local (u, v) at cell-center → rotated to u_east via
+      ``u_east = cos(angle)·u - sin(angle)·v``.
+
+    Faithful to FV3 compute_aam hydrostatic branch.
+
+    Parameters
+    ----------
+    state : FV3HydrostaticState
+    grid : CubedSphereGrid
+    coord : HybridSigmaPressureCoordinate
+
+    Returns
+    -------
+    aam_column, aam_total
+    """
+    # D-grid → cell-center wind
+    u_d = state.u_d.data
+    v_d = state.v_d.data
+    u_c = 0.25 * (u_d[:, :-1, :-1, :] + u_d[:, 1:, :-1, :]
+                  + u_d[:, :-1, 1:, :] + u_d[:, 1:, 1:, :])
+    v_c = 0.25 * (v_d[:, :-1, :-1, :] + v_d[:, 1:, :-1, :]
+                  + v_d[:, :-1, 1:, :] + v_d[:, 1:, 1:, :])
+
+    # Rotate to u_east
+    angle = grid.angle[..., None]
+    cos_a = jnp.cos(angle)
+    sin_a = jnp.sin(angle)
+    u_east = cos_a * u_c - sin_a * v_c                # (6, n, n, nlev)
+
+    # Column mass per cell: delp / g
+    p_s = state.p_s.data
+    A_h = jnp.asarray(coord.A_half)[None, None, None, :]
+    B_h = jnp.asarray(coord.B_half)[None, None, None, :]
+    p_half = A_h * coord.p_ref + B_h * p_s[..., None]
+    delp = p_half[..., 1:] - p_half[..., :-1]
+    dm = delp * grid.area[..., None] / constants.g   # kg per cell
+
+    # AAM per cell: (r²·Ω + r·u_east) · dm
+    R = float(grid.radius)
+    cos_lat = jnp.cos(grid.lat)
+    r1 = R * cos_lat
+    r2 = r1 * r1
+    aam_cell = (r2[..., None] * constants.Omega
+                + r1[..., None] * u_east) * dm
+    aam_column = jnp.sum(aam_cell, axis=-1)            # (6, n, n)
+    aam_total = float(jnp.sum(aam_column))
+    return aam_column, aam_total
+
+
+def aam_drift_pe(state_old, state_new, grid, coord) -> float:
+    """FV3_3D iter 604: PE AAM tendency.
+
+    Mirror of ``aam_drift_nh`` (iter 587) for hydrostatic state.
+
+    Returns
+    -------
+    amdt : float
+        AAM tendency [kg·m²/s].  Mountain torque NOT subtracted.
+    """
+    _, aam_old = aam_from_pe_state(state_old, grid, coord)
+    _, aam_new = aam_from_pe_state(state_new, grid, coord)
+    return aam_new - aam_old
+
+
+def apply_aam_correction_pe(state_old, state_new, grid, coord):
+    """FV3_3D iter 604: PE consv_am correction.
+
+    Mirror of ``apply_aam_correction_nh`` (iter 588) for hydrostatic
+    state.  Same algorithm (solid-body-rotation correction):
+
+        u0 = -R · amdt / M_fac_total
+        u_east_corr = u0 · cos(lat)
+        u_face_corr = cos(angle)·u_east_corr   → applied to u_c
+        v_face_corr = -sin(angle)·u_east_corr  → applied to v_c
+
+    For PE we apply the SAME correction to D-grid u_d, v_d (the
+    correction is a uniform solid-body rotation so it's identical
+    at D-grid corners as at cell centers, up to discretization).
+
+    M_fac_total = Σ R²·cos²(lat) · column_mass where column_mass
+    uses delp/g (hybrid coord) instead of rho·dz (NH).
+
+    Returns
+    -------
+    state_corrected : FV3HydrostaticState
+        State with u_d, v_d adjusted; other fields unchanged.
+    """
+    _, aam_target = aam_from_pe_state(state_old, grid, coord)
+    _, aam_curr = aam_from_pe_state(state_new, grid, coord)
+
+    # M_fac_total = sum over cells of R²·cos²·column_mass.
+    # Used as the analytic Jacobian estimate dAAM/du0.
+    p_s = state_new.p_s.data
+    A_h = jnp.asarray(coord.A_half)[None, None, None, :]
+    B_h = jnp.asarray(coord.B_half)[None, None, None, :]
+    p_half = A_h * coord.p_ref + B_h * p_s[..., None]
+    delp = p_half[..., 1:] - p_half[..., :-1]
+    column_mass_per_cell = jnp.sum(delp, axis=-1) * grid.area / constants.g
+    cos2_lat = jnp.cos(grid.lat) ** 2
+    M_fac_total = jnp.sum(
+        (grid.radius ** 2) * cos2_lat * column_mass_per_cell
+    )
+
+    cos_lat = jnp.cos(grid.lat)
+    cos_a_c = jnp.cos(grid.angle)
+    sin_a_c = jnp.sin(grid.angle)
+
+    state_curr = state_new
+    # Newton iteration: D-grid edge-padding introduces a small
+    # mismatch between the analytic correction (cell-center linear)
+    # and the AAM operator (D-grid avg + rotation).  Newton converges
+    # quickly because the correction is nearly linear.
+    for _ in range(5):
+        amdt = aam_curr - aam_target
+        if abs(amdt) < 1e10:  # negligible drift relative to typical scales
+            break
+        u0 = -grid.radius * amdt / M_fac_total
+        delta_u_face_2d = cos_a_c * u0 * cos_lat
+        delta_v_face_2d = -sin_a_c * u0 * cos_lat
+        du_pad = jnp.pad(delta_u_face_2d, [(0, 0), (0, 1), (0, 1)],
+                         mode="edge")
+        dv_pad = jnp.pad(delta_v_face_2d, [(0, 0), (0, 1), (0, 1)],
+                         mode="edge")
+        state_curr = state_curr._replace(
+            u_d=state_curr.u_d.replace(
+                data=state_curr.u_d.data + du_pad[..., None],
+            ),
+            v_d=state_curr.v_d.replace(
+                data=state_curr.v_d.data + dv_pad[..., None],
+            ),
+        )
+        _, aam_curr = aam_from_pe_state(state_curr, grid, coord)
+    return state_curr

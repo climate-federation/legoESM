@@ -1195,6 +1195,35 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 604: **PE AAM stack** (mirror NH iter 583/587/588).
+  3 new functions in ``legoesm.diagnostics``:
+  - ``aam_from_pe_state(state, grid, coord)``: cell-center
+    u_c/v_c from 4-point average of D-grid u_d/v_d; rotate to
+    u_east; FV3 AAM formula with column_mass = delp·area/g
+    from hybrid coord.
+  - ``aam_drift_pe(state_old, state_new, ...)``: companion
+    drift diagnostic.
+  - ``apply_aam_correction_pe(state_old, state_new, ...)``:
+    Newton iteration (5 steps) since D-grid edge-padding of
+    the cell-center solid-body correction introduces a
+    discretization mismatch (single-step gives ~100× reduction;
+    Newton converges to ~17000×).
+  Verified at C8 (4/4 tests in 12 s):
+  - PE AAM at Held-Suarez → finite + positive.
+  - Identical PE states → drift ≈ 0.
+  - +1 m/s u_d → drift 1.98e+25 reduces to 1.18e+21 (1.7e-5
+    ratio — Newton-converged ~5 orders of magnitude).
+    Limited by D-grid ↔ cell-center discretization mismatch;
+    NH version (iter 588) had 8 orders since no D-grid mismatch.
+  - T, p_s, phis UNCHANGED; only u_d, v_d adjusted.
+
+  **PE conservation stack now COMPLETE**:
+  - AAM: aam_from_pe_state / aam_drift_pe / apply_aam_correction_pe
+  - TE:  compute_total_energy_pe / te_drift_pe / apply_te_correction_pe
+
+  Both NH and PE now have full {AAM, TE} × {static, drift,
+  correct} diagnostic stacks.  Major FV3 conservation features
+  end-to-end.  Wired into iter-383 sweep (now 177).
 - Iter 603: **PE TE boundary-work sign fix** (iter-598 latent bug).
   Iter 602 surfaced this via numerical-Jacobian Newton: the
   iter-598 PE TE formula had the boundary-work term inverted:

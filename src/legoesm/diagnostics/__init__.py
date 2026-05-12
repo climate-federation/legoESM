@@ -2,8 +2,11 @@
 
 from legoesm.diagnostics.angular_momentum import (
     aam_drift_nh,
+    aam_drift_pe,
     aam_from_nh_state,
+    aam_from_pe_state,
     apply_aam_correction_nh,
+    apply_aam_correction_pe,
     compute_atmospheric_angular_momentum,
 )
 from legoesm.diagnostics.total_energy_nh import (
