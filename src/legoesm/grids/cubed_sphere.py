@@ -2885,6 +2885,67 @@ def compute_brn_fv3(
     return brn, shear06
 
 
+def pv_entropy_fv3(
+    vort: jax.Array,
+    f_d: jax.Array,
+    theta: jax.Array,
+    delp: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 691: Ertel potential vorticity (EPV) diagnostic.
+
+    Faithful JAX port of FV3 ``pv_entropy``
+    (tools/fv_diagnostics.F90:5111-5193).
+
+    EPV using the entropy form (S.-J. Lin):
+
+        EPV = - g · (vort + f) / delp · d(theta) / theta
+
+    where theta is potential temperature and the vertical
+    derivative is approximated by centered finite difference
+    between layer-edge interpolated theta values:
+
+        theta_edge[k] = 0.5 · (theta[k-1] + theta[k])
+                       (top edge: theta[0]; bottom edge: theta[km-1])
+        d_theta[k] = theta_edge[k] - theta_edge[k+1]      (positive
+                       for stable column where theta increases upward)
+
+    The original FV3 routine uses PPME edge reconstruction; here we
+    use simple linear averaging which is the second-order limit and
+    correct to leading order for smoothly varying θ.
+
+    Parameters
+    ----------
+    vort : jax.Array, shape (..., km)
+        Relative vorticity ζ on cell centers (1/s).
+    f_d : jax.Array, shape (...,)
+        Coriolis parameter f at cell center (1/s).
+    theta : jax.Array, shape (..., km)
+        Potential temperature θ = pt / pkz at layer centers (K).
+        FV3 convention: ``theta = pt / pkz`` where ``pt`` is the
+        stored thermodynamic var and ``pkz`` the Exner factor.
+    delp : jax.Array, shape (..., km)
+        Pressure thickness (Pa).
+
+    Returns
+    -------
+    epv : jax.Array, shape (..., km)
+        Ertel potential vorticity (m²·K·s⁻¹·kg⁻¹ = PVU·1e6).
+    """
+    # Edge θ via linear average (km-1 interior edges)
+    theta_interior = 0.5 * (theta[..., :-1] + theta[..., 1:])  # (..., km-1)
+    # Extend to top + bottom edges using endpoint extrapolation
+    theta_top = theta[..., :1]
+    theta_bot = theta[..., -1:]
+    theta_edges = jnp.concatenate(
+        [theta_top, theta_interior, theta_bot],
+        axis=-1,
+    )  # (..., km+1)
+    # d_theta per layer: edge_top - edge_bottom
+    d_theta = theta_edges[..., :-1] - theta_edges[..., 1:]  # (..., km)
+    abs_vort = vort + f_d[..., None]
+    return constants.g * abs_vort * d_theta / (theta * delp)
+
+
 def bunkers_vector_fv3(
     ua: jax.Array, va: jax.Array,
     delz: jax.Array | None = None,

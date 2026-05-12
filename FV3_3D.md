@@ -1195,6 +1195,33 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 691: **FV3 ``pv_entropy_fv3``** — Ertel potential vorticity (EPV).
+  Faithful JAX port of FV3 ``pv_entropy``
+  (tools/fv_diagnostics.F90:5111-5193).
+
+  EPV in entropy form (S.-J. Lin):
+
+      EPV = - g · (vort + f) / delp · d(theta) / theta
+
+  where the vertical derivative is approximated by linear edge
+  averaging of θ between neighboring layers (the second-order
+  limit of FV3's PPME edge reconstruction):
+
+      theta_edge[k] = 0.5 · (theta[k-1] + theta[k])
+                     (top edge: theta[0]; bot edge: theta[km-1])
+      d_theta[k] = theta_edge[k] - theta_edge[k+1]
+
+  Vectorized: edges = 0.5·(θ[:-1] + θ[1:]) concatenated with
+  endpoint extrapolation; d_theta = edges[:-1] - edges[1:].
+
+  Tests (5/5 in <1 s):
+  1. ζ + f = 0 → EPV = 0.
+  2. Constant θ → EPV = 0.
+  3. Monotone θ profile → EPV positive in interior (stable strat).
+  4. 3-D input → 3-D EPV shape.
+  5. No NaN/Inf on random inputs.
+
+  Wired into iter-383 sweep (now 255).
 - **Iters 681-689 (compacted iter 690)**: FV3 diagnostic suite —
   heights, range checks, max/min/mean, and the supercell-triad +
   storm-motion diagnostics.  9 iterations:
