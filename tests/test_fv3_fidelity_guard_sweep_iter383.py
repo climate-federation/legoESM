@@ -401,6 +401,7 @@ _GUARD_MODULES = (
     "test_fv3_k_index_iter811",                      # iter-811 add
     "test_fv3_total_totals_iter812",                 # iter-812 add
     "test_fv3_sweat_index_iter813",                  # iter-813 add
+    "test_fv3_brn_supercell_iter814",                # iter-814 add
 )
 
 

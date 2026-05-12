@@ -5850,6 +5850,58 @@ def sweat_index_fv3(
     return term1 + term2 + term3 + term4 + term5
 
 
+def brn_supercell_fv3(
+    cape: jax.Array,
+    u_shear: jax.Array,
+    v_shear: jax.Array,
+    ke_floor: float = 1e-6,
+) -> jax.Array:
+    """FV3_3D iter 814: Bulk Richardson Number (supercell BRN).
+
+        BRN = CAPE / (0.5 · |V_shear|²)
+            = CAPE / (0.5 · (u_shear² + v_shear²))
+
+    Weisman-Klemp (1982) supercell discriminator.  Composes
+    convective potential energy (CAPE, iter-808) with vector
+    shear magnitude (typically 0-6 km bulk shear computed as
+    mean low-level wind minus mean upper-level wind).
+
+    Thresholds (Weisman-Klemp 1982 / Bunkers et al. 2006):
+      * BRN < 10   — too much shear, multicell or splitting cells
+      * 10 ≤ BRN ≤ 50 — supercell-favorable regime
+      * BRN > 50   — too little shear, ordinary single cells
+
+    Distinct from iter-774 ``bulk_richardson_fv3`` (Vogelezang-
+    Holtslag PBL bulk Ri).  Same dimensional form (energy ratio)
+    but different physical use — BRN here measures convective
+    potential vs shear KE, used in **storm-mode classification**.
+
+    ``ke_floor`` prevents div-by-0 in calm shear environments.
+
+    Used by: SPC supercell-mode discrimination, ensemble
+    severe-storm-mode probabilistic forecasts, climatological
+    supercell-frequency studies.
+
+    Parameters
+    ----------
+    cape : jax.Array
+        Convective available potential energy (J/kg) from iter-808.
+    u_shear, v_shear : jax.Array
+        Bulk-shear vector components (m/s) — typically 0-6 km
+        mean-wind difference between low and upper layers.
+    ke_floor : float
+        Lower bound on shear KE (m²/s²); default 1e-6.
+
+    Returns
+    -------
+    brn : jax.Array
+        Bulk Richardson Number for supercell discrimination
+        (dimensionless).
+    """
+    ke = 0.5 * (u_shear * u_shear + v_shear * v_shear)
+    return cape / jnp.maximum(ke, ke_floor)
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

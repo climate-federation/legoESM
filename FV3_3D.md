@@ -5190,6 +5190,46 @@ severe-storm composite-index kit**: CAPE (iter-808) + CIN
 SWEAT (iter-813).  Pure JAX, vmap-compatible.  No new physical
 constants introduced.
 
+## Iter 814 — brn_supercell_fv3 (Weisman-Klemp 1982)
+
+Added `brn_supercell_fv3(cape, u_shear, v_shear, ke_floor=1e-6)`
+to `grids/cubed_sphere.py`.  Bulk Richardson Number for supercell
+discrimination:
+
+```
+BRN = CAPE / (0.5 · |V_shear|²)
+    = CAPE / (0.5 · (u_shear² + v_shear²))
+```
+
+Weisman-Klemp (1982) storm-mode discriminator.  Composes iter-808
+CAPE with vector shear (typically 0-6 km bulk-shear).
+
+Thresholds:
+  * BRN < 10      — too much shear → splitting / multicell
+  * 10 ≤ BRN ≤ 50 — supercell-favorable
+  * BRN > 50      — too little shear → ordinary cells
+
+Distinct from iter-774 ``bulk_richardson_fv3`` (PBL Ri).  Same
+dimensional form but different physical use: BRN here measures
+**convective potential vs shear KE** for storm-mode classification.
+
+Used by SPC supercell-mode discrimination, ensemble severe-storm
+mode probabilistic forecasts, climatological supercell studies.
+
+Test: `tests/test_fv3_brn_supercell_iter814.py` (5 tests:
+textbook supercell (CAPE=2500, 25 m/s shear) → BRN=8.0 exact,
+small CAPE + huge shear → BRN<10, huge CAPE + tiny shear → BRN>50,
+zero shear floored, 3-D shapes + finite + non-negative).
+
+### Why this iteration was meaningful
+
+Closes the **supercell-mode discrimination stack**: CAPE → BRN
+→ storm mode.  Combined with the pre-existing iter-7654 Bunkers
+storm motion + iter-7755/7825 helicity helpers and the index kit
+(LI, K, TT, SWEAT), the operational severe-storm discrimination
+toolkit is complete.  Pure JAX, vmap-compatible.  No new physical
+constants introduced.
+
 
 
 
