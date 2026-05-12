@@ -1304,6 +1304,89 @@ def get_center_vect(
     return u1, u2
 
 
+def rot_3d(
+    axis: int,
+    x1: jax.Array, y1: jax.Array, z1: jax.Array,
+    angle: jax.Array,
+    degrees: bool = False,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """FV3_3D iter 623: 3D rotation about coordinate axis.
+
+    Faithful port of FV3 ``rot_3d`` (fv_grid_tools.F90:2410-2467).
+    Rotates Cartesian (x1, y1, z1) by ``angle`` about axis::
+
+        axis = 1: x-axis (y, z rotated)
+        axis = 2: y-axis (x, z rotated)
+        axis = 3: z-axis (x, y rotated)
+
+    FV3 sign convention (left-handed about each axis as the code
+    is written):
+        axis 1: y' = c·y + s·z,    z' = -s·y + c·z
+        axis 2: x' = c·x - s·z,    z' =  s·x + c·z
+        axis 3: x' = c·x + s·y,    y' = -s·x + c·y
+
+    Parameters
+    ----------
+    axis : int
+        Rotation axis (1, 2, or 3).
+    x1, y1, z1 : jax.Array
+        Input Cartesian coordinates (any shape).
+    angle : jax.Array
+        Rotation angle (radians unless ``degrees=True``).
+    degrees : bool, default False
+        If True, ``angle`` is in degrees.
+    """
+    a = jnp.deg2rad(angle) if degrees else angle
+    c = jnp.cos(a)
+    s = jnp.sin(a)
+    if axis == 1:
+        return x1, c * y1 + s * z1, -s * y1 + c * z1
+    if axis == 2:
+        return c * x1 - s * z1, y1, s * x1 + c * z1
+    if axis == 3:
+        return c * x1 + s * y1, -s * x1 + c * y1, z1
+    raise ValueError(f"Invalid axis: {axis} (must be 1, 2, or 3)")
+
+
+def g_sum(
+    p: jax.Array, area: jax.Array, mode: int = 0,
+) -> jax.Array:
+    """FV3_3D iter 623: area-weighted global sum.
+
+    Faithful JAX port of FV3 ``g_sum`` (fv_grid_utils.F90:2946-2996),
+    serial branch.  Computes::
+
+        gsum = Σ_ij  p(i,j) · area(i,j)
+
+    If ``mode == 1``, returns ``gsum / global_area`` (area-weighted
+    global mean).  Otherwise returns ``gsum`` (area-weighted total).
+
+    Parameters
+    ----------
+    p : jax.Array
+        Field to be summed (any shape; must match ``area`` shape).
+    area : jax.Array
+        Cell areas (matching shape).
+    mode : int, default 0
+        If 1, divide by global area (returns area-weighted mean).
+
+    Returns
+    -------
+    g : jax.Array
+        Scalar global sum (or area-weighted mean if mode=1).
+
+    Note: serial (non-MPI) implementation.  MPI reduction is the
+    caller's responsibility (legoESM uses ``global_sum_mpi`` for
+    distributed runs).
+    """
+    weighted = p * area
+    gsum = jnp.sum(weighted)
+    if mode == 1:
+        global_area = jnp.sum(area)
+        return gsum / global_area
+    return gsum
+
+
 def gnomonic_grids(
     im: int, grid_type: int = 0,
 ) -> tuple[jax.Array, jax.Array]:

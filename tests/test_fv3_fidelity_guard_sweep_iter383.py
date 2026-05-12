@@ -217,6 +217,7 @@ _GUARD_MODULES = (
     "test_fv3_symm_ed_iter619",                      # iter-619 add
     "test_fv3_gnomonic_ed_iter621",                  # iter-621 add
     "test_fv3_gnomonic_grids_iter622",               # iter-622 add
+    "test_fv3_rot3d_gsum_iter623",                   # iter-623 add
 )
 
 

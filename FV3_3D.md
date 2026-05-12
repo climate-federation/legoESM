@@ -1195,6 +1195,39 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 623: **FV3 ``rot_3d`` + ``g_sum``**.  Faithful JAX ports of:
+
+  | Function   | F90 path            | Line | Role                          |
+  |------------|---------------------|------|-------------------------------|
+  | ``rot_3d`` | fv_grid_tools.F90   | 2410 | 3D rotation about axis 1/2/3  |
+  | ``g_sum``  | fv_grid_utils.F90   | 2946 | area-weighted global sum      |
+
+  ``rot_3d`` is a building block of FV3's ``mirror_grid`` (the
+  6-face cubed-sphere construction) — rotates Cartesian (x, y, z)
+  by an angle about coord axis 1, 2, or 3.  Preserves FV3's exact
+  sign convention (left-handed about each axis as the code reads):
+
+      axis 1: y' = c·y + s·z,    z' = -s·y + c·z
+      axis 2: x' = c·x - s·z,    z' =  s·x + c·z
+      axis 3: x' = c·x + s·y,    y' = -s·x + c·y
+
+  ``g_sum`` is FV3's area-weighted global sum.  Serial (non-MPI)
+  implementation; ``mode=1`` returns the area-weighted mean (FV3's
+  ``g_sum`` divide-by-global-area branch).  legoESM uses
+  ``global_sum_mpi`` for distributed runs.
+
+  Tests (9/9 in <1 s):
+  1. ``rot_3d`` z-axis -90° → (1,0,0)↦(0,1,0).
+  2. ``rot_3d`` x-axis 90° → (0,1,0)↦(0,0,-1).
+  3. ``rot_3d`` y-axis 90° → (1,0,0)↦(0,0,1).
+  4. ``rot_3d`` zero angle is identity on all 3 axes.
+  5. ``rot_3d`` invalid axis raises ValueError.
+  6. ``rot_3d`` degrees=True converts correctly.
+  7. ``g_sum`` Σc·area = c·Σarea.
+  8. ``g_sum`` mode=1 returns constant for constant field.
+  9. ``g_sum`` zero field → zero.
+
+  Wired into iter-383 sweep (now 194).
 - Iter 622: **FV3 ``gnomonic_grids``** — top-level dispatcher.
   Faithful JAX port of FV3 ``gnomonic_grids`` (fv_grid_utils.F90:
   1290-1311) tying together the three FV3 grid generators:
