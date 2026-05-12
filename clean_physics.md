@@ -117,6 +117,18 @@ behaviour for all existing callers.
 - 25 KPP / vertical-mixing tests pass.
 - 179 ocean tests (mpas physics + mpas ocean + ocean.py) pass.
 
+### Iteration 11 — 2026-05-12
+
+**Action:** `atmosphere/physics/turbulence/edmf.py` — added explicit-Euler
+CFL cap on the EDMF mass flux M = a·ρ·w_u.  In deep convection (w_u
+~10 m/s) the centered-FD MF tendency could drive ``M·dt/(ρ·dz) > 1``
+on coarse-vertical PBL layers; the ED implicit solve cannot recover
+the resulting overshoot in θ/q.  Cap is ``M ≤ 0.5·ρ·dz/dt``
+(layer-mass-per-step with a stability margin).
+
+**Tests (post iter-11):**
+- 95 atmosphere turbulence tests pass (all schemes including EDMF).
+
 ### Inspected & clean (no fix needed)
 - `land/snow_budget.py` — energy-limited melt with `constants.L_f` /
   `constants.T_freeze`; positivity guards intact.

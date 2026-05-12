@@ -260,6 +260,16 @@ def edmf_turbulence(
     # ``test_mass_flux_active`` and was reverted.
     M = config.a_updraft * rho * w_u  # (ncol, nlev)
 
+    # Explicit-Euler CFL cap on the mass-flux transport.  The MF tendency
+    # is ``-(1/ρ) d(M·(φ_u-φ))/dz``; the effective layer Courant number
+    # is ``M·dt/(ρ·dz)``.  For deep convection (w_u up to ~10 m/s) M can
+    # reach values that drive ``M·dt/(ρ·dz) > 1`` on coarse-vertical
+    # boundary layers — the centered-FD update then overshoots and the
+    # ED implicit solve cannot recover the integrity of θ/q.  Cap M at
+    # the local layer-mass-per-step.
+    M_max = 0.5 * rho * dz_layer / jnp.maximum(dt, 1.0e-12)
+    M = jnp.minimum(M, M_max)
+
     # MF tendencies: d(phi)/dt_mf = -(1/rho) * d(M * (phi_u - phi_env)) / dz
     # Compute vertical derivative of mass flux transport
     def _mf_tendency(phi, phi_u):
