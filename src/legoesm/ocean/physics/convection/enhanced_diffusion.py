@@ -75,14 +75,22 @@ def enhanced_diffusion_convection(
     # 70× tighter than typical ocean physics steps.  See
     # ``EnhancedDiffusionConfig`` for ``cfl_dt_estimate`` and
     # ``cfl_safety``.
+    #
+    # The earlier coarse cap used the reference ``dz_ref`` alone and
+    # ignored ``jacobian`` (z-star contracts layers when ``eta + H``
+    # shrinks): a column with jacobian = 0.5 has dz_actual half of
+    # dz_ref, so K must be 4× tighter.  Delegating the per-interface
+    # cap to ``vertical_diffusion_variable_K(..., dt=dt_eff)`` uses the
+    # actual layer thicknesses ``dz_ref · jacobian`` and the per-
+    # interface dz_min that the leaf already computes.
     if apply_diffusion:
-        dz_min_sq = jnp.maximum(jnp.min(z_coord.dz_ref) ** 2, 1.0)
         dt_eff = cfg.cfl_dt_estimate if dt is None else dt
-        K_max = cfg.cfl_safety * dz_min_sq / jnp.maximum(dt_eff, 1.0)
-        K = jnp.minimum(K, K_max)
         tracers = jnp.stack([T, S], axis=0)
         tr_tend = jax.vmap(
-            lambda q: vertical_diffusion_variable_K(q, z_coord, jacobian, K),
+            lambda q: vertical_diffusion_variable_K(
+                q, z_coord, jacobian, K,
+                dt=dt_eff, cfl_safety=cfg.cfl_safety,
+            ),
             in_axes=0, out_axes=0,
         )(tracers)
         dT_dt = tr_tend[0]

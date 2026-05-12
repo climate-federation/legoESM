@@ -317,8 +317,17 @@ def step_multilayer_land(
     weight = root_frac * beta_root  # (ncol, n_layers)
     _weight_sum_raw = jnp.sum(weight, axis=-1)  # (ncol,)
     f_veg = jnp.clip(_weight_sum_raw, 0.0, 1.0)  # vegetation cover proxy
-    evap_bare = evap_rate * (1.0 - f_veg)      # bare-soil evaporation
-    evap_transp = evap_rate * f_veg             # transpiration (root-mediated)
+    # Split surface flux between bare-soil and transpiration.  For
+    # ``evap_rate >= 0`` (evaporation upward): bare/veg partition by
+    # ``1 - f_veg`` / ``f_veg``.  For ``evap_rate < 0`` (dew /
+    # deposition downward): route ALL of the negative flux to
+    # ``flux_top`` (treated as bare-soil input) so the column water
+    # budget closes.  Routing the vegetated fraction to a
+    # ``transpiration`` sink would later be clipped at zero (line
+    # below), losing the dew mass — flagged by codex iter-22 #3.
+    is_dew = evap_rate < 0.0
+    evap_bare = jnp.where(is_dew, evap_rate, evap_rate * (1.0 - f_veg))
+    evap_transp = jnp.where(is_dew, 0.0, evap_rate * f_veg)
 
     # Infiltration: rain + snow meltwater enter the soil; snow goes to snowpack.
     # Only bare-soil evap subtracted (transpiration handled by sink).

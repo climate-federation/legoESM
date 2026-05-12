@@ -169,6 +169,37 @@ the "Iterations 1-19 — Summary" section above so the working log stays
 under the auto-loaded MEMORY.md / context envelope.  All previous detailed
 entries remain in the commit messages on `clean_physics`.
 
+### Iteration 23 — 2026-05-12
+
+**Codex iter-22 review returned 3 findings; this iteration applies 2 of 3.**
+
+- [x] `ocean/physics/convection/enhanced_diffusion.py:79` — explicit CFL
+  cap used `dz_ref` and ignored the z-star jacobian, so thin columns
+  (jacobian < 1) could violate `K · dt / dz_actual² ≤ ½`.  Replaced
+  the in-function K cap with a delegated cap inside
+  `vertical_diffusion_variable_K(K, dt=dt_eff, cfl_safety=...)` which
+  uses `dz_actual = dz_ref · jacobian` per interface.
+- [x] `land/multilayer_land.py:332` — negative `evap_transp`
+  (dew/deposition on vegetated fraction) was clipped to 0 by
+  `E_pot_transp = max(evap_transp, 0)`, losing the vegetated fraction
+  of dew while the bare fraction was correctly routed to `flux_top`.
+  Now when `evap_rate < 0`, the FULL flux goes through `flux_top`
+  (treated as bare-soil input) and the transpiration sink is set to 0.
+
+**Deferred:**
+- [ ] `ice/sea_ice.py:669` — lead-freeze in `_thermo_single` updates
+  concentration but the `h_new` path uses `h = h + dt · dh_dt_open`
+  for empty cells, not the CICE-convention `h = h_new_ice` with area
+  growth `Δa = ΔV / h_new_ice`.  This means cell-mean ice volume
+  `h_new · conc_new ≠ ΔV` for new lead ice.  Fix requires evolving
+  V = h·conc directly and is a multi-test cross-cutting change
+  (`test_partial_cover_lead_freezing_grows_concentration`,
+  `test_existing_ice_basal_growth_does_not_spread_laterally`, etc.
+  assert the existing contract).  Queued for next iteration.
+
+**Tests (post iter-23):** 85 / 85 ocean/MPAS + land multilayer +
+land_ice_multilayer + diff_land tests pass.
+
 ### Iteration 22 — 2026-05-12
 
 **Action: Sundqvist microphysics autoconversion donor clamp.**
