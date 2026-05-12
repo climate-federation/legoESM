@@ -1304,6 +1304,53 @@ def get_center_vect(
     return u1, u2
 
 
+def gnomonic_grids(
+    im: int, grid_type: int = 0,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 622: dispatcher for FV3 ``gnomonic_grids``.
+
+    Faithful port of FV3 ``gnomonic_grids`` (fv_grid_utils.F90:
+    1290-1311).  Dispatches to one of three grid generators by
+    ``grid_type``:
+
+        grid_type = 0 → ``gnomonic_ed``   (canonical, equal-distance edges; FV3 default)
+        grid_type = 1 → ``gnomonic_dist`` (linear equi-distance gnomonic)
+        grid_type = 2 → ``gnomonic_angl`` (equi-angular gnomonic)
+
+    Post-processing (FV3 lines 1301-1308) for all grid_type < 3:
+        1. ``symm_ed`` symmetrizes about i/j midplanes.
+        2. Longitude shift by -π to bring grid into FV3's standard
+           orientation (face 2 center → 0, not π).
+
+    Parameters
+    ----------
+    im : int
+        Number of cells per face edge.  Grid has shape ``(im+1, im+1)``.
+    grid_type : int, default 0
+        Grid construction algorithm (0, 1, or 2).
+
+    Returns
+    -------
+    lon, lat : jax.Array, shape ``(im+1, im+1)``
+        Cubed-sphere face corner positions in radians (FV3
+        orientation after the -π shift).
+    """
+    if grid_type == 0:
+        lon, lat = gnomonic_ed(im)
+    elif grid_type == 1:
+        lon, lat = gnomonic_dist(im)
+    elif grid_type == 2:
+        lon, lat = gnomonic_angl(im)
+    else:
+        raise ValueError(
+            f"Unsupported grid_type: {grid_type} (must be 0, 1, or 2)"
+        )
+    # grid_type < 3 post-processing (FV3 lines 1301-1308)
+    lon, lat = symm_ed(lon, lat)
+    lon = lon - jnp.pi
+    return lon, lat
+
+
 def gnomonic_ed(im: int) -> tuple[jax.Array, jax.Array]:
     """FV3_3D iter 621: equal-distance-edge cubed-sphere grid for face 2.
 

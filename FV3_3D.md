@@ -1195,6 +1195,37 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 622: **FV3 ``gnomonic_grids``** — top-level dispatcher.
+  Faithful JAX port of FV3 ``gnomonic_grids`` (fv_grid_utils.F90:
+  1290-1311) tying together the three FV3 grid generators:
+
+      grid_type = 0 → gnomonic_ed   (canonical, iter 621)
+      grid_type = 1 → gnomonic_dist (iter 617)
+      grid_type = 2 → gnomonic_angl (iter 617)
+
+  Post-processing (FV3 lines 1301-1308) for all grid_type < 3:
+  1. ``symm_ed`` (iter 619) symmetrizes about i/j midplanes.
+  2. Longitude shift by -π to bring grid into FV3's standard
+     orientation (face 2 center → 0, not π).
+
+  Raises ``ValueError`` for unsupported grid_type (FV3 silently
+  ignores; we surface the error per legoESM dispatch convention).
+
+  With iter 622, the FV3 ``gnomonic_grids`` cubed-sphere
+  construction pipeline is END-TO-END FAITHFUL: a user can call
+  ``gnomonic_grids(im, grid_type=0)`` and get the exact FV3
+  default grid that FV3's ``init_grid`` driver would produce
+  before metric / area calculations.
+
+  Tests (7/7 in 4 s):
+  1. Output shape (im+1, im+1) for all grid_types.
+  2. grid_type=0 → gnomonic_ed + symm_ed + shift.
+  3. grid_type=1 → gnomonic_dist + symm_ed + shift.
+  4. grid_type=2 → gnomonic_angl + symm_ed + shift.
+  5. Corners on unit sphere for all grid_types.
+  6. Lon shift by -π matches direct generator + symm_ed output.
+  7. Invalid grid_type raises ValueError.
+  Wired into iter-383 sweep (now 193).
 - Iter 621: **FV3 ``gnomonic_ed``** — canonical FV3 cubed-sphere
   grid generator.  Faithful JAX port of FV3 ``gnomonic_ed``
   (fv_grid_utils.F90:1313-1407).  FV3's grid of choice for global
