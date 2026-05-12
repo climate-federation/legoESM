@@ -1304,6 +1304,91 @@ def get_center_vect(
     return u1, u2
 
 
+def c2l_ord2_fv3(
+    u: jax.Array, v: jax.Array,
+    dx: jax.Array, dy: jax.Array,
+    a11: jax.Array, a12: jax.Array,
+    a21: jax.Array, a22: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 627: D-grid → cell-center latlon winds (FV3 ``c2l_ord2``).
+
+    Faithful port of FV3 ``c2l_ord2`` (fv_grid_utils.F90:2547-2628,
+    grid_type<4 branch).  Vorticity-conserving 2nd-order
+    interpolation from D-grid covariant winds to cell-center
+    (east, north) geographic winds.
+
+    Algorithm:
+        wu[i,j] = u[i,j] · dx[i,j]
+        wv[i,j] = v[i,j] · dy[i,j]
+        u1[i,j] = 2·(wu[i,j] + wu[i,j+1]) / (dx[i,j] + dx[i,j+1])
+        v1[i,j] = 2·(wv[i,j] + wv[i+1,j]) / (dy[i,j] + dy[i+1,j])
+        ua[i,j] = a11·u1 + a12·v1
+        va[i,j] = a21·u1 + a22·v1
+
+    Parameters
+    ----------
+    u : jax.Array, shape ``(..., n_x, n_y+1, [nlev])``
+        D-grid u-component on north/south edges (covariant).
+    v : jax.Array, shape ``(..., n_x+1, n_y, [nlev])``
+        D-grid v-component on east/west edges (covariant).
+    dx : jax.Array, shape ``(..., n_x, n_y+1)``
+        Cell-edge x-length.
+    dy : jax.Array, shape ``(..., n_x+1, n_y)``
+        Cell-edge y-length.
+    a11, a12, a21, a22 : jax.Array, shape ``(..., n_x, n_y)``
+        Rotation matrix entries from ``init_cubed_to_latlon``
+        (iter 626).
+
+    Returns
+    -------
+    ua, va : jax.Array, shape ``(..., n_x, n_y, [nlev])``
+        Cell-center (east, north) winds.
+    """
+    # Broadcast dx, dy, a-matrix to level dim if u, v carry extra level axis
+    has_level = u.ndim == dx.ndim + 1
+    if has_level:
+        dx_b = dx[..., None]
+        dy_b = dy[..., None]
+        a11_b = a11[..., None]
+        a12_b = a12[..., None]
+        a21_b = a21[..., None]
+        a22_b = a22[..., None]
+    else:
+        dx_b, dy_b = dx, dy
+        a11_b, a12_b, a21_b, a22_b = a11, a12, a21, a22
+
+    wu = u * dx_b           # (..., n_x, n_y+1, [nlev])
+    wv = v * dy_b           # (..., n_x+1, n_y, [nlev])
+    # Slice axis -2 of (wu, dx) to average over j; axis -3 (or -2 for 2D) of
+    # (wv, dy) to average over i.  Use jnp slicing with axis index resolved
+    # at runtime via the position of the n_y+1 / n_x+1 dim.
+    # For u shape (..., n_x, n_y+1, [nlev]): j axis is at position -2 if has_level
+    # else -1.  Equivalently: ax_j = -2 if has_level else -1.
+    if has_level:
+        wu_a = wu[..., :, :-1, :]
+        wu_b = wu[..., :, 1:, :]
+        dx_a = dx_b[..., :, :-1, :]
+        dx_b_ = dx_b[..., :, 1:, :]
+        wv_a = wv[..., :-1, :, :]
+        wv_b = wv[..., 1:, :, :]
+        dy_a = dy_b[..., :-1, :, :]
+        dy_b_ = dy_b[..., 1:, :, :]
+    else:
+        wu_a = wu[..., :, :-1]
+        wu_b = wu[..., :, 1:]
+        dx_a = dx_b[..., :, :-1]
+        dx_b_ = dx_b[..., :, 1:]
+        wv_a = wv[..., :-1, :]
+        wv_b = wv[..., 1:, :]
+        dy_a = dy_b[..., :-1, :]
+        dy_b_ = dy_b[..., 1:, :]
+    u1 = 2.0 * (wu_a + wu_b) / (dx_a + dx_b_)
+    v1 = 2.0 * (wv_a + wv_b) / (dy_a + dy_b_)
+    ua = a11_b * u1 + a12_b * v1
+    va = a21_b * u1 + a22_b * v1
+    return ua, va
+
+
 def init_cubed_to_latlon(
     agrid_lon: jax.Array, agrid_lat: jax.Array,
     ec1: jax.Array, ec2: jax.Array,

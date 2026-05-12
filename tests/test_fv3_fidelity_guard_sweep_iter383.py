@@ -221,6 +221,7 @@ _GUARD_MODULES = (
     "test_fv3_mirror_grid_iter624",                  # iter-624 add
     "test_fv3_mirror_grid_sym_iter625",              # iter-625 add
     "test_fv3_init_c2l_iter626",                     # iter-626 add
+    "test_fv3_c2l_ord2_iter627",                     # iter-627 add
 )
 
 

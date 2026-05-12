@@ -1195,6 +1195,38 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 627: **FV3 ``c2l_ord2``** — D-grid → latlon winds (2nd order
+  vorticity-conserving).  Faithful JAX port of FV3 ``c2l_ord2``
+  (fv_grid_utils.F90:2547-2628, grid_type<4 branch).
+
+  Algorithm:
+
+      wu[i,j] = u[i,j] · dx[i,j]      # weighted by metric
+      wv[i,j] = v[i,j] · dy[i,j]
+      u1[i,j] = 2·(wu[i,j] + wu[i,j+1]) / (dx[i,j] + dx[i,j+1])
+      v1[i,j] = 2·(wv[i,j] + wv[i+1,j]) / (dy[i,j] + dy[i+1,j])
+      ua[i,j] = a11·u1 + a12·v1
+      va[i,j] = a21·u1 + a22·v1
+
+  This is the FV3 vorticity-conserving 2nd-order rotation from
+  D-grid covariant winds to cell-center geographic winds.  Used
+  by FV3 wind diagnostics + Held-Suarez forcing.
+
+  Note: FV3 ``a`` matrix from iter-626 ``init_cubed_to_latlon``
+  is pre-scaled by 0.5 to compensate for the 2× factor in u1, v1
+  (FV3 formula ``2·(wu+wu)/(dx+dx) = 2·u`` for uniform fields).
+
+  Inputs accept both 2D ``(n_x, n_y+1)`` and 3D
+  ``(n_x, n_y+1, nlev)`` D-grid winds with auto-broadcast.
+
+  Tests (5/5 in 1 s):
+  1. Output shape matches cell-center grid.
+  2. Zero D-grid winds → zero output.
+  3. Uniform u=U, v=V with π/2 rotation → ua=-V, va=U.
+  4. 3D level dim handled.
+  5. Identity a-matrix verified against algorithm.
+
+  Wired into iter-383 sweep (now 198).
 - Iter 626: **FV3 ``init_cubed_to_latlon``** — D-grid → latlon
   wind rotation matrices.  Faithful JAX port of FV3
   ``init_cubed_to_latlon`` (fv_grid_utils.F90:2321-2384,
