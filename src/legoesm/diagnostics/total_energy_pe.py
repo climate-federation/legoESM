@@ -115,3 +115,22 @@ def compute_total_energy_pe(state, grid, coord) -> tuple[jax.Array, float]:
     te_column = te * grid.area
     te_total = float(jnp.sum(te_column))
     return te_column, te_total
+
+
+def te_drift_pe(state_old, state_new, grid, coord) -> float:
+    """FV3_3D iter 599: PE total-energy tendency between two states.
+
+    Returns ``te_dt = TE(state_new) - TE(state_old)``.  Adiabatic
+    flat-surface PE runs should have small drift.
+
+    Companion to ``compute_total_energy_pe`` (iter 598) and the
+    NH ``te_drift_nh`` (iter 599 NH side).
+
+    Returns
+    -------
+    te_dt : float
+        PE total-energy tendency [J].
+    """
+    _, te_old = compute_total_energy_pe(state_old, grid, coord)
+    _, te_new = compute_total_energy_pe(state_new, grid, coord)
+    return te_new - te_old

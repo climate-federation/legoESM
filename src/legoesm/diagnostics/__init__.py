@@ -8,9 +8,11 @@ from legoesm.diagnostics.angular_momentum import (
 )
 from legoesm.diagnostics.total_energy_nh import (
     compute_total_energy_nh,
+    te_drift_nh,
 )
 from legoesm.diagnostics.total_energy_pe import (
     compute_total_energy_pe,
+    te_drift_pe,
 )
 from legoesm.diagnostics.column_integrals import column_water_vapor
 from legoesm.diagnostics.conservation_drift import (

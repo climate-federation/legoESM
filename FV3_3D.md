@@ -1195,6 +1195,23 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 599: **TE drift diagnostics for NH and PE**.  Mirror of
+  iter 587's ``aam_drift_nh``.  New:
+  - ``te_drift_nh(state_old, state_new, grid, hc)`` returns
+    ``TE(new) - TE(old)`` for NH using iter-597 ``compute_total_energy_nh``.
+  - ``te_drift_pe(state_old, state_new, grid, coord)`` returns
+    ``TE(new) - TE(old)`` for PE using iter-598 ``compute_total_energy_pe``.
+  Adiabatic flat-surface runs should have small drift; large
+  drift indicates dycore numerical energy gain/loss.
+  Tests (4/4 in 12 s):
+  1. Identical NH → drift ≈ 0.
+  2. +10K θ′ NH → drift > 0 (internal energy gain).
+  3. Identical PE → drift ≈ 0.
+  4. +10K T PE → drift > 0.
+  Conservation-diagnostic stack now complete (NH + PE × {AAM,
+  TE} × {static, drift}).  FV3's ``consv_te > 0`` correction
+  remains as natural follow-up (analog of iter 588 consv_am).
+  Wired into iter-383 sweep (now 173).
 - Iter 598: **PE total-energy diagnostic** (FV3 ``compute_total_energy``
   hydrostatic branch port).  Faithful port of FV3
   fv_mapz.F90:1127-1152.  Computes:

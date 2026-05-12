@@ -76,3 +76,24 @@ def compute_total_energy_nh(state, grid, hc) -> tuple[jax.Array, float]:
     te_column = te_per_m2 * grid.area                       # J per column
     te_total = float(jnp.sum(te_column))
     return te_column, te_total
+
+
+def te_drift_nh(state_old, state_new, grid, hc) -> float:
+    """FV3_3D iter 599: NH total-energy tendency between two states.
+
+    Returns ``te_dt = TE(state_new) - TE(state_old)``.  Adiabatic
+    flat-surface runs should have small drift (the dycore is
+    energy-conserving to discretization order).
+
+    Companion to ``aam_drift_nh`` (iter 587) — both diagnose dycore
+    conservation behavior without applying corrections.
+
+    Returns
+    -------
+    te_dt : float
+        Total-energy tendency [J].  Positive = energy gained;
+        negative = energy lost (physical or numerical).
+    """
+    _, te_old = compute_total_energy_nh(state_old, grid, hc)
+    _, te_new = compute_total_energy_nh(state_new, grid, hc)
+    return te_new - te_old
