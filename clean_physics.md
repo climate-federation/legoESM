@@ -138,6 +138,24 @@ Compression iteration.  Folded iter-30 through iter-40 entries into the
 auto-loaded MEMORY.md / context envelope.  Detailed per-iteration narratives
 remain in the commit messages on `clean_physics`.
 
+### Iteration 44 — 2026-05-13
+
+**Apply codex iter-43 finding: slab_land fresh-snow albedo.**
+
+`land/slab_land.py:91` — the surface albedo block used the pre-step
+`snow` while the later `has_snow` dispatch correctly included
+`precip_snow*dt` for cold surfaces.  A snow-free cell receiving
+fresh snow below freezing therefore absorbed BARE-LAND shortwave
+for one timestep before snow accumulation took over the next step.
+
+Fix: compute `fresh_snow_surviving = where(T_soil < T_freeze,
+precip_snow*dt, 0)` BEFORE the albedo block and pass
+`snow + fresh_snow_surviving` into `compute_land_albedo`.  Matches
+the iter-68 multilayer-land fix that surface humidity / has_snow
+also need fresh-snow accounting.
+
+**Tests (post iter-44):** 140 / 140 land tests pass.
+
 ### Iteration 43 — 2026-05-13
 
 **Inspection iteration (no code changes).**
