@@ -82,9 +82,12 @@ def test_iter488_duogrid_investigation_summary(doc_text):
     )
     section = doc_text[section_start:section_end]
     # Table uses bare iter numbers in first column.
-    for it_num in ["461", "466", "471", "473", "480", "482", "487"]:
+    for it_num in [
+        "461", "466", "471", "473", "480", "482", "487",
+        "489", "490", "493",   # iter-494 additions
+    ]:
         assert f"| {it_num} |" in section, (
-            f"iter-488 summary table missing row for iter "
+            f"iter-488/494 summary table missing row for iter "
             f"{it_num}."
         )
 

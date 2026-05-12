@@ -153,9 +153,9 @@ from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
 * PE variants are API-symmetric; iter-469/470 showed PE is
   largely insensitive to these flag changes at C8.
 
-## Duogrid investigation summary (iter 461-487 synthesis, iter 488)
+## Duogrid investigation summary (iter 461-493 synthesis, iter 494 update)
 
-A 27-iter empirical investigation of cube-edge artifacts at
+A 33-iter empirical investigation of cube-edge artifacts at
 C8 + duogrid + NH factory.  Key data points:
 
 | Iter | Finding |
@@ -181,13 +181,30 @@ C8 + duogrid + NH factory.  Key data points:
 | 481 | corner_div_damp_d2_bg sweep: 100× boost → 36% reduction |
 | 482 | **Composite iter-466+iter-481: 59.5% reduction (3.50 → 1.42×)** |
 | 487 | Resolution scan: C8=5.12×, C16=4.12×, C24=4.72× → penalty plateaus 4-5× |
+| 489 | Overshoot LOCALIZED to cube-vertex (corner) cells — 24 cells/level globally |
+| 490 | ``pad_halo_4d`` exposes ``monotone_clip`` arg, eliminates iter-489 overshoot |
+| 491 | Random-field test: 76% halo overshoot (clip cuts to ≤ interior_max) |
+| 492 | Dycore monkey-patch (1 site): only 1.4% reduction |
+| 493 | Comprehensive 4-site patch: still only 1.5% — clip is NOT the dominant dycore fix |
 
-**Bottom line**: duogrid bug is real and persistent (~4-5× edge
-penalty at all tested resolutions).  Bisected to composite
-single-step dycore + duogrid interaction (not isolable to any
-individual operator).  Two mitigation paths (drop hurting flags,
-boost corner_div) compose to give 60% reduction.  Below 1.42×
-likely needs operator-level fix.
+**Bottom line**: duogrid bug is real and persistent (~4-5×
+edge penalty at all tested resolutions).  Bisected to a
+composite single-step dycore + duogrid interaction (not
+isolable to any individual operator).
+
+Mitigation taxonomy:
+* **Working**: iter-466 flag drops (50%) + iter-481/482
+  corner_div boost (60% combined).
+* **Not working**: iter-490/493 halo-level monotone_clip
+  (only 1-2% dycore impact despite 76% halo overshoot).  The
+  iter-491 random-field finding overestimates dycore impact
+  because dycore intermediate fields are smoother than
+  random noise.
+
+Below 1.42× edge ratio likely requires deeper dycore changes
+than the halo-level clip — possibly in the cube-vertex
+interpolation logic itself, or in how the dycore composes
+halo reads with derivatives.
 
 ## Final state (iter 100 close-out, table updated through iter 103)
 
