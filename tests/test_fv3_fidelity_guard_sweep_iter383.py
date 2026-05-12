@@ -112,6 +112,7 @@ _GUARD_MODULES = (
     "test_nh_duogrid_comprehensive_clip_iter493",    # iter-493 add
     "test_divergence_corner_duogrid_iter495",        # iter-495 add
     "test_interp_center_to_corner_duogrid_iter496",  # iter-496 add
+    "test_center_to_dgrid_vector_duogrid_iter497",   # iter-497 add
 )
 
 

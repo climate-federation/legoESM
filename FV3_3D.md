@@ -1015,6 +1015,18 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 497: ``center_to_dgrid_vector`` (iter-328 vector-aware
+  variant) amplifies edges 3× LESS than scalar interp:
+    iter-496 scalar interp: edge × 1.122 (12%)
+    iter-497 vector u_d:    edge × 1.040 (4%)
+    iter-497 vector v_d:    edge × 1.027 (3%)
+  The vector-aware halo (proper rotation across face
+  boundaries) reduces per-step edge amplification by ~3×.
+  **Mechanistically explains iter-465's "vector_halo_uv is
+  biggest helper" (Δ+5)**: switching from scalar to vector
+  interp cuts each step's edge contamination, compounding
+  to ~5 over multiple substeps.  1/1 in 11 s.  Wired into
+  iter-383 sweep (now 89).
 - Iter 496: ``_interp_center_to_corner`` IS a duogrid edge
   amplifier (~12%).  Apply the cell-center → D-grid corner
   4-point average (halo-aware) to random Gaussian field:
