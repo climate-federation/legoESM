@@ -185,6 +185,7 @@ _GUARD_MODULES = (
     "test_w_safety_cap_iter584",                     # iter-584 add
     "test_hord8_limiter_iter585",                    # iter-585 add
     "test_schmidt_transform_iter586",                # iter-586 add
+    "test_aam_drift_iter587",                        # iter-587 add
 )
 
 

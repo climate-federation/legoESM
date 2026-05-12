@@ -1195,6 +1195,20 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 587: **AAM drift from NH state** (extends iter 583).
+  iter-583 ``compute_atmospheric_angular_momentum`` takes raw
+  arrays; users had to manually rotate face-local u → u_east.
+  Two new convenience functions in ``legoesm.diagnostics``:
+  - ``aam_from_nh_state(state, grid, hc)``: handles rotation
+    internally via ``u_east = cos(angle)·u_face - sin(angle)·v_face``,
+    builds ``rho_full = rho_ref + rho_prime``, returns AAM column
+    + total.
+  - ``aam_drift_nh(state_old, state_new, grid, hc)``: returns
+    ``amdt = AAM_new - AAM_old`` (FV3 fv_dynamics.F90:768 form,
+    without mountain torque ``zxg``).
+  Diagnostic only; the ``consv_am`` correction (apply u0 to
+  conserve AM) is the natural follow-up.  3/3 in 4 s.
+  Wired into iter-383 sweep (now 162).
 - Iter 586: **Schmidt transformation / stretched grid** (user
   audit item #1 partial).  Faithful port of FV3
   ``direct_transform`` (fv_grid_utils.F90:870-917):

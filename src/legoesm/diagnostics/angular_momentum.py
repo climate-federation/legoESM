@@ -81,3 +81,59 @@ def compute_atmospheric_angular_momentum(
     aam_column = jnp.sum(aam_cell, axis=-1)           # (6, n, n)
     aam_total = float(jnp.sum(aam_column))
     return aam_column, aam_total
+
+
+def aam_from_nh_state(state, grid, hc) -> tuple[jax.Array, float]:
+    """FV3_3D iter 587: AAM from a NonHydrostaticState, using geographic
+    u_east (not face-local u).
+
+    Faithful to FV3's compute_aam which uses ua (geographic east wind).
+    Rotates the state's face-local (u, v) to (u_east, v_north) via
+    grid.angle before computing AAM.
+
+    Parameters
+    ----------
+    state : NonHydrostaticState
+    grid : CubedSphereGrid
+    hc : HeightCoordinate
+
+    Returns
+    -------
+    aam_column, aam_total : as ``compute_atmospheric_angular_momentum``.
+    """
+    # Rotate face-local (u_face, v_face) to (u_east, v_north).
+    # Inverse of rotate_winds_geo_to_grid:
+    #   u_east = cos(angle)*u_face - sin(angle)*v_face
+    angle = grid.angle[..., None]  # (6, n, n, 1)
+    cos_a = jnp.cos(angle)
+    sin_a = jnp.sin(angle)
+    u_east = cos_a * state.u.data - sin_a * state.v.data
+    rho_ref_b = jnp.asarray(hc.rho_ref)[None, None, None, :]
+    rho_full = rho_ref_b + state.rho_prime.data
+    return compute_atmospheric_angular_momentum(
+        u_east, rho_full, grid, hc,
+    )
+
+
+def aam_drift_nh(state_old, state_new, grid, hc) -> float:
+    """FV3_3D iter 587: AAM tendency between two NH states.
+
+    Returns amdt = AAM(state_new) - AAM(state_old), faithful to FV3
+    fv_dynamics.F90:768 ``amdt = g_sum(te_2d, ...)``.
+
+    A positive value means AM was injected by the dycore.  In
+    adiabatic flat-surface runs amdt should be ~0 (the dycore
+    should conserve AM exactly if flux-form & no friction).
+    Mountain torque (FV3 ``zxg`` term) is NOT included here — for
+    runs with terrain, the physical AM tendency includes
+    dt·sum(ps·zxg·area) and this function returns only the
+    dycore-internal drift.
+
+    Returns
+    -------
+    amdt : float
+        AAM tendency [kg·m²/s].
+    """
+    _, aam_old = aam_from_nh_state(state_old, grid, hc)
+    _, aam_new = aam_from_nh_state(state_new, grid, hc)
+    return aam_new - aam_old

@@ -1,6 +1,8 @@
 """Online diagnostics for legoESM."""
 
 from legoesm.diagnostics.angular_momentum import (
+    aam_drift_nh,
+    aam_from_nh_state,
     compute_atmospheric_angular_momentum,
 )
 from legoesm.diagnostics.column_integrals import column_water_vapor
