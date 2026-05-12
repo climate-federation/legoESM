@@ -1195,75 +1195,26 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
-- Iter 579: **SW rest preservation** — mirror iter-572.
-  SW dycore with constant h=1000m, zero u/v, flat surface,
-  10 steps @ N=12.  Result:
-  - h drift:    max|h - 1000| = **0.0** (exact)
-  - u_d drift:  max|u_d| = 0.0
-  - v_d drift:  max|v_d| = 0.0
-  Both SW and NH (iter-572) preserve quiescent rest exactly.
-  Confirms both dycores are mathematically consistent.
-  1/1 in 12 s.  Wired into iter-383 sweep (now 156).
-- Iter 578: **dycore linearity at small perturbations**.
-  Apply Gaussian θ′ bump at amplitudes 1 mK and 10 mK,
-  zero winds, 10 steps @ C16 + optimal stack:
-  - amp=1 mK:  max|θ′|=9.85e-4 K, max|u|=1.64e-5 m/s
-  - amp=10 mK: max|θ′|=9.85e-3 K, max|u|=1.64e-4 m/s
-  10× IC → **exactly 10.00× response** in both fields.
-  Perfect linearity at small perturbations.  Confirms dycore
-  has no spurious nonlinear self-excitation at low signal
-  levels.  1/1 in 67 s.  Wired into iter-383 sweep (now 155).
-- Iter 576: **50-step optimal stack — non-linear growth**.
-  Extend iter-566 to 50 steps @ C24 + optimal stack:
-  - 10 steps: edge_std = 5.83e-3, max|θ′|=0.6, max|u|≈30
-  - 30 steps: edge_std = 3.43e-2
-  - **50 steps: edge_std = 1.08e-1, max|θ′|=1.16 K, max|u|=72 m/s**
-  - growth 10→50: **18.4×** (vs power-law prediction 6.0×)
-  Growth becomes super-power-law at 50 steps.  System is
-  entering non-linear regime — the 1 K θ′ perturbation is
-  now a real signal, not edge noise.  Practical limit at
-  C24 + dt=10s: stable & well-controlled up to ~30 steps.
-  Longer runs need either finer dt or higher resolution.
-  1/1 in 40 s.  Wired into iter-383 sweep (now 154).
-- Iter 573: **NH SBR amplitude scaling**.  Sweep U_0 ∈
-  {2, 5, 10, 20} m/s @ C16 + iters=8 + clip, 10 steps:
-  - U_0=2:  edge_std=4.10e-4 (0.4 mK — calm)
-  - U_0=5:  edge_std=1.04e-3 (1.0 mK)
-  - U_0=10: edge_std=2.34e-3 (2.3 mK)
-  - U_0=20: edge_std=6.72e-3 (6.7 mK — jet stream)
-  Fit: **edge_std ~ U_0¹·²⁰** (slightly super-linear).
-  For typical mid-latitude winds (~10 m/s) the edge noise
-  is ~2-3 mK.  Calm regions (tropics, polar nights, ocean
-  basins) → effectively zero edge artifact.  Strong winds
-  (jet stream, gust fronts) → up to ~7 mK at C16.  Most
-  atmospheric flows will see mK-level edge noise, well
-  below physical signal.  1/1 in 128 s.  Wired into iter-383
-  sweep (now 153).
-- Iter 572: **NH from truly zero IC → perfect rest preservation**.
-  Build NH state with all fields = 0 (u=v=w=θ′=ρ′=phis=0),
-  run 10 steps @ C16 with iters=8 + clip.  All fields stay
-  **exactly 0** (max=0.0, std=0.0).  This is a strong
-  positive finding: the dycore preserves quiescent rest
-  PERFECTLY.  Edge artifacts only emerge from non-trivial
-  dynamics; the dycore itself does NOT introduce spurious
-  noise.  Mathematically consistent.  1/1 in 39 s.  Wired
-  into iter-383 sweep (now 152).
-- Iter 571: **PE time-growth power-law on Held-Suarez**.
-  Mirror iter-569 on PE @ C16 + iters=8, 1-30 steps.  Track
-  δT = T - T_initial edge_std:
-  - step 1:  δT = 1.07e-6 K (essentially noise floor)
-  - step 5:  δT = 2.23e-5 K
-  - step 10: δT = 8.19e-5 K
-  - step 20: δT = 3.08e-4 K
-  - step 30: δT = 6.79e-4 K
-  Fit: **δT ~ n_steps¹·⁸⁹** — steeper than NH's 1.15.
-  However, absolute values are 1000× smaller than NH (0.68 mK
-  at step 30 vs NH 34 mK).  PE has essentially **no edge
-  artifact issue** in absolute terms for Held-Suarez.  Steeper
-  relative growth but from such a tiny base it doesn't matter
-  physically.  Strong positive finding: PE production runs
-  should be artifact-free.  1/1 in 33 s.  Wired into iter-383
-  sweep (now 151).
+- **Iters 571-579 (compacted iter 580)**: dycore mathematical
+  consistency + amplitude/time scaling + linearity.
+  - iter 571: PE δT ~ n_steps¹·⁸⁹ on HS but absolute ≤1 mK
+    (essentially no artifact).
+  - iter 572: NH zero IC → exactly zero output (perfect rest).
+  - iter 573: NH edge_std ~ U_0¹·²⁰.  Typical winds → 2-3 mK
+    edge noise.  Calm regions → ≤0.4 mK.  Jet stream → ≤7 mK.
+  - iter 576: 50-step C24 grows super-power-law (18× vs 6×
+    predicted).  Non-linear regime at 50 steps.  Practical
+    limit ~30 steps.
+  - iter 578: dycore PERFECTLY linear at small perturbations
+    (10× IC → exactly 10.00× response in θ′ and u).
+  - iter 579: SW rest preservation — h, u_d, v_d drift =
+    exactly 0 over 10 steps.  Like NH, SW is mathematically
+    consistent.
+  Net positive findings: dycore is well-behaved (rest
+  preserved, linear at small pert), edge noise scales with
+  wind magnitude (mK for typical flows), PE has essentially
+  no artifact issue, NH usable up to ~30 step blocks at C24.
+  Currently 156 guards in iter-383 sweep.
 - **Iters 561-569 (compacted iter 570)**: ``heat_source_del2``
   optimization + multi-step growth + helper equivalence.
   - iter 561: bisect min-edge factory's 3 disabled flags on
