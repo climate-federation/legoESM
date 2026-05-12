@@ -3297,11 +3297,8 @@ def eqv_pot_bolton_fv3(
         p_mb = 0.01 * rdg * delp / delz * pt * (1.0 + zvir * q)
 
     if moist:
-        # Moist exponent cappa
-        cappa = constants.R_d / (
-            constants.R_d
-            + ((1.0 - q) * cv_air + q * cv_vap) / (1.0 + zvir * q)
-        )
+        # Moist exponent cappa (iter-723: delegate to cappa_moist_fv3)
+        cappa = cappa_moist_fv3(q, zvir=zvir)
         # Dry mixing ratio r (g/kg)
         r = jnp.maximum(1e-10, q / (1.0 - q) * 1000.0)
         # Water vapor pressure (mb)
@@ -4516,6 +4513,49 @@ def range_check_fv3(
     qmax = jnp.max(q)
     bad_range = (qmin < q_low) | (qmax > q_hi)
     return bad_range, qmin, qmax
+
+
+def cappa_moist_fv3(
+    q_sphum: jax.Array,
+    zvir: float | None = None,
+) -> jax.Array:
+    """FV3_3D iter 723: variable Poisson exponent in moist air.
+
+    Faithful JAX port of FV3's moist cappa formula (used by FV3
+    Riem_Solver, pv_entropy, eqv_pot, etc.):
+
+        cv_air = c_pd − R_d
+        cv_vap = c_pv − R_v
+        cappa  = R_d / (R_d + ((1−q)·cv_air + q·cv_vap)/(1+zvir·q))
+
+    In the dry limit (q=0):
+        cappa = R_d / (R_d + cv_air) = R_d / c_pd = constants.kappa
+
+    Pairs with iter-722 ``compute_pkz_fv3`` (accepts layer-varying
+    cappa array) and iter-716 ``eqv_pot_bolton_fv3`` (uses same
+    formula inline for moist θ_e).
+
+    Parameters
+    ----------
+    q_sphum : jax.Array
+        Specific humidity (kg/kg).
+    zvir : float, optional
+        Virtual-T coefficient.  Default ``R_v/R_d − 1`` from
+        legoesm constants.
+
+    Returns
+    -------
+    cappa : jax.Array
+        Layer-varying Poisson exponent (dimensionless).
+    """
+    if zvir is None:
+        zvir = constants.R_v / constants.R_d - 1.0
+    cv_air = constants.c_pd - constants.R_d
+    cv_vap = constants.c_pv - constants.R_v
+    return constants.R_d / (
+        constants.R_d
+        + ((1.0 - q_sphum) * cv_air + q_sphum * cv_vap) / (1.0 + zvir * q_sphum)
+    )
 
 
 def compute_pkz_fv3(

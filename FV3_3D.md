@@ -1195,6 +1195,38 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 723: **``cappa_moist_fv3``** — variable Poisson exponent.
+
+  Extracted moist cappa formula from inline use in iter-716
+  Bolton θ_e (and FV3 fv_mapz.F90 lines 470, 475, 487):
+
+      cv_air = c_pd − R_d
+      cv_vap = c_pv − R_v
+      cappa  = R_d / (R_d + ((1−q)·cv_air + q·cv_vap)/(1+zvir·q))
+
+  Dry limit (q=0): cappa = R_d/c_pd = constants.kappa.
+
+  Pairs with iter-722 ``compute_pkz_fv3`` (accepts layer-varying
+  cappa array for moist nwat path) and iter-716 ``eqv_pot_bolton_fv3``
+  (now delegates to helper).
+
+  Reuses legoesm constants: R_d, R_v, c_pd, c_pv, kappa.
+
+  iter-716 refactored to delegate to helper; output bit-identical.
+
+  Tests (6/6 in <2 s):
+  1. Dry limit → cappa = kappa exactly.
+  2. Monotone-decreasing in q (cv_vap > cv_air → heavier moist
+     atm → lower cappa).
+  3. Custom zvir plumbing.
+  4. Pairs with iter-722 compute_pkz_fv3 moist path.
+  5. iter-716 Bolton θ_e refactor preserves output (manual
+     cappa formula matches helper).
+  6. No NaN/Inf on random.
+
+  iter-716 8/8 tests still pass.
+
+  Wired into iter-383 sweep (now 287).
 - Iter 722: **``compute_pkz_fv3``** — layer-mean Exner factor.
   Faithful JAX port of FV3 pkz computation
   (fv_mapz.F90:457 hydrostatic, :481 non-hydrostatic dry,

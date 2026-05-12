@@ -310,6 +310,7 @@ _GUARD_MODULES = (
     "test_fv3_qsat_blend_iter720",                   # iter-720 add
     "test_fv3_virtual_temp_iter721",                 # iter-721 add
     "test_fv3_compute_pkz_iter722",                  # iter-722 add
+    "test_fv3_cappa_moist_iter723",                  # iter-723 add
 )
 
 
