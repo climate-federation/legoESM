@@ -1195,6 +1195,34 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 666: **FV3 ``dcmip16_tc_sphum``** — DCMIP16 TC humidity profile.
+  Faithful JAX port of FV3 ``DCMIP16_TC_sphum`` (tools/test_cases.F90:
+  7198-7208).
+
+  Reed-Jablonowski TC specific humidity (kg/kg):
+
+      if z >= zt: q = qt                      (stratospheric)
+      else:       q = q0·exp(-z/zq1)·exp(-(z/zq2)²)
+
+  Default DCMIP16 TC constants (FV3 lines 6880-6886):
+      q0  = 0.021 kg/kg  (surface peak)
+      qt  = 1e-11 kg/kg  (stratospheric)
+      zq1 = 3000 m       (exponential decay scale)
+      zq2 = 8000 m       (Gaussian truncation scale)
+      zt  = 15000 m      (tropopause)
+
+  Used in FV3 DCMIP16 idealized tropical-cyclone test
+  (Reed-Jablonowski).  Monotonically decreasing from q0 at
+  surface to qt above tropopause.
+
+  Tests (5/5 in <1 s):
+  1. z=0 → q = q0 = 0.021.
+  2. z=zt → q = qt = 1e-11.
+  3. Above tropopause → q = qt.
+  4. Monotonically decreasing below tropopause.
+  5. No NaN/Inf; q > 0 across full z range.
+
+  Wired into iter-383 sweep (now 233).
 - Iter 665: **FV3 ``super_k_u_fv3``** — super-cell wind shear profile.
   Faithful JAX port of FV3 ``SuperK_u`` (tools/test_cases.F90:
   6049-6082, MPAS branch without TEST_TANHP).

@@ -256,6 +256,7 @@ _GUARD_MODULES = (
     "test_fv3_gh_jet_iter663",                       # iter-663 add
     "test_fv3_case9_iter664",                        # iter-664 add
     "test_fv3_super_k_u_iter665",                    # iter-665 add
+    "test_fv3_dcmip16_tc_sphum_iter666",             # iter-666 add
 )
 
 

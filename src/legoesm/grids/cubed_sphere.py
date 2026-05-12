@@ -2382,6 +2382,48 @@ def rotate_winds_sphere_cube(
     return new_u, new_v
 
 
+def dcmip16_tc_sphum(
+    z: jax.Array,
+    q0: float = 0.021,
+    qt: float = 1.0e-11,
+    zq1: float = 3000.0,
+    zq2: float = 8000.0,
+    zt: float = 15000.0,
+) -> jax.Array:
+    """FV3_3D iter 666: DCMIP16 Reed-Jablonowski TC humidity profile.
+
+    Faithful JAX port of FV3 ``DCMIP16_TC_sphum`` (tools/test_cases.F90:
+    7198-7208, DCMIP16 TC test).  Specific humidity (kg/kg) as
+    function of height:
+
+        if z >= zt: q = qt   (stratospheric background)
+        else:       q = q0 · exp(-z/zq1) · exp(-(z/zq2)²)
+
+    Default DCMIP16 TC constants (FV3 lines 6880-6886):
+        q0  = 0.021 kg/kg  (surface peak)
+        qt  = 1e-11 kg/kg  (stratospheric)
+        zq1 = 3000 m       (exponential decay)
+        zq2 = 8000 m       (Gaussian truncation)
+        zt  = 15000 m      (tropopause)
+
+    Used in FV3 DCMIP16 idealized tropical-cyclone test.
+
+    Parameters
+    ----------
+    z : jax.Array
+        Height(s) in meters.
+    q0, qt, zq1, zq2, zt : float
+        TC profile constants (see defaults).
+
+    Returns
+    -------
+    q : jax.Array
+        Specific humidity (kg/kg).
+    """
+    q_below = q0 * jnp.exp(-z / zq1) * jnp.exp(-(z / zq2) ** 2)
+    return jnp.where(z < zt, q_below, qt)
+
+
 def super_k_u_fv3(
     zz: jax.Array,
     zs: float = 5000.0,
