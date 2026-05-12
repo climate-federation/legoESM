@@ -1120,6 +1120,19 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 535: **example script** at ``scripts/example_fv3_clip_helper.py``
+  showing end-to-end user-facing API:
+  1. Build C16 SBR state via ``rotate_winds_geo_to_grid``.
+  2. ``make_legoesm_nh_min_edge_config(...)``.
+  3. ``model = CDGridCompressibleEulerModel(...)``.
+  4. ``step = make_clipped_step(model, state, dt=10.0, slack=0.5)``.
+  5. Loop 10 steps.
+  6. Print edge_std / interior_std diagnostic.
+  Output matches iter-521 expectations within 5%:
+  edge_std=6.34e-2 (vs expected 5.89e-2), int_std=9.52e-3
+  (vs 9.34e-3).  Plus smoke test ensuring the script
+  imports.  1/1 in <1 s.  Wired into iter-383 sweep
+  (now 122).
 - Iter 534: **min_edge vs aggressive + clip — different goals**.
   Combine iter-466 / iter-483 factories with iter-526
   ``make_clipped_step``, 10 steps random IC:
