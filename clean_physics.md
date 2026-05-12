@@ -129,6 +129,23 @@ the resulting overshoot in θ/q.  Cap is ``M ≤ 0.5·ρ·dz/dt``
 **Tests (post iter-11):**
 - 95 atmosphere turbulence tests pass (all schemes including EDMF).
 
+### Iteration 19 — 2026-05-12
+
+**Inspection.** Walked the MPAS / lat-lon-cgrid / cubed-sphere ocean
+physics-closure paths to evaluate whether the `dt` plumbed into the
+leaf-CFL caps (iters 5, 7, 10, 17) could be propagated through
+`physics_fn(state, mesh, z_coord, surface_forcing)` automatically.
+Conclusion: it's a cross-file refactor (3 ocean PE backends + 3 model
+drivers + the make_*_ocean_physics closures + the K-profile path for
+the implicit branch).  Deferred — risk of subtle test breakage
+outweighs the marginal stability gain since the production code uses
+the implicit ocean solver (`apply_diffusion=False`) by default, which
+is unconditionally stable.
+
+**Integration smoke test:** `test_amip_smoke` passes after iters 16
+and 17.  No regressions from the convection-q_v and vertical-mixing-
+dt plumbing changes.
+
 ### Iteration 18 — 2026-05-12
 
 **Targeted post-change test sweep** (the full unit sweep started in
