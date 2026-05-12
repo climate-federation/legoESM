@@ -138,6 +138,43 @@ Compression iteration.  Folded iter-30 through iter-40 entries into the
 auto-loaded MEMORY.md / context envelope.  Detailed per-iteration narratives
 remain in the commit messages on `clean_physics`.
 
+### Iteration 46 — 2026-05-13
+
+**Inspection iteration on `src/legoesm/ocean/physics/lateral_mixing/`
+(no code changes).**
+
+Codex narrow review on the lateral-mixing modules failed (exit 144).
+Direct inspection of `harmonic.py`, `biharmonic.py`, `gm_redi.py`,
+`gm_redi_latlon_cgrid.py`, `gm_redi_mpas.py`, `backscatter.py`,
+`_gm_redi_common.py`, `config.py`, `integration.py`:
+
+- **DM95 taper** — smooth tanh, monotone, bounded [0, 1]
+  (`_gm_redi_common.dm95_taper`).
+- **Slope-tensor algebra** — Griffies (1998) small-slope form, signs
+  matched to z-up convention; `F_x = κ_R ∂q/∂x + (κ_R − κ_GM) S_x ∂q/∂z`
+  matches all three grid implementations (cubed, latlon-c, MPAS).
+- **Per-triad cancellation** (`gm_redi_tracer_tendency_triads_latlon_cgrid`)
+  — 8 W-face edge-pair triads at weight 0.25 each give
+  `<S_x²> + <S_y²> = <S²>` (separable corner avg ≡ 4-corner avg).
+  Tests `test_gm_redi_eady_physics.py::TestTriadCancellation` cover this.
+- **vertical_flux_divergence** — returns `+∂F_z/∂z` with zero-flux BCs
+  at top/bottom (correct for z-up); `dq/dt` consistent with the
+  Laplacian-based diagonal that uses `coeff · ∇²q = ∇·G_diag`.
+- **Visbeck κ_GM** — wet-column mask applied AFTER clipping (codex
+  earlier finding still holds); `f_safe = max(|f|, f_min)` prevents
+  infinite Rossby radius at the equator.
+- **Backscatter energy budget** — `dE/dt = η ε_diss − ε_bs − E/τ`
+  preserves the resolved/reservoir partition;
+  `d(KE+E)/dt = −(1−η) ε_diss − E/τ` matches Jansen & Held (2014).
+
+Note (deferred): `BiharmonicConfig.cfl_safety = 0.05` is 1.6× the 2-D
+explicit-Euler stability limit `B·dt/dx⁴ ≤ 1/32` (legoESM uses
+mixed compact-inner / 2h-outer stencils, so the actual Nyquist
+spectral radius is smaller — opt-in `enforce_cfl=False` default makes
+this dormant).  Production runs set `B ~ 1e10 m⁴/s`, ``dx ~ 100 km``
+which is six orders below the cap, so the cap is dormant either way.
+Skip pending mixed-stencil eigenvalue audit.
+
 ### Iteration 45 — 2026-05-13
 
 **Inspection iteration on `src/legoesm/ice/` (no code changes).**
