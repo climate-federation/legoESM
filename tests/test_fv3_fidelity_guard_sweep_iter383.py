@@ -365,6 +365,7 @@ _GUARD_MODULES = (
     "test_fv3_pbl_height_iter775",                   # iter-775 add
     "test_fv3_shear_squared_iter776",                # iter-776 add
     "test_fv3_wind_direction_iter777",               # iter-777 add
+    "test_fv3_coriolis_parameter_iter778",           # iter-778 add
 )
 
 

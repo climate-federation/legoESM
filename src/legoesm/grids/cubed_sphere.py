@@ -3656,6 +3656,43 @@ def wind_direction_fv3(
     return wdir_to
 
 
+def coriolis_parameter_fv3(
+    lat: jax.Array,
+    units: str = "rad",
+) -> jax.Array:
+    """FV3_3D iter 778: Coriolis parameter f = 2·Ω·sin(lat).
+
+    Vertical component of the planetary vorticity vector
+    (2·Ω·sin(lat)) acting on horizontal flow.  Used everywhere:
+    geostrophic balance, Rossby-wave dispersion, inertial
+    oscillations, Ekman pumping, ageostrophic decomposition.
+
+    Centred on Earth: Ω = ``constants.Omega`` = 7.292·10⁻⁵ rad/s
+    (sidereal-day rotation rate).
+
+    Sign convention: f > 0 in the Northern Hemisphere, f < 0 in
+    the Southern, f = 0 at the equator.
+
+    Parameters
+    ----------
+    lat : jax.Array
+        Latitude.  Interpreted as radians by default; pass
+        ``units='deg'`` for degrees input (will be converted to
+        radians internally).
+    units : {'rad', 'deg'}
+        Input units for ``lat``.
+
+    Returns
+    -------
+    f : jax.Array
+        Coriolis parameter (s⁻¹).
+    """
+    if units not in ("rad", "deg"):
+        raise ValueError(f"units must be 'rad' or 'deg', got {units!r}")
+    lat_rad = jnp.radians(lat) if units == "deg" else lat
+    return 2.0 * constants.Omega * jnp.sin(lat_rad)
+
+
 def kinetic_energy_fv3(
     ua: jax.Array,
     va: jax.Array,
@@ -7192,8 +7229,8 @@ def dcmip16_tc_uwind_pert(
         phip = pi / 18.0
     g = constants.g
     Rdgas = constants.R_d
-    omega = constants.Omega
-    fc = 2.0 * omega * jnp.sin(jnp.asarray(phip))
+    # iter-778: delegate Coriolis to coriolis_parameter_fv3
+    fc = coriolis_parameter_fv3(jnp.asarray(phip))
     rfac = jnp.sqrt(r / rp) ** 3
     fr5 = 0.5 * fc * r
     Tv = Tv0 - lapse * z
@@ -7589,6 +7626,9 @@ def gh_jet_fv3(
     j_idx = jnp.arange(2, jm + 1)
     lat_mid = -jnp.pi / 2.0 + (j_idx.astype(jnp.float64) - 1.0 - 0.5) * dp
     uu = u_jet_fv3(lat_mid, umax=umax)
+    # 2·Ω·sin(lat) — uses the function's configurable ``omega`` kwarg
+    # (not delegated to ``coriolis_parameter_fv3`` since that fixes
+    # Ω = ``constants.Omega``)
     ft = 2.0 * omega * jnp.sin(lat_mid)
     # increment: -uu·(R·f + tan(lat_mid)·uu)·dp
     increment = -uu * (radius * ft + jnp.tan(lat_mid) * uu) * dp

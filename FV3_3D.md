@@ -5172,3 +5172,45 @@ station, every wind-rose, and is needed to match model output
 against observations in any DA cycle.  No new physical constants
 introduced.  Pure JAX, vmap-compatible.
 
+## Iter 778 — coriolis_parameter_fv3 + dcmip16-TC refactor
+
+Added `coriolis_parameter_fv3(lat, units='rad')` to
+`grids/cubed_sphere.py`.  Standard rotating-frame term:
+
+```
+f = 2 · Ω · sin(lat)     Ω = constants.Omega = 7.292·10⁻⁵ rad/s
+```
+
+`units` kwarg accepts ``'rad'`` (default) or ``'deg'``; invalid
+string raises ``ValueError``.
+
+Refactored inline ``2.0 * omega * jnp.sin(jnp.asarray(phip))``
+pattern in iter-672 ``dcmip16_tc_uwind_pert`` to delegate.  All
+11 dcmip16-TC tests pass post-refactor (output bit-identical, both
+expressions reduce to the same constants).
+
+A second inline use in ``gh_jet_fv3`` was *intentionally not
+refactored* because that function takes ``omega: float =
+constants.Omega`` as a configurable parameter (callers can pass a
+custom Ω for non-Earth experiments).  The helper hard-codes
+``constants.Omega``, so delegating there would silently drop the
+override.  Documented inline.
+
+Test: `tests/test_fv3_coriolis_parameter_iter778.py` (7 tests:
+equator → 0, north pole → 2·Ω, south pole → −2·Ω, 40°N textbook
+value ≈ 9.376·10⁻⁵ s⁻¹, units='deg' agrees with 'rad' over 50
+random lats, 3-D shapes + finite, invalid units raises).
+
+### Why this iteration was meaningful
+
+Coriolis is the most-used dynamical parameter in atmospheric and
+oceanic models (geostrophic balance, Rossby waves, Ekman pumping,
+inertial oscillations, ageostrophic decomposition).  The codebase
+had ~9 inline ``2.0 * omega * jnp.sin(lat)`` patterns across
+``cubed_sphere.py``, ``cubed_sphere_cdgrid.py``, ``voronoi.py``,
+``ocean/physics/lateral_mixing/`` — this iter adds the single
+canonical helper and refactors the one safe atmosphere-side
+caller; the configurable-Ω caller (`gh_jet_fv3`) is documented
+as intentionally not delegated.  Pure JAX, vmap-compatible.  No
+new physical constants introduced.
+
