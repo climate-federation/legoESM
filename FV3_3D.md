@@ -1195,6 +1195,32 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 651: **FV3 ``get_pt_on_great_circle``** — point along GC
+  at given distance + heading.  Faithful JAX port of FV3
+  ``get_pt_on_great_circle`` (tools/test_cases.F90:4805-4826).
+
+  Algorithm:
+
+      pha = dist / radius                            # angular dist
+      lat3 = asin(cos(heading)·cos(lat1)·sin(pha) + sin(lat1)·cos(pha))
+      dp   = atan2(sin(heading)·sin(pha)·cos(lat1),
+                   cos(pha) - sin(lat1)·sin(lat3))
+      lon3 = ((lon1 - π) - dp + π) mod 2π
+
+  Used in FV3 for tropical-cyclone test cases (vortex placement
+  along path) and spherical-trajectory computations.
+
+  Pairs with iter-608 ``mid_pt_sphere`` and iter-612 ``slerp``;
+  these together cover FV3's spherical-geometry trajectory ops.
+
+  Tests (5/5 in <1 s):
+  1. dist=0 returns start point.
+  2. Equator + heading=north (0) → lat increases by dist/R.
+  3. great_circle_distance(start, target) ≈ dist.
+  4. Equator + heading=east stays on equator.
+  5. No NaN/Inf on random inputs.
+
+  Wired into iter-383 sweep (now 219).
 - **Iters 641-649 (compacted iter 650)**: FV3 vertical-coord
   + IC + radius-aware grid utilities.  9 iterations completing
   the FV3 vertical-coord reference profiles + hydrostatic IC

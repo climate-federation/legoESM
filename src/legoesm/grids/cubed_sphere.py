@@ -2304,6 +2304,69 @@ def gnomonic_dist(im: int) -> tuple[jax.Array, jax.Array]:
     return xyz2latlon(p1, p2, p3)
 
 
+def get_pt_on_great_circle(
+    lon1: jax.Array, lat1: jax.Array,
+    dist: jax.Array, heading: jax.Array,
+    radius: float = constants.R_earth,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 651: point on great circle at given distance + heading.
+
+    Faithful JAX port of FV3 ``get_pt_on_great_circle``
+    (tools/test_cases.F90:4805-4826).  Given a start point
+    (lon1, lat1), great-circle distance ``dist``, and initial
+    heading (radians clockwise from north), returns the target
+    point (lon3, lat3) on the same great circle.
+
+    Algorithm:
+        pha = dist / radius                            # angular dist
+        lat3 = asin(cos(heading)·cos(lat1)·sin(pha)
+                    + sin(lat1)·cos(pha))
+        dp   = atan2(sin(heading)·sin(pha)·cos(lat1),
+                     cos(pha) - sin(lat1)·sin(lat3))
+        lon3 = ((lon1 - π) - dp + π) mod 2π            # FV3 0-2π
+                                                       # wrap
+
+    Used in FV3 for tropical-cyclone test cases (placing vortex
+    along a path) and spherical-trajectory computations.
+
+    Parameters
+    ----------
+    lon1, lat1 : jax.Array
+        Start point (radians).  Broadcasting on leading axes
+        supported.
+    dist : jax.Array
+        Great-circle distance from start (meters; same units as
+        ``radius``).
+    heading : jax.Array
+        Initial heading at start (radians; 0 = north, π/2 = east).
+    radius : float, default constants.R_earth
+
+    Returns
+    -------
+    lon3, lat3 : jax.Array
+        Target point on great circle (radians).  lon3 wrapped to
+        [0, 2π).
+    """
+    pha = dist / radius
+    sin_pha = jnp.sin(pha)
+    cos_pha = jnp.cos(pha)
+    sin_lat1 = jnp.sin(lat1)
+    cos_lat1 = jnp.cos(lat1)
+    sin_heading = jnp.sin(heading)
+    cos_heading = jnp.cos(heading)
+    lat3 = jnp.arcsin(jnp.clip(
+        cos_heading * cos_lat1 * sin_pha + sin_lat1 * cos_pha,
+        -1.0, 1.0,
+    ))
+    dp = jnp.arctan2(
+        sin_heading * sin_pha * cos_lat1,
+        cos_pha - sin_lat1 * jnp.sin(lat3),
+    )
+    two_pi = 2.0 * jnp.pi
+    lon3 = jnp.mod((lon1 - jnp.pi) - dp + jnp.pi, two_pi)
+    return lon3, lat3
+
+
 def grid_area_fv3(
     grid_lon: jax.Array, grid_lat: jax.Array,
     radius: float = constants.R_earth,
