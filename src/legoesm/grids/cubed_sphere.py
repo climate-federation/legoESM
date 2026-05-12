@@ -2644,6 +2644,66 @@ def get_staggered_grid_fv3(
     return pt_c_lon, pt_c_lat, pt_d_lon, pt_d_lat
 
 
+def z_sum_fv3(
+    delp: jax.Array, q: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 677: column mass-weighted vertical sum.
+
+    Faithful JAX port of FV3 ``z_sum`` (tools/fv_diagnostics.F90:
+    4265-4285)::
+
+        sum2[i, j] = Σ_k delp[i, j, k] · q[i, j, k]
+
+    Used by FV3 for column-integrated diagnostics (e.g., total
+    water, dry mass).
+
+    Parameters
+    ----------
+    delp : jax.Array, shape (..., km)
+        Layer pressure thickness (Pa).
+    q : jax.Array, shape (..., km)
+        Tracer or scalar field.
+
+    Returns
+    -------
+    sum2 : jax.Array, shape (...,)
+        Column mass-weighted sum.
+    """
+    return jnp.sum(delp * q, axis=-1)
+
+
+def p_sum_fv3(
+    delp: jax.Array, area: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 677: global mean of column pressure thickness sum.
+
+    Faithful JAX port of FV3 ``p_sum`` (tools/fv_diagnostics.F90:
+    4287-4310, serial branch).  Returns::
+
+        sum2[i, j] = Σ_k delp[i, j, k]                 # column sum
+        global_mean = Σ_{ij} sum2 · area / Σ_{ij} area  # area-weighted
+
+    Equivalent to ``g_sum(z_sum(delp, ones), area, mode=1)``.
+    Used for global mass-mean diagnostic (mean ps - ptop).
+
+    Parameters
+    ----------
+    delp : jax.Array, shape (..., km)
+        Layer pressure thickness (Pa).
+    area : jax.Array, shape (...,)
+        Cell areas (m²).
+
+    Returns
+    -------
+    p_sum : jax.Array (scalar)
+        Area-weighted global mean column pressure thickness.
+    """
+    col_sum = jnp.sum(delp, axis=-1)
+    total_area = jnp.sum(area)
+    safe_area = jnp.where(total_area > 0.0, total_area, 1.0)
+    return jnp.sum(col_sum * area) / safe_area
+
+
 def wind_max_fv3(
     us: jax.Array, vs: jax.Array,
     half_window: int = 3,

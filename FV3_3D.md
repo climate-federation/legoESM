@@ -1195,6 +1195,35 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 677: **FV3 ``z_sum_fv3`` + ``p_sum_fv3``** — column/global sums.
+  Faithful JAX ports of FV3 ``z_sum`` (tools/fv_diagnostics.F90:
+  4265-4285) + ``p_sum`` (4287-4310, serial branch).
+
+  ``z_sum_fv3(delp, q)`` — column mass-weighted sum::
+
+      sum2[i, j] = Σ_k delp[i, j, k] · q[i, j, k]
+
+  ``p_sum_fv3(delp, area)`` — area-weighted global column-sum::
+
+      col_sum[i, j] = Σ_k delp[i, j, k]
+      p_sum = Σ_{ij} col_sum · area / Σ_{ij} area
+
+  Used by FV3 column-integrated diagnostics (total water, dry
+  mass, ps - ptop global mean).
+
+  Equivalent to: ``p_sum_fv3(delp, area)`` =
+  ``g_sum(z_sum_fv3(delp, ones_like(...)), area, mode=1)``.
+
+  Vectorized; leading axes preserved.
+
+  Tests (5/5 in <1 s):
+  1. z_sum constant field × const delp.
+  2. z_sum matches sum(delp·q) directly.
+  3. z_sum batched leading axes.
+  4. p_sum uniform delp → p_total.
+  5. p_sum area-weighted → mean(col_sum).
+
+  Wired into iter-383 sweep (now 243).
 - Iter 676: **FV3 ``wind_max_fv3``** — max wind speed neighborhood.
   Faithful JAX port of FV3 ``wind_max``
   (tools/fv_diagnostics.F90:3843-3874).
