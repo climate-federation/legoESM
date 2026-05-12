@@ -138,6 +138,34 @@ Compression iteration.  Folded iter-30 through iter-40 entries into the
 auto-loaded MEMORY.md / context envelope.  Detailed per-iteration narratives
 remain in the commit messages on `clean_physics`.
 
+### Iteration 49 — 2026-05-13
+
+**Inspection iteration on `src/legoesm/atmosphere/physics/radiation/`
+(no code changes).**
+
+- **Solar geometry (`solar.py`)**: `cos_hs = -tan(lat)·tan(δ)` with
+  `clip(cos_lat·cos_delta, _TINY, None)` denominator floor and final
+  `clip(cos_hs, -1, 1)` correctly handles polar day (cos_hs < −1 →
+  h_s = π, 24h sun) and polar night (cos_hs > 1 → h_s = 0).
+  `_TINY = jnp.finfo(jnp.float32).tiny ≈ 1.18e−38` keeps the divide
+  finite at the poles (sin·sin/_TINY ≈ 4e37, still in fp32 range).
+
+- **Gray LW two-stream (`gray.py:108-203`)**: discrete hemispheric-mean
+  with `ε = 1 − exp(−D·dτ)`.  Downward sweep `F_d(k+1) = (1−ε_k) F_d(k) + ε_k B_k`
+  starts from `F_d(TOA) = 0`; upward sweep starts from
+  `F_u(sfc) = ε_sfc σ T_s^4 + (1−ε_sfc) F_d(sfc)` (grey-surface BC,
+  consistent with the iter-13 sea-ice and iter-42 ocean fixes).
+  Thick-layer limit `ε → 1 ⇒ F → B`, thin-layer limit `ε → D·dτ`.
+
+- **Gray SW Beer-Lambert (`gray.py:206-256`)**: Frierson/Isca convention —
+  downward beam attenuated by `exp(-τ_sw)`, upward reflected beam
+  escapes to TOA without atmospheric absorption (`sw_up = const = α·F_d(sfc)`).
+  SW heating positive in the column.
+
+- **Heating-rate formula** (`gray.py:259-301`): `(g/c_pd)·dF_net/dp`.
+  For LW the atmosphere cools to space (`F_net↑` increases upward,
+  so `dF/dp < 0`), and the formula returns negative heating — correct.
+
 ### Iteration 48 — 2026-05-13
 
 **Inspection iteration on `src/legoesm/atmosphere/physics/clouds/` and
