@@ -1081,6 +1081,19 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 516: **higher-order damp doesn't help**.  Sweep
+  (nord_v, corner_div_damp_nord) ∈ {1, 2}² under min-edge +
+  clip at 10 steps, seed=516.  duogrid e/i ratios:
+  - nord_v=1, cdd_nord=1 (default): 1.991×
+  - nord_v=1, cdd_nord=2:            2.188× (+10%)
+  - nord_v=2, cdd_nord=1:            1.995× (≈ default)
+  - nord_v=2, cdd_nord=2:            2.196× (+10%)
+  nord=2 (del⁴) damping is slightly WORSE than default
+  nord=1 (del²).  Higher-order damp at corners concentrates
+  more, but also has stronger response → more sensitive to
+  the vertex-cell numerical noise.  Default min-edge config
+  is already optimal.  1/1 in 93 s.  Wired into iter-383
+  sweep (now 106).
 - Iter 515: **reframe metric** — within-grid vs cross-grid.
   Previous iters measured ``edge_std(duogrid) /
   edge_std(no_duogrid)`` (cross-grid ratio).  But this

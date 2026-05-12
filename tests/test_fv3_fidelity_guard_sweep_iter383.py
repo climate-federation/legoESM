@@ -129,6 +129,7 @@ _GUARD_MODULES = (
     "test_pad_halo_3d_clip_iter513",                 # iter-513 add
     "test_pad_halo_vector_3d_clip_iter514",          # iter-514 add
     "test_within_grid_edge_metric_iter515",          # iter-515 add
+    "test_higher_order_damp_iter516",                # iter-516 add
 )
 
 
