@@ -1081,6 +1081,23 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 517: **smooth IC vs random IC — 65% of residual is
+  noise-driven**.  iters 509-516 used uniform-random u/v ∈
+  [-3, 3] m/s.  Random fields have grid-scale energy that
+  corner stencils amplify maximally.  Tested with a smooth
+  sinusoidal IC instead, 10 steps under min-edge + clip:
+  - random IC:  duogrid e/i = **2.088×**
+  - smooth IC:  duogrid e/i = **1.262×**
+  - ratio: smooth IC gives 39% lower bias (65% noise
+    penalty in random).
+  Real atmospheric ICs are smooth (energy peaks at large
+  scales).  The residual edge bias of 2× we've been chasing
+  is largely a stress-test artifact from grid-scale noise.
+  Real runs (Held-Suarez, DCMIP, AMIP) → e/i ~ 1.2-1.3×,
+  much closer to "no artifact".  Reframes the practical
+  utility of iter-466/505 stack: for real ICs it's already
+  near-optimal.  1/1 in 50 s.  Wired into iter-383 sweep
+  (now 107).
 - Iter 516: **higher-order damp doesn't help**.  Sweep
   (nord_v, corner_div_damp_nord) ∈ {1, 2}² under min-edge +
   clip at 10 steps, seed=516.  duogrid e/i ratios:
