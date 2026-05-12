@@ -4652,6 +4652,73 @@ def dynamic_tropopause_fv3(
     return jnp.take_along_axis(z, idx_safe[..., None], axis=-1)[..., 0]
 
 
+def lapse_rate_tropopause_fv3(
+    t: jax.Array,
+    z: jax.Array,
+    dT_dz_thresh: float = -2.0e-3,
+) -> jax.Array:
+    """FV3_3D iter 797: lapse-rate (WMO 1957) thermal tropopause.
+
+    World Meteorological Organization 1957 definition: lowest
+    level at which the temperature lapse rate falls to 2 K/km or
+    less.  Equivalently: ``dT/dz`` (rising with height) exceeds
+    −2·10⁻³ K/m.
+
+    Computes lapse rate at layer midpoints by centered finite
+    difference, then finds the first crossing of the threshold:
+
+        z_lrt = z_midpoint[k*]
+        where k* = argmin{k : dT/dz(k) > dT_dz_thresh}
+
+    Returns the midpoint z between levels k and k+1.
+
+    Vertical axis last; ``z`` and ``t`` surface→top oriented.
+    Fallbacks:
+      * No crossing (purely lapse-rate column, no inversion): return
+        top midpoint.
+      * All above threshold (deep isothermal/inversion column):
+        return bottom midpoint.
+
+    Complements iter-796 ``dynamic_tropopause_fv3``: lapse-rate
+    tropopause (z_LRT) and dynamic tropopause (z_DT) generally
+    differ by 1–3 km in mid-latitudes, with DT preferred in
+    upper-troposphere jet diagnostics and LRT preferred in
+    radiosonde climatologies.
+
+    JAX-compatible via ``jnp.argmax(above, axis=-1)`` +
+    ``jnp.any`` + ``jnp.take_along_axis`` — fully vmap-compatible.
+    Same threshold-crossing pattern as iter-775 (PBL height) and
+    iter-796 (dynamic tropopause).
+
+    Note: full WMO definition requires the lapse rate to remain
+    < 2 K/km for at least 2 km above the candidate level
+    ("stability check").  This helper returns the first crossing
+    only; caller can apply the 2-km filter externally.
+
+    Parameters
+    ----------
+    t : jax.Array, shape (..., km)
+        Temperature column (K).
+    z : jax.Array, shape (..., km)
+        Geopotential height column (m).
+    dT_dz_thresh : float
+        Lapse-rate threshold (K/m).  Default −2·10⁻³ (WMO 1957).
+
+    Returns
+    -------
+    z_lrt : jax.Array, shape (...,)
+        Lapse-rate tropopause height (m, at layer midpoint).
+    """
+    dT_dz = (t[..., 1:] - t[..., :-1]) / (z[..., 1:] - z[..., :-1])
+    above = dT_dz > dT_dz_thresh
+    idx = jnp.argmax(above, axis=-1)
+    any_above = jnp.any(above, axis=-1)
+    top_idx = dT_dz.shape[-1] - 1
+    idx_safe = jnp.where(any_above, idx, top_idx)
+    z_mid = 0.5 * (z[..., 1:] + z[..., :-1])
+    return jnp.take_along_axis(z_mid, idx_safe[..., None], axis=-1)[..., 0]
+
+
 def kinetic_energy_fv3(
     ua: jax.Array,
     va: jax.Array,

@@ -384,6 +384,7 @@ _GUARD_MODULES = (
     "test_fv3_absolute_vorticity_iter794",           # iter-794 add
     "test_fv3_potential_vorticity_ertel_iter795",    # iter-795 add
     "test_fv3_dynamic_tropopause_iter796",           # iter-796 add
+    "test_fv3_lapse_rate_tropopause_iter797",        # iter-797 add
 )
 
 

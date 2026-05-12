@@ -5246,5 +5246,57 @@ and is dynamically self-consistent (PV is the conserved
 quantity).  Pure JAX, vmap-compatible.  No new physical
 constants introduced (2 PVU is the HMR-1985 convention).
 
+## Iter 797 — lapse_rate_tropopause_fv3 (WMO 1957)
+
+Added `lapse_rate_tropopause_fv3(t, z, dT_dz_thresh=-2e-3)` to
+`grids/cubed_sphere.py`.  WMO 1957 thermal tropopause: lowest
+level at which the temperature lapse rate falls to 2 K/km or
+less (i.e. ``dT/dz > −2·10⁻³`` K/m):
+
+```
+z_LRT = z_midpoint[k*]
+where k* = argmin{ k : dT/dz(k) > dT_dz_thresh }
+```
+
+Centered finite-difference lapse rate at layer midpoints; first-
+crossing detection returns the midpoint z between the bounding
+levels.
+
+Fallbacks: no crossing (deep lapse-rate column) → top midpoint;
+all above threshold (deep inversion) → bottom midpoint.
+
+Complements iter-796 ``dynamic_tropopause_fv3``:
+  * z_LRT (this iter) — preferred in radiosonde climatologies
+  * z_DT  (iter-796)  — preferred in upper-tropospheric jet
+                        diagnostics
+
+Both definitions appear in reanalysis (ERA5, MERRA2, JRA55);
+they differ by 1–3 km in mid-latitudes, with z_DT more sensitive
+to STE events and z_LRT more stable in clean radiosonde profiles.
+
+Note: full WMO definition requires the lapse rate to remain
+< 2 K/km for at least 2 km above the candidate level ("stability
+check").  This helper returns only the first crossing; caller
+may apply the 2-km filter externally.
+
+JAX-compatible threshold detection matches the iter-775 /
+iter-796 pattern.
+
+Test: `tests/test_fv3_lapse_rate_tropopause_iter797.py` (6 tests:
+ICAO standard atm → trop ≈ 11 km, no-inversion → top midpoint,
+deep inversion → bottom midpoint, custom threshold pick lower
+level, complementary-to-iter-796 cross-check, 3-D batched
+(n_x, n_y, km) → (n_x, n_y) shape).
+
+### Why this iteration was meaningful
+
+Closes the **tropopause-detection pair**: dynamic (PV-based,
+iter-796) + lapse-rate (T-based, iter-797).  Both definitions
+are needed for: (1) STE flux climatologies; (2) MERRA2/ERA5
+tropopause comparisons; (3) cross-tropopause ozone transport;
+(4) radiosonde-vs-reanalysis agreement diagnostics.  Pure JAX,
+vmap-compatible.  No new physical constants introduced (2 K/km
+is the WMO-1957 convention).
+
 
 
