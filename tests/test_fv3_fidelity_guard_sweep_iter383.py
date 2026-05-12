@@ -155,6 +155,7 @@ _GUARD_MODULES = (
     "test_clipped_scan_step_iter544",                # iter-544 add
     "test_scan_step_perf_iter546",                   # iter-546 add
     "test_pe_clipped_scan_step_iter547",             # iter-547 add
+    "test_end_to_end_validation_iter548",            # iter-548 add
 )
 
 

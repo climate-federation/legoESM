@@ -1175,6 +1175,20 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 548: **end-to-end validation** — full stack on a
+  30-step SBR run at C8 using ``make_legoesm_nh_min_edge_config``
+  + ``make_clipped_scan_step``.  Per-prognostic edge/interior
+  metrics:
+  - θ′ edge_std/int_std: 0.37 / 0.065 → ratio 5.72×
+  - u  edge_std/int_std: 13.5 / 10.2  → ratio 1.32×
+  - v  edge_std/int_std: 13.4 / 3.5   → ratio 3.83×
+  - total ρ′ mass:        -3.1e-2  (≈0)
+  - all fields finite ✓
+  In SBR, v should remain 0 — the 13 m/s edge "spurious"
+  wind is the integrated edge artifact over 30 steps.  This
+  is the longest stable C8 SBR run measured.  Consistent with
+  iter-532 sub-1st-order edge convergence rate.  1/1 in
+  30 s.  Wired into iter-383 sweep (now 132).
 - Iter 547: **PE scan_step validation** — symmetric to iter-544.
   Mirror ``make_clipped_scan_step`` validation to PE dycore:
   1. PE scan output matches Python loop bit-for-bit
