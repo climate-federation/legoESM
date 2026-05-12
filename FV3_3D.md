@@ -1195,184 +1195,38 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
-- Iter 599: **TE drift diagnostics for NH and PE**.  Mirror of
-  iter 587's ``aam_drift_nh``.  New:
-  - ``te_drift_nh(state_old, state_new, grid, hc)`` returns
-    ``TE(new) - TE(old)`` for NH using iter-597 ``compute_total_energy_nh``.
-  - ``te_drift_pe(state_old, state_new, grid, coord)`` returns
-    ``TE(new) - TE(old)`` for PE using iter-598 ``compute_total_energy_pe``.
-  Adiabatic flat-surface runs should have small drift; large
-  drift indicates dycore numerical energy gain/loss.
-  Tests (4/4 in 12 s):
-  1. Identical NH → drift ≈ 0.
-  2. +10K θ′ NH → drift > 0 (internal energy gain).
-  3. Identical PE → drift ≈ 0.
-  4. +10K T PE → drift > 0.
-  Conservation-diagnostic stack now complete (NH + PE × {AAM,
-  TE} × {static, drift}).  FV3's ``consv_te > 0`` correction
-  remains as natural follow-up (analog of iter 588 consv_am).
-  Wired into iter-383 sweep (now 173).
-- Iter 598: **PE total-energy diagnostic** (FV3 ``compute_total_energy``
-  hydrostatic branch port).  Faithful port of FV3
-  fv_mapz.F90:1127-1152.  Computes:
-
-      te_2d = pe_top·phi_top - pe_sfc·phi_sfc
-            + Σ_k delp·(cp·T + KE)
-
-  Where:
-  - phi_half built via hydrostatic integration from surface:
-    ``phi_half[k] = phis + Σ_{j>=k} R_d·T_j·(peln_{j+1} - peln_j)``
-    (JAX-friendly via reverse cumsum).
-  - p_half from hybrid coord: ``A·p_ref + B·p_s``.
-  - peln = log(p_half).
-  - KE from D-grid u_d, v_d averaged to cell-center (simple 4-pt
-    avg; orthogonal approximation — cube-sphere cells nearly
-    orthogonal so FV3 corner cosa terms negligible).
-  New ``compute_total_energy_pe(state, grid, coord)`` in
-  ``legoesm.diagnostics``.  Returns ``(te_column, te_total)``.
-  Tests (2/2 in 11 s):
-  1. Held-Suarez initial state → TE finite + positive (cp·T·delp
-     dominates).
-  2. +10 K T uniform → ΔTE > 0 (internal-energy term).
-  Companion to iter 597 NH version.  Both dycores now have
-  energy diagnostics matching FV3's compute_total_energy.
-  Wired into iter-383 sweep (now 172).
-- Iter 597: **NH total-energy diagnostic** (FV3 ``compute_total_energy``
-  NH branch port).  Faithful port of fv_mapz.F90:1154-1183.
-  Computes mass-weighted column integral of:
-
-      cv·T + 0.5·(u² + v² + w²) + g·z
-
-  For legoESM NH: ``T = theta · exner_ref``, ``rho_full = rho_ref +
-  rho_prime``, ``theta_full = theta_ref + theta_prime``; KE uses
-  w_full (mid-level avg of w_half).
-  New ``compute_total_energy_nh(state, grid, hc)`` in
-  ``legoesm.diagnostics``.  Returns ``(te_column, te_total)``.
-  Tests (3/3 in 4 s):
-  1. At rest, TE finite + positive (cv·T + g·z dominate).
-  2. Adding 10 m/s u → ΔTE > 0 (KE term).
-  3. Adding 10 K θ' → ΔTE > 0 (IE term).
-  Companion to iter 583/587 AAM diagnostic — users can now
-  monitor BOTH AM and energy budget for NH conservation tests.
-  Wired into iter-383 sweep (now 171).
-- Iter 596: **``hord`` plumbed through ``fv_tp_2d`` and
-  ``transport_step``**.  Closes iter-595 follow-up; ``hord``
-  now reaches the TOP-LEVEL public transport API.
-  - ``fv_tp_2d`` gains ``hord: int = 12`` kwarg, propagates
-    through 4 internal ``_xppm``/``_yppm`` calls.
-  - ``transport_step`` gains ``hord`` kwarg, propagates to
-    ``fv_tp_2d``.
-  - Defaults preserve pre-iter-596 behavior bit-for-bit.
-  Users can now call:
-
-      transport_step(h, ut, vt, dt, cdgrid, hord=8)
-
-  to switch the entire SW transport to the iord=8 limiter.
-  Tests (3/3 in 14 s):
-  1. ``fv_tp_2d(hord=12)`` = default (bit-for-bit).
-  2. ``fv_tp_2d(hord=8)`` differs from hord=12.
-  3. ``transport_step(hord=8)`` runs, all fields finite.
-  Wired into iter-383 sweep (now 170).
-- Iter 595: **``hord`` parameter plumbed through transport API**.
-  Closes the iter 585/592/593 follow-up: the iord=8/10/11
-  limiter utilities were standalone; now they're reachable via
-  the public API.  Changes:
-  - ``_ppm_1d`` gains ``hord: int = 12`` kwarg.  Default 12 =
-    iv=0 positive-def (preserves pre-iter-595 behavior bit-for-
-    bit).  Dispatches on hord ∈ {8, 9, 10, 11, 12} to the
-    appropriate iter 585/_pert_ppm/iter 593/iter 592/_pert_ppm_iv0
-    limiter call.  Invalid hord raises ValueError.
-  - ``_xppm`` and ``_yppm`` gain ``hord`` kwarg, propagate to
-    ``_ppm_1d``.
-  Tests (4/4 in 2 s):
-  1. hord=12 default preserves baseline (bit-for-bit).
-  2. hord=8 differs from hord=12 on sharp field.
-  3. Invalid hord raises ValueError.
-  4. _xppm/_yppm accept hord and propagate.
-  Now users can call ``_xppm(q, crx, n, hord=8)`` to switch
-  PPM variant.  ``transport_step()`` plumbing left for future
-  iter (would require adding hord arg through ~3 more sites).
-  Wired into iter-383 sweep (now 169).
-- Iter 594: **All-5 iord variants comparison test**.  Builds
-  stress field (smooth ramp + sharp step) and applies all 5
-  legoESM iord limiters: 8 (iter 585), 9 (_pert_ppm), 10
-  (iter 593), 11 (iter 592), 12 (_pert_ppm_iv0).  Verifies:
-  1. The variants produce DISTINCT output at the step
-     (pairwise max diff > 0.01).
-  2. On purely smooth fields, all 5 produce finite output
-     (no NaN/Inf).
-  Validates that iter 585/592/593's distinct limiter
-  utilities actually exhibit FV3's documented behavioral
-  differences.  2/2 in <1 s.  Wired into iter-383 sweep
-  (now 168).
-- Iter 593: **FV3 iord=10 PPM limiter utility** (Lin+Rood 1996
-  with pmp/lac extra constraints).  Faithful port of FV3
-  ``tp_core.F90:554-572``.  The most subtle FV3 PPM variant.
-  Uses one-sided diffs ``dq[i] = 2·(q[i+1]-q[i])`` to build
-  pmp (positive max) and lac (asymmetric constraint) bounds:
-
-      if |dm[i-1]|+|dm[i]|+|dm[i+1]| < near_zero: bl,br = 0
-      elif |3·(bl+br)| > |bl-br|:  # new extremum
-          pmp_2 = dq[i-1]; lac_2 = pmp_2 - 0.75·dq[i-2]
-          br = clip_to_bounds(br, pmp_2, lac_2)
-          pmp_1 = -dq[i];  lac_1 = pmp_1 + 0.75·dq[i+1]
-          bl = clip_to_bounds(bl, pmp_1, lac_1)
-
-  New ``apply_hord10_limiter(bl, br, dm, q)`` in
-  ``legoesm.core.fv_tp_2d``.  Interior cells [2:-2] limited;
-  first/last 2 boundary cells preserved (caller handles halos).
-  Default transport path unchanged (still iord=9).
-  Tests (4/4 in <1 s):
-  1. Returns finite values.
-  2. Flat field (dm=0) → bl, br zeroed in interior.
-  3. Boundary cells unchanged.
-  4. Smooth field (no new extremum) → bl, br pass through.
-  **All 5 FV3 hord PPM variants now exposed:**
-  - iord=8  via apply_hord8_limiter   (iter 585)
-  - iord=9  via _pert_ppm             (default)
-  - iord=10 via apply_hord10_limiter  (iter 593) ← NEW
-  - iord=11 via apply_hord11_limiter  (iter 592)
-  - iord=12 via _pert_ppm_iv0
-  Closes user audit item #3 (PPM tracer variants) fully.
-  Wired into iter-383 sweep (now 167).
-- Iter 592: **FV3 iord=11 PPM limiter utility**.  Faithful port
-  of FV3 ``tp_core.F90:573-579``.  iord=11 is "emulation of
-  2nd van Leer scheme using PPM codes" — same formula as
-  iord=8 (iter 585) but with configurable factor ``ppm_fac``
-  (FV3 default 1.5 per ``tp_core.F90:35``):
-
-      xt = ppm_fac · dm
-      bl = -sign(min(|xt|, |bl|), xt)
-      br =  sign(min(|xt|, |br|), xt)
-
-  New ``apply_hord11_limiter(bl, br, dm, ppm_fac=1.5)`` in
-  ``legoesm.core.fv_tp_2d``.  With ``ppm_fac=2.0`` it's exactly
-  iord=8.  Default transport path unchanged (still iord=9).
-  Tests (4/4 in <1 s):
-  1. Returns finite values.
-  2. Default ppm_fac=1.5 clips to ±1.5|dm|.
-  3. ppm_fac=2.0 matches apply_hord8_limiter bit-for-bit.
-  4. |bl|, |br| ≤ ppm_fac · |dm| for several ppm_fac values.
-  legoESM now exposes iord=8 (iter 585), iord=9 (default via
-  _pert_ppm), iord=11 (iter 592), iord=12 (via _pert_ppm_iv0).
-  Missing: iord=10 (Lin+Rood pmp/lac extra constraints — more
-  complex; deferred).  Wired into iter-383 sweep (now 166).
-- Iter 591: **``shift_fac`` longitude shift**.  Faithful port
-  of FV3 ``fv_grid_tools.F90:662-663``.  When NOT using
-  Schmidt/cube_transform and ``shift_fac > 1e-4``, shift lon
-  by ``-π/shift_fac`` (with mod-2π wrap).  FV3 default
-  ``shift_fac=18`` → west-shift by 10° (away from Japan,
-  toward east coast of China).
-  ``create_cubed_sphere(...)`` gains ``shift_fac: float = 0.0``
-  kwarg (default 0 = no shift, preserves bit-for-bit pre-iter-
-  591 grid).  Gated by ``not apply_schmidt`` (matches FV3 line
-  662 conditional).
-  4 tests (4/4 in 4 s):
-  1. Default 0 → no-op vs prior grid.
-  2. shift_fac=18 → lon diff = -π/18 everywhere.
-  3. Schmidt active → shift ignored.
-  4. lon wrapped to [0, 2π).
-  Wired into iter-383 sweep (now 165).
+- **Iters 591-599 (compacted iter 600)**: grid shift + complete
+  PPM stack + transport plumbing + NH/PE total-energy stack.
+  - iter 591: ``shift_fac`` longitude shift (FV3
+    fv_grid_tools.F90:662-663).  Default 18 = west-shift 10°
+    away from Japan.  Gated by ``not apply_schmidt``.
+  - iter 592: ``apply_hord11_limiter(bl, br, dm, ppm_fac=1.5)``
+    (FV3 tp_core.F90:573-579 "2nd van Leer emulation").
+    ppm_fac=2.0 exactly matches iord=8.
+  - iter 593: ``apply_hord10_limiter(bl, br, dm, q)`` (Lin+Rood
+    1996 with pmp/lac extra constraints, tp_core.F90:554-572).
+    Most subtle FV3 PPM variant.
+  - iter 594: 5-variant comparison test (iord=8/9/10/11/12 all
+    distinct on stress field, all finite on smooth).
+  - iter 595: ``hord`` kwarg plumbed through ``_ppm_1d`` /
+    ``_xppm`` / ``_yppm``.  Default 12 preserves baseline.
+  - iter 596: ``hord`` plumbed through ``fv_tp_2d`` /
+    ``transport_step`` (top-level public API).  Users can call
+    ``transport_step(h, ut, vt, dt, cdgrid, hord=8)``.
+  - iter 597: ``compute_total_energy_nh(state, grid, hc)`` NH
+    total-energy diagnostic.  FV3 fv_mapz.F90:1154-1183 port:
+    Σ_k delp·(cv·T + KE + g·z + 0.5·w²).
+  - iter 598: ``compute_total_energy_pe(state, grid, coord)``
+    PE hydrostatic TE.  FV3 fv_mapz.F90:1127-1152 port.
+    JAX-friendly reverse cumsum for hydrostatic ϕ integration.
+  - iter 599: ``te_drift_nh(state_old, state_new, ...)`` and
+    ``te_drift_pe(state_old, state_new, ...)`` companion to
+    iter 587's ``aam_drift_nh``.
+  Net: user audit item #3 (PPM variants) end-to-end closed;
+  NH and PE both have full {AAM, TE} × {static, drift, correct
+  for AAM only} diagnostic stacks.  consv_te correction
+  remains as natural follow-up.  Currently 173 guards in
+  iter-383 sweep.
 - **Iters 581-589 (compacted iter 590)**: user-audit response
   + FV3-faithful feature ports + stretched-grid + AAM stack.
   - iter 581: ``compute_edge_artifact_metric()`` public diag.

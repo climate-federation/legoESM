@@ -233,6 +233,33 @@ def test_iter390_compaction_covers_topics(doc_text):
         )
 
 
+def test_iter600_compaction_present(doc_text):
+    """iter-600 compacted iter 591-599 into a single block."""
+    assert "**Iters 591-599 (compacted iter 600)**" in doc_text, (
+        "iter-600 compaction block missing — doc re-expanded."
+    )
+
+
+def test_iter600_compaction_covers_topics(doc_text):
+    section_start = doc_text.find(
+        "**Iters 591-599 (compacted iter 600)**"
+    )
+    section_end = doc_text.find(
+        "**Iters 581-589", section_start,
+    )
+    assert section_start >= 0 and section_end > section_start
+    section = doc_text[section_start:section_end]
+    required = [
+        "iter 591", "iter 592", "iter 593", "iter 594",
+        "iter 595", "iter 596", "iter 597", "iter 598",
+        "iter 599",
+    ]
+    for marker in required:
+        assert marker in section, (
+            f"iter-600 compacted block missing topic ``{marker}``."
+        )
+
+
 def test_iter590_compaction_present(doc_text):
     """iter-590 compacted iter 581-589 into a single block."""
     assert "**Iters 581-589 (compacted iter 590)**" in doc_text, (
