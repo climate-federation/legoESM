@@ -1,5 +1,249 @@
 # Plan: OMIP-Style Forced Global Ocean Run at 1°
 
+## Recent Status (2026-05-06)
+
+### Current state: searching for the right A_h
+
+The central problem is finding horizontal viscosity (A_h) that is:
+- **Low enough** at midlatitudes for realistic gyres, WBCs, and ACC
+- **High enough** everywhere to prevent grid-scale noise blowup at 1°
+- **Boosted at the equator** where f→0 removes rotational stiffness
+
+We have the equatorial boost mechanism implemented and working. What
+remains is finding the right A_h baseline value.
+
+### Stable baseline — A_h=2e5 (over-damped)
+
+10-year stable run completed (88 min, 2× V100): `results/jra55_10yr_production/`
+
+**Stability stack**: basin-removal flood-fill + narrow-passage fill (min_width=2)
++ 3D maxvel clip (3 m/s) + slope-foot viscosity (alpha=3) + Smag (C=0.2)
++ SSS restoring + freeze cap + open Southern Ocean (south-cap-lat=−90).
+
+**Production config**: `A_h=2e5, K_h=1e3, B_h=5e9, B_h_barotropic=1e14`,
+`bottom_drag_r=2.5e-3, DRAG_BG_VEL=0.1`, GM/Redi (Visbeck adaptive
+kappa_GM=kappa_Redi=800, range [200, 2000]).
+
+**Results**:
+- SST: 19.8 → 15.9 (yr1) → 13.9 (yr2) → 9.5°C (yr10). Too cold
+  (observed global mean ~17–18°C).
+- SSS: 35.0 → 33.6 (yr1) → 33.2 (yr10). Modest freshening.
+- Velocity clip: **never triggered** (0/3651 days).
+- Circulation: zonal jets, no closed gyres or ACC. Over-damped.
+- Equatorial currents: 0.15 m/s (real SEC ~0.3–0.5 m/s, EUC ~1 m/s).
+
+**Diagnosis**: A_h=2e5 is 10–100× higher than production OGCMs
+(MOM6 OM4 uses ~600 m²/s background + Smagorinsky). The "good-looking"
+equator is an accident of blanket over-damping.
+
+### Failed sweep 1 — uniform A_h reduction (Runs A/B, 2026-05-05)
+
+Tested with K_h=0 (GM/Redi handles tracer mixing), no equatorial boost:
+
+| Run | A_h | K_h | Result |
+|-----|-----|-----|--------|
+| A | 5e4 | 0 | Killed day 524: eq SST 5.9°C, runaway cold pool |
+| B | 2e4 | 0 | Killed day 524: eq SST 6.5°C, runaway cold pool |
+
+**Diagnosis** — dynamic blowup, not a diffusion problem:
+- With low A_h, the equatorial band (f→0) has no damping mechanism.
+- Wind-driven Ekman divergence → unconstrained upwelling → cold deep
+  water homogenizes the top 5 levels to ~6°C.
+- `cos²(lat)` scaling makes effective A_h *largest* at the equator
+  (= user-set value), so reducing A_h hits the eq band hardest — the
+  wrong sign of latitude dependence.
+- K_h=0 was a red herring; the failure is purely momentum dynamics.
+
+### Failed sweep 2 — equatorial boost (Runs C/D, 2026-05-05)
+
+Implemented `equatorial_boost_factor()`: Gaussian enhancement
+`1 + (boost-1) * exp(-(lat/sigma)²)` applied multiplicatively on top
+of cos²(lat) CFL scaling. Config: `A_h_eq_boost`, `A_h_eq_sigma_deg`.
+
+| Run | A_h | eq_boost | sigma | Eff. eq A_h | Eff. midlat (45°) |
+|-----|-----|----------|-------|-------------|-------------------|
+| C | 5e4 | 5× | 5° | 2.5e5 | 2.5e4 |
+| D | 3e4 | 7× | 5° | 2.1e5 | 1.5e4 |
+
+Both ran 5 years to completion. Results: `results/sweep_C_eqboost5/`,
+`results/sweep_D_eqboost7/`.
+
+**Results**:
+- SST: 19.8 → 10.4 (yr1) → 7.5 (yr2) → **3.8°C** (yr5). Catastrophic.
+- SSS: 35.0 → 30.0 (yr1) → **24.7** (yr5). Massive freshening.
+- Velocity clip: **triggered every single day** (1825/1826 days).
+  Baseline never triggered it (0/3651 days).
+- Both runs nearly identical despite different eq boost → problem is
+  NOT the equator (boost is working), it's the midlatitudes.
+- Max speed location: lat ≈ −78.5° (Southern Ocean near Antarctica).
+
+**Diagnosis**:
+- Midlatitude A_h = 2.5–5e4 is below the stability threshold for 1°.
+- Grid-scale noise blows up immediately at high latitudes where:
+  (a) dx shrinks as cos(lat), increasing effective grid Reynolds number;
+  (b) Southern Ocean topography forces strong shelf-break flows;
+  (c) cos²(lat) further reduces already-low A_h near poles.
+- The 3D velocity clip (3 m/s) catches the blowup but destroys KE
+  artificially, driving anomalous vertical mixing and global cooling.
+- The equatorial boost itself works — no localized eq cold pool like
+  Runs A/B. The failure is entirely at midlatitudes/poles.
+
+### Plots from sweeps
+
+- `results/sweep_snapshots.png` — SST, SSS, SSH, speed maps (Baseline vs C vs D)
+- `results/sweep_timeseries.png` — Time series comparison
+- `results/sweep_equatorial_sections.png` — Lat-depth T sections
+
+### Code review — numerical bugs and design issues (2026-05-06)
+
+Before continuing the A_h sweep, independent ocean-expert and dycore-expert
+reviews identified several issues that likely explain the narrow stability
+window. The viscosity is compensating for underlying problems — tuning alone
+will not resolve the over-damped-vs-unstable tradeoff.
+
+**Bugs found**:
+
+1. **Radians-vs-degrees bug in `slope_foot_enhancement_3d`**
+   (`latlon_cgrid_operators.py:988`). `grid.lat` is already in radians but
+   the code does `cos(grid.lat * (pi / 180))`. This makes the bathymetric
+   gradient computation wrong at high latitudes — `cos(lat_rad * pi/180)`
+   ≈ 1.0 everywhere, so dx is treated as uniform (Cartesian). The slope-foot
+   viscosity boost is misplaced and mis-scaled near steep polar shelf breaks.
+
+2. **h_u inconsistency in Coriolis vs PE tendency**. `_forward_backward_coriolis_3d`
+   (line ~346 of `ocean_model_latlon_cgrid.py`) uses arithmetic-mean face
+   thickness `0.5*(h_west + h_k)`, while `ocean_pe_latlon_cgrid.py` (line ~814)
+   uses `min_cell_to_uface(h_k)` (min-rule). This mismatch produces spurious
+   depth-averaged currents at steep topographic steps, especially where partial
+   cells make thickness ratios large.
+
+**Design issues driving the narrow stability window**:
+
+3. **cos²(lat) scaling makes grid Reynolds number blow up near poles.**
+   The scaling keeps viscous CFL constant (good), but Re_grid =
+   U·R·dΔ / (A_h·cos(lat)), which goes as 1/cos(lat). At 80°S with
+   A_h=5e4: Re_grid > 1 → advection dominates diffusion at grid scale
+   → immediate blowup. This is why the blowup always starts at lat ≈ −78.5°.
+   MOM6/NEMO handle this with flow-adaptive Smagorinsky/Leith, not
+   constant-coefficient Laplacian. The cos² scaling is correct for zonal
+   viscous CFL but over-reduces effective damping where steep topography
+   demands MORE dissipation.
+
+4. **Non-energy-stable viscosity operator.** Production uses
+   `vector_laplacian_cgrid` (grad(div) − curl(curl)) with spatially varying
+   cos²(lat) coefficient. The codebase already has `viscous_tendency_cgrid`
+   (stress-tensor form) which IS energy-stable to machine precision — but
+   it's only used for the Smagorinsky path, not for the A_h Laplacian.
+   With a spatially varying coefficient, the non-adjoint form can inject
+   energy at strong gradient locations, raising the A_h threshold.
+
+5. **B_h = 5e9 is effectively zero.** Production OGCMs use B_h ~1e12–1e17
+   at 1°. The current value contributes equivalent Laplacian viscosity of
+   ~1–5 m²/s — negligible. This means grid-scale noise has no selective
+   damping mechanism, forcing the Laplacian A_h to do all the work.
+
+6. **3D maxvel clip is non-conservative.** It removes momentum without
+   adjusting eta or mass fluxes, breaking the barotropic-baroclinic
+   consistency established by the Hallberg-Adcroft correction. When
+   triggered persistently (Runs C/D: every single day), it systematically
+   removes KE → spurious convergence/divergence → anomalous vertical
+   mixing → catastrophic cooling. MOM6's MAXVEL is applied inside the
+   barotropic solver where continuity can respond immediately.
+
+7. **P_bt ~0.5 is anomalously high** (should be 0.05–0.15). Indicates
+   a barotropic standing mode over steep topography — the PGF + partial
+   cells + 20 vertical levels may not resolve the pressure gradient
+   accurately at shelf breaks.
+
+**Comparison to production OGCMs at 1°**:
+
+| Aspect | MOM6 OM4 | NEMO ORCA1 | POP2 | legoESM |
+|--------|----------|------------|------|---------|
+| Background A_h | 600 | 1e4 | 0 | 2e5 (200-300× too high) |
+| Adaptive visc. | Lap. Smag | Leith | Anisotropic | Biharm. Smag only |
+| B_h | ~1e10 | ~1e10–1e11 | ~3e17 | 5e9 (negligible) |
+| Vertical levels | 75 | 75 | 60 | 20 |
+| Velocity clip | 6 m/s (baro substep) | None | None | 3 m/s (post-step) |
+| dt at 1° | 3600s | 3600s | 3600s | 300s |
+
+**Priority fixes before next sweep**:
+
+| # | Fix | Expected impact | Effort |
+|---|-----|-----------------|--------|
+| 1 | Fix radians bug in `slope_foot_enhancement_3d` | Correct high-lat viscosity boost | Small |
+| 2 | Switch A_h to energy-stable `viscous_tendency_cgrid` | Lower stability threshold | Medium |
+| 3 | Replace cos²(lat) with cos¹(lat) or add floor (~5000 m²/s) | Fix polar Re_grid blowup | Small |
+| 4 | Increase B_h to 1e12–1e13 | Selective grid-scale damping | Trivial |
+| 5 | Fix h_u inconsistency (arithmetic mean → min-rule) | Reduce spurious topographic currents | Small |
+| 6 | Make velocity clip conservative or move inside barotropic solver | Stop secondary cooling | Medium |
+
+**Quick diagnostic tests** (before big fixes):
+- `A_h_lat_scaling=False`, constant A_h=5e4 → if stable, confirms cos² is the problem
+- `C_smag=0.5–1.0` → tests if flow-adaptive viscosity can bridge the gap
+- Log which latitudes trigger the clip first → confirms polar instability hypothesis
+
+### What to try next (paused pending code fixes)
+
+The stable range is A_h ∈ [~1e5, 2e5]. The baseline (2e5) is stable
+but over-damped. Runs C/D (5e4, 3e4) blow up. The sweet spot is
+probably 1.0–1.5e5 with a modest equatorial boost — but fixing the
+bugs and design issues above should shift the stability threshold
+significantly downward, making the sweep moot at current values.
+
+**Recommended next sweep (after fixes)**:
+
+| Config | A_h | eq_boost | Eff. eq | Eff. midlat (45°) | vs baseline |
+|--------|-----|----------|---------|-------------------|-------------|
+| E | 1.2e5 | 3× | 3.6e5 | 6.0e4 | 0.6× midlat |
+| F | 1.5e5 | 2× | 3.0e5 | 7.5e4 | 0.75× midlat |
+
+Alternative/complementary approaches:
+1. **Increase Smagorinsky** (C_smag 0.2 → 0.5): adaptive damping where
+   shear is strong (Southern Ocean, WBCs) without blanket over-damping.
+2. **Increase biharmonic B_h**: targets grid-scale noise selectively
+   without damping large-scale flow. Currently B_h=5e9; could try 1e10.
+3. **Anisotropic viscosity**: high meridional, low zonal near equator
+   (POP-style). More complex to implement.
+
+**Key insight**: the 3D maxvel clip is a canary — if it triggers at all,
+the run is probably in trouble. A good configuration should never need it.
+
+### Implementation details
+
+The equatorial boost is fully implemented and committed:
+- `equatorial_boost_factor()` in `latlon_cgrid_operators.py`
+- Config fields `A_h_eq_boost`, `A_h_eq_sigma_deg` in `LatLonCGridOceanConfig`
+- Wired into both Laplacian application sites in `ocean_pe_latlon_cgrid.py`
+- CLI args `--A-h-eq-boost`, `--A-h-eq-sigma` in `scripts/run_omip.py`
+
+### How to launch a sweep
+
+Pin each run to a separate GPU on the 2× V100S machine:
+
+```bash
+# Run E — conservative reduction
+CUDA_VISIBLE_DEVICES=0 nohup python scripts/run_omip.py \
+  --days 1825 --A-h 1.2e5 --K-h 0 --B-h 5e9 \
+  --A-h-eq-boost 3.0 --A-h-eq-sigma 5.0 \
+  --C-smag 0.2 --slope-foot-alpha 3.0 \
+  --min-passage-width 2 --remove-enclosed-basins \
+  --south-cap-lat -90 --maxvel-3d 3.0 \
+  --result-dir results/sweep_E_Ah1.2e5_boost3 \
+  > results/sweep_E.log 2>&1 &
+
+# Run F — moderate reduction
+CUDA_VISIBLE_DEVICES=1 nohup python scripts/run_omip.py \
+  --days 1825 --A-h 1.5e5 --K-h 0 --B-h 5e9 \
+  --A-h-eq-boost 2.0 --A-h-eq-sigma 5.0 \
+  --C-smag 0.2 --slope-foot-alpha 3.0 \
+  --min-passage-width 2 --remove-enclosed-basins \
+  --south-cap-lat -90 --maxvel-3d 3.0 \
+  --result-dir results/sweep_F_Ah1.5e5_boost2 \
+  > results/sweep_F.log 2>&1 &
+```
+
+Each run takes ~3.5 hours for 5 years on a single V100S.
+
 ## Goal
 
 Run a forced global ocean simulation at 1° lat-lon resolution driven by

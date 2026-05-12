@@ -89,8 +89,27 @@ class MPASOceanConfig(NamedTuple):
     A_h: float = 1.0e4
     B_h: float = 0.0
     C_smag: float = 0.0
+    C_smag_lap: float = 0.0  # Laplacian Smagorinsky coefficient (dimensionless).
+                              # When > 0, adds flow-dependent Laplacian viscosity
+                              # A_smag = (C_smag_lap · Δ)² · |D| where |D| is
+                              # the strain-rate magnitude.  Effective at coarse
+                              # resolution (~120 km) where the biharmonic
+                              # Smagorinsky (C_smag) produces zero.  Typical
+                              # values: 0.1–0.3.  Matches the lat-lon
+                              # ``C_smag_lap`` scheme.
     bottom_drag_r: float = 0.0
     bottom_drag_bbl_thickness: float = 0.0
+    bottom_drag_bg_velocity: float = 0.0  # Background velocity floor for
+                                           # quadratic drag [m/s].  When > 0,
+                                           # upgrades linear drag to quadratic-
+                                           # with-floor (MOM6 DRAG_BG_VEL):
+                                           #   r_eff = (r / u_bg) * sqrt(u² + u_bg²)
+                                           # Recovers linear r at |u| → 0,
+                                           # quadratic Cd*|u| at |u| >> u_bg
+                                           # where Cd = r / u_bg.
+                                           # Typical: u_bg = 0.1 m/s with
+                                           # r = 1e-3 gives Cd = 0.01.
+                                           # 0 = legacy linear drag (bit-exact).
     K_h: float = 0.0
     K_bih: float = 0.0
     A_v: float = 1.0e-3
@@ -227,6 +246,17 @@ class MPASOceanConfig(NamedTuple):
                             # 'centered' slope_scheme is implemented on MPAS;
                             # 'triads' raises NotImplementedError (Phase 5
                             # of docs/ocean_experiments/gm_redi_mpas_plan.md).
+    implicit_vertical_mixing: bool = True  # When True, vertical viscosity
+                                           # (A_v on velocity) and vertical
+                                           # diffusivity (K_v on tracers) are
+                                           # applied via backward-Euler implicit
+                                           # solve in step(), NOT as explicit
+                                           # tendencies. Unconditionally stable
+                                           # — required for realistic A_v at
+                                           # coarse vertical resolution (#204).
+                                           # When False, reverts to the legacy
+                                           # explicit vertical diffusion in the
+                                           # tendency function.
     tracer_advection: str = "upwind"
     # Runtime bounds checks (matching cubed-sphere ocean)
     enable_runtime_checks: bool = False

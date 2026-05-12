@@ -169,14 +169,15 @@ def _make_helmholtz(
     H_v_face = H_v * v_mask
 
     def A_op(eta_in: jnp.ndarray) -> jnp.ndarray:
+        _dt = eta_in.dtype
         eta_m = eta_in * mask
-        grad_x = gradient_x_cgrid(eta_m, grid)
-        grad_y = gradient_y_cgrid(eta_m, grid)
+        grad_x = gradient_x_cgrid(eta_m, grid).astype(_dt)
+        grad_y = gradient_y_cgrid(eta_m, grid).astype(_dt)
         flux_x = H_u_face * grad_x
         flux_y = H_v_face * grad_y
         div_grad = divergence_cgrid(
             flux_x, flux_y, grid, u_mask=u_mask, v_mask=v_mask,
-        )
+        ).astype(_dt)
         return (eta_m - coeff * div_grad) * mask
 
     return A_op
@@ -287,9 +288,20 @@ def barotropic_implicit_latlon_cgrid(
     v_3d = state.v.data
 
     eta_dtype = eta_old.dtype
+    # Cast all arrays to eta's dtype so that the CG while_loop and
+    # downstream lax.scan carry types stay in a single precision.
+    # Without this, H_bathy / u_3d / v_3d (float64 under x64) promote
+    # the Helmholtz operator output, breaking the CG solver's
+    # while_loop carry-type invariant.
     g = g.astype(eta_dtype)
     dt_t = jnp.asarray(dt, dtype=eta_dtype)
     min_water_col = jnp.asarray(config.min_water_column_m, dtype=eta_dtype)
+    H_bathy = H_bathy.astype(eta_dtype)
+    mask = mask.astype(eta_dtype)
+    u_mask = u_mask.astype(eta_dtype)
+    v_mask = v_mask.astype(eta_dtype)
+    u_3d = u_3d.astype(eta_dtype)
+    v_3d = v_3d.astype(eta_dtype)
 
     if F_slow_eta is None:
         F_slow_eta = jnp.zeros_like(eta_old)
@@ -313,7 +325,7 @@ def barotropic_implicit_latlon_cgrid(
     h_k_old = compute_layer_thickness(
         eta_old, H_bathy, z_coord,
         min_water_column_m=config.min_water_column_m,
-    )
+    ).astype(eta_dtype)
     U_old, V_old = _depth_average_to_faces(
         u_3d, v_3d, h_k_old, min_water_col, u_mask, v_mask,
     )
@@ -411,7 +423,9 @@ def barotropic_implicit_latlon_cgrid(
 
     # Floor clamp (mass-conserving redistribution).  In normal operation
     # this never fires; it is a safety net for extreme transients.
-    eta_new = _clamp_redistribute(eta_new, eta_floor, mask, grid.area)
+    eta_new = _clamp_redistribute(
+        eta_new, eta_floor, mask, grid.area.astype(eta_dtype),
+    )
 
     # ----- Step 6: corrector for U,V using new eta gradient delta ------
     grad_x_eta_new = gradient_x_cgrid(eta_new, grid).astype(eta_dtype)

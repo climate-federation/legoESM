@@ -25,6 +25,8 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     divergence_cgrid,
     gradient_x_cgrid,
     gradient_y_cgrid,
+    min_cell_to_uface,
+    min_cell_to_vface,
 )
 from legoesm.ocean.dynamics.eta_floor import clamp_and_redistribute as _clamp_redistribute
 from legoesm.ocean.dynamics.barotropic_common import (
@@ -61,26 +63,19 @@ def _depth_average_to_faces(
     U_bar : (n_lat, n_lon+1)
     V_bar : (n_lat+1, n_lon)
     """
-    # h at u-faces: average of adjacent cells flanking face j
-    # Face j is between cell (j-1) mod n_lon and cell j
-    h_east = h_k
-    h_west = jnp.roll(h_k, 1, axis=1)
-    h_u = 0.5 * (h_west + h_east)  # (n_lat, n_lon, nlev)
-    h_u = jnp.concatenate([h_u, h_u[:, 0:1, :]], axis=1)  # (n_lat, n_lon+1, nlev)
+    # h at u/v-faces — min-rule (MOM6/MITgcm hFacW convention).
+    # Must match the PE tendency and slow-forcing depth-average which
+    # both use min_cell_to_uface/min_cell_to_vface.  Arithmetic mean
+    # overestimates face depth at topographic steps, creating a
+    # barotropic-baroclinic residual that drives spurious currents.
+    h_u = min_cell_to_uface(h_k)
+    h_v = min_cell_to_vface(h_k)
 
     # Fuse the per-face thickness + barotropic-mean column reductions —
     # both reduce ``... * h`` over the same level axis.
     _u_pair = jnp.sum(jnp.stack([h_u, u_3d * h_u], axis=-1), axis=-2)
     H_u = jnp.maximum(_u_pair[..., 0], min_water_col)
     U_bar = _u_pair[..., 1] / H_u * u_mask
-
-    # h at v-faces: average of adjacent cell h.
-    # Pole rows are zero (wall BC); single Pad HLO op replaces
-    # alloc-zeros + concatenate-of-three.
-    h_south = h_k[:-1]
-    h_north = h_k[1:]
-    h_v_interior = 0.5 * (h_south + h_north)  # (n_lat-1, n_lon, nlev)
-    h_v = jnp.pad(h_v_interior, ((1, 1), (0, 0), (0, 0)))
 
     _v_pair = jnp.sum(jnp.stack([h_v, v_3d * h_v], axis=-1), axis=-2)
     H_v = jnp.maximum(_v_pair[..., 0], min_water_col)
@@ -133,12 +128,24 @@ def barotropic_substeps_latlon_cgrid(
     u = state.u.data
     v = state.v.data
     eta_raw = state.eta.data
-    min_water_col = jnp.asarray(config.min_water_column_m, dtype=eta_raw.dtype)
-    dt_s = jnp.asarray(dt_s, dtype=eta_raw.dtype)
-    g = g.astype(eta_raw.dtype)
+    # Cast all closure-captured arrays to eta's dtype so the fori_loop
+    # carry stays in a single precision throughout.  Without this,
+    # H_bathy (float64 under x64) promotes H_total → H_u → U_bar_new
+    # to float64 while the accumulators (U_sum, V_sum) remain float32,
+    # causing a carry-type mismatch in jax.lax.fori_loop.
+    _dt = eta_raw.dtype
+    min_water_col = jnp.asarray(config.min_water_column_m, dtype=_dt)
+    dt_s = jnp.asarray(dt_s, dtype=_dt)
+    g = g.astype(_dt)
+    H_bathy = H_bathy.astype(_dt)
+    mask = mask.astype(_dt)
+    u_mask = u_mask.astype(_dt)
+    v_mask = v_mask.astype(_dt)
+    u = u.astype(_dt)
+    v = v.astype(_dt)
     eta_floor = min_water_col - H_bathy
     eta = jnp.maximum(eta_raw, eta_floor) * mask
-    _area = grid.area  # for mass-conserving floor clamp (#176)
+    _area = grid.area.astype(_dt)
 
     if F_slow_eta is None:
         F_slow_eta = jnp.zeros_like(eta)
@@ -153,10 +160,12 @@ def barotropic_substeps_latlon_cgrid(
     else:
         F_slow_v = F_slow_v.astype(eta.dtype)
 
-    # Depth-averaged velocity
+    # Depth-averaged velocity.  Cast h_k to _dt because z_coord.sigma_w
+    # may be float64 (jnp.linspace default under x64), which would
+    # promote U_bar/V_bar and break the fori_loop carry-type invariant.
     h_k = compute_layer_thickness(
         eta, H_bathy, z_coord, min_water_column_m=config.min_water_column_m,
-    )
+    ).astype(_dt)
     U_bar, V_bar = _depth_average_to_faces(
         u, v, h_k, min_water_col, mask, u_mask, v_mask,
     )
@@ -183,7 +192,7 @@ def barotropic_substeps_latlon_cgrid(
     # Precompute face-centered diffusion coefficients (grid geometry only,
     # constant across substeps).
     if config.barotropic_diffusion_alpha > 0.0:
-        area = grid.area  # (n_lat, n_lon)
+        area = _area  # already cast to _dt above
         # u-face coefficient: average of adjacent cell areas
         nu_face_u = baro_alpha * 0.5 * (jnp.roll(area, 1, axis=1) + area)
         nu_face_u = jnp.concatenate([nu_face_u, nu_face_u[:, 0:1]], axis=1)
@@ -211,8 +220,7 @@ def barotropic_substeps_latlon_cgrid(
         div_damp_coeff = jnp.asarray(
             config.barotropic_div_damp, dtype=eta.dtype,
         ) * (dt_s / jnp.asarray(config.barotropic_diffusion_dt_ref, dtype=eta.dtype))
-        _area = grid.area  # (n_lat, n_lon)
-        # u-face area: average of adjacent cells
+        # u-face area: average of adjacent cells (_area already cast to _dt)
         div_damp_area_u = 0.5 * (jnp.roll(_area, 1, axis=1) + _area)
         div_damp_area_u = jnp.concatenate(
             [div_damp_area_u, div_damp_area_u[:, 0:1]], axis=1,
