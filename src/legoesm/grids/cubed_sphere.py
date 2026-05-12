@@ -1157,6 +1157,154 @@ def slerp(
     return xyz2latlon(xb, yb, zb)
 
 
+def spherical_angle(
+    p1: jax.Array, p2: jax.Array, p3: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 613: angle at vertex ``p1`` of spherical triangle (p1, p2, p3).
+
+    Faithful port of FV3 ``spherical_angle`` (fv_grid_utils.F90:
+    2838-2895).  Computes::
+
+        P = p1 × p2
+        Q = p1 × p3
+        cos(angle) = (P·Q) / (|P|·|Q|)
+
+    With FV3's degenerate-input fixups:
+        - ``ddd <= 0`` (colinear or coincident points) → angle = 0
+        - ``|cos| > 1`` (numerical) → angle = π or 0 by sign
+
+    Takes the last axis as the 3-vector component; broadcasts over
+    leading axes.
+    """
+    p_vec = vect_cross(p1, p2)
+    q_vec = vect_cross(p1, p3)
+    p_sq = jnp.sum(p_vec * p_vec, axis=-1)
+    q_sq = jnp.sum(q_vec * q_vec, axis=-1)
+    pq = jnp.sum(p_vec * q_vec, axis=-1)
+    ddd = p_sq * q_sq
+    safe = jnp.where(ddd > 0.0, ddd, 1.0)
+    cos_a = pq / jnp.sqrt(safe)
+    cos_a = jnp.clip(cos_a, -1.0, 1.0)
+    angle = jnp.arccos(cos_a)
+    # Degenerate ddd <= 0 → 0
+    return jnp.where(ddd > 0.0, angle, 0.0)
+
+
+def cell_center3(
+    p1: jax.Array, p2: jax.Array, p3: jax.Array, p4: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 613: Cartesian cell center from 4 corner points.
+
+    Faithful port of FV3 ``cell_center3`` (fv_grid_utils.F90:
+    2728-2745).  Returns normalized sum ``(p1+p2+p3+p4)/|sum|``.
+
+    Each ``pi`` is shape ``(..., 3)`` on the unit sphere; result is
+    ``(..., 3)`` on the unit sphere.
+    """
+    return normalize_vect(p1 + p2 + p3 + p4)
+
+
+def cell_center2(
+    lon1: jax.Array, lat1: jax.Array,
+    lon2: jax.Array, lat2: jax.Array,
+    lon3: jax.Array, lat3: jax.Array,
+    lon4: jax.Array, lat4: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 613: (lon, lat) cell center from 4 corner (lon, lat).
+
+    Faithful port of FV3 ``cell_center2`` (fv_grid_utils.F90:
+    2700-2725).  Latlon wrapper for ``cell_center3``.
+    """
+    x1, y1, z1 = latlon2xyz(lon1, lat1)
+    x2, y2, z2 = latlon2xyz(lon2, lat2)
+    x3, y3, z3 = latlon2xyz(lon3, lat3)
+    x4, y4, z4 = latlon2xyz(lon4, lat4)
+    p1 = jnp.stack([x1, y1, z1], axis=-1)
+    p2 = jnp.stack([x2, y2, z2], axis=-1)
+    p3 = jnp.stack([x3, y3, z3], axis=-1)
+    p4 = jnp.stack([x4, y4, z4], axis=-1)
+    ec = cell_center3(p1, p2, p3, p4)
+    return xyz2latlon(ec[..., 0], ec[..., 1], ec[..., 2])
+
+
+def dist2side_latlon(
+    lon1: jax.Array, lat1: jax.Array,
+    lon2: jax.Array, lat2: jax.Array,
+    lon_p: jax.Array, lat_p: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 613: angular distance from point to great-circle arc.
+
+    Faithful port of FV3 ``dist2side_latlon`` (fv_grid_utils.F90:
+    2812-2834).  Returns the normalized (angular) distance on the
+    unit sphere from point ``p`` to the great-circle arc through
+    ``(v1, v2)``::
+
+        dist = asin( sin(side) · sin(angle) )
+
+    where ``side`` is the angular distance v1 → p and ``angle`` is
+    the spherical angle ∠(v1 v2; v1 p).
+
+    Returns a scalar (or broadcast result) in radians.
+    """
+    x1, y1, z1 = latlon2xyz(lon1, lat1)
+    x2, y2, z2 = latlon2xyz(lon2, lat2)
+    xp, yp, zp = latlon2xyz(lon_p, lat_p)
+    c1 = jnp.stack([x1, y1, z1], axis=-1)
+    c2 = jnp.stack([x2, y2, z2], axis=-1)
+    cp = jnp.stack([xp, yp, zp], axis=-1)
+    angle = spherical_angle(c1, c2, cp)
+    # side = great-circle distance v1 → p on UNIT sphere (radius=1)
+    side = great_circle_distance(lon1, lat1, lon_p, lat_p, radius=1.0)
+    return jnp.arcsin(jnp.clip(jnp.sin(side) * jnp.sin(angle), -1.0, 1.0))
+
+
+def expand_cell(
+    lon1: jax.Array, lat1: jax.Array,
+    lon2: jax.Array, lat2: jax.Array,
+    lon3: jax.Array, lat3: jax.Array,
+    lon4: jax.Array, lat4: jax.Array,
+    fac: float,
+) -> tuple[
+    tuple[jax.Array, jax.Array],
+    tuple[jax.Array, jax.Array],
+    tuple[jax.Array, jax.Array],
+    tuple[jax.Array, jax.Array],
+]:
+    """FV3_3D iter 613: expand 4-corner cell about its center by factor ``fac``.
+
+    Faithful port of FV3 ``expand_cell`` (fv_grid_utils.F90:
+    2631-2697).  Returns 4 new (lon, lat) corners with the cell
+    extrapolated (fac > 1) or shrunk (fac < 1) about the
+    spherical center.
+
+        fac = 1: returns the input corners unchanged
+        fac = 0: all 4 corners collapse to the cell center
+        fac > 1: expansion outward (cell grows)
+
+    All output corners are forced to lie on the unit sphere via
+    re-normalization, matching FV3 lines 2675-2686.
+    """
+    x1, y1, z1 = latlon2xyz(lon1, lat1)
+    x2, y2, z2 = latlon2xyz(lon2, lat2)
+    x3, y3, z3 = latlon2xyz(lon3, lat3)
+    x4, y4, z4 = latlon2xyz(lon4, lat4)
+    p1 = jnp.stack([x1, y1, z1], axis=-1)
+    p2 = jnp.stack([x2, y2, z2], axis=-1)
+    p3 = jnp.stack([x3, y3, z3], axis=-1)
+    p4 = jnp.stack([x4, y4, z4], axis=-1)
+    ec = cell_center3(p1, p2, p3, p4)
+    qq1 = normalize_vect(ec + fac * (p1 - ec))
+    qq2 = normalize_vect(ec + fac * (p2 - ec))
+    qq3 = normalize_vect(ec + fac * (p3 - ec))
+    qq4 = normalize_vect(ec + fac * (p4 - ec))
+    return (
+        xyz2latlon(qq1[..., 0], qq1[..., 1], qq1[..., 2]),
+        xyz2latlon(qq2[..., 0], qq2[..., 1], qq2[..., 2]),
+        xyz2latlon(qq3[..., 0], qq3[..., 1], qq3[..., 2]),
+        xyz2latlon(qq4[..., 0], qq4[..., 1], qq4[..., 2]),
+    )
+
+
 def rotate_winds_geo_to_grid(
     u_east: jax.Array, v_north: jax.Array, angle: jax.Array
 ) -> tuple[jax.Array, jax.Array]:

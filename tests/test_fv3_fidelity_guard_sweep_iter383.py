@@ -208,6 +208,7 @@ _GUARD_MODULES = (
     "test_terrain_filter_mass_iter609",              # iter-609 add
     "test_fv3_cartesian_primitives_iter611",         # iter-611 add
     "test_fv3_mirror_intp_iter612",                  # iter-612 add
+    "test_fv3_spherical_geometry_iter613",           # iter-613 add
 )
 
 

@@ -1195,6 +1195,46 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 613: **FV3 spherical-geometry helpers**.  Faithful JAX-
+  vectorized ports of FV3 ``fv_grid_utils.F90`` helpers built on
+  iter-611/612 primitives:
+
+  | Function             | F90 line | Role                              |
+  |----------------------|----------|-----------------------------------|
+  | ``spherical_angle``  | 2838     | angle at vertex p1 of (p1,p2,p3)  |
+  | ``cell_center3``     | 2728     | Cartesian 4-corner → center       |
+  | ``cell_center2``     | 2700     | latlon 4-corner → center          |
+  | ``dist2side_latlon`` | 2812     | point→GC-arc angular distance     |
+  | ``expand_cell``      | 2631     | expand 4-corner cell by ``fac``   |
+
+  ``spherical_angle`` is the foundation for FV3 ``get_area``
+  (spherical excess formula) and ``dist2side``; FV3 includes
+  degenerate-input fixups for colinear/coincident points
+  (ddd ≤ 0 → angle = 0).
+
+  ``cell_center3`` is FV3's standard cell-center formula:
+  normalize sum of 4 corners.  ``cell_center2`` is the latlon
+  wrapper.  ``expand_cell`` extrapolates/shrinks a 4-corner
+  cell about its center (used in FV3 land-model coupling).
+
+  ``dist2side_latlon`` computes the FV3 angular distance from a
+  point to a great-circle arc::
+
+      d = asin(sin(side) · sin(angle))
+
+  Tests (11/11 in <1 s):
+  1. ``spherical_angle`` at north pole, two meridians 90° apart → π/2.
+  2. ``spherical_angle`` octant → π/3.
+  3. ``spherical_angle`` colinear → finite.
+  4. ``cell_center3`` returns unit-norm.
+  5. ``cell_center3`` symmetric square at equator → center at equator.
+  6. ``cell_center2`` ↔ ``cell_center3`` latlon-vs-Cartesian agreement.
+  7. ``dist2side_latlon`` on-arc point → 0.
+  8. ``dist2side_latlon`` pole-to-equator → π/2.
+  9. ``expand_cell`` fac=1 is identity.
+  10. ``expand_cell`` fac=0 collapses to center.
+  11. ``expand_cell`` corners forced to lie on unit sphere.
+  Wired into iter-383 sweep (now 185).
 - Iter 612: **FV3 mirror + great-circle interpolation helpers**.
   Faithful ports of FV3 ``fv_grid_utils.F90`` helpers built on
   iter-611 Cartesian primitives:
