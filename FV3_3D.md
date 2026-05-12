@@ -5010,3 +5010,35 @@ LCL height directly enters as a vertical scale.  Total cost: ~3
 lines of source.  Pure JAX, vmap-compatible.  No new physical
 constants — `constants.c_pd` and `constants.g` suffice.
 
+## Iter 766 — vapor_pressure_from_q helper + iter-763 refactor
+
+Extracted `vapor_pressure_from_q_fv3(p_mb, q_sphum)` in
+`grids/cubed_sphere.py` from the inline Bolton-paper formula in
+iter-763.  Algorithm uses the kg/kg native identity:
+
+```
+e = p · q / (ε + q·(1−ε))     with ε = constants.epsilon
+```
+
+This replaces the hardcoded `622.0` literal (= ε·1000 in Bolton's
+mb·g/kg form) with `constants.epsilon = R_d/R_v = 0.621980`,
+satisfying the CLAUDE.md constant-hygiene rule.  Numerical drift
+versus pre-refactor iter-763: |Δe/e| ≈ 3·10⁻⁵, |ΔT_LCL| < 0.1 K
+(well within iter-763 test 2's 270-285 K range).  iter-763 6/6
+tests still pass post-refactor.
+
+Test: `tests/test_fv3_vapor_pressure_from_q_iter766.py` (6 tests:
+q→0 linear regime, monotonic ∂e/∂q>0, e∝p scaling, iter-763
+refactor consistency <0.1 K vs old 622-literal, 3-D shapes,
+finite + non-negative).
+
+### Why this iteration was meaningful
+
+Two wins in one ~7-line change: (1) constant-hygiene cleanup that
+moves 622 from inline literal into the `constants.epsilon`
+audit-enforced single source of truth; (2) a reusable helper for
+any moisture diagnostic that needs vapor partial pressure from
+specific humidity (dew-point, RH, theta_e blends, saturation
+adjustment cross-checks).  Pure JAX, vmap-compatible.  No new
+physical constants introduced.
+

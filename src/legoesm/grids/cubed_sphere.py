@@ -4039,6 +4039,37 @@ def lcl_height_fv3(
     return z_parcel + (cp / g_val) * (pt - t_lcl)
 
 
+def vapor_pressure_from_q_fv3(
+    p_mb: jax.Array,
+    q_sphum: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 766: water-vapor partial pressure from specific humidity.
+
+    Identity from r = q/(1−q) and e/p = r/(ε+r):
+
+        e = p · q / (ε + q·(1−ε))
+
+    where ε = R_d/R_v ≈ 0.622 = ``constants.epsilon``.
+
+    Output units match input pressure units (mb in, mb out).
+
+    Parameters
+    ----------
+    p_mb : jax.Array
+        Pressure (mb).
+    q_sphum : jax.Array
+        Specific humidity (kg/kg).
+
+    Returns
+    -------
+    e : jax.Array
+        Vapor partial pressure (mb).
+    """
+    eps = constants.epsilon
+    q_safe = jnp.maximum(1e-12, q_sphum)
+    return p_mb * q_safe / (eps + q_safe * (1.0 - eps))
+
+
 def lcl_temperature_fv3(
     pt: jax.Array,
     p_mb: jax.Array,
@@ -4048,13 +4079,14 @@ def lcl_temperature_fv3(
 
     Bolton (1980) eq. 21 LCL temperature formula:
 
-        r     = q/(1−q) · 1000          (dry mixing ratio, g/kg)
-        e     = p_mb · r / (622 + r)    (vapor pressure, mb)
+        e     = vapor_pressure_from_q_fv3(p_mb, q)   (mb, iter-766)
         T_LCL = 2840 / (3.5·ln(T) − ln(e) − 4.805) + 55
 
     Used by iter-716 ``eqv_pot_bolton_fv3`` inline.  Extracted as
     standalone helper for SRH / supercell workflows that need T_LCL
-    independently.
+    independently.  Iter-766 refactored e-from-q computation to
+    delegate to ``vapor_pressure_from_q_fv3`` and use
+    ``constants.epsilon`` instead of the Bolton-paper literal 622.
 
     Parameters
     ----------
@@ -4070,8 +4102,7 @@ def lcl_temperature_fv3(
     t_lcl : jax.Array
         LCL temperature (K).
     """
-    r = jnp.maximum(1e-10, q_sphum / (1.0 - q_sphum) * 1000.0)
-    e = p_mb * r / (622.0 + r)
+    e = vapor_pressure_from_q_fv3(p_mb, q_sphum)
     return 2840.0 / (3.5 * jnp.log(pt) - jnp.log(e) - 4.805) + 55.0
 
 
