@@ -1185,6 +1185,22 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 558: **PE long-run stability** — 100 steps @ C8.
+  PE with Held-Suarez IC + FV3-faithful + scan_step at C8,
+  dt=10s, 100 steps:
+  - u_d:  max=2.55e+04 m/s, min=-1.03e+05 m/s  (UNPHYSICAL)
+  - v_d:  max=3.56e+05 m/s
+  - T:    max=516 K, min=-790 K  (NEGATIVE!)
+  - p_s:  max=5.99e+05 Pa, min=1.92e+04 Pa
+  - all finite: True (no NaN)
+  PE doesn't NaN at 100 steps (vs NH NaN at step 43), but
+  values become unphysical.  PE is numerically "more stable"
+  than NH at this CFL but still produces nonsense — the
+  C8 dt=10s combination is far past physical realism for
+  long runs.  Per CLAUDE.md: finite ≠ correct.  Document
+  honestly: PE long-run requires sub-CFL dt or higher
+  resolution.  1/1 in 26 s.  Wired into iter-383 sweep
+  (now 140).
 - Iter 557: **PE factory comparison at C16 smooth IC**.
   Mirror iter-553 (NH) on PE: ``make_fv3_faithful_pe_config``
   vs ``make_legoesm_pe_min_edge_config``, Held-Suarez init,
