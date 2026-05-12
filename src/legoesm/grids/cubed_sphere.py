@@ -6220,6 +6220,54 @@ def mean_wind_layer_fv3(
     return u_mean, v_mean
 
 
+def mean_layer_temperature_fv3(
+    t: jax.Array,
+    z: jax.Array,
+    z_bot: jax.Array,
+    z_top: jax.Array,
+    weight_floor: float = 1e-12,
+) -> jax.Array:
+    """FV3_3D iter 820: depth-weighted mean temperature over arbitrary layer.
+
+    Scalar analog of iter-819 ``mean_wind_layer_fv3``:
+
+        T̄ = Σ_k T_mid(k) · Δz(k) · mask(z_mid(k)) / Σ_k Δz(k) · mask(z_mid)
+
+    Mask = 1 where ``z_mid`` ∈ [z_bot, z_top], else 0.
+
+    Used by: layer-mean stability indices, atmospheric river layer-
+    mean T (AR-Cat scale calibration), tropospheric mean temperature
+    diagnostics for climate-change attribution (TMT), mean-layer
+    saturation lookups.
+
+    ``weight_floor`` prevents 0/0 when layer falls entirely outside
+    the column.
+
+    Parameters
+    ----------
+    t : jax.Array, shape (km,)
+        Temperature on column levels (K).
+    z : jax.Array, shape (km,)
+        Geopotential height column (m), monotone increasing.
+    z_bot, z_top : jax.Array
+        Layer bounds (m).
+    weight_floor : float
+        Lower bound on Σ weights (m); default 1e-12.
+
+    Returns
+    -------
+    t_mean : jax.Array
+        Depth-weighted mean temperature (K).
+    """
+    z_mid = 0.5 * (z[1:] + z[:-1])
+    dz = z[1:] - z[:-1]
+    t_mid = 0.5 * (t[1:] + t[:-1])
+    inside = (z_mid >= z_bot) & (z_mid <= z_top)
+    weights = jnp.where(inside, dz, 0.0)
+    total = jnp.maximum(jnp.sum(weights), weight_floor)
+    return jnp.sum(t_mid * weights) / total
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

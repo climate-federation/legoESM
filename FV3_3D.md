@@ -1195,6 +1195,43 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- **Iters 811-819 (compacted iter 820)**: classic severe-storm index
+  triplet (K, TT, SWEAT) + supercell discrimination (BRN, SCP, STP)
+  + SPC effective-layer suite (EIL, EBWD, mean-wind) + iter-820
+  mean-layer T.
+
+  | Iter | What                                              | Note                                                                |
+  |------|---------------------------------------------------|---------------------------------------------------------------------|
+  | 811  | ``k_index_fv3``                                   | George 1960 K = (T850-T500)+Td850-(T700-Td700)                      |
+  | 812  | ``total_totals_fv3``                              | Miller 1972 TT = (T850+Td850) - 2·T500; unit-invariant K/°C         |
+  | 813  | ``sweat_index_fv3``                               | Miller 1972 SWEAT composite; Td/TT/U/D gated terms                  |
+  | 814  | ``brn_supercell_fv3``                             | Weisman-Klemp 1982 BRN = CAPE/(0.5·|V_shear|²); storm-mode          |
+  | 815  | ``supercell_composite_fv3``                       | Thompson 2003 SCP = (CAPE/1000)·(SRH/100)·(BWD/20); BWD cap 30 m/s |
+  | 816  | ``significant_tornado_parameter_fv3``             | Thompson 2003 STP for EF2+ tornadoes; LCL-height term clamped       |
+  | 817  | ``effective_inflow_layer_fv3``                    | Thompson 2007 EIL = {k: CAPE≥100 AND |CIN|≤250}; (z_bot, z_top)     |
+  | 818  | ``effective_bulk_shear_fv3``                      | EBWD = (u, v at z_top) − (u, v at z_bot) via linear interp          |
+  | 819  | ``mean_wind_layer_fv3``                           | depth-weighted (ū, v̄) over arbitrary [z_bot, z_top] via mask       |
+  | 820  | ``mean_layer_temperature_fv3`` + this compaction  | depth-weighted T̄ over [z_bot, z_top]; scalar analog of iter-819   |
+
+  **Classic severe-storm index triplet (pre-CAPE-era, NWS/SPC)**:
+    * iter-810 LI (Galway 1956)
+    * iter-811 K (George 1960)
+    * iter-812 TT (Miller 1972)
+    * iter-813 SWEAT (Miller 1972 composite)
+
+  **Storm-mode discrimination**:
+    * iter-814 BRN  — CAPE/shear ratio
+    * iter-815 SCP  — multiplicative CAPE·SRH·BWD (modern)
+    * iter-816 STP  — STP for EF2+ tornadoes (LCL-aware)
+
+  **SPC effective-layer suite**:
+    * iter-817 EIL  — Thompson 2007 layer bounds
+    * iter-818 EBWD — bulk shear over EIL
+    * iter-819 mean wind — depth-weighted ū, v̄
+    * iter-820 mean T  — depth-weighted T̄
+
+  Wired into iter-383 sweep: 374 → 384 modules.
+
 - **Iters 801-809 (compacted iter 810)**: aviation-weather triplet
   + frost-point pair + static stability + moist adiabat + CAPE/CIN
   + iter-810 Lifted Index.
@@ -5067,375 +5104,6 @@ is verifiable with unit tests in seconds rather than wall-time
 sweeps.  Users running the NH compressible-Euler 3D path now have
 the same cube-imprint defense as users running the PE 3D path.
 
-## Iter 811 — k_index_fv3 (George 1960 thunderstorm K-index)
-
-Added `k_index_fv3(t850, td850, t700, td700, t500)` to
-`grids/cubed_sphere.py`.  George (1960) severe-thunderstorm
-instability index:
-
-```
-K = (T_850 − T_500) + T_d850 − (T_700 − T_d700)
-```
-
-Combines mid-tropospheric lapse rate (T_850 − T_500), low-level
-moisture content (T_d850), and mid-tropospheric dryness
-(T_700 − T_d700).
-
-NWS/SPC thresholds:
-  * K < 20      — no thunderstorms
-  * 20 ≤ K < 26 — isolated
-  * 26 ≤ K < 31 — widely scattered
-  * 31 ≤ K < 36 — scattered
-  * K ≥ 36      — numerous
-
-Composes iter-767 dew_point + level-extracted temperatures.
-Complements iter-810 Lifted Index — together (LI, K) span the
-canonical pre-CAPE-era thunderstorm-instability indices still
-in routine operational use (NWS/SPC convective outlooks).
-
-Test: `tests/test_fv3_k_index_iter811.py` (5 tests: analytic
-case, three-profile threshold span, dry mid-trop lowers K,
-moist Td_850 raises K, 3-D shapes + finite).
-
-### Why this iteration was meaningful
-
-Closes the **pre-CAPE-era severe-storm index triplet**
-(LI, K, with totals-totals deferred).  All three are still
-prominently displayed on NWS/SPC operational charts despite the
-rise of CAPE/CIN as primary metrics — they remain useful single-
-number summaries.  Pure JAX, vmap-compatible.  No new physical
-constants introduced.
-
-## Iter 812 — total_totals_fv3 (Miller 1972)
-
-Added `total_totals_fv3(t850, td850, t500)` to
-`grids/cubed_sphere.py`.  Miller (1972) Total Totals:
-
-```
-TT = (T_850 + T_d850) − 2·T_500
-   = VT + CT
-```
-
-Decomposition: VT = T_850 − T_500 (Vertical Totals, mid-trop
-lapse rate); CT = T_d850 − T_500 (Cross Totals, low-level
-moisture vs mid-trop T).  Unit-invariant under K↔°C shift
-(2·T_freeze cancels).
-
-NWS/SPC thresholds:
-  * TT < 44      — no thunderstorms
-  * 44 ≤ TT < 50 — isolated
-  * 50 ≤ TT < 56 — scattered (severe possible)
-  * 56 ≤ TT < 60 — numerous severe
-  * TT ≥ 60      — very high tornado risk
-
-Test: `tests/test_fv3_total_totals_iter812.py` (5 tests: analytic
-TT=80 for severe sample, K↔°C invariance, ↓T_500 → ↑TT, ↑T_d850
-→ ↑TT, 3-D shapes + finite).
-
-### Why this iteration was meaningful
-
-Closes the **classic severe-storm index triplet (LI, K, TT)**:
-  * iter-810 LI  — Galway 1956
-  * iter-811 K   — George 1960
-  * iter-812 TT  — Miller 1972
-
-All three still appear on NWS/SPC convective-outlook charts
-alongside the modern CAPE/CIN pair (iter-808/809).  Together
-the five form a complete operational deep-convection
-diagnostic kit.  Pure JAX, vmap-compatible.  No new physical
-constants introduced.
-
-## Iter 813 — sweat_index_fv3 (Miller 1972 SWEAT)
-
-Added `sweat_index_fv3(td850_C, tt_index, u_850_kts, u_500_kts,
-dir_850_deg, dir_500_deg)` to `grids/cubed_sphere.py`.  Miller
-(1972) Severe WEAther Threat composite index:
-
-```
-SWEAT = 12·Td850 + 20·(TT − 49) + 2·U_850 + U_500
-        + 125·(sin(D_500 − D_850) + 0.2)
-```
-
-Miller's conditional gating:
-  * 12·Td850 term: 0 if Td850 < 0 °C.
-  * 20·(TT−49) term: 0 if TT < 49.
-  * 125·sin shear term: 0 unless ALL of: 130°≤D_850≤250°,
-    210°≤D_500≤310°, D_500>D_850 (veering), U_850≥15 kts,
-    U_500≥15 kts.
-
-NWS/SPC thresholds:
-  * SWEAT < 250  — no severe
-  * 250–300      — moderate severe T-storm
-  * 300–400      — strong / tornadic potential
-  * > 400        — high tornadic threat
-
-**Units**: Td850 °C; U_850/U_500 **knots**; directions degrees
-from-north meteorological convention.  Caller converts m/s →
-knots (1 m/s ≈ 1.94 kts).
-
-Composes iter-812 ``total_totals_fv3``.
-
-Test: `tests/test_fv3_sweat_index_iter813.py` (5 tests:
-classic tornadic case (Td=18, TT=55, S→W veering) → 596 exact,
-Td<0 zeros term1, TT<49 zeros term2, backing wind zeros term5,
-3-D shapes + finite).
-
-### Why this iteration was meaningful
-
-SWEAT is the composite severe-weather forecast index — combines
-the three building-block indices (LI, K, TT) with shear info into
-a single number forecasters scan.  Closes the **operational
-severe-storm composite-index kit**: CAPE (iter-808) + CIN
-(iter-809) + LI (iter-810) + K (iter-811) + TT (iter-812) +
-SWEAT (iter-813).  Pure JAX, vmap-compatible.  No new physical
-constants introduced.
-
-## Iter 814 — brn_supercell_fv3 (Weisman-Klemp 1982)
-
-Added `brn_supercell_fv3(cape, u_shear, v_shear, ke_floor=1e-6)`
-to `grids/cubed_sphere.py`.  Bulk Richardson Number for supercell
-discrimination:
-
-```
-BRN = CAPE / (0.5 · |V_shear|²)
-    = CAPE / (0.5 · (u_shear² + v_shear²))
-```
-
-Weisman-Klemp (1982) storm-mode discriminator.  Composes iter-808
-CAPE with vector shear (typically 0-6 km bulk-shear).
-
-Thresholds:
-  * BRN < 10      — too much shear → splitting / multicell
-  * 10 ≤ BRN ≤ 50 — supercell-favorable
-  * BRN > 50      — too little shear → ordinary cells
-
-Distinct from iter-774 ``bulk_richardson_fv3`` (PBL Ri).  Same
-dimensional form but different physical use: BRN here measures
-**convective potential vs shear KE** for storm-mode classification.
-
-Used by SPC supercell-mode discrimination, ensemble severe-storm
-mode probabilistic forecasts, climatological supercell studies.
-
-Test: `tests/test_fv3_brn_supercell_iter814.py` (5 tests:
-textbook supercell (CAPE=2500, 25 m/s shear) → BRN=8.0 exact,
-small CAPE + huge shear → BRN<10, huge CAPE + tiny shear → BRN>50,
-zero shear floored, 3-D shapes + finite + non-negative).
-
-### Why this iteration was meaningful
-
-Closes the **supercell-mode discrimination stack**: CAPE → BRN
-→ storm mode.  Combined with the pre-existing iter-7654 Bunkers
-storm motion + iter-7755/7825 helicity helpers and the index kit
-(LI, K, TT, SWEAT), the operational severe-storm discrimination
-toolkit is complete.  Pure JAX, vmap-compatible.  No new physical
-constants introduced.
-
-## Iter 815 — supercell_composite_fv3 (Thompson SCP)
-
-Added `supercell_composite_fv3(cape, srh_3km, u_shear_6km,
-v_shear_6km, bwd_cap=30.0)` to `grids/cubed_sphere.py`.  Thompson
-et al. (2003) Supercell Composite Parameter:
-
-```
-SCP = (CAPE / 1000) · (SRH_3km / 100) · (BWD_6km / 20)
-```
-
-BWD_6km = √(u_shear² + v_shear²) capped at 30 m/s.
-
-Operational thresholds:
-  * SCP < 1   — supercell-unfavorable
-  * SCP ≥ 1   — supercell-favorable
-  * SCP ≥ 5   — very high supercell risk
-
-Distinct from iter-814 BRN: SCP is **multiplicative** (all three
-ingredients needed simultaneously); BRN is a ratio (favors
-mid-range CAPE/shear balance).  SCP is the current SPC preferred
-metric for tornado-day discrimination.
-
-Composes iter-808 (CAPE) + iter-7755/7825-area helicity helpers.
-
-Used by: SPC Mesoanalysis Supercell Composite product
-(operational tornado forecasting), HRRR-SREF ensemble severe-
-storm probabilistic forecasts, climatology of tornadic
-environments (Thompson-Edwards 2000 dataset).
-
-Test: `tests/test_fv3_supercell_composite_iter815.py` (5 tests:
-analytic SCP=7.5 for CAPE=2500/SRH=300/BWD=20, BWD-cap at 30
-m/s (BWD=50 → factor 1.5), CAPE=0 → SCP=0, SRH=0 → SCP=0, 3-D
-shapes + finite).
-
-### Why this iteration was meaningful
-
-SCP is the modern operational replacement for BRN — Thompson et
-al. (2003, 2007) demonstrated SCP outperforms BRN for tornado-
-environment discrimination because the multiplicative structure
-demands all three ingredients (instability + helicity + shear).
-Pure JAX, vmap-compatible.  No new physical constants introduced.
-
-## Iter 816 — significant_tornado_parameter_fv3 (Thompson STP)
-
-Added `significant_tornado_parameter_fv3(cape, srh_1km,
-u_shear_6km, v_shear_6km, lcl_height, bwd_cap=30.0)` to
-`grids/cubed_sphere.py`.  Thompson (2003) fixed-layer STP:
-
-```
-STP = (CAPE / 1500)
-      · (SRH_1km / 150)
-      · (BWD_6km / 12)
-      · max(0, min(1, (2000 − LCL) / 1000))
-```
-
-Composite environment discriminator for **significant** tornadoes
-(EF2+).  Refines iter-815 SCP toward strong/violent tornado
-discrimination via:
-  * Lower LCL height (wider tornadoes, less rear-flank evaporation)
-  * 0-1 km SRH (low-level rotation, not 0-3 km)
-  * 0-6 km BWD with /12 (more shear-sensitive than SCP's /20)
-
-LCL term clamping:
-  * LCL > 2000 m → 0 (LCL too high for significant tornadoes)
-  * LCL < 1000 m → 1 (saturated low-LCL response)
-  * Linear between 1000 and 2000 m
-
-Operational thresholds:
-  * STP < 1   — significant-tornado-unfavorable
-  * 1 ≤ STP < 3 — moderate
-  * STP ≥ 3   — high
-  * STP ≥ 8   — extreme (violent / outbreak)
-
-Composes iter-808 (CAPE) + iter-7755-area helicity (SRH_1km)
-+ iter-765 (LCL height).
-
-Used by SPC Mesoanalysis STP product, ensemble tornado-threat
-probabilistic forecasts, Thompson-Edwards 2000 climatology.
-
-Test: `tests/test_fv3_stp_iter816.py` (6 tests: classic tornadic
-(CAPE=3000, SRH=200, BWD=24, LCL=800) → STP=5.33, LCL>2000 → 0,
-LCL<1000 saturates, CAPE=0 → 0, BWD-cap at 30 m/s (BWD=50 →
-factor 2.5), 3-D shapes + finite + non-negative).
-
-### Why this iteration was meaningful
-
-Closes the **SPC tornado-environment composite stack**: SCP
-(iter-815) for all supercells + STP (iter-816) for EF2+
-significant tornadoes.  STP additionally exploits the LCL-height
-ingredient (iter-765 z_LCL) — low-LCL environments favor wider
-tornadoes that resist rear-flank-downdraft suppression.  Together
-with the index kit (CAPE/CIN/LI/K/TT/SWEAT) and storm-mode
-discrimination (BRN), the full operational severe-weather
-composite-index suite is complete.  Pure JAX, vmap-compatible.
-No new physical constants introduced.
-
-## Iter 817 — effective_inflow_layer_fv3 (Thompson 2007)
-
-Added `effective_inflow_layer_fv3(cape_profile, cin_mag_profile,
-z, cape_min=100.0, cin_max=250.0)` to `grids/cubed_sphere.py`.
-Thompson et al. (2007) effective inflow layer:
-
-```
-EIL = { k : CAPE(k) ≥ 100 AND |CIN(k)| ≤ 250 }
-```
-
-Returns ``(z_bot, z_top)`` tuple bounding the lowest and highest
-qualifying levels.  Both ``NaN`` when no level qualifies.
-
-Used by: SPC Effective-Layer SRH (ESRH) computation (replaces
-fixed-layer 0-3 km SRH), Effective Bulk Wind Difference (EBWD =
-bulk shear over EIL), refined SCP/STP composites with effective-
-layer inputs — operationally preferred over fixed-layer in cool-
-season and elevated-convection environments.
-
-|CIN| input expected in iter-809 positive-magnitude convention.
-
-Test: `tests/test_fv3_effective_inflow_iter817.py` (5 tests:
-mid-layer qualifying → z_bot/z_top bracket, no qualifier → both
-NaN, single layer → z_bot=z_top, surface-based EIL, 3-D batched
-(n_x, n_y, km) → (n_x, n_y)).
-
-### Why this iteration was meaningful
-
-EIL is the layer-finding primitive behind SPC's modern effective-
-layer suite (ESRH, EBWD, effective-SCP, effective-STP).  Replaces
-the older fixed-layer (0-1, 0-3, 0-6 km) recipes for
-"the right inflow layer that physically reaches the storm".
-Critical for cool-season severe-weather and elevated convection
-where the surface parcel is decoupled from the storm.  Pure JAX,
-vmap-compatible.  No new physical constants introduced.
-
-## Iter 818 — effective_bulk_shear_fv3 (EBWD)
-
-Added `effective_bulk_shear_fv3(u, v, z, z_bot, z_top)` to
-`grids/cubed_sphere.py`.  Vector bulk shear over arbitrary layer
-via linear interpolation:
-
-```
-Δu = u(z_top) − u(z_bot)
-Δv = v(z_top) − v(z_bot)
-```
-
-Uses ``jnp.interp`` (clamps extrapolation to edge values).  ``z``
-must be monotone increasing.  NaN bounds (from iter-817 no-EIL
-case) propagate.
-
-Generalizes fixed-layer (0-6, 0-3, 0-1 km) bulk-shear computation
-to arbitrary [z_bot, z_top] intervals — designed for use with
-iter-817 effective-inflow-layer bounds.
-
-Composes iter-817 ``effective_inflow_layer_fv3``.
-
-Used by: SPC Effective Bulk Wind Difference (EBWD), effective-
-layer SCP/STP composites, custom "MUSAS" effective SRH/shear
-products.
-
-Test: `tests/test_fv3_effective_bulk_shear_iter818.py` (5 tests:
-linear u → analytic Δu, v=0 → Δv=0, NaN bounds propagate, edge
-clamping, full iter-817→818 chain gives EBWD over EIL).
-
-### Why this iteration was meaningful
-
-Closes the effective-layer shear computation chain (iter-817 EIL
-bounds → iter-818 EBWD over that layer).  Together with the SCP
-(iter-815) and STP (iter-816) composites, the effective-layer
-SPC tornado-environment toolkit is now reachable as a pure-JAX
-composition: per-level parcel CAPE/CIN → EIL bounds → EBWD →
-SCP/STP-effective.  Pure JAX, vmap-compatible.  No new physical
-constants introduced.
-
-## Iter 819 — mean_wind_layer_fv3 (depth-weighted layer mean)
-
-Added `mean_wind_layer_fv3(u, v, z, z_bot, z_top,
-weight_floor=1e-12)` to `grids/cubed_sphere.py`.  Depth-weighted
-midpoint-trapezoidal mean wind over an arbitrary layer:
-
-```
-ū = Σ_k u_mid(k) · Δz(k) · mask(z_mid(k)) / Σ_k Δz(k) · mask(z_mid(k))
-```
-
-Mask = 1 where ``z_mid`` ∈ [z_bot, z_top], else 0.  Same for v.
-
-Used by: Bunkers storm motion (mean 0-6 km wind ± deviation),
-mean-layer wind for parcel deep advection, storm-relative wind
-diagnostics, effective-layer mean wind for inflow trajectory
-composites.
-
-Generic over arbitrary [z_bot, z_top] — composes with iter-817
-EIL bounds or fixed-layer (0-1, 0-6 km).
-
-``weight_floor`` prevents 0/0 when the layer falls entirely
-outside the column.
-
-Test: `tests/test_fv3_mean_wind_layer_iter819.py` (5 tests:
-uniform → mean=const, linear → midpoint analytic, v=0 → v̄=0,
-iter-817 → mean-over-EIL chain, out-of-range layer → floored
-output finite).
-
-### Why this iteration was meaningful
-
-Generic layer-mean wind primitive replaces several inline
-midpoint-mass-mean patterns scattered through storm-motion and
-effective-layer code.  Pure JAX, vmap-compatible.  Foundational
-for Bunkers storm-motion + SRH + EBWD computations.  No new
-physical constants introduced.
 
 
 

@@ -38,11 +38,11 @@ def test_iter365_compaction_present(doc_text):
     )
 
 
-def test_doc_size_below_5445_lines(doc_text):
+def test_doc_size_below_5115_lines(doc_text):
     n_lines = len(doc_text.splitlines())
-    assert n_lines < 5445, (
-        f"FV3_3D.md has {n_lines} lines (target < 5445).  "
-        f"Next compaction at iter 820."
+    assert n_lines < 5115, (
+        f"FV3_3D.md has {n_lines} lines (target < 5115).  "
+        f"Next compaction at iter 830."
     )
 
 
@@ -440,6 +440,37 @@ def test_iter670_compaction_covers_topics(doc_text):
     for marker in required:
         assert marker in section, (
             f"iter-670 compacted block missing topic ``{marker}``."
+        )
+
+
+def test_iter820_compaction_present(doc_text):
+    """iter-820 compacted iter 811-819 into single block."""
+    assert "**Iters 811-819 (compacted iter 820)**" in doc_text, (
+        "iter-820 compaction block missing — doc re-expanded."
+    )
+
+
+def test_iter820_compaction_covers_topics(doc_text):
+    section_start = doc_text.find(
+        "**Iters 811-819 (compacted iter 820)**"
+    )
+    section_end = doc_text.find(
+        "**Iters 801-809", section_start,
+    )
+    assert section_start >= 0 and section_end > section_start
+    section = doc_text[section_start:section_end]
+    required = [
+        "811", "812", "813", "814", "815",
+        "816", "817", "818", "819", "820",
+        "k_index", "total_totals", "sweat_index",
+        "brn_supercell", "supercell_composite",
+        "significant_tornado_parameter",
+        "effective_inflow_layer", "effective_bulk_shear",
+        "mean_wind_layer", "mean_layer_temperature",
+    ]
+    for marker in required:
+        assert marker in section, (
+            f"iter-820 compacted block missing topic ``{marker}``."
         )
 
 
