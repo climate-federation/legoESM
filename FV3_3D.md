@@ -5065,5 +5065,53 @@ closes the geostrophic-dynamics triplet (V_g, V_a, ∂V_g/∂z) —
 the QG-balance kit.  Pure JAX, vmap-compatible.  No new physical
 constants introduced.
 
+## Iter 793 — eady_growth_rate_fv3 (σ = 0.31·|f|·|∂V_g/∂z|/N)
+
+Added `eady_growth_rate_fv3(n_brunt, f, du_g_dz, dv_g_dz=None,
+N_floor=1e-6)` to `grids/cubed_sphere.py`.  Closed-form Eady
+(1949) maximum baroclinic-instability growth rate:
+
+```
+σ_Eady = 0.31 · |f| · |∂V_g/∂z| / N
+```
+
+The 0.31 prefactor is the Eady eigenvalue 0.3098 (≈ half the
+Charney-Stern PV growth-rate envelope).  Cyclogenesis e-folding
+timescale τ_Eady = 1/σ.
+
+Typical mid-lat (N=0.01, |f|=1e-4, |∂V_g/∂z|=3·10⁻³ s⁻¹):
+σ ≈ 9.3·10⁻⁶ s⁻¹ → τ ≈ 1.24 days (textbook cyclogenesis
+timescale).
+
+Used by: baroclinic-storm-track climatology (Hoskins-Valdes 1990),
+cyclogenesis-frequency parameterizations, atmospheric blocking-
+favoring high-σ band detection, NAO/AO regime selection (high σ
+→ strong eddy-driven jet variability).
+
+``N_floor`` clamp prevents div-by-0 in unstratified neutral
+columns where Eady mode formally breaks down.
+
+Optional ``dv_g_dz`` enables 2-D shear magnitude
+|∂V_g/∂z| = √((∂u/∂z)² + (∂v/∂z)²).
+
+Composes iter-772 N + iter-778 f + iter-792 ∂V_g/∂z.
+
+Test: `tests/test_fv3_eady_growth_rate_iter793.py` (7 tests:
+mid-lat textbook σ ≈ 9.3·10⁻⁶ (τ ≈ 1.2 days), zero shear → σ=0,
+monotone in |f|/shear/N, 2-D shear magnitude with dv_g_dz arg,
+N=0 floored finite, full iter-792 pipeline (cold pole → σ),
+3-D shapes + finite + non-negative).
+
+### Why this iteration was meaningful
+
+Closes the baroclinic-instability diagnostic chain: iter-772 N
++ iter-778 f + iter-792 ∂V_g/∂z + iter-793 σ_Eady give the full
+"will this column generate cyclones, and on what timescale"
+forecast.  Eady σ is the canonical storm-track index; the entire
+mid-latitude weather variability literature reduces to where σ
+is large.  Pure JAX, vmap-compatible.  No new physical constants
+introduced (0.31 is the Eady-1949 eigenvalue, not a generic
+physical constant).
+
 
 

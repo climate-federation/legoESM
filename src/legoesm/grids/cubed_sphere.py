@@ -4420,6 +4420,74 @@ def thermal_wind_fv3(
     return du_g_dz, dv_g_dz
 
 
+def eady_growth_rate_fv3(
+    n_brunt: jax.Array,
+    f: jax.Array,
+    du_g_dz: jax.Array,
+    dv_g_dz: jax.Array | None = None,
+    N_floor: float = 1e-6,
+) -> jax.Array:
+    """FV3_3D iter 793: Eady (1949) maximum baroclinic-instability growth rate.
+
+    Closed-form growth rate of the most-unstable baroclinic mode
+    on a flat-bottom uniformly stratified Eady channel:
+
+        σ_Eady = 0.31 · |f| · |∂V_g/∂z| / N
+
+    where:
+      * N = √max(0, N²) is the Brunt-Väisälä frequency (iter-772).
+      * f is the Coriolis parameter (iter-778).
+      * |∂V_g/∂z| = √((∂u_g/∂z)² + (∂v_g/∂z)²) is the magnitude
+        of the geostrophic vertical-shear vector (iter-792).
+
+    The 0.31 prefactor is the Eady (1949) eigenvalue 0.3098 (≈
+    half the Charney-Stern PV growth-rate envelope), giving the
+    cyclogenesis e-folding timescale:
+
+        τ_Eady = 1 / σ_Eady
+
+    Typical mid-lat (N=0.01, |f|=1e-4, |∂V_g/∂z|=3e-3 s⁻¹):
+    σ ≈ 9.3·10⁻⁶ s⁻¹ → τ ≈ 1.2 days.
+
+    Used by: baroclinic-storm-track diagnostics (Hoskins-
+    Valdes 1990 climatology), cyclogenesis-frequency
+    parameterizations, atmospheric blocking-favoring high-σ
+    band detection, NAO/AO regime selection (high σ → strong
+    eddy-driven jet variability).
+
+    The ``N_floor`` clamp prevents div-by-0 in unstratified
+    (neutral) columns where σ → ∞ (the Eady mode formally
+    breaks down without stratification).
+
+    Composes iter-772 (caller takes √N²), iter-778 (f), iter-792
+    (∂V_g/∂z components).
+
+    Parameters
+    ----------
+    n_brunt : jax.Array
+        Brunt-Väisälä frequency N (s⁻¹) ≥ 0.
+    f : jax.Array
+        Coriolis parameter (s⁻¹).
+    du_g_dz : jax.Array
+        Zonal geostrophic vertical shear (s⁻¹).
+    dv_g_dz : jax.Array, optional
+        Meridional geostrophic vertical shear (s⁻¹).  If None,
+        only the zonal component is used (1-D Eady channel).
+    N_floor : float
+        Lower bound on N (s⁻¹) to avoid div-by-0; default 1e-6.
+
+    Returns
+    -------
+    sigma : jax.Array
+        Eady growth rate (s⁻¹, ≥ 0).
+    """
+    if dv_g_dz is None:
+        shear_mag = jnp.abs(du_g_dz)
+    else:
+        shear_mag = jnp.sqrt(du_g_dz * du_g_dz + dv_g_dz * dv_g_dz)
+    return 0.31 * jnp.abs(f) * shear_mag / jnp.maximum(n_brunt, N_floor)
+
+
 def kinetic_energy_fv3(
     ua: jax.Array,
     va: jax.Array,
