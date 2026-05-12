@@ -96,6 +96,32 @@ Branch: `clean_physics`. Driven by Ralph loop + `/codex:adversarial-review`.
   75 / 75 land carbon + multilayer + diff_land; 140 / 140 land (post iter-44);
   100 / 100 ocean MPAS + surface_forcing + emanuel + atmosphere convection.
 
+## Iteration 56 — 2026-05-13
+
+**Bug fix: `shortwave_penetration_tendency` produces Inf/NaN on dry
+columns.**
+
+`shortwave_penetration_tendency` (`ocean/physics/shortwave_penetration.py:124`)
+computed `dT/dt = sw_down · frac_absorbed / (rho_0 · c_sw · dz_actual)`
+with `dz_actual = z_coord.dz_ref · jacobian`.  For dry / land cells
+the jacobian is 0, so `dz_actual = 0` and the division produced Inf
+on every land grid point.  Downstream `dT_dt + sw_tend` propagated
+Inf into the tendency; ``NaN * 0 = NaN`` in IEEE so the output mask
+applied later could not scrub the contamination.
+
+Fix: add a `dz_actual > 0` guard with safe denominator before the
+division, then `jnp.where(dz_actual > 0, dT/dt, 0)` so dry columns
+contribute exactly zero heating and gradients stay clean.
+
+New regression test
+`test_dry_column_gives_zero_finite_tendency` exercises a mixed wet /
+dry grid (half J=0, half J=1) and verifies dry rows return zero and
+wet rows return positive heating.
+
+**Tests (post iter-56):** 11 / 11 shortwave-penetration tests pass
+(plus dispatch).  Also exercised indirectly by the broader ocean
+test matrix.
+
 ## Iteration 55 — 2026-05-13
 
 **Resolved deferred item: `SeaIceConfig.Delta_min` now threads through
