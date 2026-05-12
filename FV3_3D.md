@@ -1195,6 +1195,37 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 655: **FV3 ``atod_vort_on``** — A-grid → D-grid winds
+  (circulation-conserving).  Circulation-conserving analog of
+  FV3 ``atod`` (tools/test_cases.F90:7833-7892) consistent with
+  iter-652 ``dtoa_vort_on`` inverse.
+
+  Algorithm (interior D-grid edges):
+
+      uout[i, j] = (uin[i, j-1]·dya[i, j-1] + uin[i, j]·dya[i, j])
+                 / (dya[i, j-1] + dya[i, j])
+      vout[i, j] = (vin[i-1, j]·dxa[i-1, j] + vin[i, j]·dxa[i, j])
+                 / (dxa[i-1, j] + dxa[i, j])
+
+  Output shapes (n_x, n_y+1) for uout; (n_x+1, n_y) for vout.
+  Interior-only; boundary edges zero-init (FV3 fills via halo).
+
+  Pairs with iter-652 dtoa_vort_on for A↔D round-trip via
+  circulation-conserving averaging.  Verified linear field
+  A→D→A recovers interior cells exactly.
+
+  Iters 652/653/654/655 together: complete A ↔ C ↔ D
+  circulation-conserving wind-grid conversion suite.
+
+  Tests (6/6 in 2 s):
+  1. Output shapes correct.
+  2. Zero winds → zero output.
+  3. Uniform U, V → interior matches.
+  4. Boundary edges = 0.
+  5. With uniform dya, formula reduces to simple averaging.
+  6. Linear A→D→A round-trip recovers interior (1e-12).
+
+  Wired into iter-383 sweep (now 223).
 - Iter 654: **FV3 ``atoc_vort_on``** — A-grid → C-grid winds
   (circulation-conserving).  Faithful JAX port of FV3 ``atoc``
   (tools/test_cases.F90:7965-8112, VORT_ON branch, no ALT_INTERP).

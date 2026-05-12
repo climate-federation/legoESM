@@ -2304,6 +2304,69 @@ def gnomonic_dist(im: int) -> tuple[jax.Array, jax.Array]:
     return xyz2latlon(p1, p2, p3)
 
 
+def atod_vort_on(
+    uin: jax.Array, vin: jax.Array,
+    dxa: jax.Array, dya: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 655: A-grid → D-grid winds (circulation-conserving).
+
+    Analog of FV3 ``atod`` (tools/test_cases.F90:7833-7892) using
+    the circulation-conserving formula consistent with iter-652
+    ``dtoa_vort_on`` (the inverse mapping).  FV3's source uses
+    ``interp_left_edge_1d`` (interpOrder-dependent); the
+    circulation-conserving variant is::
+
+        uout[i, j] = (uin[i, j-1]·dya[i, j-1] + uin[i, j]·dya[i, j])
+                    / (dya[i, j-1] + dya[i, j])
+        vout[i, j] = (vin[i-1, j]·dxa[i-1, j] + vin[i, j]·dxa[i, j])
+                    / (dxa[i-1, j] + dxa[i, j])
+
+    D-grid u lives on north/south edges (n_x, n_y+1); D-grid v
+    on east/west edges (n_x+1, n_y).  Interior edges only;
+    boundary edges (uout[:, 0], uout[:, -1], vout[0, :], vout[-1, :])
+    zero-initialized (FV3 fills via halo).
+
+    Pairs with iter-652 ``dtoa_vort_on`` (D→A) for round-trip
+    A-grid ↔ D-grid via circulation-conserving averages.
+
+    Parameters
+    ----------
+    uin, vin : jax.Array, shape (..., n_x, n_y)
+        A-grid wind components.
+    dxa, dya : jax.Array, shape (..., n_x, n_y)
+        A-grid (cell-center) edge lengths.
+
+    Returns
+    -------
+    uout : jax.Array, shape (..., n_x, n_y+1)
+        D-grid u (north/south edges).
+    vout : jax.Array, shape (..., n_x+1, n_y)
+        D-grid v (east/west edges).
+    """
+    n_x = uin.shape[-2]
+    n_y = uin.shape[-1]
+    leading_shape = uin.shape[:-2]
+
+    # uout: average A-grid uin along j (n_y → n_y-1 interior edges)
+    interior_u = (
+        (uin[..., :, :-1] * dya[..., :, :-1]
+         + uin[..., :, 1:] * dya[..., :, 1:])
+        / (dya[..., :, :-1] + dya[..., :, 1:])
+    )  # shape (..., n_x, n_y-1)
+    uout = jnp.zeros(leading_shape + (n_x, n_y + 1))
+    uout = uout.at[..., :, 1:n_y].set(interior_u)
+
+    # vout: average A-grid vin along i (n_x → n_x-1 interior edges)
+    interior_v = (
+        (vin[..., :-1, :] * dxa[..., :-1, :]
+         + vin[..., 1:, :] * dxa[..., 1:, :])
+        / (dxa[..., :-1, :] + dxa[..., 1:, :])
+    )  # shape (..., n_x-1, n_y)
+    vout = jnp.zeros(leading_shape + (n_x + 1, n_y))
+    vout = vout.at[..., 1:n_x, :].set(interior_v)
+    return uout, vout
+
+
 def atoc_vort_on(
     uin: jax.Array, vin: jax.Array,
     dxa: jax.Array, dya: jax.Array,
