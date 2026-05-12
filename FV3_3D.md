@@ -1195,6 +1195,26 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 752: **``dry_surface_pressure_fv3``** — per-cell ps_dry.
+
+      ps_dry = ps − g · TWC
+             = ps − g · column_water (all species)
+
+  Per-cell version of iter-694 ``prt_mass`` ``dry_ps_mean`` global
+  diagnostic.  Used in IC ingestion + dry-air mass conservation.
+
+  Composes iter-749 total_water_column_fv3.  Verified: area-weighted
+  mean of iter-752 output exactly matches iter-694 dry_ps_mean.
+
+  Tests (6/6 in <1 s):
+  1. q=0 (dry) → ps_dry = ps.
+  2. q=0.01, p_s=1e5 → ps_dry = ps − 1000 Pa.
+  3. area_weighted_mean(ps_dry) = iter-694 dry_ps_mean (exact).
+  4. 3-D shapes.
+  5. No NaN/Inf.
+  6. No tracers raises (delegated to iter-749).
+
+  Wired into iter-383 sweep (now 316).
 - Iter 751: **refactor iter-694/705 to delegate to iter-750 area_weighted_mean**.
 
   Two callsites had inline area-weighted-mean patterns matching

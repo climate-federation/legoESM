@@ -3022,6 +3022,50 @@ def potential_energy_column_fv3(
     return column_integral_delp_fv3(phi_avg, delp)
 
 
+def dry_surface_pressure_fv3(
+    ps: jax.Array,
+    delp: jax.Array,
+    q_sphum: jax.Array | None = None,
+    q_liq_wat: jax.Array | None = None,
+    q_rainwat: jax.Array | None = None,
+    q_ice_wat: jax.Array | None = None,
+    q_snowwat: jax.Array | None = None,
+    q_graupel: jax.Array | None = None,
+) -> jax.Array:
+    """FV3_3D iter 752: dry-air surface pressure (per cell).
+
+        ps_dry = ps − g · TWC
+               = ps − g · (column water vapor + liq + rain + ice + snow + graupel)
+
+    where TWC is total-water column (kg/m²) from iter-749
+    ``total_water_column_fv3``.
+
+    Per-cell version of iter-694 ``prt_mass`` ``dry_ps_mean`` global
+    diagnostic.  Used in IC ingestion + mass conservation for dry-air
+    budget.
+
+    Parameters
+    ----------
+    ps : jax.Array, shape (...,)
+        Total surface pressure (Pa).
+    delp : jax.Array, shape (..., km)
+        Pressure thickness (Pa).
+    q_sphum, q_liq_wat, q_rainwat, q_ice_wat, q_snowwat, q_graupel :
+        Mixing ratios (kg/kg).  At least one required.
+
+    Returns
+    -------
+    ps_dry : jax.Array, shape (...,)
+        Dry-air surface pressure (Pa).
+    """
+    twc = total_water_column_fv3(
+        delp,
+        q_sphum=q_sphum, q_liq_wat=q_liq_wat, q_rainwat=q_rainwat,
+        q_ice_wat=q_ice_wat, q_snowwat=q_snowwat, q_graupel=q_graupel,
+    )
+    return ps - constants.g * twc
+
+
 def area_weighted_mean_fv3(
     field: jax.Array,
     area: jax.Array,
