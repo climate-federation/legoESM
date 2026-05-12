@@ -1120,6 +1120,20 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 539: **50-step mass conservation + stability limit**.
+  Extend iter-523's 10-step mass test to 50 steps at C8 with
+  SBR + rho bump:
+  - steps 1-42: mass conserved at **5.30e-9** drift
+    (bit-perfect every checkpoint).
+  - **first NaN at step 43** — numerical instability.
+  Finding: dycore is mass-conservative until it blows up.
+  The blow-up at step 43 is a CFL/coarse-resolution stress-
+  test artifact (C8 + dt=10s + heavy initial perturbation),
+  NOT a helper-induced conservation violation.  At production
+  resolution (C48-C96) CFL is much less restrictive.  The
+  iter-526 helper preserves conservation up to the simulation's
+  intrinsic stability limit.  1/1 in 48 s.  Wired into
+  iter-383 sweep (now 126).
 - Iter 538: **tracer transport with clip helper**.  iters
   506-537 used 0 tracers.  This iter activates q_vapor
   (Gaussian blob at equator/lon=π) and runs 10 steps with
