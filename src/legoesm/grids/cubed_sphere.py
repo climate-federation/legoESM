@@ -3960,6 +3960,48 @@ def compute_brn_fv3(
     return brn, shear06
 
 
+def column_mean_rh_fv3(
+    p_full: jax.Array,
+    t: jax.Array,
+    qv: jax.Array,
+    delp: jax.Array,
+    do_cmip: bool = False,
+) -> jax.Array:
+    """FV3_3D iter 760: mass-weighted column-mean relative humidity.
+
+        RH_col = Σ_k delp · RH_layer / Σ_k delp
+
+    Mass-weighted (not / g — ratio cancels), so divide_by_g=False in
+    the layer-RH integral and then divide by total delp.
+
+    Composes iter-715 ``rh_calc_fv3`` (with optional do_cmip) +
+    iter-742 ``column_integral_delp_fv3``.
+
+    Parameters
+    ----------
+    p_full : jax.Array, shape (..., km)
+        Layer-center pressure (Pa).
+    t : jax.Array, shape (..., km)
+        Temperature (K).
+    qv : jax.Array, shape (..., km)
+        Specific humidity (kg/kg).
+    delp : jax.Array, shape (..., km)
+        Pressure thickness (Pa).
+    do_cmip : bool, default False.
+        es-over-liq-and-ice blend (CMIP convention).
+
+    Returns
+    -------
+    rh_col : jax.Array, shape (...,)
+        Column-mean relative humidity (percent).
+    """
+    rh_layer = rh_calc_fv3(p_full, t, qv, do_cmip=do_cmip)
+    sum_rh = column_integral_delp_fv3(rh_layer, delp, divide_by_g=False)
+    sum_delp = jnp.sum(delp, axis=-1)
+    safe_delp = jnp.where(sum_delp > 0.0, sum_delp, 1.0)
+    return sum_rh / safe_delp
+
+
 def rh_calc_fv3(
     p_full: jax.Array,
     t: jax.Array,

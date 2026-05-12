@@ -1195,201 +1195,53 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
-- Iter 759: **``surface_pressure_from_delp_fv3``** — ps from column delp.
+- Iter 760: **``column_mean_rh_fv3``** — mass-weighted column RH.
 
-      ps = p_top + Σ_k delp[k]
+      RH_col = Σ_k delp · RH_layer / Σ_k delp
 
-  Standard FV3 IC pattern.  Inverse of iter-731 ``compute_pe_from_delp_fv3``
-  for the surface interface (``pe[km] = ps``).
+  Mass-weighted (ratio cancels g).  Composes iter-715 ``rh_calc_fv3``
+  (with optional do_cmip) + iter-742 column_integral.
 
-  Used in IC ingestion paths to recover ps from a delp profile
-  after reading external pressure-level data and inverting the
-  hybrid-coord chain.
-
-  Tests (6/6 in <1 s):
-  1. Σ delp=1e5, p_top=0 → ps=1e5.
-  2. delp=0 → ps=p_top.
-  3. p_top offset propagates.
-  4. ps = pe[..., -1] from iter-731 exactly.
-  5. 3-D shapes.
-  6. No NaN/Inf.
+  Tests (5/5 in <2 s):
+  1. Uniform per-layer RH=50 → column RH=50.
+  2. Two layers RH=80 + RH=20 equal delp → mean=50.
+  3. do_cmip branch differs from liquid-only at sub-freezing T.
+  4. 3-D shapes.
+  5. No NaN/Inf.
 
   Wired into iter-383 sweep (now 324).
-- Iter 758: **``column_geopotential_thickness_fv3``** — z_top − z_surface.
+- **Iters 751-759 (compacted iter 760)**: mass+energy budget diagnostic
+  helpers + iter-694/705 area-weighted-mean refactor.
 
-      thickness = Σ_k (−delz[k])    (m, positive)
+  | Iter | What                                              | Note                                                    |
+  |------|---------------------------------------------------|---------------------------------------------------------|
+  | 751  | refactor iter-694/705 → iter-750 area_weighted_mean| ps_mean + per-tracer + 4 lat-band means delegate         |
+  | 752  | ``dry_surface_pressure_fv3``                      | ps_dry = ps − g·TWC (per cell)                          |
+  | 753  | ``moist_static_energy_fv3``                       | MSE = c_p·T + g·z + L·q                                 |
+  | 754  | ``dry_static_energy_fv3``                         | DSE = c_p·T + g·z (companion to MSE)                    |
+  | 755  | ``mse_column_fv3`` + ``dse_column_fv3``           | mass-weighted column variants of 753/754                |
+  | 756  | ``precipitable_water_fv3``                        | column water vapor (kg/m² ≡ mm)                         |
+  | 757  | ``total_atmosphere_mass_fv3``                     | M_col = Σ delp/g (kg/m²)                                |
+  | 758  | ``column_geopotential_thickness_fv3``             | thickness = Σ −delz (m)                                 |
+  | 759  | ``surface_pressure_from_delp_fv3``                | ps = p_top + Σ delp                                     |
 
-  Standard atmospheric dimensional check.  Earth troposphere
-  ~12.5 km from 50 layers × 250 m.  Independent of surface
-  elevation phis — only depends on delz.
+  **Energy-budget set complete**:
+    * (DSE, MSE) point: iter-754, iter-753
+    * (DSE_col, MSE_col) column: iter-755
+    * IE/KE/PE/LE column quartet: iter-744/745/746/747
 
-  Tests (6/6 in <1 s):
-  1. Uniform delz=-500, km=10 → thickness=5000.
-  2. Σ −delz known sum.
-  3. delz=0 → thickness=0.
-  4. FV3 delz<0 → thickness>0.
-  5. 3-D shapes.
-  6. No NaN/Inf.
+  **Mass-budget set complete**:
+    * Total atmosphere mass (757)
+    * Water column (749 / 756)
+    * Dry surface pressure (752)
+    * Mass conservation cross-check: M_col − TWC = ps_dry / g (verified)
 
-  Wired into iter-383 sweep (now 323).
-- Iter 757: **``total_atmosphere_mass_fv3``** — column air mass.
+  **Vertical-coord round-trips complete**:
+    * delp → pe (731), delp → ps (759)
+    * delz → thickness (758), delz → zh (727)
+    * peln + T → Φ (738), Φ inverse to ps_dry (752)
 
-      M_col = Σ_k delp / g    (kg/m²)
-            ≈ (p_s − p_top) / g
-
-  Standard mass-conservation diagnostic.  Earth surface
-  M_col ≈ 10197 kg/m² (ps=1e5 Pa, ptop≈0).
-
-  Decomposition: M_col = M_dry + TWC; therefore
-  M_col − TWC = ps_dry / g.  Verified bit-identical to iter-752
-  per-cell dry_surface_pressure / g (regression test).
-
-  Composes iter-742 column_integral_delp_fv3 with constant field=1.
-
-  Tests (6/6 in <1 s):
-  1. ps=1e5, ptop=0 → M_col ≈ 10197 kg/m².
-  2. delp=0 → M_col=0.
-  3. M_col = Σ delp / g (analytical exact).
-  4. M_col − TWC matches iter-752 ps_dry/g per cell.
-  5. 3-D → 2-D output.
-  6. No NaN/Inf.
-
-  Wired into iter-383 sweep (now 322).
-- Iter 756: **``precipitable_water_fv3``** — column water vapor.
-
-      PWV = Σ_k delp · q_sphum / g    (kg/m² ≡ mm)
-
-  Standard meteorology diagnostic.  Numeric value in kg/m² equals
-  column water-vapor depth in mm exactly (since ρ_water = 1000
-  kg/m³ ⇒ 1 kg/m² ≡ 1 mm).
-
-  Thin wrapper around iter-742 column_integral_delp_fv3 with
-  named output convention.  Effective subset of iter-749
-  total_water_column for the vapor-only case.
-
-  Tests (5/5 in <1 s):
-  1. q=0 → PWV=0.
-  2. Tropical q=0.015, p_s=1e5 → PWV ≈ 153 kg/m² analytical.
-  3. Unit identity: 1 kg/m² ≡ 1 mm depth.
-  4. 3-D shapes.
-  5. No NaN/Inf.
-
-  Wired into iter-383 sweep (now 321).
-- Iter 755: **``mse_column_fv3`` + ``dse_column_fv3``** — column variants.
-
-  Mass-weighted column integrals of iter-753 MSE + iter-754 DSE:
-
-      MSE_col = Σ_k delp · MSE / g
-      DSE_col = Σ_k delp · DSE / g
-
-  Compose iter-753/754 with iter-742 column_integral_delp_fv3.
-
-  Identity preserved at column scale:
-
-      MSE_col − DSE_col = LE_col
-
-  (verified bit-identical to iter-746 latent_energy_column).
-
-  Tests (5/5 in <1 s):
-  1. Zero inputs → MSE_col=0.
-  2. Isothermal T=280 → DSE_col = c_pd·T·p_s/g exact.
-  3. MSE_col − DSE_col = LE_col exact (iter-746 cross-check).
-  4. 3-D shapes.
-  5. No NaN/Inf.
-
-  Wired into iter-383 sweep (now 320).
-- Iter 754: **``dry_static_energy_fv3``** — DSE companion to iter-753 MSE.
-
-      DSE = c_p · T + g · z
-
-  Approximately conserved for DRY adiabatic motion (vertical
-  component of enthalpy + potential energy).  Decomposition:
-
-      MSE = DSE + L · q_sphum
-
-  Defaults: c_p = constants.c_pd.  Accepts moist c_p override.
-
-  Tests (7/7 in <1 s):
-  1. z=0 → DSE = c_p · T.
-  2. z aloft → DSE > c_p · T.
-  3. T=290, z=1000 → analytical sum.
-  4. MSE − DSE = L_v · q exactly (iter-753 cross-check).
-  5. Custom c_p override.
-  6. 3-D shapes.
-  7. No NaN/Inf.
-
-  Wired into iter-383 sweep (now 318).
-- Iter 753: **``moist_static_energy_fv3``** — MSE per unit mass.
-
-      MSE = c_p · T + g · z + L · q_sphum
-
-  Standard atmospheric conservative variable, approximately
-  conserved for moist adiabatic motion.  Used in convection
-  parameterizations + tropical-meteorology diagnostics.
-
-  Decomposition: MSE = (c_p·T + L·q) + Φ where:
-    * c_p·T relates to iter-744 IE (cv·T differs by R_d·T)
-    * L·q relates to iter-746 LE
-    * g·z = Φ relates to iter-747 PE
-
-  Defaults: c_p = constants.c_pd, L = constants.L_v.  Accepts
-  moist c_p (iter-714 moist_cp_fv3) and L_s for ice variant.
-
-  Tests (6/6 in <1 s):
-  1. q=0, z=0 → MSE = c_p · T.
-  2. T=300, z=1000, q=0.01 → MSE = analytical sum.
-  3. Custom moist c_p from iter-714.
-  4. L_s vs L_v → delta matches (L_s − L_v)·q.
-  5. 3-D shapes.
-  6. No NaN/Inf.
-
-  Wired into iter-383 sweep (now 317).
-- Iter 752: **``dry_surface_pressure_fv3``** — per-cell ps_dry.
-
-      ps_dry = ps − g · TWC
-             = ps − g · column_water (all species)
-
-  Per-cell version of iter-694 ``prt_mass`` ``dry_ps_mean`` global
-  diagnostic.  Used in IC ingestion + dry-air mass conservation.
-
-  Composes iter-749 total_water_column_fv3.  Verified: area-weighted
-  mean of iter-752 output exactly matches iter-694 dry_ps_mean.
-
-  Tests (6/6 in <1 s):
-  1. q=0 (dry) → ps_dry = ps.
-  2. q=0.01, p_s=1e5 → ps_dry = ps − 1000 Pa.
-  3. area_weighted_mean(ps_dry) = iter-694 dry_ps_mean (exact).
-  4. 3-D shapes.
-  5. No NaN/Inf.
-  6. No tracers raises (delegated to iter-749).
-
-  Wired into iter-383 sweep (now 316).
-- Iter 751: **refactor iter-694/705 to delegate to iter-750 area_weighted_mean**.
-
-  Two callsites had inline area-weighted-mean patterns matching
-  iter-750 helper:
-
-      iter-694 prt_mass_fv3 (4 sites: ps_mean + tracer means)
-        → ``area_weighted_mean_fv3(ps, area)``,
-          ``area_weighted_mean_fv3(col_mass, area)``
-
-      iter-705 prt_gb_nh_sh_fv3 (4 lat-band means: gb/nh/sh/eq)
-        → ``area_weighted_mean_fv3(a2, area)`` and 3 masked calls
-
-  Output bit-identical to before refactor (pinned by regression
-  tests; iter-694 6/6 + iter-705 5/5 tests still pass).
-
-  Removed inline ``_band_mean`` lambda + manual ``sum/inv_area``
-  bookkeeping.  Now both functions just specify the (mask, sentinel)
-  conditions per call.
-
-  Tests (4/4 in <1 s):
-  1. prt_mass refactor: ps_mean + sphum mean correct via iter-750.
-  2. prt_gb_nh_sh refactor: 4 band means uniform → all 5.0.
-  3. iter-694 multi-tracer total_water sum preserved.
-  4. iter-705 empty band sentinel −1.0 preserved.
-
-  Wired into iter-383 sweep (now 315).
+  Wired into iter-383 sweep: 314 → 323 modules.
 - Iter 750: **``area_weighted_mean_fv3`` helper**.
 
   Standard FV3 area-weighted mean pattern with optional mask + FV3
