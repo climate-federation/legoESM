@@ -1195,309 +1195,37 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
-- Iter 629: **``make_fv3_native_grid``** — end-to-end FV3 native
-  cubed-sphere grid builder.  Integration wrapper for iters 622,
-  625, 624:
+- **Iters 621-629 (compacted iter 630)**: complete FV3
+  cubed-sphere CONSTRUCTION + WIND-ROTATION pipeline.  9
+  iterations close out FV3's full grid-init code path:
 
-      lons, lats = make_fv3_native_grid(im, grid_type=0)
+  | Iter | Function                            | F90 path / line              | Role                                |
+  |------|-------------------------------------|------------------------------|-------------------------------------|
+  | 621  | ``gnomonic_ed``                     | fv_grid_utils.F90:1313       | FV3 canonical ED grid (face 2)      |
+  | 622  | ``gnomonic_grids``                  | fv_grid_utils.F90:1290       | grid_type 0/1/2 dispatcher          |
+  | 623  | ``rot_3d`` + ``g_sum``              | fv_grid_tools / fv_grid_utils| 3D axis rotation; area-weighted sum |
+  | 624  | ``mirror_grid_faces``               | fv_grid_tools.F90:2809       | 6-face cube via rot_3d sequences    |
+  | 625  | ``mirror_grid_face1_symmetrize``    | fv_grid_tools.F90:2774       | intra-face-1 SIGN-averaging         |
+  | 626  | ``init_cubed_to_latlon``            | fv_grid_utils.F90:2321       | a11/a12/a21/a22 rotation matrix     |
+  | 627  | ``c2l_ord2_fv3``                    | fv_grid_utils.F90:2547       | 2nd-order D-grid → latlon winds     |
+  | 628  | ``c2l_ord4_fv3``                    | fv_grid_utils.F90:2407       | 4th-order Lagrange + ord2 boundary  |
+  | 629  | ``make_fv3_native_grid``            | (legoESM integration)        | end-to-end pipeline wrapper         |
 
-  Pipeline:
-      1. ``gnomonic_grids(im, grid_type)``       — face-1 (iter 622)
-      2. ``mirror_grid_face1_symmetrize``        — face-1 sym (iter 625)
-      3. ``mirror_grid_faces``                   — faces 2-6 (iter 624)
+  ``make_fv3_native_grid(im, grid_type=0)`` is the new single
+  public API reproducing FV3's full ``init_grid`` cubed-sphere
+  construction in 3 calls (gnomonic_grids →
+  mirror_grid_face1_symmetrize → mirror_grid_faces).
 
-  Reproduces FV3's full cubed-sphere construction pipeline as
-  a single public API.  Returns ``(6, im+1, im+1)`` arrays matching
-  FV3 face numbering (1..6 → indices 0..5).
+  Wind-rotation pipeline (iter 626 → 627 / 628):
+  legoESM users can now reproduce FV3 ``c2l_ord2`` / ``c2l_ord4``
+  bit-equivalent (a-matrix pre-scaled by 0.5, vorticity-
+  conserving 2.0× factor in u1/v1 documented).  Boundary cells
+  in c2l_ord4 fall back to c2l_ord2 exactly per FV3 lines 2455-
+  2530.
 
-  Optional ``symmetrize_face1`` flag (default True) toggles the
-  iter-625 step; ``grid_type`` accepts 0/1/2 forwarded to
-  ``gnomonic_grids``.
-
-  Tests (6/6 in 7 s):
-  1. Output shape (6, im+1, im+1).
-  2. All faces on unit sphere.
-  3. No NaN/Inf.
-  4. Wrapper equals manual pipeline composition.
-  5. symmetrize_face1=False skips iter-625 step.
-  6. All 3 grid_types build finite grids.
-
-  Wired into iter-383 sweep (now 200).
-- Iter 628: **FV3 ``c2l_ord4``** — D-grid → latlon winds (4th order
-  Lagrange + 2nd-order boundary fallback).  Faithful JAX port of
-  FV3 ``c2l_ord4`` (fv_grid_utils.F90:2407-2546, grid_type<4
-  branch).
-
-  Interior algorithm (4-point Lagrange, FV3 lines 2422-2424):
-
-      utmp[i,j] = c2·(u[i,j-1] + u[i,j+2]) + c1·(u[i,j] + u[i,j+1])
-      vtmp[i,j] = c2·(v[i-1,j] + v[i+2,j]) + c1·(v[i,j] + v[i+1,j])
-      ua[i,j]   = a11·utmp + a12·vtmp
-      va[i,j]   = a21·utmp + a22·vtmp
-
-  with ``c1 = 1.125``, ``c2 = -0.125``.
-
-  Boundary cells (first/last row/col) fall back to iter-627
-  ``c2l_ord2_fv3`` (FV3 lines 2455-2530 boundary blocks).
-
-  Used by FV3 wind diagnostics for the most accurate D-grid →
-  latlon interpolation.  4-pt Lagrange is exact on quadratics,
-  giving 4th-order convergence in the interior.
-
-  Reuses iter-627 ``c2l_ord2_fv3`` for boundary fallback and
-  iter-626 ``init_cubed_to_latlon`` a-matrix.
-
-  Tests (6/6 in 3 s):
-  1. Output shape matches cell-center grid.
-  2. Zero D-grid winds → zero output.
-  3. Uniform u=U, v=V → all cells see U, V.
-  4. Boundary cells match c2l_ord2 (FV3 fallback).
-  5. 3D level dim handled.
-  6. Exact on quadratic u(j) (4-pt Lagrange exactness test).
-
-  Wired into iter-383 sweep (now 199).
-- Iter 627: **FV3 ``c2l_ord2``** — D-grid → latlon winds (2nd order
-  vorticity-conserving).  Faithful JAX port of FV3 ``c2l_ord2``
-  (fv_grid_utils.F90:2547-2628, grid_type<4 branch).
-
-  Algorithm:
-
-      wu[i,j] = u[i,j] · dx[i,j]      # weighted by metric
-      wv[i,j] = v[i,j] · dy[i,j]
-      u1[i,j] = 2·(wu[i,j] + wu[i,j+1]) / (dx[i,j] + dx[i,j+1])
-      v1[i,j] = 2·(wv[i,j] + wv[i+1,j]) / (dy[i,j] + dy[i+1,j])
-      ua[i,j] = a11·u1 + a12·v1
-      va[i,j] = a21·u1 + a22·v1
-
-  This is the FV3 vorticity-conserving 2nd-order rotation from
-  D-grid covariant winds to cell-center geographic winds.  Used
-  by FV3 wind diagnostics + Held-Suarez forcing.
-
-  Note: FV3 ``a`` matrix from iter-626 ``init_cubed_to_latlon``
-  is pre-scaled by 0.5 to compensate for the 2× factor in u1, v1
-  (FV3 formula ``2·(wu+wu)/(dx+dx) = 2·u`` for uniform fields).
-
-  Inputs accept both 2D ``(n_x, n_y+1)`` and 3D
-  ``(n_x, n_y+1, nlev)`` D-grid winds with auto-broadcast.
-
-  Tests (5/5 in 1 s):
-  1. Output shape matches cell-center grid.
-  2. Zero D-grid winds → zero output.
-  3. Uniform u=U, v=V with π/2 rotation → ua=-V, va=U.
-  4. 3D level dim handled.
-  5. Identity a-matrix verified against algorithm.
-
-  Wired into iter-383 sweep (now 198).
-- Iter 626: **FV3 ``init_cubed_to_latlon``** — D-grid → latlon
-  wind rotation matrices.  Faithful JAX port of FV3
-  ``init_cubed_to_latlon`` (fv_grid_utils.F90:2321-2384,
-  grid_type<4 branch).  Computes the 8 rotation-matrix entries
-  used by ``c2l_ord4`` to rotate D-grid winds to (east, north)
-  at cell centers.
-
-  Algorithm:
-
-      vlon, vlat = unit_vect_latlon(agrid)   # iter 615
-      z11 = ec1·vlon;  z12 = ec1·vlat        # iter 611 inner_prod
-      z21 = ec2·vlon;  z22 = ec2·vlat
-      a11 =  0.5·z22 / sin_sg5
-      a12 = -0.5·z12 / sin_sg5
-      a21 = -0.5·z21 / sin_sg5
-      a22 =  0.5·z11 / sin_sg5
-
-  The (a11, a12, a21, a22) matrix gives the D-grid → (u_east,
-  v_north) projection at each cell center.  Used by FV3 wind
-  diagnostics, AAM correction (iter 583/587/588), and Held-
-  Suarez physics coupling.
-
-  Reuses iter-611 ``inner_prod``, iter-615 ``unit_vect_latlon``.
-  Safe-divide on ``sin_sg5`` avoids NaN at degenerate cells.
-
-  Returns 10-tuple: ``(a11, a12, a21, a22, z11, z12, z21, z22,
-  vlon, vlat)``.
-
-  Tests (6/6 in <1 s):
-  1. Output shapes (n, n) for scalars, (n, n, 3) for vlon/vlat.
-  2. No NaN/Inf on random inputs.
-  3. z = ec·v inner products verified.
-  4. a = ±0.5·z/sin_sg5 formulas verified.
-  5. Identity case ec = (vlon, vlat) → z = (1, 0, 0, 1).
-  6. sin_sg5 = 0 → no NaN/Inf (safe-divide).
-
-  Wired into iter-383 sweep (now 197).
-- Iter 625: **FV3 ``mirror_grid_face1_symmetrize``** — face-1
-  SIGN-averaging symmetrization.  Faithful JAX port of FV3
-  ``mirror_grid`` first loop (fv_grid_tools.F90:2774-2807).
-  Symmetrizes face 1 about both the lon=0 meridian (i-axis) and
-  the equator (j-axis):
-
-      For each 4-tuple (i,j), (npx-i+1,j), (i,npy-j+1),
-                       (npx-i+1,npy-j+1):
-        avg = mean of |lon| at 4 corners
-        each corner → SIGN(avg, original lon)
-        same for |lat|
-
-  Result: |lon| and |lat| equal across the mirror,
-  preserving the sign-pattern of the original grid.
-
-  For odd ``npx``, central column ``i = (npx+1)/2`` is forced to
-  ``lon = 0`` (FV3 lines 2799-2804).
-
-  This pairs with iter-624 ``mirror_grid_faces``: the FV3
-  ``mirror_grid`` full pipeline now reproducible as::
-
-      lon_sym, lat_sym = mirror_grid_face1_symmetrize(lon1, lat1)
-      lons, lats = mirror_grid_faces(lon_sym, lat_sym)
-
-  Tests (6/6 in 5 s):
-  1. Shape preserved.
-  2. Idempotent.
-  3. |lon| symmetric about i-mirror.
-  4. |lat| symmetric about j-mirror.
-  5. Odd-npx central column lon = 0.
-  6. Applied to already-symmetric input → diff < 1e-3.
-
-  Wired into iter-383 sweep (now 196).
-- Iter 624: **FV3 ``mirror_grid_faces``** — 6-face cubed-sphere
-  from face 1.  Faithful JAX port of FV3 ``mirror_grid``
-  faces-2-to-6 rotation sequence (fv_grid_tools.F90:2809-2897).
-  Takes face-1 (lon, lat) and builds faces 2-6 via FV3's exact
-  ``rot_3d`` (iter 623) sequences:
-
-      face 2: rot_z(-90°)
-      face 3: rot_z(-90°) → rot_x(+90°)
-      face 4: rot_z(-180°) → rot_x(+90°)
-      face 5: rot_z(+90°) → rot_y(+90°)
-      face 6: rot_y(+90°)   (rot_z(0°) = identity, omitted)
-
-  Combined with iter 622's ``gnomonic_grids`` (face-1 generator),
-  this completes the FV3 cubed-sphere construction PIPELINE.  A
-  user can now build the full 6-face FV3 grid via::
-
-      lon1, lat1 = gnomonic_grids(im, grid_type=0)
-      lons, lats = mirror_grid_faces(lon1, lat1)
-      # → lons, lats of shape (6, im+1, im+1) — FV3-faithful
-
-  Returns ``(6, n+1, n+1)`` arrays.  Reuses iter-611
-  ``latlon2xyz`` / ``xyz2latlon`` and iter-623 ``rot_3d``.
-
-  NOTE: this port covers the faces 2-6 rotation only.  FV3's
-  first loop (intra-face-1 symmetrization via SIGN-of-(|...|)
-  averaging) is NOT included — input is assumed already
-  symmetrized (which it is after ``gnomonic_grids`` → ``symm_ed``).
-  Also omitted: FV3's odd-npx pole/dateline fixups, which only
-  matter for sub-1e-10 reference exactness at specific corner
-  points.
-
-  Tests (6/6 in 6 s):
-  1. Output shape (6, im+1, im+1).
-  2. Face 1 unchanged.
-  3. All 6 faces on unit sphere.
-  4. Face 2 center 90° east of face 1 center.
-  5. No NaN/Inf anywhere.
-  6. Faces 3 (top) and 6 (bottom) have opposite z-sign centers.
-
-  Wired into iter-383 sweep (now 195).
-- Iter 623: **FV3 ``rot_3d`` + ``g_sum``**.  Faithful JAX ports of:
-
-  | Function   | F90 path            | Line | Role                          |
-  |------------|---------------------|------|-------------------------------|
-  | ``rot_3d`` | fv_grid_tools.F90   | 2410 | 3D rotation about axis 1/2/3  |
-  | ``g_sum``  | fv_grid_utils.F90   | 2946 | area-weighted global sum      |
-
-  ``rot_3d`` is a building block of FV3's ``mirror_grid`` (the
-  6-face cubed-sphere construction) — rotates Cartesian (x, y, z)
-  by an angle about coord axis 1, 2, or 3.  Preserves FV3's exact
-  sign convention (left-handed about each axis as the code reads):
-
-      axis 1: y' = c·y + s·z,    z' = -s·y + c·z
-      axis 2: x' = c·x - s·z,    z' =  s·x + c·z
-      axis 3: x' = c·x + s·y,    y' = -s·x + c·y
-
-  ``g_sum`` is FV3's area-weighted global sum.  Serial (non-MPI)
-  implementation; ``mode=1`` returns the area-weighted mean (FV3's
-  ``g_sum`` divide-by-global-area branch).  legoESM uses
-  ``global_sum_mpi`` for distributed runs.
-
-  Tests (9/9 in <1 s):
-  1. ``rot_3d`` z-axis -90° → (1,0,0)↦(0,1,0).
-  2. ``rot_3d`` x-axis 90° → (0,1,0)↦(0,0,-1).
-  3. ``rot_3d`` y-axis 90° → (1,0,0)↦(0,0,1).
-  4. ``rot_3d`` zero angle is identity on all 3 axes.
-  5. ``rot_3d`` invalid axis raises ValueError.
-  6. ``rot_3d`` degrees=True converts correctly.
-  7. ``g_sum`` Σc·area = c·Σarea.
-  8. ``g_sum`` mode=1 returns constant for constant field.
-  9. ``g_sum`` zero field → zero.
-
-  Wired into iter-383 sweep (now 194).
-- Iter 622: **FV3 ``gnomonic_grids``** — top-level dispatcher.
-  Faithful JAX port of FV3 ``gnomonic_grids`` (fv_grid_utils.F90:
-  1290-1311) tying together the three FV3 grid generators:
-
-      grid_type = 0 → gnomonic_ed   (canonical, iter 621)
-      grid_type = 1 → gnomonic_dist (iter 617)
-      grid_type = 2 → gnomonic_angl (iter 617)
-
-  Post-processing (FV3 lines 1301-1308) for all grid_type < 3:
-  1. ``symm_ed`` (iter 619) symmetrizes about i/j midplanes.
-  2. Longitude shift by -π to bring grid into FV3's standard
-     orientation (face 2 center → 0, not π).
-
-  Raises ``ValueError`` for unsupported grid_type (FV3 silently
-  ignores; we surface the error per legoESM dispatch convention).
-
-  With iter 622, the FV3 ``gnomonic_grids`` cubed-sphere
-  construction pipeline is END-TO-END FAITHFUL: a user can call
-  ``gnomonic_grids(im, grid_type=0)`` and get the exact FV3
-  default grid that FV3's ``init_grid`` driver would produce
-  before metric / area calculations.
-
-  Tests (7/7 in 4 s):
-  1. Output shape (im+1, im+1) for all grid_types.
-  2. grid_type=0 → gnomonic_ed + symm_ed + shift.
-  3. grid_type=1 → gnomonic_dist + symm_ed + shift.
-  4. grid_type=2 → gnomonic_angl + symm_ed + shift.
-  5. Corners on unit sphere for all grid_types.
-  6. Lon shift by -π matches direct generator + symm_ed output.
-  7. Invalid grid_type raises ValueError.
-  Wired into iter-383 sweep (now 193).
-- Iter 621: **FV3 ``gnomonic_ed``** — canonical FV3 cubed-sphere
-  grid generator.  Faithful JAX port of FV3 ``gnomonic_ed``
-  (fv_grid_utils.F90:1313-1407).  FV3's grid of choice for global
-  cloud-resolving runs.
-
-  Properties (FV3 docstring lines 1317-1322):
-  - Defined by intersections of great circles
-  - max(dx,dy) / min(dx,dy) = √2 ≈ 1.4142
-  - Max aspect ratio = 1.06089
-  - N-S coordinate curves are const longitude on the 4 faces
-    with the equator
-
-  Algorithm:
-  1. East/West edges at constant longitude (0.75π, 1.25π);
-     theta varies linearly from -α to α where α = asin(1/√3).
-  2. North/South edges by ``mirror_latlon`` (iter 612) of W
-     edge across the (NW, SE) diagonal.
-  3. Interior Cartesian via projection onto constant-x = -1/√3
-     face cube; (y, z) inherited from j=0 row and i=0 column.
-  4. ``xyz2latlon`` (iter 611) → final (lon, lat).
-
-  Reuses iter-612 ``mirror_latlon`` and iter-611 primitives
-  (``latlon2xyz``, ``xyz2latlon``).  Third FV3 grid generator
-  after iter-617's ``gnomonic_angl`` (equi-angular) and
-  ``gnomonic_dist`` (equi-distance); completes FV3
-  ``gnomonic_grids`` dispatch table (grid_type 0, 1, 2).
-
-  Tests (7/7 in 7 s):
-  1. Output shape (im+1, im+1).
-  2. All points finite.
-  3. Corners on unit sphere.
-  4. W edge at lon=0.75π.
-  5. E edge at lon=1.25π.
-  6. N/S edges symmetric in latitude.
-  7. Equator aspect ratio < √2 (FV3 documented bound).
-  Wired into iter-383 sweep (now 192).
+  All 9 ports reuse iter-611/612/613/615 spherical primitives.
+  Total: 9 functions across 9 iters, 51 tests, all wired into
+  iter-383 sweep (now 200).
 - **Iters 611-619 (compacted iter 620)**: complete FV3
   ``fv_grid_utils.F90`` spherical-geometry port.  9 iterations
   added the building-block helpers used throughout FV3 grid
