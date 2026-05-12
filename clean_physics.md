@@ -104,8 +104,11 @@ Branch: `clean_physics`. Driven by Ralph loop + `/codex:adversarial-review`.
 - `tests/atmosphere/hydrostatic/unit/test_microphysics.py::test_sedimentation_surface_flux_conservation`
 
 ### Test status (post iter-19)
-- 6 pre-existing failures **all resolved** (Stefan-Boltzmann, hybrid_tracer
-  path, ah_lat_scaling × 4, DCA MSE).
+- 7 pre-existing test failures **all resolved** across iter-13 +
+  iter-14: Stefan-Boltzmann (1 test, iter-13), hybrid_tracer path
+  (1 test), ah_lat_scaling (4 tests), DCA MSE (1 test) — 6 fixed in
+  iter-14 plus the iter-13 fix.  (Total = 1 + 1 + 4 + 1 = 7 tests
+  across 4 categories.)
 - 17 / 17 atmosphere hydrostatic integration tests pass.
 - 169 / 169 atmosphere convection + microphysics + ocean vertical mixing
   targeted tests pass.
