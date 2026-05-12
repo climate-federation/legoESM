@@ -96,6 +96,35 @@ Branch: `clean_physics`. Driven by Ralph loop + `/codex:adversarial-review`.
   75 / 75 land carbon + multilayer + diff_land; 140 / 140 land (post iter-44);
   100 / 100 ocean MPAS + surface_forcing + emanuel + atmosphere convection.
 
+## Iteration 52 — 2026-05-13
+
+**Resolved deferred item: no-flux BC for harmonic/biharmonic tracer
+Laplacian.**
+
+`harmonic.py` + `biharmonic.py` (cubed-sphere lateral mixing) now
+Neumann-fill tracers via `fill_land_cells(T, mask, grid)` BEFORE
+the Laplacian / biharmonic operator, then mask the output.  The
+3-pass cubed-sphere Neumann fill (already used in production for
+pressure-anomaly handling, `barotropic.py:45-125`) replicates the
+ocean value at land neighbours so the stencil sees zero gradient
+across the coastline.  Previously only the OUTPUT was masked,
+which let one (harmonic) or two (biharmonic ∇⁴ = ∇²∇²) stencil
+cells of land-sentinel contamination propagate into the ocean
+interior before being zeroed.
+
+**Tests (post iter-52):** 25 / 25 harmonic + biharmonic + lateral-mixing
+tests pass; 28 / 28 surface-forcing-dispatch + ocean-differentiability
+tests pass.  No new tests needed since existing
+`test_lateral_mixing_factory_dispatch[harmonic|biharmonic|gm_redi]`
+and the Smag-biharmonic-MPAS differentiability suite exercise the
+new fill path.
+
+Removed from "Outstanding / Deferred": no-flux BC item.  GM/Redi
+already uses `_neumann_fill_cgrid` on the lat-lon path
+(`gm_redi_latlon_cgrid.py:87, 178, 406-407, 727`) and
+`_voronoi_neumann_fill` on the MPAS path
+(`gm_redi_mpas.py:68, 188, 337, 567`).
+
 ## Iteration 51 — 2026-05-13
 
 **Inspection iteration on `src/legoesm/land/multilayer_land.py`
@@ -179,8 +208,6 @@ here.  Future refactor could centralise via shared helper.
 - GM/Redi bolus Courant limiter.
 - CICE V=h·A state-variable refactor for sea-ice FW bookkeeping (iter-25 attempt
   reverted; slab path evolves h and conc semi-independently).
-- No-flux BC for harmonic/biharmonic tracer Laplacian (replicate ocean values at
-  land neighbours before the operator).
 - Threading `dt` into ocean `physics_fn` across 3 ocean PE backends + 3 model drivers.
 - Visual / long-run validation of new ice → ocean feedbacks.
 - σ-tensor rotation across cubed-sphere faces (O(dx) edge error in sea-ice EVP).

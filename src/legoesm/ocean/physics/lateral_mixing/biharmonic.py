@@ -10,6 +10,7 @@ import jax.numpy as jnp
 
 from legoesm.core.operators_3d import hyperdiffusion_3d
 from legoesm.grids.cubed_sphere import CubedSphereGrid
+from legoesm.ocean.dynamics.barotropic import fill_land_cells
 from legoesm.ocean.physics.lateral_mixing.config import BiharmonicConfig
 from legoesm.ocean.physics.lateral_mixing.output import LateralMixingOutput
 
@@ -75,14 +76,18 @@ def biharmonic_lateral_mixing(
         du_dt = vel_hyper[..., 0]
         dv_dt = vel_hyper[..., 1]
 
-    # Tracer biharmonic: apply land mask to output so land cells
-    # receive zero tendency.  See harmonic.py for the analogous fix.
-    # Full no-flux BC would require an operator-stencil refactor and
-    # is queued (codex iter-25 #2).
+    # Tracer biharmonic: Neumann fill at coastlines BEFORE the operator,
+    # then mask the output.  Biharmonic ∇⁴ = ∇²(∇²) has a wider stencil
+    # than the harmonic Laplacian, so the unfilled-input bias propagates
+    # TWO stencil cells into the ocean rather than one — making the
+    # no-flux BC even more important.  See harmonic.py for the
+    # analogous fix.
     dT_dt = z
     dS_dt = z
     if cfg.B_h_tracer > 0:
-        tr_stack = jnp.stack([T, S], axis=-1)  # (6, n, n, nlev, 2)
+        T_filled = fill_land_cells(T, mask, grid)
+        S_filled = fill_land_cells(S, mask, grid)
+        tr_stack = jnp.stack([T_filled, S_filled], axis=-1)  # (6, n, n, nlev, 2)
         n_face, n_i, n_j, nlev_t, n_pair = tr_stack.shape
         tr_flat = tr_stack.reshape(n_face, n_i, n_j, nlev_t * n_pair)
         tr_hyper = hyperdiffusion_3d(tr_flat, grid, B_tr_eff)

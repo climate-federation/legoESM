@@ -9,6 +9,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm.grids.cubed_sphere import CubedSphereGrid
+from legoesm.ocean.dynamics.barotropic import fill_land_cells
 from legoesm.ocean.physics.mixing import laplacian_viscosity_3d
 from legoesm.ocean.physics.lateral_mixing.config import HarmonicConfig
 from legoesm.ocean.physics.lateral_mixing.output import LateralMixingOutput
@@ -77,20 +78,22 @@ def harmonic_lateral_mixing(
         du_dt = vel_lap[..., 0]
         dv_dt = vel_lap[..., 1]
 
-    # Tracers: apply land mask so the resulting tendency only acts on
-    # ocean cells.  Earlier comment ("Tracers: unmasked (smooth gradients
-    # at coastlines)") justified the no-mask approach, but it lets the
-    # Laplacian source/sink ocean heat & salt via whatever land-cell
-    # value is in T / S (codex iter-25 finding #2).  Multiplying the
-    # OUTPUT by mask ensures land cells receive no tendency.  An ideal
-    # no-flux BC would also replicate the ocean value at land
-    # neighbours before the Laplacian, but that is a structural
-    # refactor of the operator stencil; the output mask is a safe
-    # minimum that contains the issue.
+    # Tracers: Neumann fill at coastlines BEFORE the Laplacian, then
+    # mask the output.  The fill replicates the ocean value at land
+    # neighbours so the stencil sees zero gradient across the land-
+    # ocean boundary (no-flux BC).  An output mask alone allows the
+    # Laplacian INPUT to see whatever land-cell sentinel is in T / S
+    # and propagate spurious gradients one stencil-cell into the
+    # ocean before being zeroed.  ``fill_land_cells`` is JIT-friendly
+    # and uses the same 3-pass cubed-sphere Neumann fill already in
+    # production for pressure-anomaly handling.  Codex finding (iter-25)
+    # plus deferred no-flux BC item.
     dT_dt = z
     dS_dt = z
     if cfg.K_h > 0:
-        tr_stack = jnp.stack([T, S], axis=-1)  # (6, n, n, nlev, 2)
+        T_filled = fill_land_cells(T, mask, grid)
+        S_filled = fill_land_cells(S, mask, grid)
+        tr_stack = jnp.stack([T_filled, S_filled], axis=-1)  # (6, n, n, nlev, 2)
         n_face, n_i, n_j, nlev_t, n_pair = tr_stack.shape
         tr_flat = tr_stack.reshape(n_face, n_i, n_j, nlev_t * n_pair)
         tr_lap_flat = laplacian_viscosity_3d(tr_flat, grid, K_h_eff)
