@@ -3022,6 +3022,54 @@ def potential_energy_column_fv3(
     return column_integral_delp_fv3(phi_avg, delp)
 
 
+def total_water_column_fv3(
+    delp: jax.Array,
+    q_sphum: jax.Array | None = None,
+    q_liq_wat: jax.Array | None = None,
+    q_rainwat: jax.Array | None = None,
+    q_ice_wat: jax.Array | None = None,
+    q_snowwat: jax.Array | None = None,
+    q_graupel: jax.Array | None = None,
+) -> jax.Array:
+    """FV3_3D iter 749: total water column (kg/m²).
+
+        TWC = Σ_species column_integral(q_species)
+            = Σ_k delp · (q_v + q_l + q_r + q_i + q_s + q_g) / g
+
+    Sum of column water across all condensate phases.  Used in
+    FV3 water-mass-conservation diagnostics (iter-694 prt_mass
+    sums these per-tracer means).
+
+    All tracer inputs optional; missing ones contribute zero.
+    At least one must be provided.
+
+    Composes iter-742 column_integral_delp_fv3.
+
+    Parameters
+    ----------
+    delp : jax.Array, shape (..., km)
+        Pressure thickness (Pa).
+    q_sphum, q_liq_wat, q_rainwat, q_ice_wat, q_snowwat, q_graupel :
+        Mixing ratios (kg/kg).
+
+    Returns
+    -------
+    twc : jax.Array, shape (...,)
+        Total water column (kg/m²).
+    """
+    tracers = [
+        q for q in (q_sphum, q_liq_wat, q_rainwat,
+                    q_ice_wat, q_snowwat, q_graupel)
+        if q is not None
+    ]
+    if not tracers:
+        raise ValueError("total_water_column_fv3 requires at least one tracer")
+    q_total = tracers[0]
+    for q in tracers[1:]:
+        q_total = q_total + q
+    return column_integral_delp_fv3(q_total, delp)
+
+
 def latent_energy_column_fv3(
     q_sphum: jax.Array,
     delp: jax.Array,

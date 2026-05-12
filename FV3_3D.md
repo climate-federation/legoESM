@@ -1195,6 +1195,25 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 749: **``total_water_column_fv3``** — column water mass (all species).
+
+      TWC = Σ_k delp · (q_v + q_l + q_r + q_i + q_s + q_g) / g
+          = column water vapor + liquid + ice + rain + snow + graupel
+
+  Used in FV3 water-mass-conservation diagnostics (iter-694
+  prt_mass sums these per-tracer means).  All tracer inputs
+  optional; at least one required.
+
+  Composes iter-742 column_integral_delp_fv3.
+
+  Tests (5/5 in <1 s):
+  1. Single q_sphum → matches iter-742 column_integral.
+  2. q_v + q_l + q_i → sum equals (0.017)·p_s/g exact.
+  3. No tracers → raises.
+  4. 3-D shapes.
+  5. No NaN/Inf.
+
+  Wired into iter-383 sweep (now 313).
 - Iter 748: **refactor iter-693 nh_total_energy to delegate to column-energy quartet**.
 
   iter-693 now composes:
