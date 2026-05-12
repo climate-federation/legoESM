@@ -371,6 +371,7 @@ _GUARD_MODULES = (
     "test_fv3_rossby_radius_iter781",                # iter-781 add
     "test_fv3_rhines_scale_iter782",                 # iter-782 add
     "test_fv3_equatorial_rossby_radius_iter783",     # iter-783 add
+    "test_fv3_gravity_wave_speed_iter784",           # iter-784 add
 )
 
 

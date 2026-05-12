@@ -5070,4 +5070,47 @@ the QG length-scale hierarchy is now complete from poles to
 equator.  Pure JAX, vmap-compatible.  No new physical constants
 introduced.
 
+## Iter 784 — gravity_wave_speed_fv3 (c = N·H)
+
+Added `gravity_wave_speed_fv3(n_brunt, H)` to
+`grids/cubed_sphere.py`.  Internal gravity-wave phase speed:
+
+```
+c = max(N, 0) · H     [m/s]
+```
+
+Baroclinic mode-1 (equivalent-depth) phase speed; the π-less form
+matches iter-781 convention L_R = N·H/|f| ≡ c/|f|.  Callers
+wanting Matsuno eigenmode value should divide by π.
+
+Typical values:
+  * Atmospheric tropical (N=0.01, H=3 km): c ≈ 30 m/s
+  * Ocean baroclinic mode 1 (N=0.005, H=540 m): c ≈ 2.7 m/s
+  * Synoptic mid-lat (N=0.01, H=10 km): c ≈ 100 m/s
+
+Composes iter-781 / iter-783: caller computes c once via this
+helper, then passes c to both ``rossby_radius_fv3(c, f, 1)`` (or
+keeps the explicit N·H form there) and
+``equatorial_rossby_radius_fv3(c, β)``.  Avoids re-deriving the
+gravity-wave-speed scalar in both call sites.
+
+Test: `tests/test_fv3_gravity_wave_speed_iter784.py` (7 tests:
+atmospheric Kelvin c=30 m/s, ocean baroclinic c=2.7 m/s, N=0 →
+c=0, monotone in N and H, full pipeline (N, H, β_eq) → c → L_eq,
+identity check L_R = c/|f| matches iter-781 direct, 3-D shapes +
+finite + non-negative).
+
+### Why this iteration was meaningful
+
+Closes the c-derivation step in the length-scale stack: callers
+now compute c once via `gravity_wave_speed_fv3(N, H)` and feed
+the same c to both mid-lat (iter-781) and equatorial (iter-783)
+Rossby-radius helpers.  Eliminates inline `N·H` redundancy.
+Critical for: (1) baroclinic-mode decomposition diagnostics
+(Wunsch & Stammer 1997 oceanographic spectra); (2) Madden-Julian
+Oscillation Kelvin-wave c estimates; (3) gravity-wave-drag
+parameterization (uses c as critical-level filter); (4) eddy-
+permitting model design via L_R = c/|f|.  Pure JAX, vmap-
+compatible.  No new physical constants introduced.
+
 

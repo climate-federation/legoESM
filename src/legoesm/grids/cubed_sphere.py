@@ -3938,6 +3938,56 @@ def equatorial_rossby_radius_fv3(
     )
 
 
+def gravity_wave_speed_fv3(
+    n_brunt: jax.Array,
+    H: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 784: internal gravity-wave phase speed c = N·H.
+
+    Baroclinic mode-1 (equivalent depth) phase speed for a
+    stratified column of depth H with mean Brunt-Väisälä
+    frequency N:
+
+        c = N · H
+
+    Used as input ``c_wave`` to iter-783 ``equatorial_rossby_radius_fv3``
+    and iter-781 ``rossby_radius_fv3`` (the latter via L_R = c/|f|).
+
+    Derivation: for the rigid-lid linear vertical mode m, the
+    eigen-phase-speed solves c_m = N·H/(m·π) for hydrostatic
+    waves.  m=1 (first baroclinic) → c_1 = N·H/π.  The simpler
+    "scale-only" form c = N·H drops the π factor; both
+    conventions appear in the literature.  This helper uses the
+    π-less form to match the L_R = N·H/|f| convention of
+    iter-781.  Callers who want the eigenmode value should
+    divide by π.
+
+    Typical values:
+      * Atmospheric tropical (N=0.01, H=3 km): c ≈ 30 m/s
+        (matches Kelvin wave c).
+      * Ocean baroclinic mode 1 (N=0.005, H=540 m): c ≈ 2.7 m/s.
+      * Synoptic mid-lat (N=0.01, H=10 km): c ≈ 100 m/s.
+
+    Used by: equatorial-wave dispersion analysis, eddy-resolving
+    model design (Δx < L_R/4 where L_R = c/|f|), gravity-wave
+    drag spectra, vertical-mode decomposition diagnostics.
+
+    Parameters
+    ----------
+    n_brunt : jax.Array
+        Brunt-Väisälä frequency N (s⁻¹).  Caller computes
+        ``jnp.sqrt(jnp.maximum(0, n_sq))`` from iter-772 N².
+    H : jax.Array
+        Vertical-scale depth (m).
+
+    Returns
+    -------
+    c : jax.Array
+        Internal gravity-wave phase speed (m/s).
+    """
+    return jnp.maximum(n_brunt, 0.0) * H
+
+
 def kinetic_energy_fv3(
     ua: jax.Array,
     va: jax.Array,
