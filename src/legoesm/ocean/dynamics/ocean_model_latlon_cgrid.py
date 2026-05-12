@@ -184,10 +184,10 @@ def _compute_advection_flux_div(
         # upwind or tvd
         if tracer_advection == "tvd":
             tr_u = _tvd_to_u_points(tr, mass_flux_u)
-            tr_v = _tvd_to_v_points(tr, mass_flux_v)
+            tr_v = _tvd_to_v_points(tr, mass_flux_v, grid=grid)
         else:
             tr_u = _upwind_to_u_points(tr, mass_flux_u)
-            tr_v = _upwind_to_v_points(tr, mass_flux_v)
+            tr_v = _upwind_to_v_points(tr, mass_flux_v, grid=grid)
         tracer_flux_u = mass_flux_u * tr_u
         tracer_flux_v = mass_flux_v * tr_v
         div_hut = divergence_cgrid(tracer_flux_u, tracer_flux_v, grid)
@@ -336,7 +336,7 @@ def _forward_backward_coriolis_3d(
     # overestimates face depth at topographic steps, creating a
     # barotropic-baroclinic residual that drives spurious currents.
     h_u = min_cell_to_uface(h_k)
-    h_v = min_cell_to_vface(h_k)
+    h_v = min_cell_to_vface(h_k, grid)
 
     # --- Depth-averaged velocity (barotropic component) ---
     # Per-face thickness + barotropic-mean column reductions share the
@@ -676,7 +676,7 @@ class LatLonCGridOceanModel:
         # topographic steps, creating a barotropic-baroclinic residual.
         h_u_pre = min_cell_to_uface(h_k_pre)
         # h at v-faces — same min-rule for meridional direction.
-        h_v_pre = min_cell_to_vface(h_k_pre)
+        h_v_pre = min_cell_to_vface(h_k_pre, self.grid)
 
         # H + F_slow share the per-face h weight on the level axis —
         # fuse the two reductions per face into one stacked sum.
@@ -812,7 +812,7 @@ class LatLonCGridOceanModel:
         # so that sum_k(h_k * u_corrected_k) = Hu_avg exactly.
         # (Hallberg & Adcroft 2009, Shchepetkin & McWilliams 2005).
         _min_uface_op = min_cell_to_uface
-        _min_vface_op = min_cell_to_vface
+        _min_vface_op = lambda f: min_cell_to_vface(f, self.grid)
         from legoesm.ocean.dynamics.latlon_cgrid_operators import (
             divergence_cgrid, interp_cell_to_uface,
         )
@@ -840,7 +840,7 @@ class LatLonCGridOceanModel:
         # tracer values inside the ground.
         if isinstance(self.z_coord, OceanPartialCellCoordinate):
             u_mask_3d_tracer, v_mask_3d_tracer = compute_face_masks_3d(
-                self.z_coord.is_active,
+                self.z_coord.is_active, self.grid,
             )
             u_mask_3d_tracer = u_mask_3d_tracer.astype(h_u_old.dtype)
             v_mask_3d_tracer = v_mask_3d_tracer.astype(h_v_old.dtype)

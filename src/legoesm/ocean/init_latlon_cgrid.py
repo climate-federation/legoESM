@@ -136,7 +136,7 @@ def rest_state_latlon_cgrid_ocean(
     zeros_2d = jnp.zeros((n_lat, n_lon), dtype=dtype)
 
     # Face masks
-    u_mask, v_mask = compute_face_masks(land_mask)
+    u_mask, v_mask = compute_face_masks(land_mask, grid)
 
     # Initialize vertical velocity with zeros (will be computed during step)
     w_zeros = jnp.zeros((n_lat, n_lon, nlev), dtype=dtype)
@@ -200,7 +200,7 @@ def wind_driven_gyre_latlon_cgrid(
     v_zeros = jnp.zeros((n_lat + 1, n_lon, nlev), dtype=dtype)
     zeros_2d = jnp.zeros((n_lat, n_lon), dtype=dtype)
 
-    u_mask, v_mask = compute_face_masks(land_mask)
+    u_mask, v_mask = compute_face_masks(land_mask, grid)
 
     # Initialize vertical velocity with zeros (will be computed during step)
     w_zeros = jnp.zeros((n_lat, n_lon, nlev), dtype=dtype)
@@ -275,7 +275,7 @@ def regional_rest_state_latlon_cgrid(
     zeros_2d = jnp.zeros((n_lat, n_lon), dtype=dtype)
 
     land_mask = wall_mask.astype(dtype)
-    u_mask, v_mask = compute_face_masks(land_mask)
+    u_mask, v_mask = compute_face_masks(land_mask, grid)
 
     # Initialize vertical velocity with zeros (will be computed during step)
     w_zeros = jnp.zeros((n_lat, n_lon, nlev), dtype=dtype)
@@ -306,14 +306,21 @@ def regional_rest_state_latlon_cgrid(
 def replace_land_mask(
     state: LatLonCGridOceanState,
     new_land_mask: jnp.ndarray,
+    grid=None,
 ) -> LatLonCGridOceanState:
     """Replace land_mask and recompute u_mask/v_mask atomically.
 
     Use this instead of ``state._replace(land_mask=...)`` to ensure
     face masks stay consistent with the cell mask.
+
+    Parameters
+    ----------
+    grid : optional LatLonGrid or LatLonCGridGeometry.
+        When provided and a tripolar fold is active, the fold-boundary
+        v-face mask is computed from fold-partner cells.
     """
     new_land_mask = jnp.asarray(new_land_mask)
-    u_mask, v_mask = compute_face_masks(new_land_mask)
+    u_mask, v_mask = compute_face_masks(new_land_mask, grid)
     return state._replace(
         land_mask=Field(data=new_land_mask, name="land_mask",
                         dims=state.land_mask.dims, units=""),

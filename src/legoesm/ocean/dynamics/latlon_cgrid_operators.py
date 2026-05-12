@@ -64,6 +64,33 @@ def _pad_ns_zero(interior: jnp.ndarray) -> jnp.ndarray:
     return jnp.pad(interior, ((1, 1), *pad_axes))
 
 
+def fold_vface_row(cell_field: jnp.ndarray, grid) -> jnp.ndarray:
+    """Compute the fold ghost row for a v-face quantity.
+
+    On a tripolar grid, the v-face at the fold boundary connects cell
+    (fold_j, i) with its fold partner (fold_j, perm_T[i]).  This helper
+    returns the fold-partner's cell values, permuted by the fold.  The
+    caller is responsible for combining it with the local cell values
+    (e.g. ``jnp.minimum(cell[-1:], fold_vface_row(cell, grid))`` for
+    face depths).
+
+    On a regular lat-lon grid (no fold), returns a zero row.
+
+    Parameters
+    ----------
+    cell_field : (n_lat, n_lon, ...) — cell-center quantity.
+    grid : LatLonGrid or LatLonCGridGeometry with ``fold`` attribute.
+
+    Returns
+    -------
+    partner_row : (1, n_lon, ...) — fold partner values at the fold row.
+    """
+    fold = getattr(grid, "fold", None)
+    if fold is not None and fold.is_active:
+        return cell_field[-1:, fold.perm_T]
+    return jnp.zeros_like(cell_field[-1:])
+
+
 def pad_ns_scalar(interior: jnp.ndarray, grid) -> jnp.ndarray:
     """Pad south/north rows for a v-face or vertex scalar quantity.
 
@@ -296,49 +323,60 @@ def min_cell_to_uface(f: jnp.ndarray) -> jnp.ndarray:
     return jnp.concatenate([f_u, f_u[:, 0:1]], axis=1)
 
 
-def min_cell_to_vface(f: jnp.ndarray) -> jnp.ndarray:
+def min_cell_to_vface(f: jnp.ndarray, grid=None) -> jnp.ndarray:
     """Min-rule interpolation of a cell-center thickness to v-faces.
 
     Same convention as ``min_cell_to_uface`` for the meridional
-    direction.  Pole rows (south=0, north=n_lat) are zero-padded:
-    the pole is a wall, no fluid passes through, so the face wet
-    thickness there is exactly zero.  This matches the ocean-PE
-    convention used everywhere else for thickness at v-faces.
+    direction.  South pole row is zero (wall).  North pole row is
+    zero on regular lat-lon (wall) or fold min-rule on tripolar.
 
     Parameters
     ----------
     f : (n_lat, n_lon, ...) at cell centers.
+    grid : optional LatLonGrid or LatLonCGridGeometry.
 
     Returns
     -------
     f_v : (n_lat+1, n_lon, ...) at v-faces.
     """
     f_v_interior = jnp.minimum(f[:-1], f[1:])
-    return _pad_ns_zero(f_v_interior)
+    south = jnp.zeros_like(f_v_interior[:1])
+    fold = getattr(grid, "fold", None) if grid is not None else None
+    if fold is not None and fold.is_active:
+        f_partner = f[-1:, fold.perm_T]
+        north = jnp.minimum(f[-1:], f_partner)
+    else:
+        north = jnp.zeros_like(south)
+    return jnp.concatenate([south, f_v_interior, north], axis=0)
 
 
 def cell_to_cgrid_winds(
     u_cell: jnp.ndarray,
     v_cell: jnp.ndarray,
+    grid=None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Convert cell-centered winds to C-grid face-staggered winds.
 
     Works for both 2D (n_lat, n_lon) and 3D (n_lat, n_lon, nlev).
-    v = 0 at pole walls (wall boundary condition).
+    v = 0 at pole walls on regular lat-lon; fold-reflected on tripolar.
 
     Parameters
     ----------
     u_cell, v_cell : cell-centered wind components.
+    grid : optional LatLonGrid or LatLonCGridGeometry.
 
     Returns
     -------
     u_face : (..., n_lon+1, ...) at lon interfaces.
-    v_face : (n_lat+1, ...) at lat interfaces, zero at poles.
+    v_face : (n_lat+1, ...) at lat interfaces.
     """
     u_face = interp_cell_to_uface(u_cell)
-    # v at poles is zero (wall BC), not the average of adjacent cells.
     v_interior = 0.5 * (v_cell[:-1] + v_cell[1:])
-    v_face = _pad_ns_zero(v_interior)
+    fold = getattr(grid, "fold", None) if grid is not None else None
+    if fold is not None and fold.is_active:
+        v_face = pad_ns_vector_v(v_interior, grid)
+    else:
+        v_face = _pad_ns_zero(v_interior)
     return u_face, v_face
 
 
@@ -429,8 +467,23 @@ def gradient_y_cgrid(
     # Interior v-faces: i=1..n_lat-1
     df_interior = (f[1:] - f[:-1]) / dy_v_interior  # (n_lat-1, n_lon, ...)
 
-    # Boundary: wall BC (zero) on regular lat-lon; fold halo on tripolar.
-    df_dy = pad_ns_scalar(df_interior, grid)
+    # Boundary: wall BC (zero) on regular lat-lon; fold gradient on tripolar.
+    fold = getattr(grid, "fold", None)
+    if fold is not None and fold.is_active:
+        # The fold face connects cell (fold_j, i) with its fold partner
+        # (fold_j, perm_T[i]).  Compute the gradient directly rather than
+        # reflecting the interior gradient (which is at a different location).
+        f_partner = f[-1:, fold.perm_T]  # (1, n_lon, ...)
+        dy_fold = grid.dy_v[-1:]  # (1, n_lon) — fold-face distance
+        if f.ndim == 3:
+            dy_fold = dy_fold[:, :, jnp.newaxis]
+        # Clamp dy_fold to avoid division by zero at degenerate fold cells
+        dy_fold_safe = jnp.maximum(dy_fold, 1.0)
+        df_fold = (f_partner - f[-1:]) / dy_fold_safe
+        south = jnp.zeros_like(df_interior[:1])
+        df_dy = jnp.concatenate([south, df_interior, df_fold], axis=0)
+    else:
+        df_dy = _pad_ns_zero(df_interior)
     return df_dy
 
 
@@ -502,25 +555,37 @@ def divergence_cgrid(
 
     # --- Zonal face length (meridional extent of u-face) ---
     if hasattr(grid, "dy_u") and grid.dlat == 0.0:
-        # Tripolar: use per-cell dy_u.  Take column 0 (uniform along lon
-        # for regular lat-lon; potentially variable for tripolar cap).
-        face_dy = grid.dy_u[:, 0]  # (n_lat,)
+        # Tripolar: use full 2D dy_u.  On a regular lat-lon grid dy_u
+        # is constant in longitude, but on the bipolar cap it varies
+        # significantly — column-0 extraction is NOT valid.
+        face_dy = grid.dy_u  # (n_lat, n_lon+1) — full 2D
     else:
         face_dy = grid.radius * grid.dlat
 
     # East face flux - west face flux
+    _is_2d_dy = hasattr(face_dy, 'ndim') and face_dy.ndim == 2
     if u.ndim == 2:
         u_east = u_eff[:, 1:]
         u_west = u_eff[:, :-1]
-        if hasattr(face_dy, 'ndim') and face_dy.ndim == 1:
+        if _is_2d_dy:
+            face_dy_e = face_dy[:, 1:]
+            face_dy_w = face_dy[:, :-1]
+        elif hasattr(face_dy, 'ndim') and face_dy.ndim == 1:
             face_dy = face_dy[:, jnp.newaxis]
     else:
         u_east = u_eff[:, 1:, :]
         u_west = u_eff[:, :-1, :]
-        if hasattr(face_dy, 'ndim') and face_dy.ndim == 1:
+        if _is_2d_dy:
+            face_dy_e = face_dy[:, 1:, jnp.newaxis]
+            face_dy_w = face_dy[:, :-1, jnp.newaxis]
+        elif hasattr(face_dy, 'ndim') and face_dy.ndim == 1:
             face_dy = face_dy[:, jnp.newaxis, jnp.newaxis]
 
-    net_zonal = (u_east - u_west) * face_dy  # preserve arithmetic order
+    if _is_2d_dy:
+        # Per-face dy: each u-face has its own meridional extent.
+        net_zonal = u_east * face_dy_e - u_west * face_dy_w
+    else:
+        net_zonal = (u_east - u_west) * face_dy  # preserve arithmetic order
 
     # --- Meridional face length (zonal extent of v-face) ---
     # On a regular lat-lon grid this is the 1D array
@@ -752,10 +817,15 @@ def curl_vertex_cgrid(
     is_3d = u.ndim == 3
 
     if hasattr(grid, "area_q") and grid.dlat == 0.0:
-        # Tripolar: use pre-computed vertex area and edge lengths
-        A_vertex_interior = grid.area_q[1:-1, 0]      # (n_lat-1,)
-        dx_cell = grid.dx_T[:, 0]                      # (n_lat,)
-        dy_edge = grid.dy_v[1, 0]                       # scalar
+        # Tripolar: use full 2D per-cell metrics.  On the bipolar cap,
+        # metrics vary significantly in BOTH lat and lon — column-0
+        # extraction is not valid.
+        A_vertex_interior = grid.area_q[1:-1]         # (n_lat-1, n_lon+1)
+        dx_cell = grid.dx_T                            # (n_lat, n_lon)
+        # dy at each v-face edge of the circulation loop: east and west
+        # edges have different dy on the distorted cap.
+        dy_v_2d = grid.dy_v                            # (n_lat+1, n_lon)
+        _tripolar_curl = True
     else:
         R = grid.radius
         dlon = grid.dlon
@@ -768,27 +838,47 @@ def curl_vertex_cgrid(
         A_vertex_interior = A_vertex_all[1:-1]
         dx_cell = R * cos_lat * dlon
         dy_edge = R * dlat
+        _tripolar_curl = False
 
-    # v contribution: v[i, j]*dy - v[i, (j-1)%n_lon]*dy.  Works for 2D
-    # and 3D directly.
+    # v contribution: circulation from v-edges (east minus west).
     v_east = v
     v_west = jnp.roll(v, 1, axis=1)
-    dv_circ = (v_east - v_west) * dy_edge
+    if _tripolar_curl:
+        # Per-face dy: v_east * dy_east - v_west * dy_west
+        dy_east = dy_v_2d
+        dy_west = jnp.roll(dy_v_2d, 1, axis=1)
+        if is_3d:
+            dy_east = dy_east[:, :, jnp.newaxis]
+            dy_west = dy_west[:, :, jnp.newaxis]
+        dv_circ = v_east * dy_east - v_west * dy_west
+    else:
+        dv_circ = (v_east - v_west) * dy_edge
 
     # u contribution: u[i-1, j]*dx[i-1] - u[i, j]*dx[i].
     # Pad with zeros at poles along the lat axis (axis 0).  Extra
     # ``(0, 0)`` pad-tuples for any trailing dims (level axis in 3D).
     pad_extra = ((0, 0),) * (u.ndim - 2)
     u_ext = jnp.pad(u, ((1, 1), (0, 0), *pad_extra))
-    dx_ext = jnp.pad(dx_cell, (1, 1))
-
-    u_south = u_ext[:-1]
-    u_north = u_ext[1:]
-    dx_south = dx_ext[:-1]
-    dx_north = dx_ext[1:]
-    # Reshape lat metrics to broadcast over (n_lat+1, n_lon+1[, nlev]).
-    bcast = (slice(None),) + (jnp.newaxis,) * (u.ndim - 1)
-    du_circ = (u_south * dx_south[bcast] - u_north * dx_north[bcast])
+    if _tripolar_curl:
+        # dx_cell is 2D (n_lat, n_lon); pad lat axis, append wrap column
+        dx_pad = jnp.pad(dx_cell, ((1, 1), (0, 0)))  # (n_lat+2, n_lon)
+        dx_pad = jnp.concatenate([dx_pad, dx_pad[:, 0:1]], axis=1)  # (n_lat+2, n_lon+1)
+        dx_south = dx_pad[:-1]  # (n_lat+1, n_lon+1)
+        dx_north = dx_pad[1:]   # (n_lat+1, n_lon+1)
+        if is_3d:
+            dx_south = dx_south[:, :, jnp.newaxis]
+            dx_north = dx_north[:, :, jnp.newaxis]
+        u_south = u_ext[:-1]
+        u_north = u_ext[1:]
+        du_circ = u_south * dx_south - u_north * dx_north
+    else:
+        dx_ext = jnp.pad(dx_cell, (1, 1))
+        u_south = u_ext[:-1]
+        u_north = u_ext[1:]
+        dx_south = dx_ext[:-1]
+        dx_north = dx_ext[1:]
+        bcast = (slice(None),) + (jnp.newaxis,) * (u.ndim - 1)
+        du_circ = (u_south * dx_south[bcast] - u_north * dx_north[bcast])
 
     # Append periodic wrap column to dv_circ.
     dv_circ_full = jnp.concatenate([dv_circ, dv_circ[:, 0:1]], axis=1)
@@ -798,7 +888,14 @@ def curl_vertex_cgrid(
     # Compute vorticity only on interior rows (pole rows zero by
     # construction; avoids 1/0 division — issue #173).
     circ_interior = circ[1:-1]
-    zeta_interior = circ_interior / A_vertex_interior[bcast]
+    if _tripolar_curl:
+        if is_3d:
+            zeta_interior = circ_interior / A_vertex_interior[:, :, jnp.newaxis]
+        else:
+            zeta_interior = circ_interior / A_vertex_interior
+    else:
+        bcast = (slice(None),) + (jnp.newaxis,) * (u.ndim - 1)
+        zeta_interior = circ_interior / A_vertex_interior[bcast]
     # Boundary: wall BC (zero) on regular lat-lon; fold halo on tripolar.
     zeta = pad_ns_scalar(zeta_interior, grid)
 
@@ -823,10 +920,15 @@ def _gradient_curl_to_u(
     grad : (n_lat, n_lon+1) or (n_lat, n_lon+1, nlev)
     """
     if hasattr(grid, "dy_v") and grid.dlat == 0.0:
-        dy = grid.dy_v[1, 0]  # scalar from interior row
+        # Full 2D dy at u-face stagger: use dy_u which has shape
+        # (n_lat, n_lon+1) matching the output shape.
+        dy = grid.dy_u  # (n_lat, n_lon+1)
+        if zeta.ndim == 3:
+            return (zeta[1:] - zeta[:-1]) / dy[:, :, jnp.newaxis]
+        return (zeta[1:] - zeta[:-1]) / dy
     else:
         dy = grid.radius * grid.dlat
-    return (zeta[1:] - zeta[:-1]) / dy
+        return (zeta[1:] - zeta[:-1]) / dy
 
 
 def _gradient_curl_to_v(
@@ -847,7 +949,7 @@ def _gradient_curl_to_v(
     grad : (n_lat+1, n_lon) or (n_lat+1, n_lon, nlev)
     """
     if hasattr(grid, "dx_v") and grid.dlat == 0.0:
-        dx_v_int = grid.dx_v[1:-1, 0]  # (n_lat-1,) interior rows
+        dx_v_int = grid.dx_v[1:-1]  # (n_lat-1, n_lon) — full 2D
     else:
         R = grid.radius
         dlon = grid.dlon
@@ -860,13 +962,20 @@ def _gradient_curl_to_v(
     dzeta = zeta[:, 1:] - zeta[:, :-1]  # (n_lat+1, n_lon [, nlev])
 
     # Compute gradient only on interior rows (1..n_lat-1), pad poles
-    # with zero.  Single Pad HLO op replaces alloc-zeros + concatenate-
-    # of-three.
+    # with zero.
     dzeta_int = dzeta[1:-1]  # (n_lat-1, n_lon [, nlev])
-    if zeta.ndim == 2:
-        grad_int = dzeta_int / dx_v_int[:, jnp.newaxis]
+    if dx_v_int.ndim == 2:
+        # Tripolar: full 2D dx_v
+        if zeta.ndim == 3:
+            grad_int = dzeta_int / dx_v_int[:, :, jnp.newaxis]
+        else:
+            grad_int = dzeta_int / dx_v_int
     else:
-        grad_int = dzeta_int / dx_v_int[:, jnp.newaxis, jnp.newaxis]
+        # Regular lat-lon: 1D dx_v
+        if zeta.ndim == 2:
+            grad_int = dzeta_int / dx_v_int[:, jnp.newaxis]
+        else:
+            grad_int = dzeta_int / dx_v_int[:, jnp.newaxis, jnp.newaxis]
     return pad_ns_scalar(grad_int, grid)
 
 
@@ -926,7 +1035,7 @@ def vector_laplacian_cgrid(
 
     # Mask curl at land-adjacent vertices
     if mask is not None:
-        vmask = _compute_vertex_mask(mask)
+        vmask = _compute_vertex_mask(mask, grid=grid)
         zeta = zeta * _bcast(vmask, zeta)
 
     # 4. Tangential gradient of curl at faces
@@ -1341,10 +1450,10 @@ def strain_rate_cgrid(
 
     D_S = (dv_circ_full + du_circ) / A_vertex[lat_bcast]
     # Boundary: wall BC on regular lat-lon; fold on tripolar.
-    D_S = _pad_ns_zero(D_S[1:-1])
+    D_S = pad_ns_scalar(D_S[1:-1], grid)
 
     if mask is not None:
-        vmask = _compute_vertex_mask(mask)
+        vmask = _compute_vertex_mask(mask, grid=grid)
         D_S = D_S * _bcast2d(vmask)
 
     return D_T, D_S
@@ -1506,7 +1615,7 @@ def stress_divergence_cgrid(
     # pole rows zero (wall BC).
     dsh_merid = stress_h[:-1] - stress_h[1:]
     tend_v_DT_interior = dx_v[1:-1][lat_bcast] * dsh_merid
-    tend_v_DT = _pad_ns_zero(tend_v_DT_interior)
+    tend_v_DT = pad_ns_scalar(tend_v_DT_interior, grid)
 
     # =====================================================================
     # tend_v: contribution from D_S adjoint
@@ -1705,7 +1814,7 @@ def smagorinsky_viscosity_q_cgrid(
     D_T_q = 0.25 * (D_T[:-1] + D_T[1:] + D_T_roll[:-1] + D_T_roll[1:])
 
     # D_T_q shape: (n_lat-1, n_lon, ...). Need (n_lat+1, n_lon+1, ...).
-    D_T_q = _pad_ns_zero(D_T_q)
+    D_T_q = pad_ns_scalar(D_T_q, grid)
     # Append periodic wrap column
     D_T_q = jnp.concatenate(
         [D_T_q, D_T_q[:, 0:1]], axis=1)  # (n_lat+1, n_lon+1, ...)
@@ -1726,7 +1835,7 @@ def smagorinsky_viscosity_q_cgrid(
     A_smag_q = A_smag_q.at[-1].set(0.0)
 
     if mask is not None:
-        vmask = _compute_vertex_mask(mask)
+        vmask = _compute_vertex_mask(mask, grid=grid)
         if is_3d:
             vmask = vmask[..., jnp.newaxis]
         A_smag_q = A_smag_q * vmask
@@ -2095,10 +2204,10 @@ def leith_viscosity_q_cgrid(
 
     # Zero at pole vertices, matching smagorinsky_viscosity_q_cgrid.
     # Slice + single Pad HLO op replaces zeros_like-of-slice ×2 +
-    A_leith_q = _pad_ns_zero(A_leith_q[1:-1])
+    A_leith_q = pad_ns_scalar(A_leith_q[1:-1], grid)
 
     if mask is not None:
-        vmask = _compute_vertex_mask(mask)
+        vmask = _compute_vertex_mask(mask, grid=grid)
         if is_3d:
             vmask = vmask[..., jnp.newaxis]
         A_leith_q = A_leith_q * vmask
@@ -2243,12 +2352,16 @@ def neumann_fill_vertex(
     return filled
 
 
-def _compute_vertex_mask(land_mask: jnp.ndarray) -> jnp.ndarray:
+def _compute_vertex_mask(land_mask: jnp.ndarray, grid=None) -> jnp.ndarray:
     """Compute vertex mask: wet only if all four surrounding cells are wet.
 
     Parameters
     ----------
     land_mask : (n_lat, n_lon)
+    grid : optional LatLonGrid or LatLonCGridGeometry.
+        When provided and a tripolar fold is active, the north-boundary
+        vertex mask is computed from the fold-partner cells rather than
+        being zero (wall BC).
 
     Returns
     -------
@@ -2266,6 +2379,9 @@ def _compute_vertex_mask(land_mask: jnp.ndarray) -> jnp.ndarray:
     interior_full = jnp.concatenate(
         [interior, interior[:, 0:1]], axis=1)  # (n_lat-1, n_lon+1)
 
+    fold = getattr(grid, "fold", None) if grid is not None else None
+    if fold is not None and fold.is_active:
+        return pad_ns_scalar(interior_full, grid)
     return _pad_ns_zero(interior_full)
 
 
@@ -2275,6 +2391,7 @@ def _compute_vertex_mask(land_mask: jnp.ndarray) -> jnp.ndarray:
 
 def compute_face_masks_3d(
     is_active_3d: jnp.ndarray,
+    grid=None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Per-level u-face and v-face masks from a 3D cell-activity mask.
 
@@ -2292,13 +2409,17 @@ def compute_face_masks_3d(
         Per-cell activity mask: True/1.0 where the cell has water,
         False/0.0 below the seafloor.  Typically
         ``partial_coord.is_active.astype(...)``.
+    grid : optional LatLonGrid or LatLonCGridGeometry.
+        When provided and a tripolar fold is active, the north-boundary
+        v-face mask is computed from the fold-partner cells rather than
+        being zero (wall BC).
 
     Returns
     -------
     u_mask_3d : array, shape (n_lat, n_lon+1, nlev)
         Wet u-face mask at each level (periodic in longitude).
     v_mask_3d : array, shape (n_lat+1, n_lon, nlev)
-        Wet v-face mask at each level (pole rows always zero).
+        Wet v-face mask at each level.
     """
     a = is_active_3d.astype(jnp.float32)
     # u-face j is between cell (j-1) mod n_lon (west) and cell j (east).
@@ -2306,10 +2427,16 @@ def compute_face_masks_3d(
     u_mask = jnp.concatenate(
         [u_mask_interior, u_mask_interior[:, 0:1, :]], axis=1,
     )
-    # v-face i is between cell i-1 (south) and cell i (north).  Pole
-    # boundaries (i=0 and i=n_lat) are always wall.
+    # v-face i is between cell i-1 (south) and cell i (north).
     v_mask_interior = a[:-1] * a[1:]
-    v_mask = _pad_ns_zero(v_mask_interior)
+    south = jnp.zeros_like(a[:1])
+    fold = getattr(grid, "fold", None) if grid is not None else None
+    if fold is not None and fold.is_active:
+        fold_partner = a[-1:, fold.perm_T, :]
+        north = a[-1:] * fold_partner
+    else:
+        north = jnp.zeros_like(south)
+    v_mask = jnp.concatenate([south, v_mask_interior, north], axis=0)
     return u_mask, v_mask
 
 
@@ -2911,6 +3038,7 @@ def pv_flux_al81_partial_cell(
 
 def compute_face_masks(
     land_mask: jnp.ndarray,
+    grid=None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Derive u-face and v-face masks from cell-center land mask.
 
@@ -2920,6 +3048,10 @@ def compute_face_masks(
     ----------
     land_mask : array, shape (n_lat, n_lon)
         Cell-center ocean mask (1 = ocean, 0 = land).
+    grid : optional LatLonGrid or LatLonCGridGeometry.
+        When provided and a tripolar fold is active, the north-boundary
+        v-face mask is computed from the fold-partner cells rather than
+        being zero (wall BC).
 
     Returns
     -------
@@ -2936,9 +3068,16 @@ def compute_face_masks(
     )
 
     # v-face i is between cell i and cell i+1.
-    # Pole boundaries: v=0 (always masked).  Single Pad HLO op replaces
-    # alloc-zeros + concatenate-of-three.
     v_mask_interior = land_mask[:-1] * land_mask[1:]
-    v_mask = _pad_ns_zero(v_mask_interior)
+    south = jnp.zeros((1, land_mask.shape[1]), dtype=land_mask.dtype)
+    # On tripolar grids, the fold face connects cell (fold_j, i) with
+    # its fold partner (fold_j, perm_T[i]).  Both must be ocean.
+    fold = getattr(grid, "fold", None) if grid is not None else None
+    if fold is not None and fold.is_active:
+        fold_partner = land_mask[-1:, fold.perm_T]
+        north = land_mask[-1:] * fold_partner
+    else:
+        north = jnp.zeros_like(south)
+    v_mask = jnp.concatenate([south, v_mask_interior, north], axis=0)
 
     return u_mask, v_mask

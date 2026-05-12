@@ -251,8 +251,10 @@ def main():
                 T_profile="cosine",
             ),
         ),
-        # Vertical mixing handled by the dynamics (A_v, K_v on model config)
-        vertical_mixing=VerticalMixingConfig(scheme="none"),
+        # KPP vertical mixing: essential for equatorial stability at 1°.
+        # Without KPP, the equatorial jet grows without bound (no
+        # thermocline-tilt arrest mechanism at f=0).
+        vertical_mixing=VerticalMixingConfig(scheme="kpp"),
         lateral_mixing=LateralMixingConfig(scheme="none"),
         convection=OceanConvectionConfig(
             scheme="enhanced_diffusion",
@@ -269,10 +271,26 @@ def main():
         n_barotropic_substeps=30,
         physics=physics,
         A_h=config.A_h, A_v=config.A_v, K_v=config.K_v,
+        # Latitude-dependent viscosity: cos¹(lat) scaling with a floor
+        # prevents A_h → 0 at the bipolar cap.  Main-branch 1° production
+        # config; critical for tripolar stability.
+        A_h_lat_scaling=True,
+        A_h_floor=2000.0,
+        # Flow-adaptive Laplacian Smagorinsky (MOM6 OM4 default)
+        C_smag_lap=0.15,
+        # Biharmonic dissipation for barotropic standing modes
+        B_h=5.0e9,
+        B_h_barotropic=1.0e14,
         bottom_drag_r=config.bottom_drag_coeff,
+        bottom_drag_bbl_thickness=100.0,
+        bottom_drag_bg_velocity=0.1,
         eos="linear", eos_linear=eos_config,
         gm_redi=gm_redi_cfg,
         barotropic_solver="implicit_cn",
+        # Implicit vertical mixing removes the explicit CFL limit
+        # dt < dz²/(2K) — essential for thin cap cells.
+        implicit_vertical_mixing=True,
+        use_conservation_fixer=True,
     )
 
     # ---- Create model ----
@@ -326,7 +344,7 @@ def main():
     state = state._replace(
         H_bathy=Field(jnp.array(H_bathy_clamped)),
     )
-    state = replace_land_mask(state, jnp.array(land_mask_raw))
+    state = replace_land_mask(state, jnp.array(land_mask_raw), grid=geom)
 
     # Add stratification
     state = _add_stratification(state, z_coord, config)
@@ -343,6 +361,11 @@ def main():
     print(f"  dt = {dt} s, n_steps = {n_steps:,} ({days/365:.1f} sim-yr)")
     print(f"  Block size: {block_size} steps ({n_steps // block_size} blocks)")
     print(f"  Barotropic solver: {ocean_config.barotropic_solver}")
+    print(f"  A_h={ocean_config.A_h:.0e}, A_h_floor={ocean_config.A_h_floor:.0f}, "
+          f"C_smag_lap={ocean_config.C_smag_lap}")
+    print(f"  A_h_lat_scaling={ocean_config.A_h_lat_scaling}, "
+          f"implicit_vert_mix={ocean_config.implicit_vertical_mixing}")
+    print(f"  B_h={ocean_config.B_h:.0e}, B_h_baro={ocean_config.B_h_barotropic:.0e}")
     print(f"  GM/Redi: {args.gm_redi}")
     print(f"  Output: {output_dir}")
     print()

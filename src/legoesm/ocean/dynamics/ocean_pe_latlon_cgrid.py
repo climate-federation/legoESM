@@ -73,6 +73,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     min_cell_to_uface,
     min_cell_to_vface,
     curl_vertex_cgrid,
+    pad_ns_scalar,
     smagorinsky_biharmonic_tendency_cgrid,
     smagorinsky_viscosity_cgrid,
     smagorinsky_viscosity_q_cgrid,
@@ -104,12 +105,15 @@ from legoesm.ocean.vertical import (
 # interp_cell_to_uface is imported from latlon_cgrid_operators (shared).
 
 
-def _interp_to_v_points(f: jnp.ndarray) -> jnp.ndarray:
+def _interp_to_v_points(f: jnp.ndarray, grid=None) -> jnp.ndarray:
     """Interpolate cell-center field to v-points (lat interfaces).
 
     Parameters
     ----------
     f : array, shape (n_lat, n_lon, ...) at cell centers.
+    grid : optional LatLonGrid or LatLonCGridGeometry.
+        When provided and a tripolar fold is active, the north-boundary
+        v-face value is computed from the fold-partner cells.
 
     Returns
     -------
@@ -117,6 +121,8 @@ def _interp_to_v_points(f: jnp.ndarray) -> jnp.ndarray:
     """
     from legoesm.ocean.dynamics.latlon_cgrid_operators import _pad_ns_zero
     f_interior = 0.5 * (f[:-1] + f[1:])  # (n_lat-1, n_lon, ...)
+    if grid is not None:
+        return pad_ns_scalar(f_interior, grid)
     return _pad_ns_zero(f_interior)
 
 
@@ -146,7 +152,7 @@ def _tvd_to_u_points(f: jnp.ndarray, mass_flux_u: jnp.ndarray) -> jnp.ndarray:
     return jnp.concatenate([f_tvd, f_tvd[:, 0:1]], axis=1)
 
 
-def _tvd_to_v_points(f: jnp.ndarray, mass_flux_v: jnp.ndarray) -> jnp.ndarray:
+def _tvd_to_v_points(f: jnp.ndarray, mass_flux_v: jnp.ndarray, grid=None) -> jnp.ndarray:
     """Van Leer TVD interpolation to v-points. Solid wall at poles (#170)."""
     eps = 1e-30
     f_south = f[:-1]; f_north = f[1:]
@@ -160,6 +166,8 @@ def _tvd_to_v_points(f: jnp.ndarray, mass_flux_v: jnp.ndarray) -> jnp.ndarray:
     f_neg = f_north + 0.5 * _van_leer_limiter(r_neg) * delta_neg
     from legoesm.ocean.dynamics.latlon_cgrid_operators import _pad_ns_zero
     f_tvd = jnp.where(mass_flux_v[1:-1] > 0, f_pos, f_neg)
+    if grid is not None:
+        return pad_ns_scalar(f_tvd, grid)
     return _pad_ns_zero(f_tvd)
 
 
@@ -199,6 +207,7 @@ def _upwind_to_u_points(
 def _upwind_to_v_points(
     f: jnp.ndarray,
     mass_flux_v: jnp.ndarray,
+    grid=None,
 ) -> jnp.ndarray:
     """First-order upwind interpolation of cell-center field to v-points.
 
@@ -207,6 +216,9 @@ def _upwind_to_v_points(
     f : array, shape (n_lat, n_lon, ...) at cell centers.
     mass_flux_v : array, shape (n_lat+1, n_lon, ...) at v-points.
         Sign convention: positive = flow in +i (northward) direction.
+    grid : optional LatLonGrid or LatLonCGridGeometry.
+        When provided and a tripolar fold is active, the north-boundary
+        v-face value is computed from the fold-partner cells.
 
     Returns
     -------
@@ -224,24 +236,44 @@ def _upwind_to_v_points(
     f_upwind = jnp.where(mf_interior > 0, f_south, f_north)
 
     from legoesm.ocean.dynamics.latlon_cgrid_operators import _pad_ns_zero
+    if grid is not None:
+        return pad_ns_scalar(f_upwind, grid)
     return _pad_ns_zero(f_upwind)
 
 
 def _neumann_fill_cgrid(
     f: jnp.ndarray,
     mask: jnp.ndarray,
+    grid=None,
 ) -> jnp.ndarray:
     """Fill land cells with nearest ocean-neighbor (Neumann BC).
 
     Same algorithm as latlon_operators.neumann_fill_latlon.
+
+    Parameters
+    ----------
+    f : (n_lat, n_lon, ...) field at cell centers.
+    mask : (n_lat, n_lon) ocean mask (1 = wet, 0 = land).
+    grid : optional LatLonGrid or LatLonCGridGeometry.
+        When provided and a tripolar fold is active, the north neighbor
+        of the fold row uses the fold-partner cell instead of repeating
+        the last row.
     """
+    fold = getattr(grid, "fold", None) if grid is not None else None
+    use_fold = fold is not None and fold.is_active
+
     m = mask
     filled = f
     for _ in range(3):
         f_s = jnp.concatenate([filled[0:1], filled[:-1]], axis=0)
         m_s = jnp.concatenate([m[0:1], m[:-1]], axis=0)
-        f_n = jnp.concatenate([filled[1:], filled[-1:]], axis=0)
-        m_n = jnp.concatenate([m[1:], m[-1:]], axis=0)
+        if use_fold:
+            north_of_fold = filled[-1:, fold.perm_T]
+            f_n = jnp.concatenate([filled[1:], north_of_fold], axis=0)
+            m_n = jnp.concatenate([m[1:], m[-1:, fold.perm_T]], axis=0)
+        else:
+            f_n = jnp.concatenate([filled[1:], filled[-1:]], axis=0)
+            m_n = jnp.concatenate([m[1:], m[-1:]], axis=0)
         f_w = jnp.roll(filled, 1, axis=1)
         m_w = jnp.roll(m, 1, axis=1)
         f_e = jnp.roll(filled, -1, axis=1)
@@ -747,7 +779,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # partial cells with all columns having the same bottom_level,
     # this produces identical results to broadcasting the 2D mask.
     if isinstance(z_coord, OceanPartialCellCoordinate):
-        u_mask_3d, v_mask_3d = compute_face_masks_3d(z_coord.is_active)
+        u_mask_3d, v_mask_3d = compute_face_masks_3d(z_coord.is_active, grid)
     else:
         u_mask_3d = u_mask[..., jnp.newaxis]
         v_mask_3d = v_mask[..., jnp.newaxis]
@@ -792,14 +824,14 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     eos_fn = make_eos_fn(config.eos, getattr(config, 'eos_linear', None))
     rho, rho_prime, p_prime = iterate_eos_and_pressure_anomaly(
         T, S, mask,
-        lambda field: _neumann_fill_cgrid(field, mask),
+        lambda field: _neumann_fill_cgrid(field, mask, grid=grid),
         eos_fn, z_coord.dz_ref, rho_0, g_val,
         n_iter=2,
         hi_precision_pressure=True,
         h_actual=_h_actual_pprime,
     )
 
-    p_prime_filled = _neumann_fill_cgrid(p_prime, mask)
+    p_prime_filled = _neumann_fill_cgrid(p_prime, mask, grid=grid)
 
     # --- 4. Vertical velocity from FV flux divergence ---
     # Divergence needs face fluxes: h*u at u-points, h*v at v-points.
@@ -813,7 +845,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # the tracer mass flux — required for the H&A 2009 column-sum
     # invariant to hold.
     h_u = min_cell_to_uface(h_k)
-    h_v = min_cell_to_vface(h_k)
+    h_v = min_cell_to_vface(h_k, grid)
     flux_div_k = divergence_cgrid(
         h_u * u * u_mask_3d, h_v * v * v_mask_3d, grid,
     )
@@ -874,10 +906,10 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
 
         # Fill land cells before WENO stencils so masked zeros don't
         # create false discontinuities near walls (Neumann extrapolation).
-        delta_u_sq_cell = _neumann_fill_cgrid(delta_u_sq_cell, mask)
-        u_avg_cell = _neumann_fill_cgrid(u_avg_cell, mask)
-        delta_v_sq_cell = _neumann_fill_cgrid(delta_v_sq_cell, mask)
-        v_avg_cell = _neumann_fill_cgrid(v_avg_cell, mask)
+        delta_u_sq_cell = _neumann_fill_cgrid(delta_u_sq_cell, mask, grid=grid)
+        u_avg_cell = _neumann_fill_cgrid(u_avg_cell, mask, grid=grid)
+        delta_v_sq_cell = _neumann_fill_cgrid(delta_v_sq_cell, mask, grid=grid)
+        v_avg_cell = _neumann_fill_cgrid(v_avg_cell, mask, grid=grid)
 
         # WENO upwind of δ_i u² to u-faces (gradient times dx_u_at_face).
         delta_u_sq_at_uface = _weno_cell_to_uface(
@@ -1157,7 +1189,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         _weno_order = {"weno5": 5, "weno7": 7}[_mom_adv]
         # Fill PV at land-adjacent vertices so WENO stencils see smooth
         # Neumann extrapolation instead of masked-zero discontinuities.
-        vtx_mask = _compute_vertex_mask(mask)
+        vtx_mask = _compute_vertex_mask(mask, grid=grid)
         q_filled = _neumann_fill_vertex(q, vtx_mask)
         q_at_u = _weno_zeta_at_u(
             q_filled, v, v_at_u, order=_weno_order, u_smooth=u)
@@ -1166,7 +1198,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         diag_vortcor_u = q_at_u * Fv_at_u
         diag_vortcor_v = -(q_at_v * Fu_at_v)
     else:
-        vtx_mask_va = _compute_vertex_mask(mask)
+        vtx_mask_va = _compute_vertex_mask(mask, grid=grid)
         diag_vortcor_u, diag_vortcor_v = pv_flux_al81_partial_cell(
             zeta, h_vtx, h_v, v, h_u, u,
             u_mask_3d, v_mask_3d, vtx_mask_va,
@@ -1198,8 +1230,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         dU_di_cell, dV_dj_cell = _split_velocity_divergence(
             u * u_mask_3d, v * v_mask_3d, grid)
         # Fill land cells before WENO stencils (Neumann extrapolation).
-        dU_di_filled = _neumann_fill_cgrid(dU_di_cell, mask)
-        dV_dj_filled = _neumann_fill_cgrid(dV_dj_cell, mask)
+        dU_di_filled = _neumann_fill_cgrid(dU_di_cell, mask, grid=grid)
+        dV_dj_filled = _neumann_fill_cgrid(dV_dj_cell, mask, grid=grid)
         # Matching direction (WENO upwind), cross direction (centered).
         D_at_u = (_weno_cell_to_uface(dU_di_filled, dU_di_filled, u, order=5)
                   + _centered_cell_to_uface(dV_dj_cell))
@@ -1227,7 +1259,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     h_u_old = h_u
     h_v_old = h_v
     w_u = interp_cell_to_uface(w)
-    w_v = _interp_to_v_points(w)
+    w_v = _interp_to_v_points(w, grid=grid)
     if _mom_adv in ("weno5", "weno7"):
         # WENO vertical momentum advection removes the implicit viscosity
         # (~|w|*dz/2) that first-order upwind provides.  Requires
@@ -1593,7 +1625,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             )
         else:
             dz_bot_u = z_coord.dz_ref[-1] * jnp.maximum(interp_cell_to_uface(J), 1e-10)
-            dz_bot_v = z_coord.dz_ref[-1] * jnp.maximum(_interp_to_v_points(J), 1e-10)
+            dz_bot_v = z_coord.dz_ref[-1] * jnp.maximum(_interp_to_v_points(J, grid=grid), 1e-10)
             # Capture only at the bottom level; zeros elsewhere.
             r_eff_u_bot = r_eff_u[..., -1] if u_bg > 0.0 else r_eff_u
             r_eff_v_bot = r_eff_v[..., -1] if u_bg > 0.0 else r_eff_v
@@ -1614,7 +1646,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             and u.shape[-1] >= 2
             and not getattr(config, "implicit_vertical_mixing", False)):
         jac_v_u = jnp.maximum(interp_cell_to_uface(J)[..., jnp.newaxis], 1e-10)
-        jac_v_v = jnp.maximum(_interp_to_v_points(J)[..., jnp.newaxis], 1e-10)
+        jac_v_v = jnp.maximum(_interp_to_v_points(J, grid=grid)[..., jnp.newaxis], 1e-10)
         for vel, jac, is_u in [(u_prime, jac_v_u, True), (v_prime, jac_v_v, False)]:
             dv_dz_half = (vel[..., :-1] - vel[..., 1:]) / (
                 z_coord.dz_half_ref * jac
@@ -1650,7 +1682,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         )
         phys = physics_fn(cc_state, grid, z_coord, surface_forcing)
         diag_phys_u = interp_cell_to_uface(phys.du_dt.data)
-        diag_phys_v = _interp_to_v_points(phys.dv_dt.data)
+        diag_phys_v = _interp_to_v_points(phys.dv_dt.data, grid=grid)
         du_dt = du_dt + diag_phys_u
         dv_dt = dv_dt + diag_phys_v
         dT_dt = dT_dt + phys.dT_dt.data
@@ -1673,7 +1705,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             diag_sponge_u = gamma_u * (sponge.u_ref.astype(_dt) - u)
             du_dt = du_dt + diag_sponge_u
         if sponge.v_ref is not None:
-            gamma_v = _interp_to_v_points(sponge.gamma.astype(_dt))[..., jnp.newaxis]
+            gamma_v = _interp_to_v_points(sponge.gamma.astype(_dt), grid=grid)[..., jnp.newaxis]
             diag_sponge_v = gamma_v * (sponge.v_ref.astype(_dt) - v)
             dv_dt = dv_dt + diag_sponge_v
 
