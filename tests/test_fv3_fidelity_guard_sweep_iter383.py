@@ -346,6 +346,7 @@ _GUARD_MODULES = (
     "test_fv3_precipitable_water_iter756",           # iter-756 add
     "test_fv3_total_atmosphere_mass_iter757",        # iter-757 add
     "test_fv3_column_thickness_iter758",             # iter-758 add
+    "test_fv3_surface_pressure_iter759",             # iter-759 add
 )
 
 

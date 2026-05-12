@@ -3022,6 +3022,39 @@ def potential_energy_column_fv3(
     return column_integral_delp_fv3(phi_avg, delp)
 
 
+def surface_pressure_from_delp_fv3(
+    delp: jax.Array,
+    p_top: float = 0.0,
+) -> jax.Array:
+    """FV3_3D iter 759: surface pressure from column delp.
+
+        ps = p_top + Σ_k delp[k]
+
+    Standard FV3 IC pattern.  Inverse of iter-731
+    ``compute_pe_from_delp_fv3`` for the surface interface
+    (``pe[km] = ps``).
+
+    Used in IC ingestion paths to recover ps from a delp profile
+    (e.g., after reading external pressure-level data and
+    inverting the hybrid-coord chain).
+
+    Pairs with iter-731 (full pe profile) and iter-724
+    ``compute_hybrid_pressure_fv3`` (ak/bk/ps path).
+
+    Parameters
+    ----------
+    delp : jax.Array, shape (..., km)
+        Pressure thickness (Pa).
+    p_top : float, default 0.0.
+
+    Returns
+    -------
+    ps : jax.Array, shape (...,)
+        Surface pressure (Pa).
+    """
+    return p_top + jnp.sum(delp, axis=-1)
+
+
 def column_geopotential_thickness_fv3(
     delz: jax.Array,
 ) -> jax.Array:

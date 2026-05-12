@@ -1195,6 +1195,26 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 759: **``surface_pressure_from_delp_fv3``** — ps from column delp.
+
+      ps = p_top + Σ_k delp[k]
+
+  Standard FV3 IC pattern.  Inverse of iter-731 ``compute_pe_from_delp_fv3``
+  for the surface interface (``pe[km] = ps``).
+
+  Used in IC ingestion paths to recover ps from a delp profile
+  after reading external pressure-level data and inverting the
+  hybrid-coord chain.
+
+  Tests (6/6 in <1 s):
+  1. Σ delp=1e5, p_top=0 → ps=1e5.
+  2. delp=0 → ps=p_top.
+  3. p_top offset propagates.
+  4. ps = pe[..., -1] from iter-731 exactly.
+  5. 3-D shapes.
+  6. No NaN/Inf.
+
+  Wired into iter-383 sweep (now 324).
 - Iter 758: **``column_geopotential_thickness_fv3``** — z_top − z_surface.
 
       thickness = Σ_k (−delz[k])    (m, positive)
