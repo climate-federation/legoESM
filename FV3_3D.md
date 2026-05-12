@@ -1195,6 +1195,31 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 735: **``theta_dry_fv3``** — dry potential temperature.
+
+  Standard Poisson form:
+
+      θ = T · (p_ref / p)^κ
+
+  Used throughout FV3 dyn_core, fv_mapz, and diagnostic paths.
+  For moist atmosphere, accepts ``cappa`` array (from iter-723
+  ``cappa_moist_fv3``) for variable-exponent θ.
+
+  Pairs with iter-722 ``compute_pkz_fv3`` (provides layer-mean
+  pkz for the standard ``θ = pt / pkz`` form), iter-723
+  ``cappa_moist_fv3`` (moist κ).
+
+  Defaults: ``p_ref = 1e5 Pa``, ``cappa = constants.kappa``.
+
+  Tests (6/6 in <1 s):
+  1. p = p_ref → θ = T exactly.
+  2. p < p_ref → θ > T (adiabatic lift).
+  3. Moist cappa override.
+  4. Consistent with iter-722 pkz inverse path.
+  5. 3-D shapes.
+  6. No NaN/Inf.
+
+  Wired into iter-383 sweep (now 299).
 - Iter 734: **``air_density_fv3``** + iter-725 refactor.
 
   Faithful port of FV3's standard air density pattern:

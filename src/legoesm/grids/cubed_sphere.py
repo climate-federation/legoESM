@@ -2806,6 +2806,47 @@ def get_pressure_given_height_fv3(
     return p
 
 
+def theta_dry_fv3(
+    pt: jax.Array,
+    p: jax.Array,
+    p_ref: float = 1.0e5,
+    cappa: float | jax.Array | None = None,
+) -> jax.Array:
+    """FV3_3D iter 735: dry potential temperature.
+
+    Standard Poisson form:
+
+        θ = T · (p_ref / p)^κ
+
+    Used throughout FV3 dyn_core, fv_mapz, and diagnostic paths.
+    For moist atmosphere, pass ``cappa = cappa_moist_fv3(q)`` from
+    iter-723 to get the variable-exponent θ.
+
+    Pairs with iter-722 ``compute_pkz_fv3`` (which provides
+    layer-mean ``pkz`` for the standard ``θ = pt / pkz`` form).
+
+    Parameters
+    ----------
+    pt : jax.Array
+        Air temperature (K).
+    p : jax.Array
+        Pressure at evaluation point (Pa).
+    p_ref : float, default 1e5
+        Reference pressure (Pa).
+    cappa : float or jax.Array, optional
+        Poisson exponent.  Default ``constants.kappa``.  Use
+        layer-varying array for moist atmosphere (iter-723
+        cappa_moist_fv3 output).
+
+    Returns
+    -------
+    theta : jax.Array
+        Potential temperature (K).
+    """
+    kap = constants.kappa if cappa is None else cappa
+    return pt * (p_ref / p) ** kap
+
+
 def air_density_fv3(
     delp: jax.Array,
     delz: jax.Array,
