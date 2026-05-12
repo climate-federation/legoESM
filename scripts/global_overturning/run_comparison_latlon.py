@@ -433,12 +433,15 @@ def main():
     print(f"  Per-timestep scalars → {csv_path}")
     print(f"  Daily snapshots → {snapshot_dir}\n")
 
-    # Precompute for diagnostics
+    # Precompute for diagnostics — use OCEAN-only cells for dx_min
     R = constants.R_earth
     dlat = grid.lat[1] - grid.lat[0]   # uniform spacing [rad]
     dlon = grid.dlon                     # scalar [rad]
     cos_lat = grid.cos_lat               # (n_lat,)
-    dx_min = float(R * dlon * jnp.min(cos_lat[cos_lat > 0.01]))
+    # Mask to ocean latitudes only (any ocean cell in that row)
+    ocean_row = jnp.any(ocean_mask > 0.5, axis=1)  # (n_lat,)
+    cos_ocean = jnp.where(ocean_row, cos_lat, 1.0)  # 1.0 for land rows
+    dx_min = float(R * dlon * jnp.min(cos_ocean))
     dy = float(R * dlat)
 
     t0 = time.time()
