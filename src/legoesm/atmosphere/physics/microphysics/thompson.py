@@ -241,6 +241,22 @@ def thompson_microphysics(
     rime_to_graupel_from_s = rime_to_graupel_from_s * qs_scale
     rime_to_graupel = rime_to_graupel_from_i + rime_to_graupel_from_s
 
+    # === DONOR CLAMP for q_v sinks ===
+    # Vapor budget: dq_v_dt = -condensation + evaporation - dq_i_dep.
+    # Positive condensation AND positive dq_i_dep together remove
+    # vapor; without a joint clamp, supersaturated icy layers can
+    # over-draw q_v.  Mirror Morrison's iter-25 q_v clamp.  Codex
+    # iter-29 #2.
+    cond_pos = jnp.maximum(condensation, 0.0)
+    qv_sink_total = cond_pos + jnp.maximum(dq_i_dep, 0.0)
+    qv_avail = jnp.clip(q_v, 0.0)
+    qv_scale = jnp.minimum(
+        1.0,
+        qv_avail / jnp.maximum(qv_sink_total * dt_safe, 1e-30),
+    )
+    condensation = jnp.where(condensation > 0.0, condensation * qv_scale, condensation)
+    dq_i_dep = dq_i_dep * qv_scale
+
     # === SEDIMENTATION ===
     # Marshall-Palmer fall speeds use fractional exponents (b_v_x in
     # [0.25, 0.5]); guard the AD path with safe_pow.
@@ -255,8 +271,16 @@ def thompson_microphysics(
     V_t_g = config.a_v_g * safe_pow(jnp.clip(q_g, 0.0) * rho_ratio, config.b_v_g)
     V_t_g = jnp.clip(V_t_g, 0.0, 30.0)
 
+    # Joint q_r donor cap: pass rain evaporation as extra_sink so sed +
+    # evap can't jointly drive q_r negative (codex iter-29 #1).  q_i,
+    # q_s, q_g have no in-scheme evaporation sink other than the
+    # melt → q_r conversion (which is a q_i / q_s / q_g sink already
+    # bounded by the q_i / q_s donor clamps), so they only need the
+    # standard self-CFL cap.
     sed_r, precip_r = sedimentation_tendency(
-        q_r, rho, V_t_r, dz, dt=dt, return_surface_flux=True,
+        q_r, rho, V_t_r, dz, dt=dt,
+        return_surface_flux=True,
+        extra_sink=evaporation,
     )
     sed_i, precip_i = sedimentation_tendency(
         q_i, rho, V_t_i, dz, dt=dt, return_surface_flux=True,

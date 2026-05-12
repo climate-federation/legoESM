@@ -116,6 +116,7 @@ def sedimentation_tendency(
     dz: jax.Array,
     dt: float | jax.Array | None = None,
     return_surface_flux: bool = False,
+    extra_sink: jax.Array | None = None,
 ) -> jax.Array | tuple[jax.Array, jax.Array]:
     """Compute sedimentation tendency from vertical flux divergence.
 
@@ -145,6 +146,12 @@ def sedimentation_tendency(
         bottom interface [kg/m²/s].  Precipitation diagnostics MUST use
         this — using the raw ``V_t · q · rho`` at the surface breaks
         column water conservation whenever the limiter fires.
+    extra_sink : jax.Array, optional
+        Additional per-level sink rate [kg/kg/s] (e.g. rain evaporation
+        in the same step).  When supplied with ``dt``, the outgoing-flux
+        cap becomes ``(q - extra_sink·dt) · ρ · dz / dt`` so the
+        combined per-step removal by sedimentation plus the external
+        sink cannot exceed available ``q``.  Codex iter-29 #1.
 
     Returns
     -------
@@ -157,10 +164,16 @@ def sedimentation_tendency(
 
     if dt is not None:
         # Positivity-preserving flux limiter: outgoing flux at level k
-        # cannot exceed the mass available in that layer per step.
-        # ``q*rho*dz/dt`` is the maximum sustainable flux density that
-        # leaves ``q_new ≥ 0`` for ANY local Courant number.
-        max_outflux = q_pos * rho * dz / jnp.maximum(dt, 1.0e-12)
+        # cannot exceed the mass available in that layer per step,
+        # net of any other per-step sink (``extra_sink·dt``).  Without
+        # this joint accounting, separately-capped sedimentation and
+        # rain evaporation can each remove q/dt, summing to 2·q/dt
+        # over one step and driving q < 0.
+        if extra_sink is not None:
+            q_for_cap = jnp.maximum(q_pos - extra_sink * dt, 0.0)
+        else:
+            q_for_cap = q_pos
+        max_outflux = q_for_cap * rho * dz / jnp.maximum(dt, 1.0e-12)
         flux = jnp.minimum(flux, max_outflux)
 
     # Flux from above: zero at top, flux[k-1] enters level k.  Use

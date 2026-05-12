@@ -158,8 +158,13 @@ def kessler_microphysics(
     V_t = config.rain_fall_speed * jnp.sqrt(
         rho_sfc / jnp.clip(rho, 0.1)
     )
+    # Joint q_r donor cap: pass evaporation as ``extra_sink`` so the
+    # sedimentation flux limiter accounts for the rain evaporation that
+    # also removes q_r in the same step.  Codex iter-29 #1.
     sed_tend, precipitation = sedimentation_tendency(
-        q_r, rho, V_t, dz, dt=dt, return_surface_flux=True,
+        q_r, rho, V_t, dz, dt=dt,
+        return_surface_flux=True,
+        extra_sink=evaporation,
     )
 
     # 6. Latent heating

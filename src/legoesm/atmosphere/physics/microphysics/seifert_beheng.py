@@ -121,8 +121,13 @@ def seifert_beheng_microphysics(
         jnp.clip(q_r, 0.0) * rho / jnp.clip(rho_sfc, 0.1), config.b_v_r,
     )
     V_t_r = jnp.clip(V_t_r, 0.0, 20.0)
+    # Joint q_r donor cap: pass evaporation as ``extra_sink`` so sed +
+    # evap together cannot remove more rain than is locally available
+    # (codex iter-29 #1).
     sed_r, precipitation = sedimentation_tendency(
-        q_r, rho, V_t_r, dz, dt=dt, return_surface_flux=True,
+        q_r, rho, V_t_r, dz, dt=dt,
+        return_surface_flux=True,
+        extra_sink=evaporation,
     )
 
     # 7. Latent heating
