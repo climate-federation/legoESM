@@ -5104,6 +5104,45 @@ is verifiable with unit tests in seconds rather than wall-time
 sweeps.  Users running the NH compressible-Euler 3D path now have
 the same cube-imprint defense as users running the PE 3D path.
 
+## Iter 821 — mean_layer_field_fv3 + iter-819/820 refactor
+
+Extracted `mean_layer_field_fv3(field, z, z_bot, z_top,
+weight_floor=1e-12)` to `grids/cubed_sphere.py` from the
+duplicated mean-layer computation pattern in iter-819
+(``mean_wind_layer_fv3``) and iter-820
+(``mean_layer_temperature_fv3``):
+
+```
+⟨X⟩ = Σ_k X_mid(k) · Δz(k) · mask(z_mid(k)) / Σ_k Δz(k) · mask(z_mid)
+```
+
+Mask = 1 where ``z_mid`` ∈ [z_bot, z_top], else 0.
+
+Refactors:
+  * iter-819 ``mean_wind_layer_fv3`` → two delegated calls (u, v).
+  * iter-820 ``mean_layer_temperature_fv3`` → single delegated call.
+
+Both iter-819 and iter-820 5/5 + 5/5 tests pass post-refactor —
+output bit-identical (same operation expressed via shared helper).
+
+Generic primitive works on any scalar field: u, v, T, q, θ, θ_e,
+θ_v, RH, ρ, p, etc.  Pure JAX, vmap-compatible.
+
+Test: `tests/test_fv3_mean_layer_field_iter821.py` (6 tests:
+constant → const, linear → midpoint analytic, humidity-like
+exponential decay → PBL > mid-trop, out-of-range → 0 via floor,
+iter-819 wind preserved, iter-820 T preserved).
+
+### Why this iteration was meaningful
+
+Matches the iter-720/727/728/766/771/776/806 helper-extraction
+lineage.  Eliminates duplicated mean-layer computation pattern
+between iter-819 and iter-820 — both now delegate to the generic
+`mean_layer_field_fv3`.  Future depth-mean diagnostics (mean q,
+mean θ_e, mean RH over any [z_bot, z_top] layer) compose
+directly without re-deriving the midpoint-mask integral.  Pure
+JAX, vmap-compatible.  No new physical constants introduced.
+
 
 
 

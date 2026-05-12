@@ -6157,6 +6157,58 @@ def effective_bulk_shear_fv3(
     return u_top - u_bot, v_top - v_bot
 
 
+def mean_layer_field_fv3(
+    field: jax.Array,
+    z: jax.Array,
+    z_bot: jax.Array,
+    z_top: jax.Array,
+    weight_floor: float = 1e-12,
+) -> jax.Array:
+    """FV3_3D iter 821: generic depth-weighted scalar mean over layer.
+
+        ⟨X⟩ = Σ_k X_mid(k) · Δz(k) · mask(z_mid(k)) / Σ_k Δz(k) · mask(z_mid)
+
+    Mask = 1 where ``z_mid`` ∈ [z_bot, z_top], else 0.
+
+    Generic scalar primitive extracted from the iter-819
+    ``mean_wind_layer_fv3`` and iter-820 ``mean_layer_temperature_fv3``
+    pattern.  Both helpers refactored to delegate to this function.
+
+    Useful for any depth-weighted layer mean:
+      * iter-819 mean wind (u, v components via two calls)
+      * iter-820 mean T
+      * mean specific humidity over a layer
+      * mean θ, θ_e, θ_v over a layer
+      * mean RH, mean ρ, mean p
+
+    ``weight_floor`` prevents 0/0 when layer falls entirely outside
+    the column (output = 0).
+
+    Parameters
+    ----------
+    field : jax.Array, shape (km,)
+        Scalar field on column levels.
+    z : jax.Array, shape (km,)
+        Geopotential height column (m), monotone increasing.
+    z_bot, z_top : jax.Array
+        Layer bounds (m).
+    weight_floor : float
+        Lower bound on Σ weights (m); default 1e-12.
+
+    Returns
+    -------
+    field_mean : jax.Array
+        Depth-weighted mean of ``field`` over the layer.
+    """
+    z_mid = 0.5 * (z[1:] + z[:-1])
+    dz = z[1:] - z[:-1]
+    field_mid = 0.5 * (field[1:] + field[:-1])
+    inside = (z_mid >= z_bot) & (z_mid <= z_top)
+    weights = jnp.where(inside, dz, 0.0)
+    total = jnp.maximum(jnp.sum(weights), weight_floor)
+    return jnp.sum(field_mid * weights) / total
+
+
 def mean_wind_layer_fv3(
     u: jax.Array,
     v: jax.Array,
@@ -6208,15 +6260,9 @@ def mean_wind_layer_fv3(
     (u_mean, v_mean) : tuple of jax.Array
         Depth-weighted mean wind components (m/s).
     """
-    z_mid = 0.5 * (z[1:] + z[:-1])
-    dz = z[1:] - z[:-1]
-    u_mid = 0.5 * (u[1:] + u[:-1])
-    v_mid = 0.5 * (v[1:] + v[:-1])
-    inside = (z_mid >= z_bot) & (z_mid <= z_top)
-    weights = jnp.where(inside, dz, 0.0)
-    total = jnp.maximum(jnp.sum(weights), weight_floor)
-    u_mean = jnp.sum(u_mid * weights) / total
-    v_mean = jnp.sum(v_mid * weights) / total
+    # iter-821: delegate scalar layer-mean to mean_layer_field_fv3
+    u_mean = mean_layer_field_fv3(u, z, z_bot, z_top, weight_floor)
+    v_mean = mean_layer_field_fv3(v, z, z_bot, z_top, weight_floor)
     return u_mean, v_mean
 
 
@@ -6259,13 +6305,8 @@ def mean_layer_temperature_fv3(
     t_mean : jax.Array
         Depth-weighted mean temperature (K).
     """
-    z_mid = 0.5 * (z[1:] + z[:-1])
-    dz = z[1:] - z[:-1]
-    t_mid = 0.5 * (t[1:] + t[:-1])
-    inside = (z_mid >= z_bot) & (z_mid <= z_top)
-    weights = jnp.where(inside, dz, 0.0)
-    total = jnp.maximum(jnp.sum(weights), weight_floor)
-    return jnp.sum(t_mid * weights) / total
+    # iter-821: delegate to mean_layer_field_fv3
+    return mean_layer_field_fv3(t, z, z_bot, z_top, weight_floor)
 
 
 def shear_squared_fv3(

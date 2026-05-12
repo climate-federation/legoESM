@@ -408,6 +408,7 @@ _GUARD_MODULES = (
     "test_fv3_effective_bulk_shear_iter818",         # iter-818 add
     "test_fv3_mean_wind_layer_iter819",              # iter-819 add
     "test_fv3_mean_layer_temperature_iter820",       # iter-820 add
+    "test_fv3_mean_layer_field_iter821",             # iter-821 add
 )
 
 
