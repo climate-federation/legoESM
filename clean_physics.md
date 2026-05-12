@@ -129,6 +129,26 @@ the resulting overshoot in θ/q.  Cap is ``M ≤ 0.5·ρ·dz/dt``
 **Tests (post iter-11):**
 - 95 atmosphere turbulence tests pass (all schemes including EDMF).
 
+### Iteration 14 — 2026-05-12
+
+**Action: fix the remaining pre-existing test failures unrelated to
+clean_physics iters 1-13.**  All 4 categories now pass:
+
+- `test_hybrid_tracer_path_calls_vertical_advection` — replaced
+  hardcoded `/home/gentine/...` path with `Path(legoesm.__file__).parent`.
+- `test_ah_lat_scaling.py` (4 tests) — `laplacian_scaling_factor`
+  default changed from `power=2` to `power=1` (constant grid Re,
+  production-recommended); tests now explicitly pass `power=2` to
+  preserve the legacy cos² regression coverage they were written for.
+- `test_dca_extended_mse_conservation` — DCA now closes the STANDARD
+  MSE `c_pd·∫dT + L_v·∫dq_v ~ 0` (because the in-scheme
+  `delta_T_lh` releases the latent heat of condensation per pair).
+  Test was checking an older "no in-scheme latent heating" form;
+  updated docstring + expected formula.
+
+**Tests (post iter-14):**
+- 73 / 73 across the four affected test files pass.
+
 ### Iteration 13 — 2026-05-12
 
 **Action:** Fixed `tests/unit/test_land_ice_sea_ice_thermo.py::Test8i_StefanBoltzmann::test_lw_up_matches`.  Test was missing the
