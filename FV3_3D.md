@@ -1195,6 +1195,42 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 612: **FV3 mirror + great-circle interpolation helpers**.
+  Faithful ports of FV3 ``fv_grid_utils.F90`` helpers built on
+  iter-611 Cartesian primitives:
+
+  | Function          | F90 line | Role                                |
+  |-------------------|----------|-------------------------------------|
+  | ``mirror_xyz``    | 1668     | reflect Cartesian point across GC plane |
+  | ``mirror_latlon`` | 1705     | (lon, lat) wrapper for ``mirror_xyz``  |
+  | ``intp_great_circle`` | 1896 | secant linear interp on GC          |
+  | ``slerp``         | 1927     | Shoemake arc-length-uniform slerp   |
+
+  Used in FV3 cubed-sphere grid generation: panel construction
+  via reflections across face symmetry planes (mirror), and edge
+  refinement via either secant interpolation (FV3 default) or
+  proper slerp (used in cubed-sphere C-grid metric refinement).
+
+  ``intp_great_circle(β=0.5)`` is identity-equivalent to
+  ``mid_pt_sphere``; verified in test.
+
+  Antipodal safety in ``slerp``: FV3 raises a fatal for
+  ``|ω|<1e-5``; we instead silently fall back to the secant
+  interpolant (well-defined for colocated ω=0 points, and at
+  least returns finite values for near-antipodal cases where
+  the great-circle is ambiguous).
+
+  Tests (9/9 in <1 s):
+  1. ``mirror_xyz`` preserves unit norm.
+  2. ``mirror_xyz`` involutive (mirror² = id).
+  3. ``mirror_xyz`` fixed on plane (p on plane → p).
+  4. ``mirror_latlon`` matches Cartesian roundtrip.
+  5. ``intp_great_circle`` β=0/1 endpoints exact.
+  6. ``intp_great_circle`` β=0.5 ↔ ``mid_pt_sphere``.
+  7. ``slerp`` β=0/1 endpoints exact.
+  8. ``slerp`` β=0.5 arc-length-equidistant.
+  9. ``slerp`` colocated-point safe.
+  Wired into iter-383 sweep (now 184).
 - Iter 611: **FV3 Cartesian grid primitives**.  Faithful ports of
   the building-block helpers from FV3 ``fv_grid_utils.F90``:
 

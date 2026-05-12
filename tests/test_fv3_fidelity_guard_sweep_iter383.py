@@ -207,6 +207,7 @@ _GUARD_MODULES = (
     "test_mid_pt_sphere_iter608",                    # iter-608 add
     "test_terrain_filter_mass_iter609",              # iter-609 add
     "test_fv3_cartesian_primitives_iter611",         # iter-611 add
+    "test_fv3_mirror_intp_iter612",                  # iter-612 add
 )
 
 

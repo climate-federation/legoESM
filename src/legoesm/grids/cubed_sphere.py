@@ -1042,6 +1042,121 @@ def get_unit_vect2(
     return normalize_vect(uc)
 
 
+def mirror_xyz(
+    p1: jax.Array, p2: jax.Array, p0: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 612: reflect ``p0`` across great-circle plane (p1, p2).
+
+    Faithful port of FV3 ``mirror_xyz`` (fv_grid_utils.F90:1668-1702).
+    The mirror plane is the great circle through ``p1`` and ``p2``;
+    the plane normal is ``nb = (p1 × p2) / |p1 × p2|``.  Mirror image
+    of ``p0`` is::
+
+        p = p0 - 2·(p0·nb)·nb
+
+    Used in FV3 cubed-sphere grid generation (panel reflections
+    across face symmetry planes).
+
+    Takes the last axis as the 3-vector component; broadcasts on
+    leading axes.  Each of ``p1``, ``p2``, ``p0`` is shape
+    ``(..., 3)``; result is ``(..., 3)``.
+    """
+    nb_raw = vect_cross(p1, p2)
+    nb = normalize_vect(nb_raw)
+    pdot = jnp.sum(p0 * nb, axis=-1, keepdims=True)
+    return p0 - 2.0 * pdot * nb
+
+
+def mirror_latlon(
+    lon1: jax.Array, lat1: jax.Array,
+    lon2: jax.Array, lat2: jax.Array,
+    lon0: jax.Array, lat0: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 612: (lon, lat) reflection across great-circle (p1,p2).
+
+    Faithful port of FV3 ``mirror_latlon`` (fv_grid_utils.F90:
+    1705-1736).  Converts inputs to Cartesian, calls ``mirror_xyz``,
+    converts back.  Returns ``(lon3, lat3)`` of the mirror image.
+    """
+    x1, y1, z1 = latlon2xyz(lon1, lat1)
+    x2, y2, z2 = latlon2xyz(lon2, lat2)
+    x0, y0, z0 = latlon2xyz(lon0, lat0)
+    p1 = jnp.stack([x1, y1, z1], axis=-1)
+    p2 = jnp.stack([x2, y2, z2], axis=-1)
+    p0 = jnp.stack([x0, y0, z0], axis=-1)
+    p3 = mirror_xyz(p1, p2, p0)
+    return xyz2latlon(p3[..., 0], p3[..., 1], p3[..., 2])
+
+
+def intp_great_circle(
+    beta: jax.Array,
+    lon1: jax.Array, lat1: jax.Array,
+    lon2: jax.Array, lat2: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 612: linear-in-Cartesian great-circle interpolation.
+
+    Faithful port of FV3 ``intp_great_circle`` (fv_grid_utils.F90:
+    1896-1925).  At ``beta ∈ [0, 1]`` interpolates from ``p1``
+    (β=0) to ``p2`` (β=1) along the great circle::
+
+        s = (1-β)·e1 + β·e2;   e_out = s / |s|
+
+    NOTE: this is the SECANT linear interpolant projected to the
+    sphere — NOT slerp.  For β=0.5 it matches ``mid_pt_sphere``.
+    For an arc-length-uniform variant use ``slerp``.
+    """
+    alpha = 1.0 - beta
+    x1, y1, z1 = latlon2xyz(lon1, lat1)
+    x2, y2, z2 = latlon2xyz(lon2, lat2)
+    s1 = alpha * x1 + beta * x2
+    s2 = alpha * y1 + beta * y2
+    s3 = alpha * z1 + beta * z2
+    dd = jnp.sqrt(s1 * s1 + s2 * s2 + s3 * s3)
+    safe = jnp.where(dd > 0.0, dd, 1.0)
+    return xyz2latlon(s1 / safe, s2 / safe, s3 / safe)
+
+
+def slerp(
+    beta: jax.Array,
+    lon1: jax.Array, lat1: jax.Array,
+    lon2: jax.Array, lat2: jax.Array,
+    eps_omg: float = 1e-5,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 612: spherical linear interpolation (Shoemake slerp).
+
+    Faithful port of FV3 ``spherical_linear_interpolation``
+    (fv_grid_utils.F90:1927-1979).  Arc-length-uniform
+    interpolation along the great circle::
+
+        ω = acos(e1·e2)
+        e_b = (sin((1-β)ω)·e1 + sin(βω)·e2) / sin(ω)
+
+    Returns ``(lon_b, lat_b)`` at parameter ``β ∈ [0, 1]``.
+
+    Antipodal-point safety: FV3 raises a fatal error for
+    ``|ω| < 1e-5``; here we silently return the secant interpolant
+    (well-defined for ω=0 colocated points; near-antipodal points
+    still have ambiguous slerp direction so caller should avoid).
+    """
+    alpha = 1.0 - beta
+    x1, y1, z1 = latlon2xyz(lon1, lat1)
+    x2, y2, z2 = latlon2xyz(lon2, lat2)
+    dot = jnp.clip(x1 * x2 + y1 * y2 + z1 * z2, -1.0, 1.0)
+    omg = jnp.arccos(dot)
+    sin_omg = jnp.sin(omg)
+    safe_sin = jnp.where(jnp.abs(sin_omg) > eps_omg, sin_omg, 1.0)
+    w1 = jnp.sin(alpha * omg) / safe_sin
+    w2 = jnp.sin(beta * omg) / safe_sin
+    # Fallback to secant for tiny ω (well-defined colocated case)
+    secant = jnp.abs(omg) <= eps_omg
+    w1 = jnp.where(secant, alpha, w1)
+    w2 = jnp.where(secant, beta, w2)
+    xb = w1 * x1 + w2 * x2
+    yb = w1 * y1 + w2 * y2
+    zb = w1 * z1 + w2 * z2
+    return xyz2latlon(xb, yb, zb)
+
+
 def rotate_winds_geo_to_grid(
     u_east: jax.Array, v_north: jax.Array, angle: jax.Array
 ) -> tuple[jax.Array, jax.Array]:
