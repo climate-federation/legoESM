@@ -2644,6 +2644,94 @@ def get_staggered_grid_fv3(
     return pt_c_lon, pt_c_lat, pt_d_lon, pt_d_lat
 
 
+def get_pressure_given_height_fv3(
+    wz: jax.Array, peln: jax.Array,
+    height: jax.Array, ts: jax.Array,
+    fac: float | None = None,
+) -> jax.Array:
+    """FV3_3D iter 683: pressure at given height (inverse of iter-681).
+
+    Faithful JAX port of FV3 ``get_pressure_given_height``
+    (tools/fv_diagnostics.F90:4312-4365).
+
+    Algorithm:
+        For each target height h:
+            if h >= wz[km] (above surface):
+                find k where wz[k+1] <= h < wz[k]
+                logp = peln[k] + (peln[k+1] - peln[k]) ·
+                       (wz[k] - h) / (wz[k] - wz[k+1])
+                p = exp(logp)
+            else (below surface, extrapolate):
+                tm = (R_d/g) · (ts + 3.25e-3·(wz[km] - h))
+                                       # 6.5 K/km half-depth lapse
+                p = exp(peln[km] + (wz[km] - h)/tm)
+
+    Used by FV3 to convert z-level diagnostics to pressure-level.
+
+    Parameters
+    ----------
+    wz : jax.Array, shape (..., km+1)
+        Layer interface heights (FV3 wz[0]=top, wz[km]=surface).
+    peln : jax.Array, shape (..., km+1)
+        Log-pressure at layer interfaces.
+    height : jax.Array, shape (...,)
+        Target heights at which to evaluate pressure (m).
+    ts : jax.Array, shape (...,)
+        Surface temperature (K) for below-surface extrapolation.
+    fac : float, optional
+        Optional multiplicative factor applied to output.
+
+    Returns
+    -------
+    p : jax.Array, shape (...,)
+        Pressure at target height (Pa).
+    """
+    g = constants.g
+    Rdgas = constants.R_d
+    # km = wz.shape[-1] - 1
+    # 0-indexed convention: wz[..., 0]=top, wz[..., km]=surface.
+    # FV3's "k from 1..km" sweeps top to bottom; we find k_python in [0, km-1].
+    km = wz.shape[-1] - 1
+    # Search for k where wz[k+1] <= height < wz[k]
+    # Since wz monotonically decreasing top→bottom: find smallest k such that
+    # wz[k+1] <= height; this gives the candidate layer index.
+    # Using a different approach: gtmask[k] = (wz[k] > height); count → k.
+    gt_mask = wz[..., :-1] > height[..., None]   # (..., km)
+    # k = number of True minus 1? Actually first True gives k.
+    # We want the first index where wz[k] > height AND wz[k+1] <= height.
+    # i.e., the first k where height is "below" wz[k] (since decreasing).
+    # If height >= wz[0] (top), we'd want k=0; if height < wz[km] (surface),
+    # we go to the extrapolation branch.
+    # Compute k as count of wz[k+1] > height (gives the index k where wz[k+1]
+    # first crosses below height).
+    # Actually easier: use jnp.searchsorted on -wz to find ascending position.
+    # Or use: k = argmax of (height >= wz[1:]) (first index where wz[k+1] is
+    # at or below height).
+    # Use cumulative sum: count of (wz[k+1] > height); k = that count
+    # (clipped to [0, km-1]).
+    above_count = jnp.sum((wz[..., 1:] > height[..., None]).astype(jnp.int32), axis=-1)
+    k = jnp.clip(above_count, 0, km - 1)
+    # Take wz[k], wz[k+1], peln[k], peln[k+1]
+    wz_k = jnp.take_along_axis(wz, k[..., None], axis=-1).squeeze(-1)
+    wz_kp1 = jnp.take_along_axis(wz, (k + 1)[..., None], axis=-1).squeeze(-1)
+    peln_k = jnp.take_along_axis(peln, k[..., None], axis=-1).squeeze(-1)
+    peln_kp1 = jnp.take_along_axis(peln, (k + 1)[..., None], axis=-1).squeeze(-1)
+    denom = wz_k - wz_kp1
+    safe_denom = jnp.where(jnp.abs(denom) > 1e-30, denom, 1.0)
+    logp_band = peln_k + (peln_kp1 - peln_k) * (wz_k - height) / safe_denom
+    p_band = jnp.exp(logp_band)
+    # Below-surface extrapolation
+    wz_surface = wz[..., -1]   # wz[km]
+    peln_surface = peln[..., -1]
+    tm = (Rdgas / g) * (ts + 3.25e-3 * (wz_surface - height))
+    p_extrap = jnp.exp(peln_surface + (wz_surface - height) / tm)
+    above_surface = height >= wz_surface
+    p = jnp.where(above_surface, p_band, p_extrap)
+    if fac is not None:
+        p = fac * p
+    return p
+
+
 def range_check_fv3(
     q: jax.Array, q_low: float, q_hi: float,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:

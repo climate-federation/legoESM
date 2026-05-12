@@ -1195,6 +1195,34 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 683: **FV3 ``get_pressure_given_height_fv3``** — pressure at z.
+  Faithful JAX port of FV3 ``get_pressure_given_height``
+  (tools/fv_diagnostics.F90:4312-4365).  Inverse of iter-681:
+  given target height, find pressure via log-p linear interp.
+
+  Algorithm:
+
+      if h >= surface (above ground):
+          find k with wz[k+1] <= h < wz[k]
+          logp = peln[k] + (peln[k+1] - peln[k]) ·
+                 (wz[k] - h) / (wz[k] - wz[k+1])
+          p = exp(logp)
+      else (below surface, extrapolate):
+          tm = (R_d/g) · (ts + 3.25e-3·(wz[km] - h))   # 6.5 K/km lapse
+          p = exp(peln[km] + (wz[km] - h)/tm)
+
+  Used by FV3 to convert z-level diagnostics to pressure-level.
+  Optional ``fac`` multiplier for unit conversions.
+
+  Tests (6/6 in <1 s):
+  1. At surface: p ≈ p_s.
+  2. Below surface: p > p_s (extrapolation branch).
+  3. At top: p ≈ ptop.
+  4. p monotonic decreasing with h.
+  5. fac doubles output.
+  6. Finite for all reasonable h.
+
+  Wired into iter-383 sweep (now 248).
 - Iter 682: **FV3 ``range_check_fv3``** — field-range sanity check.
   Faithful JAX port of FV3 ``range_check_3d`` / ``range_check_2d``
   (tools/fv_diagnostics.F90:3948-4078).  Unified single function
