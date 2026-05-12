@@ -138,6 +138,41 @@ Compression iteration.  Folded iter-30 through iter-40 entries into the
 auto-loaded MEMORY.md / context envelope.  Detailed per-iteration narratives
 remain in the commit messages on `clean_physics`.
 
+### Iteration 48 — 2026-05-13
+
+**Inspection iteration on `src/legoesm/atmosphere/physics/clouds/` and
+`turbulence/louis.py` + `vertical_diffusion.py` (no code changes).**
+
+Codex narrow review skipped (still timing out).  Direct inspection:
+
+- **Cloud fraction (`clouds/cloud_fraction.py`)**:
+  - Sundqvist: `cf = clip((RH − rh_crit) / (1 − rh_crit), 0, 1)` —
+    monotone, bounded; divisor floored by `max(1 − rh_crit, 1e-6)`.
+  - Xu-Randall: `cf = RH^p · (1 − exp(−α q_c / ((1 − RH) q_s)))` —
+    denominator floored at 1e-10; final clip to [0, 1] protects
+    against negative-condensate undershoot.
+  - `_ice_fraction(T)` linear ramp [T_freeze → T_ice_only] clipped
+    to [0, 1]; divisor `max(T_freeze − T_ice_only, 1)` handles the
+    degenerate case.
+  - LWP/IWP = `q · dp / g` is GRID-MEAN (documented choice for
+    RRTMGP-without-overlap).
+
+- **Louis turbulence (`turbulence/louis.py`)**:
+  - Surface-flux unit chain checked end-to-end: `tau` (Pa) → momentum
+    `[m/s · kg/(m²·s)]`; `shflx/c_pd` (W/m² / J/(kg·K)) →
+    `[K · kg/(m²·s)]`; `lhflx/L_v` (W/m² / J/kg) → `[kg/(m²·s)]`.
+    All match `implicit_vertical_diffusion`'s expected
+    `[phi · kg/(m²·s)]`.
+  - Stability-function blend `sigmoid(100·Ri)` is smooth; at Ri=0
+    both `f_unstable` and `f_stable` equal 1.0 so the 50/50 blend
+    is well-defined.
+  - Virtual potential temperature `T_v · (p_ref/p)^κ` uses the
+    shared `virtual_temperature` helper (no inline 0.6078 hack).
+
+- **`implicit_vertical_diffusion`**: Thomas tridiag forward/back via
+  `lax.scan`; divisor floors `b_mod` at `_TINY` to prevent NaN under
+  fp32 VJP; surface flux added to `rhs[:, -1]` only (bottom level).
+
 ### Iteration 47 — 2026-05-13
 
 **Inspection iteration on `src/legoesm/atmosphere/physics/gravity_wave_drag/`
