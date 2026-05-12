@@ -188,6 +188,94 @@ demonstrates:
 - WBCs forming at western boundaries (broad, unresolved jets)
 - No jet extensions into interior (resolution limitation at 1°)
 
+## Viscosity stack investigation (2026-05-12)
+
+### Problem: cell-to-cell noise in velocity, especially at depth
+
+Cross-sections show alternating red/blue vertical stripes in velocity
+at depth — characteristic of the TRiSK ζ-checkerboard null mode.
+Ocean-expert literature review confirmed:
+- At 1° there should be ZERO cell-to-cell variability below 1000m
+- The standard TRiSK vector Laplacian cannot see this mode
+- MPAS-Ocean production uses **B_h (biharmonic del4) as the primary
+  dissipation**, not Laplacian A_h
+
+### MPAS-Ocean production QU120 (120km) reference values
+
+| Parameter | Our config | MPAS-Ocean QU120 |
+|-----------|-----------|-----------------|
+| Primary viscosity | C_smag_lap=0.33 | B_h=2.6e13 (del4) |
+| Secondary | A_h=0 or 1e4 | A_h=1000-2000 (del2) |
+| ζ-null mode | K_zeta_bih=1e14 | enstrophy PV + del4 |
+
+### Tests performed
+
+| Config | max\|u\| yr20 | Drake Sv | Visc/forcing ratio |
+|--------|-------------|---------|-------------------|
+| Smag only (C=0.33) | 1.15 | 37 | 4.4% |
+| Smag + A_h=1e4 | 0.91 | 26 | 6.1% |
+| Smag + B_h=1e13 + A_h=2e3 | 1.11 | 20 | 5.0% |
+
+Momentum budget analysis showed all three configs have similar
+dissipation magnitude (3-14% of PGF forcing). The Drake transport
+differences (37→26→20 Sv) are partly from mid-run config switching
+(2-year adjustment transient). Proper comparison needs runs from
+rest with equal spinup time.
+
+### Confirmed from literature (ocean-expert deep dive)
+
+- Grid-scale noise diagnostic: `var(u_neighbor - u_cell) / var(u)`
+  per level — should be small for smooth flow
+- The ζ-checkerboard is invisible to del2 AND del4 on velocity —
+  only K_zeta_bih or the enstrophy PV scheme can control it
+- MPAS-Ocean's `config_mom_del4_div_factor` allows stronger damping
+  of divergent modes independently
+- B_h scaling: `del4/dx³ ~ 0.015 m/s` across MPAS-Ocean resolutions
+
+### Next steps for viscosity tuning
+
+1. Run B_h=2.6e13 (full production value) from rest with same physics
+2. Compare Drake transport, noise level, and WBC structure vs
+   Smag-only and A_h=1e4 configs after equal spinup
+3. Implement grid Reynolds number diagnostic
+4. Implement neighbor-velocity variance diagnostic
+5. Consider `del4_div_factor` for targeted divergence damping
+
+## Additional findings (2026-05-12)
+
+### Equatorial velocity is wind-driven (not PGF artifact)
+
+- Halving tropical wind (scale=0.5, σ=15°) reduces max|u| by 52%
+  (1.43 vs 2.97 with full wind) — proportional to forcing
+- AHH08 PGF (machine-zero) gives identical velocities to centered —
+  the PGF scheme accuracy is NOT the issue
+- Confirmed: the elevated equatorial flow is a resolution limitation
+  (1° can't resolve the equatorial jet structure), not a code bug
+
+### Year-18 ocean state is physically healthy
+
+- Active-cell S ranges 33.7-37.5 (no sub-seafloor leakage)
+- Zero density inversions at any active interface, anywhere
+- T cooling at poles (Arctic 9→4°C over 18 years) — physically correct
+- The earlier "S=0 at depth" alarm was from including inactive
+  (sub-seafloor) levels in the analysis — a diagnostic error
+
+### 40 vertical levels blew up (needs separate tuning)
+
+- 40 stretched levels (dz_sfc=10m, dz_deep=300m) blew up at year 0.26
+- C_smag_lap=0.33 + K_zeta_bih=1e14 need retuning for thinner cells
+- Deferred to future work
+
+### New code additions
+
+- `tropical_wind_scale` + `tropical_wind_lat_deg` in
+  PrescribedForcingConfig — selective tropical wind reduction via
+  Gaussian taper, preserving mid-latitude westerlies
+- `_plot_sections.py` — zonal/meridional cross-section diagnostic
+- `_plot_forcing.py` — wind stress, curl, restoring target maps
+- Quadratic bottom drag (`bottom_drag_bg_velocity`) implemented
+  in PE module (explicit path)
+
 ## Deferred items (LOW priority, significant code work)
 
 - **L1**: Bryan-Lewis K_v(z) depth profile (~2 days; needed for realistic AMOC)

@@ -13,6 +13,14 @@ class PrescribedForcingConfig(NamedTuple):
     E_minus_P: float = 0.0       # Evaporation minus precipitation [m/s]
     wind_profile: str = "constant"   # "constant", "cosine_latitude", "single_gyre", "double_gyre", "double_gyre_sin2", "double_gyre_tapered", or "global_wind"
     tau_max: float = 0.1         # Max wind stress for wind profiles [N/m^2]
+    tropical_wind_scale: float = 1.0  # Scale factor for wind stress within
+                                       # ±tropical_wind_lat_deg of equator.
+                                       # 1.0 = no change (default).
+                                       # 0.5 = halve tropical winds.
+                                       # Tapers smoothly via Gaussian to
+                                       # preserve continuity at the edges.
+    tropical_wind_lat_deg: float = 15.0  # Half-width of tropical reduction
+                                          # band [degrees].
     lat_south_deg: float = 15.0  # Southern basin boundary [degrees]
     lat_north_deg: float = 75.0  # Northern basin boundary [degrees]
     wind_buffer_deg: float = 0.0  # Buffer zone width [degrees] where wind tapers to zero at basin edges
