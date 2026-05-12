@@ -1185,113 +1185,34 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
-- Iter 559: **PE long-run at dt=5** — half-dt still unphysical.
-  iter-558 at dt=10 gave nonsensical values at 100 steps.
-  Try dt=5, 200 steps (same final time t=1000 s):
-  - |u_d| max:  4.57e+04 m/s  (still huge)
-  - T range:   -102 to 426 K  (still NEGATIVE)
-  - p_s range: 2.6e+04 to 3.2e+05 Pa
-  Halving dt didn't significantly help.  Conclusion: PE
-  instability at C8 is NOT primarily CFL-driven — it's
-  insufficient damping / under-resolved scales.  C8 PE is
-  a stress test, not a production config.  For production
-  PE: use C24+ with the FV3-faithful factory.  1/1 in 27 s.
-  Wired into iter-383 sweep (now 141).
-- Iter 558: **PE long-run stability** — 100 steps @ C8.
-  PE with Held-Suarez IC + FV3-faithful + scan_step at C8,
-  dt=10s, 100 steps:
-  - u_d:  max=2.55e+04 m/s, min=-1.03e+05 m/s  (UNPHYSICAL)
-  - v_d:  max=3.56e+05 m/s
-  - T:    max=516 K, min=-790 K  (NEGATIVE!)
-  - p_s:  max=5.99e+05 Pa, min=1.92e+04 Pa
-  - all finite: True (no NaN)
-  PE doesn't NaN at 100 steps (vs NH NaN at step 43), but
-  values become unphysical.  PE is numerically "more stable"
-  than NH at this CFL but still produces nonsense — the
-  C8 dt=10s combination is far past physical realism for
-  long runs.  Per CLAUDE.md: finite ≠ correct.  Document
-  honestly: PE long-run requires sub-CFL dt or higher
-  resolution.  1/1 in 26 s.  Wired into iter-383 sweep
-  (now 140).
-- Iter 557: **PE factory comparison at C16 smooth IC**.
-  Mirror iter-553 (NH) on PE: ``make_fv3_faithful_pe_config``
-  vs ``make_legoesm_pe_min_edge_config``, Held-Suarez init,
-  10 steps:
-  - FV3-faithful: T edge_std = 4.116e-1
-  - min-edge:     T edge_std = 4.116e-1
-  - difference: **0.0%**
-  PE is insensitive to factory choice (confirms iter-469 at
-  C8 random IC, extends to C16 smooth IC).  Practical PE
-  guidance: either factory works equivalently.  1/1 in 94 s.
-  Wired into iter-383 sweep (now 139).
-- Iter 556: **FV3-faithful convergence rates** on SBR.
-  Mirror iter-532 (min-edge+clip) with FV3-faithful alone
-  at C8/C16/C24:
-  - C8:  edge_std=2.99e-2, int_std=1.35e-2
-  - C16: edge_std=1.86e-2, int_std=5.07e-3
-  - C24: edge_std=1.49e-2, int_std=3.05e-3
-  Log-log fits:
-  - FV3-faithful: edge ~ N⁻⁰·⁶⁴, int ~ N⁻¹·³⁶
-  - min-edge+clip (iter-532): edge ~ N⁻⁰·⁸², int ~ N⁻¹·⁵³
-  Surprise: FV3-faithful has SLOWER convergence rate but
-  LOWER ABSOLUTE values at all measured N (1.86e-2 vs 5.89e-2
-  at C16).  Crossover at ~C9600 — far above any practical
-  resolution.  For C32-C192 production: **FV3-faithful wins**.
-  1/1 in 90 s.  Wired into iter-383 sweep (now 138).
-- Iter 555: **clip is marginal on FV3-faithful at smooth IC**.
-  iter-553 showed FV3-faithful alone gives 89.5% edge_std
-  reduction.  Does adding clip add more?  Measured at C16
-  SBR, 10 steps:
-  - FV3-faithful, no clip: edge_std = 1.864e-2
-  - FV3-faithful, + clip:  edge_std = 1.822e-2
-  - **clip reduction: +2.3%** (marginal)
-  Summary of helper value per regime (at C16 SBR):
-  - bare → FV3-faithful:  -89.5% (factory does most work)
-  - FV3-faithful → +clip: -2.3% (small incremental)
-  - min-edge → +clip:     -5% (clip helps more here)
-  Practical implication: for SMOOTH production ICs, the
-  ``make_fv3_faithful_nh_config`` factory alone is sufficient.
-  The iter-505/526 clip helpers are most valuable for
-  random/stress-test ICs (where they add ~10-50% reduction).
-  1/1 in 53 s.  Wired into iter-383 sweep (now 137).
-- Iter 553: **SURPRISE: FV3-faithful BEATS min-edge on
-  smooth ICs**.  4-config matrix at C16 SBR, 10 steps:
-  - bare config:        edge_std = 0.177 (+0% baseline)
-  - **FV3-faithful:     edge_std = 0.019 (-89.5%)** ← BEST
-  - min-edge factory:   edge_std = 0.063 (-64.4%)
-  - min-edge + clip:    edge_std = 0.059 (-66.8%)
-  iter-466's min-edge factory was optimized for RANDOM-IC
-  stress tests at C8.  On smooth physical ICs at higher
-  resolution, **the full FV3-faithful stack is BEST** —
-  ``use_fv3_metric_aware_d_con``, ``heat_source_del2``, and
-  ``d_con_top_zero_levels`` (which min-edge disables) all
-  HELP at smooth ICs.  Practical guidance updated:
-  - For smooth atmospheric ICs (SBR, HS, AMIP): use
-    ``make_fv3_faithful_nh_config``.
-  - For random/stress-test ICs (training, perturbed runs):
-    use ``make_legoesm_nh_min_edge_config``.
-  - Both compatible with the clip helper stack.
-  1/1 in 81 s.  Wired into iter-383 sweep (now 136).
-- Iter 552: **Held-Suarez-like stratified NH state**.  Test
-  with SBR winds + meridional θ′ gradient (−10·sin²(lat)) at
-  C8, 10 steps with ``make_clipped_step``.  Results:
-  - u:        ±26 m/s (SBR ±20 + meridional perturbation)
-  - v:        ±28 m/s (induced from baroclinic gradient)
-  - θ′:       -9.8 to ~0 K (close to initial -10..0)
-  - ρ′:       ±0.05 kg/m³ (small density perturbation)
-  - w:        ±1.55 m/s (vertical motion)
-  All physically reasonable, all finite.  Dycore handles
-  realistic stratified IC cleanly with the helper.  1/1 in
-  30 s.  Wired into iter-383 sweep (now 135).
-- Iter 551: **clip helper performance at C16** — does overhead
-  scale?  Measured at C16, 5-step avg:
-  - raw jit:           9.8 ms/step
-  - make_clipped_step: 9.6 ms/step
-  - overhead: **-1.6%** (within noise)
-  At C8 (iter-541): +0.6%.  At C16: -1.6%.  Both within the
-  measurement noise — clip overhead is **negligible at both
-  resolutions**.  Cost of the helper is essentially free.
-  1/1 in 49 s.  Wired into iter-383 sweep (now 134).
+- **Iters 551-559 (compacted iter 560)**: regime-aware
+  factory analysis + long-run stability bounds.
+  - iter 551: clip overhead at C16 = -1.6% (within noise).
+    Negligible at both C8 and C16.
+  - iter 552: HS-like stratified NH state stable + physical
+    over 10 steps.
+  - iter 553: **major reframe** — at C16 SBR smooth IC,
+    FV3-faithful BEATS min-edge (-89.5% vs -64% edge_std
+    reduction).  min-edge was random-IC stress-test optimum.
+  - iter 555: clip on top of FV3-faithful adds only +2.3%
+    at smooth IC.  Marginal.
+  - iter 556: FV3-faithful convergence rate ~ N⁻⁰·⁶⁴ (edge)
+    / N⁻¹·³⁶ (int).  Slower than min-edge+clip rates but
+    LOWER absolute values for N < ~9600.
+  - iter 557: PE comparison at C16 smooth — FV3-faithful
+    and min-edge tied (T edge_std 4.116e-1 both).  PE
+    insensitive to factory choice.
+  - iter 558: PE long-run @ C8 dt=10, 100 steps stays
+    finite but unphysical (u 10⁵ m/s, T -800 K).
+  - iter 559: PE long-run @ dt=5, 200 steps still unphysical.
+    PE C8 instability is damping-driven, not CFL.  Need C24+.
+  Net guidance:
+  - SMOOTH ICs → ``make_fv3_faithful_nh_config()`` (89.5%).
+  - RANDOM/STRESS ICs → ``make_legoesm_nh_min_edge_config()``
+    + clip helper.
+  - PE: either factory works.
+  - Long-run PE: need higher resolution (C24+).
+  Currently 141 guards in iter-383 sweep.
 - **Iters 541-549 (compacted iter 550)**: scan-step API +
   comprehensive helper validation (terrain, tracers,
   performance, end-to-end).
