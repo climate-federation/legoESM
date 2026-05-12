@@ -982,6 +982,68 @@ def get_eta_level(
     return pf, ph
 
 
+def compute_dz_fv3(
+    km: int, ztop: float,
+) -> jax.Array:
+    """FV3_3D iter 635: FV3 initial uniform-with-stretched-edges dz.
+
+    Faithful JAX port of FV3 ``compute_dz``
+    (tools/fv_eta.F90:1894-1928).  Builds an initial layer-
+    thickness array used as a starting point for FV3's hybrid-z
+    setup (FV3 then iterates to satisfy ztop and other
+    constraints).
+
+    Algorithm:
+        dz_uniform = ztop / km
+        dz[0]   = 2·dz_uniform     # top (stretched)
+        dz[km-1] = 0.5·dz_uniform  # bottom (compressed)
+        dz[1..km-2] = dz_uniform   # interior
+
+    Note: total height = (km + 0.5)·ztop/km > ztop by design
+    (this is an initial guess; FV3 later iterates).
+
+    Parameters
+    ----------
+    km : int
+        Number of levels.
+    ztop : float
+        Approximate top height (m).
+
+    Returns
+    -------
+    dz : jax.Array, shape ``(km,)``
+        Layer thicknesses (top→bottom indexing, FV3 convention).
+    """
+    dz_uniform = ztop / km
+    dz = jnp.full((km,), dz_uniform)
+    dz = dz.at[0].set(2.0 * dz_uniform)
+    dz = dz.at[km - 1].set(0.5 * dz_uniform)
+    return dz
+
+
+def zflip(q: jax.Array, axis: int = -1) -> jax.Array:
+    """FV3_3D iter 635: flip array along vertical axis.
+
+    Faithful JAX port of FV3 ``zflip`` (tools/fv_eta.F90:2482-2497).
+    Reverses level ordering of ``q`` along ``axis``.  Useful to
+    convert between FV3 top-down (k=1 at model top) and bottom-up
+    conventions.
+
+    Parameters
+    ----------
+    q : jax.Array
+        Field to flip.
+    axis : int, default -1
+        Vertical axis to flip.
+
+    Returns
+    -------
+    jax.Array
+        ``q`` flipped along ``axis``.  Same shape as input.
+    """
+    return jnp.flip(q, axis=axis)
+
+
 def compute_geopotential_hybrid(
     T: jax.Array,
     p_s: jax.Array,

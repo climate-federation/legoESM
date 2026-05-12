@@ -228,6 +228,7 @@ _GUARD_MODULES = (
     "test_fv3_global_reductions_iter632",            # iter-632 add
     "test_fv3_fill_ghost_iter633",                   # iter-633 add
     "test_fv3_get_eta_level_iter634",                # iter-634 add
+    "test_fv3_compute_dz_zflip_iter635",             # iter-635 add
 )
 
 

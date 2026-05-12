@@ -1195,6 +1195,39 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 635: **FV3 ``compute_dz_fv3`` + ``zflip``**.  Faithful JAX
+  ports of FV3 vertical helpers (tools/fv_eta.F90):
+
+  | Function           | F90 line | Role                              |
+  |--------------------|----------|-----------------------------------|
+  | ``compute_dz_fv3`` | 1894     | initial dz: top doubled, bot halved |
+  | ``zflip``          | 2482     | reverse vertical axis              |
+
+  ``compute_dz_fv3(km, ztop)`` algorithm:
+
+      dz_uniform = ztop / km
+      dz[0]    = 2·dz_uniform   # top (stretched)
+      dz[km-1] = 0.5·dz_uniform # bottom (compressed)
+      dz[1..km-2] = dz_uniform  # interior
+
+  Total height = (km + 0.5)·ztop/km > ztop by design — FV3 uses
+  this as initial guess for ``set_hybrid_z`` iterative solver.
+
+  ``zflip`` reverses level ordering (FV3 top-down ↔ bottom-up).
+  Convenience wrapper for ``jnp.flip``.  Both live in
+  ``legoesm.grids.vertical``.
+
+  Tests (8/8 in <1 s):
+  1. ``compute_dz_fv3`` output shape (km,).
+  2. Top cell doubled.
+  3. Bottom cell halved.
+  4. Interior uniform.
+  5. Total height = (km + 0.5)·ztop/km.
+  6. ``zflip`` reverses last axis.
+  7. ``zflip`` default axis = -1.
+  8. ``zflip`` idempotent (flip² = id).
+
+  Wired into iter-383 sweep (now 205).
 - Iter 634: **FV3 ``get_eta_level``** — hybrid coord → log-mean
   full-level pressure.  Faithful JAX port of FV3 ``get_eta_level``
   (tools/fv_eta.F90:1859-1890):
