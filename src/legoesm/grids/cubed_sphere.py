@@ -2885,6 +2885,74 @@ def compute_brn_fv3(
     return brn, shear06
 
 
+def prt_mass_fv3(
+    ps: jax.Array,
+    delp: jax.Array,
+    q_tracers: dict[str, jax.Array],
+    area: jax.Array,
+) -> dict[str, float]:
+    """FV3_3D iter 694: global mass-budget diagnostic.
+
+    Faithful JAX port of FV3 ``prt_mass``
+    (tools/fv_diagnostics.F90:4164-4263).
+
+    Computes the column-integrated mass of each water tracer
+    (kg/m²) and the area-weighted global mean.  Used as a
+    conservation check at runtime.
+
+    Returns a dict with:
+
+        ``ps_mean``      : global-mean surface pressure (Pa)
+        ``dry_ps_mean``  : ps_mean - total water mass · g (Pa)
+        ``<tracer>``     : global mean column mass (kg/m²) per
+                            tracer name in ``q_tracers``
+        ``total_water``  : sum of column water across all tracers (kg/m²)
+
+    Algorithm:
+
+        ps_mean = Σ area · ps / Σ area
+        For each tracer:
+            column[i,j] = Σ_k delp[i,j,k] · q[i,j,k] / g
+            global[name] = Σ area · column / Σ area
+        total_water = Σ_tracers global[name]
+        dry_ps_mean = ps_mean - g · total_water    (= ps_mean - total_water · g)
+
+    Parameters
+    ----------
+    ps : jax.Array, shape (n_x, n_y)
+        Surface pressure (Pa).
+    delp : jax.Array, shape (n_x, n_y, km)
+        Layer pressure thickness (Pa).
+    q_tracers : dict[str, jax.Array]
+        Mapping from tracer name (e.g. ``"sphum"``, ``"liq_wat"``,
+        ``"ice_wat"``, ``"rainwat"``, ``"snowwat"``, ``"graupel"``)
+        to mixing ratio array of shape (n_x, n_y, km).
+    area : jax.Array, shape (n_x, n_y)
+        Cell area (m²).
+
+    Returns
+    -------
+    diag : dict[str, float]
+        Mass-budget summary.  All values float.
+    """
+    total_area = jnp.sum(area)
+    inv_area = 1.0 / total_area
+    g = constants.g
+
+    ps_mean = float(jnp.sum(area * ps) * inv_area)
+
+    diag: dict[str, float] = {"ps_mean": ps_mean}
+    total_water_col_mean = 0.0
+    for name, q in q_tracers.items():
+        col_mass = jnp.sum(delp * q, axis=-1) / g    # (n_x, n_y) kg/m²
+        col_mean = float(jnp.sum(area * col_mass) * inv_area)
+        diag[name] = col_mean
+        total_water_col_mean += col_mean
+    diag["total_water"] = total_water_col_mean
+    diag["dry_ps_mean"] = ps_mean - g * total_water_col_mean
+    return diag
+
+
 def nh_total_energy_fv3(
     ua: jax.Array, va: jax.Array, w: jax.Array,
     pt: jax.Array, delp: jax.Array, delz: jax.Array,

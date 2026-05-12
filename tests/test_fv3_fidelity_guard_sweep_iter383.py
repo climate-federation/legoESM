@@ -281,6 +281,7 @@ _GUARD_MODULES = (
     "test_fv3_pv_entropy_iter691",                   # iter-691 add
     "test_fv3_eqv_pot_iter692",                      # iter-692 add
     "test_fv3_nh_total_energy_iter693",              # iter-693 add
+    "test_fv3_prt_mass_iter694",                     # iter-694 add
 )
 
 

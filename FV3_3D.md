@@ -1195,6 +1195,31 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 694: **FV3 ``prt_mass_fv3``** — global mass-budget diagnostic.
+  Faithful JAX port of FV3 ``prt_mass``
+  (tools/fv_diagnostics.F90:4164-4263).
+
+  Column-integrated mass of each water tracer (kg/m²) + area-
+  weighted global mean.  Used as a conservation check.
+
+  Returns dict containing:
+      ps_mean       — global-mean surface pressure (Pa)
+      dry_ps_mean   — ps_mean − g·total_water (Pa)
+      <tracer>      — area-mean column mass per tracer (kg/m²)
+      total_water   — Σ across tracers (kg/m²)
+
+  Per-tracer column = Σ_k delp·q / g; then area-weighted global
+  mean: Σ area·column / Σ area.
+
+  Tests (6/6 in <1 s):
+  1. Uniform ps → ps_mean = ps.
+  2. No tracers → total_water=0, dry_ps_mean=ps_mean.
+  3. q=0.01, ps=1e5 → column water = 0.01·1e5/g (analytical).
+  4. Two tracers → total_water = sum.
+  5. dry_ps_mean = ps_mean − g·total_water exactly.
+  6. Non-uniform area → weighted mean ≠ arithmetic mean.
+
+  Wired into iter-383 sweep (now 258).
 - Iter 693: **FV3 ``nh_total_energy_fv3``** — column total energy.
   Faithful JAX port of FV3 ``nh_total_energy``
   (tools/fv_diagnostics.F90:5501-5571).
