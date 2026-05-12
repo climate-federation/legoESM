@@ -1258,6 +1258,57 @@ def dist2side_latlon(
     return jnp.arcsin(jnp.clip(jnp.sin(side) * jnp.sin(angle), -1.0, 1.0))
 
 
+def unit_vect_latlon(
+    lon: jax.Array, lat: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 615: east/north unit tangent vectors at (lon, lat).
+
+    Faithful port of FV3 ``unit_vect_latlon`` (fv_grid_utils.F90:
+    2286-2309).  Returns the two Cartesian unit vectors of the
+    local geographic frame at the input (lon, lat) point::
+
+        elon = (-sin λ,    cos λ,    0    )
+        elat = (-sin φ cos λ, -sin φ sin λ, cos φ)
+
+    where ``λ`` = lon, ``φ`` = lat.  Used by FV3 ``c2l_ord4`` to
+    rotate D-grid winds to geographic (east, north) frame.
+
+    Returns two arrays of shape ``(..., 3)``; broadcasts on
+    leading axes.
+    """
+    sin_lon = jnp.sin(lon)
+    cos_lon = jnp.cos(lon)
+    sin_lat = jnp.sin(lat)
+    cos_lat = jnp.cos(lat)
+    zero = jnp.zeros_like(sin_lon)
+    elon = jnp.stack([-sin_lon, cos_lon, zero], axis=-1)
+    elat = jnp.stack([-sin_lat * cos_lon, -sin_lat * sin_lon, cos_lat], axis=-1)
+    return elon, elat
+
+
+def get_unit_vect3(
+    p1: jax.Array, p2: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 615: unit tangent vector at GC midpoint (Cartesian variant).
+
+    Faithful port of FV3 ``get_unit_vect3`` (fv_grid_utils.F90:
+    1865-1876).  Cartesian-input version of iter-611
+    ``get_unit_vect2`` — takes ``p1``, ``p2`` already in Cartesian
+    (last axis = 3-vector) and returns the unit tangent vector at
+    the great-circle midpoint pointing from p1 → p2.
+
+    Algorithm (FV3 exact):
+        pc = mid_pt3_cart(p1, p2)
+        p3 = p2 × p1                   (great-circle pole)
+        uc = pc × p3                   (tangent at pc)
+        uc / |uc|
+    """
+    pc = mid_pt3_cart(p1, p2)
+    p3 = vect_cross(p2, p1)
+    uc = vect_cross(pc, p3)
+    return normalize_vect(uc)
+
+
 def great_circle_distance_cart(
     v1: jax.Array, v2: jax.Array,
     radius: float = constants.R_earth,

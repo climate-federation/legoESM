@@ -1195,6 +1195,40 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 615: **FV3 ``unit_vect_latlon`` + ``get_unit_vect3``**.
+  Faithful JAX-vectorized ports of FV3 ``fv_grid_utils.F90``
+  helpers used by ``c2l_ord4`` for wind rotation and by
+  ``edge_factors`` for tangent-vector metric construction:
+
+  | Function             | F90 line | Role                                |
+  |----------------------|----------|-------------------------------------|
+  | ``unit_vect_latlon`` | 2286     | (lon, lat) → (elon, elat) tangents  |
+  | ``get_unit_vect3``   | 1865     | Cartesian variant of get_unit_vect2 |
+
+  ``unit_vect_latlon`` returns the two Cartesian unit tangent
+  vectors of the local geographic frame::
+
+      elon = (-sin λ,    cos λ,    0    )
+      elat = (-sin φ cos λ, -sin φ sin λ, cos φ)
+
+  Used in FV3 D-grid → cell-center latlon rotation
+  (``c2l_ord4``); legoESM's existing rotation goes via the
+  ``angle`` field, this gives a direct Cartesian alternative for
+  users porting FV3 wind diagnostics.
+
+  ``get_unit_vect3`` is the Cartesian-input variant of iter-611
+  ``get_unit_vect2``; verified to produce identical results.
+
+  Tests (7/7 in <1 s):
+  1. ``unit_vect_latlon`` elon ⊥ elat.
+  2. ``unit_vect_latlon`` outputs unit-norm.
+  3. ``unit_vect_latlon`` at equator: known values.
+  4. ``unit_vect_latlon`` north pole degenerate (documented).
+  5. ``unit_vect_latlon`` tangents ⊥ position (sphere tangent).
+  6. ``get_unit_vect3`` matches ``get_unit_vect2`` exactly.
+  7. ``get_unit_vect3`` output is unit-norm.
+
+  Wired into iter-383 sweep (now 187).
 - Iter 614: **FV3 ``get_area`` + ``great_circle_distance_cart``**.
   Faithful JAX ports of FV3 ``fv_grid_utils.F90`` helpers built on
   iter-611/613 primitives:
