@@ -1195,6 +1195,49 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- **Iters 801-809 (compacted iter 810)**: aviation-weather triplet
+  + frost-point pair + static stability + moist adiabat + CAPE/CIN
+  + iter-810 Lifted Index.
+
+  | Iter | What                                              | Note                                                                |
+  |------|---------------------------------------------------|---------------------------------------------------------------------|
+  | 801  | ``ice_supersaturation_fv3``                       | RH_ice > thresh (default 140% Koop-2000 nucleation)                 |
+  | 802  | ``contrail_appleman_fv3``                         | simplified Schmidt-Appleman: T<-40 °C ∧ RH_ice≥100%                |
+  | 803  | ``frost_point_temperature_fv3``                   | Lawrence-2005 Magnus-ice: T_f from (p, q)                           |
+  | 804  | ``frost_point_depression_fv3``                    | T − T_frost; cirrus/PSC cloud-base / aviation icing                 |
+  | 805  | ``static_stability_fv3``                          | S = −∂θ/∂p; QG omega-equation stability parameter                   |
+  | 806  | ``lapse_rate_moist_fv3``                          | Γ_m Bohren-Albrecht 6.115; dry limit → g/c_p                        |
+  | 807  | ``parcel_buoyancy_fv3``                           | b = g·Δθ_v/θ_v_env; CAPE/CIN integrand                              |
+  | 808  | ``cape_column_fv3``                               | CAPE = Σ max(b,0)·Δz                                                |
+  | 809  | ``cin_column_fv3``                                | CIN = -Σ min(b,0)·Δz (positive magnitude)                           |
+  | 810  | ``lifted_index_fv3`` + this compaction            | LI = T_env(500) − T_parcel(500); severe-wx instability index        |
+
+  **Aviation-weather diagnostic triplet** (RH_ice, ISS, contrail):
+    * iter-800 RH_ice
+    * iter-801 ISS mask (RH_ice > 140%)
+    * iter-802 contrail-formation mask (T<-40 °C ∧ RH_ice≥100%)
+
+  **Dew/frost-point pair**:
+    * iter-767 T_dew (Magnus liquid)
+    * iter-803 T_frost (Lawrence-2005 Magnus-ice)
+    * iter-770 T − T_dew (dew depression)
+    * iter-804 T − T_frost (frost depression)
+
+  **Static-stability pair** (z-coord, p-coord):
+    * iter-772 N² (z-coord)
+    * iter-805 S (p-coord)
+    * Related via N² = (g²·ρ/θ)·S
+
+  **CAPE pipeline complete** (parcel-source → CAPE/CIN/LI):
+    * iter-769 LCL state (T_LCL, p_LCL, z_LCL)
+    * iter-806 Γ_m moist-adiabatic ascent
+    * iter-807 parcel buoyancy b = g·Δθ_v/θ_v_env
+    * iter-808 CAPE column integral (J/kg)
+    * iter-809 CIN column integral (J/kg, ≥0)
+    * iter-810 Lifted Index (T_env(500) − T_parcel(500))
+
+  Wired into iter-383 sweep: 364 → 374 modules.
+
 - **Iters 791-799 (compacted iter 800)**: QG balance kit +
   baroclinic-instability + PV diagnostics + tropopause-detection
   triplet + cold-trap H₂O entry + iter-800 RH over ice.
@@ -5024,373 +5067,6 @@ is verifiable with unit tests in seconds rather than wall-time
 sweeps.  Users running the NH compressible-Euler 3D path now have
 the same cube-imprint defense as users running the PE 3D path.
 
-## Iter 801 — ice_supersaturation_fv3 (RH_ice > thresh mask)
-
-Added `ice_supersaturation_fv3(t, p_pa, q_sphum, rh_thresh=140.0)`
-to `grids/cubed_sphere.py`.  Boolean mask of ice-supersaturation:
-
-```
-ISS = relative_humidity_ice_fv3(t, p, q) > rh_thresh
-```
-
-Default ``rh_thresh = 140`` % matches Koop et al. (2000)
-homogeneous-nucleation threshold for aqueous-aerosol droplets.
-
-Standard thresholds:
-  * 100 — onset of formal supersaturation
-  * 140 — Koop-2000 homogeneous-nucleation (default)
-  * 160 — Krämer-2009 MOZAIC upper observation bound
-
-Used by: CAM5-Liu / ECMWF-IFS / GFDL-AM4 cirrus parameterization
-onset (all use Koop-2000 140 % criterion), aircraft contrail
-forecasting (ISS region = contrail-favorable), MOZAIC/IAGOS
-upper-tropospheric H₂O climatology, polar stratospheric cloud
-(PSC) onset diagnostics.
-
-Composes iter-800 ``relative_humidity_ice_fv3``.
-
-Test: `tests/test_fv3_ice_supersaturation_iter801.py` (6 tests:
-RH_ice=100% → False, RH_ice=150% with default 140 → True,
-custom thresh=160 rejects 150 → False, q=0 → False everywhere,
-mask alignment with RH_ice over 20 random samples, 3-D shapes
-preserved dtype bool).
-
-### Why this iteration was meaningful
-
-Closes the cirrus-onset chain (iter-800 RH_ice → iter-801 ISS
-mask).  ISS detection is the canonical entry point for cirrus
-parameterization in modern GCMs — the same code path used by
-CAM5/IFS/AM4/CESM2 for cirrus-cloud onset.  Pure JAX, vmap-
-compatible.  No new physical constants introduced (140 % is the
-Koop-2000 convention, not a generic physical constant).
-
-## Iter 802 — contrail_appleman_fv3 (simplified Schmidt-Appleman)
-
-Added `contrail_appleman_fv3(t, p_pa, q_sphum, T_SA=233.15,
-rh_ice_thresh=100.0)` to `grids/cubed_sphere.py`.  Boolean mask
-of potential persistent-contrail region:
-
-```
-contrail = (T_amb < T_SA) AND (RH_ice ≥ rh_ice_thresh)
-```
-
-Default ``T_SA = 233.15 K (−40 °C)`` is the simplified Schmidt-
-Appleman threshold for conventional jet engines (η ≈ 0.3,
-EI_H2O ≈ 1.25).  Below this T the engine-exhaust mixing line
-crosses the liquid-saturation curve, ice homogeneously nucleates,
-contrail forms.  ``rh_ice_thresh = 100`` distinguishes
-persistent contrails (cirrus-forming) from short-lived (RH_ice
-< 100 → evaporates within minutes).
-
-The full Schmidt-Appleman has pressure-dependent T_LC(p) via
-mixing slope G(p) = ε·EI_H2O·p / (LHV·(1−η)).  This helper uses
-the constant T_SA simplification — accurate to ~3 K across jet
-flight levels.
-
-Used by: aircraft contrail-formation forecasting (NWS contrail
-charts), aviation-induced cirrus climatology (Burkhardt-Kärcher
-2011, Schumann 2012 CoCiP framework), flight-routing
-optimization to avoid contrail regions, contrail-cirrus
-radiative-forcing assessment.
-
-Composes iter-800 ``relative_humidity_ice_fv3``.
-
-Test: `tests/test_fv3_contrail_appleman_iter802.py` (6 tests:
-warm + dry → False, cold + supersat → True, cold + dry → False,
-warm + moist → False (T > T_SA), custom T_SA=240 catches 235 K
-case, 3-D shapes preserved dtype bool).
-
-### Why this iteration was meaningful
-
-Contrail-formation forecasting is the operational aviation-
-weather diagnostic for both:
-  * Civilian flight routing (avoid contrail-cirrus formation
-    regions for climate-impact mitigation).
-  * Climate assessment (aviation-induced cirrus is the largest
-    non-CO₂ aviation forcing — Lee et al. 2021).
-
-Together with iter-800 (RH_ice) and iter-801 (ISS), closes the
-**aviation-weather diagnostic triplet** (RH_ice, ISS, contrail).
-Pure JAX, vmap-compatible.  No new physical constants introduced
-(−40 °C is the SA-1953 convention).
-
-## Iter 803 — frost_point_temperature_fv3 (Lawrence-2005 Magnus-ice)
-
-Added `frost_point_temperature_fv3(p_pa, q_sphum)` to
-`grids/cubed_sphere.py`.  Closed-form frost-point temperature
-(Lawrence 2005 BAMS approximation):
-
-```
-γ      = ln(e / 6.112)               (e in mb from iter-766)
-T_f_C  = 272.62 · γ / (22.46 − γ)
-T_f_K  = T_f_C + 273.15
-```
-
-Valid range −80 °C ≤ T_f ≤ 0 °C.  Distinct from iter-767
-``dew_point_fv3`` (Magnus liquid).  Both Magnus curves meet at
-e = 6.112 mb / T = T_freeze, so T_frost(6.112) = T_dew(6.112) =
-T_freeze exactly.  For subfreezing air at fixed q: T_frost > T_dew
-(since e_sat_ice < e_sat_liquid below 0 °C).
-
-Used by: aviation icing forecasts (hoar-frost deposition needs
-T < T_frost), polar stratospheric cloud (PSC) NAT/STS formation
-thresholds, cirrus cloud-base estimation (T_frost is where ice
-first saturates), satellite-retrieval calibration (frost-point
-hygrometer reference).
-
-Composes iter-766 ``vapor_pressure_from_q_fv3``.
-
-Test: `tests/test_fv3_frost_point_iter803.py` (6 tests: e=6.112 mb
-→ T_freeze, subfreezing T_frost > T_dew at same q, monotone in q,
-results in Lawrence-2005 validity range, iter-766 chain, 3-D
-shapes + finite).
-
-### Why this iteration was meaningful
-
-Closes the dew/frost-point pair: iter-767 T_dew (Magnus liquid)
-+ iter-803 T_frost (Magnus ice).  Cold-air moisture diagnostics
-need T_frost rather than T_dew — radiosondes report frost-point
-hygrometer measurements below 0 °C, aviation icing uses
-T_frost, and PSC formation thresholds use frost-point depression.
-Pure JAX, vmap-compatible.  No new physical constants introduced
-(272.62, 22.46 are Lawrence-2005 ice-Magnus fit coefficients).
-
-## Iter 804 — frost_point_depression_fv3 (T − T_frost)
-
-Added `frost_point_depression_fv3(t, p_pa, q_sphum)` to
-`grids/cubed_sphere.py`.  Ice analog of iter-770
-``dewpoint_depression_fv3``:
-
-```
-T − T_frost ≥ 0     (zero at ice-saturation)
-```
-
-Composes iter-803 ``frost_point_temperature_fv3``.  Below
-freezing, T − T_frost < T − T_dew at the same q (since
-T_frost > T_dew below 0 °C).  Above freezing both depressions
-formally coincide (Magnus liquid and ice meet at T_freeze).
-
-Used as: cirrus/PSC cloud-base proxy (low T − T_frost → ice
-saturation aloft), aviation icing severity index, polar-night
-H₂O sink diagnostic (T − T_frost ≈ 0 inside polar vortex
-during polar-night cooling).
-
-Test: `tests/test_fv3_frost_point_depression_iter804.py` (6
-tests: subice-sat air → positive depression, T=T_frost → ≈0,
-below freezing fpd < dpd at same q, monotone ↑q → ↓depression,
-chain identity, 3-D shapes + finite).
-
-### Why this iteration was meaningful
-
-Closes the moisture-saturation gap pair: iter-770 (T − T_dew,
-liquid) + iter-804 (T − T_frost, ice).  Together with iter-768
-(RH_liquid) + iter-800 (RH_ice), the moisture-deficit
-diagnostics now cover both liquid and ice saturation states.
-Pure JAX, vmap-compatible.  No new physical constants introduced.
-
-## Iter 805 — static_stability_fv3 (S = −∂θ/∂p)
-
-Added `static_stability_fv3(theta, p)` to
-`grids/cubed_sphere.py`.  Pressure-coord static stability:
-
-```
-S = −∂θ/∂p     at layer midpoints  (K/Pa)
-```
-
-Pressure-coord equivalent of iter-772 ``brunt_vaisala_squared_fv3``
-(z-coord).  Sign convention:
-  * S > 0   — stable (θ↑ as p↓)
-  * S = 0   — neutral
-  * S < 0   — unstable
-
-Relation to N² via hydrostatic ∂p/∂z = −ρg:
-
-    N² = (g²·ρ / θ) · S
-
-Used by: QG omega equation (Holton 4th ed. eq. 6.30), Eady-
-model eigenvalue derivation (S enters baroclinic-instability
-dispersion relation), pressure-coord diagnostics (mass-coord
-ESM analyses, ERA5/MERRA2 isobaric-level diagnostics).
-
-Centered finite differences across adjacent layers; output at
-midpoints, shape ``(..., km−1)``.
-
-Test: `tests/test_fv3_static_stability_iter805.py` (6 tests:
-stable θ↑↓p → S>0, unstable → S<0, neutral → S=0, 3-D shapes
-km→km-1, finite, same sign as iter-772 N² in hydrostatic-
-consistent stable column).
-
-### Why this iteration was meaningful
-
-Static stability in pressure coords (S = −∂θ/∂p) is the QG-
-omega-equation's primary stability parameter and the Eady-model
-input.  Many isobaric-coord reanalysis diagnostics (jet-stream
-analyses, QG vertical motion, frontogenesis Q-vectors) use S
-directly rather than the z-coord N².  Together with iter-772
-(N²) the static-stability pair (z, p-coord) is complete.
-Pure JAX, vmap-compatible.  No new physical constants
-introduced.
-
-## Iter 806 — lapse_rate_moist_fv3 (Γ_m saturated adiabat)
-
-Added `lapse_rate_moist_fv3(t, q_sat)` to
-`grids/cubed_sphere.py`.  Bohren-Albrecht (1998) eq. 6.115:
-
-```
-Γ_m = g · (1 + L_v · q_sat / (R_d · T))
-          ───────────────────────────────────────
-          c_p + L_v² · q_sat / (R_v · T²)
-```
-
-Dry-air limit q_sat → 0 gives Γ_m → g/c_p ≈ 9.76 K/km (dry
-adiabat).  Moist air: latent-heat release damps cooling →
-Γ_m < Γ_d.  At T=288 K, q_sat ≈ 10 g/kg: Γ_m ≈ 4.5 K/km
-(textbook tropical moist adiabat).
-
-Caller supplies q_sat (typically from
-``thermo.saturation_specific_humidity``).  Helper does **not**
-invoke the saturation curve itself — keeps composition
-explicit.
-
-Used by: CAPE/CIN parcel-ascent integration (Γ_m above LCL),
-moist-adiabatic CISK / WISHE feedback derivations, deep-
-convection parcel-buoyancy, mid-tropospheric moist instability
-indices.
-
-Test: `tests/test_fv3_lapse_rate_moist_iter806.py` (6 tests:
-q_sat=0 → Γ_d, tropical (T=298, q=17 g/kg) → 3-5 K/km, monotone
-q (↑q → ↓Γ_m), CC-mediated ↑T → ↓Γ_m via q_sat curve, full
-thermo chain, 3-D shapes + finite + positive).
-
-Note: at **fixed** q_sat, ↑T → ↑Γ_m (T² denominator dominates
-1/T numerator).  Realistic CC behavior requires going through
-q_sat(T,p) — documented in the iter-715-composition test.
-
-### Why this iteration was meaningful
-
-Moist-adiabatic lapse rate is the fundamental parcel-ascent
-trajectory above the LCL.  Every CAPE/CIN integrator, every
-convective trigger, every deep-convection parameterization
-uses Γ_m.  Together with dry adiabat (g/c_p, recovered in
-q_sat=0 limit), this gives the full parcel-thermodynamic
-trajectory.  Pure JAX, vmap-compatible.  No new physical
-constants introduced.
-
-## Iter 807 — parcel_buoyancy_fv3 (b = g·Δθ_v/θ_v_env)
-
-Added `parcel_buoyancy_fv3(theta_v_parcel, theta_v_env,
-theta_v_floor=1e-12)` to `grids/cubed_sphere.py`:
-
-```
-b = g · (θ_v_parcel − θ_v_env) / θ_v_env
-```
-
-Lagrangian-parcel vertical acceleration relative to env.
-
-Used by: CAPE/CIN parcel-ascent (∫_LFC^EL b dz = CAPE;
-∫_parcel^LFC b dz = CIN), bulk Richardson derivation, convective
-trigger parameterizations, gravity-wave generation diagnostics
-from convection.
-
-Caller supplies pre-computed θ_v (canonically from
-``_shared.virtual_temperature``) — buoyancy is defined on
-virtual θ to capture moisture-driven density contrast.
-
-Test: `tests/test_fv3_parcel_buoyancy_iter807.py` (5 tests:
-neutral → b=0, warm parcel → b>0 with analytic value
-g·Δθ_v/θ_v_env, cool parcel → b<0, ±Δ symmetric magnitude,
-3-D shapes + finite).
-
-### Why this iteration was meaningful
-
-Parcel buoyancy is the integrand of CAPE — the most-quoted
-diagnostic of deep-convection forecasting and severe-weather
-prediction.  Together with iter-806 (Γ_m moist-adiabat),
-iter-769 (LCL state), and iter-720 (saturation-blend), the
-**convective parcel kit is now complete**: LCL state →
-moist-adiabat ascent → buoyancy → CAPE.  Pure JAX, vmap-
-compatible.  No new physical constants introduced.
-
-## Iter 808 — cape_column_fv3 (∫ max(b, 0) dz)
-
-Added `cape_column_fv3(b, z)` to `grids/cubed_sphere.py`.
-Column-integrated positive buoyancy:
-
-```
-CAPE = ∑_k max(b_mid(k), 0) · Δz(k)         [J/kg]
-```
-
-Midpoint-rule discretization of ∫_LFC^EL max(b, 0) dz.  LFC/EL
-are implicitly defined as the bounds of the positive-buoyancy
-region(s); negative-buoyancy layers contribute zero.  Caller
-handles CIN separately (negative-buoyancy column-integral).
-
-Composes iter-807 ``parcel_buoyancy_fv3`` directly.
-
-Used by: deep-convection forecast diagnostics (CAPE ≥ 1000 →
-moderate; ≥ 2500 → strong; ≥ 5000 → tornadic), GFDL/CAM/IFS
-convection-scheme triggers, SREF/HRRR severe-weather products,
-climate-model convective-precipitation diagnostics.
-
-Test: `tests/test_fv3_cape_column_iter808.py` (6 tests: uniform
-b>0 → b·Δz_total, uniform b<0 → 0, mixed-sign positive-only sum,
-b=0 → 0, tropical-like profile 100-6000 J/kg, 3-D batched
-(n_x, n_y, km) → (n_x, n_y)).
-
-### Why this iteration was meaningful
-
-Closes the **CAPE pipeline**:
-  * iter-769 LCL state (T_LCL, p_LCL, z_LCL)
-  * iter-720 saturation-blend (q_sat above LCL)
-  * iter-806 Γ_m (moist-adiabatic ascent)
-  * iter-807 parcel buoyancy (b = g·Δθ_v/θ_v_env)
-  * iter-808 CAPE column integral (this iter)
-
-Given a parcel source (T, p, q), the full chain produces CAPE
-in J/kg — the canonical deep-convection diagnostic.  Pure JAX,
-vmap-compatible.  No new physical constants introduced.
-
-## Iter 809 — cin_column_fv3 (CIN = −Σ min(b,0)·Δz)
-
-Added `cin_column_fv3(b, z)` to `grids/cubed_sphere.py`.
-Convective inhibition column integral:
-
-```
-CIN = − Σ_k min(b_mid(k), 0) · Δz(k)     [J/kg, ≥ 0]
-```
-
-Returned as positive magnitude per meteorological convention
-(larger CIN = stronger capping).  Companion to iter-808
-``cape_column_fv3``; together (CAPE, CIN) form the canonical
-deep-convection pair.
-
-Negative-buoyancy layers (parcel cooler than env, capping
-inversions) consume parcel KE on rise; caller must supply
-CIN-worth of KE for parcel to reach the LFC.
-
-Used by: convective trigger gates (CIN > 50 J/kg → suppression),
-severe-weather pre-storm-environment diagnostics (large CIN
-enables energy buildup before "cap break"), MCS / nocturnal-
-convection forecasting, dryline boundary diagnostics.
-
-Composes iter-807 ``parcel_buoyancy_fv3``.
-
-Test: `tests/test_fv3_cin_column_iter809.py` (6 tests: uniform
-b<0 → analytic |b|·Δz_total, uniform b>0 → CIN=0, mixed-sign
-negative-only sum, b=0 → 0, surface-inversion profile 50-500
-J/kg, 3-D batched (n_x, n_y, km) → (n_x, n_y) finite ≥0).
-
-### Why this iteration was meaningful
-
-Closes the **CAPE/CIN convective-energy pair**:
-  * iter-808 CAPE = +∫ max(b,0) dz   (parcel-favorable PE)
-  * iter-809 CIN  = −∫ min(b,0) dz   (parcel-suppressive PE)
-
-Standard meteorological deep-convection diagnostic.  Together
-with iter-806 (Γ_m) + iter-807 (buoyancy), the full
-CAPE/CIN pipeline is complete: parcel source → ascent →
-buoyancy → (CAPE, CIN).  Pure JAX, vmap-compatible.  No new
-physical constants introduced.
 
 
 

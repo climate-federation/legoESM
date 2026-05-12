@@ -38,11 +38,11 @@ def test_iter365_compaction_present(doc_text):
     )
 
 
-def test_doc_size_below_5400_lines(doc_text):
+def test_doc_size_below_5080_lines(doc_text):
     n_lines = len(doc_text.splitlines())
-    assert n_lines < 5400, (
-        f"FV3_3D.md has {n_lines} lines (target < 5400).  "
-        f"Next compaction at iter 810."
+    assert n_lines < 5080, (
+        f"FV3_3D.md has {n_lines} lines (target < 5080).  "
+        f"Next compaction at iter 820."
     )
 
 
@@ -440,6 +440,37 @@ def test_iter670_compaction_covers_topics(doc_text):
     for marker in required:
         assert marker in section, (
             f"iter-670 compacted block missing topic ``{marker}``."
+        )
+
+
+def test_iter810_compaction_present(doc_text):
+    """iter-810 compacted iter 801-809 into single block."""
+    assert "**Iters 801-809 (compacted iter 810)**" in doc_text, (
+        "iter-810 compaction block missing — doc re-expanded."
+    )
+
+
+def test_iter810_compaction_covers_topics(doc_text):
+    section_start = doc_text.find(
+        "**Iters 801-809 (compacted iter 810)**"
+    )
+    section_end = doc_text.find(
+        "**Iters 791-799", section_start,
+    )
+    assert section_start >= 0 and section_end > section_start
+    section = doc_text[section_start:section_end]
+    required = [
+        "801", "802", "803", "804", "805",
+        "806", "807", "808", "809", "810",
+        "ice_supersaturation", "contrail_appleman",
+        "frost_point_temperature", "frost_point_depression",
+        "static_stability", "lapse_rate_moist",
+        "parcel_buoyancy", "cape_column", "cin_column",
+        "lifted_index",
+    ]
+    for marker in required:
+        assert marker in section, (
+            f"iter-810 compacted block missing topic ``{marker}``."
         )
 
 

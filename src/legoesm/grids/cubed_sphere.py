@@ -5622,6 +5622,52 @@ def cin_column_fv3(
     return -jnp.sum(jnp.minimum(b_mid, 0.0) * dz, axis=-1)
 
 
+def lifted_index_fv3(
+    t_env_500: jax.Array,
+    t_parcel_500: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 810: Galway (1956) Lifted Index.
+
+        LI = T_env(500 mb) − T_parcel_lifted(500 mb)
+
+    Severe-thunderstorm instability index.  Sign convention:
+      * LI > 0   — stable (parcel cooler than env at 500 mb)
+      * LI = 0   — neutral
+      * LI < 0   — unstable → convection favored
+                   * −3 ≥ LI ≥ −5 : moderate instability
+                   * −5 ≥ LI ≥ −7 : strong (severe T-storm risk)
+                   * LI ≤ −7 : extreme (tornadic / supercell)
+
+    Caller lifts a surface parcel dry-adiabatically to LCL
+    (iter-763), then moist-adiabatically (iter-806 Γ_m) to
+    500 mb, and passes T_parcel_500 here together with environment
+    T at 500 mb.
+
+    Used by: severe-weather watch/warning issuance (NWS SPC
+    convective outlooks key off LI thresholds), pre-storm
+    environment assessment, complement to CAPE/CIN (LI provides
+    single-number stability index that pre-dates CAPE in
+    operational use), aviation hazard forecasting (LI < −3
+    triggers thunderstorm hazard advisory).
+
+    Composes iter-808 (CAPE) + iter-809 (CIN) to give the
+    canonical CAPE-CIN-LI severe-storm diagnostic triplet.
+
+    Parameters
+    ----------
+    t_env_500 : jax.Array
+        Environment temperature at 500 mb (K).
+    t_parcel_500 : jax.Array
+        Surface-parcel temperature lifted to 500 mb (K).
+
+    Returns
+    -------
+    li : jax.Array
+        Lifted Index (K, negative = unstable).
+    """
+    return t_env_500 - t_parcel_500
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

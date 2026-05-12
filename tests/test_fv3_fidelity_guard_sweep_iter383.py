@@ -397,6 +397,7 @@ _GUARD_MODULES = (
     "test_fv3_parcel_buoyancy_iter807",              # iter-807 add
     "test_fv3_cape_column_iter808",                  # iter-808 add
     "test_fv3_cin_column_iter809",                   # iter-809 add
+    "test_fv3_lifted_index_iter810",                 # iter-810 add
 )
 
 
