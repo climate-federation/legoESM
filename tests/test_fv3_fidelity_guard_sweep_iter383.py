@@ -140,6 +140,7 @@ _GUARD_MODULES = (
     "test_clip_context_jit_iter525",                 # iter-525 add
     "test_make_clipped_step_iter526",                # iter-526 add
     "test_pe_halo_targets_iter527",                  # iter-527 add
+    "test_pe_make_clipped_step_iter529",             # iter-529 add
 )
 
 

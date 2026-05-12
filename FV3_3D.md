@@ -1120,6 +1120,17 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 529: **PE ``make_clipped_step`` validation** — symmetry.
+  Mirror iter-526 on the hydrostatic PE dycore.  3 tests:
+  1. Runs successfully on PE state.
+  2. Mass conservation 7.02e-9 (matches iter-524 PE direct
+     measurement → same dycore behavior).
+  3. ``jax.grad(loss)(T_init)`` returns finite + nonzero
+     gradient.
+  Confirms the iter-526 ``make_clipped_step`` is fully
+  symmetric across NH and PE.  Production-ready user-facing
+  API for both dycores.  3/3 in 116 s.  Wired into iter-383
+  sweep (now 117).
 - Iter 527: **PE-side patch targets** for symmetry.  Audit
   found PE dycore imports 4 distinct halo aliases (lines
   57, 83, 84, 85 in primitive_eq_cdgrid.py) not covered by
