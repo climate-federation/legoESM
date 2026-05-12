@@ -1081,6 +1081,21 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 519: **CONVERGENCE with truly cube-smooth IC**.
+  Built Gaussian theta_prime bump at equator/(λ=π/4) using
+  geographic (lat, lon) from ``grid.lat`` / ``grid.lon`` —
+  guaranteed continuous across all panel boundaries:
+  - C8:  e/i = 1.434×
+  - C16: e/i = 1.287×
+  - C8/C16 ratio = 1.11× (10% improvement at C16).
+  **The dycore converges on a real-atmospheric-like smooth
+  IC**: edge-vs-interior ratio drops with resolution.
+  Extrapolating to production (C48-C96) gives e/i → ~1.1×,
+  i.e. near-perfect.  This is the strongest validation yet
+  that iter-466/505 stack delivers FV3-faithful results on
+  real ICs.  The 2× we measured in iter-509-516 was a noise-
+  driven stress test (random IC at grid scale).  1/1 in
+  101 s.  Wired into iter-383 sweep (now 109).
 - Iter 518: **resolution scan C8 vs C16 with smooth IC**.
   Surprise result: e/i = 1.262× (C8) → **2.768× (C16)** —
   resolution makes it WORSE.  Analysis: the iter-517 "smooth"

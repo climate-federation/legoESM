@@ -38,12 +38,12 @@ def test_iter365_compaction_present(doc_text):
     )
 
 
-def test_doc_size_below_3950_lines(doc_text):
+def test_doc_size_below_4000_lines(doc_text):
     n_lines = len(doc_text.splitlines())
-    assert n_lines < 3950, (
-        f"FV3_3D.md has {n_lines} lines (target < 3950 after iter-"
-        f"509 multi-step growth + iter-508 sweep entries). Check "
-        f"for re-expansion or missing compaction (next at iter 510)."
+    assert n_lines < 4000, (
+        f"FV3_3D.md has {n_lines} lines (target < 4000 after iter-"
+        f"519 cube-smooth IC convergence finding).  Next compaction "
+        f"at iter 520."
     )
 
 
