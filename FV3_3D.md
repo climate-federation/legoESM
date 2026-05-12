@@ -1195,6 +1195,32 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 705: **FV3 ``prt_gb_nh_sh_fv3``** — lat-band area-weighted mean.
+  Faithful JAX port of FV3 ``prt_gb_nh_sh``
+  (tools/fv_diagnostics.F90:4462-4509).
+
+  Returns dict with 4 area-weighted band means:
+
+      gb : global (all lat)
+      nh : 20° ≤ lat <  80°
+      sh : -80° < lat ≤ -20°
+      eq : -20° < lat <  20°
+
+  Bands with total area ≤ 1.0 m² return -1.0 (FV3 bugfix for
+  non-global domains).
+
+  Rounds out the FV3 diagnostic-print suite alongside iter-685
+  prt_mxm, iter-694 prt_mass, iter-704 prt_maxmin.
+
+  Tests (5/5 in <1 s):
+  1. Uniform field → all bands match value.
+  2. Field = lat_deg → band means match midpoints (NH ≈ 50, SH ≈
+     -50, EQ ≈ 0).
+  3. Empty band → returns -1.0.
+  4. Global mean of uniform field = that value.
+  5. Area-weighted (cells same lat band, different areas).
+
+  Wired into iter-383 sweep (now 269).
 - Iter 704: **FV3 ``prt_maxmin_fv3``** — light max/min diagnostic
   (no area weighting; simpler than iter-685 ``prt_mxm`` which adds
   area-weighted gmean).  Faithful JAX port of FV3 ``prt_maxmin``

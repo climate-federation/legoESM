@@ -3489,6 +3489,65 @@ def updraft_helicity_fv3(
     return jnp.sum(vort * w * dz_eff, axis=-1)
 
 
+def prt_gb_nh_sh_fv3(
+    a2: jax.Array,
+    area: jax.Array,
+    lat: jax.Array,
+) -> dict[str, float]:
+    """FV3_3D iter 705: lat-band area-weighted mean diagnostic.
+
+    Faithful JAX port of FV3 ``prt_gb_nh_sh``
+    (tools/fv_diagnostics.F90:4462-4509).
+
+    Returns area-weighted means over 4 latitude bands matching
+    FV3's diagnostic output:
+
+        ``gb``  : global mean (all latitudes)
+        ``nh``  : northern hemisphere (20° ≤ lat < 80°)
+        ``sh``  : southern hemisphere (−80° < lat ≤ −20°)
+        ``eq``  : equatorial (−20° < lat < 20°)
+
+    Used by FV3 as a fast climate-style mean diagnostic at output
+    cadence.  Pairs with iter-685 prt_mxm / iter-694 prt_mass /
+    iter-704 prt_maxmin.
+
+    Parameters
+    ----------
+    a2 : jax.Array, shape (...,)
+        Field at cell centers (e.g. height of p-surface, T2m, etc.).
+    area : jax.Array, shape (...,)
+        Cell area (m²).
+    lat : jax.Array, shape (...,)
+        Cell-center latitude (radians).
+
+    Returns
+    -------
+    dict[str, float]
+        Keys: ``gb``, ``nh``, ``sh``, ``eq``.  Missing bands
+        return ``-1.0`` (FV3 bugfix for non-global domains).
+    """
+    lat_deg = lat * (180.0 / jnp.pi)
+    mask_eq = (lat_deg > -20.0) & (lat_deg < 20.0)
+    mask_nh = (lat_deg >= 20.0) & (lat_deg < 80.0)
+    mask_sh = (lat_deg <= -20.0) & (lat_deg > -80.0)
+
+    def _band_mean(mask):
+        area_band = jnp.sum(area * mask)
+        t_band = jnp.sum(a2 * area * mask)
+        # FV3 bugfix: empty band yields -1.0
+        return jnp.where(area_band > 1.0, t_band / area_band, -1.0)
+
+    gb_area = jnp.sum(area)
+    gb_t = jnp.sum(a2 * area)
+    gb = jnp.where(gb_area > 1.0, gb_t / gb_area, -1.0)
+    return {
+        "gb": float(gb),
+        "nh": float(_band_mean(mask_nh)),
+        "sh": float(_band_mean(mask_sh)),
+        "eq": float(_band_mean(mask_eq)),
+    }
+
+
 def prt_maxmin_fv3(
     q: jax.Array,
     fac: float = 1.0,

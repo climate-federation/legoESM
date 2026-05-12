@@ -292,6 +292,7 @@ _GUARD_MODULES = (
     "test_fv3_a2b_zeta_corner_nh_impact_iter702",    # iter-702 add
     "test_fv3_a2b_ord4_vector_uv_c24_iter703",       # iter-703 add
     "test_fv3_prt_maxmin_iter704",                   # iter-704 add
+    "test_fv3_prt_gb_nh_sh_iter705",                 # iter-705 add
 )
 
 
