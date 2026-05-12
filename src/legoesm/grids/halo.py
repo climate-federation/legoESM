@@ -702,6 +702,7 @@ def pad_halo_4d(
     interp_offsets: jax.Array | None = None,
     duogrid=None,
     monotone_clip: bool = False,
+    monotone_clip_slack: float = 0.0,
 ) -> jax.Array:
     """Pad a 4D scalar field with inter-face halo data.
 
@@ -808,6 +809,7 @@ def pad_halo_4d(
             level_slice = fill_corner_region(
                 level_slice, duogrid, halo,
                 monotone_clip=monotone_clip,
+                monotone_clip_slack=monotone_clip_slack,
             )
             return level_slice
 

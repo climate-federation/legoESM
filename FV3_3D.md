@@ -1081,6 +1081,19 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 501: ``monotone_clip_slack`` parameter — softer
+  monotonicity for iter-499's over-correction.  New
+  ``monotone_clip_slack: float = 0.0`` arg on
+  ``fill_corner_region`` and ``pad_halo_4d`` (default 0 =
+  strict iter-490 clip).  When > 0, expands clip range by
+  ``slack * (hi - lo)`` on each side.  Linear-field test:
+  slack=0 → halo max 14.00 (strict); slack=0.1 → halo max
+  14.05 (slight overshoot allowed).  Provides tunable
+  midpoint between strict clip (iter-499 over-corrects to
+  edge × 0.94) and no clip (iter-475 edge × 1.035).
+  Future investigation can sweep slack values for optimal
+  edge/physical-fidelity balance.  6/6 in 6 s.  Wired into
+  iter-383 sweep (now 92).
 - **Iters 485-494 (compacted iter 500)**: factory exposure
   + duogrid bisection + halo-level clip + investigation
   closure.
