@@ -1195,6 +1195,36 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 679: **FV3 ``interpolate_vertical_fv3``** — log-p-level interp.
+  Faithful JAX port of FV3 ``interpolate_vertical``
+  (tools/fv_diagnostics.F90:4735-4774).
+
+  Algorithm:
+
+      pm[k] = 0.5·(peln[k] + peln[k+1])     # mid-layer log-p
+      logp = log(plev)
+      if logp <= pm[0]:    a2 = a3[0]        # above top
+      elif logp >= pm[-1]: a2 = a3[-1]       # below bottom
+      else: linear interp on (pm[k], a3[k]) ↔ (pm[k+1], a3[k+1])
+
+  Pairs with iter-678 ``interpolate_z_fv3`` (z-level variant);
+  this is the p-level companion using log-pressure coordinate.
+
+  Used by FV3 for pressure-level diagnostic interpolation
+  (winds at 850 hPa, T at 500 hPa, etc.).
+
+  Vectorized via ``jnp.take_along_axis``; exact for linear-in-
+  log-p fields.
+
+  Tests (6/6 in 1 s):
+  1. Output shape correct.
+  2. Above-top clamp.
+  3. Below-bottom clamp.
+  4. Exact at mid-layer log-p.
+  5. Linear-in-log-p interp exact (1e-10).
+  6. Constant-field preserved.
+
+  Wired into iter-383 sweep (now 245).
 - Iter 678: **FV3 ``interpolate_z_fv3``** — linear vertical interp.
   Faithful JAX port of FV3 ``interpolate_z``
   (tools/fv_diagnostics.F90:4776-4810).

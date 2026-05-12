@@ -2644,6 +2644,66 @@ def get_staggered_grid_fv3(
     return pt_c_lon, pt_c_lat, pt_d_lon, pt_d_lat
 
 
+def interpolate_vertical_fv3(
+    a3: jax.Array, peln: jax.Array, plev: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 679: linear vertical interpolation to a single p-level.
+
+    Faithful JAX port of FV3 ``interpolate_vertical``
+    (tools/fv_diagnostics.F90:4735-4774).
+
+    Algorithm:
+        pm[k] = 0.5·(peln[k] + peln[k+1])     # mid-layer log-p
+        logp = log(plev)
+        if logp <= pm[0]:    a2 = a3[0]        # above top
+        elif logp >= pm[-1]: a2 = a3[-1]       # below bottom
+        else: linear interp on (pm[k], a3[k]) ↔ (pm[k+1], a3[k+1])
+
+    Pairs with iter-678 ``interpolate_z_fv3`` (z-level variant);
+    this is the p-level companion using log-pressure coordinate.
+
+    Used by FV3 for pressure-level diagnostic interpolation
+    (winds at 850 hPa, T at 500 hPa, etc.).
+
+    Parameters
+    ----------
+    a3 : jax.Array, shape (..., km)
+        3D field at mid-layer levels.
+    peln : jax.Array, shape (..., km+1)
+        Layer interface log-pressure, monotonically increasing
+        with k (top-down).
+    plev : float or jax.Array
+        Target pressure level (Pa).
+
+    Returns
+    -------
+    a2 : jax.Array, shape (...,)
+        Field interpolated to ``plev``.
+    """
+    # pm[k] = 0.5·(peln[k] + peln[k+1])
+    pm = 0.5 * (peln[..., :-1] + peln[..., 1:])             # (..., km)
+    logp = jnp.log(plev)
+    # Search: largest k with pm[k] <= logp; clip to [0, km-2]
+    km = pm.shape[-1]
+    leq_mask = pm <= logp
+    leq_count = jnp.sum(leq_mask.astype(jnp.int32), axis=-1)
+    k = jnp.clip(leq_count - 1, 0, km - 2)
+    pm_k = jnp.take_along_axis(pm, k[..., None], axis=-1).squeeze(-1)
+    pm_kp1 = jnp.take_along_axis(pm, (k + 1)[..., None], axis=-1).squeeze(-1)
+    a3_k = jnp.take_along_axis(a3, k[..., None], axis=-1).squeeze(-1)
+    a3_kp1 = jnp.take_along_axis(a3, (k + 1)[..., None], axis=-1).squeeze(-1)
+    denom = pm_kp1 - pm_k
+    safe_denom = jnp.where(jnp.abs(denom) > 1e-30, denom, 1.0)
+    a2_band = a3_k + (a3_kp1 - a3_k) * (logp - pm_k) / safe_denom
+    above_top = logp <= pm[..., 0]
+    below_bot = logp >= pm[..., -1]
+    a2 = jnp.where(
+        above_top, a3[..., 0],
+        jnp.where(below_bot, a3[..., -1], a2_band),
+    )
+    return a2
+
+
 def interpolate_z_fv3(
     a3: jax.Array, hght: jax.Array, zl: jax.Array,
 ) -> jax.Array:
