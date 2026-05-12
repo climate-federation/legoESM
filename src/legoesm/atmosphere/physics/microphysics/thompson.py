@@ -255,10 +255,10 @@ def thompson_microphysics(
     V_t_g = config.a_v_g * safe_pow(jnp.clip(q_g, 0.0) * rho_ratio, config.b_v_g)
     V_t_g = jnp.clip(V_t_g, 0.0, 30.0)
 
-    sed_r = sedimentation_tendency(q_r, rho, V_t_r, dz)
-    sed_i = sedimentation_tendency(q_i, rho, V_t_i, dz)
-    sed_s = sedimentation_tendency(q_s, rho, V_t_s, dz)
-    sed_g = sedimentation_tendency(q_g, rho, V_t_g, dz)
+    sed_r = sedimentation_tendency(q_r, rho, V_t_r, dz, dt=dt)
+    sed_i = sedimentation_tendency(q_i, rho, V_t_i, dz, dt=dt)
+    sed_s = sedimentation_tendency(q_s, rho, V_t_s, dz, dt=dt)
+    sed_g = sedimentation_tendency(q_g, rho, V_t_g, dz, dt=dt)
 
     # === LATENT HEATING ===
     L_v = constants.L_v

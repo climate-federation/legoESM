@@ -114,8 +114,16 @@ def sedimentation_tendency(
     rho: jax.Array,
     V_t: jax.Array,
     dz: jax.Array,
+    dt: float | jax.Array | None = None,
 ) -> jax.Array:
     """Compute sedimentation tendency from vertical flux divergence.
+
+    When ``dt`` is supplied the outgoing flux at each level is capped
+    by the layer's in-column mass per step
+    (``q · rho · dz / dt``), which guarantees positivity of
+    ``q_new = q + dt · tendency`` for any Courant number ``V_t·dt/dz``
+    (Bott / explicit-FCT positivity).  Without the limiter explicit
+    sedimentation can drive ``q`` negative when ``V_t·dt/dz > 1``.
 
     Parameters
     ----------
@@ -127,6 +135,9 @@ def sedimentation_tendency(
         Terminal velocity [m/s], shape (ncol, nlev).
     dz : jax.Array
         Layer thickness [m], shape (ncol, nlev).
+    dt : float, optional
+        Physics step [s].  When provided, applies CFL-aware positivity
+        limiter (recommended).
 
     Returns
     -------
@@ -134,7 +145,15 @@ def sedimentation_tendency(
         Sedimentation tendency [kg/kg/s], shape (ncol, nlev).
     """
     q_pos = jnp.clip(q, 0.0, None)
-    flux = V_t * q_pos * rho  # (ncol, nlev)
+    flux = V_t * q_pos * rho  # (ncol, nlev) outgoing flux density [kg/m^2/s]
+
+    if dt is not None:
+        # Positivity-preserving flux limiter: outgoing flux at level k
+        # cannot exceed the mass available in that layer per step.
+        # ``q*rho*dz/dt`` is the maximum sustainable flux density that
+        # leaves ``q_new ≥ 0`` for ANY local Courant number.
+        max_outflux = q_pos * rho * dz / jnp.maximum(dt, 1.0e-12)
+        flux = jnp.minimum(flux, max_outflux)
 
     # Flux from above: zero at top, flux[k-1] enters level k.  Use
     # ``jnp.pad`` (single Pad HLO) instead of allocating a fresh

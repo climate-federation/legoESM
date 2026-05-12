@@ -150,7 +150,7 @@ def kessler_microphysics(
     V_t = config.rain_fall_speed * jnp.sqrt(
         rho_sfc / jnp.clip(rho, 0.1)
     )
-    sed_tend = sedimentation_tendency(q_r, rho, V_t, dz)
+    sed_tend = sedimentation_tendency(q_r, rho, V_t, dz, dt=dt)
 
     # 6. Latent heating
     dT_dt = constants.L_v * (condensation - evaporation) / constants.c_pd

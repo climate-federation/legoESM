@@ -12,12 +12,9 @@ from legoesm.ocean.physics.surface_forcing.config import BulkFormulaConfig
 from legoesm.ocean.physics.surface_forcing.output import SurfaceForcingOutput
 from legoesm.ocean.vertical import OceanZStarCoordinate
 
-_P_ATM = 101325.0  # Standard atmosphere [Pa]
-
-
 def _saturation_specific_humidity(T_K: jnp.ndarray) -> jnp.ndarray:
     """Saturation specific humidity at standard atmosphere pressure."""
-    return saturation_mixing_ratio(T_K, jnp.full_like(T_K, _P_ATM))
+    return saturation_mixing_ratio(T_K, jnp.full_like(T_K, constants.p_atm_std))
 
 
 def bulk_formula_surface_forcing(

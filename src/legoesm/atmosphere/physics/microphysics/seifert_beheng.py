@@ -121,7 +121,7 @@ def seifert_beheng_microphysics(
         jnp.clip(q_r, 0.0) * rho / jnp.clip(rho_sfc, 0.1), config.b_v_r,
     )
     V_t_r = jnp.clip(V_t_r, 0.0, 20.0)
-    sed_r = sedimentation_tendency(q_r, rho, V_t_r, dz)
+    sed_r = sedimentation_tendency(q_r, rho, V_t_r, dz, dt=dt)
 
     # 7. Latent heating
     dT_dt = constants.L_v * (condensation - evaporation) / constants.c_pd

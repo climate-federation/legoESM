@@ -25,6 +25,7 @@ c_pd = 1004.64                  # Specific heat at constant pressure [J/(kg*K)]
 c_vd = c_pd - R_d               # Specific heat at constant volume [J/(kg*K)] = 717.59
 kappa = R_d / c_pd              # Poisson constant R_d/c_pd (~0.2857)
 p_ref = 1.0e5                   # Reference pressure [Pa] (1000 hPa)
+p_atm_std = 101325.0            # Standard atmosphere [Pa] (1013.25 hPa)
 
 # ==============================================================================
 # Water Thermodynamics

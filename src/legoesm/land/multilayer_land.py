@@ -308,7 +308,13 @@ def step_multilayer_land(
     # Richards sink removes root-mediated transpiration).
     # ``f_veg`` and ``weight_sum`` reduce the same ``root_frac * beta_root``
     # product; compute the column reduction once and reuse it.
-    weight = root_frac[None, :] * beta_root  # (ncol, n_layers)
+    # ``root_frac`` is ``(n_layers,)`` when ``lp is None`` and
+    # ``(ncol, n_layers)`` when ``lp`` is present; both broadcast
+    # cleanly against ``beta_root`` of shape ``(ncol, n_layers)`` without
+    # an explicit unsqueeze.  An earlier ``root_frac[None, :]`` worked
+    # only for the 1D case and silently produced a ``(ncol, ncol, n_layers)``
+    # weight in the 2D case (audit finding 2026-05-12 #4).
+    weight = root_frac * beta_root  # (ncol, n_layers)
     _weight_sum_raw = jnp.sum(weight, axis=-1)  # (ncol,)
     f_veg = jnp.clip(_weight_sum_raw, 0.0, 1.0)  # vegetation cover proxy
     evap_bare = evap_rate * (1.0 - f_veg)      # bare-soil evaporation

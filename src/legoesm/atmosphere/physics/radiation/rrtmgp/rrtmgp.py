@@ -628,7 +628,12 @@ class RRTMGP:
       T_3d = _add_halos(T[:, None, ::-1])
       p_3d = _add_halos(p_full[:, None, ::-1])
       p_3d = jnp.clip(p_3d, 1.0, None)
-      q_v_3d = _add_halos(jnp.clip(q_v, 0.0, None)[:, None, ::-1])
+      # Upper-clip q_v strictly below 1 so the (1 - q_v) denominator in
+      # the VMR conversion is bounded away from zero.  0.99 is far above
+      # any physically plausible specific humidity (peak tropical surface
+      # values are ~0.025); the bound only ever fires on numerical
+      # pathology during spin-up and prevents singular/negative VMRs.
+      q_v_3d = _add_halos(jnp.clip(q_v, 0.0, 0.99)[:, None, ::-1])
 
       # --- 2. Build VMR fields ---
       mol_ratio = constants.R_V / constants.R_D

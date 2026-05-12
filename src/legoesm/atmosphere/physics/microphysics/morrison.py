@@ -223,9 +223,9 @@ def morrison_microphysics(
     V_t_s = config.a_v_s * safe_pow(jnp.clip(q_s, 0.0) * rho_ratio, config.b_v_s)
     V_t_s = jnp.clip(V_t_s, 0.0, 5.0)
 
-    sed_r = sedimentation_tendency(q_r, rho, V_t_r, dz)
-    sed_i = sedimentation_tendency(q_i, rho, V_t_i, dz)
-    sed_s = sedimentation_tendency(q_s, rho, V_t_s, dz)
+    sed_r = sedimentation_tendency(q_r, rho, V_t_r, dz, dt=dt)
+    sed_i = sedimentation_tendency(q_i, rho, V_t_i, dz, dt=dt)
+    sed_s = sedimentation_tendency(q_s, rho, V_t_s, dz, dt=dt)
 
     # === LATENT HEATING ===
     L_v = constants.L_v
