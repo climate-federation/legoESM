@@ -1195,6 +1195,39 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 637: **FV3 ``compute_dz_L101`` + ``set_external_eta``**.
+  Faithful JAX ports of FV3 vertical helpers (tools/fv_eta.F90):
+
+  | Function             | F90 line | Role                              |
+  |----------------------|----------|-----------------------------------|
+  | ``set_external_eta`` | 788      | derive (ptop, ks) from ak/bk      |
+  | ``compute_dz_L101``  | 2069     | FV3-canonical L101 layer thicknesses |
+
+  ``set_external_eta(ak, bk)``: returns ``(ptop=ak[0],
+  ks=last_pure_pressure_layer_index)``.  ``ks`` = max ``k``
+  where ``bk[k] < eps`` (FV3 default eps=1e-7).
+
+  ``compute_dz_L101()`` builds FV3-canonical 101-layer vertical
+  (ztop ≈ 20.3 km):
+    - Top: dz[0] = 4·dz[1] (single ~6.6 km layer)
+    - Middle: dz[k] = stretch_f·dz[k+1] for k ∈ [1, 24]
+              (25 geometric layers, stretch 1.16)
+    - Bottom: dz[k] = 40 m uniform for k ∈ [25, 100]
+
+  Both live in ``legoesm.grids.vertical`` alongside iter-634/635/636
+  vertical helpers.
+
+  Tests (8/8 in <1 s):
+  1. ``set_external_eta`` ptop = ak[0].
+  2. ``set_external_eta`` ks = last pure-pressure index.
+  3. ``set_external_eta`` all-hybrid → ks = -1.
+  4. ``compute_dz_L101`` shape (101,).
+  5. Bottom 77 layers uniform 40 m.
+  6. Middle layers geometric stretch 1.16.
+  7. Top layer = 4·dz[1].
+  8. ztop ≈ 20.3 km (FV3 documented).
+
+  Wired into iter-383 sweep (now 207).
 - Iter 636: **FV3 ``sm1_edge_fv3``** — 1D del-2 edge smoother.
   Faithful JAX port of FV3 ``sm1_edge`` (tools/fv_eta.F90:
   2249-2284).  Smooths a column of layer-interface heights ``ze``

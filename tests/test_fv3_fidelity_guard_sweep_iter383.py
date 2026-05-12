@@ -230,6 +230,7 @@ _GUARD_MODULES = (
     "test_fv3_get_eta_level_iter634",                # iter-634 add
     "test_fv3_compute_dz_zflip_iter635",             # iter-635 add
     "test_fv3_sm1_edge_iter636",                     # iter-636 add
+    "test_fv3_compute_dz_L101_iter637",              # iter-637 add
 )
 
 

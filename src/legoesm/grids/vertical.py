@@ -1044,6 +1044,100 @@ def zflip(q: jax.Array, axis: int = -1) -> jax.Array:
     return jnp.flip(q, axis=axis)
 
 
+def set_external_eta(
+    ak: jax.Array, bk: jax.Array, eps: float = 1.0e-7,
+) -> tuple[jax.Array, int]:
+    """FV3_3D iter 637: derive (ptop, ks) from external ak/bk arrays.
+
+    Faithful JAX port of FV3 ``set_external_eta``
+    (tools/fv_eta.F90:788-807).  Given hybrid coefficients
+    ``ak`` (Pa) and ``bk`` (dimensionless), returns::
+
+        ptop = ak[0]                              # model top pressure (Pa)
+        ks   = max k where bk[k] < eps  -  1     # # pure-pressure layers
+
+    The "-1" converts FV3's level count to layer count (FV3 stores
+    levels at edges; layers are between edges).
+
+    Parameters
+    ----------
+    ak : jax.Array, shape ``(km+1,)``
+        Hybrid A coefficient at half levels (Pa).
+    bk : jax.Array, shape ``(km+1,)``
+        Hybrid B coefficient at half levels.
+    eps : float, default 1e-7
+        Threshold to classify a level as "pure pressure" (bk < eps).
+
+    Returns
+    -------
+    ptop : jax.Array (scalar)
+        Top-of-model pressure (Pa).
+    ks : int
+        Number of pure-pressure LAYERS.
+    """
+    ptop = ak[0]
+    # ks (level count) = max k with bk[k] < eps; in 0-indexed:
+    #   ks = (count of consecutive bk < eps from k=0) - 1
+    # but FV3 also counts ks even if subsequent bk increase; we take the
+    # largest k.  Use jnp.argmax over the reverse-sorted boolean array.
+    is_pure = bk < eps
+    # Cumulative AND backward: only valid as long as all preceding were pure
+    # Actually FV3 sets ks = k whenever bk[k] < eps; so ks ends up being
+    # the LAST index where bk[k] < eps (using a sweep from low to high).
+    # In JAX: ks_level = argmax(reverse[bk < eps]) interpreted as last True
+    # index.  Simpler: use jnp.where + max.
+    idx = jnp.arange(bk.shape[0])
+    # Last index where is_pure is True
+    masked_idx = jnp.where(is_pure, idx, -1)
+    ks_level = int(jnp.max(masked_idx))
+    # FV3: 1-indexed levels, ks = max k where bk(k) < eps; then ks = ks-1
+    # 0-indexed: ks_level + 1 (1-indexed) → minus 1 → ks_level (0-indexed)
+    ks = ks_level
+    return ptop, ks
+
+
+def compute_dz_L101(
+    stretch_f: float = 1.16,
+    dz0: float = 40.0,
+    k0: int = 24,  # FV3 1-indexed k0=25 → 0-indexed 24
+    k1: int = 1,   # FV3 1-indexed k1=2  → 0-indexed 1
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 637: FV3 L101 layer thicknesses + ztop.
+
+    Faithful JAX port of FV3 ``compute_dz_L101``
+    (tools/fv_eta.F90:2069-2108).  Builds the FV3-canonical
+    101-layer vertical structure with ztop ≈ 20.3 km:
+
+        - Bottom (k = k0..km-1, 0-indexed):  uniform dz = dz0 = 40 m
+        - Middle (k = k1..k0):  geometric, dz[k] = stretch_f · dz[k+1]
+        - Top (k = 0):  dz[0] = 4 · dz[1]
+
+    With defaults (FV3 reference): k1=1, k0=24, dz0=40 m,
+    stretch_f=1.16 → 25 geometric layers from 46.4 m to 1656 m,
+    77 uniform 40-m bottom layers, single 6.6 km top layer.
+    Total ztop ≈ 20.3 km.
+
+    Returns
+    -------
+    dz : jax.Array, shape ``(101,)``
+        Layer thicknesses (top→bottom indexing).
+    ztop : jax.Array (scalar)
+        Total height = sum(dz).
+    """
+    km = 101
+    dz = jnp.full((km,), dz0)
+    # Geometric middle: dz[k] = stretch_f^(k0+1-k) · dz0 for k in [k1, k0]
+    # (k0 = 24, k1 = 1)  →  exponents (k0+1-k) for k=1..24:  exponents 24..1
+    k_idx = jnp.arange(k1, k0 + 1)              # 0-indexed [1, 24]
+    exponents = (k0 + 1) - k_idx                # 24, 23, ..., 1
+    geo_dz = (stretch_f ** exponents) * dz0
+    dz = dz.at[k1:k0 + 1].set(geo_dz)
+    # Top: dz[0] = 4 · dz[1]
+    dz = dz.at[0].set(4.0 * dz[1])
+    ztop = jnp.sum(dz)
+    return dz, ztop
+
+
 def sm1_edge_fv3(
     ze: jax.Array, ntimes: int,
 ) -> jax.Array:
