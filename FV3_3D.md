@@ -1195,6 +1195,27 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 736: **``exner_fv3``** — point-wise Exner function.
+
+  Standard Exner:
+
+      Π = (p / p_ref)^κ
+
+  Inverse of iter-735 ``theta_dry_fv3``: ``θ · Π = T``.
+
+  Used in FV3 dyn_core pressure-gradient term ``c_p · θ · ∇Π``.
+  Compared to iter-722 ``compute_pkz_fv3`` which gives LAYER-MEAN
+  Exner (integral mean over log-p layer), this is point-wise.
+
+  Tests (6/6 in <1 s):
+  1. p = p_ref → Π = 1 exactly.
+  2. Lower p → smaller Π.
+  3. θ · Π = T (inverse relationship with iter-735).
+  4. Custom moist cappa.
+  5. 3-D shapes.
+  6. No NaN/Inf.
+
+  Wired into iter-383 sweep (now 300).
 - Iter 735: **``theta_dry_fv3``** — dry potential temperature.
 
   Standard Poisson form:

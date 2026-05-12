@@ -2806,6 +2806,46 @@ def get_pressure_given_height_fv3(
     return p
 
 
+def exner_fv3(
+    p: jax.Array,
+    p_ref: float = 1.0e5,
+    cappa: float | jax.Array | None = None,
+) -> jax.Array:
+    """FV3_3D iter 736: point-wise Exner function.
+
+    Standard Exner function:
+
+        Π = (p / p_ref)^κ
+
+    Used throughout FV3 dyn_core for the pressure-gradient term
+    ``c_p · θ · ∇Π`` and as the inverse of iter-735 ``theta_dry_fv3``:
+
+        θ = T / Π     ⇔     T = θ · Π
+
+    Compared to iter-722 ``compute_pkz_fv3`` which provides a
+    LAYER-MEAN Exner (integral mean over the log-p layer), this
+    helper is point-wise: Exner at a specific pressure value.
+
+    Parameters
+    ----------
+    p : jax.Array
+        Pressure (Pa).
+    p_ref : float, default 1e5
+        Reference pressure (Pa).
+    cappa : float or jax.Array, optional
+        Poisson exponent.  Default ``constants.kappa``.  Use
+        layer-varying array for moist atmosphere (iter-723
+        cappa_moist_fv3 output).
+
+    Returns
+    -------
+    pi : jax.Array
+        Exner function (dimensionless).
+    """
+    kap = constants.kappa if cappa is None else cappa
+    return (p / p_ref) ** kap
+
+
 def theta_dry_fv3(
     pt: jax.Array,
     p: jax.Array,
