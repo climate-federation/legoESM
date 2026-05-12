@@ -5298,5 +5298,50 @@ tropopause comparisons; (3) cross-tropopause ozone transport;
 vmap-compatible.  No new physical constants introduced (2 K/km
 is the WMO-1957 convention).
 
+## Iter 798 — cold_point_tropopause_fv3 (CPT)
+
+Added `cold_point_tropopause_fv3(t, z)` to
+`grids/cubed_sphere.py`.  Cold-point tropopause:
+
+```
+k_cpt = argmin_k T(k)
+z_cpt = z[k_cpt],   T_cpt = T[k_cpt]
+```
+
+Returns ``(z_cpt, T_cpt)`` tuple for callers that need both
+(e.g., saturation-mixing-ratio computation for H₂O stratospheric
+entry).
+
+Tropical-convention tropopause definition.  Sets the
+stratospheric water-vapor entry "cold trap" — the Brewer-Dobson
+circulation lifts air through z_cpt, freeze-drying it to T_cpt-
+saturation values (~3 ppmv at 190 K).
+
+Used by: tropical tropopause layer (TTL) diagnostics, Brewer-
+Dobson stratospheric water-vapor entry analysis, stratospheric
+ozone-recovery long-term trends (CPT cools under increased CO₂
+→ less H₂O in stratosphere → ozone-layer feedback), MJO / CPT
+coupled variability.
+
+Complements iter-796 (DT) and iter-797 (LRT).  In the tropics
+z_CPT > z_LRT > z_DT (often by 1–3 km); in mid-latitudes all
+three converge.
+
+Test: `tests/test_fv3_cold_point_tropopause_iter798.py` (6 tests:
+tropical profile cold point at 17 km / 195 K, monotone-decreasing
+T → top, monotone-increasing T → bottom, tuple return shape
+preserved, complementary-to-iter-797 (both in TTL 15-20 km),
+3-D batched (n_x, n_y, km) → (n_x, n_y) + finite + sensible
+ranges).
+
+### Why this iteration was meaningful
+
+Closes the **tropopause-detection triplet** (DT, LRT, CPT) —
+the three canonical reanalysis tropopause definitions.  CPT
+specifically is the tropical workhorse for stratospheric H₂O
+entry and ozone-recovery feedback diagnostics (Solomon et al.
+2010, Randel-Park 2019).  Pure JAX, vmap-compatible.  No new
+physical constants introduced.
+
 
 

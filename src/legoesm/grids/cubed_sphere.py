@@ -4719,6 +4719,59 @@ def lapse_rate_tropopause_fv3(
     return jnp.take_along_axis(z_mid, idx_safe[..., None], axis=-1)[..., 0]
 
 
+def cold_point_tropopause_fv3(
+    t: jax.Array,
+    z: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 798: cold-point tropopause (CPT).
+
+    Level of minimum temperature in the column:
+
+        k_cpt = argmin_k T(k)
+        z_cpt = z[k_cpt],  T_cpt = T[k_cpt]
+
+    Tropical-convention tropopause definition.  Sets the
+    stratospheric water-vapor entry "cold trap" — the Brewer-
+    Dobson circulation lifts air through z_cpt, freeze-drying
+    it to T_cpt-saturation values (~3 ppmv at 190 K).
+
+    Used by: tropical tropopause layer (TTL) diagnostics,
+    Brewer-Dobson stratospheric water-vapor entry analysis,
+    stratospheric ozone-recovery long-term trends (CPT cools
+    under increased CO₂ → less H₂O in stratosphere → ozone-
+    layer feedback), MJO / cold-point tropopause coupled
+    variability.
+
+    Complements:
+      * iter-796 ``dynamic_tropopause_fv3``    (PV > 2 PVU)
+      * iter-797 ``lapse_rate_tropopause_fv3`` (WMO 1957)
+
+    In the tropics z_CPT > z_LRT > z_DT (often by 1-3 km).  In
+    mid-latitudes all three converge.
+
+    Vertical axis last; ``z`` and ``t`` surface → top oriented.
+    Returns (z_cpt, T_cpt) tuple for callers that need both the
+    height and the cold-point temperature (e.g., saturation-
+    mixing-ratio computation for H₂O entry).
+
+    Parameters
+    ----------
+    t : jax.Array, shape (..., km)
+        Temperature column (K).
+    z : jax.Array, shape (..., km)
+        Geopotential height column (m).
+
+    Returns
+    -------
+    (z_cpt, T_cpt) : tuple of jax.Array, shape (...,)
+        Cold-point height (m) and temperature (K).
+    """
+    idx = jnp.argmin(t, axis=-1)
+    z_cpt = jnp.take_along_axis(z, idx[..., None], axis=-1)[..., 0]
+    t_cpt = jnp.take_along_axis(t, idx[..., None], axis=-1)[..., 0]
+    return z_cpt, t_cpt
+
+
 def kinetic_energy_fv3(
     ua: jax.Array,
     va: jax.Array,
