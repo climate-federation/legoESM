@@ -41,6 +41,12 @@ import matplotlib.pyplot as plt
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "src"))
 
+# Set fp64 precision BEFORE any model imports.
+# Matches MPAS script; eliminates float32 rounding errors in implicit
+# solver at thin partial cells.
+from legoesm.core.precision import set_policy, PrecisionPolicy
+set_policy(PrecisionPolicy.fp64())
+
 from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.grids.latlon import create_latlon_grid

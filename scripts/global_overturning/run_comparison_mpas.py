@@ -43,6 +43,12 @@ import matplotlib.pyplot as plt
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "src"))
 
+# Set fp64 precision BEFORE any model imports.
+# float32 implicit solver accumulates rounding errors at thin partial
+# cells, causing ~0.001 PSU/10-day S drift.  float64 eliminates this.
+from legoesm.core.precision import set_policy, PrecisionPolicy
+set_policy(PrecisionPolicy.fp64())
+
 from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.grids.voronoi import create_voronoi_mesh

@@ -292,38 +292,107 @@ vs 0.0001 PSU). Led to Issue 1 investigation.
 
 ## Issues Found
 
-### Issue 1: TVD sub-seafloor stencil contamination
+### Issue 1: MPAS salinity drift (0.003 PSU/month at shallow cells)
 
 **Found:** 2026-05-12  
-**Severity:** Low (0.003 PSU after 30 days, but accumulates)  
-**Status:** Root cause identified. Fix deferred after Issue 2.
+**Severity:** Medium (0.003 PSU in 30 days, ~0.04 PSU/year)  
+**Status:** ROOT CAUSE UNKNOWN. Two hypotheses tested and disproven.
 
-**Root cause:** The TVD horizontal advection stencil
-(`advection_mpas.py:111-164`) uses an upwind-of-upwind (upup) cell
-for the flux limiter. At level k, the upup cell may be below its own
-seafloor, giving S=0. This contaminates the smoothness ratio:
+**Symptom:** Starting from uniform S=35.0, after 30 days:
+- Shallow cells (H < 1000m): column-mean S = 34.997 (−0.003 PSU)
+- Deep cells (H > 4000m): column-mean S = 35.000 (no anomaly)
+- Lat-lon with same config: S = 35.00000 (essentially perfect)
 
-    r = (S_donor − 0) / (S_downstream − S_donor) → huge → φ = 2
+**Hypothesis A: TVD sub-seafloor stencil contamination** (DISPROVEN)
 
-producing doubled diffusion at edges near topography. Salt
-systematically drains from shallow to deep cells.
+The TVD upwind-of-upwind stencil reaches into sub-seafloor S=0.
+Fix applied (replace with donor value) — zero effect on S drift.
+Reason: when S is uniform, delta ≈ 0, so the limiter correction
+is proportional to delta regardless of φ. Fix is correct as
+defense-in-depth for when real gradients develop.
 
-Secondary: vertical TVD ghost cell uses deepest level (sub-seafloor
-S=0 for shallow columns), doubling diffusion at bottom active
-interface.
+**Hypothesis B: Barotropic Hu_avg conservation mismatch** (DISPROVEN)
 
-All other code paths verified safe: implicit mixing, KPP, GM/Redi,
-K_h diffusion, freshwater, conservation fixer.
+The implicit barotropic solver used H_e_new in the time-averaged
+transport, breaking div(Hu_avg) = (eta_old - eta_new)/dt. Fix
+applied (use H_e_old consistently) — zero effect on S drift.
+Reason: magnitude estimate shows the mismatch is O(3e-6 PSU) over
+30 days, three orders of magnitude too small. Fix is correct for
+formal conservation but not the observed drift.
 
-**Fix:** Replace sub-seafloor upup values with donor cell value
-(standard TVD boundary treatment: r=0 → φ=0 → pure upwind).
-Also fix vertical TVD ghost cell to use bottom active value.
+**Both fixes committed** (defense-in-depth, correct for long runs):
+- TVD stencil: `advection_mpas.py`, `vertical.py`
+- Hu_avg: `barotropic_implicit_mpas.py`, `barotropic_implicit_latlon_cgrid.py`
+
+**Verified safe by two agent audits:**
+- Implicit vertical diffusion, KPP, GM/Redi, K_h diffusion
+- Freshwater/virtual salt flux, conservation fixer
+- Vertical velocity diagnosis, sub-seafloor masking (active_3d)
+- Divergence operator (globally conservative by construction)
+
+**Isolation experiments (2026-05-12):** Disabled components one at a
+time (10-day runs). Results:
+
+| Experiment | S deficit (shallow−deep) | Conclusion |
+|-----------|-------------------------|------------|
+| baseline | −0.00082 | Reference |
+| no_gmredi | −0.00082 | Not GM/Redi |
+| **no_kpp** | **+0.00005** | **KPP/convection is the cause** |
+| no_forcing | −0.00099 | Not forcing |
+| upwind | −0.00082 | Not TVD |
+| no_visc | −0.00085 | Not viscosity |
+| no_drag | −0.00084 | Not drag |
+
+**Agent investigation (2 agents, MPAS deep-dive + cross-grid comparison):**
+
+Both agents confirmed sub-seafloor K masking is CORRECT — K=0 at the
+bottom active/sub-seafloor interface. No direct salt leakage through
+the implicit solver. The mechanism is indirect:
+
+1. Enhanced diffusion applies K_conv ≈ 0.5 m²/s at nearly ALL active
+   interfaces (sigmoid with sharpness=1e6 gives ~0.5 for near-neutral
+   stratification — too much for truly neutral columns).
+2. MPAS uses true partial-cell thickness (e.g., 5m at thin bottom
+   cells) in the implicit solver. Lat-lon uses reference thickness
+   (~100m). This makes the coupling coefficient ~20× larger on MPAS
+   at thin cells.
+3. Strong vertical mixing at thin shallow cells creates a different
+   vertical tracer distribution than at deep cells with thick layers.
+4. Horizontal advection redistributes the resulting horizontal gradient.
+
+This is a **thin-cell numerics issue**, not a masking bug.
+
+**Fix options (not yet applied):**
+- Increase snap fraction (30% → 50%) to remove thinnest cells
+- Cap coupling coefficient in implicit solver at thin cells
+- Tune enhanced diffusion sigmoid_sharpness so K≈0 at neutral (not 0.5)
+- Use reference thickness in implicit solve (matches lat-lon behavior)
+
+**ROOT CAUSE FOUND (2026-05-12): float32 precision.**
+
+Re-running the 10-day baseline in full float64 gives S_shallow =
+35.00000000, S_deep = 35.00000000, deficit = 0.00000000. The drift
+vanishes completely. The implicit solver's tridiagonal system with
+thin partial cells (large coupling coefficients) accumulates float32
+rounding errors that manifest as depth-dependent S bias. In float64,
+the error is below machine precision.
+
+This explains:
+- Why MPAS drifts but lat-lon doesn't: thin partial cells → 20×
+  larger coupling → more float32 rounding error
+- Why disabling KPP eliminates it: KPP adds K≈0.5 → larger coupling
+  → more rounding error in the tridiagonal solve
+- Why sub-seafloor masking audits found nothing: masking IS correct
+
+**Fix:** Comparison scripts now use `PrecisionPolicy.fp64()`.
+For production, the implicit solver should upcast to float64
+internally (control dtype) even when storage is float32.
 
 ### Issue 2: Adcroft PGF p_prime / centroid grid mismatch
 
 **Found:** 2026-05-12  
 **Severity:** Critical (19× SSH inflation, renders adcroft unusable)  
-**Status:** Root cause identified. Fixing now (default use_h_actual_pgf=True).
+**Status:** FIXED. Validated by Exp 0c.
 
 **Root cause:** On MPAS, `p_prime` is integrated using `dz_ref`
 (reference thicknesses, column-independent) when
@@ -340,34 +409,29 @@ The centered PGF accidentally works because dz_ref is column-
 independent → identical p_prime at level k → gradient is machine
 zero at step edges. The Adcroft correction then adds pure noise.
 
-**Fix:** Change `use_h_actual_pgf` default to `True` in
-`mpas_config.py`. This makes MPAS match lat-lon behavior: p_prime
-integrated on h_partial, correction on h_partial — consistent.
+**Fix:** Changed `use_h_actual_pgf` default to `True` in
+`mpas_config.py`. MPAS now matches lat-lon: p_prime on h_partial,
+correction on h_partial — consistent.
 
-**Files:**
-- `mpas_config.py`: line 183 (default False → True)
-- `ocean_pe_mpas.py`: lines 169-183 (p_prime integration uses h_actual
-  when flag is True), lines 411-418 (AC correction)
-- Validated by: Exp 0c (MPAS + adcroft + h_actual=True)
+**Validated:** Exp 0c: max|η| dropped from 4.13 m → 0.17 m
+(matching lat-lon's 0.22 m).
 
 ---
 
-## Next Steps (2026-05-12)
+## Next Steps (2026-05-12 evening)
 
-1. **Fix Issue 2:** Change `use_h_actual_pgf` default to `True` in
-   `mpas_config.py`.
+1. **Isolation experiments** for Issue 1 (S drift):
+   Run MPAS 30 days with components disabled one at a time:
+   - Exp A: No GM/Redi (gm_redi=None)
+   - Exp B: No KPP (vertical_mixing scheme="none")
+   - Exp C: No advection (upwind instead of TVD, or dt_tracer=0)
+   - Exp D: No implicit vertical mixing (explicit only)
+   - Exp E: No surface forcing (scheme="none")
+   Compare S drift in each to identify the responsible component.
 
-2. **Exp 0c:** Re-run MPAS 30 days with `pgf_scheme="adcroft"` and
-   the fixed default. Expect max|η| ≈ 0.15-0.22 m (matching lat-lon).
-   Compare snapshots side-by-side.
+2. Once Issue 1 source identified: fix and validate.
 
-3. **If 0c works:** Both grids now run adcroft PGF correctly. This
-   becomes the true baseline for comparison.
-
-4. **Then:** Fix Issue 1 (TVD stencil) and re-run as Exp 1. Compare
-   S fields to confirm fix.
-
-5. **Then:** Extend to 1-year and 10-year runs for production comparison.
+3. Extend baseline to 1-year and 10-year production comparison.
 
 ---
 
