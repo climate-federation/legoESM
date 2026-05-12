@@ -90,12 +90,15 @@ def compute_total_energy_pe(state, grid, coord) -> tuple[jax.Array, float]:
         [phi_half_interior, phis[..., None]], axis=-1,
     )  # (6,n,n,nlev+1) — last entry = surface
 
-    # Boundary work: pe(top)·phi(top) - pe(sfc)·phi(sfc)
+    # Boundary work: pe(sfc)·phi(sfc) - pe(top)·phi(top)
+    # FV3 fv_mapz.F90:1142: ``te_2d = pe(km+1)·phiz(km+1) - pe(1)·phiz(1)``
+    # where k=1 is top (small p), k=km+1 is surface (large p).  Matches:
+    # iter 603 fix: sign-corrected from iter 598's te = pe_top·phi_top - pe_sfc·phi_sfc.
     pe_top = p_half[..., 0]                            # (6,n,n)
     pe_sfc = p_half[..., -1]                           # (6,n,n)
     phi_top = phi_half[..., 0]
     phi_sfc = phi_half[..., -1]
-    te = pe_top * phi_top - pe_sfc * phi_sfc           # (6,n,n)
+    te = pe_sfc * phi_sfc - pe_top * phi_top           # (6,n,n)
 
     # Cell-center u, v from D-grid corners (simple average).
     u_d = state.u_d.data                               # (6, n+1, n+1, nlev)

@@ -1195,6 +1195,26 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 603: **PE TE boundary-work sign fix** (iter-598 latent bug).
+  Iter 602 surfaced this via numerical-Jacobian Newton: the
+  iter-598 PE TE formula had the boundary-work term inverted:
+
+      iter-598 (buggy): te = pe_top·phi_top - pe_sfc·phi_sfc
+      iter-603 (fix):   te = pe_sfc·phi_sfc - pe_top·phi_top
+
+  FV3 fv_mapz.F90:1142 specifies:
+  ``te_2d = pe(km+1)·phiz(km+1) - pe(1)·phiz(1)`` where k=1 is
+  top, k=km+1 is surface.
+
+  iter-598 tests still passed because they only checked positivity
+  and θ-monotonicity, which are dominated by Σ cp·T·delp (the
+  boundary term is ~0.1% of total).  New regression test:
+  - Raise phis from 0 → 1000 m²/s² → TE should INCREASE (since
+    ϕ_sfc gains 1000 and pe_sfc > pe_top).
+  - iter-598 buggy sign would give ΔTE < 0; iter-603 fixed
+    sign gives ΔTE > 0.
+  All iter-598/599/602 tests still pass after fix.  1/1 in
+  11 s.  Wired into iter-383 sweep (now 176).
 - Iter 602: **PE TE-conserving correction** (mirror iter 601).
   Faithful port of FV3 ``consv_te > 0`` for hydrostatic branch.
   Differs from NH version: PE total-energy has a hydrostatic

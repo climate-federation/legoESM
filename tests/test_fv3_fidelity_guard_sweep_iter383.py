@@ -199,6 +199,7 @@ _GUARD_MODULES = (
     "test_te_drift_iter599",                         # iter-599 add
     "test_te_correction_iter601",                    # iter-601 add
     "test_te_correction_pe_iter602",                 # iter-602 add
+    "test_pe_te_boundary_sign_iter603",              # iter-603 add
 )
 
 
