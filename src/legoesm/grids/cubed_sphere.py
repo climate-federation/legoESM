@@ -4327,20 +4327,8 @@ def prt_height_fv3(
         ``gb`` / ``nh`` / ``sh`` / ``eq`` band means of the
         pressure-surface height (m).
     """
-    g = constants.g
-    # Build wz at interfaces from surface up: wz[..., -1] = phis/g
-    wz_surface = phis / g  # (..., )
-    # Cumulative -delz from surface upward.  In FV3 ordering delz<0,
-    # so wz[k] = wz[k+1] - delz[k] = wz[k+1] + |delz[k]|.
-    minus_delz = -delz                                  # (..., km), positive
-    cum_up = jnp.cumsum(minus_delz[..., ::-1], axis=-1)[..., ::-1]
-    # wz[..., 0..km-1] = wz_surface + cum_up[..., 0..km-1]
-    # wz[..., km] = wz_surface
-    wz_above = wz_surface[..., None] + cum_up           # (..., km)
-    wz = jnp.concatenate(
-        [wz_above, wz_surface[..., None]],
-        axis=-1,
-    )                                                    # (..., km+1)
+    # iter-727: delegate height-from-delz to compute_zh_from_delz_fv3
+    wz = compute_zh_from_delz_fv3(phis, delz)
     log_p = jnp.log(press)
     height_cells = get_height_given_pressure_fv3(wz, peln, log_p)
     return prt_gb_nh_sh_fv3(height_cells, area, lat)
@@ -4513,6 +4501,50 @@ def range_check_fv3(
     qmax = jnp.max(q)
     bad_range = (qmin < q_low) | (qmax > q_hi)
     return bad_range, qmin, qmax
+
+
+def compute_zh_from_delz_fv3(
+    phis: jax.Array,
+    delz: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 727: layer interface heights from surface phis + delz.
+
+    Faithful JAX port of FV3's standard z-from-delz pattern (used
+    inline in iter-706 ``prt_height_fv3`` and many FV3 diagnostics):
+
+        zh[km] = phis / g                       (surface elevation)
+        zh[k]  = zh[k+1] − delz[k]              (cumulative upward)
+
+    With FV3 sign convention (delz < 0, top-down indexing), each
+    upward step adds |delz[k]|.  Inverse direction of iter-726
+    ``hydrostatic_delz_fv3`` (which goes z → delz).
+
+    Pairs with iter-722 ``compute_pkz_fv3`` (peln→pkz), iter-684
+    ``get_height_given_pressure_fv3`` (interpolation), and iter-681
+    ``get_height_field_fv3`` (full atmospheric height field).
+
+    Parameters
+    ----------
+    phis : jax.Array, shape (...,)
+        Surface geopotential (m²/s²).
+    delz : jax.Array, shape (..., km)
+        Layer thickness (NEGATIVE in FV3 — top-down).
+
+    Returns
+    -------
+    zh : jax.Array, shape (..., km+1)
+        Layer interface heights (m, monotone decreasing in k).
+    """
+    g = constants.g
+    zh_surface = phis / g                          # (...,)
+    # Cumulative -delz from surface upward
+    minus_delz = -delz                             # positive top-down
+    cum_up = jnp.cumsum(minus_delz[..., ::-1], axis=-1)[..., ::-1]
+    zh_above = zh_surface[..., None] + cum_up      # (..., km)
+    return jnp.concatenate(
+        [zh_above, zh_surface[..., None]],
+        axis=-1,
+    )                                                # (..., km+1)
 
 
 def hydrostatic_delz_fv3(

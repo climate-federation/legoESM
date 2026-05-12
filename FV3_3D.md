@@ -1195,6 +1195,37 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 727: **``compute_zh_from_delz_fv3``** — interface heights from delz + phis.
+  Extracted from iter-706 ``prt_height_fv3`` inline pattern as a
+  public helper.  Faithful to FV3's standard z-from-delz pattern:
+
+      zh[km] = phis / g                          (surface)
+      zh[k]  = zh[k+1] − delz[k]                 (cumulative upward,
+                                                  delz<0 in FV3)
+
+  Vectorized via cumsum on reversed (-delz).
+
+  Inverse direction of iter-726 ``hydrostatic_delz_fv3``.
+  Composes with:
+    * iter-684 ``get_height_given_pressure_fv3``
+    * iter-706 ``prt_height_fv3`` (now delegates to this helper)
+    * iter-722 ``compute_pkz_fv3`` (consumes peln but related)
+
+  iter-706 refactored: removed 10 inline lines; output bit-identical
+  (pinned by regression test in iter-727).
+
+  Tests (7/7 in <6 s):
+  1. zh[km] = phis/g exactly.
+  2. Uniform delz → evenly spaced zh.
+  3. Monotone decreasing top → surface.
+  4. iter-706 prt_height output unchanged after refactor.
+  5. Round-trip: compute_zh(hydrostatic_delz) → recover Δzh = |delz|.
+  6. 3-D (n_x, n_y, km) delz + 2-D phis → 3-D zh.
+  7. No NaN/Inf on random.
+
+  iter-706 4/4 tests still pass.
+
+  Wired into iter-383 sweep (now 291).
 - Iter 726: **``hydrostatic_delz_fv3``** — layer thickness from hydrostatic balance.
   Faithful JAX port of FV3 hydrostatic delz initialization
   (model/fv_mapz.F90:3402, 3411 HYDRO_DELZ_REMAP/EXTRAP).
