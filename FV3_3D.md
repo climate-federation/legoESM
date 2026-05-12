@@ -1195,6 +1195,30 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 703: **C24 validates iter-698 in the documented floor regime**.
+
+  iter-698 (C8) and iter-699 (C16) measured −25.8 % and −21.9 %
+  reductions.  iter-703 extends to C24 (lower end of the
+  documented 5-6 mK θ′ floor regime C24-C32), 2 seeds × 3
+  dycore steps:
+
+  ```
+  OFF: mean θ′ edge ratio = 5.4428
+  ON : mean θ′ edge ratio = 4.1826
+  delta (ON − OFF) = −1.2602  (−23.2 %)
+  ```
+
+  Scaling so far:
+    * C8  −25.8 %  (iter-698)
+    * C16 −21.9 %  (iter-699)
+    * C24 −23.2 %  (iter-703)
+
+  Stable ~22-26 % reduction across the entire floor regime.
+  iter-698 factory promotion of ``use_fv3_a2b_ord4_vector_uv``
+  is now empirically validated at the resolution that actually
+  exhibits the 5-6 mK floor.
+
+  Wired into iter-383 sweep (now 267).
 - Iter 702: **EMPIRICAL DEAD-END — scalar ζ_corner ord4 has ZERO
   impact on θ′ edge ratio at C8**.
 
