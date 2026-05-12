@@ -2304,6 +2304,61 @@ def gnomonic_dist(im: int) -> tuple[jax.Array, jax.Array]:
     return xyz2latlon(p1, p2, p3)
 
 
+def project_sphere_v(
+    f: jax.Array, e: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 659: project vector onto sphere-tangent plane.
+
+    Faithful JAX port of FV3 ``project_sphere_v``
+    (fv_grid_utils.F90:3345-3361).  Given a unit-sphere position
+    ``e`` and a 3-vector ``f``, returns ``f`` projected onto the
+    tangent plane at ``e``::
+
+        ap = f · e
+        f_tangent = f - ap·e
+
+    Takes the last axis as the 3-vector component; broadcasts on
+    leading axes.
+    """
+    ap = jnp.sum(f * e, axis=-1, keepdims=True)
+    return f - ap * e
+
+
+def get_unit_vector_fv3(
+    lon1: jax.Array, lat1: jax.Array,
+    lon2: jax.Array, lat2: jax.Array,
+    lon3: jax.Array, lat3: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 659: unit tangent vector at p2 from p1 → p3.
+
+    Faithful JAX port of FV3 ``get_unit_vector``
+    (tools/test_cases.F90:8366-8385).  Algorithm:
+
+        xyz1, xyz2, xyz3 = latlon2xyz(...)
+        uvect = xyz3 - xyz1                     # chord
+        uvect = project_sphere_v(uvect, xyz2)   # tangent at p2
+        uvect = normalize(uvect)
+
+    Returns the unit tangent vector at p2 pointing in the
+    direction from p1 toward p3 (projected onto the local
+    tangent plane).
+
+    Differs from iter-611 ``get_unit_vect2`` (great-circle
+    midpoint tangent) and iter-615 ``get_unit_vect3`` (Cartesian
+    variant of get_unit_vect2): this one is the chord-based
+    projection at an arbitrary third point.
+
+    Returns shape ``(..., 3)``; broadcasts on leading axes.
+    """
+    x1, y1, z1 = latlon2xyz(lon1, lat1)
+    x2, y2, z2 = latlon2xyz(lon2, lat2)
+    x3, y3, z3 = latlon2xyz(lon3, lat3)
+    p2 = jnp.stack([x2, y2, z2], axis=-1)
+    uvect_raw = jnp.stack([x3 - x1, y3 - y1, z3 - z1], axis=-1)
+    uvect_tangent = project_sphere_v(uvect_raw, p2)
+    return normalize_vect(uvect_tangent)
+
+
 def terminator_tracers(
     lon: jax.Array, lat: jax.Array,
     km: int,

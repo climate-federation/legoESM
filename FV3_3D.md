@@ -1195,6 +1195,39 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 659: **FV3 ``project_sphere_v`` + ``get_unit_vector_fv3``**.
+  Faithful JAX ports of FV3 tangent-plane helpers:
+
+  | Function              | Module / Line              | Role                              |
+  |-----------------------|----------------------------|-----------------------------------|
+  | ``project_sphere_v``  | fv_grid_utils.F90:3345     | project f onto tangent at e       |
+  | ``get_unit_vector_fv3`` | test_cases.F90:8366     | unit tangent at p2 from p1→p3     |
+
+  ``project_sphere_v(f, e)``:
+
+      ap = f · e
+      f_tangent = f - ap·e
+
+  ``get_unit_vector_fv3(p1, p2, p3)``:
+
+      xyz1, xyz2, xyz3 = latlon2xyz(...)
+      uvect = xyz3 - xyz1                # chord
+      uvect = project_sphere_v(uvect, xyz2)
+      uvect = normalize(uvect)
+
+  Differs from iter-611 ``get_unit_vect2`` (great-circle midpoint)
+  and iter-615 ``get_unit_vect3`` (Cartesian midpoint variant):
+  this is the chord-based projection at an arbitrary third point
+  p2.  Used by FV3 grid-metric construction.
+
+  Tests (5/5 in <1 s):
+  1. Projected vector orthogonal to e.
+  2. Radial component f∥e → zero projection.
+  3. Tangent vector unit-norm.
+  4. Tangent vector ⊥ p2.
+  5. No NaN/Inf.
+
+  Wired into iter-383 sweep (now 227).
 - Iter 658: **FV3 ``terminator_tracers``** — DCMIP 2016 terminator
   chemistry IC.  Faithful JAX port of FV3 ``terminator_tracers``
   (tools/test_cases.F90:4136-4205, Lucas Harris, 2016).
