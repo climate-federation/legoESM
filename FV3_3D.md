@@ -1175,6 +1175,15 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 546: **scan_step speedup measurement**.  iter-544
+  claimed ``make_clipped_scan_step`` eliminates Python loop
+  overhead.  Quantified at 20 steps @ C8 + SBR:
+  - Python loop: 88 ms (4.4 ms/step)
+  - scan_step:   73 ms (3.65 ms/step)
+  - **speedup: 1.20×**
+  Modest at this size; the savings compound for 100+ step
+  runs.  Both produce identical output (iter-544 bit-for-bit
+  test).  1/1 in 50 s.  Wired into iter-383 sweep (now 130).
 - Iter 544: **``make_clipped_scan_step()``** — JAX scan-based
   multi-step API for fast long runs.  iter-526's
   ``make_clipped_step`` returns a single-step function; for

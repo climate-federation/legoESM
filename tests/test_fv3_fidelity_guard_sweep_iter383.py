@@ -153,6 +153,7 @@ _GUARD_MODULES = (
     "test_clip_helper_perf_iter541",                 # iter-541 add
     "test_dt_sensitivity_iter543",                   # iter-543 add
     "test_clipped_scan_step_iter544",                # iter-544 add
+    "test_scan_step_perf_iter546",                   # iter-546 add
 )
 
 
