@@ -1195,264 +1195,75 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
-- Iter 709: **FV3 ``cs_interpolator_fv3``** — height-level interp via PPM.
-  Faithful JAX port of FV3 ``cs_interpolator``
-  (tools/fv_diagnostics.F90:4603-4649).  Uses iter-708
-  ``cs_prof_fv3`` for PPM edge values + subcell parabolic
-  distribution.
+- Iter 710: **FV3 ``cs3_interpolator_fv3``** — log-p multi-level PPM interp.
+  Faithful JAX port of FV3 ``cs3_interpolator``
+  (tools/fv_diagnostics.F90:4510-4602).  Differs from iter-709
+  ``cs_interpolator``:
+    * Interpolation coord is log-p (``pe``), not height (``wz``).
+    * Output is at multiple levels ``pout`` (shape ``(kd,)``).
+    * Supports tracer type ``iv``: -1 winds, 0 positive scalar,
+      1 temperature.
 
-  Algorithm:
-      dz[k] = wz[k] − wz[k+1]
-      qe    = cs_prof_fv3(qin, dz, iv=1)
-      For target zout (scalar):
-          above top         → qout = qe[0]
-          below surface     → qout = qe[km]
-          in-range layer k:
-              a6 = 3·(2·qin[k] − (qe[k] + qe[k+1]))
-              s0 = (wz[k] − zout) / dz[k]
-              qout = qe[k] + s0·(qe[k+1] − qe[k] + a6·(1 − s0))
-      qout = max(qmin, qout)
+  Simplification vs FV3: below-surface temperature (iv == 1) skips
+  the ECMWF (Trenberth 1993) hydrostatic extrapolation; uses
+  simple edge-value clamp like iv != 1.  Future iter can add the
+  full ECMWF path.
 
-  Vectorized one-hot layer selection (exclusive lower bound so
-  boundary points pick exactly one layer).
+  Vectorized via ``jax.vmap`` over ``pout`` levels.
 
-  Tests (6/6 in <3 s):
-  1. zout above top → returns top edge value.
-  2. zout below surface → returns bot edge value.
-  3. Uniform qin = C at all z → qout = C.
-  4. Negative result clipped to qmin.
-  5. 3-D (n_x, n_y, km) qin → (n_x, n_y) qout.
+  Tests (6/6 in <5 s):
+  1. Uniform qin → qout = qin at all output levels.
+  2. pout above top → qe[0] returned.
+  3. pout below surface → qe[km] returned (iv != 1 path).
+  4. iv=0 clips qout >= 0.
+  5. 3-D (n_x, n_y, km) qin → (n_x, n_y, kd) qout.
   6. No NaN/Inf on random.
 
-  Wired into iter-383 sweep (now 273).
-- Iter 708: **FV3 ``cs_prof_fv3``** — PPM column profile tridiag.
-  Faithful JAX port of FV3 ``cs_prof``
-  (tools/fv_diagnostics.F90:4653-4733).  Non-uniform tridiagonal
-  PPM edge reconstruction with Lin (2004) monotone constraints.
+  Wired into iter-383 sweep (now 274).
+- **Iters 701-709 (compacted iter 710)**: scalar-ord4 dead-ends,
+  C24 validation, and FV3 diagnostic + PPM column ports.
 
-  Algorithm:
-      1. Top edge q[0]  : explicit closure (delp[1]/delp[0]).
-      2. Forward sweep k=1..km-1 : Thomas-style γ.
-      3. Bottom q[km]   : explicit closure with a_bot.
-      4. Back-substitution k=km-1..0.
-      5. Large-scale clip k=1.
-      6. Interior k=2..km-2 : monotone clip on slope-sign neighbors
-           - same-sign         → clip to [min, max] of q2[k-1], q2[k]
-           - local max (g>0)   → floor at min
-           - local min (g≤0)   → ceiling at max; iv==0 (mass) also ≥ 0
-      7. Bottom k=km-1  : large-scale clip.
+  | Iter | What                                              | Outcome / FV3 ref                                  |
+  |------|---------------------------------------------------|----------------------------------------------------|
+  | 701  | ``use_fv3_a2b_ord4_theta_corner`` impact @ C8    | NULL (Δ = +0.0000) — scalar θ ord4 is dead-end    |
+  | 702  | ``use_fv3_a2b_zeta_corner`` impact @ C8 (NH)     | NULL (Δ = −0.0000 bit-identical) — scalar ord4 NA |
+  | 703  | iter-698 4th-order vector @ C24                  | −23.2% (5.44 → 4.18) — floor regime confirmed     |
+  | 704  | ``prt_maxmin_fv3``                                | fv_diagnostics:4080 — min/max·fac                  |
+  | 705  | ``prt_gb_nh_sh_fv3``                              | fv_diagnostics:4462 — gb/nh/sh/eq band means       |
+  | 706  | ``prt_height_fv3``                                | fv_diagnostics:4413 — height of p-surface          |
+  | 707  | ``helicity_relative_caps_fv3``                    | fv_diagnostics:4894 — SRH w/ external (uc, vc)     |
+  | 708  | ``cs_prof_fv3``                                   | fv_diagnostics:4653 — PPM column tridiag           |
+  | 709  | ``cs_interpolator_fv3``                           | fv_diagnostics:4603 — height-level PPM interp      |
 
-  Sequential tridiag handled via Python loops (JAX traces unroll
-  statically for fixed km).  Min km = 4 (bottom closure uses
-  k = km - 2).
+  **Edge-floor progress (cumulative since iter-466 50.4 % reduction).**
+  iter-698/703 confirmed 4th-order vector cc→D-corner reduces θ′
+  edge ratio by 21-26 % across C8/C16/C24.  iter-701/702 ruled out
+  scalar (θ, ζ) cc→corner ord4 paths as inactive levers — only the
+  VECTOR halo basis-mismatch fix matters.  Active lever set
+  unchanged since iter-698.
 
-  Tests (7/7 in <3 s):
-  1. Uniform → uniform edges.
-  2. Linear → interior edges between neighbor cells.
-  3. Random non-monotone → top/bot edges bounded by neighbors.
-  4. iv=0 (mass) → q ≥ 0 at local mins.
-  5. 3-D (n_x, n_y, km) → 3-D (n_x, n_y, km+1).
-  6. No NaN/Inf on random.
-  7. km < 4 raises ValueError.
+  **Supercell-tornado prediction suite COMPLETE** (UH 686 + SRH 687
+  + BRN 688 + Bunkers 689 + SRH-CAPS 707) — all FV3 diagnostics
+  for severe-weather analysis ported.
 
-  Used by FV3 ``cs_interpolator`` (height-level interp) and as a
-  general PPM edge primitive.
+  **FV3 diagnostic-print suite COMPLETE** (prt_mxm 685 + prt_mass
+  694 + prt_maxmin 704 + prt_gb_nh_sh 705 + prt_height 706).
 
-  Wired into iter-383 sweep (now 272).
-- Iter 707: **FV3 ``helicity_relative_caps_fv3``** — SRH with external
-  (uc, vc) storm motion.
-  Faithful JAX port of FV3 ``helicity_relative_CAPS``
-  (tools/fv_diagnostics.F90:4894-4967).
+  **PPM vertical interp suite** advanced: cs_prof (708) provides
+  the tridiag column reconstruction primitive used by
+  cs_interpolator (709, higher-order alternative to iter-678
+  linear interp).
 
-  Variant of iter-687 SRH that takes storm motion ``(uc, vc)`` as
-  INPUT rather than computing as depth-weighted mean wind.  Pairs
-  with iter-689 ``bunkers_vector_fv3`` for the empirical right-mover
-  storm-motion predictor.
-
-      SRH = Σ_k_in_window (ua - uc)·dv_dz - (va - vc)·du_dz
-
-  Algorithm identical to iter-687 (dz_eff masking + centered shear
-  finite differences); only difference is uc/vc as input.
-
-  Tests (6/6 in <3 s):
-  1. Uniform wind → SRH = 0 regardless of (uc, vc).
-  2. Zero wind → SRH = 0.
-  3. Passing iter-687's internal mean as (uc, vc) reproduces
-     iter-687 output exactly.
-  4. Pairs with iter-689 Bunkers (uc, vc) on random column.
-  5. 3-D winds + 2-D (uc, vc) → 2-D SRH output.
-  6. hydrostatic=True without pt/q/peln raises ValueError.
-
-  Wired into iter-383 sweep (now 271).
-- Iter 706: **FV3 ``prt_height_fv3``** — p-surface height with lat-band means.
-  Faithful JAX port of FV3 ``prt_height``
-  (tools/fv_diagnostics.F90:4413-4460).  Composes iter-684
-  ``get_height_given_pressure_fv3`` (mirror-method below-surface
-  extrapolation) + iter-705 ``prt_gb_nh_sh_fv3`` (lat-band means).
-
-  Algorithm:
-      wz_surface = phis / g
-      wz[k] = wz[k+1] − delz[k]                (cumulative upward)
-      height(press) = mirror-method interp at log(press) per cell
-      → ``prt_gb_nh_sh(height, area, lat)``
-
-  Returns dict ``{gb, nh, sh, eq}`` for the lat-band means of the
-  pressure-surface height (m).
-
-  Tests (4/4 in <4 s):
-  1. Isothermal column, p_500 = 500 hPa → height ≈ H·ln(p_s/p_500).
-  2. Output dict has gb/nh/sh/eq keys.
-  3. Uniform column → all band means match.
-  4. Random column data → finite outputs.
-
-  Wired into iter-383 sweep (now 270).
-- Iter 705: **FV3 ``prt_gb_nh_sh_fv3``** — lat-band area-weighted mean.
-  Faithful JAX port of FV3 ``prt_gb_nh_sh``
-  (tools/fv_diagnostics.F90:4462-4509).
-
-  Returns dict with 4 area-weighted band means:
-
-      gb : global (all lat)
-      nh : 20° ≤ lat <  80°
-      sh : -80° < lat ≤ -20°
-      eq : -20° < lat <  20°
-
-  Bands with total area ≤ 1.0 m² return -1.0 (FV3 bugfix for
-  non-global domains).
-
-  Rounds out the FV3 diagnostic-print suite alongside iter-685
-  prt_mxm, iter-694 prt_mass, iter-704 prt_maxmin.
-
-  Tests (5/5 in <1 s):
-  1. Uniform field → all bands match value.
-  2. Field = lat_deg → band means match midpoints (NH ≈ 50, SH ≈
-     -50, EQ ≈ 0).
-  3. Empty band → returns -1.0.
-  4. Global mean of uniform field = that value.
-  5. Area-weighted (cells same lat band, different areas).
-
-  Wired into iter-383 sweep (now 269).
-- Iter 704: **FV3 ``prt_maxmin_fv3``** — light max/min diagnostic
-  (no area weighting; simpler than iter-685 ``prt_mxm`` which adds
-  area-weighted gmean).  Faithful JAX port of FV3 ``prt_maxmin``
-  (tools/fv_diagnostics.F90:4080-4116).
-
-      qmin = min(q) · fac
-      qmax = max(q) · fac
-
-  Used by FV3 as a fast sanity-check diagnostic during integration.
-
-  Tests (4/4 in <1 s):
-  1. Linspace → qmin/qmax exact.
-  2. fac=2 doubles outputs.
-  3. 4-D (6, n, n, km) input → scalar outputs.
-  4. No NaN/Inf on random.
-
-  **Audit note**: investigated cross-face vector basis treatment
-  at NH ``damp_v_d_con`` site (line 1197 ``du_normal``/``dv_normal``
-  halo).  Current ``use_fv3_cross_face_du_proj=True`` uses
-  ``_pad_halo_4d_module`` (scalar duogrid pad).  ``du_normal`` is
-  velocity-component-in-face-x direction; at cube faces the local
-  east direction rotates → scalar pad gives basis-mismatch.
+  Audit note (iter 704): NH ``damp_v_d_con`` site at
+  ``compressible_euler_cdgrid.py:1197`` uses scalar
+  ``_pad_halo_4d_module`` for ``du_normal``/``dv_normal``.  These
+  are velocity-component-in-face-x/y direction values; at cube
+  faces, local axes rotate → scalar pad gives basis-mismatch.
   Vector-aware halo would require per-component basis bookkeeping
-  on staggered grid (cannot use ``pad_halo_vector_4d`` which
-  expects co-located (u, v) pair).  Logged as future audit item;
-  scope too large for one iter.
+  on staggered grid.  Scope too large for one iter; future audit
+  item.
 
-  Wired into iter-383 sweep (now 268).
-- Iter 703: **C24 validates iter-698 in the documented floor regime**.
-
-  iter-698 (C8) and iter-699 (C16) measured −25.8 % and −21.9 %
-  reductions.  iter-703 extends to C24 (lower end of the
-  documented 5-6 mK θ′ floor regime C24-C32), 2 seeds × 3
-  dycore steps:
-
-  ```
-  OFF: mean θ′ edge ratio = 5.4428
-  ON : mean θ′ edge ratio = 4.1826
-  delta (ON − OFF) = −1.2602  (−23.2 %)
-  ```
-
-  Scaling so far:
-    * C8  −25.8 %  (iter-698)
-    * C16 −21.9 %  (iter-699)
-    * C24 −23.2 %  (iter-703)
-
-  Stable ~22-26 % reduction across the entire floor regime.
-  iter-698 factory promotion of ``use_fv3_a2b_ord4_vector_uv``
-  is now empirically validated at the resolution that actually
-  exhibits the 5-6 mK floor.
-
-  Wired into iter-383 sweep (now 267).
-- Iter 702: **EMPIRICAL DEAD-END — scalar ζ_corner ord4 has ZERO
-  impact on θ′ edge ratio at C8**.
-
-  Pairs with iter-701 (θ_corner null result).  ζ_corner is the
-  absolute vorticity reconstruction at corners that feeds the
-  Coriolis term ``abs_vor_corner * v_d`` in du/dt — a PRIMARY
-  differentiated quantity, expected to be sensitive.  Measured at
-  C8 (3 seeds × 3 dycore steps):
-
-  ```
-  OFF: mean θ′ edge ratio = 3.2769
-  ON : mean θ′ edge ratio = 3.2769
-  delta (ON − OFF) = −0.0000  (BIT-IDENTICAL)
-  ```
-
-  Bit-identical result — surprising; ζ from random u/v at C8
-  should differ between 2nd and 4th order.  Hypothesis: the smag
-  path already evaluates ``_zeta_a2b_ord4`` (factory has
-  ``corner_div_damp_nord=1``), so ``_zeta_a2b_ord4`` is computed
-  regardless of the flag.  The flag only switches which
-  reconstruction is fed into the Coriolis term.  Apparently the
-  downstream propagation of the ζ difference to θ′ is filtered out
-  by some other averaging in 3 steps.
-
-  Disposition: leave NH factory default OFF (matches PE-vs-NH
-  asymmetry-closure intent of iter-170 without a measurable
-  cost).  Flag remains an opt-in FV3-faithful option.
-
-  Combined with iter-701: both SCALAR cc→corner ord4 paths
-  (θ, ζ) have null θ′ impact under the iter-465 method.  Only
-  the iter-696 VECTOR (u, v) cc→corner path moves the metric
-  (−25.8% C8, −21.9% C16).  Lesson: the cube-imprint floor is
-  driven by the VECTOR halo basis-mismatch at face boundaries,
-  NOT by the scalar reconstruction order.
-
-  Wired into iter-383 sweep (now 266).
-- Iter 701: **EMPIRICAL DEAD-END — scalar θ_corner ord4 has ZERO
-  impact on θ′ edge ratio**.
-
-  iter-700 added ``use_fv3_a2b_ord4_theta_corner``.  iter-701
-  measured at C8 (3 seeds × 3 dycore steps), method identical to
-  iter-698:
-
-  ```
-  OFF: mean θ′ edge ratio = 3.3271
-  ON : mean θ′ edge ratio = 3.3271
-  delta (ON − OFF) = +0.0000  (+0.0 %)
-  ```
-
-  Reason: the test IC has zero θ′ perturbation, so θ_total is
-  dominated by the (essentially constant per layer) reference
-  profile θ_ref(z).  4-pt average and 4th-order cascade give
-  identical answers on near-constant fields — flag has machine-
-  precision effect that doesn't propagate to the θ′ state in 3
-  steps.
-
-  Disposition: leave factory default OFF.  Flag stays as opt-in
-  (FV3-faithful for users wanting strict ord4 fidelity), but
-  evidence is the θ_corner reconstruction is NOT a meaningful
-  lever on the cube-imprint floor under this metric/IC.  Saves
-  future iterations from chasing this lever.
-
-  Lesson: cc→corner 2nd-vs-4th-order matters for the VECTOR
-  (u, v) lift (iter-696→699 captured 21-26 % reduction) but NOT
-  for the SCALAR θ_total at the c_p·θ_corner·dπ site.  Probably
-  because θ acts as a coefficient on the dominant dπ gradient
-  rather than a primary differentiated quantity.
-
-  Wired into iter-383 sweep (now 265).
+  Wired into iter-383 sweep: 265 → 273 modules.
 - Iter 700: **add ``use_fv3_a2b_ord4_theta_corner`` flag** (scalar θ
   cc → B-grid corner upgrade, mirrors iter-696 vector path).
 

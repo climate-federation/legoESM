@@ -3144,6 +3144,87 @@ def eqv_pot_fv3(
         return pt * jnp.exp(poisson)
 
 
+def cs3_interpolator_fv3(
+    qin: jax.Array,
+    pe: jax.Array,
+    pout: jax.Array,
+    iv: int = 0,
+) -> jax.Array:
+    """FV3_3D iter 710: log-p-level vertical interp via PPM (multi-level).
+
+    Faithful JAX port of FV3 ``cs3_interpolator``
+    (tools/fv_diagnostics.F90:4510-4602).  Uses iter-708
+    ``cs_prof_fv3`` for PPM edge values + subcell parabolic
+    distribution.
+
+    Differs from iter-709 ``cs_interpolator_fv3``:
+        * Interpolation coordinate is log-p (``pe``), not height (``wz``).
+        * Output is at multiple levels (``pout`` is shape ``(kd,)``).
+        * Supports tracer type ``iv``: -1 winds, 0 positive scalar,
+          1 temperature.  For iv == 1, below-surface temperature
+          would use ECMWF (Trenberth 1993) extrapolation; this port
+          uses simple edge-value clamp instead (documented
+          simplification).
+
+    Algorithm:
+        dp[k]    = pe[k+1] − pe[k]                  (log-p thickness)
+        qe       = cs_prof_fv3(qin, dp, iv)
+        For each pout[n]:
+            above top    → qe[0]
+            below bot    → qe[km]   (iv != 1 only)
+            in-range k:
+                a6 = 3·(2·qin[k] − (qe[k] + qe[k+1]))
+                s0 = (pout − pe[k]) / dp[k]
+                qout = qe[k] + s0·(qe[k+1] − qe[k] + a6·(1 − s0))
+        if iv == 0: qout = max(0, qout)
+
+    Parameters
+    ----------
+    qin : jax.Array, shape (..., km)
+        Cell-center values.
+    pe : jax.Array, shape (..., km+1)
+        log-pressure at interfaces.
+    pout : jax.Array, shape (kd,)
+        Target log-pressure levels (monotonic increasing).
+    iv : int, default 0
+        Variable type: -1 winds, 0 positive scalar, 1 temperature.
+
+    Returns
+    -------
+    qout : jax.Array, shape (..., kd)
+        Interpolated values per output level.
+    """
+    km = qin.shape[-1]
+    dp = pe[..., 1:] - pe[..., :-1]                    # (..., km)
+    qe = cs_prof_fv3(qin, dp, iv=1 if iv != 0 else 0)  # (..., km+1)
+
+    a6 = 3.0 * (2.0 * qin - (qe[..., :-1] + qe[..., 1:]))   # (..., km)
+    safe_dp = jnp.where(dp > 0.0, dp, 1.0)
+
+    def _interp_one(p):
+        # in_layer[k] = (pe[k] <= p) & (p < pe[k+1])   exclusive upper bound
+        pe_top = pe[..., :-1]                            # (..., km)
+        pe_bot = pe[..., 1:]                             # (..., km)
+        in_layer = (pe_top <= p) & (p < pe_bot)         # (..., km)
+        s0 = (p - pe_top) / safe_dp                     # (..., km)
+        q_k = qe[..., :-1] + s0 * (
+            qe[..., 1:] - qe[..., :-1] + a6 * (1.0 - s0)
+        )                                                # (..., km)
+        q_in_range = jnp.sum(jnp.where(in_layer, q_k, 0.0), axis=-1)
+        # Above top: p < pe[..., 0]    → qe[..., 0]
+        # Below bot: p >= pe[..., -1]  → qe[..., -1]
+        above_top = p < pe[..., 0]
+        below_bot = p >= pe[..., -1]
+        q = jnp.where(above_top, qe[..., 0], q_in_range)
+        q = jnp.where(below_bot, qe[..., -1], q)
+        if iv == 0:
+            q = jnp.maximum(0.0, q)
+        return q
+
+    qout_per_level = jax.vmap(_interp_one, in_axes=0, out_axes=-1)(pout)
+    return qout_per_level
+
+
 def cs_interpolator_fv3(
     qin: jax.Array,
     wz: jax.Array,

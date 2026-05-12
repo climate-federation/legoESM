@@ -297,6 +297,7 @@ _GUARD_MODULES = (
     "test_fv3_helicity_relative_caps_iter707",       # iter-707 add
     "test_fv3_cs_prof_iter708",                      # iter-708 add
     "test_fv3_cs_interpolator_iter709",              # iter-709 add
+    "test_fv3_cs3_interpolator_iter710",             # iter-710 add
 )
 
 
