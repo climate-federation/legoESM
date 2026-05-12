@@ -155,3 +155,32 @@ across all parameterizations.
 Compression iteration.  Folded iter-20 through iter-29 into the
 "Iterations 1-29 — Summary" section.  Detailed per-iteration narratives
 remain in the commit messages on `clean_physics`.
+
+### Iteration 31 — 2026-05-12
+
+**Fix iter-30 codex stop-time finding: q_v clamp NaN gradients.**
+
+The Thompson (iter-30) and Morrison (iter-25) q_v donor clamps used
+the naive ``qv_avail / max(qv_sink_total · dt, 1e-30)`` pattern.  When
+the column is subsaturated and no ice nucleation is active,
+``qv_sink_total = 0`` → ``q_v / 1e-30`` whose VJP is ``-q_v / 1e-60``,
+which overflows fp32 → NaN gradients (even though ``min(1, huge) = 1``
+kills the forward value).
+
+Applied the double-where AD guard from the kessler q_c clamp to both
+the Thompson and Morrison q_v clamps:
+
+```
+qv_sink_dt = qv_sink_total * dt_safe
+qv_sink_active = qv_sink_dt > 0.0
+qv_safe_sink_dt = jnp.where(qv_sink_active, qv_sink_dt, 1.0)
+qv_scale = jnp.where(qv_sink_active,
+                     jnp.minimum(1.0, qv_avail / qv_safe_sink_dt), 1.0)
+```
+
+Added `TestMorrison::test_differentiable_zero_sink_qv_clamp` that runs
+`jax.grad` through Morrison on a subsat clear column and asserts the
+gradient is finite.  Without the guard the test would NaN.
+
+**Tests (post iter-31):** 61 / 61 microphysics + 7 / 7 differentiability
+tests pass.

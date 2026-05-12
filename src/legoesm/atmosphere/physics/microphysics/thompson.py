@@ -247,12 +247,24 @@ def thompson_microphysics(
     # vapor; without a joint clamp, supersaturated icy layers can
     # over-draw q_v.  Mirror Morrison's iter-25 q_v clamp.  Codex
     # iter-29 #2.
+    #
+    # Double-where AD guard (same pattern as the kessler q_c clamp):
+    # in a clear column with no sinks the naive ``qv_avail / max(0,
+    # 1e-30)`` evaluates to ``q_v / 1e-30`` whose VJP is
+    # ``-q_v / 1e-60`` — overflows in fp32 and produces NaN
+    # gradients even though ``min(1, huge) = 1`` kills the value.
+    # Short-circuit on ``sink_active`` so the AD graph never sees
+    # the 0/eps division.
     cond_pos = jnp.maximum(condensation, 0.0)
     qv_sink_total = cond_pos + jnp.maximum(dq_i_dep, 0.0)
     qv_avail = jnp.clip(q_v, 0.0)
-    qv_scale = jnp.minimum(
+    qv_sink_dt = qv_sink_total * dt_safe
+    qv_sink_active = qv_sink_dt > 0.0
+    qv_safe_sink_dt = jnp.where(qv_sink_active, qv_sink_dt, 1.0)
+    qv_scale = jnp.where(
+        qv_sink_active,
+        jnp.minimum(1.0, qv_avail / qv_safe_sink_dt),
         1.0,
-        qv_avail / jnp.maximum(qv_sink_total * dt_safe, 1e-30),
     )
     condensation = jnp.where(condensation > 0.0, condensation * qv_scale, condensation)
     dq_i_dep = dq_i_dep * qv_scale

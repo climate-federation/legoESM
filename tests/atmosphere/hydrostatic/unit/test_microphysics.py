@@ -447,6 +447,32 @@ class TestMorrison:
         grad = jax.grad(loss)(T)
         assert jnp.all(jnp.isfinite(grad))
 
+    def test_differentiable_zero_sink_qv_clamp(self):
+        """A clear (no-sink) column must not produce NaN gradients
+        through the q_v donor clamp.  The naive
+        ``q_v / max(0, 1e-30)`` form has VJP ~``-q_v / 1e-60`` which
+        overflows in fp32 → NaN even though ``min(1, huge) = 1`` kills
+        the forward value.  iter-31 double-where guard fixes this."""
+        ncol, nlev = 4, 10
+        T = jnp.full((ncol, nlev), 290.0)
+        p_half = jnp.linspace(1e4, 1e5, nlev + 1)[None, :].repeat(ncol, axis=0)
+        p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+        rho = p_full / (constants.R_d * T)
+        dz = jnp.full((ncol, nlev), 500.0)
+        # Subsat clear column: no condensation, no deposition
+        q_sat = saturation_mixing_ratio(T, p_full)
+        q_v = 0.3 * q_sat
+        h = make_zero_hydrometeors(ncol, nlev)
+
+        def loss(q_v_in):
+            out = morrison_microphysics(
+                T, q_v_in, h, p_full, p_half, rho, dz, dt=100.0,
+            )
+            return jnp.sum(out.dT_dt ** 2)
+
+        grad = jax.grad(loss)(q_v)
+        assert jnp.all(jnp.isfinite(grad))
+
     def test_evaporation_enthalpy_balance(self):
         """Warm-rain evaporation cooling should close latent energy tendency."""
         T, q_v, h, p_full, p_half, rho, dz = _make_evaporation_columns()
