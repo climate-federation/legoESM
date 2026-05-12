@@ -1195,6 +1195,26 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 748: **refactor iter-693 nh_total_energy to delegate to column-energy quartet**.
+
+  iter-693 now composes:
+
+      Dry:    TE = IE_col + KE_col + PE_col
+      Moist:  TE = IE_col + KE_col + PE_col + LE_col
+
+  Using iter-744 IE + iter-745 KE + iter-746 LE + iter-747 PE.
+
+  Removed ~25 lines of inline phi_avg + layer-summation
+  boilerplate.  iter-693 7/7 + iter-713 7/7 tests still pass
+  (output bit-identical for matching code path).
+
+  Tests (4/4 in <1 s):
+  1. Dry TE = manual IE + KE + PE sum (composition pinned).
+  2. Moist TE = dry TE + LE_col exactly.
+  3. Isothermal dry column → TE > IE (PE adds).
+  4. iter-693 regression: finite, positive TE.
+
+  Wired into iter-383 sweep (now 312).
 - Iter 747: **``potential_energy_column_fv3``** — column PE diagnostic.
 
       PE_col = Σ_k delp · 0.5·(phi[k]+phi[k+1]) / g

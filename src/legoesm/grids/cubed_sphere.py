@@ -3870,42 +3870,38 @@ def nh_total_energy_fv3(
     te : jax.Array, shape (...,)
         Column total energy (J/m²).
     """
+    # iter-748: delegate to 4 column-energy helpers (744/745/746/747).
+    # Build phi_interfaces from delz + hs (cumulative −g·delz from surface up).
     g = constants.g
-    cv = constants.c_pd - constants.R_d
-
-    # phiz at km+1 interfaces: phiz[..., km] = hs; cumulative up.
-    # Build via cumsum on (-g·delz) reversed.
-    minus_g_delz = -g * delz                     # positive top-down
+    minus_g_delz = -g * delz                              # (..., km)
     cum_up = jnp.cumsum(minus_g_delz[..., ::-1], axis=-1)[..., ::-1]
-    # phiz[..., k]   = hs + cum_up[..., k]   for k = 0..km-1
-    # phiz[..., km]  = hs
-    phiz_top = hs[..., None] + cum_up            # shape (..., km)
-    phiz_bot = hs[..., None] + jnp.concatenate(
-        [cum_up[..., 1:], jnp.zeros_like(hs[..., None])],
+    phi_above = hs[..., None] + cum_up                    # (..., km)
+    phi_interfaces = jnp.concatenate(
+        [phi_above, hs[..., None]],
         axis=-1,
-    )                                            # phiz[..., k+1]
-    # Layer-mean phi
-    phi_avg = 0.5 * (phiz_top + phiz_bot)
-    # Layer KE (iter-740: delegate to kinetic_energy_fv3)
-    ke = kinetic_energy_fv3(ua, va, w)
+    )                                                      # (..., km+1)
+    # PE column (iter-747)
+    pe_col = potential_energy_column_fv3(phi_interfaces, delp)
+    # KE column (iter-745)
+    ke_col = kinetic_energy_column_fv3(ua, va, delp, w=w)
     if moist_phys:
         if q_sphum is None:
             raise ValueError("moist_phys=True requires q_sphum")
         if use_moist_cv:
-            # iter-713: FV3-faithful moisture-weighted cv via moist_cv
-            cvm, q_con = moist_cv_fv3(
+            cvm, _ = moist_cv_fv3(
                 q_sphum=q_sphum,
                 q_liq_wat=q_liq_wat, q_rainwat=q_rainwat,
                 q_ice_wat=q_ice_wat, q_snowwat=q_snowwat,
                 q_graupel=q_graupel,
             )
-            layer = cvm * pt + constants.L_v * q_sphum + phi_avg + ke
+            ie_col = internal_energy_column_fv3(pt, delp, cv=cvm)
         else:
-            layer = cv * pt + constants.L_v * q_sphum + phi_avg + ke
+            ie_col = internal_energy_column_fv3(pt, delp)
+        le_col = latent_energy_column_fv3(q_sphum, delp)
+        return ie_col + ke_col + pe_col + le_col
     else:
-        layer = cv * pt + phi_avg + ke
-    te = jnp.sum(delp * layer, axis=-1) / g
-    return te
+        ie_col = internal_energy_column_fv3(pt, delp)
+        return ie_col + ke_col + pe_col
 
 
 def eqv_pot_bolton_fv3(
