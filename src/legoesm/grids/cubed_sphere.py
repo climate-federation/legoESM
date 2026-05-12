@@ -3604,6 +3604,58 @@ def wind_speed_fv3(
     return jnp.sqrt(ua * ua + va * va + w * w)
 
 
+def wind_direction_fv3(
+    ua: jax.Array,
+    va: jax.Array,
+    convention: str = "from",
+) -> jax.Array:
+    """FV3_3D iter 777: meteorological wind direction.
+
+    Standard meteorological convention (``convention='from'``):
+    direction the wind is *coming from*, measured clockwise from
+    north in degrees on [0, 360):
+
+        0°    — N (wind from north → southward flow)
+        90°   — E (wind from east  → westward flow)
+        180°  — S (wind from south → northward flow)
+        270°  — W (wind from west  → eastward flow)
+
+    Mathematical / oceanographic convention (``convention='to'``):
+    direction the wind is *going to*.  Differs from 'from' by 180°.
+
+    Used by: wind-rose generation, gust/shift detection, surface-
+    flux directional anisotropy, observation matching (METAR
+    convention is 'from'), trajectory dispersion runs.
+
+    Calm air (ua = va = 0) returns 0° by convention (``atan2(0,0)``
+    is 0 in JAX).
+
+    Parameters
+    ----------
+    ua, va : jax.Array
+        Horizontal wind components (m/s).  ua = east-positive,
+        va = north-positive (FV3 cubed-sphere ``ua``/``va``
+        post grid-rotation are zonal/meridional).
+    convention : {'from', 'to'}
+        Meteorological 'from' (default) or mathematical 'to'.
+
+    Returns
+    -------
+    wdir : jax.Array
+        Wind direction in degrees on [0, 360).
+    """
+    if convention not in ("from", "to"):
+        raise ValueError(f"convention must be 'from' or 'to', got {convention!r}")
+    # atan2(ua, va) gives the angle of the wind vector measured
+    # clockwise from north (since va is the y-axis here).  Convert
+    # rad → deg, wrap to [0, 360).
+    wdir_to = jnp.degrees(jnp.arctan2(ua, va))
+    wdir_to = jnp.mod(wdir_to, 360.0)
+    if convention == "from":
+        return jnp.mod(wdir_to + 180.0, 360.0)
+    return wdir_to
+
+
 def kinetic_energy_fv3(
     ua: jax.Array,
     va: jax.Array,

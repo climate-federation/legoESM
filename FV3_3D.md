@@ -5135,3 +5135,40 @@ diagnostics, CAT forecasting that screens S² > S²_thresh layers,
 and TKE budget diagnostics.  Pure JAX, vmap-compatible.  No new
 physical constants introduced.
 
+## Iter 777 — wind_direction_fv3 (meteorological convention)
+
+Added `wind_direction_fv3(ua, va, convention='from')` to
+`grids/cubed_sphere.py`.  Returns wind direction in degrees on
+``[0, 360)``:
+
+```
+wdir_to   = degrees(atan2(ua, va)) mod 360       # math convention
+wdir_from = (wdir_to + 180) mod 360              # METAR / WMO
+```
+
+Meteorological standard ('from') is the direction the wind is
+*coming from*, measured clockwise from north (0°=N, 90°=E, 180°=S,
+270°=W).  Mathematical 'to' opposite (differs by 180°).
+
+Calm air (ua=va=0) returns 0° by ``atan2(0,0)`` convention.
+Invalid ``convention`` string raises ``ValueError``.
+
+Used by: wind-rose plot generation, gust-shift detection,
+surface-flux directional anisotropy, observation matching (METAR
+'from'), trajectory dispersion runs.  Complements iter-741
+``wind_speed_fv3`` to give the full (|V|, dir) wind decomposition.
+
+Test: `tests/test_fv3_wind_direction_iter777.py` (7 tests: pure
+east → from=270°, pure north → from=180°, pure west → from=90°,
+calm-air convention, from = (to + 180) mod 360 over 50 random
+winds, 3-D shapes + finite + range, invalid convention raises).
+
+### Why this iteration was meaningful
+
+Closes the basic kinematic diagnostic pair (speed + direction).
+Wind direction is the second-most-used wind diagnostic after
+speed: it's printed on every METAR, every TAF, every surface
+station, every wind-rose, and is needed to match model output
+against observations in any DA cycle.  No new physical constants
+introduced.  Pure JAX, vmap-compatible.
+
