@@ -1195,6 +1195,39 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 701: **EMPIRICAL DEAD-END — scalar θ_corner ord4 has ZERO
+  impact on θ′ edge ratio**.
+
+  iter-700 added ``use_fv3_a2b_ord4_theta_corner``.  iter-701
+  measured at C8 (3 seeds × 3 dycore steps), method identical to
+  iter-698:
+
+  ```
+  OFF: mean θ′ edge ratio = 3.3271
+  ON : mean θ′ edge ratio = 3.3271
+  delta (ON − OFF) = +0.0000  (+0.0 %)
+  ```
+
+  Reason: the test IC has zero θ′ perturbation, so θ_total is
+  dominated by the (essentially constant per layer) reference
+  profile θ_ref(z).  4-pt average and 4th-order cascade give
+  identical answers on near-constant fields — flag has machine-
+  precision effect that doesn't propagate to the θ′ state in 3
+  steps.
+
+  Disposition: leave factory default OFF.  Flag stays as opt-in
+  (FV3-faithful for users wanting strict ord4 fidelity), but
+  evidence is the θ_corner reconstruction is NOT a meaningful
+  lever on the cube-imprint floor under this metric/IC.  Saves
+  future iterations from chasing this lever.
+
+  Lesson: cc→corner 2nd-vs-4th-order matters for the VECTOR
+  (u, v) lift (iter-696→699 captured 21-26 % reduction) but NOT
+  for the SCALAR θ_total at the c_p·θ_corner·dπ site.  Probably
+  because θ acts as a coefficient on the dominant dπ gradient
+  rather than a primary differentiated quantity.
+
+  Wired into iter-383 sweep (now 265).
 - Iter 700: **add ``use_fv3_a2b_ord4_theta_corner`` flag** (scalar θ
   cc → B-grid corner upgrade, mirrors iter-696 vector path).
 
