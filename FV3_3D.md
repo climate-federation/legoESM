@@ -1081,6 +1081,26 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 521: **SBR (Williamson 2-like) IC scan**.  Canonical
+  test: u_east = U₀ cos(lat), v_north = 0, projected via
+  ``rotate_winds_geo_to_grid``.  theta_prime starts at 0;
+  any nonzero edge bias at 10 steps is purely numerical.
+    N    e/i ratio     edge_std       interior_std
+    C8   3.898×        1.067e-01      2.736e-02
+    C16  6.310×        5.891e-02      9.335e-03
+  Critical re-interpretation: **e/i RATIO grows with N
+  (3.90 → 6.31×) BUT absolute edge_std DROPS** (-45% at C16).
+  Interior drops faster (-67%).  Both are converging in
+  absolute terms — the edge converges at ~O(N⁻⁰·⁶), the
+  interior at ~O(N⁻¹·³).  Edge is a lower-order region.
+  This is consistent with FV3 literature: cube corners are
+  formally 1st-order in some operators while interior is
+  2nd-3rd order.  Conclusion: the rising ratio metric we've
+  been chasing is partly an artifact of *relative* metric —
+  in absolute terms the dycore is converging fine.  For
+  practical runs the 0.06 K perturbation magnitude at C16
+  after 10 SBR steps is noise.  1/1 in 102 s.  Wired into
+  iter-383 sweep (now 110).
 - **Iters 511-519 (compacted iter 520)**: long-term clip
   benefit, expanded clip coverage, and IC analysis closing
   on **convergence with cube-smooth IC**.

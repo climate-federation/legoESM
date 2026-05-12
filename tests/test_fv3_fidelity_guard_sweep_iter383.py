@@ -133,6 +133,7 @@ _GUARD_MODULES = (
     "test_smooth_ic_edge_iter517",                   # iter-517 add
     "test_resolution_scan_smooth_iter518",           # iter-518 add
     "test_cube_smooth_ic_iter519",                   # iter-519 add
+    "test_sbr_ic_iter521",                           # iter-521 add
 )
 
 
