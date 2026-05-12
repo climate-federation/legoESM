@@ -376,6 +376,7 @@ _GUARD_MODULES = (
     "test_fv3_rossby_number_iter786",                # iter-786 add
     "test_fv3_burger_number_iter787",                # iter-787 add
     "test_fv3_ekman_layer_depth_iter788",            # iter-788 add
+    "test_fv3_ekman_transport_iter789",              # iter-789 add
 )
 
 

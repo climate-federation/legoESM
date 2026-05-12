@@ -4196,6 +4196,65 @@ def ekman_layer_depth_fv3(
     )
 
 
+def ekman_transport_fv3(
+    tau_x: jax.Array,
+    tau_y: jax.Array,
+    f: jax.Array,
+    rho: float | jax.Array = 1025.0,
+    f_floor: float = 1e-12,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 789: depth-integrated Ekman volume transport.
+
+    Mass flux of the wind-stress-driven Ekman layer integrated
+    vertically (m²/s ≡ m³/(s·m)):
+
+        M_x =   τ_y / (ρ · f)
+        M_y = − τ_x / (ρ · f)
+
+    In the Northern Hemisphere (f > 0), Ekman transport is 90°
+    to the **right** of the surface stress vector.  In the
+    Southern Hemisphere (f < 0), transport is 90° to the **left**.
+
+    Depth-integrated form valid below the Ekman layer δ_E
+    (iter-788); independent of K_v.  Foundational for Sverdrup
+    balance and wind-stress curl ocean-gyre theory:
+
+        ∇ × (τ / ρf) → vertically averaged geostrophic flow.
+
+    Used by: ocean wind-stress-curl Sverdrup spinup, equatorial
+    upwelling diagnosis (divergence of Ekman transport sets
+    upwelling), atmospheric surface-momentum-flux budget,
+    coastal-upwelling indices (e.g., the Bakun index).
+
+    ``f_floor`` clamps |f| while preserving sign — at f → 0 the
+    Ekman theory itself breaks down (transport diverges), so the
+    clamp keeps output large-but-finite rather than NaN.
+
+    Parameters
+    ----------
+    tau_x, tau_y : jax.Array
+        Surface wind-stress components (Pa = N/m²).  Zonal /
+        meridional convention.
+    f : jax.Array
+        Coriolis parameter (s⁻¹) from iter-778.
+    rho : float or jax.Array
+        Reference density (kg/m³).  Default 1025 (ocean
+        reference; pass 1.225 for atmosphere).
+    f_floor : float
+        Lower bound on |f| (s⁻¹); default 1e-12.
+
+    Returns
+    -------
+    (M_x, M_y) : tuple of jax.Array
+        Depth-integrated Ekman volume transport (m²/s).
+    """
+    f_abs = jnp.maximum(jnp.abs(f), f_floor)
+    f_safe = jnp.where(f >= 0, f_abs, -f_abs)
+    M_x = tau_y / (rho * f_safe)
+    M_y = -tau_x / (rho * f_safe)
+    return M_x, M_y
+
+
 def kinetic_energy_fv3(
     ua: jax.Array,
     va: jax.Array,

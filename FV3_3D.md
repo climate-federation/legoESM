@@ -5289,4 +5289,53 @@ based height; (4) atmospheric Charney-Drazin boundary-layer
 filter for Rossby-wave propagation.  Pure JAX, vmap-compatible.
 No new physical constants introduced.
 
+## Iter 789 — ekman_transport_fv3 (M_x, M_y)
+
+Added `ekman_transport_fv3(tau_x, tau_y, f, rho=1025.0,
+f_floor=1e-12)` to `grids/cubed_sphere.py`.  Depth-integrated
+Ekman volume transport (m²/s):
+
+```
+M_x =  τ_y / (ρ·f)
+M_y = −τ_x / (ρ·f)
+```
+
+In Northern Hemisphere (f > 0) Ekman transport is 90° to the
+**right** of surface stress; in Southern Hemisphere (f < 0)
+transport is 90° to the **left**.
+
+Foundational for Sverdrup balance: ∇ × (τ/ρf) gives vertically
+averaged geostrophic flow.
+
+Used by: ocean wind-stress-curl Sverdrup spinup, equatorial
+upwelling (divergence of Ekman transport sets upwelling rate),
+atmospheric surface-momentum-flux budget, coastal-upwelling
+indices (Bakun index).
+
+Composes iter-778 ``coriolis_parameter_fv3``.
+
+``f_floor`` clamps |f| **preserving sign** — Ekman theory
+breaks down at equator (transport diverges); clamp keeps
+output large-but-finite rather than NaN.  Sign-preserving
+clamp via ``jnp.where(f >= 0, +f_abs, -f_abs)`` to maintain
+hemisphere direction.
+
+Test: `tests/test_fv3_ekman_transport_iter789.py` (7 tests:
+NH eastward stress → southward M_y, NH northward stress →
+eastward M_x, SH eastward stress → northward M_y (mirror NH),
+τ=0 → M=0, iter-778 pipeline at 45°N, equator floored finite,
+3-D shapes + finite + both components).
+
+### Why this iteration was meaningful
+
+Ekman transport is the canonical depth-integrated wind-stress
+response.  Used in: (1) Sverdrup-balance wind-driven ocean
+circulation (textbook gyre derivation: ∇ × M_Ekman = wind-stress
+curl); (2) equatorial upwelling (Ekman divergence at the
+equator drives w_up); (3) atmospheric surface-stress momentum
+budget; (4) Bakun-index coastal-upwelling forecasting.
+Together with iter-788 (Ekman depth δ_E), the Ekman-spinup
+diagnostic pair is complete.  Pure JAX, vmap-compatible.  No
+new physical constants introduced.
+
 
