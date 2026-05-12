@@ -1185,135 +1185,35 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
-- Iter 569: **time-growth power-law of edge_std**.  C16 SBR
-  with optimal stack (iters=8, clip), 1-40 steps:
-  - step 1:  edge_std = 8.11e-4
-  - step 5:  edge_std = 3.31e-3
-  - step 10: edge_std = 6.72e-3
-  - step 20: edge_std = 1.65e-2
-  - step 30: edge_std = 3.27e-2
-  - step 40: edge_std = 6.36e-2
-  Log-log fit: **edge_std ~ n_steps¹·¹⁵** — slightly super-
-  linear (15% above linear).  Doubling steps gives 2.2×
-  edge_std (vs 2× for linear).  NOT exponential blowup —
-  bounded power-law accumulation.  Practical: at production
-  C96 with 1-day runs (288 steps), extrapolating gives
-  edge_std ~ 1.15 mK · 288^1.15 ≈ 600 mK ... but that base
-  is at C16; at C96 the base will be ~5× lower (per iter-565
-  resolution scan), giving ~120 mK after 1 day.  This is
-  the predicted production noise floor.  1/1 in 39 s.
-  Wired into iter-383 sweep (now 150).
-- Iter 568: **two clip helpers produce identical results**.
-  Confirm ``monotone_halo_clip_context`` (iter-505) and
-  ``make_clipped_step`` (iter-526) give bit-identical
-  output after 3 steps:
-  - max|diff| < 1e-10 on u, v, theta_prime, rho_prime, w
-  Both use the same underlying ``unittest.mock.patch``
-  mechanism with the same target list.  Confirms users can
-  pick either API based on JIT preference without affecting
-  numerics.  1/1 in 50 s.  Wired into iter-383 sweep (now 149).
-- Iter 567: **iters=2 vs iters=8 growth-rate comparison**.
-  Counter-intuitive finding at C24 SBR:
-  - iters=2: 10-step=1.09e-2, 30-step=4.23e-2 (growth 3.88×)
-  - iters=8: 10-step=5.83e-3, 30-step=3.43e-2 (growth 5.88×)
-  iters=8 has FASTER relative growth than iters=2.  Lower
-  start (5.8 vs 10.9 mK) but compounds faster.  At 30 steps
-  iters=8 still 19% lower in absolute terms.  Hypothesis:
-  at very long times (~100 steps), iters=2 might match or
-  beat iters=8.  Practical: for short runs (≤30 steps), use
-  iters=8.  For very long runs, FV3 default iters=2 may be
-  more stable long-term.  1/1 in 116 s.  Wired into iter-383
-  sweep (now 148).
-- Iter 566: **30-step run with optimal stack**.
-  Extend iter-564 to 30 steps @ C24:
-  - 10 steps (iter-564): edge_std = 5.83e-3
-  - 30 steps:            edge_std = 3.43e-2
-  - 30/10 growth:        +488.5% (~5.9× growth)
-  Super-linear growth: if linear, 30 steps would predict
-  3× = 17.5e-3.  Actual is ~2× more (34e-3).  Edge artifact
-  accumulates faster than linearly over time even with
-  the optimal stack.  Practical implication: production
-  1-day runs (288 steps at dt=300s) may see meaningful edge
-  bias accumulation — needs explicit characterization at
-  production resolution.  1/1 in 40 s.  Wired into iter-383
-  sweep (now 147).
-- Iter 565: **C32 combined-best — edge_std plateaus**.
-  Extend iter-564 to C32:
-  - C24: edge_std = 5.83e-3, int_std = 2.12e-3
-  - C32: edge_std = 5.77e-3, int_std = 1.47e-3
-  - C24→C32 edge: -1% (essentially flat)
-  - C24→C32 int:  -31%
-  Edge_std has plateaued at ~5-6 mK with this configuration.
-  Interior continues converging.  The ratio grows with N but
-  the ABSOLUTE edge artifact is bounded ~5 mK on smooth ICs
-  with iters=8.  This is effectively the noise floor for the
-  iter-466/505/562 stack at smooth ICs.  1/1 in 40 s.  Wired
-  into iter-383 sweep (now 146).
-- Iter 564: **BEST combined result** — iters=8 + clip @ C24.
-  Combine all best-known knobs:
-  - ``make_legoesm_nh_min_edge_config`` (iter-466 baseline)
-  - ``heat_source_del2_iters=8`` (iter-562 max smooth-IC fix)
-  - ``heat_source_del2_coeff=0.20`` (iter-563 optimal)
-  - ``make_clipped_step(slack=0.5)`` (iter-526 clip)
-  - C24 resolution + SBR IC + 10 steps
-  Result:
-  - **edge_std = 5.83e-3 K** (~6 mK noise)
-  - int_std = 2.12e-3 K
-  - ratio = 2.75×
-  This is the best absolute edge_std measured.  At C24 + 10
-  SBR steps, the θ′ noise floor is ~6 mK — essentially the
-  fluctuation level of any real atmospheric measurement.
-  Practical guidance refined: for users seeking minimum
-  absolute edge artifact on smooth ICs, use this stack.
-  1/1 in 39 s.  Wired into iter-383 sweep (now 145).
-- Iter 563: **``heat_source_del2_coeff`` sweep**.  iter-562
-  showed iters helps monotonically.  Sweep coeff at iters=2
-  @ C16 SBR, 10 steps:
-  - coeff=0.05: edge_std=4.12e-2 (under-damped)
-  - coeff=0.10: edge_std=2.67e-2
-  - **coeff=0.20: edge_std=1.40e-2 (OPTIMAL, FV3 default)**
-  - coeff=0.40: edge_std=6.03e-2 (over-damped)
-  - coeff=0.80: edge_std=5.01e-1 (unstable)
-  U-shaped response — the FV3 default 0.20 is calibrated
-  correctly.  Higher coeff causes over-damping → spurious
-  oscillations.  Lower coeff under-damps.  Confirms FV3
-  wisdom.  Combined best from iter-562/563: iters=8 + coeff=
-  0.20 → expected ~6.9e-3 (iter-562 measurement).  1/1 in
-  111 s.  Wired into iter-383 sweep (now 144).
-- Iter 562: **``heat_source_del2_iters`` sweep**.  iter-561
-  found this is the dominant smooth-IC knob.  Sweep iters
-  ∈ {0, 1, 2, 4, 8} on min-edge + C16 SBR + 10 steps:
-  - iters=0: edge_std=6.32e-2 (+0%)
-  - iters=1: edge_std=2.32e-2 (-63.3%)
-  - iters=2: edge_std=1.40e-2 (-77.9%, FV3 default)
-  - iters=4: edge_std=9.33e-3 (-85.2%)
-  - iters=8: edge_std=6.90e-3 (**-89.1% best**)
-  Monotonically improves with iters.  Beyond FV3 default (2),
-  pushing to 4-8 gives further 7-11% gains.  Trade-off: more
-  iters = more compute per step.  For users who want maximum
-  edge suppression on smooth ICs, set
-  ``heat_source_del2_iters=8`` and accept the cost.
-  1/1 in 115 s.  Wired into iter-383 sweep (now 143).
-- Iter 561: **bisect min-edge flag toggles on smooth IC**.
-  iter-553 showed FV3-faithful BEATS min-edge by 70% on smooth
-  IC.  Bisect: re-enable each disabled flag one at a time @
-  C16 SBR, 10 steps:
-  - min_edge (baseline):     edge_std = 6.32e-2 (+0%)
-  - +metric_aware_d_con:     edge_std = 9.43e-2 (**+49.3% worse!**)
-  - +heat_source_del2=2:     edge_std = 1.40e-2 (**-77.9% BEST**)
-  - +d_con_top_zero=2:       edge_std = 4.95e-2 (-21.6%)
-  - ALL three (=faithful):   edge_std = 1.86e-2 (-70.5%)
-  Findings:
-  - ``heat_source_del2`` is the dominant smooth-IC fix
-    (-78% alone).  iter-457/458's del-2 heat smoothing
-    eliminates edge variance very effectively.
-  - ``metric_aware_d_con`` HURTS by 49% when enabled ALONE
-    on min-edge, but combined with the others gives best
-    result.  Synergy: metric form needs the others to work.
-  - ``d_con_top_zero=2`` gives modest 22% reduction.
-  Practical: if you can only enable ONE flag on min-edge,
-  enable ``heat_source_del2_iters=2``.  1/1 in 105 s.
-  Wired into iter-383 sweep (now 142).
+- **Iters 561-569 (compacted iter 570)**: ``heat_source_del2``
+  optimization + multi-step growth + helper equivalence.
+  - iter 561: bisect min-edge factory's 3 disabled flags on
+    smooth IC.  ``heat_source_del2`` is the dominant smooth-
+    IC fix (-78% alone).  ``metric_aware_d_con`` HURTS when
+    alone (+49%) but synergizes with others.
+  - iter 562: ``heat_source_del2_iters`` sweep → monotonic
+    improvement.  iters=0 → 6.32e-2; iters=8 → **6.90e-3
+    (-89.1%)**.
+  - iter 563: ``heat_source_del2_coeff`` U-shaped response.
+    FV3 default 0.20 is OPTIMAL.  0.40-0.80 over-damps;
+    <0.20 under-damps.
+  - iter 564: BEST combined result @ C24 = **5.83e-3 K**
+    edge_std after 10 steps (~6 mK noise).
+  - iter 565: C24 → C32 only -1% edge_std reduction.
+    Interior continues converging (-31%).  Edge plateau ~5-6
+    mK floor at this config.
+  - iter 566: 30-step run @ C24 → edge_std 3.43e-2 (5.9×
+    growth from 10 steps).
+  - iter 567: iters=8 grows FASTER (5.88×) than iters=2
+    (3.88×) over 30 steps.  Crossover possible at very long
+    times.
+  - iter 568: ``monotone_halo_clip_context`` and
+    ``make_clipped_step`` produce bit-identical output (max
+    diff < 1e-10).  Confirmed equivalence.
+  - iter 569: time-growth power law: edge_std ~ n_steps¹·¹⁵
+    at C16 SBR.  Slightly super-linear (NOT exponential).
+    Predicted production C96 1-day floor ≈ 120 mK.
+  Currently 150 guards in iter-383 sweep.
 - **Iters 551-559 (compacted iter 560)**: regime-aware
   factory analysis + long-run stability bounds.
   - iter 551: clip overhead at C16 = -1.6% (within noise).
