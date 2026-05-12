@@ -5350,6 +5350,48 @@ Given a parcel source (T, p, q), the full chain produces CAPE
 in J/kg — the canonical deep-convection diagnostic.  Pure JAX,
 vmap-compatible.  No new physical constants introduced.
 
+## Iter 809 — cin_column_fv3 (CIN = −Σ min(b,0)·Δz)
+
+Added `cin_column_fv3(b, z)` to `grids/cubed_sphere.py`.
+Convective inhibition column integral:
+
+```
+CIN = − Σ_k min(b_mid(k), 0) · Δz(k)     [J/kg, ≥ 0]
+```
+
+Returned as positive magnitude per meteorological convention
+(larger CIN = stronger capping).  Companion to iter-808
+``cape_column_fv3``; together (CAPE, CIN) form the canonical
+deep-convection pair.
+
+Negative-buoyancy layers (parcel cooler than env, capping
+inversions) consume parcel KE on rise; caller must supply
+CIN-worth of KE for parcel to reach the LFC.
+
+Used by: convective trigger gates (CIN > 50 J/kg → suppression),
+severe-weather pre-storm-environment diagnostics (large CIN
+enables energy buildup before "cap break"), MCS / nocturnal-
+convection forecasting, dryline boundary diagnostics.
+
+Composes iter-807 ``parcel_buoyancy_fv3``.
+
+Test: `tests/test_fv3_cin_column_iter809.py` (6 tests: uniform
+b<0 → analytic |b|·Δz_total, uniform b>0 → CIN=0, mixed-sign
+negative-only sum, b=0 → 0, surface-inversion profile 50-500
+J/kg, 3-D batched (n_x, n_y, km) → (n_x, n_y) finite ≥0).
+
+### Why this iteration was meaningful
+
+Closes the **CAPE/CIN convective-energy pair**:
+  * iter-808 CAPE = +∫ max(b,0) dz   (parcel-favorable PE)
+  * iter-809 CIN  = −∫ min(b,0) dz   (parcel-suppressive PE)
+
+Standard meteorological deep-convection diagnostic.  Together
+with iter-806 (Γ_m) + iter-807 (buoyancy), the full
+CAPE/CIN pipeline is complete: parcel source → ascent →
+buoyancy → (CAPE, CIN).  Pure JAX, vmap-compatible.  No new
+physical constants introduced.
+
 
 
 

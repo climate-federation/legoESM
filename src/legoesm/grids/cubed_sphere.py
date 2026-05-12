@@ -5572,6 +5572,56 @@ def cape_column_fv3(
     return jnp.sum(jnp.maximum(b_mid, 0.0) * dz, axis=-1)
 
 
+def cin_column_fv3(
+    b: jax.Array,
+    z: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 809: convective inhibition column integral.
+
+    Column-integrated magnitude of negative-buoyancy work:
+
+        CIN = − ∫ min(b, 0) dz       (returned as positive J/kg)
+
+    Discretized via midpoint rule:
+        CIN = − Σ_k min(b_mid(k), 0) · Δz(k)
+
+    Companion to iter-808 ``cape_column_fv3``.  Negative-
+    buoyancy layers (parcel cooler than environment, below LFC
+    or in capping inversions) consume parcel kinetic energy on
+    rise — caller must supply CIN-worth of KE for the parcel to
+    reach the LFC.
+
+    Reported as a positive magnitude per meteorological
+    convention (CIN ≥ 0; larger CIN = stronger capping).
+    Caller handles CAPE separately via iter-808.
+
+    Used by: convective trigger gates (CIN > 50 J/kg → trigger
+    inhibited unless ML kinetic-energy boost), severe-weather
+    pre-storm-environment diagnostics (large CIN allows energy
+    buildup before "cap break"), MCS / nocturnal-convection
+    forecasting, dryline boundary diagnostics.
+
+    Composes iter-807 ``parcel_buoyancy_fv3``.
+
+    Vertical axis last; ``b`` and ``z`` surface→top oriented.
+
+    Parameters
+    ----------
+    b : jax.Array, shape (..., km)
+        Parcel buoyancy at each level (m/s²) from iter-807.
+    z : jax.Array, shape (..., km)
+        Geopotential height at the same levels (m).
+
+    Returns
+    -------
+    cin : jax.Array, shape (...,)
+        Convective inhibition magnitude (J/kg, ≥ 0).
+    """
+    b_mid = 0.5 * (b[..., 1:] + b[..., :-1])
+    dz = z[..., 1:] - z[..., :-1]
+    return -jnp.sum(jnp.minimum(b_mid, 0.0) * dz, axis=-1)
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,
