@@ -3960,6 +3960,38 @@ def compute_brn_fv3(
     return brn, shear06
 
 
+def column_mean_field_fv3(
+    field: jax.Array,
+    delp: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 761: mass-weighted column-mean field.
+
+        <field> = Σ_k delp · field / Σ_k delp
+
+    Generic helper for any mass-weighted column average (T, RH, q,
+    θ_e, etc.).  Used inline by iter-760 ``column_mean_rh_fv3`` and
+    pattern-matched in many FV3 diagnostics.
+
+    Mass cancellation: ratio of two delp integrals is g-independent.
+
+    Parameters
+    ----------
+    field : jax.Array, shape (..., km)
+        Layer-mean values to average.
+    delp : jax.Array, shape (..., km)
+        Pressure thickness (Pa).
+
+    Returns
+    -------
+    mean : jax.Array, shape (...,)
+        Mass-weighted column-mean field.
+    """
+    sum_field = jnp.sum(delp * field, axis=-1)
+    sum_delp = jnp.sum(delp, axis=-1)
+    safe = jnp.where(sum_delp > 0.0, sum_delp, 1.0)
+    return sum_field / safe
+
+
 def column_mean_rh_fv3(
     p_full: jax.Array,
     t: jax.Array,
@@ -3995,11 +4027,9 @@ def column_mean_rh_fv3(
     rh_col : jax.Array, shape (...,)
         Column-mean relative humidity (percent).
     """
+    # iter-761: delegate mass-weighted mean to column_mean_field_fv3
     rh_layer = rh_calc_fv3(p_full, t, qv, do_cmip=do_cmip)
-    sum_rh = column_integral_delp_fv3(rh_layer, delp, divide_by_g=False)
-    sum_delp = jnp.sum(delp, axis=-1)
-    safe_delp = jnp.where(sum_delp > 0.0, sum_delp, 1.0)
-    return sum_rh / safe_delp
+    return column_mean_field_fv3(rh_layer, delp)
 
 
 def rh_calc_fv3(

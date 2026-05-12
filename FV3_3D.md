@@ -1195,6 +1195,26 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 761: **``column_mean_field_fv3``** — generic mass-weighted column mean.
+
+      <field> = Σ_k delp · field / Σ_k delp
+
+  Generic helper for any mass-weighted column average (T, RH, q,
+  θ_e, etc.).  Mass cancellation: ratio of two delp integrals is
+  g-independent.
+
+  iter-760 ``column_mean_rh_fv3`` refactored to delegate.  Output
+  preserved (iter-760 5/5 tests still pass).
+
+  Tests (6/6 in <2 s):
+  1. Uniform field=C → mean=C.
+  2. Two-layer weighted average analytical.
+  3. Column-mean T = arithmetic mean for uniform delp.
+  4. iter-760 RH unchanged after refactor.
+  5. 3-D shapes.
+  6. No NaN/Inf.
+
+  Wired into iter-383 sweep (now 325).
 - Iter 760: **``column_mean_rh_fv3``** — mass-weighted column RH.
 
       RH_col = Σ_k delp · RH_layer / Σ_k delp
