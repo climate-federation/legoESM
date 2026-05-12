@@ -1195,307 +1195,49 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
-- Iter 619: **FV3 ``symm_ed``** — ED-grid symmetrization.  Faithful
-  JAX port of FV3 ``symm_ed`` (fv_grid_utils.F90:1587-1626).
-  Operates on a face-2 ED grid of shape ``(im+1, im+1)`` and
-  enforces three FV3 symmetry passes:
+- **Iters 611-619 (compacted iter 620)**: complete FV3
+  ``fv_grid_utils.F90`` spherical-geometry port.  9 iterations
+  added the building-block helpers used throughout FV3 grid
+  generation, halo corner code, and vector-halo rotation:
 
-  1. Copy lamda's first column into all interior columns
-     (FV3 lines 1595-1599).
-  2. Symmetrize about i=im/2+1: pair (i, im+2-i) gets avg/π
-     reflection (lines 1601-1611).
-  3. Symmetrize about j=im/2+1: pair (j, im+2-j) gets avg in
-     theta (with sign flip for ``theta(i,jp) = -avg``) and avg
-     in lamda (lines 1614-1624).
+  | Iter | Function(s)                              | F90 line | Role                              |
+  |------|------------------------------------------|----------|-----------------------------------|
+  | 611  | ``latlon2xyz`` / ``xyz2latlon``         | 1639/1739| (lon,lat) ↔ Cartesian             |
+  | 611  | ``inner_prod`` / ``vect_cross``         | 984/1781 | Cartesian dot / cross             |
+  | 611  | ``normalize_vect``                       | 1880     | unit-norm (zero-safe)             |
+  | 611  | ``mid_pt3_cart`` / ``mid_pt_cart``      | 1996/2026| Cartesian / latlon GC midpoint    |
+  | 611  | ``get_unit_vect2``                       | 1848     | unit tangent at GC midpoint       |
+  | 612  | ``mirror_xyz`` / ``mirror_latlon``      | 1668/1705| reflect across GC plane           |
+  | 612  | ``intp_great_circle``                    | 1896     | secant GC interpolation           |
+  | 612  | ``slerp``                                | 1927     | Shoemake arc-length slerp         |
+  | 613  | ``spherical_angle``                      | 2838     | angle at vertex of (p1,p2,p3)     |
+  | 613  | ``cell_center3`` / ``cell_center2``     | 2728/2700| 4-corner → cell center            |
+  | 613  | ``dist2side_latlon``                     | 2812     | point → GC arc distance           |
+  | 613  | ``expand_cell``                          | 2631     | expand 4-corner cell by ``fac``   |
+  | 614  | ``great_circle_distance_cart``           | 2065     | distance from Cartesian inputs    |
+  | 614  | ``get_area``                             | 2749     | spherical-excess quad area        |
+  | 615  | ``unit_vect_latlon``                     | 2286     | (lon,lat) → (elon,elat) tangents  |
+  | 615  | ``get_unit_vect3``                       | 1865     | Cartesian variant of get_unit_vect2 |
+  | 616  | ``intersect_great_circles``              | 2096     | GC intersection (FV3 ``intersect``)|
+  | 617  | ``gnomonic_angl`` / ``gnomonic_dist``    | 1531/1558| equi-angular / equi-distance grids|
+  | 618  | ``get_center_vect``                      | 1795     | cell-center tangents (u1, u2)     |
+  | 619  | ``symm_ed``                              | 1587     | ED-grid symmetrization            |
 
-  Assumes input in FV3 face-2 orientation produced by iter-617
-  ``gnomonic_dist`` — the +π / -π reflections are specific to
-  that face's orientation.
+  All JAX-vectorized, broadcast on leading axes, take 3-vector
+  on last axis, AD-safe (zero-input branches via ``jnp.where``).
 
-  Tests (5/5 in 2 s):
-  1. Output shape preserved.
-  2. Idempotent (symm_ed² = symm_ed).
-  3. theta symmetric about i-midplane.
-  4. theta antisymmetric about j-midplane (interior columns).
-  5. Applied to gnomonic_dist — finite, sane diff magnitude.
+  ``get_area`` matches legoESM's existing l'Huilier's-theorem
+  area within float32 precision (~1e-7 rel) — independent
+  cross-validation of both implementations.
 
-  Wired into iter-383 sweep (now 191).
-- Iter 618: **FV3 ``get_center_vect``** — cell-center tangent vectors.
-  Faithful JAX port of FV3 ``get_center_vect``
-  (fv_grid_utils.F90:1795-1845, non-``OLD_VECT`` branch).  Given
-  an array of corner positions ``pp`` of shape
-  ``(..., n+1, n+1, 3)``, returns the two unit tangent vectors
-  ``(u1, u2)`` at each cell center::
+  ``intersect_great_circles`` returns ``(x_inter, local_a, local_b)``
+  matching FV3 exactly (``get_nearest`` branch + ``check_local``).
 
-      pc = cell_center3(SW, SE, NW, NE)
-      # u1 along i (x-direction):
-      p1_w = mid_pt3_cart(SW, NW)
-      p2_e = mid_pt3_cart(SE, NE)
-      u1   = normalize(pc × (p2_e × p1_w))
-      # u2 along j (y-direction):
-      p1_s = mid_pt3_cart(SW, SE)
-      p2_n = mid_pt3_cart(NW, NE)
-      u2   = normalize(pc × (p2_n × p1_s))
-
-  Outputs ``(u1, u2)`` of shape ``(..., n, n, 3)``.  Used by
-  FV3 vector-halo rotation: edges between faces project vector
-  components onto these per-cell tangent vectors to maintain
-  vector continuity across the cube imprint.
-
-  Tests (6/6 in 2 s):
-  1. Output shapes ``(n, n, 3)``.
-  2. Both u1 and u2 unit-norm.
-  3. u1, u2 ⊥ cell-center position (sphere tangent).
-  4. At equator, u1 ≈ +east and u2 ≈ +north (1e-4 atol).
-  5. u1 ⊥ u2 on axis-aligned equator square cells.
-  6. Applied to legoESM gnomonic face → finite + unit-norm.
-
-  Wired into iter-383 sweep (now 190).
-- Iter 617: **FV3 gnomonic grid generators**.  Faithful JAX
-  ports of FV3 ``fv_grid_utils.F90``:
-
-  | Function          | F90 line | Role                              |
-  |-------------------|----------|-----------------------------------|
-  | ``gnomonic_angl`` | 1531     | equi-angular grid (FV3 default)   |
-  | ``gnomonic_dist`` | 1558     | equi-distance gnomonic grid       |
-
-  Both build the FV3 face-2 (-x face) corner grid of shape
-  ``(im+1, im+1)`` in (lon, lat).  Equi-angular uses the
-  ``tan(α)`` map (FV3 canonical default); equi-distance uses
-  the linear map.  Returns latlon for direct use; users wanting
-  full 6-face grids can mirror via FV3's ``symm_ed`` /
-  ``mirror_xyz`` (iter 612) pattern.
-
-  legoESM's existing ``_face_to_cartesian`` is essentially the
-  equi-angular form at face 0; iter 617 adds explicit FV3-
-  named face-2 generators for users porting FV3 grid code that
-  depends on the exact FV3 corner positions.
-
-  Tests (6/6 in 2 s):
-  1. Output shape (im+1, im+1).
-  2. All face-2 points have Cartesian x < 0.
-  3. Face center at (-1, 0, 0).
-  4. ``gnomonic_dist`` output shape.
-  5. ``gnomonic_dist`` corners on unit sphere.
-  6. Both grids agree at face center.
-
-  Wired into iter-383 sweep (now 189).
-- Iter 616: **FV3 ``intersect_great_circles``**.  Faithful JAX
-  port of FV3 ``intersect`` (fv_grid_utils.F90:2096-2194).
-  Computes the intersection of two great circles defined by
-  Cartesian point pairs ``(a1, a2)`` and ``(b1, b2)``:
-
-      x_inter, local_a, local_b = intersect_great_circles(a1, a2, b1, b2, radius)
-
-  Returns:
-  - ``x_inter`` — intersection point on sphere closest to the
-    centroid (FV3's ``get_nearest`` branch);
-  - ``local_a`` / ``local_b`` — booleans indicating whether
-    ``x_inter`` lies between the input pair (FV3 ``check_local``).
-
-  Used by FV3 grid generation for cubed-sphere panel boundary
-  detection and regional refinement.  Implementation follows
-  FV3's exact determinant formulation (lines 2128-2147) for
-  bit-equivalence; handles FV3 degenerate branches
-  (``b1_xyz=0`` → x_inter=b1; ``b2_xyz=0`` → x_inter=b2) via
-  ``jnp.where``.  Broadcasts on leading axes (3-vector on last).
-
-  Tests (6/6 in <1 s):
-  1. Meridian × equator → (0, 0).
-  2. ``|x_inter|`` = radius (on sphere).
-  3. ``local_a`` / ``local_b`` flag non-crossing arcs correctly.
-  4. A↔B symmetric (up to sign).
-  5. Perpendicular meridians → north pole.
-  6. Result scales linearly with radius.
-
-  Wired into iter-383 sweep (now 188).
-- Iter 615: **FV3 ``unit_vect_latlon`` + ``get_unit_vect3``**.
-  Faithful JAX-vectorized ports of FV3 ``fv_grid_utils.F90``
-  helpers used by ``c2l_ord4`` for wind rotation and by
-  ``edge_factors`` for tangent-vector metric construction:
-
-  | Function             | F90 line | Role                                |
-  |----------------------|----------|-------------------------------------|
-  | ``unit_vect_latlon`` | 2286     | (lon, lat) → (elon, elat) tangents  |
-  | ``get_unit_vect3``   | 1865     | Cartesian variant of get_unit_vect2 |
-
-  ``unit_vect_latlon`` returns the two Cartesian unit tangent
-  vectors of the local geographic frame::
-
-      elon = (-sin λ,    cos λ,    0    )
-      elat = (-sin φ cos λ, -sin φ sin λ, cos φ)
-
-  Used in FV3 D-grid → cell-center latlon rotation
-  (``c2l_ord4``); legoESM's existing rotation goes via the
-  ``angle`` field, this gives a direct Cartesian alternative for
-  users porting FV3 wind diagnostics.
-
-  ``get_unit_vect3`` is the Cartesian-input variant of iter-611
-  ``get_unit_vect2``; verified to produce identical results.
-
-  Tests (7/7 in <1 s):
-  1. ``unit_vect_latlon`` elon ⊥ elat.
-  2. ``unit_vect_latlon`` outputs unit-norm.
-  3. ``unit_vect_latlon`` at equator: known values.
-  4. ``unit_vect_latlon`` north pole degenerate (documented).
-  5. ``unit_vect_latlon`` tangents ⊥ position (sphere tangent).
-  6. ``get_unit_vect3`` matches ``get_unit_vect2`` exactly.
-  7. ``get_unit_vect3`` output is unit-norm.
-
-  Wired into iter-383 sweep (now 187).
-- Iter 614: **FV3 ``get_area`` + ``great_circle_distance_cart``**.
-  Faithful JAX ports of FV3 ``fv_grid_utils.F90`` helpers built on
-  iter-611/613 primitives:
-
-  | Function                       | F90 line | Role                          |
-  |--------------------------------|----------|-------------------------------|
-  | ``great_circle_distance_cart`` | 2065     | distance from Cartesian inputs|
-  | ``get_area``                   | 2749     | spherical-excess quad area    |
-
-  ``get_area`` is the canonical FV3 cell-area formula::
-
-      Area = (α1 + α2 + α3 + α4 - 2π) · R²
-
-  where the four angles are spherical angles at the cell corners.
-  Uses iter-613 ``spherical_angle`` with FV3's exact corner-angle
-  convention (lines 2757-2782): at each corner the spherical
-  angle is taken between the GC arc to one adjacent corner and
-  the GC arc to the opposite corner.  Matches legoESM's existing
-  l'Huilier's-theorem area within float32 precision (~1e-7 rel)
-  — independent verification of both implementations.
-
-  ``great_circle_distance_cart`` is the Cartesian counterpart of
-  the existing latlon ``great_circle_distance``; useful when
-  inputs are already in Cartesian form (avoids round-trip
-  through trig).
-
-  Tests (7/7 in <1 s):
-  1. ``great_circle_distance_cart`` orthogonal → π/2.
-  2. ``great_circle_distance_cart`` same vector → 0.
-  3. ``great_circle_distance_cart`` ↔ latlon agreement.
-  4. ``get_area`` matches legoESM cell area (~1e-7 floor).
-  5. ``get_area`` small-cell planar limit Δ² (rel < 1e-4).
-  6. ``get_area`` positive on random cells.
-  7. ``get_area`` scales as R².
-
-  Wired into iter-383 sweep (now 186).
-- Iter 613: **FV3 spherical-geometry helpers**.  Faithful JAX-
-  vectorized ports of FV3 ``fv_grid_utils.F90`` helpers built on
-  iter-611/612 primitives:
-
-  | Function             | F90 line | Role                              |
-  |----------------------|----------|-----------------------------------|
-  | ``spherical_angle``  | 2838     | angle at vertex p1 of (p1,p2,p3)  |
-  | ``cell_center3``     | 2728     | Cartesian 4-corner → center       |
-  | ``cell_center2``     | 2700     | latlon 4-corner → center          |
-  | ``dist2side_latlon`` | 2812     | point→GC-arc angular distance     |
-  | ``expand_cell``      | 2631     | expand 4-corner cell by ``fac``   |
-
-  ``spherical_angle`` is the foundation for FV3 ``get_area``
-  (spherical excess formula) and ``dist2side``; FV3 includes
-  degenerate-input fixups for colinear/coincident points
-  (ddd ≤ 0 → angle = 0).
-
-  ``cell_center3`` is FV3's standard cell-center formula:
-  normalize sum of 4 corners.  ``cell_center2`` is the latlon
-  wrapper.  ``expand_cell`` extrapolates/shrinks a 4-corner
-  cell about its center (used in FV3 land-model coupling).
-
-  ``dist2side_latlon`` computes the FV3 angular distance from a
-  point to a great-circle arc::
-
-      d = asin(sin(side) · sin(angle))
-
-  Tests (11/11 in <1 s):
-  1. ``spherical_angle`` at north pole, two meridians 90° apart → π/2.
-  2. ``spherical_angle`` octant → π/3.
-  3. ``spherical_angle`` colinear → finite.
-  4. ``cell_center3`` returns unit-norm.
-  5. ``cell_center3`` symmetric square at equator → center at equator.
-  6. ``cell_center2`` ↔ ``cell_center3`` latlon-vs-Cartesian agreement.
-  7. ``dist2side_latlon`` on-arc point → 0.
-  8. ``dist2side_latlon`` pole-to-equator → π/2.
-  9. ``expand_cell`` fac=1 is identity.
-  10. ``expand_cell`` fac=0 collapses to center.
-  11. ``expand_cell`` corners forced to lie on unit sphere.
-  Wired into iter-383 sweep (now 185).
-- Iter 612: **FV3 mirror + great-circle interpolation helpers**.
-  Faithful ports of FV3 ``fv_grid_utils.F90`` helpers built on
-  iter-611 Cartesian primitives:
-
-  | Function          | F90 line | Role                                |
-  |-------------------|----------|-------------------------------------|
-  | ``mirror_xyz``    | 1668     | reflect Cartesian point across GC plane |
-  | ``mirror_latlon`` | 1705     | (lon, lat) wrapper for ``mirror_xyz``  |
-  | ``intp_great_circle`` | 1896 | secant linear interp on GC          |
-  | ``slerp``         | 1927     | Shoemake arc-length-uniform slerp   |
-
-  Used in FV3 cubed-sphere grid generation: panel construction
-  via reflections across face symmetry planes (mirror), and edge
-  refinement via either secant interpolation (FV3 default) or
-  proper slerp (used in cubed-sphere C-grid metric refinement).
-
-  ``intp_great_circle(β=0.5)`` is identity-equivalent to
-  ``mid_pt_sphere``; verified in test.
-
-  Antipodal safety in ``slerp``: FV3 raises a fatal for
-  ``|ω|<1e-5``; we instead silently fall back to the secant
-  interpolant (well-defined for colocated ω=0 points, and at
-  least returns finite values for near-antipodal cases where
-  the great-circle is ambiguous).
-
-  Tests (9/9 in <1 s):
-  1. ``mirror_xyz`` preserves unit norm.
-  2. ``mirror_xyz`` involutive (mirror² = id).
-  3. ``mirror_xyz`` fixed on plane (p on plane → p).
-  4. ``mirror_latlon`` matches Cartesian roundtrip.
-  5. ``intp_great_circle`` β=0/1 endpoints exact.
-  6. ``intp_great_circle`` β=0.5 ↔ ``mid_pt_sphere``.
-  7. ``slerp`` β=0/1 endpoints exact.
-  8. ``slerp`` β=0.5 arc-length-equidistant.
-  9. ``slerp`` colocated-point safe.
-  Wired into iter-383 sweep (now 184).
-- Iter 611: **FV3 Cartesian grid primitives**.  Faithful ports of
-  the building-block helpers from FV3 ``fv_grid_utils.F90``:
-
-  | Function          | F90 line | Role                              |
-  |-------------------|----------|-----------------------------------|
-  | ``latlon2xyz``    | 1639     | (lon, lat) → (x, y, z) unit sphere|
-  | ``xyz2latlon``    | 1739     | inverse; pole-safe (esl=1e-10)   |
-  | ``inner_prod``    | 984      | Cartesian dot product             |
-  | ``vect_cross``    | 1781     | Cartesian cross product           |
-  | ``normalize_vect``| 1880     | unit-norm (zero-safe)             |
-  | ``mid_pt3_cart``  | 1996     | Cartesian GC midpoint             |
-  | ``mid_pt_cart``   | 2026     | (lon, lat)→ Cartesian midpoint    |
-  | ``get_unit_vect2``| 1848     | unit tangent at GC midpoint       |
-
-  All JAX-vectorized, broadcast on leading axes, take the 3-vector
-  on the last axis (FV3 takes a flat 3-element array).  Each is a
-  pure JAX function with finite gradients (zero-safe normalization
-  via ``jnp.where``).
-
-  ``latlon2xyz`` is a thin FV3-named alias for the existing
-  ``lonlat_to_cartesian``.  ``xyz2latlon`` is new and matches the
-  FV3 ``cart_to_latlon`` pole branch (``|x|+|y|<eps → lon=0``).
-  ``get_unit_vect2`` returns the unit tangent at the great-circle
-  midpoint pointing from e1 → e2 (used in FV3 ``edge_factors`` /
-  ``efactor_a2c_v`` metric construction).
-
-  Tests (13/13 in 1 s):
-  1. ``latlon2xyz`` outputs unit-norm vectors.
-  2. ``latlon2xyz`` ↔ ``xyz2latlon`` roundtrip exact.
-  3. ``xyz2latlon`` at pole returns lon=0 (FV3 esl branch).
-  4. ``inner_prod`` orthogonal pairs → 0.
-  5. ``inner_prod`` parallel unit vectors → 1.
-  6. ``vect_cross`` standard identities.
-  7. ``vect_cross`` anticommutes.
-  8. ``normalize_vect`` produces unit norm.
-  9. ``normalize_vect`` zero input is NaN-safe.
-  10. ``mid_pt3_cart`` is unit-norm + equidistant.
-  11. ``mid_pt_cart`` ↔ ``mid_pt_sphere`` agreement (1e-12).
-  12. ``get_unit_vect2`` returns unit-norm tangent.
-  13. ``get_unit_vect2`` tangent is ⊥ pc (sphere tangent).
-  Wired into iter-383 sweep (now 183).
+  These ports are foundational building blocks: every higher-
+  level FV3 grid utility (``edge_factors``, ``efactor_a2c_v``,
+  ``init_cubed_to_latlon``) can now be ported using these
+  primitives.  Total: 24 helpers across 9 iters, 51 tests, all
+  wired into iter-383 sweep (now 191).
 - **Iters 601-609 (compacted iter 610)**: full NH+PE conservation
   matrix + FV3 utility ports (grid, ops, filter, diagnostics).
   - iter 601: **NH TE-conserving correction** (FV3 consv_te NH).
