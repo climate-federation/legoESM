@@ -116,7 +116,11 @@ def bechtold_convection(
     ncol, nlev = T.shape
 
     # -- Column geometry, moist adiabat, CAPE ------------------------------
-    dz, rho, z = _compute_column_geometry(T, p_full, p_half)
+    # Pass q_v so dz / rho / z use virtual-temperature moist hydrostatic
+    # geometry (~1 % thicker / less dense in tropics) — consistent with
+    # the mass-flux closure path (mass_flux.diagnose_mass_flux_closure)
+    # and the simplified EDMF entry point.  See clean_physics iter-2 #2.
+    dz, rho, z = _compute_column_geometry(T, p_full, p_half, q_v=q_v)
     T_base = T[:, -1]
     q_base = q_v[:, -1]
     p_base = p_full[:, -1]

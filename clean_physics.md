@@ -129,6 +129,17 @@ the resulting overshoot in θ/q.  Cap is ``M ≤ 0.5·ρ·dz/dt``
 **Tests (post iter-11):**
 - 95 atmosphere turbulence tests pass (all schemes including EDMF).
 
+### Iteration 16 — 2026-05-12
+
+**Action: thread `q_v` into `_compute_column_geometry` across the
+remaining mass-flux convection schemes** so all five (Bechtold,
+Emanuel, Tiedtke, Kain-Fritsch, Zhang-McFarlane) now use virtual-T
+moist hydrostatic geometry — consistent with `mass_flux.
+diagnose_mass_flux_closure` and `simplified_edmf` already updated in
+iter-2.  Moist tropical columns are ~1 % thicker and ~1 % less dense
+than the dry calculation; omitting `q_v` was biasing each scheme's
+parcel ascent and mass-flux closure diagnostics.
+
 ### Iteration 14 — 2026-05-12
 
 **Action: fix the remaining pre-existing test failures unrelated to
