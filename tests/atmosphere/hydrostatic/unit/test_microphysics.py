@@ -163,6 +163,46 @@ class TestOutputHelpers:
         assert tend.shape == (4, 10)
         assert jnp.all(jnp.isfinite(tend))
 
+    def test_sedimentation_cfl_positivity(self):
+        """With dt and a large V_t·dt/dz, q_new must stay non-negative.
+
+        Without the dt-aware flux limiter introduced in clean_physics
+        iter-1, ``q + dt · tendency`` can go negative when the local
+        Courant number ``V_t·dt/dz > 1``.
+        """
+        q = jnp.ones((1, 10)) * 1e-4
+        rho = jnp.ones((1, 10)) * 1.2
+        V_t = jnp.ones((1, 10)) * 50.0   # huge fall speed
+        dz = jnp.ones((1, 10)) * 100.0
+        dt = 60.0                          # V_t·dt/dz = 30, far above CFL
+
+        tend = sedimentation_tendency(q, rho, V_t, dz, dt=dt)
+        q_new = q + dt * tend
+        # With the limiter, positivity holds for ANY local Courant.
+        assert jnp.all(q_new >= -1.0e-12)
+
+    def test_sedimentation_surface_flux_conservation(self):
+        """Surface flux must equal the column-integrated mass removed.
+
+        With ``return_surface_flux=True`` the precip diagnostic matches
+        the dt-limited removal, so column water conservation is exact.
+        """
+        q = jnp.ones((2, 10)) * 1e-3
+        rho = jnp.ones((2, 10)) * 1.2
+        V_t = jnp.ones((2, 10)) * 5.0
+        dz = jnp.ones((2, 10)) * 500.0
+        dt = 60.0
+
+        tend, surf_flux = sedimentation_tendency(
+            q, rho, V_t, dz, dt=dt, return_surface_flux=True,
+        )
+        # Column-integrated mass change per area [kg/m²].
+        column_mass_before = jnp.sum(q * rho * dz, axis=-1)
+        column_mass_after = jnp.sum((q + dt * tend) * rho * dz, axis=-1)
+        delta_per_step = column_mass_before - column_mass_after
+        # Surface flux × dt should match the column mass removed.
+        assert jnp.allclose(surf_flux * dt, delta_per_step, rtol=1.0e-10)
+
 
 # ======================================================================
 # Kessler tests

@@ -764,6 +764,40 @@ class TestVerticalMixing:
         assert tendency.dtype == field.dtype
         assert jnp.all(jnp.isfinite(tendency))
 
+    def test_vertical_diffusion_cfl_cap_keeps_step_stable(self, ocean_z_coord):
+        """With dt supplied, the CFL cap keeps explicit Euler stable.
+
+        A diffusivity of 10 m²/s on dz ~ 10 m and dt = 3600 s gives a
+        bare Courant number K·dt/dz² ≈ 360 — single explicit step
+        explodes.  The cap should bring it down to ≤ 0.5 so a single
+        explicit step is bounded.
+        """
+        nlev = ocean_z_coord.n_levels
+        field = jnp.linspace(0.0, 1.0, nlev, dtype=jnp.float64)[
+            jnp.newaxis, jnp.newaxis, jnp.newaxis, :
+        ]
+        jac = jnp.ones((1, 1, 1), dtype=jnp.float64)
+        dt = 3600.0
+
+        tendency = vertical_diffusion(
+            field, ocean_z_coord, jac, coeff=10.0, dt=dt,
+        )
+        field_new = field + dt * tendency
+
+        # With the cap K·dt/dz² ≤ cfl_safety < 1, the explicit update
+        # cannot blow up beyond ~2× the initial range.
+        assert jnp.all(jnp.isfinite(field_new))
+        assert jnp.max(jnp.abs(field_new)) < 5.0  # well-bounded
+        # Without the cap (passing the same 10 m²/s with no dt arg)
+        # the same step would overshoot dramatically — sanity check.
+        tendency_uncapped = vertical_diffusion(
+            field, ocean_z_coord, jac, coeff=10.0,
+        )
+        field_new_uncapped = field + dt * tendency_uncapped
+        assert jnp.max(jnp.abs(field_new_uncapped)) > jnp.max(
+            jnp.abs(field_new)
+        )
+
 
 # ==============================================================================
 # Model Tests

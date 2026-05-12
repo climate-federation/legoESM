@@ -154,6 +154,17 @@ Branch: `clean_physics`. Driven by Ralph loop with `/codex:adversarial-review`.
 **Tests (post iter-7):**
 - ocean lateral / mixing suite → 72/73 pass (one pre-existing `test_ah_lat_scaling` failure unrelated to this change).
 
+### Iteration 8 — 2026-05-12
+
+**Actions:**
+- [x] Regression tests for the new behaviour in iter-1/iter-4/iter-5:
+  - `tests/ocean/unit/test_ocean.py::TestVerticalMixing::test_vertical_diffusion_cfl_cap_keeps_step_stable` — verifies that supplying `dt` to `vertical_diffusion` caps `K` so an explicit Euler step stays bounded.
+  - `tests/atmosphere/hydrostatic/unit/test_microphysics.py::test_sedimentation_cfl_positivity` — verifies positivity under a Courant ~ 30 hydrometeor sedimentation step.
+  - `tests/atmosphere/hydrostatic/unit/test_microphysics.py::test_sedimentation_surface_flux_conservation` — verifies the returned surface flux exactly equals the column-integrated mass removed per step.
+
+**Tests (post iter-8):**
+- 3 new conservation / CFL tests added and pass.
+
 **Tests (post-fix):**
 - atmosphere microphysics + convection + land multilayer: 172/172 pass.
 - sea ice unit suite: 78 pass, 1 pre-existing thermo failure (`Test8i_StefanBoltzmann::test_lw_up_matches` — confirmed pre-existing in iter-1).
