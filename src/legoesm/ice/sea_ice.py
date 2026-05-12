@@ -217,13 +217,22 @@ def _step_slab(
     # NOT counting sublimation (already in the atmospheric lhflx
     # channel).  Positive = freshwater INTO ocean (melt > freeze);
     # negative = freshwater extracted to form ice.
-    dh_dt_total = (h_new - h) / dt
+    #
+    # Cell-mean ice volume is ``V = h · conc`` (m of ice per cell area)
+    # — the right diagnostic for the coupler.  Using ``dh/dt`` alone
+    # (an earlier form) over- or under-counted FW exchange by the local
+    # concentration factor on partial-cover cells (codex iter-25 #1).
+    # Sublimation acts on the ice-covered fraction, so its cell-mean
+    # contribution is the ice-area-weighted ``dh_dt_sublim · conc``;
+    # subtracting it leaves the basal/surface melt + lead-freeze.
+    dV_dt_total = (h_new * conc_new - h * conc) / dt
     dh_dt_sublim = jnp.where(
         h > config.h_ice_min,
         -lhflx / (config.rho_ice * constants.L_s),
         0.0,
     )
-    freshwater_to_ocean = -config.rho_ice * (dh_dt_total - dh_dt_sublim)
+    dV_dt_sublim = dh_dt_sublim * conc
+    freshwater_to_ocean = -config.rho_ice * (dV_dt_total - dV_dt_sublim)
 
     # Heat extracted from the ocean by this tile.  Two contributions:
     #   1) basal melt/growth: F_ocean drawn from warm ocean to melt
@@ -374,9 +383,12 @@ def _step_dynamic(
     # should not show up as melt/freezing in the coupler response.
     # Codex iter-3 finding #2.
     if h.ndim > 3:
-        h_agg_post_transport, _, _ = aggregate_state(h, T_ice, conc)
+        h_agg_post_transport, _, conc_agg_post_transport = aggregate_state(
+            h, T_ice, conc,
+        )
     else:
         h_agg_post_transport = h
+        conc_agg_post_transport = conc
 
     # ---- 3. Thermodynamics (per category or single) ----
     if h.ndim > 3:
@@ -492,6 +504,7 @@ def _step_dynamic(
         h_agg, T_agg, conc_agg, u_ice, v_ice,
         forcing, config, U_min,
         h_old=h_agg_post_transport,
+        conc_old=conc_agg_post_transport,
         ocean_sst=ocean_sst,
         ocean_u=ocean_u,
         ocean_v=ocean_v,
@@ -688,6 +701,7 @@ def _build_response(
     U_min: float,
     *,
     h_old: jnp.ndarray | None = None,
+    conc_old: jnp.ndarray | None = None,
     ocean_sst: jnp.ndarray | None = None,
     ocean_u: jnp.ndarray | None = None,
     ocean_v: jnp.ndarray | None = None,
@@ -720,17 +734,23 @@ def _build_response(
     )
 
     # Ice → ocean feedbacks.  When the dynamic path threads
-    # ``h_old`` + ``ocean_*`` + ``dt`` we compute the same fluxes the
-    # slab path produces inline; otherwise expose zero placeholders.
+    # ``h_old`` + ``conc_old`` + ``ocean_*`` + ``dt`` we compute the
+    # same cell-mean volume balance the slab path produces inline;
+    # otherwise expose zero placeholders.  Codex iter-25 #1: the
+    # FW flux is the change in cell-mean ice volume ``h · conc``, not
+    # just thickness.  Sublimation acts on the ice-covered fraction,
+    # so its cell-mean contribution is ``dh_dt_sublim · conc_old``.
     if h_old is not None and dt is not None:
-        dh_dt_total = (h - h_old) / dt
+        conc_ref = conc if conc_old is None else conc_old
+        dV_dt_total = (h * conc - h_old * conc_ref) / dt
         ice_mask_init = h_old > config.h_ice_min
         dh_dt_sublim = jnp.where(
             ice_mask_init,
             -lhflx / (config.rho_ice * constants.L_s),
             0.0,
         )
-        freshwater_flux = -config.rho_ice * (dh_dt_total - dh_dt_sublim)
+        dV_dt_sublim = dh_dt_sublim * conc_ref
+        freshwater_flux = -config.rho_ice * (dV_dt_total - dV_dt_sublim)
     else:
         freshwater_flux = jnp.zeros_like(h)
 

@@ -169,6 +169,30 @@ the "Iterations 1-19 — Summary" section above so the working log stays
 under the auto-loaded MEMORY.md / context envelope.  All previous detailed
 entries remain in the commit messages on `clean_physics`.
 
+### Iteration 25 — 2026-05-12
+
+**Codex iter-24 review returned 3 findings; this iteration applies all 3.**
+
+- [x] `ice/sea_ice.py:226` (slab) and `_build_response` (dynamic) —
+  FW flux now uses ``d(h · conc)/dt`` (cell-mean volume change),
+  not ``dh/dt``.  Sublimation contribution is also ice-area-weighted
+  (`dh_dt_sublim · conc`).  Threaded `conc_old` (pre-step / post-
+  transport aggregated concentration) through `_build_response`.
+- [x] `ocean/physics/lateral_mixing/harmonic.py:84` — tracer
+  Laplacian output is now multiplied by the land `mask_3d` so land
+  cells receive zero tendency.  Full no-flux BC (replicating ocean
+  values at land neighbours before the Laplacian) would require a
+  structural operator change and is queued; the output mask is the
+  safe minimum that contains the issue.
+- [x] `atmosphere/physics/microphysics/morrison.py:112` — added joint
+  donor clamp on positive vapor sinks (``cond_pos + dq_i_dep``)
+  scaled by `qv_scale = min(1, qv_avail / (sink · dt))`.  Both the
+  matching latent heating and source terms inherit the scale via the
+  combined-tendency expressions later in the routine.
+
+**Tests (post iter-25):** 151 / 151 sea-ice + ocean MPAS + atmosphere
+microphysics tests pass.
+
 ### Iteration 24 — 2026-05-12
 
 **Fix iter-23 follow-up flagged by codex stop-time review.**

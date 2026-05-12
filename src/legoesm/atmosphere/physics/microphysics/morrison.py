@@ -210,6 +210,30 @@ def morrison_microphysics(
     # Number tendency for autoconverted droplets must scale identically.
     dN_r_au = dN_r_au * qc_scale
 
+    # === DONOR CLAMP for q_v sinks ===
+    # The vapor budget in this scheme is ``dq_v_dt = -condensation +
+    # evaporation - dq_i_dep``.  Positive ``condensation`` and positive
+    # ``dq_i_dep`` together remove vapor; if their combined rate · dt
+    # exceeds available ``q_v``, the explicit step drives q_v < 0.
+    # ``saturation_adjustment`` clamps ``condensation`` against q_v in
+    # isolation, but in a supersaturated icy layer the ice deposition
+    # ``dq_i_dep`` can still over-draw q_v on its own or jointly with
+    # condensation.  Mirror the q_c / q_i clamps: rescale all positive
+    # vapor sinks (and their matching sources / latent heat) so the
+    # combined removal cannot exceed the locally-available vapor mass.
+    # Codex iter-25 finding #3.
+    cond_pos = jnp.maximum(condensation, 0.0)
+    qv_sink_total = cond_pos + jnp.maximum(dq_i_dep, 0.0)
+    qv_avail = jnp.clip(q_v, 0.0)
+    qv_scale = jnp.minimum(
+        1.0,
+        qv_avail / jnp.maximum(qv_sink_total * jnp.maximum(dt, 1e-10), 1e-30),
+    )
+    # Scale only the positive (vapor-consuming) branch of condensation;
+    # negative condensation (evaporation) is unaffected.
+    condensation = jnp.where(condensation > 0.0, condensation * qv_scale, condensation)
+    dq_i_dep = dq_i_dep * qv_scale
+
     # === SEDIMENTATION ===
     # Marshall-Palmer fall speeds V_t = a_v * (q * rho / rho_sfc)^b_v use
     # fractional exponents (b_v_r=0.5, b_v_i=0.25, b_v_s=0.3); guard the

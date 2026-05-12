@@ -77,7 +77,16 @@ def harmonic_lateral_mixing(
         du_dt = vel_lap[..., 0]
         dv_dt = vel_lap[..., 1]
 
-    # Tracers: unmasked (smooth gradients at coastlines)
+    # Tracers: apply land mask so the resulting tendency only acts on
+    # ocean cells.  Earlier comment ("Tracers: unmasked (smooth gradients
+    # at coastlines)") justified the no-mask approach, but it lets the
+    # Laplacian source/sink ocean heat & salt via whatever land-cell
+    # value is in T / S (codex iter-25 finding #2).  Multiplying the
+    # OUTPUT by mask ensures land cells receive no tendency.  An ideal
+    # no-flux BC would also replicate the ocean value at land
+    # neighbours before the Laplacian, but that is a structural
+    # refactor of the operator stencil; the output mask is a safe
+    # minimum that contains the issue.
     dT_dt = z
     dS_dt = z
     if cfg.K_h > 0:
@@ -86,7 +95,7 @@ def harmonic_lateral_mixing(
         tr_flat = tr_stack.reshape(n_face, n_i, n_j, nlev_t * n_pair)
         tr_lap_flat = laplacian_viscosity_3d(tr_flat, grid, K_h_eff)
         tr_lap = tr_lap_flat.reshape(n_face, n_i, n_j, nlev_t, n_pair)
-        dT_dt = tr_lap[..., 0]
-        dS_dt = tr_lap[..., 1]
+        dT_dt = tr_lap[..., 0] * mask_3d
+        dS_dt = tr_lap[..., 1] * mask_3d
 
     return LateralMixingOutput(du_dt=du_dt, dv_dt=dv_dt, dT_dt=dT_dt, dS_dt=dS_dt)
