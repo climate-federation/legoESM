@@ -1195,6 +1195,35 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 652: **FV3 ``dtoa_vort_on``** — circulation-conserving
+  D-grid → A-grid winds.  Faithful JAX port of FV3 ``dtoa``
+  (tools/test_cases.F90:7896-7955, VORT_ON branch).
+
+  Algorithm:
+
+      uout[i, j] = 0.5·(uin[i, j]·dx[i, j] + uin[i, j+1]·dx[i, j+1])
+                     / dxa[i, j]
+      vout[i, j] = 0.5·(vin[i, j]·dy[i, j] + vin[i+1, j]·dy[i+1, j])
+                     / dya[i, j]
+
+  Circulation-conserving (vorticity-conserving) interpolation
+  from D-grid covariant winds to A-grid cell-center winds.
+
+  Differs from iter-627 ``c2l_ord2_fv3`` (which adds a-matrix
+  rotation to lat/lon frame); this is the raw covariant→
+  cell-center step before any rotation.  Used by FV3 test-case
+  diagnostics + visualizations.
+
+  Broadcasts on leading axes (e.g., level / time / face).
+
+  Tests (5/5 in <1 s):
+  1. Output shape (n_x, n_y) from D-grid inputs.
+  2. Zero D-grid → zero A-grid.
+  3. Uniform u=U, v=V with uniform dx=dxa → uout=U, vout=V.
+  4. With dx=dxa, formula reduces to simple averaging.
+  5. Batched (level, n_x, n_y) preserves leading axes.
+
+  Wired into iter-383 sweep (now 220).
 - Iter 651: **FV3 ``get_pt_on_great_circle``** — point along GC
   at given distance + heading.  Faithful JAX port of FV3
   ``get_pt_on_great_circle`` (tools/test_cases.F90:4805-4826).

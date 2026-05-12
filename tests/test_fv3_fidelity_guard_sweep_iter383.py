@@ -243,6 +243,7 @@ _GUARD_MODULES = (
     "test_fv3_cart_sph_iter648",                     # iter-648 add
     "test_fv3_grid_area_iter649",                    # iter-649 add
     "test_fv3_get_pt_on_gc_iter651",                 # iter-651 add
+    "test_fv3_dtoa_iter652",                         # iter-652 add
 )
 
 

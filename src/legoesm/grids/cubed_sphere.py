@@ -2304,6 +2304,56 @@ def gnomonic_dist(im: int) -> tuple[jax.Array, jax.Array]:
     return xyz2latlon(p1, p2, p3)
 
 
+def dtoa_vort_on(
+    uin: jax.Array, vin: jax.Array,
+    dx: jax.Array, dy: jax.Array,
+    dxa: jax.Array, dya: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 652: D-grid → A-grid winds (circulation-conserving).
+
+    Faithful JAX port of FV3 ``dtoa`` (tools/test_cases.F90:
+    7896-7955, ``VORT_ON`` branch).  Circulation- (vorticity-)
+    conserving interpolation from D-grid covariant winds to
+    A-grid cell-center winds::
+
+        uout[i, j] = 0.5·(uin[i, j]·dx[i, j] + uin[i, j+1]·dx[i, j+1])
+                       / dxa[i, j]
+        vout[i, j] = 0.5·(vin[i, j]·dy[i, j] + vin[i+1, j]·dy[i+1, j])
+                       / dya[i, j]
+
+    Used by FV3 test-case diagnostics + visualizations.  Differs
+    from iter-627 ``c2l_ord2_fv3`` (which applies the a-matrix
+    rotation); this is the raw covariant→cell-center step.
+
+    Parameters
+    ----------
+    uin : jax.Array, shape (..., n_x, n_y+1)
+        D-grid u (north/south edges, covariant).
+    vin : jax.Array, shape (..., n_x+1, n_y)
+        D-grid v (east/west edges, covariant).
+    dx, dy : jax.Array, shape (..., n_x, n_y+1) and (..., n_x+1, n_y)
+        Edge lengths (matching uin, vin shapes).
+    dxa, dya : jax.Array, shape (..., n_x, n_y)
+        A-grid (cell-center) edge lengths.
+
+    Returns
+    -------
+    uout, vout : jax.Array, shape (..., n_x, n_y)
+        A-grid cell-center wind components (covariant).
+    """
+    # uout: average uin·dx along j (axis -1 of uin)
+    uout = 0.5 * (
+        uin[..., :, :-1] * dx[..., :, :-1]
+        + uin[..., :, 1:] * dx[..., :, 1:]
+    ) / dxa
+    # vout: average vin·dy along i (axis -2 of vin)
+    vout = 0.5 * (
+        vin[..., :-1, :] * dy[..., :-1, :]
+        + vin[..., 1:, :] * dy[..., 1:, :]
+    ) / dya
+    return uout, vout
+
+
 def get_pt_on_great_circle(
     lon1: jax.Array, lat1: jax.Array,
     dist: jax.Array, heading: jax.Array,
