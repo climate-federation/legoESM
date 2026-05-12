@@ -1195,6 +1195,36 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 631: **FV3 ``edge_factors`` non-ortho branch port**.
+  Faithful JAX port of FV3 ``edge_factors`` (fv_grid_utils.F90:
+  1212-1289), non-orthogonal branch.  Single-axis 1D variant:
+  for one face boundary, computes per-corner interpolation
+  weights ``edge_factor[j] = d2 / (d1 + d2)`` where:
+
+      py[j]   = mid_pt_sphere(agrid_outside[j], agrid_inside[j])
+      d1[j]   = great_circle_dist(py[j-1], grid_corner[j])
+      d2[j]   = great_circle_dist(py[j],   grid_corner[j])
+
+  Used by FV3 A-grid → B-grid (corner) interpolation at
+  non-orthogonal cubed-sphere face boundaries::
+
+      q_corner[j] = (1 - edge[j]) · q_A[j] + edge[j] · q_A[j-1]
+
+  Reuses iter-608 ``mid_pt_sphere`` and iter-611 (via
+  ``great_circle_distance``).
+
+  Returns ``(n+1,)`` array with NaN at endpoints (FV3 leaves them
+  as ``big_number`` since edge formula degenerates at face
+  corners themselves).  Interior weights bounded in [0, 1].
+
+  Tests (5/5 in 2 s):
+  1. Output shape (n+1,).
+  2. Endpoint NaN, interior finite.
+  3. Equidistant midpoints → 0.5 (uniform grid limit).
+  4. Interior weights ∈ [0, 1].
+  5. No NaN/Inf in interior on random inputs.
+
+  Wired into iter-383 sweep (now 201).
 - **Iters 621-629 (compacted iter 630)**: complete FV3
   cubed-sphere CONSTRUCTION + WIND-ROTATION pipeline.  9
   iterations close out FV3's full grid-init code path:

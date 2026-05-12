@@ -1791,6 +1791,73 @@ def g_sum(
     return gsum
 
 
+def edge_factor_along_axis_nonortho(
+    agrid_outside_lon: jax.Array, agrid_outside_lat: jax.Array,
+    agrid_inside_lon: jax.Array, agrid_inside_lat: jax.Array,
+    grid_corner_lon: jax.Array, grid_corner_lat: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 631: A→B grid interpolation weights at face boundary.
+
+    Faithful port of FV3 ``edge_factors`` non-ortho branch
+    (fv_grid_utils.F90:1212-1289).  Single-axis 1D variant: for
+    one face boundary, computes per-corner interpolation weights
+    ``edge_factor[j] = d2 / (d1 + d2)`` where:
+
+        py[j]     = mid_pt_sphere(agrid_outside[j], agrid_inside[j])
+        d1[j+1]   = great_circle_dist(py[j],   grid_corner[j+1])
+        d2[j+1]   = great_circle_dist(py[j+1], grid_corner[j+1])
+
+    This is used by FV3's A-grid → B-grid (corner-located)
+    interpolation at non-orthogonal cubed-sphere face boundaries::
+
+        q_corner[j+1] = (1 - edge[j+1]) · q_A[j+1] + edge[j+1] · q_A[j]
+
+    Parameters
+    ----------
+    agrid_outside_lon, agrid_outside_lat : jax.Array, shape ``(n,)``
+        A-grid cell-center positions just OUTSIDE the boundary
+        (the halo cells across the face edge).
+    agrid_inside_lon, agrid_inside_lat : jax.Array, shape ``(n,)``
+        A-grid cell-center positions just INSIDE the boundary.
+    grid_corner_lon, grid_corner_lat : jax.Array, shape ``(n+1,)``
+        B-grid (corner) positions along the boundary.
+
+    Returns
+    -------
+    edge_factor : jax.Array, shape ``(n+1,)``
+        Per-corner interpolation weights.  Corner j+1 (interior)
+        gets ``d2/(d1+d2)``; corners 0 and n (the face corners
+        themselves) get NaN — FV3 also leaves them as ``big_number``
+        (lines 1213-1216) since the edge factor formula degenerates
+        there.
+    """
+    # Midpoints between outside and inside cells at each row
+    py_lon, py_lat = mid_pt_sphere(
+        agrid_outside_lon, agrid_outside_lat,
+        agrid_inside_lon, agrid_inside_lat,
+    )  # shape (n,)
+    # For each interior corner j ∈ [1, n-1]: d1 = dist(py[j-1], grid[j]);
+    # d2 = dist(py[j], grid[j])
+    # py[j-1] = py[:-1], py[j] = py[1:]
+    # grid corners interior: grid[1:-1] (shape (n-1,))
+    d1 = great_circle_distance(
+        py_lon[:-1], py_lat[:-1],
+        grid_corner_lon[1:-1], grid_corner_lat[1:-1],
+        radius=1.0,
+    )
+    d2 = great_circle_distance(
+        py_lon[1:], py_lat[1:],
+        grid_corner_lon[1:-1], grid_corner_lat[1:-1],
+        radius=1.0,
+    )
+    safe_sum = jnp.where(d1 + d2 > 0.0, d1 + d2, 1.0)
+    interior = d2 / safe_sum
+    # Build full (n+1,) array with NaN at endpoints (FV3 big_number)
+    edge_factor = jnp.full(grid_corner_lon.shape[0], jnp.nan)
+    edge_factor = edge_factor.at[1:-1].set(interior)
+    return edge_factor
+
+
 def make_fv3_native_grid(
     im: int,
     grid_type: int = 0,
