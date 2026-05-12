@@ -2548,6 +2548,103 @@ def dcmip16_bc_pressure(
     return p0 * jnp.exp(-g / Rdgas * (Ti1 - Ti2 * IT))
 
 
+def dcmip16_tc_temperature(
+    z: jax.Array, r: jax.Array,
+    Tv0: float | None = None,
+    lapse: float = 7.0e-3,
+    zt: float = 15000.0,
+    rp: float = 282000.0,
+    zp: float = 7000.0,
+    pb: float = 101500.0,
+    dp: float = 1115.0,
+    q0: float = 0.021,
+) -> jax.Array:
+    """FV3_3D iter 669: DCMIP16 TC temperature profile.
+
+    Faithful JAX port of FV3 ``DCMIP16_TC_temperature``
+    (tools/test_cases.F90:7137-7152).
+
+    Algorithm:
+        z > zt:  T = Tvt = Tv0 - lapse·zt
+        else:
+          Tv    = Tv0 - lapse·z
+          term1 = g·zp²·(1 - (pb/dp)·exp((r/rp)^1.5 + (z/zp)²))
+          term2 = 2·R_d·Tv·z
+          T     = Tv·(1 + (1/(1 + term2/term1) - 1))
+
+    Used in FV3 DCMIP16 Test 411 (TC).
+
+    Defaults from FV3 lines 6880-6897: Tv0 = 302.15·(1+0.608·q0).
+
+    Parameters
+    ----------
+    z : jax.Array
+        Height (m).
+    r : jax.Array
+        Great-circle distance from TC center (m).
+    Tv0 : float, optional
+        Sea-level virtual temperature; default 302.15·(1+0.608·q0).
+    lapse, zt, rp, zp, pb, dp, q0 : float
+        DCMIP16 TC parameters (see defaults).
+    """
+    g = constants.g
+    Rdgas = constants.R_d
+    if Tv0 is None:
+        Tv0 = 302.15 * (1.0 + 0.608 * q0)
+    Tvt = Tv0 - lapse * zt
+    Tv = Tv0 - lapse * z
+    rfac = jnp.sqrt(r / rp) ** 3
+    term1 = g * zp * zp * (1.0 - (pb / dp) * jnp.exp(rfac + (z / zp) ** 2))
+    term2 = 2.0 * Rdgas * Tv * z
+    # Safe-divide for term2/term1
+    safe_term1 = jnp.where(jnp.abs(term1) > 1e-30, term1, 1.0)
+    T_below = Tv + Tv * (1.0 / (1.0 + term2 / safe_term1) - 1.0)
+    return jnp.where(z > zt, Tvt, T_below)
+
+
+def dcmip16_tc_pressure(
+    z: jax.Array, r: jax.Array,
+    Tv0: float | None = None,
+    lapse: float = 7.0e-3,
+    zt: float = 15000.0,
+    rp: float = 282000.0,
+    zp: float = 7000.0,
+    pb: float = 101500.0,
+    dp: float = 1115.0,
+    q0: float = 0.021,
+) -> jax.Array:
+    """FV3_3D iter 669: DCMIP16 TC pressure profile.
+
+    Faithful JAX port of FV3 ``DCMIP16_TC_pressure``
+    (tools/test_cases.F90:7155-7167).
+
+    Algorithm:
+        z <= zt:
+          p = pb·exp(g/(R_d·lapse)·ln((Tv0-lapse·z)/Tv0))
+              - dp·exp(-(r/rp)^1.5 - (z/zp)²)·exp(g/(R_d·lapse)·ln(...))
+        z > zt:
+          p = ptt·exp(g·(zt-z)/(R_d·Tvt))
+          where ptt = pb·(Tvt/Tv0)^(g/R_d/lapse)
+    """
+    g = constants.g
+    Rdgas = constants.R_d
+    if Tv0 is None:
+        Tv0 = 302.15 * (1.0 + 0.608 * q0)
+    Tvt = Tv0 - lapse * zt
+    ptt = pb * (Tvt / Tv0) ** (g / (Rdgas * lapse))
+    # z <= zt branch
+    Tv = Tv0 - lapse * z
+    ratio = jnp.maximum(Tv / Tv0, 1e-30)
+    p_base = pb * jnp.exp(g / (Rdgas * lapse) * jnp.log(ratio))
+    rfac = jnp.sqrt(r / rp) ** 3
+    p_below = p_base - dp * jnp.exp(-rfac - (z / zp) ** 2) * jnp.exp(
+        g / (Rdgas * lapse) * jnp.log(ratio)
+    )
+    # z > zt branch
+    p_above = ptt * jnp.exp(g * (zt - z) / (Rdgas * Tvt))
+    return jnp.where(z <= zt, p_below, p_above)
+
+
 def dcmip16_tc_sphum(
     z: jax.Array,
     q0: float = 0.021,

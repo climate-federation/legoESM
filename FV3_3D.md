@@ -1195,6 +1195,44 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 669: **FV3 ``dcmip16_tc_temperature`` + ``dcmip16_tc_pressure``**.
+  Faithful JAX ports of FV3 DCMIP16 TC profiles
+  (tools/test_cases.F90:7137-7167).  Pairs with iter-666 TC humidity
+  for full TC IC stack.
+
+  TC temperature:
+
+      z > zt:  T = Tvt
+      else:
+          Tv    = Tv0 - lapse·z
+          rfac  = (r/rp)^1.5
+          term1 = g·zp²·(1 - (pb/dp)·exp(rfac + (z/zp)²))
+          term2 = 2·R_d·Tv·z
+          T     = Tv·(1 + 1/(1 + term2/term1) - 1)
+
+  TC pressure:
+
+      z ≤ zt:
+          p_base = pb·exp(g/(R_d·λ)·ln((Tv0-λ·z)/Tv0))
+          p = p_base - dp·exp(-rfac - (z/zp)²)·exp(g/(R_d·λ)·ln(...))
+      z > zt:
+          p = ptt·exp(g·(zt-z)/(R_d·Tvt))
+
+  Default DCMIP16 TC constants: Tv0=302.15·(1+0.608·q0), q0=0.021,
+  lapse=0.007, zt=15000, rp=282000, zp=7000, pb=101500, dp=1115.
+
+  Used in FV3 DCMIP16 Test 411 (TC).  With iter-666/669/iter-662
+  (rankine_vortex): complete TC IC stack.
+
+  Tests (6/6 in 1 s):
+  1. T far-field finite, positive.
+  2. T stratosphere = Tvt.
+  3. p surface ≈ pb at far-field.
+  4. p monotonic in z.
+  5. p drops at TC center (r=0).
+  6. T, p finite on random (z, r).
+
+  Wired into iter-383 sweep (now 236).
 - Iter 668: **FV3 ``dcmip16_bc_uwind`` + ``dcmip16_bc_sphum``**.
   Faithful JAX ports of FV3 DCMIP16 BC zonal wind + humidity
   (tools/test_cases.F90:6807-6852).  Pairs with iter-667 BC T/p.
