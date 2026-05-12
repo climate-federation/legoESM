@@ -1195,6 +1195,36 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 711: **FV3 ``ppme_fv3``** — PPM cell-edge values, non-uniform delp.
+  Faithful JAX port of FV3 ``ppme``
+  (tools/fv_diagnostics.F90:5196-5305).  Companion to iter-708
+  ``cs_prof_fv3`` (tridiagonal PPM); ppme uses explicit 4th-order
+  formula instead of tridiag.
+
+  Algorithm:
+      a6[k]   = delp[k-1] + delp[k]              (k=1..km-1)
+      delq[k] = p[k+1] - p[k]                    (k=0..km-2)
+      dc[k]   = Van-Leer-limited monotone slope  (k=1..km-2)
+      qe[k]   = 4th-order edge formula           (k=2..km-2)
+      Top k=0: 3-cell parabolic w/ discriminant fallback to linear
+      Top k=1: off-centered area-preserving cubic (4 cells)
+      Bot k=km-1, km: area-preserving cubic, 2nd deriv = 0 at surface
+
+  Vectorized via jnp.where for the discriminant branching at top.
+  Minimum km = 4 (top closure uses 4 cells).
+
+  Tests (6/6 in <5 s):
+  1. Uniform p → uniform qe.
+  2. Linear p → interior edges near cell midpoints.
+  3. Random p → 4th-order edges Van-Leer-bounded.
+  4. 3-D input → (..., km+1) output.
+  5. No NaN/Inf on random.
+  6. km < 4 raises ValueError.
+
+  Used internally by FV3 vertical remap and for PPME-based edge
+  reconstruction.
+
+  Wired into iter-383 sweep (now 275).
 - Iter 710: **FV3 ``cs3_interpolator_fv3``** — log-p multi-level PPM interp.
   Faithful JAX port of FV3 ``cs3_interpolator``
   (tools/fv_diagnostics.F90:4510-4602).  Differs from iter-709

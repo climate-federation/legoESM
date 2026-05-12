@@ -3225,6 +3225,155 @@ def cs3_interpolator_fv3(
     return qout_per_level
 
 
+def ppme_fv3(
+    p: jax.Array,
+    delp: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 711: PPM cell-edge values with non-uniform delp.
+
+    Faithful JAX port of FV3 ``ppme``
+    (tools/fv_diagnostics.F90:5196-5305).
+
+    Builds km+1 edge values from km cell averages using Lin (1996)
+    PPM with non-uniform layer thicknesses.  Interior uses 4th-order
+    edge formula with Van-Leer-limited monotone slopes; top edge uses
+    3-cell parabolic with discriminant fallback to linear; second cell
+    (k=1) uses off-centered area-preserving cubic; bottom 2 edges use
+    area-preserving cubic with 2nd-derivative=0 at surface.
+
+    Companion of iter-708 ``cs_prof_fv3`` (tridiagonal PPM edges).
+    Used by FV3 internally for vertical remap and edge reconstruction.
+
+    Parameters
+    ----------
+    p : jax.Array, shape (..., km)
+        Cell-mean values.  Minimum km = 4 (top + bottom closures use
+        4 cells).
+    delp : jax.Array, shape (..., km)
+        Layer thickness (positive).
+
+    Returns
+    -------
+    qe : jax.Array, shape (..., km+1)
+        PPM edge values at interfaces.
+    """
+    km = p.shape[-1]
+    if km < 4:
+        raise ValueError(f"ppme_fv3 requires km >= 4, got km={km}")
+
+    # FV3 a6[k] = delp[k-1] + delp[k] for k=2..km   (Python a6[k] for k=1..km-1)
+    a6 = jnp.zeros_like(delp)
+    a6 = a6.at[..., 1:].set(delp[..., :-1] + delp[..., 1:])
+
+    # FV3 delq[k] = p[k+1] - p[k] for k=1..km-1   (Python delq[k] for k=0..km-2)
+    delq = jnp.zeros_like(p)
+    delq = delq.at[..., :-1].set(p[..., 1:] - p[..., :-1])
+
+    # Limited monotone slope dc[k] for k=2..km-1 (Python k=1..km-2)
+    p_km1 = p[..., :-2]                    # p[k-1], k=1..km-2  (Python idx 0..km-3)
+    p_k = p[..., 1:-1]                     # p[k]
+    p_kp1 = p[..., 2:]                     # p[k+1]
+    delp_km1 = delp[..., :-2]
+    delp_k = delp[..., 1:-1]
+    delp_kp1 = delp[..., 2:]
+    a6_kp1 = a6[..., 2:]                   # a6[k+1]   k=1..km-2
+    a6_k = a6[..., 1:-1]                   # a6[k]
+    delq_k = delq[..., 1:-1]               # delq[k]  k=1..km-2 (Python idx)
+    delq_km1 = delq[..., :-2]              # delq[k-1]
+    c1 = (delp_km1 + 0.5 * delp_k) / a6_kp1
+    c2 = (delp_kp1 + 0.5 * delp_k) / a6_k
+    tmp = delp_k * (c1 * delq_k + c2 * delq_km1) / (a6_k + delp_kp1)
+    qmax = jnp.maximum(jnp.maximum(p_km1, p_k), p_kp1) - p_k
+    qmin = p_k - jnp.minimum(jnp.minimum(p_km1, p_k), p_kp1)
+    dc_interior = jnp.sign(tmp) * jnp.minimum(
+        jnp.minimum(jnp.abs(tmp), qmax), qmin,
+    )
+    dc = jnp.zeros_like(p)
+    dc = dc.at[..., 1:-1].set(dc_interior)
+
+    # 4th-order interior edge values qe[k] for k=3..km-1 (Python k=2..km-2)
+    # Uses delp[k-1], delp[k], a6[k-1], a6[k], a6[k+1], dc[k-1], dc[k]
+    delp_km1_i = delp[..., 1:-2]          # delp[k-1]   k=2..km-2 (Python idx 1..km-3)
+    delp_k_i = delp[..., 2:-1]            # delp[k]
+    a6_km1_i = a6[..., 1:-2]              # a6[k-1]
+    a6_k_i = a6[..., 2:-1]
+    a6_kp1_i = a6[..., 3:]                # a6[k+1]
+    dc_km1_i = dc[..., 1:-2]              # dc[k-1]
+    dc_k_i = dc[..., 2:-1]
+    delq_km1_i = delq[..., 1:-2]          # delq[k-1]
+    p_km1_i = p[..., 1:-2]                # p[k-1]
+
+    c1_i = delq_km1_i * delp_km1_i / a6_k_i
+    a1_i = a6_km1_i / (a6_k_i + delp_km1_i)
+    a2_i = a6_kp1_i / (a6_k_i + delp_k_i)
+    qe_interior = p_km1_i + c1_i + 2.0 / (a6_km1_i + a6_kp1_i) * (
+        delp_k_i * (c1_i * (a1_i - a2_i) + a2_i * dc_km1_i)
+        - delp_km1_i * a1_i * dc_k_i
+    )
+    qe = jnp.zeros(p.shape[:-1] + (km + 1,), dtype=p.dtype)
+    # qe_interior occupies Python idx 2..km-2  (size km-3)
+    qe = qe.at[..., 2:km - 1].set(qe_interior)
+
+    # Top cell k=0: 3-cell parabolic with discriminant check
+    s1 = delp[..., 0]
+    s2 = delp[..., 1] + s1
+    a3_top = (delq[..., 1] - delq[..., 0] * (delp[..., 1] + delp[..., 2]) / s2) / (
+        (delp[..., 1] + delp[..., 2]) * ((delp[..., 1] + delp[..., 2]) + s1)
+    )
+    b2_top = delq[..., 0] / s2 - a3_top * (s1 + s2)
+    sc_top = jnp.where(jnp.abs(a3_top) > 1e-14, -b2_top / (3.0 * a3_top + 1e-300), -1.0)
+    qe_top_parabolic = p[..., 0] - s1 * (a3_top * s1 + b2_top)
+    qe_top_linear = p[..., 0] - delq[..., 0] * s1 / s2
+    use_linear = (jnp.abs(a3_top) <= 1e-14) | (sc_top < 0.0) | (sc_top > s1)
+    qe_top = jnp.where(use_linear, qe_top_linear, qe_top_parabolic)
+    qe = qe.at[..., 0].set(qe_top)
+    dc = dc.at[..., 0].set(p[..., 0] - qe_top)
+
+    # k=1 off-centered area-preserving cubic
+    s3 = delp[..., 1] + delp[..., 2]
+    s4 = s3 + delp[..., 3]
+    ss3 = s3 + s1
+    s32 = s3 * s3
+    s42 = s4 * s4
+    s34 = s3 * s4
+    dm = delp[..., 0] / (s34 * ss3 * (delp[..., 1] + s3) * (s4 + delp[..., 0]))
+    f1 = delp[..., 1] * s34 / (s2 * ss3 * (s4 + delp[..., 0]))
+    f2 = (delp[..., 1] + s3) * (
+        ss3 * (delp[..., 1] * s3 + s34 + delp[..., 1] * s4)
+        + s42 * (delp[..., 1] + s3 + s32 / s2)
+    )
+    f3 = -delp[..., 1] * (
+        ss3 * (s32 * (s3 + s4) / (s4 - delp[..., 1])
+               + (delp[..., 1] * s3 + s34 + delp[..., 1] * s4))
+        + s42 * (delp[..., 1] + s3)
+    )
+    f4 = ss3 * delp[..., 1] * s32 * (delp[..., 1] + s3) / (s4 - delp[..., 1])
+    qe_k1 = f1 * p[..., 0] + (
+        f2 * p[..., 1] + f3 * p[..., 2] + f4 * p[..., 3]
+    ) * dm
+    qe = qe.at[..., 1].set(qe_k1)
+
+    # Bottom: area-preserving cubic w/ 2nd deriv = 0 at surface.
+    # FV3 indices: d1=delp[km], d2=delp[km-1]; reads qe[km-1] (last
+    # 4th-order edge), writes qe[km] and qe[km+1].
+    # Python:      d1=delp[..., km-1], d2=delp[..., km-2]; reads
+    # qe[..., km-2] (last 4th-order), writes qe[..., km-1], qe[..., km].
+    d1 = delp[..., -1]
+    d2 = delp[..., -2]
+    qm = (d2 * p[..., -1] + d1 * p[..., -2]) / (d1 + d2)
+    dq = 2.0 * (p[..., -2] - p[..., -1]) / (d1 + d2)
+    qe_last_ord4 = qe[..., km - 2]
+    c1_bot = (qe_last_ord4 - qm - d2 * dq) / (
+        d2 * (2.0 * d2 * d2 + d1 * (d2 + 3.0 * d1))
+    )
+    c3_bot = dq - 2.0 * c1_bot * (d2 * (5.0 * d1 + d2) - 3.0 * d1 * d1)
+    qe_kmm1 = qm - c1_bot * d1 * d2 * (d2 + 3.0 * d1)        # FV3 qe[km]
+    qe_km = d1 * (8.0 * c1_bot * d1 * d1 - c3_bot) + qe_kmm1  # FV3 qe[km+1]
+    qe = qe.at[..., km - 1].set(qe_kmm1)
+    qe = qe.at[..., km].set(qe_km)
+    return qe
+
+
 def cs_interpolator_fv3(
     qin: jax.Array,
     wz: jax.Array,
