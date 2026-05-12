@@ -1081,111 +1081,28 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
-- Iter 493: comprehensive clip propagation refutes iter-492
-  "incomplete plumbing" hypothesis.  Patched 4 ``pad_halo_4d``
-  import aliases simultaneously (compressible_euler_cdgrid +
-  operators_3d + operators_cdgrid + operators_fc):
-    no clip:   edge ratio 3.391×
-    with clip: edge ratio 3.341×  (-1.5%)
-  STILL only 1.5% reduction.  Refutes the iter-492 hypothesis
-  that more comprehensive plumbing would help significantly.
-  **Real conclusion**: ``monotone_clip`` at the halo level is
-  NOT the dominant fix for the dycore edge ratio.  iter-491's
-  76% overshoot was on random noise; dycore intermediate
-  fields are smoother in practice (random noise gets damped
-  fast by hyperdiff/Laplacian smoothing).  The iter-489
-  corner-cell overshoot is real but ITS DOWNSTREAM IMPACT IS
-  SMALLER than predicted from raw-halo measurements.  Closes
-  the duogrid investigation: bug is real, 5× edge ratio is
-  persistent, mitigations exist (iter-466 50% + iter-482 60%
-  via flag/coefficient tuning), but a root-cause halo fix at
-  pad_halo_4d level only buys 1-2%.  Below 1.42× likely
-  requires deeper dycore changes.  1/1 in 134 s.  Wired into
-  iter-383 sweep (now 86).
-- Iter 492: end-to-end test of iter-490 ``monotone_clip`` in
-  NH dycore via monkey-patch of ``_pad_halo_4d_module``:
-    no clip:   edge ratio 3.470×
-    with clip: edge ratio 3.423× (-1.4%)
-  Disappointing — only 1.4% reduction.  Diagnosis: the NH
-  dycore has MANY halo entry points beyond
-  ``_pad_halo_4d_module`` (e.g., ``packed_pad_halo_4d``
-  from ``parallel.cubesphere_exchange``, ``pad_halo_vector_
-  4d``, internal halo calls in ``operators_3d`` /
-  ``operators_cdgrid``).  Monkey-patching ONE module-level
-  reference catches a fraction of total halo calls.
-  Comprehensive plumbing through the dycore would require
-  touching ~10+ halo call sites — out of scope for this
-  loop.  Documented as a future-investigation target.
-  1/1 in 132 s.  Wired into iter-383 sweep (now 85).
-- Iter 491: **random field reveals 76% halo overshoot**
-  (vs iter-475's 3.5% on linear).  Robustness test for
-  iter-490 ``monotone_clip``:
-    Random Gaussian (μ=2, σ=1.5):
-      interior max-abs:    7.34
-      halo max no clip:   12.90  (+76% overshoot!)
-      halo max clip on:    6.74  (under interior max)
-  The duogrid halo overshoot depends STRONGLY on field
-  smoothness — random fields produce 20× larger overshoot
-  than linear.  This explains why iter-471 measured 5×
-  dycore edge penalty rather than the ~3.5% iter-475
-  predicted: dycore generates noisy fields after a few steps.
-  ``monotone_clip=True`` cuts the overshoot dramatically and
-  also passes large-magnitude (1e6) and mixed-sign field
-  tests.  3/3 in 5 s.  Wired into iter-383 sweep (now 84).
-- Iter 490: **TARGETED FIX of iter-489 corner overshoot** +
-  compact iter 475-484.  Add ``monotone_clip: bool = False``
-  arg to ``pad_halo_4d`` plumbing through to existing iter-802
-  ``fill_corner_region`` clip mechanism (was unexposed).
-  With ``monotone_clip=True``, the iter-475 linear-field test
-  halo max drops from 14.49 → 14.00 (= interior max, ratio
-  1.0000).  Corner overshoot eliminated, scalar constants
-  still preserved exactly.  Default False = backward compat.
-  Doc compacted iter 475-484 (3849 → ~3700 lines).  3/3 in
-  5 s.  Wired into iter-383 sweep (now 83).
-- Iter 489: **MOST ACTIONABLE duogrid finding** — the iter-475
-  3.5% halo overshoot is CONFINED TO CORNER CELLS (cube
-  vertices), NOT spread across edges:
-    interior max-abs:           14.0000
-    edge-cell halo max-abs:     13.5282  (UNDER interior)
-    corner-cell halo max-abs:   14.4907  (3.5% over)
-    edge cells > interior_max:   0
-    corner cells > interior_max: 1
-  Only 24 cells per level globally have the overshoot (4
-  corners × 6 faces).  This is a HIGHLY TARGETED FIX
-  OPPORTUNITY: future work can specifically address duogrid
-  corner-cell (cube-vertex) interpolation rather than the
-  general halo path.  1/1 in 4.6 s.  Wired into iter-383
-  sweep (now 82).
-- Iter 487: **duogrid penalty plateaus across resolutions**
-  (not monotonically decreasing).  C24 measurement extends
-  iter-471/472 scan:
-    C8:  5.12×
-    C16: 4.12×
-    C24: **4.72×**  (back up from C16!)
-  Trend is NOT monotonic.  Penalty stays in 4-5× range across
-  C8/C16/C24.  Refutes the "duogrid helps at higher
-  resolution C36+" hypothesis — the penalty is a persistent
-  implementation issue, not a regime/scaling artifact.
-  Future investigation (beyond this loop) should focus on
-  the duogrid op itself rather than waiting for resolution
-  to fix it.  1/1 in 71 s.  Wired into iter-383 sweep (now 81).
-- Iter 486: document the 4 legoESM-min-edge factories in the
-  production-usage section.  New "Edge-artifact-minimized
-  factories" subsection lists all 4 (iter-467/468/483/484),
-  their measured reductions (50% min_edge, 60% aggressive),
-  and the over-damping trade-off.  New iter-368 regression
-  ``test_iter486_edge_min_factories_doc_section`` pins the
-  section presence + 4 factory-name mentions.  Doc-size cap
-  bumped 3700 → 3800.  27/27 in 0.06 s.  Wired into iter-383
-  sweep (already in via test_fv3_3d_doc_compaction_iter368).
-- Iter 485: AST regression guard for the 4 user-facing
-  legoESM-min-edge factories (iter-467 NH min_edge, iter-468
-  PE min_edge, iter-483 NH aggressive, iter-484 PE aggressive).
-  8 tests: 4 function defs + 2 NH/PE min_edge override sets
-  + 2 NH/PE aggressive override sets including d2_bg=5e-2.
-  Catches a silent regression where a maintainer drops an
-  override.  8/8 in 0.04 s.  Wired into iter-383 sweep
-  (now 80).
+- **Iters 485-494 (compacted iter 500)**: factory exposure
+  + duogrid bisection + halo-level clip + investigation
+  closure.
+  - iter 485: AST guard for 4 min-edge factories.
+  - iter 486: document min-edge factories in production-
+    usage section.
+  - iter 487: C24 plateau (4.72×) — refutes "duogrid helps
+    at higher resolution" hypothesis.
+  - iter 488: synthesis section + key data table.
+  - iter 489: **overshoot confined to cube-vertex cells**
+    (24 cells/level globally).
+  - iter 490: ``monotone_clip`` arg added to
+    ``pad_halo_4d`` (default off); fixes iter-489.
+  - iter 491: random Gaussian shows 76% halo overshoot
+    (clip cuts to within interior).
+  - iter 492: dycore monkey-patch (1 site) → only 1.4%.
+  - iter 493: comprehensive 4-site patch → still 1.5%;
+    clip is NOT the dominant dycore fix (random-field
+    overshoot doesn't translate to dycore impact because
+    dycore fields are smoother than random noise).
+  - iter 494: extend iter-488 synthesis section with
+    iter-489..493 data.
 - **Iters 475-484 (compacted iter 490)**: duogrid bisection
   + edge-min factories + aggressive config.
   - iter 475: linear-field halo test, duogrid overshoots
