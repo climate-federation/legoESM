@@ -2987,6 +2987,68 @@ def prt_mass_fv3(
     return diag
 
 
+def moist_cp_fv3(
+    q_sphum: jax.Array | None = None,
+    q_liq_wat: jax.Array | None = None,
+    q_rainwat: jax.Array | None = None,
+    q_ice_wat: jax.Array | None = None,
+    q_snowwat: jax.Array | None = None,
+    q_graupel: jax.Array | None = None,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 714: moisture-weighted isobaric specific heat.
+
+    Faithful JAX port of FV3 ``moist_cp`` (general nwat≥3 branch)
+    (model/fv_mapz.F90:3656-3733).  Companion to iter-713
+    ``moist_cv_fv3`` — uses c_pd / c_pv / c_pw / c_pi directly
+    (no isochoric R subtraction):
+
+        q_l = (liq_wat or 0) + (rainwat or 0)
+        q_i = (ice_wat or 0) + (snowwat or 0) + (graupel or 0)
+        q_d = q_l + q_i
+        cpm = (1 − q_sphum − q_d) · c_pd
+              + q_sphum · c_pv
+              + q_l · c_pw
+              + q_i · c_pi
+
+    Parameters
+    ----------
+    q_sphum, q_liq_wat, q_rainwat, q_ice_wat, q_snowwat, q_graupel :
+        Mixing ratios (kg/kg).  Any subset can be provided.
+
+    Returns
+    -------
+    cpm : jax.Array
+        Moisture-weighted isobaric specific heat (J/(kg·K)).
+    q_con : jax.Array
+        Total condensate mass fraction (kg/kg).
+    """
+    qs = next(
+        (q for q in (q_sphum, q_liq_wat, q_rainwat, q_ice_wat, q_snowwat,
+                     q_graupel) if q is not None),
+        None,
+    )
+    if qs is None:
+        raise ValueError("moist_cp_fv3 requires at least one tracer input")
+    zero = jnp.zeros_like(qs)
+
+    qv = jnp.maximum(0.0, q_sphum if q_sphum is not None else zero)
+    ql = (q_liq_wat if q_liq_wat is not None else zero) + (
+        q_rainwat if q_rainwat is not None else zero
+    )
+    qi = (q_ice_wat if q_ice_wat is not None else zero) + (
+        q_snowwat if q_snowwat is not None else zero
+    ) + (q_graupel if q_graupel is not None else zero)
+    q_con = ql + qi
+
+    cpm = (
+        (1.0 - qv - q_con) * constants.c_pd
+        + qv * constants.c_pv
+        + ql * constants.c_pw
+        + qi * constants.c_pi
+    )
+    return cpm, q_con
+
+
 def moist_cv_fv3(
     q_sphum: jax.Array | None = None,
     q_liq_wat: jax.Array | None = None,

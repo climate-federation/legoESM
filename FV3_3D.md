@@ -1195,6 +1195,30 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 714: **FV3 ``moist_cp_fv3``** — isobaric specific heat companion.
+  Faithful JAX port of FV3 ``moist_cp`` (general nwat≥3 branch)
+  (model/fv_mapz.F90:3656-3733).  Companion to iter-713 moist_cv:
+
+      cpm = (1 − q_v − q_d) · c_pd
+            + q_v · c_pv
+            + q_l · c_pw
+            + q_i · c_pi
+
+  Same tracer-summation structure as moist_cv but uses isobaric
+  heats directly (no isochoric R subtraction).
+
+  Tests (6/6 in <1 s):
+  1. Dry → cpm = c_pd.
+  2. Pure vapor → cpm = c_pv.
+  3. Mixed vapor + liquid + ice → analytical cpm.
+  4. Dry case: cpm − cvm = R_d exactly (iter-713 cross-check).
+  5. q_con = sum of all condensate species.
+  6. No tracers → raises ValueError.
+
+  Completes the (cv, cp) moisture-weighted heat-capacity pair for
+  FV3-faithful thermodynamics in legoesm ports.
+
+  Wired into iter-383 sweep (now 278).
 - Iter 713: **FV3 ``moist_cv_fv3``** + nh_total_energy ``use_moist_cv``
   upgrade.
 
