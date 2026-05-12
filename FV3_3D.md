@@ -5231,6 +5231,51 @@ directly rather than the z-coord N².  Together with iter-772
 Pure JAX, vmap-compatible.  No new physical constants
 introduced.
 
+## Iter 806 — lapse_rate_moist_fv3 (Γ_m saturated adiabat)
+
+Added `lapse_rate_moist_fv3(t, q_sat)` to
+`grids/cubed_sphere.py`.  Bohren-Albrecht (1998) eq. 6.115:
+
+```
+Γ_m = g · (1 + L_v · q_sat / (R_d · T))
+          ───────────────────────────────────────
+          c_p + L_v² · q_sat / (R_v · T²)
+```
+
+Dry-air limit q_sat → 0 gives Γ_m → g/c_p ≈ 9.76 K/km (dry
+adiabat).  Moist air: latent-heat release damps cooling →
+Γ_m < Γ_d.  At T=288 K, q_sat ≈ 10 g/kg: Γ_m ≈ 4.5 K/km
+(textbook tropical moist adiabat).
+
+Caller supplies q_sat (typically from
+``thermo.saturation_specific_humidity``).  Helper does **not**
+invoke the saturation curve itself — keeps composition
+explicit.
+
+Used by: CAPE/CIN parcel-ascent integration (Γ_m above LCL),
+moist-adiabatic CISK / WISHE feedback derivations, deep-
+convection parcel-buoyancy, mid-tropospheric moist instability
+indices.
+
+Test: `tests/test_fv3_lapse_rate_moist_iter806.py` (6 tests:
+q_sat=0 → Γ_d, tropical (T=298, q=17 g/kg) → 3-5 K/km, monotone
+q (↑q → ↓Γ_m), CC-mediated ↑T → ↓Γ_m via q_sat curve, full
+thermo chain, 3-D shapes + finite + positive).
+
+Note: at **fixed** q_sat, ↑T → ↑Γ_m (T² denominator dominates
+1/T numerator).  Realistic CC behavior requires going through
+q_sat(T,p) — documented in the iter-715-composition test.
+
+### Why this iteration was meaningful
+
+Moist-adiabatic lapse rate is the fundamental parcel-ascent
+trajectory above the LCL.  Every CAPE/CIN integrator, every
+convective trigger, every deep-convection parameterization
+uses Γ_m.  Together with dry adiabat (g/c_p, recovered in
+q_sat=0 limit), this gives the full parcel-thermodynamic
+trajectory.  Pure JAX, vmap-compatible.  No new physical
+constants introduced.
+
 
 
 

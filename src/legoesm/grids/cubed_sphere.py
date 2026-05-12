@@ -5428,6 +5428,56 @@ def static_stability_fv3(
     return -dtheta / dp
 
 
+def lapse_rate_moist_fv3(
+    t: jax.Array,
+    q_sat: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 806: moist (saturated) adiabatic lapse rate.
+
+    Bohren-Albrecht (1998) eq. 6.115 / Holton (4th ed.) eq. 2.55:
+
+        Γ_m = g · (1 + L_v · q_sat / (R_d · T))
+              ───────────────────────────────────────
+              c_p + L_v² · q_sat / (R_v · T²)
+
+    Dry-air limit (q_sat → 0): Γ_m → g / c_p ≈ 9.76 K/km (the
+    dry-adiabatic lapse rate Γ_d).  Moist limit: latent-heat
+    release damps cooling on ascent → Γ_m < Γ_d.  At T=288 K,
+    q_sat ≈ 10 g/kg: Γ_m ≈ 4.5 K/km (textbook tropical moist-
+    adiabat).
+
+    Used by: convective parcel-ascent integration (CAPE/CIN
+    integrals use Γ_m above LCL), moist-adiabatic CISK / WISHE
+    feedback derivations, parcel-buoyancy diagnostics in deep
+    convection, mid-tropospheric moist instability indices.
+
+    Caller supplies the saturation specific humidity q_sat
+    (typically from canonical
+    ``thermo.saturation_specific_humidity`` or the iter-715/720
+    CMIP-blended variant).  Helper does **not** invoke the
+    saturation curve itself — keeps composition explicit.
+
+    Parameters
+    ----------
+    t : jax.Array
+        Temperature (K).
+    q_sat : jax.Array
+        Saturation specific humidity (kg/kg).
+
+    Returns
+    -------
+    gamma_m : jax.Array
+        Moist-adiabatic lapse rate (K/m).
+    """
+    L_v = constants.L_v
+    R_d = constants.R_d
+    R_v = constants.R_v
+    c_p = constants.c_pd
+    num = constants.g * (1.0 + L_v * q_sat / (R_d * t))
+    den = c_p + L_v * L_v * q_sat / (R_v * t * t)
+    return num / den
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,
