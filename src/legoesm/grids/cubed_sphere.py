@@ -4532,6 +4532,68 @@ def absolute_vorticity_fv3(
     return zeta_rel + f
 
 
+def potential_vorticity_ertel_fv3(
+    eta_abs: jax.Array,
+    rho: jax.Array,
+    dtheta_dz: jax.Array,
+    rho_floor: float = 1e-6,
+) -> jax.Array:
+    """FV3_3D iter 795: Ertel potential vorticity.
+
+    Conservative quantity on isentropic surfaces under adiabatic,
+    frictionless flow (Ertel 1942):
+
+        PV = η · ∂θ/∂z / ρ
+
+    where η = ζ + f (iter-794) is absolute vorticity, ρ is air
+    density, and ∂θ/∂z is the vertical gradient of potential
+    temperature.
+
+    Standard unit: PVU = 10⁻⁶ m²·K·kg⁻¹·s⁻¹.
+
+    Typical values:
+      * Mid-lat troposphere: 0.5–2 PVU
+      * Mid-lat lower stratosphere: 4–10 PVU
+      * Polar lower stratosphere: > 10 PVU
+      * Dynamic tropopause: 2 PVU (Hoskins-McIntyre-Robertson
+        1985 convention).
+
+    Used by: stratosphere-troposphere exchange (STE) diagnosis
+    (PV > 2 PVU = stratospheric air; PV streamers, cutoffs,
+    folds), jet-stream identification (jet core = local PV
+    maximum aloft, sharp PV gradient = jet shoulder), atmospheric
+    blocking (high-PV-anomaly aloft blocks Rossby-wave train),
+    PV-inversion balanced-state diagnostics (extract balanced
+    Φ, V from given PV distribution).
+
+    Composes iter-794 ``absolute_vorticity_fv3`` directly.  Caller
+    provides ρ (e.g. from iter-734 ``air_density_fv3`` or moist
+    EOS density) and ∂θ/∂z (caller computes from θ profile via
+    iter-772-style vertical differencing — note: iter-772
+    returns N² = (g/θ)·∂θ/∂z, so ∂θ/∂z = N²·θ/g).
+
+    ``rho_floor`` prevents div-by-0 in vacuum / column-top
+    extrapolation.
+
+    Parameters
+    ----------
+    eta_abs : jax.Array
+        Absolute vorticity (s⁻¹) from iter-794.
+    rho : jax.Array
+        Air density (kg/m³).
+    dtheta_dz : jax.Array
+        Vertical gradient of potential temperature (K/m).
+    rho_floor : float
+        Lower bound on ρ (kg/m³); default 1e-6.
+
+    Returns
+    -------
+    pv : jax.Array
+        Ertel potential vorticity (m²·K·kg⁻¹·s⁻¹).
+    """
+    return eta_abs * dtheta_dz / jnp.maximum(rho, rho_floor)
+
+
 def kinetic_energy_fv3(
     ua: jax.Array,
     va: jax.Array,

@@ -5149,5 +5149,53 @@ PV gradients (∂η/∂y = β + ∂ζ_g/∂y) determine wave propagation
 direction.  Pure JAX, vmap-compatible.  No new physical
 constants introduced.
 
+## Iter 795 — potential_vorticity_ertel_fv3 (PV = η·∂θ/∂z/ρ)
+
+Added `potential_vorticity_ertel_fv3(eta_abs, rho, dtheta_dz,
+rho_floor=1e-6)` to `grids/cubed_sphere.py`.  Ertel (1942) PV:
+
+```
+PV = η · ∂θ/∂z / ρ                    [m²·K·kg⁻¹·s⁻¹]
+```
+
+Standard unit PVU = 10⁻⁶ m²·K·kg⁻¹·s⁻¹.
+
+Conserved on isentropic surfaces under adiabatic, frictionless
+flow.
+
+Typical values:
+  * Mid-lat troposphere:        0.5–2 PVU
+  * Mid-lat lower stratosphere: 4–10 PVU
+  * Polar lower stratosphere:   > 10 PVU
+  * Dynamic tropopause:         2 PVU (HMR-1985 convention)
+
+Used by: stratosphere-troposphere exchange (PV > 2 PVU =
+stratospheric air; PV streamers, cutoffs, folds), jet-stream
+identification (local PV maxima aloft), atmospheric blocking
+(high-PV-anomaly aloft blocks Rossby trains), PV-inversion
+balanced-state diagnostics, ozone transport via PV-Φ-O₃
+correlation.
+
+Composes iter-794 ``absolute_vorticity_fv3`` directly.  Caller
+provides ρ (e.g., iter-734) and ∂θ/∂z (from θ-profile vertical
+diff, or recover from iter-772 via ∂θ/∂z = N²·θ/g).
+
+Test: `tests/test_fv3_potential_vorticity_ertel_iter795.py` (7
+tests: mid-lat trop 0.5 PVU, stratosphere 20 PVU, η=0 → PV=0,
+monotone in η/∂θ/∂z/ρ, full iter-794 pipeline (ζ, f, ρ, ∂θ/∂z)
+→ η → PV gives 0.55 PVU, ρ=0 floored finite, 3-D shapes +
+finite).
+
+### Why this iteration was meaningful
+
+Ertel PV is **the** central diagnostic in modern atmospheric
+dynamics.  Hoskins-McIntyre-Robertson (1985) showed the entire
+mid-latitude weather pattern is interpretable through PV maps:
+"PV-thinking" is the dominant framework for understanding
+extra-tropical cyclones, jet streams, blocking, and stratosphere-
+troposphere exchange.  Composes iter-794 → iter-795 to give the
+full η → PV chain.  Pure JAX, vmap-compatible.  No new physical
+constants introduced.
+
 
 

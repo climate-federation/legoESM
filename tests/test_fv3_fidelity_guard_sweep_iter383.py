@@ -382,6 +382,7 @@ _GUARD_MODULES = (
     "test_fv3_thermal_wind_iter792",                 # iter-792 add
     "test_fv3_eady_growth_rate_iter793",             # iter-793 add
     "test_fv3_absolute_vorticity_iter794",           # iter-794 add
+    "test_fv3_potential_vorticity_ertel_iter795",    # iter-795 add
 )
 
 
