@@ -2304,6 +2304,62 @@ def gnomonic_dist(im: int) -> tuple[jax.Array, jax.Array]:
     return xyz2latlon(p1, p2, p3)
 
 
+def checker_tracers(
+    lon: jax.Array, lat: jax.Array,
+    nq: int, km: int,
+    nx: float = 9.0, ny: float = 9.0,
+    rn: float | None = None,
+    rng_key: jax.Array | None = None,
+) -> jax.Array:
+    """FV3_3D iter 657: checkerboard tracer pattern with optional noise.
+
+    Faithful JAX port of FV3 ``checker_tracers`` (tools/test_cases.F90:
+    4067-4135).  Builds a checkerboard tracer pattern based on::
+
+        qt[i, j] = 0.01  if sin(nx·lon)·sin(ny·lat) > 0
+                   0     otherwise
+
+    Defaults nx=ny=9 give 20°×20° checker boxes (per FV3 docstring).
+    Optional ``rn`` adds uniform random perturbation rn·U(0,1).
+    Broadcast across vertical levels (km) and tracer count (nq).
+
+    Coded for the HIWPP benchmark by S.-J. Lin (2014).
+
+    Parameters
+    ----------
+    lon, lat : jax.Array, shape (..., n_x, n_y)
+        Cell-center positions in radians.
+    nq : int
+        Number of tracers.
+    km : int
+        Number of vertical levels.
+    nx, ny : float, default 9.0
+        East-west / North-south wave numbers.
+    rn : float, optional
+        Magnitude of random perturbation (FV3 suggests 0.1).
+    rng_key : jax.Array, optional
+        JAX PRNG key required if ``rn is not None``.
+
+    Returns
+    -------
+    q : jax.Array, shape (..., n_x, n_y, km, nq)
+        Tracer field.
+    """
+    qt = jnp.where(
+        jnp.sin(nx * lon) * jnp.sin(ny * lat) > 0.0,
+        0.01,
+        0.0,
+    )
+    # Broadcast to (..., n_x, n_y, km, nq)
+    q = jnp.broadcast_to(qt[..., None, None], qt.shape + (km, nq))
+    if rn is not None:
+        if rng_key is None:
+            raise ValueError("rng_key required when rn is not None")
+        noise = rn * jax.random.uniform(rng_key, q.shape)
+        q = q + noise
+    return q
+
+
 def get_vorticity_fv3(
     u: jax.Array, v: jax.Array,
     dx: jax.Array, dy: jax.Array,

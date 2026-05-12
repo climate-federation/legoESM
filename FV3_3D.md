@@ -1195,6 +1195,31 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 657: **FV3 ``checker_tracers``** — HIWPP checkerboard tracer.
+  Faithful JAX port of FV3 ``checker_tracers``
+  (tools/test_cases.F90:4067-4135).  Builds checkerboard tracer
+  pattern for HIWPP benchmark (S.-J. Lin, 2014):
+
+      qt[i, j] = 0.01  if sin(nx·lon)·sin(ny·lat) > 0
+                 0     otherwise
+
+  Defaults nx=ny=9 give 20°×20° checker boxes.  Optional ``rn``
+  adds uniform random perturbation rn·U(0, 1) (requires
+  ``rng_key``).  Broadcast across vertical levels (km) and
+  tracer count (nq).
+
+  Used for FV3 transport-scheme validation (sharp tracer
+  gradients reveal numerical diffusion / overshoot).
+
+  Tests (6/6 in 2 s):
+  1. Output shape (..., n_x, n_y, km, nq).
+  2. Binary values 0 / 0.01 without noise.
+  3. Uniform across k, iq dimensions.
+  4. Random perturbation breaks binary pattern.
+  5. Missing rng_key when rn given raises ValueError.
+  6. Pattern alternates (mixture of high/low).
+
+  Wired into iter-383 sweep (now 225).
 - Iter 656: **FV3 ``get_vorticity_fv3``** — vorticity from D-grid
   winds.  Faithful JAX port of FV3 ``get_vorticity``
   (tools/test_cases.F90:4034-4065).
