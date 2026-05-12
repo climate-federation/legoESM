@@ -1195,6 +1195,34 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 728: **``compute_zh_above_below_fv3`` helper + 5-iter refactor**.
+
+  Extracted cumsum-based per-layer (zh_above, zh_below) pattern
+  from iters 686/687/688/689/707 (supercell suite) as a public
+  helper:
+
+      compute_zh_above_below_fv3(dz) -> (zh_above, zh_below)
+
+      zh_above[k] = sum_{j>=k} dz[j]   (top of layer k from surface)
+      zh_below[k] = zh_above[k] - dz[k]
+
+  Pairs with iter-727 ``compute_zh_from_delz_fv3`` (which adds
+  surface elevation and uses NEGATIVE delz).  This iter's helper
+  expects positive dz and outputs heights from notional z=0.
+
+  Refactored 5 callsites — iter-686 UH, iter-687 SRH, iter-688
+  BRN, iter-689 Bunkers, iter-707 SRH-CAPS.  Removed ~20 lines
+  of duplicate code.  Output bit-identical (pinned by regression
+  tests in iter-728).
+
+  Tests (9/9 in <2 s):
+  1. Uniform dz=500, km=10 → zh_above [500..5000], zh_below [0..4500].
+  2. zh_below[-1] = 0 (surface).
+  3. Monotone decreasing top → surface.
+  4. zh_above − dz = zh_below exactly.
+  5-9. iter-686/687/688/689/707 refactor each preserves output.
+
+  Wired into iter-383 sweep (now 292).
 - Iter 727: **``compute_zh_from_delz_fv3``** — interface heights from delz + phis.
   Extracted from iter-706 ``prt_height_fv3`` inline pattern as a
   public helper.  Faithful to FV3's standard z-from-delz pattern:

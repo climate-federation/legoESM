@@ -2806,6 +2806,46 @@ def get_pressure_given_height_fv3(
     return p
 
 
+def compute_zh_above_below_fv3(
+    dz: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 728: cumulative layer-top/bottom heights above surface.
+
+    Helper for window diagnostics (iter-686 UH, iter-687 SRH,
+    iter-688 BRN, iter-689 Bunkers, iter-707 SRH-CAPS) that need
+    per-layer top + bottom heights measured from the ground.
+
+        zh_above[k] = sum_{j>=k} dz[j]   (top of layer k from surface)
+        zh_below[k] = zh_above[k] - dz[k]
+
+    With FV3 dz > 0 (positive layer thickness, top-down): zh_above
+    decreases with k; surface (k=km-1) has zh_below = 0.
+
+    Vectorized via cumsum on reversed dz.  No phis input — heights
+    measured from a notional ground of z=0.
+
+    Pairs with iter-727 ``compute_zh_from_delz_fv3`` which adds
+    surface elevation (phis/g) and uses NEGATIVE delz.
+
+    Parameters
+    ----------
+    dz : jax.Array, shape (..., km)
+        Layer thickness, POSITIVE (= −delz for FV3 sign convention).
+
+    Returns
+    -------
+    zh_above : jax.Array, shape (..., km)
+        Top-of-layer height above surface (m).
+    zh_below : jax.Array, shape (..., km)
+        Bottom-of-layer height above surface (m).
+    """
+    dz_reversed = dz[..., ::-1]
+    cumsum_from_surface = jnp.cumsum(dz_reversed, axis=-1)
+    zh_above = cumsum_from_surface[..., ::-1]
+    zh_below = zh_above - dz
+    return zh_above, zh_below
+
+
 def compute_brn_fv3(
     ua: jax.Array, va: jax.Array,
     delp: jax.Array, delz: jax.Array,
@@ -3980,10 +4020,7 @@ def bunkers_vector_fv3(
         dz = -delz
 
     # Layer top/bottom heights above surface (k=0 top, k=-1 surface)
-    dz_reversed = dz[..., ::-1]
-    cumsum_from_surface = jnp.cumsum(dz_reversed, axis=-1)
-    zh_above = cumsum_from_surface[..., ::-1]
-    zh_below = zh_above - dz
+    zh_above, zh_below = compute_zh_above_below_fv3(dz)
 
     # Mass-weighted mean wind in 0-6 km layer
     dz_eff = jnp.maximum(
@@ -4091,10 +4128,7 @@ def helicity_relative_caps_fv3(
             raise ValueError("hydrostatic=False requires delz")
         dz = -delz
 
-    dz_reversed = dz[..., ::-1]
-    cumsum_from_surface = jnp.cumsum(dz_reversed, axis=-1)
-    zh_above = cumsum_from_surface[..., ::-1]
-    zh_below = zh_above - dz
+    zh_above, zh_below = compute_zh_above_below_fv3(dz)
     dz_eff = jnp.maximum(
         0.0,
         jnp.minimum(zh_above, z_top) - jnp.maximum(zh_below, z_bot),
@@ -4177,10 +4211,7 @@ def helicity_relative_fv3(
         dz = -delz
 
     # Cumulative zh (top of each layer from surface up)
-    dz_reversed = dz[..., ::-1]
-    cumsum_from_surface = jnp.cumsum(dz_reversed, axis=-1)
-    zh_above = cumsum_from_surface[..., ::-1]
-    zh_below = zh_above - dz
+    zh_above, zh_below = compute_zh_above_below_fv3(dz)
     dz_eff = jnp.maximum(
         0.0,
         jnp.minimum(zh_above, z_top) - jnp.maximum(zh_below, z_bot),
