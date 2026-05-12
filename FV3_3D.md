@@ -5401,6 +5401,42 @@ composition: per-level parcel CAPE/CIN → EIL bounds → EBWD →
 SCP/STP-effective.  Pure JAX, vmap-compatible.  No new physical
 constants introduced.
 
+## Iter 819 — mean_wind_layer_fv3 (depth-weighted layer mean)
+
+Added `mean_wind_layer_fv3(u, v, z, z_bot, z_top,
+weight_floor=1e-12)` to `grids/cubed_sphere.py`.  Depth-weighted
+midpoint-trapezoidal mean wind over an arbitrary layer:
+
+```
+ū = Σ_k u_mid(k) · Δz(k) · mask(z_mid(k)) / Σ_k Δz(k) · mask(z_mid(k))
+```
+
+Mask = 1 where ``z_mid`` ∈ [z_bot, z_top], else 0.  Same for v.
+
+Used by: Bunkers storm motion (mean 0-6 km wind ± deviation),
+mean-layer wind for parcel deep advection, storm-relative wind
+diagnostics, effective-layer mean wind for inflow trajectory
+composites.
+
+Generic over arbitrary [z_bot, z_top] — composes with iter-817
+EIL bounds or fixed-layer (0-1, 0-6 km).
+
+``weight_floor`` prevents 0/0 when the layer falls entirely
+outside the column.
+
+Test: `tests/test_fv3_mean_wind_layer_iter819.py` (5 tests:
+uniform → mean=const, linear → midpoint analytic, v=0 → v̄=0,
+iter-817 → mean-over-EIL chain, out-of-range layer → floored
+output finite).
+
+### Why this iteration was meaningful
+
+Generic layer-mean wind primitive replaces several inline
+midpoint-mass-mean patterns scattered through storm-motion and
+effective-layer code.  Pure JAX, vmap-compatible.  Foundational
+for Bunkers storm-motion + SRH + EBWD computations.  No new
+physical constants introduced.
+
 
 
 

@@ -6157,6 +6157,69 @@ def effective_bulk_shear_fv3(
     return u_top - u_bot, v_top - v_bot
 
 
+def mean_wind_layer_fv3(
+    u: jax.Array,
+    v: jax.Array,
+    z: jax.Array,
+    z_bot: jax.Array,
+    z_top: jax.Array,
+    weight_floor: float = 1e-12,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 819: depth-weighted mean wind over arbitrary layer.
+
+    Midpoint-rule trapezoidal mean over [z_bot, z_top]:
+
+        ū = (∫_{z_bot}^{z_top} u dz) / (z_top − z_bot)
+
+    Discretized as midpoint-weighted sum over the subset of column
+    midpoints falling inside the layer bounds:
+
+        ū = Σ_k u_mid(k) · Δz(k) · mask(z_mid(k)) / Σ_k Δz(k) · mask(z_mid(k))
+
+    Mask = 1 where z_mid is in [z_bot, z_top], else 0.  Same for v.
+
+    Used by: Bunkers storm motion (mean 0-6 km wind ± deviation),
+    mean-layer wind for parcel deep advection, storm-relative wind
+    diagnostics, effective-layer mean wind for inflow trajectory
+    composites.
+
+    Generic over arbitrary [z_bot, z_top] — composes with iter-817
+    effective inflow layer or any fixed-layer bounds (e.g.,
+    0-1 km, 0-6 km).
+
+    ``weight_floor`` prevents 0/0 when the layer falls entirely
+    outside the column or when bounds are too tight to enclose any
+    midpoint.  In such cases output is essentially 0 (formally
+    a small-quotient artifact, but harmless for diagnostic use).
+
+    Parameters
+    ----------
+    u, v : jax.Array, shape (km,)
+        Wind components on column levels (m/s).
+    z : jax.Array, shape (km,)
+        Geopotential height column (m), monotone increasing.
+    z_bot, z_top : jax.Array
+        Layer bounds (m).
+    weight_floor : float
+        Lower bound on Σ weights (m); default 1e-12.
+
+    Returns
+    -------
+    (u_mean, v_mean) : tuple of jax.Array
+        Depth-weighted mean wind components (m/s).
+    """
+    z_mid = 0.5 * (z[1:] + z[:-1])
+    dz = z[1:] - z[:-1]
+    u_mid = 0.5 * (u[1:] + u[:-1])
+    v_mid = 0.5 * (v[1:] + v[:-1])
+    inside = (z_mid >= z_bot) & (z_mid <= z_top)
+    weights = jnp.where(inside, dz, 0.0)
+    total = jnp.maximum(jnp.sum(weights), weight_floor)
+    u_mean = jnp.sum(u_mid * weights) / total
+    v_mean = jnp.sum(v_mid * weights) / total
+    return u_mean, v_mean
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

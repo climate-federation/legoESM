@@ -406,6 +406,7 @@ _GUARD_MODULES = (
     "test_fv3_stp_iter816",                          # iter-816 add
     "test_fv3_effective_inflow_iter817",             # iter-817 add
     "test_fv3_effective_bulk_shear_iter818",         # iter-818 add
+    "test_fv3_mean_wind_layer_iter819",              # iter-819 add
 )
 
 
