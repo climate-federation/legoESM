@@ -40,6 +40,22 @@ def biharmonic_lateral_mixing(
     mask_3d = mask[..., jnp.newaxis]
     z = jnp.zeros_like(u)
 
+    # Optional CFL cap on the explicit biharmonic: B·dt/dx⁴ ≤
+    # cfl_safety·(1/16).  Uses ``grid.resolution_km·1000`` as the
+    # nominal dx; works on a cubed sphere because all cells are within
+    # a factor of √2 of this value.  Opt-in via ``cfg.enforce_cfl``.
+    if cfg.enforce_cfl:
+        dx = grid.resolution_km * 1000.0
+        coeff_cap = (
+            cfg.cfl_safety * dx ** 4
+            / jnp.maximum(cfg.cfl_dt_estimate, 1.0)
+        )
+        B_mom_eff = jnp.minimum(cfg.B_h_momentum, coeff_cap)
+        B_tr_eff = jnp.minimum(cfg.B_h_tracer, coeff_cap)
+    else:
+        B_mom_eff = cfg.B_h_momentum
+        B_tr_eff = cfg.B_h_tracer
+
     # Stack the (u, v) and (T, S) pairs along a trailing axis and fold
     # that into the level dim so ``hyperdiffusion_3d`` (∇⁴ = ∇²∇², two
     # ``pad_halo_4d`` halos per call) runs ONCE on the thicker
@@ -54,7 +70,7 @@ def biharmonic_lateral_mixing(
         )  # (6, n, n, nlev, 2)
         n_face, n_i, n_j, nlev_t, n_pair = vel_stack.shape
         vel_flat = vel_stack.reshape(n_face, n_i, n_j, nlev_t * n_pair)
-        vel_hyper = hyperdiffusion_3d(vel_flat, grid, cfg.B_h_momentum)
+        vel_hyper = hyperdiffusion_3d(vel_flat, grid, B_mom_eff)
         vel_hyper = vel_hyper.reshape(n_face, n_i, n_j, nlev_t, n_pair)
         du_dt = vel_hyper[..., 0]
         dv_dt = vel_hyper[..., 1]
@@ -65,7 +81,7 @@ def biharmonic_lateral_mixing(
         tr_stack = jnp.stack([T, S], axis=-1)  # (6, n, n, nlev, 2)
         n_face, n_i, n_j, nlev_t, n_pair = tr_stack.shape
         tr_flat = tr_stack.reshape(n_face, n_i, n_j, nlev_t * n_pair)
-        tr_hyper = hyperdiffusion_3d(tr_flat, grid, cfg.B_h_tracer)
+        tr_hyper = hyperdiffusion_3d(tr_flat, grid, B_tr_eff)
         tr_hyper = tr_hyper.reshape(n_face, n_i, n_j, nlev_t, n_pair)
         dT_dt = tr_hyper[..., 0]
         dS_dt = tr_hyper[..., 1]

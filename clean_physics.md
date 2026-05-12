@@ -146,6 +146,14 @@ Branch: `clean_physics`. Driven by Ralph loop with `/codex:adversarial-review`.
 - GM/Redi bolus Courant limiter.
 - Visual / long-run validation of the new feedbacks.
 
+### Iteration 7 — 2026-05-12
+
+**Actions:**
+- [x] Ocean lateral mixing — harmonic + biharmonic explicit CFL caps.  Added `enforce_cfl`, `cfl_dt_estimate`, `cfl_safety` to `HarmonicConfig` (default 3600 s / 0.20 below ¼ stability bound) and `BiharmonicConfig` (default 3600 s / 0.05 below 1/16).  `harmonic_lateral_mixing` and `biharmonic_lateral_mixing` cap `A_h`, `K_h`, `B_h_*` at `cfl_safety · dx² / dt_est` (harmonic) and `· dx⁴ / dt_est` (biharmonic) using `grid.resolution_km*1000` as nominal dx.  Opt-in via `enforce_cfl=True`; default keeps current behaviour.
+
+**Tests (post iter-7):**
+- ocean lateral / mixing suite → 72/73 pass (one pre-existing `test_ah_lat_scaling` failure unrelated to this change).
+
 **Tests (post-fix):**
 - atmosphere microphysics + convection + land multilayer: 172/172 pass.
 - sea ice unit suite: 78 pass, 1 pre-existing thermo failure (`Test8i_StefanBoltzmann::test_lw_up_matches` — confirmed pre-existing in iter-1).
