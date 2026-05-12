@@ -1195,6 +1195,33 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 675: **FV3 ``bilinear_interp_apply``** — apply remap weights to src.
+  Faithful JAX port of FV3 ``apply_inc_on_3d_scalar`` core
+  (tools/fv_treat_da_inc.F90:339-360, inner bilinear loop).
+
+  Algorithm:
+
+      target[..., i, j] = s2c[..., i, j, 0] · src[id1[i, j], jc[i, j]    ]
+                        + s2c[..., i, j, 1] · src[id2[i, j], jc[i, j]    ]
+                        + s2c[..., i, j, 2] · src[id2[i, j], jc[i, j]+1  ]
+                        + s2c[..., i, j, 3] · src[id1[i, j], jc[i, j]+1  ]
+
+  Pairs with iter-673 ``remap_coef_fv3`` (produces id1, id2, jc,
+  s2c).  Together: full lat-lon → cubed-sphere bilinear
+  interpolation pipeline.
+
+  Verified exact on linear fields f(lon, lat) = a·lon + b·lat
+  (1e-12 atol).  Handles 2D and 3D (with level axis) source
+  fields via automatic axis broadcasting.
+
+  Tests (5/5 in 4 s):
+  1. Output shape matches target.
+  2. Constant src → constant output.
+  3. Linear field reconstructs exactly (1e-12).
+  4. 3D src (im, jm, km) → output (..., km).
+  5. No NaN/Inf on random inputs.
+
+  Wired into iter-383 sweep (now 241).
 - Iter 674: **FV3 ``get_staggered_grid_fv3``** — B-grid → C/D-grid edges.
   Faithful JAX port of FV3 ``get_staggered_grid``
   (tools/fv_treat_da_inc.F90:444-475).

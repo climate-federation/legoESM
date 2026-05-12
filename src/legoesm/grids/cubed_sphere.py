@@ -2644,6 +2644,63 @@ def get_staggered_grid_fv3(
     return pt_c_lon, pt_c_lat, pt_d_lon, pt_d_lat
 
 
+def bilinear_interp_apply(
+    src_field: jax.Array,
+    id1: jax.Array, id2: jax.Array, jc: jax.Array,
+    s2c: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 675: apply bilinear remap weights to source field.
+
+    Faithful JAX port of FV3 ``apply_inc_on_3d_scalar`` core
+    (tools/fv_treat_da_inc.F90:339-360, inner bilinear loop).
+
+    Algorithm:
+
+        target[..., i, j] = s2c[..., i, j, 0] · src[id1[i, j], jc[i, j]    ]
+                          + s2c[..., i, j, 1] · src[id2[i, j], jc[i, j]    ]
+                          + s2c[..., i, j, 2] · src[id2[i, j], jc[i, j]+1  ]
+                          + s2c[..., i, j, 3] · src[id1[i, j], jc[i, j]+1  ]
+
+    Pairs with iter-673 ``remap_coef_fv3`` (produces id1, id2, jc, s2c)
+    to provide full lat-lon → cubed-sphere bilinear interpolation.
+
+    Parameters
+    ----------
+    src_field : jax.Array, shape (im, jm) or (im, jm, km)
+        Source field on regular lat-lon grid.  Trailing axes
+        broadcast.
+    id1, id2 : jax.Array (int), shape (...,)
+        Source longitude indices.
+    jc : jax.Array (int), shape (...,)
+        Source latitude index (jc and jc+1 are used for bilinear).
+    s2c : jax.Array, shape (..., 4)
+        Bilinear weights (SW, SE, NE, NW).
+
+    Returns
+    -------
+    target : jax.Array, shape matches id1 (+ trailing dims of src_field)
+    """
+    # Gather source values at the 4 corners
+    f_sw = src_field[id1, jc]                    # (..., [km])
+    f_se = src_field[id2, jc]
+    f_ne = src_field[id2, jc + 1]
+    f_nw = src_field[id1, jc + 1]
+    # Combine
+    w_sw = s2c[..., 0]
+    w_se = s2c[..., 1]
+    w_ne = s2c[..., 2]
+    w_nw = s2c[..., 3]
+    # Add level-axis broadcast if needed
+    if f_sw.ndim > id1.ndim:
+        extra = f_sw.ndim - id1.ndim
+        for _ in range(extra):
+            w_sw = w_sw[..., None]
+            w_se = w_se[..., None]
+            w_ne = w_ne[..., None]
+            w_nw = w_nw[..., None]
+    return w_sw * f_sw + w_se * f_se + w_ne * f_ne + w_nw * f_nw
+
+
 def remap_coef_fv3(
     target_lon: jax.Array, target_lat: jax.Array,
     src_lon: jax.Array, src_lat: jax.Array,
