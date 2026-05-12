@@ -4515,6 +4515,60 @@ def range_check_fv3(
     return bad_range, qmin, qmax
 
 
+def compute_hybrid_pressure_fv3(
+    ak: jax.Array,
+    bk: jax.Array,
+    ps: jax.Array,
+    pe_top_floor: float = 1.0e-6,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """FV3_3D iter 724: hybrid σ-pressure setup from ak, bk, ps.
+
+    Faithful JAX port of FV3's hybrid-pressure pattern (used
+    throughout tools/test_cases.F90 at lines 2941, 5274, 5370,
+    5479; also fv_restart and IC ingestion paths):
+
+        pe[k]   = ak[k] + ps · bk[k]            (interface pressure, k=0..km)
+        delp[k] = ak[k+1] − ak[k] + ps · (bk[k+1] − bk[k])
+        peln[k] = log(pe[k])
+
+    Top interface (k=0) typically has ak[0]=0, bk[0]=0 → pe[0]=0,
+    log(pe[0]) = −∞.  ``pe_top_floor`` (default 1e-6 Pa) clamps to
+    avoid log singularity.
+
+    Used by:
+      * iter-673 ``remap_coef_fv3`` (DA-increment vertical grid)
+      * iter-675 ``bilinear_interp_apply``
+      * iter-722 ``compute_pkz_fv3`` (consumes peln/pe)
+      * IC ingestion from external pressure-level data
+
+    Parameters
+    ----------
+    ak : jax.Array, shape (km+1,)
+        Hybrid coordinate σ_a offset (Pa).
+    bk : jax.Array, shape (km+1,)
+        Hybrid coordinate σ_b weight (dimensionless).
+    ps : jax.Array, shape (...,)
+        Surface pressure (Pa).
+    pe_top_floor : float, default 1e-6
+        Minimum allowed pe[0] to avoid log(0).
+
+    Returns
+    -------
+    delp : jax.Array, shape (..., km)
+        Layer pressure thickness (Pa).
+    pe : jax.Array, shape (..., km+1)
+        Interface pressure (Pa).
+    peln : jax.Array, shape (..., km+1)
+        log(pe).
+    """
+    # Broadcast ak/bk over (...) shape of ps
+    pe = ak + ps[..., None] * bk
+    pe = jnp.maximum(pe, pe_top_floor)
+    delp = pe[..., 1:] - pe[..., :-1]
+    peln = jnp.log(pe)
+    return delp, pe, peln
+
+
 def cappa_moist_fv3(
     q_sphum: jax.Array,
     zvir: float | None = None,

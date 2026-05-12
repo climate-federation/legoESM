@@ -1195,6 +1195,32 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 724: **``compute_hybrid_pressure_fv3``** — hybrid σ-pressure setup.
+  Faithful JAX port of FV3's hybrid-coord pressure pattern
+  (test_cases.F90:2941, 5274, 5370, 5479; fv_restart; IC ingestion):
+
+      pe[k]   = ak[k] + ps · bk[k]               (k = 0..km)
+      delp[k] = ak[k+1] − ak[k] + ps · (bk[k+1] − bk[k])
+      peln[k] = log(pe[k])
+
+  Top interface (k=0) typically has ak[0]=bk[0]=0 → pe[0]=0 →
+  log(0) = −∞.  ``pe_top_floor`` (default 1e-6 Pa) clamps to avoid
+  log singularity.
+
+  Pairs with iter-722 ``compute_pkz_fv3`` (which consumes peln),
+  iter-673 ``remap_coef_fv3`` (DA-increment vertical grid setup),
+  and iter-675 ``bilinear_interp_apply``.
+
+  Tests (7/7 in <1 s):
+  1. Pure σ (ak=0, bk monotone) → pe = bk·ps.
+  2. Pure p (bk=0) → pe = ak.
+  3. Hybrid blend (ak top, bk·ps bottom) → analytical match.
+  4. ak[0]=bk[0]=0 → pe[0] floored, peln finite.
+  5. Σ delp = ps − ak[0] (mass conservation).
+  6. 3-D (n_x, n_y) ps → 3-D (n_x, n_y, km) outputs.
+  7. No NaN/Inf on random.
+
+  Wired into iter-383 sweep (now 288).
 - Iter 723: **``cappa_moist_fv3``** — variable Poisson exponent.
 
   Extracted moist cappa formula from inline use in iter-716
