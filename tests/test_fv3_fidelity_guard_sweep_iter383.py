@@ -144,6 +144,7 @@ _GUARD_MODULES = (
     "test_sw_make_clipped_step_iter531",             # iter-531 add
     "test_sbr_c24_scan_iter532",                     # iter-532 add
     "test_corner_excited_ic_iter533",                # iter-533 add
+    "test_aggressive_clip_combined_iter534",         # iter-534 add
 )
 
 

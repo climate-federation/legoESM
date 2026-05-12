@@ -1120,6 +1120,27 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 534: **min_edge vs aggressive + clip — different goals**.
+  Combine iter-466 / iter-483 factories with iter-526
+  ``make_clipped_step``, 10 steps random IC:
+  - min_edge:   e/i = 56.7×, edge_std=2.66e-3, int_std=4.69e-5
+  - aggressive: e/i =  2.0×, edge_std=3.37e-3, int_std=1.65e-3
+  These are not "better" or "worse" — they're DIFFERENT
+  optimization targets:
+  - **min_edge**: minimizes TOTAL noise.  Interior decays to
+    near-zero (4.7e-5).  Edge variance is small in absolute
+    terms (2.66e-3) but the ratio is huge because interior
+    is too clean.
+  - **aggressive**: minimizes RATIO.  Adds more corner damp
+    (d2_bg=5e-2) which also damps interior less aggressively,
+    so interior std is 35× higher.  Edge/interior is balanced
+    at ~2×.
+  User should pick based on application:
+  - For long-term stability or training (low noise overall):
+    ``make_legoesm_nh_min_edge_config``.
+  - For spectrally-balanced edge/interior (visual symmetry):
+    ``make_legoesm_nh_min_edge_aggressive_config``.
+  1/1 in 43 s.  Wired into iter-383 sweep (now 121).
 - Iter 533: **corner-spike stability stress test**.  Drop
   5 K θ′ spike at one cube vertex on face 0, zero elsewhere,
   5 steps:
