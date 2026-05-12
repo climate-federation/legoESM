@@ -1195,6 +1195,26 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 595: **``hord`` parameter plumbed through transport API**.
+  Closes the iter 585/592/593 follow-up: the iord=8/10/11
+  limiter utilities were standalone; now they're reachable via
+  the public API.  Changes:
+  - ``_ppm_1d`` gains ``hord: int = 12`` kwarg.  Default 12 =
+    iv=0 positive-def (preserves pre-iter-595 behavior bit-for-
+    bit).  Dispatches on hord ∈ {8, 9, 10, 11, 12} to the
+    appropriate iter 585/_pert_ppm/iter 593/iter 592/_pert_ppm_iv0
+    limiter call.  Invalid hord raises ValueError.
+  - ``_xppm`` and ``_yppm`` gain ``hord`` kwarg, propagate to
+    ``_ppm_1d``.
+  Tests (4/4 in 2 s):
+  1. hord=12 default preserves baseline (bit-for-bit).
+  2. hord=8 differs from hord=12 on sharp field.
+  3. Invalid hord raises ValueError.
+  4. _xppm/_yppm accept hord and propagate.
+  Now users can call ``_xppm(q, crx, n, hord=8)`` to switch
+  PPM variant.  ``transport_step()`` plumbing left for future
+  iter (would require adding hord arg through ~3 more sites).
+  Wired into iter-383 sweep (now 169).
 - Iter 594: **All-5 iord variants comparison test**.  Builds
   stress field (smooth ramp + sharp step) and applies all 5
   legoESM iord limiters: 8 (iter 585), 9 (_pert_ppm), 10

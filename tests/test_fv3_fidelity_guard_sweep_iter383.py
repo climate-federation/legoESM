@@ -192,6 +192,7 @@ _GUARD_MODULES = (
     "test_hord11_limiter_iter592",                   # iter-592 add
     "test_hord10_limiter_iter593",                   # iter-593 add
     "test_iord_variants_comparison_iter594",         # iter-594 add
+    "test_hord_dispatch_iter595",                    # iter-595 add
 )
 
 

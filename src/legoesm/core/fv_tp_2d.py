@@ -272,7 +272,8 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
             off_left_d1=None, off_right_d1=None,
             use_duogrid=False,
             apply_fortran_xppm_boundary=False,
-            bounded_domain=False):
+            bounded_domain=False,
+            hord: int = 12):
     """PPM bl/br along axis=1 with hord=9 + position-aware boundaries.
 
     Parameters
@@ -493,8 +494,28 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
     bl = al_L - q_c
     br = al_R - q_c
 
-    # pert_ppm(iv=0): positive definite constraint (tp_core.F90:610)
-    bl, br = _pert_ppm_iv0(q_c, bl, br)
+    # FV3_3D iter 595: hord-dispatched limiter (default hord=12 = iv=0
+    # positive-def, preserving pre-iter-595 behavior).
+    # dm has shape (6, n+4, M); q_c is qe[:, 2:-2, :] → cells at padded
+    # indices 2..n+3 → dm at those positions is dm[:, 1:n+3, :].
+    if hord == 8:
+        dm_c = dm[:, 1:n + 3, :]
+        bl, br = apply_hord8_limiter(bl, br, dm_c)
+    elif hord == 9:
+        bl, br = _pert_ppm(bl, br)
+    elif hord == 10:
+        dm_c = dm[:, 1:n + 3, :]
+        bl, br = apply_hord10_limiter(bl, br, dm_c, q_c)
+    elif hord == 11:
+        dm_c = dm[:, 1:n + 3, :]
+        bl, br = apply_hord11_limiter(bl, br, dm_c)
+    elif hord == 12:
+        # pert_ppm(iv=0): positive definite constraint (tp_core.F90:610)
+        bl, br = _pert_ppm_iv0(q_c, bl, br)
+    else:
+        raise ValueError(
+            f"hord must be one of {{8, 9, 10, 11, 12}}; got {hord}"
+        )
 
     # Iter-888: optional Fortran-faithful boundary `bl/br` overrides
     # via the s11/s14/s15 + 4-point xt formulas (tp_core.F90:614-628
@@ -652,7 +673,8 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
 def _xppm(q_h2, crx, n, off_left=None, off_right=None,
           off_left_d1=None, off_right_d1=None, use_duogrid=False,
           apply_fortran_xppm_boundary=False,
-          bounded_domain=False):
+          bounded_domain=False,
+          hord: int = 12):
     """PPM in x with hord=9 Courant-number integration.
 
     FV3 tp_core.F90 xppm lines 670-677: uses raw Courant number ``crx``
@@ -677,7 +699,8 @@ def _xppm(q_h2, crx, n, off_left=None, off_right=None,
                            use_duogrid=use_duogrid,
                            apply_fortran_xppm_boundary=(
                                apply_fortran_xppm_boundary),
-                           bounded_domain=bounded_domain)
+                           bounded_domain=bounded_domain,
+                           hord=hord)
     bl_L, br_L, q_L = bl[:, :n+1, :], br[:, :n+1, :], q_c[:, :n+1, :]
     bl_R, br_R, q_R = bl[:, 1:n+2, :], br[:, 1:n+2, :], q_c[:, 1:n+2, :]
 
@@ -689,7 +712,8 @@ def _xppm(q_h2, crx, n, off_left=None, off_right=None,
 def _yppm(q_h2, cry, n, off_left=None, off_right=None,
           off_left_d1=None, off_right_d1=None, use_duogrid=False,
           apply_fortran_xppm_boundary=False,
-          bounded_domain=False):
+          bounded_domain=False,
+          hord: int = 12):
     """PPM in y with hord=9 Courant-number integration.
 
     Iter-888b: see ``_xppm`` docstring for the
@@ -703,7 +727,8 @@ def _yppm(q_h2, cry, n, off_left=None, off_right=None,
                            use_duogrid=use_duogrid,
                            apply_fortran_xppm_boundary=(
                                apply_fortran_xppm_boundary),
-                           bounded_domain=bounded_domain)
+                           bounded_domain=bounded_domain,
+                           hord=hord)
     bl_L, br_L, q_L = bl[:, :n+1, :], br[:, :n+1, :], q_c[:, :n+1, :]
     bl_R, br_R, q_R = bl[:, 1:n+2, :], br[:, 1:n+2, :], q_c[:, 1:n+2, :]
     fy_pos = q_L + (1.0 - c_t) * (br_L - c_t * (bl_L + br_L))
