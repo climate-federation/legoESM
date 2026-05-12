@@ -6100,6 +6100,63 @@ def effective_inflow_layer_fv3(
     return z_bot, z_top
 
 
+def effective_bulk_shear_fv3(
+    u: jax.Array,
+    v: jax.Array,
+    z: jax.Array,
+    z_bot: jax.Array,
+    z_top: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 818: vector bulk shear over arbitrary layer.
+
+    Linear interpolation of u, v onto ``z_bot`` and ``z_top``,
+    then return the vector difference:
+
+        Δu = u(z_top) − u(z_bot)
+        Δv = v(z_top) − v(z_bot)
+
+    For use with iter-817 ``effective_inflow_layer_fv3``: caller
+    computes effective inflow-layer bounds (z_bot, z_top), then
+    passes them here for the EBWD (Effective Bulk Wind Difference)
+    that goes into iter-815 SCP / iter-816 STP effective-layer
+    variants.
+
+    Generalizes the fixed-layer (0-6 km, 0-3 km, 0-1 km) bulk-
+    shear computation to arbitrary [z_bot, z_top] intervals.
+
+    Uses ``jnp.interp`` (clamps extrapolation to edge values).
+    ``z`` must be monotone increasing (surface→top oriented).
+    NaN ``z_bot`` / ``z_top`` (e.g., from iter-817 no-EIL case)
+    propagate to NaN output.
+
+    Caller responsible for vmap-batching across columns; this
+    helper is the per-column scalar form.
+
+    Used by: SPC Effective Bulk Wind Difference (EBWD), effective-
+    layer SCP / STP composites, customized "MUSAS" effective
+    SRH/shear products.
+
+    Parameters
+    ----------
+    u, v : jax.Array, shape (km,)
+        Wind components on column levels (m/s).
+    z : jax.Array, shape (km,)
+        Geopotential height column (m), monotone increasing.
+    z_bot, z_top : jax.Array (scalar or shape () )
+        Layer bounds (m).  May be NaN.
+
+    Returns
+    -------
+    (du, dv) : tuple of jax.Array
+        Vector bulk shear over the layer (m/s).
+    """
+    u_bot = jnp.interp(z_bot, z, u)
+    u_top = jnp.interp(z_top, z, u)
+    v_bot = jnp.interp(z_bot, z, v)
+    v_top = jnp.interp(z_top, z, v)
+    return u_top - u_bot, v_top - v_bot
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

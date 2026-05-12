@@ -5362,6 +5362,45 @@ Critical for cool-season severe-weather and elevated convection
 where the surface parcel is decoupled from the storm.  Pure JAX,
 vmap-compatible.  No new physical constants introduced.
 
+## Iter 818 — effective_bulk_shear_fv3 (EBWD)
+
+Added `effective_bulk_shear_fv3(u, v, z, z_bot, z_top)` to
+`grids/cubed_sphere.py`.  Vector bulk shear over arbitrary layer
+via linear interpolation:
+
+```
+Δu = u(z_top) − u(z_bot)
+Δv = v(z_top) − v(z_bot)
+```
+
+Uses ``jnp.interp`` (clamps extrapolation to edge values).  ``z``
+must be monotone increasing.  NaN bounds (from iter-817 no-EIL
+case) propagate.
+
+Generalizes fixed-layer (0-6, 0-3, 0-1 km) bulk-shear computation
+to arbitrary [z_bot, z_top] intervals — designed for use with
+iter-817 effective-inflow-layer bounds.
+
+Composes iter-817 ``effective_inflow_layer_fv3``.
+
+Used by: SPC Effective Bulk Wind Difference (EBWD), effective-
+layer SCP/STP composites, custom "MUSAS" effective SRH/shear
+products.
+
+Test: `tests/test_fv3_effective_bulk_shear_iter818.py` (5 tests:
+linear u → analytic Δu, v=0 → Δv=0, NaN bounds propagate, edge
+clamping, full iter-817→818 chain gives EBWD over EIL).
+
+### Why this iteration was meaningful
+
+Closes the effective-layer shear computation chain (iter-817 EIL
+bounds → iter-818 EBWD over that layer).  Together with the SCP
+(iter-815) and STP (iter-816) composites, the effective-layer
+SPC tornado-environment toolkit is now reachable as a pure-JAX
+composition: per-level parcel CAPE/CIN → EIL bounds → EBWD →
+SCP/STP-effective.  Pure JAX, vmap-compatible.  No new physical
+constants introduced.
+
 
 
 
