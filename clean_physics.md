@@ -129,6 +129,32 @@ the resulting overshoot in θ/q.  Cap is ``M ≤ 0.5·ρ·dz/dt``
 **Tests (post iter-11):**
 - 95 atmosphere turbulence tests pass (all schemes including EDMF).
 
+### Iteration 12 — 2026-05-12
+
+**Inspection / audit iteration (no code changes).**
+
+- Re-ran constant-hygiene scan across `src/legoesm/atmosphere/physics/`,
+  `src/legoesm/land/`, `src/legoesm/ocean/physics/`, `src/legoesm/ice/`
+  for any remaining hardcoded physical literals (g, R_d, c_pd, L_v, L_s,
+  L_f, sigma_sb, T_freeze, Omega, R_earth, rho_air, rho_ocean, ε).
+  Result: **CLEAN — no production-code violations remain.**  All
+  instances either live in `constants.py`, reference `constants.X` at
+  use, are re-exports in `ocean/eos.py`, are CLM5 PFT lookup data, or
+  appear only in docstrings.
+- Reviewed `ice/rheology.evp_stress_update` — already backward-Euler
+  relaxation toward the VP target; stable by construction.
+- Reviewed `ice/dynamics.evp_solver` — `N_evp = 120` subcycles + semi-
+  implicit Coriolis matches CICE convention; documented and stable.
+- Reviewed `atmosphere/physics/convection/dca.py` — moist static
+  energy conservation already enforced via the `delta_T_lh` block.
+- Reviewed `ocean/physics/bottom_drag/{linear,quadratic}.py` — explicit
+  but with the depth-averaged barotropic component going through
+  `implicit_bottom_drag_factor` in the barotropic solver.  Acceptable.
+- Reviewed `ocean/physics/lateral_mixing/gm_redi.py` — slopes are
+  tapered (DM95) and clipped to `S_max`; threading `dt` for a proper
+  bolus-Courant cap would require changing the closure signature
+  across cubed-sphere, lat-lon, and MPAS paths.  Deferred.
+
 ### Inspected & clean (no fix needed)
 - `land/snow_budget.py` — energy-limited melt with `constants.L_f` /
   `constants.T_freeze`; positivity guards intact.
