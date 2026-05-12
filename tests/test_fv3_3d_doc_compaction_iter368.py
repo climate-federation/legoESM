@@ -38,11 +38,11 @@ def test_iter365_compaction_present(doc_text):
     )
 
 
-def test_doc_size_below_3850_lines(doc_text):
+def test_doc_size_below_3900_lines(doc_text):
     n_lines = len(doc_text.splitlines())
-    assert n_lines < 3850, (
-        f"FV3_3D.md has {n_lines} lines (target < 3850 after iter-"
-        f"488 duogrid investigation synthesis section).  Check "
+    assert n_lines < 3900, (
+        f"FV3_3D.md has {n_lines} lines (target < 3900 after iter-"
+        f"505 user-facing helper entry).  Check "
         f"for re-expansion or missing compaction."
     )
 

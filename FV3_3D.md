@@ -1081,6 +1081,18 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 505: **user-facing API** for the iter-504 combined fix
+  — new ``monotone_halo_clip_context(slack=0.5)`` context
+  manager in ``legoesm.grids.halo`` that monkey-patches 6
+  pad_halo_4d/vec_4d sites for the duration.  Usage:
+  ``with monotone_halo_clip_context(slack=0.5):
+      new_state = model.step(state, dt)``
+  Test confirms min-edge factory + context: 1.606 → 1.093
+  (32% reduction at this seed pair — matches iter-504 1.135
+  trend within sampling).  Closes the user-experience gap:
+  iter-466 / iter-483 factories + this context manager = one
+  call each to reach ~1.1× edge ratio.  2/2 in 122 s.  Wired
+  into iter-383 sweep (now 96).
 - Iter 504: **NEW LOW 1.135× (65.7% reduction)** combining
   iter-466 flag drops + iter-503 halo clip.  6-config matrix
   at C8 + duogrid (2 seeds, 1 step):

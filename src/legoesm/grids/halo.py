@@ -2538,3 +2538,85 @@ def synchronize_bgrid_ne_corner_geo(u, v, cos_ang_c, sin_ang_c, n):
     v_sync = -sin_ang_c * u_east + cos_ang_c * u_north
 
     return u_sync, v_sync
+
+
+def monotone_halo_clip_context(slack: float = 0.5):
+    """FV3_3D iter 505: context manager that monkey-patches all
+    known ``pad_halo_4d`` and ``pad_halo_vector_4d`` import
+    aliases in NH/PE dycore + operator modules to use
+    ``monotone_clip=True`` with the given ``slack``.
+
+    Per iter-504, enabling this around a dycore step reduces
+    the duogrid-induced cube-edge θ′ variance ratio by ~65%
+    when combined with iter-466's ``make_legoesm_nh_min_edge_
+    config`` factory.
+
+    Usage::
+
+        from legoesm.grids.halo import monotone_halo_clip_context
+
+        with monotone_halo_clip_context(slack=0.5):
+            new_state = model.step(state, dt)
+
+    Parameters
+    ----------
+    slack : float, default 0.5
+        ``monotone_clip_slack`` value (see ``fill_corner_
+        region`` docs).  0.0 = strict clip; 0.5 = optimal per
+        iter-504; ≥1.0 = over-relaxed.
+
+    Returns
+    -------
+    contextlib.ExitStack
+        Context manager.  Patches are removed on exit.
+
+    Notes
+    -----
+    Implementation: 6 ``unittest.mock.patch`` targets:
+    * scalar halo: 4 sites (compressible_euler_cdgrid,
+      operators_3d, operators_cdgrid, operators_fc).
+    * vector halo: 2 sites (operators_cdgrid, operators_3d).
+
+    May not catch every halo call site in the dycore (e.g.,
+    SPMD ``packed_pad_halo_4d`` is not patched); the 6 sites
+    cover the dominant single-rank paths.
+    """
+    import contextlib
+    import functools
+    from unittest.mock import patch
+
+    scalar_targets = [
+        "legoesm.atmosphere.dynamics.compressible_euler_cdgrid."
+        "_pad_halo_4d_module",
+        "legoesm.core.operators_3d.pad_halo_4d",
+        "legoesm.core.operators_cdgrid.pad_halo_4d",
+        "legoesm.core.operators_fc.pad_halo_4d",
+    ]
+    vector_targets = [
+        "legoesm.core.operators_cdgrid.pad_halo_vector_4d",
+        "legoesm.core.operators_3d.pad_halo_vector_4d",
+    ]
+
+    clipped_scalar = functools.partial(
+        pad_halo_4d,
+        monotone_clip=True,
+        monotone_clip_slack=slack,
+    )
+    clipped_vector = functools.partial(
+        pad_halo_vector_4d,
+        monotone_clip=True,
+        monotone_clip_slack=slack,
+    )
+
+    stack = contextlib.ExitStack()
+    for tgt in scalar_targets:
+        try:
+            stack.enter_context(patch(tgt, clipped_scalar))
+        except (AttributeError, ModuleNotFoundError):
+            pass
+    for tgt in vector_targets:
+        try:
+            stack.enter_context(patch(tgt, clipped_vector))
+        except (AttributeError, ModuleNotFoundError):
+            pass
+    return stack
