@@ -1081,6 +1081,29 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 515: **reframe metric** — within-grid vs cross-grid.
+  Previous iters measured ``edge_std(duogrid) /
+  edge_std(no_duogrid)`` (cross-grid ratio).  But this
+  conflates "duogrid is worse" with "both grids develop
+  bias".  Within-grid ratio is more direct.  Measured under
+  min-edge + clip at seed=515, C8:
+  - n_steps   cross    duogrid e/i   no-duo e/i
+  -     1     1.099×      1.097×        0.992×
+  -     5     1.317×      1.497×        1.123×
+  -    10     1.627×      **2.062×**    **1.238×**
+  Critical findings:
+  - **Duogrid develops 2.06× edge/interior bias at 10 steps**
+    — real artifact in absolute terms.
+  - **Non-duogrid grid ALSO develops 1.24× bias** — even the
+    plain interp_offsets-based C-D-grid has growing edge
+    issue, just smaller than duogrid.
+  - Cross-grid ratio ≈ duogrid_e/i ÷ no-duo_e/i.
+  Implication: the edge bias is intrinsic to the C-D-grid
+  discretization at cube vertices, not a duogrid bug.
+  Duogrid amplifies it but doesn't create it.  iter 516+
+  needs to address the C-D-grid corner stencil itself, not
+  just halo clip.  1/1 in 99 s.  Wired into iter-383 sweep
+  (now 105).
 - Iter 514: **extend clip to ``pad_halo_vector`` (3D)**.
   Mirror of iter-513 for the vector path: new signature
   threads ``monotone_clip`` + ``monotone_clip_slack`` to the
