@@ -25,6 +25,58 @@ from legoesm.core.operators_fv_latlon_3d import fv_flux_divergence_latlon_3d
 
 
 # ---------------------------------------------------------------------------
+# AD-safe divide
+# ---------------------------------------------------------------------------
+
+def safe_divide(
+    numerator,
+    denominator,
+    eps: float,
+    fill: float = 0.0,
+):
+    """Return ``numerator / denominator`` with AD-safe behaviour near zero.
+
+    Equivalent in the forward path to::
+
+        jnp.where(denominator > eps, numerator / denominator, fill)
+
+    but written so the reverse-mode VJP never differentiates ``1/x`` or
+    ``-a/x**2`` at tiny ``x``.  The masked branch evaluates
+    ``numerator / 1.0`` whose cotangents are bounded, while the outer
+    ``jnp.where`` selects ``fill`` for both the forward output and the
+    cotangent path so the bad branch contributes nothing to gradients.
+
+    Use this anywhere both ``numerator`` and ``denominator`` can
+    legitimately approach zero together (column mass-conservation
+    rescalings, autoconversion/aggregation rates that vanish with their
+    cloud field, geometric singularities such as the polar day/night
+    sunset hour angle).
+
+    Forward outputs are bitwise identical to
+    ``numerator / jnp.clip(denominator, eps, None)`` for any sample
+    where ``denominator > eps``.  Choose ``eps`` one or two decades
+    above any prior ``clip`` floor to preserve that property.
+
+    Parameters
+    ----------
+    numerator, denominator : array-like
+        Operands.  Either may be a scalar or jax array.
+    eps : float
+        Threshold below which the divide is masked.  Must be strictly
+        positive.
+    fill : float, optional
+        Value returned where ``denominator <= eps``.  Default ``0.0``
+        matches the physical limit at the singularity for all current
+        call sites (vanishing-cloud rates, polar sunset).
+    """
+    denom = jnp.asarray(denominator)
+    mask = denom > eps
+    safe_denom = jnp.where(mask, denom, jnp.asarray(1.0, denom.dtype))
+    quotient = numerator / safe_denom
+    return jnp.where(mask, quotient, jnp.asarray(fill, quotient.dtype))
+
+
+# ---------------------------------------------------------------------------
 # Height / thickness from hydrostatic balance
 # ---------------------------------------------------------------------------
 

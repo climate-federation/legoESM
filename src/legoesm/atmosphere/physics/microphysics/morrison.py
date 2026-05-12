@@ -35,6 +35,7 @@ from legoesm.atmosphere.physics.microphysics.output import (
     MicrophysicsOutput,
     sedimentation_tendency,
 )
+from legoesm.atmosphere.physics._shared import safe_divide
 
 
 def morrison_microphysics(
@@ -255,9 +256,13 @@ def morrison_microphysics(
     dq_i_dt = dq_i_dep + bergeron + riming_i - aggregation - melt_ice + sed_i
     dq_s_dt = aggregation + riming_s - melt_snow + sed_s
 
-    dN_c_dt = -dq_c_au * rho / jnp.clip(x_c, 1e-20)
+    # AD-safe divides: clip+divide propagates inf cotangents via -a/b^2
+    # when the cloud field vanishes; safe_divide masks the bad branch.
+    dN_c_dt = safe_divide(-dq_c_au * rho, x_c, eps=1e-15)
     dN_r_dt = dN_r_au + dN_r_sc + dN_r_br
-    dN_i_dt = dN_i_nuc - aggregation * jnp.clip(N_i, 0.0) / jnp.clip(q_i, 1e-15)
+    dN_i_dt = dN_i_nuc - aggregation * safe_divide(
+        jnp.clip(N_i, 0.0), q_i, eps=1e-12,
+    )
 
     # Precipitation (rain + ice + snow at surface)
     precip_r = jnp.clip(q_r[:, -1], 0.0) * rho[:, -1] * jnp.clip(V_t_r[:, -1], 0.0)

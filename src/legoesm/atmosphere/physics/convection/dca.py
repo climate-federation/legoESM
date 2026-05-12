@@ -27,6 +27,7 @@ from legoesm.atmosphere.physics.thermodynamics import (
 )
 from legoesm.atmosphere.physics.convection.config import DCAConfig
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
+from legoesm.atmosphere.physics._shared import safe_divide
 
 
 def _adjust_one_iteration(
@@ -278,8 +279,9 @@ def dca_convection(
     )
     col_local_cond = _col_pair[..., 0:1]
     col_net_drying = jnp.clip(-_col_pair[..., 1:2], 0.0, None)
-    dq_c_conv_dt = local_cond * (
-        col_net_drying / jnp.clip(col_local_cond, 1e-30, None)
+    # AD-safe column rescaling — see sbm.py for the same fix.
+    dq_c_conv_dt = local_cond * safe_divide(
+        col_net_drying, col_local_cond, eps=1e-20,
     )  # (ncol, nlev) [kg/kg/s]
 
     # Convective mask: CAPE-gated

@@ -19,6 +19,7 @@ from legoesm.atmosphere.physics.gravity_wave_drag.config import (
     PrognosticSpectralConfig,
 )
 from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput
+from legoesm.atmosphere.physics._shared import safe_divide
 
 _EPS = float(jnp.finfo(jnp.float32).eps)  # Float32 machine epsilon (~1.19e-7)
 
@@ -90,8 +91,11 @@ def prognostic_spectral_gwd(
     )
 
     # Phase speed per wavenumber: c = N / k
-    # (ncol, nlev, n_wn) via broadcast
-    c_phase = N_full[:, :, None] / jnp.clip(k_grid[None, None, :], 1e-10, None)
+    # (ncol, nlev, n_wn) via broadcast.  ``safe_divide`` keeps the VJP
+    # bounded if any spectral component drifts toward k=0.
+    c_phase = safe_divide(
+        N_full[:, :, None], k_grid[None, None, :], eps=1e-10,
+    )
 
     # Layer thickness
     dz = jnp.abs(z_half[:, :-1] - z_half[:, 1:])
@@ -117,13 +121,18 @@ def prognostic_spectral_gwd(
     )
     intrinsic_abs = jnp.clip(jnp.abs(intrinsic), 0.1, None)
 
-    wavelength = 2.0 * jnp.pi / jnp.clip(k_grid, 1e-10, None)  # (n_wn,)
+    wavelength = safe_divide(
+        jnp.full_like(k_grid, 2.0 * jnp.pi), k_grid, eps=1e-10,
+    )  # (n_wn,)
     N_4d = N_full[:, None, None, :]  # (ncol, 1, 1, nlev)
     rho_4d = rho[:, None, None, :]
 
-    tau_sat = (
-        config.breaking_threshold * rho_4d * intrinsic_abs ** 3
-        / (jnp.clip(N_4d, 1e-6, None) * wavelength[None, None, :, None])
+    # AD-safe divide near (N → 0) or (k → 0): masks the bad branch in
+    # the VJP rather than clipping the floor of an unsafe ``-a/b**2``.
+    tau_sat = safe_divide(
+        config.breaking_threshold * rho_4d * intrinsic_abs ** 3,
+        N_4d * wavelength[None, None, :, None],
+        eps=1e-6,
     )  # (ncol, n_az, n_wn, nlev)
     tau_sat = jnp.clip(tau_sat, _EPS, None)
 

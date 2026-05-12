@@ -16,6 +16,7 @@ import jax.numpy as jnp
 _TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
 
 from legoesm import constants
+from legoesm.atmosphere.physics._shared import safe_divide
 
 
 def solar_declination(day_of_year: float, obliquity: float = 23.45) -> float:
@@ -124,8 +125,13 @@ def daily_mean_insolation(
     cos_delta = jnp.cos(delta)
 
     # Sunset hour angle
-    # cos(h_s) = -tan(lat) * tan(delta), clipped for polar day/night
-    cos_hs = jnp.clip(-sin_lat * sin_delta / jnp.clip(cos_lat * cos_delta, _TINY, None), -1.0, 1.0)
+    # cos(h_s) = -tan(lat) * tan(delta), clipped for polar day/night.
+    # AD-safe: ``safe_divide`` masks the polar singularity in the
+    # backward pass; the outer clip selects the polar day/night branch.
+    ratio = safe_divide(
+        -sin_lat * sin_delta, cos_lat * cos_delta, eps=_TINY, fill=0.0,
+    )
+    cos_hs = jnp.clip(ratio, -1.0, 1.0)
     h_s = jnp.arccos(cos_hs)
 
     # Daily-mean insolation
@@ -166,10 +172,10 @@ def daylight_fraction(
     sin_delta = jnp.sin(delta)
     cos_delta = jnp.cos(delta)
 
-    cos_hs = jnp.clip(
-        -sin_lat * sin_delta / jnp.clip(cos_lat * cos_delta, _TINY, None),
-        -1.0, 1.0,
+    ratio = safe_divide(
+        -sin_lat * sin_delta, cos_lat * cos_delta, eps=_TINY, fill=0.0,
     )
+    cos_hs = jnp.clip(ratio, -1.0, 1.0)
     h_s = jnp.arccos(cos_hs)
     return h_s / jnp.pi
 

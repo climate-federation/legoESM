@@ -53,6 +53,7 @@ from legoesm.atmosphere.physics.thermodynamics import (
 )
 from legoesm.atmosphere.physics.convection.config import KuoConfig
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
+from legoesm.atmosphere.physics._shared import safe_divide
 
 
 def kuo_convection(
@@ -208,8 +209,9 @@ def kuo_convection(
     target_col_cond = (
         trigger * config.alpha_heat * MC / config.tau_relax
     )[:, None]
-    dq_c_conv_dt = local_cond * (
-        target_col_cond / jnp.clip(col_local_cond, 1e-30, None)
+    # AD-safe column rescaling — see sbm.py for the same fix.
+    dq_c_conv_dt = local_cond * safe_divide(
+        target_col_cond, col_local_cond, eps=1e-20,
     )  # (ncol, nlev) [kg/kg/s]
 
     # 8. CAPE diagnostic

@@ -25,6 +25,7 @@ from legoesm.atmosphere.physics.microphysics.output import (
     MicrophysicsOutput,
     sedimentation_tendency,
 )
+from legoesm.atmosphere.physics._shared import safe_divide
 from legoesm.atmosphere.physics.microphysics._warm_rain import (
     saturation_adjustment,
     effective_Nc,
@@ -132,7 +133,8 @@ def seifert_beheng_microphysics(
     dq_v_dt = -condensation + evaporation
     dq_c_dt = condensation - dq_c_au - dq_c_ac
     dq_r_dt = dq_c_au + dq_c_ac - evaporation + sed_r
-    dN_c_dt = -dq_c_au * rho / jnp.clip(x_c, 1e-20)
+    # AD-safe divide — see morrison.py for the same fix.
+    dN_c_dt = safe_divide(-dq_c_au * rho, x_c, eps=1e-15)
     dN_r_dt = dN_r_au + dN_r_sc + dN_r_br
 
     # Precipitation

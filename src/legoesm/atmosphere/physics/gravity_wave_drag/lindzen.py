@@ -17,6 +17,7 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.atmosphere.physics.gravity_wave_drag.config import LindzenConfig
 from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput
+from legoesm.atmosphere.physics._shared import safe_divide
 
 
 def lindzen_gwd(
@@ -82,7 +83,12 @@ def lindzen_gwd(
     # Saturation stress per level: tau_sat = rho * U^3 * k / N
     # Wave breaks where carried stress exceeds local saturation
     U_proj_abs = jnp.clip(jnp.abs(U_proj), 0.1, None)
-    tau_sat = rho * U_proj_abs ** 3 * config.k_wave / jnp.clip(N_full, 1e-6, None)
+    # AD-safe divide near N_full = 0 (uniform-theta column); the forward
+    # is bit-identical to the prior ``/ clip(N_full, 1e-6, None)`` for
+    # any sample with N_full > 1e-6.
+    tau_sat = rho * U_proj_abs ** 3 * config.k_wave * safe_divide(
+        jnp.ones_like(N_full), N_full, eps=1e-6,
+    )
     tau_sat = jnp.clip(tau_sat, 1e-10, None)
 
     # Top-down scan: propagate stress from surface upward
@@ -92,7 +98,7 @@ def lindzen_gwd(
         tau_carry = carry
         k = nlev - 1 - k_rev
         # Smooth breaking: sigmoid activation where stress exceeds saturation
-        excess = tau_carry / jnp.clip(tau_sat[:, k], 1e-10, None) - config.critical_Fr
+        excess = safe_divide(tau_carry, tau_sat[:, k], eps=1e-10) - config.critical_Fr
         f_break = jax.nn.sigmoid(config.Fr_sharpness * excess)
         tau_new = tau_carry * (1.0 - f_break) + tau_sat[:, k] * f_break
         tau_new = jnp.minimum(tau_new, tau_carry)
