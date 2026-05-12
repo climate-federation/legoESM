@@ -1195,6 +1195,28 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 739: **``specific_volume_fv3``** — α = 1/ρ.
+
+  Companion to iter-734 air_density:
+
+      α = 1/ρ = −g · delz / delp
+
+  FV3 convention (delp > 0, delz < 0) → α > 0.
+
+  FV3 fv_mapz.F90:255 uses this directly as "specific volume / g"
+  via the line ``delz = -delz / delp`` (gravity factor absorbed
+  into thermodynamics later).
+
+  Used in pressure-volume work computations.
+
+  Tests (5/5 in <1 s):
+  1. α · ρ = 1 exactly (inverse property).
+  2. delp=1e4, delz=-1000 → α = g·1000/1e4 ≈ 0.981 m³/kg.
+  3. Random delp/delz → α > 0.
+  4. 3-D shapes.
+  5. No NaN/Inf.
+
+  Wired into iter-383 sweep (now 303).
 - Iter 738: **``geopotential_from_T_peln_fv3``** — Φ at interfaces.
 
   Hydrostatic integration:

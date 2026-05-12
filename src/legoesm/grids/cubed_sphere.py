@@ -2987,6 +2987,40 @@ def theta_dry_fv3(
     return pt * (p_ref / p) ** kap
 
 
+def specific_volume_fv3(
+    delp: jax.Array,
+    delz: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 739: specific volume α = 1/ρ from delp/delz.
+
+    Companion to iter-734 ``air_density_fv3``:
+
+        α = 1 / ρ = −g · delz / delp
+
+    With FV3 sign convention (delp > 0, delz < 0) → α > 0.
+
+    FV3 fv_mapz.F90:255 uses this directly as "specific volume / g"
+    via the line ``delz(i,j,k) = -delz(i,j,k) / delp(i,j,k)``
+    (gravity factor absorbed into thermodynamics later).
+
+    Used in pressure-volume work computations and any path that
+    needs reciprocal density.
+
+    Parameters
+    ----------
+    delp : jax.Array, shape (..., km)
+        Pressure thickness (Pa, positive).
+    delz : jax.Array, shape (..., km)
+        Layer thickness (NEGATIVE in FV3).
+
+    Returns
+    -------
+    alpha : jax.Array, shape (..., km)
+        Specific volume (m³/kg, positive).
+    """
+    return -constants.g * delz / delp
+
+
 def air_density_fv3(
     delp: jax.Array,
     delz: jax.Array,
