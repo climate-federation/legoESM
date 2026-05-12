@@ -1175,6 +1175,17 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 552: **Held-Suarez-like stratified NH state**.  Test
+  with SBR winds + meridional θ′ gradient (−10·sin²(lat)) at
+  C8, 10 steps with ``make_clipped_step``.  Results:
+  - u:        ±26 m/s (SBR ±20 + meridional perturbation)
+  - v:        ±28 m/s (induced from baroclinic gradient)
+  - θ′:       -9.8 to ~0 K (close to initial -10..0)
+  - ρ′:       ±0.05 kg/m³ (small density perturbation)
+  - w:        ±1.55 m/s (vertical motion)
+  All physically reasonable, all finite.  Dycore handles
+  realistic stratified IC cleanly with the helper.  1/1 in
+  30 s.  Wired into iter-383 sweep (now 135).
 - Iter 551: **clip helper performance at C16** — does overhead
   scale?  Measured at C16, 5-step avg:
   - raw jit:           9.8 ms/step
