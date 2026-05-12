@@ -4938,3 +4938,42 @@ re-deriving.  Eliminates the last remaining inline q/(1-q) in
 cubed_sphere.py.  Pure JAX, vmap-compatible.  No new physical
 constants introduced.
 
+## Iter 772 — brunt_vaisala_squared_fv3 (N² stability metric)
+
+Added `brunt_vaisala_squared_fv3(theta, q_sphum, z)` to
+`grids/cubed_sphere.py`.  Computes:
+
+```
+N² = (g / θ_v) · dθ_v/dz       at layer midpoints
+θ_v = θ · (1 + (1/ε − 1)·q)    via _shared.virtual_temperature
+```
+
+Sign convention: stable stratification (θ_v↑ with z) → N²>0;
+unstable → N²<0; neutral → N²=0.  Vertical axis is last; output
+shape ``(..., km−1)``.  Pass ``q_sphum=0.0`` for dry N².
+
+Delegates θ_v computation to the canonical
+`legoesm.atmosphere.physics._shared.virtual_temperature` per
+CLAUDE.md "use existing functions" rule.
+
+**Analytic guard**: isothermal atmosphere has N² = g²/(c_p·T)
+exactly.  Test exercises this with hydrostatic isothermal column
+(z = 0..10 km, T = 290 K): computed N² matches g²/(c_p·T) ≈
+3.30·10⁻⁴ s⁻² within 5 % over all 20 midpoints.
+
+Test: `tests/test_fv3_brunt_vaisala_iter772.py` (6 tests: stable
++, unstable −, neutral 0, isothermal analytic, 3-D shapes
+km→km−1, finite).
+
+### Why this iteration was meaningful
+
+N² is the canonical stability metric for the free atmosphere.
+Used directly by: (1) Richardson-number diagnostics for shear-
+driven turbulence onset; (2) gravity-wave drag schemes (uses
+column-integrated N²); (3) boundary-layer top detection
+(Ri ↗ → entrainment zone); (4) inertia-gravity wave dispersion
+relations.  Reuses the existing canonical
+``_shared.virtual_temperature`` helper rather than adding a θ_v
+wrapper — satisfies CLAUDE.md "thin dispatch wrappers forbidden".
+Pure JAX, vmap-compatible.  No new physical constants introduced.
+

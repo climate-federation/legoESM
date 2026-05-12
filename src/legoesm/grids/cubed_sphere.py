@@ -4106,6 +4106,56 @@ def mixing_ratio_fv3(
     return q_safe / (1.0 - q_safe)
 
 
+def brunt_vaisala_squared_fv3(
+    theta: jax.Array,
+    q_sphum: jax.Array,
+    z: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 772: Brunt–Väisälä squared frequency.
+
+    Buoyancy oscillation frequency squared at layer midpoints:
+
+        N² = (g / θ_v) · dθ_v/dz
+
+    where the virtual potential temperature θ_v = θ·(1 + (1/ε − 1)·q)
+    is computed via the canonical
+    ``legoesm.atmosphere.physics._shared.virtual_temperature``
+    helper.
+
+    Sign convention: stable stratification (θ_v increasing with z) →
+    N² > 0; unstable (θ_v decreasing with z) → N² < 0; neutral
+    → N² = 0.  Used by stability schemes, gravity-wave drag,
+    Richardson-number diagnostics.
+
+    Vertical axis is the last dimension.  Output is at layer
+    midpoints: shape ``(..., km-1)``.
+
+    Parameters
+    ----------
+    theta : jax.Array, shape (..., km)
+        Potential temperature (K).
+    q_sphum : jax.Array, shape (..., km)
+        Specific humidity (kg/kg).  Pass ``0.0`` for dry N²
+        (then θ_v = θ exactly).
+    z : jax.Array, shape (..., km)
+        Layer-center geopotential height (m).  Caller is
+        responsible for orienting z and θ to match (increasing z
+        with array index recommended).
+
+    Returns
+    -------
+    n_sq : jax.Array, shape (..., km−1)
+        N² at layer midpoints (s⁻²).
+    """
+    from legoesm.atmosphere.physics import _shared
+
+    theta_v = _shared.virtual_temperature(theta, q_sphum)
+    dtheta = theta_v[..., 1:] - theta_v[..., :-1]
+    dz = z[..., 1:] - z[..., :-1]
+    theta_v_mid = 0.5 * (theta_v[..., 1:] + theta_v[..., :-1])
+    return constants.g * dtheta / (dz * theta_v_mid)
+
+
 def dew_point_fv3(
     e_mb: jax.Array,
 ) -> jax.Array:

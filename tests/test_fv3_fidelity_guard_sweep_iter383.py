@@ -359,6 +359,7 @@ _GUARD_MODULES = (
     "test_fv3_lcl_state_iter769",                    # iter-769 add
     "test_fv3_dewpoint_depression_iter770",          # iter-770 add
     "test_fv3_mixing_ratio_iter771",                 # iter-771 add
+    "test_fv3_brunt_vaisala_iter772",                # iter-772 add
 )
 
 
