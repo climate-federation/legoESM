@@ -1195,6 +1195,22 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 591: **``shift_fac`` longitude shift**.  Faithful port
+  of FV3 ``fv_grid_tools.F90:662-663``.  When NOT using
+  Schmidt/cube_transform and ``shift_fac > 1e-4``, shift lon
+  by ``-π/shift_fac`` (with mod-2π wrap).  FV3 default
+  ``shift_fac=18`` → west-shift by 10° (away from Japan,
+  toward east coast of China).
+  ``create_cubed_sphere(...)`` gains ``shift_fac: float = 0.0``
+  kwarg (default 0 = no shift, preserves bit-for-bit pre-iter-
+  591 grid).  Gated by ``not apply_schmidt`` (matches FV3 line
+  662 conditional).
+  4 tests (4/4 in 4 s):
+  1. Default 0 → no-op vs prior grid.
+  2. shift_fac=18 → lon diff = -π/18 everywhere.
+  3. Schmidt active → shift ignored.
+  4. lon wrapped to [0, 2π).
+  Wired into iter-383 sweep (now 165).
 - **Iters 581-589 (compacted iter 590)**: user-audit response
   + FV3-faithful feature ports + stretched-grid + AAM stack.
   - iter 581: ``compute_edge_artifact_metric()`` public diag.

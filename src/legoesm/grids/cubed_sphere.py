@@ -251,6 +251,7 @@ def create_cubed_sphere(
     target_lon: float = 0.0,
     target_lat: float = -0.5 * 3.141592653589793,  # -π/2 = no rotation
     do_cube_transform: bool = False,
+    shift_fac: float = 0.0,
 ) -> CubedSphereGrid:
     """Create a cubed-sphere grid.
 
@@ -274,7 +275,11 @@ def create_cubed_sphere(
     lon, lat = _compute_gnomonic_lonlat(n)
 
     # FV3_3D iter 586/589: optional Schmidt stretching.
-    if abs(stretch_fac - 1.0) > 1e-5 or target_lat > -0.5 * jnp.pi + 1e-5:
+    apply_schmidt = (
+        abs(stretch_fac - 1.0) > 1e-5
+        or target_lat > -0.5 * jnp.pi + 1e-5
+    )
+    if apply_schmidt:
         if do_cube_transform:
             # FV3 cube_transform (fv_grid_utils.F90:920-980)
             lon, lat = cube_transform(
@@ -285,6 +290,13 @@ def create_cubed_sphere(
             lon, lat = schmidt_transform(
                 lon, lat, stretch_fac, target_lon, target_lat,
             )
+
+    # FV3_3D iter 591: shift_fac longitude shift (FV3 fv_grid_tools.F90:662-663).
+    # Only applied when NOT using Schmidt/cube_transform (gated in FV3).
+    # FV3 default shift_fac=18 → west-shift by π/18 = 10° (away from Japan).
+    if shift_fac > 1e-4 and not apply_schmidt:
+        lon = lon - jnp.pi / shift_fac
+        lon = jnp.where(lon < 0.0, lon + 2.0 * jnp.pi, lon)
 
     # Cartesian coordinates on unit sphere
     cos_lat = jnp.cos(lat)
