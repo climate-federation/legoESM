@@ -1195,6 +1195,42 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 702: **EMPIRICAL DEAD-END — scalar ζ_corner ord4 has ZERO
+  impact on θ′ edge ratio at C8**.
+
+  Pairs with iter-701 (θ_corner null result).  ζ_corner is the
+  absolute vorticity reconstruction at corners that feeds the
+  Coriolis term ``abs_vor_corner * v_d`` in du/dt — a PRIMARY
+  differentiated quantity, expected to be sensitive.  Measured at
+  C8 (3 seeds × 3 dycore steps):
+
+  ```
+  OFF: mean θ′ edge ratio = 3.2769
+  ON : mean θ′ edge ratio = 3.2769
+  delta (ON − OFF) = −0.0000  (BIT-IDENTICAL)
+  ```
+
+  Bit-identical result — surprising; ζ from random u/v at C8
+  should differ between 2nd and 4th order.  Hypothesis: the smag
+  path already evaluates ``_zeta_a2b_ord4`` (factory has
+  ``corner_div_damp_nord=1``), so ``_zeta_a2b_ord4`` is computed
+  regardless of the flag.  The flag only switches which
+  reconstruction is fed into the Coriolis term.  Apparently the
+  downstream propagation of the ζ difference to θ′ is filtered out
+  by some other averaging in 3 steps.
+
+  Disposition: leave NH factory default OFF (matches PE-vs-NH
+  asymmetry-closure intent of iter-170 without a measurable
+  cost).  Flag remains an opt-in FV3-faithful option.
+
+  Combined with iter-701: both SCALAR cc→corner ord4 paths
+  (θ, ζ) have null θ′ impact under the iter-465 method.  Only
+  the iter-696 VECTOR (u, v) cc→corner path moves the metric
+  (−25.8% C8, −21.9% C16).  Lesson: the cube-imprint floor is
+  driven by the VECTOR halo basis-mismatch at face boundaries,
+  NOT by the scalar reconstruction order.
+
+  Wired into iter-383 sweep (now 266).
 - Iter 701: **EMPIRICAL DEAD-END — scalar θ_corner ord4 has ZERO
   impact on θ′ edge ratio**.
 
