@@ -1195,6 +1195,33 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 726: **``hydrostatic_delz_fv3``** — layer thickness from hydrostatic balance.
+  Faithful JAX port of FV3 hydrostatic delz initialization
+  (model/fv_mapz.F90:3402, 3411 HYDRO_DELZ_REMAP/EXTRAP).
+
+      delz = (R_d / g) · T_v · (pe[k] − pe[k+1])
+
+  where T_v = pt (dry) or T_v = pt·(1 + zvir·q) (moist).
+
+  FV3 sign convention: pe[k] < pe[k+1] (top to bottom) → delz < 0.
+
+  Inverse direction of iter-722 ``compute_pkz_fv3`` (which goes
+  delz → pkz).  Used in vertical-remap init, IC ingestion, and
+  any diagnostic needing delz from (T, p) hydrostatically.
+
+  Pairs with iter-724 ``compute_hybrid_pressure_fv3`` (pe from
+  ak/bk/ps) + iter-722 (pkz from delz/T).
+
+  Tests (7/7 in <1 s):
+  1. Dry isothermal → analytical delz.
+  2. Moist branch → uses T_v, |delz| > dry case.
+  3. Sign convention: monotone-increasing pe → delz < 0.
+  4. Thicker pressure layers → larger |delz|.
+  5. 3-D input → 3-D output.
+  6. No NaN/Inf on random.
+  7. moist=True without q raises ValueError.
+
+  Wired into iter-383 sweep (now 290).
 - Iter 725: **``omega_diagnostic_fv3``** — pressure vertical velocity.
 
   Hydrostatic-limit ω = dp/dt:

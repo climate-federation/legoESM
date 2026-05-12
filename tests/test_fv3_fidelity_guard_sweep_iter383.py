@@ -313,6 +313,7 @@ _GUARD_MODULES = (
     "test_fv3_cappa_moist_iter723",                  # iter-723 add
     "test_fv3_compute_hybrid_pressure_iter724",      # iter-724 add
     "test_fv3_omega_diagnostic_iter725",             # iter-725 add
+    "test_fv3_hydrostatic_delz_iter726",             # iter-726 add
 )
 
 

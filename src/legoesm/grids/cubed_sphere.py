@@ -4515,6 +4515,60 @@ def range_check_fv3(
     return bad_range, qmin, qmax
 
 
+def hydrostatic_delz_fv3(
+    pt: jax.Array,
+    pe: jax.Array,
+    q: jax.Array | None = None,
+    moist: bool = False,
+    zvir: float | None = None,
+) -> jax.Array:
+    """FV3_3D iter 726: layer thickness from hydrostatic balance.
+
+    Faithful JAX port of FV3's hydrostatic delz initialization pattern
+    (model/fv_mapz.F90:3402, 3411 HYDRO_DELZ_REMAP/EXTRAP):
+
+        delz = (R_d / g) · T_v · (pe[k] − pe[k+1])
+
+    where T_v = pt (dry) or T_v = pt·(1 + zvir·q) (moist).
+
+    Sign: FV3 convention has pe[k] < pe[k+1] (top has lower pressure),
+    so delz < 0.
+
+    Inverse of iter-722 ``compute_pkz_fv3`` non-hydrostatic branch.
+    Used in vertical-remap initialization, IC ingestion, and any
+    diagnostic that needs delz from (T, p) under hydrostatic
+    assumption.
+
+    Parameters
+    ----------
+    pt : jax.Array, shape (..., km)
+        Air temperature (K).
+    pe : jax.Array, shape (..., km+1)
+        Interface pressure (Pa, monotone increasing in k).
+    q : jax.Array, shape (..., km), optional
+        Specific humidity (kg/kg).  Required if moist.
+    moist : bool, default False.
+        Use T_v = pt·(1 + zvir·q) instead of T.
+    zvir : float, optional
+        Virtual-T coefficient.  Default ``R_v/R_d − 1``.
+
+    Returns
+    -------
+    delz : jax.Array, shape (..., km)
+        Layer thickness (NEGATIVE in FV3 convention).
+    """
+    if moist:
+        if q is None:
+            raise ValueError("moist=True requires q")
+        if zvir is None:
+            zvir = constants.R_v / constants.R_d - 1.0
+        t_v = pt * (1.0 + zvir * q)
+    else:
+        t_v = pt
+    rdg = constants.R_d / constants.g
+    return rdg * t_v * (pe[..., :-1] - pe[..., 1:])
+
+
 def omega_diagnostic_fv3(
     w: jax.Array,
     delp: jax.Array,
