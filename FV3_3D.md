@@ -1195,256 +1195,36 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
-- Iter 679: **FV3 ``interpolate_vertical_fv3``** — log-p-level interp.
-  Faithful JAX port of FV3 ``interpolate_vertical``
-  (tools/fv_diagnostics.F90:4735-4774).
+- **Iters 671-679 (compacted iter 680)**: FV3 ingestion + diagnostic
+  utilities.  9 iterations covering DA increment readers,
+  diagnostic helpers, and vertical interp:
 
-  Algorithm:
+  | Iter | Function(s)                              | Module / Line              | Role                                |
+  |------|------------------------------------------|----------------------------|-------------------------------------|
+  | 671  | ``dcmip16_bc_uwind_pert``                | test_cases:6823            | BC perturbation trigger             |
+  | 672  | ``dcmip16_tc_uwind_pert``                | test_cases:7168            | TC vortex wind perturbation         |
+  | 673  | ``remap_coef_fv3``                       | fv_treat_da_inc:366        | bilinear remap weights              |
+  | 674  | ``get_staggered_grid_fv3``               | fv_treat_da_inc:444        | B-grid → C/D-grid edges             |
+  | 675  | ``bilinear_interp_apply``                | fv_treat_da_inc:339        | apply remap weights to src field    |
+  | 676  | ``wind_max_fv3``                         | fv_diagnostics:3843        | max wind in 7×7 neighborhood        |
+  | 677  | ``z_sum_fv3`` / ``p_sum_fv3``            | fv_diagnostics:4265/4287   | column / global mass-weighted sums  |
+  | 678  | ``interpolate_z_fv3``                    | fv_diagnostics:4776        | z-level linear interp               |
+  | 679  | ``interpolate_vertical_fv3``             | fv_diagnostics:4735        | log-p-level linear interp           |
 
-      pm[k] = 0.5·(peln[k] + peln[k+1])     # mid-layer log-p
-      logp = log(plev)
-      if logp <= pm[0]:    a2 = a3[0]        # above top
-      elif logp >= pm[-1]: a2 = a3[-1]       # below bottom
-      else: linear interp on (pm[k], a3[k]) ↔ (pm[k+1], a3[k+1])
+  DCMIP16 IC stack COMPLETE: Test 410 (BC) + Test 411 (TC)
+  including both base + trigger perturbations (iter 667-672).
 
-  Pairs with iter-678 ``interpolate_z_fv3`` (z-level variant);
-  this is the p-level companion using log-pressure coordinate.
+  IC ingestion pipeline COMPLETE: ``remap_coef_fv3`` (iter 673)
+  + ``bilinear_interp_apply`` (iter 675) + ``get_staggered_grid_fv3``
+  (iter 674) allow full lat-lon → cubed-sphere C/D-grid IC
+  ingestion (ERA5, GFS, DA increments).
 
-  Used by FV3 for pressure-level diagnostic interpolation
-  (winds at 850 hPa, T at 500 hPa, etc.).
+  Diagnostic helpers: storm-tracking max-wind (iter 676),
+  column/global mass sums (iter 677), z-level + p-level interp
+  (iter 678/679).
 
-  Vectorized via ``jnp.take_along_axis``; exact for linear-in-
-  log-p fields.
-
-  Tests (6/6 in 1 s):
-  1. Output shape correct.
-  2. Above-top clamp.
-  3. Below-bottom clamp.
-  4. Exact at mid-layer log-p.
-  5. Linear-in-log-p interp exact (1e-10).
-  6. Constant-field preserved.
-
-  Wired into iter-383 sweep (now 245).
-- Iter 678: **FV3 ``interpolate_z_fv3``** — linear vertical interp.
-  Faithful JAX port of FV3 ``interpolate_z``
-  (tools/fv_diagnostics.F90:4776-4810).
-
-  Algorithm:
-
-      zm[k] = 0.5·(hght[k] + hght[k+1])     # mid-layer height
-      if zl >= zm[0]:     a2 = a3[..., 0]    # above top
-      elif zl <= zm[-1]:  a2 = a3[..., -1]   # below bottom
-      else: linear interp on (zm[k], a3[k]) ↔ (zm[k+1], a3[k+1])
-
-  Note: FV3 ``hght(k) > hght(k+1)`` (top-down decreasing).
-  Vectorized via ``jnp.take_along_axis``; handles arbitrary
-  leading axes.  Exact for linear-in-z fields.
-
-  Used by FV3 for z-level diagnostic interpolation (winds at
-  10 m, 850 hPa, etc.).
-
-  Tests (6/6 in 1 s):
-  1. Output shape (n_x, n_y).
-  2. Above-top clamp.
-  3. Below-bottom clamp.
-  4. Exact at mid-layer height zm[k].
-  5. Linear-field interp exact (1e-10).
-  6. Constant-field preserved.
-
-  Wired into iter-383 sweep (now 244).
-- Iter 677: **FV3 ``z_sum_fv3`` + ``p_sum_fv3``** — column/global sums.
-  Faithful JAX ports of FV3 ``z_sum`` (tools/fv_diagnostics.F90:
-  4265-4285) + ``p_sum`` (4287-4310, serial branch).
-
-  ``z_sum_fv3(delp, q)`` — column mass-weighted sum::
-
-      sum2[i, j] = Σ_k delp[i, j, k] · q[i, j, k]
-
-  ``p_sum_fv3(delp, area)`` — area-weighted global column-sum::
-
-      col_sum[i, j] = Σ_k delp[i, j, k]
-      p_sum = Σ_{ij} col_sum · area / Σ_{ij} area
-
-  Used by FV3 column-integrated diagnostics (total water, dry
-  mass, ps - ptop global mean).
-
-  Equivalent to: ``p_sum_fv3(delp, area)`` =
-  ``g_sum(z_sum_fv3(delp, ones_like(...)), area, mode=1)``.
-
-  Vectorized; leading axes preserved.
-
-  Tests (5/5 in <1 s):
-  1. z_sum constant field × const delp.
-  2. z_sum matches sum(delp·q) directly.
-  3. z_sum batched leading axes.
-  4. p_sum uniform delp → p_total.
-  5. p_sum area-weighted → mean(col_sum).
-
-  Wired into iter-383 sweep (now 243).
-- Iter 676: **FV3 ``wind_max_fv3``** — max wind speed neighborhood.
-  Faithful JAX port of FV3 ``wind_max``
-  (tools/fv_diagnostics.F90:3843-3874).
-
-  Computes ``ws = sqrt(us² + vs²)`` then maximum over
-  (2·hw+1) × (2·hw+1) neighborhood centered at each cell.
-  FV3 default ``hw=3`` → 7×7 window.
-
-  Implementation: ``jax.lax.reduce_window`` with -∞ padding on
-  boundary (edge cells use effective smaller window from
-  interior values).
-
-  Used by FV3 for storm-tracking / TC max-wind diagnostics
-  (intensification metric for tropical cyclones).
-
-  Handles 2D and 3D inputs (leading axes treated as batch).
-
-  Tests (6/6 in 1 s):
-  1. Output shape matches input.
-  2. Uniform field → ws_max = sqrt(U²+V²).
-  3. Isolated 100 m/s peak propagates to 7×7 region.
-  4. Zero field → zero output.
-  5. 3D (face, n_x, n_y) input handled.
-  6. half_window=1 → 3×3 max-pool.
-
-  Wired into iter-383 sweep (now 242).
-- Iter 675: **FV3 ``bilinear_interp_apply``** — apply remap weights to src.
-  Faithful JAX port of FV3 ``apply_inc_on_3d_scalar`` core
-  (tools/fv_treat_da_inc.F90:339-360, inner bilinear loop).
-
-  Algorithm:
-
-      target[..., i, j] = s2c[..., i, j, 0] · src[id1[i, j], jc[i, j]    ]
-                        + s2c[..., i, j, 1] · src[id2[i, j], jc[i, j]    ]
-                        + s2c[..., i, j, 2] · src[id2[i, j], jc[i, j]+1  ]
-                        + s2c[..., i, j, 3] · src[id1[i, j], jc[i, j]+1  ]
-
-  Pairs with iter-673 ``remap_coef_fv3`` (produces id1, id2, jc,
-  s2c).  Together: full lat-lon → cubed-sphere bilinear
-  interpolation pipeline.
-
-  Verified exact on linear fields f(lon, lat) = a·lon + b·lat
-  (1e-12 atol).  Handles 2D and 3D (with level axis) source
-  fields via automatic axis broadcasting.
-
-  Tests (5/5 in 4 s):
-  1. Output shape matches target.
-  2. Constant src → constant output.
-  3. Linear field reconstructs exactly (1e-12).
-  4. 3D src (im, jm, km) → output (..., km).
-  5. No NaN/Inf on random inputs.
-
-  Wired into iter-383 sweep (now 241).
-- Iter 674: **FV3 ``get_staggered_grid_fv3``** — B-grid → C/D-grid edges.
-  Faithful JAX port of FV3 ``get_staggered_grid``
-  (tools/fv_treat_da_inc.F90:444-475).
-
-  Algorithm:
-
-      pt_d[i, j] = mid_pt_sphere(pt_b[i, j], pt_b[i+1, j])    # N/S edge
-      pt_c[i, j] = mid_pt_sphere(pt_b[i, j], pt_b[i, j+1])    # E/W edge
-
-  Uses iter-608 ``mid_pt_sphere`` for great-circle midpoints.
-  Returns ``(pt_c_lon, pt_c_lat, pt_d_lon, pt_d_lat)`` from
-  B-grid corner array.
-
-  Pairs with iter-673 ``remap_coef_fv3``: together FV3-faithful
-  IC ingestion (regular lat-lon → cubed-sphere C/D-grid) available.
-
-  Broadcasts on leading axes (e.g., 6-face cube).
-
-  Tests (5/5 in 9 s):
-  1. C-grid (n+1, n); D-grid (n, n+1) shapes correct.
-  2. All midpoints on unit sphere.
-  3. Equator uniform-grid midpoints exact.
-  4. No NaN/Inf in outputs.
-  5. Batched (face axis) preserves leading dim.
-
-  Wired into iter-383 sweep (now 240).
-- Iter 673: **FV3 ``remap_coef_fv3``** — lat-lon → cubed-sphere bilinear
-  remap weights.  Faithful JAX port of FV3 ``remap_coef``
-  (tools/fv_treat_da_inc.F90:366-442).
-
-  Algorithm: for each target point find source indices (i1, i2, jc)
-  and bilinear weights s2c[..., 4] (SW, SE, NE, NW corners).
-  Handles longitude wrap-around (target outside [src_lon[0], src_lon[-1]]
-  uses wrap-period 2π).
-
-  Used in FV3 reading regular lat-lon ICs (ERA5, GFS, DA increments)
-  and interpolating to cubed-sphere grid.
-
-  Bilinear interpolation verified exact on linear fields
-  ``f(lon, lat) = a·lon + b·lat``.
-
-  Tests (6/6 in 3 s):
-  1. Output shapes match target.
-  2. 4 weights sum to 1.
-  3. Weights ≥ 0 within source range.
-  4. At src grid point: SW weight = 1, others = 0.
-  5. Linear field exact reconstruction.
-  6. No NaN/Inf on random inputs.
-
-  Wired into iter-383 sweep (now 239).
-- Iter 672: **FV3 ``dcmip16_tc_uwind_pert``** — TC vortex wind perturbation.
-  Faithful JAX port of FV3 ``DCMIP16_TC_uwind_pert``
-  (tools/test_cases.F90:7168-7197).
-
-  Algorithm (z ≤ zt):
-
-      rfac = (r/rp)^1.5
-      fr5  = 0.5·fc·r                     # fc = 2·Ω·sin(phip)
-      Tvrd = (Tv0 - lapse·z)·R_d
-      vt = -fr5 + sqrt(fr5² - 1.5·rfac·Tvrd /
-                       (1 + 2·Tvrd·z/(g·zp²) - (pb/dp)·exp(rfac + (z/zp)²)))
-      d1 = sin(phip)·cos(lat) - cos(phip)·sin(lat)·cos(lon - lamp)
-      d2 = cos(phip)·sin(lon - lamp)
-      d  = max(1e-25, sqrt(d1² + d2²))
-      uu = vt · d1 / d
-      vv = vt · d2 / d
-
-  z > zt: uu = vv = 0.
-
-  Default constants: lamp = π (TC center longitude), phip = π/18
-  (~10°N), fc = 2·Ω·sin(phip).
-
-  Used in FV3 DCMIP16 Test 411 (TC).  With iter-666/669/671:
-  full TC IC stack complete (T, p, q, u_pert).
-
-  Tests (5/5 in 1 s):
-  1. z > zt → (uu, vv) = (0, 0).
-  2. At TC center → finite (regularized).
-  3. No NaN/Inf on random inputs.
-  4. Far-field perturbation small (< 100 m/s).
-  5. Vectorized shapes preserved.
-
-  Wired into iter-383 sweep (now 238).
-- Iter 671: **FV3 ``dcmip16_bc_uwind_pert``** — BC perturbation trigger.
-  Faithful JAX port of FV3 ``DCMIP16_BC_uwind_pert``
-  (tools/test_cases.F90:6823-6838).  Localized
-  Gaussian-in-x, Hermite-cubic-in-z wind perturbation for
-  baroclinic-instability trigger.
-
-  Algorithm:
-
-      zrat = z / zp
-      ZZ   = max(1 - 3·zrat² + 2·zrat³, 0)
-      dst  = great_circle_distance(point, center)
-      pert = max(0, up · ZZ · exp(-(dst/Rp)²))
-
-  Default FV3 constants:
-      up=1 m/s (peak), zp=15000 m (vertical),
-      Rp=R_earth/10 (horizontal), center=(π/9, 2π/9).
-
-  Pairs with iter-667/668 BC IC: full DCMIP16 Test 410 trigger
-  available.
-
-  Tests (5/5 in <1 s):
-  1. Center, surface → pert = up.
-  2. Far field → pert ≈ 0.
-  3. z=zp → ZZ=0 → pert=0.
-  4. pert ≥ 0 everywhere.
-  5. No NaN/Inf on random inputs.
-
-  Wired into iter-383 sweep (now 237).
+  All 9 ports cumulative: ~50 tests, all wired into iter-383
+  sweep (now 245).
 - **Iters 661-669 (compacted iter 670)**: FV3 test-case IC profiles
   (DCMIP16 BC + TC, Galewsky jet, super-cell shear, Williamson 9,
   Rankine vortex, sphere↔cube wind rotation).  9 iterations
