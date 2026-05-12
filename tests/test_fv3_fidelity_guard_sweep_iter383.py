@@ -122,6 +122,8 @@ _GUARD_MODULES = (
     "test_monotone_halo_clip_context_iter505",       # iter-505 add
     "test_pe_monotone_halo_clip_context_iter506",    # iter-506 add
     "test_nh_residual_bisection_iter507",            # iter-507 add
+    "test_corner_div_damp_sweep_iter508",            # iter-508 add
+    "test_residual_growth_iter509",                  # iter-509 add
 )
 
 

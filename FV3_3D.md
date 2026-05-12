@@ -1081,6 +1081,34 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 509: **residual GROWS** under min-edge + clip context.
+  Multi-step test (1, 2, 5, 10 steps, dt=10s):
+  - 1 step:   1.129×
+  - 2 steps:  1.192×
+  - 5 steps:  1.326×
+  - 10 steps: 1.634×  → **+44.7% growth**.
+  Conclusion: the clip context suppresses *single-step*
+  amplification but the residual edge bias **accumulates
+  over time**.  Earlier iters were measuring 1-step snapshots
+  that masked the integrated growth.  This is NOT a dynamic
+  equilibrium — it is a real accumulating edge artifact.
+  Implication: the iter-505 helper alone is insufficient
+  for long runs.  Need either (a) per-substep patching,
+  (b) stronger corner stencil correction, or (c) hyper-
+  diffusion at edges.  1/1 in 123 s.  Wired into iter-383
+  sweep (now 100).
+- Iter 508: **corner_div_damp_d2_bg sweep** under min-edge +
+  clip context (2 seeds, C8, 1 step).  Sweep [1e-5, 5e-5,
+  5e-4, 2e-3, 5e-3]:
+  - 1e-5:  1.094×
+  - 5e-5:  1.093×
+  - 5e-4 (current default): 1.092×
+  - 2e-3:  1.086×
+  - 5e-3:  1.075× (lowest)
+  Residual is INSENSITIVE to corner_div_damp_d2_bg over a
+  500× range (only 1.7% variation).  Confirms iter-507
+  conclusion: the residual is NOT eliminable by tuning this
+  knob.  1/1 in 300 s.  Wired into iter-383 sweep (now 99).
 - Iter 507: **bisect residual 1.13× NH leak** under min-edge
   + clip context.  Toggle each still-on FV3-fidelity flag
   OFF one at a time (4 flags) + key sponge/damp knobs (4
