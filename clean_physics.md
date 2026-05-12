@@ -169,6 +169,26 @@ the "Iterations 1-19 — Summary" section above so the working log stays
 under the auto-loaded MEMORY.md / context envelope.  All previous detailed
 entries remain in the commit messages on `clean_physics`.
 
+### Iteration 28 — 2026-05-12
+
+**Inspection iteration (no code changes).**
+
+- Codex narrow review attempt timed out without producing actionable
+  findings.  Killed at 3:07 and reviewed source directly.
+- Confirmed `multilayer_land.surface_mass_flux=evap_rate` is the
+  intended convention (bulk surface latent flux for coupler); the
+  iter-24 fix only changed soil-side `flux_top` bookkeeping, not the
+  coupler value.  Matches `slab_land.lhflx_actual / L_eff`.
+- Confirmed `richardson.K_v` return is uncapped (correct — implicit
+  path is unconditionally stable; explicit branch caps in the leaf
+  via the iter-17 `dt` plumbing).
+- Confirmed ZM mass-flux closure (zhang_mcfarlane.py:140) uses the
+  dimensionally-correct `M_b = ρ_BL · (CAPE - threshold)+ / (g · τ)`
+  form (audit-fixed earlier).
+
+**Tests (post iter-28):** 11/11 atmosphere AMIP-smoke + RRTMG
+integration tests pass.
+
 ### Iteration 27 — 2026-05-12
 
 **Action: biharmonic lateral mixing tracer mask** (mirror of iter-25 #2).
