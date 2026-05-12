@@ -1195,6 +1195,25 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 685: **FV3 ``prt_mxm_fv3``** — max/min/area-weighted-mean
+  diagnostic.  Faithful JAX port of FV3 ``prt_mxm``
+  (tools/fv_diagnostics.F90:4118-4161).
+
+  Returns ``(qmin, qmax, gmean)`` × fac:
+    - qmin, qmax : min/max over all cells & levels
+    - gmean : area-weighted global mean of bottom-layer (k=-1)
+              (FV3 bug-fix line 4157: g_sum on q[..., km])
+
+  Used by FV3 for diagnostic print summaries.
+
+  Tests (5/5 in <1 s):
+  1. All outputs scalar.
+  2. qmin/qmax = min/max(q) × fac.
+  3. Uniform field → gmean = constant.
+  4. fac doubles output.
+  5. No NaN/Inf on random inputs.
+
+  Wired into iter-383 sweep (now 250).
 - Iter 684: **FV3 ``get_height_given_pressure_fv3``** — height at p.
   Faithful JAX port of FV3 ``get_height_given_pressure``
   (tools/fv_diagnostics.F90:4366-4411).  Inverse of iter-683.

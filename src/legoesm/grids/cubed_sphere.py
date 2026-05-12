@@ -2806,6 +2806,47 @@ def get_pressure_given_height_fv3(
     return p
 
 
+def prt_mxm_fv3(
+    q: jax.Array, area: jax.Array, fac: float = 1.0,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """FV3_3D iter 685: max + min + area-weighted global mean diagnostic.
+
+    Faithful JAX port of FV3 ``prt_mxm`` (tools/fv_diagnostics.F90:
+    4118-4161).  Computes::
+
+        qmin = min(q)
+        qmax = max(q)
+        gmean = area-weighted global mean of q's bottom layer
+                (FV3 line 4157: ``q(is:ie, js:je, km)``)
+        All scaled by ``fac``.
+
+    Parameters
+    ----------
+    q : jax.Array, shape (..., n_x, n_y, km)
+        3D field.
+    area : jax.Array, shape (..., n_x, n_y)
+        Cell areas.
+    fac : float, default 1.0
+        Multiplicative factor applied to output (e.g., unit
+        conversion).
+
+    Returns
+    -------
+    qmin, qmax : jax.Array (scalars)
+        Min / max of q over all cells & levels (scaled by fac).
+    gmean : jax.Array (scalar)
+        Area-weighted global mean of q's bottom layer (k=-1).
+    """
+    qmin = jnp.min(q) * fac
+    qmax = jnp.max(q) * fac
+    # FV3 bug-fix line: g_sum on q[..., km] (bottom layer)
+    q_bot = q[..., -1]
+    total_area = jnp.sum(area)
+    safe_area = jnp.where(total_area > 0.0, total_area, 1.0)
+    gmean = jnp.sum(q_bot * area) / safe_area * fac
+    return qmin, qmax, gmean
+
+
 def range_check_fv3(
     q: jax.Array, q_low: float, q_hi: float,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
