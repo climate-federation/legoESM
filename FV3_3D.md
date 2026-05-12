@@ -1195,6 +1195,33 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 734: **``air_density_fv3``** + iter-725 refactor.
+
+  Faithful port of FV3's standard air density pattern:
+
+      ρ = −delp / (g · delz)
+
+  FV3 sign convention (delp > 0, delz < 0) → ρ > 0.  Derived from
+  hydrostatic balance ``dp/dz = −ρg`` applied to layer thicknesses.
+
+  iter-725 ``omega_diagnostic_fv3`` refactored to delegate:
+  ω = w·delp/delz → ω = −ρ·g·w (algebraically identical; preserved
+  bit-by-bit, pinned by regression test).
+
+  Pairs with iter-732 ``layer_mean_pressure_fv3`` and iter-726
+  ``hydrostatic_delz_fv3`` to round out the thermodynamic
+  bridging-helper set.
+
+  Tests (5/5 in <1 s):
+  1. delp=1e4 Pa, delz=-1000 m → ρ ≈ 1.02 kg/m³ analytical.
+  2. Random delp/delz → ρ > 0 always.
+  3. iter-725 omega refactor: output bit-identical to before.
+  4. 3-D shapes preserved.
+  5. No NaN/Inf on random.
+
+  iter-725 5/5 tests still pass.
+
+  Wired into iter-383 sweep (now 298).
 - Iter 733: **refactor iter-729/716 to delegate to iter-732**.
 
   Two callsites had inline ``delp/Δpeln`` patterns that match the

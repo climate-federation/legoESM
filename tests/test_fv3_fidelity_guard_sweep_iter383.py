@@ -321,6 +321,7 @@ _GUARD_MODULES = (
     "test_fv3_compute_pe_from_delp_iter731",         # iter-731 add
     "test_fv3_layer_mean_pressure_iter732",          # iter-732 add
     "test_fv3_dry_pressure_refactor_iter733",        # iter-733 add
+    "test_fv3_air_density_iter734",                  # iter-734 add
 )
 
 

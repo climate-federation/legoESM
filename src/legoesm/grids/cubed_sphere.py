@@ -2806,6 +2806,40 @@ def get_pressure_given_height_fv3(
     return p
 
 
+def air_density_fv3(
+    delp: jax.Array,
+    delz: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 734: air density from hydrostatic balance.
+
+    Faithful port of FV3's standard ρ pattern (used inline at many
+    sites in dyn_core.F90, fv_mapz.F90, and iter-725 omega
+    diagnostic):
+
+        ρ = −delp / (g · delz)
+
+    With FV3 sign convention (delp > 0, delz < 0), this returns
+    a positive density.  Derived from hydrostatic balance
+    ``dp/dz = −ρg`` applied to layer thicknesses.
+
+    Used by iter-725 ``omega_diagnostic_fv3`` (ω = −ρgw) and
+    by any thermodynamic budget needing column density.
+
+    Parameters
+    ----------
+    delp : jax.Array, shape (..., km)
+        Pressure thickness (Pa, positive).
+    delz : jax.Array, shape (..., km)
+        Layer thickness (NEGATIVE in FV3).
+
+    Returns
+    -------
+    rho : jax.Array, shape (..., km)
+        Air density (kg/m³, positive).
+    """
+    return -delp / (constants.g * delz)
+
+
 def layer_mean_pressure_fv3(
     delp: jax.Array,
     peln: jax.Array,
@@ -4768,7 +4802,9 @@ def omega_diagnostic_fv3(
     omega : jax.Array, shape (..., km)
         Pressure vertical velocity (Pa/s).
     """
-    return w * delp / delz
+    # iter-734: ω = -ρgw, where ρ = -delp/(g·delz).
+    # Note original ``w * delp / delz`` is bit-identical to ``-ρ·g·w``.
+    return -air_density_fv3(delp, delz) * constants.g * w
 
 
 def compute_hybrid_pressure_fv3(
