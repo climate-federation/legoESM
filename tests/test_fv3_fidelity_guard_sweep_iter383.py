@@ -202,6 +202,7 @@ _GUARD_MODULES = (
     "test_pe_te_boundary_sign_iter603",              # iter-603 add
     "test_pe_aam_iter604",                           # iter-604 add
     "test_column_d_ext_iter605",                     # iter-605 add
+    "test_terrain_filter_iter606",                   # iter-606 add
 )
 
 

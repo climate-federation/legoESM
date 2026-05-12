@@ -1195,6 +1195,30 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 606: **terrain_filter** (FV3 del2/del4_cubed_sphere port).
+  Faithful port of FV3 ``del2_cubed_sphere`` and
+  ``del4_cubed_sphere`` from ``tools/fv_surf_map.F90:817+``.
+  Applied at IC load time to smooth surface geopotential phis
+  before the dycore reads it — prevents stair-step terrain
+  artifacts and improves dycore stability.
+
+      from legoesm.grids.terrain_filter import terrain_filter
+      phis_smooth = terrain_filter(phis, grid, n_iter=4, nord=2)
+
+  Parameters match FV3 namelist:
+  - ``n_iter`` = ``n_zs_filter`` (default 4).
+  - ``nord`` = ``nord_zs_filter`` (2 = del-2, 4 = del-4).
+  - ``cd`` defaults to ``0.20·min(grid.area)`` matching FV3
+    ``cnst_0p20·da_min`` at ``external_ic.F90:609``.
+  Uses legoESM ``laplacian_compact`` as the Laplacian (matches
+  FV3 metric-aware flux-form to discretization order for smooth
+  fields).
+  Tests (4/4 in 5 s):
+  1. n_iter=0 → no-op.
+  2. Sharp step → variance reduced.
+  3. Constant field → preserved (Δ²·const = 0).
+  4. del-4 produces finite output (different from del-2).
+  Wired into iter-383 sweep (now 179).
 - Iter 605: **``column_d_ext_field`` / ``column_mass_weighted_mean``
   utilities** (FV3 d_ext external-mode damping support).
   Faithful port of FV3 ``dyn_core.F90:1310-1326``:
