@@ -1185,6 +1185,20 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 556: **FV3-faithful convergence rates** on SBR.
+  Mirror iter-532 (min-edge+clip) with FV3-faithful alone
+  at C8/C16/C24:
+  - C8:  edge_std=2.99e-2, int_std=1.35e-2
+  - C16: edge_std=1.86e-2, int_std=5.07e-3
+  - C24: edge_std=1.49e-2, int_std=3.05e-3
+  Log-log fits:
+  - FV3-faithful: edge ~ N⁻⁰·⁶⁴, int ~ N⁻¹·³⁶
+  - min-edge+clip (iter-532): edge ~ N⁻⁰·⁸², int ~ N⁻¹·⁵³
+  Surprise: FV3-faithful has SLOWER convergence rate but
+  LOWER ABSOLUTE values at all measured N (1.86e-2 vs 5.89e-2
+  at C16).  Crossover at ~C9600 — far above any practical
+  resolution.  For C32-C192 production: **FV3-faithful wins**.
+  1/1 in 90 s.  Wired into iter-383 sweep (now 138).
 - Iter 555: **clip is marginal on FV3-faithful at smooth IC**.
   iter-553 showed FV3-faithful alone gives 89.5% edge_std
   reduction.  Does adding clip add more?  Measured at C16
