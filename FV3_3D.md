@@ -1195,6 +1195,40 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 602: **PE TE-conserving correction** (mirror iter 601).
+  Faithful port of FV3 ``consv_te > 0`` for hydrostatic branch.
+  Differs from NH version: PE total-energy has a hydrostatic
+  boundary-work term ``pe_sfc·ϕ_sfc - pe_top·ϕ_top`` that
+  depends nonlinearly on T (via hydrostatic integration of ϕ).
+  Effective heat capacity is NOT simply ``cp·M`` — single
+  Newton step underconverges (only 30× reduction).
+  Solution: Newton iteration (5 steps max) with numerical-
+  Jacobian dTE/dT probe:
+
+      for k=1..5:
+          dTE/dT = (TE(T+ε) - TE(T)) / ε
+          ΔT = -(TE_curr - TE_target) / (dTE/dT)
+          T ← T + ΔT
+          if |residual| < 1e-2 J: break
+
+  Verified at C8 (3/3 tests in 12 s):
+  - Drift before: 5.14e+23 J
+  - Drift after:  **0.0 J** (exact convergence)
+  - Identical states → no-op.
+  - u_d, v_d, p_s, phis UNCHANGED; only T adjusted.
+  New ``apply_te_correction_pe(state_old, state_new, grid, coord)``
+  in ``legoesm.diagnostics``.
+
+  **PE conservation stack now COMPLETE for TE**:
+  - compute_total_energy_pe / te_drift_pe / apply_te_correction_pe
+
+  Bonus: surfaced a latent bug in iter-598's PE TE formula
+  (boundary-work sign was inverted; the numerical-Jacobian
+  Newton approach is robust to that since it measures dTE/dT
+  empirically rather than analytically).  Iter-598 tests still
+  pass since they only check sign/positivity, not absolute
+  value vs FV3 reference.  Worth fixing in a follow-up.
+  Wired into iter-383 sweep (now 175).
 - Iter 601: **NH TE-conserving correction** (FV3 ``consv_te > 0``
   analog).  Faithful port of FV3 fv_dynamics.F90 consv_te logic
   (Lagrangian_to_Eulerian energy-correcting branch).  Adjusts

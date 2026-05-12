@@ -12,6 +12,7 @@ from legoesm.diagnostics.total_energy_nh import (
     te_drift_nh,
 )
 from legoesm.diagnostics.total_energy_pe import (
+    apply_te_correction_pe,
     compute_total_energy_pe,
     te_drift_pe,
 )

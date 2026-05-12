@@ -198,6 +198,7 @@ _GUARD_MODULES = (
     "test_total_energy_pe_iter598",                  # iter-598 add
     "test_te_drift_iter599",                         # iter-599 add
     "test_te_correction_iter601",                    # iter-601 add
+    "test_te_correction_pe_iter602",                 # iter-602 add
 )
 
 
