@@ -1304,6 +1304,72 @@ def get_center_vect(
     return u1, u2
 
 
+def symm_ed(
+    lamda: jax.Array, theta: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 619: enforce ED-grid symmetry about i/j midplanes.
+
+    Faithful port of FV3 ``symm_ed`` (fv_grid_utils.F90:1587-1626).
+    Operates on a face-2 ED grid of shape ``(im+1, im+1)`` and
+    enforces symmetry in both axes via three passes:
+
+    1. Copy lamda's first column into all interior columns
+       (FV3 lines 1595-1599).
+    2. Symmetrize about i=im/2+1: pair (i, im+2-i) gets avg/π
+       reflection (lines 1601-1611).
+    3. Symmetrize about j=im/2+1: pair (j, im+2-j) gets avg in
+       theta (with sign flip) and avg in lamda (lines 1614-1624).
+
+    Assumes input is the FV3 face-2 orientation produced by
+    ``gnomonic_dist`` — symmetries use the FV3 ``+π/-π``
+    convention that's specific to that face orientation.
+
+    Parameters
+    ----------
+    lamda, theta : jax.Array, shape ``(im+1, im+1)``
+        Longitude, latitude in radians (FV3 face-2 layout).
+
+    Returns
+    -------
+    lamda_sym, theta_sym : jax.Array, shape ``(im+1, im+1)``
+        Symmetrized grid.
+    """
+    n = lamda.shape[0]
+    im = n - 1
+    pi = jnp.pi
+
+    # Step 1: lamda[i, 1:im+1] = lamda[i, 0] for i ∈ [1, im-1]
+    # FV3 lines 1595-1599: only interior columns (j>0) updated;
+    # row i=0 and i=im untouched.
+    lamda = lamda.at[1:im, 1:im + 1].set(lamda[1:im, 0:1])
+
+    # Step 2: symmetrize about i=im/2+1 (FV3 1601-1611)
+    i_half = im // 2
+    i_idx = jnp.arange(i_half)
+    ip_idx = im - i_idx
+    avg_lon = 0.5 * (lamda[i_idx, :] - lamda[ip_idx, :])
+    lamda = lamda.at[i_idx, :].set(avg_lon + pi)
+    lamda = lamda.at[ip_idx, :].set(pi - avg_lon)
+    avg_lat = 0.5 * (theta[i_idx, :] + theta[ip_idx, :])
+    theta = theta.at[i_idx, :].set(avg_lat)
+    theta = theta.at[ip_idx, :].set(avg_lat)
+
+    # Step 3: symmetrize about j=im/2+1 (FV3 1614-1624)
+    # Only i ∈ [1, im-1] (interior columns) are updated
+    j_half = im // 2
+    j_idx = jnp.arange(j_half)
+    jp_idx = im - j_idx
+    int_i = slice(1, im)
+    avg_lon_j = 0.5 * (lamda[int_i, :][:, j_idx] + lamda[int_i, :][:, jp_idx])
+    lamda = lamda.at[int_i, j_idx].set(avg_lon_j)
+    lamda = lamda.at[int_i, jp_idx].set(avg_lon_j)
+    avg_lat_j = 0.5 * (theta[int_i, :][:, j_idx] - theta[int_i, :][:, jp_idx])
+    theta = theta.at[int_i, j_idx].set(avg_lat_j)
+    theta = theta.at[int_i, jp_idx].set(-avg_lat_j)
+
+    return lamda, theta
+
+
 def gnomonic_angl(im: int) -> tuple[jax.Array, jax.Array]:
     """FV3_3D iter 617: equi-angular gnomonic grid for FV3 face 2.
 

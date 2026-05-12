@@ -214,6 +214,7 @@ _GUARD_MODULES = (
     "test_fv3_intersect_iter616",                    # iter-616 add
     "test_fv3_gnomonic_iter617",                     # iter-617 add
     "test_fv3_get_center_vect_iter618",              # iter-618 add
+    "test_fv3_symm_ed_iter619",                      # iter-619 add
 )
 
 

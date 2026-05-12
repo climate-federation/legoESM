@@ -1195,6 +1195,31 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 619: **FV3 ``symm_ed``** — ED-grid symmetrization.  Faithful
+  JAX port of FV3 ``symm_ed`` (fv_grid_utils.F90:1587-1626).
+  Operates on a face-2 ED grid of shape ``(im+1, im+1)`` and
+  enforces three FV3 symmetry passes:
+
+  1. Copy lamda's first column into all interior columns
+     (FV3 lines 1595-1599).
+  2. Symmetrize about i=im/2+1: pair (i, im+2-i) gets avg/π
+     reflection (lines 1601-1611).
+  3. Symmetrize about j=im/2+1: pair (j, im+2-j) gets avg in
+     theta (with sign flip for ``theta(i,jp) = -avg``) and avg
+     in lamda (lines 1614-1624).
+
+  Assumes input in FV3 face-2 orientation produced by iter-617
+  ``gnomonic_dist`` — the +π / -π reflections are specific to
+  that face's orientation.
+
+  Tests (5/5 in 2 s):
+  1. Output shape preserved.
+  2. Idempotent (symm_ed² = symm_ed).
+  3. theta symmetric about i-midplane.
+  4. theta antisymmetric about j-midplane (interior columns).
+  5. Applied to gnomonic_dist — finite, sane diff magnitude.
+
+  Wired into iter-383 sweep (now 191).
 - Iter 618: **FV3 ``get_center_vect``** — cell-center tangent vectors.
   Faithful JAX port of FV3 ``get_center_vect``
   (fv_grid_utils.F90:1795-1845, non-``OLD_VECT`` branch).  Given
