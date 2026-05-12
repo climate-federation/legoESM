@@ -136,6 +136,98 @@ def apply_hord8_limiter(bl, br, dm):
     return bl_out, br_out
 
 
+def apply_hord10_limiter(bl, br, dm, q):
+    """FV3_3D iter 593: FV3 iord=10 Lin+Rood (1996) limiter with
+    pmp/lac extra constraints (tp_core.F90:554-572).
+
+    The most subtle of FV3's hord variants.  Uses one-sided differences
+    ``dq[i] = 2·(q[i+1] - q[i])`` to build pmp (positive max) and lac
+    (lower asymmetric constraint) bounds that prevent new extrema while
+    allowing tighter convergence than iord=9.
+
+    Algorithm:
+        dq[i] = 2·(q[i+1] - q[i])
+        # near-flat region: zero bl, br
+        if |dm[i-1]| + |dm[i]| + |dm[i+1]| < near_zero:
+            bl, br = 0, 0
+        # new extremum: apply pmp/lac bounds
+        elif |3·(bl+br)| > |bl-br|:
+            pmp_2 = dq[i-1]; lac_2 = pmp_2 - 0.75·dq[i-2]
+            br = min(max(0, pmp_2, lac_2),
+                     max(br, min(0, pmp_2, lac_2)))
+            pmp_1 = -dq[i]; lac_1 = pmp_1 + 0.75·dq[i+1]
+            bl = min(max(0, pmp_1, lac_1),
+                     max(bl, min(0, pmp_1, lac_1)))
+
+    Parameters
+    ----------
+    bl, br, dm, q : jax.Array, shape (..., N)
+        Cell-center perturbations, monotone slope, and cell values
+        along the transport axis (last dimension).  N must be ≥ 5
+        (need 2 ghosts on each side for dq stencil).
+
+    Returns
+    -------
+    bl_out, br_out : jax.Array, same shape as inputs.
+
+    Notes
+    -----
+    NOT yet wired into the default transport path.  Exposed as a
+    utility.  Interior cells [2:-2] are limited; boundary cells
+    keep their original bl, br (caller's responsibility to handle
+    halos / pad if needed).
+    """
+    near_zero = 1e-30
+    # dq[i] = 2·(q[i+1] - q[i]) — needs N+1 q values; truncate.
+    # Build dq along last axis.
+    dq = 2.0 * (q[..., 1:] - q[..., :-1])  # shape (..., N-1)
+
+    # For interior cells i ∈ [2, N-3], we need:
+    #   dm[i-1], dm[i], dm[i+1]
+    #   dq[i-2], dq[i-1], dq[i], dq[i+1]
+    # Build aligned slices for interior region.
+    bl_i = bl[..., 2:-2]
+    br_i = br[..., 2:-2]
+    dm_im1 = dm[..., 1:-3]
+    dm_i = dm[..., 2:-2]
+    dm_ip1 = dm[..., 3:-1]
+    dq_im2 = dq[..., :-3]
+    dq_im1 = dq[..., 1:-2]
+    dq_i = dq[..., 2:-1]
+    dq_ip1 = dq[..., 3:]
+
+    sum_dm = jnp.abs(dm_im1) + jnp.abs(dm_i) + jnp.abs(dm_ip1)
+    is_flat = sum_dm < near_zero
+    has_new_extremum = jnp.abs(3.0 * (bl_i + br_i)) > jnp.abs(bl_i - br_i)
+
+    pmp_2 = dq_im1
+    lac_2 = pmp_2 - 0.75 * dq_im2
+    br_clipped = jnp.minimum(
+        jnp.maximum(jnp.maximum(0.0, pmp_2), lac_2),
+        jnp.maximum(br_i, jnp.minimum(jnp.minimum(0.0, pmp_2), lac_2)),
+    )
+    pmp_1 = -dq_i
+    lac_1 = pmp_1 + 0.75 * dq_ip1
+    bl_clipped = jnp.minimum(
+        jnp.maximum(jnp.maximum(0.0, pmp_1), lac_1),
+        jnp.maximum(bl_i, jnp.minimum(jnp.minimum(0.0, pmp_1), lac_1)),
+    )
+
+    bl_new = jnp.where(
+        is_flat, 0.0,
+        jnp.where(has_new_extremum, bl_clipped, bl_i),
+    )
+    br_new = jnp.where(
+        is_flat, 0.0,
+        jnp.where(has_new_extremum, br_clipped, br_i),
+    )
+
+    # Re-assemble: keep boundary cells unchanged, update interior.
+    bl_out = bl.at[..., 2:-2].set(bl_new)
+    br_out = br.at[..., 2:-2].set(br_new)
+    return bl_out, br_out
+
+
 def apply_hord11_limiter(bl, br, dm, ppm_fac: float = 1.5):
     """FV3_3D iter 592: FV3 iord=11 limiter (tp_core.F90:573-579).
 

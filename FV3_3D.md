@@ -1195,6 +1195,36 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 593: **FV3 iord=10 PPM limiter utility** (Lin+Rood 1996
+  with pmp/lac extra constraints).  Faithful port of FV3
+  ``tp_core.F90:554-572``.  The most subtle FV3 PPM variant.
+  Uses one-sided diffs ``dq[i] = 2·(q[i+1]-q[i])`` to build
+  pmp (positive max) and lac (asymmetric constraint) bounds:
+
+      if |dm[i-1]|+|dm[i]|+|dm[i+1]| < near_zero: bl,br = 0
+      elif |3·(bl+br)| > |bl-br|:  # new extremum
+          pmp_2 = dq[i-1]; lac_2 = pmp_2 - 0.75·dq[i-2]
+          br = clip_to_bounds(br, pmp_2, lac_2)
+          pmp_1 = -dq[i];  lac_1 = pmp_1 + 0.75·dq[i+1]
+          bl = clip_to_bounds(bl, pmp_1, lac_1)
+
+  New ``apply_hord10_limiter(bl, br, dm, q)`` in
+  ``legoesm.core.fv_tp_2d``.  Interior cells [2:-2] limited;
+  first/last 2 boundary cells preserved (caller handles halos).
+  Default transport path unchanged (still iord=9).
+  Tests (4/4 in <1 s):
+  1. Returns finite values.
+  2. Flat field (dm=0) → bl, br zeroed in interior.
+  3. Boundary cells unchanged.
+  4. Smooth field (no new extremum) → bl, br pass through.
+  **All 5 FV3 hord PPM variants now exposed:**
+  - iord=8  via apply_hord8_limiter   (iter 585)
+  - iord=9  via _pert_ppm             (default)
+  - iord=10 via apply_hord10_limiter  (iter 593) ← NEW
+  - iord=11 via apply_hord11_limiter  (iter 592)
+  - iord=12 via _pert_ppm_iv0
+  Closes user audit item #3 (PPM tracer variants) fully.
+  Wired into iter-383 sweep (now 167).
 - Iter 592: **FV3 iord=11 PPM limiter utility**.  Faithful port
   of FV3 ``tp_core.F90:573-579``.  iord=11 is "emulation of
   2nd van Leer scheme using PPM codes" — same formula as
