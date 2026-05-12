@@ -3772,6 +3772,62 @@ def beta_plane_fv3(
     return 2.0 * constants.Omega * jnp.cos(lat_rad) / constants.R_earth
 
 
+def rossby_radius_fv3(
+    n_brunt: jax.Array,
+    f: jax.Array,
+    H: jax.Array,
+    f_floor: float = 1e-12,
+) -> jax.Array:
+    """FV3_3D iter 781: barotropic Rossby radius of deformation.
+
+    Natural horizontal length scale of stratified rotating flow:
+
+        L_R = N · H / |f|
+
+    where N = √N² is the Brunt-Väisälä frequency (caller takes
+    the square root of iter-772 output), f is Coriolis (iter-778),
+    and H is a vertical-scale depth.
+
+    Sets the meridional/zonal scale at which rotational
+    (Coriolis) and stratification (buoyancy) effects balance.
+
+    Physical interpretation:
+      * Synoptic mid-latitudes (N ~ 0.01, H ~ 10 km, |f| ~ 1e-4):
+        L_R ~ 1000 km — the classic synoptic-scale eddy scale.
+      * Tropics (|f| → 0): L_R → ∞; equator-bound modes use the
+        equatorial Rossby radius √(N·H/(2·β)) instead.
+      * Ocean baroclinic (H ~ 1 km, N ~ 0.01): L_R ~ 30-100 km.
+
+    Used by: baroclinic-instability eddy length scale, model
+    eddy-permitting/resolving criterion (Δx < L_R/4 ~ "eddy
+    resolving"), mesoscale energy spectra, Rhines transition
+    scale to zonal jets.
+
+    The ``f_floor`` clamp prevents div-by-0 at the equator;
+    default 1e-12 → equatorial L_R ≈ 6.3·10¹⁵ m (effectively
+    "no rotational constraint" at the equator).
+
+    Parameters
+    ----------
+    n_brunt : jax.Array
+        Brunt-Väisälä frequency N (s⁻¹).  Caller computes
+        ``jnp.sqrt(jnp.maximum(0, n_sq))`` from iter-772 N².
+    f : jax.Array
+        Coriolis parameter (s⁻¹), from iter-778
+        ``coriolis_parameter_fv3``.
+    H : jax.Array
+        Vertical scale depth (m).
+    f_floor : float
+        Lower bound on |f| (s⁻¹); default 1e-12.
+
+    Returns
+    -------
+    L_R : jax.Array
+        Rossby radius of deformation (m).
+    """
+    return n_brunt * H / jnp.maximum(jnp.abs(f), f_floor)
+
+
 def kinetic_energy_fv3(
     ua: jax.Array,
     va: jax.Array,

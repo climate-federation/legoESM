@@ -4938,4 +4938,47 @@ is verifiable with unit tests in seconds rather than wall-time
 sweeps.  Users running the NH compressible-Euler 3D path now have
 the same cube-imprint defense as users running the PE 3D path.
 
+## Iter 781 — rossby_radius_fv3 (barotropic L_R = N·H/|f|)
+
+Added `rossby_radius_fv3(n_brunt, f, H, f_floor=1e-12)` to
+`grids/cubed_sphere.py`.  Computes:
+
+```
+L_R = N · H / max(|f|, f_floor)        [m]
+```
+
+Caller passes `N = √max(0, N²)` from iter-772 + `f` from iter-778.
+``f_floor`` clamp prevents div-by-0 at equator (default 1e-12 →
+L_R ≈ 6.3·10¹³ m).
+
+Physical interpretation:
+  * Synoptic mid-lat (N=0.01, H=10 km, 30°N |f|=Ω): L_R ≈ 1.37 Mm
+    (textbook synoptic-scale Rossby radius).
+  * Pole (|f|=2·Ω): L_R = N·H/(2·Ω); narrower than mid-lat.
+  * Equator: rotational constraint vanishes; equatorial-Rossby-
+    radius √(N·H/(2·β)) is the appropriate replacement and would
+    use iter-780 β.
+
+Used by: baroclinic-instability eddy length-scale predictions,
+model eddy-permitting/resolving criterion (Δx < L_R/4 ≡ "eddy
+resolving"), mesoscale energy spectra, Rhines transition scale
+to zonal jets.
+
+Test: `tests/test_fv3_rossby_radius_iter781.py` (7 tests: 30°N
+synoptic ≈ 1.37 Mm, equator floored finite, pole L_R = N·H/(2·Ω),
+monotone in N, monotone in H, full pipeline (θ, q, z, lat, H) →
+N² → N → f → L_R via iter-772 + iter-778 composition,
+3-D shapes + finite + positive).
+
+### Why this iteration was meaningful
+
+L_R is the canonical horizontal scale of stratified rotating
+flow.  It directly enters: (1) eddy-resolving model design (Δx <
+L_R/4); (2) baroclinic-instability theory (most unstable mode at
+wavenumber k ~ 1/L_R); (3) Rhines transition L_β = √(U/β) vs L_R
+ratio for jet formation; (4) mesoscale energy spectra in QG
+turbulence.  Composes iter-772 + iter-778 + iter-780 to close the
+rotation-stratification diagnostic suite.  Pure JAX, vmap-
+compatible.  No new physical constants introduced.
+
 

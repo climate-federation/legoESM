@@ -368,6 +368,7 @@ _GUARD_MODULES = (
     "test_fv3_coriolis_parameter_iter778",           # iter-778 add
     "test_fv3_inertial_period_iter779",              # iter-779 add
     "test_fv3_beta_plane_iter780",                   # iter-780 add
+    "test_fv3_rossby_radius_iter781",                # iter-781 add
 )
 
 
