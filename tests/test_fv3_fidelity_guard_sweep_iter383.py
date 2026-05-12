@@ -179,6 +179,7 @@ _GUARD_MODULES = (
     "test_low_amplitude_sbr_iter573",                # iter-573 add
     "test_50step_optimal_iter576",                   # iter-576 add
     "test_linearity_tiny_pert_iter578",              # iter-578 add
+    "test_sw_rest_preservation_iter579",             # iter-579 add
 )
 
 

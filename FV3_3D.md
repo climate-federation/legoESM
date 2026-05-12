@@ -1195,6 +1195,15 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 579: **SW rest preservation** — mirror iter-572.
+  SW dycore with constant h=1000m, zero u/v, flat surface,
+  10 steps @ N=12.  Result:
+  - h drift:    max|h - 1000| = **0.0** (exact)
+  - u_d drift:  max|u_d| = 0.0
+  - v_d drift:  max|v_d| = 0.0
+  Both SW and NH (iter-572) preserve quiescent rest exactly.
+  Confirms both dycores are mathematically consistent.
+  1/1 in 12 s.  Wired into iter-383 sweep (now 156).
 - Iter 578: **dycore linearity at small perturbations**.
   Apply Gaussian θ′ bump at amplitudes 1 mK and 10 mK,
   zero winds, 10 steps @ C16 + optimal stack:
