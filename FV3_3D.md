@@ -1195,6 +1195,18 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 576: **50-step optimal stack — non-linear growth**.
+  Extend iter-566 to 50 steps @ C24 + optimal stack:
+  - 10 steps: edge_std = 5.83e-3, max|θ′|=0.6, max|u|≈30
+  - 30 steps: edge_std = 3.43e-2
+  - **50 steps: edge_std = 1.08e-1, max|θ′|=1.16 K, max|u|=72 m/s**
+  - growth 10→50: **18.4×** (vs power-law prediction 6.0×)
+  Growth becomes super-power-law at 50 steps.  System is
+  entering non-linear regime — the 1 K θ′ perturbation is
+  now a real signal, not edge noise.  Practical limit at
+  C24 + dt=10s: stable & well-controlled up to ~30 steps.
+  Longer runs need either finer dt or higher resolution.
+  1/1 in 40 s.  Wired into iter-383 sweep (now 154).
 - Iter 573: **NH SBR amplitude scaling**.  Sweep U_0 ∈
   {2, 5, 10, 20} m/s @ C16 + iters=8 + clip, 10 steps:
   - U_0=2:  edge_std=4.10e-4 (0.4 mK — calm)
