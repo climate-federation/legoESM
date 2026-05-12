@@ -378,6 +378,7 @@ _GUARD_MODULES = (
     "test_fv3_ekman_layer_depth_iter788",            # iter-788 add
     "test_fv3_ekman_transport_iter789",              # iter-789 add
     "test_fv3_geostrophic_wind_iter790",             # iter-790 add
+    "test_fv3_ageostrophic_wind_iter791",            # iter-791 add
 )
 
 

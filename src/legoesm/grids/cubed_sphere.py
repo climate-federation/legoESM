@@ -4310,6 +4310,52 @@ def geostrophic_wind_fv3(
     return u_g, v_g
 
 
+def ageostrophic_wind_fv3(
+    u: jax.Array,
+    v: jax.Array,
+    u_g: jax.Array,
+    v_g: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 791: ageostrophic wind V_a = V − V_g.
+
+    Decomposes total horizontal wind into geostrophic and
+    ageostrophic components:
+
+        u_a = u − u_g
+        v_a = v − v_g
+
+    Ageostrophic flow carries the entire dynamical signature of
+    departures from geostrophic balance: jet-streak entrance/exit
+    quadrant divergence, frontogenetic secondary circulations,
+    isallobaric wind (∂p/∂t driven), gravity-wave emission,
+    inertial oscillations.
+
+    For QG flow Ro ≪ 1 the ageostrophic wind is O(Ro)·V_g; for
+    semi-geostrophic (Ro ~ 1) it becomes comparable.
+
+    Used by: jet-streak quadrant analysis (left-entrance / right-
+    exit = divergence aloft → surface lows), Q-vector
+    frontogenesis diagnostics, isallobaric-wind plot generation,
+    gravity-wave source identification (V_a · ∇V_g term in TKE
+    budget), Rossby-wave non-linear cascade decomposition.
+
+    Composes iter-790 ``geostrophic_wind_fv3``.
+
+    Parameters
+    ----------
+    u, v : jax.Array
+        Total horizontal wind components (m/s).
+    u_g, v_g : jax.Array
+        Geostrophic components (m/s), from iter-790.
+
+    Returns
+    -------
+    (u_a, v_a) : tuple of jax.Array
+        Ageostrophic wind components (m/s).
+    """
+    return u - u_g, v - v_g
+
+
 def kinetic_energy_fv3(
     ua: jax.Array,
     va: jax.Array,

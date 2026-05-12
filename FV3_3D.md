@@ -4978,5 +4978,47 @@ is verifiable with unit tests in seconds rather than wall-time
 sweeps.  Users running the NH compressible-Euler 3D path now have
 the same cube-imprint defense as users running the PE 3D path.
 
+## Iter 791 — ageostrophic_wind_fv3 (V_a = V − V_g)
+
+Added `ageostrophic_wind_fv3(u, v, u_g, v_g)` to
+`grids/cubed_sphere.py`.  Decomposes total wind into geostrophic
+and ageostrophic components:
+
+```
+u_a = u − u_g,   v_a = v − v_g
+```
+
+Ageostrophic flow carries the entire dynamical signature of
+departures from geostrophic balance: jet-streak entrance/exit
+quadrant divergence, frontogenetic secondary circulations,
+isallobaric wind (∂p/∂t driven), gravity-wave emission, inertial
+oscillations.
+
+For QG flow Ro ≪ 1 (iter-786), V_a is O(Ro)·V_g; for semi-
+geostrophic (Ro ~ 1) V_a becomes comparable to V_g.
+
+Used by: jet-streak quadrant analysis (left-entrance / right-exit
+= divergence aloft → surface lows), Q-vector frontogenesis
+diagnostics, isallobaric-wind plots, gravity-wave source
+identification (V_a · ∇V_g term in TKE budget), Rossby-wave non-
+linear cascade decomposition.
+
+Composes iter-790 ``geostrophic_wind_fv3``.
+
+Test: `tests/test_fv3_ageostrophic_wind_iter791.py` (5 tests:
+V=V_g → V_a=0, simple subtraction, decomposition identity
+V_g + V_a = V exactly over 20 random pairs, full iter-790 chain
+(V, ∇Φ, f) → V_g → V_a, 3-D shapes + finite + both components).
+
+### Why this iteration was meaningful
+
+Closes the geostrophic decomposition (V_g, V_a) pair with
+iter-790.  Ageostrophic wind is the dynamical workhorse of
+mid-latitude weather: every cyclogenesis textbook chapter
+(Holton, Bluestein, Carlson) parses V_a quadrants for jet-streak
+divergence patterns; every frontogenesis derivation uses Q =
+(∂V_a/∂x, ∂V_a/∂y) Q-vectors.  Pure JAX, vmap-compatible.  No
+new physical constants introduced.
+
 
 
