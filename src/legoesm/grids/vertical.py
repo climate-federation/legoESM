@@ -1166,6 +1166,72 @@ def compute_dz_L32() -> tuple[jax.Array, jax.Array]:
     return dz_flipped, ztop
 
 
+_A60 = jnp.asarray([
+    300.0000, 430.00000, 558.00000, 700.00000, 863.05803,
+    1051.07995, 1265.75194, 1510.71101, 1790.05098, 2108.36604,
+    2470.78817, 2883.03811, 3351.46002, 3883.05187, 4485.49315,
+    5167.14603, 5937.04991, 6804.87379, 7780.84698, 8875.64338,
+    10100.20534, 11264.35673, 12190.64366, 12905.42546, 13430.87867,
+    13785.88765, 13986.77987, 14047.96335, 13982.46770, 13802.40331,
+    13519.33841, 13144.59486, 12689.45608, 12165.28766, 11583.57006,
+    10955.84778, 10293.60402, 9608.08306, 8910.07678, 8209.70131,
+    7516.18560, 6837.69250, 6181.19473, 5552.39653, 4955.72632,
+    4394.37629, 3870.38682, 3384.76586, 2937.63489, 2528.37666,
+    2155.78385, 1818.20722, 1513.68173, 1240.03585, 994.99144,
+    776.23591, 581.48797, 408.53400, 255.26520, 119.70243,
+    0.0,
+])
+_B60 = jnp.asarray([
+    0.00000, 0.00000, 0.00000, 0.00000, 0.00000,
+    0.00000, 0.00000, 0.00000, 0.00000, 0.00000,
+    0.00000, 0.00000, 0.00000, 0.00000, 0.00000,
+    0.00000, 0.00000, 0.00000, 0.00000, 0.00000,
+    0.00000, 0.00201, 0.00792, 0.01755, 0.03079,
+    0.04751, 0.06761, 0.09097, 0.11746, 0.14690,
+    0.17911, 0.21382, 0.25076, 0.28960, 0.32994,
+    0.37140, 0.41353, 0.45589, 0.49806, 0.53961,
+    0.58015, 0.61935, 0.65692, 0.69261, 0.72625,
+    0.75773, 0.78698, 0.81398, 0.83876, 0.86138,
+    0.88192, 0.90050, 0.91722, 0.93223, 0.94565,
+    0.95762, 0.96827, 0.97771, 0.98608, 0.99347,
+    1.0,
+])
+
+
+def set_eta_L60() -> tuple[jax.Array, jax.Array, jax.Array, int]:
+    """FV3_3D iter 647: FV3 L60 hardcoded hybrid-coord ak/bk table.
+
+    Faithful JAX port of the L60 ``a60`` / ``b60`` data tables in
+    FV3 ``set_eta`` (tools/fv_eta.F90:45-85).
+
+    The FV3 docstring notes: "The following L63 setting is the
+    same as NCEP GFS's L64 except the top 3 layers".  Used as
+    the FV3 reference for 60-layer baroclinic-instability and
+    GFS-comparison tests.
+
+    Returns
+    -------
+    ak : jax.Array, shape (61,)
+        Hybrid A coefficient (Pa).
+    bk : jax.Array, shape (61,)
+        Hybrid B coefficient (dimensionless sigma).
+    ptop : jax.Array (scalar)
+        Top-of-model pressure = ak[0] = 300 Pa.
+    ks : int
+        Number of pure-pressure LAYERS = max index where bk < eps
+        (from iter-637 set_external_eta).
+    """
+    ak = _A60
+    bk = _B60
+    ptop = ak[0]
+    # ks = last index where bk < 1e-7
+    eps = 1.0e-7
+    idx = jnp.arange(bk.shape[0])
+    masked = jnp.where(bk < eps, idx, -1)
+    ks = int(jnp.max(masked))
+    return ak, bk, ptop, ks
+
+
 def hydro_eq(
     ak: jax.Array, bk: jax.Array,
     hs: jax.Array,

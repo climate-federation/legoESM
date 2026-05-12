@@ -1195,6 +1195,39 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 647: **FV3 ``set_eta_L60``** — FV3 L60 hardcoded hybrid-coord
+  table.  Faithful JAX port of FV3 ``set_eta`` L60 a60/b60 data
+  arrays (tools/fv_eta.F90:45-85).  Reference for 60-layer
+  baroclinic-instability tests; equivalent to NCEP GFS L64
+  except for the top 3 layers (per FV3 docstring).
+
+  Constants (Pa for ak):
+      ak[0]  = 300 Pa  (ptop)
+      ak[60] = 0       (pure sigma at surface)
+      bk[0]  = 0       (pure pressure at top)
+      bk[60] = 1       (pure sigma at surface)
+      bk[0..20] = 0    (21 pure-pressure layers)
+      bk[21..60] = monotonic increase to 1
+
+  Returns ``(ak, bk, ptop, ks)`` directly usable with iter-646
+  ``hydro_eq`` to build a 60-layer hydrostatic IC.
+
+  Pairs with iter-637 ``compute_dz_L101`` and iter-638
+  ``compute_dz_L32``; together cover FV3's reference vertical
+  profiles (L32, L60, L101).
+
+  Lives in ``legoesm.grids.vertical``.
+
+  Tests (7/7 in <1 s):
+  1. Output shapes (61, 61, scalar, int).
+  2. ptop = 300 Pa.
+  3. bk endpoints (0, 1).
+  4. ak[60] = 0.
+  5. bk monotonically increasing.
+  6. ks ≈ 20 (last pure-pressure layer index).
+  7. set_eta_L60 + hydro_eq → finite, valid IC.
+
+  Wired into iter-383 sweep (now 216).
 - Iter 646: **FV3 ``hydro_eq``** — hydrostatic-equilibrium IC builder.
   Faithful JAX port of FV3 ``hydro_eq`` (tools/init_hydro.F90:
   277-456, hybrid sigma-p hydrostatic branch).  Builds canonical
