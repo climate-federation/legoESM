@@ -2382,6 +2382,64 @@ def rotate_winds_sphere_cube(
     return new_u, new_v
 
 
+def dcmip16_bc_uwind_pert(
+    z: jax.Array, lat: jax.Array, lon: jax.Array,
+    up: float = 1.0,
+    zp: float = 1.5e4,
+    Rp: float | None = None,
+    center_lon: float | None = None,
+    center_lat: float | None = None,
+) -> jax.Array:
+    """FV3_3D iter 671: DCMIP16 BC localized wind perturbation.
+
+    Faithful JAX port of FV3 ``DCMIP16_BC_uwind_pert``
+    (tools/test_cases.F90:6823-6838).  Localized Gaussian-in-x,
+    Hermite-cubic-in-z wind perturbation for triggering the
+    baroclinic instability in DCMIP16 Test 410.
+
+    Algorithm:
+        zrat = z / zp
+        ZZ   = max(1 - 3·zrat² + 2·zrat³, 0)        (Hermite vertical taper)
+        dst  = great_circle_distance(point, center)
+        pert = max(0, up · ZZ · exp(-(dst/Rp)²))
+
+    Default FV3 constants:
+        up=1 m/s (peak amplitude)
+        zp=15000 m (vertical scale)
+        Rp=R_earth/10 (horizontal scale)
+        center = (π/9, 2π/9) (FV3 perturbation focal point)
+
+    Parameters
+    ----------
+    z : jax.Array
+        Height (m).
+    lat, lon : jax.Array
+        Cell-center positions (radians).
+    up, zp, Rp, center_lon, center_lat : float, optional
+        DCMIP16 BC perturbation parameters.
+
+    Returns
+    -------
+    pert : jax.Array
+        Wind perturbation (m/s).
+    """
+    pi = jnp.pi
+    if Rp is None:
+        Rp = constants.R_earth / 10.0
+    if center_lon is None:
+        center_lon = pi / 9.0
+    if center_lat is None:
+        center_lat = 2.0 * pi / 9.0
+    zrat = z / zp
+    ZZ = jnp.maximum(1.0 - 3.0 * zrat * zrat + 2.0 * zrat * zrat * zrat, 0.0)
+    dst = great_circle_distance(
+        lon, lat,
+        jnp.asarray(center_lon), jnp.asarray(center_lat),
+        radius=constants.R_earth,
+    )
+    return jnp.maximum(0.0, up * ZZ * jnp.exp(-((dst / Rp) ** 2)))
+
+
 def dcmip16_bc_uwind(
     z: jax.Array, T: jax.Array, lat: jax.Array,
     KK: float = 3.0,

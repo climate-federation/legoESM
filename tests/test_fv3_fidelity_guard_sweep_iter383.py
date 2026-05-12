@@ -260,6 +260,7 @@ _GUARD_MODULES = (
     "test_fv3_dcmip16_bc_iter667",                   # iter-667 add
     "test_fv3_dcmip16_bc_wind_iter668",              # iter-668 add
     "test_fv3_dcmip16_tc_iter669",                   # iter-669 add
+    "test_fv3_bc_uwind_pert_iter671",                # iter-671 add
 )
 
 

@@ -1195,6 +1195,34 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 671: **FV3 ``dcmip16_bc_uwind_pert``** — BC perturbation trigger.
+  Faithful JAX port of FV3 ``DCMIP16_BC_uwind_pert``
+  (tools/test_cases.F90:6823-6838).  Localized
+  Gaussian-in-x, Hermite-cubic-in-z wind perturbation for
+  baroclinic-instability trigger.
+
+  Algorithm:
+
+      zrat = z / zp
+      ZZ   = max(1 - 3·zrat² + 2·zrat³, 0)
+      dst  = great_circle_distance(point, center)
+      pert = max(0, up · ZZ · exp(-(dst/Rp)²))
+
+  Default FV3 constants:
+      up=1 m/s (peak), zp=15000 m (vertical),
+      Rp=R_earth/10 (horizontal), center=(π/9, 2π/9).
+
+  Pairs with iter-667/668 BC IC: full DCMIP16 Test 410 trigger
+  available.
+
+  Tests (5/5 in <1 s):
+  1. Center, surface → pert = up.
+  2. Far field → pert ≈ 0.
+  3. z=zp → ZZ=0 → pert=0.
+  4. pert ≥ 0 everywhere.
+  5. No NaN/Inf on random inputs.
+
+  Wired into iter-383 sweep (now 237).
 - **Iters 661-669 (compacted iter 670)**: FV3 test-case IC profiles
   (DCMIP16 BC + TC, Galewsky jet, super-cell shear, Williamson 9,
   Rankine vortex, sphere↔cube wind rotation).  9 iterations
