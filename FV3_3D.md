@@ -1185,6 +1185,18 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 567: **iters=2 vs iters=8 growth-rate comparison**.
+  Counter-intuitive finding at C24 SBR:
+  - iters=2: 10-step=1.09e-2, 30-step=4.23e-2 (growth 3.88×)
+  - iters=8: 10-step=5.83e-3, 30-step=3.43e-2 (growth 5.88×)
+  iters=8 has FASTER relative growth than iters=2.  Lower
+  start (5.8 vs 10.9 mK) but compounds faster.  At 30 steps
+  iters=8 still 19% lower in absolute terms.  Hypothesis:
+  at very long times (~100 steps), iters=2 might match or
+  beat iters=8.  Practical: for short runs (≤30 steps), use
+  iters=8.  For very long runs, FV3 default iters=2 may be
+  more stable long-term.  1/1 in 116 s.  Wired into iter-383
+  sweep (now 148).
 - Iter 566: **30-step run with optimal stack**.
   Extend iter-564 to 30 steps @ C24:
   - 10 steps (iter-564): edge_std = 5.83e-3
