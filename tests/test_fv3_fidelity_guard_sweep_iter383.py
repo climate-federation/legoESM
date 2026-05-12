@@ -349,6 +349,7 @@ _GUARD_MODULES = (
     "test_fv3_surface_pressure_iter759",             # iter-759 add
     "test_fv3_column_mean_rh_iter760",               # iter-760 add
     "test_fv3_column_mean_field_iter761",            # iter-761 add
+    "test_fv3_saturation_deficit_iter762",           # iter-762 add
 )
 
 

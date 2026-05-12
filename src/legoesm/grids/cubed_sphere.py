@@ -3960,6 +3960,53 @@ def compute_brn_fv3(
     return brn, shear06
 
 
+def saturation_deficit_column_fv3(
+    p_full: jax.Array,
+    t: jax.Array,
+    qv: jax.Array,
+    delp: jax.Array,
+    do_cmip: bool = False,
+) -> jax.Array:
+    """FV3_3D iter 762: column saturation deficit (kg/m²).
+
+        Q_sat_col = column_integral(q_sat, delp)
+        SatDef = Q_sat_col − PWV
+
+    Mass-equivalent of (100 − RH) integrated over column.  Indicator
+    of how much additional water vapor a column could hold before
+    saturating.
+
+    Composes iter-742 column_integral + iter-756 precipitable_water
+    + legoesm.thermo saturation helpers (with optional CMIP blend).
+
+    Parameters
+    ----------
+    p_full : jax.Array, shape (..., km)
+        Layer-center pressure (Pa).
+    t : jax.Array, shape (..., km)
+        Temperature (K).
+    qv : jax.Array, shape (..., km)
+        Specific humidity (kg/kg).
+    delp : jax.Array, shape (..., km)
+        Pressure thickness (Pa).
+    do_cmip : bool, default False.
+        Use es-over-liq-and-ice blend.
+
+    Returns
+    -------
+    sat_def : jax.Array, shape (...,)
+        Column saturation deficit (kg/m²).  Non-negative for sub-saturated.
+    """
+    from legoesm import thermo
+    if do_cmip:
+        qs = thermo.saturation_mixing_ratio_blend(t, p_full)
+    else:
+        qs = thermo.saturation_mixing_ratio(t, p_full)
+    qs_col = column_integral_delp_fv3(qs, delp)
+    pwv = column_integral_delp_fv3(qv, delp)
+    return qs_col - pwv
+
+
 def column_mean_field_fv3(
     field: jax.Array,
     delp: jax.Array,

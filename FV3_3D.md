@@ -1195,6 +1195,25 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 762: **``saturation_deficit_column_fv3``** — column moisture deficit.
+
+      Q_sat_col = column_integral(q_sat, delp)
+      SatDef = Q_sat_col − PWV    (kg/m²)
+
+  Indicator of additional water vapor capacity before saturation.
+  Mass-equivalent of (100 − RH) integrated over column.
+
+  Composes iter-742 column_integral + iter-756 PWV + legoesm.thermo
+  saturation (with optional CMIP es-over-liq-and-ice blend).
+
+  Tests (5/5 in <2 s):
+  1. qv = q_sat → SatDef = 0.
+  2. Dry (qv=0) → SatDef = full column q_sat.
+  3. do_cmip branch differs from liquid-only at sub-freezing T.
+  4. 3-D shapes.
+  5. No NaN/Inf.
+
+  Wired into iter-383 sweep (now 326).
 - Iter 761: **``column_mean_field_fv3``** — generic mass-weighted column mean.
 
       <field> = Σ_k delp · field / Σ_k delp
