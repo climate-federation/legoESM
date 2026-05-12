@@ -1791,6 +1791,47 @@ def g_sum(
     return gsum
 
 
+def make_fv3_native_grid(
+    im: int,
+    grid_type: int = 0,
+    symmetrize_face1: bool = True,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 629: end-to-end FV3 native cubed-sphere grid builder.
+
+    Integration wrapper for iters 622, 625, 624:
+
+        1. ``gnomonic_grids(im, grid_type)``       — face-1 (iter 622)
+        2. ``mirror_grid_face1_symmetrize``        — face-1 sym (iter 625)
+        3. ``mirror_grid_faces``                   — faces 2-6 (iter 624)
+
+    Reproduces FV3's full cubed-sphere construction pipeline as
+    a single public API.  Returns the 6-face (lon, lat) arrays
+    matching the FV3 face numbering convention (1..6 → indices 0..5).
+
+    Parameters
+    ----------
+    im : int
+        Number of cells per face edge.
+    grid_type : int, default 0
+        Grid type forwarded to ``gnomonic_grids``:
+            0 → ``gnomonic_ed``   (FV3 canonical)
+            1 → ``gnomonic_dist``
+            2 → ``gnomonic_angl``
+    symmetrize_face1 : bool, default True
+        If True, apply ``mirror_grid_face1_symmetrize`` (FV3
+        first-loop SIGN-averaging) before mirroring to 6 faces.
+
+    Returns
+    -------
+    lons, lats : jax.Array, shape ``(6, im+1, im+1)``
+        Cubed-sphere corner positions for all 6 faces in radians.
+    """
+    lon1, lat1 = gnomonic_grids(im, grid_type=grid_type)
+    if symmetrize_face1:
+        lon1, lat1 = mirror_grid_face1_symmetrize(lon1, lat1)
+    return mirror_grid_faces(lon1, lat1)
+
+
 def gnomonic_grids(
     im: int, grid_type: int = 0,
 ) -> tuple[jax.Array, jax.Array]:

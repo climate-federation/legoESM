@@ -1195,6 +1195,34 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 629: **``make_fv3_native_grid``** — end-to-end FV3 native
+  cubed-sphere grid builder.  Integration wrapper for iters 622,
+  625, 624:
+
+      lons, lats = make_fv3_native_grid(im, grid_type=0)
+
+  Pipeline:
+      1. ``gnomonic_grids(im, grid_type)``       — face-1 (iter 622)
+      2. ``mirror_grid_face1_symmetrize``        — face-1 sym (iter 625)
+      3. ``mirror_grid_faces``                   — faces 2-6 (iter 624)
+
+  Reproduces FV3's full cubed-sphere construction pipeline as
+  a single public API.  Returns ``(6, im+1, im+1)`` arrays matching
+  FV3 face numbering (1..6 → indices 0..5).
+
+  Optional ``symmetrize_face1`` flag (default True) toggles the
+  iter-625 step; ``grid_type`` accepts 0/1/2 forwarded to
+  ``gnomonic_grids``.
+
+  Tests (6/6 in 7 s):
+  1. Output shape (6, im+1, im+1).
+  2. All faces on unit sphere.
+  3. No NaN/Inf.
+  4. Wrapper equals manual pipeline composition.
+  5. symmetrize_face1=False skips iter-625 step.
+  6. All 3 grid_types build finite grids.
+
+  Wired into iter-383 sweep (now 200).
 - Iter 628: **FV3 ``c2l_ord4``** — D-grid → latlon winds (4th order
   Lagrange + 2nd-order boundary fallback).  Faithful JAX port of
   FV3 ``c2l_ord4`` (fv_grid_utils.F90:2407-2546, grid_type<4
