@@ -354,6 +354,7 @@ _GUARD_MODULES = (
     "test_fv3_lcl_pressure_iter764",                 # iter-764 add
     "test_fv3_lcl_height_iter765",                   # iter-765 add
     "test_fv3_vapor_pressure_from_q_iter766",        # iter-766 add
+    "test_fv3_dew_point_iter767",                    # iter-767 add
 )
 
 

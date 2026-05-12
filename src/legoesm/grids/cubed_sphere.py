@@ -4070,6 +4070,40 @@ def vapor_pressure_from_q_fv3(
     return p_mb * q_safe / (eps + q_safe * (1.0 - eps))
 
 
+def dew_point_fv3(
+    e_mb: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 767: dew-point temperature from vapor pressure.
+
+    Bolton (1980) eq. 11 inverse of Magnus saturation curve:
+
+        γ      = ln(e / 6.112)
+        T_d_C  = 243.5 · γ / (17.67 − γ)
+        T_d_K  = T_d_C + 273.15
+
+    The fitted coefficients 243.5, 17.67, 6.112 are Bolton-paper
+    constants (saturation curve fit over 250-313 K).  The reference
+    value 6.112 mb is the saturation vapor pressure at 0 °C.
+
+    Composes with iter-766 ``vapor_pressure_from_q_fv3`` to give
+    the (p, q) → T_d chain for relative-humidity diagnostics.
+
+    Parameters
+    ----------
+    e_mb : jax.Array
+        Water vapor partial pressure (mb).  Must be positive.
+
+    Returns
+    -------
+    t_dew : jax.Array
+        Dew-point temperature (K).
+    """
+    e_safe = jnp.maximum(1e-12, e_mb)
+    gamma = jnp.log(e_safe / 6.112)
+    t_dew_c = 243.5 * gamma / (17.67 - gamma)
+    return t_dew_c + constants.T_freeze
+
+
 def lcl_temperature_fv3(
     pt: jax.Array,
     p_mb: jax.Array,

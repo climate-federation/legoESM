@@ -5042,3 +5042,39 @@ specific humidity (dew-point, RH, theta_e blends, saturation
 adjustment cross-checks).  Pure JAX, vmap-compatible.  No new
 physical constants introduced.
 
+## Iter 767 — dew_point_fv3 (Bolton 1980 eq. 11)
+
+Added `dew_point_fv3(e_mb)` to `grids/cubed_sphere.py`.
+Algorithm:
+
+```
+γ      = ln(e / 6.112)
+T_d_C  = 243.5 · γ / (17.67 − γ)
+T_d_K  = T_d_C + constants.T_freeze
+```
+
+Bolton-paper fitted coefficients (243.5, 17.67, 6.112) kept as
+literals — these are empirical Magnus-curve fit constants from
+the paper, not generic physical constants.  The 6.112 mb is
+saturation vapor pressure at 0 °C.
+
+Composes with iter-766 `vapor_pressure_from_q_fv3` to give the
+(p, q) → T_d chain for relative-humidity diagnostics, dew-point
+depression, and moisture-frontal analysis.  Note that by Bolton
+construction T_d(6.112 mb) = T_freeze exactly — verified in test.
+
+Test: `tests/test_fv3_dew_point_iter767.py` (6 tests: saturation-
+at-freezing identity, monotonic ∂T_d/∂e>0, T_d<T_env for unsat
+air, iter-766 chain composition, 3-D shapes, finite).
+
+### Why this iteration was meaningful
+
+Dew-point temperature is one of the canonical moisture diagnostics
+in synoptic and mesoscale analysis (used directly in dew-point
+depression for stability, in 850-mb dew-point ridges for moisture
+fluxes, in T-T_d as a proxy for RH).  The iter-766 → iter-767 chain
+closes the (p, q) → e → T_d pipeline using only the Bolton 1980
+paper coefficients + `constants.epsilon` + `constants.T_freeze`.
+~6 lines of source.  Pure JAX, vmap-compatible.  No new physical
+constants introduced (Bolton paper coefficients only).
+
