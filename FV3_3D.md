@@ -5078,3 +5078,38 @@ paper coefficients + `constants.epsilon` + `constants.T_freeze`.
 ~6 lines of source.  Pure JAX, vmap-compatible.  No new physical
 constants introduced (Bolton paper coefficients only).
 
+## Iter 768 — relative_humidity_fv3 (WMO vapor-pressure definition)
+
+Added `relative_humidity_fv3(t, p_pa, q_sphum)` to
+`grids/cubed_sphere.py`.  Algorithm:
+
+```
+RH [%] = 100 · e(p, q) / e_sat(T)
+       = 100 · vapor_pressure_from_q_fv3(p, q) / thermo.saturation_vapor_pressure(T)
+```
+
+WMO/ICAO-standard RH definition (vapor-pressure ratio).  Composes
+iter-766 with the existing canonical
+`thermo.saturation_vapor_pressure` curve.  Pressure in Pa
+throughout (consistent units between numerator and denominator).
+Uses local import of `thermo` per established pattern in this
+module (deferred to function scope to avoid circular import).
+
+Test: `tests/test_fv3_relative_humidity_iter768.py` (6 tests:
+q = q_sat → RH ≈ 100% within 1%, dry q → RH < 1%, monotonic ∂RH/∂q,
+RH decreases with T at fixed (p, q) per Clausius-Clapeyron, 3-D
+shapes, finite + non-negative).
+
+### Why this iteration was meaningful
+
+RH is the most-used moisture diagnostic in atmospheric science.
+This iteration plugs the iter-766 / iter-767 chain into the
+canonical `thermo` saturation curve via local import, exposing a
+single-call diagnostic without duplicating any saturation math.
+Per CLAUDE.md: "Saturation thermodynamics: use legoesm.thermo for
+all saturation computations — never re-implement Tetens / Magnus /
+Clausius–Clapeyron in any file."  This iter explicitly honors that
+rule by delegating to `thermo.saturation_vapor_pressure`.  ~5
+lines of source.  Pure JAX, vmap-compatible.  No new physical
+constants introduced.
+

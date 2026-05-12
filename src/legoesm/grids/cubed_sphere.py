@@ -4104,6 +4104,46 @@ def dew_point_fv3(
     return t_dew_c + constants.T_freeze
 
 
+def relative_humidity_fv3(
+    t: jax.Array,
+    p_pa: jax.Array,
+    q_sphum: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 768: relative humidity from (T, p, q).
+
+    RH [%] = 100 · e(p, q) / e_sat(T)
+
+    where:
+      * e(p, q) is vapor partial pressure from iter-766
+        ``vapor_pressure_from_q_fv3`` (input p in Pa → output e in Pa).
+      * e_sat(T) is the canonical legoesm saturation vapor pressure
+        from ``thermo.saturation_vapor_pressure`` (Pa).
+
+    Uses the WMO/ICAO standard RH definition (vapor-pressure ratio).
+    Composes with iter-766 vapor-pressure and the shared
+    ``thermo`` saturation curve to give a unit-consistent diagnostic.
+
+    Parameters
+    ----------
+    t : jax.Array
+        Temperature (K).
+    p_pa : jax.Array
+        Pressure (Pa).
+    q_sphum : jax.Array
+        Specific humidity (kg/kg).
+
+    Returns
+    -------
+    rh : jax.Array
+        Relative humidity (%, can exceed 100 for supersaturated air).
+    """
+    from legoesm import thermo
+
+    e = vapor_pressure_from_q_fv3(p_pa, q_sphum)
+    e_sat = thermo.saturation_vapor_pressure(t)
+    return 100.0 * e / e_sat
+
+
 def lcl_temperature_fv3(
     pt: jax.Array,
     p_mb: jax.Array,
