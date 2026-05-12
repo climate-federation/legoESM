@@ -5024,6 +5024,46 @@ is verifiable with unit tests in seconds rather than wall-time
 sweeps.  Users running the NH compressible-Euler 3D path now have
 the same cube-imprint defense as users running the PE 3D path.
 
+## Iter 801 — ice_supersaturation_fv3 (RH_ice > thresh mask)
+
+Added `ice_supersaturation_fv3(t, p_pa, q_sphum, rh_thresh=140.0)`
+to `grids/cubed_sphere.py`.  Boolean mask of ice-supersaturation:
+
+```
+ISS = relative_humidity_ice_fv3(t, p, q) > rh_thresh
+```
+
+Default ``rh_thresh = 140`` % matches Koop et al. (2000)
+homogeneous-nucleation threshold for aqueous-aerosol droplets.
+
+Standard thresholds:
+  * 100 — onset of formal supersaturation
+  * 140 — Koop-2000 homogeneous-nucleation (default)
+  * 160 — Krämer-2009 MOZAIC upper observation bound
+
+Used by: CAM5-Liu / ECMWF-IFS / GFDL-AM4 cirrus parameterization
+onset (all use Koop-2000 140 % criterion), aircraft contrail
+forecasting (ISS region = contrail-favorable), MOZAIC/IAGOS
+upper-tropospheric H₂O climatology, polar stratospheric cloud
+(PSC) onset diagnostics.
+
+Composes iter-800 ``relative_humidity_ice_fv3``.
+
+Test: `tests/test_fv3_ice_supersaturation_iter801.py` (6 tests:
+RH_ice=100% → False, RH_ice=150% with default 140 → True,
+custom thresh=160 rejects 150 → False, q=0 → False everywhere,
+mask alignment with RH_ice over 20 random samples, 3-D shapes
+preserved dtype bool).
+
+### Why this iteration was meaningful
+
+Closes the cirrus-onset chain (iter-800 RH_ice → iter-801 ISS
+mask).  ISS detection is the canonical entry point for cirrus
+parameterization in modern GCMs — the same code path used by
+CAM5/IFS/AM4/CESM2 for cirrus-cloud onset.  Pure JAX, vmap-
+compatible.  No new physical constants introduced (140 % is the
+Koop-2000 convention, not a generic physical constant).
+
 
 
 

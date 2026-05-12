@@ -5709,6 +5709,61 @@ def relative_humidity_ice_fv3(
     return 100.0 * q_sphum / q_sat_ice
 
 
+def ice_supersaturation_fv3(
+    t: jax.Array,
+    p_pa: jax.Array,
+    q_sphum: jax.Array,
+    rh_thresh: float = 140.0,
+) -> jax.Array:
+    """FV3_3D iter 801: ice-supersaturation mask.
+
+    Boolean mask of points where relative humidity over ice
+    exceeds a critical threshold:
+
+        ISS = RH_ice > rh_thresh
+
+    where ``RH_ice = 100·q/q_sat_ice`` from iter-800.
+
+    Standard thresholds:
+      * ``rh_thresh = 100``  — onset of homogeneous nucleation
+        regime (formally any value > 100% can sustain ice).
+      * ``rh_thresh = 140``  — Koop et al. (2000) homogeneous-
+        nucleation threshold for aqueous-aerosol droplets (the
+        default; cold-cloud-droplet → ice transition begins at
+        140 % RH_ice).
+      * ``rh_thresh = 160``  — Krämer et al. (2009) MOZAIC
+        "cirrus cloud detection" upper bound; rarely sustained
+        in observations.
+
+    Used by: cirrus parameterization onset (CAM5-Liu, ECMWF
+    IFS, GFDL-AM4 all use Koop-2000 140 % criterion), aircraft
+    contrail forecasting (ISS region is a contrail-favorable
+    region), MOZAIC/IAGOS upper-tropospheric H₂O climatology,
+    polar stratospheric cloud (PSC) onset diagnostics.
+
+    Composes iter-800 ``relative_humidity_ice_fv3``.
+
+    Parameters
+    ----------
+    t : jax.Array
+        Temperature (K).
+    p_pa : jax.Array
+        Pressure (Pa).
+    q_sphum : jax.Array
+        Specific humidity (kg/kg).
+    rh_thresh : float
+        Critical RH_ice threshold (%, > 100).  Default 140
+        (Koop-2000 homogeneous-nucleation threshold).
+
+    Returns
+    -------
+    iss : jax.Array of bool
+        True where RH_ice > rh_thresh.
+    """
+    rh_ice = relative_humidity_ice_fv3(t, p_pa, q_sphum)
+    return rh_ice > rh_thresh
+
+
 def lcl_temperature_fv3(
     pt: jax.Array,
     p_mb: jax.Array,
