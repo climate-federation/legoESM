@@ -183,6 +183,7 @@ _GUARD_MODULES = (
     "test_compute_edge_metric_iter581",              # iter-581 add
     "test_angular_momentum_iter583",                 # iter-583 add
     "test_w_safety_cap_iter584",                     # iter-584 add
+    "test_hord8_limiter_iter585",                    # iter-585 add
 )
 
 

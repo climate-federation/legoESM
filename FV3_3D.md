@@ -1195,6 +1195,22 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 585: **FV3 iord=8 PPM limiter utility** (user audit
+  item #3 partial).  FV3 ``tp_core.F90:548-553`` Lin (1996)
+  monotonicity bound: ``bl, br ∈ ±2|dm|`` with sign tied to
+  monotone-slope direction.  legoESM had only iord=9
+  (``_pert_ppm``) and iord=12 (``_pert_ppm_iv0``); adds
+  ``apply_hord8_limiter(bl, br, dm)`` as a public utility
+  exposing the iord=8 variant.  Default transport path
+  unchanged (iord=9); users can swap in iord=8 manually for
+  tracers via post-PPM limiter override.  Full ``hord``
+  parameter plumbing through ``_xppm``, ``_yppm``,
+  ``transport_step`` deferred — would touch ~5 call sites.
+  3 tests (3/3 in 0.5 s):
+  1. Returns finite values.
+  2. dm=0 → bl=br=0 (no flux).
+  3. |bl|, |br| ≤ 2|dm| always.
+  Wired into iter-383 sweep (now 160).
 - Iter 584: **w-safety cap** (user audit item #2). FV3's
   ``w_limiter`` (fv_mapz.F90:51) caps |w| at 90/-60 m/s during
   Lagrangian-to-Eulerian remap.  legoESM uses Eulerian z*

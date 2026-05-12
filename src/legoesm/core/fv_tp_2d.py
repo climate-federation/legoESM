@@ -86,6 +86,56 @@ def _pert_ppm_iv0(q, bl, br):
     return bl_out, br_out
 
 
+def apply_hord8_limiter(bl, br, dm):
+    """FV3_3D iter 585: FV3 iord=8 Lin (1996) monotonicity limiter
+    (tp_core.F90:548-553).
+
+    Alternative to ``_pert_ppm`` (iord=9).  iord=8 bounds bl, br by
+    ±2·|dm| where dm is the cell-center monotone slope:
+
+        xt = 2·dm
+        bl = -sign(min(|xt|, |al - q|), xt)
+        br =  sign(min(|xt|, |al' - q|), xt)
+
+    Since legoESM's bl = al - q and br = al' - q are passed directly,
+    we re-express as:
+
+        bl_out = clip(bl, -2|dm|, 2|dm|) with sign-preserved
+        br_out = clip(br, -2|dm|, 2|dm|) with sign-preserved
+
+    But the FV3 form is more subtle: it forces the bl/br sign to match
+    xt's sign (i.e., the monotone slope sign).
+
+    Parameters
+    ----------
+    bl, br : jax.Array
+        Standard PPM left/right cell-edge perturbations (al-q, al'-q).
+    dm : jax.Array
+        Cell-center monotone slope.
+
+    Returns
+    -------
+    bl_out, br_out : jax.Array
+        iord=8 limited values.
+
+    Notes
+    -----
+    NOT yet wired into the default transport path (which uses iord=9
+    via _pert_ppm).  Exposed as a utility for users who want the iord=8
+    variant for tracers (e.g., as FV3 namelist sets hord_tr=8 in some
+    configs).
+    """
+    xt = 2.0 * dm
+    bl_out = -jnp.sign(xt) * jnp.minimum(jnp.abs(xt), jnp.abs(bl))
+    br_out = jnp.sign(xt) * jnp.minimum(jnp.abs(xt), jnp.abs(br))
+    # Fortran flips sign on bl: bl uses -sign(min(|xt|,|al-q|), xt).
+    # al-q corresponds to bl here.  Note xt = 2*dm; sign(xt)=sign(dm).
+    # The -sign accounts for bl pointing in the OPPOSITE direction of dm
+    # (al at i-1/2 is one cell to the left → bl = al - q < 0 typically
+    #  when dm > 0).
+    return bl_out, br_out
+
+
 def _ppm_1d(q, n, off_left=None, off_right=None,
             off_left_d1=None, off_right_d1=None,
             use_duogrid=False,
