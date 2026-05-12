@@ -3737,6 +3737,41 @@ def inertial_period_fv3(
     return 2.0 * jnp.pi / jnp.maximum(jnp.abs(f), f_floor)
 
 
+def beta_plane_fv3(
+    lat: jax.Array,
+    units: str = "rad",
+) -> jax.Array:
+    """FV3_3D iter 780: β = df/dy = 2·Ω·cos(lat) / R_earth.
+
+    Meridional gradient of the Coriolis parameter (planetary
+    vorticity gradient).  Foundation of: Rossby-wave dispersion
+    (ω = −β·k/(k²+l²+R⁻²)), Rhines scale (L_R = √(U/β)), planetary
+    geostrophic theory, β-plane approximation.
+
+    Uses Earth's radius from ``constants.R_earth``.  Result is in
+    s⁻¹ · m⁻¹ (the canonical SI unit for β).
+
+    Sign: β > 0 in both hemispheres (always positive — cos(lat) ≥ 0
+    everywhere |lat| ≤ π/2).  β maximum at equator (≈ 2.29·10⁻¹¹
+    s⁻¹m⁻¹), β → 0 at the poles.
+
+    Parameters
+    ----------
+    lat : jax.Array
+        Latitude (rad by default; pass ``units='deg'`` for degrees).
+    units : {'rad', 'deg'}
+
+    Returns
+    -------
+    beta : jax.Array
+        Meridional gradient of f (s⁻¹·m⁻¹).
+    """
+    if units not in ("rad", "deg"):
+        raise ValueError(f"units must be 'rad' or 'deg', got {units!r}")
+    lat_rad = jnp.radians(lat) if units == "deg" else lat
+    return 2.0 * constants.Omega * jnp.cos(lat_rad) / constants.R_earth
+
+
 def kinetic_energy_fv3(
     ua: jax.Array,
     va: jax.Array,

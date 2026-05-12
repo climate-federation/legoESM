@@ -38,11 +38,11 @@ def test_iter365_compaction_present(doc_text):
     )
 
 
-def test_doc_size_below_5255_lines(doc_text):
+def test_doc_size_below_4950_lines(doc_text):
     n_lines = len(doc_text.splitlines())
-    assert n_lines < 5255, (
-        f"FV3_3D.md has {n_lines} lines (target < 5255).  "
-        f"Next compaction at iter 780."
+    assert n_lines < 4950, (
+        f"FV3_3D.md has {n_lines} lines (target < 4950).  "
+        f"Next compaction at iter 790."
     )
 
 
@@ -440,6 +440,36 @@ def test_iter670_compaction_covers_topics(doc_text):
     for marker in required:
         assert marker in section, (
             f"iter-670 compacted block missing topic ``{marker}``."
+        )
+
+
+def test_iter780_compaction_present(doc_text):
+    """iter-780 compacted iter 771-779 into single block."""
+    assert "**Iters 771-779 (compacted iter 780)**" in doc_text, (
+        "iter-780 compaction block missing — doc re-expanded."
+    )
+
+
+def test_iter780_compaction_covers_topics(doc_text):
+    section_start = doc_text.find(
+        "**Iters 771-779 (compacted iter 780)**"
+    )
+    section_end = doc_text.find(
+        "**Iters 760-769", section_start,
+    )
+    assert section_start >= 0 and section_end > section_start
+    section = doc_text[section_start:section_end]
+    required = [
+        "771", "772", "773", "774", "775",
+        "776", "777", "778", "779", "780",
+        "mixing_ratio", "brunt_vaisala", "richardson_number",
+        "bulk_richardson", "pbl_height", "shear_squared",
+        "wind_direction", "coriolis_parameter",
+        "inertial_period", "beta_plane",
+    ]
+    for marker in required:
+        assert marker in section, (
+            f"iter-780 compacted block missing topic ``{marker}``."
         )
 
 

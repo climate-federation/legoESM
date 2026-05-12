@@ -1195,6 +1195,38 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- **Iters 771-779 (compacted iter 780)**: stability stack +
+  kinematic decomposition + planetary rotation helpers + iter-780
+  β = df/dy.
+
+  | Iter | What                                              | Note                                                                |
+  |------|---------------------------------------------------|---------------------------------------------------------------------|
+  | 771  | ``mixing_ratio_fv3`` + iter-716 refactor          | r = q/(1−q); replaces last inline q/(1-q) in cubed_sphere.py        |
+  | 772  | ``brunt_vaisala_squared_fv3``                     | N² = (g/θ_v)·dθ_v/dz; isothermal analytic guard N²=g²/(c_p·T)        |
+  | 773  | ``richardson_number_fv3``                         | gradient Ri = N²/S²; calm-air shear_floor; composes iter-772         |
+  | 774  | ``bulk_richardson_fv3``                           | Ri_b = g·z·Δθ_v/(θ_v_s·|V|²); Vogelezang-Holtslag, Troen-Mahrt PBL  |
+  | 775  | ``pbl_height_fv3``                                | argmax(Ri_b > ri_crit); Holtslag-Boville PBL-top detection           |
+  | 776  | ``shear_squared_fv3`` + iter-773 refactor         | S² = (du/dz)² + (dv/dz)²; matches iter-720/727/728/766/771 lineage  |
+  | 777  | ``wind_direction_fv3``                            | meteorological 'from' convention; closes (|V|, dir) kinematic pair  |
+  | 778  | ``coriolis_parameter_fv3`` + dcmip16-TC refactor  | f = 2·Ω·sin(lat); gh_jet_fv3 intentionally not delegated (Ω kwarg)  |
+  | 779  | ``inertial_period_fv3``                           | T = 2π/|f|; pole ≈ 11.97 h; 30° ≈ sidereal day; equator floored      |
+  | 780  | ``beta_plane_fv3`` + this compaction              | β = 2·Ω·cos(lat)/R_earth; planetary vorticity gradient; max at eq.   |
+
+  **PBL-stability detection chain complete**:
+    * N² (772) → gradient Ri (773) for interior turbulence onset
+    * Ri_b (774) → pbl_height (775) for boundary-layer top in m
+    * Shear² (776) extracted as separate diagnostic for KPP/CAT
+
+  **Moisture & kinematic decomposition complete**:
+    * Bolton θ_e helpers via mixing_ratio (771)
+    * (|V|, wdir) wind pair: iter-741 speed + iter-777 direction
+
+  **Planetary-rotation diagnostic triplet complete**:
+    * f = 2·Ω·sin(lat) (778)
+    * T_inertial = 2π/|f| (779)
+    * β = df/dy = 2·Ω·cos(lat)/R (780)
+
+  Wired into iter-383 sweep: 334 → 344 modules.
 - **Iters 760-769 (compacted iter 770)**: column-mean + saturation
   diagnostics + LCL state triad + moisture-chain helpers + iter-770
   dew-point depression.
@@ -4906,345 +4938,4 @@ is verifiable with unit tests in seconds rather than wall-time
 sweeps.  Users running the NH compressible-Euler 3D path now have
 the same cube-imprint defense as users running the PE 3D path.
 
-## Iter 771 — mixing_ratio_fv3 helper + iter-716 refactor
-
-Extracted `mixing_ratio_fv3(q_sphum)` to `grids/cubed_sphere.py`
-from the inline q→r conversion in iter-716 ``eqv_pot_bolton_fv3``.
-Identity:
-
-```
-r = q / (1 − q)     [kg/kg]
-```
-
-iter-716 line 4797 used `jnp.maximum(1e-10, q/(1-q) * 1000.0)`
-(g/kg, with floor 1e-10 g/kg = 1e-13 kg/kg).  Refactored to:
-`r = mixing_ratio_fv3(q) * 1000.0`.  The helper uses floor 1e-12
-kg/kg (= 1e-9 g/kg) — 10× larger than the old floor, but well below
-any atmospheric q (typical q ≳ 1e-6 kg/kg).  For all realistic
-sounding inputs the floor never engages → bit-identical θ_e output
-verified by iter-716 8/8 tests pass post-refactor.
-
-Test: `tests/test_fv3_mixing_ratio_iter771.py` (6 tests: r ≈ q
-within 2% for atmospheric q, r > q for any q > 0, floor engages at
-q=0, iter-716 θ_e regression preserved, 3-D shapes, finite).
-
-### Why this iteration was meaningful
-
-Matches the iter-720 / iter-727 / iter-728 / iter-766 helper-
-extraction lineage: pull inline arithmetic into a named, reusable
-helper that future moist-thermo code (DSE-of-mixing-ratio budgets,
-saturation cross-checks, condensate accounting) can call without
-re-deriving.  Eliminates the last remaining inline q/(1-q) in
-cubed_sphere.py.  Pure JAX, vmap-compatible.  No new physical
-constants introduced.
-
-## Iter 772 — brunt_vaisala_squared_fv3 (N² stability metric)
-
-Added `brunt_vaisala_squared_fv3(theta, q_sphum, z)` to
-`grids/cubed_sphere.py`.  Computes:
-
-```
-N² = (g / θ_v) · dθ_v/dz       at layer midpoints
-θ_v = θ · (1 + (1/ε − 1)·q)    via _shared.virtual_temperature
-```
-
-Sign convention: stable stratification (θ_v↑ with z) → N²>0;
-unstable → N²<0; neutral → N²=0.  Vertical axis is last; output
-shape ``(..., km−1)``.  Pass ``q_sphum=0.0`` for dry N².
-
-Delegates θ_v computation to the canonical
-`legoesm.atmosphere.physics._shared.virtual_temperature` per
-CLAUDE.md "use existing functions" rule.
-
-**Analytic guard**: isothermal atmosphere has N² = g²/(c_p·T)
-exactly.  Test exercises this with hydrostatic isothermal column
-(z = 0..10 km, T = 290 K): computed N² matches g²/(c_p·T) ≈
-3.30·10⁻⁴ s⁻² within 5 % over all 20 midpoints.
-
-Test: `tests/test_fv3_brunt_vaisala_iter772.py` (6 tests: stable
-+, unstable −, neutral 0, isothermal analytic, 3-D shapes
-km→km−1, finite).
-
-### Why this iteration was meaningful
-
-N² is the canonical stability metric for the free atmosphere.
-Used directly by: (1) Richardson-number diagnostics for shear-
-driven turbulence onset; (2) gravity-wave drag schemes (uses
-column-integrated N²); (3) boundary-layer top detection
-(Ri ↗ → entrainment zone); (4) inertia-gravity wave dispersion
-relations.  Reuses the existing canonical
-``_shared.virtual_temperature`` helper rather than adding a θ_v
-wrapper — satisfies CLAUDE.md "thin dispatch wrappers forbidden".
-Pure JAX, vmap-compatible.  No new physical constants introduced.
-
-## Iter 773 — richardson_number_fv3 (gradient Ri)
-
-Added `richardson_number_fv3(theta, q_sphum, u, v, z,
-shear_floor=1e-12)` to `grids/cubed_sphere.py`.  Computes:
-
-```
-Ri = N² / S²,   S² = (du/dz)² + (dv/dz)²
-```
-
-N² delegates to iter-772 `brunt_vaisala_squared_fv3`; shears are
-centered differences at the same layer midpoints.  Output shape
-``(..., km−1)``.
-
-Classical interpretation: Ri < 0 convectively unstable; 0 ≤ Ri < ¼
-turbulent (Kelvin-Helmholtz); Ri > 1 strongly stable.  Critical
-Ri_c = ¼ from Miles-Howard theorem.
-
-Shear-floor argument (default 1e-12 s⁻²) prevents div-by-0 in
-calm air.  Test verifies that zero shear + stable stratification
-gives huge but finite Ri.
-
-Test: `tests/test_fv3_richardson_iter773.py` (6 tests: calm-air
-floor (Ri > 10⁶, finite), strong shear + neutral → Ri≈0, strong
-stable + weak shear → Ri>1, explicit composition with iter-772
-N², 3-D shapes km→km−1, finite for realistic fields).
-
-### Why this iteration was meaningful
-
-Ri is the canonical shear-stratification ratio used by: (1) PBL
-schemes for turbulence onset/decay (KPP, Mellor-Yamada); (2)
-clear-air turbulence forecasting (CAT advisories key off
-Ri < 0.25 layers); (3) gravity-wave breakdown criteria; (4)
-shear-driven mixing parameterizations.  Composes iter-772 N² with
-shear in one call.  Pure JAX, vmap-compatible.  No new physical
-constants introduced.
-
-## Iter 774 — bulk_richardson_fv3 (Ri_b for PBL height)
-
-Added `bulk_richardson_fv3(theta_v_surf, theta_v, u, v, z,
-wind_sq_floor=0.01)` to `grids/cubed_sphere.py`.  Computes:
-
-```
-Ri_b(z) = g·z·(θ_v(z) − θ_v_surf) / (θ_v_surf · (u² + v²))
-```
-
-Distinct from iter-773 **gradient** Ri.  Bulk Ri integrates from
-surface to a finite height, giving a layered stability that PBL
-schemes use to detect the boundary-layer top: PBL height = first
-level where Ri_b exceeds a critical value (~0.25 over land, ~0.5
-over ocean).
-
-Used by: Vogelezang-Holtslag (1996), Troen-Mahrt (1986), Holtslag-
-Boville (1993) PBL schemes.  Caller passes pre-computed θ_v
-(typically from `_shared.virtual_temperature`) — Ri_b is
-canonically defined on θ_v, not θ.
-
-`wind_sq_floor` prevents div-by-0 at near-calm surface; default
-0.01 m²/s² ≈ (0.1 m/s)².
-
-Test: `tests/test_fv3_bulk_richardson_iter774.py` (6 tests:
-surface-level Ri_b=0, stable → +, unstable → −, calm-air floor
-gives bounded finite Ri_b, 3-D shapes preserved with θ_v_surf
-broadcast, finite).
-
-### Why this iteration was meaningful
-
-PBL height is one of the most-consequential diagnostics in
-mesoscale and global modeling: it gates vertical mixing
-intensity, dictates dust/aerosol and pollutant venting depth,
-sets the cloud-base level for convection schemes, and influences
-surface fluxes via near-surface drag.  Ri_b > Ri_c is the
-canonical detection criterion across multiple PBL parameter-
-izations.  Together with iter-773 gradient Ri, the boundary-layer
-stability diagnostic stack is complete (gradient Ri for interior,
-bulk Ri for height).  Pure JAX, vmap-compatible.  No new physical
-constants introduced.
-
-## Iter 775 — pbl_height_fv3 (Ri_b threshold crossing)
-
-Added `pbl_height_fv3(ri_b, z, ri_crit=0.25)` to
-`grids/cubed_sphere.py`.  Holtslag-Boville convention: PBL top is
-the lowest level at which the bulk Ri exceeds a critical value.
-
-```
-z_pbl = z[k*]   where k* = argmin{ k : Ri_b(k) > ri_crit }
-```
-
-Vertical axis last; ``z`` and ``ri_b`` are surface→top oriented.
-Fallbacks:
-  * No crossing in column (deep mixed / near-neutral): return z
-    at top of column.
-  * All Ri_b > ri_crit (strongly stable surface): return z at
-    surface.
-
-JAX-compatible threshold detection via `jnp.argmax(above, axis=-1)`
-+ `jnp.any` + `jnp.take_along_axis` — fully vmap-compatible.
-
-Composes with iter-774 `bulk_richardson_fv3` to give the
-(θ_v_surf, θ_v, u, v, z) → z_pbl pipeline.
-
-Standard ``ri_crit`` values: 0.25 (land, Vogelezang-Holtslag /
-Troen-Mahrt) and 0.50 (ocean, Holtslag-Boville).
-
-Test: `tests/test_fv3_pbl_height_iter775.py` (6 tests: monotone
-crossing at expected level, no-crossing → top, all-above →
-surface, ri_crit selectivity, full iter-774 chain composition,
-3-D batched columns (n_x, n_y, km) → (n_x, n_y) output shape).
-
-### Why this iteration was meaningful
-
-Closes the PBL-height detection pipeline: iter-772 N² → iter-773
-gradient Ri / iter-774 bulk Ri → iter-775 PBL top in metres.
-PBL height is the most-consequential boundary-layer diagnostic
-(gates vertical mixing depth, sets cloud-base for shallow
-convection, dictates pollutant venting layer, anchors the
-surface-flux drag coefficient lookup).  Pure JAX, vmap-
-compatible.  No new physical constants introduced.
-
-## Iter 776 — shear_squared_fv3 helper + iter-773 refactor
-
-Extracted `shear_squared_fv3(u, v, z)` to
-`grids/cubed_sphere.py` from the inline shear computation in
-iter-773 ``richardson_number_fv3``:
-
-```
-S² = (du/dz)² + (dv/dz)²     at layer midpoints
-```
-
-Output shape ``(..., km−1)`` matches iter-772 N² layout, so a
-caller can compose `Ri = N² / S²` index-aligned.
-
-iter-773 refactored from:
-
-```python
-du = u[..., 1:] - u[..., :-1]
-dv = v[..., 1:] - v[..., :-1]
-dz = z[..., 1:] - z[..., :-1]
-s_sq = (du / dz) ** 2 + (dv / dz) ** 2
-```
-
-to a single `shear_squared_fv3(u, v, z)` call.  iter-773 6/6
-tests pass post-refactor — output bit-identical.
-
-Test: `tests/test_fv3_shear_squared_iter776.py` (6 tests: zero
-wind → S²=0, u-only shear analytic, v-only shear analytic,
-iter-773 Ri regression preserved, 3-D shapes km→km−1,
-non-negative finite).
-
-### Why this iteration was meaningful
-
-Matches the iter-720/727/728/766/771 helper-extraction lineage.
-Vertical shear is independently needed by: KPP-style PBL mixing
-schemes (which discriminate stable/unstable via N²/S² ratio but
-also use S² directly for entrainment), gravity-wave breakdown
-diagnostics, CAT forecasting that screens S² > S²_thresh layers,
-and TKE budget diagnostics.  Pure JAX, vmap-compatible.  No new
-physical constants introduced.
-
-## Iter 777 — wind_direction_fv3 (meteorological convention)
-
-Added `wind_direction_fv3(ua, va, convention='from')` to
-`grids/cubed_sphere.py`.  Returns wind direction in degrees on
-``[0, 360)``:
-
-```
-wdir_to   = degrees(atan2(ua, va)) mod 360       # math convention
-wdir_from = (wdir_to + 180) mod 360              # METAR / WMO
-```
-
-Meteorological standard ('from') is the direction the wind is
-*coming from*, measured clockwise from north (0°=N, 90°=E, 180°=S,
-270°=W).  Mathematical 'to' opposite (differs by 180°).
-
-Calm air (ua=va=0) returns 0° by ``atan2(0,0)`` convention.
-Invalid ``convention`` string raises ``ValueError``.
-
-Used by: wind-rose plot generation, gust-shift detection,
-surface-flux directional anisotropy, observation matching (METAR
-'from'), trajectory dispersion runs.  Complements iter-741
-``wind_speed_fv3`` to give the full (|V|, dir) wind decomposition.
-
-Test: `tests/test_fv3_wind_direction_iter777.py` (7 tests: pure
-east → from=270°, pure north → from=180°, pure west → from=90°,
-calm-air convention, from = (to + 180) mod 360 over 50 random
-winds, 3-D shapes + finite + range, invalid convention raises).
-
-### Why this iteration was meaningful
-
-Closes the basic kinematic diagnostic pair (speed + direction).
-Wind direction is the second-most-used wind diagnostic after
-speed: it's printed on every METAR, every TAF, every surface
-station, every wind-rose, and is needed to match model output
-against observations in any DA cycle.  No new physical constants
-introduced.  Pure JAX, vmap-compatible.
-
-## Iter 778 — coriolis_parameter_fv3 + dcmip16-TC refactor
-
-Added `coriolis_parameter_fv3(lat, units='rad')` to
-`grids/cubed_sphere.py`.  Standard rotating-frame term:
-
-```
-f = 2 · Ω · sin(lat)     Ω = constants.Omega = 7.292·10⁻⁵ rad/s
-```
-
-`units` kwarg accepts ``'rad'`` (default) or ``'deg'``; invalid
-string raises ``ValueError``.
-
-Refactored inline ``2.0 * omega * jnp.sin(jnp.asarray(phip))``
-pattern in iter-672 ``dcmip16_tc_uwind_pert`` to delegate.  All
-11 dcmip16-TC tests pass post-refactor (output bit-identical, both
-expressions reduce to the same constants).
-
-A second inline use in ``gh_jet_fv3`` was *intentionally not
-refactored* because that function takes ``omega: float =
-constants.Omega`` as a configurable parameter (callers can pass a
-custom Ω for non-Earth experiments).  The helper hard-codes
-``constants.Omega``, so delegating there would silently drop the
-override.  Documented inline.
-
-Test: `tests/test_fv3_coriolis_parameter_iter778.py` (7 tests:
-equator → 0, north pole → 2·Ω, south pole → −2·Ω, 40°N textbook
-value ≈ 9.376·10⁻⁵ s⁻¹, units='deg' agrees with 'rad' over 50
-random lats, 3-D shapes + finite, invalid units raises).
-
-### Why this iteration was meaningful
-
-Coriolis is the most-used dynamical parameter in atmospheric and
-oceanic models (geostrophic balance, Rossby waves, Ekman pumping,
-inertial oscillations, ageostrophic decomposition).  The codebase
-had ~9 inline ``2.0 * omega * jnp.sin(lat)`` patterns across
-``cubed_sphere.py``, ``cubed_sphere_cdgrid.py``, ``voronoi.py``,
-``ocean/physics/lateral_mixing/`` — this iter adds the single
-canonical helper and refactors the one safe atmosphere-side
-caller; the configurable-Ω caller (`gh_jet_fv3`) is documented
-as intentionally not delegated.  Pure JAX, vmap-compatible.  No
-new physical constants introduced.
-
-## Iter 779 — inertial_period_fv3 (2π/|f|)
-
-Added `inertial_period_fv3(lat, units='rad', f_floor=1e-12)` to
-`grids/cubed_sphere.py`.  Composes iter-778 Coriolis:
-
-```
-T_inertial = 2π / max(|f|, f_floor)     [seconds]
-```
-
-Near-pole (lat = π/2): T ≈ 2π/(2·Ω) ≈ 11.97 h.
-Mid-lat 30°: |f| = Ω → T = 2π/Ω ≈ 1 sidereal day (86164 s).
-Equator (f = 0): T → ∞; clamped via ``f_floor`` to a finite huge
-value (default 6.3·10¹² s ≈ "no inertial oscillation").
-
-Used by ocean mixed-layer near-inertial wave (NIW) decay,
-atmospheric inertia-gravity wave dispersion, mesoscale eddy
-Rhines scale, MJO/equatorial-wave critical-latitude analysis.
-
-Test: `tests/test_fv3_inertial_period_iter779.py` (6 tests:
-pole T ≈ 11.97 h, 30°N T ≈ 23.93 h, equator T finite via floor,
-hemisphere symmetry T(+lat)=T(-lat), composition with iter-778
-matches 2π/|f|, 3-D shapes + finite + positive).
-
-### Why this iteration was meaningful
-
-Inertial period sets the natural-oscillation timescale of any
-unforced rotating-frame disturbance.  Critical for: (1) ocean
-near-inertial wave (NIW) spectral analysis (storm-driven NIWs
-decay over multiple T_inertial); (2) selecting mixed-layer
-turbulence-scheme timesteps (must resolve ½·T_inertial at high
-latitudes); (3) gravity-wave drag spectra (f as low cutoff);
-(4) Rhines-scale derivation L_R = √(U/β).  Pure JAX, vmap-
-compatible.  No new physical constants introduced.
 

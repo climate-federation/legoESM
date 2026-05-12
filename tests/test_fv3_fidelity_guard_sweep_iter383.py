@@ -367,6 +367,7 @@ _GUARD_MODULES = (
     "test_fv3_wind_direction_iter777",               # iter-777 add
     "test_fv3_coriolis_parameter_iter778",           # iter-778 add
     "test_fv3_inertial_period_iter779",              # iter-779 add
+    "test_fv3_beta_plane_iter780",                   # iter-780 add
 )
 
 
