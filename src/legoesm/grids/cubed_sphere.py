@@ -2806,6 +2806,82 @@ def get_pressure_given_height_fv3(
     return p
 
 
+def updraft_helicity_fv3(
+    vort: jax.Array, w: jax.Array,
+    delz: jax.Array | None = None,
+    pt: jax.Array | None = None, q: jax.Array | None = None,
+    peln: jax.Array | None = None,
+    z_bot: float = 2000.0,
+    z_top: float = 5000.0,
+    hydrostatic: bool = False,
+    zvir: float | None = None,
+) -> jax.Array:
+    """FV3_3D iter 686: updraft helicity (supercell diagnostic).
+
+    Faithful JAX port of FV3 ``updraft_helicity``
+    (tools/fv_diagnostics.F90:5048-5108).  Vertical integral of
+    ``vort · w · dz`` between ``z_bot`` and ``z_top``.  Used as
+    proxy for storm-rotation intensity (UH > 50 m²/s² = supercell
+    threshold per NWS guidance).
+
+    Algorithm:
+        if hydrostatic:
+            dz[k] = (R_d/g) · pt[k]·(1 + zvir·q[k])·(peln[k+1] - peln[k])
+        else:
+            dz[k] = -delz[k]    (FV3 delz < 0)
+        zh_above[k] = sum(dz[k:], bottom-up)
+        zh_below[k] = zh_above[k] - dz[k]
+        dz_eff[k] = max(0, min(zh_above[k], z_top)
+                          - max(zh_below[k], z_bot))
+        uh = sum_k(vort[k] · w[k] · dz_eff[k])
+
+    Parameters
+    ----------
+    vort : jax.Array, shape (..., km)
+        3D vorticity (1/s).
+    w : jax.Array, shape (..., km)
+        Vertical velocity (m/s).
+    delz : jax.Array, shape (..., km), optional
+        Layer thicknesses (m, FV3 convention negative).  Required
+        if hydrostatic=False.
+    pt, q, peln : jax.Array, optional
+        For hydrostatic: temperature, water vapor, log-p.
+    z_bot, z_top : float, default 2000, 5000 m
+        Integration bounds (NWS standard 2-5 km layer).
+    hydrostatic : bool, default False
+    zvir : float, optional
+        Virtual-T factor (R_v/R_d - 1).
+
+    Returns
+    -------
+    uh : jax.Array, shape (...,)
+        Updraft helicity (m²/s²).
+    """
+    if hydrostatic:
+        if pt is None or q is None or peln is None:
+            raise ValueError("hydrostatic=True requires pt, q, peln")
+        if zvir is None:
+            zvir = constants.R_v / constants.R_d - 1.0
+        rdg = constants.R_d / constants.g
+        dz = rdg * pt * (1.0 + zvir * q) * (peln[..., 1:] - peln[..., :-1])
+    else:
+        if delz is None:
+            raise ValueError("hydrostatic=False requires delz")
+        dz = -delz
+
+    # zh_above[k] = sum(dz[k:], axis=-1) — height of top of layer k from surface
+    dz_reversed = dz[..., ::-1]
+    cumsum_from_surface = jnp.cumsum(dz_reversed, axis=-1)
+    zh_above = cumsum_from_surface[..., ::-1]   # top-down order
+    zh_below = zh_above - dz                    # bottom of each layer
+    # Effective dz within [z_bot, z_top]
+    dz_eff = jnp.maximum(
+        0.0,
+        jnp.minimum(zh_above, z_top) - jnp.maximum(zh_below, z_bot),
+    )
+    return jnp.sum(vort * w * dz_eff, axis=-1)
+
+
 def prt_mxm_fv3(
     q: jax.Array, area: jax.Array, fac: float = 1.0,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:

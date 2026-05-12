@@ -274,6 +274,7 @@ _GUARD_MODULES = (
     "test_fv3_get_p_given_h_iter683",                # iter-683 add
     "test_fv3_get_h_given_p_iter684",                # iter-684 add
     "test_fv3_prt_mxm_iter685",                      # iter-685 add
+    "test_fv3_updraft_helicity_iter686",             # iter-686 add
 )
 
 

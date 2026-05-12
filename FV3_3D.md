@@ -1195,6 +1195,36 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 686: **FV3 ``updraft_helicity_fv3``** — UH supercell diagnostic.
+  Faithful JAX port of FV3 ``updraft_helicity``
+  (tools/fv_diagnostics.F90:5048-5108).
+
+  Vertical integral of ``vort · w · dz`` between z_bot and z_top.
+  NWS standard: 2-5 km layer.  UH > 50 m²/s² → supercell threshold.
+
+  Algorithm (vectorized):
+
+      if hydrostatic:
+          dz = (R_d/g) · pt·(1 + zvir·q)·(peln[k+1] - peln[k])
+      else:
+          dz = -delz                # FV3 delz < 0
+      zh_above = cumsum(dz, from surface up)
+      zh_below = zh_above - dz
+      dz_eff = max(0, min(zh_above, z_top) - max(zh_below, z_bot))
+      uh = sum_k(vort · w · dz_eff)
+
+  Avoids FV3's sequential loop via cumulative-zh + clipped
+  partial-layer contribution.
+
+  Tests (6/6 in <1 s):
+  1. Zero vort → uh = 0.
+  2. Zero w → uh = 0.
+  3. Uniform Ω, W in window → uh = Ω·W·(z_top - z_bot).
+  4. Empty window (z_top == z_bot) → uh = 0.
+  5. hydrostatic=True without args raises.
+  6. No NaN/Inf on random inputs.
+
+  Wired into iter-383 sweep (now 251).
 - Iter 685: **FV3 ``prt_mxm_fv3``** — max/min/area-weighted-mean
   diagnostic.  Faithful JAX port of FV3 ``prt_mxm``
   (tools/fv_diagnostics.F90:4118-4161).
