@@ -1195,6 +1195,32 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 674: **FV3 ``get_staggered_grid_fv3``** — B-grid → C/D-grid edges.
+  Faithful JAX port of FV3 ``get_staggered_grid``
+  (tools/fv_treat_da_inc.F90:444-475).
+
+  Algorithm:
+
+      pt_d[i, j] = mid_pt_sphere(pt_b[i, j], pt_b[i+1, j])    # N/S edge
+      pt_c[i, j] = mid_pt_sphere(pt_b[i, j], pt_b[i, j+1])    # E/W edge
+
+  Uses iter-608 ``mid_pt_sphere`` for great-circle midpoints.
+  Returns ``(pt_c_lon, pt_c_lat, pt_d_lon, pt_d_lat)`` from
+  B-grid corner array.
+
+  Pairs with iter-673 ``remap_coef_fv3``: together FV3-faithful
+  IC ingestion (regular lat-lon → cubed-sphere C/D-grid) available.
+
+  Broadcasts on leading axes (e.g., 6-face cube).
+
+  Tests (5/5 in 9 s):
+  1. C-grid (n+1, n); D-grid (n, n+1) shapes correct.
+  2. All midpoints on unit sphere.
+  3. Equator uniform-grid midpoints exact.
+  4. No NaN/Inf in outputs.
+  5. Batched (face axis) preserves leading dim.
+
+  Wired into iter-383 sweep (now 240).
 - Iter 673: **FV3 ``remap_coef_fv3``** — lat-lon → cubed-sphere bilinear
   remap weights.  Faithful JAX port of FV3 ``remap_coef``
   (tools/fv_treat_da_inc.F90:366-442).

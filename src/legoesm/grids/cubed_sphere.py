@@ -2606,6 +2606,44 @@ def dcmip16_bc_pressure(
     return p0 * jnp.exp(-g / Rdgas * (Ti1 - Ti2 * IT))
 
 
+def get_staggered_grid_fv3(
+    pt_b_lon: jax.Array, pt_b_lat: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    """FV3_3D iter 674: B-grid corners → C/D-grid edge midpoints.
+
+    Faithful JAX port of FV3 ``get_staggered_grid``
+    (tools/fv_treat_da_inc.F90:444-475).  Given B-grid corner
+    positions, compute C-grid (east/west edge) and D-grid
+    (north/south edge) midpoints via iter-608 ``mid_pt_sphere``::
+
+        pt_d[i, j] = mid_pt_sphere(pt_b[i, j], pt_b[i+1, j])  # N/S edge
+        pt_c[i, j] = mid_pt_sphere(pt_b[i, j], pt_b[i, j+1])  # E/W edge
+
+    Parameters
+    ----------
+    pt_b_lon, pt_b_lat : jax.Array, shape (..., n+1, n+1)
+        B-grid corner positions (radians).
+
+    Returns
+    -------
+    pt_c_lon, pt_c_lat : jax.Array, shape (..., n+1, n)
+        C-grid east/west edge midpoints.
+    pt_d_lon, pt_d_lat : jax.Array, shape (..., n, n+1)
+        D-grid north/south edge midpoints.
+    """
+    # D-grid (N/S edges): midpoint between (i, j) and (i+1, j) (axis -2)
+    pt_d_lon, pt_d_lat = mid_pt_sphere(
+        pt_b_lon[..., :-1, :], pt_b_lat[..., :-1, :],
+        pt_b_lon[..., 1:, :], pt_b_lat[..., 1:, :],
+    )
+    # C-grid (E/W edges): midpoint between (i, j) and (i, j+1) (axis -1)
+    pt_c_lon, pt_c_lat = mid_pt_sphere(
+        pt_b_lon[..., :, :-1], pt_b_lat[..., :, :-1],
+        pt_b_lon[..., :, 1:], pt_b_lat[..., :, 1:],
+    )
+    return pt_c_lon, pt_c_lat, pt_d_lon, pt_d_lat
+
+
 def remap_coef_fv3(
     target_lon: jax.Array, target_lat: jax.Array,
     src_lon: jax.Array, src_lat: jax.Array,
