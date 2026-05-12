@@ -1195,6 +1195,20 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 609: **``terrain_filter`` mass-preservation regression**.
+  Verifies that iter-606's del-2 / del-4 terrain filter preserves
+  the area-weighted mean of phis exactly on a closed cubed sphere
+  (divergence-theorem property: ∫Δq·dA = 0 since fluxes form a
+  closed-surface integral that cancels).
+  Tests (3/3 in 5 s):
+  1. del-2 filter, C16, 4 iters: rel drift in mean(phis·area)/
+     sum(area) < 1e-3.
+  2. del-4 filter, C16, 4 iters: rel drift < 1e-3.
+  3. Constant field (∇²·const = 0) → exactly preserved.
+  This is a regression guard for iter-606 ensuring the filter
+  doesn't accidentally drift the global terrain mean (which
+  would break mass-conservation-like properties).  Wired into
+  iter-383 sweep (now 182).
 - Iter 608: **``mid_pt_sphere``** great-circle midpoint helper.
   Faithful port of FV3 ``mid_pt_sphere`` (fv_grid_utils.F90:
   1981-1992).  Algorithm:
