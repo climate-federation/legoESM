@@ -1195,6 +1195,40 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 668: **FV3 ``dcmip16_bc_uwind`` + ``dcmip16_bc_sphum``**.
+  Faithful JAX ports of FV3 DCMIP16 BC zonal wind + humidity
+  (tools/test_cases.F90:6807-6852).  Pairs with iter-667 BC T/p.
+
+  ``dcmip16_bc_uwind(z, T, lat)`` — baroclinic wind:
+
+      Tir = z·exp(-(z·g/(b·R_d·T0))²)
+      Ti2 = 0.5·(K+2)·(Te-Tp)/(Te·Tp)·Tir
+      UU  = g·K/R · Ti2 · (cos^(K-1) - cos^(K+1)) · T
+      u   = -Ω·R·cos(lat) + √((Ω·R·cos(lat))² + R·cos(lat)·UU)
+
+  ``dcmip16_bc_sphum(p, ps, lat)`` — humidity profile:
+
+      eta = p / ps
+      if p > ptrop:
+          q = q0·exp(-(lat/phiW)⁴)·exp(-((eta-1)·p0/pw)²)
+      else:
+          q = qt
+
+  Default DCMIP16 BC constants: q0=0.018, qt=1e-12, phiW=2π/9,
+  pw=34000, ptrop=10000 Pa.
+
+  With iter-667 + iter-668: complete IC stack for DCMIP16 Test
+  410 (BC test).
+
+  Tests (6/6 in 1 s):
+  1. u(z=0, equator) = 0.
+  2. u finite across tropospheric range.
+  3. u positive (eastward) jet in midlatitudes.
+  4. q(surface, equator) ≈ q0 = 0.018.
+  5. q(stratosphere) = qt = 1e-12.
+  6. q finite, positive everywhere.
+
+  Wired into iter-383 sweep (now 235).
 - Iter 667: **FV3 ``dcmip16_bc_temperature`` + ``dcmip16_bc_pressure``**.
   Faithful JAX ports of FV3 DCMIP16 baroclinic-instability test
   profiles (tools/test_cases.F90:6774-6805).

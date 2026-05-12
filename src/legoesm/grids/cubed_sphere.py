@@ -2382,6 +2382,93 @@ def rotate_winds_sphere_cube(
     return new_u, new_v
 
 
+def dcmip16_bc_uwind(
+    z: jax.Array, T: jax.Array, lat: jax.Array,
+    KK: float = 3.0,
+    Te: float = 310.0,
+    Tp: float = 240.0,
+    b: float = 2.0,
+) -> jax.Array:
+    """FV3_3D iter 668: DCMIP16 BC zonal wind profile.
+
+    Faithful JAX port of FV3 ``DCMIP16_BC_uwind``
+    (tools/test_cases.F90:6807-6821).  Baroclinic-wind profile
+    derived from T via geostrophic balance + centripetal::
+
+        Tir = z·exp(-(z·g/(b·R_d·T0))²)
+        Ti2 = 0.5·(K+2)·(Te-Tp)/(Te·Tp)·Tir
+        UU  = g·K/R · Ti2 · (cos(lat)^(K-1) - cos(lat)^(K+1)) · T
+        u   = -Ω·R·cos(lat) + sqrt((Ω·R·cos(lat))² + R·cos(lat)·UU)
+
+    Used with iter-667 ``dcmip16_bc_temperature`` to build the
+    DCMIP16 Test 410 IC.
+
+    Parameters
+    ----------
+    z : jax.Array
+        Height (m).
+    T : jax.Array
+        Temperature (K), from ``dcmip16_bc_temperature``.
+    lat : jax.Array
+        Latitude (radians).
+    """
+    g = constants.g
+    Rdgas = constants.R_d
+    radius = constants.R_earth
+    omega = constants.Omega
+    T0 = 0.5 * (Te + Tp)
+    zsc = z * g / (b * Rdgas * T0)
+    Tir = z * jnp.exp(-zsc * zsc)
+    Ti2 = 0.5 * (KK + 2.0) * (Te - Tp) / (Te * Tp) * Tir
+    cos_lat = jnp.cos(lat)
+    K_int = int(KK)
+    UU = (
+        g * KK / radius * Ti2
+        * (cos_lat ** (K_int - 1) - cos_lat ** (K_int + 1)) * T
+    )
+    discriminant = (omega * radius * cos_lat) ** 2 + radius * cos_lat * UU
+    safe_disc = jnp.maximum(discriminant, 0.0)
+    return -omega * radius * cos_lat + jnp.sqrt(safe_disc)
+
+
+def dcmip16_bc_sphum(
+    p: jax.Array, ps: jax.Array, lat: jax.Array,
+    q0: float = 0.018,
+    qt: float = 1.0e-12,
+    phiW: float | None = None,
+    pw: float = 34000.0,
+    p0: float = 1.0e5,
+    ptrop: float = 1.0e4,
+) -> jax.Array:
+    """FV3_3D iter 668: DCMIP16 BC specific humidity profile.
+
+    Faithful JAX port of FV3 ``DCMIP16_BC_sphum``
+    (tools/test_cases.F90:6840-6852).
+
+    Algorithm:
+
+        eta = p / ps
+        if p > ptrop:
+            q = q0·exp(-(lat/phiW)⁴)·exp(-((eta-1)·p0/pw)²)
+        else:
+            q = qt
+
+    Default DCMIP16 BC constants (FV3 lines 6499-6503):
+        q0=0.018, qt=1e-12, phiW=2π/9, pw=34000, p0=1e5, ptrop=1e4
+
+    Used in FV3 DCMIP16 Test 410 BC moist IC.
+    """
+    if phiW is None:
+        phiW = 2.0 * jnp.pi / 9.0
+    eta = p / ps
+    q_moist = (
+        q0
+        * jnp.exp(-((lat / phiW) ** 4))
+        * jnp.exp(-((eta - 1.0) * p0 / pw) ** 2)
+    )
+    return jnp.where(p > ptrop, q_moist, qt)
+
+
 def dcmip16_bc_temperature(
     z: jax.Array, lat: jax.Array,
     KK: float = 3.0,
