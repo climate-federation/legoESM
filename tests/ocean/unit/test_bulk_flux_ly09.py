@@ -27,6 +27,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm import constants
 from legoesm.coupler.bulk_flux import compute_most_fluxes
 from legoesm.coupler.config import CouplerConfig
 from legoesm.coupler.coupler import _Q_SAT_SALINE_FACTOR, ocean_tile_response
@@ -59,7 +60,7 @@ def _extract_C_DN_at_U(U_target, n_iter=20):
     coefficient-space iteration converges to C_D == C_DN.
     """
     shape = ()
-    rho = 1.225
+    rho = constants.rho_air
     u_rel = jnp.array(U_target)
     v_rel = jnp.array(0.0)
     T_atm = jnp.array(288.15)

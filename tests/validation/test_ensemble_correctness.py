@@ -150,7 +150,7 @@ def _make_forcing() -> SegmentForcing:
         day_of_year=1.0,
         seconds_of_day=0.0,
         solar_weights=jnp.ones(14),
-        s_0=1361.0,
+        s_0=constants.S_0,
         o3_vmr=jnp.zeros(SHAPE_3D),
         aerosol_od=jnp.zeros(SHAPE_2D),
     )

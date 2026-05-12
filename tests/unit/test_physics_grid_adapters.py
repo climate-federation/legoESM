@@ -19,6 +19,7 @@ import numpy as np
 import numpy.testing as npt
 import pytest
 
+from legoesm import constants
 from legoesm.driver.grid_adapters import (
     ColumnAdapter,
     SingleColumnGrid,
@@ -571,7 +572,7 @@ class TestStepUnified:
             jnp.bool_(True),
             T, p_s, q_v, q_c, q_r, jnp.zeros((ad.ncol,), dtype=T.dtype), u, v, sst, sic, lat, lon,
             100.0, 43200.0, 600.0,
-            solar_w, 1361.0,
+            solar_w, constants.S_0,
             o3, aerosol,
             held_3d, held_2d, held_2d,
             held_2d, held_2d, held_2d,
@@ -614,7 +615,7 @@ class TestStepUnified:
             jnp.bool_(True),
             T, p_s, q_v, q_c, q_r, jnp.zeros((ad.ncol,), dtype=T.dtype), u, v, sst, sic, lat, lon,
             100.0, 43200.0, 600.0,
-            solar_w, 1361.0,
+            solar_w, constants.S_0,
             o3, aerosol,
             held_3d, held_2d, held_2d,
             held_2d, held_2d, held_2d,
@@ -656,7 +657,7 @@ class TestStepUnified:
             jnp.bool_(True),
             T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
             100.0, 43200.0, 300.0,
-            solar_w, 1361.0,
+            solar_w, constants.S_0,
             o3, aerosol,
             held_3d, held_2d, held_2d,
             held_2d, held_2d, held_2d,

@@ -20,6 +20,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.core.state import HydrostaticState
 from legoesm.driver.compiled_segments import (
@@ -296,7 +297,7 @@ def _make_forcing():
         day_of_year=1.0,
         seconds_of_day=0.0,
         solar_weights=jnp.ones(14),
-        s_0=1361.0,
+        s_0=constants.S_0,
         o3_vmr=jnp.zeros((N_FACES, N, N, NLEV)),
         aerosol_od=jnp.zeros((N_FACES, N, N)),
     )

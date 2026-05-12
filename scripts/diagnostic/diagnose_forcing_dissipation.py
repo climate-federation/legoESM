@@ -12,6 +12,7 @@ os.environ["JAX_ENABLE_X64"] = "1"
 import numpy as np
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.ocean.vertical import create_ocean_z_star
 
 NLEV = 10
@@ -123,7 +124,7 @@ taper_ll = np.cos(lat_rad_ll) ** 2
 tau_x_ll = -0.1 * np.cos(2.0 * lat_rad_ll) * taper_ll
 
 dz0 = float(z_coord.dz_ref[0])
-rho0 = 1025.0
+rho0 = constants.rho_ocean
 du_dt_wind_ll = tau_x_ll / (rho0 * dz0)  # cell center tendency
 
 # Cell areas

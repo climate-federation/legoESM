@@ -53,6 +53,7 @@ import numpy as np
 from dataclasses import dataclass
 from typing import Any, Dict, Tuple
 
+from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.ocean.eos import LinearEOSConfig
 
@@ -287,7 +288,7 @@ def create_eos_config(config: GlobalOverturningConfig = None):
     if config is None:
         config = GlobalOverturningConfig()
     return LinearEOSConfig(
-        rho_ref=1025.0,
+        rho_ref=constants.rho_ocean,
         alpha_T=config.alpha_T,
         beta_S=0.0,          # T-only buoyancy (Wolfe & Cessi use b = alpha*g*T)
         T_ref=config.T_ref,

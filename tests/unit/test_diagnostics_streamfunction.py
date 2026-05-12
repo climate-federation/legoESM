@@ -11,6 +11,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from legoesm import constants
 from legoesm.ocean.diagnostics_streamfunction import (
     barotropic_streamfunction,
     moc_streamfunction,
@@ -18,7 +19,7 @@ from legoesm.ocean.diagnostics_streamfunction import (
 
 
 class _FakeGrid:
-    def __init__(self, radius=6.371e6):
+    def __init__(self, radius=constants.R_earth):
         self.radius = radius
 
 

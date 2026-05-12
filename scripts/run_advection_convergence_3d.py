@@ -43,6 +43,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from legoesm import constants
+
 jax.config.update("jax_enable_x64", True)
 
 ALL_SCHEMES = ["upwind", "tvd", "dst3", "weno5", "weno7"]
@@ -79,7 +81,7 @@ def _overturning_velocity(lon_u, lon_v, lon_w, z_u, z_w, t, T=T_PERIOD,
     u_east : array at u-faces [m/s]
     w_vert : array at vertical interfaces [m/s]
     """
-    R = 6371.0e3
+    R = constants.R_earth
     cos_phase = jnp.cos(jnp.pi * t / T)
     kx = 2.0 * jnp.pi / Lx_rad  # one full cycle in lon
     kz = jnp.pi / H              # half cycle in z (peak at H/2)

@@ -34,6 +34,7 @@ import matplotlib.pyplot as plt
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
+from legoesm import constants  # noqa: E402
 from ocean_test_matrix.regridding import _bin_to_latlon  # noqa: E402
 
 
@@ -50,7 +51,7 @@ LAT_BIN_CENTRES = np.linspace(-87.5, 87.5, 36)
 LAT_BIN_WIDTH_DEG = 5.0
 LAT_BIN_HALFWIDTH_DEG = LAT_BIN_WIDTH_DEG / 2.0
 
-R_EARTH = 6.371e6  # m
+R_EARTH = constants.R_earth  # m
 N_LEVELS = 20
 H_MAX = 4000.0
 DZ_SURFACE = 10.0

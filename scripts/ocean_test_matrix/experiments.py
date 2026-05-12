@@ -12,6 +12,7 @@ from typing import Callable
 import jax.numpy as jnp
 import numpy as np
 
+from legoesm import constants
 from ocean_test_matrix import config
 from ocean_test_matrix.setup import _create_ocean_setup
 from ocean_test_matrix.timeloop import (
@@ -1253,7 +1254,7 @@ def _compute_rpe(state, grid_type, grid, z_coord):
     from legoesm.ocean.eos import linear_eos
     rho = np.asarray(linear_eos(
         jnp.array(T), jnp.array(S), jnp.zeros_like(jnp.array(T)),
-        rho_ref=1025.0, alpha_T=2.0e-4, beta_S=0.0, T_ref=15.0,
+        rho_ref=constants.rho_ocean, alpha_T=2.0e-4, beta_S=0.0, T_ref=15.0,
     ), dtype=np.float64)
 
     # Potential energy: PE = g * sum(rho * z * dz * area)

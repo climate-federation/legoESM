@@ -47,6 +47,7 @@ import jax.numpy as jnp
 import numpy as np
 import matplotlib.pyplot as plt
 
+from legoesm import constants
 from ocean_test_matrix.experiments import run_eady_gm_redi
 from ocean_test_matrix.testcase import TestCase
 
@@ -175,7 +176,7 @@ def _plot_gm_streamfunction(out_root: Path) -> None:
 
     # Approximate dy from the channel extent (15→35°S = 20° lat,
     # n_lat - 2 active rows).  R_earth = 6.371e6 m.
-    R_E = 6.371e6
+    R_E = constants.R_earth
     n_lat_active = n_lat - 2
     dlat_deg = 20.0 / n_lat_active
     dy = R_E * np.deg2rad(dlat_deg)

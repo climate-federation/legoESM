@@ -13,6 +13,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.core.state import HydrostaticState
 from legoesm.driver.physics_pipeline import PhysicsOutput
@@ -98,7 +99,7 @@ def _step_unified_args(*, include_conv_prog=False):
         0.0,
         600.0,
         jnp.ones(14),
-        1361.0,
+        constants.S_0,
         jnp.zeros(shape_3d),
         jnp.zeros(shape_2d),
         jnp.zeros(shape_3d),

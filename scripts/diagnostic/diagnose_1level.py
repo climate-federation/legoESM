@@ -9,6 +9,7 @@ os.environ["JAX_ENABLE_X64"] = "1"
 import numpy as np
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.ocean.vertical import create_ocean_z_star
 from legoesm.ocean.physics.combined import OceanPhysicsConfig
 from legoesm.ocean.physics.surface_forcing.config import SurfaceForcingConfig, PrescribedForcingConfig
@@ -26,7 +27,7 @@ DAYS = 30.0
 N_STEPS = int(DAYS * 86400 / DT)
 T_UNIFORM = 10.0
 S_UNIFORM = 35.0
-RHO0 = 1025.0
+RHO0 = constants.rho_ocean
 R_DRAG = 1e-4
 TAU_MAX = 0.1
 

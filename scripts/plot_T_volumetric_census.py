@@ -39,11 +39,12 @@ import numpy as np
 # Keep JAX off the GPU while running this analysis.
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
+from legoesm import constants
 from legoesm.ocean.experiments.eady_uniform import EadyUniformConfig
 from legoesm.ocean.vertical import create_ocean_z_star
 
 
-R_EARTH = 6371.0e3
+R_EARTH = constants.R_earth
 
 
 def _cell_volumes(cfg: EadyUniformConfig, nlat: int, nlon: int, nlev: int) -> np.ndarray:

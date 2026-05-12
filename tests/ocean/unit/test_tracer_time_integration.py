@@ -13,6 +13,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm import constants
 from legoesm.grids.latlon import create_latlon_grid
 from legoesm.ocean.vertical import create_ocean_z_star
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
@@ -313,7 +314,7 @@ def _advection_accuracy_test(tracer_time_integrator, n_lon=64):
     """
     from legoesm.ocean.dynamics.latlon_cgrid_operators import interp_cell_to_uface
 
-    R = 6.371e6
+    R = constants.R_earth
     u_equator = 42.0
     target_cfl = 0.3
 

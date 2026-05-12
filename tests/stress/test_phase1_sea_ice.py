@@ -8,6 +8,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
+from legoesm import constants
 from legoesm.ice.sea_ice import step_sea_ice
 from legoesm.ice.state import SeaIceState, DynamicSeaIceState, init_dynamic_ice_state
 from legoesm.ice.config import SeaIceConfig
@@ -330,8 +331,8 @@ class TestSeaIceComponent:
         shape = (6, 4, 4)
         drag_ocean = 5.5e-3
         drag_atm = 1.3e-3
-        rho_air = 1.225
-        rho_ice = 917.0
+        rho_air = constants.rho_air
+        rho_ice = constants.rho_ice
 
         # Case 1: nonzero wind, small ocean current
         wind_u = jnp.full(shape, 10.0)

@@ -11,13 +11,15 @@ Test combinations:
 import numpy as np
 from numpy.linalg import eig
 
+from legoesm import constants
+
 nlev = 20
 sigma_top = 0.01
 T_ref = 300.0
-R_d = 287.05
-kappa = R_d / 1004.0
+R_d = constants.R_d
+kappa = R_d / constants.c_pd
 lnps_0 = np.log(1e5)
-a = 6.371e6
+a = constants.R_earth
 
 sigma_half = np.linspace(sigma_top, 1.0, nlev + 1)
 sigma_full = 0.5 * (sigma_half[:-1] + sigma_half[1:])

@@ -54,6 +54,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from legoesm import constants
+
 # ---------------------------------------------------------------------------
 # JAX configuration -- must happen before jax import
 # ---------------------------------------------------------------------------
@@ -408,7 +410,7 @@ def _auto_dt(n_grid: int, grid_type: str = "cubed-sphere") -> float:
     both the advective speed (~60 m/s) and the external gravity wave
     speed (~300 m/s):  dt < cfl * dx_min / (u_max + c_grav).
     """
-    R = 6.371229e6
+    R = constants.R_earth
     if grid_type == "spectral":
         # Gaussian grid: dx_min ~ pi * R / n_lon at equator, n_lon = 2*(n_max+1)
         n_lon = 2 * (n_grid + 1)
@@ -446,7 +448,7 @@ def _hyperdiff_coeff(n_grid: int, grid_type: str = "cubed-sphere") -> float:
     elif grid_type == "icosahedral":
         # For icosahedral, n_grid is a subdivision level.  Scale the
         # coefficient with dx^4 relative to level 5 (~120 km).
-        R = 6.371229e6
+        R = constants.R_earth
         ref_cells = 10 * 4 ** 5 + 2
         cur_cells = 10 * 4 ** n_grid + 2
         dx_ref = R * math.sqrt(4.0 * math.pi / ref_cells)

@@ -9,6 +9,8 @@ import jax
 import jax.numpy as jnp
 import pytest
 
+from legoesm import constants
+
 jax.config.update("jax_enable_x64", True)
 
 
@@ -169,7 +171,7 @@ class TestSlabCarbon30Day:
         if not hasattr(driver, '_co2_field') or driver._co2_field is None:
             pytest.skip("No prognostic CO2 tracer")
         assert jnp.all(jnp.isfinite(driver._co2_field)), "CO2 field has NaN/inf"
-        M_CO2, M_air = 44.01, 28.97
+        M_CO2, M_air = constants.M_CO2, constants.M_air
         co2_ppmv = float(jnp.mean(driver._co2_field)) / (M_CO2 / M_air) * 1e6
         assert 200.0 < co2_ppmv < 800.0, f"CO2 = {co2_ppmv:.1f} ppmv out of [200,800]"
 
@@ -177,7 +179,7 @@ class TestSlabCarbon30Day:
         """Carbon cycle should cause at least a small CO2 change."""
         if not hasattr(driver, '_co2_field') or driver._co2_field is None:
             pytest.skip("No prognostic CO2 tracer")
-        M_CO2, M_air = 44.01, 28.97
+        M_CO2, M_air = constants.M_CO2, constants.M_air
         co2_init_kgkg = driver.coupled_cfg.co2_ppmv_init * 1.0e-6 * (M_CO2 / M_air)
         co2_now_kgkg = float(jnp.mean(driver._co2_field))
         assert co2_now_kgkg != pytest.approx(co2_init_kgkg, rel=1e-6), (
@@ -214,7 +216,7 @@ class TestFullCoupled30Day:
         if not hasattr(driver, '_co2_field') or driver._co2_field is None:
             pytest.skip("No prognostic CO2 tracer")
         assert jnp.all(jnp.isfinite(driver._co2_field)), "CO2 field has NaN/inf"
-        M_CO2, M_air = 44.01, 28.97
+        M_CO2, M_air = constants.M_CO2, constants.M_air
         co2_ppmv = float(jnp.mean(driver._co2_field)) / (M_CO2 / M_air) * 1e6
         assert 200.0 < co2_ppmv < 800.0, f"CO2 = {co2_ppmv:.1f} ppmv out of [200,800]"
 
@@ -241,7 +243,7 @@ class TestEnergyBudget:
         dT = diag[-1]["sst_mean"] - diag[0]["sst_mean"]
         dt_total = (diag[-1]["day"] - diag[0]["day"]) * 86400.0
         # Implied flux: F = rho * c * h * dT / dt
-        rho_c_h = 1025.0 * 3994.0 * 50.0  # ~2e8 J/m2/K
+        rho_c_h = constants.rho_ocean * constants.c_sw * 50.0  # ~2e8 J/m2/K
         implied_flux = rho_c_h * dT / max(dt_total, 1.0)
         # Should be bounded: |F| < 200 W/m2 for a reasonable model
         assert abs(implied_flux) < 200.0, (

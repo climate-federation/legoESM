@@ -75,7 +75,7 @@ def tropical_sounding(ncol: int = 4, nlev: int = 30):
     q_sat aloft.  CAPE ~ 8 kJ/kg.
     """
     sigma = create_sigma_coordinate(nlev)
-    p_s = jnp.full((ncol,), 1e5)
+    p_s = jnp.full((ncol,), constants.p_ref)
     p_full = p_s[:, None] * sigma.sigma_full
     p_half = p_s[:, None] * sigma.sigma_half
     z_approx = -8000.0 * jnp.log(jnp.clip(sigma.sigma_full, 1e-3))
@@ -100,7 +100,7 @@ def stable_sounding(ncol: int = 4, nlev: int = 30):
     we have to construct stability against the moist adiabat directly.
     """
     sigma = create_sigma_coordinate(nlev)
-    p_s = jnp.full((ncol,), 1e5)
+    p_s = jnp.full((ncol,), constants.p_ref)
     p_full = p_s[:, None] * sigma.sigma_full
     p_half = p_s[:, None] * sigma.sigma_half
     # Inversion-style profile: 275 K at sfc, +30 K above sigma=0.5 (very

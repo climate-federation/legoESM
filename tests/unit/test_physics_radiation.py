@@ -54,8 +54,8 @@ def _make_tropical_column(nlev=20):
     lat = jnp.array([0.0])  # equator
 
     # Moist profile: 80% RH
-    es = 611.2 * jnp.exp(17.67 * (T - 273.15) / (T - 29.65))
-    q_sat = 0.622 * es / jnp.maximum(p_full - es, 1.0)
+    es = 611.2 * jnp.exp(17.67 * (T - constants.T_freeze) / (T - 29.65))
+    q_sat = constants.epsilon * es / jnp.maximum(p_full - es, 1.0)
     q_v = 0.8 * q_sat
 
     return T, p_full, p_half, T_sfc, lat, q_v

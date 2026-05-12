@@ -1032,8 +1032,8 @@ class TestExternalForcing:
 
     def test_tsi_constant(self):
         from legoesm.forcing.external import SolarConfig, get_tsi_at_time
-        cfg = SolarConfig(S_0=1361.0)
-        assert get_tsi_at_time(cfg, 0.0) == 1361.0
+        cfg = SolarConfig(S_0=constants.S_0)
+        assert get_tsi_at_time(cfg, 0.0) == constants.S_0
 
     def test_ozone_disabled(self):
         from legoesm.forcing.external import OzoneConfig, get_ozone_at_time

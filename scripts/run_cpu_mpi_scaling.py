@@ -57,6 +57,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from legoesm import constants
+
 # ---------------------------------------------------------------------------
 # JAX configuration -- must happen before JAX import
 # ---------------------------------------------------------------------------
@@ -256,7 +258,7 @@ def _valid_rank_counts(max_ranks: int, grid_type: str) -> list[int]:
 # ===========================================================================
 
 def _auto_dt(n_grid: int, grid_type: str) -> float:
-    R = 6.371229e6
+    R = constants.R_earth
     u_max = 60.0
     c_grav = 300.0
     cfl = 0.7

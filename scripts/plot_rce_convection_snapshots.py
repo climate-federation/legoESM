@@ -214,7 +214,7 @@ def plot_profiles(snaps: dict, out_path: Path):
         sigma = snaps["sbm"]["sigma_full"]
     else:
         sigma = next(iter(snaps.values()))["sigma_full"]
-    p_s = 1e5
+    p_s = constants.p_ref
     p_full = sigma * p_s
     p_full_hPa = p_full / 100.0
     T_sfc_ref = float(snaps[next(iter(snaps))]["sst"])

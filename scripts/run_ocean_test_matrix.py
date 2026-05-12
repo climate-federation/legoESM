@@ -4801,7 +4801,7 @@ def _compute_rpe(state, grid_type, grid, z_coord):
     from legoesm.ocean.eos import linear_eos
     rho = np.asarray(linear_eos(
         jnp.array(T), jnp.array(S), jnp.zeros_like(jnp.array(T)),
-        rho_ref=1025.0, alpha_T=2.0e-4, beta_S=0.0, T_ref=15.0,
+        rho_ref=_C.rho_ocean, alpha_T=2.0e-4, beta_S=0.0, T_ref=15.0,
     ), dtype=np.float64)
 
     # Potential energy: PE = g * sum(rho * z * dz * area)
@@ -6659,7 +6659,7 @@ def _save_forcing_profile(test_case_dir: Path) -> None:
     axes[0].annotate('Westerlies', xy=(-50, 0.085), ha='center', fontsize=9, color='red')
 
     # Panel 2: Wind stress curl (proportional to Sverdrup transport)
-    R = 6.371e6
+    R = _C.R_earth
     dtau_dlat = np.gradient(tau_x, lat_rad)
     curl_z = dtau_dlat / R
     axes[1].plot(lat_deg, curl_z * 1e7, 'b-', linewidth=2)

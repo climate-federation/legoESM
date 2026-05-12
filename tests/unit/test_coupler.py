@@ -213,7 +213,7 @@ def test_sea_ice_concentration_bounds():
 
 def test_sea_ice_no_spurious_growth_from_open_water():
     """Cells without ice should not grow ice under net warming conditions."""
-    state = _make_ice_state(h=0.0, conc=0.0, T=271.35)
+    state = _make_ice_state(h=0.0, conc=0.0, T=constants.T_freeze_ocean)
     forcing = _make_forcing(T_lowest=280.0, sw=300.0, lw=350.0)
     config = SeaIceConfig()
     ocean_sst = jnp.full(SHAPE, 275.0)
@@ -252,7 +252,7 @@ def test_sea_ice_sublimation_mass_term_is_included():
     forcing_dry = base_forcing._replace(q_lowest=jnp.full(SHAPE, 1e-5))
     forcing_moist = base_forcing._replace(q_lowest=jnp.full(SHAPE, 5e-3))
     config = SeaIceConfig()
-    ocean_sst = jnp.full(SHAPE, 271.35)
+    ocean_sst = jnp.full(SHAPE, constants.T_freeze_ocean)
 
     # Run both cases.
     state_dry, resp_dry = step_sea_ice(
@@ -347,7 +347,7 @@ def test_sea_ice_freshwater_flux_balances_ice_mass_change():
     ocean → flux > 0.
     """
     from legoesm import constants
-    state = _make_ice_state(h=0.5, conc=0.9, T=271.35)
+    state = _make_ice_state(h=0.5, conc=0.9, T=constants.T_freeze_ocean)
     forcing = _make_forcing(T_lowest=280.0, sw=400.0, lw=350.0)
     config = SeaIceConfig()
     ocean_sst = jnp.full(SHAPE, 275.0)
@@ -406,7 +406,7 @@ def test_sea_ice_ocean_stress_opposes_ocean_ice_drag():
     # exercise the back-reaction stress.
     forcing = _make_forcing()
     config = SeaIceConfig()
-    ocean_sst = jnp.full(SHAPE, 271.35)
+    ocean_sst = jnp.full(SHAPE, constants.T_freeze_ocean)
     ocean_u = jnp.zeros(SHAPE)
     ocean_v = jnp.zeros(SHAPE)
 
@@ -445,7 +445,7 @@ def test_sea_ice_surface_mass_flux_equals_lhflx_over_Ls():
     state = _make_ice_state(h=1.0, conc=0.7, T=263.0)
     forcing = _make_forcing()
     config = SeaIceConfig()
-    ocean_sst = jnp.full(SHAPE, 271.35)
+    ocean_sst = jnp.full(SHAPE, constants.T_freeze_ocean)
 
     _, resp = step_sea_ice(
         state, forcing, ocean_sst, jnp.zeros(SHAPE), jnp.zeros(SHAPE),
@@ -917,7 +917,7 @@ def test_slab_ocean_warming():
 
 def test_slab_ocean_freezing_clamp():
     """SST stays >= T_freeze even with extreme cooling."""
-    cfg = SimpleOceanConfig(mode="slab", T_freeze=271.35)
+    cfg = SimpleOceanConfig(mode="slab", T_freeze=constants.T_freeze_ocean)
     step_fn = make_ocean(cfg)
 
     state = init_slab_state(SHAPE, T_sfc_init=272.0)
@@ -1230,7 +1230,7 @@ def test_coupler_with_3d_ocean_fc_gram():
 
     new_sfc, blended = step_fn(
         sfc_state, forcing, tile_cfg,
-        sst + 273.15,  # degC → K
+        sst + constants.T_freeze,  # degC → K
         ocean_u, ocean_v, DT,
     )
     assert jnp.all(jnp.isfinite(blended.T_surface))

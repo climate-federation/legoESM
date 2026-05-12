@@ -8,6 +8,7 @@ for land, ocean, sea ice, and lake tiles with all supported schemes.
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.coupler.bulk_flux import compute_most_fluxes
 from legoesm.coupler.config import CouplerConfig
 from legoesm.coupler.coupling_fields import AtmToSurface, TileResponse
@@ -117,7 +118,7 @@ if __name__ == "__main__":
             T_ice=Field(data=T_ice_init, name="T_ice", dims=dims, units="K"),
             concentration=Field(data=jnp.full(shape, 0.8), name="conc", dims=dims, units="1"),
         )
-        ocean_sst = jnp.full(shape, 271.35)
+        ocean_sst = jnp.full(shape, constants.T_freeze_ocean)
 
         def ice_loss(T_in):
             s = SeaIceState(

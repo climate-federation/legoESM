@@ -2067,9 +2067,10 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         grid = create_latlon_grid(n_lat, n_lon)
         # CFL-safe dt for gravity waves near poles
         import math as _m
+        from legoesm import constants as _consts_grav
         _dx_pole = float(grid.radius) * grid.dlon * _m.cos(
             _m.pi / 2 - grid.dlat / 2)
-        _c_grav = _m.sqrt(9.81 * 3000.0)
+        _c_grav = _m.sqrt(_consts_grav.g * 3000.0)
         dt = min(300.0, 0.5 * _dx_pole / _c_grav)
         # A_h must respect diffusion CFL: A_h*dt/dx_pole^2 < 0.5
         _A_h_max = 0.4 * _dx_pole**2 / dt

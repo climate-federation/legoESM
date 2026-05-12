@@ -18,6 +18,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import numpy as np
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.grids.latlon import create_latlon_grid
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     laplacian_scaling_factor,
@@ -155,7 +156,7 @@ def test_viscous_cfl_latitude_independent():
     the effective viscous CFL ``A_h_eff(lat) * dt / dx²(lat)`` is
     latitude-independent (up to the spherical metric)."""
     grid = create_latlon_grid(36, 72)
-    R = 6.371e6
+    R = constants.R_earth
     dlon = 2.0 * np.pi / 72                                # radians
     dt = 600.0
     A_h_global = 2.0e5
