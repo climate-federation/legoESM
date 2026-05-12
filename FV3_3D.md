@@ -1195,6 +1195,36 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 717: **iter-710 ``cs3_interpolator_fv3`` ECMWF T extrap upgrade**.
+
+  iter-710 used simple edge-value clamp for below-surface
+  temperature.  iter-717 adds the FV3-faithful Trenberth 1993 ECMWF
+  extrapolation when ``wz_surface`` is provided:
+
+      alpha = 0.0065 · R_d / g
+      pbot  = (exp(pe[km]) − exp(pe[km-1])) / (pe[km] − pe[km-1])
+      ts    = q2[km-1] + alpha·q2[km-1]·(exp(pe[km])/pbot − 1)
+      t0    = ts + 0.0065·wz_surface
+      tmp   = min(t0, 298 K)
+      Wz blend (wz in [2000, 2500] m):
+          tmp = 0.002·((2500 − wz)·t0 + (wz − 2000)·tmp)
+          alpha = R_d·(tmp − ts)/(wz·g) if tmp > ts else 0
+      qout(p) = ts · exp(alpha · (p − pe[km]))
+
+  Default ``wz_surface=None`` preserves iter-710 edge-clamp
+  behaviour.
+
+  Tests (6/6 in <2 s):
+  1. iv=1 without wz_surface → edge-clamp (iter-710 backward-compat).
+  2. iv=1 with wz_surface → T increases below surface (lapse rate).
+  3. Sea-level alpha = 0.0065·R_d/g gives plausible lapse.
+  4. wz=2250 m + ts=295 K triggers 298-K cap + blended alpha.
+  5. 3-D + 2-D wz_surface input → 3-D output.
+  6. No NaN/Inf in ECMWF path.
+
+  iter-710 6/6 tests still pass.
+
+  Wired into iter-383 sweep (now 281).
 - Iter 716: **FV3 ``eqv_pot_bolton_fv3``** — Bolton 1980 θ_e variant.
   Faithful JAX port of FV3 Xi.Chen + SJL Bolton-form ``eqv_pot``
   (tools/fv_diagnostics.F90:5421-5497).  Alternative to iter-692
