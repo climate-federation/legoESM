@@ -2382,6 +2382,116 @@ def rotate_winds_sphere_cube(
     return new_u, new_v
 
 
+def add_rankine_vortex(
+    u: jax.Array, v: jax.Array,
+    grid_lon: jax.Array, grid_lat: jax.Array,
+    ubar: float, r0: float,
+    center_lon: float, center_lat: float,
+    radius: float = constants.R_earth,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 662: add Rankine vortex to D-grid winds.
+
+    Faithful JAX port of FV3 ``rankine_vortex``
+    (tools/test_cases.F90:4207-4292).  Adds a Rankine-vortex
+    tangential wind onto the D-grid u, v fields at face corners,
+    projected onto the local cube-grid tangent vectors.
+
+    Tangential wind profile:
+        vr = ubar · r/r0    if r < r0  (solid-body core)
+        vr = ubar · r0/r    if r ≥ r0  (1/r decay outside)
+
+    where r is great-circle distance from cell-edge midpoint to
+    vortex center (radius·acos(cos_p)).
+
+    Parameters
+    ----------
+    u : jax.Array, shape (..., n_x, n_y+1)
+        D-grid u-wind (north/south edges); updated in-place style.
+    v : jax.Array, shape (..., n_x+1, n_y)
+        D-grid v-wind (east/west edges).
+    grid_lon : jax.Array, shape (..., n_x+1, n_y+1)
+        Cubed-sphere corner longitudes.
+    grid_lat : jax.Array, shape (..., n_x+1, n_y+1)
+        Cubed-sphere corner latitudes.
+    ubar : float
+        Maximum tangential wind (m/s).
+    r0 : float
+        Radius of maximum wind (m).
+    center_lon, center_lat : float
+        Vortex center (radians).
+    radius : float, default constants.R_earth
+        Sphere radius (m).
+
+    Returns
+    -------
+    u_new, v_new : jax.Array
+        D-grid winds with vortex added.
+    """
+    pi = jnp.pi
+
+    def _tangential_wind_at(p2_lon, p2_lat):
+        """Compute vortex contributions (utmp, vtmp) at point p2."""
+        # Shift p2_lon by -center_lon
+        p2_lon_s = p2_lon - center_lon
+        cos_p = (
+            jnp.sin(p2_lat) * jnp.sin(center_lat)
+            + jnp.cos(p2_lat) * jnp.cos(center_lat) * jnp.cos(p2_lon_s)
+        )
+        cos_p = jnp.clip(cos_p, -1.0, 1.0)
+        r = radius * jnp.arccos(cos_p)
+        # Tangential wind magnitude
+        vr_inside = ubar * r / r0
+        vr_outside = ubar * r0 / jnp.maximum(r, 1e-30)
+        vr = jnp.where(r < r0, vr_inside, vr_outside)
+        # Direction of vortex motion (in shifted frame)
+        x1 = jnp.cos(p2_lat) * jnp.sin(p2_lon_s)
+        y1 = (
+            jnp.sin(p2_lat) * jnp.cos(center_lat)
+            - jnp.cos(p2_lat) * jnp.sin(center_lat) * jnp.cos(p2_lon_s)
+        )
+        d2 = jnp.maximum(jnp.sqrt(x1 * x1 + y1 * y1), 1.0e-25)
+        utmp = -vr * y1 / d2
+        vtmp = vr * x1 / d2
+        # Return utmp, vtmp + shifted p2 for elon/elat
+        return utmp, vtmp, p2_lon_s, p2_lat
+
+    # ---- u-wind on j-edges: average grid[i, j] and grid[i+1, j] in lon
+    # u shape (..., n_x, n_y+1); grid shape (..., n_x+1, n_y+1)
+    # j-edge midpoint p2[i, j] = mid_pt_sphere(grid[i, j], grid[i+1, j])
+    sw_lon = grid_lon[..., :-1, :]   # (..., n_x, n_y+1)
+    sw_lat = grid_lat[..., :-1, :]
+    se_lon = grid_lon[..., 1:, :]
+    se_lat = grid_lat[..., 1:, :]
+    p2_lon_u, p2_lat_u = mid_pt_sphere(sw_lon, sw_lat, se_lon, se_lat)
+    utmp_u, vtmp_u, p2_lon_s, p2_lat_s = _tangential_wind_at(p2_lon_u, p2_lat_u)
+    # Cube tangent e1 at p2 from p3=(grid[i,j]-center, grid[i,j].lat)
+    # to p4=(grid[i+1,j]-center, grid[i+1,j].lat)
+    e1 = get_unit_vect2(
+        sw_lon - center_lon, sw_lat,
+        se_lon - center_lon, se_lat,
+    )
+    elon_u, elat_u = unit_vect_latlon(p2_lon_s, p2_lat_s)
+    u_add = utmp_u * inner_prod(e1, elon_u) + vtmp_u * inner_prod(e1, elat_u)
+    u_new = u + u_add
+
+    # ---- v-wind on i-edges: average grid[i, j] and grid[i, j+1] in lat
+    # v shape (..., n_x+1, n_y); grid shape (..., n_x+1, n_y+1)
+    s_lon = grid_lon[..., :, :-1]
+    s_lat = grid_lat[..., :, :-1]
+    n_lon = grid_lon[..., :, 1:]
+    n_lat = grid_lat[..., :, 1:]
+    p2_lon_v, p2_lat_v = mid_pt_sphere(s_lon, s_lat, n_lon, n_lat)
+    utmp_v, vtmp_v, p2_lon_s2, p2_lat_s2 = _tangential_wind_at(p2_lon_v, p2_lat_v)
+    e2 = get_unit_vect2(
+        s_lon - center_lon, s_lat,
+        n_lon - center_lon, n_lat,
+    )
+    elon_v, elat_v = unit_vect_latlon(p2_lon_s2, p2_lat_s2)
+    v_add = utmp_v * inner_prod(e2, elon_v) + vtmp_v * inner_prod(e2, elat_v)
+    v_new = v + v_add
+    return u_new, v_new
+
+
 def project_sphere_v(
     f: jax.Array, e: jax.Array,
 ) -> jax.Array:

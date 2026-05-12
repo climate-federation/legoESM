@@ -1195,6 +1195,32 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 662: **FV3 ``add_rankine_vortex``** — Rankine vortex IC
+  on D-grid winds.  Faithful JAX port of FV3 ``rankine_vortex``
+  (tools/test_cases.F90:4207-4292).  Adds Rankine-vortex
+  tangential wind onto D-grid u, v fields at face corners,
+  projected onto local cube-grid tangent vectors.
+
+  Tangential wind profile:
+
+      vr = ubar · r/r0    if r < r0  (solid-body core)
+      vr = ubar · r0/r    if r ≥ r0  (1/r decay)
+
+  where r is great-circle distance from cell-edge midpoint to
+  vortex center.
+
+  Used in FV3 for tropical-cyclone test cases (vortex placement).
+  Reuses iter-608 ``mid_pt_sphere``, iter-611 ``get_unit_vect2``
+  + ``inner_prod``, iter-615 ``unit_vect_latlon``.
+
+  Tests (5/5 in 8 s):
+  1. Output shapes match input D-grid winds.
+  2. ubar=0 → no change.
+  3. Far-field placement → finite.
+  4. Vortex center → finite (d2 regularization).
+  5. Max wind near vortex ≤ ubar (projection factor).
+
+  Wired into iter-383 sweep (now 229).
 - Iter 661: **FV3 ``rotate_winds_sphere_cube``** — wind rotation
   between sphere and cube frames at point.  Faithful JAX port of
   FV3 ``rotate_winds`` (tools/test_cases.F90:8183-8226).

@@ -252,6 +252,7 @@ _GUARD_MODULES = (
     "test_fv3_terminator_iter658",                   # iter-658 add
     "test_fv3_project_unitvec_iter659",              # iter-659 add
     "test_fv3_rotate_winds_iter661",                 # iter-661 add
+    "test_fv3_rankine_vortex_iter662",               # iter-662 add
 )
 
 
