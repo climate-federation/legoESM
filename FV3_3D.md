@@ -1195,6 +1195,19 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 581: **``compute_edge_artifact_metric()`` diagnostic helper**.
+  Adds a public-facing utility in ``legoesm.grids.halo`` that
+  computes edge_std / interior_std / ratio for a 4D ``(face,
+  x, y, level)`` field — same metric used throughout iter
+  466-580.  Usage::
+
+      from legoesm.grids.halo import compute_edge_artifact_metric
+      metrics = compute_edge_artifact_metric(state.theta_prime.data)
+      print(f"edge_std={metrics['edge_std']:.3e}, "
+            f"ratio={metrics['ratio']:.2f}x")
+
+  Useful for users to verify their own runs.  2/2 in <1 s.
+  Wired into iter-383 sweep (now 157).
 - **Iters 571-579 (compacted iter 580)**: dycore mathematical
   consistency + amplitude/time scaling + linearity.
   - iter 571: PE δT ~ n_steps¹·⁸⁹ on HS but absolute ≤1 mK

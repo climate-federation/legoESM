@@ -2816,3 +2816,44 @@ def make_clipped_scan_step(
         # Force trace + compilation NOW, while context is active.
         _ = scan_step(state_template)
     return scan_step
+
+
+def compute_edge_artifact_metric(field_data):
+    """FV3_3D iter 581: edge-artifact diagnostic helper.
+
+    Computes the standard edge-vs-interior std and absolute
+    edge_std for a 4D field of shape ``(face, x, y, level)``.
+    Used throughout iter 466-580 to characterize cube-edge
+    artifacts.
+
+    Returns
+    -------
+    dict with keys ``edge_std``, ``interior_std``, ``ratio``.
+
+    Usage::
+
+        from legoesm.grids.halo import compute_edge_artifact_metric
+
+        metrics = compute_edge_artifact_metric(state.theta_prime.data)
+        print(f"edge_std = {metrics['edge_std']:.3e}")
+        print(f"ratio = {metrics['ratio']:.3f}x")
+    """
+    import numpy as np
+    arr = np.asarray(field_data)
+    n_face, n_x, n_y, n_lev = arr.shape
+    edge_mask = np.zeros((n_x, n_y), dtype=bool)
+    edge_mask[0, :] = True
+    edge_mask[-1, :] = True
+    edge_mask[:, 0] = True
+    edge_mask[:, -1] = True
+    edge_mask_b = np.broadcast_to(
+        edge_mask[None, :, :, None], arr.shape,
+    )
+    interior_mask = ~edge_mask_b
+    e = float(arr[edge_mask_b].std())
+    i = float(arr[interior_mask].std())
+    return {
+        "edge_std": e,
+        "interior_std": i,
+        "ratio": e / max(i, 1e-30),
+    }
