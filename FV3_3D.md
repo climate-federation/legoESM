@@ -5248,4 +5248,45 @@ of: baroclinic-instability theory, eddy-mixing parameter-
 izations, multi-scale model design.  Pure JAX, vmap-compatible.
 No new physical constants introduced.
 
+## Iter 788 — ekman_layer_depth_fv3 (δ_E = √(2K_v/|f|))
+
+Added `ekman_layer_depth_fv3(K_v, f, f_floor=1e-12)` to
+`grids/cubed_sphere.py`.  Laminar Ekman boundary-layer depth:
+
+```
+δ_E = √(2·max(K_v, 0) / max(|f|, f_floor))
+```
+
+Penetration depth of the steady, laminar Ekman spiral driven by
+surface stress with vertical eddy viscosity K_v.  Within
+0 < z < δ_E the spiral rotates with depth; below δ_E the
+boundary-layer effect vanishes.
+
+Typical values:
+  * Atmospheric PBL (K_v ≈ 10 m²/s, |f|=1e-4): δ_E ≈ 447 m
+  * Ocean mixed layer (K_v ≈ 0.01 m²/s, |f|=1e-4): δ_E ≈ 14 m
+
+Used by: surface-stress / wind-stress curl ocean spinup theory,
+Sverdrup-balance derivations, atmospheric PBL height baseline
+(the unstratified analog of iter-775 Ri_b-based PBL height),
+surface drag-coefficient calibration.
+
+Composes iter-778 ``coriolis_parameter_fv3``.
+
+Test: `tests/test_fv3_ekman_layer_depth_iter788.py` (7 tests:
+atmospheric PBL ≈ 447 m, ocean ML ≈ 14 m, K_v=0 → δ_E=0, monotone
+in K_v and |f|, equator floored finite, full iter-778 pipeline
+at 45°N gives δ_E ≈ 441 m, 3-D shapes + finite + non-negative).
+
+### Why this iteration was meaningful
+
+Ekman depth is the canonical analytic boundary-layer scale —
+the rotating-fluid analog of the molecular Stokes boundary
+layer.  Used in: (1) wind-stress curl → Sverdrup-balance ocean
+gyre theory; (2) surface-flux drag coefficient setup; (3)
+unstratified PBL height as null hypothesis vs iter-775 Ri_b-
+based height; (4) atmospheric Charney-Drazin boundary-layer
+filter for Rossby-wave propagation.  Pure JAX, vmap-compatible.
+No new physical constants introduced.
+
 

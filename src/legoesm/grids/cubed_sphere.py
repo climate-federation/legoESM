@@ -4146,6 +4146,56 @@ def burger_number_fv3(
     return (L_R / jnp.maximum(L, L_floor)) ** 2
 
 
+def ekman_layer_depth_fv3(
+    K_v: jax.Array,
+    f: jax.Array,
+    f_floor: float = 1e-12,
+) -> jax.Array:
+    """FV3_3D iter 788: laminar Ekman boundary-layer depth.
+
+    Penetration depth of the steady, laminar Ekman spiral driven by
+    surface stress with vertical eddy viscosity K_v:
+
+        δ_E = √(2·K_v / |f|)
+
+    Ekman spiral within 0 < z < δ_E rotates with depth; below δ_E
+    the boundary-layer effect vanishes.  Defined via the e-folding
+    decay of the Ekman solution.
+
+    Typical values:
+      * Atmospheric PBL (K_v ≈ 10 m²/s, |f|=1e-4): δ_E ≈ 447 m
+      * Ocean mixed layer (K_v ≈ 0.01 m²/s, |f|=1e-4): δ_E ≈ 14 m
+
+    Used by: surface-stress / wind-stress curl ocean spinup
+    theory, Sverdrup-balance derivations, atmospheric PBL height
+    baseline (the unstratified analog of iter-775 PBL height),
+    surface drag coefficient calibration.
+
+    Composes iter-778 ``coriolis_parameter_fv3``.
+
+    ``f_floor`` clamps |f| near equator.  At f=0 the steady Ekman
+    solution does not exist (depth → ∞); helper returns large but
+    finite value.
+
+    Parameters
+    ----------
+    K_v : jax.Array
+        Vertical eddy viscosity (m²/s).
+    f : jax.Array
+        Coriolis parameter (s⁻¹) from iter-778.
+    f_floor : float
+        Lower bound on |f| (s⁻¹); default 1e-12.
+
+    Returns
+    -------
+    delta_E : jax.Array
+        Ekman layer depth (m).
+    """
+    return jnp.sqrt(
+        2.0 * jnp.maximum(K_v, 0.0) / jnp.maximum(jnp.abs(f), f_floor)
+    )
+
+
 def kinetic_energy_fv3(
     ua: jax.Array,
     va: jax.Array,
