@@ -1081,148 +1081,52 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
-- Iter 509: **residual GROWS** under min-edge + clip context.
-  Multi-step test (1, 2, 5, 10 steps, dt=10s):
-  - 1 step:   1.129×
-  - 2 steps:  1.192×
-  - 5 steps:  1.326×
-  - 10 steps: 1.634×  → **+44.7% growth**.
-  Conclusion: the clip context suppresses *single-step*
-  amplification but the residual edge bias **accumulates
-  over time**.  Earlier iters were measuring 1-step snapshots
-  that masked the integrated growth.  This is NOT a dynamic
-  equilibrium — it is a real accumulating edge artifact.
-  Implication: the iter-505 helper alone is insufficient
-  for long runs.  Need either (a) per-substep patching,
-  (b) stronger corner stencil correction, or (c) hyper-
-  diffusion at edges.  1/1 in 123 s.  Wired into iter-383
-  sweep (now 100).
-- Iter 508: **corner_div_damp_d2_bg sweep** under min-edge +
-  clip context (2 seeds, C8, 1 step).  Sweep [1e-5, 5e-5,
-  5e-4, 2e-3, 5e-3]:
-  - 1e-5:  1.094×
-  - 5e-5:  1.093×
-  - 5e-4 (current default): 1.092×
-  - 2e-3:  1.086×
-  - 5e-3:  1.075× (lowest)
-  Residual is INSENSITIVE to corner_div_damp_d2_bg over a
-  500× range (only 1.7% variation).  Confirms iter-507
-  conclusion: the residual is NOT eliminable by tuning this
-  knob.  1/1 in 300 s.  Wired into iter-383 sweep (now 99).
-- Iter 507: **bisect residual 1.13× NH leak** under min-edge
-  + clip context.  Toggle each still-on FV3-fidelity flag
-  OFF one at a time (4 flags) + key sponge/damp knobs (4
-  more), measure θ′ edge ratio.  Findings at seeds [507,508]:
-  - baseline (all on):                  1.075×
-  - use_fv3_vector_halo_uv=False:       **2.362× (+1.288)** ←critical
-  - use_fv3_d_con_cv=False:             1.216× (+0.141)
-  - use_fv3_dynamic_exner=False:        1.075× (neutral)
-  - use_fv3_cross_face_du_proj=False:   1.075× (neutral)
-  - damp_w / damp_v / sponge=0:         1.075× (neutral)
-  - corner_div_damp=0:                  **46.2× (+45.1)** ←blowup
-  Vector halo + corner_div_damp are the two stabilizers
-  doing all the work.  Dynamic Exner, cross-face projection,
-  and sponge damps are neutral on θ′ edge variance at this
-  initial state.  Residual 1.075× is NOT eliminable by flag
-  toggle: it is intrinsic to the C-D-grid composition
-  with current corner_div_damp_d2_bg=5e-4.  Next direction
-  for further reduction = sweep corner_div_damp_d2_bg
-  magnitude (the key tunable).  1/1 in 447 s.  Wired into
-  iter-383 sweep (now 98).
-- Iter 506: **PE composition check** for iter-505 helper.
-  Mirror NH iter-505 on hydrostatic PE: build state from
-  ``held_suarez_init`` + random T perturbation, step both
-  with and without ``monotone_halo_clip_context(slack=0.5)``,
-  measure T-field edge-vs-interior std ratio at C8+duogrid
-  divided by C8-no-duogrid.  Result: **1.000× both with and
-  without context** — PE shows no duogrid penalty at this
-  state.  Interpretation: PE's hydrostatic balance lacks
-  the acoustic/advection coupling through halo corners that
-  drives the NH 4.77× penalty (cf. iter-473).  Composition
-  is SAFE on PE (test guard: ≤10% degradation).  Implication:
-  the iter-505 helper is unconditionally safe to use on PE
-  even though there is no NH-magnitude reduction to gain.
-  1/1 in 89 s.  Wired into iter-383 sweep (now 97).
-- Iter 505: **user-facing API** for the iter-504 combined fix
-  — new ``monotone_halo_clip_context(slack=0.5)`` context
-  manager in ``legoesm.grids.halo`` that monkey-patches 6
-  pad_halo_4d/vec_4d sites for the duration.  Usage:
-  ``with monotone_halo_clip_context(slack=0.5):
-      new_state = model.step(state, dt)``
-  Test confirms min-edge factory + context: 1.606 → 1.093
-  (32% reduction at this seed pair — matches iter-504 1.135
-  trend within sampling).  Closes the user-experience gap:
-  iter-466 / iter-483 factories + this context manager = one
-  call each to reach ~1.1× edge ratio.  2/2 in 122 s.  Wired
-  into iter-383 sweep (now 96).
-- Iter 504: **NEW LOW 1.135× (65.7% reduction)** combining
-  iter-466 flag drops + iter-503 halo clip.  6-config matrix
-  at C8 + duogrid (2 seeds, 1 step):
-    A. factory full:                3.311×  baseline
-    B. min-edge (iter-466):         1.678×  (-49.3%)
-    C. aggressive (iter-483):       1.678×  (same as B)
-    D. factory + clip:              2.049×  (-38.1%)
-    E. **min-edge + clip:           1.135×  (-65.7%)** ← new low
-    F. aggressive + clip:           1.135×  (same as E)
-  The two paths are LARGELY INDEPENDENT and compose:
-  * iter-466 flag-drops: address flag interactions
-  * iter-503 halo-clip: bound per-step overshoot
-  Combined gives -66% reduction.  Below the iter-482 floor
-  (1.42×) by 20%.  At 1.13× the edge ratio is close to
-  neutral (1.0).  Note: aggressive (with d2_bg boost) gives
-  no additional benefit over min-edge at the new clip-
-  enabled regime — d2_bg boost and clip overlap.  1/1 in
-  364 s.  Wired into iter-383 sweep (now 95).
-- Iter 503: **46% DYCORE-LEVEL REDUCTION via vector-halo
-  inclusion**.  iter-492/493 only patched scalar halo (4
-  sites) → 1.5% reduction.  iter-503 also patches vector
-  halo (``pad_halo_vector_4d`` at 2 sites: operators_3d +
-  operators_cdgrid) for total 6 sites + slack sweep:
-    no clip:    3.724×
-    slack=0.00: 2.079× (-44%)
-    slack=0.50: **2.006× (-46%)**
-    slack=1.50: 2.149×
-    slack=2.00: 2.309×
-  Vector halo was the MISSING PIECE in iter-492/493.  The
-  NH dycore heavily uses ``pad_halo_vector_4d`` for u/v
-  cell-center → corner lift (iter-328/497).  Adding vector
-  halo to the clip propagation drops the ratio from 3.72 to
-  ~2.0 — exact match for the floor seen with iter-466
-  flag-drop config (2.25×) without needing flag changes.
-  slack=0.5 is optimal; strict (0.0) is 99% as good.  Higher
-  slack >1.0 reduces benefit (over-relaxes the clip).
-  **This closes a real fix path**: comprehensive vector +
-  scalar halo clip yields ~50% edge reduction.  1/1 in
-  327 s.  Wired into iter-383 sweep (now 94).
-- Iter 502: ``monotone_clip_slack`` sweep on
-  ``center_to_dgrid_vector`` to find neutral-edge slack.
-  Also plumbs slack through ``pad_halo_vector_4d``.  Results
-  (vector u_d edge × ratio):
-    no clip:    1.0725
-    slack=0.00: 0.9538  (strict clip over-corrects 5%)
-    slack=0.10: 0.9561
-    slack=0.50: 0.9674
-    slack=1.00: 0.9826
-    slack=2.00: 1.0135  (closest to neutral, 1% amplification)
-  To reach exact neutral (×1.000), slack must be ~1.5-2.0.
-  Slack=2.0 expands the band 2× (hi-lo) on each side —
-  effectively a very wide monotone tolerance, still bounded.
-  Real signal: strict clip is mathematically too aggressive
-  for the vector-halo path; soft clip provides recovery.
-  1/1 in 12 s.  Wired into iter-383 sweep (now 93).
-- Iter 501: ``monotone_clip_slack`` parameter — softer
-  monotonicity for iter-499's over-correction.  New
-  ``monotone_clip_slack: float = 0.0`` arg on
-  ``fill_corner_region`` and ``pad_halo_4d`` (default 0 =
-  strict iter-490 clip).  When > 0, expands clip range by
-  ``slack * (hi - lo)`` on each side.  Linear-field test:
-  slack=0 → halo max 14.00 (strict); slack=0.1 → halo max
-  14.05 (slight overshoot allowed).  Provides tunable
-  midpoint between strict clip (iter-499 over-corrects to
-  edge × 0.94) and no clip (iter-475 edge × 1.035).
-  Future investigation can sweep slack values for optimal
-  edge/physical-fidelity balance.  6/6 in 6 s.  Wired into
-  iter-383 sweep (now 92).
+- **Iters 501-509 (compacted iter 510)**: from clip-slack
+  knob → combined-fix new low → user-facing API → growth
+  diagnostic that closes the "single-step floor was optical
+  illusion" loop.
+  - iter 501: ``monotone_clip_slack`` param (default 0 =
+    strict).  Soft clip = band expansion by slack × (hi-lo).
+  - iter 502: slack sweep on ``center_to_dgrid_vector``.
+    Strict clip over-corrects (×0.95); slack ≈ 1.5-2.0 →
+    neutral (×1.00); slack=0.5 → ×0.97.
+  - iter 503: **46% dycore reduction** via 6-site (4 scalar +
+    2 vector) clip patch.  Vector halo was the missing
+    piece from iter-492/493 (which only got 1.5%).  slack=0.5
+    is optimal; strict 99% as good.  Floor 2.006×.
+  - iter 504: **NEW LOW 1.135× (65.7% reduction)** combining
+    min-edge factory (iter-466) + 6-site clip (iter-503).
+    Factory and clip paths are independent and compose.
+    Aggressive factory (iter-483 d2_bg boost) gives no
+    additional reduction at this regime.
+  - iter 505: **user-facing API** —
+    ``monotone_halo_clip_context(slack=0.5)`` in
+    ``legoesm.grids.halo``: a single context manager that
+    monkey-patches all 6 halo sites for the duration.
+    Verified: 1.606 → 1.093 (32% at this seed pair).
+  - iter 506: PE composition check — held_suarez state +
+    monotone_halo_clip_context yields 1.000× both with and
+    without context.  PE hydrostatic balance lacks the
+    NH acoustic/advection coupling that drives the 4.77×
+    duogrid penalty.  Composition is unconditionally safe.
+  - iter 507: bisect residual 1.075× under min-edge + clip.
+    Toggling 4 fidelity flags + 4 sponge/damp knobs OFF one
+    at a time: vector_halo_uv=False → 2.36× (critical),
+    d_con_cv=False → 1.22×, dynamic_exner / cross_face / all
+    sponge damps neutral, corner_div_damp=0 → 46.2× (blowup).
+    Vector halo and corner_div_damp are the two essential
+    stabilizers.  Residual NOT eliminable by flag toggle.
+  - iter 508: ``corner_div_damp_d2_bg`` sweep [1e-5..5e-3]
+    under min-edge + clip.  1.094× (1e-5) → 1.075× (5e-3).
+    Residual insensitive over 500× range.  Not the knob.
+  - iter 509: **residual GROWS** — multi-step test (1, 2,
+    5, 10 steps, dt=10s) shows 1.129 → 1.192 → 1.326 →
+    1.634× (+44.7%).  Clip context suppresses single-step
+    amplification but residual edge bias accumulates.  This
+    is NOT a dynamic equilibrium.  Iter-505 helper alone is
+    insufficient for long runs.  Next direction = patch
+    edge stencils within the substep (vector halo / corner
+    interp).  Currently 100 guards in iter-383 sweep.
 - **Iters 485-494 (compacted iter 500)**: factory exposure
   + duogrid bisection + halo-level clip + investigation
   closure.
