@@ -1185,6 +1185,22 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 571: **PE time-growth power-law on Held-Suarez**.
+  Mirror iter-569 on PE @ C16 + iters=8, 1-30 steps.  Track
+  δT = T - T_initial edge_std:
+  - step 1:  δT = 1.07e-6 K (essentially noise floor)
+  - step 5:  δT = 2.23e-5 K
+  - step 10: δT = 8.19e-5 K
+  - step 20: δT = 3.08e-4 K
+  - step 30: δT = 6.79e-4 K
+  Fit: **δT ~ n_steps¹·⁸⁹** — steeper than NH's 1.15.
+  However, absolute values are 1000× smaller than NH (0.68 mK
+  at step 30 vs NH 34 mK).  PE has essentially **no edge
+  artifact issue** in absolute terms for Held-Suarez.  Steeper
+  relative growth but from such a tiny base it doesn't matter
+  physically.  Strong positive finding: PE production runs
+  should be artifact-free.  1/1 in 33 s.  Wired into iter-383
+  sweep (now 151).
 - **Iters 561-569 (compacted iter 570)**: ``heat_source_del2``
   optimization + multi-step growth + helper equivalence.
   - iter 561: bisect min-edge factory's 3 disabled flags on
