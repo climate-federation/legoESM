@@ -1195,6 +1195,38 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 634: **FV3 ``get_eta_level``** — hybrid coord → log-mean
+  full-level pressure.  Faithful JAX port of FV3 ``get_eta_level``
+  (tools/fv_eta.F90:1859-1890):
+
+      ph[k] = ak[k] + bk[k]·p_s             # half-level pressure
+      pf[k] = (ph[k+1] - ph[k]) / log(ph[k+1]/ph[k])  # log-mean full
+
+  Top-edge branch (FV3 lines 1880-1884):
+      ak[0] > 1e-8 → standard log-mean
+      ak[0] ≤ 1e-8 → kappa-limit pf[0] = (ph[1]-ph[0]) · κ/(κ+1)
+
+  Differs from legoESM's ``pressure_from_hybrid(full=True)`` which
+  uses pre-computed ``A_full``/``B_full`` (scheme-dependent
+  midpoint).  FV3 uses LOG-MEAN.  Both are valid full-level
+  definitions; this helper makes FV3-faithful available standalone
+  for users porting FV3 vertical-coord code.
+
+  Optional ``pscale`` arg multiplies ph (FV3 lines 1874-1878).
+  Batched ``p_s`` shapes ``(...,)`` supported.
+
+  Lives in ``legoesm.grids.vertical`` (alongside existing
+  ``pressure_from_hybrid``).
+
+  Tests (6/6 in 2 s):
+  1. Output shapes (npz,) and (npz+1,).
+  2. ph[k] = ak[k] + bk[k]·p_s formula.
+  3. pf[k] = log-mean for k >= 1.
+  4. Top kappa-branch when ak[0] = 0.
+  5. pscale scales ph (and pf linearly).
+  6. Batched p_s → batched output.
+
+  Wired into iter-383 sweep (now 204).
 - Iter 633: **FV3 ``fill_ghost`` corner-ghost fill port**.  Faithful
   JAX port of FV3 ``fill_ghost_r4`` / ``fill_ghost_r8``
   (fv_grid_utils.F90:3070-3147).  Fills the 4 corner-ghost

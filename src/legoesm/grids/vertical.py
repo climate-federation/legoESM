@@ -903,6 +903,85 @@ def dp_from_hybrid(
     return coord.dA * coord.p_ref + coord.dB * p_s[..., None]
 
 
+def get_eta_level(
+    ak: jax.Array,
+    bk: jax.Array,
+    p_s: jax.Array,
+    pscale: float | None = None,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 634: FV3 hybrid → (pf, ph) log-mean full-level pressure.
+
+    Faithful JAX port of FV3 ``get_eta_level``
+    (tools/fv_eta.F90:1859-1890).  Computes:
+
+        ph[k]  = ak[k] + bk[k]·p_s            # half-level pressure
+        pf[k]  = (ph[k+1] - ph[k]) / log(ph[k+1]/ph[k])  # log-mean full
+
+    At the top edge (k=0) FV3 distinguishes:
+        - ak[0] > 1e-8 → standard log-mean (avoids log(0))
+        - ak[0] ≤ 1e-8 → use kappa-based limit:
+          pf[0] = (ph[1] - ph[0]) · kappa/(kappa+1)
+
+    The FV3 ``kappa`` is R_d / c_p (here ``constants.kappa``).
+
+    Differs from legoESM's ``pressure_from_hybrid(full=True)``
+    which uses pre-computed ``A_full``/``B_full`` (linear midpoint
+    or scheme-dependent); FV3 uses the logarithmic mean.  Both are
+    valid full-level definitions; this helper makes FV3-faithful
+    available standalone.
+
+    Parameters
+    ----------
+    ak : jax.Array, shape ``(npz+1,)``
+        Hybrid A coefficient at half levels.
+    bk : jax.Array, shape ``(npz+1,)``
+        Hybrid B coefficient at half levels.
+    p_s : jax.Array, shape ``(...,)``
+        Surface pressure (Pa).
+    pscale : float, optional
+        Multiplier applied to ph (FV3 lines 1874-1878).  Default
+        None = no scaling.
+
+    Returns
+    -------
+    pf : jax.Array, shape ``(..., npz)``
+        Full-level pressure (log-mean).
+    ph : jax.Array, shape ``(..., npz+1)``
+        Half-level pressure.
+    """
+    # Broadcast p_s to a trailing level axis
+    ps = p_s[..., None]                          # (..., 1)
+    # ph[k] = ak[k] + bk[k]·p_s
+    # FV3 line 1869: ph(1) = ak(1) (no p_s contribution at top edge)
+    # FV3 lines 1870-1872: ph(k) = ak(k) + bk(k)·p_s for k=2..npz+1
+    # In 0-indexed JAX: ph[0] = ak[0]; ph[k] = ak[k] + bk[k]·p_s for k>=1
+    # We use the vectorized form ak + bk·p_s — equivalent if bk[0] = 0
+    # (FV3 convention).  Add an explicit override for ph[0] to match the
+    # FV3 special case for safety.
+    ph = ak + bk * ps                            # (..., npz+1)
+    # Override top edge to exactly ak[0] (FV3 line 1869)
+    ph = ph.at[..., 0].set(ak[0])
+    if pscale is not None:
+        ph = pscale * ph
+
+    # pf[k] = (ph[k+1] - ph[k]) / log(ph[k+1]/ph[k])
+    dph = ph[..., 1:] - ph[..., :-1]             # (..., npz)
+    # Top-edge special branch (FV3 lines 1880-1884)
+    log_ratio = jnp.log(
+        jnp.where(ph[..., 1:] > 0.0, ph[..., 1:], 1.0)
+        / jnp.where(ph[..., :-1] > 0.0, ph[..., :-1], 1.0)
+    )
+    safe_log = jnp.where(jnp.abs(log_ratio) > 1e-30, log_ratio, 1.0)
+    pf_general = dph / safe_log
+    # Top branch: if ak[0] <= 1e-8, replace pf[0] with kappa-limit
+    kappa = constants.kappa
+    pf_top_kappa = dph[..., 0] * (kappa / (kappa + 1.0))
+    use_kappa = ak[0] <= 1e-8
+    pf_top = jnp.where(use_kappa, pf_top_kappa, pf_general[..., 0])
+    pf = pf_general.at[..., 0].set(pf_top)
+    return pf, ph
+
+
 def compute_geopotential_hybrid(
     T: jax.Array,
     p_s: jax.Array,
