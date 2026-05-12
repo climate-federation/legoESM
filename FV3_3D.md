@@ -1195,6 +1195,43 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 646: **FV3 ``hydro_eq``** — hydrostatic-equilibrium IC builder.
+  Faithful JAX port of FV3 ``hydro_eq`` (tools/init_hydro.F90:
+  277-456, hybrid sigma-p hydrostatic branch).  Builds canonical
+  FV3 cold-start IC for non-moist Earth atmosphere.
+
+  Reference profile:
+      p1 = 250 hPa, z1 = 10 km·g (tropopause; geopotential)
+      T1 = 200 K (isothermal above tropopause)
+      T0 = 300 K (sea-level)
+      a0 = 0.5·(T1 - T0)/z1
+      c0 = T0/a0
+
+  Algorithm:
+      ps = drym (no mountain) or mslp·exp(-1/(a0·R)·hs/(hs+c0))
+      ph[k] = ak[k] + bk[k]·ps
+      gz built top-down from surface:
+        if ph ≤ p1: isothermal stratosphere log-pressure
+        else:       lapse-rate troposphere c0/(1+a0·R·log(...))+hs-c0
+      pt[k] = (gz[k] - gz[k+1]) / (R·log(ph[k+1]/ph[k]))
+      pt = max(T1, pt)
+      delp[k] = ph[k+1] - ph[k]
+
+  Returns ``(ps, delp, pt)`` from inputs ``(ak, bk, hs, drym,
+  mountain, area)``.  Skips hybrid_z branch (rare) and MPI mass-
+  correction beyond mountain-mode dps.
+
+  Lives in ``legoesm.grids.vertical``.
+
+  Tests (6/6 in 2 s):
+  1. Output shapes ((...,), (..., km), (..., km)).
+  2. No-mountain → ps uniform = drym.
+  3. All delp > 0.
+  4. pt ≥ T1 = 200 K (FV3 lower bound).
+  5. Σ delp = ps - ak[0].
+  6. No NaN/Inf on random hs.
+
+  Wired into iter-383 sweep (now 215).
 - Iter 645: **FV3 ``drymadj``** — dry-mass surface pressure +
   adjustment.  Faithful JAX port of FV3 ``drymadj``
   (tools/init_hydro.F90:195-275), serial branch.

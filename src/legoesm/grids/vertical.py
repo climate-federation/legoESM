@@ -1166,6 +1166,139 @@ def compute_dz_L32() -> tuple[jax.Array, jax.Array]:
     return dz_flipped, ztop
 
 
+def hydro_eq(
+    ak: jax.Array, bk: jax.Array,
+    hs: jax.Array,
+    drym: float = 1000.0e2,
+    mountain: bool = False,
+    area: jax.Array | None = None,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """FV3_3D iter 646: hydrostatic-equilibrium IC builder.
+
+    Faithful JAX port of FV3 ``hydro_eq``
+    (tools/init_hydro.F90:277-456), hybrid sigma-p branch
+    (``hybrid_z=False``, hydrostatic-only).
+
+    Reference profile:
+        p1 = 250 hPa, z1 = 10 km · g (tropopause; geopotential)
+        T1 = 200 K (isothermal above tropopause)
+        T0 = 300 K (sea-level)
+        a0 = 0.5·(T1 - T0)/z1
+        c0 = T0/a0
+
+    Algorithm:
+        Surface pressure:
+          if mountain: ps = mslp·exp(-1/(a0·R)·hs/(hs + c0))
+                        (with global dps correction)
+          else:        ps = drym (uniform)
+        ph[k] = ak[k] + bk[k]·ps
+        Build gz top-down:
+          if ph[k] ≤ p1: gz[k] = gz[k+1] + R·T1·log(ph[k+1]/ph[k])
+                                              (isothermal stratosphere)
+          else:          gz[k] = c0/(1 + a0·R·log(ph[k]/ps)) + hs - c0
+                                              (lapse-rate troposphere)
+        pt[k] = (gz[k] - gz[k+1]) / (R·log(ph[k+1]/ph[k]))
+        pt[k] = max(T1, pt[k])
+        delp[k] = ph[k+1] - ph[k]
+
+    Parameters
+    ----------
+    ak, bk : jax.Array, shape (km+1,)
+        Hybrid coordinates (FV3 convention).
+    hs : jax.Array, shape (...,)
+        Surface geopotential (m²/s²).
+    drym : float, default 100000 Pa
+        Mean dry-mass surface pressure (used as mslp when mountain).
+    mountain : bool, default False
+        If True, ``ps`` follows topography via ``hs``.  Else uniform.
+    area : jax.Array, shape (...,), optional
+        Cell areas (used for dps mass correction if mountain).
+
+    Returns
+    -------
+    ps : jax.Array, shape (...,)
+        Surface pressure (Pa).
+    delp : jax.Array, shape (..., km)
+        Layer pressure thicknesses.
+    pt : jax.Array, shape (..., km)
+        Layer-mean temperature (K).
+    """
+    g = constants.g
+    rdgas = constants.R_d
+
+    p1 = 25000.0
+    z1 = 10.0e3 * g
+    t1 = 200.0
+    t0 = 300.0
+    a0 = (t1 - t0) / z1 * 0.5
+    c0 = t0 / a0
+    ptop = float(ak[0])
+
+    # Surface pressure
+    if mountain:
+        mslp = 100917.4
+        ps_init = mslp * jnp.exp(
+            -1.0 / (a0 * rdgas) * hs / (hs + c0)
+        )
+        if area is not None:
+            psm = jnp.sum(ps_init * area) / jnp.sum(area)
+            dps = drym - psm
+        else:
+            dps = 0.0
+        ps = ps_init + dps
+    else:
+        ps = jnp.full(hs.shape, drym)
+
+    # ph[..., k] = ak[k] + bk[k]·ps
+    km = ak.shape[0] - 1
+    ph = ak + bk * ps[..., None]                # shape (..., km+1)
+
+    # Build gz top-down from surface (gz[km] = hs)
+    # Use a Python loop over k (km is static, ~32-101)
+    gz = jnp.zeros(ps.shape + (km + 1,))
+    gz = gz.at[..., km].set(hs)
+    for k in range(km - 1, 0, -1):
+        # Branch on ph[k] ≤ p1 (tropopause)
+        ph_k = ph[..., k]
+        ph_kp1 = ph[..., k + 1]
+        gz_kp1 = gz[..., k + 1]
+        # Stratosphere branch
+        gz_strat = gz_kp1 + rdgas * t1 * jnp.log(
+            jnp.maximum(ph_kp1, 1.0) / jnp.maximum(ph_k, 1.0)
+        )
+        # Troposphere branch
+        ratio = ph_k / ps
+        safe_log = jnp.log(jnp.maximum(ratio, 1e-30))
+        denom = 1.0 + a0 * rdgas * safe_log
+        gz_trop = c0 / denom + hs - c0
+        gz_new = jnp.where(ph_k <= p1, gz_strat, gz_trop)
+        gz = gz.at[..., k].set(gz_new)
+
+    # k=0 (model top): same branch logic; ph[0]=ptop = ak[0]
+    ph_0 = ph[..., 0]
+    ph_1 = ph[..., 1]
+    gz_strat_top = gz[..., 1] + rdgas * t1 * jnp.log(
+        jnp.maximum(ph_1, 1.0) / jnp.maximum(ph_0, 1.0)
+    )
+    ratio_top = ph_0 / ps
+    safe_log_top = jnp.log(jnp.maximum(ratio_top, 1e-30))
+    denom_top = 1.0 + a0 * rdgas * safe_log_top
+    gz_trop_top = c0 / denom_top + hs - c0
+    gz_top = jnp.where(ph_0 <= p1, gz_strat_top, gz_trop_top)
+    gz = gz.at[..., 0].set(gz_top)
+
+    # pt and delp
+    log_ph_ratio = jnp.log(
+        jnp.maximum(ph[..., 1:], 1.0) / jnp.maximum(ph[..., :-1], 1.0)
+    )
+    safe_log_ph = jnp.where(jnp.abs(log_ph_ratio) > 1e-30, log_ph_ratio, 1.0)
+    pt = (gz[..., :-1] - gz[..., 1:]) / (rdgas * safe_log_ph)
+    pt = jnp.maximum(pt, t1)
+    delp = ph[..., 1:] - ph[..., :-1]
+
+    return ps, delp, pt
+
+
 def drymadj(
     delp: jax.Array,
     q: jax.Array | None,
