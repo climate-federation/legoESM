@@ -3022,6 +3022,48 @@ def potential_energy_column_fv3(
     return column_integral_delp_fv3(phi_avg, delp)
 
 
+def area_weighted_mean_fv3(
+    field: jax.Array,
+    area: jax.Array,
+    mask: jax.Array | None = None,
+    empty_band_sentinel: float = -1.0,
+) -> jax.Array:
+    """FV3_3D iter 750: area-weighted (masked) global mean.
+
+        mean = Σ (field · area · mask) / Σ (area · mask)
+             = sentinel  if Σ(area·mask) <= 1
+
+    Standard FV3 pattern used in iter-694 ``prt_mass``, iter-705
+    ``prt_gb_nh_sh``, and many other diagnostic global-mean
+    computations.
+
+    Parameters
+    ----------
+    field : jax.Array
+        Scalar field at cell centers.
+    area : jax.Array
+        Cell areas (m²).
+    mask : jax.Array, optional
+        Boolean / 0-1 mask selecting a subset of cells.  None →
+        all cells.
+    empty_band_sentinel : float, default -1.0
+        FV3 bugfix value returned when total masked area ≤ 1.0
+        (e.g., empty NH/SH band on regional domain).
+
+    Returns
+    -------
+    mean : jax.Array (scalar)
+        Area-weighted mean over masked region.
+    """
+    if mask is not None:
+        weight = area * mask
+    else:
+        weight = area
+    total_w = jnp.sum(weight)
+    total_field = jnp.sum(field * weight)
+    return jnp.where(total_w > 1.0, total_field / total_w, empty_band_sentinel)
+
+
 def total_water_column_fv3(
     delp: jax.Array,
     q_sphum: jax.Array | None = None,

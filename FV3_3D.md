@@ -1195,196 +1195,56 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
-- Iter 749: **``total_water_column_fv3``** — column water mass (all species).
+- Iter 750: **``area_weighted_mean_fv3`` helper**.
 
-      TWC = Σ_k delp · (q_v + q_l + q_r + q_i + q_s + q_g) / g
-          = column water vapor + liquid + ice + rain + snow + graupel
+  Standard FV3 area-weighted mean pattern with optional mask + FV3
+  empty-band sentinel:
 
-  Used in FV3 water-mass-conservation diagnostics (iter-694
-  prt_mass sums these per-tracer means).  All tracer inputs
-  optional; at least one required.
+      mean = Σ field·area·mask / Σ area·mask
+           = sentinel  if Σ(area·mask) ≤ 1
 
-  Composes iter-742 column_integral_delp_fv3.
+  Used inline by iter-694 prt_mass (4 sites for ps_mean + per-tracer
+  global means) and iter-705 prt_gb_nh_sh (4 lat-band means).
+  Future iter can refactor those callers to delegate.
 
-  Tests (5/5 in <1 s):
-  1. Single q_sphum → matches iter-742 column_integral.
-  2. q_v + q_l + q_i → sum equals (0.017)·p_s/g exact.
-  3. No tracers → raises.
-  4. 3-D shapes.
-  5. No NaN/Inf.
-
-  Wired into iter-383 sweep (now 313).
-- Iter 748: **refactor iter-693 nh_total_energy to delegate to column-energy quartet**.
-
-  iter-693 now composes:
-
-      Dry:    TE = IE_col + KE_col + PE_col
-      Moist:  TE = IE_col + KE_col + PE_col + LE_col
-
-  Using iter-744 IE + iter-745 KE + iter-746 LE + iter-747 PE.
-
-  Removed ~25 lines of inline phi_avg + layer-summation
-  boilerplate.  iter-693 7/7 + iter-713 7/7 tests still pass
-  (output bit-identical for matching code path).
-
-  Tests (4/4 in <1 s):
-  1. Dry TE = manual IE + KE + PE sum (composition pinned).
-  2. Moist TE = dry TE + LE_col exactly.
-  3. Isothermal dry column → TE > IE (PE adds).
-  4. iter-693 regression: finite, positive TE.
-
-  Wired into iter-383 sweep (now 312).
-- Iter 747: **``potential_energy_column_fv3``** — column PE diagnostic.
-
-      PE_col = Σ_k delp · 0.5·(phi[k]+phi[k+1]) / g
-
-  Layer-mean geopotential weighted by mass.  Standard component
-  of FV3 total-energy budget (iter-693 nh_total_energy uses
-  ``phi_avg = 0.5·(phiz[k]+phiz[k+1])`` in this form).
-
-  Pairs with iter-738 ``geopotential_from_T_peln_fv3`` (hydrostatic
-  Φ from T) and iter-727 ``compute_zh_from_delz_fv3`` (alternative
-  height pathway).  Composes iter-742 column_integral.
-
-  Completes the column-energy-component quartet:
-    * iter-744 internal_energy_column (cv·T)
-    * iter-745 kinetic_energy_column (KE)
-    * iter-746 latent_energy_column (L_v·q)
-    * iter-747 potential_energy_column (phi)
-
-  Tests (5/5 in <1 s):
-  1. phi=0 → PE=0.
-  2. Uniform phi=Φ → PE = Φ·p_s/g exact.
-  3. Composes with iter-738 hydrostatic Φ → 1e6 < PE < 1e10 J/m².
-  4. 3-D shapes.
-  5. No NaN/Inf.
-
-  Wired into iter-383 sweep (now 311).
-- Iter 746: **``latent_energy_column_fv3``** — column LE diagnostic.
-
-      LE_col = L_v · Σ_k delp · q_sphum / g
-             = L_v · column_water_vapor (kg/m²)
-
-  Default ``L = constants.L_v`` (vaporization).  Accepts L_s for
-  sublimation.  Composes iter-742 column_integral_delp_fv3.
-
-  Standard component of FV3 total-energy budget (iter-693
-  nh_total_energy uses ``L_v·q_sphum`` in moist branch).
-
-  Completes the column-energy-component trio: iter-744 IE +
-  iter-745 KE + iter-746 LE.
-
-  Tests (5/5 in <1 s):
-  1. q=0 → LE=0.
-  2. q=0.01, p_s=1e5 → LE ≈ 2.55e8 J/m² (analytical).
-  3. L override (L_s/L_v ratio scales LE correctly).
-  4. 3-D shapes.
-  5. No NaN/Inf.
-
-  Wired into iter-383 sweep (now 310).
-- Iter 745: **``kinetic_energy_column_fv3``** — column KE diagnostic.
-
-      KE_col = Σ_k delp · 0.5·(ua² + va² [+ w²]) / g
-
-  Companion to iter-744 internal_energy_column.  Composes:
-
-      column_integral_delp_fv3(kinetic_energy_fv3(ua, va, w), delp)
-
-  Standard component of FV3 total-energy budget (iter-693
-  nh_total_energy uses this as the KE piece).
-
-  Tests (5/5 in <1 s):
-  1. Zero wind → KE_col=0.
-  2. Uniform ua=10, p_s=1e5 → KE_col = 0.5·100·1e5/g ≈ 510 J/m².
-  3. w=None → 2-component (ua=3, va=4 → 5²); w=12 → 3-component (13²).
-  4. 3-D shapes.
-  5. No NaN/Inf.
-
-  Wired into iter-383 sweep (now 309).
-- Iter 744: **``internal_energy_column_fv3``** — column IE diagnostic.
-
-  Column-integrated internal energy:
-
-      IE = Σ_k delp[k] · cv · pt[k] / g
-
-  Defaults cv = c_pd − R_d (dry isochoric).  Accepts layer-varying
-  cv from iter-713 ``moist_cv_fv3`` for moisture-weighted IE.
-
-  Component of FV3 total-energy budget (iter-693 nh_total_energy
-  uses this as the cv·pt piece).  Delegates integration to
-  iter-742 column_integral_delp_fv3.
-
-  Tests (5/5 in <1 s):
-  1. Dry isothermal at p_s=1e5, T=280 → IE = cv·T·p_s/g exact.
-  2. T=0 → IE=0.
-  3. Custom moist cv from iter-713 → analytical match.
-  4. 3-D shapes.
-  5. No NaN/Inf.
-
-  Wired into iter-383 sweep (now 308).
-- Iter 743: **refactor iter-677/694 to use iter-742 column_integral helper**.
-
-  Two callsites had inline ``jnp.sum(delp * q [/ g], axis=-1)``
-  patterns matching iter-742:
-
-      iter-677 z_sum_fv3:    Σ delp·q (no /g)
-        → ``column_integral_delp_fv3(q, delp, divide_by_g=False)``
-
-      iter-694 prt_mass_fv3 col_mass loop: Σ delp·q / g
-        → ``column_integral_delp_fv3(q, delp)``  (default /g=True)
-
-  Output bit-identical (iter-677 5/5, iter-694 6/6 tests still pass).
-
-  Tests (4/4 in <1 s):
-  1. iter-677 z_sum: matches inline jnp.sum(delp·q).
-  2. iter-694 col_mass: matches inline Σ delp·q / g.
-  3. iter-677 5/5 regression preserved.
-  4. iter-694 6/6 regression preserved.
-
-  Wired into iter-383 sweep (now 307).
-- Iter 742: **``column_integral_delp_fv3``** — delp-weighted column integral.
-
-  Generic helper for FV3's standard column-mass integral pattern:
-
-      col = Σ_k delp[k] · field[k]                  (mass-weighted)
-      col_kg_per_m2 = col / g                       (divide_by_g=True)
-
-  Used throughout fv_diagnostics.F90 / fv_mapz.F90 in
-  iter-677 z_sum, iter-693 nh_total_energy, iter-694 prt_mass.
-
-  For tracer-mass column (kg/m²): ``divide_by_g=True``, field is
-  mixing ratio (kg/kg).  For pressure-weighted average: divide by
-  Σ delp externally.
-
-  Defaults: ``divide_by_g=True`` (mass-weighted column).
-
-  Tests (5/5 in <1 s):
-  1. Uniform q=0.01, p_s=1e5 → col ≈ 101.94 kg/m².
-  2. field=0 → col=0.
-  3. divide_by_g flag toggles /g correctly.
-  4. 3-D (n_x, n_y, km) → 2-D (n_x, n_y) output.
-  5. No NaN/Inf.
-
-  Wired into iter-383 sweep (now 306).
-- Iter 741: **``wind_speed_fv3``** — wind-speed magnitude.
-
-      |V| = sqrt(ua² + va²)         (2-component, w=None)
-      |V| = sqrt(ua² + va² + w²)    (3-component)
-
-  Standard FV3 diagnostic.  Equivalent to ``sqrt(2·KE)`` via
-  iter-740 (consistency pinned by test).  Used by iter-676
-  ``wind_max_fv3`` and many output snapshots.
+  Default sentinel = −1.0 (FV3 bugfix value for non-global domains).
 
   Tests (7/7 in <1 s):
-  1. Zero wind → speed=0.
-  2. ua=1, va=w=0 → speed=1.
-  3. ua=3, va=4 → speed=5 (Pythagoras).
-  4. w=None → horizontal speed only.
-  5. |V| = sqrt(2·KE) consistency with iter-740.
-  6. 3-D shapes.
+  1. Uniform field → mean = value.
+  2. Area-weighted with two cells.
+  3. Mask selects subset.
+  4. Empty mask → −1.0 sentinel.
+  5. Custom sentinel.
+  6. Multi-dim shapes.
   7. No NaN/Inf.
 
-  Wired into iter-383 sweep (now 305).
+  Wired into iter-383 sweep (now 314).
+- **Iters 741-749 (compacted iter 750)**: column-diagnostic helper
+  suite + iter-693 nh_total_energy decomposition.
+
+  | Iter | What                                              | Note                                                   |
+  |------|---------------------------------------------------|--------------------------------------------------------|
+  | 741  | ``wind_speed_fv3``                                | sqrt(u²+v²[+w²]); 2-/3-component                       |
+  | 742  | ``column_integral_delp_fv3``                      | Σ delp·field [/g]; generic kernel                      |
+  | 743  | refactor iter-677/694 to use iter-742             | z_sum + prt_mass delegate to column_integral           |
+  | 744  | ``internal_energy_column_fv3``                    | IE = Σ delp·cv·T/g                                     |
+  | 745  | ``kinetic_energy_column_fv3``                     | KE = Σ delp·KE_layer/g                                 |
+  | 746  | ``latent_energy_column_fv3``                      | LE = L·column_water_vapor                              |
+  | 747  | ``potential_energy_column_fv3``                   | PE = Σ delp·phi_avg/g                                  |
+  | 748  | refactor iter-693 to compose 744+745+746+747       | nh_total_energy = IE+KE+PE+LE_col composition          |
+  | 749  | ``total_water_column_fv3``                        | TWC sum across all condensate species                  |
+
+  **Column-energy quartet** complete: iter-744 IE + iter-745 KE +
+  iter-746 LE + iter-747 PE.  iter-693 nh_total_energy now
+  composes them (iter-748).  ~25 lines of inline computation
+  removed.
+
+  **DRY refactors**: iter-743 routes iter-677 z_sum + iter-694
+  prt_mass through iter-742 column_integral; iter-748 routes
+  iter-693 through column-energy quartet.  All output bit-
+  identical (pinned by regression tests).
+
+  Wired into iter-383 sweep: 305 → 313 modules.
 - Iter 740: **``kinetic_energy_fv3`` helper + iter-693 refactor**.
 
   KE per unit mass:
