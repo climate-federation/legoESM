@@ -29,6 +29,13 @@ checkpoints/
 data/
 wandb/
 
+# Diagnostic plots dropped at repo root by ad-hoc scripts.
+# Tracked diagnostic PNGs live under `diagnostics/` and are still
+# allowed because these patterns are anchored to the repo root with `/`.
+/*.png
+/*.pdf
+/*.svg
+
 # Local-only research-PDF stash (papers consulted while planning).
 # See CLAUDE.md "Code Hygiene Rules" — never committed.
 docs/references/

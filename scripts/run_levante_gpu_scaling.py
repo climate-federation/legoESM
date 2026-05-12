@@ -54,7 +54,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from legoesm import constants
+# NOTE: do NOT import ``legoesm.constants`` at module load — it eagerly
+# imports ``jax.numpy``, which initialises JAX before ``_configure_jax`` /
+# ``_configure_mpi_gpu_affinity`` have a chance to set ``JAX_ENABLE_X64``,
+# ``JAX_PLATFORMS``, ``CUDA_VISIBLE_DEVICES``, and ``XLA_FLAGS``.  Lazy
+# imports inside the functions that consume ``constants.X`` keep the
+# JAX-startup invariant intact.
 
 # ---------------------------------------------------------------------------
 # JAX configuration -- must happen before jax import
@@ -410,6 +415,8 @@ def _auto_dt(n_grid: int, grid_type: str = "cubed-sphere") -> float:
     both the advective speed (~60 m/s) and the external gravity wave
     speed (~300 m/s):  dt < cfl * dx_min / (u_max + c_grav).
     """
+    from legoesm import constants  # lazy: see top-of-file note on JAX init order
+
     R = constants.R_earth
     if grid_type == "spectral":
         # Gaussian grid: dx_min ~ pi * R / n_lon at equator, n_lon = 2*(n_max+1)
@@ -448,6 +455,8 @@ def _hyperdiff_coeff(n_grid: int, grid_type: str = "cubed-sphere") -> float:
     elif grid_type == "icosahedral":
         # For icosahedral, n_grid is a subdivision level.  Scale the
         # coefficient with dx^4 relative to level 5 (~120 km).
+        from legoesm import constants  # lazy: see top-of-file note on JAX init order
+
         R = constants.R_earth
         ref_cells = 10 * 4 ** 5 + 2
         cur_cells = 10 * 4 ** n_grid + 2

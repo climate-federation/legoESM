@@ -57,7 +57,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from legoesm import constants
+# NOTE: do NOT import ``legoesm.constants`` at module load — it eagerly
+# imports ``jax.numpy``, which initialises JAX before ``_configure_jax_cpu``
+# has a chance to set ``JAX_ENABLE_X64`` / ``JAX_PLATFORMS`` / thread flags.
+# Use a lazy import inside the function that needs ``constants.R_earth``.
 
 # ---------------------------------------------------------------------------
 # JAX configuration -- must happen before JAX import
@@ -258,6 +261,8 @@ def _valid_rank_counts(max_ranks: int, grid_type: str) -> list[int]:
 # ===========================================================================
 
 def _auto_dt(n_grid: int, grid_type: str) -> float:
+    from legoesm import constants  # lazy: see top-of-file note on JAX init order
+
     R = constants.R_earth
     u_max = 60.0
     c_grav = 300.0
