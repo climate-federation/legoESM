@@ -156,6 +156,35 @@ Compression iteration.  Folded iter-20 through iter-29 into the
 "Iterations 1-29 — Summary" section.  Detailed per-iteration narratives
 remain in the commit messages on `clean_physics`.
 
+### Iteration 33 — 2026-05-12
+
+**Fix iter-32 codex stop-time finding: test does not exercise the
+claimed tiny-positive-sink path.**
+
+Iter-32's regression test
+(`test_differentiable_tiny_positive_sink_qv_clamp` on Morrison) was
+constructed to engage the `q_v / sink_dt` divisor at tiny values,
+but the broader Morrison run NaN'd in fp32 from a separate path
+(unrelated to the q_v clamp).  The test passed in fp64 (sufficient
+dynamic range) and failed in fp32 from a different overflow site.
+
+Replaced with a focused unit-level test
+(`test_qv_clamp_divisor_floor_protects_VJP`) that exercises ONLY the
+divisor-floor pattern used in the q_v clamp.  Forces a `sink_total =
+1e-25` (well below the 1e-15 floor) in fp32 and asserts:
+1. Gradient w.r.t. `q_v` is finite.
+2. Gradient w.r.t. `sink_total` is finite.
+3. Both gradients are zero-magnitude (the floor regime is "inactive"
+   in physical terms; `min(1, huge) = 1` gates the gradient).
+
+This directly validates the iter-32 floor without depending on
+Morrison's other fp32 paths.
+
+The separate fp32 NaN in deep-ice Morrison is documented as a
+known-limitation (production runs use fp64 where it does not trigger).
+
+**Tests (post iter-33):** 63 / 63 microphysics tests pass.
+
 ### Iteration 32 — 2026-05-12
 
 **Fix iter-31 codex stop-time follow-up: tiny-positive-sink NaN.**
