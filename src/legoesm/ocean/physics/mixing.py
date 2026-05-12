@@ -71,11 +71,18 @@ def vertical_diffusion(
     z_coord: OceanZStarCoordinate,
     jacobian: jnp.ndarray,
     coeff: float,
+    dt: float | None = None,
+    cfl_safety: float = 0.45,
 ) -> jnp.ndarray:
     """Compute d/dz(coeff * d(field)/dz) using 2nd-order centered differences.
 
     Explicit vertical diffusion with zero-flux boundary conditions
-    at surface and bottom.
+    at surface and bottom.  When ``dt`` is supplied the diffusivity is
+    capped by the local explicit-Euler CFL bound
+    ``K ≤ cfl_safety · dz_half² / dt`` (default safety 0.45 ≤ 0.5
+    leaves a small stability margin).  Without the cap a moderate
+    ``coeff`` over thin upper layers will explode on an ocean physics
+    step.  Codex narrow review iter-4 #1.
 
     Parameters
     ----------
@@ -87,6 +94,10 @@ def vertical_diffusion(
         Dynamic Jacobian, shape (...).
     coeff : float
         Diffusivity [m^2/s].
+    dt : float, optional
+        Physics step [s].  When provided, enforces explicit-Euler CFL.
+    cfl_safety : float
+        Stability margin (must be ≤ 0.5 for explicit Euler).
 
     Returns
     -------
@@ -103,9 +114,17 @@ def vertical_diffusion(
     dz = z_coord.dz_ref * jacobian[..., jnp.newaxis]         # (..., nlev)
     dz_half = 0.5 * (dz[..., :-1] + dz[..., 1:])  # (..., nlev-1)
 
+    if dt is not None:
+        coeff_cap = cfl_safety * jnp.minimum(
+            dz[..., :-1], dz[..., 1:],
+        ) ** 2 / jnp.maximum(dt, 1.0e-12)
+        coeff_eff = jnp.minimum(coeff, coeff_cap)
+    else:
+        coeff_eff = coeff
+
     # Diffusive flux at interior interfaces: coeff * d(field)/dz
     df_dz = (field[..., :-1] - field[..., 1:]) / dz_half
-    flux = coeff * df_dz  # (..., nlev-1)
+    flux = coeff_eff * df_dz  # (..., nlev-1)
 
     # Tendency at full levels: d(flux)/dz with zero-flux BCs.
     # Using concatenate avoids scatter updates (better JIT lowering and
@@ -121,11 +140,17 @@ def vertical_diffusion_variable_K(
     z_coord: OceanZStarCoordinate,
     jacobian: jnp.ndarray,
     K_half: jnp.ndarray,
+    dt: float | None = None,
+    cfl_safety: float = 0.45,
 ) -> jnp.ndarray:
     """Compute d/dz(K(z) * d(field)/dz) with spatially varying diffusivity.
 
-    Same algorithm as ``vertical_diffusion`` but accepts a 3-D diffusivity
-    array at interior interfaces instead of a scalar.
+    Same algorithm as ``vertical_diffusion`` but accepts a 3-D
+    diffusivity array at interior interfaces instead of a scalar.
+    When ``dt`` is supplied, ``K_half`` is capped per-interface by
+    ``cfl_safety · min(dz_k, dz_{k+1})² / dt`` so Richardson/KPP
+    callers cannot violate the explicit-Euler CFL on thin upper
+    layers.  Codex narrow review iter-4 #2.
 
     Parameters
     ----------
@@ -137,6 +162,10 @@ def vertical_diffusion_variable_K(
         Dynamic Jacobian, shape (...).
     K_half : array
         Diffusivity at interior interfaces [m^2/s], shape (..., nlev-1).
+    dt : float, optional
+        Physics step [s].  When provided, enforces explicit-Euler CFL.
+    cfl_safety : float
+        Stability margin (must be ≤ 0.5 for explicit Euler).
 
     Returns
     -------
@@ -151,6 +180,12 @@ def vertical_diffusion_variable_K(
 
     dz = z_coord.dz_ref * jacobian[..., jnp.newaxis]         # (..., nlev)
     dz_half = 0.5 * (dz[..., :-1] + dz[..., 1:])  # (..., nlev-1)
+
+    if dt is not None:
+        K_cap = cfl_safety * jnp.minimum(
+            dz[..., :-1], dz[..., 1:],
+        ) ** 2 / jnp.maximum(dt, 1.0e-12)
+        K_half = jnp.minimum(K_half, K_cap)
 
     df_dz = (field[..., :-1] - field[..., 1:]) / dz_half
     flux = K_half * df_dz  # (..., nlev-1)

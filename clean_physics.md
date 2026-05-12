@@ -114,6 +114,23 @@ Branch: `clean_physics`. Driven by Ralph loop with `/codex:adversarial-review`.
 - microphysics + convection + sea-ice unit tests → 182/182 pass.
 - atmosphere hydrostatic integration → 17/17 pass.
 
+### Iteration 5 — 2026-05-12
+
+**Actions:**
+- [x] #7 enhanced_diffusion `dt` thread — `enhanced_diffusion_convection` now accepts an optional explicit `dt`; when provided it supersedes `cfg.cfl_dt_estimate` for the CFL cap.  Backward-compatible (default `None` keeps prior behaviour).
+- [x] Ocean `mixing.vertical_diffusion` + `vertical_diffusion_variable_K` — both accept optional `dt` + `cfl_safety` (default 0.45) and cap the (scalar or per-interface) diffusivity by `cfl_safety · min(dz_k, dz_{k+1})² / dt`.  Default `dt=None` keeps existing callers unchanged.
+- [x] #2 sea_ice FW/heat from thermodynamic ΔV — `_step_dynamic` now snapshots `h_agg_post_transport` (after horizontal advection, before thermo) and passes that to `_build_response.h_old` so the FW flux excludes horizontal transport (which conserves ice mass globally).
+
+**Deferred to iter-6:**
+- #1 sea-ice PPM CFL subcycling.
+- #3 multi-cat lead freezing volume consistency.
+- Ocean lateral_mixing harmonic/biharmonic CFL caps (need `grid.dx_min` plumbing).
+- GM/Redi bolus Courant limiter.
+
+**Tests (post iter-5):**
+- sea-ice unit suite → 69/69 pass.
+- ocean physics suite → 67/67 pass.
+
 **Tests (post-fix):**
 - atmosphere microphysics + convection + land multilayer: 172/172 pass.
 - sea ice unit suite: 78 pass, 1 pre-existing thermo failure (`Test8i_StefanBoltzmann::test_lw_up_matches` — confirmed pre-existing in iter-1).

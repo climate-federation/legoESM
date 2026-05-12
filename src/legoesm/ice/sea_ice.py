@@ -325,9 +325,6 @@ def _step_dynamic(
         h_agg, T_agg, conc_agg = aggregate_state(h, T_ice, conc)
     else:
         h_agg, T_agg, conc_agg = h, T_ice, conc
-    # Capture the pre-step aggregated thickness for ice→ocean
-    # freshwater / heat / stress feedback (see ``_build_response``).
-    h_agg_initial = h_agg
 
     # ---- 1. Dynamics ----
     if config.dynamics == "evp" and grid is not None:
@@ -368,6 +365,17 @@ def _step_dynamic(
         h, conc, T_ice = advect_ice_tracers(
             h, conc, T_ice, u_ice, v_ice, grid, dt,
         )
+
+    # Snapshot of aggregated ice thickness AFTER transport but BEFORE
+    # thermodynamics.  This is the reference for the ice → ocean
+    # freshwater / heat exchange — only the thermodynamic ΔV is an
+    # ocean exchange; horizontal transport conserves ice mass and
+    # should not show up as melt/freezing in the coupler response.
+    # Codex iter-3 finding #2.
+    if h.ndim > 3:
+        h_agg_post_transport, _, _ = aggregate_state(h, T_ice, conc)
+    else:
+        h_agg_post_transport = h
 
     # ---- 3. Thermodynamics (per category or single) ----
     if h.ndim > 3:
@@ -427,10 +435,13 @@ def _step_dynamic(
         h_agg, T_agg, conc_agg = h, T_ice, conc
 
     # ---- Build response ----
+    # Use the post-transport snapshot as the reference for FW / heat
+    # so transport (which conserves ice mass globally) doesn't appear
+    # as melt/freezing in the ocean coupler response.
     response = _build_response(
         h_agg, T_agg, conc_agg, u_ice, v_ice,
         forcing, config, U_min,
-        h_old=h_agg_initial,
+        h_old=h_agg_post_transport,
         ocean_sst=ocean_sst,
         ocean_u=ocean_u,
         ocean_v=ocean_v,

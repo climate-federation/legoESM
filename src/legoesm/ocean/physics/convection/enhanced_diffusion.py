@@ -23,8 +23,14 @@ def enhanced_diffusion_convection(
     jacobian: jnp.ndarray,
     cfg: EnhancedDiffusionConfig,
     apply_diffusion: bool = True,
+    dt: float | None = None,
 ) -> OceanConvectionOutput:
     """Apply enhanced diffusion where the water column is unstable.
+
+    When ``dt`` is supplied, the explicit-branch CFL cap uses the
+    actual physics step instead of ``cfg.cfl_dt_estimate`` — preserves
+    stability and correct convection strength when runtime ``dt``
+    differs from the config-time estimate.  Codex iter-3 finding #7.
 
     Parameters
     ----------
@@ -33,6 +39,12 @@ def enhanced_diffusion_convection(
     z_coord : OceanZStarCoordinate
     jacobian : array (6, n, n)
     cfg : EnhancedDiffusionConfig
+    apply_diffusion : bool
+        Run the explicit diffusion branch.  When False, K is returned
+        in the output for downstream implicit solvers.
+    dt : float, optional
+        Physics step [s].  When provided, used in the CFL cap instead
+        of ``cfg.cfl_dt_estimate``.
 
     Returns
     -------
@@ -65,7 +77,8 @@ def enhanced_diffusion_convection(
     # ``cfl_safety``.
     if apply_diffusion:
         dz_min_sq = jnp.maximum(jnp.min(z_coord.dz_ref) ** 2, 1.0)
-        K_max = cfg.cfl_safety * dz_min_sq / jnp.maximum(cfg.cfl_dt_estimate, 1.0)
+        dt_eff = cfg.cfl_dt_estimate if dt is None else dt
+        K_max = cfg.cfl_safety * dz_min_sq / jnp.maximum(dt_eff, 1.0)
         K = jnp.minimum(K, K_max)
         tracers = jnp.stack([T, S], axis=0)
         tr_tend = jax.vmap(
