@@ -247,6 +247,7 @@ _GUARD_MODULES = (
     "test_fv3_ctoa_iter653",                         # iter-653 add
     "test_fv3_atoc_iter654",                         # iter-654 add
     "test_fv3_atod_iter655",                         # iter-655 add
+    "test_fv3_get_vorticity_iter656",                # iter-656 add
 )
 
 

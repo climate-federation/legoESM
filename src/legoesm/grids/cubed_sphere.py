@@ -2304,6 +2304,72 @@ def gnomonic_dist(im: int) -> tuple[jax.Array, jax.Array]:
     return xyz2latlon(p1, p2, p3)
 
 
+def get_vorticity_fv3(
+    u: jax.Array, v: jax.Array,
+    dx: jax.Array, dy: jax.Array,
+    rarea: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 656: compute vorticity from D-grid winds.
+
+    Faithful JAX port of FV3 ``get_vorticity`` (tools/test_cases.F90:
+    4034-4065).  Standard line-integral / cell-area form:
+
+        utmp[i, j] = u[i, j] · dx[i, j]      # u-circulation
+        vtmp[i, j] = v[i, j] · dy[i, j]      # v-circulation
+        vort[i, j] = rarea[i, j] · (utmp[i, j] - utmp[i, j+1]
+                                    - vtmp[i, j] + vtmp[i+1, j])
+
+    Sign convention: positive = counterclockwise (FV3 vorticity).
+    Computes the curl of the D-grid covariant velocity field
+    integrated around each cell.
+
+    Parameters
+    ----------
+    u : jax.Array, shape (n_x, n_y+1, [nlev])
+        D-grid u (north/south edges, covariant).
+    v : jax.Array, shape (n_x+1, n_y, [nlev])
+        D-grid v (east/west edges, covariant).
+    dx : jax.Array, shape (n_x, n_y+1)
+        Edge x-lengths.
+    dy : jax.Array, shape (n_x+1, n_y)
+        Edge y-lengths.
+    rarea : jax.Array, shape (n_x, n_y)
+        Reciprocal cell area (1/m²).
+
+    Returns
+    -------
+    vort : jax.Array, shape (n_x, n_y, [nlev])
+        Cell-center vorticity.
+    """
+    has_level = u.ndim == dx.ndim + 1
+    if has_level:
+        dx_b = dx[..., None]
+        dy_b = dy[..., None]
+        rarea_b = rarea[..., None]
+    else:
+        dx_b, dy_b, rarea_b = dx, dy, rarea
+
+    utmp = u * dx_b      # (n_x, n_y+1, [nlev])
+    vtmp = v * dy_b      # (n_x+1, n_y, [nlev])
+    # Slicing axes:
+    #   utmp[i, j]   = utmp[..., :, :-1] (or :-1 last axis if 2D)
+    #   utmp[i, j+1] = utmp[..., :, 1:]
+    #   vtmp[i, j]   = vtmp[..., :-1, :]
+    #   vtmp[i+1, j] = vtmp[..., 1:, :]
+    if has_level:
+        u_j = utmp[..., :, :-1, :]
+        u_jp1 = utmp[..., :, 1:, :]
+        v_i = vtmp[..., :-1, :, :]
+        v_ip1 = vtmp[..., 1:, :, :]
+    else:
+        u_j = utmp[..., :, :-1]
+        u_jp1 = utmp[..., :, 1:]
+        v_i = vtmp[..., :-1, :]
+        v_ip1 = vtmp[..., 1:, :]
+
+    return rarea_b * (u_j - u_jp1 - v_i + v_ip1)
+
+
 def atod_vort_on(
     uin: jax.Array, vin: jax.Array,
     dxa: jax.Array, dya: jax.Array,

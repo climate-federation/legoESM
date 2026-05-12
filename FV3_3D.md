@@ -1195,6 +1195,32 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 656: **FV3 ``get_vorticity_fv3``** — vorticity from D-grid
+  winds.  Faithful JAX port of FV3 ``get_vorticity``
+  (tools/test_cases.F90:4034-4065).
+
+  Standard FV3 line-integral / cell-area form:
+
+      utmp[i, j] = u[i, j] · dx[i, j]
+      vtmp[i, j] = v[i, j] · dy[i, j]
+      vort[i, j] = rarea[i, j] · (utmp[i, j] - utmp[i, j+1]
+                                  - vtmp[i, j] + vtmp[i+1, j])
+
+  Sign convention: positive = counterclockwise (FV3 vorticity).
+  Computes the curl of the D-grid covariant velocity field
+  integrated around each cell.
+
+  Handles 2D (n_x, n_y+1) and 3D (n_x, n_y+1, nlev) inputs.
+  Verified: solid-body rotation u=-Ω·y, v=Ω·x → vort = 2·Ω.
+
+  Tests (5/5 in 1 s):
+  1. Output shape (n_x, n_y).
+  2. Zero winds → zero vorticity.
+  3. Uniform winds → zero vorticity.
+  4. Solid-body rotation → vort = 2·Ω (exact).
+  5. 3D level dim handled.
+
+  Wired into iter-383 sweep (now 224).
 - Iter 655: **FV3 ``atod_vort_on``** — A-grid → D-grid winds
   (circulation-conserving).  Circulation-conserving analog of
   FV3 ``atod`` (tools/test_cases.F90:7833-7892) consistent with
