@@ -5778,6 +5778,78 @@ def total_totals_fv3(
     return t850 + td850 - 2.0 * t500
 
 
+def sweat_index_fv3(
+    td850_C: jax.Array,
+    tt_index: jax.Array,
+    u_850_kts: jax.Array,
+    u_500_kts: jax.Array,
+    dir_850_deg: jax.Array,
+    dir_500_deg: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 813: Miller (1972) SWEAT severe-weather index.
+
+    Composite severe-weather threat (Severe WEAther Threat):
+
+        SWEAT = 12·Td850 + 20·(TT − 49) + 2·U_850 + U_500
+                + 125·(sin(D_500 − D_850) + 0.2)
+
+    Miller's conditional gating per the original paper:
+      * 12·Td850 term: 0 if Td850 < 0 °C (no surface dew-point boost).
+      * 20·(TT−49) term: 0 if TT < 49 (only above thunderstorm threshold).
+      * 125·sin shear term: 0 unless ALL of:
+          - 130° ≤ D_850 ≤ 250°   (SE-SW low-level wind)
+          - 210° ≤ D_500 ≤ 310°   (S-W mid-level wind)
+          - D_500 > D_850          (veering with height)
+          - U_850 ≥ 15 kts
+          - U_500 ≥ 15 kts
+
+    NWS/SPC operational thresholds:
+      * SWEAT < 250  — no severe storms
+      * 250-300      — moderately severe T-storm potential
+      * 300-400      — strong severe / tornadic potential
+      * > 400        — high tornadic threat
+
+    **Units note**: Td850 in °C; U_850/U_500 in **knots**; directions
+    in degrees from-north meteorological convention.  Caller must
+    convert m/s wind to knots (1 m/s ≈ 1.94 kts).
+
+    Composes iter-812 ``total_totals_fv3``.
+
+    Used by NWS/SPC severe-storm watches/warnings, mesoscale-model
+    severe-storm post-processing, climate-model tornadic-environment
+    studies.
+
+    Parameters
+    ----------
+    td850_C : jax.Array
+        Dew point at 850 mb (°C).
+    tt_index : jax.Array
+        Total Totals index (from iter-812).
+    u_850_kts, u_500_kts : jax.Array
+        Wind speed at 850 and 500 mb (knots).
+    dir_850_deg, dir_500_deg : jax.Array
+        Wind direction from-north (degrees) at 850 and 500 mb.
+
+    Returns
+    -------
+    sweat : jax.Array
+        SWEAT index (dimensionless).
+    """
+    term1 = 12.0 * jnp.maximum(td850_C, 0.0)
+    term2 = 20.0 * jnp.maximum(tt_index - 49.0, 0.0)
+    term3 = 2.0 * u_850_kts
+    term4 = u_500_kts
+    d_diff_rad = jnp.deg2rad(dir_500_deg - dir_850_deg)
+    valid = (
+        (dir_850_deg >= 130.0) & (dir_850_deg <= 250.0)
+        & (dir_500_deg >= 210.0) & (dir_500_deg <= 310.0)
+        & (dir_500_deg > dir_850_deg)
+        & (u_850_kts >= 15.0) & (u_500_kts >= 15.0)
+    )
+    term5 = jnp.where(valid, 125.0 * (jnp.sin(d_diff_rad) + 0.2), 0.0)
+    return term1 + term2 + term3 + term4 + term5
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

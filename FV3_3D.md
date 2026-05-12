@@ -5145,6 +5145,51 @@ the five form a complete operational deep-convection
 diagnostic kit.  Pure JAX, vmap-compatible.  No new physical
 constants introduced.
 
+## Iter 813 — sweat_index_fv3 (Miller 1972 SWEAT)
+
+Added `sweat_index_fv3(td850_C, tt_index, u_850_kts, u_500_kts,
+dir_850_deg, dir_500_deg)` to `grids/cubed_sphere.py`.  Miller
+(1972) Severe WEAther Threat composite index:
+
+```
+SWEAT = 12·Td850 + 20·(TT − 49) + 2·U_850 + U_500
+        + 125·(sin(D_500 − D_850) + 0.2)
+```
+
+Miller's conditional gating:
+  * 12·Td850 term: 0 if Td850 < 0 °C.
+  * 20·(TT−49) term: 0 if TT < 49.
+  * 125·sin shear term: 0 unless ALL of: 130°≤D_850≤250°,
+    210°≤D_500≤310°, D_500>D_850 (veering), U_850≥15 kts,
+    U_500≥15 kts.
+
+NWS/SPC thresholds:
+  * SWEAT < 250  — no severe
+  * 250–300      — moderate severe T-storm
+  * 300–400      — strong / tornadic potential
+  * > 400        — high tornadic threat
+
+**Units**: Td850 °C; U_850/U_500 **knots**; directions degrees
+from-north meteorological convention.  Caller converts m/s →
+knots (1 m/s ≈ 1.94 kts).
+
+Composes iter-812 ``total_totals_fv3``.
+
+Test: `tests/test_fv3_sweat_index_iter813.py` (5 tests:
+classic tornadic case (Td=18, TT=55, S→W veering) → 596 exact,
+Td<0 zeros term1, TT<49 zeros term2, backing wind zeros term5,
+3-D shapes + finite).
+
+### Why this iteration was meaningful
+
+SWEAT is the composite severe-weather forecast index — combines
+the three building-block indices (LI, K, TT) with shear info into
+a single number forecasters scan.  Closes the **operational
+severe-storm composite-index kit**: CAPE (iter-808) + CIN
+(iter-809) + LI (iter-810) + K (iter-811) + TT (iter-812) +
+SWEAT (iter-813).  Pure JAX, vmap-compatible.  No new physical
+constants introduced.
+
 
 
 
