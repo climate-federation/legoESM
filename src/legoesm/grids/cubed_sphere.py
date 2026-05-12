@@ -2382,6 +2382,107 @@ def rotate_winds_sphere_cube(
     return new_u, new_v
 
 
+def u_jet_fv3(
+    lat: jax.Array,
+    umax: float = 80.0,
+    ph0: float | None = None,
+    ph1: float | None = None,
+) -> jax.Array:
+    """FV3_3D iter 663: Galewsky-like zonal jet profile.
+
+    Faithful JAX port of FV3 ``u_jet`` (tools/test_cases.F90:
+    4349-4360).  Returns jet zonal wind::
+
+        if ph0 < lat < ph1:
+            u_jet = (umax / en) · exp(1 / ((lat - ph0)·(lat - ph1)))
+        else:
+            u_jet = 0
+        where en = exp(-4 / (ph1 - ph0)²)
+
+    Default ph0 = π/7, ph1 = π/2 - π/7 (northern hemisphere jet).
+
+    Parameters
+    ----------
+    lat : jax.Array
+        Latitude in radians.
+    umax : float, default 80.0
+        Peak zonal wind (m/s).
+    ph0, ph1 : float, optional
+        Jet boundaries (default FV3 values).
+    """
+    if ph0 is None:
+        ph0 = jnp.pi / 7.0
+    if ph1 is None:
+        ph1 = jnp.pi / 2.0 - jnp.pi / 7.0
+    en = jnp.exp(-4.0 / (ph1 - ph0) ** 2)
+    # Safe-divide inside jet band; clamp the argument to avoid -inf
+    in_band = (lat > ph0) & (lat < ph1)
+    denom = (lat - ph0) * (lat - ph1)
+    safe_denom = jnp.where(in_band, denom, -1.0)        # nonzero negative
+    profile = (umax / en) * jnp.exp(1.0 / safe_denom)
+    return jnp.where(in_band, profile, 0.0)
+
+
+def gh_jet_fv3(
+    lat_in: jax.Array,
+    npy: int = 64,
+    h0: float = 10157.946867,
+    umax: float = 80.0,
+    radius: float = constants.R_earth,
+    omega: float = constants.Omega,
+) -> jax.Array:
+    """FV3_3D iter 663: geopotential height of Galewsky-like jet.
+
+    Faithful JAX port of FV3 ``gh_jet`` (tools/test_cases.F90:
+    4297-4348).  Returns geopotential ``g·h`` along the Galewsky
+    barotropic-instability test jet by numerical integration of
+    geostrophic + centripetal balance::
+
+        gh[0] = g·h0    (at lat=-π/2)
+        gh[j] = gh[j-1] - u·(R·f + tan(lat)·u)·dp
+
+    where ``u = u_jet(lat)``, ``f = 2·Ω·sin(lat)``, ``dp = π/(jm-1)``,
+    ``jm = 4·npy``.  Then linear-interp at ``lat_in``.
+
+    Used for Galewsky barotropic-instability test (Galewsky,
+    Scott & Polvani 2004) on the sphere.
+
+    Parameters
+    ----------
+    lat_in : jax.Array
+        Latitudes at which to evaluate gh (radians).
+    npy : int, default 64
+        Reference grid resolution (table size = 4·npy).
+    h0 : float, default 10157.946867 (FV3 calibrated)
+        South-pole reference height (m).
+    umax : float, default 80.0
+        Peak zonal wind for ``u_jet`` (m/s).
+    radius : float, default constants.R_earth
+        Sphere radius.
+    omega : float, default constants.omega_earth
+        Sphere angular velocity.
+    """
+    g = constants.g
+    jm = 4 * npy
+    dp = jnp.pi / (jm - 1)
+    # Latitudes at midpoints for integration (FV3 lines 4321-4326)
+    j_idx = jnp.arange(2, jm + 1)
+    lat_mid = -jnp.pi / 2.0 + (j_idx.astype(jnp.float64) - 1.0 - 0.5) * dp
+    uu = u_jet_fv3(lat_mid, umax=umax)
+    ft = 2.0 * omega * jnp.sin(lat_mid)
+    # increment: -uu·(R·f + tan(lat_mid)·uu)·dp
+    increment = -uu * (radius * ft + jnp.tan(lat_mid) * uu) * dp
+    # Build gh_table: gh[0] = g·h0; gh[j] = gh[j-1] + increment[j-1]
+    gh_inits = jnp.asarray([g * h0])
+    gh_rest = gh_inits[0] + jnp.cumsum(increment)
+    gh_table = jnp.concatenate([gh_inits, gh_rest])
+    # Latitudes table (FV3 line 4326): lat[j] = -π/2 + (j-1)·dp
+    j_idx_all = jnp.arange(jm, dtype=jnp.float64)
+    lats_table = -jnp.pi / 2.0 + j_idx_all * dp
+    # Linear interpolation of gh_table at lat_in
+    return jnp.interp(lat_in, lats_table, gh_table)
+
+
 def add_rankine_vortex(
     u: jax.Array, v: jax.Array,
     grid_lon: jax.Array, grid_lat: jax.Array,

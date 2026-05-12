@@ -1195,6 +1195,43 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 663: **FV3 ``u_jet_fv3`` + ``gh_jet_fv3``** — Galewsky jet.
+  Faithful JAX ports of FV3 ``u_jet`` and ``gh_jet``
+  (tools/test_cases.F90:4297-4360).  Galewsky-Scott-Polvani 2004
+  barotropic-instability test on the sphere.
+
+  ``u_jet_fv3``:
+
+      if ph0 < lat < ph1:
+          u = (umax/en) · exp(1 / ((lat-ph0)·(lat-ph1)))
+      else:
+          u = 0
+      where en = exp(-4/(ph1-ph0)²)
+
+  Default ph0=π/7, ph1=π/2-π/7 (northern hemisphere jet); peak
+  at center = (ph0+ph1)/2.  Verified peak = umax exactly.
+
+  ``gh_jet_fv3`` integrates geostrophic + centripetal balance:
+
+      gh[0]  = g·h0   (south pole)
+      gh[j]  = gh[j-1] - u·(R·f + tan(lat)·u)·dp
+
+  with FV3 calibrated h0 = 10157.946867 m.  Returns
+  linearly-interpolated geopotential at requested ``lat_in``.
+
+  Used for the Galewsky barotropic-instability shallow-water
+  test.
+
+  Tests (7/7 in 1 s):
+  1. u_jet=0 outside jet band (equator, poles).
+  2. u_jet finite inside band.
+  3. Peak u_jet = umax at center (exact).
+  4. gh_jet shape matches input.
+  5. gh_jet(-π/2) ≈ g·h0 to 1e-3.
+  6. gh_jet constant outside jet band.
+  7. gh_jet finite across full latitude range.
+
+  Wired into iter-383 sweep (now 230).
 - Iter 662: **FV3 ``add_rankine_vortex``** — Rankine vortex IC
   on D-grid winds.  Faithful JAX port of FV3 ``rankine_vortex``
   (tools/test_cases.F90:4207-4292).  Adds Rankine-vortex
