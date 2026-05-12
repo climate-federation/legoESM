@@ -1185,6 +1185,26 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 561: **bisect min-edge flag toggles on smooth IC**.
+  iter-553 showed FV3-faithful BEATS min-edge by 70% on smooth
+  IC.  Bisect: re-enable each disabled flag one at a time @
+  C16 SBR, 10 steps:
+  - min_edge (baseline):     edge_std = 6.32e-2 (+0%)
+  - +metric_aware_d_con:     edge_std = 9.43e-2 (**+49.3% worse!**)
+  - +heat_source_del2=2:     edge_std = 1.40e-2 (**-77.9% BEST**)
+  - +d_con_top_zero=2:       edge_std = 4.95e-2 (-21.6%)
+  - ALL three (=faithful):   edge_std = 1.86e-2 (-70.5%)
+  Findings:
+  - ``heat_source_del2`` is the dominant smooth-IC fix
+    (-78% alone).  iter-457/458's del-2 heat smoothing
+    eliminates edge variance very effectively.
+  - ``metric_aware_d_con`` HURTS by 49% when enabled ALONE
+    on min-edge, but combined with the others gives best
+    result.  Synergy: metric form needs the others to work.
+  - ``d_con_top_zero=2`` gives modest 22% reduction.
+  Practical: if you can only enable ONE flag on min-edge,
+  enable ``heat_source_del2_iters=2``.  1/1 in 105 s.
+  Wired into iter-383 sweep (now 142).
 - **Iters 551-559 (compacted iter 560)**: regime-aware
   factory analysis + long-run stability bounds.
   - iter 551: clip overhead at C16 = -1.6% (within noise).

@@ -165,6 +165,7 @@ _GUARD_MODULES = (
     "test_pe_factory_compare_iter557",               # iter-557 add
     "test_pe_long_run_iter558",                      # iter-558 add
     "test_pe_long_run_dt5_iter559",                  # iter-559 add
+    "test_min_edge_bisect_smooth_iter561",           # iter-561 add
 )
 
 
