@@ -1166,6 +1166,89 @@ def compute_dz_L32() -> tuple[jax.Array, jax.Array]:
     return dz_flipped, ztop
 
 
+def hybrid_z_dz(
+    km: int, ztop: float, s_rate: float = 1.06,
+) -> jax.Array:
+    """FV3_3D iter 639: FV3 hybrid-z layer thicknesses with s_rate stretch.
+
+    Faithful JAX port of FV3 ``hybrid_z_dz``
+    (tools/fv_eta.F90:1794-1855).  Builds an FV3-style stretched
+    vertical profile using a per-layer stretch factor table::
+
+        s_fac[km..km-9] = 0.12, 0.20, 0.30, ..., 1.0
+        s_fac[k]        = min(4, s_rate · s_fac[k+1])   for k ∈ [9, km-10]
+        s_fac[1..8]     = 1.6, 1.5, 1.4, 1.3, 1.2, 1.15, 1.1, 1.05
+                          (top, applied to s_fac[k+1])
+
+        dz0 = ztop / Σ s_fac
+        dz[k] = s_fac[k] · dz0
+
+    Then iter-636 ``sm1_edge_fv3`` is applied with ntimes=2.
+
+    Requires ``km >= 18`` (so bottom 10 + top 8 don't overlap).
+
+    Parameters
+    ----------
+    km : int
+        Number of layers (must be ≥ 18).
+    ztop : float
+        Top of model (m).
+    s_rate : float, default 1.06
+        Stretch rate for middle layers, FV3 documented range
+        [1.0, 1.1].
+
+    Returns
+    -------
+    dz : jax.Array, shape ``(km,)``
+        Layer thicknesses (top→bottom, FV3 final convention).
+    """
+    if km < 18:
+        raise ValueError(f"hybrid_z_dz requires km >= 18, got {km}")
+
+    # Build s_fac 0-indexed (FV3 1-indexed s_fac[k] → s_fac[k-1])
+    s_fac = jnp.zeros((km,))
+    # Bottom 10 (FV3 k=km..km-9 → 0-indexed [km-1, km-10])
+    bottom = jnp.asarray(
+        [0.12, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 1.0]
+    )
+    # s_fac[km-1] = 0.12, s_fac[km-2] = 0.20, ..., s_fac[km-10] = 1.0
+    for i, v in enumerate(bottom):
+        s_fac = s_fac.at[km - 1 - i].set(float(v))
+    # Middle (FV3 k=km-10..9 → 0-indexed [km-11, 8]): recurrence
+    # s_fac[k] = min(4, s_rate · s_fac[k+1])
+    # Sequential — use Python loop (km is static)
+    for k in range(km - 11, 7, -1):  # 0-indexed: k_python = k_fortran - 1
+        s_fac = s_fac.at[k].set(
+            jnp.minimum(4.0, s_rate * s_fac[k + 1])
+        )
+    # Top 8 (FV3 k=8..1 → 0-indexed [7, 0]): specific multipliers
+    top_mults = [1.05, 1.10, 1.15, 1.20, 1.30, 1.40, 1.50, 1.60]
+    # FV3: s_fac(8) = 1.05·s_fac(9); s_fac(7) = 1.10·s_fac(8); ...
+    # 0-indexed: s_fac[7] = 1.05·s_fac[8]; s_fac[6] = 1.10·s_fac[7]; ...
+    for i, mult in enumerate(top_mults):
+        idx = 7 - i  # 7, 6, 5, ..., 0
+        s_fac = s_fac.at[idx].set(mult * s_fac[idx + 1])
+
+    sum1 = jnp.sum(s_fac)
+    dz0 = ztop / sum1
+    dz = s_fac * dz0
+
+    # Build ze top-down: FV3 ze[km+1]=0, then ze[k]=ze[k+1]+dz[k]
+    # 0-indexed: ze[km]=0, ze[k]=ze[k+1]+dz[k] for k = km-1..0
+    cumsum_rev = jnp.cumsum(dz[::-1])[::-1]
+    # cumsum_rev[k] = dz[k]+dz[k+1]+...+dz[km-1]
+    ze = jnp.concatenate([cumsum_rev, jnp.asarray([0.0])])
+    # FV3 also sets ze(1) = ztop (FV3 line 1846 overrides top edge)
+    ze = ze.at[0].set(ztop)
+
+    # Apply iter-636 sm1_edge_fv3 with ntimes=2
+    ze = sm1_edge_fv3(ze, ntimes=2)
+
+    # Recompute dz from ze (FV3 line 1851-1853: dz(k) = ze(k) - ze(k+1))
+    dz_final = ze[:-1] - ze[1:]
+    return dz_final
+
+
 def compute_dz_L101(
     stretch_f: float = 1.16,
     dz0: float = 40.0,

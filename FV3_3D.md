@@ -1195,6 +1195,35 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 639: **FV3 ``hybrid_z_dz``** — stretched vertical with
+  per-layer s_fac table.  Faithful JAX port of FV3 ``hybrid_z_dz``
+  (tools/fv_eta.F90:1794-1855).  Builds FV3 stretched vertical-coord:
+
+      s_fac[km..km-9] = 0.12, 0.20, 0.30, ..., 1.0
+      s_fac[k]        = min(4, s_rate · s_fac[k+1])   for k ∈ [9, km-10]
+      s_fac[1..8]     = 1.6, 1.5, 1.4, 1.3, 1.2, 1.15, 1.1, 1.05
+                        (top, applied to s_fac[k+1])
+
+      dz0 = ztop / Σ s_fac
+      dz[k] = s_fac[k] · dz0
+
+  Then iter-636 ``sm1_edge_fv3`` applied with ntimes=2.
+
+  Requires km ≥ 18 (top + bottom blocks: 8 + 10).  ``s_rate``
+  FV3 documented range [1.0, 1.1]; default 1.06.
+
+  Lives in ``legoesm.grids.vertical``.  Reuses iter-636
+  ``sm1_edge_fv3``.
+
+  Tests (6/6 in 1 s):
+  1. Output shape (km,).
+  2. All dz > 0.
+  3. Total ≈ ztop (sm1_edge flux-form invariant).
+  4. No NaN/Inf.
+  5. km < 18 raises ValueError.
+  6. Top layer > bottom layer (FV3 stretch pattern).
+
+  Wired into iter-383 sweep (now 209).
 - Iter 638: **FV3 ``compute_dz_L32``**.  Faithful JAX port of
   FV3 ``compute_dz_L32`` (tools/fv_eta.F90:2000-2067).  Builds
   FV3-canonical 32-layer vertical with ztop ≈ 60 km.
