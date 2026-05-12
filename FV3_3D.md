@@ -1185,6 +1185,20 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 563: **``heat_source_del2_coeff`` sweep**.  iter-562
+  showed iters helps monotonically.  Sweep coeff at iters=2
+  @ C16 SBR, 10 steps:
+  - coeff=0.05: edge_std=4.12e-2 (under-damped)
+  - coeff=0.10: edge_std=2.67e-2
+  - **coeff=0.20: edge_std=1.40e-2 (OPTIMAL, FV3 default)**
+  - coeff=0.40: edge_std=6.03e-2 (over-damped)
+  - coeff=0.80: edge_std=5.01e-1 (unstable)
+  U-shaped response — the FV3 default 0.20 is calibrated
+  correctly.  Higher coeff causes over-damping → spurious
+  oscillations.  Lower coeff under-damps.  Confirms FV3
+  wisdom.  Combined best from iter-562/563: iters=8 + coeff=
+  0.20 → expected ~6.9e-3 (iter-562 measurement).  1/1 in
+  111 s.  Wired into iter-383 sweep (now 144).
 - Iter 562: **``heat_source_del2_iters`` sweep**.  iter-561
   found this is the dominant smooth-IC knob.  Sweep iters
   ∈ {0, 1, 2, 4, 8} on min-edge + C16 SBR + 10 steps:
