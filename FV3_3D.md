@@ -5272,6 +5272,60 @@ environment discrimination because the multiplicative structure
 demands all three ingredients (instability + helicity + shear).
 Pure JAX, vmap-compatible.  No new physical constants introduced.
 
+## Iter 816 — significant_tornado_parameter_fv3 (Thompson STP)
+
+Added `significant_tornado_parameter_fv3(cape, srh_1km,
+u_shear_6km, v_shear_6km, lcl_height, bwd_cap=30.0)` to
+`grids/cubed_sphere.py`.  Thompson (2003) fixed-layer STP:
+
+```
+STP = (CAPE / 1500)
+      · (SRH_1km / 150)
+      · (BWD_6km / 12)
+      · max(0, min(1, (2000 − LCL) / 1000))
+```
+
+Composite environment discriminator for **significant** tornadoes
+(EF2+).  Refines iter-815 SCP toward strong/violent tornado
+discrimination via:
+  * Lower LCL height (wider tornadoes, less rear-flank evaporation)
+  * 0-1 km SRH (low-level rotation, not 0-3 km)
+  * 0-6 km BWD with /12 (more shear-sensitive than SCP's /20)
+
+LCL term clamping:
+  * LCL > 2000 m → 0 (LCL too high for significant tornadoes)
+  * LCL < 1000 m → 1 (saturated low-LCL response)
+  * Linear between 1000 and 2000 m
+
+Operational thresholds:
+  * STP < 1   — significant-tornado-unfavorable
+  * 1 ≤ STP < 3 — moderate
+  * STP ≥ 3   — high
+  * STP ≥ 8   — extreme (violent / outbreak)
+
+Composes iter-808 (CAPE) + iter-7755-area helicity (SRH_1km)
++ iter-765 (LCL height).
+
+Used by SPC Mesoanalysis STP product, ensemble tornado-threat
+probabilistic forecasts, Thompson-Edwards 2000 climatology.
+
+Test: `tests/test_fv3_stp_iter816.py` (6 tests: classic tornadic
+(CAPE=3000, SRH=200, BWD=24, LCL=800) → STP=5.33, LCL>2000 → 0,
+LCL<1000 saturates, CAPE=0 → 0, BWD-cap at 30 m/s (BWD=50 →
+factor 2.5), 3-D shapes + finite + non-negative).
+
+### Why this iteration was meaningful
+
+Closes the **SPC tornado-environment composite stack**: SCP
+(iter-815) for all supercells + STP (iter-816) for EF2+
+significant tornadoes.  STP additionally exploits the LCL-height
+ingredient (iter-765 z_LCL) — low-LCL environments favor wider
+tornadoes that resist rear-flank-downdraft suppression.  Together
+with the index kit (CAPE/CIN/LI/K/TT/SWEAT) and storm-mode
+discrimination (BRN), the full operational severe-weather
+composite-index suite is complete.  Pure JAX, vmap-compatible.
+No new physical constants introduced.
+
 
 
 

@@ -5960,6 +5960,81 @@ def supercell_composite_fv3(
     return (cape / 1000.0) * (srh_3km / 100.0) * (bwd_capped / 20.0)
 
 
+def significant_tornado_parameter_fv3(
+    cape: jax.Array,
+    srh_1km: jax.Array,
+    u_shear_6km: jax.Array,
+    v_shear_6km: jax.Array,
+    lcl_height: jax.Array,
+    bwd_cap: float = 30.0,
+) -> jax.Array:
+    """FV3_3D iter 816: Thompson Significant Tornado Parameter.
+
+    Fixed-layer STP (Thompson et al. 2003):
+
+        STP = (CAPE / 1500)
+            · (SRH_1km / 150)
+            · (BWD_6km / 12)
+            · max(0, min(1, (2000 − LCL_height) / 1000))
+
+    Composite environment discriminator for **significant**
+    tornadoes (EF2+).  Distinct from iter-815 SCP (which targets
+    all supercells); STP refines toward strong/violent tornado
+    discrimination via:
+      * Lower LCL height (→ wider tornadoes, less rear-flank
+        evaporative damping)
+      * 0-1 km SRH (low-level rotation, not 0-3 km)
+      * 0-6 km BWD with /12 (more shear-sensitive than SCP's /20)
+
+    LCL term clamping:
+      * LCL > 2000 m → term = 0    (LCL too high for significant)
+      * LCL < 1000 m → term = 1    (LCL low enough; saturated)
+      * 1000 ≤ LCL ≤ 2000 m → linear
+
+    BWD capped at ``bwd_cap`` = 30 m/s.
+
+    Operational thresholds:
+      * STP < 1   — significant-tornado-unfavorable
+      * 1 ≤ STP < 3 — moderate significant-tornado risk
+      * STP ≥ 3   — high significant-tornado risk
+      * STP ≥ 8   — extreme (violent tornado / outbreak)
+
+    Used by: SPC Mesoanalysis STP product, ensemble tornado-
+    threat probabilistic forecasts, Thompson-Edwards 2000
+    tornado-environment climatology.
+
+    Composes iter-808 (CAPE) + iter-7755-area helicity (SRH_1km)
+    + iter-765 (LCL height z_LCL).
+
+    Parameters
+    ----------
+    cape : jax.Array
+        Most-unstable CAPE (J/kg).
+    srh_1km : jax.Array
+        0-1 km storm-relative helicity (m²/s²).
+    u_shear_6km, v_shear_6km : jax.Array
+        0-6 km bulk-shear vector components (m/s).
+    lcl_height : jax.Array
+        Lifting condensation level height (m, AGL).
+    bwd_cap : float
+        Maximum BWD magnitude (m/s); default 30.
+
+    Returns
+    -------
+    stp : jax.Array
+        Significant Tornado Parameter (dimensionless).
+    """
+    bwd = jnp.sqrt(u_shear_6km * u_shear_6km + v_shear_6km * v_shear_6km)
+    bwd_capped = jnp.minimum(bwd, bwd_cap)
+    lcl_term = jnp.clip((2000.0 - lcl_height) / 1000.0, 0.0, 1.0)
+    return (
+        (cape / 1500.0)
+        * (srh_1km / 150.0)
+        * (bwd_capped / 12.0)
+        * lcl_term
+    )
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,
