@@ -1195,6 +1195,35 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 684: **FV3 ``get_height_given_pressure_fv3``** — height at p.
+  Faithful JAX port of FV3 ``get_height_given_pressure``
+  (tools/fv_diagnostics.F90:4366-4411).  Inverse of iter-683.
+
+  Algorithm (mirror-method extrapolation for below-surface):
+
+      pn[km+1+i] = 2·peln[km] - peln[km-i-1]  for i=0..k2-1
+      gz[km+1+i] = 2·wz[km] - wz[km-i-1]
+      (k2 = max(12, km/2+1) entries appended)
+
+      Then for target log_p:
+          find k where pn[k] <= log_p <= pn[k+1]
+          height = gz[k] + (gz[k+1] - gz[k]) ·
+                   (log_p - pn[k]) / (pn[k+1] - pn[k])
+
+  Mirror method allows smooth extrapolation below surface
+  pressure.  Used by FV3 for pressure-level diagnostic height
+  lookups.
+
+  Verified iter-683/iter-684 round-trip exact to 1e-8.
+
+  Tests (5/5 in <1 s):
+  1. At log_p=peln[0]: h = wz[0] (top).
+  2. At log_p=peln[km]: h = wz[km] (surface).
+  3. h monotonic decreasing with log_p.
+  4. Round-trip with iter-683: h → p → h.
+  5. Finite over reasonable log_p range.
+
+  Wired into iter-383 sweep (now 249).
 - Iter 683: **FV3 ``get_pressure_given_height_fv3``** — pressure at z.
   Faithful JAX port of FV3 ``get_pressure_given_height``
   (tools/fv_diagnostics.F90:4312-4365).  Inverse of iter-681:

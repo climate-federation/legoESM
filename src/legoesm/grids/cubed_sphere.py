@@ -2644,6 +2644,80 @@ def get_staggered_grid_fv3(
     return pt_c_lon, pt_c_lat, pt_d_lon, pt_d_lat
 
 
+def get_height_given_pressure_fv3(
+    wz: jax.Array, peln: jax.Array,
+    log_p: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 684: height at given log-pressure (inverse of iter-683).
+
+    Faithful JAX port of FV3 ``get_height_given_pressure``
+    (tools/fv_diagnostics.F90:4366-4411), mirror-method
+    extrapolation for below-surface pressures.
+
+    Algorithm:
+        Extend (pn, gz) below surface via mirror reflection:
+            pn[km+1+i] = 2·pn[km] - pn[km-i]    for i = 0..k2
+            gz[km+1+i] = 2·gz[km] - gz[km-i]
+        where k2 = max(12, km/2+1).  This effectively reflects
+        the atmospheric column about the surface for smooth
+        extrapolation.
+
+        For each target log_p:
+            find k where pn[k] <= log_p <= pn[k+1]
+            height = gz[k] + (gz[k+1] - gz[k]) ·
+                     (log_p - pn[k]) / (pn[k+1] - pn[k])
+
+    Used by FV3 for pressure-level diagnostic height lookups.
+
+    Parameters
+    ----------
+    wz : jax.Array, shape (..., km+1)
+        Layer interface heights (top-down: wz[0]=top, wz[km]=surface).
+    peln : jax.Array, shape (..., km+1)
+        Log-pressure at layer interfaces.
+    log_p : jax.Array, shape (...,)
+        Target log-pressure value(s).
+
+    Returns
+    -------
+    height : jax.Array, shape (...,)
+        Heights at log_p (m).
+    """
+    km = wz.shape[-1] - 1
+    k2 = max(12, km // 2 + 1)
+    n_total = km + 1 + k2          # length of extended pn, gz
+    # Build extended pn, gz via mirror reflection
+    # FV3: gz[km+1+i] = 2·gz[km] - gz[km-i]  for i=0..k2-1 (Python indexing)
+    # First, the original arrays go to index km (inclusive) = wz.shape[-1] - 1
+    # Then we append k2 more entries.
+    # km is the surface index (0-indexed); mirror entries:
+    # gz_extended[km+i+1] = 2·wz[km] - wz[km-i-1] for i=0..k2-1
+    # FV3 1-indexed: gz[k] = 2·gz[km+1] - gz[l] where l = 2·(km+1) - k.
+    # k_ext = km+i+1 (0-indexed) → l_0indexed = km - i - 1.
+    # Build via jnp.flip on wz[..., :-1], take first k2.
+    mirror_gz = 2.0 * wz[..., -1:] - jnp.flip(
+        wz[..., :-1], axis=-1,
+    )[..., :k2]
+    mirror_pn = 2.0 * peln[..., -1:] - jnp.flip(
+        peln[..., :-1], axis=-1,
+    )[..., :k2]
+    pn_ext = jnp.concatenate([peln, mirror_pn], axis=-1)
+    gz_ext = jnp.concatenate([wz, mirror_gz], axis=-1)
+    # Find k where pn[k] <= log_p <= pn[k+1]
+    # pn_ext is monotonically increasing (peln increases top-down, mirror continues).
+    leq_count = jnp.sum(
+        (pn_ext[..., :-1] <= log_p[..., None]).astype(jnp.int32), axis=-1,
+    )
+    k_idx = jnp.clip(leq_count - 1, 0, n_total - 2)
+    pn_k = jnp.take_along_axis(pn_ext, k_idx[..., None], axis=-1).squeeze(-1)
+    pn_kp1 = jnp.take_along_axis(pn_ext, (k_idx + 1)[..., None], axis=-1).squeeze(-1)
+    gz_k = jnp.take_along_axis(gz_ext, k_idx[..., None], axis=-1).squeeze(-1)
+    gz_kp1 = jnp.take_along_axis(gz_ext, (k_idx + 1)[..., None], axis=-1).squeeze(-1)
+    denom = pn_kp1 - pn_k
+    safe_denom = jnp.where(jnp.abs(denom) > 1e-30, denom, 1.0)
+    return gz_k + (gz_kp1 - gz_k) * (log_p - pn_k) / safe_denom
+
+
 def get_pressure_given_height_fv3(
     wz: jax.Array, peln: jax.Array,
     height: jax.Array, ts: jax.Array,
