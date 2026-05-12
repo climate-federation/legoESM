@@ -1081,6 +1081,32 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 513: **extend clip to ``pad_halo`` (3D) +
+  ``pad_halo_pair_h2``**.  Both gained ``monotone_clip`` +
+  ``monotone_clip_slack`` params; they pass through to
+  ``fill_corner_region`` (which already had clip via iter-501).
+  ``monotone_halo_clip_context`` extended to 10 sites total
+  (was 6): adds 3 ``pad_halo`` 3D import-sites
+  (operators_cdgrid, fv_tp_2d, fv3_sw_core) + 1
+  ``pad_halo_pair_h2`` site (fv_tp_2d).
+  Verification on iter-509 residual-growth test: **unchanged**
+  (1.129 → 1.634× still).  Conclusion: NH dycore residual
+  leaks through ``pad_halo_vector`` (3D) in fv3_sw_core
+  (lines 602, 1194, 1430), which does NOT yet support
+  ``monotone_clip``.  iter 514 plan: extend
+  ``pad_halo_vector`` (3D) signature + thread clip through
+  to the inner duogrid corner-fill, then re-test.  4/4 in
+  6 s.  Wired into iter-383 sweep (now 103).
+- Iter 512: **long-term slack sensitivity** sweep at 10 steps
+  (seed=512, C8):
+  - slack=0.0: 1.865×
+  - slack=0.5: 1.844× ← best
+  - slack=1.0: 1.903×
+  - slack=2.0: 2.260×
+  Strict slack=0 only 1% worse than slack=0.5; slack=0.5
+  default confirmed optimal long-term.  slack=2.0 over-relaxes
+  (24% degradation).  1/1 in 125 s.  Wired into iter-383 sweep
+  (now 102).
 - Iter 511: **clip benefit GROWS over time** — corrects
   iter-509 interpretation.  Compare no-clip vs clip at 1, 5,
   10 steps (seed=511, C8):

@@ -481,6 +481,8 @@ def pad_halo(
     halo: int = 1,
     interp_offsets: jax.Array | None = None,
     duogrid=None,
+    monotone_clip: bool = False,
+    monotone_clip_slack: float = 0.0,
 ) -> jax.Array:
     """Pad a scalar field with inter-face halo data.
 
@@ -617,7 +619,11 @@ def pad_halo(
     if duogrid is not None:
         from legoesm.grids.duogrid import cube_rmp_vectorized, fill_corner_region
         padded = cube_rmp_vectorized(padded, duogrid, halo)
-        padded = fill_corner_region(padded, duogrid, halo)
+        padded = fill_corner_region(
+            padded, duogrid, halo,
+            monotone_clip=monotone_clip,
+            monotone_clip_slack=monotone_clip_slack,
+        )
 
     return padded
 
@@ -627,6 +633,8 @@ def pad_halo_pair_h2(
     q2: jax.Array,
     interp_offsets: jax.Array | None = None,
     duogrid=None,
+    monotone_clip: bool = False,
+    monotone_clip_slack: float = 0.0,
 ) -> tuple[jax.Array, jax.Array]:
     """Halo=2 exchange a pair of independent ``(6, n, n)`` fields.
 
@@ -690,9 +698,13 @@ def pad_halo_pair_h2(
     # Local backend (or MPI-with-offsets — handled above): two
     # sequential pad_halo calls with identical arithmetic.
     q1_pad = pad_halo(q1, halo=2, interp_offsets=interp_offsets,
-                      duogrid=duogrid)
+                      duogrid=duogrid,
+                      monotone_clip=monotone_clip,
+                      monotone_clip_slack=monotone_clip_slack)
     q2_pad = pad_halo(q2, halo=2, interp_offsets=interp_offsets,
-                      duogrid=duogrid)
+                      duogrid=duogrid,
+                      monotone_clip=monotone_clip,
+                      monotone_clip_slack=monotone_clip_slack)
     return q1_pad, q2_pad
 
 
@@ -2596,6 +2608,16 @@ def monotone_halo_clip_context(slack: float = 0.5):
         "legoesm.core.operators_cdgrid.pad_halo_vector_4d",
         "legoesm.core.operators_3d.pad_halo_vector_4d",
     ]
+    pad_halo_3d_targets = [
+        # FV3_3D iter 513: pad_halo (3D) is used by pad_halo_pair_h2
+        # in fv_tp_2d transport, an unpatched leak in iter-505/512.
+        "legoesm.core.operators_cdgrid.pad_halo",
+        "legoesm.core.fv_tp_2d.pad_halo",
+        "legoesm.core.fv3_sw_core.pad_halo",
+    ]
+    pair_h2_targets = [
+        "legoesm.core.fv_tp_2d.pad_halo_pair_h2",
+    ]
 
     clipped_scalar = functools.partial(
         pad_halo_4d,
@@ -2604,6 +2626,16 @@ def monotone_halo_clip_context(slack: float = 0.5):
     )
     clipped_vector = functools.partial(
         pad_halo_vector_4d,
+        monotone_clip=True,
+        monotone_clip_slack=slack,
+    )
+    clipped_pad_halo_3d = functools.partial(
+        pad_halo,
+        monotone_clip=True,
+        monotone_clip_slack=slack,
+    )
+    clipped_pair_h2 = functools.partial(
+        pad_halo_pair_h2,
         monotone_clip=True,
         monotone_clip_slack=slack,
     )
@@ -2617,6 +2649,16 @@ def monotone_halo_clip_context(slack: float = 0.5):
     for tgt in vector_targets:
         try:
             stack.enter_context(patch(tgt, clipped_vector))
+        except (AttributeError, ModuleNotFoundError):
+            pass
+    for tgt in pad_halo_3d_targets:
+        try:
+            stack.enter_context(patch(tgt, clipped_pad_halo_3d))
+        except (AttributeError, ModuleNotFoundError):
+            pass
+    for tgt in pair_h2_targets:
+        try:
+            stack.enter_context(patch(tgt, clipped_pair_h2))
         except (AttributeError, ModuleNotFoundError):
             pass
     return stack
