@@ -387,6 +387,7 @@ _GUARD_MODULES = (
     "test_fv3_lapse_rate_tropopause_iter797",        # iter-797 add
     "test_fv3_cold_point_tropopause_iter798",        # iter-798 add
     "test_fv3_stratospheric_h2o_entry_iter799",      # iter-799 add
+    "test_fv3_relative_humidity_ice_iter800",        # iter-800 add
 )
 
 

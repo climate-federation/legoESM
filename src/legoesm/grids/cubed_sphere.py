@@ -5654,6 +5654,61 @@ def relative_humidity_fv3(
     return 100.0 * e / e_sat
 
 
+def relative_humidity_ice_fv3(
+    t: jax.Array,
+    p_pa: jax.Array,
+    q_sphum: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 800: relative humidity over ice surface.
+
+    Ratio of water-vapor mixing ratio to saturation mixing ratio
+    over **ice**:
+
+        RH_ice [%] = 100 · q / q_sat_ice(T, p)
+
+    where q_sat_ice is the canonical ``thermo.saturation_mixing_ratio_ice``
+    (Goff-Gratch / Murphy-Koop fit appropriate for T < 273.15 K).
+
+    Distinct from iter-768 ``relative_humidity_fv3`` which uses
+    the **liquid** saturation curve.  Below freezing, RH_liquid <
+    RH_ice (since e_sat_ice < e_sat_liquid at same T).  Cloud
+    schemes and mixed-phase microphysics need both; ice-
+    supersaturation (RH_ice > 100% but RH_liquid < 100%) is the
+    canonical pre-cloud cold-cloud regime.
+
+    Used by: cirrus / mixed-phase cloud-formation thresholds
+    (RH_ice > 100% triggers homogeneous nucleation), aircraft
+    contrail forecasting (Schmidt-Appleman criterion needs
+    RH_ice), upper-tropospheric H₂O diagnostics, polar
+    stratospheric cloud (PSC) onset (RH_ice > 100% at PSC
+    temperatures), satellite-IR moisture retrievals.
+
+    Composes canonical ``thermo.saturation_mixing_ratio_ice`` per
+    CLAUDE.md "use existing saturation curve" rule.
+
+    Parameters
+    ----------
+    t : jax.Array
+        Temperature (K).  ``saturation_mixing_ratio_ice`` is
+        valid below T_freeze; warm-temperature output is
+        formally extrapolative but caller can mask.
+    p_pa : jax.Array
+        Pressure (Pa).
+    q_sphum : jax.Array
+        Specific humidity (kg/kg).
+
+    Returns
+    -------
+    rh_ice : jax.Array
+        Relative humidity over ice (%, can exceed 100 for
+        supersaturated air).
+    """
+    from legoesm import thermo
+
+    q_sat_ice = thermo.saturation_mixing_ratio_ice(t, p_pa)
+    return 100.0 * q_sphum / q_sat_ice
+
+
 def lcl_temperature_fv3(
     pt: jax.Array,
     p_mb: jax.Array,

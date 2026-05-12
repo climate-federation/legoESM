@@ -1195,6 +1195,52 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- **Iters 791-799 (compacted iter 800)**: QG balance kit +
+  baroclinic-instability + PV diagnostics + tropopause-detection
+  triplet + cold-trap H₂O entry + iter-800 RH over ice.
+
+  | Iter | What                                              | Note                                                                |
+  |------|---------------------------------------------------|---------------------------------------------------------------------|
+  | 791  | ``ageostrophic_wind_fv3``                         | V_a = V − V_g; jet-streak / Q-vector / isallobaric closure          |
+  | 792  | ``thermal_wind_fv3``                              | ∂V_g/∂z = (g/(f·T̄))·(k̂×∇T); mid-lat baroclinic jet structure       |
+  | 793  | ``eady_growth_rate_fv3``                          | σ = 0.31·|f|·|∂V_g/∂z|/N; cyclogenesis τ ≈ 1.2 days at mid-lat      |
+  | 794  | ``absolute_vorticity_fv3``                        | η = ζ + f; foundation of Ertel PV theorem                           |
+  | 795  | ``potential_vorticity_ertel_fv3``                 | PV = η·∂θ/∂z/ρ; THE central diagnostic (HMR-1985 PV-thinking)        |
+  | 796  | ``dynamic_tropopause_fv3``                        | argmin{ |PV(k)| > 2 PVU }; HMR-1985 PV-based tropopause             |
+  | 797  | ``lapse_rate_tropopause_fv3``                     | argmin{ dT/dz > −2 K/km }; WMO-1957 thermal tropopause              |
+  | 798  | ``cold_point_tropopause_fv3``                     | argmin_k T(k); tropical CPT for Brewer-Dobson H₂O cold trap         |
+  | 799  | ``stratospheric_h2o_entry_fv3``                   | q_sat(T_CPT, p_CPT); ~3 ppmv tropical stratospheric entry           |
+  | 800  | ``relative_humidity_ice_fv3`` + this compaction   | RH over ice (q/q_sat_ice·100); cirrus + contrail + PSC diagnostics  |
+
+  **QG-balance triplet complete** (V_g, V_a, ∂V_g/∂z):
+    * iter-790 V_g           — geostrophic wind from ∇Φ
+    * iter-791 V_a           — ageostrophic = V − V_g
+    * iter-792 ∂V_g/∂z       — thermal wind from ∇T
+
+  **Baroclinic-instability chain complete** (N, f, ∂V_g/∂z, σ):
+    * iter-772 N             — Brunt-Väisälä
+    * iter-778 f             — Coriolis
+    * iter-792 ∂V_g/∂z       — thermal wind
+    * iter-793 σ_Eady        — closed-form cyclogenesis rate
+
+  **PV-thinking chain complete** (η, PV, z_DT):
+    * iter-794 η = ζ + f     — absolute vorticity
+    * iter-795 PV = η·∂θ/∂z/ρ — Ertel PV
+    * iter-796 z_DT          — dynamic tropopause
+
+  **Tropopause-detection triplet** (DT, LRT, CPT):
+    * iter-796 z_DT          — PV-based (HMR-1985)
+    * iter-797 z_LRT         — WMO-1957 lapse rate
+    * iter-798 z_CPT         — cold point (tropical convention)
+
+  **Cold-trap H₂O pipeline complete**:
+    * iter-715 q_sat curve   — saturation
+    * iter-798 (z_CPT,T_CPT) — cold point
+    * iter-799 q_strat       — stratospheric entry mixing ratio
+    * iter-800 RH_ice        — alternative supersaturation diagnostic
+
+  Wired into iter-383 sweep: 354 → 364 modules.
+
 - **Iters 781-789 (compacted iter 790)**: rotation-stratification
   length-scale hierarchy + dimensional-analysis closure triplet +
   Ekman-spinup pair + iter-790 geostrophic wind.
@@ -4978,417 +5024,6 @@ is verifiable with unit tests in seconds rather than wall-time
 sweeps.  Users running the NH compressible-Euler 3D path now have
 the same cube-imprint defense as users running the PE 3D path.
 
-## Iter 791 — ageostrophic_wind_fv3 (V_a = V − V_g)
-
-Added `ageostrophic_wind_fv3(u, v, u_g, v_g)` to
-`grids/cubed_sphere.py`.  Decomposes total wind into geostrophic
-and ageostrophic components:
-
-```
-u_a = u − u_g,   v_a = v − v_g
-```
-
-Ageostrophic flow carries the entire dynamical signature of
-departures from geostrophic balance: jet-streak entrance/exit
-quadrant divergence, frontogenetic secondary circulations,
-isallobaric wind (∂p/∂t driven), gravity-wave emission, inertial
-oscillations.
-
-For QG flow Ro ≪ 1 (iter-786), V_a is O(Ro)·V_g; for semi-
-geostrophic (Ro ~ 1) V_a becomes comparable to V_g.
-
-Used by: jet-streak quadrant analysis (left-entrance / right-exit
-= divergence aloft → surface lows), Q-vector frontogenesis
-diagnostics, isallobaric-wind plots, gravity-wave source
-identification (V_a · ∇V_g term in TKE budget), Rossby-wave non-
-linear cascade decomposition.
-
-Composes iter-790 ``geostrophic_wind_fv3``.
-
-Test: `tests/test_fv3_ageostrophic_wind_iter791.py` (5 tests:
-V=V_g → V_a=0, simple subtraction, decomposition identity
-V_g + V_a = V exactly over 20 random pairs, full iter-790 chain
-(V, ∇Φ, f) → V_g → V_a, 3-D shapes + finite + both components).
-
-### Why this iteration was meaningful
-
-Closes the geostrophic decomposition (V_g, V_a) pair with
-iter-790.  Ageostrophic wind is the dynamical workhorse of
-mid-latitude weather: every cyclogenesis textbook chapter
-(Holton, Bluestein, Carlson) parses V_a quadrants for jet-streak
-divergence patterns; every frontogenesis derivation uses Q =
-(∂V_a/∂x, ∂V_a/∂y) Q-vectors.  Pure JAX, vmap-compatible.  No
-new physical constants introduced.
-
-## Iter 792 — thermal_wind_fv3 (∂V_g/∂z from ∇T)
-
-Added `thermal_wind_fv3(dT_dx, dT_dy, f, T_mean, f_floor=1e-12)`
-to `grids/cubed_sphere.py`.  Vertical shear of geostrophic wind
-from horizontal temperature gradient in z-coordinates:
-
-```
-∂u_g/∂z = − (g / (f·T̄)) · ∂T/∂y
-∂v_g/∂z = + (g / (f·T̄)) · ∂T/∂x
-```
-
-Equivalent vector form: ∂V_g/∂z = (g/(f·T̄)) · (k̂ × ∇T).
-
-Physical interpretation: NH cold pole (∂T/∂y < 0) → westerly jet
-aloft (∂u_g/∂z > 0) — the classical baroclinic mid-latitude jet
-mechanism.  SH mirrors.
-
-Used by: baroclinic jet-stream structure analysis, Eady
-baroclinic-instability eigenmodes, Stone-Held atmospheric energy
-cycle (V_T closes the cycle), thermal-wind balance check
-(diagnosed ∂V_g/∂z vs explicit shear), front-genesis Q-vector
-derivation.
-
-Composes iter-778 ``coriolis_parameter_fv3``.  Caller supplies
-horizontal T gradient on isobaric surface via existing grid
-operators and layer-mean ``T_mean``.  Sign-preserving ``f_floor``
-keeps equatorial output large-but-finite (TWB breaks down at
-equator).
-
-Test: `tests/test_fv3_thermal_wind_iter792.py` (7 tests: NH
-cold-pole → westerly aloft, SH mirror, ∇T=0 → 0 shear, zonal
-T gradient → meridional shear, iter-778 pipeline at 45°N gives
-mid-lat jet shear ~3.8 m/s/km, equator floored finite sign-
-preserved, 3-D shapes + finite both components).
-
-### Why this iteration was meaningful
-
-Thermal-wind balance is the diagnostic backbone of mid-latitude
-dynamics: it links horizontal temperature contrasts to vertical
-wind shear and explains the entire mid-latitude jet-stream
-structure.  Together with iter-790 V_g and iter-791 V_a, this
-closes the geostrophic-dynamics triplet (V_g, V_a, ∂V_g/∂z) —
-the QG-balance kit.  Pure JAX, vmap-compatible.  No new physical
-constants introduced.
-
-## Iter 793 — eady_growth_rate_fv3 (σ = 0.31·|f|·|∂V_g/∂z|/N)
-
-Added `eady_growth_rate_fv3(n_brunt, f, du_g_dz, dv_g_dz=None,
-N_floor=1e-6)` to `grids/cubed_sphere.py`.  Closed-form Eady
-(1949) maximum baroclinic-instability growth rate:
-
-```
-σ_Eady = 0.31 · |f| · |∂V_g/∂z| / N
-```
-
-The 0.31 prefactor is the Eady eigenvalue 0.3098 (≈ half the
-Charney-Stern PV growth-rate envelope).  Cyclogenesis e-folding
-timescale τ_Eady = 1/σ.
-
-Typical mid-lat (N=0.01, |f|=1e-4, |∂V_g/∂z|=3·10⁻³ s⁻¹):
-σ ≈ 9.3·10⁻⁶ s⁻¹ → τ ≈ 1.24 days (textbook cyclogenesis
-timescale).
-
-Used by: baroclinic-storm-track climatology (Hoskins-Valdes 1990),
-cyclogenesis-frequency parameterizations, atmospheric blocking-
-favoring high-σ band detection, NAO/AO regime selection (high σ
-→ strong eddy-driven jet variability).
-
-``N_floor`` clamp prevents div-by-0 in unstratified neutral
-columns where Eady mode formally breaks down.
-
-Optional ``dv_g_dz`` enables 2-D shear magnitude
-|∂V_g/∂z| = √((∂u/∂z)² + (∂v/∂z)²).
-
-Composes iter-772 N + iter-778 f + iter-792 ∂V_g/∂z.
-
-Test: `tests/test_fv3_eady_growth_rate_iter793.py` (7 tests:
-mid-lat textbook σ ≈ 9.3·10⁻⁶ (τ ≈ 1.2 days), zero shear → σ=0,
-monotone in |f|/shear/N, 2-D shear magnitude with dv_g_dz arg,
-N=0 floored finite, full iter-792 pipeline (cold pole → σ),
-3-D shapes + finite + non-negative).
-
-### Why this iteration was meaningful
-
-Closes the baroclinic-instability diagnostic chain: iter-772 N
-+ iter-778 f + iter-792 ∂V_g/∂z + iter-793 σ_Eady give the full
-"will this column generate cyclones, and on what timescale"
-forecast.  Eady σ is the canonical storm-track index; the entire
-mid-latitude weather variability literature reduces to where σ
-is large.  Pure JAX, vmap-compatible.  No new physical constants
-introduced (0.31 is the Eady-1949 eigenvalue, not a generic
-physical constant).
-
-## Iter 794 — absolute_vorticity_fv3 (η = ζ + f)
-
-Added `absolute_vorticity_fv3(zeta_rel, f)` to
-`grids/cubed_sphere.py`.  Sum of relative and planetary
-vorticity:
-
-```
-η = ζ_rel + f
-```
-
-Foundation of: Ertel PV theorem (η/ρ conserved on isentropes),
-Rossby-wave dispersion, geostrophic adjustment theory, vortex-
-column stretching (η/h conserved on a Lagrangian column).
-
-For mid-latitude synoptic flow ζ ~ O(1e-5 to 1e-4 s⁻¹), same
-order as f, so η can change sign locally — strong anticyclones
-and tropical-cyclone eyewalls flip the sign of η.
-
-Composes iter-778 ``coriolis_parameter_fv3``.
-
-Test: `tests/test_fv3_absolute_vorticity_iter794.py` (6 tests:
-ζ=0 → η=f, f=0 → η=ζ, ζ=−f cancellation → η=0, iter-778
-pipeline at 45°N, strong anticyclone sign-flip, 3-D shapes +
-finite).
-
-### Why this iteration was meaningful
-
-Absolute vorticity is the most-fundamental rotational diagnostic
-in atmospheric dynamics.  PV (Ertel) = η/h is conserved on
-isentropes — the entire PV-thinking framework (Hoskins-McIntyre-
-Robertson 1985) is built on η.  Geostrophic adjustment derives
-balanced height field from η.  Rossby-wave dispersion and zonal
-PV gradients (∂η/∂y = β + ∂ζ_g/∂y) determine wave propagation
-direction.  Pure JAX, vmap-compatible.  No new physical
-constants introduced.
-
-## Iter 795 — potential_vorticity_ertel_fv3 (PV = η·∂θ/∂z/ρ)
-
-Added `potential_vorticity_ertel_fv3(eta_abs, rho, dtheta_dz,
-rho_floor=1e-6)` to `grids/cubed_sphere.py`.  Ertel (1942) PV:
-
-```
-PV = η · ∂θ/∂z / ρ                    [m²·K·kg⁻¹·s⁻¹]
-```
-
-Standard unit PVU = 10⁻⁶ m²·K·kg⁻¹·s⁻¹.
-
-Conserved on isentropic surfaces under adiabatic, frictionless
-flow.
-
-Typical values:
-  * Mid-lat troposphere:        0.5–2 PVU
-  * Mid-lat lower stratosphere: 4–10 PVU
-  * Polar lower stratosphere:   > 10 PVU
-  * Dynamic tropopause:         2 PVU (HMR-1985 convention)
-
-Used by: stratosphere-troposphere exchange (PV > 2 PVU =
-stratospheric air; PV streamers, cutoffs, folds), jet-stream
-identification (local PV maxima aloft), atmospheric blocking
-(high-PV-anomaly aloft blocks Rossby trains), PV-inversion
-balanced-state diagnostics, ozone transport via PV-Φ-O₃
-correlation.
-
-Composes iter-794 ``absolute_vorticity_fv3`` directly.  Caller
-provides ρ (e.g., iter-734) and ∂θ/∂z (from θ-profile vertical
-diff, or recover from iter-772 via ∂θ/∂z = N²·θ/g).
-
-Test: `tests/test_fv3_potential_vorticity_ertel_iter795.py` (7
-tests: mid-lat trop 0.5 PVU, stratosphere 20 PVU, η=0 → PV=0,
-monotone in η/∂θ/∂z/ρ, full iter-794 pipeline (ζ, f, ρ, ∂θ/∂z)
-→ η → PV gives 0.55 PVU, ρ=0 floored finite, 3-D shapes +
-finite).
-
-### Why this iteration was meaningful
-
-Ertel PV is **the** central diagnostic in modern atmospheric
-dynamics.  Hoskins-McIntyre-Robertson (1985) showed the entire
-mid-latitude weather pattern is interpretable through PV maps:
-"PV-thinking" is the dominant framework for understanding
-extra-tropical cyclones, jet streams, blocking, and stratosphere-
-troposphere exchange.  Composes iter-794 → iter-795 to give the
-full η → PV chain.  Pure JAX, vmap-compatible.  No new physical
-constants introduced.
-
-## Iter 796 — dynamic_tropopause_fv3 (|PV| > 2 PVU threshold)
-
-Added `dynamic_tropopause_fv3(pv, z, pv_thresh=2e-6)` to
-`grids/cubed_sphere.py`.  Hoskins-McIntyre-Robertson (1985) PV-
-based tropopause:
-
-```
-z_dt = z[k*]   where k* = argmin{ k : |PV(k)| > pv_thresh }
-```
-
-Canonical ``pv_thresh = 2 PVU = 2·10⁻⁶ m²·K·kg⁻¹·s⁻¹``.  ``|PV|``
-captures both NH (PV > +2 PVU) and SH (PV < −2 PVU) stratosphere
-in a single threshold.
-
-Vertical axis last; ``z`` and ``pv`` surface → top oriented.
-Fallbacks:
-  * No crossing → return z at top of column.
-  * All |PV| > thresh → return surface.
-
-JAX-compatible threshold detection via ``jnp.argmax(above,
-axis=-1)`` + ``jnp.any`` + ``jnp.take_along_axis`` — fully
-vmap-compatible.  Matches the iter-775 PBL-height-from-Ri_b
-detection pattern.
-
-Composes iter-795 ``potential_vorticity_ertel_fv3``.
-
-Used by: stratosphere-troposphere exchange diagnostics
-(depression/lift of z_dt = STE event), upper-tropospheric jet
-diagnostics (z_dt slopes mark jet shoulders), reanalysis PV-θ
-tropopause climatology, ozone-budget tropopause crossings.
-
-Test: `tests/test_fv3_dynamic_tropopause_iter796.py` (7 tests:
-monotone PV crossing at level 3, no crossing → top, all-above →
-surface, SH negative PV → |PV| triggers correctly, custom
-threshold (2 vs 4 PVU pick different levels), full iter-795
-pipeline (η, ρ, ∂θ/∂z) → PV → z_dt, 3-D batched (n_x, n_y, km)
-→ (n_x, n_y) output shape).
-
-### Why this iteration was meaningful
-
-Closes the η → PV → z_dt diagnostic chain: iter-794 (η) +
-iter-795 (PV) + iter-796 (z_dt) give the canonical HMR-1985
-tropopause-detection pipeline.  Dynamic tropopause is the
-preferred reanalysis tropopause definition (vs lapse-rate or
-ozone-based) — it tracks STE events, jet-shoulder structure,
-and is dynamically self-consistent (PV is the conserved
-quantity).  Pure JAX, vmap-compatible.  No new physical
-constants introduced (2 PVU is the HMR-1985 convention).
-
-## Iter 797 — lapse_rate_tropopause_fv3 (WMO 1957)
-
-Added `lapse_rate_tropopause_fv3(t, z, dT_dz_thresh=-2e-3)` to
-`grids/cubed_sphere.py`.  WMO 1957 thermal tropopause: lowest
-level at which the temperature lapse rate falls to 2 K/km or
-less (i.e. ``dT/dz > −2·10⁻³`` K/m):
-
-```
-z_LRT = z_midpoint[k*]
-where k* = argmin{ k : dT/dz(k) > dT_dz_thresh }
-```
-
-Centered finite-difference lapse rate at layer midpoints; first-
-crossing detection returns the midpoint z between the bounding
-levels.
-
-Fallbacks: no crossing (deep lapse-rate column) → top midpoint;
-all above threshold (deep inversion) → bottom midpoint.
-
-Complements iter-796 ``dynamic_tropopause_fv3``:
-  * z_LRT (this iter) — preferred in radiosonde climatologies
-  * z_DT  (iter-796)  — preferred in upper-tropospheric jet
-                        diagnostics
-
-Both definitions appear in reanalysis (ERA5, MERRA2, JRA55);
-they differ by 1–3 km in mid-latitudes, with z_DT more sensitive
-to STE events and z_LRT more stable in clean radiosonde profiles.
-
-Note: full WMO definition requires the lapse rate to remain
-< 2 K/km for at least 2 km above the candidate level ("stability
-check").  This helper returns only the first crossing; caller
-may apply the 2-km filter externally.
-
-JAX-compatible threshold detection matches the iter-775 /
-iter-796 pattern.
-
-Test: `tests/test_fv3_lapse_rate_tropopause_iter797.py` (6 tests:
-ICAO standard atm → trop ≈ 11 km, no-inversion → top midpoint,
-deep inversion → bottom midpoint, custom threshold pick lower
-level, complementary-to-iter-796 cross-check, 3-D batched
-(n_x, n_y, km) → (n_x, n_y) shape).
-
-### Why this iteration was meaningful
-
-Closes the **tropopause-detection pair**: dynamic (PV-based,
-iter-796) + lapse-rate (T-based, iter-797).  Both definitions
-are needed for: (1) STE flux climatologies; (2) MERRA2/ERA5
-tropopause comparisons; (3) cross-tropopause ozone transport;
-(4) radiosonde-vs-reanalysis agreement diagnostics.  Pure JAX,
-vmap-compatible.  No new physical constants introduced (2 K/km
-is the WMO-1957 convention).
-
-## Iter 798 — cold_point_tropopause_fv3 (CPT)
-
-Added `cold_point_tropopause_fv3(t, z)` to
-`grids/cubed_sphere.py`.  Cold-point tropopause:
-
-```
-k_cpt = argmin_k T(k)
-z_cpt = z[k_cpt],   T_cpt = T[k_cpt]
-```
-
-Returns ``(z_cpt, T_cpt)`` tuple for callers that need both
-(e.g., saturation-mixing-ratio computation for H₂O stratospheric
-entry).
-
-Tropical-convention tropopause definition.  Sets the
-stratospheric water-vapor entry "cold trap" — the Brewer-Dobson
-circulation lifts air through z_cpt, freeze-drying it to T_cpt-
-saturation values (~3 ppmv at 190 K).
-
-Used by: tropical tropopause layer (TTL) diagnostics, Brewer-
-Dobson stratospheric water-vapor entry analysis, stratospheric
-ozone-recovery long-term trends (CPT cools under increased CO₂
-→ less H₂O in stratosphere → ozone-layer feedback), MJO / CPT
-coupled variability.
-
-Complements iter-796 (DT) and iter-797 (LRT).  In the tropics
-z_CPT > z_LRT > z_DT (often by 1–3 km); in mid-latitudes all
-three converge.
-
-Test: `tests/test_fv3_cold_point_tropopause_iter798.py` (6 tests:
-tropical profile cold point at 17 km / 195 K, monotone-decreasing
-T → top, monotone-increasing T → bottom, tuple return shape
-preserved, complementary-to-iter-797 (both in TTL 15-20 km),
-3-D batched (n_x, n_y, km) → (n_x, n_y) + finite + sensible
-ranges).
-
-### Why this iteration was meaningful
-
-Closes the **tropopause-detection triplet** (DT, LRT, CPT) —
-the three canonical reanalysis tropopause definitions.  CPT
-specifically is the tropical workhorse for stratospheric H₂O
-entry and ozone-recovery feedback diagnostics (Solomon et al.
-2010, Randel-Park 2019).  Pure JAX, vmap-compatible.  No new
-physical constants introduced.
-
-## Iter 799 — stratospheric_h2o_entry_fv3 (cold-trap H₂O entry)
-
-Added `stratospheric_h2o_entry_fv3(t_cpt, p_cpt)` to
-`grids/cubed_sphere.py`.  Saturation specific humidity at the
-cold-point tropopause:
-
-```
-q_v_strat = thermo.saturation_specific_humidity(T_CPT, p_CPT)
-ppmv      = q_v_strat / ε · 10⁶            (ε = R_d/R_v ≈ 0.622)
-```
-
-Returns ``(q_kgkg, q_ppmv)`` tuple — caller picks units.
-
-Sets the lower bound on stratospheric water vapor through the
-Brewer-Dobson "cold trap" mechanism: tropical tropospheric air
-is freeze-dried at the cold point before entering the
-stratosphere, so the stratospheric H₂O entry mixing ratio equals
-the saturation-mixing-ratio at the CPT.
-
-Tropical CPT (T=190 K, p=100 hPa) → ppmv O(1-10), bracketing the
-observed 3-4 ppmv stratospheric "background" from MLS/HALOE.
-
-Used by: Brewer-Dobson stratospheric H₂O budget, ozone-recovery
-feedback diagnostics (CPT cools under CO₂ increase → ppmv drops
-→ less HOₓ → ozone-layer change), CCM/CCMI evaluation against
-ACE-FTS / MLS, methane oxidation "lower-bound minus 2×CH₄"
-inversion for entry mixing ratio.
-
-Composes iter-798 (T_CPT) + canonical
-``thermo.saturation_specific_humidity`` per CLAUDE.md "use
-existing saturation curve" rule.
-
-Test: `tests/test_fv3_stratospheric_h2o_entry_iter799.py` (6
-tests: tropical CPT ppmv in physical range, warmer CPT → more
-H₂O (CC), lower pressure → more H₂O, full iter-798 pipeline,
-tuple shape preserved, 3-D finite + non-negative).
-
-### Why this iteration was meaningful
-
-Closes the **cold-trap H₂O pipeline** iter-715 (saturation) →
-iter-798 (CPT) → iter-799 (stratospheric entry).  The full
-Brewer-Dobson stratospheric water-vapor budget can now be
-computed from any FV3 temperature column in one composition
-chain.  Pure JAX, vmap-compatible.  Uses canonical
-``thermo.saturation_specific_humidity`` — no new saturation
-math.  No new physical constants introduced.
 
 
 
