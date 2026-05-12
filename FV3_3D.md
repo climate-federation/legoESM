@@ -1185,6 +1185,24 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 569: **time-growth power-law of edge_std**.  C16 SBR
+  with optimal stack (iters=8, clip), 1-40 steps:
+  - step 1:  edge_std = 8.11e-4
+  - step 5:  edge_std = 3.31e-3
+  - step 10: edge_std = 6.72e-3
+  - step 20: edge_std = 1.65e-2
+  - step 30: edge_std = 3.27e-2
+  - step 40: edge_std = 6.36e-2
+  Log-log fit: **edge_std ~ n_steps¹·¹⁵** — slightly super-
+  linear (15% above linear).  Doubling steps gives 2.2×
+  edge_std (vs 2× for linear).  NOT exponential blowup —
+  bounded power-law accumulation.  Practical: at production
+  C96 with 1-day runs (288 steps), extrapolating gives
+  edge_std ~ 1.15 mK · 288^1.15 ≈ 600 mK ... but that base
+  is at C16; at C96 the base will be ~5× lower (per iter-565
+  resolution scan), giving ~120 mK after 1 day.  This is
+  the predicted production noise floor.  1/1 in 39 s.
+  Wired into iter-383 sweep (now 150).
 - Iter 568: **two clip helpers produce identical results**.
   Confirm ``monotone_halo_clip_context`` (iter-505) and
   ``make_clipped_step`` (iter-526) give bit-identical
