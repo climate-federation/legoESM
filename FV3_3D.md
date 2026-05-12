@@ -1195,6 +1195,31 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 605: **``column_d_ext_field`` / ``column_mass_weighted_mean``
+  utilities** (FV3 d_ext external-mode damping support).
+  Faithful port of FV3 ``dyn_core.F90:1310-1326``:
+
+      if d_ext > 0:
+          d2_divg = d_ext · da_min_c
+          divg2[i,j] = d2_divg · Σ_k(ptc·vt) / Σ_k(ptc)
+
+  divg2 then feeds into ``one_grad_p`` to add a column-mean
+  divergence-damping term to the pressure-gradient force —
+  damping the external (barotropic) mode.
+  Two utilities in ``legoesm.diagnostics.column_integrals``:
+  - ``column_mass_weighted_mean(field, mass_per_cell)``: generic,
+    returns mass-weighted column mean.  Zero-mass safe.
+  - ``column_d_ext_field(vt, delp, d_ext, da_min_c)``: the
+    specific d_ext field.  Returns zeros if d_ext ≤ 0.
+  NOT yet wired into the NH dycore (one_grad_p plumbing is
+  complex); standalone utility makes the computation available
+  for users, tests, and future plumbing.
+  4 tests (4/4 in <1 s):
+  1. Constant field → mean = constant.
+  2. Zero mass → returns 0 safely.
+  3. d_ext=0 → returns 0.
+  4. Formula divg2 = d_ext·da_min_c·column_mean(vt) verified.
+  Wired into iter-383 sweep (now 178).
 - Iter 604: **PE AAM stack** (mirror NH iter 583/587/588).
   3 new functions in ``legoesm.diagnostics``:
   - ``aam_from_pe_state(state, grid, coord)``: cell-center
