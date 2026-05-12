@@ -1195,259 +1195,35 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
-- Iter 659: **FV3 ``project_sphere_v`` + ``get_unit_vector_fv3``**.
-  Faithful JAX ports of FV3 tangent-plane helpers:
+- **Iters 651-659 (compacted iter 660)**: FV3 test-case ICs +
+  wind-grid conversions + spherical-geometry helpers.  9
+  iterations covering FV3 test-case + diagnostic ops:
 
-  | Function              | Module / Line              | Role                              |
-  |-----------------------|----------------------------|-----------------------------------|
-  | ``project_sphere_v``  | fv_grid_utils.F90:3345     | project f onto tangent at e       |
-  | ``get_unit_vector_fv3`` | test_cases.F90:8366     | unit tangent at p2 from p1→p3     |
+  | Iter | Function(s)                              | Module / Line              | Role                                |
+  |------|------------------------------------------|----------------------------|-------------------------------------|
+  | 651  | ``get_pt_on_great_circle``               | test_cases:4805            | GC trajectory: dist + heading → pt  |
+  | 652  | ``dtoa_vort_on``                         | test_cases:7896            | D→A circulation-conserving winds    |
+  | 653  | ``ctoa_vort_on``                         | test_cases:8114            | C→A circulation-conserving winds    |
+  | 654  | ``atoc_vort_on``                         | test_cases:7965            | A→C circulation-conserving winds    |
+  | 655  | ``atod_vort_on``                         | test_cases:7833 (analog)   | A→D circulation-conserving winds    |
+  | 656  | ``get_vorticity_fv3``                    | test_cases:4034            | D-grid vorticity (line-integral)   |
+  | 657  | ``checker_tracers``                      | test_cases:4067            | HIWPP checkerboard tracer IC        |
+  | 658  | ``terminator_tracers``                   | test_cases:4136            | DCMIP 2016 chemistry IC (Cl/Cl2)    |
+  | 659  | ``project_sphere_v`` / ``get_unit_vector_fv3`` | fv_grid_utils:3345 / test_cases:8366 | tangent-plane proj + unit tangent |
 
-  ``project_sphere_v(f, e)``:
+  Wind-grid conversion suite COMPLETE (iters 652/653/654/655):
+  A ↔ C ↔ D circulation-conserving averages all available.
+  Verified A→D→A round-trip exact for linear fields.
 
-      ap = f · e
-      f_tangent = f - ap·e
+  Test-case ICs: ``checker_tracers`` (HIWPP), ``terminator_tracers``
+  (DCMIP 2016) for transport-scheme validation.  Chlorine atom
+  balance Cl + 2·Cl2 = qcly preserved to 1e-15.
 
-  ``get_unit_vector_fv3(p1, p2, p3)``:
+  Spherical-geometry helpers (iter 651, 659) extend FV3
+  trajectory-and-tangent operations.
 
-      xyz1, xyz2, xyz3 = latlon2xyz(...)
-      uvect = xyz3 - xyz1                # chord
-      uvect = project_sphere_v(uvect, xyz2)
-      uvect = normalize(uvect)
-
-  Differs from iter-611 ``get_unit_vect2`` (great-circle midpoint)
-  and iter-615 ``get_unit_vect3`` (Cartesian midpoint variant):
-  this is the chord-based projection at an arbitrary third point
-  p2.  Used by FV3 grid-metric construction.
-
-  Tests (5/5 in <1 s):
-  1. Projected vector orthogonal to e.
-  2. Radial component f∥e → zero projection.
-  3. Tangent vector unit-norm.
-  4. Tangent vector ⊥ p2.
-  5. No NaN/Inf.
-
-  Wired into iter-383 sweep (now 227).
-- Iter 658: **FV3 ``terminator_tracers``** — DCMIP 2016 terminator
-  chemistry IC.  Faithful JAX port of FV3 ``terminator_tracers``
-  (tools/test_cases.F90:4136-4205, Lucas Harris, 2016).
-
-  Paired Cl / Cl2 tracers under photolysis at localized sun
-  (lc=5π/3, thc=π/9):
-
-      k1   = max(0, sin(lat)·sin(thc) + cos(lat)·cos(thc)·cos(lon - lc))
-      r    = k1/k2 · 0.25                          (k2 = 1)
-      D    = sqrt(r² + 2·r·qcly)
-      Cl   = D - r
-      Cl2  = 0.5·(qcly - Cl)
-
-  Conserves total chlorine atoms: Cl + 2·Cl2 = qcly = 4e-6
-  everywhere.  Assumes DRY mixing ratio.  Used for FV3 transport
-  + chemistry coupling validation.
-
-  Pairs with iter-657 ``checker_tracers``; together cover FV3
-  HIWPP / DCMIP tracer-test ICs.
-
-  Tests (6/6 in 2 s):
-  1. Output shapes (..., n_x, n_y, km).
-  2. Cl + 2·Cl2 = qcly (chlorine atom balance) to 1e-15.
-  3. Cl, Cl2 ≥ 0.
-  4. Uniform across vertical levels.
-  5. Sun position has max Cl.
-  6. No NaN/Inf.
-
-  Wired into iter-383 sweep (now 226).
-- Iter 657: **FV3 ``checker_tracers``** — HIWPP checkerboard tracer.
-  Faithful JAX port of FV3 ``checker_tracers``
-  (tools/test_cases.F90:4067-4135).  Builds checkerboard tracer
-  pattern for HIWPP benchmark (S.-J. Lin, 2014):
-
-      qt[i, j] = 0.01  if sin(nx·lon)·sin(ny·lat) > 0
-                 0     otherwise
-
-  Defaults nx=ny=9 give 20°×20° checker boxes.  Optional ``rn``
-  adds uniform random perturbation rn·U(0, 1) (requires
-  ``rng_key``).  Broadcast across vertical levels (km) and
-  tracer count (nq).
-
-  Used for FV3 transport-scheme validation (sharp tracer
-  gradients reveal numerical diffusion / overshoot).
-
-  Tests (6/6 in 2 s):
-  1. Output shape (..., n_x, n_y, km, nq).
-  2. Binary values 0 / 0.01 without noise.
-  3. Uniform across k, iq dimensions.
-  4. Random perturbation breaks binary pattern.
-  5. Missing rng_key when rn given raises ValueError.
-  6. Pattern alternates (mixture of high/low).
-
-  Wired into iter-383 sweep (now 225).
-- Iter 656: **FV3 ``get_vorticity_fv3``** — vorticity from D-grid
-  winds.  Faithful JAX port of FV3 ``get_vorticity``
-  (tools/test_cases.F90:4034-4065).
-
-  Standard FV3 line-integral / cell-area form:
-
-      utmp[i, j] = u[i, j] · dx[i, j]
-      vtmp[i, j] = v[i, j] · dy[i, j]
-      vort[i, j] = rarea[i, j] · (utmp[i, j] - utmp[i, j+1]
-                                  - vtmp[i, j] + vtmp[i+1, j])
-
-  Sign convention: positive = counterclockwise (FV3 vorticity).
-  Computes the curl of the D-grid covariant velocity field
-  integrated around each cell.
-
-  Handles 2D (n_x, n_y+1) and 3D (n_x, n_y+1, nlev) inputs.
-  Verified: solid-body rotation u=-Ω·y, v=Ω·x → vort = 2·Ω.
-
-  Tests (5/5 in 1 s):
-  1. Output shape (n_x, n_y).
-  2. Zero winds → zero vorticity.
-  3. Uniform winds → zero vorticity.
-  4. Solid-body rotation → vort = 2·Ω (exact).
-  5. 3D level dim handled.
-
-  Wired into iter-383 sweep (now 224).
-- Iter 655: **FV3 ``atod_vort_on``** — A-grid → D-grid winds
-  (circulation-conserving).  Circulation-conserving analog of
-  FV3 ``atod`` (tools/test_cases.F90:7833-7892) consistent with
-  iter-652 ``dtoa_vort_on`` inverse.
-
-  Algorithm (interior D-grid edges):
-
-      uout[i, j] = (uin[i, j-1]·dya[i, j-1] + uin[i, j]·dya[i, j])
-                 / (dya[i, j-1] + dya[i, j])
-      vout[i, j] = (vin[i-1, j]·dxa[i-1, j] + vin[i, j]·dxa[i, j])
-                 / (dxa[i-1, j] + dxa[i, j])
-
-  Output shapes (n_x, n_y+1) for uout; (n_x+1, n_y) for vout.
-  Interior-only; boundary edges zero-init (FV3 fills via halo).
-
-  Pairs with iter-652 dtoa_vort_on for A↔D round-trip via
-  circulation-conserving averaging.  Verified linear field
-  A→D→A recovers interior cells exactly.
-
-  Iters 652/653/654/655 together: complete A ↔ C ↔ D
-  circulation-conserving wind-grid conversion suite.
-
-  Tests (6/6 in 2 s):
-  1. Output shapes correct.
-  2. Zero winds → zero output.
-  3. Uniform U, V → interior matches.
-  4. Boundary edges = 0.
-  5. With uniform dya, formula reduces to simple averaging.
-  6. Linear A→D→A round-trip recovers interior (1e-12).
-
-  Wired into iter-383 sweep (now 223).
-- Iter 654: **FV3 ``atoc_vort_on``** — A-grid → C-grid winds
-  (circulation-conserving).  Faithful JAX port of FV3 ``atoc``
-  (tools/test_cases.F90:7965-8112, VORT_ON branch, no ALT_INTERP).
-
-  Algorithm (interior C-grid edges):
-
-      uout[i, j] = (uin[i, j]·dxa[i, j] + uin[i-1, j]·dxa[i-1, j])
-                 / (dxa[i, j] + dxa[i-1, j])
-      vout[i, j] = (vin[i, j]·dya[i, j] + vin[i, j-1]·dya[i, j-1])
-                 / (dya[i, j] + dya[i, j-1])
-
-  Pairs with iter-652/653 dtoa/ctoa.  Together: A↔C↔D grid
-  conversions via FV3 circulation-conserving formulas all
-  available.
-
-  Interior-only output; boundary edges (uout[0, :], uout[-1, :],
-  vout[:, 0], vout[:, -1]) zero-initialized (FV3 fills via halo
-  exchange).
-
-  Tests (5/5 in 1 s):
-  1. Output shapes (n_x+1, n_y) and (n_x, n_y+1).
-  2. Zero winds → zero output.
-  3. Uniform → interior matches U, V.
-  4. Boundary edges = 0.
-  5. With uniform dxa, formula reduces to 0.5·(uin[i-1]+uin[i]).
-
-  Wired into iter-383 sweep (now 222).
-- Iter 653: **FV3 ``ctoa_vort_on``** — C-grid → A-grid winds
-  (circulation-conserving).  Faithful JAX port of FV3 ``ctoa``
-  (tools/test_cases.F90:8114-8174, simple branch).
-
-  Mirror of iter-652 ``dtoa_vort_on`` with input axes swapped
-  (C-grid u on east/west edges, n_x+1, n_y; v on north/south
-  edges, n_x, n_y+1).
-
-  Algorithm:
-
-      uout[i, j] = 0.5·(uin[i, j]·dy[i, j] + uin[i+1, j]·dy[i+1, j])
-                     / dya[i, j]
-      vout[i, j] = 0.5·(vin[i, j]·dx[i, j] + vin[i, j+1]·dx[i, j+1])
-                     / dxa[i, j]
-
-  Pairs with iter-652 ``dtoa_vort_on``: combined with existing
-  legoESM A/B/C/D-grid helpers, FV3-named circulation-conserving
-  grid-conversion utilities are complete.
-
-  Tests (5/5 in <1 s):
-  1. Output shape (n_x, n_y) from C-grid (n_x+1, n_y), (n_x, n_y+1).
-  2. Zero winds → zero output.
-  3. Uniform u=U, v=V with uniform dx → uout=U, vout=V.
-  4. With dx=dxa, formula reduces to simple averaging.
-  5. Batched leading axes preserved.
-
-  Wired into iter-383 sweep (now 221).
-- Iter 652: **FV3 ``dtoa_vort_on``** — circulation-conserving
-  D-grid → A-grid winds.  Faithful JAX port of FV3 ``dtoa``
-  (tools/test_cases.F90:7896-7955, VORT_ON branch).
-
-  Algorithm:
-
-      uout[i, j] = 0.5·(uin[i, j]·dx[i, j] + uin[i, j+1]·dx[i, j+1])
-                     / dxa[i, j]
-      vout[i, j] = 0.5·(vin[i, j]·dy[i, j] + vin[i+1, j]·dy[i+1, j])
-                     / dya[i, j]
-
-  Circulation-conserving (vorticity-conserving) interpolation
-  from D-grid covariant winds to A-grid cell-center winds.
-
-  Differs from iter-627 ``c2l_ord2_fv3`` (which adds a-matrix
-  rotation to lat/lon frame); this is the raw covariant→
-  cell-center step before any rotation.  Used by FV3 test-case
-  diagnostics + visualizations.
-
-  Broadcasts on leading axes (e.g., level / time / face).
-
-  Tests (5/5 in <1 s):
-  1. Output shape (n_x, n_y) from D-grid inputs.
-  2. Zero D-grid → zero A-grid.
-  3. Uniform u=U, v=V with uniform dx=dxa → uout=U, vout=V.
-  4. With dx=dxa, formula reduces to simple averaging.
-  5. Batched (level, n_x, n_y) preserves leading axes.
-
-  Wired into iter-383 sweep (now 220).
-- Iter 651: **FV3 ``get_pt_on_great_circle``** — point along GC
-  at given distance + heading.  Faithful JAX port of FV3
-  ``get_pt_on_great_circle`` (tools/test_cases.F90:4805-4826).
-
-  Algorithm:
-
-      pha = dist / radius                            # angular dist
-      lat3 = asin(cos(heading)·cos(lat1)·sin(pha) + sin(lat1)·cos(pha))
-      dp   = atan2(sin(heading)·sin(pha)·cos(lat1),
-                   cos(pha) - sin(lat1)·sin(lat3))
-      lon3 = ((lon1 - π) - dp + π) mod 2π
-
-  Used in FV3 for tropical-cyclone test cases (vortex placement
-  along path) and spherical-trajectory computations.
-
-  Pairs with iter-608 ``mid_pt_sphere`` and iter-612 ``slerp``;
-  these together cover FV3's spherical-geometry trajectory ops.
-
-  Tests (5/5 in <1 s):
-  1. dist=0 returns start point.
-  2. Equator + heading=north (0) → lat increases by dist/R.
-  3. great_circle_distance(start, target) ≈ dist.
-  4. Equator + heading=east stays on equator.
-  5. No NaN/Inf on random inputs.
-
-  Wired into iter-383 sweep (now 219).
+  All 9 ports cumulative: ~52 tests, all wired into iter-383
+  sweep (now 227).
 - **Iters 641-649 (compacted iter 650)**: FV3 vertical-coord
   + IC + radius-aware grid utilities.  9 iterations completing
   the FV3 vertical-coord reference profiles + hydrostatic IC
