@@ -1162,6 +1162,15 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 543: **dt sensitivity for the helper**.  ``make_clipped_step``
+  traces a new graph per dt.  Run to t_final=100 s with dt
+  ∈ {5, 10, 20} s, C8 + SBR:
+  - dt= 5 (20 steps): max|u|=30.97, max|θ′|=0.968
+  - dt=10 (10 steps): max|u|=30.78, max|θ′|=0.964
+  - dt=20 ( 5 steps): max|u|=30.52, max|θ′|=0.965
+  Consistency: max|u| varies <2%, max|θ′| <1% across 4×
+  dt range.  Helper robust to timestep choice (within CFL).
+  1/1 in 129 s.  Wired into iter-383 sweep (now 128).
 - Iter 541: **clip helper performance benchmark**.  Measure
   wall-clock ms/step for raw ``jax.jit(step)`` vs
   ``make_clipped_step`` at C8, 5-step average:
