@@ -1195,6 +1195,40 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 713: **FV3 ``moist_cv_fv3``** + nh_total_energy ``use_moist_cv``
+  upgrade.
+
+  Faithful JAX port of FV3 ``moist_cv`` (general nwat≥3 branch)
+  (model/fv_mapz.F90:3579-3654).  Layer-wise moisture-weighted
+  isochoric specific heat + total condensate:
+
+      cv_air = c_pd − R_d
+      cv_vap = c_pv − R_v
+      q_l    = (liq_wat or 0) + (rainwat or 0)
+      q_i    = (ice_wat or 0) + (snowwat or 0) + (graupel or 0)
+      q_d    = q_l + q_i
+      cvm    = (1 − q_sphum − q_d) · cv_air + q_sphum · cv_vap
+               + q_l · c_pw + q_i · c_pi
+
+  iter-693 ``nh_total_energy_fv3`` upgraded with ``use_moist_cv``
+  flag (default False keeps iter-693 dry-cv + L_v·q approximation;
+  True uses FV3-faithful moist_cv path).
+
+  Reuses legoesm constants: ``c_pd``, ``R_d``, ``c_pv``, ``R_v``,
+  ``c_pw``, ``c_pi`` (all pre-existing).
+
+  Tests (7/7 in <2 s):
+  1. All-zero tracers → cvm = cv_air.
+  2. q_sphum=1 → cvm = cv_vap.
+  3. Mixed vapor + liquid + ice → analytical cvm matches.
+  4. q_con = liq + rain + ice + snow + graupel exactly.
+  5. No tracers raises ValueError.
+  6. nh_total_energy use_moist_cv=True branch finite.
+  7. nh_total_energy default unchanged (iter-693 backward-compat).
+
+  iter-693 7/7 tests still pass (no regression).
+
+  Wired into iter-383 sweep (now 277).
 - Iter 712: **iter-691 ``pv_entropy_fv3`` PPME upgrade**.
 
   iter-691 used 2nd-order linear edge average for θ reconstruction.

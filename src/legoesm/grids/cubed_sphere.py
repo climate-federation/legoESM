@@ -2987,12 +2987,90 @@ def prt_mass_fv3(
     return diag
 
 
+def moist_cv_fv3(
+    q_sphum: jax.Array | None = None,
+    q_liq_wat: jax.Array | None = None,
+    q_rainwat: jax.Array | None = None,
+    q_ice_wat: jax.Array | None = None,
+    q_snowwat: jax.Array | None = None,
+    q_graupel: jax.Array | None = None,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 713: moisture-weighted isochoric specific heat.
+
+    Faithful JAX port of FV3 ``moist_cv`` (general nwat≥3 branch)
+    (model/fv_mapz.F90:3579-3654).
+
+    Returns layer-wise moisture-weighted ``cvm`` and total condensate
+    ``q_con = q_liquid + q_ice``:
+
+        cv_air = c_pd − R_d
+        cv_vap = c_pv − R_v
+        q_l = (liq_wat or 0) + (rainwat or 0)
+        q_i = (ice_wat or 0) + (snowwat or 0) + (graupel or 0)
+        q_d = q_l + q_i                        (total condensate)
+        cvm = (1 − q_sphum − q_d) · cv_air
+              + q_sphum · cv_vap
+              + q_l · c_pw
+              + q_i · c_pi
+
+    All inputs are optional; missing components default to zero.
+    Uses legoesm constants: ``c_pd``, ``R_d``, ``c_pv``, ``R_v``,
+    ``c_pw``, ``c_pi``.
+
+    Parameters
+    ----------
+    q_sphum, q_liq_wat, q_rainwat, q_ice_wat, q_snowwat, q_graupel :
+        Mixing ratios (kg/kg).  Any subset can be provided.
+
+    Returns
+    -------
+    cvm : jax.Array
+        Moisture-weighted isochoric specific heat (J/(kg·K)).
+    q_con : jax.Array
+        Total condensate mass fraction (kg/kg).
+    """
+    cv_air = constants.c_pd - constants.R_d
+    cv_vap = constants.c_pv - constants.R_v
+    # Reference shape from any non-None input
+    qs = next(
+        (q for q in (q_sphum, q_liq_wat, q_rainwat, q_ice_wat, q_snowwat,
+                     q_graupel) if q is not None),
+        None,
+    )
+    if qs is None:
+        raise ValueError("moist_cv_fv3 requires at least one tracer input")
+    zero = jnp.zeros_like(qs)
+
+    qv = jnp.maximum(0.0, q_sphum if q_sphum is not None else zero)
+    ql = (q_liq_wat if q_liq_wat is not None else zero) + (
+        q_rainwat if q_rainwat is not None else zero
+    )
+    qi = (q_ice_wat if q_ice_wat is not None else zero) + (
+        q_snowwat if q_snowwat is not None else zero
+    ) + (q_graupel if q_graupel is not None else zero)
+    q_con = ql + qi
+
+    cvm = (
+        (1.0 - qv - q_con) * cv_air
+        + qv * cv_vap
+        + ql * constants.c_pw
+        + qi * constants.c_pi
+    )
+    return cvm, q_con
+
+
 def nh_total_energy_fv3(
     ua: jax.Array, va: jax.Array, w: jax.Array,
     pt: jax.Array, delp: jax.Array, delz: jax.Array,
     hs: jax.Array,
     q_sphum: jax.Array | None = None,
     moist_phys: bool = False,
+    use_moist_cv: bool = False,
+    q_liq_wat: jax.Array | None = None,
+    q_rainwat: jax.Array | None = None,
+    q_ice_wat: jax.Array | None = None,
+    q_snowwat: jax.Array | None = None,
+    q_graupel: jax.Array | None = None,
 ) -> jax.Array:
     """FV3_3D iter 693: vertically-integrated total energy per column.
 
@@ -3056,7 +3134,17 @@ def nh_total_energy_fv3(
     if moist_phys:
         if q_sphum is None:
             raise ValueError("moist_phys=True requires q_sphum")
-        layer = cv * pt + constants.L_v * q_sphum + phi_avg + ke
+        if use_moist_cv:
+            # iter-713: FV3-faithful moisture-weighted cv via moist_cv
+            cvm, q_con = moist_cv_fv3(
+                q_sphum=q_sphum,
+                q_liq_wat=q_liq_wat, q_rainwat=q_rainwat,
+                q_ice_wat=q_ice_wat, q_snowwat=q_snowwat,
+                q_graupel=q_graupel,
+            )
+            layer = cvm * pt + constants.L_v * q_sphum + phi_avg + ke
+        else:
+            layer = cv * pt + constants.L_v * q_sphum + phi_avg + ke
     else:
         layer = cv * pt + phi_avg + ke
     te = jnp.sum(delp * layer, axis=-1) / g
