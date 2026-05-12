@@ -998,6 +998,21 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 492: end-to-end test of iter-490 ``monotone_clip`` in
+  NH dycore via monkey-patch of ``_pad_halo_4d_module``:
+    no clip:   edge ratio 3.470×
+    with clip: edge ratio 3.423× (-1.4%)
+  Disappointing — only 1.4% reduction.  Diagnosis: the NH
+  dycore has MANY halo entry points beyond
+  ``_pad_halo_4d_module`` (e.g., ``packed_pad_halo_4d``
+  from ``parallel.cubesphere_exchange``, ``pad_halo_vector_
+  4d``, internal halo calls in ``operators_3d`` /
+  ``operators_cdgrid``).  Monkey-patching ONE module-level
+  reference catches a fraction of total halo calls.
+  Comprehensive plumbing through the dycore would require
+  touching ~10+ halo call sites — out of scope for this
+  loop.  Documented as a future-investigation target.
+  1/1 in 132 s.  Wired into iter-383 sweep (now 85).
 - Iter 491: **random field reveals 76% halo overshoot**
   (vs iter-475's 3.5% on linear).  Robustness test for
   iter-490 ``monotone_clip``:
