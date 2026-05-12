@@ -1195,6 +1195,31 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 598: **PE total-energy diagnostic** (FV3 ``compute_total_energy``
+  hydrostatic branch port).  Faithful port of FV3
+  fv_mapz.F90:1127-1152.  Computes:
+
+      te_2d = pe_top·phi_top - pe_sfc·phi_sfc
+            + Σ_k delp·(cp·T + KE)
+
+  Where:
+  - phi_half built via hydrostatic integration from surface:
+    ``phi_half[k] = phis + Σ_{j>=k} R_d·T_j·(peln_{j+1} - peln_j)``
+    (JAX-friendly via reverse cumsum).
+  - p_half from hybrid coord: ``A·p_ref + B·p_s``.
+  - peln = log(p_half).
+  - KE from D-grid u_d, v_d averaged to cell-center (simple 4-pt
+    avg; orthogonal approximation — cube-sphere cells nearly
+    orthogonal so FV3 corner cosa terms negligible).
+  New ``compute_total_energy_pe(state, grid, coord)`` in
+  ``legoesm.diagnostics``.  Returns ``(te_column, te_total)``.
+  Tests (2/2 in 11 s):
+  1. Held-Suarez initial state → TE finite + positive (cp·T·delp
+     dominates).
+  2. +10 K T uniform → ΔTE > 0 (internal-energy term).
+  Companion to iter 597 NH version.  Both dycores now have
+  energy diagnostics matching FV3's compute_total_energy.
+  Wired into iter-383 sweep (now 172).
 - Iter 597: **NH total-energy diagnostic** (FV3 ``compute_total_energy``
   NH branch port).  Faithful port of fv_mapz.F90:1154-1183.
   Computes mass-weighted column integral of:

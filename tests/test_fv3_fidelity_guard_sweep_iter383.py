@@ -195,6 +195,7 @@ _GUARD_MODULES = (
     "test_hord_dispatch_iter595",                    # iter-595 add
     "test_transport_step_hord_iter596",              # iter-596 add
     "test_total_energy_nh_iter597",                  # iter-597 add
+    "test_total_energy_pe_iter598",                  # iter-598 add
 )
 
 
