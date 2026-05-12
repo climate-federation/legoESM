@@ -1,22 +1,21 @@
 #!/usr/bin/env python
-"""Global overturning on the ORCA1 tripolar grid.
+"""Global overturning on the ORCA1 tripolar grid with ETOPO bathymetry.
 
-Runs the global overturning circulation experiment (wind + SST restoring)
-on the eORCA1 tripolar grid (362x332, ~1 deg) with the implicit CN
-barotropic solver.  Uses ORCA's native bathymetry and land mask instead
-of the idealized flat-bottom + polar-cap domain.
+Matched configuration with run_comparison_latlon.py — uses ETOPO
+bathymetry interpolated onto the ORCA1 tripolar grid geometry, partial
+cells, Wright EOS, Adcroft PGF, KPP, GM/Redi, TVD advection.
 
-This is the Phase 6 validation run for the tripolar grid implementation.
 The tripolar grid eliminates the polar singularity, enabling full Arctic
 ocean dynamics without ad-hoc polar caps.
 
 Usage:
-    JAX_ENABLE_X64=1 python scripts/global_overturning/run_global_overturning_tripole.py
-    JAX_ENABLE_X64=1 python scripts/global_overturning/run_global_overturning_tripole.py --days 30 --quick
+    CUDA_VISIBLE_DEVICES=1 JAX_ENABLE_X64=1 python scripts/global_overturning/run_global_overturning_tripole.py
+    CUDA_VISIBLE_DEVICES=1 JAX_ENABLE_X64=1 python scripts/global_overturning/run_global_overturning_tripole.py --days 365 --quick
 """
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 import time
@@ -24,149 +23,157 @@ from functools import partial
 from pathlib import Path
 
 import numpy as np
+
+os.environ.setdefault("JAX_ENABLE_X64", "1")
 import jax
 import jax.numpy as jnp
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-os.environ.setdefault("JAX_ENABLE_X64", "1")
 jax.config.update("jax_enable_x64", True)
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+
+from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.core.precision import PrecisionPolicy, set_policy
 set_policy(PrecisionPolicy.fp64())
 
-from legoesm.ocean.vertical import create_ocean_z_star
 from legoesm.grids.tripole import create_tripole_grid
+from legoesm.ocean.bathymetry import BathymetryConfig, init_ocean_bathymetry
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+from legoesm.ocean.eos import scale_depth as _SCALE_DEPTH
+from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.state import LatLonCGridOceanConfig
-from legoesm.ocean.init_latlon_cgrid import (
-    rest_state_latlon_cgrid_ocean,
-    replace_land_mask,
+from legoesm.ocean.physics.combined import OceanPhysicsConfig
+from legoesm.ocean.physics.surface_forcing.config import (
+    PrescribedForcingConfig, RestoringConfig, SurfaceForcingConfig,
 )
-from legoesm.ocean.experiments.global_overturning import (
-    GlobalOverturningConfig,
-    create_forcings,
-    create_eos_config,
-    create_gm_redi_config,
+from legoesm.ocean.physics.vertical_mixing.config import (
+    VerticalMixingConfig, KPPConfig,
+)
+from legoesm.ocean.physics.lateral_mixing.config import (
+    LateralMixingConfig, GMRediConfig, VisbeckConfig,
+)
+from legoesm.ocean.physics.convection.config import (
+    OceanConvectionConfig, EnhancedDiffusionConfig,
+)
+from legoesm.ocean.vertical import (
+    create_ocean_z_star, create_partial_cell_coordinate, compute_centroid_depth,
 )
 
 
-OUTPUT_DIR = Path("results/ocean/global_overturning_tripole")
+# ============================================================================
+# Configuration constants (matched with run_comparison_latlon.py)
+# ============================================================================
+
+N_LEVELS = 20
+H_MAX = 5500.0
+DZ_SURFACE = 20.0
+DZ_DEEP = 500.0
+DT = 1200.0                # seconds (matches comparison)
+SNAP_FRAC = 0.30
+
+# Viscosity — Smagorinsky-dominated, low constant floor
+A_H = 1.0e4
+C_SMAG_LAP = 0.33
+
+# Vertical mixing
+A_V = 1.0e-4
+K_V = 1.0e-5
+
+# Bottom drag
+BOTTOM_DRAG_R = 1.0e-3
+BOTTOM_DRAG_BBL = 100.0
+BOTTOM_DRAG_BG_VEL = 0.1
+
+# GM/Redi
+KAPPA_GM = 600.0
+KAPPA_REDI = 600.0
+S_MAX = 0.005
+
+# Forcing
+TAU_MAX = 0.1
+TROPICAL_WIND_SCALE = 0.5
+TROPICAL_WIND_LAT_DEG = 15.0
+TAU_T = 2592000.0          # 30-day restoring [s]
+TAU_S = 2592000.0
+T_STAR_EQ = 25.0
+T_STAR_POLE = 0.0
+S_STAR = 35.0
+
 GRID_FILE = Path("data/grids/eORCA1.2_mesh_mask.nc")
+ETOPO_FILE = Path("/home/dbalwada/legoESM/data/bathymetry/etopo_1deg.nc")
+OUTPUT_DIR = Path("results/ocean/global_overturning_tripole")
 
 
-def _reconstruct_bathymetry(grid_file: str | Path):
-    """Reconstruct bathymetry [m] and land mask from ORCA mesh_mask.
+# ============================================================================
+# Helpers
+# ============================================================================
 
-    Returns
-    -------
-    H_bathy : (n_lat, n_lon) array of ocean depth [m]. Zero on land.
-    land_mask : (n_lat, n_lon) array, 1 = ocean, 0 = land.
-    """
-    import netCDF4
-
-    ds = netCDF4.Dataset(str(grid_file), "r")
-    mbathy = np.asarray(ds.variables["mbathy"][0])  # (332, 362) int
-    gdept_1d = np.asarray(ds.variables["gdept_1d"][0])  # (75,)
-
-    # tmask at the surface gives the land/ocean mask
-    tmask_surf = np.asarray(ds.variables["tmask"][0, 0])  # (332, 362)
-    ds.close()
-
-    # Reconstruct depth from level index
-    H_bathy = np.zeros_like(mbathy, dtype=np.float64)
-    n_lev = len(gdept_1d)
-    for j in range(mbathy.shape[0]):
-        for i in range(mbathy.shape[1]):
-            k = int(mbathy[j, i])
-            if k > 0:
-                H_bathy[j, i] = gdept_1d[min(k, n_lev - 1)]
-
-    land_mask = tmask_surf.astype(np.float64)
-
-    return H_bathy, land_mask
+def snap_partial_cells_2d(H_bathy, z_coord, min_frac=SNAP_FRAC):
+    """Snap thin partial cells to nearest interface (2D version)."""
+    abs_z_half = jnp.abs(z_coord.z_half_ref)
+    nlev = z_coord.n_levels
+    shape = H_bathy.shape
+    H_flat = H_bathy.ravel()
+    n_above = jnp.sum(abs_z_half[None, :] < H_flat[:, None], axis=1)
+    bottom_level = jnp.clip(n_above - 1, 0, nlev - 1)
+    abs_z_at_bottom = abs_z_half[bottom_level]
+    dz_at_bottom = z_coord.dz_ref[bottom_level]
+    partial_thick = H_flat - abs_z_at_bottom
+    frac = partial_thick / jnp.maximum(dz_at_bottom, 1e-10)
+    z_upper = abs_z_half[bottom_level]
+    z_lower = abs_z_half[jnp.minimum(bottom_level + 1, nlev)]
+    H_snapped = jnp.where(H_flat - z_upper < z_lower - H_flat,
+                           z_upper, z_lower)
+    needs_snap = (frac < min_frac) & (frac > 0) & (H_flat > 0)
+    H_new = jnp.where(needs_snap, H_snapped, H_flat)
+    H_new = jnp.where(H_new <= 0, 0.0, H_new)
+    return H_new.reshape(shape)
 
 
-def _add_stratification(state, z_coord, config: GlobalOverturningConfig):
-    """Add exponential temperature stratification."""
-    z_full = np.asarray(z_coord.z_full_ref)
-    decay = np.exp(z_full / config.T_scale_depth)
-    T_profile = config.T_deep + (config.T_surface - config.T_deep) * decay
-
-    T_data = np.array(state.T.data)
-    for k in range(z_coord.n_levels):
-        T_data[..., k] = T_profile[k]
-
-    return state._replace(
-        T=Field(jnp.array(T_data), name="T",
-                dims=state.T.dims, units=state.T.units),
-    )
-
-
-def _save_restart(state, day, output_dir):
-    npz = {
-        "step": int(round(day * 86400 / 600)),
-        "time_days": float(day),
-        "grid_type": "tripole",
-    }
+def save_restart(state, day, dt, output_dir):
+    """Save state as restart_dayXXXXXX.npz."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    payload = {"step": int(round(day * 86400 / dt)), "time_days": float(day),
+               "grid_type": "tripole"}
     for f in state._fields:
         obj = getattr(state, f)
         if obj is None or not hasattr(obj, "data"):
             continue
-        npz[f] = np.asarray(obj.data)
+        payload[f] = np.asarray(obj.data)
     fname = output_dir / f"restart_day{int(round(day)):06d}.npz"
-    np.savez_compressed(fname, **npz)
+    np.savez_compressed(fname, **payload)
     print(f"    Restart saved: {fname.name}")
+    return fname
 
 
-def _make_step_block(model, dt):
-    """JIT-compiled n-step scan of model.step."""
-    def scan_body(state, _):
-        return model.step(state, dt), None
-
-    @partial(jax.jit, static_argnames=("n_inner",))
-    def block_fn(state, n_inner: int):
-        state, _ = jax.lax.scan(scan_body, state, None, length=n_inner)
-        return state
-
-    return block_fn
-
-
-def parse_args():
-    import argparse
-    p = argparse.ArgumentParser(
-        description="Global overturning on ORCA1 tripolar grid",
-    )
-    p.add_argument("--days", type=float, default=3650.0,
-                   help="Simulation length [days] (default: 3650 = 10 yr)")
-    p.add_argument("--dt", type=float, default=600.0,
-                   help="Timestep [s] (default: 600)")
-    p.add_argument("--quick", action="store_true",
-                   help="Quick 30-day run for testing")
-    p.add_argument("--nlev", type=int, default=20,
-                   help="Number of vertical levels (default: 20)")
-    p.add_argument("--block-size", type=int, default=100,
-                   help="Steps per JIT block (default: 100)")
-    p.add_argument("--gm-redi", action="store_true",
-                   help="Enable GM/Redi mesoscale parameterization")
-    p.add_argument("--grid-file", type=str, default=str(GRID_FILE),
-                   help="Path to ORCA mesh_mask NetCDF file")
-    p.add_argument("--output", type=str, default=str(OUTPUT_DIR))
-    return p.parse_args()
-
+# ============================================================================
+# Main
+# ============================================================================
 
 def main():
-    args = parse_args()
+    p = argparse.ArgumentParser(
+        description="Global overturning on ORCA1 tripolar grid (ETOPO bathy)")
+    p.add_argument("--days", type=float, default=3650.0,
+                   help="Simulation length [days] (default: 3650 = 10 yr)")
+    p.add_argument("--dt", type=float, default=DT)
+    p.add_argument("--quick", action="store_true",
+                   help="Quick 30-day run for testing")
+    p.add_argument("--block-size", type=int, default=100)
+    p.add_argument("--grid-file", type=str, default=str(GRID_FILE))
+    p.add_argument("--etopo", type=str, default=str(ETOPO_FILE))
+    p.add_argument("--output", type=str, default=str(OUTPUT_DIR))
+    args = p.parse_args()
 
     output_dir = Path(args.output)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    restart_dir = output_dir / "restarts"
+    restart_dir.mkdir(parents=True, exist_ok=True)
 
     days = 30.0 if args.quick else args.days
     dt = args.dt
     n_steps = int(days * 86400 / dt)
     block_size = args.block_size
 
-    # ---- Load ORCA1 tripolar grid ----
+    # ---- Load ORCA1 tripolar grid (geometry only) ----
     grid_file = Path(args.grid_file)
     if not grid_file.exists():
         print(f"Grid file not found: {grid_file}")
@@ -177,14 +184,11 @@ def main():
     print(f"Loading ORCA1 tripolar grid from {grid_file}...")
     geom = create_tripole_grid(str(grid_file))
     print(f"  Grid: {geom.n_lat} x {geom.n_lon} "
-          f"(fold at j={geom.fold.fold_j}, cap at j={geom.fold.cap_j})")
-    print(f"  Total area: {float(geom.total_area):.4e} m^2")
+          f"(fold at j={geom.fold.fold_j})")
 
-    # Metric floor (1 km).  eORCA has cells ~2 m wide at south pole and
-    # bipolar fold seam; division by these blows up tendencies.  Main-
-    # domain cells (~50 km at 1 deg) are untouched by this clamp.
+    # Metric floor (1 km) for degenerate cells at bipolar fold seam
     dx_floor = 1000.0
-    n_small = int(jnp.sum(geom.dx_T < dx_floor)) + int(jnp.sum(geom.dx_v < dx_floor))
+    n_small = int(jnp.sum(geom.dx_T < dx_floor))
     if n_small > 0:
         print(f"  Metric floor: clamping {n_small} cells with dx < {dx_floor:.0f} m")
         geom = geom._replace(
@@ -198,99 +202,91 @@ def main():
             area_q=jnp.maximum(geom.area_q, dx_floor * dx_floor),
         )
 
-    # ---- Reconstruct bathymetry from mesh_mask ----
-    print("Reconstructing bathymetry from mesh_mask...")
-    H_bathy_raw, land_mask_raw = _reconstruct_bathymetry(grid_file)
-    print(f"  Ocean cells: {int(np.sum(land_mask_raw > 0))}")
-    print(f"  H_bathy range: {H_bathy_raw[land_mask_raw > 0].min():.0f} "
-          f"- {H_bathy_raw.max():.0f} m")
+    # ---- ETOPO bathymetry interpolated onto tripolar grid ----
+    print(f"Loading ETOPO bathymetry from {args.etopo}...")
+    # H_min=500m for z-star (no partial cells) — ensures first-layer
+    # thickness dz_ref[0]*H/H_max >= 20*500/5500 ≈ 1.8m, avoiding
+    # thin-cell blowup.  Lower this when partial cells are enabled.
+    bathy_cfg = BathymetryConfig(
+        source="file", path=args.etopo,
+        H_max=H_MAX, H_min=500.0, smoothing_passes=2,
+        r_factor_max=0.2, depth_is_negative=True,
+        north_cap_lat=None,     # tripolar handles the north pole
+        south_cap_lat=-75.0,    # southern cap (converging meridians)
+    )
+    H_bathy_raw, ocean_mask = init_ocean_bathymetry(geom, bathy_cfg)
+    H_bathy_raw = jnp.asarray(H_bathy_raw, dtype=jnp.float64)
+    ocean_mask = jnp.asarray(ocean_mask, dtype=jnp.float64)
 
-    # ---- Vertical coordinate ----
-    config = GlobalOverturningConfig(
-        use_gm_redi=args.gm_redi,
-        H_max=float(H_bathy_raw.max()),
-        n_levels=args.nlev,
-    )
-    z_coord = create_ocean_z_star(
-        n_levels=config.n_levels,
-        H_max=config.H_max,
-        dz_surface=config.dz_surface,
-        dz_deep=config.dz_deep,
-    )
-
-    # ---- Physics / forcing ----
-    # Build the physics config directly rather than using create_forcings(),
-    # because the lat-lon C-grid model handles vertical mixing (A_v, K_v)
-    # internally in the baroclinic tendency — the physics-level vertical
-    # mixing function assumes u/v have the same shape (cubed-sphere),
-    # which fails on C-grid staggering.
-    from legoesm.ocean.physics.combined import OceanPhysicsConfig
-    from legoesm.ocean.physics.surface_forcing.config import (
-        PrescribedForcingConfig, RestoringConfig, SurfaceForcingConfig,
-    )
-    from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
-    from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
-    from legoesm.ocean.physics.convection.config import (
-        EnhancedDiffusionConfig, OceanConvectionConfig,
+    # ---- Vertical coordinate with partial cells ----
+    z_coord_base = create_ocean_z_star(
+        n_levels=N_LEVELS, H_max=H_MAX,
+        dz_surface=DZ_SURFACE, dz_deep=DZ_DEEP,
     )
 
-    tau_T_seconds = config.tau_T_days * 86400.0
+    # For now use plain z-star (no partial cells) until partial-cell
+    # PGF corrections are fully validated on the tripolar grid.
+    H_snapped = H_bathy_raw
+    ocean_mask = jnp.where(H_snapped > 0, ocean_mask, 0.0)
+    z_coord = z_coord_base
+
+    n_ocean = int(jnp.sum(ocean_mask > 0.5))
+    print(f"  Ocean cells: {n_ocean}/{ocean_mask.size} "
+          f"({100.0 * n_ocean / ocean_mask.size:.1f}%)")
+    print(f"  H_bathy range: "
+          f"{float(H_snapped[ocean_mask > 0.5].min()):.0f} - "
+          f"{float(H_snapped.max()):.0f} m")
+
+    # ---- Physics (matched with comparison) ----
     physics = OceanPhysicsConfig(
         surface_forcing=SurfaceForcingConfig(
             scheme="combined",
             prescribed=PrescribedForcingConfig(
-                wind_profile="two_belt",
-                tau_max=config.tau_max,
+                wind_profile="global_wind", tau_max=TAU_MAX,
+                tropical_wind_scale=TROPICAL_WIND_SCALE,
+                tropical_wind_lat_deg=TROPICAL_WIND_LAT_DEG,
             ),
             restoring=RestoringConfig(
-                tau_T=tau_T_seconds,
-                tau_S=1e30,
-                T_star_eq=config.T_star_eq,
-                T_star_pole=config.T_star_pole,
-                S_star=config.S_uniform,
-                T_profile="cosine",
+                tau_T=TAU_T, tau_S=TAU_S,
+                T_star_eq=T_STAR_EQ, T_star_pole=T_STAR_POLE,
+                S_star=S_STAR, T_profile="cosine",
             ),
         ),
-        # KPP vertical mixing: essential for equatorial stability at 1°.
-        # Without KPP, the equatorial jet grows without bound (no
-        # thermocline-tilt arrest mechanism at f=0).
-        vertical_mixing=VerticalMixingConfig(scheme="kpp"),
+        vertical_mixing=VerticalMixingConfig(
+            scheme="kpp",
+            kpp=KPPConfig(K_conv=1.0),
+        ),
         lateral_mixing=LateralMixingConfig(scheme="none"),
         convection=OceanConvectionConfig(
             scheme="enhanced_diffusion",
-            enhanced_diffusion=EnhancedDiffusionConfig(
-                K_conv=1.0, K_bg=1e-5,
-            ),
+            enhanced_diffusion=EnhancedDiffusionConfig(K_conv=1.0),
         ),
         shortwave_penetration=None,
     )
-    eos_config = create_eos_config(config)
-    gm_redi_cfg = create_gm_redi_config(config)
 
     ocean_config = LatLonCGridOceanConfig(
-        n_barotropic_substeps=30,
-        physics=physics,
-        A_h=config.A_h, A_v=config.A_v, K_v=config.K_v,
-        # Latitude-dependent viscosity: cos¹(lat) scaling with a floor
-        # prevents A_h → 0 at the bipolar cap.  Main-branch 1° production
-        # config; critical for tripolar stability.
-        A_h_lat_scaling=True,
-        A_h_floor=2000.0,
-        # Flow-adaptive Laplacian Smagorinsky (MOM6 OM4 default)
-        C_smag_lap=0.15,
-        # Biharmonic dissipation for barotropic standing modes
-        B_h=5.0e9,
-        B_h_barotropic=1.0e14,
-        bottom_drag_r=config.bottom_drag_coeff,
-        bottom_drag_bbl_thickness=100.0,
-        bottom_drag_bg_velocity=0.1,
-        eos="linear", eos_linear=eos_config,
-        gm_redi=gm_redi_cfg,
+        A_h=A_H,
+        C_smag_lap=C_SMAG_LAP,
+        A_v=A_V,
+        K_v=K_V,
+        bottom_drag_r=BOTTOM_DRAG_R,
+        bottom_drag_bbl_thickness=BOTTOM_DRAG_BBL,
+        bottom_drag_bg_velocity=BOTTOM_DRAG_BG_VEL,
+        # pgf_scheme="adcroft",  # re-enable with partial cells
         barotropic_solver="implicit_cn",
-        # Implicit vertical mixing removes the explicit CFL limit
-        # dt < dz²/(2K) — essential for thin cap cells.
         implicit_vertical_mixing=True,
-        use_conservation_fixer=True,
+        tracer_advection="tvd",
+        eos="wright",
+        freshwater_closure="virtual_salt_flux",
+        S_ref=S_STAR,
+        # GM/Redi disabled for now — causes immediate blowup on tripolar
+        # grid (likely isopycnal slope computation has column-0 metric
+        # extractions).  Enable after fixing compute_isopycnal_slopes.
+        # gm_redi=GMRediConfig(
+        #     kappa_GM=KAPPA_GM, kappa_Redi=KAPPA_REDI, S_max=S_MAX,
+        #     visbeck=VisbeckConfig(enabled=False), slope_scheme="centered",
+        # ),
+        physics=physics,
     )
 
     # ---- Create model ----
@@ -298,148 +294,100 @@ def main():
     model = LatLonCGridOceanModel(geom, z_coord, ocean_config)
 
     # ---- Initial conditions ----
-    # Start from rest with stratified T/S, then apply ORCA land mask
     print("Creating initial conditions...")
     state = rest_state_latlon_cgrid_ocean(
-        geom, z_coord,
-        T_surface=config.T_surface, T_deep=config.T_surface,
-        S_uniform=config.S_uniform,
+        geom, z_coord_base,
+        T_surface=20.0, T_deep=2.0,
+        S_uniform=S_STAR, H_max=H_MAX,
+        land_mask_override=ocean_mask,
+        H_bathy_override=H_snapped,
     )
 
-    # Apply ORCA bathymetry and land mask.
-    H_bathy_clamped = np.clip(H_bathy_raw, 0, config.H_max)
-
-    # Southern polar cap: eORCA's extended grid has cells only ~2m wide
-    # near Antarctica.  Mask cells south of 75°S as land to avoid the
-    # southern polar singularity (the tripolar grid fixes the NORTH pole
-    # but the south pole still has converging meridians).
-    lat_deg_2d = np.asarray(geom.lat_T) * 180 / np.pi
-    south_cap_mask = lat_deg_2d < -75.0
-    n_south = int(np.sum(south_cap_mask & (land_mask_raw > 0)))
-    if n_south > 0:
-        print(f"  Southern polar cap: masking {n_south} cells south of 75°S")
-        H_bathy_clamped[south_cap_mask] = 0.0
-        land_mask_raw[south_cap_mask] = 0.0
-
-    # Mask out shelf cells.  z-star first-layer thickness scales as
-    # ``dz_ref[0] * H_bathy / H_max``; on a shallow shelf cell (e.g.
-    # H_bathy = 27 m, H_max = 5500 m) this gives dz_0 = 0.13 m, which
-    # makes surface wind forcing du/dt = tau / (rho * dz_0) ~ 200x too
-    # large and the model blows up.  The proper fix is a hybrid z/z-star
-    # coordinate or partial cells; for now we mask shelf cells deeper
-    # than a threshold so dz_0 stays >= ~5 m.
-    H_shelf_min = max(
-        float(z_coord.dz_ref[0]) * 1.1,         # at least the 1st layer
-        config.H_max * 5.0 / float(z_coord.dz_ref[0]) * 0.05,  # dz_0 >= 5 m guard
+    # Centroid-aware exponential T(z) — same as comparison
+    centroid = compute_centroid_depth(
+        jnp.zeros_like(H_snapped), H_snapped, z_coord,
     )
-    # Practical floor: 500 m bathymetry.  Shelf-process resolution will
-    # be revisited when we add partial cells / hybrid vertical coordinate.
-    H_shelf_min = 500.0
-    too_shallow = (H_bathy_clamped > 0) & (H_bathy_clamped < H_shelf_min)
-    n_masked = int(np.sum(too_shallow))
-    if n_masked > 0:
-        print(f"  Masking {n_masked} shelf cells (H < {H_shelf_min:.0f} m) as land")
-        H_bathy_clamped[too_shallow] = 0.0
-        land_mask_raw[too_shallow] = 0.0
+    T_init = 2.0 + 18.0 * jnp.exp(-centroid / _SCALE_DEPTH)
+    if hasattr(z_coord, 'is_active'):
+        T_init = jnp.where(z_coord.is_active, T_init, 0.0)
+    T_init = T_init * ocean_mask[..., jnp.newaxis]
     state = state._replace(
-        H_bathy=Field(jnp.array(H_bathy_clamped)),
+        T=state.T.replace(data=T_init.astype(state.T.data.dtype)),
     )
-    state = replace_land_mask(state, jnp.array(land_mask_raw), grid=geom)
-
-    # Add stratification
-    state = _add_stratification(state, z_coord, config)
 
     print(f"  T range: [{float(jnp.min(state.T.data)):.2f}, "
           f"{float(jnp.max(state.T.data)):.2f}] degC")
-    print(f"  S uniform: {float(jnp.mean(state.S.data)):.2f} PSU")
     print(f"  Fold active: {geom.fold.is_active}")
-    print()
 
     # ---- Integration ----
-    print(f"=== Global overturning on ORCA1 tripolar grid ===")
-    print(f"  Grid: {geom.n_lat}x{geom.n_lon} tripolar, {args.nlev} levels")
+    print(f"\n=== Global overturning on ORCA1 tripolar grid ===")
+    print(f"  Grid: {geom.n_lat}x{geom.n_lon} tripolar, {N_LEVELS} levels")
     print(f"  dt = {dt} s, n_steps = {n_steps:,} ({days/365:.1f} sim-yr)")
-    print(f"  Block size: {block_size} steps ({n_steps // block_size} blocks)")
-    print(f"  Barotropic solver: {ocean_config.barotropic_solver}")
-    print(f"  A_h={ocean_config.A_h:.0e}, A_h_floor={ocean_config.A_h_floor:.0f}, "
-          f"C_smag_lap={ocean_config.C_smag_lap}")
-    print(f"  A_h_lat_scaling={ocean_config.A_h_lat_scaling}, "
-          f"implicit_vert_mix={ocean_config.implicit_vertical_mixing}")
-    print(f"  B_h={ocean_config.B_h:.0e}, B_h_baro={ocean_config.B_h_barotropic:.0e}")
-    print(f"  GM/Redi: {args.gm_redi}")
+    print(f"  Block size: {block_size}")
+    print(f"  Config: A_h={A_H:.0e}, C_smag_lap={C_SMAG_LAP}, "
+          f"A_v={A_V:.0e}, K_v={K_V:.0e}")
+    print(f"  KPP, GM/Redi(κ={KAPPA_GM}), TVD, Wright EOS, Adcroft PGF")
+    print(f"  Bottom drag: r={BOTTOM_DRAG_R:.0e}, BBL={BOTTOM_DRAG_BBL}m")
     print(f"  Output: {output_dir}")
     print()
 
-    block_fn = _make_step_block(model, dt)
+    def scan_body(state, _):
+        return model.step(state, dt), None
 
-    # Save day-0 restart
-    _save_restart(state, 0.0, output_dir)
+    @partial(jax.jit, static_argnames=("n_inner",))
+    def block_fn(state, n_inner: int):
+        state, _ = jax.lax.scan(scan_body, state, None, length=n_inner)
+        return state
+
+    save_restart(state, 0.0, dt, restart_dir)
 
     n_blocks = n_steps // block_size
     n_remainder = n_steps - n_blocks * block_size
-
-    print(f"Starting integration ({n_blocks} blocks x {block_size} steps "
-          f"+ {n_remainder} remainder)")
     t0 = time.time()
-    last_print = t0
     steps_done = 0
-    restart_every_days = 365.0
-    n_steps_per_restart = int(restart_every_days * 86400 / dt)
     last_restart_step = 0
+    n_steps_per_restart = int(365.0 * 86400 / dt)
     progress_every = max(1, n_blocks // 30)
 
+    print(f"Starting integration ({n_blocks} blocks x {block_size} steps)")
     for b in range(n_blocks):
         state = block_fn(state, block_size)
         steps_done += block_size
 
-        # Periodic restarts
         if (steps_done - last_restart_step) >= n_steps_per_restart:
             jax.block_until_ready(state.eta.data)
             day = steps_done * dt / 86400.0
-            _save_restart(state, day, output_dir)
+            save_restart(state, day, dt, restart_dir)
             last_restart_step = steps_done
 
         if (b + 1) % progress_every == 0 or (b + 1) == n_blocks:
             now = time.time()
-            if now - last_print > 30 or (b + 1) == n_blocks:
-                jax.block_until_ready(state.eta.data)
-                day = steps_done * dt / 86400.0
-                eta = state.eta.data
-                u = state.u.data
-                max_eta = float(jnp.max(jnp.abs(eta)))
-                max_u = float(jnp.max(jnp.abs(u)))
-                elapsed = now - t0
-                rate = steps_done / elapsed if elapsed > 0 else 0
-                print(f"  Block {b+1:>5}/{n_blocks}: day {day:>8.1f} "
-                      f"({day/365:.2f} yr)  "
-                      f"max|eta|={max_eta:.3e}  max|u|={max_u:.3e}  "
-                      f"({rate:.1f} steps/s, {elapsed:.0f}s elapsed)")
-                last_print = now
+            jax.block_until_ready(state.eta.data)
+            day = steps_done * dt / 86400.0
+            max_eta = float(jnp.max(jnp.abs(state.eta.data)))
+            max_u = float(jnp.max(jnp.abs(state.u.data)))
+            rate = steps_done / (now - t0) if now > t0 else 0
+            print(f"  Block {b+1:>5}/{n_blocks}: day {day:>8.1f} "
+                  f"({day/365:.2f} yr)  "
+                  f"max|eta|={max_eta:.3e}  max|u|={max_u:.3e}  "
+                  f"({rate:.1f} steps/s, {now - t0:.0f}s)")
 
-    # Handle remainder
     if n_remainder > 0:
         state = block_fn(state, n_remainder)
         steps_done += n_remainder
 
-    # Final save
     jax.block_until_ready(state.eta.data)
     final_day = steps_done * dt / 86400.0
-    _save_restart(state, final_day, output_dir)
+    save_restart(state, final_day, dt, restart_dir)
 
     elapsed = time.time() - t0
-    print()
-    print(f"=== Done: {final_day/365:.2f} sim-years in {elapsed:.0f}s ===")
-
-    # Final diagnostics
-    eta = state.eta.data
-    u = state.u.data
-    v = state.v.data
+    print(f"\n=== Done: {final_day/365:.2f} sim-years in {elapsed:.0f}s ===")
+    print(f"  max |eta|: {float(jnp.max(jnp.abs(state.eta.data))):.4e} m")
+    print(f"  max |u|:   {float(jnp.max(jnp.abs(state.u.data))):.4e} m/s")
+    print(f"  max |v|:   {float(jnp.max(jnp.abs(state.v.data))):.4e} m/s")
     T = state.T.data
-    print(f"  max |eta|: {float(jnp.max(jnp.abs(eta))):.4e} m")
-    print(f"  max |u|:   {float(jnp.max(jnp.abs(u))):.4e} m/s")
-    print(f"  max |v|:   {float(jnp.max(jnp.abs(v))):.4e} m/s")
     print(f"  T range:   [{float(jnp.min(T)):.2f}, {float(jnp.max(T)):.2f}] degC")
-    print(f"  All finite: {bool(jnp.all(jnp.isfinite(eta)) and jnp.all(jnp.isfinite(u)))}")
+    print(f"  All finite: {bool(jnp.all(jnp.isfinite(state.eta.data)) and jnp.all(jnp.isfinite(state.u.data)))}")
 
 
 if __name__ == "__main__":

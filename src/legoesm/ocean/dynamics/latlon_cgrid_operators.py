@@ -2514,7 +2514,7 @@ def partial_cell_pgf_correction_y(
     Output shape: ``(n_lat+1, n_lon, nlev)``.
     """
     if hasattr(grid, "dy_v") and grid.dlat == 0.0:
-        dy_v = grid.dy_v[1, 0]
+        dy_v = grid.dy_v  # (n_lat+1, n_lon) — full 2D
     else:
         dy_v = grid.radius * grid.dlat
 
@@ -2533,8 +2533,26 @@ def partial_cell_pgf_correction_y(
         - rho_prime_south * excess_south
     )
 
-    correction = _pad_ns_zero(correction_interior)
+    # Fold face: compute correction from fold-partner centroids
+    fold = getattr(grid, "fold", None)
+    if fold is not None and fold.is_active:
+        centroid_partner = centroid_depth[-1:, fold.perm_T, :]
+        rho_partner = rho_prime[-1:, fold.perm_T, :]
+        face_ref_fold = jnp.minimum(centroid_depth[-1:], centroid_partner)
+        excess_local = centroid_depth[-1:] - face_ref_fold
+        excess_partner = centroid_partner - face_ref_fold
+        correction_fold = -g * (
+            rho_partner * excess_partner - rho_prime[-1:] * excess_local
+        )
+        south = jnp.zeros_like(correction_interior[:1])
+        correction = jnp.concatenate(
+            [south, correction_interior, correction_fold], axis=0,
+        )
+    else:
+        correction = _pad_ns_zero(correction_interior)
 
+    if hasattr(dy_v, 'ndim') and dy_v.ndim == 2:
+        return correction / dy_v[:, :, jnp.newaxis]
     return correction / dy_v
 
 
@@ -2684,13 +2702,34 @@ def density_jacobian_pgf_smc03_y(
     )
     diff_interior = P_N - P_S
 
-    diff = _pad_ns_zero(diff_interior)
+    # Fold face: compute PGF from fold-partner cells
+    fold = getattr(grid, "fold", None)
+    if fold is not None and fold.is_active:
+        rho_F = rho_per_cell[-1:, fold.perm_T, :]
+        h_F = h_partial[-1:, fold.perm_T, :]
+        z_c_F = z_centroid[-1:, fold.perm_T, :]
+        sigma_F = sigma[-1:, fold.perm_T, :]
+        z_c_L = z_centroid[-1:]
+        z_target_fold = jnp.minimum(z_c_L, z_c_F)
+        P_fold = compute_pressure_at_target_smc03(
+            rho_F, h_F, z_c_F, sigma_F, z_target_fold, g,
+        )
+        P_local = compute_pressure_at_target_smc03(
+            rho_per_cell[-1:], h_partial[-1:], z_c_L,
+            sigma[-1:], z_target_fold, g,
+        )
+        diff_fold = P_fold - P_local
+        south = jnp.zeros_like(diff_interior[:1])
+        diff = jnp.concatenate([south, diff_interior, diff_fold], axis=0)
+    else:
+        diff = _pad_ns_zero(diff_interior)
 
     if hasattr(grid, "dy_v") and grid.dlat == 0.0:
-        dy_v = grid.dy_v[1, 0]
+        dy_v = grid.dy_v  # full 2D
+        return diff / dy_v[:, :, jnp.newaxis]
     else:
         dy_v = grid.radius * grid.dlat
-    return diff / dy_v
+        return diff / dy_v
 
 
 def pv_flux_al81_partial_cell(
