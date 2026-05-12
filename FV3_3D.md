@@ -1120,127 +1120,44 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
-- Iter 529: **PE ``make_clipped_step`` validation** — symmetry.
-  Mirror iter-526 on the hydrostatic PE dycore.  3 tests:
-  1. Runs successfully on PE state.
-  2. Mass conservation 7.02e-9 (matches iter-524 PE direct
-     measurement → same dycore behavior).
-  3. ``jax.grad(loss)(T_init)`` returns finite + nonzero
-     gradient.
-  Confirms the iter-526 ``make_clipped_step`` is fully
-  symmetric across NH and PE.  Production-ready user-facing
-  API for both dycores.  3/3 in 116 s.  Wired into iter-383
-  sweep (now 117).
-- Iter 527: **PE-side patch targets** for symmetry.  Audit
-  found PE dycore imports 4 distinct halo aliases (lines
-  57, 83, 84, 85 in primitive_eq_cdgrid.py) not covered by
-  iter-505-526 (which targeted NH + operator modules):
-  - ``_pad_halo_4d`` (4D scalar)
-  - ``_pad_halo_4d_module`` (4D scalar)
-  - ``pad_halo_vector`` (3D vector)
-  - ``pad_halo_vector_4d`` (4D vector)
-  Added 3 new patch targets (one is duplicate of vector_4d
-  in operators_cdgrid).  Context now patches **15 sites**.
-  Verified: PE mass conservation holds with expanded context
-  (iter-524 test still passes).  Aliases properly toggled on
-  enter / restored on exit.  2/2 in 52 s.  Wired into
-  iter-383 sweep (now 116).
-- Iter 526: **``make_clipped_step()`` helper** — JIT-safe
-  user-facing API.  Solves iter-525 limitation that
-  ``jax.jit(model.step)`` outside context misses clip patches.
-  New ``make_clipped_step(model, state_template, dt, slack=0.5)``
-  in ``legoesm.grids.halo``:
-  1. Enters ``monotone_halo_clip_context(slack=slack)``.
-  2. ``step_jit = jax.jit(model.step)``.
-  3. Forces trace + compilation by calling
-     ``step_jit(state_template, dt)`` while context active.
-  4. Returns cached-compiled ``step_jit``.
-  Clip is permanently baked into the lowered HLO; subsequent
-  calls (with or without context) use the clipped graph.
-  Verified: ``make_clipped_step`` gives 2.097× vs raw jit
-  4.063× at 10 steps — **48.4% edge reduction**, matching
-  iter-511 long-term clip benefit.  Note: requires separate
-  model instances to avoid JAX trace-cache reuse between
-  clip and no-clip runs in tests.  Usage::
-
-      step = make_clipped_step(model, state, dt=10.0, slack=0.5)
-      for _ in range(100):
-          state = step(state, dt=10.0)
-
-  2/2 in 47 s.  Wired into iter-383 sweep (now 115).
-- Iter 525: **JIT + ``monotone_halo_clip_context`` interaction**.
-  The helper uses ``unittest.mock.patch`` at Python level.
-  JAX traces functions ONCE; the patch must be in scope at
-  trace time to be baked into the compiled graph.  Tested
-  both scenarios:
-  1. jit COMPILE inside context, run inside: clip is baked
-     into the graph ✓
-  2. jit COMPILE outside context, run inside: SAME compiled
-     graph reused; **clip has no effect** ✗
-  Both behaviors are now verified by tests.  Documents the
-  user-facing constraint: ``with monotone_halo_clip_context():
-      step_jit = jax.jit(m.step)`` — JIT inside the context.
-  Equivalently, don't JIT at all if context is intermittent.
-  2/2 in 47 s.  Wired into iter-383 sweep (now 114).
-- Iter 524: **PE mass conservation** — mirror iter-523 on
-  the hydrostatic PE dycore.  Held-Suarez IC + min-edge +
-  clip context, 10 steps:
-  - step  0: sum(p_s · area) = 5.101011e+19
-  - step  5: rel drift = +7.02e-09
-  - step 10: rel drift = +7.02e-09
-  Mass conserved to **7 ppb** (PE) vs **5 ppb** (NH iter-523)
-  — same machine-precision order.  Both NH and PE dycores
-  preserve conservation under iter-466/505 stack.  1/1 in
-  52 s.  Wired into iter-383 sweep (now 113).
-- Iter 523: **mass conservation under SBR + clip context**.
-  Critical Earth-system check: does iter-466/505 stack break
-  conservation?  Sum(ρ' · area · dz) over the full cube at
-  step 0, 5, 10 under min-edge + clip context:
-  - step  0: m₀ = 3.731415e+18
-  - step  5: rel drift = +5.30e-09
-  - step 10: rel drift = +5.30e-09
-  Conservation to **~5 parts per billion** — essentially
-  float64 machine precision.  iter-466/505 stack does NOT
-  break mass conservation despite 11 patched halo sites.
-  Note: rho_prime in NH is the perturbation from a 1D
-  reference state, so this measures perturbation-mass
-  conservation, which is the relevant quantity.  1/1 in
-  51 s.  Wired into iter-383 sweep (now 112).
-- Iter 522: **AD-at-rest through ``monotone_halo_clip_context``**.
-  iter-505 helper uses ``unittest.mock.patch`` to monkey-
-  patch 11 halo aliases.  Critical question: does
-  ``jax.grad`` still flow through the patched code?  Patched
-  fn is ``functools.partial`` of the original AD-safe
-  ``pad_halo_4d`` / ``pad_halo_vector_4d`` / etc.  Tests:
-  1. Single-step grad: ``loss = mean(theta_prime²)``,
-     ``jax.grad(loss, u0)`` and ``jax.grad(loss, v0)``
-     return finite & nonzero gradients.
-  2. 3-step grad: through 3 sequential ``m.step()`` inside
-     one context.  Finite & nonzero.
-  Confirms: the iter-505 helper is fully differentiable
-  end-to-end.  Training (neural GCM, parameter tuning) can
-  use the helper unconditionally.  2/2 in 328 s.  Wired
-  into iter-383 sweep (now 111).
-- Iter 521: **SBR (Williamson 2-like) IC scan**.  Canonical
-  test: u_east = U₀ cos(lat), v_north = 0, projected via
-  ``rotate_winds_geo_to_grid``.  theta_prime starts at 0;
-  any nonzero edge bias at 10 steps is purely numerical.
-    N    e/i ratio     edge_std       interior_std
-    C8   3.898×        1.067e-01      2.736e-02
-    C16  6.310×        5.891e-02      9.335e-03
-  Critical re-interpretation: **e/i RATIO grows with N
-  (3.90 → 6.31×) BUT absolute edge_std DROPS** (-45% at C16).
-  Interior drops faster (-67%).  Both are converging in
-  absolute terms — the edge converges at ~O(N⁻⁰·⁶), the
-  interior at ~O(N⁻¹·³).  Edge is a lower-order region.
-  This is consistent with FV3 literature: cube corners are
-  formally 1st-order in some operators while interior is
-  2nd-3rd order.  Conclusion: the rising ratio metric we've
-  been chasing is partly an artifact of *relative* metric —
-  in absolute terms the dycore is converging fine.  For
-  practical runs the 0.06 K perturbation magnitude at C16
-  after 10 SBR steps is noise.  1/1 in 102 s.  Wired into
-  iter-383 sweep (now 110).
+- **Iters 521-529 (compacted iter 530)**: helper validation —
+  conservation, AD, JIT-safety, PE symmetry, production
+  docs.
+  - iter 521: SBR (Williamson 2-like) IC scan.  C8 e/i=3.90×,
+    C16 e/i=6.31× — but **absolute** edge_std DROPS (-45%
+    at C16), interior_std drops faster (-67%).  Edge
+    converges at ~O(N⁻⁰·⁶), interior at ~O(N⁻¹·³).  Cube
+    corners are formally lower-order in FV3 — the rising
+    e/i ratio is intrinsic, not a legoESM bug.  At C16 the
+    perturbation magnitude after 10 SBR steps is 0.06 K,
+    physical noise level.
+  - iter 522: AD-at-rest validated.  ``jax.grad`` through
+    1-step and 3-step under ``monotone_halo_clip_context``
+    returns finite + nonzero gradients.  Helper is fully
+    differentiable.
+  - iter 523: NH mass conservation under SBR + clip context
+    — 5.3 ppb drift over 10 steps.  Machine precision.
+  - iter 524: PE mass conservation under Held-Suarez + clip
+    context — 7.0 ppb drift over 10 steps.  Symmetric to NH.
+  - iter 525: JIT + clip context interaction.  jit-compile
+    inside context = clip baked in; jit-compile outside +
+    run inside = clip ignored.  Both behaviors documented.
+  - iter 526: ``make_clipped_step(model, state, dt, slack)``
+    helper — JIT-safe.  Enters context, jit-compiles, forces
+    trace via dummy call, returns cached-compiled step.
+    48.4% edge reduction vs raw jit at 10 steps.
+  - iter 527: PE-side patch targets.  Context now covers
+    15 sites: 4 NH-scalar + 2 NH-vector + 3 PE-aliases + 3
+    pad_halo 3D + 1 pad_halo_pair_h2 + 2 pad_halo_vector 3D.
+  - iter 528: production-usage section updated with concrete
+    ``monotone_halo_clip_context`` + ``make_clipped_step``
+    examples.
+  - iter 529: PE ``make_clipped_step`` validation.  Runs,
+    conserves mass (7e-9), differentiable.  Full NH/PE
+    symmetry of helper stack.
+  Net result: iter-505 helper is production-ready with
+  conservation, AD, JIT-safety, and full NH/PE coverage.
+  Currently 117 guards in iter-383 sweep.
 - **Iters 511-519 (compacted iter 520)**: long-term clip
   benefit, expanded clip coverage, and IC analysis closing
   on **convergence with cube-smooth IC**.
