@@ -1195,6 +1195,26 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 743: **refactor iter-677/694 to use iter-742 column_integral helper**.
+
+  Two callsites had inline ``jnp.sum(delp * q [/ g], axis=-1)``
+  patterns matching iter-742:
+
+      iter-677 z_sum_fv3:    Σ delp·q (no /g)
+        → ``column_integral_delp_fv3(q, delp, divide_by_g=False)``
+
+      iter-694 prt_mass_fv3 col_mass loop: Σ delp·q / g
+        → ``column_integral_delp_fv3(q, delp)``  (default /g=True)
+
+  Output bit-identical (iter-677 5/5, iter-694 6/6 tests still pass).
+
+  Tests (4/4 in <1 s):
+  1. iter-677 z_sum: matches inline jnp.sum(delp·q).
+  2. iter-694 col_mass: matches inline Σ delp·q / g.
+  3. iter-677 5/5 regression preserved.
+  4. iter-694 6/6 regression preserved.
+
+  Wired into iter-383 sweep (now 307).
 - Iter 742: **``column_integral_delp_fv3``** — delp-weighted column integral.
 
   Generic helper for FV3's standard column-mass integral pattern:

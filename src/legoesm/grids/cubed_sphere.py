@@ -3526,7 +3526,8 @@ def prt_mass_fv3(
     diag: dict[str, float] = {"ps_mean": ps_mean}
     total_water_col_mean = 0.0
     for name, q in q_tracers.items():
-        col_mass = jnp.sum(delp * q, axis=-1) / g    # (n_x, n_y) kg/m²
+        # iter-743: delegate column-mass integral to column_integral_delp_fv3
+        col_mass = column_integral_delp_fv3(q, delp)         # (n_x, n_y) kg/m²
         col_mean = float(jnp.sum(area * col_mass) * inv_area)
         diag[name] = col_mean
         total_water_col_mean += col_mean
@@ -5613,7 +5614,8 @@ def z_sum_fv3(
     sum2 : jax.Array, shape (...,)
         Column mass-weighted sum.
     """
-    return jnp.sum(delp * q, axis=-1)
+    # iter-743: delegate to column_integral_delp_fv3 (no /g for raw FV3 sum)
+    return column_integral_delp_fv3(q, delp, divide_by_g=False)
 
 
 def p_sum_fv3(
