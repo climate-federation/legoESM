@@ -169,6 +169,20 @@ the "Iterations 1-19 — Summary" section above so the working log stays
 under the auto-loaded MEMORY.md / context envelope.  All previous detailed
 entries remain in the commit messages on `clean_physics`.
 
+### Iteration 27 — 2026-05-12
+
+**Action: biharmonic lateral mixing tracer mask** (mirror of iter-25 #2).
+
+`ocean/physics/lateral_mixing/biharmonic.py` previously applied
+`hyperdiffusion_3d` to T/S without any land mask.  Adding the same
+output-side `mask_3d` multiplication used for the harmonic Laplacian
+contains the issue: land cells now receive zero biharmonic tracer
+tendency.  Full no-flux BC requires an operator-stencil refactor and
+is queued.
+
+**Tests (post iter-27):** 20 / 20 ocean MPAS physics + biharmonic
+vorticity tests pass.
+
 ### Iteration 26 — 2026-05-12
 
 **Revert iter-25 sea-ice FW change.**

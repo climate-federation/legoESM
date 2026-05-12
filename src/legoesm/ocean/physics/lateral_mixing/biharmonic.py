@@ -75,6 +75,10 @@ def biharmonic_lateral_mixing(
         du_dt = vel_hyper[..., 0]
         dv_dt = vel_hyper[..., 1]
 
+    # Tracer biharmonic: apply land mask to output so land cells
+    # receive zero tendency.  See harmonic.py for the analogous fix.
+    # Full no-flux BC would require an operator-stencil refactor and
+    # is queued (codex iter-25 #2).
     dT_dt = z
     dS_dt = z
     if cfg.B_h_tracer > 0:
@@ -83,7 +87,7 @@ def biharmonic_lateral_mixing(
         tr_flat = tr_stack.reshape(n_face, n_i, n_j, nlev_t * n_pair)
         tr_hyper = hyperdiffusion_3d(tr_flat, grid, B_tr_eff)
         tr_hyper = tr_hyper.reshape(n_face, n_i, n_j, nlev_t, n_pair)
-        dT_dt = tr_hyper[..., 0]
-        dS_dt = tr_hyper[..., 1]
+        dT_dt = tr_hyper[..., 0] * mask_3d
+        dS_dt = tr_hyper[..., 1] * mask_3d
 
     return LateralMixingOutput(du_dt=du_dt, dv_dt=dv_dt, dT_dt=dT_dt, dS_dt=dS_dt)
