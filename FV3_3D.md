@@ -1120,6 +1120,22 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 533: **corner-spike stability stress test**.  Drop
+  5 K θ′ spike at one cube vertex on face 0, zero elsewhere,
+  5 steps:
+  - initial: vertex max 5.0 K, interior 0.0 K
+  - no clip: vertex max 5.004, interior ~0
+  - clip:    vertex max 5.004, interior ~0
+  Two findings:
+  1. Dycore is STABLE — spike grows 0.08% in 5 steps,
+     doesn't propagate to interior (consistent with the
+     d_con sponge + corner damp + halo isolation).
+  2. Clip and no-clip identical at corner cell value: clip
+     bounds *halo* cells filled from neighbors, NOT the
+     interior corner cells of a face themselves.  This
+     reframes the clip mechanism: it suppresses halo-induced
+     edge variance, not corner-cell amplification.
+  1/1 in 48 s.  Wired into iter-383 sweep (now 120).
 - Iter 532: **SBR resolution scan to C24**.  Extends
   iter-521 (C8/C16 only) with C24.  10 steps, min-edge +
   clip:
