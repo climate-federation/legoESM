@@ -181,6 +181,7 @@ _GUARD_MODULES = (
     "test_linearity_tiny_pert_iter578",              # iter-578 add
     "test_sw_rest_preservation_iter579",             # iter-579 add
     "test_compute_edge_metric_iter581",              # iter-581 add
+    "test_angular_momentum_iter583",                 # iter-583 add
 )
 
 

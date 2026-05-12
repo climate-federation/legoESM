@@ -1195,6 +1195,23 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 583: **atmospheric angular momentum (AAM) diagnostic**.
+  Faithful port of FV3 ``compute_aam`` (fv_dynamics.F90:1264-
+  1307).  New ``compute_atmospheric_angular_momentum(u_center,
+  rho_full, grid, hc)`` in ``legoesm.diagnostics``.  Formula:
+
+      aam[i,j] = sum_k ( (r²·Ω + r·u) · rho·dz·area )
+      where r = R · cos(lat)
+
+  Returns per-column AAM + total scalar.  3 tests:
+  1. AAM at rest is finite, positive.
+  2. At rest matches closed form ρ·Ω·R²·∫cos²(lat)·dV
+     to float32 precision (1.5e-7 rel_err).
+  3. +1 m/s uniform u increases AAM by R·∫cos(lat)·dm.
+  Useful for users to monitor AM drift in long runs.  This
+  closes one of the audit gaps identified in iter-582
+  user response.  3/3 in 4 s.  Wired into iter-383 sweep
+  (now 158).
 - Iter 581: **``compute_edge_artifact_metric()`` diagnostic helper**.
   Adds a public-facing utility in ``legoesm.grids.halo`` that
   computes edge_std / interior_std / ratio for a 4D ``(face,
