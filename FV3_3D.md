@@ -1081,6 +1081,19 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 518: **resolution scan C8 vs C16 with smooth IC**.
+  Surprise result: e/i = 1.262× (C8) → **2.768× (C16)** —
+  resolution makes it WORSE.  Analysis: the iter-517 "smooth"
+  IC uses per-face local (i, j) sinusoid ``sin(πi/n) cos(πj/n)``.
+  This is smooth WITHIN a face but discontinuous at panel
+  boundaries (each face has its own (i, j) frame).  At C16
+  the panel-boundary discontinuity is more sharply resolved,
+  exciting the corner stencils more.  Invalidates iter-517's
+  interpretation of "smooth = artifact-free": the test was
+  smooth-on-face but discontinuous-on-cube.  Iter 519+ needs
+  a TRULY smooth-on-cube IC (e.g., solid-body rotation
+  ``u_φ = U₀ cos(lat)`` or spherical-harmonic Y_l^m basis).
+  1/1 in 58 s.  Wired into iter-383 sweep (now 108).
 - Iter 517: **smooth IC vs random IC — 65% of residual is
   noise-driven**.  iters 509-516 used uniform-random u/v ∈
   [-3, 3] m/s.  Random fields have grid-scale energy that

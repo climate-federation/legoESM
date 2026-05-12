@@ -131,6 +131,7 @@ _GUARD_MODULES = (
     "test_within_grid_edge_metric_iter515",          # iter-515 add
     "test_higher_order_damp_iter516",                # iter-516 add
     "test_smooth_ic_edge_iter517",                   # iter-517 add
+    "test_resolution_scan_smooth_iter518",           # iter-518 add
 )
 
 
