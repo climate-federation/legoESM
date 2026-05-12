@@ -1195,6 +1195,42 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 614: **FV3 ``get_area`` + ``great_circle_distance_cart``**.
+  Faithful JAX ports of FV3 ``fv_grid_utils.F90`` helpers built on
+  iter-611/613 primitives:
+
+  | Function                       | F90 line | Role                          |
+  |--------------------------------|----------|-------------------------------|
+  | ``great_circle_distance_cart`` | 2065     | distance from Cartesian inputs|
+  | ``get_area``                   | 2749     | spherical-excess quad area    |
+
+  ``get_area`` is the canonical FV3 cell-area formula::
+
+      Area = (α1 + α2 + α3 + α4 - 2π) · R²
+
+  where the four angles are spherical angles at the cell corners.
+  Uses iter-613 ``spherical_angle`` with FV3's exact corner-angle
+  convention (lines 2757-2782): at each corner the spherical
+  angle is taken between the GC arc to one adjacent corner and
+  the GC arc to the opposite corner.  Matches legoESM's existing
+  l'Huilier's-theorem area within float32 precision (~1e-7 rel)
+  — independent verification of both implementations.
+
+  ``great_circle_distance_cart`` is the Cartesian counterpart of
+  the existing latlon ``great_circle_distance``; useful when
+  inputs are already in Cartesian form (avoids round-trip
+  through trig).
+
+  Tests (7/7 in <1 s):
+  1. ``great_circle_distance_cart`` orthogonal → π/2.
+  2. ``great_circle_distance_cart`` same vector → 0.
+  3. ``great_circle_distance_cart`` ↔ latlon agreement.
+  4. ``get_area`` matches legoESM cell area (~1e-7 floor).
+  5. ``get_area`` small-cell planar limit Δ² (rel < 1e-4).
+  6. ``get_area`` positive on random cells.
+  7. ``get_area`` scales as R².
+
+  Wired into iter-383 sweep (now 186).
 - Iter 613: **FV3 spherical-geometry helpers**.  Faithful JAX-
   vectorized ports of FV3 ``fv_grid_utils.F90`` helpers built on
   iter-611/612 primitives:

@@ -1258,6 +1258,77 @@ def dist2side_latlon(
     return jnp.arcsin(jnp.clip(jnp.sin(side) * jnp.sin(angle), -1.0, 1.0))
 
 
+def great_circle_distance_cart(
+    v1: jax.Array, v2: jax.Array,
+    radius: float = constants.R_earth,
+) -> jax.Array:
+    """FV3_3D iter 614: great-circle distance from Cartesian inputs.
+
+    Faithful port of FV3 ``great_circle_dist_cart`` (fv_grid_utils.F90:
+    2065-2092)::
+
+        cos(d/R) = (v1·v2) / (|v1|·|v2|)
+        d = R · acos(clip(cos, -1, 1))
+
+    Each ``v1``, ``v2`` shape ``(..., 3)`` on (or near) the unit
+    sphere; result broadcasts on leading axes.  Result has same
+    units as ``radius`` (default: legoESM R_earth in metres).
+
+    Differentiable; safe near antipodal points via clip.
+    """
+    norm = jnp.sum(v1 * v1, axis=-1) * jnp.sum(v2 * v2, axis=-1)
+    safe_norm = jnp.where(norm > 0.0, norm, 1.0)
+    dot = jnp.sum(v1 * v2, axis=-1) / jnp.sqrt(safe_norm)
+    dot = jnp.clip(dot, -1.0, 1.0)
+    return radius * jnp.arccos(dot)
+
+
+def get_area(
+    lon1: jax.Array, lat1: jax.Array,
+    lon2: jax.Array, lat2: jax.Array,
+    lon3: jax.Array, lat3: jax.Array,
+    lon4: jax.Array, lat4: jax.Array,
+    radius: float = constants.R_earth,
+) -> jax.Array:
+    """FV3_3D iter 614: spherical-excess cell area for quadrilateral cell.
+
+    Faithful port of FV3 ``get_area`` (fv_grid_utils.F90:2749-2790).
+    Computes the four spherical angles at the cell corners and uses
+    the spherical-excess formula::
+
+        Area = (α1 + α2 + α3 + α4 - 2π) · R²
+
+    The corner-order convention matches FV3's signature exactly
+    (note the FV3 call uses ``p1, p4, p2, p3``):
+
+        4 ----- 3
+        |       |
+        |       |
+        1 ----- 2
+
+    and the four corner angles are taken at vertices 1, 2, 3, 4 in
+    counterclockwise order.
+
+    Result has units of ``radius²`` (default: legoESM R_earth in m²).
+    """
+    # Build Cartesian corner vectors
+    e1 = jnp.stack(list(latlon2xyz(lon1, lat1)), axis=-1)
+    e2 = jnp.stack(list(latlon2xyz(lon2, lat2)), axis=-1)
+    e3 = jnp.stack(list(latlon2xyz(lon3, lat3)), axis=-1)
+    e4 = jnp.stack(list(latlon2xyz(lon4, lat4)), axis=-1)
+    # FV3 fv_grid_utils.F90:2757-2782 corner-angle convention:
+    #   ang1 = ∠(at p1; p2 → p4)
+    #   ang2 = ∠(at p2; p3 → p1)
+    #   ang3 = ∠(at p3; p4 → p2)
+    #   ang4 = ∠(at p4; p3 → p1)
+    ang1 = spherical_angle(e1, e2, e4)
+    ang2 = spherical_angle(e2, e3, e1)
+    ang3 = spherical_angle(e3, e4, e2)
+    ang4 = spherical_angle(e4, e3, e1)
+    excess = ang1 + ang2 + ang3 + ang4 - 2.0 * jnp.pi
+    return excess * (radius * radius)
+
+
 def expand_cell(
     lon1: jax.Array, lat1: jax.Array,
     lon2: jax.Array, lat2: jax.Array,

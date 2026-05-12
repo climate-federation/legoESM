@@ -209,6 +209,7 @@ _GUARD_MODULES = (
     "test_fv3_cartesian_primitives_iter611",         # iter-611 add
     "test_fv3_mirror_intp_iter612",                  # iter-612 add
     "test_fv3_spherical_geometry_iter613",           # iter-613 add
+    "test_fv3_get_area_iter614",                     # iter-614 add
 )
 
 
