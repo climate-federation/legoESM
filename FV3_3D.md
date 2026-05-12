@@ -1120,6 +1120,21 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 532: **SBR resolution scan to C24**.  Extends
+  iter-521 (C8/C16 only) with C24.  10 steps, min-edge +
+  clip:
+  - C8:  e/i=3.898×, edge_std=1.07e-01, int_std=2.74e-02
+  - C16: e/i=6.310×, edge_std=5.89e-02, int_std=9.34e-03
+  - C24: e/i=8.558×, edge_std=4.36e-02, int_std=5.09e-03
+  Log-log fit:
+  - edge_std ~ N⁻⁰·⁸² (sub-1st-order)
+  - int_std  ~ N⁻¹·⁵³ (between 1st & 2nd order)
+  Edge is formally lower-order than interior — FV3-faithful
+  (cube corners are formally 1st-order in some operators).
+  Extrapolating to C96: edge_std ≈ 0.014 K, int_std ≈
+  0.0006 K — absolute magnitudes tiny.  The growing e/i
+  ratio is a metric artifact of relative scaling.  1/1 in
+  156 s.  Wired into iter-383 sweep (now 119).
 - Iter 531: **``make_clipped_step`` works on SW dycore too**.
   Generic ``(model, state, dt, slack)`` signature applies
   to ``FV3EdgeShallowWaterModel`` unchanged.  Tests:
