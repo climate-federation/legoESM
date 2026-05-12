@@ -96,6 +96,26 @@ Branch: `clean_physics`. Driven by Ralph loop + `/codex:adversarial-review`.
   75 / 75 land carbon + multilayer + diff_land; 140 / 140 land (post iter-44);
   100 / 100 ocean MPAS + surface_forcing + emanuel + atmosphere convection.
 
+## Iteration 57 — 2026-05-13
+
+**Defensive AD-safety fix: KPP non-local dz_actual divisor.**
+
+KPP non-local tendency (`vertical_mixing/kpp.py:430-444`) divides
+flux convergence by `dz_actual`.  On dry columns ``dz_actual = 0``
+gives `0/0 = NaN` in the inner computation; the forward `jnp.where`
+on `is_unstable_col` scrubs the NaN forward (since `is_unstable_col`
+is False for B_f=0 on land), but the **backward** pass through the
+0/0 division still produces NaN gradients.
+
+Fix: AD-safe divisor `dz_safe = jnp.where(dz_actual > 0, dz_actual, 1)`
+and gate the output where on both `is_unstable_col & dz_actual > 0`.
+Forward output unchanged on wet columns; gradients now clean.
+
+**Tests (post iter-57):** 11 / 11 KPP tests pass (excluding the
+pre-existing `test_b_salt_sign_freshening_is_stabilizing` failure
+which is a test-fragility issue — `jnp.mean(None)` when `out.K_v
+is None` — and unrelated to this fix).
+
 ## Iteration 56 — 2026-05-13
 
 **Bug fix: `shortwave_penetration_tendency` produces Inf/NaN on dry

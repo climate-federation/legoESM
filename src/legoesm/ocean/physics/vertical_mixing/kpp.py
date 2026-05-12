@@ -426,27 +426,35 @@ def kpp_vertical_mixing(
     # finding #1).  Keep only the column-level ``is_unstable_col``
     # gate.
     F_T = cfg.gamma_T * Q_T[..., jnp.newaxis] * G_half  # (..., nlev-1)
-    # Tendency = -dF/dz at full levels (zero-flux BCs at surface and bottom)
-    dT_nonlocal_top = -F_T[..., :1] / dz_actual[..., :1]
-    dT_nonlocal_int = (F_T[..., :-1] - F_T[..., 1:]) / dz_actual[..., 1:-1]
-    dT_nonlocal_bot = F_T[..., -1:] / dz_actual[..., -1:]
+    # Tendency = -dF/dz at full levels (zero-flux BCs at surface and bottom).
+    # AD-safe divisor: dry columns have ``dz_actual = 0`` and the
+    # column-level ``is_unstable_col`` mask scrubs the forward value,
+    # but the 0/0 division produces NaN gradients in the backward
+    # pass.  Safe denominator (``where dz>0, dz, 1``) gives clean
+    # gradients while the where-mask still zeroes the forward output.
+    dz_safe = jnp.where(dz_actual > 0.0, dz_actual, 1.0)
+    dT_nonlocal_top = -F_T[..., :1] / dz_safe[..., :1]
+    dT_nonlocal_int = (F_T[..., :-1] - F_T[..., 1:]) / dz_safe[..., 1:-1]
+    dT_nonlocal_bot = F_T[..., -1:] / dz_safe[..., -1:]
     dT_nonlocal = jnp.concatenate(
         [dT_nonlocal_top, dT_nonlocal_int, dT_nonlocal_bot], axis=-1
     )  # (..., nlev)  [K/s]
     dT_nonlocal = jnp.where(
-        is_unstable_col[..., jnp.newaxis], dT_nonlocal, 0.0
+        is_unstable_col[..., jnp.newaxis] & (dz_actual > 0.0),
+        dT_nonlocal, 0.0,
     )
 
     # --- Salinity non-local tendency ---
     F_S = cfg.gamma_S * Q_S[..., jnp.newaxis] * G_half  # (..., nlev-1)
-    dS_nonlocal_top = -F_S[..., :1] / dz_actual[..., :1]
-    dS_nonlocal_int = (F_S[..., :-1] - F_S[..., 1:]) / dz_actual[..., 1:-1]
-    dS_nonlocal_bot = F_S[..., -1:] / dz_actual[..., -1:]
+    dS_nonlocal_top = -F_S[..., :1] / dz_safe[..., :1]
+    dS_nonlocal_int = (F_S[..., :-1] - F_S[..., 1:]) / dz_safe[..., 1:-1]
+    dS_nonlocal_bot = F_S[..., -1:] / dz_safe[..., -1:]
     dS_nonlocal = jnp.concatenate(
         [dS_nonlocal_top, dS_nonlocal_int, dS_nonlocal_bot], axis=-1
     )  # (..., nlev)  [psu/s]
     dS_nonlocal = jnp.where(
-        is_unstable_col[..., jnp.newaxis], dS_nonlocal, 0.0
+        is_unstable_col[..., jnp.newaxis] & (dz_actual > 0.0),
+        dS_nonlocal, 0.0,
     )
 
     return VerticalMixingOutput(
