@@ -2304,6 +2304,71 @@ def gnomonic_dist(im: int) -> tuple[jax.Array, jax.Array]:
     return xyz2latlon(p1, p2, p3)
 
 
+def terminator_tracers(
+    lon: jax.Array, lat: jax.Array,
+    km: int,
+    qcly: float = 4.0e-6,
+    k2: float = 1.0,
+    lc: float | None = None,
+    thc: float | None = None,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 658: DCMIP 2016 terminator chemistry tracer IC.
+
+    Faithful JAX port of FV3 ``terminator_tracers``
+    (tools/test_cases.F90:4136-4205).  DCMIP 2016 idealized
+    chemistry test (Lauritzen et al.); paired Cl / Cl2 tracers
+    that exchange under photolysis at a localized "sun":
+
+        k1   = max(0, sin(lat)·sin(thc) + cos(lat)·cos(thc)·cos(lon - lc))
+        r    = k1/k2 · 0.25
+        D    = sqrt(r² + 2·r·qcly)
+        Cl   = D - r
+        Cl2  = 0.5·(qcly - Cl)
+
+    Same pattern at every vertical level.  Assumes DRY mixing
+    ratio (FV3 docstring note).
+
+    Default sun position lc=5π/3, thc=π/9 matches FV3.
+
+    Parameters
+    ----------
+    lon, lat : jax.Array, shape (..., n_x, n_y)
+        Cell-center positions in radians.
+    km : int
+        Number of vertical levels.
+    qcly : float, default 4e-6
+        Total chlorine family mixing ratio (kg/kg, DRY).
+    k2 : float, default 1.0
+        Recombination rate constant.
+    lc, thc : float, optional
+        Sun position (radians); default FV3 values.
+
+    Returns
+    -------
+    Cl, Cl2 : jax.Array, shape (..., n_x, n_y, km)
+        Chemical species mixing ratios.
+    """
+    if lc is None:
+        lc = 5.0 * jnp.pi / 3.0
+    if thc is None:
+        thc = jnp.pi / 9.0
+    sinthc = jnp.sin(thc)
+    costhc = jnp.cos(thc)
+    cos_phot = (
+        jnp.sin(lat) * sinthc
+        + jnp.cos(lat) * costhc * jnp.cos(lon - lc)
+    )
+    k1 = jnp.maximum(0.0, cos_phot)
+    r = k1 / k2 * 0.25
+    D = jnp.sqrt(r * r + 2.0 * r * qcly)
+    Cl_2d = D - r
+    Cl2_2d = 0.5 * (qcly - Cl_2d)
+    # Broadcast over km
+    Cl = jnp.broadcast_to(Cl_2d[..., None], Cl_2d.shape + (km,))
+    Cl2 = jnp.broadcast_to(Cl2_2d[..., None], Cl2_2d.shape + (km,))
+    return Cl, Cl2
+
+
 def checker_tracers(
     lon: jax.Array, lat: jax.Array,
     nq: int, km: int,

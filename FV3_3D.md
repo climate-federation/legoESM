@@ -1195,6 +1195,35 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 658: **FV3 ``terminator_tracers``** — DCMIP 2016 terminator
+  chemistry IC.  Faithful JAX port of FV3 ``terminator_tracers``
+  (tools/test_cases.F90:4136-4205, Lucas Harris, 2016).
+
+  Paired Cl / Cl2 tracers under photolysis at localized sun
+  (lc=5π/3, thc=π/9):
+
+      k1   = max(0, sin(lat)·sin(thc) + cos(lat)·cos(thc)·cos(lon - lc))
+      r    = k1/k2 · 0.25                          (k2 = 1)
+      D    = sqrt(r² + 2·r·qcly)
+      Cl   = D - r
+      Cl2  = 0.5·(qcly - Cl)
+
+  Conserves total chlorine atoms: Cl + 2·Cl2 = qcly = 4e-6
+  everywhere.  Assumes DRY mixing ratio.  Used for FV3 transport
+  + chemistry coupling validation.
+
+  Pairs with iter-657 ``checker_tracers``; together cover FV3
+  HIWPP / DCMIP tracer-test ICs.
+
+  Tests (6/6 in 2 s):
+  1. Output shapes (..., n_x, n_y, km).
+  2. Cl + 2·Cl2 = qcly (chlorine atom balance) to 1e-15.
+  3. Cl, Cl2 ≥ 0.
+  4. Uniform across vertical levels.
+  5. Sun position has max Cl.
+  6. No NaN/Inf.
+
+  Wired into iter-383 sweep (now 226).
 - Iter 657: **FV3 ``checker_tracers``** — HIWPP checkerboard tracer.
   Faithful JAX port of FV3 ``checker_tracers``
   (tools/test_cases.F90:4067-4135).  Builds checkerboard tracer
