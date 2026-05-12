@@ -212,6 +212,7 @@ _GUARD_MODULES = (
     "test_fv3_get_area_iter614",                     # iter-614 add
     "test_fv3_unit_vect_iter615",                    # iter-615 add
     "test_fv3_intersect_iter616",                    # iter-616 add
+    "test_fv3_gnomonic_iter617",                     # iter-617 add
 )
 
 

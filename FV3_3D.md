@@ -1195,6 +1195,35 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 617: **FV3 gnomonic grid generators**.  Faithful JAX
+  ports of FV3 ``fv_grid_utils.F90``:
+
+  | Function          | F90 line | Role                              |
+  |-------------------|----------|-----------------------------------|
+  | ``gnomonic_angl`` | 1531     | equi-angular grid (FV3 default)   |
+  | ``gnomonic_dist`` | 1558     | equi-distance gnomonic grid       |
+
+  Both build the FV3 face-2 (-x face) corner grid of shape
+  ``(im+1, im+1)`` in (lon, lat).  Equi-angular uses the
+  ``tan(α)`` map (FV3 canonical default); equi-distance uses
+  the linear map.  Returns latlon for direct use; users wanting
+  full 6-face grids can mirror via FV3's ``symm_ed`` /
+  ``mirror_xyz`` (iter 612) pattern.
+
+  legoESM's existing ``_face_to_cartesian`` is essentially the
+  equi-angular form at face 0; iter 617 adds explicit FV3-
+  named face-2 generators for users porting FV3 grid code that
+  depends on the exact FV3 corner positions.
+
+  Tests (6/6 in 2 s):
+  1. Output shape (im+1, im+1).
+  2. All face-2 points have Cartesian x < 0.
+  3. Face center at (-1, 0, 0).
+  4. ``gnomonic_dist`` output shape.
+  5. ``gnomonic_dist`` corners on unit sphere.
+  6. Both grids agree at face center.
+
+  Wired into iter-383 sweep (now 189).
 - Iter 616: **FV3 ``intersect_great_circles``**.  Faithful JAX
   port of FV3 ``intersect`` (fv_grid_utils.F90:2096-2194).
   Computes the intersection of two great circles defined by

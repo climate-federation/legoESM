@@ -1258,6 +1258,70 @@ def dist2side_latlon(
     return jnp.arcsin(jnp.clip(jnp.sin(side) * jnp.sin(angle), -1.0, 1.0))
 
 
+def gnomonic_angl(im: int) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 617: equi-angular gnomonic grid for FV3 face 2.
+
+    Faithful port of FV3 ``gnomonic_angl`` (fv_grid_utils.F90:
+    1531-1556).  Builds the canonical FV3 equi-angular cubed-
+    sphere grid for face 2 (-x face)::
+
+        dp = π/(2·im)
+        p1 = -1/√3                                (constant)
+        p2 = -1/√3 · tan(-π/4 + (j-1)·dp)
+        p3 =  1/√3 · tan(-π/4 + (k-1)·dp)
+
+    Then ``cart_to_latlon`` to (lon, lat).
+
+    Parameters
+    ----------
+    im : int
+        Number of cells per face edge.  Grid has shape ``(im+1, im+1)``.
+
+    Returns
+    -------
+    lon, lat : jax.Array, shape ``(im+1, im+1)``
+        Cubed-sphere corner positions in radians.
+    """
+    dp = 0.5 * jnp.pi / im
+    rsq3 = 1.0 / jnp.sqrt(3.0)
+    idx = jnp.arange(im + 1, dtype=jnp.float64)
+    # Match FV3 (j, k) layout: j varies axis 0, k varies axis 1
+    j_grid, k_grid = jnp.meshgrid(idx, idx, indexing="ij")
+    p1 = jnp.full_like(j_grid, -rsq3)
+    p2 = -rsq3 * jnp.tan(-0.25 * jnp.pi + j_grid * dp)
+    p3 = rsq3 * jnp.tan(-0.25 * jnp.pi + k_grid * dp)
+    return xyz2latlon(p1, p2, p3)
+
+
+def gnomonic_dist(im: int) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 617: equi-distance gnomonic grid for FV3 face 2.
+
+    Faithful port of FV3 ``gnomonic_dist`` (fv_grid_utils.F90:
+    1558-1585).  Builds the equi-distance cubed-sphere grid for
+    face 2 (-x face)::
+
+        p1 = -1/√3                                (constant)
+        p2 =  1/√3 - (j-1)·2/(im·√3)
+        p3 = -1/√3 + (k-1)·2/(im·√3)
+
+    Then ``cart_to_latlon`` to (lon, lat).
+
+    Same return convention as ``gnomonic_angl``.
+    """
+    rsq3 = 1.0 / jnp.sqrt(3.0)
+    xf = -rsq3
+    y0 = rsq3
+    dy = -2.0 * rsq3 / im
+    z0 = -rsq3
+    dz = 2.0 * rsq3 / im
+    idx = jnp.arange(im + 1, dtype=jnp.float64)
+    j_grid, k_grid = jnp.meshgrid(idx, idx, indexing="ij")
+    p1 = jnp.full_like(j_grid, xf)
+    p2 = y0 + j_grid * dy
+    p3 = z0 + k_grid * dz
+    return xyz2latlon(p1, p2, p3)
+
+
 def intersect_great_circles(
     a1: jax.Array, a2: jax.Array,
     b1: jax.Array, b2: jax.Array,
