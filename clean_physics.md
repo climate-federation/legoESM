@@ -96,6 +96,30 @@ Branch: `clean_physics`. Driven by Ralph loop + `/codex:adversarial-review`.
   75 / 75 land carbon + multilayer + diff_land; 140 / 140 land (post iter-44);
   100 / 100 ocean MPAS + surface_forcing + emanuel + atmosphere convection.
 
+## Iteration 53 — 2026-05-13
+
+**Fix codex iter-52 stop-time finding: thin-barrier leak.**
+
+`fill_land_cells` default `n_passes=3` bridges land strips ≤ 3 cells
+wide, creating spurious cross-basin diffusion through narrow
+isthmuses (e.g. Central America at coarse resolution).
+
+Fix:
+- `harmonic.py`: `fill_land_cells(T, mask, grid, n_passes=1)` —
+  matches the 5-point Laplacian stencil reach.
+- `biharmonic.py`: `fill_land_cells(T, mask, grid, n_passes=2)` —
+  matches ∇²∇² 2-cell stencil reach.
+
+Residual limitation: a 1-cell-wide land strip is still bridged by
+harmonic (1 pass), and a ≤ 2-cell-wide strip by biharmonic.  This
+is unavoidable without connected-components analysis of the mask
+and is the minimum reach required for the stencil to see correct
+gradients at coastlines.  Wider barriers (≥ 2 cells for harmonic,
+≥ 3 cells for biharmonic) no longer leak.
+
+**Tests (post iter-53):** 35 / 35 lateral-mixing + harmonic +
+biharmonic + surface-forcing-dispatch tests pass.
+
 ## Iteration 52 — 2026-05-13
 
 **Resolved deferred item: no-flux BC for harmonic/biharmonic tracer

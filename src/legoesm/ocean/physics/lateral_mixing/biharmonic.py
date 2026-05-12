@@ -82,11 +82,17 @@ def biharmonic_lateral_mixing(
     # TWO stencil cells into the ocean rather than one — making the
     # no-flux BC even more important.  See harmonic.py for the
     # analogous fix.
+    #
+    # ``n_passes=2`` matches the ∇²∇² 2-cell stencil reach — the inner
+    # ∇² needs land cells 1 step from ocean filled; the outer ∇² needs
+    # land cells 2 steps from ocean filled.  Going deeper would bridge
+    # thin (≤ n_passes-wide) land barriers and leak T/S across
+    # disconnected basins.  Codex iter-52 stop-time review.
     dT_dt = z
     dS_dt = z
     if cfg.B_h_tracer > 0:
-        T_filled = fill_land_cells(T, mask, grid)
-        S_filled = fill_land_cells(S, mask, grid)
+        T_filled = fill_land_cells(T, mask, grid, n_passes=2)
+        S_filled = fill_land_cells(S, mask, grid, n_passes=2)
         tr_stack = jnp.stack([T_filled, S_filled], axis=-1)  # (6, n, n, nlev, 2)
         n_face, n_i, n_j, nlev_t, n_pair = tr_stack.shape
         tr_flat = tr_stack.reshape(n_face, n_i, n_j, nlev_t * n_pair)

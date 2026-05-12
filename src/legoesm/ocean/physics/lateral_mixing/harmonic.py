@@ -85,14 +85,22 @@ def harmonic_lateral_mixing(
     # Laplacian INPUT to see whatever land-cell sentinel is in T / S
     # and propagate spurious gradients one stencil-cell into the
     # ocean before being zeroed.  ``fill_land_cells`` is JIT-friendly
-    # and uses the same 3-pass cubed-sphere Neumann fill already in
-    # production for pressure-anomaly handling.  Codex finding (iter-25)
-    # plus deferred no-flux BC item.
+    # and uses the cubed-sphere Neumann fill already in production for
+    # pressure-anomaly handling.  Codex finding (iter-25) plus
+    # deferred no-flux BC item.
+    #
+    # ``n_passes=1`` matches the 5-point Laplacian stencil reach — any
+    # deeper would bridge thin (≤ n_passes-wide) land barriers and
+    # leak T/S across basins that shouldn't be connected.  A 1-cell-
+    # wide land strip (e.g. Central America at coarse resolution) is
+    # still bridged by a single pass; a true cross-basin barrier
+    # requires connected-components analysis of the mask, which is
+    # beyond the scope of this scheme.  Codex iter-52 stop-time review.
     dT_dt = z
     dS_dt = z
     if cfg.K_h > 0:
-        T_filled = fill_land_cells(T, mask, grid)
-        S_filled = fill_land_cells(S, mask, grid)
+        T_filled = fill_land_cells(T, mask, grid, n_passes=1)
+        S_filled = fill_land_cells(S, mask, grid, n_passes=1)
         tr_stack = jnp.stack([T_filled, S_filled], axis=-1)  # (6, n, n, nlev, 2)
         n_face, n_i, n_j, nlev_t, n_pair = tr_stack.shape
         tr_flat = tr_stack.reshape(n_face, n_i, n_j, nlev_t * n_pair)
