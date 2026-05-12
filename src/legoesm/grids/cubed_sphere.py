@@ -2644,6 +2644,80 @@ def get_staggered_grid_fv3(
     return pt_c_lon, pt_c_lat, pt_d_lon, pt_d_lat
 
 
+def get_height_field_fv3(
+    pt: jax.Array, q: jax.Array, peln: jax.Array,
+    zsurf: jax.Array,
+    delz: jax.Array | None = None,
+    zvir: float | None = None,
+    hydrostatic: bool = True,
+) -> jax.Array:
+    """FV3_3D iter 681: geopotential heights at layer interfaces.
+
+    Faithful JAX port of FV3 ``get_height_field``
+    (tools/fv_diagnostics.F90:3911-3945).
+
+    Hydrostatic branch:
+        wz[km]  = zsurf
+        wz[k]   = wz[k+1] + (R_d/g) · pt[k]·(1+zvir·q[k])·(peln[k+1] - peln[k])
+
+    Non-hydrostatic branch:
+        wz[km]  = zsurf
+        wz[k]   = wz[k+1] - delz[k]    (delz < 0 from FV3 convention)
+
+    Builds wz top-down from surface upward (bottom interface at zsurf).
+
+    Parameters
+    ----------
+    pt : jax.Array, shape (..., km)
+        Temperature (K).
+    q : jax.Array, shape (..., km)
+        Water-vapor mixing ratio.
+    peln : jax.Array, shape (..., km+1)
+        Log-pressure at layer interfaces.
+    zsurf : jax.Array, shape (...,)
+        Surface elevation (m).
+    delz : jax.Array, shape (..., km), optional
+        Layer thickness (m, FV3 convention delz < 0).  Required if
+        hydrostatic=False.
+    zvir : float, optional
+        Virtual-temperature factor (R_v/R_d - 1).  Default
+        ``constants.R_v/constants.R_d - 1``.
+    hydrostatic : bool, default True
+        If True, use hydrostatic R_d/g log-p formula.
+
+    Returns
+    -------
+    wz : jax.Array, shape (..., km+1)
+        Geopotential heights at layer interfaces (m).
+    """
+    g = constants.g
+    Rdgas = constants.R_d
+    if zvir is None:
+        zvir = constants.R_v / Rdgas - 1.0
+    gg = Rdgas / g
+
+    km = pt.shape[-1]
+    # Initialize wz at surface (k=km, 0-indexed)
+    # Then build top-down: wz[k] = wz[k+1] + dz_k
+    if hydrostatic:
+        # dz_k = gg · pt[k] · (1 + zvir·q[k]) · (peln[k+1] - peln[k])
+        dz = gg * pt * (1.0 + zvir * q) * (peln[..., 1:] - peln[..., :-1])
+    else:
+        if delz is None:
+            raise ValueError("delz required when hydrostatic=False")
+        dz = -delz       # FV3 wz[k] = wz[k+1] - delz[k], delz<0 → dz>0
+
+    # Reverse cumulative sum from bottom up
+    # wz[km] = zsurf; wz[k] = zsurf + Σ_{j>=k} dz[j]
+    dz_reversed = dz[..., ::-1]                  # bottom layer first
+    cumsum_rev = jnp.cumsum(dz_reversed, axis=-1)
+    cumsum_rev = cumsum_rev[..., ::-1]           # back to top-down
+    # wz has km+1 entries; wz[km] = zsurf
+    wz_above_surface = zsurf[..., None] + cumsum_rev
+    wz_surface = zsurf[..., None]
+    return jnp.concatenate([wz_above_surface, wz_surface], axis=-1)
+
+
 def interpolate_vertical_fv3(
     a3: jax.Array, peln: jax.Array, plev: jax.Array,
 ) -> jax.Array:

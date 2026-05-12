@@ -1195,6 +1195,36 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 681: **FV3 ``get_height_field_fv3``** — geopotential heights.
+  Faithful JAX port of FV3 ``get_height_field``
+  (tools/fv_diagnostics.F90:3911-3945).
+
+  Hydrostatic branch:
+
+      wz[km]  = zsurf
+      wz[k]   = wz[k+1] + (R_d/g) · pt[k]·(1+zvir·q[k])·(peln[k+1] - peln[k])
+
+  Non-hydrostatic branch:
+
+      wz[km]  = zsurf
+      wz[k]   = wz[k+1] - delz[k]    (FV3 delz < 0)
+
+  Builds wz top-down from surface upward.  Vectorized via
+  reverse-cumsum.  Verified isothermal hydrostatic exact:
+  wz[0]-wz[km] = (R_d/g)·T·ln(p_s/p_top).
+
+  Used by FV3 for diagnostic z-level lookups and 3D vertical
+  coord conversion.
+
+  Tests (6/6 in <1 s):
+  1. Output shape (..., km+1).
+  2. wz at km = zsurf.
+  3. Monotonic decrease from top to bottom.
+  4. Isothermal hydrostatic exact.
+  5. Non-hydrostatic branch via delz.
+  6. Missing delz when hydrostatic=False raises ValueError.
+
+  Wired into iter-383 sweep (now 246).
 - **Iters 671-679 (compacted iter 680)**: FV3 ingestion + diagnostic
   utilities.  9 iterations covering DA increment readers,
   diagnostic helpers, and vertical interp:

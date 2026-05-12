@@ -269,6 +269,7 @@ _GUARD_MODULES = (
     "test_fv3_z_p_sum_iter677",                      # iter-677 add
     "test_fv3_interpolate_z_iter678",                # iter-678 add
     "test_fv3_interpolate_vertical_iter679",         # iter-679 add
+    "test_fv3_get_height_field_iter681",             # iter-681 add
 )
 
 
