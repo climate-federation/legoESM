@@ -1185,6 +1185,20 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 562: **``heat_source_del2_iters`` sweep**.  iter-561
+  found this is the dominant smooth-IC knob.  Sweep iters
+  ∈ {0, 1, 2, 4, 8} on min-edge + C16 SBR + 10 steps:
+  - iters=0: edge_std=6.32e-2 (+0%)
+  - iters=1: edge_std=2.32e-2 (-63.3%)
+  - iters=2: edge_std=1.40e-2 (-77.9%, FV3 default)
+  - iters=4: edge_std=9.33e-3 (-85.2%)
+  - iters=8: edge_std=6.90e-3 (**-89.1% best**)
+  Monotonically improves with iters.  Beyond FV3 default (2),
+  pushing to 4-8 gives further 7-11% gains.  Trade-off: more
+  iters = more compute per step.  For users who want maximum
+  edge suppression on smooth ICs, set
+  ``heat_source_del2_iters=8`` and accept the cost.
+  1/1 in 115 s.  Wired into iter-383 sweep (now 143).
 - Iter 561: **bisect min-edge flag toggles on smooth IC**.
   iter-553 showed FV3-faithful BEATS min-edge by 70% on smooth
   IC.  Bisect: re-enable each disabled flag one at a time @
