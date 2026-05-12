@@ -1195,6 +1195,28 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 592: **FV3 iord=11 PPM limiter utility**.  Faithful port
+  of FV3 ``tp_core.F90:573-579``.  iord=11 is "emulation of
+  2nd van Leer scheme using PPM codes" — same formula as
+  iord=8 (iter 585) but with configurable factor ``ppm_fac``
+  (FV3 default 1.5 per ``tp_core.F90:35``):
+
+      xt = ppm_fac · dm
+      bl = -sign(min(|xt|, |bl|), xt)
+      br =  sign(min(|xt|, |br|), xt)
+
+  New ``apply_hord11_limiter(bl, br, dm, ppm_fac=1.5)`` in
+  ``legoesm.core.fv_tp_2d``.  With ``ppm_fac=2.0`` it's exactly
+  iord=8.  Default transport path unchanged (still iord=9).
+  Tests (4/4 in <1 s):
+  1. Returns finite values.
+  2. Default ppm_fac=1.5 clips to ±1.5|dm|.
+  3. ppm_fac=2.0 matches apply_hord8_limiter bit-for-bit.
+  4. |bl|, |br| ≤ ppm_fac · |dm| for several ppm_fac values.
+  legoESM now exposes iord=8 (iter 585), iord=9 (default via
+  _pert_ppm), iord=11 (iter 592), iord=12 (via _pert_ppm_iv0).
+  Missing: iord=10 (Lin+Rood pmp/lac extra constraints — more
+  complex; deferred).  Wired into iter-383 sweep (now 166).
 - Iter 591: **``shift_fac`` longitude shift**.  Faithful port
   of FV3 ``fv_grid_tools.F90:662-663``.  When NOT using
   Schmidt/cube_transform and ``shift_fac > 1e-4``, shift lon

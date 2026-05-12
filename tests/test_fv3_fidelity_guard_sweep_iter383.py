@@ -189,6 +189,7 @@ _GUARD_MODULES = (
     "test_aam_correction_iter588",                   # iter-588 add
     "test_cube_transform_iter589",                   # iter-589 add
     "test_shift_fac_iter591",                        # iter-591 add
+    "test_hord11_limiter_iter592",                   # iter-592 add
 )
 
 

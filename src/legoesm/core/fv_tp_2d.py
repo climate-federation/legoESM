@@ -136,6 +136,46 @@ def apply_hord8_limiter(bl, br, dm):
     return bl_out, br_out
 
 
+def apply_hord11_limiter(bl, br, dm, ppm_fac: float = 1.5):
+    """FV3_3D iter 592: FV3 iord=11 limiter (tp_core.F90:573-579).
+
+    Same form as iord=8 (iter 585) but with a configurable factor
+    ``ppm_fac`` instead of fixed 2.0.  FV3 default ``ppm_fac = 1.5``
+    (tp_core.F90:35).  Called "emulation of 2nd van Leer scheme using
+    PPM codes".
+
+    Formula:
+        xt = ppm_fac · dm
+        bl = -sign(min(|xt|, |al - q|), xt)
+        br =  sign(min(|xt|, |al' - q|), xt)
+
+    Parameters
+    ----------
+    bl, br : jax.Array
+        Standard PPM left/right cell-edge perturbations.
+    dm : jax.Array
+        Cell-center monotone slope.
+    ppm_fac : float, default 1.5
+        FV3's ppm_fac parameter, "nonlinear scheme limiter:
+        between 1 and 2" (tp_core.F90:35 comment).
+
+    Returns
+    -------
+    bl_out, br_out : jax.Array
+        iord=11 limited values.
+
+    Notes
+    -----
+    NOT yet wired into the default transport path (still iord=9).
+    Exposed as a utility for users who want iord=11 for tracers.
+    With ``ppm_fac=2.0`` this is exactly iord=8 (iter 585).
+    """
+    xt = ppm_fac * dm
+    bl_out = -jnp.sign(xt) * jnp.minimum(jnp.abs(xt), jnp.abs(bl))
+    br_out = jnp.sign(xt) * jnp.minimum(jnp.abs(xt), jnp.abs(br))
+    return bl_out, br_out
+
+
 def _ppm_1d(q, n, off_left=None, off_right=None,
             off_left_d1=None, off_right_d1=None,
             use_duogrid=False,
