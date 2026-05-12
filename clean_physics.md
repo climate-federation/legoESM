@@ -156,6 +156,37 @@ Compression iteration.  Folded iter-20 through iter-29 into the
 "Iterations 1-29 — Summary" section.  Detailed per-iteration narratives
 remain in the commit messages on `clean_physics`.
 
+### Iteration 39 — 2026-05-13
+
+**Apply codex iter-38 findings + extend conservation tests.**
+
+Codex returned 2 findings:
+
+1. `ice/sea_ice.py:490` — dynamic single-category thermodynamics path
+   fell through to `simple_bulk_fluxes` regardless of
+   `config.bulk_scheme`.  Now precomputes `_bulk_flux_dispatch(...)`
+   and passes `shflx`/`lhflx` into `_thermo_single`, matching the
+   slab path, multi-cat path, and diagnostic `_build_response`.
+
+2. `ocean/dynamics/ocean_tendency_common.py:522` — BBL drag rate
+   used the nominal `H_BBL` as denominator, making drag too weak by
+   `total_wet_depth / H_BBL` on shelves shallower than the nominal
+   boundary-layer thickness.  Now uses `min(H_BBL, total_overlap)`
+   so the rate is correct on shallow cells.
+
+**Conservation regression tests (extending iter-38 Kessler test):**
+
+Added `test_total_water_conservation_under_heavy_clamp` to Seifert-
+Beheng, Morrison, and Thompson tests — all 4 schemes now have a
+hydrostatic-column conservation test that asserts
+``∫(Σ_species dq/dt) · dp/g + precipitation = 0`` to machine
+precision (residual < 1e-12) under heavy q_c / q_i / q_s / q_g
+clamp activity.
+
+**Tests (post iter-39):** 88 / 88 sea-ice + bottom-drag tests pass.
+4 / 4 total-water-conservation regressions pass across all
+microphysics schemes.
+
 ### Iteration 38 — 2026-05-13
 
 **Add Kessler total-water-conservation test, audit clamp consistency.**

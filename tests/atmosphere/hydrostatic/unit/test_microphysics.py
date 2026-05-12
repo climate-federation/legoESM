@@ -432,6 +432,32 @@ class TestSeifertBeheng:
         residual = constants.c_pd * out.dT_dt + constants.L_v * out.dq_v_dt
         assert float(jnp.max(jnp.abs(residual))) < 1e-6
 
+    def test_total_water_conservation_under_heavy_clamp(self):
+        """Seifert-Beheng total water conservation in a hydrostatic
+        column under heavy q_c clamp activity.  Locks in the iter-35
+        consolidation onto ``donor_clamp_scale``."""
+        ncol, nlev = 2, 10
+        T = jnp.full((ncol, nlev), 290.0)
+        p_half = jnp.linspace(1e4, 1e5, nlev + 1)[None, :].repeat(ncol, axis=0)
+        p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+        rho = p_full / (constants.R_d * T)
+        dp = p_half[:, 1:] - p_half[:, :-1]
+        dz = dp / (rho * constants.g)
+        q_sat = saturation_mixing_ratio(T, p_full)
+        q_v = q_sat * 1.001
+        h = make_zero_hydrometeors(ncol, nlev)
+        h = h._replace(
+            q_c=jnp.full_like(T, 1e-4),
+            q_r=jnp.full_like(T, 5e-3),
+            N_c=jnp.full_like(T, 1.0e8),
+            N_r=jnp.full_like(T, 1.0e3),
+        )
+        out = seifert_beheng_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=1200.0)
+        total_tend = out.dq_v_dt + out.dq_c_dt + out.dq_r_dt
+        col = jnp.sum(total_tend * dp / constants.g, axis=-1)
+        residual = col + out.precipitation
+        assert float(jnp.max(jnp.abs(residual))) < 1.0e-12
+
 
 # ======================================================================
 # Morrison tests
@@ -634,6 +660,36 @@ class TestMorrison:
         residual = constants.c_pd * out.dT_dt + constants.L_v * out.dq_v_dt
         assert float(jnp.max(jnp.abs(residual))) < 5e-3
 
+    def test_total_water_conservation_under_heavy_clamp(self):
+        """Morrison total water conservation in a hydrostatic column
+        under heavy q_c / q_i / q_s clamp activity.  Locks in the
+        iter-35 consolidation onto ``donor_clamp_scale``."""
+        ncol, nlev = 2, 10
+        T = jnp.full((ncol, nlev), 280.0)
+        p_half = jnp.linspace(1e4, 1e5, nlev + 1)[None, :].repeat(ncol, axis=0)
+        p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+        rho = p_full / (constants.R_d * T)
+        dp = p_half[:, 1:] - p_half[:, :-1]
+        dz = dp / (rho * constants.g)
+        q_sat = saturation_mixing_ratio(T, p_full)
+        q_v = q_sat * 1.001
+        h = make_zero_hydrometeors(ncol, nlev)
+        h = h._replace(
+            q_c=jnp.full_like(T, 1e-4),
+            q_r=jnp.full_like(T, 5e-3),
+            q_i=jnp.full_like(T, 1e-4),
+            q_s=jnp.full_like(T, 1e-3),
+            N_i=jnp.full_like(T, 1.0e4),
+        )
+        out = morrison_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=1200.0)
+        total_tend = (
+            out.dq_v_dt + out.dq_c_dt + out.dq_r_dt
+            + out.dq_i_dt + out.dq_s_dt
+        )
+        col = jnp.sum(total_tend * dp / constants.g, axis=-1)
+        residual = col + out.precipitation
+        assert float(jnp.max(jnp.abs(residual))) < 1.0e-12
+
 
 # ======================================================================
 # Thompson tests
@@ -695,6 +751,37 @@ class TestThompson:
         out = thompson_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0)
         residual = constants.c_pd * out.dT_dt + constants.L_v * out.dq_v_dt
         assert float(jnp.max(jnp.abs(residual))) < 5e-3
+
+    def test_total_water_conservation_under_heavy_clamp(self):
+        """Thompson total water conservation in a hydrostatic column
+        under heavy q_c / q_i / q_s / graupel clamp activity.  Locks
+        in the iter-35 consolidation onto ``donor_clamp_scale``."""
+        ncol, nlev = 2, 10
+        T = jnp.full((ncol, nlev), 270.0)
+        p_half = jnp.linspace(1e4, 1e5, nlev + 1)[None, :].repeat(ncol, axis=0)
+        p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+        rho = p_full / (constants.R_d * T)
+        dp = p_half[:, 1:] - p_half[:, :-1]
+        dz = dp / (rho * constants.g)
+        q_sat = saturation_mixing_ratio(T, p_full)
+        q_v = q_sat * 1.001
+        h = make_zero_hydrometeors(ncol, nlev)
+        h = h._replace(
+            q_c=jnp.full_like(T, 1e-4),
+            q_r=jnp.full_like(T, 1e-3),
+            q_i=jnp.full_like(T, 1e-4),
+            q_s=jnp.full_like(T, 5e-4),
+            q_g=jnp.full_like(T, 5e-4),
+            N_i=jnp.full_like(T, 1.0e4),
+        )
+        out = thompson_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=1200.0)
+        total_tend = (
+            out.dq_v_dt + out.dq_c_dt + out.dq_r_dt
+            + out.dq_i_dt + out.dq_s_dt + out.dq_g_dt
+        )
+        col = jnp.sum(total_tend * dp / constants.g, axis=-1)
+        residual = col + out.precipitation
+        assert float(jnp.max(jnp.abs(residual))) < 1.0e-12
 
 
 # ======================================================================

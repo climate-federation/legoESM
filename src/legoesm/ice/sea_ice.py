@@ -487,8 +487,18 @@ def _step_dynamic(
         # ---- 4. ITD remap (including temperature for enthalpy conservation) ----
         h, conc, T_ice = linear_remap(h_old, conc_old, h, conc, n_cat, T_new=T_ice)
     else:
+        # Single-category dynamic-path thermo.  Use the same bulk-flux
+        # dispatch (MOST / COARE / Large-Yeager / simple_bulk) as the
+        # slab path + multi-cat path + diagnostic ``_build_response``
+        # so state and diagnostics use the same closure.  Earlier this
+        # branch fell through to ``simple_bulk_fluxes`` regardless of
+        # ``config.bulk_scheme``.  Codex iter-39 #1.
+        _, _, shflx_sc, lhflx_sc = _bulk_flux_dispatch(
+            T_ice, forcing, config, U_min,
+        )
         h, T_ice, conc = _thermo_single(
             h, T_ice, conc, forcing, ocean_sst, config, U_min, dt,
+            shflx=shflx_sc, lhflx=lhflx_sc,
         )
 
     # Re-aggregate for coupler response
