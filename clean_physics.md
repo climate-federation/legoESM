@@ -102,3 +102,36 @@ Compression iteration.  Consolidated iter-1 through iter-8 entries into the
 "Iterations 1-8 — Summary" section above so the working log stays under the
 auto-loaded MEMORY.md / context envelope.  All previous detailed entries
 moved to commit messages on `clean_physics`.
+
+### Iteration 10 — 2026-05-12
+
+**Action:** `ocean/vertical_mixing/kpp.py` — `kpp_vertical_mixing` now accepts
+optional `dt`; when supplied it is threaded into the two
+`vertical_diffusion_variable_K` calls inside the explicit branch so the
+leaf CFL cap (iter-5) fires on KPP `K_v`/`A_v`.  Without this plumb,
+KPP's own `cfg.K_max` cap bounded K from above but couldn't enforce
+`K·dt/dz² ≤ ½` on thin upper layers.  Default `dt=None` keeps current
+behaviour for all existing callers.
+
+**Tests (post iter-10):**
+- 25 KPP / vertical-mixing tests pass.
+- 179 ocean tests (mpas physics + mpas ocean + ocean.py) pass.
+
+### Inspected & clean (no fix needed)
+- `land/snow_budget.py` — energy-limited melt with `constants.L_f` /
+  `constants.T_freeze`; positivity guards intact.
+- `land/carbon/carbon_cycle.py` — proper `jnp.maximum`/`jnp.clip` on GPP,
+  phenology, NPP allocation.
+- `land/richards.py` — implicit Picard + tridiagonal solve (unconditionally
+  stable).
+- `land/soil_thermal.py` — backward Euler + tridiagonal solve.
+- `atmosphere/physics/turbulence/vertical_diffusion.py` — implicit (uses
+  tridiagonal).
+- `atmosphere/physics/clouds/cloud_fraction.py` — shared
+  `saturation_mixing_ratio`, no inline Tetens.
+- `atmosphere/physics/gravity_wave_drag/lindzen.py` — `constants.g`,
+  `constants.p_ref`, `constants.kappa` references; differentiable scan.
+- `ocean/physics/shortwave_penetration.py` — conservation correction at
+  bottom layer; no flux leakage.
+- `ocean/physics/bottom_drag/quadratic.py` — proper sign convention,
+  shared dz-from-jacobian.

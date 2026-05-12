@@ -166,6 +166,7 @@ def kpp_vertical_mixing(
     Q_sfc_S: jnp.ndarray | None = None,
     h_bl_prev: jnp.ndarray | None = None,
     apply_diffusion: bool = True,
+    dt: float | None = None,
 ) -> VerticalMixingOutput:
     """Apply LMD94-style KPP vertical mixing.
 
@@ -345,15 +346,24 @@ def kpp_vertical_mixing(
     # non-local KPP transport (counter-gradient flux) below is *not* a
     # diffusion and is always returned in dT/dS.
     if apply_diffusion:
+        # Pass ``dt`` (when provided) so the explicit-Euler CFL cap
+        # added in clean_physics iter-5 fires inside
+        # ``vertical_diffusion_variable_K``.  KPP's own ``cfg.K_max``
+        # bounds K from above but cannot enforce ``K·dt/dz²≤½`` on
+        # thin upper layers; the leaf cap is the safety net.
         vel = jnp.stack([u, v], axis=0)
         vel_tend = jax.vmap(
-            lambda q: vertical_diffusion_variable_K(q, z_coord, jacobian, A_v),
+            lambda q: vertical_diffusion_variable_K(
+                q, z_coord, jacobian, A_v, dt=dt,
+            ),
             in_axes=0, out_axes=0,
         )(vel)
 
         tracers = jnp.stack([T, S], axis=0)
         tr_tend = jax.vmap(
-            lambda q: vertical_diffusion_variable_K(q, z_coord, jacobian, K_v),
+            lambda q: vertical_diffusion_variable_K(
+                q, z_coord, jacobian, K_v, dt=dt,
+            ),
             in_axes=0, out_axes=0,
         )(tracers)
     else:
