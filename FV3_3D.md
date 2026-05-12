@@ -1185,6 +1185,18 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 565: **C32 combined-best — edge_std plateaus**.
+  Extend iter-564 to C32:
+  - C24: edge_std = 5.83e-3, int_std = 2.12e-3
+  - C32: edge_std = 5.77e-3, int_std = 1.47e-3
+  - C24→C32 edge: -1% (essentially flat)
+  - C24→C32 int:  -31%
+  Edge_std has plateaued at ~5-6 mK with this configuration.
+  Interior continues converging.  The ratio grows with N but
+  the ABSOLUTE edge artifact is bounded ~5 mK on smooth ICs
+  with iters=8.  This is effectively the noise floor for the
+  iter-466/505/562 stack at smooth ICs.  1/1 in 40 s.  Wired
+  into iter-383 sweep (now 146).
 - Iter 564: **BEST combined result** — iters=8 + clip @ C24.
   Combine all best-known knobs:
   - ``make_legoesm_nh_min_edge_config`` (iter-466 baseline)
