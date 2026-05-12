@@ -1195,6 +1195,31 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 707: **FV3 ``helicity_relative_caps_fv3``** — SRH with external
+  (uc, vc) storm motion.
+  Faithful JAX port of FV3 ``helicity_relative_CAPS``
+  (tools/fv_diagnostics.F90:4894-4967).
+
+  Variant of iter-687 SRH that takes storm motion ``(uc, vc)`` as
+  INPUT rather than computing as depth-weighted mean wind.  Pairs
+  with iter-689 ``bunkers_vector_fv3`` for the empirical right-mover
+  storm-motion predictor.
+
+      SRH = Σ_k_in_window (ua - uc)·dv_dz - (va - vc)·du_dz
+
+  Algorithm identical to iter-687 (dz_eff masking + centered shear
+  finite differences); only difference is uc/vc as input.
+
+  Tests (6/6 in <3 s):
+  1. Uniform wind → SRH = 0 regardless of (uc, vc).
+  2. Zero wind → SRH = 0.
+  3. Passing iter-687's internal mean as (uc, vc) reproduces
+     iter-687 output exactly.
+  4. Pairs with iter-689 Bunkers (uc, vc) on random column.
+  5. 3-D winds + 2-D (uc, vc) → 2-D SRH output.
+  6. hydrostatic=True without pt/q/peln raises ValueError.
+
+  Wired into iter-383 sweep (now 271).
 - Iter 706: **FV3 ``prt_height_fv3``** — p-surface height with lat-band means.
   Faithful JAX port of FV3 ``prt_height``
   (tools/fv_diagnostics.F90:4413-4460).  Composes iter-684

@@ -3318,6 +3318,86 @@ def bunkers_vector_fv3(
     return uc, vc
 
 
+def helicity_relative_caps_fv3(
+    ua: jax.Array, va: jax.Array,
+    uc: jax.Array, vc: jax.Array,
+    delz: jax.Array | None = None,
+    pt: jax.Array | None = None, q: jax.Array | None = None,
+    peln: jax.Array | None = None,
+    z_bot: float = 0.0,
+    z_top: float = 3000.0,
+    hydrostatic: bool = False,
+    zvir: float | None = None,
+) -> jax.Array:
+    """FV3_3D iter 707: storm-relative helicity (SRH) with external (uc, vc).
+
+    Faithful JAX port of FV3 ``helicity_relative_CAPS``
+    (tools/fv_diagnostics.F90:4894-4967).
+
+    Variant of iter-687 ``helicity_relative_fv3`` that takes the
+    storm motion ``(uc, vc)`` as INPUT rather than computing it as
+    the depth-weighted mean wind.  Pairs with iter-689
+    ``bunkers_vector_fv3`` which produces the empirical right-mover
+    storm motion.
+
+    Algorithm (identical to iter-687 once (uc, vc) given):
+
+        dz_eff[k] = max(0, min(zh_above, z_top) - max(zh_below, z_bot))
+        du_dz[k]  = 0.5·(ua[k-1] - ua[k+1])    (interior centered)
+        dv_dz[k]  = 0.5·(va[k-1] - va[k+1])
+        SRH = Σ_k_in_window (ua-uc)·dv_dz - (va-vc)·du_dz
+
+    Parameters
+    ----------
+    ua, va : jax.Array, shape (..., km)
+        A-grid wind components.
+    uc, vc : jax.Array, shape (...,)
+        Storm motion components (m/s) — typically from
+        ``bunkers_vector_fv3`` (iter-689).
+    delz, pt, q, peln, zvir : optional
+        Vertical grid info (see iter-687).
+    z_bot, z_top : float, default 0, 3000 m.
+    hydrostatic : bool, default False.
+
+    Returns
+    -------
+    srh : jax.Array, shape (...,)
+        Storm-relative helicity (m²/s²).
+    """
+    if hydrostatic:
+        if pt is None or q is None or peln is None:
+            raise ValueError("hydrostatic=True requires pt, q, peln")
+        if zvir is None:
+            zvir = constants.R_v / constants.R_d - 1.0
+        rdg = constants.R_d / constants.g
+        dz = rdg * pt * (1.0 + zvir * q) * (peln[..., 1:] - peln[..., :-1])
+    else:
+        if delz is None:
+            raise ValueError("hydrostatic=False requires delz")
+        dz = -delz
+
+    dz_reversed = dz[..., ::-1]
+    cumsum_from_surface = jnp.cumsum(dz_reversed, axis=-1)
+    zh_above = cumsum_from_surface[..., ::-1]
+    zh_below = zh_above - dz
+    dz_eff = jnp.maximum(
+        0.0,
+        jnp.minimum(zh_above, z_top) - jnp.maximum(zh_below, z_bot),
+    )
+
+    du_dz = jnp.zeros_like(ua)
+    dv_dz = jnp.zeros_like(va)
+    du_dz = du_dz.at[..., 1:-1].set(
+        0.5 * (ua[..., :-2] - ua[..., 2:])
+    )
+    dv_dz = dv_dz.at[..., 1:-1].set(
+        0.5 * (va[..., :-2] - va[..., 2:])
+    )
+    in_window = dz_eff > 0.0
+    srh_k = (ua - uc[..., None]) * dv_dz - (va - vc[..., None]) * du_dz
+    return jnp.sum(jnp.where(in_window, srh_k, 0.0), axis=-1)
+
+
 def helicity_relative_fv3(
     ua: jax.Array, va: jax.Array,
     delz: jax.Array | None = None,
