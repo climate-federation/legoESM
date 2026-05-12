@@ -1015,6 +1015,19 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 495: isolate ``fv3_divergence_corner_3d`` — duogrid-
+  invariant.  Apply the corner-div op to random u/v field at
+  corners with grid_off vs grid_on:
+    no-duogrid: edge × 1.00, interior × 1.00
+    duogrid:    edge × 1.00, interior × 1.00
+  IDENTICAL output between duogrid ON/OFF.  Reason: corner-
+  div op uses corner-stored u/v directly without needing
+  inter-face halo (corners ARE the face boundary).  Rules out
+  ``fv3_divergence_corner_3d`` as the dycore amplifier.
+  Remaining suspect: cell-center→corner halo-aware interp
+  (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
+  used in the NH (cell-center u, v) → D-grid corner lift.
+  1/1 in 11 s.  Wired into iter-383 sweep (now 87).
 - Iter 493: comprehensive clip propagation refutes iter-492
   "incomplete plumbing" hypothesis.  Patched 4 ``pad_halo_4d``
   import aliases simultaneously (compressible_euler_cdgrid +
