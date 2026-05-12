@@ -1195,6 +1195,34 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 731: **``compute_pe_from_delp_fv3``** — interface pressure from delp.
+  Faithful port of FV3's pe accumulation pattern (dyn_core.F90,
+  fv_mapz.F90, fv_treat_da_inc.F90):
+
+      pe[0] = p_top
+      pe[k] = pe[k-1] + delp[k-1]               (k = 1..km)
+
+  Vectorized via cumulative sum.  Inverse of standard
+  delp = pe[k+1] − pe[k].
+
+  Used in IC ingestion (when only delp + p_top are known) and
+  vertical-remap initialization.
+
+  Pairs with iter-724 ``compute_hybrid_pressure_fv3`` (different
+  input pathway: ak/bk/ps → pe), iter-722 ``compute_pkz_fv3``
+  (consumes peln = log(pe)), iter-726 ``hydrostatic_delz_fv3``
+  (consumes pe).
+
+  Tests (7/7 in <1 s):
+  1. Uniform delp → analytical pe array.
+  2. pe[0] = p_top exactly.
+  3. pe[km] = p_top + Σ delp.
+  4. Monotone increasing.
+  5. Composes with iter-724 hybrid: recovers pe from its delp.
+  6. 3-D shape.
+  7. No NaN/Inf.
+
+  Wired into iter-383 sweep (now 295).
 - Iter 730: **``dz_from_delz_or_hydrostatic_fv3`` helper + 5-iter refactor**.
 
   Extracted common dz reconstruction pattern from supercell suite:

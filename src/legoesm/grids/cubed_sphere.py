@@ -2806,6 +2806,49 @@ def get_pressure_given_height_fv3(
     return p
 
 
+def compute_pe_from_delp_fv3(
+    delp: jax.Array,
+    p_top: float,
+) -> jax.Array:
+    """FV3_3D iter 731: interface pressure from layer thicknesses.
+
+    Faithful JAX port of FV3's pe accumulation pattern (used at
+    multiple sites in dyn_core.F90, fv_mapz.F90, fv_treat_da_inc.F90):
+
+        pe[0] = p_top                          (top of atmosphere)
+        pe[k] = pe[k-1] + delp[k-1]            (k = 1..km)
+
+    Vectorized via cumulative sum.  Inverse of the standard
+    delp = pe[k+1] − pe[k] computation.
+
+    Used in IC ingestion (when only delp + p_top are known),
+    vertical-remap initialization, and any path that builds pe
+    incrementally from layer thicknesses.
+
+    Pairs with:
+      * iter-724 ``compute_hybrid_pressure_fv3`` (ak/bk/ps → pe)
+        — different input
+      * iter-722 ``compute_pkz_fv3`` (consumes peln = log(pe))
+      * iter-726 ``hydrostatic_delz_fv3`` (consumes pe)
+
+    Parameters
+    ----------
+    delp : jax.Array, shape (..., km)
+        Layer pressure thickness (Pa, positive).
+    p_top : float
+        Top-of-atmosphere pressure (Pa).
+
+    Returns
+    -------
+    pe : jax.Array, shape (..., km+1)
+        Interface pressure (Pa, monotone increasing).
+    """
+    cumsum_delp = jnp.cumsum(delp, axis=-1)
+    pe_top = jnp.full_like(delp[..., :1], p_top)
+    pe_below = p_top + cumsum_delp
+    return jnp.concatenate([pe_top, pe_below], axis=-1)
+
+
 def dz_from_delz_or_hydrostatic_fv3(
     delz: jax.Array | None = None,
     pt: jax.Array | None = None,
