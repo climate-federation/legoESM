@@ -1175,6 +1175,15 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 551: **clip helper performance at C16** — does overhead
+  scale?  Measured at C16, 5-step avg:
+  - raw jit:           9.8 ms/step
+  - make_clipped_step: 9.6 ms/step
+  - overhead: **-1.6%** (within noise)
+  At C8 (iter-541): +0.6%.  At C16: -1.6%.  Both within the
+  measurement noise — clip overhead is **negligible at both
+  resolutions**.  Cost of the helper is essentially free.
+  1/1 in 49 s.  Wired into iter-383 sweep (now 134).
 - **Iters 541-549 (compacted iter 550)**: scan-step API +
   comprehensive helper validation (terrain, tracers,
   performance, end-to-end).
