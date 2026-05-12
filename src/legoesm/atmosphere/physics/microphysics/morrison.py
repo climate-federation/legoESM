@@ -85,7 +85,7 @@ def morrison_microphysics(
     dN_r_sc, dN_r_br = self_collection_breakup(
         N_r, q_r, rho, config.k_sc, config.breakup_sharpness, config.D_eq,
     )
-    evaporation = rain_evaporation(q_v, q_r, q_sat, config.evap_coeff)
+    evaporation = rain_evaporation(q_v, q_r, q_sat, config.evap_coeff, dt=dt)
 
     # === ICE PHASE ===
     T_freeze = constants.T_freeze
@@ -223,9 +223,15 @@ def morrison_microphysics(
     V_t_s = config.a_v_s * safe_pow(jnp.clip(q_s, 0.0) * rho_ratio, config.b_v_s)
     V_t_s = jnp.clip(V_t_s, 0.0, 5.0)
 
-    sed_r = sedimentation_tendency(q_r, rho, V_t_r, dz, dt=dt)
-    sed_i = sedimentation_tendency(q_i, rho, V_t_i, dz, dt=dt)
-    sed_s = sedimentation_tendency(q_s, rho, V_t_s, dz, dt=dt)
+    sed_r, precip_r = sedimentation_tendency(
+        q_r, rho, V_t_r, dz, dt=dt, return_surface_flux=True,
+    )
+    sed_i, precip_i = sedimentation_tendency(
+        q_i, rho, V_t_i, dz, dt=dt, return_surface_flux=True,
+    )
+    sed_s, precip_s = sedimentation_tendency(
+        q_s, rho, V_t_s, dz, dt=dt, return_surface_flux=True,
+    )
 
     # === LATENT HEATING ===
     L_v = constants.L_v
@@ -259,10 +265,9 @@ def morrison_microphysics(
     dN_r_dt = dN_r_au + dN_r_sc + dN_r_br
     dN_i_dt = dN_i_nuc - aggregation * jnp.clip(N_i, 0.0) / jnp.clip(q_i, 1e-15)
 
-    # Precipitation (rain + ice + snow at surface)
-    precip_r = jnp.clip(q_r[:, -1], 0.0) * rho[:, -1] * jnp.clip(V_t_r[:, -1], 0.0)
-    precip_i = jnp.clip(q_i[:, -1], 0.0) * rho[:, -1] * jnp.clip(V_t_i[:, -1], 0.0)
-    precip_s = jnp.clip(q_s[:, -1], 0.0) * rho[:, -1] * jnp.clip(V_t_s[:, -1], 0.0)
+    # Precipitation (rain + ice + snow at surface) uses the dt-limited
+    # surface flux from ``sedimentation_tendency`` so column water
+    # conservation holds exactly when the CFL limiter fires.
     precipitation = precip_r + precip_i + precip_s
 
     # Pin dtype to the input precision so we never silently promote

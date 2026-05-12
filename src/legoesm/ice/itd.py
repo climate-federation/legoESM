@@ -312,14 +312,22 @@ def linear_remap(
         h_clamped_lo,
     )
     # Rescale concentration to preserve volume.  Where no clamp
-    # fired ``h_clamped == h_pre`` so the ratio is 1.0.  Cap final
-    # ``a_remap`` to [0, 1] — when h_pre << lo and a was near 1,
-    # the rescaled a falls toward 0 (sliver of thin ice promoted
-    # to the bin floor takes up proportionally less area).
+    # fired ``h_clamped == h_pre`` so the ratio is 1.0.  Two regimes:
+    #   1. ``a_rescaled ≤ 1``: ordinary case, keep clamped thickness.
+    #   2. ``a_rescaled > 1``: would-be excess area is folded back into
+    #      the thickness (``h_final = a_pre · h_pre``) so volume is
+    #      conserved exactly.  This locally violates the upper bin
+    #      bound when concentration saturates, but preserves mass —
+    #      the proper Lipscomb redistribution to the next category is
+    #      the long-term structural fix.  Codex iter-3 finding #4.
     h_safe = jnp.maximum(h_clamped, 1e-20)
-    a_remap = a_remap * h_pre / h_safe
-    a_remap = jnp.clip(a_remap, 0.0, 1.0)
-    h_remap = h_clamped
+    a_pre = a_remap
+    vol_pre = a_pre * h_pre
+    a_rescaled = a_pre * h_pre / h_safe
+    saturated = a_rescaled > 1.0
+    a_remap = jnp.clip(a_rescaled, 0.0, 1.0)
+    # When saturated: put the residual volume back into h.
+    h_remap = jnp.where(saturated, vol_pre, h_clamped)
 
     if T_new is None:
         return h_remap, a_remap

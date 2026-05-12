@@ -90,8 +90,15 @@ def _compute_column_geometry(
     """
     dz = compute_layer_dz(T, p_half, q_v=q_v)
     rho = compute_rho(T, p_full, q_v=q_v)
-    # Cumulative height from the surface (level nlev-1) upward.
-    z = jnp.cumsum(dz[:, ::-1], axis=1)[:, ::-1]
+    # Full-level (cell-centre) height above the surface.  Cumulative
+    # ``cumsum(dz[::-1])[::-1]`` gives the height of the *top* of each
+    # layer (interface above the level); subtracting half the local
+    # thickness places the height at the layer mid-point, which is
+    # where ``T``/``q`` live.  An earlier formulation used the layer-top
+    # value, biasing parcel ascent diagnostics by ~½ layer per level
+    # (~10–250 m depending on resolution).  Codex iter-3 finding #8.
+    z_top = jnp.cumsum(dz[:, ::-1], axis=1)[:, ::-1]
+    z = z_top - 0.5 * dz
     return dz, rho, z
 
 

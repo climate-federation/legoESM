@@ -238,8 +238,14 @@ def self_collection_breakup(N_r, q_r, rho, k_sc, breakup_sharpness, D_eq):
     return dN_r_sc, dN_r_br
 
 
-def rain_evaporation(q_v, q_r, q_sat, evap_coeff):
+def rain_evaporation(q_v, q_r, q_sat, evap_coeff, dt=None):
     """Compute rain evaporation in subsaturated air.
+
+    When ``dt`` is provided the returned evaporation rate is
+    donor-limited: ``evap · dt ≤ q_r``.  Without the limit one explicit
+    step can evaporate more rain than exists (and over-heat/cool the
+    column), since the Marshall-Palmer rate scales as ``q_r^0.525``
+    rather than ``q_r``.  Codex finding iter-3 #6.
 
     Parameters
     ----------
@@ -251,12 +257,20 @@ def rain_evaporation(q_v, q_r, q_sat, evap_coeff):
         Saturation mixing ratio [kg/kg].
     evap_coeff : float
         Evaporation rate coefficient.
+    dt : float, optional
+        Physics step [s].  When provided, clamp the evaporation rate
+        so ``evap · dt ≤ q_r`` (donor positivity).
 
     Returns
     -------
     array : Evaporation rate [kg/kg/s].
     """
     subsaturation = jnp.clip(q_sat - q_v, 0.0) / jnp.clip(q_sat, 1e-10)
+    q_r_pos = jnp.clip(q_r, 0.0, None)
     # Marshall-Palmer ventilation factor q_r^0.525 — fractional power has
     # an unbounded derivative at q_r=0; safe_pow handles the AD guard.
-    return evap_coeff * subsaturation * safe_pow(q_r, 0.525)
+    rate = evap_coeff * subsaturation * safe_pow(q_r_pos, 0.525)
+    if dt is not None:
+        max_rate = q_r_pos / jnp.maximum(dt, 1.0e-12)
+        rate = jnp.minimum(rate, max_rate)
+    return rate

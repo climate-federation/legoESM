@@ -84,6 +84,36 @@ Branch: `clean_physics`. Driven by Ralph loop with `/codex:adversarial-review`.
 - `tests/unit/test_sea_ice_dynamics.py` → 50/50 pass (including the previously-strict-xfail `test_strict_volume_conservation_under_clamping`).
 - `tests/unit/test_diff_sea_ice.py` → 11/11 pass.
 
+### Iteration 4 — 2026-05-12
+
+**Codex iter-3 review surfaced 8 follow-up findings:**
+
+1. `transport.py:113` — PPM still needs CFL subcycling; large `dt*u/dx` can overshoot and the final clip breaks conservation.
+2. `sea_ice.py:647` — FW/heat response uses `(h - h_old)` which includes transport+ITD redistribution; should use thermodynamic ΔV only.
+3. `sea_ice.py:583` — Multi-cat lead-freezing may double-deposit growth.
+4. `itd.py:320` — Conservation breaks when rescaled `a > 1`; should redistribute residual, not clip.
+5. `microphysics/output.py:150` — Precip diagnostic uses raw bottom flux, not the dt-limited one.
+6. `_warm_rain.py:262` — Rain evaporation not donor-limited against `q_r`.
+7. `enhanced_diffusion.py:68` — CFL cap uses `cfg.cfl_dt_estimate` instead of runtime `dt`.
+8. `mass_flux.py:94` — `z` for full levels offset by ~½ layer.
+
+**Actions (this iteration):**
+- [x] #5 `microphysics/output.py:sedimentation_tendency` — new `return_surface_flux=True` kwarg returns the dt-limited bottom flux; all four schemes (kessler, morrison, thompson, seifert_beheng) now derive `precipitation` from this rather than `q_r·ρ·V_t` (which exceeds actual deposited mass when limiter fires).
+- [x] #6 `_warm_rain.py:rain_evaporation` — new optional `dt` kwarg donor-limits evaporation against available `q_r` (`evap·dt ≤ q_r`). All callers (kessler — newly refactored to use the shared helper — plus thompson, morrison, seifert_beheng) pass `dt`.
+- [x] #8 `mass_flux.py:_compute_column_geometry` — full-level height now uses `cumsum(dz)[::-1] - 0.5·dz` (mid-layer) instead of the layer-top.  Earlier value biased parcel-ascent diagnostics by ~½ layer (10–250 m).
+- [x] #4 `itd.py:linear_remap` — when the volume-rescale would put `a > 1`, the residual is now folded back into thickness (`h = a_pre·h_pre`) so volume is preserved.  Earlier `jnp.clip(a, 0, 1)` discarded the excess.  Volume-conservation test continues to pass.
+
+**Deferred to iter-5 (codex iter-3 findings #1, #2, #3, #7 + narrow review):**
+- transport.py PPM CFL subcycling (`lax.scan` to CFL ≤ 1).
+- sea_ice freshwater/heat from thermodynamic ΔV only (exclude transport/ITD redistribution).
+- sea_ice multi-cat lead-freezing volume consistency.
+- enhanced_diffusion: thread real `dt` instead of `cfl_dt_estimate`.
+- ocean mixing.py / lateral_mixing CFL caps (5 findings).
+
+**Tests (post iter-4):**
+- microphysics + convection + sea-ice unit tests → 182/182 pass.
+- atmosphere hydrostatic integration → 17/17 pass.
+
 **Tests (post-fix):**
 - atmosphere microphysics + convection + land multilayer: 172/172 pass.
 - sea ice unit suite: 78 pass, 1 pre-existing thermo failure (`Test8i_StefanBoltzmann::test_lw_up_matches` — confirmed pre-existing in iter-1).

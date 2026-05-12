@@ -115,7 +115,8 @@ def sedimentation_tendency(
     V_t: jax.Array,
     dz: jax.Array,
     dt: float | jax.Array | None = None,
-) -> jax.Array:
+    return_surface_flux: bool = False,
+) -> jax.Array | tuple[jax.Array, jax.Array]:
     """Compute sedimentation tendency from vertical flux divergence.
 
     When ``dt`` is supplied the outgoing flux at each level is capped
@@ -138,11 +139,18 @@ def sedimentation_tendency(
     dt : float, optional
         Physics step [s].  When provided, applies CFL-aware positivity
         limiter (recommended).
+    return_surface_flux : bool, default False
+        When True returns ``(tendency, surface_flux)`` where
+        ``surface_flux`` is the dt-limited outgoing mass flux at the
+        bottom interface [kg/m²/s].  Precipitation diagnostics MUST use
+        this — using the raw ``V_t · q · rho`` at the surface breaks
+        column water conservation whenever the limiter fires.
 
     Returns
     -------
-    jax.Array
-        Sedimentation tendency [kg/kg/s], shape (ncol, nlev).
+    jax.Array or tuple
+        Sedimentation tendency [kg/kg/s], shape (ncol, nlev); or
+        ``(tendency, surface_flux)`` if ``return_surface_flux=True``.
     """
     q_pos = jnp.clip(q, 0.0, None)
     flux = V_t * q_pos * rho  # (ncol, nlev) outgoing flux density [kg/m^2/s]
@@ -160,4 +168,9 @@ def sedimentation_tendency(
     # zero buffer + concatenate.
     flux_in = jnp.pad(flux[:, :-1], ((0, 0), (1, 0)))
     dz_safe = jnp.clip(dz, 1.0, None)
-    return (flux_in - flux) / (rho * dz_safe)
+    tendency = (flux_in - flux) / (rho * dz_safe)
+
+    if return_surface_flux:
+        # Bottom outgoing flux is the precipitation reaching the surface.
+        return tendency, flux[:, -1]
+    return tendency

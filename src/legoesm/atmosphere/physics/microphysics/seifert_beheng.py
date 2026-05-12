@@ -87,7 +87,7 @@ def seifert_beheng_microphysics(
     )
 
     # 5. Rain evaporation
-    evaporation = rain_evaporation(q_v, q_r, q_sat, config.evap_coeff)
+    evaporation = rain_evaporation(q_v, q_r, q_sat, config.evap_coeff, dt=dt)
 
     # === Joint donor clamp on q_c sinks ===
     # ``saturation_adjustment`` already donor-clamps the evaporation
@@ -121,7 +121,9 @@ def seifert_beheng_microphysics(
         jnp.clip(q_r, 0.0) * rho / jnp.clip(rho_sfc, 0.1), config.b_v_r,
     )
     V_t_r = jnp.clip(V_t_r, 0.0, 20.0)
-    sed_r = sedimentation_tendency(q_r, rho, V_t_r, dz, dt=dt)
+    sed_r, precipitation = sedimentation_tendency(
+        q_r, rho, V_t_r, dz, dt=dt, return_surface_flux=True,
+    )
 
     # 7. Latent heating
     dT_dt = constants.L_v * (condensation - evaporation) / constants.c_pd
@@ -135,9 +137,9 @@ def seifert_beheng_microphysics(
     dN_c_dt = -dq_c_au * rho / jnp.clip(x_c, 1e-20)
     dN_r_dt = dN_r_au + dN_r_sc + dN_r_br
 
-    # Precipitation
-    q_r_bot = jnp.clip(q_r[:, -1], 0.0)
-    precipitation = q_r_bot * rho[:, -1] * jnp.clip(V_t_r[:, -1], 0.0)
+    # Precipitation now comes from the dt-limited bottom flux returned
+    # by ``sedimentation_tendency`` so column water conservation holds
+    # exactly when the CFL limiter fires.
 
     # Pin dtype to the input precision so we never silently promote
     # the unused-species placeholders to f64 under x64 mode.
