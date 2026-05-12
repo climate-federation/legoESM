@@ -3693,6 +3693,50 @@ def coriolis_parameter_fv3(
     return 2.0 * constants.Omega * jnp.sin(lat_rad)
 
 
+def inertial_period_fv3(
+    lat: jax.Array,
+    units: str = "rad",
+    f_floor: float = 1e-12,
+) -> jax.Array:
+    """FV3_3D iter 779: inertial-oscillation period 2π/|f|.
+
+    Period of a free inertial (Coriolis-only) oscillation:
+
+        T_inertial = 2π / |f|,    f = 2·Ω·sin(lat)   (iter-778)
+
+    Returned in **seconds**.  Near-pole values approach 2π/(2·Ω) =
+    sidereal half-day ≈ 11.97 h.  Mid-latitude 30°N has |f| = Ω
+    → T_inertial = 2π/Ω = one sidereal day ≈ 86164 s.  Equator
+    has f = 0 → T = ∞; the helper clamps |f| to ``f_floor`` to
+    keep output finite.
+
+    Used by:
+      * Ocean mixed-layer near-inertial wave (NIW) decay timescales.
+      * Atmospheric inertia-gravity wave dispersion relations.
+      * Mesoscale eddy diagnostic Rhines scale & PV inversion.
+      * MJO / equatorial-wave critical-latitude analysis.
+
+    Composes with iter-778 ``coriolis_parameter_fv3``.
+
+    Parameters
+    ----------
+    lat : jax.Array
+        Latitude (rad by default; pass ``units='deg'`` for degrees).
+    units : {'rad', 'deg'}
+    f_floor : float
+        Lower bound on |f| (s⁻¹) to avoid div-by-0 at equator.
+        Default 1e-12 → equatorial T ≈ 6.3·10¹² s (≈ 2·10⁵ years —
+        effectively "no inertial oscillation").
+
+    Returns
+    -------
+    t_inertial : jax.Array
+        Inertial period (s).
+    """
+    f = coriolis_parameter_fv3(lat, units=units)
+    return 2.0 * jnp.pi / jnp.maximum(jnp.abs(f), f_floor)
+
+
 def kinetic_energy_fv3(
     ua: jax.Array,
     va: jax.Array,

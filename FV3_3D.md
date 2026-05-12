@@ -5214,3 +5214,37 @@ caller; the configurable-Ω caller (`gh_jet_fv3`) is documented
 as intentionally not delegated.  Pure JAX, vmap-compatible.  No
 new physical constants introduced.
 
+## Iter 779 — inertial_period_fv3 (2π/|f|)
+
+Added `inertial_period_fv3(lat, units='rad', f_floor=1e-12)` to
+`grids/cubed_sphere.py`.  Composes iter-778 Coriolis:
+
+```
+T_inertial = 2π / max(|f|, f_floor)     [seconds]
+```
+
+Near-pole (lat = π/2): T ≈ 2π/(2·Ω) ≈ 11.97 h.
+Mid-lat 30°: |f| = Ω → T = 2π/Ω ≈ 1 sidereal day (86164 s).
+Equator (f = 0): T → ∞; clamped via ``f_floor`` to a finite huge
+value (default 6.3·10¹² s ≈ "no inertial oscillation").
+
+Used by ocean mixed-layer near-inertial wave (NIW) decay,
+atmospheric inertia-gravity wave dispersion, mesoscale eddy
+Rhines scale, MJO/equatorial-wave critical-latitude analysis.
+
+Test: `tests/test_fv3_inertial_period_iter779.py` (6 tests:
+pole T ≈ 11.97 h, 30°N T ≈ 23.93 h, equator T finite via floor,
+hemisphere symmetry T(+lat)=T(-lat), composition with iter-778
+matches 2π/|f|, 3-D shapes + finite + positive).
+
+### Why this iteration was meaningful
+
+Inertial period sets the natural-oscillation timescale of any
+unforced rotating-frame disturbance.  Critical for: (1) ocean
+near-inertial wave (NIW) spectral analysis (storm-driven NIWs
+decay over multiple T_inertial); (2) selecting mixed-layer
+turbulence-scheme timesteps (must resolve ½·T_inertial at high
+latitudes); (3) gravity-wave drag spectra (f as low cutoff);
+(4) Rhines-scale derivation L_R = √(U/β).  Pure JAX, vmap-
+compatible.  No new physical constants introduced.
+
