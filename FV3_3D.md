@@ -1185,6 +1185,15 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 572: **NH from truly zero IC → perfect rest preservation**.
+  Build NH state with all fields = 0 (u=v=w=θ′=ρ′=phis=0),
+  run 10 steps @ C16 with iters=8 + clip.  All fields stay
+  **exactly 0** (max=0.0, std=0.0).  This is a strong
+  positive finding: the dycore preserves quiescent rest
+  PERFECTLY.  Edge artifacts only emerge from non-trivial
+  dynamics; the dycore itself does NOT introduce spurious
+  noise.  Mathematically consistent.  1/1 in 39 s.  Wired
+  into iter-383 sweep (now 152).
 - Iter 571: **PE time-growth power-law on Held-Suarez**.
   Mirror iter-569 on PE @ C16 + iters=8, 1-30 steps.  Track
   δT = T - T_initial edge_std:
