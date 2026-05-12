@@ -1304,6 +1304,142 @@ def get_center_vect(
     return u1, u2
 
 
+def gnomonic_ed(im: int) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 621: equal-distance-edge cubed-sphere grid for face 2.
+
+    Faithful port of FV3 ``gnomonic_ed`` (fv_grid_utils.F90:1313-1407).
+    This is FV3's grid of choice for global cloud-resolving runs.
+
+    Properties (FV3 docstring):
+        - Defined by intersections of great circles
+        - max(dx,dy) / min(dx,dy) = √2 ≈ 1.4142
+        - Max aspect ratio = 1.06089
+        - N-S coordinate curves are const longitude on the 4 faces
+          with the equator
+
+    Algorithm:
+        1. East/West edges at constant longitude (0.75π, 1.25π).
+        2. North/South edges obtained by ``mirror_latlon`` of W
+           edge across the (NW, SE) diagonal.
+        3. Interior Cartesian coordinates obtained by projecting
+           edge values onto the constant-x = -1/√3 face cube.
+        4. Convert back to (lon, lat).
+
+    Parameters
+    ----------
+    im : int
+        Number of cells per face edge.  Grid has shape ``(im+1, im+1)``.
+
+    Returns
+    -------
+    lon, lat : jax.Array, shape ``(im+1, im+1)``
+        Cubed-sphere face-2 corner positions in radians.
+    """
+    rsq3 = 1.0 / jnp.sqrt(3.0)
+    alpha = jnp.arcsin(rsq3)
+    pi = jnp.pi
+    dely = 2.0 * alpha / im
+
+    n = im + 1
+
+    # Step 1: W and E edges (FV3 lines 1345-1350)
+    j_idx = jnp.arange(n, dtype=jnp.float64)
+    lon = jnp.zeros((n, n), dtype=jnp.float64)
+    lat = jnp.zeros((n, n), dtype=jnp.float64)
+    west_theta = -alpha + dely * j_idx
+    lon = lon.at[0, :].set(0.75 * pi)
+    lon = lon.at[im, :].set(1.25 * pi)
+    lat = lat.at[0, :].set(west_theta)
+    lat = lat.at[im, :].set(west_theta)
+
+    # Step 2: S and N edges by mirror_latlon of W edge column (FV3 lines 1354-1359)
+    # FV3 loop: for i in 2..im:
+    #   mirror_latlon( (lon[0,0], lat[0,0]),  (lon[im,im], lat[im,im]),
+    #                  (lon[0,i-1], lat[0,i-1]), (lon[i-1, 0], lat[i-1, 0]) )
+    # Vectorize over i ∈ [1, im-1] (0-indexed)
+    i_idx = jnp.arange(1, im, dtype=jnp.float64)
+    # Reference: SW corner (already at lon[0,0], lat[0,0]) and NE corner
+    # (already at lon[im,im], lat[im,im]).  But these are not yet set
+    # — lon[im,im] = lat[im,im] are from the W/E edge assignments.
+    # W/E edges already set lon[0,0]=0.75π, lat[0,0]=-α; lon[im,im]=1.25π,
+    # lat[im,im]=alpha.
+    lon_sw, lat_sw = lon[0, 0], lat[0, 0]
+    lon_ne, lat_ne = lon[im, im], lat[im, im]
+    # Source points (W edge column at j=i): vary i in [1, im-1]
+    i_int = jnp.arange(1, im)
+    lon_src = lon[0, i_int]
+    lat_src = lat[0, i_int]
+    lon_s_row, lat_s_row = mirror_latlon(
+        lon_sw, lat_sw,
+        lon_ne, lat_ne,
+        lon_src, lat_src,
+    )
+    # South edge (j=0): row i, S edge → (lamda(i,1), theta(i,1))
+    lon = lon.at[i_int, 0].set(lon_s_row)
+    lat = lat.at[i_int, 0].set(lat_s_row)
+    # North edge (j=im): same lon, theta flipped
+    lon = lon.at[i_int, im].set(lon_s_row)
+    lat = lat.at[i_int, im].set(-lat_s_row)
+
+    # Step 3: Convert edges to Cartesian, project onto constant-x face
+    # (FV3 lines 1370-1382)
+    # i=0 column (W edge), j ∈ [1, im-1]
+    x_w_full, y_w_full, z_w_full = latlon2xyz(lon[0, :], lat[0, :])
+    safe_x_w = jnp.where(jnp.abs(x_w_full) > 1e-30, x_w_full, 1.0)
+    pp2_i0 = -y_w_full * rsq3 / safe_x_w  # y' = -y * rsq3 / x
+    pp3_i0 = -z_w_full * rsq3 / safe_x_w
+    # j=0 row (S edge), i ∈ [1, im-1]
+    x_s_full, y_s_full, z_s_full = latlon2xyz(lon[:, 0], lat[:, 0])
+    safe_x_s = jnp.where(jnp.abs(x_s_full) > 1e-30, x_s_full, 1.0)
+    pp2_j0 = -y_s_full * rsq3 / safe_x_s
+    pp3_j0 = -z_s_full * rsq3 / safe_x_s
+    # 4 corners: latlon2xyz directly
+    x_corners_w = x_w_full  # (im+1,) — W edge i=0 has all j
+    y_corners_w = y_w_full
+    z_corners_w = z_w_full
+    # FV3 uses raw latlon2xyz for corners but the same projection is needed
+    # for j=0 and j=im endpoints too.  For interior points, we use the
+    # projection.  For the corners, latlon2xyz gives the position on the
+    # unit sphere.  But the FV3 algorithm explicitly sets pp(i, 1) and
+    # pp(1, j) from the projection then sets corner positions from raw
+    # latlon2xyz2.  Final step is pp(2,i,j) = pp(2,i,1) and
+    # pp(3,i,j) = pp(3,1,j) for interior (i>1, j>1).
+    # This means the interior i=0, j ∈ [1, im-1] uses the projected
+    # values; for i=0 and j=0 corners use direct latlon2xyz.
+    # FV3 line 1386: pp(1,i,j) = -rsq3 for ALL i, j → constant x face.
+
+    # Step 4: Build full (pp2, pp3) by taking pp2 from j=0 row (i-varying)
+    # and pp3 from i=0 column (j-varying).  This gives the cube-face
+    # coordinates on the constant-x face.
+    pp1 = jnp.full((n, n), -rsq3)
+    # pp2[i, j] = pp2_j0[i] (varies with i, constant in j)
+    pp2 = jnp.broadcast_to(pp2_j0[:, None], (n, n))
+    # pp3[i, j] = pp3_i0[j] (varies with j, constant in i)
+    pp3 = jnp.broadcast_to(pp3_i0[None, :], (n, n))
+    # At the 4 corners use direct latlon2xyz (FV3 lines 1362-1365)
+    # Corner SW (i=0, j=0): use lon[0,0]/lat[0,0] → (x, y, z) directly
+    # We need to override the broadcast values at the 4 corners and
+    # the i=0/j=0 edges with the exact values from the projection above.
+    # i=0 column: pp2[0, j] should be from latlon2xyz directly (W edge);
+    # but the projection above already gives the right answer when
+    # pp2_j0[0] = pp2_i0[0] = 0 (W-edge has lon=0.75π, so y/x ratio is
+    # known).  Verify by ensuring pp2[0, j] doesn't break and pp3[i, 0]
+    # likewise.
+
+    # j=0 row: pp3 should be pp3_j0 (S edge i-vary), NOT pp3_i0[0]
+    pp3 = pp3.at[:, 0].set(pp3_j0)
+    # i=0 col: pp2 should be pp2_i0 (W edge j-vary), NOT pp2_j0[0]
+    pp2 = pp2.at[0, :].set(pp2_i0)
+    # j=im row: similar, use S edge mirrored to N
+    pp3 = pp3.at[:, im].set(-pp3_j0)  # N edge: theta flipped → z flipped
+    # i=im col: E edge mirror of W edge: lon=1.25π so y/x ratio flipped
+    pp2 = pp2.at[im, :].set(-pp2_i0)  # E edge: y flipped relative to W
+
+    # Step 5: Convert pp back to (lon, lat) (FV3 line 1399)
+    lon_out, lat_out = xyz2latlon(pp1, pp2, pp3)
+    return lon_out, lat_out
+
+
 def symm_ed(
     lamda: jax.Array, theta: jax.Array,
 ) -> tuple[jax.Array, jax.Array]:

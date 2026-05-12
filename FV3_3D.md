@@ -1195,6 +1195,42 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 621: **FV3 ``gnomonic_ed``** — canonical FV3 cubed-sphere
+  grid generator.  Faithful JAX port of FV3 ``gnomonic_ed``
+  (fv_grid_utils.F90:1313-1407).  FV3's grid of choice for global
+  cloud-resolving runs.
+
+  Properties (FV3 docstring lines 1317-1322):
+  - Defined by intersections of great circles
+  - max(dx,dy) / min(dx,dy) = √2 ≈ 1.4142
+  - Max aspect ratio = 1.06089
+  - N-S coordinate curves are const longitude on the 4 faces
+    with the equator
+
+  Algorithm:
+  1. East/West edges at constant longitude (0.75π, 1.25π);
+     theta varies linearly from -α to α where α = asin(1/√3).
+  2. North/South edges by ``mirror_latlon`` (iter 612) of W
+     edge across the (NW, SE) diagonal.
+  3. Interior Cartesian via projection onto constant-x = -1/√3
+     face cube; (y, z) inherited from j=0 row and i=0 column.
+  4. ``xyz2latlon`` (iter 611) → final (lon, lat).
+
+  Reuses iter-612 ``mirror_latlon`` and iter-611 primitives
+  (``latlon2xyz``, ``xyz2latlon``).  Third FV3 grid generator
+  after iter-617's ``gnomonic_angl`` (equi-angular) and
+  ``gnomonic_dist`` (equi-distance); completes FV3
+  ``gnomonic_grids`` dispatch table (grid_type 0, 1, 2).
+
+  Tests (7/7 in 7 s):
+  1. Output shape (im+1, im+1).
+  2. All points finite.
+  3. Corners on unit sphere.
+  4. W edge at lon=0.75π.
+  5. E edge at lon=1.25π.
+  6. N/S edges symmetric in latitude.
+  7. Equator aspect ratio < √2 (FV3 documented bound).
+  Wired into iter-383 sweep (now 192).
 - **Iters 611-619 (compacted iter 620)**: complete FV3
   ``fv_grid_utils.F90`` spherical-geometry port.  9 iterations
   added the building-block helpers used throughout FV3 grid
