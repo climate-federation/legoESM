@@ -30,12 +30,22 @@ This is FV3-faithful behavior — corners are formally lower-
 order in FV3 too.
 
 **User-facing API for additional ~50% edge reduction:**
-- ``make_legoesm_nh_min_edge_config`` (iter-466): factory
-  with 3 disabled flags → 50% reduction at C8+duogrid.
+
+iter-553 found two regimes:
+- **For SMOOTH atmospheric ICs (production, AMIP, HS, SBR):**
+  use ``make_fv3_faithful_nh_config()`` — 89.5% edge_std
+  reduction vs bare at C16 SBR.  All 5 NH fidelity flags ON.
+- **For RANDOM/STRESS-TEST ICs (training, perturbations):**
+  use ``make_legoesm_nh_min_edge_config()`` — 50% reduction
+  at C8 random IC (iter-466 finding).
+
+Both compatible with the clip-helper stack:
 - ``monotone_halo_clip_context(slack=0.5)`` (iter-505): 15-
-  site context manager → +50% reduction.
+  site context manager, non-JIT.
 - ``make_clipped_step(model, state, dt, slack=0.5)`` (iter-
   526): JIT-safe wrapper.  +0.6% performance overhead.
+- ``make_clipped_scan_step(..., n_steps=N)`` (iter-544):
+  multi-step JAX-scan API for long runs.
 
 **Verified properties:**
 - Mass conservation: NH 5e-9, PE 7e-9 over 10 steps (machine
