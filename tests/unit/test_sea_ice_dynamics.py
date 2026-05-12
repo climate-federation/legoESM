@@ -521,19 +521,6 @@ class TestLinearRemap:
         assert jnp.all(a_remap >= 0.0)
         assert jnp.all(a_remap <= 1.0)
 
-    @pytest.mark.xfail(
-        reason=(
-            "Iter-85 audit: linear_remap leaks 1-4% volume per call when "
-            "h_new straddles category bounds.  The naive lo/hi clamp "
-            "overwrites h_remap without adjusting a_remap, so the post-"
-            "clamp volume differs from the pre-clamp volume.  Proper fix "
-            "requires CICE-style Lipscomb piecewise-linear g(h) remapping "
-            "— deferred to future structural work.  This xfail test "
-            "documents the expected post-fix behavior so future "
-            "maintainers see the contract."
-        ),
-        strict=True,
-    )
     def test_strict_volume_conservation_under_clamping(self):
         """Volume drift through linear_remap should be < 0.1% even when
         category bounds activate the clamp.

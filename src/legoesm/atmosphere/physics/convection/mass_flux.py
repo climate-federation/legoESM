@@ -50,7 +50,11 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
-from legoesm.atmosphere.physics._shared import virtual_temperature
+from legoesm.atmosphere.physics._shared import (
+    compute_layer_dz,
+    compute_rho,
+    virtual_temperature,
+)
 from legoesm.atmosphere.physics.thermodynamics import (
     compute_moist_adiabat,
     compute_cape,
@@ -71,20 +75,21 @@ def _compute_column_geometry(
     T: jax.Array,
     p_full: jax.Array,
     p_half: jax.Array,
+    q_v: jax.Array | None = None,
 ) -> Tuple[jax.Array, jax.Array, jax.Array]:
     """Compute layer thickness, density, and surface-relative height.
 
-    Returns ``(dz, rho, z)``, all of shape ``(ncol, nlev)``. ``dz`` is
-    the layer thickness from hydrostatic balance using the mid-layer
-    pressure; ``rho`` is the dry-air density at full levels; ``z`` is
-    the cumulative height above the surface (note: levels are ordered
-    top-down, so ``z[:, -1]`` is the surface).
+    Returns ``(dz, rho, z)``, all of shape ``(ncol, nlev)``.  Delegates
+    to the shared atmosphere column helpers (`compute_layer_dz`,
+    `compute_rho`) so a single hypsometric/EOS convention is used by
+    every parameterization.  When ``q_v`` is supplied the geometry
+    uses virtual temperature — moist tropical columns are ~1 % thicker
+    and ~1 % less dense than the dry calculation, which biases the
+    mass-flux closure when omitted.  Levels are ordered top-down, so
+    ``z[:, -1]`` is the surface.
     """
-    dp = p_half[:, 1:] - p_half[:, :-1]
-    p_mid = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
-    dz = constants.R_d * T * dp / (constants.g * jnp.clip(p_mid, 1.0, None))
-    dz = jnp.abs(dz)
-    rho = p_full / (constants.R_d * jnp.clip(T, 1.0, None))
+    dz = compute_layer_dz(T, p_half, q_v=q_v)
+    rho = compute_rho(T, p_full, q_v=q_v)
     # Cumulative height from the surface (level nlev-1) upward.
     z = jnp.cumsum(dz[:, ::-1], axis=1)[:, ::-1]
     return dz, rho, z
@@ -292,7 +297,7 @@ def diagnose_mass_flux_closure(
     config: MassFluxConfig = MassFluxConfig(),
 ) -> MassFluxClosureDiagnostics:
     """Diagnose closure terms before computing mass-flux tendencies."""
-    dz, rho, z = _compute_column_geometry(T, p_full, p_half)
+    dz, rho, z = _compute_column_geometry(T, p_full, p_half, q_v=q_v)
     T_moist, cape, convective_mask = _compute_cape_diagnostics(
         T, p_full, p_half, config.cape_threshold, config.cape_activation_scale,
         q_v=q_v,
@@ -452,7 +457,7 @@ def edmf_convection(
     a_u_new : jax.Array
         Updated updraft area fraction, shape ``(ncol,)``.
     """
-    dz, rho, z = _compute_column_geometry(T, p_full, p_half)
+    dz, rho, z = _compute_column_geometry(T, p_full, p_half, q_v=q_v)
     T_moist, cape, convective_mask = _compute_cape_diagnostics(
         T, p_full, p_half, config.cape_threshold, config.cape_activation_scale,
         q_v=q_v,

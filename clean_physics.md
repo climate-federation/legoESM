@@ -62,3 +62,19 @@ Branch: `clean_physics`. Driven by Ralph loop with `/codex:adversarial-review`.
 - #8 sea_ice dynamic ocean feedback zeros (sea_ice.py:625)
 - #9 ITD remap non-conservative (itd.py:304)
 - #10 sea-ice transport centered + clamps (transport.py:110)
+
+### Iteration 2 — 2026-05-12
+
+**Actions:**
+- [x] #2 `mass_flux.py:70` — `_compute_column_geometry` now delegates to shared `compute_layer_dz`/`compute_rho` from `_shared.py` and accepts optional `q_v`; both callers (mass-flux closure + EDMF) now pass `q_v` so moist columns use virtual-T (~1 % thicker / less dense).
+- [x] #7 `sea_ice.py` — new `_bulk_flux_dispatch(T_ice, forcing, config, U_min)` helper centralises MOST/COARE/Large-Yeager/simple_bulk dispatch.  Slab path and dynamic multi-category `_thermo_cat` both consume it, so state and diagnostic responses always use the configured scheme.
+- [x] #8 `sea_ice.py:_build_response` — adds optional `h_old`, `ocean_sst`, `ocean_u`, `ocean_v`, `dt` kwargs; when supplied (dynamic path) computes `freshwater_flux`, `ocean_heat_extraction`, `ocean_stress_x/y` using the same formulae as the slab path, instead of zero placeholders.  Dynamic path threads pre-step aggregated `h_agg_initial` for the FW budget.
+- [x] #9 `itd.py:linear_remap` — replaced the volume-leaking lo/hi clamp with a volume-conserving rescale: `a_post · h_post = a_pre · h_pre`.  Concentration capped at 1 (residual error only at the unphysical hi=100 m sentinel).  The previously-strict-xfail conservation test (`test_strict_volume_conservation_under_clamping`) now passes; xfail marker removed.
+
+**Deferred:**
+- #10 sea-ice transport centered + post-clamps: full FCT / conservative upwind needs a multi-file structural refactor; queued for iter-3.
+
+**Tests (post-fix):**
+- atmosphere microphysics + convection + land multilayer: 172/172 pass.
+- sea ice unit suite: 78 pass, 1 pre-existing thermo failure (`Test8i_StefanBoltzmann::test_lw_up_matches` — confirmed pre-existing in iter-1).
+- ocean + physics_convection suite: 1189 pass, 5 pre-existing failures (4× `test_ah_lat_scaling`, 1× `test_dca_extended_mse_conservation` — all confirmed pre-existing via baseline stash).

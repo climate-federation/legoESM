@@ -108,6 +108,51 @@ def step_sea_ice(
 
 
 # ==============================================================================
+# Shared bulk-flux dispatch
+# ==============================================================================
+
+def _bulk_flux_dispatch(
+    T_ice: jnp.ndarray,
+    forcing: AtmToSurface,
+    config: SeaIceConfig,
+    U_min: float,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Return ``(tau_x, tau_y, shflx, lhflx)`` from configured scheme.
+
+    The slab path duplicates this dispatch inline; the multi-category
+    thermodynamics path used to skip it and silently use
+    ``simple_bulk_fluxes`` regardless of ``config.bulk_scheme``.  This
+    helper centralises the choice so both paths and the diagnostic
+    ``_build_response`` produce consistent values.
+    """
+    wind_speed = jnp.sqrt(
+        forcing.u_lowest ** 2 + forcing.v_lowest ** 2 + U_min ** 2
+    )
+    rho = forcing.rho_lowest
+    q_sfc = saturation_mixing_ratio_ice(T_ice, forcing.p_surface)
+    if config.bulk_scheme in ("most", "coare3", "large_yeager"):
+        tau_x, tau_y, shflx, lhflx, _ = compute_most_fluxes(
+            forcing.u_lowest, forcing.v_lowest,
+            forcing.T_lowest, forcing.q_lowest,
+            T_ice, q_sfc, rho,
+            z_ref=config.z_ref,
+            z0_init=config.z0_ice,
+            scheme=config.bulk_scheme,
+            n_iter=config.bulk_n_iter,
+            L_latent=constants.L_s,
+        )
+    else:
+        tau_x, tau_y, shflx, lhflx = simple_bulk_fluxes(
+            forcing.u_lowest, forcing.v_lowest,
+            forcing.T_lowest, forcing.q_lowest,
+            T_ice, q_sfc, rho, wind_speed,
+            config.Cd_ice, config.Ch_ice,
+            L_latent=constants.L_s,
+        )
+    return tau_x, tau_y, shflx, lhflx
+
+
+# ==============================================================================
 # Slab thermodynamics (original implementation)
 # ==============================================================================
 
@@ -126,32 +171,8 @@ def _step_slab(
     T_ice = state.T_ice.data
     conc = state.concentration.data
 
-    # ---------- Surface fluxes (MOST dispatch stays in slab path) ----------
-    wind_speed = jnp.sqrt(
-        forcing.u_lowest ** 2 + forcing.v_lowest ** 2 + U_min ** 2
-    )
-    rho = forcing.rho_lowest
-    q_sfc = saturation_mixing_ratio_ice(T_ice, forcing.p_surface)
-
-    if config.bulk_scheme in ("most", "coare3", "large_yeager"):
-        tau_x, tau_y, shflx, lhflx, _ = compute_most_fluxes(
-            forcing.u_lowest, forcing.v_lowest,
-            forcing.T_lowest, forcing.q_lowest,
-            T_ice, q_sfc, rho,
-            z_ref=config.z_ref,
-            z0_init=config.z0_ice,
-            scheme=config.bulk_scheme,
-            n_iter=config.bulk_n_iter,
-            L_latent=constants.L_s,  # sublimation over ice, not evaporation
-        )
-    else:
-        tau_x, tau_y, shflx, lhflx = simple_bulk_fluxes(
-            forcing.u_lowest, forcing.v_lowest,
-            forcing.T_lowest, forcing.q_lowest,
-            T_ice, q_sfc, rho, wind_speed,
-            config.Cd_ice, config.Ch_ice,
-            L_latent=constants.L_s,  # sublimation over ice
-        )
+    # ---------- Surface fluxes (configured scheme via shared dispatch) ----------
+    tau_x, tau_y, shflx, lhflx = _bulk_flux_dispatch(T_ice, forcing, config, U_min)
 
     # ---------- Thermodynamics (delegate to shared routine) ----------
     h_new, T_ice_new, conc_new = _thermo_single(
@@ -304,6 +325,9 @@ def _step_dynamic(
         h_agg, T_agg, conc_agg = aggregate_state(h, T_ice, conc)
     else:
         h_agg, T_agg, conc_agg = h, T_ice, conc
+    # Capture the pre-step aggregated thickness for ice→ocean
+    # freshwater / heat / stress feedback (see ``_build_response``).
+    h_agg_initial = h_agg
 
     # ---- 1. Dynamics ----
     if config.dynamics == "evp" and grid is not None:
@@ -359,10 +383,21 @@ def _step_dynamic(
         h_old = h
         conc_old = conc
 
+        # Compute bulk fluxes per category with the configured scheme
+        # BEFORE thermodynamics, so the dynamic multi-category path uses
+        # the same bulk-flux closure that the slab path and diagnostic
+        # ``_build_response`` use.  Previously ``_thermo_single`` was
+        # called without ``shflx``/``lhflx``, silently falling back to
+        # ``simple_bulk_fluxes`` regardless of ``config.bulk_scheme`` —
+        # state and diagnostics could disagree.  (Codex finding #7.)
         def _thermo_cat(h_k, T_k, conc_k):
+            _, _, shflx_k, lhflx_k = _bulk_flux_dispatch(
+                T_k, forcing, config, U_min,
+            )
             return _thermo_single(
                 h_k, T_k, conc_k,
                 forcing, ocean_sst, config, U_min, dt,
+                shflx=shflx_k, lhflx=lhflx_k,
             )
 
         h, T_ice, conc = jax.vmap(
@@ -395,6 +430,11 @@ def _step_dynamic(
     response = _build_response(
         h_agg, T_agg, conc_agg, u_ice, v_ice,
         forcing, config, U_min,
+        h_old=h_agg_initial,
+        ocean_sst=ocean_sst,
+        ocean_u=ocean_u,
+        ocean_v=ocean_v,
+        dt=dt,
     )
 
     new_state = DynamicSeaIceState(
@@ -560,8 +600,22 @@ def _build_response(
     forcing: AtmToSurface,
     config: SeaIceConfig,
     U_min: float,
+    *,
+    h_old: jnp.ndarray | None = None,
+    ocean_sst: jnp.ndarray | None = None,
+    ocean_u: jnp.ndarray | None = None,
+    ocean_v: jnp.ndarray | None = None,
+    dt: float | None = None,
 ) -> TileResponse:
-    """Build coupler response from aggregated ice fields."""
+    """Build coupler response from aggregated ice fields.
+
+    The optional ``h_old``/``ocean_*``/``dt`` arguments enable the
+    dynamic multi-category path to compute the freshwater flux, ocean
+    heat extraction, and ocean stress feedbacks — the slab path
+    computes these inline.  Without them the response carries zero
+    placeholders (legacy behaviour) which silently breaks ice→ocean
+    feedback.  See codex finding #8.
+    """
     q_sfc = saturation_mixing_ratio_ice(T_ice, forcing.p_surface)
 
     if config.temp_dependent_albedo:
@@ -569,40 +623,58 @@ def _build_response(
     else:
         alpha_ice = jnp.full(h.shape, config.albedo_ice, dtype=h.dtype)
 
-    # Direct ``ε σ T⁴ + (1-ε)·lw_down`` instead of the full
-    # ``surface_radiation_fluxes`` call (which discards ``sw_net``
-    # / ``lw_net``).  Same direct-expression rewrite used for
-    # ``ocean_tile_response`` and ``two_layer_lake``.
     lw_up = (
         config.emissivity_ice * constants.sigma_sb * T_ice ** 4
         + (1.0 - config.emissivity_ice) * forcing.lw_down
     )
 
-    # Recompute surface fluxes from aggregated state, honoring bulk_scheme
-    wind_speed = jnp.sqrt(
-        forcing.u_lowest ** 2 + forcing.v_lowest ** 2 + U_min ** 2
+    # Recompute surface fluxes from aggregated state via shared dispatch
+    tau_x, tau_y, shflx, lhflx = _bulk_flux_dispatch(
+        T_ice, forcing, config, U_min,
     )
-    rho = forcing.rho_lowest
 
-    if config.bulk_scheme in ("most", "coare3", "large_yeager"):
-        tau_x, tau_y, shflx, lhflx, _ = compute_most_fluxes(
-            forcing.u_lowest, forcing.v_lowest,
-            forcing.T_lowest, forcing.q_lowest,
-            T_ice, q_sfc, rho,
-            z_ref=config.z_ref,
-            z0_init=config.z0_ice,
-            scheme=config.bulk_scheme,
-            n_iter=config.bulk_n_iter,
-            L_latent=constants.L_s,  # sublimation over ice
+    # Ice → ocean feedbacks.  When the dynamic path threads
+    # ``h_old`` + ``ocean_*`` + ``dt`` we compute the same fluxes the
+    # slab path produces inline; otherwise expose zero placeholders.
+    if h_old is not None and dt is not None:
+        dh_dt_total = (h - h_old) / dt
+        ice_mask_init = h_old > config.h_ice_min
+        dh_dt_sublim = jnp.where(
+            ice_mask_init,
+            -lhflx / (config.rho_ice * constants.L_s),
+            0.0,
         )
+        freshwater_flux = -config.rho_ice * (dh_dt_total - dh_dt_sublim)
     else:
-        tau_x, tau_y, shflx, lhflx = simple_bulk_fluxes(
-            forcing.u_lowest, forcing.v_lowest,
-            forcing.T_lowest, forcing.q_lowest,
-            T_ice, q_sfc, rho, wind_speed,
-            config.Cd_ice, config.Ch_ice,
-            L_latent=constants.L_s,  # sublimation over ice
+        freshwater_flux = jnp.zeros_like(h)
+
+    if (
+        h_old is not None and ocean_sst is not None and dt is not None
+    ):
+        ice_mask_init = h_old > config.h_ice_min
+        F_ocean = jnp.where(
+            ice_mask_init,
+            config.ocean_heat_transfer_coeff
+            * jnp.maximum(ocean_sst - config.T_freeze_ocean, 0.0),
+            0.0,
         )
+        dh_dt_freeze_open = jnp.where(~ice_mask_init, h / dt, 0.0)
+        open_freeze_flux = config.rho_ice * config.L_f * dh_dt_freeze_open
+        ocean_heat_extraction = F_ocean + open_freeze_flux
+    else:
+        ocean_heat_extraction = jnp.zeros_like(h)
+
+    if ocean_u is not None and ocean_v is not None:
+        du_oi = ocean_u - u_ice
+        dv_oi = ocean_v - v_ice
+        speed_oi = jnp.sqrt(du_oi ** 2 + dv_oi ** 2 + 1e-10)
+        tau_oi_x = config.rho_ocean_ref * config.drag_ocean * speed_oi * du_oi
+        tau_oi_y = config.rho_ocean_ref * config.drag_ocean * speed_oi * dv_oi
+        ocean_stress_x = -tau_oi_x * conc
+        ocean_stress_y = -tau_oi_y * conc
+    else:
+        ocean_stress_x = jnp.zeros_like(h)
+        ocean_stress_y = jnp.zeros_like(h)
 
     return TileResponse(
         T_surface=T_ice,
@@ -618,14 +690,10 @@ def _build_response(
         u_ocean_sfc=u_ice,
         v_ocean_sfc=v_ice,
         co2_flux=jnp.zeros_like(h),
-        # Multi-cat aggregate: freshwater, ocean-heat-extraction, and
-        # ice→ocean stress are constructed in the multi-cat step
-        # path (above); the aggregator just exposes zero placeholders
-        # and lets the multi-cat path overwrite if needed.
-        freshwater_flux=jnp.zeros_like(h),
-        ocean_heat_extraction=jnp.zeros_like(h),
-        ocean_stress_x=jnp.zeros_like(h),
-        ocean_stress_y=jnp.zeros_like(h),
+        freshwater_flux=freshwater_flux,
+        ocean_heat_extraction=ocean_heat_extraction,
+        ocean_stress_x=ocean_stress_x,
+        ocean_stress_y=ocean_stress_y,
         # Sublimation mass flux from the aggregated ice surface.
         surface_mass_flux=lhflx / constants.L_s,
     )
