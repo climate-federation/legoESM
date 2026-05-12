@@ -1195,6 +1195,32 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 692: **FV3 ``eqv_pot_fv3``** — equivalent potential temperature.
+  Faithful JAX port of FV3 ``eqv_pot``
+  (tools/fv_diagnostics.F90:5341-5419).
+
+  Simplified S.-J. Lin form (RH term ignored):
+
+      pd = hydrostatic   :  (1-rq)·delp / (peln[k+1] - peln[k])
+         | non-hydro     : -R_d·pt·(1-rq)·delp / (g·delz)
+
+      dry  : θ_e = pt · (1e5/pd)^κ
+      moist: dc_vap = c_pv - c_pw
+             θ_e = pt · exp( q/(c_pd·pt)·(L_v + dc_vap·(pt-T_freeze))
+                           + κ · ln(1e5/pd) )
+
+  Both hydrostatic and non-hydrostatic branches; both moist and dry.
+
+  Tests (7/7 in <2 s):
+  1. Dry isothermal at p=1e5 → θ_e = T exactly.
+  2. Dry Poisson form at p=500 hPa → analytical θ_e.
+  3. Moist θ_e > dry θ_e by ≥20 K for q=15 g/kg, T=290 K.
+  4. Hydrostatic branch via monotone peln.
+  5. 3-D input → 3-D output.
+  6. No NaN/Inf on random inputs.
+  7. Missing peln (hydrostatic) / delz raises ValueError.
+
+  Wired into iter-383 sweep (now 256).
 - Iter 691: **FV3 ``pv_entropy_fv3``** — Ertel potential vorticity (EPV).
   Faithful JAX port of FV3 ``pv_entropy``
   (tools/fv_diagnostics.F90:5111-5193).

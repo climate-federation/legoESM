@@ -2885,6 +2885,87 @@ def compute_brn_fv3(
     return brn, shear06
 
 
+def eqv_pot_fv3(
+    pt: jax.Array,
+    delp: jax.Array,
+    q: jax.Array,
+    delz: jax.Array | None = None,
+    peln: jax.Array | None = None,
+    hydrostatic: bool = False,
+    moist: bool = True,
+) -> jax.Array:
+    """FV3_3D iter 692: equivalent potential temperature θ_e.
+
+    Faithful JAX port of FV3 ``eqv_pot``
+    (tools/fv_diagnostics.F90:5341-5419).
+
+    Simplified S.-J. Lin form (RH term ignored).  Reference dry
+    pressure ``pd`` from either hydrostatic ``delp / Δpeln`` or
+    non-hydrostatic ``ρ R_d T`` form.  Moist branch uses the
+    full Bolton-style expression with the c_pv − c_pw isobaric
+    heating correction; dry branch reduces to standard Poisson.
+
+    Algorithm:
+
+        rq = q if moist else 0  (clipped to ≥ 0)
+        Hydrostatic:
+            pd = (1 − rq) · delp / (peln[k+1] − peln[k])
+        Non-hydrostatic:
+            pd = − R_d · pt · (1 − rq) · delp / (g · delz)
+
+        Moist:
+            dc_vap = c_pv − c_pw
+            θ_e = pt · exp( rq/(c_pd·pt) · (L_v + dc_vap·(pt − T_freeze))
+                           + κ · ln(1e5/pd) )
+        Dry:
+            θ_e = pt · (1e5/pd)^κ
+
+    Parameters
+    ----------
+    pt : jax.Array, shape (..., km)
+        Air temperature T (K).
+    delp : jax.Array, shape (..., km)
+        Pressure thickness (Pa).
+    q : jax.Array, shape (..., km)
+        Specific humidity (kg/kg).
+    delz : jax.Array, shape (..., km), optional
+        Layer thickness (NEGATIVE in FV3) — required if not hydrostatic.
+    peln : jax.Array, shape (..., km+1), optional
+        log(pressure) at interfaces — required if hydrostatic.
+    hydrostatic : bool, default False.
+    moist : bool, default True.
+
+    Returns
+    -------
+    theta_e : jax.Array, shape (..., km)
+        Equivalent potential temperature (K).
+    """
+    wfac = 1.0 if moist else 0.0
+    rq = jnp.maximum(0.0, wfac * q)
+    one_minus_rq = 1.0 - rq
+
+    if hydrostatic:
+        if peln is None:
+            raise ValueError("hydrostatic=True requires peln")
+        dpeln = peln[..., 1:] - peln[..., :-1]
+        pd = one_minus_rq * delp / dpeln
+    else:
+        if delz is None:
+            raise ValueError("hydrostatic=False requires delz")
+        pd = -constants.R_d * pt * one_minus_rq * delp / (constants.g * delz)
+
+    poisson = constants.kappa * jnp.log(1.0e5 / pd)
+    if moist:
+        dc_vap = constants.c_pv - constants.c_pw
+        rq_full = jnp.maximum(0.0, q)  # FV3 re-reads q here w/o wfac mask
+        moist_exp = rq_full / (constants.c_pd * pt) * (
+            constants.L_v + dc_vap * (pt - constants.T_freeze)
+        )
+        return pt * jnp.exp(moist_exp + poisson)
+    else:
+        return pt * jnp.exp(poisson)
+
+
 def pv_entropy_fv3(
     vort: jax.Array,
     f_d: jax.Array,

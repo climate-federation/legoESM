@@ -279,6 +279,7 @@ _GUARD_MODULES = (
     "test_fv3_compute_brn_iter688",                  # iter-688 add
     "test_fv3_bunkers_vector_iter689",               # iter-689 add
     "test_fv3_pv_entropy_iter691",                   # iter-691 add
+    "test_fv3_eqv_pot_iter692",                      # iter-692 add
 )
 
 
