@@ -228,12 +228,73 @@ def _ppm_reconstruct_1d(q, *, axis: int,
 # Cell-centre <-> D-grid corner vector conversion
 # ==============================================================================
 
-def center_to_dgrid_vector(u_cc, v_cc, cdgrid):
-    """Interpolate cell-centre wind vectors to D-grid corners (vector halo + 4-pt avg)."""
+def _a2b_ord4_corner_from_padded(f_pad, n):
+    """FV3_3D iter 696: 4th-order A→B cc→corner cascade from already-padded array.
+
+    Accepts padded array of shape ``(6, n+4, n+4)`` (3-D) or
+    ``(6, n+4, n+4, nlev)`` (4-D).  Same stencil as
+    :func:`_interp_center_to_corner_a2b_ord4`, but lifted out so it
+    can be reused with a pre-rotated vector halo (halo=2).
+
+    Returns corner array of shape ``(6, n+1, n+1[, nlev])``.
+    """
+    a1 = 9.0 / 16.0
+    a2 = -1.0 / 16.0
+    b1 = 7.0 / 12.0
+    b2 = -1.0 / 12.0
+    if f_pad.ndim == 4:
+        qx = (b2 * (f_pad[:, 0:n + 1, :, :] + f_pad[:, 3:n + 4, :, :])
+              + b1 * (f_pad[:, 1:n + 2, :, :] + f_pad[:, 2:n + 3, :, :]))
+        qy = (b2 * (f_pad[:, :, 0:n + 1, :] + f_pad[:, :, 3:n + 4, :])
+              + b1 * (f_pad[:, :, 1:n + 2, :] + f_pad[:, :, 2:n + 3, :]))
+        qxx = (a2 * (qx[:, :, 0:n + 1, :] + qx[:, :, 3:n + 4, :])
+               + a1 * (qx[:, :, 1:n + 2, :] + qx[:, :, 2:n + 3, :]))
+        qyy = (a2 * (qy[:, 0:n + 1, :, :] + qy[:, 3:n + 4, :, :])
+               + a1 * (qy[:, 1:n + 2, :, :] + qy[:, 2:n + 3, :, :]))
+    else:
+        qx = (b2 * (f_pad[:, 0:n + 1, :] + f_pad[:, 3:n + 4, :])
+              + b1 * (f_pad[:, 1:n + 2, :] + f_pad[:, 2:n + 3, :]))
+        qy = (b2 * (f_pad[:, :, 0:n + 1] + f_pad[:, :, 3:n + 4])
+              + b1 * (f_pad[:, :, 1:n + 2] + f_pad[:, :, 2:n + 3]))
+        qxx = (a2 * (qx[:, :, 0:n + 1] + qx[:, :, 3:n + 4])
+               + a1 * (qx[:, :, 1:n + 2] + qx[:, :, 2:n + 3]))
+        qyy = (a2 * (qy[:, 0:n + 1, :] + qy[:, 3:n + 4, :])
+               + a1 * (qy[:, 1:n + 2, :] + qy[:, 2:n + 3, :]))
+    return 0.5 * (qxx + qyy)
+
+
+def center_to_dgrid_vector(u_cc, v_cc, cdgrid, use_fv3_a2b_ord4: bool = False):
+    """Interpolate cell-centre wind vectors to D-grid corners.
+
+    Default (``use_fv3_a2b_ord4=False``): halo=1 vector pad + 4-pt
+    arithmetic average (2nd-order).
+
+    FV3_3D iter 696 path (``use_fv3_a2b_ord4=True``): halo=2 vector
+    pad with cross-face rotation, then 4th-order PPM-volume +
+    Lagrange cascade (Fortran-faithful A→B via
+    ``a2b_edge.F90:a2b_ord4`` duogrid path).  Use to close the last
+    documented PE-vs-NH FV3-fidelity asymmetry on the NH path's
+    cell-centre → D-corner u, v lift (suspect for the residual
+    cube-imprint floor at C24-C32).
+    """
     grid = cdgrid.base
     dg = grid.duogrid
     offsets = None if dg is not None else grid.halo_interp_offsets
+    offsets_h2 = (None if dg is not None
+                  else getattr(grid, "halo_interp_offsets_h2", None))
+
     if u_cc.ndim == 3:
+        if use_fv3_a2b_ord4:
+            u_pad, v_pad = pad_halo_vector(
+                u_cc, v_cc,
+                grid.cos_angle, grid.sin_angle,
+                grid.cos_angle_padded_h2, grid.sin_angle_padded_h2,
+                interp_offsets=offsets_h2, halo=2, duogrid=dg,
+            )
+            n = u_cc.shape[1]
+            u_d = _a2b_ord4_corner_from_padded(u_pad, n)
+            v_d = _a2b_ord4_corner_from_padded(v_pad, n)
+            return u_d, v_d
         u_pad, v_pad = pad_halo_vector(
             u_cc, v_cc,
             grid.cos_angle, grid.sin_angle,
@@ -246,7 +307,18 @@ def center_to_dgrid_vector(u_cc, v_cc, cdgrid):
                        + v_pad[:, :-1, 1:] + v_pad[:, 1:, 1:])
         return u_d, v_d
 
-    # 4D: native pad_halo_vector_4d single-message halo (replaces per-level vmap)
+    # 4D
+    if use_fv3_a2b_ord4:
+        u_pad, v_pad = pad_halo_vector_4d(
+            u_cc, v_cc,
+            grid.cos_angle, grid.sin_angle,
+            grid.cos_angle_padded_h2, grid.sin_angle_padded_h2,
+            interp_offsets=offsets_h2, halo=2, duogrid=dg,
+        )
+        n = u_cc.shape[1]
+        u_d = _a2b_ord4_corner_from_padded(u_pad, n)
+        v_d = _a2b_ord4_corner_from_padded(v_pad, n)
+        return u_d, v_d
     u_pad, v_pad = pad_halo_vector_4d(
         u_cc, v_cc,
         grid.cos_angle, grid.sin_angle,

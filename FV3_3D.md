@@ -1195,6 +1195,43 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 696: **FV3 4th-order vector cc→D-corner (a2b_ord4 path)** —
+  closes the last documented PE-vs-NH FV3-fidelity asymmetry on
+  the NH path's cell-centre → D-corner ``u``/``v`` lift.
+
+  Opt-in flag ``use_fv3_a2b_ord4=True`` on
+  ``center_to_dgrid_vector`` switches from the default halo=1
+  4-pt arithmetic average (2nd-order) to halo=2 vector pad
+  (with cross-face rotation, ``cos_angle_padded_h2`` /
+  ``sin_angle_padded_h2``) followed by the 4th-order PPM-volume
+  + Lagrange cascade (FV3 ``a2b_edge.F90:a2b_ord4`` duogrid
+  path):
+
+      qx[k] = b2·(f[k-2]+f[k+1]) + b1·(f[k-1]+f[k])         (PPM)
+      qy = same on j-axis
+      qxx[k] = a2·(qx[k-2]+qx[k+1]) + a1·(qx[k-1]+qx[k])    (Lagrange)
+      qyy = same on i-axis of qy
+      out = 0.5·(qxx + qyy)
+        b1=7/12, b2=-1/12, a1=9/16, a2=-1/16
+
+  Shared with scalar ``_interp_center_to_corner_a2b_ord4`` (iter-971
+  scalar path) via new ``_a2b_ord4_corner_from_padded`` helper.
+  3-D and 4-D (with nlev) shapes supported.
+
+  Suspect for the residual ~5-6 mK cube-imprint floor at C24-C32 —
+  the NH path's vector cc→corner lift has been the last unaudited
+  piece in the corner-fidelity chain.  Default OFF; opt-in for the
+  NH dycore to evaluate impact on the floor.
+
+  Tests (5/5 in <15 s):
+  1. Uniform field → uniform corner output.
+  2. Linear ramp → exact recovery at corners (4th-order on linear).
+  3. Constant winds (u=10, v=5) → recovered to float32 precision
+     at interior corners.
+  4. Default vs ord4 paths differ on non-linear random field.
+  5. 4D path stacks identically to 3D path per level.
+
+  Wired into iter-383 sweep (now 260).
 - Iter 695: **FV3 ``rh_calc_fv3``** — relative humidity diagnostic.
   Faithful JAX port of FV3 ``rh_calc``
   (tools/fv_diagnostics.F90:5309-5339).
