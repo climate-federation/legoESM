@@ -1195,226 +1195,54 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
-- Iter 739: **``specific_volume_fv3``** — α = 1/ρ.
+- Iter 740: **``kinetic_energy_fv3`` helper + iter-693 refactor**.
 
-  Companion to iter-734 air_density:
+  KE per unit mass:
 
-      α = 1/ρ = −g · delz / delp
+      KE = 0.5·(ua² + va²)         (2-component, w=None / hydrostatic)
+      KE = 0.5·(ua² + va² + w²)    (3-component, non-hydrostatic)
 
-  FV3 convention (delp > 0, delz < 0) → α > 0.
+  Standard FV3 pattern used in iter-693 ``nh_total_energy_fv3``
+  and many diagnostic budgets.
 
-  FV3 fv_mapz.F90:255 uses this directly as "specific volume / g"
-  via the line ``delz = -delz / delp`` (gravity factor absorbed
-  into thermodynamics later).
+  iter-693 refactored to delegate; output bit-identical (iter-693
+  7/7 tests still pass).
 
-  Used in pressure-volume work computations.
-
-  Tests (5/5 in <1 s):
-  1. α · ρ = 1 exactly (inverse property).
-  2. delp=1e4, delz=-1000 → α = g·1000/1e4 ≈ 0.981 m³/kg.
-  3. Random delp/delz → α > 0.
-  4. 3-D shapes.
-  5. No NaN/Inf.
-
-  Wired into iter-383 sweep (now 303).
-- Iter 738: **``geopotential_from_T_peln_fv3``** — Φ at interfaces.
-
-  Hydrostatic integration:
-
-      Φ_surface = phis                              (k = km)
-      Φ[k] = phis + Σ_{j>=k} R_d · T_v[j] · Δpeln[j]
-
-  where ``T_v = pt`` (dry) or ``T_v = pt·(1+zvir·q)`` (moist).
-
-  Standard FV3 hydrostatic Φ pattern (fv_diagnostics.F90 height
-  paths + IC ingestion).  Returns interface geopotential (m²/s²);
-  divide by g for height (m).
-
-  Pairs with iter-727 ``compute_zh_from_delz_fv3`` (alternate
-  height pathway from delz instead of T/peln), iter-684
-  ``get_height_given_pressure_fv3``.
-
-  Vectorized via cumsum on reversed layer contributions.
-
-  Tests (7/7 in <2 s):
-  1. Φ[km] = phis exactly.
-  2. Isothermal dry → ΔΦ = R_d·T·ln(p_bot/p_top) exact.
-  3. Moist column → larger ΔΦ than dry (T_v > T).
-  4. Monotone decreasing top → surface.
-  5. 3-D shapes.
-  6. No NaN/Inf.
-  7. moist=True without q raises.
-
-  Wired into iter-383 sweep (now 302).
-- Iter 737: **``temperature_from_theta_fv3``** — inverse of iter-735.
-
-  Recovers air temperature from potential temperature + pressure:
-
-      T = θ · (p/p_ref)^κ = θ · Π
-
-  Inverse of iter-735 ``theta_dry_fv3``.  Equivalent to
-  ``θ · exner_fv3(p)`` (composition with iter-736).
-
-  Completes the (θ, T, Π) trio of point-wise thermodynamic
-  helpers: iter-735 θ_dry, iter-736 Exner, iter-737 T-from-θ.
-
-  Tests (7/7 in <1 s):
-  1. p = p_ref → T = θ exactly.
-  2. p > p_ref (subsidence) → T > θ.
-  3. Round-trip with iter-735: T_in → θ → T_out = T_in.
-  4. Composition via iter-736: T = θ · Exner(p).
-  5. Custom moist cappa.
-  6. 3-D shapes.
-  7. No NaN/Inf.
-
-  Wired into iter-383 sweep (now 301).
-- Iter 736: **``exner_fv3``** — point-wise Exner function.
-
-  Standard Exner:
-
-      Π = (p / p_ref)^κ
-
-  Inverse of iter-735 ``theta_dry_fv3``: ``θ · Π = T``.
-
-  Used in FV3 dyn_core pressure-gradient term ``c_p · θ · ∇Π``.
-  Compared to iter-722 ``compute_pkz_fv3`` which gives LAYER-MEAN
-  Exner (integral mean over log-p layer), this is point-wise.
-
-  Tests (6/6 in <1 s):
-  1. p = p_ref → Π = 1 exactly.
-  2. Lower p → smaller Π.
-  3. θ · Π = T (inverse relationship with iter-735).
-  4. Custom moist cappa.
+  Tests (6/6 in <2 s):
+  1. Zero wind → KE=0.
+  2. ua=1, va=w=0 → KE=0.5.
+  3. w=None → 2-component KE.
+  4. iter-693 nh_total_energy refactor preserved.
   5. 3-D shapes.
   6. No NaN/Inf.
 
-  Wired into iter-383 sweep (now 300).
-- Iter 735: **``theta_dry_fv3``** — dry potential temperature.
+  Wired into iter-383 sweep (now 304).
+- **Iters 731-739 (compacted iter 740)**: thermodynamic + vertical-coord
+  helper suite expansion.
 
-  Standard Poisson form:
+  | Iter | What                                              | Note                                                  |
+  |------|---------------------------------------------------|-------------------------------------------------------|
+  | 731  | ``compute_pe_from_delp_fv3``                      | pe = p_top + cumsum(delp); IC pathway                 |
+  | 732  | ``layer_mean_pressure_fv3``                       | p_f = delp/Δpeln (log-p integral mean)                |
+  | 733  | refactor iter-729/716 to use iter-732             | hydrostatic branches delegate to layer_mean_pressure  |
+  | 734  | ``air_density_fv3`` + iter-725 refactor           | ρ = −delp/(g·delz); omega rewrites as -ρgw            |
+  | 735  | ``theta_dry_fv3``                                 | θ = T·(p_ref/p)^κ                                     |
+  | 736  | ``exner_fv3``                                     | Π = (p/p_ref)^κ point-wise                            |
+  | 737  | ``temperature_from_theta_fv3``                    | T = θ·Π (inverse of iter-735)                         |
+  | 738  | ``geopotential_from_T_peln_fv3``                  | Φ = Σ R_d·T_v·Δpeln hydrostatic                       |
+  | 739  | ``specific_volume_fv3``                           | α = 1/ρ = −g·delz/delp                                |
 
-      θ = T · (p_ref / p)^κ
+  **Thermodynamic helper trios** complete:
+    * (θ, T, Π) point-wise: iter-735 / iter-737 / iter-736
+    * (delp, peln, p_f, pkz, exner, layer_mean): iter-722 / iter-732
+    * (delz, ρ, α, hydrostatic_delz, zh): iter-726 / iter-734 / iter-739
+    * (pe, peln, ak/bk): iter-724 / iter-731
 
-  Used throughout FV3 dyn_core, fv_mapz, and diagnostic paths.
-  For moist atmosphere, accepts ``cappa`` array (from iter-723
-  ``cappa_moist_fv3``) for variable-exponent θ.
+  **DRY refactors** (iter-733, iter-734): 2 sites delegate to
+  iter-732; iter-725 omega rewritten using iter-734 ρ helper.
+  Output bit-identical (pinned by regression tests).
 
-  Pairs with iter-722 ``compute_pkz_fv3`` (provides layer-mean
-  pkz for the standard ``θ = pt / pkz`` form), iter-723
-  ``cappa_moist_fv3`` (moist κ).
-
-  Defaults: ``p_ref = 1e5 Pa``, ``cappa = constants.kappa``.
-
-  Tests (6/6 in <1 s):
-  1. p = p_ref → θ = T exactly.
-  2. p < p_ref → θ > T (adiabatic lift).
-  3. Moist cappa override.
-  4. Consistent with iter-722 pkz inverse path.
-  5. 3-D shapes.
-  6. No NaN/Inf.
-
-  Wired into iter-383 sweep (now 299).
-- Iter 734: **``air_density_fv3``** + iter-725 refactor.
-
-  Faithful port of FV3's standard air density pattern:
-
-      ρ = −delp / (g · delz)
-
-  FV3 sign convention (delp > 0, delz < 0) → ρ > 0.  Derived from
-  hydrostatic balance ``dp/dz = −ρg`` applied to layer thicknesses.
-
-  iter-725 ``omega_diagnostic_fv3`` refactored to delegate:
-  ω = w·delp/delz → ω = −ρ·g·w (algebraically identical; preserved
-  bit-by-bit, pinned by regression test).
-
-  Pairs with iter-732 ``layer_mean_pressure_fv3`` and iter-726
-  ``hydrostatic_delz_fv3`` to round out the thermodynamic
-  bridging-helper set.
-
-  Tests (5/5 in <1 s):
-  1. delp=1e4 Pa, delz=-1000 m → ρ ≈ 1.02 kg/m³ analytical.
-  2. Random delp/delz → ρ > 0 always.
-  3. iter-725 omega refactor: output bit-identical to before.
-  4. 3-D shapes preserved.
-  5. No NaN/Inf on random.
-
-  iter-725 5/5 tests still pass.
-
-  Wired into iter-383 sweep (now 298).
-- Iter 733: **refactor iter-729/716 to delegate to iter-732**.
-
-  Two callsites had inline ``delp/Δpeln`` patterns that match the
-  iter-732 ``layer_mean_pressure_fv3`` helper:
-
-      iter-729 ``dry_pressure_fv3`` hydrostatic branch:
-          pd = (1−rq) · delp / Δpeln  →  (1−rq) · layer_mean_pressure_fv3
-
-      iter-716 ``eqv_pot_bolton_fv3`` hydrostatic branch:
-          p_mb = 0.01 · delp / Δpeln  →  0.01 · layer_mean_pressure_fv3
-
-  Both refactors output bit-identical (29/29 supercell, 7/7
-  eqv_pot, 8/8 Bolton, 7/7 dry_pressure tests still pass).
-
-  Tests (4/4 in <1 s):
-  1. iter-729 hydrostatic: pd = (1−rq) · layer_mean_pressure exactly.
-  2. iter-716 Bolton p_mb = 0.01 · layer_mean_pressure exactly.
-  3. iter-692 eqv_pot still produces finite output.
-  4. iter-716 Bolton θ_e still produces finite output.
-
-  Wired into iter-383 sweep (now 297).
-- Iter 732: **``layer_mean_pressure_fv3``** — layer-center pressure p_f.
-
-  Faithful port of FV3's standard layer-center pressure diagnostic
-  used throughout fv_diagnostics.F90, fv_mapz.F90, and IC paths:
-
-      p_f[k] = delp[k] / (peln[k+1] − peln[k])
-             = (p[k+1] − p[k]) / ln(p[k+1]/p[k])
-
-  Integral mean of p over the layer in log-p coordinates —
-  thermodynamically-consistent layer-center pressure used in
-  saturation-mixing-ratio computations, RH, θ_e, etc.
-
-  Composes with iter-724 ``compute_hybrid_pressure_fv3`` and is
-  used inline in many existing ports (iter-692 eqv_pot,
-  iter-695 rh_calc, iter-715 do_cmip, etc.).
-
-  Tests (6/6 in <1 s):
-  1. Thin layer → p_f ≈ p_mid.
-  2. Single layer → p_f = (p_bot − p_top)/ln(p_bot/p_top) exact.
-  3. Column-wise monotone increasing.
-  4. Composes with iter-724: p_f bounded by adjacent pe.
-  5. 3-D shapes.
-  6. No NaN/Inf.
-
-  Wired into iter-383 sweep (now 296).
-- Iter 731: **``compute_pe_from_delp_fv3``** — interface pressure from delp.
-  Faithful port of FV3's pe accumulation pattern (dyn_core.F90,
-  fv_mapz.F90, fv_treat_da_inc.F90):
-
-      pe[0] = p_top
-      pe[k] = pe[k-1] + delp[k-1]               (k = 1..km)
-
-  Vectorized via cumulative sum.  Inverse of standard
-  delp = pe[k+1] − pe[k].
-
-  Used in IC ingestion (when only delp + p_top are known) and
-  vertical-remap initialization.
-
-  Pairs with iter-724 ``compute_hybrid_pressure_fv3`` (different
-  input pathway: ak/bk/ps → pe), iter-722 ``compute_pkz_fv3``
-  (consumes peln = log(pe)), iter-726 ``hydrostatic_delz_fv3``
-  (consumes pe).
-
-  Tests (7/7 in <1 s):
-  1. Uniform delp → analytical pe array.
-  2. pe[0] = p_top exactly.
-  3. pe[km] = p_top + Σ delp.
-  4. Monotone increasing.
-  5. Composes with iter-724 hybrid: recovers pe from its delp.
-  6. 3-D shape.
-  7. No NaN/Inf.
-
-  Wired into iter-383 sweep (now 295).
+  Wired into iter-383 sweep: 295 → 303 modules.
 - Iter 730: **``dz_from_delz_or_hydrostatic_fv3`` helper + 5-iter refactor**.
 
   Extracted common dz reconstruction pattern from supercell suite:

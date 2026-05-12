@@ -327,6 +327,7 @@ _GUARD_MODULES = (
     "test_fv3_T_from_theta_iter737",                 # iter-737 add
     "test_fv3_geopotential_iter738",                 # iter-738 add
     "test_fv3_specific_volume_iter739",              # iter-739 add
+    "test_fv3_kinetic_energy_iter740",               # iter-740 add
 )
 
 

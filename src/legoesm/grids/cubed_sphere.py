@@ -2987,6 +2987,38 @@ def theta_dry_fv3(
     return pt * (p_ref / p) ** kap
 
 
+def kinetic_energy_fv3(
+    ua: jax.Array,
+    va: jax.Array,
+    w: jax.Array | None = None,
+) -> jax.Array:
+    """FV3_3D iter 740: kinetic energy per unit mass.
+
+        KE = 0.5 · (ua² + va²)        (2-component, hydrostatic)
+        KE = 0.5 · (ua² + va² + w²)   (3-component, non-hydrostatic)
+
+    Standard FV3 pattern used in iter-693 ``nh_total_energy_fv3``
+    and many other diagnostics.  ``w=None`` skips the vertical
+    component (hydrostatic limit).
+
+    Parameters
+    ----------
+    ua, va : jax.Array
+        Horizontal wind components (m/s).
+    w : jax.Array, optional
+        Vertical velocity (m/s).  If None, only ua, va contribute.
+
+    Returns
+    -------
+    ke : jax.Array
+        KE per unit mass (m²/s²).
+    """
+    ke = 0.5 * (ua * ua + va * va)
+    if w is not None:
+        ke = ke + 0.5 * w * w
+    return ke
+
+
 def specific_volume_fv3(
     delp: jax.Array,
     delz: jax.Array,
@@ -3634,8 +3666,8 @@ def nh_total_energy_fv3(
     )                                            # phiz[..., k+1]
     # Layer-mean phi
     phi_avg = 0.5 * (phiz_top + phiz_bot)
-    # Layer KE
-    ke = 0.5 * (ua * ua + va * va + w * w)
+    # Layer KE (iter-740: delegate to kinetic_energy_fv3)
+    ke = kinetic_energy_fv3(ua, va, w)
     if moist_phys:
         if q_sphum is None:
             raise ValueError("moist_phys=True requires q_sphum")
