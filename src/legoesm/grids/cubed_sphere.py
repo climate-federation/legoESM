@@ -1752,6 +1752,43 @@ def rot_3d(
     raise ValueError(f"Invalid axis: {axis} (must be 1, 2, or 3)")
 
 
+def global_qsum(p: jax.Array) -> jax.Array:
+    """FV3_3D iter 632: quick global sum without area weighting.
+
+    Faithful JAX port of FV3 ``global_qsum`` (fv_grid_utils.F90:
+    2999-3018).  Serial (non-MPI) implementation; for distributed
+    runs use ``legoesm.distributed.global_sum_mpi``.
+
+    Returns the scalar sum of all elements in ``p`` (no area
+    weighting; unlike iter-623 ``g_sum``).
+    """
+    return jnp.sum(p)
+
+
+def global_mx(q: jax.Array) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 632: global min / max reduction.
+
+    Faithful JAX port of FV3 ``global_mx`` (fv_grid_utils.F90:
+    3020-3046).  Serial (non-MPI) implementation; for distributed
+    runs use ``legoesm.distributed.global_min_mpi`` /
+    ``global_max_mpi``.
+
+    Returns ``(qmin, qmax)`` over all elements of ``q``.
+    """
+    return jnp.min(q), jnp.max(q)
+
+
+def global_mx_c(q: jax.Array) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 632: global min / max at cell corners.
+
+    Faithful JAX port of FV3 ``global_mx_c`` (fv_grid_utils.F90:
+    3048-3067).  Identical to ``global_mx`` but FV3 distinguishes
+    cell-center vs corner indexing in the signature; for legoESM
+    they're identical operations on the input array.
+    """
+    return jnp.min(q), jnp.max(q)
+
+
 def g_sum(
     p: jax.Array, area: jax.Array, mode: int = 0,
 ) -> jax.Array:

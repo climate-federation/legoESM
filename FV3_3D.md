@@ -1195,6 +1195,28 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 632: **FV3 ``global_qsum`` + ``global_mx`` + ``global_mx_c``**.
+  Faithful JAX ports of FV3 serial reduction helpers:
+
+  | Function       | F90 line | Role                              |
+  |----------------|----------|-----------------------------------|
+  | ``global_qsum``| 2999     | sum w/o area weight (vs g_sum)    |
+  | ``global_mx``  | 3020     | min/max at cell centers           |
+  | ``global_mx_c``| 3048     | min/max at cell corners           |
+
+  All serial (non-MPI); legoESM uses ``global_sum_mpi`` /
+  ``global_min_mpi`` / ``global_max_mpi`` for distributed runs.
+  Useful FV3-named aliases for code porting and CI diagnostics.
+
+  Tests (6/6 in <1 s):
+  1. ``global_qsum`` constant field.
+  2. ``global_qsum`` zero field.
+  3. ``global_qsum`` works for any shape.
+  4. ``global_mx`` extremes.
+  5. ``global_mx`` uniform field (qmin=qmax).
+  6. ``global_mx_c`` identical to ``global_mx``.
+
+  Wired into iter-383 sweep (now 202).
 - Iter 631: **FV3 ``edge_factors`` non-ortho branch port**.
   Faithful JAX port of FV3 ``edge_factors`` (fv_grid_utils.F90:
   1212-1289), non-orthogonal branch.  Single-axis 1D variant:
