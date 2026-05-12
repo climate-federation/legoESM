@@ -1195,6 +1195,42 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 667: **FV3 ``dcmip16_bc_temperature`` + ``dcmip16_bc_pressure``**.
+  Faithful JAX ports of FV3 DCMIP16 baroclinic-instability test
+  profiles (tools/test_cases.F90:6774-6805).
+
+  Jablonowski-Williamson BC temperature:
+
+      IT = cos(lat)^K - K/(K+2)·cos(lat)^(K+2)
+      zsc = z·g/(b·R_d·T0)
+      Tr = (1 - 2·zsc²)·exp(-zsc²)
+      T1 = (1/T0)·exp(λ·z/T0) + (T0-Tp)/(T0·Tp)·Tr
+      T2 = 0.5·(K+2)·(Te-Tp)/(Te·Tp)·Tr
+      T  = 1/(T1 - T2·IT)
+
+  BC pressure (companion):
+
+      Tir = z·exp(-(z·g/(b·R_d·T0))²)
+      Ti1 = (1/λ)·(exp(λ·z/T0) - 1) + Tir·(T0-Tp)/(T0·Tp)
+      Ti2 = 0.5·(K+2)·(Te-Tp)/(Te·Tp)·Tir
+      p   = p0·exp(-g/R_d·(Ti1 - Ti2·IT))
+
+  Default DCMIP16 BC constants:
+      KK=3 (zonal wave number)
+      Te=310 K, Tp=240 K, T0=(Te+Tp)/2=275 K
+      b=2, lapse=0.005 K/m, p0=1e5 Pa
+
+  Used in FV3 DCMIP16 Test 410 (baroclinic instability).
+
+  Tests (6/6 in 1 s):
+  1. Surface-equator T in realistic range.
+  2. Surface p = p0.
+  3. p monotonically decreasing with z.
+  4. Output shape matches input.
+  5. No NaN/Inf on random (z, lat).
+  6. T ∈ [150, 350] K across globe at z=5km.
+
+  Wired into iter-383 sweep (now 234).
 - Iter 666: **FV3 ``dcmip16_tc_sphum``** — DCMIP16 TC humidity profile.
   Faithful JAX port of FV3 ``DCMIP16_TC_sphum`` (tools/test_cases.F90:
   7198-7208).

@@ -2382,6 +2382,85 @@ def rotate_winds_sphere_cube(
     return new_u, new_v
 
 
+def dcmip16_bc_temperature(
+    z: jax.Array, lat: jax.Array,
+    KK: float = 3.0,
+    Te: float = 310.0,
+    Tp: float = 240.0,
+    b: float = 2.0,
+    lapse: float = 0.005,
+) -> jax.Array:
+    """FV3_3D iter 667: DCMIP16 baroclinic-instability temperature profile.
+
+    Faithful JAX port of FV3 ``DCMIP16_BC_temperature``
+    (tools/test_cases.F90:6774-6789).  Jablonowski-Williamson
+    BC test temperature::
+
+        IT = cos(lat)^K - K/(K+2) · cos(lat)^(K+2)
+        zsc = z·g/(b·R_d·T0)
+        Tr = (1 - 2·zsc²) · exp(-zsc²)
+        T1 = (1/T0)·exp(lapse·z/T0) + (T0-Tp)/(T0·Tp)·Tr
+        T2 = 0.5·(K+2)·(Te-Tp)/(Te·Tp)·Tr
+        T  = 1 / (T1 - T2·IT)
+
+    Default DCMIP16 BC constants:
+        KK = 3 (zonal wave number)
+        Te = 310 K, Tp = 240 K, T0 = (Te+Tp)/2 = 275 K
+        b = 2, lapse = 0.005 K/m
+    """
+    g = constants.g
+    Rdgas = constants.R_d
+    T0 = 0.5 * (Te + Tp)  # FV3 note: WRONG in document, here = 275
+    IT = (
+        jnp.cos(lat) ** KK
+        - KK / (KK + 2.0) * jnp.cos(lat) ** (KK + 2.0)
+    )
+    zsc = z * g / (b * Rdgas * T0)
+    Tr = (1.0 - 2.0 * zsc * zsc) * jnp.exp(-zsc * zsc)
+    T1 = (1.0 / T0) * jnp.exp(lapse * z / T0) + (T0 - Tp) / (T0 * Tp) * Tr
+    T2 = 0.5 * (KK + 2.0) * (Te - Tp) / (Te * Tp) * Tr
+    return 1.0 / (T1 - T2 * IT)
+
+
+def dcmip16_bc_pressure(
+    z: jax.Array, lat: jax.Array,
+    KK: float = 3.0,
+    Te: float = 310.0,
+    Tp: float = 240.0,
+    b: float = 2.0,
+    lapse: float = 0.005,
+    p0: float = 1.0e5,
+) -> jax.Array:
+    """FV3_3D iter 667: DCMIP16 BC pressure profile (companion to T).
+
+    Faithful JAX port of FV3 ``DCMIP16_BC_pressure``
+    (tools/test_cases.F90:6791-6805):
+
+        IT  = cos(lat)^K - K/(K+2) · cos(lat)^(K+2)
+        Tir = z · exp(-(z·g/(b·R_d·T0))²)
+        Ti1 = (1/lapse)·(exp(lapse·z/T0) - 1) + Tir·(T0-Tp)/(T0·Tp)
+        Ti2 = 0.5·(K+2)·(Te-Tp)/(Te·Tp)·Tir
+        p   = p0·exp(-g/R_d · (Ti1 - Ti2·IT))
+
+    Used in FV3 DCMIP16 baroclinic-instability test (Test 410).
+    """
+    g = constants.g
+    Rdgas = constants.R_d
+    T0 = 0.5 * (Te + Tp)
+    IT = (
+        jnp.cos(lat) ** KK
+        - KK / (KK + 2.0) * jnp.cos(lat) ** (KK + 2.0)
+    )
+    zsc = z * g / (b * Rdgas * T0)
+    Tir = z * jnp.exp(-zsc * zsc)
+    Ti1 = (
+        (1.0 / lapse) * (jnp.exp(lapse * z / T0) - 1.0)
+        + Tir * (T0 - Tp) / (T0 * Tp)
+    )
+    Ti2 = 0.5 * (KK + 2.0) * (Te - Tp) / (Te * Tp) * Tir
+    return p0 * jnp.exp(-g / Rdgas * (Ti1 - Ti2 * IT))
+
+
 def dcmip16_tc_sphum(
     z: jax.Array,
     q0: float = 0.021,
