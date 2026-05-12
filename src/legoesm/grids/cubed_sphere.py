@@ -5764,6 +5764,69 @@ def ice_supersaturation_fv3(
     return rh_ice > rh_thresh
 
 
+def contrail_appleman_fv3(
+    t: jax.Array,
+    p_pa: jax.Array,
+    q_sphum: jax.Array,
+    T_SA: float = 233.15,
+    rh_ice_thresh: float = 100.0,
+) -> jax.Array:
+    """FV3_3D iter 802: simplified Schmidt-Appleman contrail criterion.
+
+    Boolean mask of potential persistent-contrail region for
+    conventional jet aviation:
+
+        contrail = (T_amb < T_SA) AND (RH_ice ≥ rh_ice_thresh)
+
+    Default ``T_SA = −40 °C = 233.15 K`` is the simplified
+    Schmidt-Appleman threshold for jet engines (η ≈ 0.3,
+    EI_H2O ≈ 1.25); below this T the engine-exhaust mixing line
+    crosses the liquid-saturation curve, ice can homogeneously
+    nucleate on cooling exhaust → contrail forms.  Default
+    ``rh_ice_thresh = 100`` % distinguishes **persistent**
+    contrails (RH_ice > 100% → contrail spreads into cirrus)
+    from short-lived contrails (RH_ice < 100% → evaporates).
+
+    The full Schmidt-Appleman criterion has a pressure-dependent
+    threshold via the mixing slope G(p) = ε·EI_H2O·p / (LHV·(1−η)),
+    with the tangent-to-saturation construction giving T_LC(p).
+    This helper uses the constant T_SA simplification, which is
+    accurate to ~3 K across jet flight levels.
+
+    Used by: aircraft contrail-formation forecasting (NWS
+    contrail charts), aviation-induced cirrus climatology
+    (Burkhardt-Kärcher 2011, Schumann 2012 CoCiP framework),
+    flight-routing optimization to avoid contrail regions,
+    contrail-cirrus radiative-forcing assessment.
+
+    Composes iter-800 ``relative_humidity_ice_fv3``.
+
+    Parameters
+    ----------
+    t : jax.Array
+        Temperature (K).
+    p_pa : jax.Array
+        Pressure (Pa).
+    q_sphum : jax.Array
+        Specific humidity (kg/kg).
+    T_SA : float
+        Schmidt-Appleman temperature threshold (K).  Default
+        233.15 K (−40 °C).  Pass a smaller value (e.g., 230 K)
+        for more conservative detection, larger (e.g., 240 K)
+        for aviation-cirrus-cover upper bound.
+    rh_ice_thresh : float
+        Persistent-contrail RH_ice threshold (%).  Default 100
+        (formal definition of persistent contrail).
+
+    Returns
+    -------
+    contrail : jax.Array of bool
+        True where simplified Schmidt-Appleman criterion satisfied.
+    """
+    rh_ice = relative_humidity_ice_fv3(t, p_pa, q_sphum)
+    return (t < T_SA) & (rh_ice >= rh_ice_thresh)
+
+
 def lcl_temperature_fv3(
     pt: jax.Array,
     p_mb: jax.Array,

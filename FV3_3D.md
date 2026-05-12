@@ -5064,6 +5064,56 @@ CAM5/IFS/AM4/CESM2 for cirrus-cloud onset.  Pure JAX, vmap-
 compatible.  No new physical constants introduced (140 % is the
 Koop-2000 convention, not a generic physical constant).
 
+## Iter 802 — contrail_appleman_fv3 (simplified Schmidt-Appleman)
+
+Added `contrail_appleman_fv3(t, p_pa, q_sphum, T_SA=233.15,
+rh_ice_thresh=100.0)` to `grids/cubed_sphere.py`.  Boolean mask
+of potential persistent-contrail region:
+
+```
+contrail = (T_amb < T_SA) AND (RH_ice ≥ rh_ice_thresh)
+```
+
+Default ``T_SA = 233.15 K (−40 °C)`` is the simplified Schmidt-
+Appleman threshold for conventional jet engines (η ≈ 0.3,
+EI_H2O ≈ 1.25).  Below this T the engine-exhaust mixing line
+crosses the liquid-saturation curve, ice homogeneously nucleates,
+contrail forms.  ``rh_ice_thresh = 100`` distinguishes
+persistent contrails (cirrus-forming) from short-lived (RH_ice
+< 100 → evaporates within minutes).
+
+The full Schmidt-Appleman has pressure-dependent T_LC(p) via
+mixing slope G(p) = ε·EI_H2O·p / (LHV·(1−η)).  This helper uses
+the constant T_SA simplification — accurate to ~3 K across jet
+flight levels.
+
+Used by: aircraft contrail-formation forecasting (NWS contrail
+charts), aviation-induced cirrus climatology (Burkhardt-Kärcher
+2011, Schumann 2012 CoCiP framework), flight-routing
+optimization to avoid contrail regions, contrail-cirrus
+radiative-forcing assessment.
+
+Composes iter-800 ``relative_humidity_ice_fv3``.
+
+Test: `tests/test_fv3_contrail_appleman_iter802.py` (6 tests:
+warm + dry → False, cold + supersat → True, cold + dry → False,
+warm + moist → False (T > T_SA), custom T_SA=240 catches 235 K
+case, 3-D shapes preserved dtype bool).
+
+### Why this iteration was meaningful
+
+Contrail-formation forecasting is the operational aviation-
+weather diagnostic for both:
+  * Civilian flight routing (avoid contrail-cirrus formation
+    regions for climate-impact mitigation).
+  * Climate assessment (aviation-induced cirrus is the largest
+    non-CO₂ aviation forcing — Lee et al. 2021).
+
+Together with iter-800 (RH_ice) and iter-801 (ISS), closes the
+**aviation-weather diagnostic triplet** (RH_ice, ISS, contrail).
+Pure JAX, vmap-compatible.  No new physical constants introduced
+(−40 °C is the SA-1953 convention).
+
 
 
 
