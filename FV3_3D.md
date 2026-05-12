@@ -1195,6 +1195,29 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 755: **``mse_column_fv3`` + ``dse_column_fv3``** — column variants.
+
+  Mass-weighted column integrals of iter-753 MSE + iter-754 DSE:
+
+      MSE_col = Σ_k delp · MSE / g
+      DSE_col = Σ_k delp · DSE / g
+
+  Compose iter-753/754 with iter-742 column_integral_delp_fv3.
+
+  Identity preserved at column scale:
+
+      MSE_col − DSE_col = LE_col
+
+  (verified bit-identical to iter-746 latent_energy_column).
+
+  Tests (5/5 in <1 s):
+  1. Zero inputs → MSE_col=0.
+  2. Isothermal T=280 → DSE_col = c_pd·T·p_s/g exact.
+  3. MSE_col − DSE_col = LE_col exact (iter-746 cross-check).
+  4. 3-D shapes.
+  5. No NaN/Inf.
+
+  Wired into iter-383 sweep (now 320).
 - Iter 754: **``dry_static_energy_fv3``** — DSE companion to iter-753 MSE.
 
       DSE = c_p · T + g · z

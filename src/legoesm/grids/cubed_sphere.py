@@ -3022,6 +3022,70 @@ def potential_energy_column_fv3(
     return column_integral_delp_fv3(phi_avg, delp)
 
 
+def mse_column_fv3(
+    pt: jax.Array,
+    z: jax.Array,
+    q_sphum: jax.Array,
+    delp: jax.Array,
+    cp: float | jax.Array | None = None,
+    L: float | None = None,
+) -> jax.Array:
+    """FV3_3D iter 755: column-integrated moist static energy.
+
+        MSE_col = Σ_k delp · MSE / g
+
+    Composes iter-753 ``moist_static_energy_fv3`` + iter-742
+    ``column_integral_delp_fv3``.
+
+    Parameters
+    ----------
+    pt, z, q_sphum, delp : jax.Array
+        Layer-mean inputs (see iter-753).
+    cp, L : optional
+        Overrides (see iter-753).
+
+    Returns
+    -------
+    mse_col : jax.Array
+        Column MSE (J/m²).
+    """
+    return column_integral_delp_fv3(
+        moist_static_energy_fv3(pt, z, q_sphum, cp=cp, L=L),
+        delp,
+    )
+
+
+def dse_column_fv3(
+    pt: jax.Array,
+    z: jax.Array,
+    delp: jax.Array,
+    cp: float | jax.Array | None = None,
+) -> jax.Array:
+    """FV3_3D iter 755: column-integrated dry static energy.
+
+        DSE_col = Σ_k delp · DSE / g
+
+    Composes iter-754 ``dry_static_energy_fv3`` + iter-742
+    ``column_integral_delp_fv3``.
+
+    Parameters
+    ----------
+    pt, z, delp : jax.Array
+        Layer-mean inputs.
+    cp : optional
+        Override (see iter-754).
+
+    Returns
+    -------
+    dse_col : jax.Array
+        Column DSE (J/m²).
+    """
+    return column_integral_delp_fv3(
+        dry_static_energy_fv3(pt, z, cp=cp),
+        delp,
+    )
+
+
 def dry_static_energy_fv3(
     pt: jax.Array,
     z: jax.Array,
