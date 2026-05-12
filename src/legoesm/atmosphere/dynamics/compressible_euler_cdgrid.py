@@ -207,6 +207,12 @@ class CDGridCompressibleEulerConfig(NamedTuple):
         # FV3_3D iter 328: vector halo for cc → D-grid (u, v). Scalar halo leaves O(1) basis-mismatch
         # at cube edges (face-local e_x/e_y differ). center_to_dgrid_vector rotates via pad_halo_vector
         # (FV3 ext_vector, fv_duogrid.F90:626-975). PE unaffected (winds at corners).
+    use_fv3_a2b_ord4_vector_uv: bool = False
+        # FV3_3D iter 697: 4th-order a2b_ord4 PPM+Lagrange cascade for cc → D-grid (u, v).
+        # Requires use_fv3_vector_halo_uv=True.  Halo=2 vector pad + 4th-order corner cascade
+        # (FV3 a2b_edge.F90:a2b_ord4 duogrid path).  Default OFF; opt-in to evaluate impact
+        # on the residual ~5-6 mK cube-imprint floor at C24-C32.  PE unaffected (PE iter-170
+        # already runs 4th-order scalar a2b for zeta corner).
     use_fv3_d_con_cv: bool = False
         # FV3_3D iter 320: c_v denominator for NH d_con (FV3 dyn_core.F90:1795 cv_air branch).
         # NH conserves internal energy c_v·T; c_pd under-heats by c_v/c_p≈0.714 (~40%). PE unaffected.
@@ -270,7 +276,10 @@ def cdgrid_compressible_euler_slow_tendencies(
     # FV3_3D iter 328: vector-aware center_to_dgrid_vector rotates across cube faces (default False = scalar)
     n_face_uv, n_i_uv, n_j_uv, nlev_uv = u.shape
     if config.use_fv3_vector_halo_uv:
-        u_d, v_d = center_to_dgrid_vector(u, v, cdgrid)
+        u_d, v_d = center_to_dgrid_vector(
+            u, v, cdgrid,
+            use_fv3_a2b_ord4=config.use_fv3_a2b_ord4_vector_uv,
+        )
     else:
         _uv_stack = jnp.stack([u, v], axis=-1)  # (6, n, n, nlev, 2)
         _uv_flat = _uv_stack.reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv * 2)

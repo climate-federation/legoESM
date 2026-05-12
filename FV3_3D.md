@@ -1195,6 +1195,36 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 697: **wire iter-696 ``use_fv3_a2b_ord4_vector_uv`` through
+  NH dycore config**.  Iter 696 added the opt-in
+  ``use_fv3_a2b_ord4`` arg to ``center_to_dgrid_vector``; iter 697
+  exposes it through ``CDGridCompressibleEulerConfig`` and wires
+  the callsite in ``_nh_step`` (NH cc → D-grid lift):
+
+      if config.use_fv3_vector_halo_uv:
+          u_d, v_d = center_to_dgrid_vector(
+              u, v, cdgrid,
+              use_fv3_a2b_ord4=config.use_fv3_a2b_ord4_vector_uv,
+          )
+
+  Flag defaults to False everywhere; ``make_fv3_faithful_nh_config``
+  leaves it OFF pending an impact measurement on the 5-6 mK floor
+  (avoids regressing the existing 30-day C96 climate spin-up
+  before evidence is in).
+
+  Requires ``use_fv3_vector_halo_uv=True`` (h2 vector pad replaces
+  h1 vector pad).  Factory already enables vector halo.
+
+  Tests (4/4 in <1 s):
+  1. Flag exists on config, default False.
+  2. ``make_fv3_faithful_nh_config`` default OFF.
+  3. Factory respects user override.
+  4. Override pairs with ``use_fv3_vector_halo_uv``.
+
+  Regression: 37/37 NH integration tests pass unchanged with
+  default OFF.
+
+  Wired into iter-383 sweep (now 261).
 - Iter 696: **FV3 4th-order vector cc→D-corner (a2b_ord4 path)** —
   closes the last documented PE-vs-NH FV3-fidelity asymmetry on
   the NH path's cell-centre → D-corner ``u``/``v`` lift.
