@@ -5113,3 +5113,41 @@ rule by delegating to `thermo.saturation_vapor_pressure`.  ~5
 lines of source.  Pure JAX, vmap-compatible.  No new physical
 constants introduced.
 
+## Iter 769 — lcl_state_fv3 (single-call LCL triad + MSE-conservation guard)
+
+Added `lcl_state_fv3(pt, p_pa, q_sphum, z_parcel)` to
+`grids/cubed_sphere.py`.  Single-call API that composes:
+
+  * iter-763 `lcl_temperature_fv3`  → T_LCL (Bolton 1980 eq. 21)
+  * iter-764 `lcl_pressure_fv3`     → p_LCL = p·(T_LCL/T)^(1/κ)
+  * iter-765 `lcl_height_fv3`       → z_LCL = z + (c_pd/g)·(T − T_LCL)
+
+Returns the (T_LCL, p_LCL, z_LCL) tuple.  Caller passes parcel
+state once instead of three separate helper calls.
+
+**Key consistency property** verified in regression test: on the
+dry adiabat below LCL, both DSE = c_pd·T + g·z (by construction
+of iter-765) and q (no condensation below LCL) are conserved →
+MSE = DSE + L_v·q is conserved → `moist_static_energy_fv3` of
+parcel matches that of LCL endpoint to float64 roundoff
+(< 1e−6 J/kg of ~3·10⁵ J/kg MSE).  This is a powerful end-to-end
+guard: any future modification to iter-763/764/765 that breaks
+this conservation property fails the test.
+
+Test: `tests/test_fv3_lcl_state_iter769.py` (6 tests: bit-identity
+vs separate iter-763/764/765 calls, MSE conservation < 1e−6 J/kg,
+DSE conservation < 1e−6 J/kg, 3-D shapes for all three outputs,
+finite, physical sanity z_LCL>z & p_LCL<p & T_LCL<T).
+
+### Why this iteration was meaningful
+
+(1) Single-call LCL-state API consolidates the iter-763/764/765
+sequence — CAPE/CIN integrators, SRH parcel helpers, and
+convective-trigger schemes now call one function instead of three.
+(2) The MSE-conservation regression test is an end-to-end
+consistency guard for the entire LCL triad: it exercises iter-753
+MSE, iter-754 DSE, and iter-763/764/765 together, catching any
+future drift that would break the dry-adiabatic conservation
+identity.  This is the type of cross-cutting fidelity test that
+the per-helper unit tests cannot provide.
+

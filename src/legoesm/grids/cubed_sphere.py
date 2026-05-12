@@ -4180,6 +4180,54 @@ def lcl_temperature_fv3(
     return 2840.0 / (3.5 * jnp.log(pt) - jnp.log(e) - 4.805) + 55.0
 
 
+def lcl_state_fv3(
+    pt: jax.Array,
+    p_pa: jax.Array,
+    q_sphum: jax.Array,
+    z_parcel: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """FV3_3D iter 769: full LCL state (T_LCL, p_LCL, z_LCL) in one call.
+
+    Composes:
+
+      * iter-763 ``lcl_temperature_fv3``  — Bolton (1980) eq. 21 T_LCL
+      * iter-764 ``lcl_pressure_fv3``     — Poisson p_LCL = p·(T_LCL/T)^(1/κ)
+      * iter-765 ``lcl_height_fv3``       — z_LCL = z + (c_pd/g)·(T − T_LCL)
+
+    Returned triad is mutually consistent on the dry adiabat below
+    LCL: in particular, since DSE = c_pd·T + g·z is conserved on
+    the dry adiabat (by construction of iter-765) and q is
+    conserved (no condensation below LCL), the MSE = DSE + L_v·q
+    of the parcel and LCL endpoint match identically.  This
+    property is verified in the iter-769 regression test.
+
+    Single-call API for parcel-lift diagnostics, CAPE/CIN
+    integrators, supercell parcel-source helpers, and convective-
+    initiation triggers.
+
+    Parameters
+    ----------
+    pt : jax.Array
+        Parcel temperature (K).
+    p_pa : jax.Array
+        Parcel pressure (Pa).
+    q_sphum : jax.Array
+        Specific humidity (kg/kg).
+    z_parcel : jax.Array
+        Parcel geopotential height (m).
+
+    Returns
+    -------
+    (t_lcl, p_lcl, z_lcl) : tuple of jax.Array
+        LCL temperature (K), pressure (Pa), height (m).
+    """
+    p_mb = p_pa / 100.0
+    t_lcl = lcl_temperature_fv3(pt, p_mb, q_sphum)
+    p_lcl = lcl_pressure_fv3(pt, p_pa, t_lcl)
+    z_lcl = lcl_height_fv3(z_parcel, pt, t_lcl)
+    return t_lcl, p_lcl, z_lcl
+
+
 def saturation_deficit_column_fv3(
     p_full: jax.Array,
     t: jax.Array,
