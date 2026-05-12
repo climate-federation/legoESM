@@ -138,6 +138,39 @@ Compression iteration.  Folded iter-30 through iter-40 entries into the
 auto-loaded MEMORY.md / context envelope.  Detailed per-iteration narratives
 remain in the commit messages on `clean_physics`.
 
+### Iteration 45 — 2026-05-13
+
+**Inspection iteration on `src/legoesm/ice/` (no code changes).**
+
+Codex narrow review (60 s budget) on the ice modules timed out
+(exit 144).  Direct inspection of `dynamics.py`, `rheology.py`,
+`itd.py`, `transport.py`, `sea_ice.py`:
+
+- **EVP semi-implicit Coriolis** — algebra verified.  Per-substep
+  rotation by ``2·alpha = f·dt_s`` cumulates to ``f·dt`` over
+  ``N_evp`` substeps (eq. lines 352-355 of `dynamics.py`).
+- **EVP backward-Euler stress relaxation** — ``E_factor = 1 /
+  (2·T_evp·N_evp)`` correctly recovers ``dt_s / (2·T_damp)`` with
+  ``T_damp = T_evp · N_evp · dt_s`` (rheology.py:268).
+- **VP constitutive law** — ``σ_ij = 2η ε_ij + (ζ − η) δ_ij·tr(ε)
+  − (P/2) δ_ij`` matches Hunke & Dukowicz (1997) (vp_stress).
+- **PPM transport** — flux-form, monotone within CFL ≤ 1; volume
+  ``h·A``, area ``A``, enthalpy ``T·h·A`` advected as independent
+  conserved scalars; cell-mean temperature recovered as
+  ``enthalpy / volume`` (transport.py:147-168).
+- **ITD remap** — volume-conserving rescale after bound clamp; cat
+  0 retains its own deficit (no smaller bin to demote to); last
+  cat retains its own excess (no larger bin to promote to).
+  Conservation exact when no clamp fires.
+- **Strain-rate FD denominators** — ``grid.dy`` is already the
+  full ``2·hy`` spacing between (i±1) (cubed_sphere.py:326, 794),
+  so the ``(u[..., 2:] − u[..., :-2]) / dy`` formula is centred.
+
+Known deferred items unchanged: CICE V=h·A refactor (lead-freeze
+``h·Δconc`` over-counts new ice by ``h_old/h_new_ice``);
+``Delta_min`` config field not threaded into ``delta_deformation``;
+σ-tensor not rotated across cubed-sphere faces (O(dx) edge error).
+
 ### Iteration 44 — 2026-05-13
 
 **Apply codex iter-43 finding: slab_land fresh-snow albedo.**
