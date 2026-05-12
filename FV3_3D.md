@@ -4981,4 +4981,45 @@ turbulence.  Composes iter-772 + iter-778 + iter-780 to close the
 rotation-stratification diagnostic suite.  Pure JAX, vmap-
 compatible.  No new physical constants introduced.
 
+## Iter 782 — rhines_scale_fv3 (L_β = √(U/β))
+
+Added `rhines_scale_fv3(u_eddy, beta, beta_floor=1e-15)` to
+`grids/cubed_sphere.py`.  Rhines (1975) transition scale:
+
+```
+L_β = √(U / max(|β|, beta_floor))     [m]
+```
+
+Below L_β: isotropic 2-D turbulence dominates.  Above L_β: the
+β-effect breaks isotropy → zonal banded jets and Rossby waves
+take over (the "Rhines β-arrest" of the inverse cascade).
+
+Sets jet-spacing scale on rapidly rotating planets (Jupiter,
+Saturn) and the meridional eddy-mixing length in QG turbulence
+theory.  ``beta_floor`` prevents div-by-0 at poles (β→0 there).
+
+Used by: jet-formation criterion in QG turbulence models, eddy-
+permitting ocean parameterization scales, planetary-rotation
+effects on cascade, mesoscale energy spectra.
+
+Composes iter-780 ``beta_plane_fv3``.
+
+Test: `tests/test_fv3_rhines_scale_iter782.py` (7 tests: 20 m/s
++ equatorial β → 935 km, U=0 → L_β=0, monotone U, monotone β,
+pole floored, full iter-780 (lat=45°, U=20) → β → L_β ≈ 1.1 Mm
+composition, 3-D shapes + finite + non-negative).
+
+### Why this iteration was meaningful
+
+L_β is the canonical scale separating eddy turbulence from
+zonal-banded β-plane dynamics.  Critical for: (1) prediction of
+banded-jet formation on planetary atmospheres; (2) eddy-mixing
+length parameterization in GFDL-style ocean lateral-mixing
+schemes; (3) understanding the inverse-cascade arrest in QG
+turbulence (Maltrud-Vallis 1991 / Rhines 1975); (4) interpreting
+the L_β vs L_R hierarchy for jet vs eddy regime transitions.
+Together with iter-781 L_R, this closes the canonical
+length-scale pair for rotating stratified flow.  Pure JAX, vmap-
+compatible.  No new physical constants introduced.
+
 

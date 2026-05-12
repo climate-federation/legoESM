@@ -3828,6 +3828,54 @@ def rossby_radius_fv3(
     return n_brunt * H / jnp.maximum(jnp.abs(f), f_floor)
 
 
+def rhines_scale_fv3(
+    u_eddy: jax.Array,
+    beta: jax.Array,
+    beta_floor: float = 1e-15,
+) -> jax.Array:
+    """FV3_3D iter 782: Rhines scale L_β = √(U/β).
+
+    Transition length scale (Rhines 1975) at which eddy nonlinear
+    advection (∝ U/L) matches β·L Rossby-wave restoring:
+
+        L_β = √(U / β)
+
+    Below L_β: isotropic 2-D turbulence; cascade is dimensional.
+    Above L_β: β-effect breaks isotropy → zonal banded jets and
+    Rossby waves dominate (the "Rhines β-arrest" of the inverse
+    cascade).
+
+    Sets jet-spacing scale on rapidly rotating planets (Jupiter,
+    Saturn) and the meridional eddy-mixing length in QG
+    turbulence theory.
+
+    Used by: jet-formation criterion in QG turbulence models,
+    eddy-permitting ocean parameterization scales, planetary
+    rotation effects on cascade, mesoscale energy spectra.
+
+    Composes with iter-780 ``beta_plane_fv3``.
+
+    ``beta_floor`` prevents div-by-0 at the poles (β→0 there).
+    Default 1e-15 → polar L_β ≈ √(U/1e-15) ≈ 3.2·10⁷·√U (huge).
+
+    Parameters
+    ----------
+    u_eddy : jax.Array
+        Eddy velocity scale U (m/s).  Typical RMS eddy speed.
+    beta : jax.Array
+        Meridional Coriolis gradient β = df/dy (s⁻¹·m⁻¹), from
+        iter-780 ``beta_plane_fv3``.
+    beta_floor : float
+        Lower bound on |β| (s⁻¹·m⁻¹).  Default 1e-15.
+
+    Returns
+    -------
+    L_beta : jax.Array
+        Rhines scale (m).
+    """
+    return jnp.sqrt(jnp.maximum(u_eddy, 0.0) / jnp.maximum(jnp.abs(beta), beta_floor))
+
+
 def kinetic_energy_fv3(
     ua: jax.Array,
     va: jax.Array,
