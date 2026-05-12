@@ -187,6 +187,7 @@ _GUARD_MODULES = (
     "test_schmidt_transform_iter586",                # iter-586 add
     "test_aam_drift_iter587",                        # iter-587 add
     "test_aam_correction_iter588",                   # iter-588 add
+    "test_cube_transform_iter589",                   # iter-589 add
 )
 
 

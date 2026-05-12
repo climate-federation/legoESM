@@ -1195,6 +1195,23 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 589: **``cube_transform`` revised Schmidt variant**.
+  Faithful port of FV3 ``cube_transform`` (fv_grid_utils.F90:
+  920-980).  Same as ``schmidt_transform`` (iter 586) plus
+  one critical line: ``lon += π`` before pole rotation (FV3
+  line 963: "rotate around first to get final orientation
+  correct").  Selected by FV3 ``do_cube_transform=.true.``
+  namelist flag.
+  New ``cube_transform()`` in ``legoesm.grids.cubed_sphere``.
+  ``create_cubed_sphere(...)`` gains ``do_cube_transform``
+  kwarg (default False = use ``schmidt_transform`` per
+  iter-586).  Tests (4/4 in 4 s):
+  1. cube_transform produces finite output.
+  2. Differs from schmidt_transform on same params (π-shift
+     non-trivial).
+  3. Full grid creation @ c=2 + do_cube_transform=True valid.
+  4. do_cube_transform=False matches schmidt_transform default.
+  Wired into iter-383 sweep (now 164).
 - Iter 588: **FV3 ``consv_am`` correction** (extends iter 587).
   Faithful port of FV3 ``fv_dynamics.F90:774-794``.  Enforces
   AAM conservation by adding a solid-body-rotation correction:

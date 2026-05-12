@@ -250,6 +250,7 @@ def create_cubed_sphere(
     stretch_fac: float = 1.0,
     target_lon: float = 0.0,
     target_lat: float = -0.5 * 3.141592653589793,  # -π/2 = no rotation
+    do_cube_transform: bool = False,
 ) -> CubedSphereGrid:
     """Create a cubed-sphere grid.
 
@@ -272,11 +273,18 @@ def create_cubed_sphere(
     # Compute gnomonic coordinates on each face
     lon, lat = _compute_gnomonic_lonlat(n)
 
-    # FV3_3D iter 586: optional Schmidt stretching (FV3 fv_grid_utils.F90:870-917).
+    # FV3_3D iter 586/589: optional Schmidt stretching.
     if abs(stretch_fac - 1.0) > 1e-5 or target_lat > -0.5 * jnp.pi + 1e-5:
-        lon, lat = schmidt_transform(
-            lon, lat, stretch_fac, target_lon, target_lat,
-        )
+        if do_cube_transform:
+            # FV3 cube_transform (fv_grid_utils.F90:920-980)
+            lon, lat = cube_transform(
+                lon, lat, stretch_fac, target_lon, target_lat,
+            )
+        else:
+            # FV3 direct_transform / do_schmidt (fv_grid_utils.F90:870-917)
+            lon, lat = schmidt_transform(
+                lon, lat, stretch_fac, target_lon, target_lat,
+            )
 
     # Cartesian coordinates on unit sphere
     cos_lat = jnp.cos(lat)
@@ -485,6 +493,91 @@ def schmidt_transform(
     lon_rot = jnp.where(lon_rot >= two_pi, lon_rot - two_pi, lon_rot)
 
     # Pole branch
+    lat_pole = jnp.sign(sin_o) * p2
+    lon_pole = jnp.zeros_like(lon_rot)
+
+    lon_new = jnp.where(is_pole, lon_pole, lon_rot)
+    lat_new = jnp.where(is_pole, lat_pole, lat_rot)
+    return lon_new, lat_new
+
+
+def cube_transform(
+    lon: jax.Array,
+    lat: jax.Array,
+    stretch_fac: float,
+    target_lon: float,
+    target_lat: float,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 589: cube_transform (revised Schmidt at north pole).
+
+    Faithful port of FV3 ``cube_transform`` (fv_grid_utils.F90:920-980).
+    Same algorithm as ``schmidt_transform`` (iter 586) but with a
+    ``lon += π`` shift before the pole rotation to get the final
+    orientation correct.  Selected by FV3 namelist via
+    ``do_cube_transform=.true.`` (alternative to ``do_schmidt``).
+
+    Algorithm:
+    1. Latitude stretching (identical to direct_transform):
+       ``lat_t = asin((c²-1 + (c²+1)·sin_lat) / (c²+1 + (c²-1)·sin_lat))``
+    2. **Add π to lon** (the only difference from direct_transform).
+    3. Pole rotation to (target_lon, target_lat).
+
+    Parameters
+    ----------
+    lon, lat : jax.Array
+        Input gnomonic coordinates.  Lat ∈ [-π/2, π/2], lon ∈ [0, 2π].
+    stretch_fac : float
+        Stretching factor c.  1.0 = no stretch.
+    target_lon, target_lat : float
+        Center of high-res face in radians.
+
+    Returns
+    -------
+    lon_new, lat_new : jax.Array
+        Transformed coordinates.
+
+    See Also
+    --------
+    schmidt_transform : iter 586, ``do_schmidt`` variant (no π shift).
+    """
+    c = stretch_fac
+    c2p1 = 1.0 + c * c
+    c2m1 = 1.0 - c * c
+
+    sin_lat = jnp.sin(lat)
+    do_stretch = abs(c2m1) > 1e-7
+    if do_stretch:
+        lat_t = jnp.arcsin(
+            (c2m1 + c2p1 * sin_lat) / (c2p1 + c2m1 * sin_lat)
+        )
+    else:
+        lat_t = lat
+
+    sin_p = jnp.sin(target_lat)
+    cos_p = jnp.cos(target_lat)
+    sin_lat_t = jnp.sin(lat_t)
+    cos_lat_t = jnp.cos(lat_t)
+
+    # iter-589: the only difference from schmidt_transform — lon += π
+    lon_pi = lon + jnp.pi
+    cos_lon_pi = jnp.cos(lon_pi)
+    sin_lon_pi = jnp.sin(lon_pi)
+
+    sin_o = -(sin_p * sin_lat_t + cos_p * cos_lat_t * cos_lon_pi)
+    sin_o = jnp.clip(sin_o, -1.0, 1.0)
+
+    is_pole = (1.0 - jnp.abs(sin_o)) < 1e-7
+    p2 = 0.5 * jnp.pi
+    two_pi = 2.0 * jnp.pi
+
+    lat_rot = jnp.arcsin(sin_o)
+    lon_rot = target_lon + jnp.arctan2(
+        -cos_lat_t * sin_lon_pi,
+        -sin_lat_t * cos_p + cos_lat_t * sin_p * cos_lon_pi,
+    )
+    lon_rot = jnp.where(lon_rot < 0.0, lon_rot + two_pi, lon_rot)
+    lon_rot = jnp.where(lon_rot >= two_pi, lon_rot - two_pi, lon_rot)
+
     lat_pole = jnp.sign(sin_o) * p2
     lon_pole = jnp.zeros_like(lon_rot)
 
