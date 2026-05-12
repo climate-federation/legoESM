@@ -11,6 +11,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from legoesm import constants
 from legoesm.grids.halo import (
     pad_halo,
     pad_halo_vector,
@@ -569,7 +570,7 @@ class TestPaddedAngleHaloConsistency:
     def test_compute_padded_half_metrics_h2_h3_consistent(self):
         from legoesm.grids.halo import compute_padded_half_metrics
         n = 8
-        radius = 6.371229e6
+        radius = constants.R_earth
         hx2, hy2 = compute_padded_half_metrics(n, radius, halo=2)
         hx3, hy3 = compute_padded_half_metrics(n, radius, halo=3)
         assert hx2.shape == (6, n + 4, n + 4)

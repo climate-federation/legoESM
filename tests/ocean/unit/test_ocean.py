@@ -21,6 +21,7 @@ import pytest
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.ocean.eos import (
     wright_eos,
@@ -145,10 +146,10 @@ class TestWrightEOS:
     def test_density_perturbation(self):
         """density_perturbation should subtract reference density."""
         rho_p = density_perturbation(
-            jnp.array(10.0), jnp.array(35.0), jnp.array(0.0), rho_ref=1025.0,
+            jnp.array(10.0), jnp.array(35.0), jnp.array(0.0), rho_ref=constants.rho_ocean,
         )
         rho = wright_eos(jnp.array(10.0), jnp.array(35.0), jnp.array(0.0))
-        assert float(rho_p) == pytest.approx(float(rho) - 1025.0, abs=1e-6)
+        assert float(rho_p) == pytest.approx(float(rho) - constants.rho_ocean, abs=1e-6)
 
     def test_jit_compatible(self):
         """EOS should work under jax.jit."""
@@ -208,9 +209,9 @@ class TestLinearEOS:
         """At T=T_ref, S=S_ref, density should be rho_ref."""
         rho = linear_eos(
             jnp.array(10.0), jnp.array(35.0), jnp.array(0.0),
-            rho_ref=1025.0, T_ref=10.0, S_ref=35.0,
+            rho_ref=constants.rho_ocean, T_ref=10.0, S_ref=35.0,
         )
-        assert float(rho) == pytest.approx(1025.0)
+        assert float(rho) == pytest.approx(constants.rho_ocean)
 
     def test_warm_water_lighter(self):
         """Warmer water should be less dense (positive alpha_T)."""
@@ -236,10 +237,10 @@ class TestLinearEOS:
         #     = 1025 * (1 - 0.002 + 0.00074) = 1025 * 0.99874 = 1023.7085
         rho = linear_eos(
             jnp.array(20.0), jnp.array(36.0), jnp.array(0.0),
-            rho_ref=1025.0, alpha_T=2e-4, beta_S=7.4e-4,
+            rho_ref=constants.rho_ocean, alpha_T=2e-4, beta_S=7.4e-4,
             T_ref=10.0, S_ref=35.0,
         )
-        assert float(rho) == pytest.approx(1025.0 * 0.99874, rel=1e-6)
+        assert float(rho) == pytest.approx(constants.rho_ocean * 0.99874, rel=1e-6)
 
     def test_vectorized(self):
         """Linear EOS should work with array inputs."""
@@ -259,7 +260,7 @@ class TestLinearEOS:
         g = jax.grad(lambda T: linear_eos(T, jnp.array(35.0), jnp.array(0.0)))
         drho_dT = g(jnp.array(10.0))
         # drho/dT = -rho_ref * alpha_T = -1025 * 2e-4 = -0.205
-        assert float(drho_dT) == pytest.approx(-1025.0 * 2e-4, rel=1e-6)
+        assert float(drho_dT) == pytest.approx(-constants.rho_ocean * 2e-4, rel=1e-6)
 
 
 class TestMakeEosFn:
@@ -1036,7 +1037,7 @@ class TestHydrostaticPressure:
     def test_pressure_increases_with_depth(self, ocean_z_coord):
         """Pressure should increase with depth."""
         nlev = ocean_z_coord.n_levels
-        rho = jnp.full((1, 1, 1, nlev), 1025.0)
+        rho = jnp.full((1, 1, 1, nlev), constants.rho_ocean)
         eta = jnp.zeros((1, 1, 1))
         J = jnp.ones((1, 1, 1))
         p = compute_hydrostatic_pressure(
@@ -1049,7 +1050,7 @@ class TestHydrostaticPressure:
     def test_surface_pressure_from_eta(self, ocean_z_coord):
         """Positive eta should increase all pressures."""
         nlev = ocean_z_coord.n_levels
-        rho = jnp.full((1, 1, 1, nlev), 1025.0)
+        rho = jnp.full((1, 1, 1, nlev), constants.rho_ocean)
         J = jnp.ones((1, 1, 1))
         p_zero = compute_hydrostatic_pressure(
             rho, jnp.zeros((1, 1, 1)), ocean_z_coord.dz_ref, J,

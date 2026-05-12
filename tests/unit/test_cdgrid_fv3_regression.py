@@ -15,6 +15,8 @@ import warnings
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
+
 jax.config.update("jax_enable_x64", True)
 
 
@@ -169,7 +171,7 @@ def _dsw4_has_ut_plus_vt_crossterm(tree):
     return False
 
 
-def _make_solid_body_corner(cdgrid, Omega=7.292e-5):
+def _make_solid_body_corner(cdgrid, Omega=constants.Omega):
     """Solid-body rotation at D-grid corners: u_east = Omega*R*cos(lat)."""
     R = cdgrid.radius
     cos_lat = jnp.cos(cdgrid.lat_corner)
@@ -179,7 +181,7 @@ def _make_solid_body_corner(cdgrid, Omega=7.292e-5):
     return u_d, v_d
 
 
-def _make_solid_body_edge(cdgrid, Omega=7.292e-5):
+def _make_solid_body_edge(cdgrid, Omega=constants.Omega):
     """Solid-body rotation at FV3 edge-midpoint D-grid positions."""
     R = cdgrid.radius
     # x-edge midpoints: (6, n, n+1)
@@ -195,7 +197,7 @@ def _make_solid_body_edge(cdgrid, Omega=7.292e-5):
     return u_d, v_d
 
 
-def _make_tc2_state_edge(cdgrid, g=9.80616, Omega=7.292e-5, H0=2.94e4 / 9.80616):
+def _make_tc2_state_edge(cdgrid, g=constants.g, Omega=constants.Omega, H0=2.94e4 / constants.g):
     """Williamson TC2 (steady-state geostrophic flow) at edge-midpoint stagger."""
     R = cdgrid.radius
     n = cdgrid.n
@@ -235,7 +237,7 @@ class TestDgridToCenterGeographic(unittest.TestCase):
 
         # u_east should match Omega*R*cos(lat)
         R = cdgrid.radius
-        Omega = 7.292e-5
+        Omega = constants.Omega
         expected_ue = Omega * R * jnp.cos(cdgrid.base.lat)
         rel_err = jnp.max(jnp.abs(u_east - expected_ue)) / jnp.max(jnp.abs(expected_ue))
         self.assertLess(float(rel_err), 0.02,
@@ -275,7 +277,7 @@ class TestD2a2cVsFv3Cc2c(unittest.TestCase):
         rms_phys = float(jnp.sqrt(jnp.mean(div_phys**2)))
 
         # Both should be small (solid body has zero divergence)
-        Omega = 7.292e-5
+        Omega = constants.Omega
         # Divergence scale: Omega ~ 7e-5 s^-1; truncation should be << this
         # At C16 with non-orthogonality corrections, RMS ~ O(1e-7) which is
         # ~0.003 * Omega — well within acceptable range.
@@ -299,11 +301,11 @@ class TestFv3SwTendenciesBalancedResidual(unittest.TestCase):
         h, u_d, v_d, h_s = _make_tc2_state_edge(cdgrid)
 
         dh_dt, du_dt, dv_dt = fv3_sw_tendencies(
-            h, u_d, v_d, h_s, cdgrid, g=9.80616,
+            h, u_d, v_d, h_s, cdgrid, g=constants.g,
         )
 
         # Velocity residual normalized by Omega (natural tendency scale)
-        Omega = 7.292e-5
+        Omega = constants.Omega
         R = cdgrid.radius
         u_max = Omega * R
         du_max = float(jnp.max(jnp.abs(du_dt)))
@@ -339,7 +341,7 @@ class TestFv3SwTendenciesBalancedResidual(unittest.TestCase):
         h, u_d, v_d, h_s = _make_tc2_state_edge(cdgrid)
 
         dh_dt, du_dt, dv_dt = fv3_sw_tendencies(
-            h, u_d, v_d, h_s, cdgrid, g=9.80616,
+            h, u_d, v_d, h_s, cdgrid, g=constants.g,
         )
 
         self.assertTrue(jnp.all(jnp.isfinite(dh_dt)), "dh_dt has non-finite values")
@@ -473,7 +475,7 @@ class TestFv3ForwardBackwardSmoke(unittest.TestCase):
         dt = 300.0  # 5-minute step
 
         h_new, u_new, v_new = fv3_forward_backward_step(
-            h, u_d, v_d, h_s, cdgrid, dt, g=9.80616)
+            h, u_d, v_d, h_s, cdgrid, dt, g=constants.g)
 
         self.assertTrue(jnp.all(jnp.isfinite(h_new)),
                         "h_new has non-finite values after 1 FB step")
@@ -499,7 +501,7 @@ class TestFv3ForwardBackwardSmoke(unittest.TestCase):
         mass_0 = float(jnp.sum(h * area))
 
         h_new, u_new, v_new = fv3_forward_backward_step(
-            h, u_d, v_d, h_s, cdgrid, dt, g=9.80616)
+            h, u_d, v_d, h_s, cdgrid, dt, g=constants.g)
 
         mass_1 = float(jnp.sum(h_new * area))
         rel_err = abs(mass_1 - mass_0) / abs(mass_0)
@@ -623,7 +625,7 @@ class TestD2a2cVectDuogridSeams(unittest.TestCase):
         grid = create_cubed_sphere(n, use_duogrid=True)
         cdgrid = create_cubed_sphere_cdgrid(grid)
 
-        Omega = 7.292e-5
+        Omega = constants.Omega
         R = cdgrid.radius
         u_east_ex = Omega * R * jnp.cos(cdgrid.lat_edge_x)
         u_east_ey = Omega * R * jnp.cos(cdgrid.lat_edge_y)
@@ -797,7 +799,7 @@ class TestD2a2cVectDuogridSeams(unittest.TestCase):
         cdgrid = create_cubed_sphere_cdgrid(grid)
 
         # Solid-body rotation: u_east = Omega * R * cos(lat)
-        Omega = 7.292e-5
+        Omega = constants.Omega
         R = cdgrid.radius
         u_east_ex = Omega * R * jnp.cos(cdgrid.lat_edge_x)
         u_east_ey = Omega * R * jnp.cos(cdgrid.lat_edge_y)
@@ -2920,7 +2922,7 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
                                  duogrid=duogrid)
 
         with mock.patch.object(halo_mod, 'pad_halo', recording):
-            fv3_sw_core_mod._c_sw(h, u_d, v_d, h_s, cdgrid_dg, dt=300.0, g=9.81)
+            fv3_sw_core_mod._c_sw(h, u_d, v_d, h_s, cdgrid_dg, dt=300.0, g=constants.g)
 
         # Expect at least the 4 sin_sg E/W/N/S halos that iter-79 fixed.
         self.assertTrue(len(sin_sg_calls) >= 4,
@@ -3012,7 +3014,7 @@ class TestSupergridMetrics(unittest.TestCase):
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 
         n = 16
-        R = 6.371229e6
+        R = constants.R_earth
         grid = create_cubed_sphere(n, radius=R, use_duogrid=False)
         cdgrid = create_cubed_sphere_cdgrid(grid)
 
@@ -3066,7 +3068,7 @@ class TestSupergridMetrics(unittest.TestCase):
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 
         n = 16
-        R = 6.371229e6
+        R = constants.R_earth
         grid = create_cubed_sphere(n, radius=R, use_duogrid=False)
         cdgrid = create_cubed_sphere_cdgrid(grid)
 
@@ -3343,7 +3345,7 @@ class TestCgridMassFluxDivergenceXAxis(unittest.TestCase):
         from legoesm.core.operators_cdgrid import cgrid_mass_flux_divergence
 
         n = 8
-        base = create_cubed_sphere(n=n, radius=6.37e6, use_duogrid=False)
+        base = create_cubed_sphere(n=n, radius=constants.R_earth, use_duogrid=False)
         cdgrid = create_cubed_sphere_cdgrid(base)
         # h varying quadratically along the local i-axis on each face
         i_vals = jnp.arange(n, dtype=jnp.float64) ** 2 * 0.1 + 1.0
@@ -3389,7 +3391,7 @@ class TestCgridMassFluxDivergenceXAxis(unittest.TestCase):
 
         n = 16  # C16 gives a large interior so boundary clipping is a
                 # small fraction of the total field.
-        base = create_cubed_sphere(n=n, radius=6.37e6, use_duogrid=False)
+        base = create_cubed_sphere(n=n, radius=constants.R_earth, use_duogrid=False)
         cdgrid = create_cubed_sphere_cdgrid(base)
         # Smooth monotone quadratic in i only — no extrema so the
         # Colella-Woodward monotonicity limiter cannot fire.
@@ -3431,7 +3433,7 @@ class TestCgridMassFluxDivergenceXAxis(unittest.TestCase):
         from legoesm.core.operators_cdgrid import _cgrid_fct_fluxes_2d
 
         n = 8
-        base = create_cubed_sphere(n=n, radius=6.37e6, use_duogrid=False)
+        base = create_cubed_sphere(n=n, radius=constants.R_earth, use_duogrid=False)
         cdgrid = create_cubed_sphere_cdgrid(base)
         i_vals = jnp.arange(n, dtype=jnp.float64) ** 2 * 0.1 + 1.0
         q = jnp.broadcast_to(i_vals[None, :, None], (6, n, n))
@@ -6160,10 +6162,10 @@ class TestFv3SwTendenciesPolarFaceSymmetry(unittest.TestCase):
         from legoesm.core.operators_cdgrid import fv3_sw_tendencies
 
         n = 16
-        base = create_cubed_sphere(n=n, radius=6.37e6, use_duogrid=False)
+        base = create_cubed_sphere(n=n, radius=constants.R_earth, use_duogrid=False)
         cdgrid = create_cubed_sphere_cdgrid(base)
 
-        g, omega, a, u0 = 9.80616, 7.292e-5, 6.37e6, 38.0
+        g, omega, a, u0 = constants.g, constants.Omega, constants.R_earth, 38.0
         lat = base.lat
         u_east = u0 * jnp.cos(lat)
         v_north = jnp.zeros_like(u_east)
@@ -6220,9 +6222,9 @@ class TestFv3SwTendenciesPolarFaceSymmetry(unittest.TestCase):
         from legoesm.core.operators_cdgrid import fv3_sw_tendencies
 
         n = 16
-        base = create_cubed_sphere(n=n, radius=6.37e6, use_duogrid=False)
+        base = create_cubed_sphere(n=n, radius=constants.R_earth, use_duogrid=False)
         cdgrid = create_cubed_sphere_cdgrid(base)
-        g, omega, a, u0 = 9.80616, 7.292e-5, 6.37e6, 38.0
+        g, omega, a, u0 = constants.g, constants.Omega, constants.R_earth, 38.0
         lat = base.lat
         u_east = u0 * jnp.cos(lat)
         v_north = jnp.zeros_like(u_east)
@@ -7417,7 +7419,7 @@ class TestPGradCFortranFormula(unittest.TestCase):
         h_star = jnp.full((6, n, n), 1000.0)
         h_s = jnp.full((6, n, n), 10.0)
         dp_x, dp_y = _p_grad_c(h_star, h_s, cdgrid,
-                                 dt2=150.0, g=9.81)
+                                 dt2=150.0, g=constants.g)
         self.assertLess(
             float(jnp.max(jnp.abs(dp_x))), 1e-10,
             msg=f"Constant p → dp_x should be 0; got max={float(jnp.max(jnp.abs(dp_x))):.3e}")
@@ -7441,7 +7443,7 @@ class TestPGradCFortranFormula(unittest.TestCase):
         h_star = jnp.asarray(h_star_np)
         h_s = jnp.asarray(h_s_np)
         dt2 = 150.0
-        g = 9.81
+        g = constants.g
 
         dp_x, dp_y = _p_grad_c(h_star, h_s, cdgrid, dt2, g)
 
@@ -9928,7 +9930,7 @@ class TestCdgridDxcDycBoundaryIter666(unittest.TestCase):
 
         N = 36
         cdgrid = create_cubed_sphere_cdgrid(create_cubed_sphere(n=N))
-        g = 9.80616; omega = 7.292e-5; u_0 = 38.61068276698372
+        g = constants.g; omega = constants.Omega; u_0 = 38.61068276698372
         h_0 = 29400.0 / g; R = cdgrid.radius
         lat_c = cdgrid.base.lat
         h = h_0 - (R * omega * u_0 + 0.5 * u_0**2) * jnp.sin(lat_c)**2 / g
@@ -11467,7 +11469,7 @@ class TestFv3SwTendenciesProductionGoldFileIter711(unittest.TestCase):
         hyperdiff_coeff = 1e16 * (48.0 / n) ** 4
         div_damp = 1.5e7 * (48.0 / n) ** 2
         dh, du, dv = fv3_sw_tendencies(
-            h, u_d, v_d, h_s, cdgrid, g=9.80616,
+            h, u_d, v_d, h_s, cdgrid, g=constants.g,
             div_damp=div_damp, hyperdiff_coeff=hyperdiff_coeff,
             boundary_fix=True)
         dh = np.asarray(dh); du = np.asarray(du); dv = np.asarray(dv)
@@ -11554,7 +11556,7 @@ class TestDSwNativeEndToEndGoldFileIter710(unittest.TestCase):
         ua = jnp.asarray(rng.standard_normal((6, n, n)))
         va = jnp.asarray(rng.standard_normal((6, n, n)))
         dt = 100.0
-        g = 9.80616
+        g = constants.g
 
         h_new, u_new, v_new = _d_sw_native(
             h, u_d, v_d, h_s, uc, vc, ua, va,
@@ -11687,7 +11689,7 @@ class TestDSwNativeEndToEndGoldFileIter710(unittest.TestCase):
         ua = jnp.asarray(rng.standard_normal((6, n, n)))
         va = jnp.asarray(rng.standard_normal((6, n, n)))
         dt = 100.0
-        g = 9.80616
+        g = constants.g
 
         h_new, u_new, v_new = _d_sw_native(
             h, u_d, v_d, h_s, uc, vc, ua, va,

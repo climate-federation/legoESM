@@ -134,6 +134,10 @@ def _compute_ozone_vmr(
     p_full: jnp.ndarray,
     lat: jnp.ndarray,
     ozone_config: OzoneProfileConfig,
+    *,
+    T: jnp.ndarray | None = None,
+    lon: jnp.ndarray | None = None,
+    ml_ozone_coefs=None,
 ) -> jnp.ndarray | None:
     """Compute ozone VMR for RRTMGP.
 
@@ -144,6 +148,12 @@ def _compute_ozone_vmr(
     lat : jnp.ndarray
         Latitude (ncol,) [rad].
     ozone_config : OzoneProfileConfig
+    T : jnp.ndarray, optional
+        Temperature (ncol, nlev) [K].  Required for ``source="ml"``.
+    lon : jnp.ndarray, optional
+        Longitude (ncol,) [rad].  Required for ``source="ml"``.
+    ml_ozone_coefs : MLOzoneCoefficients, optional
+        Pre-loaded ridge weights.  Required for ``source="ml"``.
 
     Returns
     -------
@@ -156,20 +166,41 @@ def _compute_ozone_vmr(
     if ozone_config.source == "none":
         return jnp.full_like(p_full, 1.0e-10)
 
-    # source == "analytical": latitude-dependent Gaussian profile.
-    p_hPa = p_full / 100.0
-    p_peak = ozone_config.p_peak_hPa
-    sigma = ozone_config.sigma_logp
-    o3 = ozone_config.o3_max_vmr * jnp.exp(
-        -0.5 * ((jnp.log(p_hPa) - jnp.log(p_peak)) / sigma) ** 2
+    if ozone_config.source == "analytical":
+        p_hPa = p_full / 100.0
+        p_peak = ozone_config.p_peak_hPa
+        sigma = ozone_config.sigma_logp
+        o3 = ozone_config.o3_max_vmr * jnp.exp(
+            -0.5 * ((jnp.log(p_hPa) - jnp.log(p_peak)) / sigma) ** 2
+        )
+        if ozone_config.lat_dependence:
+            # Ozone is ~2x higher at poles than equator in the lower strat.
+            lat_factor = 1.0 + 0.5 * jnp.sin(lat) ** 2  # (ncol,)
+            o3 = o3 * lat_factor[:, None]
+        return jnp.clip(o3, 1.0e-10, None)
+
+    if ozone_config.source == "ml":
+        if T is None or lon is None or ml_ozone_coefs is None:
+            raise ValueError(
+                "OzoneProfileConfig.source='ml' requires T, lon, and "
+                "ml_ozone_coefs to be passed through the radiation "
+                "backend.  Did make_radiation_physics() succeed in "
+                "loading ml_weights_path?"
+            )
+        from legoesm.atmosphere.physics.radiation.ozone_ml import predict_ozone_ml
+        return predict_ozone_ml(
+            T=T,
+            lat=lat,
+            lon=lon,
+            p_full=p_full,
+            coefs=ml_ozone_coefs,
+            mmr_to_vmr=ozone_config.ml_mmr_to_vmr,
+        )
+
+    raise ValueError(
+        f"Unknown OzoneProfileConfig.source: {ozone_config.source!r}. "
+        f"Choose from 'standard', 'analytical', 'none', 'ml'."
     )
-
-    if ozone_config.lat_dependence:
-        # Ozone is ~2x higher at poles than equator in the lower stratosphere.
-        lat_factor = 1.0 + 0.5 * jnp.sin(lat) ** 2  # (ncol,)
-        o3 = o3 * lat_factor[:, None]  # broadcast to (ncol, nlev)
-
-    return jnp.clip(o3, 1.0e-10, None)
 
 
 # ===========================================================================
@@ -309,6 +340,8 @@ def _call_radiation_backend(
     ghg_vmr_override: dict | None = None,
     f_day: jnp.ndarray | None = None,
     rrtmgp_solver=None,
+    lon: jnp.ndarray | None = None,
+    ml_ozone_coefs=None,
 ):
     """Call configured radiation backend with a unified integration interface.
 
@@ -365,7 +398,10 @@ def _call_radiation_backend(
     q_v_safe = q_v if q_v is not None else jnp.zeros_like(T)
 
     # Compute ozone VMR based on config.
-    o3_vmr = _compute_ozone_vmr(p_full, lat, radiation_config.ozone)
+    o3_vmr = _compute_ozone_vmr(
+        p_full, lat, radiation_config.ozone,
+        T=T, lon=lon, ml_ozone_coefs=ml_ozone_coefs,
+    )
 
     # Compute cloud properties if cloud scheme is active.
     cloud_kwargs = {}
@@ -452,14 +488,33 @@ def make_radiation_physics(
         RRTMGP.preload(radiation_config.rrtmgp)
         rrtmgp_solver = RRTMGP.from_legoesm_config(radiation_config.rrtmgp)
 
+    # Load ML ozone ridge weights once (outside JIT).
+    ml_ozone_coefs = None
+    if radiation_config.ozone.source == "ml":
+        if not radiation_config.ozone.ml_weights_path:
+            raise ValueError(
+                "OzoneProfileConfig.source='ml' requires ml_weights_path to "
+                "point at a directory of NetCDF ridge weights."
+            )
+        from legoesm.atmosphere.physics.radiation.ozone_ml import (
+            load_ml_ozone_coefficients,
+        )
+        ml_ozone_coefs = load_ml_ozone_coefficients(
+            radiation_config.ozone.ml_weights_path
+        )
+
     if model_type == "hydrostatic":
-        return _make_hydrostatic_radiation(radiation_config, rrtmgp_solver)
+        return _make_hydrostatic_radiation(radiation_config, rrtmgp_solver,
+                                            ml_ozone_coefs=ml_ozone_coefs)
     elif model_type == "nonhydrostatic":
-        return _make_nonhydrostatic_radiation(radiation_config, rrtmgp_solver)
+        return _make_nonhydrostatic_radiation(radiation_config, rrtmgp_solver,
+                                               ml_ozone_coefs=ml_ozone_coefs)
     elif model_type == "spectral_pe":
-        return _make_spectral_pe_radiation(radiation_config, rrtmgp_solver)
+        return _make_spectral_pe_radiation(radiation_config, rrtmgp_solver,
+                                            ml_ozone_coefs=ml_ozone_coefs)
     elif model_type == "mpas":
-        return _make_mpas_radiation(radiation_config, rrtmgp_solver)
+        return _make_mpas_radiation(radiation_config, rrtmgp_solver,
+                                     ml_ozone_coefs=ml_ozone_coefs)
     else:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
@@ -474,6 +529,7 @@ def make_radiation_physics(
 def _make_hydrostatic_radiation(
     radiation_config: RadiationConfig,
     rrtmgp_solver=None,
+    ml_ozone_coefs=None,
 ) -> Callable:
     """Create radiation physics_fn for any hydrostatic model.
 
@@ -516,6 +572,7 @@ def _make_hydrostatic_radiation(
         p_half_col = p_half.reshape(ncol, nlev + 1)
         T_sfc_col = T_sfc.reshape(ncol)
         lat_col = lat.reshape(ncol)
+        lon_col = lon.reshape(ncol)
         insol_col = insol.reshape(ncol)
         cos_sza_col = cos_sza.reshape(ncol) if cos_sza is not None else None
 
@@ -538,6 +595,8 @@ def _make_hydrostatic_radiation(
             q_ice=q_ice_col,
             f_day=f_day_col,
             rrtmgp_solver=rrtmgp_solver,
+            lon=lon_col,
+            ml_ozone_coefs=ml_ozone_coefs,
         )
 
         dT_dt = rad_out.heating_rate.reshape(shape_3d)
@@ -557,6 +616,7 @@ _make_mpas_radiation = _make_hydrostatic_radiation
 def _make_nonhydrostatic_radiation(
     radiation_config: RadiationConfig,
     rrtmgp_solver=None,
+    ml_ozone_coefs=None,
 ) -> Callable:
     """Create radiation physics_fn for CompressibleEulerModel.
 
@@ -620,6 +680,7 @@ def _make_nonhydrostatic_radiation(
         p_half_col = p_half.reshape(ncol, nlev + 1)
         T_sfc_col = T_sfc.reshape(ncol)
         lat_col = lat.reshape(ncol)
+        lon_col = lon.reshape(ncol)
         insol_col = insol.reshape(ncol)
         cos_sza_col = cos_sza.reshape(ncol) if cos_sza is not None else None
 
@@ -658,6 +719,8 @@ def _make_nonhydrostatic_radiation(
             q_ice=q_ice_col,
             f_day=f_day_col,
             rrtmgp_solver=rrtmgp_solver,
+            lon=lon_col,
+            ml_ozone_coefs=ml_ozone_coefs,
         )
 
         # Convert dT/dt -> dtheta'/dt using local Exner (T = theta * exner).
@@ -716,6 +779,7 @@ def _make_nonhydrostatic_radiation(
 def _make_spectral_pe_radiation(
     radiation_config: RadiationConfig,
     rrtmgp_solver=None,
+    ml_ozone_coefs=None,
 ) -> Callable:
     """Create radiation physics_fn for SpectralPEModel.
 
@@ -774,6 +838,7 @@ def _make_spectral_pe_radiation(
         p_half_col = p_half.reshape(ncol, nlev + 1)
         T_sfc_col = T_sfc.reshape(ncol)
         lat_col = jnp.broadcast_to(lat[:, None], (n_lat, n_lon)).reshape(ncol)
+        lon_col = jnp.broadcast_to(grid.lon[None, :], (n_lat, n_lon)).reshape(ncol)
         insol_col = insol.reshape(ncol)
         cos_sza_col = cos_sza.reshape(ncol) if cos_sza is not None else None
 
@@ -796,6 +861,8 @@ def _make_spectral_pe_radiation(
             q_ice=q_ice_col,
             f_day=f_day_col,
             rrtmgp_solver=rrtmgp_solver,
+            lon=lon_col,
+            ml_ozone_coefs=ml_ozone_coefs,
         )
 
         # Reshape heating rate back to (n_lat, n_lon, nlev)

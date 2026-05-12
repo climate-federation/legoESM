@@ -3,6 +3,7 @@
 import numpy as np
 import pytest
 
+from legoesm import constants
 from legoesm.core.cfl import (
     estimate_min_dx_cubed_sphere,
     estimate_min_dx_latlon,
@@ -14,7 +15,7 @@ from legoesm.core.cfl import (
 )
 
 
-EARTH_RADIUS = 6.371229e6
+EARTH_RADIUS = constants.R_earth
 
 
 # ============================================================================
