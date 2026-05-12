@@ -1258,6 +1258,92 @@ def dist2side_latlon(
     return jnp.arcsin(jnp.clip(jnp.sin(side) * jnp.sin(angle), -1.0, 1.0))
 
 
+def intersect_great_circles(
+    a1: jax.Array, a2: jax.Array,
+    b1: jax.Array, b2: jax.Array,
+    radius: float = 1.0,
+    eps: float = 1e-30,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """FV3_3D iter 616: intersection of two great circles (Cartesian inputs).
+
+    Faithful port of FV3 ``intersect`` (fv_grid_utils.F90:2096-2194).
+    Two great circles are defined by:
+        - Circle A: arc through ``a1`` and ``a2``
+        - Circle B: arc through ``b1`` and ``b2``
+
+    Returns:
+        - ``x_inter``: the intersection point on sphere closest to
+          the centroid of (a1, a2, b1, b2) (FV3's ``get_nearest``
+          branch); scaled to ``radius``.
+        - ``local_a``: ``True`` if ``x_inter`` lies between ``a1``
+          and ``a2`` on circle A (chord distance check, F90:2186).
+        - ``local_b``: same for circle B.
+
+    Each ``ai``, ``bi`` shape ``(..., 3)``; broadcasts on leading
+    axes.  ``local_a`` / ``local_b`` are boolean arrays.
+
+    Matches FV3's exact determinant formulation (lines 2128-2147)
+    for bit-equivalence; handles the FV3 degenerate branches
+    (``b1_xyz=0`` → x_inter=b1; ``b2_xyz=0`` → x_inter=b2) via
+    ``jnp.where``.
+    """
+    a1x = a1[..., 0]; a1y = a1[..., 1]; a1z = a1[..., 2]
+    a2x = a2[..., 0]; a2y = a2[..., 1]; a2z = a2[..., 2]
+    b1x = b1[..., 0]; b1y = b1[..., 1]; b1z = b1[..., 2]
+    b2x = b2[..., 0]; b2y = b2[..., 1]; b2z = b2[..., 2]
+
+    a2_xy = a2x * a1y - a2y * a1x
+    b1_xy = b1x * a1y - b1y * a1x
+    b2_xy = b2x * a1y - b2y * a1x
+
+    a2_xz = a2x * a1z - a2z * a1x
+    b1_xz = b1x * a1z - b1z * a1x
+    b2_xz = b2x * a1z - b2z * a1x
+
+    b1_xyz = b1_xy * a2_xz - b1_xz * a2_xy
+    b2_xyz = b2_xy * a2_xz - b2_xz * a2_xy
+
+    # General branch: x_raw = b2 - b1 * (b2_xyz / b1_xyz), normalized to radius
+    safe_b1_xyz = jnp.where(jnp.abs(b1_xyz) > eps, b1_xyz, 1.0)
+    ratio = b2_xyz / safe_b1_xyz
+    x_general = b2 - b1 * ratio[..., None]
+    length = jnp.sqrt(jnp.sum(x_general * x_general, axis=-1, keepdims=True))
+    safe_len = jnp.where(length > eps, length, 1.0)
+    x_general = radius * x_general / safe_len
+
+    # FV3 degenerate branches (F90:2139-2142)
+    b1_zero = jnp.abs(b1_xyz) <= eps
+    b2_zero = (~b1_zero) & (jnp.abs(b2_xyz) <= eps)
+    x_inter = jnp.where(
+        b1_zero[..., None], b1,
+        jnp.where(b2_zero[..., None], b2, x_general),
+    )
+
+    # get_nearest: pick ±x_inter closer to centroid (F90:2157-2169)
+    center = 0.25 * (a1 + a2 + b1 + b2)
+    dx_pos = x_inter - center
+    dx_neg = -x_inter - center
+    d_pos = jnp.sum(dx_pos * dx_pos, axis=-1)
+    d_neg = jnp.sum(dx_neg * dx_neg, axis=-1)
+    x_inter = jnp.where(
+        (d_neg < d_pos)[..., None], -x_inter, x_inter,
+    )
+
+    # check_local for A and B (F90:2171-2192): chord-distance test
+    def _check_local(x1: jax.Array, x2: jax.Array) -> jax.Array:
+        dx = x1 - x2
+        dist = jnp.sum(dx * dx, axis=-1)
+        dx1 = x1 - x_inter
+        dx2 = x2 - x_inter
+        d1 = jnp.sum(dx1 * dx1, axis=-1)
+        d2 = jnp.sum(dx2 * dx2, axis=-1)
+        return (d1 <= dist) & (d2 <= dist)
+
+    local_a = _check_local(a1, a2)
+    local_b = _check_local(b1, b2)
+    return x_inter, local_a, local_b
+
+
 def unit_vect_latlon(
     lon: jax.Array, lat: jax.Array,
 ) -> tuple[jax.Array, jax.Array]:

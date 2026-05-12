@@ -1195,6 +1195,35 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 616: **FV3 ``intersect_great_circles``**.  Faithful JAX
+  port of FV3 ``intersect`` (fv_grid_utils.F90:2096-2194).
+  Computes the intersection of two great circles defined by
+  Cartesian point pairs ``(a1, a2)`` and ``(b1, b2)``:
+
+      x_inter, local_a, local_b = intersect_great_circles(a1, a2, b1, b2, radius)
+
+  Returns:
+  - ``x_inter`` — intersection point on sphere closest to the
+    centroid (FV3's ``get_nearest`` branch);
+  - ``local_a`` / ``local_b`` — booleans indicating whether
+    ``x_inter`` lies between the input pair (FV3 ``check_local``).
+
+  Used by FV3 grid generation for cubed-sphere panel boundary
+  detection and regional refinement.  Implementation follows
+  FV3's exact determinant formulation (lines 2128-2147) for
+  bit-equivalence; handles FV3 degenerate branches
+  (``b1_xyz=0`` → x_inter=b1; ``b2_xyz=0`` → x_inter=b2) via
+  ``jnp.where``.  Broadcasts on leading axes (3-vector on last).
+
+  Tests (6/6 in <1 s):
+  1. Meridian × equator → (0, 0).
+  2. ``|x_inter|`` = radius (on sphere).
+  3. ``local_a`` / ``local_b`` flag non-crossing arcs correctly.
+  4. A↔B symmetric (up to sign).
+  5. Perpendicular meridians → north pole.
+  6. Result scales linearly with radius.
+
+  Wired into iter-383 sweep (now 188).
 - Iter 615: **FV3 ``unit_vect_latlon`` + ``get_unit_vect3``**.
   Faithful JAX-vectorized ports of FV3 ``fv_grid_utils.F90``
   helpers used by ``c2l_ord4`` for wind rotation and by
