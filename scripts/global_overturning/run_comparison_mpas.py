@@ -1,0 +1,476 @@
+#!/usr/bin/env python
+"""MPAS side of the MPAS-vs-LatLon comparison experiment.
+
+Matched configuration with run_comparison_latlon.py — see
+docs/ocean_experiments/mpas_vs_latlon_comparison_plan.md for full details.
+
+Key settings (shared with lat-lon):
+  - ETOPO bathymetry, H_max=5500, H_min=10, smooth=2, MEO r=0.2, snap=30%
+  - North cap at 80°N (for fairness with lat-lon)
+  - dt=1200s, 30-day initial test
+  - A_h=1e4, C_smag_lap=0.33
+  - Implicit vertical mixing, KPP (K_conv=1.0), enhanced diffusion convection
+  - TVD tracer advection, GM/Redi κ=600
+  - Quadratic bottom drag (r=1e-3, BBL=100m, u_bg=0.1)
+  - Adcroft PGF, implicit-CN barotropic
+  - Per-timestep scalar diagnostics, daily 3D snapshots
+
+MPAS-only: K_zeta_bih=1e14 (TRiSK null mode damping).
+
+Usage:
+    CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 python scripts/global_overturning/run_comparison_mpas.py
+    CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 python scripts/global_overturning/run_comparison_mpas.py --days 365 --restart results/ocean/comparison_mpas_v_latlon/mpas/restarts/restart_day000030.npz
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import os
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+
+os.environ.setdefault("JAX_ENABLE_X64", "1")
+import jax
+import jax.numpy as jnp
+jax.config.update("jax_enable_x64", True)
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "src"))
+
+from legoesm import constants
+from legoesm.core.field import Field
+from legoesm.grids.voronoi import create_voronoi_mesh
+from legoesm.ocean.bathymetry import BathymetryConfig, load_bathymetry_mpas
+from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
+from legoesm.ocean.eos import scale_depth as _SCALE_DEPTH
+from legoesm.ocean.init_mpas import rest_state_mpas_ocean, reconstruct_cell_velocity
+from legoesm.ocean.mpas_config import MPASOceanConfig
+from legoesm.ocean.physics.combined import OceanPhysicsConfig
+from legoesm.ocean.physics.surface_forcing.config import (
+    PrescribedForcingConfig, RestoringConfig, SurfaceForcingConfig,
+)
+from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig, KPPConfig
+from legoesm.ocean.physics.lateral_mixing.config import (
+    LateralMixingConfig, GMRediConfig, VisbeckConfig,
+)
+from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
+from legoesm.ocean.physics.convection.config import (
+    OceanConvectionConfig, EnhancedDiffusionConfig,
+)
+from legoesm.ocean.vertical import create_ocean_z_star, create_partial_cell_coordinate
+
+
+# ============================================================================
+# Shared configuration constants (must match run_comparison_latlon.py)
+# ============================================================================
+
+SUBDIVISION = 5           # ico5 ~ 120 km ~ 1°
+N_LEVELS = 20
+H_MAX = 5500.0
+DZ_SURFACE = 20.0
+DZ_DEEP = 500.0
+DT = 1200.0               # seconds
+SNAP_FRAC = 0.30
+NORTH_CAP_LAT = 80.0      # cap Arctic for parity with lat-lon
+
+# Viscosity
+A_H = 1.0e4               # constant Laplacian floor [m²/s]
+C_SMAG_LAP = 0.33         # Smagorinsky Laplacian coefficient
+
+# Vertical mixing
+A_V = 1.0e-4
+K_V = 1.0e-5
+
+# Bottom drag
+BOTTOM_DRAG_R = 1.0e-3
+BOTTOM_DRAG_BBL = 100.0
+BOTTOM_DRAG_BG_VEL = 0.1
+
+# GM/Redi
+KAPPA_GM = 600.0
+KAPPA_REDI = 600.0
+S_MAX = 0.005
+
+# Forcing
+TAU_MAX = 0.1
+TROPICAL_WIND_SCALE = 0.5
+TROPICAL_WIND_LAT_DEG = 15.0
+TAU_T = 2592000.0         # 30-day restoring
+TAU_S = 2592000.0
+T_STAR_EQ = 25.0
+T_STAR_POLE = 0.0
+S_STAR = 35.0
+
+OUTPUT_DIR = Path("results/ocean/comparison_mpas_v_latlon/mpas")
+
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+def snap_partial_cells(H_bathy, z_coord, min_frac=SNAP_FRAC):
+    """Round H_bathy to nearest interface when bottom partial cell < min_frac."""
+    abs_z_half = jnp.abs(z_coord.z_half_ref)
+    nlev = z_coord.n_levels
+    n_above = jnp.sum(abs_z_half[None, :] < H_bathy[:, None], axis=1)
+    bottom_level = jnp.clip(n_above - 1, 0, nlev - 1)
+    abs_z_at_bottom = abs_z_half[bottom_level]
+    dz_at_bottom = z_coord.dz_ref[bottom_level]
+    partial_thick = H_bathy - abs_z_at_bottom
+    frac = partial_thick / jnp.maximum(dz_at_bottom, 1e-10)
+    z_upper = abs_z_half[bottom_level]
+    z_lower = abs_z_half[jnp.minimum(bottom_level + 1, nlev)]
+    H_snapped = jnp.where(H_bathy - z_upper < z_lower - H_bathy,
+                           z_upper, z_lower)
+    needs_snap = (frac < min_frac) & (frac > 0) & (H_bathy > 0)
+    H_new = jnp.where(needs_snap, H_snapped, H_bathy)
+    return jnp.where(H_new <= 0, 0.0, H_new)
+
+
+def save_restart(state, day, output_dir):
+    """Save state as restart_dayXXXXXX.npz."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    payload = {"step": int(round(day * 86400 / DT)), "time_days": float(day),
+               "grid_type": "mpas", "subdivision": SUBDIVISION}
+    for f in state._fields:
+        obj = getattr(state, f)
+        if obj is None or not hasattr(obj, "data"):
+            continue
+        payload[f] = np.asarray(obj.data)
+    fname = output_dir / f"restart_day{int(round(day)):06d}.npz"
+    np.savez_compressed(fname, **payload)
+    return fname
+
+
+def load_restart(restart_path, template_state):
+    """Load restart npz into template state."""
+    data = np.load(restart_path)
+    restart_day = float(data["time_days"])
+    replacements = {}
+    for f in template_state._fields:
+        if f not in data:
+            continue
+        obj = getattr(template_state, f)
+        if obj is None or not hasattr(obj, "data"):
+            continue
+        arr = jnp.asarray(data[f], dtype=obj.data.dtype)
+        replacements[f] = Field(data=arr, name=obj.name, dims=obj.dims,
+                                units=obj.units)
+    return template_state._replace(**replacements), restart_day
+
+
+def save_snapshot(state, mesh, ocean_mask, day, output_dir):
+    """Save 6-panel diagnostic PNG."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    mask_np = np.asarray(ocean_mask) > 0.5
+    lon = np.degrees(np.asarray(mesh.lonCell))
+    lat = np.degrees(np.asarray(mesh.latCell))
+
+    u_east, v_north = reconstruct_cell_velocity(state.u.data, mesh)
+    speed = np.asarray(jnp.sqrt(u_east**2 + v_north**2))
+    eta = np.asarray(state.eta.data)
+    sst = np.asarray(state.T.data[:, 0])
+
+    fig, axes = plt.subplots(2, 3, figsize=(22, 12))
+
+    spd = np.where(mask_np, speed[:, 0], np.nan)
+    vmax = max(0.01, np.nanpercentile(spd, 99))
+    sc = axes[0, 0].scatter(lon, lat, c=spd, s=3, cmap="magma",
+                             vmin=0, vmax=vmax)
+    plt.colorbar(sc, ax=axes[0, 0], label="m/s")
+    axes[0, 0].set_title("Surface speed")
+
+    eta_p = np.where(mask_np, eta, np.nan)
+    vm = max(0.01, np.nanmax(np.abs(eta_p)))
+    sc = axes[0, 1].scatter(lon, lat, c=eta_p, s=3, cmap="RdBu_r",
+                             vmin=-vm, vmax=vm)
+    plt.colorbar(sc, ax=axes[0, 1], label="m")
+    axes[0, 1].set_title("SSH")
+
+    sst_p = np.where(mask_np, sst, np.nan)
+    sc = axes[0, 2].scatter(lon, lat, c=sst_p, s=3, cmap="RdYlBu_r")
+    plt.colorbar(sc, ax=axes[0, 2], label="°C")
+    axes[0, 2].set_title("SST")
+
+    spd_max = np.where(mask_np, np.max(speed, axis=1), np.nan)
+    sc = axes[1, 0].scatter(lon, lat, c=spd_max, s=3, cmap="magma",
+                             vmin=0,
+                             vmax=max(0.01, np.nanpercentile(spd_max, 99)))
+    plt.colorbar(sc, ax=axes[1, 0], label="m/s")
+    axes[1, 0].set_title("Max-depth speed")
+
+    sss = np.asarray(state.S.data[:, 0])
+    sss_p = np.where(mask_np, sss, np.nan)
+    sc = axes[1, 1].scatter(lon, lat, c=sss_p, s=3, cmap="YlGnBu")
+    plt.colorbar(sc, ax=axes[1, 1], label="PSU")
+    axes[1, 1].set_title("SSS")
+
+    deep_lev = min(15, state.T.data.shape[1] - 1)
+    T_deep = np.asarray(state.T.data[:, deep_lev])
+    T_deep_p = np.where(mask_np, T_deep, np.nan)
+    sc = axes[1, 2].scatter(lon, lat, c=T_deep_p, s=3, cmap="RdYlBu_r")
+    plt.colorbar(sc, ax=axes[1, 2], label="°C")
+    axes[1, 2].set_title(f"T at level {deep_lev}")
+
+    for ax in axes.flat:
+        ax.set_xlabel("lon"); ax.set_ylabel("lat")
+
+    fig.suptitle(f"MPAS comparison — day {day:.1f} "
+                 f"(year {day/365.25:.2f})", fontsize=14)
+    fig.tight_layout()
+    fig.savefig(output_dir / f"snapshot_day{int(round(day)):06d}.png",
+                dpi=120, bbox_inches="tight")
+    plt.close(fig)
+
+
+# ============================================================================
+# Main
+# ============================================================================
+
+def main():
+    p = argparse.ArgumentParser(
+        description="MPAS side of MPAS-vs-LatLon comparison.")
+    p.add_argument("--days", type=float, default=30.0)
+    p.add_argument("--restart", default=None)
+    p.add_argument("--tag", default=None,
+                   help="Experiment tag (e.g., 'e0b'). Output goes to "
+                        "results/.../mpas_{tag}/. If omitted, uses 'mpas/'.")
+    p.add_argument("--etopo",
+                   default="/home/dbalwada/legoESM/data/bathymetry/etopo_1deg.nc")
+    args = p.parse_args()
+
+    if args.tag:
+        outdir = OUTPUT_DIR.parent / f"mpas_{args.tag}"
+    else:
+        outdir = OUTPUT_DIR
+    restart_dir = outdir / "restarts"
+    snapshot_dir = outdir / "snapshots"
+    restart_dir.mkdir(parents=True, exist_ok=True)
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+
+    # --- Grid ---
+    print(f"=== MPAS comparison run: ico{SUBDIVISION}, {args.days} days ===")
+    mesh = create_voronoi_mesh(subdivision_level=SUBDIVISION)
+    z_coord = create_ocean_z_star(n_levels=N_LEVELS, H_max=H_MAX,
+                                  dz_surface=DZ_SURFACE, dz_deep=DZ_DEEP)
+
+    # --- Bathymetry (matched with lat-lon) ---
+    bathy_cfg = BathymetryConfig(
+        source="file", path=args.etopo,
+        H_max=H_MAX, H_min=10.0, smoothing_passes=2,
+        r_factor_max=0.2, depth_is_negative=True,
+    )
+    H_bathy_raw, ocean_mask = load_bathymetry_mpas(mesh, bathy_cfg)
+
+    # Apply north cap at 80°N for parity with lat-lon
+    lat_cell = np.degrees(np.asarray(mesh.latCell))
+    north_cap_mask = jnp.asarray(lat_cell <= NORTH_CAP_LAT, dtype=H_bathy_raw.dtype)
+    H_bathy_raw = H_bathy_raw * north_cap_mask
+    ocean_mask = ocean_mask * north_cap_mask
+
+    H_snapped = snap_partial_cells(H_bathy_raw, z_coord)
+    ocean_mask = jnp.where(H_snapped > 0, ocean_mask, 0.0)
+    pc_coord = create_partial_cell_coordinate(z_coord, H_snapped)
+
+    n_ocean = int(jnp.sum(ocean_mask > 0.5))
+    print(f"  Mesh: nCells={mesh.nCells}, nEdges={mesh.nEdges}")
+    print(f"  Ocean cells: {n_ocean}/{mesh.nCells} "
+          f"(after 80°N cap)")
+    print(f"  Vertical: {N_LEVELS} levels, dz_sfc={DZ_SURFACE}m, "
+          f"dz_deep={DZ_DEEP}m")
+
+    # --- Physics ---
+    physics = OceanPhysicsConfig(
+        surface_forcing=SurfaceForcingConfig(
+            scheme="combined",
+            prescribed=PrescribedForcingConfig(
+                wind_profile="global_wind", tau_max=TAU_MAX,
+                tropical_wind_scale=TROPICAL_WIND_SCALE,
+                tropical_wind_lat_deg=TROPICAL_WIND_LAT_DEG,
+            ),
+            restoring=RestoringConfig(
+                tau_T=TAU_T, tau_S=TAU_S,
+                T_star_eq=T_STAR_EQ, T_star_pole=T_STAR_POLE,
+                S_star=S_STAR, T_profile="cosine",
+            ),
+        ),
+        vertical_mixing=VerticalMixingConfig(
+            scheme="kpp",
+            kpp=KPPConfig(K_conv=1.0),
+        ),
+        lateral_mixing=LateralMixingConfig(scheme="none"),
+        bottom_drag=BottomDragConfig(scheme="none"),
+        convection=OceanConvectionConfig(
+            scheme="enhanced_diffusion",
+            enhanced_diffusion=EnhancedDiffusionConfig(K_conv=1.0),
+        ),
+        shortwave_penetration=None,
+    )
+
+    # --- Model config ---
+    config = MPASOceanConfig(
+        barotropic_solver="implicit_cn",
+        barotropic_implicit_pcg_tol=1e-10,
+        barotropic_implicit_pcg_maxiter=300,
+        A_h=A_H,
+        A_v=A_V,
+        C_smag_lap=C_SMAG_LAP,
+        K_v=K_V,
+        bottom_drag_r=BOTTOM_DRAG_R,
+        bottom_drag_bbl_thickness=BOTTOM_DRAG_BBL,
+        bottom_drag_bg_velocity=BOTTOM_DRAG_BG_VEL,
+        K_zeta_bih=1e14,                # MPAS-only: TRiSK null mode damping
+        equatorial_visc_boost=0.0,
+        pgf_scheme="adcroft",             # now works: use_h_actual_pgf=True by default
+        implicit_vertical_mixing=True,
+        tracer_advection="tvd",
+        gm_redi=GMRediConfig(
+            kappa_GM=KAPPA_GM,
+            kappa_Redi=KAPPA_REDI,
+            S_max=S_MAX,
+            visbeck=VisbeckConfig(enabled=False),
+            slope_scheme="centered",
+        ),
+        physics=physics,
+    )
+
+    model = MPASOceanModel(mesh, pc_coord, config)
+
+    # --- Initial condition ---
+    T_ref = 2.0 + 18.0 * jnp.exp(z_coord.z_full_ref / _SCALE_DEPTH)
+    T_data = jnp.broadcast_to(T_ref[None, :], (mesh.nCells, N_LEVELS))
+    T_data = jnp.where(pc_coord.is_active, T_data, 0.0)
+    S_data = jnp.where(pc_coord.is_active,
+                        jnp.full_like(T_data, S_STAR), 0.0)
+
+    state = rest_state_mpas_ocean(
+        mesh, z_coord, T_surface=20.0, T_deep=2.0,
+        S_uniform=S_STAR, H_max=H_MAX, land_lat_threshold=90.0,
+    )
+    dtype = state.eta.data.dtype
+    state = state._replace(
+        H_bathy=Field(data=H_snapped.astype(dtype), name="H_bathy",
+                      dims=("nCells",), units="m"),
+        land_mask=Field(data=ocean_mask.astype(dtype)),
+        T=Field(data=T_data.astype(dtype), name="T",
+                dims=("nCells", "nlev"), units="degC"),
+        S=Field(data=S_data.astype(dtype), name="S",
+                dims=("nCells", "nlev"), units="PSU"),
+    )
+
+    # --- Restart? ---
+    start_day = 0.0
+    if args.restart:
+        state, start_day = load_restart(args.restart, state)
+        print(f"  Resumed from {args.restart} at day {start_day:.0f}")
+
+    # --- Print config ---
+    print(f"\n  Config (matched with lat-lon except K_zeta_bih):")
+    print(f"    A_h={A_H:.0e}, C_smag_lap={C_SMAG_LAP}")
+    print(f"    A_v={A_V:.0e}, K_v={K_V:.0e}")
+    print(f"    KPP(K_conv=1.0), enhanced_diffusion(K_conv=1.0)")
+    print(f"    bottom_drag: r={BOTTOM_DRAG_R:.0e}, "
+          f"BBL={BOTTOM_DRAG_BBL}m, u_bg={BOTTOM_DRAG_BG_VEL}")
+    print(f"    GM/Redi: κ_GM={KAPPA_GM}, κ_Redi={KAPPA_REDI}")
+    print(f"    PGF=adcroft, barotropic=implicit_cn")
+    print(f"    K_zeta_bih=1e14 (MPAS-only)")
+    print(f"    dt={DT}s, tracer_advection=tvd")
+    print(f"    Wind: global_wind τ_max={TAU_MAX}, "
+          f"tropical_scale={TROPICAL_WIND_SCALE}")
+
+    # --- Time loop ---
+    total_days = args.days
+    dt = DT
+    n_steps = int(total_days * 86400 / dt)
+    diag_every_day = 1  # daily snapshots
+    diag_steps = int(diag_every_day * 86400 / dt)
+
+    # Per-timestep CSV
+    csv_path = outdir / "timeseries.csv"
+    csv_exists = csv_path.exists() and args.restart
+    csv_file = open(csv_path, "a" if csv_exists else "w", newline="")
+    csv_writer = csv.writer(csv_file)
+    if not csv_exists:
+        csv_writer.writerow([
+            "step", "day", "max_u", "max_eta", "mean_SST",
+            "global_KE", "max_CFL_h", "wall_s",
+        ])
+
+    print(f"\n  Running {total_days:.0f} days ({n_steps} steps)")
+    print(f"  Per-timestep scalars → {csv_path}")
+    print(f"  Daily snapshots → {snapshot_dir}\n")
+
+    # Precompute cell areas for KE
+    area_cell = jnp.asarray(mesh.areaCell)
+
+    t0 = time.time()
+    for k in range(n_steps):
+        state = model.step(state, dt=dt)
+        day = start_day + (k + 1) * dt / 86400.0
+        step = int(round(day * 86400 / dt))
+
+        # --- Per-timestep scalar diagnostics ---
+        u_data = state.u.data
+        eta_data = state.eta.data
+        T_data_cur = state.T.data
+
+        max_u = float(jnp.max(jnp.abs(u_data)))
+        max_eta = float(jnp.max(jnp.abs(eta_data)))
+        mean_sst = float(
+            jnp.where(ocean_mask > 0.5, T_data_cur[:, 0], 0.0).sum()
+            / jnp.maximum(jnp.sum(ocean_mask > 0.5), 1)
+        )
+
+        # Global KE: 0.5 * rho_0 * sum(u_edge² * dcEdge * dvEdge * h_e)
+        # Approximate: use edge lengths as proxy for area
+        edge_area = mesh.dcEdge * mesh.dvEdge  # (nEdges,)
+        h_e = pc_coord.dz_ref[None, :]  # approximate
+        KE_edge = 0.5 * jnp.sum(u_data**2 * edge_area[:, None])
+        global_KE = float(KE_edge)
+
+        # Horizontal CFL: max(|u| * dt / dcEdge)
+        max_CFL_h = float(jnp.max(
+            jnp.max(jnp.abs(u_data), axis=1) * dt / mesh.dcEdge
+        ))
+
+        wall = time.time() - t0
+        csv_writer.writerow([
+            step, f"{day:.4f}", f"{max_u:.6e}", f"{max_eta:.6e}",
+            f"{mean_sst:.4f}", f"{global_KE:.6e}", f"{max_CFL_h:.4f}",
+            f"{wall:.1f}",
+        ])
+        csv_file.flush()
+
+        # --- Console output ---
+        if (k + 1) % diag_steps == 0 or k == 0 or k == n_steps - 1:
+            year = day / 365.25
+            print(f"  day {day:6.1f}  max|u|={max_u:.4f}  "
+                  f"max|eta|={max_eta:.4f}  <SST>={mean_sst:.2f}  "
+                  f"CFL={max_CFL_h:.3f}  wall={wall:.0f}s")
+
+        # --- Blowup check ---
+        if not np.isfinite(max_u) or max_u > 20:
+            print(f"  *** BLOWUP at day {day:.1f} ***")
+            save_restart(state, day, restart_dir)
+            save_snapshot(state, mesh, ocean_mask, day, snapshot_dir)
+            break
+
+        # --- Daily snapshot ---
+        if (k + 1) % diag_steps == 0 or k == n_steps - 1:
+            save_restart(state, day, restart_dir)
+            save_snapshot(state, mesh, ocean_mask, day, snapshot_dir)
+
+    csv_file.close()
+    wall_total = time.time() - t0
+    print(f"\nDone: {day:.0f} days in {wall_total:.0f}s "
+          f"({wall_total/60:.1f} min)")
+
+
+if __name__ == "__main__":
+    main()

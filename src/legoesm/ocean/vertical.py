@@ -787,6 +787,7 @@ def flux_form_vertical_tracer_advection_tvd(
     w_half: jnp.ndarray,
     h_k: jnp.ndarray,
     dt: float,
+    cell_active: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Flux-form vertical tracer advection with TVD Van Leer scheme.
 
@@ -808,6 +809,11 @@ def flux_form_vertical_tracer_advection_tvd(
         Layer thickness [m] at full levels (z-star actual thickness).
     dt : float
         Time step [s], for CFL computation.
+    cell_active : array, shape (..., nlev), optional
+        Per-level active mask (1=ocean, 0=sub-seafloor).  When provided,
+        sub-seafloor ghost values in the upwind-of-upwind stencil are
+        replaced with the boundary active value, preventing the TVD
+        limiter from seeing T=0/S=0 below the seafloor.
 
     Returns
     -------
@@ -818,10 +824,30 @@ def flux_form_vertical_tracer_advection_tvd(
     eps = 1e-30
     nlev = field.shape[-1]
 
+    # On partial cells, replace sub-seafloor values with the nearest
+    # active value above.  This prevents the TVD upwind-of-upwind
+    # stencil from seeing T=0/S=0 below the seafloor.
+    if cell_active is not None:
+        # Propagate bottom active value downward through inactive levels.
+        # Scan from top to bottom: if level k is inactive, copy from k-1.
+        def _fill_down(carry, k):
+            prev = carry
+            cur = field[..., k]
+            active_k = cell_active[..., k] > 0.5
+            filled = jnp.where(active_k, cur, prev)
+            return filled, filled
+        import jax.lax
+        _, filled_cols = jax.lax.scan(
+            _fill_down, field[..., 0], jnp.arange(nlev))
+        # filled_cols is (nlev, ...) — transpose back to (..., nlev)
+        field_safe = jnp.moveaxis(filled_cols, 0, -1)
+    else:
+        field_safe = field
+
     # Interior interface values: k = 1..nlev-1
     w_interior = w_half[..., 1:nlev]   # (..., nlev-1)
-    T_below = field[..., 1:]           # field[k]   for k=1..nlev-1
-    T_above = field[..., :-1]          # field[k-1] for k=1..nlev-1
+    T_below = field_safe[..., 1:]      # field[k]   for k=1..nlev-1
+    T_above = field_safe[..., :-1]     # field[k-1] for k=1..nlev-1
 
     # --- First-order upwind flux ---
     T_upwind = jnp.where(w_interior > 0.0, T_below, T_above)
@@ -841,11 +867,12 @@ def flux_form_vertical_tracer_advection_tvd(
     # Upwind-of-upwind gradient:
     # For upward flow (w>0), donor=k(below): need field[k]-field[k+1]
     # For downward flow (w<=0), donor=k-1(above): need field[k-2]-field[k-1]
-    # Use ghost cells at boundaries (copy of boundary value → delta=0 → r=0 → upwind)
+    # Ghost cells at boundaries copy boundary value → delta=0 → r=0 → upwind.
+    # Using field_safe ensures sub-seafloor ghost = bottom active value.
     field_bot_ghost = jnp.concatenate(
-        [field, field[..., -1:]], axis=-1)     # ghost at bottom
+        [field_safe, field_safe[..., -1:]], axis=-1)     # ghost at bottom
     field_top_ghost = jnp.concatenate(
-        [field[..., :1], field], axis=-1)      # ghost at top
+        [field_safe[..., :1], field_safe], axis=-1)      # ghost at top
 
     # Upwind gradient for upward flow: field[k] - field[k+1]
     delta_upwind_up = field_bot_ghost[..., 1:nlev] - field_bot_ghost[..., 2:nlev + 1]

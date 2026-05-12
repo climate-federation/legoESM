@@ -47,9 +47,9 @@ Differentiability: ``jax.scipy.sparse.linalg.cg`` is differentiable
 through implicit-function-theorem custom-VJP.
 
 Tracer transport consistency: returns ``(Hu_avg, Hv_avg)`` =
-``½·(H_old·U^n + H_new·U^{n+1})`` (and similar for V) — trapezoidal-rule
-estimator of the time-integrated face transport, matching the explicit
-substep's box-averaged Hu_avg interface.
+``H_old · [(1-θ)·U^n + θ·U^{n+1}]`` — time-averaged face transport using
+the OLD face thickness, ensuring ``div(Hu_avg) = (η_old − η_new)/dt``
+exactly (required for flux-form tracer conservation on partial cells).
 """
 
 from __future__ import annotations
@@ -446,11 +446,15 @@ def barotropic_implicit_latlon_cgrid(
     H_u_new, H_v_new = _h_total_at_faces(
         h_k_new, min_water_col, mask,
     )
-    Hu_avg = (
-        (1.0 - theta_eta) * H_u_old * U_old + theta_eta * H_u_new * U_new
+    # Use H_old consistently so that div(Hu_avg) = (eta_old - eta_new)/dt
+    # exactly — required for flux-form tracer conservation.  The Helmholtz
+    # solve used H_old throughout; using H_new here breaks the discrete
+    # continuity closure on partial cells.
+    Hu_avg = H_u_old * (
+        (1.0 - theta_eta) * U_old + theta_eta * U_new
     ) * u_mask
-    Hv_avg = (
-        (1.0 - theta_eta) * H_v_old * V_old + theta_eta * H_v_new * V_new
+    Hv_avg = H_v_old * (
+        (1.0 - theta_eta) * V_old + theta_eta * V_new
     ) * v_mask
 
     # ----- Step 8: update 3D velocity (preserve baroclinic structure) --
