@@ -1195,6 +1195,34 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 601: **NH TE-conserving correction** (FV3 ``consv_te > 0``
+  analog).  Faithful port of FV3 fv_dynamics.F90 consv_te logic
+  (Lagrangian_to_Eulerian energy-correcting branch).  Adjusts
+  θ′ uniformly across all cells to compensate exact dycore TE
+  drift:
+
+      te_dt = TE(state_new) - TE(state_old)
+      ΔT = -te_dt / (cv · total_dry_mass)
+      Δθ′ = ΔT / exner_ref(k)  (level-dependent)
+
+  KE/PE NOT redistributed — only IE adjusted via θ′ (matches
+  FV3 design: thermodynamic correction, not wind correction).
+  Verified at C8 (3/3 tests in 4 s):
+  - Drift before correction: 7.16e+22 J
+  - Drift after correction:  -1.07e+09 J
+  - Reduction factor: **1.5e-14** (~14 orders of magnitude →
+    float64 precision).  Cleaner than iter 588's AAM correction
+    (8 orders) because IE is linear in T.
+  - Identical states → no-op (max|Δθ′|<1e-10).
+  - u, v, w, rho_prime UNCHANGED; only theta_prime adjusted.
+  New ``apply_te_correction_nh(state_old, state_new, grid, hc)``
+  in ``legoesm.diagnostics``.  Differentiable.
+
+  **NH conservation stack now COMPLETE**:
+  - AAM: aam_from_nh_state / aam_drift_nh / apply_aam_correction_nh
+  - TE:  compute_total_energy_nh / te_drift_nh / apply_te_correction_nh
+  PE-side TE correction is the natural follow-up.
+  Wired into iter-383 sweep (now 174).
 - **Iters 591-599 (compacted iter 600)**: grid shift + complete
   PPM stack + transport plumbing + NH/PE total-energy stack.
   - iter 591: ``shift_fac`` longitude shift (FV3

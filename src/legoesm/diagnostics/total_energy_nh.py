@@ -97,3 +97,56 @@ def te_drift_nh(state_old, state_new, grid, hc) -> float:
     _, te_old = compute_total_energy_nh(state_old, grid, hc)
     _, te_new = compute_total_energy_nh(state_new, grid, hc)
     return te_new - te_old
+
+
+def apply_te_correction_nh(state_old, state_new, grid, hc):
+    """FV3_3D iter 601: NH total-energy-conserving correction.
+
+    Analog of iter 588's ``apply_aam_correction_nh`` but for total
+    energy.  Inspired by FV3 ``consv_te > 0`` (fv_dynamics.F90:359-378
+    + Lagrangian_to_Eulerian energy-correcting branch).
+
+    Enforces ``TE(corrected) ≈ TE(state_old)`` by adding a uniform
+    temperature increment ΔT such that the total internal-energy
+    change exactly compensates the drift:
+
+        te_dt = TE(state_new) - TE(state_old)
+        ΔT = -te_dt / (cv · total_dry_mass)
+        Δθ' = ΔT / exner_ref(k)   (level-dependent)
+
+    KE and PE terms are NOT redistributed — only the IE term is
+    adjusted via θ'.  This matches FV3's design (the correction
+    targets the thermodynamic state, not winds).
+
+    Returns
+    -------
+    state_corrected : NonHydrostaticState
+        State with theta_prime adjusted; other fields unchanged.
+
+    Notes
+    -----
+    Bit-for-bit identical to state_new when te_dt = 0.  Differentiable
+    end-to-end.
+    """
+    _, te_old = compute_total_energy_nh(state_old, grid, hc)
+    _, te_new = compute_total_energy_nh(state_new, grid, hc)
+    te_dt = te_new - te_old                              # J
+
+    # Total dry mass: sum(rho_full · dz · area)
+    dz_b = jnp.asarray(hc.dz)[None, None, None, :]
+    rho_ref_b = jnp.asarray(hc.rho_ref)[None, None, None, :]
+    rho_full = rho_ref_b + state_new.rho_prime.data
+    dm = rho_full * dz_b * grid.area[..., None]
+    total_mass = jnp.sum(dm)
+
+    # ΔT uniform across the atmosphere (kelvin)
+    dT = -te_dt / (constants.c_vd * total_mass)
+
+    # Δθ' = ΔT / exner_ref(k)
+    exner_ref_b = jnp.asarray(hc.exner_ref)[None, None, None, :]
+    d_theta_prime = dT / exner_ref_b                     # (1,1,1,nlev)
+
+    new_theta = state_new.theta_prime.replace(
+        data=state_new.theta_prime.data + d_theta_prime,
+    )
+    return state_new._replace(theta_prime=new_theta)

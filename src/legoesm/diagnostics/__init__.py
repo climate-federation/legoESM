@@ -7,6 +7,7 @@ from legoesm.diagnostics.angular_momentum import (
     compute_atmospheric_angular_momentum,
 )
 from legoesm.diagnostics.total_energy_nh import (
+    apply_te_correction_nh,
     compute_total_energy_nh,
     te_drift_nh,
 )
