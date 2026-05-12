@@ -1081,6 +1081,21 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 522: **AD-at-rest through ``monotone_halo_clip_context``**.
+  iter-505 helper uses ``unittest.mock.patch`` to monkey-
+  patch 11 halo aliases.  Critical question: does
+  ``jax.grad`` still flow through the patched code?  Patched
+  fn is ``functools.partial`` of the original AD-safe
+  ``pad_halo_4d`` / ``pad_halo_vector_4d`` / etc.  Tests:
+  1. Single-step grad: ``loss = mean(theta_prime²)``,
+     ``jax.grad(loss, u0)`` and ``jax.grad(loss, v0)``
+     return finite & nonzero gradients.
+  2. 3-step grad: through 3 sequential ``m.step()`` inside
+     one context.  Finite & nonzero.
+  Confirms: the iter-505 helper is fully differentiable
+  end-to-end.  Training (neural GCM, parameter tuning) can
+  use the helper unconditionally.  2/2 in 328 s.  Wired
+  into iter-383 sweep (now 111).
 - Iter 521: **SBR (Williamson 2-like) IC scan**.  Canonical
   test: u_east = U₀ cos(lat), v_north = 0, projected via
   ``rotate_winds_geo_to_grid``.  theta_prime starts at 0;
