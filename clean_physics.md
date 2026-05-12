@@ -96,6 +96,40 @@ Branch: `clean_physics`. Driven by Ralph loop + `/codex:adversarial-review`.
   75 / 75 land carbon + multilayer + diff_land; 140 / 140 land (post iter-44);
   100 / 100 ocean MPAS + surface_forcing + emanuel + atmosphere convection.
 
+## Iteration 58 — 2026-05-13
+
+**Fix codex iter-57 stop-time finding: dry-column AD fix incomplete.**
+
+Iter-57 patched KPP's non-local tendency divisor but did NOT cover
+`vertical_diffusion` and `vertical_diffusion_variable_K` in
+`ocean/physics/mixing.py`, which are the leaf operators called from
+KPP, Richardson, constant-K, enhanced-diffusion convection, and the
+per-PE-backend baseline tracer diffusion.  Both divided by
+`dz_actual = dz_ref · jacobian` without a wet-cell guard, producing
+`0/0 = NaN` on dry columns — exactly the issue iter-56 fixed for
+shortwave penetration.
+
+Fix: in BOTH `vertical_diffusion` and `vertical_diffusion_variable_K`:
+- `dz_half_safe = jnp.where(dz_half > 0, dz_half, 1)` for the flux
+  denominator.
+- `dz_safe = jnp.where(dz > 0, dz, 1)` for the tendency denominator.
+- Final `jnp.where(dz > 0, tend, 0)` so dry columns return zero.
+
+Wet-cell output bitwise identical to the previous implementation.
+Backward (AD) pass now clean on mixed wet/dry grids.
+
+New regression test
+`test_vertical_diffusion_dry_column_gives_zero_finite_tendency`
+exercises a mixed wet (J=1) / dry (J=0) two-column grid and verifies
+dry rows return zero and wet rows return non-zero.
+
+**Tests (post iter-58):**
+- 31 / 31 vertical-mixing + convection + shortwave + ocean dispatch.
+- 48 / 49 tests/unit/test_corrections.py (1 pre-existing
+  `test_b_salt_sign_freshening_is_stabilizing` deselected — test
+  fragility: `jnp.mean(None)` when `out.K_v is None`).
+- 3 / 3 TestVerticalMixing including new regression.
+
 ## Iteration 57 — 2026-05-13
 
 **Defensive AD-safety fix: KPP non-local dz_actual divisor.**

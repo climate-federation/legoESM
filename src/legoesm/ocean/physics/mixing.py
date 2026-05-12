@@ -122,17 +122,24 @@ def vertical_diffusion(
     else:
         coeff_eff = coeff
 
-    # Diffusive flux at interior interfaces: coeff * d(field)/dz
-    df_dz = (field[..., :-1] - field[..., 1:]) / dz_half
+    # Diffusive flux at interior interfaces: coeff * d(field)/dz.
+    # Dry / land columns have ``dz = 0`` (jacobian = 0).  Safe
+    # denominators avoid 0/0 = NaN in both the flux and tendency
+    # divisions; the result is gated to zero on dry columns at the
+    # end so wet-cell output is bitwise identical.
+    dz_half_safe = jnp.where(dz_half > 0.0, dz_half, 1.0)
+    dz_safe = jnp.where(dz > 0.0, dz, 1.0)
+    df_dz = (field[..., :-1] - field[..., 1:]) / dz_half_safe
     flux = coeff_eff * df_dz  # (..., nlev-1)
 
     # Tendency at full levels: d(flux)/dz with zero-flux BCs.
     # Using concatenate avoids scatter updates (better JIT lowering and
     # no mixed-dtype scatter edge cases on strict x64 runs).
-    top = -flux[..., :1] / dz[..., :1]  # surface: flux_above = 0
-    interior = (flux[..., :-1] - flux[..., 1:]) / dz[..., 1:-1]
-    bottom = flux[..., -1:] / dz[..., -1:]  # bottom: flux_below = 0
-    return jnp.concatenate([top, interior, bottom], axis=-1)
+    top = -flux[..., :1] / dz_safe[..., :1]  # surface: flux_above = 0
+    interior = (flux[..., :-1] - flux[..., 1:]) / dz_safe[..., 1:-1]
+    bottom = flux[..., -1:] / dz_safe[..., -1:]  # bottom: flux_below = 0
+    tend = jnp.concatenate([top, interior, bottom], axis=-1)
+    return jnp.where(dz > 0.0, tend, 0.0)
 
 
 def vertical_diffusion_variable_K(
@@ -187,10 +194,16 @@ def vertical_diffusion_variable_K(
         ) ** 2 / jnp.maximum(dt, 1.0e-12)
         K_half = jnp.minimum(K_half, K_cap)
 
-    df_dz = (field[..., :-1] - field[..., 1:]) / dz_half
+    # Safe denominators for dry / land columns (dz = 0 there).  See
+    # the matching comment in ``vertical_diffusion`` — wet-cell output
+    # is bitwise identical.
+    dz_half_safe = jnp.where(dz_half > 0.0, dz_half, 1.0)
+    dz_safe = jnp.where(dz > 0.0, dz, 1.0)
+    df_dz = (field[..., :-1] - field[..., 1:]) / dz_half_safe
     flux = K_half * df_dz  # (..., nlev-1)
 
-    top = -flux[..., :1] / dz[..., :1]
-    interior = (flux[..., :-1] - flux[..., 1:]) / dz[..., 1:-1]
-    bottom = flux[..., -1:] / dz[..., -1:]
-    return jnp.concatenate([top, interior, bottom], axis=-1)
+    top = -flux[..., :1] / dz_safe[..., :1]
+    interior = (flux[..., :-1] - flux[..., 1:]) / dz_safe[..., 1:-1]
+    bottom = flux[..., -1:] / dz_safe[..., -1:]
+    tend = jnp.concatenate([top, interior, bottom], axis=-1)
+    return jnp.where(dz > 0.0, tend, 0.0)
