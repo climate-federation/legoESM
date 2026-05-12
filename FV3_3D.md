@@ -5326,6 +5326,42 @@ discrimination (BRN), the full operational severe-weather
 composite-index suite is complete.  Pure JAX, vmap-compatible.
 No new physical constants introduced.
 
+## Iter 817 — effective_inflow_layer_fv3 (Thompson 2007)
+
+Added `effective_inflow_layer_fv3(cape_profile, cin_mag_profile,
+z, cape_min=100.0, cin_max=250.0)` to `grids/cubed_sphere.py`.
+Thompson et al. (2007) effective inflow layer:
+
+```
+EIL = { k : CAPE(k) ≥ 100 AND |CIN(k)| ≤ 250 }
+```
+
+Returns ``(z_bot, z_top)`` tuple bounding the lowest and highest
+qualifying levels.  Both ``NaN`` when no level qualifies.
+
+Used by: SPC Effective-Layer SRH (ESRH) computation (replaces
+fixed-layer 0-3 km SRH), Effective Bulk Wind Difference (EBWD =
+bulk shear over EIL), refined SCP/STP composites with effective-
+layer inputs — operationally preferred over fixed-layer in cool-
+season and elevated-convection environments.
+
+|CIN| input expected in iter-809 positive-magnitude convention.
+
+Test: `tests/test_fv3_effective_inflow_iter817.py` (5 tests:
+mid-layer qualifying → z_bot/z_top bracket, no qualifier → both
+NaN, single layer → z_bot=z_top, surface-based EIL, 3-D batched
+(n_x, n_y, km) → (n_x, n_y)).
+
+### Why this iteration was meaningful
+
+EIL is the layer-finding primitive behind SPC's modern effective-
+layer suite (ESRH, EBWD, effective-SCP, effective-STP).  Replaces
+the older fixed-layer (0-1, 0-3, 0-6 km) recipes for
+"the right inflow layer that physically reaches the storm".
+Critical for cool-season severe-weather and elevated convection
+where the surface parcel is decoupled from the storm.  Pure JAX,
+vmap-compatible.  No new physical constants introduced.
+
 
 
 

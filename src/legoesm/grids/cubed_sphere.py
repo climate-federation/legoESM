@@ -6035,6 +6035,71 @@ def significant_tornado_parameter_fv3(
     )
 
 
+def effective_inflow_layer_fv3(
+    cape_profile: jax.Array,
+    cin_mag_profile: jax.Array,
+    z: jax.Array,
+    cape_min: float = 100.0,
+    cin_max: float = 250.0,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 817: effective inflow layer (Thompson 2007).
+
+    Range of levels where a lifted parcel can reach the LFC and
+    contribute to storm inflow:
+
+        EIL = { k : CAPE(k) ≥ cape_min  AND  |CIN(k)| ≤ cin_max }
+
+    Defaults follow Thompson et al. (2007):
+      * ``cape_min = 100 J/kg`` — minimum positive instability.
+      * ``cin_max = 250 J/kg`` — maximum convective inhibition
+        (in iter-809 positive-magnitude convention).
+
+    Returns ``(z_bot, z_top)`` tuple bounding the lowest and
+    highest qualifying levels.  Both ``NaN`` when no level
+    satisfies the criteria.
+
+    Used by: SPC Effective-Layer SRH (ESRH) computation
+    (replaces fixed-layer 0-3 km SRH), Effective Bulk Wind
+    Difference (EBWD = bulk shear over EIL), refined SCP/STP
+    composites with effective-layer inputs (operationally
+    preferred over fixed-layer in cool-season and elevated-
+    convection environments).
+
+    Caller supplies CAPE/|CIN| profiles per level (e.g., from
+    multi-source parcel lifting), with z aligned surface→top.
+
+    Parameters
+    ----------
+    cape_profile : jax.Array, shape (..., km)
+        Per-level CAPE (J/kg).
+    cin_mag_profile : jax.Array, shape (..., km)
+        Per-level CIN **magnitude** (J/kg, ≥ 0).  Pass iter-809
+        ``cin_column_fv3`` output convention.
+    z : jax.Array, shape (..., km)
+        Geopotential height (m), surface→top oriented.
+    cape_min : float
+        Minimum CAPE threshold (J/kg); default 100.
+    cin_max : float
+        Maximum |CIN| threshold (J/kg); default 250.
+
+    Returns
+    -------
+    (z_bot, z_top) : tuple of jax.Array, shape (...,)
+        Effective inflow layer bottom and top (m).  NaN where
+        no level qualifies.
+    """
+    valid = (cape_profile >= cape_min) & (cin_mag_profile <= cin_max)
+    any_valid = jnp.any(valid, axis=-1)
+    idx_bot = jnp.argmax(valid, axis=-1)
+    idx_top = valid.shape[-1] - 1 - jnp.argmax(valid[..., ::-1], axis=-1)
+    z_bot_raw = jnp.take_along_axis(z, idx_bot[..., None], axis=-1)[..., 0]
+    z_top_raw = jnp.take_along_axis(z, idx_top[..., None], axis=-1)[..., 0]
+    nan_arr = jnp.full_like(z_bot_raw, jnp.nan)
+    z_bot = jnp.where(any_valid, z_bot_raw, nan_arr)
+    z_top = jnp.where(any_valid, z_top_raw, nan_arr)
+    return z_bot, z_top
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

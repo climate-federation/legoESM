@@ -404,6 +404,7 @@ _GUARD_MODULES = (
     "test_fv3_brn_supercell_iter814",                # iter-814 add
     "test_fv3_supercell_composite_iter815",          # iter-815 add
     "test_fv3_stp_iter816",                          # iter-816 add
+    "test_fv3_effective_inflow_iter817",             # iter-817 add
 )
 
 
