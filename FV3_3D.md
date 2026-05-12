@@ -1195,6 +1195,25 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 584: **w-safety cap** (user audit item #2). FV3's
+  ``w_limiter`` (fv_mapz.F90:51) caps |w| at 90/-60 m/s during
+  Lagrangian-to-Eulerian remap.  legoESM uses Eulerian z*
+  (no remap) so direct port doesn't fit; added FV3-inspired
+  standalone post-step clip instead.
+  - Config: ``w_safety_cap: float = 0.0`` (disabled default),
+    ``w_safety_cap_min: float = 0.0`` (=use symmetric cap).
+  - When >0: clip w_half ∈ [-w_safety_cap, +w_safety_cap]
+    (or [-w_safety_cap_min, +w_safety_cap] if asymmetric).
+  - Applied post-Rayleigh in step.
+  - Tests:
+    1. Default 0.0 → no-op.
+    2. cap=50: bounds |w| ≤ 50 m/s after step.
+    3. Asymmetric (cap=90, cap_min=60): w ∈ [-60, +90].
+  NOTE: simple clip, NOT FV3's momentum-conserving cascade —
+  FV3 transfers excess to neighboring full-level via dp2[k];
+  half-level w + Eulerian context makes direct port unwieldy.
+  Documented as practical safety filter not "FV3-faithful".
+  3/3 in 70 s.  Wired into iter-383 sweep (now 159).
 - Iter 583: **atmospheric angular momentum (AAM) diagnostic**.
   Faithful port of FV3 ``compute_aam`` (fv_dynamics.F90:1264-
   1307).  New ``compute_atmospheric_angular_momentum(u_center,

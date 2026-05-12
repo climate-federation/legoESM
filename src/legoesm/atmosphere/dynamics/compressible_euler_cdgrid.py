@@ -105,6 +105,16 @@ class CDGridCompressibleEulerConfig(NamedTuple):
     use_fv3_sponge_damp_w: bool = False
         # FV3_3D iter 441: sponge boost of NH damp_w (FV3 dyn_core.F90:782,793,803). damp_w = d2_divg.
         # (boosted/damp_w)^(nord_w+1) post-step scaling. Levels: k=0 (d2_bg_k1>0), k=1 (k2>0.01), k=2 (k2>0.05).
+    w_safety_cap: float = 0.0
+        # FV3_3D iter 584: optional |w| safety cap (FV3 fv_mapz.F90:51 w_max=90).
+        # 0.0 = disabled (default).  When > 0, clip w_half to [-w_safety_cap, +w_safety_cap]
+        # post-step.  Note: FV3's w_limiter cascades excess to neighbor level for
+        # momentum conservation; legoESM applies simple clip on half-level w because
+        # the Lagrangian-to-Eulerian remap context (where FV3 applies it) is absent here.
+        # Use for runaway-w protection in stress tests; not part of FV3-faithful path.
+    w_safety_cap_min: float = 0.0
+        # Negative cap (downward).  0.0 means use -w_safety_cap symmetrically.
+        # Set explicitly to override (FV3 uses asymmetric: w_max=90, w_min=-60).
     corner_div_damp_d2_bg_k1: float = 0.0
         # NH mirror of PE iter-438 (FV3 dyn_core.F90:780). FV3 namelist 4.0 not portable, see iter-452.
     corner_div_damp_d2_bg_k2: float = 0.0
@@ -1461,6 +1471,18 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
             state_new = state_new._replace(
                 w=state_new.w.replace(
                     data=state_new.w.data * _rff_half_b,
+                ),
+            )
+
+        # FV3_3D iter 584: optional |w| safety cap (FV3 fv_mapz.F90:51 w_max=90).
+        if self.config.w_safety_cap > 0.0:
+            _w_max = self.config.w_safety_cap
+            _w_min = (-self.config.w_safety_cap_min
+                      if self.config.w_safety_cap_min > 0.0
+                      else -_w_max)
+            state_new = state_new._replace(
+                w=state_new.w.replace(
+                    data=jnp.clip(state_new.w.data, _w_min, _w_max),
                 ),
             )
 
