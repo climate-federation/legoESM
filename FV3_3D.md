@@ -5157,4 +5157,47 @@ intermediate-variable visibility.  Closes the gravity-wave-
 regime diagnostic pair (c, Fr).  Pure JAX, vmap-compatible.
 No new physical constants introduced.
 
+## Iter 786 — rossby_number_fv3 (Ro = U/(|f|·L))
+
+Added `rossby_number_fv3(u_speed, L, f, fL_floor=1e-12)` to
+`grids/cubed_sphere.py`.  Dimensionless inertial vs Coriolis
+ratio:
+
+```
+Ro = max(U, 0) / max(|f|·L, fL_floor)
+```
+
+Regime interpretation:
+  * Ro ≪ 1   — quasi-geostrophic (synoptic mid-lat, ocean mesoscale)
+  * Ro ~ 1   — semi-geostrophic (jet streaks, fronts, ARs)
+  * Ro ≫ 1   — inertial (tornadoes, convection, TC eyewall)
+
+Distinct from iter-785 Fr (inertia/gravity); Ro is inertia/
+rotation.  Together (Fr, Ro) close the canonical dimensional-
+analysis pair for rotating-stratified flow regime selection.
+
+Composes iter-778 ``coriolis_parameter_fv3``: (U, L, lat) → f → Ro.
+
+Used by: regime-selection diagnostics (QG validity check),
+convective-vs-synoptic scale separation, ageostrophic-flow
+parameterizations, mesoscale-to-microscale model boundary
+design.
+
+Test: `tests/test_fv3_rossby_number_iter786.py` (7 tests:
+synoptic mid-lat Ro=0.1 (QG), tornado Ro=7000 (inertial), U=0
+→ Ro=0, monotone in U/L/f (each varied independently), equator
+floored finite, iter-778 pipeline at 45°N gives Ro ≈ 0.097,
+3-D shapes + finite + non-negative).
+
+### Why this iteration was meaningful
+
+Ro is the canonical regime-selection number: it tells you when
+a flow is QG (synoptic), semi-geostrophic (fronts/jets), or
+inertial (mesoscale/microscale).  Used everywhere from
+parameterization scheme selection to model-design choices.
+Together with iter-785 Fr, the dimensional-analysis pair
+(Ro, Fr) is complete — these two numbers classify any flow as
+{rotation, stratification, inertia}-dominated.  Pure JAX, vmap-
+compatible.  No new physical constants introduced.
+
 

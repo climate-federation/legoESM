@@ -4038,6 +4038,62 @@ def froude_number_fv3(
     return jnp.maximum(u_speed, 0.0) / jnp.maximum(c_wave, c_floor)
 
 
+def rossby_number_fv3(
+    u_speed: jax.Array,
+    L: jax.Array,
+    f: jax.Array,
+    fL_floor: float = 1e-12,
+) -> jax.Array:
+    """FV3_3D iter 786: Rossby number Ro = U / (|f|·L).
+
+    Dimensionless ratio of inertial to Coriolis acceleration:
+
+        Ro = U / max(|f|·L, fL_floor)
+
+    Diagnostic of rotational regime:
+
+      * Ro ≪ 1   — quasi-geostrophic: Coriolis dominates, geostrophic
+                   balance to leading order (synoptic mid-latitudes,
+                   ocean mesoscale).
+      * Ro ~ 1   — semi-geostrophic: ageostrophic effects O(1) (jet
+                   streaks, fronts, atmospheric rivers).
+      * Ro ≫ 1   — inertial: rotation negligible (tornadoes, small-
+                   scale convective flows, tropical cyclones near
+                   eyewall).
+
+    Compose with iter-778 ``coriolis_parameter_fv3`` to derive |f|
+    from lat: Ro = U/(2·Ω·sin(lat)·L).
+
+    Used by: regime-selection diagnostics (QG validity check),
+    convective-vs-synoptic scale separation, ageostrophic flow
+    parameterizations, mesoscale-to-microscale model design.
+
+    ``fL_floor`` clamps |f·L| at the equator and zero-scale limit.
+
+    Note: this is the **inertial** Rossby number Ro = U/(fL).  The
+    related but distinct **Burger** number B = (L_R/L)² compares
+    Rossby radius to length scale; not implemented here (use
+    iter-781 L_R then compute B = (L_R/L)² directly if needed).
+
+    Parameters
+    ----------
+    u_speed : jax.Array
+        Characteristic flow speed (m/s).
+    L : jax.Array
+        Characteristic horizontal length scale (m).
+    f : jax.Array
+        Coriolis parameter (s⁻¹) from iter-778.
+    fL_floor : float
+        Lower bound on |f·L| (s⁻¹·m); default 1e-12.
+
+    Returns
+    -------
+    Ro : jax.Array
+        Rossby number (dimensionless).
+    """
+    return jnp.maximum(u_speed, 0.0) / jnp.maximum(jnp.abs(f) * L, fL_floor)
+
+
 def kinetic_energy_fv3(
     ua: jax.Array,
     va: jax.Array,
