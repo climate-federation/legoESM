@@ -1195,6 +1195,31 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 732: **``layer_mean_pressure_fv3``** — layer-center pressure p_f.
+
+  Faithful port of FV3's standard layer-center pressure diagnostic
+  used throughout fv_diagnostics.F90, fv_mapz.F90, and IC paths:
+
+      p_f[k] = delp[k] / (peln[k+1] − peln[k])
+             = (p[k+1] − p[k]) / ln(p[k+1]/p[k])
+
+  Integral mean of p over the layer in log-p coordinates —
+  thermodynamically-consistent layer-center pressure used in
+  saturation-mixing-ratio computations, RH, θ_e, etc.
+
+  Composes with iter-724 ``compute_hybrid_pressure_fv3`` and is
+  used inline in many existing ports (iter-692 eqv_pot,
+  iter-695 rh_calc, iter-715 do_cmip, etc.).
+
+  Tests (6/6 in <1 s):
+  1. Thin layer → p_f ≈ p_mid.
+  2. Single layer → p_f = (p_bot − p_top)/ln(p_bot/p_top) exact.
+  3. Column-wise monotone increasing.
+  4. Composes with iter-724: p_f bounded by adjacent pe.
+  5. 3-D shapes.
+  6. No NaN/Inf.
+
+  Wired into iter-383 sweep (now 296).
 - Iter 731: **``compute_pe_from_delp_fv3``** — interface pressure from delp.
   Faithful port of FV3's pe accumulation pattern (dyn_core.F90,
   fv_mapz.F90, fv_treat_da_inc.F90):

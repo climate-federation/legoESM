@@ -2806,6 +2806,44 @@ def get_pressure_given_height_fv3(
     return p
 
 
+def layer_mean_pressure_fv3(
+    delp: jax.Array,
+    peln: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 732: layer-mean pressure p_f = delp / Δpeln.
+
+    Faithful JAX port of FV3's standard layer-center pressure
+    diagnostic (used inline throughout fv_diagnostics.F90,
+    fv_mapz.F90, and IC paths):
+
+        p_f[k] = delp[k] / (peln[k+1] − peln[k])
+
+    Integral mean of p over the layer with pressure as the
+    independent variable, equivalent to
+    ``(p[k+1] − p[k]) / ln(p[k+1]/p[k])``.  This is the
+    thermodynamically-consistent "layer-mean pressure" used in
+    saturation-mixing-ratio computations, RH, θ_e, etc.
+
+    Pairs with iter-692 ``eqv_pot_fv3``, iter-695 ``rh_calc_fv3``,
+    iter-715 ``rh_calc_fv3 do_cmip``, iter-720
+    ``saturation_mixing_ratio_blend`` (any diagnostic that needs
+    layer-center p from delp + peln).
+
+    Parameters
+    ----------
+    delp : jax.Array, shape (..., km)
+        Pressure thickness (Pa).
+    peln : jax.Array, shape (..., km+1)
+        log(pressure) at interfaces.
+
+    Returns
+    -------
+    p_f : jax.Array, shape (..., km)
+        Layer-mean (log-p integral-mean) pressure (Pa).
+    """
+    return delp / (peln[..., 1:] - peln[..., :-1])
+
+
 def compute_pe_from_delp_fv3(
     delp: jax.Array,
     p_top: float,
