@@ -1195,241 +1195,54 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
-- Iter 699: **C16 verification of iter-698 reduction**.
+- Iter 700: **add ``use_fv3_a2b_ord4_theta_corner`` flag** (scalar θ
+  cc → B-grid corner upgrade, mirrors iter-696 vector path).
 
-  iter-698 measured −25.8 % θ′ edge ratio at C8.  iter-699 verifies
-  at the next resolution step (C16), 2 seeds × 3 dycore steps:
+  The c_p · θ_corner · dπ term in ``_nh_step`` (line ~383) uses
+  ``_interp_center_to_corner(theta_total, cdgrid)``; that's a
+  2nd-order 4-pt arithmetic average not gated by any flag.  iter-700
+  adds ``use_fv3_a2b_ord4_theta_corner`` so users can switch to the
+  4th-order ``_interp_center_to_corner_a2b_ord4`` cascade (same path
+  as iter-696 vector lift and iter-170 ζ corner).
 
-  ```
-  OFF: mean θ′ edge ratio = 5.1496
-  ON : mean θ′ edge ratio = 4.0244
-  delta (ON − OFF) = −1.1252  (−21.9 %)
-  ```
+  Default OFF.  Factory default OFF.  Wired live: 1-step C8 diff
+  vs 2nd-order = 2.3e-15 (machine precision because zero-θ′ IC
+  gives near-constant θ_total).  Impact measurement pending.
 
-  C16 reduction (−21.9 %) close to C8 (−25.8 %).  Confirms factory
-  default promotion (iter-698) is the right call.  Suggests
-  ``use_fv3_a2b_ord4_vector_uv`` continues to help at higher
-  resolution.  Next: C24-C32 the documented floor regime.
+  Wired into iter-383 sweep (now 264).
+- **Iters 691-699 (compacted iter 700)**: FV3 diagnostic suite +
+  4th-order vector cc→D-corner (a2b_ord4) NH dycore fix.  Major
+  result: −25.8% θ′ edge ratio at C8, −21.9% at C16 (iter-698/699).
+  9 iterations:
 
-  Note absolute θ′ edge ratio INCREASES with resolution
-  (4.18 → 5.15 from C8 → C16), as expected — finer grid resolves
-  more edge-localized vorticity structure.  But ON-vs-OFF % is
-  comparable.
+  | Iter | What                                  | FV3 ref / Outcome                              |
+  |------|---------------------------------------|------------------------------------------------|
+  | 691  | ``pv_entropy_fv3`` (EPV)              | fv_diagnostics:5111 — Ertel PV diagnostic     |
+  | 692  | ``eqv_pot_fv3`` (θ_e)                 | fv_diagnostics:5341 — equiv potential temp    |
+  | 693  | ``nh_total_energy_fv3``               | fv_diagnostics:5501 — column total energy     |
+  | 694  | ``prt_mass_fv3``                      | fv_diagnostics:4164 — global mass-budget      |
+  | 695  | ``rh_calc_fv3``                       | fv_diagnostics:5309 — relative humidity       |
+  | 696  | a2b_ord4 cc→corner vector lift        | a2b_edge.F90:a2b_ord4 — 4th-order PPM+Lagrange|
+  | 697  | NH config wiring for iter-696 flag    | use_fv3_a2b_ord4_vector_uv plumbed            |
+  | 698  | EMPIRICAL: −25.8% θ′ @ C8 → factory ON| FIRST positive signal on 5-6 mK floor         |
+  | 699  | C16 verification: −21.9% θ′           | Confirms iter-698 generalizes                  |
 
-  Wired into iter-383 sweep (now 263).
-- Iter 698: **EMPIRICAL POSITIVE — 4th-order vector cc→corner
-  reduces θ′ edge ratio 25.8 % at C8**.
+  **Edge-floor progress.**  After iter-466's three-flag-OFF sweep
+  reduced the C8 floor by 50.4%, the floor stayed asymptotic at
+  ~5-6 mK at C24-C32 for many iterations.  Iter-696→699 is the
+  first new lever: 4th-order vector cc→corner lift reduces θ′ edge
+  ratio by 21-26% at C8/C16.  Now factory-ON by default.
 
-  iter-696 + iter-697 added the opt-in flag.  iter-698 measured
-  impact at C8 (3 seeds × 3 dycore steps):
+  **Empirical method.**  iter-465/466 baseline: build NH state, run
+  3 dycore steps, compute std(θ′_edge) / std(θ′_interior).  iter-698
+  measured ON-vs-OFF delta for iter-696 flag (3 seeds × C8 × 3 steps);
+  iter-699 repeated at C16 with 2 seeds.  Always vs ``make_fv3_faithful_nh_config``.
 
-  ```
-  OFF (default):  mean θ′ edge ratio = 4.1805
-  ON  (iter-696): mean θ′ edge ratio = 3.1018
-  delta (ON − OFF) = −1.0786  (≈ −25.8 %)
-  ```
+  37/37 NH unit + integration tests pass with flag ON.  No climate
+  regression on existing 30-day C96 spin-up tests.
 
-  NEGATIVE delta = flag REDUCES cube imprint.  FIRST positive
-  signal on the residual 5-6 mK floor since the supercell-triad
-  ports.
-
-  Promoted to ``make_fv3_faithful_nh_config`` factory default ON.
-  37/37 NH unit + integration tests pass with flag enabled (no
-  climate regression on the existing 30-day C96 spin-up tests).
-
-  iter-697 wiring guard updated to require factory default ON.
-
-  Wired into iter-383 sweep (now 262).
-- Iter 697: **wire iter-696 ``use_fv3_a2b_ord4_vector_uv`` through
-  NH dycore config**.  Iter 696 added the opt-in
-  ``use_fv3_a2b_ord4`` arg to ``center_to_dgrid_vector``; iter 697
-  exposes it through ``CDGridCompressibleEulerConfig`` and wires
-  the callsite in ``_nh_step`` (NH cc → D-grid lift):
-
-      if config.use_fv3_vector_halo_uv:
-          u_d, v_d = center_to_dgrid_vector(
-              u, v, cdgrid,
-              use_fv3_a2b_ord4=config.use_fv3_a2b_ord4_vector_uv,
-          )
-
-  Flag defaults to False everywhere; ``make_fv3_faithful_nh_config``
-  leaves it OFF pending an impact measurement on the 5-6 mK floor
-  (avoids regressing the existing 30-day C96 climate spin-up
-  before evidence is in).
-
-  Requires ``use_fv3_vector_halo_uv=True`` (h2 vector pad replaces
-  h1 vector pad).  Factory already enables vector halo.
-
-  Tests (4/4 in <1 s):
-  1. Flag exists on config, default False.
-  2. ``make_fv3_faithful_nh_config`` default OFF.
-  3. Factory respects user override.
-  4. Override pairs with ``use_fv3_vector_halo_uv``.
-
-  Regression: 37/37 NH integration tests pass unchanged with
-  default OFF.
-
-  Wired into iter-383 sweep (now 261).
-- Iter 696: **FV3 4th-order vector cc→D-corner (a2b_ord4 path)** —
-  closes the last documented PE-vs-NH FV3-fidelity asymmetry on
-  the NH path's cell-centre → D-corner ``u``/``v`` lift.
-
-  Opt-in flag ``use_fv3_a2b_ord4=True`` on
-  ``center_to_dgrid_vector`` switches from the default halo=1
-  4-pt arithmetic average (2nd-order) to halo=2 vector pad
-  (with cross-face rotation, ``cos_angle_padded_h2`` /
-  ``sin_angle_padded_h2``) followed by the 4th-order PPM-volume
-  + Lagrange cascade (FV3 ``a2b_edge.F90:a2b_ord4`` duogrid
-  path):
-
-      qx[k] = b2·(f[k-2]+f[k+1]) + b1·(f[k-1]+f[k])         (PPM)
-      qy = same on j-axis
-      qxx[k] = a2·(qx[k-2]+qx[k+1]) + a1·(qx[k-1]+qx[k])    (Lagrange)
-      qyy = same on i-axis of qy
-      out = 0.5·(qxx + qyy)
-        b1=7/12, b2=-1/12, a1=9/16, a2=-1/16
-
-  Shared with scalar ``_interp_center_to_corner_a2b_ord4`` (iter-971
-  scalar path) via new ``_a2b_ord4_corner_from_padded`` helper.
-  3-D and 4-D (with nlev) shapes supported.
-
-  Suspect for the residual ~5-6 mK cube-imprint floor at C24-C32 —
-  the NH path's vector cc→corner lift has been the last unaudited
-  piece in the corner-fidelity chain.  Default OFF; opt-in for the
-  NH dycore to evaluate impact on the floor.
-
-  Tests (5/5 in <15 s):
-  1. Uniform field → uniform corner output.
-  2. Linear ramp → exact recovery at corners (4th-order on linear).
-  3. Constant winds (u=10, v=5) → recovered to float32 precision
-     at interior corners.
-  4. Default vs ord4 paths differ on non-linear random field.
-  5. 4D path stacks identically to 3D path per level.
-
-  Wired into iter-383 sweep (now 260).
-- Iter 695: **FV3 ``rh_calc_fv3``** — relative humidity diagnostic.
-  Faithful JAX port of FV3 ``rh_calc``
-  (tools/fv_diagnostics.F90:5309-5339).
-
-      RH = 100 · qv / qs(T, p_full)
-
-  Reuses ``legoesm.thermo.saturation_mixing_ratio`` (Tetens form);
-  follows CLAUDE.md mandate: never re-derive Tetens / Magnus /
-  Clausius-Clapeyron.
-
-  Tests (5/5 in <1 s):
-  1. qv = 0 → RH = 0.
-  2. qv = qs → RH = 100.
-  3. qv = 0.5·qs → RH = 50.
-  4. 3-D input → 3-D output.
-  5. No NaN/Inf on random.
-
-  Wired into iter-383 sweep (now 259).
-- Iter 694: **FV3 ``prt_mass_fv3``** — global mass-budget diagnostic.
-  Faithful JAX port of FV3 ``prt_mass``
-  (tools/fv_diagnostics.F90:4164-4263).
-
-  Column-integrated mass of each water tracer (kg/m²) + area-
-  weighted global mean.  Used as a conservation check.
-
-  Returns dict containing:
-      ps_mean       — global-mean surface pressure (Pa)
-      dry_ps_mean   — ps_mean − g·total_water (Pa)
-      <tracer>      — area-mean column mass per tracer (kg/m²)
-      total_water   — Σ across tracers (kg/m²)
-
-  Per-tracer column = Σ_k delp·q / g; then area-weighted global
-  mean: Σ area·column / Σ area.
-
-  Tests (6/6 in <1 s):
-  1. Uniform ps → ps_mean = ps.
-  2. No tracers → total_water=0, dry_ps_mean=ps_mean.
-  3. q=0.01, ps=1e5 → column water = 0.01·1e5/g (analytical).
-  4. Two tracers → total_water = sum.
-  5. dry_ps_mean = ps_mean − g·total_water exactly.
-  6. Non-uniform area → weighted mean ≠ arithmetic mean.
-
-  Wired into iter-383 sweep (now 258).
-- Iter 693: **FV3 ``nh_total_energy_fv3``** — column total energy.
-  Faithful JAX port of FV3 ``nh_total_energy``
-  (tools/fv_diagnostics.F90:5501-5571).
-
-  Per-column total energy (J/m²):
-
-      phiz[km] = hs                                  (surface)
-      phiz[k]  = phiz[k+1] - g·delz[k]               (cumul. upward)
-      TE = (1/g) · Σ delp · ( cv·pt
-                            + L_v·q_sphum            (moist)
-                            + 0.5·(phiz[k]+phiz[k+1])
-                            + 0.5·(ua²+va²+w²) )
-
-  cv = c_pd - R_d (dry isochoric specific heat).  Moist branch uses
-  L_v·q_sphum for latent contribution (leading-order moisture-only
-  approximation correct for sphum-only moist energy budget).
-
-  Tests (7/7 in <2 s):
-  1. Isothermal at rest, hs=0 → TE matches cv·T·p_s/g + geopot.
-  2. Moist > dry by L_v·Σ delp·q/g exactly.
-  3. Uniform-wind ↑ KE = 0.5·U²·p_s/g exactly.
-  4. Realistic atmosphere column → 1e8 < TE < 1e10 J/m².
-  5. 3-D input → 2-D output.
-  6. No NaN/Inf on random.
-  7. moist_phys=True without q_sphum raises ValueError.
-
-  Wired into iter-383 sweep (now 257).
-- Iter 692: **FV3 ``eqv_pot_fv3``** — equivalent potential temperature.
-  Faithful JAX port of FV3 ``eqv_pot``
-  (tools/fv_diagnostics.F90:5341-5419).
-
-  Simplified S.-J. Lin form (RH term ignored):
-
-      pd = hydrostatic   :  (1-rq)·delp / (peln[k+1] - peln[k])
-         | non-hydro     : -R_d·pt·(1-rq)·delp / (g·delz)
-
-      dry  : θ_e = pt · (1e5/pd)^κ
-      moist: dc_vap = c_pv - c_pw
-             θ_e = pt · exp( q/(c_pd·pt)·(L_v + dc_vap·(pt-T_freeze))
-                           + κ · ln(1e5/pd) )
-
-  Both hydrostatic and non-hydrostatic branches; both moist and dry.
-
-  Tests (7/7 in <2 s):
-  1. Dry isothermal at p=1e5 → θ_e = T exactly.
-  2. Dry Poisson form at p=500 hPa → analytical θ_e.
-  3. Moist θ_e > dry θ_e by ≥20 K for q=15 g/kg, T=290 K.
-  4. Hydrostatic branch via monotone peln.
-  5. 3-D input → 3-D output.
-  6. No NaN/Inf on random inputs.
-  7. Missing peln (hydrostatic) / delz raises ValueError.
-
-  Wired into iter-383 sweep (now 256).
-- Iter 691: **FV3 ``pv_entropy_fv3``** — Ertel potential vorticity (EPV).
-  Faithful JAX port of FV3 ``pv_entropy``
-  (tools/fv_diagnostics.F90:5111-5193).
-
-  EPV in entropy form (S.-J. Lin):
-
-      EPV = - g · (vort + f) / delp · d(theta) / theta
-
-  where the vertical derivative is approximated by linear edge
-  averaging of θ between neighboring layers (the second-order
-  limit of FV3's PPME edge reconstruction):
-
-      theta_edge[k] = 0.5 · (theta[k-1] + theta[k])
-                     (top edge: theta[0]; bot edge: theta[km-1])
-      d_theta[k] = theta_edge[k] - theta_edge[k+1]
-
-  Vectorized: edges = 0.5·(θ[:-1] + θ[1:]) concatenated with
-  endpoint extrapolation; d_theta = edges[:-1] - edges[1:].
-
-  Tests (5/5 in <1 s):
-  1. ζ + f = 0 → EPV = 0.
-  2. Constant θ → EPV = 0.
-  3. Monotone θ profile → EPV positive in interior (stable strat).
-  4. 3-D input → 3-D EPV shape.
-  5. No NaN/Inf on random inputs.
-
-  Wired into iter-383 sweep (now 255).
+  Wired into iter-383 sweep: 254 → 263 modules (iter-690 sweep
+  starting point → iter-699 end).
 - **Iters 681-689 (compacted iter 690)**: FV3 diagnostic suite —
   heights, range checks, max/min/mean, and the supercell-triad +
   storm-motion diagnostics.  9 iterations:

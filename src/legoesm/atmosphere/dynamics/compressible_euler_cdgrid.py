@@ -210,9 +210,13 @@ class CDGridCompressibleEulerConfig(NamedTuple):
     use_fv3_a2b_ord4_vector_uv: bool = False
         # FV3_3D iter 697: 4th-order a2b_ord4 PPM+Lagrange cascade for cc → D-grid (u, v).
         # Requires use_fv3_vector_halo_uv=True.  Halo=2 vector pad + 4th-order corner cascade
-        # (FV3 a2b_edge.F90:a2b_ord4 duogrid path).  Default OFF; opt-in to evaluate impact
-        # on the residual ~5-6 mK cube-imprint floor at C24-C32.  PE unaffected (PE iter-170
-        # already runs 4th-order scalar a2b for zeta corner).
+        # (FV3 a2b_edge.F90:a2b_ord4 duogrid path).  iter-698 empirical: -25.8% θ′ edge
+        # ratio at C8; iter-699 verified -21.9% at C16.  Promoted to factory ON.
+    use_fv3_a2b_ord4_theta_corner: bool = False
+        # FV3_3D iter 700: 4th-order a2b_ord4 cc → B-grid corner for θ_total in the
+        # c_p · θ_corner · dπ Coriolis-pressure term (line ~383).  Same 4th-order
+        # scalar cascade used by use_fv3_a2b_zeta_corner (iter-170 PE) and the
+        # iter-696 vector path.  Default OFF; impact measurement pending.
     use_fv3_d_con_cv: bool = False
         # FV3_3D iter 320: c_v denominator for NH d_con (FV3 dyn_core.F90:1795 cv_air branch).
         # NH conserves internal energy c_v·T; c_pd under-heats by c_v/c_p≈0.714 (~40%). PE unaffected.
@@ -378,7 +382,19 @@ def cdgrid_compressible_euler_slow_tendencies(
         abs_vor_corner = zeta_corner + cdgrid.f_corner[..., None]
     else:
         abs_vor_corner = zeta_corner
-    theta_corner = _interp_center_to_corner(theta_total, cdgrid)
+    if config.use_fv3_a2b_ord4_theta_corner:
+        from legoesm.core.operators_cdgrid import (
+            _interp_center_to_corner_a2b_ord4 as _icc_a2b_ord4_theta,
+        )
+        if theta_total.ndim == 4:
+            theta_corner = jax.vmap(
+                lambda lev: _icc_a2b_ord4_theta(lev, cdgrid),
+                in_axes=-1, out_axes=-1,
+            )(theta_total)
+        else:
+            theta_corner = _icc_a2b_ord4_theta(theta_total, cdgrid)
+    else:
+        theta_corner = _interp_center_to_corner(theta_total, cdgrid)
 
     du_d_dt = abs_vor_corner * v_d - dK_dx - c_p * theta_corner * dpi_dx
     dv_d_dt = -abs_vor_corner * u_d - dK_dy_perp - c_p * theta_corner * dpi_dy_perp
