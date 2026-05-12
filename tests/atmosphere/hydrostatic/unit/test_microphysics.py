@@ -273,7 +273,9 @@ class TestKessler:
         in the conservation-respecting scaling of matched sink/source
         pairs added by the iter-35 consolidation onto
         ``donor_clamp_scale`` — without it, scaled sinks and unscaled
-        sources would lose mass.
+        sources would lose mass.  Uses a relative tolerance so the
+        test passes in both fp32 (default) and fp64
+        (``JAX_ENABLE_X64=1``) modes.
         """
         ncol, nlev = 2, 10
         T = jnp.full((ncol, nlev), 290.0)
@@ -300,8 +302,11 @@ class TestKessler:
             axis=-1,
         )
         residual = col_tend + out.precipitation
-        # Machine-precision conservation
-        assert float(jnp.max(jnp.abs(residual))) < 1.0e-12
+        scale = jnp.maximum(jnp.abs(out.precipitation), 1.0e-10)
+        rel = jnp.max(jnp.abs(residual) / scale)
+        # 1e-6 covers fp32 (~1e-7 epsilon) with margin; in fp64 we get
+        # ~1e-15 which trivially clears.
+        assert float(rel) < 1.0e-6
 
 
 # ======================================================================
@@ -435,7 +440,8 @@ class TestSeifertBeheng:
     def test_total_water_conservation_under_heavy_clamp(self):
         """Seifert-Beheng total water conservation in a hydrostatic
         column under heavy q_c clamp activity.  Locks in the iter-35
-        consolidation onto ``donor_clamp_scale``."""
+        consolidation onto ``donor_clamp_scale``.  Uses a relative
+        tolerance so the test passes in both fp32 and fp64."""
         ncol, nlev = 2, 10
         T = jnp.full((ncol, nlev), 290.0)
         p_half = jnp.linspace(1e4, 1e5, nlev + 1)[None, :].repeat(ncol, axis=0)
@@ -456,7 +462,9 @@ class TestSeifertBeheng:
         total_tend = out.dq_v_dt + out.dq_c_dt + out.dq_r_dt
         col = jnp.sum(total_tend * dp / constants.g, axis=-1)
         residual = col + out.precipitation
-        assert float(jnp.max(jnp.abs(residual))) < 1.0e-12
+        scale = jnp.maximum(jnp.abs(out.precipitation), 1.0e-10)
+        rel = jnp.max(jnp.abs(residual) / scale)
+        assert float(rel) < 1.0e-6
 
 
 # ======================================================================
@@ -663,7 +671,8 @@ class TestMorrison:
     def test_total_water_conservation_under_heavy_clamp(self):
         """Morrison total water conservation in a hydrostatic column
         under heavy q_c / q_i / q_s clamp activity.  Locks in the
-        iter-35 consolidation onto ``donor_clamp_scale``."""
+        iter-35 consolidation onto ``donor_clamp_scale``.  Uses a
+        relative tolerance so the test passes in both fp32 and fp64."""
         ncol, nlev = 2, 10
         T = jnp.full((ncol, nlev), 280.0)
         p_half = jnp.linspace(1e4, 1e5, nlev + 1)[None, :].repeat(ncol, axis=0)
@@ -688,7 +697,9 @@ class TestMorrison:
         )
         col = jnp.sum(total_tend * dp / constants.g, axis=-1)
         residual = col + out.precipitation
-        assert float(jnp.max(jnp.abs(residual))) < 1.0e-12
+        scale = jnp.maximum(jnp.abs(out.precipitation), 1.0e-10)
+        rel = jnp.max(jnp.abs(residual) / scale)
+        assert float(rel) < 1.0e-6
 
 
 # ======================================================================
@@ -755,7 +766,8 @@ class TestThompson:
     def test_total_water_conservation_under_heavy_clamp(self):
         """Thompson total water conservation in a hydrostatic column
         under heavy q_c / q_i / q_s / graupel clamp activity.  Locks
-        in the iter-35 consolidation onto ``donor_clamp_scale``."""
+        in the iter-35 consolidation onto ``donor_clamp_scale``.  Uses
+        a relative tolerance so the test passes in both fp32 and fp64."""
         ncol, nlev = 2, 10
         T = jnp.full((ncol, nlev), 270.0)
         p_half = jnp.linspace(1e4, 1e5, nlev + 1)[None, :].repeat(ncol, axis=0)
@@ -781,7 +793,9 @@ class TestThompson:
         )
         col = jnp.sum(total_tend * dp / constants.g, axis=-1)
         residual = col + out.precipitation
-        assert float(jnp.max(jnp.abs(residual))) < 1.0e-12
+        scale = jnp.maximum(jnp.abs(out.precipitation), 1.0e-10)
+        rel = jnp.max(jnp.abs(residual) / scale)
+        assert float(rel) < 1.0e-6
 
 
 # ======================================================================

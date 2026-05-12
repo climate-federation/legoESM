@@ -156,6 +156,30 @@ Compression iteration.  Folded iter-20 through iter-29 into the
 "Iterations 1-29 — Summary" section.  Detailed per-iteration narratives
 remain in the commit messages on `clean_physics`.
 
+### Iteration 40 — 2026-05-13
+
+**Fix iter-39 codex stop-time findings.**
+
+1. **iter-39 conservation tests failed in fp32 default mode.**
+   The 1e-12 absolute tolerance assumed fp64 precision; under fp32
+   (default when `JAX_ENABLE_X64` is not set) the residual was
+   ~5e-10, larger than the tolerance.  Changed all 4 conservation
+   tests (Kessler / SB / Morrison / Thompson) to use a RELATIVE
+   tolerance `|residual| / max(|precip|, 1e-10) < 1e-6` which clears
+   in fp32 (~1e-7 epsilon with margin) and fp64 (~1e-15, trivially).
+
+2. **iter-39 BBL fix left the lat-lon C-grid inline copy unfixed.**
+   `ocean_pe_latlon_cgrid.py:1545` had an inline `_bbl_drag_for_face`
+   that used the same buggy `h_safe · H_BBL` denominator.  Applied
+   the same `min(H_BBL, total_overlap)` correction so the lat-lon
+   path matches the `ocean_tendency_common.bbl_drag_distributed`
+   helper fixed in iter-39.
+
+**Tests (post iter-40):**
+- 4 / 4 total-water-conservation tests pass in BOTH fp32 and fp64
+  modes.
+- 14 / 14 ocean bottom-drag + eta_floor tests pass.
+
 ### Iteration 39 — 2026-05-13
 
 **Apply codex iter-38 findings + extend conservation tests.**
