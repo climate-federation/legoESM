@@ -160,6 +160,7 @@ _GUARD_MODULES = (
     "test_clip_helper_perf_c16_iter551",             # iter-551 add
     "test_hs_like_nh_iter552",                       # iter-552 add
     "test_full_stack_edge_reduction_iter553",        # iter-553 add
+    "test_faithful_plus_clip_iter555",               # iter-555 add
 )
 
 

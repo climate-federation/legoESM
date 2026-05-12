@@ -1185,6 +1185,22 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 555: **clip is marginal on FV3-faithful at smooth IC**.
+  iter-553 showed FV3-faithful alone gives 89.5% edge_std
+  reduction.  Does adding clip add more?  Measured at C16
+  SBR, 10 steps:
+  - FV3-faithful, no clip: edge_std = 1.864e-2
+  - FV3-faithful, + clip:  edge_std = 1.822e-2
+  - **clip reduction: +2.3%** (marginal)
+  Summary of helper value per regime (at C16 SBR):
+  - bare → FV3-faithful:  -89.5% (factory does most work)
+  - FV3-faithful → +clip: -2.3% (small incremental)
+  - min-edge → +clip:     -5% (clip helps more here)
+  Practical implication: for SMOOTH production ICs, the
+  ``make_fv3_faithful_nh_config`` factory alone is sufficient.
+  The iter-505/526 clip helpers are most valuable for
+  random/stress-test ICs (where they add ~10-50% reduction).
+  1/1 in 53 s.  Wired into iter-383 sweep (now 137).
 - Iter 553: **SURPRISE: FV3-faithful BEATS min-edge on
   smooth ICs**.  4-config matrix at C16 SBR, 10 steps:
   - bare config:        edge_std = 0.177 (+0% baseline)
