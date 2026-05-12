@@ -1195,6 +1195,18 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 594: **All-5 iord variants comparison test**.  Builds
+  stress field (smooth ramp + sharp step) and applies all 5
+  legoESM iord limiters: 8 (iter 585), 9 (_pert_ppm), 10
+  (iter 593), 11 (iter 592), 12 (_pert_ppm_iv0).  Verifies:
+  1. The variants produce DISTINCT output at the step
+     (pairwise max diff > 0.01).
+  2. On purely smooth fields, all 5 produce finite output
+     (no NaN/Inf).
+  Validates that iter 585/592/593's distinct limiter
+  utilities actually exhibit FV3's documented behavioral
+  differences.  2/2 in <1 s.  Wired into iter-383 sweep
+  (now 168).
 - Iter 593: **FV3 iord=10 PPM limiter utility** (Lin+Rood 1996
   with pmp/lac extra constraints).  Faithful port of FV3
   ``tp_core.F90:554-572``.  The most subtle FV3 PPM variant.

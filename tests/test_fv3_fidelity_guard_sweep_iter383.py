@@ -191,6 +191,7 @@ _GUARD_MODULES = (
     "test_shift_fac_iter591",                        # iter-591 add
     "test_hord11_limiter_iter592",                   # iter-592 add
     "test_hord10_limiter_iter593",                   # iter-593 add
+    "test_iord_variants_comparison_iter594",         # iter-594 add
 )
 
 
