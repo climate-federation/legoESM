@@ -1195,6 +1195,33 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 653: **FV3 ``ctoa_vort_on``** — C-grid → A-grid winds
+  (circulation-conserving).  Faithful JAX port of FV3 ``ctoa``
+  (tools/test_cases.F90:8114-8174, simple branch).
+
+  Mirror of iter-652 ``dtoa_vort_on`` with input axes swapped
+  (C-grid u on east/west edges, n_x+1, n_y; v on north/south
+  edges, n_x, n_y+1).
+
+  Algorithm:
+
+      uout[i, j] = 0.5·(uin[i, j]·dy[i, j] + uin[i+1, j]·dy[i+1, j])
+                     / dya[i, j]
+      vout[i, j] = 0.5·(vin[i, j]·dx[i, j] + vin[i, j+1]·dx[i, j+1])
+                     / dxa[i, j]
+
+  Pairs with iter-652 ``dtoa_vort_on``: combined with existing
+  legoESM A/B/C/D-grid helpers, FV3-named circulation-conserving
+  grid-conversion utilities are complete.
+
+  Tests (5/5 in <1 s):
+  1. Output shape (n_x, n_y) from C-grid (n_x+1, n_y), (n_x, n_y+1).
+  2. Zero winds → zero output.
+  3. Uniform u=U, v=V with uniform dx → uout=U, vout=V.
+  4. With dx=dxa, formula reduces to simple averaging.
+  5. Batched leading axes preserved.
+
+  Wired into iter-383 sweep (now 221).
 - Iter 652: **FV3 ``dtoa_vort_on``** — circulation-conserving
   D-grid → A-grid winds.  Faithful JAX port of FV3 ``dtoa``
   (tools/test_cases.F90:7896-7955, VORT_ON branch).

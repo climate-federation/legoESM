@@ -2304,6 +2304,59 @@ def gnomonic_dist(im: int) -> tuple[jax.Array, jax.Array]:
     return xyz2latlon(p1, p2, p3)
 
 
+def ctoa_vort_on(
+    uin: jax.Array, vin: jax.Array,
+    dx: jax.Array, dy: jax.Array,
+    dxa: jax.Array, dya: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 653: C-grid → A-grid winds (circulation-conserving).
+
+    Faithful JAX port of FV3 ``ctoa`` (tools/test_cases.F90:8114-
+    8174, simple/circulation-conserving branch — the
+    commented-out FV3 lines 8147-8157).  Note C-grid u is on
+    east/west edges (shape (n_x+1, n_y), opposite of D-grid u);
+    C-grid v is on north/south edges (shape (n_x, n_y+1)).
+
+    Algorithm:
+
+        uout[i, j] = 0.5·(uin[i, j]·dy[i, j] + uin[i+1, j]·dy[i+1, j])
+                       / dya[i, j]
+        vout[i, j] = 0.5·(vin[i, j]·dx[i, j] + vin[i, j+1]·dx[i, j+1])
+                       / dxa[i, j]
+
+    Mirror of iter-652 ``dtoa_vort_on`` with input axes swapped
+    (C-grid puts u on east/west edges; D-grid puts u on north/
+    south edges).
+
+    Parameters
+    ----------
+    uin : jax.Array, shape (..., n_x+1, n_y)
+        C-grid u (east/west edges).
+    vin : jax.Array, shape (..., n_x, n_y+1)
+        C-grid v (north/south edges).
+    dx, dy : jax.Array, shape (..., n_x, n_y+1) and (..., n_x+1, n_y)
+        Edge lengths.
+    dxa, dya : jax.Array, shape (..., n_x, n_y)
+        A-grid (cell-center) edge lengths.
+
+    Returns
+    -------
+    uout, vout : jax.Array, shape (..., n_x, n_y)
+        A-grid cell-center wind components (covariant).
+    """
+    # uout: average uin·dy along i (axis -2 of uin)
+    uout = 0.5 * (
+        uin[..., :-1, :] * dy[..., :-1, :]
+        + uin[..., 1:, :] * dy[..., 1:, :]
+    ) / dya
+    # vout: average vin·dx along j (axis -1 of vin)
+    vout = 0.5 * (
+        vin[..., :, :-1] * dx[..., :, :-1]
+        + vin[..., :, 1:] * dx[..., :, 1:]
+    ) / dxa
+    return uout, vout
+
+
 def dtoa_vort_on(
     uin: jax.Array, vin: jax.Array,
     dx: jax.Array, dy: jax.Array,
