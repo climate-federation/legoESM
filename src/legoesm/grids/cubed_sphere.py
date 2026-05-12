@@ -2644,6 +2644,67 @@ def get_staggered_grid_fv3(
     return pt_c_lon, pt_c_lat, pt_d_lon, pt_d_lat
 
 
+def interpolate_z_fv3(
+    a3: jax.Array, hght: jax.Array, zl: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 678: linear vertical interpolation to a single z-level.
+
+    Faithful JAX port of FV3 ``interpolate_z`` (tools/fv_diagnostics.F90:
+    4776-4810).
+
+    Algorithm:
+        zm[k] = 0.5·(hght[k] + hght[k+1])     # mid-layer height
+        if zl >= zm[0]:    a2 = a3[0]         # above top
+        elif zl <= zm[-1]: a2 = a3[-1]        # below bottom
+        else: linear interp on (zm[k], a3[k]) ↔ (zm[k+1], a3[k+1])
+
+    Note: FV3 ``hght(k) > hght(k+1)`` (decreasing with k = top-down).
+    Function interpolates onto a single requested level ``zl``.
+
+    Parameters
+    ----------
+    a3 : jax.Array, shape (..., km)
+        3D field at mid-layer heights.
+    hght : jax.Array, shape (..., km+1)
+        Layer interface heights, decreasing with k (top-down).
+    zl : float or jax.Array
+        Target z-level.
+
+    Returns
+    -------
+    a2 : jax.Array, shape (...,)
+        Field interpolated to ``zl``.
+    """
+    # zm[k] = 0.5·(hght[k] + hght[k+1])
+    zm = 0.5 * (hght[..., :-1] + hght[..., 1:])             # (..., km)
+    # Search: for each column find k where zm[k] >= zl >= zm[k+1]
+    # zm is monotonically decreasing (since hght is).
+    # Reformulate: find largest k where zm[k] >= zl; clip to [0, km-2].
+    above_mask = zm >= zl
+    above_count = jnp.sum(above_mask.astype(jnp.int32), axis=-1)
+    km = zm.shape[-1]
+    # k_idx = index of last True (in [0, km-1]); k = max(0, above_count - 1)
+    # but we need the [k, k+1] pair for interpolation
+    k = jnp.clip(above_count - 1, 0, km - 2)
+    # Gather zm[k], zm[k+1], a3[k], a3[k+1]
+    zm_k = jnp.take_along_axis(zm, k[..., None], axis=-1).squeeze(-1)
+    zm_kp1 = jnp.take_along_axis(zm, (k + 1)[..., None], axis=-1).squeeze(-1)
+    a3_k = jnp.take_along_axis(a3, k[..., None], axis=-1).squeeze(-1)
+    a3_kp1 = jnp.take_along_axis(a3, (k + 1)[..., None], axis=-1).squeeze(-1)
+    # Linear interp inside band
+    denom = zm_k - zm_kp1
+    safe_denom = jnp.where(jnp.abs(denom) > 1e-30, denom, 1.0)
+    a2_band = a3_k + (a3_kp1 - a3_k) * (zm_k - zl) / safe_denom
+    # Boundary cases
+    above_top = zl >= zm[..., 0]
+    below_bot = zl <= zm[..., -1]
+    a2 = jnp.where(
+        above_top, a3[..., 0],
+        jnp.where(below_bot, a3[..., -1], a2_band),
+    )
+    return a2
+
+
 def z_sum_fv3(
     delp: jax.Array, q: jax.Array,
 ) -> jax.Array:

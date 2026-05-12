@@ -267,6 +267,7 @@ _GUARD_MODULES = (
     "test_fv3_bilinear_apply_iter675",               # iter-675 add
     "test_fv3_wind_max_iter676",                     # iter-676 add
     "test_fv3_z_p_sum_iter677",                      # iter-677 add
+    "test_fv3_interpolate_z_iter678",                # iter-678 add
 )
 
 

@@ -1195,6 +1195,33 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 678: **FV3 ``interpolate_z_fv3``** — linear vertical interp.
+  Faithful JAX port of FV3 ``interpolate_z``
+  (tools/fv_diagnostics.F90:4776-4810).
+
+  Algorithm:
+
+      zm[k] = 0.5·(hght[k] + hght[k+1])     # mid-layer height
+      if zl >= zm[0]:     a2 = a3[..., 0]    # above top
+      elif zl <= zm[-1]:  a2 = a3[..., -1]   # below bottom
+      else: linear interp on (zm[k], a3[k]) ↔ (zm[k+1], a3[k+1])
+
+  Note: FV3 ``hght(k) > hght(k+1)`` (top-down decreasing).
+  Vectorized via ``jnp.take_along_axis``; handles arbitrary
+  leading axes.  Exact for linear-in-z fields.
+
+  Used by FV3 for z-level diagnostic interpolation (winds at
+  10 m, 850 hPa, etc.).
+
+  Tests (6/6 in 1 s):
+  1. Output shape (n_x, n_y).
+  2. Above-top clamp.
+  3. Below-bottom clamp.
+  4. Exact at mid-layer height zm[k].
+  5. Linear-field interp exact (1e-10).
+  6. Constant-field preserved.
+
+  Wired into iter-383 sweep (now 244).
 - Iter 677: **FV3 ``z_sum_fv3`` + ``p_sum_fv3``** — column/global sums.
   Faithful JAX ports of FV3 ``z_sum`` (tools/fv_diagnostics.F90:
   4265-4285) + ``p_sum`` (4287-4310, serial branch).
