@@ -1195,6 +1195,40 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 708: **FV3 ``cs_prof_fv3``** — PPM column profile tridiag.
+  Faithful JAX port of FV3 ``cs_prof``
+  (tools/fv_diagnostics.F90:4653-4733).  Non-uniform tridiagonal
+  PPM edge reconstruction with Lin (2004) monotone constraints.
+
+  Algorithm:
+      1. Top edge q[0]  : explicit closure (delp[1]/delp[0]).
+      2. Forward sweep k=1..km-1 : Thomas-style γ.
+      3. Bottom q[km]   : explicit closure with a_bot.
+      4. Back-substitution k=km-1..0.
+      5. Large-scale clip k=1.
+      6. Interior k=2..km-2 : monotone clip on slope-sign neighbors
+           - same-sign         → clip to [min, max] of q2[k-1], q2[k]
+           - local max (g>0)   → floor at min
+           - local min (g≤0)   → ceiling at max; iv==0 (mass) also ≥ 0
+      7. Bottom k=km-1  : large-scale clip.
+
+  Sequential tridiag handled via Python loops (JAX traces unroll
+  statically for fixed km).  Min km = 4 (bottom closure uses
+  k = km - 2).
+
+  Tests (7/7 in <3 s):
+  1. Uniform → uniform edges.
+  2. Linear → interior edges between neighbor cells.
+  3. Random non-monotone → top/bot edges bounded by neighbors.
+  4. iv=0 (mass) → q ≥ 0 at local mins.
+  5. 3-D (n_x, n_y, km) → 3-D (n_x, n_y, km+1).
+  6. No NaN/Inf on random.
+  7. km < 4 raises ValueError.
+
+  Used by FV3 ``cs_interpolator`` (height-level interp) and as a
+  general PPM edge primitive.
+
+  Wired into iter-383 sweep (now 272).
 - Iter 707: **FV3 ``helicity_relative_caps_fv3``** — SRH with external
   (uc, vc) storm motion.
   Faithful JAX port of FV3 ``helicity_relative_CAPS``

@@ -3144,6 +3144,135 @@ def eqv_pot_fv3(
         return pt * jnp.exp(poisson)
 
 
+def cs_prof_fv3(
+    q2: jax.Array,
+    delp: jax.Array,
+    iv: int = 1,
+) -> jax.Array:
+    """FV3_3D iter 708: PPM column profile edge reconstruction.
+
+    Faithful JAX port of FV3 ``cs_prof``
+    (tools/fv_diagnostics.F90:4653-4733).  Non-uniform tridiagonal
+    PPM edge values from layer-mean q2 with Lin (2004) monotone
+    constraints.
+
+    Algorithm:
+        1. Top edge q[0] : explicit closure using delp[1]/delp[0].
+        2. Forward sweep k=1..km-1 : Thomas-style with γ coefficient.
+        3. Bottom edge q[km] : explicit closure with a_bot.
+        4. Back-substitution k=km-1..0 : q[k] -= γ[k]·q[k+1].
+        5. Top edge k=1 : large-scale clip between q2[0] and q2[1].
+        6. Interior k=2..km-2 : monotone clip based on slope-sign
+           pattern of neighbors.
+           - same-sign neighbors: clip to [min, max] of q2[k-1], q2[k]
+           - local max  : floor at min(q2[k-1], q2[k])
+           - local min  : ceiling at max(q2[k-1], q2[k]);
+                          if iv==0 (mass species) enforce q[k] ≥ 0.
+        7. Bottom k=km-1 : large-scale clip between q2[km-2], q2[km-1].
+
+    Vertical sequence handled via Python loops (JAX traces unroll
+    statically for fixed km).
+
+    Parameters
+    ----------
+    q2 : jax.Array, shape (..., km)
+        Layer-mean values.
+    delp : jax.Array, shape (..., km)
+        Layer pressure thickness (Pa, positive).
+    iv : int, default 1
+        Variable kind:
+            0 = mass species (enforce non-negativity at local mins)
+            1 = otherwise
+
+    Returns
+    -------
+    q : jax.Array, shape (..., km+1)
+        PPM edge values at level interfaces.
+    """
+    km = q2.shape[-1]
+    if km < 4:
+        raise ValueError(f"cs_prof_fv3 requires km >= 4, got km={km}")
+
+    # Initialize q (km+1 edges) and gam (km layers)
+    out_shape = q2.shape[:-1] + (km + 1,)
+    q = jnp.zeros(out_shape, dtype=q2.dtype)
+    gam = jnp.zeros_like(q2)
+
+    # Top edge (k=0): explicit
+    grat = delp[..., 1] / delp[..., 0]
+    bet = grat * (grat + 0.5)
+    q = q.at[..., 0].set(
+        ((grat + grat) * (grat + 1.0) * q2[..., 0] + q2[..., 1]) / bet
+    )
+    gam = gam.at[..., 0].set((1.0 + grat * (grat + 1.5)) / bet)
+
+    # Forward sweep k=1..km-1 (FV3 k=2..km)
+    d4 = None
+    for k in range(1, km):
+        d4 = delp[..., k - 1] / delp[..., k]
+        bet_k = 2.0 + d4 + d4 - gam[..., k - 1]
+        q = q.at[..., k].set(
+            (3.0 * (q2[..., k - 1] + d4 * q2[..., k]) - q[..., k - 1]) / bet_k
+        )
+        gam = gam.at[..., k].set(d4 / bet_k)
+
+    # Bottom edge (k=km): explicit closure
+    a_bot = 1.0 + d4 * (d4 + 1.5)
+    q = q.at[..., km].set(
+        (2.0 * d4 * (d4 + 1.0) * q2[..., km - 1] + q2[..., km - 2]
+         - a_bot * q[..., km - 1])
+        / (d4 * (d4 + 0.5) - a_bot * gam[..., km - 1])
+    )
+
+    # Back-substitution k=km-1..0
+    for k in range(km - 1, -1, -1):
+        q = q.at[..., k].set(q[..., k] - gam[..., k] * q[..., k + 1])
+
+    # Large-scale constraint at top edge (FV3 k=2 → Python k=1)
+    q1_min = jnp.minimum(q2[..., 0], q2[..., 1])
+    q1_max = jnp.maximum(q2[..., 0], q2[..., 1])
+    q = q.at[..., 1].set(jnp.clip(q[..., 1], q1_min, q1_max))
+
+    # Slopes γ[k] = q2[k] - q2[k-1] for k=1..km-1
+    gam_slopes = jnp.zeros_like(q2)
+    for k in range(1, km):
+        gam_slopes = gam_slopes.at[..., k].set(q2[..., k] - q2[..., k - 1])
+
+    # Interior k=2..km-2 (FV3 k=3..km-1)
+    for k in range(2, km - 1):
+        gleft = gam_slopes[..., k - 1]
+        gright = gam_slopes[..., k + 1]
+        q_k = q[..., k]
+        # Range of q2 in current layer pair
+        qk_min = jnp.minimum(q2[..., k - 1], q2[..., k])
+        qk_max = jnp.maximum(q2[..., k - 1], q2[..., k])
+        # Standard clip (same-sign neighbors)
+        q_clip_full = jnp.clip(q_k, qk_min, qk_max)
+        # Local max: gleft > 0  (and gright <= 0)
+        q_clip_max = jnp.maximum(q_k, qk_min)
+        # Local min: gleft <= 0
+        q_clip_min = jnp.minimum(q_k, qk_max)
+        if iv == 0:
+            q_clip_min = jnp.maximum(0.0, q_clip_min)
+        # Selectors
+        same_sign = gleft * gright > 0.0
+        is_local_max = gleft > 0.0
+        # Apply
+        q_new = jnp.where(
+            same_sign,
+            q_clip_full,
+            jnp.where(is_local_max, q_clip_max, q_clip_min),
+        )
+        q = q.at[..., k].set(q_new)
+
+    # Bottom layer k=km-1 (FV3 k=km)
+    qb_min = jnp.minimum(q2[..., km - 2], q2[..., km - 1])
+    qb_max = jnp.maximum(q2[..., km - 2], q2[..., km - 1])
+    q = q.at[..., km - 1].set(jnp.clip(q[..., km - 1], qb_min, qb_max))
+
+    return q
+
+
 def pv_entropy_fv3(
     vort: jax.Array,
     f_d: jax.Array,
