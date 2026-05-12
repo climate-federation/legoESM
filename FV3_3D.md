@@ -5113,5 +5113,41 @@ is large.  Pure JAX, vmap-compatible.  No new physical constants
 introduced (0.31 is the Eady-1949 eigenvalue, not a generic
 physical constant).
 
+## Iter 794 — absolute_vorticity_fv3 (η = ζ + f)
+
+Added `absolute_vorticity_fv3(zeta_rel, f)` to
+`grids/cubed_sphere.py`.  Sum of relative and planetary
+vorticity:
+
+```
+η = ζ_rel + f
+```
+
+Foundation of: Ertel PV theorem (η/ρ conserved on isentropes),
+Rossby-wave dispersion, geostrophic adjustment theory, vortex-
+column stretching (η/h conserved on a Lagrangian column).
+
+For mid-latitude synoptic flow ζ ~ O(1e-5 to 1e-4 s⁻¹), same
+order as f, so η can change sign locally — strong anticyclones
+and tropical-cyclone eyewalls flip the sign of η.
+
+Composes iter-778 ``coriolis_parameter_fv3``.
+
+Test: `tests/test_fv3_absolute_vorticity_iter794.py` (6 tests:
+ζ=0 → η=f, f=0 → η=ζ, ζ=−f cancellation → η=0, iter-778
+pipeline at 45°N, strong anticyclone sign-flip, 3-D shapes +
+finite).
+
+### Why this iteration was meaningful
+
+Absolute vorticity is the most-fundamental rotational diagnostic
+in atmospheric dynamics.  PV (Ertel) = η/h is conserved on
+isentropes — the entire PV-thinking framework (Hoskins-McIntyre-
+Robertson 1985) is built on η.  Geostrophic adjustment derives
+balanced height field from η.  Rossby-wave dispersion and zonal
+PV gradients (∂η/∂y = β + ∂ζ_g/∂y) determine wave propagation
+direction.  Pure JAX, vmap-compatible.  No new physical
+constants introduced.
+
 
 

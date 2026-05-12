@@ -4488,6 +4488,50 @@ def eady_growth_rate_fv3(
     return 0.31 * jnp.abs(f) * shear_mag / jnp.maximum(n_brunt, N_floor)
 
 
+def absolute_vorticity_fv3(
+    zeta_rel: jax.Array,
+    f: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 794: absolute vorticity η = ζ + f.
+
+    Sum of relative vorticity (vertical component of ∇ × V) and
+    planetary vorticity (iter-778 Coriolis parameter):
+
+        η = ζ_rel + f
+
+    Foundation of:
+      * Conservation of potential vorticity P = η/h (or η/ρ for
+        compressible) on isentropes / Lagrangian parcels (Ertel
+        PV theorem).
+      * Rossby-wave dispersion ω = U·k − β·k/|k|² + advection of
+        relative vorticity by mean flow.
+      * Geostrophic adjustment theory (η_g = ∇²Φ/f + f sets the
+        balanced PV).
+      * Stretching deformation of vortex columns (η/h conserved
+        ⇒ stretching → increased ζ).
+
+    For mid-latitude synoptic flow ζ_rel is O(1e-5 to 1e-4 s⁻¹),
+    same order as f, so η can change sign locally (anticyclonic
+    stratosphere, tropical cyclones).
+
+    Composes iter-778 ``coriolis_parameter_fv3``.
+
+    Parameters
+    ----------
+    zeta_rel : jax.Array
+        Relative vorticity ζ = ∂v/∂x − ∂u/∂y (s⁻¹).  Caller
+        derives via existing cubed-sphere differential operators.
+    f : jax.Array
+        Coriolis parameter (s⁻¹) from iter-778.
+
+    Returns
+    -------
+    eta : jax.Array
+        Absolute vorticity (s⁻¹).
+    """
+    return zeta_rel + f
+
+
 def kinetic_energy_fv3(
     ua: jax.Array,
     va: jax.Array,
