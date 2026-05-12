@@ -1195,6 +1195,33 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 648: **FV3 ``cartesian_to_spherical_fv3`` +
+  ``spherical_to_cartesian_fv3``**.  Radius-aware coord conversions
+  from FV3 ``fv_grid_tools.F90:2373-2402``.
+
+  Differs from iter-611 ``latlon2xyz`` / ``xyz2latlon`` (unit-
+  sphere only) by passing/returning radius ``r`` explicitly:
+
+      cartesian_to_spherical_fv3(x, y, z) → (lon, lat, r)
+      spherical_to_cartesian_fv3(lon, lat, r) → (x, y, z)
+
+  FV3 conventions preserved:
+      - Pole branch: |x|+|y|<1e-10 → lon=0
+      - Lon range [-π, π] (atan2; NOT wrapped to [0, 2π))
+      - RIGHT_HAND branch: lat = asin(z/r); z = r·sin(lat)
+
+  Useful for FV3 grid generation code that needs r (non-unit
+  sphere, e.g., physical Earth-radius grids).
+
+  Tests (6/6 in <1 s):
+  1. r = sqrt(x²+y²+z²) preserved.
+  2. Pole branch lon=0.
+  3. (lon=0,lat=0,r=1) → (1,0,0).
+  4. Round-trip exact (1e-12).
+  5. Linear scaling with r.
+  6. Lon in atan2 range [-π, π].
+
+  Wired into iter-383 sweep (now 217).
 - Iter 647: **FV3 ``set_eta_L60``** — FV3 L60 hardcoded hybrid-coord
   table.  Faithful JAX port of FV3 ``set_eta`` L60 a60/b60 data
   arrays (tools/fv_eta.F90:45-85).  Reference for 60-layer

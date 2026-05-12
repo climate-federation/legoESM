@@ -240,6 +240,7 @@ _GUARD_MODULES = (
     "test_fv3_drymadj_iter645",                      # iter-645 add
     "test_fv3_hydro_eq_iter646",                     # iter-646 add
     "test_fv3_set_eta_L60_iter647",                  # iter-647 add
+    "test_fv3_cart_sph_iter648",                     # iter-648 add
 )
 
 

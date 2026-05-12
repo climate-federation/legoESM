@@ -2304,6 +2304,60 @@ def gnomonic_dist(im: int) -> tuple[jax.Array, jax.Array]:
     return xyz2latlon(p1, p2, p3)
 
 
+def cartesian_to_spherical_fv3(
+    x: jax.Array, y: jax.Array, z: jax.Array,
+    eps: float = 1.0e-10,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """FV3_3D iter 648: Cartesian (x, y, z) → (lon, lat, r) with FV3 pole branch.
+
+    Faithful JAX port of FV3 ``cartesian_to_spherical``
+    (tools/fv_grid_tools.F90:2373-2390).  Differs from iter-611
+    ``xyz2latlon`` (which is normalized to unit sphere) by
+    returning the actual radius ``r = sqrt(x²+y²+z²)`` and not
+    normalizing inputs.
+
+    FV3 pole branch: ``|x|+|y| < 1e-10`` → lon=0.
+
+    Returns
+    -------
+    lon : jax.Array
+        Longitude in [-π, π] (FV3 ATAN2 range, NOT wrapped to [0, 2π)).
+    lat : jax.Array
+        Latitude (RIGHT_HAND branch: asin(z/r)).
+    r : jax.Array
+        Radius.
+    """
+    r = jnp.sqrt(x * x + y * y + z * z)
+    safe_r = jnp.where(r > 0.0, r, 1.0)
+    near_pole = (jnp.abs(x) + jnp.abs(y)) < eps
+    lon = jnp.where(near_pole, 0.0, jnp.arctan2(y, x))
+    lat = jnp.arcsin(jnp.clip(z / safe_r, -1.0, 1.0))
+    return lon, lat, r
+
+
+def spherical_to_cartesian_fv3(
+    lon: jax.Array, lat: jax.Array, r: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """FV3_3D iter 648: (lon, lat, r) → Cartesian (x, y, z), radius-aware.
+
+    Faithful JAX port of FV3 ``spherical_to_cartesian``
+    (tools/fv_grid_tools.F90:2391-2402, RIGHT_HAND branch):
+
+        x = r·cos(lon)·cos(lat)
+        y = r·sin(lon)·cos(lat)
+        z = r·sin(lat)
+
+    Differs from iter-611 ``latlon2xyz`` by:
+        - Output scaled by ``r`` (legoESM iter-611 returns unit-sphere).
+        - Lon in any range (FV3 doesn't restrict).
+    """
+    cos_lat = jnp.cos(lat)
+    x = r * jnp.cos(lon) * cos_lat
+    y = r * jnp.sin(lon) * cos_lat
+    z = r * jnp.sin(lat)
+    return x, y, z
+
+
 def intersect_great_circles(
     a1: jax.Array, a2: jax.Array,
     b1: jax.Array, b2: jax.Array,
