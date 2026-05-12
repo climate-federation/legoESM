@@ -1258,6 +1258,52 @@ def dist2side_latlon(
     return jnp.arcsin(jnp.clip(jnp.sin(side) * jnp.sin(angle), -1.0, 1.0))
 
 
+def get_center_vect(
+    pp: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 618: cell-center tangent unit vectors (u1, u2).
+
+    Faithful port of FV3 ``get_center_vect`` (fv_grid_utils.F90:
+    1795-1845), non-``OLD_VECT`` branch (FV3 default).  Given an
+    array of cell corner positions ``pp`` of shape
+    ``(..., n+1, n+1, 3)``, returns the two unit tangent vectors
+    at each cell center::
+
+        pc = cell_center3(SW, SE, NW, NE)
+        # u1 (along i / x-direction):
+        p1_w = mid_pt3_cart(SW, NW)   # west edge midpoint
+        p2_e = mid_pt3_cart(SE, NE)   # east edge midpoint
+        p3   = p2_e × p1_w
+        u1   = normalize(pc × p3)
+        # u2 (along j / y-direction):
+        p1_s = mid_pt3_cart(SW, SE)   # south edge midpoint
+        p2_n = mid_pt3_cart(NW, NE)   # north edge midpoint
+        p3   = p2_n × p1_s
+        u2   = normalize(pc × p3)
+
+    Returns ``(u1, u2)`` each of shape ``(..., n, n, 3)``.
+
+    Used by FV3 vector-halo rotation: edges between faces project
+    vector components onto these per-cell tangent vectors.
+    """
+    sw = pp[..., :-1, :-1, :]
+    se = pp[..., 1:, :-1, :]
+    nw = pp[..., :-1, 1:, :]
+    ne = pp[..., 1:, 1:, :]
+    pc = cell_center3(sw, se, nw, ne)
+    # u1 along i-direction (east-west edges)
+    p1_w = mid_pt3_cart(sw, nw)
+    p2_e = mid_pt3_cart(se, ne)
+    p3_1 = vect_cross(p2_e, p1_w)
+    u1 = normalize_vect(vect_cross(pc, p3_1))
+    # u2 along j-direction (north-south edges)
+    p1_s = mid_pt3_cart(sw, se)
+    p2_n = mid_pt3_cart(nw, ne)
+    p3_2 = vect_cross(p2_n, p1_s)
+    u2 = normalize_vect(vect_cross(pc, p3_2))
+    return u1, u2
+
+
 def gnomonic_angl(im: int) -> tuple[jax.Array, jax.Array]:
     """FV3_3D iter 617: equi-angular gnomonic grid for FV3 face 2.
 

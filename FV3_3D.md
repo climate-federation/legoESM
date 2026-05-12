@@ -1195,6 +1195,37 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 618: **FV3 ``get_center_vect``** — cell-center tangent vectors.
+  Faithful JAX port of FV3 ``get_center_vect``
+  (fv_grid_utils.F90:1795-1845, non-``OLD_VECT`` branch).  Given
+  an array of corner positions ``pp`` of shape
+  ``(..., n+1, n+1, 3)``, returns the two unit tangent vectors
+  ``(u1, u2)`` at each cell center::
+
+      pc = cell_center3(SW, SE, NW, NE)
+      # u1 along i (x-direction):
+      p1_w = mid_pt3_cart(SW, NW)
+      p2_e = mid_pt3_cart(SE, NE)
+      u1   = normalize(pc × (p2_e × p1_w))
+      # u2 along j (y-direction):
+      p1_s = mid_pt3_cart(SW, SE)
+      p2_n = mid_pt3_cart(NW, NE)
+      u2   = normalize(pc × (p2_n × p1_s))
+
+  Outputs ``(u1, u2)`` of shape ``(..., n, n, 3)``.  Used by
+  FV3 vector-halo rotation: edges between faces project vector
+  components onto these per-cell tangent vectors to maintain
+  vector continuity across the cube imprint.
+
+  Tests (6/6 in 2 s):
+  1. Output shapes ``(n, n, 3)``.
+  2. Both u1 and u2 unit-norm.
+  3. u1, u2 ⊥ cell-center position (sphere tangent).
+  4. At equator, u1 ≈ +east and u2 ≈ +north (1e-4 atol).
+  5. u1 ⊥ u2 on axis-aligned equator square cells.
+  6. Applied to legoESM gnomonic face → finite + unit-norm.
+
+  Wired into iter-383 sweep (now 190).
 - Iter 617: **FV3 gnomonic grid generators**.  Faithful JAX
   ports of FV3 ``fv_grid_utils.F90``:
 
