@@ -11,6 +11,48 @@ visible cube imprint (concentric blobs at face centres bordered by
 red/blue rings at panel boundaries) in u/v wind snapshots from
 Held-Suarez and baroclinic test cases.
 
+## Key findings summary (iter 541)
+
+Comprehensive validation of the FV3-faithful 3D stack + the
+user-facing edge-artifact suppression helpers.
+
+**FV3 fidelity:** All 5 NH + 3 PE opt-in flags ported (see
+table below).  Faithful to ``../FV3/atmos_cubed_sphere-
+symmetryclean/``.
+
+**Edge artifacts:** Asymptotically converging, not eliminated.
+On a SBR (Williamson 2-like) IC:
+- edge_std ~ N⁻⁰·⁸² (sub-1st order at cube corners)
+- int_std ~ N⁻¹·⁵³ (1.5th order in the interior)
+- At C96 production: edge_std ≈ 0.014 K, int_std ≈ 0.0006 K
+  after 10 steps from rest.
+This is FV3-faithful behavior — corners are formally lower-
+order in FV3 too.
+
+**User-facing API for additional ~50% edge reduction:**
+- ``make_legoesm_nh_min_edge_config`` (iter-466): factory
+  with 3 disabled flags → 50% reduction at C8+duogrid.
+- ``monotone_halo_clip_context(slack=0.5)`` (iter-505): 15-
+  site context manager → +50% reduction.
+- ``make_clipped_step(model, state, dt, slack=0.5)`` (iter-
+  526): JIT-safe wrapper.  +0.6% performance overhead.
+
+**Verified properties:**
+- Mass conservation: NH 5e-9, PE 7e-9 over 10 steps (machine
+  precision).
+- ``jax.grad`` flows through (iter-522, iter-529).
+- JIT-compatible via ``make_clipped_step`` (iter-526).
+- Works on NH + PE + SW dycores (iter-526/529/531).
+- Terrain (mountain) compatible (iter-537).
+- Tracer transport: conservative + monotonic (iter-538).
+- 50-step mass test: 5.3 ppb drift through step 42; instability
+  at step 43 is C8 stability limit, NOT helper-induced
+  (iter-539).
+- Performance: +0.6% overhead vs raw jit (iter-541).
+
+See ``scripts/example_fv3_clip_helper.py`` for a runnable
+end-to-end demo.
+
 ## FV3-fidelity stack (iter 356/423 update)
 
 By iter-423 the FV3-fidelity opt-in stack closes the major
