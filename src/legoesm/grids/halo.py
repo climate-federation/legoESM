@@ -2571,15 +2571,26 @@ def synchronize_bgrid_ne_corner_geo(u, v, cos_ang_c, sin_ang_c, n):
 
 
 def monotone_halo_clip_context(slack: float = 0.5):
-    """FV3_3D iter 505: context manager that monkey-patches all
-    known ``pad_halo_4d`` and ``pad_halo_vector_4d`` import
-    aliases in NH/PE dycore + operator modules to use
-    ``monotone_clip=True`` with the given ``slack``.
+    """FV3_3D iter 505: context manager that monkey-patches 15
+    known halo import aliases in NH/PE/SW dycore + operator
+    modules to use ``monotone_clip=True`` with the given ``slack``.
 
     Per iter-504, enabling this around a dycore step reduces
     the duogrid-induced cube-edge θ′ variance ratio by ~65%
     when combined with iter-466's ``make_legoesm_nh_min_edge_
-    config`` factory.
+    config`` factory.  At smooth atmospheric ICs, the iter-553
+    ``make_fv3_faithful_nh_config`` factory alone gives 89.5%
+    reduction without needing this context.  Use this context
+    when iters>2 boost is enabled (iter-562) for additional
+    edge suppression.
+
+    See also:
+    - ``make_clipped_step(model, state, dt, slack)`` (iter-526):
+      JIT-safe variant that bakes the clip into a cached compiled
+      function.  Required for ``jax.jit`` users.
+    - ``make_clipped_scan_step(model, state, dt, n_steps, slack)``
+      (iter-544): multi-step ``jax.lax.scan`` variant for low
+      Python-overhead long runs.
 
     Usage::
 
