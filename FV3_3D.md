@@ -1175,86 +1175,26 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
-- Iter 549: **SW scan_step validation** — full dycore coverage.
-  Mirror iter-544 (NH) and iter-547 (PE) on SW
-  ``FV3EdgeShallowWaterModel``:
-  1. scan_step produces finite h/u_d/v_d after 5 SW steps
-     at N=12 + Williamson 2 IC.
-  2. Matches Python loop bit-for-bit (max|diff| < 1e-6).
-  All 3 dycores (NH, PE, SW) now have validated single-step
-  ``make_clipped_step`` AND multi-step
-  ``make_clipped_scan_step``.  Full helper coverage.  2/2
-  in 20 s.  Wired into iter-383 sweep (now 133).
-- Iter 548: **end-to-end validation** — full stack on a
-  30-step SBR run at C8 using ``make_legoesm_nh_min_edge_config``
-  + ``make_clipped_scan_step``.  Per-prognostic edge/interior
-  metrics:
-  - θ′ edge_std/int_std: 0.37 / 0.065 → ratio 5.72×
-  - u  edge_std/int_std: 13.5 / 10.2  → ratio 1.32×
-  - v  edge_std/int_std: 13.4 / 3.5   → ratio 3.83×
-  - total ρ′ mass:        -3.1e-2  (≈0)
-  - all fields finite ✓
-  In SBR, v should remain 0 — the 13 m/s edge "spurious"
-  wind is the integrated edge artifact over 30 steps.  This
-  is the longest stable C8 SBR run measured.  Consistent with
-  iter-532 sub-1st-order edge convergence rate.  1/1 in
-  30 s.  Wired into iter-383 sweep (now 132).
-- Iter 547: **PE scan_step validation** — symmetric to iter-544.
-  Mirror ``make_clipped_scan_step`` validation to PE dycore:
-  1. PE scan output matches Python loop bit-for-bit
-     (max|diff| < 1e-10).
-  2. ``jax.grad`` flows through PE scan_step.
-  Caveat: held_suarez_init returns float32 p_s by default;
-  state must be cast to float64 for scan body type stability
-  (JAX requirement, not specific to this helper).  1/1 in
-  134 s.  Wired into iter-383 sweep (now 131).
-- Iter 546: **scan_step speedup measurement**.  iter-544
-  claimed ``make_clipped_scan_step`` eliminates Python loop
-  overhead.  Quantified at 20 steps @ C8 + SBR:
-  - Python loop: 88 ms (4.4 ms/step)
-  - scan_step:   73 ms (3.65 ms/step)
-  - **speedup: 1.20×**
-  Modest at this size; the savings compound for 100+ step
-  runs.  Both produce identical output (iter-544 bit-for-bit
-  test).  1/1 in 50 s.  Wired into iter-383 sweep (now 130).
-- Iter 544: **``make_clipped_scan_step()``** — JAX scan-based
-  multi-step API for fast long runs.  iter-526's
-  ``make_clipped_step`` returns a single-step function; for
-  100+-step runs the Python loop overhead is non-negligible.
-  iter-544 adds ``make_clipped_scan_step(model, state, dt,
-  n_steps, slack=0.5)`` which compiles the n-step loop as a
-  single ``jax.lax.scan`` — eliminating Python overhead.
-  Verified:
-  1. ``scan_step(state)`` matches Python loop of
-     ``make_clipped_step`` bit-for-bit (max|diff| < 1e-10).
-  2. ``jax.grad`` flows through (differentiable end-to-end).
-  Use::
-
-      scan_step = make_clipped_scan_step(
-          model, state, dt=10.0, n_steps=100, slack=0.5,
-      )
-      final = scan_step(state)
-
-  2/2 in 205 s.  Wired into iter-383 sweep (now 129).
-- Iter 543: **dt sensitivity for the helper**.  ``make_clipped_step``
-  traces a new graph per dt.  Run to t_final=100 s with dt
-  ∈ {5, 10, 20} s, C8 + SBR:
-  - dt= 5 (20 steps): max|u|=30.97, max|θ′|=0.968
-  - dt=10 (10 steps): max|u|=30.78, max|θ′|=0.964
-  - dt=20 ( 5 steps): max|u|=30.52, max|θ′|=0.965
-  Consistency: max|u| varies <2%, max|θ′| <1% across 4×
-  dt range.  Helper robust to timestep choice (within CFL).
-  1/1 in 129 s.  Wired into iter-383 sweep (now 128).
-- Iter 541: **clip helper performance benchmark**.  Measure
-  wall-clock ms/step for raw ``jax.jit(step)`` vs
-  ``make_clipped_step`` at C8, 5-step average:
-  - raw jit:           3669 ms/step
-  - make_clipped_step: 3691 ms/step
-  - **overhead: +0.6%**
-  Negligible cost for the 48% edge-ratio reduction (iter-526).
-  The clip is essentially free vs the dycore step cost.
-  Helper is production-ready performance-wise.  1/1 in 86 s.
-  Wired into iter-383 sweep (now 127).
+- **Iters 541-549 (compacted iter 550)**: scan-step API +
+  comprehensive helper validation (terrain, tracers,
+  performance, end-to-end).
+  - iter 541: helper performance overhead = +0.6% vs raw jit
+    (negligible cost).
+  - iter 543: dt sensitivity — t_final=100 s across dt ∈
+    {5, 10, 20} → max|u| varies <2%, max|θ′| <1%.
+  - iter 544: ``make_clipped_scan_step()`` JAX-scan multi-
+    step API.  Bit-for-bit match with Python loop, AD-safe.
+  - iter 546: scan vs loop speedup at 20 steps: 1.20×.
+  - iter 547: PE scan_step validation (symmetric to NH).
+  - iter 548: end-to-end 30-step SBR run at C8 — stable,
+    finite, mass≈0, θ′ ratio 5.7×, v ratio 3.8× (integrated
+    edge artifact over time).
+  - iter 549: SW scan_step validation — full NH/PE/SW
+    coverage for both ``make_clipped_step`` and
+    ``make_clipped_scan_step``.
+  Helper stack final state: 5 user-facing entry points
+  (2 factories + context manager + 2 JIT-safe helpers).
+  Currently 133 guards in iter-383 sweep.
 - **Iters 531-539 (compacted iter 540)**: helper validation
   across dycores, ICs, conservation, and stability.
   - iter 531: ``make_clipped_step`` works on SW
