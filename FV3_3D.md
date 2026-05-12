@@ -1081,6 +1081,22 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 502: ``monotone_clip_slack`` sweep on
+  ``center_to_dgrid_vector`` to find neutral-edge slack.
+  Also plumbs slack through ``pad_halo_vector_4d``.  Results
+  (vector u_d edge × ratio):
+    no clip:    1.0725
+    slack=0.00: 0.9538  (strict clip over-corrects 5%)
+    slack=0.10: 0.9561
+    slack=0.50: 0.9674
+    slack=1.00: 0.9826
+    slack=2.00: 1.0135  (closest to neutral, 1% amplification)
+  To reach exact neutral (×1.000), slack must be ~1.5-2.0.
+  Slack=2.0 expands the band 2× (hi-lo) on each side —
+  effectively a very wide monotone tolerance, still bounded.
+  Real signal: strict clip is mathematically too aggressive
+  for the vector-halo path; soft clip provides recovery.
+  1/1 in 12 s.  Wired into iter-383 sweep (now 93).
 - Iter 501: ``monotone_clip_slack`` parameter — softer
   monotonicity for iter-499's over-correction.  New
   ``monotone_clip_slack: float = 0.0`` arg on

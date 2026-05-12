@@ -1025,6 +1025,7 @@ def pad_halo_vector_4d(
     halo: int = 1,
     duogrid=None,
     monotone_clip: bool = False,
+    monotone_clip_slack: float = 0.0,
 ) -> tuple[jax.Array, jax.Array]:
     """4D vector halo exchange (rotation + pad for all levels at once).
 
@@ -1086,16 +1087,15 @@ def pad_halo_vector_4d(
                 "this today.")
         if duogrid is not None:
             # Iter-634: per-component scalar `pad_halo_4d` fallback.
-            # Pays 2 MPI messages instead of 1 packed exchange, but
-            # exercises `pad_halo_4d`'s validated duogrid post-
-            # processing so the kinked→extended remap actually runs.
             u_east_padded = pad_halo_4d(
                 u_east, halo=halo, duogrid=duogrid,
                 monotone_clip=monotone_clip,
+                monotone_clip_slack=monotone_clip_slack,
             )
             v_north_padded = pad_halo_4d(
                 v_north, halo=halo, duogrid=duogrid,
                 monotone_clip=monotone_clip,
+                monotone_clip_slack=monotone_clip_slack,
             )
         else:
             from legoesm.parallel.halo_exchange import pad_halo_mpi_4d
@@ -1108,10 +1108,12 @@ def pad_halo_vector_4d(
         u_east_padded = pad_halo_4d(
             u_east, halo=halo, interp_offsets=interp_offsets,
             duogrid=duogrid, monotone_clip=monotone_clip,
+            monotone_clip_slack=monotone_clip_slack,
         )
         v_north_padded = pad_halo_4d(
             v_north, halo=halo, interp_offsets=interp_offsets,
             duogrid=duogrid, monotone_clip=monotone_clip,
+            monotone_clip_slack=monotone_clip_slack,
         )
     # Step 3: convert back using padded angles
     cap = cos_angle_padded[..., None]
