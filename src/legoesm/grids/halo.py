@@ -2696,3 +2696,50 @@ def monotone_halo_clip_context(slack: float = 0.5):
         except (AttributeError, ModuleNotFoundError):
             pass
     return stack
+
+
+def make_clipped_step(model, state_template, dt: float, slack: float = 0.5):
+    """FV3_3D iter 526: return a JIT-compiled ``model.step`` with the
+    iter-505 clip baked into the compiled graph.
+
+    Solves the iter-525 limitation that ``jax.jit(model.step)`` only
+    picks up the clip if traced inside the context.  This helper
+    enters the context, JIT-compiles ``model.step``, FORCES TRACING by
+    calling the JIT once with ``state_template`` and ``dt``, then exits
+    the context and returns the cached-compiled function.  Subsequent
+    calls reuse the cached compilation (with clip permanently baked
+    into the lowered HLO).
+
+    Parameters
+    ----------
+    model : object
+        Anything with a ``.step(state, dt)`` method (NH or PE dycore).
+    state_template : pytree
+        Example state used to force trace (shapes/dtypes must match
+        all later calls).
+    dt : float
+        Step size used to force trace.
+    slack : float
+        ``monotone_clip_slack``.  Default 0.5 (iter-504 optimum).
+
+    Returns
+    -------
+    callable
+        ``step(state, dt) -> new_state``, JIT-compiled with clip baked in.
+
+    Usage
+    -----
+    ::
+
+        from legoesm.grids.halo import make_clipped_step
+
+        model = CDGridCompressibleEulerModel(grid, hc, tm, cfg)
+        step = make_clipped_step(model, state, dt=10.0, slack=0.5)
+        for _ in range(100):
+            state = step(state, dt=10.0)
+    """
+    with monotone_halo_clip_context(slack=slack):
+        step_jit = jax.jit(model.step)
+        # Force trace + compilation NOW, while context is active.
+        _ = step_jit(state_template, dt)
+    return step_jit

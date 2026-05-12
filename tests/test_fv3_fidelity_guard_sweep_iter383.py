@@ -138,6 +138,7 @@ _GUARD_MODULES = (
     "test_mass_conservation_sbr_iter523",            # iter-523 add
     "test_pe_mass_conservation_iter524",             # iter-524 add
     "test_clip_context_jit_iter525",                 # iter-525 add
+    "test_make_clipped_step_iter526",                # iter-526 add
 )
 
 

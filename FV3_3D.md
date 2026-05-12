@@ -1081,6 +1081,29 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 526: **``make_clipped_step()`` helper** — JIT-safe
+  user-facing API.  Solves iter-525 limitation that
+  ``jax.jit(model.step)`` outside context misses clip patches.
+  New ``make_clipped_step(model, state_template, dt, slack=0.5)``
+  in ``legoesm.grids.halo``:
+  1. Enters ``monotone_halo_clip_context(slack=slack)``.
+  2. ``step_jit = jax.jit(model.step)``.
+  3. Forces trace + compilation by calling
+     ``step_jit(state_template, dt)`` while context active.
+  4. Returns cached-compiled ``step_jit``.
+  Clip is permanently baked into the lowered HLO; subsequent
+  calls (with or without context) use the clipped graph.
+  Verified: ``make_clipped_step`` gives 2.097× vs raw jit
+  4.063× at 10 steps — **48.4% edge reduction**, matching
+  iter-511 long-term clip benefit.  Note: requires separate
+  model instances to avoid JAX trace-cache reuse between
+  clip and no-clip runs in tests.  Usage::
+
+      step = make_clipped_step(model, state, dt=10.0, slack=0.5)
+      for _ in range(100):
+          state = step(state, dt=10.0)
+
+  2/2 in 47 s.  Wired into iter-383 sweep (now 115).
 - Iter 525: **JIT + ``monotone_halo_clip_context`` interaction**.
   The helper uses ``unittest.mock.patch`` at Python level.
   JAX traces functions ONCE; the patch must be in scope at
