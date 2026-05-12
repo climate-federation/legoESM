@@ -245,6 +245,7 @@ _GUARD_MODULES = (
     "test_fv3_get_pt_on_gc_iter651",                 # iter-651 add
     "test_fv3_dtoa_iter652",                         # iter-652 add
     "test_fv3_ctoa_iter653",                         # iter-653 add
+    "test_fv3_atoc_iter654",                         # iter-654 add
 )
 
 

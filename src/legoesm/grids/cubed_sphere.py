@@ -2304,6 +2304,67 @@ def gnomonic_dist(im: int) -> tuple[jax.Array, jax.Array]:
     return xyz2latlon(p1, p2, p3)
 
 
+def atoc_vort_on(
+    uin: jax.Array, vin: jax.Array,
+    dxa: jax.Array, dya: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 654: A-grid → C-grid winds (circulation-conserving).
+
+    Faithful JAX port of FV3 ``atoc`` (tools/test_cases.F90:7965-
+    8112, ``VORT_ON`` branch, no ``ALT_INTERP``).
+
+    Algorithm (interior C-grid edges only):
+
+        uout[i, j] = (uin[i, j]·dxa[i, j] + uin[i-1, j]·dxa[i-1, j])
+                    / (dxa[i, j] + dxa[i-1, j])
+        vout[i, j] = (vin[i, j]·dya[i, j] + vin[i, j-1]·dya[i, j-1])
+                    / (dya[i, j] + dya[i, j-1])
+
+    Interior edges only (FV3 ``i ∈ [isd+1, ied]``, ``j ∈ [jsd+1, jed]``).
+    Boundary edges (uout[0, :] / uout[-1, :] / vout[:, 0] / vout[:, -1])
+    are zero-initialized; FV3 sets them via halo communication or
+    fill_corners afterward.
+
+    Parameters
+    ----------
+    uin : jax.Array, shape (..., n_x, n_y)
+        A-grid u (cell-center).
+    vin : jax.Array, shape (..., n_x, n_y)
+        A-grid v (cell-center).
+    dxa, dya : jax.Array, shape (..., n_x, n_y)
+        A-grid (cell-center) edge lengths.
+
+    Returns
+    -------
+    uout : jax.Array, shape (..., n_x+1, n_y)
+        C-grid u (east/west edges).  Boundary edges = 0.
+    vout : jax.Array, shape (..., n_x, n_y+1)
+        C-grid v (north/south edges).  Boundary edges = 0.
+    """
+    # Build C-grid uout via vectorized average of adjacent A-grid columns.
+    # uout[i, j] for i ∈ [1, n_x-1] uses uin[i-1, j] and uin[i, j].
+    interior_u = (
+        (uin[..., 1:, :] * dxa[..., 1:, :]
+         + uin[..., :-1, :] * dxa[..., :-1, :])
+        / (dxa[..., 1:, :] + dxa[..., :-1, :])
+    )  # shape (..., n_x-1, n_y)
+    n_x = uin.shape[-2]
+    n_y = uin.shape[-1]
+    # Allocate full uout (..., n_x+1, n_y) with zeros and fill interior
+    leading_shape = uin.shape[:-2]
+    uout = jnp.zeros(leading_shape + (n_x + 1, n_y))
+    uout = uout.at[..., 1:n_x, :].set(interior_u)
+
+    interior_v = (
+        (vin[..., :, 1:] * dya[..., :, 1:]
+         + vin[..., :, :-1] * dya[..., :, :-1])
+        / (dya[..., :, 1:] + dya[..., :, :-1])
+    )  # shape (..., n_x, n_y-1)
+    vout = jnp.zeros(leading_shape + (n_x, n_y + 1))
+    vout = vout.at[..., :, 1:n_y].set(interior_v)
+    return uout, vout
+
+
 def ctoa_vort_on(
     uin: jax.Array, vin: jax.Array,
     dx: jax.Array, dy: jax.Array,

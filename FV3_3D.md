@@ -1195,6 +1195,33 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 654: **FV3 ``atoc_vort_on``** — A-grid → C-grid winds
+  (circulation-conserving).  Faithful JAX port of FV3 ``atoc``
+  (tools/test_cases.F90:7965-8112, VORT_ON branch, no ALT_INTERP).
+
+  Algorithm (interior C-grid edges):
+
+      uout[i, j] = (uin[i, j]·dxa[i, j] + uin[i-1, j]·dxa[i-1, j])
+                 / (dxa[i, j] + dxa[i-1, j])
+      vout[i, j] = (vin[i, j]·dya[i, j] + vin[i, j-1]·dya[i, j-1])
+                 / (dya[i, j] + dya[i, j-1])
+
+  Pairs with iter-652/653 dtoa/ctoa.  Together: A↔C↔D grid
+  conversions via FV3 circulation-conserving formulas all
+  available.
+
+  Interior-only output; boundary edges (uout[0, :], uout[-1, :],
+  vout[:, 0], vout[:, -1]) zero-initialized (FV3 fills via halo
+  exchange).
+
+  Tests (5/5 in 1 s):
+  1. Output shapes (n_x+1, n_y) and (n_x, n_y+1).
+  2. Zero winds → zero output.
+  3. Uniform → interior matches U, V.
+  4. Boundary edges = 0.
+  5. With uniform dxa, formula reduces to 0.5·(uin[i-1]+uin[i]).
+
+  Wired into iter-383 sweep (now 222).
 - Iter 653: **FV3 ``ctoa_vort_on``** — C-grid → A-grid winds
   (circulation-conserving).  Faithful JAX port of FV3 ``ctoa``
   (tools/test_cases.F90:8114-8174, simple branch).
