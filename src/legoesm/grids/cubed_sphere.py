@@ -3022,6 +3022,50 @@ def potential_energy_column_fv3(
     return column_integral_delp_fv3(phi_avg, delp)
 
 
+def moist_static_energy_fv3(
+    pt: jax.Array,
+    z: jax.Array,
+    q_sphum: jax.Array,
+    cp: float | jax.Array | None = None,
+    L: float | None = None,
+) -> jax.Array:
+    """FV3_3D iter 753: moist static energy per unit mass.
+
+        MSE = c_p · T + g · z + L · q_sphum
+
+    Standard atmospheric conservative variable (approximately
+    conserved for moist adiabatic motion).  Used in convection
+    parameterizations and tropical-meteorology diagnostics.
+
+    Pairs with iter-744 IE (cv·T), iter-746 LE (L·q), iter-747 PE (Φ).
+    MSE = h + Φ = (c_p·T + L·q) + g·z (h = moist static enthalpy).
+
+    Parameters
+    ----------
+    pt : jax.Array
+        Temperature (K).
+    z : jax.Array
+        Height above surface (m).
+    q_sphum : jax.Array
+        Specific humidity (kg/kg).
+    cp : float or jax.Array, optional
+        Isobaric specific heat (J/kg/K).  Default ``constants.c_pd``.
+        For moist atmosphere use iter-714 ``moist_cp_fv3`` output.
+    L : float, optional
+        Latent heat (J/kg).  Default ``constants.L_v`` (vaporization).
+
+    Returns
+    -------
+    mse : jax.Array
+        Moist static energy per unit mass (J/kg).
+    """
+    if cp is None:
+        cp = constants.c_pd
+    if L is None:
+        L = constants.L_v
+    return cp * pt + constants.g * z + L * q_sphum
+
+
 def dry_surface_pressure_fv3(
     ps: jax.Array,
     delp: jax.Array,

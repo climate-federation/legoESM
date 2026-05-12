@@ -1195,6 +1195,31 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 753: **``moist_static_energy_fv3``** — MSE per unit mass.
+
+      MSE = c_p · T + g · z + L · q_sphum
+
+  Standard atmospheric conservative variable, approximately
+  conserved for moist adiabatic motion.  Used in convection
+  parameterizations + tropical-meteorology diagnostics.
+
+  Decomposition: MSE = (c_p·T + L·q) + Φ where:
+    * c_p·T relates to iter-744 IE (cv·T differs by R_d·T)
+    * L·q relates to iter-746 LE
+    * g·z = Φ relates to iter-747 PE
+
+  Defaults: c_p = constants.c_pd, L = constants.L_v.  Accepts
+  moist c_p (iter-714 moist_cp_fv3) and L_s for ice variant.
+
+  Tests (6/6 in <1 s):
+  1. q=0, z=0 → MSE = c_p · T.
+  2. T=300, z=1000, q=0.01 → MSE = analytical sum.
+  3. Custom moist c_p from iter-714.
+  4. L_s vs L_v → delta matches (L_s − L_v)·q.
+  5. 3-D shapes.
+  6. No NaN/Inf.
+
+  Wired into iter-383 sweep (now 317).
 - Iter 752: **``dry_surface_pressure_fv3``** — per-cell ps_dry.
 
       ps_dry = ps − g · TWC
