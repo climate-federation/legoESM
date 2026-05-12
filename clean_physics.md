@@ -156,6 +156,34 @@ Compression iteration.  Folded iter-20 through iter-29 into the
 "Iterations 1-29 — Summary" section.  Detailed per-iteration narratives
 remain in the commit messages on `clean_physics`.
 
+### Iteration 37 — 2026-05-12
+
+**Fix iter-36 test + apply codex iter-36 findings.**
+
+1. Replaced `test_morrison_fp32_grad_finite_at_ice_saturation` (which
+   ran on a zero-hydrometeor column and did not actually engage the
+   q_v clamp's active branch) with
+   `test_morrison_fp32_grad_finite_with_tiny_qv_sink` that:
+   - Sets `N_i = 1e3 /kg` so `safe_pow(N_i, 1/3) > 0` and the deposition
+     path is non-zero.
+   - Verifies forward `dq_v_dt` is non-zero AND ``< 1e-10`` so the test
+     genuinely exercises the tiny-positive-sink clamp regime (forward
+     measured: dq_v_dt ≈ 1.2e-18, sink_dt ≈ 1.2e-17 < 1e-15 floor).
+   - Asserts the fp32 gradient is finite end-to-end.
+
+2. Applied codex iter-36 findings on
+   `ocean/diagnostics_streamfunction.py`:
+   - `moc_streamfunction:62` — v-face latitudes now derive from
+     `grid.lat_v` / `grid.lat` + `grid.dlat` when available; falls
+     back to the legacy global `linspace(-π/2, π/2)` only when the
+     grid does not expose face metadata.  Same fix for `dlon`.
+   - `barotropic_streamfunction:114` — `dlat = getattr(grid, "dlat",
+     π/n_lat)` so regional grids integrate transport with their
+     actual meridional spacing.
+
+**Tests (post iter-37):** 77 / 77 streamfunction + microphysics tests
+pass.
+
 ### Iteration 36 — 2026-05-12
 
 **Add end-to-end fp32 regression test for Morrison.**

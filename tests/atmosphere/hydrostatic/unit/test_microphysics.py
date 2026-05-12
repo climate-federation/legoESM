@@ -473,14 +473,26 @@ class TestMorrison:
         grad = jax.grad(loss)(q_v)
         assert jnp.all(jnp.isfinite(grad))
 
-    def test_morrison_fp32_grad_finite_at_ice_saturation(self):
-        """Morrison forward+backward must produce finite fp32 gradients
-        on a cold subsat-wrt-liquid column at q_v ≈ q_sat_ice (the
-        regime where the q_v / q_i / q_c donor clamps all see tiny
-        divisors).  Before iter-35 the legacy 1e-30 floors NaN'd fp32
-        VJPs; the consolidated ``donor_clamp_scale`` (1e-15 floor) is
-        what fixes this end-to-end."""
+    def test_morrison_fp32_grad_finite_with_tiny_qv_sink(self):
+        """Morrison forward+backward fp32 gradients on a cold column
+        with a TRULY TINY but positive vapor sink path.
+
+        Inputs are constructed so the q_v clamp sees a nonzero but
+        very small ``qv_sink_dt`` (below the iter-32 1e-15 floor):
+            T = 240 K (cold, ice physics active)
+            N_i = 1e3 /kg (so safe_pow(N_i, 1/3) > 0 → dq_i_dep > 0)
+            q_v ≈ q_sat_ice · (1 + 1e-7)  (S_i tiny positive)
+        Forward measurement: ``dq_i_dt ≈ 1.2e-18`` → ``qv_sink_dt ≈
+        1.2e-17`` which is below 1e-15 (active clamp path).
+
+        Before iter-35 (legacy 1e-30 floor) the fp32 VJP NaN'd.  After
+        the consolidated ``donor_clamp_scale`` (1e-15 floor) the
+        gradient is finite — confirmed end-to-end through the full
+        Morrison routine, not just the helper in isolation."""
         from legoesm.thermo import saturation_mixing_ratio_ice
+        from legoesm.atmosphere.physics.microphysics.output import (
+            HydrometeorState,
+        )
         ncol, nlev = 4, 10
         dt32 = jnp.float32
         T = jnp.full((ncol, nlev), 240.0, dtype=dt32)
@@ -491,8 +503,30 @@ class TestMorrison:
         rho = (p_full / (constants.R_d * T)).astype(dt32)
         dz = jnp.full((ncol, nlev), 500.0, dtype=dt32)
         q_sat_i = saturation_mixing_ratio_ice(T, p_full)
+        # q_v just above q_sat_ice → tiny S_i.
         q_v = (q_sat_i * jnp.float32(1.0 + 1e-7)).astype(dt32)
-        h = make_zero_hydrometeors(ncol, nlev, dtype=dt32)
+        z32 = jnp.zeros((ncol, nlev), dtype=dt32)
+        # N_i > 0 so dq_i_dep ∝ N_i^(1/3) is positive (engages the
+        # tiny-sink clamp path).  q_i = 0 — the q_i_min_growth floor
+        # in dq_i_dep gives a tiny but positive deposition rate.
+        h = HydrometeorState(
+            q_c=z32, q_r=z32, q_i=z32, q_s=z32, q_g=z32,
+            N_c=z32, N_r=z32,
+            N_i=jnp.full((ncol, nlev), 1.0e3, dtype=dt32),
+        )
+
+        # Verify the forward path actually creates a non-zero but
+        # tiny sink — otherwise the test would not exercise the
+        # active clamp branch.
+        out_fwd = morrison_microphysics(
+            T, q_v, h, p_full, p_half, rho, dz, dt=10.0,
+        )
+        assert float(jnp.max(jnp.abs(out_fwd.dq_v_dt))) > 0.0, (
+            "Test setup error: no q_v sink — clamp path not exercised"
+        )
+        assert float(jnp.max(jnp.abs(out_fwd.dq_v_dt))) < 1e-10, (
+            "Test setup error: q_v sink too large — not in tiny regime"
+        )
 
         def loss(q_v_in):
             out = morrison_microphysics(
