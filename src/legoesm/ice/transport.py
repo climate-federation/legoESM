@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+from jax import lax
 
 from legoesm import constants
 from legoesm.core.operators_3d import fv_flux_divergence_3d
@@ -59,6 +60,30 @@ def _ppm_tendency_per_category(
     return fv_flux_divergence_3d(q_cat, u_3d, v_3d, grid, limiter=True)
 
 
+def _ppm_one_substep(
+    vol: jnp.ndarray,
+    conc: jnp.ndarray,
+    enth: jnp.ndarray,
+    u_ice: jnp.ndarray,
+    v_ice: jnp.ndarray,
+    grid: CubedSphereGrid,
+    dt_sub: float,
+    is_multicat: bool,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """One PPM substep of the conservation-form transport."""
+    tendency = _ppm_tendency_per_category if is_multicat else _ppm_tendency_2d
+    vol_new = vol + dt_sub * tendency(vol, u_ice, v_ice, grid)
+    conc_new = conc + dt_sub * tendency(conc, u_ice, v_ice, grid)
+    enth_new = enth + dt_sub * tendency(enth, u_ice, v_ice, grid)
+    # PPM-with-limiter is monotone within its own CFL bound; defensive
+    # clips guard against floating-point round-off only.
+    return (
+        jnp.maximum(vol_new, 0.0),
+        jnp.clip(conc_new, 0.0, 1.0),
+        enth_new,
+    )
+
+
 def advect_ice_tracers(
     h_ice: jnp.ndarray,
     concentration: jnp.ndarray,
@@ -69,16 +94,19 @@ def advect_ice_tracers(
     dt: float,
     T_ice_min: float = 180.0,
     T_freeze_ocean: float = constants.T_freeze_ocean,
+    n_subcycles: int = 1,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Advect ice tracers by the ice velocity field.
 
     Uses conservative monotone PPM (Colella–Woodward with limiter)
     flux-form transport from ``core.operators_fv``.  Volume ``h*a``,
     concentration ``a``, and enthalpy ``T*h*a`` are each advected as
-    independent conserved scalars.  The PPM scheme is monotone — it
-    cannot produce new extrema — so positivity of ``h*a`` and ``a`` is
-    preserved without lossy post-step clipping.  A defensive ``jnp.clip``
-    on concentration only guards against floating-point round-off.
+    independent conserved scalars.  The PPM scheme is monotone *within*
+    its CFL-1 bound — if ``|u·dt/dx| > 1`` the limiter cannot guarantee
+    monotonicity.  ``n_subcycles`` partitions the step into
+    ``n_subcycles`` substeps of length ``dt/n_subcycles`` (executed
+    with ``lax.scan``) so callers in storm conditions can force CFL
+    safety by setting ``SeaIceConfig.transport_subcycles > 1``.
 
     Accepts both single-category 2D inputs ``(6, n, n)`` and
     multi-category 3D inputs ``(6, n, n, n_cat)``.
@@ -94,6 +122,10 @@ def advect_ice_tracers(
         Timestep [s].
     T_ice_min, T_freeze_ocean : float
         Physical temperature bounds [K].
+    n_subcycles : int, default 1
+        Number of PPM substeps inside the step.  Static (treated as a
+        Python int, not a traced value), so changing it triggers a
+        recompile.
 
     Returns
     -------
@@ -101,24 +133,29 @@ def advect_ice_tracers(
         Updated tracer fields with the same shape as the inputs.
     """
     eps = 1e-20
+    n_subcycles = int(max(n_subcycles, 1))
 
     # Conservation-form auxiliary fields.
     vol = h_ice * concentration                  # m of ice per m² of grid
-    enthalpy = T_ice * vol                       # K · m
+    enth = T_ice * vol                           # K · m
+    conc = concentration
 
     is_multicat = h_ice.ndim == 4
-    tendency = _ppm_tendency_per_category if is_multicat else _ppm_tendency_2d
+    dt_sub = dt / n_subcycles
 
-    # dq/dt = -div(q v); integrate explicitly.
-    vol_new = vol + dt * tendency(vol, u_ice, v_ice, grid)
-    conc_new = concentration + dt * tendency(concentration, u_ice, v_ice, grid)
-    enth_new = enthalpy + dt * tendency(enthalpy, u_ice, v_ice, grid)
-
-    # PPM-with-limiter is monotone, so vol_new and conc_new lie in
-    # [min(input), max(input)].  These clips only guard against
-    # floating-point round-off near the bounds.
-    vol_new = jnp.maximum(vol_new, 0.0)
-    conc_new = jnp.clip(conc_new, 0.0, 1.0)
+    if n_subcycles == 1:
+        vol_new, conc_new, enth_new = _ppm_one_substep(
+            vol, conc, enth, u_ice, v_ice, grid, dt_sub, is_multicat,
+        )
+    else:
+        def _body(carry, _):
+            v, c, e = carry
+            return _ppm_one_substep(
+                v, c, e, u_ice, v_ice, grid, dt_sub, is_multicat,
+            ), None
+        (vol_new, conc_new, enth_new), _ = lax.scan(
+            _body, (vol, conc, enth), xs=None, length=n_subcycles,
+        )
 
     # Recover thickness and temperature.
     conc_safe = jnp.maximum(conc_new, eps)

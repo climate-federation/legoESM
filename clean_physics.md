@@ -131,6 +131,21 @@ Branch: `clean_physics`. Driven by Ralph loop with `/codex:adversarial-review`.
 - sea-ice unit suite → 69/69 pass.
 - ocean physics suite → 67/67 pass.
 
+### Iteration 6 — 2026-05-12
+
+**Actions:**
+- [x] Sea-ice transport PPM subcycle — new `n_subcycles` kwarg on `advect_ice_tracers` runs `n_subcycles` PPM substeps with `lax.scan`; new `SeaIceConfig.transport_subcycles` (default 1) wires the choice through.  Default keeps current behaviour; setting > 1 enables CFL safety in storm conditions.
+- [x] #3 Multi-cat lead freezing — new `_thermo_single` kwargs `open_water_fraction` and `enable_lead_freeze` allow the dynamic path to (a) drive lead-freeze concentration growth by the aggregated `(1 - sum_k conc_k)` instead of per-category `(1 - conc_k)` (which sums to > 1), and (b) fire the open-water freeze ONLY in category 0.  Implemented by splitting the `vmap` over the leading category vs the rest.
+
+**Tests (post iter-6):**
+- sea-ice unit suite → 78/79 pass (1 pre-existing Stefan-Boltzmann thermo failure unrelated to this work).
+- atmosphere hydrostatic integration → 17/17 pass.
+
+**Remaining (iter-7+):**
+- Ocean lateral_mixing harmonic/biharmonic CFL caps.
+- GM/Redi bolus Courant limiter.
+- Visual / long-run validation of the new feedbacks.
+
 **Tests (post-fix):**
 - atmosphere microphysics + convection + land multilayer: 172/172 pass.
 - sea ice unit suite: 78 pass, 1 pre-existing thermo failure (`Test8i_StefanBoltzmann::test_lw_up_matches` — confirmed pre-existing in iter-1).

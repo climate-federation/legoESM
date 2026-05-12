@@ -364,6 +364,7 @@ def _step_dynamic(
     if config.transport == "advect" and grid is not None:
         h, conc, T_ice = advect_ice_tracers(
             h, conc, T_ice, u_ice, v_ice, grid, dt,
+            n_subcycles=config.transport_subcycles,
         )
 
     # Snapshot of aggregated ice thickness AFTER transport but BEFORE
@@ -391,6 +392,14 @@ def _step_dynamic(
         h_old = h
         conc_old = conc
 
+        # Open-water fraction at the aggregate level — the total lead
+        # area available for refreezing this step.  Per-category
+        # ``(1 - conc_k)`` sums to ``n_cat - sum_k conc_k`` and badly
+        # over-counts when more than one category is occupied.  We pass
+        # this aggregated value into ``_thermo_single`` so the lead
+        # freeze is driven by the true lead area.  Codex iter-3 #3.
+        open_water_agg = jnp.clip(1.0 - jnp.sum(conc_old, axis=-1), 0.0, 1.0)
+
         # Compute bulk fluxes per category with the configured scheme
         # BEFORE thermodynamics, so the dynamic multi-category path uses
         # the same bulk-flux closure that the slab path and diagnostic
@@ -398,7 +407,11 @@ def _step_dynamic(
         # called without ``shflx``/``lhflx``, silently falling back to
         # ``simple_bulk_fluxes`` regardless of ``config.bulk_scheme`` —
         # state and diagnostics could disagree.  (Codex finding #7.)
-        def _thermo_cat(h_k, T_k, conc_k):
+        # ``enable_lead_freeze`` is per-category: True only for cat 0
+        # so the open-water → new-ice deposit happens once, into the
+        # thinnest bin.  Cats 1+ still do their own basal / surface
+        # melt-growth from F_cond / F_ocean / sublim.
+        def _thermo_cat(h_k, T_k, conc_k, enable_lead_freeze_k):
             _, _, shflx_k, lhflx_k = _bulk_flux_dispatch(
                 T_k, forcing, config, U_min,
             )
@@ -406,11 +419,48 @@ def _step_dynamic(
                 h_k, T_k, conc_k,
                 forcing, ocean_sst, config, U_min, dt,
                 shflx=shflx_k, lhflx=lhflx_k,
+                open_water_fraction=open_water_agg,
+                enable_lead_freeze=bool(enable_lead_freeze_k),
             )
 
-        h, T_ice, conc = jax.vmap(
-            _thermo_cat, in_axes=-1, out_axes=-1,
-        )(h, T_ice, conc)
+        # cat-0 deposits the lead freeze; cats 1+ skip it.  Implemented
+        # by building separate forward calls (cat 0 vs the others) so
+        # the static bool can flow through ``_thermo_single``.
+        def _thermo_cat_with_lead(args):
+            h_k, T_k, c_k = args
+            return _thermo_cat(h_k, T_k, c_k, True)
+
+        def _thermo_cat_no_lead(args):
+            h_k, T_k, c_k = args
+            return _thermo_cat(h_k, T_k, c_k, False)
+
+        # Split: process cat 0 with lead-freeze, then vmap cats 1+
+        # without.  ``jax.lax.map``-style splits keep the static bool
+        # as a Python-level constant inside each branch.
+        h_0, T_0, c_0 = _thermo_cat_with_lead(
+            (h[..., 0], T_ice[..., 0], conc[..., 0]),
+        )
+        if n_cat > 1:
+            h_rest, T_rest, c_rest = jax.vmap(
+                _thermo_cat_no_lead, in_axes=0, out_axes=0,
+            )((
+                jnp.moveaxis(h[..., 1:], -1, 0),
+                jnp.moveaxis(T_ice[..., 1:], -1, 0),
+                jnp.moveaxis(conc[..., 1:], -1, 0),
+            ))
+            h = jnp.concatenate(
+                [h_0[..., None], jnp.moveaxis(h_rest, 0, -1)], axis=-1,
+            )
+            T_ice = jnp.concatenate(
+                [T_0[..., None], jnp.moveaxis(T_rest, 0, -1)], axis=-1,
+            )
+            conc = jnp.concatenate(
+                [c_0[..., None], jnp.moveaxis(c_rest, 0, -1)], axis=-1,
+            )
+        else:
+            h = h_0[..., None]
+            T_ice = T_0[..., None]
+            conc = c_0[..., None]
 
         # Open-water ice growth should only be deposited into category 0
         # (thinnest). Zero out new-ice growth in empty higher categories
@@ -477,6 +527,8 @@ def _thermo_single(
     dt: float,
     shflx: jnp.ndarray | None = None,
     lhflx: jnp.ndarray | None = None,
+    open_water_fraction: jnp.ndarray | None = None,
+    enable_lead_freeze: bool = True,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Thermodynamic update for a single thickness class.
 
@@ -487,6 +539,18 @@ def _thermo_single(
         (the default), ``simple_bulk_fluxes`` is called internally.
         Pass pre-computed values when the caller uses a different
         bulk-flux scheme (e.g. MOST).
+    open_water_fraction : jnp.ndarray or None
+        Aggregated ``(1 - sum_k conc_k)`` from the multi-category
+        dispatch.  When supplied, replaces the per-category
+        ``(1 - conc)`` in the concentration-growth term so the lead
+        freeze is driven by *total* lead area rather than per-category
+        lead area (which sums to > 1 across categories).  Default None
+        preserves the slab/single-category behaviour.
+    enable_lead_freeze : bool
+        When False, suppress the open-water freezing (volume and
+        concentration) contribution.  Multi-category callers set this
+        True for category 0 only so the lead freeze isn't double-
+        counted across categories.  Codex iter-3 finding #3.
     """
     ice_mask = h > 0.0
     h_eff = jnp.maximum(h, config.h_ice_min)
@@ -568,7 +632,11 @@ def _thermo_single(
     dh_dt_ice = dh_dt_basal + dh_dt_surface_melt + dh_dt_sublim
 
     freeze_flux_open = jnp.maximum(-Q_sfc, 0.0)
-    dh_dt_open = freeze_flux_open / (config.rho_ice * config.L_f)
+    dh_dt_open_raw = freeze_flux_open / (config.rho_ice * config.L_f)
+    # Multi-category: only deposit lead-freeze in category 0.  Cats
+    # with ``enable_lead_freeze=False`` see ``dh_dt_open = 0`` so the
+    # same open-water freeze does not fire per-category.
+    dh_dt_open = dh_dt_open_raw if enable_lead_freeze else jnp.zeros_like(dh_dt_open_raw)
     dh_dt = jnp.where(ice_mask, dh_dt_ice, dh_dt_open)
     h_new = jnp.maximum(h + dt * dh_dt, 0.0)
 
@@ -591,7 +659,14 @@ def _thermo_single(
     # Melt: concentration decreases as floes shrink in area while their
     # thickness stays roughly constant — ``dh_dt · A / h_eff`` (sign
     # carries through, dh_dt < 0 in melt).
-    dconc_growth = dh_dt_open * (1.0 - conc) / config.h_new_ice
+    # ``lead_area`` is the lead area available for refreezing.  In
+    # single-category mode this is ``(1 - conc)`` of the local cell;
+    # in multi-category mode the caller supplies the aggregated
+    # ``(1 - sum_k conc_k)`` to avoid summing more than 1 across cats.
+    lead_area = (
+        (1.0 - conc) if open_water_fraction is None else open_water_fraction
+    )
+    dconc_growth = dh_dt_open * lead_area / config.h_new_ice
     dconc_melt = jnp.minimum(dh_dt, 0.0) * conc / h_eff
     conc_new = jnp.clip(conc + dt * (dconc_growth + dconc_melt), 0.0, 1.0)
 
