@@ -113,6 +113,7 @@ _GUARD_MODULES = (
     "test_divergence_corner_duogrid_iter495",        # iter-495 add
     "test_interp_center_to_corner_duogrid_iter496",  # iter-496 add
     "test_center_to_dgrid_vector_duogrid_iter497",   # iter-497 add
+    "test_pad_halo_vector_4d_monotone_clip_iter498", # iter-498 add
 )
 
 

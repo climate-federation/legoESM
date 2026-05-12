@@ -1015,6 +1015,18 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 498: extend iter-490 ``monotone_clip`` to
+  ``pad_halo_vector_4d`` — also propagates to the two
+  internal ``pad_halo_4d`` calls (east + north components).
+  Random Gaussian vector field:
+    interior_max:        5.3133
+    halo_max no clip:   10.9629  (+106% over interior!)
+    halo_max clip on:    4.8723  (within interior)
+    Overshoot reduction: 55.6%
+  Vector halo overshoot is even larger than scalar (76% per
+  iter-491).  Clip works for both.  Default False preserves
+  backward compat.  2/2 in 6 s.  Wired into iter-383 sweep
+  (now 90).
 - Iter 497: ``center_to_dgrid_vector`` (iter-328 vector-aware
   variant) amplifies edges 3× LESS than scalar interp:
     iter-496 scalar interp: edge × 1.122 (12%)

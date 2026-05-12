@@ -1022,6 +1022,7 @@ def pad_halo_vector_4d(
     interp_offsets: jax.Array | None = None,
     halo: int = 1,
     duogrid=None,
+    monotone_clip: bool = False,
 ) -> tuple[jax.Array, jax.Array]:
     """4D vector halo exchange (rotation + pad for all levels at once).
 
@@ -1086,8 +1087,14 @@ def pad_halo_vector_4d(
             # Pays 2 MPI messages instead of 1 packed exchange, but
             # exercises `pad_halo_4d`'s validated duogrid post-
             # processing so the kinked→extended remap actually runs.
-            u_east_padded = pad_halo_4d(u_east, halo=halo, duogrid=duogrid)
-            v_north_padded = pad_halo_4d(v_north, halo=halo, duogrid=duogrid)
+            u_east_padded = pad_halo_4d(
+                u_east, halo=halo, duogrid=duogrid,
+                monotone_clip=monotone_clip,
+            )
+            v_north_padded = pad_halo_4d(
+                v_north, halo=halo, duogrid=duogrid,
+                monotone_clip=monotone_clip,
+            )
         else:
             from legoesm.parallel.halo_exchange import pad_halo_mpi_4d
             packed = jnp.concatenate([u_east, v_north], axis=-1)  # (6, n, n, 2*nlev)
@@ -1096,10 +1103,14 @@ def pad_halo_vector_4d(
             u_east_padded = packed_padded[..., :nlev]
             v_north_padded = packed_padded[..., nlev:]
     else:
-        u_east_padded = pad_halo_4d(u_east, halo=halo, interp_offsets=interp_offsets,
-                                     duogrid=duogrid)
-        v_north_padded = pad_halo_4d(v_north, halo=halo, interp_offsets=interp_offsets,
-                                      duogrid=duogrid)
+        u_east_padded = pad_halo_4d(
+            u_east, halo=halo, interp_offsets=interp_offsets,
+            duogrid=duogrid, monotone_clip=monotone_clip,
+        )
+        v_north_padded = pad_halo_4d(
+            v_north, halo=halo, interp_offsets=interp_offsets,
+            duogrid=duogrid, monotone_clip=monotone_clip,
+        )
     # Step 3: convert back using padded angles
     cap = cos_angle_padded[..., None]
     sap = sin_angle_padded[..., None]
