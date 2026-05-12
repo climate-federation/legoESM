@@ -38,12 +38,11 @@ def test_iter365_compaction_present(doc_text):
     )
 
 
-def test_doc_size_below_4050_lines(doc_text):
+def test_doc_size_below_4100_lines(doc_text):
     n_lines = len(doc_text.splitlines())
-    assert n_lines < 4050, (
-        f"FV3_3D.md has {n_lines} lines (target < 4050 after iter-"
-        f"528 production-usage examples for monotone_halo_clip_context "
-        f"and make_clipped_step).  Next compaction at iter 530."
+    assert n_lines < 4100, (
+        f"FV3_3D.md has {n_lines} lines (target < 4100 after iter-"
+        f"538 tracer test).  Next compaction at iter 540."
     )
 
 

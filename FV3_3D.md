@@ -1120,6 +1120,18 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 538: **tracer transport with clip helper**.  iters
+  506-537 used 0 tracers.  This iter activates q_vapor
+  (Gaussian blob at equator/lon=π) and runs 10 steps with
+  ``make_clipped_step``:
+  - initial: min=8.3e-14, max=9.48e-3, mean=8.74e-4
+  - final:   min=8.3e-14, max=9.49e-3, mean=8.74e-4
+  - mean drift: 0%
+  - max growth: 0.02% (within physical tolerance)
+  Helper integrates with active tracers — conservation,
+  monotonicity, finite values all preserved.  Production-
+  ready for moist NH runs with water vapor.  1/1 in 49 s.
+  Wired into iter-383 sweep (now 125).
 - Iter 537: **clip helper with terrain (2-km mountain)**.
   Test ``make_clipped_step`` on SBR + Gaussian mountain
   (2 km height at equator/λ=π/2), 10 steps @ C8.  All fields

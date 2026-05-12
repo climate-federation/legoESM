@@ -148,6 +148,7 @@ _GUARD_MODULES = (
     "test_example_script_imports_iter535",           # iter-535 add
     "test_slack_at_c16_sbr_iter536",                 # iter-536 add
     "test_terrain_clip_iter537",                     # iter-537 add
+    "test_tracer_clip_iter538",                      # iter-538 add
 )
 
 
