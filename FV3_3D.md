@@ -1081,6 +1081,20 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 527: **PE-side patch targets** for symmetry.  Audit
+  found PE dycore imports 4 distinct halo aliases (lines
+  57, 83, 84, 85 in primitive_eq_cdgrid.py) not covered by
+  iter-505-526 (which targeted NH + operator modules):
+  - ``_pad_halo_4d`` (4D scalar)
+  - ``_pad_halo_4d_module`` (4D scalar)
+  - ``pad_halo_vector`` (3D vector)
+  - ``pad_halo_vector_4d`` (4D vector)
+  Added 3 new patch targets (one is duplicate of vector_4d
+  in operators_cdgrid).  Context now patches **15 sites**.
+  Verified: PE mass conservation holds with expanded context
+  (iter-524 test still passes).  Aliases properly toggled on
+  enter / restored on exit.  2/2 in 52 s.  Wired into
+  iter-383 sweep (now 116).
 - Iter 526: **``make_clipped_step()`` helper** — JIT-safe
   user-facing API.  Solves iter-525 limitation that
   ``jax.jit(model.step)`` outside context misses clip patches.
