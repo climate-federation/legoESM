@@ -176,10 +176,7 @@ def thompson_microphysics(
         dq_c_au + dq_c_ac + bergeron + riming_i + riming_s + cond_evap_sink
     )
     qc_avail = jnp.clip(q_c, 0.0)
-    qc_scale = jnp.minimum(
-        1.0,
-        qc_avail / jnp.maximum(qc_sink_total * dt_safe, 1e-30),
-    )
+    qc_scale = donor_clamp_scale(qc_avail, qc_sink_total, dt)
     dq_c_au = dq_c_au * qc_scale
     dq_c_ac = dq_c_ac * qc_scale
     bergeron = bergeron * qc_scale
@@ -222,10 +219,7 @@ def thompson_microphysics(
     # step with combined sinks > q_i / dt drives q_i negative.
     qi_sink_total = aggregation + melt_ice + rime_to_graupel_from_i
     qi_avail = jnp.clip(q_i, 0.0)
-    qi_scale = jnp.minimum(
-        1.0,
-        qi_avail / jnp.maximum(qi_sink_total * dt_safe, 1e-30),
-    )
+    qi_scale = donor_clamp_scale(qi_avail, qi_sink_total, dt)
     aggregation = aggregation * qi_scale
     melt_ice = melt_ice * qi_scale
     rime_to_graupel_from_i = rime_to_graupel_from_i * qi_scale
@@ -234,10 +228,7 @@ def thompson_microphysics(
     # q_s sinks: melt_snow, rime_to_graupel_from_s.
     qs_sink_total = melt_snow + rime_to_graupel_from_s
     qs_avail = jnp.clip(q_s, 0.0)
-    qs_scale = jnp.minimum(
-        1.0,
-        qs_avail / jnp.maximum(qs_sink_total * dt_safe, 1e-30),
-    )
+    qs_scale = donor_clamp_scale(qs_avail, qs_sink_total, dt)
     melt_snow = melt_snow * qs_scale
     rime_to_graupel_from_s = rime_to_graupel_from_s * qs_scale
     rime_to_graupel = rime_to_graupel_from_i + rime_to_graupel_from_s

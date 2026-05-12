@@ -33,6 +33,7 @@ from legoesm.atmosphere.physics.microphysics._warm_rain import (
     self_collection_breakup,
     rain_evaporation,
     safe_pow,
+    donor_clamp_scale,
 )
 
 
@@ -101,10 +102,7 @@ def seifert_beheng_microphysics(
     cond_evap_sink = jnp.maximum(-condensation, 0.0)
     qc_sink_total = cond_evap_sink + dq_c_au + dq_c_ac
     qc_avail = jnp.clip(q_c, 0.0)
-    qc_scale = jnp.minimum(
-        1.0,
-        qc_avail / jnp.maximum(qc_sink_total * jnp.maximum(dt, 1e-10), 1e-30),
-    )
+    qc_scale = donor_clamp_scale(qc_avail, qc_sink_total, dt)
     dq_c_au = dq_c_au * qc_scale
     dq_c_ac = dq_c_ac * qc_scale
     condensation = jnp.where(

@@ -156,6 +156,26 @@ Compression iteration.  Folded iter-20 through iter-29 into the
 "Iterations 1-29 — Summary" section.  Detailed per-iteration narratives
 remain in the commit messages on `clean_physics`.
 
+### Iteration 35 — 2026-05-12
+
+**Consolidate all microphysics donor clamps onto
+`donor_clamp_scale`.**
+
+Iter-34 extracted `donor_clamp_scale` and switched only the q_v
+clamps to it.  The other donor clamps (Kessler q_c; Morrison q_c, q_i,
+q_s; Thompson q_c, q_i, q_s; SB q_c) still used the legacy
+`1e-30`-floored pattern that is fp32-overflow-prone in the same way
+the iter-32 finding flagged for q_v.  Migrated all of them to
+`donor_clamp_scale` so the AD-safe floor (1e-15) is applied
+uniformly.
+
+Net result: 8 donor clamps across 4 schemes (Kessler, Morrison,
+Thompson, Seifert-Beheng) now route through one helper.  The 1e-30
+literal floor is removed everywhere.  The kessler double-where
+``sink_active`` guard is gone (subsumed by the helper).
+
+**Tests (post iter-35):** 63 / 63 microphysics tests pass.
+
 ### Iteration 34 — 2026-05-12
 
 **Fix iter-33 codex stop-time finding: test does not exercise

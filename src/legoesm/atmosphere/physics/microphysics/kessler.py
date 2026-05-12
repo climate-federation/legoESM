@@ -23,6 +23,7 @@ from legoesm.thermo import saturation_mixing_ratio
 from legoesm.atmosphere.physics.microphysics._warm_rain import (
     rain_evaporation,
     safe_pow,
+    donor_clamp_scale,
 )
 from legoesm.atmosphere.physics.microphysics.config import KesslerConfig
 from legoesm.atmosphere.physics.microphysics.output import (
@@ -129,20 +130,12 @@ def kessler_microphysics(
     cond_evap_sink = jnp.maximum(-condensation, 0.0)
     qc_sink_total = cond_evap_sink + autoconv + accretion
     qc_avail = jnp.clip(q_c, 0.0)
-    # Double-where pattern: under fp32 ``1e-30`` underflows in the VJP
-    # (``1e-30**2 < fp32.tiny``) so the reverse-mode pass evaluates
-    # ``0/0`` even though the forward path is well-defined.  Short-
-    # circuit to ``1.0`` when there is no q_c sink so the AD graph
-    # never sees the underflow.  See ``safe_pow`` for the same
-    # pattern around fractional powers of zero hydrometeors.
-    qc_sink_dt = qc_sink_total * jnp.maximum(dt, 1e-10)
-    sink_active = qc_sink_dt > 0.0
-    safe_sink_dt = jnp.where(sink_active, qc_sink_dt, 1.0)
-    qc_scale = jnp.where(
-        sink_active,
-        jnp.minimum(1.0, qc_avail / safe_sink_dt),
-        1.0,
-    )
+    # Shared AD-safe donor clamp helper.  Replaces the previous
+    # boolean ``sink_active`` double-where with an explicit
+    # ``divisor_floor=1e-15`` that bounds the worst-case VJP under
+    # fp32 to ``-q / 1e-30 ≈ -1e30`` (safely within fp32 dynamic
+    # range).
+    qc_scale = donor_clamp_scale(qc_avail, qc_sink_total, dt)
     autoconv = autoconv * qc_scale
     accretion = accretion * qc_scale
     # Scale the evaporation branch only; positive condensation
