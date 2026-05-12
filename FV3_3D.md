@@ -1195,6 +1195,32 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 747: **``potential_energy_column_fv3``** — column PE diagnostic.
+
+      PE_col = Σ_k delp · 0.5·(phi[k]+phi[k+1]) / g
+
+  Layer-mean geopotential weighted by mass.  Standard component
+  of FV3 total-energy budget (iter-693 nh_total_energy uses
+  ``phi_avg = 0.5·(phiz[k]+phiz[k+1])`` in this form).
+
+  Pairs with iter-738 ``geopotential_from_T_peln_fv3`` (hydrostatic
+  Φ from T) and iter-727 ``compute_zh_from_delz_fv3`` (alternative
+  height pathway).  Composes iter-742 column_integral.
+
+  Completes the column-energy-component quartet:
+    * iter-744 internal_energy_column (cv·T)
+    * iter-745 kinetic_energy_column (KE)
+    * iter-746 latent_energy_column (L_v·q)
+    * iter-747 potential_energy_column (phi)
+
+  Tests (5/5 in <1 s):
+  1. phi=0 → PE=0.
+  2. Uniform phi=Φ → PE = Φ·p_s/g exact.
+  3. Composes with iter-738 hydrostatic Φ → 1e6 < PE < 1e10 J/m².
+  4. 3-D shapes.
+  5. No NaN/Inf.
+
+  Wired into iter-383 sweep (now 311).
 - Iter 746: **``latent_energy_column_fv3``** — column LE diagnostic.
 
       LE_col = L_v · Σ_k delp · q_sphum / g

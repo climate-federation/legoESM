@@ -334,6 +334,7 @@ _GUARD_MODULES = (
     "test_fv3_internal_energy_column_iter744",       # iter-744 add
     "test_fv3_kinetic_energy_column_iter745",        # iter-745 add
     "test_fv3_latent_energy_column_iter746",         # iter-746 add
+    "test_fv3_potential_energy_column_iter747",      # iter-747 add
 )
 
 

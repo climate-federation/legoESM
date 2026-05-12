@@ -2987,6 +2987,41 @@ def theta_dry_fv3(
     return pt * (p_ref / p) ** kap
 
 
+def potential_energy_column_fv3(
+    phi_interfaces: jax.Array,
+    delp: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 747: column-integrated geopotential energy.
+
+        PE_col = Σ_k delp[k] · 0.5·(phi[k] + phi[k+1]) / g
+
+    Layer-mean geopotential weighted by mass.  Standard component
+    of FV3 total-energy budget (iter-693 nh_total_energy uses
+    ``phi_avg = 0.5·(phiz[k]+phiz[k+1])`` in this form).
+
+    Composes iter-742 column_integral_delp_fv3.  Use with iter-738
+    ``geopotential_from_T_peln_fv3`` or iter-727
+    ``compute_zh_from_delz_fv3`` (multiplied by g) to produce
+    interface geopotentials.
+
+    Companion to iter-744 IE, iter-745 KE, iter-746 LE.
+
+    Parameters
+    ----------
+    phi_interfaces : jax.Array, shape (..., km+1)
+        Geopotential at interfaces (m²/s²).
+    delp : jax.Array, shape (..., km)
+        Pressure thickness (Pa).
+
+    Returns
+    -------
+    pe : jax.Array, shape (...,)
+        Column potential energy (J/m²).
+    """
+    phi_avg = 0.5 * (phi_interfaces[..., :-1] + phi_interfaces[..., 1:])
+    return column_integral_delp_fv3(phi_avg, delp)
+
+
 def latent_energy_column_fv3(
     q_sphum: jax.Array,
     delp: jax.Array,
