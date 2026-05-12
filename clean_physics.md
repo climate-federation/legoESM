@@ -129,6 +129,20 @@ the resulting overshoot in θ/q.  Cap is ``M ≤ 0.5·ρ·dz/dt``
 **Tests (post iter-11):**
 - 95 atmosphere turbulence tests pass (all schemes including EDMF).
 
+### Iteration 18 — 2026-05-12
+
+**Targeted post-change test sweep** (the full unit sweep started in
+iter-15 was killed at 15:28 min etime after reaching 23 % progress —
+the slow MPAS/spectral tests dominate the wallclock; targeted runs on
+the areas touched by iters 14-17 cover the change risk):
+
+- atmosphere convection + microphysics + physics_convection + ocean
+  vertical-mixing: 169 / 169 pass.
+- ocean implicit_vertical_solver + implicit_vertical_mixing +
+  mpas_physics + physics_ocean: 48 / 48 pass.
+
+No regressions from iter-14 through iter-17 changes.
+
 ### Iteration 17 — 2026-05-12
 
 **Action: thread `dt` into all explicit ocean vertical-mixing schemes**
