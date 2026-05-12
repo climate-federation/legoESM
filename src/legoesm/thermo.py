@@ -111,6 +111,56 @@ def saturation_mixing_ratio_ice(
     return 1.0 - jax.nn.softplus(20.0 * (1.0 - q_sat_i)) / 20.0
 
 
+def saturation_mixing_ratio_blend(
+    T: jax.Array,
+    p: jax.Array,
+    T_blend_top: float | None = None,
+    T_blend_width: float = 20.0,
+) -> jax.Array:
+    """FV3_3D iter 720: saturation mixing ratio with liquid/ice blend.
+
+    Reusable helper matching FV3's ``compute_qs(..., es_over_liq_and_ice=
+    .true.)`` behaviour:
+
+        w_liq  = clip((T − (T_top − width)) / width, 0, 1)
+        q_sat  = w_liq · q_sat_liq + (1 − w_liq) · q_sat_ice
+
+    Defaults:
+        T_blend_top = ``constants.T_freeze``     (273.15 K)
+        T_blend_width = 20.0 K
+
+    Generalizes the inline blend in ``rh_calc_fv3 do_cmip=True``
+    (iter-715) for reuse by other diagnostics.
+
+    Parameters
+    ----------
+    T : jax.Array
+        Temperature (K).
+    p : jax.Array
+        Pressure (Pa).
+    T_blend_top : float, optional
+        Upper temperature above which q_sat = q_sat_liq exactly.
+        Default ``constants.T_freeze``.
+    T_blend_width : float, default 20.0 K.
+        Linear-blend width.
+
+    Returns
+    -------
+    q_sat : jax.Array
+        Blended saturation mixing ratio (kg/kg).
+    """
+    if T_blend_top is None:
+        T_blend_top = constants.T_freeze
+    T_blend_bot = T_blend_top - T_blend_width
+    qs_liq = saturation_mixing_ratio(T, p)
+    qs_ice = saturation_mixing_ratio_ice(T, p)
+    w_liq = jnp.clip(
+        (T - T_blend_bot) / (T_blend_top - T_blend_bot),
+        0.0, 1.0,
+    )
+    return w_liq * qs_liq + (1.0 - w_liq) * qs_ice
+
+
 def saturation_mixing_ratio_dT(
     T: jax.Array,
     p: jax.Array,

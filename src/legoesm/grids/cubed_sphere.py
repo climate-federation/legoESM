@@ -2929,16 +2929,8 @@ def rh_calc_fv3(
     """
     from legoesm import thermo
     if do_cmip:
-        qs_liq = thermo.saturation_mixing_ratio(t, p_full)
-        qs_ice = thermo.saturation_mixing_ratio_ice(t, p_full)
-        # Linear blend: 1.0 at T_freeze, 0.0 at T_freeze - 20 K
-        T_blend_top = constants.T_freeze
-        T_blend_bot = constants.T_freeze - 20.0
-        w_liq = jnp.clip(
-            (t - T_blend_bot) / (T_blend_top - T_blend_bot),
-            0.0, 1.0,
-        )
-        qs = w_liq * qs_liq + (1.0 - w_liq) * qs_ice
+        # iter-720: refactored to reuse thermo.saturation_mixing_ratio_blend
+        qs = thermo.saturation_mixing_ratio_blend(t, p_full)
     else:
         qs = thermo.saturation_mixing_ratio(t, p_full)
     return 100.0 * qv / qs

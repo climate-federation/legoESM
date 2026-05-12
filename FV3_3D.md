@@ -1195,257 +1195,76 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
-- Iter 719: **iter-689 ``bunkers_vector_fv3`` left-mover variant**.
+- Iter 720: **``saturation_mixing_ratio_blend`` helper in thermo.py**.
 
-  iter-689 returned Bunkers right-mover storm motion.  iter-719 adds
-  ``right_mover=False`` flag for the left-mover variant:
+  Extracted reusable liquid/ice saturation blend from iter-715
+  ``rh_calc_fv3 do_cmip``:
 
-      Right-mover (FV3 default): uc = umn + 7.5·vshr/|shr|, vc = vmn − 7.5·ushr/|shr|
-      Left-mover  (iter-719):    uc = umn − 7.5·vshr/|shr|, vc = vmn + 7.5·ushr/|shr|
+      w_liq  = clip((T − (T_top − width))/width, 0, 1)
+      q_sat  = w_liq·q_sat_liq + (1 − w_liq)·q_sat_ice
 
-  Left-mover storms occur ~5-15 % of supercell observations; the
-  pair (right, left) brackets the empirical storm-motion space.
+  Defaults: ``T_blend_top = constants.T_freeze``, width = 20 K.
 
-  Default ``right_mover=True`` preserves iter-689 backward-compat.
+  Public helper in ``legoesm.thermo`` for any diagnostic that
+  needs CMIP-convention sat ratio (was previously inline).  Pairs
+  with existing ``saturation_mixing_ratio`` (liquid) and
+  ``saturation_mixing_ratio_ice``.
 
-  Tests (5/5 in <3 s):
-  1. Default flag matches iter-689 (backward-compat pin).
-  2. Zero shear → left/right both = mean wind.
-  3. Linear westerly shear → left-mover gives uc=15, vc=+7.5
-     (sign-flipped from iter-689 right-mover).
-  4. (uc_right + uc_left)/2 = umn exactly (offset cancels).
-  5. No NaN/Inf on 3-D random.
-
-  iter-689 6/6 tests still pass.
-
-  Wired into iter-383 sweep (now 283).
-- Iter 718: **FV3 ``get_vorticity_fv3``** — diagnostic relative vorticity.
-  Faithful JAX port of FV3 ``get_vorticity``
-  (tools/fv_diagnostics.F90:3877-3908).  Circulation-form vorticity
-  via Stokes' theorem around the cell:
-
-      utmp = u · dx
-      vtmp = v · dy
-      vort[i,j] = rarea · (utmp[i,j] − utmp[i,j+1]
-                           − vtmp[i,j] + vtmp[i+1,j])
-
-  Diagnostic equivalent of legoesm's dycore ``dgrid_vorticity``
-  operator (in operators_cdgrid.py); exposed standalone to match
-  FV3's tools/fv_diagnostics API.
-
-  Handles 2-D ((n, n+1)) and 3-D ((n, n+1, km)) inputs with the
-  same metric arrays.
-
-  Tests (5/5 in <2 s):
-  1. Zero wind → vort = 0.
-  2. Uniform wind on uniform grid → vort = 0 (no curl).
-  3. Solid-body rotation → vort = 2ω exactly.
-  4. 3-D shape: (n, n+1, km) → (n, n, km).
-  5. No NaN/Inf on random.
-
-  Wired into iter-383 sweep (now 282).
-- Iter 717: **iter-710 ``cs3_interpolator_fv3`` ECMWF T extrap upgrade**.
-
-  iter-710 used simple edge-value clamp for below-surface
-  temperature.  iter-717 adds the FV3-faithful Trenberth 1993 ECMWF
-  extrapolation when ``wz_surface`` is provided:
-
-      alpha = 0.0065 · R_d / g
-      pbot  = (exp(pe[km]) − exp(pe[km-1])) / (pe[km] − pe[km-1])
-      ts    = q2[km-1] + alpha·q2[km-1]·(exp(pe[km])/pbot − 1)
-      t0    = ts + 0.0065·wz_surface
-      tmp   = min(t0, 298 K)
-      Wz blend (wz in [2000, 2500] m):
-          tmp = 0.002·((2500 − wz)·t0 + (wz − 2000)·tmp)
-          alpha = R_d·(tmp − ts)/(wz·g) if tmp > ts else 0
-      qout(p) = ts · exp(alpha · (p − pe[km]))
-
-  Default ``wz_surface=None`` preserves iter-710 edge-clamp
-  behaviour.
+  iter-715 ``rh_calc_fv3`` refactored to delegate to this helper;
+  output bit-identical to before (pinned by regression test).
 
   Tests (6/6 in <2 s):
-  1. iv=1 without wz_surface → edge-clamp (iter-710 backward-compat).
-  2. iv=1 with wz_surface → T increases below surface (lapse rate).
-  3. Sea-level alpha = 0.0065·R_d/g gives plausible lapse.
-  4. wz=2250 m + ts=295 K triggers 298-K cap + blended alpha.
-  5. 3-D + 2-D wz_surface input → 3-D output.
-  6. No NaN/Inf in ECMWF path.
+  1. T > T_freeze → blend = liquid sat.
+  2. T < T_freeze − 20 → blend = ice sat.
+  3. T = T_freeze − 10 → blend = 0.5·liq + 0.5·ice.
+  4. Custom (T_top, width) parameterize correctly.
+  5. iter-715 rh_calc do_cmip output unchanged after refactor.
+  6. No NaN/Inf on random 2-D.
 
-  iter-710 6/6 tests still pass.
+  iter-695 5/5 + iter-715 6/6 tests still pass.
 
-  Wired into iter-383 sweep (now 281).
-- Iter 716: **FV3 ``eqv_pot_bolton_fv3``** — Bolton 1980 θ_e variant.
-  Faithful JAX port of FV3 Xi.Chen + SJL Bolton-form ``eqv_pot``
-  (tools/fv_diagnostics.F90:5421-5497).  Alternative to iter-692
-  simplified SJL form — uses Bolton 1980's T_LCL formula for
-  greater accuracy:
+  Wired into iter-383 sweep (now 284).
+- **Iters 711-719 (compacted iter 720)**: PPM-edges suite, moist
+  thermodynamics, FV3-faithful diagnostic upgrades.
 
-      cappa = R_d/(R_d + ((1-q)·cv_air + q·cv_vap)/(1+zvir·q))
-      r     = q/(1-q)·1000                       (dry mixing ratio, g/kg)
-      e     = p_mb·r/(622+r)                     (vapor pressure, mb)
-      T_LCL = 2840/(3.5·ln(T) - ln(e) - 4.805) + 55   (Bolton 1980 eq. 21)
-      capa  = cappa·(1 - r·0.28e-3)
-      θ_e   = T·(1000/p_mb)^capa
-              ·exp((3.376/T_LCL - 0.00254)·r·(1 + r·0.81e-3))
+  | Iter | What                                                | FV3 ref / Note                                            |
+  |------|-----------------------------------------------------|-----------------------------------------------------------|
+  | 711  | ``ppme_fv3``                                         | fv_diagnostics:5196 — PPM edge values, non-uniform delp   |
+  | 712  | iter-691 ``pv_entropy_fv3`` PPME edge upgrade        | use_ppme=True switches to iter-711 (FV3-faithful)         |
+  | 713  | ``moist_cv_fv3`` + nh_total_energy ``use_moist_cv``  | fv_mapz:3579 — moisture-weighted isochoric cv             |
+  | 714  | ``moist_cp_fv3``                                     | fv_mapz:3656 — isobaric companion to iter-713              |
+  | 715  | iter-695 ``rh_calc_fv3`` do_cmip upgrade             | es-over-liq-and-ice blend (T_freeze ± 10 K)               |
+  | 716  | ``eqv_pot_bolton_fv3``                               | fv_diagnostics:5421 — Bolton 1980 T_LCL form              |
+  | 717  | iter-710 ``cs3_interpolator_fv3`` ECMWF below-T     | Trenberth 1993 below-surface T extrapolation              |
+  | 718  | ``get_vorticity_fv3``                                | fv_diagnostics:3877 — circulation curl diagnostic         |
+  | 719  | iter-689 ``bunkers_vector_fv3`` left-mover           | right_mover=False sign-flip variant                       |
 
-  Both hydrostatic + non-hydrostatic.  Reuses legoesm constants
-  (R_d, R_v, c_pd, c_pv, kappa, g).
+  **PPM vertical-interp suite** complete:
+    * ``ppme`` (711) explicit 4th-order edges (non-uniform delp)
+    * ``cs_prof`` (708) tridiag PPM edges
+    * ``cs_interpolator`` (709) height-level interp
+    * ``cs3_interpolator`` (710, 717) log-p multi-level interp +
+      ECMWF below-surface T extrap
 
-  Tests (8/8 in <2 s):
-  1. Dry isothermal at p=1000 mb → θ_e = T exactly.
-  2. Dry Poisson form at p=500 mb → analytical θ_e.
-  3. Moist θ_e > dry θ_e at q=15 g/kg, T=290 K.
-  4. Hydrostatic branch via monotone peln.
-  5. 3-D input → 3-D output.
-  6. No NaN/Inf on random.
-  7. Missing peln (hydrostatic) / delz raises.
-  8. Bolton θ_e ≠ iter-692 SJL θ_e at moist tropical conditions
-     (Bolton uses T_LCL formula; SJL uses L_v/(cp·T)).
+  **Moisture-weighted thermodynamics**:
+    * ``moist_cv`` (713) + ``moist_cp`` (714) pair
+    * Bolton 1980 ``eqv_pot_bolton_fv3`` (716) for accurate θ_e
+    * ``rh_calc_fv3 do_cmip`` (715) for CMIP-convention RH
 
-  Pairs with iter-692 SJL form — both are FV3-faithful variants
-  (FV3 selects via #ifdef SIMPLIFIED_THETA_E).
+  **Diagnostic FV3-faithful upgrades**:
+    * iter-691 ``pv_entropy_fv3`` now has PPME path via iter-712
+    * iter-693 ``nh_total_energy_fv3`` now has full moist_cv path
+    * iter-695 ``rh_calc_fv3`` now has do_cmip path
+    * iter-710 ``cs3_interpolator_fv3`` now has ECMWF below-T
 
-  Wired into iter-383 sweep (now 280).
-- Iter 715: **iter-695 ``rh_calc_fv3`` do_cmip upgrade**.
+  All backward-compatible (default flags preserve original
+  behavior; pinned by regression tests in each iter).
 
-  iter-695 used saturation over liquid only.  iter-715 adds
-  ``do_cmip=True`` flag for FV3-faithful
-  ``compute_qs(... es_over_liq_and_ice=.true.)`` path:
+  iter-696/698/699/703 4th-order vector cc→D-corner remains the
+  only confirmed lever on the 5-6 mK floor (21-26 % reduction
+  across C8/C16/C24).
 
-      w_liq  = clip((T − (T_freeze − 20)) / 20, 0, 1)
-      q_sat  = w_liq · q_sat_liq + (1 − w_liq) · q_sat_ice
-      RH     = 100 · qv / q_sat
-
-  Linear blend: pure liquid above T_freeze, pure ice below
-  T_freeze − 20 K, smooth transition in between.
-
-  Reuses ``thermo.saturation_mixing_ratio`` (liquid) and
-  ``saturation_mixing_ratio_ice`` (CLAUDE.md mandate: never
-  re-derive saturation formulas).
-
-  Default ``do_cmip=False`` preserves iter-695 backward-compat.
-
-  Tests (6/6 in <2 s):
-  1. T > T_freeze → CMIP RH = liquid-only RH.
-  2. T < T_freeze − 20 → CMIP RH = ice-only RH.
-  3. T = T_freeze − 10 → blend weight 0.5 exactly.
-  4. Default matches iter-695 (backward-compat pin).
-  5. 3-D input → 3-D output.
-  6. No NaN/Inf in CMIP path.
-
-  iter-695 5/5 tests still pass.
-
-  Wired into iter-383 sweep (now 279).
-- Iter 714: **FV3 ``moist_cp_fv3``** — isobaric specific heat companion.
-  Faithful JAX port of FV3 ``moist_cp`` (general nwat≥3 branch)
-  (model/fv_mapz.F90:3656-3733).  Companion to iter-713 moist_cv:
-
-      cpm = (1 − q_v − q_d) · c_pd
-            + q_v · c_pv
-            + q_l · c_pw
-            + q_i · c_pi
-
-  Same tracer-summation structure as moist_cv but uses isobaric
-  heats directly (no isochoric R subtraction).
-
-  Tests (6/6 in <1 s):
-  1. Dry → cpm = c_pd.
-  2. Pure vapor → cpm = c_pv.
-  3. Mixed vapor + liquid + ice → analytical cpm.
-  4. Dry case: cpm − cvm = R_d exactly (iter-713 cross-check).
-  5. q_con = sum of all condensate species.
-  6. No tracers → raises ValueError.
-
-  Completes the (cv, cp) moisture-weighted heat-capacity pair for
-  FV3-faithful thermodynamics in legoesm ports.
-
-  Wired into iter-383 sweep (now 278).
-- Iter 713: **FV3 ``moist_cv_fv3``** + nh_total_energy ``use_moist_cv``
-  upgrade.
-
-  Faithful JAX port of FV3 ``moist_cv`` (general nwat≥3 branch)
-  (model/fv_mapz.F90:3579-3654).  Layer-wise moisture-weighted
-  isochoric specific heat + total condensate:
-
-      cv_air = c_pd − R_d
-      cv_vap = c_pv − R_v
-      q_l    = (liq_wat or 0) + (rainwat or 0)
-      q_i    = (ice_wat or 0) + (snowwat or 0) + (graupel or 0)
-      q_d    = q_l + q_i
-      cvm    = (1 − q_sphum − q_d) · cv_air + q_sphum · cv_vap
-               + q_l · c_pw + q_i · c_pi
-
-  iter-693 ``nh_total_energy_fv3`` upgraded with ``use_moist_cv``
-  flag (default False keeps iter-693 dry-cv + L_v·q approximation;
-  True uses FV3-faithful moist_cv path).
-
-  Reuses legoesm constants: ``c_pd``, ``R_d``, ``c_pv``, ``R_v``,
-  ``c_pw``, ``c_pi`` (all pre-existing).
-
-  Tests (7/7 in <2 s):
-  1. All-zero tracers → cvm = cv_air.
-  2. q_sphum=1 → cvm = cv_vap.
-  3. Mixed vapor + liquid + ice → analytical cvm matches.
-  4. q_con = liq + rain + ice + snow + graupel exactly.
-  5. No tracers raises ValueError.
-  6. nh_total_energy use_moist_cv=True branch finite.
-  7. nh_total_energy default unchanged (iter-693 backward-compat).
-
-  iter-693 7/7 tests still pass (no regression).
-
-  Wired into iter-383 sweep (now 277).
-- Iter 712: **iter-691 ``pv_entropy_fv3`` PPME upgrade**.
-
-  iter-691 used 2nd-order linear edge average for θ reconstruction.
-  iter-712 adds ``use_ppme=True`` flag that switches to iter-711
-  ``ppme_fv3`` (Van-Leer-limited PPM with non-uniform delp).  This
-  matches FV3's actual pv_entropy source (FV3 explicitly calls
-  ``ppme`` for θ edges).
-
-  Default ``use_ppme=False`` preserves iter-691 backward-compat;
-  ``use_ppme=True`` is the FV3-faithful path.
-
-  Tests (6/6 in <7 s):
-  1. Uniform θ → EPV = 0 (both paths).
-  2. ζ + f = 0 → EPV = 0 with PPME.
-  3. Non-linear θ → PPME and linear differ noticeably.
-  4. Default flag matches iter-691 exactly (backward-compat pin).
-  5. 3-D input → 3-D EPV.
-  6. No NaN/Inf with PPME on random.
-
-  iter-691 11/11 tests still pass (no regression).
-
-  Wired into iter-383 sweep (now 276).
-- Iter 711: **FV3 ``ppme_fv3``** — PPM cell-edge values, non-uniform delp.
-  Faithful JAX port of FV3 ``ppme``
-  (tools/fv_diagnostics.F90:5196-5305).  Companion to iter-708
-  ``cs_prof_fv3`` (tridiagonal PPM); ppme uses explicit 4th-order
-  formula instead of tridiag.
-
-  Algorithm:
-      a6[k]   = delp[k-1] + delp[k]              (k=1..km-1)
-      delq[k] = p[k+1] - p[k]                    (k=0..km-2)
-      dc[k]   = Van-Leer-limited monotone slope  (k=1..km-2)
-      qe[k]   = 4th-order edge formula           (k=2..km-2)
-      Top k=0: 3-cell parabolic w/ discriminant fallback to linear
-      Top k=1: off-centered area-preserving cubic (4 cells)
-      Bot k=km-1, km: area-preserving cubic, 2nd deriv = 0 at surface
-
-  Vectorized via jnp.where for the discriminant branching at top.
-  Minimum km = 4 (top closure uses 4 cells).
-
-  Tests (6/6 in <5 s):
-  1. Uniform p → uniform qe.
-  2. Linear p → interior edges near cell midpoints.
-  3. Random p → 4th-order edges Van-Leer-bounded.
-  4. 3-D input → (..., km+1) output.
-  5. No NaN/Inf on random.
-  6. km < 4 raises ValueError.
-
-  Used internally by FV3 vertical remap and for PPME-based edge
-  reconstruction.
-
-  Wired into iter-383 sweep (now 275).
+  Wired into iter-383 sweep: 275 → 283 modules.
 - Iter 710: **FV3 ``cs3_interpolator_fv3``** — log-p multi-level PPM interp.
   Faithful JAX port of FV3 ``cs3_interpolator``
   (tools/fv_diagnostics.F90:4510-4602).  Differs from iter-709
