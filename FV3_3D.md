@@ -1175,6 +1175,16 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 549: **SW scan_step validation** — full dycore coverage.
+  Mirror iter-544 (NH) and iter-547 (PE) on SW
+  ``FV3EdgeShallowWaterModel``:
+  1. scan_step produces finite h/u_d/v_d after 5 SW steps
+     at N=12 + Williamson 2 IC.
+  2. Matches Python loop bit-for-bit (max|diff| < 1e-6).
+  All 3 dycores (NH, PE, SW) now have validated single-step
+  ``make_clipped_step`` AND multi-step
+  ``make_clipped_scan_step``.  Full helper coverage.  2/2
+  in 20 s.  Wired into iter-383 sweep (now 133).
 - Iter 548: **end-to-end validation** — full stack on a
   30-step SBR run at C8 using ``make_legoesm_nh_min_edge_config``
   + ``make_clipped_scan_step``.  Per-prognostic edge/interior
