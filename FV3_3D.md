@@ -1195,6 +1195,43 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 687: **FV3 ``helicity_relative_fv3``** — storm-relative helicity (SRH).
+  Faithful JAX port of FV3 ``helicity_relative``
+  (tools/fv_diagnostics.F90:4811-4895).
+
+  SRH = vertical integral of streamwise vorticity transport in
+  [z_bot, z_top] layer.  NWS standard: 0-3 km layer.
+
+      SRH = Σ_k_in_window (u_k - uc)·dv_dz_k - (v_k - vc)·du_dz_k
+
+  where (uc, vc) = depth-weighted mean wind in the window and
+  du/dz, dv/dz are centered finite differences.
+
+  Pairs with iter-686 UH for supercell-tornado prediction.
+
+  SRH thresholds (per NWS):
+    150-299:    weak tornado possible
+    300-449:    supercells + strong tornadoes
+    > 450:      violent tornadoes
+
+  Algorithm (vectorized like iter-686):
+
+      dz_eff[k] = max(0, min(zh_above, z_top) - max(zh_below, z_bot))
+      uc = Σ ua·dz_eff / Σ dz_eff
+      vc = Σ va·dz_eff / Σ dz_eff
+      du_dz[k] = 0.5·(ua[k-1] - ua[k+1])   (interior centered)
+      dv_dz[k] = 0.5·(va[k-1] - va[k+1])
+      srh = Σ_{k in window} (ua-uc)·dv_dz - (va-vc)·du_dz
+
+  Tests (6/6 in <1 s):
+  1. Zero shear → SRH = 0.
+  2. Zero wind → SRH = 0.
+  3. Empty window (z_top == z_bot) → SRH = 0.
+  4. No NaN/Inf on random 3-D field.
+  5. hydrostatic=True without args raises.
+  6. Linear ua(z), va=0 → SRH = 0 (pure unidirectional shear).
+
+  Wired into iter-383 sweep (now 252).
 - Iter 686: **FV3 ``updraft_helicity_fv3``** — UH supercell diagnostic.
   Faithful JAX port of FV3 ``updraft_helicity``
   (tools/fv_diagnostics.F90:5048-5108).

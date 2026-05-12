@@ -2806,6 +2806,101 @@ def get_pressure_given_height_fv3(
     return p
 
 
+def helicity_relative_fv3(
+    ua: jax.Array, va: jax.Array,
+    delz: jax.Array | None = None,
+    pt: jax.Array | None = None, q: jax.Array | None = None,
+    peln: jax.Array | None = None,
+    z_bot: float = 0.0,
+    z_top: float = 3000.0,
+    hydrostatic: bool = False,
+    zvir: float | None = None,
+) -> jax.Array:
+    """FV3_3D iter 687: storm-relative helicity (SRH) diagnostic.
+
+    Faithful JAX port of FV3 ``helicity_relative``
+    (tools/fv_diagnostics.F90:4811-4895).  Vectorized integration:
+
+        SRH = Σ_k_in_window  (u_k - uc)·dv_dz_k - (v_k - vc)·du_dz_k
+
+    where (uc, vc) is the depth-weighted mean wind in [z_bot, z_top]
+    and dv/dz, du/dz are centered differences from neighboring layers.
+
+    SRH thresholds (per NWS):
+        150-299: weak tornado possible
+        300-449: supercells + strong tornadoes
+        > 450: violent tornadoes
+
+    Algorithm (vectorized, similar to iter-686 UH):
+
+        dz from delz or hydrostatic
+        zh_above[k], zh_below[k] cumulative from surface
+        dz_eff[k] = max(0, min(zh_above, z_top) - max(zh_below, z_bot))
+        uc = Σ ua·dz_eff / Σ dz_eff
+        vc = Σ va·dz_eff / Σ dz_eff
+        du_dz[k] = 0.5·(ua[k-1] - ua[k+1])     (centered diff)
+        dv_dz[k] = 0.5·(va[k-1] - va[k+1])
+        SRH = Σ_k in_window (ua[k]-uc)·dv_dz[k] - (va[k]-vc)·du_dz[k]
+
+    Parameters
+    ----------
+    ua, va : jax.Array, shape (..., km)
+        A-grid wind components.
+    delz, pt, q, peln, zvir : optional
+        Vertical grid info (see iter-686).
+    z_bot, z_top : float, default 0, 3000 m
+        SRH window (NWS standard 0-3 km layer).
+    hydrostatic : bool, default False.
+
+    Returns
+    -------
+    srh : jax.Array, shape (...,)
+        Storm-relative helicity (m²/s²).
+    """
+    if hydrostatic:
+        if pt is None or q is None or peln is None:
+            raise ValueError("hydrostatic=True requires pt, q, peln")
+        if zvir is None:
+            zvir = constants.R_v / constants.R_d - 1.0
+        rdg = constants.R_d / constants.g
+        dz = rdg * pt * (1.0 + zvir * q) * (peln[..., 1:] - peln[..., :-1])
+    else:
+        if delz is None:
+            raise ValueError("hydrostatic=False requires delz")
+        dz = -delz
+
+    # Cumulative zh (top of each layer from surface up)
+    dz_reversed = dz[..., ::-1]
+    cumsum_from_surface = jnp.cumsum(dz_reversed, axis=-1)
+    zh_above = cumsum_from_surface[..., ::-1]
+    zh_below = zh_above - dz
+    dz_eff = jnp.maximum(
+        0.0,
+        jnp.minimum(zh_above, z_top) - jnp.maximum(zh_below, z_bot),
+    )
+    # Depth-weighted mean wind in window
+    total_dz_eff = jnp.sum(dz_eff, axis=-1)
+    safe_total = jnp.where(total_dz_eff > 0.0, total_dz_eff, 1.0)
+    uc = jnp.sum(ua * dz_eff, axis=-1) / safe_total
+    vc = jnp.sum(va * dz_eff, axis=-1) / safe_total
+
+    # Centered vertical wind shears (interior layers; edges = 0)
+    # FV3 indexing: k=1 is top, k=km bottom (top-down).  Python: k=0 top.
+    # du_dz[k] = 0.5·(ua[k-1] - ua[k+1])
+    du_dz = jnp.zeros_like(ua)
+    dv_dz = jnp.zeros_like(va)
+    du_dz = du_dz.at[..., 1:-1].set(
+        0.5 * (ua[..., :-2] - ua[..., 2:])
+    )
+    dv_dz = dv_dz.at[..., 1:-1].set(
+        0.5 * (va[..., :-2] - va[..., 2:])
+    )
+    # Mask: only sum over layers with dz_eff > 0
+    in_window = dz_eff > 0.0
+    srh_k = (ua - uc[..., None]) * dv_dz - (va - vc[..., None]) * du_dz
+    return jnp.sum(jnp.where(in_window, srh_k, 0.0), axis=-1)
+
+
 def updraft_helicity_fv3(
     vort: jax.Array, w: jax.Array,
     delz: jax.Array | None = None,
