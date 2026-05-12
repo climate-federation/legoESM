@@ -21,12 +21,21 @@ from legoesm.ocean.physics.surface_forcing.config import SurfaceForcingConfig
 from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
 
 
-def make_mpas_ocean_physics(config) -> Callable:
+def make_mpas_ocean_physics(
+    config,
+    implicit_vertical_mixing: bool = False,
+) -> Callable:
     """Build a combined physics function for MPAS ocean.
 
     Parameters
     ----------
     config : OceanPhysicsConfig
+    implicit_vertical_mixing : bool
+        When True, KPP and convective-adjustment tendencies are skipped
+        here — their K profiles are routed through the backward-Euler
+        implicit solver in ``MPASOceanModel.step()`` instead.  Wind,
+        restoring, and other physics are still applied as explicit
+        tendencies.
 
     Returns
     -------
@@ -36,12 +45,29 @@ def make_mpas_ocean_physics(config) -> Callable:
     """
     sf_config = config.surface_forcing
     bd_config = config.bottom_drag
+    vm_config = getattr(config, "vertical_mixing", None)
+
+    # Vertical mixing dispatch (currently only KPP is wired into MPAS).
+    vm_scheme = (vm_config.scheme
+                 if vm_config is not None else "none")
+    apply_kpp = vm_scheme == "kpp"
+    if apply_kpp:
+        from legoesm.ocean.physics.vertical_mixing.mpas_integration import (
+            make_kpp_physics_mpas,
+        )
+        _kpp_fn = make_kpp_physics_mpas(vm_config)
+    else:
+        _kpp_fn = None
 
     # Warn about unsupported physics schemes that would be silently ignored.
     # ``convection`` is handled explicitly below (supports "enhanced_diffusion").
+    # ``vertical_mixing="kpp"`` is now supported (above); other schemes
+    # (constant, richardson) are not yet wired in.
     import warnings
     _unsupported = []
-    for attr in ("vertical_mixing", "lateral_mixing", "shortwave_penetration"):
+    if vm_config is not None and vm_scheme not in ("none", "kpp"):
+        _unsupported.append(f"vertical_mixing={vm_scheme!r}")
+    for attr in ("lateral_mixing", "shortwave_penetration"):
         sub = getattr(config, attr, None)
         if sub is not None and getattr(sub, "scheme", "none") != "none":
             _unsupported.append(f"{attr}={getattr(sub, 'scheme', '?')!r}")
@@ -169,7 +195,11 @@ def make_mpas_ocean_physics(config) -> Callable:
             dS_dt = dS_dt + r_out.dS_dt * mask[:, None]
 
         # --- Convective adjustment (enhanced diffusion where N²<0) ---
-        if apply_convection:
+        # When implicit_vertical_mixing is True, convection K profiles are
+        # routed through the implicit solver in step() — skip the explicit
+        # tendency here to avoid double-counting and CFL violations on
+        # thin partial cells.
+        if apply_convection and not implicit_vertical_mixing:
             from legoesm.ocean.physics.convection.enhanced_diffusion import (
                 enhanced_diffusion_convection,
             )
@@ -186,6 +216,20 @@ def make_mpas_ocean_physics(config) -> Callable:
             )
             dT_dt = dT_dt + c_out.dT_dt * mask[:, None]
             dS_dt = dS_dt + c_out.dS_dt * mask[:, None]
+
+        # ---- KPP vertical mixing ----
+        # Returns tendencies for u (edge-normal) and T, S (cell-centered).
+        # Mask land cells out of tracer tendencies; for edges, the model's
+        # edge_mask already zeros out land-touching contributions.
+        # When implicit_vertical_mixing is True, KPP K profiles are routed
+        # through the implicit solver — skip the explicit tendency here.
+        if _kpp_fn is not None and not implicit_vertical_mixing:
+            kpp_du, kpp_dT, kpp_dS = _kpp_fn(
+                state, mesh, z_coord, surface_forcing,
+            )
+            du_dt = du_dt + kpp_du
+            dT_dt = dT_dt + kpp_dT * mask[:, None]
+            dS_dt = dS_dt + kpp_dS * mask[:, None]
 
         return MPASOceanTendencies(
             du_dt=Field(data=du_dt, name="du_dt",

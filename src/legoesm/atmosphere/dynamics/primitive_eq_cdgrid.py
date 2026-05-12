@@ -1,33 +1,8 @@
-"""FV3-inspired Hydrostatic Primitive Equations on the cubed-sphere (D-grid dynamics).
+"""FV3-inspired Hydrostatic PE on cubed-sphere (D-grid). Research path, not a faithful FV3 port.
 
-**Fidelity status: stabilized research path, not a faithful FV3 port.**
-
-Key similarities to FV3:
-- D-grid prognostic winds (cell corners, (6, n+1, n+1, nlev))
-- Arakawa-Lamb gradient at D-grid corners
-- Exact circulation-based vorticity
-- C-grid mass flux for transport
-
-Key differences from faithful FV3:
-- Uses RK3 time integration (FV3 uses forward-backward splitting)
-- Uses edge-midpoint stagger with corner averaging (FV3 uses true D-grid)
-- Halo exchange uses interpolation (FV3 uses exact tile-edge coupling)
-- No Lagrangian vertical coordinate (FV3 uses vertically Lagrangian remapping)
-
-Operator staggering
--------------------
-- Momentum:  D-grid prognostic, C-grid diagnostic (for KE / mass flux)
-- Vorticity: cell centres (from D-grid circulation)
-- Bernoulli / pressure gradient: Arakawa-Lamb gradient at D-grid corners
-- Divergence: C-grid flux-form (exact mass conservation)
-- Scalar diffusion: cell-centre (proper inter-face halo exchange)
-- Wind diffusion: D-grid Laplacian with halo
-
-References
-----------
-- Lin (2004): A "Vertically Lagrangian" FV Dynamical Core
-- Putman & Lin (2007): Finite-volume transport on various cubed-sphere grids
-- Simmons & Burridge (1981): Energy and Angular-Momentum Conserving Scheme
+Lin (2004), Putman & Lin (2007), Simmons & Burridge (1981).
+Differs from faithful FV3: RK3 (not forward-backward), interpolated halo,
+no Lagrangian vertical coord.
 """
 
 from __future__ import annotations
@@ -119,58 +94,112 @@ from legoesm import constants
 # ==============================================================================
 
 class CDGridPrimitiveEquationConfig(NamedTuple):
-    """Configuration for the C-D grid hydrostatic PE model.
+    """Config for C-D grid hydrostatic PE.
 
-    For explicit time integration without semi-implicit gravity wave
-    treatment, set ``n_barotropic_substeps > 1`` to subcycle the
-    barotropic (external gravity wave) mode.  The barotropic substep
-    advances surface pressure and the column-mean divergent flow with
-    dt_baro = dt / n_barotropic_substeps, while the baroclinic modes
-    (temperature, internal wind structure) evolve on the full dt.
-
-    Alternatively, set ``implicit_grav_wave_damping > 0`` to apply a
-    linearized implicit correction to p_s after each step, which damps
-    the fastest gravity wave mode without substeps.
+    Set ``n_barotropic_substeps > 1`` to subcycle external gravity waves,
+    or ``implicit_grav_wave_damping > 0`` for a simplified semi-implicit p_s damping.
     """
     g: float = constants.g
-    A_h: float = 0.0              # Laplacian viscosity [m^2/s]
+    A_h: float = 0.0              # Laplacian viscosity [m^2/s]; FV3_3D iter 33-35: needs ~2e7 at C72
+    smagorinsky_cs: float = 0.0
+        # FV3_3D iter 57/58: opt-in Smagorinsky A_h. A_h_total = A_h + cs*dx²*|D|. Typical 0.1-0.4.
+    ah_d_con: float = 0.0
+        # FV3_3D iter 225: KE→heat d_con for Smagorinsky A_h. dT = -ah_d_con*(u·du+v·dv)/c_pd at corners.
+        # Default 0.0 = baseline; gated by A_h>0. FV3 default 1.0.
     hyperdiff_coeff: float = 0.0
     hyperdiff_ps_coeff: float = 0.0
     div_damp_coeff: float = 0.0   # Divergence damping coefficient [m^2/s]
     implicit_grav_wave_damping: float = 0.0
-        # Implicit damping factor for the external gravity wave mode.
-        # Applied as an exponential filter: ps_new *= exp(-alpha * dt * lap(ps))
-        # where alpha = implicit_grav_wave_damping.
-        # Typical value: 0.5 * c_grav^2 * dt / dx^2 where c_grav ~ 300 m/s.
-        # This is a simplified semi-implicit treatment that selectively
-        # damps divergent modes without a full barotropic solve.
-    T_min: float = 50.0            # Temperature floor [K] (positivity protection)
-    p_floor: float = 100.0         # Pressure floor [Pa] for adiabatic heating (limits 1/p)
-    sponge_sigma: float = 0.15     # Rayleigh sponge activates above this sigma
+        # Simplified semi-implicit damping. ps *= exp(-alpha*dt*lap(ps)). Typical 0.5*c_grav²*dt/dx².
+    T_min: float = 50.0            # Temperature floor [K]
+    p_floor: float = 100.0         # Pressure floor [Pa] for adiabatic 1/p
+    sponge_sigma: float = 0.15     # Rayleigh sponge above this sigma
     sponge_tau_sec: float = 3600.0 # e-folding time at model top [s]
     use_conservation_fixer: bool = True
     fix_mass: bool = True
     anchor_mass_to_initial: bool = False
     time_integrator: str = "ssp_rk3"
     T_diss_coeff: float = 0.0
-        # Velocity-dependent Laplacian dissipation for the temperature
-        # equation.  Mimics upwind advection's built-in diffusivity:
-        #   nu_T = T_diss_coeff * |v| * dx
-        # Typically not needed when A_h (Laplacian viscosity) is used,
-        # since A_h already damps intermediate-scale T noise.
-        # Typical range when used: 0.1-0.5.  0 disables (default).
+        # Velocity-dependent T diffusion: nu_T = coeff*|v|*dx. Typical 0.1-0.5 when used.
     zero_mean_ps_tendency: bool = True
-        # Apply zero_mean_tendency() to dp_s/dt every RK stage.
-        # Ensures exact mass conservation to machine precision but
-        # requires a global reduction (MPI allreduce when distributed).
-        # Disable for pure performance benchmarks to eliminate sync.
+        # Apply zero_mean_tendency() to dp_s/dt every RK stage. Requires MPI allreduce.
     use_async_halo: bool = False
-        # Enable interior/boundary split for compute-communication
-        # overlap in MPI mode.  Computes stencils on interior points
-        # before halo exchange completes, then recomputes boundary
-        # points after.  Overhead: boundary fraction (~8% at C96,
-        # ~17% at C48) of redundant compute.  Benefit: hides MPI
-        # latency behind interior compute.  Off by default.
+        # MPI interior/boundary split for compute-comm overlap.
+    use_fv3_lin_pgf: bool = False
+        # FV3 Lin (1997) cross-product PGF. FV3_3D iter 4: INERT — needs forward-backward stepping
+        # for stability with RK3 (CFL-incompatible). Retained for future iter.
+    div_damp_dddmp: float = 0.0
+        # FV3_3D iter 5: adaptive Smag div damping. FV3 sw_core.F90:1720
+        # damp = da_min_c * max(d2_bg, min(0.20, dddmp*|div|)). FV3 default 0.2.
+    div_damp_d_con: float = 0.0
+        # FV3_3D iter 223: KE→heat d_con for cell-centre div_damp.
+        # dT = -coeff*(u·du+v·dv)/c_pd. Default 0.0; gated by div_damp_coeff>0. FV3 default 1.0.
+    damp_v: float = 0.0
+        # FV3_3D iter 12: post-step del-n vorticity damping via SW backbone
+        # fv3_del6_vorticity_damping (sw_core.F90:1948-1999). Applied once per step AFTER RK3.
+        # Iter1009 SW uses 0.030.
+    nord_v: int = 2
+        # Order of post-step vorticity damping (0=del-2, 1=del-4, 2=del-6). FV3 default 2.
+    damp_v_d_con: float = 0.0
+        # FV3_3D iter 208: KE→heat d_con for damp_v (FV3 sw_core.F90:1953-1990).
+        # ΔKE = u·du + 0.5du² + v·dv + 0.5dv²; ΔT = -coeff*ΔKE/c_pd at corners → centres.
+        # iter 338: opt-in metric-aware form via use_fv3_metric_aware_d_con.
+        # PE T is true temperature (no FV3 pkz factor needed; iter-246).
+        # FV3_3D iter 338/344/347-352: metric-aware port at all 8 PE+NH d_con sites.
+    delt_max: float = 0.0
+        # FV3_3D iter 218/219: per-step heating cap (FV3 dyn_core.F90:1774). Clips |dT| to bdt*delt_max
+        # (K). PE: skip k=0,1; cap k>=2. NH: 0.1x at k=0, 0.5x at k=1, 1x k>=2. FV3 default 1.0.
+    corner_div_damp_d_con: float = 0.0
+        # FV3_3D iter 221: KE→heat d_con for corner-div damp. dT/dt = -coeff*(u·du+v·dv)/c_pd.
+        # Gated by corner_div_damp_d2_bg>0. FV3 default 1.0. Capped by iter-218/219 delt_max.
+    use_fv3_cross_face_du_proj: bool = False
+        # FV3_3D iter 370/384: cross-face halo for damp_v wind-increment projection. Requires
+        # duogrid=True to actually transfer cross-face values (NO-OP without duogrid).
+    use_fv3_metric_aware_d_con: bool = False
+        # FV3_3D iter 338: metric-aware d_con at damp_v_d_con site (FV3 sw_core.F90:1956-1985 with
+        # rsin2/cosa_s). Other d_con sites stay with simpler form. Equivalent in orthogonal limit.
+    d_con_top_zero_levels: int = 0
+        # FV3_3D iter 433 (mirror of NH 431/432): zero d_con heating in top N levels.
+        # Port of FV3 dyn_core.F90:790/800/804 d_con_k=0. Wired at 4 PE d_con sites.
+    use_fv3_a2b_zeta_corner: bool = False
+        # FV3_3D iter 14: a2b_ord4 4th-order A→B interp for ζ_corner only (other corner interps
+        # stay 2nd-order; iter-9: swapping all breaks operator balance).
+    corner_div_damp_d2_bg: float = 0.0
+        # FV3_3D iter 16: B-grid corner-div adaptive damping (FV3 sw_core.F90:1720).
+        # damp = da_min_c * max(d2_bg, min(0.20, dddmp*|delpc|*dt)). Stable range 0 to ~0.005.
+        # iter-17 optimum HS C36: 0.0005.
+    corner_div_damp_dddmp: float = 0.20
+        # FV3 sw_core.F90 default 0.20. Active when corner_div_damp_d2_bg>0.
+    corner_div_damp_d4_bg: float = 0.0
+        # FV3_3D iter 18: del-(2*(nord+1)) corner-div damp (FV3 sw_core.F90:1809-1817).
+        # dd8 = (da_min_c*d4_bg)^(nord+1); vort = damp2*delpc + dd8*divg_d_iter. FV3 typical d4_bg=0.16, nord=2.
+    corner_div_damp_nord: int = 0
+        # 0=del-2, 1=del-4, 2=del-6. Active when corner_div_damp_d4_bg>0.
+    rf_tau_days: float = 0.0
+        # FV3_3D iter 449 (PE mirror of NH 448): Ray_fast (FV3 dyn_core.F90:2922-3020).
+        # rff(k) = 1/(1 + dt/(tau*86400)*sin²(...)²); u_d,v_d *= rff for pfull<rf_cutoff_pa.
+        # tau in DAYS. Typical 5-15 days. PE: no w.
+    rf_cutoff_pa: float = 3000.0
+        # FV3 default rf_cutoff=3.0e2 Pa = 30 hPa.
+    heat_source_del2_iters: int = 0
+        # FV3_3D iter 458 (PE mirror of NH 457): del-2 smoothing of _d_con_sum heat source.
+    heat_source_del2_coeff: float = 0.20
+        # FV3 cnst_0p20 from dyn_core.F90.
+    use_fv3_sponge_damp_v: bool = False
+        # FV3_3D iter 443 (PE mirror of NH 442): sponge boost of damp_v at k=0,1 (NOT k=2). FV3
+        # dyn_core.F90:786-787,796-797 damp_vt=0.5*d2_divg. Linear damp^(nord_v+1) scaling.
+    corner_div_damp_d2_bg_k2: float = 0.0
+        # FV3_3D iter 439: per-level sponge boost at k=1,k=2 (FV3 dyn_core.F90:792,802).
+        # k=1 if >0.01: d2_divg=max(d2_bg,d2_bg_k2); k=2 if >0.05: max(d2_bg, 0.2*d2_bg_k2).
+        # FV3 namelist 4.0 not portable, see iter-452.
+    corner_div_damp_d2_bg_k1: float = 0.0
+        # FV3_3D iter 438: per-level sponge boost at k=0 (FV3 dyn_core.F90:780).
+        # d2_divg = max(0.01, d2_bg, d2_bg_k1). FV3 namelist 4.0 not portable, see iter-452;
+        # legoESM use ~1e-4 with d2_bg=5e-4.
+    corner_div_damp_fv3_vector_fill: bool = False
+        # FV3_3D iter 23: FV3-faithful vector cube-vertex fill (sw_core.F90:1762). NO-OP at nord=1.
+    corner_div_damp_dt_proxy: float = 200.0
+        # FV3_3D iter 188: dt fallback for adaptive cap when dt_actual not passed. PE typical 50-200s.
 
 
 # ==============================================================================
@@ -185,37 +214,11 @@ def fv3_hydrostatic_tendencies(
     config: CDGridPrimitiveEquationConfig = CDGridPrimitiveEquationConfig(),
     physics_tendency: FV3HydrostaticTendencies | None = None,
     physics_tendency_cc: HydrostaticTendencies | None = None,
+    dt_actual: float | jax.Array | None = None,
 ) -> FV3HydrostaticTendencies:
-    """Compute tendencies for the FV3 hydrostatic PE with D-grid winds.
+    """Compute tendencies for FV3 hydrostatic PE with D-grid winds.
 
-    The prognostic momentum is stored at D-grid cell corners.  The C-grid
-    velocities are diagnosed from the D-grid winds for mass flux and KE
-    computation.
-
-    Parameters
-    ----------
-    state : FV3HydrostaticState
-        Prognostic state with D-grid winds.
-    grid : CubedSphereGrid
-    sigma_coord : SigmaCoordinate or HybridSigmaPressureCoordinate
-    cdgrid : CubedSphereCDGrid
-    config : CDGridPrimitiveEquationConfig
-    physics_tendency : FV3HydrostaticTendencies, optional
-        Pre-converted D-grid physics tendency.  Existing API; added
-        directly to the dycore tendencies (no extra halo).
-    physics_tendency_cc : HydrostaticTendencies, optional
-        Iter-65: cell-centre physics tendency.  When provided, the
-        ``du_dt`` / ``dv_dt`` components ride iter-64's batched
-        corner interpolation rather than firing their own halo
-        collective in the caller.  The caller passes this instead of
-        ``physics_tendency`` to skip the standalone corner-interp
-        halo for the physics u/v contribution.  ``dT_dt`` /
-        ``dp_s_dt`` from this object are added directly (cell-centre,
-        no interp needed).
-
-    Returns
-    -------
-    FV3HydrostaticTendencies
+    physics_tendency_cc (iter-65): cell-centre physics; du/dv ride iter-64 batched corner interp.
     """
     _hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
 
@@ -256,21 +259,14 @@ def fv3_hydrostatic_tendencies(
     KE = 0.5 * (u_cell ** 2 + v_cell ** 2)
 
     # --- 5. Bernoulli function B = KE + Phi (cell centres) ---
+    # FV3_3D iter 4: Lin (1997) cross-product PGF not stable with RK3 (needs forward-backward);
+    # use_fv3_lin_pgf flag inert here.
     B = KE + Phi
 
     # --- 6. D-grid vorticity at cell centres via circulation ---
     zeta = dgrid_vorticity(u_d, v_d, cdgrid)  # (6, n, n, nlev)
 
-    # === Stage-level packed halo exchange (merged iter-58/60) ===
-    # Pack ALL cell-field halos for the stage into ONE collective:
-    # always {ζ, B, 1/T, T, ln_ps_3d}; conditionally {u_cell, v_cell}
-    # for hyperdiff and {hybrid_factor} for the hybrid PGF correction.
-    #
-    # Iter-58 merge: previously two separate packed exchanges fired
-    # at different points in the function.  Iter-59 added ln_ps_hi
-    # reuse for the high-precision PGF.  Iter-60 adds the hybrid
-    # factor ``B_full * p_s / p_full`` to the pack so the PGF
-    # correction's corner interpolation skips its standalone halo too.
+    # Stage-level packed halo (iter-58/60): {ζ, B, 1/T} always; ln_ps_3d/hybrid_factor/u_cell/v_cell conditional.
     ln_ps = jnp.log(p_s)
     inv_T = 1.0 / T
     ln_ps_3d = ln_ps[..., jnp.newaxis]  # (6, n, n, 1) — rides the pack
@@ -278,15 +274,7 @@ def fv3_hydrostatic_tendencies(
         _hybrid_factor = sigma_coord.B_full * p_s[..., None] / p_full  # (6, n, n, nlev)
     else:
         _hybrid_factor = None
-    # Iter-61: when divergence damping is active, compute ``div_v`` via
-    # the C-grid divergence operator BEFORE the merged stage halo and
-    # pack it so the corresponding ``_arakawa_lamb_gradient(div_v)``
-    # below skips its own standalone halo collective.  ``cgrid_divergence``
-    # is local (no halo) and depends only on (u_c, v_c) which are
-    # already in scope.  Note: ``div_v`` is also used downstream by
-    # ``compute_mass_flux_hybrid`` / ``compute_sigma_dot_and_total`` —
-    # those consume the unpadded interior values so this hoist is
-    # transparent to them.
+    # iter-61: precompute div_v for div_damp so A-L gradient skips standalone halo
     _need_div_pad = config.div_damp_coeff > 0
     if _need_div_pad:
         div_v = cgrid_divergence(u_c, v_c, cdgrid)  # (6, n, n, nlev)
@@ -294,9 +282,7 @@ def fv3_hydrostatic_tendencies(
         div_v = None  # computed lazily below if not div-damped
     from legoesm.grids.halo import _halo_backend
     _needs_uv_pad = config.A_h > 0 or config.hyperdiff_coeff > 0
-    # Packed MPI/SPMD halos now apply the duogrid kinked-to-extended
-    # remap when `duogrid=dg` is passed (iter-84).  Fall through to
-    # None pre-pads only when neither backend is active.
+    # iter-84: packed MPI/SPMD halos apply duogrid kinked-to-extended remap when duogrid=dg
     _pe_dg = grid.duogrid
     if _halo_backend == "spmd":
         from legoesm.parallel.cubesphere_exchange import _spmd_mesh
@@ -311,39 +297,48 @@ def fv3_hydrostatic_tendencies(
     else:
         _zeta_pad = _B_pad = _invT_pad = None  # operators do own exchange
 
-    # Pre-pad slots for fields whose merged-stage exchange now happens
-    # in section 11 (T / ln_ps_3d / u_cell / v_cell) and for the hybrid-
-    # factor / div_v halos that are no longer packed at this point in
-    # the function.  Initialising to ``None`` lets each downstream
-    # operator fall back to its own standalone halo collective via
-    # ``_pad_halo_auto`` — same numerical result, one extra exchange.
-    # Without these defaults the references at lines ~343/~366/~403
-    # raise ``UnboundLocalError`` (regression introduced when the
-    # iter-58/60 merged-stage halo was split apart).
+    # Pre-pad slots for section 11 (T/ln_ps_3d/u_cell/v_cell); None falls back to per-op halo
     _lnps_pad = None
     _hf_pad = None
     _div_v_pad = None
 
-    # Vorticity interpolated to D-grid corners, absolute vorticity = ζ_corner + f_corner
-    zeta_corner = (_interp_center_to_corner(zeta, cdgrid, padded=_zeta_pad)
-                   + cdgrid.f_corner[..., None])
+    # FV3_3D iter 14/190: optional a2b_ord4 for ζ_corner; shared with iter-187 smag_vort cap (sw_core.F90:1795)
+    _need_zeta_a2b_for_smag = (
+        config.corner_div_damp_d2_bg > 0.0
+        and config.corner_div_damp_d4_bg > 0.0
+        and config.corner_div_damp_nord > 0
+    )
+    _need_zeta_a2b = config.use_fv3_a2b_zeta_corner or _need_zeta_a2b_for_smag
+    _zeta_a2b_ord4: jax.Array | None = None
+    if _need_zeta_a2b:
+        from legoesm.core.operators_cdgrid import (
+            _interp_center_to_corner_a2b_ord4,
+        )
+        # a2b_ord4 takes 3D shape (6, n, n) — vmap over level axis.
+        if zeta.ndim == 4:
+            _zeta_a2b_ord4 = jax.vmap(
+                lambda lev: _interp_center_to_corner_a2b_ord4(lev, cdgrid),
+                in_axes=-1, out_axes=-1,
+            )(zeta)
+        else:
+            _zeta_a2b_ord4 = _interp_center_to_corner_a2b_ord4(zeta, cdgrid)
+
+    if config.use_fv3_a2b_zeta_corner:
+        zeta_corner_relative = _zeta_a2b_ord4
+    else:
+        zeta_corner_relative = _interp_center_to_corner(
+            zeta, cdgrid, padded=_zeta_pad,
+        )
+    zeta_corner = zeta_corner_relative + cdgrid.f_corner[..., None]
 
     # --- 7. Bernoulli gradient at D-grid corners (Arakawa-Lamb) ---
     dB_dx, dB_dy_perp = _arakawa_lamb_gradient(B, cdgrid, padded=_B_pad)
 
     # --- 8. Pressure gradient correction at D-grid corners ---
-    # Promote to higher precision for the PGF computation to avoid
-    # catastrophic cancellation (large p terms, small gradient).
-    # Use result_type to only upcast (never downcast from current dtype).
+    # Higher precision for PGF to avoid catastrophic cancellation
     _pg_dt = jnp.result_type(ln_ps.dtype, _resolve_dtype("atm_pressure_gradient", "compute"))
     ln_ps_hi = ln_ps.astype(_pg_dt)
-    # Iter-59: when the merged stage halo (iter-58) already exchanged
-    # ``ln_ps`` at the PGF compute precision (i.e. ``ln_ps.dtype == _pg_dt``),
-    # reuse ``_lnps_pad`` here instead of re-exchanging ln_ps standalone.
-    # Saves one halo collective per RK3 stage on the SPMD / MPI cubed-
-    # sphere FV3 PE float64 path.  Falls through to the legacy 2D-halo
-    # path when dtypes differ (e.g. mixed float32 state with float64 PGF
-    # compute precision) so no precision is lost.
+    # iter-59: reuse _lnps_pad from merged stage halo when dtype matches
     if _lnps_pad is not None and ln_ps.dtype == _pg_dt:
         _lnps_pad_hi = _lnps_pad[..., 0]  # (6, n+2, n+2) at PGF precision
         dln_dx_hi, dln_dy_perp_hi = _arakawa_lamb_gradient(
@@ -357,15 +352,9 @@ def fv3_hydrostatic_tendencies(
     pg_corr_x = (R_d * T_corner_hi * dln_dx_hi[..., None]).astype(u_d.dtype)
     pg_corr_y_perp = (R_d * T_corner_hi * dln_dy_perp_hi[..., None]).astype(v_d.dtype)
 
-    # Hybrid coordinate correction: in sigma coords grad_eta(ln p) = grad(ln p_s),
-    # but in hybrid coords grad_eta(ln p) = (B*p_s/p) * grad(ln p_s).
-    # Near the model top B -> 0 (pure pressure levels), so the PGF correction
-    # from surface pressure should vanish.  Without this factor the model
-    # develops spurious upper-level heating and eventually blows up.
+    # Hybrid coord: grad_eta(ln p) = (B*p_s/p) * grad(ln p_s). Required at model top.
     if _hybrid:
-        # ``_hybrid_factor`` and ``_hf_pad`` are produced by the merged
-        # halo exchange above (iter-60).  Reuse the pre-padded halo so
-        # the corner interpolation skips its own standalone collective.
+        # iter-60: reuse pre-padded _hf_pad from merged halo
         _hf_corner = _interp_center_to_corner(
             _hybrid_factor, cdgrid, padded=_hf_pad,
         )
@@ -377,18 +366,6 @@ def fv3_hydrostatic_tendencies(
     dv_d_dt = -zeta_corner * u_d - dB_dy_perp - pg_corr_y_perp
 
     # --- 10a. C-grid divergence for continuity + (optional) damping ---
-    # ``cgrid_divergence`` is identical regardless of caller, so compute
-    # it once here and feed both the optional divergence-damping block
-    # below and the continuity / mass-flux block in section 10b.  The
-    # previous code computed ``cgrid_divergence(u_c, v_c, cdgrid)``
-    # twice when ``div_damp_coeff > 0`` — one full halo exchange + PPM
-    # pass per RHS evaluation.  Drop the duplicate.
-    # Iter-61: when div_damp is active, ``div_v`` was already computed
-    # before the merged stage halo and packed alongside the cell fields,
-    # so reuse it here.  Without div_damp, compute lazily — no need to
-    # pad it since downstream operators (``compute_mass_flux_hybrid``,
-    # ``compute_sigma_dot_and_total``) consume the unpadded interior
-    # values.
     if div_v is None:
         div_v = cgrid_divergence(u_c, v_c, cdgrid)  # (6, n, n, nlev)
 
@@ -399,34 +376,259 @@ def fv3_hydrostatic_tendencies(
                 div_v, cdgrid,
             )
         else:
-            # Iter-61: feed the pre-padded ``_div_v_pad`` from the
-            # merged stage halo so the A-L gradient skips its own halo
-            # exchange.  Falls through to a standalone exchange on the
-            # single-device (None) path or the async-overlap path above.
             ddiv_dx, ddiv_dy_perp = _arakawa_lamb_gradient(
                 div_v, cdgrid, padded=_div_v_pad,
             )
-        du_d_dt = du_d_dt + config.div_damp_coeff * ddiv_dx
-        dv_d_dt = dv_d_dt + config.div_damp_coeff * ddiv_dy_perp
+        # FV3_3D iter 5: adaptive Smag damp (sw_core.F90:1720)
+        # damp = da_min_c * max(d2_bg, min(0.20, dddmp*|div|))
+        if config.div_damp_dddmp > 0:
+            _da_min_c = jnp.min(cdgrid.area_corner)
+            _d2_bg = config.div_damp_coeff / _da_min_c
+            _div_abs_corner = _interp_center_to_corner(
+                jnp.abs(div_v), cdgrid,
+            )                                                  # (6, n+1, n+1, nlev)
+            _adaptive_coeff = _da_min_c * jnp.maximum(
+                _d2_bg,
+                jnp.minimum(0.20, config.div_damp_dddmp * _div_abs_corner),
+            )                                                  # (6, n+1, n+1, nlev)
+            _du_d_dt_dd = _adaptive_coeff * ddiv_dx
+            _dv_d_dt_dd = _adaptive_coeff * ddiv_dy_perp
+        else:
+            _du_d_dt_dd = config.div_damp_coeff * ddiv_dx
+            _dv_d_dt_dd = config.div_damp_coeff * ddiv_dy_perp
+        du_d_dt = du_d_dt + _du_d_dt_dd
+        dv_d_dt = dv_d_dt + _dv_d_dt_dd
+
+        # FV3_3D iter 223: KE→heat d_con for cell-centre div_damp; dT/dt = -coeff*(u·du+v·dv)/c_pd
+        if config.div_damp_d_con > 0.0:
+            if config.use_fv3_metric_aware_d_con:
+                # FV3_3D iter 349: metric-aware form at PE cell-centre div_damp
+                _u_d_n = 0.5 * (u_d[:, :-1, :, :] + u_d[:, 1:, :, :])
+                _v_d_n = 0.5 * (v_d[:, :, :-1, :] + v_d[:, :, 1:, :])
+                _du_n = 0.5 * (
+                    _du_d_dt_dd[:, :-1, :, :] + _du_d_dt_dd[:, 1:, :, :]
+                )
+                _dv_n = 0.5 * (
+                    _dv_d_dt_dd[:, :, :-1, :] + _dv_d_dt_dd[:, :, 1:, :]
+                )
+                _ubs = _du_n[:, :, :-1, :]
+                _ubn = _du_n[:, :, 1:, :]
+                _vbw = _dv_n[:, :-1, :, :]
+                _vbe = _dv_n[:, 1:, :, :]
+                _us = _u_d_n[:, :, :-1, :]
+                _un = _u_d_n[:, :, 1:, :]
+                _vw = _v_d_n[:, :-1, :, :]
+                _ve = _v_d_n[:, 1:, :, :]
+                _u2 = _us + _un
+                _du2 = _ubs + _ubn
+                _v2 = _vw + _ve
+                _dv2 = _vbw + _vbe
+                _cosa = cdgrid.cosa_cell[..., None]
+                _rsin2 = cdgrid.rsin2_cell[..., None]
+                _dKE_dt_cc_m = 0.25 * _rsin2 * (
+                    _ubs ** 2 + _ubn ** 2 + _vbw ** 2 + _vbe ** 2
+                    + 2.0 * (
+                        _us * _ubs + _un * _ubn
+                        + _vw * _vbw + _ve * _vbe
+                    )
+                    - _cosa * (_u2 * _dv2 + _v2 * _du2 + _du2 * _dv2)
+                )
+                _dT_dt_dd_cc = (
+                    -config.div_damp_d_con
+                    * _dKE_dt_cc_m
+                    / constants.c_pd
+                )
+            else:
+                _dKE_dt_corner_dd = (
+                    u_d * _du_d_dt_dd + v_d * _dv_d_dt_dd
+                )
+                _dT_dt_dd_cc = (
+                    -config.div_damp_d_con
+                    * _interp_corner_to_center(_dKE_dt_corner_dd)
+                    / constants.c_pd
+                )
+        else:
+            _dT_dt_dd_cc = None
+    else:
+        _dT_dt_dd_cc = None
+
+    # FV3_3D iter 16: B-grid corner-div damping (FV3 sw_core.F90:1641-1724).
+    # ke(i,j) += damp*delpc(i,j); momentum -= grad(ke). Differs from cell-centre div_damp above.
+    if config.corner_div_damp_d2_bg > 0.0:
+        from legoesm.core._fv3_divergence_corner import (
+            fv3_divergence_corner_3d,
+        )
+        # Step 1: B-grid corner divergence (Fortran delpc)
+        delpc = fv3_divergence_corner_3d(u_d, v_d, cdgrid)  # (6, n+1, n+1, nlev)
+
+        # Step 2: adaptive damp at corners (FV3 sw_core.F90:1720)
+        # damp = da_min_c * max(d2_bg, min(0.20, dddmp*|delpc|*dt))
+        _da_min_c = jnp.min(cdgrid.area_corner)
+        _delpc_abs = jnp.abs(delpc)
+        # iter-189: prefer dt_actual when provided; fall back to dt_proxy (iter-188)
+        if dt_actual is not None:
+            _dt_approx = dt_actual
+        else:
+            _dt_approx = config.corner_div_damp_dt_proxy
+        _damp_corner = _da_min_c * jnp.maximum(
+            config.corner_div_damp_d2_bg,
+            jnp.minimum(
+                0.20, config.corner_div_damp_dddmp * _delpc_abs * _dt_approx,
+            ),
+        )                                                  # (6, n+1, n+1, nlev)
+
+        # FV3_3D iter 438/439/446: per-level sponge boost via shared helper (FV3 dyn_core.F90:780,792,802)
+        from legoesm.core.fv3_sponge_boost import (
+            apply_top_sponge_damp_boost as _shared_boost,
+        )
+        _damp_corner = _shared_boost(
+            _damp_corner, _da_min_c,
+            config.corner_div_damp_d2_bg,
+            config.corner_div_damp_d2_bg_k1,
+            config.corner_div_damp_d2_bg_k2,
+        )
+
+        # FV3_3D iter 18: del-(2*(nord+1)) damping (FV3 sw_core.F90:1725-1822, nord>0 path)
+        # dd8 = (da_min_c*d4_bg)^(nord+1); ke_corr = damp2*delpc + dd8*divg_d
+        if config.corner_div_damp_d4_bg > 0.0 and config.corner_div_damp_nord > 0:
+            from legoesm.core._fv3_divergence_corner import (
+                fv3_corner_laplacian_iteration,
+            )
+            _vfill = config.corner_div_damp_fv3_vector_fill
+
+            def _lap_per_level(field_3d):
+                return jax.vmap(
+                    lambda lev: fv3_corner_laplacian_iteration(
+                        lev, cdgrid, apply_vector_corner_fill=_vfill,
+                    ),
+                    in_axes=-1, out_axes=-1,
+                )(field_3d)
+
+            _delpc_initial = delpc
+            _divg_d_iter = delpc
+            for _ in range(config.corner_div_damp_nord):
+                _divg_d_iter = _lap_per_level(_divg_d_iter)
+
+            # FV3_3D iter 187: smag_vort cap for nord>=1 (FV3 sw_core.F90:1797-1809).
+            # smag_vort = |dt|*sqrt(delpc² + wk_corner²); wk_corner = a2b_ord4(zeta_relative).
+            # iter-181/183: double-where pattern for grad-safe sqrt at rest state.
+            # iter-190: reuses _zeta_a2b_ord4 from earlier site.
+            _zeta_smag_corner = _zeta_a2b_ord4              # (6, n+1, n+1, nlev)
+            _smag_arg = _delpc_initial ** 2 + _zeta_smag_corner ** 2
+            _safe_smag_arg = jnp.where(_smag_arg > 0.0, _smag_arg, 1.0)
+            _smag_root = jnp.where(
+                _smag_arg > 0.0, jnp.sqrt(_safe_smag_arg), 0.0,
+            )
+            _smag_vort = jnp.abs(_dt_approx) * _smag_root    # (6, n+1, n+1, nlev)
+            _damp_corner = _da_min_c * jnp.maximum(
+                config.corner_div_damp_d2_bg,
+                jnp.minimum(0.20, config.corner_div_damp_dddmp * _smag_vort),
+            )                                                # (6, n+1, n+1, nlev)
+
+            _dd8 = jnp.asarray(
+                (_da_min_c * config.corner_div_damp_d4_bg)
+                ** (config.corner_div_damp_nord + 1),
+                dtype=delpc.dtype,
+            )
+            _ke_correction = (
+                _damp_corner * _delpc_initial + _dd8 * _divg_d_iter
+            )                                               # (6, n+1, n+1, nlev)
+        else:
+            _ke_correction = _damp_corner * delpc          # (6, n+1, n+1, nlev)
+
+        # Step 4: gradient at D-grid corners. FV3_3D iter 333: PE ke_correction halo via duogrid
+        # remap (mirror of NH iter-325 fix for fv_duogrid.F90 Lagrange-extended halo)
+        _pe_dg_ke = grid.duogrid
+        from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d_fn
+        _ke_pad = _pad_halo_4d_fn(
+            _ke_correction, duogrid=_pe_dg_ke,
+        )                                                  # (6, n+3, n+3, nlev)
+
+        # Centred difference at corner (i,j): ∂x ke = (ke_pad[i+2,j+1] - ke_pad[i,j+1])/(2*dx_corner)
+        _dke_dx_pad = (_ke_pad[:, 2:, 1:-1, :] - _ke_pad[:, :-2, 1:-1, :])
+        _dke_dy_pad = (_ke_pad[:, 1:-1, 2:, :] - _ke_pad[:, 1:-1, :-2, :])
+
+        # 2*dx, 2*dy at corners via padded cdgrid.dxc/dyc (face-centred)
+        _dx_corner_uface = jnp.pad(
+            cdgrid.dxc, [(0, 0), (0, 0), (0, 1)], mode="edge",
+        )                                                  # (6, n+1, n+1)
+        _dy_corner_vface = jnp.pad(
+            cdgrid.dyc, [(0, 0), (0, 1), (0, 0)], mode="edge",
+        )                                                  # (6, n+1, n+1)
+        _two_dx = 2.0 * _dx_corner_uface[..., None]         # (6, n+1, n+1, 1)
+        _two_dy = 2.0 * _dy_corner_vface[..., None]
+
+        # u -= grad(ke); dt_approx cancels (iter-16 damping is per-step rate)
+        _du_d_dt_cdd = -_dke_dx_pad / _two_dx
+        _dv_d_dt_cdd = -_dke_dy_pad / _two_dy
+        du_d_dt = du_d_dt + _du_d_dt_cdd
+        dv_d_dt = dv_d_dt + _dv_d_dt_cdd
+
+        # FV3_3D iter 221: KE→heat d_con for corner-div damp (FV3 sw_core.F90:1085-1086, dyn_core.F90:1764-1779)
+        # dT/dt = -d_con*(u·du+v·dv)/c_pd. iter-218/219 delt_max applied in section 12.
+        if config.corner_div_damp_d_con > 0.0:
+            if config.use_fv3_metric_aware_d_con:
+                # FV3_3D iter 347: metric-aware form at corner-div d_con site
+                _u_d_n = 0.5 * (u_d[:, :-1, :, :] + u_d[:, 1:, :, :])
+                _v_d_n = 0.5 * (v_d[:, :, :-1, :] + v_d[:, :, 1:, :])
+                _du_n = 0.5 * (
+                    _du_d_dt_cdd[:, :-1, :, :] + _du_d_dt_cdd[:, 1:, :, :]
+                )
+                _dv_n = 0.5 * (
+                    _dv_d_dt_cdd[:, :, :-1, :] + _dv_d_dt_cdd[:, :, 1:, :]
+                )
+                _ubs = _du_n[:, :, :-1, :]
+                _ubn = _du_n[:, :, 1:, :]
+                _vbw = _dv_n[:, :-1, :, :]
+                _vbe = _dv_n[:, 1:, :, :]
+                _us = _u_d_n[:, :, :-1, :]
+                _un = _u_d_n[:, :, 1:, :]
+                _vw = _v_d_n[:, :-1, :, :]
+                _ve = _v_d_n[:, 1:, :, :]
+                _gys = _us * _ubs
+                _gyn = _un * _ubn
+                _gxw = _vw * _vbw
+                _gxe = _ve * _vbe
+                _u2 = _us + _un
+                _du2 = _ubs + _ubn
+                _v2 = _vw + _ve
+                _dv2 = _vbw + _vbe
+                _cosa = cdgrid.cosa_cell[..., None]
+                _rsin2 = cdgrid.rsin2_cell[..., None]
+                _dKE_dt_cc_m = 0.25 * _rsin2 * (
+                    _ubs ** 2 + _ubn ** 2 + _vbw ** 2 + _vbe ** 2
+                    + 2.0 * (_gys + _gyn + _gxw + _gxe)
+                    - _cosa * (_u2 * _dv2 + _v2 * _du2 + _du2 * _dv2)
+                )
+                _dT_dt_cdd_cc = (
+                    -config.corner_div_damp_d_con
+                    * _dKE_dt_cc_m
+                    / constants.c_pd
+                )
+            else:
+                _dKE_dt_corner_cdd = (
+                    u_d * _du_d_dt_cdd + v_d * _dv_d_dt_cdd
+                )
+                _dT_dt_cdd_cc = (
+                    -config.corner_div_damp_d_con
+                    * _interp_corner_to_center(_dKE_dt_corner_cdd)
+                    / constants.c_pd
+                )
+        else:
+            _dT_dt_cdd_cc = None
+
+    else:
+        _dT_dt_cdd_cc = None
 
     # --- 10b. Surface pressure tendency and vertical motion ---
-
-    # Iter 1 gating (re-applied after merge): skip per-stage
-    # ``zero_mean_tendency`` when end-step ``fix_mass`` is active.
-    # The end-step mass fixer enforces conservation per step in a
-    # single allreduce; per-stage zero-mean would add 3-4 allreduces
-    # per SSP-RK3 step for an effect the end-step fixer corrects.
+    # Iter-1: skip per-stage zero_mean_tendency when end-step fix_mass active (saves 3-4 allreduces/step)
     _apply_zero_mean_per_stage = (
         config.zero_mean_ps_tendency
         and not (config.use_conservation_fixer and config.fix_mass)
     )
 
     if _hybrid:
-        # Reuse the column-sum that ``compute_mass_flux_hybrid``
-        # already produces internally instead of recomputing
-        # ``jnp.sum(div_v * dp, axis=-1)`` ourselves.  Saves one
-        # cross-level reduction per RK3 stage on every horizontal-shard
-        # configuration that touches the hybrid path.
+        # Reuse column-sum from compute_mass_flux_hybrid (saves cross-level reduction)
         mass_flux, _D_total_p_full = compute_mass_flux_hybrid(
             div_v, p_s, sigma_coord,
         )
@@ -434,25 +636,14 @@ def fv3_hydrostatic_tendencies(
         if _apply_zero_mean_per_stage:
             dp_s_dt_data = zero_mean_tendency(dp_s_dt_data, grid)
 
-        # Vertical advection of D-grid winds: interpolate (u_d, v_d)
-        # together to cell centres (single 4-point average instead of
-        # two), compute vertical advection per-component, then batch
-        # the back-interpolation to D-grid corners (single halo + 4-pt
-        # average instead of two).  Same trailing-axis-as-passive-batch
-        # pattern as Loops 113/114.
+        # Loop 113/114: batch (u_d, v_d) corner→centre and back
         n_face_uv, n_i_uv, n_j_uv, nlev_uv = u_d.shape[0], u_d.shape[1] - 1, u_d.shape[2] - 1, u_d.shape[3]
         _uv_d = jnp.stack([u_d, v_d], axis=-1)
         _uv_cc_flat = _interp_corner_to_center(
             _uv_d.reshape(*_uv_d.shape[:-2], nlev_uv * 2),
         )
         _uv_cc = _uv_cc_flat.reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv, 2)
-        # Batch ``vertical_advection_hybrid`` over (u_cc, v_cc, T) by
-        # adding a leading axis: T uses the same ``mass_flux``,
-        # ``p_s``, and ``sigma_coord`` as (u, v), so ``F_full`` and
-        # ``p_full`` are computed once and broadcast over the new (3,)
-        # axis instead of being computed twice (once for the (u, v)
-        # batch and once for T standalone).  3 calls → 1.  Loop 168
-        # extends Loop 142.
+        # Loop 168: batch vertical_advection_hybrid over (u_cc, v_cc, T); shared mass_flux/p_s
         _uvT_cc_lead = jnp.stack(
             [_uv_cc[..., 0], _uv_cc[..., 1], T], axis=0,
         )  # (3, face, i, j, nlev)
@@ -461,10 +652,7 @@ def fv3_hydrostatic_tendencies(
         )
         _vert_adv_uv_cc = jnp.moveaxis(_vert_adv_uvT_lead[:2], 0, -1)
         vert_adv_T = _vert_adv_uvT_lead[2]
-        # Iter-64: defer the cell-center → D-grid corner interpolation
-        # of ``_vert_adv_uv_cc`` until the diffusion section so it can
-        # be batched with the (lap_uv, hyperdiff_uv) corner interps
-        # into a single halo collective.
+        # iter-64: defer _vert_adv_uv_cc corner interp to section 12c (batched with diff)
 
         omega = compute_omega_hybrid(mass_flux, p_s, dp_s_dt_data, sigma_coord)
         p_adiab = jnp.maximum(p_full, config.p_floor)
@@ -472,12 +660,7 @@ def fv3_hydrostatic_tendencies(
         sigma_top = sigma_coord.sigma_half[0]
         sigma_range = 1.0 - sigma_top
 
-        # Iter-52: ``compute_sigma_dot_and_total`` runs the cumsum
-        # exactly once and returns both σ̇ and ``D_total = Σ div · Δσ``,
-        # rather than recomputing ``jnp.sum(div_v * dsigma, ...)``
-        # separately and then ``compute_sigma_dot`` doing its own
-        # cumsum.  Saves one cross-level collective per RK3 stage on
-        # the non-hybrid σ-coordinate path.
+        # iter-52: compute_sigma_dot_and_total runs cumsum once (saves cross-level collective)
         sigma_dot, _D_total_full = compute_sigma_dot_and_total(
             div_v, sigma_coord,
         )
@@ -485,21 +668,13 @@ def fv3_hydrostatic_tendencies(
         if _apply_zero_mean_per_stage:
             dp_s_dt_data = zero_mean_tendency(dp_s_dt_data, grid)
 
-        # Vertical advection of D-grid winds via cell-centre interpolation.
-        # Batch (u_d, v_d) → (u_cc, v_cc) and (vert_adv_u_cc,
-        # vert_adv_v_cc) → (vert_adv_u_d, vert_adv_v_d) — same pattern
-        # as the hybrid branch above.
         n_face_uv, n_i_uv, n_j_uv, nlev_uv = u_d.shape[0], u_d.shape[1] - 1, u_d.shape[2] - 1, u_d.shape[3]
         _uv_d = jnp.stack([u_d, v_d], axis=-1)
         _uv_cc_flat = _interp_corner_to_center(
             _uv_d.reshape(*_uv_d.shape[:-2], nlev_uv * 2),
         )
         _uv_cc = _uv_cc_flat.reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv, 2)
-        # Batch ``vertical_advection`` over (u_cc, v_cc, T) by adding a
-        # leading axis.  T shares ``sigma_dot`` / ``sigma_coord`` with
-        # (u, v), so the velocity-independent shared work is computed
-        # once and broadcast over the (3,) leading axis.  3 calls → 1.
-        # Loop 168 extends Loop 142.
+        # Loop 168: batch vertical_advection over (u_cc, v_cc, T)
         _uvT_cc_lead = jnp.stack(
             [_uv_cc[..., 0], _uv_cc[..., 1], T], axis=0,
         )  # (3, face, i, j, nlev)
@@ -508,47 +683,17 @@ def fv3_hydrostatic_tendencies(
         )
         _vert_adv_uv_cc = jnp.moveaxis(_vert_adv_uvT_lead[:2], 0, -1)
         vert_adv_T = _vert_adv_uvT_lead[2]
-        # Iter-64: defer the cell-center → D-grid corner interpolation
-        # of ``_vert_adv_uv_cc`` (mirrors the hybrid branch above).
 
         omega = compute_pressure_velocity(sigma_dot, p_s, dp_s_dt_data, sigma_coord)
         p_adiab = jnp.maximum(p_full, config.p_floor)
 
-    # Iter-64: ``vert_adv_uv_d`` will be added to ``du_d_dt``/``dv_d_dt``
-    # in section 12c below alongside the lap_uv and hyperdiff_uv
-    # contributions, so the three corner interpolations share a single
-    # halo collective.
+    # iter-64: vert_adv_uv_d added with lap_uv/hyperdiff_uv at section 12c (shared halo)
 
     # --- 11. Thermodynamic equation ---
-    # Horizontal advection: centred advection using cell-centre velocities.
-    #
-    # Loop 189 — promote ``ln_ps`` to ``(6, n, n, 1)`` and pack it
-    # into the same packed halo exchange as ``T`` (and, when
-    # ``_needs_uv_pad``, ``u_cell`` / ``v_cell``).  This eliminates
-    # the two standalone halo exchanges that previously fired inside
-    # ``gradient_x(ln_ps)`` and ``gradient_y(ln_ps)`` (each issued
-    # its own ``pad_halo``) — they are now replaced by sliced gradients
-    # of the shared 4D padded field.  Saves 2 halo exchanges (or, on
-    # SPMD/MPI, packs ln_ps into an existing collective at the cost
-    # of ``9*4`` extra bytes per face boundary).
+    # Loop 189: pack ln_ps_3d with T (and u/v if needed) — saves 2 halo exchanges
     _needs_uv_pad = config.A_h > 0 or config.hyperdiff_coeff > 0
     _pad_halo_4d = _pad_halo_4d_module
-    # Packed MPI halo now applies duogrid remap (iter-84) so we use it
-    # even when duogrid is active.  Non-MPI fallback does per-field pads
-    # with duogrid routing preserved.
     _pe_dg = grid.duogrid
-    # ``ln_ps_3d`` carries a singleton trailing axis on purpose so it
-    # can ride the same packed exchange as the full 3D fields.  This is
-    # explicitly supported by ``packed_pad_halo_mpi_4d`` (and its SPMD
-    # twin), whose docstring promises that "all fields must share the
-    # same (6, n, n) spatial prefix; the trailing axis (levels/channels)
-    # can differ" — the helper concatenates along the trailing axis and
-    # splits per-field on return (halo_exchange.py:1128-1133).  Loop 189
-    # added the optimisation; restoring it here preserves the
-    # ``∇(ln p_s)`` halo without paying for two extra exchanges.  The
-    # MPI branch is taken whenever the backend is MPI (regardless of
-    # ``_needs_uv_pad``) so the lnps halo is never silently routed
-    # through a non-packed code path under MPI.
     ln_ps_3d = ln_ps[..., jnp.newaxis]  # (6, n, n, 1)
     if _halo_backend == "mpi":
         from legoesm.grids.halo import _mpi_topology
@@ -563,9 +708,7 @@ def fv3_hydrostatic_tendencies(
             )
             _u_cc_pad = _v_cc_pad = None
     else:
-        # Route through duogrid remap when duogrid is active on the grid,
-        # matching the pattern used by _arakawa_lamb_gradient via
-        # `_pad_halo_auto`.
+        # Duogrid remap when active (matches _pad_halo_auto pattern)
         _pe_offs = None if _pe_dg is not None else grid.halo_interp_offsets
         _T_pad = _pad_halo_4d(T, interp_offsets=_pe_offs, duogrid=_pe_dg)
         _lnps_pad = _pad_halo_4d(ln_ps_3d, interp_offsets=_pe_offs, duogrid=_pe_dg)
@@ -577,41 +720,25 @@ def fv3_hydrostatic_tendencies(
     dT_dy = _gradient_y_3d(T, grid, padded=_T_pad)
     horiz_adv_T = -(u_cell * dT_dx + v_cell * dT_dy)
 
-    # Adiabatic heating: kappa * T * omega / p
-    # ln_ps gradient at cell centres for the v.grad(ln ps) correction.
-    # Use the 3D variants with the shared ``_lnps_pad`` from exchange
-    # #2 — saves the two halo exchanges that the 2D ``gradient_x`` /
-    # ``gradient_y`` would otherwise fire (Loop 189).
+    # Adiabatic: kappa * T * omega / p + kappa*T*v.grad(ln p_s) correction
+    # Loop 189: use 3D gradients with shared _lnps_pad
     dln_ps_dx = _gradient_x_3d(ln_ps_3d, grid, padded=_lnps_pad)[..., 0]  # (6, n, n)
     dln_ps_dy = _gradient_y_3d(ln_ps_3d, grid, padded=_lnps_pad)[..., 0]
     adiabatic = kappa * T * omega / p_adiab
     v_dot_grad_lnps = u_cell * dln_ps_dx[..., None] + v_cell * dln_ps_dy[..., None]
-    # In sigma coords: grad_eta(ln p) = grad(ln p_s).
-    # In hybrid coords: grad_eta(ln p) = (B*p_s/p) * grad(ln p_s).
-    # Apply the same factor to the adiabatic v.grad(ln p_s) correction.
+    # Hybrid: grad_eta(ln p) = (B*p_s/p) * grad(ln p_s)
     if _hybrid:
         v_dot_grad_lnps = v_dot_grad_lnps * (sigma_coord.B_full * p_s[..., None] / p_adiab)
     adiabatic = adiabatic + kappa * T * v_dot_grad_lnps
 
     dT_dt_data = horiz_adv_T + vert_adv_T + adiabatic
 
+    # FV3_3D iter 239: aggregate 3 tendency-based d_con sources after A_h block, then cap once
+    # (FV3 sw_core.F90 + dyn_core.F90:1764-1779)
+
     # --- 12. Diffusion ---
-    # 12a. Laplacian viscosity on D-grid winds
-    #
-    # Apply the compact Laplacian at cell centres (full-strength damping
-    # on all modes) and interpolate the tendency back to D-grid corners.
-    # This avoids the corner-centre-corner round-trip of _laplacian_dgrid
-    # which attenuates the grid-scale mode to near zero.
-    # Pre-padded {T, u_cell, v_cell} from exchange #2 eliminate
-    # redundant halo exchanges in the Laplacian calls.
-    # Stack {u_cell, v_cell, T} along a trailing axis and fold into the
-    # level dim so a single Laplacian (12a) and a single hyperdiffusion
-    # (12b) run on the thicker (6, n, n, nlev*3) field.  The existing
-    # pre-padded arrays (from packed_pad_halo_4d / packed_pad_halo_mpi_4d
-    # at exchange #2) are stacked the same way so the inner laplacians
-    # still skip their halo (no extra MPI cost), while the outer ∇² of
-    # hyperdiffusion shares its outer-halo sweep across all 3 fields
-    # instead of paying it 3 times.
+    # 12a: compact Laplacian at centres avoids _laplacian_dgrid corner-centre roundtrip attenuation.
+    # Stack {u_cell, v_cell, T} along trailing axis for batched ∇²/hyperdiff (3 calls → 1).
     _need_uvT_stack = config.A_h > 0 or config.hyperdiff_coeff > 0
     if _need_uvT_stack:
         n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT = u_cell.shape
@@ -621,31 +748,24 @@ def fv3_hydrostatic_tendencies(
         _pad_pre = _uvT_pad_stack.shape[:3]
         _uvT_pad_flat = _uvT_pad_stack.reshape(*_pad_pre, nlev_uvT * 3)
 
-    # When BOTH A_h and hyperdiff_coeff are active, compute the inner
-    # ∇²(_uvT_flat) (compact stencil) ONCE and reuse it for both the
-    # explicit Laplacian (Section 12a) and the inner stage of the
-    # biharmonic hyperdiffusion (Section 12b).  Saves one full
-    # ``_laplacian_compact_3d`` call (i.e. one extra arithmetic ∇² pass
-    # over the (u, v, T) trio) per RHS evaluation — same idea as the
-    # ocean Loop 135 K_h+K_bih sharing.
+    # Share inner ∇²(uvT) between Laplacian (12a) and biharmonic hyperdiff (12b). Ocean Loop 135 pattern.
     _lap_flat: jax.Array | None = None
     if config.A_h > 0 or config.hyperdiff_coeff > 0:
         _lap_flat = _laplacian_compact_3d(
             _uvT_flat, grid, padded=_uvT_pad_flat,
         )
 
-    # --- 11b. Velocity-dependent temperature dissipation ---
-    # Lifted below the (u, v, T) Laplacian above so that, when ``A_h``
-    # or ``hyperdiff_coeff`` is also active, the T component of the
-    # batched ∇²(uvT) is reused — one fewer ``_laplacian_compact_3d``
-    # call (i.e. one extra ∇² over T standalone).  When the (u, v, T)
-    # batch did not run, fall back to a standalone ``∇²(T)``.
+    # --- 11b. T-diss reuses T slice of batched ∇²(uvT) when available ---
     if config.T_diss_coeff > 0:
-        wind_speed = jnp.sqrt(u_cell**2 + v_cell**2)
+        # FV3_3D iter 182: double-where for grad-safe sqrt at rest state
+        _ws_sq = u_cell ** 2 + v_cell ** 2
+        _safe_ws_sq = jnp.where(_ws_sq > 0.0, _ws_sq, 1.0)
+        wind_speed = jnp.where(
+            _ws_sq > 0.0, jnp.sqrt(_safe_ws_sq), 0.0,
+        )
         dx_local = grid.dx[..., None]
         nu_T = config.T_diss_coeff * wind_speed * dx_local
         if _lap_flat is not None:
-            # Reuse the T slice of the batched compact Laplacian.
             lap_T = _lap_flat.reshape(
                 n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT, 3,
             )[..., 2]
@@ -653,16 +773,7 @@ def fv3_hydrostatic_tendencies(
             lap_T = _laplacian_compact_3d(T, grid, padded=_T_pad)
         dT_dt_data = dT_dt_data + nu_T * lap_T
 
-    # Iter-63/64: collect ALL (u, v) cell-center → D-grid corner
-    # interpolations of the stage and batch them into ONE halo +
-    # 4-pt corner average.  ``_vert_adv_uv_cc`` (always present) plus
-    # optionally ``lap_uvT[..., :2]`` (when A_h > 0) and
-    # ``hyperdiff_uvT[..., :2]`` (when hyperdiff_coeff > 0).  Each
-    # ``_interp_center_to_corner`` would otherwise do its own halo
-    # exchange; the batched version stacks the pairs along the trailing
-    # axis and exchanges in one halo.  Saves 1 collective per stage
-    # in the typical hyperdiff-only config; 2 per stage when both
-    # A_h and hyperdiff are active.
+    # Iter-63/64: batch all (u, v) cell-centre→corner interps into one halo
     lap_uvT = None
     hyperdiff_uvT = None
     if config.A_h > 0:
@@ -671,19 +782,13 @@ def fv3_hydrostatic_tendencies(
         hyperdiff_flat = _hyperdiffusion_3d(
             _uvT_flat, grid, config.hyperdiff_coeff,
             padded=_uvT_pad_flat,
-            # When ``_lap_flat`` was already computed above (A_h > 0),
-            # feed it in as the inner ∇² so the biharmonic skips a
-            # redundant compact-stencil pass.
-            inner_lap=_lap_flat,
+            inner_lap=_lap_flat,  # reuse ∇² when A_h>0 (biharmonic skip)
         )
         hyperdiff_uvT = hyperdiff_flat.reshape(
             n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT, 3,
         )
 
-    # Build the cell-center batch: vert_adv (always) + lap (if A_h>0)
-    # + hyperdiff (if hyperdiff_coeff>0) + phys_cc.du/dv (iter-65,
-    # when ``physics_tendency_cc`` is provided), each shape
-    # (n_face, n, n, nlev*2) along the trailing axis.
+    # Build cc batch: vert_adv + lap (A_h>0) + hyperdiff (>0) + phys_cc (iter-65)
     _uv_corner_blocks = [
         _vert_adv_uv_cc.reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv * 2),
     ]
@@ -728,15 +833,128 @@ def fv3_hydrostatic_tendencies(
         _phys_uv_d = _combined_uv_d[:, :, :, _block_idx]
         _block_idx += 1
 
-    # Add the vert_adv contribution to du_d_dt/dv_d_dt now that the
-    # corner interpolation is done.
+    # vert_adv contribution
     du_d_dt = du_d_dt + _vert_adv_uv_d[..., 0]
     dv_d_dt = dv_d_dt + _vert_adv_uv_d[..., 1]
 
     if config.A_h > 0:
-        du_d_dt = du_d_dt + config.A_h * _lap_uv_d[..., 0]
-        dv_d_dt = dv_d_dt + config.A_h * _lap_uv_d[..., 1]
-        dT_dt_data = dT_dt_data + config.A_h * lap_uvT[..., 2]
+        # FV3_3D iter 58: Smag adaptive A_h at corners; du/dt += (A_h + ah_smag) * lap_u
+        if config.smagorinsky_cs > 0.0:
+            from legoesm.core._smagorinsky_visc import (
+                compute_smagorinsky_ah_3d,
+            )
+            _ah_smag_corner = compute_smagorinsky_ah_3d(
+                u_d, v_d, cdgrid, config.smagorinsky_cs,
+            )                                              # (6, n+1, n+1, nlev)
+            _ah_eff_corner = config.A_h + _ah_smag_corner
+            _du_d_dt_ah = _ah_eff_corner * _lap_uv_d[..., 0]
+            _dv_d_dt_ah = _ah_eff_corner * _lap_uv_d[..., 1]
+            du_d_dt = du_d_dt + _du_d_dt_ah
+            dv_d_dt = dv_d_dt + _dv_d_dt_ah
+            # T at centres: interpolate ah_smag from corners (4-pt avg)
+            _ah_smag_cell = 0.25 * (
+                _ah_smag_corner[:, :-1, :-1, :]
+                + _ah_smag_corner[:, 1:, :-1, :]
+                + _ah_smag_corner[:, :-1, 1:, :]
+                + _ah_smag_corner[:, 1:, 1:, :]
+            )                                              # (6, n, n, nlev)
+            _ah_eff_cell = config.A_h + _ah_smag_cell
+            dT_dt_data = dT_dt_data + _ah_eff_cell * lap_uvT[..., 2]
+        else:
+            _du_d_dt_ah = config.A_h * _lap_uv_d[..., 0]
+            _dv_d_dt_ah = config.A_h * _lap_uv_d[..., 1]
+            du_d_dt = du_d_dt + _du_d_dt_ah
+            dv_d_dt = dv_d_dt + _dv_d_dt_ah
+            dT_dt_data = dT_dt_data + config.A_h * lap_uvT[..., 2]
+
+        # FV3_3D iter 225: KE→heat d_con for A_h Laplacian; dT/dt = -ah_d_con*(u·du+v·dv)/c_pd
+        if config.ah_d_con > 0.0:
+            if config.use_fv3_metric_aware_d_con:
+                # FV3_3D iter 351: metric-aware form at PE A_h d_con
+                _u_d_n = 0.5 * (u_d[:, :-1, :, :] + u_d[:, 1:, :, :])
+                _v_d_n = 0.5 * (v_d[:, :, :-1, :] + v_d[:, :, 1:, :])
+                _du_n = 0.5 * (
+                    _du_d_dt_ah[:, :-1, :, :] + _du_d_dt_ah[:, 1:, :, :]
+                )
+                _dv_n = 0.5 * (
+                    _dv_d_dt_ah[:, :, :-1, :] + _dv_d_dt_ah[:, :, 1:, :]
+                )
+                _ubs = _du_n[:, :, :-1, :]
+                _ubn = _du_n[:, :, 1:, :]
+                _vbw = _dv_n[:, :-1, :, :]
+                _vbe = _dv_n[:, 1:, :, :]
+                _us = _u_d_n[:, :, :-1, :]
+                _un = _u_d_n[:, :, 1:, :]
+                _vw = _v_d_n[:, :-1, :, :]
+                _ve = _v_d_n[:, 1:, :, :]
+                _u2 = _us + _un
+                _du2 = _ubs + _ubn
+                _v2 = _vw + _ve
+                _dv2 = _vbw + _vbe
+                _cosa = cdgrid.cosa_cell[..., None]
+                _rsin2 = cdgrid.rsin2_cell[..., None]
+                _dKE_dt_cc_m = 0.25 * _rsin2 * (
+                    _ubs ** 2 + _ubn ** 2 + _vbw ** 2 + _vbe ** 2
+                    + 2.0 * (
+                        _us * _ubs + _un * _ubn
+                        + _vw * _vbw + _ve * _vbe
+                    )
+                    - _cosa * (_u2 * _dv2 + _v2 * _du2 + _du2 * _dv2)
+                )
+                _dT_dt_ah_cc = (
+                    -config.ah_d_con
+                    * _dKE_dt_cc_m
+                    / constants.c_pd
+                )
+            else:
+                _dKE_dt_corner_ah = (
+                    u_d * _du_d_dt_ah + v_d * _dv_d_dt_ah
+                )
+                _dT_dt_ah_cc = (
+                    -config.ah_d_con
+                    * _interp_corner_to_center(_dKE_dt_corner_ah)
+                    / constants.c_pd
+                )
+        else:
+            _dT_dt_ah_cc = None
+    else:
+        _dT_dt_ah_cc = None
+
+    # FV3_3D iter 239: aggregate 3 d_con sources (iter-221/223/225), cap once with delt_max
+    _d_con_sum = None
+    for _contrib in (_dT_dt_cdd_cc, _dT_dt_dd_cc, _dT_dt_ah_cc):
+        if _contrib is not None:
+            _d_con_sum = (
+                _contrib if _d_con_sum is None
+                else _d_con_sum + _contrib
+            )
+    if _d_con_sum is not None:
+        # FV3_3D iter 433: sponge-zero top N levels (PE mirror of NH 432)
+        if config.d_con_top_zero_levels > 0:
+            _nlev_zsp = _d_con_sum.shape[-1]
+            _k_idx_zsp = jnp.arange(_nlev_zsp)
+            _d_con_mask_sp = jnp.where(
+                _k_idx_zsp < config.d_con_top_zero_levels,
+                0.0, 1.0,
+            )
+            _d_con_sum = _d_con_sum * _d_con_mask_sp[None, None, None, :]
+        # FV3_3D iter 458 (PE mirror of NH 457): del-2 smoothing of heat_source
+        if config.heat_source_del2_iters > 0:
+            _da_min_hs_pe = jnp.min(cdgrid.area_corner)
+            _cd_hs_pe = config.heat_source_del2_coeff * _da_min_hs_pe
+            for _ in range(config.heat_source_del2_iters):
+                _lap_hs_pe = _laplacian_compact_3d(_d_con_sum, grid)
+                _d_con_sum = _d_con_sum + _cd_hs_pe * _lap_hs_pe
+        if config.delt_max > 0.0:
+            # Sponge-aware cap: k=0,1 uncapped, k>=2 capped to delt_max K/s
+            _nlev = _d_con_sum.shape[-1]
+            _k_idx = jnp.arange(_nlev)
+            _cap_per_level = jnp.where(
+                _k_idx < 2, jnp.inf, config.delt_max,
+            )
+            _cap_b = _cap_per_level[None, None, None, :]
+            _d_con_sum = jnp.clip(_d_con_sum, -_cap_b, _cap_b)
+        dT_dt_data = dT_dt_data + _d_con_sum
 
     if config.hyperdiff_coeff > 0:
         du_d_dt = du_d_dt + _hd_uv_d[..., 0]
@@ -766,9 +984,7 @@ def fv3_hydrostatic_tendencies(
         dv_d_dt = dv_d_dt + physics_tendency.dv_d_dt.data
         dT_dt_data = dT_dt_data + physics_tendency.dT_dt.data
         dp_s_dt_data = dp_s_dt_data + physics_tendency.dp_s_dt.data
-    # Iter-65: cell-centre physics ``du_dt`` / ``dv_dt`` rode the
-    # iter-64 batch above; ``dT_dt`` / ``dp_s_dt`` are added directly
-    # (cell-centre, no corner interp needed).
+    # Iter-65: cc du/dv rode iter-64 batch; dT/dp_s added directly
     if physics_tendency_cc is not None:
         if physics_tendency_cc.du_dt is not None and _phys_uv_d is not None:
             du_d_dt = du_d_dt + _phys_uv_d[..., 0]
@@ -799,14 +1015,7 @@ def fv3_to_hydrostatic(
     state: FV3HydrostaticState,
     cdgrid: CubedSphereCDGrid,
 ) -> HydrostaticState:
-    """Convert FV3 D-grid state to cell-centre HydrostaticState.
-
-    Uses corner-to-centre interpolation for the wind components.
-    Batches (u_d, v_d) into a single ``_interp_corner_to_center`` call
-    so the 4-point average kernel runs once on the thicker stacked
-    tensor instead of twice — same passive-trailing-axis pattern used
-    in the tendency function.
-    """
+    """Convert FV3 D-grid state to cell-centre HydrostaticState (batched corner→centre)."""
     u_d = state.u_d.data
     v_d = state.v_d.data
     n_face_a, n_corner_i, n_corner_j, nlev_a = u_d.shape
@@ -835,20 +1044,7 @@ def fv3_to_hydrostatic(
 # ==============================================================================
 
 class CDGridPrimitiveEquationModel(IntegrationMixin):
-    """Hydrostatic PE model on the cubed-sphere with FV3 C-D grid dynamics.
-
-    Prognostic winds live on the D-grid (cell corners).  The model
-    accepts and returns ``FV3HydrostaticState`` from ``step()``.
-
-    For backward compatibility with code that passes ``HydrostaticState``
-    (cell-centre winds), use ``step_cell_centre()`` or ``fv3_to_hydrostatic``.
-
-    Parameters
-    ----------
-    grid : CubedSphereGrid
-    sigma_coord : SigmaCoordinate or HybridSigmaPressureCoordinate
-    config : CDGridPrimitiveEquationConfig, optional
-    """
+    """Hydrostatic PE model on cubed-sphere with FV3 C-D grid. Prognostic D-grid winds."""
 
     def __init__(
         self,
@@ -863,14 +1059,7 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         self._target_mass = None
 
     def _sync_dgrid_boundary(self, state: FV3HydrostaticState):
-        """No-op: cross-face continuity is handled by halo exchange.
-
-        The FV3 approach relies on halo exchange in the d2a2c operators
-        (dgrid_to_cgrid, cdgrid_momentum_tendencies) to handle cross-
-        face data, not explicit boundary syncing.  Any explicit sync
-        (whether averaging or owner-copy) acts as edge-selective
-        dissipation that seeds spurious v-wind in steady-state flows.
-        """
+        """No-op: cross-face continuity via halo exchange (explicit sync seeds spurious v-wind)."""
         return state
 
     def tendencies(
@@ -885,25 +1074,8 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         )
 
     def step(self, state, dt, physics_fn=None):
-        """Advance one time step.
-
-        Accepts ``FV3HydrostaticState`` (D-grid prognostic winds).
-        For legacy ``HydrostaticState`` input, uses the cell-centre
-        adapter path.
-
-        Parameters
-        ----------
-        state : FV3HydrostaticState or HydrostaticState
-        dt : float
-        physics_fn : callable, optional
-
-        Returns
-        -------
-        Same type as input state.
-        """
-        # Precompute target mass outside JIT boundary (host-side only).
-        # This avoids writing traced values into persistent object attributes
-        # inside a jit-compiled method.
+        """Advance one step. Accepts FV3HydrostaticState or HydrostaticState."""
+        # Precompute target mass outside JIT boundary (avoid writing traced into self)
         if (self.config.use_conservation_fixer and self.config.fix_mass
                 and self.config.anchor_mass_to_initial
                 and self._target_mass is None):
@@ -928,26 +1100,20 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         def tendency_fn(s):
             phys_cc = None
             if physics_fn is not None:
-                # Convert D-grid state to cell-centre for physics.
-                # Iter-65: pass the cell-centre physics tendency
-                # directly to fv3_hydrostatic_tendencies via
-                # ``physics_tendency_cc`` so its (du_dt, dv_dt)
-                # corner interpolation is batched with the iter-64
-                # vert_adv/lap/hyperdiff corner interp — saves the
-                # standalone halo collective that the old conversion
-                # path emitted here.
+                # Iter-65: pass cc physics via physics_tendency_cc (rides iter-64 batched corner interp)
                 s_cc = fv3_to_hydrostatic(s, cdgrid)
                 _phys_result = physics_fn(s_cc, self.grid, self.sigma_coord)
                 phys_cc = _phys_result[0] if type(_phys_result) is tuple else _phys_result
 
+            # iter-189: dt_actual for corner-div adaptive cap
             tend = fv3_hydrostatic_tendencies(
                 s, self.grid, self.sigma_coord, cdgrid,
                 self.config,
                 physics_tendency=None,
                 physics_tendency_cc=phys_cc,
+                dt_actual=dt,
             )
-            # Return an FV3HydrostaticState-shaped pytree with tendency data
-            # so that the time integrator's tree_map works correctly.
+            # Return FV3HydrostaticState-shaped pytree for integrator tree_map
             return FV3HydrostaticState(
                 u_d=s.u_d.replace(data=tend.du_d_dt.data),
                 v_d=s.v_d.replace(data=tend.dv_d_dt.data),
@@ -963,6 +1129,155 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         # Synchronize D-grid boundary corners across cubed-sphere faces
         state_new = self._sync_dgrid_boundary(state_new)
 
+        # FV3_3D iter 12: post-step del-n vorticity damp (SW backbone, FV3 sw_core.F90:1948-1999)
+        if self.config.damp_v > 0.0:
+            from legoesm.core.fv3_del6_vt_flux import (
+                fv3_del6_vorticity_damping,
+            )
+            # Convert C-D corners (6, n+1, n+1, nlev) to FV3 normal D-grid per level
+            u_corner = state_new.u_d.data
+            v_corner = state_new.v_d.data
+            u_normal = 0.5 * (u_corner[:, :-1, :, :] + u_corner[:, 1:, :, :])
+            v_normal = 0.5 * (v_corner[:, :, :-1, :] + v_corner[:, :, 1:, :])
+
+            # FV3 damp coeff: da_min_c = global min B-grid corner area
+            da_min_c = jnp.min(self.cdgrid.area_corner)
+            damp_step = (self.config.damp_v * da_min_c) ** (
+                self.config.nord_v + 1
+            )
+
+            # Per-level vmap over (6, n, n+1) and (6, n+1, n)
+            def _per_level(args):
+                u_lev, v_lev = args
+                return fv3_del6_vorticity_damping(
+                    u_lev, v_lev, damp=damp_step,
+                    nord=self.config.nord_v, cdgrid=self.cdgrid,
+                )
+
+            u_normal_t = jnp.moveaxis(u_normal, -1, 0)  # (nlev, 6, n, n+1)
+            v_normal_t = jnp.moveaxis(v_normal, -1, 0)  # (nlev, 6, n+1, n)
+            du_normal_t, dv_normal_t = jax.vmap(_per_level)(
+                (u_normal_t, v_normal_t),
+            )
+            du_normal = jnp.moveaxis(du_normal_t, 0, -1)
+            dv_normal = jnp.moveaxis(dv_normal_t, 0, -1)
+
+            # FV3_3D iter 443 (PE mirror of NH 442): sponge boost at k=0,k=1 (NOT k=2)
+            if self.config.use_fv3_sponge_damp_v:
+                from legoesm.core.fv3_sponge_boost import (
+                    apply_top_sponge_field_scale as _shared_pscale_v,
+                )
+                du_normal = _shared_pscale_v(
+                    du_normal, self.config.damp_v,
+                    self.config.nord_v, factor=0.5,
+                    d2_bg=self.config.corner_div_damp_d2_bg,
+                    d2_bg_k1=self.config.corner_div_damp_d2_bg_k1,
+                    d2_bg_k2=self.config.corner_div_damp_d2_bg_k2,
+                    apply_at_k2=False,
+                )
+                dv_normal = _shared_pscale_v(
+                    dv_normal, self.config.damp_v,
+                    self.config.nord_v, factor=0.5,
+                    d2_bg=self.config.corner_div_damp_d2_bg,
+                    d2_bg_k1=self.config.corner_div_damp_d2_bg_k1,
+                    d2_bg_k2=self.config.corner_div_damp_d2_bg_k2,
+                    apply_at_k2=False,
+                )
+
+            # Project FV3 normal → corners by mode='edge' padding + avg
+            # FV3_3D iter 370: opt cross-face halo via pad_halo_4d (duogrid-aware)
+            if self.config.use_fv3_cross_face_du_proj:
+                from legoesm.grids.halo import pad_halo_4d as _pad_h4
+                _dg = self.grid.duogrid
+                du_full = _pad_h4(du_normal, duogrid=_dg)
+                # (6, n+2, n+3, nlev) → slice axis=2 to (n+1)
+                du_pad = du_full[:, :, 1:-1, :]
+                dv_full = _pad_h4(dv_normal, duogrid=_dg)
+                # (6, n+3, n+2, nlev) → slice axis=1 to (n+1)
+                dv_pad = dv_full[:, 1:-1, :, :]
+            else:
+                du_pad = jnp.pad(
+                    du_normal, [(0, 0), (1, 1), (0, 0), (0, 0)],
+                    mode="edge",
+                )
+                dv_pad = jnp.pad(
+                    dv_normal, [(0, 0), (0, 0), (1, 1), (0, 0)],
+                    mode="edge",
+                )
+            du_corner = 0.5 * (du_pad[:, :-1, :, :] + du_pad[:, 1:, :, :])
+            dv_corner = 0.5 * (dv_pad[:, :, :-1, :] + dv_pad[:, :, 1:, :])
+
+            # FV3_3D iter 208: KE→heat d_con for damp_v (FV3 sw_core.F90:1953-1990)
+            # ΔKE = u·du + 0.5du² + v·dv + 0.5dv²; ΔT = -coeff*ΔKE/c_pd at corners → centres
+            if self.config.damp_v_d_con > 0.0:
+                from legoesm.core.operators_cdgrid import (
+                    _interp_corner_to_center,
+                )
+                if self.config.use_fv3_metric_aware_d_con:
+                    # FV3_3D iter 338/344: metric-aware form (cosa_cell/rsin2_cell)
+                    ub_s = du_normal[:, :, :-1, :]   # (6,n,n,nlev)
+                    ub_n = du_normal[:, :, 1:, :]
+                    vb_w = dv_normal[:, :-1, :, :]
+                    vb_e = dv_normal[:, 1:, :, :]
+                    u_s = u_normal[:, :, :-1, :]
+                    u_n = u_normal[:, :, 1:, :]
+                    v_w = v_normal[:, :-1, :, :]
+                    v_e = v_normal[:, 1:, :, :]
+                    gy_s = u_s * ub_s
+                    gy_n = u_n * ub_n
+                    gx_w = v_w * vb_w
+                    gx_e = v_e * vb_e
+                    u2 = u_s + u_n
+                    du2 = ub_s + ub_n
+                    v2 = v_w + v_e
+                    dv2 = vb_w + vb_e
+                    cosa_b = self.cdgrid.cosa_cell[..., None]
+                    rsin2_b = self.cdgrid.rsin2_cell[..., None]
+
+                    dKE_cc_metric = 0.25 * rsin2_b * (
+                        ub_s ** 2 + ub_n ** 2 + vb_w ** 2 + vb_e ** 2
+                        + 2.0 * (gy_s + gy_n + gx_w + gx_e)
+                        - cosa_b * (u2 * dv2 + v2 * du2 + du2 * dv2)
+                    )
+                    dT = -self.config.damp_v_d_con * dKE_cc_metric / constants.c_pd
+                else:
+                    dKE_corner = (
+                        u_corner * du_corner + 0.5 * du_corner ** 2
+                        + v_corner * dv_corner + 0.5 * dv_corner ** 2
+                    )
+                    dKE_cc = _interp_corner_to_center(dKE_corner)
+                    dT = -self.config.damp_v_d_con * dKE_cc / constants.c_pd
+                # FV3_3D iter 433 (PE mirror of NH 431): sponge-zero d_con top N levels
+                if self.config.d_con_top_zero_levels > 0:
+                    _nlev_zv = dT.shape[-1]
+                    _k_idx_zv = jnp.arange(_nlev_zv)
+                    _d_con_mask_v = jnp.where(
+                        _k_idx_zv < self.config.d_con_top_zero_levels,
+                        0.0, 1.0,
+                    )
+                    dT = dT * _d_con_mask_v[None, None, None, :]
+                # FV3_3D iter 218/219: per-step |dT| cap (FV3 dyn_core.F90:1764-1776)
+                # PE: skip cap for k<2 (top sponge); cap rest to dt*delt_max
+                if self.config.delt_max > 0.0:
+                    nlev = dT.shape[-1]
+                    k_idx = jnp.arange(nlev)
+                    cap_per_level = jnp.where(
+                        k_idx < 2, jnp.inf,
+                        dt * self.config.delt_max,
+                    )
+                    cap_b = cap_per_level[None, None, None, :]
+                    dT = jnp.clip(dT, -cap_b, cap_b)
+                state_new = state_new._replace(
+                    u_d=state_new.u_d.replace(data=u_corner + du_corner),
+                    v_d=state_new.v_d.replace(data=v_corner + dv_corner),
+                    T=state_new.T.replace(data=state_new.T.data + dT),
+                )
+            else:
+                state_new = state_new._replace(
+                    u_d=state_new.u_d.replace(data=u_corner + du_corner),
+                    v_d=state_new.v_d.replace(data=v_corner + dv_corner),
+                )
+
         # Implicit gravity wave damping — post-step Laplacian diffusion on p_s.
         if self.config.implicit_grav_wave_damping > 0:
             alpha = self.config.implicit_grav_wave_damping
@@ -973,18 +1288,10 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                 p_s=state_new.p_s.replace(data=p_s_damped),
             )
 
-        # Conservation fixer (operates on p_s which is at cell centres,
-        # in *both* hydrostatic and FV3 D-grid layouts).  Iter 2 routes
-        # through the raw-array ``fix_ps_mass`` / ``fix_ps_mass_target``
-        # helpers in :mod:`legoesm.core.conservation`, which act
-        # directly on the surface-pressure data and skip the
-        # ``fv3_to_hydrostatic`` round-trip — that round-trip would run
-        # an expensive corner-to-centre halo exchange + 4-point average
-        # on (u_d, v_d) only to discard the wind result, since only
-        # ``p_s`` is fixed here.
+        # Iter-2: raw-array fix_ps_mass skips fv3_to_hydrostatic roundtrip
         if self.config.use_conservation_fixer and self.config.fix_mass:
             if self.config.anchor_mass_to_initial:
-                # _target_mass is precomputed in step() outside the JIT boundary.
+                # _target_mass precomputed in step() outside JIT
                 p_s_fixed = fix_ps_mass_target(
                     state_new.p_s.data, self._target_mass, self.grid,
                 )
@@ -996,6 +1303,30 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                 p_s=state_new.p_s.replace(data=p_s_fixed),
             )
 
+        # FV3_3D iter 449 (PE mirror of NH 448): Ray_fast. pfull(k) = (A_full+B_full)*p_ref
+        if self.config.rf_tau_days > 0.0:
+            from legoesm.core.fv3_rayleigh_fast import (
+                compute_rff_profile,
+            )
+            _coord = self.sigma_coord
+            _pfull_pe = (_coord.A_full + _coord.B_full) * _coord.p_ref
+            _ptop_pe = _pfull_pe[0]
+            _rff_pe = compute_rff_profile(
+                _pfull_pe, ptop=_ptop_pe,
+                rf_cutoff=self.config.rf_cutoff_pa,
+                tau_days=self.config.rf_tau_days,
+                dt=dt,
+            )
+            _rff_pe_b = _rff_pe[None, None, None, :]
+            state_new = state_new._replace(
+                u_d=state_new.u_d.replace(
+                    data=state_new.u_d.data * _rff_pe_b,
+                ),
+                v_d=state_new.v_d.replace(
+                    data=state_new.v_d.data * _rff_pe_b,
+                ),
+            )
+
         return cast_pytree(state_new, None, "storage")
 
     @partial(jax.jit, static_argnums=(0, 3))
@@ -1005,17 +1336,8 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         dt: float,
         physics_fn=None,
     ) -> HydrostaticState:
-        """Advance one step, accepting and returning cell-centre state.
-
-        This is a convenience wrapper for code that still works with
-        ``HydrostaticState``.  Cell-centre winds are interpolated to
-        D-grid corners at entry and back to cell centres at exit;
-        internally the dycore operates entirely on D-grid winds.
-        """
-        # Batch the cell-centre → D-grid interpolation for u, v: same
-        # passive-trailing-axis pattern as the tendency function and
-        # ``fv3_to_hydrostatic`` adapter.  One halo + one 4-point
-        # average shared between u and v.
+        """Cell-centre wrapper: cc winds → D-grid corners (entry); back to cc (exit)."""
+        # Batched cc → D-grid interp for (u, v)
         _u_in = state.u.data
         _v_in = state.v.data
         _ni_face, _ni_i, _ni_j, _ni_lev = _u_in.shape
@@ -1060,13 +1382,7 @@ def cdgrid_hydrostatic_tendencies(
     config: CDGridPrimitiveEquationConfig = CDGridPrimitiveEquationConfig(),
     physics_tendency=None,
 ):
-    """Compute hydrostatic tendencies, accepting either HydrostaticState or FV3HydrostaticState.
-
-    If given a HydrostaticState (cell-centre winds), converts to D-grid internally,
-    calls fv3_hydrostatic_tendencies, and returns HydrostaticTendencies (cell-centre).
-
-    If given a FV3HydrostaticState, delegates directly to fv3_hydrostatic_tendencies.
-    """
+    """Hydrostatic tendencies. HydrostaticState → cc; FV3HydrostaticState → D-grid."""
     if isinstance(state, FV3HydrostaticState):
         return fv3_hydrostatic_tendencies(state, grid, sigma_coord, cdgrid, config, physics_tendency)
 
@@ -1124,22 +1440,10 @@ def hydrostatic_to_fv3(
     state: HydrostaticState,
     cdgrid: CubedSphereCDGrid,
 ) -> FV3HydrostaticState:
-    """Convert cell-centre HydrostaticState to FV3 D-grid state.
+    """Convert cc HydrostaticState to FV3 D-grid (vector-aware halo + 4-pt avg).
 
-    Uses **vector**-aware halo exchange + 4-point averaging — the
-    cell-centre ``(u, v)`` are local-east/local-north components, and
-    the local basis rotates across face boundaries.  Scalar
-    ``_interp_center_to_corner`` (which uses scalar ``pad_halo``)
-    averages ``u`` from a face into a neighbouring face's edge
-    without rotating into that face's basis, which leaves a non-zero
-    spurious divergence at every cube edge — initialising the JW
-    baroclinic-wave IC through that path injected ``|div_v| ~ 5e-5
-    s^-1`` at t=0 and produced a 970 Pa surface-pressure shift in
-    one 300 s step.  This was the structural cause of the C24 BCW
-    blow-up at day 0.35 (issue tracked in scaling.md §1.b).
-
-    The shallow-water ``_sw_to_cdgrid`` helper used the correct
-    vector-aware path; this routine now mirrors it.
+    Scalar interp leaves spurious cube-edge divergence (~5e-5 s^-1) — caused C24 BCW
+    blow-up. Mirrors SW _sw_to_cdgrid path.
     """
 
     _u_in = state.u.data
@@ -1176,3 +1480,62 @@ def hydrostatic_to_fv3(
         phis=state.phis,
         tracers=getattr(state, 'tracers', None),
     )
+
+
+def make_fv3_faithful_pe_config(**overrides) -> CDGridPrimitiveEquationConfig:
+    """FV3_3D iter 392: factory for FV3-faithful PE config.
+
+    Pair with use_duogrid=True so iter-370 cross_face_du_proj has effect (iter-384).
+    Enables iter-14/338/370/433/436/437/451/459/443.
+    """
+    defaults = dict(
+        use_fv3_a2b_zeta_corner=True,
+        use_fv3_metric_aware_d_con=True,
+        use_fv3_cross_face_du_proj=True,
+        d_con_top_zero_levels=2,
+        delt_max=1.0,
+        nord_v=1,
+        corner_div_damp_nord=1,
+        corner_div_damp_d4_bg=0.16,
+        heat_source_del2_iters=2,   # FV3 nf_ke at nord=1
+        # iter-452: d2_bg_k1/k2 left at 0.0 — see NH factory note.
+        use_fv3_sponge_damp_v=True,
+    )
+    defaults.update(overrides)
+    return CDGridPrimitiveEquationConfig(**defaults)
+
+
+def make_legoesm_pe_min_edge_config(**overrides) -> CDGridPrimitiveEquationConfig:
+    """FV3_3D iter 468 (PE mirror of NH iter-467): min-edge factory.
+
+    Turns OFF 3 flags that hurt NH θ′ ratio (iter-465/466): metric_aware_d_con,
+    heat_source_del2, d_con_top_zero. NH-tuned; PE sweep not done — empirical only.
+    """
+    edge_min_overrides = dict(
+        use_fv3_metric_aware_d_con=False,
+        heat_source_del2_iters=0,
+        d_con_top_zero_levels=0,
+    )
+    edge_min_overrides.update(overrides)
+    return make_fv3_faithful_pe_config(**edge_min_overrides)
+
+
+def make_legoesm_pe_min_edge_aggressive_config(
+    **overrides
+) -> CDGridPrimitiveEquationConfig:
+    """FV3_3D iter 484: PE mirror of NH iter-483 aggressive factory.
+
+    Stacks iter-466 hurting-flag drops + iter-481 corner_div boost
+    (d2_bg=5e-2).  iter-469/470 found PE T/u_d insensitive to most
+    factory flags at C8 — this aggressive config is unlikely to help
+    much on PE compared to NH, but provided for API symmetry with
+    NH iter-483.  Trade-off: over-damps physical waves.
+    """
+    aggressive_overrides = dict(
+        use_fv3_metric_aware_d_con=False,
+        heat_source_del2_iters=0,
+        d_con_top_zero_levels=0,
+        corner_div_damp_d2_bg=5e-2,
+    )
+    aggressive_overrides.update(overrides)
+    return make_fv3_faithful_pe_config(**aggressive_overrides)

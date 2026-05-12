@@ -1,6 +1,29 @@
 """Online diagnostics for legoESM."""
 
-from legoesm.diagnostics.column_integrals import column_water_vapor
+from legoesm.diagnostics.angular_momentum import (
+    aam_drift_nh,
+    aam_drift_pe,
+    aam_from_nh_state,
+    aam_from_pe_state,
+    apply_aam_correction_nh,
+    apply_aam_correction_pe,
+    compute_atmospheric_angular_momentum,
+)
+from legoesm.diagnostics.total_energy_nh import (
+    apply_te_correction_nh,
+    compute_total_energy_nh,
+    te_drift_nh,
+)
+from legoesm.diagnostics.total_energy_pe import (
+    apply_te_correction_pe,
+    compute_total_energy_pe,
+    te_drift_pe,
+)
+from legoesm.diagnostics.column_integrals import (
+    column_d_ext_field,
+    column_mass_weighted_mean,
+    column_water_vapor,
+)
 from legoesm.diagnostics.conservation_drift import (
     DAYS_REQUIRED,
     DEFAULT_MIN_BASELINE,

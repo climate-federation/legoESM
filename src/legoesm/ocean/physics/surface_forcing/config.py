@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
+from legoesm import constants
+
 
 class PrescribedForcingConfig(NamedTuple):
     """Fixed wind stress and heat/freshwater fluxes."""
@@ -13,6 +15,14 @@ class PrescribedForcingConfig(NamedTuple):
     E_minus_P: float = 0.0       # Evaporation minus precipitation [m/s]
     wind_profile: str = "constant"   # "constant", "cosine_latitude", "single_gyre", "double_gyre", "double_gyre_sin2", "double_gyre_tapered", or "global_wind"
     tau_max: float = 0.1         # Max wind stress for wind profiles [N/m^2]
+    tropical_wind_scale: float = 1.0  # Scale factor for wind stress within
+                                       # ±tropical_wind_lat_deg of equator.
+                                       # 1.0 = no change (default).
+                                       # 0.5 = halve tropical winds.
+                                       # Tapers smoothly via Gaussian to
+                                       # preserve continuity at the edges.
+    tropical_wind_lat_deg: float = 15.0  # Half-width of tropical reduction
+                                          # band [degrees].
     lat_south_deg: float = 15.0  # Southern basin boundary [degrees]
     lat_north_deg: float = 75.0  # Northern basin boundary [degrees]
     wind_buffer_deg: float = 0.0  # Buffer zone width [degrees] where wind tapers to zero at basin edges
@@ -33,9 +43,9 @@ class BulkFormulaConfig(NamedTuple):
     C_D: float = 1.5e-3     # Drag coefficient (constant scheme)
     C_H: float = 1.5e-3     # Sensible heat transfer coefficient (constant)
     C_E: float = 1.5e-3     # Latent heat transfer coefficient (constant)
-    rho_a: float = 1.225    # Air density [kg/m^3] (= constants.rho_air)
-    c_pa: float = 1004.64   # Specific heat of air [J/(kg·K)] (= constants.c_pd)
-    L_v: float = 2.501e6    # Latent heat of vaporization [J/kg] (= constants.L_v)
+    rho_a: float = constants.rho_air
+    c_pa: float = constants.c_pd
+    L_v: float = constants.L_v
     T_a: float = 280.0      # Air temperature [K]
     U_a: float = 5.0        # Wind speed [m/s]
     q_a: float = 0.005      # Air specific humidity [kg/kg]

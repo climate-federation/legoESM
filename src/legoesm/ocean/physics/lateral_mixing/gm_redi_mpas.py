@@ -371,8 +371,25 @@ def gm_redi_tracer_tendency_centered_mpas(
         + jnp.concatenate([F_n_half, z_pad], axis=-1)
     )                                                          # (nEdges, nlev)
 
-    # Land-boundary flux is zero.
-    F_n_full = F_n_full * edge_mask[:, None]
+    # Per-level edge mask on partial-cell coordinates: zero F_n at
+    # levels below the shallower neighbor's seafloor.  Without this,
+    # the divergence at deep cells' deep levels would include spurious
+    # flux from the (sub-seafloor, T_fill) side of the step edge.
+    if hasattr(z_coord, 'bottom_level'):
+        from legoesm.ocean.dynamics.mpas_partial_cell_helpers import (
+            compute_max_level_edge_bot,
+        )
+        bot_e = compute_max_level_edge_bot(z_coord.bottom_level, mesh)
+        nlev_loc = F_n_full.shape[1]
+        k_idx = jnp.arange(nlev_loc, dtype=bot_e.dtype)
+        edge_mask_3d = (
+            (k_idx[None, :] <= bot_e[:, None]).astype(F_n_full.dtype)
+            * edge_mask[:, None]
+        )
+        F_n_full = F_n_full * edge_mask_3d
+    else:
+        # Land-boundary flux is zero.
+        F_n_full = F_n_full * edge_mask[:, None]
 
     # Horizontal flux divergence: standard TRiSK divergence_cell.
     dq_h = divergence_cell_3d(F_n_full, mesh)                  # (nCells, nlev)
@@ -527,11 +544,29 @@ def gm_redi_tracer_tendency_mpas(
 
     jacobian = compute_ocean_jacobian(eta, H_bathy, z_coord)
 
+    # Sub-seafloor fill on partial cells: extend bottom-cell T/S downward
+    # into inactive levels.  Without this, EOS at sub-seafloor sees
+    # T=0,S=35 (the zero-fill convention from model init) and produces a
+    # spurious rho value that creates infinite vertical density gradients
+    # at the seafloor interface — same root cause that crashed KPP at
+    # day 35 before the 2026-05-10 fixes.  Apply the fill BEFORE EOS so
+    # rho at every level represents a sensible water mass.
+    T_fill = T
+    S_fill = S
+    if hasattr(z_coord, 'is_active') and hasattr(z_coord, 'bottom_level'):
+        _active = z_coord.is_active  # (nCells, nlev)
+        _bot_lev = jnp.clip(z_coord.bottom_level, 0, T.shape[1] - 1)
+        _row_idx = jnp.arange(T.shape[0])
+        _T_bot = T[_row_idx, _bot_lev]
+        _S_bot = S[_row_idx, _bot_lev]
+        T_fill = jnp.where(_active, T, _T_bot[:, None])
+        S_fill = jnp.where(_active, S, _S_bot[:, None])
+
     # In-situ density via the grid-agnostic 2-pass EOS iteration.
     eos_fn = make_eos_fn(eos, eos_linear)
     fill_fn = lambda field: _voronoi_neumann_fill(field, mask, mesh)
     rho, _rho_prime, _p_prime = iterate_eos_and_pressure_anomaly(
-        T, S, mask, fill_fn, eos_fn,
+        T_fill, S_fill, mask, fill_fn, eos_fn,
         z_coord.dz_ref, _RHO_0, constants.g,
         n_iter=2,
     )
@@ -554,14 +589,27 @@ def gm_redi_tracer_tendency_mpas(
 
     scheme = getattr(cfg, "slope_scheme", "centered")
     if scheme == "centered":
+        # Pass the sub-seafloor-filled T/S to the tendency function so
+        # the tracer gradients across step edges use sensible values on
+        # the inactive side.  The active_3d mask zeros the tendency at
+        # sub-seafloor levels before returning.
         dT_dt = gm_redi_tracer_tendency_centered_mpas(
-            T, S_n, mask, edge_mask, z_coord, jacobian, mesh,
+            T_fill, S_n, mask, edge_mask, z_coord, jacobian, mesh,
             kappa_GM, cfg.kappa_Redi,
         )
         dS_dt = gm_redi_tracer_tendency_centered_mpas(
-            S, S_n, mask, edge_mask, z_coord, jacobian, mesh,
+            S_fill, S_n, mask, edge_mask, z_coord, jacobian, mesh,
             kappa_GM, cfg.kappa_Redi,
         )
+        # Per-level active mask: zero the tendency at inactive (sub-
+        # seafloor) levels on partial-cell coords.  Without this, GM/
+        # Redi imprints O(K_redi * gradient / dz) tendencies on cells
+        # below the seafloor where there is no real water — the same
+        # bug class that crashed KPP before the 2026-05-10 fixes.
+        if hasattr(z_coord, 'is_active'):
+            _active = z_coord.is_active.astype(dT_dt.dtype)
+            dT_dt = dT_dt * _active
+            dS_dt = dS_dt * _active
     elif scheme == "triads":
         raise NotImplementedError(
             "GM/Redi triad scheme is not yet implemented on MPAS. "

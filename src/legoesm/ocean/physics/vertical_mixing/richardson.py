@@ -35,6 +35,7 @@ def richardson_vertical_mixing(
     z_coord: OceanZStarCoordinate,
     jacobian: jnp.ndarray,
     cfg: RichardsonVerticalMixingConfig,
+    apply_diffusion: bool = True,
 ) -> VerticalMixingOutput:
     """Apply Richardson-number dependent vertical mixing.
 
@@ -101,18 +102,26 @@ def richardson_vertical_mixing(
     A_v = cfg.K_0 / one_plus_aRi ** cfg.n + cfg.A_bg              # momentum
     K_v = A_v / one_plus_aRi + cfg.K_bg                            # tracer
 
-    # Apply variable-K vertical diffusion
-    vel = jnp.stack([u, v], axis=0)
-    vel_tend = jax.vmap(
-        lambda q: vertical_diffusion_variable_K(q, z_coord, jacobian, A_v),
-        in_axes=0, out_axes=0,
-    )(vel)
+    # Apply variable-K vertical diffusion.  When ``apply_diffusion`` is
+    # False, return zero tendencies; the caller will apply K_v/A_v via an
+    # unconditionally-stable backward-Euler solver after the explicit step.
+    if apply_diffusion:
+        vel = jnp.stack([u, v], axis=0)
+        vel_tend = jax.vmap(
+            lambda q: vertical_diffusion_variable_K(q, z_coord, jacobian, A_v),
+            in_axes=0, out_axes=0,
+        )(vel)
 
-    tracers = jnp.stack([T, S], axis=0)
-    tr_tend = jax.vmap(
-        lambda q: vertical_diffusion_variable_K(q, z_coord, jacobian, K_v),
-        in_axes=0, out_axes=0,
-    )(tracers)
+        tracers = jnp.stack([T, S], axis=0)
+        tr_tend = jax.vmap(
+            lambda q: vertical_diffusion_variable_K(q, z_coord, jacobian, K_v),
+            in_axes=0, out_axes=0,
+        )(tracers)
+    else:
+        zero_uv = jnp.zeros_like(u)
+        vel_tend = jnp.stack([zero_uv, zero_uv], axis=0)
+        zero_T = jnp.zeros_like(T)
+        tr_tend = jnp.stack([zero_T, zero_T], axis=0)
 
     return VerticalMixingOutput(
         du_dt=vel_tend[0],

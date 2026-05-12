@@ -70,3 +70,34 @@ def test_spectral_postprocess_promotes_gaussian_grid():
     assert cfg.grid.grid_type == "gaussian"
     assert cfg.grid.resolution == 42
     assert cfg.dycore.discretization == "spectral"
+
+
+def test_ic_era5_threads_through_to_config():
+    parser = build_arg_parser()
+    args = parser.parse_args([
+        "--dataset", "analytical",
+        "--ic", "era5",
+        "--ic-path", "/tmp/era5_test.zarr",
+    ])
+    args = _postprocess_args(args, parser)
+    cfg = build_config_from_args(args)
+
+    assert cfg.ic == "era5"
+    assert cfg.ic_path == "/tmp/era5_test.zarr"
+
+
+def test_ic_default_is_backward_compatible():
+    parser = build_arg_parser()
+    args = parser.parse_args(["--dataset", "analytical"])
+    args = _postprocess_args(args, parser)
+    cfg = build_config_from_args(args)
+
+    assert cfg.ic == "default"
+    assert cfg.ic_path == ""
+
+
+def test_ic_era5_without_ic_path_fails():
+    parser = build_arg_parser()
+    args = parser.parse_args(["--dataset", "analytical", "--ic", "era5"])
+    with pytest.raises(SystemExit):
+        _postprocess_args(args, parser)

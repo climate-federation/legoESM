@@ -16,6 +16,8 @@ import json
 from pathlib import Path
 from typing import NamedTuple
 
+from legoesm import constants
+
 
 class GridConfig(NamedTuple):
     """Horizontal and vertical grid configuration."""
@@ -92,7 +94,7 @@ class ExperimentConfig(NamedTuple):
     co2_ppmv: float = 415.0
     ch4_ppbv: float = 1900.0
     n2o_ppbv: float = 332.0
-    S_0: float = 1361.0                    # = constants.S_0
+    S_0: float = constants.S_0
     ozone_source: str = "standard"
     ozone_forcing: str = "inline"       # inline, external, off
     ozone_file: str = ""
@@ -135,6 +137,10 @@ class ExperimentConfig(NamedTuple):
     dynamic_albedo: bool = False
     carbon_cycle: str = "none"
 
+    # Initial conditions
+    ic: str = "default"   # "default" (held_suarez_init) or "era5"
+    ic_path: str = ""     # ERA5 Zarr path when ic="era5"
+
     # CMIP
     experiment: str = ""
     start_year: int = 1979
@@ -145,7 +151,7 @@ class ExperimentConfig(NamedTuple):
     # T_ice is the seawater freezing point used as the SST floor /
     # SIC ramp threshold — NOT the ice surface temperature.  Legacy
     # name kept for AMIP config compatibility.
-    T_ice: float = 271.35                  # = constants.T_freeze_ocean
+    T_ice: float = constants.T_freeze_ocean
     albedo_ice: float = 0.65
     albedo_ocean: float = 0.06
     sfc_emissivity: float = 0.97
@@ -240,6 +246,11 @@ class ExperimentConfig(NamedTuple):
                 f"ModelDriver is atmosphere-only with prescribed SST/SIC. "
                 f"Set carbon_cycle='none' or use a coupled driver."
             )
+        _valid_ic = ("default", "era5")
+        if self.ic not in _valid_ic:
+            errors.append(f"ic must be one of {_valid_ic}, got {self.ic!r}")
+        if self.ic == "era5" and not self.ic_path:
+            errors.append("ic='era5' requires ic_path to be set")
 
         if errors:
             raise ValueError(

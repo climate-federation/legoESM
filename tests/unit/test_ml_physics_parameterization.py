@@ -8,6 +8,7 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.atmosphere.physics.ml_parameterization import (
     apply_predicted_sundqvist_rain_survival_fraction,
 )
@@ -453,7 +454,7 @@ def test_sundqvist_rain_survival_rebuild_drains_incoming_qr():
     # Drain flux contributes to precipitation in both paths.
     dp = p_half[:, 1:] - p_half[:, :-1]
     expected_drain = float(
-        jnp.sum(q_r * dp, axis=1)[0] / (9.80616 * dt)
+        jnp.sum(q_r * dp, axis=1)[0] / (constants.g * dt)
     )
     assert float(physical.precipitation[0]) >= expected_drain - 1e-12
     assert float(rebuilt.precipitation[0]) >= expected_drain - 1e-12

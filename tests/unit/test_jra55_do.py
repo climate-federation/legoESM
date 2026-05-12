@@ -706,7 +706,7 @@ def test_freshwater_custom_L_v():
     """Caller can override L_v, e.g. for sublimation."""
     slc = _make_synthetic_slice()
     lhflx = jnp.full((4, 8), 300.0)
-    custom_L = 2.834e6  # latent heat of sublimation
+    custom_L = constants.L_s  # latent heat of sublimation
     fw = jra55_to_freshwater(slc, lhflx, L_v=custom_L)
     np.testing.assert_allclose(
         np.asarray(fw.evap), 300.0 / custom_L, rtol=1e-12,

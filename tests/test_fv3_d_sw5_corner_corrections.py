@@ -47,6 +47,7 @@ import numpy as np
 import jax.numpy as jnp
 import pytest
 
+from legoesm import constants
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 from legoesm.core.fv3_sw_core import (
@@ -409,12 +410,12 @@ def test_d_sw_native_forwards_d_sw5_flag():
     # and the iter-862 corner-correction propagates into ke_damping.
     # nord=0 + d4_bg=0 keeps the higher-order Laplacian path off.
     h_off, u_off, v_off = _d_sw_native(
-        h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid_leg, 100.0, 9.80616,
+        h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid_leg, 100.0, constants.g,
         div_damp=0.0, d2_bg=1.0, dddmp=0.0, d4_bg=0.0, nord=0,
         damp_v=0.0, nord_v=0,
         apply_legacy_d_sw5_corner_corrections=False)
     h_on, u_on, v_on = _d_sw_native(
-        h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid_leg, 100.0, 9.80616,
+        h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid_leg, 100.0, constants.g,
         div_damp=0.0, d2_bg=1.0, dddmp=0.0, d4_bg=0.0, nord=0,
         damp_v=0.0, nord_v=0,
         apply_legacy_d_sw5_corner_corrections=True)
@@ -432,12 +433,12 @@ def test_d_sw_native_forwards_d_sw5_flag():
     assert cdgrid_dg.base.bounded_domain is True
 
     h_off2, u_off2, v_off2 = _d_sw_native(
-        h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid_dg, 100.0, 9.80616,
+        h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid_dg, 100.0, constants.g,
         div_damp=0.0, d2_bg=1.0, dddmp=0.0, d4_bg=0.0, nord=0,
         damp_v=0.0, nord_v=0,
         apply_legacy_d_sw5_corner_corrections=False)
     h_on2, u_on2, v_on2 = _d_sw_native(
-        h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid_dg, 100.0, 9.80616,
+        h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid_dg, 100.0, constants.g,
         div_damp=0.0, d2_bg=1.0, dddmp=0.0, d4_bg=0.0, nord=0,
         damp_v=0.0, nord_v=0,
         apply_legacy_d_sw5_corner_corrections=True)

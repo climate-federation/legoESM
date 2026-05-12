@@ -14,6 +14,7 @@ import pytest
 mpi4jax = pytest.importorskip("mpi4jax")
 MPI = pytest.importorskip("mpi4py.MPI")
 
+from legoesm import constants
 from legoesm.coupler.config import CouplerConfig, TileConfig
 from legoesm.coupler.coupler import init_surface_state, make_coupler
 from legoesm.coupler.coupling_fields import AtmToSurface, SurfaceToAtm
@@ -62,7 +63,7 @@ def _make_forcing(shape: tuple[int, int, int]) -> AtmToSurface:
     v_lowest = _pattern(shape, base=-2.0, face_scale=-0.2, x_scale=0.03, y_scale=0.04)
     p_surface = _pattern(shape, base=1.0e5, face_scale=15.0, x_scale=1.0, y_scale=-0.5)
     p_lowest = 0.95 * p_surface
-    rho_lowest = p_lowest / (287.05 * jnp.maximum(T_lowest, 200.0))
+    rho_lowest = p_lowest / (constants.R_d * jnp.maximum(T_lowest, 200.0))
 
     zero = jnp.zeros(shape, dtype=jnp.float32)
     return AtmToSurface(

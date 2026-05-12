@@ -13,6 +13,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
+from legoesm import constants
 from legoesm.ocean.physics.convection.config import PlumeConfig
 from legoesm.ocean.physics.convection.plume import plume_convection
 from legoesm.ocean.vertical import create_ocean_z_star
@@ -34,7 +35,7 @@ def _build_state(n_levels: int = 8, H_max: float = 4000.0,
     S = jnp.full(shape, 35.0, dtype=jnp.float64)
 
     # Crude linear-EOS density consistent with T (alpha ~2e-4):
-    rho = 1025.0 - 0.2 * (T - 4.0)
+    rho = constants.rho_ocean - 0.2 * (T - 4.0)
     p = jnp.cumsum(
         jnp.broadcast_to(jnp.linspace(0.0, 4.0e7, n_levels), shape),
         axis=-1,
@@ -82,7 +83,7 @@ def test_plume_no_nan_for_dry_columns():
     T = jnp.broadcast_to(T_profile, shape).astype(jnp.float64)
     T = T.at[..., 0].set(1.0)  # cold dense surface (would be unstable)
     S = jnp.full(shape, 35.0, dtype=jnp.float64)
-    rho = 1025.0 - 0.2 * (T - 4.0)
+    rho = constants.rho_ocean - 0.2 * (T - 4.0)
     p = jnp.cumsum(
         jnp.broadcast_to(jnp.linspace(0.0, 2.0e7, nlev), shape), axis=-1,
     )
@@ -148,7 +149,7 @@ def test_plume_conserves_column_heat_and_salt():
     T = jnp.broadcast_to(T_profile, shape).astype(jnp.float64)
     S_profile = jnp.linspace(34.0, 35.5, nlev)
     S = jnp.broadcast_to(S_profile, shape).astype(jnp.float64)
-    rho = 1025.0 - 0.2 * (T - 4.0) + 0.8 * (S - 35.0)
+    rho = constants.rho_ocean - 0.2 * (T - 4.0) + 0.8 * (S - 35.0)
     p = jnp.cumsum(
         jnp.broadcast_to(jnp.linspace(0.0, 4.0e6, nlev), shape), axis=-1,
     )
@@ -220,7 +221,7 @@ def test_plume_entrainment_uses_exact_not_linear_form():
     T_profile = jnp.array([5.0, 20.0, 18.0, 16.0])
     T = jnp.broadcast_to(T_profile, shape).astype(jnp.float64)
     S = jnp.full(shape, 35.0, dtype=jnp.float64)
-    rho = 1025.0 - 0.2 * (T - 4.0)
+    rho = constants.rho_ocean - 0.2 * (T - 4.0)
     p = jnp.cumsum(
         jnp.broadcast_to(jnp.linspace(0.0, 6.0e7, nlev), shape), axis=-1,
     )
@@ -290,7 +291,7 @@ def test_plume_finite_across_eps_regimes(eps):
     T = jnp.broadcast_to(T_profile, shape).astype(jnp.float64)
     T = T.at[..., 0].set(1.0)
     S = jnp.full(shape, 35.0, dtype=jnp.float64)
-    rho = 1025.0 - 0.2 * (T - 4.0)
+    rho = constants.rho_ocean - 0.2 * (T - 4.0)
     p = jnp.cumsum(
         jnp.broadcast_to(jnp.linspace(0.0, 1.5e7, nlev), shape), axis=-1,
     )

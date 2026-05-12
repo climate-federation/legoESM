@@ -2118,6 +2118,556 @@ class TestHeldSuarezDissipationImbalance:
             f"CROSS_GRID_COMPARISON_REPORT.md and this test."
         )
 
+    def test_cfl_safe_dt_cube_calibration(self):
+        """iter 66: ``_cfl_safe_dt_cube`` returns the calibrated dt
+        per resolution.  At C36/C48/C72 default safety preserves
+        ``dt=200`` (iter-19/iter-37/iter-33 reference); at C96 it
+        reduces to ``dt=150`` (iter-65 empirical threshold).
+        """
+        # Calibration table: must match iter-65/66 doc.
+        for n, expected_dt in [(36, 200.0), (48, 200.0), (72, 200.0)]:
+            actual = M._cfl_safe_dt_cube(n)
+            assert actual == 200.0, (
+                f"iter-66 CFL dt: at C{n} expected dt=200.0 (iter-33/37 "
+                f"reference preservation), got dt={actual:.1f}.  This "
+                f"would change the iter-33 reference numbers."
+            )
+        # C96 must reduce by exactly the iter-65 empirical threshold.
+        # safety=0.422 calibrated so dt(C96) ≈ 150.
+        dt_c96 = M._cfl_safe_dt_cube(96)
+        assert 145.0 <= dt_c96 <= 155.0, (
+            f"iter-66 CFL dt: at C96 expected dt ≈ 150 (iter-65 "
+            f"empirical threshold), got dt={dt_c96:.1f}."
+        )
+        # Higher resolutions must reduce monotonically.
+        dt_c144 = M._cfl_safe_dt_cube(144)
+        assert dt_c144 < dt_c96, (
+            f"CFL dt must decrease with n: dt(C144)={dt_c144:.1f} "
+            f">= dt(C96)={dt_c96:.1f}"
+        )
+
+    def test_cfl_safe_dt_cube_long_time_mode(self):
+        """iter 71: long_time mode reduces dt further than short_time
+        for C96+ stability.  Pin the iter-70 calibration table.
+        """
+        # mode='long_time' -> safety=0.307
+        # C36/C48: still capped to 200 (large dx).
+        assert M._cfl_safe_dt_cube(36, mode="long_time") == 200.0
+        # C48 just barely fits (safety=0.307 * dx48 / 320 ~ 199.6).
+        dt_48_lt = M._cfl_safe_dt_cube(48, mode="long_time")
+        assert 195.0 < dt_48_lt <= 200.0
+        # C72: NOT 200 in long_time (CHANGE from short_time).
+        dt_72_lt = M._cfl_safe_dt_cube(72, mode="long_time")
+        assert 130.0 <= dt_72_lt <= 140.0, (
+            f"long_time at C72 should give dt ~ 133 (iter-70 calibration), "
+            f"got {dt_72_lt:.1f}"
+        )
+        # C96: dt ~ 100 (iter-70 empirical stable threshold).
+        dt_96_lt = M._cfl_safe_dt_cube(96, mode="long_time")
+        assert 95.0 <= dt_96_lt <= 105.0, (
+            f"long_time at C96 should give dt ~ 100 (iter-70 stable), "
+            f"got {dt_96_lt:.1f}"
+        )
+        # long_time is strictly more conservative than short_time.
+        for n in (72, 96, 144):
+            dt_st = M._cfl_safe_dt_cube(n, mode="short_time")
+            dt_lt = M._cfl_safe_dt_cube(n, mode="long_time")
+            assert dt_lt < dt_st, (
+                f"At C{n} long_time dt={dt_lt:.1f} must be smaller "
+                f"than short_time dt={dt_st:.1f}"
+            )
+
+    def test_cfl_safe_dt_cube_invalid_mode_raises(self):
+        """iter 71/80: ``mode`` must be ``short_time``,
+        ``long_time``, or ``very_long_time``.
+        """
+        import pytest
+        with pytest.raises(ValueError, match="mode must be"):
+            M._cfl_safe_dt_cube(72, mode="invalid")
+        with pytest.raises(ValueError, match="mode must be"):
+            M._cfl_safe_dt_cube(72, mode="")
+
+    def test_cfl_safe_dt_cube_very_long_time_mode(self):
+        """iter 80: very_long_time mode reduces dt further than
+        long_time.  At C96 dt should be ~50.
+        """
+        # very_long_time at C96: safety=0.154 -> dt ≈ 50.
+        dt_96_vlt = M._cfl_safe_dt_cube(96, mode="very_long_time")
+        assert 47.0 <= dt_96_vlt <= 53.0, (
+            f"very_long_time at C96 should give dt ≈ 50, got {dt_96_vlt:.1f}"
+        )
+        # very_long_time strictly more conservative than long_time.
+        for n in (72, 96, 144):
+            dt_lt = M._cfl_safe_dt_cube(n, mode="long_time")
+            dt_vlt = M._cfl_safe_dt_cube(n, mode="very_long_time")
+            assert dt_vlt < dt_lt, (
+                f"At C{n} very_long_time dt={dt_vlt:.1f} must be smaller "
+                f"than long_time dt={dt_lt:.1f}"
+            )
+
+    def test_resolve_dt_cube_very_long_time_env_var(
+            self, monkeypatch, capsys):
+        """iter 80 / iter 93: ``LEGOESM_HS_CUBE_DT_CFL=very_long_time``
+        selects the iter-80 calibration AND prints a notice mentioning
+        the mode.
+
+        iter 93 expanded to verify the printed notice includes
+        ``very_long_time`` so users can confirm which calibration
+        mode is active from the matrix output.
+        """
+        for val in ("very_long_time", "verylongtime", "VERY_LONG_TIME"):
+            monkeypatch.setenv("LEGOESM_HS_CUBE_DT_CFL", val)
+            capsys.readouterr()  # clear
+            dt_96 = M._resolve_dt_cube(96)
+            captured = capsys.readouterr().out
+            assert 47.0 <= dt_96 <= 53.0, (
+                f"very_long_time at C96 expected dt ≈ 50, got {dt_96:.1f}"
+            )
+            assert "very_long_time" in captured, (
+                f"iter-93: notice for env var {val!r} must mention "
+                f"'very_long_time'.  Got: {captured!r}"
+            )
+
+    def test_resolve_dt_cube_long_time_env_var(self, monkeypatch, capsys):
+        """iter 71: ``LEGOESM_HS_CUBE_DT_CFL=long_time`` selects the
+        iter-70 calibration.
+        """
+        for val in ("long_time", "longtime", "LONG_TIME", "Longtime"):
+            monkeypatch.setenv("LEGOESM_HS_CUBE_DT_CFL", val)
+            capsys.readouterr()  # clear
+            dt_72 = M._resolve_dt_cube(72)
+            captured = capsys.readouterr().out
+            assert 130.0 <= dt_72 <= 140.0, (
+                f"long_time at C72: expected ~133, got {dt_72:.1f}"
+            )
+            # Notice should print at C72 since dt < 200.
+            assert "[FV3_3D iter 66/71" in captured
+            assert "long_time" in captured
+            # C96: dt ~ 100.
+            capsys.readouterr()  # clear
+            dt_96 = M._resolve_dt_cube(96)
+            captured = capsys.readouterr().out
+            assert 95.0 <= dt_96 <= 105.0
+            assert "long_time" in captured
+
+    def test_matrix_help_documents_iter_env_vars(self):
+        """iter 73 / iter 91: matrix --help epilog must document the
+        iter 33-91 env vars so users discover them without reading
+        FV3_3D.md.
+        """
+        epilog = M._ENV_VAR_EPILOG
+        # iter 33/43: A_h scale.
+        assert "LEGOESM_AH_SCALE" in epilog
+        assert "iter 33" in epilog or "iter-33" in epilog
+        # iter 66/71/72: CFL-aware dt.
+        assert "LEGOESM_HS_CUBE_DT_CFL" in epilog
+        assert "auto" in epilog, (
+            "iter 72 added 'auto' as the recommended mode; epilog must "
+            "mention it"
+        )
+        # iter 80: very_long_time mode.
+        assert "very_long_time" in epilog, (
+            "iter 80 added very_long_time mode; epilog must mention it"
+        )
+        # iter 57-59: Smagorinsky.
+        assert "LEGOESM_SMAG_CS" in epilog
+        # iter 16-25: corner divergence damping.
+        assert "LEGOESM_CDD_D2BG" in epilog
+        # iter 13: vorticity damping.
+        assert "LEGOESM_DAMP_V" in epilog
+        # Pointer to the full investigation doc.
+        assert "FV3_3D.md" in epilog
+
+    def test_matrix_help_renders_with_epilog(self):
+        """iter 73: argparse builder must include the epilog so
+        ``--help`` actually shows the env-var docs.
+        """
+        parser = M.build_parser()
+        assert parser.epilog is not None
+        assert "LEGOESM_HS_CUBE_DT_CFL" in parser.epilog
+
+    def test_resolve_dt_cube_auto_mode(self, monkeypatch, capsys):
+        """iter 72/81: ``LEGOESM_HS_CUBE_DT_CFL=auto`` picks short_time
+        at n<96 (preserves iter-33 C72 reference dt=200) and
+        very_long_time at n>=96 (iter-79 found long_time NaNs at day
+        22.5; very_long_time dt=50 is the safer default).
+        """
+        monkeypatch.setenv("LEGOESM_HS_CUBE_DT_CFL", "auto")
+
+        # n<96: short_time mode -> C72 stays at 200 (iter-33 ref).
+        capsys.readouterr()  # clear
+        dt_72 = M._resolve_dt_cube(72)
+        captured = capsys.readouterr().out
+        assert dt_72 == 200.0, (
+            f"auto at C72 must use short_time (dt=200, iter-33 ref), "
+            f"got dt={dt_72:.1f}"
+        )
+        assert captured == "", (
+            "auto at C72 should not print (dt unchanged from 200)"
+        )
+
+        # n=48: also short_time -> dt=200.
+        assert M._resolve_dt_cube(48) == 200.0
+
+        # n=96: very_long_time mode -> dt~50 (iter-81).
+        capsys.readouterr()
+        dt_96 = M._resolve_dt_cube(96)
+        captured = capsys.readouterr().out
+        assert 47.0 <= dt_96 <= 53.0, (
+            f"auto at C96 must use very_long_time (dt=50, iter-81), got "
+            f"dt={dt_96:.1f}"
+        )
+        # Notice should print since dt < 200.
+        assert "very_long_time" in captured
+
+        # n=144: also very_long_time -> even smaller dt.
+        dt_144 = M._resolve_dt_cube(144)
+        assert dt_144 < dt_96, (
+            f"auto at C144 must give smaller dt than C96, "
+            f"got dt(C144)={dt_144:.1f}, dt(C96)={dt_96:.1f}"
+        )
+
+    def test_resolve_dt_cube_invalid_env_value_raises(self, monkeypatch):
+        """iter 71: unrecognised env values (other than known truthy
+        / falsy / mode names) must raise rather than silently default.
+
+        iter 72: ``auto`` was added as a valid value, so it is no
+        longer in the ``bad`` list.
+        """
+        import pytest
+        for bad in ("foo", "2", "short", "automatic"):
+            monkeypatch.setenv("LEGOESM_HS_CUBE_DT_CFL", bad)
+            with pytest.raises(ValueError, match="unrecognised value"):
+                M._resolve_dt_cube(72)
+
+    def test_cfl_safe_dt_cube_invalid_inputs_raise(self):
+        """iter 67: ``_cfl_safe_dt_cube`` rejects bad inputs.
+
+        ``n=0`` would divide-by-zero in ``pi*R/(2*n)``; ``n<0``
+        gives negative dx; ``c_max <= 0`` gives negative or
+        infinite dt.  All of these must raise ``ValueError``,
+        not silently return garbage.  iter-67 self-review caught
+        this as a missing input-validation gap.
+        """
+        import pytest
+        with pytest.raises(ValueError, match="positive cube face count"):
+            M._cfl_safe_dt_cube(0)
+        with pytest.raises(ValueError, match="positive cube face count"):
+            M._cfl_safe_dt_cube(-72)
+        with pytest.raises(ValueError, match="c_max must be positive"):
+            M._cfl_safe_dt_cube(72, c_max=0.0)
+        with pytest.raises(ValueError, match="c_max must be positive"):
+            M._cfl_safe_dt_cube(72, c_max=-320.0)
+
+    def test_resolve_dt_cube_off_returns_200(self, monkeypatch):
+        """iter 67: when ``LEGOESM_HS_CUBE_DT_CFL`` is unset or 0,
+        ``_resolve_dt_cube`` returns the iter-pre-66 default 200.0
+        regardless of ``n``.  Pin the default-off behavior.
+        """
+        monkeypatch.delenv("LEGOESM_HS_CUBE_DT_CFL", raising=False)
+        for n in (36, 48, 72, 96, 144):
+            assert M._resolve_dt_cube(n) == 200.0
+        # Explicit 0 / false / off — all should be off.
+        for val in ("0", "false", "no", "off", ""):
+            monkeypatch.setenv("LEGOESM_HS_CUBE_DT_CFL", val)
+            assert M._resolve_dt_cube(96) == 200.0
+
+    def test_resolve_dt_cube_on_uses_cfl_helper(self, monkeypatch, capsys):
+        """iter 67: when env var truthy, returns the CFL-aware dt
+        and prints a one-line notice when the dt is reduced.
+        """
+        for val in ("1", "true", "yes", "on", "TRUE", "Yes"):
+            monkeypatch.setenv("LEGOESM_HS_CUBE_DT_CFL", val)
+            # C72 still preserved at 200 (no notice).
+            capsys.readouterr()  # clear
+            dt_72 = M._resolve_dt_cube(72)
+            captured = capsys.readouterr().out
+            assert dt_72 == 200.0
+            assert captured == "", (
+                f"At C72 the dt is unchanged; no notice should print, "
+                f"but got {captured!r}"
+            )
+            # C96 reduced — must print.
+            dt_96 = M._resolve_dt_cube(96, label="HS")
+            captured = capsys.readouterr().out
+            assert 145.0 <= dt_96 <= 155.0
+            assert "[FV3_3D iter 66" in captured
+            assert "C96" in captured
+            assert "HS" in captured
+
+    def test_cfl_safe_dt_cube_explicit_overrides(self):
+        """iter 66: explicit ``base_dt``, ``c_max``, ``safety`` args
+        override the defaults — pin the API surface so future
+        callers can dial these per-test-case.
+        """
+        # Larger base_dt cap allows finer resolution to use dt > 200.
+        dt = M._cfl_safe_dt_cube(36, base_dt=500.0)
+        assert 350.0 < dt < 450.0, (
+            f"With base_dt=500 at C36, dt should be the CFL "
+            f"value (~399), got {dt:.1f}"
+        )
+        # Smaller safety factor reduces dt proportionally.
+        dt_a = M._cfl_safe_dt_cube(96, safety=0.422)
+        dt_b = M._cfl_safe_dt_cube(96, safety=0.211)
+        assert abs(dt_b - 0.5 * dt_a) < 1.0, (
+            f"safety=0.211 should give dt = 0.5 * dt(safety=0.422) at C96"
+        )
+        # Larger c_max reduces dt proportionally.
+        dt_c = M._cfl_safe_dt_cube(96, c_max=320.0)
+        dt_d = M._cfl_safe_dt_cube(96, c_max=640.0)
+        assert abs(dt_d - 0.5 * dt_c) < 1.0, (
+            f"c_max=640 should give dt = 0.5 * dt(c_max=320) at C96"
+        )
+
+    def test_laplacian_visc_cube_v2_calibration(self):
+        """iter 33-39: ``_laplacian_visc_cube_v2`` returns the
+        empirically calibrated A_h values at C36, C48, C72 — the 3
+        resolutions tested in iter-33 (C72), iter-25 (C48), and
+        iter-19/24 (C36).  These values are LOAD-BEARING for the
+        production setting recommendations in ``FV3_3D.md``.
+        """
+        # The calibration table is the iter-37 finding.
+        for n, expected in [(36, 4.08e+06), (48, 6.12e+06), (72, 2.04e+07)]:
+            actual = M._laplacian_visc_cube_v2(n)
+            assert abs(actual - expected) < 1e3, (
+                f"iter-37/39 calibration: _laplacian_visc_cube_v2({n}) "
+                f"expected {expected:.3e}, got {actual:.3e}.  This is "
+                f"the empirically calibrated value from FV3_3D.md "
+                f"iter 33-37.  Updating it requires retesting."
+            )
+
+    def test_laplacian_visc_cube_v2_extrapolation_monotonic(self):
+        """iter 39: the v2 extrapolation must be MONOTONICALLY
+        INCREASING with n in the C36-C192 range.  This is the
+        opposite trend from v1 (which has A_h ∝ 1/n).
+        """
+        ns = [24, 36, 48, 60, 72, 96, 144, 192]
+        v2_values = [M._laplacian_visc_cube_v2(n) for n in ns]
+        for i in range(1, len(ns)):
+            assert v2_values[i] > v2_values[i - 1], (
+                f"v2 calibration must be monotonic in n.  At n={ns[i-1]} "
+                f"got {v2_values[i-1]:.3e}; at n={ns[i]} got "
+                f"{v2_values[i]:.3e}."
+            )
+
+    def test_auto_ah_scale_resolution_buckets(self):
+        """iter 43/44: auto-apply returns the recommended scale per
+        resolution bucket.  Pin the iter-33/37 thresholds.
+        """
+        # No env override — auto-apply per resolution.
+        # C36 → 1.0 (no change).
+        scale_36, msg_36 = M._auto_ah_scale(36, None)
+        assert scale_36 == 1.0
+        assert msg_36 is None, "C36 should NOT print an auto-apply message"
+
+        # C48 → 2.0.
+        scale_48, msg_48 = M._auto_ah_scale(48, None)
+        assert scale_48 == 2.0
+        assert msg_48 is not None and "iter-37" in msg_48
+
+        # C72 → 10.0.
+        scale_72, msg_72 = M._auto_ah_scale(72, None)
+        assert scale_72 == 10.0
+        assert msg_72 is not None and "iter-33" in msg_72
+
+        # C96 → 10.0 (continues iter-33 bucket).
+        scale_96, msg_96 = M._auto_ah_scale(96, None)
+        assert scale_96 == 10.0
+
+    def test_auto_ah_scale_explicit_override(self):
+        """iter 43/44: explicit env var overrides the auto-apply."""
+        # Even at C72 where auto would give 10.0, explicit env var wins.
+        scale, msg = M._auto_ah_scale(72, "1.0")
+        assert scale == 1.0
+        assert msg is None, "explicit override should NOT print message"
+
+        # Explicit scale=20 (above auto bucket).
+        scale, msg = M._auto_ah_scale(72, "20.0")
+        assert scale == 20.0
+        assert msg is None
+
+        # Explicit scale=1.0 at C36 — same as auto.
+        scale, msg = M._auto_ah_scale(36, "1.0")
+        assert scale == 1.0
+        assert msg is None
+
+    def test_auto_ah_scale_auto_disable_opt_out(self):
+        """iter 46: auto_disable=True returns scale=1.0 with no
+        message regardless of n.  This is the backwards-compat
+        escape hatch (codex iter-45 review).
+        """
+        # At C72 with auto_disable=True, scale=1.0 (NOT 10.0).
+        scale, msg = M._auto_ah_scale(72, env_value=None, auto_disable=True)
+        assert scale == 1.0
+        assert msg is None, "auto_disable should NOT print a message"
+
+        # At C48 with auto_disable=True, scale=1.0 (NOT 2.0).
+        scale, msg = M._auto_ah_scale(48, env_value=None, auto_disable=True)
+        assert scale == 1.0
+        assert msg is None
+
+        # At C36 with auto_disable=True, scale=1.0 (same as default).
+        scale, msg = M._auto_ah_scale(36, env_value=None, auto_disable=True)
+        assert scale == 1.0
+        assert msg is None
+
+        # Explicit env_value still wins even with auto_disable=True.
+        scale, msg = M._auto_ah_scale(72, env_value="5.0", auto_disable=True)
+        assert scale == 5.0
+        assert msg is None
+
+    def test_auto_ah_scale_message_format_iter43(self):
+        """iter 55: pin the iter-43 auto-apply MESSAGE format
+        (not just the scale value).  Catches accidental format
+        changes that would confuse users tracking the env vars.
+        """
+        # C72 message should mention iter-33 + the env-var name.
+        scale, msg = M._auto_ah_scale(72, env_value=None)
+        assert msg is not None
+        assert "iter-33" in msg, f"C72 message must reference iter-33: {msg!r}"
+        assert "LEGOESM_AH_SCALE" in msg, (
+            f"C72 message must mention LEGOESM_AH_SCALE: {msg!r}"
+        )
+        assert "10" in msg, (
+            f"C72 message must show scale value 10: {msg!r}"
+        )
+
+        # C48 message should mention iter-37 + the env-var name.
+        scale, msg = M._auto_ah_scale(48, env_value=None)
+        assert msg is not None
+        assert "iter-37" in msg, f"C48 message must reference iter-37: {msg!r}"
+        assert "LEGOESM_AH_SCALE" in msg, (
+            f"C48 message must mention LEGOESM_AH_SCALE: {msg!r}"
+        )
+        assert "2" in msg, (
+            f"C48 message must show scale value 2: {msg!r}"
+        )
+
+        # All messages should include 'override' to inform users they
+        # can opt out via the env var.
+        for n in [48, 72, 96, 144]:
+            _, msg = M._auto_ah_scale(n, env_value=None)
+            if msg is not None:
+                assert "override" in msg.lower(), (
+                    f"C{n} message must say 'override' to inform users "
+                    f"they can opt out: {msg!r}"
+                )
+
+    def test_iter43_production_guidance_end_to_end(self):
+        """iter 52: end-to-end pin of the iter-43 production
+        guidance.  When the matrix calls
+        ``ah = _laplacian_visc_cube(n) * scale`` with scale from
+        ``_auto_ah_scale(n, env_value=None)``, the resulting ``ah``
+        must match the iter-37/33-verified values:
+
+        | n  | matrix default ah | auto scale | recommended ah |
+        | 36 |   4.08e+06        |  1.0       |  4.08e+06      |
+        | 48 |   3.06e+06        |  2.0       |  6.12e+06      |
+        | 72 |   2.04e+06        | 10.0       |  2.04e+07      |
+
+        These are the LOAD-BEARING production numbers from iter
+        17/24 (C36), iter 37 (C48), iter 33 (C72).  Updating any
+        of them requires retesting the end-to-end stability and
+        cube-imprint metrics.
+        """
+        for n, scale_expected, ah_recommended in [
+            (36,  1.0,  4.08e+06),
+            (48,  2.0,  6.12e+06),
+            (72, 10.0,  2.04e+07),
+        ]:
+            scale, msg = M._auto_ah_scale(n, env_value=None)
+            assert scale == scale_expected, (
+                f"iter-43 auto-apply at C{n}: expected scale "
+                f"{scale_expected}, got {scale}"
+            )
+            ah_default = M._laplacian_visc_cube(n)
+            ah_combined = ah_default * scale
+            # 0.5% relative tolerance to absorb the FV3_3D.md
+            # documentation's rounding to 3 sig figs.
+            assert abs(ah_combined - ah_recommended) / ah_recommended < 0.005, (
+                f"iter-43 end-to-end at C{n}: matrix-default ah * "
+                f"auto-scale = {ah_combined:.3e}, expected "
+                f"{ah_recommended:.3e}.  See iter-17/24 (C36), "
+                f"iter-37 (C48), iter-33 (C72) calibration."
+            )
+
+    def test_auto_ah_scale_precedence_explicit_wins(self):
+        """iter 49 codex review: pin the precedence ordering.
+
+        Order (highest priority first):
+        1. Explicit non-empty env_value → parse as float, use it.
+        2. auto_disable=True → 1.0 (no message).
+        3. Auto-apply bucket per resolution.
+
+        Empty / whitespace env_value falls through to (2) or (3).
+        """
+        # Explicit "10.0" at C72 with auto_disable=True → 10.0 (rule 1).
+        scale, msg = M._auto_ah_scale(72, env_value="10.0", auto_disable=True)
+        assert scale == 10.0
+        assert msg is None
+
+        # Explicit "2.0" at C36 with auto_disable=True → 2.0 (rule 1).
+        scale, msg = M._auto_ah_scale(36, env_value="2.0", auto_disable=True)
+        assert scale == 2.0
+        assert msg is None
+
+        # Empty env_value + auto_disable=True at C72 → 1.0 (rule 2).
+        scale, msg = M._auto_ah_scale(72, env_value="", auto_disable=True)
+        assert scale == 1.0
+        assert msg is None
+
+        # Empty env_value + auto_disable=False at C72 → 10.0 (rule 3).
+        scale, msg = M._auto_ah_scale(72, env_value="", auto_disable=False)
+        assert scale == 10.0
+        assert msg is not None and "iter-33" in msg
+
+    def test_auto_ah_scale_edge_cases(self):
+        """iter 45 codex review: edge-case handling for env_value."""
+        import pytest as _pytest
+
+        # Empty env var → treated as unset (auto-apply).
+        scale, msg = M._auto_ah_scale(72, "")
+        assert scale == 10.0, "empty env var should fall through to auto"
+        assert msg is not None and "iter-33" in msg
+
+        # Whitespace-only env var → also treated as unset.
+        scale, msg = M._auto_ah_scale(72, "   ")
+        assert scale == 10.0
+        assert msg is not None
+
+        # Negative scale → ValueError.
+        with _pytest.raises(ValueError, match="finite positive"):
+            M._auto_ah_scale(72, "-1.0")
+
+        # Zero scale → ValueError (would zero out viscosity).
+        with _pytest.raises(ValueError, match="finite positive"):
+            M._auto_ah_scale(72, "0")
+
+        # NaN → ValueError.
+        with _pytest.raises(ValueError, match="finite positive"):
+            M._auto_ah_scale(72, "nan")
+
+        # inf → ValueError.
+        with _pytest.raises(ValueError, match="finite positive"):
+            M._auto_ah_scale(72, "inf")
+
+        # Non-numeric → ValueError (from float() conversion).
+        with _pytest.raises(ValueError):
+            M._auto_ah_scale(72, "not-a-number")
+
+    def test_laplacian_visc_cube_v2_extrapolation_powerlaw(self):
+        """iter 39: the v2 log-linear extrapolation should produce
+        ``A_h ∝ n^2.32`` between C36 and C72.  Pin the slope.
+        """
+        import math
+        a36 = M._laplacian_visc_cube_v2(36)
+        a72 = M._laplacian_visc_cube_v2(72)
+        slope = math.log10(a72 / a36) / math.log10(72.0 / 36.0)
+        assert abs(slope - 2.322) < 0.01, (
+            f"iter 39 extrapolation slope: expected ~2.322 (i.e. "
+            f"A_h ~ n^2.322), got {slope:.4f}.  See FV3_3D.md iter 39."
+        )
+
     def test_cube_has_strict_superset_of_latlon_dissipation(self):
         """Cube uses 4 dissipation terms; latlon uses 1.
 
@@ -2244,22 +2794,27 @@ class TestHeldSuarezDissipationImbalance:
                 f"requires a Fortran-reference operator."
             )
 
-    def _find_branch_body(self, branch_grid: str):
+    def _find_branch_body(self, branch_grid: str, fn_name: str = "run_held_suarez"):
         """Return the AST nodes that make up the branch body for
-        ``tc.grid_type == <branch_grid>`` inside ``run_held_suarez``.
-        Used by iter-60 to walk the actual config-call AST.
+        ``tc.grid_type == <branch_grid>`` inside ``M.<fn_name>``.
+
+        iter-60: scans run_held_suarez.
+        iter-94: parameterized to also support run_baroclinic.
         """
         import ast
         import inspect
-        src = inspect.getsource(M.run_held_suarez)
+        fn = getattr(M, fn_name)
+        src = inspect.getsource(fn)
         tree = ast.parse(src)
-        # Find run_held_suarez.
+        # Find the function.
         run_hs = None
         for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == "run_held_suarez":
+            if isinstance(node, ast.FunctionDef) and node.name == fn_name:
                 run_hs = node
                 break
-        assert run_hs is not None
+        assert run_hs is not None, (
+            f"could not locate function {fn_name!r} in module"
+        )
 
         # Walk if-elif chain.
         def _matches(test, value):
@@ -2367,7 +2922,6 @@ class TestHeldSuarezDissipationImbalance:
         # Each local assignment has the right RHS.
         hd_rhs = self._resolve_local_assignment(body, "hd")
         dd_rhs = self._resolve_local_assignment(body, "dd")
-        ah_rhs = self._resolve_local_assignment(body, "ah")
         n_rhs = self._resolve_local_assignment(body, "n")
 
         assert hd_rhs is not None and self._is_call_to(hd_rhs, "_hyperdiff_cube", "n"), (
@@ -2378,9 +2932,35 @@ class TestHeldSuarezDissipationImbalance:
             "iter-60 codex MEDIUM: ``dd = _div_damp_cube(n)`` "
             "expected in cube HS branch"
         )
-        assert ah_rhs is not None and self._is_call_to(ah_rhs, "_laplacian_visc_cube", "n"), (
-            "iter-60 codex MEDIUM: ``ah = _laplacian_visc_cube(n)`` "
-            "expected in cube HS branch"
+        # For ``ah``: iter-34 added a ``LEGOESM_AH_SCALE`` env-var
+        # multiply for C72+ stability (see FV3_3D.md iter 33-37).
+        # The cube HS branch may have multiple ``ah = ...`` assignments
+        # (one for the helper call, one for the env-var multiply).
+        # Match the latlon test's pattern: ANY assignment must invoke
+        # the canonical helper.
+        import ast
+        ah_assignments = []
+        for stmt in body:
+            for node in ast.walk(stmt):
+                if (
+                    isinstance(node, ast.Assign)
+                    and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name)
+                    and node.targets[0].id == "ah"
+                ):
+                    ah_assignments.append(node.value)
+        assert ah_assignments, (
+            "iter-60/iter-34 codex: cube HS branch must compute an "
+            "``ah`` Laplacian-viscosity local"
+        )
+        ah_helper_used = any(
+            "_laplacian_visc_cube" in ast.unparse(rhs)
+            for rhs in ah_assignments
+        )
+        assert ah_helper_used, (
+            f"iter-60/iter-34 codex: cube ``ah`` should derive from "
+            f"``_laplacian_visc_cube(...)`` somewhere in the chain.  "
+            f"Saw: {[ast.unparse(rhs) for rhs in ah_assignments]}"
         )
         # ``n = int(tc.resolution[1:])`` is the canonical idiom for
         # parsing the cube resolution string (e.g. ``C48`` → 48).
@@ -2421,6 +3001,84 @@ class TestHeldSuarezDissipationImbalance:
                 f"must reference local alias ``{expected_alias}``, "
                 f"got ``{ast.unparse(value)}``"
             )
+
+    def test_baroclinic_cube_branch_uses_resolve_dt_cube_helper(self):
+        """iter 89 / iter 94: parallel to
+        test_cube_branch_dt_uses_resolve_dt_cube_helper but for the
+        baroclinic function.  Catches the same silent-revert
+        regression mode for the second cube hydrostatic call site
+        (line ~3197 in matrix).
+
+        iter 94 upgraded from textual to AST walk after extending
+        _find_branch_body to support multiple functions.
+        """
+        import ast
+        body = self._find_branch_body("cubed_sphere", fn_name="run_baroclinic")
+        # Walk all dt assignments in the cube branch.
+        dt_assignments = []
+        for stmt in body:
+            for node in ast.walk(stmt):
+                if (
+                    isinstance(node, ast.Assign)
+                    and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name)
+                    and node.targets[0].id == "dt"
+                ):
+                    dt_assignments.append(node.value)
+        assert dt_assignments, (
+            "iter-66/67/89/94: run_baroclinic cube branch must compute "
+            "a ``dt`` local"
+        )
+        helper_used = any(
+            "_resolve_dt_cube" in ast.unparse(rhs)
+            for rhs in dt_assignments
+        )
+        assert helper_used, (
+            f"iter-66/67/89/94: run_baroclinic cube branch's ``dt`` "
+            f"must derive from ``_resolve_dt_cube(...)`` (which honors "
+            f"LEGOESM_HS_CUBE_DT_CFL).  A future edit that reverts to "
+            f"``dt = 200.0`` would silently disable the env var.  "
+            f"Saw: {[ast.unparse(rhs) for rhs in dt_assignments]}"
+        )
+
+    def test_cube_branch_dt_uses_resolve_dt_cube_helper(self):
+        """iter 68: pin that the cube HS branch's ``dt`` assignment
+        invokes ``_resolve_dt_cube`` rather than reverting to a
+        hardcoded ``200.0``.
+
+        The iter-66/67 wiring depends on this dataflow: a future
+        edit that replaces ``dt = _resolve_dt_cube(n, ...)`` with
+        ``dt = 200.0`` would silently disable the
+        ``LEGOESM_HS_CUBE_DT_CFL`` env var without changing any
+        other test result.  This catches that regression.
+        """
+        import ast
+        body = self._find_branch_body("cubed_sphere")
+        # Walk for any ``dt = ...`` assignment in the cube branch.
+        dt_assignments = []
+        for stmt in body:
+            for node in ast.walk(stmt):
+                if (
+                    isinstance(node, ast.Assign)
+                    and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name)
+                    and node.targets[0].id == "dt"
+                ):
+                    dt_assignments.append(node.value)
+        assert dt_assignments, (
+            "iter-66/67: cube HS branch must compute a ``dt`` local"
+        )
+        # At least one assignment must invoke the iter-67 helper.
+        helper_used = any(
+            "_resolve_dt_cube" in ast.unparse(rhs)
+            for rhs in dt_assignments
+        )
+        assert helper_used, (
+            f"iter-66/67: cube HS branch's ``dt`` must derive from "
+            f"``_resolve_dt_cube(...)`` (which honors "
+            f"LEGOESM_HS_CUBE_DT_CFL).  Saw: "
+            f"{[ast.unparse(rhs) for rhs in dt_assignments]}"
+        )
 
     def test_latlon_branch_config_wires_A_h_via_local_alias(self):
         """iter-60 codex HIGH: pin that the latlon HS branch

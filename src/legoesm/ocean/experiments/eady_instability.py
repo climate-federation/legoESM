@@ -81,7 +81,7 @@ class EadyInstabilityConfig:
 
     # Thermal wind parameters
     alpha_T: float = 2.0e-4        # Thermal expansion [1/K] (matches LinearEOS)
-    rho_0: float = 1025.0          # = eos.rho_0
+    rho_0: float = constants.rho_ocean
 
     # Perturbation to seed instability
     eta_perturbation_m: float = 0.01  # SSH perturbation amplitude [m]

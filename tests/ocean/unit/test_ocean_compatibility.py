@@ -14,6 +14,7 @@ import pytest
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.ocean.eos import wright_eos, compute_hydrostatic_pressure
 from legoesm.ocean.vertical import (
@@ -322,11 +323,11 @@ class TestDifferentiability:
             rho = jnp.broadcast_to(rho_val, (5,))
             p = compute_hydrostatic_pressure(
                 rho, jnp.array(0.0), z_coord.dz_ref,
-                jnp.array(1.0), rho_ref=1025.0,
+                jnp.array(1.0), rho_ref=constants.rho_ocean,
             )
             return jnp.sum(p)
 
-        grad = jax.grad(loss)(jnp.array(1025.0))
+        grad = jax.grad(loss)(jnp.array(constants.rho_ocean))
         assert jnp.isfinite(grad)
 
     def test_grad_through_tendencies(self, state, grid, cdgrid, z_coord, config):

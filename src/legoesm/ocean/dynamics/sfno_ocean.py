@@ -27,6 +27,7 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.grids.gaussian import (
     GaussianGrid,
     sh_analysis,
@@ -85,8 +86,8 @@ class SFNOOceanConfig(NamedTuple):
     )
     mode: str = "state_update"
     dt_sfno: float = 3600.0
-    g: float = 9.80616  # = constants.g
-    rho_0: float = 1025.0        # = eos.rho_0
+    g: float = constants.g
+    rho_0: float = constants.rho_ocean
     correct_volume: bool = True
     correct_heat: bool = True
     correct_salt: bool = True

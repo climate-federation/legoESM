@@ -78,12 +78,16 @@ from legoesm.core.operators_voronoi import (
     divergence_cell,
     gradient_edge,
     tangential_velocity,
+    vector_laplacian_del2,
+    vector_laplacian_del4,
     edge_thickness as _edge_avg,
 )
 from legoesm.ocean.dynamics.eta_floor import (
     clamp_and_redistribute as _clamp_redistribute,
 )
 from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas
+from legoesm.ocean.dynamics.mpas_partial_cell_helpers import min_cell_to_edge
+from legoesm.ocean.vertical import OceanPartialCellCoordinate
 
 
 def _depth_average_to_edges(
@@ -91,13 +95,43 @@ def _depth_average_to_edges(
     h_k: jnp.ndarray,
     H_e: jnp.ndarray,
     mesh: VoronoiMesh,
+    *,
+    partial_cells: bool = False,
 ) -> jnp.ndarray:
-    """Thickness-weighted depth-average of edge-normal velocity."""
-    c1 = mesh.cellsOnEdge[0]
-    c2 = mesh.cellsOnEdge[1]
-    h_e_k = 0.5 * (h_k[c1] + h_k[c2])  # (nEdges, nlev)
+    """Thickness-weighted depth-average of edge-normal velocity.
+
+    On partial cells, the per-level edge thickness MUST use the min-rule
+    (MITgcm hFacZ) so the depth-mean matches what the baroclinic step's
+    ``F_slow_u`` is computed against (see ``ocean_pe_mpas.py:186``).
+    Using a centered ``0.5*(h[c1]+h[c2])`` here lets phantom transport
+    leak through a step edge — drives the seamount rest-state explosion.
+    """
+    if partial_cells:
+        h_e_k = min_cell_to_edge(h_k, mesh)
+    else:
+        c1 = mesh.cellsOnEdge[0]
+        c2 = mesh.cellsOnEdge[1]
+        h_e_k = 0.5 * (h_k[c1] + h_k[c2])  # (nEdges, nlev)
     Hu = jnp.sum(u_3d * h_e_k, axis=1)
     return Hu / jnp.maximum(H_e, 1.0e-10)
+
+
+def _edge_H_min_rule(
+    h_k: jnp.ndarray,
+    mesh: VoronoiMesh,
+    min_water_col,
+) -> jnp.ndarray:
+    """Column-sum of min-rule per-level edge thickness — the partial-cell
+    analog of ``_edge_avg(eta+H_bathy)``.
+
+    On partial cells, the barotropic Helmholtz operator must use this
+    flux-closure H_e (matching the baroclinic step's H_e) so that
+    ``c² = g·H_min`` is the correct gravity-wave speed across step
+    edges and the predictor-corrector eta/u_bar update stays
+    consistent with the slow-forcing F_slow_u.
+    """
+    h_e_k = min_cell_to_edge(h_k, mesh)
+    return jnp.maximum(jnp.sum(h_e_k, axis=1), min_water_col)
 
 
 def _make_helmholtz(
@@ -237,9 +271,20 @@ def barotropic_implicit_mpas(
         eta_old, H_bathy, z_coord,
         min_water_column_m=config.min_water_column_m,
     )  # (nCells, nlev)
-    H_total_old = jnp.maximum(eta_old + H_bathy, min_water_col)
-    H_e_old = _edge_avg(H_total_old, mesh)
-    u_bar_old = _depth_average_to_edges(u_3d, h_k_old, H_e_old, mesh)
+    # Partial-cell H_e: use the min-rule column-sum of per-level edge
+    # thickness so the Helmholtz operator's gravity-wave speed matches
+    # the flux closure at step edges (consistent with the baroclinic
+    # step's H_e at ocean_pe_mpas.py:186).  On legacy z-star (every
+    # column full) min-rule equals 0.5*(H[c1]+H[c2]) bit-exactly.
+    partial_cells = isinstance(z_coord, OceanPartialCellCoordinate)
+    if partial_cells:
+        H_e_old = _edge_H_min_rule(h_k_old, mesh, min_water_col).astype(eta_dtype)
+    else:
+        H_total_old = jnp.maximum(eta_old + H_bathy, min_water_col)
+        H_e_old = _edge_avg(H_total_old, mesh)
+    u_bar_old = _depth_average_to_edges(
+        u_3d, h_k_old, H_e_old, mesh, partial_cells=partial_cells,
+    ).astype(eta_dtype)
 
     # ----- Step 2: predictor (Heun on Coriolis, OLD η gradient) ---------
     eta_filled_old = fill_land_cells_mpas(eta_old, mask, c1, c2)
@@ -311,6 +356,46 @@ def barotropic_implicit_mpas(
 
     u_bar_new = (u_pred - theta_pgf * dt_t * g * delta_grad) * edge_mask
 
+    # Barotropic-mode lateral viscosity on u_bar — damps modes that
+    # have ∇·(H·u_bar)≈0 (so the Helmholtz solve doesn't see them) and
+    # f·v_t cancellations near step edges (so the predictor-corrector
+    # doesn't damp them either).  On flat bottom the implicit Helmholtz
+    # is sufficient (project_mpas_barotropic_noise.md, 5-yr σ plateau);
+    # on partial-cell ETOPO the topographic step edges energize a
+    # rotational u_bar null mode that grows e-folding ~5 days
+    # (project_mpas_etopo_instability.md).  Mirrors the explicit-substep
+    # path (barotropic_mpas.py:272) and the lat-lon Follow-up C
+    # recommendation (docs/issues/barotropic_mode_noise.md §"Residual").
+    A_baro_visc = jnp.asarray(
+        getattr(config, "barotropic_u_viscosity", 0.0), dtype=eta_dtype,
+    )
+    # Per-edge equatorial-boost factor — same mechanism as 3D A_h.
+    # Damps the equatorial f→0 u_baro mode that the implicit-CN
+    # solver's Coriolis predictor-corrector cannot catch.  See
+    # project_mpas_etopo_instability.md §"equatorial mode".
+    _eq_boost = jnp.asarray(
+        getattr(config, "equatorial_visc_boost", 0.0), dtype=eta_dtype,
+    )
+    _cos2 = jnp.cos(mesh.latEdge.astype(eta_dtype)) ** 2
+    _lat_factor = 1.0 + _eq_boost * _cos2  # (nEdges,)
+    if config.barotropic_u_viscosity > 0.0:
+        lap_u = vector_laplacian_del2(u_bar_new, mesh).astype(eta_dtype)
+        u_bar_new = (
+            u_bar_new + dt_t * A_baro_visc * _lat_factor * lap_u
+        ) * edge_mask
+
+    # Biharmonic ∇⁴ damping on u_bar — preferred over harmonic for the
+    # partial-cell rotational null mode (dycore-expert review 2026-05-03).
+    # Scale-selective: damps grid-scale much harder than mesoscale, so
+    # safe to use at production strength.  ``vector_laplacian_del4``
+    # returns ``-∇²(∇²u)`` so adding ``+dt·K·del4`` gives stable decay.
+    K_baro_bih = jnp.asarray(
+        getattr(config, "barotropic_u_biharmonic", 0.0), dtype=eta_dtype,
+    )
+    if config.barotropic_u_biharmonic > 0.0:
+        del4_u = vector_laplacian_del4(u_bar_new, mesh).astype(eta_dtype)
+        u_bar_new = (u_bar_new + dt_t * K_baro_bih * del4_u) * edge_mask
+
     # Bottom drag enters via F_slow_u (depth-mean of the 3D bottom-cell
     # drag set in ocean_pe_mpas.py); applying it again here would
     # double-count. The lat-lon implicit solver omits it for the same
@@ -318,8 +403,17 @@ def barotropic_implicit_mpas(
     # as an open issue.
 
     # ----- Step 6: time-averaged transport for tracer flux --------------
-    H_total_new = jnp.maximum(eta_new + H_bathy, min_water_col)
-    H_e_new = _edge_avg(H_total_new, mesh)
+    # Same partial-cell H_e convention as step 1 — use min-rule so the
+    # tracer-flux divergence matches the η evolution exactly.
+    if partial_cells:
+        h_k_new = compute_layer_thickness(
+            eta_new, H_bathy, z_coord,
+            min_water_column_m=config.min_water_column_m,
+        )
+        H_e_new = _edge_H_min_rule(h_k_new, mesh, min_water_col).astype(eta_dtype)
+    else:
+        H_total_new = jnp.maximum(eta_new + H_bathy, min_water_col)
+        H_e_new = _edge_avg(H_total_new, mesh)
     Hu_avg = (
         (1.0 - theta_eta) * H_e_old * u_bar_old
         + theta_eta * H_e_new * u_bar_new

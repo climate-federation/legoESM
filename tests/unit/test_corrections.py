@@ -16,6 +16,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from legoesm import constants
+
 jax.config.update("jax_enable_x64", True)
 
 
@@ -46,7 +48,7 @@ class TestGWDDissipationSign:
             jnp.linspace(30000.0, 0.0, nlev + 1)[None, :], (ncol, nlev + 1)
         )
         z_full = 0.5 * (z_half[:, :-1] + z_half[:, 1:])
-        rho = p_full / (287.0 * T)
+        rho = p_full / (constants.R_d * T)
         lat = jnp.linspace(-jnp.pi / 4, jnp.pi / 4, ncol)
         return u, v, T, p_full, p_half, z_full, z_half, rho, lat
 
@@ -252,7 +254,7 @@ class TestGMRedi:
 
         # Uniform density in horizontal => zero slopes
         rho = jnp.broadcast_to(
-            jnp.linspace(1025.0, 1027.0, shape[-1])[None, None, None, :],
+            jnp.linspace(constants.rho_ocean, 1027.0, shape[-1])[None, None, None, :],
             shape,
         )
         T = jnp.broadcast_to(
@@ -277,7 +279,7 @@ class TestGMRedi:
         from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
         grid, z_coord, jacobian, shape = self._make_ocean_setup()
 
-        rho = jnp.ones(shape) * 1025.0
+        rho = jnp.ones(shape) * constants.rho_ocean
         T = jnp.ones(shape) * 15.0
         S = jnp.ones(shape) * 35.0
         u = jnp.zeros(shape)
@@ -304,7 +306,7 @@ class TestGMRedi:
         # (tilted isopycnals, non-zero S_y)
         lat_profile = jnp.linspace(-1.0, 1.0, n)[None, None, :, None]
         vert_profile = jnp.linspace(0.0, 2.0, nlev)[None, None, None, :]
-        rho = 1025.0 + vert_profile + 0.1 * lat_profile
+        rho = constants.rho_ocean + vert_profile + 0.1 * lat_profile
         rho = jnp.broadcast_to(rho, shape).copy()
 
         # Tracer with horizontal gradient (so slopes matter)

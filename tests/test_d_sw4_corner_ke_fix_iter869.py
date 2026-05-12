@@ -43,6 +43,7 @@ import numpy as np
 import jax.numpy as jnp
 import pytest
 
+from legoesm import constants
 from legoesm.core.fv3_sw_core import _apply_legacy_d_sw4_corner_ke_fix
 
 
@@ -165,11 +166,11 @@ def test_d_sw_native_default_off_matches_pre_iter869():
     va = jnp.asarray(rng.standard_normal((6, n, n)))
 
     h_a, u_a, v_a = _d_sw_native(
-        h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, 100.0, 9.80616,
+        h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, 100.0, constants.g,
         div_damp=0.0, d2_bg=0.0, dddmp=0.0, d4_bg=0.16, nord=1,
         damp_v=0.0, nord_v=0)
     h_b, u_b, v_b = _d_sw_native(
-        h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, 100.0, 9.80616,
+        h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, 100.0, constants.g,
         div_damp=0.0, d2_bg=0.0, dddmp=0.0, d4_bg=0.16, nord=1,
         damp_v=0.0, nord_v=0,
         apply_legacy_d_sw4_corner_ke_fix=False)
@@ -207,12 +208,12 @@ def test_d_sw_native_flag_on_legacy_changes_winds():
     va = jnp.asarray(rng.standard_normal((6, n, n)))
 
     h_off, u_off, v_off = _d_sw_native(
-        h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, 100.0, 9.80616,
+        h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, 100.0, constants.g,
         div_damp=0.0, d2_bg=0.0, dddmp=0.0, d4_bg=0.16, nord=1,
         damp_v=0.0, nord_v=0,
         apply_legacy_d_sw4_corner_ke_fix=False)
     h_on, u_on, v_on = _d_sw_native(
-        h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, 100.0, 9.80616,
+        h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, 100.0, constants.g,
         div_damp=0.0, d2_bg=0.0, dddmp=0.0, d4_bg=0.16, nord=1,
         damp_v=0.0, nord_v=0,
         apply_legacy_d_sw4_corner_ke_fix=True)
@@ -253,12 +254,12 @@ def test_d_sw_native_flag_on_duogrid_no_change():
     va = jnp.asarray(rng.standard_normal((6, n, n)))
 
     h_off, u_off, v_off = _d_sw_native(
-        h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, 100.0, 9.80616,
+        h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, 100.0, constants.g,
         div_damp=0.0, d2_bg=0.0, dddmp=0.0, d4_bg=0.16, nord=1,
         damp_v=0.0, nord_v=0,
         apply_legacy_d_sw4_corner_ke_fix=False)
     h_on, u_on, v_on = _d_sw_native(
-        h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, 100.0, 9.80616,
+        h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, 100.0, constants.g,
         div_damp=0.0, d2_bg=0.0, dddmp=0.0, d4_bg=0.16, nord=1,
         damp_v=0.0, nord_v=0,
         apply_legacy_d_sw4_corner_ke_fix=True)

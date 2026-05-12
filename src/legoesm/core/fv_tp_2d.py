@@ -86,11 +86,194 @@ def _pert_ppm_iv0(q, bl, br):
     return bl_out, br_out
 
 
+def apply_hord8_limiter(bl, br, dm):
+    """FV3_3D iter 585: FV3 iord=8 Lin (1996) monotonicity limiter
+    (tp_core.F90:548-553).
+
+    Alternative to ``_pert_ppm`` (iord=9).  iord=8 bounds bl, br by
+    ±2·|dm| where dm is the cell-center monotone slope:
+
+        xt = 2·dm
+        bl = -sign(min(|xt|, |al - q|), xt)
+        br =  sign(min(|xt|, |al' - q|), xt)
+
+    Since legoESM's bl = al - q and br = al' - q are passed directly,
+    we re-express as:
+
+        bl_out = clip(bl, -2|dm|, 2|dm|) with sign-preserved
+        br_out = clip(br, -2|dm|, 2|dm|) with sign-preserved
+
+    But the FV3 form is more subtle: it forces the bl/br sign to match
+    xt's sign (i.e., the monotone slope sign).
+
+    Parameters
+    ----------
+    bl, br : jax.Array
+        Standard PPM left/right cell-edge perturbations (al-q, al'-q).
+    dm : jax.Array
+        Cell-center monotone slope.
+
+    Returns
+    -------
+    bl_out, br_out : jax.Array
+        iord=8 limited values.
+
+    Notes
+    -----
+    NOT yet wired into the default transport path (which uses iord=9
+    via _pert_ppm).  Exposed as a utility for users who want the iord=8
+    variant for tracers (e.g., as FV3 namelist sets hord_tr=8 in some
+    configs).
+    """
+    xt = 2.0 * dm
+    bl_out = -jnp.sign(xt) * jnp.minimum(jnp.abs(xt), jnp.abs(bl))
+    br_out = jnp.sign(xt) * jnp.minimum(jnp.abs(xt), jnp.abs(br))
+    # Fortran flips sign on bl: bl uses -sign(min(|xt|,|al-q|), xt).
+    # al-q corresponds to bl here.  Note xt = 2*dm; sign(xt)=sign(dm).
+    # The -sign accounts for bl pointing in the OPPOSITE direction of dm
+    # (al at i-1/2 is one cell to the left → bl = al - q < 0 typically
+    #  when dm > 0).
+    return bl_out, br_out
+
+
+def apply_hord10_limiter(bl, br, dm, q):
+    """FV3_3D iter 593: FV3 iord=10 Lin+Rood (1996) limiter with
+    pmp/lac extra constraints (tp_core.F90:554-572).
+
+    The most subtle of FV3's hord variants.  Uses one-sided differences
+    ``dq[i] = 2·(q[i+1] - q[i])`` to build pmp (positive max) and lac
+    (lower asymmetric constraint) bounds that prevent new extrema while
+    allowing tighter convergence than iord=9.
+
+    Algorithm:
+        dq[i] = 2·(q[i+1] - q[i])
+        # near-flat region: zero bl, br
+        if |dm[i-1]| + |dm[i]| + |dm[i+1]| < near_zero:
+            bl, br = 0, 0
+        # new extremum: apply pmp/lac bounds
+        elif |3·(bl+br)| > |bl-br|:
+            pmp_2 = dq[i-1]; lac_2 = pmp_2 - 0.75·dq[i-2]
+            br = min(max(0, pmp_2, lac_2),
+                     max(br, min(0, pmp_2, lac_2)))
+            pmp_1 = -dq[i]; lac_1 = pmp_1 + 0.75·dq[i+1]
+            bl = min(max(0, pmp_1, lac_1),
+                     max(bl, min(0, pmp_1, lac_1)))
+
+    Parameters
+    ----------
+    bl, br, dm, q : jax.Array, shape (..., N)
+        Cell-center perturbations, monotone slope, and cell values
+        along the transport axis (last dimension).  N must be ≥ 5
+        (need 2 ghosts on each side for dq stencil).
+
+    Returns
+    -------
+    bl_out, br_out : jax.Array, same shape as inputs.
+
+    Notes
+    -----
+    NOT yet wired into the default transport path.  Exposed as a
+    utility.  Interior cells [2:-2] are limited; boundary cells
+    keep their original bl, br (caller's responsibility to handle
+    halos / pad if needed).
+    """
+    near_zero = 1e-30
+    # dq[i] = 2·(q[i+1] - q[i]) — needs N+1 q values; truncate.
+    # Build dq along last axis.
+    dq = 2.0 * (q[..., 1:] - q[..., :-1])  # shape (..., N-1)
+
+    # For interior cells i ∈ [2, N-3], we need:
+    #   dm[i-1], dm[i], dm[i+1]
+    #   dq[i-2], dq[i-1], dq[i], dq[i+1]
+    # Build aligned slices for interior region.
+    bl_i = bl[..., 2:-2]
+    br_i = br[..., 2:-2]
+    dm_im1 = dm[..., 1:-3]
+    dm_i = dm[..., 2:-2]
+    dm_ip1 = dm[..., 3:-1]
+    dq_im2 = dq[..., :-3]
+    dq_im1 = dq[..., 1:-2]
+    dq_i = dq[..., 2:-1]
+    dq_ip1 = dq[..., 3:]
+
+    sum_dm = jnp.abs(dm_im1) + jnp.abs(dm_i) + jnp.abs(dm_ip1)
+    is_flat = sum_dm < near_zero
+    has_new_extremum = jnp.abs(3.0 * (bl_i + br_i)) > jnp.abs(bl_i - br_i)
+
+    pmp_2 = dq_im1
+    lac_2 = pmp_2 - 0.75 * dq_im2
+    br_clipped = jnp.minimum(
+        jnp.maximum(jnp.maximum(0.0, pmp_2), lac_2),
+        jnp.maximum(br_i, jnp.minimum(jnp.minimum(0.0, pmp_2), lac_2)),
+    )
+    pmp_1 = -dq_i
+    lac_1 = pmp_1 + 0.75 * dq_ip1
+    bl_clipped = jnp.minimum(
+        jnp.maximum(jnp.maximum(0.0, pmp_1), lac_1),
+        jnp.maximum(bl_i, jnp.minimum(jnp.minimum(0.0, pmp_1), lac_1)),
+    )
+
+    bl_new = jnp.where(
+        is_flat, 0.0,
+        jnp.where(has_new_extremum, bl_clipped, bl_i),
+    )
+    br_new = jnp.where(
+        is_flat, 0.0,
+        jnp.where(has_new_extremum, br_clipped, br_i),
+    )
+
+    # Re-assemble: keep boundary cells unchanged, update interior.
+    bl_out = bl.at[..., 2:-2].set(bl_new)
+    br_out = br.at[..., 2:-2].set(br_new)
+    return bl_out, br_out
+
+
+def apply_hord11_limiter(bl, br, dm, ppm_fac: float = 1.5):
+    """FV3_3D iter 592: FV3 iord=11 limiter (tp_core.F90:573-579).
+
+    Same form as iord=8 (iter 585) but with a configurable factor
+    ``ppm_fac`` instead of fixed 2.0.  FV3 default ``ppm_fac = 1.5``
+    (tp_core.F90:35).  Called "emulation of 2nd van Leer scheme using
+    PPM codes".
+
+    Formula:
+        xt = ppm_fac · dm
+        bl = -sign(min(|xt|, |al - q|), xt)
+        br =  sign(min(|xt|, |al' - q|), xt)
+
+    Parameters
+    ----------
+    bl, br : jax.Array
+        Standard PPM left/right cell-edge perturbations.
+    dm : jax.Array
+        Cell-center monotone slope.
+    ppm_fac : float, default 1.5
+        FV3's ppm_fac parameter, "nonlinear scheme limiter:
+        between 1 and 2" (tp_core.F90:35 comment).
+
+    Returns
+    -------
+    bl_out, br_out : jax.Array
+        iord=11 limited values.
+
+    Notes
+    -----
+    NOT yet wired into the default transport path (still iord=9).
+    Exposed as a utility for users who want iord=11 for tracers.
+    With ``ppm_fac=2.0`` this is exactly iord=8 (iter 585).
+    """
+    xt = ppm_fac * dm
+    bl_out = -jnp.sign(xt) * jnp.minimum(jnp.abs(xt), jnp.abs(bl))
+    br_out = jnp.sign(xt) * jnp.minimum(jnp.abs(xt), jnp.abs(br))
+    return bl_out, br_out
+
+
 def _ppm_1d(q, n, off_left=None, off_right=None,
             off_left_d1=None, off_right_d1=None,
             use_duogrid=False,
             apply_fortran_xppm_boundary=False,
-            bounded_domain=False):
+            bounded_domain=False,
+            hord: int = 12):
     """PPM bl/br along axis=1 with hord=9 + position-aware boundaries.
 
     Parameters
@@ -311,8 +494,28 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
     bl = al_L - q_c
     br = al_R - q_c
 
-    # pert_ppm(iv=0): positive definite constraint (tp_core.F90:610)
-    bl, br = _pert_ppm_iv0(q_c, bl, br)
+    # FV3_3D iter 595: hord-dispatched limiter (default hord=12 = iv=0
+    # positive-def, preserving pre-iter-595 behavior).
+    # dm has shape (6, n+4, M); q_c is qe[:, 2:-2, :] → cells at padded
+    # indices 2..n+3 → dm at those positions is dm[:, 1:n+3, :].
+    if hord == 8:
+        dm_c = dm[:, 1:n + 3, :]
+        bl, br = apply_hord8_limiter(bl, br, dm_c)
+    elif hord == 9:
+        bl, br = _pert_ppm(bl, br)
+    elif hord == 10:
+        dm_c = dm[:, 1:n + 3, :]
+        bl, br = apply_hord10_limiter(bl, br, dm_c, q_c)
+    elif hord == 11:
+        dm_c = dm[:, 1:n + 3, :]
+        bl, br = apply_hord11_limiter(bl, br, dm_c)
+    elif hord == 12:
+        # pert_ppm(iv=0): positive definite constraint (tp_core.F90:610)
+        bl, br = _pert_ppm_iv0(q_c, bl, br)
+    else:
+        raise ValueError(
+            f"hord must be one of {{8, 9, 10, 11, 12}}; got {hord}"
+        )
 
     # Iter-888: optional Fortran-faithful boundary `bl/br` overrides
     # via the s11/s14/s15 + 4-point xt formulas (tp_core.F90:614-628
@@ -470,7 +673,8 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
 def _xppm(q_h2, crx, n, off_left=None, off_right=None,
           off_left_d1=None, off_right_d1=None, use_duogrid=False,
           apply_fortran_xppm_boundary=False,
-          bounded_domain=False):
+          bounded_domain=False,
+          hord: int = 12):
     """PPM in x with hord=9 Courant-number integration.
 
     FV3 tp_core.F90 xppm lines 670-677: uses raw Courant number ``crx``
@@ -495,7 +699,8 @@ def _xppm(q_h2, crx, n, off_left=None, off_right=None,
                            use_duogrid=use_duogrid,
                            apply_fortran_xppm_boundary=(
                                apply_fortran_xppm_boundary),
-                           bounded_domain=bounded_domain)
+                           bounded_domain=bounded_domain,
+                           hord=hord)
     bl_L, br_L, q_L = bl[:, :n+1, :], br[:, :n+1, :], q_c[:, :n+1, :]
     bl_R, br_R, q_R = bl[:, 1:n+2, :], br[:, 1:n+2, :], q_c[:, 1:n+2, :]
 
@@ -507,7 +712,8 @@ def _xppm(q_h2, crx, n, off_left=None, off_right=None,
 def _yppm(q_h2, cry, n, off_left=None, off_right=None,
           off_left_d1=None, off_right_d1=None, use_duogrid=False,
           apply_fortran_xppm_boundary=False,
-          bounded_domain=False):
+          bounded_domain=False,
+          hord: int = 12):
     """PPM in y with hord=9 Courant-number integration.
 
     Iter-888b: see ``_xppm`` docstring for the
@@ -521,7 +727,8 @@ def _yppm(q_h2, cry, n, off_left=None, off_right=None,
                            use_duogrid=use_duogrid,
                            apply_fortran_xppm_boundary=(
                                apply_fortran_xppm_boundary),
-                           bounded_domain=bounded_domain)
+                           bounded_domain=bounded_domain,
+                           hord=hord)
     bl_L, br_L, q_L = bl[:, :n+1, :], br[:, :n+1, :], q_c[:, :n+1, :]
     bl_R, br_R, q_R = bl[:, 1:n+2, :], br[:, 1:n+2, :], q_c[:, 1:n+2, :]
     fy_pos = q_L + (1.0 - c_t) * (br_L - c_t * (bl_L + br_L))
@@ -707,7 +914,8 @@ def _deln_flux(nord, damp, q, fx, fy, cdgrid, mass=None):
 def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
              nord=None, damp_c=None, mass=None,
              apply_cgrid_flux_sync=True,
-             apply_fortran_xppm_boundary=False):
+             apply_fortran_xppm_boundary=False,
+             hord: int = 12):
     """Lin-Rood operator-split 2D transport (Putman & Lin 2007).
 
     Parameters
@@ -811,7 +1019,8 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
     fy2 = _yppm(q_full[:, 2:-2, :], cry, n, oy_L0, oy_R0, oy_L1, oy_R1,
                 use_duogrid=use_duogrid,
                 apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
-                bounded_domain=bounded_domain)
+                bounded_domain=bounded_domain,
+                hord=hord)
     fyy = yfx * fy2
     q_i = (q * area + fyy[:, :, :-1] - fyy[:, :, 1:]) / ra_y
 
@@ -822,7 +1031,8 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
     fx2 = _xppm(q_full[:, :, 2:-2], crx, n, ox_L0, ox_R0, ox_L1, ox_R1,
                 use_duogrid=use_duogrid,
                 apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
-                bounded_domain=bounded_domain)
+                bounded_domain=bounded_domain,
+                hord=hord)
     fxx = xfx * fx2
     q_j = (q * area + fxx[:, :-1, :] - fxx[:, 1:, :]) / ra_x
 
@@ -838,12 +1048,14 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
     fx1 = _xppm(q_i_pad[:, :, 2:-2], crx, n, ox_L0, ox_R0, ox_L1, ox_R1,
                 use_duogrid=use_duogrid,
                 apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
-                bounded_domain=bounded_domain)
+                bounded_domain=bounded_domain,
+                hord=hord)
 
     fy1 = _yppm(q_j_pad[:, 2:-2, :], cry, n, oy_L0, oy_R0, oy_L1, oy_R1,
                 use_duogrid=use_duogrid,
                 apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
-                bounded_domain=bounded_domain)
+                bounded_domain=bounded_domain,
+                hord=hord)
 
     if mass is not None:
         # With mass: fx = 0.5*(fx1+fx2)*mfx, fy = 0.5*(fy1+fy2)*mfy
@@ -876,7 +1088,8 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
 
 def transport_step(h, ut, vt, dt, cdgrid, mass_target=None,
                    nord=None, damp_c=None,
-                   apply_fortran_xppm_boundary=False, **_kwargs):
+                   apply_fortran_xppm_boundary=False,
+                   hord: int = 12, **_kwargs):
     """Single FV3-style transport step with mass conservation.
 
     Parameters
@@ -907,7 +1120,8 @@ def transport_step(h, ut, vt, dt, cdgrid, mass_target=None,
     fx, fy = fv_tp_2d(h, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
                       nord=nord, damp_c=damp_c,
                       apply_fortran_xppm_boundary=(
-                          apply_fortran_xppm_boundary))
+                          apply_fortran_xppm_boundary),
+                      hord=hord)
     h_new = h + (fx[:, :-1, :] - fx[:, 1:, :]
                  + fy[:, :, :-1] - fy[:, :, 1:]) / area
 

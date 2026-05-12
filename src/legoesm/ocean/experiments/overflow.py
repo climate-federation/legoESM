@@ -57,6 +57,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
+from legoesm import constants
 from legoesm.constants import g
 from legoesm.core.field import Field
 
@@ -96,7 +97,7 @@ class OverflowConfig:
     depth_decay_factor: float = 0.5  # Temperature decay with depth
 
     # Physical parameters for RPE calculation
-    rho_reference: float = 1025.0   # = eos.rho_0
+    rho_reference: float = constants.rho_ocean
     alpha_T: float = 2.0e-4         # Thermal expansion coefficient [1/K]
     T_reference: float = 12.5       # Reference temperature [°C]
 
