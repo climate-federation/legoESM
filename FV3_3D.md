@@ -1195,6 +1195,26 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 756: **``precipitable_water_fv3``** — column water vapor.
+
+      PWV = Σ_k delp · q_sphum / g    (kg/m² ≡ mm)
+
+  Standard meteorology diagnostic.  Numeric value in kg/m² equals
+  column water-vapor depth in mm exactly (since ρ_water = 1000
+  kg/m³ ⇒ 1 kg/m² ≡ 1 mm).
+
+  Thin wrapper around iter-742 column_integral_delp_fv3 with
+  named output convention.  Effective subset of iter-749
+  total_water_column for the vapor-only case.
+
+  Tests (5/5 in <1 s):
+  1. q=0 → PWV=0.
+  2. Tropical q=0.015, p_s=1e5 → PWV ≈ 153 kg/m² analytical.
+  3. Unit identity: 1 kg/m² ≡ 1 mm depth.
+  4. 3-D shapes.
+  5. No NaN/Inf.
+
+  Wired into iter-383 sweep (now 321).
 - Iter 755: **``mse_column_fv3`` + ``dse_column_fv3``** — column variants.
 
   Mass-weighted column integrals of iter-753 MSE + iter-754 DSE:

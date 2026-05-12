@@ -3022,6 +3022,37 @@ def potential_energy_column_fv3(
     return column_integral_delp_fv3(phi_avg, delp)
 
 
+def precipitable_water_fv3(
+    q_sphum: jax.Array,
+    delp: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 756: precipitable water (column water vapor).
+
+        PWV = Σ_k delp · q_sphum / g     (kg/m²)
+            ≈ PWV / ρ_water · 1000        (mm, numerically same value
+                                            since ρ_water = 1000 kg/m³)
+
+    Standard meteorology diagnostic.  Numeric value in kg/m² equals
+    column-water-vapor height in mm exactly (1 kg of water per m²
+    spread at 1000 kg/m³ density = 1 mm depth).
+
+    Composes iter-742 ``column_integral_delp_fv3``.
+
+    Parameters
+    ----------
+    q_sphum : jax.Array, shape (..., km)
+        Specific humidity (kg/kg).
+    delp : jax.Array, shape (..., km)
+        Pressure thickness (Pa).
+
+    Returns
+    -------
+    pwv : jax.Array, shape (...,)
+        Precipitable water (kg/m² ≡ mm).
+    """
+    return column_integral_delp_fv3(q_sphum, delp)
+
+
 def mse_column_fv3(
     pt: jax.Array,
     z: jax.Array,
