@@ -5902,6 +5902,64 @@ def brn_supercell_fv3(
     return cape / jnp.maximum(ke, ke_floor)
 
 
+def supercell_composite_fv3(
+    cape: jax.Array,
+    srh_3km: jax.Array,
+    u_shear_6km: jax.Array,
+    v_shear_6km: jax.Array,
+    bwd_cap: float = 30.0,
+) -> jax.Array:
+    """FV3_3D iter 815: Thompson Supercell Composite Parameter.
+
+        SCP = (CAPE / 1000) · (SRH_3km / 100) · (BWD_6km / 20)
+
+    where:
+      * CAPE  — most-unstable CAPE (J/kg) from iter-808.
+      * SRH_3km — 0-3 km storm-relative helicity (m²/s²) from
+                  iter-7755 area helicity helpers.
+      * BWD_6km — 0-6 km bulk-shear magnitude (m/s):
+                  BWD = √(u_shear² + v_shear²), capped at
+                  ``bwd_cap`` (default 30 m/s) per Thompson
+                  et al. (2003).
+
+    Operational threshold: SCP ≥ 1 → supercell-favorable
+    environment.  Higher values indicate stronger supercell
+    likelihood; SCP ≥ 5 marks "very high" supercell risk.
+
+    Distinct from iter-814 BRN: SCP is multiplicative (all three
+    ingredients needed simultaneously), while BRN is a ratio
+    (favors mid-range CAPE/shear balance).  SCP is now preferred
+    in SPC mesoanalysis for tornado-day discrimination.
+
+    Composes iter-808 (CAPE) + iter-814 (provides u/v shear in
+    same convention) + iter-7755/7825-area helicity helpers.
+
+    Used by: SPC Mesoanalysis Supercell Composite product
+    (operational tornado forecasting), HRRR-SREF ensemble
+    severe-storm probabilistic forecasts, climatology of
+    tornadic environments (Thompson-Edwards 2000 dataset).
+
+    Parameters
+    ----------
+    cape : jax.Array
+        Most-unstable CAPE (J/kg) from iter-808.
+    srh_3km : jax.Array
+        0-3 km storm-relative helicity (m²/s²).
+    u_shear_6km, v_shear_6km : jax.Array
+        0-6 km bulk-shear vector components (m/s).
+    bwd_cap : float
+        Maximum BWD magnitude before capping (m/s); default 30.
+
+    Returns
+    -------
+    scp : jax.Array
+        Supercell Composite Parameter (dimensionless).
+    """
+    bwd = jnp.sqrt(u_shear_6km * u_shear_6km + v_shear_6km * v_shear_6km)
+    bwd_capped = jnp.minimum(bwd, bwd_cap)
+    return (cape / 1000.0) * (srh_3km / 100.0) * (bwd_capped / 20.0)
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

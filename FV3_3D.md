@@ -5230,6 +5230,48 @@ storm motion + iter-7755/7825 helicity helpers and the index kit
 toolkit is complete.  Pure JAX, vmap-compatible.  No new physical
 constants introduced.
 
+## Iter 815 — supercell_composite_fv3 (Thompson SCP)
+
+Added `supercell_composite_fv3(cape, srh_3km, u_shear_6km,
+v_shear_6km, bwd_cap=30.0)` to `grids/cubed_sphere.py`.  Thompson
+et al. (2003) Supercell Composite Parameter:
+
+```
+SCP = (CAPE / 1000) · (SRH_3km / 100) · (BWD_6km / 20)
+```
+
+BWD_6km = √(u_shear² + v_shear²) capped at 30 m/s.
+
+Operational thresholds:
+  * SCP < 1   — supercell-unfavorable
+  * SCP ≥ 1   — supercell-favorable
+  * SCP ≥ 5   — very high supercell risk
+
+Distinct from iter-814 BRN: SCP is **multiplicative** (all three
+ingredients needed simultaneously); BRN is a ratio (favors
+mid-range CAPE/shear balance).  SCP is the current SPC preferred
+metric for tornado-day discrimination.
+
+Composes iter-808 (CAPE) + iter-7755/7825-area helicity helpers.
+
+Used by: SPC Mesoanalysis Supercell Composite product
+(operational tornado forecasting), HRRR-SREF ensemble severe-
+storm probabilistic forecasts, climatology of tornadic
+environments (Thompson-Edwards 2000 dataset).
+
+Test: `tests/test_fv3_supercell_composite_iter815.py` (5 tests:
+analytic SCP=7.5 for CAPE=2500/SRH=300/BWD=20, BWD-cap at 30
+m/s (BWD=50 → factor 1.5), CAPE=0 → SCP=0, SRH=0 → SCP=0, 3-D
+shapes + finite).
+
+### Why this iteration was meaningful
+
+SCP is the modern operational replacement for BRN — Thompson et
+al. (2003, 2007) demonstrated SCP outperforms BRN for tornado-
+environment discrimination because the multiplicative structure
+demands all three ingredients (instability + helicity + shear).
+Pure JAX, vmap-compatible.  No new physical constants introduced.
+
 
 
 
