@@ -1195,6 +1195,26 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 682: **FV3 ``range_check_fv3``** — field-range sanity check.
+  Faithful JAX port of FV3 ``range_check_3d`` / ``range_check_2d``
+  (tools/fv_diagnostics.F90:3948-4078).  Unified single function
+  for any-shape input.
+
+  Returns ``(bad_range, qmin, qmax)``:
+    - bad_range : bool scalar — True if any value outside [q_low, q_hi]
+    - qmin, qmax : actual min/max of q
+
+  Used by FV3 for diagnostic range sanity checks (catch numerical
+  blowup before NaN propagation).
+
+  Tests (5/5 in <1 s):
+  1. In-range field → bad_range = False; qmin, qmax exact.
+  2. Below q_low → bad_range = True.
+  3. Above q_hi → bad_range = True.
+  4. qmin / qmax match jnp.min/max.
+  5. Works on 2D and 3D inputs identically.
+
+  Wired into iter-383 sweep (now 247).
 - Iter 681: **FV3 ``get_height_field_fv3``** — geopotential heights.
   Faithful JAX port of FV3 ``get_height_field``
   (tools/fv_diagnostics.F90:3911-3945).

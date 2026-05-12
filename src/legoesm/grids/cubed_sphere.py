@@ -2644,6 +2644,42 @@ def get_staggered_grid_fv3(
     return pt_c_lon, pt_c_lat, pt_d_lon, pt_d_lat
 
 
+def range_check_fv3(
+    q: jax.Array, q_low: float, q_hi: float,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """FV3_3D iter 682: check field stays within [q_low, q_hi] range.
+
+    Faithful JAX port of FV3 ``range_check_3d`` /
+    ``range_check_2d`` (tools/fv_diagnostics.F90:3948-4078).
+    Unified into one function since the 2D/3D variants are
+    identical except for array rank.
+
+    Returns:
+        bad_range : bool scalar — True if any q[i, j, k] outside [low, hi]
+        qmin, qmax : scalars — min/max of q
+
+    Used by FV3 for diagnostic range sanity (e.g., catch numerical
+    blowup before NaN propagation).
+
+    Parameters
+    ----------
+    q : jax.Array
+        Field to check (any shape).
+    q_low, q_hi : float
+        Valid range bounds.
+
+    Returns
+    -------
+    bad_range : jax.Array (bool scalar)
+    qmin : jax.Array (scalar)
+    qmax : jax.Array (scalar)
+    """
+    qmin = jnp.min(q)
+    qmax = jnp.max(q)
+    bad_range = (qmin < q_low) | (qmax > q_hi)
+    return bad_range, qmin, qmax
+
+
 def get_height_field_fv3(
     pt: jax.Array, q: jax.Array, peln: jax.Array,
     zsurf: jax.Array,
