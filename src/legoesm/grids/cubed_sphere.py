@@ -2987,6 +2987,37 @@ def theta_dry_fv3(
     return pt * (p_ref / p) ** kap
 
 
+def wind_speed_fv3(
+    ua: jax.Array,
+    va: jax.Array,
+    w: jax.Array | None = None,
+) -> jax.Array:
+    """FV3_3D iter 741: wind-speed magnitude.
+
+        |V| = sqrt(ua² + va²)       (2-component, horizontal)
+        |V| = sqrt(ua² + va² + w²)  (3-component)
+
+    Standard FV3 diagnostic.  Equivalent to ``sqrt(2 · KE)`` via
+    iter-740.  Used by iter-676 ``wind_max_fv3`` and many output
+    snapshots.
+
+    Parameters
+    ----------
+    ua, va : jax.Array
+        Horizontal wind components (m/s).
+    w : jax.Array, optional
+        Vertical velocity (m/s).  None → horizontal speed only.
+
+    Returns
+    -------
+    speed : jax.Array
+        Wind-speed magnitude (m/s).
+    """
+    if w is None:
+        return jnp.sqrt(ua * ua + va * va)
+    return jnp.sqrt(ua * ua + va * va + w * w)
+
+
 def kinetic_energy_fv3(
     ua: jax.Array,
     va: jax.Array,

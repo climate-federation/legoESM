@@ -1195,6 +1195,25 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 741: **``wind_speed_fv3``** — wind-speed magnitude.
+
+      |V| = sqrt(ua² + va²)         (2-component, w=None)
+      |V| = sqrt(ua² + va² + w²)    (3-component)
+
+  Standard FV3 diagnostic.  Equivalent to ``sqrt(2·KE)`` via
+  iter-740 (consistency pinned by test).  Used by iter-676
+  ``wind_max_fv3`` and many output snapshots.
+
+  Tests (7/7 in <1 s):
+  1. Zero wind → speed=0.
+  2. ua=1, va=w=0 → speed=1.
+  3. ua=3, va=4 → speed=5 (Pythagoras).
+  4. w=None → horizontal speed only.
+  5. |V| = sqrt(2·KE) consistency with iter-740.
+  6. 3-D shapes.
+  7. No NaN/Inf.
+
+  Wired into iter-383 sweep (now 305).
 - Iter 740: **``kinetic_energy_fv3`` helper + iter-693 refactor**.
 
   KE per unit mass:
