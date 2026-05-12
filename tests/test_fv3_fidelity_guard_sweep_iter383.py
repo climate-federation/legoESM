@@ -168,6 +168,7 @@ _GUARD_MODULES = (
     "test_min_edge_bisect_smooth_iter561",           # iter-561 add
     "test_heat_source_del2_sweep_iter562",           # iter-562 add
     "test_heat_source_del2_coeff_sweep_iter563",     # iter-563 add
+    "test_combined_best_iter564",                    # iter-564 add
 )
 
 

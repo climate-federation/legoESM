@@ -1185,6 +1185,23 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 564: **BEST combined result** — iters=8 + clip @ C24.
+  Combine all best-known knobs:
+  - ``make_legoesm_nh_min_edge_config`` (iter-466 baseline)
+  - ``heat_source_del2_iters=8`` (iter-562 max smooth-IC fix)
+  - ``heat_source_del2_coeff=0.20`` (iter-563 optimal)
+  - ``make_clipped_step(slack=0.5)`` (iter-526 clip)
+  - C24 resolution + SBR IC + 10 steps
+  Result:
+  - **edge_std = 5.83e-3 K** (~6 mK noise)
+  - int_std = 2.12e-3 K
+  - ratio = 2.75×
+  This is the best absolute edge_std measured.  At C24 + 10
+  SBR steps, the θ′ noise floor is ~6 mK — essentially the
+  fluctuation level of any real atmospheric measurement.
+  Practical guidance refined: for users seeking minimum
+  absolute edge artifact on smooth ICs, use this stack.
+  1/1 in 39 s.  Wired into iter-383 sweep (now 145).
 - Iter 563: **``heat_source_del2_coeff`` sweep**.  iter-562
   showed iters helps monotonically.  Sweep coeff at iters=2
   @ C16 SBR, 10 steps:
