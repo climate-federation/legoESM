@@ -374,7 +374,7 @@ def test_cmt_gregory_1997_applies_stratospheric_gate():
     u_env = jnp.array([[60.0, 50.0, 40.0, 25.0, 12.0, 5.0, 2.0, 0.0]])
     v_env = jnp.zeros((ncol, nlev))
     M_u = jnp.full((ncol, nlev), 0.05)
-    rho = p_full / (287.0 * 250.0)
+    rho = p_full / (constants.R_d * 250.0)
     c_u = 0.55
 
     du_dt_func, _ = cmt_gregory_1997(
@@ -388,7 +388,7 @@ def test_cmt_gregory_1997_applies_stratospheric_gate():
     du_layer = jnp.diff(u_env, axis=-1, prepend=u_env[:, :1])
     flux_ref = -c_u * (M_u * gate) * du_layer
     dflux_ref = jnp.diff(flux_ref, axis=-1, append=flux_ref[:, -1:])
-    g = 9.80616
+    g = constants.g
     du_dt_ref = -g * dflux_ref / dp
 
     # The function output must equal the gated reference exactly.

@@ -14,12 +14,14 @@ The E-variable form adds R_d*lnps_0 to N, which makes N*M large and negative.
 """
 import numpy as np
 
-R_d = 287.05
-c_p = 1004.0
+from legoesm import constants
+
+R_d = constants.R_d
+c_p = constants.c_pd
 kappa = R_d / c_p
 T_ref = 300.0
 lnps_0 = np.log(1e5)  # ~11.51
-a = 6.371e6
+a = constants.R_earth
 
 # 1-level sigma coordinate
 sigma_top = 0.01

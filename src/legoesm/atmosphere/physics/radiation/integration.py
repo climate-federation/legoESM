@@ -488,9 +488,11 @@ def make_radiation_physics(
         RRTMGP.preload(radiation_config.rrtmgp)
         rrtmgp_solver = RRTMGP.from_legoesm_config(radiation_config.rrtmgp)
 
-    # Load ML ozone ridge weights once (outside JIT).
+    # Load ML ozone ridge weights once (outside JIT).  Gray radiation
+    # ignores ozone, so skip the (potentially large) NetCDF load when
+    # scheme="gray" even if ozone.source="ml" is set.
     ml_ozone_coefs = None
-    if radiation_config.ozone.source == "ml":
+    if radiation_config.ozone.source == "ml" and radiation_config.scheme == "rrtmgp":
         if not radiation_config.ozone.ml_weights_path:
             raise ValueError(
                 "OzoneProfileConfig.source='ml' requires ml_weights_path to "

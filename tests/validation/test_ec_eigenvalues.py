@@ -7,12 +7,14 @@ or have positive real parts (unstable).
 import numpy as np
 from numpy.linalg import eig
 
+from legoesm import constants
+
 # ---- Parameters ----
 nlev = 20
 sigma_top = 0.01
 T_ref = 300.0
-R_d = 287.05
-kappa = R_d / 1004.0
+R_d = constants.R_d
+kappa = R_d / constants.c_pd
 lnps_0 = np.log(1e5)  # ~11.51
 
 # ---- Build sigma coordinate ----
@@ -110,7 +112,7 @@ def analyze(label, M):
     n_total = 2 * nlev + 1
 
     for n_wave in [1, 5, 10, 21]:
-        a = 6.371e6
+        a = constants.R_earth
         lambda_n = n_wave * (n_wave + 1) / a**2
 
         A = np.zeros((n_total, n_total))
