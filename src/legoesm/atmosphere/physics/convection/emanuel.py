@@ -201,7 +201,10 @@ def emanuel_convection(
     # value so the downdraft column-budget bookkeeping matches the
     # original implementation's intent (downdraft uses the basic
     # condensate, not the buoyancy-sort-enhanced version).
-    dq_c_conv_dt_raw = dq_c_conv_dt / jnp.maximum(sort_multiplier, 1e-30)
+    # AD-safe floor on the divisor (1e-15) so the VJP
+    # ``-dq_c / sort_multiplier²`` cannot overflow fp32 when the
+    # buoyancy sort gives a tiny weight.  Codex iter-35 audit pattern.
+    dq_c_conv_dt_raw = dq_c_conv_dt / jnp.maximum(sort_multiplier, 1e-15)
 
     # -- Optional unsaturated-downdraft cooling ---------------------------
     # Implemented as a static Python branch (closure-time decision) so

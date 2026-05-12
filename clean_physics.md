@@ -137,3 +137,28 @@ Compression iteration.  Folded iter-30 through iter-40 entries into the
 "Iterations 1-40 — Summary" section above so the working log stays under the
 auto-loaded MEMORY.md / context envelope.  Detailed per-iteration narratives
 remain in the commit messages on `clean_physics`.
+
+### Iteration 42 — 2026-05-13
+
+**Apply codex iter-41 findings + Emanuel AD-safe floor.**
+
+Codex returned 2 findings on `ocean/physics/surface_forcing/bulk_formulas.py`:
+
+1. `_saturation_specific_humidity` returned mixing ratio (kg/kg dry)
+   rather than specific humidity (kg/kg moist), biasing latent flux
+   high by ``1 + r_sat`` (~3 % in the tropics).  Fixed by converting
+   ``q_sat = r_sat / (1 + r_sat)``.
+2. `Q_lw_up = ε σ T_s^4` omitted the reflected ``(1-ε)·LW_down``
+   component, biasing ocean Q_net by ~10 W/m² for ε = 0.97 / typical
+   tropical LW_down.  Now uses ``ε σ T_s^4 + (1-ε)·LW_down`` (mirror
+   of the iter-13 sea-ice fix).
+
+Plus a parallel-inspection find:
+
+- `emanuel.py:204` — `dq_c_conv_dt / max(sort_multiplier, 1e-30)`
+  could overflow fp32 in VJP when `sort_multiplier` is tiny.
+  Raised the floor to 1e-15 (same AD-safe pattern as the iter-32
+  donor_clamp_scale).
+
+**Tests (post iter-42):** 100 / 100 ocean MPAS + surface_forcing +
+emanuel + atmosphere convection tests pass.
