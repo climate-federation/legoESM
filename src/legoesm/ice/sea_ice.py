@@ -352,6 +352,7 @@ def _step_dynamic(
             P_star=config.P_star,
             C_strength=config.C_strength,
             T_evp=config.T_evp,
+            Delta_min=config.Delta_min,
             rho_ice=config.rho_ice,
             rho_air=config.rho_air_ref,
             rho_ocean=config.rho_ocean_ref,

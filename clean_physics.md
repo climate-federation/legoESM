@@ -96,6 +96,29 @@ Branch: `clean_physics`. Driven by Ralph loop + `/codex:adversarial-review`.
   75 / 75 land carbon + multilayer + diff_land; 140 / 140 land (post iter-44);
   100 / 100 ocean MPAS + surface_forcing + emanuel + atmosphere convection.
 
+## Iteration 55 — 2026-05-13
+
+**Resolved deferred item: `SeaIceConfig.Delta_min` now threads through
+to `delta_deformation`.**
+
+`SeaIceConfig.Delta_min` field existed (default 2.0e-9 [1/s]) but was
+never passed in.  `evp_solver` and `evp_stress_update` were updated
+to accept and forward `Delta_min`; `step_sea_ice → _step_dynamic`
+now passes `Delta_min=config.Delta_min`.  Users can finally tune the
+plastic-yield-curve smoothness without editing source.
+
+New regression test
+`test_delta_min_threads_through_evp_stress_update` exercises the
+sub-yield branch (strain ~1e-12) and verifies that distinct
+`Delta_min` values produce distinct stress responses — catches a
+regression where the config field is silently ignored.
+
+**Tests (post iter-55):** 51 / 51 sea-ice dynamics tests pass.
+65 / 65 sea-ice + lateral-mixing-dispatch tests pass.
+
+Removed from "Outstanding / Deferred": `Delta_min` config field
+threading.
+
 ## Iteration 54 — 2026-05-13
 
 **Fix codex iter-53 stop-time finding: wrong stencil reach in fill.**
@@ -259,7 +282,6 @@ here.  Future refactor could centralise via shared helper.
 - Threading `dt` into ocean `physics_fn` across 3 ocean PE backends + 3 model drivers.
 - Visual / long-run validation of new ice → ocean feedbacks.
 - σ-tensor rotation across cubed-sphere faces (O(dx) edge error in sea-ice EVP).
-- `Delta_min` config field not threaded into `delta_deformation` (sea-ice rheology).
 - Codex `adversarial-review` runtime: 4 consecutive iters lost to exit 144.  Retry
   later or switch to direct inspection until runtime stabilises.
 

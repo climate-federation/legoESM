@@ -240,6 +240,7 @@ def evp_solver(
     P_star: float = 2.75e4,
     C_strength: float = 20.0,
     T_evp: float = 0.36,
+    Delta_min: float = 2.0e-9,
     rho_ice: float = constants.rho_ice,
     rho_air: float = constants.rho_air,
     rho_ocean: float = constants.rho_ocean,
@@ -280,6 +281,10 @@ def evp_solver(
         Ice strength parameters.
     T_evp : float
         EVP damping timescale ratio.
+    Delta_min : float
+        Deformation-rate regulariser [1/s] threaded into the EVP
+        stress-update — keeps the plastic yield curve smooth at zero
+        deformation.  Default 2e-9 (CICE convention).
     rho_ice, rho_air, rho_ocean : float
         Densities [kg/m^3].
     C_ai, C_oi : float
@@ -330,7 +335,7 @@ def evp_solver(
         s11_new, s22_new, s12_new = evp_stress_update(
             s11_c, s22_c, s12_c,
             eps_11, eps_22, eps_12,
-            P, e_yield, T_evp, dt_s, N_evp,
+            P, e_yield, T_evp, dt_s, N_evp, Delta_min,
         )
 
         # 3. Stress divergence

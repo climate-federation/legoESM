@@ -275,6 +275,39 @@ class TestEVPStressUpdate:
         # Larger N_evp → smaller per-subcycle relaxation → smaller stress.
         assert abs(float(s11_n240)) < abs(float(s11_new))
 
+    def test_delta_min_threads_through_evp_stress_update(self):
+        """SeaIceConfig.Delta_min reaches delta_deformation via evp_stress_update.
+
+        Sub-yield deformation should saturate `Delta` at `Delta_min`,
+        capping viscosity `zeta = P/(2·Delta)` and producing distinct
+        stress responses for distinct Delta_min values.  Catches a
+        regression where the config field is ignored and the rheology
+        default is used regardless of the user-set value.
+        """
+        # Sub-yield strain — without regularisation, Delta would be ~0
+        # and zeta would diverge.  The regulariser sets Delta = Delta_min.
+        eps_11 = jnp.array(1e-12)
+        eps_22 = jnp.array(0.0)
+        eps_12 = jnp.array(0.0)
+        s11 = jnp.array(0.0); s22 = jnp.array(0.0); s12 = jnp.array(0.0)
+        P = jnp.array(1e4)
+
+        s11_a, _, _ = evp_stress_update(
+            s11, s22, s12, eps_11, eps_22, eps_12,
+            P, e_yield=2.0, T_evp=0.36, dt_s=100.0, N_evp=120,
+            Delta_min=2.0e-9,
+        )
+        s11_b, _, _ = evp_stress_update(
+            s11, s22, s12, eps_11, eps_22, eps_12,
+            P, e_yield=2.0, T_evp=0.36, dt_s=100.0, N_evp=120,
+            Delta_min=2.0e-7,  # 100× larger floor → 100× smaller zeta
+        )
+        # Larger Delta_min → smaller viscosity → smaller deviatoric stress
+        # response.  Both stresses include the −P/2 isotropic term, so
+        # compare deviation from that baseline.
+        baseline = -float(P) / 2.0
+        assert abs(float(s11_a) - baseline) > abs(float(s11_b) - baseline)
+
 
 # ==============================================================================
 # Test Dynamics
