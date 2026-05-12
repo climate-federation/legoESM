@@ -1015,6 +1015,21 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 496: ``_interp_center_to_corner`` IS a duogrid edge
+  amplifier (~12%).  Apply the cell-center → D-grid corner
+  4-point average (halo-aware) to random Gaussian field:
+    no-duogrid: edge std = 0.7475, interior = 0.7166
+                ratio = 1.0431
+    duogrid:    edge std = 0.8383, interior = 0.7166
+                ratio = 1.1699
+    duogrid effect: edge × 1.122, interior × 1.000
+  Edge std jumps 12% with duogrid; interior unchanged.  This
+  is the FIRST identified single op showing real (not
+  negligible) duogrid edge amplification.  Not enough to
+  explain the full 5× dycore ratio — but contributes.  The
+  dycore composes ``_interp_center_to_corner`` with many
+  other halo-aware ops; product compounds to 5×.  1/1 in
+  10 s.  Wired into iter-383 sweep (now 88).
 - Iter 495: isolate ``fv3_divergence_corner_3d`` — duogrid-
   invariant.  Apply the corner-div op to random u/v field at
   corners with grid_off vs grid_on:
