@@ -1195,6 +1195,36 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 709: **FV3 ``cs_interpolator_fv3``** — height-level interp via PPM.
+  Faithful JAX port of FV3 ``cs_interpolator``
+  (tools/fv_diagnostics.F90:4603-4649).  Uses iter-708
+  ``cs_prof_fv3`` for PPM edge values + subcell parabolic
+  distribution.
+
+  Algorithm:
+      dz[k] = wz[k] − wz[k+1]
+      qe    = cs_prof_fv3(qin, dz, iv=1)
+      For target zout (scalar):
+          above top         → qout = qe[0]
+          below surface     → qout = qe[km]
+          in-range layer k:
+              a6 = 3·(2·qin[k] − (qe[k] + qe[k+1]))
+              s0 = (wz[k] − zout) / dz[k]
+              qout = qe[k] + s0·(qe[k+1] − qe[k] + a6·(1 − s0))
+      qout = max(qmin, qout)
+
+  Vectorized one-hot layer selection (exclusive lower bound so
+  boundary points pick exactly one layer).
+
+  Tests (6/6 in <3 s):
+  1. zout above top → returns top edge value.
+  2. zout below surface → returns bot edge value.
+  3. Uniform qin = C at all z → qout = C.
+  4. Negative result clipped to qmin.
+  5. 3-D (n_x, n_y, km) qin → (n_x, n_y) qout.
+  6. No NaN/Inf on random.
+
+  Wired into iter-383 sweep (now 273).
 - Iter 708: **FV3 ``cs_prof_fv3``** — PPM column profile tridiag.
   Faithful JAX port of FV3 ``cs_prof``
   (tools/fv_diagnostics.F90:4653-4733).  Non-uniform tridiagonal

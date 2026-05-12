@@ -3144,6 +3144,75 @@ def eqv_pot_fv3(
         return pt * jnp.exp(poisson)
 
 
+def cs_interpolator_fv3(
+    qin: jax.Array,
+    wz: jax.Array,
+    zout: float,
+    qmin: float = 0.0,
+) -> jax.Array:
+    """FV3_3D iter 709: height-level interpolation via PPM column profile.
+
+    Faithful JAX port of FV3 ``cs_interpolator``
+    (tools/fv_diagnostics.F90:4603-4649).  Uses iter-708
+    ``cs_prof_fv3`` for PPM edge values + subcell parabolic
+    distribution.
+
+    Algorithm:
+        dz[..., k] = wz[..., k] - wz[..., k+1]    (top-down)
+        qe = cs_prof_fv3(qin, dz, iv=1)           (km+1 edge values)
+        For target zout (scalar):
+            above top (zout >= wz[..., 0])      → qe[..., 0]
+            below bot (zout <= wz[..., km])     → qe[..., km]
+            interior layer k containing zout:
+                a6 = 3·(2·qin[k] - (qe[k] + qe[k+1]))
+                s0 = (wz[k] - zout) / dz[k]
+                qout = qe[k] + s0·(qe[k+1] - qe[k] + a6·(1 - s0))
+        Clip qout >= qmin.
+
+    Parameters
+    ----------
+    qin : jax.Array, shape (..., km)
+        Cell-center values.
+    wz : jax.Array, shape (..., km+1)
+        Layer interface heights (top-down: wz[..., 0] = top,
+        wz[..., km] = surface).
+    zout : float
+        Target height (m).
+    qmin : float, default 0.0
+        Minimum-allowed output value (FV3 clip floor).
+
+    Returns
+    -------
+    qout : jax.Array, shape (...,)
+        Interpolated value at zout.
+    """
+    km = qin.shape[-1]
+    dz = wz[..., :-1] - wz[..., 1:]           # (..., km), positive
+    qe = cs_prof_fv3(qin, dz, iv=1)           # (..., km+1)
+
+    # Locate target layer per column: in_layer[k] = (wz[k] >= zout >= wz[k+1])
+    wz_top = wz[..., :-1]                     # (..., km)
+    wz_bot = wz[..., 1:]                      # (..., km)
+    # Exclusive on lower bound so boundary points pick exactly one layer
+    in_layer = (zout <= wz_top) & (zout > wz_bot)    # (..., km), one True per column inside range
+
+    # PPM subcell interp
+    a6 = 3.0 * (2.0 * qin - (qe[..., :-1] + qe[..., 1:]))   # (..., km)
+    safe_dz = jnp.where(dz > 0.0, dz, 1.0)
+    s0 = (wz_top - zout) / safe_dz                          # (..., km)
+    qout_k = qe[..., :-1] + s0 * (qe[..., 1:] - qe[..., :-1]
+                                  + a6 * (1.0 - s0))         # (..., km)
+    # Sum over k with in_layer mask (only one True per column when in range)
+    qout_in_range = jnp.sum(jnp.where(in_layer, qout_k, 0.0), axis=-1)
+
+    # Top / bottom clamps
+    above_top = zout >= wz[..., 0]
+    below_bot = zout <= wz[..., -1]
+    qout = jnp.where(above_top, qe[..., 0], qout_in_range)
+    qout = jnp.where(below_bot, qe[..., -1], qout)
+    return jnp.maximum(qmin, qout)
+
+
 def cs_prof_fv3(
     q2: jax.Array,
     delp: jax.Array,
