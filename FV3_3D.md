@@ -1120,6 +1120,16 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 531: **``make_clipped_step`` works on SW dycore too**.
+  Generic ``(model, state, dt, slack)`` signature applies
+  to ``FV3EdgeShallowWaterModel`` unchanged.  Tests:
+  1. Runs successfully on Williamson 2 IC at N=12.
+  2. h/u_d/v_d remain finite after 10 SW steps.
+  Note: SW's ``step`` is already ``@jax.jit``-wrapped, so
+  ``make_clipped_step`` adds an outer JIT.  Functions
+  identically.  Confirms the helper is fully dycore-agnostic
+  (NH + PE + SW).  2/2 in 16 s.  Wired into iter-383 sweep
+  (now 118).
 - **Iters 521-529 (compacted iter 530)**: helper validation —
   conservation, AD, JIT-safety, PE symmetry, production
   docs.

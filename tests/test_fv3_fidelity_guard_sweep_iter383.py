@@ -141,6 +141,7 @@ _GUARD_MODULES = (
     "test_make_clipped_step_iter526",                # iter-526 add
     "test_pe_halo_targets_iter527",                  # iter-527 add
     "test_pe_make_clipped_step_iter529",             # iter-529 add
+    "test_sw_make_clipped_step_iter531",             # iter-531 add
 )
 
 
