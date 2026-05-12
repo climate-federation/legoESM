@@ -2806,6 +2806,62 @@ def get_pressure_given_height_fv3(
     return p
 
 
+def dz_from_delz_or_hydrostatic_fv3(
+    delz: jax.Array | None = None,
+    pt: jax.Array | None = None,
+    q: jax.Array | None = None,
+    peln: jax.Array | None = None,
+    hydrostatic: bool = False,
+    zvir: float | None = None,
+) -> jax.Array:
+    """FV3_3D iter 730: positive layer thickness dz from delz or hydrostatic.
+
+    Helper extracted from iters 686/687/688/689/707 (supercell suite)
+    which all reconstruct positive layer thickness from either FV3
+    delz (non-hydrostatic: dz = -delz) or hydrostatic balance:
+
+        Hydrostatic:
+            zvir = R_v/R_d − 1  (default)
+            dz = (R_d / g) · pt · (1 + zvir · q) · (peln[k+1] − peln[k])
+
+        Non-hydrostatic:
+            dz = −delz                          (FV3 delz < 0 ⇒ dz > 0)
+
+    Output is positive thickness suitable for ``compute_zh_above_below_fv3``
+    (iter-728) and window-mask computations.
+
+    Parameters
+    ----------
+    delz : jax.Array, shape (..., km), optional
+        Layer thickness (NEGATIVE in FV3) — required if non-hydrostatic.
+    pt : jax.Array, shape (..., km), optional
+        Temperature (K) — required if hydrostatic.
+    q : jax.Array, shape (..., km), optional
+        Specific humidity — required if hydrostatic.
+    peln : jax.Array, shape (..., km+1), optional
+        log(pressure) at interfaces — required if hydrostatic.
+    hydrostatic : bool, default False.
+    zvir : float, optional
+        Virtual-T coefficient.  Default ``R_v/R_d − 1``.
+
+    Returns
+    -------
+    dz : jax.Array, shape (..., km)
+        Positive layer thickness (m).
+    """
+    if hydrostatic:
+        if pt is None or q is None or peln is None:
+            raise ValueError("hydrostatic=True requires pt, q, peln")
+        if zvir is None:
+            zvir = constants.R_v / constants.R_d - 1.0
+        rdg = constants.R_d / constants.g
+        return rdg * pt * (1.0 + zvir * q) * (peln[..., 1:] - peln[..., :-1])
+    else:
+        if delz is None:
+            raise ValueError("hydrostatic=False requires delz")
+        return -delz
+
+
 def compute_zh_above_below_fv3(
     dz: jax.Array,
 ) -> tuple[jax.Array, jax.Array]:
@@ -3998,17 +4054,10 @@ def bunkers_vector_fv3(
     uc, vc : jax.Array, shape (...,)
         Bunkers storm motion components (m/s).
     """
-    if hydrostatic:
-        if pt is None or q is None or peln is None:
-            raise ValueError("hydrostatic=True requires pt, q, peln")
-        if zvir is None:
-            zvir = constants.R_v / constants.R_d - 1.0
-        rdg = constants.R_d / constants.g
-        dz = rdg * pt * (1.0 + zvir * q) * (peln[..., 1:] - peln[..., :-1])
-    else:
-        if delz is None:
-            raise ValueError("hydrostatic=False requires delz")
-        dz = -delz
+    dz = dz_from_delz_or_hydrostatic_fv3(
+        delz=delz, pt=pt, q=q, peln=peln,
+        hydrostatic=hydrostatic, zvir=zvir,
+    )
 
     # Layer top/bottom heights above surface (k=0 top, k=-1 surface)
     zh_above, zh_below = compute_zh_above_below_fv3(dz)
@@ -4107,17 +4156,10 @@ def helicity_relative_caps_fv3(
     srh : jax.Array, shape (...,)
         Storm-relative helicity (m²/s²).
     """
-    if hydrostatic:
-        if pt is None or q is None or peln is None:
-            raise ValueError("hydrostatic=True requires pt, q, peln")
-        if zvir is None:
-            zvir = constants.R_v / constants.R_d - 1.0
-        rdg = constants.R_d / constants.g
-        dz = rdg * pt * (1.0 + zvir * q) * (peln[..., 1:] - peln[..., :-1])
-    else:
-        if delz is None:
-            raise ValueError("hydrostatic=False requires delz")
-        dz = -delz
+    dz = dz_from_delz_or_hydrostatic_fv3(
+        delz=delz, pt=pt, q=q, peln=peln,
+        hydrostatic=hydrostatic, zvir=zvir,
+    )
 
     zh_above, zh_below = compute_zh_above_below_fv3(dz)
     dz_eff = jnp.maximum(
@@ -4189,17 +4231,10 @@ def helicity_relative_fv3(
     srh : jax.Array, shape (...,)
         Storm-relative helicity (m²/s²).
     """
-    if hydrostatic:
-        if pt is None or q is None or peln is None:
-            raise ValueError("hydrostatic=True requires pt, q, peln")
-        if zvir is None:
-            zvir = constants.R_v / constants.R_d - 1.0
-        rdg = constants.R_d / constants.g
-        dz = rdg * pt * (1.0 + zvir * q) * (peln[..., 1:] - peln[..., :-1])
-    else:
-        if delz is None:
-            raise ValueError("hydrostatic=False requires delz")
-        dz = -delz
+    dz = dz_from_delz_or_hydrostatic_fv3(
+        delz=delz, pt=pt, q=q, peln=peln,
+        hydrostatic=hydrostatic, zvir=zvir,
+    )
 
     # Cumulative zh (top of each layer from surface up)
     zh_above, zh_below = compute_zh_above_below_fv3(dz)
@@ -4281,17 +4316,10 @@ def updraft_helicity_fv3(
     uh : jax.Array, shape (...,)
         Updraft helicity (m²/s²).
     """
-    if hydrostatic:
-        if pt is None or q is None or peln is None:
-            raise ValueError("hydrostatic=True requires pt, q, peln")
-        if zvir is None:
-            zvir = constants.R_v / constants.R_d - 1.0
-        rdg = constants.R_d / constants.g
-        dz = rdg * pt * (1.0 + zvir * q) * (peln[..., 1:] - peln[..., :-1])
-    else:
-        if delz is None:
-            raise ValueError("hydrostatic=False requires delz")
-        dz = -delz
+    dz = dz_from_delz_or_hydrostatic_fv3(
+        delz=delz, pt=pt, q=q, peln=peln,
+        hydrostatic=hydrostatic, zvir=zvir,
+    )
 
     # zh_above[k] = sum(dz[k:], axis=-1) — height of top of layer k from surface
     dz_reversed = dz[..., ::-1]

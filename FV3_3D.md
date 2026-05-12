@@ -1195,266 +1195,64 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
-- Iter 729: **``dry_pressure_fv3`` helper + iter-692 refactor**.
+- Iter 730: **``dz_from_delz_or_hydrostatic_fv3`` helper + 5-iter refactor**.
 
-  Extracted FV3's moist-air dry partial pressure pattern from iter-692
-  inline use (matching fv_diagnostics.F90:5375-5391):
+  Extracted common dz reconstruction pattern from supercell suite:
 
-      rq = max(0, q) if moist else 0
-      Hydrostatic:    pd = (1 − rq) · delp / (peln[k+1] − peln[k])
-      Non-hydro:      pd = −R_d · pt · (1 − rq) · delp / (g · delz)
+      Hydrostatic: dz = (R_d/g)·pt·(1+zvir·q)·(peln[k+1]−peln[k])
+      Non-hydro:   dz = −delz
 
-  Used in moist Poisson exponent computations and θ_e formulas.
+  Refactored 5 callsites — iter-686/687/688/689/707 — each removed
+  10 lines of identical branching boilerplate (50 lines total).
+  Output bit-identical (29/29 supercell tests still pass).
 
-  iter-692 ``eqv_pot_fv3`` refactored to delegate (removed 9 inline
-  lines).  Output bit-identical (pinned by iter-692 7/7 tests still
-  pass).
+  Composes with iter-728 ``compute_zh_above_below_fv3`` (dz →
+  zh_above/zh_below).
 
-  iter-716 ``eqv_pot_bolton_fv3`` not refactored: its inline pattern
-  uses (1 + zvir·q) virtual-T factor (not (1 − rq) dry-partial), so
-  different semantics.
+  Tests (5/5 in <2 s):
+  1. Non-hydro → dz = −delz exactly.
+  2. Hydrostatic isothermal dry → analytical match.
+  3. Moist (q=0.02) → exactly (1+zvir·q) factor over dry.
+  4. All 5 supercell functions still produce finite output.
+  5. Missing args raises ValueError as appropriate.
 
-  Tests (7/7 in <2 s):
-  1. Dry hydrostatic → pd = delp/Δpeln exactly.
-  2. Moist q=0.01 → pd = 0.99 · delp/Δpeln.
-  3. Non-hydro dry at pt=280, delz=-1000 → analytical pd.
-  4. iter-692 eqv_pot refactor output sanity (T=290, q variable → 290<θ_e<400).
-  5. 3-D shapes.
-  6. No NaN/Inf.
-  7. Missing peln/pt/delz/q raises ValueError as appropriate.
+  Wired into iter-383 sweep (now 294).
+- **Iters 721-729 (compacted iter 730)**: thermodynamic helpers,
+  vertical-coord utilities, and DRY refactors.
 
-  Wired into iter-383 sweep (now 293).
-- Iter 728: **``compute_zh_above_below_fv3`` helper + 5-iter refactor**.
+  | Iter | What                                              | Note / FV3 ref                                           |
+  |------|---------------------------------------------------|----------------------------------------------------------|
+  | 721  | ``virtual_temp_fv3`` + iter-718 dup cleanup        | T_v = T·(1+zvir·q); removed iter-656 get_vorticity dup    |
+  | 722  | ``compute_pkz_fv3``                               | fv_mapz:457/481 — Exner factor (3 branches)              |
+  | 723  | ``cappa_moist_fv3`` + iter-716 refactor           | fv_mapz:470/475 — moist Poisson exponent                  |
+  | 724  | ``compute_hybrid_pressure_fv3``                   | test_cases:2941 — pe, delp, peln from ak/bk/ps           |
+  | 725  | ``omega_diagnostic_fv3``                          | ω = w · delp/delz (hydrostatic limit)                    |
+  | 726  | ``hydrostatic_delz_fv3``                          | fv_mapz:3402/3411 — delz from hydrostatic balance        |
+  | 727  | ``compute_zh_from_delz_fv3`` + iter-706 refactor  | zh interfaces from delz + phis                           |
+  | 728  | ``compute_zh_above_below_fv3`` + 5-iter refactor  | zh per layer from dz (iter-686/687/688/689/707 callers)  |
+  | 729  | ``dry_pressure_fv3`` + iter-692 refactor          | pd dry partial pressure (hydro/non-hydro branches)       |
 
-  Extracted cumsum-based per-layer (zh_above, zh_below) pattern
-  from iters 686/687/688/689/707 (supercell suite) as a public
-  helper:
+  **Vertical-coord helper trio complete**:
+    * ``compute_hybrid_pressure_fv3`` (724): pe/delp/peln from ak/bk/ps
+    * ``hydrostatic_delz_fv3`` (726): delz from T/pe
+    * ``compute_zh_from_delz_fv3`` (727): zh from phis + delz
+    * ``compute_zh_above_below_fv3`` (728): per-layer zh from dz
+    * ``compute_pkz_fv3`` (722): Exner from delz/T or peln
+    * ``omega_diagnostic_fv3`` (725): ω from w + delp/delz
 
-      compute_zh_above_below_fv3(dz) -> (zh_above, zh_below)
+  **Moist thermo helper set**:
+    * ``virtual_temp_fv3`` (721): T_v
+    * ``cappa_moist_fv3`` (723): moist Poisson exponent
+    * ``dry_pressure_fv3`` (729): pd dry partial pressure
 
-      zh_above[k] = sum_{j>=k} dz[j]   (top of layer k from surface)
-      zh_below[k] = zh_above[k] - dz[k]
+  **DRY refactors**: ~50 lines of duplicated code removed across
+  9 iterations.  All refactors preserve output bit-identical
+  (pinned by regression tests in each iter).
 
-  Pairs with iter-727 ``compute_zh_from_delz_fv3`` (which adds
-  surface elevation and uses NEGATIVE delz).  This iter's helper
-  expects positive dz and outputs heights from notional z=0.
+  Iter-718 cleanup: audit found accidental duplicate ``get_vorticity_fv3``
+  redefinition (iter-656 was already there).  Removed.
 
-  Refactored 5 callsites — iter-686 UH, iter-687 SRH, iter-688
-  BRN, iter-689 Bunkers, iter-707 SRH-CAPS.  Removed ~20 lines
-  of duplicate code.  Output bit-identical (pinned by regression
-  tests in iter-728).
-
-  Tests (9/9 in <2 s):
-  1. Uniform dz=500, km=10 → zh_above [500..5000], zh_below [0..4500].
-  2. zh_below[-1] = 0 (surface).
-  3. Monotone decreasing top → surface.
-  4. zh_above − dz = zh_below exactly.
-  5-9. iter-686/687/688/689/707 refactor each preserves output.
-
-  Wired into iter-383 sweep (now 292).
-- Iter 727: **``compute_zh_from_delz_fv3``** — interface heights from delz + phis.
-  Extracted from iter-706 ``prt_height_fv3`` inline pattern as a
-  public helper.  Faithful to FV3's standard z-from-delz pattern:
-
-      zh[km] = phis / g                          (surface)
-      zh[k]  = zh[k+1] − delz[k]                 (cumulative upward,
-                                                  delz<0 in FV3)
-
-  Vectorized via cumsum on reversed (-delz).
-
-  Inverse direction of iter-726 ``hydrostatic_delz_fv3``.
-  Composes with:
-    * iter-684 ``get_height_given_pressure_fv3``
-    * iter-706 ``prt_height_fv3`` (now delegates to this helper)
-    * iter-722 ``compute_pkz_fv3`` (consumes peln but related)
-
-  iter-706 refactored: removed 10 inline lines; output bit-identical
-  (pinned by regression test in iter-727).
-
-  Tests (7/7 in <6 s):
-  1. zh[km] = phis/g exactly.
-  2. Uniform delz → evenly spaced zh.
-  3. Monotone decreasing top → surface.
-  4. iter-706 prt_height output unchanged after refactor.
-  5. Round-trip: compute_zh(hydrostatic_delz) → recover Δzh = |delz|.
-  6. 3-D (n_x, n_y, km) delz + 2-D phis → 3-D zh.
-  7. No NaN/Inf on random.
-
-  iter-706 4/4 tests still pass.
-
-  Wired into iter-383 sweep (now 291).
-- Iter 726: **``hydrostatic_delz_fv3``** — layer thickness from hydrostatic balance.
-  Faithful JAX port of FV3 hydrostatic delz initialization
-  (model/fv_mapz.F90:3402, 3411 HYDRO_DELZ_REMAP/EXTRAP).
-
-      delz = (R_d / g) · T_v · (pe[k] − pe[k+1])
-
-  where T_v = pt (dry) or T_v = pt·(1 + zvir·q) (moist).
-
-  FV3 sign convention: pe[k] < pe[k+1] (top to bottom) → delz < 0.
-
-  Inverse direction of iter-722 ``compute_pkz_fv3`` (which goes
-  delz → pkz).  Used in vertical-remap init, IC ingestion, and
-  any diagnostic needing delz from (T, p) hydrostatically.
-
-  Pairs with iter-724 ``compute_hybrid_pressure_fv3`` (pe from
-  ak/bk/ps) + iter-722 (pkz from delz/T).
-
-  Tests (7/7 in <1 s):
-  1. Dry isothermal → analytical delz.
-  2. Moist branch → uses T_v, |delz| > dry case.
-  3. Sign convention: monotone-increasing pe → delz < 0.
-  4. Thicker pressure layers → larger |delz|.
-  5. 3-D input → 3-D output.
-  6. No NaN/Inf on random.
-  7. moist=True without q raises ValueError.
-
-  Wired into iter-383 sweep (now 290).
-- Iter 725: **``omega_diagnostic_fv3``** — pressure vertical velocity.
-
-  Hydrostatic-limit ω = dp/dt:
-
-      ρ      = −delp / (g · delz)              (FV3 delz < 0)
-      ω      = −ρ · g · w = w · delp / delz
-
-  Sign convention: ω > 0 means descending air (pressure increasing
-  Lagrangian), ω < 0 means ascending air.
-
-  Captures dominant w·∂p/∂z term in the omega definition.  FV3's
-  exact omga (dyn_core.F90:1642) uses full Lagrangian
-  ``(pe[k+1] − pem[k+1])·rdt`` including ∂p/∂t + advection;
-  this diagnostic is the quasi-hydrostatic approximation suitable
-  for output snapshots.
-
-  Pairs with iter-693 nh_total_energy KE term + iter-679
-  interpolate_vertical for pressure-level diagnostics.
-
-  Tests (5/5 in <1 s):
-  1. w=0 → ω=0.
-  2. w<0 (descending) → ω>0.
-  3. Known density at delp=1e4 Pa, delz=-1000 m, w=0.01 → analytic ω.
-  4. 3-D input → 3-D output.
-  5. No NaN/Inf.
-
-  Wired into iter-383 sweep (now 289).
-- Iter 724: **``compute_hybrid_pressure_fv3``** — hybrid σ-pressure setup.
-  Faithful JAX port of FV3's hybrid-coord pressure pattern
-  (test_cases.F90:2941, 5274, 5370, 5479; fv_restart; IC ingestion):
-
-      pe[k]   = ak[k] + ps · bk[k]               (k = 0..km)
-      delp[k] = ak[k+1] − ak[k] + ps · (bk[k+1] − bk[k])
-      peln[k] = log(pe[k])
-
-  Top interface (k=0) typically has ak[0]=bk[0]=0 → pe[0]=0 →
-  log(0) = −∞.  ``pe_top_floor`` (default 1e-6 Pa) clamps to avoid
-  log singularity.
-
-  Pairs with iter-722 ``compute_pkz_fv3`` (which consumes peln),
-  iter-673 ``remap_coef_fv3`` (DA-increment vertical grid setup),
-  and iter-675 ``bilinear_interp_apply``.
-
-  Tests (7/7 in <1 s):
-  1. Pure σ (ak=0, bk monotone) → pe = bk·ps.
-  2. Pure p (bk=0) → pe = ak.
-  3. Hybrid blend (ak top, bk·ps bottom) → analytical match.
-  4. ak[0]=bk[0]=0 → pe[0] floored, peln finite.
-  5. Σ delp = ps − ak[0] (mass conservation).
-  6. 3-D (n_x, n_y) ps → 3-D (n_x, n_y, km) outputs.
-  7. No NaN/Inf on random.
-
-  Wired into iter-383 sweep (now 288).
-- Iter 723: **``cappa_moist_fv3``** — variable Poisson exponent.
-
-  Extracted moist cappa formula from inline use in iter-716
-  Bolton θ_e (and FV3 fv_mapz.F90 lines 470, 475, 487):
-
-      cv_air = c_pd − R_d
-      cv_vap = c_pv − R_v
-      cappa  = R_d / (R_d + ((1−q)·cv_air + q·cv_vap)/(1+zvir·q))
-
-  Dry limit (q=0): cappa = R_d/c_pd = constants.kappa.
-
-  Pairs with iter-722 ``compute_pkz_fv3`` (accepts layer-varying
-  cappa array for moist nwat path) and iter-716 ``eqv_pot_bolton_fv3``
-  (now delegates to helper).
-
-  Reuses legoesm constants: R_d, R_v, c_pd, c_pv, kappa.
-
-  iter-716 refactored to delegate to helper; output bit-identical.
-
-  Tests (6/6 in <2 s):
-  1. Dry limit → cappa = kappa exactly.
-  2. Monotone-decreasing in q (cv_vap > cv_air → heavier moist
-     atm → lower cappa).
-  3. Custom zvir plumbing.
-  4. Pairs with iter-722 compute_pkz_fv3 moist path.
-  5. iter-716 Bolton θ_e refactor preserves output (manual
-     cappa formula matches helper).
-  6. No NaN/Inf on random.
-
-  iter-716 8/8 tests still pass.
-
-  Wired into iter-383 sweep (now 287).
-- Iter 722: **``compute_pkz_fv3``** — layer-mean Exner factor.
-  Faithful JAX port of FV3 pkz computation
-  (fv_mapz.F90:457 hydrostatic, :481 non-hydrostatic dry,
-  :470/:475 non-hydrostatic moist).
-
-      Hydrostatic:
-          pkz = (p_top^κ − p_bot^κ) / (κ · (peln_top − peln_bot))
-
-      Non-hydrostatic dry:
-          pkz = exp(κ · ln(R_d · delp · pt / (g · |delz|)))
-              = (R_d · delp · pt / (g · |delz|))^κ
-
-      Non-hydrostatic moist (varying κ per layer):
-          pkz = exp(cappa · ln(R_d · delp · pt / (g · |delz|)))
-          (cappa parameter accepts scalar or (...,km) array)
-
-  Pairs with iter-691 ``pv_entropy_fv3`` (uses θ = pt/pkz),
-  iter-692 ``eqv_pot_fv3`` (uses pkz for dry-hydrostatic θ_e),
-  and FV3 ``Riem_Solver`` (uses pkz in nonhydrostatic momentum).
-
-  Tests (7/7 in <1 s):
-  1. Thin Δp around p=1e5 → pkz ≈ p^κ (limit Δp → 0).
-  2. Multi-layer column → pkz monotone in pressure.
-  3. Non-hydrostatic dry analytic match.
-  4. Hydro and non-hydro isothermal match to 1e-3 rel.
-  5. Custom cappa overrides default kappa.
-  6. 3-D shape: (n_x, n_y, km+1) peln → (n_x, n_y, km) pkz.
-  7. Missing peln/pt/delz raises ValueError.
-
-  Reuses ``constants.kappa``, ``R_d``, ``g``.  No new constants.
-
-  Wired into iter-383 sweep (now 286).
-- Iter 721: **``virtual_temp_fv3`` helper + iter-718 duplicate cleanup**.
-
-  ``virtual_temp_fv3(pt, q, zvir=None)`` returns
-  ``T_v = T · (1 + zvir · q)`` matching FV3's inline pattern
-  (dyn_core.F90 and fv_diagnostics.F90 use this expression at
-  ~15 sites: lines 2959, 2990, 3532, etc.).  Default
-  ``zvir = R_v/R_d − 1`` from legoesm constants.
-
-  **iter-718 cleanup**: audit revealed iter-718 had accidentally
-  redefined ``get_vorticity_fv3`` already ported in iter-656
-  (line ~5750).  Both implementations bit-equivalent but caused
-  duplicate-function namespace clash (Python uses last-defined).
-  iter-721 removes the iter-718 duplicate; the iter-656
-  canonical definition remains.  iter-718 tests still pass
-  unchanged (they validate the surviving iter-656 implementation).
-
-  Tests (6/6 in <2 s):
-  1. q = 0 → T_v = T.
-  2. q > 0 → T_v > T by exactly T·zvir·q (Δ = ~2.65 K at q=15 g/kg,
-     T=290 K).
-  3. Custom zvir overrides default.
-  4. iter-656 get_vorticity_fv3 still importable + works post-cleanup.
-  5. 3-D input → 3-D output.
-  6. No NaN/Inf on random.
-
-  iter-718 5/5 tests still pass.
-
-  Wired into iter-383 sweep (now 285).
+  Wired into iter-383 sweep: 284 → 293 modules.
 - Iter 720: **``saturation_mixing_ratio_blend`` helper in thermo.py**.
 
   Extracted reusable liquid/ice saturation blend from iter-715
