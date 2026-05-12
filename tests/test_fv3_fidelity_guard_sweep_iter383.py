@@ -124,6 +124,7 @@ _GUARD_MODULES = (
     "test_nh_residual_bisection_iter507",            # iter-507 add
     "test_corner_div_damp_sweep_iter508",            # iter-508 add
     "test_residual_growth_iter509",                  # iter-509 add
+    "test_clip_long_term_effect_iter511",            # iter-511 add
 )
 
 

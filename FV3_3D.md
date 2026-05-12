@@ -1081,6 +1081,20 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 511: **clip benefit GROWS over time** — corrects
+  iter-509 interpretation.  Compare no-clip vs clip at 1, 5,
+  10 steps (seed=511, C8):
+  - 1 step:   no-clip 1.896× vs clip 1.209× → clip -36.2%
+  - 5 steps:  no-clip 2.622× vs clip 1.486× → clip -43.3%
+  - 10 steps: no-clip 3.796× vs clip 1.793× → clip **-52.7%**
+  Both grow, but no-clip grows ~2× faster than clip.  Clip is
+  not a single-step cosmetic — it suppresses real long-term
+  accumulation.  Re-frames iter-509: clip is *necessary*
+  precisely because the leak accumulates; iter-509 was just
+  measuring residual growth WITH clip already active.  Next
+  question: does strict slack=0 outperform slack=0.5 long-term
+  (iter-503 found them similar at 1 step)?  1/1 in 182 s.
+  Wired into iter-383 sweep (now 101).
 - **Iters 501-509 (compacted iter 510)**: from clip-slack
   knob → combined-fix new low → user-facing API → growth
   diagnostic that closes the "single-step floor was optical
