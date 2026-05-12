@@ -1195,6 +1195,34 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 704: **FV3 ``prt_maxmin_fv3``** — light max/min diagnostic
+  (no area weighting; simpler than iter-685 ``prt_mxm`` which adds
+  area-weighted gmean).  Faithful JAX port of FV3 ``prt_maxmin``
+  (tools/fv_diagnostics.F90:4080-4116).
+
+      qmin = min(q) · fac
+      qmax = max(q) · fac
+
+  Used by FV3 as a fast sanity-check diagnostic during integration.
+
+  Tests (4/4 in <1 s):
+  1. Linspace → qmin/qmax exact.
+  2. fac=2 doubles outputs.
+  3. 4-D (6, n, n, km) input → scalar outputs.
+  4. No NaN/Inf on random.
+
+  **Audit note**: investigated cross-face vector basis treatment
+  at NH ``damp_v_d_con`` site (line 1197 ``du_normal``/``dv_normal``
+  halo).  Current ``use_fv3_cross_face_du_proj=True`` uses
+  ``_pad_halo_4d_module`` (scalar duogrid pad).  ``du_normal`` is
+  velocity-component-in-face-x direction; at cube faces the local
+  east direction rotates → scalar pad gives basis-mismatch.
+  Vector-aware halo would require per-component basis bookkeeping
+  on staggered grid (cannot use ``pad_halo_vector_4d`` which
+  expects co-located (u, v) pair).  Logged as future audit item;
+  scope too large for one iter.
+
+  Wired into iter-383 sweep (now 268).
 - Iter 703: **C24 validates iter-698 in the documented floor regime**.
 
   iter-698 (C8) and iter-699 (C16) measured −25.8 % and −21.9 %

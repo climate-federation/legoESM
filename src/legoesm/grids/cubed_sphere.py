@@ -3489,6 +3489,39 @@ def updraft_helicity_fv3(
     return jnp.sum(vort * w * dz_eff, axis=-1)
 
 
+def prt_maxmin_fv3(
+    q: jax.Array,
+    fac: float = 1.0,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 704: max/min field diagnostic (no area weighting).
+
+    Faithful JAX port of FV3 ``prt_maxmin``
+    (tools/fv_diagnostics.F90:4080-4116).
+
+    Simpler than iter-685 ``prt_mxm_fv3`` which adds area-weighted
+    global mean.  This is the lighter-weight diagnostic for sanity
+    checks during integration:
+
+        qmin = min(q) · fac
+        qmax = max(q) · fac
+
+    Parameters
+    ----------
+    q : jax.Array
+        Field of any shape.
+    fac : float, default 1.0
+        Multiplicative factor (FV3 convention for unit scaling).
+
+    Returns
+    -------
+    qmin, qmax : jax.Array
+        Scalar min / max of q · fac.
+    """
+    qmin = jnp.min(q) * fac
+    qmax = jnp.max(q) * fac
+    return qmin, qmax
+
+
 def prt_mxm_fv3(
     q: jax.Array, area: jax.Array, fac: float = 1.0,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
