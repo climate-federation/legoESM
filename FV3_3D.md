@@ -153,6 +153,45 @@ from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
 * PE variants are API-symmetric; iter-469/470 showed PE is
   largely insensitive to these flag changes at C8.
 
+### Halo monotone-clip helpers (iter 505/526)
+
+For an additional ~50% long-term edge reduction (iter-511
+shows 53% benefit at 10 steps), wrap the dycore step with
+the iter-505 monotone-clip helper:
+
+**For non-JIT use** (or when JIT is compiled inside the
+context):
+
+```python
+from legoesm.grids.halo import monotone_halo_clip_context
+
+with monotone_halo_clip_context(slack=0.5):
+    new_state = model.step(state, dt)
+```
+
+**For JIT-compiled use** (recommended for long runs) — use
+the iter-526 ``make_clipped_step`` helper which forces
+tracing inside the context so clip is permanently baked in:
+
+```python
+from legoesm.grids.halo import make_clipped_step
+
+step = make_clipped_step(model, state, dt=10.0, slack=0.5)
+for _ in range(n_steps):
+    state = step(state, dt=10.0)
+```
+
+Combined with ``make_legoesm_nh_min_edge_config`` (iter-466),
+this achieves **65.7% reduction** at C8+duogrid (iter-504).
+
+Verified properties of the helper stack:
+* Mass conservation: 5e-9 (NH) / 7e-9 (PE) over 10 steps
+  (iter-523/524).
+* ``jax.grad`` flows through (iter-522).
+* Cube-smooth IC converges with resolution (iter-519:
+  C8 e/i=1.43× → C16 1.29×).
+* 15 halo-site patches (iter-527 final coverage).
+
 ## Duogrid investigation summary (iter 461-493 synthesis, iter 494 update)
 
 A 33-iter empirical investigation of cube-edge artifacts at
