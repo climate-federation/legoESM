@@ -1304,6 +1304,63 @@ def get_center_vect(
     return u1, u2
 
 
+def init_cubed_to_latlon(
+    agrid_lon: jax.Array, agrid_lat: jax.Array,
+    ec1: jax.Array, ec2: jax.Array,
+    sin_sg5: jax.Array,
+) -> tuple[
+    jax.Array, jax.Array, jax.Array, jax.Array,
+    jax.Array, jax.Array, jax.Array, jax.Array,
+    jax.Array, jax.Array,
+]:
+    """FV3_3D iter 626: D-grid → latlon wind rotation matrices.
+
+    Faithful port of FV3 ``init_cubed_to_latlon``
+    (fv_grid_utils.F90:2321-2384), grid_type<4 branch.  Computes
+    the 8 rotation-matrix entries used by FV3 ``c2l_ord4`` to
+    rotate D-grid winds to (east, north) at cell centers.
+
+    Algorithm:
+        1. vlon, vlat = unit_vect_latlon(agrid)  — local frame
+        2. z11 = ec1 · vlon                       — inner products
+           z12 = ec1 · vlat
+           z21 = ec2 · vlon
+           z22 = ec2 · vlat
+        3. a11 =  0.5·z22 / sin_sg5
+           a12 = -0.5·z12 / sin_sg5
+           a21 = -0.5·z21 / sin_sg5
+           a22 =  0.5·z11 / sin_sg5
+
+    The (a11, a12, a21, a22) matrix gives the D-grid → (u_east,
+    v_north) projection at each cell center.
+
+    Parameters
+    ----------
+    agrid_lon, agrid_lat : jax.Array, shape ``(..., n, n)``
+        Cell-center positions (radians).
+    ec1, ec2 : jax.Array, shape ``(..., n, n, 3)``
+        Cell-edge unit tangent vectors (FV3 ``ec1``, ``ec2``).
+    sin_sg5 : jax.Array, shape ``(..., n, n)``
+        sin of the cell-area diagonal (FV3 ``sin_sg(:,:,5)``).
+
+    Returns
+    -------
+    (a11, a12, a21, a22, z11, z12, z21, z22, vlon, vlat) : tuple
+        Rotation matrix entries + intermediate z and unit vectors.
+    """
+    vlon, vlat = unit_vect_latlon(agrid_lon, agrid_lat)
+    z11 = inner_prod(ec1, vlon)
+    z12 = inner_prod(ec1, vlat)
+    z21 = inner_prod(ec2, vlon)
+    z22 = inner_prod(ec2, vlat)
+    safe_sin = jnp.where(jnp.abs(sin_sg5) > 1e-30, sin_sg5, 1.0)
+    a11 = 0.5 * z22 / safe_sin
+    a12 = -0.5 * z12 / safe_sin
+    a21 = -0.5 * z21 / safe_sin
+    a22 = 0.5 * z11 / safe_sin
+    return a11, a12, a21, a22, z11, z12, z21, z22, vlon, vlat
+
+
 def mirror_grid_face1_symmetrize(
     face1_lon: jax.Array, face1_lat: jax.Array,
 ) -> tuple[jax.Array, jax.Array]:

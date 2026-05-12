@@ -1195,6 +1195,43 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 626: **FV3 ``init_cubed_to_latlon``** — D-grid → latlon
+  wind rotation matrices.  Faithful JAX port of FV3
+  ``init_cubed_to_latlon`` (fv_grid_utils.F90:2321-2384,
+  grid_type<4 branch).  Computes the 8 rotation-matrix entries
+  used by ``c2l_ord4`` to rotate D-grid winds to (east, north)
+  at cell centers.
+
+  Algorithm:
+
+      vlon, vlat = unit_vect_latlon(agrid)   # iter 615
+      z11 = ec1·vlon;  z12 = ec1·vlat        # iter 611 inner_prod
+      z21 = ec2·vlon;  z22 = ec2·vlat
+      a11 =  0.5·z22 / sin_sg5
+      a12 = -0.5·z12 / sin_sg5
+      a21 = -0.5·z21 / sin_sg5
+      a22 =  0.5·z11 / sin_sg5
+
+  The (a11, a12, a21, a22) matrix gives the D-grid → (u_east,
+  v_north) projection at each cell center.  Used by FV3 wind
+  diagnostics, AAM correction (iter 583/587/588), and Held-
+  Suarez physics coupling.
+
+  Reuses iter-611 ``inner_prod``, iter-615 ``unit_vect_latlon``.
+  Safe-divide on ``sin_sg5`` avoids NaN at degenerate cells.
+
+  Returns 10-tuple: ``(a11, a12, a21, a22, z11, z12, z21, z22,
+  vlon, vlat)``.
+
+  Tests (6/6 in <1 s):
+  1. Output shapes (n, n) for scalars, (n, n, 3) for vlon/vlat.
+  2. No NaN/Inf on random inputs.
+  3. z = ec·v inner products verified.
+  4. a = ±0.5·z/sin_sg5 formulas verified.
+  5. Identity case ec = (vlon, vlat) → z = (1, 0, 0, 1).
+  6. sin_sg5 = 0 → no NaN/Inf (safe-divide).
+
+  Wired into iter-383 sweep (now 197).
 - Iter 625: **FV3 ``mirror_grid_face1_symmetrize``** — face-1
   SIGN-averaging symmetrization.  Faithful JAX port of FV3
   ``mirror_grid`` first loop (fv_grid_tools.F90:2774-2807).
