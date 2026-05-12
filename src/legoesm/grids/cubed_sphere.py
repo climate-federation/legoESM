@@ -4594,6 +4594,64 @@ def potential_vorticity_ertel_fv3(
     return eta_abs * dtheta_dz / jnp.maximum(rho, rho_floor)
 
 
+def dynamic_tropopause_fv3(
+    pv: jax.Array,
+    z: jax.Array,
+    pv_thresh: float = 2.0e-6,
+) -> jax.Array:
+    """FV3_3D iter 796: dynamic tropopause height from PV threshold.
+
+    Hoskins-McIntyre-Robertson (1985) PV-based tropopause: the
+    lowest level at which the magnitude of Ertel PV exceeds a
+    critical value:
+
+        z_dt = z[k*]   where k* = argmin{ k : |PV(k)| > pv_thresh }
+
+    Canonical ``pv_thresh = 2 PVU = 2·10⁻⁶ m²·K·kg⁻¹·s⁻¹``.
+    ``|PV|`` rather than ``PV`` is used so that the Southern-
+    Hemisphere stratosphere (PV < −2 PVU) is also captured.
+
+    Vertical axis last; ``z`` and ``pv`` are surface → top
+    oriented.  Fallbacks:
+      * No crossing in column (deep troposphere): return z[..., −1]
+        (top of column).
+      * All |PV| > pv_thresh (degenerate; possible near the polar
+        vortex with very low tropopause): return z[..., 0].
+
+    Composes iter-795 ``potential_vorticity_ertel_fv3``.
+
+    Used by: stratosphere-troposphere exchange diagnostics
+    (depression/lift of z_dt = STE event), upper-tropospheric
+    jet diagnostics (z_dt slopes mark jet shoulders), reanalysis
+    PV-θ tropopause climatology, ozone-budget tropopause
+    crossings.
+
+    JAX-compatible threshold detection via ``jnp.argmax(above,
+    axis=-1)`` + ``jnp.any`` + ``jnp.take_along_axis`` — fully
+    vmap-compatible.
+
+    Parameters
+    ----------
+    pv : jax.Array, shape (..., km)
+        Ertel PV at each level (m²·K·kg⁻¹·s⁻¹).
+    z : jax.Array, shape (..., km)
+        Geopotential height above surface at the same levels (m).
+    pv_thresh : float
+        Critical PV value (m²·K·kg⁻¹·s⁻¹).  Default 2·10⁻⁶.
+
+    Returns
+    -------
+    z_dt : jax.Array, shape (...,)
+        Dynamic-tropopause height (m).
+    """
+    above = jnp.abs(pv) > pv_thresh
+    idx = jnp.argmax(above, axis=-1)
+    any_above = jnp.any(above, axis=-1)
+    top_idx = pv.shape[-1] - 1
+    idx_safe = jnp.where(any_above, idx, top_idx)
+    return jnp.take_along_axis(z, idx_safe[..., None], axis=-1)[..., 0]
+
+
 def kinetic_energy_fv3(
     ua: jax.Array,
     va: jax.Array,

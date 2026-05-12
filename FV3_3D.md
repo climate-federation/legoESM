@@ -5197,5 +5197,54 @@ troposphere exchange.  Composes iter-794 → iter-795 to give the
 full η → PV chain.  Pure JAX, vmap-compatible.  No new physical
 constants introduced.
 
+## Iter 796 — dynamic_tropopause_fv3 (|PV| > 2 PVU threshold)
+
+Added `dynamic_tropopause_fv3(pv, z, pv_thresh=2e-6)` to
+`grids/cubed_sphere.py`.  Hoskins-McIntyre-Robertson (1985) PV-
+based tropopause:
+
+```
+z_dt = z[k*]   where k* = argmin{ k : |PV(k)| > pv_thresh }
+```
+
+Canonical ``pv_thresh = 2 PVU = 2·10⁻⁶ m²·K·kg⁻¹·s⁻¹``.  ``|PV|``
+captures both NH (PV > +2 PVU) and SH (PV < −2 PVU) stratosphere
+in a single threshold.
+
+Vertical axis last; ``z`` and ``pv`` surface → top oriented.
+Fallbacks:
+  * No crossing → return z at top of column.
+  * All |PV| > thresh → return surface.
+
+JAX-compatible threshold detection via ``jnp.argmax(above,
+axis=-1)`` + ``jnp.any`` + ``jnp.take_along_axis`` — fully
+vmap-compatible.  Matches the iter-775 PBL-height-from-Ri_b
+detection pattern.
+
+Composes iter-795 ``potential_vorticity_ertel_fv3``.
+
+Used by: stratosphere-troposphere exchange diagnostics
+(depression/lift of z_dt = STE event), upper-tropospheric jet
+diagnostics (z_dt slopes mark jet shoulders), reanalysis PV-θ
+tropopause climatology, ozone-budget tropopause crossings.
+
+Test: `tests/test_fv3_dynamic_tropopause_iter796.py` (7 tests:
+monotone PV crossing at level 3, no crossing → top, all-above →
+surface, SH negative PV → |PV| triggers correctly, custom
+threshold (2 vs 4 PVU pick different levels), full iter-795
+pipeline (η, ρ, ∂θ/∂z) → PV → z_dt, 3-D batched (n_x, n_y, km)
+→ (n_x, n_y) output shape).
+
+### Why this iteration was meaningful
+
+Closes the η → PV → z_dt diagnostic chain: iter-794 (η) +
+iter-795 (PV) + iter-796 (z_dt) give the canonical HMR-1985
+tropopause-detection pipeline.  Dynamic tropopause is the
+preferred reanalysis tropopause definition (vs lapse-rate or
+ozone-based) — it tracks STE events, jet-shoulder structure,
+and is dynamically self-consistent (PV is the conserved
+quantity).  Pure JAX, vmap-compatible.  No new physical
+constants introduced (2 PVU is the HMR-1985 convention).
+
 
 
