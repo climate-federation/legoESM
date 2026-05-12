@@ -168,3 +168,23 @@ Compression iteration.  Consolidated iter-10 through iter-19 entries into
 the "Iterations 1-19 — Summary" section above so the working log stays
 under the auto-loaded MEMORY.md / context envelope.  All previous detailed
 entries remain in the commit messages on `clean_physics`.
+
+### Iteration 22 — 2026-05-12
+
+**Action: Sundqvist microphysics autoconversion donor clamp.**
+
+Inspection found that
+`atmosphere/physics/microphysics/sundqvist.py:diagnose_sundqvist_process_rates`
+computes `P_auto = config.auto_rate · jnp.maximum(q_c + condensation·dt, 0)`
+[kg/kg/s].  With the default `auto_rate = 1e-3` /s and a typical
+physics step `dt = 1800 s`, the autoconversion sink times dt is
+``auto_rate · dt = 1.8`` × the available cloud water — explicit Euler
+update `q_c + dt · dq_c_dt` would drive q_c negative.
+
+Fix: cap `P_auto = min(auto_rate · q_c_avail, q_c_avail / dt)` so
+the per-step removal cannot exceed the local mass.  Added a
+regression test that exercises an `auto_rate · dt = 1.8` configuration
+and asserts `q_c_new ≥ 0`.
+
+**Tests (post iter-22):**
+- 7 / 7 Sundqvist + autoconversion regression tests pass.

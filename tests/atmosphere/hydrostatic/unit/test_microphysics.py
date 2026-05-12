@@ -293,6 +293,31 @@ class TestSundqvist:
         for field in out:
             assert jnp.all(jnp.isfinite(field))
 
+    def test_autoconversion_does_not_drive_qc_negative(self):
+        """With dt large enough that auto_rate·dt > 1, an explicit Euler
+        step on q_c must NOT drive q_c below zero.  Default
+        ``auto_rate = 1e-3`` and ``dt = 1800 s`` give ``auto_rate·dt = 1.8``;
+        without the donor clamp added in clean_physics iter-22, the
+        autoconversion sink would exceed available ``q_c`` and the
+        explicit update ``q_c + dt·dq_c_dt`` would go negative."""
+        ncol, nlev = 4, 10
+        T = jnp.full((ncol, nlev), 280.0)
+        p_half = jnp.linspace(1e4, 1e5, nlev + 1)[None, :].repeat(ncol, axis=0)
+        p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+        rho = p_full / (constants.R_d * T)
+        dz = jnp.full((ncol, nlev), 500.0)
+        q_sat = saturation_mixing_ratio(T, p_full)
+        q_v = jnp.full_like(T, 0.5) * q_sat  # subsat, no new condensation
+        h = make_zero_hydrometeors(ncol, nlev)
+        # Seed a thin cloud water layer
+        q_c = jnp.full_like(T, 1.0e-4)
+        h = h._replace(q_c=q_c)
+        dt = 1800.0  # 30-min step → auto_rate·dt = 1.8
+        out = sundqvist_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=dt)
+        q_c_new = q_c + dt * out.dq_c_dt
+        # Positivity must hold for any explicit Euler step
+        assert jnp.all(q_c_new >= -1.0e-12)
+
     def test_below_RH_crit_no_condensation(self):
         ncol, nlev = 4, 10
         T = jnp.full((ncol, nlev), 280.0)
