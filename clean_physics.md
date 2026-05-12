@@ -96,6 +96,30 @@ Branch: `clean_physics`. Driven by Ralph loop + `/codex:adversarial-review`.
   75 / 75 land carbon + multilayer + diff_land; 140 / 140 land (post iter-44);
   100 / 100 ocean MPAS + surface_forcing + emanuel + atmosphere convection.
 
+## Iteration 54 — 2026-05-13
+
+**Fix codex iter-53 stop-time finding: wrong stencil reach in fill.**
+
+Iter-53 used `n_passes=1` (harmonic) / `n_passes=2` (biharmonic),
+matching a naive compact-stencil interpretation.  The actual legoESM
+operators are wider:
+
+- `laplacian_viscosity_3d` = `div(grad(·))` with centred FD
+  `(f[i+1] - f[i-1]) / dx` → at cell `j` samples `{j-2, j, j+2}`.
+  Stencil reach = 2 cells → `n_passes=2`.
+- `hyperdiffusion_3d` = `compact_laplacian(·)` then `div(grad(·))` —
+  reach 1 + 2 = 3.  At cell `j` samples `f[j±1], f[j±2], f[j±3]`.
+  Stencil reach = 3 cells → `n_passes=3`.
+
+With the corrected `n_passes`, the Neumann fill covers the full
+stencil reach so coastline gradients are zero across every cell the
+operator actually inspects.  Trade-off: bridges land barriers up to
+2 cells (harmonic) or 3 cells (biharmonic) wide.  Wider barriers
+no longer leak.
+
+**Tests (post iter-54):** 35 / 35 lateral-mixing + harmonic +
+biharmonic + surface-forcing-dispatch tests pass.
+
 ## Iteration 53 — 2026-05-13
 
 **Fix codex iter-52 stop-time finding: thin-barrier leak.**

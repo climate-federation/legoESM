@@ -83,16 +83,19 @@ def biharmonic_lateral_mixing(
     # no-flux BC even more important.  See harmonic.py for the
     # analogous fix.
     #
-    # ``n_passes=2`` matches the ∇²∇² 2-cell stencil reach — the inner
-    # ∇² needs land cells 1 step from ocean filled; the outer ∇² needs
-    # land cells 2 steps from ocean filled.  Going deeper would bridge
-    # thin (≤ n_passes-wide) land barriers and leak T/S across
-    # disconnected basins.  Codex iter-52 stop-time review.
+    # ``n_passes=3`` matches the biharmonic ∇⁴ stencil reach.
+    # ``hyperdiffusion_3d`` composes ``compact_laplacian`` (reach 1,
+    # uses ``f[i±1]``) with ``div(grad(·))`` (reach 2, uses ``f[i±2]``).
+    # The full ∇²∇² then samples cells up to ``{i±3}``, so land cells
+    # THREE steps from ocean must be filled for the operator to see
+    # consistent gradients at coastlines.  Bridges land barriers up to
+    # 3 cells wide — wider strips no longer leak.  Codex iter-53
+    # stop-time review (n_passes=2 from iter-53 under-counted).
     dT_dt = z
     dS_dt = z
     if cfg.B_h_tracer > 0:
-        T_filled = fill_land_cells(T, mask, grid, n_passes=2)
-        S_filled = fill_land_cells(S, mask, grid, n_passes=2)
+        T_filled = fill_land_cells(T, mask, grid, n_passes=3)
+        S_filled = fill_land_cells(S, mask, grid, n_passes=3)
         tr_stack = jnp.stack([T_filled, S_filled], axis=-1)  # (6, n, n, nlev, 2)
         n_face, n_i, n_j, nlev_t, n_pair = tr_stack.shape
         tr_flat = tr_stack.reshape(n_face, n_i, n_j, nlev_t * n_pair)

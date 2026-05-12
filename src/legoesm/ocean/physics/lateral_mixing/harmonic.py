@@ -89,18 +89,21 @@ def harmonic_lateral_mixing(
     # pressure-anomaly handling.  Codex finding (iter-25) plus
     # deferred no-flux BC item.
     #
-    # ``n_passes=1`` matches the 5-point Laplacian stencil reach — any
-    # deeper would bridge thin (≤ n_passes-wide) land barriers and
-    # leak T/S across basins that shouldn't be connected.  A 1-cell-
-    # wide land strip (e.g. Central America at coarse resolution) is
-    # still bridged by a single pass; a true cross-basin barrier
-    # requires connected-components analysis of the mask, which is
-    # beyond the scope of this scheme.  Codex iter-52 stop-time review.
+    # ``n_passes=2`` matches the stencil reach of the legoESM Laplacian.
+    # ``laplacian_viscosity_3d`` uses ``div(grad(f))`` with the centred
+    # FD ``(f[i+1] - f[i-1]) / dx`` (dx = distance between i±1).  The
+    # resulting wide-stencil Laplacian at cell i samples cells
+    # ``{i-2, i, i+2}`` — so land cells TWO steps from ocean must be
+    # filled for the stencil to see correct gradients at coastlines.
+    # ``n_passes=1`` (the iter-53 setting) under-counted the reach and
+    # left a one-cell strip of unfilled land within the operator's view.
+    # ``n_passes=2`` bridges land barriers up to 2 cells wide — wider
+    # barriers no longer leak.  Codex iter-53 stop-time review.
     dT_dt = z
     dS_dt = z
     if cfg.K_h > 0:
-        T_filled = fill_land_cells(T, mask, grid, n_passes=1)
-        S_filled = fill_land_cells(S, mask, grid, n_passes=1)
+        T_filled = fill_land_cells(T, mask, grid, n_passes=2)
+        S_filled = fill_land_cells(S, mask, grid, n_passes=2)
         tr_stack = jnp.stack([T_filled, S_filled], axis=-1)  # (6, n, n, nlev, 2)
         n_face, n_i, n_j, nlev_t, n_pair = tr_stack.shape
         tr_flat = tr_stack.reshape(n_face, n_i, n_j, nlev_t * n_pair)
