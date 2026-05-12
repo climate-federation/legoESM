@@ -1175,6 +1175,15 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 547: **PE scan_step validation** — symmetric to iter-544.
+  Mirror ``make_clipped_scan_step`` validation to PE dycore:
+  1. PE scan output matches Python loop bit-for-bit
+     (max|diff| < 1e-10).
+  2. ``jax.grad`` flows through PE scan_step.
+  Caveat: held_suarez_init returns float32 p_s by default;
+  state must be cast to float64 for scan body type stability
+  (JAX requirement, not specific to this helper).  1/1 in
+  134 s.  Wired into iter-383 sweep (now 131).
 - Iter 546: **scan_step speedup measurement**.  iter-544
   claimed ``make_clipped_scan_step`` eliminates Python loop
   overhead.  Quantified at 20 steps @ C8 + SBR:
