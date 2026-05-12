@@ -1195,6 +1195,32 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 641: **FV3 ``compute_dz_var``** — variable dz with rescaling.
+  Faithful JAX port of FV3 ``compute_dz_var``
+  (tools/fv_eta.F90:1930-1998).  Mirror of iter-639 ``hybrid_z_dz``
+  with three key differences:
+
+      - s_fac[km] = 0.125 (vs 0.12 in hybrid_z_dz)
+      - middle layers: s_fac[k] = s_rate · s_fac[k+1] (no min-4 cap)
+      - dz rescaled so sum(dz) = ztop exactly (FV3 lines 1981-1983)
+      - sm1_edge with ntimes=2 (iter 636)
+
+  Default ``s_rate = 1.0`` gives uniform middle layers.  Top 8
+  layers use FV3 multipliers (1.05 → 1.6).  Requires km ≥ 18.
+
+  Pairs with iter-639 ``hybrid_z_dz``; both implement FV3's
+  stretched vertical-coord variants.  Lives in
+  ``legoesm.grids.vertical``.
+
+  Tests (6/6 in 1 s):
+  1. Output shape (km,).
+  2. Σ dz = ztop (rescale + sm1_edge invariant).
+  3. All dz > 0.
+  4. No NaN/Inf.
+  5. km < 18 raises ValueError.
+  6. Top > bottom (FV3 stretch pattern).
+
+  Wired into iter-383 sweep (now 210).
 - **Iters 631-639 (compacted iter 640)**: FV3 grid + vertical-coord
   ancillary ports.  9 iterations add boundary, reduction, vertical,
   and ghost helpers from FV3 fv_grid_utils + fv_eta + fv_grid_tools:

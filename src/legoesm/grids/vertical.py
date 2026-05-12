@@ -1166,6 +1166,86 @@ def compute_dz_L32() -> tuple[jax.Array, jax.Array]:
     return dz_flipped, ztop
 
 
+def compute_dz_var(
+    km: int, ztop: float, s_rate: float = 1.0,
+) -> jax.Array:
+    """FV3_3D iter 641: variable dz with stretch rescaling.
+
+    Faithful JAX port of FV3 ``compute_dz_var``
+    (tools/fv_eta.F90:1930-1998).  Similar to iter-639
+    ``hybrid_z_dz`` but with::
+
+        - s_fac[km] = 0.125 (vs 0.12 in hybrid_z_dz)
+        - middle layers: s_fac[k] = s_rate · s_fac[k+1] (no min-cap)
+        - rescale dz so ze[0] = ztop exactly (FV3 lines 1981-1983)
+        - sm1_edge with ntimes=2
+
+    Default ``s_rate = 1.0`` gives uniform middle layers.  Top 8
+    layers use the same FV3 multipliers as iter-639 (1.05 → 1.6).
+
+    Requires ``km >= 18``.
+
+    Parameters
+    ----------
+    km : int
+        Number of layers (must be ≥ 18).
+    ztop : float
+        Top of model (m).
+    s_rate : float, default 1.0
+        Middle-layer stretch rate.
+
+    Returns
+    -------
+    dz : jax.Array, shape ``(km,)``
+        Layer thicknesses (top→bottom indexing).
+    """
+    if km < 18:
+        raise ValueError(f"compute_dz_var requires km >= 18, got {km}")
+
+    # Build s_fac (FV3 1-indexed → 0-indexed)
+    s_fac = jnp.zeros((km,))
+    bottom = jnp.asarray(
+        [0.125, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 1.0]
+    )
+    for i, v in enumerate(bottom):
+        s_fac = s_fac.at[km - 1 - i].set(float(v))
+    # Middle (no cap)
+    for k in range(km - 11, 7, -1):
+        s_fac = s_fac.at[k].set(s_rate * s_fac[k + 1])
+    # Top 8 (same as hybrid_z_dz)
+    top_mults = [1.05, 1.10, 1.15, 1.20, 1.30, 1.40, 1.50, 1.60]
+    for i, mult in enumerate(top_mults):
+        idx = 7 - i
+        s_fac = s_fac.at[idx].set(mult * s_fac[idx + 1])
+
+    sum1 = jnp.sum(s_fac)
+    dz0 = ztop / sum1
+    dz = s_fac * dz0
+
+    # FV3 lines 1976-1980: ze[0]=ztop, ze[km]=0; rebuild bottom-up
+    # ze[k] = ze[k+1] + dz[k] for k = km-1..1 (0-indexed); ze[0] = ztop
+    cumsum_rev = jnp.cumsum(dz[::-1])[::-1]
+    ze1 = jnp.concatenate([cumsum_rev, jnp.asarray([0.0])])
+    # FV3 line 1976 sets ze(1) = ztop AFTER building ze from dz; this
+    # may not match the dz sum exactly.  Then FV3 rescales dz:
+    #   dz(k) = dz(k) * (ztop/ze(1))   FV3 line 1983
+    # where ze(1) here is the *unmodified* sum (= cumsum_rev[0]).
+    actual_top = cumsum_rev[0]
+    dz_rescaled = dz * (ztop / actual_top)
+
+    # Rebuild ze from rescaled dz, set ze[0] = ztop
+    cumsum_rev2 = jnp.cumsum(dz_rescaled[::-1])[::-1]
+    ze = jnp.concatenate([cumsum_rev2, jnp.asarray([0.0])])
+    ze = ze.at[0].set(ztop)
+
+    # Apply sm1_edge with ntimes=2 (iter 636)
+    ze = sm1_edge_fv3(ze, ntimes=2)
+
+    # Recompute dz from ze
+    dz_final = ze[:-1] - ze[1:]
+    return dz_final
+
+
 def hybrid_z_dz(
     km: int, ztop: float, s_rate: float = 1.06,
 ) -> jax.Array:
