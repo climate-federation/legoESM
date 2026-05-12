@@ -1195,6 +1195,36 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 645: **FV3 ``drymadj``** — dry-mass surface pressure +
+  adjustment.  Faithful JAX port of FV3 ``drymadj``
+  (tools/init_hydro.F90:195-275), serial branch.
+
+  Algorithm:
+
+      ps[i,j]  = ptop + Σ_k delp[i,j,k]
+      psd[i,j] = ptop + Σ_k delp[i,j,k] · (1 - Σ_n q[i,j,k,n])
+      psdry    = area-weighted global mean of psd
+      dpd      = dry_mass - psdry   (if adjust_dry_mass; else 0)
+
+  Computes both total surface pressure ``ps`` and dry-air-only
+  surface pressure ``psd`` (excluding water-substance tracers).
+  ``dpd`` is the global dry-mass adjustment used in FV3's
+  ``p_var`` (iter-644) for restart-based mass conservation.
+
+  When ``nwat == 0`` or ``q=None``, psd defaults to ps.
+
+  Lives in ``legoesm.grids.vertical`` alongside iter-644
+  ``p_var_core``.
+
+  Tests (6/6 in <1 s):
+  1. ps = ptop + Σ delp formula.
+  2. psd = ps when no water tracers.
+  3. psd < ps with positive q.
+  4. dpd = 0 when adjust_dry_mass=False.
+  5. dpd = dry_mass - area-weighted mean(psd).
+  6. Batched (face, lat, lon) leading axes preserved.
+
+  Wired into iter-383 sweep (now 214).
 - Iter 644: **FV3 ``p_var_core``** — pressure-edge diagnostics
   from (delp, ptop).  Faithful JAX port of FV3 ``p_var`` core
   algorithm (tools/init_hydro.F90:41-145), excluding dry-mass

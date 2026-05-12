@@ -1166,6 +1166,72 @@ def compute_dz_L32() -> tuple[jax.Array, jax.Array]:
     return dz_flipped, ztop
 
 
+def drymadj(
+    delp: jax.Array,
+    q: jax.Array | None,
+    area: jax.Array,
+    ptop: float,
+    dry_mass: float,
+    adjust_dry_mass: bool = True,
+    nwat: int = 0,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """FV3_3D iter 645: dry-mass surface pressure + adjustment.
+
+    Faithful JAX port of FV3 ``drymadj`` (tools/init_hydro.F90:
+    195-275), serial branch (no MPI).
+
+    Algorithm:
+        ps[i,j]  = ptop + Σ_k delp[i,j,k]
+        psd[i,j] = ptop + Σ_k delp[i,j,k] · (1 - Σ_n q[i,j,k,n])
+                                       # dry surface pressure
+        psdry    = area-weighted global mean of psd
+        dpd      = dry_mass - psdry  (if adjust_dry_mass; else 0)
+
+    Parameters
+    ----------
+    delp : jax.Array, shape (..., km)
+        Layer pressure thicknesses (Pa).
+    q : jax.Array, shape (..., km, nwat), optional
+        Water-substance tracers (mass mixing ratios).  If None or
+        ``nwat==0``, psd defaults to ps.
+    area : jax.Array, shape (...,)
+        Cell areas (matching delp leading axes).
+    ptop : float
+        Top-of-model pressure (Pa).
+    dry_mass : float
+        Target global mean dry surface pressure (Pa).
+    adjust_dry_mass : bool, default True
+        If True, return ``dpd = dry_mass - psdry``; else dpd = 0.
+    nwat : int, default 0
+        Number of water-substance tracers in ``q[..., :nwat]``.
+
+    Returns
+    -------
+    ps : jax.Array, shape (...,)
+        Total surface pressure.
+    psd : jax.Array, shape (...,)
+        Dry surface pressure.
+    dpd : jax.Array (scalar)
+        Mass adjustment (dry_mass - psdry), or 0 if disabled.
+    """
+    ps = ptop + jnp.sum(delp, axis=-1)
+    if q is not None and nwat >= 1:
+        # Sum of nwat water tracers per cell (last axis runs over species)
+        q_sum = jnp.sum(q[..., :nwat], axis=-1)        # shape (..., km)
+        psd = ptop + jnp.sum(delp * (1.0 - q_sum), axis=-1)
+    else:
+        psd = ps
+    # Area-weighted mean of psd (iter-623 g_sum mode=1 analog)
+    total_area = jnp.sum(area)
+    safe_area = jnp.where(total_area > 0.0, total_area, 1.0)
+    psdry = jnp.sum(psd * area) / safe_area
+    if adjust_dry_mass:
+        dpd = dry_mass - psdry
+    else:
+        dpd = jnp.asarray(0.0)
+    return ps, psd, dpd
+
+
 def p_var_core(
     delp: jax.Array, ptop: float,
     cappa: float | None = None,

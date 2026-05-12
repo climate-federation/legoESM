@@ -237,6 +237,7 @@ _GUARD_MODULES = (
     "test_fv3_gw_1d_iter642",                        # iter-642 add
     "test_fv3_mount_waves_iter643",                  # iter-643 add
     "test_fv3_p_var_core_iter644",                   # iter-644 add
+    "test_fv3_drymadj_iter645",                      # iter-645 add
 )
 
 
