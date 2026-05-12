@@ -473,6 +473,36 @@ class TestMorrison:
         grad = jax.grad(loss)(q_v)
         assert jnp.all(jnp.isfinite(grad))
 
+    def test_morrison_fp32_grad_finite_at_ice_saturation(self):
+        """Morrison forward+backward must produce finite fp32 gradients
+        on a cold subsat-wrt-liquid column at q_v ≈ q_sat_ice (the
+        regime where the q_v / q_i / q_c donor clamps all see tiny
+        divisors).  Before iter-35 the legacy 1e-30 floors NaN'd fp32
+        VJPs; the consolidated ``donor_clamp_scale`` (1e-15 floor) is
+        what fixes this end-to-end."""
+        from legoesm.thermo import saturation_mixing_ratio_ice
+        ncol, nlev = 4, 10
+        dt32 = jnp.float32
+        T = jnp.full((ncol, nlev), 240.0, dtype=dt32)
+        p_half = jnp.linspace(
+            1.0e4, 1.0e5, nlev + 1, dtype=dt32,
+        )[None, :].repeat(ncol, axis=0)
+        p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+        rho = (p_full / (constants.R_d * T)).astype(dt32)
+        dz = jnp.full((ncol, nlev), 500.0, dtype=dt32)
+        q_sat_i = saturation_mixing_ratio_ice(T, p_full)
+        q_v = (q_sat_i * jnp.float32(1.0 + 1e-7)).astype(dt32)
+        h = make_zero_hydrometeors(ncol, nlev, dtype=dt32)
+
+        def loss(q_v_in):
+            out = morrison_microphysics(
+                T, q_v_in, h, p_full, p_half, rho, dz, dt=10.0,
+            )
+            return jnp.sum(out.dT_dt ** 2)
+
+        grad = jax.grad(loss)(q_v)
+        assert jnp.all(jnp.isfinite(grad))
+
     def test_qv_clamp_divisor_floor_protects_VJP(self):
         """Exercises the ACTUAL production donor_clamp_scale helper
         (used by Morrison and Thompson q_v clamps) at a tiny positive

@@ -156,6 +156,24 @@ Compression iteration.  Folded iter-20 through iter-29 into the
 "Iterations 1-29 — Summary" section.  Detailed per-iteration narratives
 remain in the commit messages on `clean_physics`.
 
+### Iteration 36 — 2026-05-12
+
+**Add end-to-end fp32 regression test for Morrison.**
+
+Iter-35 consolidated all 8 microphysics donor clamps onto
+`donor_clamp_scale`.  Direct measurement: with the legacy 1e-30 floor,
+a Morrison fp32 run at T = 240 K, q_v ≈ q_sat_ice + epsilon produced
+NaN gradients.  After iter-35 the same call produces finite zero
+gradients (correct: the column is essentially inactive).
+
+Added `TestMorrison::test_morrison_fp32_grad_finite_at_ice_saturation`
+to lock this in.  Earlier `test_qv_clamp_divisor_floor_protects_VJP`
+(iter-34) tests the helper in isolation; this test confirms
+end-to-end Morrison fp32 differentiability — the bigger regression
+risk if a future donor clamp drifts back to a tighter floor.
+
+**Tests (post iter-36):** 64 / 64 microphysics tests pass.
+
 ### Iteration 35 — 2026-05-12
 
 **Consolidate all microphysics donor clamps onto
