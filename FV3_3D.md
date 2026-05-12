@@ -1081,6 +1081,20 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 525: **JIT + ``monotone_halo_clip_context`` interaction**.
+  The helper uses ``unittest.mock.patch`` at Python level.
+  JAX traces functions ONCE; the patch must be in scope at
+  trace time to be baked into the compiled graph.  Tested
+  both scenarios:
+  1. jit COMPILE inside context, run inside: clip is baked
+     into the graph ✓
+  2. jit COMPILE outside context, run inside: SAME compiled
+     graph reused; **clip has no effect** ✗
+  Both behaviors are now verified by tests.  Documents the
+  user-facing constraint: ``with monotone_halo_clip_context():
+      step_jit = jax.jit(m.step)`` — JIT inside the context.
+  Equivalently, don't JIT at all if context is intermittent.
+  2/2 in 47 s.  Wired into iter-383 sweep (now 114).
 - Iter 524: **PE mass conservation** — mirror iter-523 on
   the hydrostatic PE dycore.  Held-Suarez IC + min-edge +
   clip context, 10 steps:
