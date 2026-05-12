@@ -1195,6 +1195,31 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 718: **FV3 ``get_vorticity_fv3``** — diagnostic relative vorticity.
+  Faithful JAX port of FV3 ``get_vorticity``
+  (tools/fv_diagnostics.F90:3877-3908).  Circulation-form vorticity
+  via Stokes' theorem around the cell:
+
+      utmp = u · dx
+      vtmp = v · dy
+      vort[i,j] = rarea · (utmp[i,j] − utmp[i,j+1]
+                           − vtmp[i,j] + vtmp[i+1,j])
+
+  Diagnostic equivalent of legoesm's dycore ``dgrid_vorticity``
+  operator (in operators_cdgrid.py); exposed standalone to match
+  FV3's tools/fv_diagnostics API.
+
+  Handles 2-D ((n, n+1)) and 3-D ((n, n+1, km)) inputs with the
+  same metric arrays.
+
+  Tests (5/5 in <2 s):
+  1. Zero wind → vort = 0.
+  2. Uniform wind on uniform grid → vort = 0 (no curl).
+  3. Solid-body rotation → vort = 2ω exactly.
+  4. 3-D shape: (n, n+1, km) → (n, n, km).
+  5. No NaN/Inf on random.
+
+  Wired into iter-383 sweep (now 282).
 - Iter 717: **iter-710 ``cs3_interpolator_fv3`` ECMWF T extrap upgrade**.
 
   iter-710 used simple edge-value clamp for below-surface
