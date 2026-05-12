@@ -1185,6 +1185,17 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 557: **PE factory comparison at C16 smooth IC**.
+  Mirror iter-553 (NH) on PE: ``make_fv3_faithful_pe_config``
+  vs ``make_legoesm_pe_min_edge_config``, Held-Suarez init,
+  10 steps:
+  - FV3-faithful: T edge_std = 4.116e-1
+  - min-edge:     T edge_std = 4.116e-1
+  - difference: **0.0%**
+  PE is insensitive to factory choice (confirms iter-469 at
+  C8 random IC, extends to C16 smooth IC).  Practical PE
+  guidance: either factory works equivalently.  1/1 in 94 s.
+  Wired into iter-383 sweep (now 139).
 - Iter 556: **FV3-faithful convergence rates** on SBR.
   Mirror iter-532 (min-edge+clip) with FV3-faithful alone
   at C8/C16/C24:

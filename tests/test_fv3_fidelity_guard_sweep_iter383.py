@@ -162,6 +162,7 @@ _GUARD_MODULES = (
     "test_full_stack_edge_reduction_iter553",        # iter-553 add
     "test_faithful_plus_clip_iter555",               # iter-555 add
     "test_faithful_convergence_iter556",             # iter-556 add
+    "test_pe_factory_compare_iter557",               # iter-557 add
 )
 
 
