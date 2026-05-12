@@ -329,6 +329,7 @@ _GUARD_MODULES = (
     "test_fv3_specific_volume_iter739",              # iter-739 add
     "test_fv3_kinetic_energy_iter740",               # iter-740 add
     "test_fv3_wind_speed_iter741",                   # iter-741 add
+    "test_fv3_column_integral_iter742",              # iter-742 add
 )
 
 

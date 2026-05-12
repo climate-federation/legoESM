@@ -1195,6 +1195,30 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 742: **``column_integral_delp_fv3``** — delp-weighted column integral.
+
+  Generic helper for FV3's standard column-mass integral pattern:
+
+      col = Σ_k delp[k] · field[k]                  (mass-weighted)
+      col_kg_per_m2 = col / g                       (divide_by_g=True)
+
+  Used throughout fv_diagnostics.F90 / fv_mapz.F90 in
+  iter-677 z_sum, iter-693 nh_total_energy, iter-694 prt_mass.
+
+  For tracer-mass column (kg/m²): ``divide_by_g=True``, field is
+  mixing ratio (kg/kg).  For pressure-weighted average: divide by
+  Σ delp externally.
+
+  Defaults: ``divide_by_g=True`` (mass-weighted column).
+
+  Tests (5/5 in <1 s):
+  1. Uniform q=0.01, p_s=1e5 → col ≈ 101.94 kg/m².
+  2. field=0 → col=0.
+  3. divide_by_g flag toggles /g correctly.
+  4. 3-D (n_x, n_y, km) → 2-D (n_x, n_y) output.
+  5. No NaN/Inf.
+
+  Wired into iter-383 sweep (now 306).
 - Iter 741: **``wind_speed_fv3``** — wind-speed magnitude.
 
       |V| = sqrt(ua² + va²)         (2-component, w=None)

@@ -2987,6 +2987,48 @@ def theta_dry_fv3(
     return pt * (p_ref / p) ** kap
 
 
+def column_integral_delp_fv3(
+    field: jax.Array,
+    delp: jax.Array,
+    divide_by_g: bool = True,
+) -> jax.Array:
+    """FV3_3D iter 742: delp-weighted column integral.
+
+    Faithful port of FV3's standard column-mass integral pattern
+    (used throughout fv_diagnostics.F90, fv_mapz.F90 — e.g. iter-677
+    ``z_sum``, iter-693 ``nh_total_energy``, iter-694 ``prt_mass``):
+
+        col = Σ_k delp[k] · field[k]                  (mass-weighted)
+        col_kg_per_m2 = col / g                       (divide_by_g=True)
+
+    For tracer-mass column (kg/m²): ``divide_by_g=True``, field is
+    mixing ratio (kg/kg).
+    For column-mean pressure-weighted average: divide by Σ delp
+    externally.
+
+    Standard FV3 convention: cumulative integral in pressure layers.
+
+    Parameters
+    ----------
+    field : jax.Array, shape (..., km)
+        Layer-mean values to integrate.
+    delp : jax.Array, shape (..., km)
+        Pressure thickness (Pa, positive).
+    divide_by_g : bool, default True.
+        Apply ``/ g`` to convert pressure-weighted integral to
+        mass-weighted (kg/m²).
+
+    Returns
+    -------
+    col : jax.Array, shape (...,)
+        Column integral.
+    """
+    col = jnp.sum(delp * field, axis=-1)
+    if divide_by_g:
+        col = col / constants.g
+    return col
+
+
 def wind_speed_fv3(
     ua: jax.Array,
     va: jax.Array,
