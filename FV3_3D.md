@@ -5095,3 +5095,43 @@ convection, dictates pollutant venting layer, anchors the
 surface-flux drag coefficient lookup).  Pure JAX, vmap-
 compatible.  No new physical constants introduced.
 
+## Iter 776 — shear_squared_fv3 helper + iter-773 refactor
+
+Extracted `shear_squared_fv3(u, v, z)` to
+`grids/cubed_sphere.py` from the inline shear computation in
+iter-773 ``richardson_number_fv3``:
+
+```
+S² = (du/dz)² + (dv/dz)²     at layer midpoints
+```
+
+Output shape ``(..., km−1)`` matches iter-772 N² layout, so a
+caller can compose `Ri = N² / S²` index-aligned.
+
+iter-773 refactored from:
+
+```python
+du = u[..., 1:] - u[..., :-1]
+dv = v[..., 1:] - v[..., :-1]
+dz = z[..., 1:] - z[..., :-1]
+s_sq = (du / dz) ** 2 + (dv / dz) ** 2
+```
+
+to a single `shear_squared_fv3(u, v, z)` call.  iter-773 6/6
+tests pass post-refactor — output bit-identical.
+
+Test: `tests/test_fv3_shear_squared_iter776.py` (6 tests: zero
+wind → S²=0, u-only shear analytic, v-only shear analytic,
+iter-773 Ri regression preserved, 3-D shapes km→km−1,
+non-negative finite).
+
+### Why this iteration was meaningful
+
+Matches the iter-720/727/728/766/771 helper-extraction lineage.
+Vertical shear is independently needed by: KPP-style PBL mixing
+schemes (which discriminate stable/unstable via N²/S² ratio but
+also use S² directly for entrainment), gravity-wave breakdown
+diagnostics, CAT forecasting that screens S² > S²_thresh layers,
+and TKE budget diagnostics.  Pure JAX, vmap-compatible.  No new
+physical constants introduced.
+

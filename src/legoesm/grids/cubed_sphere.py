@@ -4156,6 +4156,42 @@ def brunt_vaisala_squared_fv3(
     return constants.g * dtheta / (dz * theta_v_mid)
 
 
+def shear_squared_fv3(
+    u: jax.Array,
+    v: jax.Array,
+    z: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 776: vertical-shear squared at layer midpoints.
+
+        S² = (du/dz)² + (dv/dz)²
+
+    Centered finite differences across adjacent layer pairs.
+    Output shape ``(..., km−1)`` (matches iter-772 N² layout, so
+    direct Ri = N²/S² composition is index-aligned).
+
+    Used by iter-773 ``richardson_number_fv3`` (now delegates),
+    KPP-style PBL mixing schemes, gravity-wave breakdown
+    diagnostics, and clear-air-turbulence forecasting that
+    inspects S² in isolation (independent of N²).
+
+    Parameters
+    ----------
+    u, v : jax.Array, shape (..., km)
+        Horizontal wind components (m/s).
+    z : jax.Array, shape (..., km)
+        Layer-center heights (m), matching wind orientation.
+
+    Returns
+    -------
+    s_sq : jax.Array, shape (..., km−1)
+        Vertical-shear squared at midpoints (s⁻²).
+    """
+    du = u[..., 1:] - u[..., :-1]
+    dv = v[..., 1:] - v[..., :-1]
+    dz = z[..., 1:] - z[..., :-1]
+    return (du / dz) ** 2 + (dv / dz) ** 2
+
+
 def richardson_number_fv3(
     theta: jax.Array,
     q_sphum: jax.Array,
@@ -4207,10 +4243,8 @@ def richardson_number_fv3(
         Gradient Richardson number at layer midpoints.
     """
     n_sq = brunt_vaisala_squared_fv3(theta, q_sphum, z)
-    du = u[..., 1:] - u[..., :-1]
-    dv = v[..., 1:] - v[..., :-1]
-    dz = z[..., 1:] - z[..., :-1]
-    s_sq = (du / dz) ** 2 + (dv / dz) ** 2
+    # iter-776: delegate (du/dz)² + (dv/dz)² to shear_squared_fv3
+    s_sq = shear_squared_fv3(u, v, z)
     return n_sq / jnp.maximum(s_sq, shear_floor)
 
 
