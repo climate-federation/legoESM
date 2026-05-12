@@ -299,6 +299,7 @@ _GUARD_MODULES = (
     "test_fv3_cs_interpolator_iter709",              # iter-709 add
     "test_fv3_cs3_interpolator_iter710",             # iter-710 add
     "test_fv3_ppme_iter711",                         # iter-711 add
+    "test_fv3_pv_entropy_ppme_iter712",              # iter-712 add
 )
 
 

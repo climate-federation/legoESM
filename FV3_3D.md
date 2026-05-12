@@ -1195,6 +1195,28 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 712: **iter-691 ``pv_entropy_fv3`` PPME upgrade**.
+
+  iter-691 used 2nd-order linear edge average for θ reconstruction.
+  iter-712 adds ``use_ppme=True`` flag that switches to iter-711
+  ``ppme_fv3`` (Van-Leer-limited PPM with non-uniform delp).  This
+  matches FV3's actual pv_entropy source (FV3 explicitly calls
+  ``ppme`` for θ edges).
+
+  Default ``use_ppme=False`` preserves iter-691 backward-compat;
+  ``use_ppme=True`` is the FV3-faithful path.
+
+  Tests (6/6 in <7 s):
+  1. Uniform θ → EPV = 0 (both paths).
+  2. ζ + f = 0 → EPV = 0 with PPME.
+  3. Non-linear θ → PPME and linear differ noticeably.
+  4. Default flag matches iter-691 exactly (backward-compat pin).
+  5. 3-D input → 3-D EPV.
+  6. No NaN/Inf with PPME on random.
+
+  iter-691 11/11 tests still pass (no regression).
+
+  Wired into iter-383 sweep (now 276).
 - Iter 711: **FV3 ``ppme_fv3``** — PPM cell-edge values, non-uniform delp.
   Faithful JAX port of FV3 ``ppme``
   (tools/fv_diagnostics.F90:5196-5305).  Companion to iter-708

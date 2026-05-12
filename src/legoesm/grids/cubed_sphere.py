@@ -3577,8 +3577,9 @@ def pv_entropy_fv3(
     f_d: jax.Array,
     theta: jax.Array,
     delp: jax.Array,
+    use_ppme: bool = False,
 ) -> jax.Array:
-    """FV3_3D iter 691: Ertel potential vorticity (EPV) diagnostic.
+    """FV3_3D iter 691/712: Ertel potential vorticity (EPV) diagnostic.
 
     Faithful JAX port of FV3 ``pv_entropy``
     (tools/fv_diagnostics.F90:5111-5193).
@@ -3587,18 +3588,16 @@ def pv_entropy_fv3(
 
         EPV = - g · (vort + f) / delp · d(theta) / theta
 
-    where theta is potential temperature and the vertical
-    derivative is approximated by centered finite difference
-    between layer-edge interpolated theta values:
+    Edge θ reconstruction:
+        ``use_ppme=False`` (default, backward-compat with iter-691):
+            second-order linear edge average + endpoint extrapolation.
+        ``use_ppme=True`` (iter-712, FV3-faithful):
+            iter-711 ``ppme_fv3`` (Van-Leer-limited PPM with non-uniform
+            delp, 4th-order interior + parabolic/cubic boundaries).
+            This is what FV3's pv_entropy actually calls.
 
-        theta_edge[k] = 0.5 · (theta[k-1] + theta[k])
-                       (top edge: theta[0]; bottom edge: theta[km-1])
-        d_theta[k] = theta_edge[k] - theta_edge[k+1]      (positive
-                       for stable column where theta increases upward)
-
-    The original FV3 routine uses PPME edge reconstruction; here we
-    use simple linear averaging which is the second-order limit and
-    correct to leading order for smoothly varying θ.
+        d_theta[k] = theta_edge[k] - theta_edge[k+1]   (positive in
+                       stable column where θ increases upward)
 
     Parameters
     ----------
@@ -3608,27 +3607,29 @@ def pv_entropy_fv3(
         Coriolis parameter f at cell center (1/s).
     theta : jax.Array, shape (..., km)
         Potential temperature θ = pt / pkz at layer centers (K).
-        FV3 convention: ``theta = pt / pkz`` where ``pt`` is the
-        stored thermodynamic var and ``pkz`` the Exner factor.
     delp : jax.Array, shape (..., km)
         Pressure thickness (Pa).
+    use_ppme : bool, default False.
+        FV3-faithful PPME edge reconstruction (iter-712).  Default
+        OFF to preserve iter-691 behavior.
 
     Returns
     -------
     epv : jax.Array, shape (..., km)
         Ertel potential vorticity (m²·K·s⁻¹·kg⁻¹ = PVU·1e6).
     """
-    # Edge θ via linear average (km-1 interior edges)
-    theta_interior = 0.5 * (theta[..., :-1] + theta[..., 1:])  # (..., km-1)
-    # Extend to top + bottom edges using endpoint extrapolation
-    theta_top = theta[..., :1]
-    theta_bot = theta[..., -1:]
-    theta_edges = jnp.concatenate(
-        [theta_top, theta_interior, theta_bot],
-        axis=-1,
-    )  # (..., km+1)
-    # d_theta per layer: edge_top - edge_bottom
-    d_theta = theta_edges[..., :-1] - theta_edges[..., 1:]  # (..., km)
+    if use_ppme:
+        theta_edges = ppme_fv3(theta, delp)              # (..., km+1)
+    else:
+        # Default: linear edge average + endpoint extrapolation
+        theta_interior = 0.5 * (theta[..., :-1] + theta[..., 1:])
+        theta_top = theta[..., :1]
+        theta_bot = theta[..., -1:]
+        theta_edges = jnp.concatenate(
+            [theta_top, theta_interior, theta_bot],
+            axis=-1,
+        )
+    d_theta = theta_edges[..., :-1] - theta_edges[..., 1:]
     abs_vort = vort + f_d[..., None]
     return constants.g * abs_vort * d_theta / (theta * delp)
 
