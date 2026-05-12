@@ -3489,6 +3489,68 @@ def updraft_helicity_fv3(
     return jnp.sum(vort * w * dz_eff, axis=-1)
 
 
+def prt_height_fv3(
+    press: float,
+    phis: jax.Array,
+    delz: jax.Array,
+    peln: jax.Array,
+    area: jax.Array,
+    lat: jax.Array,
+) -> dict[str, float]:
+    """FV3_3D iter 706: height-of-p-surface diagnostic with lat-band means.
+
+    Faithful JAX port of FV3 ``prt_height``
+    (tools/fv_diagnostics.F90:4413-4460).  Composition of iter-684
+    ``get_height_given_pressure_fv3`` (mirror-method below-surface
+    extrapolation) + iter-705 ``prt_gb_nh_sh_fv3`` (lat-band area-
+    weighted means).
+
+    For each cell:
+        wz[km]   = phis / g
+        wz[k]    = wz[k+1] - delz[k]    (k = km-1..0, building up)
+        height(press) = interp at log(press) via mirror method
+    Then global / NH / SH / EQ area-weighted means.
+
+    Parameters
+    ----------
+    press : float
+        Target pressure (Pa).
+    phis : jax.Array, shape (..., )
+        Surface geopotential (m²/s²).
+    delz : jax.Array, shape (..., km)
+        Layer thickness (NEGATIVE in FV3).
+    peln : jax.Array, shape (..., km+1)
+        log(pressure) at interfaces.
+    area : jax.Array, shape (...,)
+        Cell area (m²).
+    lat : jax.Array, shape (...,)
+        Cell-center latitude (radians).
+
+    Returns
+    -------
+    dict[str, float]
+        ``gb`` / ``nh`` / ``sh`` / ``eq`` band means of the
+        pressure-surface height (m).
+    """
+    g = constants.g
+    # Build wz at interfaces from surface up: wz[..., -1] = phis/g
+    wz_surface = phis / g  # (..., )
+    # Cumulative -delz from surface upward.  In FV3 ordering delz<0,
+    # so wz[k] = wz[k+1] - delz[k] = wz[k+1] + |delz[k]|.
+    minus_delz = -delz                                  # (..., km), positive
+    cum_up = jnp.cumsum(minus_delz[..., ::-1], axis=-1)[..., ::-1]
+    # wz[..., 0..km-1] = wz_surface + cum_up[..., 0..km-1]
+    # wz[..., km] = wz_surface
+    wz_above = wz_surface[..., None] + cum_up           # (..., km)
+    wz = jnp.concatenate(
+        [wz_above, wz_surface[..., None]],
+        axis=-1,
+    )                                                    # (..., km+1)
+    log_p = jnp.log(press)
+    height_cells = get_height_given_pressure_fv3(wz, peln, log_p)
+    return prt_gb_nh_sh_fv3(height_cells, area, lat)
+
+
 def prt_gb_nh_sh_fv3(
     a2: jax.Array,
     area: jax.Array,

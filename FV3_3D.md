@@ -1195,6 +1195,28 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 706: **FV3 ``prt_height_fv3``** — p-surface height with lat-band means.
+  Faithful JAX port of FV3 ``prt_height``
+  (tools/fv_diagnostics.F90:4413-4460).  Composes iter-684
+  ``get_height_given_pressure_fv3`` (mirror-method below-surface
+  extrapolation) + iter-705 ``prt_gb_nh_sh_fv3`` (lat-band means).
+
+  Algorithm:
+      wz_surface = phis / g
+      wz[k] = wz[k+1] − delz[k]                (cumulative upward)
+      height(press) = mirror-method interp at log(press) per cell
+      → ``prt_gb_nh_sh(height, area, lat)``
+
+  Returns dict ``{gb, nh, sh, eq}`` for the lat-band means of the
+  pressure-surface height (m).
+
+  Tests (4/4 in <4 s):
+  1. Isothermal column, p_500 = 500 hPa → height ≈ H·ln(p_s/p_500).
+  2. Output dict has gb/nh/sh/eq keys.
+  3. Uniform column → all band means match.
+  4. Random column data → finite outputs.
+
+  Wired into iter-383 sweep (now 270).
 - Iter 705: **FV3 ``prt_gb_nh_sh_fv3``** — lat-band area-weighted mean.
   Faithful JAX port of FV3 ``prt_gb_nh_sh``
   (tools/fv_diagnostics.F90:4462-4509).
