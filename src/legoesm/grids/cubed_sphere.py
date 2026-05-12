@@ -2606,6 +2606,105 @@ def dcmip16_bc_pressure(
     return p0 * jnp.exp(-g / Rdgas * (Ti1 - Ti2 * IT))
 
 
+def remap_coef_fv3(
+    target_lon: jax.Array, target_lat: jax.Array,
+    src_lon: jax.Array, src_lat: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    """FV3_3D iter 673: bilinear remap weights from regular lat-lon to target.
+
+    Faithful JAX port of FV3 ``remap_coef`` (tools/fv_treat_da_inc.F90:
+    366-442).  Computes bilinear interpolation weights for mapping
+    a regular lat-lon source grid to arbitrary target positions
+    (typically cubed-sphere cell centers).
+
+    Algorithm:
+        For each target point (target_lon, target_lat):
+            i1 = largest src_lon index ≤ target_lon
+            i2 = i1 + 1 (wrap around if at end)
+            jc = largest src_lat index ≤ target_lat
+            a1 = (target_lon - src_lon[i1]) / (src_lon[i2] - src_lon[i1])
+            b1 = (target_lat - src_lat[jc]) / (src_lat[jc+1] - src_lat[jc])
+            s2c[..., 0] = (1-a1)·(1-b1)    (SW corner weight)
+            s2c[..., 1] =    a1 ·(1-b1)    (SE)
+            s2c[..., 2] =    a1 ·   b1     (NE)
+            s2c[..., 3] = (1-a1)·   b1     (NW)
+
+    Used for FV3 reading regular lat-lon ICs (ERA5, GFS) and
+    interpolating to cubed-sphere grid.
+
+    Parameters
+    ----------
+    target_lon, target_lat : jax.Array
+        Target grid positions (radians), shape (..., n_x, n_y) or
+        (n_x, n_y).
+    src_lon : jax.Array, shape (im,)
+        Source longitude (radians, monotonic, periodic).
+    src_lat : jax.Array, shape (jm,)
+        Source latitude (radians, monotonic ascending).
+
+    Returns
+    -------
+    id1, id2 : jax.Array (int)
+        Source longitude indices (i1, i2).
+    jdc : jax.Array (int)
+        Source latitude index (jc).
+    s2c : jax.Array, shape (..., 4)
+        4 bilinear weights (SW, SE, NE, NW).
+    """
+    pi = jnp.pi
+    im = src_lon.shape[0]
+    jm = src_lat.shape[0]
+    # Longitude lookup with wrap-around (FV3 lines 394-408)
+    # First find i1 = max(i where src_lon[i] <= target_lon); if target_lon <
+    # src_lon[0], use wrap (i1 = im-1, i2 = 0); if > src_lon[-1], same.
+    in_range = (target_lon >= src_lon[0]) & (target_lon <= src_lon[im - 1])
+    # Within range: i1 = searchsorted-1
+    i1_in_range = jnp.clip(jnp.searchsorted(src_lon, target_lon, side="right") - 1, 0, im - 2)
+    # Out of range: i1 = im-1, i2 = 0 (wrap)
+    i1 = jnp.where(in_range, i1_in_range, im - 1)
+    i2 = jnp.where(in_range, i1 + 1, 0)
+    # a1 computation
+    # Wrap case 1: target > src_lon[im-1] → a1 = (target - src_lon[im-1]) / (src_lon[0] + 2π - src_lon[im-1])
+    # Wrap case 2: target < src_lon[0] → a1 = (target + 2π - src_lon[im-1]) / (src_lon[0] + 2π - src_lon[im-1])
+    # Within range: a1 = (target - src_lon[i1]) / (src_lon[i2] - src_lon[i1])
+    rdlon_wrap = 1.0 / (src_lon[0] + 2.0 * pi - src_lon[im - 1])
+    a1_wrap_high = (target_lon - src_lon[im - 1]) * rdlon_wrap
+    a1_wrap_low = (target_lon + 2.0 * pi - src_lon[im - 1]) * rdlon_wrap
+    a1_in_range = (
+        (target_lon - src_lon[i1_in_range])
+        / (src_lon[i1_in_range + 1] - src_lon[i1_in_range])
+    )
+    a1 = jnp.where(
+        in_range, a1_in_range,
+        jnp.where(target_lon > src_lon[im - 1], a1_wrap_high, a1_wrap_low),
+    )
+    # Latitude lookup (FV3 lines 411-426)
+    in_lat_range = (target_lat >= src_lat[0]) & (target_lat <= src_lat[jm - 1])
+    jc_in_range = jnp.clip(
+        jnp.searchsorted(src_lat, target_lat, side="right") - 1, 0, jm - 2,
+    )
+    jc = jnp.where(
+        in_lat_range, jc_in_range,
+        jnp.where(target_lat < src_lat[0], 0, jm - 2),
+    )
+    b1_in_range = (
+        (target_lat - src_lat[jc_in_range])
+        / (src_lat[jc_in_range + 1] - src_lat[jc_in_range])
+    )
+    b1 = jnp.where(
+        in_lat_range, b1_in_range,
+        jnp.where(target_lat < src_lat[0], 0.0, 1.0),
+    )
+    # 4 bilinear weights
+    s2c = jnp.stack([
+        (1.0 - a1) * (1.0 - b1),
+        a1 * (1.0 - b1),
+        a1 * b1,
+        (1.0 - a1) * b1,
+    ], axis=-1)
+    return i1.astype(jnp.int32), i2.astype(jnp.int32), jc.astype(jnp.int32), s2c
+
+
 def dcmip16_tc_uwind_pert(
     z: jax.Array, r: jax.Array,
     lon: jax.Array, lat: jax.Array,

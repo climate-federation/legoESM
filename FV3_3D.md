@@ -1195,6 +1195,30 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 673: **FV3 ``remap_coef_fv3``** — lat-lon → cubed-sphere bilinear
+  remap weights.  Faithful JAX port of FV3 ``remap_coef``
+  (tools/fv_treat_da_inc.F90:366-442).
+
+  Algorithm: for each target point find source indices (i1, i2, jc)
+  and bilinear weights s2c[..., 4] (SW, SE, NE, NW corners).
+  Handles longitude wrap-around (target outside [src_lon[0], src_lon[-1]]
+  uses wrap-period 2π).
+
+  Used in FV3 reading regular lat-lon ICs (ERA5, GFS, DA increments)
+  and interpolating to cubed-sphere grid.
+
+  Bilinear interpolation verified exact on linear fields
+  ``f(lon, lat) = a·lon + b·lat``.
+
+  Tests (6/6 in 3 s):
+  1. Output shapes match target.
+  2. 4 weights sum to 1.
+  3. Weights ≥ 0 within source range.
+  4. At src grid point: SW weight = 1, others = 0.
+  5. Linear field exact reconstruction.
+  6. No NaN/Inf on random inputs.
+
+  Wired into iter-383 sweep (now 239).
 - Iter 672: **FV3 ``dcmip16_tc_uwind_pert``** — TC vortex wind perturbation.
   Faithful JAX port of FV3 ``DCMIP16_TC_uwind_pert``
   (tools/test_cases.F90:7168-7197).
