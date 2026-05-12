@@ -1195,6 +1195,46 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 624: **FV3 ``mirror_grid_faces``** — 6-face cubed-sphere
+  from face 1.  Faithful JAX port of FV3 ``mirror_grid``
+  faces-2-to-6 rotation sequence (fv_grid_tools.F90:2809-2897).
+  Takes face-1 (lon, lat) and builds faces 2-6 via FV3's exact
+  ``rot_3d`` (iter 623) sequences:
+
+      face 2: rot_z(-90°)
+      face 3: rot_z(-90°) → rot_x(+90°)
+      face 4: rot_z(-180°) → rot_x(+90°)
+      face 5: rot_z(+90°) → rot_y(+90°)
+      face 6: rot_y(+90°)   (rot_z(0°) = identity, omitted)
+
+  Combined with iter 622's ``gnomonic_grids`` (face-1 generator),
+  this completes the FV3 cubed-sphere construction PIPELINE.  A
+  user can now build the full 6-face FV3 grid via::
+
+      lon1, lat1 = gnomonic_grids(im, grid_type=0)
+      lons, lats = mirror_grid_faces(lon1, lat1)
+      # → lons, lats of shape (6, im+1, im+1) — FV3-faithful
+
+  Returns ``(6, n+1, n+1)`` arrays.  Reuses iter-611
+  ``latlon2xyz`` / ``xyz2latlon`` and iter-623 ``rot_3d``.
+
+  NOTE: this port covers the faces 2-6 rotation only.  FV3's
+  first loop (intra-face-1 symmetrization via SIGN-of-(|...|)
+  averaging) is NOT included — input is assumed already
+  symmetrized (which it is after ``gnomonic_grids`` → ``symm_ed``).
+  Also omitted: FV3's odd-npx pole/dateline fixups, which only
+  matter for sub-1e-10 reference exactness at specific corner
+  points.
+
+  Tests (6/6 in 6 s):
+  1. Output shape (6, im+1, im+1).
+  2. Face 1 unchanged.
+  3. All 6 faces on unit sphere.
+  4. Face 2 center 90° east of face 1 center.
+  5. No NaN/Inf anywhere.
+  6. Faces 3 (top) and 6 (bottom) have opposite z-sign centers.
+
+  Wired into iter-383 sweep (now 195).
 - Iter 623: **FV3 ``rot_3d`` + ``g_sum``**.  Faithful JAX ports of:
 
   | Function   | F90 path            | Line | Role                          |

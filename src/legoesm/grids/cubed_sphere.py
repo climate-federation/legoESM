@@ -1304,6 +1304,68 @@ def get_center_vect(
     return u1, u2
 
 
+def mirror_grid_faces(
+    face1_lon: jax.Array, face1_lat: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 624: build 6-face cubed-sphere from face 1.
+
+    Faithful port of FV3 ``mirror_grid`` faces-2-to-6 construction
+    (fv_grid_tools.F90:2809-2897).  Takes face-1 (lon, lat) and
+    builds faces 2-6 via FV3's exact rot_3d (iter 623) sequences:
+
+        face 2: rot_z(-90°)
+        face 3: rot_z(-90°) → rot_x(+90°)
+        face 4: rot_z(-180°) → rot_x(+90°)
+        face 5: rot_z(+90°) → rot_y(+90°)
+        face 6: rot_y(+90°)  (FV3 also applies rot_z(0°) = identity)
+
+    Parameters
+    ----------
+    face1_lon, face1_lat : jax.Array, shape ``(n+1, n+1)``
+        Face-1 corner positions in radians (e.g., output of
+        ``gnomonic_grids``).
+
+    Returns
+    -------
+    lons, lats : jax.Array, shape ``(6, n+1, n+1)``
+        6-face cubed-sphere corner positions in radians.  Face 1
+        is the input.
+
+    Note: this port covers the rotation sequence for faces 2-6.
+    FV3's first loop (lines 2774-2807, intra-face-1 symmetrization
+    via SIGN-of-(|...|) averaging) is NOT included — input is
+    assumed already symmetrized (e.g., post-``symm_ed``).
+    """
+    x1, y1, z1 = latlon2xyz(face1_lon, face1_lat)
+
+    # Face 2: rot_z(-90°)
+    x2, y2, z2 = rot_3d(3, x1, y1, z1, jnp.asarray(-90.0), degrees=True)
+    lon2, lat2 = xyz2latlon(x2, y2, z2)
+
+    # Face 3: rot_z(-90°) → rot_x(+90°)
+    xa, ya, za = rot_3d(3, x1, y1, z1, jnp.asarray(-90.0), degrees=True)
+    x3, y3, z3 = rot_3d(1, xa, ya, za, jnp.asarray(90.0), degrees=True)
+    lon3, lat3 = xyz2latlon(x3, y3, z3)
+
+    # Face 4: rot_z(-180°) → rot_x(+90°)
+    xa, ya, za = rot_3d(3, x1, y1, z1, jnp.asarray(-180.0), degrees=True)
+    x4, y4, z4 = rot_3d(1, xa, ya, za, jnp.asarray(90.0), degrees=True)
+    lon4, lat4 = xyz2latlon(x4, y4, z4)
+
+    # Face 5: rot_z(+90°) → rot_y(+90°)
+    xa, ya, za = rot_3d(3, x1, y1, z1, jnp.asarray(90.0), degrees=True)
+    x5, y5, z5 = rot_3d(2, xa, ya, za, jnp.asarray(90.0), degrees=True)
+    lon5, lat5 = xyz2latlon(x5, y5, z5)
+
+    # Face 6: rot_y(+90°)  (rot_z(0°) is identity, omitted)
+    x6, y6, z6 = rot_3d(2, x1, y1, z1, jnp.asarray(90.0), degrees=True)
+    lon6, lat6 = xyz2latlon(x6, y6, z6)
+
+    lons = jnp.stack([face1_lon, lon2, lon3, lon4, lon5, lon6], axis=0)
+    lats = jnp.stack([face1_lat, lat2, lat3, lat4, lat5, lat6], axis=0)
+    return lons, lats
+
+
 def rot_3d(
     axis: int,
     x1: jax.Array, y1: jax.Array, z1: jax.Array,
