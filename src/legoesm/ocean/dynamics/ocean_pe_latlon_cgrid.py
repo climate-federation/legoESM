@@ -1294,7 +1294,11 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # pipeline's vertical_mixing module is a separate concept (e.g.,
     # KPP).  Baseline K_v diffusion should always be active when K_v > 0.
     # (Fixes #150.)
-    if config.K_v > 0 and nlev_t >= 2:
+    #
+    # Skipped when ``implicit_vertical_mixing`` is enabled — the
+    # K_v floor is folded into the implicit K profile in the model step.
+    if (config.K_v > 0 and nlev_t >= 2
+            and not getattr(config, "implicit_vertical_mixing", False)):
         jac_v = jnp.maximum(J[..., jnp.newaxis], 1e-10)  # (n_lat, n_lon, 1)
         dz_actual_loc = z_coord.dz_ref * jac_v           # (n_lat, n_lon, nlev)
 
@@ -1594,7 +1598,15 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         du_dt = du_dt + diag_botdrag_u
         dv_dt = dv_dt + diag_botdrag_v
 
-    if config.A_v > 0 and u.shape[-1] >= 2:
+    # Skip the explicit background vertical viscosity when the host
+    # dynamics requested an implicit (backward-Euler) vertical solve —
+    # the LatLonCGridOceanConfig.A_v floor is folded into the implicit
+    # K profile downstream and applied unconditionally-stable.  The
+    # KPP / Richardson / Constant scheme branches above are already
+    # ``apply_diffusion=False`` in that mode.
+    if (config.A_v > 0
+            and u.shape[-1] >= 2
+            and not getattr(config, "implicit_vertical_mixing", False)):
         jac_v_u = jnp.maximum(interp_cell_to_uface(J)[..., jnp.newaxis], 1e-10)
         jac_v_v = jnp.maximum(_interp_to_v_points(J)[..., jnp.newaxis], 1e-10)
         for vel, jac, is_u in [(u_prime, jac_v_u, True), (v_prime, jac_v_v, False)]:
@@ -1621,6 +1633,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # A-grid and cubed-sphere).  Create a cell-center proxy state so
     # the physics functions produce (n_lat, n_lon, nlev) output, then
     # interpolate momentum tendencies to C-grid face points.
+    phys_K_v = None
+    phys_A_v = None
     if physics_fn is not None:
         u_cell = 0.5 * (u[:, :-1, :] + u[:, 1:, :])  # (n_lat, n_lon, nlev)
         v_cell = 0.5 * (v[:-1, :, :] + v[1:, :, :])   # (n_lat, n_lon, nlev)
@@ -1635,6 +1649,10 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         dv_dt = dv_dt + diag_phys_v
         dT_dt = dT_dt + phys.dT_dt.data
         dS_dt = dS_dt + phys.dS_dt.data
+        # Capture K profiles for implicit vertical mixing (avoids
+        # recomputing KPP in the model step).
+        phys_K_v = getattr(phys, "K_v", None)
+        phys_A_v = getattr(phys, "A_v", None)
 
     # --- 10c. Sponge layer relaxation ---
     # Cast sponge arrays to state dtype to prevent float64 promotion when
@@ -1681,6 +1699,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             data=jnp.zeros_like(mask), name="dland_mask_dt",
             dims=dims_2d, units="1/s",
         ),
+        K_v=phys_K_v,
+        A_v=phys_A_v,
     )
 
     if not diagnose_momentum:

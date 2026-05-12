@@ -249,6 +249,16 @@ def parse_args():
                    ))
     p.add_argument("--no-gpu-interp", action="store_false", dest="gpu_interp",
                    help="Disable GPU-side forcing interpolation (use CPU path).")
+    p.add_argument("--no-gm-redi", action="store_true",
+                   help="Disable GM/Redi isopycnal mixing (for diagnostic experiments).")
+    p.add_argument("--implicit-vertical-mixing", action="store_true",
+                   dest="implicit_vertical_mixing",
+                   help=("Use backward-Euler implicit vertical viscosity and "
+                         "diffusivity (issue #204).  Removes the explicit-CFL "
+                         "limit dt < dz²/(2K) that becomes binding when "
+                         "K_conv=1 m²/s convection fires with surface dz<30 m "
+                         "or when vertical resolution is increased.  KPP non-"
+                         "local fluxes remain explicit."))
     return p.parse_args()
 
 
@@ -325,7 +335,9 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                   C_leith: float = None,
                   pgf_scheme: str = None,
                   slope_foot_alpha: float = 0.0,
-                  no_lat_scaling: bool = False):
+                  no_lat_scaling: bool = False,
+                  no_gm_redi: bool = False,
+                  implicit_vertical_mixing: bool = False):
     """Create grid, z_coord, config, model for any grid type.
 
     All grids use the SAME config-based diffusion (A_h, K_h, A_v, K_v)
@@ -476,7 +488,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                 n_barotropic_substeps=30,
                 use_conservation_fixer=True,
                 physics=bathy_physics,
-                gm_redi=bathy_gm_redi,
+                gm_redi=None if no_gm_redi else bathy_gm_redi,
                 barotropic_solver="implicit_cn",
                 pgf_scheme=pgf_scheme if pgf_scheme is not None else "smc03",
                 # MOM6 MAXVEL: clip barotropic velocities to prevent
@@ -484,6 +496,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                 # MOM6 default is 6.0 m/s; we use 3.0 since realistic
                 # currents at 1° shouldn't exceed ~2 m/s.
                 maxvel_barotropic=0.0,  # disabled — let physics handle it
+                implicit_vertical_mixing=implicit_vertical_mixing,
             )
         else:
             config = LatLonCGridOceanConfig(
@@ -491,6 +504,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                 n_barotropic_substeps=30,
                 use_conservation_fixer=True,
                 physics=None,
+                implicit_vertical_mixing=implicit_vertical_mixing,
             )
         model = LatLonCGridOceanModel(grid, z_coord, config)
         return grid, z_coord, config, model, "latlon"
@@ -2198,11 +2212,8 @@ def _save_output(output_dir: Path, diag, args, grid_type, wall_time, ok,
         "final_SST": diag["SST"][-1] if diag["SST"] else None,
         "final_SSS": diag["SSS"][-1] if diag["SSS"] else None,
         "final_SSH": diag["SSH"][-1] if diag["SSH"] else None,
-        "cli_args": vars(args),
-        # iter-97: include BLOWUP info in results.json so the
-        # CLI summary table can label BLOWUP rows distinctly
-        # rather than displaying the last-clean SST.
         "blowup_info": blowup_info,
+        "cli_args": vars(args),
     }
     with open(output_dir / "results.json", "w") as f:
         json.dump(results, f, indent=2, default=str)
@@ -2341,6 +2352,9 @@ def run_omip_single(grid_type: str, args) -> dict:
         pgf_scheme=args.pgf_scheme,
         slope_foot_alpha=args.slope_foot_alpha,
         no_lat_scaling=args.no_lat_scaling,
+        no_gm_redi=getattr(args, "no_gm_redi", False),
+        implicit_vertical_mixing=getattr(
+            args, "implicit_vertical_mixing", False),
     )
 
     # --- Initialization strategy ---
