@@ -265,6 +265,7 @@ _GUARD_MODULES = (
     "test_fv3_remap_coef_iter673",                   # iter-673 add
     "test_fv3_get_staggered_grid_iter674",           # iter-674 add
     "test_fv3_bilinear_apply_iter675",               # iter-675 add
+    "test_fv3_wind_max_iter676",                     # iter-676 add
 )
 
 

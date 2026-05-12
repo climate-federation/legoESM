@@ -2644,6 +2644,52 @@ def get_staggered_grid_fv3(
     return pt_c_lon, pt_c_lat, pt_d_lon, pt_d_lat
 
 
+def wind_max_fv3(
+    us: jax.Array, vs: jax.Array,
+    half_window: int = 3,
+) -> jax.Array:
+    """FV3_3D iter 676: max wind speed in (2·hw+1)² neighborhood.
+
+    Faithful JAX port of FV3 ``wind_max`` (tools/fv_diagnostics.F90:
+    3843-3874).  Computes wind speed ``ws = sqrt(us² + vs²)`` then
+    takes the maximum over a (2·hw+1) × (2·hw+1) neighborhood
+    centered at each cell.  FV3 default ``hw = 3`` → 7×7 window.
+
+    Used by FV3 for storm-tracking / TC max-wind diagnostics.
+
+    Boundary cells (within hw of edge) use a smaller effective
+    window (clipped to grid bounds).
+
+    Parameters
+    ----------
+    us, vs : jax.Array, shape (..., n_x, n_y)
+        Surface wind components (m/s).
+    half_window : int, default 3
+        Half-window size (FV3 uses 3 → 7×7 max-pool).
+
+    Returns
+    -------
+    ws_max : jax.Array, shape (..., n_x, n_y)
+        Maximum wind speed in (2·hw+1)² neighborhood.
+    """
+    ws = jnp.sqrt(us * us + vs * vs)
+    hw = half_window
+    # Use jax.lax.reduce_window for efficient max-pool
+    from jax import lax
+    leading = ws.ndim - 2
+    # window_dimensions: 1's for leading axes, (2·hw+1) for (i, j)
+    window = (1,) * leading + (2 * hw + 1, 2 * hw + 1)
+    strides = (1,) * ws.ndim
+    # Pad with -inf so edge cells take max over interior only
+    padding = ((0, 0),) * leading + ((hw, hw), (hw, hw))
+    ws_padded = jnp.pad(ws, padding, mode="constant", constant_values=-jnp.inf)
+    return lax.reduce_window(
+        ws_padded, -jnp.inf, lax.max,
+        window_dimensions=window, window_strides=strides,
+        padding="VALID",
+    )
+
+
 def bilinear_interp_apply(
     src_field: jax.Array,
     id1: jax.Array, id2: jax.Array, jc: jax.Array,

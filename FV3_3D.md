@@ -1195,6 +1195,32 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 676: **FV3 ``wind_max_fv3``** — max wind speed neighborhood.
+  Faithful JAX port of FV3 ``wind_max``
+  (tools/fv_diagnostics.F90:3843-3874).
+
+  Computes ``ws = sqrt(us² + vs²)`` then maximum over
+  (2·hw+1) × (2·hw+1) neighborhood centered at each cell.
+  FV3 default ``hw=3`` → 7×7 window.
+
+  Implementation: ``jax.lax.reduce_window`` with -∞ padding on
+  boundary (edge cells use effective smaller window from
+  interior values).
+
+  Used by FV3 for storm-tracking / TC max-wind diagnostics
+  (intensification metric for tropical cyclones).
+
+  Handles 2D and 3D inputs (leading axes treated as batch).
+
+  Tests (6/6 in 1 s):
+  1. Output shape matches input.
+  2. Uniform field → ws_max = sqrt(U²+V²).
+  3. Isolated 100 m/s peak propagates to 7×7 region.
+  4. Zero field → zero output.
+  5. 3D (face, n_x, n_y) input handled.
+  6. half_window=1 → 3×3 max-pool.
+
+  Wired into iter-383 sweep (now 242).
 - Iter 675: **FV3 ``bilinear_interp_apply``** — apply remap weights to src.
   Faithful JAX port of FV3 ``apply_inc_on_3d_scalar`` core
   (tools/fv_treat_da_inc.F90:339-360, inner bilinear loop).
