@@ -170,6 +170,7 @@ _GUARD_MODULES = (
     "test_heat_source_del2_coeff_sweep_iter563",     # iter-563 add
     "test_combined_best_iter564",                    # iter-564 add
     "test_combined_best_c32_iter565",                # iter-565 add
+    "test_combined_best_30step_iter566",             # iter-566 add
 )
 
 

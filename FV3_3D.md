@@ -1185,6 +1185,19 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 566: **30-step run with optimal stack**.
+  Extend iter-564 to 30 steps @ C24:
+  - 10 steps (iter-564): edge_std = 5.83e-3
+  - 30 steps:            edge_std = 3.43e-2
+  - 30/10 growth:        +488.5% (~5.9× growth)
+  Super-linear growth: if linear, 30 steps would predict
+  3× = 17.5e-3.  Actual is ~2× more (34e-3).  Edge artifact
+  accumulates faster than linearly over time even with
+  the optimal stack.  Practical implication: production
+  1-day runs (288 steps at dt=300s) may see meaningful edge
+  bias accumulation — needs explicit characterization at
+  production resolution.  1/1 in 40 s.  Wired into iter-383
+  sweep (now 147).
 - Iter 565: **C32 combined-best — edge_std plateaus**.
   Extend iter-564 to C32:
   - C24: edge_std = 5.83e-3, int_std = 2.12e-3
