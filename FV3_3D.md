@@ -1015,6 +1015,20 @@ Key iterations:
   - **GAP #2 CLOSED**: dynamic Exner (5 NH sites).
   - **Per-flag default**: all False (preserves bit-for-bit).
 
+- Iter 499: monotone_clip in ``center_to_dgrid_vector`` —
+  OVERSHOOTS neutral.  Monkey-patch ``pad_halo_vector_4d``
+  inside ``center_to_dgrid_vector`` with clip=True:
+    no clip:   u_d edge × 1.0396  (iter-497 baseline 1.040)
+    with clip: u_d edge × 0.9378  (UNDER interior!)
+  Clip goes 257% of the way to neutral — it actively pulls
+  edge cells BELOW interior values, over-correcting.  This
+  explains iter-493's modest dycore impact: the clip is too
+  aggressive at the op level, and the dycore's own damping
+  further pulls edges down → small net change.  A SOFTER
+  constraint (e.g., allow edges ≤ interior_max × 1.05) might
+  give better balance between artifact suppression and
+  physical fidelity.  Future investigation direction.
+  1/1 in 11 s.  Wired into iter-383 sweep (now 91).
 - Iter 498: extend iter-490 ``monotone_clip`` to
   ``pad_halo_vector_4d`` — also propagates to the two
   internal ``pad_halo_4d`` calls (east + north components).

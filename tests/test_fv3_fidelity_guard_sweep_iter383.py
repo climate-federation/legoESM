@@ -114,6 +114,7 @@ _GUARD_MODULES = (
     "test_interp_center_to_corner_duogrid_iter496",  # iter-496 add
     "test_center_to_dgrid_vector_duogrid_iter497",   # iter-497 add
     "test_pad_halo_vector_4d_monotone_clip_iter498", # iter-498 add
+    "test_center_to_dgrid_vector_with_clip_iter499", # iter-499 add
 )
 
 
