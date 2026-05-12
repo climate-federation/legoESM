@@ -3988,6 +3988,56 @@ def gravity_wave_speed_fv3(
     return jnp.maximum(n_brunt, 0.0) * H
 
 
+def froude_number_fv3(
+    u_speed: jax.Array,
+    c_wave: jax.Array,
+    c_floor: float = 1e-12,
+) -> jax.Array:
+    """FV3_3D iter 785: Froude number Fr = U / c.
+
+    Dimensionless ratio of mean flow speed to gravity-wave speed:
+
+        Fr = U / max(c, c_floor)
+
+    Diagnostic of subcritical vs supercritical regime:
+
+      * Fr < 1   — subcritical: long gravity waves can propagate
+                   upstream; smooth-flow regime.
+      * Fr = 1   — critical: hydraulic jump / standing wave.
+      * Fr > 1   — supercritical: upstream propagation blocked;
+                   wave breaking, downslope windstorm, turbulence.
+
+    Compose with iter-784 ``gravity_wave_speed_fv3`` for c = N·H,
+    giving Fr = U/(N·H).
+
+    Used by: mountain-wave drag schemes (Lott-Miller 1997 et al.
+    parameterize Fr-dependent breaking), downslope-windstorm
+    forecasting (Fr > 1 in lee favors windstorms), hydraulic
+    flow-regime selection in open-channel and atmospheric
+    blocking diagnostics, gravity-wave critical-level analysis.
+
+    ``c_floor`` prevents div-by-0 in unstratified columns (c→0).
+    Default 1e-12 → unstratified Fr ≈ U·10¹² (essentially "fully
+    supercritical").
+
+    Parameters
+    ----------
+    u_speed : jax.Array
+        Mean flow speed |V| (m/s).  Caller typically passes
+        ``wind_speed_fv3(ua, va)``.
+    c_wave : jax.Array
+        Gravity-wave phase speed c (m/s) from iter-784.
+    c_floor : float
+        Lower bound on c (m/s); default 1e-12.
+
+    Returns
+    -------
+    Fr : jax.Array
+        Froude number (dimensionless).
+    """
+    return jnp.maximum(u_speed, 0.0) / jnp.maximum(c_wave, c_floor)
+
+
 def kinetic_energy_fv3(
     ua: jax.Array,
     va: jax.Array,

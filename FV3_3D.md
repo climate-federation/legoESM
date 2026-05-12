@@ -5113,4 +5113,48 @@ parameterization (uses c as critical-level filter); (4) eddy-
 permitting model design via L_R = c/|f|.  Pure JAX, vmap-
 compatible.  No new physical constants introduced.
 
+## Iter 785 — froude_number_fv3 (Fr = U/c)
+
+Added `froude_number_fv3(u_speed, c_wave, c_floor=1e-12)` to
+`grids/cubed_sphere.py`.  Dimensionless flow regime indicator:
+
+```
+Fr = max(U, 0) / max(c, c_floor)
+```
+
+Composes iter-784 ``gravity_wave_speed_fv3``: feed c = N·H to
+get Fr = U / (N·H).
+
+Regime interpretation:
+  * Fr < 1   — subcritical (long gravity waves can propagate
+               upstream; smooth-flow regime)
+  * Fr = 1   — critical (hydraulic jump / standing wave)
+  * Fr > 1   — supercritical (upstream blocking, wave breaking,
+               downslope-windstorm regime)
+
+Used by: Lott-Miller (1997) mountain-wave drag scheme (Fr-
+dependent breaking parameterization), downslope-windstorm
+forecasting (Fr > 1 in lee favors windstorms), hydraulic
+flow-regime selection in atmospheric blocking diagnostics,
+gravity-wave critical-level analysis.
+
+``c_floor`` prevents div-by-0 in unstratified columns (c→0).
+
+Test: `tests/test_fv3_froude_number_iter785.py` (7 tests:
+U=0 → Fr=0, subcritical U=10/c=30 → Fr=1/3, critical U=c=30
+→ Fr=1, supercritical U=50/c=30 → Fr=5/3, unstratified c=0
+floored finite, full iter-784 pipeline (U=20, N=0.01, H=3 km)
+→ c=30 → Fr=2/3, 3-D shapes + finite + non-negative).
+
+### Why this iteration was meaningful
+
+Fr is the key diagnostic for mountain-wave drag, downslope
+windstorm forecasting, and hydraulic-flow regime selection.
+Together with iter-784 c, this provides the full Fr =
+U/(N·H) computation in two named, vmap-compatible calls — vs
+the previous inline `u/(n*h)` derivation that lacked
+intermediate-variable visibility.  Closes the gravity-wave-
+regime diagnostic pair (c, Fr).  Pure JAX, vmap-compatible.
+No new physical constants introduced.
+
 
