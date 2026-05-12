@@ -49,6 +49,43 @@ def safe_pow(x, p):
     return jnp.where(positive, safe_x ** p, 0.0)
 
 
+def donor_clamp_scale(q_avail, sink_total, dt, divisor_floor=1.0e-15):
+    """AD-safe donor clamp scale ``min(1, q / (sink·dt))``.
+
+    Returns the multiplicative scale that should be applied to all
+    sinks of a single hydrometeor species so the per-step removal does
+    not exceed the locally-available mass.  The naive
+    ``q / max(sink·dt, 1e-30)`` form has a VJP of ``-q / (sink·dt)²``
+    that overflows fp32 (max ≈ 3.4e38) whenever ``sink·dt`` is
+    smaller than ~1e-20.  The ``divisor_floor`` (default 1e-15)
+    bounds the divisor from below so the worst-case VJP magnitude is
+    ``q / 1e-30 ≈ 1e30`` — comfortably within fp32.  At the floor
+    ``jnp.maximum`` has zero subgradient, which is physically correct
+    (no scaling, no sensitivity to the tiny sink).
+
+    Parameters
+    ----------
+    q_avail : array
+        Available mass per unit air (positive part of the hydrometeor
+        mixing ratio).
+    sink_total : array
+        Combined sink rate [kg/kg/s] for the species in this step.
+    dt : float or array
+        Physics step [s].
+    divisor_floor : float, default 1e-15
+        Floor on ``sink_total · dt`` for AD safety.
+
+    Returns
+    -------
+    array
+        Multiplicative scale in ``[0, 1]``.  Identity (1.0) wherever
+        the per-step sink is below the floor (no clamp needed).
+    """
+    sink_dt_safe = jnp.maximum(sink_total * jnp.maximum(dt, 1.0e-10),
+                               divisor_floor)
+    return jnp.minimum(1.0, q_avail / sink_dt_safe)
+
+
 def saturation_adjustment(T, q_v, p_full, dt, sharpness=50.0, q_c=None):
     """Compute smooth saturation adjustment (condensation tendency).
 

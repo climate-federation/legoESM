@@ -156,6 +156,36 @@ Compression iteration.  Folded iter-20 through iter-29 into the
 "Iterations 1-29 — Summary" section.  Detailed per-iteration narratives
 remain in the commit messages on `clean_physics`.
 
+### Iteration 34 — 2026-05-12
+
+**Fix iter-33 codex stop-time finding: test does not exercise
+production clamp.**
+
+Iter-33's test re-implemented the donor-clamp pattern locally
+instead of calling production code, so it could not catch a
+regression where the production helper drifts from the test copy.
+
+Refactored: extracted `donor_clamp_scale(q_avail, sink_total, dt,
+divisor_floor=1e-15)` into `_warm_rain.py` as a shared AD-safe
+helper.  Morrison and Thompson q_v clamps now call this helper
+directly (replacing the inline `jnp.maximum`/`jnp.minimum` pattern).
+The regression test now imports and exercises THIS production
+function rather than a copy.
+
+```python
+# tests now do:
+from legoesm.atmosphere.physics.microphysics._warm_rain import (
+    donor_clamp_scale,
+)
+grad = jax.grad(lambda q: donor_clamp_scale(...))(q_v)
+```
+
+The test also adds an active-regime check (`q_v_small=1e-6,
+sink_big=1e-3` → scale = 1e-4) so it catches both the
+floor regime (gradient zero) and the active regime (correct scale).
+
+**Tests (post iter-34):** 63 / 63 microphysics tests pass.
+
 ### Iteration 33 — 2026-05-12
 
 **Fix iter-32 codex stop-time finding: test does not exercise the

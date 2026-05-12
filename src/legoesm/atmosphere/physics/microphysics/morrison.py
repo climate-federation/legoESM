@@ -28,6 +28,7 @@ from legoesm.atmosphere.physics.microphysics._warm_rain import (
     self_collection_breakup,
     rain_evaporation,
     safe_pow,
+    donor_clamp_scale,
 )
 from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
 from legoesm.atmosphere.physics.microphysics.output import (
@@ -222,20 +223,14 @@ def morrison_microphysics(
     # vapor sinks (and their matching sources / latent heat) so the
     # combined removal cannot exceed the locally-available vapor mass.
     # Codex iter-25 finding #3.
-    # AD-safe floor on the divisor.  A boolean-only double-where guard
-    # (iter-31) only protected the ``sink == 0`` branch — for TINY
-    # positive sinks the VJP ``-q_v / sink_dt²`` still overflows fp32
-    # when sink_dt is small enough.  ``jnp.maximum(qv_sink_dt, 1e-15)``
-    # floors the divisor so the worst-case VJP is ``-q_v / 1e-30 ≈
-    # -4e28`` which is safely within fp32 dynamic range.  At the floor
-    # the ``jnp.maximum`` subgradient is zero — we are in the inactive
-    # regime where ``min(1, huge) = 1`` so propagating zero gradient is
-    # physically correct (no scaling, no sensitivity to the tiny sink).
+    # Vapor donor clamp via the shared AD-safe helper
+    # (donor_clamp_scale).  The helper's ``divisor_floor`` (default
+    # 1e-15) keeps the VJP bounded under fp32 even for tiny
+    # supersaturated icy layers where the sink is small but positive.
     cond_pos = jnp.maximum(condensation, 0.0)
     qv_sink_total = cond_pos + jnp.maximum(dq_i_dep, 0.0)
     qv_avail = jnp.clip(q_v, 0.0)
-    qv_sink_dt_safe = jnp.maximum(qv_sink_total * jnp.maximum(dt, 1e-10), 1e-15)
-    qv_scale = jnp.minimum(1.0, qv_avail / qv_sink_dt_safe)
+    qv_scale = donor_clamp_scale(qv_avail, qv_sink_total, dt)
     # Scale only the positive (vapor-consuming) branch of condensation;
     # negative condensation (evaporation) is unaffected.
     condensation = jnp.where(condensation > 0.0, condensation * qv_scale, condensation)
