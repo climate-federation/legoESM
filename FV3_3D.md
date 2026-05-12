@@ -1195,6 +1195,38 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 716: **FV3 ``eqv_pot_bolton_fv3``** — Bolton 1980 θ_e variant.
+  Faithful JAX port of FV3 Xi.Chen + SJL Bolton-form ``eqv_pot``
+  (tools/fv_diagnostics.F90:5421-5497).  Alternative to iter-692
+  simplified SJL form — uses Bolton 1980's T_LCL formula for
+  greater accuracy:
+
+      cappa = R_d/(R_d + ((1-q)·cv_air + q·cv_vap)/(1+zvir·q))
+      r     = q/(1-q)·1000                       (dry mixing ratio, g/kg)
+      e     = p_mb·r/(622+r)                     (vapor pressure, mb)
+      T_LCL = 2840/(3.5·ln(T) - ln(e) - 4.805) + 55   (Bolton 1980 eq. 21)
+      capa  = cappa·(1 - r·0.28e-3)
+      θ_e   = T·(1000/p_mb)^capa
+              ·exp((3.376/T_LCL - 0.00254)·r·(1 + r·0.81e-3))
+
+  Both hydrostatic + non-hydrostatic.  Reuses legoesm constants
+  (R_d, R_v, c_pd, c_pv, kappa, g).
+
+  Tests (8/8 in <2 s):
+  1. Dry isothermal at p=1000 mb → θ_e = T exactly.
+  2. Dry Poisson form at p=500 mb → analytical θ_e.
+  3. Moist θ_e > dry θ_e at q=15 g/kg, T=290 K.
+  4. Hydrostatic branch via monotone peln.
+  5. 3-D input → 3-D output.
+  6. No NaN/Inf on random.
+  7. Missing peln (hydrostatic) / delz raises.
+  8. Bolton θ_e ≠ iter-692 SJL θ_e at moist tropical conditions
+     (Bolton uses T_LCL formula; SJL uses L_v/(cp·T)).
+
+  Pairs with iter-692 SJL form — both are FV3-faithful variants
+  (FV3 selects via #ifdef SIMPLIFIED_THETA_E).
+
+  Wired into iter-383 sweep (now 280).
 - Iter 715: **iter-695 ``rh_calc_fv3`` do_cmip upgrade**.
 
   iter-695 used saturation over liquid only.  iter-715 adds

@@ -303,6 +303,7 @@ _GUARD_MODULES = (
     "test_fv3_moist_cv_iter713",                     # iter-713 add
     "test_fv3_moist_cp_iter714",                     # iter-714 add
     "test_fv3_rh_calc_cmip_iter715",                 # iter-715 add
+    "test_fv3_eqv_pot_bolton_iter716",               # iter-716 add
 )
 
 

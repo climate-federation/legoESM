@@ -3238,6 +3238,92 @@ def nh_total_energy_fv3(
     return te
 
 
+def eqv_pot_bolton_fv3(
+    pt: jax.Array,
+    delp: jax.Array,
+    q: jax.Array,
+    delz: jax.Array | None = None,
+    peln: jax.Array | None = None,
+    hydrostatic: bool = False,
+    moist: bool = True,
+) -> jax.Array:
+    """FV3_3D iter 716: equivalent potential temperature (Bolton 1980).
+
+    Faithful JAX port of FV3's Xi.Chen Bolton-form ``eqv_pot``
+    (tools/fv_diagnostics.F90:5421-5497).  Alternative to iter-692
+    simplified S.-J. Lin form — Bolton 1980 thermodynamics gives a
+    more accurate θ_e using the lifting-condensation-level temp.
+
+    Algorithm:
+
+        p_mb (mb) = hydrostatic: delp/Δpeln · 0.01
+                  | non-hydro  : −R_d/g · delp/delz · pt · (1+zvir·q) · 0.01
+
+        Moist:
+          cappa = R_d / (R_d + ((1-q)·cv_air + q·cv_vap)/(1+zvir·q))
+          r     = q/(1-q) · 1000              (dry mixing ratio, g/kg)
+          e     = p_mb · r / (622 + r)        (vapor pressure, mb)
+          T_LCL = 2840 / (3.5·ln(T) − ln(e) − 4.805) + 55   (Bolton eq. 21)
+          capa  = cappa · (1 − r · 0.28e-3)
+          θ_e   = T · (1000/p_mb)^capa
+                  · exp((3.376/T_LCL − 0.00254) · r · (1 + r · 0.81e-3))
+
+        Dry: θ_e = T · (1000/p_mb)^kappa
+
+    Parameters
+    ----------
+    pt : jax.Array, shape (..., km)
+        Air temperature (K).
+    delp : jax.Array, shape (..., km)
+        Pressure thickness (Pa).
+    q : jax.Array, shape (..., km)
+        Specific humidity (kg/kg).
+    delz : jax.Array, shape (..., km), optional
+        Layer thickness — required if not hydrostatic.
+    peln : jax.Array, shape (..., km+1), optional
+        log(pressure) at interfaces — required if hydrostatic.
+    hydrostatic, moist : bool
+
+    Returns
+    -------
+    theta_e : jax.Array, shape (..., km)
+        Equivalent potential temperature (K).
+    """
+    cv_air = constants.c_pd - constants.R_d
+    cv_vap = constants.c_pv - constants.R_v
+    zvir = (constants.R_v / constants.R_d - 1.0) if moist else 0.0
+    rdg = -constants.R_d / constants.g
+
+    if hydrostatic:
+        if peln is None:
+            raise ValueError("hydrostatic=True requires peln")
+        dpeln = peln[..., 1:] - peln[..., :-1]
+        p_mb = 0.01 * delp / dpeln
+    else:
+        if delz is None:
+            raise ValueError("hydrostatic=False requires delz")
+        p_mb = 0.01 * rdg * delp / delz * pt * (1.0 + zvir * q)
+
+    if moist:
+        # Moist exponent cappa
+        cappa = constants.R_d / (
+            constants.R_d
+            + ((1.0 - q) * cv_air + q * cv_vap) / (1.0 + zvir * q)
+        )
+        # Dry mixing ratio r (g/kg)
+        r = jnp.maximum(1e-10, q / (1.0 - q) * 1000.0)
+        # Water vapor pressure (mb)
+        e = p_mb * r / (622.0 + r)
+        # Bolton 1980 eq. 21 T_LCL
+        t_l = 2840.0 / (3.5 * jnp.log(pt) - jnp.log(e) - 4.805) + 55.0
+        capa = cappa * (1.0 - r * 0.28e-3)
+        return jnp.exp(
+            (3.376 / t_l - 0.00254) * r * (1.0 + r * 0.81e-3)
+        ) * pt * (1000.0 / p_mb) ** capa
+    else:
+        return pt * jnp.exp(constants.kappa * jnp.log(1000.0 / p_mb))
+
+
 def eqv_pot_fv3(
     pt: jax.Array,
     delp: jax.Array,
