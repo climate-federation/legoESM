@@ -2885,6 +2885,40 @@ def compute_brn_fv3(
     return brn, shear06
 
 
+def rh_calc_fv3(
+    p_full: jax.Array,
+    t: jax.Array,
+    qv: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 695: relative humidity diagnostic (percent).
+
+    Faithful JAX port of FV3 ``rh_calc``
+    (tools/fv_diagnostics.F90:5309-5339).
+
+    RH = 100 · qv / qs(T, p_full)
+
+    Reuses legoesm ``thermo.saturation_mixing_ratio`` (CLAUDE.md
+    rule: never re-derive Tetens / Magnus / Clausius-Clapeyron).
+
+    Parameters
+    ----------
+    p_full : jax.Array
+        Layer-center pressure (Pa).
+    t : jax.Array
+        Air temperature (K).
+    qv : jax.Array
+        Specific humidity (kg/kg).
+
+    Returns
+    -------
+    rh : jax.Array
+        Relative humidity (percent).
+    """
+    from legoesm import thermo
+    qs = thermo.saturation_mixing_ratio(t, p_full)
+    return 100.0 * qv / qs
+
+
 def prt_mass_fv3(
     ps: jax.Array,
     delp: jax.Array,

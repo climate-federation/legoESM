@@ -1195,6 +1195,24 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 695: **FV3 ``rh_calc_fv3``** — relative humidity diagnostic.
+  Faithful JAX port of FV3 ``rh_calc``
+  (tools/fv_diagnostics.F90:5309-5339).
+
+      RH = 100 · qv / qs(T, p_full)
+
+  Reuses ``legoesm.thermo.saturation_mixing_ratio`` (Tetens form);
+  follows CLAUDE.md mandate: never re-derive Tetens / Magnus /
+  Clausius-Clapeyron.
+
+  Tests (5/5 in <1 s):
+  1. qv = 0 → RH = 0.
+  2. qv = qs → RH = 100.
+  3. qv = 0.5·qs → RH = 50.
+  4. 3-D input → 3-D output.
+  5. No NaN/Inf on random.
+
+  Wired into iter-383 sweep (now 259).
 - Iter 694: **FV3 ``prt_mass_fv3``** — global mass-budget diagnostic.
   Faithful JAX port of FV3 ``prt_mass``
   (tools/fv_diagnostics.F90:4164-4263).
