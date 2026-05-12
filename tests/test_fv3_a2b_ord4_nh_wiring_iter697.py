@@ -37,10 +37,11 @@ def test_flag_exists_default_off():
     assert cfg.use_fv3_a2b_ord4_vector_uv is False
 
 
-def test_fv3_faithful_factory_does_not_enable():
-    """make_fv3_faithful_nh_config leaves flag OFF (impact-pending)."""
+def test_fv3_faithful_factory_enables_flag_after_iter698():
+    """iter-698 measured -25.8% θ′ edge ratio at C8 from this flag.
+    iter-699 promoted it to factory default ON."""
     cfg = make_fv3_faithful_nh_config()
-    assert cfg.use_fv3_a2b_ord4_vector_uv is False
+    assert cfg.use_fv3_a2b_ord4_vector_uv is True
 
 
 def test_flag_override_via_factory():

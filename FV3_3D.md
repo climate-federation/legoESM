@@ -1195,6 +1195,29 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 698: **EMPIRICAL POSITIVE — 4th-order vector cc→corner
+  reduces θ′ edge ratio 25.8 % at C8**.
+
+  iter-696 + iter-697 added the opt-in flag.  iter-698 measured
+  impact at C8 (3 seeds × 3 dycore steps):
+
+  ```
+  OFF (default):  mean θ′ edge ratio = 4.1805
+  ON  (iter-696): mean θ′ edge ratio = 3.1018
+  delta (ON − OFF) = −1.0786  (≈ −25.8 %)
+  ```
+
+  NEGATIVE delta = flag REDUCES cube imprint.  FIRST positive
+  signal on the residual 5-6 mK floor since the supercell-triad
+  ports.
+
+  Promoted to ``make_fv3_faithful_nh_config`` factory default ON.
+  37/37 NH unit + integration tests pass with flag enabled (no
+  climate regression on the existing 30-day C96 spin-up tests).
+
+  iter-697 wiring guard updated to require factory default ON.
+
+  Wired into iter-383 sweep (now 262).
 - Iter 697: **wire iter-696 ``use_fv3_a2b_ord4_vector_uv`` through
   NH dycore config**.  Iter 696 added the opt-in
   ``use_fv3_a2b_ord4`` arg to ``center_to_dgrid_vector``; iter 697

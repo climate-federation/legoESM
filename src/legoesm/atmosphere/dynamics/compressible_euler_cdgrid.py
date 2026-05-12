@@ -1512,6 +1512,7 @@ def make_fv3_faithful_nh_config(**overrides) -> CDGridCompressibleEulerConfig:
     defaults = dict(
         use_fv3_d_con_cv=True,
         use_fv3_vector_halo_uv=True,
+        use_fv3_a2b_ord4_vector_uv=True,   # iter-698: -25.8% θ′ edge ratio at C8
         use_fv3_dynamic_exner=True,
         use_fv3_metric_aware_d_con=True,
         use_fv3_cross_face_du_proj=True,

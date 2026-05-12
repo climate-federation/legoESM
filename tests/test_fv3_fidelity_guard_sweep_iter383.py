@@ -285,6 +285,7 @@ _GUARD_MODULES = (
     "test_fv3_rh_calc_iter695",                      # iter-695 add
     "test_fv3_a2b_ord4_vector_cc_to_corner_iter696", # iter-696 add
     "test_fv3_a2b_ord4_nh_wiring_iter697",           # iter-697 add
+    "test_fv3_a2b_ord4_vector_uv_edge_impact_iter698", # iter-698 add
 )
 
 
