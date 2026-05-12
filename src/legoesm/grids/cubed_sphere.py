@@ -897,6 +897,151 @@ def mid_pt_sphere(
     return lon_mid, lat_mid
 
 
+def latlon2xyz(
+    lon: jax.Array, lat: jax.Array
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """FV3_3D iter 611: FV3-named alias for ``lonlat_to_cartesian``.
+
+    Faithful port of FV3 ``latlon2xyz`` (fv_grid_utils.F90:1639-1665).
+    Convert (lon, lat) in radians to 3D Cartesian unit-sphere
+    coordinates::
+
+        x = cos(lat) cos(lon)
+        y = cos(lat) sin(lon)
+        z = sin(lat)
+    """
+    return lonlat_to_cartesian(lon, lat)
+
+
+def xyz2latlon(
+    x: jax.Array, y: jax.Array, z: jax.Array,
+    eps: float = 1e-10,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 611: Cartesian → (lon, lat) inverse of ``latlon2xyz``.
+
+    Faithful port of FV3 ``cart_to_latlon`` (fv_grid_utils.F90:1739-1777).
+    Normalizes (x, y, z) to the unit sphere first; returns ``lon`` in
+    ``[0, 2π)`` and ``lat`` in ``[-π/2, π/2]``.
+
+    Matches FV3's ``esl=1.d-10`` guard near the poles (where
+    ``|x|+|y| < esl``, longitude is set to 0).
+    """
+    dist = jnp.sqrt(x * x + y * y + z * z)
+    safe = jnp.where(dist > 0.0, dist, 1.0)
+    x_n = x / safe
+    y_n = y / safe
+    z_n = z / safe
+    lat = jnp.arcsin(jnp.clip(z_n, -1.0, 1.0))
+    near_pole = (jnp.abs(x_n) + jnp.abs(y_n)) < eps
+    lon = jnp.where(near_pole, 0.0, jnp.arctan2(y_n, x_n))
+    lon = jnp.where(lon < 0.0, lon + 2.0 * jnp.pi, lon)
+    return lon, lat
+
+
+def inner_prod(
+    v1: jax.Array, v2: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 611: Cartesian dot product.
+
+    Faithful port of FV3 ``inner_prod`` (fv_grid_utils.F90:984-998).
+    Takes the last axis as the 3-vector component; broadcasts over
+    leading axes.  Each ``v1`` and ``v2`` is shape ``(..., 3)``.
+    """
+    return jnp.sum(v1 * v2, axis=-1)
+
+
+def vect_cross(
+    p1: jax.Array, p2: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 611: Cartesian cross product ``e = p1 × p2``.
+
+    Faithful port of FV3 ``vect_cross`` (fv_grid_utils.F90:1781-1791).
+    Takes the last axis as the 3-vector component; broadcasts over
+    leading axes.
+    """
+    return jnp.cross(p1, p2, axis=-1)
+
+
+def normalize_vect(
+    e: jax.Array, eps: float = 1e-30,
+) -> jax.Array:
+    """FV3_3D iter 611: normalize Cartesian vector to unit length.
+
+    Faithful port of FV3 ``normalize_vect`` (fv_grid_utils.F90:
+    1880-1893).  Takes the last axis as the 3-vector component;
+    broadcasts over leading axes.  Zero-vector input returns the
+    input unchanged (avoiding NaN).
+    """
+    pdot = jnp.sqrt(jnp.sum(e * e, axis=-1, keepdims=True))
+    safe = jnp.where(pdot > eps, pdot, 1.0)
+    return e / safe
+
+
+def mid_pt3_cart(
+    p1: jax.Array, p2: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 611: Cartesian-input great-circle midpoint.
+
+    Faithful port of FV3 ``mid_pt3_cart`` (fv_grid_utils.F90:
+    1996-2022).  Returns the normalized sum (p1 + p2) / |p1 + p2|.
+
+    Takes the last axis as the 3-vector component; broadcasts over
+    leading axes.  Each of ``p1``, ``p2`` should already be on the
+    unit sphere (no extra normalization beyond the post-sum step).
+    """
+    return normalize_vect(p1 + p2)
+
+
+def mid_pt_cart(
+    lon1: jax.Array, lat1: jax.Array,
+    lon2: jax.Array, lat2: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 611: (lon, lat)-input → Cartesian midpoint vector.
+
+    Faithful port of FV3 ``mid_pt_cart`` (fv_grid_utils.F90:
+    2026-2036).  Convenience for code that takes (lon, lat) inputs
+    but wants the Cartesian midpoint (e.g., FV3 grid generation).
+    Returns shape ``(..., 3)``.
+    """
+    x1, y1, z1 = latlon2xyz(lon1, lat1)
+    x2, y2, z2 = latlon2xyz(lon2, lat2)
+    p1 = jnp.stack([x1, y1, z1], axis=-1)
+    p2 = jnp.stack([x2, y2, z2], axis=-1)
+    return mid_pt3_cart(p1, p2)
+
+
+def get_unit_vect2(
+    lon1: jax.Array, lat1: jax.Array,
+    lon2: jax.Array, lat2: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 611: unit tangent vector at the GC midpoint.
+
+    Faithful port of FV3 ``get_unit_vect2`` (fv_grid_utils.F90:
+    1848-1863).  Returns the unit tangent vector to the great
+    circle through (e1, e2), evaluated at the midpoint and pointing
+    from e1 toward e2.  Used in FV3 ``edge_factors`` /
+    ``efactor_a2c_v`` for metric construction.
+
+    Algorithm:
+        p1 = latlon2xyz(e1)
+        p2 = latlon2xyz(e2)
+        pc = mid_pt3_cart(p1, p2)
+        p3 = p2 × p1           (great-circle pole)
+        uc = pc × p3           (tangent at pc)
+        uc / |uc|
+
+    Returns shape ``(..., 3)``.
+    """
+    x1, y1, z1 = latlon2xyz(lon1, lat1)
+    x2, y2, z2 = latlon2xyz(lon2, lat2)
+    p1 = jnp.stack([x1, y1, z1], axis=-1)
+    p2 = jnp.stack([x2, y2, z2], axis=-1)
+    pc = mid_pt3_cart(p1, p2)
+    p3 = vect_cross(p2, p1)
+    uc = vect_cross(pc, p3)
+    return normalize_vect(uc)
+
+
 def rotate_winds_geo_to_grid(
     u_east: jax.Array, v_north: jax.Array, angle: jax.Array
 ) -> tuple[jax.Array, jax.Array]:

@@ -206,6 +206,7 @@ _GUARD_MODULES = (
     "test_cubed_to_latlon_iter607",                  # iter-607 add
     "test_mid_pt_sphere_iter608",                    # iter-608 add
     "test_terrain_filter_mass_iter609",              # iter-609 add
+    "test_fv3_cartesian_primitives_iter611",         # iter-611 add
 )
 
 

@@ -1195,6 +1195,47 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 611: **FV3 Cartesian grid primitives**.  Faithful ports of
+  the building-block helpers from FV3 ``fv_grid_utils.F90``:
+
+  | Function          | F90 line | Role                              |
+  |-------------------|----------|-----------------------------------|
+  | ``latlon2xyz``    | 1639     | (lon, lat) → (x, y, z) unit sphere|
+  | ``xyz2latlon``    | 1739     | inverse; pole-safe (esl=1e-10)   |
+  | ``inner_prod``    | 984      | Cartesian dot product             |
+  | ``vect_cross``    | 1781     | Cartesian cross product           |
+  | ``normalize_vect``| 1880     | unit-norm (zero-safe)             |
+  | ``mid_pt3_cart``  | 1996     | Cartesian GC midpoint             |
+  | ``mid_pt_cart``   | 2026     | (lon, lat)→ Cartesian midpoint    |
+  | ``get_unit_vect2``| 1848     | unit tangent at GC midpoint       |
+
+  All JAX-vectorized, broadcast on leading axes, take the 3-vector
+  on the last axis (FV3 takes a flat 3-element array).  Each is a
+  pure JAX function with finite gradients (zero-safe normalization
+  via ``jnp.where``).
+
+  ``latlon2xyz`` is a thin FV3-named alias for the existing
+  ``lonlat_to_cartesian``.  ``xyz2latlon`` is new and matches the
+  FV3 ``cart_to_latlon`` pole branch (``|x|+|y|<eps → lon=0``).
+  ``get_unit_vect2`` returns the unit tangent at the great-circle
+  midpoint pointing from e1 → e2 (used in FV3 ``edge_factors`` /
+  ``efactor_a2c_v`` metric construction).
+
+  Tests (13/13 in 1 s):
+  1. ``latlon2xyz`` outputs unit-norm vectors.
+  2. ``latlon2xyz`` ↔ ``xyz2latlon`` roundtrip exact.
+  3. ``xyz2latlon`` at pole returns lon=0 (FV3 esl branch).
+  4. ``inner_prod`` orthogonal pairs → 0.
+  5. ``inner_prod`` parallel unit vectors → 1.
+  6. ``vect_cross`` standard identities.
+  7. ``vect_cross`` anticommutes.
+  8. ``normalize_vect`` produces unit norm.
+  9. ``normalize_vect`` zero input is NaN-safe.
+  10. ``mid_pt3_cart`` is unit-norm + equidistant.
+  11. ``mid_pt_cart`` ↔ ``mid_pt_sphere`` agreement (1e-12).
+  12. ``get_unit_vect2`` returns unit-norm tangent.
+  13. ``get_unit_vect2`` tangent is ⊥ pc (sphere tangent).
+  Wired into iter-383 sweep (now 183).
 - **Iters 601-609 (compacted iter 610)**: full NH+PE conservation
   matrix + FV3 utility ports (grid, ops, filter, diagnostics).
   - iter 601: **NH TE-conserving correction** (FV3 consv_te NH).
