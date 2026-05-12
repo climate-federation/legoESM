@@ -1195,6 +1195,31 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 633: **FV3 ``fill_ghost`` corner-ghost fill port**.  Faithful
+  JAX port of FV3 ``fill_ghost_r4`` / ``fill_ghost_r8``
+  (fv_grid_utils.F90:3070-3147).  Fills the 4 corner-ghost
+  rectangular regions OUTSIDE the face corners with a constant.
+
+  Used to mask FV3's cube-vertex singularity (no well-defined
+  neighbor at the 8 cube corners → 4 per-face corner-ghost
+  blocks).  legoESM already handles cube vertex via duogrid +
+  halo_aware interp; this port adds FV3-faithful explicit
+  corner-mask utility for diagnostic visualization and
+  cube-imprint regression tests.
+
+  Algorithm: builds a corner-mask (i<ng AND j<ng) OR
+  (i≥n_x-ng AND j<ng) OR ... and applies ``jnp.where(mask, value, q)``.
+  Broadcasts over leading axes.
+
+  Tests (6/6 in <1 s):
+  1. Shape preserved.
+  2. Interior unchanged.
+  3. All 4 corner-ghost regions filled.
+  4. Face-edge halo (one-axis halo) NOT touched.
+  5. value=0 is valid (corners → 0).
+  6. Leading face-axis preserved (3D input).
+
+  Wired into iter-383 sweep (now 203).
 - Iter 632: **FV3 ``global_qsum`` + ``global_mx`` + ``global_mx_c``**.
   Faithful JAX ports of FV3 serial reduction helpers:
 

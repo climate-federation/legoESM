@@ -226,6 +226,7 @@ _GUARD_MODULES = (
     "test_fv3_native_grid_iter629",                  # iter-629 add
     "test_fv3_edge_factors_iter631",                 # iter-631 add
     "test_fv3_global_reductions_iter632",            # iter-632 add
+    "test_fv3_fill_ghost_iter633",                   # iter-633 add
 )
 
 

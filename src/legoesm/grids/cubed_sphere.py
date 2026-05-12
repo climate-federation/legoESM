@@ -1752,6 +1752,61 @@ def rot_3d(
     raise ValueError(f"Invalid axis: {axis} (must be 1, 2, or 3)")
 
 
+def fill_ghost(
+    q: jax.Array, ng: int, value: float,
+) -> jax.Array:
+    """FV3_3D iter 633: fill 4 corner-ghost regions with constant.
+
+    Faithful JAX port of FV3 ``fill_ghost_r4`` / ``fill_ghost_r8``
+    (fv_grid_utils.F90:3070-3147).  Fills the 4 corner-ghost
+    rectangular regions OUTSIDE the face corners with ``value``.
+    Used to mask FV3's cube-vertex singularity (no well-defined
+    neighbor at the 8 cube corners, propagated to 4 corner-ghost
+    blocks per face).
+
+    Input ``q`` has shape ``(..., npx-1+2·ng, npy-1+2·ng)`` where:
+        - npx-1 = number of interior cells in x (cell-centered)
+        - ng = number of halo cells on each side
+
+    The 4 corner-ghost regions are the rectangles in the halo
+    where BOTH i and j are outside the interior range:
+        - SW corner ghost: i ∈ [0, ng-1], j ∈ [0, ng-1]
+        - SE corner ghost: i ∈ [-ng:], j ∈ [0, ng-1]
+        - NE corner ghost: i ∈ [-ng:], j ∈ [-ng:]
+        - NW corner ghost: i ∈ [0, ng-1], j ∈ [-ng:]
+
+    Parameters
+    ----------
+    q : jax.Array, shape ``(..., n_x_halo, n_y_halo)``
+        Field with halo.  Two trailing axes interpreted as (i, j).
+    ng : int
+        Number of halo cells on each side.
+    value : float
+        Fill value for corner ghost cells.
+
+    Returns
+    -------
+    q_filled : jax.Array
+        Copy of ``q`` with the 4 corner-ghost regions set to ``value``.
+    """
+    n_x = q.shape[-2]
+    n_y = q.shape[-1]
+    i_idx = jnp.arange(n_x)[:, None]
+    j_idx = jnp.arange(n_y)[None, :]
+    # Interior: ng <= i < n_x - ng, ng <= j < n_y - ng
+    # Corner ghost: (i < ng AND j < ng) OR (i >= n_x-ng AND j < ng) OR
+    #               (i >= n_x-ng AND j >= n_y-ng) OR (i < ng AND j >= n_y-ng)
+    i_lo = i_idx < ng
+    i_hi = i_idx >= (n_x - ng)
+    j_lo = j_idx < ng
+    j_hi = j_idx >= (n_y - ng)
+    corner_mask = (
+        (i_lo & j_lo) | (i_hi & j_lo) | (i_hi & j_hi) | (i_lo & j_hi)
+    )
+    # Broadcast mask over leading axes
+    return jnp.where(corner_mask, value, q)
+
+
 def global_qsum(p: jax.Array) -> jax.Array:
     """FV3_3D iter 632: quick global sum without area weighting.
 
