@@ -1195,273 +1195,32 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
-- Iter 639: **FV3 ``hybrid_z_dz``** — stretched vertical with
-  per-layer s_fac table.  Faithful JAX port of FV3 ``hybrid_z_dz``
-  (tools/fv_eta.F90:1794-1855).  Builds FV3 stretched vertical-coord:
+- **Iters 631-639 (compacted iter 640)**: FV3 grid + vertical-coord
+  ancillary ports.  9 iterations add boundary, reduction, vertical,
+  and ghost helpers from FV3 fv_grid_utils + fv_eta + fv_grid_tools:
 
-      s_fac[km..km-9] = 0.12, 0.20, 0.30, ..., 1.0
-      s_fac[k]        = min(4, s_rate · s_fac[k+1])   for k ∈ [9, km-10]
-      s_fac[1..8]     = 1.6, 1.5, 1.4, 1.3, 1.2, 1.15, 1.1, 1.05
-                        (top, applied to s_fac[k+1])
+  | Iter | Function(s)                              | Module / Line             | Role                                |
+  |------|------------------------------------------|---------------------------|-------------------------------------|
+  | 631  | ``edge_factor_along_axis_nonortho``      | fv_grid_utils:1212        | A→B GC-weighted edge interp factor  |
+  | 632  | ``global_qsum`` / ``global_mx`` / ``global_mx_c`` | fv_grid_utils:2999/3020/3048 | serial sum / min / max  |
+  | 633  | ``fill_ghost``                           | fv_grid_utils:3070        | 4 corner-ghost regions fill          |
+  | 634  | ``get_eta_level``                        | fv_eta:1859               | hybrid → log-mean full-level pressure|
+  | 635  | ``compute_dz_fv3`` / ``zflip``           | fv_eta:1894/2482          | initial dz layering + vertical flip |
+  | 636  | ``sm1_edge_fv3``                         | fv_eta:2249               | 1D del-2 edge smoother for dz       |
+  | 637  | ``set_external_eta`` / ``compute_dz_L101`` | fv_eta:788/2069        | (ptop, ks) + L101 vertical (20.3km) |
+  | 638  | ``compute_dz_L32``                       | fv_eta:2000               | FV3 canonical L32 vertical (~60 km) |
+  | 639  | ``hybrid_z_dz``                          | fv_eta:1794               | stretched vertical w/ s_fac table   |
 
-      dz0 = ztop / Σ s_fac
-      dz[k] = s_fac[k] · dz0
+  Vertical-coord port stack now covers ALL FV3 canonical
+  reference layer profiles (L32, L101, hybrid_z) plus the
+  general helpers (get_eta_level, compute_dz, sm1_edge).  Lives
+  in ``legoesm.grids.vertical`` alongside existing
+  ``HybridSigmaPressureCoordinate`` infrastructure.
 
-  Then iter-636 ``sm1_edge_fv3`` applied with ntimes=2.
-
-  Requires km ≥ 18 (top + bottom blocks: 8 + 10).  ``s_rate``
-  FV3 documented range [1.0, 1.1]; default 1.06.
-
-  Lives in ``legoesm.grids.vertical``.  Reuses iter-636
-  ``sm1_edge_fv3``.
-
-  Tests (6/6 in 1 s):
-  1. Output shape (km,).
-  2. All dz > 0.
-  3. Total ≈ ztop (sm1_edge flux-form invariant).
-  4. No NaN/Inf.
-  5. km < 18 raises ValueError.
-  6. Top layer > bottom layer (FV3 stretch pattern).
-
-  Wired into iter-383 sweep (now 209).
-- Iter 638: **FV3 ``compute_dz_L32``**.  Faithful JAX port of
-  FV3 ``compute_dz_L32`` (tools/fv_eta.F90:2000-2067).  Builds
-  FV3-canonical 32-layer vertical with ztop ≈ 60 km.
-
-  Three blocks (FV3 1-indexed):
-    - k=1, 2 (bottom): dz[0]=75 m, dz[1]=112.5 m (1.5× growth)
-    - k=3..23 (middle, k1=21): linear stretching to z1=10 km
-      dz[k] = dz0 + (k-k0)·dz1
-    - k=24..31 (upper, k2=8): linear stretching to z2=30 km
-      dz[k] = dz0_new + (k-k0-k1)·dz2
-    - k=32 (top): dz[31] = 2·dz[30]
-
-  After construction, dz is zflipped to top→bottom indexing
-  (FV3 final convention).
-
-  Mirror of iter-637 ``compute_dz_L101``.  Together both ports
-  cover FV3's canonical L32 and L101 vertical-coord references
-  for users porting hybrid-z setup code.
-
-  Lives in ``legoesm.grids.vertical`` alongside iter-634/635/636/637
-  vertical helpers.
-
-  Tests (7/7 in <1 s):
-  1. Output shape (32,).
-  2. Bottom layer (after zflip) = 75 m.
-  3. ztop = sum(dz).
-  4. All dz > 0.
-  5. No NaN/Inf.
-  6. Top layer = 2·dz[1] (FV3 construction).
-  7. ztop ≈ 60 km (FV3 documented bound).
-
-  Wired into iter-383 sweep (now 208).
-- Iter 637: **FV3 ``compute_dz_L101`` + ``set_external_eta``**.
-  Faithful JAX ports of FV3 vertical helpers (tools/fv_eta.F90):
-
-  | Function             | F90 line | Role                              |
-  |----------------------|----------|-----------------------------------|
-  | ``set_external_eta`` | 788      | derive (ptop, ks) from ak/bk      |
-  | ``compute_dz_L101``  | 2069     | FV3-canonical L101 layer thicknesses |
-
-  ``set_external_eta(ak, bk)``: returns ``(ptop=ak[0],
-  ks=last_pure_pressure_layer_index)``.  ``ks`` = max ``k``
-  where ``bk[k] < eps`` (FV3 default eps=1e-7).
-
-  ``compute_dz_L101()`` builds FV3-canonical 101-layer vertical
-  (ztop ≈ 20.3 km):
-    - Top: dz[0] = 4·dz[1] (single ~6.6 km layer)
-    - Middle: dz[k] = stretch_f·dz[k+1] for k ∈ [1, 24]
-              (25 geometric layers, stretch 1.16)
-    - Bottom: dz[k] = 40 m uniform for k ∈ [25, 100]
-
-  Both live in ``legoesm.grids.vertical`` alongside iter-634/635/636
-  vertical helpers.
-
-  Tests (8/8 in <1 s):
-  1. ``set_external_eta`` ptop = ak[0].
-  2. ``set_external_eta`` ks = last pure-pressure index.
-  3. ``set_external_eta`` all-hybrid → ks = -1.
-  4. ``compute_dz_L101`` shape (101,).
-  5. Bottom 77 layers uniform 40 m.
-  6. Middle layers geometric stretch 1.16.
-  7. Top layer = 4·dz[1].
-  8. ztop ≈ 20.3 km (FV3 documented).
-
-  Wired into iter-383 sweep (now 207).
-- Iter 636: **FV3 ``sm1_edge_fv3``** — 1D del-2 edge smoother.
-  Faithful JAX port of FV3 ``sm1_edge`` (tools/fv_eta.F90:
-  2249-2284).  Smooths a column of layer-interface heights ``ze``
-  via iterated del-2 flux on layer thicknesses.
-
-  Algorithm:
-
-      dz[k] = ze[k+1] - ze[k]
-      for n in 1..ntimes:
-          k1 = 2 + (ntimes - n)         # iteration shrinks top
-          flux[k1] = flux[km] = 0       # boundary
-          flux[k] = 0.25·(dz[k] - dz[k-1])   # interior
-          dz[k] += flux[k+1] - flux[k]
-      rebuild ze from dz bottom-up
-
-  Used in FV3 ``set_hybrid_z`` to smooth oscillations at the top
-  of vertical-coordinate generation.  Flux-form preserves total
-  thickness (mass-conservation analog).
-
-  Lives in ``legoesm.grids.vertical`` alongside iter-634/635
-  vertical helpers.
-
-  Tests (6/6 in 1 s):
-  1. Output shape (km+1,).
-  2. ntimes=0 → no-op.
-  3. Bottom interface preserved.
-  4. Total thickness conserved (flux-form invariant).
-  5. Oscillating dz → smoother dz after pass.
-  6. Uniform dz unchanged.
-
-  Wired into iter-383 sweep (now 206).
-- Iter 635: **FV3 ``compute_dz_fv3`` + ``zflip``**.  Faithful JAX
-  ports of FV3 vertical helpers (tools/fv_eta.F90):
-
-  | Function           | F90 line | Role                              |
-  |--------------------|----------|-----------------------------------|
-  | ``compute_dz_fv3`` | 1894     | initial dz: top doubled, bot halved |
-  | ``zflip``          | 2482     | reverse vertical axis              |
-
-  ``compute_dz_fv3(km, ztop)`` algorithm:
-
-      dz_uniform = ztop / km
-      dz[0]    = 2·dz_uniform   # top (stretched)
-      dz[km-1] = 0.5·dz_uniform # bottom (compressed)
-      dz[1..km-2] = dz_uniform  # interior
-
-  Total height = (km + 0.5)·ztop/km > ztop by design — FV3 uses
-  this as initial guess for ``set_hybrid_z`` iterative solver.
-
-  ``zflip`` reverses level ordering (FV3 top-down ↔ bottom-up).
-  Convenience wrapper for ``jnp.flip``.  Both live in
-  ``legoesm.grids.vertical``.
-
-  Tests (8/8 in <1 s):
-  1. ``compute_dz_fv3`` output shape (km,).
-  2. Top cell doubled.
-  3. Bottom cell halved.
-  4. Interior uniform.
-  5. Total height = (km + 0.5)·ztop/km.
-  6. ``zflip`` reverses last axis.
-  7. ``zflip`` default axis = -1.
-  8. ``zflip`` idempotent (flip² = id).
-
-  Wired into iter-383 sweep (now 205).
-- Iter 634: **FV3 ``get_eta_level``** — hybrid coord → log-mean
-  full-level pressure.  Faithful JAX port of FV3 ``get_eta_level``
-  (tools/fv_eta.F90:1859-1890):
-
-      ph[k] = ak[k] + bk[k]·p_s             # half-level pressure
-      pf[k] = (ph[k+1] - ph[k]) / log(ph[k+1]/ph[k])  # log-mean full
-
-  Top-edge branch (FV3 lines 1880-1884):
-      ak[0] > 1e-8 → standard log-mean
-      ak[0] ≤ 1e-8 → kappa-limit pf[0] = (ph[1]-ph[0]) · κ/(κ+1)
-
-  Differs from legoESM's ``pressure_from_hybrid(full=True)`` which
-  uses pre-computed ``A_full``/``B_full`` (scheme-dependent
-  midpoint).  FV3 uses LOG-MEAN.  Both are valid full-level
-  definitions; this helper makes FV3-faithful available standalone
-  for users porting FV3 vertical-coord code.
-
-  Optional ``pscale`` arg multiplies ph (FV3 lines 1874-1878).
-  Batched ``p_s`` shapes ``(...,)`` supported.
-
-  Lives in ``legoesm.grids.vertical`` (alongside existing
-  ``pressure_from_hybrid``).
-
-  Tests (6/6 in 2 s):
-  1. Output shapes (npz,) and (npz+1,).
-  2. ph[k] = ak[k] + bk[k]·p_s formula.
-  3. pf[k] = log-mean for k >= 1.
-  4. Top kappa-branch when ak[0] = 0.
-  5. pscale scales ph (and pf linearly).
-  6. Batched p_s → batched output.
-
-  Wired into iter-383 sweep (now 204).
-- Iter 633: **FV3 ``fill_ghost`` corner-ghost fill port**.  Faithful
-  JAX port of FV3 ``fill_ghost_r4`` / ``fill_ghost_r8``
-  (fv_grid_utils.F90:3070-3147).  Fills the 4 corner-ghost
-  rectangular regions OUTSIDE the face corners with a constant.
-
-  Used to mask FV3's cube-vertex singularity (no well-defined
-  neighbor at the 8 cube corners → 4 per-face corner-ghost
-  blocks).  legoESM already handles cube vertex via duogrid +
-  halo_aware interp; this port adds FV3-faithful explicit
-  corner-mask utility for diagnostic visualization and
-  cube-imprint regression tests.
-
-  Algorithm: builds a corner-mask (i<ng AND j<ng) OR
-  (i≥n_x-ng AND j<ng) OR ... and applies ``jnp.where(mask, value, q)``.
-  Broadcasts over leading axes.
-
-  Tests (6/6 in <1 s):
-  1. Shape preserved.
-  2. Interior unchanged.
-  3. All 4 corner-ghost regions filled.
-  4. Face-edge halo (one-axis halo) NOT touched.
-  5. value=0 is valid (corners → 0).
-  6. Leading face-axis preserved (3D input).
-
-  Wired into iter-383 sweep (now 203).
-- Iter 632: **FV3 ``global_qsum`` + ``global_mx`` + ``global_mx_c``**.
-  Faithful JAX ports of FV3 serial reduction helpers:
-
-  | Function       | F90 line | Role                              |
-  |----------------|----------|-----------------------------------|
-  | ``global_qsum``| 2999     | sum w/o area weight (vs g_sum)    |
-  | ``global_mx``  | 3020     | min/max at cell centers           |
-  | ``global_mx_c``| 3048     | min/max at cell corners           |
-
-  All serial (non-MPI); legoESM uses ``global_sum_mpi`` /
-  ``global_min_mpi`` / ``global_max_mpi`` for distributed runs.
-  Useful FV3-named aliases for code porting and CI diagnostics.
-
-  Tests (6/6 in <1 s):
-  1. ``global_qsum`` constant field.
-  2. ``global_qsum`` zero field.
-  3. ``global_qsum`` works for any shape.
-  4. ``global_mx`` extremes.
-  5. ``global_mx`` uniform field (qmin=qmax).
-  6. ``global_mx_c`` identical to ``global_mx``.
-
-  Wired into iter-383 sweep (now 202).
-- Iter 631: **FV3 ``edge_factors`` non-ortho branch port**.
-  Faithful JAX port of FV3 ``edge_factors`` (fv_grid_utils.F90:
-  1212-1289), non-orthogonal branch.  Single-axis 1D variant:
-  for one face boundary, computes per-corner interpolation
-  weights ``edge_factor[j] = d2 / (d1 + d2)`` where:
-
-      py[j]   = mid_pt_sphere(agrid_outside[j], agrid_inside[j])
-      d1[j]   = great_circle_dist(py[j-1], grid_corner[j])
-      d2[j]   = great_circle_dist(py[j],   grid_corner[j])
-
-  Used by FV3 A-grid → B-grid (corner) interpolation at
-  non-orthogonal cubed-sphere face boundaries::
-
-      q_corner[j] = (1 - edge[j]) · q_A[j] + edge[j] · q_A[j-1]
-
-  Reuses iter-608 ``mid_pt_sphere`` and iter-611 (via
-  ``great_circle_distance``).
-
-  Returns ``(n+1,)`` array with NaN at endpoints (FV3 leaves them
-  as ``big_number`` since edge formula degenerates at face
-  corners themselves).  Interior weights bounded in [0, 1].
-
-  Tests (5/5 in 2 s):
-  1. Output shape (n+1,).
-  2. Endpoint NaN, interior finite.
-  3. Equidistant midpoints → 0.5 (uniform grid limit).
-  4. Interior weights ∈ [0, 1].
-  5. No NaN/Inf in interior on random inputs.
-
-  Wired into iter-383 sweep (now 201).
+  Grid ancillary ports (edge_factors non-ortho, fill_ghost,
+  global reductions) round out the FV3 fv_grid_utils.F90 cover
+  matrix.  All 9 ports cumulative: ~36 tests, all wired into
+  iter-383 sweep (now 209).
 - **Iters 621-629 (compacted iter 630)**: complete FV3
   cubed-sphere CONSTRUCTION + WIND-ROTATION pipeline.  9
   iterations close out FV3's full grid-init code path:
