@@ -129,6 +129,17 @@ the resulting overshoot in θ/q.  Cap is ``M ≤ 0.5·ρ·dz/dt``
 **Tests (post iter-11):**
 - 95 atmosphere turbulence tests pass (all schemes including EDMF).
 
+### Iteration 13 — 2026-05-12
+
+**Action:** Fixed `tests/unit/test_land_ice_sea_ice_thermo.py::Test8i_StefanBoltzmann::test_lw_up_matches`.  Test was missing the
+reflected-LW component `(1 - ε) · lw_down` in the expected value.
+Sea-ice `lw_up` is correctly `ε σ T⁴ + (1 - ε) lw_down` (grey-surface
+upward longwave; ε ≈ 0.97 for sea ice).  Adjusted the test to match
+the proper physics; the code was always correct.
+
+**Tests (post iter-13):**
+- All 10 sea-ice thermo tests now pass (was 9/10 with 1 pre-existing fail).
+
 ### Iteration 12 — 2026-05-12
 
 **Inspection / audit iteration (no code changes).**
