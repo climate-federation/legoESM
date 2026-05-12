@@ -3960,6 +3960,41 @@ def compute_brn_fv3(
     return brn, shear06
 
 
+def lcl_pressure_fv3(
+    pt: jax.Array,
+    p: jax.Array,
+    t_lcl: jax.Array,
+    cappa: float | jax.Array | None = None,
+) -> jax.Array:
+    """FV3_3D iter 764: pressure at lifting condensation level.
+
+    Dry adiabatic lift from (T, p) to (T_LCL, p_LCL):
+
+        θ conserved  ⇒  T · p^(−κ) = T_LCL · p_LCL^(−κ)
+                     ⇒  p_LCL = p · (T_LCL / T)^(1/κ)
+
+    Companion to iter-763 ``lcl_temperature_fv3``.  Together they
+    give the full LCL state (T_LCL, p_LCL).
+
+    Parameters
+    ----------
+    pt : jax.Array
+        Parcel temperature (K).
+    p : jax.Array
+        Parcel pressure (Pa).
+    t_lcl : jax.Array
+        LCL temperature (K, from iter-763).
+    cappa : float or jax.Array, optional.  Default ``constants.kappa``.
+
+    Returns
+    -------
+    p_lcl : jax.Array
+        LCL pressure (Pa, < p since LCL is above parcel).
+    """
+    kap = constants.kappa if cappa is None else cappa
+    return p * (t_lcl / pt) ** (1.0 / kap)
+
+
 def lcl_temperature_fv3(
     pt: jax.Array,
     p_mb: jax.Array,

@@ -4947,3 +4947,34 @@ is verifiable with unit tests in seconds rather than wall-time
 sweeps.  Users running the NH compressible-Euler 3D path now have
 the same cube-imprint defense as users running the PE 3D path.
 
+## Iter 764 — LCL pressure helper (Poisson lift companion to iter 763)
+
+Added `lcl_pressure_fv3(pt, p, t_lcl, cappa=None)` to
+`grids/cubed_sphere.py`. Algorithm: pressure at LCL via the
+Poisson relation conserved along a dry adiabat:
+
+```
+p_LCL = p · (T_LCL / T)^(1/κ)
+```
+
+Composes with iter-763 `lcl_temperature_fv3` and iter-736 Exner
+to give the full LCL state (T_LCL, p_LCL) for parcel-lift
+diagnostics.  Defaults `cappa=constants.kappa` per the constant-
+hygiene rule.  Test: `tests/test_fv3_lcl_pressure_iter764.py`
+(6 tests: dry case identity, p_LCL<p when cooling required,
+iter-763 cross-check for supercell parcel, 3-D shapes, finite,
+explicit cappa override).  Sweep entry added.  Cap bumped to
+4965.
+
+### Why this iteration was meaningful
+
+iter-763 added `T_LCL` (Bolton 1980 eq. 21) but to localize a
+parcel's LCL in pressure coordinates (needed for CAPE/CIN level-
+of-free-convection integrals and the parcel-source layer used
+in storm-mode diagnostics), one also needs `p_LCL`.  This iter
+ports that companion.  Total iter-763+764 cost: ~6 lines of
+source plus two extracted helpers.  Both are pure JAX, vmap-
+compatible, and compose with the iter-715 saturation-blend /
+iter-720 helper / iter-736 Exner stack.  No new physical
+constants — `constants.kappa` suffices.
+
