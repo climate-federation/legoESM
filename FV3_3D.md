@@ -1081,6 +1081,26 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 507: **bisect residual 1.13× NH leak** under min-edge
+  + clip context.  Toggle each still-on FV3-fidelity flag
+  OFF one at a time (4 flags) + key sponge/damp knobs (4
+  more), measure θ′ edge ratio.  Findings at seeds [507,508]:
+  - baseline (all on):                  1.075×
+  - use_fv3_vector_halo_uv=False:       **2.362× (+1.288)** ←critical
+  - use_fv3_d_con_cv=False:             1.216× (+0.141)
+  - use_fv3_dynamic_exner=False:        1.075× (neutral)
+  - use_fv3_cross_face_du_proj=False:   1.075× (neutral)
+  - damp_w / damp_v / sponge=0:         1.075× (neutral)
+  - corner_div_damp=0:                  **46.2× (+45.1)** ←blowup
+  Vector halo + corner_div_damp are the two stabilizers
+  doing all the work.  Dynamic Exner, cross-face projection,
+  and sponge damps are neutral on θ′ edge variance at this
+  initial state.  Residual 1.075× is NOT eliminable by flag
+  toggle: it is intrinsic to the C-D-grid composition
+  with current corner_div_damp_d2_bg=5e-4.  Next direction
+  for further reduction = sweep corner_div_damp_d2_bg
+  magnitude (the key tunable).  1/1 in 447 s.  Wired into
+  iter-383 sweep (now 98).
 - Iter 506: **PE composition check** for iter-505 helper.
   Mirror NH iter-505 on hydrostatic PE: build state from
   ``held_suarez_init`` + random T perturbation, step both
