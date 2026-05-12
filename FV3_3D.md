@@ -1195,6 +1195,29 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 757: **``total_atmosphere_mass_fv3``** — column air mass.
+
+      M_col = Σ_k delp / g    (kg/m²)
+            ≈ (p_s − p_top) / g
+
+  Standard mass-conservation diagnostic.  Earth surface
+  M_col ≈ 10197 kg/m² (ps=1e5 Pa, ptop≈0).
+
+  Decomposition: M_col = M_dry + TWC; therefore
+  M_col − TWC = ps_dry / g.  Verified bit-identical to iter-752
+  per-cell dry_surface_pressure / g (regression test).
+
+  Composes iter-742 column_integral_delp_fv3 with constant field=1.
+
+  Tests (6/6 in <1 s):
+  1. ps=1e5, ptop=0 → M_col ≈ 10197 kg/m².
+  2. delp=0 → M_col=0.
+  3. M_col = Σ delp / g (analytical exact).
+  4. M_col − TWC matches iter-752 ps_dry/g per cell.
+  5. 3-D → 2-D output.
+  6. No NaN/Inf.
+
+  Wired into iter-383 sweep (now 322).
 - Iter 756: **``precipitable_water_fv3``** — column water vapor.
 
       PWV = Σ_k delp · q_sphum / g    (kg/m² ≡ mm)

@@ -3022,6 +3022,37 @@ def potential_energy_column_fv3(
     return column_integral_delp_fv3(phi_avg, delp)
 
 
+def total_atmosphere_mass_fv3(
+    delp: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 757: column total atmospheric mass (kg/m²).
+
+        M_col = Σ_k delp / g
+              ≈ (p_s − p_top) / g
+
+    Standard mass-conservation diagnostic.  For Earth at p_s=1e5 Pa,
+    p_top=0 → M_col ≈ 10197 kg/m².
+
+    Companion to iter-749 ``total_water_column_fv3`` (water mass)
+    and iter-752 ``dry_surface_pressure_fv3``:
+
+        M_col_dry = M_col − TWC
+
+    Composes iter-742 column_integral_delp_fv3 with field=1.
+
+    Parameters
+    ----------
+    delp : jax.Array, shape (..., km)
+        Pressure thickness (Pa).
+
+    Returns
+    -------
+    mass_col : jax.Array, shape (...,)
+        Column air mass (kg/m²).
+    """
+    return column_integral_delp_fv3(jnp.ones_like(delp), delp)
+
+
 def precipitable_water_fv3(
     q_sphum: jax.Array,
     delp: jax.Array,

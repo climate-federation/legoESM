@@ -344,6 +344,7 @@ _GUARD_MODULES = (
     "test_fv3_dry_static_energy_iter754",            # iter-754 add
     "test_fv3_mse_dse_column_iter755",               # iter-755 add
     "test_fv3_precipitable_water_iter756",           # iter-756 add
+    "test_fv3_total_atmosphere_mass_iter757",        # iter-757 add
 )
 
 
