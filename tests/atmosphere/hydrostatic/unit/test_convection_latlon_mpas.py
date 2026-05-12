@@ -536,23 +536,38 @@ class TestMicrophysicsMPAS:
         assert bool(jnp.all(jnp.isfinite(tend.dT_dt.data)))
 
 
-class TestTurbulenceGWDMPASSupported:
-    """Turbulence and GWD bridges now run on MPAS Voronoi meshes via
-    Perot (2000) edge→cell wind reconstruction
-    (:func:`legoesm.grids.voronoi.reconstruct_cell_velocity`).  The
-    factories return callable physics functions for the standard
-    column schemes (audit 2026-05-12 MEDIUM #10).  Prognostic-spectral
-    GWD and the ML-emulator variant still need pytree wiring through
-    the MPAS driver and remain unsupported."""
+class TestTurbulenceGWDMPASStatus:
+    """Status of turbulence / GWD dispatch on MPAS Voronoi meshes.
 
-    def test_turbulence_mpas_returns_callable(self):
+    Gravity-wave drag is supported: the MPAS bridge reconstructs
+    cell-centered winds from the prognostic edge-normal velocity
+    (:func:`legoesm.grids.voronoi.reconstruct_cell_velocity`), runs the
+    column GWD backend on cell quantities, and projects the
+    cell-centered wind tendencies back to edge-normal form via
+    ``angleEdge``.  GWD produces only momentum and temperature
+    tendencies — no tracer or stateful TKE outputs — so the MPAS step
+    can consume the resulting ``HydrostaticTendencies`` without
+    additional plumbing (audit 2026-05-12 MEDIUM #10).
+
+    Turbulence remains unsupported on MPAS: every turbulence backend
+    in this package diffuses ``q_v`` (and three of them, TKE/CLUBB-
+    lite/EDMF, carry a prognostic TKE field), but
+    ``MPASPrimitiveEquationModel.step`` only consumes
+    ``(du_dt, dT_dt, dp_s_dt)`` and does not preserve ``state.tracers``
+    or thread a ``PhysicsState`` for stateful schemes.  Enabling MPAS
+    turbulence would silently drop those tendencies / state, which
+    Codex adversarial-review (2026-05-12) called out as no-ship.  The
+    factory therefore fails fast with a clear ``NotImplementedError``
+    until the MPAS step gains tracer + ``PhysicsState`` plumbing."""
+
+    def test_turbulence_mpas_raises_not_implemented(self):
         from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
         from legoesm.atmosphere.physics.turbulence.integration import (
             make_turbulence_physics,
         )
         cfg = TurbulenceConfig(scheme="louis")
-        fn = make_turbulence_physics(cfg, model_type="mpas", dt=300.0)
-        assert callable(fn)
+        with pytest.raises(NotImplementedError, match="MPAS"):
+            make_turbulence_physics(cfg, model_type="mpas", dt=300.0)
 
     def test_gwd_mpas_returns_callable(self):
         from legoesm.atmosphere.physics.gravity_wave_drag.config import (

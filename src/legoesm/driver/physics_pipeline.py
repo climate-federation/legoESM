@@ -528,21 +528,18 @@ class PhysicsPipeline:
         p_full = p_s[..., None] * self.sigma_full
         p_half = p_s[..., None] * self.sigma_half
 
-        # Flatten to columns via adapter
+        # Flatten to columns via adapter.  ``q_v`` is kept in the
+        # repo's mixing-ratio convention here; each ``radiation_fn``
+        # wrapper is responsible for converting to the unit its solver
+        # expects.  Gray radiation consumes mixing ratio directly (its
+        # optical depth uses ``q_v · dp / g`` as column water).  The
+        # RRTMGP wrapper converts to specific humidity inside the
+        # builder before invoking the solver (audit 2026-05-12 #6 fix,
+        # narrowed to RRTMGP per Codex review).
         T_col = ad.flatten_3d(T)
         p_full_col = ad.flatten_3d(p_full)
         p_half_col = p_half.reshape(ad.ncol, nlev + 1)
         q_v_col = ad.flatten_3d(q_v)
-        # Water-vapor unit convention: the prognostic ``q_v`` in
-        # legoESM (and ERA5 ingestion via ``era5_to_state``) is the
-        # **mixing ratio** r = m_v / m_d.  The RRTMGP solver, however,
-        # expects **specific humidity** q = m_v / (m_v + m_d) for its
-        # internal VMR conversion ``h2o_vmr = (M_d/M_w) · q/(1-q)``.
-        # Converting at the boundary keeps both modules internally
-        # consistent (audit 2026-05-12 finding MEDIUM-HIGH #6) — the
-        # ~1 % drift between r and q matters in saturated tropical
-        # columns where RRTMGP's H2O continuum is sensitive to VMR.
-        q_v_specific_col = q_v_col / (1.0 + jnp.clip(q_v_col, 0.0, None))
         T_sfc_col = ad.flatten_2d(T_sfc)
         lat_col = ad.flatten_2d(lat)
         lon_col = ad.flatten_2d(lon)
@@ -590,7 +587,7 @@ class PhysicsPipeline:
             }
 
         rad_out = self.radiation_fn(
-            T_col, p_full_col, p_half_col, q_v_specific_col,
+            T_col, p_full_col, p_half_col, q_v_col,
             T_sfc_col, lat_col, lon_col,
             day_of_year, seconds_of_day,
             albedo_col, emis_col,
@@ -841,9 +838,18 @@ def _build_rrtmgp_radiation_fn(config):
             )
             _sw_scale = f_day
 
+        # Water-vapor unit convention: the upstream pipeline passes
+        # ``q_v`` as **mixing ratio** r = m_v / m_d.  RRTMGP's internal
+        # H2O VMR formula ``mol_ratio * q / (1 - q)`` expects **specific
+        # humidity** q = m_v / (m_v + m_d).  Convert at the solver
+        # boundary so that gray radiation and other consumers of
+        # ``q_v_col`` (e.g. cloud-fraction diagnostics) keep their
+        # mixing-ratio inputs while RRTMGP sees the right unit.
+        # Audit 2026-05-12 #6, narrowed to RRTMGP per Codex review.
+        q_v_specific = q_v_col / (1.0 + jnp.clip(q_v_col, 0.0, None))
         result = solver.solve_columns(
             T=T_col, p_full=p_full_col, p_half=p_half_col,
-            sfc_temperature=T_sfc_col, q_v=q_v_col,
+            sfc_temperature=T_sfc_col, q_v=q_v_specific,
             cos_zenith=cos_zenith,
             sfc_albedo=albedo_col,
             sfc_emissivity=emis_col,

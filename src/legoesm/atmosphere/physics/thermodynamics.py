@@ -292,31 +292,49 @@ def compute_moist_adiabat(
 
     def scan_step(carry, p_k):
         T_prev_val, p_prev_val = carry
-        dp = p_k - p_prev_val  # negative going upward
 
-        # Smooth dry/moist switch:  weight = 1 when p_k > p_lcl (below
-        # LCL, dry adiabat); 0 when p_k < p_lcl (above LCL, moist
-        # adiabat).  Sharp sigmoid keeps the transition tight in p.
+        # Smooth dry/moist switches.  Pressure decreases upward, so
+        # ``p > p_lcl`` ⇔ below LCL.  Width = 100 Pa (≈ 1 hPa) gives a
+        # tight differentiable transition relative to the ~10⁵ Pa
+        # column range.
         if q_v_base is None:
-            below_lcl = jnp.zeros_like(p_k)
+            below_lcl_k = jnp.zeros_like(p_k)
+            prev_below_lcl = jnp.zeros_like(p_k)
         else:
-            # Width ~ 1 hPa (100 Pa); pressure varies by ~10⁵ Pa over a
-            # column so this is sharp enough to be effectively a switch
-            # while staying differentiable.
-            below_lcl = jax.nn.sigmoid((p_k - p_lcl) / 100.0)
+            below_lcl_k = jax.nn.sigmoid((p_k - p_lcl) / 100.0)
+            prev_below_lcl = jax.nn.sigmoid((p_prev_val - p_lcl) / 100.0)
 
-        # Moist adiabat trapezoidal predictor-corrector
-        gamma_1 = moist_adiabat_lapse_rate(T_prev_val, p_prev_val)
-        T_pred_moist = T_prev_val + gamma_1 * dp
+        # Straddling steps (previous below LCL, current above) must
+        # start the moist integration at the LCL itself rather than
+        # the previous (still-dry) level.  Otherwise the moist lapse
+        # rate is applied across the entire dry-leg slab and warms
+        # the first saturated level — the bias Codex 2026-05-12 P3
+        # flagged.  Codex review (2026-05-12) explicitly calls for
+        # initialising the moist scan at the diagnosed LCL on
+        # cross-LCL steps; that is exactly what ``straddle_weight``
+        # interpolates.
+        straddle_weight = prev_below_lcl * (1.0 - below_lcl_k)
+        # On a straddle, the *moist* starting point is (T_lcl, p_lcl)
+        # because the dry leg has carried the parcel from p_prev to
+        # p_lcl.  On a pure above-LCL step (straddle_weight ≈ 0) the
+        # moist integration starts at the previous level.
+        T_moist_start = straddle_weight * T_lcl + (1.0 - straddle_weight) * T_prev_val
+        p_moist_start = straddle_weight * p_lcl + (1.0 - straddle_weight) * p_prev_val
+        dp_moist = p_k - p_moist_start
+
+        # Moist adiabat trapezoidal predictor-corrector from the
+        # (possibly shifted) start to p_k.
+        gamma_1 = moist_adiabat_lapse_rate(T_moist_start, p_moist_start)
+        T_pred_moist = T_moist_start + gamma_1 * dp_moist
         gamma_2 = moist_adiabat_lapse_rate(T_pred_moist, p_k)
-        T_moist = T_prev_val + 0.5 * (gamma_1 + gamma_2) * dp
+        T_moist = T_moist_start + 0.5 * (gamma_1 + gamma_2) * dp_moist
 
-        # Dry adiabat exact: T = theta_dry * (p / p_ref)^kappa
+        # Dry adiabat exact: T = theta_dry * (p / p_ref)^kappa.
         T_dry = theta_dry * (
             jnp.clip(p_k, 1.0, None) / constants.p_ref
         ) ** constants.kappa
 
-        T_new = below_lcl * T_dry + (1.0 - below_lcl) * T_moist
+        T_new = below_lcl_k * T_dry + (1.0 - below_lcl_k) * T_moist
         T_new = jnp.clip(T_new, 100.0, 350.0).astype(_dtype)
         return (T_new, p_k.astype(_dtype)), T_new
 

@@ -118,7 +118,30 @@ def make_turbulence_physics(
     elif model_type == "spectral_pe":
         return _make_spectral_pe_turbulence(turbulence_config, dt)
     elif model_type == "mpas":
-        return _make_mpas_turbulence(turbulence_config, dt)
+        # The MPAS hydrostatic step (primitive_eq_mpas.MPASPrimitiveEquationModel.step)
+        # consumes only (du_dt, dT_dt, dp_s_dt) from the physics tendencies and
+        # does not preserve ``state.tracers`` or thread a ``PhysicsState`` for
+        # prognostic-TKE schemes.  Returning a turbulence physics_fn that
+        # carries moisture / TKE tendencies would silently drop them in the
+        # step kernel — every turbulence scheme in this package diffuses q_v
+        # and the TKE/CLUBB/EDMF backends carry a stateful TKE field.  Codex
+        # adversarial-review (2026-05-12) called this out as no-ship.  The
+        # Perot-reconstruction edge→cell wind helper lives in
+        # ``grids.voronoi.reconstruct_cell_velocity`` and is already wired
+        # into MPAS gravity-wave drag (which has no tracer/TKE outputs); the
+        # turbulence path is unblocked by extending the MPAS step to thread
+        # ``state.tracers`` and a ``PhysicsState`` carry, at which point
+        # ``_make_mpas_turbulence`` below can be enabled.
+        raise NotImplementedError(
+            "Turbulence on MPAS Voronoi mesh requires threading "
+            "state.tracers and a PhysicsState carry through "
+            "MPASPrimitiveEquationModel.step so that q_v tendencies "
+            "and prognostic TKE are not silently dropped.  Run MPAS "
+            "with turbulence='none' until that wiring lands.  "
+            "(Edge→cell wind reconstruction itself is supported — see "
+            "legoesm.grids.voronoi.reconstruct_cell_velocity and the "
+            "MPAS gravity-wave-drag bridge.)"
+        )
     else:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
