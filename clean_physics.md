@@ -129,6 +129,22 @@ the resulting overshoot in θ/q.  Cap is ``M ≤ 0.5·ρ·dz/dt``
 **Tests (post iter-11):**
 - 95 atmosphere turbulence tests pass (all schemes including EDMF).
 
+### Iteration 17 — 2026-05-12
+
+**Action: thread `dt` into all explicit ocean vertical-mixing schemes**
+so the leaf CFL cap (iter-5) is reachable from every entry point.
+Already done for KPP in iter-10; this iteration covers the remaining
+schemes:
+
+- `ocean/physics/vertical_mixing/richardson.py` — `richardson_vertical_mixing`
+  accepts optional `dt`, threaded into `vertical_diffusion_variable_K`.
+- `ocean/physics/vertical_mixing/constant.py` — `constant_vertical_mixing`
+  accepts optional `dt`, threaded into `vertical_diffusion`.
+
+Default `dt=None` keeps current behaviour everywhere.  Callers that
+have access to the physics step (`mpas_integration.py`, etc.) can
+opt in by passing the runtime `dt`.
+
 ### Iteration 16 — 2026-05-12
 
 **Action: thread `q_v` into `_compute_column_geometry` across the
