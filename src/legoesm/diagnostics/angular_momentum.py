@@ -115,6 +115,75 @@ def aam_from_nh_state(state, grid, hc) -> tuple[jax.Array, float]:
     )
 
 
+def apply_aam_correction_nh(state_old, state_new, grid, hc):
+    """FV3_3D iter 588: FV3 consv_am correction for NH state.
+
+    Faithful port of FV3 ``fv_dynamics.F90:774-794``.  Enforces
+    AAM conservation by adding a solid-body-rotation correction
+    proportional to the AM drift over the step:
+
+        u0 = -R · amdt / M_fac_total
+        u_east_corr(i,j) = u0 · cos(lat(i,j))
+        u_face += u_east_corr · cos(angle)
+        v_face += -u_east_corr · sin(angle)
+
+    where:
+        amdt = AAM(state_new) - AAM(state_old)
+        M_fac_total = sum(R²·cos²(lat) · rho·dz·area)
+
+    The correction is uniform in vertical (broadcast across levels).
+    Mountain-torque term (FV3 ``zxg``) is NOT subtracted from
+    ``amdt`` — for flat-surface adiabatic runs ``amdt`` is the
+    pure dycore drift and the correction restores AM exactly.
+    For runs with terrain, the user should subtract the
+    physical mountain torque before calling this function.
+
+    Returns
+    -------
+    state_corrected : NonHydrostaticState
+        State with u, v adjusted; other fields unchanged.
+
+    Notes
+    -----
+    Differentiable end-to-end (no Python control flow on traced
+    values).  Bit-for-bit identical to state_new when amdt=0
+    (no AM drift).
+    """
+    # Compute AAM at both states (geographic frame)
+    _, aam_old = aam_from_nh_state(state_old, grid, hc)
+    _, aam_new = aam_from_nh_state(state_new, grid, hc)
+    amdt = aam_new - aam_old  # kg·m²/s
+
+    # M_fac_total = sum over all cells of R²·cos²(lat) · column_mass
+    cos2_lat = jnp.cos(grid.lat) ** 2                   # (6, n, n)
+    dz_b = jnp.asarray(hc.dz)[None, None, None, :]
+    rho_ref_b = jnp.asarray(hc.rho_ref)[None, None, None, :]
+    rho_full = rho_ref_b + state_new.rho_prime.data
+    column_mass = jnp.sum(rho_full * dz_b, axis=-1) * grid.area  # (6, n, n)
+    M_fac_total = jnp.sum(
+        (grid.radius ** 2) * cos2_lat * column_mass
+    )
+
+    # u0 solid-body angular velocity (in u_east units)
+    u0 = -grid.radius * amdt / M_fac_total              # scalar [m/s]
+
+    # Build face-local correction from u_east_corr = u0·cos(lat),
+    # v_north_corr = 0.
+    cos_lat = jnp.cos(grid.lat)                         # (6, n, n)
+    u_east_corr = u0 * cos_lat                          # (6, n, n)
+    cos_a = jnp.cos(grid.angle)                         # (6, n, n)
+    sin_a = jnp.sin(grid.angle)
+    delta_u_face_2d = cos_a * u_east_corr               # (6, n, n)
+    delta_v_face_2d = -sin_a * u_east_corr              # (6, n, n)
+    # Broadcast across levels
+    delta_u = delta_u_face_2d[..., None]
+    delta_v = delta_v_face_2d[..., None]
+
+    new_u = state_new.u.replace(data=state_new.u.data + delta_u)
+    new_v = state_new.v.replace(data=state_new.v.data + delta_v)
+    return state_new._replace(u=new_u, v=new_v)
+
+
 def aam_drift_nh(state_old, state_new, grid, hc) -> float:
     """FV3_3D iter 587: AAM tendency between two NH states.
 

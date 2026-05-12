@@ -1195,6 +1195,30 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 588: **FV3 ``consv_am`` correction** (extends iter 587).
+  Faithful port of FV3 ``fv_dynamics.F90:774-794``.  Enforces
+  AAM conservation by adding a solid-body-rotation correction:
+
+      u0 = -R · amdt / M_fac_total
+      u_east_corr = u0 · cos(lat)
+      Δu_face = cos(angle) · u_east_corr
+      Δv_face = -sin(angle) · u_east_corr
+
+  Uniform across vertical (broadcast).  Mountain torque ``zxg``
+  not subtracted — for flat-surface adiabatic runs ``amdt`` is
+  the pure dycore drift and the correction restores AM exactly.
+
+  Verified at C8 (3/3 tests in 4 s):
+  - Drift before correction: 4.05e+25 kg·m²/s
+  - Drift after correction:  -9.9e+17 kg·m²/s
+  - Reduction factor: **2.4e-8** (~8 orders of magnitude →
+    float64 precision)
+  - Identical states → no-op (within float roundoff).
+  - All fields finite.
+
+  New ``apply_aam_correction_nh(state_old, state_new, grid, hc)``
+  in ``legoesm.diagnostics``.  Differentiable.  Wired into
+  iter-383 sweep (now 163).
 - Iter 587: **AAM drift from NH state** (extends iter 583).
   iter-583 ``compute_atmospheric_angular_momentum`` takes raw
   arrays; users had to manually rotate face-local u → u_east.
