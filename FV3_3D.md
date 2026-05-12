@@ -5311,6 +5311,45 @@ iter-769 (LCL state), and iter-720 (saturation-blend), the
 moist-adiabat ascent → buoyancy → CAPE.  Pure JAX, vmap-
 compatible.  No new physical constants introduced.
 
+## Iter 808 — cape_column_fv3 (∫ max(b, 0) dz)
+
+Added `cape_column_fv3(b, z)` to `grids/cubed_sphere.py`.
+Column-integrated positive buoyancy:
+
+```
+CAPE = ∑_k max(b_mid(k), 0) · Δz(k)         [J/kg]
+```
+
+Midpoint-rule discretization of ∫_LFC^EL max(b, 0) dz.  LFC/EL
+are implicitly defined as the bounds of the positive-buoyancy
+region(s); negative-buoyancy layers contribute zero.  Caller
+handles CIN separately (negative-buoyancy column-integral).
+
+Composes iter-807 ``parcel_buoyancy_fv3`` directly.
+
+Used by: deep-convection forecast diagnostics (CAPE ≥ 1000 →
+moderate; ≥ 2500 → strong; ≥ 5000 → tornadic), GFDL/CAM/IFS
+convection-scheme triggers, SREF/HRRR severe-weather products,
+climate-model convective-precipitation diagnostics.
+
+Test: `tests/test_fv3_cape_column_iter808.py` (6 tests: uniform
+b>0 → b·Δz_total, uniform b<0 → 0, mixed-sign positive-only sum,
+b=0 → 0, tropical-like profile 100-6000 J/kg, 3-D batched
+(n_x, n_y, km) → (n_x, n_y)).
+
+### Why this iteration was meaningful
+
+Closes the **CAPE pipeline**:
+  * iter-769 LCL state (T_LCL, p_LCL, z_LCL)
+  * iter-720 saturation-blend (q_sat above LCL)
+  * iter-806 Γ_m (moist-adiabatic ascent)
+  * iter-807 parcel buoyancy (b = g·Δθ_v/θ_v_env)
+  * iter-808 CAPE column integral (this iter)
+
+Given a parcel source (T, p, q), the full chain produces CAPE
+in J/kg — the canonical deep-convection diagnostic.  Pure JAX,
+vmap-compatible.  No new physical constants introduced.
+
 
 
 

@@ -5524,6 +5524,54 @@ def parcel_buoyancy_fv3(
     )
 
 
+def cape_column_fv3(
+    b: jax.Array,
+    z: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 808: CAPE column integral from buoyancy profile.
+
+    Column-integrated positive parcel buoyancy:
+
+        CAPE = ∫_LFC^EL max(b, 0) dz
+
+    Approximated as ∑_k max(b_mid(k), 0) · Δz(k) using midpoint
+    rule between adjacent levels.  Output unit J/kg.
+
+    Caller supplies the per-level buoyancy ``b`` from iter-807
+    ``parcel_buoyancy_fv3(theta_v_parcel, theta_v_env)``.  The
+    LFC and EL are implicitly defined as the lower and upper
+    boundaries of the positive-buoyancy region(s); negative-
+    buoyancy layers contribute zero (clipped at 0).  Caller
+    handles CIN separately (negative-buoyancy column-integral).
+
+    Used by: deep-convection forecast diagnostics (CAPE ≥ 1000
+    J/kg → moderate, ≥ 2500 → strong, ≥ 5000 → tornado
+    environment), GFDL/CAM/IFS convection-scheme triggers,
+    SREF/HRRR severe-weather product generation, climate-model
+    convective-precipitation diagnostics.
+
+    Vertical axis last; ``b`` and ``z`` are surface→top oriented.
+    Output is sum over the column-integral range.  Typical
+    tropical CAPE 500–5000 J/kg; mid-latitude severe storms
+    1000–4000 J/kg; nocturnal MCS 2000–6000 J/kg.
+
+    Parameters
+    ----------
+    b : jax.Array, shape (..., km)
+        Parcel buoyancy at each level (m/s²) from iter-807.
+    z : jax.Array, shape (..., km)
+        Geopotential height at the same levels (m).
+
+    Returns
+    -------
+    cape : jax.Array, shape (...,)
+        Convective available potential energy (J/kg).
+    """
+    b_mid = 0.5 * (b[..., 1:] + b[..., :-1])
+    dz = z[..., 1:] - z[..., :-1]
+    return jnp.sum(jnp.maximum(b_mid, 0.0) * dz, axis=-1)
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,
