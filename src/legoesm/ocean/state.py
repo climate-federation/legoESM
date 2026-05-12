@@ -54,6 +54,11 @@ class OceanTendencies(NamedTuple):
 
     Same structure as OceanState. Static fields (H_bathy, land_mask)
     have zero tendencies, matching the phis pattern in the atmosphere.
+
+    K_v / A_v are optional interface-level diffusivity / viscosity
+    profiles populated by the physics function when
+    ``implicit_vertical_mixing`` is enabled.  Shape
+    ``(..., nlev-1)`` at interior interfaces, or None.
     """
     du_dt: Field
     dv_dt: Field
@@ -62,6 +67,8 @@ class OceanTendencies(NamedTuple):
     deta_dt: Field
     dH_bathy_dt: Field
     dland_mask_dt: Field
+    K_v: object = None   # tracer diffusivity at interfaces [m²/s]
+    A_v: object = None   # momentum viscosity at interfaces [m²/s]
 
 
 class OceanSurfaceForcing(NamedTuple):
@@ -375,8 +382,11 @@ class LatLonCGridOceanDiagnostics(NamedTuple):
 
 
 class LatLonCGridOceanTendencies(NamedTuple):
-    """Tendencies for the lat-lon C-grid ocean primitive equations."""
+    """Tendencies for the lat-lon C-grid ocean primitive equations.
 
+    K_v / A_v are optional interface-level diffusivity / viscosity
+    profiles populated when ``implicit_vertical_mixing`` is enabled.
+    """
     du_dt: Field
     dv_dt: Field
     dT_dt: Field
@@ -384,6 +394,8 @@ class LatLonCGridOceanTendencies(NamedTuple):
     deta_dt: Field
     dH_bathy_dt: Field
     dland_mask_dt: Field
+    K_v: object = None
+    A_v: object = None
 
 
 class MomentumTendencyDiagnostics(NamedTuple):
@@ -621,3 +633,20 @@ class LatLonCGridOceanConfig(NamedTuple):
     #   nonlinear limiters (TVD, WENO, FCT).
     tracer_time_integrator: str = "euler"
     ab2_epsilon: float = 0.1  # AB2 stabilization (MITgcm ABepsBar)
+    # Implicit (backward-Euler) vertical mixing.  When True:
+    #   1. The PE tendency function skips the explicit ``A_v`` viscous
+    #      block (lines tagged ``if config.A_v > 0 ...``).
+    #   2. The vertical-mixing and ``enhanced_diffusion`` convection
+    #      schemes are called with ``apply_diffusion=False`` — they
+    #      return zero local-diffusion tendency but still produce the
+    #      K_v / A_v profile and (for KPP) the non-local counter-
+    #      gradient flux.
+    #   3. After the barotropic step, tracer advection, and GM/Redi,
+    #      the model step applies an unconditionally-stable backward-
+    #      Euler tridiagonal solve to ``T, S, u, v`` using the summed
+    #      K_v / A_v profiles.
+    # Removes the explicit-diffusion CFL limit ``dt < dz² / (2 K)``,
+    # which becomes binding when ``K_conv = 1 m²/s`` is active with
+    # surface dz < 30 m or when vertical resolution is increased.
+    # MOM6 / NEMO / POP / MITgcm all use this approach.
+    implicit_vertical_mixing: bool = False

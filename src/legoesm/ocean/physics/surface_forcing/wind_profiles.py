@@ -171,4 +171,21 @@ def compute_wind_stress(
         tau_x = jnp.full_like(lat, cfg.tau_x)
         tau_y = jnp.full_like(lat, cfg.tau_y)
 
+    # Tropical wind reduction: scale wind stress near the equator.
+    # Blends from tropical_wind_scale at lat=0 to 1.0 outside the band
+    # using a Gaussian taper for smooth transition.
+    _tw_scale = getattr(cfg, "tropical_wind_scale", 1.0)
+    if _tw_scale != 1.0:
+        _tw_sigma = jnp.radians(
+            getattr(cfg, "tropical_wind_lat_deg", 15.0)
+        )
+        # Gaussian: 1 at equator → 0 at ±sigma.
+        # scale_factor = 1 + (tropical_wind_scale - 1) * exp(-lat²/sigma²)
+        # At lat=0: scale_factor = tropical_wind_scale
+        # At |lat|>>sigma: scale_factor = 1.0 (unchanged)
+        _gauss = jnp.exp(-0.5 * (lat / _tw_sigma) ** 2)
+        _scale = 1.0 + (_tw_scale - 1.0) * _gauss
+        tau_x = tau_x * _scale
+        tau_y = tau_y * _scale
+
     return tau_x, tau_y

@@ -165,6 +165,7 @@ def kpp_vertical_mixing(
     Q_sfc_T: jnp.ndarray | None = None,
     Q_sfc_S: jnp.ndarray | None = None,
     h_bl_prev: jnp.ndarray | None = None,
+    apply_diffusion: bool = True,
 ) -> VerticalMixingOutput:
     """Apply LMD94-style KPP vertical mixing.
 
@@ -338,17 +339,28 @@ def kpp_vertical_mixing(
     A_v = jnp.minimum(A_v, cfg.K_max)
 
     # --- Apply diffusion ---
-    vel = jnp.stack([u, v], axis=0)
-    vel_tend = jax.vmap(
-        lambda q: vertical_diffusion_variable_K(q, z_coord, jacobian, A_v),
-        in_axes=0, out_axes=0,
-    )(vel)
+    # When ``apply_diffusion`` is False, the local diffusion tendency is
+    # zeroed; the caller is expected to apply the K_v/A_v profiles via an
+    # implicit (backward-Euler) solver after the explicit step.  The
+    # non-local KPP transport (counter-gradient flux) below is *not* a
+    # diffusion and is always returned in dT/dS.
+    if apply_diffusion:
+        vel = jnp.stack([u, v], axis=0)
+        vel_tend = jax.vmap(
+            lambda q: vertical_diffusion_variable_K(q, z_coord, jacobian, A_v),
+            in_axes=0, out_axes=0,
+        )(vel)
 
-    tracers = jnp.stack([T, S], axis=0)
-    tr_tend = jax.vmap(
-        lambda q: vertical_diffusion_variable_K(q, z_coord, jacobian, K_v),
-        in_axes=0, out_axes=0,
-    )(tracers)
+        tracers = jnp.stack([T, S], axis=0)
+        tr_tend = jax.vmap(
+            lambda q: vertical_diffusion_variable_K(q, z_coord, jacobian, K_v),
+            in_axes=0, out_axes=0,
+        )(tracers)
+    else:
+        zero_uv = jnp.zeros_like(u)
+        vel_tend = jnp.stack([zero_uv, zero_uv], axis=0)
+        zero_T = jnp.zeros_like(T)
+        tr_tend = jnp.stack([zero_T, zero_T], axis=0)
 
     # --- Non-local flux for T, S (LMD94 Eq. 19) ---
     #
