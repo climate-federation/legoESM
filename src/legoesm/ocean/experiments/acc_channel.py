@@ -43,6 +43,7 @@ import jax.numpy as jnp
 import numpy as np
 from dataclasses import dataclass
 
+from legoesm import constants
 from legoesm.core.field import Field
 
 
@@ -72,7 +73,7 @@ class ACCChannelConfig:
 
     # Linear EOS
     alpha_T: float = 2.0e-4
-    rho_0: float = 1025.0        # = eos.rho_0
+    rho_0: float = constants.rho_ocean
     T_ref: float = 4.0              # reference T for EOS
 
     # Wind forcing

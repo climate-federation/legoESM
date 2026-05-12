@@ -14,6 +14,8 @@ from typing import NamedTuple
 import jax.numpy as jnp
 import numpy as np
 
+from legoesm import constants
+
 
 class AMIPExperimentConfig(NamedTuple):
     """Complete AMIP experiment configuration.
@@ -111,7 +113,7 @@ class AMIPExperimentConfig(NamedTuple):
     # SST floor / SIC ramp threshold — NOT the ice surface
     # temperature.  Legacy name preserved for AMIP config
     # compatibility.
-    T_ice: float = 271.35           # = constants.T_freeze_ocean
+    T_ice: float = constants.T_freeze_ocean
     albedo_ice: float = 0.65
     albedo_ocean: float = 0.06
 

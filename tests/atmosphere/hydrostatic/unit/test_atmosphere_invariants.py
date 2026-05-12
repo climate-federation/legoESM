@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
     CDGridPrimitiveEquationConfig as PrimitiveEquationConfig,
     cdgrid_hydrostatic_tendencies as hydrostatic_tendencies,
@@ -137,7 +138,7 @@ class TestSolidBodyRotationBehavior:
             u_cell = 0.5 * (u_c[:, :-1] + u_c[:, 1:])
             v_cell = 0.5 * (v_c[:, :, :-1] + v_c[:, :, 1:])
             ke = 0.5 * (u_cell**2 + v_cell**2)
-            g = 9.80616
+            g = constants.g
             pe = 0.5 * g * (s.h + s.h_s)**2
             return float(jnp.sum((ke * s.h + pe) * area))
 

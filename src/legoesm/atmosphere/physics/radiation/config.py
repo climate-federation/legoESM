@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
+from legoesm import constants
+
 
 class GrayRadiationConfig(NamedTuple):
     """Configuration for two-stream gray radiation.
@@ -68,7 +70,7 @@ class GrayRadiationConfig(NamedTuple):
     sfc_emissivity: float = 1.0
     sw_tau_0: float = 0.22
     sw_exponent: float = 2.0
-    S_0: float = 1361.0  # = constants.S_0
+    S_0: float = constants.S_0
     sfc_albedo: float = 0.31
     perpetual_equinox: bool = True
     obliquity: float = 23.45
@@ -127,7 +129,7 @@ class RRTMGPConfig(NamedTuple):
     n2o_ppbv: float = 332.0
     sfc_emissivity: float = 0.98
     sfc_albedo: float = 0.06
-    S_0: float = 1361.0  # = constants.S_0
+    S_0: float = constants.S_0
     aerosol_ssa: float = 0.93
     aerosol_g: float = 0.70
     use_scan: bool = False
@@ -152,6 +154,10 @@ class OzoneProfileConfig(NamedTuple):
           configurable parameters.  Peak scaled by
           ``1 + 0.5 * sin²(lat)`` when ``lat_dependence`` is True.
         - ``"none"``: zero ozone (disables ozone absorption entirely).
+        - ``"ml"``: machine-learning ridge regression predictor of Ma et al.
+          (UKESM-trained, per-gridpoint T -> O3 column).  Requires
+          ``ml_weights_path`` to point at a directory of NetCDF weights;
+          see :mod:`legoesm.atmosphere.physics.radiation.ozone_ml`.
     p_peak_hPa : float
         Peak pressure [hPa] for the analytical profile (default 30.0).
     o3_max_vmr : float
@@ -161,12 +167,22 @@ class OzoneProfileConfig(NamedTuple):
     lat_dependence : bool
         If True, scale analytical ozone by ``1 + 0.5 * sin²(lat)``
         (default True).  Only used when ``source="analytical"``.
+    ml_weights_path : str or None
+        Directory of NetCDF coefficient files for ``source="ml"``.  Must
+        contain ``coefs*.nc``, ``Scaler_x*.nc``, ``Scaler_y*.nc`` and a
+        pressure-coordinate sidecar (``plev.npy`` / ``plev.nc``).
+    ml_mmr_to_vmr : bool
+        If True, multiply ridge output by ``M_dry / M_o3`` to convert mass
+        mixing ratio to volume mixing ratio.  Set False if upstream
+        weights are already in VMR.  Default True.
     """
     source: str = "standard"
     p_peak_hPa: float = 30.0
     o3_max_vmr: float = 8.0e-6
     sigma_logp: float = 1.5
     lat_dependence: bool = True
+    ml_weights_path: str | None = None
+    ml_mmr_to_vmr: bool = True
 
 
 class RadiationConfig(NamedTuple):

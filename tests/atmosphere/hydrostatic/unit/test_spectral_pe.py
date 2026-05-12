@@ -129,7 +129,7 @@ class TestSH3DTransforms:
     def test_solid_body_rotation_3d(self, grid):
         """Solid-body rotation: vor=2*Omega*sin(lat), div=0 -> u*cos=Omega*a*cos^2."""
         nlev = 3
-        Omega = 7.292e-5
+        Omega = constants.Omega
         a = grid.radius
 
         # For solid-body rotation u = Omega*a*cos(lat), v = 0,
@@ -460,7 +460,7 @@ class TestGeopotentialGaussian:
         p_s = jnp.full((n_lat, n_lon), 1e5, dtype=jnp.float64)
 
         phis_flat = jnp.zeros((n_lat, n_lon), dtype=jnp.float64)
-        phis_mountain = jnp.full((n_lat, n_lon), 9.81 * 2000.0, dtype=jnp.float64)
+        phis_mountain = jnp.full((n_lat, n_lon), constants.g * 2000.0, dtype=jnp.float64)
 
         Phi_flat = _compute_geopotential_gaussian(T, p_s, sigma_coord, phis_flat)
         Phi_mountain = _compute_geopotential_gaussian(T, p_s, sigma_coord, phis_mountain)

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
+from legoesm import constants
+
 
 class ConstantVerticalMixingConfig(NamedTuple):
     """Constant-coefficient vertical mixing."""
@@ -36,7 +38,7 @@ class KPPConfig(NamedTuple):
     """
     Ri_crit: float = 0.3    # Critical bulk Richardson number (Large, McWilliams & Doney 1994; matches NCAR POP2 / MOM6 default)
     Cv: float = 1.6          # Unresolved shear coefficient
-    kappa_vk: float = 0.4    # von Karman constant
+    kappa_vk: float = constants.kappa_vk
     K_max: float = 1.0       # Maximum diffusivity [m^2/s]
     K_bg: float = 1e-5       # Background diffusivity [m^2/s]
     A_bg: float = 1e-4       # Background viscosity [m^2/s]

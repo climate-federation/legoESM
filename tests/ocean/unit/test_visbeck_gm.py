@@ -13,6 +13,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from legoesm import constants
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.ocean.vertical import create_ocean_z_star
 from legoesm.ocean.physics.lateral_mixing.config import (
@@ -53,7 +54,7 @@ def _stratified_fields(n=4, nlev=10, slope=1e-4):
     grid, z_coord, jacobian, shape = _make_setup(n=n, nlev=nlev)
     # Vertical profile: 1025 at surface -> 1027 at bottom, so rho[0] < rho[-1]
     # giving N² > 0.  compute_buoyancy_frequency uses +(g/ρ₀)·|drho/dz|.
-    rho_z = jnp.linspace(1025.0, 1027.0, nlev)
+    rho_z = jnp.linspace(constants.rho_ocean, 1027.0, nlev)
     # Add a meridional gradient proportional to latitude index.  At slope
     # = 1e-4 and dρ/dz ≈ 2/H, horizontal gradient ≈ slope × dρ/dz.
     dz_full = z_coord.dz_ref
@@ -145,7 +146,7 @@ class TestVisbeckCoefficient:
         """Flat isopycnals ⇒ N·|S| ≈ 0 ⇒ κ collapses to ``kappa_min``."""
         grid, z_coord, jacobian, shape = _make_setup()
         rho = jnp.broadcast_to(
-            jnp.linspace(1025.0, 1027.0, shape[-1])[None, None, None, :],
+            jnp.linspace(constants.rho_ocean, 1027.0, shape[-1])[None, None, None, :],
             shape,
         )
         # Zero slopes by construction
@@ -212,7 +213,7 @@ class TestVisbeckCoefficient:
         # Density profile: Δρ = 2 kg/m³ over 1000 m → N² ≈ 1.9e-5,
         # giving N ≈ 4.4e-3 s⁻¹ for ρ₀ = 1025.
         rho = jnp.broadcast_to(
-            jnp.linspace(1025.0, 1027.0, shape[-1])[None, None, None, :],
+            jnp.linspace(constants.rho_ocean, 1027.0, shape[-1])[None, None, None, :],
             shape,
         )
         S_mag = 1.0e-3   # 1 m per 1000 m — Southern Ocean frontal scale
@@ -248,7 +249,7 @@ class TestVisbeckCoefficient:
         z_centers = jnp.cumsum(z_coord.dz_ref) - 0.5 * z_coord.dz_ref
         H_max = float(jnp.sum(z_coord.dz_ref))
         z0 = 100.0
-        rho_prof = 1025.0 + 2.0 * (1.0 - jnp.exp(-z_centers / z0))
+        rho_prof = constants.rho_ocean + 2.0 * (1.0 - jnp.exp(-z_centers / z0))
         rho = jnp.broadcast_to(rho_prof[None, None, None, :], shape)
 
         S_x = jnp.full(shape[:-1] + (nlev - 1,), 1.0e-3)
@@ -263,10 +264,9 @@ class TestVisbeckCoefficient:
         # Sanity: value is finite and far below what the RMS-bias form
         # would give.  A local check against a manual ⟨N⟩ average:
         from legoesm.ocean.eos import compute_buoyancy_frequency
-        from legoesm import constants
 
         N2 = compute_buoyancy_frequency(
-            rho, z_coord.dz_ref, jacobian, rho_ref=1025.0, g=constants.g)
+            rho, z_coord.dz_ref, jacobian, rho_ref=constants.rho_ocean, g=constants.g)
         N = jnp.sqrt(jnp.maximum(N2, 0.0))
         dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
         dz_half = 0.5 * (dz_actual[..., :-1] + dz_actual[..., 1:])

@@ -78,6 +78,42 @@ def test_damp_v_post_acoustic_dynamic_exner(nh_source):
     )
 
 
+def test_aggregate_cap_uses_dyn_exner(nh_source):
+    """iter-397: aggregate delt_max cap respects dyn_exner flag."""
+    pat = (
+        r"if\s+config\.use_fv3_dynamic_exner\s*:[\s\S]{0,200}?"
+        r"_sf_b\s*=\s*_sponge_factor[\s\S]{0,200}?"
+        r"_exner_eff_b"
+    )
+    assert re.search(pat, nh_source), (
+        "iter-397 aggregate-cap dyn_exner wiring missing."
+    )
+
+
+def test_damp_v_cap_uses_dyn_exner(nh_source):
+    """iter-398: damp_v post-acoustic cap respects dyn_exner."""
+    pat = (
+        r"if\s+self\.config\.use_fv3_dynamic_exner\s*:[\s\S]{0,200}?"
+        r"delt_theta_b\s*=[\s\S]{0,200}?_exner_eff_dv"
+    )
+    assert re.search(pat, nh_source), (
+        "iter-398 damp_v post-acoustic cap dyn_exner wiring "
+        "missing."
+    )
+
+
+def test_damp_w_cap_uses_dyn_exner(nh_source):
+    """iter-398: damp_w post-acoustic cap respects dyn_exner."""
+    pat = (
+        r"if\s+self\.config\.use_fv3_dynamic_exner\s*:[\s\S]{0,200}?"
+        r"delt_theta_b\s*=[\s\S]{0,200}?_exner_eff_dw"
+    )
+    assert re.search(pat, nh_source), (
+        "iter-398 damp_w post-acoustic cap dyn_exner wiring "
+        "missing."
+    )
+
+
 def test_damp_w_post_acoustic_dynamic_exner(nh_source):
     """damp_w_d_con post-step site has the iter-337 dynamic Exner
     gate."""

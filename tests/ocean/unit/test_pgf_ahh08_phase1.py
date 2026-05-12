@@ -33,6 +33,7 @@ jax.config.update("jax_enable_x64", True)
 from legoesm.core.precision import PrecisionPolicy, set_policy
 set_policy(PrecisionPolicy(storage=jnp.float64, compute=jnp.float64))
 
+from legoesm import constants
 from legoesm.ocean.dynamics.pgf_ahh08 import (
     column_pressure_integrals_ahh08,
     integral_p_dz_cell,
@@ -57,10 +58,10 @@ def test_newton_satisfies_implicit_relation():
     al0, p0, lam = wright_eos_coefficients(T, S)
     u_top = p_top + p0
 
-    u_bot = solve_u_bottom(T, S, u_top, h, g=9.80616)
+    u_bot = solve_u_bottom(T, S, u_top, h, g=constants.g)
 
     # Plug back into [1]: λ·ln(u_b/u_t) + α₀·(u_b−u_t) − g·dz = 0
-    F = lam * jnp.log(u_bot / u_top) + al0 * (u_bot - u_top) - 9.80616 * h
+    F = lam * jnp.log(u_bot / u_top) + al0 * (u_bot - u_top) - constants.g * h
     assert float(jnp.abs(F)) < 1e-6, (
         f"Newton residual {float(F):.3e} too large; expected < 1e-6"
     )
@@ -71,7 +72,7 @@ def test_pressure_at_bottom_matches_eos_iteration():
     T, S, h, p_top = _typical_cell()
     al0, p0, lam = wright_eos_coefficients(T, S)
     u_top = p_top + p0
-    u_bot = solve_u_bottom(T, S, u_top, h, g=9.80616)
+    u_bot = solve_u_bottom(T, S, u_top, h, g=constants.g)
     p_bot_ahh08 = u_bot - p0
 
     # Manual reference: average ρ along the column, hydrostatic step
@@ -80,7 +81,7 @@ def test_pressure_at_bottom_matches_eos_iteration():
     for _ in range(20):
         p_mid = 0.5 * (p_top + p)
         rho_mid = wright_eos(T, S, p_mid)
-        p_new = p_top + rho_mid * 9.80616 * h
+        p_new = p_top + rho_mid * constants.g * h
         if float(jnp.abs(p_new - p)) < 1e-6:
             break
         p = p_new
@@ -98,9 +99,9 @@ def test_integral_p_dz_matches_quadrature():
     T, S, h, p_top = _typical_cell()
     al0, p0, lam = wright_eos_coefficients(T, S)
     u_top = p_top + p0
-    u_bot = solve_u_bottom(T, S, u_top, h, g=9.80616)
+    u_bot = solve_u_bottom(T, S, u_top, h, g=constants.g)
 
-    F_analytic = float(integral_p_dz_cell(T, S, u_top, u_bot, g=9.80616))
+    F_analytic = float(integral_p_dz_cell(T, S, u_top, u_bot, g=constants.g))
 
     # Reference: numerically integrate p(z) over [0, h] using 64-point
     # Gauss-Legendre.  At each quadrature node z_q, solve for u(z_q)
@@ -112,7 +113,7 @@ def test_integral_p_dz_matches_quadrature():
     w_q = 0.5 * float(h) * weights
     p_at = np.zeros(n_q)
     for i, z in enumerate(z_q):
-        u_q = solve_u_bottom(T, S, u_top, jnp.array(z), g=9.80616)
+        u_q = solve_u_bottom(T, S, u_top, jnp.array(z), g=constants.g)
         p_at[i] = float(u_q) - float(p0)
     F_quad = float(np.sum(p_at * w_q))
 
@@ -129,8 +130,8 @@ def test_zero_thickness_cell_is_noop():
     al0, p0, lam = wright_eos_coefficients(T, S)
     u_top = p_top + p0
 
-    u_bot = solve_u_bottom(T, S, u_top, jnp.array(0.0), g=9.80616)
-    F = integral_p_dz_cell(T, S, u_top, u_bot, g=9.80616)
+    u_bot = solve_u_bottom(T, S, u_top, jnp.array(0.0), g=constants.g)
+    F = integral_p_dz_cell(T, S, u_top, u_bot, g=constants.g)
 
     assert float(jnp.abs(u_bot - u_top)) < 1e-9
     assert float(jnp.abs(F)) < 1e-9
@@ -148,7 +149,7 @@ def test_column_walk_uniform_T_S_gives_uniform_columns():
     S_3d = jnp.broadcast_to(S_prof[None, :], (nCells, nlev))
     h_3d = jnp.broadcast_to(h_prof[None, :], (nCells, nlev))
 
-    _u_t, _u_b, F = column_pressure_integrals_ahh08(T_3d, S_3d, h_3d, g=9.80616)
+    _u_t, _u_b, F = column_pressure_integrals_ahh08(T_3d, S_3d, h_3d, g=constants.g)
 
     F_ref = F[0]  # reference column
     for i in range(1, nCells):
@@ -170,7 +171,7 @@ def test_column_walk_partial_cell_below_seafloor_zeros_cleanly():
     h = jnp.array([100.0, 100.0, 100.0, 0.0, 0.0])
 
     _u_t, u_b, F = column_pressure_integrals_ahh08(
-        T[None, :], S[None, :], h[None, :], g=9.80616,
+        T[None, :], S[None, :], h[None, :], g=constants.g,
     )
     F = F[0]
     u_b = u_b[0]
@@ -194,7 +195,7 @@ def test_grad_flows_through_column_walk():
 
     def loss(T_in):
         _u_t, _u_b, F = column_pressure_integrals_ahh08(
-            T_in[None, :], S[None, :], h[None, :], g=9.80616,
+            T_in[None, :], S[None, :], h[None, :], g=constants.g,
         )
         return jnp.sum(F)
 

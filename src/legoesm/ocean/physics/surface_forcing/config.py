@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
+from legoesm import constants
+
 
 class PrescribedForcingConfig(NamedTuple):
     """Fixed wind stress and heat/freshwater fluxes."""
@@ -33,9 +35,9 @@ class BulkFormulaConfig(NamedTuple):
     C_D: float = 1.5e-3     # Drag coefficient (constant scheme)
     C_H: float = 1.5e-3     # Sensible heat transfer coefficient (constant)
     C_E: float = 1.5e-3     # Latent heat transfer coefficient (constant)
-    rho_a: float = 1.225    # Air density [kg/m^3] (= constants.rho_air)
-    c_pa: float = 1004.64   # Specific heat of air [J/(kg·K)] (= constants.c_pd)
-    L_v: float = 2.501e6    # Latent heat of vaporization [J/kg] (= constants.L_v)
+    rho_a: float = constants.rho_air
+    c_pa: float = constants.c_pd
+    L_v: float = constants.L_v
     T_a: float = 280.0      # Air temperature [K]
     U_a: float = 5.0        # Wind speed [m/s]
     q_a: float = 0.005      # Air specific humidity [kg/kg]

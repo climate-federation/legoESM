@@ -12,6 +12,8 @@ import unittest
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
+
 jax.config.update("jax_enable_x64", True)
 
 
@@ -369,7 +371,7 @@ class TestCDGridOperators(unittest.TestCase):
 
         n = self.n
         cdgrid = self.cdgrid
-        Omega = 7.292e-5
+        Omega = constants.Omega
         R = cdgrid.radius
 
         # Solid-body rotation: u_east = Omega*R*cos(lat), v_north = 0

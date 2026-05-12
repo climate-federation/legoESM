@@ -1528,7 +1528,6 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             # -sum(h_u, axis=-1)`` (face's wet depth = sum of per-level
             # face thickness, partial-aware via min h).
             def _bbl_drag_for_face(u_field, h_face, r_eff):
-                pad_axes = ((0, 0),) * (h_face.ndim - 1)
                 z_half = jnp.concatenate([
                     jnp.zeros(h_face.shape[:-1] + (1,), dtype=h_face.dtype),
                     -jnp.cumsum(h_face, axis=-1),

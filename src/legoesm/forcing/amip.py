@@ -75,7 +75,7 @@ class AMIPForcingConfig(NamedTuple):
     # The legacy name is preserved for AMIP config compatibility, but
     # the value tracks ``constants.T_freeze_ocean`` (CLAUDE.md naming
     # discipline gap; renaming is tracked tech debt).
-    T_ice: float = 271.35           # = constants.T_freeze_ocean
+    T_ice: float = constants.T_freeze_ocean
     albedo_ice: float = 0.65
     albedo_ocean: float = 0.06
 

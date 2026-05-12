@@ -16,6 +16,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
+from legoesm import constants
 from legoesm.core.field import Field
 
 # ---------------------------------------------------------------------------
@@ -108,7 +109,7 @@ class TestSpectralShallowWater:
 
         # Build a spectral state: phi_hat = g * mean_depth (constant field)
         n_sh = grid.n_sh
-        g = 9.80616
+        g = constants.g
         H0 = 5960.0
         phi_hat = jnp.zeros(n_sh, dtype=jnp.complex128)
         phi_hat = phi_hat.at[0].set(g * H0 * jnp.sqrt(4 * jnp.pi))  # n=0,m=0
