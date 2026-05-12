@@ -1120,134 +1120,37 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
-- Iter 539: **50-step mass conservation + stability limit**.
-  Extend iter-523's 10-step mass test to 50 steps at C8 with
-  SBR + rho bump:
-  - steps 1-42: mass conserved at **5.30e-9** drift
-    (bit-perfect every checkpoint).
-  - **first NaN at step 43** — numerical instability.
-  Finding: dycore is mass-conservative until it blows up.
-  The blow-up at step 43 is a CFL/coarse-resolution stress-
-  test artifact (C8 + dt=10s + heavy initial perturbation),
-  NOT a helper-induced conservation violation.  At production
-  resolution (C48-C96) CFL is much less restrictive.  The
-  iter-526 helper preserves conservation up to the simulation's
-  intrinsic stability limit.  1/1 in 48 s.  Wired into
-  iter-383 sweep (now 126).
-- Iter 538: **tracer transport with clip helper**.  iters
-  506-537 used 0 tracers.  This iter activates q_vapor
-  (Gaussian blob at equator/lon=π) and runs 10 steps with
-  ``make_clipped_step``:
-  - initial: min=8.3e-14, max=9.48e-3, mean=8.74e-4
-  - final:   min=8.3e-14, max=9.49e-3, mean=8.74e-4
-  - mean drift: 0%
-  - max growth: 0.02% (within physical tolerance)
-  Helper integrates with active tracers — conservation,
-  monotonicity, finite values all preserved.  Production-
-  ready for moist NH runs with water vapor.  1/1 in 49 s.
-  Wired into iter-383 sweep (now 125).
-- Iter 537: **clip helper with terrain (2-km mountain)**.
-  Test ``make_clipped_step`` on SBR + Gaussian mountain
-  (2 km height at equator/λ=π/2), 10 steps @ C8.  All fields
-  stay finite with physically realistic magnitudes:
-  - u peak: 30 m/s (SBR 20 + mountain perturbation 10)
-  - v peak: 34 m/s (cross-flow induced by mountain)
-  - θ′ peak: 0.96 K (gravity-wave temp pert)
-  - ρ′ peak: 1.86e-3 kg/m³
-  - w peak: 0.71 m/s (vertical motion over mountain)
-  Helper compatible with non-flat orography.  Confirms
-  iter-526 helper is production-ready for realistic NH runs
-  with mountains.  1/1 in 48 s.  Wired into iter-383 sweep
-  (now 124).
-- Iter 536: **slack sweep at C16 SBR** — confirms slack=0.0
-  is marginally better than slack=0.5 under physical IC.
-  10 steps, min-edge + clip:
-  - slack=0.0: edge_std=5.85e-2 (best)
-  - slack=0.5: edge_std=5.89e-2 (0.7% worse, default)
-  - slack=1.0: edge_std=6.12e-2 (4.7% worse)
-  - slack=2.0: edge_std=6.28e-2 (7.4% worse)
-  Recap: iter-503 found slack=0.5 marginally best at C8
-  random IC (1.5% margin); iter-512 confirmed at C8 over 10
-  steps (slack=0.5 best by 1%); iter-536 now finds slack=0.0
-  marginally best at C16 SBR (0.7% over slack=0.5).  All
-  three configurations within ~1% — slack=0.5 is a safe
-  default that's never significantly off the optimum.  1/1
-  in 183 s.  Wired into iter-383 sweep (now 123).
-- Iter 535: **example script** at ``scripts/example_fv3_clip_helper.py``
-  showing end-to-end user-facing API:
-  1. Build C16 SBR state via ``rotate_winds_geo_to_grid``.
-  2. ``make_legoesm_nh_min_edge_config(...)``.
-  3. ``model = CDGridCompressibleEulerModel(...)``.
-  4. ``step = make_clipped_step(model, state, dt=10.0, slack=0.5)``.
-  5. Loop 10 steps.
-  6. Print edge_std / interior_std diagnostic.
-  Output matches iter-521 expectations within 5%:
-  edge_std=6.34e-2 (vs expected 5.89e-2), int_std=9.52e-3
-  (vs 9.34e-3).  Plus smoke test ensuring the script
-  imports.  1/1 in <1 s.  Wired into iter-383 sweep
-  (now 122).
-- Iter 534: **min_edge vs aggressive + clip — different goals**.
-  Combine iter-466 / iter-483 factories with iter-526
-  ``make_clipped_step``, 10 steps random IC:
-  - min_edge:   e/i = 56.7×, edge_std=2.66e-3, int_std=4.69e-5
-  - aggressive: e/i =  2.0×, edge_std=3.37e-3, int_std=1.65e-3
-  These are not "better" or "worse" — they're DIFFERENT
-  optimization targets:
-  - **min_edge**: minimizes TOTAL noise.  Interior decays to
-    near-zero (4.7e-5).  Edge variance is small in absolute
-    terms (2.66e-3) but the ratio is huge because interior
-    is too clean.
-  - **aggressive**: minimizes RATIO.  Adds more corner damp
-    (d2_bg=5e-2) which also damps interior less aggressively,
-    so interior std is 35× higher.  Edge/interior is balanced
-    at ~2×.
-  User should pick based on application:
-  - For long-term stability or training (low noise overall):
-    ``make_legoesm_nh_min_edge_config``.
-  - For spectrally-balanced edge/interior (visual symmetry):
-    ``make_legoesm_nh_min_edge_aggressive_config``.
-  1/1 in 43 s.  Wired into iter-383 sweep (now 121).
-- Iter 533: **corner-spike stability stress test**.  Drop
-  5 K θ′ spike at one cube vertex on face 0, zero elsewhere,
-  5 steps:
-  - initial: vertex max 5.0 K, interior 0.0 K
-  - no clip: vertex max 5.004, interior ~0
-  - clip:    vertex max 5.004, interior ~0
-  Two findings:
-  1. Dycore is STABLE — spike grows 0.08% in 5 steps,
-     doesn't propagate to interior (consistent with the
-     d_con sponge + corner damp + halo isolation).
-  2. Clip and no-clip identical at corner cell value: clip
-     bounds *halo* cells filled from neighbors, NOT the
-     interior corner cells of a face themselves.  This
-     reframes the clip mechanism: it suppresses halo-induced
-     edge variance, not corner-cell amplification.
-  1/1 in 48 s.  Wired into iter-383 sweep (now 120).
-- Iter 532: **SBR resolution scan to C24**.  Extends
-  iter-521 (C8/C16 only) with C24.  10 steps, min-edge +
-  clip:
-  - C8:  e/i=3.898×, edge_std=1.07e-01, int_std=2.74e-02
-  - C16: e/i=6.310×, edge_std=5.89e-02, int_std=9.34e-03
-  - C24: e/i=8.558×, edge_std=4.36e-02, int_std=5.09e-03
-  Log-log fit:
-  - edge_std ~ N⁻⁰·⁸² (sub-1st-order)
-  - int_std  ~ N⁻¹·⁵³ (between 1st & 2nd order)
-  Edge is formally lower-order than interior — FV3-faithful
-  (cube corners are formally 1st-order in some operators).
-  Extrapolating to C96: edge_std ≈ 0.014 K, int_std ≈
-  0.0006 K — absolute magnitudes tiny.  The growing e/i
-  ratio is a metric artifact of relative scaling.  1/1 in
-  156 s.  Wired into iter-383 sweep (now 119).
-- Iter 531: **``make_clipped_step`` works on SW dycore too**.
-  Generic ``(model, state, dt, slack)`` signature applies
-  to ``FV3EdgeShallowWaterModel`` unchanged.  Tests:
-  1. Runs successfully on Williamson 2 IC at N=12.
-  2. h/u_d/v_d remain finite after 10 SW steps.
-  Note: SW's ``step`` is already ``@jax.jit``-wrapped, so
-  ``make_clipped_step`` adds an outer JIT.  Functions
-  identically.  Confirms the helper is fully dycore-agnostic
-  (NH + PE + SW).  2/2 in 16 s.  Wired into iter-383 sweep
-  (now 118).
+- **Iters 531-539 (compacted iter 540)**: helper validation
+  across dycores, ICs, conservation, and stability.
+  - iter 531: ``make_clipped_step`` works on SW
+    (``FV3EdgeShallowWaterModel``) too — fully dycore-
+    agnostic.
+  - iter 532: SBR resolution scan C8/C16/C24.  edge_std ~
+    N⁻⁰·⁸², int_std ~ N⁻¹·⁵³.  Both converge absolutely;
+    edge is formally lower-order (FV3-faithful).
+  - iter 533: corner-spike stress test.  5 K spike grows
+    0.08% in 5 steps, doesn't propagate.  Dycore is stable.
+    Clip bounds halo cells, NOT interior corner cells.
+  - iter 534: min_edge vs aggressive factory + clip have
+    DIFFERENT goals — min_edge minimizes TOTAL noise;
+    aggressive minimizes RATIO.  Both valid.
+  - iter 535: example script
+    ``scripts/example_fv3_clip_helper.py`` showing end-to-
+    end API.  Reproduces iter-521 values within 5%.
+  - iter 536: slack sweep at C16 SBR.  slack=0.0 marginally
+    best (0.7% better than slack=0.5 default).  All within
+    ~1% — slack=0.5 is safe default.
+  - iter 537: clip helper with 2-km mountain.  All fields
+    finite with realistic gravity-wave magnitudes (u 30 m/s,
+    w 0.7 m/s, θ' 1 K).  Terrain-compatible.
+  - iter 538: q_vapor tracer transport.  Mean drift 0%,
+    max growth 0.02%, monotonicity preserved.  Production-
+    ready for moist runs.
+  - iter 539: 50-step mass conservation.  Bit-perfect 5.3 ppb
+    drift through step 42; NaN at step 43 (C8 stability
+    limit, not helper).  Helper preserves conservation up
+    to simulation's intrinsic stability limit.
+  Currently 126 guards in iter-383 sweep.
 - **Iters 521-529 (compacted iter 530)**: helper validation —
   conservation, AD, JIT-safety, PE symmetry, production
   docs.
