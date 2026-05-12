@@ -1195,6 +1195,33 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 665: **FV3 ``super_k_u_fv3``** — super-cell wind shear profile.
+  Faithful JAX port of FV3 ``SuperK_u`` (tools/test_cases.F90:
+  6049-6082, MPAS branch without TEST_TANHP).
+
+  Piecewise wind profile:
+
+      if z > zs + 1km:    um = us;             dudz = 0
+      elif |z-zs| ≤ 1km:  um = us·(-4/5 + 3z/zs - 5/4·(z/zs)²)
+                          dudz = us/zs · (3 - 5/2·z/zs)
+      else (z < zs-1km):  um = us·z/zs;        dudz = us/zs
+      um -= uc                                  (storm offset)
+
+  Default constants: zs=5 km (shear scale), us=30 m/s (peak
+  shear), uc=15 m/s (offset for near-stationary storm).  Profile
+  is continuous at z = zs ± 1 km boundaries.
+
+  Used for FV3 super-cell idealized test cases.
+
+  Tests (6/6 in 1 s):
+  1. Output shapes match input.
+  2. Upper region (z > zs+1km): um = us - uc, dudz = 0.
+  3. Lower region: um = us·z/zs - uc, dudz = us/zs.
+  4. Continuous at zs ± 1km boundaries.
+  5. um(z=0) = -uc.
+  6. No NaN/Inf across full z range.
+
+  Wired into iter-383 sweep (now 232).
 - Iter 664: **FV3 ``case9_B`` + ``case9_AofT``** — Williamson test 9.
   Faithful JAX ports of FV3 Williamson test 9 forcing
   (tools/test_cases.F90:4361-4424).

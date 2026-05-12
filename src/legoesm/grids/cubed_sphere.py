@@ -2382,6 +2382,69 @@ def rotate_winds_sphere_cube(
     return new_u, new_v
 
 
+def super_k_u_fv3(
+    zz: jax.Array,
+    zs: float = 5000.0,
+    us: float = 30.0,
+    uc: float = 15.0,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 665: super-cell vertical wind-shear profile (MPAS branch).
+
+    Faithful JAX port of FV3 ``SuperK_u`` (tools/test_cases.F90:
+    6049-6082, MPAS branch without TEST_TANHP).  Piecewise-cubic
+    wind profile for super-cell test cases.
+
+    Algorithm:
+        if z > zs + 1km:           um = us;             dudz = 0
+        elif |z - zs| ≤ 1km:       um = us·(-4/5 + 3z/zs - 5/4·(z/zs)²)
+                                   dudz = us/zs · (3 - 5/2·z/zs)
+        else (z < zs - 1km):       um = us·z/zs;         dudz = us/zs
+        um -= uc                                         (storm offset)
+
+    Default constants: zs=5 km (shear scale), us=30 m/s (peak
+    shear), uc=15 m/s (storm offset for near-stationary storm).
+
+    Used for FV3 super-cell idealized test cases.
+
+    Parameters
+    ----------
+    zz : jax.Array
+        Heights (m).
+    zs : float, default 5000
+        Shear scale height (m).
+    us : float, default 30
+        Peak shear wind (m/s).
+    uc : float, default 15
+        Constant offset wind (m/s).
+
+    Returns
+    -------
+    um : jax.Array
+        Mean wind profile (m/s).
+    dudz : jax.Array
+        Vertical wind shear (s⁻¹).
+    """
+    ratio = zz / zs
+    # Region 1: z > zs + 1km
+    upper = zz > zs + 1.0e3
+    um_upper = jnp.full_like(zz, us)
+    dudz_upper = jnp.zeros_like(zz)
+    # Region 2: |z - zs| ≤ 1km (cubic blend)
+    blend = jnp.abs(zz - zs) <= 1.0e3
+    um_blend = us * (-4.0 / 5.0 + 3.0 * ratio - 5.0 / 4.0 * ratio ** 2)
+    dudz_blend = us / zs * (3.0 - 5.0 / 2.0 * ratio)
+    # Region 3: z < zs - 1km (linear)
+    um_lower = us * ratio
+    dudz_lower = jnp.full_like(zz, us / zs)
+    # Compose: upper takes precedence over blend over lower
+    um = jnp.where(upper, um_upper,
+                   jnp.where(blend, um_blend, um_lower))
+    dudz = jnp.where(upper, dudz_upper,
+                     jnp.where(blend, dudz_blend, dudz_lower))
+    um = um - uc
+    return um, dudz
+
+
 def case9_B(
     lon: jax.Array, lat: jax.Array, gh0: float | None = None,
 ) -> jax.Array:
