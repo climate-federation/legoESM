@@ -302,6 +302,7 @@ _GUARD_MODULES = (
     "test_fv3_pv_entropy_ppme_iter712",              # iter-712 add
     "test_fv3_moist_cv_iter713",                     # iter-713 add
     "test_fv3_moist_cp_iter714",                     # iter-714 add
+    "test_fv3_rh_calc_cmip_iter715",                 # iter-715 add
 )
 
 

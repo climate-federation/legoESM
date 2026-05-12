@@ -2889,16 +2889,27 @@ def rh_calc_fv3(
     p_full: jax.Array,
     t: jax.Array,
     qv: jax.Array,
+    do_cmip: bool = False,
 ) -> jax.Array:
-    """FV3_3D iter 695: relative humidity diagnostic (percent).
+    """FV3_3D iter 695/715: relative humidity diagnostic (percent).
 
     Faithful JAX port of FV3 ``rh_calc``
     (tools/fv_diagnostics.F90:5309-5339).
 
-    RH = 100 · qv / qs(T, p_full)
+        RH = 100 · qv / qs(T, p_full)
 
-    Reuses legoesm ``thermo.saturation_mixing_ratio`` (CLAUDE.md
-    rule: never re-derive Tetens / Magnus / Clausius-Clapeyron).
+    Two saturation-reference options:
+        * ``do_cmip=False`` (iter-695 default): saturation over liquid
+          via ``thermo.saturation_mixing_ratio``.
+        * ``do_cmip=True`` (iter-715, CMIP convention): saturation
+          blended over liquid + ice — pure liquid above T_freeze,
+          pure ice below T_freeze − 20 K, linear blend in between.
+          Matches FV3's ``compute_qs(... es_over_liq_and_ice=.true.)``
+          path.
+
+    Reuses legoesm ``thermo.saturation_mixing_ratio`` and
+    ``saturation_mixing_ratio_ice`` (CLAUDE.md mandate: never
+    re-derive Tetens / Magnus / Clausius-Clapeyron).
 
     Parameters
     ----------
@@ -2908,6 +2919,8 @@ def rh_calc_fv3(
         Air temperature (K).
     qv : jax.Array
         Specific humidity (kg/kg).
+    do_cmip : bool, default False.
+        Use es-over-liq-and-ice blend (CMIP convention).
 
     Returns
     -------
@@ -2915,7 +2928,19 @@ def rh_calc_fv3(
         Relative humidity (percent).
     """
     from legoesm import thermo
-    qs = thermo.saturation_mixing_ratio(t, p_full)
+    if do_cmip:
+        qs_liq = thermo.saturation_mixing_ratio(t, p_full)
+        qs_ice = thermo.saturation_mixing_ratio_ice(t, p_full)
+        # Linear blend: 1.0 at T_freeze, 0.0 at T_freeze - 20 K
+        T_blend_top = constants.T_freeze
+        T_blend_bot = constants.T_freeze - 20.0
+        w_liq = jnp.clip(
+            (t - T_blend_bot) / (T_blend_top - T_blend_bot),
+            0.0, 1.0,
+        )
+        qs = w_liq * qs_liq + (1.0 - w_liq) * qs_ice
+    else:
+        qs = thermo.saturation_mixing_ratio(t, p_full)
     return 100.0 * qv / qs
 
 

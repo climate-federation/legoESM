@@ -1195,6 +1195,36 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 715: **iter-695 ``rh_calc_fv3`` do_cmip upgrade**.
+
+  iter-695 used saturation over liquid only.  iter-715 adds
+  ``do_cmip=True`` flag for FV3-faithful
+  ``compute_qs(... es_over_liq_and_ice=.true.)`` path:
+
+      w_liq  = clip((T − (T_freeze − 20)) / 20, 0, 1)
+      q_sat  = w_liq · q_sat_liq + (1 − w_liq) · q_sat_ice
+      RH     = 100 · qv / q_sat
+
+  Linear blend: pure liquid above T_freeze, pure ice below
+  T_freeze − 20 K, smooth transition in between.
+
+  Reuses ``thermo.saturation_mixing_ratio`` (liquid) and
+  ``saturation_mixing_ratio_ice`` (CLAUDE.md mandate: never
+  re-derive saturation formulas).
+
+  Default ``do_cmip=False`` preserves iter-695 backward-compat.
+
+  Tests (6/6 in <2 s):
+  1. T > T_freeze → CMIP RH = liquid-only RH.
+  2. T < T_freeze − 20 → CMIP RH = ice-only RH.
+  3. T = T_freeze − 10 → blend weight 0.5 exactly.
+  4. Default matches iter-695 (backward-compat pin).
+  5. 3-D input → 3-D output.
+  6. No NaN/Inf in CMIP path.
+
+  iter-695 5/5 tests still pass.
+
+  Wired into iter-383 sweep (now 279).
 - Iter 714: **FV3 ``moist_cp_fv3``** — isobaric specific heat companion.
   Faithful JAX port of FV3 ``moist_cp`` (general nwat≥3 branch)
   (model/fv_mapz.F90:3656-3733).  Companion to iter-713 moist_cv:
