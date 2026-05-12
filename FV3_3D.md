@@ -223,6 +223,19 @@ for _ in range(n_steps):
     state = step(state, dt=10.0)
 ```
 
+**For long-running batches**, use the iter-544 scan-based
+variant that compiles the entire n-step loop as a single
+``jax.lax.scan`` (no Python overhead per step):
+
+```python
+from legoesm.grids.halo import make_clipped_scan_step
+
+scan_step = make_clipped_scan_step(
+    model, state, dt=10.0, n_steps=100, slack=0.5,
+)
+final_state = scan_step(state)
+```
+
 Combined with ``make_legoesm_nh_min_edge_config`` (iter-466),
 this achieves **65.7% reduction** at C8+duogrid (iter-504).
 

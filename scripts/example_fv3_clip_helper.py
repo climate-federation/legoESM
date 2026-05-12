@@ -33,7 +33,7 @@ from legoesm.grids.cubed_sphere import (
     create_cubed_sphere,
     rotate_winds_geo_to_grid,
 )
-from legoesm.grids.halo import make_clipped_step
+from legoesm.grids.halo import make_clipped_step, make_clipped_scan_step
 from legoesm.grids.vertical import (
     create_height_coordinate,
     compute_terrain_metric,
@@ -53,8 +53,12 @@ def build_sbr_state(n: int = 16, U_0: float = 20.0):
     u_grid, v_grid = rotate_winds_geo_to_grid(
         u_east, v_north, grid.angle,
     )
-    u_p = jnp.broadcast_to(u_grid[..., None], (6, n, n, nlev))
-    v_p = jnp.broadcast_to(v_grid[..., None], (6, n, n, nlev))
+    u_p = jnp.broadcast_to(
+        u_grid[..., None], (6, n, n, nlev),
+    ).astype(jnp.float64)
+    v_p = jnp.broadcast_to(
+        v_grid[..., None], (6, n, n, nlev),
+    ).astype(jnp.float64)
     dims_3d = ("face", "x", "y", "level")
     dims_w = ("face", "x", "y", "level_half")
     dims_2d = ("face", "x", "y")
@@ -97,13 +101,22 @@ def main():
     print("\nCompiling JIT-clipped step (iter-526 make_clipped_step)...")
     step = make_clipped_step(model, state, dt=10.0, slack=0.5)
 
-    # === 4. Run 10 steps ===
-    print("\nRunning 10 steps...")
+    # === 4. Run 10 steps (Python loop) ===
+    print("\nRunning 10 steps (Python loop)...")
     s = state
     for k in range(10):
         s = step(s, 10.0)
     print(f"  final state.theta_prime.data.max() = "
           f"{float(jnp.abs(s.theta_prime.data).max()):.3e}")
+
+    # === 4b. Alternative: scan-based 10-step (iter-544) ===
+    print("\nRunning 10 steps (jax.lax.scan, no Python overhead)...")
+    scan_step = make_clipped_scan_step(
+        model, state, dt=10.0, n_steps=10, slack=0.5,
+    )
+    s_scan = scan_step(state)
+    print(f"  scan final state.theta_prime.data.max() = "
+          f"{float(jnp.abs(s_scan.theta_prime.data).max()):.3e}")
 
     # === 5. Edge / interior std diagnostic ===
     arr = np.asarray(s.theta_prime.data)
