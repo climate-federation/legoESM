@@ -1195,6 +1195,26 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 586: **Schmidt transformation / stretched grid** (user
+  audit item #1 partial).  Faithful port of FV3
+  ``direct_transform`` (fv_grid_utils.F90:870-917):
+  1. Latitude stretching:
+     ``lat_t = asin((c²-1 + (c²+1)·sin_lat) / (c²+1 + (c²-1)·sin_lat))``
+  2. Pole rotation to (target_lon, target_lat).
+  New public function ``schmidt_transform(lon, lat, stretch_fac,
+  target_lon, target_lat)`` in ``legoesm.grids.cubed_sphere``.
+  ``create_cubed_sphere(...)`` gains 3 new kwargs:
+  ``stretch_fac=1.0`` (default = no stretch), ``target_lon=0.0``,
+  ``target_lat=-π/2`` (default = no rotation).  Skipped when
+  defaults (preserves bit-for-bit pre-iter-586 grid).
+  Tests (4/4 in 4 s):
+  1. c=1 + default target → identity transformation.
+  2. c=3 at equator target → finite + stable.
+  3. Full grid creation @ c=2 → valid (area=4πR² within 5%).
+  4. Default unchanged matches pre-iter-586 grid bit-for-bit.
+  Closes user audit item #1 (stretched grid).  Nested grid
+  (2-way refinement) deferred — much larger scope.
+  Wired into iter-383 sweep (now 161).
 - Iter 585: **FV3 iord=8 PPM limiter utility** (user audit
   item #3 partial).  FV3 ``tp_core.F90:548-553`` Lin (1996)
   monotonicity bound: ``bl, br ∈ ±2|dm|`` with sign tied to

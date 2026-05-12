@@ -247,6 +247,9 @@ def create_cubed_sphere(
     use_duogrid: bool = False,
     k2e_nord: int = 2,
     duogrid_ng: int | None = None,
+    stretch_fac: float = 1.0,
+    target_lon: float = 0.0,
+    target_lat: float = -0.5 * 3.141592653589793,  # -π/2 = no rotation
 ) -> CubedSphereGrid:
     """Create a cubed-sphere grid.
 
@@ -268,6 +271,12 @@ def create_cubed_sphere(
     """
     # Compute gnomonic coordinates on each face
     lon, lat = _compute_gnomonic_lonlat(n)
+
+    # FV3_3D iter 586: optional Schmidt stretching (FV3 fv_grid_utils.F90:870-917).
+    if abs(stretch_fac - 1.0) > 1e-5 or target_lat > -0.5 * jnp.pi + 1e-5:
+        lon, lat = schmidt_transform(
+            lon, lat, stretch_fac, target_lon, target_lat,
+        )
 
     # Cartesian coordinates on unit sphere
     cos_lat = jnp.cos(lat)
@@ -391,6 +400,97 @@ def create_cubed_sphere(
     precompute_halo_tables(n)
 
     return grid
+
+
+def schmidt_transform(
+    lon: jax.Array,
+    lat: jax.Array,
+    stretch_fac: float,
+    target_lon: float,
+    target_lat: float,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 586: Schmidt transformation for stretched cubed-sphere.
+
+    Faithful port of FV3 ``direct_transform`` (fv_grid_utils.F90:870-917).
+    Applies a conformal stretching that locally enhances resolution at
+    ``(target_lon, target_lat)`` by factor ``stretch_fac``.
+
+    Algorithm:
+    1. Latitude stretching:
+           lat_t = asin( (c²-1 + (c²+1)·sin_lat) / (c²+1 + (c²-1)·sin_lat) )
+       where c = stretch_fac.  c > 1 → stretching (high-res near target).
+    2. Pole rotation: rotate the stretched-pole frame so the new pole
+       lies at (target_lon, target_lat).
+
+    Parameters
+    ----------
+    lon, lat : jax.Array
+        Input gnomonic coordinates (any shape).  Lat in [-π/2, π/2],
+        lon in [0, 2π].
+    stretch_fac : float
+        Stretching factor c.  1.0 = no stretch.  Typical 2-5 for regional
+        focus.  When |c-1| < 1e-5 stretching is skipped (only rotation).
+    target_lon, target_lat : float
+        Center of high-res face in radians.  When target_lat = -π/2
+        (equivalent of FV3 default -90°), no rotation applied.
+
+    Returns
+    -------
+    lon_new, lat_new : jax.Array
+        Transformed coordinates.
+
+    Notes
+    -----
+    Faithful to FV3.  Adds stretched-grid support to ``create_cubed_sphere``
+    via the ``stretch_fac``/``target_*`` kwargs.  Closes user audit item
+    #1 (stretched grid) partial — nested grids (2-way refinement) deferred.
+    """
+    c = stretch_fac
+    c2p1 = 1.0 + c * c
+    c2m1 = 1.0 - c * c
+
+    # Step 1: latitude stretching.
+    sin_lat = jnp.sin(lat)
+    # When |c²-1| < 1e-7, no stretching → lat_t = lat.
+    do_stretch = abs(c2m1) > 1e-7
+    if do_stretch:
+        lat_t = jnp.arcsin(
+            (c2m1 + c2p1 * sin_lat) / (c2p1 + c2m1 * sin_lat)
+        )
+    else:
+        lat_t = lat
+
+    # Step 2: pole rotation to (target_lon, target_lat).
+    sin_p = jnp.sin(target_lat)
+    cos_p = jnp.cos(target_lat)
+    sin_lat_t = jnp.sin(lat_t)
+    cos_lat_t = jnp.cos(lat_t)
+    cos_lon_old = jnp.cos(lon)
+    sin_lon_old = jnp.sin(lon)
+
+    sin_o = -(sin_p * sin_lat_t + cos_p * cos_lat_t * cos_lon_old)
+    sin_o = jnp.clip(sin_o, -1.0, 1.0)  # numerical safety for asin
+
+    is_pole = (1.0 - jnp.abs(sin_o)) < 1e-7
+    p2 = 0.5 * jnp.pi
+    two_pi = 2.0 * jnp.pi
+
+    # Non-pole branch
+    lat_rot = jnp.arcsin(sin_o)
+    lon_rot = target_lon + jnp.arctan2(
+        -cos_lat_t * sin_lon_old,
+        -sin_lat_t * cos_p + cos_lat_t * sin_p * cos_lon_old,
+    )
+    lon_rot = jnp.where(lon_rot < 0.0, lon_rot + two_pi, lon_rot)
+    lon_rot = jnp.where(lon_rot >= two_pi, lon_rot - two_pi, lon_rot)
+
+    # Pole branch
+    lat_pole = jnp.sign(sin_o) * p2
+    lon_pole = jnp.zeros_like(lon_rot)
+
+    lon_new = jnp.where(is_pole, lon_pole, lon_rot)
+    lat_new = jnp.where(is_pole, lat_pole, lat_rot)
+    return lon_new, lat_new
 
 
 def _compute_gnomonic_lonlat(n: int) -> tuple[jax.Array, jax.Array]:
