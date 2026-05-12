@@ -2304,6 +2304,84 @@ def gnomonic_dist(im: int) -> tuple[jax.Array, jax.Array]:
     return xyz2latlon(p1, p2, p3)
 
 
+def rotate_winds_sphere_cube(
+    u: jax.Array, v: jax.Array,
+    lon1: jax.Array, lat1: jax.Array,
+    lon2: jax.Array, lat2: jax.Array,
+    lon3: jax.Array, lat3: jax.Array,
+    lon4: jax.Array, lat4: jax.Array,
+    lon_t: jax.Array, lat_t: jax.Array,
+    direction: int = 1,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 661: rotate winds between sphere and cube frames at point.
+
+    Faithful JAX port of FV3 ``rotate_winds``
+    (tools/test_cases.F90:8183-8226).
+
+    Geometry: at central point ``t1=(lon_t, lat_t)``, the i-axis
+    of the cube goes from p3 → p1 (projected to tangent plane);
+    j-axis goes from p4 → p2.  FV3 lon-shift by π convention is
+    applied to (e_lon, e_lat) of the geographic frame at t1.
+
+    Algorithm:
+
+        ee1 = get_unit_vector_fv3(p3, t1, p1)        # cube i-axis
+        ee2 = get_unit_vector_fv3(p4, t1, p2)        # cube j-axis
+        elon = (-sin(λ-π), cos(λ-π), 0)              # geo east at t1
+        elat = (-sin(φ)·cos(λ-π), -sin(φ)·sin(λ-π), cos(φ))
+        g_ij = ee_i · e_lonlat_j
+        if dir=1 (sphere → cube):
+            newu = u·g11 + v·g12
+            newv = u·g21 + v·g22
+        else (cube → sphere):
+            det = g11·g22 - g21·g12
+            newu = (u·g22 - v·g12) / det
+            newv = (-u·g21 + v·g11) / det
+
+    Parameters
+    ----------
+    u, v : jax.Array
+        Wind components (broadcastable to scalar or matching p1..t1).
+    lon1, lat1, ..., lon4, lat4 : jax.Array
+        4 neighboring points (p1, p2, p3, p4) in lat/lon.
+    lon_t, lat_t : jax.Array
+        Central point t1.
+    direction : int, default 1
+        1 = sphere-to-cube; 2 = cube-to-sphere.
+
+    Returns
+    -------
+    newu, newv : jax.Array
+    """
+    ee1 = get_unit_vector_fv3(lon3, lat3, lon_t, lat_t, lon1, lat1)
+    ee2 = get_unit_vector_fv3(lon4, lat4, lon_t, lat_t, lon2, lat2)
+    # FV3 lon-shift by π convention
+    lon_shifted = lon_t - jnp.pi
+    sin_lon = jnp.sin(lon_shifted)
+    cos_lon = jnp.cos(lon_shifted)
+    sin_lat = jnp.sin(lat_t)
+    cos_lat = jnp.cos(lat_t)
+    elon = jnp.stack([-sin_lon, cos_lon, jnp.zeros_like(sin_lon)], axis=-1)
+    elat = jnp.stack(
+        [-sin_lat * cos_lon, -sin_lat * sin_lon, cos_lat], axis=-1,
+    )
+    g11 = inner_prod(ee1, elon)
+    g12 = inner_prod(ee1, elat)
+    g21 = inner_prod(ee2, elon)
+    g22 = inner_prod(ee2, elat)
+    if direction == 1:
+        new_u = u * g11 + v * g12
+        new_v = u * g21 + v * g22
+    elif direction == 2:
+        det = g11 * g22 - g21 * g12
+        safe_det = jnp.where(jnp.abs(det) > 1e-30, det, 1.0)
+        new_u = (u * g22 - v * g12) / safe_det
+        new_v = (-u * g21 + v * g11) / safe_det
+    else:
+        raise ValueError(f"direction must be 1 or 2, got {direction}")
+    return new_u, new_v
+
+
 def project_sphere_v(
     f: jax.Array, e: jax.Array,
 ) -> jax.Array:

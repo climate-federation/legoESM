@@ -1195,6 +1195,30 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 661: **FV3 ``rotate_winds_sphere_cube``** — wind rotation
+  between sphere and cube frames at point.  Faithful JAX port of
+  FV3 ``rotate_winds`` (tools/test_cases.F90:8183-8226).
+
+  Algorithm:
+
+      ee1 = get_unit_vector_fv3(p3, t1, p1)   # cube i-axis (iter 659)
+      ee2 = get_unit_vector_fv3(p4, t1, p2)   # cube j-axis
+      elon = (-sin(λ-π), cos(λ-π), 0)
+      elat = (-sin(φ)·cos(λ-π), -sin(φ)·sin(λ-π), cos(φ))
+      g_ij = ee_i · e_lonlat_j
+      sphere→cube: newu = u·g11 + v·g12; newv = u·g21 + v·g22
+      cube→sphere: 2×2 inverse
+
+  Reuses iter-659 ``get_unit_vector_fv3`` + iter-611 ``inner_prod``.
+  Round-trip sphere→cube→sphere verified to 1e-10.
+
+  Tests (4/4 in <1 s):
+  1. Zero winds → zero (both directions).
+  2. Sphere→cube→sphere round-trip exact (1e-10).
+  3. No NaN/Inf on random inputs.
+  4. Invalid direction raises ValueError.
+
+  Wired into iter-383 sweep (now 228).
 - **Iters 651-659 (compacted iter 660)**: FV3 test-case ICs +
   wind-grid conversions + spherical-geometry helpers.  9
   iterations covering FV3 test-case + diagnostic ops:
