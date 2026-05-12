@@ -1120,6 +1120,20 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 536: **slack sweep at C16 SBR** — confirms slack=0.0
+  is marginally better than slack=0.5 under physical IC.
+  10 steps, min-edge + clip:
+  - slack=0.0: edge_std=5.85e-2 (best)
+  - slack=0.5: edge_std=5.89e-2 (0.7% worse, default)
+  - slack=1.0: edge_std=6.12e-2 (4.7% worse)
+  - slack=2.0: edge_std=6.28e-2 (7.4% worse)
+  Recap: iter-503 found slack=0.5 marginally best at C8
+  random IC (1.5% margin); iter-512 confirmed at C8 over 10
+  steps (slack=0.5 best by 1%); iter-536 now finds slack=0.0
+  marginally best at C16 SBR (0.7% over slack=0.5).  All
+  three configurations within ~1% — slack=0.5 is a safe
+  default that's never significantly off the optimum.  1/1
+  in 183 s.  Wired into iter-383 sweep (now 123).
 - Iter 535: **example script** at ``scripts/example_fv3_clip_helper.py``
   showing end-to-end user-facing API:
   1. Build C16 SBR state via ``rotate_winds_geo_to_grid``.
