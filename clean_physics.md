@@ -74,6 +74,16 @@ Branch: `clean_physics`. Driven by Ralph loop with `/codex:adversarial-review`.
 **Deferred:**
 - #10 sea-ice transport centered + post-clamps: full FCT / conservative upwind needs a multi-file structural refactor; queued for iter-3.
 
+### Iteration 3 — 2026-05-12
+
+**Actions:**
+- [x] #10 `ice/transport.py` — replaced the centered `divergence_3d` transport with conservative monotone PPM (Colella–Woodward with limiter) via `core.operators_fv.fv_flux_divergence` (2D path) and `core.operators_3d.fv_flux_divergence_3d` (multi-category path).  Volume / concentration / enthalpy each go through PPM-with-limiter so the scheme is monotone (no new extrema, no negative `h*a`, no `a > 1`); the post-step `jnp.clip` becomes a round-off safety guard rather than a conservation-breaker.  All 63 sea-ice transport / dynamics / differentiability tests pass.
+
+**Tests (post-fix):**
+- `tests/unit/test_land_ice_sea_ice_transport.py` → 2/2 pass.
+- `tests/unit/test_sea_ice_dynamics.py` → 50/50 pass (including the previously-strict-xfail `test_strict_volume_conservation_under_clamping`).
+- `tests/unit/test_diff_sea_ice.py` → 11/11 pass.
+
 **Tests (post-fix):**
 - atmosphere microphysics + convection + land multilayer: 172/172 pass.
 - sea ice unit suite: 78 pass, 1 pre-existing thermo failure (`Test8i_StefanBoltzmann::test_lw_up_matches` — confirmed pre-existing in iter-1).
