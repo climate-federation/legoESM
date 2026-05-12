@@ -204,12 +204,9 @@ def main():
 
     # ---- ETOPO bathymetry interpolated onto tripolar grid ----
     print(f"Loading ETOPO bathymetry from {args.etopo}...")
-    # H_min=500m for z-star (no partial cells) — ensures first-layer
-    # thickness dz_ref[0]*H/H_max >= 20*500/5500 ≈ 1.8m, avoiding
-    # thin-cell blowup.  Lower this when partial cells are enabled.
     bathy_cfg = BathymetryConfig(
         source="file", path=args.etopo,
-        H_max=H_MAX, H_min=500.0, smoothing_passes=2,
+        H_max=H_MAX, H_min=10.0, smoothing_passes=2,
         r_factor_max=0.2, depth_is_negative=True,
         north_cap_lat=None,     # tripolar handles the north pole
         south_cap_lat=-75.0,    # southern cap (converging meridians)
@@ -224,11 +221,10 @@ def main():
         dz_surface=DZ_SURFACE, dz_deep=DZ_DEEP,
     )
 
-    # For now use plain z-star (no partial cells) until partial-cell
-    # PGF corrections are fully validated on the tripolar grid.
-    H_snapped = H_bathy_raw
+    # Snap thin partial cells (same 30% threshold as comparison)
+    H_snapped = snap_partial_cells_2d(H_bathy_raw, z_coord_base)
     ocean_mask = jnp.where(H_snapped > 0, ocean_mask, 0.0)
-    z_coord = z_coord_base
+    z_coord = create_partial_cell_coordinate(z_coord_base, H_snapped)
 
     n_ocean = int(jnp.sum(ocean_mask > 0.5))
     print(f"  Ocean cells: {n_ocean}/{ocean_mask.size} "
@@ -252,10 +248,10 @@ def main():
                 S_star=S_STAR, T_profile="cosine",
             ),
         ),
-        vertical_mixing=VerticalMixingConfig(
-            scheme="kpp",
-            kpp=KPPConfig(K_conv=1.0),
-        ),
+        # KPP disabled with partial cells — C-grid shape mismatch in
+        # KPP internals causes NaN.  Use constant A_v via config instead.
+        # Re-enable after fixing KPP for C-grid + partial cells.
+        vertical_mixing=VerticalMixingConfig(scheme="none"),
         lateral_mixing=LateralMixingConfig(scheme="none"),
         convection=OceanConvectionConfig(
             scheme="enhanced_diffusion",
@@ -272,7 +268,7 @@ def main():
         bottom_drag_r=BOTTOM_DRAG_R,
         bottom_drag_bbl_thickness=BOTTOM_DRAG_BBL,
         bottom_drag_bg_velocity=BOTTOM_DRAG_BG_VEL,
-        # pgf_scheme="adcroft",  # re-enable with partial cells
+        pgf_scheme="adcroft",
         barotropic_solver="implicit_cn",
         implicit_vertical_mixing=True,
         tracer_advection="tvd",
@@ -303,16 +299,15 @@ def main():
         H_bathy_override=H_snapped,
     )
 
-    # Centroid-aware exponential T(z) — same as comparison
-    centroid = compute_centroid_depth(
-        jnp.zeros_like(H_snapped), H_snapped, z_coord,
-    )
-    T_init = 2.0 + 18.0 * jnp.exp(-centroid / _SCALE_DEPTH)
-    if hasattr(z_coord, 'is_active'):
-        T_init = jnp.where(z_coord.is_active, T_init, 0.0)
-    T_init = T_init * ocean_mask[..., jnp.newaxis]
+    # Level-based exponential T(z) stratification
+    z_full = np.asarray(z_coord_base.z_full_ref)
+    T_profile = 2.0 + 18.0 * np.exp(z_full / _SCALE_DEPTH)
+    T_data = np.array(state.T.data)
+    for k in range(N_LEVELS):
+        T_data[..., k] = T_profile[k]
+    T_data = T_data * np.asarray(ocean_mask)[..., np.newaxis]
     state = state._replace(
-        T=state.T.replace(data=T_init.astype(state.T.data.dtype)),
+        T=state.T.replace(data=jnp.array(T_data)),
     )
 
     print(f"  T range: [{float(jnp.min(state.T.data)):.2f}, "
