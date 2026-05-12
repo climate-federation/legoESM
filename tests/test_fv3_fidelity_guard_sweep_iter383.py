@@ -332,6 +332,7 @@ _GUARD_MODULES = (
     "test_fv3_column_integral_iter742",              # iter-742 add
     "test_fv3_column_integral_refactor_iter743",     # iter-743 add
     "test_fv3_internal_energy_column_iter744",       # iter-744 add
+    "test_fv3_kinetic_energy_column_iter745",        # iter-745 add
 )
 
 

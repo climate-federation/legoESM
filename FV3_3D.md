@@ -1195,6 +1195,25 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 745: **``kinetic_energy_column_fv3``** — column KE diagnostic.
+
+      KE_col = Σ_k delp · 0.5·(ua² + va² [+ w²]) / g
+
+  Companion to iter-744 internal_energy_column.  Composes:
+
+      column_integral_delp_fv3(kinetic_energy_fv3(ua, va, w), delp)
+
+  Standard component of FV3 total-energy budget (iter-693
+  nh_total_energy uses this as the KE piece).
+
+  Tests (5/5 in <1 s):
+  1. Zero wind → KE_col=0.
+  2. Uniform ua=10, p_s=1e5 → KE_col = 0.5·100·1e5/g ≈ 510 J/m².
+  3. w=None → 2-component (ua=3, va=4 → 5²); w=12 → 3-component (13²).
+  4. 3-D shapes.
+  5. No NaN/Inf.
+
+  Wired into iter-383 sweep (now 309).
 - Iter 744: **``internal_energy_column_fv3``** — column IE diagnostic.
 
   Column-integrated internal energy:

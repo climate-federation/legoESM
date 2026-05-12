@@ -2987,6 +2987,41 @@ def theta_dry_fv3(
     return pt * (p_ref / p) ** kap
 
 
+def kinetic_energy_column_fv3(
+    ua: jax.Array,
+    va: jax.Array,
+    delp: jax.Array,
+    w: jax.Array | None = None,
+) -> jax.Array:
+    """FV3_3D iter 745: column-integrated kinetic energy.
+
+        KE_col = Σ_k delp[k] · KE[k] / g
+                = Σ_k delp[k] · 0.5·(ua²+va²[+w²]) / g
+
+    Companion to iter-744 ``internal_energy_column_fv3``.  Composes
+    iter-740 ``kinetic_energy_fv3`` + iter-742
+    ``column_integral_delp_fv3``.
+
+    Standard component of FV3 total-energy budget (iter-693
+    ``nh_total_energy_fv3`` uses this as the KE piece).
+
+    Parameters
+    ----------
+    ua, va : jax.Array, shape (..., km)
+        Horizontal wind components.
+    delp : jax.Array, shape (..., km)
+        Pressure thickness (Pa).
+    w : jax.Array, shape (..., km), optional
+        Vertical velocity.  None → 2-component (hydrostatic).
+
+    Returns
+    -------
+    ke_col : jax.Array, shape (...,)
+        Column kinetic energy (J/m²).
+    """
+    return column_integral_delp_fv3(kinetic_energy_fv3(ua, va, w), delp)
+
+
 def internal_energy_column_fv3(
     pt: jax.Array,
     delp: jax.Array,
