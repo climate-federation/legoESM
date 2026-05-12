@@ -38,11 +38,11 @@ def test_iter365_compaction_present(doc_text):
     )
 
 
-def test_doc_size_below_4700_lines(doc_text):
+def test_doc_size_below_4500_lines(doc_text):
     n_lines = len(doc_text.splitlines())
-    assert n_lines < 4700, (
-        f"FV3_3D.md has {n_lines} lines (target < 4700).  "
-        f"Next compaction at iter 650."
+    assert n_lines < 4500, (
+        f"FV3_3D.md has {n_lines} lines (target < 4500).  "
+        f"Next compaction at iter 660."
     )
 
 
@@ -362,6 +362,32 @@ def test_iter640_compaction_covers_topics(doc_text):
     for marker in required:
         assert marker in section, (
             f"iter-640 compacted block missing topic ``{marker}``."
+        )
+
+
+def test_iter650_compaction_present(doc_text):
+    """iter-650 compacted iter 641-649 into a single block."""
+    assert "**Iters 641-649 (compacted iter 650)**" in doc_text, (
+        "iter-650 compaction block missing — doc re-expanded."
+    )
+
+
+def test_iter650_compaction_covers_topics(doc_text):
+    section_start = doc_text.find(
+        "**Iters 641-649 (compacted iter 650)**"
+    )
+    section_end = doc_text.find(
+        "**Iters 631-639", section_start,
+    )
+    assert section_start >= 0 and section_end > section_start
+    section = doc_text[section_start:section_end]
+    required = [
+        "641", "642", "643", "644",
+        "645", "646", "647", "648", "649",
+    ]
+    for marker in required:
+        assert marker in section, (
+            f"iter-650 compacted block missing topic ``{marker}``."
         )
 
 

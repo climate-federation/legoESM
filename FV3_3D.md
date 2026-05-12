@@ -1195,291 +1195,34 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
-- Iter 649: **FV3 ``grid_area_fv3``** — 2D vectorized cell-area
-  computation.  Faithful JAX port of FV3 ``grid_area``
-  (tools/fv_grid_tools.F90:2512-2620, spherical-excess branch).
+- **Iters 641-649 (compacted iter 650)**: FV3 vertical-coord
+  + IC + radius-aware grid utilities.  9 iterations completing
+  the FV3 vertical-coord reference profiles + hydrostatic IC
+  builder + Cartesian/radius helpers:
 
-  Algorithm:
+  | Iter | Function(s)                              | Module / Line              | Role                                |
+  |------|------------------------------------------|----------------------------|-------------------------------------|
+  | 641  | ``compute_dz_var``                       | fv_eta:1930                | variable dz, exact-ztop rescaling   |
+  | 642  | ``gw_1d``                                | fv_eta:2286                | gravity-wave 1D coord init          |
+  | 643  | ``mount_waves``                          | fv_eta:2346                | HIWPP mountain-wave hybrid coord    |
+  | 644  | ``p_var_core``                           | init_hydro:41              | (pe, peln, pk, pkz, ps) from delp   |
+  | 645  | ``drymadj``                              | init_hydro:195             | dry-mass adjustment                 |
+  | 646  | ``hydro_eq``                             | init_hydro:277             | hydrostatic IC builder              |
+  | 647  | ``set_eta_L60``                          | fv_eta:38 (data tables)    | FV3 L60 hardcoded ak/bk             |
+  | 648  | ``cartesian_to_spherical_fv3`` / ``spherical_to_cartesian_fv3`` | fv_grid_tools:2373/2391 | radius-aware coord conversions      |
+  | 649  | ``grid_area_fv3``                        | fv_grid_tools:2512         | 2D vectorized cell-area via get_area|
 
-      For each cell (i, j) in [0, n_x-1] × [0, n_y-1]:
-          p_lL = grid[..., i,   j  ]   # SW corner
-          p_uL = grid[..., i,   j+1]   # NW
-          p_lR = grid[..., i+1, j  ]   # SE
-          p_uR = grid[..., i+1, j+1]   # NE
-          area[i, j] = get_area(p_lL, p_uL, p_lR, p_uR, radius)
+  Vertical-coord reference profiles now COMPLETE: L32 (iter 638),
+  L60 (iter 647), L101 (iter 637), hybrid_z (iter 639),
+  compute_dz_var (iter 641), gw_1d (iter 642), mount_waves
+  (iter 643).  Plus hydrostatic IC (iter 646), pressure-edge
+  diagnostics (iter 644), dry-mass adjustment (iter 645).
 
-  Uses iter-614 ``get_area`` (Gauss-Bonnet spherical excess).
-  Broadcasts on leading axes (e.g., 6-face cube).
+  Grid helpers: radius-aware (iter 648) and 2D cell-area
+  (iter 649) complete fv_grid_tools.F90 coord-conversion cover.
 
-  Pairs with iter-629 ``make_fv3_native_grid`` to produce both
-  corner positions and cell areas.  6-face sum verified to
-  match 4π·R² to <1e-9 rel at C24.
-
-  Tests (5/5 in 13 s):
-  1. Output shape (6, n, n) from (6, n+1, n+1).
-  2. All cell areas > 0.
-  3. 6-face total ≈ 4π·R² (full sphere).
-  4. Area scales as R² (radius doubling → 4×).
-  5. Area max/min ratio < 2.5 (consistent with dx, dy each √2).
-
-  Wired into iter-383 sweep (now 218).
-- Iter 648: **FV3 ``cartesian_to_spherical_fv3`` +
-  ``spherical_to_cartesian_fv3``**.  Radius-aware coord conversions
-  from FV3 ``fv_grid_tools.F90:2373-2402``.
-
-  Differs from iter-611 ``latlon2xyz`` / ``xyz2latlon`` (unit-
-  sphere only) by passing/returning radius ``r`` explicitly:
-
-      cartesian_to_spherical_fv3(x, y, z) → (lon, lat, r)
-      spherical_to_cartesian_fv3(lon, lat, r) → (x, y, z)
-
-  FV3 conventions preserved:
-      - Pole branch: |x|+|y|<1e-10 → lon=0
-      - Lon range [-π, π] (atan2; NOT wrapped to [0, 2π))
-      - RIGHT_HAND branch: lat = asin(z/r); z = r·sin(lat)
-
-  Useful for FV3 grid generation code that needs r (non-unit
-  sphere, e.g., physical Earth-radius grids).
-
-  Tests (6/6 in <1 s):
-  1. r = sqrt(x²+y²+z²) preserved.
-  2. Pole branch lon=0.
-  3. (lon=0,lat=0,r=1) → (1,0,0).
-  4. Round-trip exact (1e-12).
-  5. Linear scaling with r.
-  6. Lon in atan2 range [-π, π].
-
-  Wired into iter-383 sweep (now 217).
-- Iter 647: **FV3 ``set_eta_L60``** — FV3 L60 hardcoded hybrid-coord
-  table.  Faithful JAX port of FV3 ``set_eta`` L60 a60/b60 data
-  arrays (tools/fv_eta.F90:45-85).  Reference for 60-layer
-  baroclinic-instability tests; equivalent to NCEP GFS L64
-  except for the top 3 layers (per FV3 docstring).
-
-  Constants (Pa for ak):
-      ak[0]  = 300 Pa  (ptop)
-      ak[60] = 0       (pure sigma at surface)
-      bk[0]  = 0       (pure pressure at top)
-      bk[60] = 1       (pure sigma at surface)
-      bk[0..20] = 0    (21 pure-pressure layers)
-      bk[21..60] = monotonic increase to 1
-
-  Returns ``(ak, bk, ptop, ks)`` directly usable with iter-646
-  ``hydro_eq`` to build a 60-layer hydrostatic IC.
-
-  Pairs with iter-637 ``compute_dz_L101`` and iter-638
-  ``compute_dz_L32``; together cover FV3's reference vertical
-  profiles (L32, L60, L101).
-
-  Lives in ``legoesm.grids.vertical``.
-
-  Tests (7/7 in <1 s):
-  1. Output shapes (61, 61, scalar, int).
-  2. ptop = 300 Pa.
-  3. bk endpoints (0, 1).
-  4. ak[60] = 0.
-  5. bk monotonically increasing.
-  6. ks ≈ 20 (last pure-pressure layer index).
-  7. set_eta_L60 + hydro_eq → finite, valid IC.
-
-  Wired into iter-383 sweep (now 216).
-- Iter 646: **FV3 ``hydro_eq``** — hydrostatic-equilibrium IC builder.
-  Faithful JAX port of FV3 ``hydro_eq`` (tools/init_hydro.F90:
-  277-456, hybrid sigma-p hydrostatic branch).  Builds canonical
-  FV3 cold-start IC for non-moist Earth atmosphere.
-
-  Reference profile:
-      p1 = 250 hPa, z1 = 10 km·g (tropopause; geopotential)
-      T1 = 200 K (isothermal above tropopause)
-      T0 = 300 K (sea-level)
-      a0 = 0.5·(T1 - T0)/z1
-      c0 = T0/a0
-
-  Algorithm:
-      ps = drym (no mountain) or mslp·exp(-1/(a0·R)·hs/(hs+c0))
-      ph[k] = ak[k] + bk[k]·ps
-      gz built top-down from surface:
-        if ph ≤ p1: isothermal stratosphere log-pressure
-        else:       lapse-rate troposphere c0/(1+a0·R·log(...))+hs-c0
-      pt[k] = (gz[k] - gz[k+1]) / (R·log(ph[k+1]/ph[k]))
-      pt = max(T1, pt)
-      delp[k] = ph[k+1] - ph[k]
-
-  Returns ``(ps, delp, pt)`` from inputs ``(ak, bk, hs, drym,
-  mountain, area)``.  Skips hybrid_z branch (rare) and MPI mass-
-  correction beyond mountain-mode dps.
-
-  Lives in ``legoesm.grids.vertical``.
-
-  Tests (6/6 in 2 s):
-  1. Output shapes ((...,), (..., km), (..., km)).
-  2. No-mountain → ps uniform = drym.
-  3. All delp > 0.
-  4. pt ≥ T1 = 200 K (FV3 lower bound).
-  5. Σ delp = ps - ak[0].
-  6. No NaN/Inf on random hs.
-
-  Wired into iter-383 sweep (now 215).
-- Iter 645: **FV3 ``drymadj``** — dry-mass surface pressure +
-  adjustment.  Faithful JAX port of FV3 ``drymadj``
-  (tools/init_hydro.F90:195-275), serial branch.
-
-  Algorithm:
-
-      ps[i,j]  = ptop + Σ_k delp[i,j,k]
-      psd[i,j] = ptop + Σ_k delp[i,j,k] · (1 - Σ_n q[i,j,k,n])
-      psdry    = area-weighted global mean of psd
-      dpd      = dry_mass - psdry   (if adjust_dry_mass; else 0)
-
-  Computes both total surface pressure ``ps`` and dry-air-only
-  surface pressure ``psd`` (excluding water-substance tracers).
-  ``dpd`` is the global dry-mass adjustment used in FV3's
-  ``p_var`` (iter-644) for restart-based mass conservation.
-
-  When ``nwat == 0`` or ``q=None``, psd defaults to ps.
-
-  Lives in ``legoesm.grids.vertical`` alongside iter-644
-  ``p_var_core``.
-
-  Tests (6/6 in <1 s):
-  1. ps = ptop + Σ delp formula.
-  2. psd = ps when no water tracers.
-  3. psd < ps with positive q.
-  4. dpd = 0 when adjust_dry_mass=False.
-  5. dpd = dry_mass - area-weighted mean(psd).
-  6. Batched (face, lat, lon) leading axes preserved.
-
-  Wired into iter-383 sweep (now 214).
-- Iter 644: **FV3 ``p_var_core``** — pressure-edge diagnostics
-  from (delp, ptop).  Faithful JAX port of FV3 ``p_var`` core
-  algorithm (tools/init_hydro.F90:41-145), excluding dry-mass
-  adjustment + MPI.
-
-  Algorithm:
-
-      pe[0]   = ptop;           pk[0] = ptop^cappa
-      pe[k]   = pe[k-1] + delp[k-1]      for k = 1..km
-      peln[k] = log(pe[k])
-      pk[k]   = pe[k]^cappa
-      ps      = pe[km]
-      # Top-edge peln branch (FV3 lines 116-127):
-      if ptop < ptop_min:
-          peln[0] = peln[1] - (cappa+1)/cappa
-      else:
-          peln[0] = log(ptop)
-      # Hydrostatic pkz (FV3 lines 129-135):
-      pkz[k] = (pk[k+1] - pk[k]) / (cappa · (peln[k+1] - peln[k]))
-
-  Used throughout FV3 for pressure / Exner-function diagnostics
-  given delp + ptop.  Vectorized: ``delp`` of shape ``(..., km)``
-  produces batched outputs on leading axes.
-
-  Lives in ``legoesm.grids.vertical``.
-
-  Tests (8/8 in 2 s):
-  1. Output shapes (km+1, km+1, km+1, km, scalar).
-  2. pe = ptop + cumsum(delp).
-  3. ps = pe[km].
-  4. pk = pe^cappa.
-  5. Normal top-edge branch: peln[0] = log(ptop).
-  6. Small-ptop branch: peln[0] = peln[1] - (cappa+1)/cappa.
-  7. pkz log-mean formula.
-  8. Batched (3, 4, km) input → batched output.
-
-  Wired into iter-383 sweep (now 213).
-- Iter 643: **FV3 ``mount_waves``** — HIWPP mountain-wave hybrid
-  coord init.  Faithful JAX port of FV3 ``mount_waves``
-  (tools/fv_eta.F90:2346-2479, ``NO_UKMO_HB`` branch).  Builds
-  hybrid (ak, bk) coords for HIWPP mountain-wave test cases:
-
-      Bottom 20: dz = 500 m (250 m if km > 60)
-      Middle:    dz unchanged (s_fac = 1.0)
-      Top 2:     ze[2] = ze[3] + √2·dz; ze[1] = ze[2] + 2·dz
-      pe[k] from isothermal hydrostatic (T0=300)
-      ptop = pe[0]
-      ks = max k where pint < pe[k]
-      Pure pressure k ≤ ks; hybrid sigma k > ks
-
-  Requires km ≥ 23.  Default ``pint = 300 hPa`` (transition).
-  Returns ``(ak, bk, ptop, ks, pint_out)``.
-
-  Used by FV3 for the HIWPP idealized mountain-wave benchmark.
-
-  Lives in ``legoesm.grids.vertical``.  Uses constants g, R_d.
-
-  Tests (6/6 in <1 s):
-  1. Output shapes (km+1, km+1, int, scalar, scalar).
-  2. ak[0]=ptop, bk[0]=0, ak[km]=0, bk[km]=1.
-  3. Pe = ak + bk·p00 monotone top→bottom.
-  4. Pure-pressure layers (k ≤ ks) have bk = 0.
-  5. No NaN/Inf.
-  6. km < 23 raises ValueError.
-
-  Wired into iter-383 sweep (now 212).
-- Iter 642: **FV3 ``gw_1d``** — gravity-wave 1D vertical-coord init.
-  Faithful JAX port of FV3 ``gw_1d`` (tools/fv_eta.F90:2286-2344).
-  Sets up uniform-dz vertical coord with isothermal or constant-N²
-  atmosphere; returns hybrid (ak, bk) coefficients, top-of-model
-  pressure, and reference potential temperature profile.
-
-  Algorithm:
-
-      dz[k] = ztop / km                       # uniform
-      ze built bottom-up
-      N² = g²/(cp·T0) if isothermal else 0.0001 s⁻²
-      s0 = g²/(cp·N²)
-      pe[k] = p0·((1 - s0/T0) + s0/T0·exp(-N²·z/g))^(1/κ)
-      ptop = pe[0]
-      ak[0] = pe[0]; bk[0] = 0
-      bk[k] = (pe[k] - pe[0]) / (pe[km] - pe[0])    for k ∈ [1, km-1]
-      ak[k] = pe[0]·(1 - bk[k])
-      ak[km] = 0; bk[km] = 1
-      pt[k] = g·dz[k] / (cp·(pe[k+1]^κ - pe[k]^κ))
-
-  NOTE: formula requires base > 0 → ztop ≲ 36 km (for default N²
-  = 0.0001 and T0=300).  For higher ztop, FV3 expects user to
-  pick smaller domain or use isothermal mode.
-
-  Used in FV3 for non-linear gravity-wave test cases.  Reuses
-  legoESM constants (g, c_pd, kappa).
-
-  Lives in ``legoesm.grids.vertical``.
-
-  Tests (6/6 in 1 s):
-  1. Output shapes (km+1, km+1, scalar, km).
-  2. ak[0]=ptop, bk[0]=0, ak[km]=0, bk[km]=1.
-  3. 0 < ptop < p0.
-  4. Potential temperature pt1 > 0.
-  5. Isothermal vs constant-N² → different ptop.
-  6. No NaN/Inf.
-
-  Wired into iter-383 sweep (now 211).
-- Iter 641: **FV3 ``compute_dz_var``** — variable dz with rescaling.
-  Faithful JAX port of FV3 ``compute_dz_var``
-  (tools/fv_eta.F90:1930-1998).  Mirror of iter-639 ``hybrid_z_dz``
-  with three key differences:
-
-      - s_fac[km] = 0.125 (vs 0.12 in hybrid_z_dz)
-      - middle layers: s_fac[k] = s_rate · s_fac[k+1] (no min-4 cap)
-      - dz rescaled so sum(dz) = ztop exactly (FV3 lines 1981-1983)
-      - sm1_edge with ntimes=2 (iter 636)
-
-  Default ``s_rate = 1.0`` gives uniform middle layers.  Top 8
-  layers use FV3 multipliers (1.05 → 1.6).  Requires km ≥ 18.
-
-  Pairs with iter-639 ``hybrid_z_dz``; both implement FV3's
-  stretched vertical-coord variants.  Lives in
-  ``legoesm.grids.vertical``.
-
-  Tests (6/6 in 1 s):
-  1. Output shape (km,).
-  2. Σ dz = ztop (rescale + sm1_edge invariant).
-  3. All dz > 0.
-  4. No NaN/Inf.
-  5. km < 18 raises ValueError.
-  6. Top > bottom (FV3 stretch pattern).
-
-  Wired into iter-383 sweep (now 210).
+  All 9 ports cumulative: ~58 tests, all wired into iter-383
+  sweep (now 218).
 - **Iters 631-639 (compacted iter 640)**: FV3 grid + vertical-coord
   ancillary ports.  9 iterations add boundary, reduction, vertical,
   and ghost helpers from FV3 fv_grid_utils + fv_eta + fv_grid_tools:
