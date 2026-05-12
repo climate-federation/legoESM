@@ -1195,6 +1195,27 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 733: **refactor iter-729/716 to delegate to iter-732**.
+
+  Two callsites had inline ``delp/Δpeln`` patterns that match the
+  iter-732 ``layer_mean_pressure_fv3`` helper:
+
+      iter-729 ``dry_pressure_fv3`` hydrostatic branch:
+          pd = (1−rq) · delp / Δpeln  →  (1−rq) · layer_mean_pressure_fv3
+
+      iter-716 ``eqv_pot_bolton_fv3`` hydrostatic branch:
+          p_mb = 0.01 · delp / Δpeln  →  0.01 · layer_mean_pressure_fv3
+
+  Both refactors output bit-identical (29/29 supercell, 7/7
+  eqv_pot, 8/8 Bolton, 7/7 dry_pressure tests still pass).
+
+  Tests (4/4 in <1 s):
+  1. iter-729 hydrostatic: pd = (1−rq) · layer_mean_pressure exactly.
+  2. iter-716 Bolton p_mb = 0.01 · layer_mean_pressure exactly.
+  3. iter-692 eqv_pot still produces finite output.
+  4. iter-716 Bolton θ_e still produces finite output.
+
+  Wired into iter-383 sweep (now 297).
 - Iter 732: **``layer_mean_pressure_fv3``** — layer-center pressure p_f.
 
   Faithful port of FV3's standard layer-center pressure diagnostic

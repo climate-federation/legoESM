@@ -3466,8 +3466,8 @@ def eqv_pot_bolton_fv3(
     if hydrostatic:
         if peln is None:
             raise ValueError("hydrostatic=True requires peln")
-        dpeln = peln[..., 1:] - peln[..., :-1]
-        p_mb = 0.01 * delp / dpeln
+        # iter-733: delegate hydrostatic layer-center p to layer_mean_pressure
+        p_mb = 0.01 * layer_mean_pressure_fv3(delp, peln)
     else:
         if delz is None:
             raise ValueError("hydrostatic=False requires delz")
@@ -4992,7 +4992,8 @@ def dry_pressure_fv3(
     if hydrostatic:
         if peln is None:
             raise ValueError("hydrostatic=True requires peln")
-        return one_minus_rq * delp / (peln[..., 1:] - peln[..., :-1])
+        # iter-733: delegate hydrostatic p_f to layer_mean_pressure_fv3
+        return one_minus_rq * layer_mean_pressure_fv3(delp, peln)
     else:
         if pt is None or delz is None:
             raise ValueError("hydrostatic=False requires pt and delz")
