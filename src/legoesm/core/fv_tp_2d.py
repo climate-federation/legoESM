@@ -914,7 +914,8 @@ def _deln_flux(nord, damp, q, fx, fy, cdgrid, mass=None):
 def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
              nord=None, damp_c=None, mass=None,
              apply_cgrid_flux_sync=True,
-             apply_fortran_xppm_boundary=False):
+             apply_fortran_xppm_boundary=False,
+             hord: int = 12):
     """Lin-Rood operator-split 2D transport (Putman & Lin 2007).
 
     Parameters
@@ -1018,7 +1019,8 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
     fy2 = _yppm(q_full[:, 2:-2, :], cry, n, oy_L0, oy_R0, oy_L1, oy_R1,
                 use_duogrid=use_duogrid,
                 apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
-                bounded_domain=bounded_domain)
+                bounded_domain=bounded_domain,
+                hord=hord)
     fyy = yfx * fy2
     q_i = (q * area + fyy[:, :, :-1] - fyy[:, :, 1:]) / ra_y
 
@@ -1029,7 +1031,8 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
     fx2 = _xppm(q_full[:, :, 2:-2], crx, n, ox_L0, ox_R0, ox_L1, ox_R1,
                 use_duogrid=use_duogrid,
                 apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
-                bounded_domain=bounded_domain)
+                bounded_domain=bounded_domain,
+                hord=hord)
     fxx = xfx * fx2
     q_j = (q * area + fxx[:, :-1, :] - fxx[:, 1:, :]) / ra_x
 
@@ -1045,12 +1048,14 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
     fx1 = _xppm(q_i_pad[:, :, 2:-2], crx, n, ox_L0, ox_R0, ox_L1, ox_R1,
                 use_duogrid=use_duogrid,
                 apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
-                bounded_domain=bounded_domain)
+                bounded_domain=bounded_domain,
+                hord=hord)
 
     fy1 = _yppm(q_j_pad[:, 2:-2, :], cry, n, oy_L0, oy_R0, oy_L1, oy_R1,
                 use_duogrid=use_duogrid,
                 apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
-                bounded_domain=bounded_domain)
+                bounded_domain=bounded_domain,
+                hord=hord)
 
     if mass is not None:
         # With mass: fx = 0.5*(fx1+fx2)*mfx, fy = 0.5*(fy1+fy2)*mfy
@@ -1083,7 +1088,8 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
 
 def transport_step(h, ut, vt, dt, cdgrid, mass_target=None,
                    nord=None, damp_c=None,
-                   apply_fortran_xppm_boundary=False, **_kwargs):
+                   apply_fortran_xppm_boundary=False,
+                   hord: int = 12, **_kwargs):
     """Single FV3-style transport step with mass conservation.
 
     Parameters
@@ -1114,7 +1120,8 @@ def transport_step(h, ut, vt, dt, cdgrid, mass_target=None,
     fx, fy = fv_tp_2d(h, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
                       nord=nord, damp_c=damp_c,
                       apply_fortran_xppm_boundary=(
-                          apply_fortran_xppm_boundary))
+                          apply_fortran_xppm_boundary),
+                      hord=hord)
     h_new = h + (fx[:, :-1, :] - fx[:, 1:, :]
                  + fy[:, :, :-1] - fy[:, :, 1:]) / area
 

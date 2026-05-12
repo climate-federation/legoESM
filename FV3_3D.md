@@ -1195,6 +1195,24 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 596: **``hord`` plumbed through ``fv_tp_2d`` and
+  ``transport_step``**.  Closes iter-595 follow-up; ``hord``
+  now reaches the TOP-LEVEL public transport API.
+  - ``fv_tp_2d`` gains ``hord: int = 12`` kwarg, propagates
+    through 4 internal ``_xppm``/``_yppm`` calls.
+  - ``transport_step`` gains ``hord`` kwarg, propagates to
+    ``fv_tp_2d``.
+  - Defaults preserve pre-iter-596 behavior bit-for-bit.
+  Users can now call:
+
+      transport_step(h, ut, vt, dt, cdgrid, hord=8)
+
+  to switch the entire SW transport to the iord=8 limiter.
+  Tests (3/3 in 14 s):
+  1. ``fv_tp_2d(hord=12)`` = default (bit-for-bit).
+  2. ``fv_tp_2d(hord=8)`` differs from hord=12.
+  3. ``transport_step(hord=8)`` runs, all fields finite.
+  Wired into iter-383 sweep (now 170).
 - Iter 595: **``hord`` parameter plumbed through transport API**.
   Closes the iter 585/592/593 follow-up: the iord=8/10/11
   limiter utilities were standalone; now they're reachable via
