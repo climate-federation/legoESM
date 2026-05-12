@@ -3876,6 +3876,68 @@ def rhines_scale_fv3(
     return jnp.sqrt(jnp.maximum(u_eddy, 0.0) / jnp.maximum(jnp.abs(beta), beta_floor))
 
 
+def equatorial_rossby_radius_fv3(
+    c_wave: jax.Array,
+    beta: jax.Array,
+    beta_floor: float = 1e-15,
+) -> jax.Array:
+    """FV3_3D iter 783: equatorial Rossby radius L_eq = √(c/(2·β)).
+
+    Trapping length scale for equatorial waves (Kelvin, equatorial
+    Rossby, mixed Rossby-gravity / Yanai, inertia-gravity).  Below
+    L_eq from the equator: wave amplitude e-folds Gaussian-like;
+    above L_eq: rotational restoring decouples → off-equator modes.
+
+    The mid-latitude radius L_R = N·H/|f| (iter-781) diverges at
+    f → 0; the equatorial radius uses β instead of f as the
+    rotational scaling:
+
+        L_eq = √(c / (2·β))
+
+    where c = √(g'·H) (shallow-water) or c = N·H/m (baroclinic
+    mode) is the gravity-wave speed.
+
+    Typical values:
+      * Atmospheric Kelvin wave (c ~ 30 m/s, β_eq ~ 2.29·10⁻¹¹):
+        L_eq ≈ √(30/(2·2.29e-11)) ≈ 810 km
+      * Tropical baroclinic mode 1 (c ~ 60 m/s): L_eq ≈ 1145 km
+      * Ocean baroclinic mode 1 (c ~ 2.7 m/s, equatorial Pacific):
+        L_eq ≈ 243 km
+
+    Used by: equatorial wave dispersion analysis (Matsuno 1966
+    spectrum), Madden-Julian Oscillation theory, El Niño coupled
+    Kelvin-Rossby dynamics, equatorial-trapping diagnosis.
+
+    Composes with iter-780 ``beta_plane_fv3``.  Caller computes c
+    from N·H for baroclinic modes, or √(g·H) for external mode.
+
+    ``beta_floor`` clamps |β| > 0 (β never vanishes on Earth except
+    in non-rotating limit).
+
+    Parameters
+    ----------
+    c_wave : jax.Array
+        Gravity-wave speed c (m/s).  Caller derives from N·H for
+        baroclinic vertical modes, or √(g·H_eff) for shallow-water
+        external mode.
+    beta : jax.Array
+        Meridional Coriolis gradient β = df/dy (s⁻¹·m⁻¹) from
+        iter-780 ``beta_plane_fv3``.  Evaluate at the equator
+        for canonical trapping scale.
+    beta_floor : float
+        Lower bound on |β| (s⁻¹·m⁻¹); default 1e-15.
+
+    Returns
+    -------
+    L_eq : jax.Array
+        Equatorial Rossby radius (m).
+    """
+    return jnp.sqrt(
+        jnp.maximum(c_wave, 0.0)
+        / (2.0 * jnp.maximum(jnp.abs(beta), beta_floor))
+    )
+
+
 def kinetic_energy_fv3(
     ua: jax.Array,
     va: jax.Array,

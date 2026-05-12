@@ -370,6 +370,7 @@ _GUARD_MODULES = (
     "test_fv3_beta_plane_iter780",                   # iter-780 add
     "test_fv3_rossby_radius_iter781",                # iter-781 add
     "test_fv3_rhines_scale_iter782",                 # iter-782 add
+    "test_fv3_equatorial_rossby_radius_iter783",     # iter-783 add
 )
 
 

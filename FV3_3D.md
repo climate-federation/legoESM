@@ -5022,4 +5022,52 @@ Together with iter-781 L_R, this closes the canonical
 length-scale pair for rotating stratified flow.  Pure JAX, vmap-
 compatible.  No new physical constants introduced.
 
+## Iter 783 — equatorial_rossby_radius_fv3 (L_eq = √(c/(2β)))
+
+Added `equatorial_rossby_radius_fv3(c_wave, beta,
+beta_floor=1e-15)` to `grids/cubed_sphere.py`.  Equatorial
+trapping length scale:
+
+```
+L_eq = √(c / (2·max(|β|, beta_floor)))     [m]
+```
+
+Complements iter-781 L_R = N·H/|f|, which diverges as f → 0 at
+the equator.  L_eq uses β (the leading-order rotational term on
+the equatorial β-plane) instead of f.
+
+Typical values:
+  * Atmospheric Kelvin wave (c=30 m/s, β_eq=2.29·10⁻¹¹): L_eq ≈ 810 km
+  * Tropical baroclinic mode 1 (c=60 m/s): L_eq ≈ 1145 km
+  * Ocean baroclinic mode 1 (c=2.7 m/s): L_eq ≈ 243 km
+
+Used by equatorial-wave dispersion analysis (Matsuno 1966
+spectrum: Kelvin, equatorial Rossby, mixed Rossby-gravity /
+Yanai, inertia-gravity), Madden-Julian Oscillation theory,
+El Niño coupled Kelvin-Rossby dynamics, equatorial-trapping
+diagnosis.
+
+Caller passes c_wave derived from N·H for baroclinic modes, or
+√(g·H_eff) for shallow-water external mode.
+
+Test: `tests/test_fv3_equatorial_rossby_radius_iter783.py` (7
+tests: atmospheric Kelvin ≈ 810 km, ocean baroclinic ≈ 243 km,
+c=0 → L=0, monotone c, monotone β, full iter-780 pipeline at
+equator, 3-D shapes + finite + non-negative).
+
+### Why this iteration was meaningful
+
+The mid-latitude L_R from iter-781 breaks down at the equator
+(f → 0).  L_eq fills the gap: it sets the Gaussian-trapping
+envelope width of the entire Matsuno equatorial-wave spectrum
+(Kelvin, Rossby, MRG, IG).  Critical for: (1) MJO theoretical
+length-scale predictions; (2) Pacific Niño 3.4 region Kelvin-
+wave propagation diagnostics; (3) tropical-channel model
+boundary-condition decisions (channel must be wider than several
+L_eq to avoid spurious reflection); (4) cross-equatorial mode
+analysis.  Together with iter-781 (mid-lat L_R), iter-782 (L_β),
+the QG length-scale hierarchy is now complete from poles to
+equator.  Pure JAX, vmap-compatible.  No new physical constants
+introduced.
+
 
