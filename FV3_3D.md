@@ -1081,6 +1081,20 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 523: **mass conservation under SBR + clip context**.
+  Critical Earth-system check: does iter-466/505 stack break
+  conservation?  Sum(ρ' · area · dz) over the full cube at
+  step 0, 5, 10 under min-edge + clip context:
+  - step  0: m₀ = 3.731415e+18
+  - step  5: rel drift = +5.30e-09
+  - step 10: rel drift = +5.30e-09
+  Conservation to **~5 parts per billion** — essentially
+  float64 machine precision.  iter-466/505 stack does NOT
+  break mass conservation despite 11 patched halo sites.
+  Note: rho_prime in NH is the perturbation from a 1D
+  reference state, so this measures perturbation-mass
+  conservation, which is the relevant quantity.  1/1 in
+  51 s.  Wired into iter-383 sweep (now 112).
 - Iter 522: **AD-at-rest through ``monotone_halo_clip_context``**.
   iter-505 helper uses ``unittest.mock.patch`` to monkey-
   patch 11 halo aliases.  Critical question: does

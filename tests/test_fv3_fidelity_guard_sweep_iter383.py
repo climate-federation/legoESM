@@ -135,6 +135,7 @@ _GUARD_MODULES = (
     "test_cube_smooth_ic_iter519",                   # iter-519 add
     "test_sbr_ic_iter521",                           # iter-521 add
     "test_clip_context_ad_iter522",                  # iter-522 add
+    "test_mass_conservation_sbr_iter523",            # iter-523 add
 )
 
 
