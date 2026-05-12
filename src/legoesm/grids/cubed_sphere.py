@@ -1304,6 +1304,77 @@ def get_center_vect(
     return u1, u2
 
 
+def mirror_grid_face1_symmetrize(
+    face1_lon: jax.Array, face1_lat: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 625: face-1 SIGN-averaging symmetrization.
+
+    Faithful port of FV3 ``mirror_grid`` first loop
+    (fv_grid_tools.F90:2774-2807).  Symmetrizes face 1 about both
+    the lon=0 meridian (i-axis) and the equator (j-axis) by:
+
+        1. For each symmetric 4-tuple of grid points
+           ``(i, j), (npx-i+1, j), (i, npy-j+1), (npx-i+1, npy-j+1)``:
+        2. Compute the average of the absolute values, then assign
+           ``SIGN(avg, original_value)`` to each of the 4 corners.
+
+    Result: ``|lon|`` and ``|lat|`` are pairwise-equal across the
+    mirror, preserving the sign-pattern of the original grid.
+
+    For odd ``npx``, the central column ``i = (npx+1)/2`` is
+    forced to ``lon = 0`` (FV3 lines 2799-2804).
+
+    Parameters
+    ----------
+    face1_lon, face1_lat : jax.Array, shape ``(npx, npy)``
+        Face-1 corner positions in radians.
+
+    Returns
+    -------
+    lon_sym, lat_sym : jax.Array, shape ``(npx, npy)``
+        Symmetrized face-1 grid.
+    """
+    npx = face1_lon.shape[0]
+    npy = face1_lon.shape[1]
+
+    # Build mirrors via reverse-indexing
+    lon = face1_lon
+    lat = face1_lat
+    # 4-tuple of absolute lons
+    avg_abs_lon = 0.25 * (
+        jnp.abs(lon)
+        + jnp.abs(lon[::-1, :])
+        + jnp.abs(lon[:, ::-1])
+        + jnp.abs(lon[::-1, ::-1])
+    )
+    avg_abs_lat = 0.25 * (
+        jnp.abs(lat)
+        + jnp.abs(lat[::-1, :])
+        + jnp.abs(lat[:, ::-1])
+        + jnp.abs(lat[::-1, ::-1])
+    )
+    # Apply SIGN(avg, original_value)
+    lon_sym = jnp.copysign(avg_abs_lon, lon)
+    lat_sym = jnp.copysign(avg_abs_lat, lat)
+
+    # Odd-npx central column: lon = 0
+    if npx % 2 == 1:
+        center_i = (npx - 1) // 2
+        lon_sym = lon_sym.at[center_i, :].set(0.0)
+    if npy % 2 == 1:
+        # FV3 doesn't have a corresponding odd-npy clause for lat=0,
+        # but if the grid is symmetric about the equator, lat=0
+        # naturally at j-center; SIGN-averaging already enforces this.
+        center_j = (npy - 1) // 2
+        # lat at center row is already 0 by symmetry; force exactly 0
+        lat_sym = lat_sym.at[:, center_j].set(
+            jnp.where(jnp.abs(lat_sym[:, center_j]) < 1e-12, 0.0,
+                      lat_sym[:, center_j])
+        )
+
+    return lon_sym, lat_sym
+
+
 def mirror_grid_faces(
     face1_lon: jax.Array, face1_lat: jax.Array,
 ) -> tuple[jax.Array, jax.Array]:

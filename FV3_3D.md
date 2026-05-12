@@ -1195,6 +1195,39 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 625: **FV3 ``mirror_grid_face1_symmetrize``** — face-1
+  SIGN-averaging symmetrization.  Faithful JAX port of FV3
+  ``mirror_grid`` first loop (fv_grid_tools.F90:2774-2807).
+  Symmetrizes face 1 about both the lon=0 meridian (i-axis) and
+  the equator (j-axis):
+
+      For each 4-tuple (i,j), (npx-i+1,j), (i,npy-j+1),
+                       (npx-i+1,npy-j+1):
+        avg = mean of |lon| at 4 corners
+        each corner → SIGN(avg, original lon)
+        same for |lat|
+
+  Result: |lon| and |lat| equal across the mirror,
+  preserving the sign-pattern of the original grid.
+
+  For odd ``npx``, central column ``i = (npx+1)/2`` is forced to
+  ``lon = 0`` (FV3 lines 2799-2804).
+
+  This pairs with iter-624 ``mirror_grid_faces``: the FV3
+  ``mirror_grid`` full pipeline now reproducible as::
+
+      lon_sym, lat_sym = mirror_grid_face1_symmetrize(lon1, lat1)
+      lons, lats = mirror_grid_faces(lon_sym, lat_sym)
+
+  Tests (6/6 in 5 s):
+  1. Shape preserved.
+  2. Idempotent.
+  3. |lon| symmetric about i-mirror.
+  4. |lat| symmetric about j-mirror.
+  5. Odd-npx central column lon = 0.
+  6. Applied to already-symmetric input → diff < 1e-3.
+
+  Wired into iter-383 sweep (now 196).
 - Iter 624: **FV3 ``mirror_grid_faces``** — 6-face cubed-sphere
   from face 1.  Faithful JAX port of FV3 ``mirror_grid``
   faces-2-to-6 rotation sequence (fv_grid_tools.F90:2809-2897).
