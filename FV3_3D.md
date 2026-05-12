@@ -4978,3 +4978,35 @@ compatible, and compose with the iter-715 saturation-blend /
 iter-720 helper / iter-736 Exner stack.  No new physical
 constants — `constants.kappa` suffices.
 
+## Iter 765 — LCL height helper (completes the LCL state triad)
+
+Added `lcl_height_fv3(z_parcel, pt, t_lcl, cp_air=None, g=None)`
+to `grids/cubed_sphere.py`.  Algorithm: geopotential height of
+LCL from dry-adiabatic + hydrostatic + ideal-gas:
+
+```
+dz/dT = (dz/dp) · (dp/dT) = (−RT/(p·g)) · (p/(κT)) = −cp/g
+⇒ z_LCL = z_parcel + (cp_d / g) · (T − T_LCL)
+```
+
+Since T_LCL < T (cooling required to reach saturation), z_LCL >
+z_parcel (LCL always above parcel source).  Completes the
+(T_LCL, p_LCL, z_LCL) triad together with iter-763 + iter-764.
+Defaults `cp_air = constants.c_pd`, `g = constants.g`.  Test:
+`tests/test_fv3_lcl_height_iter765.py` (6 tests: dry case
+identity, z_LCL>z_parcel cooling case + analytic Δz check,
+iter-763 + iter-764 + iter-765 triad cross-check, 3-D shapes,
+finite, explicit cp_air+g overrides match defaults).  Sweep
+entry added.
+
+### Why this iteration was meaningful
+
+The (T, p, z) LCL state is needed for: (1) CAPE/CIN integrals
+over the parcel ascent column where the LCL marks the transition
+from dry- to moist-adiabatic lapse; (2) supercell helicity
+metrics that integrate over a fixed-height layer requiring LCL-
+relative geometry; (3) storm-relative parcel sources where the
+LCL height directly enters as a vertical scale.  Total cost: ~3
+lines of source.  Pure JAX, vmap-compatible.  No new physical
+constants — `constants.c_pd` and `constants.g` suffice.
+

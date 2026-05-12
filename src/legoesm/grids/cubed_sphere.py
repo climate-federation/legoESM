@@ -3995,6 +3995,50 @@ def lcl_pressure_fv3(
     return p * (t_lcl / pt) ** (1.0 / kap)
 
 
+def lcl_height_fv3(
+    z_parcel: jax.Array,
+    pt: jax.Array,
+    t_lcl: jax.Array,
+    cp_air: float | jax.Array | None = None,
+    g: float | jax.Array | None = None,
+) -> jax.Array:
+    """FV3_3D iter 765: geopotential height of LCL.
+
+    On a dry adiabat (θ conserved) under hydrostatic balance with
+    ideal-gas EOS:
+
+        dz/dT = (dz/dp) · (dp/dT) = (−RT/(p·g)) · (p/(κT)) = −cp/g
+
+    Integrating from parcel (z, T) up to (z_LCL, T_LCL):
+
+        z_LCL = z + (cp / g) · (T − T_LCL)
+
+    Since T_LCL < T (cooling required), z_LCL > z (LCL above
+    parcel).  Companion to iter-763 ``lcl_temperature_fv3`` and
+    iter-764 ``lcl_pressure_fv3``; completes the LCL state triad
+    (T_LCL, p_LCL, z_LCL) for parcel-lift diagnostics.
+
+    Parameters
+    ----------
+    z_parcel : jax.Array
+        Parcel geopotential height (m).
+    pt : jax.Array
+        Parcel temperature (K).
+    t_lcl : jax.Array
+        LCL temperature (K, from iter-763).
+    cp_air : float or jax.Array, optional.  Default ``constants.c_pd``.
+    g : float or jax.Array, optional.  Default ``constants.g``.
+
+    Returns
+    -------
+    z_lcl : jax.Array
+        LCL geopotential height (m, > z_parcel).
+    """
+    cp = constants.c_pd if cp_air is None else cp_air
+    g_val = constants.g if g is None else g
+    return z_parcel + (cp / g_val) * (pt - t_lcl)
+
+
 def lcl_temperature_fv3(
     pt: jax.Array,
     p_mb: jax.Array,

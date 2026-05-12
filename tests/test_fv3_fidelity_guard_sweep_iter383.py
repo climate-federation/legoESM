@@ -352,6 +352,7 @@ _GUARD_MODULES = (
     "test_fv3_saturation_deficit_iter762",           # iter-762 add
     "test_fv3_lcl_temperature_iter763",              # iter-763 add
     "test_fv3_lcl_pressure_iter764",                 # iter-764 add
+    "test_fv3_lcl_height_iter765",                   # iter-765 add
 )
 
 
