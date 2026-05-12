@@ -247,6 +247,11 @@ def create_cubed_sphere(
     use_duogrid: bool = False,
     k2e_nord: int = 2,
     duogrid_ng: int | None = None,
+    stretch_fac: float = 1.0,
+    target_lon: float = 0.0,
+    target_lat: float = -0.5 * 3.141592653589793,  # -π/2 = no rotation
+    do_cube_transform: bool = False,
+    shift_fac: float = 0.0,
 ) -> CubedSphereGrid:
     """Create a cubed-sphere grid.
 
@@ -268,6 +273,30 @@ def create_cubed_sphere(
     """
     # Compute gnomonic coordinates on each face
     lon, lat = _compute_gnomonic_lonlat(n)
+
+    # FV3_3D iter 586/589: optional Schmidt stretching.
+    apply_schmidt = (
+        abs(stretch_fac - 1.0) > 1e-5
+        or target_lat > -0.5 * jnp.pi + 1e-5
+    )
+    if apply_schmidt:
+        if do_cube_transform:
+            # FV3 cube_transform (fv_grid_utils.F90:920-980)
+            lon, lat = cube_transform(
+                lon, lat, stretch_fac, target_lon, target_lat,
+            )
+        else:
+            # FV3 direct_transform / do_schmidt (fv_grid_utils.F90:870-917)
+            lon, lat = schmidt_transform(
+                lon, lat, stretch_fac, target_lon, target_lat,
+            )
+
+    # FV3_3D iter 591: shift_fac longitude shift (FV3 fv_grid_tools.F90:662-663).
+    # Only applied when NOT using Schmidt/cube_transform (gated in FV3).
+    # FV3 default shift_fac=18 → west-shift by π/18 = 10° (away from Japan).
+    if shift_fac > 1e-4 and not apply_schmidt:
+        lon = lon - jnp.pi / shift_fac
+        lon = jnp.where(lon < 0.0, lon + 2.0 * jnp.pi, lon)
 
     # Cartesian coordinates on unit sphere
     cos_lat = jnp.cos(lat)
@@ -391,6 +420,182 @@ def create_cubed_sphere(
     precompute_halo_tables(n)
 
     return grid
+
+
+def schmidt_transform(
+    lon: jax.Array,
+    lat: jax.Array,
+    stretch_fac: float,
+    target_lon: float,
+    target_lat: float,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 586: Schmidt transformation for stretched cubed-sphere.
+
+    Faithful port of FV3 ``direct_transform`` (fv_grid_utils.F90:870-917).
+    Applies a conformal stretching that locally enhances resolution at
+    ``(target_lon, target_lat)`` by factor ``stretch_fac``.
+
+    Algorithm:
+    1. Latitude stretching:
+           lat_t = asin( (c²-1 + (c²+1)·sin_lat) / (c²+1 + (c²-1)·sin_lat) )
+       where c = stretch_fac.  c > 1 → stretching (high-res near target).
+    2. Pole rotation: rotate the stretched-pole frame so the new pole
+       lies at (target_lon, target_lat).
+
+    Parameters
+    ----------
+    lon, lat : jax.Array
+        Input gnomonic coordinates (any shape).  Lat in [-π/2, π/2],
+        lon in [0, 2π].
+    stretch_fac : float
+        Stretching factor c.  1.0 = no stretch.  Typical 2-5 for regional
+        focus.  When |c-1| < 1e-5 stretching is skipped (only rotation).
+    target_lon, target_lat : float
+        Center of high-res face in radians.  When target_lat = -π/2
+        (equivalent of FV3 default -90°), no rotation applied.
+
+    Returns
+    -------
+    lon_new, lat_new : jax.Array
+        Transformed coordinates.
+
+    Notes
+    -----
+    Faithful to FV3.  Adds stretched-grid support to ``create_cubed_sphere``
+    via the ``stretch_fac``/``target_*`` kwargs.  Closes user audit item
+    #1 (stretched grid) partial — nested grids (2-way refinement) deferred.
+    """
+    c = stretch_fac
+    c2p1 = 1.0 + c * c
+    c2m1 = 1.0 - c * c
+
+    # Step 1: latitude stretching.
+    sin_lat = jnp.sin(lat)
+    # When |c²-1| < 1e-7, no stretching → lat_t = lat.
+    do_stretch = abs(c2m1) > 1e-7
+    if do_stretch:
+        lat_t = jnp.arcsin(
+            (c2m1 + c2p1 * sin_lat) / (c2p1 + c2m1 * sin_lat)
+        )
+    else:
+        lat_t = lat
+
+    # Step 2: pole rotation to (target_lon, target_lat).
+    sin_p = jnp.sin(target_lat)
+    cos_p = jnp.cos(target_lat)
+    sin_lat_t = jnp.sin(lat_t)
+    cos_lat_t = jnp.cos(lat_t)
+    cos_lon_old = jnp.cos(lon)
+    sin_lon_old = jnp.sin(lon)
+
+    sin_o = -(sin_p * sin_lat_t + cos_p * cos_lat_t * cos_lon_old)
+    sin_o = jnp.clip(sin_o, -1.0, 1.0)  # numerical safety for asin
+
+    is_pole = (1.0 - jnp.abs(sin_o)) < 1e-7
+    p2 = 0.5 * jnp.pi
+    two_pi = 2.0 * jnp.pi
+
+    # Non-pole branch
+    lat_rot = jnp.arcsin(sin_o)
+    lon_rot = target_lon + jnp.arctan2(
+        -cos_lat_t * sin_lon_old,
+        -sin_lat_t * cos_p + cos_lat_t * sin_p * cos_lon_old,
+    )
+    lon_rot = jnp.where(lon_rot < 0.0, lon_rot + two_pi, lon_rot)
+    lon_rot = jnp.where(lon_rot >= two_pi, lon_rot - two_pi, lon_rot)
+
+    # Pole branch
+    lat_pole = jnp.sign(sin_o) * p2
+    lon_pole = jnp.zeros_like(lon_rot)
+
+    lon_new = jnp.where(is_pole, lon_pole, lon_rot)
+    lat_new = jnp.where(is_pole, lat_pole, lat_rot)
+    return lon_new, lat_new
+
+
+def cube_transform(
+    lon: jax.Array,
+    lat: jax.Array,
+    stretch_fac: float,
+    target_lon: float,
+    target_lat: float,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 589: cube_transform (revised Schmidt at north pole).
+
+    Faithful port of FV3 ``cube_transform`` (fv_grid_utils.F90:920-980).
+    Same algorithm as ``schmidt_transform`` (iter 586) but with a
+    ``lon += π`` shift before the pole rotation to get the final
+    orientation correct.  Selected by FV3 namelist via
+    ``do_cube_transform=.true.`` (alternative to ``do_schmidt``).
+
+    Algorithm:
+    1. Latitude stretching (identical to direct_transform):
+       ``lat_t = asin((c²-1 + (c²+1)·sin_lat) / (c²+1 + (c²-1)·sin_lat))``
+    2. **Add π to lon** (the only difference from direct_transform).
+    3. Pole rotation to (target_lon, target_lat).
+
+    Parameters
+    ----------
+    lon, lat : jax.Array
+        Input gnomonic coordinates.  Lat ∈ [-π/2, π/2], lon ∈ [0, 2π].
+    stretch_fac : float
+        Stretching factor c.  1.0 = no stretch.
+    target_lon, target_lat : float
+        Center of high-res face in radians.
+
+    Returns
+    -------
+    lon_new, lat_new : jax.Array
+        Transformed coordinates.
+
+    See Also
+    --------
+    schmidt_transform : iter 586, ``do_schmidt`` variant (no π shift).
+    """
+    c = stretch_fac
+    c2p1 = 1.0 + c * c
+    c2m1 = 1.0 - c * c
+
+    sin_lat = jnp.sin(lat)
+    do_stretch = abs(c2m1) > 1e-7
+    if do_stretch:
+        lat_t = jnp.arcsin(
+            (c2m1 + c2p1 * sin_lat) / (c2p1 + c2m1 * sin_lat)
+        )
+    else:
+        lat_t = lat
+
+    sin_p = jnp.sin(target_lat)
+    cos_p = jnp.cos(target_lat)
+    sin_lat_t = jnp.sin(lat_t)
+    cos_lat_t = jnp.cos(lat_t)
+
+    # iter-589: the only difference from schmidt_transform — lon += π
+    lon_pi = lon + jnp.pi
+    cos_lon_pi = jnp.cos(lon_pi)
+    sin_lon_pi = jnp.sin(lon_pi)
+
+    sin_o = -(sin_p * sin_lat_t + cos_p * cos_lat_t * cos_lon_pi)
+    sin_o = jnp.clip(sin_o, -1.0, 1.0)
+
+    is_pole = (1.0 - jnp.abs(sin_o)) < 1e-7
+    p2 = 0.5 * jnp.pi
+    two_pi = 2.0 * jnp.pi
+
+    lat_rot = jnp.arcsin(sin_o)
+    lon_rot = target_lon + jnp.arctan2(
+        -cos_lat_t * sin_lon_pi,
+        -sin_lat_t * cos_p + cos_lat_t * sin_p * cos_lon_pi,
+    )
+    lon_rot = jnp.where(lon_rot < 0.0, lon_rot + two_pi, lon_rot)
+    lon_rot = jnp.where(lon_rot >= two_pi, lon_rot - two_pi, lon_rot)
+
+    lat_pole = jnp.sign(sin_o) * p2
+    lon_pole = jnp.zeros_like(lon_rot)
+
+    lon_new = jnp.where(is_pole, lon_pole, lon_rot)
+    lat_new = jnp.where(is_pole, lat_pole, lat_rot)
+    return lon_new, lat_new
 
 
 def _compute_gnomonic_lonlat(n: int) -> tuple[jax.Array, jax.Array]:
@@ -636,6 +841,590 @@ def great_circle_distance(
     dlon = lon2 - lon1
     a = jnp.sin(dlat / 2)**2 + jnp.cos(lat1) * jnp.cos(lat2) * jnp.sin(dlon / 2)**2
     return 2.0 * radius * jnp.arcsin(jnp.sqrt(jnp.clip(a, 0.0, 1.0)))
+
+
+def mid_pt_sphere(
+    lon1: jax.Array, lat1: jax.Array,
+    lon2: jax.Array, lat2: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 608: great-circle midpoint of two (lon, lat) points.
+
+    Faithful port of FV3 ``mid_pt_sphere`` (fv_grid_utils.F90:1981-1992).
+    Algorithm:
+        1. (lon, lat) → 3D Cartesian unit vector e
+        2. e_mid = (e1 + e2) / 2 (Cartesian midpoint)
+        3. Normalize e_mid → unit sphere
+        4. Cartesian → (lon, lat)
+
+    The result is the point on the great circle through (p1, p2)
+    equidistant from both endpoints.  NOT the same as the (lon, lat)
+    average — that gives wrong results across the dateline or poles.
+
+    Parameters
+    ----------
+    lon1, lat1, lon2, lat2 : jax.Array (any shape, broadcastable)
+        Two points on the sphere in radians.
+
+    Returns
+    -------
+    lon_mid, lat_mid : jax.Array
+        Midpoint on the great circle (radians).
+    """
+    # latlon → Cartesian
+    cl1, sl1 = jnp.cos(lat1), jnp.sin(lat1)
+    cl2, sl2 = jnp.cos(lat2), jnp.sin(lat2)
+    x1 = cl1 * jnp.cos(lon1)
+    y1 = cl1 * jnp.sin(lon1)
+    z1 = sl1
+    x2 = cl2 * jnp.cos(lon2)
+    y2 = cl2 * jnp.sin(lon2)
+    z2 = sl2
+    # Cartesian midpoint
+    xm = 0.5 * (x1 + x2)
+    ym = 0.5 * (y1 + y2)
+    zm = 0.5 * (z1 + z2)
+    # Normalize to unit sphere
+    norm = jnp.sqrt(xm * xm + ym * ym + zm * zm)
+    norm = jnp.where(norm > 1e-30, norm, 1.0)
+    xm = xm / norm
+    ym = ym / norm
+    zm = zm / norm
+    # Back to (lon, lat)
+    lat_mid = jnp.arcsin(jnp.clip(zm, -1.0, 1.0))
+    lon_mid = jnp.arctan2(ym, xm)
+    # Wrap lon to [0, 2π)
+    lon_mid = jnp.where(lon_mid < 0.0, lon_mid + 2.0 * jnp.pi, lon_mid)
+    return lon_mid, lat_mid
+
+
+def latlon2xyz(
+    lon: jax.Array, lat: jax.Array
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """FV3_3D iter 611: FV3-named alias for ``lonlat_to_cartesian``.
+
+    Faithful port of FV3 ``latlon2xyz`` (fv_grid_utils.F90:1639-1665).
+    Convert (lon, lat) in radians to 3D Cartesian unit-sphere
+    coordinates::
+
+        x = cos(lat) cos(lon)
+        y = cos(lat) sin(lon)
+        z = sin(lat)
+    """
+    return lonlat_to_cartesian(lon, lat)
+
+
+def xyz2latlon(
+    x: jax.Array, y: jax.Array, z: jax.Array,
+    eps: float = 1e-10,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 611: Cartesian → (lon, lat) inverse of ``latlon2xyz``.
+
+    Faithful port of FV3 ``cart_to_latlon`` (fv_grid_utils.F90:1739-1777).
+    Normalizes (x, y, z) to the unit sphere first; returns ``lon`` in
+    ``[0, 2π)`` and ``lat`` in ``[-π/2, π/2]``.
+
+    Matches FV3's ``esl=1.d-10`` guard near the poles (where
+    ``|x|+|y| < esl``, longitude is set to 0).
+    """
+    dist = jnp.sqrt(x * x + y * y + z * z)
+    safe = jnp.where(dist > 0.0, dist, 1.0)
+    x_n = x / safe
+    y_n = y / safe
+    z_n = z / safe
+    lat = jnp.arcsin(jnp.clip(z_n, -1.0, 1.0))
+    near_pole = (jnp.abs(x_n) + jnp.abs(y_n)) < eps
+    lon = jnp.where(near_pole, 0.0, jnp.arctan2(y_n, x_n))
+    lon = jnp.where(lon < 0.0, lon + 2.0 * jnp.pi, lon)
+    return lon, lat
+
+
+def inner_prod(
+    v1: jax.Array, v2: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 611: Cartesian dot product.
+
+    Faithful port of FV3 ``inner_prod`` (fv_grid_utils.F90:984-998).
+    Takes the last axis as the 3-vector component; broadcasts over
+    leading axes.  Each ``v1`` and ``v2`` is shape ``(..., 3)``.
+    """
+    return jnp.sum(v1 * v2, axis=-1)
+
+
+def vect_cross(
+    p1: jax.Array, p2: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 611: Cartesian cross product ``e = p1 × p2``.
+
+    Faithful port of FV3 ``vect_cross`` (fv_grid_utils.F90:1781-1791).
+    Takes the last axis as the 3-vector component; broadcasts over
+    leading axes.
+    """
+    return jnp.cross(p1, p2, axis=-1)
+
+
+def normalize_vect(
+    e: jax.Array, eps: float = 1e-30,
+) -> jax.Array:
+    """FV3_3D iter 611: normalize Cartesian vector to unit length.
+
+    Faithful port of FV3 ``normalize_vect`` (fv_grid_utils.F90:
+    1880-1893).  Takes the last axis as the 3-vector component;
+    broadcasts over leading axes.  Zero-vector input returns the
+    input unchanged (avoiding NaN).
+    """
+    pdot = jnp.sqrt(jnp.sum(e * e, axis=-1, keepdims=True))
+    safe = jnp.where(pdot > eps, pdot, 1.0)
+    return e / safe
+
+
+def mid_pt3_cart(
+    p1: jax.Array, p2: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 611: Cartesian-input great-circle midpoint.
+
+    Faithful port of FV3 ``mid_pt3_cart`` (fv_grid_utils.F90:
+    1996-2022).  Returns the normalized sum (p1 + p2) / |p1 + p2|.
+
+    Takes the last axis as the 3-vector component; broadcasts over
+    leading axes.  Each of ``p1``, ``p2`` should already be on the
+    unit sphere (no extra normalization beyond the post-sum step).
+    """
+    return normalize_vect(p1 + p2)
+
+
+def mid_pt_cart(
+    lon1: jax.Array, lat1: jax.Array,
+    lon2: jax.Array, lat2: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 611: (lon, lat)-input → Cartesian midpoint vector.
+
+    Faithful port of FV3 ``mid_pt_cart`` (fv_grid_utils.F90:
+    2026-2036).  Convenience for code that takes (lon, lat) inputs
+    but wants the Cartesian midpoint (e.g., FV3 grid generation).
+    Returns shape ``(..., 3)``.
+    """
+    x1, y1, z1 = latlon2xyz(lon1, lat1)
+    x2, y2, z2 = latlon2xyz(lon2, lat2)
+    p1 = jnp.stack([x1, y1, z1], axis=-1)
+    p2 = jnp.stack([x2, y2, z2], axis=-1)
+    return mid_pt3_cart(p1, p2)
+
+
+def get_unit_vect2(
+    lon1: jax.Array, lat1: jax.Array,
+    lon2: jax.Array, lat2: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 611: unit tangent vector at the GC midpoint.
+
+    Faithful port of FV3 ``get_unit_vect2`` (fv_grid_utils.F90:
+    1848-1863).  Returns the unit tangent vector to the great
+    circle through (e1, e2), evaluated at the midpoint and pointing
+    from e1 toward e2.  Used in FV3 ``edge_factors`` /
+    ``efactor_a2c_v`` for metric construction.
+
+    Algorithm:
+        p1 = latlon2xyz(e1)
+        p2 = latlon2xyz(e2)
+        pc = mid_pt3_cart(p1, p2)
+        p3 = p2 × p1           (great-circle pole)
+        uc = pc × p3           (tangent at pc)
+        uc / |uc|
+
+    Returns shape ``(..., 3)``.
+    """
+    x1, y1, z1 = latlon2xyz(lon1, lat1)
+    x2, y2, z2 = latlon2xyz(lon2, lat2)
+    p1 = jnp.stack([x1, y1, z1], axis=-1)
+    p2 = jnp.stack([x2, y2, z2], axis=-1)
+    pc = mid_pt3_cart(p1, p2)
+    p3 = vect_cross(p2, p1)
+    uc = vect_cross(pc, p3)
+    return normalize_vect(uc)
+
+
+def mirror_xyz(
+    p1: jax.Array, p2: jax.Array, p0: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 612: reflect ``p0`` across great-circle plane (p1, p2).
+
+    Faithful port of FV3 ``mirror_xyz`` (fv_grid_utils.F90:1668-1702).
+    The mirror plane is the great circle through ``p1`` and ``p2``;
+    the plane normal is ``nb = (p1 × p2) / |p1 × p2|``.  Mirror image
+    of ``p0`` is::
+
+        p = p0 - 2·(p0·nb)·nb
+
+    Used in FV3 cubed-sphere grid generation (panel reflections
+    across face symmetry planes).
+
+    Takes the last axis as the 3-vector component; broadcasts on
+    leading axes.  Each of ``p1``, ``p2``, ``p0`` is shape
+    ``(..., 3)``; result is ``(..., 3)``.
+    """
+    nb_raw = vect_cross(p1, p2)
+    nb = normalize_vect(nb_raw)
+    pdot = jnp.sum(p0 * nb, axis=-1, keepdims=True)
+    return p0 - 2.0 * pdot * nb
+
+
+def mirror_latlon(
+    lon1: jax.Array, lat1: jax.Array,
+    lon2: jax.Array, lat2: jax.Array,
+    lon0: jax.Array, lat0: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 612: (lon, lat) reflection across great-circle (p1,p2).
+
+    Faithful port of FV3 ``mirror_latlon`` (fv_grid_utils.F90:
+    1705-1736).  Converts inputs to Cartesian, calls ``mirror_xyz``,
+    converts back.  Returns ``(lon3, lat3)`` of the mirror image.
+    """
+    x1, y1, z1 = latlon2xyz(lon1, lat1)
+    x2, y2, z2 = latlon2xyz(lon2, lat2)
+    x0, y0, z0 = latlon2xyz(lon0, lat0)
+    p1 = jnp.stack([x1, y1, z1], axis=-1)
+    p2 = jnp.stack([x2, y2, z2], axis=-1)
+    p0 = jnp.stack([x0, y0, z0], axis=-1)
+    p3 = mirror_xyz(p1, p2, p0)
+    return xyz2latlon(p3[..., 0], p3[..., 1], p3[..., 2])
+
+
+def intp_great_circle(
+    beta: jax.Array,
+    lon1: jax.Array, lat1: jax.Array,
+    lon2: jax.Array, lat2: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 612: linear-in-Cartesian great-circle interpolation.
+
+    Faithful port of FV3 ``intp_great_circle`` (fv_grid_utils.F90:
+    1896-1925).  At ``beta ∈ [0, 1]`` interpolates from ``p1``
+    (β=0) to ``p2`` (β=1) along the great circle::
+
+        s = (1-β)·e1 + β·e2;   e_out = s / |s|
+
+    NOTE: this is the SECANT linear interpolant projected to the
+    sphere — NOT slerp.  For β=0.5 it matches ``mid_pt_sphere``.
+    For an arc-length-uniform variant use ``slerp``.
+    """
+    alpha = 1.0 - beta
+    x1, y1, z1 = latlon2xyz(lon1, lat1)
+    x2, y2, z2 = latlon2xyz(lon2, lat2)
+    s1 = alpha * x1 + beta * x2
+    s2 = alpha * y1 + beta * y2
+    s3 = alpha * z1 + beta * z2
+    dd = jnp.sqrt(s1 * s1 + s2 * s2 + s3 * s3)
+    safe = jnp.where(dd > 0.0, dd, 1.0)
+    return xyz2latlon(s1 / safe, s2 / safe, s3 / safe)
+
+
+def slerp(
+    beta: jax.Array,
+    lon1: jax.Array, lat1: jax.Array,
+    lon2: jax.Array, lat2: jax.Array,
+    eps_omg: float = 1e-5,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 612: spherical linear interpolation (Shoemake slerp).
+
+    Faithful port of FV3 ``spherical_linear_interpolation``
+    (fv_grid_utils.F90:1927-1979).  Arc-length-uniform
+    interpolation along the great circle::
+
+        ω = acos(e1·e2)
+        e_b = (sin((1-β)ω)·e1 + sin(βω)·e2) / sin(ω)
+
+    Returns ``(lon_b, lat_b)`` at parameter ``β ∈ [0, 1]``.
+
+    Antipodal-point safety: FV3 raises a fatal error for
+    ``|ω| < 1e-5``; here we silently return the secant interpolant
+    (well-defined for ω=0 colocated points; near-antipodal points
+    still have ambiguous slerp direction so caller should avoid).
+    """
+    alpha = 1.0 - beta
+    x1, y1, z1 = latlon2xyz(lon1, lat1)
+    x2, y2, z2 = latlon2xyz(lon2, lat2)
+    dot = jnp.clip(x1 * x2 + y1 * y2 + z1 * z2, -1.0, 1.0)
+    omg = jnp.arccos(dot)
+    sin_omg = jnp.sin(omg)
+    safe_sin = jnp.where(jnp.abs(sin_omg) > eps_omg, sin_omg, 1.0)
+    w1 = jnp.sin(alpha * omg) / safe_sin
+    w2 = jnp.sin(beta * omg) / safe_sin
+    # Fallback to secant for tiny ω (well-defined colocated case)
+    secant = jnp.abs(omg) <= eps_omg
+    w1 = jnp.where(secant, alpha, w1)
+    w2 = jnp.where(secant, beta, w2)
+    xb = w1 * x1 + w2 * x2
+    yb = w1 * y1 + w2 * y2
+    zb = w1 * z1 + w2 * z2
+    return xyz2latlon(xb, yb, zb)
+
+
+def spherical_angle(
+    p1: jax.Array, p2: jax.Array, p3: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 613: angle at vertex ``p1`` of spherical triangle (p1, p2, p3).
+
+    Faithful port of FV3 ``spherical_angle`` (fv_grid_utils.F90:
+    2838-2895).  Computes::
+
+        P = p1 × p2
+        Q = p1 × p3
+        cos(angle) = (P·Q) / (|P|·|Q|)
+
+    With FV3's degenerate-input fixups:
+        - ``ddd <= 0`` (colinear or coincident points) → angle = 0
+        - ``|cos| > 1`` (numerical) → angle = π or 0 by sign
+
+    Takes the last axis as the 3-vector component; broadcasts over
+    leading axes.
+    """
+    p_vec = vect_cross(p1, p2)
+    q_vec = vect_cross(p1, p3)
+    p_sq = jnp.sum(p_vec * p_vec, axis=-1)
+    q_sq = jnp.sum(q_vec * q_vec, axis=-1)
+    pq = jnp.sum(p_vec * q_vec, axis=-1)
+    ddd = p_sq * q_sq
+    safe = jnp.where(ddd > 0.0, ddd, 1.0)
+    cos_a = pq / jnp.sqrt(safe)
+    cos_a = jnp.clip(cos_a, -1.0, 1.0)
+    angle = jnp.arccos(cos_a)
+    # Degenerate ddd <= 0 → 0
+    return jnp.where(ddd > 0.0, angle, 0.0)
+
+
+def cell_center3(
+    p1: jax.Array, p2: jax.Array, p3: jax.Array, p4: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 613: Cartesian cell center from 4 corner points.
+
+    Faithful port of FV3 ``cell_center3`` (fv_grid_utils.F90:
+    2728-2745).  Returns normalized sum ``(p1+p2+p3+p4)/|sum|``.
+
+    Each ``pi`` is shape ``(..., 3)`` on the unit sphere; result is
+    ``(..., 3)`` on the unit sphere.
+    """
+    return normalize_vect(p1 + p2 + p3 + p4)
+
+
+def cell_center2(
+    lon1: jax.Array, lat1: jax.Array,
+    lon2: jax.Array, lat2: jax.Array,
+    lon3: jax.Array, lat3: jax.Array,
+    lon4: jax.Array, lat4: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 613: (lon, lat) cell center from 4 corner (lon, lat).
+
+    Faithful port of FV3 ``cell_center2`` (fv_grid_utils.F90:
+    2700-2725).  Latlon wrapper for ``cell_center3``.
+    """
+    x1, y1, z1 = latlon2xyz(lon1, lat1)
+    x2, y2, z2 = latlon2xyz(lon2, lat2)
+    x3, y3, z3 = latlon2xyz(lon3, lat3)
+    x4, y4, z4 = latlon2xyz(lon4, lat4)
+    p1 = jnp.stack([x1, y1, z1], axis=-1)
+    p2 = jnp.stack([x2, y2, z2], axis=-1)
+    p3 = jnp.stack([x3, y3, z3], axis=-1)
+    p4 = jnp.stack([x4, y4, z4], axis=-1)
+    ec = cell_center3(p1, p2, p3, p4)
+    return xyz2latlon(ec[..., 0], ec[..., 1], ec[..., 2])
+
+
+def dist2side_latlon(
+    lon1: jax.Array, lat1: jax.Array,
+    lon2: jax.Array, lat2: jax.Array,
+    lon_p: jax.Array, lat_p: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 613: angular distance from point to great-circle arc.
+
+    Faithful port of FV3 ``dist2side_latlon`` (fv_grid_utils.F90:
+    2812-2834).  Returns the normalized (angular) distance on the
+    unit sphere from point ``p`` to the great-circle arc through
+    ``(v1, v2)``::
+
+        dist = asin( sin(side) · sin(angle) )
+
+    where ``side`` is the angular distance v1 → p and ``angle`` is
+    the spherical angle ∠(v1 v2; v1 p).
+
+    Returns a scalar (or broadcast result) in radians.
+    """
+    x1, y1, z1 = latlon2xyz(lon1, lat1)
+    x2, y2, z2 = latlon2xyz(lon2, lat2)
+    xp, yp, zp = latlon2xyz(lon_p, lat_p)
+    c1 = jnp.stack([x1, y1, z1], axis=-1)
+    c2 = jnp.stack([x2, y2, z2], axis=-1)
+    cp = jnp.stack([xp, yp, zp], axis=-1)
+    angle = spherical_angle(c1, c2, cp)
+    # side = great-circle distance v1 → p on UNIT sphere (radius=1)
+    side = great_circle_distance(lon1, lat1, lon_p, lat_p, radius=1.0)
+    return jnp.arcsin(jnp.clip(jnp.sin(side) * jnp.sin(angle), -1.0, 1.0))
+
+
+def unit_vect_latlon(
+    lon: jax.Array, lat: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 615: east/north unit tangent vectors at (lon, lat).
+
+    Faithful port of FV3 ``unit_vect_latlon`` (fv_grid_utils.F90:
+    2286-2309).  Returns the two Cartesian unit vectors of the
+    local geographic frame at the input (lon, lat) point::
+
+        elon = (-sin λ,    cos λ,    0    )
+        elat = (-sin φ cos λ, -sin φ sin λ, cos φ)
+
+    where ``λ`` = lon, ``φ`` = lat.  Used by FV3 ``c2l_ord4`` to
+    rotate D-grid winds to geographic (east, north) frame.
+
+    Returns two arrays of shape ``(..., 3)``; broadcasts on
+    leading axes.
+    """
+    sin_lon = jnp.sin(lon)
+    cos_lon = jnp.cos(lon)
+    sin_lat = jnp.sin(lat)
+    cos_lat = jnp.cos(lat)
+    zero = jnp.zeros_like(sin_lon)
+    elon = jnp.stack([-sin_lon, cos_lon, zero], axis=-1)
+    elat = jnp.stack([-sin_lat * cos_lon, -sin_lat * sin_lon, cos_lat], axis=-1)
+    return elon, elat
+
+
+def get_unit_vect3(
+    p1: jax.Array, p2: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 615: unit tangent vector at GC midpoint (Cartesian variant).
+
+    Faithful port of FV3 ``get_unit_vect3`` (fv_grid_utils.F90:
+    1865-1876).  Cartesian-input version of iter-611
+    ``get_unit_vect2`` — takes ``p1``, ``p2`` already in Cartesian
+    (last axis = 3-vector) and returns the unit tangent vector at
+    the great-circle midpoint pointing from p1 → p2.
+
+    Algorithm (FV3 exact):
+        pc = mid_pt3_cart(p1, p2)
+        p3 = p2 × p1                   (great-circle pole)
+        uc = pc × p3                   (tangent at pc)
+        uc / |uc|
+    """
+    pc = mid_pt3_cart(p1, p2)
+    p3 = vect_cross(p2, p1)
+    uc = vect_cross(pc, p3)
+    return normalize_vect(uc)
+
+
+def great_circle_distance_cart(
+    v1: jax.Array, v2: jax.Array,
+    radius: float = constants.R_earth,
+) -> jax.Array:
+    """FV3_3D iter 614: great-circle distance from Cartesian inputs.
+
+    Faithful port of FV3 ``great_circle_dist_cart`` (fv_grid_utils.F90:
+    2065-2092)::
+
+        cos(d/R) = (v1·v2) / (|v1|·|v2|)
+        d = R · acos(clip(cos, -1, 1))
+
+    Each ``v1``, ``v2`` shape ``(..., 3)`` on (or near) the unit
+    sphere; result broadcasts on leading axes.  Result has same
+    units as ``radius`` (default: legoESM R_earth in metres).
+
+    Differentiable; safe near antipodal points via clip.
+    """
+    norm = jnp.sum(v1 * v1, axis=-1) * jnp.sum(v2 * v2, axis=-1)
+    safe_norm = jnp.where(norm > 0.0, norm, 1.0)
+    dot = jnp.sum(v1 * v2, axis=-1) / jnp.sqrt(safe_norm)
+    dot = jnp.clip(dot, -1.0, 1.0)
+    return radius * jnp.arccos(dot)
+
+
+def get_area(
+    lon1: jax.Array, lat1: jax.Array,
+    lon2: jax.Array, lat2: jax.Array,
+    lon3: jax.Array, lat3: jax.Array,
+    lon4: jax.Array, lat4: jax.Array,
+    radius: float = constants.R_earth,
+) -> jax.Array:
+    """FV3_3D iter 614: spherical-excess cell area for quadrilateral cell.
+
+    Faithful port of FV3 ``get_area`` (fv_grid_utils.F90:2749-2790).
+    Computes the four spherical angles at the cell corners and uses
+    the spherical-excess formula::
+
+        Area = (α1 + α2 + α3 + α4 - 2π) · R²
+
+    The corner-order convention matches FV3's signature exactly
+    (note the FV3 call uses ``p1, p4, p2, p3``):
+
+        4 ----- 3
+        |       |
+        |       |
+        1 ----- 2
+
+    and the four corner angles are taken at vertices 1, 2, 3, 4 in
+    counterclockwise order.
+
+    Result has units of ``radius²`` (default: legoESM R_earth in m²).
+    """
+    # Build Cartesian corner vectors
+    e1 = jnp.stack(list(latlon2xyz(lon1, lat1)), axis=-1)
+    e2 = jnp.stack(list(latlon2xyz(lon2, lat2)), axis=-1)
+    e3 = jnp.stack(list(latlon2xyz(lon3, lat3)), axis=-1)
+    e4 = jnp.stack(list(latlon2xyz(lon4, lat4)), axis=-1)
+    # FV3 fv_grid_utils.F90:2757-2782 corner-angle convention:
+    #   ang1 = ∠(at p1; p2 → p4)
+    #   ang2 = ∠(at p2; p3 → p1)
+    #   ang3 = ∠(at p3; p4 → p2)
+    #   ang4 = ∠(at p4; p3 → p1)
+    ang1 = spherical_angle(e1, e2, e4)
+    ang2 = spherical_angle(e2, e3, e1)
+    ang3 = spherical_angle(e3, e4, e2)
+    ang4 = spherical_angle(e4, e3, e1)
+    excess = ang1 + ang2 + ang3 + ang4 - 2.0 * jnp.pi
+    return excess * (radius * radius)
+
+
+def expand_cell(
+    lon1: jax.Array, lat1: jax.Array,
+    lon2: jax.Array, lat2: jax.Array,
+    lon3: jax.Array, lat3: jax.Array,
+    lon4: jax.Array, lat4: jax.Array,
+    fac: float,
+) -> tuple[
+    tuple[jax.Array, jax.Array],
+    tuple[jax.Array, jax.Array],
+    tuple[jax.Array, jax.Array],
+    tuple[jax.Array, jax.Array],
+]:
+    """FV3_3D iter 613: expand 4-corner cell about its center by factor ``fac``.
+
+    Faithful port of FV3 ``expand_cell`` (fv_grid_utils.F90:
+    2631-2697).  Returns 4 new (lon, lat) corners with the cell
+    extrapolated (fac > 1) or shrunk (fac < 1) about the
+    spherical center.
+
+        fac = 1: returns the input corners unchanged
+        fac = 0: all 4 corners collapse to the cell center
+        fac > 1: expansion outward (cell grows)
+
+    All output corners are forced to lie on the unit sphere via
+    re-normalization, matching FV3 lines 2675-2686.
+    """
+    x1, y1, z1 = latlon2xyz(lon1, lat1)
+    x2, y2, z2 = latlon2xyz(lon2, lat2)
+    x3, y3, z3 = latlon2xyz(lon3, lat3)
+    x4, y4, z4 = latlon2xyz(lon4, lat4)
+    p1 = jnp.stack([x1, y1, z1], axis=-1)
+    p2 = jnp.stack([x2, y2, z2], axis=-1)
+    p3 = jnp.stack([x3, y3, z3], axis=-1)
+    p4 = jnp.stack([x4, y4, z4], axis=-1)
+    ec = cell_center3(p1, p2, p3, p4)
+    qq1 = normalize_vect(ec + fac * (p1 - ec))
+    qq2 = normalize_vect(ec + fac * (p2 - ec))
+    qq3 = normalize_vect(ec + fac * (p3 - ec))
+    qq4 = normalize_vect(ec + fac * (p4 - ec))
+    return (
+        xyz2latlon(qq1[..., 0], qq1[..., 1], qq1[..., 2]),
+        xyz2latlon(qq2[..., 0], qq2[..., 1], qq2[..., 2]),
+        xyz2latlon(qq3[..., 0], qq3[..., 1], qq3[..., 2]),
+        xyz2latlon(qq4[..., 0], qq4[..., 1], qq4[..., 2]),
+    )
 
 
 def rotate_winds_geo_to_grid(
