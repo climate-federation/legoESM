@@ -452,7 +452,7 @@ class TestMorrison:
         through the q_v donor clamp.  The naive
         ``q_v / max(0, 1e-30)`` form has VJP ~``-q_v / 1e-60`` which
         overflows in fp32 → NaN even though ``min(1, huge) = 1`` kills
-        the forward value.  iter-31 double-where guard fixes this."""
+        the forward value.  iter-31 / iter-32 AD-safe floor fixes this."""
         ncol, nlev = 4, 10
         T = jnp.full((ncol, nlev), 290.0)
         p_half = jnp.linspace(1e4, 1e5, nlev + 1)[None, :].repeat(ncol, axis=0)
@@ -467,6 +467,35 @@ class TestMorrison:
         def loss(q_v_in):
             out = morrison_microphysics(
                 T, q_v_in, h, p_full, p_half, rho, dz, dt=100.0,
+            )
+            return jnp.sum(out.dT_dt ** 2)
+
+        grad = jax.grad(loss)(q_v)
+        assert jnp.all(jnp.isfinite(grad))
+
+    def test_differentiable_tiny_positive_sink_qv_clamp(self):
+        """A column with a TINY positive q_v sink must also have finite
+        gradients.  The iter-31 boolean-only ``sink_active = sink > 0``
+        guard still allowed the VJP ``-q_v / sink_dt²`` to overflow when
+        the active branch was hit with a vanishingly-small sink_dt.
+        iter-32 replaces the boolean guard with a fp32-safe floor on
+        the divisor."""
+        ncol, nlev = 4, 10
+        # Slightly supersaturated (but barely) wrt ice to engage
+        # dq_i_dep without making it large.
+        T = jnp.full((ncol, nlev), 250.0)
+        p_half = jnp.linspace(1e4, 1e5, nlev + 1)[None, :].repeat(ncol, axis=0)
+        p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+        rho = p_full / (constants.R_d * T)
+        dz = jnp.full((ncol, nlev), 500.0)
+        q_sat = saturation_mixing_ratio(T, p_full)
+        # Just at saturation — minimal ice deposition demand
+        q_v = q_sat * 1.0001
+        h = make_zero_hydrometeors(ncol, nlev)
+
+        def loss(q_v_in):
+            out = morrison_microphysics(
+                T, q_v_in, h, p_full, p_half, rho, dz, dt=10.0,
             )
             return jnp.sum(out.dT_dt ** 2)
 

@@ -248,24 +248,21 @@ def thompson_microphysics(
     # over-draw q_v.  Mirror Morrison's iter-25 q_v clamp.  Codex
     # iter-29 #2.
     #
-    # Double-where AD guard (same pattern as the kessler q_c clamp):
-    # in a clear column with no sinks the naive ``qv_avail / max(0,
-    # 1e-30)`` evaluates to ``q_v / 1e-30`` whose VJP is
-    # ``-q_v / 1e-60`` — overflows in fp32 and produces NaN
-    # gradients even though ``min(1, huge) = 1`` kills the value.
-    # Short-circuit on ``sink_active`` so the AD graph never sees
-    # the 0/eps division.
+    # AD-safe floor on the divisor.  A boolean-only sink-active gate
+    # only protected the ``sink == 0`` branch — for TINY positive
+    # sinks the VJP ``-q_v / sink_dt²`` still overflows fp32 when
+    # sink_dt is small enough.  ``jnp.maximum(qv_sink_dt, 1e-15)``
+    # floors the divisor so the worst-case VJP is ``-q_v / 1e-30 ≈
+    # -4e28`` which is safely within fp32 dynamic range.  At the floor
+    # ``jnp.maximum`` subgradient is zero — we are in the inactive
+    # regime where ``min(1, huge) = 1`` so propagating zero gradient
+    # is physically correct (no scaling, no sensitivity to the tiny
+    # sink).
     cond_pos = jnp.maximum(condensation, 0.0)
     qv_sink_total = cond_pos + jnp.maximum(dq_i_dep, 0.0)
     qv_avail = jnp.clip(q_v, 0.0)
-    qv_sink_dt = qv_sink_total * dt_safe
-    qv_sink_active = qv_sink_dt > 0.0
-    qv_safe_sink_dt = jnp.where(qv_sink_active, qv_sink_dt, 1.0)
-    qv_scale = jnp.where(
-        qv_sink_active,
-        jnp.minimum(1.0, qv_avail / qv_safe_sink_dt),
-        1.0,
-    )
+    qv_sink_dt_safe = jnp.maximum(qv_sink_total * dt_safe, 1e-15)
+    qv_scale = jnp.minimum(1.0, qv_avail / qv_sink_dt_safe)
     condensation = jnp.where(condensation > 0.0, condensation * qv_scale, condensation)
     dq_i_dep = dq_i_dep * qv_scale
 

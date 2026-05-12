@@ -156,6 +156,35 @@ Compression iteration.  Folded iter-20 through iter-29 into the
 "Iterations 1-29 — Summary" section.  Detailed per-iteration narratives
 remain in the commit messages on `clean_physics`.
 
+### Iteration 32 — 2026-05-12
+
+**Fix iter-31 codex stop-time follow-up: tiny-positive-sink NaN.**
+
+The iter-31 fix used a boolean ``sink_active = sink > 0`` guard with
+a sentinel ``1.0`` on the inactive branch.  This protected
+``sink_active = False`` from the 0/eps division but the ACTIVE branch
+with a TINY positive sink (e.g. ``sink_dt = 1e-25``) still hit the
+VJP ``-q_v / sink_dt² ≈ -q_v / 1e-50`` which overflows fp32 → NaN.
+
+Replaced the boolean guard with a fp32-safe FLOOR on the divisor:
+
+```python
+qv_sink_dt_safe = jnp.maximum(qv_sink_total * dt_safe, 1e-15)
+qv_scale = jnp.minimum(1.0, qv_avail / qv_sink_dt_safe)
+```
+
+Worst-case VJP is ``-q_v / 1e-30 ≈ -4e28`` — safely within fp32
+dynamic range (~3.4e38).  At the floor ``jnp.maximum`` subgradient is
+zero, which is physically correct (no scaling, no sensitivity to the
+tiny sink).
+
+Added `TestMorrison::test_differentiable_tiny_positive_sink_qv_clamp`
+that exercises a column with q_v just at saturation wrt ice — the
+boolean-only guard would have NaN'd there.
+
+**Tests (post iter-32):** 63 / 63 microphysics tests pass including
+the new tiny-positive-sink regression.
+
 ### Iteration 31 — 2026-05-12
 
 **Fix iter-30 codex stop-time finding: q_v clamp NaN gradients.**
