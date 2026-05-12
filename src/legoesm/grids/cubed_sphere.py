@@ -4273,6 +4273,56 @@ def bulk_richardson_fv3(
     )
 
 
+def pbl_height_fv3(
+    ri_b: jax.Array,
+    z: jax.Array,
+    ri_crit: float = 0.25,
+) -> jax.Array:
+    """FV3_3D iter 775: PBL top from Ri_b threshold crossing.
+
+    Holtslag-Boville convention: PBL height = lowest level at which
+    the bulk Richardson number exceeds a critical value.
+
+        z_pbl = z[k*]   where k* = argmin{k : Ri_b(k) > ri_crit}
+
+    Standard ``ri_crit`` values:
+
+      * 0.25  — land (Vogelezang-Holtslag 1996, Troen-Mahrt 1986)
+      * 0.50  — ocean (Holtslag-Boville 1993)
+
+    Vertical axis last; ``z`` and ``ri_b`` must share orientation
+    with index 0 = surface, index km-1 = top.  Fallbacks:
+
+      * No crossing in column (deep mixed or near-neutral): return
+        z[..., −1] (top of column).
+      * All Ri_b > ri_crit (strongly stable everywhere): return
+        z[..., 0] (surface).
+
+    Composes with iter-774 ``bulk_richardson_fv3`` for the
+    (θ_v, u, v, z) → z_pbl pipeline.
+
+    Parameters
+    ----------
+    ri_b : jax.Array, shape (..., km)
+        Bulk Richardson number at each level (iter-774).
+    z : jax.Array, shape (..., km)
+        Geopotential height above surface at the same levels (m).
+    ri_crit : float
+        Critical Richardson value; default 0.25.
+
+    Returns
+    -------
+    z_pbl : jax.Array, shape (...,)
+        PBL-top height (m).
+    """
+    above = ri_b > ri_crit
+    idx = jnp.argmax(above, axis=-1)
+    any_above = jnp.any(above, axis=-1)
+    top_idx = ri_b.shape[-1] - 1
+    idx_safe = jnp.where(any_above, idx, top_idx)
+    return jnp.take_along_axis(z, idx_safe[..., None], axis=-1)[..., 0]
+
+
 def dew_point_fv3(
     e_mb: jax.Array,
 ) -> jax.Array:

@@ -5054,3 +5054,44 @@ stability diagnostic stack is complete (gradient Ri for interior,
 bulk Ri for height).  Pure JAX, vmap-compatible.  No new physical
 constants introduced.
 
+## Iter 775 — pbl_height_fv3 (Ri_b threshold crossing)
+
+Added `pbl_height_fv3(ri_b, z, ri_crit=0.25)` to
+`grids/cubed_sphere.py`.  Holtslag-Boville convention: PBL top is
+the lowest level at which the bulk Ri exceeds a critical value.
+
+```
+z_pbl = z[k*]   where k* = argmin{ k : Ri_b(k) > ri_crit }
+```
+
+Vertical axis last; ``z`` and ``ri_b`` are surface→top oriented.
+Fallbacks:
+  * No crossing in column (deep mixed / near-neutral): return z
+    at top of column.
+  * All Ri_b > ri_crit (strongly stable surface): return z at
+    surface.
+
+JAX-compatible threshold detection via `jnp.argmax(above, axis=-1)`
++ `jnp.any` + `jnp.take_along_axis` — fully vmap-compatible.
+
+Composes with iter-774 `bulk_richardson_fv3` to give the
+(θ_v_surf, θ_v, u, v, z) → z_pbl pipeline.
+
+Standard ``ri_crit`` values: 0.25 (land, Vogelezang-Holtslag /
+Troen-Mahrt) and 0.50 (ocean, Holtslag-Boville).
+
+Test: `tests/test_fv3_pbl_height_iter775.py` (6 tests: monotone
+crossing at expected level, no-crossing → top, all-above →
+surface, ri_crit selectivity, full iter-774 chain composition,
+3-D batched columns (n_x, n_y, km) → (n_x, n_y) output shape).
+
+### Why this iteration was meaningful
+
+Closes the PBL-height detection pipeline: iter-772 N² → iter-773
+gradient Ri / iter-774 bulk Ri → iter-775 PBL top in metres.
+PBL height is the most-consequential boundary-layer diagnostic
+(gates vertical mixing depth, sets cloud-base for shallow
+convection, dictates pollutant venting layer, anchors the
+surface-flux drag coefficient lookup).  Pure JAX, vmap-
+compatible.  No new physical constants introduced.
+
