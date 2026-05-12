@@ -1185,6 +1185,18 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 559: **PE long-run at dt=5** — half-dt still unphysical.
+  iter-558 at dt=10 gave nonsensical values at 100 steps.
+  Try dt=5, 200 steps (same final time t=1000 s):
+  - |u_d| max:  4.57e+04 m/s  (still huge)
+  - T range:   -102 to 426 K  (still NEGATIVE)
+  - p_s range: 2.6e+04 to 3.2e+05 Pa
+  Halving dt didn't significantly help.  Conclusion: PE
+  instability at C8 is NOT primarily CFL-driven — it's
+  insufficient damping / under-resolved scales.  C8 PE is
+  a stress test, not a production config.  For production
+  PE: use C24+ with the FV3-faithful factory.  1/1 in 27 s.
+  Wired into iter-383 sweep (now 141).
 - Iter 558: **PE long-run stability** — 100 steps @ C8.
   PE with Held-Suarez IC + FV3-faithful + scan_step at C8,
   dt=10s, 100 steps:
