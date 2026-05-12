@@ -1195,6 +1195,27 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 754: **``dry_static_energy_fv3``** — DSE companion to iter-753 MSE.
+
+      DSE = c_p · T + g · z
+
+  Approximately conserved for DRY adiabatic motion (vertical
+  component of enthalpy + potential energy).  Decomposition:
+
+      MSE = DSE + L · q_sphum
+
+  Defaults: c_p = constants.c_pd.  Accepts moist c_p override.
+
+  Tests (7/7 in <1 s):
+  1. z=0 → DSE = c_p · T.
+  2. z aloft → DSE > c_p · T.
+  3. T=290, z=1000 → analytical sum.
+  4. MSE − DSE = L_v · q exactly (iter-753 cross-check).
+  5. Custom c_p override.
+  6. 3-D shapes.
+  7. No NaN/Inf.
+
+  Wired into iter-383 sweep (now 318).
 - Iter 753: **``moist_static_energy_fv3``** — MSE per unit mass.
 
       MSE = c_p · T + g · z + L · q_sphum

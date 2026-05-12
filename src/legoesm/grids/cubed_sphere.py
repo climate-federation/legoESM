@@ -3022,6 +3022,42 @@ def potential_energy_column_fv3(
     return column_integral_delp_fv3(phi_avg, delp)
 
 
+def dry_static_energy_fv3(
+    pt: jax.Array,
+    z: jax.Array,
+    cp: float | jax.Array | None = None,
+) -> jax.Array:
+    """FV3_3D iter 754: dry static energy per unit mass.
+
+        DSE = c_p · T + g · z
+
+    Approximately conserved for DRY adiabatic motion (vertical
+    component of enthalpy + potential energy).  Companion to
+    iter-753 ``moist_static_energy_fv3``:
+
+        MSE = DSE + L · q_sphum
+
+    Used in atmospheric energy budget decompositions.
+
+    Parameters
+    ----------
+    pt : jax.Array
+        Temperature (K).
+    z : jax.Array
+        Height above surface (m).
+    cp : float or jax.Array, optional
+        Isobaric specific heat (J/kg/K).  Default ``constants.c_pd``.
+
+    Returns
+    -------
+    dse : jax.Array
+        Dry static energy per unit mass (J/kg).
+    """
+    if cp is None:
+        cp = constants.c_pd
+    return cp * pt + constants.g * z
+
+
 def moist_static_energy_fv3(
     pt: jax.Array,
     z: jax.Array,
