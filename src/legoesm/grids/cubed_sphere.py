@@ -1304,6 +1304,135 @@ def get_center_vect(
     return u1, u2
 
 
+def c2l_ord4_fv3(
+    u: jax.Array, v: jax.Array,
+    dx: jax.Array, dy: jax.Array,
+    a11: jax.Array, a12: jax.Array,
+    a21: jax.Array, a22: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 628: D-grid → cell-center latlon winds (FV3 ``c2l_ord4``).
+
+    Faithful port of FV3 ``c2l_ord4`` (fv_grid_utils.F90:2407-2546,
+    grid_type<4 branch).  Uses 4-point Lagrange interpolation in
+    the interior::
+
+        utmp[i,j] = c2·(u[i,j-1] + u[i,j+2]) + c1·(u[i,j] + u[i,j+1])
+        vtmp[i,j] = c2·(v[i-1,j] + v[i+2,j]) + c1·(v[i,j] + v[i+1,j])
+
+    where ``c1 = 1.125``, ``c2 = -0.125`` (FV3 lines 2422-2424).
+    For grid-edge cells (where the 4-point stencil reaches across
+    a cube face boundary), falls back to the iter-627
+    ``c2l_ord2_fv3`` 2nd-order vorticity-conserving formula.
+
+    Then applies iter-626 a-matrix:
+
+        ua[i,j] = a11·utmp + a12·vtmp
+        va[i,j] = a21·utmp + a22·vtmp
+
+    Inputs ``u`` shape ``(n_x, n_y+1, [nlev])``: needs at least
+    a 2-cell halo in j-direction for the Lagrange stencil to be
+    valid in the interior (cells j=1 and j=n_y-2 use the 2nd-order
+    fallback per FV3 lines 2455-2530).  This port assumes ``u`` has
+    halo cells pre-padded — only the interior LD cells get the
+    4th-order treatment; boundary cells fall back to c2l_ord2.
+
+    Parameters
+    ----------
+    u, v, dx, dy, a11..a22 : as in ``c2l_ord2_fv3``.
+
+    Returns
+    -------
+    ua, va : jax.Array, shape ``(n_x, n_y, [nlev])``
+        Cell-center geographic winds (4th order in interior,
+        2nd order at boundaries).
+    """
+    c1 = 1.125
+    c2 = -0.125
+    has_level = u.ndim == dx.ndim + 1
+    # Broadcast scalars to level dim
+    if has_level:
+        a11_b = a11[..., None]; a12_b = a12[..., None]
+        a21_b = a21[..., None]; a22_b = a22[..., None]
+    else:
+        a11_b, a12_b, a21_b, a22_b = a11, a12, a21, a22
+
+    # Start with c2l_ord2 result everywhere (used for edge cells)
+    ua_ord2, va_ord2 = c2l_ord2_fv3(u, v, dx, dy, a11, a12, a21, a22)
+
+    # Interior 4-pt Lagrange: needs j-1, j, j+1, j+2 cells of u (so
+    # u has at least n_y+1 cells indexed [0, n_y]; the stencil reads
+    # u[:, j-1], u[:, j], u[:, j+1], u[:, j+2] for cell-centers j in
+    # [1, n_y-2]).  For v: v[i-1, :], v[i, :], v[i+1, :], v[i+2, :].
+    n_y_u = u.shape[-2] if has_level else u.shape[-1]
+    n_x_v = v.shape[-3] if has_level else v.shape[-2]
+    n_x_cells = ua_ord2.shape[-2] if has_level else ua_ord2.shape[-1]
+    # Determine which cells get 4th-order treatment
+    # Cell-center j ranges over [0, n_y-1] (n_y_u = n_y+1).  The 4-pt
+    # stencil reads u[:, j-1..j+2], so valid for j ∈ [1, n_y-2].
+    # Compute interior 4th-order interpolation
+    # u: (..., n_x, n_y+1, [nlev]); stencil along axis -2 (3D) or -1 (2D)
+
+    # Construct utmp_4 of shape (..., n_x, n_y-2, [nlev]) for cells j ∈ [1, n_y-2]
+    if has_level:
+        u_jm1 = u[..., :, 0:-3, :]
+        u_j   = u[..., :, 1:-2, :]
+        u_jp1 = u[..., :, 2:-1, :]
+        u_jp2 = u[..., :, 3:,   :]
+    else:
+        u_jm1 = u[..., :, 0:-3]
+        u_j   = u[..., :, 1:-2]
+        u_jp1 = u[..., :, 2:-1]
+        u_jp2 = u[..., :, 3:]
+    utmp_4 = c2 * (u_jm1 + u_jp2) + c1 * (u_j + u_jp1)
+
+    if has_level:
+        v_im1 = v[..., 0:-3, :, :]
+        v_i   = v[..., 1:-2, :, :]
+        v_ip1 = v[..., 2:-1, :, :]
+        v_ip2 = v[..., 3:,   :, :]
+    else:
+        v_im1 = v[..., 0:-3, :]
+        v_i   = v[..., 1:-2, :]
+        v_ip1 = v[..., 2:-1, :]
+        v_ip2 = v[..., 3:,   :]
+    vtmp_4 = c2 * (v_im1 + v_ip2) + c1 * (v_i + v_ip1)
+
+    # Apply a-matrix to interior cells (those in [1, n_y-2] × [1, n_x-2]).
+    # But utmp_4 spans only ~n_y-2 cells in j; vtmp_4 spans n_x-2 in i.
+    # Interior cell-center region: i ∈ [1, n_x-2], j ∈ [1, n_y-2].
+    # Both arrays must be sliced to this rectangle.
+    # utmp_4 shape: (..., n_x, n_y-2, [nlev]) — full n_x but j cropped
+    # vtmp_4 shape: (..., n_x-2, n_y, [nlev]) — full n_y but i cropped
+    # Interior rectangle: i ∈ [1, n_x-2], j ∈ [1, n_y-2]
+    # Slice utmp_4: take i ∈ [1, n_x-2]  → axis -2 (3D) or -1 (2D)
+    if has_level:
+        utmp_int = utmp_4[..., 1:-1, :, :]   # shape (..., n_x-2, n_y-2, nlev)
+        vtmp_int = vtmp_4[..., :, 1:-1, :]   # shape (..., n_x-2, n_y-2, nlev)
+        a11_int = a11_b[..., 1:-1, 1:-1, :]
+        a12_int = a12_b[..., 1:-1, 1:-1, :]
+        a21_int = a21_b[..., 1:-1, 1:-1, :]
+        a22_int = a22_b[..., 1:-1, 1:-1, :]
+    else:
+        utmp_int = utmp_4[..., 1:-1, :]
+        vtmp_int = vtmp_4[..., :, 1:-1]
+        a11_int = a11_b[..., 1:-1, 1:-1]
+        a12_int = a12_b[..., 1:-1, 1:-1]
+        a21_int = a21_b[..., 1:-1, 1:-1]
+        a22_int = a22_b[..., 1:-1, 1:-1]
+    ua_int = a11_int * utmp_int + a12_int * vtmp_int
+    va_int = a21_int * utmp_int + a22_int * vtmp_int
+
+    # Overlay interior 4th-order onto c2l_ord2 baseline (boundary cells
+    # keep c2l_ord2 values, FV3 lines 2455-2530)
+    if has_level:
+        ua = ua_ord2.at[..., 1:-1, 1:-1, :].set(ua_int)
+        va = va_ord2.at[..., 1:-1, 1:-1, :].set(va_int)
+    else:
+        ua = ua_ord2.at[..., 1:-1, 1:-1].set(ua_int)
+        va = va_ord2.at[..., 1:-1, 1:-1].set(va_int)
+    return ua, va
+
+
 def c2l_ord2_fv3(
     u: jax.Array, v: jax.Array,
     dx: jax.Array, dy: jax.Array,

@@ -1195,6 +1195,39 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 628: **FV3 ``c2l_ord4``** — D-grid → latlon winds (4th order
+  Lagrange + 2nd-order boundary fallback).  Faithful JAX port of
+  FV3 ``c2l_ord4`` (fv_grid_utils.F90:2407-2546, grid_type<4
+  branch).
+
+  Interior algorithm (4-point Lagrange, FV3 lines 2422-2424):
+
+      utmp[i,j] = c2·(u[i,j-1] + u[i,j+2]) + c1·(u[i,j] + u[i,j+1])
+      vtmp[i,j] = c2·(v[i-1,j] + v[i+2,j]) + c1·(v[i,j] + v[i+1,j])
+      ua[i,j]   = a11·utmp + a12·vtmp
+      va[i,j]   = a21·utmp + a22·vtmp
+
+  with ``c1 = 1.125``, ``c2 = -0.125``.
+
+  Boundary cells (first/last row/col) fall back to iter-627
+  ``c2l_ord2_fv3`` (FV3 lines 2455-2530 boundary blocks).
+
+  Used by FV3 wind diagnostics for the most accurate D-grid →
+  latlon interpolation.  4-pt Lagrange is exact on quadratics,
+  giving 4th-order convergence in the interior.
+
+  Reuses iter-627 ``c2l_ord2_fv3`` for boundary fallback and
+  iter-626 ``init_cubed_to_latlon`` a-matrix.
+
+  Tests (6/6 in 3 s):
+  1. Output shape matches cell-center grid.
+  2. Zero D-grid winds → zero output.
+  3. Uniform u=U, v=V → all cells see U, V.
+  4. Boundary cells match c2l_ord2 (FV3 fallback).
+  5. 3D level dim handled.
+  6. Exact on quadratic u(j) (4-pt Lagrange exactness test).
+
+  Wired into iter-383 sweep (now 199).
 - Iter 627: **FV3 ``c2l_ord2``** — D-grid → latlon winds (2nd order
   vorticity-conserving).  Faithful JAX port of FV3 ``c2l_ord2``
   (fv_grid_utils.F90:2547-2628, grid_type<4 branch).
