@@ -138,6 +138,28 @@ Compression iteration.  Folded iter-30 through iter-40 entries into the
 auto-loaded MEMORY.md / context envelope.  Detailed per-iteration narratives
 remain in the commit messages on `clean_physics`.
 
+### Iteration 43 — 2026-05-13
+
+**Inspection iteration (no code changes).**
+
+Codex narrow review on `atmosphere/physics/radiation/` /
+`turbulence/` timed out without producing actionable findings (output
+was source-code excerpts).  Direct inspection of the recently-touched
+paths confirmed they are sound:
+
+- `radiation/gray.py` — proper grey-surface LW BC at the seafloor
+  (``F_up_sfc = ε σ T^4 + (1-ε) F_down_sfc``).
+- `radiation/solar.py` — daily-mean insolation handles polar
+  day / night via clipped ``cos_hs``.
+- `turbulence/pbl_height.py`, `turbulence/holtslag_boville.py`,
+  `turbulence/ysu.py` — divisor floors are ADDITIVE (e.g.
+  ``+ 1e-20``), not ``max()`` — these do not trigger the
+  ``-q / sink²`` VJP overflow pattern the iter-32 floor addresses.
+- `integration.py` ``dtheta_prime_dt`` uses ``jnp.clip(exner, 1e-6,
+  None)`` which never approaches 1e-6 in practice (TOA exner ≈ 0 at
+  p → 0, but production columns never go below p ~ 100 Pa where
+  exner ≈ 1e-2).
+
 ### Iteration 42 — 2026-05-13
 
 **Apply codex iter-41 findings + Emanuel AD-safe floor.**
