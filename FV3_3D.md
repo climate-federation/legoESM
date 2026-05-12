@@ -1195,6 +1195,42 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 664: **FV3 ``case9_B`` + ``case9_AofT``** — Williamson test 9.
+  Faithful JAX ports of FV3 Williamson test 9 forcing
+  (tools/test_cases.F90:4361-4424).
+
+  ``case9_B(lon, lat)`` — spatial forcing pattern:
+
+      if sin(lat) > 0:
+          yy = (cos(lat) / sin(lat))² = cot²(lat)
+          B  = gh0 · yy · exp(1 - yy) · sin(lon)
+      else:
+          B = 0
+
+  Default gh0 = 720·g; peaks at lat=π/4 (cot²=1) with magnitude
+  gh0·sin(lon).
+
+  ``case9_AofT(tday)`` — time-varying amplitude:
+
+      tday ≤ 4:           A = 0.5·(1 - cos(π·tday/4))   [ramp up]
+      4 < tday ≤ 16:      A = 1                          [peak]
+      16 < tday ≤ 20:     A = 0.5·(1 + cos(π·(tday-16)/4)) [ramp down]
+      tday > 20:          A = 0.5·(1 - cos(π·(tday-20)/4)) [new cycle]
+
+  Together: phis(t, lon, lat) = AofT(t) · B(lon, lat).  Used in
+  FV3 for the Williamson test 9 SW orographic-forcing test.
+
+  Tests (8/8 in 1 s):
+  1. B shape matches input.
+  2. B = 0 in southern hemisphere.
+  3. B peak at lat=π/4 = gh0·sin(lon).
+  4. B = 0 at lon=0.
+  5. AofT ramp up: A(0)=0, A(4)=1.
+  6. AofT peak: A(5..16)=1.
+  7. AofT ramp down: A(20)=0.
+  8. AofT finite, bounded [0, 1] for all times.
+
+  Wired into iter-383 sweep (now 231).
 - Iter 663: **FV3 ``u_jet_fv3`` + ``gh_jet_fv3``** — Galewsky jet.
   Faithful JAX ports of FV3 ``u_jet`` and ``gh_jet``
   (tools/test_cases.F90:4297-4360).  Galewsky-Scott-Polvani 2004

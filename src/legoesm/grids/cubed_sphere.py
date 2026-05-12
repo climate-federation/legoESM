@@ -2382,6 +2382,87 @@ def rotate_winds_sphere_cube(
     return new_u, new_v
 
 
+def case9_B(
+    lon: jax.Array, lat: jax.Array, gh0: float | None = None,
+) -> jax.Array:
+    """FV3_3D iter 664: Williamson case 9 spatial forcing pattern B(λ, φ).
+
+    Faithful JAX port of FV3 ``get_case9_B`` (tools/test_cases.F90:
+    4361-4389).  Returns::
+
+        if sin(φ) > 0:
+            yy = (cos(φ) / sin(φ))² = cot²(φ)
+            B  = gh0 · yy · exp(1 - yy) · sin(λ)
+        else:
+            B = 0
+
+    Default gh0 = 720·g (FV3 calibrated for the SW orographic
+    forcing test).  The forcing peaks where yy=1 (i.e., lat=π/4)
+    with magnitude gh0·sin(λ).
+
+    Parameters
+    ----------
+    lon, lat : jax.Array
+        Cell-center positions (radians).
+    gh0 : float, optional
+        Forcing peak amplitude (default 720·g).
+
+    Returns
+    -------
+    B : jax.Array
+        Spatial forcing field.
+    """
+    if gh0 is None:
+        gh0 = 720.0 * constants.g
+    sin_lat = jnp.sin(lat)
+    cos_lat = jnp.cos(lat)
+    # Safe cot²: avoid divide-by-zero at equator and poles
+    safe_sin = jnp.where(jnp.abs(sin_lat) > 1e-30, sin_lat, 1.0)
+    yy = (cos_lat / safe_sin) ** 2
+    myB = gh0 * yy * jnp.exp(1.0 - yy)
+    B = myB * jnp.sin(lon)
+    # Zero in southern hemisphere (and equator)
+    return jnp.where(sin_lat > 0.0, B, 0.0)
+
+
+def case9_AofT(
+    tday: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 664: Williamson case 9 amplitude modulation AofT(t).
+
+    Faithful JAX port of FV3 ``case9_forcing1`` amplitude logic
+    (tools/test_cases.F90:4391-4424).  Time-varying amplitude:
+
+        tday ≤ 4:           A = 0.5·(1 - cos(π·tday/4))   [ramp up]
+        4 < tday ≤ 16:      A = 1                          [peak]
+        16 < tday ≤ 20:     A = 0.5·(1 + cos(π·(tday-16)/4)) [ramp down]
+        tday > 20:          A = 0.5·(1 - cos(π·(tday-20)/4)) [new cycle]
+
+    Parameters
+    ----------
+    tday : jax.Array
+        Time in days.
+
+    Returns
+    -------
+    A : jax.Array
+        Amplitude ∈ [0, 1].
+    """
+    pi = jnp.pi
+    ramp_up = 0.5 * (1.0 - jnp.cos(0.25 * pi * tday))
+    peak = jnp.ones_like(ramp_up)
+    ramp_down = 0.5 * (1.0 + jnp.cos(0.25 * pi * (tday - 16.0)))
+    new_cycle = 0.5 * (1.0 - jnp.cos(0.25 * pi * (tday - 20.0)))
+    A = jnp.where(
+        tday <= 4.0, ramp_up,
+        jnp.where(
+            tday <= 16.0, peak,
+            jnp.where(tday <= 20.0, ramp_down, new_cycle),
+        ),
+    )
+    return A
+
+
 def u_jet_fv3(
     lat: jax.Array,
     umax: float = 80.0,
