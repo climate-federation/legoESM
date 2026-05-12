@@ -1081,6 +1081,16 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 524: **PE mass conservation** — mirror iter-523 on
+  the hydrostatic PE dycore.  Held-Suarez IC + min-edge +
+  clip context, 10 steps:
+  - step  0: sum(p_s · area) = 5.101011e+19
+  - step  5: rel drift = +7.02e-09
+  - step 10: rel drift = +7.02e-09
+  Mass conserved to **7 ppb** (PE) vs **5 ppb** (NH iter-523)
+  — same machine-precision order.  Both NH and PE dycores
+  preserve conservation under iter-466/505 stack.  1/1 in
+  52 s.  Wired into iter-383 sweep (now 113).
 - Iter 523: **mass conservation under SBR + clip context**.
   Critical Earth-system check: does iter-466/505 stack break
   conservation?  Sum(ρ' · area · dz) over the full cube at

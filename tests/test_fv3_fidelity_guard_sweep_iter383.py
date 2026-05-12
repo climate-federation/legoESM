@@ -136,6 +136,7 @@ _GUARD_MODULES = (
     "test_sbr_ic_iter521",                           # iter-521 add
     "test_clip_context_ad_iter522",                  # iter-522 add
     "test_mass_conservation_sbr_iter523",            # iter-523 add
+    "test_pe_mass_conservation_iter524",             # iter-524 add
 )
 
 
