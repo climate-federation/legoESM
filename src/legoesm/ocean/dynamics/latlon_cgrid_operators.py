@@ -2428,14 +2428,10 @@ def compute_face_masks_3d(
         [u_mask_interior, u_mask_interior[:, 0:1, :]], axis=1,
     )
     # v-face i is between cell i-1 (south) and cell i (north).
+    # Fold face kept as wall (see compute_face_masks comment).
     v_mask_interior = a[:-1] * a[1:]
     south = jnp.zeros_like(a[:1])
-    fold = getattr(grid, "fold", None) if grid is not None else None
-    if fold is not None and fold.is_active:
-        fold_partner = a[-1:, fold.perm_T, :]
-        north = a[-1:] * fold_partner
-    else:
-        north = jnp.zeros_like(south)
+    north = jnp.zeros_like(south)
     v_mask = jnp.concatenate([south, v_mask_interior, north], axis=0)
     return u_mask, v_mask
 
@@ -3109,14 +3105,11 @@ def compute_face_masks(
     # v-face i is between cell i and cell i+1.
     v_mask_interior = land_mask[:-1] * land_mask[1:]
     south = jnp.zeros((1, land_mask.shape[1]), dtype=land_mask.dtype)
-    # On tripolar grids, the fold face connects cell (fold_j, i) with
-    # its fold partner (fold_j, perm_T[i]).  Both must be ocean.
-    fold = getattr(grid, "fold", None) if grid is not None else None
-    if fold is not None and fold.is_active:
-        fold_partner = land_mask[-1:, fold.perm_T]
-        north = land_mask[-1:] * fold_partner
-    else:
-        north = jnp.zeros_like(south)
+    # The fold face is kept as a wall (zero) until a proper halo
+    # exchange architecture (Option B) is implemented.  Opening the
+    # fold face without consistent halo exchange creates fold-asymmetry
+    # that drives an instability over ~40 steps.
+    north = jnp.zeros_like(south)
     v_mask = jnp.concatenate([south, v_mask_interior, north], axis=0)
 
     return u_mask, v_mask

@@ -1121,7 +1121,18 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         jnp.minimum(h_sw_active[:-1], h_sw_active[1:]),
     )                                                  # (n_lat-1, n_lon, nlev)
     h_vtx_south = jnp.minimum(h_k_active[0:1], h_sw_active[0:1])
-    h_vtx_north = jnp.minimum(h_k_active[-1:], h_sw_active[-1:])
+    # At the fold, the vertex connects 4 cells: two local (fold row)
+    # and two fold-partner cells.  Include all 4 in the min.
+    fold = getattr(grid, "fold", None)
+    if fold is not None and fold.is_active:
+        h_k_partner = h_k_active[-1:, fold.perm_T, :]
+        h_sw_partner = h_sw_active[-1:, fold.perm_T, :]
+        h_vtx_north = jnp.minimum(
+            jnp.minimum(h_k_active[-1:], h_sw_active[-1:]),
+            jnp.minimum(h_k_partner, h_sw_partner),
+        )
+    else:
+        h_vtx_north = jnp.minimum(h_k_active[-1:], h_sw_active[-1:])
     h_vtx = jnp.concatenate(
         [h_vtx_south, h_vtx_interior, h_vtx_north], axis=0,
     )  # (n_lat+1, n_lon, nlev)
@@ -1144,11 +1155,19 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         [Fv_at_u_core, Fv_at_u_core[:, 0:1, :]], axis=1,
     )  # (n_lat, n_lon+1, nlev)
 
-    # Average Fu to v-points (4-point, zero-padded at poles)
+    # Average Fu to v-points (4-point; fold-reflected at north on tripolar)
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import pad_ns_vector_u
     n_lon_loc = Fu.shape[1]   # n_lon+1
     nlev_loc = Fu.shape[2]
-    zero_u = jnp.zeros((1, n_lon_loc, nlev_loc), dtype=u.dtype)
-    Fu_ext = jnp.concatenate([zero_u, Fu, zero_u], axis=0)  # (n_lat+2, n_lon+1, nlev)
+    if fold is not None and fold.is_active:
+        # Fu is u-component: sign flip across fold.
+        # pad_ns_vector_u handles the wrap-column correctly.
+        Fu_south = jnp.zeros((1, n_lon_loc, nlev_loc), dtype=u.dtype)
+        Fu_fold = pad_ns_vector_u(Fu, grid)  # adds fold-reflected row
+        Fu_ext = jnp.concatenate([Fu_south, Fu, Fu_fold[-1:]], axis=0)
+    else:
+        zero_u = jnp.zeros((1, n_lon_loc, nlev_loc), dtype=u.dtype)
+        Fu_ext = jnp.concatenate([zero_u, Fu, zero_u], axis=0)
     Fu_at_v = 0.25 * (Fu_ext[:-1, :-1, :] + Fu_ext[:-1, 1:, :]
                        + Fu_ext[1:, :-1, :] + Fu_ext[1:, 1:, :])  # (n_lat+1, n_lon, nlev)
 
@@ -1160,11 +1179,15 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         [v_at_u_core, v_at_u_core[:, 0:1, :]], axis=1,
     )  # (n_lat, n_lon+1, nlev)
 
-    # Average total u to v-points (4-point average, zero-padded at poles).
-    # Single Pad HLO op replaces alloc-zeros + concatenate-of-three.
-    # Uses total velocity (not u_prime) for consistency with total-velocity
+    # Average total u to v-points (4-point average; fold-reflected at north
+    # on tripolar).  Uses total velocity for consistency with total-velocity
     # Sadourny EC PV flux and WENO upwinding (#160).
-    u_ext = jnp.pad(u, ((1, 1), (0, 0), (0, 0)))  # (n_lat+2, n_lon+1, nlev)
+    if fold is not None and fold.is_active:
+        u_south = jnp.zeros_like(u[:1])
+        u_fold_row = pad_ns_vector_u(u, grid)
+        u_ext = jnp.concatenate([u_south, u, u_fold_row[-1:]], axis=0)
+    else:
+        u_ext = jnp.pad(u, ((1, 1), (0, 0), (0, 0)))
     u_at_v = 0.25 * (u_ext[:-1, :-1, :] + u_ext[:-1, 1:, :]
                       + u_ext[1:, :-1, :] + u_ext[1:, 1:, :])  # (n_lat+1, n_lon, nlev)
 

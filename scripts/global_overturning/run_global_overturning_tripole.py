@@ -206,9 +206,9 @@ def main():
     print(f"Loading ETOPO bathymetry from {args.etopo}...")
     bathy_cfg = BathymetryConfig(
         source="file", path=args.etopo,
-        H_max=H_MAX, H_min=10.0, smoothing_passes=2,
-        r_factor_max=0.2, depth_is_negative=True,
-        north_cap_lat=None,     # tripolar handles the north pole
+        H_max=H_MAX, H_min=10.0, smoothing_passes=10,
+        r_factor_max=0.1, depth_is_negative=True,
+        north_cap_lat=80.0,     # mask >80°N like comparison script
         south_cap_lat=-75.0,    # southern cap (converging meridians)
     )
     H_bathy_raw, ocean_mask = init_ocean_bathymetry(geom, bathy_cfg)
@@ -225,6 +225,24 @@ def main():
     H_snapped = snap_partial_cells_2d(H_bathy_raw, z_coord_base)
     ocean_mask = jnp.where(H_snapped > 0, ocean_mask, 0.0)
     z_coord = create_partial_cell_coordinate(z_coord_base, H_snapped)
+
+    # Mask cells with dx < 5 km (CFL guard).  These are near the bipolar
+    # poles where the ORCA1 grid design places the coordinate singularity
+    # on land.  ETOPO may place ocean there but the grid is too distorted
+    # for stable ocean dynamics (CFL violation with u > 1 m/s at dt=1200s).
+    dx_min = 5000.0  # 5 km minimum cell width
+    dx_T_raw = jnp.asarray(geom.dx_T)  # pre-floor values already clamped
+    # Use the raw grid dx_T (before floor clamp) for the mask decision
+    import netCDF4
+    _ds = netCDF4.Dataset(str(args.grid_file), "r")
+    _e1t = jnp.asarray(np.asarray(_ds.variables["e1t"][0]), dtype=jnp.float64)
+    _ds.close()
+    tiny_dx = _e1t < dx_min
+    n_tiny = int(jnp.sum(tiny_dx & (ocean_mask > 0.5)))
+    if n_tiny > 0:
+        print(f"  CFL guard: masking {n_tiny} ocean cells with dx < {dx_min:.0f} m")
+        ocean_mask = jnp.where(tiny_dx, 0.0, ocean_mask)
+        H_snapped = jnp.where(tiny_dx, 0.0, H_snapped)
 
     n_ocean = int(jnp.sum(ocean_mask > 0.5))
     print(f"  Ocean cells: {n_ocean}/{ocean_mask.size} "

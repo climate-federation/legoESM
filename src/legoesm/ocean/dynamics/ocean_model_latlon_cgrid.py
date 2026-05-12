@@ -1115,6 +1115,42 @@ class LatLonCGridOceanModel:
 
         return cast_pytree(state_new, None, "storage", allow_downcast=True)
 
+    @staticmethod
+    def _symmetrize_fold(state, fold):
+        """Enforce fold symmetry on the fold row.
+
+        Scalars (eta, T, S) at fold-partner cells must be equal.
+        Velocity v at the fold face must be antisymmetric.
+        """
+        perm = fold.perm_T
+
+        # Scalars: average fold partners
+        eta = state.eta.data
+        eta_sym = 0.5 * (eta[-1:] + eta[-1:, perm])
+        eta = eta.at[-1].set(eta_sym[0])
+
+        T = state.T.data
+        T_sym = 0.5 * (T[-1:] + T[-1:, perm, :])
+        T = T.at[-1].set(T_sym[0])
+
+        S = state.S.data
+        S_sym = 0.5 * (S[-1:] + S[-1:, perm, :])
+        S = S.at[-1].set(S_sym[0])
+
+        # v at fold face (last v-row): antisymmetric
+        v = state.v.data
+        v_fold = v[-1:]  # (1, n_lon, nlev)
+        v_partner = v_fold[:, perm, :]
+        v_sym = 0.5 * (v_fold - v_partner)
+        v = v.at[-1].set(v_sym[0])
+
+        return state._replace(
+            eta=state.eta.replace(data=eta),
+            T=state.T.replace(data=T),
+            S=state.S.replace(data=S),
+            v=state.v.replace(data=v),
+        )
+
     def _apply_implicit_vertical_mixing(
         self,
         state: LatLonCGridOceanState,
