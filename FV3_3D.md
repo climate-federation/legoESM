@@ -1195,6 +1195,38 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 722: **``compute_pkz_fv3``** — layer-mean Exner factor.
+  Faithful JAX port of FV3 pkz computation
+  (fv_mapz.F90:457 hydrostatic, :481 non-hydrostatic dry,
+  :470/:475 non-hydrostatic moist).
+
+      Hydrostatic:
+          pkz = (p_top^κ − p_bot^κ) / (κ · (peln_top − peln_bot))
+
+      Non-hydrostatic dry:
+          pkz = exp(κ · ln(R_d · delp · pt / (g · |delz|)))
+              = (R_d · delp · pt / (g · |delz|))^κ
+
+      Non-hydrostatic moist (varying κ per layer):
+          pkz = exp(cappa · ln(R_d · delp · pt / (g · |delz|)))
+          (cappa parameter accepts scalar or (...,km) array)
+
+  Pairs with iter-691 ``pv_entropy_fv3`` (uses θ = pt/pkz),
+  iter-692 ``eqv_pot_fv3`` (uses pkz for dry-hydrostatic θ_e),
+  and FV3 ``Riem_Solver`` (uses pkz in nonhydrostatic momentum).
+
+  Tests (7/7 in <1 s):
+  1. Thin Δp around p=1e5 → pkz ≈ p^κ (limit Δp → 0).
+  2. Multi-layer column → pkz monotone in pressure.
+  3. Non-hydrostatic dry analytic match.
+  4. Hydro and non-hydro isothermal match to 1e-3 rel.
+  5. Custom cappa overrides default kappa.
+  6. 3-D shape: (n_x, n_y, km+1) peln → (n_x, n_y, km) pkz.
+  7. Missing peln/pt/delz raises ValueError.
+
+  Reuses ``constants.kappa``, ``R_d``, ``g``.  No new constants.
+
+  Wired into iter-383 sweep (now 286).
 - Iter 721: **``virtual_temp_fv3`` helper + iter-718 duplicate cleanup**.
 
   ``virtual_temp_fv3(pt, q, zvir=None)`` returns

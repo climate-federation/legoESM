@@ -4518,6 +4518,75 @@ def range_check_fv3(
     return bad_range, qmin, qmax
 
 
+def compute_pkz_fv3(
+    delp: jax.Array,
+    peln: jax.Array | None = None,
+    pt: jax.Array | None = None,
+    delz: jax.Array | None = None,
+    hydrostatic: bool = True,
+    cappa: float | jax.Array | None = None,
+) -> jax.Array:
+    """FV3_3D iter 722: layer-mean Exner factor (pkz).
+
+    Faithful JAX port of FV3 pkz computation
+    (model/fv_mapz.F90:457 hydrostatic, :481 non-hydrostatic dry,
+    :470/:475 non-hydrostatic moist with varying cappa).
+
+    Two branches:
+
+        Hydrostatic (default):
+            pkz = (p_top^κ − p_bot^κ) / (κ · (peln_top − peln_bot))
+            (line 457; uses peln = ln(p) at interfaces).
+
+        Non-hydrostatic dry (line 481):
+            pkz = exp(κ · ln(R_d · delp / (delz · g) · pt))
+                = (R_d · delp · pt / (g · delz))^κ
+
+        Non-hydrostatic moist (line 470, varying κ per layer):
+            pkz = exp(cappa · ln(R_d · delp / (delz · g) · pt))
+
+    Parameters
+    ----------
+    delp : jax.Array, shape (..., km)
+        Pressure thickness (Pa, positive).
+    peln : jax.Array, shape (..., km+1), optional
+        log(pressure) at interfaces — required if hydrostatic.
+    pt : jax.Array, shape (..., km), optional
+        Air temperature (K) — required if not hydrostatic.
+    delz : jax.Array, shape (..., km), optional
+        Layer thickness (NEGATIVE in FV3 — top-down) — required
+        if not hydrostatic.
+    hydrostatic : bool, default True.
+    cappa : float or jax.Array, optional
+        Exponent.  Default ``constants.kappa``.  Pass an array of
+        shape ``(..., km)`` for layer-varying moist cappa (FV3
+        line 470 path).
+
+    Returns
+    -------
+    pkz : jax.Array, shape (..., km)
+        Layer-mean Exner factor (dimensionless).
+    """
+    kap = constants.kappa if cappa is None else cappa
+    if hydrostatic:
+        if peln is None:
+            raise ValueError("hydrostatic=True requires peln")
+        pe = jnp.exp(peln)
+        pk_top = pe[..., :-1] ** kap
+        pk_bot = pe[..., 1:] ** kap
+        d_peln = peln[..., 1:] - peln[..., :-1]
+        return (pk_bot - pk_top) / (kap * d_peln)
+    else:
+        if pt is None or delz is None:
+            raise ValueError("hydrostatic=False requires pt and delz")
+        # Non-hydrostatic: pkz = (R_d · delp · pt / (g · |delz|))^κ
+        # FV3 uses delz < 0; rrg·delp/delz·pt is negative on a finite
+        # column, so use -delz to keep base positive.
+        rrg = constants.R_d / constants.g
+        base = rrg * delp * pt / (-delz)
+        return jnp.exp(kap * jnp.log(base))
+
+
 def virtual_temp_fv3(
     pt: jax.Array,
     q: jax.Array,
