@@ -120,6 +120,7 @@ _GUARD_MODULES = (
     "test_nh_dycore_clip_slack_iter503",             # iter-503 add
     "test_combined_iter466_iter503_iter504",         # iter-504 add
     "test_monotone_halo_clip_context_iter505",       # iter-505 add
+    "test_pe_monotone_halo_clip_context_iter506",    # iter-506 add
 )
 
 

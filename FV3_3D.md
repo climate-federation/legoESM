@@ -1081,6 +1081,20 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 506: **PE composition check** for iter-505 helper.
+  Mirror NH iter-505 on hydrostatic PE: build state from
+  ``held_suarez_init`` + random T perturbation, step both
+  with and without ``monotone_halo_clip_context(slack=0.5)``,
+  measure T-field edge-vs-interior std ratio at C8+duogrid
+  divided by C8-no-duogrid.  Result: **1.000× both with and
+  without context** — PE shows no duogrid penalty at this
+  state.  Interpretation: PE's hydrostatic balance lacks
+  the acoustic/advection coupling through halo corners that
+  drives the NH 4.77× penalty (cf. iter-473).  Composition
+  is SAFE on PE (test guard: ≤10% degradation).  Implication:
+  the iter-505 helper is unconditionally safe to use on PE
+  even though there is no NH-magnitude reduction to gain.
+  1/1 in 89 s.  Wired into iter-383 sweep (now 97).
 - Iter 505: **user-facing API** for the iter-504 combined fix
   — new ``monotone_halo_clip_context(slack=0.5)`` context
   manager in ``legoesm.grids.halo`` that monkey-patches 6
