@@ -4518,68 +4518,41 @@ def range_check_fv3(
     return bad_range, qmin, qmax
 
 
-def get_vorticity_fv3(
-    u: jax.Array,
-    v: jax.Array,
-    dx: jax.Array,
-    dy: jax.Array,
-    rarea: jax.Array,
+def virtual_temp_fv3(
+    pt: jax.Array,
+    q: jax.Array,
+    zvir: float | None = None,
 ) -> jax.Array:
-    """FV3_3D iter 718: relative vorticity at cell center from D-grid.
+    """FV3_3D iter 721: virtual temperature helper.
 
-    Faithful JAX port of FV3 ``get_vorticity``
-    (tools/fv_diagnostics.F90:3877-3908).  Circulation-form
-    vorticity via Stokes' theorem around the cell:
+    Faithful JAX port of FV3's ``T·(1 + zvir·q)`` pattern used
+    throughout dyn_core.F90 and fv_diagnostics.F90 (e.g. lines
+    2959, 2990, 3532).
 
-        utmp[i,j] = u[i,j] · dx[i,j]
-        vtmp[i,j] = v[i,j] · dy[i,j]
-        vort[i,j] = rarea[i,j] · (utmp[i,j] − utmp[i,j+1]
-                                  − vtmp[i,j] + vtmp[i+1,j])
+        T_v = T · (1 + zvir · q_sphum)
+        zvir = R_v/R_d − 1 (≈ 0.6078 with legoesm constants)
 
-    Diagnostic equivalent of dycore ``dgrid_vorticity`` (in
-    ``operators_cdgrid.py``), but exposed as a standalone routine
-    matching FV3's tools/fv_diagnostics API.
+    Used when computing density / pressure under moist air via
+    p = ρ·R_d·T_v.
 
     Parameters
     ----------
-    u : jax.Array, shape (..., n, n+1[, km])
-        D-grid u-wind on y-edges (x-tangential).
-    v : jax.Array, shape (..., n+1, n[, km])
-        D-grid v-wind on x-edges.
-    dx : jax.Array, shape (..., n, n+1)
-        x-edge length (m).
-    dy : jax.Array, shape (..., n+1, n)
-        y-edge length (m).
-    rarea : jax.Array, shape (..., n, n)
-        Inverse cell area (1/m²).
+    pt : jax.Array
+        Air temperature (K).
+    q : jax.Array
+        Specific humidity (kg/kg).
+    zvir : float, optional
+        Virtual-T coefficient.  Default ``R_v/R_d − 1`` from
+        legoesm constants.
 
     Returns
     -------
-    vort : jax.Array, shape (..., n, n[, km])
-        Relative vorticity at cell centers (1/s).
+    t_v : jax.Array
+        Virtual temperature (K).
     """
-    # Broadcast metric over level axis if u has trailing km
-    if u.ndim > dx.ndim:
-        dx_b = dx[..., None]
-        dy_b = dy[..., None]
-        rarea_b = rarea[..., None]
-    else:
-        dx_b = dx
-        dy_b = dy
-        rarea_b = rarea
-    utmp = u * dx_b                         # (..., n, n+1[, km])
-    vtmp = v * dy_b                         # (..., n+1, n[, km])
-    if u.ndim > dx.ndim:
-        vort = rarea_b * (
-            utmp[..., :, :-1, :] - utmp[..., :, 1:, :]
-            - vtmp[..., :-1, :, :] + vtmp[..., 1:, :, :]
-        )
-    else:
-        vort = rarea_b * (
-            utmp[..., :, :-1] - utmp[..., :, 1:]
-            - vtmp[..., :-1, :] + vtmp[..., 1:, :]
-        )
-    return vort
+    if zvir is None:
+        zvir = constants.R_v / constants.R_d - 1.0
+    return pt * (1.0 + zvir * q)
 
 
 def get_height_field_fv3(

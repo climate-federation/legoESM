@@ -308,6 +308,7 @@ _GUARD_MODULES = (
     "test_fv3_get_vorticity_iter718",                # iter-718 add
     "test_fv3_bunkers_left_mover_iter719",           # iter-719 add
     "test_fv3_qsat_blend_iter720",                   # iter-720 add
+    "test_fv3_virtual_temp_iter721",                 # iter-721 add
 )
 
 

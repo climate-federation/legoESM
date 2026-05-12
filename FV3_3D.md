@@ -1195,6 +1195,34 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 721: **``virtual_temp_fv3`` helper + iter-718 duplicate cleanup**.
+
+  ``virtual_temp_fv3(pt, q, zvir=None)`` returns
+  ``T_v = T · (1 + zvir · q)`` matching FV3's inline pattern
+  (dyn_core.F90 and fv_diagnostics.F90 use this expression at
+  ~15 sites: lines 2959, 2990, 3532, etc.).  Default
+  ``zvir = R_v/R_d − 1`` from legoesm constants.
+
+  **iter-718 cleanup**: audit revealed iter-718 had accidentally
+  redefined ``get_vorticity_fv3`` already ported in iter-656
+  (line ~5750).  Both implementations bit-equivalent but caused
+  duplicate-function namespace clash (Python uses last-defined).
+  iter-721 removes the iter-718 duplicate; the iter-656
+  canonical definition remains.  iter-718 tests still pass
+  unchanged (they validate the surviving iter-656 implementation).
+
+  Tests (6/6 in <2 s):
+  1. q = 0 → T_v = T.
+  2. q > 0 → T_v > T by exactly T·zvir·q (Δ = ~2.65 K at q=15 g/kg,
+     T=290 K).
+  3. Custom zvir overrides default.
+  4. iter-656 get_vorticity_fv3 still importable + works post-cleanup.
+  5. 3-D input → 3-D output.
+  6. No NaN/Inf on random.
+
+  iter-718 5/5 tests still pass.
+
+  Wired into iter-383 sweep (now 285).
 - Iter 720: **``saturation_mixing_ratio_blend`` helper in thermo.py**.
 
   Extracted reusable liquid/ice saturation blend from iter-715
