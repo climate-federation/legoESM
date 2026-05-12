@@ -1195,6 +1195,44 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 642: **FV3 ``gw_1d``** — gravity-wave 1D vertical-coord init.
+  Faithful JAX port of FV3 ``gw_1d`` (tools/fv_eta.F90:2286-2344).
+  Sets up uniform-dz vertical coord with isothermal or constant-N²
+  atmosphere; returns hybrid (ak, bk) coefficients, top-of-model
+  pressure, and reference potential temperature profile.
+
+  Algorithm:
+
+      dz[k] = ztop / km                       # uniform
+      ze built bottom-up
+      N² = g²/(cp·T0) if isothermal else 0.0001 s⁻²
+      s0 = g²/(cp·N²)
+      pe[k] = p0·((1 - s0/T0) + s0/T0·exp(-N²·z/g))^(1/κ)
+      ptop = pe[0]
+      ak[0] = pe[0]; bk[0] = 0
+      bk[k] = (pe[k] - pe[0]) / (pe[km] - pe[0])    for k ∈ [1, km-1]
+      ak[k] = pe[0]·(1 - bk[k])
+      ak[km] = 0; bk[km] = 1
+      pt[k] = g·dz[k] / (cp·(pe[k+1]^κ - pe[k]^κ))
+
+  NOTE: formula requires base > 0 → ztop ≲ 36 km (for default N²
+  = 0.0001 and T0=300).  For higher ztop, FV3 expects user to
+  pick smaller domain or use isothermal mode.
+
+  Used in FV3 for non-linear gravity-wave test cases.  Reuses
+  legoESM constants (g, c_pd, kappa).
+
+  Lives in ``legoesm.grids.vertical``.
+
+  Tests (6/6 in 1 s):
+  1. Output shapes (km+1, km+1, scalar, km).
+  2. ak[0]=ptop, bk[0]=0, ak[km]=0, bk[km]=1.
+  3. 0 < ptop < p0.
+  4. Potential temperature pt1 > 0.
+  5. Isothermal vs constant-N² → different ptop.
+  6. No NaN/Inf.
+
+  Wired into iter-383 sweep (now 211).
 - Iter 641: **FV3 ``compute_dz_var``** — variable dz with rescaling.
   Faithful JAX port of FV3 ``compute_dz_var``
   (tools/fv_eta.F90:1930-1998).  Mirror of iter-639 ``hybrid_z_dz``

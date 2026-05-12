@@ -1166,6 +1166,95 @@ def compute_dz_L32() -> tuple[jax.Array, jax.Array]:
     return dz_flipped, ztop
 
 
+def gw_1d(
+    km: int, p0: float, ztop: float,
+    isothermal: bool = False, t0: float = 300.0,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    """FV3_3D iter 642: FV3 gravity-wave 1D vertical coord init.
+
+    Faithful JAX port of FV3 ``gw_1d`` (tools/fv_eta.F90:2286-2344).
+    Sets up a uniform-dz vertical coord with isothermal or
+    constant-N² atmosphere; returns the resulting hybrid (ak, bk)
+    coefficients, top-of-model pressure, and reference potential
+    temperature profile.
+
+    Algorithm:
+        dz[k] = ztop / km                       # uniform
+        ze[km] = 0; ze[k] = ze[k+1] + dz[k]    # bottom-up
+        # If isothermal: N² = g²/(cp·T0); else N² = 0.0001 s⁻²
+        s0 = g²/(cp·N²)
+        pe[k] = p0·((1 - s0/T0) + s0/T0·exp(-N²·ze[k]/g))^(1/κ)
+        ptop = pe[0]
+        ak[0] = pe[0]; bk[0] = 0
+        bk[k] = (pe[k] - pe[0]) / (pe[km] - pe[0])    for k ∈ [1, km-1]
+        ak[k] = pe[0] · (1 - bk[k])
+        ak[km] = 0; bk[km] = 1
+        pk[k] = pe[k]^κ
+        pt[k] = g·dz[k] / (cp · (pk[k+1] - pk[k]))
+
+    Parameters
+    ----------
+    km : int
+        Number of layers.
+    p0 : float
+        Reference surface pressure (Pa).
+    ztop : float
+        Top of model height (m).
+    isothermal : bool, default False
+        If True, use N² = g²/(cp·T0); else N² = 0.0001.
+    t0 : float, default 300.0
+        Reference temperature (K).
+
+    Returns
+    -------
+    ak : jax.Array, shape (km+1,)
+    bk : jax.Array, shape (km+1,)
+    ptop : jax.Array (scalar)
+    pt1 : jax.Array, shape (km,)
+        Volume-mean potential temperature.
+    """
+    g = constants.g
+    cp = constants.c_pd
+    kappa = constants.kappa
+
+    if isothermal:
+        n2 = g * g / (cp * t0)
+    else:
+        n2 = 0.0001
+
+    s0 = g * g / (cp * n2)
+
+    # Uniform dz; ze built bottom-up: ze[km] = 0, ze[k] = ze[k+1] + dz
+    dz_uniform = ztop / km
+    dz1 = jnp.full((km,), dz_uniform)
+    # ze[k] = (km - k) · dz_uniform (0-indexed, ze[0] = ztop, ze[km] = 0)
+    ze = (km - jnp.arange(km + 1)) * dz_uniform
+
+    # pe[k] = p0·((1 - s0/T0) + s0/T0·exp(-N²·ze[k]/g))^(1/κ)
+    base = (1.0 - s0 / t0) + (s0 / t0) * jnp.exp(-n2 * ze / g)
+    pe1 = p0 * base ** (1.0 / kappa)
+
+    ptop = pe1[0]
+
+    # ak, bk build
+    ak = jnp.zeros((km + 1,))
+    bk = jnp.zeros((km + 1,))
+    ak = ak.at[0].set(pe1[0])
+    # Interior k ∈ [1, km-1] (0-indexed)
+    bk_int = (pe1[1:km] - pe1[0]) / (pe1[km] - pe1[0])
+    bk = bk.at[1:km].set(bk_int)
+    ak_int = pe1[0] * (1.0 - bk_int)
+    ak = ak.at[1:km].set(ak_int)
+    # Bottom k = km
+    ak = ak.at[km].set(0.0)
+    bk = bk.at[km].set(1.0)
+
+    # pk and pt1
+    pk1 = pe1 ** kappa
+    pt1 = g * dz1 / (cp * (pk1[1:] - pk1[:-1]))
+    return ak, bk, ptop, pt1
+
+
 def compute_dz_var(
     km: int, ztop: float, s_rate: float = 1.0,
 ) -> jax.Array:
