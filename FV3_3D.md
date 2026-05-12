@@ -1120,6 +1120,16 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- Iter 541: **clip helper performance benchmark**.  Measure
+  wall-clock ms/step for raw ``jax.jit(step)`` vs
+  ``make_clipped_step`` at C8, 5-step average:
+  - raw jit:           3669 ms/step
+  - make_clipped_step: 3691 ms/step
+  - **overhead: +0.6%**
+  Negligible cost for the 48% edge-ratio reduction (iter-526).
+  The clip is essentially free vs the dycore step cost.
+  Helper is production-ready performance-wise.  1/1 in 86 s.
+  Wired into iter-383 sweep (now 127).
 - **Iters 531-539 (compacted iter 540)**: helper validation
   across dycores, ICs, conservation, and stability.
   - iter 531: ``make_clipped_step`` works on SW

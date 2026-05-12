@@ -150,6 +150,7 @@ _GUARD_MODULES = (
     "test_terrain_clip_iter537",                     # iter-537 add
     "test_tracer_clip_iter538",                      # iter-538 add
     "test_long_run_mass_iter539",                    # iter-539 add
+    "test_clip_helper_perf_iter541",                 # iter-541 add
 )
 
 
