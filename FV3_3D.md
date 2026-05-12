@@ -5200,4 +5200,52 @@ Together with iter-785 Fr, the dimensional-analysis pair
 {rotation, stratification, inertia}-dominated.  Pure JAX, vmap-
 compatible.  No new physical constants introduced.
 
+## Iter 787 — burger_number_fv3 (B = (L_R/L)²)
+
+Added `burger_number_fv3(L_R, L, L_floor=1e-6)` to
+`grids/cubed_sphere.py`.  Dimensionless Rossby-radius vs length-
+scale squared:
+
+```
+B = (L_R / max(L, L_floor))²
+```
+
+Regime interpretation:
+  * B ≪ 1   — barotropic (L ≫ L_R; rotation dominates)
+  * B ~ 1   — classical QG (L ~ L_R; geostrophic + thermal-wind
+              closure)
+  * B ≫ 1   — fully stratified (L ≪ L_R; non-rotating Boussinesq)
+
+Completes the (Ro, Fr, B) regime-selection triplet:
+  * iter-785 Fr = U/c        — inertia/gravity
+  * iter-786 Ro = U/(|f|·L)  — inertia/rotation
+  * iter-787 B  = (L_R/L)²   — rotation/stratification balance
+
+Quasi-geostrophy ⇔ Ro ≪ 1 AND B ~ 1.
+
+Composes iter-781 ``rossby_radius_fv3``: caller computes
+L_R = N·H/|f| then passes here.
+
+Used by: QG validity checks, baroclinic-instability mode
+selection (most unstable mode at B ~ 1), eddy-resolving model
+design (resolve features near B = 1), mesoscale parameterization
+regime detection.
+
+Test: `tests/test_fv3_burger_number_iter787.py` (7 tests:
+QG classical L_R=L=1000 km → B=1, stratified L_R/L=10 → B=100,
+barotropic L_R/L=0.1 → B=0.01, L=0 floored finite, monotone in
+L_R and L, full iter-781 pipeline at 30°N gives B ≈ 1.88 (near-
+QG), 3-D shapes + finite + non-negative).
+
+### Why this iteration was meaningful
+
+Closes the QG-closure dimensional-analysis triplet (Ro, Fr, B).
+This trio classifies any rotating-stratified flow into its
+canonical regime: B alone separates barotropic from QG from
+fully stratified; combined with Ro it isolates true QG (Ro ≪ 1,
+B ~ 1) from semi-geostrophic and inertial regimes.  Foundation
+of: baroclinic-instability theory, eddy-mixing parameter-
+izations, multi-scale model design.  Pure JAX, vmap-compatible.
+No new physical constants introduced.
+
 

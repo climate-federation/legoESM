@@ -374,6 +374,7 @@ _GUARD_MODULES = (
     "test_fv3_gravity_wave_speed_iter784",           # iter-784 add
     "test_fv3_froude_number_iter785",                # iter-785 add
     "test_fv3_rossby_number_iter786",                # iter-786 add
+    "test_fv3_burger_number_iter787",                # iter-787 add
 )
 
 

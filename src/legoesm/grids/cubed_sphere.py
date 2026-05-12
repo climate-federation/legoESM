@@ -4094,6 +4094,58 @@ def rossby_number_fv3(
     return jnp.maximum(u_speed, 0.0) / jnp.maximum(jnp.abs(f) * L, fL_floor)
 
 
+def burger_number_fv3(
+    L_R: jax.Array,
+    L: jax.Array,
+    L_floor: float = 1e-6,
+) -> jax.Array:
+    """FV3_3D iter 787: Burger number B = (L_R / L)².
+
+    Dimensionless ratio of Rossby radius to characteristic length
+    scale, squared:
+
+        B = (L_R / max(L, L_floor))²
+
+    Diagnostic of QG closure regime:
+
+      * B ≪ 1   — barotropic limit: L ≫ L_R, rotation dominates
+                  over stratification, vorticity advection
+                  decoupled from interior buoyancy.
+      * B ~ 1   — classical QG: comparable scales, geostrophic
+                  balance + thermal-wind closure.
+      * B ≫ 1   — fully stratified: L ≪ L_R, hydrostatic balance,
+                  hydrostatic primitive equations / non-rotating
+                  Boussinesq.
+
+    Together with iter-785 ``froude_number_fv3`` and iter-786
+    ``rossby_number_fv3``, completes the (Ro, Fr, B) regime-
+    selection triplet.  Quasi-geostrophy = Ro ≪ 1 AND B ~ 1.
+
+    Composes with iter-781 ``rossby_radius_fv3`` directly: caller
+    computes L_R = N·H/|f| then passes it here.
+
+    Used by: QG validity checks, baroclinic-instability mode
+    selection (most unstable at B ~ 1), eddy-resolving model
+    design (resolve features with B near unity), mesoscale
+    parameterization regime detection.
+
+    Parameters
+    ----------
+    L_R : jax.Array
+        Rossby radius of deformation (m), from iter-781.
+    L : jax.Array
+        Characteristic horizontal length scale (m).
+    L_floor : float
+        Lower bound on L (m); default 1e-6.
+
+    Returns
+    -------
+    B : jax.Array
+        Burger number (dimensionless, ≥ 0).
+    """
+    return (L_R / jnp.maximum(L, L_floor)) ** 2
+
+
 def kinetic_energy_fv3(
     ua: jax.Array,
     va: jax.Array,
