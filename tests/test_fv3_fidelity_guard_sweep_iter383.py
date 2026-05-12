@@ -361,6 +361,7 @@ _GUARD_MODULES = (
     "test_fv3_mixing_ratio_iter771",                 # iter-771 add
     "test_fv3_brunt_vaisala_iter772",                # iter-772 add
     "test_fv3_richardson_iter773",                   # iter-773 add
+    "test_fv3_bulk_richardson_iter774",              # iter-774 add
 )
 
 

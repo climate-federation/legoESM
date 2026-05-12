@@ -4214,6 +4214,65 @@ def richardson_number_fv3(
     return n_sq / jnp.maximum(s_sq, shear_floor)
 
 
+def bulk_richardson_fv3(
+    theta_v_surf: jax.Array,
+    theta_v: jax.Array,
+    u: jax.Array,
+    v: jax.Array,
+    z: jax.Array,
+    wind_sq_floor: float = 0.01,
+) -> jax.Array:
+    """FV3_3D iter 774: bulk Richardson number from surface to z.
+
+    Layered (non-gradient) stability metric:
+
+        Ri_b(z) = g · z · (θ_v(z) − θ_v_surf) /
+                  (θ_v_surf · (u(z)² + v(z)²))
+
+    Differs from the iter-773 gradient Ri (which uses ``dθ_v/dz``
+    and ``du/dz`` at layer midpoints).  Ri_b integrates from the
+    surface to a finite height z — used by Vogelezang-Holtslag,
+    Troen-Mahrt, Holtslag-Boville PBL schemes to detect the
+    boundary-layer top: PBL height = first level where Ri_b
+    exceeds a critical value (≈ 0.25 over land, 0.5 over ocean).
+
+    Caller passes virtual potential temperature (computed via
+    ``_shared.virtual_temperature``) — Ri_b is canonically
+    defined on θ_v, not θ.
+
+    ``wind_sq_floor`` prevents div-by-0 at near-calm surface
+    layers.  Default 0.01 m²/s² corresponds to a 0.1 m/s wind.
+
+    Parameters
+    ----------
+    theta_v_surf : jax.Array
+        Surface virtual potential temperature (K).  Typically
+        ``theta_v[..., 0]`` for FV3 bottom-up arrays or
+        ``theta_v[..., -1]`` for top-down arrays.
+    theta_v : jax.Array, shape (..., km)
+        Virtual potential temperature column (K).
+    u, v : jax.Array, shape (..., km)
+        Horizontal wind components (m/s).
+    z : jax.Array, shape (..., km)
+        Geopotential height above the surface (m).
+    wind_sq_floor : float
+        Lower bound on wind² (m²/s²); default 0.01 (0.1 m/s).
+
+    Returns
+    -------
+    ri_b : jax.Array, shape (..., km)
+        Bulk Richardson number at each level.
+    """
+    theta_v_surf_b = theta_v_surf[..., jnp.newaxis]
+    wind_sq = u * u + v * v
+    return (
+        constants.g
+        * z
+        * (theta_v - theta_v_surf_b)
+        / (theta_v_surf_b * jnp.maximum(wind_sq, wind_sq_floor))
+    )
+
+
 def dew_point_fv3(
     e_mb: jax.Array,
 ) -> jax.Array:

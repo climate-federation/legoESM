@@ -5013,3 +5013,44 @@ shear-driven mixing parameterizations.  Composes iter-772 N² with
 shear in one call.  Pure JAX, vmap-compatible.  No new physical
 constants introduced.
 
+## Iter 774 — bulk_richardson_fv3 (Ri_b for PBL height)
+
+Added `bulk_richardson_fv3(theta_v_surf, theta_v, u, v, z,
+wind_sq_floor=0.01)` to `grids/cubed_sphere.py`.  Computes:
+
+```
+Ri_b(z) = g·z·(θ_v(z) − θ_v_surf) / (θ_v_surf · (u² + v²))
+```
+
+Distinct from iter-773 **gradient** Ri.  Bulk Ri integrates from
+surface to a finite height, giving a layered stability that PBL
+schemes use to detect the boundary-layer top: PBL height = first
+level where Ri_b exceeds a critical value (~0.25 over land, ~0.5
+over ocean).
+
+Used by: Vogelezang-Holtslag (1996), Troen-Mahrt (1986), Holtslag-
+Boville (1993) PBL schemes.  Caller passes pre-computed θ_v
+(typically from `_shared.virtual_temperature`) — Ri_b is
+canonically defined on θ_v, not θ.
+
+`wind_sq_floor` prevents div-by-0 at near-calm surface; default
+0.01 m²/s² ≈ (0.1 m/s)².
+
+Test: `tests/test_fv3_bulk_richardson_iter774.py` (6 tests:
+surface-level Ri_b=0, stable → +, unstable → −, calm-air floor
+gives bounded finite Ri_b, 3-D shapes preserved with θ_v_surf
+broadcast, finite).
+
+### Why this iteration was meaningful
+
+PBL height is one of the most-consequential diagnostics in
+mesoscale and global modeling: it gates vertical mixing
+intensity, dictates dust/aerosol and pollutant venting depth,
+sets the cloud-base level for convection schemes, and influences
+surface fluxes via near-surface drag.  Ri_b > Ri_c is the
+canonical detection criterion across multiple PBL parameter-
+izations.  Together with iter-773 gradient Ri, the boundary-layer
+stability diagnostic stack is complete (gradient Ri for interior,
+bulk Ri for height).  Pure JAX, vmap-compatible.  No new physical
+constants introduced.
+
