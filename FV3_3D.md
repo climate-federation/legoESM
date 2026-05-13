@@ -5550,6 +5550,62 @@ Pure JAX, vmap-compatible.  Myhre-1998 α=5.35 is an empirical
 RTM fit coefficient (default arg, not a fundamental physical
 constant).  No new entries in `constants.py`.
 
+## Iter 839 — radiative_forcing_ch4_fv3 (Myhre 1998 √-form)
+
+Added `radiative_forcing_ch4_fv3(ch4_ppb, ch4_ppb_ref=722.0,
+alpha_myhre=0.036)` to `grids/cubed_sphere.py`.  IPCC TAR/AR5
+methane forcing (CH₄-only branch, no CH₄-N₂O overlap):
+
+```
+ΔF_CH₄ = α_Myhre · (√M − √M_ref)    (W/m²)
+```
+
+α_Myhre = 0.036 W/m²/√ppb (Myhre 1998 RRTM fit; AR5 8.SM.1).
+M_ref = 722 ppb (1750-CE pre-industrial).
+
+Square-root saturation reflects partial 7.66-μm ν₄ band saturation
+— additional CH₄ broadens line wings sub-logarithmically (weaker
+than CO₂'s full log).
+
+Canonical values:
+  | scenario             | M (ppb) | ΔF (W/m²) |
+  |----------------------|---------|-----------|
+  | Pre-industrial ref   | 722     | 0.00      |
+  | Present-day 2024     | 1925    | 0.61      |
+  | SSP3-7.0 2100        | 3500    | 1.18      |
+  | 8× pre-ind           | 5776    | 1.74      |
+
+Extends iter-838 to non-CO₂ GHG forcing.  Together they enable
+multi-gas warming pipelines:
+
+```
+{CO₂ ppm, CH₄ ppb} (+N₂O, halocarbons future iters)
+↓ iter-838 ΔF_CO₂ + iter-839 ΔF_CH₄ → ΣΔF
+↓ iter-836/837 ECS / TCR → ΔT
+```
+
+Test verifies CO₂+CH₄ chain: present-day {420 ppm, 1925 ppb} →
+ΔF_total ≈ 2.82 → ECS ≈ 2.0 K with |λ|=1.4.
+
+Note: AR6 (Etminan et al. 2016) uses fitted polynomial replacing
+both Myhre forms; simple √-form remains AR5 default and provides
+cleanest pure-JAX composable.  CH₄-N₂O overlap < 5% in AR6 likely
+range — neglected for clean primitive form.
+
+Test: `tests/test_fv3_radiative_forcing_ch4_iter839.py` (8 tests:
+present-day AR6 ≈ 0.61 W/m², no-change zero, decrease cools,
+monotone, successive doublings positive marginal, full CO₂+CH₄
+chain to ECS ≈ 2.0 K, M=0 floored, 3-D shapes).
+
+### Why this iteration was meaningful
+
+Extends iter-838 CO₂-only forcing to non-CO₂ GHG.  CH₄ is the
+second-largest single-gas anthropogenic forcing (~25% of CO₂)
+and a methane-spike scenario is policy-relevant.  Together with
+iter-838 enables multi-gas FaIR/MAGICC-class emulators.  Pure
+JAX, vmap-compatible.  Myhre 0.036 is empirical RTM fit (default
+arg) — no `constants.py` additions.
+
 
 
 

@@ -7346,6 +7346,81 @@ def radiative_forcing_co2_fv3(
     return alpha_myhre * jnp.log(c_safe / c_ref_safe)
 
 
+def radiative_forcing_ch4_fv3(
+    ch4_ppb: jax.Array,
+    ch4_ppb_ref: jax.Array = 722.0,
+    alpha_myhre: float = 0.036,
+    ch4_floor: float = 1e-6,
+) -> jax.Array:
+    """FV3_3D iter 839: Myhre 1998 √-form CH₄ radiative forcing.
+
+    IPCC TAR/AR5 standard methane radiative-forcing formula (CH₄-
+    only branch, neglecting CH₄-N₂O band-overlap correction):
+
+        ΔF_CH₄ = α_Myhre · (√M − √M_ref)    (W/m²)
+
+    Where:
+      * α_Myhre  = 0.036 W/m²/√ppb (Myhre 1998 fit to RRTM
+        line-by-line spectral calculations; AR5 Table 8.SM.1).
+      * M_ref    — reference CH₄ (default 722 ppb = AR5 1750-CE
+        pre-industrial).
+
+    Square-root dependence reflects partial band saturation in
+    the 7.66-μm CH₄ ν₄ rotation-vibration band — additional CH₄
+    broadens line wings sub-logarithmically (weaker than CO₂'s
+    full log).
+
+    Canonical values:
+      * M_ref = 722 (1750 CE):              ΔF = 0.00 W/m²
+      * Present-day M = 1925 (2024):        ΔF ≈ 0.61 W/m²
+      * SSP3-7.0 2100: M = 3500:            ΔF ≈ 1.18 W/m²
+      * Methane spike M_ref→2·M_ref=1444:   ΔF ≈ 0.40 W/m²
+
+    The CH₄-N₂O overlap correction (Myhre 1998 eqn 2 last term)
+    is < 5% in the AR6 likely range — neglected here for clean
+    primitive form.  AR6 (Etminan et al. 2016) uses a fitted
+    polynomial replacing both Myhre forms; the simple √-form
+    remains the AR5 default and provides the cleanest pure-JAX
+    composable.
+
+    Composes naturally with the iter-836 ECS / iter-837 TCR
+    primitive chain:
+
+        CH₄ ppb (or co-input with CO₂, N₂O)
+        → iter-839 ΔF_CH₄    (+ iter-838 ΔF_CO₂)
+        → iter-836/837 ΔT_eq / ΔT_trans
+
+    Used by: AR5/AR6 forcing tables (CH₄ row), simple climate
+    models (FaIR v2.0, MAGICC7) for non-CO₂ GHG terms, AR-WG1
+    multi-gas emissions-to-warming pipelines.
+
+    Note: ``alpha_myhre`` is Myhre-1998 empirical fit; AR6
+    Etminan 2016 has minor revisions (typically <3% offset).
+    Default 0.036 reproduces AR5 row 8.SM.1 to 2 sig figs.
+
+    Parameters
+    ----------
+    ch4_ppb : jax.Array
+        Atmospheric CH₄ concentration (ppb).
+    ch4_ppb_ref : jax.Array or float
+        Reference CH₄ (ppb); default 722 (1750-CE pre-industrial).
+    alpha_myhre : float
+        Myhre-1998 coefficient (W/m²/√ppb); default 0.036.
+    ch4_floor : float
+        Lower bound on M and M_ref (ppb); default 1e-6 — prevents
+        √(negative) for hypothetical CH₄-free atmosphere.
+
+    Returns
+    -------
+    delta_f : jax.Array
+        Radiative forcing (W/m²) relative to ``ch4_ppb_ref``.
+        Positive for M > M_ref (warming).
+    """
+    m_safe = jnp.maximum(ch4_ppb, ch4_floor)
+    m_ref_safe = jnp.maximum(ch4_ppb_ref, ch4_floor)
+    return alpha_myhre * (jnp.sqrt(m_safe) - jnp.sqrt(m_ref_safe))
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,
