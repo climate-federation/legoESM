@@ -7421,6 +7421,69 @@ def radiative_forcing_ch4_fv3(
     return alpha_myhre * (jnp.sqrt(m_safe) - jnp.sqrt(m_ref_safe))
 
 
+def radiative_forcing_n2o_fv3(
+    n2o_ppb: jax.Array,
+    n2o_ppb_ref: jax.Array = 270.0,
+    alpha_myhre: float = 0.12,
+    n2o_floor: float = 1e-6,
+) -> jax.Array:
+    """FV3_3D iter 840: Myhre 1998 √-form N₂O radiative forcing.
+
+    IPCC TAR/AR5 standard nitrous-oxide radiative-forcing formula
+    (N₂O-only branch, neglecting N₂O-CH₄ band-overlap correction):
+
+        ΔF_N₂O = α_Myhre · (√N − √N_ref)    (W/m²)
+
+    Where:
+      * α_Myhre = 0.12 W/m²/√ppb (Myhre 1998 RRTM fit; AR5 8.SM.1).
+      * N_ref   — reference N₂O (default 270 ppb = AR5 1750-CE
+        pre-industrial).
+
+    Square-root saturation in main 7.78-μm ν₃ band — same form as
+    CH₄ (iter-839) but with stronger coefficient (0.12 vs 0.036
+    per √ppb) reflecting N₂O's stronger per-molecule absorption.
+
+    Canonical values:
+      * N_ref = 270 (1750 CE):              ΔF = 0.00 W/m²
+      * Present-day N = 336 (2024):         ΔF ≈ 0.23 W/m²
+      * SSP3-7.0 2100: N = 435:             ΔF ≈ 0.53 W/m²
+
+    Completes the **Myhre 1998 trio** for ΔF of all three major
+    well-mixed GHG (iter-838 CO₂, iter-839 CH₄, iter-840 N₂O).
+    Multi-gas total forcing:
+
+        ΔF_total = ΔF_CO₂ + ΔF_CH₄ + ΔF_N₂O   (+ halocarbons)
+
+    Pairs with iter-836 ECS / iter-837 TCR to enable FaIR/MAGICC-
+    class multi-gas climate emulators in pure JAX.
+
+    Note: ``alpha_myhre`` is Myhre 1998 empirical fit; AR6 Etminan
+    et al. 2016 polynomial form preferred for accuracy but the
+    √-form remains AR5 default.  N₂O-CH₄ overlap < 5% in AR6
+    likely range — neglected here.
+
+    Parameters
+    ----------
+    n2o_ppb : jax.Array
+        Atmospheric N₂O concentration (ppb).
+    n2o_ppb_ref : jax.Array or float
+        Reference N₂O (ppb); default 270 (1750-CE pre-industrial).
+    alpha_myhre : float
+        Myhre-1998 coefficient (W/m²/√ppb); default 0.12.
+    n2o_floor : float
+        Lower bound on N and N_ref (ppb); default 1e-6.
+
+    Returns
+    -------
+    delta_f : jax.Array
+        Radiative forcing (W/m²) relative to ``n2o_ppb_ref``.
+        Positive for N > N_ref (warming).
+    """
+    n_safe = jnp.maximum(n2o_ppb, n2o_floor)
+    n_ref_safe = jnp.maximum(n2o_ppb_ref, n2o_floor)
+    return alpha_myhre * (jnp.sqrt(n_safe) - jnp.sqrt(n_ref_safe))
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

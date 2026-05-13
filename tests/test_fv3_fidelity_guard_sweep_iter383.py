@@ -427,6 +427,7 @@ _GUARD_MODULES = (
     "test_fv3_tcr_iter837",                          # iter-837 add
     "test_fv3_radiative_forcing_co2_iter838",        # iter-838 add
     "test_fv3_radiative_forcing_ch4_iter839",        # iter-839 add
+    "test_fv3_radiative_forcing_n2o_iter840",        # iter-840 add
 )
 
 

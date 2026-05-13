@@ -38,11 +38,11 @@ def test_iter365_compaction_present(doc_text):
     )
 
 
-def test_doc_size_below_5620_lines(doc_text):
+def test_doc_size_below_5230_lines(doc_text):
     n_lines = len(doc_text.splitlines())
-    assert n_lines < 5620, (
-        f"FV3_3D.md has {n_lines} lines (target < 5620).  "
-        f"Compaction scheduled at iter 840."
+    assert n_lines < 5230, (
+        f"FV3_3D.md has {n_lines} lines (target < 5230).  "
+        f"Next compaction at iter 850."
     )
 
 
@@ -471,6 +471,39 @@ def test_iter820_compaction_covers_topics(doc_text):
     for marker in required:
         assert marker in section, (
             f"iter-820 compacted block missing topic ``{marker}``."
+        )
+
+
+def test_iter840_compaction_present(doc_text):
+    """iter-840 compacted iter 831-839 into single block."""
+    assert "**Iters 831-839 (compacted iter 840)**" in doc_text, (
+        "iter-840 compaction block missing — doc re-expanded."
+    )
+
+
+def test_iter840_compaction_covers_topics(doc_text):
+    section_start = doc_text.find(
+        "**Iters 831-839 (compacted iter 840)**"
+    )
+    section_end = doc_text.find(
+        "**Iters 821-829", section_start,
+    )
+    assert section_start >= 0 and section_end > section_start
+    section = doc_text[section_start:section_end]
+    required = [
+        "831", "832", "833", "834", "835",
+        "836", "837", "838", "839", "840",
+        "planck_feedback", "clausius_clapeyron_dqdt",
+        "fixed_rh_humidity_change",
+        "ice_albedo_feedback", "lapse_rate_feedback",
+        "equilibrium_climate_sensitivity",
+        "transient_climate_response",
+        "radiative_forcing_co2", "radiative_forcing_ch4",
+        "radiative_forcing_n2o",
+    ]
+    for marker in required:
+        assert marker in section, (
+            f"iter-840 compacted block missing topic ``{marker}``."
         )
 
 
