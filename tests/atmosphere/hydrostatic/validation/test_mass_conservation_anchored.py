@@ -303,3 +303,42 @@ def test_long_run_mass_conservation_latlon_pe():
     assert drift < 1e-12, (
         f"lat-lon PE 100-step drift {drift:.2e} exceeds 1e-12"
     )
+
+
+def test_long_run_mass_conservation_mpas_pe():
+    """iter-63: 100-step MPAS PE long-run guard.
+
+    Completes the PE long-run matrix (cube iter-33, spectral iter-61,
+    lat-lon iter-62, MPAS iter-63).  Exercises iter-11's anchored
+    `_fix_mass_mpas_hydro` on a Voronoi mesh over the 100-step
+    horizon.  Direct measurement: drift = 1.61e-16 on level-4
+    Voronoi + 10 sigma levels.
+    """
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+        MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig,
+    )
+    from legoesm.atmosphere.held_suarez import held_suarez_init_mpas
+
+    mesh = create_voronoi_mesh(4)
+    sigma = create_sigma_coordinate(10)
+    cfg = MPASPrimitiveEquationConfig(
+        fix_mass=True, anchor_mass_to_initial=True,
+    )
+    model = MPASPrimitiveEquationModel(mesh, sigma, cfg)
+    state = held_suarez_init_mpas(mesh, sigma)
+
+    def _mass(s):
+        return float(jnp.sum(
+            s.p_s.data.astype(jnp.float64)
+            * mesh.areaCell.astype(jnp.float64),
+        ))
+
+    m0 = _mass(state)
+    for _ in range(100):
+        state = model.step(state, 200.0)
+    drift = _rel_drift(m0, _mass(state))
+    assert drift < 1e-12, (
+        f"MPAS PE 100-step drift {drift:.2e} exceeds 1e-12"
+    )
