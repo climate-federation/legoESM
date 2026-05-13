@@ -3304,6 +3304,13 @@ STILL OPEN (post-iter-99 stretch goals):
     nord=2, ruling out a silent cap at nord=2 due to numerical
     fixed-point convergence or loop truncation.  FV3 uses
     nord ∈ {1, 2, 3} in its namelist range; legoESM matches.
+  - iter 889: NH-path mirror of iter-888
+    (``test_nh_corner_div_damp_nord3_loop_scales``) confirming
+    NH ``for _ in range(nord)`` loop in
+    ``compressible_euler_cdgrid.py:631-632`` scales to nord=3.
+    Combined iter-886/887/888/889 give regression-guard coverage
+    for both PE + NH paths across the full FV3 nord ∈ {1, 2, 3}
+    range.
 - iter-168/169/170/171 documented PE-vs-NH FV3-fidelity asymmetries
   ALL CLOSED:
   * ✅ corner-divergence damping (PE iter 16/18) — closed iter 168

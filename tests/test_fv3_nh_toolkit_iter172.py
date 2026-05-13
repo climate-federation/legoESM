@@ -258,6 +258,81 @@ def test_nh_corner_div_damp_nord2_runs_and_differs_from_nord1(
     )
 
 
+def test_nh_corner_div_damp_nord3_loop_scales(small_nh_state):
+    """FV3_3D iter 889: NH-path mirror of iter-888 PE nord=3 stress.
+
+    Validates the NH compressible-Euler ``for _ in range(nord)``
+    Laplacian iteration loop in
+    ``compressible_euler_cdgrid.py:631-632`` scales beyond nord=2
+    (iter-887) to the full FV3 namelist range nord ∈ {1, 2, 3}.
+
+    Two checks:
+
+    1. ``corner_div_damp_nord=3`` runs end-to-end through the NH
+       acoustic-substep loop without NaN.
+    2. nord=3 NH output differs from nord=2 NH output — rules out
+       silent cap due to numerical fixed-point convergence or
+       loop truncation.
+
+    Combined with iter-886/887/888 this completes regression-guard
+    coverage for both 3D paths across the full FV3 nord-range.
+    """
+    grid, height_coord, terrain_metric, state = small_nh_state
+
+    n = grid.n
+    nlev = state.u.data.shape[-1]
+    rng = np.random.default_rng(seed=889)
+    u_p = rng.uniform(-1.0, 1.0, size=(6, n, n, nlev))
+    v_p = rng.uniform(-1.0, 1.0, size=(6, n, n, nlev))
+    s = state._replace(
+        u=state.u.replace(data=jnp.asarray(u_p)),
+        v=state.v.replace(data=jnp.asarray(v_p)),
+    )
+
+    cfg_nord2 = CDGridCompressibleEulerConfig(
+        hyperdiff_coeff=1e14,
+        n_acoustic_substeps=4,
+        corner_div_damp_d2_bg=0.0005,
+        corner_div_damp_dddmp=0.20,
+        corner_div_damp_d4_bg=1e-3,
+        corner_div_damp_nord=2,
+        corner_div_damp_fv3_vector_fill=True,
+    )
+    cfg_nord3 = CDGridCompressibleEulerConfig(
+        hyperdiff_coeff=1e14,
+        n_acoustic_substeps=4,
+        corner_div_damp_d2_bg=0.0005,
+        corner_div_damp_dddmp=0.20,
+        corner_div_damp_d4_bg=1e-3,
+        corner_div_damp_nord=3,
+        corner_div_damp_fv3_vector_fill=True,
+    )
+
+    m_nord2 = CDGridCompressibleEulerModel(
+        grid, height_coord, terrain_metric, cfg_nord2,
+    )
+    m_nord3 = CDGridCompressibleEulerModel(
+        grid, height_coord, terrain_metric, cfg_nord3,
+    )
+
+    s_nord2 = m_nord2.step(s, 10.0)
+    s_nord3 = m_nord3.step(s, 10.0)
+
+    # (1) nord=3 NH runs without NaN.
+    assert jnp.all(jnp.isfinite(s_nord3.u.data)), \
+        "NH u NaN under nord=3"
+    assert jnp.all(jnp.isfinite(s_nord3.v.data))
+    assert jnp.all(jnp.isfinite(s_nord3.theta_prime.data))
+    assert jnp.all(jnp.isfinite(s_nord3.rho_prime.data))
+
+    # (2) nord=3 NH output differs from nord=2 NH output.
+    max_diff_u = float(jnp.max(jnp.abs(s_nord3.u.data - s_nord2.u.data)))
+    assert max_diff_u > 1e-12, (
+        "NH nord=3 produced bit-for-bit identical output to nord=2; "
+        "Laplacian iteration loop may be silently capped at 2."
+    )
+
+
 def test_nh_fv3_config_fields_ast_regression():
     """AST regression guard: ``CDGridCompressibleEulerConfig`` must
     declare the four new iter-168/169/170/171 fields with the
