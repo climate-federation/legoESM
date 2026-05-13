@@ -1,4 +1,4 @@
-"""Regression test for the iter-18..21 anchor-mass API.
+"""Regression test for the iter-18..21 anchor-mass API + matrix-runner gates.
 
 Every anchored dycore model class must expose the four-method
 interface:
@@ -183,4 +183,48 @@ def test_anchor_lazy_snapshot_is_sticky():
     assert 0.0099 < rel < 0.011, (
         f"After reset_target_mass, anchor should track new state: "
         f"expected rel ~1e-2, got {rel:.4e}"
+    )
+
+
+def test_matrix_runner_mass_drift_constants_sane():
+    """iter-32: pin the iter-30 matrix-runner mass-drift gate constants.
+
+    A regression to ``1e-2`` (the iter-117/118 pre-iter-23 default) on
+    any of the gates would silently let a 100x conservation regression
+    slip through CI; the explicit lower-bound assertions here flag that
+    sort of change.
+    """
+    import sys
+    import importlib
+    sys.path.insert(0, "scripts")
+    try:
+        runner = importlib.import_module("run_atmosphere_test_matrix")
+    finally:
+        sys.path.pop(0)
+
+    assert hasattr(runner, "_DYCORE_MASS_DRIFT_TOL")
+    assert hasattr(runner, "_DYCORE_MASS_DRIFT_TOL_CB")
+
+    # SW W5/W6, hydro HS/baroclinic/AMIP, NH TC1/TC2a/TC3 ceiling.
+    tol = runner._DYCORE_MASS_DRIFT_TOL
+    assert tol <= 1e-6, (
+        f"_DYCORE_MASS_DRIFT_TOL relaxed to {tol:.0e} — should stay "
+        f"<= 1e-6 per iter-23..28"
+    )
+    assert tol >= 1e-14, (
+        f"_DYCORE_MASS_DRIFT_TOL tightened to {tol:.0e} — fp64 floor "
+        f"limits the realistic ceiling; reconsider if intentional"
+    )
+
+    # cosine_bell gate (intentional lat-lon raw-FV benchmark) at 1e-4
+    # per iter-29.
+    cb_tol = runner._DYCORE_MASS_DRIFT_TOL_CB
+    assert cb_tol <= 1e-4, (
+        f"_DYCORE_MASS_DRIFT_TOL_CB relaxed to {cb_tol:.0e} — should "
+        f"stay <= 1e-4 per iter-29"
+    )
+    assert cb_tol >= tol, (
+        f"_DYCORE_MASS_DRIFT_TOL_CB ({cb_tol:.0e}) should be >= "
+        f"_DYCORE_MASS_DRIFT_TOL ({tol:.0e}) since lat-lon cosine_bell "
+        f"intentionally measures raw-FV transport drift (~1.49e-05)"
     )
