@@ -5631,3 +5631,69 @@ for: (1) SCM / RCE clear-sky SW driver; (2) photolysis rates;
 vmap-compatible.  Uses ``constants.S_0`` per CLAUDE.md hygiene.
 No new `constants.py` additions.
 
+## Iter 867 — par_from_global_radiation_fv3 (PAR primitive)
+
+Added `par_from_global_radiation_fv3(r_s, par_fraction=0.45)` to
+`grids/cubed_sphere.py`.  Britton-Dodd 1976 / Tsubo-Walker 2005
+broadband-to-PAR linear fraction:
+
+```
+PAR = f_PAR · R_s        (units match input)
+```
+
+Default f_PAR = 0.45 (Tsubo-Walker 2005 multi-site mean; Britton-
+Dodd 1976 original 0.50±0.04).  f_PAR varies seasonally /
+regionally:
+  * Clear sky:           ≈ 0.44–0.46
+  * Cloudy sky:          ≈ 0.50–0.55 (Rayleigh-favored)
+  * High SZA:            ≈ 0.50 (long path → more IR removed)
+  * Akitsu 2015 global:  0.45 multi-year flux-tower mean
+
+Canonical (W/m²):
+  | scenario              | R_s   | PAR | PPFD (μmol/m²/s) |
+  |-----------------------|-------|-----|------------------|
+  | Tropical noon clear   | 1000  | 450 | 2057             |
+  | Mid-lat summer noon   | 800   | 360 | 1645             |
+  | Overcast              | 200   | 90  | 411              |
+  | Forest understory     | 50    | 23  | 105              |
+
+PPFD (μmol photons/m²/s) conversion: PPFD = PAR_W·4.57 (Britton-
+Dodd factor; caller applies — this primitive returns energy units
+matching R_s input).
+
+**Closes the radiation → photosynthesis primitive chain**:
+
+```
+lat, DOY, hr → iter-865 cos(θ)
+             → iter-866 S_TOA(t)
+             · τ_atm (caller-derived)
+             = R_s   (surface SW)
+             → iter-867 PAR
+             · 4.57
+             = PPFD  → Farquhar-von Caemmerer-Berry photosynthesis
+                       A_n curves
+```
+
+Used by: Britton-Dodd 1976 JGR PAR-fraction measurements, Tsubo-
+Walker 2005 Theor. Appl. Climatol. multi-site validation, Akitsu
+et al. 2015 Sci. Rep. global flux-tower database, Farquhar-von
+Caemmerer-Berry 1980 photosynthesis A_n(PPFD), two-stream canopy
+RT (Goudriaan 1977, de Pury-Farquhar 1997), DGVM / DGVM-coupled
+ESM photosynthesis modules.
+
+Test: `tests/test_fv3_par_iter867.py` (7 tests: tropical 1000→450
+analytic, overcast 200→90, zero, custom f_PAR=0.50, PPFD ×4.57
+photon conversion ≈ 2057 μmol/m²/s tropical noon, chain via
+iter-866 S_TOA → R_s = τ·S_TOA → PAR, 3-D shapes).
+
+### Why this iteration was meaningful
+
+**Closes the radiation → photosynthesis primitive chain** —
+caller now has full lat/DOY/hour → PPFD pipeline ready for
+Farquhar A_n(PPFD) curves.  Critical for: (1) DGVM-coupled ESM
+photosynthesis modules; (2) crop-light-curve modeling; (3) marine
+phytoplankton primary production (Behrenfeld-Falkowski 1997 VGPM
+needs PAR); (4) two-stream canopy radiative-transfer.  Pure JAX,
+vmap-compatible.  f_PAR=0.45 is Tsubo-Walker/Akitsu empirical
+(default arg).  No `constants.py` additions.
+

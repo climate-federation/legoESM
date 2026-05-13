@@ -9738,6 +9738,91 @@ def clear_sky_toa_radiation_fv3(
     return s_0_use * d_r_sq * cos_theta
 
 
+def par_from_global_radiation_fv3(
+    r_s: jax.Array,
+    par_fraction: float = 0.45,
+) -> jax.Array:
+    """FV3_3D iter 867: photosynthetically-active radiation primitive.
+
+    Britton-Dodd 1976 / Tsubo-Walker 2005 broadband-to-PAR linear
+    fraction — the standard parameterization for separating
+    photosynthetically-usable (400-700 nm) from total downwelling
+    shortwave at the surface:
+
+        PAR = f_PAR · R_s        (same units as R_s)
+
+    Where:
+      * R_s     — broadband (full-spectrum SW) incoming radiation
+                  at surface (W/m² for instantaneous, MJ/m²/day
+                  for daily-integrated).
+      * f_PAR   — PAR fraction (dimensionless); default 0.45
+                  (Tsubo-Walker 2005 multi-site mean; Britton-Dodd
+                  1976 original 0.50 ± 0.04).
+
+    PAR fraction varies seasonally / regionally:
+      * Clear sky (low aerosol):   f_PAR ≈ 0.44–0.46
+      * Cloudy sky:                f_PAR ≈ 0.50–0.55 (Rayleigh
+                                    scattering favors PAR band)
+      * High solar zenith angle:   f_PAR ≈ 0.50 (long path → more
+                                    IR removed)
+      * Default 0.45 globally       (Akitsu et al. 2015 multi-year
+                                    flux-tower mean)
+
+    PAR-energy → PAR-photon-flux conversion (often needed for
+    photosynthesis curves):
+
+        PAR_μmol/m²/s = PAR_W/m² · 4.57    (Britton-Dodd 1976)
+
+    Caller multiplies output by 4.57 to get μmol/m²/s for biology
+    models; this primitive returns *energy units* (matching R_s
+    input).
+
+    Canonical magnitudes:
+      | scenario              | R_s (W/m²) | PAR (W/m²) | PAR (μmol/m²/s) |
+      |-----------------------|------------|------------|------------------|
+      | Tropical noon clear   | 1000       | 450        | 2057             |
+      | Mid-lat summer noon   | 800        | 360        | 1645             |
+      | Overcast              | 200        | 100        | 457              |
+      | Forest understory     | 50         | 23         | 105              |
+
+    Composes with iter-866 ``clear_sky_toa_radiation_fv3`` (caller
+    derives surface R_s from TOA S_TOA via atmosphere transmissivity
+    τ_atm) and iter-863/864/865.
+
+    **Closes the radiation → photosynthesis primitive chain**:
+
+        lat, DOY, hr → iter-865 cos(θ)
+                     → iter-866 S_TOA(t)
+                     · τ_atm (caller-derived)
+                     = R_s (surface SW)
+                     → iter-867 PAR
+                     · 4.57
+                     = PPFD (μmol/m²/s) → photosynthesis curves
+
+    Used by: Britton-Dodd 1976 J. Geophys. Res. PAR-fraction
+    measurements, Tsubo-Walker 2005 Theor. Appl. Climatol. multi-
+    site validation, Akitsu et al. 2015 Sci. Rep. global flux-tower
+    PAR database, Farquhar-von Caemmerer-Berry 1980 photosynthesis
+    A_n(PPFD) curves, two-stream canopy radiative transfer
+    (Goudriaan 1977, de Pury-Farquhar 1997), DGVMs and DGVM-coupled
+    ESMs.
+
+    Parameters
+    ----------
+    r_s : jax.Array
+        Broadband downwelling shortwave at surface (W/m² or
+        MJ/m²/day; output units match input).
+    par_fraction : float
+        PAR fraction (dimensionless); default 0.45.
+
+    Returns
+    -------
+    par : jax.Array
+        Photosynthetically-active radiation (same units as r_s).
+    """
+    return par_fraction * r_s
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,
