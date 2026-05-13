@@ -96,6 +96,42 @@ Branch: `clean_physics`. Driven by Ralph loop + `/codex:adversarial-review`.
   75 / 75 land carbon + multilayer + diff_land; 140 / 140 land (post iter-44);
   100 / 100 ocean MPAS + surface_forcing + emanuel + atmosphere convection.
 
+## Iteration 59 — 2026-05-13
+
+**Fix codex iter-58 stop-time finding: variable-K NaN gradient leak.**
+
+Iter-58's `dz_safe` guard prevented `0/0` in the divisions but the
+upstream callers (KPP, Richardson) can produce NaN `K_half` on dry
+columns from `h_bl·w_s·G(σ)` / `N²`-dependent profiles.  `K_half *
+df_dz` then propagates NaN forward, and the gradient `∂(NaN·x)/∂x =
+NaN` leaks NaN through the backward pass even when the forward
+output is masked.  The same applies to the input `field` array:
+`NaN − NaN` in the difference has NaN gradients.
+
+Fix: SUBSTITUTE both `K_half` and `field` with 0 on dry cells
+BEFORE any arithmetic, so neither forward nor backward sees NaN.
+Wet-cell output is bitwise identical (since the substitution only
+fires where `dz <= 0`).
+
+```python
+dry_iface = (dz[..., :-1] <= 0) | (dz[..., 1:] <= 0)
+K_half = jnp.where(dry_iface, 0.0, K_half)
+field_safe = jnp.where(dz > 0, field, 0.0)
+df_dz = (field_safe[..., :-1] - field_safe[..., 1:]) / dz_half_safe
+```
+
+Same `field` substitution applied to `vertical_diffusion` (constant
+K case) for defensive symmetry.
+
+New regression test
+`test_vertical_diffusion_variable_K_dry_column_scrubs_nan_input`
+seeds dry columns with NaN K_half AND NaN field, then verifies the
+output is finite with zero on the dry column.
+
+**Tests (post iter-59):**
+- 4 / 4 TestVerticalMixing including 2 new regressions.
+- 77 / 78 broader ocean tests (1 pre-existing failure deselected).
+
 ## Iteration 58 — 2026-05-13
 
 **Fix codex iter-57 stop-time finding: dry-column AD fix incomplete.**

@@ -126,10 +126,14 @@ def vertical_diffusion(
     # Dry / land columns have ``dz = 0`` (jacobian = 0).  Safe
     # denominators avoid 0/0 = NaN in both the flux and tendency
     # divisions; the result is gated to zero on dry columns at the
-    # end so wet-cell output is bitwise identical.
+    # end so wet-cell output is bitwise identical.  Field is also
+    # substituted to 0 on dry cells so an upstream NaN sentinel in T
+    # / S / u / v cannot leak NaN through the backward pass of the
+    # subtraction (``NaN − NaN`` has NaN gradients).
     dz_half_safe = jnp.where(dz_half > 0.0, dz_half, 1.0)
     dz_safe = jnp.where(dz > 0.0, dz, 1.0)
-    df_dz = (field[..., :-1] - field[..., 1:]) / dz_half_safe
+    field_safe = jnp.where(dz > 0.0, field, 0.0)
+    df_dz = (field_safe[..., :-1] - field_safe[..., 1:]) / dz_half_safe
     flux = coeff_eff * df_dz  # (..., nlev-1)
 
     # Tendency at full levels: d(flux)/dz with zero-flux BCs.
@@ -188,6 +192,18 @@ def vertical_diffusion_variable_K(
     dz = z_coord.dz_ref * jacobian[..., jnp.newaxis]         # (..., nlev)
     dz_half = 0.5 * (dz[..., :-1] + dz[..., 1:])  # (..., nlev-1)
 
+    # Substitute K_half with 0 on dry interfaces BEFORE any arithmetic.
+    # Upstream callers (KPP, Richardson) compute K_half from
+    # ``h_bl·w_s·G(σ)`` / ``N²``-dependent profiles that may carry
+    # NaN/Inf into the dry columns.  ``K_half * df_dz`` then propagates
+    # NaN forward, and the gradient ∂(NaN·x)/∂x = NaN — leaking NaN
+    # through the backward pass even though my iter-58 ``dz_safe`` /
+    # output mask scrub the forward value.  ``jnp.where(wet, K_half, 0)``
+    # SUBSTITUTES the dry-cell value with a clean 0 so neither forward
+    # nor backward sees NaN.  Codex iter-58 stop-time review.
+    dry_iface = (dz[..., :-1] <= 0.0) | (dz[..., 1:] <= 0.0)
+    K_half = jnp.where(dry_iface, 0.0, K_half)
+
     if dt is not None:
         K_cap = cfl_safety * jnp.minimum(
             dz[..., :-1], dz[..., 1:],
@@ -199,7 +215,12 @@ def vertical_diffusion_variable_K(
     # is bitwise identical.
     dz_half_safe = jnp.where(dz_half > 0.0, dz_half, 1.0)
     dz_safe = jnp.where(dz > 0.0, dz, 1.0)
-    df_dz = (field[..., :-1] - field[..., 1:]) / dz_half_safe
+    # Also scrub field on dry cells before differencing so an upstream
+    # NaN sentinel in T/S/u/v cannot leak through (``field[..., :-1]
+    # − field[..., 1:]`` is otherwise ``NaN − NaN`` on a fully-dry
+    # column).
+    field_safe = jnp.where(dz > 0.0, field, 0.0)
+    df_dz = (field_safe[..., :-1] - field_safe[..., 1:]) / dz_half_safe
     flux = K_half * df_dz  # (..., nlev-1)
 
     top = -flux[..., :1] / dz_safe[..., :1]

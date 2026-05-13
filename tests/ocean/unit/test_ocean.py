@@ -798,6 +798,37 @@ class TestVerticalMixing:
             jnp.abs(field_new)
         )
 
+    def test_vertical_diffusion_variable_K_dry_column_scrubs_nan_input(
+        self, ocean_z_coord,
+    ):
+        """Variable-K dry-column path must scrub NaN inputs (codex
+        iter-58 stop-time review).
+
+        Upstream KPP / Richardson callers can produce NaN K_half on
+        dry columns (e.g. ``h_bl·w_s·G(σ)`` with ``h_bl = 0``).  The
+        leaf operator must SUBSTITUTE the dry-cell value before the
+        flux multiplication so neither forward nor backward leaks NaN.
+        """
+        from legoesm.ocean.physics.mixing import vertical_diffusion_variable_K
+
+        nlev = ocean_z_coord.n_levels
+        # Field has NaN sentinel on the dry column (col 1).
+        field = jnp.linspace(0.0, 1.0, nlev, dtype=jnp.float64)
+        field_wet = jnp.broadcast_to(field, (1, nlev))
+        field_dry = jnp.full((1, nlev), jnp.nan, dtype=jnp.float64)
+        field2 = jnp.concatenate([field_wet, field_dry], axis=0)
+        # K_half also NaN on dry column (mimicking KPP output).
+        K_half_wet = jnp.full((1, nlev - 1), 1.0e-4, dtype=jnp.float64)
+        K_half_dry = jnp.full((1, nlev - 1), jnp.nan, dtype=jnp.float64)
+        K_half = jnp.concatenate([K_half_wet, K_half_dry], axis=0)
+        jac = jnp.array([1.0, 0.0], dtype=jnp.float64)
+        tendency = vertical_diffusion_variable_K(
+            field2, ocean_z_coord, jac, K_half,
+        )
+        assert jnp.all(jnp.isfinite(tendency)), \
+            "Variable-K leaf must scrub NaN inputs on dry columns"
+        assert jnp.allclose(tendency[1, :], 0.0)
+
     def test_vertical_diffusion_dry_column_gives_zero_finite_tendency(
         self, ocean_z_coord,
     ):
