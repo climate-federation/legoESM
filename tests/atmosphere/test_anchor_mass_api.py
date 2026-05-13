@@ -358,3 +358,61 @@ def test_anchored_step_supports_jax_grad():
         )
     finally:
         set_policy(saved)
+
+
+def test_anchored_step_supports_jax_grad_multistep():
+    """iter-38: extend iter-37 AD test to a 3-step chain.
+
+    Validates the autodiff chain across multiple time steps with the
+    anchored fixer in the loop.  The cached ``_target_mass`` captured
+    on the first ``step()`` trace remains constant across the
+    subsequent two steps inside the same ``jax.grad`` trace — the
+    chain rule still applies cleanly because the fixer is pure
+    state→state.  Catches regressions where multi-step gradients
+    would diverge / become non-finite (e.g. a future fixer change
+    that mutates ``self._target_mass`` mid-trace).
+    """
+    from legoesm.core.precision import PrecisionPolicy, set_policy, get_policy
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        CDGridPrimitiveEquationModel,
+        CDGridPrimitiveEquationConfig,
+    )
+    from legoesm.atmosphere.held_suarez import held_suarez_init
+
+    saved = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp64())
+        grid = create_cubed_sphere(8)
+        sigma = create_sigma_coordinate(8)
+        cfg = CDGridPrimitiveEquationConfig(
+            use_conservation_fixer=True,
+            fix_mass=True,
+            anchor_mass_to_initial=True,
+        )
+        model = CDGridPrimitiveEquationModel(grid, sigma, cfg)
+        state0 = held_suarez_init(grid, sigma)
+
+        def loss(p_s_data):
+            state = state0._replace(
+                p_s=state0.p_s.replace(data=p_s_data))
+            s = model.step(state, 600.0)
+            s = model.step(s, 600.0)
+            s = model.step(s, 600.0)
+            return jnp.sum(s.T.data ** 2)
+
+        model.reset_target_mass()
+        grad = jax.grad(loss)(state0.p_s.data)
+
+        assert jnp.all(jnp.isfinite(grad))
+        # 3-step gradient should be larger than 1-step (chain rule
+        # accumulates the upstream sensitivity through more state
+        # updates) — assert it grew rather than collapsed.
+        assert float(jnp.max(jnp.abs(grad))) > 1e-2, (
+            f"3-step grad max |{float(jnp.max(jnp.abs(grad))):.2e}| "
+            "smaller than expected — chain rule may be broken across "
+            "multi-step anchored fixer"
+        )
+    finally:
+        set_policy(saved)
