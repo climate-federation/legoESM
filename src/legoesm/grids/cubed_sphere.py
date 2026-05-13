@@ -8091,6 +8091,83 @@ def airborne_fraction_co2_fv3(
     return airborne_fraction * cumulative_emission / gtco2_per_ppm
 
 
+def thermosteric_sea_level_fv3(
+    delta_t_layer: jax.Array,
+    thickness: jax.Array,
+    alpha_t: jax.Array = 2.0e-4,
+) -> jax.Array:
+    """FV3_3D iter 848: thermosteric sea-level change (ocean
+    thermal-expansion primitive).
+
+    Column-integrated sea-level rise from ocean warming via the
+    linearized equation-of-state thermal-expansion coefficient:
+
+        Δη = Σ_k α_T(k) · ΔT(k) · H(k)        (m)
+
+    Where:
+      * α_T    — thermal-expansion coefficient (1/K).  Sea-water
+                 typical value 2×10⁻⁴ /K at T=15°C, S=35 psu;
+                 ranges 5×10⁻⁵ (cold deep water) to 3×10⁻⁴ (warm
+                 surface).
+      * ΔT(k)  — temperature change in layer k (K).
+      * H(k)   — layer thickness (m).
+
+    Sign: positive Δη ⇒ sea-level rise from warming.  Halosteric
+    (salinity) contribution NOT included — for that combine with
+    a separate β_S·ΔS·H term.
+
+    Canonical magnitudes:
+      * Uniform 0.1 K warming over 4000 m: Δη ≈ 8 cm.
+      * Pinatubo 1992 transient cooling (−0.05 K over 1000 m
+        upper ocean): Δη ≈ −1 cm.
+      * 21st-century thermosteric SLR (AR6 SSP3-7.0): ~30 cm
+        (matches GCM-mean integrated heat-uptake → expansion).
+      * Last Glacial Maximum cooling −3 K over 5000 m: Δη ≈ −3 m
+        (substantial fraction of LGM sea-level lowering of 120 m
+        — rest from ice-sheet meltwater).
+
+    Layer-by-layer broadcast: caller passes per-layer arrays,
+    helper returns per-column total Δη.  Accepts:
+      * 1-D layer arrays — single column.
+      * (..., n_layers) batched — last axis is depth.
+
+    Composes naturally with the climate-sensitivity chain:
+
+        emission → iter-846 TCRE → ΔT_surf
+        ΔT_surf  → ocean-warming profile (caller / model-specific)
+        ΔT(z), H, α_T → iter-848 Δη_thermosteric
+
+    Note: per CLAUDE.md ocean-EOS guidance the *full* α_T(T,S,p)
+    lives in ``ocean.eos``; this helper takes α_T as scalar/array
+    input to remain pure-primitive without re-deriving EOS.  For
+    higher-fidelity calculations:
+
+        from legoesm.ocean import eos
+        alpha = -eos.compute_ocean_rho_dT(t, s, p) / eos.rho_0
+
+    Used by: AR5/AR6 §9.4 thermosteric-SLR diagnostics, CMIP6 RFMIP-
+    SLR analyses (Slangen et al. 2017), reconstructions from ARGO
+    OHC (Cheng et al. 2017), paleoclimate sea-level studies
+    (Lambeck et al. 2014 LGM lowering).
+
+    Parameters
+    ----------
+    delta_t_layer : jax.Array
+        Per-layer temperature change (K), shape ``(..., n_layers)``.
+    thickness : jax.Array
+        Per-layer thickness (m), shape ``(..., n_layers)``.
+    alpha_t : jax.Array or float
+        Thermal-expansion coefficient (1/K); default 2.0e-4.
+
+    Returns
+    -------
+    delta_eta : jax.Array
+        Column-integrated thermosteric SLR (m); positive for
+        warming.
+    """
+    return jnp.sum(alpha_t * delta_t_layer * thickness, axis=-1)
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

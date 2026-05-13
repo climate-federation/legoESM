@@ -5616,6 +5616,73 @@ full carbon-cycle model.  Pure JAX, vmap-compatible.  AF=0.46
 and k=7.81 are AR6/GCB empirical values (default args).  No
 `constants.py` additions.
 
+## Iter 848 — thermosteric_sea_level_fv3 (ocean thermal expansion)
+
+Added `thermosteric_sea_level_fv3(delta_t_layer, thickness,
+alpha_t=2.0e-4)` to `grids/cubed_sphere.py`.  Column-integrated
+sea-level rise from ocean warming via linearized EOS thermal-
+expansion coefficient:
+
+```
+Δη = Σ_k α_T(k) · ΔT(k) · H(k)        (m)
+```
+
+Where α_T = 2×10⁻⁴ /K (sea-water typical at T=15°C, S=35 psu;
+range 5×10⁻⁵ cold-deep to 3×10⁻⁴ warm-surface).
+
+Canonical magnitudes:
+  | scenario                          | Δη       |
+  |-----------------------------------|----------|
+  | Uniform 0.1 K, 4000 m             | 8 cm     |
+  | Pinatubo 1992 transient cooling   | −1 cm    |
+  | 21st-c thermosteric SSP3-7.0      | ~30 cm   |
+  | LGM −3 K over 5000 m              | −3 m     |
+
+Halosteric (salinity β_S·ΔS·H) NOT included — add separately if
+needed.
+
+Layer-by-layer broadcast: caller passes per-layer arrays
+(``(..., n_layers)``), returns per-column total Δη.
+
+Composes with climate-sensitivity chain:
+
+```
+emission → iter-846 TCRE → ΔT_surf
+         → ocean profile (caller-supplied)
+         → iter-848 Δη_thermosteric
+```
+
+Per CLAUDE.md ocean-EOS guidance: this helper takes α_T as
+scalar/array input.  For high-fidelity EOS-derived α_T(T,S,p)
+the caller should use ``legoesm.ocean.eos`` rather than re-deriving:
+
+```python
+from legoesm.ocean import eos
+alpha = -eos.compute_ocean_rho_dT(t, s, p) / eos.rho_0
+eta  = thermosteric_sea_level_fv3(delta_t, thickness, alpha)
+```
+
+Used by: AR5/AR6 §9.4 thermosteric-SLR diagnostics, CMIP6 RFMIP-SLR
+(Slangen et al. 2017), ARGO OHC reconstructions (Cheng et al.
+2017), paleoclimate sea-level (Lambeck et al. 2014 LGM).
+
+Test: `tests/test_fv3_thermosteric_sea_level_iter848.py` (8 tests:
+uniform 0.1K/4km → 8cm analytic, zero, cooling negative, Pinatubo
+−1 cm, LGM −3 m, α_T linear scaling, batched lat×lon×depth shapes,
+3-D random shapes finite).
+
+### Why this iteration was meaningful
+
+Adds **first ocean-response primitive** to the climate-metric
+chain — sea-level rise is the most-policy-relevant slow-climate
+response after surface T.  Pairs with iter-836/837 ECS/TCR for
+end-to-end emission → SLR pipelines.  AR6 likely-range thermosteric
+SLR contribution is ~50% of total observed SLR; combined with
+future cryosphere primitives (Greenland/Antarctica mass balance)
+gives complete SLR budget.  Pure JAX, vmap-compatible.  α_T scalar
+default per CLAUDE.md ocean-EOS hygiene (full EOS in
+``legoesm.ocean.eos``).  No `constants.py` additions.
+
 
 
 

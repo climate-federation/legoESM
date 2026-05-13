@@ -435,6 +435,7 @@ _GUARD_MODULES = (
     "test_fv3_gtp_iter845",                          # iter-845 add
     "test_fv3_tcre_budget_iter846",                  # iter-846 add
     "test_fv3_airborne_fraction_iter847",            # iter-847 add
+    "test_fv3_thermosteric_sea_level_iter848",       # iter-848 add
 )
 
 
