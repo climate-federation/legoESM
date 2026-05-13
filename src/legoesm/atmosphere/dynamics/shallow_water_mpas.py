@@ -157,6 +157,10 @@ class MPASShallowWaterModel(IntegrationMixin):
         # ``CGridLatLonShallowWaterModel._target_mass``.
         self._target_mass: jax.Array | None = None
 
+    def reset_target_mass(self) -> None:
+        """Clear the anchored mass target (iter-18; see iter-4 SW twin)."""
+        self._target_mass = None
+
     def compute_mass(self, state: MPASShallowWaterState) -> jax.Array:
         """Compute total dry mass ``∫ h dA`` in the fp64 budget acc."""
         return jnp.sum(

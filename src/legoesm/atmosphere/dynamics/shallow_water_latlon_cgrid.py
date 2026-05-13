@@ -317,6 +317,15 @@ class CGridLatLonShallowWaterModel(IntegrationMixin):
         # Mirrors ``CGridLatLonPrimitiveEquationModel._target_mass``.
         self._target_mass: jax.Array | None = None
 
+    def reset_target_mass(self) -> None:
+        """Clear the anchored mass target.
+
+        iter-18: lets the caller re-snapshot the initial mass on the
+        next ``step()`` call.  Useful when restarting integration from a
+        different initial state without rebuilding the model object.
+        """
+        self._target_mass = None
+
     def compute_mass(self, state: CGridLatLonShallowWaterState) -> jax.Array:
         """Compute total mass (for conservation fixer target).
 

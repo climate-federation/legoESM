@@ -1382,6 +1382,10 @@ class SpectralPrimitiveEquationModel:
             * self.grid.grid_area.astype(jnp.float64),
         )
 
+    def reset_target_mass(self) -> None:
+        """Clear the anchored mass target (iter-18; see iter-4 SW twin)."""
+        self._target_mass = None
+
     def step(
         self,
         state: SpectralHydrostaticState,

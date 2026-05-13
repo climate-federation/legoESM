@@ -762,6 +762,10 @@ class SpectralCompressibleEulerModel:
         # iter-9: lazy fp64 dry-mass snapshot for anchor-to-initial.
         self._target_mass = None
 
+    def reset_target_mass(self) -> None:
+        """Clear the anchored mass target (iter-18; see iter-4 SW twin)."""
+        self._target_mass = None
+
     def compute_dry_mass(self, state) -> jax.Array:
         """Global dry mass ``∫ J · (rho_ref + rho') · dz · dA`` (fp64)."""
         rho_p_grid = sh_synthesis_3d(self.grid, state.rho_prime_hat.data)

@@ -111,6 +111,17 @@ NH cross-grid TC1 mass-drift after iter-10 (matrix runner `notes` line):
   ceiling).  Direct measurement on cube C12 PE shows 50-step drift
   ~4e-15, so 20-step runs sit comfortably below 1e-12 while staying
   ~1 minute total wall time.  10/10 PASS.
+- **iter-18**: add ``reset_target_mass()`` method to the seven anchored
+  models (latlon SW/PE, MPAS SW/PE/NH, spectral PE/NH).  One-liner
+  on each: lets users re-anchor the fixer after replacing the prognostic
+  state (e.g. checkpoint restore, new initial condition) without
+  having to rebuild the model object.  Investigated ``integrate_scan``
+  compatibility with anchored fixers — confirmed the fp32→fp64 carry-
+  type mismatch is structural (``cast_pytree(..., allow_downcast=False)``
+  keeps p_s fp64 inside the model so per-step drift stays at fp64
+  floor; lossy downcast would worsen drift by ~10^5x).  Scan-based
+  workflows currently need ``anchor_mass_to_initial=False`` until a
+  dedicated dtype-stable path lands.  Regression tests 10/10 PASS.
 
 ## Implementation patterns established (apply to any new dycore)
 

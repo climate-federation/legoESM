@@ -549,6 +549,10 @@ class MPASCompressibleEulerModel(IntegrationMixin):
         # iter-8: lazy fp64 dry-mass snapshot for anchor-to-initial.
         self._target_mass: jax.Array | None = None
 
+    def reset_target_mass(self) -> None:
+        """Clear the anchored mass target (iter-18; see iter-4 SW twin)."""
+        self._target_mass = None
+
     def compute_dry_mass(self, state) -> jax.Array:
         """Global dry mass ``∫ J · (rho_ref + rho_prime) · dz · dA`` (fp64)."""
         return compute_nh_dry_mass_mpas(

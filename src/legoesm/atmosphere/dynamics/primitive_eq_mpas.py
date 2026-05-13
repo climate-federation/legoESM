@@ -460,6 +460,10 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
         # iter-11: lazy fp64 mass snapshot for anchor-to-initial.
         self._target_mass: jax.Array | None = None
 
+    def reset_target_mass(self) -> None:
+        """Clear the anchored mass target (iter-18; see iter-4 SW twin)."""
+        self._target_mass = None
+
     def compute_mass(self, state) -> jax.Array:
         """Compute global ``∫ p_s dA`` in the fp64 budget accumulator."""
         return jnp.sum(
