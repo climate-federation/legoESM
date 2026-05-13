@@ -669,6 +669,33 @@ class TestTransport:
         assert jnp.all(a_new >= 0.0)
         assert jnp.all(a_new <= 1.0)
 
+    def test_grad_no_nan_at_ice_free_cells(self):
+        """Iter-122 regression: AD-safe ``where(has_ice, vol/conc_safe, 0)``
+        recovery pattern must not produce NaN gradients at fully ice-free
+        cells (vol=conc=0).  The previous ``conc_safe = max(conc, 1e-20)``
+        floor produced a subnormal squared denominator in fp32 (FTZ → 0)
+        whose VJP cotangent flowed back through ``jnp.where`` as NaN.
+        """
+        import jax
+        grid = _make_grid()
+        n = grid.n
+        shape = (6, n, n)
+        # Mostly ice-free cells with a small ice patch.
+        h = jnp.zeros(shape).at[0, n // 2, n // 2].set(1.0)
+        a = jnp.zeros(shape).at[0, n // 2, n // 2].set(0.5)
+        T = jnp.full(shape, 260.0)
+        u = jnp.full(shape, 0.01)
+        v = jnp.zeros(shape)
+
+        def _loss(h_in):
+            h_new, _, _ = advect_ice_tracers(
+                h_in, a, T, u, v, grid, 3600.0,
+            )
+            return jnp.sum(h_new)
+
+        g = jax.grad(_loss)(h)
+        assert jnp.all(jnp.isfinite(g)), "NaN/Inf in grad through advect_ice_tracers at ice-free cells"
+
 
 # ==============================================================================
 # Test Full Integration

@@ -304,6 +304,39 @@ Verified clean:
 
 No code changes this iteration.
 
+## Iter-122 — ice `transport.py` AD-safety fix at ice-free cells
+Audited `ice/state.py` (105 LOC) and `ice/transport.py` (175 LOC).
+
+Real fix in `transport.py` recovery section.  Previous form
+```python
+eps = 1e-20
+conc_safe = jnp.maximum(conc_new, eps)
+h_new = jnp.where(conc_new > 0.0, vol_new / conc_safe, 0.0)
+```
+hits a classic AD-safety pitfall in fp32: the floor `1e-20` is normal in
+fp32 but `conc_safe² = 1e-40` is subnormal and flushes to zero under XLA
+FTZ, so `−vol_new / conc_safe²` (the true-branch reverse cotangent)
+evaluates to `−Inf` at ice-free cells.  Multiplying by the `where`
+mask `0` produces NaN in the gradient.
+
+Replaced with the canonical "substitute first, divide after" pattern:
+```python
+has_ice = conc_new > 0.0
+conc_safe = jnp.where(has_ice, conc_new, 1.0)
+h_new = jnp.where(has_ice, vol_new / conc_safe, 0.0)
+```
+Same fix applied to the temperature recovery (`vol_safe`).
+The placeholder `1.0` makes the true-branch arithmetic finite everywhere,
+and the outer `where` selects the correct value.  Forward output bit-
+identical when `has_ice = True`.
+
+Regression test `test_grad_no_nan_at_ice_free_cells` in
+`tests/unit/test_sea_ice_dynamics.py` runs `jax.grad` of
+`advect_ice_tracers` through mostly ice-free cells; passes under fp64
+(would have NaN'd under fp32 with old form).
+
+51 sea-ice-dynamics tests pass; 2 transport state-roundtrip tests pass.
+
 ## Next iterations
 Continue addressing codex findings and direct-inspection sweeps until all schemes are
 provably conservative, monotone, CFL-safe, and AD-safe across mixed wet/dry grids.

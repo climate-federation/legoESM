@@ -132,7 +132,6 @@ def advect_ice_tracers(
     h_new, conc_new, T_new : arrays
         Updated tracer fields with the same shape as the inputs.
     """
-    eps = 1e-20
     n_subcycles = int(max(n_subcycles, 1))
 
     # Conservation-form auxiliary fields.
@@ -157,15 +156,18 @@ def advect_ice_tracers(
             _body, (vol, conc, enth), xs=None, length=n_subcycles,
         )
 
-    # Recover thickness and temperature.
-    conc_safe = jnp.maximum(conc_new, eps)
-    h_new = jnp.where(conc_new > 0.0, vol_new / conc_safe, 0.0)
-    vol_safe = jnp.maximum(vol_new, eps)
-    T_new = jnp.where(
-        vol_new > 0.0,
-        enth_new / vol_safe,
-        T_freeze_ocean,
-    )
+    # Recover thickness and temperature.  AD-safe pattern: substitute a
+    # benign placeholder (1.0) into the denominator BEFORE dividing, so
+    # the true-branch arithmetic is computed on a finite value at every
+    # cotangent location.  The previous ``maximum(x, 1e-20)`` floor
+    # produced subnormal squared denominators in fp32 (FTZ → 0 → NaN in
+    # the reverse pass through ``jnp.where``).
+    has_ice = conc_new > 0.0
+    conc_safe = jnp.where(has_ice, conc_new, 1.0)
+    h_new = jnp.where(has_ice, vol_new / conc_safe, 0.0)
+    has_vol = vol_new > 0.0
+    vol_safe = jnp.where(has_vol, vol_new, 1.0)
+    T_new = jnp.where(has_vol, enth_new / vol_safe, T_freeze_ocean)
 
     # Defensive temperature bounds — monotone advection keeps T_new in
     # the input range, so this only fires when the enthalpy / volume
