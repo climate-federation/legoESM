@@ -579,3 +579,52 @@ def test_anchored_step_supports_jax_grad_spectral_nh():
         assert grad.dtype == jnp.complex128
     finally:
         set_policy(saved)
+
+
+def test_anchored_step_supports_jax_grad_latlon_pe():
+    """iter-55: ``jax.grad`` through anchored ``step()`` on lat-lon PE.
+
+    Different code path from iter-37 (cube PE) and iter-39/41 (spectral):
+    lat-lon PE's fix uses ``_apply_safety_rails`` which combines T-floor,
+    p_s-floor, mass fixer, and hybrid-coord tracer rescale.  AD must
+    flow through every branch even when tracers are absent.
+    """
+    from legoesm.core.precision import PrecisionPolicy, set_policy, get_policy
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+        CGridLatLonPrimitiveEquationModel,
+        CGridLatLonPrimitiveEquationConfig,
+        hydrostatic_to_cgrid,
+    )
+    from legoesm.atmosphere.held_suarez import held_suarez_init_latlon
+
+    saved = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp64())
+        grid = create_latlon_grid(36, 72)
+        sigma = create_sigma_coordinate(8)
+        dx_pole = float(grid.radius) * grid.dlon * math.cos(
+            math.pi / 2 - grid.dlat / 2)
+        dt = min(200.0, 0.5 * dx_pole / 300.0)
+        cfg = CGridLatLonPrimitiveEquationConfig(
+            fix_mass=True, anchor_mass_to_initial=True,
+        )
+        model = CGridLatLonPrimitiveEquationModel(grid, sigma, cfg, dt=dt)
+        state0 = hydrostatic_to_cgrid(
+            held_suarez_init_latlon(grid, sigma), grid,
+        )
+
+        def loss(p_s_data):
+            state = state0._replace(p_s=p_s_data)
+            s = model.step(state, dt)
+            return jnp.sum(s.T ** 2)
+
+        model.reset_target_mass()
+        grad = jax.grad(loss)(state0.p_s)
+
+        assert jnp.all(jnp.isfinite(grad))
+        assert float(jnp.max(jnp.abs(grad))) > 0.0
+        assert grad.dtype == jnp.float64
+    finally:
+        set_policy(saved)
