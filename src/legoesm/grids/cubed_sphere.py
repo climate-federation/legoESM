@@ -6790,6 +6790,64 @@ def equilibrium_temperature_fv3(
     return (s_abs / (emissivity * constants.sigma_sb)) ** 0.25
 
 
+def planck_feedback_fv3(
+    t_eff: jax.Array,
+    emissivity: jax.Array = 1.0,
+) -> jax.Array:
+    """FV3_3D iter 831: Planck climate-feedback parameter.
+
+    Linearized Stefan-Boltzmann response of TOA outgoing LW to a
+    uniform vertical surface-air warming:
+
+        d(OLR)/dT = 4 · ε · σ · T_eff³
+        λ_Planck  = − d(OLR)/dT   (sign: negative = stabilizing)
+
+    Where:
+      * T_eff   — effective radiating temperature (K); see
+                  iter-829 ``effective_radiating_temperature_fv3``.
+      * ε       — broadband emissivity (default 1.0).
+      * σ       — ``constants.sigma_sb``.
+
+    Sign convention: λ_Planck < 0 because warmer surface → more
+    outgoing LW → restoring force on TOA energy balance.  Cement
+    of the climate-feedback decomposition (Bony et al. 2006,
+    Soden-Held 2006).
+
+    Typical values:
+      * Earth (T_eff = 255 K, ε = 1): λ_Planck ≈ −3.76 W/m²/K.
+      * Cold climate (T_eff = 240 K): λ_Planck ≈ −3.13 W/m²/K.
+      * Warm climate (T_eff = 270 K): λ_Planck ≈ −4.46 W/m²/K.
+
+    The Planck response sets the "reference" climate sensitivity:
+    no-feedback ΔT for 2×CO₂ forcing (3.7 W/m²) is approximately
+    3.7 / |λ_Planck| ≈ 0.98 K.  All other feedbacks (water vapor,
+    lapse rate, albedo, cloud) act on top.
+
+    Used by: CMIP feedback-kernel analysis (Soden-Held 2006),
+    equilibrium-climate-sensitivity ECS decomposition, emergent-
+    constraint diagnostics on Sherwood-Hall-Caldwell (2014)-style
+    feedback uncertainty, Bony et al. 2006 cloud-feedback
+    framework, AR5/AR6 climate-feedback tables.
+
+    Composes iter-829 ``effective_radiating_temperature_fv3``:
+    caller can chain ``λ_Planck(T_eff(OLR))`` from raw OLR.
+
+    Parameters
+    ----------
+    t_eff : jax.Array
+        Effective radiating temperature (K).
+    emissivity : jax.Array or float
+        Broadband emissivity (0 ≤ ε ≤ 1); default 1.0.
+
+    Returns
+    -------
+    lam_planck : jax.Array
+        Planck feedback parameter (W/m²/K); negative for stable
+        Earth-like climates.
+    """
+    return -4.0 * emissivity * constants.sigma_sb * t_eff ** 3
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

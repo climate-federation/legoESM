@@ -5143,6 +5143,55 @@ is verifiable with unit tests in seconds rather than wall-time
 sweeps.  Users running the NH compressible-Euler 3D path now have
 the same cube-imprint defense as users running the PE 3D path.
 
+## Iter 831 — planck_feedback_fv3 (climate-feedback primitive)
+
+Added `planck_feedback_fv3(t_eff, emissivity=1.0)` to
+`grids/cubed_sphere.py`.  Linearized Stefan-Boltzmann response of
+TOA outgoing LW to uniform surface warming:
+
+```
+λ_Planck = − d(OLR)/dT = − 4 · ε · σ · T_eff³     (W/m²/K)
+```
+
+Sign: negative ⇒ stabilizing (warmer surface → more outgoing LW
+→ restoring TOA energy balance).  Cement of climate-feedback
+decomposition (Bony et al. 2006, Soden-Held 2006).
+
+Typical values:
+  * Earth (T_eff=255, ε=1): λ_Planck ≈ −3.76 W/m²/K
+  * Cold climate (T_eff=240): λ_Planck ≈ −3.13 W/m²/K
+  * Warm climate (T_eff=270): λ_Planck ≈ −4.46 W/m²/K
+
+No-feedback ECS: ΔT(2×CO₂) = 3.7 / |λ_Planck| ≈ 0.98 K.  All
+other feedbacks (water vapor, lapse rate, albedo, cloud) act on
+top of this reference response.
+
+Composes iter-829 ``effective_radiating_temperature_fv3``:
+caller can chain ``λ_Planck(T_eff(OLR))`` directly from raw OLR.
+By identity OLR = ε·σ·T_eff⁴ ⇒ λ_Planck = −4·OLR/T_eff (test
+verifies exact round-trip).
+
+Used by: CMIP feedback-kernel analysis, ECS decomposition,
+emergent-constraint diagnostics (Sherwood-Hall-Caldwell 2014),
+Bony et al. 2006 cloud-feedback framework, AR5/AR6 climate-
+feedback tables.
+
+Test: `tests/test_fv3_planck_feedback_iter831.py` (7 tests:
+Earth λ=−3.76 (analytic), negative sign over Earth-like T range,
+monotone in T (T³ scaling), ε=0.5 → λ halved, iter-829 chain
+exact via OLR = ε·σ·T_eff⁴, 2×CO₂ ΔT ≈ 0.98 K, 3-D shapes +
+finite + negative).
+
+### Why this iteration was meaningful
+
+Planck feedback is THE reference climate-feedback parameter —
+every paper on climate sensitivity since Bony et al. 2006 starts
+by separating λ_total into λ_Planck + λ_lapse + λ_WV + λ_α +
+λ_cloud.  Without this primitive the CMIP feedback-kernel
+decomposition cannot close.  Pure JAX, vmap-compatible.  Uses
+``constants.sigma_sb`` per CLAUDE.md hygiene.  No new physical
+constants introduced.
+
 
 
 
