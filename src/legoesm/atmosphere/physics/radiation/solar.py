@@ -14,6 +14,14 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 _TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
+# Pole-detection threshold on ``cos_lat * cos_delta``.  Must exceed the
+# fp32 roundoff of ``cos(π/2) ≈ -4.37e-8`` so that any latitude
+# numerically reaching the pole is treated as the singular branch and
+# routed through the AD-safe fill (issue #249 codex round 5).  At the
+# minimum tropical ``cos_delta ≈ 0.91``, this corresponds to a
+# latitude shell of width ``arccos(1 − 1e-7) ≈ 4.5e-4 rad ≈ 0.025°``
+# around each pole — far below any physical or grid resolution.
+_POLE_THRESHOLD = 1.0e-7
 
 from legoesm import constants
 
@@ -135,10 +143,34 @@ def daily_mean_insolation(
     # threshold — while keeping ``|d arccos / dx| ≤ 1/sqrt(2ε) ≈ 2236``,
     # safely within fp64 and fp32 dynamic range.
     _AD_SAFE_BOUND = 1.0 - 1.0e-7
-    cos_hs = jnp.clip(
-        -sin_lat * sin_delta / jnp.clip(cos_lat * cos_delta, _TINY, None),
-        -_AD_SAFE_BOUND, _AD_SAFE_BOUND,
+    # AD-safe polar singularity (issue #249 codex round 5).  The legacy
+    # ``-sin_lat sin_delta / clip(cos_lat cos_delta, _TINY, None)`` form
+    # was AD-safe at *equinox* (where ``sin_delta = 0`` makes the
+    # numerator vanish too) but produced NaN gradients at solstice in
+    # fp32 — the divide's ``-num / denom**2`` cotangent at
+    # ``denom = _TINY ≈ 1e-38`` reaches ``∼1e76``, then chains through
+    # the outer ``arccos`` saturation and ``maximum(Q, 0)`` reductions
+    # before the saturation clip can kill it.  Replace with a
+    # where-before-divide that masks the pole branch out of the divide
+    # entirely and routes the polar-day / polar-night branch through a
+    # numerator-sign-driven fill that the outer clip then saturates to
+    # ``±_AD_SAFE_BOUND``.
+    numerator = -sin_lat * sin_delta
+    denom = cos_lat * cos_delta
+    near_pole = denom < _POLE_THRESHOLD
+    safe_denom = jnp.where(near_pole, jnp.asarray(1.0, denom.dtype), denom)
+    ratio_div = numerator / safe_denom
+    # In the pole branch, drive ``cos_hs`` to the saturation bound from
+    # the *correct* side using the numerator's sign:
+    #   numerator > 0 → polar night (``cos_hs → +bound``)
+    #   numerator < 0 → polar day  (``cos_hs → -bound``)
+    pole_fill = jnp.where(
+        numerator > 0.0,
+        jnp.asarray(1.0e30, denom.dtype),
+        jnp.asarray(-1.0e30, denom.dtype),
     )
+    ratio = jnp.where(near_pole, pole_fill, ratio_div)
+    cos_hs = jnp.clip(ratio, -_AD_SAFE_BOUND, _AD_SAFE_BOUND)
     h_s = jnp.arccos(cos_hs)
 
     # Daily-mean insolation
@@ -183,10 +215,21 @@ def daylight_fraction(
     # the bound strictly inside ±1 so the polar-day / polar-night
     # gradient does not NaN.
     _AD_SAFE_BOUND = 1.0 - 1.0e-7
-    cos_hs = jnp.clip(
-        -sin_lat * sin_delta / jnp.clip(cos_lat * cos_delta, _TINY, None),
-        -_AD_SAFE_BOUND, _AD_SAFE_BOUND,
+    # Same where-before-divide pattern as ``daily_mean_insolation`` —
+    # required for AD-safe gradients at fp32 poles on solstice (issue
+    # #249 codex round 5).  See that function for the derivation.
+    numerator = -sin_lat * sin_delta
+    denom = cos_lat * cos_delta
+    near_pole = denom < _POLE_THRESHOLD
+    safe_denom = jnp.where(near_pole, jnp.asarray(1.0, denom.dtype), denom)
+    ratio_div = numerator / safe_denom
+    pole_fill = jnp.where(
+        numerator > 0.0,
+        jnp.asarray(1.0e30, denom.dtype),
+        jnp.asarray(-1.0e30, denom.dtype),
     )
+    ratio = jnp.where(near_pole, pole_fill, ratio_div)
+    cos_hs = jnp.clip(ratio, -_AD_SAFE_BOUND, _AD_SAFE_BOUND)
     h_s = jnp.arccos(cos_hs)
     return h_s / jnp.pi
 

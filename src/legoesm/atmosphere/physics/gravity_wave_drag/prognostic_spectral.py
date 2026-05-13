@@ -89,8 +89,12 @@ def prognostic_spectral_gwd(
         + v[:, None, :] * sin_az[None, :, None]
     )
 
-    # Phase speed per wavenumber: c = N / k
-    # (ncol, nlev, n_wn) via broadcast
+    # Phase speed per wavenumber: c = N / k.  ``k_grid`` is a static
+    # config-derived array — its values never participate in AD — and
+    # the legacy ``clip`` floor preserves the divide's forward
+    # semantics for misconfigured ``k_min ≤ 1e-10`` configs (codex
+    # round 3 flagged that ``safe_divide`` would silently zero
+    # ``c_phase`` and ``wavelength`` in that boundary case).
     c_phase = N_full[:, :, None] / jnp.clip(k_grid[None, None, :], 1e-10, None)
 
     # Layer thickness
@@ -121,6 +125,14 @@ def prognostic_spectral_gwd(
     N_4d = N_full[:, None, None, :]  # (ncol, 1, 1, nlev)
     rho_4d = rho[:, None, None, :]
 
+    # ``N`` is upstream-clipped (``N2_half ≥ 1e-8`` → ``N ≥ 1e-4``) and
+    # ``wavelength`` floors at ``2π/k_max`` ≥ 1e3 m for the default
+    # config, so the legacy ``clip(N, 1e-6) * wavelength`` denominator
+    # is bounded well above zero in normal operation.  The clip on
+    # ``N_4d`` keeps the divide AD-safe via the clip's zero VJP in any
+    # misconfigured neutral layer.  Issue #249 codex round 3:
+    # ``safe_divide`` here would mask trace-but-valid configurations
+    # rather than fall back to the clipped-denominator divide.
     tau_sat = (
         config.breaking_threshold * rho_4d * intrinsic_abs ** 3
         / (jnp.clip(N_4d, 1e-6, None) * wavelength[None, None, :, None])
