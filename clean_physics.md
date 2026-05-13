@@ -347,6 +347,42 @@ Verified clean:
 
 No code changes this iteration.
 
+## Iter-106 — Emanuel + Kuo + atmosphere `_shared` sweep
+Audited `atmosphere/physics/convection/emanuel.py` (278 LOC),
+`convection/kuo.py` (224 LOC), `atmosphere/physics/_shared.py`
+(585 LOC).
+
+Verified clean:
+- **Emanuel buoyancy-sort ensemble**: per-level detrainment enhancement
+  via `sort_multiplier = 1 + 4·c_u · var(ascending_weight)`; passed
+  through `delta_0 * sort_multiplier` to the kernel so only detrainment
+  is scaled (not subsidence — iter-? fix).  Unsaturated downdraft
+  column-conservation: subtracts the same column-integrated
+  evaporated mass from `dq_c_conv_dt` proportional to where it was
+  produced (not where it evaporates).
+- **Emanuel CAPE closure**: `M_b = ρ_BL · max(CAPE−thr, 0) / (g·τ)`
+  (Kain 2004 §3 form, iter-2 dimensional fix held).
+- **No CMT in Emanuel** (du_dt_conv = dv_dt_conv = None).
+- **Kuo MC-gate**: `mc_gate = tanh(MC/me_threshold)` prevents spurious
+  heating in undersaturated columns (the smooth sigmoid trigger alone
+  gives ~0.475 at MC=0 — would create water from nothing without this).
+  Moistening budget distributed proportional to deficit, normalised so
+  column integral exactly equals `(1−α_heat)·MC/τ_relax` (audit iter-?
+  finding fixed extra g/dp factor that under-reported by ~500× at
+  nlev=20).
+- **`_shared.compute_heights_from_sigma` / `compute_layer_dz` /
+  `compute_rho`**: optional virtual-T variant via `q_v` (~1 % moist
+  correction in tropics, iter-35 F2/F6 held).
+- **`_shared.compute_moisture_convergence`**: cubed-sphere + lat-lon
+  paths return `fv_flux_divergence_3d(...)` directly because that
+  operator's docstring says it returns `-div(q·v)` = MC.  Spectral path
+  applies the explicit negation `-div_grid` to convert div→MC.  Both
+  give positive value when moisture converging in — iter-35 F1 fix held.
+- **`_shared.diagnose_grid_w_from_omega`**: `w = -ω/(ρ·g)` standard
+  hydrostatic identity; positive ω = sinking → negative w (downward). ✓
+
+No code changes this iteration.
+
 ## Next iterations
 Continue addressing codex findings and direct-inspection sweeps until all schemes are
 provably conservative, monotone, CFL-safe, and AD-safe across mixed wet/dry grids.
