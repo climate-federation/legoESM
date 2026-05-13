@@ -383,6 +383,43 @@ Verified clean:
 
 No code changes this iteration.
 
+## Iter-107 — Morrison + Thompson microphysics conservation audit
+Audited `atmosphere/physics/microphysics/morrison.py` (316 LOC) and
+`thompson.py` (347 LOC) end-to-end, with explicit hand-checked
+conservation of total water and latent heat budget.
+
+Verified clean:
+- **Total-water conservation**: Σ_species dq/dt cancels for every
+  internal process (condensation, evaporation, dep, autoconv, accretion,
+  bergeron, riming_i/s, aggregation, melt_ice/snow [+graupel], rime-
+  to-graupel splits).  Sed terms net to surface precipitation only.
+- **Latent heating consistency** with the moist-enthalpy invariant
+  `h = c_pd T + L_v q_v − L_f q_ice`: condensation/evap use L_v;
+  dep uses L_s; bergeron / riming release L_f; melts absorb L_f.
+  L_s − L_v − L_f = 0 cancels the dep term cleanly.  Rime-to-graupel
+  (frozen → frozen) correctly has no latent heat term.
+- **Donor clamps**: q_v sinks (cond + dep), q_c sinks (au + ac +
+  bergeron + riming + cond-evap), q_i sinks (agg + melt_ice [+ rime-
+  to-graupel-from-i]), q_s sinks (melt_s [+ rime-to-graupel-from-s])
+  all use the shared `donor_clamp_scale(q_avail, sink_total, dt)`
+  helper.  Each sink rate appears once as `-` in its donor species
+  and once as `+` in the recipient, so uniform scaling preserves
+  conservation.
+- **Sedimentation `extra_sink`** plumbed for all species (iter-29 →
+  iter-73 extension): q_r (evap), q_i (agg + melt_ice + rime-to-
+  graupel-from-i), q_s (melt_s + rime-to-graupel-from-s), q_g
+  (melt_graupel).
+- **`dN_i_dt = dN_i_nuc − aggregation · N_i / max(q_i, 1e-15)`**:
+  when q_i = 0, aggregation = 0 (it's q_i·agg_coeff), so 0 / 1e-15
+  = 0 — division is safe.
+- **Thompson rime-to-graupel donor split**: `rime_to_graupel_from_i`
+  drawn from q_i, `_from_s` from q_s; pre-clamp `total_riming` only
+  used for the sigmoid `graupel_frac` (iter-25 audit fix held —
+  earlier form clamped `rime_to_graupel` post-hoc by `qc_scale` which
+  caused over-estimation of the actual donor draw).
+
+No code changes this iteration.
+
 ## Next iterations
 Continue addressing codex findings and direct-inspection sweeps until all schemes are
 provably conservative, monotone, CFL-safe, and AD-safe across mixed wet/dry grids.
