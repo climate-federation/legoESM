@@ -3335,6 +3335,11 @@ STILL OPEN (post-iter-99 stretch goals):
   Both paths equivalent at machine eps (iter-901/iter-903).  iter-904
   adds JIT + grad pass-through tests for nord ∈ {0,1,2,3} + docstring
   with FV3 fill_c semantics block (8 unit tests).
+- **iter-905 cleanup (user-requested 2026-05-13)**: deleted 204
+  Earth-system / tangential diagnostic helpers from
+  ``cubed_sphere.py`` (16299→3736 lines) + 211 dedicated test
+  files + 211 sweep guard entries.  FV3 dycore + corner-div
+  + nord∈{0,1,2,3} expanding-halo test suite UNCHANGED.
 - iter-168/169/170/171 documented PE-vs-NH FV3-fidelity asymmetries
   ALL CLOSED:
   * ✅ corner-divergence damping (PE iter 16/18) — closed iter 168
