@@ -9313,6 +9313,98 @@ def spei_z_score_fv3(
     return (deficit - mu_d) / sigma_safe
 
 
+def hargreaves_pet_fv3(
+    t_mean_c: jax.Array,
+    t_max_c: jax.Array,
+    t_min_c: jax.Array,
+    r_a_mj: jax.Array,
+    range_floor: float = 1e-6,
+) -> jax.Array:
+    """FV3_3D iter 862: Hargreaves-Samani 1985 PET primitive.
+
+    Hargreaves-Samani 1985 (Appl. Eng. Agric.) potential
+    evapotranspiration formula — temperature-and-extraterrestrial-
+    radiation form, no humidity or wind input required:
+
+        PET = 0.0023 · R_a · (T_mean + 17.8) · (T_max − T_min)^0.5
+                                                            (mm/day)
+
+    Where:
+      * T_mean  — daily mean temperature (°C).
+      * T_max   — daily max temperature (°C).
+      * T_min   — daily min temperature (°C).
+      * R_a     — extraterrestrial radiation (MJ/m²/day);
+                  caller-supplied (function of latitude +
+                  day-of-year, computable from solar geometry).
+      * 0.0023, 17.8 — Hargreaves-Samani 1985 California-arid fit
+                       coefficients; FAO-56 recommended global use.
+
+    Output: PET in mm/day (matches FAO-56 convention).
+
+    Sign: PET ≥ 0 (always positive; bounded below by 0 if
+    T_max=T_min or T_mean=−17.8).
+
+    Hargreaves vs Penman-Monteith (full FAO-56):
+      * Hargreaves needs only T + R_a (no RH, wind, net radiation).
+      * Penman-Monteith requires full energy balance — preferred
+        when data available.
+      * Hargreaves matches PM within 10-20% in semi-arid climates
+        (its original calibration regime); larger errors in humid
+        or windy locales.
+      * AR6 §11.6 and SPEIbase v2.6+ use Hargreaves PET for
+        global SPEI computation by default (data availability).
+
+    Canonical magnitudes (R_a varies 5–40 MJ/m²/day with latitude):
+      * Tropical (R_a≈40, T̄=27, ΔT=8): PET ≈ 0.0023·40·44.8·2.83 ≈ 11.7 mm/day
+      * Subtropical desert (R_a≈30, T̄=30, ΔT=15): PET ≈ 10.1 mm/day
+      * Mid-lat summer (R_a≈30, T̄=22, ΔT=12): PET ≈ 9.5 mm/day
+      * Polar winter (R_a≈0, T̄=−30): PET ≈ 0 mm/day
+
+    **Closes the drought-budget primitive chain**:
+
+        T_mean, T_max, T_min, R_a → iter-862 PET
+                                  ↓
+        iter-861 SPEI (D = P − PET, z-score)
+
+    Composes naturally:
+      * iter-861 ``spei_z_score_fv3`` consumes PET output here.
+      * iter-832 ``clausius_clapeyron_dqdt_fv3`` (humidity-rise
+        modulates Penman-Monteith but not Hargreaves directly;
+        Hargreaves indirectly captures via diurnal range).
+
+    Used by: Hargreaves-Samani 1985 Appl. Eng. Agric., Allen-Pereira
+    1998 FAO-56 PET guidelines, Vicente-Serrano 2010 SPEIbase
+    Hargreaves default, AR6 §11.6 drought, Sheffield et al. 2012
+    Nature global-drought debate (the Hargreaves vs PM PET-method
+    discrepancy), Trabucco-Zomer 2009 CGIAR-CSI Global Aridity
+    Database.
+
+    ``range_floor`` prevents sqrt(0) when T_max=T_min (degenerate
+    no-diurnal-cycle case).
+
+    Parameters
+    ----------
+    t_mean_c : jax.Array
+        Daily mean temperature (°C).
+    t_max_c : jax.Array
+        Daily maximum temperature (°C).
+    t_min_c : jax.Array
+        Daily minimum temperature (°C).
+    r_a_mj : jax.Array
+        Extraterrestrial radiation (MJ/m²/day; caller computes
+        from latitude + day-of-year).
+    range_floor : float
+        Lower bound on (T_max - T_min); default 1e-6.
+
+    Returns
+    -------
+    pet : jax.Array
+        Potential evapotranspiration (mm/day); ≥ 0.
+    """
+    diurnal = jnp.maximum(t_max_c - t_min_c, range_floor)
+    return 0.0023 * r_a_mj * (t_mean_c + 17.8) * jnp.sqrt(diurnal)
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

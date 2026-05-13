@@ -5317,3 +5317,72 @@ properly captures warming-driven aridification.  Critical for:
 drought-stress modules.  Pure JAX, vmap-compatible.  No
 `constants.py` additions.
 
+## Iter 862 — hargreaves_pet_fv3 (PET primitive, Hargreaves-Samani 1985)
+
+Added `hargreaves_pet_fv3(t_mean_c, t_max_c, t_min_c, r_a_mj)` to
+`grids/cubed_sphere.py`.  Hargreaves-Samani 1985 (Appl. Eng.
+Agric.) potential-evapotranspiration formula:
+
+```
+PET = 0.0023 · R_a · (T_mean + 17.8) · sqrt(T_max − T_min)   (mm/day)
+```
+
+R_a = extraterrestrial radiation (MJ/m²/day; caller supplies from
+latitude + day-of-year solar geometry).  Output mm/day per FAO-56
+convention.
+
+Hargreaves vs Penman-Monteith:
+  * Hargreaves needs only T + R_a (no RH, wind, net radiation).
+  * Penman-Monteith requires full energy balance (preferred when
+    data available).
+  * Hargreaves matches PM within 10–20% in semi-arid climates;
+    larger errors in humid/windy locales.
+  * AR6 §11.6 and SPEIbase v2.6+ use Hargreaves by default for
+    global SPEI computation (data availability).
+
+Canonical PET magnitudes:
+  | regime               | R_a   | T̄   | ΔT   | PET (mm/day) |
+  |----------------------|-------|-----|------|--------------|
+  | Tropical             | 40    | 27  | 8    | 11.7         |
+  | Subtropical desert   | 30    | 30  | 15   | 10.1         |
+  | Mid-lat summer       | 30    | 22  | 12   | 9.5          |
+  | Polar winter         | 0     | −30 | —    | 0            |
+
+**Closes the drought-budget primitive chain**:
+
+```
+T_mean, T_max, T_min, R_a → iter-862 PET
+                          ↓
+                          iter-861 SPEI (D = P − PET)
+```
+
+Composes naturally:
+  * iter-861 SPEI consumes PET output here.
+  * iter-832 CC scaling captures humidity dependence (Hargreaves
+    indirectly via diurnal range; Penman-Monteith directly via
+    vapor-pressure deficit).
+
+Used by: Hargreaves-Samani 1985 Appl. Eng. Agric., Allen-Pereira
+1998 FAO-56 PET guidelines, Vicente-Serrano 2010 SPEIbase Hargreaves
+default, AR6 §11.6 drought, Sheffield et al. 2012 Nature global-
+drought debate (Hargreaves vs PM PET-method discrepancy), Trabucco-
+Zomer 2009 CGIAR-CSI Global Aridity Database.
+
+Test: `tests/test_fv3_hargreaves_pet_iter862.py` (8 tests: tropical
+canonical ≈ 11.7 mm/day, polar R_a=0 → 0, no-diurnal floored, T=−17.8
+offset → 0, chain to iter-861 SPEI, monotone in R_a and T_mean,
+3-D shapes).
+
+### Why this iteration was meaningful
+
+**Closes the drought-budget primitive chain** end-to-end: caller
+goes from (T, R_a) → PET (iter-862) → SPEI (iter-861) without
+need for external PET data.  Critical for: (1) AR6 §11.6 global
+SPEIbase reconstructions; (2) SSP-scenario drought projections
+where only T is GCM-output (not RH/wind); (3) SPEIbase v2.6+
+operational global-aridity-database coupling.  Pure JAX,
+vmap-compatible.  Hargreaves coefficients 0.0023 and 17.8 are
+California-arid empirical fit (FAO-56-canonical defaults — kept
+literal per CLAUDE.md empirical-fit-not-physical-constant rule).
+No `constants.py` additions.
+
