@@ -7275,6 +7275,77 @@ def transient_climate_response_fv3(
     return radiative_forcing / denom
 
 
+def radiative_forcing_co2_fv3(
+    co2_ppm: jax.Array,
+    co2_ppm_ref: jax.Array = 278.0,
+    alpha_myhre: float = 5.35,
+    co2_floor: float = 1e-6,
+) -> jax.Array:
+    """FV3_3D iter 838: Myhre 1998 logarithmic CO₂ radiative forcing.
+
+    Empirical IPCC TAR/AR5/AR6 standard for CO₂ radiative forcing:
+
+        ΔF_CO₂ = α_Myhre · ln(C / C_ref)   (W/m²)
+
+    Where:
+      * α_Myhre = 5.35 W/m² (Myhre 1998 fit to detailed line-by-line
+        RRTM radiative-transfer calculations; AR5 Table 8.SM.1).
+      * C_ref   — reference CO₂ (default 278 ppm = AR5 1750-CE
+        pre-industrial).
+
+    Canonical values:
+      * 2×CO₂ (C=556, C_ref=278): ΔF = 5.35·ln(2) ≈ 3.71 W/m²
+        — the AR5 standard forcing entry.
+      * 4×CO₂ (C=1112):           ΔF = 5.35·2·ln(2) ≈ 7.42 W/m²
+      * Present-day (C=420, C_ref=278): ΔF ≈ 2.21 W/m²
+      * 8×CO₂ runaway:            ΔF = 5.35·3·ln(2) ≈ 11.13 W/m²
+
+    Logarithmic dependence reflects line-overlap saturation in
+    main 15-μm CO₂ band — additional CO₂ broadens only into the
+    line wings (Pierrehumbert 2010 ch. 4, Wilson-Gea-Kiehl 2008).
+
+    Completes the **CO₂ → climate-sensitivity primitive chain**:
+
+        CO₂ ppm                                     (input)
+        → iter-838 radiative_forcing_co2_fv3        (ΔF)
+        → iter-836 equilibrium_climate_sensitivity  (ΔT_eq)
+        → iter-837 transient_climate_response       (ΔT_trans)
+
+    Users can now go from raw ppm to warming entirely in pure JAX.
+
+    Used by: AR5/AR6 forcing tables, simple climate models (FaIR
+    v2.0, MAGICC7), AR-WG1 emissions-to-warming pipelines, CMIP6
+    forcing-consistent diagnostic computations, integrated-
+    assessment models (DICE/PAGE/REMIND).
+
+    Note: ``alpha_myhre`` is the Myhre-1998 empirical fit
+    coefficient.  AR6 has minor revisions (Etminan et al. 2016
+    nonlinear N₂O-CH₄-CO₂ overlap form) but the simple-log form
+    remains the AR5/AR6 default for CO₂-only forcing.
+
+    Parameters
+    ----------
+    co2_ppm : jax.Array
+        Atmospheric CO₂ concentration (ppm).
+    co2_ppm_ref : jax.Array or float
+        Reference CO₂ (ppm); default 278 (1750-CE pre-industrial).
+    alpha_myhre : float
+        Myhre-1998 forcing coefficient (W/m²); default 5.35.
+    co2_floor : float
+        Lower bound on C and C_ref ratios (ppm); default 1e-6
+        — prevents ln(0) for hypothetical CO₂-free atmosphere.
+
+    Returns
+    -------
+    delta_f : jax.Array
+        Radiative forcing (W/m²) relative to ``co2_ppm_ref``.
+        Positive for C > C_ref (warming).
+    """
+    c_safe = jnp.maximum(co2_ppm, co2_floor)
+    c_ref_safe = jnp.maximum(co2_ppm_ref, co2_floor)
+    return alpha_myhre * jnp.log(c_safe / c_ref_safe)
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

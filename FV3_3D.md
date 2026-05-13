@@ -5490,6 +5490,66 @@ post-equilibration limit.  Together iter-836+iter-837 span the
 full IPCC climate-sensitivity primitive set.  Pure JAX, vmap-
 compatible.  No new physical constants introduced.
 
+## Iter 838 — radiative_forcing_co2_fv3 (Myhre 1998 log forcing)
+
+Added `radiative_forcing_co2_fv3(co2_ppm, co2_ppm_ref=278.0,
+alpha_myhre=5.35)` to `grids/cubed_sphere.py`.  IPCC TAR/AR5/AR6
+standard CO₂ radiative-forcing formula:
+
+```
+ΔF_CO₂ = α_Myhre · ln(C / C_ref)    (W/m²)
+```
+
+Where α_Myhre = 5.35 W/m² is the Myhre-1998 fit to detailed line-
+by-line RRTM radiative-transfer calculations (AR5 Table 8.SM.1).
+
+Canonical values:
+  | scenario             | C (ppm) | ΔF (W/m²) |
+  |----------------------|---------|-----------|
+  | Pre-industrial ref   | 278     | 0.00      |
+  | Present-day 2025-ish | 420     | 2.21      |
+  | 2×CO₂ (AR5 standard) | 556     | 3.71      |
+  | 4×CO₂                | 1112    | 7.42      |
+  | 8×CO₂                | 2224    | 11.13     |
+
+Logarithmic dependence reflects line-overlap saturation in main
+15-μm CO₂ band — additional CO₂ broadens only into line wings
+(Pierrehumbert 2010 ch. 4, Wilson-Gea-Kiehl 2008).
+
+**Completes the CO₂ → climate-sensitivity primitive chain**:
+
+```
+CO₂ ppm                                                  (input)
+↓ iter-838 radiative_forcing_co2_fv3                      ΔF
+↓ iter-836 equilibrium_climate_sensitivity_fv3            ΔT_eq
+  iter-837 transient_climate_response_fv3                 ΔT_trans
+```
+
+Users can now go from raw ppm to warming entirely in pure JAX.
+
+Used by: AR5/AR6 forcing tables, simple climate models (FaIR
+v2.0, MAGICC7), CMIP6 forcing-consistent diagnostics, integrated-
+assessment models (DICE/PAGE/REMIND).
+
+Test: `tests/test_fv3_radiative_forcing_co2_iter838.py` (9 tests:
+2×CO₂ ≈ 3.71 W/m² (analytic Myhre), 4×CO₂ ≈ 7.42, no-change zero,
+cooling for C<C_ref, present-day 420 ppm ≈ 2.21, full chain to
+iter-836 ECS ≈ 2.64 K, full chain to iter-837 TCR ≈ 1.76 K, C=0
+floored finite, 3-D shapes).
+
+### Why this iteration was meaningful
+
+**Closes the ppm → warming primitive chain** end-to-end —
+caller goes from input CO₂ concentration directly to ΔT_eq or
+ΔT_trans through the full Myhre→AR6-quartet→TCR/ECS pipeline.
+Critical for: (1) AR6-class scenario analysis from raw ppm;
+(2) simple climate emulator construction (FaIR-class); (3)
+integrated-assessment-model coupling; (4) differentiable
+emergent-constraint optimization on emissions-to-warming.
+Pure JAX, vmap-compatible.  Myhre-1998 α=5.35 is an empirical
+RTM fit coefficient (default arg, not a fundamental physical
+constant).  No new entries in `constants.py`.
+
 
 
 
