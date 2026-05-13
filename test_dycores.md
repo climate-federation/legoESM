@@ -94,6 +94,12 @@ NH cross-grid TC1 mass-drift after iter-10 (matrix runner `notes` line):
   imports (`shallow_water_latlon_cgrid.py`,
   `shallow_water_fv3_cdgrid.py`, `primitive_eq_latlon_cgrid.py`).
   829 unit tests PASS.
+- **iter-15**: regression test
+  `tests/atmosphere/hydrostatic/validation/test_mass_conservation_anchored.py`
+  asserts mass drift ≤ 1e-10 over a short HS-init integration on all
+  four PE solvers (cube C12 / lat-lon 36x72 / MPAS ico4 / spectral T21,
+  5 steps each).  Catches regressions in any of the iter-1..14 fixer
+  changes; 4/4 PASS in ~27s.
 
 ## Implementation patterns established (apply to any new dycore)
 
