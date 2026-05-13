@@ -209,6 +209,37 @@ Branch: `clean_physics`.  Driven by Ralph loop + `/codex:adversarial-review`.
 - Codex `adversarial-review` runtime ~50/50 success/failure.  Continue alongside
   direct inspection.
 
+## Iter-111 — coupler infrastructure (accumulator + tile fractions + step)
+Audited `coupler/{accumulator,tile_fractions,coupling_fields}.py` and
+the `step_surface` orchestrator inside `coupler/coupler.py`.
+
+Verified clean:
+- **`FluxAccumulator`**: dt-weighted accumulation of all SurfaceToAtm
+  fields including the separately-tracked `sum_lw_up` (avoids the
+  σ⟨T⟩⁴ ≠ ⟨σT⁴⟩ trap when emission averaging is needed downstream).
+  `mean_accumulator` divides by `clip(total_dt, _tiny, None)` for
+  AD-safe division.
+- **`compute_tile_fractions`**: `f_water = 1 - f_land - f_lake`,
+  `f_ice = f_water · ice_conc`, `f_ocean = f_water - f_ice`.  Total
+  sums to 1 (`f_ocean + f_ice + f_land + f_lake = 1` algebraically).
+  Static rescale `static_scale = 1/total_static` triggers when
+  `f_land + f_lake > 1` — slightly oversaturated input is renormalized
+  rather than producing negative `f_water`.
+- **`blend_tiles`**: area-weighted linear blend `f_o·O + f_i·I +
+  f_l·L + f_k·K` for every TileResponse field including
+  `freshwater_flux`, `ocean_heat_extraction`, `ocean_stress_x/y`
+  (audit F8/F9), `surface_mass_flux` (audit F3).  Continuous, no hard
+  conditionals — differentiable everywhere.
+- **`step_surface` asynchronous coupling window** (lines 430-465):
+  on flush, accumulate the residual `dt_to_close = clip(coupling_dt -
+  dt_prev, 0, dt)` to close the window exactly, emit mean, seed
+  `acc_next` with `dt_excess = max(dt - dt_to_close, 0)` worth of
+  blended flux.  Boundary cases: when `dt_excess = 0` the new
+  accumulator has `total_dt = 0` and emit-side `_tiny` floor protects
+  the next-mean division.
+
+No code changes this iteration.
+
 ## Next iterations
 Continue addressing codex findings and direct-inspection sweeps until all schemes are
 provably conservative, monotone, CFL-safe, and AD-safe across mixed wet/dry grids.
