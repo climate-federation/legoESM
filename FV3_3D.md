@@ -5487,6 +5487,64 @@ matches the AR6 emissions-impulse-response framework cleanly
 in pure JAX.  c, d, AGTP_CO2 are AR5/Shine empirical fits
 (default args).  No `constants.py` additions.
 
+## Iter 846 — tcre_remaining_budget_fv3 (AR6 carbon-budget primitive)
+
+Added `tcre_remaining_budget_fv3(delta_t_target, delta_t_current,
+tcre=0.45)` to `grids/cubed_sphere.py`.  Allen-Stocker-Matthews
+TCRE (Transient Climate Response to cumulative carbon Emissions;
+Matthews et al. 2009, Allen et al. 2009) cumulative-emission
+linear closure:
+
+```
+E_remaining = 1000 · (ΔT_target − ΔT_current) / TCRE   (Gt-CO₂)
+```
+
+TCRE = 0.45 K per 1000 Gt-CO₂ (AR6 central; likely range 0.27–0.63).
+
+AR6 central remaining-budget benchmarks (ΔT_current = 1.1 K, 2020 CE):
+  | target ΔT | E_remain (Gt-CO₂) | years @ 40 Gt-CO₂/yr |
+  |-----------|-------------------|----------------------|
+  | 1.5 K     | 889               | 22                   |
+  | 1.7 K     | 1333              | 33                   |
+  | 2.0 K     | 2000              | 50                   |
+  | 2.5 K     | 3111              | 78                   |
+
+Negative output ⇒ target already exceeded (overshoot).
+
+TCRE near-linearity comes from cancellation between sub-linear
+CO₂ log forcing and sub-linear ocean carbon uptake (Goodwin et al.
+2015, Williams et al. 2017 thermodynamic derivation).
+
+**Closes the cumulative-emission climate-budget primitive
+chain**.  Composes with iter-836 ECS / iter-837 TCR and the
+GHG-forcing trio (iter-838–840) for end-to-end emission-pathway
+analysis.  Unlike iter-836 (per-forcing) and iter-844 GWP (per-
+mass cumulative-forcing weighting), TCRE is the canonical
+*cumulative-emission* climate-sensitivity metric used in:
+  * AR6 SPM carbon-budget statements
+  * IPCC AR5 WG1 §12.5.4 framework
+  * Allen-Stocker 2014 fairness/equity analysis
+  * 1.5°C/2°C remaining-budget calculators (Friedlingstein et al.
+    2022 Global Carbon Project)
+  * Net-zero target setting (corporate, national, IAM-based)
+
+Test: `tests/test_fv3_tcre_budget_iter846.py` (8 tests: AR6 1.5°C
+canonical 889 Gt, AR6 2°C canonical 2000 Gt, overshoot negative,
+at-target zero, TCRE inverse scaling, AR6 0.27–0.63 spread ratio,
+TCRE=0 floored, 3-D shapes).
+
+### Why this iteration was meaningful
+
+Adds **AR6 SPM-class remaining-carbon-budget primitive** — the
+single most policy-relevant climate-sensitivity metric used in
+1.5°C/2°C target setting, Paris Agreement progress reporting,
+and net-zero pathway analysis.  Pairs with iter-836 ECS /
+iter-837 TCR / iter-844 GWP / iter-845 GTP to span the complete
+**climate-metric primitive set**: per-forcing (ECS/TCR), per-mass
+(GWP/GTP), per-cumulative-emission (TCRE).  Pure JAX, vmap-
+compatible.  TCRE = 0.45 is AR6 likely-range central (default
+arg).  No `constants.py` additions.
+
 
 
 

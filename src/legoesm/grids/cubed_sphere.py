@@ -7920,6 +7920,96 @@ def gtp_single_decay_fv3(
     return agtp_x / agtp_co2
 
 
+def tcre_remaining_budget_fv3(
+    delta_t_target: jax.Array,
+    delta_t_current: jax.Array,
+    tcre: jax.Array = 0.45,
+    tcre_floor: float = 1e-6,
+) -> jax.Array:
+    """FV3_3D iter 846: TCRE-based remaining-carbon-budget primitive.
+
+    Allen-Stocker-Matthews TCRE (Transient Climate Response to
+    cumulative carbon Emissions; Matthews et al. 2009, Allen
+    et al. 2009, Allen-Stocker 2014) gives the near-linear
+    relationship between cumulative anthropogenic CO₂ emissions
+    and global-mean warming:
+
+        ΔT − ΔT_pre-industrial ≈ TCRE · E_cumulative
+
+    Remaining carbon budget for a target warming threshold:
+
+        E_remaining = (ΔT_target − ΔT_current) / TCRE   (Gt-CO₂)
+
+    Where:
+      * ΔT_target  — target warming above pre-industrial (K).
+      * ΔT_current — current warming (K), typically ~1.1 K (2020 CE).
+      * TCRE       — slope (K per 1000 Gt-CO₂); AR6 central 0.45
+                     (likely range 0.27–0.63).
+
+    AR6 central remaining-budget benchmarks (ΔT_current = 1.1 K):
+      | target ΔT  | E_remaining (Gt-CO₂) | years @ 40 Gt-CO₂/yr |
+      |-----------|----------------------|----------------------|
+      | 1.5 K     | 889                  | 22                   |
+      | 1.7 K     | 1333                 | 33                   |
+      | 2.0 K     | 2000                 | 50                   |
+      | 2.5 K     | 3111                 | 78                   |
+
+    Negative output ⇒ target already exceeded (overshoot).
+
+    Sign convention: TCRE > 0 (warming per emission); output
+    follows sign of (ΔT_target − ΔT_current).
+
+    Closes the **cumulative-emission climate-budget primitive**
+    chain.  Composes with iter-836 ECS / iter-837 TCR and the
+    GHG-forcing trio (iter-838-840) for end-to-end emission-
+    pathway analysis:
+
+        cumulative emission E → iter-846 ΔT (via TCRE)
+        or
+        target ΔT → iter-846 E_remaining
+
+    Unlike iter-836 ECS (per-forcing) and iter-844 GWP (per-mass
+    cumulative-forcing weighting), TCRE is the canonical
+    *cumulative-emission* climate-sensitivity metric used in:
+      * AR6 SPM and policy briefs (carbon-budget statements).
+      * IPCC AR5 WG1 §12.5.4 carbon-budget framework.
+      * Allen-Stocker 2014 fairness and equity analysis.
+      * 1.5°C / 2°C remaining-budget calculators
+        (Friedlingstein et al. 2022 Global Carbon Project).
+      * Net-zero target setting (corporate, national, IAM-based).
+
+    TCRE near-linearity comes from the cancellation between
+    sub-linear CO₂ radiative forcing (log) and sub-linear
+    ocean carbon-uptake (decreasing saturation) — Goodwin et al.
+    2015, Williams et al. 2017 thermodynamic derivation.
+
+    ``tcre_floor`` prevents div-by-0 in pathological TCRE→0.
+
+    Parameters
+    ----------
+    delta_t_target : jax.Array
+        Target warming above pre-industrial (K).
+    delta_t_current : jax.Array
+        Current warming above pre-industrial (K).
+    tcre : jax.Array or float
+        Transient Climate Response to cumulative Emissions
+        (K per 1000 Gt-CO₂); default 0.45 (AR6 central).
+    tcre_floor : float
+        Lower bound on |TCRE|; default 1e-6.
+
+    Returns
+    -------
+    e_remaining : jax.Array
+        Remaining carbon budget (Gt-CO₂); negative for overshoot.
+    """
+    tcre_safe = jnp.where(
+        jnp.abs(tcre) < tcre_floor,
+        tcre_floor,
+        tcre,
+    )
+    return 1000.0 * (delta_t_target - delta_t_current) / tcre_safe
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,
