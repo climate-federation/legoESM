@@ -5234,6 +5234,52 @@ decomposition.  Pure JAX, vmap-compatible.  Composes canonical
 ``constants.L_v``, ``constants.R_v``.  No new physical constants
 introduced.
 
+## Iter 833 — fixed_rh_humidity_change_fv3 (finite fixed-RH q projection)
+
+Added `fixed_rh_humidity_change_fv3(q_old, t_old, t_new, p)` to
+`grids/cubed_sphere.py`.  Manabe-Wetherald 1967 / Held-Soden
+2000 fixed-RH paradigm: column warming T_old → T_new at fixed
+pressure preserves relative humidity:
+
+```
+RH = q / q_sat(T, p)   (held constant)
+⇒ q_new = q_old · q_sat(T_new, p) / q_sat(T_old, p)
+```
+
+Composes canonical ``thermo.saturation_mixing_ratio`` per
+CLAUDE.md hygiene — never re-derives Tetens/Magnus/CC.
+
+For small ΔT this matches iter-832 ``clausius_clapeyron_dqdt_fv3``
+to first order; for finite ΔT (e.g. 2×CO₂ ~3 K, 4×CO₂ ~6 K) it
+is the *exact* projection, not just linear CC.
+
+Used by:
+  * Held-Soden 2000 / Soden-Held 2006 fixed-RH water-vapor
+    feedback diagnostic (apply uniform ΔT to column, project q
+    via this helper, recompute radiation, regress ΔOLR/ΔT).
+  * CMIP fixed-SST simulations (uniform-warming column projection).
+  * AMIP / cfMIP forcing perturbations.
+  * Idealized 4×CO₂ Gregory-plot fixed-RH moisture extrapolation.
+
+Pairs with iter-831 ``planck_feedback_fv3`` (linear T-derivative)
+and iter-832 ``clausius_clapeyron_dqdt_fv3`` (linear q-derivative)
+to close the **fixed-RH water-vapor-feedback diagnostic triplet**.
+
+Test: `tests/test_fv3_fixed_rh_humidity_iter833.py` (7 tests:
+identity at T_new=T_old, RH invariant, small ΔT matches iter-832
+CC to <1%, ΔT=3 K → ~22% q amplification, cooling dries,
+T_old=0 floored, 3-D shapes).
+
+### Why this iteration was meaningful
+
+Completes the fixed-RH water-vapor-feedback toolkit (iter-831
+Planck + iter-832 linear CC + iter-833 finite-Δ projection).
+The finite version is required for non-perturbative warming
+scenarios (2×CO₂, 4×CO₂) where linear CC understates moisture
+amplification by 5-10%.  Pure JAX, vmap-compatible.  Composes
+``thermo.saturation_mixing_ratio`` per CLAUDE.md hygiene.  No
+new physical constants introduced.
+
 
 
 

@@ -6914,6 +6914,77 @@ def clausius_clapeyron_dqdt_fv3(
     return rh * q_sat * constants.L_v / (constants.R_v * t_sq)
 
 
+def fixed_rh_humidity_change_fv3(
+    q_old: jax.Array,
+    t_old: jax.Array,
+    t_new: jax.Array,
+    p: jax.Array,
+    q_sat_floor: float = 1e-30,
+) -> jax.Array:
+    """FV3_3D iter 833: fixed-RH specific humidity projection.
+
+    Under the Manabe-Wetherald 1967 / Held-Soden 2000 fixed-RH
+    paradigm, a column warming from T_old → T_new at constant
+    pressure preserves relative humidity:
+
+        RH = q / q_sat(T, p)    (held constant)
+        ⇒ q_new = q_old · q_sat(T_new, p) / q_sat(T_old, p)
+
+    Where ``q_sat`` is the canonical
+    ``thermo.saturation_mixing_ratio(T, p)`` — never re-derives
+    Tetens/Magnus/CC per CLAUDE.md hygiene.
+
+    For small ΔT: q_new/q_old ≈ 1 + (L_v / (R_v · T²)) · ΔT,
+    matching iter-832 ``clausius_clapeyron_dqdt_fv3``.  This
+    helper is the *finite* version — exact across large ΔT (e.g.
+    2×CO₂ ~3 K, 4×CO₂ ~6 K), not just first-order CC.
+
+    Used by:
+      * Held-Soden 2000 / Soden-Held 2006 fixed-RH water-vapor
+        feedback diagnostic (apply uniform ΔT to column, project
+        q via this helper, recompute radiation, regress ΔOLR/ΔT).
+      * CMIP fixed-SST simulations (uniform-warming column
+        projection).
+      * AMIP / cfMIP forcing perturbations (q rescaling under +K
+        SST anomaly).
+      * Idealized 4×CO₂ "Gregory-plot" analysis with fixed-RH
+        moisture extrapolation.
+
+    Composes ``thermo.saturation_mixing_ratio`` per CLAUDE.md
+    hygiene.
+
+    Pairs with iter-832 ``clausius_clapeyron_dqdt_fv3`` (linear)
+    and iter-831 ``planck_feedback_fv3`` (Planck) to form the
+    fixed-RH water-vapor-feedback diagnostic triplet.
+
+    ``q_sat_floor`` prevents div-by-0 at very cold T.
+
+    Parameters
+    ----------
+    q_old : jax.Array
+        Initial specific humidity (kg/kg).
+    t_old : jax.Array
+        Initial temperature (K).
+    t_new : jax.Array
+        Target temperature (K).
+    p : jax.Array
+        Pressure (Pa) — held constant across the projection.
+    q_sat_floor : float
+        Lower bound on q_sat(T_old) (kg/kg); default 1e-30.
+
+    Returns
+    -------
+    q_new : jax.Array
+        Specific humidity (kg/kg) projected onto T_new at fixed RH.
+    """
+    from legoesm import thermo
+    q_sat_old = jnp.maximum(
+        thermo.saturation_mixing_ratio(t_old, p), q_sat_floor
+    )
+    q_sat_new = thermo.saturation_mixing_ratio(t_new, p)
+    return q_old * q_sat_new / q_sat_old
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,
