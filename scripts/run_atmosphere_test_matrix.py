@@ -2092,7 +2092,9 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         # A_h must respect diffusion CFL: A_h*dt/dx_pole^2 < 0.5
         _A_h_max = 0.4 * _dx_pole**2 / dt
         _A_h = min(_laplacian_visc_latlon(n_lat), _A_h_max)
-        config = CGridLatLonShallowWaterConfig(A_h=_A_h)
+        config = CGridLatLonShallowWaterConfig(
+            A_h=_A_h, anchor_mass_to_initial=True,
+        )
         model = CGridLatLonShallowWaterModel(grid, config, dt=dt)
         state = (williamson_test2_cgrid(grid) if test_num == 2
                  else williamson_test5_cgrid(grid))
@@ -2449,8 +2451,8 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
         _ua, _va, _uc, _vc, ut, vt = _d2a2c_vect(
             state.u_d, state.v_d, cdgrid)
 
-        # Pre-compute initial mass for conservation fixer
-        _mass_target = float(jnp.sum(state.h * grid.area))
+        # Pre-compute initial mass for conservation fixer (fp64 acc)
+        _mass_target = _area_weighted_sum(state.h, grid.area)
 
         @jax.jit
         def step_fn(s, dt_):
@@ -2512,7 +2514,7 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
         # in the benchmark norms.
         _u_frozen = _u_face
         _v_frozen = _v_face
-        _mass_init = float(jnp.sum(state.h * grid.area))
+        _mass_init = _area_weighted_sum(state.h, grid.area)
 
         @jax.jit
         def step_fn(s, dt_):
@@ -2559,7 +2561,7 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
             # that a blown-up run reports NaN explicitly instead of silently
             # returning a non-finite that downstream comparisons treat as
             # False.
-            mass_final = float(jnp.sum(s.h * grid.area))
+            mass_final = _area_weighted_sum(s.h, grid.area)
             norms["mass_drift"] = _compute_drift([_mass_init, mass_final])
             return norms
 

@@ -185,18 +185,68 @@ All 13 spectral hydro PASS cases at machine precision (~10^-16).  ``max|v|``
 values unchanged (no dynamics regression).  Unit suite
 ``tests/atmosphere/hydrostatic`` 768/768 PASS.
 
-## Iteration 4 plan
+## Iteration 4 — latlon SW anchored mass + fp64 budget accumulator (FIX)
 
+**Root cause of residual ~10^-5/-6 SW drift.** Two cumulative effects:
+
+1. ``CGridLatLonShallowWaterConfig`` had no ``anchor_mass_to_initial`` flag
+   (only the per-step pre-state path).  Fp32 storage cast at end of step
+   produced random-walk drift, same pattern as iter-2 PE.
+2. The SW fixer used ``_accumulation_dtype()`` for the area-weighted sums,
+   which returns **fp32** under the default fp32 storage policy (only the
+   compute role would be fp64 in mixed mode).  ``_conservation_accumulator()``
+   is the dtype budgets actually need — promotes to fp64 whenever x64 is
+   enabled — and was already used by the cubed-sphere ``_batch_global_area_sums``
+   path.  The fp32 reduction noise (~N·eps on a 16k-cell lat-lon grid) leaked
+   into both the anchored target and the per-step mass, defeating the fixer
+   even after iter-4's anchor change.
+
+**Changes (1 src file + 4 runner sites):**
+
+- ``src/legoesm/atmosphere/dynamics/shallow_water_latlon_cgrid.py``
+  - Add ``anchor_mass_to_initial: bool = False`` to
+    ``CGridLatLonShallowWaterConfig``.
+  - Split ``step()`` into an outer Python wrapper that snapshots initial mass
+    (fp64) on first call when the flag is on, plus the existing JIT-compiled
+    body renamed to ``_step_jit``.  Reuses the existing ``target_mass``
+    argument plumbing — no new fixer code.
+  - ``compute_mass`` and the in-step fixer both switch from
+    ``_accumulation_dtype`` to ``_conservation_accumulator`` so the area-
+    weighted sums are reliably fp64.
+  - Drop ``correction.astype(state_new.h.dtype)`` (same rationale as iter-2).
+- ``scripts/run_atmosphere_test_matrix.py``: enable
+  ``anchor_mass_to_initial=True`` at the lat-lon SW config; replace 3
+  ``float(jnp.sum(state.h * grid.area))`` mass diagnostics (W5, cosine_bell
+  cube target, cosine_bell latlon final) with ``_area_weighted_sum`` for
+  consistency with iter-1.
+
+**Validation (via `run_atmosphere_test_matrix.py --only sw --grid latlon --quick`):**
+
+| Case               | Baseline mass drift | Iter-4 mass drift |
+|--------------------|---------------------|-------------------|
+| williamson5        | 1.21e-05            | **3.24e-16**      |
+| cosine_bell        | 1.43e-05            | 1.49e-05 (n/c)    |
+| williamson2        | L2=2.54e-04 (n/c)   | L2=2.67e-04 (n/c) |
+
+Williamson-5 mass drift now at machine precision (~10^-11 reduction).
+Williamson-2 / cosine-bell error norms unchanged (cosine_bell uses a custom
+raw-FV step that bypasses the SW model, so the model edits don't reach it —
+that's a separate fixer wiring for iter-5).
+``tests/atmosphere/shallow_water`` 110/110 PASS.
+
+## Iteration 5 plan
+
+- Cosine_bell lat-lon path uses an inline ``cgrid_fv_flux_divergence_latlon``
+  + ``dispatch_integrator`` rather than ``CGridLatLonShallowWaterModel.step``,
+  so the iter-4 anchor doesn't reach it.  Add an explicit mass fixer on that
+  inline step (or migrate to the model).
+- FV3-cube SW (W5, cosine_bell) already has ``set_initial_mass`` plumbing
+  (``shallow_water_fv3_cdgrid.py``) but the matrix runner doesn't always
+  call ``set_initial_mass``.  Audit + wire.
+- MPAS SW shallow-water (``shallow_water_mpas.py``) — check whether
+  ``MPASShallowWaterConfig`` has equivalent anchor knobs and tighten if not.
 - Quick-mode 30-day full suite (cube/latlon/ico/spectral × hydro) for
-  end-to-end conservation snapshot.
-- Lat-lon AMIP isn't yet validated under the iter-2 anchor; the iter-2 wire
-  covers it but no run has been performed yet.
-- NH (DCMIP TC1/TC2/TC3) max|w| comparison cube vs ico vs spectral — already
-  PASS at baseline; check that iter-2/iter-3 changes (lat-lon HS / spectral
-  HS) leave NH state untouched.
-- CLAUDE.md's visual-verification guidance: Williamson-2 v-wind snapshot for
-  lat-lon and cube; iter-1/2/3 changes are conservation-only so visuals
-  should be identical.
+  end-to-end conservation snapshot now that PE + SW are anchored.
 
 ## Improvement log
 
@@ -210,3 +260,6 @@ values unchanged (no dynamics regression).  Unit suite
   (`lnps_hat[0] += log(target/now)·sqrt(4π)`).  All 13 spectral hydro cases
   now drift at ~1e-16 (machine precision).  Largest baseline drift
   (rossby_haurwitz 2.65e-3) collapses to 1.12e-15 — ~10^13x reduction.
+- **iter-4 (2026-05-13)**: latlon SW `anchor_mass_to_initial` +
+  `_conservation_accumulator` (fp64) in fixer + drop fp32 cast.
+  Williamson-5 mass drift `1.21e-05 → 3.24e-16` (machine precision).

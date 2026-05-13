@@ -55,7 +55,10 @@ from legoesm.grids.polar_filter import (
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
 from legoesm.core.precision import cast_pytree
-from legoesm.core.conservation import _accumulation_dtype
+from legoesm.core.conservation import (
+    _accumulation_dtype,
+    _conservation_accumulator,
+)
 from legoesm import constants
 
 
@@ -86,6 +89,7 @@ class CGridLatLonShallowWaterConfig(NamedTuple):
     A_h: float = 0.0              # Laplacian viscosity [m^2/s]
     time_integrator: str = "ssp_rk3"
     fix_mass: bool = True
+    anchor_mass_to_initial: bool = False  # Mirror PE: anchor fixer to initial mass
     use_ppm_transport: bool = True  # PPM (4th-order) vs simple averaging for mass flux
     use_polar_filter: bool = False
     polar_filter_cutoff_deg: float = 60.0
@@ -312,9 +316,21 @@ class CGridLatLonShallowWaterModel(IntegrationMixin):
         else:
             self._polar_mask = None
 
+        # Iter-4: anchored mass target (fp64, lazy on first step()).
+        # Mirrors ``CGridLatLonPrimitiveEquationModel._target_mass``.
+        self._target_mass: jax.Array | None = None
+
     def compute_mass(self, state: CGridLatLonShallowWaterState) -> jax.Array:
-        """Compute total mass (for conservation fixer target)."""
-        acc = _accumulation_dtype()
+        """Compute total mass (for conservation fixer target).
+
+        Uses the fp64 conservation accumulator unconditionally — mass
+        budgets need higher precision than the per-step compute dtype
+        (``_accumulation_dtype`` may be fp32 on fp32 policies, which
+        leaks ~10^-7 reduction noise into the anchored target and
+        defeats the fixer; ``_conservation_accumulator`` promotes to
+        fp64 whenever x64 is enabled).
+        """
+        acc = _conservation_accumulator()
         return jnp.sum(state.h.astype(acc) * self.grid.area.astype(acc))
 
     def tendencies(
@@ -323,8 +339,28 @@ class CGridLatLonShallowWaterModel(IntegrationMixin):
         """Compute tendencies (pure function wrapper)."""
         return cgrid_latlon_sw_tendencies(state, self.grid, self.config)
 
-    @partial(jax.jit, static_argnums=(0,))
     def step(
+        self,
+        state: CGridLatLonShallowWaterState,
+        dt: float,
+        target_mass: jax.Array | None = None,
+    ) -> CGridLatLonShallowWaterState:
+        """Outer wrapper: snapshots initial mass on first call when
+        ``anchor_mass_to_initial`` is on (fp64, outside JIT), then
+        delegates to the JIT'd inner step."""
+        if (self.config.fix_mass
+                and self.config.anchor_mass_to_initial
+                and self._target_mass is None
+                and target_mass is None):
+            self._target_mass = self.compute_mass(state)
+        if (target_mass is None
+                and self.config.fix_mass
+                and self.config.anchor_mass_to_initial):
+            target_mass = self._target_mass
+        return self._step_jit(state, dt, target_mass)
+
+    @partial(jax.jit, static_argnums=(0,))
+    def _step_jit(
         self,
         state: CGridLatLonShallowWaterState,
         dt: float,
@@ -366,9 +402,13 @@ class CGridLatLonShallowWaterModel(IntegrationMixin):
         v_new = jnp.pad(state_new.v[1:-1, :], ((1, 1), (0, 0)))
         state_new = state_new._replace(v=v_new)
 
-        # Conservation fixer (use float64 accumulation for precision)
+        # Conservation fixer — use the fp64 budget accumulator so the
+        # mass integrals aren't contaminated by fp32 reduction noise
+        # (fp32 ``jnp.sum`` over 16k+ cells leaks ~N·eps relative
+        # error and produces spurious O(1e-6) drift even when the
+        # anchored target is exact).
         if self.config.fix_mass:
-            acc = _accumulation_dtype()
+            acc = _conservation_accumulator()
             area = self.grid.area.astype(acc)
             total_area = jnp.sum(area)
             if target_mass is not None:
@@ -385,7 +425,13 @@ class CGridLatLonShallowWaterModel(IntegrationMixin):
                 )
                 mass_target, mass_new = _mass_pair[0], _mass_pair[1]
             correction = (mass_target - mass_new) / total_area
-            h_fixed = state_new.h + correction.astype(state_new.h.dtype)
+            # Iter-4: drop ``.astype(state_new.h.dtype)`` so the
+            # fp64 correction promotes the add (matches
+            # ``fix_ps_mass`` semantics on cubed-sphere PE).  The
+            # end-of-step ``cast_pytree(..., "storage")`` rounds back
+            # to fp32 once instead of compounding fp32 quantization
+            # every step.
+            h_fixed = state_new.h + correction
             # Re-clamp after mass correction to prevent negative depth
             h_fixed = jnp.maximum(h_fixed, 0.0)
             state_new = state_new._replace(h=h_fixed)
