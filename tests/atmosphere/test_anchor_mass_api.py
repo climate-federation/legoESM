@@ -70,6 +70,19 @@ def test_anchor_api_methods_present(import_path):
         f"{cls_name} missing compute_mass / compute_dry_mass")
 
 
+def test_spectral_sw_compute_mass_present():
+    """iter-35: spectral SW has no anchor (baseline drift already
+    bit-clean) but exposes ``compute_mass`` for API parity with the
+    cube / lat-lon / MPAS SW twins."""
+    from legoesm.atmosphere.dynamics.spectral_sw import (
+        SpectralShallowWaterModel,
+    )
+    assert hasattr(SpectralShallowWaterModel, "compute_mass"), (
+        "SpectralShallowWaterModel.compute_mass missing — iter-35 "
+        "added it for uniform per-grid public API"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Lifecycle round-trip: set → step → reset → step ends with the fresh anchor
 # ---------------------------------------------------------------------------
