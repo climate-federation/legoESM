@@ -263,7 +263,7 @@ class TestSoilThermalX64(unittest.TestCase):
         npt.assert_allclose(x, 0.5, atol=1e-12)
         self.assertEqual(x.dtype, jnp.float64)
 
-    def test_tridiag_denom_floor_preserves_sign(self):
+    def test_tridiag_denom_floor_is_never_zero(self):
         """Iter-85 math regression for the Thomas-solver denom safety floor.
 
         The previous formulation
@@ -271,42 +271,52 @@ class TestSoilThermalX64(unittest.TestCase):
             denom_safe = jnp.where(|denom| < _tiny,
                                    jnp.sign(denom)*_tiny + _tiny, denom)
 
-        evaluates to *exactly zero* whenever ``denom`` is a tiny negative
-        number under full IEEE subnormal arithmetic (``sign = -1`` ⇒
-        ``-_tiny + _tiny = 0``).  The very next line ``c_col[k] / denom``
-        then divides by zero.  In practice XLA's subnormal flush-to-zero
-        (FTZ) hides this in the integrated solver (``sign(-_subnormal)``
-        comes back as ``-0.0``, so the formula returns ``+_tiny``), but
-        the code is fragile across compilation / platform changes.
+        can evaluate to *exactly zero* whenever ``denom`` is a tiny
+        negative number under full IEEE subnormal arithmetic
+        (``sign(-_subnormal) = -1`` ⇒ ``-_tiny + _tiny = 0``).  The next
+        line ``c_col[k] / denom`` then divides by zero.
+
+        Under XLA's default subnormal flush-to-zero (FTZ) ``sign`` on a
+        negative subnormal returns ``-0.0``, so the old formula
+        already produces ``+_tiny`` and is safe in practice — but the
+        masking is platform-dependent and the code is fragile.
 
         The fix replaces ``sign(denom)`` with an explicit
-        ``where(denom >= 0.0, 1.0, -1.0)`` branch.  This test verifies the
-        *math* of both formulations directly — independent of XLA FTZ — by
-        feeding the floor expressions a fixed negative ``denom`` ≈ ``-x``
-        with ``x < _tiny`` *forced through the formulas as if FTZ were off*
-        (by passing ``sign = -1.0`` explicitly).
+        ``where(denom >= 0.0, 1.0, -1.0)`` branch.  **Note that this does
+        *not* preserve sign on a backend that flushes subnormals**: under
+        FTZ a negative subnormal becomes ``-0.0``, ``-0.0 >= 0.0`` is
+        ``True``, and the new formula returns ``+_tiny`` (same as the old
+        masked behavior).  The point of the fix is *non-zero floor* on
+        every platform — without FTZ the old formula produces 0 while
+        the new one produces ``-_tiny``.
+
+        This test verifies the bug existed (old math) and that the new
+        formula never produces 0, both checked at the math level so the
+        result is independent of XLA's subnormal handling.
         """
         _tiny = float(jnp.finfo(jnp.float32).tiny)
 
-        # Demonstrate the old formula's failure mode with the IEEE-correct
-        # sign = -1 (no FTZ): the floored value is exactly 0.
+        # Old formula with the IEEE-correct sign = -1 (no FTZ): exactly 0.
         old_floored = (-1.0) * _tiny + _tiny
         self.assertEqual(old_floored, 0.0,
                          "old denom-floor must reproduce divide-by-zero")
 
-        # New formula: explicit branch produces -_tiny, never zero.
         def new_floor(denom_val: float) -> float:
             sign = 1.0 if denom_val >= 0.0 else -1.0
             return sign * _tiny if abs(denom_val) < _tiny else denom_val
 
-        # Negative subnormal-like value → -_tiny (sign preserved, non-zero).
+        # The defining property of the fix: floored value is never zero.
+        for denom_val in (-1e-40, -1.4e-45, 0.0, +1e-40, +1.4e-45):
+            self.assertNotEqual(new_floor(denom_val), 0.0,
+                                f"new floor returned 0 for denom={denom_val!r}")
+
+        # Without FTZ the new formula additionally maps negative inputs
+        # to ``-_tiny`` (sign preserved).
         self.assertEqual(new_floor(-1e-40), -_tiny)
-        self.assertNotEqual(new_floor(-1e-40), 0.0)
-        # Positive subnormal-like value → +_tiny.
         self.assertEqual(new_floor(+1e-40), +_tiny)
-        # Exactly zero → +_tiny (treat zero as positive sign).
+        # Exactly zero treated as the positive branch.
         self.assertEqual(new_floor(0.0), +_tiny)
-        # Normal value passes through unchanged.
+        # Normal values pass through unchanged.
         self.assertEqual(new_floor(-2.5), -2.5)
         self.assertEqual(new_floor(+1.7), +1.7)
 

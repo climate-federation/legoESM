@@ -258,26 +258,30 @@ denom)` collapsed to **exactly 0** whenever `denom` was a small negative
 number, because `sign(-x)*_tiny + _tiny = -_tiny + _tiny = 0`.  The very
 next line (`c_col[k] / denom`) then divided by zero.
 
-Trigger condition: any step that produces a denominator in `(-_tiny, 0)`.
-**In practice this is masked on our XLA build by subnormal flush-to-zero
-(FTZ)** — `jnp.sign(-1e-40)` returns `-0.0` (not `-1.0`) once XLA
-flushes the subnormal, so the old formula evaluates to
-`-0.0 * _tiny + _tiny = +_tiny` and divides cleanly.  But the masking
-is platform/compilation-dependent (codex stop-time call-out), so the
+Trigger condition: any step that produces a denominator in `(-_tiny, 0)`
+on a backend that preserves subnormals.  **On our XLA build this is
+masked by subnormal flush-to-zero (FTZ)** — `jnp.sign(-1e-40)` returns
+`-0.0` (not `-1.0`) post-flush, so the old formula evaluates to
+`-0.0 * _tiny + _tiny = +_tiny` and divides cleanly.  Masking is
+platform/compilation-dependent (codex stop-time call-out), so the
 defensive fix is still warranted.
 
-Fix: compute the sign with an explicit branch (`sign = jnp.where(denom
->= 0.0, 1.0, -1.0)`) and floor magnitude with `sign * _tiny`; same fix
-applied to the init-row `denom0`.  Now the floored denominator is
-sign-preserving and non-zero on any platform regardless of FTZ mode.
+Fix: replace `jnp.sign(denom)` with an explicit branch (`sign =
+jnp.where(denom >= 0.0, 1.0, -1.0)`) and floor magnitude with `sign *
+_tiny`; same fix applied to the init-row `denom0`.  **The fix
+guarantees a *non-zero* floor on every platform, but does NOT preserve
+sign under FTZ**: a negative subnormal becomes `-0.0`, `-0.0 >= 0.0` is
+`True`, so the new formula returns `+_tiny` (same as the old masked
+behavior).  Without FTZ the new formula maps negative inputs to
+`-_tiny` while the old formula collapses to `0`.
 
-Regression test `test_tridiag_denom_floor_preserves_sign` exercises the
-math directly (without depending on XLA FTZ): asserts that the old
-formula evaluates to exactly 0 when fed `sign = -1`, and that the new
-branch-based floor produces `-_tiny` for negative subnormals and
-`+_tiny` for zero / positive subnormals.  An end-to-end smoke check on
-the live `thomas_solve_batch` is included.  Full `tests/land/unit/` +
-soil-hydraulics suite (208 tests) green.
+Regression test `test_tridiag_denom_floor_is_never_zero` exercises the
+math directly (independent of XLA FTZ): asserts that the old formula
+evaluates to exactly 0 when fed `sign = -1`, and that the new branch-
+based floor returns a non-zero result for every negative / zero /
+positive subnormal input.  An end-to-end smoke check on the live
+`thomas_solve_batch` is included.  Full `tests/land/unit/` + soil-
+hydraulics suite (208 tests) green.
 
 ## Next iterations
 Continue addressing further codex findings and direct-inspection sweeps until all

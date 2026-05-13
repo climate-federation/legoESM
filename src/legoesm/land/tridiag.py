@@ -42,15 +42,19 @@ def thomas_solve_batch(
         def fwd(carry, k):
             c_p, d_p = carry
             denom = b_col[k] - a_col[k] * c_p
-            # Floor |denom| at _tiny while preserving sign.  The previous
-            # ``jnp.sign(denom) * _tiny + _tiny`` formulation relies on
-            # subnormal flush-to-zero (FTZ) to mask a latent bug: with
-            # full IEEE subnormals, ``sign(-x)*_tiny + _tiny = 0`` for any
-            # tiny negative ``denom``, which then divides by zero in
-            # ``c_col[k] / denom`` on the next line.  Use an explicit
-            # branch-based sign so the floored value is never zero on any
-            # platform / FTZ setting.  Zero is treated as the positive
-            # branch.
+            # Floor |denom| at _tiny with a *non-zero* result on any
+            # platform / FTZ setting.  The previous
+            # ``jnp.sign(denom) * _tiny + _tiny`` formulation can return
+            # *exactly zero* on a backend that preserves subnormals:
+            # ``sign(-_subnormal) = -1`` ⇒ ``-_tiny + _tiny = 0``, then
+            # ``c_col[k] / denom`` divides by zero.  Under XLA's default
+            # flush-to-zero (FTZ) ``sign(-_subnormal)`` returns ``-0.0``
+            # so the old formula already produces ``+_tiny`` and the bug
+            # is hidden, but the masking is platform-dependent.  Use an
+            # explicit ``where(denom >= 0.0, ...)`` branch: under FTZ
+            # both branches collapse to ``+_tiny`` (since ``-0.0 >= 0.0``
+            # is ``True``), and without FTZ negative inputs cleanly map
+            # to ``-_tiny``.  In every case the result is non-zero.
             sign = jnp.where(denom >= 0.0, 1.0, -1.0)
             denom = jnp.where(jnp.abs(denom) < _tiny, sign * _tiny, denom)
             c_new = c_col[k] / denom
