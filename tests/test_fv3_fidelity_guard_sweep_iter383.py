@@ -421,6 +421,7 @@ _GUARD_MODULES = (
     "test_fv3_planck_feedback_iter831",              # iter-831 add
     "test_fv3_cc_scaling_iter832",                   # iter-832 add
     "test_fv3_fixed_rh_humidity_iter833",            # iter-833 add
+    "test_fv3_ice_albedo_feedback_iter834",          # iter-834 add
 )
 
 

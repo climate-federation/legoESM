@@ -5280,6 +5280,56 @@ amplification by 5-10%.  Pure JAX, vmap-compatible.  Composes
 ``thermo.saturation_mixing_ratio`` per CLAUDE.md hygiene.  No
 new physical constants introduced.
 
+## Iter 834 — ice_albedo_feedback_fv3 (Budyko-Sellers surface-α feedback)
+
+Added `ice_albedo_feedback_fv3(s_incident, dalpha_dt)` to
+`grids/cubed_sphere.py`.  Linearized TOA-SW response to surface
+warming via Bond-albedo change:
+
+```
+λ_α = − S_in · dα/dT     (W/m²/K)
+```
+
+Positive feedback (destabilizing) because dα/dT < 0 (warming →
+melt → darker surface → more absorbed SW).  Canonical Budyko
+1969 / Sellers 1969 mechanism — closure for snowball-Earth
+bifurcation in 0-D energy-balance models.
+
+Typical CMIP values:
+  * Global (mixed): dα/dT ≈ −0.001/K → λ_α ≈ +0.34 W/m²/K
+  * High-lat NH 60-90°: dα/dT ≈ −0.01/K → regional λ_α ≈ +3.4
+  * Snowball regime: dα/dT ≈ −0.05/K → λ_α > |λ_Planck|
+
+Closes the **canonical fast-feedback quartet**:
+  * iter-831 λ_Planck   ≈ −3.76 W/m²/K    (stabilizing Planck)
+  * iter-832 λ_WV (CC)  ≈ +1.80 W/m²/K    (positive WV via CC)
+  * λ_LR (lapse-rate)   ≈ −0.60 W/m²/K    (future iter)
+  * iter-834 λ_α        ≈ +0.34 W/m²/K    (positive ice-albedo)
+
+Pairs with iter-826 ``cloud_albedo_two_stream_fv3`` and iter-827
+``shortwave_cloud_forcing_fv3`` (share α-sensitivity structure).
+
+Used by: Budyko 1969 / Sellers 1969 EBM, Held-Soden 2000
+feedback decomposition, Soden-Held 2006 kernel approach, CMIP
+albedo-feedback diagnostic, snowball-Earth bifurcation (Hoffman-
+Schrag 2002, Pierrehumbert 2005), Arctic-amplification analysis
+(Hall 2004, Pithan-Mauritsen 2014).
+
+Test: `tests/test_fv3_ice_albedo_feedback_iter834.py` (6 tests:
+global-mean analytic +0.34 W/m²/K, positive for melt, zero for
+no change, negative for cooling brightening, snowball runaway
+exceeds |λ_Planck|, 3-D shapes).
+
+### Why this iteration was meaningful
+
+Adds 3rd of 4 canonical fast feedbacks (after iter-831 Planck,
+iter-832/833 water-vapor); only λ_LR (lapse-rate) remains to
+close the AR5/AR6 feedback-decomposition quartet.  Critical for:
+(1) Budyko-Sellers EBM closure; (2) Soden-Held 2006 kernel-method
+albedo feedback; (3) snowball-Earth bifurcation studies;
+(4) Arctic-amplification factor decomposition.  Pure JAX, vmap-
+compatible.  No new physical constants introduced.
+
 
 
 

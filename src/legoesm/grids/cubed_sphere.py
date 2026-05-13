@@ -6985,6 +6985,71 @@ def fixed_rh_humidity_change_fv3(
     return q_old * q_sat_new / q_sat_old
 
 
+def ice_albedo_feedback_fv3(
+    s_incident: jax.Array,
+    dalpha_dt: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 834: surface-albedo (ice-albedo) feedback.
+
+    Linearized TOA-SW response to a uniform surface-warming
+    perturbation, mediated by surface-albedo change:
+
+        d(ASR)/dT = − S_in · dα/dT
+        λ_α       = − S_in · dα/dT      (W/m²/K)
+
+    Where:
+      * S_in      — mean TOA incident SW (W/m²; Earth = 340.25).
+      * dα/dT     — planetary Bond-albedo sensitivity to surface
+                    warming (1/K).  Almost always negative
+                    (warming → ice/snow melt → darker surface).
+
+    Sign convention: positive feedback (λ_α > 0) because dα/dT
+    < 0 ⇒ −S_in·(−) = +; warming amplified by albedo loss.  This
+    is the canonical Budyko 1969 / Sellers 1969 destabilizing
+    feedback — the closure mechanism for the snowball-Earth
+    bifurcation in 0-D energy-balance models.
+
+    Typical CMIP values:
+      * Global mean (mixed snow/ice/cloud): dα/dT ≈ −0.001 /K
+        ⇒ λ_α ≈ +0.34 W/m²/K
+      * High-latitude only (NH 60-90°): dα/dT ≈ −0.01 /K
+        ⇒ regional λ_α ≈ +3.4 W/m²/K
+      * Snowball bifurcation regime: dα/dT ≈ −0.05 /K
+        ⇒ λ_α exceeds |λ_Planck| (runaway)
+
+    Closes the **canonical fast-feedback quartet**:
+      * iter-831 λ_Planck   = −4·ε·σ·T_eff³     (≈ −3.76)
+      * iter-832 λ_WV       (via fixed-RH CC)   (≈ +1.8)
+      * (lapse-rate λ_LR)                       (≈ −0.6, future iter)
+      * iter-834 λ_α        = −S_in · dα/dT     (≈ +0.34)
+
+    Pairs naturally with iter-826 ``cloud_albedo_two_stream_fv3``
+    and iter-827 ``shortwave_cloud_forcing_fv3`` (which share the
+    α-sensitivity structure for cloud-feedback decomposition).
+
+    Used by: Budyko 1969 / Sellers 1969 EBM, Held-Soden 2000
+    feedback decomposition, CMIP albedo-feedback diagnostic
+    (Soden-Held 2006 kernel approach), snowball-Earth bifurcation
+    studies (Hoffman-Schrag 2002, Pierrehumbert 2005), Arctic-
+    amplification analysis (Hall 2004, Pithan-Mauritsen 2014).
+
+    Parameters
+    ----------
+    s_incident : jax.Array
+        Mean TOA incident shortwave (W/m²).
+    dalpha_dt : jax.Array
+        Albedo sensitivity to surface warming (1/K); typically
+        negative for ice-albedo melt feedback.
+
+    Returns
+    -------
+    lam_alpha : jax.Array
+        Surface-albedo feedback parameter (W/m²/K); positive for
+        destabilizing ice/snow melt.
+    """
+    return -s_incident * dalpha_dt
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,
