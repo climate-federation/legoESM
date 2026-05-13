@@ -3319,7 +3319,9 @@ STILL OPEN (post-iter-99 stretch goals):
   numerically equivalent (max abs diff 3e-24) to FV3 single-pad
   convention.  pad_halo's avg-mode corner fill makes halo=2 single
   pad indistinguishable from repeated halo=1 re-pads at the inner
-  ring.  No behavioural change needed.
+  ring.  No behavioural change needed.  iter-902 wires iter-890
+  ``validate_corner_div_damp_nord`` into both PE + NH model
+  ``__init__`` (fail-fast at construction; 6 unit tests).
 - iter-168/169/170/171 documented PE-vs-NH FV3-fidelity asymmetries
   ALL CLOSED:
   * ✅ corner-divergence damping (PE iter 16/18) — closed iter 168

@@ -1028,6 +1028,13 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
         self.height_coord = height_coord
         self.terrain_metric = terrain_metric
         self.config = config or CDGridCompressibleEulerConfig()
+        # FV3_3D iter 902: enforce iter-890 nord range validation at
+        # model construction (fail-fast vs silent misuse).  Mirror of
+        # PE primitive_eq_cdgrid.py site.
+        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+            validate_corner_div_damp_nord,
+        )
+        validate_corner_div_damp_nord(self.config.corner_div_damp_nord)
         self._target_mass = None
 
         if self.config.small_earth_factor != 1.0:

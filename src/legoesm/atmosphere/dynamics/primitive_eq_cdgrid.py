@@ -1085,6 +1085,9 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         self.grid = grid
         self.sigma_coord = sigma_coord
         self.config = config or CDGridPrimitiveEquationConfig()
+        # FV3_3D iter 902: enforce iter-890 nord range validation at
+        # model construction (fail-fast vs silent misuse).
+        validate_corner_div_damp_nord(self.config.corner_div_damp_nord)
         self.cdgrid = create_cubed_sphere_cdgrid(grid)
         self._target_mass = None
 
