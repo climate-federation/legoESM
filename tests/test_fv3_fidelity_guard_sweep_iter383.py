@@ -442,6 +442,7 @@ _GUARD_MODULES = (
     "test_fv3_ocean_ph_iter852",                     # iter-852 add
     "test_fv3_aragonite_saturation_iter853",         # iter-853 add
     "test_fv3_ocean_o2_iter854",                     # iter-854 add
+    "test_fv3_dhw_iter855",                          # iter-855 add
 )
 
 

@@ -8664,6 +8664,95 @@ def ocean_oxygen_decline_fv3(
     return -alpha_o2 * delta_t_ocean
 
 
+def degree_heating_weeks_fv3(
+    sst_weekly: jax.Array,
+    mmm: jax.Array,
+    hotspot_threshold: float = 1.0,
+) -> jax.Array:
+    """FV3_3D iter 855: NOAA Coral Reef Watch degree-heating-weeks.
+
+    Eakin et al. 2010 / NOAA Coral Reef Watch (CRW) accumulated-
+    thermal-stress primitive used in coral-bleaching forecasts:
+
+        HS(t)  = max(SST(t) − MMM − τ_HS, 0)        (°C; hotspot)
+        DHW    = Σ_{k=t-12+1}^{t} HS(k)             (°C·weeks)
+
+    Where:
+      * SST(t)       — weekly satellite SST (K or °C).
+      * MMM          — Maximum Monthly Mean climatology (same
+                       units; pre-computed from 1985-2012 or
+                       custom baseline).
+      * τ_HS         — hotspot threshold (default 1.0 °C; ≥1°C
+                       above MMM marks 'hotspot' day under Eakin
+                       2010 CRW protocol).
+      * Σ over 12-wk — accumulating thermal stress over the
+                       rolling 12-week window (NOAA convention).
+
+    This primitive operates on the *final 12-week window* of input
+    SST — caller passes ``(..., 12)`` of weekly SST and gets DHW
+    summed over all 12 weeks.  For full time-series rolling DHW,
+    caller uses ``jax.vmap`` or ``jnp.cumsum`` outside.
+
+    Sign: DHW ≥ 0 always (only positive HS contributes).
+
+    Bleaching thresholds (Eakin 2010, NOAA CRW):
+      | DHW (°C-wk) | Outcome                                |
+      |-------------|----------------------------------------|
+      | 0–4         | thermal stress accumulating            |
+      | 4–8         | significant bleaching expected         |
+      | 8+          | severe bleaching + widespread mortality|
+
+    Canonical real-world events:
+      * 1998 global bleaching:        DHW peak ~12 °C-wk
+      * 2016 GBR mass bleaching:      DHW peak ~16 °C-wk
+        (29% Great Barrier Reef coral mortality)
+      * 2023 Caribbean MHW:           DHW peak ~22 °C-wk
+        (record Florida Reef Tract bleaching)
+
+    Composes naturally with iter-851 ``ocean_heat_content_fv3``
+    (OHC growth → SST anomaly → DHW exceedance).  Pairs with
+    iter-853 ``aragonite_saturation_state_fv3`` (Ω + thermal stress
+    are the two main reef-impact pathways).
+
+    Adds **first marine-extreme-event primitive** to the impact
+    chain — complements long-term mean diagnostics (iter-852/853/
+    854) with the event-scale acute-stress metric.
+
+    Used by: Eakin et al. 2010 J. Climate CRW protocol, Hobday et al.
+    2016 marine-heatwave definition (related), Heron et al. 2016
+    Sci Reports satellite-DHW reef forecast, AR6 §3.5 marine
+    extreme events, IPCC SROCC §5.3.4 reef impacts, Hoegh-Guldberg
+    1999/2007 coral-bleaching synthesis.
+
+    Note: NOAA CRW uses additional logic (HS only contributes if
+    ≥1 °C, only ≥1°C HS counted toward DHW).  This primitive
+    matches the canonical published formula; production NOAA
+    pipeline adds night-time SST filtering, cloud-cover gating,
+    and 5-km grid resolution.
+
+    Parameters
+    ----------
+    sst_weekly : jax.Array
+        Weekly SST values over last 12 weeks (K or °C); shape
+        ``(..., 12)`` (last axis is time).
+    mmm : jax.Array
+        Maximum Monthly Mean climatology (same units as SST);
+        shape ``(...,)`` or broadcastable.
+    hotspot_threshold : float
+        Hotspot anomaly threshold (°C); default 1.0 (Eakin 2010).
+
+    Returns
+    -------
+    dhw : jax.Array
+        Accumulated degree-heating-weeks (°C·weeks); shape
+        ``(...,)`` after summing time axis.
+    """
+    mmm_b = jnp.expand_dims(mmm, axis=-1) if mmm.ndim < sst_weekly.ndim else mmm
+    anomaly = sst_weekly - mmm_b
+    hotspot = jnp.maximum(anomaly - hotspot_threshold, 0.0)
+    return jnp.sum(hotspot, axis=-1)
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

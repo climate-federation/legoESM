@@ -5467,3 +5467,65 @@ projections under SSP scenarios; (4) coastal dead-zone risk
 maps.  Pure JAX, vmap-compatible.  α_O2=0.05 is Schmidtko+Keeling
 empirical (default arg).  No `constants.py` additions.
 
+## Iter 855 — degree_heating_weeks_fv3 (NOAA CRW thermal-stress primitive)
+
+Added `degree_heating_weeks_fv3(sst_weekly, mmm,
+hotspot_threshold=1.0)` to `grids/cubed_sphere.py`.  Eakin et al.
+2010 / NOAA Coral Reef Watch (CRW) accumulated thermal-stress
+metric for coral-bleaching forecasts:
+
+```
+HS(t)  = max(SST(t) − MMM − 1°C, 0)        (°C; hotspot)
+DHW    = Σ_{12-wk window} HS(t)             (°C·weeks)
+```
+
+Inputs: per-cell ``(..., 12)`` weekly SST + per-cell MMM (Maximum
+Monthly Mean climatology).  Returns ``(...,)`` DHW summed over time
+axis.
+
+Bleaching thresholds (Eakin 2010 / NOAA CRW):
+  | DHW (°C·wk) | Outcome                          |
+  |-------------|----------------------------------|
+  | 0–4         | Thermal stress accumulating       |
+  | 4–8         | Significant bleaching expected    |
+  | 8+          | Severe bleaching + mortality      |
+
+Real-world events:
+  * 1998 global bleaching:  peak DHW ~12 °C·wk
+  * 2016 GBR mass bleach:   peak DHW ~16 °C·wk (29% mortality)
+  * 2023 Florida MHW:       peak DHW ~22 °C·wk (record)
+
+**Adds first marine-extreme-event primitive** to the ocean-impact
+chain — complements long-term mean diagnostics (iter-852/853/854)
+with event-scale acute-stress metric.  Pairs with iter-853
+``aragonite_saturation_state_fv3`` (Ω + thermal stress are the two
+canonical reef-impact pathways).
+
+Composes naturally with iter-851 ``ocean_heat_content_fv3``: OHC
+growth → SST anomaly → DHW exceedance.
+
+Used by: Eakin et al. 2010 J. Climate CRW protocol, Hobday et al.
+2016 marine-heatwave definition (related), Heron et al. 2016
+satellite-DHW reef forecast, AR6 §3.5 marine extreme events,
+IPCC SROCC §5.3.4 reef impacts, Hoegh-Guldberg 1999/2007 coral-
+bleaching synthesis.
+
+Note: NOAA CRW production pipeline adds night-time SST filtering,
+cloud-cover gating, 5-km grid resolution.  This primitive matches
+the canonical published formula (Eakin 2010).
+
+Test: `tests/test_fv3_dhw_iter855.py` (8 tests: SST=MMM zero,
+below hotspot zero, at hotspot zero (exactly threshold), uniform
++2°C/12 wk → DHW=12 analytic, 2016 GBR profile → DHW=8 analytic,
+severe-bleaching threshold pass, cooling zero, 3-D shapes).
+
+### Why this iteration was meaningful
+
+Adds **first marine-extreme-event primitive** to ocean-impact
+chain.  DHW is THE operational metric used by NOAA / GBRMPA /
+NCRMP for real-time reef-bleaching alerts.  Closes the AR6 §3.5
+marine-extreme + AR6 §5.3 long-term BGC duality: chronic stress
+(iter-852/853/854) + acute stress (iter-855).  Pure JAX, vmap-
+compatible.  hotspot_threshold=1.0 °C is NOAA CRW canonical
+(default arg).  No `constants.py` additions.
+
