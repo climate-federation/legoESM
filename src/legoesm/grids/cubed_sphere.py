@@ -9043,6 +9043,90 @@ def heat_index_rothfusz_fv3(
     return (hi_f - 32.0) * 5.0 / 9.0
 
 
+def growing_degree_days_fv3(
+    t_daily: jax.Array,
+    t_base: jax.Array = 10.0,
+    t_cap: jax.Array = None,
+) -> jax.Array:
+    """FV3_3D iter 859: agricultural growing-degree-days primitive.
+
+    Wang 1960 / McMaster-Wilhelm 1997 cumulative heat-unit measure
+    of crop development:
+
+        GDD(t) = max(T_daily(t) − T_base, 0)
+        GDD_total = Σ_t GDD(t)         (°C·days)
+
+    With optional upper cap (modified GDD method):
+
+        T_eff = min(T_daily, T_cap)
+        GDD(t) = max(T_eff(t) − T_base, 0)
+
+    Where:
+      * T_daily — daily mean (or (T_max+T_min)/2) temperature (°C).
+      * T_base  — crop-specific lower threshold (°C):
+                  default 10 (corn / rice / soy);
+                  wheat / oats: 0 °C; cotton: 15.5 °C.
+      * T_cap   — optional upper cap (°C); commonly 30 °C for corn
+                  modifies GDD to prevent over-counting extreme-heat
+                  damage.  None = no cap (standard simple GDD).
+
+    Sign: GDD ≥ 0 always (only positive contributions).
+
+    Crop maturity GDD requirements (canonical):
+      | crop          | T_base | GDD to maturity |
+      |---------------|--------|-----------------|
+      | Corn (maize)  | 10 °C  | 2500–2800       |
+      | Soybeans      | 10 °C  | 2400–2900       |
+      | Spring wheat  | 0 °C   | 1500–1700       |
+      | Cotton        | 15.5 °C| 2200–2800       |
+      | Rice          | 10 °C  | 2000–2500       |
+
+    Counter-balance to heat-stress primitives (iter-857 T_w,
+    iter-858 HI) — represents *positive* effect of warming on
+    growing-season length / crop maturation rate.  Under +2 K
+    Northern-mid-latitude warming, corn GDD can rise ~15-20%,
+    enabling double-cropping in former marginal zones (Hatfield
+    et al. 2011 Agron. J.).
+
+    But: T_cap-capped GDD declines under extreme heat as max(T-base,
+    0) saturates → crop yield falls (Schlenker-Roberts 2009 PNAS
+    "non-linear temperature effect on US crop yields").
+
+    Composes with iter-832 ``clausius_clapeyron_dqdt_fv3`` (humidity
+    increase under warming may offset heat-stress impact on crops
+    via stomatal-closure suppression).
+
+    **Adds first agricultural-impact primitive** to the impact
+    chain.  Pairs with heat-stress duo (iter-857 + iter-858) as
+    the **terrestrial-impact triplet** (one positive + two
+    negative crop-climate response metrics).
+
+    Used by: Wang 1960 Annu. Rev. Phytopathol., McMaster-Wilhelm
+    1997 Agric. For. Meteor., Hatfield et al. 2011 Agron. J. crop
+    response synthesis, USDA crop-growth models (CERES-Maize),
+    AR6 §5.4 food-system risks, Schlenker-Roberts 2009 PNAS yield-
+    temperature nonlinearity.
+
+    Parameters
+    ----------
+    t_daily : jax.Array
+        Daily mean (or (T_max+T_min)/2) temperature (°C); shape
+        ``(..., n_days)`` (last axis is time).
+    t_base : jax.Array or float
+        Lower threshold (°C); default 10 (corn).
+    t_cap : jax.Array or float or None
+        Optional upper cap (°C); None disables capping (default).
+
+    Returns
+    -------
+    gdd_total : jax.Array
+        Cumulative growing-degree-days (°C·days), summed over time
+        axis; shape ``(...,)``.
+    """
+    t_eff = t_daily if t_cap is None else jnp.minimum(t_daily, t_cap)
+    return jnp.sum(jnp.maximum(t_eff - t_base, 0.0), axis=-1)
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

@@ -5725,3 +5725,71 @@ complete.  Pure JAX, vmap-compatible.  Rothfusz 1990 fit
 coefficients are empirical (literal numbers).  No `constants.py`
 additions.
 
+## Iter 859 — growing_degree_days_fv3 (agricultural impact primitive)
+
+Added `growing_degree_days_fv3(t_daily, t_base=10.0, t_cap=None)`
+to `grids/cubed_sphere.py`.  Wang 1960 / McMaster-Wilhelm 1997
+cumulative heat-unit measure of crop development:
+
+```
+GDD = Σ_t max(min(T_daily(t), T_cap) − T_base, 0)   (°C·days)
+```
+
+T_cap optional (modified GDD); default no cap (standard simple
+GDD).
+
+Crop-specific T_base + maturity GDD requirements:
+  | crop            | T_base | GDD to maturity |
+  |-----------------|--------|-----------------|
+  | Corn (maize)    | 10 °C  | 2500–2800       |
+  | Soybeans        | 10 °C  | 2400–2900       |
+  | Spring wheat    | 0 °C   | 1500–1700       |
+  | Cotton          | 15.5 °C| 2200–2800       |
+  | Rice            | 10 °C  | 2000–2500       |
+
+**Counter-balance** to heat-stress primitives (iter-857 T_w,
+iter-858 HI) — represents *positive* crop-climate response.
+Under +2 K mid-latitude warming corn GDD rises ~15-20%, enabling
+double-cropping in marginal zones (Hatfield et al. 2011 Agron. J.).
+
+But: T_cap-capped GDD declines under extreme heat — captures the
+Schlenker-Roberts 2009 PNAS "non-linear T effect on U.S. crop
+yields" finding.
+
+**Adds first agricultural-impact primitive**.  Pairs with heat-
+stress duo (iter-857 + iter-858) as the **terrestrial-impact
+triplet** (one positive + two negative crop-climate response
+metrics) — required for AR6 §5.4 food-system risk diagnostics.
+
+Composes with iter-832 ``clausius_clapeyron_dqdt_fv3`` (humidity
+rise under warming may offset heat-stress impact on crops via
+stomatal-closure suppression).
+
+Used by: Wang 1960 Annu. Rev. Phytopathol., McMaster-Wilhelm 1997
+Agric. For. Meteor., Hatfield et al. 2011 Agron. J. crop-response
+synthesis, USDA crop-growth models (CERES-Maize), AR6 §5.4
+food-system risks, Schlenker-Roberts 2009 PNAS yield-temperature
+nonlinearity.
+
+Test: `tests/test_fv3_gdd_iter859.py` (9 tests: uniform 20°C/100
+days/base=10 → GDD=1000 analytic, below-base zero, at-base zero,
+corn-maturity 25°C/180 days → 2700 mid-band, wheat-base-0 larger
+GDD, T_cap=30 caps extreme-heat 35°C from 2500→2000, +2 K warming
+increases GDD, batched (lat, lon, time) shapes, 3-D random
+non-negative).
+
+### Why this iteration was meaningful
+
+**Adds first agricultural-impact primitive**.  GDD is THE canonical
+crop-development metric used in:
+  * USDA crop-progress reports
+  * IAM food-system risk modules (DICE, GCAM)
+  * AR6 §5.4 food-security projections
+  * climate-shift growing-season studies (Wheeler et al. 2000)
+
+Counterbalances the heat-stress primitives (iter-857/858): GDD
+captures *positive* warming impacts on growing-season length and
+crop maturation, while T_w / HI capture negative heat-stress
+impacts.  Together they span the AR6 §11+§5 terrestrial-impact
+triplet.  Pure JAX, vmap-compatible.  No `constants.py` additions.
+
