@@ -181,10 +181,19 @@ def _step_slab(
     )
 
     # ---------- Ice velocity (free drift, diagnostic) ----------
-    u_ice = (config.drag_ocean * ocean_u
-             + config.drag_atm * (config.rho_air_ref / config.rho_ice) * forcing.u_lowest)
-    v_ice = (config.drag_ocean * ocean_v
-             + config.drag_atm * (config.rho_air_ref / config.rho_ice) * forcing.v_lowest)
+    # Use the shared Zubov-style drag balance instead of the dimensionally
+    # broken slab formula (iter-86): the previous inline expression
+    # ``drag_ocean*U_w + (drag_atm*rho_air/rho_ice)*U_a`` produced ice
+    # drift two orders of magnitude smaller than the physical Nansen /
+    # Zubov estimate.
+    u_ice, v_ice = free_drift_velocity(
+        ocean_u, ocean_v,
+        forcing.u_lowest, forcing.v_lowest,
+        drag_ocean=config.drag_ocean,
+        drag_atm=config.drag_atm,
+        rho_air=config.rho_air_ref,
+        rho_ocean=config.rho_ocean_ref,
+    )
 
     new_state = SeaIceState(
         h_ice=state.h_ice.replace(data=h_new),

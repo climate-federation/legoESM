@@ -415,15 +415,19 @@ def test_sea_ice_ocean_stress_opposes_ocean_ice_drag():
         config, U_min=1.0, dt=DT,
     )
 
-    # Ice velocity from free-drift formula uses drag_atm·rho_air/rho_ice·wind
-    rho_air_ratio = config.rho_air_ref / config.rho_ice
-    u_ice_expected = (
-        config.drag_ocean * 0.0  # ocean at rest contributes 0
-        + config.drag_atm * rho_air_ratio * 5.0
+    # Ice velocity from Zubov-style drag-balance free drift (iter-86):
+    #   u_i = U_w + alpha * (U_a - U_w),
+    #   alpha = sqrt(rho_air * C_ai / (rho_ocean * C_oi)).
+    # With ocean at rest, u_i = alpha * U_a.
+    import math
+    alpha = math.sqrt(
+        config.rho_air_ref * config.drag_atm
+        / (config.rho_ocean_ref * config.drag_ocean)
     )
+    u_ice_expected = alpha * 5.0
+    v_ice_expected = alpha * (-3.0)
     # Relative velocity ocean - ice = -u_ice (ocean at rest)
     du_oi = -u_ice_expected
-    v_ice_expected = config.drag_atm * rho_air_ratio * (-3.0)
     dv_oi = -v_ice_expected
     speed_oi = float(jnp.sqrt(du_oi ** 2 + dv_oi ** 2 + 1e-10))
     tau_oi_x = config.rho_ocean_ref * config.drag_ocean * speed_oi * du_oi

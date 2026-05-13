@@ -317,6 +317,29 @@ unaffected; `test_matches_zubov_balance` replaces the old
 `tests/sea_ice/validation/.../TestFreeDriftSanity` (3) +
 `tests/stress/test_phase1_sea_ice.py` (7) green.
 
+## Iter-87 — slab sea-ice path was *still* using the broken free-drift formula
+Codex stop-time review on iter-86 caught a second site:
+`src/legoesm/ice/sea_ice.py:184-187` had the same dimensionally-broken
+expression *inlined* in the slab thermo / diagnostic path (it predates
+`free_drift_velocity`).  Iter-86 only fixed the `dynamics="free_drift"`
+branch — the default `dynamics="none"` slab path still produced
+~5.7e-4 m/s drift.
+
+Fix: replace the inlined formula with a call to the shared
+`free_drift_velocity` helper (same Zubov-style drag balance).
+`tests/unit/test_coupler.py::test_sea_ice_ocean_back_reaction_*` was
+asserting expected ocean-back-reaction stress derived from the *old*
+formula — updated to derive the expected ice velocity from the new
+`alpha = sqrt(ρ_air · C_ai / (ρ_oc · C_oi))` balance.
+
+Run: `tests/unit/test_sea_ice_dynamics.py` (51) +
+`tests/unit/test_coupler.py` (59) + `tests/stress/test_phase1_sea_ice.py`
+(7) = 117 green.  `tests/sea_ice/validation/...::TestEVPSanity::
+test_zero_velocity_isotropic_stress` is a *pre-existing* failure
+(EVP doesn't fully relax to ‑P/2 in 10 subcycles at dt=3600 s, 15 %
+rtol too tight) — verified by re-running the test on HEAD~1; not
+caused by this iter.
+
 ## Next iterations
 Continue addressing further codex findings and direct-inspection sweeps until all
 schemes are provably conservative, monotone, CFL-safe, and AD-safe across mixed
