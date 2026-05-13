@@ -407,6 +407,34 @@ Verified clean:
 
 No code changes this iteration.
 
+## Iter-117 — ocean lateral-mixing backscatter audit
+Audited `ocean/physics/lateral_mixing/backscatter.py` (363 LOC).
+
+Verified clean:
+- **C-grid two-pass operator** (`backscatter_tendency_cgrid`):
+  unit-coefficient unnormalised stress-divergence first pass produces
+  `u_star, v_star`; second pass with `A_bs` coefficient and
+  `normalize=True` returns `+∇²(A_bs · ∇²u)` (sign opposite Smag-biharm,
+  so caller adds rather than subtracts).  Operator is the exact
+  discrete adjoint of `strain_rate_cgrid` → energy-consistent.
+- **MPAS variant** (`backscatter_tendency_mpas`): edge-normal
+  velocity tendency `+∇²(ν_bs · ∇²u)` with `ν_bs = c_bs · Δ_e ·
+  √E_edge`; geometric-mean edge length `Δ_e = √(dcEdge·dvEdge)` gives
+  the harmonic viscosity units `[m·m/s] = [m²/s]`.
+- **`backscatter_power_density_cgrid`**: `ε_bs = ⟨u, tend_u⟩ + ⟨v,
+  tend_v⟩` averaged to cell centres; depth-integrated with `dz` when
+  3-D.  Sign: positive `ε_bs` ⇒ energy injected into resolved flow ⇒
+  sink for reservoir E.
+- **`update_eddy_energy` (E budget)**: forward-Euler
+  `E_new = clip(E + dt·(η·ε_diss − ε_bs − E/τ), E_min, E_max)`.
+  Energy balance: resolved KE change = `ε_bs − η·ε_diss`; SGS E change
+  = `η·ε_diss − ε_bs − E/τ`.  Sum: `d/dt(KE + E) = −E/τ` (slow memory
+  decay, physically reasonable).
+- **No-op short-circuit**: `not cfg.enabled or cfg.c_bs == 0`
+  returns zero tendency / unchanged E.
+
+No code changes this iteration.
+
 ## Next iterations
 Continue addressing codex findings and direct-inspection sweeps until all schemes are
 provably conservative, monotone, CFL-safe, and AD-safe across mixed wet/dry grids.
