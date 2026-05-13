@@ -7201,6 +7201,80 @@ def equilibrium_climate_sensitivity_fv3(
     return radiative_forcing / abs_lam
 
 
+def transient_climate_response_fv3(
+    radiative_forcing: jax.Array,
+    lam_net: jax.Array,
+    gamma: jax.Array,
+    denom_floor: float = 1e-6,
+) -> jax.Array:
+    """FV3_3D iter 837: transient climate response (TCR).
+
+    Two-layer energy-balance-model transient surface response
+    (Held et al. 2010, Geoffroy et al. 2013):
+
+        ΔF = (|λ_net| + γ) · ΔT_trans
+        TCR = ΔF / (|λ_net| + γ)
+
+    Where γ > 0 is the ocean heat-uptake efficiency (W/m²/K) —
+    the rate at which the deep ocean absorbs surface forcing
+    proportional to ΔT_surface.  γ acts as an *additional*
+    damping term that retards the transient warming below the
+    eventual equilibrium value.
+
+    Sign convention: |λ_net| > 0 (we apply absolute value
+    internally — λ_net is naturally negative for stable Earth-
+    like climate).  γ > 0 always (ocean is a heat sink during
+    warming).
+
+    Canonical 2×CO₂ forcing ΔF ≈ 3.7 W/m² (Myhre 1998 / AR5):
+      * AR6 |λ_net|=1.4, γ=0.7  ⇒ TCR ≈ 1.76 K
+      * Low-sensitivity     1.8, 0.6  ⇒ TCR ≈ 1.54 K
+      * High-sensitivity    0.8, 0.9  ⇒ TCR ≈ 2.18 K
+      * No ocean uptake γ=0           ⇒ TCR → ECS
+
+    Always TCR < ECS for γ > 0 — ocean uptake delays equilibration.
+
+    The **ratio TCR/ECS = |λ_net| / (|λ_net| + γ)** is the
+    "realized warming fraction" — a dimensionless climate-response
+    measure used in:
+      * Held et al. 2010 fast/slow component decomposition
+      * Geoffroy et al. 2013 two-layer model fits
+      * CMIP6 transient-vs-equilibrium-sensitivity diagnostics
+      * Sherwood et al. 2020 emergent-constraint TCR analysis
+      * AR6 likely-range TCR 1.4–2.2 K (matches AR6 quartet+cloud)
+
+    Composes iter-836 ``equilibrium_climate_sensitivity_fv3``:
+    in the γ→0 limit they agree.  Caller can compute both from
+    the same primitive chain (iter-829 T_eff → quartet → these).
+
+    Used by: CMIP6 1pctCO2 / abrupt-4xCO2 protocol analysis,
+    Gregory plot transient regime, AR5/AR6 TCR tables,
+    Sherwood et al. 2020 transient-feedback synthesis.
+
+    ``denom_floor`` prevents div-by-0 if |λ_net|+γ → 0
+    (instability regime — runaway warming, linear TCR undefined).
+
+    Parameters
+    ----------
+    radiative_forcing : jax.Array
+        Sustained TOA radiative forcing (W/m²; positive=warming).
+    lam_net : jax.Array
+        Net feedback parameter (W/m²/K; negative for stable
+        climate — absolute value taken internally).
+    gamma : jax.Array
+        Ocean heat-uptake efficiency (W/m²/K; positive).
+    denom_floor : float
+        Lower bound on (|λ_net|+γ); default 1e-6.
+
+    Returns
+    -------
+    tcr : jax.Array
+        Transient climate response (K).  TCR ≤ ECS for γ ≥ 0.
+    """
+    denom = jnp.maximum(jnp.abs(lam_net) + gamma, denom_floor)
+    return radiative_forcing / denom
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

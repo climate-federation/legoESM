@@ -5439,6 +5439,57 @@ constraint diagnostics; (3) AR5/AR6 feedback-table reproduction;
 (4) sensitivity studies of cloud-feedback magnitude on ECS.  Pure
 JAX, vmap-compatible.  No new physical constants introduced.
 
+## Iter 837 — transient_climate_response_fv3 (TCR primitive)
+
+Added `transient_climate_response_fv3(radiative_forcing, lam_net,
+gamma)` to `grids/cubed_sphere.py`.  Held et al. 2010 / Geoffroy
+et al. 2013 two-layer EBM transient response:
+
+```
+ΔF = (|λ_net| + γ) · ΔT_trans
+⇒ TCR = ΔF / (|λ_net| + γ)
+```
+
+Where γ > 0 is the ocean heat-uptake efficiency (W/m²/K) — deep-
+ocean heat-absorption rate proportional to ΔT_surface.  γ acts as
+*additional* damping retarding transient warming below eventual
+equilibrium.
+
+Canonical 2×CO₂ ΔF=3.7 W/m²:
+  | scenario          | |λ| | γ   | TCR  | ECS  | TCR/ECS |
+  |-------------------|-----|-----|------|------|---------|
+  | AR6 central       | 1.4 | 0.7 | 1.76 | 2.64 | 0.67    |
+  | Low sensitivity   | 1.8 | 0.6 | 1.54 | 2.06 | 0.75    |
+  | High sensitivity  | 0.8 | 0.9 | 2.18 | 4.63 | 0.47    |
+  | No ocean uptake   | 1.4 | 0.0 | 2.64 | 2.64 | 1.00    |
+
+Always TCR < ECS for γ > 0.  The **ratio TCR/ECS = |λ_net|/(|λ_net|+γ)**
+is the "realized warming fraction" — dimensionless climate-response
+measure (Held et al. 2010 fast/slow component decomposition).
+
+Composes iter-836 ``equilibrium_climate_sensitivity_fv3``: in the
+γ→0 limit they agree to machine precision.  Together they span
+the **transient↔equilibrium climate-sensitivity primitive pair**.
+
+Used by: CMIP6 1pctCO2 / abrupt-4xCO2 protocols, Gregory plot
+transient regime, AR5/AR6 TCR tables (likely range 1.4–2.2 K),
+Sherwood et al. 2020 emergent-constraint TCR synthesis, Geoffroy
+et al. 2013 two-layer model fits.
+
+Test: `tests/test_fv3_tcr_iter837.py` (7 tests: AR6 canonical
+3.7/2.1≈1.76 K, TCR<ECS, γ=0→TCR=ECS, ↑γ→↓TCR, TCR/ECS-ratio
+identity, |λ|+γ=0 floored, 3-D shapes).
+
+### Why this iteration was meaningful
+
+Extends iter-836 ECS closure with the *transient* dimension —
+ocean-heat-uptake corrected sensitivity used for IPCC TCR
+diagnostics.  TCR is the policy-relevant warming number (what
+the climate does over 70-year doubling), while ECS is the
+post-equilibration limit.  Together iter-836+iter-837 span the
+full IPCC climate-sensitivity primitive set.  Pure JAX, vmap-
+compatible.  No new physical constants introduced.
+
 
 
 
