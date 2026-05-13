@@ -466,6 +466,23 @@ def _area_weighted_mean(field, area) -> float:
     return float(jnp.sum(f_collapsed * a) / jnp.sum(a))
 
 
+def _area_weighted_sum(field, area) -> float:
+    """Area-weighted scalar integral with fp64 accumulator.
+
+    Promotes both inputs to ``float64`` before multiply + sum so that
+    cross-grid mass diagnostics are not contaminated by fp32 reduction
+    rounding.  A plain ``jnp.sum(p_s * area)`` over a 720x1440 lat-lon
+    grid in fp32 loses ~log2(N) bits of precision and produced spurious
+    O(1e-3) "mass drift" in Held-Suarez / AMIP latlon, while cube and
+    Voronoi paths happened to be clean (cube uses ``global_integral``
+    which already casts; Voronoi ``areaCell`` is fp64 so the mixed-
+    dtype product promotes implicitly).
+    """
+    f = jnp.asarray(field, dtype=jnp.float64)
+    a = jnp.asarray(area, dtype=jnp.float64)
+    return float(jnp.sum(f * a))
+
+
 # ---------------------------------------------------------------------------
 # Hyperdiffusion helpers
 # ---------------------------------------------------------------------------
@@ -2984,7 +3001,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         def step_fn(s, dt_):
             return model.step_with_physics(s, dt_, physics_fn)
 
-        mass_fn = lambda s: float(jnp.sum(s.p_s * grid.area))
+        mass_fn = lambda s: _area_weighted_sum(s.p_s, grid.area)
 
         def check_fn(s):
             return (check_finite({"T": s.T, "u": s.u}),
@@ -3043,7 +3060,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         def step_fn(s, dt_):
             return model.step(s, dt_, physics_fn_mpas)
 
-        mass_fn = lambda s: float(jnp.sum(s.p_s.data * mesh.areaCell))
+        mass_fn = lambda s: _area_weighted_sum(s.p_s.data, mesh.areaCell)
 
         def check_fn(s):
             return (check_finite({"T": s.T.data, "u": s.u.data}),
@@ -3125,7 +3142,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
                 # iter-5 codex review H1 caught my iter-3 mistake of
                 # using the area-weighted MEAN here (Pa) — that broke
                 # cross-grid ``mass`` time-series comparability.
-                "mass": float(jnp.sum(fields['p_s'] * grid.grid_area)),
+                "mass": _area_weighted_sum(fields['p_s'], grid.grid_area),
                 "max_wind": float(jnp.max(jnp.sqrt(
                     fields['u'] ** 2 + fields['v'] ** 2))),
                 "mean_T": _area_weighted_mean(fields['T'], grid.grid_area),
@@ -3432,7 +3449,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         def step_fn(s, dt_):
             return model.step(s, dt_)
 
-        mass_fn = lambda s: float(jnp.sum(s.p_s * grid.area))
+        mass_fn = lambda s: _area_weighted_sum(s.p_s, grid.area)
 
         def check_fn(s):
             return (check_finite({"T": s.T, "u": s.u}),
@@ -3505,7 +3522,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         def step_fn(s, dt_):
             return model.step(s, dt_)
 
-        mass_fn = lambda s: float(jnp.sum(s.p_s.data * mesh.areaCell))
+        mass_fn = lambda s: _area_weighted_sum(s.p_s.data, mesh.areaCell)
 
         def check_fn(s):
             return (check_finite({"T": s.T.data, "u": s.u.data}),
@@ -3588,7 +3605,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             fields = spectral_pe_to_grid(s, grid, sigma)
             return {
                 # See iter-5 H1: ``mass`` is the integral, not the mean.
-                "mass": float(jnp.sum(fields['p_s'] * grid.grid_area)),
+                "mass": _area_weighted_sum(fields['p_s'], grid.grid_area),
                 "max_wind": float(jnp.max(jnp.sqrt(
                     fields['u'] ** 2 + fields['v'] ** 2))),
                 "ps_perturbation": float(jnp.max(
@@ -4011,7 +4028,7 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         def step_fn(s, dt_):
             return model.step_with_physics(s, dt_, physics_fn)
 
-        mass_fn = lambda s: float(jnp.sum(s.p_s * grid.area))
+        mass_fn = lambda s: _area_weighted_sum(s.p_s, grid.area)
 
         def check_fn(s):
             return (check_finite({"T": s.T, "u": s.u}),
@@ -4069,7 +4086,7 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         def step_fn(s, dt_):
             return model.step(s, dt_, physics_fn_mpas)
 
-        mass_fn = lambda s: float(jnp.sum(s.p_s.data * mesh.areaCell))
+        mass_fn = lambda s: _area_weighted_sum(s.p_s.data, mesh.areaCell)
 
         def check_fn(s):
             return (check_finite({"T": s.T.data, "u": s.u.data}),
@@ -4137,7 +4154,7 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
             return {
                 # See iter-5 H1: ``mass`` is the integral (Pa·m²),
                 # ``mean_p_s`` is the area-weighted mean (Pa).
-                "mass":     float(jnp.sum(fields['p_s'] * grid.grid_area)),
+                "mass":     _area_weighted_sum(fields['p_s'], grid.grid_area),
                 "max_wind": float(jnp.max(jnp.sqrt(
                     fields['u'] ** 2 + fields['v'] ** 2))),
                 "mean_T":   _area_weighted_mean(fields['T'],   grid.grid_area),
