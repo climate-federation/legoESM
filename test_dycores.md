@@ -69,6 +69,13 @@ NH cross-grid TC1 mass-drift after iter-10 (matrix runner `notes` line):
   correction dropped); cube PE matrix-runner sites opt in to anchor.
   Ico HS 1-day mass drift `1.31e-12 → 1.61e-16`; cube HS 1-day
   `4.01e-08 → 4.02e-13` (~10^5x).
+- **iter-12**: lat-lon PE `compute_mass` + in-step fixer + HS-path
+  snapshot all switched from `_accumulation_dtype` (fp32 default) to
+  `_conservation_accumulator` (fp64). The anchored target itself was
+  contaminated with fp32 reduction noise — iter-2's 3.71e-7 residual
+  was that, not the dynamics. Latlon HS sigma now `3.71e-07 → 1.61e-16`;
+  hybrid `4.79e-07 → 1.61e-16`; topo `1.73e-07 → 0.00e+00`. Cumulative
+  iter-0→iter-12 lat-lon HS reduction: ~10^13x.
 
 ## Implementation patterns established (apply to any new dycore)
 

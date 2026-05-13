@@ -86,6 +86,7 @@ from legoesm.core.conservation import (
     zero_mean_tendency,
     _accumulation_dtype,
     _batch_global_area_sums,
+    _conservation_accumulator,
 )
 from legoesm.core.precision import cast_pytree
 from legoesm.core.operators_fv_latlon import (
@@ -617,8 +618,15 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         self._target_mass: jax.Array | None = None
 
     def compute_mass(self, state: CGridLatLonHydrostaticState) -> jax.Array:
-        """Compute total mass (for conservation fixer target)."""
-        acc = _accumulation_dtype()
+        """Compute total mass (for conservation fixer target).
+
+        Iter-12: use the fp64 budget accumulator unconditionally.
+        ``_accumulation_dtype`` is fp32 under the default storage
+        policy, so a 16k-cell reduction leaked ~N·eps noise into the
+        anchored target and blocked sub-fp32 conservation even after
+        iter-2's anchor wiring.
+        """
+        acc = _conservation_accumulator()
         return jnp.sum(state.p_s.astype(acc) * self.grid.area.astype(acc))
 
     def tendencies(self, state: CGridLatLonHydrostaticState):
@@ -743,9 +751,10 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         p_s_new = jnp.maximum(state.p_s, self.config.p_floor)
         state = state._replace(p_s=p_s_new)
 
-        # Conservation fixer for mass
+        # Conservation fixer for mass — fp64 budget accumulator
+        # (iter-12 mirrors compute_mass; see docstring there).
         if self.config.fix_mass:
-            acc = _accumulation_dtype()
+            acc = _conservation_accumulator()
             # ``grid_total_area`` is a precomputed scalar on the grid;
             # avoids recomputing ``jnp.sum(area)`` every step (one
             # extra reduction in serial, one extra allreduce under
@@ -855,8 +864,8 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
             else:
                 # HS path: cell-centred Field state.  ``compute_mass``
                 # expects a CGrid state, but the integral is the same
-                # area-weighted sum of p_s.
-                acc = _accumulation_dtype()
+                # area-weighted sum of p_s.  Iter-12: fp64 budget acc.
+                acc = _conservation_accumulator()
                 self._target_mass = jnp.sum(
                     state.p_s.data.astype(acc) * self.grid.area.astype(acc)
                 )
