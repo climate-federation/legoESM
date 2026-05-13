@@ -5662,3 +5662,66 @@ vmap-compatible.  Stull 2011 fit coefficients are empirical
 (literal numbers, not `constants.py` entries per the
 "empirical-fit-not-physical-constant" exception).
 
+## Iter 858 — heat_index_rothfusz_fv3 (NOAA apparent-T heat index)
+
+Added `heat_index_rothfusz_fv3(t_c, rh_pct)` to
+`grids/cubed_sphere.py`.  Rothfusz 1990 (NWS Tech. Memo. SR-90)
+operational NOAA heat-index 9-coefficient regression to
+Steadman 1979 PNAS apparent-temperature lookup table:
+
+```
+HI(°F) = c₁ + c₂T + c₃R + c₄TR + c₅T² + c₆R²
+       + c₇T²R + c₈TR² + c₉T²R²
+```
+
+Input/output in °C; internal conversion to °F for the regression.
+Valid for T ≥ 27 °C and RH ≥ 40 %.
+
+NOAA HI severity thresholds:
+  | HI (°C)    | NOAA category   | Outcome                |
+  |------------|-----------------|------------------------|
+  | 27–32      | Caution         | fatigue                |
+  | 32–39      | Extreme caution | heat cramps/exhaustion |
+  | 39–51      | Danger          | heat exhaustion/stroke |
+  | ≥ 51       | Extreme danger  | heat stroke imminent   |
+
+Real-world peaks:
+  * Phoenix 2024 summer:   HI peak ~55 °C
+  * Iraq 2015 heat wave:   HI peak ~70 °C (record)
+  * U.S. Midwest 1995:     HI >40 °C sustained, 700+ Chicago deaths
+
+**Closes NOAA-operational terrestrial heat-stress pair** with
+iter-857:
+  * iter-857 T_w (Stull)     — physiological cooling-failure
+  * iter-858 HI (Rothfusz)   — perceived apparent-temperature
+
+T_w focuses on humid limits to evaporative cooling; HI focuses on
+public-warning-issuance thresholds.  Both AR6 §11.3.2 diagnostics.
+
+Composes with iter-832/833 (fixed-RH warming → ↑T → ↑HI faster
+than linear via quadratic T² terms in regression).
+
+Per CLAUDE.md hygiene: Rothfusz 9 coefficients are empirical
+regression numerics (not physical constants).  Literal storage.
+
+Used by: Rothfusz 1990 NWS Tech. Memo., Steadman 1979 PNAS,
+NOAA NWS operational heat warnings, AR6 §11.3.2 heat extremes,
+Vecellio et al. 2022 PNAS critical environmental-limit
+experiments.
+
+Test: `tests/test_fv3_heat_index_iter858.py` (9 tests: NOAA 80°F/40%
+calibration, Caution / Extreme caution / Danger bands, Iraq 2015
+out-of-validity finite, monotone in T and RH, paired-with-Stull
+consistency, 3-D shapes).
+
+### Why this iteration was meaningful
+
+**Closes the NOAA-operational terrestrial heat-stress pair**
+(Stull wet-bulb + Rothfusz HI).  HI is the *public-warning*
+metric (NWS issues advisories from this); T_w is the
+*physiological-survivability* metric.  Together with iter-855
+DHW (marine) the AR6 §11.3.2 heat-extreme primitive triplet is
+complete.  Pure JAX, vmap-compatible.  Rothfusz 1990 fit
+coefficients are empirical (literal numbers).  No `constants.py`
+additions.
+

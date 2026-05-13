@@ -445,6 +445,7 @@ _GUARD_MODULES = (
     "test_fv3_dhw_iter855",                          # iter-855 add
     "test_fv3_mhw_category_iter856",                 # iter-856 add
     "test_fv3_wet_bulb_iter857",                     # iter-857 add
+    "test_fv3_heat_index_iter858",                   # iter-858 add
 )
 
 

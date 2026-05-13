@@ -8938,6 +8938,111 @@ def wet_bulb_temperature_stull_fv3(
     )
 
 
+def heat_index_rothfusz_fv3(
+    t_c: jax.Array,
+    rh_pct: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 858: NOAA Rothfusz 1990 apparent-temperature heat index.
+
+    Rothfusz 1990 (NWS Tech. Memo. SR-90) operational NOAA heat-
+    index regression converting (T, RH) to perceived "feels-like"
+    apparent temperature:
+
+        HI(°F) = c₁ + c₂·T + c₃·R + c₄·T·R + c₅·T² + c₆·R²
+              + c₇·T²·R + c₈·T·R² + c₉·T²·R²
+
+    Where T in °F, R in %, and (Rothfusz 1990 9-term fit to
+    Steadman 1979 PNAS apparent-temperature lookup table):
+
+        c₁ = −42.379,  c₂ = 2.04901523,
+        c₃ = 10.14333127,  c₄ = −0.22475541,
+        c₅ = −6.83783e-3, c₆ = −5.481717e-2,
+        c₇ = 1.22874e-3,  c₈ = 8.5282e-4,
+        c₉ = −1.99e-6
+
+    Input/output in °C for consistency with rest of FV3_3D primitives:
+    internally converts to °F for the regression, returns °F → °C.
+
+    Valid for T ≥ 27 °C (≥80 °F) and RH ≥ 40 %.  Outside this band,
+    Rothfusz formula is less accurate; NOAA falls back to alternative
+    adjustments (e.g. low-RH correction).  This primitive returns
+    the raw regression — caller is responsible for gating on validity
+    range.
+
+    NOAA HI severity thresholds:
+      | HI (°C) | NOAA category   | Outcome                       |
+      |---------|-----------------|-------------------------------|
+      | 27–32   | Caution         | fatigue with prolonged exposure|
+      | 32–39   | Extreme caution | heat cramps, heat exhaustion  |
+      | 39–51   | Danger          | heat exhaustion likely; stroke|
+      |         |                 | possible                      |
+      | ≥ 51    | Extreme danger  | heat stroke imminent          |
+
+    Real-world peak HI events:
+      * Phoenix 2024 summer: HI peak ~55 °C
+      * Iraq 2015 heat wave: HI peak 70 °C (record)
+      * U.S. Midwest 1995:   HI sustained >40 °C, 700+ Chicago deaths
+
+    Composes with iter-857 ``wet_bulb_temperature_stull_fv3`` to
+    give the **NOAA-operational terrestrial heat-stress pair**:
+      * iter-857 T_w (Stull)     — physiological cooling-failure threshold
+      * iter-858 HI (Rothfusz)   — perceived apparent-temperature
+
+    T_w focuses on humid limits to sweat-evaporation cooling;
+    HI focuses on warning-issuance thresholds for public health.
+    Both are AR6 §11.3.2 heat-extreme diagnostics.
+
+    Composes with iter-832 ``clausius_clapeyron_dqdt_fv3`` and
+    iter-833 ``fixed_rh_humidity_change_fv3``: fixed-RH warming
+    raises both T (linear) and HI (faster than linear due to
+    quadratic T² and RH terms).
+
+    Per CLAUDE.md hygiene: Rothfusz 1990 9-coefficient fit is an
+    empirical regression (not physical constants).  Coefficients
+    kept as literals.
+
+    Used by: Rothfusz 1990 NWS Tech. Memo. SR-90, Steadman 1979
+    PNAS apparent-T lookup, NOAA NWS operational heat warnings,
+    AR6 §11.3.2 heat extremes, Vecellio et al. 2022 PNAS critical
+    environmental-limit experiments.
+
+    Parameters
+    ----------
+    t_c : jax.Array
+        Dry-bulb temperature (°C).
+    rh_pct : jax.Array
+        Relative humidity (%, 0–100).
+
+    Returns
+    -------
+    hi_c : jax.Array
+        Apparent-temperature heat index (°C).
+    """
+    t_f = 9.0 / 5.0 * t_c + 32.0
+    r = rh_pct
+    c1 = -42.379
+    c2 = 2.04901523
+    c3 = 10.14333127
+    c4 = -0.22475541
+    c5 = -6.83783e-3
+    c6 = -5.481717e-2
+    c7 = 1.22874e-3
+    c8 = 8.5282e-4
+    c9 = -1.99e-6
+    hi_f = (
+        c1
+        + c2 * t_f
+        + c3 * r
+        + c4 * t_f * r
+        + c5 * t_f * t_f
+        + c6 * r * r
+        + c7 * t_f * t_f * r
+        + c8 * t_f * r * r
+        + c9 * t_f * t_f * r * r
+    )
+    return (hi_f - 32.0) * 5.0 / 9.0
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,
