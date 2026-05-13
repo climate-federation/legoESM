@@ -716,6 +716,124 @@ def fv3_laplacian_step_from_pad_h1(
     return lap_divg * cdgrid.rarea_c
 
 
+def fv3_laplacian_step_from_pad_h2(
+    divg_pad: jnp.ndarray,
+    cdgrid: "CubedSphereCDGrid",
+) -> jnp.ndarray:
+    """FV3_3D iter 898: one Laplacian step on h2-padded input.
+
+    Consumes pre-padded ``divg_pad`` of shape ``(6, n+5, n+5)``
+    (halo=2 around canonical ``(n+1, n+1)`` corner-staggered field)
+    and returns the Laplacian on the SHRUNK halo=1 interior of shape
+    ``(6, n+3, n+3)``.
+
+    Each iteration consumes one halo cell per side.  Foundation
+    for the FV3-faithful expanding-halo nord>=2 pattern
+    (sw_core.F90:1748-1785, ``nt = nord - n`` decreasing).
+
+    Sequence for nord=2 single-pad-multi-step pattern:
+
+        divg_pad = pad_halo(divg_d, halo=2)        # (6, n+5, n+5)
+        intermediate = fv3_laplacian_step_from_pad_h2(...)  # (6, n+3, n+3)
+        out = fv3_laplacian_step_from_pad_h1(intermediate, ...)  # (6, n+1, n+1)
+
+    Metric arrays (``divg_u``, ``divg_v``, ``rarea_c``) are
+    canonical-sized and edge-padded to match the wider write region
+    — same approximation as iter-18's halo=1 step, just applied
+    over a wider stencil.
+
+    Parameters
+    ----------
+    divg_pad : jnp.ndarray, shape ``(6, n+5, n+5)``
+        Pre-halo-2-padded corner-staggered divergence.
+    cdgrid : CubedSphereCDGrid
+
+    Returns
+    -------
+    lap_divg_h1 : jnp.ndarray, shape ``(6, n+3, n+3)``
+        Laplacian on halo=1 interior (consumed by subsequent
+        ``fv3_laplacian_step_from_pad_h1`` call).
+
+    Notes
+    -----
+    Index translation for divg_pad shape (6, n+5, n+5):
+
+      Padded index 0 = i = -2 (outer west halo)
+      Padded index 1 = i = -1 (inner west halo)
+      Padded indices 2..n+2 = canonical interior i = 0..n
+      Padded index n+3 = i = n+1 (inner east halo)
+      Padded index n+4 = i = n+2 (outer east halo)
+
+    Output covers i = -1..n+1 (n+3 cells) — the halo=1 interior.
+    """
+    n = cdgrid.n
+
+    # Step 2: x-flux vc at i ∈ [-2, n+1] (shape n+4), j ∈ [-1, n+1]
+    # (shape n+3).  Padded index translation:
+    #   divg_pad(i+1) for i ∈ [-2, n+1] → padded 1..n+4 → slice [1:n+5]
+    #   divg_pad(i)   for i ∈ [-2, n+1] → padded 0..n+3 → slice [0:n+4]
+    #   j ∈ [-1, n+1] → padded 1..n+3 → slice [1:n+4]
+    vc_raw = (
+        divg_pad[:, 1:n + 5, 1:n + 4]
+        - divg_pad[:, 0:n + 4, 1:n + 4]
+    )                                                       # (6, n+4, n+3)
+    divg_u = cdgrid.dy_edge_x * cdgrid.rdxc                  # (6, n+1, n)
+    divg_u_pad = jnp.pad(
+        divg_u, [(0, 0), (2, 1), (1, 2)], mode="edge",
+    )                                                       # (6, n+4, n+3)
+    vc = vc_raw * divg_u_pad
+
+    # Step 3: y-flux uc at i ∈ [-1, n+1] (shape n+3), j ∈ [-2, n+1]
+    # (shape n+4).
+    uc_raw = (
+        divg_pad[:, 1:n + 4, 1:n + 5]
+        - divg_pad[:, 1:n + 4, 0:n + 4]
+    )                                                       # (6, n+3, n+4)
+    divg_v = cdgrid.dx_edge_y * cdgrid.rdyc                  # (6, n, n+1)
+    divg_v_pad = jnp.pad(
+        divg_v, [(0, 0), (1, 2), (2, 1)], mode="edge",
+    )                                                       # (6, n+3, n+4)
+    uc = uc_raw * divg_v_pad
+
+    # Step 4: divergence at corner for output i, j ∈ [-1, n+1]
+    # (write shape n+3).  Local indexing into extended uc / vc:
+    #   uc(i, j-1) for j ∈ [-1, n+1] → uc[..., 0:n+3]
+    #   uc(i, j)   for j ∈ [-1, n+1] → uc[..., 1:n+4]
+    #   vc(i-1, j) for i ∈ [-1, n+1] → vc[..., 0:n+3, :]
+    #   vc(i,   j) for i ∈ [-1, n+1] → vc[..., 1:n+4, :]
+    lap_divg_raw = (
+        uc[:, :, 0:n + 3]
+        - uc[:, :, 1:n + 4]
+        + vc[:, 0:n + 3, :]
+        - vc[:, 1:n + 4, :]
+    )                                                       # (6, n+3, n+3)
+
+    # Step 5: cube-vertex corner removal.  Cube vertices are at the
+    # CANONICAL corners of the original (n+1, n+1) field, which sit
+    # at INTERIOR indices of the wider (n+3, n+3) write region:
+    #   (i=0, j=0) → local (1, 1)
+    #   (i=n, j=0) → local (n+1, 1)
+    #   (i=n, j=n) → local (n+1, n+1)
+    #   (i=0, j=n) → local (1, n+1)
+    # uc indices: south-halo row j = -1 → uc[..., 0]; interior j = n
+    # → uc[..., n+2]
+    sw = uc[:, 1, 0]            # uc at (i = 0,  j = -1)
+    se = uc[:, n + 1, 0]        # uc at (i = n,  j = -1)
+    ne = uc[:, n + 1, n + 2]    # uc at (i = n,  j = n)
+    nw = uc[:, 1, n + 2]        # uc at (i = 0,  j = n)
+    lap_divg = lap_divg_raw
+    lap_divg = lap_divg.at[:, 1, 1].add(-sw)
+    lap_divg = lap_divg.at[:, n + 1, 1].add(-se)
+    lap_divg = lap_divg.at[:, n + 1, n + 1].add(ne)
+    lap_divg = lap_divg.at[:, 1, n + 1].add(nw)
+
+    # Step 6: normalise by rarea_c (extended via edge mode).
+    rarea_c_pad = jnp.pad(
+        cdgrid.rarea_c, [(0, 0), (1, 1), (1, 1)], mode="edge",
+    )                                                       # (6, n+3, n+3)
+    return lap_divg * rarea_c_pad
+
+
 def fv3_corner_laplacian_nord(
     divg_d: jnp.ndarray,
     cdgrid: "CubedSphereCDGrid",
