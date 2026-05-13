@@ -258,19 +258,26 @@ denom)` collapsed to **exactly 0** whenever `denom` was a small negative
 number, because `sign(-x)*_tiny + _tiny = -_tiny + _tiny = 0`.  The very
 next line (`c_col[k] / denom`) then divided by zero.
 
-Trigger condition: a poorly-conditioned step in the Richards / soil-thermal
-backward-Euler solve that produces a denominator in `(-_tiny, 0)`.  Unlikely
-with default physical inputs but possible at low precision (float32) for the
-mixed-dtype branch, and a latent landmine.
+Trigger condition: any step that produces a denominator in `(-_tiny, 0)`.
+**In practice this is masked on our XLA build by subnormal flush-to-zero
+(FTZ)** — `jnp.sign(-1e-40)` returns `-0.0` (not `-1.0`) once XLA
+flushes the subnormal, so the old formula evaluates to
+`-0.0 * _tiny + _tiny = +_tiny` and divides cleanly.  But the masking
+is platform/compilation-dependent (codex stop-time call-out), so the
+defensive fix is still warranted.
 
-Fix: compute the sign branchlessly (`sign = jnp.where(denom >= 0.0, 1.0,
--1.0)`) and floor magnitude with `sign * _tiny`; same fix applied to the
-init-row `denom0`.
+Fix: compute the sign with an explicit branch (`sign = jnp.where(denom
+>= 0.0, 1.0, -1.0)`) and floor magnitude with `sign * _tiny`; same fix
+applied to the init-row `denom0`.  Now the floored denominator is
+sign-preserving and non-zero on any platform regardless of FTZ mode.
 
-Regression test `test_tridiag_solver_tiny_negative_denominator` constructs
-a 2-row float32 system whose row-1 denominator falls below float32 `_tiny`
-and asserts the solution is finite.  Full `tests/land/unit/` + soil-
-hydraulics suite (208 tests) green.
+Regression test `test_tridiag_denom_floor_preserves_sign` exercises the
+math directly (without depending on XLA FTZ): asserts that the old
+formula evaluates to exactly 0 when fed `sign = -1`, and that the new
+branch-based floor produces `-_tiny` for negative subnormals and
+`+_tiny` for zero / positive subnormals.  An end-to-end smoke check on
+the live `thomas_solve_batch` is included.  Full `tests/land/unit/` +
+soil-hydraulics suite (208 tests) green.
 
 ## Next iterations
 Continue addressing further codex findings and direct-inspection sweeps until all

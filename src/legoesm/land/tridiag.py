@@ -43,11 +43,14 @@ def thomas_solve_batch(
             c_p, d_p = carry
             denom = b_col[k] - a_col[k] * c_p
             # Floor |denom| at _tiny while preserving sign.  The previous
-            # ``jnp.sign(denom) * _tiny + _tiny`` formulation collapsed to
-            # exactly 0 whenever ``denom`` was a small *negative* value
-            # (sign = -1 ⇒ -_tiny + _tiny = 0), which then divided by zero
-            # in ``c_col[k] / denom`` on the next line.  Treat zero as a
-            # positive sign so the floored value is never zero.
+            # ``jnp.sign(denom) * _tiny + _tiny`` formulation relies on
+            # subnormal flush-to-zero (FTZ) to mask a latent bug: with
+            # full IEEE subnormals, ``sign(-x)*_tiny + _tiny = 0`` for any
+            # tiny negative ``denom``, which then divides by zero in
+            # ``c_col[k] / denom`` on the next line.  Use an explicit
+            # branch-based sign so the floored value is never zero on any
+            # platform / FTZ setting.  Zero is treated as the positive
+            # branch.
             sign = jnp.where(denom >= 0.0, 1.0, -1.0)
             denom = jnp.where(jnp.abs(denom) < _tiny, sign * _tiny, denom)
             c_new = c_col[k] / denom

@@ -263,26 +263,60 @@ class TestSoilThermalX64(unittest.TestCase):
         npt.assert_allclose(x, 0.5, atol=1e-12)
         self.assertEqual(x.dtype, jnp.float64)
 
-    def test_tridiag_solver_tiny_negative_denominator(self):
-        """Iter-85 regression: the previous ``jnp.sign(denom)*_tiny + _tiny``
-        floor collapsed tiny *negative* denominators to exactly 0, blowing
-        up the very next division.  Construct a system whose row-1
-        intermediate denominator is a small negative number and confirm
-        the solver does not produce inf/NaN.
+    def test_tridiag_denom_floor_preserves_sign(self):
+        """Iter-85 math regression for the Thomas-solver denom safety floor.
+
+        The previous formulation
+
+            denom_safe = jnp.where(|denom| < _tiny,
+                                   jnp.sign(denom)*_tiny + _tiny, denom)
+
+        evaluates to *exactly zero* whenever ``denom`` is a tiny negative
+        number under full IEEE subnormal arithmetic (``sign = -1`` ⇒
+        ``-_tiny + _tiny = 0``).  The very next line ``c_col[k] / denom``
+        then divides by zero.  In practice XLA's subnormal flush-to-zero
+        (FTZ) hides this in the integrated solver (``sign(-_subnormal)``
+        comes back as ``-0.0``, so the formula returns ``+_tiny``), but
+        the code is fragile across compilation / platform changes.
+
+        The fix replaces ``sign(denom)`` with an explicit
+        ``where(denom >= 0.0, 1.0, -1.0)`` branch.  This test verifies the
+        *math* of both formulations directly — independent of XLA FTZ — by
+        feeding the floor expressions a fixed negative ``denom`` ≈ ``-x``
+        with ``x < _tiny`` *forced through the formulas as if FTZ were off*
+        (by passing ``sign = -1.0`` explicitly).
         """
+        _tiny = float(jnp.finfo(jnp.float32).tiny)
+
+        # Demonstrate the old formula's failure mode with the IEEE-correct
+        # sign = -1 (no FTZ): the floored value is exactly 0.
+        old_floored = (-1.0) * _tiny + _tiny
+        self.assertEqual(old_floored, 0.0,
+                         "old denom-floor must reproduce divide-by-zero")
+
+        # New formula: explicit branch produces -_tiny, never zero.
+        def new_floor(denom_val: float) -> float:
+            sign = 1.0 if denom_val >= 0.0 else -1.0
+            return sign * _tiny if abs(denom_val) < _tiny else denom_val
+
+        # Negative subnormal-like value → -_tiny (sign preserved, non-zero).
+        self.assertEqual(new_floor(-1e-40), -_tiny)
+        self.assertNotEqual(new_floor(-1e-40), 0.0)
+        # Positive subnormal-like value → +_tiny.
+        self.assertEqual(new_floor(+1e-40), +_tiny)
+        # Exactly zero → +_tiny (treat zero as positive sign).
+        self.assertEqual(new_floor(0.0), +_tiny)
+        # Normal value passes through unchanged.
+        self.assertEqual(new_floor(-2.5), -2.5)
+        self.assertEqual(new_floor(+1.7), +1.7)
+
+        # Smoke check that the live solver remains finite on a system that
+        # would land in the floor branch under default XLA FTZ.
         from legoesm.land.tridiag import thomas_solve_batch
-
-        # Two-row system where (b1 - a1 * c'_0) is forced to be a small
-        # negative number.  Choose b0 = 1, c0 = 1 ⇒ c'_0 = 1.  Then take
-        # a1 = 1 and b1 = 1 - 1e-39, so denom1 ≈ -1e-39 (well below
-        # float64 _tiny ≈ 2.225e-308 only at the subnormal floor, but
-        # below float32 _tiny ≈ 1.18e-38).  Cast to float32 so the bug
-        # actually fires on the floor.
-        a = jnp.array([[0.0, 1.0]], dtype=jnp.float32)
-        b = jnp.array([[1.0, 1.0 - 1e-39], [1.0, 1.0]], dtype=jnp.float32)[:1]
-        c = jnp.array([[1.0, 0.0]], dtype=jnp.float32)
-        d = jnp.array([[1.0, 1.0]], dtype=jnp.float32)
-
+        a = jnp.array([[0.0, 0.0]], dtype=jnp.float32)
+        b = jnp.array([[1.0, -1e-40]], dtype=jnp.float32)
+        c = jnp.array([[0.0, 0.0]], dtype=jnp.float32)
+        d = jnp.array([[0.0, 1.0]], dtype=jnp.float32)
         x = thomas_solve_batch(a, b, c, d)
         assert jnp.all(jnp.isfinite(x)), f"tridiag produced non-finite x: {x}"
 
