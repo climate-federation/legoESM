@@ -38,11 +38,11 @@ def test_iter365_compaction_present(doc_text):
     )
 
 
-def test_doc_size_below_5680_lines(doc_text):
+def test_doc_size_below_5450_lines(doc_text):
     n_lines = len(doc_text.splitlines())
-    assert n_lines < 5680, (
-        f"FV3_3D.md has {n_lines} lines (target < 5680).  "
-        f"Next compaction at iter 890."
+    assert n_lines < 5450, (
+        f"FV3_3D.md has {n_lines} lines (target < 5450).  "
+        f"Next compaction at iter 900."
     )
 
 
@@ -472,6 +472,13 @@ def test_iter820_compaction_covers_topics(doc_text):
         assert marker in section, (
             f"iter-820 compacted block missing topic ``{marker}``."
         )
+
+
+def test_iter890_compaction_present(doc_text):
+    """iter-890 compacted iter 881-889 into single block."""
+    assert "**Iters 881-889 (compacted iter 890)**" in doc_text, (
+        "iter-890 compaction block missing — doc re-expanded."
+    )
 
 
 def test_iter880_compaction_present(doc_text):

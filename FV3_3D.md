@@ -1195,6 +1195,38 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- **Iters 881-889 (compacted iter 890)**: ET-formulation trio
+  (PT 1972 + Bouchet 1963 CR + Penman 1948) + UNEP aridity + Yang
+  Budyko AET; then **REFOCUS** iter-886-889 onto real FV3-fidelity
+  work (PE/NH nord∈{2,3} regression-guard tests).  iter-890 adds
+  ``validate_corner_div_damp_nord`` explicit range check + 5 unit
+  tests.
+
+  | Iter | What                                            | Note                                                                |
+  |------|-------------------------------------------------|---------------------------------------------------------------------|
+  | 881  | ``priestley_taylor_le_fv3``                     | PT 1972 equilibrium ET; α_PT=1.26                                    |
+  | 882  | ``complementary_relationship_et_fv3``           | Bouchet 1963 CR: λE_act = 2·λE_wet − λE_pot                          |
+  | 883  | ``penman_open_water_le_fv3``                    | Penman 1948 potential ET (PM with g_s→∞)                            |
+  | 884  | ``aridity_index_fv3``                           | UNEP 1997 P/PET classification                                       |
+  | 885  | ``budyko_aet_fv3``                              | Yang 2008 water-energy AET                                           |
+  | 886  | nord=2 PE regression test                       | test_corner_div_damp_nord2_pe_runs_and_differs_from_nord1            |
+  | 887  | nord=2 NH regression test                       | test_nh_corner_div_damp_nord2_runs_and_differs_from_nord1            |
+  | 888  | nord=3 PE stress test                           | test_corner_div_damp_nord3_pe_loop_scales                            |
+  | 889  | nord=3 NH stress test                           | test_nh_corner_div_damp_nord3_loop_scales                            |
+  | 890  | ``validate_corner_div_damp_nord`` + this compaction | explicit nord∈{0,1,2,3} range check; refuse misuse outside FV3 range |
+
+  Highlights: (1) **REFOCUS at iter-886**: prior iters 831-885
+  drifted into tangential Earth-system diagnostic primitives;
+  iter-886+ explicitly returned to FV3-fidelity dycore work.
+  (2) **Full nord ∈ {1, 2, 3} regression-guard coverage** for
+  both PE + NH 3D paths (iter-886/887/888/889 matrix).  Rules
+  out silent caps, no-op cases, NaN paths.  (3) iter-890
+  ``validate_corner_div_damp_nord`` raises ValueError for nord<0
+  or nord>3 — refuses silent misuse outside regression-guard
+  range.  Only remaining open FV3-fidelity follow-up: FV3
+  expanding-halo restructure (sw_core.F90:1746-1782, nt=nord-n
+  decreasing) — documented lower priority per iter-32.
+
 - **Iters 871-879 (compacted iter 880)**: Penman-Monteith input
   primitive set (VPD, ψ const, Δ slope, g_a, R_n) + Brunt/gray-body
   LW pair + e_a/bowen ratio closure.  Soil heat flux G closes
@@ -5366,301 +5398,4 @@ narrow the FV3-fidelity asymmetry between the two 3D paths, which
 is verifiable with unit tests in seconds rather than wall-time
 sweeps.  Users running the NH compressible-Euler 3D path now have
 the same cube-imprint defense as users running the PE 3D path.
-
-## Iter 881 — priestley_taylor_le_fv3 (PT 1972 equilibrium ET)
-
-Added `priestley_taylor_le_fv3(available_energy, delta_pa_k,
-gamma_pa_k, alpha_pt=1.26)` to `grids/cubed_sphere.py`.  Priestley-
-Taylor 1972 (MWR) radiation-limited equilibrium ET:
-
-```
-λE_PT = α_PT · Δ/(Δ+γ) · A        (W/m²)
-```
-
-Default α_PT=1.26 (PT 1972 canonical, open water + wet vegetation).
-
-α_PT by surface:
-  | surface              | α_PT       |
-  |----------------------|------------|
-  | Open water (PT 1972) | 1.26       |
-  | Wet grass            | 1.26       |
-  | Forest canopy        | 1.05–1.20  |
-  | Crop midday          | 1.0–1.26   |
-  | Mediterranean dry    | 0.6–0.9    |
-  | Desert / arid        | 0.3–0.7    |
-
-**PT vs PM** (iter-870):
-  * PM: full Monteith form requiring (Δ, γ, VPD, g_s, g_a, A).
-  * PT: equilibrium form requiring only (Δ, γ, α_PT, A); no
-    aerodynamic + stomatal conductance needed.
-  * For well-watered surfaces PT ≈ PM at ~5% accuracy.
-  * For stressed/arid surfaces PM more accurate via g_s.
-
-Radiation limit (Δ→∞): λE_PT → α_PT · A.
-
-**Pairs with iter-870 PM as ET-formulation duo**:
-  * iter-870 PM — full data; arbitrary stress regime.
-  * iter-881 PT — sparse data / well-watered fallback.
-
-Composes iter-873 γ, iter-874 Δ, iter-876 R_n, iter-880 G (same
-A=R_n−G as PM consumes).
-
-Used by: Priestley-Taylor 1972 MWR origin, Bonan 2008 ch. 11,
-Brutsaert 1982 Evaporation, Fisher 2008 RSE PT-JPL global-ET
-product, NASA SMAP/MetOp ET validation, CLM5/JULES sparse-data
-ET fallback.
-
-Test: `tests/test_fv3_priestley_taylor_iter881.py` (8 tests:
-A=0 zero, canonical A=400/Δ=200/γ=67 → 378, α-linear scaling,
-Δ→∞ → α·A radiation limit, PT vs PM well-watered ~25% agreement,
-denom-zero floored, full radiation chain → PT λE, 3-D shapes).
-
-### Why this iteration was meaningful
-
-Adds **PT 1972 equilibrium ET primitive** as paired alternative
-to iter-870 PM.  Critical for: (1) sparse-data ET estimation
-when g_s/g_a unavailable; (2) PT-JPL global-ET product
-calculations; (3) well-watered-surface ET benchmark; (4) coupling
-to satellite-derived radiation-only ET retrievals (MODIS R_n →
-PT λE).  Pure JAX, vmap-compatible.  α_PT=1.26 is PT 1972
-canonical (default arg).  No `constants.py` additions.
-
-## Iter 882 — complementary_relationship_et_fv3 (Bouchet 1963 CR)
-
-Added `complementary_relationship_et_fv3(le_wet, le_pot,
-floor_zero=True)` to `grids/cubed_sphere.py`.  Bouchet 1963 /
-Brutsaert-Stricker 1979 Advection-Aridity complementary-
-relationship closure:
-
-```
-λE_actual = 2 · λE_wet − λE_pot        (W/m²)
-```
-
-Bouchet hypothesis: as actual ET decreases (drying soil),
-potential ET *increases* by the same amount → sum stays constant
-at 2·λE_wet.
-
-Regimes:
-  * Saturated:  λE_actual = λE_wet = λE_pot
-  * Drying:     λE_actual < λE_wet < λE_pot
-  * Fully dry:  λE_actual = 0, λE_pot = 2·λE_wet
-
-``floor_zero=True`` (default) clips negative output to 0 (extreme
-drought beyond CR validity).  ``floor_zero=False`` returns raw.
-
-Canonical:
-  | scenario          | λE_wet | λE_pot | λE_actual |
-  |-------------------|--------|--------|-----------|
-  | Saturated humid   | 350    | 350    | 350       |
-  | Mid-lat summer    | 300    | 400    | 200       |
-  | Arid sparse       | 200    | 500    | 0 (clipped)|
-  | Tropical forest   | 450    | 470    | 430       |
-
-**Closes the ET-formulation trio**:
-  * iter-870 PM   — full Monteith (needs g_s/g_a; arbitrary regime)
-  * iter-881 PT   — equilibrium wet-surface (radiation-limited)
-  * iter-882 CR   — complementary actual-ET from (PT wet + Penman pot)
-
-Caller picks PM for full-data full-stress, PT for sparse-data
-wet, CR for sparse-data with sub-saturated surfaces.
-
-Used by: Bouchet 1963 origin, Brutsaert-Stricker 1979 AA, Morton
-1983 CRAE, Granger-Gray 1989 modified CR, Han et al. 2012 WRR
-generalized CR review, Brutsaert 2015 J. Hydrol. PT-CR for
-non-humid surfaces, Hobbins-Ramirez 2001 IJC regional water
-balance, PT-JPL vs CR-MOD16 vs PM-VIC ET-product intercomparison.
-
-Test: `tests/test_fv3_complementary_et_iter882.py` (7 tests:
-saturated identity λE_wet=λE_pot → λE_actual=λE_wet, drying
-λE_pot>λE_wet → λE_actual<λE_wet (analytic 200), fully dry zero
-floored, floor_zero=True default clips negative, floor_zero=False
-raw returned, chain via iter-881 PT λE_wet, 3-D shapes
-non-negative).
-
-### Why this iteration was meaningful
-
-**Closes the ET-formulation trio** (PM + PT + CR).  CR provides
-*actual* ET from paired wet + potential without needing g_s/g_a
-input — bridges the gap between PT (well-watered only) and PM
-(full data needed).  Critical for: (1) MODIS-style satellite-
-based actual-ET retrieval; (2) regional water-balance estimation
-with sparse-station data; (3) drought-evolution monitoring (CR
-amplifies the ET-pot growth as actual ET drops); (4) climate-
-model ET-formulation intercomparison.  Pure JAX, vmap-compatible.
-No `constants.py` additions.
-
-## Iter 883 — penman_open_water_le_fv3 (Penman 1948 potential ET)
-
-Added `penman_open_water_le_fv3(available_energy, vpd_pa,
-delta_pa_k, gamma_pa_k, g_a, rho_a=1.225, c_p=1005.0)` to
-`grids/cubed_sphere.py`.  Penman 1948 open-water potential
-evaporation:
-
-```
-λE_pot = (Δ · A + ρ · c_p · VPD · g_a) / (Δ + γ)    (W/m²)
-```
-
-Equivalent to iter-870 PM with g_s → ∞ (no stomatal closure);
-test verifies PM(g_s=10⁶) matches Penman to <0.01%.
-
-Limits:
-  * VPD=0:    λE_pot → Δ·A/(Δ+γ) (radiation equilibrium).
-  * High VPD: λE_pot ∝ g_a·VPD (advection-driven).
-  * A=0:      pure-advection night-time evaporation.
-
-Penman vs PM (iter-870):
-  * Penman: g_s=∞ (no stomatal limit).
-  * PM:     g_s finite, (1+g_a/g_s) denominator term.
-  * PM/Penman = (Δ+γ)/(Δ+γ·(1+g_a/g_s)) ≤ 1.
-
-Canonical:
-  | scenario          | λE_pot (W/m²) |
-  |-------------------|---------------|
-  | Tropical noon humid | 400-500    |
-  | Mid-lat summer     | 300-450    |
-  | Arid daytime       | 200-500    |
-  | Night humid        | 0-30       |
-
-**Closes CR-input pair** with iter-881 PT (λE_wet) → iter-882 CR
-(λE_actual = 2·λE_wet − λE_pot).  Test verifies full chain.
-
-Composes iter-871 VPD, iter-873 γ, iter-874 Δ, iter-875 g_a,
-iter-876+iter-880 A.
-
-Used by: Penman 1948 origin, Allen-Pereira 1998 FAO-56 reference
-ET, Brutsaert 1982, Bouchet 1963 / Brutsaert-Stricker 1979 CR
-pairing, eddy-covariance potential-ET benchmark, CLM5/JULES
-open-water lake/wetland-surface ET.
-
-Test: `tests/test_fv3_penman_open_water_iter883.py` (7 tests:
-VPD=0 radiation-limit analytic, A=0 advection-limit, tropical
-canonical band, PM(g_s=10⁶) matches Penman <0.01%, denom-zero
-floored, chain via iter-881+883 → iter-882, 3-D shapes).
-
-### Why this iteration was meaningful
-
-**Closes the CR-input pair** (λE_wet from iter-881 PT + λE_pot
-from iter-883 Penman) → iter-882 CR for actual ET.  Full
-ET-formulation trio (PM/PT/CR) now has all input primitives
-in pure JAX.  Pure JAX, vmap-compatible.  No `constants.py`
-additions.
-
-## Iter 884 — aridity_index_fv3 (UNEP 1997 P/PET classification)
-
-Added `aridity_index_fv3(precip_annual, pet_annual)` to
-`grids/cubed_sphere.py`.  UNEP 1997 World Atlas of Desertification
-/ Trabucco-Zomer 2009 CGIAR-CSI Global Aridity Database aridity
-classification:
-
-```
-AI = P_annual / PET_annual        (dimensionless)
-```
-
-UNEP 1997 thresholds:
-  | AI            | category          | example                |
-  |---------------|-------------------|------------------------|
-  | < 0.05        | Hyper-arid        | Sahara, Atacama        |
-  | 0.05 ≤ AI<0.20| Arid              | Mojave, Negev          |
-  | 0.20 ≤ AI<0.50| Semi-arid         | Sahel, Mediterranean   |
-  | 0.50 ≤ AI<0.65| Dry sub-humid     | inland China           |
-  | AI ≥ 0.65     | Humid             | temperate/tropical     |
-
-Dryland fraction (UNEP 1997): 47.2% of global land surface.
-AR6 SSP3-7.0 projections: dryland expansion +10-15% by 2100
-(Huang et al. 2017 NCC) — PET rises faster than P under warming.
-
-**Closes the aridity-classification primitive** in drought chain:
-
-```
-P_annual, T, lat, DOY → iter-862 Hargreaves PET (or iter-883 Penman)
-                      → iter-884 AI → UNEP category map
-                      (vs iter-861 SPEI temporal anomaly)
-```
-
-AI is climatological-mean baseline; SPEI is temporal-anomaly
-deviation.  Pair gives both static-aridity and dynamic-drought
-diagnostics.
-
-Used by: UNEP 1997 World Atlas Desertification, Trabucco-Zomer 2009
-CGIAR-CSI Global Aridity DB, Huang et al. 2016 NCC dryland-
-expansion analysis, AR6 §11.6 drought-aridity projections,
-Spinoni et al. 2015 IJC global-AI-trends, MEA 2005 ecosystems-
-and-human-well-being.
-
-Test: `tests/test_fv3_aridity_index_iter884.py` (7 tests: Sahara
-P=20/PET=2500 → AI<0.05 hyper-arid, Sahel P=500/PET=1500 → 0.33
-semi-arid, humid P=800/PET=1000 → 0.80, P=0 → 0, PET=0 floored,
-UNEP-threshold mapping (4-band), 3-D shapes non-negative).
-
-### Why this iteration was meaningful
-
-Adds **canonical aridity-classification primitive** complementing
-iter-861 SPEI (temporal drought anomaly).  AI provides static-
-baseline aridity for dryland-expansion analysis, climate-zone
-attribution, vegetation-bioclimatic studies, and AR6 §11.6
-dryland-expansion projections.  Pure JAX, vmap-compatible.  No
-`constants.py` additions.
-
-## Iter 885 — budyko_aet_fv3 (Yang 2008 water-energy framework)
-
-Added `budyko_aet_fv3(precip, pet, omega=2.6)` to
-`grids/cubed_sphere.py`.  Budyko 1974 / Choudhury 1999 / Yang
-et al. 2008 (WRR) generalized water-energy-balance closure:
-
-```
-AET = P · PET / (P^ω + PET^ω)^(1/ω)        (mm)
-```
-
-Default ω=2.6 (Yang 2008 global mean fit; range 1.5–3.5 by
-landscape).
-
-Asymptotic limits:
-  * Energy-limited (PET<<P, humid):  AET → PET
-  * Water-limited  (P<<PET, arid):   AET → P
-  * Crossover (P=PET):               AET ≈ 0.6–0.77·P (depends on ω)
-
-Budyko curve (AET/P vs PET/P):
-  | PET/P  | AET/P   | regime         |
-  |--------|---------|----------------|
-  | 0.2    | 0.20    | hyper-humid    |
-  | 0.5    | 0.45    | humid          |
-  | 1.0    | ~0.65   | energy=water   |
-  | 2.0    | ~0.85   | semi-arid      |
-  | 10.0   | ~0.99   | hyper-arid     |
-
-Runoff coefficient Q/P = 1 − AET/P (widely used in catchment
-modeling).
-
-ω regime (Yang 2008):
-  Bare soil:      1.5-2.0
-  Mixed grassland: 2.5
-  Forest:          3.0-3.5
-  Global mean:     2.6
-
-**Closes the water-energy framework primitive** — complementary
-to iter-884 AI (P/PET classification):
-  * iter-884 AI     — climatological aridity *classification*.
-  * iter-885 AET    — water-balance *actual* ET partition.
-  * 1 − AET/P       — runoff coefficient for catchment closure.
-
-Used by: Budyko 1974 Climate-and-Life, Choudhury 1999 J. Hydrol.,
-Yang et al. 2008 WRR ω-fits, AR6 §11.6 water-balance projections,
-Sankarasubramanian-Vogel 2003 WRR climate-elasticity of runoff,
-Roderick-Farquhar 2011 Phil. Trans. global-Budyko trends.
-
-Test: `tests/test_fv3_budyko_iter885.py` (9 tests: energy-limited
-AET→PET, water-limited AET→P, crossover P=PET → AET≈0.6-0.8·P,
-AET ≤ min(P,PET) physical bound, ↑ω sharpens transition, runoff
-coefficient, chain with AI, P=0 floored, 3-D shapes non-negative).
-
-### Why this iteration was meaningful
-
-Adds **water-energy framework primitive** (Budyko/Yang) closing
-the catchment water-balance pair with iter-884 AI.  Critical
-for: (1) hydrological runoff modeling Q/P = 1−AET/P;
-(2) AR6 §11.6 catchment-scale water-balance projections;
-(3) Roderick-Farquhar 2011 global Budyko-trend analysis under
-warming; (4) climate-elasticity of runoff (Sankarasubramanian
-2003).  Pure JAX, vmap-compatible.  Yang ω=2.6 is global-mean
-fit (default arg).  No `constants.py` additions.
 

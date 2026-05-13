@@ -202,6 +202,33 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # FV3_3D iter 188: dt fallback for adaptive cap when dt_actual not passed. PE typical 50-200s.
 
 
+def validate_corner_div_damp_nord(nord: int) -> None:
+    """FV3_3D iter 890: explicit nord range validation.
+
+    FV3 namelist `nord` is documented integer in {0, 1, 2, 3}:
+      0  — del-2 only (no higher-order Laplacian)
+      1  — del-4 (one Laplacian iteration)
+      2  — del-6 (two Laplacian iterations)
+      3  — del-8 (three Laplacian iterations)
+
+    legoESM tested range: nord ∈ {0, 1, 2, 3} (regression-guarded
+    in iter-886/887/888/889).  Higher values are not FV3-canonical
+    and not regression-tested; raise to prevent silent misuse.
+
+    Raises
+    ------
+    ValueError
+        If nord < 0 or nord > 3.
+    """
+    if not isinstance(nord, (int,)) or nord < 0 or nord > 3:
+        raise ValueError(
+            f"corner_div_damp_nord={nord!r} outside FV3 namelist "
+            f"range {{0, 1, 2, 3}}.  legoESM only regression-tested "
+            f"for these values (iter 886-889).  Use 0 (del-2 only), "
+            f"1 (del-4, FV3 default), 2 (del-6), or 3 (del-8)."
+        )
+
+
 # ==============================================================================
 # FV3 D-grid tendency function (core implementation)
 # ==============================================================================
