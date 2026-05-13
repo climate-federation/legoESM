@@ -5185,6 +5185,50 @@ in shear-driven PBLs (nighttime, sloping fronts), θ-jump works
 in convective PBLs (daytime free convection, cumulus).  Pure
 JAX, vmap-compatible.  No new physical constants introduced.
 
+## Iter 823 — eis_fv3 (Wood-Bretherton 2006 Estimated Inversion Strength)
+
+Added `eis_fv3(theta_700, theta_sfc, lcl_height, gamma_m_850,
+z_700=3000.0)` to `grids/cubed_sphere.py`.  Wood-Bretherton 2006
+EIS:
+
+```
+LTS = θ_700 − θ_surf                        (Klein-Hartmann 1993)
+EIS = LTS − Γ_m_850 · (z_700 − LCL)         (Wood-Bretherton 2006)
+```
+
+Removes the moist-adiabatic-implicit component of LTS — a deeper
+free troposphere with strong CC lapse-rate cooling inflates raw
+LTS without truly increasing the *additional* stability above
+what a moist adiabat from LCL would predict.  EIS is a better
+predictor of stratocumulus cloud fraction (Wood-Bretherton
+showed r ≈ 0.7 for monthly-mean Sc fraction vs EIS in CMIP).
+
+Stratocumulus regimes:
+  * EIS < 4 K       — trade-Cu / shallow Cu (open ocean)
+  * 4 ≤ EIS < 8 K   — transitional / Cu-under-Sc
+  * EIS ≥ 8 K       — well-formed Sc deck (subtropical Eastern
+                      boundary currents — California Current,
+                      Peru/Chile, Namibia, Australia)
+
+Composes:
+  * iter-765 ``lcl_height_fv3``        — provides LCL height
+  * iter-806 ``lapse_rate_moist_fv3``  — provides Γ_m at 850 mb
+  * Klein-Hartmann LTS = θ_700 − θ_sfc (inline subtraction)
+
+Test: `tests/test_fv3_eis_iter823.py` (6 tests: subtropical Sc
+sample EIS=7.4 (analytic), LCL=z_700 → EIS=LTS, monotone in LTS
+(↑LTS → ↑EIS), monotone in LCL (↑LCL → ↑EIS), full iter-806 Γ_m
+chain, 3-D shapes + finite).
+
+### Why this iteration was meaningful
+
+EIS is the canonical low-cloud-regime predictor used in CMIP
+analysis, satellite-cloud-fraction climatology, and stratocumulus
+parameterization tuning.  Composes 3 prior helpers (iter-765
+LCL, iter-806 Γ_m, Klein-Hartmann LTS) to give the most-used
+single-number Sc-regime metric.  Pure JAX, vmap-compatible.
+No new physical constants introduced.
+
 
 
 

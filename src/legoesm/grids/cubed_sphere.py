@@ -6368,6 +6368,63 @@ def mixed_layer_height_fv3(
     return jnp.take_along_axis(z, idx_safe[..., None], axis=-1)[..., 0]
 
 
+def eis_fv3(
+    theta_700: jax.Array,
+    theta_sfc: jax.Array,
+    lcl_height: jax.Array,
+    gamma_m_850: jax.Array,
+    z_700: float = 3000.0,
+) -> jax.Array:
+    """FV3_3D iter 823: Wood-Bretherton (2006) Estimated Inversion Strength.
+
+        LTS = θ_700 − θ_surf                         (Klein-Hartmann 1993)
+        EIS = LTS − Γ_m_850 · (z_700 − LCL)          (Wood-Bretherton 2006)
+
+    Better predictor of stratocumulus cloud fraction than the
+    raw LTS, because it removes the moist-adiabatic component of
+    the inversion's apparent stability (i.e., a deeper free
+    troposphere with strong CC lapse-rate cooling would inflate
+    LTS but doesn't really increase the *additional* stability
+    above what a moist adiabat from LCL would predict).
+
+    Stratocumulus regimes (Wood-Bretherton 2006, table 1):
+      * EIS < 4 K       — trade-Cu / shallow Cu (open ocean)
+      * 4 ≤ EIS < 8 K   — transitional / cumulus-under-Sc
+      * EIS ≥ 8 K       — well-formed Sc deck (subtropical
+                          eastern boundary currents)
+
+    Strongest correlation with low-cloud fraction in the
+    Atlantic, Pacific, and Southern Hemisphere Sc decks (r ≈ 0.7
+    for monthly-mean Sc fraction vs EIS in CMIP-class GCMs).
+
+    Composes:
+      * iter-765 ``lcl_height_fv3``    — provides LCL height
+      * iter-806 ``lapse_rate_moist_fv3`` — provides Γ_m at 850 mb
+
+    Caller supplies pre-computed θ_700, θ_surf, LCL, Γ_m_850.
+
+    Parameters
+    ----------
+    theta_700 : jax.Array
+        Potential temperature at 700 mb (K).
+    theta_sfc : jax.Array
+        Surface potential temperature (K).
+    lcl_height : jax.Array
+        Lifting condensation level height (m, AGL).
+    gamma_m_850 : jax.Array
+        Moist-adiabatic lapse rate at 850 mb (K/m).
+    z_700 : float
+        Reference height of the 700 mb surface (m); default 3000.
+
+    Returns
+    -------
+    eis : jax.Array
+        Estimated Inversion Strength (K).
+    """
+    lts = theta_700 - theta_sfc
+    return lts - gamma_m_850 * (z_700 - lcl_height)
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

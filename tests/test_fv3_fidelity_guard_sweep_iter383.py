@@ -410,6 +410,7 @@ _GUARD_MODULES = (
     "test_fv3_mean_layer_temperature_iter820",       # iter-820 add
     "test_fv3_mean_layer_field_iter821",             # iter-821 add
     "test_fv3_mixed_layer_height_iter822",           # iter-822 add
+    "test_fv3_eis_iter823",                          # iter-823 add
 )
 
 
