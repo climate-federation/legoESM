@@ -38,11 +38,11 @@ def test_iter365_compaction_present(doc_text):
     )
 
 
-def test_doc_size_below_5800_lines(doc_text):
+def test_doc_size_below_5300_lines(doc_text):
     n_lines = len(doc_text.splitlines())
-    assert n_lines < 5800, (
-        f"FV3_3D.md has {n_lines} lines (target < 5800).  "
-        f"Compaction scheduled at iter 860."
+    assert n_lines < 5300, (
+        f"FV3_3D.md has {n_lines} lines (target < 5300).  "
+        f"Next compaction at iter 870."
     )
 
 
@@ -471,6 +471,37 @@ def test_iter820_compaction_covers_topics(doc_text):
     for marker in required:
         assert marker in section, (
             f"iter-820 compacted block missing topic ``{marker}``."
+        )
+
+
+def test_iter860_compaction_present(doc_text):
+    """iter-860 compacted iter 851-859 into single block."""
+    assert "**Iters 851-859 (compacted iter 860)**" in doc_text, (
+        "iter-860 compaction block missing — doc re-expanded."
+    )
+
+
+def test_iter860_compaction_covers_topics(doc_text):
+    section_start = doc_text.find(
+        "**Iters 851-859 (compacted iter 860)**"
+    )
+    section_end = doc_text.find(
+        "**Iters 841-849", section_start,
+    )
+    assert section_start >= 0 and section_end > section_start
+    section = doc_text[section_start:section_end]
+    required = [
+        "851", "852", "853", "854", "855",
+        "856", "857", "858", "859", "860",
+        "ocean_heat_content", "ocean_ph_change",
+        "aragonite_saturation_state", "ocean_oxygen_decline",
+        "degree_heating_weeks", "marine_heatwave_category",
+        "wet_bulb_temperature_stull", "heat_index_rothfusz",
+        "growing_degree_days", "spi_z_score",
+    ]
+    for marker in required:
+        assert marker in section, (
+            f"iter-860 compacted block missing topic ``{marker}``."
         )
 
 

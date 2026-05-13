@@ -9127,6 +9127,97 @@ def growing_degree_days_fv3(
     return jnp.sum(jnp.maximum(t_eff - t_base, 0.0), axis=-1)
 
 
+def spi_z_score_fv3(
+    precip: jax.Array,
+    mu_p: jax.Array,
+    sigma_p: jax.Array,
+    sigma_floor: float = 1e-6,
+) -> jax.Array:
+    """FV3_3D iter 860: Standardized Precipitation Index (z-score form).
+
+    McKee et al. 1993 (8th Conf. Appl. Climatol.) drought-index
+    primitive — standardized precipitation anomaly relative to
+    long-term climatology:
+
+        SPI = (P − μ_P) / σ_P
+
+    Where:
+      * P       — observed precipitation accumulated over a fixed
+                  time window (typically 1, 3, 6, 12 months).
+      * μ_P     — climatological mean over baseline (e.g. 1981-2010).
+      * σ_P     — climatological standard deviation.
+
+    Full McKee formulation fits a gamma distribution to the
+    precipitation series and inverse-transforms quantiles to the
+    standard normal.  This primitive returns the *z-score form*
+    (linear normalization), which is the gamma-fit limit for
+    nearly-symmetric distributions and the standard simplified
+    formula used in IAM food-system and drought-impact diagnostics
+    (Vicente-Serrano et al. 2010 SPEI extension).
+
+    Sign: SPI < 0 ⇒ drier than baseline (drought); SPI > 0 ⇒ wetter.
+
+    Severity thresholds (McKee 1993 / NOAA NDMC):
+      | SPI            | Category               |
+      |----------------|------------------------|
+      |  SPI ≥ 2.0     | Extreme wet            |
+      | 1.5 ≤ SPI <2.0 | Severe wet             |
+      | 1.0 ≤ SPI <1.5 | Moderate wet           |
+      | −1 < SPI < 1   | Near-normal            |
+      | −1.5< SPI ≤−1  | Moderate drought       |
+      | −2 < SPI ≤−1.5 | Severe drought         |
+      |  SPI ≤ −2      | Extreme drought        |
+
+    Adds **first drought-impact primitive** — completes the
+    terrestrial-impact quartet:
+      * iter-857 wet-bulb T_w        — heat physiological
+      * iter-858 NOAA HI             — heat warning
+      * iter-859 GDD                 — crop development (positive)
+      * iter-860 SPI                 — drought stress
+
+    Closes AR6 §11 + §5 heat-and-water terrestrial-impact set.
+
+    Composes with iter-832 ``clausius_clapeyron_dqdt_fv3`` (more
+    water-vapor capacity under warming → potentially wetter or
+    drier depending on circulation; SPI captures observed/projected
+    P, decoupled from CC theory).
+
+    Used by: McKee et al. 1993 SPI introduction, Hayes et al. 1999
+    Bull. Am. Meteor. Soc. drought-monitor protocol, Vicente-Serrano
+    et al. 2010 SPEI extension (T-corrected variant), AR6 §11.6
+    drought projections, IPCC SREX 2012 drought definition, U.S.
+    Drought Monitor operational pipeline, IAM crop-yield modules
+    (Lobell-Schlenker 2010).
+
+    Note: gamma-fit form (full McKee SPI) would require fitting
+    distribution parameters per cell — not a pure primitive.  This
+    z-score variant operates on pre-computed (μ, σ) climatology;
+    caller computes those externally.
+
+    ``sigma_floor`` prevents div-by-0 when σ_P → 0 (degenerate
+    deterministic-climatology cell).
+
+    Parameters
+    ----------
+    precip : jax.Array
+        Observed precipitation accumulation (mm or kg/m²).
+    mu_p : jax.Array
+        Climatological mean (same units).
+    sigma_p : jax.Array
+        Climatological standard deviation (same units).
+    sigma_floor : float
+        Lower bound on σ_P; default 1e-6.
+
+    Returns
+    -------
+    spi : jax.Array
+        Standardized Precipitation Index (dimensionless z-score);
+        negative for drought, positive for wet conditions.
+    """
+    sigma_safe = jnp.maximum(sigma_p, sigma_floor)
+    return (precip - mu_p) / sigma_safe
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,
