@@ -55,10 +55,7 @@ from legoesm.grids.polar_filter import (
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
 from legoesm.core.precision import cast_pytree
-from legoesm.core.conservation import (
-    _accumulation_dtype,
-    _conservation_accumulator,
-)
+from legoesm.core.conservation import _conservation_accumulator
 from legoesm import constants
 
 

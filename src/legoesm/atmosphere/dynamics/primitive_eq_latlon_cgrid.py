@@ -84,7 +84,6 @@ from legoesm.timestepping.integration import IntegrationMixin
 from legoesm.core.cfl import pole_cell_dx, cfl_max_dt
 from legoesm.core.conservation import (
     zero_mean_tendency,
-    _accumulation_dtype,
     _batch_global_area_sums,
     _conservation_accumulator,
 )

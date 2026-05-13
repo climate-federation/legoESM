@@ -50,10 +50,7 @@ from legoesm.grids.cubed_sphere_cdgrid import (
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
-from legoesm.core.conservation import (
-    _accumulation_dtype,
-    _conservation_accumulator,
-)
+from legoesm.core.conservation import _conservation_accumulator
 from legoesm.core.fv3_sw_core import (
     _d2a2c_vect,
     _d_sw5_corner_divergence,

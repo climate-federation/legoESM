@@ -86,6 +86,14 @@ NH cross-grid TC1 mass-drift after iter-10 (matrix runner `notes` line):
   state in fp64 (the residual 4e-13 cube HS drift is fp64 accumulation
   noise across ~430 steps, not fp32 quantization).  Protects against
   future allow_downcast=True paths or fp32-only storage policies.
+- **iter-14**: audit + cleanup.  Confirmed `zero_mean_tendency`,
+  `fix_mass_hydrostatic_target`, `fix_mass_shallow_water` all already
+  use fp64 accumulators / iter-13 `_total_area` helper.  Confirmed no
+  remaining `_accumulation_dtype()` callers outside
+  `core/conservation.py` itself; removed the three now-stale dycore
+  imports (`shallow_water_latlon_cgrid.py`,
+  `shallow_water_fv3_cdgrid.py`, `primitive_eq_latlon_cgrid.py`).
+  829 unit tests PASS.
 
 ## Implementation patterns established (apply to any new dycore)
 
