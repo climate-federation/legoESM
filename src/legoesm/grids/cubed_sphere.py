@@ -7050,6 +7050,88 @@ def ice_albedo_feedback_fv3(
     return -s_incident * dalpha_dt
 
 
+def lapse_rate_feedback_fv3(
+    t_eff: jax.Array,
+    dT_atm_mean: jax.Array,
+    dT_sfc: jax.Array,
+    emissivity: jax.Array = 1.0,
+    dT_floor: float = 1e-6,
+) -> jax.Array:
+    """FV3_3D iter 835: lapse-rate climate feedback parameter.
+
+    Soden-Held 2006 lapse-rate feedback — TOA-LW response to the
+    *difference* between mid-tropospheric and surface warming
+    (i.e. the departure of column warming from uniform Planck):
+
+        λ_LR = − 4·ε·σ·T_eff³ · (ΔT̄_atm − ΔT_sfc) / ΔT_sfc
+
+    Derivation: linearizing OLR = ε·σ·T_eff⁴ at the effective
+    radiating level gives dOLR/dT_eff = 4·ε·σ·T_eff³.  The Planck
+    feedback assumes ΔT_eff = ΔT_sfc (uniform warming).  Lapse-
+    rate feedback corrects for the warming-amplification ratio
+    ΔT̄_atm/ΔT_sfc that the actual profile exhibits:
+
+        λ_LR = λ_Planck · (ΔT̄_atm − ΔT_sfc) / ΔT_sfc
+
+    Where iter-831 ``planck_feedback_fv3`` returns λ_Planck.
+
+    Regimes (sign of ΔT̄_atm − ΔT_sfc):
+      * Tropics: moist-adiabatic warming amplifies upper-trop
+        relative to surface (ΔT̄/ΔT_sfc ≈ 1.4) → λ_LR < 0
+        (stabilizing).  Tropical λ_LR ≈ −1.5 W/m²/K.
+      * Polar: surface warms faster than column (snow-ice-feedback
+        + stable BL trapping); ΔT̄/ΔT_sfc < 1 → λ_LR > 0
+        (destabilizing).  Polar λ_LR ≈ +0.5 W/m²/K locally.
+      * Global mean (CMIP): tropical-dominated → λ_LR ≈ −0.6 W/m²/K
+        (the canonical AR5/AR6 quartet value).
+
+    Closes the **AR5/AR6 fast-feedback quartet**:
+      * iter-831 λ_Planck   ≈ −3.76  W/m²/K   (stabilizing)
+      * iter-832 λ_WV (CC)  ≈ +1.80  W/m²/K   (destabilizing)
+      * iter-834 λ_α        ≈ +0.34  W/m²/K   (destabilizing)
+      * iter-835 λ_LR       ≈ −0.60  W/m²/K   (stabilizing)
+
+    Net AR5/AR6: λ_net ≈ −2.2 W/m²/K → ECS ≈ 3.7/|λ_net| ≈ 1.7 K
+    before λ_cloud (the major uncertainty source).
+
+    Composes iter-831 ``planck_feedback_fv3``: caller can chain
+    ``λ_LR(T_eff, ΔT̄, ΔT_sfc) = λ_Planck(T_eff)·(ΔT̄ − ΔT_sfc)/ΔT_sfc``.
+
+    Used by: Soden-Held 2006 / Held-Soden 2000 kernel decomposition,
+    AR5/AR6 climate-feedback tables, Bony et al. 2006 framework,
+    polar-amplification analysis (Pithan-Mauritsen 2014 ranking),
+    moist-adiabatic atmospheric-warming-pattern studies.
+
+    ``dT_floor`` prevents div-by-0 when ΔT_sfc → 0 (no perturbation).
+
+    Parameters
+    ----------
+    t_eff : jax.Array
+        Effective radiating temperature (K).
+    dT_atm_mean : jax.Array
+        Mass-weighted column-mean atmospheric warming (K).
+    dT_sfc : jax.Array
+        Surface warming (K).
+    emissivity : jax.Array or float
+        Broadband emissivity (0 ≤ ε ≤ 1); default 1.0.
+    dT_floor : float
+        Lower bound on ΔT_sfc magnitude (K); default 1e-6.
+
+    Returns
+    -------
+    lam_lr : jax.Array
+        Lapse-rate feedback (W/m²/K); negative in tropics,
+        positive at poles.
+    """
+    dT_sfc_safe = jnp.where(
+        jnp.abs(dT_sfc) < dT_floor,
+        jnp.sign(dT_sfc) * dT_floor + (dT_sfc == 0) * dT_floor,
+        dT_sfc,
+    )
+    lam_planck = -4.0 * emissivity * constants.sigma_sb * t_eff ** 3
+    return lam_planck * (dT_atm_mean - dT_sfc) / dT_sfc_safe
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

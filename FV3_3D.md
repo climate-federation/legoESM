@@ -5330,6 +5330,58 @@ albedo feedback; (3) snowball-Earth bifurcation studies;
 (4) Arctic-amplification factor decomposition.  Pure JAX, vmap-
 compatible.  No new physical constants introduced.
 
+## Iter 835 — lapse_rate_feedback_fv3 (closes AR5/AR6 quartet)
+
+Added `lapse_rate_feedback_fv3(t_eff, dT_atm_mean, dT_sfc,
+emissivity=1.0)` to `grids/cubed_sphere.py`.  Soden-Held 2006
+lapse-rate feedback — TOA-LW response to *non-uniform* column
+warming:
+
+```
+λ_LR = λ_Planck · (ΔT̄_atm − ΔT_sfc) / ΔT_sfc
+     = − 4·ε·σ·T_eff³ · (ΔT̄_atm − ΔT_sfc) / ΔT_sfc
+```
+
+Regimes:
+  * Tropics: moist-adiabatic warming amplifies upper-trop
+    (ΔT̄/ΔT_sfc ≈ 1.4) → λ_LR ≈ −1.5 W/m²/K (stabilizing).
+  * Polar: surface warms faster than column (BL trapping +
+    snow-ice); ΔT̄/ΔT_sfc < 1 → λ_LR > 0 (destabilizing).
+  * Global mean (CMIP, tropical-dominated): λ_LR ≈ −0.6 W/m²/K
+    (canonical AR5/AR6 quartet value).
+
+**Closes the AR5/AR6 fast-feedback quartet**:
+  * iter-831 λ_Planck   ≈ −3.76  W/m²/K   (stabilizing)
+  * iter-832 λ_WV (CC)  ≈ +1.80  W/m²/K   (destabilizing)
+  * iter-834 λ_α        ≈ +0.34  W/m²/K   (destabilizing)
+  * iter-835 λ_LR       ≈ −0.60  W/m²/K   (stabilizing)
+  ────────────────────────────────────────────────────────
+  Σ λ_net  ≈ −2.22  W/m²/K → ECS ≈ 3.7/|λ_net| ≈ 1.66 K
+  (before λ_cloud — major uncertainty source).
+
+Composes iter-831 ``planck_feedback_fv3``: identity
+``λ_LR = λ_Planck · (ΔT̄ − ΔT_sfc)/ΔT_sfc`` verified to
+machine precision in test.
+
+Used by: Soden-Held 2006 / Held-Soden 2000 kernel decomposition,
+AR5/AR6 climate-feedback tables, Bony et al. 2006 framework,
+Pithan-Mauritsen 2014 polar-amplification ranking, moist-
+adiabatic warming-pattern studies.
+
+Test: `tests/test_fv3_lapse_rate_feedback_iter835.py` (6 tests:
+tropical ratio 1.4 → λ_LR ≈ −1.5, uniform warming → 0, polar
+profile → positive, chain with iter-831 exact, ΔT_sfc=0 floored,
+3-D shapes).
+
+### Why this iteration was meaningful
+
+**Closes the AR5/AR6 canonical fast-feedback quartet** — every
+ECS paper since Bony et al. 2006 starts by separating climate
+feedback into λ_Planck + λ_WV + λ_α + λ_LR (+ λ_cloud).  All 4
+are now available as pure-JAX composable primitives, enabling
+end-to-end ECS decomposition from any state perturbation.  Pure
+JAX, vmap-compatible.  No new physical constants introduced.
+
 
 
 

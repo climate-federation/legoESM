@@ -422,6 +422,7 @@ _GUARD_MODULES = (
     "test_fv3_cc_scaling_iter832",                   # iter-832 add
     "test_fv3_fixed_rh_humidity_iter833",            # iter-833 add
     "test_fv3_ice_albedo_feedback_iter834",          # iter-834 add
+    "test_fv3_lapse_rate_feedback_iter835",          # iter-835 add
 )
 
 
