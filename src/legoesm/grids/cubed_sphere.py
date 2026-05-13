@@ -7812,6 +7812,114 @@ def gwp_single_decay_fv3(
     return agwp_x / agwp_co2
 
 
+def gtp_single_decay_fv3(
+    rad_eff: jax.Array,
+    tau: jax.Array,
+    horizon: jax.Array = 100.0,
+    agtp_co2: jax.Array = 6.84e-16,
+    c_climate: float = 0.631,
+    d_climate: float = 8.4,
+    tau_floor: float = 1e-6,
+    diff_floor: float = 1e-9,
+) -> jax.Array:
+    """FV3_3D iter 845: single-decay Global Temperature Potential.
+
+    Shine et al. 2005 instantaneous-temperature-response metric
+    for a well-mixed GHG with single-exponential atmospheric
+    decay convolved with a single-mode climate-response IRF:
+
+        AGTP_x(H) = (A_x · c · τ_x / (τ_x − d)) · (exp(−H/τ_x) − exp(−H/d))
+        GTP_x(H)  = AGTP_x(H) / AGTP_CO2(H)            (dimensionless)
+
+    Where:
+      * A_x   — radiative efficiency (W/m²/kg).
+      * τ_x   — atmospheric perturbation lifetime (years).
+      * c     — climate sensitivity (K per W/m²); default 0.631
+                (Shine et al. 2005 fast-mode coefficient).
+      * d     — climate-response timescale (years); default 8.4
+                (Shine et al. 2005 fast mode).
+      * H     — time horizon (years; default 100).
+      * AGTP_CO2(H) — reference CO₂ AGTP at horizon H (K per kg).
+                Default 6.84×10⁻¹⁶ (Shine et al. 2005 / AR5
+                Table 8.SM.16 at H=100).
+
+    Derivation: AGTP = ∫₀^H A·R_x(t')·IRF_T(H−t') dt' with
+    R_x(t)=exp(−t/τ_x) and IRF_T(s)=(c/d)·exp(−s/d) collapses to
+    the closed-form above.
+
+    Sign: positive GTP for warming GHG, like GWP.
+
+    AR6 reference GTP_100 values (this primitive reproduces with
+    appropriate (A, τ) pairs):
+      | gas    | A (W/m²/kg)    | τ (yr) | GTP_100 (AR6) |
+      |--------|----------------|--------|---------------|
+      | CH₄    | 3.88×10⁻¹³     | 11.8   | ≈ 4.7         |
+      | N₂O    | 3.03×10⁻¹³     | 109    | ≈ 233         |
+      | HFC-23 | 1.91×10⁻¹¹     | 228    | ≈ 12 400      |
+
+    **GTP vs GWP**: GTP focuses on temperature response at a
+    specific horizon (policy-relevant for end-state warming),
+    while iter-844 GWP integrates radiative forcing over the
+    horizon.  For short-lived gases (e.g. CH₄) GTP_100 << GWP_100
+    because most of the forcing happened decades earlier and the
+    temperature signal has substantially decayed by year 100.
+    For long-lived gases (CO₂, N₂O) the two metrics converge.
+
+    Composes naturally with iter-844 ``gwp_single_decay_fv3``:
+    the two together span the **emissions-metric primitive pair**
+    (time-integrated forcing vs end-state temperature).
+
+    Used by: Shine et al. 2005 / 2007 GTP introduction, AR5/AR6
+    Tables 7.SM (GTP_50, GTP_100), Tanaka-O'Neill 2018 policy-
+    metric review, GTP* variants, EU Commission emissions-pricing
+    proposals, IAM long-horizon mitigation analysis.
+
+    Closed-form numerically singular when τ_x = d (resonance);
+    ``diff_floor`` guards against this edge case.
+
+    Parameters
+    ----------
+    rad_eff : jax.Array
+        Per-mass radiative efficiency A_x (W/m²/kg).
+    tau : jax.Array
+        Atmospheric perturbation lifetime τ_x (years).
+    horizon : jax.Array or float
+        Time horizon H (years); default 100.
+    agtp_co2 : jax.Array or float
+        Reference AGTP_CO2 at horizon H (K per kg); default
+        6.84e-16 (AR5 Table 8.SM.16 H=100).
+    c_climate : float
+        Climate sensitivity (K per W/m²); default 0.631.
+    d_climate : float
+        Climate-response timescale (years); default 8.4.
+    tau_floor : float
+        Lower bound on τ (years); default 1e-6.
+    diff_floor : float
+        Lower bound on |τ − d| guard against τ=d resonance;
+        default 1e-9.
+
+    Returns
+    -------
+    gtp : jax.Array
+        Dimensionless GTP relative to CO₂ at horizon H.
+    """
+    tau_safe = jnp.maximum(tau, tau_floor)
+    diff = tau_safe - d_climate
+    diff_safe = jnp.where(
+        jnp.abs(diff) < diff_floor,
+        jnp.sign(diff) * diff_floor + (diff == 0) * diff_floor,
+        diff,
+    )
+    agtp_x = (
+        rad_eff
+        * c_climate
+        * tau_safe
+        / diff_safe
+        * (jnp.exp(-horizon / tau_safe) - jnp.exp(-horizon / d_climate))
+    )
+    return agtp_x / agtp_co2
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

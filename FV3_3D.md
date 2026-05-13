@@ -5426,6 +5426,67 @@ vmap-compatible.  AGWP_CO2 = 8.95×10⁻¹⁴ is AR6 reference (default
 arg, not a fundamental physical constant).  No `constants.py`
 additions.
 
+## Iter 845 — gtp_single_decay_fv3 (Shine et al. 2005 GTP)
+
+Added `gtp_single_decay_fv3(rad_eff, tau, horizon=100.0,
+agtp_co2=6.84e-16, c_climate=0.631, d_climate=8.4)` to
+`grids/cubed_sphere.py`.  Shine et al. 2005 instantaneous-
+temperature-response metric for a well-mixed GHG with single-
+exponential atmospheric decay convolved with single-mode
+climate-response IRF:
+
+```
+AGTP_x(H) = (A_x · c · τ_x / (τ_x − d)) · (exp(−H/τ_x) − exp(−H/d))
+GTP_x(H)  = AGTP_x(H) / AGTP_CO2(H)
+```
+
+Derivation: AGTP = ∫₀^H A·R_x(t')·IRF_T(H−t') dt' with
+R_x(t)=exp(−t/τ_x) and IRF_T(s)=(c/d)·exp(−s/d) gives the
+closed-form above.
+
+Default climate-response coefficients: c = 0.631 K/(W/m²),
+d = 8.4 yr (Shine et al. 2005 fast-mode fit).  AGTP_CO2(100) =
+6.84×10⁻¹⁶ K/kg (AR5 Table 8.SM.16).
+
+**GTP vs GWP** (iter-844):
+  * GTP = temperature response *at* horizon H (end-state).
+  * GWP = time-integrated forcing *over* horizon H.
+  * For short-lived gases (CH₄): GTP_100 << GWP_100 because
+    most forcing decayed before H, leaving little temperature.
+  * For long-lived gases (N₂O): GTP_100 ≈ GWP_100 (both metrics
+    converge in the persistent-forcing limit).
+
+Spans the **emissions-metric primitive pair** with iter-844:
+  | gas    | GWP_100 | GTP_100 | comment             |
+  |--------|---------|---------|---------------------|
+  | CH₄    | 27      | 4.7     | short-lived (τ≪d)   |
+  | N₂O    | 273     | 233     | long-lived (τ≫d)    |
+  | HFC-23 | 14 600  | 12 400  | long-lived (τ≫d)    |
+
+Closed-form numerically singular at τ_x=d_climate=8.4 yr;
+``diff_floor`` guards against resonance.
+
+Used by: Shine et al. 2005/2007 GTP introduction, AR5/AR6
+Tables 7.SM (GTP_50 and GTP_100), Tanaka-O'Neill 2018 policy-
+metric review, GTP* variants, EU emissions-pricing proposals,
+long-horizon IAM mitigation analysis.
+
+Test: `tests/test_fv3_gtp_iter845.py` (7 tests: CH₄ short-lived
+GTP << GWP, N₂O long-lived plausible band, horizon dependence
+GTP_20 > GTP_100 for CH₄, A=0 → 0, τ=d resonance floored, GTP/GWP
+same-sign consistency, 3-D shapes + non-negative).
+
+### Why this iteration was meaningful
+
+Adds the temperature-response policy-metric primitive to pair
+with iter-844 GWP.  GTP is the IPCC/EU-preferred metric for
+*end-state warming targets* (Paris-Agreement language), while
+GWP suits *cumulative-forcing* accounting (UNFCCC inventories).
+Closes the emissions-metric primitive pair.  Single-decay form
+matches the AR6 emissions-impulse-response framework cleanly
+in pure JAX.  c, d, AGTP_CO2 are AR5/Shine empirical fits
+(default args).  No `constants.py` additions.
+
 
 
 

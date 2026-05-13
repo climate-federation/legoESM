@@ -432,6 +432,7 @@ _GUARD_MODULES = (
     "test_fv3_volcanic_forcing_iter842",             # iter-842 add
     "test_fv3_aerosol_forcing_iter843",              # iter-843 add
     "test_fv3_gwp_iter844",                          # iter-844 add
+    "test_fv3_gtp_iter845",                          # iter-845 add
 )
 
 
