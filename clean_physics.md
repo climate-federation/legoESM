@@ -375,6 +375,38 @@ Verified clean:
 
 No code changes this iteration.
 
+## Iter-116 — radiation `integration.py` audit
+Audited `atmosphere/physics/radiation/integration.py` (892 LOC, top-
+level dispatcher routing gray + RRTMGP through hydrostatic / non-
+hydrostatic / spectral-PE / MPAS bridges).
+
+Verified clean:
+- **`_compute_insolation`**: 3-mode dispatch — diurnal (cos_sza from
+  hour/lon), perpetual-equinox (`S_0/π · max(cos lat, 0)`), or
+  daily-mean (Eq. 2.6 with iter-92 polar AD-safe clip).  Returns
+  `(insolation, cos_sza, f_day)` for downstream branching.
+- **`_compute_ozone_vmr`**: dispatches between AMIP zonal-mean,
+  `gozsolar`-style polynomial, and the ML ridge (`predict_ozone_ml`).
+  Reuses the pre-loaded `ml_ozone_coefs` from `make_radiation_physics`
+  to avoid per-step NetCDF load.
+- **`_extract_tracer_columns`**: dtype inferred from `state.T.data`
+  to avoid silent f64 promotion on Metal/fp32 backends; q_c / q_i
+  defensively clipped at `max(..., 0)`.
+- **`_pack_hydrostatic_tendencies`**: zero placeholders for
+  `du/dt`, `dv/dt`, `dp_s/dt`, `dphis/dt` pinned to upstream state
+  precision (no silent f64 promotion); only `dT/dt` non-zero.
+- **`_call_radiation_backend` daily-mean RRTMGP path** (iter-92
+  verified): when `cos_sza is None` and `f_day is provided`, derives
+  daytime-effective cos(SZA) via `insol / (S_0 · max(f_day, 1e-6))`
+  and rescales SW fluxes back by `f_day` after the solver call;
+  insolation=0 at polar night ⇒ cos_sza=0 safely.
+- **Make-time-state closure pattern**: `_time = {"day_of_year": ...,
+  "seconds_of_day": ...}` mutable dict + `set_time` setter — closure-
+  captured but Python-mutable, so the JIT-compiled `physics_fn`
+  reuses one trace across time updates (no recompile per step).
+
+No code changes this iteration.
+
 ## Next iterations
 Continue addressing codex findings and direct-inspection sweeps until all schemes are
 provably conservative, monotone, CFL-safe, and AD-safe across mixed wet/dry grids.
