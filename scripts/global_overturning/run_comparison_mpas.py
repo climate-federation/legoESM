@@ -247,6 +247,14 @@ def main():
     p.add_argument("--tag", default=None,
                    help="Experiment tag (e.g., 'e0b'). Output goes to "
                         "results/.../mpas_{tag}/. If omitted, uses 'mpas/'.")
+    p.add_argument("--save-every-days", type=int, default=1,
+                   help="Save restart and snapshot every N days (default 1).")
+    p.add_argument("--k-zeta-bih", type=float, default=None,
+                   help="Override K_zeta_bih (default: use 1e14).")
+    p.add_argument("--apvm-dt", type=float, default=None,
+                   help="Override apvm_dt [s] (default: 0 = disabled).")
+    p.add_argument("--b-h", type=float, default=None,
+                   help="Override B_h biharmonic viscosity [m⁴/s] (default: 0).")
     p.add_argument("--etopo",
                    default="/home/dbalwada/legoESM/data/bathymetry/etopo_1deg.nc")
     args = p.parse_args()
@@ -331,7 +339,9 @@ def main():
         bottom_drag_r=BOTTOM_DRAG_R,
         bottom_drag_bbl_thickness=BOTTOM_DRAG_BBL,
         bottom_drag_bg_velocity=BOTTOM_DRAG_BG_VEL,
-        K_zeta_bih=1e14,                # MPAS-only: TRiSK null mode damping
+        K_zeta_bih=args.k_zeta_bih if args.k_zeta_bih is not None else 1e14,
+        B_h=args.b_h if args.b_h is not None else 0.0,
+        apvm_dt=args.apvm_dt if args.apvm_dt is not None else 0.0,
         equatorial_visc_boost=0.0,
         pgf_scheme="adcroft",             # now works: use_h_actual_pgf=True by default
         implicit_vertical_mixing=True,
@@ -385,7 +395,8 @@ def main():
           f"BBL={BOTTOM_DRAG_BBL}m, u_bg={BOTTOM_DRAG_BG_VEL}")
     print(f"    GM/Redi: κ_GM={KAPPA_GM}, κ_Redi={KAPPA_REDI}")
     print(f"    PGF=adcroft, barotropic=implicit_cn")
-    print(f"    K_zeta_bih=1e14 (MPAS-only)")
+    _kzb = args.k_zeta_bih if args.k_zeta_bih is not None else 1e14
+    print(f"    K_zeta_bih={_kzb:.0e} (MPAS-only)")
     print(f"    dt={DT}s, tracer_advection=tvd")
     print(f"    Wind: global_wind τ_max={TAU_MAX}, "
           f"tropical_scale={TROPICAL_WIND_SCALE}")
@@ -394,7 +405,7 @@ def main():
     total_days = args.days
     dt = DT
     n_steps = int(total_days * 86400 / dt)
-    diag_every_day = 1  # daily snapshots
+    diag_every_day = args.save_every_days
     diag_steps = int(diag_every_day * 86400 / dt)
 
     # Per-timestep CSV

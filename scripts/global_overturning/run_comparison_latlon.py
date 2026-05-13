@@ -272,6 +272,14 @@ def main():
     p.add_argument("--tag", default=None,
                    help="Experiment tag (e.g., 'e1'). Output goes to "
                         "results/.../latlon_{tag}/. If omitted, uses 'latlon/'.")
+    p.add_argument("--save-every-days", type=int, default=1,
+                   help="Save restart and snapshot every N days (default 1).")
+    p.add_argument("--b-h", type=float, default=None,
+                   help="Override B_h biharmonic viscosity [m⁴/s] (default: 0).")
+    p.add_argument("--a-h", type=float, default=None,
+                   help="Override A_h Laplacian viscosity [m²/s] (default: 1e4).")
+    p.add_argument("--c-smag-lap", type=float, default=None,
+                   help="Override C_smag_lap (default: 0.33).")
     p.add_argument("--etopo",
                    default="/home/dbalwada/legoESM/data/bathymetry/etopo_1deg.nc")
     args = p.parse_args()
@@ -366,8 +374,9 @@ def main():
 
     # --- Model config ---
     ocean_config = LatLonCGridOceanConfig(
-        A_h=A_H,
-        C_smag_lap=C_SMAG_LAP,
+        A_h=args.a_h if args.a_h is not None else A_H,
+        B_h=args.b_h if args.b_h is not None else 0.0,
+        C_smag_lap=args.c_smag_lap if args.c_smag_lap is not None else C_SMAG_LAP,
         A_v=A_V,
         K_v=K_V,
         bottom_drag_r=BOTTOM_DRAG_R,
@@ -415,7 +424,7 @@ def main():
     total_days = args.days
     dt = DT
     n_steps = int(total_days * 86400 / dt)
-    diag_every_day = 1
+    diag_every_day = args.save_every_days
     diag_steps = int(diag_every_day * 86400 / dt)
 
     # Per-timestep CSV

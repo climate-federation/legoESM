@@ -416,46 +416,153 @@ correction on h_partial — consistent.
 **Validated:** Exp 0c: max|η| dropped from 4.13 m → 0.17 m
 (matching lat-lon's 0.22 m).
 
+### Issue 3: K_zeta_bih over-damps the ACC
+
+**Found:** 2026-05-12  
+**Severity:** High (MPAS Drake = 25 Sv vs lat-lon = 126 Sv)  
+**Status:** Investigating alternative damping strategies.
+
+**Problem:** MPAS uses K_zeta_bih = 1e14 (biharmonic ζ damping) to
+control the TRiSK vorticity checkerboard null mode. This is a
+legoESM invention — production MPAS-Ocean does NOT use this operator.
+
+**K_zeta_bih sensitivity sweep (branched from year 6):**
+
+| K_zeta_bih | Drake (equilibrium) | max\|u\| | Stability |
+|------------|-------------------|----------|-----------|
+| 1e12 | ~6 Sv (declining) | 1.09 | Stable but ACC collapses |
+| 1e14 | ~25 Sv (plateau yr 30+) | 0.89 | Stable, baseline |
+| 1e15 | ~12 Sv (recovering?) | 0.61 | Stable, too calm |
+| 1e16 | BLOWUP (10 steps) | 38 | Biharmonic CFL exceeded |
+
+Reducing K_zeta_bih makes things WORSE (checkerboard disrupts ACC).
+Increasing makes things WORSE (over-damps physical vorticity, or
+blows up). 1e14 is near optimal but still only gives 25 Sv.
+
+**Drake Passage decomposition (year > 1 means):**
+
+| Run | Total | Upper (<1000m) | Lower (>1000m) | Structure |
+|-----|-------|---------------|----------------|-----------|
+| MPAS (K_zeta_bih=1e14) | +16 Sv | +10 Sv (61%) | +6 Sv (39%) | Barotropic |
+| Lat-lon | +14 Sv | +21 Sv (150%) | −7 Sv (−50%) | Baroclinic |
+
+MPAS has barotropic ACC (uniform with depth); lat-lon has realistic
+baroclinic structure (surface jet + deep return). K_zeta_bih likely
+damps the vortex stretching that creates vertical shear.
+
+**Ocean-expert research (2026-05-12): production MPAS-Ocean uses APVM**
+
+Production MPAS-Ocean (E3SM) handles the checkerboard via:
+1. Energy-conserving PV scheme + APVM (Anticipated PV Method)
+2. Biharmonic velocity viscosity B_h (del4 on u, not ζ)
+3. Leith closure (flow-adaptive viscosity)
+
+Our K_zeta_bih * del4(ζ) is NOT used in production. APVM upstream-
+biases PV by half a timestep, selectively damping the checkerboard
+without over-damping physical vorticity. We already have `apvm_dt`
+in MPASOceanConfig (currently disabled, default 0.0).
+
+**APVM experiment plan (branched from year 6):**
+
+| Exp | Config | Purpose |
+|-----|--------|---------|
+| e7a | K_zeta_bih=0, apvm_dt=1200 | APVM only (production approach) |
+| e7b | K_zeta_bih=0, apvm_dt=1200, B_h=7.7e12 | APVM + production B_h |
+| e7c | K_zeta_bih=0, apvm_dt=1200, C_leith=1.0 | APVM + Leith closure |
+
+References:
+- Sadourny & Basdevant (1985) — APVM original
+- Ringler et al. (2010) — MPAS-Ocean PV schemes
+- Thuburn et al. (2009, 2012) — TRiSK computational modes
+- Petersen et al. (2019) — E3SM ocean evaluation
+- Hoch et al. (2020) — MPAS-Ocean variable resolution
+
 ---
 
-## Next Steps (2026-05-12 evening)
+### Issue 4: Lat-lon spurious zonal jets (missing biharmonic viscosity)
 
-1. **Isolation experiments** for Issue 1 (S drift):
-   Run MPAS 30 days with components disabled one at a time:
-   - Exp A: No GM/Redi (gm_redi=None)
-   - Exp B: No KPP (vertical_mixing scheme="none")
-   - Exp C: No advection (upwind instead of TVD, or dt_tracer=0)
-   - Exp D: No implicit vertical mixing (explicit only)
-   - Exp E: No surface forcing (scheme="none")
-   Compare S drift in each to identify the responsible component.
+**Found:** 2026-05-12  
+**Severity:** High (basin-spanning zonal jets after 6 years)  
+**Status:** Diagnosed, testing fix.
 
-2. Once Issue 1 source identified: fix and validate.
+**Symptom:** After 6 years of spinup, the lat-lon 1° run develops
+alternating east-west velocity bands (zonal jets) spanning entire
+ocean basins. Meridional spacing ~3-5° (300-500 km ≈ 3-5Δx).
 
-3. Extend baseline to 1-year and 10-year production comparison.
+**Root cause (two independent agents agree):** Missing biharmonic
+viscosity (B_h = 0). Our config uses only Laplacian (A_h=1e4 +
+C_smag_lap=0.33), which is not scale-selective enough. Laplacian
+damps 2Δx modes only 4× faster than 4Δx; biharmonic damps them
+16× faster. Without biharmonic, the enstrophy cascade organizes
+grid-scale noise into coherent jets at the Rhines scale (~4Δx).
+
+Every production 1° ocean model uses biharmonic as primary dissipation:
+- MOM6 OM4p5: B_h ~ 1e10-2e10 (Smagorinsky biharmonic)
+- NEMO ORCA1: B_h = 1.5e11
+- POP/CESM: B_h ~ 2.7e11
+
+Contributing factor: zonally symmetric forcing (global_wind is purely
+latitude-dependent) preferentially excites zonal wavenumber k=0 modes.
+
+**NOT the cause:** enhanced diffusion convection (sigmoid sharp enough),
+Smagorinsky anisotropy (uses sqrt(area), isotropic), Matsuno Coriolis
+(negligible asymmetry), AL81 PV flux (production-grade), GM κ=600
+(acts on tracers not momentum).
+
+**Fix:** Add B_h = 5e10 m⁴/s (MOM6 range) to the lat-lon config.
+Implementation already fully wired. Biharmonic CFL safe (1.4e-6).
+
+**Experiment:** Exp e8_bih — lat-lon with B_h=5e10, from year-6
+restart, 5 years.
+
+## Completed Steps
+
+1. ✅ Matched config designed and documented
+2. ✅ 30-day baseline runs (MPAS + lat-lon, fp32 then fp64)
+3. ✅ Adcroft PGF bug found and fixed (use_h_actual_pgf default)
+4. ✅ S drift diagnosed (float32 precision → fp64 fix)
+5. ✅ TVD stencil + Hu_avg conservation fixes (defense-in-depth)
+6. ✅ CFL diagnostic bug fixed (ocean-only dx_min)
+7. ✅ 1-year baseline runs (both grids, fp64)
+8. ✅ 5-year lat-lon run (Drake → 126 Sv)
+9. ✅ 50-year MPAS baseline run (Drake → 25 Sv plateau)
+10. ✅ K_zeta_bih sensitivity sweep (1e12, 1e14, 1e15, 1e16)
+11. ✅ Drake transport decomposition (barotropic vs baroclinic)
+12. ✅ Production MPAS-Ocean research (APVM discovery)
+13. 🔄 APVM experiment (Exp e7a, next)
+
+## Next Steps
+
+1. **Exp e7a:** K_zeta_bih=0, apvm_dt=1200 — test if APVM alone
+   controls the checkerboard while allowing stronger ACC.
+
+2. **If e7a works:** Run 20 years, compare Drake transport and
+   vertical structure with baseline and lat-lon.
+
+3. **If e7a shows checkerboard:** Try e7b (add B_h=7.7e12) or
+   e7c (add C_leith=1.0).
+
+4. **Once checkerboard strategy resolved:** Final 50-year
+   comparison with matched APVM config.
 
 ---
 
 ## Honest Caveats
 
-1. The MPAS K_zeta_bih = 1e14 is extra dissipation with no lat-lon
-   counterpart. It acts mainly on grid-scale vorticity noise, but
-   its integrated effect on Drake transport or WBC structure is
-   unknown.
-
-2. Smagorinsky single-pass on MPAS vs stress-tensor on lat-lon is
+1. Smagorinsky single-pass on MPAS vs stress-tensor on lat-lon is
    an implementation difference. For smoothly varying A_smag the
    difference is small, but near coastlines or fronts where
    ∇A_smag is large, the MPAS version misses the cross-term.
 
-3. The 80°N polar cap removes MPAS's advantage of pole-free coverage.
+2. The 80°N polar cap removes MPAS's advantage of pole-free coverage.
    Arctic circulation cannot be compared in this setup.
 
-4. Lat-lon cells near 80°N are ~19 km — effectively eddy-permitting
+3. Lat-lon cells near 80°N are ~19 km — effectively eddy-permitting
    resolution. The same physics (GM κ=600, A_h=1e4) may be
    inappropriate there. This is a known issue with lat-lon grids
    at high latitudes.
 
-5. A_h=1e4 + C_smag_lap=0.33 blew up from cold start on MPAS when
+4. A_h=1e4 + C_smag_lap=0.33 blew up from cold start on MPAS when
    C_smag_lap was lowered to 0.15 (Step 2 of tuning plan). With
    C_smag_lap=0.33 this should be stable, but watch the first
    few months carefully.
