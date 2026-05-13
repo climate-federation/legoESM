@@ -272,6 +272,22 @@ def step_carbon_differland(
     A_root = (NPP_pos - A_fol - A_lab) * config.f_root
     A_wood = jnp.maximum(NPP_pos - A_fol - A_lab - A_root, 0.0)
 
+    # NPP deficit (NPP_day < 0, GPP cannot cover R_auto).  Draw from C_lab
+    # (labile reserves first, the standard CASA/DALEC convention for
+    # carbon-starvation periods such as polar winter / drought).  Cap
+    # the draw at the labile pool contents so we don't go negative
+    # within one step.  The atmosphere already receives the full
+    # ``R_auto`` via NEE; the corresponding biomass loss now closes the
+    # carbon budget when ``GPP < R_auto``.  Without this draw, a
+    # ``test_total_carbon_conservation_tendency`` regression of order
+    # ``(R_maint − GPP)·dt`` builds up every step — masked by the
+    # rtol=0.05 tolerance in the existing test but visible at high
+    # tolerance.
+    npp_deficit_day = jnp.maximum(-NPP_day, 0.0)
+    lab_deficit_draw = jnp.minimum(
+        npp_deficit_day, state.C_lab / jnp.maximum(dt_days, 1e-10),
+    )
+
     # --- Phenology ---------------------------------------------------------
     lrf, lff = compute_phenology(jnp.asarray(doy), lat, config)
 
@@ -308,7 +324,7 @@ def step_carbon_differland(
 
     new_state = CarbonState(
         C_lab=_soft_pos(
-            state.C_lab + (A_lab - lab_release) * dt_days),
+            state.C_lab + (A_lab - lab_release - lab_deficit_draw) * dt_days),
         C_fol=_soft_pos(
             state.C_fol + (A_fol + lab_release - leaf_litter) * dt_days),
         C_root=_soft_pos(

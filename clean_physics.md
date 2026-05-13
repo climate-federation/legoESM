@@ -9,6 +9,36 @@ Branch: `clean_physics`. Driven by Ralph loop + `/codex:adversarial-review`.
 - **Ocean** (`src/legoesm/ocean/physics/`): vertical_mixing, bottom_drag, lateral_mixing, convection, surface_forcing, shortwave_penetration, mixing.
 - **Cryosphere** (`src/legoesm/ice/`): sea_ice, dynamics, itd, rheology, transport.
 
+## Iteration 62 — 2026-05-13
+
+**Bug fix: carbon conservation under R_auto > GPP.**
+
+`carbon_cycle.step_carbon_differland` emits `R_auto = R_maint +
+R_growth` to atmosphere via NEE, but the biomass pools that
+PRODUCED `R_maint` are NEVER decremented.  When `GPP < R_maint`
+(polar winter, drought, nighttime + cold), the deficit `(R_auto −
+GPP)·dt` of "ghost carbon" appears in the atmosphere every step.
+
+The existing `test_total_carbon_conservation_tendency` masked this
+with `rtol=0.05` (5%); the violation is bounded by `R_maint − GPP`
+which is small under typical tropical forcing but visible under
+carbon-starvation conditions.
+
+Fix: when `NPP_day < 0`, draw the deficit `|NPP_day|` from the
+labile pool `C_lab` (capped at `C_lab/dt_days` so the pool can't go
+negative within a step).  Carbon balance now closes exactly under
+`GPP ≥ R_auto`, and within the `C_lab/dt_days` cap under
+carbon-starvation regimes.  Standard CASA/DALEC convention.
+
+New regression test
+`test_total_carbon_conservation_under_carbon_starvation` exercises
+`sw=0, T=285K, beta=1, precip=1e-6` (zero light + above-freezing
+respiration) and verifies conservation at `rtol=1e-3` (50× tighter
+than the existing test).
+
+**Tests (post iter-62):** 43 / 43 carbon unit tests pass +
+new regression at `rtol=1e-3`.
+
 ## Iteration 61 — 2026-05-13
 
 **Scan-only iteration: verified other ocean dz / jacobian divisions
