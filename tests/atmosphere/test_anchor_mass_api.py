@@ -479,3 +479,50 @@ def test_anchored_step_supports_jax_grad_spectral_pe():
         )
     finally:
         set_policy(saved)
+
+
+def test_anchored_step_supports_jax_grad_cube_nh():
+    """iter-40: ``jax.grad`` through anchored ``step()`` on cube NH.
+
+    Third AD code path after iter-37 (cube PE additive fixer) and
+    iter-39 (spectral PE SH log-scale fixer). Cube NH uses the
+    ``fix_mass_nonhydrostatic`` path that applies a uniform additive
+    correction to ``rho_prime`` (3-D state) normalised by ``∫ J·dz·dA``.
+
+    Catches NH-specific AD regressions — e.g. a stop_gradient on the
+    volume normaliser or a host-callback inside ``compute_nh_dry_mass``.
+    """
+    from legoesm.core.precision import PrecisionPolicy, set_policy, get_policy
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+        CDGridCompressibleEulerModel,
+        CDGridCompressibleEulerConfig,
+    )
+    from tests.test_cases.dcmip2025 import dcmip25_tc1_init
+
+    saved = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp64())
+        grid = create_cubed_sphere(8)
+        state0, hcoord, tmetric = dcmip25_tc1_init(grid, n_levels=8)
+        cfg = CDGridCompressibleEulerConfig(
+            n_acoustic_substeps=10, semi_implicit_acoustic=True,
+            fix_mass=True, anchor_mass_to_initial=True,
+        )
+        model = CDGridCompressibleEulerModel(
+            grid, hcoord, tmetric, cfg)
+
+        def loss(rho_prime_data):
+            state = state0._replace(
+                rho_prime=state0.rho_prime.replace(data=rho_prime_data))
+            s = model.step(state, 5.0)
+            return jnp.sum(s.theta_prime.data ** 2)
+
+        model.reset_target_mass()
+        grad = jax.grad(loss)(state0.rho_prime.data)
+
+        assert jnp.all(jnp.isfinite(grad))
+        assert float(jnp.max(jnp.abs(grad))) > 0.0
+        assert grad.dtype == jnp.float64
+    finally:
+        set_policy(saved)
