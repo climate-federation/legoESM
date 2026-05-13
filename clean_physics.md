@@ -231,6 +231,26 @@ production setups all have q_v tracer so the bug was dormant.
 - Pre-existing test failure `test_b_salt_sign_freshening_is_stabilizing` (harness
   fragility — `jnp.mean(None)` when `out.K_v` is None) — needs harness fix.
 
+## Iter-84 — PDI hydraulic-conductivity wet-end smoothstep inverted
+`src/legoesm/land/soil_hydraulics.py:322` (Iden et al. 2015 PDI capillary K with
+max-pore-size constraint).  Cosine interpolation between `h_crit` and `h≈0` was
+written `0.5*(1+cos(π·frac))`, giving `Kr_interp = Kr_crit` at frac=0 (wet end)
+and `Kr_interp = 1` at frac=1 (h=h_crit) — the opposite of the intended boundary
+conditions.  Diagnosis: at h=h_crit, Kr_interp must match the standard
+capillary `Kr_c(h_crit) = Kr_crit` for continuity; at h≈0 it must approach 1 so
+K → K_sat.  Loam defaults gave Kr_crit ≈ 0.342, so saturated K was effectively
+clamped at 34 % of K_sat in the wet regime.  Fix replaces `(1 + cos)` with
+`(1 − cos)` so the smoothstep runs 1 → Kr_crit as frac goes 0 → 1.
+
+Quantitative check (loam defaults, JAX float64, CPU):
+- `K(h = h_crit = 0.06 m) = 9.871e-7 m/s = K_sat * Kr_crit` (continuous match)
+- `K(h = 1e-9 m) = 2.830e-6 m/s ≈ 0.979 * K_sat` (smoothly approaching K_sat)
+- `K(h = 1e-12 m) = 2.890e-6 m/s = K_sat` (exact to machine precision)
+
+Regression test `test_K_approaches_Ksat_at_saturation` walks h from h_crit down
+to 1e-12 m, asserts monotone K and `K(1e-12) = K_sat` to rtol=1e-6.  Full
+`tests/unit/test_land_ice_soil_hydraulics.py` (38 tests) green.
+
 ## Next iterations
 Continue addressing further codex findings and direct-inspection sweeps until all
 schemes are provably conservative, monotone, CFL-safe, and AD-safe across mixed
