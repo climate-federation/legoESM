@@ -4479,7 +4479,16 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 # but the matrix runner had remained on the legacy
                 # scalar-halo path.
                 use_fv3_vector_halo_uv=True,
-                use_fv3_a2b_ord4_vector_uv=True)
+                use_fv3_a2b_ord4_vector_uv=True,
+                # new_test_dycores iter-12: enable FV3 iter-320 c_v
+                # denominator for NH d_con (compressible_euler_cdgrid.py
+                # line ~220 comment): NH conserves internal energy
+                # c_v·T, but legoESM's default used c_pd which
+                # under-heats by c_v/c_p ≈ 0.714 (~40 % magnitude).
+                # Factory ``make_fv3_faithful_nh_config`` enables this
+                # by default; matrix runner had remained at the
+                # under-heating default.
+                use_fv3_d_con_cv=True)
         elif test_case == "tc2a":
             from tests.test_cases.dcmip2025 import dcmip25_tc2_init
             state, hcoord, tmetric, small_grid = dcmip25_tc2_init(
@@ -4504,7 +4513,11 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 # TC1.  Pre-change TC2 cube |w|_max = 4.65 m/s vs ico
                 # 0.36 / spec 0.36 (~13x gap).
                 use_fv3_vector_halo_uv=True,
-                use_fv3_a2b_ord4_vector_uv=True)
+                use_fv3_a2b_ord4_vector_uv=True,
+                # new_test_dycores iter-12: c_v denominator for NH
+                # d_con (factory default; ~40 % heating-magnitude
+                # correctness fix).
+                use_fv3_d_con_cv=True)
         elif test_case == "tc3":
             from tests.test_cases.dcmip2025 import dcmip25_tc3_init
             state, hcoord, tmetric, small_grid = dcmip25_tc3_init(
@@ -4530,7 +4543,11 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 # dominated by physical convective updrafts, not
                 # discretization noise.
                 use_fv3_vector_halo_uv=True,
-                use_fv3_a2b_ord4_vector_uv=True)
+                use_fv3_a2b_ord4_vector_uv=True,
+                # new_test_dycores iter-12: c_v denominator for NH
+                # d_con (factory default; ~40 % heating-magnitude
+                # correctness fix).
+                use_fv3_d_con_cv=True)
         else:
             raise ValueError(f"Unknown NH test case: {test_case}")
 

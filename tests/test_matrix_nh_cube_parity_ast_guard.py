@@ -131,6 +131,22 @@ def test_tc3_cube_has_a2b_ord4_flag():
     )
 
 
+def test_all_nh_cube_branches_use_d_con_cv():
+    """iter-12 sentinel: all 3 NH cube branches enable
+    ``use_fv3_d_con_cv=True`` (c_v denominator for NH d_con heating;
+    matches FV3-faithful factory default in
+    ``make_fv3_faithful_nh_config``).
+    """
+    blocks = _find_nh_config_blocks()
+    for tc in ("tc1", "tc2a", "tc3"):
+        assert "use_fv3_d_con_cv=True" in blocks[tc], (
+            f"iter-12 regression: {tc} cube NH config lost "
+            "``use_fv3_d_con_cv=True``.  This re-introduces a ~40 % "
+            "heating-magnitude error in the NH d_con term "
+            "(c_pd vs c_v denominator)."
+        )
+
+
 def test_sw_cube_uses_iter1009_dual_target_config():
     """iter-1/8 sentinel: matrix runner SW W2/W5 cube branch routes
     through the canonical ``iter1009_dual_target_config(n)`` helper
