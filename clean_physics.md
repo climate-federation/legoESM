@@ -313,6 +313,40 @@ Verified clean (no similar issue) in:
 
 107 convection tests green.
 
+## Iter-105 — multilayer_land + slab_land + coupler ocean tile sweep
+Audited `land/multilayer_land.py` end-to-end (543 LOC), `land/slab_land.py`
+(328 LOC), `coupler/{surface_energy,coupler.py}`, and traced the
+TileResponse.tau_x convention across all four tile producers (ocean
+tile, sea-ice slab + dynamic, land slab + multilayer, lake).
+
+Verified clean:
+- **`surface_radiation_fluxes`**: canonical Stefan-Boltzmann surface BC
+  with reflected-down LW component; `lw_up = ε·σ·T⁴ + (1−ε)·LW_down`.
+- **Multilayer land energy budget**: `G_surface = SW_net + LW_net −
+  SH − LH` (positive into soil), with subsequent `melt_energy =
+  snow_melt·L_f/dt` subtracted before the soil thermal solve; water-
+  limited evap excess energy `(evap_demand − evap_actual)·L_eff` added
+  back to G_surface (iter-71 phase-aware fix held).  q_sfc post-step
+  applies `is_frozen_new` switch consistent with the pre-step phase
+  decision.
+- **Slab land**: parallel structure; `T_soil_new += dt·evap_excess/
+  heat_cap` adds the missed-evaporation energy to soil instead of
+  silently discarding it.  W_bucket overflow → runoff (not silent
+  loss).
+- **Coupler ocean tile** (`make_ocean_tile`): `evap_rate = lhflx/L_v`
+  (ocean uses L_v always — never sublimates); `freshwater_flux =
+  precip − evap` (positive into ocean).  `TileResponse.tau_x` is in
+  atmospheric retarding convention (negative for westerly wind);
+  ocean tile's `ocean_stress_x = 0` (ocean is itself the source — back-
+  reaction is the sea-ice tile's job).  This is consistent with the
+  ocean physics layer's `bulk_formula_surface_forcing` flipping
+  `tau_x → -tau_x` for ocean convention (verified in iter-101).
+- **CMT downdraft scan**: all three `cmt_gregory_1997` callers cross-
+  checked.  Z-M passes `M_d=None`, Tiedtke (iter-103) and Bechtold
+  (iter-104) now both apply `-downdraft_alpha · M_u · downdraft_trigger`.
+
+No code changes this iteration.
+
 ## Next iterations
 Continue addressing codex findings and direct-inspection sweeps until all schemes are
 provably conservative, monotone, CFL-safe, and AD-safe across mixed wet/dry grids.
