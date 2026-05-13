@@ -165,7 +165,17 @@ class TestBarotropicSolver:
         assert_gradient_ok(grad, "Barotropic solver w.r.t. eta")
 
     def test_grad_3_steps(self):
-        """Multi-step gradient through ocean model with differentiable barotropic."""
+        """Multi-step gradient through ocean model with differentiable barotropic.
+
+        BUG: ocean model.step promotes u/v from float32 to float64 during the
+        barotropic substepping (likely an x64-cast inside the differentiable
+        barotropic solver), so jax.lax.scan rejects the carry-input vs
+        carry-output dtype mismatch.  The dtype promotion needs to be tracked
+        down in the barotropic-solver path (probably in
+        ocean/dynamics/barotropic_*.py — search for places that do
+        ``.astype(jnp.float64)`` or ``jnp.float64(...)`` unconditionally).
+        Test left failing per /test-differentiability agent rules.
+        """
         model, state, dt = self.model, self.state, self.dt
 
         def loss(T_data):
