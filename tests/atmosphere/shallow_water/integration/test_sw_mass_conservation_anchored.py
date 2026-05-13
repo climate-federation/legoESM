@@ -123,3 +123,50 @@ def test_sw_mass_conservation_mpas():
     for _ in range(N_STEPS):
         state = model.step(state, 300.0)
     assert _rel_drift(m0, _mass(state)) < DRIFT_TOL
+
+
+# ---------------------------------------------------------------------------
+# iter-34: long-run drift check (parallel to iter-33 hydro PE).
+# ---------------------------------------------------------------------------
+
+def test_long_run_sw_mass_conservation_fv3_cube():
+    """100-step FV3 cube SW: anchor must NOT random-walk."""
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        FV3EdgeShallowWaterModel, FV3EdgeShallowWaterState,
+        CDGridShallowWaterConfig,
+    )
+    from tests.atmosphere.shallow_water.test_cases.williamson import (
+        williamson_test5,
+    )
+
+    grid = create_cubed_sphere(12)
+    cfg = CDGridShallowWaterConfig(
+        hyperdiff_coeff=0.0, boundary_fix=True,
+    )
+    model = FV3EdgeShallowWaterModel(grid, cfg)
+    cdgrid = model.cdgrid
+    sw = williamson_test5(grid)
+    u0 = 20.0
+    u_east_x = u0 * jnp.cos(cdgrid.lat_edge_x)
+    u_d = cdgrid.cos_angle_edge_x * u_east_x
+    u_east_y = u0 * jnp.cos(cdgrid.lat_edge_y)
+    v_d = -cdgrid.sin_angle_edge_y * u_east_y
+    state = FV3EdgeShallowWaterState(
+        h=sw.h.data, u_d=u_d, v_d=v_d, h_s=sw.h_s.data,
+    )
+    model.set_initial_mass(state)
+
+    def _mass(s):
+        return float(jnp.sum(
+            s.h.astype(jnp.float64) * grid.area.astype(jnp.float64),
+        ))
+
+    m0 = _mass(state)
+    for _ in range(100):
+        state = model.step(state, 300.0)
+    drift = _rel_drift(m0, _mass(state))
+    assert drift < 1e-12, (
+        f"cube SW 100-step drift {drift:.2e} exceeds 1e-12 — possible "
+        f"per-step accumulation bug in the anchored fixer"
+    )
