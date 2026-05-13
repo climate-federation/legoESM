@@ -5609,3 +5609,59 @@ reference-ET calculations; (3) FLUXNET site-PM validation;
 (4) elevation/canopy-dependent ET projections under AR6 SSPs.
 Pure JAX, vmap-compatible.  No `constants.py` additions.
 
+## Iter 876 — net_radiation_fv3 (surface R_n primitive)
+
+Added `net_radiation_fv3(sw_down, albedo, lw_down, lw_up)` to
+`grids/cubed_sphere.py`.  Standard surface-energy-balance closure:
+
+```
+R_n = (1 − α) · SW_down + LW_down − LW_up        (W/m²)
+```
+
+Canonical:
+  | scenario           | (1−α)SW | LW_dn | LW_up | R_n  |
+  |--------------------|---------|-------|-------|------|
+  | Tropical noon humid| 700     | 430   | 460   | 670  |
+  | Mid-lat summer noon| 600     | 380   | 430   | 550  |
+  | Arid daytime       | 800     | 350   | 500   | 650  |
+  | Night clear-sky    | 0       | 280   | 350   | −70  |
+  | Snow surface       | 100     | 300   | 320   | 80   |
+
+R_n > 0: net energy gain (daytime); R_n < 0: net loss (nighttime
+LW cooling).  Surface-energy budget closure: R_n = H + λE + G.
+
+**Closes the available-energy A side of PM input set** —
+complementary to iter-875 (aerodynamic g_a):
+
+```
+SW_dn, α, LW_dn, LW_up → iter-876 R_n
+                       − G (caller; 0.1·R_n FAO-56 daily approx)
+                       = A
+                       ↓ iter-870 PM λE
+                       along with g_s/VPD/γ/Δ/g_a.
+```
+
+Test verifies full PM chain end-to-end: iter-876 R_n → A →
+iter-870 λE with iter-871/873/874/875 inputs.
+
+Used by: Bonan 2008 ch. 4-5 land-surface energy budget, Allen-
+Pereira 1998 FAO-56 Eq. 14 net radiation, FLUXNET R_n sensor
+measurements, CERES/MERRA2/ERA5 surface-energy products, CLM5/
+JULES/NoahMP radiative-budget modules, Brunt 1932 / Idso 1981
+clear-sky LW parameterizations.
+
+Test: `tests/test_fv3_net_radiation_iter876.py` (7 tests: tropical
+noon analytic 670, night LW cooling −70, snow high-α 180, zero
+inputs zero, full PM chain to λE, ↑α → ↓R_n, 3-D shapes).
+
+### Why this iteration was meaningful
+
+Closes the **available-energy A primitive** for PM input set.
+Caller now derives every iter-870 PM input from atmospheric +
+radiative state directly.  Pairs with iter-875 (g_a) as the
+final two PM-input primitives.  Required for: (1) DGVM ET
+parameterization from radiation budget; (2) eddy-covariance
+energy-balance closure validation; (3) FAO-56 reference-ET
+computation; (4) AR6 §11 land-surface energy-budget diagnostics.
+Pure JAX, vmap-compatible.  No `constants.py` additions.
+

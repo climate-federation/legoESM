@@ -10584,6 +10584,91 @@ def aerodynamic_conductance_fv3(
     return u_z * k_vk * k_vk / (jnp.log(arg_m) * jnp.log(arg_h))
 
 
+def net_radiation_fv3(
+    sw_down: jax.Array,
+    albedo: jax.Array,
+    lw_down: jax.Array,
+    lw_up: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 876: surface net radiation primitive.
+
+    Standard surface-energy-balance closure for net radiation
+    absorbed at the surface:
+
+        R_n = (1 − α) · SW_down + LW_down − LW_up        (W/m²)
+
+    Where:
+      * SW_down — incoming shortwave at surface (W/m²); from
+                  iter-866 ``clear_sky_toa_radiation_fv3`` × τ_atm
+                  or from radiation parameterization.
+      * α       — surface shortwave albedo (0–1).
+      * LW_down — incoming longwave (W/m²); from atmospheric
+                  parameterization (caller-derived, e.g. Brunt
+                  1932 / Idso 1981 clear-sky LW).
+      * LW_up   — outgoing longwave (W/m²); ε·σ·T_s⁴ +
+                  (1−ε)·LW_down (full leaf-EB form) or simplified
+                  ε·σ·T_s⁴ (gray approximation).
+
+    Sign: positive R_n = net energy gain (daytime over warm wet
+    surface); negative R_n = net loss (nighttime, clear-sky LW
+    cooling).
+
+    Canonical magnitudes:
+      | scenario                | (1−α)SW | LW_dn  | LW_up  | R_n   |
+      |-------------------------|---------|--------|--------|-------|
+      | Tropical noon humid     | 700     | 430    | 460    | 670   |
+      | Mid-lat summer noon     | 600     | 380    | 430    | 550   |
+      | Arid daytime            | 800     | 350    | 500    | 650   |
+      | Night clear-sky cooling | 0       | 280    | 350    | −70   |
+      | Snow surface daytime    | 100     | 300    | 320    | 80    |
+
+    Surface-energy budget closure: R_n = H + λE + G  (ignoring
+    photosynthesis-storage), where H = sensible, λE = latent
+    (iter-870 PM), G = soil heat flux.  Available energy
+    A = R_n − G feeds iter-870 PM as input.
+
+    **Closes the available-energy A side of PM input set** —
+    complementary to iter-875 (aerodynamic g_a side):
+
+        sw_down, α, lw_down, lw_up → iter-876 R_n
+                                   − G (caller; e.g. 0.1·R_n daily)
+                                   = A
+                                   ↓
+                                   iter-870 λE
+                                   along with iter-869 g_s,
+                                   iter-871 VPD, iter-873 γ,
+                                   iter-874 Δ, iter-875 g_a.
+
+    Used by: Bonan 2008 ch. 4-5 land-surface energy budget,
+    Allen-Pereira 1998 FAO-56 Eq. 14 net radiation, FLUXNET R_n
+    sensor measurements, CERES/MERRA2/ERA5 surface-energy
+    products, CLM5/JULES/NoahMP radiative-budget modules,
+    Brunt 1932 clear-sky LW parameterization, Idso 1981 humid
+    overcast LW.
+
+    Note: this primitive returns instantaneous R_n.  For FAO-56
+    daily-mean reference ET, caller supplies daily-averaged inputs.
+
+    Parameters
+    ----------
+    sw_down : jax.Array
+        Incoming shortwave at surface (W/m²).
+    albedo : jax.Array
+        Surface shortwave albedo (0–1).
+    lw_down : jax.Array
+        Incoming longwave (W/m²).
+    lw_up : jax.Array
+        Outgoing longwave (W/m²).
+
+    Returns
+    -------
+    r_n : jax.Array
+        Net radiation absorbed at surface (W/m²); positive =
+        net energy gain.
+    """
+    return (1.0 - albedo) * sw_down + lw_down - lw_up
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,
