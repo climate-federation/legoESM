@@ -450,6 +450,7 @@ _GUARD_MODULES = (
     "test_fv3_spi_iter860",                          # iter-860 add
     "test_fv3_spei_iter861",                         # iter-861 add
     "test_fv3_hargreaves_pet_iter862",               # iter-862 add
+    "test_fv3_extraterrestrial_rad_iter863",         # iter-863 add
 )
 
 

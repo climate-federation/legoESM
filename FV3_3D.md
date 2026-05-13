@@ -5386,3 +5386,69 @@ California-arid empirical fit (FAO-56-canonical defaults — kept
 literal per CLAUDE.md empirical-fit-not-physical-constant rule).
 No `constants.py` additions.
 
+## Iter 863 — extraterrestrial_radiation_fv3 (FAO-56 R_a primitive)
+
+Added `extraterrestrial_radiation_fv3(latitude_deg, day_of_year,
+g_sc=0.0820)` to `grids/cubed_sphere.py`.  Allen-Pereira 1998
+FAO-56 Eq. 21 closed-form sun-up integral:
+
+```
+R_a = (24·60/π) · G_sc · d_r · [ω_s·sin(φ)·sin(δ)
+                              + cos(φ)·cos(δ)·sin(ω_s)]
+                                                  (MJ/m²/day)
+d_r = 1 + 0.033·cos(2π·J/365)         (Earth-Sun distance factor)
+δ   = 0.409·sin(2π·J/365 − 1.39)      (solar declination, rad)
+ω_s = arccos(−tan(φ)·tan(δ))          (sunset hour angle, rad)
+```
+
+G_sc = 0.0820 MJ/m²/min (FAO-56 default).  Polar regions
+(|−tan(φ)·tan(δ)| > 1) handled by clipping arccos argument → ω_s
+= 0 (polar night R_a=0) or π (polar day 24h).
+
+Canonical R_a:
+  | location/date              | R_a (MJ/m²/day) |
+  |----------------------------|-----------------|
+  | Equator any day            | ~37–38          |
+  | 30°N June solstice         | ~43             |
+  | 60°N June solstice         | ~41             |
+  | 60°N December solstice     | ~3              |
+  | 80°N polar day             | ~46             |
+  | 80°N polar night           | 0               |
+
+**Closes the solar-geometry → PET → drought-index chain**:
+
+```
+latitude, DOY → iter-863 R_a
+              ↓ iter-862 PET (Hargreaves)
+              ↓ iter-861 SPEI (z-score)
+```
+
+User now has fully self-contained drought-index pipeline needing
+only (T_mean, T_max, T_min, precip, latitude, DOY) + climatology
+(μ_D, σ_D).  No external R_a dataset required.
+
+Used by: Allen-Pereira 1998 FAO-56, Hargreaves-Samani 1985 PET,
+Trabucco-Zomer 2009 CGIAR-CSI Global Aridity DB, SPEIbase v2.6+
+Hargreaves PET, photosynthesis-light-curve solar-budget models.
+
+G_sc = 0.0820 is FAO-56 fit value (1367 W/m² × 60 / 1e6).
+Coefficients 0.033, 0.409, 1.39 are FAO-56 ephemeris fit numerics
+— kept literal per CLAUDE.md empirical-fit rule.
+
+Test: `tests/test_fv3_extraterrestrial_rad_iter863.py` (7 tests:
+equator equinox ≈ 37 MJ/m²/day, 80°N polar night ≈ 0, 80°N polar
+day > 40, 60°N June >> 60°N Dec, chain to iter-862 PET consistent,
+hemisphere symmetry (-60 Dec ≈ +60 Jun), 3-D shapes non-negative).
+
+### Why this iteration was meaningful
+
+**Closes the solar-geometry → drought-index primitive chain**
+end-to-end.  Caller now has complete drought-pipeline from raw
+(T, P, lat, DOY) → SPEI without external solar-radiation dataset
+input.  Critical for: (1) SPEIbase-style global reconstructions
+from sparse observations; (2) GCM SSP output where R_a not
+typically saved; (3) self-contained Hargreaves PET implementation;
+(4) photosynthesis / NPP light-curve models.  Pure JAX,
+vmap-compatible.  FAO-56 coefficients are empirical (literal).
+No `constants.py` additions.
+

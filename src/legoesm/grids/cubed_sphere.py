@@ -9405,6 +9405,100 @@ def hargreaves_pet_fv3(
     return 0.0023 * r_a_mj * (t_mean_c + 17.8) * jnp.sqrt(diurnal)
 
 
+def extraterrestrial_radiation_fv3(
+    latitude_deg: jax.Array,
+    day_of_year: jax.Array,
+    g_sc: float = 0.0820,
+) -> jax.Array:
+    """FV3_3D iter 863: FAO-56 extraterrestrial radiation R_a.
+
+    Allen-Pereira 1998 (FAO-56 Eq. 21) closed-form integral of
+    TOA solar irradiance over a sun-up day at given latitude and
+    day-of-year:
+
+        R_a = (24·60/π) · G_sc · d_r · [ω_s·sin(φ)·sin(δ)
+                                       + cos(φ)·cos(δ)·sin(ω_s)]
+                                                      (MJ/m²/day)
+
+    Where:
+      * G_sc — solar constant = 0.0820 MJ/m²/min (FAO-56 default).
+      * d_r  — inverse relative Earth-Sun distance
+               d_r = 1 + 0.033·cos(2π·J/365).
+      * δ    — solar declination
+               δ = 0.409·sin(2π·J/365 − 1.39)        (rad).
+      * ω_s  — sunset hour angle
+               ω_s = arccos(−tan(φ)·tan(δ))           (rad).
+      * φ    — latitude in radians (input given in degrees).
+      * J    — day-of-year (1-365).
+
+    Polar regions: at ω_s undefined (|−tan(φ)·tan(δ)| > 1) the
+    formula breaks; this primitive clips the arccos argument to
+    [−1, 1] producing the physical limits:
+      * Polar day  (clip to −1): ω_s = π, full 24-h sun.
+      * Polar night (clip to +1): ω_s = 0, no sun, R_a = 0.
+
+    Canonical values:
+      | location/date              | R_a (MJ/m²/day) |
+      |----------------------------|-----------------|
+      | Equator (φ=0) any day      | ~37–38          |
+      | 30°N June solstice         | ~43             |
+      | 60°N June solstice         | ~41             |
+      | 60°N December solstice     | ~3              |
+      | 80°N June (polar day)      | ~46             |
+      | 80°N December (polar night)| 0               |
+
+    **Closes the solar-geometry → PET → drought-index chain**:
+
+        latitude, DOY → iter-863 R_a
+                      ↓
+                      iter-862 PET (Hargreaves)
+                      ↓
+                      iter-861 SPEI (z-score)
+
+    User now has fully self-contained drought-index pipeline
+    requiring only (T_mean, T_max, T_min, precip, latitude, DOY)
+    plus climatology (μ_D, σ_D).  No external R_a dataset needed.
+
+    Used by: Allen-Pereira 1998 FAO-56 PET guidelines, Hargreaves-
+    Samani 1985 PET (this is R_a input), Trabucco-Zomer 2009
+    CGIAR-CSI Global Aridity Database (R_a precomputed from
+    same formula), SPEIbase v2.6+ Hargreaves-method PET,
+    photosynthesis-light-curve solar-radiation budget.
+
+    Note: G_sc = 0.0820 MJ/m²/min is the FAO-56 fit value
+    (equivalent to 1367 W/m² solar irradiance × 60 s/min /
+    1e6 J/MJ ≈ 0.0820); kept as default arg per CLAUDE.md
+    empirical-fit treatment.  d_r and δ coefficients (0.033,
+    0.409, 1.39) are FAO-56 ephemeris approximations — literal.
+
+    Parameters
+    ----------
+    latitude_deg : jax.Array
+        Latitude (degrees, −90 to +90).
+    day_of_year : jax.Array
+        Day-of-year integer (1–365 typical; 366 also accepted).
+    g_sc : float
+        Solar constant (MJ/m²/min); default 0.0820 (FAO-56).
+
+    Returns
+    -------
+    r_a : jax.Array
+        Extraterrestrial radiation (MJ/m²/day); ≥ 0.
+    """
+    phi = latitude_deg * jnp.pi / 180.0
+    dr_arg = 2.0 * jnp.pi * day_of_year / 365.0
+    d_r = 1.0 + 0.033 * jnp.cos(dr_arg)
+    delta = 0.409 * jnp.sin(dr_arg - 1.39)
+    cos_omega_s_raw = -jnp.tan(phi) * jnp.tan(delta)
+    cos_omega_s = jnp.clip(cos_omega_s_raw, -1.0, 1.0)
+    omega_s = jnp.arccos(cos_omega_s)
+    factor = (24.0 * 60.0 / jnp.pi) * g_sc * d_r
+    return factor * (
+        omega_s * jnp.sin(phi) * jnp.sin(delta)
+        + jnp.cos(phi) * jnp.cos(delta) * jnp.sin(omega_s)
+    )
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,
