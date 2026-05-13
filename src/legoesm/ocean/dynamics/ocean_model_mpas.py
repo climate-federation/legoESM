@@ -665,6 +665,7 @@ class MPASOceanModel:
                 tr_edge = tvd_tracer_to_edges(
                     tr, mass_flux, mesh,
                     self._upup_pos, self._upup_neg,
+                    cell_active=active_3d,
                 )
             else:
                 # First-order upwind
@@ -677,7 +678,7 @@ class MPASOceanModel:
             # Vertical flux divergence
             if use_tvd:
                 vert_flux_div = flux_form_vertical_tracer_advection_tvd(
-                    tr, w, h_k_old, dt)
+                    tr, w, h_k_old, dt, cell_active=active_3d)
             else:
                 vert_flux_div = flux_form_vertical_tracer_advection(tr, w)
 

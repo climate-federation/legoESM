@@ -60,10 +60,10 @@ Differentiability:
 function-theorem custom-VJP.
 
 Tracer transport consistency:
-returns ``Hu_avg = ½·(H_e_old·u_n + H_e_new·u_{n+1})`` — trapezoidal-
-rule estimator of the time-integrated edge transport, matching the
-explicit substep's box-averaged ``Hu_avg`` interface for the tracer
-correction step in :class:`MPASOceanModel`.
+returns ``Hu_avg = H_e_old · [(1-θ)·u_n + θ·u_{n+1}]`` — time-averaged
+edge transport using the OLD edge thickness throughout, ensuring
+``div(Hu_avg) = (η_old − η_new)/dt`` exactly (required for flux-form
+tracer conservation on partial cells).
 """
 
 from __future__ import annotations
@@ -414,9 +414,14 @@ def barotropic_implicit_mpas(
     else:
         H_total_new = jnp.maximum(eta_new + H_bathy, min_water_col)
         H_e_new = _edge_avg(H_total_new, mesh)
-    Hu_avg = (
-        (1.0 - theta_eta) * H_e_old * u_bar_old
-        + theta_eta * H_e_new * u_bar_new
+    # Use H_e_old consistently so that div(Hu_avg) = (eta_old - eta_new)/dt
+    # exactly — required for flux-form tracer conservation.  The Helmholtz
+    # solve used H_e_old throughout, so the transport average must too.
+    # Using H_e_new here introduced theta * div((H_e_new - H_e_old) * u_new)
+    # error that broke salt conservation on partial cells (shallow cells
+    # lost 0.003 PSU in 30 days).
+    Hu_avg = H_e_old * (
+        (1.0 - theta_eta) * u_bar_old + theta_eta * u_bar_new
     ) * edge_mask
 
     return eta_new, u_bar_new, Hu_avg

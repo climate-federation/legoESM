@@ -180,15 +180,21 @@ class MPASOceanConfig(NamedTuple):
                                          # but with controllable strength.
                                          # Typical 3-10 for ico4 ETOPO.
                                          # 0 = uniform viscosity.
-    use_h_actual_pgf: bool = False         # When True, the baroclinic
-                                            # pressure cumsum integrates
-                                            # against the actual partial-
+    use_h_actual_pgf: bool = True          # Integrate baroclinic pressure
+                                            # cumsum against actual partial-
                                             # cell thickness h_k rather
                                             # than the reference dz_ref.
-                                            # Matches NEMO ``ln_hpg_zps``
-                                            # and MITgcm conventions for
-                                            # z* + partial cells.  Off by
-                                            # default for back-compat.
+                                            # Matches NEMO ``ln_hpg_zps``,
+                                            # MITgcm, and our own lat-lon
+                                            # implementation.  Required for
+                                            # Adcroft PGF consistency: the
+                                            # AC correction computes centroid
+                                            # depths from h_partial, so
+                                            # p_prime must also be on the
+                                            # h_partial grid.  When False,
+                                            # p_prime uses dz_ref while AC
+                                            # uses h_partial → mismatch →
+                                            # spurious PGF at step edges.
     use_baroclinic_rho_ref: bool = False  # DYNAMIC (legacy / discouraged):
                                            # subtracts ρ_ref(z) computed
                                            # as wet-cell mean of ρ on
