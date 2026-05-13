@@ -263,12 +263,12 @@ def thompson_microphysics(
     V_t_g = config.a_v_g * safe_pow(jnp.clip(q_g, 0.0) * rho_ratio, config.b_v_g)
     V_t_g = jnp.clip(V_t_g, 0.0, 30.0)
 
-    # Joint q_r donor cap: pass rain evaporation as extra_sink so sed +
-    # evap can't jointly drive q_r negative (codex iter-29 #1).  q_i,
-    # q_s, q_g have no in-scheme evaporation sink other than the
-    # melt → q_r conversion (which is a q_i / q_s / q_g sink already
-    # bounded by the q_i / q_s donor clamps), so they only need the
-    # standard self-CFL cap.
+    # Joint donor caps: each `extra_sink` is the in-column sink that
+    # shares the same explicit-Euler step as sedimentation.  Without
+    # these, post-donor-clamp in-column sinks ALREADY consume up to
+    # q/dt, AND sed independently can drain another q/dt — driving the
+    # pool negative.  Mirrors the iter-29 q_r/evap fix; extended to
+    # ALL sed paths in iter-73.
     sed_r, precip_r = sedimentation_tendency(
         q_r, rho, V_t_r, dz, dt=dt,
         return_surface_flux=True,
@@ -276,12 +276,15 @@ def thompson_microphysics(
     )
     sed_i, precip_i = sedimentation_tendency(
         q_i, rho, V_t_i, dz, dt=dt, return_surface_flux=True,
+        extra_sink=aggregation + melt_ice + rime_to_graupel_from_i,
     )
     sed_s, precip_s = sedimentation_tendency(
         q_s, rho, V_t_s, dz, dt=dt, return_surface_flux=True,
+        extra_sink=melt_snow + rime_to_graupel_from_s,
     )
     sed_g, precip_g = sedimentation_tendency(
         q_g, rho, V_t_g, dz, dt=dt, return_surface_flux=True,
+        extra_sink=melt_graupel,
     )
 
     # === LATENT HEATING ===

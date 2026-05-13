@@ -240,7 +240,12 @@ def morrison_microphysics(
     V_t_s = config.a_v_s * safe_pow(jnp.clip(q_s, 0.0) * rho_ratio, config.b_v_s)
     V_t_s = jnp.clip(V_t_s, 0.0, 5.0)
 
-    # Joint q_r donor cap: pass evaporation as extra_sink (codex iter-29).
+    # Joint donor caps: each `extra_sink` is the in-column sink that
+    # shares the same explicit-Euler step as sedimentation.
+    # Without these, the post-donor-clamp in-column sinks (aggregation +
+    # melt_ice for q_i, melt_snow for q_s, evaporation for q_r) ALREADY
+    # consume up to q/dt, AND sed independently can drain another q/dt
+    # — driving the pool negative.  Mirrors the iter-29 q_r/evap fix.
     sed_r, precip_r = sedimentation_tendency(
         q_r, rho, V_t_r, dz, dt=dt,
         return_surface_flux=True,
@@ -248,9 +253,11 @@ def morrison_microphysics(
     )
     sed_i, precip_i = sedimentation_tendency(
         q_i, rho, V_t_i, dz, dt=dt, return_surface_flux=True,
+        extra_sink=aggregation + melt_ice,
     )
     sed_s, precip_s = sedimentation_tendency(
         q_s, rho, V_t_s, dz, dt=dt, return_surface_flux=True,
+        extra_sink=melt_snow,
     )
 
     # === LATENT HEATING ===

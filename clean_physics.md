@@ -9,6 +9,35 @@ Branch: `clean_physics`. Driven by Ralph loop + `/codex:adversarial-review`.
 - **Ocean** (`src/legoesm/ocean/physics/`): vertical_mixing, bottom_drag, lateral_mixing, convection, surface_forcing, shortwave_penetration, mixing.
 - **Cryosphere** (`src/legoesm/ice/`): sea_ice, dynamics, itd, rheology, transport.
 
+## Iteration 73 — 2026-05-13
+
+**Bug fix: Morrison + Thompson ice/snow/graupel sedimentation +
+in-column-sink joint cap missing.**
+
+Codex review confirmed and direct inspection found: the iter-29
+joint-cap pattern (sedimentation passes `extra_sink` for the
+in-column sink so the combined per-step removal can't exceed
+available mass) was applied to q_r/evaporation but NOT to
+q_i/q_s/q_g/in-column-melt-or-rime sinks.
+
+The donor clamps already cap (aggregation + melt_ice) ≤ q_i/dt,
+but the separate `sedimentation_tendency` call independently caps
+sed_i at q_i/dt, so the combined removal `(clamped sinks + sed) ·
+dt` can reach **2·q_i**, driving the pool negative when both
+processes are simultaneously active (e.g. melting graupel +
+strong sedimentation in a warm layer).
+
+Fix: pass `extra_sink=` to every solid-hydrometeor sedimentation
+call so the per-layer sed flux is capped against the NET pool
+after natural drains:
+- Morrison: `q_i` → `aggregation + melt_ice`; `q_s` → `melt_snow`.
+- Thompson: `q_i` → `aggregation + melt_ice + rime_to_graupel_from_i`;
+  `q_s` → `melt_snow + rime_to_graupel_from_s`; `q_g` → `melt_graupel`.
+
+**Tests (post iter-73):** 68 / 68 atmosphere microphysics tests pass
+(Kessler, Morrison, Thompson, Seifert-Beheng + multi-step
+stability).
+
 ## Iteration 72 — 2026-05-13
 
 **Inspection iteration on TKE / CLUBB-lite / `pbl_height` (no code changes).**
