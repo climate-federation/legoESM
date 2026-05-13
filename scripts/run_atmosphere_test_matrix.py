@@ -4844,13 +4844,16 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             f"|w|_max={w_max:.4f} m/s, mass_drift={mass_drift:.2e}, "
             f"dt={dt:.2f}s"
         )
-        # iter-25: NH PASS gate on mass drift.  With iter-7/8/9 fixers
-        # active TC1 sits at exact 0 across cube/ico/spectral.  Loose
-        # 1e-3 ceiling provides margin for TC2a / TC3 (stronger
-        # convective / mountain dynamics, unmeasured) while still
-        # catching gross fixer regressions.
+        # iter-25/26: NH PASS gate on mass drift.  With iter-7/8/9
+        # fixers active every measured case sits at exact 0 or fp64
+        # ULP:
+        #   TC1  cube 0     ico 0    spec 0
+        #   TC2a cube 6e-16 ico 0    spec 5e-16
+        #   TC3  cube 1e-15 ico 0    spec SKIP (Kessler not wired)
+        # Iter-26 tightens to 1e-6 (matches HS / baroclinic in
+        # iter-23/24) — 9 orders of headroom above the noisiest case.
         ok, notes = _apply_mass_drift_tolerance(
-            ok, notes, mass_drift, 1e-3,
+            ok, notes, mass_drift, 1e-6,
             n_samples=len(_mass_series),
         )
     else:
