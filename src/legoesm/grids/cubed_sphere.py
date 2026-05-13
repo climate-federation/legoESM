@@ -6630,6 +6630,55 @@ def shortwave_cloud_forcing_fv3(
     return -s_incident * (alpha_cloudy - alpha_clear)
 
 
+def longwave_cloud_forcing_fv3(
+    t_cloud_top: jax.Array,
+    t_sfc: jax.Array,
+    emissivity: jax.Array = 1.0,
+) -> jax.Array:
+    """FV3_3D iter 828: TOA longwave cloud-radiative effect (CRE_LW).
+
+        CRE_LW = ε · σ · (T_sfc⁴ − T_cloud_top⁴)
+
+    Sign convention: positive ⇒ TOA warming (typical clouds trap
+    IR that would otherwise escape from the warmer surface);
+    zero when cloud is at surface T (e.g. fog) or transparent.
+
+    Derivation: clear-sky outgoing LW ≈ σ·T_sfc⁴ (assumes window
+    emission dominates); cloudy outgoing LW = ε·σ·T_cloud_top⁴
+    + (1−ε)·σ·T_sfc⁴ (cloud emits its own + transmits surface).
+    Difference = ε·σ·(T_sfc⁴ − T_cloud_top⁴).
+
+    Typical magnitudes:
+      * Tropical anvil (T_cloud=200 K, T_sfc=300 K, ε=1):
+        CRE_LW ≈ 5.67·10⁻⁸·(300⁴−200⁴) ≈ 367 W/m²
+      * Mid-lat Sc (T_cloud=280, T_sfc=290, ε=1): CRE_LW ≈ 50 W/m²
+      * Thin cirrus (T_cloud=220, T_sfc=300, ε=0.5): CRE_LW ≈ 170 W/m²
+
+    Uses ``constants.sigma_sb`` per CLAUDE.md hygiene.
+
+    Pairs with iter-827 ``shortwave_cloud_forcing_fv3`` to give
+    net TOA cloud forcing: CRE_net = CRE_SW + CRE_LW (typically
+    near 0 globally — SW cooling balances LW warming, by ~2 W/m²
+    net SW dominance in present climate).
+
+    Parameters
+    ----------
+    t_cloud_top : jax.Array
+        Effective cloud-top emission temperature (K).
+    t_sfc : jax.Array
+        Surface temperature (K).
+    emissivity : jax.Array or float
+        Cloud LW emissivity (0 ≤ ε ≤ 1); default 1.0 for
+        optically thick clouds.  Thin cirrus typically ε ≈ 0.3–0.7.
+
+    Returns
+    -------
+    cre_lw : jax.Array
+        TOA longwave cloud-radiative effect (W/m²).
+    """
+    return emissivity * constants.sigma_sb * (t_sfc ** 4 - t_cloud_top ** 4)
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

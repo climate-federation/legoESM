@@ -5397,6 +5397,50 @@ flux comparison; (4) emergent-constraint analyses (Klein-Hall
 2015, Sherwood et al. 2014).  Pure JAX, vmap-compatible.  No
 new physical constants introduced.
 
+## Iter 828 — longwave_cloud_forcing_fv3 (TOA CRE_LW)
+
+Added `longwave_cloud_forcing_fv3(t_cloud_top, t_sfc,
+emissivity=1.0)` to `grids/cubed_sphere.py`.  TOA longwave
+cloud-radiative effect:
+
+```
+CRE_LW = ε · σ · (T_sfc⁴ − T_cloud_top⁴)
+```
+
+Sign: positive ⇒ TOA warming (clouds trap IR from warmer
+surface).
+
+Derivation: clear-sky outgoing LW ≈ σ·T_sfc⁴; cloudy outgoing
+LW = ε·σ·T_cloud_top⁴ + (1−ε)·σ·T_sfc⁴ (cloud emits + transmits).
+Difference = ε·σ·(T_sfc⁴ − T_cloud_top⁴).
+
+Typical magnitudes:
+  * Tropical anvil (T_cloud=200, T_sfc=300, ε=1): ≈ 367 W/m²
+  * Mid-lat Sc (T_cloud=280, T_sfc=290, ε=1): ≈ 50 W/m²
+  * Thin cirrus (T_cloud=220, T_sfc=300, ε=0.5): ≈ 170 W/m²
+
+Uses ``constants.sigma_sb`` per CLAUDE.md hygiene.
+
+Pairs with iter-827 ``shortwave_cloud_forcing_fv3``: net TOA
+cloud forcing CRE_net = CRE_SW + CRE_LW.  Globally CRE_net ≈
+−20 W/m² (SW cooling dominates).  Tropical anvils: CRE_net > 0
+(LW > SW).  Sc decks: CRE_net < 0 (SW > LW).
+
+Test: `tests/test_fv3_longwave_cloud_forcing_iter828.py` (7
+tests: tropical anvil analytic 367 W/m², T_cloud=T_sfc → 0,
+ε=0.5 halves CRE, ε=0 → 0, monotone in ΔT, paired with iter-827
+gives tropical anvil net warming, 3-D shapes + finite + non-
+negative for T_cloud<T_sfc).
+
+### Why this iteration was meaningful
+
+Closes the **TOA cloud-forcing diagnostic pair** (CRE_SW,
+CRE_LW): iter-827 + iter-828.  Sum gives net cloud forcing —
+the canonical metric for cloud-radiative impact on TOA energy
+balance (CERES product target).  Pure JAX, vmap-compatible.
+Uses ``constants.sigma_sb``.  No new physical constants
+introduced.
+
 
 
 
