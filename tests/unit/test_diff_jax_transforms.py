@@ -23,6 +23,14 @@ import jax
 import jax.numpy as jnp
 import pytest
 
+# Enable x64 unconditionally for this module — the JIT/grad equivalence
+# and checkpoint-vs-plain comparisons here require fp64 to keep the
+# kernel-level numerical noise below the comparison tolerances we use.
+# When the test runner does *not* set ``JAX_ENABLE_X64=1``, JAX silently
+# truncates fp64 requests in source code, which leaks fp32 results into
+# fp64 assertions.
+jax.config.update("jax_enable_x64", True)
+
 
 # ---------------------------------------------------------------------------
 # Helpers

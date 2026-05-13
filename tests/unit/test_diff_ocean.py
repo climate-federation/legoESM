@@ -167,14 +167,14 @@ class TestBarotropicSolver:
     def test_grad_3_steps(self):
         """Multi-step gradient through ocean model with differentiable barotropic.
 
-        BUG: ocean model.step promotes u/v from float32 to float64 during the
-        barotropic substepping (likely an x64-cast inside the differentiable
-        barotropic solver), so jax.lax.scan rejects the carry-input vs
-        carry-output dtype mismatch.  The dtype promotion needs to be tracked
-        down in the barotropic-solver path (probably in
-        ocean/dynamics/barotropic_*.py — search for places that do
-        ``.astype(jnp.float64)`` or ``jnp.float64(...)`` unconditionally).
-        Test left failing per /test-differentiability agent rules.
+        Regression for the ``cast_pytree(..., "storage")`` round-trip:
+        ``OceanModel.step`` upcasts to compute precision on entry and
+        used to leave the output at compute precision because the
+        storage cast defaulted to ``allow_downcast=False``.  Under
+        ``JAX_ENABLE_X64`` that turned fp32 inputs into fp64 outputs and
+        ``jax.lax.scan`` rejected the carry-dtype mismatch.  The fix
+        passes ``allow_downcast=True`` for the storage cast so the
+        output dtype matches the input dtype.
         """
         model, state, dt = self.model, self.state, self.dt
 
