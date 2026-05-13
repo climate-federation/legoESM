@@ -274,6 +274,40 @@ Verified clean:
 
 No code changes this iteration.
 
+## Iter-113 — shared `thermo.py` + `constants.py` audit
+Audited `src/legoesm/thermo.py` (172 LOC, shared saturation thermo)
+and `src/legoesm/constants.py` (125 LOC).
+
+Verified clean:
+- **`saturation_vapor_pressure`**: Tetens form
+  `e_sat = 611.2 · exp(17.67 · T_c / (T_c + 243.5))` in Pa.  AD-safe
+  (no singular operations in the realistic range).
+- **`saturation_mixing_ratio`**: `q_sat = ε · e_sat / max(p − e_sat,
+  softplus(p − e_sat − 1) + 1)` — smooth softplus floor preserves
+  gradients near `e_sat ≈ p` (prevents zero-gradient plateau a hard
+  clip would create); LogSumExp smooth-min cap at `q_sat ≤ 1` for
+  low-pressure singularity safety.
+- **`saturation_mixing_ratio_ice`**: Clausius–Clapeyron form
+  `e_sat_i = 611.2 · exp(L_s/R_v · (1/T_freeze − 1/T))`, same
+  softplus floor + cap as the liquid variant.
+- **`saturation_mixing_ratio_dT`**: analytical derivative
+  `d(q_sat)/dT` consistent with the Tetens formula; uses simpler
+  hard `max(p − e_sat, 1)` floor (PDF-width convention).
+- **`saturation_specific_humidity`**: `q = w_sat / (1 + w_sat)`
+  conversion from mixing ratio to specific humidity (~1 % difference
+  at typical tropospheric humidities).
+- **`constants.py`**: `c_vd = c_pd − R_d` enforces the thermodynamic
+  identity (iter-39 MEDIUM #6 fix held — earlier hardcoded 717.56
+  violated the identity by 0.03 J/(kg·K)).  Molar masses available
+  in both g/mol (e.g. `M_air`, `M_H2O`) and kg/mol (`M_dry`, `M_h2o`)
+  forms with `* 1e-3` derivation to prevent drift.  Centralised
+  emissivities (`emissivity_ocean`, `emissivity_ice = 0.97`,
+  `emissivity_land = 0.95`).  Freshwater EOS local-parabolic fit
+  constants (`T_freshwater_max_density = 277.133 K`,
+  `rho_freshwater_curvature = 8e-6 K⁻²`).
+
+No code changes this iteration.
+
 ## Next iterations
 Continue addressing codex findings and direct-inspection sweeps until all schemes are
 provably conservative, monotone, CFL-safe, and AD-safe across mixed wet/dry grids.
