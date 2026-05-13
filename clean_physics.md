@@ -312,6 +312,32 @@ Verified clean:
 
 No code changes this iteration.
 
+## Iter-95 — ocean vertical mixing + convection sweep
+Audited `ocean/physics/convection/{enhanced_diffusion,plume}.py`,
+`ocean/physics/vertical_mixing/{constant,richardson,k_profiles}.py`.
+
+Verified clean:
+- **`enhanced_diffusion_convection`**: `K = K_bg + (K_conv - K_bg) ·
+  σ(-N²·sharpness)` smooth transition; iter-3 #7 fix held (per-interface
+  CFL cap via `vertical_diffusion_variable_K` uses runtime `dt` rather
+  than `cfl_dt_estimate`).
+- **`richardson_vertical_mixing`** (Pacanowski-Philander 1981 / POP /
+  E3SM-Omega convention): `ν = ν₀/(1+αRi)^n + ν_b` (momentum) and
+  `κ = ν/(1+αRi) + κ_b` (tracer) — iter-47 fix held; the tracer
+  division gives an Ri-growing effective Prandtl number, which is
+  physically essential.  `Pr_t` config field warns-on-non-default.
+- **`plume_convection`**: AD-safe `entrain = -expm1(-ε·dz)` (exact
+  exponential, bounded in [0, 1)); `active = active · σ(Δρ · 1e4)`
+  monotonically dies once neutral; column-conservation correction
+  subtracts `Σ_k dT_dt·dz / dz_top` from level 0; dry-column mask via
+  `wet[..., None]`.
+- **`compute_vertical_K_profiles`**: brine / heat / FW buoyancy flux
+  signs verified — B_T = -gα·Q_T (warming stabilizes), B_S = g·β·Q_S
+  with Q_S = -S·fw/ρ (freshwater addition stabilizes, brine rejection
+  destabilizes), B_f = B_T + B_S.
+
+No code changes this iteration.
+
 ## Next iterations
 Continue addressing further codex findings and direct-inspection sweeps until all
 schemes are provably conservative, monotone, CFL-safe, and AD-safe across mixed
