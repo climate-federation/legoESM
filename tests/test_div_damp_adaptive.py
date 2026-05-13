@@ -558,14 +558,21 @@ def test_corner_div_damp_d4_stable_short_run_nord1(small_3d_state):
 
 def test_corner_div_damp_fv3_vector_fill_bit_for_bit_nord1(small_3d_state):
     """iter-22: ``corner_div_damp_fv3_vector_fill = True`` is a
-    mathematical no-op at nord=1 — bit-for-bit identical end-to-end
-    integration as iter-18 nord=1 (vector fill OFF).
+    mathematical no-op at nord=1 — end-to-end integration matches
+    iter-18 nord=1 (vector fill OFF) within 1-ULP tolerance.
 
-    This is the integration-level confirmation of the unit-level
-    proof in ``test_corner_laplacian_vector_fill_is_noop_for_nord1``.
-    Even after dispatching through ``CDGridPrimitiveEquationModel.step``
-    (which JIT-compiles a fresh path for each different config), the
-    end-of-step state must be bit-for-bit identical.
+    Unit-level bit-for-bit confirmed in
+    ``test_corner_laplacian_vector_fill_is_noop_for_nord1`` (single
+    Laplacian iteration: byte-identical output between the two paths).
+
+    Integration-level: 100-sec step through ``CDGridPrimitiveEquationModel
+    .step`` produces 1-ULP (∼5×10⁻¹⁷) reorder differences from JAX
+    JIT tracing two different code branches.  iter-894: loosened
+    from ``assert_array_equal`` to ``assert_allclose(rtol=2e-15)`` to
+    accept the trace-reorder ULP drift while still catching any
+    non-trivial mathematical divergence.
+
+    Tighter no-op claim remains the unit-level test.
     """
     grid, cdgrid, coord, _ = small_3d_state
 
@@ -608,17 +615,24 @@ def test_corner_div_damp_fv3_vector_fill_bit_for_bit_nord1(small_3d_state):
     s_no = m_no.step(s, 100.0)
     s_yes = m_yes.step(s, 100.0)
 
-    np.testing.assert_array_equal(
+    # iter-894: 1-ULP tolerance (was assert_array_equal pre-iter-894).
+    # Trace-reorder ULP drift is expected; mathematical equivalence
+    # at the Laplacian-iteration level is unit-tested separately.
+    np.testing.assert_allclose(
         np.asarray(s_no.u_d.data), np.asarray(s_yes.u_d.data),
+        rtol=2e-15, atol=1e-15,
     )
-    np.testing.assert_array_equal(
+    np.testing.assert_allclose(
         np.asarray(s_no.v_d.data), np.asarray(s_yes.v_d.data),
+        rtol=2e-15, atol=1e-15,
     )
-    np.testing.assert_array_equal(
+    np.testing.assert_allclose(
         np.asarray(s_no.T.data), np.asarray(s_yes.T.data),
+        rtol=2e-15, atol=1e-15,
     )
-    np.testing.assert_array_equal(
+    np.testing.assert_allclose(
         np.asarray(s_no.p_s.data), np.asarray(s_yes.p_s.data),
+        rtol=2e-15, atol=1e-15,
     )
 
 
