@@ -472,6 +472,7 @@ _GUARD_MODULES = (
     "test_fv3_complementary_et_iter882",             # iter-882 add
     "test_fv3_penman_open_water_iter883",            # iter-883 add
     "test_fv3_aridity_index_iter884",                # iter-884 add
+    "test_fv3_budyko_iter885",                       # iter-885 add
 )
 
 

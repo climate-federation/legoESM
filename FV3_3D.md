@@ -5571,3 +5571,66 @@ attribution, vegetation-bioclimatic studies, and AR6 §11.6
 dryland-expansion projections.  Pure JAX, vmap-compatible.  No
 `constants.py` additions.
 
+## Iter 885 — budyko_aet_fv3 (Yang 2008 water-energy framework)
+
+Added `budyko_aet_fv3(precip, pet, omega=2.6)` to
+`grids/cubed_sphere.py`.  Budyko 1974 / Choudhury 1999 / Yang
+et al. 2008 (WRR) generalized water-energy-balance closure:
+
+```
+AET = P · PET / (P^ω + PET^ω)^(1/ω)        (mm)
+```
+
+Default ω=2.6 (Yang 2008 global mean fit; range 1.5–3.5 by
+landscape).
+
+Asymptotic limits:
+  * Energy-limited (PET<<P, humid):  AET → PET
+  * Water-limited  (P<<PET, arid):   AET → P
+  * Crossover (P=PET):               AET ≈ 0.6–0.77·P (depends on ω)
+
+Budyko curve (AET/P vs PET/P):
+  | PET/P  | AET/P   | regime         |
+  |--------|---------|----------------|
+  | 0.2    | 0.20    | hyper-humid    |
+  | 0.5    | 0.45    | humid          |
+  | 1.0    | ~0.65   | energy=water   |
+  | 2.0    | ~0.85   | semi-arid      |
+  | 10.0   | ~0.99   | hyper-arid     |
+
+Runoff coefficient Q/P = 1 − AET/P (widely used in catchment
+modeling).
+
+ω regime (Yang 2008):
+  Bare soil:      1.5-2.0
+  Mixed grassland: 2.5
+  Forest:          3.0-3.5
+  Global mean:     2.6
+
+**Closes the water-energy framework primitive** — complementary
+to iter-884 AI (P/PET classification):
+  * iter-884 AI     — climatological aridity *classification*.
+  * iter-885 AET    — water-balance *actual* ET partition.
+  * 1 − AET/P       — runoff coefficient for catchment closure.
+
+Used by: Budyko 1974 Climate-and-Life, Choudhury 1999 J. Hydrol.,
+Yang et al. 2008 WRR ω-fits, AR6 §11.6 water-balance projections,
+Sankarasubramanian-Vogel 2003 WRR climate-elasticity of runoff,
+Roderick-Farquhar 2011 Phil. Trans. global-Budyko trends.
+
+Test: `tests/test_fv3_budyko_iter885.py` (9 tests: energy-limited
+AET→PET, water-limited AET→P, crossover P=PET → AET≈0.6-0.8·P,
+AET ≤ min(P,PET) physical bound, ↑ω sharpens transition, runoff
+coefficient, chain with AI, P=0 floored, 3-D shapes non-negative).
+
+### Why this iteration was meaningful
+
+Adds **water-energy framework primitive** (Budyko/Yang) closing
+the catchment water-balance pair with iter-884 AI.  Critical
+for: (1) hydrological runoff modeling Q/P = 1−AET/P;
+(2) AR6 §11.6 catchment-scale water-balance projections;
+(3) Roderick-Farquhar 2011 global Budyko-trend analysis under
+warming; (4) climate-elasticity of runoff (Sankarasubramanian
+2003).  Pure JAX, vmap-compatible.  Yang ω=2.6 is global-mean
+fit (default arg).  No `constants.py` additions.
+

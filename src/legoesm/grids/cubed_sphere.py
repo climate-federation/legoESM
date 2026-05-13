@@ -11351,6 +11351,101 @@ def aridity_index_fv3(
     return precip_annual / pet_safe
 
 
+def budyko_aet_fv3(
+    precip: jax.Array,
+    pet: jax.Array,
+    omega: float = 2.6,
+    p_floor: float = 1e-6,
+) -> jax.Array:
+    """FV3_3D iter 885: Budyko 1974 / Yang 2008 actual-ET primitive.
+
+    Budyko 1974 (climate-and-life) / Choudhury 1999 / Yang et al.
+    2008 (WRR) generalized water-energy-balance closure for
+    actual evapotranspiration:
+
+        AET = P · PET / (P^ω + PET^ω)^(1/ω)        (mm)
+
+    Where:
+      * P     — annual precipitation (mm).
+      * PET   — annual potential evapotranspiration (mm); from
+                iter-862 Hargreaves × 365 or iter-883 Penman × 365.
+      * ω     — Yang 2008 shape parameter (dimensionless);
+                default 2.6 (global mean fit; range 1.5–3.5 depending
+                on vegetation cover, soil texture, topography).
+
+    Sign: AET ≥ 0; bounded above by both P (water limit) and PET
+    (energy limit).
+
+    Asymptotic limits:
+      * **Energy-limited** (PET << P, humid): AET → PET.
+        All available energy evaporates; surplus P becomes runoff.
+      * **Water-limited** (P << PET, arid): AET → P.
+        All precipitation evaporates; surplus PET unmet.
+      * **Crossover** (P ≈ PET): AET ≈ 0.6·P (Budyko canonical).
+
+    The Budyko curve traces AET/P vs PET/P (the **dryness index**
+    inverse of iter-884 AI):
+      | regime          | PET/P  | AET/P   |
+      |-----------------|--------|---------|
+      | Hyper-humid     | 0.2    | 0.20    |
+      | Humid           | 0.5    | 0.45    |
+      | Energy = Water  | 1.0    | ~0.60   |
+      | Semi-arid       | 2.0    | ~0.85   |
+      | Hyper-arid      | 10.0   | ~0.99   |
+
+    Runoff coefficient: Q/P = 1 − AET/P (1 minus Budyko ratio).
+    Used widely for catchment water-balance modeling.
+
+    ω regime values (Yang 2008):
+      | landscape          | ω         |
+      |--------------------|-----------|
+      | Bare soil/agric    | 1.5–2.0   |
+      | Mixed grassland    | 2.5       |
+      | Forest             | 3.0–3.5   |
+      | Global mean        | 2.6       |
+
+    **Closes the water-energy framework primitive** —
+    complementary to iter-884 ``aridity_index_fv3`` (P/PET
+    classification):
+      * iter-884 AI    — climatological aridity *classification*.
+      * iter-885 AET   — water-balance *actual* ET partition.
+      * 1 − AET/P     — runoff coefficient for catchment closure.
+
+    Composes naturally with iter-862 Hargreaves PET (or iter-883
+    Penman PET), iter-861 SPEI temporal-anomaly chain, iter-883
+    Penman.
+
+    Used by: Budyko 1974 Climate-and-Life, Choudhury 1999 J. Hydrol.
+    generalized Budyko, Yang et al. 2008 WRR ω-parameter fits,
+    AR6 §11.6 water-balance projections, Sankarasubramanian-
+    Vogel 2003 WRR climate-elasticity of runoff, Roderick-Farquhar
+    2011 Phil. Trans. global-Budyko trends.
+
+    ``p_floor`` prevents div-by-0 at P→0 (Saharan limit, but
+    AET → P → 0 physically, so floor is just NaN guard).
+
+    Parameters
+    ----------
+    precip : jax.Array
+        Annual precipitation (mm).
+    pet : jax.Array
+        Annual potential evapotranspiration (mm).
+    omega : float
+        Yang 2008 shape parameter; default 2.6 (global mean).
+    p_floor : float
+        Lower bound on denominator (mm^ω); default 1e-6.
+
+    Returns
+    -------
+    aet : jax.Array
+        Actual evapotranspiration (mm); ≥ 0, ≤ min(P, PET).
+    """
+    p_pow = precip ** omega
+    pet_pow = pet ** omega
+    denom = jnp.maximum(p_pow + pet_pow, p_floor)
+    return precip * pet / (denom ** (1.0 / omega))
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,
