@@ -94,3 +94,35 @@ def test_compute_atmospheric_angular_momentum_returns_fp64():
     )
     # aam_total is Python float; just assert finite + non-zero.
     assert jnp.isfinite(aam_total)
+
+
+def test_compute_total_energy_pe_returns_fp64():
+    """iter-45: diagnostics/total_energy_pe.compute_total_energy_pe."""
+    from legoesm.diagnostics import compute_total_energy_pe
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.core.state import FV3HydrostaticState
+    from legoesm.core.field import Field
+    from legoesm.grids.vertical import standard_hybrid_levels
+
+    grid = create_cubed_sphere(8)
+    coord = standard_hybrid_levels(10)
+    n = grid.n
+    nlev = 10
+    state = FV3HydrostaticState(
+        u_d=Field(data=jnp.zeros((6, n + 1, n + 1, nlev), dtype=jnp.float32),
+                  name="u_d", dims=("face", "i", "j", "k")),
+        v_d=Field(data=jnp.zeros((6, n + 1, n + 1, nlev), dtype=jnp.float32),
+                  name="v_d", dims=("face", "i", "j", "k")),
+        T=Field(data=jnp.full((6, n, n, nlev), 280.0, dtype=jnp.float32),
+                name="T", dims=("face", "i", "j", "k")),
+        p_s=Field(data=jnp.full((6, n, n), 1e5, dtype=jnp.float32),
+                  name="p_s", dims=("face", "i", "j")),
+        phis=Field(data=jnp.zeros((6, n, n), dtype=jnp.float32),
+                   name="phis", dims=("face", "i", "j")),
+    )
+    te_column, te_total = compute_total_energy_pe(state, grid, coord)
+    assert te_column.dtype == jnp.float64, (
+        f"PE total-energy column dropped fp64: {te_column.dtype}"
+    )
+    # te_total is Python float; assert finite + non-zero.
+    assert te_total > 0
