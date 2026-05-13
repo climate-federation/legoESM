@@ -272,36 +272,6 @@ def step_carbon_differland(
     A_root = (NPP_pos - A_fol - A_lab) * config.f_root
     A_wood = jnp.maximum(NPP_pos - A_fol - A_lab - A_root, 0.0)
 
-    # NPP deficit (NPP_day < 0, GPP cannot cover R_auto).  Cascade the
-    # draw C_lab → C_fol → C_root → C_wood so the atmosphere gain via
-    # NEE is matched exactly by biomass loss, even if any single pool
-    # is exhausted (codex iter-62 stop-time review: "labile-reserve cap
-    # still leaves ghost carbon when C_lab is exhausted").  Standard
-    # CASA/DALEC carbon-starvation convention: labile reserves first,
-    # then foliage, then root, then wood (slowest-turnover pool last).
-    # Each draw is capped at the pool contents per timestep so no pool
-    # goes negative within one step; the remaining deficit (if all four
-    # pools are simultaneously exhausted — extremely rare) is the only
-    # residual carbon-imbalance source and bounded by
-    # ``(sum_pools)/dt``.
-    _inv_dt_days = 1.0 / jnp.maximum(dt_days, 1e-10)
-    npp_deficit_day = jnp.maximum(-NPP_day, 0.0)
-    lab_deficit_draw = jnp.minimum(
-        npp_deficit_day, state.C_lab * _inv_dt_days,
-    )
-    remaining_after_lab = npp_deficit_day - lab_deficit_draw
-    fol_deficit_draw = jnp.minimum(
-        remaining_after_lab, state.C_fol * _inv_dt_days,
-    )
-    remaining_after_fol = remaining_after_lab - fol_deficit_draw
-    root_deficit_draw = jnp.minimum(
-        remaining_after_fol, state.C_root * _inv_dt_days,
-    )
-    remaining_after_root = remaining_after_fol - root_deficit_draw
-    wood_deficit_draw = jnp.minimum(
-        remaining_after_root, state.C_wood * _inv_dt_days,
-    )
-
     # --- Phenology ---------------------------------------------------------
     lrf, lff = compute_phenology(jnp.asarray(doy), lat, config)
 
@@ -315,6 +285,43 @@ def step_carbon_differland(
     root_litter = state.C_root * _effective_rate(
         jnp.asarray(config.tor_root), dt_days,
     )
+
+    # NPP deficit (NPP_day < 0, GPP cannot cover R_auto).  Cascade the
+    # draw C_lab → C_fol → C_root → C_wood so the atmosphere gain via
+    # NEE is matched exactly by biomass loss, even if any single pool
+    # is exhausted.  Each draw is capped at the **net** pool contents
+    # after natural turnover flows (lab_release / leaf_litter / etc.)
+    # so the pool cannot go below 0 once both the natural drain AND
+    # the deficit are applied — preventing the ``_soft_pos`` smoothing
+    # bias from leaking ``_alpha·log(2)`` of phantom carbon per pool.
+    # Codex iter-63 stop-time review: "exhausted-labile case still
+    # leaks carbon" — caused by the prior cap using raw state.C_x
+    # without subtracting the natural turnover drain.
+    _inv_dt_days = 1.0 / jnp.maximum(dt_days, 1e-10)
+    npp_deficit_day = jnp.maximum(-NPP_day, 0.0)
+    # Net pool capacity per day after subtracting natural turnover drain
+    # (and adding natural turnover gain, e.g. ``lab_release → C_fol``).
+    # ``A_x`` contributions are zero in deficit regime (NPP_pos = 0).
+    lab_net_avail = jnp.maximum(
+        state.C_lab + (A_lab - lab_release) * dt_days, 0.0,
+    ) * _inv_dt_days
+    fol_net_avail = jnp.maximum(
+        state.C_fol + (A_fol + lab_release - leaf_litter) * dt_days, 0.0,
+    ) * _inv_dt_days
+    root_net_avail = jnp.maximum(
+        state.C_root + (A_root - root_litter) * dt_days, 0.0,
+    ) * _inv_dt_days
+    wood_net_avail = jnp.maximum(
+        state.C_wood + (A_wood - wood_litter) * dt_days, 0.0,
+    ) * _inv_dt_days
+
+    lab_deficit_draw = jnp.minimum(npp_deficit_day, lab_net_avail)
+    remaining_after_lab = npp_deficit_day - lab_deficit_draw
+    fol_deficit_draw = jnp.minimum(remaining_after_lab, fol_net_avail)
+    remaining_after_fol = remaining_after_lab - fol_deficit_draw
+    root_deficit_draw = jnp.minimum(remaining_after_fol, root_net_avail)
+    remaining_after_root = remaining_after_fol - root_deficit_draw
+    wood_deficit_draw = jnp.minimum(remaining_after_root, wood_net_avail)
 
     # --- Heterotrophic respiration & decomposition -------------------------
     tempmod = _temperate_modifier(T, precip, config)
@@ -330,11 +337,19 @@ def step_carbon_differland(
     )
 
     # --- Pool updates (Euler, gC/m2/day rates * dt_days) -------------------
-    # Smooth non-negativity (softplus): preserves AD gradients and allows
-    # pools to approach zero without the artificial 1 gC/m2 hard floor.
-    _alpha = 0.01  # smoothing scale [gC/m2]
+    # Hard non-negativity ``jnp.maximum(x, 0)``.  The iter-64 cap
+    # (``lab_net_avail`` etc., computed against the pool AFTER natural
+    # turnover) guarantees ``state.C + (A − drain − deficit) · dt ≥ 0``
+    # exactly, so no smoothing is required.  Previously a softplus
+    # (``_alpha · logaddexp(x/_alpha, 0)`` with ``_alpha = 0.01``) was
+    # used; even when ``raw_new_C == 0`` exactly, ``softplus(0) =
+    # _alpha · log(2) ≈ 0.007 gC/m2`` of phantom carbon was added per
+    # pool per step (codex iter-63 stop-time review).  ``jnp.maximum``
+    # has subgradient 0 below 0 and 1 above — well-defined for both
+    # forward simulation and AD when crossing zero is unphysical
+    # anyway.
     def _soft_pos(x):
-        return _alpha * jnp.logaddexp(x / _alpha, 0.0)
+        return jnp.maximum(x, 0.0)
 
     new_state = CarbonState(
         C_lab=_soft_pos(

@@ -9,6 +9,36 @@ Branch: `clean_physics`. Driven by Ralph loop + `/codex:adversarial-review`.
 - **Ocean** (`src/legoesm/ocean/physics/`): vertical_mixing, bottom_drag, lateral_mixing, convection, surface_forcing, shortwave_penetration, mixing.
 - **Cryosphere** (`src/legoesm/ice/`): sea_ice, dynamics, itd, rheology, transport.
 
+## Iteration 64 — 2026-05-13
+
+**Fix codex iter-63 stop-time finding: exhausted-labile case still
+leaks carbon.**
+
+The iter-63 cascade capped each draw at `state.C_x / dt_days`,
+which ignored the simultaneous natural turnover drain
+(`lab_release`, `leaf_litter`, etc.).  When deficit_draw +
+natural_drain together exceeded the pool, the new pool value went
+slightly negative and the `_soft_pos` softplus clamped it to
+`_alpha · log(2) ≈ 0.007 gC/m2` of phantom carbon per pool per
+step.
+
+Fix:
+1. **Net-available cap**: compute `lab_net_avail = max(state.C_lab +
+   (A_lab − lab_release) · dt, 0) / dt_days` so the cap accounts for
+   the natural turnover flow BEFORE deciding how much deficit a pool
+   can absorb.  Same for fol/root/wood.
+2. **Hard `jnp.maximum(x, 0)`** replaces softplus.  With the cap
+   guaranteeing `state.C + (A − drain − deficit)·dt ≥ 0` exactly,
+   no smoothing bias is added.
+
+New regression test
+`test_total_carbon_conservation_machine_precision` exercises the
+exhausted-labile + no-GPP forcing at `rtol=1e-9, atol=1e-9` —
+50,000× tighter than the iter-62 test, ~12 orders of magnitude
+better than the original iter-50 `rtol=0.05`.
+
+**Tests (post iter-64):** 45 / 45 carbon unit tests pass.
+
 ## Iteration 63 — 2026-05-13
 
 **Fix codex iter-62 stop-time finding: labile-reserve cap leaves

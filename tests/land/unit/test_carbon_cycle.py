@@ -444,6 +444,48 @@ class TestDifferLandStep(unittest.TestCase):
             err_msg="Carbon not conserved when C_lab exhausted",
         )
 
+    def test_total_carbon_conservation_machine_precision(self):
+        """Iter-64: with the natural-turnover-aware cascade cap and the
+        ``jnp.maximum`` (vs softplus) clamp, conservation should hold
+        at near-machine precision under any forcing — not just the
+        loose 5% / 0.1% bounds of the earlier tests.
+
+        Tests carbon-starvation forcing AND a state with a depleted
+        labile pool, then asserts rtol=1e-9 conservation.
+        """
+        cfg = _default_config(scheme="differland")
+        ncol = 1
+        from legoesm.land.carbon.config import CarbonState
+        state = CarbonState(
+            C_lab=jnp.full((ncol,), 0.5),
+            C_fol=jnp.full((ncol,), 300.0),
+            C_root=jnp.full((ncol,), 400.0),
+            C_wood=jnp.full((ncol,), 10000.0),
+            C_lit=jnp.full((ncol,), 600.0),
+            C_som=jnp.full((ncol,), 12000.0),
+        )
+        sw = jnp.zeros(ncol)            # no GPP
+        T = jnp.full(ncol, 290.0)
+        lat = jnp.full(ncol, 0.7)
+        precip = jnp.full(ncol, 1e-6)
+        beta = jnp.ones(ncol)
+        co2 = jnp.full(ncol, 400.0)
+        dt = 600.0
+
+        new_state, co2_flux = step_carbon_differland(
+            state, sw, T, co2, beta, lat, 15.0, precip, cfg, dt,
+        )
+        dC_total = sum(
+            getattr(new_state, f) - getattr(state, f)
+            for f in state._fields
+        )
+        nee_gC = co2_flux / ((44.0 / 12.0) * 1e-3)
+        expected_dC = -nee_gC * dt
+        npt.assert_allclose(
+            dC_total, expected_dC, rtol=1e-9, atol=1e-9,
+            err_msg="Carbon conservation must hold at near-machine precision",
+        )
+
 
 # ===================================================================
 # Seasonal Cycle
