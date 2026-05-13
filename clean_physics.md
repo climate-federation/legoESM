@@ -9,6 +9,31 @@ Branch: `clean_physics`. Driven by Ralph loop + `/codex:adversarial-review`.
 - **Ocean** (`src/legoesm/ocean/physics/`): vertical_mixing, bottom_drag, lateral_mixing, convection, surface_forcing, shortwave_penetration, mixing.
 - **Cryosphere** (`src/legoesm/ice/`): sea_ice, dynamics, itd, rheology, transport.
 
+## Iteration 72 — 2026-05-13
+
+**Inspection iteration on TKE / CLUBB-lite / `pbl_height` (no code changes).**
+
+- **`pbl_height`**: bulk-Ri with surface-difference dV² (Vogelezang &
+  Holtslag 1996 form, not absolute-wind-speed); two methods —
+  smooth sigmoid-weighted (`w_pbl = sigma·(1−sigma)` peaks at the
+  Ri_crit crossing) and `interp` (linear interpolation + softmin).
+  Both differentiable, clipped to [h_min, h_max].
+- **`tke.py`** (Mellor-Yamada level 2.5): sqrt floor at `tke_min`
+  via `tke = max(tke, tke_min)` at line 93; semi-implicit dissipation
+  `(tke_diffused + dt·prod)/(1 + dt·diss)` linearises so even strong
+  dissipation can't drive tke negative; `tke_new = max(tke_new,
+  tke_min)` final clamp.  Buoyancy sign correct (sink for stable,
+  source for unstable).
+- **`clubb_lite.py`** (Golaz / Larson PDF closure): wp2 carried via
+  TKE slot; cloud-fraction PDF block confirmed-dead and removed in
+  iter-172 audit; restoration instructions in source comments for
+  future CLUBB unified scheme.
+- **YSU / HB / Louis / CLUBB / TKE all share `surface_layer.
+  compute_surface_fluxes`** with hardcoded L_v (known limitation —
+  internal atmospheric path, NOT the tile-side coupler flux).
+
+No new fixes needed.  All turbulence schemes are mature.
+
 ## Iteration 71 — 2026-05-13
 
 **Inspection iteration on YSU PBL + surface_layer + EDMF
