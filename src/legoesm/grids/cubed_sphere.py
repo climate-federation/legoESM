@@ -10669,6 +10669,91 @@ def net_radiation_fv3(
     return (1.0 - albedo) * sw_down + lw_down - lw_up
 
 
+def clear_sky_longwave_brunt_fv3(
+    t: jax.Array,
+    e_a_pa: jax.Array,
+    a_brunt: float = 0.605,
+    b_brunt: float = 0.048,
+) -> jax.Array:
+    """FV3_3D iter 877: Brunt 1932 clear-sky downwelling LW primitive.
+
+    Brunt 1932 (Quart. J. Roy. Meteor. Soc.) empirical clear-sky
+    atmospheric emissivity → downwelling longwave irradiance:
+
+        ε_a   = a + b · √e_a_hPa           (dimensionless)
+        LW_dn = ε_a · σ · T⁴               (W/m²)
+
+    Where:
+      * T        — screen-level air temperature (K).
+      * e_a_pa   — screen-level vapor pressure (Pa); converted
+                   to hPa internally for √(e_a) fit.
+      * a, b     — Brunt 1932 coefficients (default 0.605, 0.048);
+                   range across studies: a ∈ [0.5, 0.7], b ∈
+                   [0.04, 0.08] depending on climate regime.
+      * σ        — ``constants.sigma_sb``.
+
+    Sign: LW_dn > 0; ε_a in [0.6, 0.95] for clear sky.  Cloud-cover
+    correction (Idso-Jackson 1969 multiplicative factor) NOT
+    included — caller applies if needed.
+
+    Canonical magnitudes:
+      | scenario              | T (°C)| e_a (Pa)| ε_a   | LW_dn (W/m²)|
+      |-----------------------|-------|---------|-------|--------------|
+      | Tropical humid        | 30    | 2700    | 0.85  | 408          |
+      | Mid-lat summer humid  | 25    | 1500    | 0.79  | 354          |
+      | Mid-lat winter dry    | 0     | 300     | 0.69  | 217          |
+      | Arid daytime          | 35    | 600     | 0.72  | 365          |
+      | Polar night dry       | −30   | 30      | 0.61  | 119          |
+
+    **Closes the LW_dn input to iter-876 net_radiation_fv3** —
+    caller now has full PM-radiation pipeline:
+
+        T, RH → iter-871 e_a (via thermo)
+              → iter-877 LW_dn (Brunt)
+        T, ε  → caller-derived LW_up = ε·σ·T_s⁴
+        + SW_down, α → iter-876 R_n
+                     − G (caller)
+                     = A → iter-870 PM λE
+
+    Pairs with iter-876 (R_n) — supplies LW_dn input.
+
+    Per CLAUDE.md hygiene: uses ``constants.sigma_sb``.  Brunt a, b
+    are empirical fit coefficients (literal default args, not
+    physical constants).
+
+    Used by: Brunt 1932 original paper, Allen-Pereira 1998 FAO-56
+    Eq. 39 (different Brunt-style net-LW form), Bonan 2008 ch. 4
+    radiation budget, Brutsaert 1975 / Idso 1981 alternative
+    clear-sky LW parameterizations, CLM5/JULES/NoahMP atmospheric-
+    LW driver, FLUXNET LW-radiation sensor calibration baseline.
+
+    Note: this primitive is the **Brunt 1932 form** (a+b·√e_a).
+    Caller may swap for Brutsaert 1975 (ε_a = 1.24·(e_a/T)^(1/7))
+    or Idso-Jackson 1969 by overriding the formula externally —
+    Brunt is the most widely-used baseline for FAO-56-style
+    operational ET.
+
+    Parameters
+    ----------
+    t : jax.Array
+        Air temperature (K).
+    e_a_pa : jax.Array
+        Vapor pressure (Pa; not hPa or kPa).
+    a_brunt : float
+        Brunt 1932 intercept; default 0.605.
+    b_brunt : float
+        Brunt 1932 slope; default 0.048.
+
+    Returns
+    -------
+    lw_down : jax.Array
+        Downwelling clear-sky longwave irradiance (W/m²); positive.
+    """
+    e_a_hpa = e_a_pa / 100.0
+    eps_a = a_brunt + b_brunt * jnp.sqrt(jnp.maximum(e_a_hpa, 0.0))
+    return eps_a * constants.sigma_sb * t ** 4
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

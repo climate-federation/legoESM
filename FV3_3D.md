@@ -5665,3 +5665,62 @@ energy-balance closure validation; (3) FAO-56 reference-ET
 computation; (4) AR6 §11 land-surface energy-budget diagnostics.
 Pure JAX, vmap-compatible.  No `constants.py` additions.
 
+## Iter 877 — clear_sky_longwave_brunt_fv3 (Brunt 1932 LW_dn)
+
+Added `clear_sky_longwave_brunt_fv3(t, e_a_pa, a_brunt=0.605,
+b_brunt=0.048)` to `grids/cubed_sphere.py`.  Brunt 1932 (QJRMS)
+empirical clear-sky atmospheric emissivity → downwelling LW:
+
+```
+ε_a   = a + b · √e_a_hPa
+LW_dn = ε_a · σ · T⁴        (W/m²)
+```
+
+Defaults a=0.605, b=0.048 (Brunt 1932 canonical).  Uses
+``constants.sigma_sb`` per CLAUDE.md hygiene.
+
+Canonical:
+  | scenario              | T (°C)| e_a (Pa)| ε_a   | LW_dn (W/m²)|
+  |-----------------------|-------|---------|-------|--------------|
+  | Tropical humid        | 30    | 2700    | 0.85  | 408          |
+  | Mid-lat summer humid  | 25    | 1500    | 0.79  | 354          |
+  | Mid-lat winter dry    | 0     | 300     | 0.69  | 217          |
+  | Arid daytime          | 35    | 600     | 0.72  | 365          |
+  | Polar night dry       | −30   | 30      | 0.61  | 119          |
+
+Cloud-cover correction (Idso-Jackson 1969) NOT included — caller
+applies if needed.
+
+**Closes the LW_dn input to iter-876 net_radiation_fv3** — caller
+now has full PM-radiation pipeline:
+
+```
+T, RH → iter-871 e_a (via thermo)
+      → iter-877 LW_dn (Brunt)
+T, ε  → caller LW_up = ε·σ·T_s⁴
++ SW_dn, α → iter-876 R_n − G = A → iter-870 PM λE
+```
+
+Alternative parameterizations (Brutsaert 1975 (e_a/T)^(1/7),
+Idso 1981 dual-band) are caller-side swaps; Brunt is FAO-56
+operational baseline.
+
+Used by: Brunt 1932 origin, Allen-Pereira 1998 FAO-56 Eq. 39 net-LW
+form, Bonan 2008 ch. 4 radiation budget, Brutsaert 1975 /
+Idso 1981 alternative LW parameterizations, CLM5/JULES/NoahMP
+atmospheric-LW driver, FLUXNET LW-sensor calibration baseline.
+
+Test: `tests/test_fv3_brunt_lw_iter877.py` (7 tests: tropical humid
+≈408 W/m², polar dry ≈125, e_a=0 → ε_a=0.605 intercept analytic,
+monotone in T (T⁴ dominant) + e_a (CC humidity), chain with iter-876
+R_n, 3-D shapes positive).
+
+### Why this iteration was meaningful
+
+Closes the **LW_dn supplier primitive** for iter-876 R_n; caller
+has complete pure-JAX radiation→ET pipeline from baseline
+meteorology + albedo + canopy.  Brunt 1932 is FAO-56 operational
+baseline.  Pure JAX, vmap-compatible.  Uses ``constants.sigma_sb``
+per CLAUDE.md hygiene.  Brunt fit coefficients are empirical
+(default args).  No `constants.py` additions.
+
