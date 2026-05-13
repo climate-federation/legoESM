@@ -9,6 +9,36 @@ Branch: `clean_physics`. Driven by Ralph loop + `/codex:adversarial-review`.
 - **Ocean** (`src/legoesm/ocean/physics/`): vertical_mixing, bottom_drag, lateral_mixing, convection, surface_forcing, shortwave_penetration, mixing.
 - **Cryosphere** (`src/legoesm/ice/`): sea_ice, dynamics, itd, rheology, transport.
 
+## Iteration 68 — 2026-05-13
+
+**Inspection iteration on `thermo.py` + `surface_albedo.py` (no
+code changes).**
+
+- **`thermo.py`**: Tetens formula `611.2 · exp(17.67 · Tc / (Tc +
+  243.5))` (liquid) and Clausius-Clapeyron with L_s (ice) both
+  correct.  Analytic `de/dT` derivative matches forward formula.
+  Smooth softplus floor + cap in `saturation_mixing_ratio` is
+  asymptotic to standard `clip(., 1)` for atmospheric q_sat <
+  0.05.  Specific-humidity helper `q = w_sat/(1+w_sat)` correct.
+
+- **`surface_albedo.py`**:
+  - `land_vegetation_albedo`: linear blend of α_tropics → α_midlat
+    → α_highlat with `sharpness = 0.3°⁻¹` transitions at 23.5° /
+    60°.  Verified `w_midlat ≥ w_highlat` always (since lat − 23.5
+    > lat − 60); endpoint cases (lat=0, 30, 70) recover α_T / α_M
+    / α_H exactly.
+  - `snow_albedo`: `α_min + (α_max − α_min) · exp(−age/τ)`,
+    standard exponential decay.
+  - `ice_albedo`: linear interpolation between cold (266.35 K)
+    and warm (271.35 K = T_freeze_ocean) endpoints.  Frac clipped
+    to [0, 1].
+  - `ocean_albedo` Briegleb 1992 zenith formula: `0.026/(μ^1.7 +
+    0.065) + 0.15·(μ−0.10)·(μ−0.50)·(μ−1.0)` clipped to
+    [0.03, 0.40].  Verified at μ=1 (0.0244, clipped to 0.03)
+    and μ=0.01 (0.39).
+
+No new fixes needed.  Both modules are mature.
+
 ## Iteration 67 — 2026-05-13
 
 **Bug fix: frozen-lake post-step q_surface uses liquid saturation.**
