@@ -420,6 +420,37 @@ Verified clean:
 
 No code changes this iteration.
 
+## Iter-108 — convection `_triggers` smooth primitives + sea-ice ITD audit
+Audited `atmosphere/physics/convection/_triggers.py` (367 LOC, shared
+smooth primitives used by every convection scheme) and `ice/itd.py`
+(357 LOC, multi-category remapping).
+
+Verified clean:
+- **`smooth_step` / `smooth_heaviside`**: `sigmoid(s·x)`, gradient at
+  origin `s/4`; standard AD-safe step.
+- **`smooth_max` / `smooth_min`**: `logaddexp(s·a, s·b)/s` (log-sum-exp
+  form, overflow-safe across magnitudes).
+- **`smooth_positive_part`**: `softplus(s·x)/s` — gradient `0.5` at
+  `x=0`, smoothly transitioning to `1` for `x≫0` / `0` for `x≪0`.
+  Used in the CAPE-relaxation `(CAPE − thr)_+` closure.
+- **`smooth_lowest_crossing_index`**: sequential survival product
+  `first_cross[k] = cross_weight[k] · Π_{j<k}(1 − cross_weight[j])`
+  picks first crossing robustly; no-cross fallback gate (sharpness 20
+  around midpoint 0.5) defaults to surface index.  Surface-first ↔
+  surface-last conversion at line 331: `nlev − 1 − idx_surface_first`.
+- **ITD `linear_remap`**: vol-conserving rescale `a_pre · h_pre →
+  a_post · h_post` preserves mass under clamp at category bounds
+  (iter-3 #9 fix held).  Saturated branch (a_rescaled > 1) folds
+  excess into thickness (locally violates upper bin bound but
+  preserves mass — documented).  T_remap = E/vol_remap uses pre-
+  rescale volume, which is correct because rescale preserves
+  `a · h = vol_remap` exactly.
+- **ITD enthalpy remap** (when T_new provided): E = T·vol transferred
+  alongside volume via the same shift / receive pattern;
+  T_remap clipped to [T_ice_min, T_freeze_ocean].
+
+No code changes this iteration.
+
 ## Next iterations
 Continue addressing codex findings and direct-inspection sweeps until all schemes are
 provably conservative, monotone, CFL-safe, and AD-safe across mixed wet/dry grids.
