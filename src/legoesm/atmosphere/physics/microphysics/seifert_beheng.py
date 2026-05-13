@@ -74,9 +74,14 @@ def seifert_beheng_microphysics(
         T, q_v, p_full, dt, sharpness, q_c=q_c,
     )
 
-    # 1. Autoconversion (mass-dependent)
+    # 1. Autoconversion (mass-dependent).  Use the autoconversion-
+    # specific sharpness so the normalised-argument sigmoid (iter-97)
+    # is not driven 100× too steep by ``saturation_sharpness`` (which
+    # is calibrated for kg/kg-scale ``excess``, not for the
+    # dimensionless ``x_c/x_star − 1``).
     dq_c_au, dN_r_au, x_c = autoconversion_sb(
-        q_c, N_c_eff, rho, config.k_au, config.x_star, sharpness,
+        q_c, N_c_eff, rho, config.k_au, config.x_star,
+        config.autoconversion_sharpness,
     )
 
     # 2. Accretion

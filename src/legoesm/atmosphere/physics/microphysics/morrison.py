@@ -80,7 +80,8 @@ def morrison_microphysics(
         T, q_v, p_full, dt, sharpness, q_c=q_c,
     )
     dq_c_au, dN_r_au, x_c = autoconversion_sb(
-        q_c, N_c_eff, rho, config.k_au, config.x_star, sharpness,
+        q_c, N_c_eff, rho, config.k_au, config.x_star,
+        config.autoconversion_sharpness,
     )
     dq_c_ac = accretion(q_c, q_r, rho, config.k_ac)
     dN_r_sc, dN_r_br = self_collection_breakup(

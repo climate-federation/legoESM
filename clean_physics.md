@@ -448,6 +448,44 @@ droplets, fewer huge raindrops — physically correct.
   sharpness ~ 5 / K gives proper switch behaviour.
 - Sundqvist RH-based sigmoid: dimensionless arg, OK.
 
+## Iter-99 — codex stop-time on iter-97/98: parameter units vs defaults
+Codex stop-time review on iter-97/98 flagged "changed parameter units
+without updating production defaults".  Two issues:
+
+1. **iter-98 was wrong**: `breakup_sharpness = 1e4` is in units of
+   **[1/m]**, not dimensionless.  With `D_r, D_eq ~ O(1e-3 m)` the
+   *old* formula `sigmoid(1e4 · (D_r − D_eq))` already gave a proper
+   transition over a ~0.1 mm width (sigmoid argument O(1) near
+   threshold).  My iter-98 normalisation `sigmoid(1e4 · (D_r/D_eq −
+   1.0))` made the sigmoid an essentially step function (transition
+   width ~ 0.01 % of D_eq).  **Reverted to the original dimensional
+   form** in iter-99.  Added unit comment `[1/m]` to the config.
+
+2. **iter-97 fix kept, default refined**: the autoconversion onset
+   `sigmoid(sharpness · (x_c/x_star − 1))` *is* the right form, but
+   the SB scheme was passing `config.saturation_sharpness = 100`
+   (calibrated for `excess ~ 1e-3 kg/kg`) as the autoconversion
+   sharpness — 100× too steep on the normalised argument.  Added a
+   separate `autoconversion_sharpness: float = 10.0` config field on
+   `SeifertBeheng`, `Morrison`, `Thompson` configs and threaded it
+   through `seifert_beheng.py`, `morrison.py`, `thompson.py` call
+   sites.  Default of 10 gives transition over ~10 % of `x_star`
+   around the threshold — sharp enough to act as a meaningful
+   threshold without being a step function.
+
+**Production behaviour**: maritime stratocumulus (N_c = 1e8 /m³,
+q_c = 1 g/kg) gives `x_c/x_star ≈ 0.04`, well below threshold ⇒
+SB autoconversion onset ≈ 6.6e-5 (essentially zero).  This is the
+canonical SB-2001 threshold behaviour — drizzle in such columns
+relies on accretion of pre-existing rain plus the proper τ-based
+Φ_au switch (the simplified form here only models the x_c switch).
+Breakup behaviour unchanged from pre-iter-98:
+- D_r = 0.124 mm: breakup_frac = 6e-5 (no breakup)
+- D_r = 1.241 mm: breakup_frac = 0.80 (above threshold ~1.1 mm)
+- D_r = 2.122 mm: breakup_frac = 1.00 (full breakup).
+
+All 115 microphysics tests green.
+
 ## Next iterations
 Continue addressing further codex findings and direct-inspection sweeps until all
 schemes are provably conservative, monotone, CFL-safe, and AD-safe across mixed

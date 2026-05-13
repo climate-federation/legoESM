@@ -95,7 +95,8 @@ def thompson_microphysics(
 
     # Autoconversion (gamma-corrected)
     dq_c_au, dN_r_au, x_c = autoconversion_sb(
-        q_c, N_c_eff, rho, config.k_au, config.x_star, sharpness, gamma_norm=gamma_c_norm,
+        q_c, N_c_eff, rho, config.k_au, config.x_star,
+        config.autoconversion_sharpness, gamma_norm=gamma_c_norm,
     )
 
     # Accretion (gamma-corrected)
