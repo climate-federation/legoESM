@@ -4465,7 +4465,18 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 # iter-7: enable anchored mass fixer (default-off in
                 # config; we opt in here so the NH suite reports mass
                 # drift alongside |w|_max).
-                fix_mass=True, anchor_mass_to_initial=True)
+                fix_mass=True, anchor_mass_to_initial=True,
+                # new_test_dycores iter-5: enable FV3 iter-697/698 cube
+                # edge artifact reduction.  Cross-grid survey at C36
+                # showed cube NH TC1 |w|_max = 0.33 m/s vs ico 0.014,
+                # spectral 0.014 (~22x worse).  Vector-rotating halo +
+                # 4th-order a2b_ord4 corner cascade reduces theta_prime
+                # edge ratio -21.9% at C16 (iter-699 sentinel).  Both
+                # flags are core enablers in ``make_fv3_faithful_nh_config``
+                # but the matrix runner had remained on the legacy
+                # scalar-halo path.
+                use_fv3_vector_halo_uv=True,
+                use_fv3_a2b_ord4_vector_uv=True)
         elif test_case == "tc2a":
             from tests.test_cases.dcmip2025 import dcmip25_tc2_init
             state, hcoord, tmetric, small_grid = dcmip25_tc2_init(
