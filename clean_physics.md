@@ -9,6 +9,39 @@ Branch: `clean_physics`. Driven by Ralph loop + `/codex:adversarial-review`.
 - **Ocean** (`src/legoesm/ocean/physics/`): vertical_mixing, bottom_drag, lateral_mixing, convection, surface_forcing, shortwave_penetration, mixing.
 - **Cryosphere** (`src/legoesm/ice/`): sea_ice, dynamics, itd, rheology, transport.
 
+## Iteration 65 — 2026-05-13
+
+**Inspection iteration on atmospheric convection + coupler bulk-flux
+helpers (no code changes).**
+
+- **`bechtold.py`** (Bechtold/IFS, 395 lines): PBL-CAPE closure
+  matches Kain (2004) §3 form with proper `rho_BL` and `g` factors;
+  MC enhancement gated to O(1) by `mc_normalize_scale = 0.05
+  kg/m²/s`.  Downdraft rain-evaporation conservation verified:
+  `col_int(evap_rate · dp/g) = evap_total`, `col_int(rain_scale ·
+  dq_c) = rain_source_total - evap_total` (column water balanced).
+- **`_apply_mass_flux_kernel`** (Tiedtke 1989 / Siebesma 2007):
+  subsidence + detrainment decomposition; separate `q_v_u` and
+  `q_c_u` plume streams (instead of conflated `q_u`) close column
+  MSE budget.  Stratosphere mass-flux gate prevents TOA T spikes.
+- **`emanuel.py`** post iter-42 downdraft rewrite: vapor source
+  via `evap_rate ∝ below_lcl/below_mass`; cloud-water subtract via
+  `weight = dq_c_conv_dt_raw / col_dq_c` (subtract = downdraft_eff
+  · col_dq_c, vapor gain = same).  Conservation closes; `dq_c -
+  subtract ≥ 0` because `subtract ≤ dq_c_conv_dt_raw ≤ dq_c_conv_dt`.
+- **`surface_radiation_fluxes`** (`coupler/surface_energy.py`):
+  net = SW_down·(1-α) + LW_down·ε - σT⁴·ε.  Upward LW = emission +
+  reflected.  Total surface energy gain = SW_net + LW_net.  Matches
+  grey-surface BC (iter-13 sea-ice + iter-42 ocean fix).
+- **`simple_bulk_fluxes`** (`coupler/bulk_flux.py`): standard
+  bulk-aerodynamic with positive-upward sign convention.  Stress
+  opposes wind; heat / moisture fluxes track surface − air
+  difference times `rho · c_p · Ch · |U|`.
+
+No new fixes needed.  iter-42 covered the Emanuel AD-safe floor;
+iter-13/42 covered the grey-surface LW fix downstream.  All paths
+audited above close their conservation budgets to first principles.
+
 ## Iteration 64 — 2026-05-13
 
 **Fix codex iter-63 stop-time finding: exhausted-labile case still
