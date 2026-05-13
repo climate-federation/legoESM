@@ -143,3 +143,38 @@ def test_compute_total_energy_nh_returns_fp64():
     # te_total is a Python float; sanity-check non-zero positive
     # (atmosphere has positive internal+gravitational+kinetic energy).
     assert te_total > 0
+
+
+def test_compute_hydrostatic_energy_returns_fp64():
+    """iter-43: core/conservation.compute_hydrostatic_energy."""
+    from legoesm.core.conservation import compute_hydrostatic_energy
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.atmosphere.held_suarez import held_suarez_init
+
+    grid = create_cubed_sphere(8)
+    sigma = create_sigma_coordinate(10)
+    state = held_suarez_init(grid, sigma)
+    diag = compute_hydrostatic_energy(state, grid, sigma)
+    for k in ("kinetic_energy", "internal_energy",
+              "potential_energy", "total_energy"):
+        assert diag[k].dtype == jnp.float64, (
+            f"compute_hydrostatic_energy['{k}'] dropped fp64: "
+            f"{diag[k].dtype}"
+        )
+
+
+def test_compute_nh_energy_returns_fp64():
+    """iter-43: core/conservation.compute_nh_energy."""
+    from legoesm.core.conservation import compute_nh_energy
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from tests.test_cases.dcmip2025 import dcmip25_tc1_init
+
+    grid = create_cubed_sphere(8)
+    state, hcoord, tmetric = dcmip25_tc1_init(grid, n_levels=8)
+    diag = compute_nh_energy(state, grid, hcoord, tmetric)
+    for k in ("kinetic_energy", "internal_energy",
+              "potential_energy", "total_energy"):
+        assert diag[k].dtype == jnp.float64, (
+            f"compute_nh_energy['{k}'] dropped fp64: {diag[k].dtype}"
+        )
