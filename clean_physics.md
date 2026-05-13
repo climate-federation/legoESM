@@ -407,6 +407,47 @@ precip`).  All 115 microphysics tests green (`test_warm_rain` +
 `atmosphere/hydrostatic/unit/test_microphysics` +
 `unit/test_physics_microphysics`).
 
+## Iter-98 — rain self-collection breakup sigmoid scale bug (same class as iter-97)
+`atmosphere/physics/microphysics/_warm_rain.py::self_collection_breakup`.
+Following iter-97's SB autoconversion fix, scanned for similar
+sigmoid-scale bugs.  Found one:
+
+    breakup_frac = sigmoid(breakup_sharpness · (D_r − D_eq))
+
+with `breakup_sharpness = 10` and physical drop diameters
+`D_r, D_eq ~ O(1e-3 m)` — the sigmoid argument is O(1e-3) for every
+physical drop size, so `breakup_frac ≈ 0.5` regardless of drop size.
+Breakup permanently cancelled half of self-collection regardless of
+the equilibrium-diameter threshold.
+
+Fix: same normalization as iter-97 — divide by D_eq so
+`breakup_sharpness` is a proper dimensionless steepness:
+
+    breakup_frac = sigmoid(breakup_sharpness · (D_r / D_eq − 1.0))
+
+Verification across drop sizes (k_sc=7.12, D_eq=0.9 mm, sharpness=10):
+- D_r = 0.124 mm: breakup_frac = 1.8e-4 (essentially no breakup) ✓
+- D_r = 1.24 mm  : breakup_frac = 0.978 (strong breakup at threshold) ✓
+- D_r = 2.67 mm  : breakup_frac = 1.000 (full breakup) ✓
+
+All 115 microphysics tests (`test_warm_rain` +
+`atmosphere/hydrostatic/unit/test_microphysics` +
+`unit/test_physics_microphysics`) green.
+
+**Production behaviour shift**: drizzle (D_r ~ 0.5 mm) no longer
+loses ~50 % of self-collection to spurious breakup; large raindrops
+(D_r > 1 mm) now break up properly.  Net effect: more drizzle
+droplets, fewer huge raindrops — physically correct.
+
+**Other patterns scanned and verified clean**:
+- `saturation_adjustment cond_frac = sigmoid(sharpness · excess)`:
+  sharpness=50 acts on `excess ~ 1e-3 kg/kg`; half-active near
+  saturation is the intentional smooth-adjustment design (matches
+  Kessler).
+- Morrison / Thompson ice / melt sigmoids: argument has units of K,
+  sharpness ~ 5 / K gives proper switch behaviour.
+- Sundqvist RH-based sigmoid: dimensionless arg, OK.
+
 ## Next iterations
 Continue addressing further codex findings and direct-inspection sweeps until all
 schemes are provably conservative, monotone, CFL-safe, and AD-safe across mixed

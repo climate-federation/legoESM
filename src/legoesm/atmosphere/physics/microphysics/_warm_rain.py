@@ -282,7 +282,16 @@ def self_collection_breakup(N_r, q_r, rho, k_sc, breakup_sharpness, D_eq):
         / (jnp.pi / 6.0 * constants.rho_water)
     )
     D_r = safe_pow(D_r_arg, 1.0 / 3.0)
-    breakup_frac = jax.nn.sigmoid(breakup_sharpness * (D_r - D_eq))
+    # Breakup onset is a smooth transition at the equilibrium drop
+    # diameter ``D_eq``.  Argument to the sigmoid must be NORMALISED by
+    # ``D_eq`` so ``breakup_sharpness`` is a proper dimensionless
+    # steepness: with un-normalised ``breakup_sharpness · (D_r − D_eq)``
+    # at ``breakup_sharpness = 10`` and physical diameters ``D_r, D_eq
+    # ~ O(1e-3 m)``, the sigmoid argument is O(1e-3) for every drop
+    # size and ``breakup_frac`` stuck at ≈ 0.5 — breakup permanently
+    # cancels half of self-collection regardless of drop size.  Same
+    # class of scale bug as iter-97 SB autoconversion onset.
+    breakup_frac = jax.nn.sigmoid(breakup_sharpness * (D_r / D_eq - 1.0))
     dN_r_br = -dN_r_sc * breakup_frac
     return dN_r_sc, dN_r_br
 
