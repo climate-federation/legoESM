@@ -198,9 +198,8 @@ Branch: `clean_physics`.  Driven by Ralph loop + `/codex:adversarial-review`.
   fragility — `jnp.mean(None)` when `out.K_v` is None).
 - Pre-existing test failure `TestEVPSanity::test_zero_velocity_isotropic_stress`
   (EVP doesn't relax to -P/2 in 10 subcycles at dt=3600 s; verified on HEAD~1).
-- **Plume buoyancy uses dry T, not virtual** (`convection/_plume.py:653`).  ~1 K virtual
-  correction comparable to plume-alive threshold.  `compute_cape` supports virtual-T
-  when q_v threaded; plume integrator does not yet.  Scheme-wide recalibration.
+- ~~Plume buoyancy uses dry T~~ — fixed iter-125 via shared
+  `_shared.virtual_temperature` + cloud-water loading factor.
 - **Sea-ice `_thermo_single` emissivity** (`ice/sea_ice.py:614-617`): `ε_ice` used for
   all cells regardless of `ice_mask`.  Masked by conc-weighting in production.
 - **SB autoconversion τ-based Φ_au switch**: the simplified x_c switch (iter-97/99) is
@@ -398,6 +397,33 @@ Audited (~700 LOC):
 
 No code changes — all three modules canonical with prior audit fixes
 intact.
+
+## Iter-125 — plume buoyancy uses virtual T + cloud-water loading
+Cleared deferred item from iter-110+ list.  ``_plume.entraining_
+detraining_plume`` previously used dry temperature for buoyancy:
+``B_u = T_u - T_e``.  Virtual-T effect for a moist 10 g/kg parcel is
+~0.6 K, comparable to the ``1/buoyancy_sharpness = 2 K`` plume-alive
+threshold — the dry form was sufficient to flip the alive/dead
+classification for weak-CAPE columns.
+
+Fix (`atmosphere/physics/convection/_plume.py:650`):
+```python
+T_v_u = virtual_temperature(T_u, q_u) * (1.0 - q_c_u)
+T_v_e = virtual_temperature(T_e, q_e)
+B_u = T_v_u - T_v_e
+```
+Uses shared ``_shared.virtual_temperature(T, q_v) = T · (1 + (1/ε − 1)·q_v)``
+so the ε convention is centralised with the turbulence / PBL paths.
+The ``(1 − q_c_u)`` cloud-water mass-loading factor is one-sided
+(environment has q_c=0); it captures the canonical "water loading"
+buoyancy reduction (~0.1–0.3 K) known to suppress weak shallow
+convection.
+
+All 5 convection schemes that import the plume integrator (Bechtold,
+Emanuel, Kain-Fritsch, Zhang-McFarlane, Tiedtke) now use virtual-T
+buoyancy through this single change.
+
+Validated by 21 plume + 44 convection unit tests (65/65 pass).
 
 ## Next iterations
 Continue addressing codex findings and direct-inspection sweeps until all schemes are
