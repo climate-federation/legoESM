@@ -9,6 +9,36 @@ Branch: `clean_physics`. Driven by Ralph loop + `/codex:adversarial-review`.
 - **Ocean** (`src/legoesm/ocean/physics/`): vertical_mixing, bottom_drag, lateral_mixing, convection, surface_forcing, shortwave_penetration, mixing.
 - **Cryosphere** (`src/legoesm/ice/`): sea_ice, dynamics, itd, rheology, transport.
 
+## Iteration 71 — 2026-05-13
+
+**Inspection iteration on YSU PBL + surface_layer + EDMF
+(no code changes).**
+
+- **`ysu.py`**: PBL-height bulk-Ri integrator with `sigmoid(sharpness ·
+  (Ri_crit − Ri_bulk))` weighting; `w_pbl = sigma · (1−sigma)` peaks at
+  the Ri_crit crossing.  Both pure-stable and pure-unstable columns
+  collapse to `w → 0` everywhere and `+1e-20` floor regularises (h_pbl
+  → mean(z), clipped to 100m).  Known limitation, not a bug.
+- **K-profile / local-Ri blend**: `Km_profile = κ_vk · u* · z · (1 − z/h)²`
+  inside PBL, Louis-style local-Ri Km above PBL, Gaussian
+  entrainment envelope `K_ent = c_ent · w* · h · exp(−((z−h)/(0.3h))²)`
+  centred at h_pbl.  Smooth blend via `sigmoid(10·(z/h − 1))`.
+- **`implicit_vertical_diffusion_theta`**: T → θ via `(p/p_ref)^κ`;
+  surface flux converted to θ via `F_θ = F_T / exner_sfc`; diffused
+  in θ-space; converted back to T.  Dry adiabat (dθ/dz = 0) is neutral.
+- **`surface_layer.compute_surface_fluxes`** (atmospheric side):
+  hard-coded `L_v` for `lhflx`.  Over snow/ice tiles, this is ~13%
+  too low (`L_s/L_v ≈ 1.13`).  In coupled-mode, the tile-side
+  bulk-flux (with `L_eff` switch) is what's reported to the coupler;
+  the YSU/HB internal `lhflx` is only used as the boundary condition
+  for q_v implicit diffusion.  Known limitation in non-aquaplanet
+  setups; out of scope for this iter.
+- **`edmf_turbulence`**: `M_max = 0.5 · ρ · dz / dt` cap (per iter-12
+  fix).  Column conservation noted as approximate in source comments.
+
+No new fixes needed.  YSU/HB internal `L_v` hardcode is a known
+limitation tracked alongside the coupled-mode surface-flux flow.
+
 ## Iterations 1-50 — Summary (compressed 2026-05-13 after iter-50)
 
 ### Constants & shared utilities
