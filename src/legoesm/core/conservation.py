@@ -763,14 +763,20 @@ def compute_hydrostatic_energy(
         'potential_energy': ∫ Φ·p_s·dσ·dA / g
         'total_energy': sum of all three
     """
-    u = state.u.data
-    v = state.v.data
-    T = state.T.data
-    p_s = state.p_s.data
-    phis = state.phis.data
-    g = constants.g
-    c_v = constants.c_vd
-    dsigma = sigma_coord.dsigma
+    # iter-43: promote energy fields to the fp64 budget accumulator
+    # before the column + area-weighted sums.  Same fp32-field bug as
+    # iter-1/4/5 mass path and iter-42 SW/MPAS energy fixer — the
+    # 0.5·(u²+v²) square+multiply lost ~7 bits of precision when the
+    # state was stored in fp32.
+    acc = _conservation_accumulator()
+    u = state.u.data.astype(acc)
+    v = state.v.data.astype(acc)
+    T = state.T.data.astype(acc)
+    p_s = state.p_s.data.astype(acc)
+    phis = state.phis.data.astype(acc)
+    g = jnp.asarray(constants.g, dtype=acc)
+    c_v = jnp.asarray(constants.c_vd, dtype=acc)
+    dsigma = sigma_coord.dsigma.astype(acc)
 
     # Mass weight per layer: p_s * dsigma / g
     # Use [..., None] broadcasting so this works for both cubed-sphere
@@ -821,20 +827,23 @@ def compute_nh_energy(
         'potential_energy': ∫ g·z·rho·J·dz·dA
         'total_energy': sum of all three
     """
-    u = state.u.data
-    v = state.v.data
-    w = state.w.data
-    theta_p = state.theta_prime.data
-    rho_p = state.rho_prime.data
+    # iter-43: promote energy fields to fp64 budget accumulator (see
+    # compute_hydrostatic_energy docstring above).
+    acc = _conservation_accumulator()
+    u = state.u.data.astype(acc)
+    v = state.v.data.astype(acc)
+    w = state.w.data.astype(acc)
+    theta_p = state.theta_prime.data.astype(acc)
+    rho_p = state.rho_prime.data.astype(acc)
 
-    g = constants.g
-    c_v = constants.c_vd
-    theta_0 = height_coord.theta_ref
-    rho_0 = height_coord.rho_ref
-    exner_0 = height_coord.exner_ref
-    dz = height_coord.dz
-    z_full = height_coord.z_full
-    J = terrain_metric.jacobian
+    g = jnp.asarray(constants.g, dtype=acc)
+    c_v = jnp.asarray(constants.c_vd, dtype=acc)
+    theta_0 = height_coord.theta_ref.astype(acc)
+    rho_0 = height_coord.rho_ref.astype(acc)
+    exner_0 = height_coord.exner_ref.astype(acc)
+    dz = height_coord.dz.astype(acc)
+    z_full = height_coord.z_full.astype(acc)
+    J = terrain_metric.jacobian.astype(acc)
 
     rho_total = rho_0 + rho_p
     theta_total = theta_0 + theta_p
