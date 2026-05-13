@@ -64,6 +64,11 @@ NH cross-grid TC1 mass-drift after iter-10 (matrix runner `notes` line):
 - **iter-10**: surface `mass_drift` in the NH `notes` line of
   `run_atmosphere_test_matrix.py` (parallel to SW/hydro runners) so
   conservation is visible without parsing `mean_timeseries.csv`.
+- **iter-11**: MPAS PE `anchor_mass_to_initial` flag + fp64 budget acc
+  in `_fix_mass_mpas_hydro` (target_mass kwarg, fp32-cast on
+  correction dropped); cube PE matrix-runner sites opt in to anchor.
+  Ico HS 1-day mass drift `1.31e-12 → 1.61e-16`; cube HS 1-day
+  `4.01e-08 → 4.02e-13` (~10^5x).
 
 ## Implementation patterns established (apply to any new dycore)
 

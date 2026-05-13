@@ -2932,7 +2932,8 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
             corner_div_damp_nord=_cdd_nord_env,
             corner_div_damp_fv3_vector_fill=_cdd_fv3_vfill_env,
             smagorinsky_cs=_smag_cs_env,
-            use_conservation_fixer=True, fix_mass=True)
+            use_conservation_fixer=True, fix_mass=True,
+            anchor_mass_to_initial=True)
         model = PrimitiveEquationModel(grid, sigma, config)
         if _topo:
             from legoesm.atmosphere.idealized.held_suarez_topo import (
@@ -3050,7 +3051,8 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         dt = 200.0
         ah = _laplacian_visc_ico(mesh)
         config = MPASPrimitiveEquationConfig(
-            nu_del4=_hyperdiff_ico(mesh), nu_del2=ah, fix_mass=True)
+            nu_del4=_hyperdiff_ico(mesh), nu_del2=ah,
+            fix_mass=True, anchor_mass_to_initial=True)
         model = MPASPrimitiveEquationModel(mesh, sigma, config)
         if _topo:
             from legoesm.atmosphere.idealized.held_suarez_topo import (
@@ -3364,7 +3366,8 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         config = PrimitiveEquationConfig(
             hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
             div_damp_coeff=dd, A_h=ah,
-            use_conservation_fixer=True, fix_mass=True)
+            use_conservation_fixer=True, fix_mass=True,
+            anchor_mass_to_initial=True)
         model = PrimitiveEquationModel(grid, sigma, config)
         if _rotated:
             from tests.test_cases.dcmip2008.jablonowski_rotated import (
@@ -3508,7 +3511,8 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         dt = 200.0
         ah = _laplacian_visc_ico(mesh)
         config = MPASPrimitiveEquationConfig(
-            nu_del4=_hyperdiff_ico(mesh), nu_del2=ah, fix_mass=True)
+            nu_del4=_hyperdiff_ico(mesh), nu_del2=ah,
+            fix_mass=True, anchor_mass_to_initial=True)
         model = MPASPrimitiveEquationModel(mesh, sigma, config)
         if _rotated:
             from tests.test_cases.dcmip2008.jablonowski_rotated import (
@@ -3966,7 +3970,8 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         config = PrimitiveEquationConfig(
             hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
             div_damp_coeff=dd, A_h=ah,
-            use_conservation_fixer=True, fix_mass=True)
+            use_conservation_fixer=True, fix_mass=True,
+            anchor_mass_to_initial=True)
         model = PrimitiveEquationModel(grid, sigma, config)
         state = held_suarez_init(grid, sigma, T_init=280.0)
 
@@ -4086,7 +4091,8 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         dt = 200.0
         ah = _laplacian_visc_ico(mesh)
         config = MPASPrimitiveEquationConfig(
-            nu_del4=_hyperdiff_ico(mesh), nu_del2=ah, fix_mass=True)
+            nu_del4=_hyperdiff_ico(mesh), nu_del2=ah,
+            fix_mass=True, anchor_mass_to_initial=True)
         model = MPASPrimitiveEquationModel(mesh, sigma, config)
         state = held_suarez_init_mpas(mesh, sigma, T_init=280.0)
         grid = mesh

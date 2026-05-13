@@ -85,6 +85,7 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     pv_scheme: str = "energy"     # "energy" or "enstrophy"
     apvm_scale: float = 0.0       # APVM upwinding (0 = off)
     fix_mass: bool = True
+    anchor_mass_to_initial: bool = False  # iter-11: mirror PE/SW anchor pattern
     time_integrator: str = "ssp_rk3"
 
 
@@ -456,6 +457,15 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
         # under SPMD sharding XLA folds this value as a compile-time
         # constant and avoids the live-time reduction.
         self._total_area = float(jnp.sum(mesh.areaCell))
+        # iter-11: lazy fp64 mass snapshot for anchor-to-initial.
+        self._target_mass: jax.Array | None = None
+
+    def compute_mass(self, state) -> jax.Array:
+        """Compute global ``∫ p_s dA`` in the fp64 budget accumulator."""
+        return jnp.sum(
+            state.p_s.data.astype(jnp.float64)
+            * self.mesh.areaCell.astype(jnp.float64),
+        )
 
     def tendencies(
         self,
@@ -468,12 +478,27 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
             physics_tendency=physics_tendency, dt=dt,
         )
 
-    @partial(jax.jit, static_argnums=(0, 3))
     def step(
         self,
         state: MPASHydrostaticState,
         dt: float,
         physics_fn=None,
+    ):
+        """Outer wrapper: snapshots initial mass on first call when
+        ``anchor_mass_to_initial`` is on (fp64, outside JIT)."""
+        if (self.config.fix_mass
+                and self.config.anchor_mass_to_initial
+                and self._target_mass is None):
+            self._target_mass = self.compute_mass(state)
+        return self._step_jit(state, dt, physics_fn, self._target_mass)
+
+    @partial(jax.jit, static_argnums=(0, 3))
+    def _step_jit(
+        self,
+        state: MPASHydrostaticState,
+        dt: float,
+        physics_fn=None,
+        target_mass: jax.Array | None = None,
     ) -> MPASHydrostaticState:
         """Advance one time step.
 
@@ -519,7 +544,9 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
 
         if self.config.fix_mass:
             state_new = _fix_mass_mpas_hydro(
-                state_new, state, self.mesh, total_area=self._total_area,
+                state_new, state, self.mesh,
+                total_area=self._total_area,
+                target_mass=target_mass,
             )
 
         return cast_pytree(state_new, None, "storage")
@@ -527,13 +554,17 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
     # integrate() and integrate_scan() inherited from IntegrationMixin
 
 
-def _fix_mass_mpas_hydro(state_new, state_old, mesh, total_area=None):
+def _fix_mass_mpas_hydro(
+    state_new, state_old, mesh, total_area=None, target_mass=None,
+):
     """Fix mass conservation: uniform additive correction to p_s.
 
-    The two ps mass sums are stacked into a single ``jnp.sum`` so XLA
-    can emit one cross-device reduction when sharded.  ``total_area``
-    is a state-independent constant — pass it in (precomputed once at
-    setup) so we drop it from the per-step reduction payload.
+    iter-11: cast both p_s fields to the fp64 budget accumulator before
+    the area-weighted sum.  Plain fp32 reductions over ~10^4–10^5
+    Voronoi cells leak ~N·eps noise into ``mass_old``/``mass_new`` and
+    leave a residual O(10^-7) random walk in the global integral.
+    When ``target_mass`` is provided (anchor-to-initial path), skip the
+    ``state_old`` reduction entirely.
 
     Parameters
     ----------
@@ -542,19 +573,34 @@ def _fix_mass_mpas_hydro(state_new, state_old, mesh, total_area=None):
         ``jnp.sum(mesh.areaCell)`` (correct for single-rank /
         non-sharded; redundant work under MPI when *total_area* is
         already known at the call site).
+    target_mass : jax.Array, optional
+        Anchored initial mass; when supplied (and only-then),
+        ``mass_old`` is replaced by this fp64 scalar.
     """
     area = mesh.areaCell
     if total_area is None:
         total_area = jnp.sum(area)
-    # Both p_s mass sums share the ``* area`` weight on the same axes —
-    # stack the two fields and reduce once locally before the allreduce.
-    _ps_stack = jnp.stack(
-        [state_old.p_s.data, state_new.p_s.data], axis=-1,
-    ) * area[..., None]
-    local = jnp.sum(_ps_stack, axis=tuple(range(area.ndim)))
-    if jax.process_count() > 1:
-        local = global_sum_mpi(local)
-    mass_old, mass_new = local[0], local[1]
+    acc = jnp.float64
+    area_acc = area.astype(acc)
+    if target_mass is not None:
+        mass_new = jnp.sum(state_new.p_s.data.astype(acc) * area_acc)
+        if jax.process_count() > 1:
+            mass_new = global_sum_mpi(mass_new)
+        mass_old = target_mass
+    else:
+        _ps_stack = jnp.stack(
+            [
+                state_old.p_s.data.astype(acc),
+                state_new.p_s.data.astype(acc),
+            ],
+            axis=-1,
+        ) * area_acc[..., None]
+        local = jnp.sum(_ps_stack, axis=tuple(range(area.ndim)))
+        if jax.process_count() > 1:
+            local = global_sum_mpi(local)
+        mass_old, mass_new = local[0], local[1]
     correction = (mass_old - mass_new) / total_area
+    # iter-11: drop ``.astype(p_s.data.dtype)`` — fp64 correction
+    # promotes the add, matches ``fix_ps_mass`` cubed-sphere convention.
     p_s_fixed = state_new.p_s.replace(data=state_new.p_s.data + correction)
     return state_new._replace(p_s=p_s_fixed)
