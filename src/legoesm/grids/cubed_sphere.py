@@ -6474,6 +6474,59 @@ def sc_fraction_eis_fv3(
     return jnp.clip(slope * eis + intercept, 0.0, 1.0)
 
 
+def cloud_optical_thickness_fv3(
+    lwp: jax.Array,
+    r_eff: jax.Array,
+    rho_water: float | jax.Array | None = None,
+    r_eff_floor: float = 1e-9,
+) -> jax.Array:
+    """FV3_3D iter 825: Slingo-Mie cloud optical thickness.
+
+    Slingo (1989) bulk Mie approximation:
+
+        τ = 1.5 · LWP / (ρ_water · r_eff)
+
+    where:
+      * LWP   — liquid water path (kg/m²; from
+                ``precipitable_water_fv3``-style column integral
+                of q_l · delp / g)
+      * ρ_water — liquid-water density (default
+                ``constants.rho_water = 1000`` kg/m³)
+      * r_eff — droplet effective radius (m)
+
+    Used by: shortwave-radiation parameterizations (Slingo 1989
+    8-stream Mie + delta-Eddington), Sc-deck cloud-optical-
+    thickness retrievals (MODIS COT), low-cloud feedback
+    decomposition (Stephens 2005).
+
+    Typical Sc deck (LWP = 100 g/m² = 0.1 kg/m², r_eff = 10 μm):
+        τ = 1.5 · 0.1 / (1000 · 1e-5) = 15
+
+    Thin cirrus (LWP = 5 g/m², r_eff = 30 μm): τ ≈ 0.25.
+
+    ``r_eff_floor`` prevents div-by-0 for empty cloud cells.
+
+    Parameters
+    ----------
+    lwp : jax.Array
+        Liquid water path (kg/m²).
+    r_eff : jax.Array
+        Droplet effective radius (m).
+    rho_water : float or jax.Array, optional
+        Default ``constants.rho_water``.
+    r_eff_floor : float
+        Lower bound on r_eff (m); default 1e-9.
+
+    Returns
+    -------
+    tau : jax.Array
+        Cloud optical thickness (dimensionless).
+    """
+    rho_w = constants.rho_water if rho_water is None else rho_water
+    r_safe = jnp.maximum(r_eff, r_eff_floor)
+    return 1.5 * lwp / (rho_w * r_safe)
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

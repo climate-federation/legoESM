@@ -5268,6 +5268,42 @@ from any model thermodynamic profile via the WB2006 fit.  Pure
 JAX, vmap-compatible.  No new physical constants introduced
 (0.06, 0.41 are WB2006-paper fit coefficients).
 
+## Iter 825 — cloud_optical_thickness_fv3 (Slingo 1989)
+
+Added `cloud_optical_thickness_fv3(lwp, r_eff, rho_water=None,
+r_eff_floor=1e-9)` to `grids/cubed_sphere.py`.  Slingo (1989)
+bulk-Mie approximation:
+
+```
+τ = 1.5 · LWP / (ρ_water · r_eff)
+```
+
+Used by Slingo 1989 shortwave-radiation parameterization (Mie +
+delta-Eddington), Sc-deck MODIS COT retrievals, low-cloud
+feedback decomposition.
+
+Typical values:
+  * Sc deck (LWP=100 g/m², r_eff=10 μm): τ = 15
+  * Thin cirrus (LWP=5 g/m², r_eff=30 μm): τ ≈ 0.25
+
+Defaults ``rho_water = constants.rho_water = 1000 kg/m³`` per
+constant-hygiene rule.  ``r_eff_floor`` prevents div-by-0 in
+empty cloud cells.
+
+Test: `tests/test_fv3_cloud_optical_thickness_iter825.py` (7
+tests: Sc deck τ=15 (analytic), thin cirrus τ≈0.25, LWP=0 → τ=0,
+monotone in LWP (↑LWP → ↑τ), monotone in r_eff (↑r_eff → ↓τ),
+r_eff=0 floored finite, 3-D shapes + non-negative).
+
+### Why this iteration was meaningful
+
+Cloud-optical-thickness primitive used in every cloud-radiation
+parameterization (CAM5-Slingo, IFS-McRad, MOM6-Stephens).
+Closes the Sc-cloud-radiative-effect chain: iter-823 EIS →
+iter-824 f_low → iter-825 τ via Slingo Mie.  Pure JAX, vmap-
+compatible.  Uses `constants.rho_water` per CLAUDE.md hygiene.
+No new physical constants introduced.
+
 
 
 

@@ -412,6 +412,7 @@ _GUARD_MODULES = (
     "test_fv3_mixed_layer_height_iter822",           # iter-822 add
     "test_fv3_eis_iter823",                          # iter-823 add
     "test_fv3_sc_fraction_eis_iter824",              # iter-824 add
+    "test_fv3_cloud_optical_thickness_iter825",      # iter-825 add
 )
 
 
