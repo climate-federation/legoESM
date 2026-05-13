@@ -3107,6 +3107,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
             hyperdiff_coeff=2.338e15 * (21.0 / n_max) ** 4,
             spectral_filter_order=8,
             spectral_filter_strength=0.01,
+            fix_mass=True, anchor_mass_to_initial=True,
         )
         model = SpectralPrimitiveEquationModel(grid, sigma, pe_config)
         # iter-47 codex MEDIUM + post-merge with main HS-topo
@@ -3572,6 +3573,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             hyperdiff_coeff=2.338e15 * (21.0 / n_max) ** 4,
             spectral_filter_order=8,
             spectral_filter_strength=0.01,
+            fix_mass=True, anchor_mass_to_initial=True,
         )
         model = SpectralPrimitiveEquationModel(grid, sigma, pe_config)
         if _rotated:
@@ -4138,6 +4140,7 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
             hyperdiff_coeff=2.338e15 * (21.0 / n_max) ** 4,
             spectral_filter_order=8,
             spectral_filter_strength=0.01,
+            fix_mass=True, anchor_mass_to_initial=True,
         )
         model = SpectralPrimitiveEquationModel(grid, sigma, pe_config)
         state = isothermal_rest_state_spectral(

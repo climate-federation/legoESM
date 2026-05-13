@@ -136,20 +136,67 @@ icosahedral (1e-12).  Baroclinic was already clean; anchor is neutral there.
 Unit tests: ``tests/atmosphere/hydrostatic/unit/test_primitive_eq_latlon_cgrid.py``
 48/48 PASS.
 
-## Iteration 3 plan
+## Iteration 3 — spectral PE anchored mass fixer (FIX)
 
-- Spectral primitive-equation has **no mass fixer** at all
-  (``SpectralPrimitiveEquationModel.step`` line ~1320 has no
-  ``fix_mass``/``target_mass`` hook).  Residual baseline drift on spectral
-  mountain_rossby (1.63e-3) and rossby_haurwitz (2.65e-3) is therefore real
-  conservation loss, not diagnostic noise.  Add an end-of-step spectral mass
-  fixer (rescale ``ln_p_s_hat[0,0]`` to target).
-- Quick-mode duration for HS is 30 days; the iter-2 drift figures above are at
-  1 day.  Run the canonical 30-day suite once to lock in the new baseline
-  before moving on.
-- CLAUDE.md's visual-verification guidance: rerun lat-lon Williamson-2 snapshot
-  with the iter-1 / iter-2 deltas and confirm v-wind is unchanged (this fix
-  touches conservation, not stencils, but worth a snapshot check).
+**Root cause.** ``SpectralPrimitiveEquationModel`` had no mass fixer at all.
+Mass drift on spectral hydrostatic cases (mountain_rossby 1.63e-3,
+rossby_haurwitz 2.65e-3, AMIP 3.02e-4) was true uncorrected conservation loss
+from the SSP-RK3/SI integrator, not diagnostic noise.
+
+**Changes (1 src file + 1 runner site):**
+
+- ``src/legoesm/atmosphere/dynamics/spectral_pe.py``
+  - ``SpectralPEConfig``: add ``fix_mass: bool = False`` and
+    ``anchor_mass_to_initial: bool = False`` (off by default to preserve
+    bit-for-bit baseline for tests that measure drift; matrix runner opts in).
+  - Add ``_target_mass`` slot, lazily populated in ``step()`` on first call
+    (snapshot computed outside JIT in fp64 via ``_compute_initial_mass``).
+  - ``_apply_mass_fixer(state)``: ``Δ = log(target / current)`` added to
+    ``lnps_hat[0]`` after scaling by ``sqrt(4π)`` to match this module's
+    (4π)-normalised real-SH convention (verified empirically:
+    ``sh_analysis(ones)[0] == sqrt(4π)``).  Multiplicative correction in
+    physical space preserves ``p_s`` gradients exactly (same property as the
+    additive cubed-sphere/lat-lon ``fix_ps_mass`` correction).
+  - Hooks: ``_do_step`` (SSP-RK3 path) + both leapfrog branches (Euler
+    startup + leapfrog body, applied AFTER the Robert-Asselin filter so the
+    computational mode is damped first, then mass is restored exactly).
+- ``scripts/run_atmosphere_test_matrix.py``: enable ``fix_mass=True,
+  anchor_mass_to_initial=True`` at all three ``SpectralPEConfig`` sites
+  (HS, baroclinic, AMIP).
+
+**Validation (via `run_atmosphere_test_matrix.py --only hydro --grid spectral --quick`):**
+
+| Case                    | Baseline mass drift | Iter-3 mass drift |
+|-------------------------|---------------------|-------------------|
+| held_suarez             | 2.00e-05            | **1.61e-16**      |
+| held_suarez (hybrid)    | 1.97e-04            | **0.00e+00**      |
+| held_suarez_topo        | 3.33e-04            | **1.45e-15**      |
+| baroclinic              | 3.82e-09            | **9.64e-16**      |
+| amip                    | 3.02e-04            | **1.28e-15**      |
+| rotated_baroclinic      | 2.75e-04            | **4.82e-16**      |
+| rotated_steady          | 2.75e-04            | **3.21e-16**      |
+| rest_state_topo         | 2.22e-04            | **1.13e-15**      |
+| gravity_wave_3_1        | 4.19e-07            | **8.03e-16**      |
+| inertio_gravity_3_2     | 4.44e-04            | **3.21e-16**      |
+| mountain_rossby_5_0     | 1.63e-03            | **1.29e-15**      |
+| rossby_haurwitz_6_0     | 2.65e-03            | **1.12e-15**      |
+
+All 13 spectral hydro PASS cases at machine precision (~10^-16).  ``max|v|``
+values unchanged (no dynamics regression).  Unit suite
+``tests/atmosphere/hydrostatic`` 768/768 PASS.
+
+## Iteration 4 plan
+
+- Quick-mode 30-day full suite (cube/latlon/ico/spectral × hydro) for
+  end-to-end conservation snapshot.
+- Lat-lon AMIP isn't yet validated under the iter-2 anchor; the iter-2 wire
+  covers it but no run has been performed yet.
+- NH (DCMIP TC1/TC2/TC3) max|w| comparison cube vs ico vs spectral — already
+  PASS at baseline; check that iter-2/iter-3 changes (lat-lon HS / spectral
+  HS) leave NH state untouched.
+- CLAUDE.md's visual-verification guidance: Williamson-2 v-wind snapshot for
+  lat-lon and cube; iter-1/2/3 changes are conservation-only so visuals
+  should be identical.
 
 ## Improvement log
 
@@ -159,3 +206,7 @@ Unit tests: ``tests/atmosphere/hydrostatic/unit/test_primitive_eq_latlon_cgrid.p
 - **iter-2 (2026-05-13)**: `anchor_mass_to_initial` for latlon PE + drop fp32
   cast in `_apply_safety_rails`.  Latlon HS mass drift `1.57e-4 → 3.71e-7`
   (1-day, sigma).  Cumulative iter-0→iter-2 reduction: ~9000x.
+- **iter-3 (2026-05-13)**: spectral PE anchored mass fixer
+  (`lnps_hat[0] += log(target/now)·sqrt(4π)`).  All 13 spectral hydro cases
+  now drift at ~1e-16 (machine precision).  Largest baseline drift
+  (rossby_haurwitz 2.65e-3) collapses to 1.12e-15 — ~10^13x reduction.
