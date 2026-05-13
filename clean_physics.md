@@ -435,6 +435,35 @@ Verified clean:
 
 No code changes this iteration.
 
+## Iter-118 — land stomata_utils + surface_params audit
+Audited `land/stomata_utils.py` (92 LOC) and `land/surface_params.py`
+(247 LOC).
+
+Verified clean:
+- **`compute_effective_beta`** dispatcher:
+  - Stomata disabled → returns `beta_soil` directly.
+  - Stomata + differland carbon → `LAI = C_fol / LCMA`, coupled
+    Farquhar-stomata solver, then `compute_stomatal_beta`.
+  - Stomata + non-differland → Jarvis fallback.
+  - Optional `land_params` override (PFT-weighted spatial fields) via
+    `_replace` on stomata + carbon configs.
+- **`LandSurfaceParams`** NamedTuple: 12 per-column fields with
+  documented physical ranges (`PARAM_BOUNDS` dict) for sigmoid-bounded
+  ML parameterization (`lo + (hi-lo)·sigmoid(raw)`).
+- **`default_land_surface_params`**: broadcast scalars from
+  `LandConfig` / `MultiLayerLandConfig` to `(ncol,)` arrays with
+  `getattr` defaults for config-asymmetric fields (e.g. `root_depth`
+  exists on multilayer config but not slab).
+- **`array_to_params` / `reshape_params`**: round-trip conversion
+  between flat `(ncol, n_params)` matrix (training format) and
+  `LandSurfaceParams` NamedTuple, plus reshape `(ncol,) → (6, n, n)`
+  for slab path.
+- **`CLM5_PFT_TABLE_RAW`**: 17 PFT × 12 parameter lookup table
+  matching CLM5 Tech Note (Lawrence 2019).  Lazy-cached as a JAX
+  array on first call to avoid import-time JAX init.
+
+No code changes this iteration.
+
 ## Next iterations
 Continue addressing codex findings and direct-inspection sweeps until all schemes are
 provably conservative, monotone, CFL-safe, and AD-safe across mixed wet/dry grids.
