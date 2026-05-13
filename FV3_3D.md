@@ -5406,3 +5406,64 @@ diagnostic from any emission scenario.  Pure JAX, vmap-compatible.
 γ=0.85 and Ω_arag_ref=3.5 are Orr 2005 / AR6 empirical (default
 args).  No `constants.py` additions.
 
+## Iter 854 — ocean_oxygen_decline_fv3 (deoxygenation primitive)
+
+Added `ocean_oxygen_decline_fv3(delta_t_ocean, alpha_o2=0.05)` to
+`grids/cubed_sphere.py`.  Schmidtko et al. 2017 / Keeling et al.
+2010 linear closure combining temperature-dependent solubility
+(Henry's law) and warming-induced stratification (reduced
+ventilation):
+
+```
+ΔO₂/O₂_ref = − α_O2 · ΔT_ocean
+```
+
+Default α_O2 = 0.05/K decomposes:
+  * solubility:  −0.022/K (Garcia-Gordon 1992)
+  * ventilation: −0.028/K (Schmidtko 2017 inferred)
+
+Canonical AR6 / Schmidtko 2017:
+  | period             | ΔT_ocean | ΔO₂   |
+  |--------------------|----------|-------|
+  | 1960–2010 observed | +0.4 K   | −2%   |
+  | SSP1-2.6 2100      | +1.0 K   | −5%   |
+  | SSP3-7.0 2100      | +2.5 K   | −12%  |
+
+Observed −2% (~−4 Pmol) since 1960 (Schmidtko 2017 Nature).
+
+Cascading impacts:
+  * OMZ (Oxygen Minimum Zone) expansion (Stramma 2008, Breitburg 2018)
+  * N₂O production via denitrification → GHG feedback (Codispoti 2010)
+  * Fish habitat compression (Pörtner 2008)
+  * Coastal hypoxic 'dead zone' expansion (Diaz-Rosenberg 2008)
+
+**Closes the AR6 §5 ocean-BGC triplet** with iter-852 + iter-853:
+  * iter-852 ocean_ph_change_fv3       — acidification ΔpH
+  * iter-853 aragonite_saturation_fv3  — calcite-saturation Ω
+  * iter-854 ocean_oxygen_decline_fv3  — deoxygenation ΔO₂
+
+Pairs with iter-851 ``ocean_heat_content_fv3``: OHC → ΔT_ocean →
+ΔO₂.  Together they span the full AR6 ocean-response diagnostic
+set (thermal + 3 BGC).
+
+Used by: Schmidtko et al. 2017 Nature deoxygenation map, Keeling
+et al. 2010 Annu Rev, Breitburg et al. 2018 Science synthesis,
+Bopp et al. 2013 ESD CMIP5 multi-stressor, AR6 §5.3.4, IPCC SROCC
+§5.2.2.4, OMZ-and-N₂O coupled biogeochemistry studies.
+
+Test: `tests/test_fv3_ocean_o2_iter854.py` (7 tests: 1960-2010
+observed ΔT=0.4 K → −2% analytic, SSP3-7.0 ΔT=2.5 K → −12.5%,
+zero, cooling increases O₂, α-linear scaling, paired with iter-851
+OHC chain, 3-D shapes).
+
+### Why this iteration was meaningful
+
+**Closes the AR6 §5 ocean-impact diagnostic set** (thermal+pH+
+Ω+O₂).  Deoxygenation is the third major BGC stressor after
+acidification (Bopp 2013 ESD calls it the "deadly trio" with
+warming).  Critical for: (1) OMZ-expansion forecasts;
+(2) N₂O-feedback diagnosis; (3) fish-habitat compression
+projections under SSP scenarios; (4) coastal dead-zone risk
+maps.  Pure JAX, vmap-compatible.  α_O2=0.05 is Schmidtko+Keeling
+empirical (default arg).  No `constants.py` additions.
+

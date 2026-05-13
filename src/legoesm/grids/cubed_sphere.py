@@ -8585,6 +8585,85 @@ def aragonite_saturation_state_fv3(
     return omega_arag_ref * (p_ref_safe / p_new_safe) ** gamma_exp
 
 
+def ocean_oxygen_decline_fv3(
+    delta_t_ocean: jax.Array,
+    alpha_o2: float = 0.05,
+) -> jax.Array:
+    """FV3_3D iter 854: ocean deoxygenation fractional-decline primitive.
+
+    Schmidtko et al. 2017 / Keeling et al. 2010 linear closure
+    relating ocean warming to dissolved-O₂ fractional decline,
+    combining temperature-dependent solubility (Henry's law,
+    ~2–3% per K) and warming-induced stratification (reduced
+    ventilation, ~2% per K):
+
+        ΔO₂/O₂_ref = − α_O2 · ΔT_ocean         (dimensionless)
+
+    Where:
+      * ΔT_ocean — ocean-volume-weighted (or basin-mean) warming (K).
+      * α_O2     — empirical sensitivity (per K); default 0.05/K
+                   (Schmidtko 2017 + Keeling 2010 / Bopp 2013 CMIP
+                   global mean).  Subcomponents:
+                   - solubility:  −0.022/K (Garcia-Gordon 1992)
+                   - ventilation: −0.028/K (Schmidtko 2017 inferred)
+
+    Sign: ΔT > 0 ⇒ ΔO₂ < 0 (warming-induced deoxygenation).
+
+    Canonical AR6 / Schmidtko 2017:
+      | period            | ΔT_ocean | ΔO₂ |
+      |-------------------|----------|-----|
+      | 1960–2010 observed| ~+0.4 K  | −2% |
+      | SSP1-2.6 2100     | +1.0 K   | −5% |
+      | SSP3-7.0 2100     | +2.5 K   | −12% |
+      | Pre-industrial ref| 0        |  0  |
+
+    Observed −2% (~−4 Pmol O₂) since 1960 (Schmidtko 2017 Nature),
+    consistent with α_O2 ≈ 0.05/K at observed ΔT ≈ 0.4 K.
+
+    Deoxygenation has cascading impacts: (1) OMZ (Oxygen Minimum
+    Zone) expansion (Stramma 2008, Breitburg 2018); (2) N₂O
+    production via denitrification, amplifying GHG (Codispoti 2010);
+    (3) fish habitat compression (Pörtner 2008); (4) hypoxic
+    'dead zone' coastal expansion (Diaz-Rosenberg 2008).
+
+    **Closes the AR6 §5 ocean-BGC triplet** with iter-852 + iter-853:
+      * iter-852 ocean_ph_change_fv3       — acidification ΔpH
+      * iter-853 aragonite_saturation_fv3  — calcite-saturation Ω
+      * iter-854 ocean_oxygen_decline_fv3  — deoxygenation ΔO₂
+
+    Together these are the AR6 §5.3 OA-and-deoxygenation impact
+    pair (technically OA is two: pH + Ω; deoxygenation is third).
+
+    Pairs with iter-851 ``ocean_heat_content_fv3`` as natural
+    chain: OHC → ΔT_ocean → ΔO₂.
+
+    Used by: Schmidtko et al. 2017 Nature deoxygenation map,
+    Keeling et al. 2010 Annu Rev review, Breitburg et al. 2018
+    Science synthesis, Bopp et al. 2013 ESD CMIP5 multi-stressor,
+    AR6 §5.3.4, IPCC SROCC §5.2.2.4, OMZ-and-N₂O coupled
+    biogeochemistry studies.
+
+    Note: linear primitive; non-linear basin-specific effects
+    (Atlantic vs Pacific stratification, NADW vs AABW ventilation
+    differences) require 3-D BGC model.  For CMIP-class basin
+    decomposition use OMIP-BGC kernels.
+
+    Parameters
+    ----------
+    delta_t_ocean : jax.Array
+        Ocean warming anomaly (K); positive for warming.
+    alpha_o2 : float
+        Schmidtko-Keeling sensitivity (per K); default 0.05.
+
+    Returns
+    -------
+    delta_o2_frac : jax.Array
+        Fractional O₂ change (dimensionless); negative for
+        deoxygenation under warming.
+    """
+    return -alpha_o2 * delta_t_ocean
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

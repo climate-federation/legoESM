@@ -441,6 +441,7 @@ _GUARD_MODULES = (
     "test_fv3_ocean_heat_content_iter851",           # iter-851 add
     "test_fv3_ocean_ph_iter852",                     # iter-852 add
     "test_fv3_aragonite_saturation_iter853",         # iter-853 add
+    "test_fv3_ocean_o2_iter854",                     # iter-854 add
 )
 
 
