@@ -3328,7 +3328,13 @@ STILL OPEN (post-iter-99 stretch goals):
   gap.  nord=3 expand-halo vs re-pad max diff ≈ 1.8e-35 (machine
   eps), confirming legoESM re-pad path remains FV3-faithful at
   nord=3.  7 new tests; iter-899 nord-3-raises test repurposed to
-  nord-4-raises.
+  nord-4-raises.  iter-904 audits FV3 ``fill_c = (nt/=0)`` gating
+  in ``sw_core.F90:1741`` — legoESM expand-halo matches
+  ``flagstruct%duogrid=.true.`` branch (no intermediate
+  ``fill_corners``); re-pad path matches ``fill_c=.true.`` branch.
+  Both paths equivalent at machine eps (iter-901/iter-903).  iter-904
+  adds JIT + grad pass-through tests for nord ∈ {0,1,2,3} + docstring
+  with FV3 fill_c semantics block (8 unit tests).
 - iter-168/169/170/171 documented PE-vs-NH FV3-fidelity asymmetries
   ALL CLOSED:
   * ✅ corner-divergence damping (PE iter 16/18) — closed iter 168

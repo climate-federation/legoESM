@@ -1034,6 +1034,25 @@ def fv3_corner_laplacian_nord_expanding_halo(
     nord=3 chain (iter-903): h3 → h2 → h1 step composition.
     nord >= 4 raises NotImplementedError (outside FV3 namelist).
 
+    FV3 ``fill_c`` semantics (iter-904 audit)
+    -----------------------------------------
+
+    FV3 ``sw_core.F90:1741`` gates intermediate ``fill_corners``::
+
+        fill_c = (nt/=0) .and. (flagstruct%grid_type<3) .and.       &
+                 ( sw/se/ne/nw_corner )                             &
+                  .and. .not. (bounded_domain .or. flagstruct%duogrid)
+
+    i.e. ``fill_corners`` between iterations is SKIPPED when
+    ``flagstruct%duogrid = .true.``.  This single-pad multi-step
+    wrapper matches the ``duogrid=.true.`` branch — no intermediate
+    refresh of cube-vertex corner cells.  The re-pad wrapper
+    ``fv3_corner_laplacian_nord`` (iter-892) refreshes via
+    ``pad_halo`` each iteration, corresponding to the
+    ``fill_c=.true.`` branch.  Empirically the two paths match at
+    machine epsilon (see iter-901/iter-903 quantitative pins),
+    so either is FV3-faithful for the duogrid cubed-sphere use case.
+
     Parameters
     ----------
     divg_d : jnp.ndarray, shape ``(6, n+1, n+1)``
