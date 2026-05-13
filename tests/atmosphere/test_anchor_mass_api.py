@@ -526,3 +526,56 @@ def test_anchored_step_supports_jax_grad_cube_nh():
         assert grad.dtype == jnp.float64
     finally:
         set_policy(saved)
+
+
+def test_anchored_step_supports_jax_grad_spectral_nh():
+    """iter-41: ``jax.grad`` through anchored ``step()`` on spectral NH.
+
+    Fourth structural AD path:
+      cube PE  additive 2-D       (iter-37, iter-38 multi-step)
+      spectral PE SH 2-D log-scale (iter-39)
+      cube NH  additive 3-D       (iter-40)
+      spectral NH SH 3-D log-scale (this iter)
+
+    Spectral NH fixer ``_apply_mass_fixer`` reaches grid space via
+    ``sh_synthesis_3d`` on a (n_sh, nlev) state and writes back to
+    ``rho_prime_hat[0, :]`` (per-level (0,0) coefficient) with
+    ``Δρ·sqrt(4π)``.  AD must traverse the 3-D SH round-trip + the
+    sigma vertical integral inside the fixer.
+    """
+    from legoesm.core.precision import PrecisionPolicy, set_policy, get_policy
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.atmosphere.dynamics.spectral_nh import (
+        SpectralCompressibleEulerModel, SpectralNHConfig,
+        dcmip25_tc1_init_spectral,
+    )
+
+    saved = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp64())
+        grid = create_gaussian_grid(21)
+        state0, hcoord, tmetric = dcmip25_tc1_init_spectral(
+            grid, n_levels=8)
+        cfg = SpectralNHConfig(
+            n_acoustic_substeps=10, semi_implicit_acoustic=True,
+            fix_mass=True, anchor_mass_to_initial=True,
+        )
+        model = SpectralCompressibleEulerModel(
+            grid, hcoord, tmetric, cfg, allow_unsupported_backend=True,
+        )
+
+        def loss(rho_prime_hat_data):
+            state = state0._replace(
+                rho_prime_hat=state0.rho_prime_hat.replace(
+                    data=rho_prime_hat_data))
+            s = model.step(state, 5.0)
+            return jnp.sum(jnp.abs(s.theta_prime_hat.data) ** 2)
+
+        model.reset_target_mass()
+        grad = jax.grad(loss)(state0.rho_prime_hat.data)
+
+        assert jnp.all(jnp.isfinite(jnp.abs(grad)))
+        assert float(jnp.max(jnp.abs(grad))) > 0.0
+        assert grad.dtype == jnp.complex128
+    finally:
+        set_policy(saved)

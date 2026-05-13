@@ -145,3 +145,4 @@ SW, latlon PE, MPAS SW, MPAS PE, MPAS NH, spectral PE, spectral NH.
 | 38   | `jax.grad` 3-step chain — grows `5.65e-02 → 2.96e-01`. | locks multi-step AD |
 | 39   | `jax.grad` through spectral PE anchored fixer (SH round-trip in chain) — complex128 grad `3.22`. | locks spectral AD path |
 | 40   | `jax.grad` through cube NH anchored fixer (`fix_mass_nonhydrostatic` on 3-D `rho_prime`) — fp64 grad `1.63`. 20/20 anchor API tests PASS. Doc compress (iter-31..39 collapsed to single rows). | locks NH AD path |
+| 41   | `jax.grad` through spectral NH anchored fixer — 3-D SH round-trip (`sh_synthesis_3d` on `(n_sh, nlev)`, per-level `Δρ·sqrt(4π)` write to `rho_prime_hat[0,:]`). complex128 grad `4.71e-04`. 21/21 anchor API tests PASS. All four structural fixer paths (cube PE 2D / spectral PE SH 2D / cube NH 3D / spectral NH SH 3D) now have AD CI guards. | locks spectral NH AD path |
