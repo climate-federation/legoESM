@@ -5537,3 +5537,75 @@ derivable from primitives.  Pure JAX, vmap-compatible.  Uses
 ``constants.R_v`` per CLAUDE.md hygiene.  No `constants.py`
 additions.
 
+## Iter 875 — aerodynamic_conductance_fv3 (FAO-56 log-law g_a)
+
+Added `aerodynamic_conductance_fv3(u_z, z_m, z_h, d, z_0m, z_0h,
+k_vk=0.41)` to `grids/cubed_sphere.py`.  FAO-56 Eq. 4 / Bonan
+2008 ch. 6 neutral-stability log-law aerodynamic conductance:
+
+```
+g_a = u(z_m) · k² / (ln((z_m − d)/z_0m) · ln((z_h − d)/z_0h))
+                                                      (m/s)
+```
+
+Default von Karman k = 0.41.
+
+FAO-56 reference-grass simplification (h=0.12 m, z_m=z_h=2 m,
+d=0.08, z_0m=0.0148, z_0h=0.00148):
+  g_a ≈ u_2 / 208   (r_a = 208/u_2 s/m).
+
+Canopy-height table (Bonan 2008 Table 6.1):
+  | canopy           | h (m) | d (m)  | z_0m (m)| z_0h (m)  |
+  |------------------|-------|--------|---------|-----------|
+  | Reference grass  | 0.12  | 0.08   | 0.0148  | 0.00148   |
+  | Crops            | 1.0   | 0.667  | 0.123   | 0.0123    |
+  | Shrubland        | 1.5   | 1.0    | 0.18    | 0.018     |
+  | Forest deciduous | 20.0  | 13.3   | 2.46    | 0.246     |
+
+Test verifies forest g_a > grass g_a at same u (rougher surface).
+
+Stability corrections (Monin-Obukhov Ψ_m / Ψ_h) NOT included —
+this primitive returns neutral-stability form.  Caller applies Ψ
+externally if needed (Bonan 2008 §6.4, Brutsaert 1982).
+
+**Closes the aerodynamic-conductance side of PM input set** —
+test verifies full pure-JAX PM pipeline iter-871 + 873 + 874 +
+875 → iter-870 end-to-end:
+
+```
+u, z_m, z_h, d, z_0m, z_0h → iter-875 g_a
+T                          → iter-874 Δ
+T, RH                      → iter-871 VPD
+p                          → iter-873 γ
+A_n, h_s, C_s              → iter-869 g_s
+R_n, G                     → A
+                           ↓
+                           iter-870 λE (PM)
+```
+
+Used by: Bonan 2008 land-model textbook ch. 6, Allen-Pereira 1998
+FAO-56 Eq. 4, Brutsaert 1982 Evaporation into the Atmosphere,
+Monteith-Unsworth 2013 Principles of Environmental Physics, CLM5/
+JULES/NoahMP/MOSES/SiB2 surface-layer flux modules.
+
+Per CLAUDE.md hygiene: von Karman k=0.41 kept as default arg
+(fluid-mechanics empirical constant, not strictly a fundamental
+physical constant — not added to `constants.py`).
+
+Test: `tests/test_fv3_aero_conductance_iter875.py` (8 tests: FAO-56
+grass u_2=2 → g_a≈0.0096, zero wind → 0, monotone in u, forest
+g_a > grass g_a, (z-d)/z_0 ≤ 1 floored, chain with iter-870 PM,
+**full pure-JAX PM pipeline end-to-end** verified, 3-D shapes).
+
+### Why this iteration was meaningful
+
+**ABSOLUTELY CLOSES THE PENMAN-MONTEITH PIPELINE END-TO-END** —
+caller now has full ET diagnostic chain in pure JAX from baseline
+(T, RH, u, R_n, G, p, A_n, canopy_geometry):
+  Δ (iter-874), γ (iter-873), VPD (iter-871), g_s (iter-869),
+  g_a (iter-875) → PM λE (iter-870).
+Required for: (1) DGVM/ESM ET parameterization; (2) FAO-56
+reference-ET calculations; (3) FLUXNET site-PM validation;
+(4) elevation/canopy-dependent ET projections under AR6 SSPs.
+Pure JAX, vmap-compatible.  No `constants.py` additions.
+

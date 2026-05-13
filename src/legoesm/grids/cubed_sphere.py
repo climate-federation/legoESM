@@ -10471,6 +10471,119 @@ def saturation_vapor_pressure_slope_fv3(
     return e_sat * constants.L_v / (constants.R_v * t_sq)
 
 
+def aerodynamic_conductance_fv3(
+    u_z: jax.Array,
+    z_m: jax.Array,
+    z_h: jax.Array,
+    d: jax.Array,
+    z_0m: jax.Array,
+    z_0h: jax.Array,
+    k_vk: float = 0.41,
+    arg_floor: float = 1e-9,
+) -> jax.Array:
+    """FV3_3D iter 875: FAO-56 / Monin-Obukhov log-law aerodynamic
+    conductance primitive.
+
+    Standard neutral-stability log-law aerodynamic conductance to
+    momentum + heat/water-vapor (Bonan 2008 ch. 6 / FAO-56 Eq. 4):
+
+        g_a = u(z_m) · k² / (ln((z_m − d)/z_0m) · ln((z_h − d)/z_0h))
+                                                    (m/s)
+
+    Where:
+      * u(z_m) — wind speed at reference height z_m (m/s).
+      * z_m    — momentum reference height (m).
+      * z_h    — scalar (heat / water-vapor) reference height (m).
+      * d      — zero-plane displacement height (m).
+      * z_0m   — momentum roughness length (m).
+      * z_0h   — scalar (heat) roughness length (m); typically
+                 z_0h ≈ 0.1·z_0m for vegetated canopies.
+      * k      — von Karman constant ≈ 0.41 (default).
+
+    Output: g_a in m/s (canonical big-leaf-aerodynamic unit;
+    convert to mol/m²/s via × ρ_a/M_a or × p/(R·T)).
+
+    FAO-56 reference-grass simplification (canopy height
+    h = 0.12 m, z_m = z_h = 2 m, d = 0.08 m, z_0m = 0.0148 m,
+    z_0h = 0.00148 m):
+        g_a ≈ u_2 / 208            (FAO-56 Eq. 4 grass)
+    Equivalent r_a = 208/u_2 (s/m).
+
+    Canonical g_a (m/s) for grass at u_2 = 2 m/s:
+        g_a ≈ 0.0096 m/s.
+
+    Canopy-height-dependent (Bonan 2008 Table 6.1) values:
+      | canopy           | h (m) | d (m)  | z_0m (m)| z_0h (m)  |
+      |------------------|-------|--------|---------|-----------|
+      | Reference grass  | 0.12  | 0.08   | 0.0148  | 0.00148   |
+      | Crops            | 1.0   | 0.667  | 0.123   | 0.0123    |
+      | Shrubland        | 1.5   | 1.0    | 0.18    | 0.018     |
+      | Forest (deciduous)| 20.0 | 13.3   | 2.46    | 0.246     |
+
+    Stability corrections (atmospheric stability via Monin-Obukhov
+    Ψ_m and Ψ_h) NOT included — this primitive returns the
+    neutral-stability form.  Caller applies Ψ corrections if
+    needed (Bonan 2008 §6.4, Brutsaert 1982).
+
+    **Closes the aerodynamic-conductance side of the PM input
+    primitive set** — caller now has:
+
+        u, z_m, z_h, d, z_0m, z_0h → iter-875 g_a
+        T                          → iter-874 Δ
+        T, RH                      → iter-871 VPD
+        p                          → iter-873 γ
+        A_n, h, C                  → iter-869 g_s
+        R_n, G                     → A
+                                   ↓
+                                   iter-870 λE  (Penman-Monteith)
+
+    With iter-874 Δ + iter-875 g_a, **the full PM ET pipeline is
+    end-to-end pure JAX** from baseline meteorology + canopy
+    geometry.
+
+    Used by: Bonan 2008 land-model textbook ch. 6, Allen-Pereira
+    1998 FAO-56 Eq. 4 reference ET, Brutsaert 1982 Evaporation
+    into the Atmosphere, Monteith-Unsworth 2013 Principles of
+    Environmental Physics, CLM5/JULES/NoahMP/MOSES/SiB2 surface-
+    layer flux modules.
+
+    Per CLAUDE.md hygiene: von Karman k ≈ 0.41 is a fundamental
+    fluid-mechanics empirical constant.  Kept as default arg
+    (NOT in `constants.py`; appears widely in PBL/MO formulations
+    but not strictly a physical constant).
+
+    ``arg_floor`` prevents log(0) when (z − d) ≤ z_0 (degenerate
+    instrument-below-canopy or zero-roughness regime).
+
+    Parameters
+    ----------
+    u_z : jax.Array
+        Wind speed at reference height (m/s).
+    z_m : jax.Array
+        Momentum reference height (m).
+    z_h : jax.Array
+        Scalar reference height (m).
+    d : jax.Array
+        Displacement height (m).
+    z_0m : jax.Array
+        Momentum roughness length (m).
+    z_0h : jax.Array
+        Scalar roughness length (m).
+    k_vk : float
+        Von Karman constant; default 0.41.
+    arg_floor : float
+        Lower bound on log arguments; default 1e-9.
+
+    Returns
+    -------
+    g_a : jax.Array
+        Aerodynamic conductance (m/s); positive.
+    """
+    arg_m = jnp.maximum((z_m - d) / z_0m, 1.0 + arg_floor)
+    arg_h = jnp.maximum((z_h - d) / z_0h, 1.0 + arg_floor)
+    return u_z * k_vk * k_vk / (jnp.log(arg_m) * jnp.log(arg_h))
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,
