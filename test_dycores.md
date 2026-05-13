@@ -100,6 +100,12 @@ NH cross-grid TC1 mass-drift after iter-10 (matrix runner `notes` line):
   four PE solvers (cube C12 / lat-lon 36x72 / MPAS ico4 / spectral T21,
   5 steps each).  Catches regressions in any of the iter-1..14 fixer
   changes; 4/4 PASS in ~27s.
+- **iter-16**: parallel regression tests for SW (cube FV3 / lat-lon /
+  MPAS) and NH (cube / MPAS / spectral) — six new tests at
+  `tests/atmosphere/shallow_water/integration/test_sw_mass_conservation_anchored.py`
+  and
+  `tests/atmosphere/nonhydrostatic/integration/test_nh_mass_conservation_anchored.py`.
+  Lock down the full SW × hydro × NH coverage from iter-4..9.  6/6 PASS.
 
 ## Implementation patterns established (apply to any new dycore)
 
