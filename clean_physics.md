@@ -83,6 +83,22 @@ Branch: `clean_physics`. Driven by Ralph loop + `/codex:adversarial-review`.
   convection + coupler bulk_flux, sea-ice _thermo_single, thermo + surface_albedo,
   land utils + ML ozone + insolation — all verified clean.
 
+## Iteration 83 — 2026-05-13
+
+**Inspection iteration on Richards solver units + ice module
+(no code changes).**
+
+- **`richards.py`**: Picard iteration units verified — coeff =
+  K_half / dz_if has units 1/s; rhs has 1/s; tridiag matrix has
+  1/(m·s); dpsi has m.  Consistent.
+- **Codex on ice/**: was killed after extensive investigation of
+  dynamics, itd, state, sea_ice, coupler tile-fractions, driver
+  component_factory; no actionable finding emerged.  Iter-45 had
+  already verified EVP algebra, VP constitutive law, PPM
+  transport, ITD remap and strain-rate FD denominators.
+
+No new fixes needed.
+
 ## Iteration 82 — 2026-05-13
 
 **Scan-only iteration: confirmed no other `jnp.where`-traces-both-
