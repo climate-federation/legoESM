@@ -384,6 +384,16 @@ def _compute_drift(values: list[float]) -> float:
     return compute_relative_drift(values)
 
 
+# iter-30: hoist the iter-23..28 1e-6 mass-drift PASS ceiling to a
+# single module constant so future re-tightening (or temporary loosening
+# during fixer development) is a one-line edit rather than five.
+# Applied at every PE/SW/NH gate in the matrix runner; the only
+# intentional outlier is the lat-lon cosine_bell ``CB`` constant below,
+# which preserves the raw-FV transport-drift benchmark at iter-29's 1e-4.
+_DYCORE_MASS_DRIFT_TOL = 1e-6
+_DYCORE_MASS_DRIFT_TOL_CB = 1e-4
+
+
 def _apply_mass_drift_tolerance(
     ok: bool, notes: str, mass_drift: float, tol: float,
     *, n_samples: int | None = None,
@@ -2370,7 +2380,7 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         # `1.46e-15`, latlon W5 `3.24e-16`, ico W5/W6 `0` / `1.62e-16`,
         # spectral W5/W6 `1.91e-16` — 10 orders of headroom.
         ok, notes = _apply_mass_drift_tolerance(
-            ok, notes, _w_mass_drift, 1e-6,
+            ok, notes, _w_mass_drift, _DYCORE_MASS_DRIFT_TOL,
             n_samples=len(diag['mean_height']),
         )
 
@@ -2770,7 +2780,7 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
     # so the intentional benchmark stays a PASS, but a true regression
     # to the iter-22 1e-2 ceiling (100x looser) no longer slips through.
     ok, notes = _apply_mass_drift_tolerance(
-        ok, notes, mass_drift, 1e-4,
+        ok, notes, mass_drift, _DYCORE_MASS_DRIFT_TOL_CB,
         n_samples=n_mass_samples)
 
     _write_results_txt(output_dir, {
@@ -3223,7 +3233,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
     # too loose.  Tighten to 1e-6 — still 9 orders above the
     # observed floor, but catches regressions that the previous
     # bound silently accepted.
-    HELD_SUAREZ_MASS_DRIFT_TOL = 1e-6
+    HELD_SUAREZ_MASS_DRIFT_TOL = _DYCORE_MASS_DRIFT_TOL
     ok, notes = _apply_mass_drift_tolerance(
         ok, notes, mass_drift, HELD_SUAREZ_MASS_DRIFT_TOL,
         n_samples=len(diag.get("mass", [])))
@@ -3691,7 +3701,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
     # to 1e-6 (5 orders of headroom on cube) to match the iter-23 HS
     # ceiling.
     ok, notes = _apply_mass_drift_tolerance(
-        ok, notes, mass_drift, 1e-6,
+        ok, notes, mass_drift, _DYCORE_MASS_DRIFT_TOL,
         n_samples=len(diag.get("mass", [])))
 
     level_values = np.asarray(
@@ -4248,7 +4258,7 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
     # to 1e-6 — 5 orders of headroom on cube — matching the
     # iter-23/24/26/27 HS / baroclinic / NH / SW ceilings.
     ok, notes = _apply_mass_drift_tolerance(
-        ok, notes, mass_drift, 1e-6,
+        ok, notes, mass_drift, _DYCORE_MASS_DRIFT_TOL,
         n_samples=len(diag.get("mass", [])))
 
     level_values = np.asarray(
@@ -4875,7 +4885,7 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
         # Iter-26 tightens to 1e-6 (matches HS / baroclinic in
         # iter-23/24) — 9 orders of headroom above the noisiest case.
         ok, notes = _apply_mass_drift_tolerance(
-            ok, notes, mass_drift, 1e-6,
+            ok, notes, mass_drift, _DYCORE_MASS_DRIFT_TOL,
             n_samples=len(_mass_series),
         )
     else:
