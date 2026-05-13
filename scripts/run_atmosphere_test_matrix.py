@@ -4488,7 +4488,16 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 # Factory ``make_fv3_faithful_nh_config`` enables this
                 # by default; matrix runner had remained at the
                 # under-heating default.
-                use_fv3_d_con_cv=True)
+                use_fv3_d_con_cv=True,
+                # new_test_dycores iter-13: dynamic Exner + metric-aware
+                # d_con (factory defaults).  iter-336 dynamic Exner
+                # uses Π_total = Π_ref + π' (matches FV3 live pkz);
+                # iter-339 metric-aware d_con uses the rsin2/cosa_s
+                # form at the damp_v d_con site (PE iter-338 mirror).
+                # Both compose with iter-12 d_con_cv; together they
+                # match the full factory bundle for the d_con term.
+                use_fv3_dynamic_exner=True,
+                use_fv3_metric_aware_d_con=True)
         elif test_case == "tc2a":
             from tests.test_cases.dcmip2025 import dcmip25_tc2_init
             state, hcoord, tmetric, small_grid = dcmip25_tc2_init(
@@ -4517,7 +4526,11 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 # new_test_dycores iter-12: c_v denominator for NH
                 # d_con (factory default; ~40 % heating-magnitude
                 # correctness fix).
-                use_fv3_d_con_cv=True)
+                use_fv3_d_con_cv=True,
+                # new_test_dycores iter-13: dynamic Exner + metric-
+                # aware d_con (factory defaults; PE/NH 336/339).
+                use_fv3_dynamic_exner=True,
+                use_fv3_metric_aware_d_con=True)
         elif test_case == "tc3":
             from tests.test_cases.dcmip2025 import dcmip25_tc3_init
             state, hcoord, tmetric, small_grid = dcmip25_tc3_init(
@@ -4547,7 +4560,11 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 # new_test_dycores iter-12: c_v denominator for NH
                 # d_con (factory default; ~40 % heating-magnitude
                 # correctness fix).
-                use_fv3_d_con_cv=True)
+                use_fv3_d_con_cv=True,
+                # new_test_dycores iter-13: dynamic Exner + metric-
+                # aware d_con (factory defaults; PE/NH 336/339).
+                use_fv3_dynamic_exner=True,
+                use_fv3_metric_aware_d_con=True)
         else:
             raise ValueError(f"Unknown NH test case: {test_case}")
 
