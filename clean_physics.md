@@ -9,6 +9,33 @@ Branch: `clean_physics`. Driven by Ralph loop + `/codex:adversarial-review`.
 - **Ocean** (`src/legoesm/ocean/physics/`): vertical_mixing, bottom_drag, lateral_mixing, convection, surface_forcing, shortwave_penetration, mixing.
 - **Cryosphere** (`src/legoesm/ice/`): sea_ice, dynamics, itd, rheology, transport.
 
+## Iteration 75 — 2026-05-13
+
+**Inspection iteration on `kessler.py`, `seifert_beheng.py`,
+`kuo.py`, `dca.py` (no code changes).** Codex review on
+Kessler/SB returned `verdict=approve` (truncated post-test) and
+direct inspection confirms:
+
+- **`kessler.py`** + **`seifert_beheng.py`**: joint donor clamp
+  on q_c sinks (cond_evap + autoconv + accretion) and joint sed +
+  evap cap on q_r (`extra_sink=evaporation`).  Latent heating
+  `dT/dt = L_v · (condensation − evaporation) / c_pd`.  Pattern
+  shared with Morrison/Thompson (post iter-73).
+- **`kuo.py`**: column moisture-excess (MC) gated by both smooth
+  sigmoid trigger AND `tanh(MC/me_threshold)` to enforce
+  `dT_dt = 0` when `MC = 0` (audit fix).  Vapor budget
+  distribution proportional to subsaturation deficit; column
+  integral = `(1 − alpha_heat) · MC / tau_relax` (units checked
+  per the audit comment).  `dq_c_conv_dt` rescaled so column =
+  `alpha_heat · MC / tau_relax`.
+- **`dca.py`**: STANDARD MSE conservation via column-net-drying
+  rescale of `dq_c_conv_dt`.  CAPE-gated.  `n_iterations`
+  adjustment via `lax.scan`.
+
+No new fixes needed.  All 4 microphysics + Kuo + DCA share the
+column-conservative scaffold introduced in iter-29 and extended in
+iter-73 to all hydrometeor / sink combinations.
+
 ## Iteration 74 — 2026-05-13
 
 **Codex review + inspection on ocean physics convection +
