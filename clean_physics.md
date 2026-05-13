@@ -451,6 +451,33 @@ Verified clean:
 
 No code changes this iteration.
 
+## Iter-109 — TKE + CLUBB-lite turbulence prognostic budgets
+Audited `atmosphere/physics/turbulence/{tke,clubb_lite}.py` (202 + 283
+LOC).
+
+Verified clean:
+- **TKE budget**: `de/dt = Km·S² − Kh·N² − Ce·e^(3/2)/l + d/dz[Km·de/dz]`.
+  Shear production `P = Km·S²` (positive); buoyancy `B = −Kh·N²`
+  (negative in stable, positive in unstable).  Semi-implicit
+  linearisation `Ce·e^(3/2) ≈ Ce·e^(1/2)_old · e_{new}/l` makes
+  dissipation linear in the new TKE so the implicit update
+  `e_{new} = (e_diffused + dt·(P+B)) / (1 + dt·Ce·sqrt(e_old)/l)` is
+  unconditionally non-negative-bounded.  `max(tke_new, tke_min)` clip
+  catches the residual P+B<0 corner.
+- **CLUBB-lite `wp2` budget**: same structure as TKE but tracks the
+  vertical-velocity variance `w'²` instead of full TKE.  Iter-172 F841
+  audit removed dead higher-moment + Gaussian-PDF cloud-fraction
+  diagnostics that were computed but never returned through
+  `TurbulenceOutput`.
+- **Mixing length**: `l = κ·z / (1 + κ·z/l_mix_max)` — asymptotic
+  free-troposphere limit; AD-safe via `clip(z, 1.0, None)`.
+- **Surface-flux plumbing**: `compute_surface_fluxes` → `sflx_u/v` for
+  momentum, `sflx_T = shflx/c_pd`, `sflx_q = lhflx/L_v`.  Implicit
+  vertical-diffusion in θ-space for T preserves dry-adiabat neutral
+  (iter-? `implicit_vertical_diffusion_theta` fix held).
+
+No code changes this iteration.
+
 ## Next iterations
 Continue addressing codex findings and direct-inspection sweeps until all schemes are
 provably conservative, monotone, CFL-safe, and AD-safe across mixed wet/dry grids.
