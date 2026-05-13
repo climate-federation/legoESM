@@ -241,3 +241,55 @@ def test_matrix_runner_mass_drift_constants_sane():
         f"_DYCORE_MASS_DRIFT_TOL ({tol:.0e}) since lat-lon cosine_bell "
         f"intentionally measures raw-FV transport drift (~1.49e-05)"
     )
+
+
+def test_anchored_step_scan_compat_under_fp64_policy():
+    """iter-36: ``integrate_scan`` works with the anchored fixer when the
+    precision policy is fp64 (so post-fix state stays type-stable).
+
+    iter-18 documented that under the default fp32 storage policy
+    ``cast_pytree(allow_downcast=False)`` keeps post-fix p_s in fp64
+    while scan_fn carry input is fp32 — scan errors with a dtype
+    mismatch.  Setting ``PrecisionPolicy.fp64()`` removes that mismatch
+    (state is fp64 everywhere) and ``integrate_scan`` succeeds with
+    machine-precision drift, the same as a Python-loop integration.
+    """
+    from legoesm.core.precision import PrecisionPolicy, set_policy, get_policy
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        CDGridPrimitiveEquationModel,
+        CDGridPrimitiveEquationConfig,
+    )
+    from legoesm.atmosphere.held_suarez import held_suarez_init
+
+    saved = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp64())
+        grid = create_cubed_sphere(8)
+        sigma = create_sigma_coordinate(8)
+        cfg = CDGridPrimitiveEquationConfig(
+            use_conservation_fixer=True,
+            fix_mass=True,
+            anchor_mass_to_initial=True,
+        )
+        model = CDGridPrimitiveEquationModel(grid, sigma, cfg)
+        state = held_suarez_init(grid, sigma)
+
+        # Lazy snapshot fires inside scan trace; the fp64 carry keeps
+        # the trace type-stable so the scan body emits a valid program.
+        final, _traj = model.integrate_scan(state, 5, 600.0)
+
+        def _mass(s):
+            return float(jnp.sum(
+                s.p_s.data.astype(jnp.float64)
+                * grid.area.astype(jnp.float64),
+            ))
+
+        rel = abs(_mass(final) - _mass(state)) / max(abs(_mass(state)), 1.0)
+        assert rel < 1e-12, (
+            f"integrate_scan under fp64 policy drift {rel:.2e} > 1e-12 "
+            "— anchored fixer should be bit-clean here"
+        )
+    finally:
+        set_policy(saved)

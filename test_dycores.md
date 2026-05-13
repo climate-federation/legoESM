@@ -88,11 +88,13 @@ SW, latlon PE, MPAS SW, MPAS PE, MPAS NH, spectral PE, spectral NH.
 
 ## Known limitations
 
-- **`lax.scan` compat** — anchored fixers keep post-fix state in fp64
-  via `cast_pytree(allow_downcast=False)`. `lax.scan` requires
-  type-stable carry, so scan-based workflows currently need
-  `anchor_mass_to_initial=False`. Lossy downcast would worsen drift by
-  ~10^5x — not a worthwhile trade.
+- **`lax.scan` compat under fp32 storage** — anchored fixers keep post-
+  fix state in fp64 via `cast_pytree(allow_downcast=False)`. With the
+  default fp32 storage policy, `lax.scan` errors on the carry-dtype
+  mismatch. Set `PrecisionPolicy.fp64()` (or `mixed_fp64_storage()`)
+  before constructing the model and `integrate_scan` works at machine
+  precision — pinned by `test_anchored_step_scan_compat_under_fp64_policy`
+  (iter-36).
 - **Cube NH TC1 `|w|_max=0.3177`** vs ico/spec 0.014. Suspect
   cube-imprint edge artifact; tuning knobs (`corner_div_damp_*`,
   `damp_v`) available but defaults preserved.
@@ -138,3 +140,4 @@ SW, latlon PE, MPAS SW, MPAS PE, MPAS NH, spectral PE, spectral NH.
 | 33   | Add `test_long_run_mass_conservation_cubed_sphere_pe` — 100-step cube C12 PE run, asserts drift `< 1e-12`. Catches O(N) per-step accumulation bugs that the existing 20-step regression at `1e-12` would miss. Direct measurement: `4.18e-15` over 100 steps. 5/5 hydro mass-conservation tests PASS. | locks long-run anchor stability |
 | 34   | Extend iter-33 long-run guard to SW (`test_long_run_sw_mass_conservation_fv3_cube`) and NH (`test_long_run_nh_mass_conservation_cubed_sphere`) — 100-step cube FV3 SW + cube NH each assert drift `< 1e-12`. Full atmosphere test suite regression sweep (`pytest tests/atmosphere`): 986/988 PASS (2 skipped) in 37 min — confirms iter-1..33 hasn't broken anything. | locks long-run anchor on SW + NH paths |
 | 35   | Spectral SW `compute_mass(state)` helper — bit-clean baseline so no anchor needed, but the helper matches the cube / lat-lon / MPAS SW twins for uniform public API. `test_spectral_sw_compute_mass_present` pins the requirement. 15/15 anchor API tests PASS. | uniform compute_mass across all 4 SW grids |
+| 36   | Resolve iter-18 `lax.scan` limitation: anchored `integrate_scan` works at machine precision under `PrecisionPolicy.fp64()` / `mixed_fp64_storage()` (state stays type-stable). Add `test_anchored_step_scan_compat_under_fp64_policy` (cube PE, 5 scan steps, drift `8.03e-16`). The fp32-storage scan incompat remains documented; the fix is "switch precision policy", not "disable anchor". 16/16 anchor API tests PASS. | scan workflows now have a clean path |
