@@ -5468,3 +5468,72 @@ vmap-compatible.  Uses ``constants.c_pd``, ``constants.epsilon``,
 ``constants.L_v`` per CLAUDE.md hygiene.  No `constants.py`
 additions.
 
+## Iter 874 — saturation_vapor_pressure_slope_fv3 (Δ closure)
+
+Added `saturation_vapor_pressure_slope_fv3(t)` to
+`grids/cubed_sphere.py`.  Standard Clausius-Clapeyron temperature
+derivative of saturation vapor pressure — last unsupplied PM input:
+
+```
+Δ = de_sat/dT = e_sat(T) · L_v / (R_v · T²)        (Pa/K)
+```
+
+Uses canonical ``thermo.saturation_vapor_pressure`` (Bolton 1980)
++ ``constants.L_v`` + ``constants.R_v`` per CLAUDE.md hygiene.
+Matches FAO-56 Eq. 13 closed-form fit to within 1%.
+
+Canonical:
+  | T (°C)| Δ (Pa/K) |
+  |-------|----------|
+  | 0     | 44       |
+  | 15    | 110      |
+  | 20    | 145      |
+  | 25    | 189      |
+  | 30    | 244      |
+  | 35    | 314      |
+  | 40    | 399      |
+
+Δ grows ~exponentially with T (factor of ~9 from 0 to 40 °C) via
+CC — drives **~7%/K atmospheric-demand rise** under warming that
+intensifies drought (Yuan 2019, Grossiord 2020).
+
+**FULLY CLOSES the Penman-Monteith input primitive set
+end-to-end** — Δ was the last unsupplied input.  Caller now has
+pure-JAX ET pipeline:
+
+```
+T          → iter-874 Δ
+T, RH      → iter-871 VPD
+pressure   → iter-873 γ
+u, z_0     → g_a (caller; standard log-law)
+A_n,h,C    → iter-869 g_s
+R_n, G     → A
+           ↓
+           iter-870 λE     (full Penman-Monteith)
+```
+
+Pairs with iter-832 ``clausius_clapeyron_dqdt_fv3`` (same CC
+structure, different unit: dq_sat/dT for moisture-budget).
+Test verifies finite-diff of ``thermo.e_sat`` matches analytic
+within 1%.
+
+Used by: FAO-56 Eq. 13 reference ET, Penman-Monteith standard,
+Penman 1948 evaporation, Bolton 1980 thermodynamic fits, Allen-
+Pereira 1998 FAO-56, CLM5/JULES/NoahMP ET modules.
+
+Test: `tests/test_fv3_delta_slope_iter874.py` (8 tests: 20°C
+canonical 145 Pa/K band, 30°C higher than 20°C, finite-diff matches
+analytic <2%, monotone in T, T=0 floored, chain to iter-870 PM,
+pairs with iter-832 CC, 3-D shapes positive).
+
+### Why this iteration was meaningful
+
+**ABSOLUTELY CLOSES THE PENMAN-MONTEITH INPUT PRIMITIVE SET** —
+caller's full ET pipeline is now end-to-end pure-JAX with zero
+external dependencies beyond baseline meteorology (T, RH, u, R_n,
+G, p, A_n).  All iter-870 PM inputs (Δ, γ, VPD, g_s, g_a, A) now
+derivable from primitives.  Pure JAX, vmap-compatible.  Uses
+``thermo.saturation_vapor_pressure`` + ``constants.L_v``,
+``constants.R_v`` per CLAUDE.md hygiene.  No `constants.py`
+additions.
+

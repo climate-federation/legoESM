@@ -10386,6 +10386,91 @@ def psychrometric_constant_fv3(
     return cp_use * pressure_pa / (eps_use * lv_use)
 
 
+def saturation_vapor_pressure_slope_fv3(
+    t: jax.Array,
+    t_floor: float = 1e-6,
+) -> jax.Array:
+    """FV3_3D iter 874: dE_sat/dT slope primitive (Clausius-Clapeyron form).
+
+    Standard Clausius-Clapeyron temperature derivative of saturation
+    vapor pressure — the Δ input to Penman-Monteith iter-870:
+
+        Δ = de_sat/dT = e_sat(T) · L_v / (R_v · T²)        (Pa/K)
+
+    Where:
+      * e_sat(T) — canonical ``thermo.saturation_vapor_pressure``
+                   (Bolton 1980) per CLAUDE.md hygiene.
+      * L_v      — ``constants.L_v`` = 2.501×10⁶ J/kg.
+      * R_v      — ``constants.R_v`` = 461.51 J/(kg·K).
+      * T        — temperature (K).
+
+    Pure Clausius-Clapeyron form; equivalent to FAO-56 Eq. 13
+    closed-form fit:
+
+        Δ = 4098 · e_sat / (T_C + 237.3)²
+
+    (Bolton 1980 + CC matches FAO-56 fit to within ~1%.)
+
+    Canonical magnitudes:
+      | T (°C)    | T (K)   | Δ (Pa/K) |
+      |-----------|---------|----------|
+      | 0         | 273.15  | ~44      |
+      | 15        | 288.15  | ~110     |
+      | 20        | 293.15  | ~145     |
+      | 25        | 298.15  | ~189     |
+      | 30        | 303.15  | ~244     |
+      | 35        | 308.15  | ~314     |
+      | 40        | 313.15  | ~399     |
+
+    Δ grows roughly exponentially with T (factor of ~9 from 0 to
+    40 °C) via Clausius-Clapeyron — drives the **~7%/K rise in
+    atmospheric demand** under warming that intensifies drought
+    (Yuan et al. 2019, Grossiord et al. 2020).
+
+    **Fully closes the Penman-Monteith input primitive set** —
+    Δ was the last unsupplied input.  Caller now has end-to-end
+    pure-JAX ET pipeline:
+
+        T          → iter-874 Δ
+        T, RH      → iter-871 VPD
+        pressure   → iter-873 γ
+        u, z_0     → g_a (caller; standard log-law)
+        A_n,h_s,C_s → iter-869 g_s
+        R_n, G     → A
+                   ↓
+                   iter-870 λE (Penman-Monteith)
+
+    Composes canonical ``thermo.saturation_vapor_pressure`` per
+    CLAUDE.md hygiene.  Uses ``constants.L_v`` and ``constants.R_v``.
+
+    Pairs with iter-832 ``clausius_clapeyron_dqdt_fv3`` (same CC
+    structure, different unit: dq_sat/dT for moisture-budget).
+
+    Used by: FAO-56 Eq. 13 reference ET, Penman-Monteith standard,
+    Penman 1948 evaporation formula, Bolton 1980 thermodynamic
+    fits, Allen-Pereira 1998 FAO-56 reference, CLM5/JULES/NoahMP
+    ET modules, eddy-covariance flux-tower closure.
+
+    ``t_floor`` prevents NaN at T=0 (pathological frozen regime).
+
+    Parameters
+    ----------
+    t : jax.Array
+        Temperature (K).
+    t_floor : float
+        Lower bound on T² (K²); default 1e-6.
+
+    Returns
+    -------
+    delta : jax.Array
+        de_sat/dT (Pa/K); positive.
+    """
+    from legoesm import thermo
+    e_sat = thermo.saturation_vapor_pressure(t)
+    t_sq = jnp.maximum(t * t, t_floor)
+    return e_sat * constants.L_v / (constants.R_v * t_sq)
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

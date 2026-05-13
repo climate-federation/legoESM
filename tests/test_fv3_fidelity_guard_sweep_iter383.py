@@ -461,6 +461,7 @@ _GUARD_MODULES = (
     "test_fv3_vpd_iter871",                          # iter-871 add
     "test_fv3_bowen_ratio_iter872",                  # iter-872 add
     "test_fv3_psychrometric_iter873",                # iter-873 add
+    "test_fv3_delta_slope_iter874",                  # iter-874 add
 )
 
 
