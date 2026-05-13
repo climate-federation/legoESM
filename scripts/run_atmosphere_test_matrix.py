@@ -3201,7 +3201,12 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
     # iter-120 (codex iter-119 followup MEDIUM-1): also fail
     # on series with < 2 samples (pre-iter-120 returned 0.0
     # sentinel that silently passed).
-    HELD_SUAREZ_MASS_DRIFT_TOL = 1e-2
+    # iter-23 (test_dycores): after iter-1..22 every grid sits at
+    # ~1e-15 in this test path, so the 1e-2 ceiling is 13 orders
+    # too loose.  Tighten to 1e-6 — still 9 orders above the
+    # observed floor, but catches regressions that the previous
+    # bound silently accepted.
+    HELD_SUAREZ_MASS_DRIFT_TOL = 1e-6
     ok, notes = _apply_mass_drift_tolerance(
         ok, notes, mass_drift, HELD_SUAREZ_MASS_DRIFT_TOL,
         n_samples=len(diag.get("mass", [])))
