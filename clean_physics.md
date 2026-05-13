@@ -268,6 +268,42 @@ All sections cumulatively verified; no new defects across coupler infrastructure
 ocean EOS, shared thermo / constants, HB / YSU PBL, barotropic substep solver,
 radiation integration dispatcher, backscatter scheme, land surface params, MPAS GM/Redi.
 
+## Iter-121 — ice EVP `dynamics.evp_solver` deep audit
+Audited `ice/dynamics.py` evp_solver (411 LOC, 120 subcycles per
+dynamic step) and `ice/rheology.py` stress-update chain (281 LOC).
+
+Verified clean:
+- **Ice mass scaling**: `m_ice = ρ_ice · max(h, 0.01)` is mass per unit
+  ICE-covered area, not per grid cell.  `air_ice_stress` /
+  `ocean_ice_stress` already return per-ice-area stresses, so the
+  momentum equation `m_ice · du/dt = τ_a + τ_o + ∇·σ` is dimensionally
+  consistent.  An earlier audit incorrectly claimed concentration
+  weighting was missing — codex GPT-5 review caught the bookkeeping
+  error; original form is correct.
+- **Semi-implicit Coriolis** (Crank-Nicolson): `α = 0.5 · f · dt_s`,
+  `rhs_u = u + dt·ax + α·v`, `rhs_v = v + dt·ay − α·u`, then
+  `u_new = (rhs_u + α·rhs_v)/(1+α²)`, `v_new = (rhs_v − α·rhs_u)/
+  (1+α²)`.  Verified by matrix-inverse algebra; energy- and rotation-
+  conserving for inertial oscillations.
+- **EVP relaxation chain**: strain_rates → evp_stress_update (with
+  iter-55 Delta_min threaded) → stress_divergence → momentum update.
+  Each subcycle uses `dt_s = dt / N_evp` (default N=120).
+- **`vp_stress`**: `ζ = P/(2·Δ_reg)`, `η = ζ/e²`; standard Hibler form
+  `σ_11 = 2η·ε_11 + (ζ−η)·trace − P/2`, etc.  AD-safe via
+  `sqrt(max(Δ², 0))` and outer `max(., Delta_min)`.
+- **Ice strength** `P = P* · h · exp(−C·(1−A))`: positive, smoothly
+  approaches 0 as A → 0 (no internal stress in open water).
+- **`ice_mask = concentration > 0.01`** gates all stress / velocity
+  updates; cast to float and multiplied (`smooth gradient` per the
+  inline comment).  Stress fields zeroed on ice-free cells.
+- **`evp_stress_update` semi-implicit**: `σ_new = (σ_old + E·σ_VP) /
+  (1+E)` with `E = 1/(2·T_evp·N_evp)` — recovers the canonical
+  Hunke-Dukowicz EVP relaxation when T_damp = T_evp·N_evp·dt_s
+  (the unitless `T_evp = 0.36` CICE default + `N_evp = 120` gives
+  ~30 % effective relaxation per dynamic step).
+
+No code changes this iteration.
+
 ## Next iterations
 Continue addressing codex findings and direct-inspection sweeps until all schemes are
 provably conservative, monotone, CFL-safe, and AD-safe across mixed wet/dry grids.
