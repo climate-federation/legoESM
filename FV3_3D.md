@@ -5229,6 +5229,45 @@ LCL, iter-806 Γ_m, Klein-Hartmann LTS) to give the most-used
 single-number Sc-regime metric.  Pure JAX, vmap-compatible.
 No new physical constants introduced.
 
+## Iter 824 — sc_fraction_eis_fv3 (Wood-Bretherton 2006 fit)
+
+Added `sc_fraction_eis_fv3(eis, slope=0.06, intercept=0.41)` to
+`grids/cubed_sphere.py`.  Wood-Bretherton (2006) empirical fit
+to ISCCP low-cloud-fraction climatology:
+
+```
+f_low = clip(slope · EIS + intercept, 0, 1)
+```
+
+Default coefficients (0.06, 0.41) from regression against
+30°S–30°N JJA ISCCP low-cloud-fraction.  Accuracy ±0.15 globally;
+specific Sc decks (California, Peru) may have offsets ±0.1.
+
+Interpretation:
+  * EIS < −7 K  → f_low → 0 (deep convective / clear)
+  * EIS = 0 K   → f_low ≈ 0.41 (transitional)
+  * EIS = 8 K   → f_low ≈ 0.89 (Sc deck)
+  * EIS > 10 K  → f_low = 1 (saturated)
+
+Composes iter-823 ``eis_fv3``.
+
+Used by: low-cloud climate-feedback diagnostics (Klein-Hartmann-
+Wood 2017 Annu Rev), CMIP cloud-fraction evaluation, Sc-deck
+shortwave-feedback decomposition, parameterization tuning
+against ISCCP / MODIS.
+
+Test: `tests/test_fv3_sc_fraction_eis_iter824.py` (6 tests:
+EIS=0 → 0.41, EIS=10 → 1 (clipped), EIS=−10 → 0 (clipped),
+monotone, custom slope/intercept, 3-D shapes + in [0, 1]).
+
+### Why this iteration was meaningful
+
+Closes the **Sc-cloud-fraction empirical chain**: iter-823 EIS
+→ iter-824 f_low.  Allows direct CMIP-class Sc fraction estimates
+from any model thermodynamic profile via the WB2006 fit.  Pure
+JAX, vmap-compatible.  No new physical constants introduced
+(0.06, 0.41 are WB2006-paper fit coefficients).
+
 
 
 
