@@ -9,271 +9,6 @@ Branch: `clean_physics`. Driven by Ralph loop + `/codex:adversarial-review`.
 - **Ocean** (`src/legoesm/ocean/physics/`): vertical_mixing, bottom_drag, lateral_mixing, convection, surface_forcing, shortwave_penetration, mixing.
 - **Cryosphere** (`src/legoesm/ice/`): sea_ice, dynamics, itd, rheology, transport.
 
-## Iteration 79 — 2026-05-13
-
-**Bug fix (codex stop-time): RRTMGP humidity guard bypassed by
-halo extrapolation.**
-
-`rrtmgp.py:636-640` applied `jnp.clip(q_v, 0.0, 0.99)` BEFORE
-`_add_halos`.  But `_add_halos` linearly extrapolates the
-boundary halo cells, which can push q_v OUTSIDE the [0, 0.99]
-window for a steep boundary profile (e.g. `q_v = [0.99, 0.0,
-...]` → halo = `2·0.99 − 0.0 = 1.98`).  The downstream
-`h2o_vmr = mol_ratio · q_v / (1 − q_v)` then divides by a
-negative number, producing singular / negative VMRs.
-
-Fix: clip AFTER `_add_halos` so the halo cells are also bounded.
-The interior values stay bit-identical to the previous clipped
-behaviour.
-
-```python
-q_v_3d = _add_halos(q_v[:, None, ::-1])
-q_v_3d = jnp.clip(q_v_3d, 0.0, 0.99)
-```
-
-New regression test
-`test_rrtmgp_humidity_clip_survives_halo_extrapolation` exercises
-the pathological `q_v = [0.99, 0.0, ...]` boundary profile and
-verifies the heating rate is finite.
-
-## Iteration 78 — 2026-05-13
-
-**Inspection iteration on barotropic substep solvers (no code changes).**
-
-- **`barotropic_implicit_latlon_cgrid.py`**: Crank-Nicolson with
-  Forward-Backward Coriolis predictor + Helmholtz solve via
-  `jax.scipy.sparse.linalg.cg` (differentiable through IFT).  Mass
-  conservation noted as exact in docstring (lines 41-44).  `θ_eta
-  = θ_pgf = 0.55` (slightly past true Crank-Nicolson — unconditional
-  gravity-wave damping).
-- **`barotropic_latlon_cgrid.py`** (explicit substep): accumulates
-  `Hu_sum` over substeps and returns `Hu_avg = Hu_sum / n_substeps`.
-  This IS the integrated face transport that drove eta, so
-  mass-tracer consistency is exact for this path.
-
-Note (potential subtle issue in implicit path): the implicit solver
-returns `Hu_avg = (1−θ)·H_u_old·U_old + θ·H_u_new·U_new` (trapezoidal
-rule on raw transport).  The eta update uses `div(H_u_old ·
-U_avg_pred)` with U_avg_pred from the FB Coriolis predictor (not
-U_new).  After the corrector adds `−θ_pgf·dt·g·∇δη` to get U_new,
-the time-integrated transport that closed the eta budget is NOT
-exactly the same as the trapezoidal Hu_avg returned for tracers.
-The discrepancy is O(θ²·dt²·g·∇²η) per step — small for typical
-baroclinic timescales but non-zero.  MOM6 / NEMO use iterative
-implicit methods that converge to exact consistency.  Tracked
-alongside the explicit-path bottom-drag double-application as
-"open architectural debt".
-
-No new fixes needed.  Per-substep transport accumulation in the
-explicit path is exact; implicit path is approximate by O(θ²·dt²)
-— acceptable for current production use.
-
-## Iteration 77 — 2026-05-13
-
-**Inspection iteration on `ocean/dynamics/ocean_tendency_common.py`
-and `barotropic_common.py` (no code changes).**
-
-- **`barotropic_common.compute_filter_weights`**: cosine bell with
-  `n < 2` fallback to box filter (avoids `1 + cos(-π) = 0` divide-
-  by-zero).  `bebt_blend` and `maxvel_clip` are thin and correct.
-- **`iterate_eos_and_pressure_anomaly`**: 2-pass EOS iteration with
-  optional static `ρ_ref(z)` or dynamic recomputed-mean reference
-  density.  Reference-Jacobian (J=1, η=0) used so the `-g·∇η`
-  forcing isn't double-counted by the barotropic solver.
-- **`compute_static_rho_ref_z`**: wet-cell mean of in-situ density
-  after the 2-pass iteration; cast to `T.dtype`.
-- **`apply_sponge_tracer_relaxation` + `apply_freshwater_virtual_
-  salt_top`**: standard `+γ(ref − q)` relaxation + virtual-salt
-  flux at top; dtype cast prevents x64 promotion.
-- **`implicit_bottom_drag_factor`** (line 371): `1 / (1 + dt·r/H)`.
-  Unconditionally stable.
-- **`bbl_distributed_drag_face_column`**: Killworth & Edwards
-  (1999) overlap distribution; `h_bbl_eff = min(max(total_overlap,
-  eps), H_BBL)` correctly handles shelf cells with total depth <
-  H_BBL (iter-39 #2 fix in place).
-
-Known open architectural debt (per source comments at line 389-407):
-**bottom drag double-application in the explicit barotropic path**
-— ``F_slow`` already includes the depth-mean of the 3D PE's
-bottom-cell drag, and the implicit factor here adds another
-``r/H`` (effective `2·r/H` drag).  The Crank-Nicolson implicit
-barotropic path relies on `F_slow` alone and is correct.  Fix
-requires single-owner drag plumbing across `ocean_model_*.py` —
-deferred (cross-cutting refactor).
-
-No new fixes needed.
-
-## Iteration 76 — 2026-05-13
-
-**Inspection iteration on remaining convection schemes
-(no code changes).** Direct inspection of `tiedtke.py`,
-`kain_fritsch.py`, `zhang_mcfarlane.py`:
-
-- **`tiedtke.py`**: Three-class blend (deep / shallow / midlevel)
-  with per-class entrainment / detrainment profiles.  Deep uses
-  moisture-convergence closure (saturation-excess proxy when MC
-  unavailable, with sign correctly flipped from saturation-deficit
-  per prior audit).  Shallow / midlevel use Kain (2004) §3
-  dimensionally-correct CAPE-relaxation form.
-- **`kain_fritsch.py`**: Trigger via smooth-step
-  `T_lcl_perturbed > T_env_at_lcl`; CAPE gate as safety net.
-  Cloud-base mass flux `M_b = ρ_BL · CAPE / (g · tau_consume)`
-  (Kain 2004 §3, dimensionally correct).
-- **`zhang_mcfarlane.py`**: Implicit-Euler relaxation of M_b
-  toward `M_b_eq` (no `dt / max(tau, dt)` clamp — the comment
-  audit fix);  shared mass-flux kernel with separate `q_u` /
-  `q_c_u` plume streams; optional Gregory 1997 CMT.
-
-All three schemes use the shared `_apply_mass_flux_kernel` (which
-handles compensating subsidence + detrainment with the
-stratosphere mass-flux gate), the shared `entraining_detraining_
-plume`, and column-conservative cloud-water source via
-`delta_0 · M · q_c_u / rho`.
-
-No new fixes needed.  All 6 mass-flux schemes (Bechtold, Emanuel,
-Tiedtke, Kain-Fritsch, Zhang-McFarlane, plus DCA / Kuo
-adjustment schemes) share the conservation scaffold.
-
-## Iteration 75 — 2026-05-13
-
-**Inspection iteration on `kessler.py`, `seifert_beheng.py`,
-`kuo.py`, `dca.py` (no code changes).** Codex review on
-Kessler/SB returned `verdict=approve` (truncated post-test) and
-direct inspection confirms:
-
-- **`kessler.py`** + **`seifert_beheng.py`**: joint donor clamp
-  on q_c sinks (cond_evap + autoconv + accretion) and joint sed +
-  evap cap on q_r (`extra_sink=evaporation`).  Latent heating
-  `dT/dt = L_v · (condensation − evaporation) / c_pd`.  Pattern
-  shared with Morrison/Thompson (post iter-73).
-- **`kuo.py`**: column moisture-excess (MC) gated by both smooth
-  sigmoid trigger AND `tanh(MC/me_threshold)` to enforce
-  `dT_dt = 0` when `MC = 0` (audit fix).  Vapor budget
-  distribution proportional to subsaturation deficit; column
-  integral = `(1 − alpha_heat) · MC / tau_relax` (units checked
-  per the audit comment).  `dq_c_conv_dt` rescaled so column =
-  `alpha_heat · MC / tau_relax`.
-- **`dca.py`**: STANDARD MSE conservation via column-net-drying
-  rescale of `dq_c_conv_dt`.  CAPE-gated.  `n_iterations`
-  adjustment via `lax.scan`.
-
-No new fixes needed.  All 4 microphysics + Kuo + DCA share the
-column-conservative scaffold introduced in iter-29 and extended in
-iter-73 to all hydrometeor / sink combinations.
-
-## Iteration 74 — 2026-05-13
-
-**Codex review + inspection on ocean physics convection +
-surface_forcing.**  Codex returned `verdict=approve` with one
-candidate risk but truncated output (post-investigation Python
-tests failed due to missing venv activation in codex shell);
-direct inspection of the same paths found no concrete bug:
-
-- **`prescribed.py`**: virtual-salt-flux `dS/dt = S · E_minus_P /
-  dz_0` matches the standard salt-conservation derivation
-  (S = M_salt / V_water; d(M_salt) = 0 with dV/dt = −E).
-- **`restoring.py`**: linear relaxation `dT/dt = −(T − T_star) /
-  τ` with cosine T_star profile.  Sign convention correct.
-- **`wind_profiles.py`**: 10 wind-profile options (single_gyre,
-  double_gyre, double_gyre_sin2/tapered, channel_sine, global_wind,
-  two_belt, etc.) with buffer tapers at basin walls.
-- **`bulk_formulas.py`**: iter-42 fixes (`_saturation_specific_
-  humidity` mixing-ratio→specific-humidity, grey-surface LW `ε σ
-  T^4 + (1−ε)·LW_down`, |U| scaling) hold.  Config `q_a` is
-  specific humidity (kg/kg moist), consistent with iter-42 q_sat.
-- **`bulk_flux.compute_most_fluxes`** (COARE3 / Large-Yeager 2009):
-  Charnock + smooth-flow z₀ update; LY09 -3.14807e-10·U⁶ high-wind
-  correction; multi-height (z_u, z_t, z_q) Stanton/Dalton number
-  shift with stability corrections; `wind_speed = sqrt(u² + v² +
-  1e-4)` floor.
-
-No new fixes needed.  iter-42 cleanup and the MOST iterations are
-mature.
-
-## Iteration 73 — 2026-05-13
-
-**Bug fix: Morrison + Thompson ice/snow/graupel sedimentation +
-in-column-sink joint cap missing.**
-
-Codex review confirmed and direct inspection found: the iter-29
-joint-cap pattern (sedimentation passes `extra_sink` for the
-in-column sink so the combined per-step removal can't exceed
-available mass) was applied to q_r/evaporation but NOT to
-q_i/q_s/q_g/in-column-melt-or-rime sinks.
-
-The donor clamps already cap (aggregation + melt_ice) ≤ q_i/dt,
-but the separate `sedimentation_tendency` call independently caps
-sed_i at q_i/dt, so the combined removal `(clamped sinks + sed) ·
-dt` can reach **2·q_i**, driving the pool negative when both
-processes are simultaneously active (e.g. melting graupel +
-strong sedimentation in a warm layer).
-
-Fix: pass `extra_sink=` to every solid-hydrometeor sedimentation
-call so the per-layer sed flux is capped against the NET pool
-after natural drains:
-- Morrison: `q_i` → `aggregation + melt_ice`; `q_s` → `melt_snow`.
-- Thompson: `q_i` → `aggregation + melt_ice + rime_to_graupel_from_i`;
-  `q_s` → `melt_snow + rime_to_graupel_from_s`; `q_g` → `melt_graupel`.
-
-**Tests (post iter-73):** 68 / 68 atmosphere microphysics tests pass
-(Kessler, Morrison, Thompson, Seifert-Beheng + multi-step
-stability).
-
-## Iteration 72 — 2026-05-13
-
-**Inspection iteration on TKE / CLUBB-lite / `pbl_height` (no code changes).**
-
-- **`pbl_height`**: bulk-Ri with surface-difference dV² (Vogelezang &
-  Holtslag 1996 form, not absolute-wind-speed); two methods —
-  smooth sigmoid-weighted (`w_pbl = sigma·(1−sigma)` peaks at the
-  Ri_crit crossing) and `interp` (linear interpolation + softmin).
-  Both differentiable, clipped to [h_min, h_max].
-- **`tke.py`** (Mellor-Yamada level 2.5): sqrt floor at `tke_min`
-  via `tke = max(tke, tke_min)` at line 93; semi-implicit dissipation
-  `(tke_diffused + dt·prod)/(1 + dt·diss)` linearises so even strong
-  dissipation can't drive tke negative; `tke_new = max(tke_new,
-  tke_min)` final clamp.  Buoyancy sign correct (sink for stable,
-  source for unstable).
-- **`clubb_lite.py`** (Golaz / Larson PDF closure): wp2 carried via
-  TKE slot; cloud-fraction PDF block confirmed-dead and removed in
-  iter-172 audit; restoration instructions in source comments for
-  future CLUBB unified scheme.
-- **YSU / HB / Louis / CLUBB / TKE all share `surface_layer.
-  compute_surface_fluxes`** with hardcoded L_v (known limitation —
-  internal atmospheric path, NOT the tile-side coupler flux).
-
-No new fixes needed.  All turbulence schemes are mature.
-
-## Iteration 71 — 2026-05-13
-
-**Inspection iteration on YSU PBL + surface_layer + EDMF
-(no code changes).**
-
-- **`ysu.py`**: PBL-height bulk-Ri integrator with `sigmoid(sharpness ·
-  (Ri_crit − Ri_bulk))` weighting; `w_pbl = sigma · (1−sigma)` peaks at
-  the Ri_crit crossing.  Both pure-stable and pure-unstable columns
-  collapse to `w → 0` everywhere and `+1e-20` floor regularises (h_pbl
-  → mean(z), clipped to 100m).  Known limitation, not a bug.
-- **K-profile / local-Ri blend**: `Km_profile = κ_vk · u* · z · (1 − z/h)²`
-  inside PBL, Louis-style local-Ri Km above PBL, Gaussian
-  entrainment envelope `K_ent = c_ent · w* · h · exp(−((z−h)/(0.3h))²)`
-  centred at h_pbl.  Smooth blend via `sigmoid(10·(z/h − 1))`.
-- **`implicit_vertical_diffusion_theta`**: T → θ via `(p/p_ref)^κ`;
-  surface flux converted to θ via `F_θ = F_T / exner_sfc`; diffused
-  in θ-space; converted back to T.  Dry adiabat (dθ/dz = 0) is neutral.
-- **`surface_layer.compute_surface_fluxes`** (atmospheric side):
-  hard-coded `L_v` for `lhflx`.  Over snow/ice tiles, this is ~13%
-  too low (`L_s/L_v ≈ 1.13`).  In coupled-mode, the tile-side
-  bulk-flux (with `L_eff` switch) is what's reported to the coupler;
-  the YSU/HB internal `lhflx` is only used as the boundary condition
-  for q_v implicit diffusion.  Known limitation in non-aquaplanet
-  setups; out of scope for this iter.
-- **`edmf_turbulence`**: `M_max = 0.5 · ρ · dz / dt` cap (per iter-12
-  fix).  Column conservation noted as approximate in source comments.
-
-No new fixes needed.  YSU/HB internal `L_v` hardcode is a known
-limitation tracked alongside the coupled-mode surface-flux flow.
-
 ## Iterations 1-50 — Summary (compressed 2026-05-13 after iter-50)
 
 ### Constants & shared utilities
@@ -326,48 +61,61 @@ limitation tracked alongside the coupled-mode surface-flux flow.
 ## Iterations 51-69 — Summary (compressed 2026-05-13 after iter-70)
 
 ### Real code fixes
-- **iter-52 / 53 / 54** (lateral_mixing no-flux BC, 3 iters):
-  Neumann-fill tracers via `fill_land_cells(T, mask, grid, n_passes=N)` BEFORE
-  the harmonic / biharmonic operator; N = stencil reach (2 / 3).
-- **iter-55** (Delta_min threading): `SeaIceConfig.Delta_min` now routes
-  through `evp_solver → evp_stress_update → delta_deformation`.
-- **iter-56** (shortwave_penetration Inf/NaN on dry columns): `dz_actual >
-  0` guard + safe-denominator + output mask in
-  `shortwave_penetration_tendency`.
-- **iter-57 / 58 / 59** (dry-column AD safety in vertical-diffusion leafs,
-  3 iters): KPP non-local + `vertical_diffusion` + `vertical_diffusion_
-  variable_K` all switched to `dz_safe = jnp.where(dz > 0, dz, 1)` for
-  the divisor and `field_safe = where(dz > 0, field, 0)` + `K_half =
-  where(dry_iface, 0, K_half)` SUBSTITUTIONS to scrub upstream NaN
-  from KPP / Richardson before arithmetic.  Backward (AD) pass now
-  clean on mixed wet/dry grids.
-- **iter-62 / 63 / 64** (carbon conservation under R_auto > GPP, 3 iters):
-  When NPP_day < 0, cascade the deficit `C_lab → C_fol → C_root →
-  C_wood` (standard CASA/DALEC).  Each draw capped at the **net-
-  available** pool budget after natural turnover.  Hard `jnp.maximum`
-  clamp replacing softplus (avoiding the `_alpha · log(2)` smoothing
-  bias).  Carbon conservation now at near-machine precision
-  (`rtol=1e-9, atol=1e-9` regression).
-- **iter-67** (frozen-lake q_surface): post-step `q_sfc_new` now applies
-  the same liquid / ice saturation phase switch used pre-step.  ~14 %
-  bias removed for `T_epi ≤ T_freeze` lakes.
+- **iter-52 / 53 / 54** (lateral_mixing no-flux BC): Neumann-fill tracers via
+  `fill_land_cells(T, mask, grid, n_passes=N)` BEFORE the harmonic / biharmonic operator;
+  N = stencil reach (2 / 3).
+- **iter-55** (Delta_min threading): `SeaIceConfig.Delta_min` routes through
+  `evp_solver → evp_stress_update → delta_deformation`.
+- **iter-56** (shortwave_penetration Inf/NaN on dry columns): `dz_actual > 0` guard +
+  safe-denominator + output mask.
+- **iter-57 / 58 / 59** (dry-column AD safety in vertical-diffusion leafs): KPP non-local
+  + `vertical_diffusion` + `vertical_diffusion_variable_K` use `dz_safe = jnp.where(dz >
+  0, dz, 1)` + substitution `field_safe = where(dz > 0, field, 0)` + `K_half = where(dry,
+  0, K_half)` to scrub upstream NaN before arithmetic.
+- **iter-62 / 63 / 64** (carbon conservation under R_auto > GPP): cascade C_lab → C_fol →
+  C_root → C_wood when NPP_day < 0; net-available pool budget; `jnp.maximum(x, 0)` clamp
+  replacing softplus.  rtol=1e-9 conservation.
+- **iter-67** (frozen-lake q_surface): post-step `q_sfc_new` applies same liquid/ice
+  saturation phase switch as pre-step (~14 % bias removed).
 
-### Inspection-only iters (no code changes)
-- **iter-51**: `land/multilayer_land.py` — has_snow phase, energy
-  budget closure, sublimation cap, soil water-budget partition, root
-  sink normalisation all verified.
-- **iter-61**: scan complete — `ocean_pe_*` backends use additive or
-  `max()`-bounded floors; no additional `dz` divide-by-zero risks.
-- **iter-65**: Bechtold / Emanuel convection + coupler bulk-flux
-  helpers verified; surface_radiation_fluxes grey-surface BC
-  consistent.
-- **iter-66**: sea-ice `_thermo_single` sign conventions and
-  conservation verified.
-- **iter-68**: `thermo.py` + `surface_albedo.py` — Tetens / C-C
-  formulas, smooth-cap softplus, snow / ice / ocean albedo all
-  verified.
-- **iter-69**: `land/stomata_utils`, `land/param_providers`,
-  `radiation/ozone_ml.py`, `_compute_insolation` all verified.
+### Inspection-only iters
+- **iter-51, 61, 65, 66, 68, 69**: multilayer_land, ocean_pe backends, Bechtold/Emanuel
+  convection + coupler bulk_flux, sea-ice _thermo_single, thermo + surface_albedo,
+  land utils + ML ozone + insolation — all verified clean.
+
+## Iterations 71-79 — Summary (compressed 2026-05-13 after iter-80)
+
+### Real code fixes
+- **iter-73** (joint sed + in-column-sink cap, codex-confirmed): Morrison + Thompson
+  sedimentation now passes `extra_sink=` for the in-column sinks competing with sed in
+  the same explicit step — q_i (aggregation + melt_ice [+ rime_to_graupel_from_i]),
+  q_s (melt_snow [+ rime_to_graupel_from_s]), q_g (melt_graupel).  Extends the iter-29
+  q_r/evaporation pattern to all solid-hydrometeor sed paths.
+- **iter-79** (codex stop-time: RRTMGP humidity guard bypassed by halo extrapolation):
+  `rrtmgp.py:636-640` applied `clip(q_v, 0, 0.99)` BEFORE `_add_halos`, but the linear
+  halo extrapolation could push q_v outside [0, 0.99] for steep boundary profiles
+  (`q_v = [0.99, 0.0, ...]` → halo = 1.98 → singular `(1−q_v)` denominator).  Fix:
+  clip AFTER `_add_halos`.  New regression test exercises the pathological profile.
+
+### Inspection-only iters
+- **iter-71**: YSU PBL + surface_layer + EDMF.  YSU/HB internal `L_v` hardcode noted
+  as known limitation (tile-side flux is authoritative in coupled mode).
+- **iter-72**: TKE + CLUBB-lite + pbl_height.  All differentiable with semi-implicit
+  dissipation and clip-to-tke_min final guards.
+- **iter-74**: ocean surface_forcing + bulk_flux (codex `verdict=approve`).
+- **iter-75**: kessler/SB/Kuo/DCA convection (codex `verdict=approve`, truncated).
+- **iter-76**: Tiedtke/Kain-Fritsch/Zhang-McFarlane mass-flux convection.  All 6 schemes
+  share the column-conservative `_apply_mass_flux_kernel` scaffold.
+- **iter-77**: ocean_tendency_common helpers (iterate_eos_and_pressure_anomaly,
+  bbl_distributed_drag_face_column, implicit_bottom_drag_factor).
+- **iter-78**: barotropic substep solvers (explicit + implicit Crank-Nicolson).
+  Explicit's Hu_avg is exact; implicit's trapezoidal Hu_avg differs from the eta-update
+  flux by O(θ²·dt²·g·∇²η).
+
+### Codex review activity
+- 5+ codex runs in this window; 2 returned actionable findings (iter-73 sed cap,
+  iter-79 q_v halo) — both confirmed and fixed.  Many runs returned
+  `verdict=approve`.
 
 ## Iterations 41-50 — Detail (compressed 2026-05-13)
 
@@ -382,49 +130,48 @@ limitation tracked alongside the coupled-mode surface-flux flow.
 - **iter-49**: inspection-only (gray radiation + solar geometry).
 - **iter-50**: compression + land inspection.
 
-## Inspected & clean (as of iter-70)
-- `land/{snow_budget,carbon/{carbon_cycle,stomata},richards,soil_thermal,
-  multilayer_land,slab_land,stomata_utils,surface_params,param_providers}.py`.
-- `atmosphere/physics/turbulence/{clubb_lite,holtslag_boville,louis,ysu,
-  vertical_diffusion}.py`.
-- `atmosphere/physics/clouds/cloud_fraction.py`.
-- `atmosphere/physics/gravity_wave_drag/{rayleigh,lindzen,mcfarlane,hines,
-  integration}.py`.
-- `atmosphere/physics/radiation/{gray,solar,ozone_ml,integration}.py`.
-- `atmosphere/physics/convection/{bechtold,emanuel,dca,kuo,zhang_mcfarlane,
-  mass_flux}.py`.
-- `ocean/physics/lateral_mixing/{harmonic,biharmonic,gm_redi,gm_redi_latlon_cgrid,
-  gm_redi_mpas,backscatter,_gm_redi_common}.py` (post iter-52/53/54).
-- `ocean/physics/{shortwave_penetration,mixing,bottom_drag/quadratic}.py`
-  (post iter-56/58/59).
-- `ocean/physics/vertical_mixing/{kpp,implicit_solver,mpas_integration}.py`
-  (post iter-57).
-- `coupler/{surface_energy,bulk_flux,lake/two_layer_lake}.py` (post iter-67).
-- `ice/{rheology,dynamics,itd,transport,sea_ice}.py` (post iter-55).
-- `thermo.py`, `surface_albedo.py`.
+## Inspected & clean (as of iter-80)
+- **Land**: `snow_budget`, `carbon/{carbon_cycle,stomata}`, `richards`, `soil_thermal`,
+  `multilayer_land`, `slab_land`, `stomata_utils`, `surface_params`, `param_providers`.
+- **Atmosphere turbulence**: `clubb_lite`, `holtslag_boville`, `louis`, `ysu`, `tke`,
+  `vertical_diffusion`, `surface_layer`, `pbl_height`.
+- **Atmosphere clouds**: `cloud_fraction`.
+- **Atmosphere GWD**: `rayleigh`, `lindzen`, `mcfarlane`, `hines`, `integration`.
+- **Atmosphere radiation**: `gray`, `solar`, `ozone_ml`, `integration`,
+  `rrtmgp/rrtmgp` (post iter-79).
+- **Atmosphere convection**: `bechtold`, `emanuel`, `dca`, `kuo`, `zhang_mcfarlane`,
+  `tiedtke`, `kain_fritsch`, `mass_flux`.
+- **Atmosphere microphysics**: `kessler`, `seifert_beheng`, `morrison`, `thompson`,
+  `_warm_rain`, `output` (post iter-73).
+- **Ocean physics**: `lateral_mixing/{harmonic,biharmonic,gm_redi,gm_redi_latlon_cgrid,
+  gm_redi_mpas,backscatter,_gm_redi_common}` (post iter-52/53/54),
+  `shortwave_penetration`, `mixing` (post iter-58/59), `bottom_drag/quadratic`,
+  `vertical_mixing/{kpp,implicit_solver,mpas_integration}` (post iter-57),
+  `convection/{enhanced_diffusion,plume}`, `surface_forcing/{prescribed,restoring,
+  bulk_formulas,wind_profiles}`.
+- **Ocean dynamics**: `ocean_tendency_common`, `barotropic_common`,
+  `barotropic_latlon_cgrid` (explicit), `barotropic_implicit_latlon_cgrid` (with
+  known limitation).
+- **Coupler**: `surface_energy`, `bulk_flux`, `lake/two_layer_lake` (post iter-67).
+- **Ice**: `rheology`, `dynamics`, `itd`, `transport`, `sea_ice` (post iter-55).
+- **Shared**: `thermo`, `surface_albedo`.
 
 ## Outstanding / Deferred
 - GM/Redi bolus Courant limiter.
-- Bottom drag double-application in explicit barotropic substep
-  path (`F_slow` already carries depth-mean drag; `implicit_bottom_
-  drag_factor` adds another `r/H` → effective `2·r/H`).  Fix
-  requires single-owner drag plumbing across `ocean_model_*.py`.
-- Implicit barotropic `Hu_avg` returned to the tracer step is
-  `(1−θ)·H_u_old·U_old + θ·H_u_new·U_new` (trapezoidal on raw
-  transport), which differs from the actual time-integrated
-  transport that drove the eta update by O(θ²·dt²·g·∇²η).  MOM6 /
-  NEMO use iterative implicit methods for exact consistency.
-- CICE V=h·A state-variable refactor for sea-ice FW bookkeeping (iter-25 attempt
-  reverted; slab path evolves h and conc semi-independently).
+- CICE V=h·A state-variable refactor for sea-ice FW bookkeeping.
 - Threading `dt` into ocean `physics_fn` across 3 ocean PE backends + 3 model drivers.
 - Visual / long-run validation of new ice → ocean feedbacks.
 - σ-tensor rotation across cubed-sphere faces (O(dx) edge error in sea-ice EVP).
-- Codex `adversarial-review` runtime: many consecutive iters lost to exit 144.
-  Continue direct inspection until runtime stabilises.
-- Pre-existing test failure `test_b_salt_sign_freshening_is_stabilizing` (test
-  fragility: `jnp.mean(None)` when `out.K_v` is None) — harness fix, not physics.
+- Codex `adversarial-review` runtime: ~50/50 success/failure when running.  Continue
+  alongside direct inspection.
+- Bottom drag double-application in explicit barotropic substep path (F_slow already
+  carries depth-mean drag; effective `2·r/H`).  Requires cross-cutting refactor.
+- Implicit barotropic Hu_avg O(θ²·dt²·g·∇²η) inconsistency with eta-update flux.
+  MOM6 / NEMO use iterative implicit methods for exact consistency.
+- Pre-existing test failure `test_b_salt_sign_freshening_is_stabilizing` (harness
+  fragility — `jnp.mean(None)` when `out.K_v` is None) — needs harness fix.
 
 ## Next iterations
-Continue addressing further codex findings and direct-inspection sweeps through
-remaining modules until all schemes are provably conservative, monotone, CFL-safe,
-and AD-safe across mixed wet/dry grids.
+Continue addressing further codex findings and direct-inspection sweeps until all
+schemes are provably conservative, monotone, CFL-safe, and AD-safe across mixed
+wet/dry grids.
