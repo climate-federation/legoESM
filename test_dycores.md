@@ -107,3 +107,4 @@ the pre-existing `set_initial_mass(state)` convenience (iter-20 API parity).
 | 19   | `set_target_mass(target)` setter on same 7 models | — |
 | 20   | `reset/set_target_mass` API on cube SW (3 classes) + cube PE + cube NH; doc compress | — |
 | 21   | `compute_mass` / `compute_dry_mass` helpers on the four cube model classes (FV3EdgeSW, FV3FBSW, CDGridPE, CDGridCE) — API parity with MPAS/latlon/spectral twins. | — |
+| 22   | Anchor API regression test (`tests/atmosphere/test_anchor_mass_api.py`, 12 cases) covers all 11 anchored model classes; spectral PE gains public `compute_mass` alias of `_compute_initial_mass`. 12/12 PASS. | — |

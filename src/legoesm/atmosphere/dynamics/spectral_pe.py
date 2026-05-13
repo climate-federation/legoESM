@@ -1382,6 +1382,15 @@ class SpectralPrimitiveEquationModel:
             * self.grid.grid_area.astype(jnp.float64),
         )
 
+    def compute_mass(self, state) -> jax.Array:
+        """Public alias of ``_compute_initial_mass`` (iter-22).
+
+        Provides the same name as the cube / lat-lon / MPAS PE
+        ``compute_mass(state)`` helpers — single API across all four
+        hydrostatic dycores.
+        """
+        return self._compute_initial_mass(state)
+
     def reset_target_mass(self) -> None:
         """Clear the anchored mass target (iter-18; see iter-4 SW twin)."""
         self._target_mass = None
