@@ -5410,3 +5410,61 @@ energy-balance-closure validation (Wilson 2002); (4) AR6 §11
 land-atmosphere coupling diagnostics.  Pure JAX, vmap-compatible.
 No `constants.py` additions.
 
+## Iter 873 — psychrometric_constant_fv3 (FAO-56 γ closure)
+
+Added `psychrometric_constant_fv3(pressure_pa, c_p=None, l_v=None,
+epsilon=None)` to `grids/cubed_sphere.py`.  Allen-Pereira 1998
+FAO-56 Eq. 8:
+
+```
+γ = c_p · p / (ε · λ_v)        (Pa/K)
+```
+
+Uses ``constants.c_pd``, ``constants.epsilon``, ``constants.L_v``
+defaults per CLAUDE.md hygiene.
+
+Canonical:
+  | elevation       | p (Pa)   | γ (Pa/K) |
+  |-----------------|----------|----------|
+  | Sea level       | 101325   | ~65–67   |
+  | 1000 m (Denver) | 89875    | ~58      |
+  | 3000 m (La Paz) | 70110    | ~45      |
+  | 5500 m (Everest)| 50500    | ~33      |
+
+Lower γ at high elevation → less sensible-heat coupling per unit
+T-difference → enhanced evaporation at fixed VPD.  Critical
+**elevation correction** for high-altitude ET.
+
+**Fully closes the Penman-Monteith input primitive set** —
+caller now has every iter-870 input from baseline meteorology +
+pressure in pure JAX:
+
+```
+T, RH      → iter-871 VPD
+T          → Δ (caller dE_sat/dT)
+pressure   → iter-873 γ
+u, z_0     → g_a (caller)
+A_n,h_s,C_s → iter-869 g_s
+R_n, G     → A
+           ↓ iter-870 λE
+```
+
+Used by: Allen-Pereira 1998 FAO-56 Eq. 8, Monteith 1965 Penman-
+Monteith origin, FLUXNET energy-closure analysis, high-altitude
+ET studies (Andes / Tibetan Plateau), WMO ET reporting.
+
+Test: `tests/test_fv3_psychrometric_iter873.py` (7 tests: FAO-56
+sea-level ≈ 65 Pa/K, ↑elevation→↓γ, p=0 → 0, linear in p, chain
+with iter-870 PM, custom c_p/L_v/ε overrides, 3-D shapes positive).
+
+### Why this iteration was meaningful
+
+**Fully closes the Penman-Monteith input primitive set** — last
+canonical input (γ) now in pure JAX with elevation dependence.
+Caller's full ET pipeline requires only baseline meteorology
+(T, RH, u, R_n, G, p, A_n) — no external lookup tables.  Critical
+for high-altitude AR6 SSP-scenario ET attribution.  Pure JAX,
+vmap-compatible.  Uses ``constants.c_pd``, ``constants.epsilon``,
+``constants.L_v`` per CLAUDE.md hygiene.  No `constants.py`
+additions.
+

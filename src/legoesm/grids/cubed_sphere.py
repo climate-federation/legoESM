@@ -10305,6 +10305,87 @@ def bowen_ratio_fv3(
     return h_sensible / le_safe
 
 
+def psychrometric_constant_fv3(
+    pressure_pa: jax.Array,
+    c_p: float = None,
+    l_v: float = None,
+    epsilon: float = None,
+) -> jax.Array:
+    """FV3_3D iter 873: FAO-56 psychrometric constant.
+
+    Allen-Pereira 1998 FAO-56 Eq. 8 closure for the psychrometric
+    constant — pressure-dependent coupling between sensible-heat
+    and latent-heat fluxes in the Penman-Monteith equation:
+
+        γ = c_p · p / (ε · λ_v)        (Pa/K)
+
+    Where:
+      * c_p   — specific heat of dry air at constant pressure
+                (J/(kg·K)); default ``constants.c_pd`` = 1004.64.
+      * p     — atmospheric pressure (Pa).
+      * ε     — H₂O/dry-air molecular-weight ratio;
+                default ``constants.epsilon`` ≈ 0.622.
+      * λ_v   — latent heat of vaporization (J/kg);
+                default ``constants.L_v`` = 2.501×10⁶.
+
+    Canonical magnitudes:
+      | elevation         | p (Pa)   | γ (Pa/K) |
+      |-------------------|----------|----------|
+      | Sea level         | 101325   | ~67      |
+      | 1000 m (Denver)   | 89875    | ~59      |
+      | 3000 m (La Paz)   | 70110    | ~46      |
+      | 5500 m (Everest)  | 50500    | ~33      |
+
+    Lower γ at high elevation → less sensible-heat coupling per
+    unit T-difference → enhanced evaporation at fixed VPD.  This
+    is the **elevation-correction** that fully closes the Penman-
+    Monteith input set.
+
+    Per CLAUDE.md hygiene: uses ``constants.c_pd``,
+    ``constants.epsilon``, ``constants.L_v`` — never re-derived.
+
+    **Fully closes the Penman-Monteith input primitive set**:
+
+        T, RH      → iter-871 VPD                    (input)
+        T          → Δ (caller dE_sat/dT)            (input)
+        pressure   → iter-873 γ                       (input)
+        u, z_0     → g_a (caller)                     (input)
+        A_n, h_s,C_s → iter-869 g_s                   (input)
+        R_n, G     → A                                (input)
+                   ↓
+                   iter-870 λE  (full Penman-Monteith)
+
+    Used by: Allen-Pereira 1998 FAO-56 Eq. 8, Monteith 1965
+    Penman-Monteith original, eddy-covariance / FLUXNET energy-
+    closure calculations, high-altitude evapotranspiration studies
+    (Andes / Tibetan Plateau), WMO meteorological-station ET
+    reporting.
+
+    Parameters
+    ----------
+    pressure_pa : jax.Array
+        Atmospheric pressure (Pa).
+    c_p : float or None
+        Specific heat dry air (J/(kg·K)); default None →
+        ``constants.c_pd``.
+    l_v : float or None
+        Latent heat of vaporization (J/kg); default None →
+        ``constants.L_v``.
+    epsilon : float or None
+        Molecular-weight ratio H₂O/dry-air; default None →
+        ``constants.epsilon``.
+
+    Returns
+    -------
+    gamma : jax.Array
+        Psychrometric constant (Pa/K); positive.
+    """
+    cp_use = c_p if c_p is not None else constants.c_pd
+    lv_use = l_v if l_v is not None else constants.L_v
+    eps_use = epsilon if epsilon is not None else constants.epsilon
+    return cp_use * pressure_pa / (eps_use * lv_use)
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,
