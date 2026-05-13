@@ -280,6 +280,38 @@ integration}.py`.
 
 No code changes this iteration.
 
+## Iter-94 — land carbon + stomata + snow_budget sweep
+Audited `land/carbon/{stomata,carbon_cycle}.py` and `land/snow_budget.py`.
+
+Verified clean:
+- **Farquhar electron-transport quadratic**: discriminant `(αQ + J_max)² −
+  4θ αQ J_max` stays positive for all 0 < θ < 1; sqrt-gradient finite
+  (analytic minimum disc ≈ 0.84·J_max² at αQ = (2θ−1)·J_max, so disc
+  never gets close to 0 across any realistic photosynthesis regime).
+- **Arrhenius / peaked_arrhenius**: standard temperature-dependence forms,
+  no AD-unsafe operations.
+- **Ball-Berry / Medlyn / Jarvis stomata**: gs floors at `g0` via outer
+  max; VPD / RH derived from specific humidity via correct
+  `e_air = q · p / (ε + (1−ε)·q)` (mixing-ratio form would bias ~1 %,
+  fixed in iter-2 audit #24); `compute_stomatal_beta` Beer-law canopy
+  blend OK.
+- **Coupled Farquhar-stomata fixed point**: `Ci = Ca − 1.6 · A_pos /
+  gs_safe` standard form; `Ci` clipped to `[1, Ca]`; n_iter_ags
+  unrolled for JIT.
+- **`compute_gpp`** LUE-style with CO2 Michaelis-Menten and Gaussian
+  T-response — all factors non-negative via `jnp.maximum`.
+- **`compute_phenology`**: DALEC990 Gaussian-pulse phenology with
+  hemisphere-aware doy shift; offsets via Horner polynomial.
+- **`_effective_rate(r, dt)` = (1 − (1−r)^dt) / dt**: exact
+  exponential decay; AD-safe via `clip(r, 0, 1−1e-10)`.
+- **`step_carbon_differland`**: iter-62/63/64 cascade `C_lab → C_fol →
+  C_root → C_wood` deficit draws in place; `_soft_pos = jnp.maximum(x,
+  0)` replaces softplus (iter-64 fix held).
+- **`update_snow`**: energy-limited melt `M = min(snow, max(0,
+  Q_net·dt/L_f))` with degree-day fallback; donor cap on melt.
+
+No code changes this iteration.
+
 ## Next iterations
 Continue addressing further codex findings and direct-inspection sweeps until all
 schemes are provably conservative, monotone, CFL-safe, and AD-safe across mixed
