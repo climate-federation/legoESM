@@ -3281,6 +3281,14 @@ STILL OPEN (post-iter-99 stretch goals):
   intermediate ``divg_d`` arrays, vector corner fill at nt > 0)
   — iter 32 found the C72 mode is interior, NOT cube-vertex, so
   this is lower priority than originally thought.
+  - iter 886: regression-guard test added
+    (``test_corner_div_damp_nord2_pe_runs_and_differs_from_nord1``)
+    confirming the existing nord=2 PE path with
+    ``corner_div_damp_fv3_vector_fill=True`` (a) runs without
+    NaN end-to-end and (b) differs from nord=1.  The higher-order
+    Laplacian loop in ``primitive_eq_cdgrid.py`` (line 508-510)
+    is functional; the FV3-faithful halo restructure remains
+    open but the path is not silently broken.
 - iter-168/169/170/171 documented PE-vs-NH FV3-fidelity asymmetries
   ALL CLOSED:
   * ✅ corner-divergence damping (PE iter 16/18) — closed iter 168

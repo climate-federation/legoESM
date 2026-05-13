@@ -622,6 +622,85 @@ def test_corner_div_damp_fv3_vector_fill_bit_for_bit_nord1(small_3d_state):
     )
 
 
+def test_corner_div_damp_nord2_pe_runs_and_differs_from_nord1(small_3d_state):
+    """FV3_3D iter 886: regression guard for ``corner_div_damp_nord=2``
+    PE path with FV3-faithful vector-corner fill.
+
+    Validates the open follow-up "Substantive nord>=2 fidelity
+    restructure" (iter-32 / iter-99 stretch goal).  Two checks:
+
+    1. ``corner_div_damp_nord=2`` runs end-to-end one step without
+       NaN.  Sanity guard — the higher-order Laplacian iteration
+       loop must be JAX-traceable and produce finite output.
+
+    2. ``corner_div_damp_nord=2 + corner_div_damp_fv3_vector_fill=True``
+       produces output that differs from ``corner_div_damp_nord=1``.
+       At nord=2 the vector-fill path writes cube-vertex halo cells
+       that the inner Laplacian iteration reads (FV3 sw_core.F90:1762).
+       This contrasts with the bit-for-bit-identical nord=1 behaviour
+       (``test_corner_div_damp_fv3_vector_fill_bit_for_bit_nord1``).
+
+    Faithful-implementation goal: nord=2 should be a strict
+    extension of nord=1, not a different code path that silently
+    fails or returns unchanged output.
+    """
+    grid, cdgrid, coord, _ = small_3d_state
+
+    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        CDGridPrimitiveEquationModel,
+    )
+
+    s = held_suarez_init(grid, coord)
+    s = hydrostatic_to_fv3(s, cdgrid)
+    n = grid.n
+    nlev = s.u_d.data.shape[-1]
+    rng = np.random.default_rng(seed=886)
+    u_p = rng.uniform(-3.0, 3.0, size=(6, n + 1, n + 1, nlev))
+    v_p = rng.uniform(-3.0, 3.0, size=(6, n + 1, n + 1, nlev))
+    s = s._replace(
+        u_d=s.u_d.replace(data=jnp.asarray(u_p)),
+        v_d=s.v_d.replace(data=jnp.asarray(v_p)),
+    )
+
+    cfg_nord1 = CDGridPrimitiveEquationConfig(
+        div_damp_coeff=1e7,
+        corner_div_damp_d2_bg=0.0005,
+        corner_div_damp_dddmp=0.20,
+        corner_div_damp_d4_bg=1e-3,
+        corner_div_damp_nord=1,
+        corner_div_damp_fv3_vector_fill=True,
+    )
+    cfg_nord2 = CDGridPrimitiveEquationConfig(
+        div_damp_coeff=1e7,
+        corner_div_damp_d2_bg=0.0005,
+        corner_div_damp_dddmp=0.20,
+        corner_div_damp_d4_bg=1e-3,
+        corner_div_damp_nord=2,
+        corner_div_damp_fv3_vector_fill=True,
+    )
+
+    m_nord1 = CDGridPrimitiveEquationModel(grid, coord, cfg_nord1)
+    m_nord2 = CDGridPrimitiveEquationModel(grid, coord, cfg_nord2)
+
+    s_nord1 = m_nord1.step(s, 100.0)
+    s_nord2 = m_nord2.step(s, 100.0)
+
+    # (1) Both paths finite (no NaN from inner Laplacian iteration).
+    assert jnp.all(jnp.isfinite(s_nord2.u_d.data))
+    assert jnp.all(jnp.isfinite(s_nord2.v_d.data))
+    assert jnp.all(jnp.isfinite(s_nord2.T.data))
+    assert jnp.all(jnp.isfinite(s_nord2.p_s.data))
+
+    # (2) nord=2 differs from nord=1 (higher-order Laplacian
+    # contributes additional dd8·∇⁴(divg_d) damping vs nord=1's
+    # dd4·∇²(divg_d)).
+    max_diff_u = float(jnp.max(jnp.abs(s_nord2.u_d.data - s_nord1.u_d.data)))
+    assert max_diff_u > 1e-12, (
+        "nord=2 path produced bit-for-bit identical output to "
+        "nord=1; higher-order Laplacian iteration is silently a no-op."
+    )
+
+
 def test_smagorinsky_cs_zero_is_bit_for_bit_baseline(small_3d_state):
     """iter 58: ``smagorinsky_cs = 0`` (default) → bit-for-bit
     identical to the iter-19/24 path that does not have Smagorinsky.
