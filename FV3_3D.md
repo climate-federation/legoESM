@@ -5361,6 +5361,71 @@ agents are now pure-JAX primitives.  Pure JAX, vmap-compatible.
 β coefficients are AR5/AR6 empirical fits (default args).  No
 `constants.py` additions.
 
+## Iter 844 — gwp_single_decay_fv3 (emissions→CO₂-eq primitive)
+
+Added `gwp_single_decay_fv3(rad_eff, tau, horizon=100.0,
+agwp_co2=8.95e-14)` to `grids/cubed_sphere.py`.  IPCC time-integrated
+Global Warming Potential for a well-mixed GHG with single-exponential
+atmospheric decay:
+
+```
+AGWP_x(H) = A_x · τ_x · (1 − exp(−H/τ_x))      [W/m²·yr per kg]
+GWP_x(H)  = AGWP_x(H) / AGWP_CO2(H)             [dimensionless]
+```
+
+AR6 reference (default ``agwp_co2 = 8.95×10⁻¹⁴`` W/m²·yr per kg
+at H=100; Table 7.SM.7).
+
+Used with AR6 radiative-efficiency tables:
+  | gas    | A (W/m²/kg)    | τ (yr) | GWP_100 (this primitive) |
+  |--------|----------------|--------|--------------------------|
+  | CH₄    | 3.88×10⁻¹³     | 11.8   | ≈ 51 (single-decay)      |
+  | N₂O    | 3.03×10⁻¹³     | 109    | ≈ 222                    |
+  | HFC-23 | 1.91×10⁻¹¹     | 228    | ≈ 17 270                 |
+  | SF₆    | 2.01×10⁻¹¹     | 3200   | ≈ 23 000                 |
+
+(Single-decay form differs from AR6 GWP_100 for CH₄ because AR6
+includes CH₄ indirect effects via stratospheric water vapor + O₃
+not in single-decay; for non-CO₂ gases without indirect effects
+the form is exact.)
+
+Closes the **emissions → equivalent-CO₂ chain** for policy
+applications:
+
+```
+emission flux (kg/yr) × GWP_H → CO₂-eq emission (kg-CO₂-eq/yr)
+```
+
+Complements iter-838/839/840 (concentration → instantaneous ΔF)
+with iter-844 (emission → time-integrated per-emission contribution).
+
+Time-horizon sensitivity (test verifies for CH₄ short-lived):
+GWP_20 > GWP_100 > GWP_500 because shorter horizons weight
+more strongly the early-period CH₄ peak before its 12-yr decay.
+
+Used by: IPCC AR5/AR6 Tables 7.SM, UNFCCC national-inventory
+reporting (GWP_100 standard), integrated-assessment models
+(DICE/PAGE/REMIND emission weighting), GTP (Global Temperature
+Potential alternative), GWP* / sustained-emission-GWP forms
+(Allen et al. 2016, Lynch et al. 2020).
+
+Test: `tests/test_fv3_gwp_iter844.py` (8 tests: CH₄/N₂O/HFC-23
+plausible band, long-lived saturates A·H, short-lived saturates
+A·τ, horizon dependence (GWP_20 > GWP_100 for CH₄), τ=0 floored,
+3-D shapes + non-negative).
+
+### Why this iteration was meaningful
+
+Adds the emissions-to-CO₂-equivalent primitive that closes the
+*emissions* side of the warming pipeline (iter-838-840 close
+the *concentrations* side).  Required for IAM coupling and UNFCCC
+inventory reporting.  Single-decay form is the cleanest pure-JAX
+GWP composable; multi-mode Bern-CC for CO₂ itself remains in the
+default AGWP_CO2 reference value (not re-derived).  Pure JAX,
+vmap-compatible.  AGWP_CO2 = 8.95×10⁻¹⁴ is AR6 reference (default
+arg, not a fundamental physical constant).  No `constants.py`
+additions.
+
 
 
 

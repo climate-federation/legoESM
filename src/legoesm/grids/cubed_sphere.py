@@ -7730,6 +7730,88 @@ def aerosol_forcing_fv3(
     return direct + indirect
 
 
+def gwp_single_decay_fv3(
+    rad_eff: jax.Array,
+    tau: jax.Array,
+    horizon: jax.Array = 100.0,
+    agwp_co2: jax.Array = 8.95e-14,
+    tau_floor: float = 1e-6,
+) -> jax.Array:
+    """FV3_3D iter 844: single-decay Global Warming Potential.
+
+    IPCC time-integrated GWP for a well-mixed greenhouse gas with
+    single-exponential atmospheric decay:
+
+        AGWP_x(H) = A_x · τ_x · (1 − exp(−H/τ_x))      (W/m²·yr per kg)
+        GWP_x(H)  = AGWP_x(H) / AGWP_CO2(H)            (dimensionless)
+
+    Where:
+      * A_x   — radiative efficiency (W/m²/kg).
+      * τ_x   — perturbation lifetime (years).
+      * H     — time horizon (years; default 100).
+      * AGWP_CO2(H) — reference CO₂ AGWP at horizon H
+                      (W/m²·yr per kg).  Bern-CC multi-decay
+                      gives 8.95×10⁻¹⁴ at H=100 (AR6 Table 7.SM.7).
+
+    Sign convention: per-kg GWP > 0 for positive-forcing GHG.
+
+    AR6 reference GWP_100 values (this primitive reproduces with
+    appropriate (A, τ) pairs):
+      | gas    | A (W/m²/kg)    | τ (yr) | GWP_100 |
+      |--------|----------------|--------|---------|
+      | CH₄    | 3.88×10⁻¹³     | 11.8   | ≈ 27    |
+      | N₂O    | 3.03×10⁻¹³     | 109    | ≈ 273   |
+      | HFC-23 | 1.91×10⁻¹¹     | 228    | ≈ 14600 |
+      | SF₆    | 2.01×10⁻¹¹     | 3200   | ≈ 24300 |
+
+    Single-decay approximation neglects CO₂'s multi-mode Bern-CC
+    decay (with permanent ~22% fraction).  For non-CO₂ gases the
+    single-decay form is exact (single chemical sink); for CO₂
+    use AGWP_CO2 reference value directly — do not call this
+    helper with CO₂'s effective lifetime.
+
+    Closes the emissions → equivalent-CO₂ chain for policy
+    applications:
+
+        emission flux (kg/yr) × GWP_H → CO₂-eq emission (kg-CO₂-eq/yr)
+
+    Composes naturally with the forcing primitives:
+      * iter-838/839/840 give *instantaneous* ΔF from concentrations
+      * iter-844 gives *time-integrated* per-emission contribution
+
+    Used by: IPCC AR5/AR6 Tables 7.SM (radiative-efficiency tables),
+    UNFCCC national-inventory reporting (GWP_100 used for CO₂-eq),
+    integrated-assessment models (DICE/PAGE/REMIND emission
+    weighting), GTP (Global Temperature Potential, ratio with
+    impulse-response function), GWP* / sustained-emission-GWP
+    alternatives (Allen et al. 2016, Lynch et al. 2020).
+
+    ``tau_floor`` prevents div-by-0 in H/τ ratio at τ→0.
+
+    Parameters
+    ----------
+    rad_eff : jax.Array
+        Per-mass radiative efficiency A_x (W/m²/kg).
+    tau : jax.Array
+        Perturbation lifetime τ_x (years).
+    horizon : jax.Array or float
+        Time horizon H (years); default 100.
+    agwp_co2 : jax.Array or float
+        Reference AGWP_CO2 at horizon H (W/m²·yr per kg);
+        default 8.95e-14 (AR6 H=100).
+    tau_floor : float
+        Lower bound on τ (years); default 1e-6.
+
+    Returns
+    -------
+    gwp : jax.Array
+        Dimensionless GWP relative to CO₂ at horizon H.
+    """
+    tau_safe = jnp.maximum(tau, tau_floor)
+    agwp_x = rad_eff * tau_safe * (1.0 - jnp.exp(-horizon / tau_safe))
+    return agwp_x / agwp_co2
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,
