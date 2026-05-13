@@ -293,3 +293,68 @@ def test_anchored_step_scan_compat_under_fp64_policy():
         )
     finally:
         set_policy(saved)
+
+
+def test_anchored_step_supports_jax_grad():
+    """iter-37: ``jax.grad`` through ``step()`` with anchor enabled.
+
+    Differentiable workflows (training, sensitivity analysis) require
+    AD to flow through the conservation fixer.  The anchored target is
+    snapshotted as a fp64 scalar inside ``step()``; once cached on
+    ``self``, all subsequent steps inside the same trace use it as a
+    closure constant.  The fixer itself is a pure ``state -> state``
+    function so the autodiff chain through it is well-defined.
+
+    Test: build a 1-step loss ``∫ T² dV`` and assert ``jax.grad`` w.r.t.
+    the initial ``p_s`` produces a finite, non-zero gradient.  Catches
+    AD regressions (e.g. a future fixer change that introduces a
+    ``float(...)`` host callback or other non-differentiable op).
+    """
+    from legoesm.core.precision import PrecisionPolicy, set_policy, get_policy
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        CDGridPrimitiveEquationModel,
+        CDGridPrimitiveEquationConfig,
+    )
+    from legoesm.atmosphere.held_suarez import held_suarez_init
+
+    saved = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp64())
+        grid = create_cubed_sphere(8)
+        sigma = create_sigma_coordinate(8)
+        cfg = CDGridPrimitiveEquationConfig(
+            use_conservation_fixer=True,
+            fix_mass=True,
+            anchor_mass_to_initial=True,
+        )
+        model = CDGridPrimitiveEquationModel(grid, sigma, cfg)
+        state0 = held_suarez_init(grid, sigma)
+
+        def loss(p_s_data):
+            state = state0._replace(p_s=state0.p_s.replace(data=p_s_data))
+            s1 = model.step(state, 600.0)
+            # Return a JAX scalar — must not call ``float(...)``
+            # inside an AD-traced function.
+            return jnp.sum(s1.T.data ** 2)
+
+        # iter-31 sticky-snapshot semantics: re-anchor before each
+        # gradient evaluation so the target tracks the differentiation
+        # variable rather than caching a stale value.
+        model.reset_target_mass()
+        grad = jax.grad(loss)(state0.p_s.data)
+
+        assert jnp.all(jnp.isfinite(grad)), (
+            "jax.grad through anchored step produced non-finite values"
+        )
+        assert float(jnp.max(jnp.abs(grad))) > 0.0, (
+            "jax.grad through anchored step is identically zero — "
+            "fixer may be silently breaking the autodiff chain"
+        )
+        # fp64 policy keeps gradients in fp64.
+        assert grad.dtype == jnp.float64, (
+            f"Expected fp64 gradient under fp64 policy, got {grad.dtype}"
+        )
+    finally:
+        set_policy(saved)
