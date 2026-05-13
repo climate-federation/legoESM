@@ -5529,3 +5529,65 @@ marine-extreme + AR6 §5.3 long-term BGC duality: chronic stress
 compatible.  hotspot_threshold=1.0 °C is NOAA CRW canonical
 (default arg).  No `constants.py` additions.
 
+## Iter 856 — marine_heatwave_category_fv3 (Hobday 2018 categories)
+
+Added `marine_heatwave_category_fv3(sst, clim, threshold_90)` to
+`grids/cubed_sphere.py`.  Hobday et al. 2018 (Oceanography) MHW
+categorization from 90th-percentile threshold multiples:
+
+```
+Δ_clim = SST − clim
+Δ_90   = T_90 − clim
+x      = Δ_clim / Δ_90
+
+Cat 0  (no MHW)            x ≤ 1
+Cat 1  (moderate)          1 < x ≤ 2
+Cat 2  (strong)            2 < x ≤ 3
+Cat 3  (severe)            3 < x ≤ 4
+Cat 4  (extreme)           x > 4
+```
+
+Hurricane-scale framing (Saffir-Simpson-style) for non-specialist
+communication.
+
+Real-world peak categories:
+  | event                       | peak cat |
+  |-----------------------------|----------|
+  | Blob NE Pacific 2014–2016   | III      |
+  | Tasman Sea 2015–2016        | IV       |
+  | NW Atlantic 2012            | III      |
+  | Florida Reef Tract 2023     | IV+      |
+
+Pairs with iter-855 ``degree_heating_weeks_fv3`` to close the
+**marine-extreme primitive pair**:
+  * iter-855 DHW   — cumulative chronic thermal stress (°C·wk)
+  * iter-856 MHW cat — instantaneous acute-event category (0–4)
+
+DHW = bleaching-exposure measure over 12 wks; MHW cat = daily
+intensity relative to baseline variability — both operational
+products at NOAA / IMOS / CSIRO.
+
+Composes with iter-851 OHC chain (warming → SST → MHW cat).
+
+Used by: Hobday et al. 2016 PIO MHW definition, Hobday et al.
+2018 Oceanography category framework, IMOS Marine Heatwave Portal,
+Smale et al. 2019 Nature Climate Change global MHW impact synthesis,
+AR6 §11.3.5 marine-heatwave projections.
+
+Test: `tests/test_fv3_mhw_category_iter856.py` (10 tests: no-MHW
+cat 0, moderate cat 1 at x=1.5 analytic, strong cat 2 at x=2.5,
+severe cat 3 at x=3.5, extreme cat 4 clamped at x=6, NE Pacific
+Blob cat 3 reproduction, at-threshold boundary zero, cooling zero,
+clim=T_90 degenerate floored, 3-D shapes + range [0,4]).
+
+### Why this iteration was meaningful
+
+**Closes the AR6 §3.5 / §11.3.5 marine-extreme-event primitive
+pair** (iter-855 DHW + iter-856 MHW cat).  Pair distinguishes
+chronic (reef bleaching) from acute (fisheries, kelp loss,
+seagrass die-off) MHW impacts — both required for full marine-
+extreme attribution under SSP scenarios.  MHW frequency has
+quintupled since 1980 (Frölicher 2018), making categorical
+intensity (this primitive) the key ratio metric.  Pure JAX, vmap-
+compatible.  No `constants.py` additions.
+

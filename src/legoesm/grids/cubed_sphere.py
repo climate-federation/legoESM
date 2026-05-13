@@ -8753,6 +8753,102 @@ def degree_heating_weeks_fv3(
     return jnp.sum(hotspot, axis=-1)
 
 
+def marine_heatwave_category_fv3(
+    sst: jax.Array,
+    clim: jax.Array,
+    threshold_90: jax.Array,
+    delta_floor: float = 1e-6,
+) -> jax.Array:
+    """FV3_3D iter 856: Hobday 2016/2018 marine-heatwave category.
+
+    Hobday et al. 2018 (Oceanography) category classification for
+    a marine-heatwave event using 90th-percentile threshold
+    exceedance multiples:
+
+        Δ_clim = SST − clim                       (raw anomaly, °C)
+        Δ_90   = T_90 − clim                      (threshold exceedance, °C)
+        x      = Δ_clim / Δ_90                    (multiplicative intensity)
+
+        Category =
+          0  (no MHW)            x ≤ 1
+          1  (moderate)          1 < x ≤ 2
+          2  (strong)            2 < x ≤ 3
+          3  (severe)            3 < x ≤ 4
+          4  (extreme)           x > 4
+
+    Where:
+      * SST          — current sea-surface temperature (K or °C).
+      * clim         — daily climatology (same units).
+      * T_90         — 90th-percentile threshold (climatology +
+                       daily-resolution percentile from baseline
+                       1982-2011 typically; same units).
+
+    Output: integer-valued ``jax.Array`` (still float-dtype for
+    JAX-pytree compatibility) giving the Hobday category 0–4.
+
+    Real-world events:
+      | event                         | peak category |
+      |-------------------------------|---------------|
+      | Blob NE Pacific 2014–2016     | III           |
+      | Tasman Sea 2015–2016          | IV            |
+      | Florida Reef Tract 2023       | V (off-scale) |
+      | NW Atlantic 2012              | III           |
+
+    Categories I–IV mirror Saffir-Simpson hurricane scale framing
+    (Hobday 2018), providing intuitive non-specialist communication
+    of MHW severity.
+
+    Pairs with iter-855 ``degree_heating_weeks_fv3`` to close the
+    **marine-extreme-event primitive pair**:
+      * iter-855 DHW         — accumulated chronic thermal stress
+      * iter-856 MHW cat     — instantaneous acute-event category
+
+    DHW measures *cumulative reef-bleaching* exposure over 12 wks;
+    MHW category measures *daily intensity* relative to baseline
+    variability — both used in NOAA / IMOS / CSIRO operational
+    products.
+
+    Composes with iter-851 OHC chain: warming → SST → MHW cat.
+
+    ``delta_floor`` prevents div-by-0 when Δ_90 → 0 (cells where
+    no MHW threshold exists, e.g. polar climatologies with no
+    distinguishable 90th percentile).
+
+    Used by: Hobday et al. 2016 PIO MHW definition, Hobday et al.
+    2018 Oceanography category framework, IMOS Marine Heatwave
+    Portal, Smale et al. 2019 Nature Climate Change global MHW
+    impact synthesis, AR6 §11.3.5 marine heatwave projections.
+
+    Parameters
+    ----------
+    sst : jax.Array
+        Daily SST (K or °C).
+    clim : jax.Array
+        Daily climatology (same units).
+    threshold_90 : jax.Array
+        90th-percentile threshold T_90 (same units).
+    delta_floor : float
+        Lower bound on |T_90 − clim|; default 1e-6.
+
+    Returns
+    -------
+    category : jax.Array
+        Hobday MHW category (0–4); 0 = no MHW, 4 = extreme.
+    """
+    delta_clim = sst - clim
+    delta_90 = threshold_90 - clim
+    delta_90_safe = jnp.where(
+        jnp.abs(delta_90) < delta_floor,
+        delta_floor,
+        delta_90,
+    )
+    x = delta_clim / delta_90_safe
+    # Clip below 1 (no MHW) to 0 explicitly; cat = floor(x) clamped [0, 4]
+    cat = jnp.floor(jnp.maximum(x, 0.0))
+    cat = jnp.where(x <= 1.0, 0.0, cat)
+    return jnp.clip(cat, 0.0, 4.0)
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,
