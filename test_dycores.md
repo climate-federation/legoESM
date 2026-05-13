@@ -273,16 +273,59 @@ cosine_bell uses a separate raw-FV path (`transport_step` in `fv_tp_2d.py`)
 and is unchanged — that's iter-6 if pursued.
 ``tests/atmosphere/shallow_water`` 110/110 PASS.
 
-## Iteration 6 plan
+## Iteration 6 — MPAS SW anchor + cube transport_step fp64 acc (FIX)
 
-- Audit ``MPASShallowWaterConfig`` — already uses fp64 in ``_fix_mass_mpas``
-  (line 206) and baseline drift is already 1e-10, so likely a no-op fix.
-  Add ``anchor_mass_to_initial`` flag for cross-grid uniformity.
-- ``transport_step`` in ``core/fv_tp_2d.py`` for cube cosine_bell: lines 1131-
-  1137 do ``mass_pos = jnp.sum(h_pos * area)`` in fp32 — same accumulator
-  bug as iter-5 SW.  Cast to fp64.
-- Quick-mode full suite snapshot once SW fixers are all anchored.
-- Cross-grid drift check after iter-1..5 changes.
+**Two targeted fixes.**
+
+(a) ``core/fv_tp_2d.transport_step`` (cube cosine_bell raw-FV path):
+    ``mass_pos = jnp.sum(h_pos * area)`` ran in fp32 on a ~6·N² cubed-sphere
+    grid, leaking ~N·eps reduction noise into the multiplicative ``scale``.
+    Cast both factors to ``_conservation_accumulator()`` before the sum
+    (matches iter-5 SW model).  ``scale`` is now divided in fp64 and cast
+    once back to ``h_pos.dtype`` before the final multiply.
+
+(b) ``MPASShallowWaterModel``: add ``anchor_mass_to_initial: bool = False``
+    + ``_target_mass`` slot + lazy fp64 snapshot in ``step()``.  Split
+    ``step`` into a Python wrapper (snapshot, outside JIT) and the existing
+    JIT body renamed ``_step_jit``.  ``_fix_mass_mpas`` learns an optional
+    ``target_mass`` kwarg: when set, the per-step ``state_old.h`` reduction
+    is dropped (target replaces it) and the fp32-cast on ``correction`` is
+    removed for fp64 promotion.
+
+**Changes:**
+
+- ``src/legoesm/core/fv_tp_2d.py`` (1 site, ~10 LOC).
+- ``src/legoesm/atmosphere/dynamics/shallow_water_mpas.py`` (~30 LOC):
+  config + ``_target_mass`` + ``compute_mass`` helper + step wrapper +
+  ``_fix_mass_mpas`` extension.
+- ``scripts/run_atmosphere_test_matrix.py``: enable
+  ``anchor_mass_to_initial=True`` at the icosahedral SW config.
+
+**Validation (via `run_atmosphere_test_matrix.py --only sw --quick`):**
+
+| Case                            | Baseline | Iter-5 | Iter-6        |
+|---------------------------------|----------|--------|---------------|
+| cube  shallow_water  W5         | 9.68e-07 | 1.46e-15 | 1.46e-15    |
+| cube  shallow_water  cosine_bell| 4.49e-07 | 5.38e-07 | **2.18e-08**|
+| ico   shallow_water  W5         | 3.52e-10 | n/c     | **1.62e-16**  |
+| ico   shallow_water  W6         | 2.14e-09 | n/c     | **0.00e+00**  |
+| ico   shallow_water  cosine_bell| 4.16e-07 | n/c     | 4.16e-07 (n/c)|
+
+ico W5/W6 now at exact bitcleanness.  Cube cosine_bell ~25x cleaner
+(remaining 2e-8 is residual non-conservation in the PPM clip+rescale, not
+diagnostic noise).  ``tests/atmosphere/shallow_water/integration/test_shallow_water_mpas.py``
+7/7 PASS.
+
+## Iteration 7 plan
+
+- Full quick suite snapshot (all grids × SW/hydro/NH) for a single
+  before/after table covering iter-1..iter-6.
+- NH dycore audit: ``compressible_euler.py`` / ``compressible_euler_cdgrid.py``
+  / ``compressible_euler_mpas.py`` / ``spectral_nh.py`` — none of the iter-1..6
+  changes touched the NH solvers; check if they have the same fp32-cast
+  fixer pattern.
+- Visual snapshot regression check (Williamson-2 v-wind, lat-lon + cube) per
+  CLAUDE.md guidance.
 
 ## Improvement log
 
@@ -302,3 +345,7 @@ and is unchanged — that's iter-6 if pursued.
 - **iter-5 (2026-05-13)**: FV3 cube SW (three classes) `set_initial_mass` +
   fixer use fp64 budget accumulator, drop fp32 cast on `h` correction.
   Williamson-5 mass drift `9.68e-07 → 1.46e-15` (machine precision).
+- **iter-6 (2026-05-13)**: cube `transport_step` mass_pos fp64;
+  MPAS SW `anchor_mass_to_initial` + fp64 fixer.  cube cosine_bell
+  `4.49e-07 → 2.18e-08`; ico W5 `3.52e-10 → 1.62e-16`;
+  ico W6 `2.14e-09 → 0.00e+00`.

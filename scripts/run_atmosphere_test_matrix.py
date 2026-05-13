@@ -2138,7 +2138,9 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         level = int(tc.resolution.replace("ico", ""))
         mesh = create_voronoi_mesh(level)
         dt = 300.0
-        config = MPASShallowWaterConfig(nu_del4=_hyperdiff_ico(mesh))
+        config = MPASShallowWaterConfig(
+            nu_del4=_hyperdiff_ico(mesh), anchor_mass_to_initial=True,
+        )
         model = MPASShallowWaterModel(mesh, config)
         if test_num == 6:
             from tests.test_cases.williamson_extended import (
