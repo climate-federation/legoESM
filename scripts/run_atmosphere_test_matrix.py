@@ -2362,7 +2362,17 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             np.max(np.abs(_err)) / np.max(np.abs(_init_h)))
         notes = f"L2={_l2:.2e}, Linf={_linf:.2e}"
     elif diag.get("mean_height"):
-        notes = f"mass drift={_compute_drift(diag['mean_height']):.2e}"
+        _w_mass_drift = _compute_drift(diag['mean_height'])
+        notes = f"mass drift={_w_mass_drift:.2e}"
+        # iter-27: SW Williamson 5/6 had no mass-drift PASS gate (only
+        # finiteness + blowup).  Apply the same 1e-6 ceiling as HS /
+        # baroclinic / NH (iter-23/24/26).  Post-iter-1..22 cube W5
+        # `1.46e-15`, latlon W5 `3.24e-16`, ico W5/W6 `0` / `1.62e-16`,
+        # spectral W5/W6 `1.91e-16` — 10 orders of headroom.
+        ok, notes = _apply_mass_drift_tolerance(
+            ok, notes, _w_mass_drift, 1e-6,
+            n_samples=len(diag['mean_height']),
+        )
 
     _write_results_txt(output_dir, {
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
