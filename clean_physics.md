@@ -9,6 +9,39 @@ Branch: `clean_physics`. Driven by Ralph loop + `/codex:adversarial-review`.
 - **Ocean** (`src/legoesm/ocean/physics/`): vertical_mixing, bottom_drag, lateral_mixing, convection, surface_forcing, shortwave_penetration, mixing.
 - **Cryosphere** (`src/legoesm/ice/`): sea_ice, dynamics, itd, rheology, transport.
 
+## Iteration 61 — 2026-05-13
+
+**Scan-only iteration: verified other ocean dz / jacobian divisions
+are protected (no code changes).**
+
+Followed up on iter-58/59 to ensure the dry-column NaN guards are
+not missing anywhere else.  Scanned all `/` and `dz_*` patterns in
+the ocean codebase:
+
+- **`ocean_pe_latlon_cgrid.py:1302`**: `jac_v = jnp.maximum(J, 1e-10)`
+  bounds `dz_actual_loc = dz_ref · jac_v ≥ dz_ref · 1e-10 > 0` for
+  the baseline `K_v` tracer diffusion.  Forward + AD safe.
+- **`ocean_pe_latlon_cgrid.py:1621-1622`**: same `max(jac, 1e-10)`
+  for `A_v` momentum diffusion on u-faces / v-faces.
+- **`ocean_pe_mpas.py:933, 942`**: `h_safe = jnp.maximum(h_e, 1.0)`
+  (1 m floor, mask-protected downstream — overkill but AD-safe).
+- **`implicit_solver.py:133-134`**: `K_safe = max(K, 0)`,
+  `dzh_safe = max(dzh, _EPS)`, `inv_dz = 1/max(dz, _EPS)` — all
+  protected.
+- **`mpas_integration.py:97, 107, 111-113`**: `h_safe = max(h_e, 1.0)`
+  + zero-K on out-of-column interfaces — forward + AD safe.
+- **`_gm_redi_common.py:166`**: `sqrt(S_x² + S_y² + 1e-30)` — additive
+  regulariser (no division), AD-safe.
+- **`stomata.py:200`**: `(2a + 1e-20)` divisor — degenerate (a=0)
+  case gives J=0 (not the correct c/b limit) but is unreachable for
+  realistic `theta_j ≈ 0.7`.
+
+No new fixes needed.  The iter-56..59 pass covered the
+forward-NaN-on-dry-column class of bugs in the leaf
+`vertical_diffusion*` and `shortwave_penetration` paths; upstream
+backends (`ocean_pe_*`) all use additive or max-bounded floors that
+were already AD-safe.
+
 ## Iterations 1-50 — Summary (compressed 2026-05-13 after iter-50)
 
 ### Constants & shared utilities
