@@ -374,6 +374,39 @@ Verified clean:
 
 No code changes this iteration.
 
+## Iter-97 — Seifert-Beheng autoconversion onset sigmoid scale bug
+`atmosphere/physics/microphysics/_warm_rain.py::autoconversion_sb`.  The
+onset sigmoid used un-normalised arithmetic on the droplet mass scale:
+
+    onset = sigmoid(sharpness · (x_c − x_star))   # sharpness = 50 (dimensionless)
+
+With ``x_c, x_star ∈ O(1e-10) kg`` the sigmoid argument is
+``50 · 1e-10 ≈ 5×10⁻⁹`` for every physical regime, so ``onset ≈ 0.5``
+always.  The autoconversion threshold ``x_star`` (mean-droplet-mass
+cutoff for drizzle initiation) was effectively *disabled*: droplet-poor
+columns auto-converted at half strength instead of zero, and the
+``sharpness`` config field was a no-op.
+
+Fix: normalise the argument by ``x_star`` so ``sharpness`` is a proper
+dimensionless steepness in units of ``x_star``:
+
+    onset = sigmoid(sharpness · (x_c / x_star − 1.0))
+
+With the existing ``sharpness = 50`` default the sigmoid now sweeps
+from 0 (x_c ≪ x_star) to 1 (x_c ≫ x_star) over an O(1/sharpness =
+0.02·x_star) range around ``x_c = x_star``, matching the canonical SB
+2001 / Seifert 2008 mass-dependent switch.
+
+**Production behaviour shift**: typical maritime stratocumulus
+(N_c=10⁸/m³, q_c=1 g/kg) gives x_c=1e-11 kg ≪ x_star ⇒ onset→0 and
+autoconversion essentially zero — was 0.5 before.  Drizzle in such
+columns now depends almost entirely on accretion plus the τ-based
+Φ_au switch (not implemented here; this scheme is a simplified SB
+variant).  Column water conservation verified (`Σ_k dq_total·dz ≈
+precip`).  All 115 microphysics tests green (`test_warm_rain` +
+`atmosphere/hydrostatic/unit/test_microphysics` +
+`unit/test_physics_microphysics`).
+
 ## Next iterations
 Continue addressing further codex findings and direct-inspection sweeps until all
 schemes are provably conservative, monotone, CFL-safe, and AD-safe across mixed

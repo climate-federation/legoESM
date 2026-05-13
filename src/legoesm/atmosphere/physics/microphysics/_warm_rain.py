@@ -209,7 +209,19 @@ def autoconversion_sb(q_c, N_c_eff, rho, k_au, x_star, sharpness=50.0, gamma_nor
     """
     q_c_pos = jnp.clip(q_c, 0.0)
     x_c = q_c_pos * rho / jnp.clip(N_c_eff, 1.0)
-    onset = jax.nn.sigmoid(sharpness * (x_c - x_star))
+    # SB autoconversion onset is a smooth transition at the
+    # mean-droplet-mass threshold ``x_star`` (~2.6e-10 kg).  Argument to
+    # the sigmoid must be NORMALISED by ``x_star`` so the switch sits
+    # at the right scale: with un-normalised ``sharpness · (x_c − x_star)``
+    # at ``sharpness = 50`` the sigmoid argument is O(5e-9) for any
+    # physical ``x_c`` and ``onset`` stuck at ≈ 0.5 — the threshold is
+    # effectively disabled and droplet-poor columns auto-converted at
+    # half strength.  Normalising by ``x_star`` makes ``sharpness`` a
+    # dimensionless steepness in fractional units of ``x_star``: the
+    # sigmoid then sweeps from 0 (x_c ≪ x_star) to 1 (x_c ≫ x_star)
+    # over an O(1/sharpness) range around x_c = x_star, matching the
+    # canonical SB 2001 / Seifert 2008 switch behaviour.
+    onset = jax.nn.sigmoid(sharpness * (x_c / x_star - 1.0))
     dq_c_au = k_au * q_c_pos ** 2 * onset * gamma_norm * rho
     dN_r_au = dq_c_au * rho / (x_star * 20.0)
     return dq_c_au, dN_r_au, x_c
