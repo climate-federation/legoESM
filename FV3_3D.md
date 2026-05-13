@@ -5515,3 +5515,59 @@ ET-formulation trio (PM/PT/CR) now has all input primitives
 in pure JAX.  Pure JAX, vmap-compatible.  No `constants.py`
 additions.
 
+## Iter 884 — aridity_index_fv3 (UNEP 1997 P/PET classification)
+
+Added `aridity_index_fv3(precip_annual, pet_annual)` to
+`grids/cubed_sphere.py`.  UNEP 1997 World Atlas of Desertification
+/ Trabucco-Zomer 2009 CGIAR-CSI Global Aridity Database aridity
+classification:
+
+```
+AI = P_annual / PET_annual        (dimensionless)
+```
+
+UNEP 1997 thresholds:
+  | AI            | category          | example                |
+  |---------------|-------------------|------------------------|
+  | < 0.05        | Hyper-arid        | Sahara, Atacama        |
+  | 0.05 ≤ AI<0.20| Arid              | Mojave, Negev          |
+  | 0.20 ≤ AI<0.50| Semi-arid         | Sahel, Mediterranean   |
+  | 0.50 ≤ AI<0.65| Dry sub-humid     | inland China           |
+  | AI ≥ 0.65     | Humid             | temperate/tropical     |
+
+Dryland fraction (UNEP 1997): 47.2% of global land surface.
+AR6 SSP3-7.0 projections: dryland expansion +10-15% by 2100
+(Huang et al. 2017 NCC) — PET rises faster than P under warming.
+
+**Closes the aridity-classification primitive** in drought chain:
+
+```
+P_annual, T, lat, DOY → iter-862 Hargreaves PET (or iter-883 Penman)
+                      → iter-884 AI → UNEP category map
+                      (vs iter-861 SPEI temporal anomaly)
+```
+
+AI is climatological-mean baseline; SPEI is temporal-anomaly
+deviation.  Pair gives both static-aridity and dynamic-drought
+diagnostics.
+
+Used by: UNEP 1997 World Atlas Desertification, Trabucco-Zomer 2009
+CGIAR-CSI Global Aridity DB, Huang et al. 2016 NCC dryland-
+expansion analysis, AR6 §11.6 drought-aridity projections,
+Spinoni et al. 2015 IJC global-AI-trends, MEA 2005 ecosystems-
+and-human-well-being.
+
+Test: `tests/test_fv3_aridity_index_iter884.py` (7 tests: Sahara
+P=20/PET=2500 → AI<0.05 hyper-arid, Sahel P=500/PET=1500 → 0.33
+semi-arid, humid P=800/PET=1000 → 0.80, P=0 → 0, PET=0 floored,
+UNEP-threshold mapping (4-band), 3-D shapes non-negative).
+
+### Why this iteration was meaningful
+
+Adds **canonical aridity-classification primitive** complementing
+iter-861 SPEI (temporal drought anomaly).  AI provides static-
+baseline aridity for dryland-expansion analysis, climate-zone
+attribution, vegetation-bioclimatic studies, and AR6 §11.6
+dryland-expansion projections.  Pure JAX, vmap-compatible.  No
+`constants.py` additions.
+

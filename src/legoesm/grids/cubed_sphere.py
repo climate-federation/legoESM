@@ -11272,6 +11272,85 @@ def penman_open_water_le_fv3(
     ) / denom
 
 
+def aridity_index_fv3(
+    precip_annual: jax.Array,
+    pet_annual: jax.Array,
+    pet_floor: float = 1e-6,
+) -> jax.Array:
+    """FV3_3D iter 884: UNEP 1997 aridity-index P/PET primitive.
+
+    UNEP 1997 (World Atlas of Desertification, 2nd ed.) /
+    Trabucco-Zomer 2009 (CGIAR-CSI Global Aridity Database)
+    standard aridity-classification primitive:
+
+        AI = P_annual / PET_annual        (dimensionless)
+
+    Where:
+      * P_annual    — annual precipitation (mm or kg/m²).
+      * PET_annual  — annual potential evapotranspiration (same
+                      units; typically from iter-862 Hargreaves
+                      cumulated × 365, or iter-883 Penman × 365).
+
+    Sign: AI ≥ 0; higher = wetter.
+
+    UNEP 1997 classification:
+      | AI            | category          | example                |
+      |---------------|-------------------|------------------------|
+      | < 0.05        | Hyper-arid        | Sahara, Atacama, Gobi  |
+      | 0.05 ≤ AI<0.20| Arid              | Mojave, Negev          |
+      | 0.20 ≤ AI<0.50| Semi-arid         | Sahel, Mediterranean   |
+      | 0.50 ≤ AI<0.65| Dry sub-humid     | inland China, U.S. SW  |
+      | AI ≥ 0.65     | Humid             | most temperate / trop  |
+
+    Dryland area fraction (UNEP 1997):
+      * Hyper-arid:    7.5% of land
+      * Arid:          12.1%
+      * Semi-arid:     17.7%
+      * Dry sub-humid: 9.9%
+      * Total dryland: 47.2%
+
+    AR6 projections (SSP3-7.0 2100): drylands expand ~10-15% by
+    end-of-century (Huang et al. 2017 NCC) due to PET rising
+    faster than P under warming (~7%/K CC for PET vs +2-5% for P).
+
+    **Closes the aridity-classification primitive** in the
+    drought/water-balance chain:
+
+        P_annual, T, lat, DOY → iter-862 Hargreaves PET (or
+                                iter-883 Penman PET annual)
+                              → iter-884 AI → category map
+        (alternative to iter-861 SPEI for absolute aridity baseline)
+
+    Composes with iter-862/863 PET pipeline, iter-861 SPEI (SPEI
+    is temporal anomaly; AI is climatological baseline).
+
+    Used by: UNEP 1997 World Atlas Desertification, Trabucco-
+    Zomer 2009 CGIAR-CSI Global Aridity Database, Huang et al.
+    2016 NCC dryland-expansion analysis, AR6 §11.6 drought-aridity
+    projections, Spinoni et al. 2015 IJC global-AI-trends, MEA
+    2005 ecosystems-and-human-well-being aridity classification.
+
+    ``pet_floor`` prevents div-by-0 in PET → 0 (e.g. polar regions
+    where PET ≈ 0).
+
+    Parameters
+    ----------
+    precip_annual : jax.Array
+        Annual precipitation (mm or kg/m²).
+    pet_annual : jax.Array
+        Annual potential evapotranspiration (same units).
+    pet_floor : float
+        Lower bound on PET (mm); default 1e-6.
+
+    Returns
+    -------
+    ai : jax.Array
+        Aridity Index P/PET (dimensionless); ≥ 0.
+    """
+    pet_safe = jnp.maximum(pet_annual, pet_floor)
+    return precip_annual / pet_safe
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,
