@@ -4503,7 +4503,12 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 # dyn_core.F90:773-805 d_con_k=0 for k=0,1).  Factory
                 # default = 2.  Matches FV3 reference handling above
                 # the sponge cap.
-                d_con_top_zero_levels=2)
+                d_con_top_zero_levels=2,
+                # new_test_dycores iter-15: heat_source_del2_iters=2
+                # (factory default; FV3 iter-457
+                # dyn_core.F90:1755-1756 del-2 smoothing of
+                # _d_con_sum heat source, nf_ke=2 at nord=1).
+                heat_source_del2_iters=2)
         elif test_case == "tc2a":
             from tests.test_cases.dcmip2025 import dcmip25_tc2_init
             state, hcoord, tmetric, small_grid = dcmip25_tc2_init(
@@ -4539,7 +4544,12 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 use_fv3_metric_aware_d_con=True,
                 # new_test_dycores iter-14: d_con_top_zero_levels=2
                 # (factory default; FV3 iter-431 sponge consistency).
-                d_con_top_zero_levels=2)
+                d_con_top_zero_levels=2,
+                # new_test_dycores iter-15: heat_source_del2_iters=2
+                # (factory default; FV3 iter-457 dyn_core.F90:1755-1756
+                # del-2 smoothing of _d_con_sum heat source, nf_ke=2
+                # at nord=1).
+                heat_source_del2_iters=2)
         elif test_case == "tc3":
             from tests.test_cases.dcmip2025 import dcmip25_tc3_init
             state, hcoord, tmetric, small_grid = dcmip25_tc3_init(
@@ -4576,7 +4586,12 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 use_fv3_metric_aware_d_con=True,
                 # new_test_dycores iter-14: d_con_top_zero_levels=2
                 # (factory default; FV3 iter-431 sponge consistency).
-                d_con_top_zero_levels=2)
+                d_con_top_zero_levels=2,
+                # new_test_dycores iter-15: heat_source_del2_iters=2
+                # (factory default; FV3 iter-457 dyn_core.F90:1755-1756
+                # del-2 smoothing of _d_con_sum heat source, nf_ke=2
+                # at nord=1).
+                heat_source_del2_iters=2)
         else:
             raise ValueError(f"Unknown NH test case: {test_case}")
 

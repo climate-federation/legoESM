@@ -187,6 +187,20 @@ def test_all_nh_cube_branches_use_d_con_top_zero_levels():
         )
 
 
+def test_all_nh_cube_branches_use_heat_source_del2_iters():
+    """iter-15 sentinel: all 3 NH cube branches set
+    ``heat_source_del2_iters=2`` (FV3 iter-457; del-2 smoothing of
+    ``_d_con_sum`` heat source, ``nf_ke=2`` at ``nord=1`` per FV3
+    ``dyn_core.F90:1755-1756``).
+    """
+    blocks = _find_nh_config_blocks()
+    for tc in ("tc1", "tc2a", "tc3"):
+        assert "heat_source_del2_iters=2" in blocks[tc], (
+            f"iter-15 regression: {tc} cube NH config lost "
+            "``heat_source_del2_iters=2``."
+        )
+
+
 def test_sw_cube_uses_iter1009_dual_target_config():
     """iter-1/8 sentinel: matrix runner SW W2/W5 cube branch routes
     through the canonical ``iter1009_dual_target_config(n)`` helper
