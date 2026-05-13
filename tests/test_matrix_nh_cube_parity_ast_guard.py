@@ -173,6 +173,20 @@ def test_all_nh_cube_branches_use_metric_aware_d_con():
         )
 
 
+def test_all_nh_cube_branches_use_d_con_top_zero_levels():
+    """iter-14 sentinel: all 3 NH cube branches set
+    ``d_con_top_zero_levels=2`` (FV3 iter-431 sponge consistency;
+    zero d_con heating in top 2 model levels per FV3
+    ``dyn_core.F90:773-805``).
+    """
+    blocks = _find_nh_config_blocks()
+    for tc in ("tc1", "tc2a", "tc3"):
+        assert "d_con_top_zero_levels=2" in blocks[tc], (
+            f"iter-14 regression: {tc} cube NH config lost "
+            "``d_con_top_zero_levels=2``."
+        )
+
+
 def test_sw_cube_uses_iter1009_dual_target_config():
     """iter-1/8 sentinel: matrix runner SW W2/W5 cube branch routes
     through the canonical ``iter1009_dual_target_config(n)`` helper

@@ -4497,7 +4497,13 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 # Both compose with iter-12 d_con_cv; together they
                 # match the full factory bundle for the d_con term.
                 use_fv3_dynamic_exner=True,
-                use_fv3_metric_aware_d_con=True)
+                use_fv3_metric_aware_d_con=True,
+                # new_test_dycores iter-14: zero d_con heating in the
+                # top 2 model levels (FV3 iter-431 sponge behaviour;
+                # dyn_core.F90:773-805 d_con_k=0 for k=0,1).  Factory
+                # default = 2.  Matches FV3 reference handling above
+                # the sponge cap.
+                d_con_top_zero_levels=2)
         elif test_case == "tc2a":
             from tests.test_cases.dcmip2025 import dcmip25_tc2_init
             state, hcoord, tmetric, small_grid = dcmip25_tc2_init(
@@ -4530,7 +4536,10 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 # new_test_dycores iter-13: dynamic Exner + metric-
                 # aware d_con (factory defaults; PE/NH 336/339).
                 use_fv3_dynamic_exner=True,
-                use_fv3_metric_aware_d_con=True)
+                use_fv3_metric_aware_d_con=True,
+                # new_test_dycores iter-14: d_con_top_zero_levels=2
+                # (factory default; FV3 iter-431 sponge consistency).
+                d_con_top_zero_levels=2)
         elif test_case == "tc3":
             from tests.test_cases.dcmip2025 import dcmip25_tc3_init
             state, hcoord, tmetric, small_grid = dcmip25_tc3_init(
@@ -4564,7 +4573,10 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 # new_test_dycores iter-13: dynamic Exner + metric-
                 # aware d_con (factory defaults; PE/NH 336/339).
                 use_fv3_dynamic_exner=True,
-                use_fv3_metric_aware_d_con=True)
+                use_fv3_metric_aware_d_con=True,
+                # new_test_dycores iter-14: d_con_top_zero_levels=2
+                # (factory default; FV3 iter-431 sponge consistency).
+                d_con_top_zero_levels=2)
         else:
             raise ValueError(f"Unknown NH test case: {test_case}")
 
