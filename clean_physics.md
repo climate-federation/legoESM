@@ -209,293 +209,66 @@ Branch: `clean_physics`.  Driven by Ralph loop + `/codex:adversarial-review`.
 - Codex `adversarial-review` runtime ~50/50 success/failure.  Continue alongside
   direct inspection.
 
-## Iter-111 — coupler infrastructure (accumulator + tile fractions + step)
-Audited `coupler/{accumulator,tile_fractions,coupling_fields}.py` and
-the `step_surface` orchestrator inside `coupler/coupler.py`.
 
-Verified clean:
-- **`FluxAccumulator`**: dt-weighted accumulation of all SurfaceToAtm
-  fields including the separately-tracked `sum_lw_up` (avoids the
-  σ⟨T⟩⁴ ≠ ⟨σT⁴⟩ trap when emission averaging is needed downstream).
-  `mean_accumulator` divides by `clip(total_dt, _tiny, None)` for
-  AD-safe division.
-- **`compute_tile_fractions`**: `f_water = 1 - f_land - f_lake`,
-  `f_ice = f_water · ice_conc`, `f_ocean = f_water - f_ice`.  Total
-  sums to 1 (`f_ocean + f_ice + f_land + f_lake = 1` algebraically).
-  Static rescale `static_scale = 1/total_static` triggers when
-  `f_land + f_lake > 1` — slightly oversaturated input is renormalized
-  rather than producing negative `f_water`.
-- **`blend_tiles`**: area-weighted linear blend `f_o·O + f_i·I +
-  f_l·L + f_k·K` for every TileResponse field including
-  `freshwater_flux`, `ocean_heat_extraction`, `ocean_stress_x/y`
-  (audit F8/F9), `surface_mass_flux` (audit F3).  Continuous, no hard
-  conditionals — differentiable everywhere.
-- **`step_surface` asynchronous coupling window** (lines 430-465):
-  on flush, accumulate the residual `dt_to_close = clip(coupling_dt -
-  dt_prev, 0, dt)` to close the window exactly, emit mean, seed
-  `acc_next` with `dt_excess = max(dt - dt_to_close, 0)` worth of
-  blended flux.  Boundary cases: when `dt_excess = 0` the new
-  accumulator has `total_dt = 0` and emit-side `_tiny` floor protects
-  the next-mean division.
+## Iterations 110-119 — Summary (compressed 2026-05-13 after iter-120)
 
-No code changes this iteration.
+All inspection-only iters (no code changes), one bug fix at iter-119 boundary (none).
+Total LOC audited: ~5000.
 
-## Iter-112 — ocean EOS + atmosphere thermodynamics audit
-Audited `ocean/eos.py` (506 LOC) and
-`atmosphere/physics/thermodynamics.py` (416 LOC).
+- **iter-110** (compression milestone) + brief `ocean_tendency_common.py` inspection:
+  2-pass EOS-pressure iteration, partial-cell-safe `iterate_eos_and_pressure_anomaly`,
+  `implicit_bottom_drag_factor`, KE-1999/MOM6 BBL distributed drag with iter-39 #2 fix.
+- **iter-111** coupler infrastructure: `FluxAccumulator` dt-weighted with separately-
+  tracked `sum_lw_up` (avoids `σ⟨T⟩⁴ ≠ ⟨σT⁴⟩` trap); `compute_tile_fractions` sums to 1
+  algebraically with static rescale for oversaturated input; `blend_tiles` linear-
+  weighted; `step_surface` async coupling window correctly closes/seeds with `_tiny`
+  floor on the next-mean division.
+- **iter-112** ocean EOS + atmosphere thermodynamics: Wright 1997 polynomial with f64
+  intermediate promotion; `α/β` via `jax.vmap+grad` on scalar EOS; `compute_hydrostatic
+  _pressure` with `h_actual` partial-cell support; `N²` sign matches z-up convention;
+  `moist_adiabat_lapse_rate` canonical Iribarne-Godson form.
+- **iter-113** shared `thermo.py` + `constants.py`: Tetens / Clausius-Clapeyron
+  saturation thermo with softplus floor + LogSumExp cap; `c_vd = c_pd − R_d` thermo
+  identity (iter-39 MEDIUM #6); molar masses in g/mol and kg/mol with `*1e-3` derivation
+  to prevent drift; centralised emissivities; freshwater EOS parabolic-fit constants.
+- **iter-114** Holtslag-Boville + YSU PBL: shared bulk-Ri sigmoid `σ·(1−σ)` PBL-height
+  weighting peaks at Ri_crit crossing; `K-profile = κ·u*·z·(1−z/h)²`; Louis-style
+  Ri-dependent local Km above PBL with config-sourced (b, c, d); HB counter-gradient
+  as enhanced surface BC; YSU entrainment Gaussian with AD-safe `cbrt(max(...,1e-20))`
+  for w*; θ-space heat diffusion preserves dry-adiabat neutrality.
+- **iter-115** `barotropic_common` + `barotropic_latlon_cgrid`: `compute_filter_weights`
+  cosine fallback to box at n<2 (iter-1 #4 held); `bebt_blend` semi-implicit eta blend
+  (#205); min-rule face depth `H_u = min(roll(H), H)`; flux-form barotropic diffusion
+  `div(ν_face · grad η)` for exact volume conservation on cos(lat) grid; forward-
+  backward Matsuno Coriolis; divergence damping targets eta-checkerboard without
+  affecting geostrophic flow; pole rows = wall BC; cosine time filter on eta/velocity
+  but BOX on Hu/Hv transport (volume conservation).
+- **iter-116** radiation integration: 3-mode insolation dispatch with iter-92 polar
+  AD-safe clip; `_extract_tracer_columns` dtype-inferred (no f64 promotion on Metal);
+  zero placeholders pinned to upstream state precision; daily-mean RRTMGP path
+  correctly rescales SW by `f_day`; mutable-dict time-state closure prevents per-step
+  recompile.
+- **iter-117** ocean lateral-mixing backscatter: two-pass `+∇²(A_bs · ∇²u)` exact
+  discrete adjoint of `strain_rate` → energy-consistent; MPAS variant has correct
+  `[m²/s]` units; `update_eddy_energy` budget closes such that resolved+SGS total
+  energy decays only via slow `−E/τ` memory term.
+- **iter-118** land `stomata_utils` + `surface_params`: dispatcher correctly chains
+  Farquhar-stomata (with differland LAI) or Jarvis fallback; optional `land_params`
+  override via NamedTuple `_replace`; `LandSurfaceParams` 12-field NamedTuple with
+  `PARAM_BOUNDS` for ML sigmoid-bounded parameterization; CLM5 PFT 17×12 lookup table.
+- **iter-119** ocean MPAS GM/Redi: edge-normal `F_n = κ_R·∂_n q + (κ_R − κ_GM)·S_n·∂_z q`
+  with partial-cell `bot_e` masking and `edge_mask = mask[c1]·mask[c2]` coastline
+  zeroing on BOTH horizontal F_n and Perot input `S_n_oc`; vertical flux via Perot
+  reconstruction at cell centres; TRiSK `divergence_cell_3d` + `vertical_flux_divergence`;
+  Neumann coastline fill before tracer differencing; Visbeck adaptive κ_GM mirrors
+  cubed-sphere form.
 
-Verified clean:
-- **Wright (1997) EOS** (`wright_eos`): polynomial form `ρ = (p + p_0) /
-  (λ + α_0·(p + p_0))` with intermediate float64 promotion for the
-  large coefficients (~5.79e8); no clipping of T, S inputs so
-  unphysical overshoots remain visible (issue #165).
-- **`thermal_expansion_coeff`** `α = −(1/ρ) ∂ρ/∂T` via `jax.vmap`
-  + `jax.grad` on the scalar EOS.  Positive for water (warming
-  decreases density).
-- **`haline_contraction_coeff`** `β = (1/ρ) ∂ρ/∂S`.  Positive (salt
-  increases density).
-- **`linear_eos`**: `ρ = ρ_ref · [1 − α_T·(T − T_ref) + β_S·(S − S_ref)]`
-  — standard linear form, dimensionally consistent.
-- **`compute_hydrostatic_pressure`**: `p_top = ρ_ref·g·η + cumsum(ρ·g·h)
-  − ρ·g·h`; cell-center = `p_top + 0.5·dp`.  Supports `h_actual` for
-  partial-cells extension.
-- **`compute_buoyancy_frequency`**: `N² = −(g/ρ_ref)·(ρ_shallow −
-  ρ_deep)/dz_iface`.  Sign matches standard z-up convention regardless
-  of indexing direction: stable strat gives `ρ_shallow < ρ_deep` →
-  drho_dz < 0 → N² > 0. ✓
-- **`temperature_from_theta`**: `T = θ·(p/p_ref)^κ` with `_THETA_MIN`,
-  `_P_MIN`/`_P_MAX` clips for AD safety.
-- **`pressure_from_eos`**: `p = p_0·(R_d·ρ·θ/p_0)^(c_p/c_v)` (non-
-  hydrostatic dycore form); base clipped to `[1e-20, 1e20]` before
-  the power.
-- **`moist_adiabat_lapse_rate`**: canonical Iribarne–Godson form
-  `Γ_m = (R_d·T)/(c_p·p) · (1 + L_v·q_sat/(R_d·T)) / (1 + L_v²·q_sat/
-  (c_p·R_v·T²))` in [K/Pa].
-
-No code changes this iteration.
-
-## Iter-113 — shared `thermo.py` + `constants.py` audit
-Audited `src/legoesm/thermo.py` (172 LOC, shared saturation thermo)
-and `src/legoesm/constants.py` (125 LOC).
-
-Verified clean:
-- **`saturation_vapor_pressure`**: Tetens form
-  `e_sat = 611.2 · exp(17.67 · T_c / (T_c + 243.5))` in Pa.  AD-safe
-  (no singular operations in the realistic range).
-- **`saturation_mixing_ratio`**: `q_sat = ε · e_sat / max(p − e_sat,
-  softplus(p − e_sat − 1) + 1)` — smooth softplus floor preserves
-  gradients near `e_sat ≈ p` (prevents zero-gradient plateau a hard
-  clip would create); LogSumExp smooth-min cap at `q_sat ≤ 1` for
-  low-pressure singularity safety.
-- **`saturation_mixing_ratio_ice`**: Clausius–Clapeyron form
-  `e_sat_i = 611.2 · exp(L_s/R_v · (1/T_freeze − 1/T))`, same
-  softplus floor + cap as the liquid variant.
-- **`saturation_mixing_ratio_dT`**: analytical derivative
-  `d(q_sat)/dT` consistent with the Tetens formula; uses simpler
-  hard `max(p − e_sat, 1)` floor (PDF-width convention).
-- **`saturation_specific_humidity`**: `q = w_sat / (1 + w_sat)`
-  conversion from mixing ratio to specific humidity (~1 % difference
-  at typical tropospheric humidities).
-- **`constants.py`**: `c_vd = c_pd − R_d` enforces the thermodynamic
-  identity (iter-39 MEDIUM #6 fix held — earlier hardcoded 717.56
-  violated the identity by 0.03 J/(kg·K)).  Molar masses available
-  in both g/mol (e.g. `M_air`, `M_H2O`) and kg/mol (`M_dry`, `M_h2o`)
-  forms with `* 1e-3` derivation to prevent drift.  Centralised
-  emissivities (`emissivity_ocean`, `emissivity_ice = 0.97`,
-  `emissivity_land = 0.95`).  Freshwater EOS local-parabolic fit
-  constants (`T_freshwater_max_density = 277.133 K`,
-  `rho_freshwater_curvature = 8e-6 K⁻²`).
-
-No code changes this iteration.
-
-## Iter-114 — Holtslag-Boville + YSU PBL schemes audit
-Audited `atmosphere/physics/turbulence/{holtslag_boville,ysu}.py`
-(both 228 LOC).
-
-Verified clean:
-- **PBL-height diagnosis** (shared): smooth bulk-Ri sigmoid weighting
-  `σ_pbl · (1 − σ_pbl)` peaks at the Ri_crit crossing (not centroid);
-  `h_pbl = ∫(z · w_pbl) / ∫w_pbl`.  Clipped to `≥ 100 m` floor.
-- **K-profile inside PBL**: `Km = κ·u*·z·(1−z/h)²` standard form,
-  zero at z=0 and z=h.
-- **Local Ri-based Km above PBL** (Louis 1982 style): `f_stable = 1/(1
-  + 2b·Ri / sqrt(1 + d·Ri))`, `f_unstable = 1 − 2b·Ri / denominator`,
-  sigmoid blend on Ri.  All Louis coefficients (b, c, d) sourced from
-  config (no hardcoded literals — iter-? constant-discipline fix held).
-- **HB counter-gradient correction**: `γ_h · w'θ'_sfc / (Km_max ·
-  h_pbl)` adds the non-local heat flux as an enhanced surface BC
-  in the implicit T-diffusion solve.  Known simplified form (full
-  non-local profile shape would require modifying the RHS at every
-  level).
-- **YSU entrainment Gaussian**: `K_ent = c_ent·w*·h · exp(−((z−h) /
-  (0.3·h))²)` with `w* = cbrt(max(g·h·max(w'θ',0)/θ̄, 1e-20))` —
-  AD-safe via the 1e-20 floor (cbrt gradient is finite away from 0);
-  stable BL (w'θ'<0) correctly gives w*≈0 → no entrainment.
-- **Implicit vertical diffusion**: heat in θ-space for dry-adiabat
-  neutrality, momentum/moisture in raw space.
-
-One minor noted: YSU computes `θ̄ = mean(θ_v, axis=1)` over the FULL
-column (including stratosphere) rather than the PBL only — slight
-overestimate of θ̄ → underestimate of w*.  Scheme simplification, not
-a bug.
-
-No code changes this iteration.
-
-## Iter-115 — `barotropic_common` + `barotropic_latlon_cgrid` audit
-Audited `ocean/dynamics/barotropic_common.py` (99 LOC, shared helpers)
-and `ocean/dynamics/barotropic_latlon_cgrid.py` (433 LOC, explicit
-forward-backward solver).
-
-Verified clean:
-- **`compute_filter_weights`**: cosine bell `1 + cos(2π·(i - n/2)/n)`
-  for `n_substeps ≥ 2`; falls back to box filter for `n_substeps < 2`
-  (iter-1 bug #4 fix held — cosine collapses to 0 at `n=1` giving
-  divide-by-zero in `eta_sum / w_total`).
-- **`bebt_blend`**: `bebt · η_old + (1 − bebt) · η_new` semi-implicit
-  PGF blend; MOM6 default bebt=0.2 damps fastest barotropic gravity
-  waves (#205).
-- **`maxvel_clip`**: symmetric `clip(field, ±maxvel)` suppresses
-  runaway velocities before crashes.
-- **Lat-lon C-grid barotropic solver**:
-  - Min-rule face depth `H_u = min(roll(H), H)` matches implicit solver
-    (arithmetic mean overestimates face depth at topographic steps).
-  - Eta-floor clamp `eta_floor = min_water_col − H_bathy` keeps the
-    layer thickness positive; redistribution preserves total volume.
-  - Flux-form barotropic diffusion `div(ν_face · grad η)` (NOT
-    `ν_cell · ∇²η`) exact volume conservation on the cos(lat)-varying
-    spherical grid.
-  - Forward-backward Coriolis (Matsuno): `U_bar_new = U_bar_c + dt·(f_u
-    V_at_u − g ∂η/∂x + F_slow_u)`, then `V_bar_new` uses the *just-
-    updated* `U_new_at_v` — preserves energy on inertial oscillation.
-  - Divergence damping `−γ_div · grad(div(u_bar))` targets the eta-
-    checkerboard mode without affecting geostrophic flow (#205).
-  - Pad-with-zero pole rows for wall BC; cosine time filter for
-    eta/velocity accumulators, box filter for `Hu`/`Hv` transport
-    accumulators (volume conservation).
-
-No code changes this iteration.
-
-## Iter-116 — radiation `integration.py` audit
-Audited `atmosphere/physics/radiation/integration.py` (892 LOC, top-
-level dispatcher routing gray + RRTMGP through hydrostatic / non-
-hydrostatic / spectral-PE / MPAS bridges).
-
-Verified clean:
-- **`_compute_insolation`**: 3-mode dispatch — diurnal (cos_sza from
-  hour/lon), perpetual-equinox (`S_0/π · max(cos lat, 0)`), or
-  daily-mean (Eq. 2.6 with iter-92 polar AD-safe clip).  Returns
-  `(insolation, cos_sza, f_day)` for downstream branching.
-- **`_compute_ozone_vmr`**: dispatches between AMIP zonal-mean,
-  `gozsolar`-style polynomial, and the ML ridge (`predict_ozone_ml`).
-  Reuses the pre-loaded `ml_ozone_coefs` from `make_radiation_physics`
-  to avoid per-step NetCDF load.
-- **`_extract_tracer_columns`**: dtype inferred from `state.T.data`
-  to avoid silent f64 promotion on Metal/fp32 backends; q_c / q_i
-  defensively clipped at `max(..., 0)`.
-- **`_pack_hydrostatic_tendencies`**: zero placeholders for
-  `du/dt`, `dv/dt`, `dp_s/dt`, `dphis/dt` pinned to upstream state
-  precision (no silent f64 promotion); only `dT/dt` non-zero.
-- **`_call_radiation_backend` daily-mean RRTMGP path** (iter-92
-  verified): when `cos_sza is None` and `f_day is provided`, derives
-  daytime-effective cos(SZA) via `insol / (S_0 · max(f_day, 1e-6))`
-  and rescales SW fluxes back by `f_day` after the solver call;
-  insolation=0 at polar night ⇒ cos_sza=0 safely.
-- **Make-time-state closure pattern**: `_time = {"day_of_year": ...,
-  "seconds_of_day": ...}` mutable dict + `set_time` setter — closure-
-  captured but Python-mutable, so the JIT-compiled `physics_fn`
-  reuses one trace across time updates (no recompile per step).
-
-No code changes this iteration.
-
-## Iter-117 — ocean lateral-mixing backscatter audit
-Audited `ocean/physics/lateral_mixing/backscatter.py` (363 LOC).
-
-Verified clean:
-- **C-grid two-pass operator** (`backscatter_tendency_cgrid`):
-  unit-coefficient unnormalised stress-divergence first pass produces
-  `u_star, v_star`; second pass with `A_bs` coefficient and
-  `normalize=True` returns `+∇²(A_bs · ∇²u)` (sign opposite Smag-biharm,
-  so caller adds rather than subtracts).  Operator is the exact
-  discrete adjoint of `strain_rate_cgrid` → energy-consistent.
-- **MPAS variant** (`backscatter_tendency_mpas`): edge-normal
-  velocity tendency `+∇²(ν_bs · ∇²u)` with `ν_bs = c_bs · Δ_e ·
-  √E_edge`; geometric-mean edge length `Δ_e = √(dcEdge·dvEdge)` gives
-  the harmonic viscosity units `[m·m/s] = [m²/s]`.
-- **`backscatter_power_density_cgrid`**: `ε_bs = ⟨u, tend_u⟩ + ⟨v,
-  tend_v⟩` averaged to cell centres; depth-integrated with `dz` when
-  3-D.  Sign: positive `ε_bs` ⇒ energy injected into resolved flow ⇒
-  sink for reservoir E.
-- **`update_eddy_energy` (E budget)**: forward-Euler
-  `E_new = clip(E + dt·(η·ε_diss − ε_bs − E/τ), E_min, E_max)`.
-  Energy balance: resolved KE change = `ε_bs − η·ε_diss`; SGS E change
-  = `η·ε_diss − ε_bs − E/τ`.  Sum: `d/dt(KE + E) = −E/τ` (slow memory
-  decay, physically reasonable).
-- **No-op short-circuit**: `not cfg.enabled or cfg.c_bs == 0`
-  returns zero tendency / unchanged E.
-
-No code changes this iteration.
-
-## Iter-118 — land stomata_utils + surface_params audit
-Audited `land/stomata_utils.py` (92 LOC) and `land/surface_params.py`
-(247 LOC).
-
-Verified clean:
-- **`compute_effective_beta`** dispatcher:
-  - Stomata disabled → returns `beta_soil` directly.
-  - Stomata + differland carbon → `LAI = C_fol / LCMA`, coupled
-    Farquhar-stomata solver, then `compute_stomatal_beta`.
-  - Stomata + non-differland → Jarvis fallback.
-  - Optional `land_params` override (PFT-weighted spatial fields) via
-    `_replace` on stomata + carbon configs.
-- **`LandSurfaceParams`** NamedTuple: 12 per-column fields with
-  documented physical ranges (`PARAM_BOUNDS` dict) for sigmoid-bounded
-  ML parameterization (`lo + (hi-lo)·sigmoid(raw)`).
-- **`default_land_surface_params`**: broadcast scalars from
-  `LandConfig` / `MultiLayerLandConfig` to `(ncol,)` arrays with
-  `getattr` defaults for config-asymmetric fields (e.g. `root_depth`
-  exists on multilayer config but not slab).
-- **`array_to_params` / `reshape_params`**: round-trip conversion
-  between flat `(ncol, n_params)` matrix (training format) and
-  `LandSurfaceParams` NamedTuple, plus reshape `(ncol,) → (6, n, n)`
-  for slab path.
-- **`CLM5_PFT_TABLE_RAW`**: 17 PFT × 12 parameter lookup table
-  matching CLM5 Tech Note (Lawrence 2019).  Lazy-cached as a JAX
-  array on first call to avoid import-time JAX init.
-
-No code changes this iteration.
-
-## Iter-119 — ocean MPAS GM/Redi audit
-Audited `ocean/physics/lateral_mixing/gm_redi_mpas.py` (625 LOC,
-centred + triads variants of the small-slope GM+Redi tracer-tendency
-operator on a Voronoi mesh).
-
-Verified clean:
-- **Horizontal flux at edge interfaces**: `F_n[edge, k_int] = κ_R ·
-  ∂_n q + (κ_R − κ_GM) · S_n · ∂_z q`, averaged to full-level edges
-  with zero pad at surface/bottom.  Same `F = +K · grad` convention
-  as the cubed-sphere helper.
-- **Partial-cell edge masking**: `bot_e =
-  compute_max_level_edge_bot(bottom_level)` zeros `F_n` at levels
-  below the shallower neighbour's seafloor; prevents Neumann-filled
-  sub-seafloor tracer values from contaminating the divergence at
-  deep cells.
-- **Land-boundary masking**: `edge_mask = mask[c1] · mask[c2]` zeros
-  coastline edge flux on BOTH horizontal F_n and the Perot input
-  `S_n_oc = S_n · edge_mask` (no spurious slope·gradient into the
-  cell mean).
-- **Vertical flux via Perot reconstruction**: `(S·∇q)_cell =
-  Perot_Σ_edges(S_n · ∂_n q)`, `|S|²_cell = Perot_Σ_edges(S_n²)`,
-  then `F_z = (κ_R + κ_GM)·(S·∇q)_cell + κ_R · |S|²_cell · ∂_z q`.
-- **Volume-conserving discretisation**: TRiSK `divergence_cell_3d`
-  horizontal + `vertical_flux_divergence` vertical.
-- **Neumann coastline fill** via `_voronoi_neumann_fill` before
-  differencing tracer.
-- **Visbeck adaptive κ_GM** (`_visbeck_kappa_gm_mpas`) mirrors the
-  cubed-sphere column-stability + Eady-growth-rate form.
-
-No code changes this iteration.
+### Inspected & clean (additions through iter-119)
+All sections cumulatively verified; no new defects across coupler infrastructure,
+ocean EOS, shared thermo / constants, HB / YSU PBL, barotropic substep solver,
+radiation integration dispatcher, backscatter scheme, land surface params, MPAS GM/Redi.
 
 ## Next iterations
 Continue addressing codex findings and direct-inspection sweeps until all schemes are
 provably conservative, monotone, CFL-safe, and AD-safe across mixed wet/dry grids.
-Next compression at iter-120.
+Next compression at iter-130.
