@@ -5177,6 +5177,60 @@ is verifiable with unit tests in seconds rather than wall-time
 sweeps.  Users running the NH compressible-Euler 3D path now have
 the same cube-imprint defense as users running the PE 3D path.
 
+## Iter 841 — solar_forcing_fv3 (TSI-anomaly TOA forcing)
+
+Added `solar_forcing_fv3(delta_tsi, albedo=0.30)` to
+`grids/cubed_sphere.py`.  TOA radiative forcing from TSI
+perturbation:
+
+```
+ΔF_solar = (1 − α) · ΔTSI / 4    (W/m²)
+```
+
+Factor 1/4 = Earth disk-area / surface-area ratio (πR²/4πR²) —
+converts sub-solar TOA insolation to global-mean TOA flux.
+
+Canonical magnitudes:
+  | scenario                        | ΔTSI (W/m²) | ΔF (W/m²)  |
+  |---------------------------------|-------------|------------|
+  | 11-yr cycle peak-to-trough      | ±1.0        | ±0.175     |
+  | Maunder Minimum (LIA estimate)  | −1.0        | −0.175     |
+  | Modern solar-cycle 24 min       | −0.13       | −0.023     |
+  | Faint Young Sun 3.8 Ga          | −340        | −59.5      |
+
+Extends GHG forcing trio (iter-838/839/840) to natural-forcing
+agents.  Composes iter-836 ECS / iter-837 TCR:
+
+```
+ΔTSI → iter-841 ΔF_solar → iter-836/837 ECS/TCR → ΔT
+```
+
+Pairs with iter-834 ``ice_albedo_feedback_fv3`` (same 1−α structure
+for SW response).
+
+Used by: PMIP3 last-millennium solar-variability attribution,
+Maunder-Minimum / grand-minimum scenario studies, Faint-Young-Sun
+paradox / Archean climate, detection-and-attribution residual
+diagnostics (solar contribution to historical warming budget).
+
+Note: returns radiative forcing (level-of-no-perturbation TOA flux
+change), not effective forcing (ERF).  For ERF apply AR6 efficacy
+factor f_eff ≈ 0.78 multiplicatively.
+
+Test: `tests/test_fv3_solar_forcing_iter841.py` (8 tests: solar
+cycle ΔF=+0.175 analytic, Maunder-Minimum cools, no-perturbation
+zero, α=1 mirror planet ΔF=0, disk-to-sphere identity, ECS chain
+sanity, Faint-Young-Sun −59.5 W/m², 3-D shapes).
+
+### Why this iteration was meaningful
+
+Adds first natural (non-anthropogenic) forcing agent to the
+ECS/TCR primitive chain.  Solar variability is the canonical
+natural forcing in CMIP historical experiments, detection-and-
+attribution residuals, paleoclimate sensitivity studies, and
+exoplanet-habitability stellar-luminosity scaling.  Pure JAX,
+vmap-compatible.  No new physical constants introduced.
+
 
 
 

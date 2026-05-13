@@ -7484,6 +7484,77 @@ def radiative_forcing_n2o_fv3(
     return alpha_myhre * (jnp.sqrt(n_safe) - jnp.sqrt(n_ref_safe))
 
 
+def solar_forcing_fv3(
+    delta_tsi: jax.Array,
+    albedo: jax.Array = 0.30,
+) -> jax.Array:
+    """FV3_3D iter 841: solar (TSI-anomaly) radiative forcing.
+
+    TOA radiative forcing from a perturbation in total solar
+    irradiance (TSI), accounting for Earth's disk-to-sphere
+    geometric factor and Bond-albedo reflection:
+
+        ΔF_solar = (1 − α) · ΔTSI / 4    (W/m²)
+
+    Where:
+      * ΔTSI    — TSI anomaly relative to reference (W/m² at the
+                  Earth's orbital radius).
+      * α       — planetary Bond albedo (default 0.30).
+      * 1/4     — Earth disk-area/surface-area ratio (πR²/4πR²),
+                  converting top-of-atmosphere insolation at the
+                  sub-solar point to global-mean TOA flux.
+
+    Canonical magnitudes:
+      * 11-yr solar cycle (ΔTSI = 1.0 W/m² peak-to-trough):
+        ΔF ≈ +0.175 W/m² (at α=0.30, dawn-of-cycle warming).
+      * Maunder Minimum (ΔTSI ≈ −1.0 W/m²):
+        ΔF ≈ −0.175 W/m² (LIA contribution; modest vs volcanism).
+      * Modern minimum (ΔTSI ≈ −0.13 W/m² Solar Cycle 24 minimum):
+        ΔF ≈ −0.023 W/m² (negligible vs anthropogenic +3.0).
+      * Faint Young Sun 3.8 Ga (ΔTSI ≈ −340 W/m² = −25% S_solar):
+        ΔF ≈ −60 W/m² (Sagan-Mullen paradox).
+
+    Composes with iter-836 ECS / iter-837 TCR:
+
+        ΔTSI → iter-841 ΔF_solar
+        ΔT_eq  = iter-836 ECS(ΔF_solar, λ_net)
+        ΔT_trn = iter-837 TCR(ΔF_solar, λ_net, γ)
+
+    Extends the GHG-forcing trio (iter-838/839/840) to natural-
+    forcing agents.  Critical for:
+      * Last-millennium solar-variability climate-attribution
+        (e.g. PMIP3, Vieira-Solanki 2010 TSI reconstructions).
+      * Modern Maunder-Minimum-style "grand-minimum" scenarios.
+      * Faint-Young-Sun paradox / Archean climate studies.
+      * Detection-and-attribution residual diagnosis (solar
+        contribution to historical warming budget).
+
+    Pairs naturally with iter-834 ``ice_albedo_feedback_fv3``
+    (both use the same 1−α structure for SW response to surface
+    temperature).
+
+    Note: this primitive returns *radiative* forcing (level-of-
+    no-perturbation TOA flux change), not *effective* forcing
+    (ERF) which would include rapid stratospheric adjustment
+    plus a small heating-rate scaling factor.  For ERF use the
+    AR6 efficacy factor f_eff ≈ 0.78 multiplicatively.
+
+    Parameters
+    ----------
+    delta_tsi : jax.Array
+        TSI anomaly (W/m²; positive = brighter sun).
+    albedo : jax.Array or float
+        Planetary Bond albedo (0 ≤ α ≤ 1); default 0.30 (Earth).
+
+    Returns
+    -------
+    delta_f : jax.Array
+        Solar radiative forcing (W/m²); positive = warming for
+        ΔTSI > 0 (and α < 1).
+    """
+    return (1.0 - albedo) * delta_tsi / 4.0
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,
