@@ -8849,6 +8849,95 @@ def marine_heatwave_category_fv3(
     return jnp.clip(cat, 0.0, 4.0)
 
 
+def wet_bulb_temperature_stull_fv3(
+    t_c: jax.Array,
+    rh_pct: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 857: Stull 2011 empirical wet-bulb temperature.
+
+    Stull (2011) J. Appl. Meteor. Climatol. 50: 2267-2269 closed-
+    form empirical fit to standard psychrometric wet-bulb T_w at
+    pressure ~1013.25 hPa:
+
+        T_w = T · atan(0.151977 · (RH + 8.313659)^0.5)
+            + atan(T + RH)
+            − atan(RH − 1.676331)
+            + 0.00391838 · RH^1.5 · atan(0.023101 · RH)
+            − 4.686035
+
+    Where:
+      * T   — dry-bulb temperature (°C).
+      * RH  — relative humidity (%, 0–100).
+      * T_w — wet-bulb temperature (°C).
+
+    Validity: −20 < T < 50 °C, 5 < RH < 99 %, 850 < p < 1080 hPa.
+    Max error 0.3 K vs full psychrometric solution (Stull 2011).
+
+    Wet-bulb is the key **heat-stress** metric (more relevant than
+    dry-bulb for human / livestock thermoregulation) because
+    evaporative cooling is the body's primary heat-shedding
+    pathway in hot environments.
+
+    Sherwood-Huber 2010 PNAS survivability thresholds:
+      | T_w (°C) | Outcome                                |
+      |----------|----------------------------------------|
+      | < 28     | mild heat stress; tolerable            |
+      | 28–32    | dangerous for vulnerable populations   |
+      | 32–35    | extreme heat stress; current peaks     |
+      | ≥ 35     | survivability ceiling — evaporative    |
+      |          | cooling fails, hyperthermia within 6h  |
+
+    Real-world peaks (Raymond et al. 2020 Sci. Adv.):
+      * Persian Gulf (Jacobabad PK 2015): T_w peak 35°C
+      * Indus Valley monsoon onset: T_w 34°C routine
+      * AR6 SSP3-7.0 2100: 1+ billion people exposed to T_w>35°C
+
+    Adds **first terrestrial heat-stress primitive** to impact
+    chain.  Pairs with iter-855 ``degree_heating_weeks_fv3``
+    (marine reef bleaching) — both 'survivability-threshold'
+    diagnostics for AR6 §3.5.
+
+    Composes with iter-832 ``clausius_clapeyron_dqdt_fv3`` (humidity
+    scaling under warming) and iter-833 ``fixed_rh_humidity_change_fv3``
+    (RH-preserving warming projection).  Under fixed-RH warming
+    T_w rises faster than T (heat-stress amplifies via CC).
+
+    Per CLAUDE.md hygiene: Stull 2011 is the *empirical fit* form,
+    distinct from the full psychrometric ``saturation_vapor_pressure``-
+    based wet-bulb solution.  Stull's coefficients are not physical
+    constants but fit numerics — kept as literal numbers (not
+    `constants.py` entries).  For full psychrometric solve use
+    iterative Newton on the Bolton-style saturation curve in
+    ``legoesm.thermo``.
+
+    Used by: Stull 2011 J. Appl. Meteor., Sherwood-Huber 2010 PNAS
+    survivability analysis, Raymond et al. 2020 Sci. Adv. global
+    T_w extremes, AR6 §11.3.2 heat extremes, Mora et al. 2017
+    Nature Climate Change deadly-heat-day projections, NOAA NWS
+    operational heat-stress warnings.
+
+    Parameters
+    ----------
+    t_c : jax.Array
+        Dry-bulb temperature (°C).
+    rh_pct : jax.Array
+        Relative humidity (%; 0–100).
+
+    Returns
+    -------
+    t_w : jax.Array
+        Wet-bulb temperature (°C).
+    """
+    arg1 = jnp.sqrt(rh_pct + 8.313659)
+    return (
+        t_c * jnp.arctan(0.151977 * arg1)
+        + jnp.arctan(t_c + rh_pct)
+        - jnp.arctan(rh_pct - 1.676331)
+        + 0.00391838 * rh_pct ** 1.5 * jnp.arctan(0.023101 * rh_pct)
+        - 4.686035
+    )
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

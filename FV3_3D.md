@@ -5591,3 +5591,74 @@ quintupled since 1980 (Frölicher 2018), making categorical
 intensity (this primitive) the key ratio metric.  Pure JAX, vmap-
 compatible.  No `constants.py` additions.
 
+## Iter 857 — wet_bulb_temperature_stull_fv3 (terrestrial heat-stress)
+
+Added `wet_bulb_temperature_stull_fv3(t_c, rh_pct)` to
+`grids/cubed_sphere.py`.  Stull 2011 J. Appl. Meteor. Climatol.
+closed-form empirical fit to wet-bulb temperature at ~1013 hPa:
+
+```
+T_w = T · atan(0.151977·(RH+8.313659)^0.5)
+    + atan(T+RH)
+    − atan(RH − 1.676331)
+    + 0.00391838·RH^1.5 · atan(0.023101·RH)
+    − 4.686035       (°C; T °C, RH %)
+```
+
+Valid: −20<T<50 °C, 5<RH<99%, 850<p<1080 hPa.  Max error 0.3 K
+vs full psychrometric solution.
+
+Wet-bulb is the canonical **heat-stress metric** — body's primary
+cooling pathway is evaporation, which fails when T_w approaches
+35°C (Sherwood-Huber 2010 PNAS survivability ceiling).
+
+Sherwood-Huber thresholds:
+  | T_w (°C) | Outcome                              |
+  |----------|--------------------------------------|
+  | < 28     | mild stress, tolerable               |
+  | 28–32    | dangerous for vulnerable populations |
+  | 32–35    | extreme stress; current peaks         |
+  | ≥ 35     | survivability ceiling; hyperthermia 6h|
+
+Real-world peaks (Raymond et al. 2020 Sci. Adv.):
+  * Persian Gulf (Jacobabad 2015): T_w peak 35°C
+  * Indus Valley monsoon onset:    T_w 34°C routine
+  * AR6 SSP3-7.0 2100:             1+ billion exposed T_w>35°C
+
+**Adds first terrestrial heat-stress primitive**, pairs with
+iter-855 ``degree_heating_weeks_fv3`` (marine).  Both
+'survivability-threshold' diagnostics for AR6 §3.5 + §11.3.2.
+
+Composes with iter-832 ``clausius_clapeyron_dqdt_fv3`` and
+iter-833 ``fixed_rh_humidity_change_fv3`` — under fixed-RH warming
+T_w rises faster than T (heat-stress amplifies via CC, Coffel et
+al. 2018 ERL).
+
+Per CLAUDE.md hygiene: Stull 2011 is the *empirical fit* form
+(distinct from full psychrometric solution via
+``thermo.saturation_vapor_pressure``).  Stull coefficients are
+fit numerics not physical constants — kept as literal numbers
+(not `constants.py` entries).
+
+Used by: Stull 2011, Sherwood-Huber 2010 PNAS, Raymond et al.
+2020 Sci. Adv., AR6 §11.3.2 heat extremes, Mora et al. 2017
+Nature Climate Change deadly-heat-day projections, NOAA NWS
+operational heat warnings.
+
+Test: `tests/test_fv3_wet_bulb_iter857.py` (8 tests: RH=100 → T_w
+≈ T (saturated, 0.3 K Stull tolerance), RH=10% → strong evaporative
+cooling, 30°C/70% → ~26°C temperate humid, 40°C/55% → ~31°C
+Persian Gulf, 45°C/50% → ~32°C near survivability ceiling, monotone
+in T and RH, 3-D shapes with T_w ≤ T psychrometric inequality).
+
+### Why this iteration was meaningful
+
+Adds **first terrestrial heat-stress primitive**, closing the
+**heat-extreme-impact pair**: marine (iter-855 DHW) + terrestrial
+(iter-857 wet-bulb).  Wet-bulb is THE policy-relevant heat
+metric (Sherwood-Huber survivability ceiling) and is used for
+billion-people-exposure analyses in AR6 SSP scenarios.  Pure JAX,
+vmap-compatible.  Stull 2011 fit coefficients are empirical
+(literal numbers, not `constants.py` entries per the
+"empirical-fit-not-physical-constant" exception).
+

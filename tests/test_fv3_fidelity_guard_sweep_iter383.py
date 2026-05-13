@@ -444,6 +444,7 @@ _GUARD_MODULES = (
     "test_fv3_ocean_o2_iter854",                     # iter-854 add
     "test_fv3_dhw_iter855",                          # iter-855 add
     "test_fv3_mhw_category_iter856",                 # iter-856 add
+    "test_fv3_wet_bulb_iter857",                     # iter-857 add
 )
 
 
