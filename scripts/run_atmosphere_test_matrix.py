@@ -3669,8 +3669,12 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
     # a 1e-2 mass-drift tolerance to baroclinic.  Same
     # rationale as iter-117 HS.  iter-120 also gates on
     # n_samples >= 2 (codex iter-119 followup MEDIUM-1).
+    # iter-24 (test_dycores): observed quick-mode max across 4 grids
+    # is 2.62e-11 (cube) with the rest at exact 0 or ~1e-16.  Tighten
+    # to 1e-6 (5 orders of headroom on cube) to match the iter-23 HS
+    # ceiling.
     ok, notes = _apply_mass_drift_tolerance(
-        ok, notes, mass_drift, 1e-2,
+        ok, notes, mass_drift, 1e-6,
         n_samples=len(diag.get("mass", [])))
 
     level_values = np.asarray(
