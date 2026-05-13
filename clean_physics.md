@@ -283,6 +283,40 @@ positive subnormal input.  An end-to-end smoke check on the live
 `thomas_solve_batch` is included.  Full `tests/land/unit/` + soil-
 hydraulics suite (208 tests) green.
 
+## Iter-86 — free-drift ice velocity dimensionally inconsistent (300× too small)
+`src/legoesm/ice/dynamics.py:105` (`free_drift_velocity`, exposed via
+`SeaIceConfig(dynamics="free_drift")`).  The previous formula
+
+    u_ice = drag_ocean * U_w + (drag_atm * ρ_air / ρ_ice) * U_a
+
+treats the dimensionless drag coefficients (~5.5e-3, 1.3e-3) as if
+they were velocity-mapping ratios and uses ρ_ice in the denominator
+of the wind term — neither survives a dimensional analysis of the
+air/ocean drag balance.  Quantitatively the formula yields
+~5.7e-4 m/s ice drift for U_a=5 m/s, U_w=0.1 m/s; the physical
+Zubov estimate is ~0.18 m/s.  Off by O(300).
+
+Fix replaces it with the steady-state, no-Coriolis drag balance
+
+    ρ_air · C_ai · |U_a - u_i| (U_a - u_i)
+        = ρ_oc  · C_oi · |u_i - U_w| (u_i - U_w)
+
+linearised about U_w to
+
+    u_i = U_w + α · (U_a - U_w),
+    α   = sqrt(ρ_air · C_ai / (ρ_oc · C_oi))   ≈ 0.017.
+
+This is the canonical Nansen / Zubov ~2 % drift rule (Leppäranta 2011,
+§6.4).  Signature changes `rho_ice → rho_ocean` (the proper density in
+the drag balance); the lone caller in `sea_ice.py` and three test
+modules were updated accordingly.  Validation tests (sanity checks)
+unaffected; `test_matches_zubov_balance` replaces the old
+`test_matches_slab`, and `test_free_drift_bounds` asserts
+`u_ice ≈ U_w + α·(U_a - U_w)` plus 0.005 < α < 0.05.  Full
+`tests/unit/test_sea_ice_dynamics.py` (51) +
+`tests/sea_ice/validation/.../TestFreeDriftSanity` (3) +
+`tests/stress/test_phase1_sea_ice.py` (7) green.
+
 ## Next iterations
 Continue addressing further codex findings and direct-inspection sweeps until all
 schemes are provably conservative, monotone, CFL-safe, and AD-safe across mixed

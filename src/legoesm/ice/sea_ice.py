@@ -367,7 +367,7 @@ def _step_dynamic(
             drag_ocean=config.drag_ocean,
             drag_atm=config.drag_atm,
             rho_air=config.rho_air_ref,
-            rho_ice=config.rho_ice,
+            rho_ocean=config.rho_ocean_ref,
         )
 
     # ---- 2. Transport ----

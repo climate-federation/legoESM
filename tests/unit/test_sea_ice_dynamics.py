@@ -335,8 +335,15 @@ class TestStressDivergence:
 
 
 class TestFreeDrift:
-    def test_matches_slab(self):
-        """Free drift should match the original slab diagnostic velocity."""
+    def test_matches_zubov_balance(self):
+        """Free drift = U_w + alpha*(U_a - U_w) with alpha ≈ 1.7 % (Zubov).
+
+        Iter-86 replaced the dimensionally-inconsistent slab formula
+        (``drag_ocean * U_w + (drag_atm * rho_air / rho_ice) * U_a``,
+        which produced O(10^-4 m/s) ice drift) with the standard
+        steady-state air/ocean drag balance.
+        """
+        import math
         config = SeaIceConfig()
         ou = jnp.array(0.1)
         ov = jnp.array(-0.05)
@@ -348,12 +355,20 @@ class TestFreeDrift:
             drag_ocean=config.drag_ocean,
             drag_atm=config.drag_atm,
             rho_air=config.rho_air_ref,
-            rho_ice=config.rho_ice,
+            rho_ocean=config.rho_ocean_ref,
         )
 
-        u_slab = (config.drag_ocean * ou
-                   + config.drag_atm * (config.rho_air_ref / config.rho_ice) * wu)
-        assert float(u_fd) == pytest.approx(float(u_slab), rel=1e-10)
+        alpha = math.sqrt(
+            config.rho_air_ref * config.drag_atm
+            / (config.rho_ocean_ref * config.drag_ocean)
+        )
+        u_expected = float(ou) + alpha * (float(wu) - float(ou))
+        v_expected = float(ov) + alpha * (float(wv) - float(ov))
+        assert float(u_fd) == pytest.approx(u_expected, rel=1e-10)
+        assert float(v_fd) == pytest.approx(v_expected, rel=1e-10)
+        # Sanity: drift magnitude is in the physical 1-3 % of wind range,
+        # not the 0.001 % the old formula produced.
+        assert 0.005 < alpha < 0.05
 
 
 class TestEVPSolver:
