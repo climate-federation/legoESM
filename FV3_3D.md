@@ -3289,6 +3289,14 @@ STILL OPEN (post-iter-99 stretch goals):
     Laplacian loop in ``primitive_eq_cdgrid.py`` (line 508-510)
     is functional; the FV3-faithful halo restructure remains
     open but the path is not silently broken.
+  - iter 887: NH-path mirror regression-guard test added
+    (``test_nh_corner_div_damp_nord2_runs_and_differs_from_nord1``)
+    confirming the iter-168-ported nord=2 NH path also
+    (a) runs end-to-end without NaN through the acoustic-substep
+    loop and (b) differs from nord=1.  Both 3D paths (PE + NH)
+    now have regression-guard coverage for the higher-order
+    Laplacian iteration; the FV3-faithful expanding-halo
+    restructure remains the only open follow-up.
 - iter-168/169/170/171 documented PE-vs-NH FV3-fidelity asymmetries
   ALL CLOSED:
   * ✅ corner-divergence damping (PE iter 16/18) — closed iter 168
