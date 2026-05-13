@@ -217,6 +217,40 @@ Branch: `clean_physics`.  Driven by Ralph loop + `/codex:adversarial-review`.
 - Codex `adversarial-review` runtime ~50/50 success/failure.  Continue alongside
   direct inspection.
 
+## Iter-101 — ocean surface forcing + lake + bulk-flux sign-convention sweep
+Audited `ocean/physics/surface_forcing/{restoring,prescribed,wind_profiles,
+bulk_formulas,integration}.py`, `coupler/lake/two_layer_lake.py`, and the
+`coupler/bulk_flux.compute_most_fluxes` + `simple_bulk_fluxes` callers.
+
+Verified clean:
+- **Restoring**: `dT/dt = -(T − T_star)/τ` standard relaxation; surface-layer
+  only via pad-with-zero pattern.
+- **Wind profiles**: 9 profiles validated — `cosine_latitude`,
+  `single_gyre`, `double_gyre{,_sin2,_tapered}`, `channel_sine`,
+  `global_wind` (Nikurashin–Vallis 3-belt polynomial in sin²(φ)·cos(φ)
+  verified at φ ∈ {0, 30°, 50°, 70°}), `two_belt` (Gaussian).
+  Tropical-wind Gaussian taper has docstring inaccuracy ("0 at ±σ" —
+  actually 0.607 at σ; comment cosmetic only, math correct).
+- **Bulk-formula ocean forcing**: `Q_lw_up = εσT⁴ + (1−ε)·LW_down`
+  (iter-13/41 grey-surface form held); constant-coefficient branch
+  uses `|U_a|` for `Q_sh`, `Q_lh` (heat exchange rate independent of
+  wind direction) and signed `U_a` for `τ_x` (directional stress);
+  `_saturation_specific_humidity` mixing-ratio→specific conversion
+  (iter-41 ~3 % bias fix held); MOST-path `τ_x = -τ_x` flip converts
+  atmospheric retarding convention to ocean accelerating convention.
+- **Lake two-layer**: phase-aware `q_sfc` switch (iter-67); convective
+  overturn fires on freshwater density-inversion (ρ depends on
+  `(T − T_max)²` so cold ≪ T_max water can be less dense than warmer
+  water near T_max=3.98°C); Q_freeze accounting closes energy budget
+  under T-clamping at T_freeze; pre-step + post-step q_sfc both use
+  the same `is_frozen` switch.
+- **Compute_most_fluxes / simple_bulk_fluxes** sign convention:
+  returns ``τ_x = −ρ·u*²·u_rel/|U|`` (atmospheric retarding); callers
+  flip for ocean (bulk_formulas.py:84) or use directly for atmosphere
+  / sea-ice / lake.  All paths verified.
+
+No code changes this iteration.
+
 ## Next iterations
 Continue addressing codex findings and direct-inspection sweeps until all schemes are
 provably conservative, monotone, CFL-safe, and AD-safe across mixed wet/dry grids.
