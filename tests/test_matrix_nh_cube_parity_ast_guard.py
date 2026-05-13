@@ -129,3 +129,24 @@ def test_tc3_cube_has_a2b_ord4_flag():
         "iter-7 regression: TC3 cube NH config lost "
         "``use_fv3_a2b_ord4_vector_uv=True``."
     )
+
+
+def test_sw_cube_uses_iter1009_dual_target_config():
+    """iter-1/8 sentinel: matrix runner SW W2/W5 cube branch routes
+    through the canonical ``iter1009_dual_target_config(n)`` helper
+    instead of an inline ``CDGridShallowWaterConfig(...)`` construction.
+
+    The iter-1 calibration update (damp_v 0.06 -> 0.030) was factored
+    via the iter-8 helper substitution.  A refactor that inlines a
+    bare ``CDGridShallowWaterConfig(...)`` again would silently drop
+    the iter-1030 W5-best stability margin if the inlined fields
+    don't match the helper output bit-for-bit.
+    """
+    src = _runner_source()
+    assert "iter1009_dual_target_config(n)" in src, (
+        "iter-1/iter-8 regression: matrix runner SW cube branch no "
+        "longer routes through the canonical "
+        "``iter1009_dual_target_config(n)`` helper.  Re-route or pin "
+        "the inlined config to ``damp_v=0.030`` / "
+        "``div_damp=8*_div_damp_cube(n)``."
+    )

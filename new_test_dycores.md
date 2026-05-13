@@ -37,6 +37,7 @@ Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV /
 - iter-8: DRY refactor — matrix W2/W5 uses canonical `iter1009_dual_target_config(n)` helper.
 - iter-9: PE flag (`use_fv3_a2b_zeta_corner`) probe neutral, reverted; AST guard sentinel for iter-5/6/7 NH flags.
 - iter-10 (compressed at this point): fix outdated iter-329 regex (accept 4-arg `center_to_dgrid_vector`); compress this doc; queue iter-11+ targets.
+- iter-11: extend AST guard sentinel to pin the iter-1/iter-8 SW helper substitution (`iter1009_dual_target_config(n)` in matrix runner).  Now 7/7 AST tests covering both NH cube flags (iter-5/6/7) and SW cube helper (iter-1/8) in 0.09 s.  Sanity-checked the 14 AST + a2b_ord4 wiring sentinels — all PASS.
 
 ## Iter-11+ queued
 
