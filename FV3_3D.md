@@ -5766,3 +5766,70 @@ meteorological inputs.  Pure JAX, vmap-compatible.  Collatz α=0.06,
 A_max=25, θ=0.7 are canonical (default args).  No `constants.py`
 additions.
 
+## Iter 869 — ball_berry_conductance_fv3 (stomatal-conductance primitive)
+
+Added `ball_berry_conductance_fv3(a_n, h_s, c_s, m_slope=9.0,
+b_min=0.01)` to `grids/cubed_sphere.py`.  Ball-Berry 1987 / Collatz
+1991 GCB empirical stomatal-conductance closure:
+
+```
+g_s = m · (A_n · h_s / C_s) + b      (mol H₂O / m² / s)
+```
+
+Default m=9.0 (C3 slope), b=0.01 mol/m²/s (cuticular floor).  C4:
+m=4.5, b=0.04.
+
+Mechanism: stomata open ∝ photosynthetic demand (A_n) with
+humidity-suppression (↓h_s closes stomata to conserve water) and
+CO₂-suppression (↑C_s closes stomata since less aperture needed
+to achieve given C_i).
+
+Canonical (C3, m=9, b=0.01):
+  | scenario             | A_n | h_s  | C_s | g_s   |
+  |----------------------|-----|------|-----|-------|
+  | Dark/dawn            | 0   | 0.6  | 400 | 0.010 |
+  | Forest morning       | 5   | 0.7  | 400 | 0.089 |
+  | Crop midday          | 20  | 0.5  | 400 | 0.235 |
+  | Tropical tree noon   | 25  | 0.8  | 400 | 0.460 |
+
+**Closes the photosynthesis ↔ transpiration coupling primitive**:
+
+```
+lat, DOY, hr → iter-865 cos(θ) → iter-866 S_TOA
+             · τ_atm = R_s
+             → iter-867 PAR · 4.57 = PPFD
+             → iter-868 A_n
+             × (h_s, C_s)
+             → iter-869 g_s     (mol H₂O/m²/s)
+             × VPD               (caller)
+             = E_T               (transpiration mol H₂O/m²/s)
+```
+
+Used by: Ball-Berry 1987 stomatal conductance origin paper,
+Collatz et al. 1991 GCB iterative A-C_i closure, Leuning 1995
+Ball-Berry-Leuning variant (VPD replaces h_s, Γ_co2 offset),
+Medlyn 2011 optimal-stomatal-control variant (sqrt(VPD)), CLM5 /
+JULES / NoahMP / MOSES / SiB2 stomatal modules, Bonan 2008
+land-model textbook ch. 9-10.
+
+Note: this primitive is the original Ball-Berry form (cleanest
+composable).  Leuning 1995 and Medlyn 2011 variants are
+modifications caller applies outside.
+
+Test: `tests/test_fv3_ball_berry_iter869.py` (10 tests: dark→0.01
+floor, forest/crop/tropical analytic g_s, low-RH/high-CO₂
+suppression, C4 m=4.5 lower than C3, chain via iter-868 PPFD→A_n
+→g_s, C_s=0 floored, 3-D shapes ≥ b_min).
+
+### Why this iteration was meaningful
+
+**Closes the photosynthesis ↔ transpiration coupling primitive
+chain**.  Ball-Berry g_s is the central diagnostic linking A_n
+(carbon side) to leaf-water-vapor exchange (water side) — required
+for: (1) coupled GPP-ET closure in land-surface models;
+(2) plant-water-use-efficiency analysis; (3) Penman-Monteith
+canopy-resistance term r_s = 1/g_s; (4) drought-stress feedback
+on photosynthesis via stomatal closure.  Pure JAX, vmap-compatible.
+Ball-Berry coefficients m=9, b=0.01 are Collatz 1991 canonical
+(default args).  No `constants.py` additions.
+

@@ -9922,6 +9922,108 @@ def light_response_curve_fv3(
     return (a_var - jnp.sqrt(discr)) / (2.0 * theta)
 
 
+def ball_berry_conductance_fv3(
+    a_n: jax.Array,
+    h_s: jax.Array,
+    c_s: jax.Array,
+    m_slope: float = 9.0,
+    b_min: float = 0.01,
+    c_floor: float = 1e-6,
+) -> jax.Array:
+    """FV3_3D iter 869: Ball-Berry 1987 stomatal-conductance primitive.
+
+    Ball-Berry (1987 Progress in Photosynth. Res.) / Collatz et al.
+    1991 GCB empirical link between net photosynthesis and stomatal
+    conductance to water vapor:
+
+        g_s = m · (A_n · h_s / C_s) + b      (mol H₂O / m² / s)
+
+    Where:
+      * A_n     — net photosynthesis (μmol CO₂/m²/s);
+                  from iter-868 ``light_response_curve_fv3``.
+      * h_s     — leaf-surface relative humidity (fraction 0–1).
+      * C_s     — leaf-surface CO₂ mole fraction (μmol/mol = ppm).
+      * m       — Ball-Berry slope (dimensionless); default 9.0
+                  (C3 plants).  C4 plants: m ≈ 4.5.
+      * b       — minimum stomatal conductance (mol/m²/s) when
+                  A_n = 0 (cuticular leakage); default 0.01
+                  (C3); C4: 0.04.
+
+    Output: g_s in mol H₂O/m²/s (canonical leaf-model unit).
+
+    Sign: g_s ≥ b_min always (cuticular floor); g_s scales linearly
+    with photosynthesis × RH / CO₂.
+
+    Mechanistic interpretation: stomata open in proportion to
+    photosynthetic demand (A_n), with humidity-suppression (low
+    h_s closes stomata to conserve water) and CO₂-suppression
+    (high ambient C_s closes stomata since less aperture needed
+    to achieve given C_i).
+
+    Canonical values (C3, m=9, b=0.01):
+      | scenario                  | A_n  | h_s  | C_s  | g_s        |
+      |---------------------------|------|------|------|------------|
+      | Dark / dawn               | 0    | 0.6  | 400  | 0.010      |
+      | Forest morning            | 5    | 0.7  | 400  | 0.089      |
+      | Crop midday               | 20   | 0.5  | 400  | 0.235      |
+      | Tropical tree noon        | 25   | 0.8  | 400  | 0.460      |
+
+    **Closes the photosynthesis ↔ transpiration coupling
+    primitive** — Ball-Berry is the central diagnostic linking
+    A_n (from iter-868) to leaf-water-vapor exchange (caller
+    multiplies by VPD to get transpiration flux E_T).
+
+    Extends the radiation → photosynthesis chain:
+
+        lat, DOY, hr → iter-865 cos(θ) → iter-866 S_TOA
+                     · τ_atm = R_s
+                     → iter-867 PAR · 4.57 = PPFD
+                     → iter-868 A_n
+                     × (h_s, C_s)
+                     → iter-869 g_s  (mol H₂O/m²/s)
+                     × VPD            (caller)
+                     = E_T   (transpiration; mol H₂O/m²/s)
+
+    Used by: Ball-Berry 1987 stomatal-conductance origin paper,
+    Collatz et al. 1991 GCB iterative A-C_i closure, Leuning 1995
+    modified Ball-Berry-Leuning form (replaces h_s with VPD), CLM5
+    / JULES / NoahMP / MOSES / SiB2 stomatal-conductance modules,
+    Bonan 2008 land-model textbook ch. 9-10, Sellers et al. 1996
+    SiB2 reference implementation.
+
+    Note: Leuning 1995 variant uses VPD instead of h_s and adds
+    Γ_co2 offset to C_s.  Medlyn 2011 optimal-stomatal-control
+    variant uses sqrt(VPD).  This primitive is the original
+    Ball-Berry form (cleanest baseline composable); caller can
+    apply Leuning/Medlyn modifications outside.
+
+    ``c_floor`` prevents div-by-0 at vanishing C_s (e.g., during
+    cold-glacial low-CO₂ states or pre-Cambrian).
+
+    Parameters
+    ----------
+    a_n : jax.Array
+        Net photosynthesis (μmol CO₂/m²/s).
+    h_s : jax.Array
+        Leaf-surface relative humidity (0–1).
+    c_s : jax.Array
+        Leaf-surface CO₂ mole fraction (ppm).
+    m_slope : float
+        Ball-Berry slope (dimensionless); default 9.0 (C3 plants).
+    b_min : float
+        Minimum stomatal conductance (mol/m²/s); default 0.01.
+    c_floor : float
+        Lower bound on C_s (ppm); default 1e-6.
+
+    Returns
+    -------
+    g_s : jax.Array
+        Stomatal conductance to water vapor (mol H₂O/m²/s).
+    """
+    c_safe = jnp.maximum(c_s, c_floor)
+    return m_slope * a_n * h_s / c_safe + b_min
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,
