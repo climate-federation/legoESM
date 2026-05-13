@@ -9,6 +9,38 @@ Branch: `clean_physics`. Driven by Ralph loop + `/codex:adversarial-review`.
 - **Ocean** (`src/legoesm/ocean/physics/`): vertical_mixing, bottom_drag, lateral_mixing, convection, surface_forcing, shortwave_penetration, mixing.
 - **Cryosphere** (`src/legoesm/ice/`): sea_ice, dynamics, itd, rheology, transport.
 
+## Iteration 63 — 2026-05-13
+
+**Fix codex iter-62 stop-time finding: labile-reserve cap leaves
+ghost carbon when C_lab is exhausted.**
+
+Iter-62 capped the deficit draw at `C_lab/dt_days`.  If C_lab is
+exhausted (depleted from prolonged carbon starvation), the
+remaining deficit `(R_auto − GPP) − C_lab/dt_days` is still emitted
+to atmosphere via NEE without any pool decrement — ghost carbon
+returns.
+
+Fix: cascade the deficit through ALL living pools in the standard
+CASA/DALEC order:
+1. C_lab (labile reserves first)
+2. C_fol (foliage)
+3. C_root (root)
+4. C_wood (wood — slowest turnover, last)
+
+Each draw is capped at its pool/dt_days.  Residual imbalance is
+only possible if ALL FOUR pools are simultaneously exhausted —
+biologically equivalent to plant death — and bounded by the total
+biomass budget per step.
+
+New regression test
+`test_total_carbon_conservation_with_exhausted_labile_pool`
+constructs a state with `C_lab=0.5, C_fol=300, C_root=400, C_wood=
+10000` under no-GPP conditions and verifies the cascade closes the
+budget at `rtol=1e-3`.
+
+**Tests (post iter-63):** 9 / 9 TestDifferLandStep including
+new exhausted-C_lab regression; 44 / 44 carbon unit tests.
+
 ## Iteration 62 — 2026-05-13
 
 **Bug fix: carbon conservation under R_auto > GPP.**
