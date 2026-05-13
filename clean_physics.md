@@ -9,6 +9,38 @@ Branch: `clean_physics`. Driven by Ralph loop + `/codex:adversarial-review`.
 - **Ocean** (`src/legoesm/ocean/physics/`): vertical_mixing, bottom_drag, lateral_mixing, convection, surface_forcing, shortwave_penetration, mixing.
 - **Cryosphere** (`src/legoesm/ice/`): sea_ice, dynamics, itd, rheology, transport.
 
+## Iteration 66 — 2026-05-13
+
+**Inspection iteration on sea-ice `_thermo_single` (no code changes).**
+
+- **`dh_dt_sublim`** uses `-lhflx / (ρ_ice · L_s)`.  Upstream
+  `_bulk_flux_dispatch` always passes `L_latent=constants.L_s` for
+  sea-ice (sublimation, not vaporisation) so the division is
+  dimensionally consistent.  ✓
+- **`freshwater_to_ocean = -ρ_ice · (dh_dt_total - dh_dt_sublim)`**:
+  Sign convention verified — pure sublim gives FW=0 (mass goes to
+  atmosphere, not ocean), pure melt gives FW > 0 (mass to ocean),
+  pure freeze gives FW < 0 (mass extracted from ocean).
+- **`h_eff = max(h, h_ice_min)`** caps conduction at very thin ice
+  (h < 0.01 m); under-estimates F_cond marginally but prevents
+  numerical divergence.  Mass conservation unaffected.
+- **Phantom skin on open water (`ice_mask=False`)**: `skin_cap`
+  uses `h_eff = h_ice_min` even on open-water cells.  `T_trial`
+  responds, but the `T_new = T_freeze_ocean` clip and the
+  `dh_dt = where(ice_mask, dh_dt_ice, dh_dt_open)` selector mask
+  the spurious `dh_dt_surface_melt` so it doesn't affect the open-
+  water energy budget.
+- **`dconc_growth = dh_dt_open · lead_area / h_new_ice`** matches
+  CICE convention: new-ice forms with `h_new_ice` thickness over
+  `lead_area`; concentration grows linearly with the freezing rate.
+- **`dconc_melt = min(dh_dt, 0) · conc / h_eff`**: floes shrink
+  laterally while thickness stays ≈ constant; sign carries through
+  for melt.
+
+No new fixes needed.  CICE V=h·A refactor remains the open
+structural item for the slab-path mass-bookkeeping under
+simultaneous melt + lead-freeze (iter-25 attempt reverted).
+
 ## Iteration 65 — 2026-05-13
 
 **Inspection iteration on atmospheric convection + coupler bulk-flux
