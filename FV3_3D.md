@@ -3297,6 +3297,13 @@ STILL OPEN (post-iter-99 stretch goals):
     now have regression-guard coverage for the higher-order
     Laplacian iteration; the FV3-faithful expanding-halo
     restructure remains the only open follow-up.
+  - iter 888: nord=3 PE stress test
+    (``test_corner_div_damp_nord3_pe_loop_scales``) confirming
+    the ``for _ in range(nord)`` Laplacian iteration loop scales
+    beyond nord=2.  nord=3 runs without NaN AND differs from
+    nord=2, ruling out a silent cap at nord=2 due to numerical
+    fixed-point convergence or loop truncation.  FV3 uses
+    nord ∈ {1, 2, 3} in its namelist range; legoESM matches.
 - iter-168/169/170/171 documented PE-vs-NH FV3-fidelity asymmetries
   ALL CLOSED:
   * ✅ corner-divergence damping (PE iter 16/18) — closed iter 168

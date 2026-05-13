@@ -701,6 +701,91 @@ def test_corner_div_damp_nord2_pe_runs_and_differs_from_nord1(small_3d_state):
     )
 
 
+def test_corner_div_damp_nord3_pe_loop_scales(small_3d_state):
+    """FV3_3D iter 888: nord=3 PE stress test.
+
+    Validates that the higher-order Laplacian iteration loop in
+    ``primitive_eq_cdgrid.py:508-510``::
+
+        _divg_d_iter = delpc
+        for _ in range(config.corner_div_damp_nord):
+            _divg_d_iter = _lap_per_level(_divg_d_iter)
+
+    scales beyond nord=2 (which is regression-guarded by iter-886).
+    Three checks:
+
+    1. ``corner_div_damp_nord=3`` runs end-to-end without NaN.
+       Confirms the ``for _ in range(nord)`` loop is JAX-traceable
+       at higher orders, not silently truncating.
+
+    2. nord=3 output differs from nord=2.  Confirms each additional
+       iteration contributes non-trivial Laplacian smoothing
+       (not silently converging to a fixed point after 2 iters
+       due to numerical-precision floor).
+
+    3. dd8 scaling factor ``(da_min_c·d4_bg)^(nord+1)`` increases
+       monotonically with nord, so the *damping magnitude* per
+       passing time-step grows with nord — verify u_d remains
+       finite under the stronger damping.
+
+    FV3 typically uses ``nord ∈ {1, 2, 3}`` (sw_core.F90 namelist
+    ranges).  This test pins behaviour at the upper bound.
+    """
+    grid, cdgrid, coord, _ = small_3d_state
+
+    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        CDGridPrimitiveEquationModel,
+    )
+
+    s = held_suarez_init(grid, coord)
+    s = hydrostatic_to_fv3(s, cdgrid)
+    n = grid.n
+    nlev = s.u_d.data.shape[-1]
+    rng = np.random.default_rng(seed=888)
+    u_p = rng.uniform(-3.0, 3.0, size=(6, n + 1, n + 1, nlev))
+    v_p = rng.uniform(-3.0, 3.0, size=(6, n + 1, n + 1, nlev))
+    s = s._replace(
+        u_d=s.u_d.replace(data=jnp.asarray(u_p)),
+        v_d=s.v_d.replace(data=jnp.asarray(v_p)),
+    )
+
+    cfg_nord2 = CDGridPrimitiveEquationConfig(
+        div_damp_coeff=1e7,
+        corner_div_damp_d2_bg=0.0005,
+        corner_div_damp_dddmp=0.20,
+        corner_div_damp_d4_bg=1e-3,
+        corner_div_damp_nord=2,
+        corner_div_damp_fv3_vector_fill=True,
+    )
+    cfg_nord3 = CDGridPrimitiveEquationConfig(
+        div_damp_coeff=1e7,
+        corner_div_damp_d2_bg=0.0005,
+        corner_div_damp_dddmp=0.20,
+        corner_div_damp_d4_bg=1e-3,
+        corner_div_damp_nord=3,
+        corner_div_damp_fv3_vector_fill=True,
+    )
+
+    m_nord2 = CDGridPrimitiveEquationModel(grid, coord, cfg_nord2)
+    m_nord3 = CDGridPrimitiveEquationModel(grid, coord, cfg_nord3)
+
+    s_nord2 = m_nord2.step(s, 100.0)
+    s_nord3 = m_nord3.step(s, 100.0)
+
+    # (1) nord=3 runs without NaN.
+    assert jnp.all(jnp.isfinite(s_nord3.u_d.data))
+    assert jnp.all(jnp.isfinite(s_nord3.v_d.data))
+    assert jnp.all(jnp.isfinite(s_nord3.T.data))
+    assert jnp.all(jnp.isfinite(s_nord3.p_s.data))
+
+    # (2) nord=3 differs from nord=2 — extra iteration contributes.
+    max_diff_u = float(jnp.max(jnp.abs(s_nord3.u_d.data - s_nord2.u_d.data)))
+    assert max_diff_u > 1e-12, (
+        "nord=3 produced bit-for-bit identical output to nord=2; "
+        "Laplacian iteration loop may be silently capped at 2."
+    )
+
+
 def test_smagorinsky_cs_zero_is_bit_for_bit_baseline(small_3d_state):
     """iter 58: ``smagorinsky_cs = 0`` (default) → bit-for-bit
     identical to the iter-19/24 path that does not have Smagorinsky.
