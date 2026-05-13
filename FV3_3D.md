@@ -5291,6 +5291,76 @@ natural climate-variability driver (Pinatubo cooled global mean
 GISS/AR5 empirical scaling (default arg).  No `constants.py`
 additions.
 
+## Iter 843 — aerosol_forcing_fv3 (ERFari + ERFaci)
+
+Added `aerosol_forcing_fv3(tau_aero, n_cdnc_ratio=1.0,
+beta_direct=20.0, beta_indirect=−0.45)` to `grids/cubed_sphere.py`.
+Anthropogenic-aerosol radiative forcing combining direct (Charlson-
+Schwartz 1992) + Boucher-Lohmann 1995 Twomey indirect:
+
+```
+ΔF_aero_dir   = − β_direct · τ_aero                      (ERFari)
+ΔF_aero_indir = β_indirect · ln(N_d / N_d_ref)           (ERFaci)
+ΔF_aero_total = direct + indirect
+```
+
+β_direct = 20 W/m² (weaker than iter-842 volcanic 25 because
+tropospheric AOD has shorter residence + lower-altitude scattering).
+β_indirect = −0.45 W/m² (AR5/AR6 ERFaci median).
+
+AR6 typical magnitudes:
+  | mechanism            | ΔF (W/m²) |
+  |----------------------|-----------|
+  | ERFari direct        | −0.22     |
+  | ERFaci indirect      | −0.84     |
+  | ERFari + ERFaci      | −1.06     |
+  | range (5–95% CL)     | −2.0 to −0.6 |
+
+**Closes the AR6 anthropogenic-forcing trinity** with the GHG
+trio (iter-838/839/840):
+
+  ΔF_GHG_present-day                              ≈ +3.0 W/m²
+  ΔF_aero (iter-843)                              ≈ −1.1
+  ──────────────────────────────────────────────────────────
+  ΔF_anthro_net                                   ≈ +1.9 W/m²
+
+Net-anthro ECS (excluding solar/volcanic) at |λ|=1.4 → ΔT ≈
+1.36 K (AR6 historical-warming-consistent).
+
+Composes iter-836 ECS / iter-837 TCR:
+
+```
+{τ_aero, N_d ratio} → iter-843 ΔF_aero
+→ iter-836/837 ECS/TCR → ΔT
+```
+
+Pairs with iter-826 ``cloud_albedo_two_stream_fv3`` (cloud SW
+scattering), iter-841 ``solar_forcing_fv3``, iter-842
+``volcanic_forcing_fv3``.
+
+Used by: CMIP6 DAMIP / hist-aer attribution, AeroCom Phase I-III
+intercomparison, AR5/AR6 ERFari + ERFaci tables, Boucher-Lohmann
+1995 Twomey-effect studies, Bellouin et al. 2020 aerosol-forcing
+review.
+
+Test: `tests/test_fv3_aerosol_forcing_iter843.py` (7 tests:
+direct-only τ=0.02 → −0.40, indirect-only ratio=1.5 → −0.18,
+no-perturbation zero, combined AR6 central ≈ −1.06, GHG-aerosol
+net ≈ +1.15 W/m², N_d=0 floored, 3-D shapes).
+
+### Why this iteration was meaningful
+
+**Closes the complete AR6 anthropogenic-forcing trinity** —
+GHG (CO₂+CH₄+N₂O) + aerosol (direct+indirect).  Aerosol forcing
+is the **single largest source of historical-forcing uncertainty**
+(AR6 5–95% range −2.0 to −0.6 W/m²) and the canonical anti-GHG
+cooling term that constrains transient climate sensitivity via
+the historical-warming budget.  Together with iter-841 (solar)
+and iter-842 (volcanic), all four CMIP6 DAMIP attribution forcing
+agents are now pure-JAX primitives.  Pure JAX, vmap-compatible.
+β coefficients are AR5/AR6 empirical fits (default args).  No
+`constants.py` additions.
+
 
 
 

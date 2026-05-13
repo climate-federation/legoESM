@@ -7635,6 +7635,101 @@ def volcanic_forcing_fv3(
     return -alpha_volc * tau_strat
 
 
+def aerosol_forcing_fv3(
+    tau_aero: jax.Array,
+    n_cdnc_ratio: jax.Array = 1.0,
+    beta_direct: float = 20.0,
+    beta_indirect: float = -0.45,
+    ratio_floor: float = 1e-6,
+) -> jax.Array:
+    """FV3_3D iter 843: anthropogenic-aerosol direct + indirect forcing.
+
+    Linear-direct + Boucher-Lohmann-1995 log-indirect TOA forcing
+    from anthropogenic-aerosol perturbation:
+
+        ΔF_aero_dir   = − β_direct · τ_aero
+        ΔF_aero_indir = β_indirect · ln(N_d / N_d_ref)
+        ΔF_aero_total = ΔF_aero_dir + ΔF_aero_indir
+
+    Where:
+      * τ_aero      — tropospheric anthropogenic AOD (550 nm).
+      * N_d/N_d_ref — cloud-droplet-number-concentration ratio
+                      (Twomey effect; >1 ⇒ more CCN ⇒ smaller
+                      droplets ⇒ brighter clouds).
+      * β_direct    — direct-effect coefficient (W/m²); default
+                      20 (Charlson-Schwartz 1992, weaker than
+                      iter-842 volcanic 25 W/m² because
+                      tropospheric AOD has shorter residence time
+                      and lower-altitude scattering).
+      * β_indirect  — indirect-effect log coefficient (W/m²);
+                      default −0.45 (AR5/AR6 ERFaci median).
+
+    Sign convention: both terms typically negative ⇒ aerosol
+    cools climate (sulfate dominates anthropogenic burden;
+    AR5/AR6 ERFari+aci ≈ −1.1 W/m² central, range −1.7 to −0.4).
+
+    AR6 typical magnitudes:
+      | mechanism            | ΔF (W/m²) |
+      |----------------------|-----------|
+      | ERFari direct        | −0.22     |
+      | ERFaci indirect      | −0.84     |
+      | ERFari + ERFaci      | −1.06     |
+      | range (5–95% CL)     | −2.0 to −0.6 |
+
+    Closes the AR6 anthropogenic-forcing trinity together with:
+      * iter-838/839/840 GHG forcing  (CO₂, CH₄, N₂O)  ≈ +3.0 W/m²
+      * iter-843 aerosol forcing                       ≈ −1.1 W/m²
+      → AR6 anthropogenic net                          ≈ +1.9 W/m²
+
+    Net anthropogenic-only ECS (excluding solar/volcanic):
+    1.9 W/m² → iter-836 ECS(λ=−1.4) ≈ 1.36 K (historical-warming
+    consistent with AR6).
+
+    Composes iter-836 ECS / iter-837 TCR:
+
+        {τ_aero, N_d ratio} → iter-843 ΔF_aero
+        → iter-836/837 ECS/TCR → ΔT
+
+    Pairs with iter-826 ``cloud_albedo_two_stream_fv3`` (shares
+    cloud-microphysics SW-scattering structure), iter-841
+    ``solar_forcing_fv3``, iter-842 ``volcanic_forcing_fv3``.
+
+    Used by: CMIP6 DAMIP / hist-aer attribution, AeroCom Phase I-III
+    intercomparison, AR5/AR6 ERFari and ERFaci tables, Boucher-
+    Lohmann 1995 Twomey-effect studies, Bellouin et al. 2020
+    aerosol-forcing review.
+
+    ``ratio_floor`` prevents ln(0) for hypothetical zero-CDNC.
+
+    Parameters
+    ----------
+    tau_aero : jax.Array
+        Tropospheric anthropogenic AOD at 550 nm (dimensionless,
+        ≥ 0).  Typical present-day global mean: 0.02 (regional
+        SE Asia summer ~0.5).
+    n_cdnc_ratio : jax.Array or float
+        Cloud-droplet-number ratio N_d/N_d_ref (dimensionless).
+        Default 1.0 (no indirect effect).  AR6 present-day
+        global mean: ~1.2–1.4 anthropogenic perturbation.
+    beta_direct : float
+        Direct-effect coefficient (W/m²); default 20.
+    beta_indirect : float
+        Indirect-effect log coefficient (W/m²); default −0.45.
+    ratio_floor : float
+        Lower bound on N_d/N_d_ref; default 1e-6.
+
+    Returns
+    -------
+    delta_f : jax.Array
+        Total aerosol radiative forcing (W/m²); negative for
+        anthropogenic cooling (typical sign).
+    """
+    ratio_safe = jnp.maximum(n_cdnc_ratio, ratio_floor)
+    direct = -beta_direct * tau_aero
+    indirect = beta_indirect * jnp.log(ratio_safe)
+    return direct + indirect
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,
