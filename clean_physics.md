@@ -338,6 +338,42 @@ Verified clean:
 
 No code changes this iteration.
 
+## Iter-96 — KPP vertical mixing inspection
+Audited `ocean/physics/vertical_mixing/kpp.py` end-to-end (467 lines).
+
+Verified clean:
+- **`_boundary_layer_depth`**: sigmoid-weighted soft Ri_b crossing
+  interpolation with column-stability fallback; AD-safe via `sqrt(max(
+  |N²|, 1e-30))` floor; iter-23 fix for V_t implicit decoupling via
+  `h_bl_prev` carry.
+- **Friction velocity**: proper `u* = sqrt(|τ| / ρ_0)` when stress
+  provided, falls back to `0.01 · |U_sfc|` proxy.
+- **B_f sign convention**: B_f > 0 = destabilizing (convective).
+  iter-1 #4 fix held: `max(-zeta_kpp, 0)` not `max(zeta_kpp, 0)` for
+  stable suppression `1 + 5·|ζ|`.  iter-168 bug 1: `copysign(eps, B_f)`
+  preserves sign of B_f near zero (no classification flip).
+- **Monin-Obukhov w_s branches**: weakly unstable `κu*·(1+16|ζ|)^¼`;
+  strongly convective `[κ(u*³ + c_b·κ·max(B_f,0)·d)]^⅓` with
+  `ε·d > |L_MO|` switch; stable `κu*/(1 + 5·max(-ζ, 0))`.
+- **K_v / A_v separation**: iter-1 #6 fix held — interior background
+  floors use `K_bg` for tracer and `A_bg` for momentum (previously
+  both used `K_bg`).
+- **Non-local LMD94 Eq. 19 flux**: `F_nl = C_s · Q · G(σ)` at interior
+  interfaces; dT/dt = -∂F_nl/∂z discretized with zero-flux at surface
+  and bottom; iter-1 #1 fix held — column-level `is_unstable_col` gate
+  only, not per-level in-BL gate (preserves column conservation when
+  h_bl cuts through a grid cell).
+- **Telescope check**: `Σ_k dT/dt|_nl·dz = -F_T[0] + (F_T[0] - F_T[1])
+  + … + F_T[N-2] = 0`.  Column-conservative to machine precision.
+- **AD-safety**: `dz_safe = where(dz>0, dz, 1)` for non-local divisor;
+  `where(is_unstable_col & dz>0, dT_nl, 0)` outer mask gives clean
+  gradients on dry / land columns.
+- **`Q_sfc_T` / `Q_sfc_S` plumbing**: iter-168 bug 2 fix held — use
+  caller-supplied surface kinematic flux when provided, fall back to
+  `K_sfc · dT/dz` proxy only when absent.
+
+No code changes this iteration.
+
 ## Next iterations
 Continue addressing further codex findings and direct-inspection sweeps until all
 schemes are provably conservative, monotone, CFL-safe, and AD-safe across mixed
