@@ -8255,6 +8255,81 @@ def ice_mass_to_slr_fv3(
     return mass_loss_gt * 1.0e12 / (rho * ocean_area)
 
 
+def halosteric_sea_level_fv3(
+    delta_s_layer: jax.Array,
+    thickness: jax.Array,
+    beta_s: jax.Array = 7.6e-4,
+) -> jax.Array:
+    """FV3_3D iter 850: halosteric sea-level change (salinity primitive).
+
+    Column-integrated sea-level change from ocean salinity
+    perturbation via linearized-EOS haline-contraction coefficient
+    (mirror of iter-848 thermosteric):
+
+        Δη_halo = − Σ_k β_S(k) · ΔS(k) · H(k)      (m)
+
+    Where:
+      * β_S    — haline-contraction coefficient (1/psu, equivalently
+                 (g/kg)⁻¹).  Sea-water typical 7.6×10⁻⁴ /psu (T=15°C
+                 S=35); range 7×10⁻⁴ (warm) to 8×10⁻⁴ (cold).
+      * ΔS     — salinity change in layer (psu).
+      * H      — layer thickness (m).
+
+    Sign: ΔS > 0 (salinification) ⇒ Δη_halo < 0 (water contracts);
+    ΔS < 0 (freshening) ⇒ Δη_halo > 0 (local SLR).  This is the
+    opposite-sign mirror of iter-848 thermosteric.
+
+    Canonical magnitudes:
+      * Global mean ΔS ≈ 0 (mass conservation; halosteric ≈ 0 on
+        global mean — but locally important).
+      * North Atlantic freshening ~−0.5 psu over 1000 m:
+        Δη_halo ≈ +0.4 m (regional, contributes to AMOC-slowdown
+        SLR pattern).
+      * Tropical-Pacific salinification ~+0.3 psu over 500 m:
+        Δη_halo ≈ −0.1 m (regional dynamic SLR).
+      * AR6 §9.5.1: halosteric SLR globally ≈ 0 but spatially
+        explains O(0.1 m) regional pattern variation (Durack-
+        Wijffels 2015).
+
+    Layer-by-layer broadcast: same signature as iter-848.
+
+    **Closes the SLR-budget triplet** with iter-848 + iter-849:
+      * iter-848 thermosteric_sea_level_fv3  — ocean thermal exp
+      * iter-850 halosteric_sea_level_fv3    — ocean salinity exp
+      * iter-849 ice_mass_to_slr_fv3         — cryosphere melt
+
+    Together these span the AR6 SLR budget terms (~100% closure
+    when combined with land-water-storage residual).
+
+    Per CLAUDE.md ocean-EOS guidance: full β_S(T,S,p) lives in
+    ``legoesm.ocean.eos``.  Caller can use:
+
+        from legoesm.ocean import eos
+        beta = eos.compute_ocean_rho_dS(t, s, p) / eos.rho_0
+        eta_h = halosteric_sea_level_fv3(delta_s, thickness, beta)
+
+    Used by: AR5/AR6 §9.5.1 halosteric SLR diagnostics, Durack-
+    Wijffels 2015 ocean-salinity-pattern attribution, CMIP6 RFMIP-
+    SLR, ARGO salinity reconstructions (Durack et al. 2014).
+
+    Parameters
+    ----------
+    delta_s_layer : jax.Array
+        Per-layer salinity change (psu); shape ``(..., n_layers)``.
+    thickness : jax.Array
+        Per-layer thickness (m); same shape.
+    beta_s : jax.Array or float
+        Haline-contraction coefficient (1/psu); default 7.6e-4.
+
+    Returns
+    -------
+    delta_eta : jax.Array
+        Column-integrated halosteric SLR contribution (m); positive
+        for freshening (ΔS<0), negative for salinification.
+    """
+    return -jnp.sum(beta_s * delta_s_layer * thickness, axis=-1)
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

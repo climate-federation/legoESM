@@ -38,11 +38,11 @@ def test_iter365_compaction_present(doc_text):
     )
 
 
-def test_doc_size_below_5770_lines(doc_text):
+def test_doc_size_below_5260_lines(doc_text):
     n_lines = len(doc_text.splitlines())
-    assert n_lines < 5770, (
-        f"FV3_3D.md has {n_lines} lines (target < 5770).  "
-        f"Compaction scheduled at iter 850."
+    assert n_lines < 5260, (
+        f"FV3_3D.md has {n_lines} lines (target < 5260).  "
+        f"Next compaction at iter 860."
     )
 
 
@@ -471,6 +471,37 @@ def test_iter820_compaction_covers_topics(doc_text):
     for marker in required:
         assert marker in section, (
             f"iter-820 compacted block missing topic ``{marker}``."
+        )
+
+
+def test_iter850_compaction_present(doc_text):
+    """iter-850 compacted iter 841-849 into single block."""
+    assert "**Iters 841-849 (compacted iter 850)**" in doc_text, (
+        "iter-850 compaction block missing — doc re-expanded."
+    )
+
+
+def test_iter850_compaction_covers_topics(doc_text):
+    section_start = doc_text.find(
+        "**Iters 841-849 (compacted iter 850)**"
+    )
+    section_end = doc_text.find(
+        "**Iters 831-839", section_start,
+    )
+    assert section_start >= 0 and section_end > section_start
+    section = doc_text[section_start:section_end]
+    required = [
+        "841", "842", "843", "844", "845",
+        "846", "847", "848", "849", "850",
+        "solar_forcing", "volcanic_forcing",
+        "aerosol_forcing", "gwp_single_decay",
+        "gtp_single_decay", "tcre_remaining_budget",
+        "airborne_fraction_co2", "thermosteric_sea_level",
+        "ice_mass_to_slr", "halosteric_sea_level",
+    ]
+    for marker in required:
+        assert marker in section, (
+            f"iter-850 compacted block missing topic ``{marker}``."
         )
 
 

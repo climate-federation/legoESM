@@ -437,6 +437,7 @@ _GUARD_MODULES = (
     "test_fv3_airborne_fraction_iter847",            # iter-847 add
     "test_fv3_thermosteric_sea_level_iter848",       # iter-848 add
     "test_fv3_ice_mass_slr_iter849",                 # iter-849 add
+    "test_fv3_halosteric_sea_level_iter850",         # iter-850 add
 )
 
 
