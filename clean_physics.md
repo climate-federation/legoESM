@@ -177,8 +177,47 @@ Branch: `clean_physics`.  Driven by Ralph loop + `/codex:adversarial-review`.
   `compute_cape` already supports virtual-T mode when q_v threaded; the plume
   integrator does not yet.  Scheme-wide recalibration — defer until a dedicated tuning
   iter.
+- **Sea-ice `_thermo_single` emissivity** (`ice/sea_ice.py:614-617`): radiation
+  always uses `config.emissivity_ice` regardless of `ice_mask`.  For h=0 / empty-cat
+  cells the lw_up has a ε_ice (0.97) vs ε_ocean (0.99) bias.  Masked by conc-
+  weighted coupling in production, but a cleaner per-cat branch on
+  `surface_radiation_fluxes` is possible.
 - Codex `adversarial-review` runtime ~50/50 success/failure when running.  Continue
   alongside direct inspection.
+
+## Iter-91 — gravity-wave-drag + sea-ice thermo sweep (inspection only)
+Audited `atmosphere/physics/gravity_wave_drag/{rayleigh,mcfarlane,
+lindzen,hines}.py` and `ice/sea_ice._thermo_single`.
+
+All four GWD backends verified:
+- **Rayleigh**: BL drag ramp + sin² sponge top; frictional heating
+  `dT/dt = -(u·du/dt + v·dv/dt)/c_pd` = `+k·(u²+v²)/c_pd` preserves
+  total energy (KE → IE).  Column dissipation positive-definite.
+- **McFarlane / Lindzen**: stress dimensionally consistent
+  `tau_0 = G_0 · ρ · N · k · h² · U` [Pa]; saturation
+  `tau_sat = ε · ρ · |U|³ · k / N` [Pa]; soft-min / sigmoid breaking;
+  `accel = -drag/(ρ·dz)` projects along surface-wind direction —
+  correct for mountain-wave drag (decelerates upper flow in the
+  direction of original surface wind).
+- **Hines**: per-level rho-ratio WKB growth (single-step, not
+  cumulative); `sigma_sat = N/m_*` per level (not /√(ρ_sfc/ρ));
+  drag = ρ·(σ_grown² - σ_new²) [Pa].  All previous dimensional
+  issues caught in earlier iters (audits B1, B2).
+
+Sea-ice `_thermo_single`: ice_mask gating on F_cond / dh_dt_sublim
+correct, skin_cap = ½·ρ·c·h matches the half-slab convention,
+temperature clamp + excess-energy → surface-melt pattern is
+energy-conserving.  Open-water freeze gated by `enable_lead_freeze`
+for multi-category lead-freeze deposition (iter-3 #3 fix held).
+
+**One minor finding documented as deferred**: `surface_radiation_fluxes`
+uses `config.emissivity_ice` for all cells regardless of ice_mask —
+for h=0 / cat with conc=0 cells the lw_up bias is ε_ice (0.97) vs
+ε_ocean (0.99), but the result is masked by conc-weighted coupling
+so it does not affect production runs.  Listed under
+*Outstanding / Deferred*.
+
+No code changes this iteration.
 
 ## Next iterations
 Continue addressing further codex findings and direct-inspection sweeps until all
