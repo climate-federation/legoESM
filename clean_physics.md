@@ -272,6 +272,23 @@ the standard 30 % ratio.  All 107 convection tests
 (`tests/atmosphere/hydrostatic/unit/test_convection.py` +
 `tests/unit/test_physics_convection.py`) green.
 
+## Iter-103 — Tiedtke CMT downdraft missing RH trigger (codex follow-up to iter-102)
+Codex stop-time review on iter-102 flagged "CMT downdraft is now
+amplified without the RH downdraft trigger".  iter-102 removed the
+spurious hardcoded `× 0.3` on `M_d`, restoring the canonical Tiedtke
+30 % LFS ratio — but the subcloud rain-evap path also multiplies by
+`downdraft_trigger = sigmoid(10·(downdraft_RH_min − rh_below))` (~1
+in dry columns, ~0 in moist), so my fix amplified CMT downdraft 3.3×
+in moist columns where no physical downdraft would form.
+
+Fix: apply the same trigger to CMT M_d:
+
+    M_d = -downdraft_alpha · M_u(z) · downdraft_trigger
+
+so CMT downdraft mass-flux profile is consistent with the
+M_d_base = -downdraft_alpha · M_b · trigger used by the rain-evap
+path.  All 107 convection tests still green.
+
 ## Next iterations
 Continue addressing codex findings and direct-inspection sweeps until all schemes are
 provably conservative, monotone, CFL-safe, and AD-safe across mixed wet/dry grids.

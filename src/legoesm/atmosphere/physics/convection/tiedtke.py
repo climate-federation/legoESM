@@ -372,14 +372,28 @@ def tiedtke_convection(
     # -- CMT --------------------------------------------------------------
     if config.enable_cmt:
         if config.enable_downdraft:
-            # Downdraft mass flux profile = -downdraft_alpha · M_u (the
-            # canonical Tiedtke 1989 ~30 % ratio at the LFS, scaled
-            # column-wide).  An earlier formulation multiplied by an
-            # extra hardcoded ``0.3`` here on top of the already-0.3
-            # ``downdraft_alpha`` default, yielding an effective 9 %
-            # downdraft / updraft ratio inconsistent with the subcloud
-            # rain-evap path (line 312) and with Tiedtke literature.
-            M_d = -config.downdraft_alpha * M_u_for_kernel
+            # Downdraft mass flux profile for CMT:
+            #     M_d(z) = -downdraft_alpha · M_u(z) · downdraft_trigger
+            # where ``downdraft_alpha`` is the canonical Tiedtke 1989
+            # ~30 % LFS ratio and ``downdraft_trigger`` is the RH-based
+            # column gate computed for the subcloud rain-evap branch
+            # (sigmoid on below-LCL RH < downdraft_RH_min, ≈1 in dry
+            # columns, ≈0 in moist columns).
+            #
+            # An earlier formulation multiplied by a hardcoded ``× 0.3``
+            # on top of ``downdraft_alpha`` and *omitted* the
+            # ``downdraft_trigger`` gate (iter-102): the literal × 0.3
+            # gave a 9 % effective ratio, and removing it alone (without
+            # the trigger) amplified CMT downdraft in moist columns
+            # where no real downdraft forms — codex stop-time follow-up.
+            # iter-103 applies BOTH the canonical ``downdraft_alpha``
+            # ratio AND the RH trigger so CMT downdraft is consistent
+            # with the rain-evap path's M_d_base.
+            M_d = (
+                -config.downdraft_alpha
+                * M_u_for_kernel
+                * downdraft_trigger[:, None]
+            )
         else:
             M_d = None
         du_dt_conv, dv_dt_conv = cmt_gregory_1997(
