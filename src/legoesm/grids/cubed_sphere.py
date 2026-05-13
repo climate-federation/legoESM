@@ -11084,6 +11084,87 @@ def priestley_taylor_le_fv3(
     return alpha_pt * delta_pa_k / denom * available_energy
 
 
+def complementary_relationship_et_fv3(
+    le_wet: jax.Array,
+    le_pot: jax.Array,
+    floor_zero: bool = True,
+) -> jax.Array:
+    """FV3_3D iter 882: Bouchet 1963 complementary-relationship ET.
+
+    Bouchet 1963 / Brutsaert-Stricker 1979 Advection-Aridity
+    closure for *actual* ET from paired wet-surface and potential
+    ET estimates:
+
+        λE_actual = 2 · λE_wet − λE_pot        (W/m²)
+
+    Where:
+      * λE_wet  — wet-surface ET (Priestley-Taylor; from iter-881
+                  ``priestley_taylor_le_fv3``).
+      * λE_pot  — potential ET (Penman 1948 open-water form; can
+                  be derived from iter-870 PM with g_s → ∞).
+
+    Bouchet 1963 hypothesis: as actual ET decreases (drying soil),
+    surface heating + dry-air advection make atmosphere more
+    arid → potential ET *increases* by exactly the amount actual
+    ET decreased.  Sum λE_actual + λE_pot = 2·λE_wet remains
+    constant.
+
+    Regimes:
+      * Saturated surface: λE_actual = λE_wet = λE_pot.
+        (formula gives 2·λE_wet − λE_wet = λE_wet ✓)
+      * Drying:            λE_actual < λE_wet < λE_pot.
+      * Fully dry:         λE_actual = 0, λE_pot = 2·λE_wet.
+
+    Floor at zero (default): ``floor_zero=True`` clips negative
+    output to 0 (avoids spurious-negative ET in extreme-drought
+    regimes where complementary relationship breaks down).
+    Set False to inspect raw value.
+
+    Canonical magnitudes:
+      | scenario              | λE_wet | λE_pot | λE_actual |
+      |-----------------------|--------|--------|-----------|
+      | Saturated humid       | 350    | 350    | 350       |
+      | Mid-lat summer crop   | 300    | 400    | 200       |
+      | Arid sparse           | 200    | 500    | −100 → 0  |
+      | Tropical forest noon  | 450    | 470    | 430       |
+
+    **Closes the ET-formulation trio**:
+      * iter-870 PM   — full Monteith big-leaf (needs g_s, g_a, etc).
+      * iter-881 PT   — equilibrium wet-surface (radiation-limited).
+      * iter-882 CR   — complementary-relationship actual ET from
+                        wet + potential pair.
+
+    Composes naturally with iter-881 (λE_wet) and iter-870 PM
+    (λE_pot via g_s→∞ Penman limit).
+
+    Used by: Bouchet 1963 origin paper, Brutsaert-Stricker 1979
+    Advection-Aridity formulation, Morton 1983 CRAE model,
+    Granger-Gray 1989 modified CR, Han et al. 2012 generalized
+    CR review (Water Resour. Res.), Brutsaert 2015 modified PT-
+    CR (J. Hydrology) for non-humid surfaces, regional water-
+    balance studies (Hobbins-Ramirez 2001 IJC), satellite ET
+    cross-validation (PT-JPL vs CR-MOD16 vs PM-VIC).
+
+    Parameters
+    ----------
+    le_wet : jax.Array
+        Wet-surface ET (W/m²); from iter-881 PT.
+    le_pot : jax.Array
+        Potential ET (W/m²); from Penman 1948 or iter-870 PM
+        with g_s → ∞.
+    floor_zero : bool
+        If True (default), clip negative output to 0; if False,
+        return raw 2·λE_wet − λE_pot.
+
+    Returns
+    -------
+    le_actual : jax.Array
+        Actual ET (W/m²); ≥ 0 if ``floor_zero=True``.
+    """
+    raw = 2.0 * le_wet - le_pot
+    return jnp.maximum(raw, 0.0) if floor_zero else raw
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

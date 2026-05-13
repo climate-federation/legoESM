@@ -469,6 +469,7 @@ _GUARD_MODULES = (
     "test_fv3_vapor_pressure_iter879",               # iter-879 add
     "test_fv3_soil_heat_flux_iter880",               # iter-880 add
     "test_fv3_priestley_taylor_iter881",             # iter-881 add
+    "test_fv3_complementary_et_iter882",             # iter-882 add
 )
 
 

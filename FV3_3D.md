@@ -5395,3 +5395,67 @@ to satellite-derived radiation-only ET retrievals (MODIS R_n →
 PT λE).  Pure JAX, vmap-compatible.  α_PT=1.26 is PT 1972
 canonical (default arg).  No `constants.py` additions.
 
+## Iter 882 — complementary_relationship_et_fv3 (Bouchet 1963 CR)
+
+Added `complementary_relationship_et_fv3(le_wet, le_pot,
+floor_zero=True)` to `grids/cubed_sphere.py`.  Bouchet 1963 /
+Brutsaert-Stricker 1979 Advection-Aridity complementary-
+relationship closure:
+
+```
+λE_actual = 2 · λE_wet − λE_pot        (W/m²)
+```
+
+Bouchet hypothesis: as actual ET decreases (drying soil),
+potential ET *increases* by the same amount → sum stays constant
+at 2·λE_wet.
+
+Regimes:
+  * Saturated:  λE_actual = λE_wet = λE_pot
+  * Drying:     λE_actual < λE_wet < λE_pot
+  * Fully dry:  λE_actual = 0, λE_pot = 2·λE_wet
+
+``floor_zero=True`` (default) clips negative output to 0 (extreme
+drought beyond CR validity).  ``floor_zero=False`` returns raw.
+
+Canonical:
+  | scenario          | λE_wet | λE_pot | λE_actual |
+  |-------------------|--------|--------|-----------|
+  | Saturated humid   | 350    | 350    | 350       |
+  | Mid-lat summer    | 300    | 400    | 200       |
+  | Arid sparse       | 200    | 500    | 0 (clipped)|
+  | Tropical forest   | 450    | 470    | 430       |
+
+**Closes the ET-formulation trio**:
+  * iter-870 PM   — full Monteith (needs g_s/g_a; arbitrary regime)
+  * iter-881 PT   — equilibrium wet-surface (radiation-limited)
+  * iter-882 CR   — complementary actual-ET from (PT wet + Penman pot)
+
+Caller picks PM for full-data full-stress, PT for sparse-data
+wet, CR for sparse-data with sub-saturated surfaces.
+
+Used by: Bouchet 1963 origin, Brutsaert-Stricker 1979 AA, Morton
+1983 CRAE, Granger-Gray 1989 modified CR, Han et al. 2012 WRR
+generalized CR review, Brutsaert 2015 J. Hydrol. PT-CR for
+non-humid surfaces, Hobbins-Ramirez 2001 IJC regional water
+balance, PT-JPL vs CR-MOD16 vs PM-VIC ET-product intercomparison.
+
+Test: `tests/test_fv3_complementary_et_iter882.py` (7 tests:
+saturated identity λE_wet=λE_pot → λE_actual=λE_wet, drying
+λE_pot>λE_wet → λE_actual<λE_wet (analytic 200), fully dry zero
+floored, floor_zero=True default clips negative, floor_zero=False
+raw returned, chain via iter-881 PT λE_wet, 3-D shapes
+non-negative).
+
+### Why this iteration was meaningful
+
+**Closes the ET-formulation trio** (PM + PT + CR).  CR provides
+*actual* ET from paired wet + potential without needing g_s/g_a
+input — bridges the gap between PT (well-watered only) and PM
+(full data needed).  Critical for: (1) MODIS-style satellite-
+based actual-ET retrieval; (2) regional water-balance estimation
+with sparse-station data; (3) drought-evolution monitoring (CR
+amplifies the ET-pot growth as actual ET drops); (4) climate-
+model ET-formulation intercomparison.  Pure JAX, vmap-compatible.
+No `constants.py` additions.
+
