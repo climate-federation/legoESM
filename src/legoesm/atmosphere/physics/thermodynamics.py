@@ -218,6 +218,7 @@ def compute_moist_adiabat(
     T_base: jax.Array,
     p_levels: jax.Array,
     q_v_base: jax.Array | None = None,
+    lcl_sigmoid_width_pa: float = 100.0,
 ) -> jax.Array:
     """Compute parcel temperature profile from surface upward.
 
@@ -246,6 +247,10 @@ def compute_moist_adiabat(
         Pressure at full levels [Pa], top-to-bottom ordering.
     q_v_base : jax.Array, shape (ncol,) or None
         Optional water-vapor mixing ratio at the launch level [kg/kg].
+    lcl_sigmoid_width_pa : float
+        Sigmoid transition width [Pa] for the smooth dry/moist switch
+        across the LCL.  Default 100 Pa (~1 hPa) gives a tight
+        differentiable transition relative to the ~10⁵ Pa column range.
 
     Returns
     -------
@@ -294,15 +299,14 @@ def compute_moist_adiabat(
         T_prev_val, p_prev_val = carry
 
         # Smooth dry/moist switches.  Pressure decreases upward, so
-        # ``p > p_lcl`` ⇔ below LCL.  Width = 100 Pa (≈ 1 hPa) gives a
-        # tight differentiable transition relative to the ~10⁵ Pa
-        # column range.
+        # ``p > p_lcl`` ⇔ below LCL.  Transition width is configurable
+        # via ``lcl_sigmoid_width_pa`` (default 100 Pa ≈ 1 hPa).
         if q_v_base is None:
             below_lcl_k = jnp.zeros_like(p_k)
             prev_below_lcl = jnp.zeros_like(p_k)
         else:
-            below_lcl_k = jax.nn.sigmoid((p_k - p_lcl) / 100.0)
-            prev_below_lcl = jax.nn.sigmoid((p_prev_val - p_lcl) / 100.0)
+            below_lcl_k = jax.nn.sigmoid((p_k - p_lcl) / lcl_sigmoid_width_pa)
+            prev_below_lcl = jax.nn.sigmoid((p_prev_val - p_lcl) / lcl_sigmoid_width_pa)
 
         # Straddling steps (previous below LCL, current above) must
         # start the moist integration at the LCL itself rather than

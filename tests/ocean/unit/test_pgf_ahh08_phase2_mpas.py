@@ -51,12 +51,12 @@ def _build_test_state(nlev=10, sub=2):
     return mesh, pc, H_bathy
 
 
-def _uniform_rest_T_S(pc, T_surface=20.0, T_deep=2.0, S_uniform=35.0):
+def _uniform_rest_T_S(pc, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0):
     """Horizontally uniform T(z), S(z) — exponential T(z) profile."""
     nlev = pc.h_partial.shape[-1]
     nCells = pc.h_partial.shape[0]
     z_full = pc.z_full_ref  # (nlev,), negative downward
-    T_prof = T_deep + (T_surface - T_deep) * jnp.exp(z_full / 1000.0)
+    T_prof = T_deep + (T_water_init_C - T_deep) * jnp.exp(z_full / 1000.0)
     T_3d = jnp.broadcast_to(T_prof[None, :], (nCells, nlev)).astype(jnp.float64)
     S_3d = jnp.full((nCells, nlev), S_uniform, dtype=jnp.float64)
     return T_3d, S_3d

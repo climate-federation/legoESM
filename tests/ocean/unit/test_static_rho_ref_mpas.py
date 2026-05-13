@@ -58,7 +58,7 @@ def setup():
     z_coord = create_ocean_z_star(n_levels=10, H_max=5500.0)
     state = rest_state_mpas_ocean(
         mesh, z_coord,
-        T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+        T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
         H_max=5500.0, land_lat_threshold=80.0,
     )
     pc_coord = create_partial_cell_coordinate(z_coord, state.H_bathy.data)

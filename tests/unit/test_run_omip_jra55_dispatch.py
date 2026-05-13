@@ -435,7 +435,7 @@ def test_cli_rejects_unknown_forcing_mode():
 # Day 3 — sponges + SSS restoring + freeze cap
 # ============================================================================
 
-def _make_woa_like_targets(grid, T_surface=18.0, T_deep=2.0, S_uniform=35.0,
+def _make_woa_like_targets(grid, T_water_init_C=18.0, T_deep=2.0, S_uniform=35.0,
                             nlev=4):
     """Build (T_woa, S_woa) of shape (n_lat, n_lon, nlev) — WOA-like
     targets with smooth latitudinal SST and uniform S.
@@ -451,7 +451,7 @@ def _make_woa_like_targets(grid, T_surface=18.0, T_deep=2.0, S_uniform=35.0,
     n_lat = int(grid.n_lat)
     n_lon = int(grid.n_lon)
     lat_deg = np.degrees(np.asarray(grid.lat))
-    sst = T_surface * np.cos(np.deg2rad(lat_deg))   # °C
+    sst = T_water_init_C * np.cos(np.deg2rad(lat_deg))   # °C
     T_3d = np.empty((n_lat, n_lon, nlev), dtype=np.float64)
     for k in range(nlev):
         # Linear cooling with depth, in °C.

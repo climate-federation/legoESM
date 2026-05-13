@@ -2,6 +2,30 @@
 
 Provides the Spherical Fourier Neural Operator (SFNO) and supporting
 infrastructure for learned dynamical cores and hybrid ML-physics models.
+
+Integration status
+------------------
+The ``ml/`` subtree is staged-not-integrated experimental scaffolding.
+
+Audited 2026-05-13: 36 modules in this subtree are not imported by any
+non-``ml/`` source file and many lack direct unit tests
+(``ml/training.py``, ``ml/s2s/paths.py``, ``ml/s2s/plotting.py``,
+``ml/physics/{plotting,model,train,evaluate,data}.py``,
+``ml/s2s/neuralgcm_slab/{metrics,neuralgcm_backend,cli}.py``,
+``ml/s2s/sfno_slab/{config,evaluation,postprocess,cli,rollout,preparation,data,regrid}.py``).
+
+The leaf training/eval/plotting modules are reachable only from CLI
+entry points and notebooks — they are research scaffolding, not yet
+wired into the core dynamical-core ↔ physics pipeline that the rest of
+``src/legoesm/`` services.  New ML work should either (a) commit to
+adding direct unit tests when a module is touched, or (b) move the
+module to a ``_future/`` sibling per the CLAUDE.md staged-not-integrated
+rule.  Do not extend the untested-leaf footprint of this subtree.
+
+The publicly re-exported names below (``SFNO``, ``SFNOBlock``,
+``SpectralConv``, channel-packing helpers, conservation correctors) ARE
+covered by direct tests in ``tests/`` and are safe to import from
+production callers.
 """
 
 from legoesm.ml.normalization import (

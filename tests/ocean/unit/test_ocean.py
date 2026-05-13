@@ -83,7 +83,7 @@ def ocean_state(ocean_grid, ocean_z_coord):
     """Rest-state ocean initial condition."""
     return rest_state_ocean(
         ocean_grid, ocean_z_coord,
-        T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+        T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
         H_max=4000.0,
     )
 
@@ -537,7 +537,7 @@ class TestOceanTendencies:
         """FV tendencies should include planetary Coriolis on shear flow."""
         state = rest_state_ocean(
             ocean_grid, ocean_z_coord, H_max=4000.0, land_lat_threshold=90.0,
-            T_surface=15.0, T_deep=15.0,
+            T_water_init_C=15.0, T_deep=15.0,
         )
         nlev = ocean_z_coord.n_levels
         shear_profile = jnp.linspace(-1.0, 1.0, nlev, dtype=jnp.float32)
@@ -1332,8 +1332,8 @@ class TestSpectralOcean:
             rest_state_spectral_ocean(grid, z_coord, land_lat_threshold=-1.0)
         with pytest.raises(ValueError, match="land_lat_threshold"):
             rest_state_spectral_ocean(grid, z_coord, land_lat_threshold=91.0)
-        with pytest.raises(ValueError, match="T_surface"):
-            rest_state_spectral_ocean(grid, z_coord, T_surface=float("inf"))
+        with pytest.raises(ValueError, match="T_water_init_C"):
+            rest_state_spectral_ocean(grid, z_coord, T_water_init_C=float("inf"))
 
     def test_model_warns_for_ignored_barotropic_substeps(self):
         from legoesm.grids.gaussian import create_gaussian_grid
@@ -1418,7 +1418,7 @@ class TestLongRunConservation:
         grid = create_cubed_sphere(8)
         z_coord = create_ocean_z_star(n_levels=10, H_max=4000.0)
         state = rest_state_ocean(
-            grid, z_coord, T_surface=20.0, T_deep=2.0,
+            grid, z_coord, T_water_init_C=20.0, T_deep=2.0,
             S_uniform=35.0, H_max=4000.0,
         )
         config = OceanConfig(
@@ -1467,7 +1467,7 @@ class TestLongRunConservation:
         grid = create_cubed_sphere(8)
         z_coord = create_ocean_z_star(n_levels=10, H_max=4000.0)
         state = rest_state_ocean(
-            grid, z_coord, T_surface=20.0, T_deep=2.0,
+            grid, z_coord, T_water_init_C=20.0, T_deep=2.0,
             S_uniform=35.0, H_max=4000.0,
         )
         config = OceanConfig(

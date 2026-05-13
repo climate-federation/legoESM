@@ -159,7 +159,7 @@ class TestStepBathymetryRestState:
         H_bathy = _make_step_bathymetry(grid)
         state = rest_state_latlon_cgrid_ocean(
             grid, z_coord,
-            T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+            T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
             H_bathy_override=H_bathy,
         )
         # All ocean (no land mask), uniform T(z) and S → density depends
@@ -181,7 +181,7 @@ class TestStepBathymetryRestState:
         H_bathy = _make_step_bathymetry(grid)
         state = rest_state_latlon_cgrid_ocean(
             grid, z_coord,
-            T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+            T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
             H_bathy_override=H_bathy,
         )
         # Use implicit-CN solver to avoid chequerboard and barotropic
@@ -214,14 +214,14 @@ class TestStepBathymetryRestState:
         # Path A: legacy flat-bottom default
         s_a = rest_state_latlon_cgrid_ocean(
             grid, z_coord,
-            T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+            T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
             H_max=4000.0, land_lat_threshold=80.0,
         )
         # Path B: same but explicit flat-bottom H_bathy_override
         H_flat = jnp.full((grid.n_lat, grid.n_lon), 4000.0)
         s_b = rest_state_latlon_cgrid_ocean(
             grid, z_coord,
-            T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+            T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
             H_bathy_override=H_flat,
         )
         # T, S, u, v, eta should match exactly.
@@ -264,7 +264,7 @@ class TestSmoothBathymetryTracerConservation:
         H_bathy = _make_smooth_bathymetry(grid)
         state = rest_state_latlon_cgrid_ocean(
             grid, z_coord,
-            T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+            T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
             H_bathy_override=H_bathy,
         )
         # Initial integrated heat and salt
@@ -310,7 +310,7 @@ class TestSmoothBathymetryTracerConservation:
         H_bathy = _make_smooth_bathymetry(grid)
         state = rest_state_latlon_cgrid_ocean(
             grid, z_coord,
-            T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+            T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
             H_bathy_override=H_bathy,
         )
         col0 = state.eta.data + state.H_bathy.data

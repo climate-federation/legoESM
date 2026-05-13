@@ -63,7 +63,7 @@ class GlobalOverturningConfig:
     """Configuration for the global overturning circulation experiment."""
 
     # --- Stratification ---
-    T_surface: float = 20.0        # Surface temperature [degC]
+    T_water_init_C: float = 20.0        # Surface temperature [degC]
     T_deep: float = 2.0            # Abyssal temperature [degC]
     T_scale_depth: float = 1000.0  # Stratification e-folding depth [m]
     S_uniform: float = 35.0        # Uniform salinity [PSU] (T-only EOS)
@@ -114,13 +114,13 @@ class GlobalOverturningConfig:
 def _add_stratification(state, z_coord, config: GlobalOverturningConfig):
     """Add exponential temperature stratification to a uniform state.
 
-    T(z) = T_deep + (T_surface - T_deep) * exp(z / scale_depth)
+    T(z) = T_deep + (T_water_init_C - T_deep) * exp(z / scale_depth)
 
     where z is negative (depth below surface).
     """
     z_full = np.asarray(z_coord.z_full_ref)   # negative values
     decay = np.exp(z_full / config.T_scale_depth)
-    T_profile = config.T_deep + (config.T_surface - config.T_deep) * decay
+    T_profile = config.T_deep + (config.T_water_init_C - config.T_deep) * decay
 
     T_data = np.array(state.T.data)
     for k in range(z_coord.n_levels):
@@ -149,7 +149,7 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
         state = rest_state_latlon_cgrid_ocean(
             grid, z_coord,
-            T_surface=config.T_surface, T_deep=config.T_surface,
+            T_water_init_C=config.T_water_init_C, T_deep=config.T_water_init_C,
             S_uniform=config.S_uniform,
         )
         lon_1d = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
@@ -166,7 +166,7 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         from legoesm.ocean.init_mpas import rest_state_mpas_ocean
         state = rest_state_mpas_ocean(
             grid, z_coord,
-            T_surface=config.T_surface, T_deep=config.T_surface,
+            T_water_init_C=config.T_water_init_C, T_deep=config.T_water_init_C,
             S_uniform=config.S_uniform,
         )
         lon_deg = np.asarray(grid.lonCell, dtype=np.float64) * 180 / np.pi

@@ -198,7 +198,7 @@ from legoesm.core.field import Field
 ll_config = LatLonCGridOceanConfig(n_barotropic_substeps=30, physics=physics, A_h=5e5)
 ll_model = LatLonCGridOceanModel(ll_grid, z_coord, ll_config)
 ll_state = rest_state_latlon_cgrid_ocean(
-    ll_grid, z_coord, T_surface=T_UNIFORM, T_deep=T_UNIFORM, S_uniform=S_UNIFORM)
+    ll_grid, z_coord, T_water_init_C=T_UNIFORM, T_deep=T_UNIFORM, S_uniform=S_UNIFORM)
 mask_typed = mask_ll_2d.astype(ll_state.eta.data.dtype)
 u_mask_new, v_mask_new = compute_face_masks(jnp.asarray(mask_typed))
 ll_state = ll_state._replace(
@@ -212,7 +212,7 @@ from legoesm.ocean.init_mpas import rest_state_mpas_ocean
 mpas_config = MPASOceanConfig(n_barotropic_substeps=30, physics=physics, A_h=5e5)
 mpas_model = MPASOceanModel(mpas_mesh, z_coord, mpas_config)
 mpas_state = rest_state_mpas_ocean(
-    mpas_mesh, z_coord, T_surface=T_UNIFORM, T_deep=T_UNIFORM, S_uniform=S_UNIFORM)
+    mpas_mesh, z_coord, T_water_init_C=T_UNIFORM, T_deep=T_UNIFORM, S_uniform=S_UNIFORM)
 mpas_state = mpas_state._replace(
     land_mask=Field(data=jnp.asarray(mask_cells.astype(mpas_state.eta.data.dtype))))
 

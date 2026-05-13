@@ -162,7 +162,7 @@ def _init_latlon(grid, z_coord, config):
 
     state = rest_state_latlon_cgrid_ocean(
         grid, z_coord, H_max=config.H_max,
-        T_surface=config.delta_T, T_deep=0.0,
+        T_water_init_C=config.delta_T, T_deep=0.0,
         S_uniform=config.S_uniform,
         land_mask_override=wall_mask,
     )
@@ -212,7 +212,7 @@ def _init_mpas(mesh, z_coord, config):
 
     state = rest_state_mpas_ocean(
         mesh, z_coord, H_max=config.H_max,
-        T_surface=config.delta_T, T_deep=0.0,
+        T_water_init_C=config.delta_T, T_deep=0.0,
         S_uniform=config.S_uniform,
     )
 

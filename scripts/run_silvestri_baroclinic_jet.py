@@ -217,7 +217,7 @@ def create_initial_state(grid, z_coord, wall_mask, cfg: SilvestriConfig):
     """
     state = rest_state_latlon_cgrid_ocean(
         grid, z_coord,
-        T_surface=cfg.T_ref, T_deep=cfg.T_ref,
+        T_water_init_C=cfg.T_ref, T_deep=cfg.T_ref,
         S_uniform=cfg.S_uniform,
         H_max=cfg.H_max,
         land_mask_override=jnp.array(wall_mask),

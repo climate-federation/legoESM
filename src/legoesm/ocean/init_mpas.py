@@ -54,7 +54,7 @@ def idealized_bathymetry_mpas(
 def rest_state_mpas_ocean(
     mesh: VoronoiMesh,
     z_coord: OceanZStarCoordinate,
-    T_surface: float = 20.0,
+    T_water_init_C: float = 20.0,
     T_deep: float = 2.0,
     S_uniform: float = 35.0,
     H_max: float = 5500.0,
@@ -70,7 +70,7 @@ def rest_state_mpas_ocean(
     ----------
     mesh : VoronoiMesh
     z_coord : OceanZStarCoordinate
-    T_surface : float
+    T_water_init_C : float
         Surface temperature [degC].
     T_deep : float
         Deep temperature [degC].
@@ -114,7 +114,7 @@ def rest_state_mpas_ocean(
 
     # Temperature: exponential profile
     z_full = z_coord.z_full_ref  # (nlev,), negative values
-    T_profile = T_deep + (T_surface - T_deep) * jnp.exp(z_full / _SCALE_DEPTH)
+    T_profile = T_deep + (T_water_init_C - T_deep) * jnp.exp(z_full / _SCALE_DEPTH)
     T_data = jnp.broadcast_to(T_profile[jnp.newaxis, :], (nCells, nlev)).astype(dtype)
 
     # Salinity: uniform

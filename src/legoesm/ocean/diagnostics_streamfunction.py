@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from legoesm import constants
+
 
 def moc_streamfunction(v, h_partial, eta, H_bathy, mask, grid):
     """Eulerian-mean meridional overturning streamfunction [Sv].
@@ -58,7 +60,7 @@ def moc_streamfunction(v, h_partial, eta, H_bathy, mask, grid):
     """
     del eta, H_bathy  # accepted for API symmetry
     n_lat_v, n_lon, _ = v.shape  # n_lat_v = n_lat + 1
-    R = getattr(grid, "radius", 6.371e6)
+    R = getattr(grid, "radius", constants.R_earth)
     # Derive v-face latitudes from grid metadata when available so
     # regional grids get the correct zonal face lengths.  Falls back
     # to the legacy global ``linspace(-π/2, π/2)`` only when the
@@ -129,7 +131,7 @@ def barotropic_streamfunction(u, h_partial, mask, grid):
     """
     n_lat, n_lon_u, _ = u.shape
     n_lon = n_lon_u - 1
-    R = getattr(grid, "radius", 6.371e6)
+    R = getattr(grid, "radius", constants.R_earth)
     # Use ``grid.dlat`` when available so regional grids integrate
     # transport with their actual meridional spacing rather than the
     # global ``π / n_lat``.  Codex iter-36 #2.

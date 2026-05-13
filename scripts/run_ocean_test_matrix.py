@@ -2266,13 +2266,13 @@ def _create_rest_state_uniform_ts(tc: TestCase, grid, z_coord, H_max=DEFAULT_H_M
     """Create rest-state with uniform T/S (no stratification) + land."""
     if tc.grid_type == "cubed_sphere":
         from legoesm.ocean.init import rest_state_ocean
-        return rest_state_ocean(grid, z_coord, H_max=H_max, T_surface=10.0, T_deep=10.0)
+        return rest_state_ocean(grid, z_coord, H_max=H_max, T_water_init_C=10.0, T_deep=10.0)
     elif tc.grid_type == "latlon":
         from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
-        return rest_state_latlon_cgrid_ocean(grid, z_coord, H_max=H_max, T_surface=10.0, T_deep=10.0)
+        return rest_state_latlon_cgrid_ocean(grid, z_coord, H_max=H_max, T_water_init_C=10.0, T_deep=10.0)
     elif tc.grid_type == "mpas":
         from legoesm.ocean.init_mpas import rest_state_mpas_ocean
-        return rest_state_mpas_ocean(grid, z_coord, H_max=H_max, T_surface=10.0, T_deep=10.0)
+        return rest_state_mpas_ocean(grid, z_coord, H_max=H_max, T_water_init_C=10.0, T_deep=10.0)
     raise ValueError(f"Unknown grid type: {tc.grid_type}")
 
 
@@ -2280,15 +2280,15 @@ def _create_rest_state_uniform_ts_no_land(tc: TestCase, grid, z_coord, H_max=DEF
     """Create rest-state with uniform T/S and no land."""
     if tc.grid_type == "cubed_sphere":
         from legoesm.ocean.init import rest_state_ocean
-        return rest_state_ocean(grid, z_coord, H_max=H_max, T_surface=10.0, T_deep=10.0,
+        return rest_state_ocean(grid, z_coord, H_max=H_max, T_water_init_C=10.0, T_deep=10.0,
                                  land_lat_threshold=90.0)
     elif tc.grid_type == "latlon":
         from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
-        return rest_state_latlon_cgrid_ocean(grid, z_coord, H_max=H_max, T_surface=10.0, T_deep=10.0,
+        return rest_state_latlon_cgrid_ocean(grid, z_coord, H_max=H_max, T_water_init_C=10.0, T_deep=10.0,
                                         land_lat_threshold=90.0)
     elif tc.grid_type == "mpas":
         from legoesm.ocean.init_mpas import rest_state_mpas_ocean
-        return rest_state_mpas_ocean(grid, z_coord, H_max=H_max, T_surface=10.0, T_deep=10.0,
+        return rest_state_mpas_ocean(grid, z_coord, H_max=H_max, T_water_init_C=10.0, T_deep=10.0,
                                       land_lat_threshold=90.0)
     raise ValueError(f"Unknown grid type: {tc.grid_type}")
 
@@ -3916,7 +3916,7 @@ def run_global_barotropic_wind(tc: TestCase, output_dir: Path, days: float
     if tc.grid_type == "cubed_sphere":
         from legoesm.ocean.init import rest_state_ocean
         state = rest_state_ocean(grid, z_coord,
-                                 T_surface=T_uniform, T_deep=T_uniform,
+                                 T_water_init_C=T_uniform, T_deep=T_uniform,
                                  S_uniform=S_uniform)
         # Override land mask with simplified continent
         lon_flat = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
@@ -3927,7 +3927,7 @@ def run_global_barotropic_wind(tc: TestCase, output_dir: Path, days: float
     elif tc.grid_type == "latlon":
         from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
         state = rest_state_latlon_cgrid_ocean(grid, z_coord,
-                                              T_surface=T_uniform, T_deep=T_uniform,
+                                              T_water_init_C=T_uniform, T_deep=T_uniform,
                                               S_uniform=S_uniform)
         lon_2d = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
         lat_1d = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
@@ -3948,7 +3948,7 @@ def run_global_barotropic_wind(tc: TestCase, output_dir: Path, days: float
     elif tc.grid_type == "mpas":
         from legoesm.ocean.init_mpas import rest_state_mpas_ocean
         state = rest_state_mpas_ocean(grid, z_coord,
-                                      T_surface=T_uniform, T_deep=T_uniform,
+                                      T_water_init_C=T_uniform, T_deep=T_uniform,
                                       S_uniform=S_uniform)
         lon_deg_c = np.asarray(grid.lonCell, dtype=np.float64) * 180 / np.pi
         lat_deg_c = np.asarray(grid.latCell, dtype=np.float64) * 180 / np.pi

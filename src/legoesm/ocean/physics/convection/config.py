@@ -37,6 +37,11 @@ class PlumeConfig(NamedTuple):
     # unresolved-plume detrainment closure (see plume.py:75-88).
     w_plume_min: float = 0.01
     T_excess: float = 0.05      # Initial plume temperature excess [K]
+    # Sharpness of the smooth active-mask transition on ``delta_rho``.
+    # Larger values approach a hard switch; ``1e4`` corresponds to a
+    # transition width of ~1e-4 kg/m^3 in density anomaly.  Configurable
+    # so coarser/finer EOS regimes can retune without source edits.
+    active_sigmoid_sharpness: float = 1e4
 
 
 class OceanConvectionConfig(NamedTuple):

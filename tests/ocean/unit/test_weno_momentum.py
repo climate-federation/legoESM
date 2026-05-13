@@ -706,7 +706,7 @@ class TestFullTendencyWENODK:
         z_coord = create_ocean_z_star(n_levels=nlev, H_max=1000.0)
         state = rest_state_latlon_cgrid_ocean(
             grid, z_coord,
-            T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+            T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
             H_max=1000.0,
         )
         # Add small velocity perturbation (respecting mask types).

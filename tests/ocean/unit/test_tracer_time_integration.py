@@ -42,7 +42,7 @@ def z_coord():
 def state(grid, z_coord):
     return rest_state_latlon_cgrid_ocean(
         grid, z_coord,
-        T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+        T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
         H_max=1000.0,
     )
 
@@ -151,7 +151,7 @@ class TestModelIntegration:
         # Use a state with non-trivial T profile so advection is active
         state0 = rest_state_latlon_cgrid_ocean(
             grid, z_coord,
-            T_surface=25.0, T_deep=2.0, S_uniform=35.0,
+            T_water_init_C=25.0, T_deep=2.0, S_uniform=35.0,
             H_max=1000.0,
         )
 

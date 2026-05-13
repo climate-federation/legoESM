@@ -197,7 +197,7 @@ def main():
         A_h=A_H_GLOBAL,
         H_max=5000.0, dz_surface=20.0,
         kappa_GM=800.0, kappa_Redi=800.0,
-        T_surface=20.0, T_deep=2.0, T_scale_depth=1000.0,
+        T_water_init_C=20.0, T_deep=2.0, T_scale_depth=1000.0,
     )
     grid = create_latlon_grid(36, 72)
     z_coord_base = create_ocean_z_star(
@@ -219,7 +219,7 @@ def main():
     # Build fresh state (structure template) and overwrite from restart
     fresh_state = rest_state_latlon_cgrid_ocean(
         grid, z_coord_base,
-        T_surface=config.T_surface, T_deep=config.T_surface,
+        T_water_init_C=config.T_water_init_C, T_deep=config.T_water_init_C,
         S_uniform=config.S_uniform,
         H_bathy_override=H_bathy,
         land_mask_override=ocean_mask,

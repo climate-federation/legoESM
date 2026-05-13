@@ -50,7 +50,7 @@ def z_coord():
 def state0(mesh, z_coord):
     return rest_state_mpas_ocean(
         mesh, z_coord,
-        T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+        T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
         H_max=500.0, land_lat_threshold=85.0,
     )
 
@@ -606,7 +606,7 @@ def ll_z_coord():
 def ll_state0(ll_grid, ll_z_coord):
     return rest_state_latlon_cgrid_ocean(
         ll_grid, ll_z_coord,
-        T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+        T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
         H_max=500.0, land_lat_threshold=85.0,
     )
 
@@ -845,7 +845,7 @@ class TestCouplerAdapter:
             cos_zenith=z, co2_ppmv=z, has_radiation=z, has_precipitation=ones,
         )
         sfc = SurfaceToAtm(
-            T_surface=z, albedo=z, emissivity=z, z0=z,
+            T_water_init_C=z, albedo=z, emissivity=z, z0=z,
             q_surface=z, shflx=z,
             lhflx=ones * 100.0,  # 100 W/m2
             tau_x=z, tau_y=z, lw_up=z,

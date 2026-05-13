@@ -27,6 +27,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.grids.latlon import LatLonGrid
 
 
@@ -997,7 +998,7 @@ def slope_foot_enhancement_3d(
     -------
     E_3d : (n_lat, n_lon, nlev) — multiplicative factor, ≥1.
     """
-    R = getattr(grid, "radius", 6.371e6)
+    R = getattr(grid, "radius", constants.R_earth)
     n_lat, n_lon = H_bathy.shape
 
     # ∇H at cell centres via centred differences (periodic in lon, walls in lat)

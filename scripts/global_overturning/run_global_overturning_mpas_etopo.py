@@ -292,7 +292,7 @@ def main():
     S_data = jnp.where(pc_coord.is_active, jnp.full_like(T_data, 35.0), 0.0)
 
     state = rest_state_mpas_ocean(
-        mesh, z_coord, T_surface=20.0, T_deep=2.0,
+        mesh, z_coord, T_water_init_C=20.0, T_deep=2.0,
         S_uniform=35.0, H_max=H_MAX, land_lat_threshold=90.0,
     )
     dtype = state.eta.data.dtype

@@ -119,7 +119,7 @@ def main():
 
     model = LatLonCGridOceanModel(grid, z_coord, ocean_config)
     state = create_initial_conditions("latlon", grid, z_coord, config)
-    print("Initial state: rest with stratified T (T_surface=20°C, T_deep=2°C)")
+    print("Initial state: rest with stratified T (T_water_init_C=20°C, T_deep=2°C)")
     print(f"  T range: [{float(jnp.min(state.T.data)):.2f}, "
           f"{float(jnp.max(state.T.data)):.2f}] °C")
     print(f"  S uniform: {float(jnp.mean(state.S.data)):.2f} PSU")

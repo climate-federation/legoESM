@@ -53,7 +53,7 @@ def idealized_bathymetry_latlon_cgrid(
 def rest_state_latlon_cgrid_ocean(
     grid: LatLonGrid,
     z_coord: OceanZStarCoordinate,
-    T_surface: float = 20.0,
+    T_water_init_C: float = 20.0,
     T_deep: float = 2.0,
     S_uniform: float = 35.0,
     H_max: float = 5500.0,
@@ -72,7 +72,7 @@ def rest_state_latlon_cgrid_ocean(
     ----------
     grid : LatLonGrid
     z_coord : OceanZStarCoordinate
-    T_surface, T_deep : float
+    T_water_init_C, T_deep : float
         Surface and deep temperature [degC].
     S_uniform : float
         Uniform salinity [PSU].
@@ -120,7 +120,7 @@ def rest_state_latlon_cgrid_ocean(
         )
 
     # Exponential T stratification
-    T_profile = T_deep + (T_surface - T_deep) * jnp.exp(
+    T_profile = T_deep + (T_water_init_C - T_deep) * jnp.exp(
         z_coord.z_full_ref / _SCALE_DEPTH,
     )
     dtype = get_policy().storage
@@ -233,7 +233,7 @@ def regional_rest_state_latlon_cgrid(
     wall_mask: jnp.ndarray,
     z_coord: OceanZStarCoordinate,
     H_max: float = 5500.0,
-    T_surface: float = 20.0,
+    T_water_init_C: float = 20.0,
     T_deep: float = 2.0,
     S_uniform: float = 35.0,
 ) -> LatLonCGridOceanState:
@@ -247,7 +247,7 @@ def regional_rest_state_latlon_cgrid(
         1 = ocean interior, 0 = wall.
     z_coord : OceanZStarCoordinate
     H_max : float
-    T_surface, T_deep : float
+    T_water_init_C, T_deep : float
     S_uniform : float
 
     Returns
@@ -261,7 +261,7 @@ def regional_rest_state_latlon_cgrid(
 
     H_bathy = jnp.full((n_lat, n_lon), H_max, dtype=dtype)
 
-    T_profile = T_deep + (T_surface - T_deep) * jnp.exp(
+    T_profile = T_deep + (T_water_init_C - T_deep) * jnp.exp(
         z_coord.z_full_ref / _SCALE_DEPTH,
     )
     T_3d = jnp.broadcast_to(
