@@ -1122,8 +1122,23 @@ def transport_step(h, ut, vt, dt, cdgrid, mass_target=None,
                       apply_fortran_xppm_boundary=(
                           apply_fortran_xppm_boundary),
                       hord=hord)
-    h_new = h + (fx[:, :-1, :] - fx[:, 1:, :]
-                 + fy[:, :, :-1] - fy[:, :, 1:]) / area
+    # new_test_dycores iter-3: fp64 flux differencing.  Without this
+    # promotion the cube transport accrues ~4.66e-10 cancellation noise
+    # per step from the fp32 ``fx[:-1] - fx[1:]`` subtraction across
+    # ~6·N² cells (per-step measurement on C36 cosine-bell IC).  The
+    # anchor path masks this via rescaling; the no-anchor path leaks
+    # the noise as a visible mass drift.  Promotion preserves bit-clean
+    # flux closure (cube panel-edge flux is conservative when summed
+    # in fp64).  Output cast back to input dtype.
+    from legoesm.core.conservation import _conservation_accumulator
+    _acc = _conservation_accumulator()
+    h64 = h.astype(_acc)
+    fx64 = fx.astype(_acc)
+    fy64 = fy.astype(_acc)
+    area64 = area.astype(_acc)
+    h_new = (h64 + (fx64[:, :-1, :] - fx64[:, 1:, :]
+                    + fy64[:, :, :-1] - fy64[:, :, 1:]) / area64
+             ).astype(h.dtype)
 
     # Mass conservation fixer: clip negative values and rescale
     # positive values to conserve total mass.  This compensates for
