@@ -5568,3 +5568,66 @@ Critical for: (1) two-stream radiative-transfer canopy models;
 new physical constants (FAO-56 ephemeris coefficients are literal).
 No `constants.py` additions.
 
+## Iter 866 — clear_sky_toa_radiation_fv3 (instantaneous TOA SW)
+
+Added `clear_sky_toa_radiation_fv3(cos_theta, day_of_year, s_0=None)`
+to `grids/cubed_sphere.py`.  Standard astronomy / radiation closure
+for instantaneous TOA SW irradiance:
+
+```
+S_TOA(t) = S_0 · d_r⁻² · cos(θ_s)        (W/m²)
+1/d_r²  ≈ 1 + 0.033·cos(2π·J/365)
+```
+
+Default S_0 = ``constants.S_0`` = 1361 W/m² (Kopp-Lean 2011 /
+CERES) per CLAUDE.md hygiene.
+
+Canonical:
+  | location/date/time          | S_TOA (W/m²)|
+  |-----------------------------|-------------|
+  | Equator equinox noon        | ~1367       |
+  | 30°N equinox noon           | ~1186       |
+  | 60°N June noon              | ~1057       |
+  | 60°N Dec noon               | ~163        |
+  | Night / polar night         | 0           |
+
+**Closes the solar-radiation primitive chain** end-to-end:
+
+```
+lat, DOY, hr → iter-865 cos(θ) → iter-866 S_TOA(t)   (W/m², instantaneous)
+lat, DOY     → iter-863 R_a                          (MJ/m²/day, integrated)
+lat, DOY     → iter-864 N                            (hours, duration)
+```
+
+Daily-integral identity: ∫_day S_TOA dt = R_a × 10⁶ J/MJ.  Test
+verifies closure across (lat, DOY) configurations.
+
+Used by:
+  * TOA-down clear-sky SW for SCM / RCE forcing.
+  * Photolysis-rate parameterizations (PAR ∝ S_TOA·η_atm).
+  * Diurnal solar PV simulation (Φ = S·cos(θ−θ_tilt)).
+  * Satellite-retrieval normalization.
+  * Radiative-transfer benchmarks (Toon-Stamnes-McKay 1989,
+    TwoStream toy-atmosphere validation).
+  * Atmosphere-physics offline diurnal-cycle drivers.
+
+Per CLAUDE.md hygiene: uses ``constants.S_0`` default.  d_r fit
+coefficient 0.033 is FAO-56 Eq. 23 ephemeris numerics — literal
+(empirical-fit-not-physical-constant rule).
+
+Test: `tests/test_fv3_toa_radiation_iter866.py` (7 tests: equator
+equinox noon ≈ 1367, night zero, Jan>Jul perihelion-aphelion ratio
+~1.07, chain with iter-865 cos(θ) at 60°N June noon ≈1057, daily-
+integral matches R_a to 2%, S_0 linear scaling, 3-D shapes).
+
+### Why this iteration was meaningful
+
+**Closes the solar-radiation primitive chain end-to-end**:
+caller now has full lat/DOY/hour → S_TOA pipeline in pure JAX.
+Daily-integral test verifies closure with iter-863 R_a.  Required
+for: (1) SCM / RCE clear-sky SW driver; (2) photolysis rates;
+(3) diurnal PV simulation; (4) satellite retrieval pipeline;
+(5) Toon-style radiative-transfer benchmarks.  Pure JAX,
+vmap-compatible.  Uses ``constants.S_0`` per CLAUDE.md hygiene.
+No new `constants.py` additions.
+

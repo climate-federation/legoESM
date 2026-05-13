@@ -9656,6 +9656,88 @@ def solar_zenith_cos_fv3(
     return jnp.maximum(raw, 0.0)
 
 
+def clear_sky_toa_radiation_fv3(
+    cos_theta: jax.Array,
+    day_of_year: jax.Array,
+    s_0: float = None,
+) -> jax.Array:
+    """FV3_3D iter 866: instantaneous TOA clear-sky shortwave.
+
+    Standard astronomy / radiation closure for the TOA solar
+    irradiance at a given solar zenith angle and Earth-Sun
+    distance:
+
+        S_TOA(t) = S_0 · d_r⁻² · cos(θ_s)        (W/m²)
+
+    Where:
+      * S_0       — total solar irradiance (W/m²); default
+                    ``constants.S_0`` = 1361 (Kopp-Lean 2011 / CERES).
+      * d_r       — relative Earth-Sun distance:
+                    1/d_r² ≈ 1 + 0.033·cos(2π·J/365)  (FAO-56 fit).
+      * cos(θ_s)  — cosine of solar zenith angle (caller-supplied,
+                    typically from iter-865 ``solar_zenith_cos_fv3``).
+      * J         — day-of-year (1–365).
+
+    Output W/m² (instantaneous TOA SW); 0 when sun below horizon
+    (cos θ = 0 clipped in iter-865).
+
+    Canonical magnitudes:
+      | location/date/time         | S_TOA (W/m²) |
+      |----------------------------|--------------|
+      | Equator equinox noon       | ~1367        |
+      | 30°N equinox noon          | ~1186        |
+      | 60°N June noon             | ~1186        |
+      | 60°N Dec noon              | ~163         |
+      | Night / polar night        | 0            |
+
+    Daily integral identity: ∫_day S_TOA dt = R_a × 10⁶ J/MJ
+    (matches iter-863 R_a in MJ/m²/day).
+
+    **Closes the solar-radiation primitive chain** end-to-end:
+
+        latitude, DOY, hour → iter-865 cos(θ)
+                            → iter-866 S_TOA(t)            (W/m²)
+        latitude, DOY       → iter-863 R_a                  (MJ/m²/day)
+        latitude, DOY       → iter-864 N                    (hours)
+
+    Used by:
+      * **TOA-down clear-sky SW** in idealized SCM / RCE forcing.
+      * **Photolysis-rate parameterizations** (PAR ∝ S_TOA·η_atm).
+      * **Diurnal-cycle solar PV simulation**: instantaneous panel
+        output S·cos(θ−θ_tilt).
+      * **Satellite-retrieval normalization** by S_TOA.
+      * **Radiative-transfer benchmarks**: Toon-Stamnes-McKay 1989
+        / TwoStream toy-atmosphere validation.
+      * **Diurnal-cycle radiative-driver** for atmosphere-physics
+        offline tests.
+
+    Per CLAUDE.md hygiene: uses ``constants.S_0`` as default
+    (the canonical 1361 W/m² Kopp-Lean 2011 value).
+
+    Note: d_r fit (0.033 coefficient) is FAO-56 Eq. 23 ephemeris
+    approximation — accurate to ~0.05% (~0.7 W/m²); kept as literal.
+
+    Parameters
+    ----------
+    cos_theta : jax.Array
+        Cosine of solar zenith angle (0–1).  From iter-865 or
+        equivalent.
+    day_of_year : jax.Array
+        Day-of-year (1–365); used for Earth-Sun distance factor.
+    s_0 : float or None
+        Total solar irradiance (W/m²); default None → uses
+        ``constants.S_0`` = 1361.
+
+    Returns
+    -------
+    s_toa : jax.Array
+        TOA clear-sky downwelling SW (W/m²); ≥ 0.
+    """
+    s_0_use = s_0 if s_0 is not None else constants.S_0
+    d_r_sq = 1.0 + 0.033 * jnp.cos(2.0 * jnp.pi * day_of_year / 365.0)
+    return s_0_use * d_r_sq * cos_theta
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,
