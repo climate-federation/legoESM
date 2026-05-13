@@ -466,6 +466,23 @@ def _area_weighted_mean(field, area) -> float:
     return float(jnp.sum(f_collapsed * a) / jnp.sum(a))
 
 
+def _area_weighted_sum(field, area) -> float:
+    """Area-weighted scalar integral with fp64 accumulator.
+
+    Promotes both inputs to ``float64`` before multiply + sum so that
+    cross-grid mass diagnostics are not contaminated by fp32 reduction
+    rounding.  A plain ``jnp.sum(p_s * area)`` over a 720x1440 lat-lon
+    grid in fp32 loses ~log2(N) bits of precision and produced spurious
+    O(1e-3) "mass drift" in Held-Suarez / AMIP latlon, while cube and
+    Voronoi paths happened to be clean (cube uses ``global_integral``
+    which already casts; Voronoi ``areaCell`` is fp64 so the mixed-
+    dtype product promotes implicitly).
+    """
+    f = jnp.asarray(field, dtype=jnp.float64)
+    a = jnp.asarray(area, dtype=jnp.float64)
+    return float(jnp.sum(f * a))
+
+
 # ---------------------------------------------------------------------------
 # Hyperdiffusion helpers
 # ---------------------------------------------------------------------------
@@ -2075,7 +2092,9 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         # A_h must respect diffusion CFL: A_h*dt/dx_pole^2 < 0.5
         _A_h_max = 0.4 * _dx_pole**2 / dt
         _A_h = min(_laplacian_visc_latlon(n_lat), _A_h_max)
-        config = CGridLatLonShallowWaterConfig(A_h=_A_h)
+        config = CGridLatLonShallowWaterConfig(
+            A_h=_A_h, anchor_mass_to_initial=True,
+        )
         model = CGridLatLonShallowWaterModel(grid, config, dt=dt)
         state = (williamson_test2_cgrid(grid) if test_num == 2
                  else williamson_test5_cgrid(grid))
@@ -2119,7 +2138,9 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         level = int(tc.resolution.replace("ico", ""))
         mesh = create_voronoi_mesh(level)
         dt = 300.0
-        config = MPASShallowWaterConfig(nu_del4=_hyperdiff_ico(mesh))
+        config = MPASShallowWaterConfig(
+            nu_del4=_hyperdiff_ico(mesh), anchor_mass_to_initial=True,
+        )
         model = MPASShallowWaterModel(mesh, config)
         if test_num == 6:
             from tests.test_cases.williamson_extended import (
@@ -2432,8 +2453,8 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
         _ua, _va, _uc, _vc, ut, vt = _d2a2c_vect(
             state.u_d, state.v_d, cdgrid)
 
-        # Pre-compute initial mass for conservation fixer
-        _mass_target = float(jnp.sum(state.h * grid.area))
+        # Pre-compute initial mass for conservation fixer (fp64 acc)
+        _mass_target = _area_weighted_sum(state.h, grid.area)
 
         @jax.jit
         def step_fn(s, dt_):
@@ -2495,7 +2516,7 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
         # in the benchmark norms.
         _u_frozen = _u_face
         _v_frozen = _v_face
-        _mass_init = float(jnp.sum(state.h * grid.area))
+        _mass_init = _area_weighted_sum(state.h, grid.area)
 
         @jax.jit
         def step_fn(s, dt_):
@@ -2542,7 +2563,7 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
             # that a blown-up run reports NaN explicitly instead of silently
             # returning a non-finite that downstream comparisons treat as
             # False.
-            mass_final = float(jnp.sum(s.h * grid.area))
+            mass_final = _area_weighted_sum(s.h, grid.area)
             norms["mass_drift"] = _compute_drift([_mass_init, mass_final])
             return norms
 
@@ -2911,7 +2932,8 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
             corner_div_damp_nord=_cdd_nord_env,
             corner_div_damp_fv3_vector_fill=_cdd_fv3_vfill_env,
             smagorinsky_cs=_smag_cs_env,
-            use_conservation_fixer=True, fix_mass=True)
+            use_conservation_fixer=True, fix_mass=True,
+            anchor_mass_to_initial=True)
         model = PrimitiveEquationModel(grid, sigma, config)
         if _topo:
             from legoesm.atmosphere.idealized.held_suarez_topo import (
@@ -2967,7 +2989,9 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         dt = min(200.0, 0.5 * _dx_pole / 300.0)
         _A_h_max = 0.4 * _dx_pole**2 / dt
         ah = min(ah, _A_h_max)
-        config = CGridLatLonPrimitiveEquationConfig(A_h=ah, fix_mass=True)
+        config = CGridLatLonPrimitiveEquationConfig(
+            A_h=ah, fix_mass=True, anchor_mass_to_initial=True,
+        )
         model = CGridLatLonPrimitiveEquationModel(grid, sigma, config, dt=dt)
         if _topo:
             from legoesm.atmosphere.idealized.held_suarez_topo import (
@@ -2984,7 +3008,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         def step_fn(s, dt_):
             return model.step_with_physics(s, dt_, physics_fn)
 
-        mass_fn = lambda s: float(jnp.sum(s.p_s * grid.area))
+        mass_fn = lambda s: _area_weighted_sum(s.p_s, grid.area)
 
         def check_fn(s):
             return (check_finite({"T": s.T, "u": s.u}),
@@ -3027,7 +3051,8 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         dt = 200.0
         ah = _laplacian_visc_ico(mesh)
         config = MPASPrimitiveEquationConfig(
-            nu_del4=_hyperdiff_ico(mesh), nu_del2=ah, fix_mass=True)
+            nu_del4=_hyperdiff_ico(mesh), nu_del2=ah,
+            fix_mass=True, anchor_mass_to_initial=True)
         model = MPASPrimitiveEquationModel(mesh, sigma, config)
         if _topo:
             from legoesm.atmosphere.idealized.held_suarez_topo import (
@@ -3043,7 +3068,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         def step_fn(s, dt_):
             return model.step(s, dt_, physics_fn_mpas)
 
-        mass_fn = lambda s: float(jnp.sum(s.p_s.data * mesh.areaCell))
+        mass_fn = lambda s: _area_weighted_sum(s.p_s.data, mesh.areaCell)
 
         def check_fn(s):
             return (check_finite({"T": s.T.data, "u": s.u.data}),
@@ -3088,6 +3113,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
             hyperdiff_coeff=2.338e15 * (21.0 / n_max) ** 4,
             spectral_filter_order=8,
             spectral_filter_strength=0.01,
+            fix_mass=True, anchor_mass_to_initial=True,
         )
         model = SpectralPrimitiveEquationModel(grid, sigma, pe_config)
         # iter-47 codex MEDIUM + post-merge with main HS-topo
@@ -3125,7 +3151,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
                 # iter-5 codex review H1 caught my iter-3 mistake of
                 # using the area-weighted MEAN here (Pa) — that broke
                 # cross-grid ``mass`` time-series comparability.
-                "mass": float(jnp.sum(fields['p_s'] * grid.grid_area)),
+                "mass": _area_weighted_sum(fields['p_s'], grid.grid_area),
                 "max_wind": float(jnp.max(jnp.sqrt(
                     fields['u'] ** 2 + fields['v'] ** 2))),
                 "mean_T": _area_weighted_mean(fields['T'], grid.grid_area),
@@ -3340,7 +3366,8 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         config = PrimitiveEquationConfig(
             hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
             div_damp_coeff=dd, A_h=ah,
-            use_conservation_fixer=True, fix_mass=True)
+            use_conservation_fixer=True, fix_mass=True,
+            anchor_mass_to_initial=True)
         model = PrimitiveEquationModel(grid, sigma, config)
         if _rotated:
             from tests.test_cases.dcmip2008.jablonowski_rotated import (
@@ -3408,7 +3435,9 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         dt = min(200.0, 0.5 * _dx_pole / 300.0)
         _A_h_max = 0.4 * _dx_pole**2 / dt
         ah = min(ah, _A_h_max)
-        config = CGridLatLonPrimitiveEquationConfig(A_h=ah, fix_mass=True)
+        config = CGridLatLonPrimitiveEquationConfig(
+            A_h=ah, fix_mass=True, anchor_mass_to_initial=True,
+        )
         model = CGridLatLonPrimitiveEquationModel(grid, sigma, config, dt=dt)
         if _rotated:
             from tests.test_cases.dcmip2008.jablonowski_rotated import (
@@ -3432,7 +3461,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         def step_fn(s, dt_):
             return model.step(s, dt_)
 
-        mass_fn = lambda s: float(jnp.sum(s.p_s * grid.area))
+        mass_fn = lambda s: _area_weighted_sum(s.p_s, grid.area)
 
         def check_fn(s):
             return (check_finite({"T": s.T, "u": s.u}),
@@ -3482,7 +3511,8 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         dt = 200.0
         ah = _laplacian_visc_ico(mesh)
         config = MPASPrimitiveEquationConfig(
-            nu_del4=_hyperdiff_ico(mesh), nu_del2=ah, fix_mass=True)
+            nu_del4=_hyperdiff_ico(mesh), nu_del2=ah,
+            fix_mass=True, anchor_mass_to_initial=True)
         model = MPASPrimitiveEquationModel(mesh, sigma, config)
         if _rotated:
             from tests.test_cases.dcmip2008.jablonowski_rotated import (
@@ -3505,7 +3535,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         def step_fn(s, dt_):
             return model.step(s, dt_)
 
-        mass_fn = lambda s: float(jnp.sum(s.p_s.data * mesh.areaCell))
+        mass_fn = lambda s: _area_weighted_sum(s.p_s.data, mesh.areaCell)
 
         def check_fn(s):
             return (check_finite({"T": s.T.data, "u": s.u.data}),
@@ -3551,6 +3581,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             hyperdiff_coeff=2.338e15 * (21.0 / n_max) ** 4,
             spectral_filter_order=8,
             spectral_filter_strength=0.01,
+            fix_mass=True, anchor_mass_to_initial=True,
         )
         model = SpectralPrimitiveEquationModel(grid, sigma, pe_config)
         if _rotated:
@@ -3588,7 +3619,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             fields = spectral_pe_to_grid(s, grid, sigma)
             return {
                 # See iter-5 H1: ``mass`` is the integral, not the mean.
-                "mass": float(jnp.sum(fields['p_s'] * grid.grid_area)),
+                "mass": _area_weighted_sum(fields['p_s'], grid.grid_area),
                 "max_wind": float(jnp.max(jnp.sqrt(
                     fields['u'] ** 2 + fields['v'] ** 2))),
                 "ps_perturbation": float(jnp.max(
@@ -3939,7 +3970,8 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         config = PrimitiveEquationConfig(
             hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
             div_damp_coeff=dd, A_h=ah,
-            use_conservation_fixer=True, fix_mass=True)
+            use_conservation_fixer=True, fix_mass=True,
+            anchor_mass_to_initial=True)
         model = PrimitiveEquationModel(grid, sigma, config)
         state = held_suarez_init(grid, sigma, T_init=280.0)
 
@@ -3999,7 +4031,9 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         dt = min(300.0, 0.5 * _dx_pole / 300.0)
         _A_h_max = 0.4 * _dx_pole**2 / dt
         ah = min(ah, _A_h_max)
-        config = CGridLatLonPrimitiveEquationConfig(A_h=ah, fix_mass=True)
+        config = CGridLatLonPrimitiveEquationConfig(
+            A_h=ah, fix_mass=True, anchor_mass_to_initial=True,
+        )
         model = CGridLatLonPrimitiveEquationModel(grid, sigma, config, dt=dt)
         state_cc = held_suarez_init_latlon(grid, sigma, T_init=280.0)
         state = hydrostatic_to_cgrid(state_cc, grid)
@@ -4011,7 +4045,7 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         def step_fn(s, dt_):
             return model.step_with_physics(s, dt_, physics_fn)
 
-        mass_fn = lambda s: float(jnp.sum(s.p_s * grid.area))
+        mass_fn = lambda s: _area_weighted_sum(s.p_s, grid.area)
 
         def check_fn(s):
             return (check_finite({"T": s.T, "u": s.u}),
@@ -4057,7 +4091,8 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         dt = 200.0
         ah = _laplacian_visc_ico(mesh)
         config = MPASPrimitiveEquationConfig(
-            nu_del4=_hyperdiff_ico(mesh), nu_del2=ah, fix_mass=True)
+            nu_del4=_hyperdiff_ico(mesh), nu_del2=ah,
+            fix_mass=True, anchor_mass_to_initial=True)
         model = MPASPrimitiveEquationModel(mesh, sigma, config)
         state = held_suarez_init_mpas(mesh, sigma, T_init=280.0)
         grid = mesh
@@ -4069,7 +4104,7 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         def step_fn(s, dt_):
             return model.step(s, dt_, physics_fn_mpas)
 
-        mass_fn = lambda s: float(jnp.sum(s.p_s.data * mesh.areaCell))
+        mass_fn = lambda s: _area_weighted_sum(s.p_s.data, mesh.areaCell)
 
         def check_fn(s):
             return (check_finite({"T": s.T.data, "u": s.u.data}),
@@ -4115,6 +4150,7 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
             hyperdiff_coeff=2.338e15 * (21.0 / n_max) ** 4,
             spectral_filter_order=8,
             spectral_filter_strength=0.01,
+            fix_mass=True, anchor_mass_to_initial=True,
         )
         model = SpectralPrimitiveEquationModel(grid, sigma, pe_config)
         state = isothermal_rest_state_spectral(
@@ -4137,7 +4173,7 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
             return {
                 # See iter-5 H1: ``mass`` is the integral (Pa·m²),
                 # ``mean_p_s`` is the area-weighted mean (Pa).
-                "mass":     float(jnp.sum(fields['p_s'] * grid.grid_area)),
+                "mass":     _area_weighted_sum(fields['p_s'], grid.grid_area),
                 "max_wind": float(jnp.max(jnp.sqrt(
                     fields['u'] ** 2 + fields['v'] ** 2))),
                 "mean_T":   _area_weighted_mean(fields['T'],   grid.grid_area),
@@ -4379,7 +4415,11 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 n_acoustic_substeps=10, semi_implicit_acoustic=True,
                 sponge_width=10000.0, sponge_coeff=0.05,
                 hyperdiff_coeff=hd,
-                acoustic_off_centering=0.1)
+                acoustic_off_centering=0.1,
+                # iter-7: enable anchored mass fixer (default-off in
+                # config; we opt in here so the NH suite reports mass
+                # drift alongside |w|_max).
+                fix_mass=True, anchor_mass_to_initial=True)
         elif test_case == "tc2a":
             from tests.test_cases.dcmip2025 import dcmip25_tc2_init
             state, hcoord, tmetric, small_grid = dcmip25_tc2_init(
@@ -4398,7 +4438,8 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 sponge_coeff=1.0 / (0.1 * 86400.0),
                 hyperdiff_coeff=hd_tc2,
                 hyperdiff_w_coeff=hd_tc2,
-                acoustic_off_centering=0.15)
+                acoustic_off_centering=0.15,
+                fix_mass=True, anchor_mass_to_initial=True)
         elif test_case == "tc3":
             from tests.test_cases.dcmip2025 import dcmip25_tc3_init
             state, hcoord, tmetric, small_grid = dcmip25_tc3_init(
@@ -4414,7 +4455,8 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 sponge_width=12000.0, sponge_coeff=0.3,
                 hyperdiff_coeff=hd_tc3,
                 hyperdiff_w_coeff=hd_tc3,
-                acoustic_off_centering=0.2)
+                acoustic_off_centering=0.2,
+                fix_mass=True, anchor_mass_to_initial=True)
         else:
             raise ValueError(f"Unknown NH test case: {test_case}")
 
@@ -4440,12 +4482,18 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 float(jnp.max(jnp.abs(s.u.data))))
 
         def scalar_fn(s):
+            # iter-7: report total dry mass alongside |w|_max so mass
+            # drift becomes visible in mean_timeseries.csv (cubed-sphere
+            # NH supports anchored mass via fix_mass + compute_nh_dry_mass).
+            from legoesm.core.conservation import compute_nh_dry_mass
             return {
                 "max_abs_w": float(jnp.max(jnp.abs(s.w.data))),
                 "mean_theta_prime": _area_weighted_mean(
                     s.theta_prime.data, grid.area),
                 "mean_rho_prime":   _area_weighted_mean(
                     s.rho_prime.data,   grid.area),
+                "mass":             float(compute_nh_dry_mass(
+                    s.rho_prime.data, hcoord, tmetric, grid)),
             }
 
         _cos_a_nh = np.asarray(grid.cos_angle, dtype=np.float64)
@@ -4530,7 +4578,10 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
         nh_config = MPASCompressibleEulerConfig(
             n_acoustic_substeps=_n_acoustic, sponge_width=_sponge_w,
             sponge_coeff=_sponge_c,
-            nu_del4=_nu_del4)
+            nu_del4=_nu_del4,
+            # iter-8: opt into anchored mass fixer (same on/off semantics
+            # as the cubed-sphere NH config in iter-7).
+            fix_mass=True, anchor_mass_to_initial=True)
         model = MPASCompressibleEulerModel(
             mesh, hcoord, tmetric, nh_config)
 
@@ -4560,12 +4611,17 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             return (u_ok and cell_ok, metric)
 
         def scalar_fn(s):
+            # iter-8: track total dry mass alongside |w|_max (parallel
+            # to iter-7's cube NH scalar_fn extension).
+            from legoesm.core.conservation import compute_nh_dry_mass_mpas
             return {
                 "max_abs_w": float(jnp.max(jnp.abs(s.w.data))),
                 "mean_theta_prime": _area_weighted_mean(
                     s.theta_prime.data, mesh.areaCell),
                 "mean_rho_prime":   _area_weighted_mean(
                     s.rho_prime.data,   mesh.areaCell),
+                "mass":             float(compute_nh_dry_mass_mpas(
+                    s.rho_prime.data, hcoord, tmetric, mesh)),
             }
 
         def extract_fn(s):
@@ -4669,6 +4725,9 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             sponge_coeff=sponge_c,
             hyperdiff_coeff=_hd_sp,
             small_earth_factor=sef,
+            # iter-9: opt into anchored mass fixer (parallel to cube/ico
+            # NH in iter-7/8).
+            fix_mass=True, anchor_mass_to_initial=True,
         )
         # Use the small-Earth grid for tc2/tc3
         if sef != 1.0:
@@ -4691,10 +4750,20 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             w = sh_synthesis_3d(grid, s.w_hat.data)
             theta_p = sh_synthesis_3d(grid, s.theta_prime_hat.data)
             rho_p = sh_synthesis_3d(grid, s.rho_prime_hat.data)
+            # iter-9: report dry mass alongside |w|_max for spectral NH
+            # (parallel to iter-7 cube / iter-8 ico instrumentation).
+            rho_total = hcoord.rho_ref + rho_p
+            col_mass = jnp.sum(
+                tmetric.jacobian[..., None]
+                * rho_total
+                * hcoord.dz[None, None, :],
+                axis=-1,
+            )
             return {
                 "max_abs_w": float(jnp.max(jnp.abs(w))),
                 "mean_theta_prime": _area_weighted_mean(theta_p, grid.grid_area),
                 "mean_rho_prime":   _area_weighted_mean(rho_p,   grid.grid_area),
+                "mass": _area_weighted_sum(col_mass, grid.grid_area),
             }
 
         def extract_fn(s):
@@ -4756,7 +4825,18 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             w_max = float("nan")
     else:
         w_max = float("nan")
-    notes = f"|w|_max={w_max:.4f} m/s, dt={dt:.2f}s"
+    # iter-10: surface mass drift in the NH notes line (parallel to the
+    # SW / hydro runners).  ``diag`` is the dict accumulated from
+    # ``scalar_fn``; iter-7..9 added ``"mass"`` to every NH grid path.
+    _mass_series = diag.get("mass") if isinstance(diag, dict) else None
+    if _mass_series and len(_mass_series) >= 2:
+        mass_drift = _compute_drift(_mass_series)
+        notes = (
+            f"|w|_max={w_max:.4f} m/s, mass_drift={mass_drift:.2e}, "
+            f"dt={dt:.2f}s"
+        )
+    else:
+        notes = f"|w|_max={w_max:.4f} m/s, dt={dt:.2f}s"
 
     _write_results_txt(output_dir, {
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,

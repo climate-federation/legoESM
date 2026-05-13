@@ -1037,6 +1037,8 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
         validate_corner_div_damp_nord(self.config.corner_div_damp_nord)
         self._target_mass = None
 
+        # iter-20: anchor-mass API parity (see iter-18 / iter-19 SW twins).
+
         if self.config.small_earth_factor != 1.0:
             grid = apply_small_earth_scaling(grid, self.config.small_earth_factor)
         self.grid = grid
@@ -1067,16 +1069,33 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
             self.cdgrid, self.config, physics_tendency,
         )
 
+    def reset_target_mass(self) -> None:
+        """Clear the anchored mass target (iter-20; mirrors iter-18 API)."""
+        self._target_mass = None
+
+    def set_target_mass(self, target_mass) -> None:
+        """Explicitly set the anchored mass target (iter-20; iter-19 API)."""
+        self._target_mass = target_mass
+
+    def compute_dry_mass(self, state: NonHydrostaticState) -> jax.Array:
+        """Global dry mass ``∫ J · (rho_ref + rho') · dz · dA`` (fp64).
+
+        iter-21: API parity with the MPAS NH (iter-8) and spectral NH
+        (iter-9) ``compute_dry_mass`` helpers; underlying helper is
+        ``core.conservation.compute_nh_dry_mass``.
+        """
+        return compute_nh_dry_mass(
+            state.rho_prime.data, self.height_coord,
+            self.terrain_metric, self.grid,
+        )
+
     def step(self, state: NonHydrostaticState, dt: float, physics_fn=None) -> NonHydrostaticState:
         """Advance one step using split-explicit RK3 with C-D grid transport."""
         # Precompute target mass outside JIT boundary
         if (self.config.fix_mass
                 and self.config.anchor_mass_to_initial
                 and self._target_mass is None):
-            self._target_mass = compute_nh_dry_mass(
-                state.rho_prime.data, self.height_coord,
-                self.terrain_metric, self.grid,
-            )
+            self._target_mass = self.compute_dry_mass(state)
         return self._step_jitted(state, dt, physics_fn=physics_fn)
 
     @partial(jax.jit, static_argnums=(0, 3))

@@ -1129,11 +1129,18 @@ def transport_step(h, ut, vt, dt, cdgrid, mass_target=None,
     # positive values to conserve total mass.  This compensates for
     # flux mismatches at face boundaries while maintaining non-negativity.
     if mass_target is not None:
+        # iter-6: fp64 budget accumulator (matches SW model fixer).
+        # The bare ``jnp.sum(h_pos * area)`` over a fp32 product reduces
+        # in fp32 over ~6·N² cells and leaks ~N·eps noise into ``scale``,
+        # which then multiplies every cell — turning O(1e-7) reduction
+        # noise into a directly visible cosine_bell mass drift.
+        from legoesm.core.conservation import _conservation_accumulator
+        _acc = _conservation_accumulator()
         # Step 1: clip negatives to zero
         h_pos = jnp.maximum(h_new, 0.0)
-        mass_pos = jnp.sum(h_pos * area)
+        mass_pos = jnp.sum(h_pos.astype(_acc) * area.astype(_acc))
         # Step 2: scale positive values to match target mass
         scale = mass_target / jnp.maximum(mass_pos, 1.0)
-        h_new = h_pos * scale
+        h_new = h_pos * scale.astype(h_pos.dtype)
 
     return h_new

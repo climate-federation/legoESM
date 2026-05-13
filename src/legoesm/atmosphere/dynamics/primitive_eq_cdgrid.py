@@ -1091,6 +1091,24 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         self.cdgrid = create_cubed_sphere_cdgrid(grid)
         self._target_mass = None
 
+    def reset_target_mass(self) -> None:
+        """Clear the anchored mass target (iter-20; mirrors iter-18 API)."""
+        self._target_mass = None
+
+    def set_target_mass(self, target_mass) -> None:
+        """Explicitly set the anchored mass target (iter-20; iter-19 API)."""
+        self._target_mass = target_mass
+
+    def compute_mass(self, state) -> jax.Array:
+        """Compute global ``∫ p_s dA`` in fp64 via ``global_integral``.
+
+        iter-21: API parity with the MPAS PE (iter-11), lat-lon PE
+        (iter-2/12), and spectral PE (iter-3) ``compute_mass``
+        helpers.  Reuses the existing fp64-clean ``global_integral``
+        path used by ``step()`` for the initial-mass snapshot.
+        """
+        return global_integral(state.p_s, self.grid)
+
     def _sync_dgrid_boundary(self, state: FV3HydrostaticState):
         """No-op: cross-face continuity via halo exchange (explicit sync seeds spurious v-wind)."""
         return state

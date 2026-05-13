@@ -190,20 +190,32 @@ def hyperdiffusion(field: Field, grid: LatLonGrid, coeff: float) -> Field:
 def global_integral(field: Field, grid: LatLonGrid) -> jax.Array:
     """Compute the area-weighted global integral of a field.
 
-    Parameters
-    ----------
-    field : Field
-        Scalar field at cell centers, shape (n_lat, n_lon).
-    grid : LatLonGrid
-        The grid with cell areas.
+    Uses an fp64 accumulator (via
+    ``legoesm.core.conservation._conservation_accumulator``) so the
+    result is well-conditioned even when ``field.data`` and
+    ``grid.area`` are stored in fp32.  A plain ``jnp.sum`` over an
+    fp32 product loses ~log2(n_cells) bits of precision and produces
+    spurious O(0.1%-1%) "mass drift" on N=720x1440 lat-lon grids,
+    while the cubed-sphere path (``operators.global_integral``)
+    already promotes to fp64 before summing.
 
-    Returns
-    -------
-    scalar : The global integral.
+    Supports single-device and MPI distributed execution; the
+    JAX/XLA NamedSharding multi-device path is handled implicitly
+    via ``jnp.sum`` on a sharded array.
     """
-    return jnp.sum(field.data * grid.area)
+    from legoesm.core.conservation import _conservation_accumulator
+    acc = _conservation_accumulator()
+    prod = field.data.astype(acc) * grid.area.astype(acc)
+    local_sum = jnp.sum(prod)
+
+    from legoesm.core.operators import _is_distributed
+    if _is_distributed():
+        from legoesm.parallel.reductions import global_sum_mpi
+        return global_sum_mpi(local_sum)
+    return local_sum
 
 
 def global_mean(field: Field, grid: LatLonGrid) -> jax.Array:
     """Compute the area-weighted global mean of a field."""
-    return global_integral(field, grid) / grid.total_area
+    integ = global_integral(field, grid)
+    return integ / grid.total_area.astype(integ.dtype)
