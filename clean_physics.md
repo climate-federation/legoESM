@@ -9,6 +9,35 @@ Branch: `clean_physics`. Driven by Ralph loop + `/codex:adversarial-review`.
 - **Ocean** (`src/legoesm/ocean/physics/`): vertical_mixing, bottom_drag, lateral_mixing, convection, surface_forcing, shortwave_penetration, mixing.
 - **Cryosphere** (`src/legoesm/ice/`): sea_ice, dynamics, itd, rheology, transport.
 
+## Iteration 74 — 2026-05-13
+
+**Codex review + inspection on ocean physics convection +
+surface_forcing.**  Codex returned `verdict=approve` with one
+candidate risk but truncated output (post-investigation Python
+tests failed due to missing venv activation in codex shell);
+direct inspection of the same paths found no concrete bug:
+
+- **`prescribed.py`**: virtual-salt-flux `dS/dt = S · E_minus_P /
+  dz_0` matches the standard salt-conservation derivation
+  (S = M_salt / V_water; d(M_salt) = 0 with dV/dt = −E).
+- **`restoring.py`**: linear relaxation `dT/dt = −(T − T_star) /
+  τ` with cosine T_star profile.  Sign convention correct.
+- **`wind_profiles.py`**: 10 wind-profile options (single_gyre,
+  double_gyre, double_gyre_sin2/tapered, channel_sine, global_wind,
+  two_belt, etc.) with buffer tapers at basin walls.
+- **`bulk_formulas.py`**: iter-42 fixes (`_saturation_specific_
+  humidity` mixing-ratio→specific-humidity, grey-surface LW `ε σ
+  T^4 + (1−ε)·LW_down`, |U| scaling) hold.  Config `q_a` is
+  specific humidity (kg/kg moist), consistent with iter-42 q_sat.
+- **`bulk_flux.compute_most_fluxes`** (COARE3 / Large-Yeager 2009):
+  Charnock + smooth-flow z₀ update; LY09 -3.14807e-10·U⁶ high-wind
+  correction; multi-height (z_u, z_t, z_q) Stanton/Dalton number
+  shift with stability corrections; `wind_speed = sqrt(u² + v² +
+  1e-4)` floor.
+
+No new fixes needed.  iter-42 cleanup and the MOST iterations are
+mature.
+
 ## Iteration 73 — 2026-05-13
 
 **Bug fix: Morrison + Thompson ice/snow/graupel sedimentation +
