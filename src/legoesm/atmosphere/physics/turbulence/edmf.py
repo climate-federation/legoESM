@@ -195,15 +195,31 @@ def edmf_turbulence(
         # Updraft virtual potential temperature
         theta_v_u = virtual_temperature(theta_u, q_u)
 
-        # Buoyancy
+        # Buoyancy [m/s²]
         buoy = constants.g * (theta_v_u - theta_v_env) / jnp.clip(theta_v_env, 1.0, None)
 
-        # Update updraft vertical velocity
+        # Plume vertical velocity equation (Siebesma 2007 / Tan et al. 2018):
+        #
+        #     w · dw/dz = B − ε · w²       ⇔     d(w²)/dz = 2(B − ε·w²).
+        #
+        # Use the **squared form** so the discrete update is dimensionally
+        # consistent (m²/s² on both sides) and naturally handles w → 0:
+        # ``w_new² = w² + 2·(B − ε·w²)·dz``, clamped at zero.  The
+        # previous formulation ``dw/dz ≈ B − ε·w`` mixed [m/s²] and
+        # [1/s] in a single sum, missed the canonical ``B/w`` term in
+        # the Lagrangian form, and consequently flipped the sign of
+        # dw/dz at small w_u — strangling buoyant updrafts that should
+        # accelerate.
         eps = config.entrainment_rate
-        dw_dz = buoy - eps * w_u
-        w_u_new = w_u + dw_dz * dz_k
+        w_u_sq_raw = w_u ** 2 + 2.0 * (buoy - eps * w_u ** 2) * dz_k
+        # AD-safe sqrt: ``d/dx sqrt(x) = 1/(2·sqrt(x))`` blows up at 0,
+        # so floor the argument before sqrt and zero the result for
+        # genuinely-negative w² (dead updraft) via an outer ``where``.
+        w_u_sq_safe = jnp.maximum(w_u_sq_raw, 1.0e-20)
+        w_u_new = jnp.where(w_u_sq_raw > 0.0, jnp.sqrt(w_u_sq_safe), 0.0)
 
-        # Entrain/detrain updraft properties
+        # Entrain environment air (mass-conservation form):
+        #   d(φ_u)/dz = −ε · (φ_u − φ_env).
         dtheta_dz = -eps * (theta_u - theta_env)
         dq_dz = -eps * (q_u - q_env)
         theta_u_new = theta_u + dtheta_dz * dz_k

@@ -340,6 +340,38 @@ test_zero_velocity_isotropic_stress` is a *pre-existing* failure
 rtol too tight) — verified by re-running the test on HEAD~1; not
 caused by this iter.
 
+## Iter-88 — EDMF updraft equation dimensionally inconsistent
+`src/legoesm/atmosphere/physics/turbulence/edmf.py:201-204` (Siebesma
+2007 / Tan et al. 2018 simplified-EDMF updraft).  Code had
+
+    dw_dz = buoy - eps * w_u
+    w_u_new = w_u + dw_dz * dz_k
+
+`buoy` is `g·Δθ_v/θ_v` [m/s²]; `eps·w_u` is [1/m]·[m/s] = [1/s].
+Summing two terms with different units silently mixes the
+buoyancy-driven dw/dz term with the entrainment damping.  The
+Lagrangian plume equation is `w·dw/dz = B − ε·w²`; the linearised
+form is `dw/dz = B/w − ε·w` (both [1/s]).  Dropping `B/w → B` flips
+the sign of `dw/dz` at small `w_u` — buoyant updrafts that should
+accelerate were being damped.
+
+Fix: integrate the **squared form** which is dimensionally consistent
+on both sides and naturally handles `w → 0`:
+
+    d(w²)/dz = 2·(B − ε·w²),
+    w²_new   = max( w² + 2·(B − ε·w²)·dz_k, 0 ),
+    w_new    = sqrt( w²_new ).
+
+AD safety: `d/dx sqrt(x) = 1/(2 sqrt(x))` is singular at 0, so floor
+the argument before sqrt (`max(w²_new, 1e-20)`) and gate the result
+with `where(w² > 0, sqrt(...), 0)`.
+
+Verification: 53 `tests/atmosphere/hydrostatic/unit/test_turbulence.py`
++ 45 `tests/unit/test_physics_turbulence.py` + 3 EDMF state /
+convection tests = 101 green.  Differentiability test
+`test_differentiable` now finite (previously NaN under the new sqrt
+without the AD-safe pattern, caught in the test loop).
+
 ## Next iterations
 Continue addressing further codex findings and direct-inspection sweeps until all
 schemes are provably conservative, monotone, CFL-safe, and AD-safe across mixed
