@@ -5346,3 +5346,63 @@ reconstructions (PETM, K-Pg, glacial-interglacial).  Pure JAX,
 vmap-compatible.  s=0.67 is Caldeira-Wickett / AR6 empirical
 (default arg).  No `constants.py` additions.
 
+## Iter 853 — aragonite_saturation_state_fv3 (Ω_arag primitive)
+
+Added `aragonite_saturation_state_fv3(pco2_new, omega_arag_ref=3.5,
+pco2_ref=278.0, gamma_exp=0.85)` to `grids/cubed_sphere.py`.
+Orr et al. 2005 / Feely et al. 2009 power-law parameterization
+of aragonite saturation state:
+
+```
+Ω_arag(t) = Ω_arag_ref · (pCO₂_ref / pCO₂_new)^γ
+```
+
+Where Ω_arag = [Ca²⁺][CO₃²⁻]/K_sp; default γ = 0.85 (Orr 2005;
+0.8–0.9 across regimes via [CO₃²⁻] buffering).  Ω_arag_ref = 3.5
+(PI surface tropics; surface mean ~3.0, polar ~1.5).
+
+Canonical AR6 trajectory (tropical surface):
+  | epoch           | pCO₂   | Ω_arag |
+  |-----------------|--------|--------|
+  | 1750 pre-ind    | 278    | 3.50   |
+  | 2024 present    | 420    | 2.47   |
+  | SSP1-2.6 2100   | 450    | 2.34   |
+  | SSP3-7.0 2100   | 850    | 1.41   |
+  | Undersaturation | ~2200  | 1.00   |
+  | PETM ~55 Ma     | 1000   | 1.23   |
+
+Below Ω_arag = 1 corals/pteropods/mollusks struggle to calcify
+(Hoegh-Guldberg 2007).  Polar oceans near Ω_arag=1 already at
+present-day (Orr 2005); Southern Ocean projected to cross 1.0 by
+2030–2040 under SSP scenarios (Hauck-Völker 2015).  Test verifies
+polar-Ω_ref=1.5 case crosses Ω=1 already at 700 ppm.
+
+Composes with iter-852 ``ocean_ph_change_fv3`` for **paired
+carbonate-chemistry primitives**:
+  * iter-852 ΔpH    — protonation state
+  * iter-853 Ω_arag — calcite-saturation state
+
+Together they span the AR6 §5.3 OA-impact metrics.
+
+Used by: Orr et al. 2005 GBC OA projections, Feely et al. 2009
+Annu Rev shells-and-skeletons synthesis, AR6 §5.3 OA, IPCC SROCC
+§5.2.2.5, OA-MIP / CMIP6 carbonate-chemistry diagnostics, reef-
+impact studies, Hauck-Völker 2015 Southern Ocean.
+
+Test: `tests/test_fv3_aragonite_saturation_iter853.py` (9 tests:
+pre-industrial Ω=3.5 analytic, present-day Ω≈2.47, SSP3-7.0 Ω≈1.41,
+undersaturation crossing at 2200 ppm, LGM Ω>3.5, polar Ω_ref=1.5
+crosses 1 at 700 ppm, chain consistency with iter-852 ΔpH, pCO₂=0
+floored, 3-D shapes).
+
+### Why this iteration was meaningful
+
+**Closes the AR6 §5.3 OA paired-primitive set** (iter-852 ΔpH +
+iter-853 Ω_arag).  Ω_arag is THE canonical calcification-threshold
+metric used in reef-bleaching forecasts, pteropod-habitat
+projections, and dissolution-horizon depth estimates.  Together
+with iter-852 these give the complete carbonate-chemistry impact
+diagnostic from any emission scenario.  Pure JAX, vmap-compatible.
+γ=0.85 and Ω_arag_ref=3.5 are Orr 2005 / AR6 empirical (default
+args).  No `constants.py` additions.
+

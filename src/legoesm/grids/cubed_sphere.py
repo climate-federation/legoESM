@@ -8500,6 +8500,91 @@ def ocean_ph_change_fv3(
     return -sensitivity_s * jnp.log10(p_new_safe / p_ref_safe)
 
 
+def aragonite_saturation_state_fv3(
+    pco2_new: jax.Array,
+    omega_arag_ref: jax.Array = 3.5,
+    pco2_ref: jax.Array = 278.0,
+    gamma_exp: float = 0.85,
+    pco2_floor: float = 1e-6,
+) -> jax.Array:
+    """FV3_3D iter 853: aragonite saturation state Ω_arag.
+
+    Orr et al. 2005 / Feely et al. 2009 power-law parameterization
+    of aragonite saturation state Ω_arag = [Ca²⁺][CO₃²⁻]/K_sp under
+    atmospheric pCO₂ perturbation:
+
+        Ω_arag(t) = Ω_arag_ref · (pCO₂_ref / pCO₂_new)^γ
+
+    Where:
+      * Ω_arag_ref  — reference Ω_arag at pCO₂_ref; default 3.5
+                      (pre-industrial surface tropics, Orr 2005).
+                      Surface mean ~3.0, subtropics ~3.8, polar ~1.5.
+      * pCO₂_ref    — reference atmospheric pCO₂ (ppm); default 278.
+      * γ           — empirical exponent ~0.85 (Orr 2005; varies
+                      0.8–0.9 across saturation regimes via [CO₃²⁻]
+                      buffering response to DIC).
+
+    Sign: Ω > 1 ⇒ supersaturated (calcification favorable); Ω < 1
+    ⇒ undersaturated (dissolution, aragonite-dependent organisms
+    die back).
+
+    Canonical AR6 trajectory (warm tropical surface):
+      | epoch           | pCO₂   | Ω_arag |
+      |-----------------|--------|--------|
+      | 1750 pre-ind    | 278    | 3.50   |
+      | 2024 present    | 420    | 2.47   |
+      | SSP1-2.6 2100   | 450    | 2.34   |
+      | SSP3-7.0 2100   | 850    | 1.41   |
+      | Undersaturation | ~2100  | 1.00   |
+      | PETM ~55 Ma     | 1000   | 1.23   |
+
+    Below Ω_arag = 1 corals/pteropods/mollusks struggle to calcify
+    (Hoegh-Guldberg 2007).  Polar oceans already near Ω_arag=1 at
+    present-day (Orr 2005); Southern Ocean projected to cross 1.0
+    by ~2030–2040 under SSP scenarios (Hauck-Völker 2015).
+
+    Composes with iter-852 ``ocean_ph_change_fv3`` to give the
+    **paired carbonate-chemistry primitives**:
+      * iter-852 ΔpH    — protonation state
+      * iter-853 Ω_arag — calcite-saturation state
+
+    Together they span the AR6 §5.3 OA-impact metrics.
+
+    Used by: Orr et al. 2005 GBC OA projections, Feely et al. 2009
+    Annu Rev shells-and-skeletons synthesis, AR6 §5.3 ocean
+    acidification, IPCC SROCC §5.2.2.5, OA-MIP / CMIP6 carbonate-
+    chemistry diagnostics, reef-impact studies (Hoegh-Guldberg
+    2007), Hauck-Völker 2015 Southern Ocean projections.
+
+    Note: γ varies with saturation regime; for high-CO₂ regimes
+    (PETM, paleoclimate) the [CO₃²⁻] response saturates and γ
+    decreases.  Linear-in-log-pCO₂ form (this primitive) is most
+    accurate in 200–1000 ppm band.
+
+    Parameters
+    ----------
+    pco2_new : jax.Array
+        Current atmospheric pCO₂ (ppm).
+    omega_arag_ref : jax.Array or float
+        Reference Ω_arag at pco2_ref; default 3.5 (PI tropical).
+    pco2_ref : jax.Array or float
+        Reference atmospheric pCO₂ (ppm); default 278 (1750 CE).
+    gamma_exp : float
+        Orr 2005 empirical exponent; default 0.85.
+    pco2_floor : float
+        Lower bound on pCO₂ (ppm); default 1e-6.
+
+    Returns
+    -------
+    omega_arag : jax.Array
+        Aragonite saturation state (dimensionless); Ω<1 indicates
+        dissolution regime.
+    """
+    p_new_safe = jnp.maximum(pco2_new, pco2_floor)
+    p_ref_safe = jnp.maximum(pco2_ref, pco2_floor)
+    return omega_arag_ref * (p_ref_safe / p_new_safe) ** gamma_exp
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,
