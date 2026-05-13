@@ -25,6 +25,7 @@ c_pd = 1004.64                  # Specific heat at constant pressure [J/(kg*K)]
 c_vd = c_pd - R_d               # Specific heat at constant volume [J/(kg*K)] = 717.59
 kappa = R_d / c_pd              # Poisson constant R_d/c_pd (~0.2857)
 p_ref = 1.0e5                   # Reference pressure [Pa] (1000 hPa)
+p_atm_std = 101325.0            # Standard atmosphere [Pa] (1013.25 hPa)
 
 # ==============================================================================
 # Water Thermodynamics
@@ -97,6 +98,12 @@ M_h2o = M_H2O * 1e-3            # [kg/mol] = 0.01801528 (water)
 
 # Avogadro's number (CODATA 2019 SI redefinition — exact value).
 N_A = 6.02214076e23             # [1/mol] particles per mole
+
+# Universal gas constant (CODATA 2018 / SI redefinition — exact).
+# Used by biochemistry / photosynthesis (Arrhenius temperature factors)
+# and any other code that needs R independent of a specific gas (R_d,
+# R_v are gas-specific = R / M).
+R_universal = 8.314462618       # [J/(mol·K)] = N_A · k_B
 
 # ==============================================================================
 # Mathematical Constants

@@ -314,12 +314,16 @@ def pdi_K(psi: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarray:
     inner_crit = 1.0 - (1.0 - Sc_crit_safe ** (1.0 / m)) ** m
     Kr_crit = Sc_crit_safe ** config.omega_pdi * inner_crit ** 2
 
-    # Cosine interpolation between h_crit and h=0
+    # Cosine interpolation between h_crit and h=0.
+    # Boundary conditions: Kr_interp(h~0) = 1 (= K_sat) and
+    # Kr_interp(h=h_crit) = Kr_crit (continuous match with capillary Kr_c).
+    # frac = 0 at h~0 (wet), frac = 1 at h=h_crit (drier), so the smoothstep
+    # must run from 1 at frac=0 to Kr_crit at frac=1.
     x = jnp.log10(jnp.clip(h, 1e-10, None))
     x_crit = jnp.log10(h_crit)
     x_s = jnp.log10(1e-10)  # effectively h ~ 0
     frac = jnp.clip((x - x_s) / (x_crit - x_s + _TINY), 0.0, 1.0)
-    Kr_interp = 1.0 + 0.5 * (1.0 + jnp.cos(jnp.pi * frac)) * (Kr_crit - 1.0)
+    Kr_interp = 1.0 + 0.5 * (1.0 - jnp.cos(jnp.pi * frac)) * (Kr_crit - 1.0)
 
     # Use interpolated K when h < h_crit, otherwise standard capillary
     Kc = config.K_sat * jnp.where(h < h_crit, Kr_interp, Kr_c)

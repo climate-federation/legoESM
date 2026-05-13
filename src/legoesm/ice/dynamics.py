@@ -110,16 +110,33 @@ def free_drift_velocity(
     drag_ocean: float = 5.5e-3,
     drag_atm: float = 1.3e-3,
     rho_air: float = constants.rho_air,
-    rho_ice: float = constants.rho_ice,
+    rho_ocean: float = constants.rho_ocean,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Compute diagnostic ice velocity via linear drag combination.
+    r"""Diagnostic ice velocity from the linearised free-drift balance.
 
-    **This is a heuristic placeholder**, not a physically faithful
-    free-drift solver.  A proper free-drift model would solve the
-    steady-state momentum balance including Coriolis and turning
-    angles.  The current formulation is a simple linear combination:
+    Steady-state, no-Coriolis, no-internal-stress momentum balance:
 
-        u_ice = drag_ocean * u_ocean + drag_atm * (rho_air/rho_ice) * u_wind
+        ρ_air · C_ai · |U_a - u_i| (U_a - u_i)
+            = ρ_oc  · C_oi · |u_i - U_w| (u_i - U_w)
+
+    Approximating ``|U_a - u_i| ≈ |U_a - U_w|`` in the slow-ice limit
+    gives the Zubov-style estimate
+
+        u_i = U_w + α · (U_a - U_w),
+        α   = sqrt(ρ_air · C_ai / (ρ_oc · C_oi)).
+
+    With the CICE-default drag coefficients (``C_ai = 1.3e-3``,
+    ``C_oi = 5.5e-3``) and densities (``ρ_air ≈ 1.225``, ``ρ_oc ≈ 1025``)
+    this yields ``α ≈ 0.017`` — the canonical "2 % of wind" Nansen /
+    Zubov drift rule (Leppäranta 2011, eq. 6.42).
+
+    The previous implementation linearly combined ``drag_ocean * U_w +
+    (drag_atm * ρ_air / ρ_ice) * U_a``, which treats the dimensionless
+    drag coefficients as if they were velocity-mapping ratios and uses
+    ρ_ice in the denominator instead of ρ_oc.  That formula produced
+    ice drift roughly two orders of magnitude smaller than the physical
+    Zubov estimate and is **not** a defensible placeholder for
+    diagnostic use.
 
     Parameters
     ----------
@@ -127,19 +144,23 @@ def free_drift_velocity(
         Ocean surface currents [m/s].
     wind_u, wind_v : arrays
         Atmospheric wind [m/s].
-    drag_ocean, drag_atm : float
-        Drag coefficients.
-    rho_air, rho_ice : float
-        Densities [kg/m^3].
+    drag_ocean : float
+        Ocean-ice drag coefficient ``C_oi`` [-].
+    drag_atm : float
+        Air-ice drag coefficient ``C_ai`` [-].
+    rho_air : float
+        Reference dry-air density [kg/m^3].
+    rho_ocean : float
+        Reference seawater density [kg/m^3].
 
     Returns
     -------
     u_ice, v_ice : arrays
         Diagnostic ice velocity [m/s].
     """
-    ratio = drag_atm * rho_air / rho_ice
-    u_ice = drag_ocean * ocean_u + ratio * wind_u
-    v_ice = drag_ocean * ocean_v + ratio * wind_v
+    alpha = jnp.sqrt(rho_air * drag_atm / (rho_ocean * drag_ocean))
+    u_ice = ocean_u + alpha * (wind_u - ocean_u)
+    v_ice = ocean_v + alpha * (wind_v - ocean_v)
     return u_ice, v_ice
 
 
@@ -240,6 +261,7 @@ def evp_solver(
     P_star: float = 2.75e4,
     C_strength: float = 20.0,
     T_evp: float = 0.36,
+    Delta_min: float = 2.0e-9,
     rho_ice: float = constants.rho_ice,
     rho_air: float = constants.rho_air,
     rho_ocean: float = constants.rho_ocean,
@@ -280,6 +302,10 @@ def evp_solver(
         Ice strength parameters.
     T_evp : float
         EVP damping timescale ratio.
+    Delta_min : float
+        Deformation-rate regulariser [1/s] threaded into the EVP
+        stress-update — keeps the plastic yield curve smooth at zero
+        deformation.  Default 2e-9 (CICE convention).
     rho_ice, rho_air, rho_ocean : float
         Densities [kg/m^3].
     C_ai, C_oi : float
@@ -330,7 +356,7 @@ def evp_solver(
         s11_new, s22_new, s12_new = evp_stress_update(
             s11_c, s22_c, s12_c,
             eps_11, eps_22, eps_12,
-            P, e_yield, T_evp, dt_s, N_evp,
+            P, e_yield, T_evp, dt_s, N_evp, Delta_min,
         )
 
         # 3. Stress divergence

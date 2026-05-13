@@ -195,15 +195,31 @@ def edmf_turbulence(
         # Updraft virtual potential temperature
         theta_v_u = virtual_temperature(theta_u, q_u)
 
-        # Buoyancy
+        # Buoyancy [m/s²]
         buoy = constants.g * (theta_v_u - theta_v_env) / jnp.clip(theta_v_env, 1.0, None)
 
-        # Update updraft vertical velocity
+        # Plume vertical velocity equation (Siebesma 2007 / Tan et al. 2018):
+        #
+        #     w · dw/dz = B − ε · w²       ⇔     d(w²)/dz = 2(B − ε·w²).
+        #
+        # Use the **squared form** so the discrete update is dimensionally
+        # consistent (m²/s² on both sides) and naturally handles w → 0:
+        # ``w_new² = w² + 2·(B − ε·w²)·dz``, clamped at zero.  The
+        # previous formulation ``dw/dz ≈ B − ε·w`` mixed [m/s²] and
+        # [1/s] in a single sum, missed the canonical ``B/w`` term in
+        # the Lagrangian form, and consequently flipped the sign of
+        # dw/dz at small w_u — strangling buoyant updrafts that should
+        # accelerate.
         eps = config.entrainment_rate
-        dw_dz = buoy - eps * w_u
-        w_u_new = w_u + dw_dz * dz_k
+        w_u_sq_raw = w_u ** 2 + 2.0 * (buoy - eps * w_u ** 2) * dz_k
+        # AD-safe sqrt: ``d/dx sqrt(x) = 1/(2·sqrt(x))`` blows up at 0,
+        # so floor the argument before sqrt and zero the result for
+        # genuinely-negative w² (dead updraft) via an outer ``where``.
+        w_u_sq_safe = jnp.maximum(w_u_sq_raw, 1.0e-20)
+        w_u_new = jnp.where(w_u_sq_raw > 0.0, jnp.sqrt(w_u_sq_safe), 0.0)
 
-        # Entrain/detrain updraft properties
+        # Entrain environment air (mass-conservation form):
+        #   d(φ_u)/dz = −ε · (φ_u − φ_env).
         dtheta_dz = -eps * (theta_u - theta_env)
         dq_dz = -eps * (q_u - q_env)
         theta_u_new = theta_u + dtheta_dz * dz_k
@@ -259,6 +275,16 @@ def edmf_turbulence(
     # iter-50 audit attempt to do so broke
     # ``test_mass_flux_active`` and was reverted.
     M = config.a_updraft * rho * w_u  # (ncol, nlev)
+
+    # Explicit-Euler CFL cap on the mass-flux transport.  The MF tendency
+    # is ``-(1/ρ) d(M·(φ_u-φ))/dz``; the effective layer Courant number
+    # is ``M·dt/(ρ·dz)``.  For deep convection (w_u up to ~10 m/s) M can
+    # reach values that drive ``M·dt/(ρ·dz) > 1`` on coarse-vertical
+    # boundary layers — the centered-FD update then overshoots and the
+    # ED implicit solve cannot recover the integrity of θ/q.  Cap M at
+    # the local layer-mass-per-step.
+    M_max = 0.5 * rho * dz_layer / jnp.maximum(dt, 1.0e-12)
+    M = jnp.minimum(M, M_max)
 
     # MF tendencies: d(phi)/dt_mf = -(1/rho) * d(M * (phi_u - phi_env)) / dz
     # Compute vertical derivative of mass flux transport

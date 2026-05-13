@@ -28,6 +28,7 @@ from legoesm.atmosphere.physics.microphysics._warm_rain import (
     self_collection_breakup,
     rain_evaporation,
     safe_pow,
+    donor_clamp_scale,
 )
 from legoesm.atmosphere.physics.microphysics.config import ThompsonConfig
 from legoesm.atmosphere.physics.microphysics.output import (
@@ -94,7 +95,8 @@ def thompson_microphysics(
 
     # Autoconversion (gamma-corrected)
     dq_c_au, dN_r_au, x_c = autoconversion_sb(
-        q_c, N_c_eff, rho, config.k_au, config.x_star, sharpness, gamma_norm=gamma_c_norm,
+        q_c, N_c_eff, rho, config.k_au, config.x_star,
+        config.autoconversion_sharpness, gamma_norm=gamma_c_norm,
     )
 
     # Accretion (gamma-corrected)
@@ -106,7 +108,7 @@ def thompson_microphysics(
     )
 
     # Rain evaporation
-    evaporation = rain_evaporation(q_v, q_r, q_sat, config.evap_coeff)
+    evaporation = rain_evaporation(q_v, q_r, q_sat, config.evap_coeff, dt=dt)
 
     # === ICE PHASE (Morrison processes) ===
     T_freeze = constants.T_freeze
@@ -175,10 +177,7 @@ def thompson_microphysics(
         dq_c_au + dq_c_ac + bergeron + riming_i + riming_s + cond_evap_sink
     )
     qc_avail = jnp.clip(q_c, 0.0)
-    qc_scale = jnp.minimum(
-        1.0,
-        qc_avail / jnp.maximum(qc_sink_total * dt_safe, 1e-30),
-    )
+    qc_scale = donor_clamp_scale(qc_avail, qc_sink_total, dt)
     dq_c_au = dq_c_au * qc_scale
     dq_c_ac = dq_c_ac * qc_scale
     bergeron = bergeron * qc_scale
@@ -221,10 +220,7 @@ def thompson_microphysics(
     # step with combined sinks > q_i / dt drives q_i negative.
     qi_sink_total = aggregation + melt_ice + rime_to_graupel_from_i
     qi_avail = jnp.clip(q_i, 0.0)
-    qi_scale = jnp.minimum(
-        1.0,
-        qi_avail / jnp.maximum(qi_sink_total * dt_safe, 1e-30),
-    )
+    qi_scale = donor_clamp_scale(qi_avail, qi_sink_total, dt)
     aggregation = aggregation * qi_scale
     melt_ice = melt_ice * qi_scale
     rime_to_graupel_from_i = rime_to_graupel_from_i * qi_scale
@@ -233,13 +229,26 @@ def thompson_microphysics(
     # q_s sinks: melt_snow, rime_to_graupel_from_s.
     qs_sink_total = melt_snow + rime_to_graupel_from_s
     qs_avail = jnp.clip(q_s, 0.0)
-    qs_scale = jnp.minimum(
-        1.0,
-        qs_avail / jnp.maximum(qs_sink_total * dt_safe, 1e-30),
-    )
+    qs_scale = donor_clamp_scale(qs_avail, qs_sink_total, dt)
     melt_snow = melt_snow * qs_scale
     rime_to_graupel_from_s = rime_to_graupel_from_s * qs_scale
     rime_to_graupel = rime_to_graupel_from_i + rime_to_graupel_from_s
+
+    # === DONOR CLAMP for q_v sinks ===
+    # Vapor budget: dq_v_dt = -condensation + evaporation - dq_i_dep.
+    # Positive condensation AND positive dq_i_dep together remove
+    # vapor; without a joint clamp, supersaturated icy layers can
+    # over-draw q_v.  Mirror Morrison's iter-25 q_v clamp.  Codex
+    # iter-29 #2.
+    #
+    # Vapor donor clamp via the shared AD-safe helper
+    # (donor_clamp_scale).  See morrison.py for the rationale.
+    cond_pos = jnp.maximum(condensation, 0.0)
+    qv_sink_total = cond_pos + jnp.maximum(dq_i_dep, 0.0)
+    qv_avail = jnp.clip(q_v, 0.0)
+    qv_scale = donor_clamp_scale(qv_avail, qv_sink_total, dt)
+    condensation = jnp.where(condensation > 0.0, condensation * qv_scale, condensation)
+    dq_i_dep = dq_i_dep * qv_scale
 
     # === SEDIMENTATION ===
     # Marshall-Palmer fall speeds use fractional exponents (b_v_x in
@@ -255,10 +264,29 @@ def thompson_microphysics(
     V_t_g = config.a_v_g * safe_pow(jnp.clip(q_g, 0.0) * rho_ratio, config.b_v_g)
     V_t_g = jnp.clip(V_t_g, 0.0, 30.0)
 
-    sed_r = sedimentation_tendency(q_r, rho, V_t_r, dz)
-    sed_i = sedimentation_tendency(q_i, rho, V_t_i, dz)
-    sed_s = sedimentation_tendency(q_s, rho, V_t_s, dz)
-    sed_g = sedimentation_tendency(q_g, rho, V_t_g, dz)
+    # Joint donor caps: each `extra_sink` is the in-column sink that
+    # shares the same explicit-Euler step as sedimentation.  Without
+    # these, post-donor-clamp in-column sinks ALREADY consume up to
+    # q/dt, AND sed independently can drain another q/dt — driving the
+    # pool negative.  Mirrors the iter-29 q_r/evap fix; extended to
+    # ALL sed paths in iter-73.
+    sed_r, precip_r = sedimentation_tendency(
+        q_r, rho, V_t_r, dz, dt=dt,
+        return_surface_flux=True,
+        extra_sink=evaporation,
+    )
+    sed_i, precip_i = sedimentation_tendency(
+        q_i, rho, V_t_i, dz, dt=dt, return_surface_flux=True,
+        extra_sink=aggregation + melt_ice + rime_to_graupel_from_i,
+    )
+    sed_s, precip_s = sedimentation_tendency(
+        q_s, rho, V_t_s, dz, dt=dt, return_surface_flux=True,
+        extra_sink=melt_snow + rime_to_graupel_from_s,
+    )
+    sed_g, precip_g = sedimentation_tendency(
+        q_g, rho, V_t_g, dz, dt=dt, return_surface_flux=True,
+        extra_sink=melt_graupel,
+    )
 
     # === LATENT HEATING ===
     L_v = constants.L_v
@@ -299,11 +327,9 @@ def thompson_microphysics(
     dN_r_dt = dN_r_au + dN_r_sc + dN_r_br
     dN_i_dt = dN_i_nuc - aggregation * jnp.clip(N_i, 0.0) / jnp.clip(q_i, 1e-15)
 
-    # Precipitation
-    precip_r = jnp.clip(q_r[:, -1], 0.0) * rho[:, -1] * jnp.clip(V_t_r[:, -1], 0.0)
-    precip_i = jnp.clip(q_i[:, -1], 0.0) * rho[:, -1] * jnp.clip(V_t_i[:, -1], 0.0)
-    precip_s = jnp.clip(q_s[:, -1], 0.0) * rho[:, -1] * jnp.clip(V_t_s[:, -1], 0.0)
-    precip_g = jnp.clip(q_g[:, -1], 0.0) * rho[:, -1] * jnp.clip(V_t_g[:, -1], 0.0)
+    # Precipitation uses the dt-limited surface flux from
+    # ``sedimentation_tendency`` so column water conservation holds
+    # exactly when the CFL limiter fires.
     precipitation = precip_r + precip_i + precip_s + precip_g
 
     return MicrophysicsOutput(

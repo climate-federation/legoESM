@@ -1542,7 +1542,18 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
                     - jnp.maximum(z_bot, z_seafloor),
                 )
                 h_safe = jnp.maximum(h_face, 1e-10)
-                return -r_eff * u_field * overlap / (h_safe * H_BBL)
+                # Effective BBL thickness: on shelves where the
+                # total wet depth is shallower than ``H_BBL`` the
+                # boundary-layer band cannot extend to its full
+                # nominal thickness.  Divide by the actual total
+                # overlap to keep the rate correct (matches
+                # ``ocean_tendency_common.bbl_drag_distributed``).
+                # Codex iter-39 #2.
+                total_overlap = jnp.sum(overlap, axis=-1, keepdims=True)
+                h_bbl_eff = jnp.minimum(
+                    jnp.maximum(total_overlap, 1e-10), H_BBL,
+                )
+                return -r_eff * u_field * overlap / (h_safe * h_bbl_eff)
             diag_botdrag_u = _bbl_drag_for_face(u, h_u, r_eff_u)
             diag_botdrag_v = _bbl_drag_for_face(v, h_v, r_eff_v)
         elif isinstance(z_coord, OceanPartialCellCoordinate):

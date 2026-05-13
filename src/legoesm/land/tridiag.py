@@ -42,13 +42,27 @@ def thomas_solve_batch(
         def fwd(carry, k):
             c_p, d_p = carry
             denom = b_col[k] - a_col[k] * c_p
-            denom = jnp.where(jnp.abs(denom) < _tiny,
-                              jnp.sign(denom) * _tiny + _tiny, denom)
+            # Floor |denom| at _tiny with a *non-zero* result on any
+            # platform / FTZ setting.  The previous
+            # ``jnp.sign(denom) * _tiny + _tiny`` formulation can return
+            # *exactly zero* on a backend that preserves subnormals:
+            # ``sign(-_subnormal) = -1`` ⇒ ``-_tiny + _tiny = 0``, then
+            # ``c_col[k] / denom`` divides by zero.  Under XLA's default
+            # flush-to-zero (FTZ) ``sign(-_subnormal)`` returns ``-0.0``
+            # so the old formula already produces ``+_tiny`` and the bug
+            # is hidden, but the masking is platform-dependent.  Use an
+            # explicit ``where(denom >= 0.0, ...)`` branch: under FTZ
+            # both branches collapse to ``+_tiny`` (since ``-0.0 >= 0.0``
+            # is ``True``), and without FTZ negative inputs cleanly map
+            # to ``-_tiny``.  In every case the result is non-zero.
+            sign = jnp.where(denom >= 0.0, 1.0, -1.0)
+            denom = jnp.where(jnp.abs(denom) < _tiny, sign * _tiny, denom)
             c_new = c_col[k] / denom
             d_new = (d_col[k] - a_col[k] * d_p) / denom
             return (c_new, d_new), (c_new, d_new)
 
-        denom0 = jnp.where(jnp.abs(b_col[0]) < _tiny, _tiny, b_col[0])
+        sign0 = jnp.where(b_col[0] >= 0.0, 1.0, -1.0)
+        denom0 = jnp.where(jnp.abs(b_col[0]) < _tiny, sign0 * _tiny, b_col[0])
         init = (c_col[0] / denom0, d_col[0] / denom0)
         _, (c_primes, d_primes) = jax.lax.scan(fwd, init, jnp.arange(1, n))
         c_all = jnp.concatenate([jnp.array([init[0]]), c_primes])

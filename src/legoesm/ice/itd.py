@@ -290,27 +290,44 @@ def linear_remap(
     h_remap = jnp.where(a_remap > 0.0, vol_remap / a_safe, 0.0)
     h_remap = jnp.maximum(h_remap, 0.0)
 
-    # KNOWN ISSUE (iter-85 audit): clamp at lo/hi without adjusting
-    # ``a_remap`` silently leaks volume — production probes show
-    # 1–4 % drift per call.  Naively scaling a by h_pre/h_clamp
-    # explodes at the upper-bound sentinel (hi=100 m for the last
-    # category) and at the lower bound where h_clamped → 0.  The
-    # proper fix requires Lipscomb piecewise-linear g(h) remapping
-    # (CICE convention) where the moved sliver between categories
-    # is analytically integrated and redistributed across category
-    # bounds.  This is a substantial structural refactor deferred
-    # to future cycle work.  Affects multi-day integration sea-ice
-    # mass budget by O(10–100 %) drift on long runs.
-    h_remap = jnp.where(
-        (a_remap > 0.0) & (h_remap < lo),
+    # Volume-conserving clamp.  An earlier implementation clamped
+    # h_remap to [lo, hi] without adjusting a_remap, leaking
+    # 1–4 % volume per call.  The local fix below rescales the
+    # area so ``a_remap * h_remap`` (volume per cell) is preserved
+    # whenever the thickness is moved into the category bin:
+    #     a_post · h_post = a_pre · h_pre   (V invariant)
+    # The Lipscomb piecewise-linear g(h) redistribution (CICE
+    # convention) is the long-term fix; until that lands, the
+    # local rescale eliminates the systematic mass drift while
+    # remaining differentiable and JIT-friendly.  Codex finding #9.
+    h_pre = h_remap
+    h_clamped_lo = jnp.where(
+        (a_remap > 0.0) & (h_pre < lo),
         lo,
-        h_remap,
+        h_pre,
     )
-    h_remap = jnp.where(
-        (a_remap > 0.0) & (h_remap > hi),
+    h_clamped = jnp.where(
+        (a_remap > 0.0) & (h_clamped_lo > hi),
         hi,
-        h_remap,
+        h_clamped_lo,
     )
+    # Rescale concentration to preserve volume.  Where no clamp
+    # fired ``h_clamped == h_pre`` so the ratio is 1.0.  Two regimes:
+    #   1. ``a_rescaled ≤ 1``: ordinary case, keep clamped thickness.
+    #   2. ``a_rescaled > 1``: would-be excess area is folded back into
+    #      the thickness (``h_final = a_pre · h_pre``) so volume is
+    #      conserved exactly.  This locally violates the upper bin
+    #      bound when concentration saturates, but preserves mass —
+    #      the proper Lipscomb redistribution to the next category is
+    #      the long-term structural fix.  Codex iter-3 finding #4.
+    h_safe = jnp.maximum(h_clamped, 1e-20)
+    a_pre = a_remap
+    vol_pre = a_pre * h_pre
+    a_rescaled = a_pre * h_pre / h_safe
+    saturated = a_rescaled > 1.0
+    a_remap = jnp.clip(a_rescaled, 0.0, 1.0)
+    # When saturated: put the residual volume back into h.
+    h_remap = jnp.where(saturated, vol_pre, h_clamped)
 
     if T_new is None:
         return h_remap, a_remap

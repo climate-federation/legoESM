@@ -36,6 +36,7 @@ def richardson_vertical_mixing(
     jacobian: jnp.ndarray,
     cfg: RichardsonVerticalMixingConfig,
     apply_diffusion: bool = True,
+    dt: float | None = None,
 ) -> VerticalMixingOutput:
     """Apply Richardson-number dependent vertical mixing.
 
@@ -106,15 +107,22 @@ def richardson_vertical_mixing(
     # False, return zero tendencies; the caller will apply K_v/A_v via an
     # unconditionally-stable backward-Euler solver after the explicit step.
     if apply_diffusion:
+        # Pass dt (when provided) so the explicit-Euler CFL cap
+        # introduced in clean_physics iter-5 fires on K_v/A_v at thin
+        # upper layers.  Default None keeps current behaviour.
         vel = jnp.stack([u, v], axis=0)
         vel_tend = jax.vmap(
-            lambda q: vertical_diffusion_variable_K(q, z_coord, jacobian, A_v),
+            lambda q: vertical_diffusion_variable_K(
+                q, z_coord, jacobian, A_v, dt=dt,
+            ),
             in_axes=0, out_axes=0,
         )(vel)
 
         tracers = jnp.stack([T, S], axis=0)
         tr_tend = jax.vmap(
-            lambda q: vertical_diffusion_variable_K(q, z_coord, jacobian, K_v),
+            lambda q: vertical_diffusion_variable_K(
+                q, z_coord, jacobian, K_v, dt=dt,
+            ),
             in_axes=0, out_axes=0,
         )(tracers)
     else:

@@ -59,8 +59,27 @@ def moc_streamfunction(v, h_partial, eta, H_bathy, mask, grid):
     del eta, H_bathy  # accepted for API symmetry
     n_lat_v, n_lon, _ = v.shape  # n_lat_v = n_lat + 1
     R = getattr(grid, "radius", 6.371e6)
-    cos_lat_v = np.cos(np.linspace(-np.pi / 2, np.pi / 2, n_lat_v))
-    dlon = 2.0 * np.pi / n_lon
+    # Derive v-face latitudes from grid metadata when available so
+    # regional grids get the correct zonal face lengths.  Falls back
+    # to the legacy global ``linspace(-π/2, π/2)`` only when the
+    # grid object does not expose ``lat_v`` / ``lat`` / ``dlat``.
+    # Codex iter-36 #1.
+    lat_v = getattr(grid, "lat_v", None)
+    if lat_v is None:
+        grid_lat = getattr(grid, "lat", None)
+        grid_dlat = getattr(grid, "dlat", None)
+        if grid_lat is not None and grid_dlat is not None:
+            # Cell centres + half-cell offset → v-face latitudes.
+            lat_v = np.concatenate([
+                [grid_lat[0] - 0.5 * grid_dlat],
+                grid_lat + 0.5 * grid_dlat,
+            ])
+        else:
+            lat_v = np.linspace(-np.pi / 2, np.pi / 2, n_lat_v)
+    cos_lat_v = np.cos(np.asarray(lat_v))
+    # Longitudinal spacing: prefer ``grid.dlon`` (correct on regional
+    # grids); fall back to the global 2π/n_lon.
+    dlon = getattr(grid, "dlon", 2.0 * np.pi / n_lon)
     dx_v = R * dlon * cos_lat_v[:, None]                        # (n_lat+1, 1)
 
     h_v = np.zeros_like(v)                                      # (n_lat+1, n_lon, nlev)
@@ -111,7 +130,10 @@ def barotropic_streamfunction(u, h_partial, mask, grid):
     n_lat, n_lon_u, _ = u.shape
     n_lon = n_lon_u - 1
     R = getattr(grid, "radius", 6.371e6)
-    dlat = np.pi / n_lat
+    # Use ``grid.dlat`` when available so regional grids integrate
+    # transport with their actual meridional spacing rather than the
+    # global ``π / n_lat``.  Codex iter-36 #2.
+    dlat = getattr(grid, "dlat", np.pi / n_lat)
     dy = R * dlat                                                # uniform
 
     # MOM6/MITgcm "min-rule" thickness at u-faces:

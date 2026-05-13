@@ -20,7 +20,11 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
-from legoesm.atmosphere.physics.microphysics._warm_rain import safe_pow
+from legoesm.atmosphere.physics.microphysics._warm_rain import (
+    rain_evaporation,
+    safe_pow,
+    donor_clamp_scale,
+)
 from legoesm.atmosphere.physics.microphysics.config import KesslerConfig
 from legoesm.atmosphere.physics.microphysics.output import (
     HydrometeorState,
@@ -105,9 +109,14 @@ def kessler_microphysics(
     # have unbounded derivative at q_r=0 — safe_pow handles the AD guard.
     accretion = config.accretion_coeff * q_c * safe_pow(q_r, 0.875)
 
-    # 4. Evaporation of rain (q_r^0.525).
-    subsaturation = jnp.clip(q_sat - q_v, 0.0) / jnp.clip(q_sat, 1e-10)
-    evaporation = config.evaporation_coeff * subsaturation * safe_pow(q_r, 0.525)
+    # 4. Evaporation of rain (q_r^0.525) via the shared donor-limited
+    # helper — bounds ``evap·dt ≤ q_r`` so one explicit step can't
+    # evaporate more rain than exists.  Centralises the formula so the
+    # four schemes (kessler/morrison/thompson/seifert_beheng) share
+    # one implementation.
+    evaporation = rain_evaporation(
+        q_v, q_r, q_sat, config.evaporation_coeff, dt=dt,
+    )
 
     # === Joint donor clamp on q_c sinks ===
     # Saturation-evaporation, autoconversion, and accretion can each
@@ -121,20 +130,12 @@ def kessler_microphysics(
     cond_evap_sink = jnp.maximum(-condensation, 0.0)
     qc_sink_total = cond_evap_sink + autoconv + accretion
     qc_avail = jnp.clip(q_c, 0.0)
-    # Double-where pattern: under fp32 ``1e-30`` underflows in the VJP
-    # (``1e-30**2 < fp32.tiny``) so the reverse-mode pass evaluates
-    # ``0/0`` even though the forward path is well-defined.  Short-
-    # circuit to ``1.0`` when there is no q_c sink so the AD graph
-    # never sees the underflow.  See ``safe_pow`` for the same
-    # pattern around fractional powers of zero hydrometeors.
-    qc_sink_dt = qc_sink_total * jnp.maximum(dt, 1e-10)
-    sink_active = qc_sink_dt > 0.0
-    safe_sink_dt = jnp.where(sink_active, qc_sink_dt, 1.0)
-    qc_scale = jnp.where(
-        sink_active,
-        jnp.minimum(1.0, qc_avail / safe_sink_dt),
-        1.0,
-    )
+    # Shared AD-safe donor clamp helper.  Replaces the previous
+    # boolean ``sink_active`` double-where with an explicit
+    # ``divisor_floor=1e-15`` that bounds the worst-case VJP under
+    # fp32 to ``-q / 1e-30 ≈ -1e30`` (safely within fp32 dynamic
+    # range).
+    qc_scale = donor_clamp_scale(qc_avail, qc_sink_total, dt)
     autoconv = autoconv * qc_scale
     accretion = accretion * qc_scale
     # Scale the evaporation branch only; positive condensation
@@ -150,7 +151,14 @@ def kessler_microphysics(
     V_t = config.rain_fall_speed * jnp.sqrt(
         rho_sfc / jnp.clip(rho, 0.1)
     )
-    sed_tend = sedimentation_tendency(q_r, rho, V_t, dz)
+    # Joint q_r donor cap: pass evaporation as ``extra_sink`` so the
+    # sedimentation flux limiter accounts for the rain evaporation that
+    # also removes q_r in the same step.  Codex iter-29 #1.
+    sed_tend, precipitation = sedimentation_tendency(
+        q_r, rho, V_t, dz, dt=dt,
+        return_surface_flux=True,
+        extra_sink=evaporation,
+    )
 
     # 6. Latent heating
     dT_dt = constants.L_v * (condensation - evaporation) / constants.c_pd
@@ -163,10 +171,12 @@ def kessler_microphysics(
     dq_c_dt = dq_c_sat - autoconv - accretion
     dq_r_dt = autoconv + accretion - evaporation + sed_tend
 
-    # Precipitation: surface flux
-    q_r_bot = jnp.clip(q_r[:, -1], 0.0)
-    V_t_bot = V_t[:, -1]
-    precipitation = q_r_bot * rho[:, -1] * V_t_bot
+    # Precipitation comes from the dt-limited surface flux returned by
+    # ``sedimentation_tendency`` so column water conservation holds
+    # exactly when the CFL limiter fires.  An earlier formulation
+    # diagnosed precipitation as ``q_r_bot · ρ · V_t``, which exceeds
+    # the actual amount removed from the column whenever
+    # ``V_t·dt/dz_bot > 1``.
 
     # Pin dtype to the input precision so we never silently promote
     # the unused-tendency placeholders to f64 under x64 mode.

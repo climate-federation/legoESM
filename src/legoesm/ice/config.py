@@ -62,3 +62,8 @@ class SeaIceConfig(NamedTuple):
     n_categories: int = 1           # 1=single-category (backward compat), 5=CICE ITD
     # --- Tracer transport ---
     transport: str = "none"         # "none" or "advect"
+    # PPM transport is monotone only when |u·dt/dx| ≤ 1.  Default 1
+    # substep covers the typical sea-ice regime (u ~ 0.1 m/s, dx ~
+    # 50 km, dt ~ 1 h → C ~ 0.007).  Raise for storm / fine-grid
+    # conditions where the Courant number can exceed 1.
+    transport_subcycles: int = 1
