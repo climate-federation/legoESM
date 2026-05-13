@@ -628,3 +628,46 @@ def test_anchored_step_supports_jax_grad_latlon_pe():
         assert grad.dtype == jnp.float64
     finally:
         set_policy(saved)
+
+
+def test_anchored_step_supports_jax_grad_mpas_sw():
+    """iter-56: ``jax.grad`` through anchored ``step()`` on MPAS SW.
+
+    Voronoi-mesh code path — structurally different from the cubed-sphere
+    PPM transport (cube PE/SW/NH) and the Gaussian-grid SH transform
+    (spectral PE/NH).  Uses TRiSK vector Laplacian and Bernoulli-form
+    SW tendencies; mass fixer is the iter-6 anchored additive correction
+    via ``fix_mass_mpas`` with the iter-8 ``target_mass`` kwarg path.
+    """
+    from legoesm.core.precision import PrecisionPolicy, set_policy, get_policy
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    from legoesm.atmosphere.dynamics.shallow_water_mpas import (
+        MPASShallowWaterModel, MPASShallowWaterConfig,
+    )
+    from tests.atmosphere.shallow_water.test_cases.williamson_mpas import (
+        williamson_test5_mpas,
+    )
+
+    saved = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp64())
+        mesh = create_voronoi_mesh(4)
+        cfg = MPASShallowWaterConfig(
+            nu_del4=0.0, fix_mass=True, anchor_mass_to_initial=True,
+        )
+        model = MPASShallowWaterModel(mesh, cfg)
+        state0 = williamson_test5_mpas(mesh)
+
+        def loss(h_data):
+            state = state0._replace(h=state0.h.replace(data=h_data))
+            s = model.step(state, 300.0)
+            return jnp.sum(s.h.data ** 2)
+
+        model.reset_target_mass()
+        grad = jax.grad(loss)(state0.h.data)
+
+        assert jnp.all(jnp.isfinite(grad))
+        assert float(jnp.max(jnp.abs(grad))) > 0.0
+        assert grad.dtype == jnp.float64
+    finally:
+        set_policy(saved)
