@@ -217,3 +217,44 @@ def test_long_run_mass_conservation_cubed_sphere_pe():
         f"cube PE 100-step drift {drift:.2e} exceeds 1e-12 — possible "
         f"per-step accumulation bug in the anchored fixer"
     )
+
+
+def test_long_run_mass_conservation_spectral_pe():
+    """iter-61: 100-step spectral PE long-run guard.
+
+    Parallel to iter-33 cube PE.  Validates the iter-3 spectral PE
+    anchored fixer (`lnps_hat[0] += log(target/now)·sqrt(4π)`) holds
+    over 100 steps.  Direct measurement: drift = 8.03e-16 on T21
+    spectral PE with isothermal rest state.
+    """
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.atmosphere.dynamics.spectral_pe import (
+        SpectralPrimitiveEquationModel, SpectralPEConfig,
+        isothermal_rest_state_spectral, spectral_pe_to_grid,
+    )
+
+    grid = create_gaussian_grid(21)
+    sigma = create_sigma_coordinate(10)
+    cfg = SpectralPEConfig(
+        fix_mass=True, anchor_mass_to_initial=True,
+    )
+    model = SpectralPrimitiveEquationModel(
+        grid, sigma, cfg, allow_unsupported_backend=True,
+    )
+    state = isothermal_rest_state_spectral(grid, sigma)
+
+    def _mass(s):
+        fields = spectral_pe_to_grid(s, grid, sigma)
+        return float(jnp.sum(
+            fields["p_s"].astype(jnp.float64)
+            * grid.grid_area.astype(jnp.float64),
+        ))
+
+    m0 = _mass(state)
+    for _ in range(100):
+        state = model.step(state, 600.0)
+    drift = _rel_drift(m0, _mass(state))
+    assert drift < 1e-12, (
+        f"spectral PE 100-step drift {drift:.2e} exceeds 1e-12"
+    )

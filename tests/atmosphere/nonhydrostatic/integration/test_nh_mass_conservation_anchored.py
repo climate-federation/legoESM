@@ -185,3 +185,37 @@ def test_long_run_nh_mass_conservation_mpas():
     assert drift < 1e-12, (
         f"MPAS NH 100-step dry-mass drift {drift:.2e} exceeds 1e-12"
     )
+
+
+def test_long_run_nh_mass_conservation_spectral():
+    """iter-61: 100-step spectral NH long-run guard.
+
+    Parallel to iter-33/34/60 long-run guards on cube PE / cube SW /
+    cube NH / MPAS NH.  Validates iter-9 spectral NH anchored fixer
+    (`rho_prime_hat[0,:] += Δρ·sqrt(4π)`).  Direct measurement: drift
+    = 1.94e-16 on T21 spectral NH with DCMIP-2025 TC1 init.
+    """
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.atmosphere.dynamics.spectral_nh import (
+        SpectralCompressibleEulerModel, SpectralNHConfig,
+        dcmip25_tc1_init_spectral,
+    )
+
+    grid = create_gaussian_grid(21)
+    state, hcoord, tmetric = dcmip25_tc1_init_spectral(grid, n_levels=10)
+    cfg = SpectralNHConfig(
+        n_acoustic_substeps=10, semi_implicit_acoustic=True,
+        fix_mass=True, anchor_mass_to_initial=True,
+    )
+    model = SpectralCompressibleEulerModel(
+        grid, hcoord, tmetric, cfg, allow_unsupported_backend=True,
+    )
+
+    m0 = float(model.compute_dry_mass(state))
+    for _ in range(100):
+        state = model.step(state, 5.0)
+    m_final = float(model.compute_dry_mass(state))
+    drift = _rel_drift(m0, m_final)
+    assert drift < 1e-12, (
+        f"spectral NH 100-step dry-mass drift {drift:.2e} exceeds 1e-12"
+    )
