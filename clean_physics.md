@@ -9,6 +9,41 @@ Branch: `clean_physics`. Driven by Ralph loop + `/codex:adversarial-review`.
 - **Ocean** (`src/legoesm/ocean/physics/`): vertical_mixing, bottom_drag, lateral_mixing, convection, surface_forcing, shortwave_penetration, mixing.
 - **Cryosphere** (`src/legoesm/ice/`): sea_ice, dynamics, itd, rheology, transport.
 
+## Iteration 77 — 2026-05-13
+
+**Inspection iteration on `ocean/dynamics/ocean_tendency_common.py`
+and `barotropic_common.py` (no code changes).**
+
+- **`barotropic_common.compute_filter_weights`**: cosine bell with
+  `n < 2` fallback to box filter (avoids `1 + cos(-π) = 0` divide-
+  by-zero).  `bebt_blend` and `maxvel_clip` are thin and correct.
+- **`iterate_eos_and_pressure_anomaly`**: 2-pass EOS iteration with
+  optional static `ρ_ref(z)` or dynamic recomputed-mean reference
+  density.  Reference-Jacobian (J=1, η=0) used so the `-g·∇η`
+  forcing isn't double-counted by the barotropic solver.
+- **`compute_static_rho_ref_z`**: wet-cell mean of in-situ density
+  after the 2-pass iteration; cast to `T.dtype`.
+- **`apply_sponge_tracer_relaxation` + `apply_freshwater_virtual_
+  salt_top`**: standard `+γ(ref − q)` relaxation + virtual-salt
+  flux at top; dtype cast prevents x64 promotion.
+- **`implicit_bottom_drag_factor`** (line 371): `1 / (1 + dt·r/H)`.
+  Unconditionally stable.
+- **`bbl_distributed_drag_face_column`**: Killworth & Edwards
+  (1999) overlap distribution; `h_bbl_eff = min(max(total_overlap,
+  eps), H_BBL)` correctly handles shelf cells with total depth <
+  H_BBL (iter-39 #2 fix in place).
+
+Known open architectural debt (per source comments at line 389-407):
+**bottom drag double-application in the explicit barotropic path**
+— ``F_slow`` already includes the depth-mean of the 3D PE's
+bottom-cell drag, and the implicit factor here adds another
+``r/H`` (effective `2·r/H` drag).  The Crank-Nicolson implicit
+barotropic path relies on `F_slow` alone and is correct.  Fix
+requires single-owner drag plumbing across `ocean_model_*.py` —
+deferred (cross-cutting refactor).
+
+No new fixes needed.
+
 ## Iteration 76 — 2026-05-13
 
 **Inspection iteration on remaining convection schemes
@@ -311,6 +346,10 @@ limitation tracked alongside the coupled-mode surface-flux flow.
 
 ## Outstanding / Deferred
 - GM/Redi bolus Courant limiter.
+- Bottom drag double-application in explicit barotropic substep
+  path (`F_slow` already carries depth-mean drag; `implicit_bottom_
+  drag_factor` adds another `r/H` → effective `2·r/H`).  Fix
+  requires single-owner drag plumbing across `ocean_model_*.py`.
 - CICE V=h·A state-variable refactor for sea-ice FW bookkeeping (iter-25 attempt
   reverted; slab path evolves h and conc semi-independently).
 - Threading `dt` into ocean `physics_fn` across 3 ocean PE backends + 3 model drivers.
