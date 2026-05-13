@@ -207,6 +207,16 @@ class CDGridCompressibleEulerConfig(NamedTuple):
         # FV3_3D iter 328: vector halo for cc → D-grid (u, v). Scalar halo leaves O(1) basis-mismatch
         # at cube edges (face-local e_x/e_y differ). center_to_dgrid_vector rotates via pad_halo_vector
         # (FV3 ext_vector, fv_duogrid.F90:626-975). PE unaffected (winds at corners).
+    use_fv3_a2b_ord4_vector_uv: bool = False
+        # FV3_3D iter 697: 4th-order a2b_ord4 PPM+Lagrange cascade for cc → D-grid (u, v).
+        # Requires use_fv3_vector_halo_uv=True.  Halo=2 vector pad + 4th-order corner cascade
+        # (FV3 a2b_edge.F90:a2b_ord4 duogrid path).  iter-698 empirical: -25.8% θ′ edge
+        # ratio at C8; iter-699 verified -21.9% at C16.  Promoted to factory ON.
+    use_fv3_a2b_ord4_theta_corner: bool = False
+        # FV3_3D iter 700: 4th-order a2b_ord4 cc → B-grid corner for θ_total in the
+        # c_p · θ_corner · dπ Coriolis-pressure term (line ~383).  Same 4th-order
+        # scalar cascade used by use_fv3_a2b_zeta_corner (iter-170 PE) and the
+        # iter-696 vector path.  Default OFF; impact measurement pending.
     use_fv3_d_con_cv: bool = False
         # FV3_3D iter 320: c_v denominator for NH d_con (FV3 dyn_core.F90:1795 cv_air branch).
         # NH conserves internal energy c_v·T; c_pd under-heats by c_v/c_p≈0.714 (~40%). PE unaffected.
@@ -270,7 +280,10 @@ def cdgrid_compressible_euler_slow_tendencies(
     # FV3_3D iter 328: vector-aware center_to_dgrid_vector rotates across cube faces (default False = scalar)
     n_face_uv, n_i_uv, n_j_uv, nlev_uv = u.shape
     if config.use_fv3_vector_halo_uv:
-        u_d, v_d = center_to_dgrid_vector(u, v, cdgrid)
+        u_d, v_d = center_to_dgrid_vector(
+            u, v, cdgrid,
+            use_fv3_a2b_ord4=config.use_fv3_a2b_ord4_vector_uv,
+        )
     else:
         _uv_stack = jnp.stack([u, v], axis=-1)  # (6, n, n, nlev, 2)
         _uv_flat = _uv_stack.reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv * 2)
@@ -369,7 +382,19 @@ def cdgrid_compressible_euler_slow_tendencies(
         abs_vor_corner = zeta_corner + cdgrid.f_corner[..., None]
     else:
         abs_vor_corner = zeta_corner
-    theta_corner = _interp_center_to_corner(theta_total, cdgrid)
+    if config.use_fv3_a2b_ord4_theta_corner:
+        from legoesm.core.operators_cdgrid import (
+            _interp_center_to_corner_a2b_ord4 as _icc_a2b_ord4_theta,
+        )
+        if theta_total.ndim == 4:
+            theta_corner = jax.vmap(
+                lambda lev: _icc_a2b_ord4_theta(lev, cdgrid),
+                in_axes=-1, out_axes=-1,
+            )(theta_total)
+        else:
+            theta_corner = _icc_a2b_ord4_theta(theta_total, cdgrid)
+    else:
+        theta_corner = _interp_center_to_corner(theta_total, cdgrid)
 
     du_d_dt = abs_vor_corner * v_d - dK_dx - c_p * theta_corner * dpi_dx
     dv_d_dt = -abs_vor_corner * u_d - dK_dy_perp - c_p * theta_corner * dpi_dy_perp
@@ -587,6 +612,9 @@ def cdgrid_compressible_euler_slow_tendencies(
         )
 
         # Step 3: del-(2*(nord+1)) damp (FV3 sw_core.F90:1725-1822, nord>0)
+        # FV3_3D iter 893: nord-loop preserved inline (1-ULP trace-reorder
+        # diff vs fv3_corner_laplacian_nord wrapper would break iter-22
+        # bit-for-bit test; mirror of PE-side rationale).
         if config.corner_div_damp_d4_bg > 0.0 and config.corner_div_damp_nord > 0:
             from legoesm.core._fv3_divergence_corner import (
                 fv3_corner_laplacian_iteration,
@@ -1000,6 +1028,13 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
         self.height_coord = height_coord
         self.terrain_metric = terrain_metric
         self.config = config or CDGridCompressibleEulerConfig()
+        # FV3_3D iter 902: enforce iter-890 nord range validation at
+        # model construction (fail-fast vs silent misuse).  Mirror of
+        # PE primitive_eq_cdgrid.py site.
+        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+            validate_corner_div_damp_nord,
+        )
+        validate_corner_div_damp_nord(self.config.corner_div_damp_nord)
         self._target_mass = None
 
         if self.config.small_earth_factor != 1.0:
@@ -1503,6 +1538,7 @@ def make_fv3_faithful_nh_config(**overrides) -> CDGridCompressibleEulerConfig:
     defaults = dict(
         use_fv3_d_con_cv=True,
         use_fv3_vector_halo_uv=True,
+        use_fv3_a2b_ord4_vector_uv=True,   # iter-698: -25.8% θ′ edge ratio at C8
         use_fv3_dynamic_exner=True,
         use_fv3_metric_aware_d_con=True,
         use_fv3_cross_face_du_proj=True,

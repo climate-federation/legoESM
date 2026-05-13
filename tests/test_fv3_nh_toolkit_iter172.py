@@ -177,6 +177,162 @@ def test_nh_full_fv3_toolkit_differentiable(small_nh_state):
     )
 
 
+def test_nh_corner_div_damp_nord2_runs_and_differs_from_nord1(
+    small_nh_state,
+):
+    """FV3_3D iter 887: NH-path mirror of iter-886 PE nord=2 regression
+    guard.
+
+    Validates open follow-up "Substantive nord>=2 fidelity restructure"
+    for the NH compressible-Euler path (ported in iter-168).  Two checks:
+
+    1. ``corner_div_damp_nord=2`` runs end-to-end one step without
+       NaN.  Sanity guard — the higher-order Laplacian iteration
+       loop in compressible_euler_cdgrid.py:631-632 must be
+       JAX-traceable and produce finite output through the NH
+       acoustic-substep loop.
+
+    2. ``corner_div_damp_nord=2 + corner_div_damp_fv3_vector_fill=True``
+       produces output that differs from ``corner_div_damp_nord=1``.
+       Confirms the higher-order ∇⁴ Laplacian contribution to
+       ke_correction is functional, not silently a no-op.
+
+    Faithful-implementation goal: NH nord=2 should be a strict
+    extension of nord=1, matching the PE path behavior verified
+    in iter-886 (test_corner_div_damp_nord2_pe_runs_and_differs_from_nord1).
+    """
+    grid, height_coord, terrain_metric, state = small_nh_state
+
+    n = grid.n
+    nlev = state.u.data.shape[-1]
+    rng = np.random.default_rng(seed=887)
+    u_p = rng.uniform(-1.0, 1.0, size=(6, n, n, nlev))
+    v_p = rng.uniform(-1.0, 1.0, size=(6, n, n, nlev))
+    s = state._replace(
+        u=state.u.replace(data=jnp.asarray(u_p)),
+        v=state.v.replace(data=jnp.asarray(v_p)),
+    )
+
+    cfg_nord1 = CDGridCompressibleEulerConfig(
+        hyperdiff_coeff=1e14,
+        n_acoustic_substeps=4,
+        corner_div_damp_d2_bg=0.0005,
+        corner_div_damp_dddmp=0.20,
+        corner_div_damp_d4_bg=1e-3,
+        corner_div_damp_nord=1,
+        corner_div_damp_fv3_vector_fill=True,
+    )
+    cfg_nord2 = CDGridCompressibleEulerConfig(
+        hyperdiff_coeff=1e14,
+        n_acoustic_substeps=4,
+        corner_div_damp_d2_bg=0.0005,
+        corner_div_damp_dddmp=0.20,
+        corner_div_damp_d4_bg=1e-3,
+        corner_div_damp_nord=2,
+        corner_div_damp_fv3_vector_fill=True,
+    )
+
+    m_nord1 = CDGridCompressibleEulerModel(
+        grid, height_coord, terrain_metric, cfg_nord1,
+    )
+    m_nord2 = CDGridCompressibleEulerModel(
+        grid, height_coord, terrain_metric, cfg_nord2,
+    )
+
+    s_nord1 = m_nord1.step(s, 10.0)
+    s_nord2 = m_nord2.step(s, 10.0)
+
+    # (1) Both paths finite (no NaN from inner Laplacian iteration
+    # composed with NH acoustic-substep loop).
+    assert jnp.all(jnp.isfinite(s_nord2.u.data)), \
+        "NH u NaN under nord=2"
+    assert jnp.all(jnp.isfinite(s_nord2.v.data))
+    assert jnp.all(jnp.isfinite(s_nord2.theta_prime.data))
+    assert jnp.all(jnp.isfinite(s_nord2.rho_prime.data))
+
+    # (2) nord=2 output differs from nord=1.
+    max_diff_u = float(jnp.max(jnp.abs(s_nord2.u.data - s_nord1.u.data)))
+    assert max_diff_u > 1e-12, (
+        "NH nord=2 path produced bit-for-bit identical output to "
+        "nord=1; higher-order Laplacian iteration is silently a no-op."
+    )
+
+
+def test_nh_corner_div_damp_nord3_loop_scales(small_nh_state):
+    """FV3_3D iter 889: NH-path mirror of iter-888 PE nord=3 stress.
+
+    Validates the NH compressible-Euler ``for _ in range(nord)``
+    Laplacian iteration loop in
+    ``compressible_euler_cdgrid.py:631-632`` scales beyond nord=2
+    (iter-887) to the full FV3 namelist range nord ∈ {1, 2, 3}.
+
+    Two checks:
+
+    1. ``corner_div_damp_nord=3`` runs end-to-end through the NH
+       acoustic-substep loop without NaN.
+    2. nord=3 NH output differs from nord=2 NH output — rules out
+       silent cap due to numerical fixed-point convergence or
+       loop truncation.
+
+    Combined with iter-886/887/888 this completes regression-guard
+    coverage for both 3D paths across the full FV3 nord-range.
+    """
+    grid, height_coord, terrain_metric, state = small_nh_state
+
+    n = grid.n
+    nlev = state.u.data.shape[-1]
+    rng = np.random.default_rng(seed=889)
+    u_p = rng.uniform(-1.0, 1.0, size=(6, n, n, nlev))
+    v_p = rng.uniform(-1.0, 1.0, size=(6, n, n, nlev))
+    s = state._replace(
+        u=state.u.replace(data=jnp.asarray(u_p)),
+        v=state.v.replace(data=jnp.asarray(v_p)),
+    )
+
+    cfg_nord2 = CDGridCompressibleEulerConfig(
+        hyperdiff_coeff=1e14,
+        n_acoustic_substeps=4,
+        corner_div_damp_d2_bg=0.0005,
+        corner_div_damp_dddmp=0.20,
+        corner_div_damp_d4_bg=1e-3,
+        corner_div_damp_nord=2,
+        corner_div_damp_fv3_vector_fill=True,
+    )
+    cfg_nord3 = CDGridCompressibleEulerConfig(
+        hyperdiff_coeff=1e14,
+        n_acoustic_substeps=4,
+        corner_div_damp_d2_bg=0.0005,
+        corner_div_damp_dddmp=0.20,
+        corner_div_damp_d4_bg=1e-3,
+        corner_div_damp_nord=3,
+        corner_div_damp_fv3_vector_fill=True,
+    )
+
+    m_nord2 = CDGridCompressibleEulerModel(
+        grid, height_coord, terrain_metric, cfg_nord2,
+    )
+    m_nord3 = CDGridCompressibleEulerModel(
+        grid, height_coord, terrain_metric, cfg_nord3,
+    )
+
+    s_nord2 = m_nord2.step(s, 10.0)
+    s_nord3 = m_nord3.step(s, 10.0)
+
+    # (1) nord=3 NH runs without NaN.
+    assert jnp.all(jnp.isfinite(s_nord3.u.data)), \
+        "NH u NaN under nord=3"
+    assert jnp.all(jnp.isfinite(s_nord3.v.data))
+    assert jnp.all(jnp.isfinite(s_nord3.theta_prime.data))
+    assert jnp.all(jnp.isfinite(s_nord3.rho_prime.data))
+
+    # (2) nord=3 NH output differs from nord=2 NH output.
+    max_diff_u = float(jnp.max(jnp.abs(s_nord3.u.data - s_nord2.u.data)))
+    assert max_diff_u > 1e-12, (
+        "NH nord=3 produced bit-for-bit identical output to nord=2; "
+        "Laplacian iteration loop may be silently capped at 2."
+    )
+
+
 def test_nh_fv3_config_fields_ast_regression():
     """AST regression guard: ``CDGridCompressibleEulerConfig`` must
     declare the four new iter-168/169/170/171 fields with the
@@ -320,7 +476,9 @@ NH_GATE_HELPER_PAIRS = [
     # iter-203: damp_w KE→heat (d_con).
     ("self.config.damp_w_d_con > 0.0", "heat_half"),
     # iter-209: damp_v KE→heat (d_con NH mirror of PE iter-208).
-    ("self.config.damp_v_d_con > 0.0", "_exner_ref_broadcast"),
+    # iter-895: substring updated from _exner_ref_broadcast (stale)
+    # to _exner_ref_b1 matching the actual variable name at line 1268.
+    ("self.config.damp_v_d_con > 0.0", "_exner_ref_b1"),
     # iter-218/219: per-step dissipative-heating cap.
     ("self.config.delt_max > 0.0", "jnp.clip"),
     # iter-222: corner-div damping d_con.
