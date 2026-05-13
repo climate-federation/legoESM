@@ -5216,3 +5216,64 @@ is verifiable with unit tests in seconds rather than wall-time
 sweeps.  Users running the NH compressible-Euler 3D path now have
 the same cube-imprint defense as users running the PE 3D path.
 
+## Iter 851 — ocean_heat_content_fv3 (Earth energy-imbalance primitive)
+
+Added `ocean_heat_content_fv3(t_layer, thickness, rho=None,
+c_p=None)` to `grids/cubed_sphere.py`.  Column-integrated sensible
+heat or heat-content anomaly per horizontal area:
+
+```
+OHC = ρ_0 · c_p · Σ_k T(k) · H(k)        (J/m²)
+```
+
+Defaults: ρ_0 = ``constants.rho_ocean`` (1025 kg/m³), c_p =
+``constants.c_sw`` (3994 J/(kg·K), Gill 1982) per CLAUDE.md
+hygiene.
+
+Canonical (use ΔT for anomalies):
+  | scenario              | ΔOHC (J/m²) | Global (ZJ) |
+  |-----------------------|-------------|-------------|
+  | 0.1 K / 4000 m uniform| 1.64×10⁹   | 590         |
+  | 1991–2020 (Cheng 2017)| ~10 ZJ/yr  | ~0.4 W/m²   |
+  | RCP8.5 2100 (0–2000 m)| ~600 ZJ accumulated      |
+
+Canonical diagnostic for **Earth's energy imbalance** (Hansen
+2005, Cheng 2017) — ocean absorbs >90% of climate forcing, so
+ΔOHC growth rate ≈ TOA imbalance × A_ocean.
+
+Pairs directly with iter-848 ``thermosteric_sea_level_fv3``
+(identical column-integral structure ΔT·H):
+
+```
+Δη_thermo = α_T   · Σ ΔT · H      (m;   thermal expansion)
+ΔOHC      = ρ·c_p · Σ ΔT · H      (J/m²; heat absorbed)
+```
+
+Same input arrays → both metrics computable in one pass.
+
+Per CLAUDE.md: full EOS-derived ρ(T,S,p), c_p(T,S,p) live in
+``legoesm.ocean.eos`` — caller imports for high-fidelity work.
+
+Used by: Hansen 2005 / 2011 planetary-energy-imbalance, Cheng
+et al. 2017 ARGO OHC reconstruction, AR6 §7.2 energy-budget
+closure, von Schuckmann 2020 GEWEX-EEI review, Domingues 2008
+XBT-bias-corrected reanalysis.
+
+Test: `tests/test_fv3_ocean_heat_content_iter851.py` (8 tests:
+0.1 K/4 km analytic 1.64e9 J/m², zero, cooling negative, paired
+with iter-848 thermosteric same ΔT·H integral, global growth
+4–6 ZJ/yr Cheng-style band, ρ-linear scaling, batched lat×lon×depth
+shapes, 3-D random finite).
+
+### Why this iteration was meaningful
+
+Adds **Earth-energy-imbalance closure primitive** — pairs naturally
+with iter-848 (thermal expansion is the *integral consequence* of
+heat absorption).  Critical for: (1) Cheng-Hansen GEWEX-EEI ocean
+heat-uptake-budget verification; (2) γ in iter-837 TCR
+(parameterized ocean heat-uptake efficiency = ΔOHC growth /
+ΔT_surf); (3) AR6 §7.2 net-zero-emission climate-target verification
+(remaining-imbalance test).  Pure JAX, vmap-compatible.  Uses
+``constants.rho_ocean`` and ``constants.c_sw`` per CLAUDE.md
+hygiene.  No new `constants.py` additions.
+

@@ -8330,6 +8330,85 @@ def halosteric_sea_level_fv3(
     return -jnp.sum(beta_s * delta_s_layer * thickness, axis=-1)
 
 
+def ocean_heat_content_fv3(
+    t_layer: jax.Array,
+    thickness: jax.Array,
+    rho: float = None,
+    c_p: float = None,
+) -> jax.Array:
+    """FV3_3D iter 851: ocean heat content column-integral primitive.
+
+    Column-integrated sensible heat (or heat-content anomaly when
+    ``t_layer`` is an anomaly) per unit horizontal area:
+
+        OHC = ρ_0 · c_p · Σ_k T(k) · H(k)        (J/m²)
+
+    Where:
+      * ρ_0   — reference seawater density (kg/m³); default
+                ``constants.rho_ocean`` = 1025.
+      * c_p   — specific heat of seawater at constant pressure
+                (J/(kg·K)); default ``constants.c_sw`` = 3994 (Gill 1982).
+      * T(k)  — layer temperature OR temperature anomaly (K).
+      * H(k)  — layer thickness (m).
+
+    Sign: positive for warm-anomaly column; passing absolute T
+    gives total OHC, passing ΔT gives ΔOHC (heat-uptake anomaly).
+
+    Canonical magnitudes (use ΔT for anomalies):
+      * 0.1 K uniform / 4000 m: ΔOHC ≈ 1.64×10⁹ J/m²
+        → globally (×3.61×10¹⁴ m²) ≈ 590 ZJ.
+      * 1991–2020 observed (Cheng 2017 0–2000 m): ~10 ZJ/yr
+        → ~0.4 W/m² ocean heat-uptake rate.
+      * CMIP6 RCP8.5 2100 (top 2000 m): ~600 ZJ accumulated.
+
+    OHC is the canonical diagnostic for Earth's energy imbalance
+    (Hansen 2005, Cheng 2017) — ocean absorbs >90% of climate
+    forcing, so ΔOHC growth rate ≈ TOA imbalance × A_ocean.
+
+    Pairs directly with iter-848 ``thermosteric_sea_level_fv3``
+    (same column-integral structure):
+
+        Δη_thermo = α_T · Σ ΔT · H        (m;     ~thermal expansion)
+        ΔOHC      = ρ·c_p · Σ ΔT · H      (J/m²; heat absorbed)
+
+    so they share the input ΔT·H weighting — caller can compute
+    both from same per-layer arrays.
+
+    Per CLAUDE.md hygiene: uses ``constants.rho_ocean`` and
+    ``constants.c_sw`` defaults.  For high-fidelity EOS-derived
+    ρ(T,S,p) and c_p(T,S,p), caller imports from ``legoesm.ocean.eos``
+    and passes explicitly.
+
+    Used by: Hansen 2005 / 2011 planetary-energy-imbalance OHC
+    diagnostic, Cheng et al. 2017 ARGO-based OHC reconstruction,
+    AR6 §7.2 energy-budget closure, von Schuckmann 2020 GEWEX-EEI
+    review, Domingues 2008 XBT-bias-corrected reanalysis.
+
+    Parameters
+    ----------
+    t_layer : jax.Array
+        Per-layer temperature or temperature anomaly (K), shape
+        ``(..., n_layers)``.
+    thickness : jax.Array
+        Per-layer thickness (m), same shape.
+    rho : float or None
+        Reference density (kg/m³); default None → uses
+        ``constants.rho_ocean``.
+    c_p : float or None
+        Specific heat (J/(kg·K)); default None → uses
+        ``constants.c_sw``.
+
+    Returns
+    -------
+    ohc : jax.Array
+        Column-integrated heat content (J/m²); positive for warm
+        column or warm anomaly.
+    """
+    rho_use = rho if rho is not None else constants.rho_ocean
+    c_p_use = c_p if c_p is not None else constants.c_sw
+    return rho_use * c_p_use * jnp.sum(t_layer * thickness, axis=-1)
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,
