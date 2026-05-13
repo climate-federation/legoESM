@@ -247,6 +247,39 @@ value plus `d/dlat`, `d/dDOY` are finite for both
 radiation suite (`tests/unit/test_physics_radiation.py` +
 `tests/atmosphere/hydrostatic/unit/test_radiation.py`) stays green.
 
+## Iter-93 — ocean bottom drag + ozone_ml + radiation integration sweep
+Audited `ocean/physics/bottom_drag/{linear,quadratic,integration}.py`,
+`atmosphere/physics/radiation/{ozone_ml,rrtmgp_radiation,gray,
+integration}.py`.
+
+- **Quadratic bottom drag**: `drag = -C_d · |u| · u / dz_bot` —
+  dimensionally [m/s²]; AD-safe via `sqrt(u² + v² + ε)` floor on
+  speed; explicit-CFL timescale `dz/(C_d·|u|) ~ 4×10⁶ s` (~46 days)
+  for typical (dz=1000 m, |u|=0.1 m/s, C_d=2.5e-3); orders of
+  magnitude above dt=3600 s.  Pad-with-zero top fills inactive
+  layers (single Pad HLO op).
+- **Linear bottom drag**: `drag = -r · u / dz_bot` with r in [m/s],
+  matching MITgcm `bottomDragLinear` convention.  Same pad-with-zero
+  pattern.
+- **Ozone ML ridge**: bilinear (lat, lon) + log-p vertical interp
+  with bound-clipped indices and `argsort` for per-column ascending
+  log-p; einsum contraction `"czk,ck->zk"` correctly sums over the
+  feature axis (n_c = n_z = T at each UKESM level).  AD-safe
+  divisions guard `x_scale_col == 0`.
+- **Gray radiation heating rate**: `dT/dt = (g/c_p) · dF_net_up/dp`
+  with surface-last index convention is the canonical Frierson form
+  (signs derived: subsidence convention dp>0 downward, dF>0 absorbing
+  → warming).  Beer-Lambert SW with α-reflection escaping directly to
+  TOA correctly conserves column energy.
+- **Radiation integration daily-mean path**: at polar boundary the
+  iter-92 ε=1e-7 `cos_hs` clip leaves f_day ≈ 4.5×10⁻⁶ (not 0); the
+  `f_day_safe = max(f_day, 1e-6)` guard in `cos_sza = insol/(S_0·f_day)`
+  still functions correctly (insolation is 0 at polar night so cos_sza
+  = 0/anything = 0).  Iter-92 fix verified to not break the downstream
+  RRTMGP daytime-effective cos(SZA) derivation.
+
+No code changes this iteration.
+
 ## Next iterations
 Continue addressing further codex findings and direct-inspection sweeps until all
 schemes are provably conservative, monotone, CFL-safe, and AD-safe across mixed
