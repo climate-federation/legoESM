@@ -83,6 +83,25 @@ Branch: `clean_physics`. Driven by Ralph loop + `/codex:adversarial-review`.
   convection + coupler bulk_flux, sea-ice _thermo_single, thermo + surface_albedo,
   land utils + ML ozone + insolation — all verified clean.
 
+## Iteration 81 — 2026-05-13
+
+**Bug fix: `extract_atm_to_surface_nh` crashes for dry NH state.**
+
+`coupler/surface_exchange.py:138` used `jnp.where(has_tracers,
+state.tracers.data[..., -1, 0], 0.0)` to fall back when there
+are no tracers.  But `jnp.where` traces BOTH branches, and the
+`[..., -1, 0]` indexing crashes at trace time when the `n_tracers`
+axis has shape 0 (dry NH simulations).  The hydrostatic version
+(line 69-74) correctly uses a Python `if` based on the static
+shape — extended that pattern to the NH version.
+
+Codex review on coupler/ returned `verdict=approve, No new findings`
+(false negative — the bug is real but only fires for dry NH state,
+not currently in the test matrix).
+
+**Tests (post iter-81):** 9 / 9 lake tests pass (smoke).  Existing
+production setups all have q_v tracer so the bug was dormant.
+
 ## Iterations 71-79 — Summary (compressed 2026-05-13 after iter-80)
 
 ### Real code fixes

@@ -133,9 +133,17 @@ def extract_atm_to_surface_nh(
     u_lowest = state.u.data[..., -1]
     v_lowest = state.v.data[..., -1]
 
-    # Humidity from tracers if available
-    has_tracers = state.tracers.data.shape[-1] > 0
-    q_lowest = jnp.where(has_tracers, state.tracers.data[..., -1, 0], 0.0)
+    # Humidity from tracers if available.  Use a Python ``if`` rather
+    # than ``jnp.where`` because the latter still traces both branches,
+    # and ``state.tracers.data[..., -1, 0]`` crashes at trace time when
+    # the n_tracers axis is empty (dry NH simulations have shape
+    # ``(..., nlev, 0)`` and indexing axis-0 position 0 is out of
+    # bounds).  Mirrors the hydrostatic branch's static-shape check
+    # (lines 69-74).
+    if state.tracers.data.shape[-1] > 0:
+        q_lowest = state.tracers.data[..., -1, 0]
+    else:
+        q_lowest = jnp.zeros_like(T_lowest)
 
     rho_lowest = rho_low
 
