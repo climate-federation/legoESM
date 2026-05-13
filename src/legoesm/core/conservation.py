@@ -231,17 +231,27 @@ def fix_energy_shallow_water(
     """
     # Compute all three energy integrals as local sums, then batch
     # into a single MPI allreduce (3 separate allreduces -> 1).
-    h_old = state_old.h.data
-    u_old = state_old.u.data
-    v_old = state_old.v.data
-    h_s_old = state_old.h_s.data
-    E_old_field = 0.5 * h_old * (u_old**2 + v_old**2) + 0.5 * g * (h_old + h_s_old)**2
+    # iter-42: promote the per-cell energy *field* computation to the
+    # fp64 budget accumulator before the area-weighted sum.  The pre-
+    # iter-42 path computed ``0.5 * h * (u² + v²)`` in fp32 (input
+    # storage dtype), so the square+multiply lost ~7 bits of precision
+    # before ``_batch_global_area_sums`` ever cast to fp64 — the same
+    # fp32-field bug iter-1/4/5 fixed for the mass diagnostic, just on
+    # the energy path.
+    acc = _conservation_accumulator()
+    h_old = state_old.h.data.astype(acc)
+    u_old = state_old.u.data.astype(acc)
+    v_old = state_old.v.data.astype(acc)
+    h_s_old = state_old.h_s.data.astype(acc)
+    g_acc = jnp.asarray(g, dtype=acc)
+    E_old_field = 0.5 * h_old * (u_old**2 + v_old**2) + 0.5 * g_acc * (h_old + h_s_old)**2
 
-    h_new = state_new.h.data
-    u_new = state_new.u.data
-    v_new = state_new.v.data
+    h_new = state_new.h.data.astype(acc)
+    u_new = state_new.u.data.astype(acc)
+    v_new = state_new.v.data.astype(acc)
+    h_s_new = state_new.h_s.data.astype(acc)
     KE_new_field = 0.5 * h_new * (u_new**2 + v_new**2)
-    PE_new_field = 0.5 * g * (h_new + state_new.h_s.data)**2
+    PE_new_field = 0.5 * g_acc * (h_new + h_s_new)**2
 
     E_old, KE_new, PE_new = _batch_global_area_sums(
         [E_old_field, KE_new_field, PE_new_field], grid,
@@ -1051,10 +1061,15 @@ def fix_energy_mpas(state, target_energy, mesh, g=constants.g):
     -------
     MPASShallowWaterState
     """
-    h = state.h.data
-    u = state.u.data
-    h_s = state.h_s.data
-    area = mesh.areaCell
+    # iter-42: promote energy fields to the fp64 budget accumulator
+    # before the area-weighted sum (same fix as
+    # ``fix_energy_shallow_water`` for the SW-on-any-grid path).
+    acc = _conservation_accumulator()
+    h = state.h.data.astype(acc)
+    u = state.u.data.astype(acc)
+    h_s = state.h_s.data.astype(acc)
+    area = mesh.areaCell.astype(acc)
+    g_acc = jnp.asarray(g, dtype=acc)
 
     KE_cells = kinetic_energy_cell(u, mesh)
     # Both KE and PE share the ``area`` weight on the horizontal axes —
@@ -1062,7 +1077,7 @@ def fix_energy_mpas(state, target_energy, mesh, g=constants.g):
     # sum kernel; the stacked result still yields a 2-vector for the
     # downstream ``KE / PE`` split (and a future allreduce, if any).
     _energy_intg = jnp.stack(
-        [KE_cells * h, 0.5 * g * (h + h_s) ** 2], axis=-1,
+        [KE_cells * h, 0.5 * g_acc * (h + h_s) ** 2], axis=-1,
     ) * area[..., None]
     energy_terms = jnp.sum(_energy_intg, axis=tuple(range(area.ndim)))
     KE, PE = energy_terms[0], energy_terms[1]
