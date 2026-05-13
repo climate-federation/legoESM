@@ -251,6 +251,27 @@ Verified clean:
 
 No code changes this iteration.
 
+## Iter-102 — Tiedtke CMT downdraft mass flux double-scaled by 0.3
+`atmosphere/physics/convection/tiedtke.py:375`.  CMT branch had:
+
+    M_d = -config.downdraft_alpha * M_u_for_kernel * 0.3
+
+With `downdraft_alpha = 0.3` (config default, the canonical Tiedtke
+1989 LFS downdraft-to-updraft ratio), the extra `× 0.3` literal made
+the effective ratio 9 % instead of 30 %.  The companion subcloud rain-
+evap path (line 312) uses `downdraft_alpha` alone for the standard
+30 % ratio, so CMT was inconsistent.
+
+Fix: drop the literal `× 0.3` so CMT uses
+
+    M_d = -config.downdraft_alpha * M_u_for_kernel
+
+Production behaviour shift: when `enable_cmt=True` and
+`enable_downdraft=True`, CMT downdraft momentum transport now matches
+the standard 30 % ratio.  All 107 convection tests
+(`tests/atmosphere/hydrostatic/unit/test_convection.py` +
+`tests/unit/test_physics_convection.py`) green.
+
 ## Next iterations
 Continue addressing codex findings and direct-inspection sweeps until all schemes are
 provably conservative, monotone, CFL-safe, and AD-safe across mixed wet/dry grids.

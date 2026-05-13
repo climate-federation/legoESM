@@ -372,7 +372,14 @@ def tiedtke_convection(
     # -- CMT --------------------------------------------------------------
     if config.enable_cmt:
         if config.enable_downdraft:
-            M_d = -config.downdraft_alpha * M_u_for_kernel * 0.3
+            # Downdraft mass flux profile = -downdraft_alpha · M_u (the
+            # canonical Tiedtke 1989 ~30 % ratio at the LFS, scaled
+            # column-wide).  An earlier formulation multiplied by an
+            # extra hardcoded ``0.3`` here on top of the already-0.3
+            # ``downdraft_alpha`` default, yielding an effective 9 %
+            # downdraft / updraft ratio inconsistent with the subcloud
+            # rain-evap path (line 312) and with Tiedtke literature.
+            M_d = -config.downdraft_alpha * M_u_for_kernel
         else:
             M_d = None
         du_dt_conv, dv_dt_conv = cmt_gregory_1997(
