@@ -123,9 +123,22 @@ def daily_mean_insolation(
     sin_delta = jnp.sin(delta)
     cos_delta = jnp.cos(delta)
 
-    # Sunset hour angle
-    # cos(h_s) = -tan(lat) * tan(delta), clipped for polar day/night
-    cos_hs = jnp.clip(-sin_lat * sin_delta / jnp.clip(cos_lat * cos_delta, _TINY, None), -1.0, 1.0)
+    # Sunset hour angle.
+    # cos(h_s) = -tan(lat) * tan(delta), clipped for polar day / night.
+    # AD-safe arccos: clip *strictly inside* (-1, 1) so the derivative
+    # d/dx arccos(x) = -1/sqrt(1 - x²) stays finite at the boundary.
+    # Clipping exactly to ±1 makes the next ``arccos`` blow up to ±∞ on
+    # the backward pass; combined with the zero subgradient through the
+    # ``clip`` itself, JAX evaluates 0 · ∞ = NaN.  An ε = 1e-7 cap shrinks
+    # the daily-mean insolation by at most ``(S_0/π) · ε ≈ 4e-5 W/m²`` at
+    # the polar-day boundary — far below any physical or observational
+    # threshold — while keeping ``|d arccos / dx| ≤ 1/sqrt(2ε) ≈ 2236``,
+    # safely within fp64 and fp32 dynamic range.
+    _AD_SAFE_BOUND = 1.0 - 1.0e-7
+    cos_hs = jnp.clip(
+        -sin_lat * sin_delta / jnp.clip(cos_lat * cos_delta, _TINY, None),
+        -_AD_SAFE_BOUND, _AD_SAFE_BOUND,
+    )
     h_s = jnp.arccos(cos_hs)
 
     # Daily-mean insolation
@@ -166,9 +179,13 @@ def daylight_fraction(
     sin_delta = jnp.sin(delta)
     cos_delta = jnp.cos(delta)
 
+    # Same AD-safe arccos pattern as in ``daily_mean_insolation`` — keep
+    # the bound strictly inside ±1 so the polar-day / polar-night
+    # gradient does not NaN.
+    _AD_SAFE_BOUND = 1.0 - 1.0e-7
     cos_hs = jnp.clip(
         -sin_lat * sin_delta / jnp.clip(cos_lat * cos_delta, _TINY, None),
-        -1.0, 1.0,
+        -_AD_SAFE_BOUND, _AD_SAFE_BOUND,
     )
     h_s = jnp.arccos(cos_hs)
     return h_s / jnp.pi

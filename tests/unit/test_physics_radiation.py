@@ -293,6 +293,41 @@ class TestDiurnalCycle:
             f"Daily-mean vs perpetual equinox: max rel err = {max_rel_err:.4f}"
         )
 
+    def test_daily_mean_insolation_polar_ad_safe(self):
+        """Iter-92 regression: daily-mean insolation must produce finite
+        gradients at polar day / polar night.
+
+        Previous code clipped ``cos(h_s)`` exactly to ``[-1, 1]`` before
+        calling ``arccos``, but ``d/dx arccos(x) = -1/sqrt(1 - x²)``
+        blows up at the boundary.  Combined with the zero subgradient
+        through ``clip`` itself, JAX evaluates ``0 · ∞`` on the backward
+        pass and emits ``NaN`` for every column inside the polar-day or
+        polar-night cap.  Sweep lat × doy and confirm both the forward
+        value and ``d/dlat``, ``d/dDOY`` are finite.
+        """
+        from legoesm.atmosphere.physics.radiation.solar import (
+            daily_mean_insolation, daylight_fraction,
+        )
+        for lat_deg in (88.0, 80.0, -80.0, -88.0):
+            lat = jnp.deg2rad(lat_deg)
+            for doy in (1.0, 80.0, 172.0, 265.0):
+                Q = daily_mean_insolation(lat, doy)
+                g_lat = jax.grad(daily_mean_insolation, argnums=0)(lat, doy)
+                g_doy = jax.grad(daily_mean_insolation, argnums=1)(lat, doy)
+                f = daylight_fraction(lat, doy)
+                g_f = jax.grad(daylight_fraction, argnums=0)(lat, doy)
+                assert jnp.isfinite(Q), f"NaN Q at lat={lat_deg}, doy={doy}"
+                assert jnp.isfinite(g_lat), (
+                    f"NaN dQ/dlat at lat={lat_deg}, doy={doy}"
+                )
+                assert jnp.isfinite(g_doy), (
+                    f"NaN dQ/dDOY at lat={lat_deg}, doy={doy}"
+                )
+                assert jnp.isfinite(f), f"NaN daylight at lat={lat_deg}, doy={doy}"
+                assert jnp.isfinite(g_f), (
+                    f"NaN d(daylight)/dlat at lat={lat_deg}, doy={doy}"
+                )
+
 
 # ============================================================================
 # 2f  Gray radiation qualitative checks

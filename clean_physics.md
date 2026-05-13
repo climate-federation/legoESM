@@ -219,6 +219,34 @@ so it does not affect production runs.  Listed under
 
 No code changes this iteration.
 
+## Iter-92 — solar insolation NaN gradient at polar day / polar night
+`atmosphere/physics/radiation/solar.py` (`daily_mean_insolation`,
+`daylight_fraction`).  The sunset-hour-angle calculation
+
+    cos_hs = clip(-tan(lat) · tan(δ), -1.0, 1.0)
+    h_s    = arccos(cos_hs)
+
+produces a finite forward value (h_s = 0 at polar night, π at polar
+day), but the backward pass NaN-s for every column inside the polar
+cap: ``d/dx arccos(x) = -1/sqrt(1 − x²)`` is ±∞ at the clip boundary,
+and JAX's zero subgradient through ``clip`` then evaluates 0 · ∞ as
+``NaN``.  Forward Q is correct (533 W/m² at 80°N summer; 0 at 80°N
+winter), but ``jax.grad(Q, lat)`` and ``jax.grad(Q, doy)`` are NaN at
+every lat ≥ 67° in summer / winter.
+
+Fix: clip ``cos_hs`` to ``[-1 + ε, 1 − ε]`` with ε = 1e-7 so the
+``arccos`` derivative is finite (≤ 1/sqrt(2ε) ≈ 2236, well within fp32
+and fp64 dynamic range).  Forward effect on Q at the polar boundary
+is at most ``(S_0/π) · ε ≈ 4 × 10⁻⁵ W/m²`` — undetectable in any
+physical context.  Same fix applied to `daylight_fraction`.
+
+Regression test `test_daily_mean_insolation_polar_ad_safe` sweeps lat
+∈ {±80°, ±88°} × doy ∈ {1, 80, 172, 265} and asserts the forward
+value plus `d/dlat`, `d/dDOY` are finite for both
+`daily_mean_insolation` and `daylight_fraction`.  Existing 72-test
+radiation suite (`tests/unit/test_physics_radiation.py` +
+`tests/atmosphere/hydrostatic/unit/test_radiation.py`) stays green.
+
 ## Next iterations
 Continue addressing further codex findings and direct-inspection sweeps until all
 schemes are provably conservative, monotone, CFL-safe, and AD-safe across mixed
