@@ -425,6 +425,31 @@ buoyancy through this single change.
 
 Validated by 21 plume + 44 convection unit tests (65/65 pass).
 
+## Iter-126 — coupler `rho_lowest` uses moist (virtual T) density
+`coupler/surface_exchange.extract_atm_to_surface` (hydrostatic path)
+computed lowest-level density via the **dry** ideal gas law
+``ρ = p / (R_d · T)``.  For moist tropical conditions
+(``q_v ~ 17 g/kg``, ``T_v − T ~ 1.7 K``) this underestimates ρ by
+~0.6 %, which propagates through every downstream consumer of
+``forcing.rho_lowest`` — bulk-flux stress, sensible heat, latent
+heat — biasing surface fluxes consistently.
+
+Fix uses the moist gas law:
+```python
+T_v_lowest = T_lowest * (1 + (1/ε − 1) · q_lowest)
+rho_lowest = p_lowest / (R_d · T_v_lowest)
+```
+Non-hydrostatic path was already correct (uses prognostic ρ from
+state directly).
+
+Also brought test harness in `tests/unit/test_diff_coupler.py` up to
+the current `TileResponse` / `SurfaceToAtm` signatures (5 missing
+fields each: `freshwater_flux`, `ocean_heat_extraction`,
+`ocean_stress_x`, `ocean_stress_y`, `surface_mass_flux`).  Both
+pre-existing failures were latent test debt, not new regressions.
+
+Validated: 69/69 coupler unit tests pass.
+
 ## Next iterations
 Continue addressing codex findings and direct-inspection sweeps until all schemes are
 provably conservative, monotone, CFL-safe, and AD-safe across mixed wet/dry grids.

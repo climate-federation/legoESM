@@ -73,8 +73,14 @@ def extract_atm_to_surface(
     else:
         q_lowest = jnp.zeros(shape, dtype=_state_dtype)
 
-    # Air density from ideal gas law
-    rho_lowest = p_lowest / (constants.R_d * T_lowest)
+    # Air density from ideal gas law for moist air: ``p = ρ · R_d · T_v``
+    # where ``T_v = T · (1 + (1/ε − 1) · q_v)``.  The previous dry form
+    # ``ρ = p / (R_d · T)`` underestimated density by ~0.6 % in the
+    # tropics (q_v ~ 17 g/kg, T_v − T ~ 1.7 K), biasing bulk-flux
+    # surface stress and turbulent fluxes via every downstream caller
+    # that uses ``forcing.rho_lowest``.
+    T_v_lowest = T_lowest * (1.0 + (1.0 / constants.epsilon - 1.0) * q_lowest)
+    rho_lowest = p_lowest / (constants.R_d * T_v_lowest)
 
     # Default unavailable fields to zero with flags
     zero = jnp.zeros(shape, dtype=_state_dtype)
