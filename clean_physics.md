@@ -240,6 +240,40 @@ Verified clean:
 
 No code changes this iteration.
 
+## Iter-112 — ocean EOS + atmosphere thermodynamics audit
+Audited `ocean/eos.py` (506 LOC) and
+`atmosphere/physics/thermodynamics.py` (416 LOC).
+
+Verified clean:
+- **Wright (1997) EOS** (`wright_eos`): polynomial form `ρ = (p + p_0) /
+  (λ + α_0·(p + p_0))` with intermediate float64 promotion for the
+  large coefficients (~5.79e8); no clipping of T, S inputs so
+  unphysical overshoots remain visible (issue #165).
+- **`thermal_expansion_coeff`** `α = −(1/ρ) ∂ρ/∂T` via `jax.vmap`
+  + `jax.grad` on the scalar EOS.  Positive for water (warming
+  decreases density).
+- **`haline_contraction_coeff`** `β = (1/ρ) ∂ρ/∂S`.  Positive (salt
+  increases density).
+- **`linear_eos`**: `ρ = ρ_ref · [1 − α_T·(T − T_ref) + β_S·(S − S_ref)]`
+  — standard linear form, dimensionally consistent.
+- **`compute_hydrostatic_pressure`**: `p_top = ρ_ref·g·η + cumsum(ρ·g·h)
+  − ρ·g·h`; cell-center = `p_top + 0.5·dp`.  Supports `h_actual` for
+  partial-cells extension.
+- **`compute_buoyancy_frequency`**: `N² = −(g/ρ_ref)·(ρ_shallow −
+  ρ_deep)/dz_iface`.  Sign matches standard z-up convention regardless
+  of indexing direction: stable strat gives `ρ_shallow < ρ_deep` →
+  drho_dz < 0 → N² > 0. ✓
+- **`temperature_from_theta`**: `T = θ·(p/p_ref)^κ` with `_THETA_MIN`,
+  `_P_MIN`/`_P_MAX` clips for AD safety.
+- **`pressure_from_eos`**: `p = p_0·(R_d·ρ·θ/p_0)^(c_p/c_v)` (non-
+  hydrostatic dycore form); base clipped to `[1e-20, 1e20]` before
+  the power.
+- **`moist_adiabat_lapse_rate`**: canonical Iribarne–Godson form
+  `Γ_m = (R_d·T)/(c_p·p) · (1 + L_v·q_sat/(R_d·T)) / (1 + L_v²·q_sat/
+  (c_p·R_v·T²))` in [K/Pa].
+
+No code changes this iteration.
+
 ## Next iterations
 Continue addressing codex findings and direct-inspection sweeps until all schemes are
 provably conservative, monotone, CFL-safe, and AD-safe across mixed wet/dry grids.
