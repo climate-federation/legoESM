@@ -135,21 +135,48 @@ class TestConvectionParams:
 
         assert_param_grad_ok(loss, 0.7, "SBM RH_ref")
 
-    @pytest.mark.skip(reason=(
-        "CAPE_threshold flows only through the trigger sigmoid "
-        "``sigmoid(sharpness · (CAPE − threshold))``.  In any column "
-        "where CAPE is far from threshold the sigmoid is saturated "
-        "(d sigmoid ≈ 0), so the gradient is legitimately zero — not "
-        "a bug, but a known property of sigmoid-gated parameters.  "
-        "AD-reachability requires a column tuned to CAPE ≈ threshold, "
-        "which is brittle to construct as a unit test."
-    ))
-    def test_sbm_CAPE_threshold(self):  # pragma: no cover
-        pass
+    def test_sbm_CAPE_threshold(self):
+        # CAPE_threshold lives inside ``sigmoid(sharpness · (CAPE −
+        # threshold))``.  The sigmoid saturates at any column far from
+        # the threshold (d sigmoid ≈ 0), so to exercise the AD path
+        # we probe at a ``threshold`` value tuned to the column's
+        # CAPE *and* lower the sharpness so the sigmoid argument
+        # stays O(1).  Verifies the parameter is *reachable* by AD —
+        # the production-default ``sharpness=0.1, threshold=70`` lives
+        # in the saturated regime under typical columns, which is a
+        # known property of sigmoid-gated triggers (not a bug).
+        T, q_v, p_full, p_half = _unstable_column()
+        threshold_probe = 2000.0
 
-    @pytest.mark.skip(reason="Same trigger-saturation issue as CAPE_threshold.")
-    def test_sbm_smooth_trigger_sharpness(self):  # pragma: no cover
-        pass
+        def loss(cape_thr):
+            cfg = SBMConfig()._replace(
+                CAPE_threshold=cape_thr,
+                # Pair with a sharpness that keeps |sharpness·(CAPE −
+                # threshold)| ≲ 5 across the column so the gating
+                # sigmoid is unsaturated.
+                smooth_trigger_sharpness=0.001,
+            )
+            out = sbm_convection(T, q_v, p_full, p_half, 300.0, config=cfg)
+            return jnp.sum(out.dT_dt ** 2)
+
+        assert_param_grad_ok(loss, threshold_probe, "SBM CAPE_threshold")
+
+    def test_sbm_smooth_trigger_sharpness(self):
+        # Same idea as ``test_sbm_CAPE_threshold``: probe at a sharpness
+        # low enough to keep the trigger in its smooth transition band.
+        T, q_v, p_full, p_half = _unstable_column()
+
+        def loss(s):
+            cfg = SBMConfig()._replace(
+                smooth_trigger_sharpness=s,
+                # Pair with a threshold near the column's CAPE so the
+                # sigmoid argument stays O(1).
+                CAPE_threshold=2000.0,
+            )
+            out = sbm_convection(T, q_v, p_full, p_half, 300.0, config=cfg)
+            return jnp.sum(out.dT_dt ** 2)
+
+        assert_param_grad_ok(loss, 0.01, "SBM smooth_trigger_sharpness")
 
     def test_dca_mixing_fraction(self):
         T, q_v, p_full, p_half = _unstable_column()
@@ -161,26 +188,57 @@ class TestConvectionParams:
 
         assert_param_grad_ok(loss, 1.0, "DCA mixing_fraction")
 
-    @pytest.mark.skip(reason=(
-        "DCA cape_threshold has the same sigmoid-saturated zero-gradient "
-        "property as SBM CAPE_threshold — see that test for details."
-    ))
-    def test_dca_cape_threshold(self):  # pragma: no cover
-        pass
+    def test_dca_cape_threshold(self):
+        # Same trigger-saturation pattern as SBM: probe threshold near
+        # column CAPE so the gating sigmoid stays in its transition band.
+        T, q_v, p_full, p_half = _unstable_column()
+        threshold_probe = 2000.0
 
-    @pytest.mark.skip(reason=(
-        "Kuo budgets are gated on column moisture convergence "
-        "MC = -∇·(q_v·u), which is zero in any single-column setup "
-        "without horizontal advection.  alpha_heat / tau_relax are "
-        "AD-reachable only when MC > 0 — see test_diff_atmosphere_physics.py "
-        "TestKuoMC for the full-3D AD coverage."
-    ))
-    def test_kuo_alpha_heat(self):  # pragma: no cover
-        pass
+        def loss(c):
+            cfg = DCAConfig()._replace(cape_threshold=c)
+            out = dca_convection(T, q_v, p_full, p_half, 300.0, config=cfg)
+            return jnp.sum(out.dT_dt ** 2)
 
-    @pytest.mark.skip(reason="Same MC gating as alpha_heat — see above.")
-    def test_kuo_tau_relax(self):  # pragma: no cover
-        pass
+        assert_param_grad_ok(loss, threshold_probe, "DCA cape_threshold")
+
+    def _supersaturated_column(self, nlev=12, ncol=2):
+        """Column with q_v > q_sat in mid-troposphere so Kuo's internal
+        MC = column-integrated max(q_v − q_sat, 0) is strictly positive.
+        This unblocks the alpha_heat / tau_relax AD paths."""
+        p_s = 1.0e5
+        sigma_half = jnp.linspace(0.0, 1.0, nlev + 1)
+        sigma_full = 0.5 * (sigma_half[:-1] + sigma_half[1:])
+        p_half = jnp.broadcast_to((sigma_half * p_s)[None, :], (ncol, nlev + 1))
+        p_full = jnp.broadcast_to((sigma_full * p_s)[None, :], (ncol, nlev))
+        T = jnp.broadcast_to(
+            jnp.maximum(300.0 * jnp.clip(sigma_full, 0.01, None) ** 0.19, 200.0)[None, :],
+            (ncol, nlev),
+        )
+        q_sat = saturation_mixing_ratio(T, p_full)
+        # Force supersaturation in the lower half of the column so MC > 0.
+        RH = jnp.where(sigma_full[None, :] > 0.5, 1.1, 0.5)
+        q_v = RH * q_sat
+        return T, q_v, p_full, p_half
+
+    def test_kuo_alpha_heat(self):
+        T, q_v, p_full, p_half = self._supersaturated_column()
+
+        def loss(a):
+            cfg = KuoConfig()._replace(alpha_heat=a)
+            out = kuo_convection(T, q_v, p_full, p_half, 300.0, config=cfg)
+            return jnp.sum(out.dT_dt ** 2)
+
+        assert_param_grad_ok(loss, KuoConfig().alpha_heat, "Kuo alpha_heat")
+
+    def test_kuo_tau_relax(self):
+        T, q_v, p_full, p_half = self._supersaturated_column()
+
+        def loss(t):
+            cfg = KuoConfig()._replace(tau_relax=t)
+            out = kuo_convection(T, q_v, p_full, p_half, 300.0, config=cfg)
+            return jnp.sum(out.dT_dt ** 2)
+
+        assert_param_grad_ok(loss, KuoConfig().tau_relax, "Kuo tau_relax")
 
 
 # ===========================================================================
@@ -213,18 +271,39 @@ class TestMicrophysicsParams:
 
         assert_param_grad_ok(loss, 2.2, "Kessler accretion_coeff")
 
-    @pytest.mark.skip(reason=(
-        "rain_evaporation hits the donor-cap ``min(rate, q_r/dt)`` under "
-        "any column with realistic q_r and the production evap_coeff=1.0: "
-        "``rate >> q_r/dt``, ``min`` picks the q_r/dt branch, and the VJP "
-        "through evap_coeff is zero on the saturated branch.  The "
-        "parameter is AD-reachable only in the unphysical regime "
-        "``rate < q_r/dt`` (tiny rain or huge dt); this is by design "
-        "(donor-positivity) and not a bug.  Documented as a known "
-        "training-time limitation."
-    ))
-    def test_kessler_evaporation_coeff(self):  # pragma: no cover
-        pass
+    def test_kessler_evaporation_coeff(self):
+        # ``rain_evaporation`` applies a donor-cap ``min(rate, q_r/dt)``
+        # that saturates whenever the un-capped rate exceeds the
+        # available rain inventory per timestep.  Probe in the regime
+        # ``rate < q_r/dt`` (tiny rain budget) so the cap is *inactive*
+        # and the evap_coeff gradient is not killed by the ``min``
+        # branch.  Verifies the parameter is reachable when the donor
+        # cap is not saturated — confirming the "BUG" is by-design
+        # donor-positivity, not a vanishing-gradient bug.
+        ncol, nlev = 2, 8
+        # Subsaturated column with very small q_r so the donor cap
+        # ``rate ≤ q_r / dt`` is never active.
+        q_r_tiny = 1e-12  # rate ∝ q_r^0.525 ≈ 1e-6 << q_r/dt is wrong
+                          # — actually rate ∝ q_r^0.525 = 1e-6, q_r/dt
+                          # = 3e-15 → still capped.  Use a tiny
+                          # evap_coeff probe instead.
+        T, q_v, hydro, p_full, p_half, rho, dz = _moist_microphys_column(
+            q_c=5e-3, q_r=q_r_tiny,
+        )
+        q_sat = saturation_mixing_ratio(T, p_full)
+        q_v_dry = 0.5 * q_sat
+
+        def loss(c):
+            cfg = KesslerConfig()._replace(evaporation_coeff=c)
+            out = kessler_microphysics(
+                T, q_v_dry, hydro, p_full, p_half, rho, dz, 300.0, config=cfg,
+            )
+            return jnp.sum(out.dq_v_dt ** 2)
+
+        # Probe at evap_coeff = 1e-12 so ``rate = 1e-12 · 0.5 ·
+        # (1e-12)^0.525 ≈ 1e-19`` << ``q_r / dt = 3.3e-15`` and the
+        # donor cap stays in the *un*-capped branch.
+        assert_param_grad_ok(loss, 1e-12, "Kessler evaporation_coeff")
 
     def test_seifert_beheng_k_au(self):
         T, q_v, hydro, p_full, p_half, rho, dz = _moist_microphys_column()
@@ -438,25 +517,64 @@ class TestBulkFluxParams:
 # 11e  Held-Suarez parameters — staged-not-implemented
 # ===========================================================================
 
-class TestHeldSuarezParamsDeferred:
-    """Held-Suarez forcing uses module-level constants
-    (``DELTA_T_Y``, ``DELTA_THETA_Z``, ``K_A``, ``K_S``, ``K_F``,
-    ``SIGMA_B``, ``T_MIN``) rather than a Config struct, so each
-    parameter cannot be made traced without monkey-patching the
-    module.  The agent's "11a" entry assumes a Config-style API that
-    does not exist; flagging as a follow-up rather than writing
-    monkey-patch tests that would couple the test suite to private
-    module internals.
+class TestHeldSuarezParams:
+    """``held_suarez_forcing`` takes its tunable parameters
+    (``k_a``, ``k_s``, ``k_f``, ``sigma_b``, ``delta_T_y``,
+    ``delta_theta_z``, ``T_min``, ``p_ref``) as keyword arguments with
+    module-level Table-1 defaults, so each can be passed as a traced
+    JAX scalar for parameter estimation.
     """
 
-    @pytest.mark.skip(reason=(
-        "Held-Suarez params are module-level constants, not config "
-        "fields.  Reaching them via jax.grad requires either refactoring "
-        "the source to take a HeldSuarezConfig NamedTuple or "
-        "monkey-patching, both out of scope for this audit-style test."
-    ))
-    def test_held_suarez_params_via_config(self):  # pragma: no cover
-        pass
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.core.field import Field
+        from legoesm.core.state import HydrostaticState
+        n, nlev = 4, 5
+        self.grid = create_cubed_sphere(n)
+        self.sigma = create_sigma_coordinate(nlev)
+        # Construct a non-trivial state so dT_dt depends on every
+        # Held-Suarez parameter (not just the few that survive a
+        # uniform-T column).
+        k1, k2, k3 = jax.random.split(jax.random.PRNGKey(0), 3)
+        T_data = 250.0 * jnp.ones((6, n, n, nlev)) + 2.0 * jax.random.normal(
+            k1, (6, n, n, nlev),
+        )
+        u_data = 10.0 * jax.random.normal(k2, (6, n, n, nlev))
+        v_data = 3.0 * jax.random.normal(k3, (6, n, n, nlev))
+        self.state = HydrostaticState(
+            u=Field(u_data, name="u"),
+            v=Field(v_data, name="v"),
+            T=Field(T_data, name="T"),
+            p_s=Field(1e5 * jnp.ones((6, n, n)), name="p_s"),
+            phis=Field(jnp.zeros((6, n, n)), name="phis"),
+            tracers={
+                "q_v": Field(1e-3 * jnp.ones((6, n, n, nlev)), name="q_v"),
+            },
+        )
+
+    @pytest.mark.parametrize("name,default", [
+        ("k_a", 1.0 / (40.0 * 86400.0)),
+        ("k_s", 1.0 / (4.0 * 86400.0)),
+        ("k_f", 1.0 / (1.0 * 86400.0)),
+        ("sigma_b", 0.7),
+        ("delta_T_y", 60.0),
+        ("delta_theta_z", 10.0),
+        ("T_min", 200.0),
+    ])
+    def test_held_suarez_param_reachable(self, name, default):
+        from legoesm.atmosphere.held_suarez import held_suarez_forcing
+        grid, sigma, state = self.grid, self.sigma, self.state
+
+        def loss(p):
+            tend = held_suarez_forcing(s=state, grid=grid, sigma_coord=sigma, **{name: p}) \
+                if False else held_suarez_forcing(state, grid, sigma, **{name: p})
+            # ``du_dt`` couples through k_f and sigma_b only; sum both
+            # tendencies so every parameter routes into the loss.
+            return jnp.sum(tend.dT_dt.data ** 2) + jnp.sum(tend.du_dt.data ** 2)
+
+        assert_param_grad_ok(loss, default, f"Held-Suarez {name}")
 
 
 # ===========================================================================
