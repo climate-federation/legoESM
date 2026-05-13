@@ -9499,6 +9499,80 @@ def extraterrestrial_radiation_fv3(
     )
 
 
+def daylight_hours_fv3(
+    latitude_deg: jax.Array,
+    day_of_year: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 864: FAO-56 daylight-hours primitive.
+
+    Allen-Pereira 1998 FAO-56 Eq. 34 — astronomical sun-up
+    duration from sunset hour angle:
+
+        N = (24 / π) · ω_s          (hours)
+        ω_s = arccos(−tan(φ)·tan(δ))    (rad)
+
+    Where:
+      * φ  — latitude in radians (input given in degrees).
+      * δ  — solar declination
+             δ = 0.409·sin(2π·J/365 − 1.39)    (rad).
+      * ω_s — sunset hour angle (clipped to [−1, 1] for polar
+              regions; → ω_s = π means polar day, ω_s = 0 polar
+              night).
+
+    Shares solar-geometry (δ, ω_s) with iter-863 ``extraterrestrial_radiation_fv3``
+    — caller could compute ω_s once and reuse, but separate primitives
+    are cleaner.
+
+    Canonical:
+      | location/date            | N (hours)  |
+      |--------------------------|------------|
+      | Equator any day          | 12.00      |
+      | 23.5°N June solstice     | 13.7       |
+      | 60°N June solstice       | 18.8       |
+      | 60°N December solstice   | 5.4        |
+      | 80°N June (polar day)    | 24.0       |
+      | 80°N December (polar)    | 0.0        |
+      | Arctic Circle boundary   | 24.0 / 0.0 |
+
+    Used by:
+      * **Photoperiod-driven plant biology**: short-day vs long-day
+        plants flower based on N (Garner-Allard 1920); GDD-effective
+        modification weights heat units by N (Hatfield 2011 Agron J).
+      * **Solar-energy yield**: daily PV-array sunhours scale
+        ~linearly with N at fixed sky-clarity.
+      * **Circadian biology**: insect/bird seasonality, snowpack
+        melt-onset timing, ice-on/off lake-stratification studies.
+      * **Hargreaves PET ALT-form**: some PET formulas use N
+        directly rather than R_a (Trabucco-Zomer 2009 CGIAR-CSI).
+      * **FAO-56 Eq. 34**: canonical reference.
+
+    Composes with iter-859 ``growing_degree_days_fv3`` (N-weighted
+    GDD modifications for photoperiod-sensitive crops like soybean
+    that count GDD only during long-day photoperiod).
+
+    Pairs with iter-863 ``extraterrestrial_radiation_fv3`` —
+    sun-up *integrated radiation* (R_a) vs sun-up *duration* (N).
+    Together they fully characterize the daily solar geometry.
+
+    Parameters
+    ----------
+    latitude_deg : jax.Array
+        Latitude (degrees, −90 to +90).
+    day_of_year : jax.Array
+        Day-of-year integer (1–365; 366 also accepted).
+
+    Returns
+    -------
+    n_hours : jax.Array
+        Daylight hours (0–24); 0 = polar night, 24 = polar day.
+    """
+    phi = latitude_deg * jnp.pi / 180.0
+    delta = 0.409 * jnp.sin(2.0 * jnp.pi * day_of_year / 365.0 - 1.39)
+    cos_omega_s = jnp.clip(-jnp.tan(phi) * jnp.tan(delta), -1.0, 1.0)
+    omega_s = jnp.arccos(cos_omega_s)
+    return 24.0 * omega_s / jnp.pi
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

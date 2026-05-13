@@ -5452,3 +5452,58 @@ typically saved; (3) self-contained Hargreaves PET implementation;
 vmap-compatible.  FAO-56 coefficients are empirical (literal).
 No `constants.py` additions.
 
+## Iter 864 — daylight_hours_fv3 (FAO-56 photoperiod primitive)
+
+Added `daylight_hours_fv3(latitude_deg, day_of_year)` to
+`grids/cubed_sphere.py`.  Allen-Pereira 1998 FAO-56 Eq. 34
+astronomical sun-up duration:
+
+```
+N = (24 / π) · ω_s          (hours)
+ω_s = arccos(−tan(φ)·tan(δ))    (clipped [-1, 1] for polar)
+δ   = 0.409·sin(2π·J/365 − 1.39)
+```
+
+Shares solar geometry (δ, ω_s) with iter-863 R_a; pair gives
+*duration* (N) + *integrated radiation* (R_a) characterization
+of daily solar input.
+
+Canonical N values:
+  | location/date            | N (hours)  |
+  |--------------------------|------------|
+  | Equator any day          | 12.00      |
+  | 23.5°N June solstice     | 13.7       |
+  | 60°N June solstice       | 18.8       |
+  | 60°N December solstice   | 5.4        |
+  | 80°N polar day           | 24.0       |
+  | 80°N polar night         | 0.0        |
+
+Used by:
+  * Photoperiod-driven plant biology (Garner-Allard 1920 short-/
+    long-day flowering; soybean photoperiod-sensitive GDD).
+  * Solar-energy yield (PV array sunhours).
+  * Circadian biology (insect/bird seasonality, snowpack melt
+    timing).
+  * Alternative Hargreaves-N variants (Trabucco-Zomer 2009
+    CGIAR-CSI).
+
+Composes with iter-859 ``growing_degree_days_fv3`` (N-weighted
+GDD for photoperiod-sensitive crops).  Pairs with iter-863
+``extraterrestrial_radiation_fv3`` (same ω_s).
+
+Test: `tests/test_fv3_daylight_hours_iter864.py` (7 tests: equator
+12 h any day, 80°N polar day 24, polar night 0, 60°N seasonal
+18.8/5.4, Arctic Circle near-24, hemisphere symmetry (±60°
+opposite-season N sums to 24), 3-D shapes bounded [0, 24]).
+
+### Why this iteration was meaningful
+
+Adds **photoperiod primitive** completing solar-geometry pair
+with iter-863 (R_a, integrated radiation; N, duration).
+Required for: (1) photoperiod-sensitive crop modeling (soybean,
+rice, wheat day-length triggers); (2) circadian-cycle ecology;
+(3) PV-yield/solar-budget analysis; (4) Trabucco-Zomer 2009
+alt-Hargreaves PET forms.  Pure JAX, vmap-compatible.  FAO-56
+ephemeris coefficients are empirical (literal).  No
+`constants.py` additions.
+
