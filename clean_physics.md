@@ -83,6 +83,31 @@ Branch: `clean_physics`. Driven by Ralph loop + `/codex:adversarial-review`.
   convection + coupler bulk_flux, sea-ice _thermo_single, thermo + surface_albedo,
   land utils + ML ozone + insolation — all verified clean.
 
+## Iteration 82 — 2026-05-13
+
+**Scan-only iteration: confirmed no other `jnp.where`-traces-both-
+branches on static-shape gates (no code changes).**
+
+After iter-81 fix, scanned `src/legoesm/` for similar patterns:
+- `state.tracers.data[..., -1, 0]` indexing (only in iter-81's
+  `extract_atm_to_surface_nh`; now uses Python `if`).
+- `radiation/integration.py:689-707` already uses the Python-`if`
+  pattern correctly:
+  ```python
+  n_tracers = state.tracers.data.shape[-1]
+  if n_tracers > 0:
+      q_v = jnp.clip(state.tracers.data[..., 0], 0.0, None)
+  ```
+
+Also inspected `_warm_rain.py` (donor_clamp_scale, safe_pow,
+saturation_adjustment, effective_Nc, autoconversion_sb, accretion,
+self_collection_breakup, rain_evaporation), `_plume.py` (analytic
+exponential decay forms for `M_u`, `T_u_ent`, `q_u_ent`,
+`q_c_u_ent` for AD-safety), and `snow_budget.py` (energy-limited
+melt + degree-day fallback).  All clean.
+
+No new fixes needed.
+
 ## Iteration 81 — 2026-05-13
 
 **Bug fix: `extract_atm_to_surface_nh` crashes for dry NH state.**
