@@ -337,6 +337,42 @@ Regression test `test_grad_no_nan_at_ice_free_cells` in
 
 51 sea-ice-dynamics tests pass; 2 transport state-roundtrip tests pass.
 
+## Iter-123 — GWD leafs + PPM monotonicity limiter
+Audited (~700 LOC):
+- `gravity_wave_drag/lindzen.py` (138): launch stress
+  `τ_0 = ρ·N·k·h² · U_ll` with optional per-column `h_topo_col`
+  override (audit 2026-05-12 MEDIUM #9); saturation stress
+  `τ_sat = ρ·U³·k/N` per Lindzen 1981; top-down `lax.scan` sigmoid-
+  smoothed breaking with `tau_new = tau_carry·(1−f_br) + tau_sat·f_br`
+  blend and `min(tau_new, tau_carry)` monotone-decreasing guard;
+  drag → `-drag/(ρ·dz)`, projected onto surface-wind direction
+  (canonical for orographic GWD); frictional heating `(u·du/dt + v·dv/dt)
+  /c_pd`; eps_gwd column-integrated KE loss positive-definite.
+- `gravity_wave_drag/rayleigh.py` (89): linear sigma-coordinate drag
+  with BL ramp from `sigma_b` and `sin²` upper sponge; `du/dt = −k·u`
+  monotone-decelerating; KE → IE energetics consistent.
+- `gravity_wave_drag/mcfarlane.py` (164): smooth softmin
+  `τ_k = −logsumexp(−α·[τ_carry, τ_sat])/α` for breaking transition;
+  consistent overestimate of `log(2)/α` near threshold is a documented
+  smoothing artifact; `k_wave` correctly threaded through both `τ_0`
+  and `τ_sat` (audit cycle 2 fix).
+- `gravity_wave_drag/hines.py` (164): inter-level WKB ratio
+  `sqrt(rho[k+1]/rho[k])` for amplitude growth (not cumulative);
+  saturation `σ_sat = N/m_*` constant per column (not /rho_ratio
+  monotonically — audit GWD-B2 fix); drag in proper Pa units
+  `ρ·(σ²_grown − σ²_new)` (audit cycle 2 P1 dimensional fix);
+  `clip(drag, 0, Fmax)` mitigates sigmoid-smoothing "anti-drag" leak
+  in transition region.
+- `core/operators_fv._ppm_limit` (~40 LOC): canonical Colella-Woodward
+  84 limiter; flat-at-extrema via `(qR−qbar)(qbar−qL) ≤ 0` test;
+  overshoot detection `dm·d6 > dm²` / `< −dm²` clips edge values
+  via `q_L = 3·qbar − 2·qR` / `q_R = 3·qbar − 2·qL` per CW84 eq.
+  1.10.  Used by `fv_flux_divergence` (ice transport, FV3 forward path,
+  microphysics sedimentation).
+
+No code changes — all six modules verified canonical with previously-
+applied audit fixes still intact.
+
 ## Next iterations
 Continue addressing codex findings and direct-inspection sweeps until all schemes are
 provably conservative, monotone, CFL-safe, and AD-safe across mixed wet/dry grids.
