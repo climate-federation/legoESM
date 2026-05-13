@@ -132,6 +132,7 @@ class CGridLatLonPrimitiveEquationConfig(NamedTuple):
     A_h: float = 0.0              # Laplacian viscosity [m^2/s]
     time_integrator: str = "ssp_rk3"
     fix_mass: bool = True
+    anchor_mass_to_initial: bool = False  # Mirror cubed-sphere: anchor fixer to initial mass
     T_min: float = 50.0           # Temperature floor [K]
     p_floor: float = 100.0        # Pressure floor [Pa] for surface pressure positivity
     zero_mean_ps_tendency: bool = True
@@ -608,6 +609,13 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         self._cgrid_cache_key: tuple | None = None
         self._cgrid_cache: CGridLatLonHydrostaticState | None = None
 
+        # Anchored mass target (lazy: filled on first step when
+        # ``anchor_mass_to_initial`` is True). Mirrors the cubed-sphere
+        # ``CDGridPrimitiveEquationModel`` pattern so the per-step
+        # additive correction is taken against an unchanging fp64 scalar
+        # instead of the (potentially fp32-rounded) previous-step mass.
+        self._target_mass: jax.Array | None = None
+
     def compute_mass(self, state: CGridLatLonHydrostaticState) -> jax.Array:
         """Compute total mass (for conservation fixer target)."""
         acc = _accumulation_dtype()
@@ -771,8 +779,15 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
             # and the ratio differs per level (upper levels with large dA
             # barely change).
             p_s_pre = state.p_s
+            # Iter-2: keep ``correction`` at fp64 (no ``astype`` to
+            # ``p_s_pre.dtype``) so the additive fixer matches the
+            # cubed-sphere ``fix_ps_mass`` semantics. JAX promotes the
+            # sum to fp64; ``cast_pytree(..., "storage")`` at the end
+            # of ``_step_cgrid`` rounds back to storage dtype, but the
+            # correction is applied before that single round-trip
+            # instead of compounding fp32 quantization every step.
             p_s_post = jnp.maximum(
-                p_s_pre + correction.astype(p_s_pre.dtype),
+                p_s_pre + correction,
                 self.config.p_floor,
             )
             if state.tracers:
@@ -826,6 +841,30 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
             or 1-arg closure, tuple returns unwrapped).
 
         """
+        # Anchor-to-initial: snapshot mass once outside JIT (mirrors
+        # primitive_eq_cdgrid.step()).  Computed in fp64 via
+        # ``compute_mass`` so it stays clean of the per-step
+        # ``cast_pytree(..., "storage")`` round-trip and the runner-side
+        # fp32 reduction noise that iter-1 cleaned out of the diagnostic.
+        if (self.config.fix_mass
+                and self.config.anchor_mass_to_initial
+                and self._target_mass is None
+                and target_mass is None):
+            if isinstance(state, CGridLatLonHydrostaticState):
+                self._target_mass = self.compute_mass(state)
+            else:
+                # HS path: cell-centred Field state.  ``compute_mass``
+                # expects a CGrid state, but the integral is the same
+                # area-weighted sum of p_s.
+                acc = _accumulation_dtype()
+                self._target_mass = jnp.sum(
+                    state.p_s.data.astype(acc) * self.grid.area.astype(acc)
+                )
+        if (target_mass is None
+                and self.config.fix_mass
+                and self.config.anchor_mass_to_initial):
+            target_mass = self._target_mass
+
         if isinstance(state, CGridLatLonHydrostaticState):
             return self._step_cgrid(state, dt, target_mass, physics_fn)
 

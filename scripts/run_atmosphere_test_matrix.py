@@ -2984,7 +2984,9 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         dt = min(200.0, 0.5 * _dx_pole / 300.0)
         _A_h_max = 0.4 * _dx_pole**2 / dt
         ah = min(ah, _A_h_max)
-        config = CGridLatLonPrimitiveEquationConfig(A_h=ah, fix_mass=True)
+        config = CGridLatLonPrimitiveEquationConfig(
+            A_h=ah, fix_mass=True, anchor_mass_to_initial=True,
+        )
         model = CGridLatLonPrimitiveEquationModel(grid, sigma, config, dt=dt)
         if _topo:
             from legoesm.atmosphere.idealized.held_suarez_topo import (
@@ -3425,7 +3427,9 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         dt = min(200.0, 0.5 * _dx_pole / 300.0)
         _A_h_max = 0.4 * _dx_pole**2 / dt
         ah = min(ah, _A_h_max)
-        config = CGridLatLonPrimitiveEquationConfig(A_h=ah, fix_mass=True)
+        config = CGridLatLonPrimitiveEquationConfig(
+            A_h=ah, fix_mass=True, anchor_mass_to_initial=True,
+        )
         model = CGridLatLonPrimitiveEquationModel(grid, sigma, config, dt=dt)
         if _rotated:
             from tests.test_cases.dcmip2008.jablonowski_rotated import (
@@ -4016,7 +4020,9 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         dt = min(300.0, 0.5 * _dx_pole / 300.0)
         _A_h_max = 0.4 * _dx_pole**2 / dt
         ah = min(ah, _A_h_max)
-        config = CGridLatLonPrimitiveEquationConfig(A_h=ah, fix_mass=True)
+        config = CGridLatLonPrimitiveEquationConfig(
+            A_h=ah, fix_mass=True, anchor_mass_to_initial=True,
+        )
         model = CGridLatLonPrimitiveEquationModel(grid, sigma, config, dt=dt)
         state_cc = held_suarez_init_latlon(grid, sigma, T_init=280.0)
         state = hydrostatic_to_cgrid(state_cc, grid)
