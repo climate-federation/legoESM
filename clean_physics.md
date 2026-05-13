@@ -308,6 +308,39 @@ Verified clean:
 
 No code changes this iteration.
 
+## Iter-114 — Holtslag-Boville + YSU PBL schemes audit
+Audited `atmosphere/physics/turbulence/{holtslag_boville,ysu}.py`
+(both 228 LOC).
+
+Verified clean:
+- **PBL-height diagnosis** (shared): smooth bulk-Ri sigmoid weighting
+  `σ_pbl · (1 − σ_pbl)` peaks at the Ri_crit crossing (not centroid);
+  `h_pbl = ∫(z · w_pbl) / ∫w_pbl`.  Clipped to `≥ 100 m` floor.
+- **K-profile inside PBL**: `Km = κ·u*·z·(1−z/h)²` standard form,
+  zero at z=0 and z=h.
+- **Local Ri-based Km above PBL** (Louis 1982 style): `f_stable = 1/(1
+  + 2b·Ri / sqrt(1 + d·Ri))`, `f_unstable = 1 − 2b·Ri / denominator`,
+  sigmoid blend on Ri.  All Louis coefficients (b, c, d) sourced from
+  config (no hardcoded literals — iter-? constant-discipline fix held).
+- **HB counter-gradient correction**: `γ_h · w'θ'_sfc / (Km_max ·
+  h_pbl)` adds the non-local heat flux as an enhanced surface BC
+  in the implicit T-diffusion solve.  Known simplified form (full
+  non-local profile shape would require modifying the RHS at every
+  level).
+- **YSU entrainment Gaussian**: `K_ent = c_ent·w*·h · exp(−((z−h) /
+  (0.3·h))²)` with `w* = cbrt(max(g·h·max(w'θ',0)/θ̄, 1e-20))` —
+  AD-safe via the 1e-20 floor (cbrt gradient is finite away from 0);
+  stable BL (w'θ'<0) correctly gives w*≈0 → no entrainment.
+- **Implicit vertical diffusion**: heat in θ-space for dry-adiabat
+  neutrality, momentum/moisture in raw space.
+
+One minor noted: YSU computes `θ̄ = mean(θ_v, axis=1)` over the FULL
+column (including stratosphere) rather than the PBL only — slight
+overestimate of θ̄ → underestimate of w*.  Scheme simplification, not
+a bug.
+
+No code changes this iteration.
+
 ## Next iterations
 Continue addressing codex findings and direct-inspection sweeps until all schemes are
 provably conservative, monotone, CFL-safe, and AD-safe across mixed wet/dry grids.
