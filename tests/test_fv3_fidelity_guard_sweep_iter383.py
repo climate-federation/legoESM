@@ -414,6 +414,7 @@ _GUARD_MODULES = (
     "test_fv3_sc_fraction_eis_iter824",              # iter-824 add
     "test_fv3_cloud_optical_thickness_iter825",      # iter-825 add
     "test_fv3_cloud_albedo_two_stream_iter826",      # iter-826 add
+    "test_fv3_shortwave_cloud_forcing_iter827",      # iter-827 add
 )
 
 

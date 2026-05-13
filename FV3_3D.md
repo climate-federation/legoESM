@@ -5346,6 +5346,57 @@ as a pure-JAX composition.  Pure JAX, vmap-compatible.  No new
 physical constants introduced (0.85, 0.70 are Mie-fit values,
 not generic physical constants).
 
+## Iter 827 — shortwave_cloud_forcing_fv3 (TOA CRE_SW)
+
+Added `shortwave_cloud_forcing_fv3(alpha_cloudy, alpha_clear,
+s_incident)` to `grids/cubed_sphere.py`.  TOA shortwave cloud
+radiative effect:
+
+```
+CRE_SW = − S_in · (α_cloudy − α_clear)
+```
+
+Sign convention: negative ⇒ TOA cooling (typical clouds increase
+albedo, reduce net absorbed SW); positive ⇒ TOA warming (rare,
+dark cloud over bright surface like snow / desert).
+
+Typical magnitudes:
+  * Sc deck (α_c=0.5, α_clr=0.1, S_in=200): CRE ≈ −80 W/m²
+  * Cirrus (α_c=0.2, α_clr=0.1): CRE ≈ −20 W/m²
+  * Polar summer Sc: CRE ≈ −150 W/m²
+
+S_in=0 at night ⇒ CRE_SW=0 automatically.
+
+Used by: ISCCP/CERES TOA CRE comparison, cloud-feedback
+decomposition (Soden-Held 2006), CMIP CRE bias diagnostics,
+Sc-deck SW radiative-budget closure.
+
+Composes iter-826 ``cloud_albedo_two_stream_fv3``.
+
+Test: `tests/test_fv3_shortwave_cloud_forcing_iter827.py` (6
+tests: Sc deck CRE=−80 (analytic), α_cloudy=α_clear → 0,
+night S=0 → 0, dark-cloud-over-bright-surface → CRE > 0
+(warming), monotone in α_cloudy (↑ → ↓CRE), 3-D shapes +
+finite).
+
+### Why this iteration was meaningful
+
+Completes the **end-to-end Sc-radiative-feedback pipeline**:
+  * iter-823 EIS                 — Sc-regime predictor
+  * iter-824 f_low               — empirical fraction
+  * iter-825 τ(LWP, r_eff)       — Slingo Mie optical thickness
+  * iter-826 α(τ, μ_0, g)        — two-stream cloud albedo
+  * iter-827 CRE_SW(α, S_in)     — TOA SW cloud forcing
+
+The full chain from thermodynamic profile → SW radiative
+forcing at TOA is now reachable as a pure-JAX composition.
+Critical for: (1) CMIP cloud-feedback diagnostic decomposition;
+(2) Sc-feedback uncertainty studies (largest source of inter-
+model spread in climate sensitivity); (3) ISCCP / CERES TOA
+flux comparison; (4) emergent-constraint analyses (Klein-Hall
+2015, Sherwood et al. 2014).  Pure JAX, vmap-compatible.  No
+new physical constants introduced.
+
 
 
 

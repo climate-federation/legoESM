@@ -6581,6 +6581,55 @@ def cloud_albedo_two_stream_fv3(
     return factor / (2.0 * jnp.maximum(mu_0, mu_floor) + factor)
 
 
+def shortwave_cloud_forcing_fv3(
+    alpha_cloudy: jax.Array,
+    alpha_clear: jax.Array,
+    s_incident: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 827: TOA shortwave cloud-radiative effect (CRE_SW).
+
+        CRE_SW = − S_in · (α_cloudy − α_clear)
+
+    Sign convention: negative ⇒ TOA cooling (typical clouds
+    increase albedo, reduce net SW absorption); positive ⇒ TOA
+    warming (rare; cloud darker than underlying surface).
+
+    Derivation: TOA net-SW = S_in·(1 − α).  Cloud forcing =
+    all-sky − clear-sky = S_in·(α_clear − α_cloudy) = −S_in·Δα.
+
+    Typical magnitudes:
+      * Sc deck (α_cloudy ≈ 0.5, α_clear ≈ 0.1, S_in ≈ 200 W/m²
+        for stratocumulus latitudes): CRE_SW ≈ −80 W/m².
+      * Cirrus (α_cloudy ≈ 0.2, α_clear ≈ 0.1): CRE_SW ≈ −20 W/m².
+      * Polar summer with Sc: CRE_SW ≈ −150 W/m² (record values).
+
+    Caller supplies pre-computed α (e.g., iter-826) and incident
+    flux S_in (TOA solar × cos(SZA) × eccentricity correction).
+    S_in = 0 at night ⇒ CRE_SW = 0.
+
+    Used by: ISCCP/CERES TOA CRE comparison, cloud-feedback
+    decomposition (Soden-Held 2006), CMIP CRE bias diagnostics,
+    Sc-deck SW radiative-budget closure.
+
+    Composes iter-826 ``cloud_albedo_two_stream_fv3``.
+
+    Parameters
+    ----------
+    alpha_cloudy : jax.Array
+        All-sky cloud albedo (0 ≤ α ≤ 1), from iter-826.
+    alpha_clear : jax.Array
+        Clear-sky surface albedo (0 ≤ α ≤ 1).
+    s_incident : jax.Array
+        TOA incident shortwave flux (W/m²).
+
+    Returns
+    -------
+    cre_sw : jax.Array
+        TOA shortwave cloud-radiative effect (W/m²).
+    """
+    return -s_incident * (alpha_cloudy - alpha_clear)
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,
