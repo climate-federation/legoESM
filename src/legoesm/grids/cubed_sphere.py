@@ -10915,6 +10915,82 @@ def vapor_pressure_from_rh_fv3(
     return rh * thermo.saturation_vapor_pressure(t)
 
 
+def soil_heat_flux_g_fv3(
+    r_n: jax.Array,
+    c_g: float = 0.1,
+) -> jax.Array:
+    """FV3_3D iter 880: FAO-56 soil heat flux G primitive.
+
+    Allen-Pereira 1998 (FAO-56 Eq. 45-46) empirical scaling of
+    soil heat flux to net radiation:
+
+        G = c_g · R_n        (W/m²)
+
+    Where:
+      * R_n   — net radiation at surface (W/m²); from iter-876
+                ``net_radiation_fv3``.
+      * c_g   — empirical fraction (dimensionless); default 0.1
+                (FAO-56 daytime grass / crop daily approximation).
+
+    Sign convention: G positive = downward into soil (typical
+    daytime); R_n > 0 → G > 0 (soil warming).  Nighttime regime
+    (R_n < 0) → G < 0 (soil cools, releases stored heat upward).
+
+    FAO-56 / Bonan 2008 ch. 4 typical c_g values:
+      | regime / surface         | c_g          |
+      |--------------------------|--------------|
+      | Daily-mean grass         | 0            |
+      | Hourly daytime grass     | 0.1          |
+      | Hourly nighttime grass   | 0.5          |
+      | Bare soil daytime        | 0.2–0.3      |
+      | Forest canopy daytime    | 0.05         |
+      | Snow / ice               | 0.5 (penetr) |
+
+    Surface-energy budget: R_n = H + λE + G; A = R_n − G is the
+    available energy that PM partitions into λE + H.  G stores
+    energy in soil substrate over diurnal cycle.
+
+    **Closes the A = R_n − G computation for iter-870 PM input** —
+    final residual primitive completing the **full pure-JAX ET
+    pipeline**:
+
+        T_air, RH, p, u, T_s, ε, SW_dn, α, A_n, h_s, C_s, canopy_geom
+        → iter-871 VPD (using thermo)
+        → iter-879 e_a → iter-877 LW_dn (Brunt)
+        → iter-878 LW_up
+        → iter-876 R_n
+        → iter-880 G
+                A = R_n − G
+        → iter-873 γ, iter-874 Δ, iter-875 g_a, iter-869 g_s
+        → iter-870 PM λE (W/m²)
+
+    Used by: Allen-Pereira 1998 FAO-56 Eq. 45-46 G estimation,
+    Bonan 2008 ch. 4-5 surface-energy budget, FLUXNET soil-heat-
+    flux-plate measurements, eddy-covariance energy-balance
+    closure (Wilson 2002 AFM), CLM5/JULES/NoahMP soil-energy
+    storage.
+
+    Note: more sophisticated G parameterizations exist (Choudhury
+    1987 LAI-dependent, Friedl 1996 day/night ratio, Santanello-
+    Friedl 2003 time-of-day phase shift) — this primitive is the
+    canonical FAO-56 c_g · R_n baseline.  Caller swaps externally
+    for site-specific calibrations.
+
+    Parameters
+    ----------
+    r_n : jax.Array
+        Net radiation (W/m²).
+    c_g : float
+        FAO-56 c_g fraction (dimensionless); default 0.1.
+
+    Returns
+    -------
+    g : jax.Array
+        Soil heat flux (W/m²; positive into soil).
+    """
+    return c_g * r_n
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

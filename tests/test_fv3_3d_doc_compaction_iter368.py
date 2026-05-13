@@ -38,11 +38,11 @@ def test_iter365_compaction_present(doc_text):
     )
 
 
-def test_doc_size_below_5870_lines(doc_text):
+def test_doc_size_below_5380_lines(doc_text):
     n_lines = len(doc_text.splitlines())
-    assert n_lines < 5870, (
-        f"FV3_3D.md has {n_lines} lines (target < 5870).  "
-        f"Compaction scheduled at iter 880."
+    assert n_lines < 5380, (
+        f"FV3_3D.md has {n_lines} lines (target < 5380).  "
+        f"Next compaction at iter 890."
     )
 
 
@@ -471,6 +471,37 @@ def test_iter820_compaction_covers_topics(doc_text):
     for marker in required:
         assert marker in section, (
             f"iter-820 compacted block missing topic ``{marker}``."
+        )
+
+
+def test_iter880_compaction_present(doc_text):
+    """iter-880 compacted iter 871-879 into single block."""
+    assert "**Iters 871-879 (compacted iter 880)**" in doc_text, (
+        "iter-880 compaction block missing — doc re-expanded."
+    )
+
+
+def test_iter880_compaction_covers_topics(doc_text):
+    section_start = doc_text.find(
+        "**Iters 871-879 (compacted iter 880)**"
+    )
+    section_end = doc_text.find(
+        "**Iters 861-869", section_start,
+    )
+    assert section_start >= 0 and section_end > section_start
+    section = doc_text[section_start:section_end]
+    required = [
+        "871", "872", "873", "874", "875",
+        "876", "877", "878", "879", "880",
+        "vpd_from_t_rh", "bowen_ratio",
+        "psychrometric_constant", "saturation_vapor_pressure_slope",
+        "aerodynamic_conductance", "net_radiation",
+        "clear_sky_longwave_brunt", "gray_body_lw_emission",
+        "vapor_pressure_from_rh", "soil_heat_flux_g",
+    ]
+    for marker in required:
+        assert marker in section, (
+            f"iter-880 compacted block missing topic ``{marker}``."
         )
 
 
