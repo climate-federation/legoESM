@@ -451,7 +451,13 @@ def compute_global_moisture(
     jax.Array : Scalar global moisture integral [kg].
     """
     # Column water vapor: ∫ q_v dp/g = q_v * p_s * dsigma / g
-    cwv = jnp.sum(q_v * p_s[..., None] * dsigma, axis=-1) / constants.g
+    # iter-44: promote field computation to fp64 budget accumulator
+    # (same fp32-field bug as iter-42/43 energy diagnostics).
+    acc = _conservation_accumulator()
+    cwv = jnp.sum(
+        q_v.astype(acc) * p_s.astype(acc)[..., None] * dsigma.astype(acc),
+        axis=-1,
+    ) / jnp.asarray(constants.g, dtype=acc)
     return _global_area_sum(cwv, grid, owned_mask=owned_mask)
 
 
@@ -892,13 +898,19 @@ def compute_conservation_diagnostics(
         'total_mass': Global integral of h*area
         'total_energy': Global integral of (KE + PE)*area
     """
-    h = state.h.data
-    u = state.u.data
-    v = state.v.data
-    h_s = state.h_s.data
+    # iter-44: promote energy field to fp64 budget accumulator before
+    # the area-sum (same fp32-field bug as iter-42/43).  The mass
+    # integrand (h alone) is already correct via _batch_global_area_sums
+    # internal cast.
+    acc = _conservation_accumulator()
+    h = state.h.data.astype(acc)
+    u = state.u.data.astype(acc)
+    v = state.v.data.astype(acc)
+    h_s = state.h_s.data.astype(acc)
+    g_acc = jnp.asarray(g, dtype=acc)
 
     ke = 0.5 * h * (u**2 + v**2)
-    pe = 0.5 * g * (h + h_s)**2
+    pe = 0.5 * g_acc * (h + h_s)**2
     total_mass, total_energy = _batch_global_area_sums(
         [h, ke + pe], grid,
     )
