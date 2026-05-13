@@ -369,7 +369,18 @@ def bechtold_convection(
     # -- CMT --------------------------------------------------------------
     if config.enable_cmt:
         if config.enable_downdraft:
-            M_d = -config.downdraft_alpha * M_u_new * 0.3
+            # CMT downdraft profile = -downdraft_alpha · M_u · trigger,
+            # matching ``M_d_base = -downdraft_alpha · M_b · trigger``
+            # used by the subcloud rain-evap path above.  An earlier
+            # formulation had an extra hardcoded ``× 0.3`` factor on
+            # top of ``downdraft_alpha`` (effective 9 % instead of the
+            # canonical Tiedtke 30 %) AND omitted the RH trigger gate
+            # — fixed jointly with the Tiedtke scheme in iter-102/103.
+            M_d = (
+                -config.downdraft_alpha
+                * M_u_new
+                * downdraft_trigger[:, None]
+            )
         else:
             M_d = None
         du_dt_conv, dv_dt_conv = cmt_gregory_1997(

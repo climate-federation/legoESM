@@ -289,6 +289,30 @@ so CMT downdraft mass-flux profile is consistent with the
 M_d_base = -downdraft_alpha · M_b · trigger used by the rain-evap
 path.  All 107 convection tests still green.
 
+## Iter-104 — Bechtold CMT downdraft has the same bug as Tiedtke (iter-102/103)
+`atmosphere/physics/convection/bechtold.py:372`.  After fixing Tiedtke
+in iter-102/103, scanned the other convection schemes for the same
+pattern.  Bechtold had:
+
+    M_d = -config.downdraft_alpha * M_u_new * 0.3
+
+— same double-scale with extra hardcoded `× 0.3` (effective 9 %
+instead of the canonical Tiedtke 30 %) AND missing `downdraft_trigger`
+gate.  Companion subcloud rain-evap path (line 343) correctly uses
+`M_d_base = -downdraft_alpha · M_b · downdraft_trigger`.
+
+Fix: identical to iter-103 — drop literal `× 0.3` and apply the RH
+trigger:
+
+    M_d = -downdraft_alpha · M_u_new · downdraft_trigger[:, None]
+
+Verified clean (no similar issue) in:
+- **Zhang-McFarlane**: passes `M_d=None` (CMT updraft-only, intentional).
+- **Kain-Fritsch**: returns `du_dt_conv = dv_dt_conv = None` (no CMT).
+- **DCA / Kuo**: no CMT branch.
+
+107 convection tests green.
+
 ## Next iterations
 Continue addressing codex findings and direct-inspection sweeps until all schemes are
 provably conservative, monotone, CFL-safe, and AD-safe across mixed wet/dry grids.
