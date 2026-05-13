@@ -373,6 +373,32 @@ Audited (~700 LOC):
 No code changes — all six modules verified canonical with previously-
 applied audit fixes still intact.
 
+## Iter-124 — cloud_fraction + surface_albedo + microphysics/output
+Audited (~700 LOC):
+- `atmosphere/physics/clouds/cloud_fraction.py` (217): Sundqvist
+  `cf = clip((RH−RH_crit)/max(1−RH_crit, 1e-6), 0, 1)`; Xu-Randall
+  `cf = RH^p · (1−exp(−α·q_c/((1−RH)·q_sat)))` with `denominator =
+  max((1−RH)·q_sat, 1e-10)`; dispatcher raises ValueError on unknown
+  scheme (2026-05-03 audit fix held).  Ice-fraction linear ramp
+  `(T_freeze−T)/(T_freeze−T_ice_only)` clipped to [0, 1].  Cloud paths
+  `lwp = q·dp/g` use `constants.g`.
+- `surface_albedo.py` (299): linear-ramp land vegetation albedo by
+  latitude tropics/midlat/highlat with `sharpness=0.3 deg⁻¹` clipped
+  blending weights; snow albedo `α_min + (α_max−α_min)·exp(−age/τ)`;
+  ice albedo linear ramp over `T_transition_width` below
+  `T_freeze_ocean`; ocean Briegleb 1992 zenith albedo with `μ =
+  clip(cos_zenith, 0.01, 1)` floor avoids div-by-zero in `μ^1.7+0.065`
+  denominator and clip output to [0.03, 0.40].
+- `atmosphere/physics/microphysics/output.py` (189):
+  `sedimentation_tendency` with `extra_sink` joint mass cap (iter-73
+  fix) — outgoing flux at level k capped by
+  `(q − extra_sink·dt)·ρ·dz/dt`; documented number-concentration
+  convention split (per-volume N_c, N_r; per-mass N_i); `dz_safe`
+  floor at 1.0 m for division.
+
+No code changes — all three modules canonical with prior audit fixes
+intact.
+
 ## Next iterations
 Continue addressing codex findings and direct-inspection sweeps until all schemes are
 provably conservative, monotone, CFL-safe, and AD-safe across mixed wet/dry grids.
