@@ -905,6 +905,83 @@ def fv3_corner_laplacian_nord(
     return result
 
 
+def fv3_corner_laplacian_nord_expanding_halo(
+    divg_d: jnp.ndarray,
+    cdgrid: "CubedSphereCDGrid",
+    nord: int,
+) -> jnp.ndarray:
+    """FV3_3D iter 899: FV3-faithful expanding-halo nord-loop wrapper.
+
+    Compose iter-897 ``fv3_laplacian_step_from_pad_h1`` + iter-898
+    ``fv3_laplacian_step_from_pad_h2`` into a unified expanding-halo
+    wrapper.  Pads ONCE with halo=nord, then applies nord shrinking
+    steps WITHOUT re-padding — matching FV3 ``sw_core.F90:1748-1785``
+    structure where intermediate iterations consume the original
+    pre-halo'd buffer without refreshing cross-panel data.
+
+    Sequence for nord=2:
+
+        divg_pad = pad_halo(divg_d, halo=2)         # (6, n+5, n+5)
+        mid      = fv3_laplacian_step_from_pad_h2(divg_pad, ...)
+                                                    # (6, n+3, n+3)
+        out      = fv3_laplacian_step_from_pad_h1(mid, ...)
+                                                    # (6, n+1, n+1)
+
+    Compare to existing ``fv3_corner_laplacian_nord`` (iter-892)
+    which RE-pads via ``pad_halo`` between iterations.  The
+    expanding-halo wrapper differs in cube-vertex behaviour:
+    re-pad refreshes corner-fill via the pad's default avg mode at
+    each iteration; expanding halo uses the Laplacian-operator
+    output at the interior cells without refresh.  FV3 sw_core.F90
+    matches the expanding-halo convention (single fill_corners call
+    before the loop, none between).
+
+    Currently supports nord ∈ {0, 1, 2}.  nord >= 3 raises
+    NotImplementedError pending iter-900+ ``fv3_laplacian_step_from_pad_h3``
+    helper.
+
+    Parameters
+    ----------
+    divg_d : jnp.ndarray, shape ``(6, n+1, n+1)``
+        Corner-staggered divergence (canonical interior).
+    cdgrid : CubedSphereCDGrid
+    nord : int
+        Number of Laplacian iterations.  Must be in {0, 1, 2}.
+
+    Returns
+    -------
+    lap_nord_divg : jnp.ndarray, shape ``(6, n+1, n+1)``
+        nord-fold iterated Laplacian via expanding halo.
+
+    Raises
+    ------
+    NotImplementedError
+        For nord >= 3 (h3 step not yet implemented).
+    ValueError
+        For nord < 0.
+    """
+    from legoesm.grids.halo import pad_halo
+
+    if nord < 0:
+        raise ValueError(
+            f"nord={nord!r} must be >= 0 (expanding-halo wrapper)"
+        )
+    if nord == 0:
+        return divg_d
+    if nord == 1:
+        divg_pad = pad_halo(divg_d, halo=1)
+        return fv3_laplacian_step_from_pad_h1(divg_pad, cdgrid)
+    if nord == 2:
+        divg_pad = pad_halo(divg_d, halo=2)
+        mid = fv3_laplacian_step_from_pad_h2(divg_pad, cdgrid)
+        return fv3_laplacian_step_from_pad_h1(mid, cdgrid)
+    raise NotImplementedError(
+        f"nord={nord} expanding-halo not yet implemented "
+        f"(need fv3_laplacian_step_from_pad_h3 helper for nord=3); "
+        f"use fv3_corner_laplacian_nord re-pad path until iter-900+."
+    )
+
+
 def _laplacian_iteration_with_vector_fill(
     divg_pad: jnp.ndarray,
     cdgrid: CubedSphereCDGrid,
