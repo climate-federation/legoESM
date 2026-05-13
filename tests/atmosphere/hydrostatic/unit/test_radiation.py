@@ -507,6 +507,37 @@ class TestRRTMGP:
         """Bundled rrtmgp package should import successfully."""
         from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP  # noqa: F401
 
+    def test_rrtmgp_humidity_clip_survives_halo_extrapolation(self):
+        """Iter-79: a steep q_v boundary profile must not produce
+        singular / negative h2o_vmr after the linear halo extrapolation
+        in ``_add_halos``.
+
+        Pre-fix the q_v clip was applied BEFORE ``_add_halos``, so a
+        boundary profile like ``q_v = [0.99, 0.0, ...]`` extrapolated
+        to halo = ``2·q_v[0] − q_v[1] = 1.98``, driving the
+        ``1 − q_v`` denominator negative and producing singular VMRs.
+        Now the clip is applied AFTER halos so the operation is robust.
+        """
+        from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (
+            rrtmgp_radiation,
+        )
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+
+        ncol, nlev = 2, 40
+        T, p_full, p_half, T_sfc, lat, insol = _make_column_data(ncol, nlev)
+        # Pathological q_v: boundary value at the upper limit, next layer
+        # at 0.  Halo extrapolation pre-fix → 1.98 (out of bounds).
+        q_v = jnp.zeros((ncol, nlev))
+        q_v = q_v.at[:, 0].set(0.99)
+        cos_zen = jnp.full(ncol, 0.5)
+        config = RRTMGPConfig()
+        out = rrtmgp_radiation(T, p_full, p_half, T_sfc, q_v, cos_zen, config)
+        assert jnp.all(jnp.isfinite(out.heating_rate)), (
+            "RRTMGP heating rate must be finite even when the q_v boundary"
+            " profile has a steep gradient that would extrapolate halos "
+            "out of [0, 0.99]."
+        )
+
     def test_rrtmgp_clear_sky(self):
         """RRTMGP clear-sky heating rates should be finite."""
         from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (

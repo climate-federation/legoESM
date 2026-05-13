@@ -633,7 +633,16 @@ class RRTMGP:
       # any physically plausible specific humidity (peak tropical surface
       # values are ~0.025); the bound only ever fires on numerical
       # pathology during spin-up and prevents singular/negative VMRs.
-      q_v_3d = _add_halos(jnp.clip(q_v, 0.0, 0.99)[:, None, ::-1])
+      #
+      # **Clip AFTER ``_add_halos``**: linear extrapolation of a steep
+      # boundary profile can produce halo values OUTSIDE [0, 0.99]
+      # (e.g. q_v = [0.99, 0.0, ...] extrapolates to halo = 1.98), which
+      # would yield singular / negative h2o_vmr via the
+      # ``1 − q_v`` denominator.  Clipping the interior alone is not
+      # enough — the halo cells are passed straight to the RRTMGP
+      # solve.  Codex iter-79 stop-time review.
+      q_v_3d = _add_halos(q_v[:, None, ::-1])
+      q_v_3d = jnp.clip(q_v_3d, 0.0, 0.99)
 
       # --- 2. Build VMR fields ---
       mol_ratio = constants.R_V / constants.R_D

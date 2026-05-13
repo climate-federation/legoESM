@@ -9,6 +9,33 @@ Branch: `clean_physics`. Driven by Ralph loop + `/codex:adversarial-review`.
 - **Ocean** (`src/legoesm/ocean/physics/`): vertical_mixing, bottom_drag, lateral_mixing, convection, surface_forcing, shortwave_penetration, mixing.
 - **Cryosphere** (`src/legoesm/ice/`): sea_ice, dynamics, itd, rheology, transport.
 
+## Iteration 79 — 2026-05-13
+
+**Bug fix (codex stop-time): RRTMGP humidity guard bypassed by
+halo extrapolation.**
+
+`rrtmgp.py:636-640` applied `jnp.clip(q_v, 0.0, 0.99)` BEFORE
+`_add_halos`.  But `_add_halos` linearly extrapolates the
+boundary halo cells, which can push q_v OUTSIDE the [0, 0.99]
+window for a steep boundary profile (e.g. `q_v = [0.99, 0.0,
+...]` → halo = `2·0.99 − 0.0 = 1.98`).  The downstream
+`h2o_vmr = mol_ratio · q_v / (1 − q_v)` then divides by a
+negative number, producing singular / negative VMRs.
+
+Fix: clip AFTER `_add_halos` so the halo cells are also bounded.
+The interior values stay bit-identical to the previous clipped
+behaviour.
+
+```python
+q_v_3d = _add_halos(q_v[:, None, ::-1])
+q_v_3d = jnp.clip(q_v_3d, 0.0, 0.99)
+```
+
+New regression test
+`test_rrtmgp_humidity_clip_survives_halo_extrapolation` exercises
+the pathological `q_v = [0.99, 0.0, ...]` boundary profile and
+verifies the heating rate is finite.
+
 ## Iteration 78 — 2026-05-13
 
 **Inspection iteration on barotropic substep solvers (no code changes).**
