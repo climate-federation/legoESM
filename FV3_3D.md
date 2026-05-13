@@ -5354,3 +5354,59 @@ analysis.  Pure JAX, vmap-compatible.  Uses
 ``thermo.saturation_vapor_pressure`` per CLAUDE.md hygiene.  No
 `constants.py` additions.
 
+## Iter 872 — bowen_ratio_fv3 (surface-energy-partition primitive)
+
+Added `bowen_ratio_fv3(h_sensible, le_latent)` to
+`grids/cubed_sphere.py`.  Bowen 1926 (Phys. Rev.) ratio of
+sensible to latent heat flux:
+
+```
+β = H / λE        (dimensionless)
+```
+
+Closes surface-energy partition: A = R_n − G = H + λE  ⇒
+  λE = A / (1+β),  H = β·A / (1+β).
+
+Typical values:
+  | surface              | β             |
+  |----------------------|---------------|
+  | Tropical forest      | 0.1–0.3       |
+  | Crop midday          | 0.3–0.7       |
+  | Mid-lat grassland    | 0.4–1.0       |
+  | Mediterranean dry    | 1–5           |
+  | Arid / desert        | 5–20          |
+  | Ocean                | 0.1–0.2       |
+  | Snow / ice           | very large / − |
+
+Energy-balance limits:
+  * β → 0  ⇒ all A goes to ET (humid surface).
+  * β → ∞ ⇒ all A goes to sensible (dry surface).
+  * β < 0  ⇒ inversion / dew (flipped sign).
+
+Drought intensification: as soil dries, λE drops faster than H
+rises → ↑β.  Flash-drought events show β > 5 (Otkin 2018 BAMS).
+AR6 SSP3-7.0 mid-lat: β trend +30-50% by 2100.
+
+Composes with iter-870 PM ``λE`` and surface H from caller's
+flux scheme (Louis 1979 / Monin-Obukhov).
+
+Used by: Bowen 1926 origin, Penman 1948 ET formulation, FAO-56
+ET cross-checks, FLUXNET eddy-covariance energy-balance closure
+(Wilson 2002 AFM), CLM5/JULES/NoahMP surface-energy diagnostics,
+urban-heat-island studies (Oke 1982 QJRMS), drought-induced
+β-amplification (Berg-Sheffield 2018 Sci. Adv.).
+
+Test: `tests/test_fv3_bowen_ratio_iter872.py` (9 tests: tropical
+forest β≈0.125, desert β=10, ocean β≈0.13, zero H→0, λE=0
+floored, negative inversion, partition-identity λE=A/(1+β) +
+H=β·A/(1+β), chain with iter-870 PM, 3-D shapes).
+
+### Why this iteration was meaningful
+
+Closes **surface-energy-partition primitive**.  β is the canonical
+diagnostic for: (1) drought-intensification flash-events (Otkin
+2018); (2) urban-heat-island analysis (Oke 1982); (3) FLUXNET
+energy-balance-closure validation (Wilson 2002); (4) AR6 §11
+land-atmosphere coupling diagnostics.  Pure JAX, vmap-compatible.
+No `constants.py` additions.
+

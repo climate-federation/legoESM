@@ -459,6 +459,7 @@ _GUARD_MODULES = (
     "test_fv3_ball_berry_iter869",                   # iter-869 add
     "test_fv3_penman_monteith_iter870",              # iter-870 add
     "test_fv3_vpd_iter871",                          # iter-871 add
+    "test_fv3_bowen_ratio_iter872",                  # iter-872 add
 )
 
 

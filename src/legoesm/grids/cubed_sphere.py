@@ -10223,6 +10223,88 @@ def vpd_from_t_rh_fv3(
     return thermo.saturation_vapor_pressure(t) * (1.0 - rh)
 
 
+def bowen_ratio_fv3(
+    h_sensible: jax.Array,
+    le_latent: jax.Array,
+    le_floor: float = 1e-6,
+) -> jax.Array:
+    """FV3_3D iter 872: Bowen 1926 surface-energy-partition primitive.
+
+    Bowen 1926 (Phys. Rev.) ratio of sensible to latent heat flux:
+
+        β = H / λE        (dimensionless)
+
+    Where:
+      * H    — sensible heat flux (W/m²; positive = upward,
+               convective heating from surface).
+      * λE   — latent heat flux (W/m²; positive = upward,
+               evapotranspiration cooling).  Typically from
+               iter-870 ``penman_monteith_le_fv3``.
+
+    Surface-energy-budget closure: A = R_n − G = H + λE
+    ⇒ partition energy via β:
+        λE = A / (1 + β)
+        H  = β · A / (1 + β)
+
+    Typical values:
+      | surface              | β            |
+      |----------------------|--------------|
+      | Tropical forest      | 0.1–0.3      |
+      | Crop midday          | 0.3–0.7      |
+      | Mid-lat grassland    | 0.4–1.0      |
+      | Mediterranean dry    | 1–5          |
+      | Arid / desert        | 5–20         |
+      | Ocean                | 0.1–0.2      |
+      | Snow / ice           | very large or − |
+
+    Energy-balance interpretation:
+      * β → 0   ⇒ all A goes to evapotranspiration (humid surface).
+      * β → ∞   ⇒ all A goes to sensible heating (dry surface).
+      * β < 0   ⇒ inversion or dew formation (H or λE flipped sign).
+
+    Composes with iter-870 ``penman_monteith_le_fv3`` (λE input
+    here from PM) and surface H from caller's atmosphere flux
+    parameterization (e.g. Louis 1979 / Monin-Obukhov surface-
+    layer Monteith-style sensible-heat-flux closure).
+
+    Used by: Bowen 1926 origin paper, Penman 1948 evaporation
+    formulation, FAO-56 ET reference cross-checks, FLUXNET eddy-
+    covariance energy-balance closure (Wilson et al. 2002 AFM),
+    CLM5/JULES/NoahMP surface-energy diagnostics, urban-heat-island
+    studies (Oke 1982 QJRMS), drought-induced β-amplification
+    (Berg-Sheffield 2018 Sci. Adv.).
+
+    Drought intensification: as soil dries, λE drops faster than
+    H rises → ↑β; β reaches >5 in flash-drought events (Otkin et
+    al. 2018 BAMS).  AR6 SSP3-7.0 mid-lat: β trend +30-50% by
+    2100 over continental regions.
+
+    ``le_floor`` prevents div-by-0 when λE → 0 (degenerate frozen
+    / fully-stressed regime).
+
+    Parameters
+    ----------
+    h_sensible : jax.Array
+        Sensible heat flux (W/m²).
+    le_latent : jax.Array
+        Latent heat flux (W/m²).
+    le_floor : float
+        Lower bound on |λE| (W/m²); default 1e-6.
+
+    Returns
+    -------
+    beta : jax.Array
+        Bowen ratio (dimensionless); negative possible for
+        inversions / dew.
+    """
+    le_safe = jnp.where(
+        jnp.abs(le_latent) < le_floor,
+        jnp.sign(le_latent) * le_floor + (le_latent == 0) * le_floor,
+        le_latent,
+    )
+    return h_sensible / le_safe
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,
