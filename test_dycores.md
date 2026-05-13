@@ -316,16 +316,52 @@ ico W5/W6 now at exact bitcleanness.  Cube cosine_bell ~25x cleaner
 diagnostic noise).  ``tests/atmosphere/shallow_water/integration/test_shallow_water_mpas.py``
 7/7 PASS.
 
-## Iteration 7 plan
+## Iteration 7 — NH cube enable anchored mass fixer + mass diagnostic (FIX)
 
-- Full quick suite snapshot (all grids × SW/hydro/NH) for a single
-  before/after table covering iter-1..iter-6.
-- NH dycore audit: ``compressible_euler.py`` / ``compressible_euler_cdgrid.py``
-  / ``compressible_euler_mpas.py`` / ``spectral_nh.py`` — none of the iter-1..6
-  changes touched the NH solvers; check if they have the same fp32-cast
-  fixer pattern.
-- Visual snapshot regression check (Williamson-2 v-wind, lat-lon + cube) per
-  CLAUDE.md guidance.
+**Audit findings.**
+
+- Cube NH (``compressible_euler_cdgrid.py``): mass fixer
+  (``fix_mass_nonhydrostatic`` + ``compute_nh_dry_mass``) *exists* and uses
+  the fp64 budget accumulator via ``_batch_global_area_sums``.  Default-off
+  (``fix_mass: bool = False``, ``anchor_mass_to_initial: bool = False``); the
+  matrix runner never opted in.
+- MPAS NH (``compressible_euler_mpas.py``): no mass fixer at all.  No
+  ``fix_mass`` config field, no ``target_mass`` plumbing.
+- Spectral NH (``spectral_nh.py``): not audited this iter; same gap
+  expected.
+- The NH runner reports ``|w|_max`` only; mass drift was invisible — no way
+  to know whether the un-fixed grids were drifting.
+
+**Changes (1 runner site + matrix-runner diagnostic):**
+
+- ``scripts/run_atmosphere_test_matrix.py``: enable
+  ``fix_mass=True, anchor_mass_to_initial=True`` at all three cube NH
+  ``CompressibleEulerConfig`` sites (TC1 / TC2a / TC3).
+- ``run_nonhydrostatic`` cube ``scalar_fn``: add
+  ``"mass": float(compute_nh_dry_mass(s.rho_prime.data, hcoord, tmetric,
+  grid))`` so ``mean_timeseries.csv`` carries a per-step mass column for
+  drift comparison.
+
+**Validation (via `run_atmosphere_test_matrix.py --only nh --grid cubed_sphere --test dcmip_tc1 --quick`):**
+
+| Diagnostic         | Baseline       | Iter-7        |
+|--------------------|----------------|---------------|
+| dcmip_tc1 |w|_max  | 0.3266 m/s     | 0.3177 m/s    |
+| dcmip_tc1 mass drift | (not tracked) | **0.00e+00** (exact) |
+
+``|w|_max`` shifted slightly because the per-step fixer perturbs
+``rho_prime`` by the anchored correction; dynamics remain stable.
+``tests/atmosphere/nonhydrostatic`` 60/60 PASS.
+
+## Iteration 8 plan
+
+- MPAS NH: add ``fix_mass`` / ``anchor_mass_to_initial`` + a
+  ``compute_nh_dry_mass`` MPAS variant.  Wire into the matrix runner's
+  ico NH scalar_fn so we get cross-grid mass-drift visibility.
+- Spectral NH (``spectral_nh.py``): mirror iter-3 spectral PE pattern — log-
+  scale rescale on the ``rho_prime_hat[0]`` or equivalent scalar mode.
+- TC2a / TC3 cube NH mass-drift run once iter-7 is on main.
+- Williamson-2 v-wind visual check.
 
 ## Improvement log
 
@@ -349,3 +385,7 @@ diagnostic noise).  ``tests/atmosphere/shallow_water/integration/test_shallow_wa
   MPAS SW `anchor_mass_to_initial` + fp64 fixer.  cube cosine_bell
   `4.49e-07 → 2.18e-08`; ico W5 `3.52e-10 → 1.62e-16`;
   ico W6 `2.14e-09 → 0.00e+00`.
+- **iter-7 (2026-05-13)**: enable cube NH anchored mass fixer
+  (`CompressibleEulerConfig.fix_mass=True, anchor_mass_to_initial=True`)
+  at all three TC sites; expose `mass` in scalar_fn so drift becomes
+  visible.  Cube NH TC1 mass drift `(not tracked) → 0.00e+00` (exact).

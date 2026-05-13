@@ -4409,7 +4409,11 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 n_acoustic_substeps=10, semi_implicit_acoustic=True,
                 sponge_width=10000.0, sponge_coeff=0.05,
                 hyperdiff_coeff=hd,
-                acoustic_off_centering=0.1)
+                acoustic_off_centering=0.1,
+                # iter-7: enable anchored mass fixer (default-off in
+                # config; we opt in here so the NH suite reports mass
+                # drift alongside |w|_max).
+                fix_mass=True, anchor_mass_to_initial=True)
         elif test_case == "tc2a":
             from tests.test_cases.dcmip2025 import dcmip25_tc2_init
             state, hcoord, tmetric, small_grid = dcmip25_tc2_init(
@@ -4428,7 +4432,8 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 sponge_coeff=1.0 / (0.1 * 86400.0),
                 hyperdiff_coeff=hd_tc2,
                 hyperdiff_w_coeff=hd_tc2,
-                acoustic_off_centering=0.15)
+                acoustic_off_centering=0.15,
+                fix_mass=True, anchor_mass_to_initial=True)
         elif test_case == "tc3":
             from tests.test_cases.dcmip2025 import dcmip25_tc3_init
             state, hcoord, tmetric, small_grid = dcmip25_tc3_init(
@@ -4444,7 +4449,8 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 sponge_width=12000.0, sponge_coeff=0.3,
                 hyperdiff_coeff=hd_tc3,
                 hyperdiff_w_coeff=hd_tc3,
-                acoustic_off_centering=0.2)
+                acoustic_off_centering=0.2,
+                fix_mass=True, anchor_mass_to_initial=True)
         else:
             raise ValueError(f"Unknown NH test case: {test_case}")
 
@@ -4470,12 +4476,18 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 float(jnp.max(jnp.abs(s.u.data))))
 
         def scalar_fn(s):
+            # iter-7: report total dry mass alongside |w|_max so mass
+            # drift becomes visible in mean_timeseries.csv (cubed-sphere
+            # NH supports anchored mass via fix_mass + compute_nh_dry_mass).
+            from legoesm.core.conservation import compute_nh_dry_mass
             return {
                 "max_abs_w": float(jnp.max(jnp.abs(s.w.data))),
                 "mean_theta_prime": _area_weighted_mean(
                     s.theta_prime.data, grid.area),
                 "mean_rho_prime":   _area_weighted_mean(
                     s.rho_prime.data,   grid.area),
+                "mass":             float(compute_nh_dry_mass(
+                    s.rho_prime.data, hcoord, tmetric, grid)),
             }
 
         _cos_a_nh = np.asarray(grid.cos_angle, dtype=np.float64)
