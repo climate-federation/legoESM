@@ -4496,7 +4496,12 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 hyperdiff_coeff=hd_tc2,
                 hyperdiff_w_coeff=hd_tc2,
                 acoustic_off_centering=0.15,
-                fix_mass=True, anchor_mass_to_initial=True)
+                fix_mass=True, anchor_mass_to_initial=True,
+                # new_test_dycores iter-6: same iter-697/698 flags as
+                # TC1.  Pre-change TC2 cube |w|_max = 4.65 m/s vs ico
+                # 0.36 / spec 0.36 (~13x gap).
+                use_fv3_vector_halo_uv=True,
+                use_fv3_a2b_ord4_vector_uv=True)
         elif test_case == "tc3":
             from tests.test_cases.dcmip2025 import dcmip25_tc3_init
             state, hcoord, tmetric, small_grid = dcmip25_tc3_init(
