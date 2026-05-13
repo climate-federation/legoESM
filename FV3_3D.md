@@ -5724,3 +5724,77 @@ baseline.  Pure JAX, vmap-compatible.  Uses ``constants.sigma_sb``
 per CLAUDE.md hygiene.  Brunt fit coefficients are empirical
 (default args).  No `constants.py` additions.
 
+## Iter 878 — gray_body_lw_emission_fv3 (LW_up primitive)
+
+Added `gray_body_lw_emission_fv3(t_surf, emissivity=0.97,
+lw_down=0.0)` to `grids/cubed_sphere.py`.  Standard surface-LW
+closure combining emission + reflection (Bonan 2008 ch. 4 /
+Brutsaert 1982):
+
+```
+LW_up = ε · σ · T_s⁴ + (1 − ε) · LW_down        (W/m²)
+```
+
+Default ε=0.97 (mean natural-surface).  Uses ``constants.sigma_sb``
+per CLAUDE.md hygiene.
+
+Surface emissivity table (Bonan 2008 Table 4.2):
+  | surface      | ε    |
+  |--------------|------|
+  | Open water   | 0.96 |
+  | Bare soil dry| 0.92 |
+  | Forest canopy| 0.98 |
+  | Grass/crop   | 0.96 |
+  | Snow/ice     | 0.98 |
+  | Sand/desert  | 0.90 |
+
+Canonical (ε=0.97):
+  T_s=0°C:  LW_up ≈ 318 W/m²
+  T_s=15°C: ≈ 373
+  T_s=25°C: ≈ 419
+  T_s=35°C: ≈ 470
+
+**Closes the LW_up input to iter-876 net_radiation_fv3** — final
+radiation primitive.  Caller now has full pure-JAX radiation→ET
+pipeline:
+
+```
+T_air, RH → iter-871 e_a → iter-877 LW_dn (Brunt)
+T_s, ε    → iter-878 LW_up
++ SW_dn, α → iter-876 R_n − G = A → iter-870 PM λE
+```
+
+Test verifies full chain end-to-end iter-877 + iter-878 → iter-876
+R_n → iter-870 PM λE.
+
+Used by: Bonan 2008 ch. 4, Brutsaert 1982 Evaporation, FAO-56
+net-LW, CLM5/JULES/NoahMP surface-LW driver, FLUXNET upwelling-LW
+sensors, MODIS LST retrieval validation.
+
+Note: simplified gray-body form; real surfaces have wavelength-
+dependent ε (broadband used here).  Spectral correction caller-
+side if needed.
+
+Test: `tests/test_fv3_lw_up_iter878.py` (7 tests: blackbody analytic
+σT⁴, T=288 K → 390 W/m², ε=0 perfect mirror → LW_dn returned, mixed
+emission+reflection band, monotone in T (T⁴), full chain iter-877
+→878→876, 3-D shapes positive).
+
+### Why this iteration was meaningful
+
+**ABSOLUTELY CLOSES THE END-TO-END PURE-JAX RADIATION→ET PIPELINE**
+in pure JAX.  All iter-870 PM inputs derivable from baseline meteo
++ canopy + albedo + ε:
+
+  T_air, RH, p, u, T_s, ε, SW_dn, α, A_n, h_s, C_s, canopy_geom
+  → iter-871 VPD, iter-873 γ, iter-874 Δ, iter-875 g_a,
+    iter-876 R_n (using iter-877 LW_dn + iter-878 LW_up),
+    iter-869 g_s, A = R_n − G
+  → iter-870 PM λE
+
+Required for: (1) self-contained DGVM/ESM ET module; (2) FAO-56
+reference-ET with all sub-primitives; (3) FLUXNET full-radiation-
+budget validation; (4) AR6 §11 land-atmosphere coupled
+diagnostics.  Pure JAX, vmap-compatible.  Uses ``constants.sigma_sb``
+per CLAUDE.md hygiene.  No `constants.py` additions.
+

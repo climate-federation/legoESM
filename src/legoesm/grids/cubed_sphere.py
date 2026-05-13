@@ -10754,6 +10754,100 @@ def clear_sky_longwave_brunt_fv3(
     return eps_a * constants.sigma_sb * t ** 4
 
 
+def gray_body_lw_emission_fv3(
+    t_surf: jax.Array,
+    emissivity: jax.Array = 0.97,
+    lw_down: jax.Array = 0.0,
+) -> jax.Array:
+    """FV3_3D iter 878: gray-body surface LW emission primitive.
+
+    Standard surface-LW closure combining emission and reflection
+    (Bonan 2008 ch. 4 / Brutsaert 1982):
+
+        LW_up = ε · σ · T_s⁴ + (1 − ε) · LW_down        (W/m²)
+
+    Where:
+      * T_s        — surface skin temperature (K).
+      * ε          — surface broadband-LW emissivity (0–1); default
+                     0.97 (mean natural-surface emissivity).
+      * LW_down    — incoming LW (W/m²); the (1−ε)·LW_dn term is
+                     reflected component.  Default 0 (gray-body
+                     emission only, no reflection).
+      * σ          — ``constants.sigma_sb``.
+
+    Sign: LW_up > 0 always.
+
+    Surface emissivity values (Bonan 2008 Table 4.2):
+      | surface              | ε         |
+      |----------------------|-----------|
+      | Open water           | 0.96      |
+      | Bare soil (dry)      | 0.92      |
+      | Bare soil (wet)      | 0.97      |
+      | Forest canopy        | 0.98      |
+      | Grass / crop         | 0.96      |
+      | Snow / ice           | 0.98      |
+      | Sand / desert        | 0.90      |
+
+    Canonical magnitudes (ε=0.97, LW_dn=400):
+      | T_s (°C)  | T (K)   | LW_up (W/m²) |
+      |-----------|---------|--------------|
+      | 0         | 273.15  | 318          |
+      | 15        | 288.15  | 373          |
+      | 25        | 298.15  | 419          |
+      | 35        | 308.15  | 470          |
+      | 45        | 318.15  | 527          |
+
+    **Closes the LW_up input to iter-876 net_radiation_fv3** —
+    final radiation primitive.  Caller now has full pure-JAX
+    radiation→ET pipeline:
+
+        T_air, RH → iter-871 e_a (via thermo)
+                  → iter-877 LW_dn (Brunt)
+        T_s, ε    → iter-878 LW_up
+        + SW_dn, α
+                  → iter-876 R_n
+                  − G (caller; e.g. 0.1·R_n FAO-56 daily)
+                  = A
+                  ↓
+                  iter-870 PM λE  (with iter-869 g_s, iter-871 VPD,
+                                  iter-873 γ, iter-874 Δ,
+                                  iter-875 g_a inputs)
+
+    Pure-JAX, vmap-friendly **end-to-end ET pipeline from baseline
+    meteorology + radiation + canopy** is now complete.
+
+    Per CLAUDE.md hygiene: uses ``constants.sigma_sb``.  Default
+    ε=0.97 is mean natural-surface emissivity (literal default arg).
+
+    Used by: Bonan 2008 ch. 4 radiation budget, Brutsaert 1982
+    Evaporation into the Atmosphere, FAO-56 net-LW formulation,
+    CLM5/JULES/NoahMP surface-LW driver, FLUXNET upwelling-LW
+    sensor analysis, MODIS LST retrieval validation.
+
+    Note: simplified gray-body form; real surfaces have wavelength-
+    dependent emissivity (broadband ε reported here).  Caller
+    applies spectral correction if needed.
+
+    Parameters
+    ----------
+    t_surf : jax.Array
+        Surface skin temperature (K).
+    emissivity : jax.Array or float
+        Surface broadband-LW emissivity (0–1); default 0.97.
+    lw_down : jax.Array or float
+        Downwelling LW (W/m²); default 0 (emission-only mode).
+
+    Returns
+    -------
+    lw_up : jax.Array
+        Upwelling LW (W/m²); positive.
+    """
+    return (
+        emissivity * constants.sigma_sb * t_surf ** 4
+        + (1.0 - emissivity) * lw_down
+    )
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

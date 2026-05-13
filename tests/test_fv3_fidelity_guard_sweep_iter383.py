@@ -465,6 +465,7 @@ _GUARD_MODULES = (
     "test_fv3_aero_conductance_iter875",             # iter-875 add
     "test_fv3_net_radiation_iter876",                # iter-876 add
     "test_fv3_brunt_lw_iter877",                     # iter-877 add
+    "test_fv3_lw_up_iter878",                        # iter-878 add
 )
 
 
