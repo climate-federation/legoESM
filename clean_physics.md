@@ -9,6 +9,38 @@ Branch: `clean_physics`. Driven by Ralph loop + `/codex:adversarial-review`.
 - **Ocean** (`src/legoesm/ocean/physics/`): vertical_mixing, bottom_drag, lateral_mixing, convection, surface_forcing, shortwave_penetration, mixing.
 - **Cryosphere** (`src/legoesm/ice/`): sea_ice, dynamics, itd, rheology, transport.
 
+## Iteration 78 — 2026-05-13
+
+**Inspection iteration on barotropic substep solvers (no code changes).**
+
+- **`barotropic_implicit_latlon_cgrid.py`**: Crank-Nicolson with
+  Forward-Backward Coriolis predictor + Helmholtz solve via
+  `jax.scipy.sparse.linalg.cg` (differentiable through IFT).  Mass
+  conservation noted as exact in docstring (lines 41-44).  `θ_eta
+  = θ_pgf = 0.55` (slightly past true Crank-Nicolson — unconditional
+  gravity-wave damping).
+- **`barotropic_latlon_cgrid.py`** (explicit substep): accumulates
+  `Hu_sum` over substeps and returns `Hu_avg = Hu_sum / n_substeps`.
+  This IS the integrated face transport that drove eta, so
+  mass-tracer consistency is exact for this path.
+
+Note (potential subtle issue in implicit path): the implicit solver
+returns `Hu_avg = (1−θ)·H_u_old·U_old + θ·H_u_new·U_new` (trapezoidal
+rule on raw transport).  The eta update uses `div(H_u_old ·
+U_avg_pred)` with U_avg_pred from the FB Coriolis predictor (not
+U_new).  After the corrector adds `−θ_pgf·dt·g·∇δη` to get U_new,
+the time-integrated transport that closed the eta budget is NOT
+exactly the same as the trapezoidal Hu_avg returned for tracers.
+The discrepancy is O(θ²·dt²·g·∇²η) per step — small for typical
+baroclinic timescales but non-zero.  MOM6 / NEMO use iterative
+implicit methods that converge to exact consistency.  Tracked
+alongside the explicit-path bottom-drag double-application as
+"open architectural debt".
+
+No new fixes needed.  Per-substep transport accumulation in the
+explicit path is exact; implicit path is approximate by O(θ²·dt²)
+— acceptable for current production use.
+
 ## Iteration 77 — 2026-05-13
 
 **Inspection iteration on `ocean/dynamics/ocean_tendency_common.py`
@@ -350,6 +382,11 @@ limitation tracked alongside the coupled-mode surface-flux flow.
   path (`F_slow` already carries depth-mean drag; `implicit_bottom_
   drag_factor` adds another `r/H` → effective `2·r/H`).  Fix
   requires single-owner drag plumbing across `ocean_model_*.py`.
+- Implicit barotropic `Hu_avg` returned to the tracer step is
+  `(1−θ)·H_u_old·U_old + θ·H_u_new·U_new` (trapezoidal on raw
+  transport), which differs from the actual time-integrated
+  transport that drove the eta update by O(θ²·dt²·g·∇²η).  MOM6 /
+  NEMO use iterative implicit methods for exact consistency.
 - CICE V=h·A state-variable refactor for sea-ice FW bookkeeping (iter-25 attempt
   reverted; slab path evolves h and conc semi-independently).
 - Threading `dt` into ocean `physics_fn` across 3 ocean PE backends + 3 model drivers.
