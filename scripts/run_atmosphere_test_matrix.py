@@ -2762,8 +2762,15 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
     # cosine_bell only WARNED.  iter-120: now applies to ALL
     # 4 grids via the unified mass_drift / n_mass_samples
     # path above.
+    # iter-29 (test_dycores): tighten from 1e-2 → 1e-4.  Post-iter-22
+    # cross-grid quick drifts are cube 2.18e-08 (transport_step fixer),
+    # latlon 1.49e-05 (intentional raw-FV benchmark — comment at line
+    # ~2513), ico 4.16e-07 (additive fixer in matrix runner), spectral
+    # 0.  The 1e-4 ceiling sits ~7x above the latlon raw-FV measurement
+    # so the intentional benchmark stays a PASS, but a true regression
+    # to the iter-22 1e-2 ceiling (100x looser) no longer slips through.
     ok, notes = _apply_mass_drift_tolerance(
-        ok, notes, mass_drift, 1e-2,
+        ok, notes, mass_drift, 1e-4,
         n_samples=n_mass_samples)
 
     _write_results_txt(output_dir, {
