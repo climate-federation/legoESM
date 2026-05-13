@@ -6848,6 +6848,72 @@ def planck_feedback_fv3(
     return -4.0 * emissivity * constants.sigma_sb * t_eff ** 3
 
 
+def clausius_clapeyron_dqdt_fv3(
+    t: jax.Array,
+    p: jax.Array,
+    rh: jax.Array = 1.0,
+    t_floor: float = 1e-6,
+) -> jax.Array:
+    """FV3_3D iter 832: Clausius-Clapeyron scaling dq/dT at fixed RH.
+
+    Temperature derivative of specific humidity holding relative
+    humidity fixed — canonical water-vapor amplification primitive
+    (~7%/K Earth-mean):
+
+        dq/dT |_RH = RH · dq_sat/dT
+        dq_sat/dT ≈ q_sat · L_v / (R_v · T²)     (Clausius-Clapeyron)
+
+    Where:
+      * q_sat   — canonical saturation mixing ratio via
+                  ``thermo.saturation_mixing_ratio(T, p)``.
+      * L_v     — ``constants.L_v``.
+      * R_v     — ``constants.R_v``.
+      * RH      — relative humidity (0 ≤ RH ≤ 1).
+
+    Relative scaling dq/q/dT = L_v / (R_v · T²) ≈ 6.5–7.5 %/K at
+    Earth-surface T 273–300 K — the canonical Clausius-Clapeyron
+    rate observed in:
+      * GCM-mean water-vapor feedback (Held-Soden 2000, IPCC AR4-AR6)
+      * Trenberth-Dai 2003 precipitable-water trend (~7%/K)
+      * Lenderink-van Meijgaard 2008 super-CC extreme-precip scaling
+      * Cloud-resolving model extreme-precip scaling (O'Gorman 2015)
+      * Manabe-Wetherald 1967 fixed-RH paradigm
+
+    Composes canonical ``thermo.saturation_mixing_ratio`` per
+    CLAUDE.md hygiene — never re-derives Tetens/Magnus/CC.
+
+    Pairs with iter-806 ``lapse_rate_moist_fv3`` (which also uses
+    q_sat · L_v / (R_v · T²) inside Γ_m) — both share the CC
+    amplification structure.
+
+    Used by: water-vapor-feedback decomposition (Soden-Held 2006
+    kernel approach), CMIP precipitable-water-trend diagnostics,
+    extreme-precip-scaling-with-T analysis, fixed-RH GCM closure.
+
+    ``t_floor`` prevents NaN at T=0.
+
+    Parameters
+    ----------
+    t : jax.Array
+        Temperature (K).
+    p : jax.Array
+        Pressure (Pa).
+    rh : jax.Array or float
+        Relative humidity (0 ≤ RH ≤ 1); default 1.0 (saturated).
+    t_floor : float
+        Lower bound on T² (K²); default 1e-6.
+
+    Returns
+    -------
+    dqdt : jax.Array
+        dq/dT at fixed RH (kg/kg/K).
+    """
+    from legoesm import thermo
+    q_sat = thermo.saturation_mixing_ratio(t, p)
+    t_sq = jnp.maximum(t * t, t_floor)
+    return rh * q_sat * constants.L_v / (constants.R_v * t_sq)
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

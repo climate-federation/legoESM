@@ -5192,6 +5192,48 @@ decomposition cannot close.  Pure JAX, vmap-compatible.  Uses
 ``constants.sigma_sb`` per CLAUDE.md hygiene.  No new physical
 constants introduced.
 
+## Iter 832 — clausius_clapeyron_dqdt_fv3 (CC water-vapor scaling)
+
+Added `clausius_clapeyron_dqdt_fv3(t, p, rh=1.0)` to
+`grids/cubed_sphere.py`.  Temperature derivative of specific
+humidity holding RH fixed:
+
+```
+dq/dT |_RH = RH · q_sat · L_v / (R_v · T²)
+```
+
+Where ``q_sat`` is the canonical
+``thermo.saturation_mixing_ratio(T, p)`` — never re-derives
+Tetens/Magnus/CC per CLAUDE.md hygiene.
+
+Relative scaling dq/q/dT ≈ 6.5–7.5 %/K at Earth-surface T —
+the canonical Clausius-Clapeyron rate observed in:
+  * GCM-mean water-vapor feedback (Held-Soden 2000)
+  * Trenberth-Dai 2003 precipitable-water trend
+  * Lenderink-van Meijgaard 2008 super-CC extreme-precip scaling
+  * O'Gorman 2015 CRM precip-extreme analysis
+  * Manabe-Wetherald 1967 fixed-RH paradigm
+
+Pairs with iter-806 ``lapse_rate_moist_fv3`` (which uses the
+same q_sat·L_v/(R_v·T²) inside Γ_m) — both share CC structure.
+Pairs with iter-831 ``planck_feedback_fv3`` for water-vapor-
+feedback diagnostic (canonical λ_WV from fixed-RH closure).
+
+Test: `tests/test_fv3_cc_scaling_iter832.py` (6 tests: Earth-
+surface rel rate 6.7%/K, finite-diff matches analytic to 1%,
+RH-linear, positive everywhere, T=0 floored finite, 3-D shapes
++ non-negative).
+
+### Why this iteration was meaningful
+
+Closes the **water-vapor-feedback pair** (with iter-831 Planck):
+fixed-RH GCM water-vapor amplification rate.  Required for AR5/
+AR6-style λ_WV ≈ +1.8 W/m²/K diagnostic in feedback-kernel
+decomposition.  Pure JAX, vmap-compatible.  Composes canonical
+``thermo.saturation_mixing_ratio`` per CLAUDE.md hygiene.  Uses
+``constants.L_v``, ``constants.R_v``.  No new physical constants
+introduced.
+
 
 
 
