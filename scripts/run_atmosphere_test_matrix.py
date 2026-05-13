@@ -4235,8 +4235,13 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
     # a 1e-2 mass-drift tolerance to AMIP.  Same rationale
     # as iter-117 HS / iter-118 baroclinic.  iter-120 also
     # gates on n_samples >= 2.
+    # iter-28 (test_dycores): cube AMIP days=1 with iter-1..22
+    # fixers drifts at 1.17e-12 (down from 1.76e-7 baseline).
+    # Over the 30-day quick run that scales to ~3.5e-11.  Tighten
+    # to 1e-6 — 5 orders of headroom on cube — matching the
+    # iter-23/24/26/27 HS / baroclinic / NH / SW ceilings.
     ok, notes = _apply_mass_drift_tolerance(
-        ok, notes, mass_drift, 1e-2,
+        ok, notes, mass_drift, 1e-6,
         n_samples=len(diag.get("mass", [])))
 
     level_values = np.asarray(
