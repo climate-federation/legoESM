@@ -8409,6 +8409,97 @@ def ocean_heat_content_fv3(
     return rho_use * c_p_use * jnp.sum(t_layer * thickness, axis=-1)
 
 
+def ocean_ph_change_fv3(
+    pco2_new: jax.Array,
+    pco2_ref: jax.Array = 278.0,
+    sensitivity_s: float = 0.67,
+    pco2_floor: float = 1e-6,
+) -> jax.Array:
+    """FV3_3D iter 852: ocean-acidification ΔpH primitive.
+
+    Caldeira-Wickett 2003 / Bates 2014 logarithmic-CO₂ closure
+    for surface-ocean pH change from atmospheric pCO₂ perturbation:
+
+        ΔpH = − s · log10(pCO₂_new / pCO₂_ref)
+
+    Where:
+      * pCO₂_ref     — reference atmospheric pCO₂ (ppm; default
+                       278 = 1750-CE pre-industrial).
+      * pCO₂_new     — current/scenario atmospheric pCO₂ (ppm).
+      * s            — empirical sensitivity (dimensionless);
+                       default 0.67 (calibrated to AR6 observed
+                       278→420 ppm → ΔpH ≈ −0.12).
+
+    Sign: ΔpH < 0 for pCO₂_new > pCO₂_ref (warming-era acidification).
+    pCO₂_new < pCO₂_ref → ΔpH > 0 (paleoclimate / cooling regimes).
+
+    Log-form derivation: surface ocean equilibrium [H₂CO₃*] tracks
+    atmospheric pCO₂ via Henry's law.  pH = −log₁₀[H⁺], and
+    carbonate-system buffering gives [H⁺] ∝ pCO₂^s with s≈0.67
+    at present-day chemistry (varies 0.5–0.8 across pCO₂ range
+    300–800 ppm; Revelle factor varies with DIC saturation).
+
+    Canonical AR6 acidification:
+      | epoch           | pCO₂   | ΔpH from 1750 |
+      |-----------------|--------|---------------|
+      | 1750 CE pre-ind | 278    |  0.00         |
+      | 2024 present    | 420    | −0.12         |
+      | SSP1-2.6 2100   | 450    | −0.14         |
+      | SSP3-7.0 2100   | 850    | −0.32         |
+      | LGM glacial     | 180    | +0.13         |
+      | PETM ~55 Ma     | 1000   | −0.37         |
+
+    Observed surface-ocean pH dropped from ~8.18 (1750) to ~8.06
+    (2024) — global mean −0.12.  Below pH 7.7 most aragonite-
+    dependent species (corals, pteropods) struggle to calcify.
+
+    Composes with iter-847 ``airborne_fraction_co2_fv3`` (emission
+    → ΔCO₂_atm) and iter-838 ``radiative_forcing_co2_fv3`` (CO₂
+    → ΔF):
+
+        E_cum → iter-847 AF → ΔCO₂_atm
+              ↓
+              iter-852 ΔpH               (ocean BGC impact)
+              iter-838 ΔF_CO₂ → ECS/TCR  (climate impact)
+
+    Adds first **ocean-biogeochemistry primitive** to the
+    emission→impact chain.  Pairs with iter-851 ``ocean_heat_content_fv3``
+    (ocean BGC impact + thermal impact = full ocean response to
+    anthropogenic forcing).
+
+    Used by: Bates et al. 2014 ESSD ocean-acidification overview,
+    AR6 §5.3 ocean acidification, Caldeira-Wickett 2003 / Orr et al.
+    2005 GBC OA projections, IPCC SROCC §5.2.2, OA-MIP CMIP6
+    protocol (Schwinger et al. 2020), reef-impact studies (Hoegh-
+    Guldberg 2007).
+
+    Note: linear pH vs ΔpCO₂ in small-perturbation limit:
+    ΔpH ≈ −s/(ln10·pCO₂_ref)·ΔpCO₂ ≈ −1.05×10⁻³/ppm at PI.  Use
+    log form for non-linear regimes (>50% ΔpCO₂).
+
+    ``pco2_floor`` prevents log10(0) for zero / negative input.
+
+    Parameters
+    ----------
+    pco2_new : jax.Array
+        Current atmospheric pCO₂ (ppm).
+    pco2_ref : jax.Array or float
+        Reference atmospheric pCO₂ (ppm); default 278 (1750 CE).
+    sensitivity_s : float
+        Caldeira-Wickett dimensionless sensitivity; default 0.67.
+    pco2_floor : float
+        Lower bound on pCO₂ (ppm); default 1e-6.
+
+    Returns
+    -------
+    delta_ph : jax.Array
+        pH change (dimensionless); negative for acidification.
+    """
+    p_new_safe = jnp.maximum(pco2_new, pco2_floor)
+    p_ref_safe = jnp.maximum(pco2_ref, pco2_floor)
+    return -sensitivity_s * jnp.log10(p_new_safe / p_ref_safe)
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

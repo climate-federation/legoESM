@@ -5277,3 +5277,72 @@ heat-uptake-budget verification; (2) γ in iter-837 TCR
 ``constants.rho_ocean`` and ``constants.c_sw`` per CLAUDE.md
 hygiene.  No new `constants.py` additions.
 
+## Iter 852 — ocean_ph_change_fv3 (acidification ΔpH primitive)
+
+Added `ocean_ph_change_fv3(pco2_new, pco2_ref=278.0,
+sensitivity_s=0.67)` to `grids/cubed_sphere.py`.  Caldeira-Wickett
+2003 / Bates 2014 logarithmic-CO₂ closure for ocean acidification:
+
+```
+ΔpH = − s · log10(pCO₂_new / pCO₂_ref)
+```
+
+Default s = 0.67 (calibrated to AR6 observed 278→420 ppm →
+ΔpH ≈ −0.12).  Log-form derivation: [H⁺] ∝ pCO₂^s under
+present-day carbonate-system buffering.
+
+Canonical AR6 acidification:
+  | epoch           | pCO₂   | ΔpH    |
+  |-----------------|--------|--------|
+  | 1750 pre-ind    | 278    |  0.00  |
+  | 2024 present    | 420    | −0.12  |
+  | SSP1-2.6 2100   | 450    | −0.14  |
+  | SSP3-7.0 2100   | 850    | −0.32  |
+  | LGM glacial     | 180    | +0.13  |
+  | PETM ~55 Ma     | 1000   | −0.37  |
+
+Observed surface-ocean pH dropped from 8.18 (1750) to 8.06 (2024).
+Below pH 7.7 most aragonite-dependent species (corals, pteropods)
+struggle to calcify (Hoegh-Guldberg 2007).
+
+**Adds first ocean-biogeochemistry primitive** to the
+emission→impact chain:
+
+```
+E_cum → iter-847 AF → ΔCO₂_atm
+                    ↓
+                    iter-852 ΔpH               (ocean BGC impact)
+                    iter-838 ΔF_CO₂ → ECS/TCR   (climate impact)
+```
+
+Test verifies emission→pH chain: 2400 Gt-CO₂ cumulative → 419 ppm
+→ ΔpH ≈ −0.12 (matches AR6 observed).
+
+Pairs with iter-851 ``ocean_heat_content_fv3`` (thermal impact +
+BGC impact = full ocean response to anthropogenic forcing).
+
+Used by: Bates et al. 2014 ESSD OA overview, AR6 §5.3, Caldeira-
+Wickett 2003 / Orr et al. 2005 OA projections, IPCC SROCC §5.2.2,
+OA-MIP CMIP6 (Schwinger et al. 2020), reef-impact studies.
+
+Note: linear small-perturbation limit gives ΔpH ≈ −1.05×10⁻³/ppm
+at PI baseline.  Use log form (this primitive) for non-linear
+regimes (PETM, SSP3-7.0).
+
+Test: `tests/test_fv3_ocean_ph_iter852.py` (8 tests: AR6 present-day
+−0.12 analytic, no-change zero, LGM 180 ppm → +0.13, PETM −0.37,
+SSP3-7.0 −0.32, emission→AF→pH chain consistent with AR6, pCO₂=0
+floored, 3-D shapes).
+
+### Why this iteration was meaningful
+
+**First ocean-biogeochemistry primitive** — acidification is the
+canonical non-temperature impact of CO₂ on the ocean.  Pairs with
+iter-851 OHC (thermal ocean response).  Critical for: (1) IPCC
+SROCC ocean-impact diagnostics; (2) calcifying-organism habitat
+projections (corals, pteropods, mollusks); (3) marine-protected-
+area threshold analysis; (4) paleoclimate ocean-chemistry
+reconstructions (PETM, K-Pg, glacial-interglacial).  Pure JAX,
+vmap-compatible.  s=0.67 is Caldeira-Wickett / AR6 empirical
+(default arg).  No `constants.py` additions.
+
