@@ -106,3 +106,4 @@ the pre-existing `set_initial_mass(state)` convenience (iter-20 API parity).
 | 18   | `reset_target_mass()` API on 7 lazy-snapshot models | — |
 | 19   | `set_target_mass(target)` setter on same 7 models | — |
 | 20   | `reset/set_target_mass` API on cube SW (3 classes) + cube PE + cube NH; doc compress | — |
+| 21   | `compute_mass` / `compute_dry_mass` helpers on the four cube model classes (FV3EdgeSW, FV3FBSW, CDGridPE, CDGridCE) — API parity with MPAS/latlon/spectral twins. | — |

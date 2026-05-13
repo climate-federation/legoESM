@@ -647,6 +647,13 @@ class CDGridShallowWaterModel(IntegrationMixin):
         """Explicitly set the anchored mass target (iter-20; iter-19 API)."""
         self._target_mass = target_mass
 
+    def compute_mass(self, state) -> jax.Array:
+        """Global ``∫ h dA`` (fp64).  iter-21: API parity with PE / NH twins."""
+        _acc = _conservation_accumulator()
+        return jnp.sum(
+            state.h.astype(_acc) * self.cdgrid.base.area.astype(_acc),
+        )
+
     def _sync_dgrid_boundary(self, state: CDGridShallowWaterState):
         """Owner-based sync of D-grid corner winds at shared edges.
 
@@ -877,6 +884,13 @@ class FV3FBShallowWaterModel:
         """Explicitly set the anchored mass target (iter-20; iter-19 API)."""
         self._target_mass = target_mass
 
+    def compute_mass(self, state) -> jax.Array:
+        """Global ``∫ h dA`` (fp64).  iter-21: API parity with PE / NH twins."""
+        _acc = _conservation_accumulator()
+        return jnp.sum(
+            state.h.astype(_acc) * self.cdgrid.base.area.astype(_acc),
+        )
+
     @partial(jax.jit, static_argnums=(0,))
     def step(self, state, dt):
         """Advance one time step using FV3 forward-backward."""
@@ -1008,6 +1022,13 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
     def set_target_mass(self, target_mass) -> None:
         """Explicitly set the anchored mass target (iter-20; iter-19 API)."""
         self._target_mass = target_mass
+
+    def compute_mass(self, state) -> jax.Array:
+        """Global ``∫ h dA`` (fp64).  iter-21: API parity with PE / NH twins."""
+        _acc = _conservation_accumulator()
+        return jnp.sum(
+            state.h.astype(_acc) * self.cdgrid.base.area.astype(_acc),
+        )
 
     @partial(jax.jit, static_argnums=(0,))
     def step(self, state, dt):
