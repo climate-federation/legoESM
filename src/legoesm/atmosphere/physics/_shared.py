@@ -25,6 +25,64 @@ from legoesm.core.operators_fv_latlon_3d import fv_flux_divergence_latlon_3d
 
 
 # ---------------------------------------------------------------------------
+# AD-safe arithmetic helpers
+# ---------------------------------------------------------------------------
+
+def safe_divide(
+    numerator: jnp.ndarray,
+    denominator: jnp.ndarray,
+    eps: float,
+    fill: float = 0.0,
+) -> jnp.ndarray:
+    """Return ``numerator / denominator`` with AD-safe behaviour near zero.
+
+    Equivalent in the forward path to::
+
+        jnp.where(jnp.abs(denominator) > eps, numerator / denominator, fill)
+
+    but written so the reverse-mode VJP never differentiates ``1/x`` or
+    ``-a/x**2`` at tiny ``x``.  Use this anywhere both ``numerator`` and
+    ``denominator`` can legitimately approach zero together (column
+    mass-conservation rescalings, autoconversion/aggregation rates that
+    vanish with their cloud field, geometric singularities at the poles
+    or at the grid origin, etc.).
+
+    The ``where``-before-divide ordering is required for AD safety; the
+    common idiom ``numerator / jnp.clip(denominator, eps, None)`` is
+    forward-equivalent for the unmasked branch but still differentiates
+    the divide at the floor and emits ``-a / eps**2`` cotangents that
+    overflow to ``inf``/``NaN`` — the very bug this helper exists to
+    avoid.
+
+    Forward outputs are bitwise identical to ``numerator / denominator``
+    for any sample where ``|denominator| > eps``.  The mask uses
+    ``|denominator|`` rather than ``denominator`` so that both polarities
+    of the singularity are caught (e.g. wind shears near zero, signed
+    metric quantities approaching zero from either side).
+
+    Parameters
+    ----------
+    numerator : jnp.ndarray
+        Dividend.
+    denominator : jnp.ndarray
+        Divisor.  May contain zeros or values with ``|x| ≤ eps``.
+    eps : float
+        Magnitude floor below which the divide is masked out.  Choose
+        ``eps`` one or two decades above any prior ``clip`` floor so the
+        forward stays bit-identical wherever the old code was sound.
+    fill : float, optional
+        Value substituted into the output where ``|denominator| ≤ eps``.
+        Defaults to ``0.0`` — appropriate when ``numerator`` also
+        vanishes with ``denominator`` (the common physical limit) or
+        when downstream logic clips the result back to a valid range.
+    """
+    denom_abs = jnp.abs(denominator)
+    mask = denom_abs > eps
+    safe_denom = jnp.where(mask, denominator, jnp.asarray(1.0, denominator.dtype))
+    return jnp.where(mask, numerator / safe_denom, jnp.asarray(fill, numerator.dtype))
+
+
+# ---------------------------------------------------------------------------
 # Height / thickness from hydrostatic balance
 # ---------------------------------------------------------------------------
 

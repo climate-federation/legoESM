@@ -15,6 +15,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.atmosphere.physics._shared import safe_divide
 from legoesm.atmosphere.physics.gravity_wave_drag.config import LindzenConfig
 from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput
 
@@ -96,9 +97,15 @@ def lindzen_gwd(
     tau_0 = jnp.clip(tau_0, 0.0, None)
 
     # Saturation stress per level: tau_sat = rho * U^3 * k / N
-    # Wave breaks where carried stress exceeds local saturation
+    # Wave breaks where carried stress exceeds local saturation.
+    # AD-safe divide by ``N`` (issue #249): ``N_full`` can hit the
+    # ``1e-8`` clip floor in nearly neutral layers, where the prior
+    # ``clip + divide`` form left ``-rho*U^3*k / N**2`` cotangents that
+    # blow up under reverse-mode AD.
     U_proj_abs = jnp.clip(jnp.abs(U_proj), 0.1, None)
-    tau_sat = rho * U_proj_abs ** 3 * config.k_wave / jnp.clip(N_full, 1e-6, None)
+    tau_sat = rho * U_proj_abs ** 3 * config.k_wave * safe_divide(
+        jnp.ones_like(N_full), N_full, eps=1e-6,
+    )
     tau_sat = jnp.clip(tau_sat, 1e-10, None)
 
     # Top-down scan: propagate stress from surface upward
@@ -107,8 +114,21 @@ def lindzen_gwd(
     def scan_fn(carry, k_rev):
         tau_carry = carry
         k = nlev - 1 - k_rev
-        # Smooth breaking: sigmoid activation where stress exceeds saturation
-        excess = tau_carry / jnp.clip(tau_sat[:, k], 1e-10, None) - config.critical_Fr
+        # Smooth breaking: sigmoid activation where stress exceeds saturation.
+        # AD-safe ratio (issue #249).  ``tau_sat`` is already pre-clipped
+        # to ``≥ 1e-10`` upstream so its VJP is already zero in the
+        # floor-active cells.  ``safe_divide`` is used here with ``eps``
+        # strictly *below* the pre-clip floor (``1e-12`` vs ``1e-10``) so
+        # the mask is never triggered for any physical input — the
+        # forward path stays bit-identical to the legacy
+        # ``tau_carry / tau_sat`` (including in floor-clipped cells,
+        # where the breaking transition must keep firing once
+        # ``tau_carry`` overtakes the floor).  ``safe_divide`` is kept
+        # here defensively in case the upstream pre-clip is later
+        # removed or relaxed.
+        excess = safe_divide(
+            tau_carry, tau_sat[:, k], eps=1e-12,
+        ) - config.critical_Fr
         f_break = jax.nn.sigmoid(config.Fr_sharpness * excess)
         tau_new = tau_carry * (1.0 - f_break) + tau_sat[:, k] * f_break
         tau_new = jnp.minimum(tau_new, tau_carry)

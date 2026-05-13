@@ -38,6 +38,7 @@ from legoesm.atmosphere.physics.thermodynamics import (
 )
 from legoesm.atmosphere.physics.convection.config import SBMConfig
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
+from legoesm.atmosphere.physics._shared import safe_divide
 
 
 def sbm_convection(
@@ -164,8 +165,14 @@ def sbm_convection(
     )
     col_local_cond = _col_pair[..., 0:1]
     col_net_drying = jnp.clip(-_col_pair[..., 1:2], 0.0, None)
-    dq_c_conv_dt = local_cond * (
-        col_net_drying / jnp.clip(col_local_cond, 1e-30, None)
+    # AD-safe column rescaling: ``col_local_cond`` and ``col_net_drying``
+    # vanish together when the column is barely triggered.  ``clip + divide``
+    # is forward-safe but the divide's reverse-mode VJP still emits
+    # ``-a/eps**2`` terms that overflow under ``jax.value_and_grad``
+    # (issue #249).  ``safe_divide`` masks the bad branch *before* the
+    # divide so neither cotangent path differentiates ``1/x²`` at tiny ``x``.
+    dq_c_conv_dt = local_cond * safe_divide(
+        col_net_drying, col_local_cond, eps=1e-20,
     )  # (ncol, nlev) [kg/kg/s]
 
     return ConvectionOutput(

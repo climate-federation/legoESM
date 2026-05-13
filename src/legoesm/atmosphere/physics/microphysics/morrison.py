@@ -30,6 +30,7 @@ from legoesm.atmosphere.physics.microphysics._warm_rain import (
     safe_pow,
     donor_clamp_scale,
 )
+from legoesm.atmosphere.physics._shared import safe_divide
 from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
 from legoesm.atmosphere.physics.microphysics.output import (
     HydrometeorState,
@@ -289,7 +290,31 @@ def morrison_microphysics(
     dq_i_dt = dq_i_dep + bergeron + riming_i - aggregation - melt_ice + sed_i
     dq_s_dt = aggregation + riming_s - melt_snow + sed_s
 
-    dN_c_dt = -dq_c_au * rho / jnp.clip(x_c, 1e-20)
+    # AD-safe number-concentration tendencies (issue #249).
+    #
+    # ``dN_c_dt = -dq_c_au · ρ / x_c``: ``x_c = q_c·ρ/N_c`` has no
+    # upstream clip (``effective_Nc`` clips ``N_c`` only), so ``x_c``
+    # can land anywhere in ``(0, ∞)`` including the AD-unsafe range
+    # ``(1e-20, 1e-15)`` where the legacy ``clip(x_c, 1e-20)`` floor
+    # was inactive but ``-dq_c_au·ρ / x_c²`` cotangents reached
+    # ``∼1e30`` — the dominant NaN-gradient source in the issue's
+    # repro.  ``safe_divide(eps=1e-15)`` masks the unphysical residue
+    # below the cloud-water scale (``q_c=1e-7 kg/kg`` → ``x_c ≈ 1e-15
+    # kg``); cells that legitimately contain cloud stay in the divide
+    # branch.  ``dq_c_au ∝ q_c² ∝ x_c²`` also vanishes there, so
+    # ``fill=0.0`` matches the physical limit.
+    #
+    # ``dN_i_dt`` keeps the legacy ``clip(q_i, 1e-15) + divide`` form:
+    # the floor is large enough relative to ``aggregation ∝ q_i`` that
+    # the divide's cotangent stays bounded, and ``clip``'s zero VJP in
+    # the floor-active branch already breaks the AD propagation.
+    # ``safe_divide`` here would lose the trace-positive
+    # ``q_i ∈ (0, 1e-15)`` scaling of the legacy expression
+    # (``aggregation · N_i / 1e-15 ∝ q_i``); the per-mass-rate rewrite
+    # is also non-equivalent in that regime (codex round 4).  Issue
+    # #249 listed this as a vanishing-numerator site, but the
+    # ``q_i``-floor clip already saves the AD path.
+    dN_c_dt = safe_divide(-dq_c_au * rho, x_c, eps=1e-15)
     dN_r_dt = dN_r_au + dN_r_sc + dN_r_br
     dN_i_dt = dN_i_nuc - aggregation * jnp.clip(N_i, 0.0) / jnp.clip(q_i, 1e-15)
 

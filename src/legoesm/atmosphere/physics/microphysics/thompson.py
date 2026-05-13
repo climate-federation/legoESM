@@ -30,6 +30,7 @@ from legoesm.atmosphere.physics.microphysics._warm_rain import (
     safe_pow,
     donor_clamp_scale,
 )
+from legoesm.atmosphere.physics._shared import safe_divide
 from legoesm.atmosphere.physics.microphysics.config import ThompsonConfig
 from legoesm.atmosphere.physics.microphysics.output import (
     HydrometeorState,
@@ -323,7 +324,15 @@ def thompson_microphysics(
     dq_s_dt = aggregation + riming_s - melt_snow - rime_to_graupel_from_s + sed_s
     dq_g_dt = rime_to_graupel - melt_graupel + sed_g
 
-    dN_c_dt = -dq_c_au * rho / jnp.clip(x_c, 1e-20)
+    # AD-safe number-concentration tendencies (issue #249).  ``dN_c_dt``
+    # uses ``safe_divide(eps=1e-15)`` (5 decades above the prior
+    # ``clip(x_c, 1e-20)`` floor; cells masked out fall well below the
+    # physical droplet-mass scale).  ``dN_i_dt`` keeps the legacy
+    # ``clip(q_i, 1e-15) + divide`` form: the floor is high enough that
+    # ``aggregation ∝ q_i`` divided by it stays bounded, and the
+    # clip's zero VJP at the floor branch already protects AD.  See
+    # ``morrison.py`` for the full justification.
+    dN_c_dt = safe_divide(-dq_c_au * rho, x_c, eps=1e-15)
     dN_r_dt = dN_r_au + dN_r_sc + dN_r_br
     dN_i_dt = dN_i_nuc - aggregation * jnp.clip(N_i, 0.0) / jnp.clip(q_i, 1e-15)
 
