@@ -178,3 +178,35 @@ def test_compute_nh_energy_returns_fp64():
         assert diag[k].dtype == jnp.float64, (
             f"compute_nh_energy['{k}'] dropped fp64: {diag[k].dtype}"
         )
+
+
+def test_compute_nh_dry_mass_returns_fp64():
+    """iter-7: core/conservation.compute_nh_dry_mass (cube NH dry mass)."""
+    from legoesm.core.conservation import compute_nh_dry_mass
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from tests.test_cases.dcmip2025 import dcmip25_tc1_init
+
+    grid = create_cubed_sphere(8)
+    state, hcoord, tmetric = dcmip25_tc1_init(grid, n_levels=8)
+    m = compute_nh_dry_mass(state.rho_prime.data, hcoord, tmetric, grid)
+    assert m.dtype == jnp.float64, (
+        f"compute_nh_dry_mass dropped fp64: {m.dtype}"
+    )
+    assert float(m) > 0.0
+
+
+def test_compute_nh_dry_mass_mpas_returns_fp64():
+    """iter-8: core/conservation.compute_nh_dry_mass_mpas (Voronoi twin)."""
+    from legoesm.core.conservation import compute_nh_dry_mass_mpas
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    from tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_1_mpas import (
+        dcmip25_tc1_init_mpas,
+    )
+
+    mesh = create_voronoi_mesh(4)
+    state, hcoord, tmetric = dcmip25_tc1_init_mpas(mesh, n_levels=8)
+    m = compute_nh_dry_mass_mpas(state.rho_prime.data, hcoord, tmetric, mesh)
+    assert m.dtype == jnp.float64, (
+        f"compute_nh_dry_mass_mpas dropped fp64: {m.dtype}"
+    )
+    assert float(m) > 0.0
