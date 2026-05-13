@@ -1195,6 +1195,45 @@ Key iterations:
   (``_interp_center_to_corner``, ``center_to_dgrid_vector``)
   used in the NH (cell-center u, v) → D-grid corner lift.
   1/1 in 11 s.  Wired into iter-383 sweep (now 87).
+- **Iters 821-829 (compacted iter 830)**: layer-mean primitive refactor
+  + ML/Sc/cloud-radiation chain (EIS → f_low → τ → α → CRE_SW, CRE_LW)
+  + planetary radiation primitives (T_eff, T_eq).
+
+  | Iter | What                                            | Note                                                                |
+  |------|-------------------------------------------------|---------------------------------------------------------------------|
+  | 821  | ``mean_layer_field_fv3``                        | generic depth-weighted layer-mean primitive; iter-819/820 refactor |
+  | 822  | ``mixed_layer_height_fv3``                      | Stull 1988 θ-jump; complements iter-775 Ri-based PBL height        |
+  | 823  | ``eis_fv3``                                     | Wood-Bretherton 2006 EIS = LTS − Γ_m·(z_700−LCL); Sc predictor      |
+  | 824  | ``sc_fraction_eis_fv3``                         | WB2006 empirical f_low = clip(0.06·EIS + 0.41, 0, 1)                |
+  | 825  | ``cloud_optical_thickness_fv3``                 | Slingo 1989 τ = 1.5·LWP/(ρ_w·r_eff)                                 |
+  | 826  | ``cloud_albedo_two_stream_fv3``                 | Coakley-Chylek 1975 α = τ(1−g)/(2μ_0 + τ(1−g))                      |
+  | 827  | ``shortwave_cloud_forcing_fv3``                 | CRE_SW = −S_in·(α_cloudy − α_clear); TOA SW cloud forcing           |
+  | 828  | ``longwave_cloud_forcing_fv3``                  | CRE_LW = ε·σ·(T_sfc⁴ − T_cloud⁴); pairs with iter-827               |
+  | 829  | ``effective_radiating_temperature_fv3``         | T_eff = (OLR/(ε·σ))^(1/4); Earth ≈ 255 K                            |
+  | 830  | ``equilibrium_temperature_fv3`` + this compaction | T_eq = ((1−α)·S_in/(ε·σ))^(1/4); Earth ≈ 255 K (round-trips iter-829) |
+
+  Tests: ``tests/test_fv3_mean_layer_field_iter821.py``,
+  ``tests/test_fv3_mixed_layer_height_iter822.py``,
+  ``tests/test_fv3_eis_iter823.py``,
+  ``tests/test_fv3_sc_fraction_eis_iter824.py``,
+  ``tests/test_fv3_cloud_optical_thickness_iter825.py``,
+  ``tests/test_fv3_cloud_albedo_two_stream_iter826.py``,
+  ``tests/test_fv3_shortwave_cloud_forcing_iter827.py``,
+  ``tests/test_fv3_longwave_cloud_forcing_iter828.py``,
+  ``tests/test_fv3_effective_radiating_temp_iter829.py``,
+  ``tests/test_fv3_equilibrium_temperature_iter830.py``.  All pass.
+
+  Highlights: (1) iter-821 generic layer-mean primitive eliminates
+  near-duplicate iter-819 (vector) and iter-820 (scalar) inlined
+  midpoint-trapezoidal logic — both now delegate.  (2) iters 823-828
+  compose the full Sc-cloud-radiative-feedback pipeline (5-helper
+  chain from thermodynamic profile → SW radiative forcing at TOA),
+  critical for CMIP cloud-feedback diagnostic decomposition.  (3)
+  iters 829-830 close the planetary-radiation-budget pair: T_eff
+  (inverse Planck) ↔ T_eq (energy balance) round-trip exactly
+  via OLR = (1−α)·S_in.  No new physical constants introduced;
+  ``constants.sigma_sb`` used throughout per CLAUDE.md hygiene.
+
 - **Iters 811-819 (compacted iter 820)**: classic severe-storm index
   triplet (K, TT, SWEAT) + supercell discrimination (BRN, SCP, STP)
   + SPC effective-layer suite (EIL, EBWD, mean-wind) + iter-820
@@ -5104,381 +5143,6 @@ is verifiable with unit tests in seconds rather than wall-time
 sweeps.  Users running the NH compressible-Euler 3D path now have
 the same cube-imprint defense as users running the PE 3D path.
 
-## Iter 821 — mean_layer_field_fv3 + iter-819/820 refactor
-
-Extracted `mean_layer_field_fv3(field, z, z_bot, z_top,
-weight_floor=1e-12)` to `grids/cubed_sphere.py` from the
-duplicated mean-layer computation pattern in iter-819
-(``mean_wind_layer_fv3``) and iter-820
-(``mean_layer_temperature_fv3``):
-
-```
-⟨X⟩ = Σ_k X_mid(k) · Δz(k) · mask(z_mid(k)) / Σ_k Δz(k) · mask(z_mid)
-```
-
-Mask = 1 where ``z_mid`` ∈ [z_bot, z_top], else 0.
-
-Refactors:
-  * iter-819 ``mean_wind_layer_fv3`` → two delegated calls (u, v).
-  * iter-820 ``mean_layer_temperature_fv3`` → single delegated call.
-
-Both iter-819 and iter-820 5/5 + 5/5 tests pass post-refactor —
-output bit-identical (same operation expressed via shared helper).
-
-Generic primitive works on any scalar field: u, v, T, q, θ, θ_e,
-θ_v, RH, ρ, p, etc.  Pure JAX, vmap-compatible.
-
-Test: `tests/test_fv3_mean_layer_field_iter821.py` (6 tests:
-constant → const, linear → midpoint analytic, humidity-like
-exponential decay → PBL > mid-trop, out-of-range → 0 via floor,
-iter-819 wind preserved, iter-820 T preserved).
-
-### Why this iteration was meaningful
-
-Matches the iter-720/727/728/766/771/776/806 helper-extraction
-lineage.  Eliminates duplicated mean-layer computation pattern
-between iter-819 and iter-820 — both now delegate to the generic
-`mean_layer_field_fv3`.  Future depth-mean diagnostics (mean q,
-mean θ_e, mean RH over any [z_bot, z_top] layer) compose
-directly without re-deriving the midpoint-mask integral.  Pure
-JAX, vmap-compatible.  No new physical constants introduced.
-
-## Iter 822 — mixed_layer_height_fv3 (θ-jump detection)
-
-Added `mixed_layer_height_fv3(theta, z, theta_jump_thresh=0.5)`
-to `grids/cubed_sphere.py`.  Well-mixed-layer top from θ-jump:
-
-```
-h_ML = z[k*]   where k* = argmin{ k : θ(k) − θ(surface) > τ }
-```
-
-Default τ = 0.5 K (Stull 1988 daytime convective BL convention).
-
-Distinct from iter-775 ``pbl_height_fv3`` (Ri-based) — this
-helper uses pure θ-jump detection, complementary in:
-  * Convective BL daytime sounding (θ uniform → jump well-defined,
-    Ri less reliable in deep mixing).
-  * Free-convective PBL where shear is weak.
-  * Climate-model output without explicit u, v columns.
-
-Fallback: no level exceeds threshold (deeply mixed column) →
-return z at top of column.
-
-JAX-compatible threshold detection via ``jnp.argmax`` + ``jnp.any``
-+ ``jnp.take_along_axis`` — matches the iter-775/796/797 pattern.
-
-Used by: WRF/HRRR boundary-layer height diagnostic, ARL HYSPLIT
-trajectory model, CAM/GEOS5 dry mixed-layer height output,
-surface-based parcel-source layer estimation for CAPE/CIN
-integrators.
-
-Test: `tests/test_fv3_mixed_layer_height_iter822.py` (5 tests:
-well-mixed then jump → catches at jump, no-jump → top, custom
-threshold (0.1 vs 0.5) picks earlier level, large surface
-inversion → bottom layer, 3-D batched).
-
-### Why this iteration was meaningful
-
-Closes the **PBL/ML-height diagnostic pair**: Ri-based (iter-775)
-+ θ-jump-based (iter-822).  The two methods complement: Ri works
-in shear-driven PBLs (nighttime, sloping fronts), θ-jump works
-in convective PBLs (daytime free convection, cumulus).  Pure
-JAX, vmap-compatible.  No new physical constants introduced.
-
-## Iter 823 — eis_fv3 (Wood-Bretherton 2006 Estimated Inversion Strength)
-
-Added `eis_fv3(theta_700, theta_sfc, lcl_height, gamma_m_850,
-z_700=3000.0)` to `grids/cubed_sphere.py`.  Wood-Bretherton 2006
-EIS:
-
-```
-LTS = θ_700 − θ_surf                        (Klein-Hartmann 1993)
-EIS = LTS − Γ_m_850 · (z_700 − LCL)         (Wood-Bretherton 2006)
-```
-
-Removes the moist-adiabatic-implicit component of LTS — a deeper
-free troposphere with strong CC lapse-rate cooling inflates raw
-LTS without truly increasing the *additional* stability above
-what a moist adiabat from LCL would predict.  EIS is a better
-predictor of stratocumulus cloud fraction (Wood-Bretherton
-showed r ≈ 0.7 for monthly-mean Sc fraction vs EIS in CMIP).
-
-Stratocumulus regimes:
-  * EIS < 4 K       — trade-Cu / shallow Cu (open ocean)
-  * 4 ≤ EIS < 8 K   — transitional / Cu-under-Sc
-  * EIS ≥ 8 K       — well-formed Sc deck (subtropical Eastern
-                      boundary currents — California Current,
-                      Peru/Chile, Namibia, Australia)
-
-Composes:
-  * iter-765 ``lcl_height_fv3``        — provides LCL height
-  * iter-806 ``lapse_rate_moist_fv3``  — provides Γ_m at 850 mb
-  * Klein-Hartmann LTS = θ_700 − θ_sfc (inline subtraction)
-
-Test: `tests/test_fv3_eis_iter823.py` (6 tests: subtropical Sc
-sample EIS=7.4 (analytic), LCL=z_700 → EIS=LTS, monotone in LTS
-(↑LTS → ↑EIS), monotone in LCL (↑LCL → ↑EIS), full iter-806 Γ_m
-chain, 3-D shapes + finite).
-
-### Why this iteration was meaningful
-
-EIS is the canonical low-cloud-regime predictor used in CMIP
-analysis, satellite-cloud-fraction climatology, and stratocumulus
-parameterization tuning.  Composes 3 prior helpers (iter-765
-LCL, iter-806 Γ_m, Klein-Hartmann LTS) to give the most-used
-single-number Sc-regime metric.  Pure JAX, vmap-compatible.
-No new physical constants introduced.
-
-## Iter 824 — sc_fraction_eis_fv3 (Wood-Bretherton 2006 fit)
-
-Added `sc_fraction_eis_fv3(eis, slope=0.06, intercept=0.41)` to
-`grids/cubed_sphere.py`.  Wood-Bretherton (2006) empirical fit
-to ISCCP low-cloud-fraction climatology:
-
-```
-f_low = clip(slope · EIS + intercept, 0, 1)
-```
-
-Default coefficients (0.06, 0.41) from regression against
-30°S–30°N JJA ISCCP low-cloud-fraction.  Accuracy ±0.15 globally;
-specific Sc decks (California, Peru) may have offsets ±0.1.
-
-Interpretation:
-  * EIS < −7 K  → f_low → 0 (deep convective / clear)
-  * EIS = 0 K   → f_low ≈ 0.41 (transitional)
-  * EIS = 8 K   → f_low ≈ 0.89 (Sc deck)
-  * EIS > 10 K  → f_low = 1 (saturated)
-
-Composes iter-823 ``eis_fv3``.
-
-Used by: low-cloud climate-feedback diagnostics (Klein-Hartmann-
-Wood 2017 Annu Rev), CMIP cloud-fraction evaluation, Sc-deck
-shortwave-feedback decomposition, parameterization tuning
-against ISCCP / MODIS.
-
-Test: `tests/test_fv3_sc_fraction_eis_iter824.py` (6 tests:
-EIS=0 → 0.41, EIS=10 → 1 (clipped), EIS=−10 → 0 (clipped),
-monotone, custom slope/intercept, 3-D shapes + in [0, 1]).
-
-### Why this iteration was meaningful
-
-Closes the **Sc-cloud-fraction empirical chain**: iter-823 EIS
-→ iter-824 f_low.  Allows direct CMIP-class Sc fraction estimates
-from any model thermodynamic profile via the WB2006 fit.  Pure
-JAX, vmap-compatible.  No new physical constants introduced
-(0.06, 0.41 are WB2006-paper fit coefficients).
-
-## Iter 825 — cloud_optical_thickness_fv3 (Slingo 1989)
-
-Added `cloud_optical_thickness_fv3(lwp, r_eff, rho_water=None,
-r_eff_floor=1e-9)` to `grids/cubed_sphere.py`.  Slingo (1989)
-bulk-Mie approximation:
-
-```
-τ = 1.5 · LWP / (ρ_water · r_eff)
-```
-
-Used by Slingo 1989 shortwave-radiation parameterization (Mie +
-delta-Eddington), Sc-deck MODIS COT retrievals, low-cloud
-feedback decomposition.
-
-Typical values:
-  * Sc deck (LWP=100 g/m², r_eff=10 μm): τ = 15
-  * Thin cirrus (LWP=5 g/m², r_eff=30 μm): τ ≈ 0.25
-
-Defaults ``rho_water = constants.rho_water = 1000 kg/m³`` per
-constant-hygiene rule.  ``r_eff_floor`` prevents div-by-0 in
-empty cloud cells.
-
-Test: `tests/test_fv3_cloud_optical_thickness_iter825.py` (7
-tests: Sc deck τ=15 (analytic), thin cirrus τ≈0.25, LWP=0 → τ=0,
-monotone in LWP (↑LWP → ↑τ), monotone in r_eff (↑r_eff → ↓τ),
-r_eff=0 floored finite, 3-D shapes + non-negative).
-
-### Why this iteration was meaningful
-
-Cloud-optical-thickness primitive used in every cloud-radiation
-parameterization (CAM5-Slingo, IFS-McRad, MOM6-Stephens).
-Closes the Sc-cloud-radiative-effect chain: iter-823 EIS →
-iter-824 f_low → iter-825 τ via Slingo Mie.  Pure JAX, vmap-
-compatible.  Uses `constants.rho_water` per CLAUDE.md hygiene.
-No new physical constants introduced.
-
-## Iter 826 — cloud_albedo_two_stream_fv3 (Coakley-Chylek 1975)
-
-Added `cloud_albedo_two_stream_fv3(tau, mu_0, g=0.85,
-mu_floor=1e-6)` to `grids/cubed_sphere.py`.  Closed-form
-two-stream cloud-top SW albedo:
-
-```
-α = τ · (1 − g) / (2·μ_0 + τ · (1 − g))
-```
-
-Limits:
-  * τ → 0  → α → 0 (transparent)
-  * τ → ∞  → α → 1 (totally reflective)
-  * μ_0 → 0 → α → 1 (grazing saturates reflection)
-
-Default g = 0.85 (water clouds); ice clouds use g ≈ 0.7.
-
-Used by Sc-deck SW-feedback decomposition (Stephens 2005),
-Slingo 1989 / McRad cloud-radiation parameterization, Δα/Δτ
-sensitivity analysis, MODIS broadband albedo comparison.
-
-Composes iter-825 ``cloud_optical_thickness_fv3``.
-
-Test: `tests/test_fv3_cloud_albedo_two_stream_iter826.py` (7
-tests: overhead-sun analytic (τ=15, μ=1, g=0.85 → α=0.529),
-τ=0 → α=0, τ→∞ → α→1, grazing μ_0 boosts α, monotone in τ, ice
-g=0.7 > water g=0.85 at same τ, 3-D shapes + finite in [0,1]).
-
-### Why this iteration was meaningful
-
-Closes the **Sc cloud-radiative-effect chain** end-to-end:
-  * iter-823 EIS                     — Sc-regime predictor
-  * iter-824 f_low(EIS)              — empirical cloud fraction
-  * iter-825 τ(LWP, r_eff)           — Slingo Mie optical thickness
-  * iter-826 α(τ, μ_0, g)            — two-stream cloud albedo
-
-The full pipeline from thermodynamic profile → low-cloud
-fraction → cloud optical properties → SW albedo is now reachable
-as a pure-JAX composition.  Pure JAX, vmap-compatible.  No new
-physical constants introduced (0.85, 0.70 are Mie-fit values,
-not generic physical constants).
-
-## Iter 827 — shortwave_cloud_forcing_fv3 (TOA CRE_SW)
-
-Added `shortwave_cloud_forcing_fv3(alpha_cloudy, alpha_clear,
-s_incident)` to `grids/cubed_sphere.py`.  TOA shortwave cloud
-radiative effect:
-
-```
-CRE_SW = − S_in · (α_cloudy − α_clear)
-```
-
-Sign convention: negative ⇒ TOA cooling (typical clouds increase
-albedo, reduce net absorbed SW); positive ⇒ TOA warming (rare,
-dark cloud over bright surface like snow / desert).
-
-Typical magnitudes:
-  * Sc deck (α_c=0.5, α_clr=0.1, S_in=200): CRE ≈ −80 W/m²
-  * Cirrus (α_c=0.2, α_clr=0.1): CRE ≈ −20 W/m²
-  * Polar summer Sc: CRE ≈ −150 W/m²
-
-S_in=0 at night ⇒ CRE_SW=0 automatically.
-
-Used by: ISCCP/CERES TOA CRE comparison, cloud-feedback
-decomposition (Soden-Held 2006), CMIP CRE bias diagnostics,
-Sc-deck SW radiative-budget closure.
-
-Composes iter-826 ``cloud_albedo_two_stream_fv3``.
-
-Test: `tests/test_fv3_shortwave_cloud_forcing_iter827.py` (6
-tests: Sc deck CRE=−80 (analytic), α_cloudy=α_clear → 0,
-night S=0 → 0, dark-cloud-over-bright-surface → CRE > 0
-(warming), monotone in α_cloudy (↑ → ↓CRE), 3-D shapes +
-finite).
-
-### Why this iteration was meaningful
-
-Completes the **end-to-end Sc-radiative-feedback pipeline**:
-  * iter-823 EIS                 — Sc-regime predictor
-  * iter-824 f_low               — empirical fraction
-  * iter-825 τ(LWP, r_eff)       — Slingo Mie optical thickness
-  * iter-826 α(τ, μ_0, g)        — two-stream cloud albedo
-  * iter-827 CRE_SW(α, S_in)     — TOA SW cloud forcing
-
-The full chain from thermodynamic profile → SW radiative
-forcing at TOA is now reachable as a pure-JAX composition.
-Critical for: (1) CMIP cloud-feedback diagnostic decomposition;
-(2) Sc-feedback uncertainty studies (largest source of inter-
-model spread in climate sensitivity); (3) ISCCP / CERES TOA
-flux comparison; (4) emergent-constraint analyses (Klein-Hall
-2015, Sherwood et al. 2014).  Pure JAX, vmap-compatible.  No
-new physical constants introduced.
-
-## Iter 828 — longwave_cloud_forcing_fv3 (TOA CRE_LW)
-
-Added `longwave_cloud_forcing_fv3(t_cloud_top, t_sfc,
-emissivity=1.0)` to `grids/cubed_sphere.py`.  TOA longwave
-cloud-radiative effect:
-
-```
-CRE_LW = ε · σ · (T_sfc⁴ − T_cloud_top⁴)
-```
-
-Sign: positive ⇒ TOA warming (clouds trap IR from warmer
-surface).
-
-Derivation: clear-sky outgoing LW ≈ σ·T_sfc⁴; cloudy outgoing
-LW = ε·σ·T_cloud_top⁴ + (1−ε)·σ·T_sfc⁴ (cloud emits + transmits).
-Difference = ε·σ·(T_sfc⁴ − T_cloud_top⁴).
-
-Typical magnitudes:
-  * Tropical anvil (T_cloud=200, T_sfc=300, ε=1): ≈ 367 W/m²
-  * Mid-lat Sc (T_cloud=280, T_sfc=290, ε=1): ≈ 50 W/m²
-  * Thin cirrus (T_cloud=220, T_sfc=300, ε=0.5): ≈ 170 W/m²
-
-Uses ``constants.sigma_sb`` per CLAUDE.md hygiene.
-
-Pairs with iter-827 ``shortwave_cloud_forcing_fv3``: net TOA
-cloud forcing CRE_net = CRE_SW + CRE_LW.  Globally CRE_net ≈
-−20 W/m² (SW cooling dominates).  Tropical anvils: CRE_net > 0
-(LW > SW).  Sc decks: CRE_net < 0 (SW > LW).
-
-Test: `tests/test_fv3_longwave_cloud_forcing_iter828.py` (7
-tests: tropical anvil analytic 367 W/m², T_cloud=T_sfc → 0,
-ε=0.5 halves CRE, ε=0 → 0, monotone in ΔT, paired with iter-827
-gives tropical anvil net warming, 3-D shapes + finite + non-
-negative for T_cloud<T_sfc).
-
-### Why this iteration was meaningful
-
-Closes the **TOA cloud-forcing diagnostic pair** (CRE_SW,
-CRE_LW): iter-827 + iter-828.  Sum gives net cloud forcing —
-the canonical metric for cloud-radiative impact on TOA energy
-balance (CERES product target).  Pure JAX, vmap-compatible.
-Uses ``constants.sigma_sb``.  No new physical constants
-introduced.
-
-## Iter 829 — effective_radiating_temperature_fv3
-
-Added `effective_radiating_temperature_fv3(olr, emissivity=1.0,
-olr_floor=1e-6)` to `grids/cubed_sphere.py`.  Inverse of broadband
-Stefan-Boltzmann:
-
-```
-T_eff = (OLR / (ε · σ))^(1/4)
-```
-
-Typical values:
-  * Earth global mean (OLR=240 W/m², ε=1): T_eff ≈ 255 K
-  * Mars (OLR=110): T_eff ≈ 210 K
-  * Venus (OLR=156): T_eff ≈ 227 K (vs T_surf=735 K — runaway
-    greenhouse)
-
-Used by radiative-budget diagnostics (T_eff vs T_surf = greenhouse
-effect ≈ 33 K on Earth), planetary climate comparison, CERES /
-ERBE broadband-OLR inversion.
-
-Uses ``constants.sigma_sb`` per CLAUDE.md hygiene.
-
-Pairs with iter-828: caller can diagnose effective cloud-top T
-from ΔOLR.
-
-Test: `tests/test_fv3_effective_radiating_temp_iter829.py` (6
-tests: Earth mean → 255 K, round trip σT⁴ → T exact, ε<1 boosts
-T_eff at same OLR, OLR=0 floored finite, monotone in OLR, 3-D
-shapes + positive).
-
-### Why this iteration was meaningful
-
-Effective-radiating-temperature is the canonical planetary-
-radiation-budget primitive — used in every climate textbook to
-derive Earth's T_eff=255 K and demonstrate the 33 K greenhouse
-effect.  Pairs naturally with iter-828 CRE_LW for cloud-top
-effective-T retrievals.  Pure JAX, vmap-compatible.  No new
-physical constants introduced.
 
 
 

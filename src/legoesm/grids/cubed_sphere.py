@@ -6728,6 +6728,68 @@ def effective_radiating_temperature_fv3(
     ) ** 0.25
 
 
+def equilibrium_temperature_fv3(
+    s_incident: jax.Array,
+    albedo: jax.Array,
+    emissivity: jax.Array = 1.0,
+    s_floor: float = 1e-6,
+) -> jax.Array:
+    """FV3_3D iter 830: planetary equilibrium temperature.
+
+    Steady-state TOA energy balance:
+
+        absorbed SW    =    emitted LW
+        (1 − α)·S_in   =    ε · σ · T_eq⁴
+
+        T_eq = ((1 − α) · S_in / (ε · σ))^(1/4)
+
+    Where:
+      * S_in    — mean TOA incident SW (W/m²; for Earth global-
+                  mean = S_solar / 4 ≈ 340.25).
+      * α       — Bond albedo (planetary).
+      * ε       — broadband emissivity (default 1.0).
+      * σ       — ``constants.sigma_sb``.
+
+    Typical values (Earth global-mean ε=1):
+      * α = 0.30: T_eq ≈ 255 K (canonical "Earth without
+        greenhouse" temperature).
+      * α = 0.36 (Bond albedo measured by CERES): T_eq ≈ 250 K.
+      * Snowball Earth (α=0.6): T_eq ≈ 222 K.
+
+    Climate-sensitivity sketch: ΔT_eq / Δα ≈ −T_eq / (4·(1−α))
+    ≈ −1 K per 0.01 reduction in albedo at α=0.3.
+
+    Used by: zero-D climate models, planetary-climate textbook
+    derivations, CMIP equilibrium-climate-sensitivity ECS
+    decomposition (T_eq baseline), planetary-comparison studies
+    (Mars/Venus/exoplanet T_eq tables).
+
+    Inverse of iter-829 ``effective_radiating_temperature_fv3``
+    when ε·σ·T⁴ = (1−α)·S_in (planetary equilibrium): the two
+    helpers complement.
+
+    ``s_floor`` prevents NaN from non-positive absorbed flux.
+
+    Parameters
+    ----------
+    s_incident : jax.Array
+        Mean TOA incident shortwave (W/m²).
+    albedo : jax.Array
+        Bond albedo (0 ≤ α ≤ 1).
+    emissivity : jax.Array or float
+        Broadband emissivity (0 ≤ ε ≤ 1); default 1.0.
+    s_floor : float
+        Lower bound on absorbed SW (W/m²); default 1e-6.
+
+    Returns
+    -------
+    t_eq : jax.Array
+        Equilibrium temperature (K).
+    """
+    s_abs = jnp.maximum((1.0 - albedo) * s_incident, s_floor)
+    return (s_abs / (emissivity * constants.sigma_sb)) ** 0.25
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

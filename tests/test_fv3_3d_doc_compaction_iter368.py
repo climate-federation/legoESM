@@ -38,11 +38,11 @@ def test_iter365_compaction_present(doc_text):
     )
 
 
-def test_doc_size_below_5490_lines(doc_text):
+def test_doc_size_below_5200_lines(doc_text):
     n_lines = len(doc_text.splitlines())
-    assert n_lines < 5490, (
-        f"FV3_3D.md has {n_lines} lines (target < 5490).  "
-        f"Next compaction at iter 830."
+    assert n_lines < 5200, (
+        f"FV3_3D.md has {n_lines} lines (target < 5200).  "
+        f"Next compaction at iter 840."
     )
 
 
@@ -471,6 +471,38 @@ def test_iter820_compaction_covers_topics(doc_text):
     for marker in required:
         assert marker in section, (
             f"iter-820 compacted block missing topic ``{marker}``."
+        )
+
+
+def test_iter830_compaction_present(doc_text):
+    """iter-830 compacted iter 821-829 into single block."""
+    assert "**Iters 821-829 (compacted iter 830)**" in doc_text, (
+        "iter-830 compaction block missing — doc re-expanded."
+    )
+
+
+def test_iter830_compaction_covers_topics(doc_text):
+    section_start = doc_text.find(
+        "**Iters 821-829 (compacted iter 830)**"
+    )
+    section_end = doc_text.find(
+        "**Iters 811-819", section_start,
+    )
+    assert section_start >= 0 and section_end > section_start
+    section = doc_text[section_start:section_end]
+    required = [
+        "821", "822", "823", "824", "825",
+        "826", "827", "828", "829", "830",
+        "mean_layer_field", "mixed_layer_height",
+        "eis", "sc_fraction_eis", "cloud_optical_thickness",
+        "cloud_albedo_two_stream", "shortwave_cloud_forcing",
+        "longwave_cloud_forcing",
+        "effective_radiating_temperature",
+        "equilibrium_temperature",
+    ]
+    for marker in required:
+        assert marker in section, (
+            f"iter-830 compacted block missing topic ``{marker}``."
         )
 
 
