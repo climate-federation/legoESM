@@ -671,3 +671,46 @@ def test_anchored_step_supports_jax_grad_mpas_sw():
         assert grad.dtype == jnp.float64
     finally:
         set_policy(saved)
+
+
+def test_anchored_step_supports_jax_grad_mpas_pe():
+    """iter-57: ``jax.grad`` through anchored ``step()`` on MPAS PE.
+
+    Seventh AD structural path — MPAS hydrostatic PE with vertical
+    coupling.  Uses Voronoi mesh + TRiSK (like iter-56 MPAS SW) but
+    adds 3-D thermodynamics and the iter-11 anchored
+    ``_fix_mass_mpas_hydro`` (uniform p_s correction with fp64 budget).
+    """
+    from legoesm.core.precision import PrecisionPolicy, set_policy, get_policy
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+        MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig,
+    )
+    from legoesm.atmosphere.held_suarez import held_suarez_init_mpas
+
+    saved = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp64())
+        mesh = create_voronoi_mesh(4)
+        sigma = create_sigma_coordinate(8)
+        cfg = MPASPrimitiveEquationConfig(
+            fix_mass=True, anchor_mass_to_initial=True,
+        )
+        model = MPASPrimitiveEquationModel(mesh, sigma, cfg)
+        state0 = held_suarez_init_mpas(mesh, sigma)
+
+        def loss(p_s_data):
+            state = state0._replace(
+                p_s=state0.p_s.replace(data=p_s_data))
+            s = model.step(state, 200.0)
+            return jnp.sum(s.T.data ** 2)
+
+        model.reset_target_mass()
+        grad = jax.grad(loss)(state0.p_s.data)
+
+        assert jnp.all(jnp.isfinite(grad))
+        assert float(jnp.max(jnp.abs(grad))) > 0.0
+        assert grad.dtype == jnp.float64
+    finally:
+        set_policy(saved)
