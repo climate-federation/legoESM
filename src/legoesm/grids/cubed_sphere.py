@@ -9823,6 +9823,105 @@ def par_from_global_radiation_fv3(
     return par_fraction * r_s
 
 
+def light_response_curve_fv3(
+    ppfd: jax.Array,
+    a_max: jax.Array = 25.0,
+    alpha: float = 0.06,
+    theta: float = 0.7,
+    floor: float = 1e-12,
+) -> jax.Array:
+    """FV3_3D iter 868: non-rectangular hyperbola photosynthesis primitive.
+
+    Collatz et al. 1991 GCB / Sellers et al. 1996 SiB2 non-
+    rectangular hyperbola light-response curve for net leaf
+    photosynthesis A_n vs photosynthetic photon flux density:
+
+        θ · A² − (α·I + A_max) · A + α·I·A_max = 0
+
+    Solve quadratic with negative-root branch (physically meaningful):
+
+        A = (a − sqrt(a² − b)) / (2·θ)
+        a = α·I + A_max
+        b = 4·θ·α·I·A_max
+
+    Where:
+      * I       — PPFD (μmol photons/m²/s); from iter-867 ×4.57.
+      * α       — quantum yield (mol CO₂/mol photons); default 0.06
+                  (Collatz 1991; range 0.05-0.08 for C3 plants).
+      * A_max   — light-saturated photosynthesis rate
+                  (μmol CO₂/m²/s); default 25 (mean C3 canopy
+                  saturation).
+      * θ       — curvature parameter; default 0.7 (Marshall-Biscoe
+                  1980 leaf-level; ranges 0.5-0.95).
+
+    Output: net photosynthesis A_n (μmol CO₂/m²/s).
+
+    Limits:
+      * I → 0:       A → α·I  (light-limited, linear in PPFD)
+      * I → ∞:       A → A_max (carboxylation-limited, plateau)
+      * θ → 0:       collapses to min(α·I, A_max) Liebig-style
+      * θ → 1:       rectangular hyperbola (Thornley 1976)
+
+    Canonical magnitudes (A_max=25, α=0.06, θ=0.7):
+      | PPFD (μmol/m²/s)  | A_n (μmol CO₂/m²/s) |
+      |-------------------|----------------------|
+      | 0                 | 0                    |
+      | 200 (overcast)    | 9.0                  |
+      | 500 (forest)      | 15.6                 |
+      | 1000 (cloudy)     | 20.0                 |
+      | 2000 (clear noon) | 23.1                 |
+      | ∞ (saturation)    | 25 (A_max)           |
+
+    **Closes the radiation → photosynthesis chain to A_n leaf rate**:
+
+        lat, DOY, hr → iter-865 cos(θ)
+                     → iter-866 S_TOA
+                     · τ_atm = R_s
+                     → iter-867 PAR
+                     · 4.57 = PPFD
+                     → iter-868 A_n  (μmol CO₂/m²/s leaf rate)
+
+    Used by: Collatz et al. 1991 GCB C3 photosynthesis, Sellers
+    et al. 1996 SiB2 land-surface module, Farquhar-von Caemmerer-
+    Berry 1980 (FvCB) framework (this is the light-limited
+    component; full FvCB has Rubisco-limited A_v + electron-
+    transport-limited A_j branches), de Pury-Farquhar 1997 two-
+    leaf canopy upscaling, Bonan 2008 land-model textbook,
+    CLM5 / MOSES / JULES / NoahMP photosynthesis modules.
+
+    Note: this primitive returns *light-limited* A_n only — full
+    FvCB requires combining with Rubisco-limited A_v (V_cmax-
+    dependent) and triose-phosphate-limited A_p branches via
+    quadratic colimitation.  Caller layers those if needed.
+
+    ``floor`` prevents negative-discriminant numerical-noise
+    cases when (a² − b) becomes slightly negative.
+
+    Parameters
+    ----------
+    ppfd : jax.Array
+        Photosynthetic photon flux density (μmol photons/m²/s).
+    a_max : jax.Array or float
+        Light-saturated photosynthesis rate (μmol CO₂/m²/s);
+        default 25 (mean C3 canopy).
+    alpha : float
+        Quantum yield (mol CO₂/mol photons); default 0.06.
+    theta : float
+        Hyperbola curvature parameter; default 0.7.
+    floor : float
+        Lower bound on discriminant; default 1e-12.
+
+    Returns
+    -------
+    a_n : jax.Array
+        Net leaf photosynthesis (μmol CO₂/m²/s); ≥ 0.
+    """
+    a_var = alpha * ppfd + a_max
+    b_var = 4.0 * theta * alpha * ppfd * a_max
+    discr = jnp.maximum(a_var * a_var - b_var, floor)
+    return (a_var - jnp.sqrt(discr)) / (2.0 * theta)
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

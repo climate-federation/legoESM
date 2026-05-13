@@ -455,6 +455,7 @@ _GUARD_MODULES = (
     "test_fv3_solar_zenith_iter865",                 # iter-865 add
     "test_fv3_toa_radiation_iter866",                # iter-866 add
     "test_fv3_par_iter867",                          # iter-867 add
+    "test_fv3_light_response_iter868",               # iter-868 add
 )
 
 

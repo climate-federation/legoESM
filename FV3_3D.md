@@ -5697,3 +5697,72 @@ needs PAR); (4) two-stream canopy radiative-transfer.  Pure JAX,
 vmap-compatible.  f_PAR=0.45 is Tsubo-Walker/Akitsu empirical
 (default arg).  No `constants.py` additions.
 
+## Iter 868 — light_response_curve_fv3 (non-rect hyperbola photosynthesis)
+
+Added `light_response_curve_fv3(ppfd, a_max=25.0, alpha=0.06,
+theta=0.7)` to `grids/cubed_sphere.py`.  Collatz 1991 GCB / Sellers
+1996 SiB2 non-rectangular hyperbola light-response curve:
+
+```
+θ · A² − (α·I + A_max) · A + α·I·A_max = 0
+A_n = (a − sqrt(a² − b)) / (2·θ)
+a = α·I + A_max
+b = 4·θ·α·I·A_max
+```
+
+Where I=PPFD (μmol photons/m²/s), α=0.06 quantum yield (Collatz
+1991 C3 default), A_max=25 μmol CO₂/m²/s light-saturated rate,
+θ=0.7 hyperbola curvature (Marshall-Biscoe 1980).
+
+Limits:
+  * I → 0:       A_n → α·I (light-limited linear)
+  * I → ∞:       A_n → A_max (carboxylation-saturated)
+  * θ → 0:       Liebig-style min(α·I, A_max)
+  * θ → 1:       rectangular hyperbola (Thornley 1976)
+
+Canonical (A_max=25, α=0.06, θ=0.7):
+  | PPFD (μmol/m²/s)  | A_n (μmol CO₂/m²/s) |
+  |-------------------|----------------------|
+  | 200 (overcast)    | 9.0                  |
+  | 500 (forest)      | 15.6                 |
+  | 1000 (cloudy)     | 20.0                 |
+  | 2000 (clear noon) | 23.1                 |
+  | ∞ (saturation)    | 25                   |
+
+**Closes the radiation → photosynthesis A_n leaf-rate chain**:
+
+```
+lat, DOY, hr → iter-865 cos(θ)
+             → iter-866 S_TOA
+             · τ_atm = R_s
+             → iter-867 PAR · 4.57 = PPFD
+             → iter-868 A_n  (μmol CO₂/m²/s leaf rate)
+```
+
+Used by: Collatz 1991 GCB C3 photosynthesis, Sellers 1996 SiB2,
+Farquhar-von Caemmerer-Berry 1980 (this is light-limited component;
+full FvCB combines with Rubisco-limited A_v and triose-phosphate-
+limited A_p via quadratic colimitation), de Pury-Farquhar 1997
+two-leaf canopy upscaling, Bonan 2008 land-model textbook,
+CLM5 / MOSES / JULES / NoahMP photosynthesis modules.
+
+Note: returns *light-limited* A_n only.  Full FvCB requires
+combining with V_cmax-limited Rubisco branch + triose-phosphate
+branch — caller layers if needed.
+
+Test: `tests/test_fv3_light_response_iter868.py` (9 tests: dark=0,
+overcast 200→9, full-sun 2000→23, asymptote → A_max, low-light
+linear ≈α·PPFD, monotone, custom A_max, chain via iter-867 PAR
+→ PPFD → A_n ≈22 at tropical R_s=1000, 3-D shapes).
+
+### Why this iteration was meaningful
+
+**Closes the radiation → photosynthesis A_n leaf-rate chain**
+end-to-end.  Caller now has full lat/DOY/hour → A_n photosynthesis
+in pure JAX.  Critical for: (1) DGVM/ESM photosynthesis modules
+(CLM5/JULES/NoahMP); (2) GPP from PPFD; (3) C-cycle ESM coupling
+(GPP → NPP → flux response to climate); (4) crop-GPP from
+meteorological inputs.  Pure JAX, vmap-compatible.  Collatz α=0.06,
+A_max=25, θ=0.7 are canonical (default args).  No `constants.py`
+additions.
+
