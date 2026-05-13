@@ -133,3 +133,4 @@ SW, latlon PE, MPAS SW, MPAS PE, MPAS NH, spectral PE, spectral NH.
 | 28   | AMIP gate `1e-2 → 1e-6` (cube measured `1.17e-12`) | — |
 | 29   | cosine_bell gate `1e-2 → 1e-4` (preserves latlon raw-FV benchmark) | 4/4 PASS |
 | 30   | Hoist gates to `_DYCORE_MASS_DRIFT_TOL` / `_DYCORE_MASS_DRIFT_TOL_CB` module constants; doc compress | one-line edit for future re-tightening |
+| 31   | Add `test_anchor_lazy_snapshot_is_sticky` to `test_anchor_mass_api.py` — documents that the lazy snapshot fires once per `_target_mass is None` window; AD / repeated-init users must call `reset_target_mass()` between fresh initial states.  13/13 anchor API tests PASS. | locks the snapshot semantics |

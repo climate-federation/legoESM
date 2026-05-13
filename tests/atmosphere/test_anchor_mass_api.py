@@ -123,3 +123,64 @@ def test_anchor_lifecycle_latlon_pe():
     # Run the model with a fresh state — the now-cached _target_mass
     # is the iter-snapshot, NOT a stale custom target.
     _ = state2  # silence linter
+
+
+def test_anchor_lazy_snapshot_is_sticky():
+    """iter-31: document that the lazy snapshot fires ONCE.
+
+    A second initial state will see the first state's cached
+    ``_target_mass`` unless the caller invokes ``reset_target_mass()``
+    or ``set_target_mass(...)`` first.  This is the right behaviour for
+    a long Python-loop integration (the matrix runner's pattern) but
+    the wrong behaviour for AD / multi-experiment callers that re-anchor
+    on every gradient step — the documented workaround is to call
+    ``reset_target_mass()`` between gradient evaluations.
+
+    Test asserts: ``state.p_s * 1.01`` (1% more mass) on the second
+    ``step()`` call still reports the FIRST state's mass as the
+    anchored target.  After ``reset_target_mass()`` the next step
+    correctly re-snapshots.
+    """
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        CDGridPrimitiveEquationModel,
+        CDGridPrimitiveEquationConfig,
+    )
+    from legoesm.atmosphere.held_suarez import held_suarez_init
+
+    grid = create_cubed_sphere(8)
+    sigma = create_sigma_coordinate(8)
+    cfg = CDGridPrimitiveEquationConfig(
+        use_conservation_fixer=True,
+        fix_mass=True,
+        anchor_mass_to_initial=True,
+    )
+    model = CDGridPrimitiveEquationModel(grid, sigma, cfg)
+    state = held_suarez_init(grid, sigma)
+
+    _ = model.step(state, 600.0)
+    mass_after_first = float(model._target_mass)
+
+    # 1%-perturbed initial state — should anchor to a different target.
+    state2 = state._replace(
+        p_s=state.p_s.replace(data=state.p_s.data * 1.01),
+    )
+    _ = model.step(state2, 600.0)
+    mass_after_second = float(model._target_mass)
+    # Stale: first state's mass survives because lazy snapshot doesn't refire.
+    assert mass_after_first == mass_after_second, (
+        "Expected sticky lazy snapshot: target should NOT re-fire when "
+        "_target_mass is already set."
+    )
+
+    # Caller-side fix: reset and re-step.
+    model.reset_target_mass()
+    _ = model.step(state2, 600.0)
+    mass_after_reset = float(model._target_mass)
+    # Now reflects the 1% extra mass.
+    rel = (mass_after_reset - mass_after_first) / mass_after_first
+    assert 0.0099 < rel < 0.011, (
+        f"After reset_target_mass, anchor should track new state: "
+        f"expected rel ~1e-2, got {rel:.4e}"
+    )
