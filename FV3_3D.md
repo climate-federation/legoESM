@@ -5231,6 +5231,66 @@ attribution residuals, paleoclimate sensitivity studies, and
 exoplanet-habitability stellar-luminosity scaling.  Pure JAX,
 vmap-compatible.  No new physical constants introduced.
 
+## Iter 842 — volcanic_forcing_fv3 (stratospheric AOD forcing)
+
+Added `volcanic_forcing_fv3(tau_strat, alpha_volc=25.0)` to
+`grids/cubed_sphere.py`.  Hansen et al. 2005 / Lacis-Hansen 1992
+linear scaling of TOA SW radiative forcing with stratospheric
+aerosol optical depth (AOD at 550 nm):
+
+```
+ΔF_volc = − α_volc · τ_strat    (W/m²)
+```
+
+α_volc = 25 W/m² (GISS ModelE fit; AR5 21–25 range; Pinatubo
+observations 20–28).  Stratospheric sulfate scatters SW → cooling.
+
+Canonical eruptions:
+  | event                  | τ_strat | ΔF (W/m²) |
+  |------------------------|---------|-----------|
+  | Quiescent background   | 0.005   | −0.13     |
+  | El Chichón 1982        | 0.10    | −2.5      |
+  | Pinatubo 1991 peak     | 0.15    | −3.75     |
+  | Krakatoa 1883          | 0.20    | −5.0      |
+  | Tambora 1815           | 0.50    | −12.5     |
+  | Toba 74 ka (estimate)  | 1.0–3.0 | −25 to −75|
+
+**Closes the natural-forcing pair** (iter-841 solar + iter-842
+volcanic) required for CMIP6 DAMIP / hist-volc / hist-nat
+attribution experiments.  Full historical-warming-budget
+decomposition now reachable:
+
+```
+ΔF_total = ΔF_GHG (iter-838+839+840)
+         + ΔF_aerosol (future iter)
+         + ΔF_solar (iter-841)
+         + ΔF_volcanic (iter-842)
+↓ iter-836/837 ECS/TCR
+ΔT
+```
+
+Used by: CMIP6 historical / hist-volc / hist-nat / DAMIP,
+Hansen-Sato GISS Forcing Reconstruction, PMIP last-millennium
+runs (Crowley 2000, Toohey 2017 eVolv2k), paleoclimate Tambora-
+Krakatoa attribution (Stoffel et al. 2015), volcanic-aerosol
+geoengineering (SAI) studies.
+
+Test: `tests/test_fv3_volcanic_forcing_iter842.py` (8 tests:
+Pinatubo τ=0.15 → −3.75 W/m², Tambora τ=0.50 → −12.5, quiescent
+background −0.125, no-eruption zero, ECS-chain Pinatubo cooling
+≈ −2.68 K, paired Maunder+Tambora natural forcing, custom
+α_volc=21 AR5 low, 3-D shapes + non-positive).
+
+### Why this iteration was meaningful
+
+Adds the canonical natural-cooling agent — paired with iter-841
+solar — that closes the natural-forcing branch of CMIP6 DAMIP
+attribution.  Volcanic forcing is the dominant decadal-scale
+natural climate-variability driver (Pinatubo cooled global mean
+~0.3 K for ~2 years).  Pure JAX, vmap-compatible.  α_volc is a
+GISS/AR5 empirical scaling (default arg).  No `constants.py`
+additions.
+
 
 
 

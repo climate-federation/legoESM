@@ -7555,6 +7555,86 @@ def solar_forcing_fv3(
     return (1.0 - albedo) * delta_tsi / 4.0
 
 
+def volcanic_forcing_fv3(
+    tau_strat: jax.Array,
+    alpha_volc: float = 25.0,
+) -> jax.Array:
+    """FV3_3D iter 842: stratospheric-volcanic radiative forcing.
+
+    Hansen et al. 2005 / Lacis-Hansen 1992 linear scaling of TOA
+    SW radiative forcing with stratospheric aerosol optical depth
+    (AOD at 550 nm):
+
+        ΔF_volc = − α_volc · τ_strat    (W/m²)
+
+    Where:
+      * τ_strat   — stratospheric aerosol optical depth at 550 nm
+                    (dimensionless, typically 0–1).
+      * α_volc    — Hansen 2005 forcing-per-AOD coefficient
+                    (W/m²); default 25 W/m² (GISS ModelE fit).
+                    AR5 uses 21–25; Pinatubo observations support
+                    20–28.
+
+    Sign: negative ⇒ stratospheric sulfate aerosols scatter SW
+    back to space → planetary cooling.  Symmetric to iter-841
+    solar forcing in sign (volcanism is the canonical natural
+    *cooling* agent).
+
+    Canonical eruptions:
+      | event                  | τ_strat | ΔF (W/m²) |
+      |------------------------|---------|-----------|
+      | Background (quiescent) | 0.005   | −0.13     |
+      | El Chichón 1982        | 0.10    | −2.5      |
+      | Pinatubo 1991 peak     | 0.15    | −3.75     |
+      | Krakatoa 1883          | 0.20    | −5.0      |
+      | Tambora 1815           | 0.50    | −12.5     |
+      | Year Without a Summer  | 0.50    | −12.5     |
+      | Toba 74 ka (estimate)  | 1.0–3.0 | −25 to −75|
+
+    Composes iter-836 ECS / iter-837 TCR:
+
+        τ_strat → iter-842 ΔF_volc → iter-836/837 ECS/TCR → ΔT
+
+    Closes the **natural-forcing pair** (iter-841 solar + iter-842
+    volcanic) — required for CMIP DAMIP attribution experiments
+    (Held-Sato-style historical-warming budget decomposition into
+    GHG + aerosol + solar + volcanic + internal-variability).
+
+    Used by: CMIP6 historical / hist-volc / hist-nat / DAMIP
+    protocols, Hansen-Sato GISS Forcing Reconstruction (Vernier-
+    Thomason CALIPSO-OSIRIS AOD products), PMIP last-millennium
+    runs (Crowley 2000, Toohey 2017 eVolv2k reconstruction),
+    paleoclimate Tambora-Krakatoa attribution (Stoffel et al. 2015),
+    volcanic-aerosol-injection geoengineering studies (SAI).
+
+    Note: this primitive returns instantaneous radiative forcing
+    at the TOA — not accounting for τ_strat vertical-profile
+    variation or wavelength dependence beyond 550 nm.  More
+    sophisticated treatments use band-integrated forcing kernels
+    (Schmidt et al. 2018) but the linear −25·τ form remains the
+    AR5/AR6 standard for first-order multi-gas-forcing pipelines.
+
+    Pairs with iter-826 ``cloud_albedo_two_stream_fv3`` (also a
+    SW-scattering primitive) and iter-841 ``solar_forcing_fv3``
+    (paired natural-forcing agent).
+
+    Parameters
+    ----------
+    tau_strat : jax.Array
+        Stratospheric aerosol optical depth at 550 nm
+        (dimensionless, ≥ 0).
+    alpha_volc : float
+        Hansen-2005 forcing-per-AOD coefficient (W/m²); default 25.
+
+    Returns
+    -------
+    delta_f : jax.Array
+        Volcanic radiative forcing (W/m²); negative = cooling
+        for τ > 0.
+    """
+    return -alpha_volc * tau_strat
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,
