@@ -258,3 +258,48 @@ def test_long_run_mass_conservation_spectral_pe():
     assert drift < 1e-12, (
         f"spectral PE 100-step drift {drift:.2e} exceeds 1e-12"
     )
+
+
+def test_long_run_mass_conservation_latlon_pe():
+    """iter-62: 100-step lat-lon PE long-run guard.
+
+    Parallel to iter-33 cube PE / iter-61 spectral PE.  Exercises the
+    iter-2/12 lat-lon ``_apply_safety_rails`` (T-floor + p_s-floor +
+    mass fixer + tracer rescale) over 100 steps.  Direct measurement:
+    drift = 1.61e-16 on 36x72 lat-lon, dt=40.4s.
+    """
+    import math
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+        CGridLatLonPrimitiveEquationModel,
+        CGridLatLonPrimitiveEquationConfig,
+        hydrostatic_to_cgrid,
+    )
+    from legoesm.atmosphere.held_suarez import held_suarez_init_latlon
+
+    grid = create_latlon_grid(36, 72)
+    sigma = create_sigma_coordinate(10)
+    dx_pole = float(grid.radius) * grid.dlon * math.cos(
+        math.pi / 2 - grid.dlat / 2)
+    dt = min(200.0, 0.5 * dx_pole / 300.0)
+    cfg = CGridLatLonPrimitiveEquationConfig(
+        fix_mass=True, anchor_mass_to_initial=True,
+    )
+    model = CGridLatLonPrimitiveEquationModel(grid, sigma, cfg, dt=dt)
+    state = hydrostatic_to_cgrid(
+        held_suarez_init_latlon(grid, sigma), grid,
+    )
+
+    def _mass(s):
+        return float(jnp.sum(
+            s.p_s.astype(jnp.float64) * grid.area.astype(jnp.float64),
+        ))
+
+    m0 = _mass(state)
+    for _ in range(100):
+        state = model.step(state, dt)
+    drift = _rel_drift(m0, _mass(state))
+    assert drift < 1e-12, (
+        f"lat-lon PE 100-step drift {drift:.2e} exceeds 1e-12"
+    )

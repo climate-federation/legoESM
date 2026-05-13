@@ -162,3 +162,4 @@ SW, latlon PE, MPAS SW, MPAS PE, MPAS NH, spectral PE, spectral NH.
 | 59   | 10th + 11th fp64-dtype cases — `compute_nh_dry_mass` (cube, iter-7) + Voronoi twin (iter-8). | NH dry-mass dtype coverage |
 | 60   | 100-step MPAS NH long-run guard (`test_long_run_nh_mass_conservation_mpas`) parallel to iter-34 cube NH. Measured drift `3.89e-16`. Doc compress (iter-51..59 collapse). | locks MPAS NH long-run |
 | 61   | 100-step spectral PE + spectral NH long-run guards.  Spectral PE drift `8.03e-16`, spectral NH `1.94e-16`.  Long-run coverage now 6 tests: cube PE / cube SW / cube NH / MPAS NH / spectral PE / spectral NH — exercises every fp64 anchored fixer over the 100-step horizon. | locks spectral long-run |
+| 62   | 100-step lat-lon PE long-run guard (`test_long_run_mass_conservation_latlon_pe`).  Exercises iter-2/12 `_apply_safety_rails` over the 100-step horizon.  Drift `1.61e-16` on 36x72, dt=40.4s.  Long-run coverage now 7 tests. | locks lat-lon PE long-run |
