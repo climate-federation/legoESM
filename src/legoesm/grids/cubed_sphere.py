@@ -9218,6 +9218,101 @@ def spi_z_score_fv3(
     return (precip - mu_p) / sigma_safe
 
 
+def spei_z_score_fv3(
+    precip: jax.Array,
+    pet: jax.Array,
+    mu_d: jax.Array,
+    sigma_d: jax.Array,
+    sigma_floor: float = 1e-6,
+) -> jax.Array:
+    """FV3_3D iter 861: Standardized Precipitation-Evapotranspiration Index.
+
+    Vicente-Serrano et al. 2010 (J. Climate) drought-index primitive
+    extending iter-860 SPI with potential-evapotranspiration (PET)
+    correction.  Captures warming-driven aridification missed by
+    SPI (which sees only precipitation):
+
+        D     = P − PET                  (water-balance deficit, mm)
+        SPEI  = (D − μ_D) / σ_D          (z-score form)
+
+    Where:
+      * P      — observed precipitation (mm).
+      * PET    — potential evapotranspiration (mm); typically
+                 from Thornthwaite (T-only), Hargreaves (T+S_in),
+                 or Penman-Monteith (full energy balance).  Caller
+                 supplies; this primitive doesn't enforce a PET
+                 method.
+      * μ_D    — climatological mean of D = P − PET over baseline.
+      * σ_D    — climatological standard deviation.
+
+    Like SPI, this z-score variant is the gamma-fit limit; full
+    Vicente-Serrano SPEI fits a log-logistic distribution to D
+    and inverse-transforms quantiles.  z-score form is the
+    standard simplified primitive used in IAMs and AR6.
+
+    Sign: SPEI < 0 ⇒ drought (deficit beyond climatology);
+    SPEI > 0 ⇒ wet (surplus).
+
+    Severity thresholds identical to iter-860 SPI (McKee 1993):
+      ≥+2.0 extreme wet; 1.5–2.0 severe wet; 1.0–1.5 moderate wet;
+      −1<SPEI<1 near-normal; −1.5<SPEI≤−1 moderate drought;
+      −2<SPEI≤−1.5 severe drought; SPEI≤−2 extreme drought.
+
+    SPEI vs SPI:
+      * Same P → both equal under fixed PET climatology.
+      * +1 K warming → PET rises ~5%/K (Allen-Pereira 1998 FAO-56),
+        D drops, SPEI drops more negative than SPI for same P.
+      * AR6 §11.6.3: SPEI shows ~2× larger drying signal than SPI
+        under SSP3-7.0 → 2100 because of evapotranspiration
+        contribution.
+
+    Adds **first PET-corrected drought primitive** — important
+    because under warming, drought severity *increases even at
+    constant P* due to rising atmospheric demand.  Vicente-Serrano
+    2010 showed AR4-era SPI underestimated drought trends by
+    ignoring this term.
+
+    Composes with iter-860 ``spi_z_score_fv3`` (same z-score
+    structure, different input statistic — caller can compute both
+    from same P series + optional PET).
+
+    Composes with iter-832 ``clausius_clapeyron_dqdt_fv3`` (humidity
+    rise affects PET via vapor-pressure-deficit term in Penman-
+    Monteith) — full AR6 §11.6 drought-warming-coupling primitive
+    suite.
+
+    Used by: Vicente-Serrano et al. 2010 J. Climate SPEI definition,
+    Beguería et al. 2014 Int. J. Climatol. SPEI-base dataset,
+    AR6 §11.6 drought projections, IPCC SREX 2012 drought, SPEIbase
+    operational global dataset (v2.6+), Lehner et al. 2017 GRL
+    drought-warming-coupling study.
+
+    ``sigma_floor`` prevents div-by-0 when σ_D → 0.
+
+    Parameters
+    ----------
+    precip : jax.Array
+        Observed precipitation accumulation (mm).
+    pet : jax.Array
+        Potential evapotranspiration (mm; same window).
+    mu_d : jax.Array
+        Climatological mean of D = P − PET (mm).
+    sigma_d : jax.Array
+        Climatological standard deviation of D.
+    sigma_floor : float
+        Lower bound on σ_D; default 1e-6.
+
+    Returns
+    -------
+    spei : jax.Array
+        Standardized Precipitation-Evapotranspiration Index
+        (dimensionless z-score); negative for drought.
+    """
+    deficit = precip - pet
+    sigma_safe = jnp.maximum(sigma_d, sigma_floor)
+    return (deficit - mu_d) / sigma_safe
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

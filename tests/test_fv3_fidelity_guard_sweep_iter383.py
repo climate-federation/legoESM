@@ -448,6 +448,7 @@ _GUARD_MODULES = (
     "test_fv3_heat_index_iter858",                   # iter-858 add
     "test_fv3_gdd_iter859",                          # iter-859 add
     "test_fv3_spi_iter860",                          # iter-860 add
+    "test_fv3_spei_iter861",                         # iter-861 add
 )
 
 

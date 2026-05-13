@@ -5253,3 +5253,67 @@ is verifiable with unit tests in seconds rather than wall-time
 sweeps.  Users running the NH compressible-Euler 3D path now have
 the same cube-imprint defense as users running the PE 3D path.
 
+## Iter 861 — spei_z_score_fv3 (PET-corrected drought primitive)
+
+Added `spei_z_score_fv3(precip, pet, mu_d, sigma_d)` to
+`grids/cubed_sphere.py`.  Vicente-Serrano et al. 2010 (J. Climate)
+SPEI extends iter-860 SPI with potential-evapotranspiration
+correction:
+
+```
+D    = P − PET                          (water-balance deficit)
+SPEI = (D − μ_D) / σ_D                  (z-score)
+```
+
+Captures **warming-driven aridification missed by SPI** — under
++1 K warming PET rises ~5% (Allen-Pereira 1998 FAO-56) → D drops
+→ SPEI drops more negative than SPI at fixed P.  AR6 §11.6.3
+reports SPEI shows ~2× larger drying signal than SPI under
+SSP3-7.0 2100.
+
+Severity thresholds identical to iter-860 SPI:
+  | SPEI            | Category               |
+  |-----------------|------------------------|
+  |  SPEI ≥ 2.0     | Extreme wet            |
+  | 1.5 ≤ SPEI <2.0 | Severe wet             |
+  | 1.0 ≤ SPEI <1.5 | Moderate wet           |
+  | −1 < SPEI < 1   | Near-normal            |
+  | −1.5< SPEI ≤−1  | Moderate drought       |
+  | −2 < SPEI ≤−1.5 | Severe drought         |
+  |  SPEI ≤ −2      | Extreme drought        |
+
+Test verifies SPEI < SPI under warming-induced ↑PET — Vicente-
+Serrano canonical advantage.
+
+Composes with iter-860 SPI (same z-score structure, different
+input statistic; caller computes both from same P series).
+Composes with iter-832 ``clausius_clapeyron_dqdt_fv3`` (humidity
+affects PET via vapor-pressure-deficit in Penman-Monteith).
+
+**Adds first PET-corrected drought primitive**, completing the
+**drought-index primitive pair** (iter-860 SPI + iter-861 SPEI)
+required for AR6 §11.6 drought-warming-coupling diagnostics.
+Vicente-Serrano 2010 showed AR4-era SPI underestimated drought
+trends by ignoring evapotranspiration — SPEI is the AR6 default.
+
+Used by: Vicente-Serrano et al. 2010 J. Climate SPEI introduction,
+Beguería et al. 2014 Int. J. Climatol. SPEIbase dataset, AR6 §11.6
+drought projections, IPCC SREX 2012, SPEIbase v2.6+ operational
+global dataset, Lehner et al. 2017 GRL drought-warming-coupling.
+
+Test: `tests/test_fv3_spei_iter861.py` (7 tests: at-climatology
+zero, warming-PET aridifies (sign of difference), extreme-drought
+−2σ analytic, SPEI<SPI under warming Vicente-Serrano canonical,
+σ=0 floored, monotone in P, 3-D shapes).
+
+### Why this iteration was meaningful
+
+**Closes the drought-index primitive pair** (SPI + SPEI) — SPEI
+is the AR6-default drought metric for projections because it
+properly captures warming-driven aridification.  Critical for:
+(1) AR6 §11.6 drought-attribution projections;
+(2) Vicente-Serrano-style PET-corrected aridity trends;
+(3) SPEIbase global drought-monitor coupling; (4) IAM food-system
+drought-stress modules.  Pure JAX, vmap-compatible.  No
+`constants.py` additions.
+
