@@ -157,3 +157,4 @@ SW, latlon PE, MPAS SW, MPAS PE, MPAS NH, spectral PE, spectral NH.
 | 50   | Doc compress (iter-41..49 rolled into single rows). | every conservation helper across `core/conservation.py` + `diagnostics/{total_energy_*, angular_momentum, energy_budget, column_integrals}.py` now performs non-trivial arithmetic in fp64 before any reduction. |
 | 51   | Drop stale `_accumulation_dtype` import from `scripts/run_atmosphere_test_matrix.py` (imported but never used after iter-1/4/5/12 migrated all live conservation sites to `_conservation_accumulator`).  Cube cosine_bell quick PASS. | trim stale import |
 | 52   | Extend `test_diagnostic_fp64_dtypes.py` with a 6th case — `compute_total_energy_pe` (iter-45 FV3-fidelity PE total-energy diagnostic). 6/6 dtype tests PASS. | pins PE TE fp64 contract |
+| 53   | 7th case — `compute_total_energy_nh` on cube DCMIP-2025 TC1 init. Asserts fp64 column + positive te_total. 7/7 dtype tests PASS. | pins NH TE fp64 contract |

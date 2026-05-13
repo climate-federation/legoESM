@@ -126,3 +126,20 @@ def test_compute_total_energy_pe_returns_fp64():
     )
     # te_total is Python float; assert finite + non-zero.
     assert te_total > 0
+
+
+def test_compute_total_energy_nh_returns_fp64():
+    """iter-45: diagnostics/total_energy_nh.compute_total_energy_nh."""
+    from legoesm.diagnostics import compute_total_energy_nh
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from tests.test_cases.dcmip2025 import dcmip25_tc1_init
+
+    grid = create_cubed_sphere(8)
+    state, hcoord, _tmetric = dcmip25_tc1_init(grid, n_levels=8)
+    te_column, te_total = compute_total_energy_nh(state, grid, hcoord)
+    assert te_column.dtype == jnp.float64, (
+        f"NH total-energy column dropped fp64: {te_column.dtype}"
+    )
+    # te_total is a Python float; sanity-check non-zero positive
+    # (atmosphere has positive internal+gravitational+kinetic energy).
+    assert te_total > 0
