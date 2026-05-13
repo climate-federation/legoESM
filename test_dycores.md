@@ -388,15 +388,59 @@ MPAS NH had neither, and the matrix runner reported only ``|w|_max``.
 ``tests/atmosphere/nonhydrostatic`` 60/60 PASS.  Spectral NH still
 lacks a fixer (iter-9 target).
 
-## Iteration 9 plan
+## Iteration 9 — spectral NH anchored dry-mass fixer (FIX)
 
-- Spectral NH (``spectral_nh.py``): mirror iter-3 spectral PE — the
-  prognostic ``rho_prime_hat`` (or analogue) needs a log-scale rescale on
-  its constant mode.  Or, if the spectral NH state stores ``ρ' = rho-rho_ref``
-  in spectral space, an additive constant via ``rho_prime_hat[0] +=
-  Δρ·sqrt(4π)`` matches the cube uniform-correction convention.
-- TC2a / TC3 cube + ico NH mass-drift runs (longer integrations).
-- Williamson-2 v-wind visual snapshot regression (CLAUDE.md guidance).
+**Last NH gap closed.**  ``SpectralCompressibleEulerModel`` had no mass
+fixer; iter-7/8 covered cube and MPAS NH, but spectral NH stayed
+uncorrected.
+
+**Changes:**
+
+- ``src/legoesm/atmosphere/dynamics/spectral_nh.py``
+  - ``SpectralNHConfig`` gains ``fix_mass`` / ``anchor_mass_to_initial``
+    (default False).
+  - Model gains ``_target_mass`` slot + ``compute_dry_mass(state)`` helper
+    (SH synthesis to grid → fp64 area integral of ``J·(rho_ref+rho')·dz``).
+  - ``_apply_mass_fixer(state)``: ``Δρ = (target − current) / (∫ J·dz·dA)``
+    added to ``rho_prime_hat[0, :]`` as ``Δρ · sqrt(4π)``.  The (n=0,m=0)
+    coefficient of a constant=1 field is ``sqrt(4π)`` under this module's
+    (4π)-normalised real-SH convention (same as iter-3 spectral PE).
+  - ``step()`` split into Python wrapper (snapshot outside JIT) and JIT
+    body ``_step_jit``; fixer applied after ``split_explicit_step``.
+- ``scripts/run_atmosphere_test_matrix.py``: enable ``fix_mass=True,
+  anchor_mass_to_initial=True`` at the spectral NH config; add
+  ``"mass": _area_weighted_sum(col_mass, grid.grid_area)`` to spectral NH
+  ``scalar_fn``.
+
+**Validation (via `run_atmosphere_test_matrix.py --only nh --grid spectral --test dcmip_tc1 --quick`):**
+
+| Diagnostic            | Baseline      | Iter-9        |
+|-----------------------|---------------|---------------|
+| dcmip_tc1 |w|_max     | 0.0144 m/s    | 0.0144 m/s    |
+| dcmip_tc1 mass drift  | (not tracked) | **0.00e+00** (exact) |
+
+``tests/atmosphere/nonhydrostatic`` 60/60 PASS.
+
+**Cross-grid status snapshot (iter-1..iter-9).**
+
+| Equation set | cube | latlon FV | MPAS / ico | spectral |
+|--------------|------|-----------|------------|----------|
+| shallow water | bit-clean (iter-5/6) | bit-clean (iter-1/4) | bit-clean (iter-6) | bit-clean (iter-1) |
+| hydrostatic   | bit-clean (iter-7 pattern, was 4e-8) | bit-clean (iter-2) | bit-clean (already) | bit-clean (iter-3) |
+| non-hydrostatic | bit-clean (iter-7) | not implemented   | bit-clean (iter-8) | bit-clean (iter-9) |
+
+## Iteration 10 plan
+
+- **Compress test_dycores.md** per the user instruction (every 10 iters).
+  Replace per-iter detail blocks with a compact summary table; preserve the
+  improvement log and iter-N plans.
+- TC2a / TC3 mass-drift validation runs across the three NH grids (currently
+  only TC1 validated end-to-end).
+- ``run_atmosphere_test_matrix.py``: ``mass_drift`` should be surfaced in
+  the NH ``notes`` line (next to ``|w|_max``) so it's visible without
+  parsing ``mean_timeseries.csv``.
+- Visual snapshot regression check (Williamson-2 v-wind, lat-lon + cube)
+  per CLAUDE.md guidance.
 
 ## Improvement log
 
@@ -430,3 +474,9 @@ lacks a fixer (iter-9 target).
   + lazy snapshot + step wrapper in `compressible_euler_mpas.py`.
   Ico NH TC1 mass drift `(not tracked) → 0.00e+00` (exact); `|w|_max`
   unchanged at 0.0145.
+- **iter-9 (2026-05-13)**: spectral NH anchored dry-mass fixer.  Config
+  flags + ``_target_mass`` + ``compute_dry_mass`` + ``_apply_mass_fixer``
+  (``rho_prime_hat[0,:] += Δρ·sqrt(4π)`` matches iter-3 PE convention) in
+  `spectral_nh.py`.  Spectral NH TC1 mass drift `(not tracked) → 0.00e+00`
+  (exact); `|w|_max` unchanged at 0.0144.  All three NH grids
+  (cube+ico+spectral) now bit-conserve.

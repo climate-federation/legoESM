@@ -4719,6 +4719,9 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             sponge_coeff=sponge_c,
             hyperdiff_coeff=_hd_sp,
             small_earth_factor=sef,
+            # iter-9: opt into anchored mass fixer (parallel to cube/ico
+            # NH in iter-7/8).
+            fix_mass=True, anchor_mass_to_initial=True,
         )
         # Use the small-Earth grid for tc2/tc3
         if sef != 1.0:
@@ -4741,10 +4744,20 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             w = sh_synthesis_3d(grid, s.w_hat.data)
             theta_p = sh_synthesis_3d(grid, s.theta_prime_hat.data)
             rho_p = sh_synthesis_3d(grid, s.rho_prime_hat.data)
+            # iter-9: report dry mass alongside |w|_max for spectral NH
+            # (parallel to iter-7 cube / iter-8 ico instrumentation).
+            rho_total = hcoord.rho_ref + rho_p
+            col_mass = jnp.sum(
+                tmetric.jacobian[..., None]
+                * rho_total
+                * hcoord.dz[None, None, :],
+                axis=-1,
+            )
             return {
                 "max_abs_w": float(jnp.max(jnp.abs(w))),
                 "mean_theta_prime": _area_weighted_mean(theta_p, grid.grid_area),
                 "mean_rho_prime":   _area_weighted_mean(rho_p,   grid.grid_area),
+                "mass": _area_weighted_sum(col_mass, grid.grid_area),
             }
 
         def extract_fn(s):
