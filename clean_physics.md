@@ -9,6 +9,35 @@ Branch: `clean_physics`. Driven by Ralph loop + `/codex:adversarial-review`.
 - **Ocean** (`src/legoesm/ocean/physics/`): vertical_mixing, bottom_drag, lateral_mixing, convection, surface_forcing, shortwave_penetration, mixing.
 - **Cryosphere** (`src/legoesm/ice/`): sea_ice, dynamics, itd, rheology, transport.
 
+## Iteration 67 — 2026-05-13
+
+**Bug fix: frozen-lake post-step q_surface uses liquid saturation.**
+
+`coupler/lake/two_layer_lake.py` had a phase-switch consistency
+bug.  Pre-step `q_sfc` correctly used
+`jnp.where(is_frozen, q_ice, q_liq)` (line 50-53) for the
+bulk-flux call, but post-step `q_sfc_new` (line 175) always called
+`saturation_mixing_ratio` (liquid form).  The `response.q_surface`
+reported to the atmosphere was therefore biased high for frozen
+lakes by ~14 % at T = −10 °C (liquid vs ice saturation diverges
+below T_freeze), feeding the next-step bulk-flux computation a
+non-physical q_sfc.
+
+Fix:
+```python
+is_frozen_new = T_epi_new <= config.T_freeze
+q_sfc_liq_new = saturation_mixing_ratio(T_epi_new, p_sfc)
+q_sfc_ice_new = saturation_mixing_ratio_ice(T_epi_new, p_sfc)
+q_sfc_new = jnp.where(is_frozen_new, q_sfc_ice_new, q_sfc_liq_new)
+```
+
+New regression test
+`Test11g_FreezingFloor::test_post_step_q_surface_uses_ice_saturation_when_frozen`
+holds the lake at `T_epi = T_freeze` and verifies the post-step
+`response.q_surface` matches ice saturation (rather than liquid).
+
+**Tests (post iter-67):** 9 / 9 lake tests pass.
+
 ## Iteration 66 — 2026-05-13
 
 **Inspection iteration on sea-ice `_thermo_single` (no code changes).**
