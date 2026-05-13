@@ -50,7 +50,10 @@ from legoesm.grids.cubed_sphere_cdgrid import (
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
-from legoesm.core.conservation import _accumulation_dtype
+from legoesm.core.conservation import (
+    _accumulation_dtype,
+    _conservation_accumulator,
+)
 from legoesm.core.fv3_sw_core import (
     _d2a2c_vect,
     _d_sw5_corner_divergence,
@@ -630,7 +633,14 @@ class CDGridShallowWaterModel(IntegrationMixin):
 
     def set_initial_mass(self, state: CDGridShallowWaterState):
         """Anchor conservation fixer to initial state mass."""
-        self._target_mass = jnp.sum(state.h * self.cdgrid.base.area)
+        # iter-5: fp64 budget accumulator — fp32 reductions on ~6·N²
+        # cubed-sphere arrays leak ~N·eps noise into the anchor and
+        # produced ~10^-7 spurious "mass drift" in W5.  Matches the
+        # cubed-sphere PE ``_batch_global_area_sums`` precision.
+        _acc = _conservation_accumulator()
+        self._target_mass = jnp.sum(
+            state.h.astype(_acc) * self.cdgrid.base.area.astype(_acc),
+        )
 
     def _sync_dgrid_boundary(self, state: CDGridShallowWaterState):
         """Owner-based sync of D-grid corner winds at shared edges.
@@ -738,7 +748,8 @@ class CDGridShallowWaterModel(IntegrationMixin):
 
         # Conservation fixer
         if self.config.use_conservation_fixer and self.config.fix_mass:
-            acc = _accumulation_dtype()
+            # iter-5: fp64 budget accumulator (see set_initial_mass).
+            acc = _conservation_accumulator()
             area = self.cdgrid.base.area.astype(acc)
             total_area = jnp.sum(area)
             if self._target_mass is not None:
@@ -756,7 +767,9 @@ class CDGridShallowWaterModel(IntegrationMixin):
                 )
                 mass_target, mass_new = _mass_pair[0], _mass_pair[1]
             correction = (mass_target - mass_new) / total_area
-            h_fixed = state_new.h + correction.astype(state_new.h.dtype)
+            # iter-5: drop ``.astype(state_new.h.dtype)`` so the fp64
+            # correction promotes the add (matches ``fix_ps_mass``).
+            h_fixed = state_new.h + correction
             state_new = state_new._replace(h=h_fixed)
 
         # Cast back to storage precision.
@@ -838,7 +851,14 @@ class FV3FBShallowWaterModel:
                 UserWarning, stacklevel=2)
 
     def set_initial_mass(self, state):
-        self._target_mass = jnp.sum(state.h * self.cdgrid.base.area)
+        # iter-5: fp64 budget accumulator — fp32 reductions on ~6·N²
+        # cubed-sphere arrays leak ~N·eps noise into the anchor and
+        # produced ~10^-7 spurious "mass drift" in W5.  Matches the
+        # cubed-sphere PE ``_batch_global_area_sums`` precision.
+        _acc = _conservation_accumulator()
+        self._target_mass = jnp.sum(
+            state.h.astype(_acc) * self.cdgrid.base.area.astype(_acc),
+        )
 
     @partial(jax.jit, static_argnums=(0,))
     def step(self, state, dt):
@@ -884,7 +904,8 @@ class FV3FBShallowWaterModel:
 
         # Conservation fixer
         if self.config.use_conservation_fixer and self.config.fix_mass:
-            acc = _accumulation_dtype()
+            # iter-5: fp64 budget accumulator (see set_initial_mass).
+            acc = _conservation_accumulator()
             area = self.cdgrid.base.area.astype(acc)
             total_area = jnp.sum(area)
             if self._target_mass is not None:
@@ -901,7 +922,9 @@ class FV3FBShallowWaterModel:
                 )
                 mass_target, mass_new = _mass_pair[0], _mass_pair[1]
             correction = (mass_target - mass_new) / total_area
-            h_fixed = state_new.h + correction.astype(state_new.h.dtype)
+            # iter-5: drop ``.astype(state_new.h.dtype)`` so the fp64
+            # correction promotes the add (matches ``fix_ps_mass``).
+            h_fixed = state_new.h + correction
             state_new = state_new._replace(h=h_fixed)
 
         return cast_pytree(state_new, None, "storage")
@@ -948,7 +971,14 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
         self._target_mass = None
 
     def set_initial_mass(self, state):
-        self._target_mass = jnp.sum(state.h * self.cdgrid.base.area)
+        # iter-5: fp64 budget accumulator — fp32 reductions on ~6·N²
+        # cubed-sphere arrays leak ~N·eps noise into the anchor and
+        # produced ~10^-7 spurious "mass drift" in W5.  Matches the
+        # cubed-sphere PE ``_batch_global_area_sums`` precision.
+        _acc = _conservation_accumulator()
+        self._target_mass = jnp.sum(
+            state.h.astype(_acc) * self.cdgrid.base.area.astype(_acc),
+        )
 
     @partial(jax.jit, static_argnums=(0,))
     def step(self, state, dt):
@@ -1190,7 +1220,8 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
 
         # Conservation fixer
         if self.config.use_conservation_fixer and self.config.fix_mass:
-            acc = _accumulation_dtype()
+            # iter-5: fp64 budget accumulator (see set_initial_mass).
+            acc = _conservation_accumulator()
             area = self.cdgrid.base.area.astype(acc)
             total_area = jnp.sum(area)
             if self._target_mass is not None:
@@ -1207,7 +1238,9 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
                 )
                 mass_target, mass_new = _mass_pair[0], _mass_pair[1]
             correction = (mass_target - mass_new) / total_area
-            h_fixed = state_new.h + correction.astype(state_new.h.dtype)
+            # iter-5: drop ``.astype(state_new.h.dtype)`` so the fp64
+            # correction promotes the add (matches ``fix_ps_mass``).
+            h_fixed = state_new.h + correction
             state_new = state_new._replace(h=h_fixed)
 
         return cast_pytree(state_new, None, "storage")

@@ -234,19 +234,55 @@ raw-FV step that bypasses the SW model, so the model edits don't reach it —
 that's a separate fixer wiring for iter-5).
 ``tests/atmosphere/shallow_water`` 110/110 PASS.
 
-## Iteration 5 plan
+## Iteration 5 — FV3 cube SW fp64 budget accumulator + drop fp32 cast (FIX)
 
-- Cosine_bell lat-lon path uses an inline ``cgrid_fv_flux_divergence_latlon``
-  + ``dispatch_integrator`` rather than ``CGridLatLonShallowWaterModel.step``,
-  so the iter-4 anchor doesn't reach it.  Add an explicit mass fixer on that
-  inline step (or migrate to the model).
-- FV3-cube SW (W5, cosine_bell) already has ``set_initial_mass`` plumbing
-  (``shallow_water_fv3_cdgrid.py``) but the matrix runner doesn't always
-  call ``set_initial_mass``.  Audit + wire.
-- MPAS SW shallow-water (``shallow_water_mpas.py``) — check whether
-  ``MPASShallowWaterConfig`` has equivalent anchor knobs and tighten if not.
-- Quick-mode 30-day full suite (cube/latlon/ico/spectral × hydro) for
-  end-to-end conservation snapshot now that PE + SW are anchored.
+**Root cause.** Three SW model classes in ``shallow_water_fv3_cdgrid.py``
+(``FV3EdgeShallowWaterModel``, ``FV3FBShallowWaterModel``, the experimental
+csw variant) shared the same iter-4-style bug pair:
+
+1. ``set_initial_mass`` snapshotted with a bare ``jnp.sum(state.h *
+   self.cdgrid.base.area)``.  Both inputs are typically fp32, so the ~6·N²
+   cubed-sphere reduction leaked ~N·eps noise into the anchor.  Set via
+   ``set_initial_mass`` from the matrix runner at line 2016/2442, so every
+   cube SW Williamson case inherited the noise.
+2. The fixers used ``_accumulation_dtype()`` (fp32 on default storage
+   policy) and added the correction back with ``correction.astype(state_new.h.dtype)``,
+   so even with an anchored target the per-step round-trip lost precision.
+
+**Changes (1 src file):**
+
+- ``src/legoesm/atmosphere/dynamics/shallow_water_fv3_cdgrid.py``
+  - Import ``_conservation_accumulator``.
+  - Three ``set_initial_mass`` methods (lines 631-633, 840-841, 950-951) now
+    cast both inputs to the fp64 budget accumulator before the sum.
+  - Three in-step fixers (lines 741, 887, 1193) switch from
+    ``_accumulation_dtype`` to ``_conservation_accumulator``.
+  - Three ``h_fixed = state_new.h + correction.astype(...)`` adds (lines 759,
+    901, 1213) drop the cast for fp64 promotion (matches iter-2 / iter-4).
+
+**Validation (via `run_atmosphere_test_matrix.py --only sw --grid cubed_sphere --quick`):**
+
+| Case               | Baseline mass drift | Iter-5 mass drift |
+|--------------------|---------------------|-------------------|
+| williamson5        | 9.68e-07            | **1.46e-15**      |
+| williamson2        | L2=2.05e-04 (n/c)   | L2=2.04e-04 (n/c) |
+| cosine_bell        | 4.49e-07            | 5.38e-07 (n/c)    |
+
+Williamson-5 mass drift now at machine precision (~10^8 reduction).
+cosine_bell uses a separate raw-FV path (`transport_step` in `fv_tp_2d.py`)
+and is unchanged — that's iter-6 if pursued.
+``tests/atmosphere/shallow_water`` 110/110 PASS.
+
+## Iteration 6 plan
+
+- Audit ``MPASShallowWaterConfig`` — already uses fp64 in ``_fix_mass_mpas``
+  (line 206) and baseline drift is already 1e-10, so likely a no-op fix.
+  Add ``anchor_mass_to_initial`` flag for cross-grid uniformity.
+- ``transport_step`` in ``core/fv_tp_2d.py`` for cube cosine_bell: lines 1131-
+  1137 do ``mass_pos = jnp.sum(h_pos * area)`` in fp32 — same accumulator
+  bug as iter-5 SW.  Cast to fp64.
+- Quick-mode full suite snapshot once SW fixers are all anchored.
+- Cross-grid drift check after iter-1..5 changes.
 
 ## Improvement log
 
@@ -263,3 +299,6 @@ that's a separate fixer wiring for iter-5).
 - **iter-4 (2026-05-13)**: latlon SW `anchor_mass_to_initial` +
   `_conservation_accumulator` (fp64) in fixer + drop fp32 cast.
   Williamson-5 mass drift `1.21e-05 → 3.24e-16` (machine precision).
+- **iter-5 (2026-05-13)**: FV3 cube SW (three classes) `set_initial_mass` +
+  fixer use fp64 budget accumulator, drop fp32 cast on `h` correction.
+  Williamson-5 mass drift `9.68e-07 → 1.46e-15` (machine precision).
