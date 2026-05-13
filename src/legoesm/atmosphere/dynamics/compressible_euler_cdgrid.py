@@ -1037,6 +1037,8 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
         validate_corner_div_damp_nord(self.config.corner_div_damp_nord)
         self._target_mass = None
 
+        # iter-20: anchor-mass API parity (see iter-18 / iter-19 SW twins).
+
         if self.config.small_earth_factor != 1.0:
             grid = apply_small_earth_scaling(grid, self.config.small_earth_factor)
         self.grid = grid
@@ -1066,6 +1068,14 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
             state, self.grid, self.height_coord, self.terrain_metric,
             self.cdgrid, self.config, physics_tendency,
         )
+
+    def reset_target_mass(self) -> None:
+        """Clear the anchored mass target (iter-20; mirrors iter-18 API)."""
+        self._target_mass = None
+
+    def set_target_mass(self, target_mass) -> None:
+        """Explicitly set the anchored mass target (iter-20; iter-19 API)."""
+        self._target_mass = target_mass
 
     def step(self, state: NonHydrostaticState, dt: float, physics_fn=None) -> NonHydrostaticState:
         """Advance one step using split-explicit RK3 with C-D grid transport."""

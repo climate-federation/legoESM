@@ -1091,6 +1091,14 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         self.cdgrid = create_cubed_sphere_cdgrid(grid)
         self._target_mass = None
 
+    def reset_target_mass(self) -> None:
+        """Clear the anchored mass target (iter-20; mirrors iter-18 API)."""
+        self._target_mass = None
+
+    def set_target_mass(self, target_mass) -> None:
+        """Explicitly set the anchored mass target (iter-20; iter-19 API)."""
+        self._target_mass = target_mass
+
     def _sync_dgrid_boundary(self, state: FV3HydrostaticState):
         """No-op: cross-face continuity via halo exchange (explicit sync seeds spurious v-wind)."""
         return state

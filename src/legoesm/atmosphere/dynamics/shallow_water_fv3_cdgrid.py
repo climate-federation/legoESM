@@ -639,6 +639,14 @@ class CDGridShallowWaterModel(IntegrationMixin):
             state.h.astype(_acc) * self.cdgrid.base.area.astype(_acc),
         )
 
+    def reset_target_mass(self) -> None:
+        """Clear the anchored mass target (iter-20; mirrors iter-18 API)."""
+        self._target_mass = None
+
+    def set_target_mass(self, target_mass) -> None:
+        """Explicitly set the anchored mass target (iter-20; iter-19 API)."""
+        self._target_mass = target_mass
+
     def _sync_dgrid_boundary(self, state: CDGridShallowWaterState):
         """Owner-based sync of D-grid corner winds at shared edges.
 
@@ -857,6 +865,18 @@ class FV3FBShallowWaterModel:
             state.h.astype(_acc) * self.cdgrid.base.area.astype(_acc),
         )
 
+    def reset_target_mass(self) -> None:
+        """Clear the anchored mass target (iter-20; mirrors iter-18 API).
+
+        After this, the next ``step()`` falls back to the pre-state path.
+        Call ``set_initial_mass(state)`` to re-anchor.
+        """
+        self._target_mass = None
+
+    def set_target_mass(self, target_mass) -> None:
+        """Explicitly set the anchored mass target (iter-20; iter-19 API)."""
+        self._target_mass = target_mass
+
     @partial(jax.jit, static_argnums=(0,))
     def step(self, state, dt):
         """Advance one time step using FV3 forward-backward."""
@@ -976,6 +996,18 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
         self._target_mass = jnp.sum(
             state.h.astype(_acc) * self.cdgrid.base.area.astype(_acc),
         )
+
+    def reset_target_mass(self) -> None:
+        """Clear the anchored mass target (iter-20; mirrors iter-18 API).
+
+        After this, the next ``step()`` falls back to the pre-state path.
+        Call ``set_initial_mass(state)`` to re-anchor.
+        """
+        self._target_mass = None
+
+    def set_target_mass(self, target_mass) -> None:
+        """Explicitly set the anchored mass target (iter-20; iter-19 API)."""
+        self._target_mass = target_mass
 
     @partial(jax.jit, static_argnums=(0,))
     def step(self, state, dt):
