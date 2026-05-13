@@ -509,3 +509,17 @@ def test_guard_set_inventory_complete():
             f"Guard module {mod_name!r} declared in sweep but "
             f"file not found at {path}."
         )
+
+
+def test_guard_set_non_trivial_count_iter896():
+    """FV3_3D iter 896: sweep must contain >= 80 guard modules.
+
+    Regression guard against accidental sweep deletion / mass-truncate.
+    Pinned at conservative floor below current count to allow normal
+    additions/removals while catching destructive refactors.
+    """
+    assert len(_GUARD_MODULES) >= 80, (
+        f"FV3-fidelity guard sweep has {len(_GUARD_MODULES)} entries "
+        f"(< 80 floor).  Possible accidental truncation; verify "
+        f"iter-383+ guard accumulation is intact."
+    )
