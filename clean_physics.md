@@ -9,6 +9,37 @@ Branch: `clean_physics`. Driven by Ralph loop + `/codex:adversarial-review`.
 - **Ocean** (`src/legoesm/ocean/physics/`): vertical_mixing, bottom_drag, lateral_mixing, convection, surface_forcing, shortwave_penetration, mixing.
 - **Cryosphere** (`src/legoesm/ice/`): sea_ice, dynamics, itd, rheology, transport.
 
+## Iteration 76 — 2026-05-13
+
+**Inspection iteration on remaining convection schemes
+(no code changes).** Direct inspection of `tiedtke.py`,
+`kain_fritsch.py`, `zhang_mcfarlane.py`:
+
+- **`tiedtke.py`**: Three-class blend (deep / shallow / midlevel)
+  with per-class entrainment / detrainment profiles.  Deep uses
+  moisture-convergence closure (saturation-excess proxy when MC
+  unavailable, with sign correctly flipped from saturation-deficit
+  per prior audit).  Shallow / midlevel use Kain (2004) §3
+  dimensionally-correct CAPE-relaxation form.
+- **`kain_fritsch.py`**: Trigger via smooth-step
+  `T_lcl_perturbed > T_env_at_lcl`; CAPE gate as safety net.
+  Cloud-base mass flux `M_b = ρ_BL · CAPE / (g · tau_consume)`
+  (Kain 2004 §3, dimensionally correct).
+- **`zhang_mcfarlane.py`**: Implicit-Euler relaxation of M_b
+  toward `M_b_eq` (no `dt / max(tau, dt)` clamp — the comment
+  audit fix);  shared mass-flux kernel with separate `q_u` /
+  `q_c_u` plume streams; optional Gregory 1997 CMT.
+
+All three schemes use the shared `_apply_mass_flux_kernel` (which
+handles compensating subsidence + detrainment with the
+stratosphere mass-flux gate), the shared `entraining_detraining_
+plume`, and column-conservative cloud-water source via
+`delta_0 · M · q_c_u / rho`.
+
+No new fixes needed.  All 6 mass-flux schemes (Bechtold, Emanuel,
+Tiedtke, Kain-Fritsch, Zhang-McFarlane, plus DCA / Kuo
+adjustment schemes) share the conservation scaffold.
+
 ## Iteration 75 — 2026-05-13
 
 **Inspection iteration on `kessler.py`, `seifert_beheng.py`,
