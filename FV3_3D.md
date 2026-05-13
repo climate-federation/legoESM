@@ -5459,3 +5459,59 @@ amplifies the ET-pot growth as actual ET drops); (4) climate-
 model ET-formulation intercomparison.  Pure JAX, vmap-compatible.
 No `constants.py` additions.
 
+## Iter 883 — penman_open_water_le_fv3 (Penman 1948 potential ET)
+
+Added `penman_open_water_le_fv3(available_energy, vpd_pa,
+delta_pa_k, gamma_pa_k, g_a, rho_a=1.225, c_p=1005.0)` to
+`grids/cubed_sphere.py`.  Penman 1948 open-water potential
+evaporation:
+
+```
+λE_pot = (Δ · A + ρ · c_p · VPD · g_a) / (Δ + γ)    (W/m²)
+```
+
+Equivalent to iter-870 PM with g_s → ∞ (no stomatal closure);
+test verifies PM(g_s=10⁶) matches Penman to <0.01%.
+
+Limits:
+  * VPD=0:    λE_pot → Δ·A/(Δ+γ) (radiation equilibrium).
+  * High VPD: λE_pot ∝ g_a·VPD (advection-driven).
+  * A=0:      pure-advection night-time evaporation.
+
+Penman vs PM (iter-870):
+  * Penman: g_s=∞ (no stomatal limit).
+  * PM:     g_s finite, (1+g_a/g_s) denominator term.
+  * PM/Penman = (Δ+γ)/(Δ+γ·(1+g_a/g_s)) ≤ 1.
+
+Canonical:
+  | scenario          | λE_pot (W/m²) |
+  |-------------------|---------------|
+  | Tropical noon humid | 400-500    |
+  | Mid-lat summer     | 300-450    |
+  | Arid daytime       | 200-500    |
+  | Night humid        | 0-30       |
+
+**Closes CR-input pair** with iter-881 PT (λE_wet) → iter-882 CR
+(λE_actual = 2·λE_wet − λE_pot).  Test verifies full chain.
+
+Composes iter-871 VPD, iter-873 γ, iter-874 Δ, iter-875 g_a,
+iter-876+iter-880 A.
+
+Used by: Penman 1948 origin, Allen-Pereira 1998 FAO-56 reference
+ET, Brutsaert 1982, Bouchet 1963 / Brutsaert-Stricker 1979 CR
+pairing, eddy-covariance potential-ET benchmark, CLM5/JULES
+open-water lake/wetland-surface ET.
+
+Test: `tests/test_fv3_penman_open_water_iter883.py` (7 tests:
+VPD=0 radiation-limit analytic, A=0 advection-limit, tropical
+canonical band, PM(g_s=10⁶) matches Penman <0.01%, denom-zero
+floored, chain via iter-881+883 → iter-882, 3-D shapes).
+
+### Why this iteration was meaningful
+
+**Closes the CR-input pair** (λE_wet from iter-881 PT + λE_pot
+from iter-883 Penman) → iter-882 CR for actual ET.  Full
+ET-formulation trio (PM/PT/CR) now has all input primitives
+in pure JAX.  Pure JAX, vmap-compatible.  No `constants.py`
+additions.
+

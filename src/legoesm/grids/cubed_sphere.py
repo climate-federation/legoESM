@@ -11165,6 +11165,113 @@ def complementary_relationship_et_fv3(
     return jnp.maximum(raw, 0.0) if floor_zero else raw
 
 
+def penman_open_water_le_fv3(
+    available_energy: jax.Array,
+    vpd_pa: jax.Array,
+    delta_pa_k: jax.Array,
+    gamma_pa_k: jax.Array,
+    g_a: jax.Array,
+    rho_a: jax.Array = 1.225,
+    c_p: jax.Array = 1005.0,
+    denom_floor: float = 1e-6,
+) -> jax.Array:
+    """FV3_3D iter 883: Penman 1948 open-water potential ET primitive.
+
+    Penman 1948 (Proc. Roy. Soc. A) open-water potential
+    evaporation — equivalent to iter-870 ``penman_monteith_le_fv3``
+    in the limit g_s → ∞ (no stomatal resistance):
+
+        λE_pot = (Δ · A + ρ · c_p · VPD · g_a) / (Δ + γ)
+                                                  (W/m²)
+
+    Where:
+      * A         — available energy A = R_n − G (W/m²); from
+                    iter-876 + iter-880.
+      * VPD       — vapor-pressure deficit (Pa); from iter-871.
+      * Δ         — slope of saturation vapor-pressure curve
+                    (Pa/K); from iter-874.
+      * γ         — psychrometric constant (Pa/K); from iter-873.
+      * g_a       — aerodynamic conductance (m/s); from iter-875.
+      * ρ_a       — air density (kg/m³); default 1.225 (sea-level).
+      * c_p       — specific heat air (J/(kg·K)); default 1005.
+
+    Output: latent heat flux λE_pot in W/m² (canonical leaf-energy-
+    balance unit).  Represents the *potential* ET — the maximum
+    possible evaporation when surface water supply is unlimited
+    (no stomatal closure).
+
+    Limits:
+      * VPD → 0:  λE_pot → Δ·A/(Δ+γ) (radiation-equilibrium limit;
+                            matches PT with α_PT=1).
+      * High VPD: λE_pot ∝ g_a · VPD (aerodynamic-driven).
+      * A → 0:    λE_pot → ρ·c_p·VPD·g_a/(Δ+γ) (pure-advection,
+                  night-time evaporation from warm wet surface).
+
+    Penman vs PM:
+      * Penman: g_s = ∞, no stomatal-closure term.
+      * PM:     g_s finite, (1 + g_a/g_s) factor in denominator.
+      * PM/Penman ratio = (Δ+γ)/(Δ + γ·(1+g_a/g_s)).
+      * For arid stressed surface: PM << Penman.
+
+    Canonical magnitudes:
+      | scenario              | λE_pot (W/m²)|
+      |-----------------------|--------------|
+      | Tropical noon humid   | 400–500      |
+      | Mid-lat summer        | 300–450      |
+      | Arid daytime          | 200–500 (VPD-driven, no g_s limit)|
+      | Night humid           | 0–30         |
+
+    **Closes CR-input pair** with iter-881 ``priestley_taylor_le_fv3``
+    (λE_wet) → iter-882 ``complementary_relationship_et_fv3``
+    (λE_actual = 2·λE_wet − λE_pot).
+
+    Composes iter-871 VPD, iter-873 γ, iter-874 Δ, iter-875 g_a,
+    iter-876+iter-880 A.
+
+    Used by: Penman 1948 origin paper, Allen-Pereira 1998 FAO-56
+    reference ET (Penman as PM limit), Brutsaert 1982 Evaporation,
+    Bouchet 1963 / Brutsaert-Stricker 1979 CR pairing, eddy-
+    covariance flux-tower potential-ET benchmark, CLM5/JULES
+    open-water lake/wetland-surface ET.
+
+    Per CLAUDE.md hygiene: ρ_a and c_p take canonical sea-level
+    defaults; caller overrides for high-altitude or non-standard
+    pressure.
+
+    ``denom_floor`` prevents div-by-0 when Δ+γ → 0 (pathological
+    cold-arid regime).
+
+    Parameters
+    ----------
+    available_energy : jax.Array
+        A = R_n − G (W/m²).
+    vpd_pa : jax.Array
+        Vapor-pressure deficit (Pa).
+    delta_pa_k : jax.Array
+        Slope of saturation vapor-pressure curve (Pa/K).
+    gamma_pa_k : jax.Array
+        Psychrometric constant (Pa/K).
+    g_a : jax.Array
+        Aerodynamic conductance (m/s).
+    rho_a : jax.Array or float
+        Air density (kg/m³); default 1.225.
+    c_p : jax.Array or float
+        Specific heat air (J/(kg·K)); default 1005.
+    denom_floor : float
+        Lower bound on (Δ+γ); default 1e-6.
+
+    Returns
+    -------
+    le_pot : jax.Array
+        Potential latent heat flux (W/m²); positive typical.
+    """
+    denom = jnp.maximum(delta_pa_k + gamma_pa_k, denom_floor)
+    return (
+        delta_pa_k * available_energy
+        + rho_a * c_p * vpd_pa * g_a
+    ) / denom
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,
