@@ -7132,6 +7132,75 @@ def lapse_rate_feedback_fv3(
     return lam_planck * (dT_atm_mean - dT_sfc) / dT_sfc_safe
 
 
+def equilibrium_climate_sensitivity_fv3(
+    radiative_forcing: jax.Array,
+    lam_net: jax.Array,
+    lam_floor: float = 1e-6,
+) -> jax.Array:
+    """FV3_3D iter 836: equilibrium climate sensitivity (ECS).
+
+    Linearized energy-balance-model steady-state response of
+    global-mean surface temperature to a sustained radiative
+    forcing perturbation:
+
+        0 = ΔF + λ_net · ΔT_eq
+        ΔT_eq = − ΔF / λ_net = ΔF / |λ_net|
+
+    Where λ_net < 0 for stable Earth-like climate.
+
+    Canonical 2×CO₂ forcing: ΔF ≈ 3.7 W/m² (Myhre 1998 / AR5).
+    Canonical CMIP6 |λ_net| ≈ 1.0–1.5 W/m²/K → ECS ≈ 2.5–3.7 K
+    (AR6 likely range 2.5–4.0 K).
+
+    Building blocks (sum across the AR5/AR6 quartet + clouds):
+      λ_net = λ_Planck + λ_WV + λ_LR + λ_α + λ_cloud
+            ≈ (−3.76) + (+1.80) + (−0.60) + (+0.34) + λ_cloud
+            ≈ (−2.22) + λ_cloud   [W/m²/K]
+
+      ECS sensitivity to clouds:
+        λ_cloud = 0      ⇒ ECS ≈ 1.66 K (pre-cloud)
+        λ_cloud = +0.4   ⇒ ECS ≈ 2.03 K (mild positive)
+        λ_cloud = +1.0   ⇒ ECS ≈ 3.03 K (strong positive)
+        λ_cloud = +1.5   ⇒ ECS ≈ 5.14 K (very high)
+
+    This helper is the *closure* of the feedback decomposition
+    chain — composes:
+      * iter-831 ``planck_feedback_fv3``
+      * iter-832 ``clausius_clapeyron_dqdt_fv3`` (linear WV)
+      * iter-833 ``fixed_rh_humidity_change_fv3`` (finite WV)
+      * iter-834 ``ice_albedo_feedback_fv3``
+      * iter-835 ``lapse_rate_feedback_fv3``
+      * (+ user-provided λ_cloud)
+
+    Used by: Gregory plot (Gregory et al. 2004; intercept = ΔF,
+    slope = λ_net, x-intercept = ECS), CMIP ECS-uncertainty
+    decomposition (Caldwell et al. 2016), Sherwood et al. 2020
+    emergent-constraint synthesis, AR5/AR6 climate-feedback
+    tables.
+
+    ``lam_floor`` prevents div-by-0 if λ_net → 0 (runaway
+    instability — note the runaway condition itself signals
+    snowball bifurcation, but the linearized ECS is undefined).
+
+    Parameters
+    ----------
+    radiative_forcing : jax.Array
+        Sustained TOA radiative forcing (W/m²; positive=warming).
+    lam_net : jax.Array
+        Net feedback parameter (W/m²/K; negative for stable
+        Earth-like climate).
+    lam_floor : float
+        Lower bound on |λ_net|; default 1e-6.
+
+    Returns
+    -------
+    ecs : jax.Array
+        Equilibrium surface-temperature response (K).
+    """
+    abs_lam = jnp.maximum(jnp.abs(lam_net), lam_floor)
+    return radiative_forcing / abs_lam
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

@@ -5382,6 +5382,63 @@ are now available as pure-JAX composable primitives, enabling
 end-to-end ECS decomposition from any state perturbation.  Pure
 JAX, vmap-compatible.  No new physical constants introduced.
 
+## Iter 836 — equilibrium_climate_sensitivity_fv3 (ECS closure)
+
+Added `equilibrium_climate_sensitivity_fv3(radiative_forcing,
+lam_net)` to `grids/cubed_sphere.py`.  Linearized EBM closure:
+
+```
+0 = ΔF + λ_net · ΔT_eq
+⇒ ECS = ΔF / |λ_net|
+```
+
+Closure of the feedback-decomposition chain — combines outputs of
+iter-831 through iter-835 into a single climate-sensitivity number.
+
+Canonical 2×CO₂ forcing ΔF ≈ 3.7 W/m² (Myhre 1998 / AR5).
+AR5/AR6-quartet net |λ_net| ≈ 2.22 W/m²/K → ECS ≈ 1.67 K
+*pre-cloud*.  Cloud feedback determines bulk of CMIP6 spread:
+
+  | λ_cloud (W/m²/K) | λ_net   | ECS    |
+  |------------------|---------|--------|
+  | 0.0 (pre-cloud)  | −2.22   | 1.67 K |
+  | +0.4 (mild +)    | −1.82   | 2.03 K |
+  | +1.0 (strong +)  | −1.22   | 3.03 K |
+  | +1.5 (very high) | −0.72   | 5.14 K |
+
+AR6 likely range 2.5–4.0 K corresponds to λ_cloud ∈ [+0.65, +1.2].
+
+Composes:
+  * iter-831 ``planck_feedback_fv3``
+  * iter-832 ``clausius_clapeyron_dqdt_fv3``
+  * iter-833 ``fixed_rh_humidity_change_fv3``
+  * iter-834 ``ice_albedo_feedback_fv3``
+  * iter-835 ``lapse_rate_feedback_fv3``
+
+Used by: Gregory plot (Gregory et al. 2004), CMIP ECS-uncertainty
+decomposition (Caldwell et al. 2016), Sherwood et al. 2020
+emergent-constraint synthesis, AR5/AR6 climate-feedback tables.
+
+``lam_floor`` prevents div-by-0 if |λ_net|→0 (runaway-instability
+limit — bifurcation regime, linearized ECS undefined).
+
+Test: `tests/test_fv3_ecs_iter836.py` (7 tests: AR6 canonical
+3.7/1.4 ≈ 2.64 K, Planck-only no-feedback ECS ≈ 0.98 K, quartet
+pre-cloud ≈ 1.67 K, high λ_cloud=+1.5 ≈ 5 K, full primitive chain,
+λ=0 floored, 3-D shapes).
+
+### Why this iteration was meaningful
+
+**Closes the end-to-end ECS-decomposition primitive chain**
+(iter-829 T_eff → iter-831–835 feedback quartet → iter-836 ECS).
+A user can now go from any (OLR, profile, dα/dT) input directly
+to a climate-sensitivity number with a pure-JAX, vmap-friendly,
+differentiable pipeline.  Critical for: (1) Gregory-plot analysis
+of model spinups; (2) Sherwood-Hall-Caldwell-style emergent
+constraint diagnostics; (3) AR5/AR6 feedback-table reproduction;
+(4) sensitivity studies of cloud-feedback magnitude on ECS.  Pure
+JAX, vmap-compatible.  No new physical constants introduced.
+
 
 
 
