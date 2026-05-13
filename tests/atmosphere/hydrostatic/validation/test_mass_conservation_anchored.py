@@ -169,3 +169,51 @@ def test_mass_conservation_spectral_pe():
     for _ in range(N_STEPS):
         state = model.step(state, 600.0)
     assert _rel_drift(m0, _mass(state)) < DRIFT_TOL
+
+
+# ---------------------------------------------------------------------------
+# iter-33: long-run drift check.  Ensures the anchor doesn't accumulate
+# error across 5x the standard N_STEPS — catches any per-step drift the
+# 20-step gate would miss (e.g. a slow O(N_steps) bias rather than the
+# bounded O(ULP) random walk the anchor is supposed to enforce).
+# ---------------------------------------------------------------------------
+
+def test_long_run_mass_conservation_cubed_sphere_pe():
+    """100-step cube PE: anchor must NOT random-walk over long runs."""
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        CDGridPrimitiveEquationModel,
+        CDGridPrimitiveEquationConfig,
+    )
+    from legoesm.atmosphere.held_suarez import held_suarez_init
+
+    grid = create_cubed_sphere(12)
+    sigma = create_sigma_coordinate(10)
+    cfg = CDGridPrimitiveEquationConfig(
+        use_conservation_fixer=True,
+        fix_mass=True,
+        anchor_mass_to_initial=True,
+    )
+    model = CDGridPrimitiveEquationModel(grid, sigma, cfg)
+    state = held_suarez_init(grid, sigma)
+
+    def _mass(s):
+        return float(jnp.sum(
+            s.p_s.data.astype(jnp.float64)
+            * grid.area.astype(jnp.float64),
+        ))
+
+    m0 = _mass(state)
+    for _ in range(100):
+        state = model.step(state, 600.0)
+    drift = _rel_drift(m0, _mass(state))
+    # 100 steps × ULP(p_s) random walk ~ sqrt(100)·1e-15 ~ 1e-14.
+    # Direct measurement on cube C12 gives 4.18e-15.  Allow 1e-12 (a
+    # factor of ~200 above the observed floor) for resilience to
+    # JAX-version / platform jitter, while still catching a true O(1e-9)
+    # regression by 3 orders of magnitude.
+    assert drift < 1e-12, (
+        f"cube PE 100-step drift {drift:.2e} exceeds 1e-12 — possible "
+        f"per-step accumulation bug in the anchored fixer"
+    )
