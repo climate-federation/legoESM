@@ -372,7 +372,40 @@ convection tests = 101 green.  Differentiability test
 `test_differentiable` now finite (previously NaN under the new sqrt
 without the AD-safe pattern, caught in the test loop).
 
+## Iter-89 — convection sweep (inspection + dead-code cleanup)
+Audited `convection/_plume.py`, `convection/mass_flux.py`,
+`convection/zhang_mcfarlane.py`, `microphysics/kessler.py`,
+`microphysics/_warm_rain.py`, and the supporting
+`thermodynamics.compute_cape` / `compute_moist_adiabat` helpers.
+
+Findings (no production hot-path defects this round):
+
+1. **Dead code removed** (`_plume.compute_lcl`): `e_sat =
+   saturation_vapor_pressure(T_parcel)` was computed and never used —
+   Bolton (1980) Eq. 22 uses RH directly.  Removed the call and the
+   corresponding `saturation_vapor_pressure` import.  All 21
+   `tests/unit/test_convection_plume.py` tests still green.
+
+2. **Deferred — plume buoyancy uses dry T, not virtual** (`_plume.py:653`
+   and `compute_lfc_lnb`).  The plume gate `B_u = T_u - T_e` is the
+   dry-temperature difference; the physically correct test is the
+   virtual-temperature difference with cloud-water drag,
+   `T_v,u - T_v,e = T_u(1 + 0.608 q_u - q_c,u) - T_e(1 + 0.608 q_e)`.
+   For tropical convection (q_u≈0.018, q_e≈0.012, q_c,u≈0.002) the
+   correction is up to ~1 K — comparable to the `buoyancy_sharpness
+   = 0.5 /K` plume-alive threshold.  Acknowledged in `compute_cape`
+   docstring (~1 % CAPE bias).  Folding virtual buoyancy through the
+   plume integrator is a scheme-wide recalibration; defer until a
+   dedicated tuning iteration.
+
+3. **Verified clean**: `_apply_mass_flux_kernel` compensating-subsidence
+   sign convention (`dT/dt = (M/ρ) · (dT/dz + g/c_p)`); Z-M closure
+   uses dimensionally-correct `M_b = ρ_BL · max(CAPE − thr, 0) / (g τ)`
+   (iter-2 fix held); `donor_clamp_scale` AD-safe pattern correct;
+   `compute_moist_adiabat` straddle interpolation across the LCL is
+   correct.
+
 ## Next iterations
 Continue addressing further codex findings and direct-inspection sweeps until all
 schemes are provably conservative, monotone, CFL-safe, and AD-safe across mixed
-wet/dry grids.
+wet/dry grids.  Next compression at iter-90 (current size: ~400 lines).

@@ -69,10 +69,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import (
-    saturation_mixing_ratio,
-    saturation_vapor_pressure,
-)
+from legoesm.thermo import saturation_mixing_ratio
 from legoesm.atmosphere.physics.thermodynamics import (
     compute_cape,
     compute_moist_adiabat,
@@ -163,8 +160,8 @@ def compute_lcl(
     LCL
         ``p_lcl, T_lcl, k_lcl_smooth``.
     """
-    # Vapor pressure and relative humidity at parcel level.
-    e_sat = saturation_vapor_pressure(T_parcel)
+    # Relative humidity at parcel level.  ``q_sat`` is enough — Bolton
+    # Eq. 22 uses RH directly, not the saturation vapor pressure.
     q_sat = saturation_mixing_ratio(T_parcel, p_parcel)
     # RH = q / q_sat, clipped to (0, 1] so log is well-defined and
     # supersaturated parcels produce LCL at parcel level.
