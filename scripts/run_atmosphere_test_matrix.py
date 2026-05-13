@@ -2009,13 +2009,16 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         # speed at iter-1030 is 45 m/s (best W5 stability across the
         # 1009/1021/1030 calibration sweep).  Pinned by
         # ``tests/test_iter1002_w2_target_met.py``.
-        config = CDGridShallowWaterConfig(
-            hyperdiff_coeff=0.0,
-            div_damp=8.0 * _div_damp_cube(n),
-            boundary_fix=True,
-            damp_v=0.030,
-            nord_v=2,
-            apply_fortran_xppm_boundary=True)
+        # new_test_dycores iter-8: factored to the canonical
+        # ``iter1009_dual_target_config(n)`` helper in
+        # ``shallow_water_fv3_cdgrid``.  Removes a 6-line inline
+        # duplicate; future calibration updates land in the helper +
+        # propagate here automatically.  Bit-identical at C36 (helper
+        # uses ``div_damp_factor=8.0, damp_v=0.030`` defaults).
+        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+            iter1009_dual_target_config,
+        )
+        config = iter1009_dual_target_config(n)
         model = FV3EdgeShallowWaterModel(grid, config)
         cdgrid = model.cdgrid
 
