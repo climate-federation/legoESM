@@ -38,11 +38,11 @@ def test_iter365_compaction_present(doc_text):
     )
 
 
-def test_doc_size_below_5850_lines(doc_text):
+def test_doc_size_below_5340_lines(doc_text):
     n_lines = len(doc_text.splitlines())
-    assert n_lines < 5850, (
-        f"FV3_3D.md has {n_lines} lines (target < 5850).  "
-        f"Compaction scheduled at iter 870."
+    assert n_lines < 5340, (
+        f"FV3_3D.md has {n_lines} lines (target < 5340).  "
+        f"Next compaction at iter 880."
     )
 
 
@@ -471,6 +471,37 @@ def test_iter820_compaction_covers_topics(doc_text):
     for marker in required:
         assert marker in section, (
             f"iter-820 compacted block missing topic ``{marker}``."
+        )
+
+
+def test_iter870_compaction_present(doc_text):
+    """iter-870 compacted iter 861-869 into single block."""
+    assert "**Iters 861-869 (compacted iter 870)**" in doc_text, (
+        "iter-870 compaction block missing — doc re-expanded."
+    )
+
+
+def test_iter870_compaction_covers_topics(doc_text):
+    section_start = doc_text.find(
+        "**Iters 861-869 (compacted iter 870)**"
+    )
+    section_end = doc_text.find(
+        "**Iters 851-859", section_start,
+    )
+    assert section_start >= 0 and section_end > section_start
+    section = doc_text[section_start:section_end]
+    required = [
+        "861", "862", "863", "864", "865",
+        "866", "867", "868", "869", "870",
+        "spei_z_score", "hargreaves_pet",
+        "extraterrestrial_radiation", "daylight_hours",
+        "solar_zenith_cos", "clear_sky_toa_radiation",
+        "par_from_global_radiation", "light_response_curve",
+        "ball_berry_conductance", "penman_monteith_le",
+    ]
+    for marker in required:
+        assert marker in section, (
+            f"iter-870 compacted block missing topic ``{marker}``."
         )
 
 

@@ -10024,6 +10024,123 @@ def ball_berry_conductance_fv3(
     return m_slope * a_n * h_s / c_safe + b_min
 
 
+def penman_monteith_le_fv3(
+    available_energy: jax.Array,
+    vpd_pa: jax.Array,
+    delta_pa_k: jax.Array,
+    gamma_pa_k: jax.Array,
+    g_s: jax.Array,
+    g_a: jax.Array,
+    rho_a: jax.Array = 1.225,
+    c_p: jax.Array = 1005.0,
+    g_floor: float = 1e-6,
+) -> jax.Array:
+    """FV3_3D iter 870: Monteith 1965 / FAO-56 Penman-Monteith latent
+    heat flux primitive.
+
+    Standard "big-leaf" Penman-Monteith formulation linking radiative
+    forcing + atmospheric demand to evapotranspiration:
+
+        λE = (Δ · A + ρ · c_p · VPD · g_a) / (Δ + γ · (1 + g_a/g_s))
+
+    Where:
+      * A         — available energy A = R_n − G (W/m²).
+      * VPD       — vapor-pressure deficit (Pa).
+      * Δ         — slope of saturation-vapor-pressure curve at T
+                    (Pa/K); caller computes from thermo.
+      * γ         — psychrometric constant ≈ 67 Pa/K (Allen-Pereira
+                    1998 FAO-56 standard).
+      * g_s       — stomatal conductance (m/s); convert from
+                    mol/m²/s by ÷ 0.04 (gas-mol-to-velocity factor
+                    at standard T, p — caller does conversion).
+                    Alternative: pass molar units consistently.
+      * g_a       — aerodynamic conductance (m/s); for short grass
+                    g_a ≈ u_2/208 (FAO-56 §3.5).
+      * ρ         — air density (kg/m³); default 1.225 (sea-level
+                    standard).
+      * c_p       — specific heat air (J/(kg·K)); default 1005.
+
+    Output: latent heat flux λE in W/m² (canonical leaf-energy-
+    balance unit).  Convert to ET (mm/day): ET = λE · 86400 / λ_v
+    where λ_v ≈ 2.45×10⁶ J/kg.
+
+    Limits:
+      * g_s → ∞ (no stomatal closure): collapses to Penman 1948
+        open-water evaporation formula.
+      * g_s → 0 (full stomatal closure): λE → Δ·A/(Δ+γ·∞) → 0
+        (no transpiration).
+      * Low VPD: λE ≈ Δ·A/(Δ+γ) (radiation-limited equilibrium).
+      * High VPD: λE ∝ g_a·VPD (atmospherically-limited).
+
+    Canonical magnitudes:
+      | scenario                 | λE (W/m²)  | ET (mm/day) |
+      |--------------------------|------------|-------------|
+      | Tropical forest noon     | 400–500    | 14–17       |
+      | Crop midday              | 300–400    | 11–14       |
+      | Mediterranean dry summer | 100–200    | 4–7         |
+      | Arid daytime             | 20–80      | 1–3         |
+      | Night / dark             | 0–30       | 0–1         |
+
+    **Closes the energy/water-flux primitive chain**:
+
+        (R_n, G, T, RH, u, A_n) → iter-869 g_s
+                                → iter-870 λE (Penman-Monteith)
+                                = transpiration flux
+
+    Together with iter-862 ``hargreaves_pet_fv3`` (T-and-R_a-only
+    PET) provides paired PET/ET primitives — Hargreaves for sparse-
+    data SPEI calculation; Penman-Monteith for full energy-balance
+    closure.
+
+    Used by: Monteith 1965 origin paper, Allen-Pereira 1998 FAO-56
+    Eq. 6, CLM5 / JULES / NoahMP / MOSES / SiB2 evapotranspiration
+    modules, Bonan 2008 land-model textbook ch. 11, ERA5 / MERRA2
+    surface-energy-budget validation, eddy-covariance flux-tower
+    benchmark calculations (FLUXNET).
+
+    Per CLAUDE.md hygiene: ρ_a and c_p take canonical sea-level
+    defaults but caller-overrideable (vary with elevation).
+
+    Note: This is the *big-leaf* form.  Two-layer (Shuttleworth-
+    Wallace 1985) or canopy-resistance-from-LAI (Bonan 2008 §11.6)
+    refinements are caller's responsibility.
+
+    ``g_floor`` prevents div-by-0 in g_s → 0 (degenerate plant-
+    death / winter-dormancy regime).
+
+    Parameters
+    ----------
+    available_energy : jax.Array
+        A = R_n − G (W/m²); positive for daytime warming.
+    vpd_pa : jax.Array
+        Vapor-pressure deficit (Pa).  Note: input in Pa, not kPa.
+    delta_pa_k : jax.Array
+        Slope of saturation vapor-pressure curve dE_sat/dT (Pa/K).
+    gamma_pa_k : jax.Array
+        Psychrometric constant (Pa/K); ~67 at sea level.
+    g_s : jax.Array
+        Stomatal conductance (m/s).
+    g_a : jax.Array
+        Aerodynamic conductance (m/s).
+    rho_a : jax.Array or float
+        Air density (kg/m³); default 1.225.
+    c_p : jax.Array or float
+        Specific heat air (J/(kg·K)); default 1005.
+    g_floor : float
+        Lower bound on g_s (m/s); default 1e-6.
+
+    Returns
+    -------
+    le : jax.Array
+        Latent heat flux (W/m²); ≥ 0 typical (negative possible
+        with strong inversion + dew formation).
+    """
+    g_s_safe = jnp.maximum(g_s, g_floor)
+    numer = delta_pa_k * available_energy + rho_a * c_p * vpd_pa * g_a
+    denom = delta_pa_k + gamma_pa_k * (1.0 + g_a / g_s_safe)
+    return numer / denom
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,
