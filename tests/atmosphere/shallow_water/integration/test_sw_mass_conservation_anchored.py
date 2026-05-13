@@ -16,7 +16,8 @@ import jax.numpy as jnp
 import math
 import pytest
 
-DRIFT_TOL = 1e-10
+DRIFT_TOL = 1e-12
+N_STEPS = 20
 
 
 def _rel_drift(m0: float, m1: float) -> float:
@@ -59,7 +60,7 @@ def test_sw_mass_conservation_fv3_cube():
         ))
 
     m0 = _mass(state)
-    for _ in range(5):
+    for _ in range(N_STEPS):
         state = model.step(state, 300.0)
     assert _rel_drift(m0, _mass(state)) < DRIFT_TOL
 
@@ -90,7 +91,7 @@ def test_sw_mass_conservation_latlon():
         ))
 
     m0 = _mass(state)
-    for _ in range(5):
+    for _ in range(N_STEPS):
         state = model.step(state, dt)
     assert _rel_drift(m0, _mass(state)) < DRIFT_TOL
 
@@ -119,6 +120,6 @@ def test_sw_mass_conservation_mpas():
         ))
 
     m0 = _mass(state)
-    for _ in range(5):
+    for _ in range(N_STEPS):
         state = model.step(state, 300.0)
     assert _rel_drift(m0, _mass(state)) < DRIFT_TOL

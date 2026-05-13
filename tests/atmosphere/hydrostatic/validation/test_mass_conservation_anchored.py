@@ -27,7 +27,12 @@ import pytest
 # 1e-10 ceiling so per-step trace differences across JAX versions don't
 # flap the test, while still flagging a regression by orders of
 # magnitude (pre-iter-1 baselines were 1e-3 to 1e-5).
-DRIFT_TOL = 1e-10
+# iter-17: tighten from 1e-10 → 1e-12 and extend per-test integration
+# from 5 → 20 steps.  Direct measurement on cube C12 PE shows
+# 50-step mass drift ~4e-15, so a 20-step run sits comfortably below
+# the 1e-12 ceiling while staying sub-second per grid.
+DRIFT_TOL = 1e-12
+N_STEPS = 20
 
 
 def _rel_drift(m0: float, m1: float) -> float:
@@ -61,7 +66,7 @@ def test_mass_conservation_cubed_sphere_pe():
         ))
 
     m0 = _mass(state)
-    for _ in range(5):
+    for _ in range(N_STEPS):
         state = model.step(state, 600.0)
     assert _rel_drift(m0, _mass(state)) < DRIFT_TOL
 
@@ -97,7 +102,7 @@ def test_mass_conservation_latlon_pe():
         ))
 
     m0 = _mass(state)
-    for _ in range(5):
+    for _ in range(N_STEPS):
         state = model.step(state, dt)
     assert _rel_drift(m0, _mass(state)) < DRIFT_TOL
 
@@ -127,7 +132,7 @@ def test_mass_conservation_mpas_pe():
         ))
 
     m0 = _mass(state)
-    for _ in range(5):
+    for _ in range(N_STEPS):
         state = model.step(state, 200.0)
     assert _rel_drift(m0, _mass(state)) < DRIFT_TOL
 
@@ -161,6 +166,6 @@ def test_mass_conservation_spectral_pe():
         ))
 
     m0 = _mass(state)
-    for _ in range(5):
+    for _ in range(N_STEPS):
         state = model.step(state, 600.0)
     assert _rel_drift(m0, _mass(state)) < DRIFT_TOL

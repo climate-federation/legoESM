@@ -106,6 +106,11 @@ NH cross-grid TC1 mass-drift after iter-10 (matrix runner `notes` line):
   and
   `tests/atmosphere/nonhydrostatic/integration/test_nh_mass_conservation_anchored.py`.
   Lock down the full SW × hydro × NH coverage from iter-4..9.  6/6 PASS.
+- **iter-17**: tighten all 10 regression tests — 5 steps → 20 steps
+  (4x longer integration) and `DRIFT_TOL` 1e-10 → 1e-12 (100x tighter
+  ceiling).  Direct measurement on cube C12 PE shows 50-step drift
+  ~4e-15, so 20-step runs sit comfortably below 1e-12 while staying
+  ~1 minute total wall time.  10/10 PASS.
 
 ## Implementation patterns established (apply to any new dycore)
 

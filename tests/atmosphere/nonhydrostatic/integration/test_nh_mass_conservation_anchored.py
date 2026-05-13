@@ -18,7 +18,8 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import pytest
 
-DRIFT_TOL = 1e-10
+DRIFT_TOL = 1e-12
+N_STEPS = 20
 
 
 def _rel_drift(m0: float, m1: float) -> float:
@@ -51,7 +52,7 @@ def test_nh_mass_conservation_cubed_sphere():
         ))
 
     m0 = _mass(state)
-    for _ in range(5):
+    for _ in range(N_STEPS):
         state = model.step(state, 5.0)
     assert _rel_drift(m0, _mass(state)) < DRIFT_TOL
 
@@ -83,7 +84,7 @@ def test_nh_mass_conservation_mpas():
         ))
 
     m0 = _mass(state)
-    for _ in range(5):
+    for _ in range(N_STEPS):
         state = model.step(state, 5.0)
     assert _rel_drift(m0, _mass(state)) < DRIFT_TOL
 
@@ -107,7 +108,7 @@ def test_nh_mass_conservation_spectral():
     )
 
     m0 = float(model.compute_dry_mass(state))
-    for _ in range(5):
+    for _ in range(N_STEPS):
         state = model.step(state, 5.0)
     m_final = float(model.compute_dry_mass(state))
     assert _rel_drift(m0, m_final) < DRIFT_TOL
