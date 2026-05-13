@@ -416,6 +416,7 @@ _GUARD_MODULES = (
     "test_fv3_cloud_albedo_two_stream_iter826",      # iter-826 add
     "test_fv3_shortwave_cloud_forcing_iter827",      # iter-827 add
     "test_fv3_longwave_cloud_forcing_iter828",       # iter-828 add
+    "test_fv3_effective_radiating_temp_iter829",     # iter-829 add
 )
 
 

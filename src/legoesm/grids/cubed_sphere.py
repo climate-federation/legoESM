@@ -6679,6 +6679,55 @@ def longwave_cloud_forcing_fv3(
     return emissivity * constants.sigma_sb * (t_sfc ** 4 - t_cloud_top ** 4)
 
 
+def effective_radiating_temperature_fv3(
+    olr: jax.Array,
+    emissivity: jax.Array = 1.0,
+    olr_floor: float = 1e-6,
+) -> jax.Array:
+    """FV3_3D iter 829: effective radiating temperature from OLR.
+
+    Inverse of the broadband Stefan-Boltzmann law:
+
+        T_eff = (OLR / (ε · σ))^(1/4)
+
+    Where σ = ``constants.sigma_sb`` (Stefan-Boltzmann).
+
+    Typical values:
+      * Earth global mean (OLR ≈ 240 W/m², ε=1): T_eff ≈ 255 K
+      * Mars (OLR ≈ 110 W/m²): T_eff ≈ 210 K
+      * Venus (OLR ≈ 156 W/m²): T_eff ≈ 227 K (but T_surf=735 K
+        due to runaway greenhouse — illustrates greenhouse effect)
+
+    Used by: radiative-budget diagnostics (Earth's T_eff vs T_surf
+    gap = greenhouse effect ≈ 33 K), planetary climate comparison,
+    inverse-retrieval of effective temperature from broadband
+    satellite-OLR products (CERES, ERBE).
+
+    ``olr_floor`` prevents NaN from non-positive OLR.
+
+    Pairs with iter-828 ``longwave_cloud_forcing_fv3``: caller can
+    diagnose effective T of cloud top from OLR change.
+
+    Parameters
+    ----------
+    olr : jax.Array
+        Outgoing longwave radiation (W/m²).
+    emissivity : jax.Array or float
+        Broadband emissivity; default 1.0.
+    olr_floor : float
+        Lower bound on OLR (W/m²); default 1e-6.
+
+    Returns
+    -------
+    t_eff : jax.Array
+        Effective radiating temperature (K).
+    """
+    return (
+        jnp.maximum(olr, olr_floor)
+        / (emissivity * constants.sigma_sb)
+    ) ** 0.25
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

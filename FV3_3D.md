@@ -5441,6 +5441,45 @@ balance (CERES product target).  Pure JAX, vmap-compatible.
 Uses ``constants.sigma_sb``.  No new physical constants
 introduced.
 
+## Iter 829 — effective_radiating_temperature_fv3
+
+Added `effective_radiating_temperature_fv3(olr, emissivity=1.0,
+olr_floor=1e-6)` to `grids/cubed_sphere.py`.  Inverse of broadband
+Stefan-Boltzmann:
+
+```
+T_eff = (OLR / (ε · σ))^(1/4)
+```
+
+Typical values:
+  * Earth global mean (OLR=240 W/m², ε=1): T_eff ≈ 255 K
+  * Mars (OLR=110): T_eff ≈ 210 K
+  * Venus (OLR=156): T_eff ≈ 227 K (vs T_surf=735 K — runaway
+    greenhouse)
+
+Used by radiative-budget diagnostics (T_eff vs T_surf = greenhouse
+effect ≈ 33 K on Earth), planetary climate comparison, CERES /
+ERBE broadband-OLR inversion.
+
+Uses ``constants.sigma_sb`` per CLAUDE.md hygiene.
+
+Pairs with iter-828: caller can diagnose effective cloud-top T
+from ΔOLR.
+
+Test: `tests/test_fv3_effective_radiating_temp_iter829.py` (6
+tests: Earth mean → 255 K, round trip σT⁴ → T exact, ε<1 boosts
+T_eff at same OLR, OLR=0 floored finite, monotone in OLR, 3-D
+shapes + positive).
+
+### Why this iteration was meaningful
+
+Effective-radiating-temperature is the canonical planetary-
+radiation-budget primitive — used in every climate textbook to
+derive Earth's T_eff=255 K and demonstrate the 33 K greenhouse
+effect.  Pairs naturally with iter-828 CRE_LW for cloud-top
+effective-T retrievals.  Pure JAX, vmap-compatible.  No new
+physical constants introduced.
+
 
 
 
