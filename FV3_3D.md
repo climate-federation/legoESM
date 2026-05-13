@@ -3321,7 +3321,14 @@ STILL OPEN (post-iter-99 stretch goals):
   pad indistinguishable from repeated halo=1 re-pads at the inner
   ring.  No behavioural change needed.  iter-902 wires iter-890
   ``validate_corner_div_damp_nord`` into both PE + NH model
-  ``__init__`` (fail-fast at construction; 6 unit tests).
+  ``__init__`` (fail-fast at construction; 6 unit tests).  iter-903
+  adds ``fv3_laplacian_step_from_pad_h3`` (consumes (6,n+7,n+7) →
+  (6,n+5,n+5)) and extends expanding-halo wrapper to nord=3
+  (h3 → h2 → h1 chain) — closes the iter-899 NotImplementedError
+  gap.  nord=3 expand-halo vs re-pad max diff ≈ 1.8e-35 (machine
+  eps), confirming legoESM re-pad path remains FV3-faithful at
+  nord=3.  7 new tests; iter-899 nord-3-raises test repurposed to
+  nord-4-raises.
 - iter-168/169/170/171 documented PE-vs-NH FV3-fidelity asymmetries
   ALL CLOSED:
   * ✅ corner-divergence damping (PE iter 16/18) — closed iter 168

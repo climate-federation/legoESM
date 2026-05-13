@@ -834,6 +834,99 @@ def fv3_laplacian_step_from_pad_h2(
     return lap_divg * rarea_c_pad
 
 
+def fv3_laplacian_step_from_pad_h3(
+    divg_pad: jnp.ndarray,
+    cdgrid: "CubedSphereCDGrid",
+) -> jnp.ndarray:
+    """FV3_3D iter 903: one Laplacian step on h3-padded input.
+
+    Consumes pre-padded ``divg_pad`` of shape ``(6, n+7, n+7)``
+    (halo=3 around canonical ``(n+1, n+1)`` corner-staggered field)
+    and returns the Laplacian on the SHRUNK halo=2 interior of shape
+    ``(6, n+5, n+5)``.  Same arithmetic structure as iter-898
+    ``fv3_laplacian_step_from_pad_h2``, one halo cell wider.
+
+    Sequence for nord=3 single-pad-multi-step pattern:
+
+        divg_pad = pad_halo(divg_d, halo=3)         # (6, n+7, n+7)
+        h2      = fv3_laplacian_step_from_pad_h3(...)  # (6, n+5, n+5)
+        h1      = fv3_laplacian_step_from_pad_h2(h2, ...)  # (6, n+3, n+3)
+        out     = fv3_laplacian_step_from_pad_h1(h1, ...)  # (6, n+1, n+1)
+
+    Faithful to FV3 ``sw_core.F90:1748-1785`` ``nt = nord - n``
+    decreasing-interior pattern at nord=3.
+
+    Index translation for divg_pad shape (6, n+7, n+7):
+
+      Padded index 0..2 = i = -3..-1 (outer west halo)
+      Padded index 3..n+3 = canonical interior i = 0..n
+      Padded index n+4..n+6 = i = n+1..n+3 (outer east halo)
+
+    Write region covers i = -2..n+2 (n+5 cells) — halo=2 interior.
+
+    Cube vertices canonical (0,0), (n,0), (n,n), (0,n) sit at
+    write-region local indices (2,2), (n+2,2), (n+2,n+2), (2,n+2).
+    """
+    n = cdgrid.n
+
+    # x-flux vc at i ∈ [-3, n+2] (shape n+6), j ∈ [-2, n+2] (shape n+5).
+    #   divg_pad(i+1) for i ∈ [-3, n+2] → padded 1..n+6 → slice [1:n+7]
+    #   divg_pad(i)   for i ∈ [-3, n+2] → padded 0..n+5 → slice [0:n+6]
+    #   j ∈ [-2, n+2] → padded 1..n+5 → slice [1:n+6]
+    vc_raw = (
+        divg_pad[:, 1:n + 7, 1:n + 6]
+        - divg_pad[:, 0:n + 6, 1:n + 6]
+    )                                                       # (6, n+6, n+5)
+    divg_u = cdgrid.dy_edge_x * cdgrid.rdxc                  # (6, n+1, n)
+    divg_u_pad = jnp.pad(
+        divg_u, [(0, 0), (3, 2), (2, 3)], mode="edge",
+    )                                                       # (6, n+6, n+5)
+    vc = vc_raw * divg_u_pad
+
+    # y-flux uc at i ∈ [-2, n+2] (shape n+5), j ∈ [-3, n+2] (shape n+6).
+    uc_raw = (
+        divg_pad[:, 1:n + 6, 1:n + 7]
+        - divg_pad[:, 1:n + 6, 0:n + 6]
+    )                                                       # (6, n+5, n+6)
+    divg_v = cdgrid.dx_edge_y * cdgrid.rdyc                  # (6, n, n+1)
+    divg_v_pad = jnp.pad(
+        divg_v, [(0, 0), (2, 3), (3, 2)], mode="edge",
+    )                                                       # (6, n+5, n+6)
+    uc = uc_raw * divg_v_pad
+
+    # divergence at corner for output i, j ∈ [-2, n+2] (write shape n+5).
+    #   uc(i, j-1) for j ∈ [-2, n+2] → uc[..., 0:n+5]
+    #   uc(i, j)   for j ∈ [-2, n+2] → uc[..., 1:n+6]
+    #   vc(i-1, j) for i ∈ [-2, n+2] → vc[..., 0:n+5, :]
+    #   vc(i,   j) for i ∈ [-2, n+2] → vc[..., 1:n+6, :]
+    lap_divg_raw = (
+        uc[:, :, 0:n + 5]
+        - uc[:, :, 1:n + 6]
+        + vc[:, 0:n + 5, :]
+        - vc[:, 1:n + 6, :]
+    )                                                       # (6, n+5, n+5)
+
+    # Cube-vertex corner removal — canonical (0,0),(n,0),(n,n),(0,n)
+    # sit at write-region local (2,2),(n+2,2),(n+2,n+2),(2,n+2).
+    # uc indices: south-halo row j = -2 → uc[..., 0]; interior j = n
+    # → uc[..., n+3].
+    sw = uc[:, 2, 0]            # uc at (i = 0,  j = -2)
+    se = uc[:, n + 2, 0]        # uc at (i = n,  j = -2)
+    ne = uc[:, n + 2, n + 3]    # uc at (i = n,  j = n)
+    nw = uc[:, 2, n + 3]        # uc at (i = 0,  j = n)
+    lap_divg = lap_divg_raw
+    lap_divg = lap_divg.at[:, 2, 2].add(-sw)
+    lap_divg = lap_divg.at[:, n + 2, 2].add(-se)
+    lap_divg = lap_divg.at[:, n + 2, n + 2].add(ne)
+    lap_divg = lap_divg.at[:, 2, n + 2].add(nw)
+
+    # normalise by rarea_c (extended via edge mode to (n+5, n+5)).
+    rarea_c_pad = jnp.pad(
+        cdgrid.rarea_c, [(0, 0), (2, 2), (2, 2)], mode="edge",
+    )                                                       # (6, n+5, n+5)
+    return lap_divg * rarea_c_pad
+
+
 def fv3_corner_laplacian_nord(
     divg_d: jnp.ndarray,
     cdgrid: "CubedSphereCDGrid",
@@ -936,9 +1029,10 @@ def fv3_corner_laplacian_nord_expanding_halo(
     matches the expanding-halo convention (single fill_corners call
     before the loop, none between).
 
-    Currently supports nord ∈ {0, 1, 2}.  nord >= 3 raises
-    NotImplementedError pending iter-900+ ``fv3_laplacian_step_from_pad_h3``
-    helper.
+    Supports nord ∈ {0, 1, 2, 3} — matches iter-890
+    ``validate_corner_div_damp_nord`` FV3 namelist range.
+    nord=3 chain (iter-903): h3 → h2 → h1 step composition.
+    nord >= 4 raises NotImplementedError (outside FV3 namelist).
 
     Parameters
     ----------
@@ -946,7 +1040,7 @@ def fv3_corner_laplacian_nord_expanding_halo(
         Corner-staggered divergence (canonical interior).
     cdgrid : CubedSphereCDGrid
     nord : int
-        Number of Laplacian iterations.  Must be in {0, 1, 2}.
+        Number of Laplacian iterations.  Must be in {0, 1, 2, 3}.
 
     Returns
     -------
@@ -956,7 +1050,7 @@ def fv3_corner_laplacian_nord_expanding_halo(
     Raises
     ------
     NotImplementedError
-        For nord >= 3 (h3 step not yet implemented).
+        For nord >= 4 (outside FV3 namelist range).
     ValueError
         For nord < 0.
     """
@@ -975,10 +1069,16 @@ def fv3_corner_laplacian_nord_expanding_halo(
         divg_pad = pad_halo(divg_d, halo=2)
         mid = fv3_laplacian_step_from_pad_h2(divg_pad, cdgrid)
         return fv3_laplacian_step_from_pad_h1(mid, cdgrid)
+    if nord == 3:
+        # FV3_3D iter 903: nord=3 expanding-halo via h3 → h2 → h1 chain.
+        divg_pad = pad_halo(divg_d, halo=3)
+        h2 = fv3_laplacian_step_from_pad_h3(divg_pad, cdgrid)
+        h1 = fv3_laplacian_step_from_pad_h2(h2, cdgrid)
+        return fv3_laplacian_step_from_pad_h1(h1, cdgrid)
     raise NotImplementedError(
         f"nord={nord} expanding-halo not yet implemented "
-        f"(need fv3_laplacian_step_from_pad_h3 helper for nord=3); "
-        f"use fv3_corner_laplacian_nord re-pad path until iter-900+."
+        f"(only nord ∈ {{0, 1, 2, 3}} supported, matching iter-890 "
+        f"validate_corner_div_damp_nord range)."
     )
 
 

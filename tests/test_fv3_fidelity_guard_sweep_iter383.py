@@ -480,6 +480,7 @@ _GUARD_MODULES = (
     "test_fv3_laplacian_step_pad_h2_iter898",        # iter-898 add
     "test_fv3_expanding_halo_iter899",               # iter-899 add
     "test_fv3_model_nord_validation_iter902",        # iter-902 add
+    "test_fv3_laplacian_step_pad_h3_iter903",        # iter-903 add
 )
 
 

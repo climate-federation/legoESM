@@ -120,13 +120,30 @@ def test_nord_2_quantitative_equivalence_iter901():
     )
 
 
-def test_nord_3_raises():
-    """nord >= 3 not yet implemented — raises NotImplementedError."""
+def test_nord_3_now_supported_iter903():
+    """nord=3 added at iter-903 (h3 → h2 → h1 chain).
+
+    Originally raised NotImplementedError per iter-899's open
+    follow-up; iter-903 closes that gap by adding
+    ``fv3_laplacian_step_from_pad_h3``.  This test pins the new
+    behaviour: nord=3 returns a finite (6, n+1, n+1) array.
+    """
     n = 8
     cdgrid = _cdgrid(n)
     divg = jnp.zeros((6, n + 1, n + 1))
-    with pytest.raises(NotImplementedError, match="nord=3"):
-        fv3_corner_laplacian_nord_expanding_halo(divg, cdgrid, nord=3)
+    out = fv3_corner_laplacian_nord_expanding_halo(divg, cdgrid, nord=3)
+    assert out.shape == (6, n + 1, n + 1)
+    # zero input → zero output (Laplacian linear)
+    assert float(jnp.max(jnp.abs(out))) == 0.0
+
+
+def test_nord_4_raises_iter903():
+    """nord >= 4 outside FV3 namelist range — still NotImplementedError."""
+    n = 8
+    cdgrid = _cdgrid(n)
+    divg = jnp.zeros((6, n + 1, n + 1))
+    with pytest.raises(NotImplementedError, match="nord=4"):
+        fv3_corner_laplacian_nord_expanding_halo(divg, cdgrid, nord=4)
 
 
 def test_nord_negative_raises():
