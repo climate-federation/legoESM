@@ -251,6 +251,27 @@ Regression test `test_K_approaches_Ksat_at_saturation` walks h from h_crit down
 to 1e-12 m, asserts monotone K and `K(1e-12) = K_sat` to rtol=1e-6.  Full
 `tests/unit/test_land_ice_soil_hydraulics.py` (38 tests) green.
 
+## Iter-85 — Thomas tridiag denominator-floor lost sign for tiny negatives
+`src/legoesm/land/tridiag.py:42-55`.  The forward-sweep safety floor
+`denom = jnp.where(jnp.abs(denom) < _tiny, jnp.sign(denom)*_tiny + _tiny,
+denom)` collapsed to **exactly 0** whenever `denom` was a small negative
+number, because `sign(-x)*_tiny + _tiny = -_tiny + _tiny = 0`.  The very
+next line (`c_col[k] / denom`) then divided by zero.
+
+Trigger condition: a poorly-conditioned step in the Richards / soil-thermal
+backward-Euler solve that produces a denominator in `(-_tiny, 0)`.  Unlikely
+with default physical inputs but possible at low precision (float32) for the
+mixed-dtype branch, and a latent landmine.
+
+Fix: compute the sign branchlessly (`sign = jnp.where(denom >= 0.0, 1.0,
+-1.0)`) and floor magnitude with `sign * _tiny`; same fix applied to the
+init-row `denom0`.
+
+Regression test `test_tridiag_solver_tiny_negative_denominator` constructs
+a 2-row float32 system whose row-1 denominator falls below float32 `_tiny`
+and asserts the solution is finite.  Full `tests/land/unit/` + soil-
+hydraulics suite (208 tests) green.
+
 ## Next iterations
 Continue addressing further codex findings and direct-inspection sweeps until all
 schemes are provably conservative, monotone, CFL-safe, and AD-safe across mixed

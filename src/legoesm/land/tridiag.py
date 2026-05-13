@@ -42,13 +42,20 @@ def thomas_solve_batch(
         def fwd(carry, k):
             c_p, d_p = carry
             denom = b_col[k] - a_col[k] * c_p
-            denom = jnp.where(jnp.abs(denom) < _tiny,
-                              jnp.sign(denom) * _tiny + _tiny, denom)
+            # Floor |denom| at _tiny while preserving sign.  The previous
+            # ``jnp.sign(denom) * _tiny + _tiny`` formulation collapsed to
+            # exactly 0 whenever ``denom`` was a small *negative* value
+            # (sign = -1 ⇒ -_tiny + _tiny = 0), which then divided by zero
+            # in ``c_col[k] / denom`` on the next line.  Treat zero as a
+            # positive sign so the floored value is never zero.
+            sign = jnp.where(denom >= 0.0, 1.0, -1.0)
+            denom = jnp.where(jnp.abs(denom) < _tiny, sign * _tiny, denom)
             c_new = c_col[k] / denom
             d_new = (d_col[k] - a_col[k] * d_p) / denom
             return (c_new, d_new), (c_new, d_new)
 
-        denom0 = jnp.where(jnp.abs(b_col[0]) < _tiny, _tiny, b_col[0])
+        sign0 = jnp.where(b_col[0] >= 0.0, 1.0, -1.0)
+        denom0 = jnp.where(jnp.abs(b_col[0]) < _tiny, sign0 * _tiny, b_col[0])
         init = (c_col[0] / denom0, d_col[0] / denom0)
         _, (c_primes, d_primes) = jax.lax.scan(fwd, init, jnp.arange(1, n))
         c_all = jnp.concatenate([jnp.array([init[0]]), c_primes])

@@ -263,6 +263,29 @@ class TestSoilThermalX64(unittest.TestCase):
         npt.assert_allclose(x, 0.5, atol=1e-12)
         self.assertEqual(x.dtype, jnp.float64)
 
+    def test_tridiag_solver_tiny_negative_denominator(self):
+        """Iter-85 regression: the previous ``jnp.sign(denom)*_tiny + _tiny``
+        floor collapsed tiny *negative* denominators to exactly 0, blowing
+        up the very next division.  Construct a system whose row-1
+        intermediate denominator is a small negative number and confirm
+        the solver does not produce inf/NaN.
+        """
+        from legoesm.land.tridiag import thomas_solve_batch
+
+        # Two-row system where (b1 - a1 * c'_0) is forced to be a small
+        # negative number.  Choose b0 = 1, c0 = 1 ⇒ c'_0 = 1.  Then take
+        # a1 = 1 and b1 = 1 - 1e-39, so denom1 ≈ -1e-39 (well below
+        # float64 _tiny ≈ 2.225e-308 only at the subnormal floor, but
+        # below float32 _tiny ≈ 1.18e-38).  Cast to float32 so the bug
+        # actually fires on the floor.
+        a = jnp.array([[0.0, 1.0]], dtype=jnp.float32)
+        b = jnp.array([[1.0, 1.0 - 1e-39], [1.0, 1.0]], dtype=jnp.float32)[:1]
+        c = jnp.array([[1.0, 0.0]], dtype=jnp.float32)
+        d = jnp.array([[1.0, 1.0]], dtype=jnp.float32)
+
+        x = thomas_solve_batch(a, b, c, d)
+        assert jnp.all(jnp.isfinite(x)), f"tridiag produced non-finite x: {x}"
+
 
 # =========================================================================
 # 4. Root-zone moisture sensitivity with transpiration
