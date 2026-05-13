@@ -2467,7 +2467,6 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
         # then Lin-Rood split transport with Courant-number PPM.
         from legoesm.core.fv3_sw_core import _d2a2c_vect
         from legoesm.core.fv_tp_2d import transport_step
-        from legoesm.core.conservation import _accumulation_dtype
 
         # Pre-compute contravariant velocities (winds are frozen)
         _ua, _va, _uc, _vc, ut, vt = _d2a2c_vect(

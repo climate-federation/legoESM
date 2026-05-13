@@ -155,3 +155,4 @@ SW, latlon PE, MPAS SW, MPAS PE, MPAS NH, spectral PE, spectral NH.
 | 48   | fp64 in `diagnostics/column_integrals.column_water_vapor` (canonical CWV helper). `precision_drift` + `monthly_means` audited, already clean. | one canonical fp64 CWV |
 | 49   | Remove dead `fix_mass_hydrostatic_latlon` (unused). | trim orphan |
 | 50   | Doc compress (iter-41..49 rolled into single rows). | every conservation helper across `core/conservation.py` + `diagnostics/{total_energy_*, angular_momentum, energy_budget, column_integrals}.py` now performs non-trivial arithmetic in fp64 before any reduction. |
+| 51   | Drop stale `_accumulation_dtype` import from `scripts/run_atmosphere_test_matrix.py` (imported but never used after iter-1/4/5/12 migrated all live conservation sites to `_conservation_accumulator`).  Cube cosine_bell quick PASS. | trim stale import |
