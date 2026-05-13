@@ -925,6 +925,99 @@ def fix_mass_mpas(state, target_mass, mesh):
     return state._replace(h=h_fixed)
 
 
+def compute_nh_dry_mass_mpas(
+    rho_prime: jax.Array,
+    height_coord,
+    terrain_metric,
+    mesh,
+) -> jax.Array:
+    """Global dry mass on a Voronoi mesh for the non-hydrostatic model.
+
+    M = sum_k(sum_cells J · (rho_ref_k + rho_prime_k) · dz_k · areaCell).
+
+    Parameters
+    ----------
+    rho_prime : jax.Array, shape (nCells, nlev)
+    height_coord : HeightCoordinate (rho_ref, dz attrs as in
+        ``compute_nh_dry_mass`` cubed-sphere variant).
+    terrain_metric : TerrainMetric (jacobian shape ``(nCells,)``).
+    mesh : VoronoiMesh.
+
+    Returns
+    -------
+    jax.Array : scalar dry mass [kg].
+    """
+    rho_total = height_coord.rho_ref + rho_prime  # (nCells, nlev)
+    J = terrain_metric.jacobian                   # (nCells,)
+    dz = height_coord.dz                          # (nlev,)
+    col_mass = jnp.sum(
+        J[:, None] * rho_total * dz[None, :], axis=-1,
+    )                                             # (nCells,)
+    return global_integral_voronoi(col_mass, mesh)
+
+
+def fix_mass_nonhydrostatic_mpas(
+    state,
+    target_mass: jax.Array,
+    height_coord,
+    terrain_metric,
+    mesh,
+):
+    """Fix dry-mass conservation on a Voronoi mesh.
+
+    Applies a uniform additive correction to ``rho_prime`` so the
+    global dry mass matches ``target_mass``.  Volume normalisation is
+    ``∫ J · dz · dA`` so the correction has units of density (kg/m³)
+    and is broadcast across levels — matches the cubed-sphere
+    ``fix_mass_nonhydrostatic`` convention.
+
+    Parameters
+    ----------
+    state : MPASNonHydrostaticState
+    target_mass : jax.Array
+        Target dry mass (e.g. computed once via
+        ``compute_nh_dry_mass_mpas`` on the initial state).
+    height_coord, terrain_metric, mesh : as for
+        :func:`compute_nh_dry_mass_mpas`.
+    """
+    rho_total = height_coord.rho_ref + state.rho_prime.data
+    J = terrain_metric.jacobian
+    dz = height_coord.dz
+    col_mass = jnp.sum(
+        J[:, None] * rho_total * dz[None, :], axis=-1,
+    )                                             # (nCells,)
+    col_vol = J * jnp.sum(dz)                     # (nCells,)
+    current_mass, total_vol = _batch_global_area_sums_voronoi(
+        [col_mass, col_vol], mesh,
+    )
+    correction = (target_mass - current_mass) / total_vol
+    rho_fixed = state.rho_prime.replace(
+        data=state.rho_prime.data + correction,
+    )
+    return state._replace(rho_prime=rho_fixed)
+
+
+def _batch_global_area_sums_voronoi(
+    arrays: list[jax.Array],
+    mesh,
+) -> list[jax.Array]:
+    """Voronoi analogue of :func:`_batch_global_area_sums`.
+
+    Stacks the arrays along a new trailing axis, multiplies by
+    ``mesh.areaCell`` (cast to the fp64 conservation accumulator),
+    reduces once locally, then applies the multi-rank allreduce when
+    the mesh is sharded.
+    """
+    acc = _conservation_accumulator()
+    area_acc = mesh.areaCell.astype(acc)
+    stacked = jnp.stack([arr.astype(acc) for arr in arrays], axis=-1)
+    summed = jnp.sum(stacked * area_acc[..., None], axis=0)  # (n_arrays,)
+    local_sums = [summed[..., i] for i in range(len(arrays))]
+    if _is_distributed():
+        return batch_allreduce_mpi(local_sums, op="sum")
+    return local_sums
+
+
 def fix_energy_mpas(state, target_energy, mesh, g=constants.g):
     """Fix energy conservation on Voronoi mesh via velocity scaling.
 

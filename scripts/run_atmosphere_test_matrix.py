@@ -4572,7 +4572,10 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
         nh_config = MPASCompressibleEulerConfig(
             n_acoustic_substeps=_n_acoustic, sponge_width=_sponge_w,
             sponge_coeff=_sponge_c,
-            nu_del4=_nu_del4)
+            nu_del4=_nu_del4,
+            # iter-8: opt into anchored mass fixer (same on/off semantics
+            # as the cubed-sphere NH config in iter-7).
+            fix_mass=True, anchor_mass_to_initial=True)
         model = MPASCompressibleEulerModel(
             mesh, hcoord, tmetric, nh_config)
 
@@ -4602,12 +4605,17 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             return (u_ok and cell_ok, metric)
 
         def scalar_fn(s):
+            # iter-8: track total dry mass alongside |w|_max (parallel
+            # to iter-7's cube NH scalar_fn extension).
+            from legoesm.core.conservation import compute_nh_dry_mass_mpas
             return {
                 "max_abs_w": float(jnp.max(jnp.abs(s.w.data))),
                 "mean_theta_prime": _area_weighted_mean(
                     s.theta_prime.data, mesh.areaCell),
                 "mean_rho_prime":   _area_weighted_mean(
                     s.rho_prime.data,   mesh.areaCell),
+                "mass":             float(compute_nh_dry_mass_mpas(
+                    s.rho_prime.data, hcoord, tmetric, mesh)),
             }
 
         def extract_fn(s):

@@ -353,15 +353,50 @@ diagnostic noise).  ``tests/atmosphere/shallow_water/integration/test_shallow_wa
 ``rho_prime`` by the anchored correction; dynamics remain stable.
 ``tests/atmosphere/nonhydrostatic`` 60/60 PASS.
 
-## Iteration 8 plan
+## Iteration 8 — MPAS NH anchored dry-mass fixer (FIX)
 
-- MPAS NH: add ``fix_mass`` / ``anchor_mass_to_initial`` + a
-  ``compute_nh_dry_mass`` MPAS variant.  Wire into the matrix runner's
-  ico NH scalar_fn so we get cross-grid mass-drift visibility.
-- Spectral NH (``spectral_nh.py``): mirror iter-3 spectral PE pattern — log-
-  scale rescale on the ``rho_prime_hat[0]`` or equivalent scalar mode.
-- TC2a / TC3 cube NH mass-drift run once iter-7 is on main.
-- Williamson-2 v-wind visual check.
+**Gap.** MPAS NH had no mass conservation enforcement at all.  Cube NH
+already shipped ``compute_nh_dry_mass`` + ``fix_mass_nonhydrostatic``;
+MPAS NH had neither, and the matrix runner reported only ``|w|_max``.
+
+**Changes:**
+
+- ``src/legoesm/core/conservation.py``: add the Voronoi analogues
+  ``compute_nh_dry_mass_mpas`` and ``fix_mass_nonhydrostatic_mpas`` (uniform
+  ``rho_prime`` correction normalised by ``∫ J · dz · dA``, same
+  convention as the cubed-sphere variant).  Add the
+  ``_batch_global_area_sums_voronoi`` helper for the two-sum reduction.
+- ``src/legoesm/atmosphere/dynamics/compressible_euler_mpas.py``:
+  ``MPASCompressibleEulerConfig`` gains ``fix_mass`` /
+  ``anchor_mass_to_initial`` (both default False).
+  ``MPASCompressibleEulerModel`` gains a ``_target_mass`` slot and a
+  ``compute_dry_mass`` helper; ``step()`` is split into a Python wrapper
+  (snapshot outside JIT) plus the existing body renamed ``_step_jit``,
+  which now applies the fixer after the split-explicit RK3 step.
+- ``scripts/run_atmosphere_test_matrix.py``: opt into ``fix_mass=True,
+  anchor_mass_to_initial=True`` at the ico NH config; mirror iter-7 by
+  adding ``"mass": float(compute_nh_dry_mass_mpas(...))`` to the ico NH
+  ``scalar_fn``.
+
+**Validation (via `run_atmosphere_test_matrix.py --only nh --grid icosahedral --test dcmip_tc1 --quick`):**
+
+| Diagnostic           | Baseline       | Iter-8        |
+|----------------------|----------------|---------------|
+| dcmip_tc1 |w|_max    | 0.0145 m/s     | 0.0145 m/s    |
+| dcmip_tc1 mass drift | (not tracked)  | **0.00e+00** (exact) |
+
+``tests/atmosphere/nonhydrostatic`` 60/60 PASS.  Spectral NH still
+lacks a fixer (iter-9 target).
+
+## Iteration 9 plan
+
+- Spectral NH (``spectral_nh.py``): mirror iter-3 spectral PE — the
+  prognostic ``rho_prime_hat`` (or analogue) needs a log-scale rescale on
+  its constant mode.  Or, if the spectral NH state stores ``ρ' = rho-rho_ref``
+  in spectral space, an additive constant via ``rho_prime_hat[0] +=
+  Δρ·sqrt(4π)`` matches the cube uniform-correction convention.
+- TC2a / TC3 cube + ico NH mass-drift runs (longer integrations).
+- Williamson-2 v-wind visual snapshot regression (CLAUDE.md guidance).
 
 ## Improvement log
 
@@ -389,3 +424,9 @@ diagnostic noise).  ``tests/atmosphere/shallow_water/integration/test_shallow_wa
   (`CompressibleEulerConfig.fix_mass=True, anchor_mass_to_initial=True`)
   at all three TC sites; expose `mass` in scalar_fn so drift becomes
   visible.  Cube NH TC1 mass drift `(not tracked) → 0.00e+00` (exact).
+- **iter-8 (2026-05-13)**: MPAS NH anchored dry-mass fixer.  New helpers
+  `compute_nh_dry_mass_mpas` + `fix_mass_nonhydrostatic_mpas` +
+  `_batch_global_area_sums_voronoi` in `core/conservation.py`; config flags
+  + lazy snapshot + step wrapper in `compressible_euler_mpas.py`.
+  Ico NH TC1 mass drift `(not tracked) → 0.00e+00` (exact); `|w|_max`
+  unchanged at 0.0145.
