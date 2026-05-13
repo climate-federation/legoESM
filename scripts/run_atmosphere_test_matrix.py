@@ -4819,7 +4819,18 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             w_max = float("nan")
     else:
         w_max = float("nan")
-    notes = f"|w|_max={w_max:.4f} m/s, dt={dt:.2f}s"
+    # iter-10: surface mass drift in the NH notes line (parallel to the
+    # SW / hydro runners).  ``diag`` is the dict accumulated from
+    # ``scalar_fn``; iter-7..9 added ``"mass"`` to every NH grid path.
+    _mass_series = diag.get("mass") if isinstance(diag, dict) else None
+    if _mass_series and len(_mass_series) >= 2:
+        mass_drift = _compute_drift(_mass_series)
+        notes = (
+            f"|w|_max={w_max:.4f} m/s, mass_drift={mass_drift:.2e}, "
+            f"dt={dt:.2f}s"
+        )
+    else:
+        notes = f"|w|_max={w_max:.4f} m/s, dt={dt:.2f}s"
 
     _write_results_txt(output_dir, {
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
