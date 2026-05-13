@@ -10991,6 +10991,99 @@ def soil_heat_flux_g_fv3(
     return c_g * r_n
 
 
+def priestley_taylor_le_fv3(
+    available_energy: jax.Array,
+    delta_pa_k: jax.Array,
+    gamma_pa_k: jax.Array,
+    alpha_pt: float = 1.26,
+    denom_floor: float = 1e-6,
+) -> jax.Array:
+    """FV3_3D iter 881: Priestley-Taylor 1972 equilibrium ET primitive.
+
+    Priestley-Taylor 1972 (Monthly Weather Rev.) equilibrium-
+    evaporation closure for well-watered surfaces — radiation-
+    limited form with no aerodynamic-conductance dependence:
+
+        λE_PT = α_PT · Δ / (Δ + γ) · A        (W/m²)
+
+    Where:
+      * A         — available energy A = R_n − G (W/m²); from
+                    iter-876 + iter-880.
+      * Δ         — slope of saturation-vapor-pressure curve (Pa/K);
+                    from iter-874.
+      * γ         — psychrometric constant (Pa/K); from iter-873.
+      * α_PT      — Priestley-Taylor coefficient (dimensionless);
+                    default 1.26 (PT 1972 calibration over open
+                    water and wet vegetation).
+
+    Output: latent heat flux λE in W/m².
+
+    α_PT regime values:
+      | surface                   | α_PT       |
+      |---------------------------|------------|
+      | Open water (PT 1972)      | 1.26       |
+      | Wet grass / saturated soil| 1.26       |
+      | Forest canopy             | 1.05–1.20  |
+      | Crop midday               | 1.0–1.26   |
+      | Mediterranean dry         | 0.6–0.9    |
+      | Desert / arid             | 0.3–0.7    |
+
+    **PT vs PM** (iter-870):
+      * PM = full big-leaf form with aerodynamic + stomatal
+        conductance (g_a, g_s); needs (Δ, γ, VPD, g_s, g_a, A).
+      * PT = equilibrium form assumes VPD-driven term is fraction
+        α_PT − 1 of radiation term; needs only (Δ, γ, α_PT, A).
+      * PT collapse: λE_PT = α_PT · (Δ/(Δ+γ))·A; corresponds to PM
+        with VPD-driven aerodynamic-term = (α_PT−1)·(Δ/(Δ+γ))·A.
+      * For well-watered surfaces PT ≈ PM at ~5% accuracy.
+      * For stressed surfaces PM is more accurate (resolves
+        stomatal-closure suppression via g_s).
+
+    Equilibrium limit (Δ → ∞ or saturated air):
+        λE_PT → α_PT · A.
+    Radiation-dominated tropics: λE_PT ≈ A × 1.26 × 0.7 ≈ 0.88·A.
+
+    Composes with iter-873 γ, iter-874 Δ, iter-876 R_n, iter-880
+    G — all PM-input primitives reused for PT.  Pairs with iter-870
+    PM to form **ET-formulation duo**:
+
+        A, Δ, γ                → iter-881 PT λE  (equilibrium form)
+        A, Δ, γ, VPD, g_s, g_a → iter-870 PM λE  (full Monteith form)
+
+    Caller picks PT for sparse-data (no g_s/g_a) or wet-surface
+    regimes; PM for full closure when all inputs available.
+
+    Used by: Priestley-Taylor 1972 MWR origin, Bonan 2008 land-
+    model textbook ch. 11, Brutsaert 1982 Evaporation, Fisher
+    et al. 2008 RSE PT-based global-ET reconstruction (PT-JPL),
+    NASA SMAP-MetOp ET-product validation, CLM5/JULES sparse-
+    data ET fallback.
+
+    ``denom_floor`` prevents div-by-0 in Δ+γ → 0 (pathological
+    cold-arid regime).
+
+    Parameters
+    ----------
+    available_energy : jax.Array
+        A = R_n − G (W/m²); positive for daytime.
+    delta_pa_k : jax.Array
+        de_sat/dT (Pa/K); from iter-874.
+    gamma_pa_k : jax.Array
+        Psychrometric constant (Pa/K); from iter-873.
+    alpha_pt : float
+        Priestley-Taylor coefficient; default 1.26.
+    denom_floor : float
+        Lower bound on (Δ+γ); default 1e-6.
+
+    Returns
+    -------
+    le : jax.Array
+        Latent heat flux (W/m²); ≥ 0 typically.
+    """
+    denom = jnp.maximum(delta_pa_k + gamma_pa_k, denom_floor)
+    return alpha_pt * delta_pa_k / denom * available_energy
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

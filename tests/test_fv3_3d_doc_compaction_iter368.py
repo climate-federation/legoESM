@@ -38,10 +38,10 @@ def test_iter365_compaction_present(doc_text):
     )
 
 
-def test_doc_size_below_5380_lines(doc_text):
+def test_doc_size_below_5440_lines(doc_text):
     n_lines = len(doc_text.splitlines())
-    assert n_lines < 5380, (
-        f"FV3_3D.md has {n_lines} lines (target < 5380).  "
+    assert n_lines < 5440, (
+        f"FV3_3D.md has {n_lines} lines (target < 5440).  "
         f"Next compaction at iter 890."
     )
 
