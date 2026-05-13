@@ -4518,7 +4518,16 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 hyperdiff_coeff=hd_tc3,
                 hyperdiff_w_coeff=hd_tc3,
                 acoustic_off_centering=0.2,
-                fix_mass=True, anchor_mass_to_initial=True)
+                fix_mass=True, anchor_mass_to_initial=True,
+                # new_test_dycores iter-7: same iter-697/698 flags as
+                # TC1/TC2.  Pre-change TC3 cube |w|_max = 23.07 m/s vs
+                # ico 10.24 (~2.2x gap).  TC3 uses Kessler microphysics
+                # + squall-line dynamics; smallest expected improvement
+                # of the three NH cases since the cube's |w| is
+                # dominated by physical convective updrafts, not
+                # discretization noise.
+                use_fv3_vector_halo_uv=True,
+                use_fv3_a2b_ord4_vector_uv=True)
         else:
             raise ValueError(f"Unknown NH test case: {test_case}")
 
