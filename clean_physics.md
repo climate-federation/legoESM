@@ -341,6 +341,40 @@ a bug.
 
 No code changes this iteration.
 
+## Iter-115 — `barotropic_common` + `barotropic_latlon_cgrid` audit
+Audited `ocean/dynamics/barotropic_common.py` (99 LOC, shared helpers)
+and `ocean/dynamics/barotropic_latlon_cgrid.py` (433 LOC, explicit
+forward-backward solver).
+
+Verified clean:
+- **`compute_filter_weights`**: cosine bell `1 + cos(2π·(i - n/2)/n)`
+  for `n_substeps ≥ 2`; falls back to box filter for `n_substeps < 2`
+  (iter-1 bug #4 fix held — cosine collapses to 0 at `n=1` giving
+  divide-by-zero in `eta_sum / w_total`).
+- **`bebt_blend`**: `bebt · η_old + (1 − bebt) · η_new` semi-implicit
+  PGF blend; MOM6 default bebt=0.2 damps fastest barotropic gravity
+  waves (#205).
+- **`maxvel_clip`**: symmetric `clip(field, ±maxvel)` suppresses
+  runaway velocities before crashes.
+- **Lat-lon C-grid barotropic solver**:
+  - Min-rule face depth `H_u = min(roll(H), H)` matches implicit solver
+    (arithmetic mean overestimates face depth at topographic steps).
+  - Eta-floor clamp `eta_floor = min_water_col − H_bathy` keeps the
+    layer thickness positive; redistribution preserves total volume.
+  - Flux-form barotropic diffusion `div(ν_face · grad η)` (NOT
+    `ν_cell · ∇²η`) exact volume conservation on the cos(lat)-varying
+    spherical grid.
+  - Forward-backward Coriolis (Matsuno): `U_bar_new = U_bar_c + dt·(f_u
+    V_at_u − g ∂η/∂x + F_slow_u)`, then `V_bar_new` uses the *just-
+    updated* `U_new_at_v` — preserves energy on inertial oscillation.
+  - Divergence damping `−γ_div · grad(div(u_bar))` targets the eta-
+    checkerboard mode without affecting geostrophic flow (#205).
+  - Pad-with-zero pole rows for wall BC; cosine time filter for
+    eta/velocity accumulators, box filter for `Hu`/`Hv` transport
+    accumulators (volume conservation).
+
+No code changes this iteration.
+
 ## Next iterations
 Continue addressing codex findings and direct-inspection sweeps until all schemes are
 provably conservative, monotone, CFL-safe, and AD-safe across mixed wet/dry grids.
