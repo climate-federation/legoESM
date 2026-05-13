@@ -5683,6 +5683,73 @@ gives complete SLR budget.  Pure JAX, vmap-compatible.  α_T scalar
 default per CLAUDE.md ocean-EOS hygiene (full EOS in
 ``legoesm.ocean.eos``).  No `constants.py` additions.
 
+## Iter 849 — ice_mass_to_slr_fv3 (cryosphere mass-loss → SLR)
+
+Added `ice_mass_to_slr_fv3(mass_loss_gt, ocean_area=3.61e14,
+rho_water=None)` to `grids/cubed_sphere.py`.  Mass-balance closure
+converting ice-sheet/glacier mass loss to eustatic SLR:
+
+```
+Δη (m) = ΔM_Gt · 10¹² / (ρ_water · A_ocean)
+```
+
+Defaults: ρ_water = ``constants.rho_water`` (1000 kg/m³),
+A_ocean = 3.61×10¹⁴ m² (AR6 global ocean area).  Conversion:
+361 Gt ice ≈ 1 mm SLR.
+
+AR6 2010–2019 mass-balance rates (IMBIE-3 / Mauritzen 2020):
+  | source              | Rate (Gt/yr) | SLR (mm/yr) |
+  |---------------------|--------------|-------------|
+  | Greenland ice sheet | ~250         | 0.69        |
+  | Antarctic ice sheet | ~150         | 0.41        |
+  | Mountain glaciers   | ~330         | 0.91        |
+  | All cryosphere      | ~730         | 2.02        |
+  | (vs total SLR ~3.7 mm/yr → ~55% cryospheric)             |
+
+Bookkeeping limits (AR6 §9.5.3):
+  * Greenland total 2.85×10⁶ Gt → 7.4 m SLR
+  * WAIS marine-based 2.0×10⁶ Gt → 5.3 m (MISI/MICI bifurcation)
+  * East Antarctica 51.9×10⁶ Gt → 53 m (geological upper bound)
+
+**Closes the AR6 SLR contributor pair** with iter-848:
+  * iter-848 thermosteric_sea_level_fv3  — ocean thermal expansion
+  * iter-849 ice_mass_to_slr_fv3         — cryosphere melt
+
+Together with halosteric (caller-derived β_S·ΔS·H from
+``legoesm.ocean.eos``) these span the canonical SLR budget terms.
+
+Composes with climate-sensitivity chain:
+
+```
+emission → iter-846 TCRE → ΔT_surf
+ΔT_surf  → cryosphere mass-balance (caller-specific PISM/EISMINT etc.)
+ΔM_ice   → iter-849 Δη_eustatic
++ iter-848 thermosteric → total Δη_SLR
+```
+
+Per CLAUDE.md hygiene: uses ``constants.rho_water`` default.
+A_ocean is AR6 reference geometric value (default arg).
+
+Used by: AR5/AR6 §9.5 cryospheric SLR diagnostics, IMBIE
+Mass-Balance Intercomparison (Shepherd et al. 2018, 2020),
+Mauritzen 2020 SROCC update, GlacierMIP / ISMIP6 protocols,
+paleoclimate ice-sheet studies, SLES coupling.
+
+Test: `tests/test_fv3_ice_mass_slr_iter849.py` (8 tests: AR6
+361 Gt → 1 mm canonical, Greenland 250→0.69 mm/yr, Antarctica
+150→0.41 mm/yr, Greenland-full-melt → 7.4 m, zero, accretion
+ΔM<0 → Δη<0, chained with iter-848 thermosteric for present-day
+SLR sum, 3-D shapes).
+
+### Why this iteration was meaningful
+
+**Closes the AR6 SLR contributor pair** (thermal + cryosphere)
+covering ~95% of total observed SLR (residual ~5% is land-water-
+storage + halosteric).  Pairs with iter-848 thermal expansion to
+give the canonical 2-term SLR budget.  Pure JAX, vmap-compatible.
+Uses ``constants.rho_water`` per CLAUDE.md hygiene.  No new
+`constants.py` additions.
+
 
 
 

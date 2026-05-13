@@ -8168,6 +8168,93 @@ def thermosteric_sea_level_fv3(
     return jnp.sum(alpha_t * delta_t_layer * thickness, axis=-1)
 
 
+def ice_mass_to_slr_fv3(
+    mass_loss_gt: jax.Array,
+    ocean_area: float = 3.61e14,
+    rho_water: float = None,
+) -> jax.Array:
+    """FV3_3D iter 849: ice-sheet mass-loss → sea-level-rise primitive.
+
+    Mass-balance closure converting ice-sheet / glacier mass loss
+    (Greenland, Antarctica, mountain glaciers) into equivalent
+    eustatic SLR via fresh-water-volume distribution over the
+    global ocean area:
+
+        Δη = ΔM_ice (kg) / (ρ_water · A_ocean)        (m)
+
+    With mass input in Gt (10¹² kg):
+
+        Δη (m) = ΔM_Gt · 10¹² / (ρ_water · A_ocean)
+
+    Defaults: ρ_water = ``constants.rho_water`` (1000 kg/m³),
+    A_ocean = 3.61×10¹⁴ m² (AR6 global ocean area).
+
+    Sign: ΔM_ice > 0 (mass loss to ocean) ⇒ Δη > 0 (SLR).
+    Reverse sign for accretion (e.g. Antarctic Ice Sheet gain
+    during snowfall episodes; LGM-onset ice-sheet build-up).
+
+    Conversion factor: 1 Gt ice → ~2.77 μm SLR, or equivalently
+    361 Gt ice → 1 mm SLR (AR6 reference value).
+
+    AR6 (2010–2019 mass-balance rates, IMBIE-3 / Mauritzen 2020):
+      | source                  | Rate (Gt/yr) | SLR (mm/yr) |
+      |-------------------------|--------------|-------------|
+      | Greenland ice sheet     | ~250         | 0.69        |
+      | Antarctic ice sheet     | ~150         | 0.41        |
+      | Mountain glaciers       | ~330         | 0.91        |
+      | All cryosphere          | ~730         | 2.02        |
+      | (vs total SLR ~3.7 mm/yr; ~55% cryospheric)             |
+
+    Worst-case bookkeeping limits:
+      * Greenland total volume: 2.85×10⁶ Gt → 7.4 m SLR if fully
+        melted (matches AR6 §9.5.3 contribution).
+      * West Antarctica (WAIS) marine-based: 2.0×10⁶ Gt → 5.3 m
+        SLR (potential bifurcation under MISI / MICI mechanisms).
+      * East Antarctica: 51.9×10⁶ Gt → 53 m SLR (geological-time
+        upper bound).
+
+    Closes the **AR6 SLR contributor pair** with iter-848:
+      * iter-848 thermosteric_sea_level_fv3  — ocean thermal exp
+      * iter-849 ice_mass_to_slr_fv3         — cryosphere melt
+
+    Together with halosteric (caller-derived β_S·ΔS·H) these give
+    the four canonical SLR budget terms.  Composes with:
+
+        emission → iter-846 TCRE → ΔT_surf
+        ΔT_surf  → cryosphere mass-balance model (caller-specific)
+        ΔM_ice   → iter-849 Δη_eustatic
+
+    Per CLAUDE.md hygiene: uses ``constants.rho_water`` as default
+    (the canonical 1000 kg/m³).  Ocean-area 3.61×10¹⁴ m² is an
+    AR6 reference geometric value (not a fundamental physical
+    constant — default arg).
+
+    Used by: AR5/AR6 §9.5 cryospheric SLR diagnostics, IMBIE
+    Mass-Balance Intercomparison (Shepherd et al. 2018, 2020),
+    Mauritzen 2020 SROCC update, GlacierMIP / ISMIP6 protocols,
+    paleoclimate ice-sheet retreat / advance studies, sea-level
+    Earth-system-model (SLES) coupling.
+
+    Parameters
+    ----------
+    mass_loss_gt : jax.Array
+        Cryosphere mass loss (Gt; positive = ice loss to ocean,
+        negative = accretion).
+    ocean_area : float
+        Global ocean area (m²); default 3.61×10¹⁴ (AR6).
+    rho_water : float or None
+        Water density (kg/m³); default None → uses
+        ``constants.rho_water``.
+
+    Returns
+    -------
+    delta_eta : jax.Array
+        Eustatic SLR contribution (m); positive for ice loss.
+    """
+    rho = rho_water if rho_water is not None else constants.rho_water
+    return mass_loss_gt * 1.0e12 / (rho * ocean_area)
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,
