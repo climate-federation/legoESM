@@ -9,6 +9,33 @@ Branch: `clean_physics`. Driven by Ralph loop + `/codex:adversarial-review`.
 - **Ocean** (`src/legoesm/ocean/physics/`): vertical_mixing, bottom_drag, lateral_mixing, convection, surface_forcing, shortwave_penetration, mixing.
 - **Cryosphere** (`src/legoesm/ice/`): sea_ice, dynamics, itd, rheology, transport.
 
+## Iteration 69 — 2026-05-13
+
+**Inspection iteration on `land/stomata_utils`, `land/param_providers`,
+and `radiation/ozone_ml.py` + `radiation/integration._compute_insolation`
+(no code changes).**
+
+- **`stomata_utils.compute_effective_beta`**: clean dispatch between
+  Farquhar (differland + carbon_state) and Jarvis (else); honours
+  `land_params` overrides on `Vc_max25` / `g1` / `LCMA`.
+- **`param_providers`**: PFT-weighted sigmoid-bounded lookup with
+  `stop_gradient` on `pft_fractions` (prevents accidental
+  differentiation through prescribed data); Neural FCNN with GELU
+  + sigmoid output bounds.  Convexity guarantee via fraction
+  normalisation.
+- **`ozone_ml.predict_ozone_ml`**: bilinear T-scaler / O3-scaler /
+  ridge-coef interpolation on UKESM grid; periodic-longitude wrap
+  handled by `_bilinear_weights_1d(..., periodic_period=360)`.
+  Vertical interp in log-p with bound-clamp extrapolation.
+  Forward differentiable wrt T.
+- **`_compute_insolation`**: standard `S_0 · cos(SZA)` for diurnal
+  cycle, `daily_mean_insolation` for non-diurnal.  Earth-Sun
+  distance correction (~6 % peak amplitude) deferred — typical
+  for idealised aquaplanet setups.
+
+No new fixes needed.  Land parameter pipeline, ML ozone, and
+solar geometry all sound.
+
 ## Iteration 68 — 2026-05-13
 
 **Inspection iteration on `thermo.py` + `surface_albedo.py` (no
