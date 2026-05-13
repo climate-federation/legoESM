@@ -1,42 +1,45 @@
 # new_test_dycores — FV3 cube parity vs latlon/MPAS/spectral
 
 Branch: `new_test_dycores` (from `main` post merge of `test_dycores` PR #259).
-Oracle: `../../FV3/atmos_cubed_sphere-symmetryclean/model/` (sw_core.F90, tp_core.F90, dyn_core.F90, fv_dynamics.F90, nh_core.F90, nh_utils.F90, fv_mapz.F90, a2b_edge.F90).
+Oracle: `../../FV3/atmos_cubed_sphere-symmetryclean/model/`.
+Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV / MPAS Voronoi / spectral SH at the same resolution + duration.
 
-Scope: get FV3 cube SW/PE/NH error norms within close numerical proximity of latlon FV / MPAS Voronoi / spectral SH at the same resolution + duration.
+## State after iter-1..9 (compressed at iter-10)
 
-## State snapshot (iter-1)
-- Main has 64 iters of mass-conservation hardening (anchored fixer + fp64 budget across `core/conservation.py` + `diagnostics/`) merged via PR #259.
-- Codex FV3 fidelity branch `codex/fv3-fortran-fidelity-ralph-loop-20260417` has 1697 commits of cube-vertex audit + calibration work; NOT all merged. Notable findings still relevant:
-  - iter-968/969/975/976/977: 14 routines (c_sw, d_sw1, d_sw5, d_sw6, divergence_corner_duo, d2a2c_vect, xppm/yppm, del6_vt_flux, compute_transport_quantities) audited bit-faithful to FV3 Fortran.
-  - iter-971/972: ported FV3 `a2b_ord4` 4th-order cell→corner; wired into d_sw5 Smagorinsky branch (`_interp_center_to_corner_a2b_ord4` in `core/fv3_sw_core.py`).
-  - iter-981/982/983: residual cube-vertex bug isolated to c_sw + p_grad_c imbalance on polar-face cube vertices (face=4 i=35 j=35 N-pole NE, face=5 i=35 j=1 S-pole SE).
-  - iter-1000-1009-1021-1030: SW cube W2/W5 calibration evolution
-    - iter-1009: `(div=10·cube, damp_v=0.04)` → W2 v_ll=0.1147 m/s, W5 day-5 spd=68.6 m/s
-    - iter-1021: `(9, 0.035)` → v_ll=0.1137, W5 spd=53.3
-    - iter-1030: `(8, 0.030)` → v_ll=0.1138 m/s, W5 spd=45.1 m/s (BEST W5, sentinel-pinned)
-- Matrix runner SW W2/W5 cube config (`scripts/run_atmosphere_test_matrix.py:2006-2012`) is at iter-893 baseline `damp_v=0.06`; iter-1030 sentinel-pinned best is `damp_v=0.030`.
+**Wins**:
+- Cube SW W2/W5: matrix runner now uses iter-1030 calibration (`damp_v=0.030`) via the canonical `iter1009_dual_target_config(n)` helper (iter-1/8). v_ll_Linf 5-day = 3.65 m/s (PASS).
+- Cube NH: parity gap CLOSED for ALL THREE DCMIP cases via `use_fv3_vector_halo_uv=True` + `use_fv3_a2b_ord4_vector_uv=True` (iter-697/698 flags promoted to matrix runner, iter-5/6/7):
+  - TC1: 0.3266 → **0.0142 m/s** (23x), matches ico 0.0145
+  - TC2: 4.6528 → **0.3177 m/s** (14.6x), matches ico 0.3568
+  - TC3: 23.07 → **7.36 m/s** (3.1x), now BEATS ico 10.24
+- Cube transport flux closure verified bit-clean in fp64 (iter-3); `transport_step` flux differencing promoted to fp64 (`core/fv_tp_2d.py:1117-1131`).
 
-## Iter-1 action
-Bring matrix runner W2/W5 SW cube config to iter-1030 calibration (`damp_v=0.030`).
-Rationale: matches the calibration the iter-1002/1030 sentinel pins as the W5-best balanced calibration. Reduces vorticity damping → frees the 2nd-order divergence damping to suppress cube-vertex mode at lat ±35° without over-damping kinetic energy in long W5 runs.
+**Regression sentinels added** (iter-4 + iter-9 + iter-10):
+- `tests/atmosphere/shallow_water/integration/test_fv_cubesphere.py::TestCubeCswW2Residual` — pins cube c_sw + p_grad_c residual on W2 IC.
+- `tests/test_matrix_nh_cube_parity_ast_guard.py` — 6 AST tests pin iter-697/698 flags in all 3 NH cube branches (catches removal in 0.10 s).
+- iter-329 regex updated to accept 4-arg `center_to_dgrid_vector(u, v, cdgrid, use_fv3_a2b_ord4=...)`.
 
-Verification gate: run the W2 cube matrix test at C36 5 days. Must PASS.
+## Structural cube parity findings (not closed)
 
-## Open cube-parity items (rolling)
-1. **Cube-vertex c_sw + p_grad_c imbalance** (codex iter-983): 1.3 m/s spurious uc, 0.5 m/s spurious vc on W2 IC. Localised to polar-face vertices. Source under investigation in codex branch; not yet root-caused.
-2. **W5 long-run stability** (codex iter-1003-1004): cube-edge polar mechanism degrades W5 past day 5+ even at best calibration.
-3. **Cube SW W2 v_ll_Linf** ≈ 0.114 m/s at iter-1030. Latlon W2 v_ll typically ~10× tighter; spectral exact to truncation. Parity gap = ~1 order of magnitude.
-4. **Cosine-bell matrix gate disparity**: latlon CB uses `_DYCORE_MASS_DRIFT_TOL_CB=1e-4` (raw transport), cube CB uses anchored fixer + standard `1e-6`. Apples-to-apples comparison requires running both with/without the anchor.
-5. **PE/NH cube parity**: not yet probed.
+- **c_sw + p_grad_c cube-vertex residual** (codex iter-983; iter-3/4 reproduced): |duc|_max = 2.71 m/s at face=2 i=1 j=35 on cube W2 IC. Decomposition: fy1·vort_x = -2.98 m/s (dominant), dke_x = +1.32, dp_x = +1.16, combined = -0.50 m/s. Interior point gives 2e-6 residual — 250000× ratio. STRUCTURAL to duogrid c_sw path; FV3 oracle also skips corner correction on duogrid (`sw_core.F90:395-401`). Codex 1000+ iters reached v_ll=0.114 via calibration damping, not by closing the gap.
+- **Cube CB no-anchor mass drift** (iter-2): raw `transport_step` (mass_target=None) at C36 drifts 3.82e-4/day vs latlon raw 1.49e-5. Exponential blow-up step 40+ from PPM monotone limiter producing small negative h cells at cube vertices. Anchor's positivity clip (`jnp.maximum(h_new, 0.0)`) is the correct fix; flux closure itself is bit-clean.
+- **PE cube already best-in-class** (iter-9 probe): matrix-runner survey shows cube wins or ties on baroclinic / rotated_steady / held_suarez / amip max|v|. `use_fv3_a2b_zeta_corner=True` (PE analog of NH iter-697/698) was neutral on rotated_steady (+30% wall, same numerics); reverted.
 
-## Iter trail
-- iter-1 (2026-05-13): scope set, state snapshot, matrix runner SW cube W2/W5 config bumped to iter-1030 calibration (`damp_v=0.030`). `test_iter1002_w2_v_ll_linf_meets_target` PASS, `test_iter1009_w5_day5_artifact_free` PASS. Open: verify W2 5-day + W5 15-day matrix paths (the calibrations were sentinel-tested at C36 1-day / day-5 only).
-- iter-2 (2026-05-13): probed cube CB raw transport (anchor stripped from `transport_step` in the matrix CB cube path) to assess apples-to-apples vs latlon raw-FV benchmark.  Result: cube CB at C36, 48 × dt=1800s (1 day) drifts `mass_drift = 3.82e-4` vs latlon raw `1.49e-5` (~25x worse).  Per-step breakdown shows the drift is NOT linear in step count — step 1 = 6e-10, step 30 = 8e-10, step 40 = 2.3e-7, step 48 = 1.9e-4 → exponential blow-up between step 40 and 48.  Root cause: PPM monotone limiter near cube vertices creates small negative h cells which subsequent transport amplifies; anchor's positivity clip (`jnp.maximum(h_new, 0.0)`) suppresses these.  Apples-to-apples cube↔latlon requires fixing the per-step flux mismatch at cube panel edges (not just removing the anchor).  Revert applied; matrix-runner CB cube anchor restored.  iter-1 W2 5-day matrix verification: **PASS** at iter-1030 calibration (C36 5-day: L2=2.45e-3, Linf=2.40e-2, v_ll_Linf=3.65 m/s post-regrid, 25.5s wall).  iter-1030 → matrix is safe.  Open for iter-3+: trace flux closure gap at panel edges in `compute_transport_quantities` (sin_sg halo) + cube-vertex c_sw + p_grad_c imbalance (codex iter-983: face=4 i=35 j=35 polar-face NE vertex).
-- iter-3 (2026-05-13): four cube-parity findings + one targeted hardening.  (a) Cube transport flux closure verified bit-clean in fp64 — per-face boundary fluxes sum to exactly 0 when reduced in fp64; the iter-2 1.96e6 "sum_div" was fp32 cancellation noise (~4.66e-10 relative) not real flux mismatch.  (b) Probed c_sw + p_grad_c residual on cube W2 IC (which should be 0 for steady solid-body rotation): `|duc|_max = 2.71 m/s` at **face=2 i=1 j=35** (equatorial-face north-boundary, one cell inside west edge).  Reproduces codex iter-983's cube-vertex residual.  (c) dxc/dyc at cube panel seams are exactly continuous (max |diff| = 0 across all four seams probed) — rules out metric mismatch as the c_sw bug source.  (d) hord sweep (8/9/10/12) all blow up cube CB transport similarly when no anchor (drift 3.8–5.6e-4, h_min slightly negative).  PPM cube-vertex positivity is structural; the anchor's `jnp.maximum(h_new, 0.0)` is the correct fix.  **Code change**: promoted `transport_step` flux differencing to fp64 (`core/fv_tp_2d.py:1117-1131`) — consistent with the iter-1..64 mainline fp64 budget convention.  All 3 sentinels PASS (`test_iter1002_w2_v_ll_linf_meets_target`, `test_iter1009_w5_day5_artifact_free`, `test_williamson5_stable`).  No change to cube CB drift (PPM blow-up dominates), but eliminates a ~4.66e-10 per-step fp32 cancellation noise floor that would matter for long no-anchor tracer transport.  Open for iter-4+: the c_sw vortex flux at face=2 i=1 j=35 is the real W2 v_ll source — drill into `_corner_vorticity`'s duogrid halo path.
-- iter-4 (2026-05-13): decomposed c_sw at face=2 i=1 j=35 (the cube-vertex bug location): fy1·vort_x = -2.98 m/s, dke_x = +1.32 m/s, dp_x = +1.16 m/s, combined = -0.50 m/s residual (a real ~250000x worse than the interior point face=1 i=18 j=18 which gives 2e-6 residual).  Corner vorticity error at face=5 i=36 j=36 = 1.94e-4 1/s (~277 % of typical mid-latitude Coriolis) — the worst cube-vertex vort_abs error.  Confirmed FV3 c_sw also skips corner correction on duogrid (`sw_core.F90:395-401`); legoESM matches.  Conclusion: cube-vertex W2 residual is STRUCTURAL to the duogrid c_sw path — codex 1000+ iters reached W2 v_ll=0.114 m/s via calibration damping, not by closing the structural gap.  **Regression sentinel added**: `tests/atmosphere/shallow_water/integration/test_fv_cubesphere.py::TestCubeCswW2Residual::test_w2_csw_pgrad_c_residual_bounded` pins `|duc|_max < 3.0`, `|dvc|_max < 3.6`, `|duc - dp_x|_max < 6.0`, `|dvc - dp_y|_max < 6.0`.  Catches future regressions WORSE than today's cube-vertex residual; targeted improvements (e.g., 4th-order corner vort, a2b_ord4-based KE grad) would tighten these.  PASS at C36.
-- iter-5 (2026-05-13): **NH cube parity gap CLOSED for DCMIP TC1**.  Cross-grid survey of cached matrix-runner results found cube NH TC1 |w|_max = 0.3266 m/s vs ico 0.0145, spectral 0.0144 — 22x cube parity gap.  Root cause: matrix-runner NH config used the legacy scalar-halo cc→D-grid path; `make_fv3_faithful_nh_config` (the FV3-faithful factory) enables `use_fv3_vector_halo_uv=True` + `use_fv3_a2b_ord4_vector_uv=True` (iter-697/698: 4th-order a2b_ord4 corner cascade + vector-rotating halo, -25.8 % θ′ edge ratio at C8 / -21.9 % at C16) but the matrix-runner TC1 config had remained on scalar-halo defaults.  **Code change**: enabled both flags in `scripts/run_atmosphere_test_matrix.py:4460-4475` for the TC1 cube branch.  **Result at C36 quick (0.5h, 675 steps)**: cube `|w|_max=0.0142 m/s, mass_drift=0.00e+00` — matches ico (0.0145) and spectral (0.0144) within 1 ULP.  **23x reduction in cube NH parity gap**, all PASS gates intact.  Wall time 555s (2x slower vs 273s pre-change — extra cost is the 4th-order corner cascade).  TC2 and TC3 cube parity gaps remain (TC2: cube 4.65 m/s vs ico 0.36, spectral 0.36; TC3: cube 23.07 m/s vs ico 10.24).  Queued for iter-6+: extend the same flags to TC2/TC3 cube paths and verify.
-- iter-6 (2026-05-13): **NH cube parity gap CLOSED for DCMIP TC2 (mountain)**.  Same iter-697/698 flag pair applied to the matrix-runner TC2 cube config.  **Result at C36 quick (5 min, 225 steps)**: cube `|w|_max=0.3177 m/s, mass_drift=1.10e-15`.  Pre-change cube was 4.6528 m/s; ico/spectral give 0.3568 / 0.3597.  **14.6x reduction; cube now matches (or slightly beats) ico and spectral.**  Wall time 354.6s (2.2x slower vs 163s pre-change).  All PASS.  Mass drift 1.10e-15 (anchored).  TC3 still pending: needs longer wall budget (1070s pre-change + factor of 2 = ~2200s) plus Kessler microphysics path is sensitive to NH path changes — deferring to iter-7 to verify carefully.  TC3 config left unchanged in this commit.
-- iter-7 (2026-05-13): **NH cube parity gap CLOSED for DCMIP TC3 (squall line + Kessler)**.  Same flag pair applied to TC3 cube config.  **Result at C36 quick (4 min, 1080 steps, dt=0.22s)**: cube `|w|_max=7.36 m/s, mass_drift=5.16e-16`.  Pre-change cube was 23.07 m/s; ico gives 10.24.  **3.1x reduction; cube now BEATS ico for TC3.**  Wall time 2042.7s (1.9x slower vs 1070s pre-change).  PASS.  All 3 NH DCMIP cases now cube-parity-clean: TC1 (cube 0.0142 vs ico 0.0145), TC2 (cube 0.32 vs ico 0.36), TC3 (cube 7.36 vs ico 10.24).  Mass drift 5.16e-16 at TC3 (anchored).  Cumulative: 8 lines of code change in `scripts/run_atmosphere_test_matrix.py` (3 places × 2 flags + brief comment) closes the entire NH cube parity gap.  The flags were already wired and sentinel-tested (iter-697/698/699); they just hadn't been promoted to the matrix-runner config.
-- iter-8 (2026-05-13): DRY refactor.  Replaced the matrix-runner W2/W5 cube SW inline `CDGridShallowWaterConfig(...)` construction with the canonical `iter1009_dual_target_config(n)` helper in `shallow_water_fv3_cdgrid.py:419-494`.  Bit-identical config — helper uses `div_damp_factor=8.0, damp_v=0.030` defaults matching iter-1.  Removes 6-line inline duplicate; future calibration updates land in the helper.  SW W2/W5 sentinels (`test_iter1002_w2_v_ll_linf_meets_target`, `test_iter1009_w5_day5_artifact_free`) both PASS.
-- iter-9 (2026-05-13): (a) Probed PE cube parity: enabled `use_fv3_a2b_zeta_corner=True` on the baroclinic / rotated_steady PE cube branch (FV3 iter-14 4th-order ζ corner — the PE analog of NH iter-697/698 a2b_ord4).  rotated_steady C36 2-day result identical: `max|v|=31.8 m/s, mass_drift=1.08e-11` (same as pre-change) at +30 % wall (87.7 s → 113.9 s).  No measurable benefit; REVERTED.  PE cube is already best-in-class on the matrix tests (cube 29.9 vs latlon 53.6 on baroclinic max|v|; latlon is the outlier).  (b) Added AST regression sentinel `tests/test_matrix_nh_cube_parity_ast_guard.py` — 6 tests (2 flags × 3 NH test cases) that pin the iter-5/6/7 cube NH parity wins by pattern-matching the matrix-runner source.  Catches inadvertent flag removal in 0.10 s without running the matrix.  All 6 PASS.
+## Iter trail (terse)
+
+- iter-1: matrix W2/W5 cube `damp_v` 0.06→0.030 (iter-1030 sentinel-pinned). W2 5-day PASS.
+- iter-2: cube CB no-anchor probe — 3.82e-4 drift, blow-up step 40+. PPM positivity structural. Revert.
+- iter-3: cube flux closure bit-clean fp64; promoted `transport_step` differencing to fp64; c_sw probe found 2.71 m/s residual at face=2 i=1 j=35; hord sweep all blow up similarly.
+- iter-4: regression sentinel `TestCubeCswW2Residual` pins `|duc|_max < 3.0, |dvc|_max < 3.6`.
+- iter-5: NH TC1 cube parity CLOSED (23×) — added `use_fv3_vector_halo_uv` + `use_fv3_a2b_ord4_vector_uv`.
+- iter-6: NH TC2 cube parity CLOSED (14.6×) — same flags.
+- iter-7: NH TC3 cube parity CLOSED (3.1×) — same flags. All 3 NH DCMIP cube-parity-clean.
+- iter-8: DRY refactor — matrix W2/W5 uses canonical `iter1009_dual_target_config(n)` helper.
+- iter-9: PE flag (`use_fv3_a2b_zeta_corner`) probe neutral, reverted; AST guard sentinel for iter-5/6/7 NH flags.
+- iter-10 (compressed at this point): fix outdated iter-329 regex (accept 4-arg `center_to_dgrid_vector`); compress this doc; queue iter-11+ targets.
+
+## Iter-11+ queued
+
+- Probe AMIP cube vs other grids (matrix already shows 4.18e-11 mass drift — best-in-class).
+- Investigate if any iter-697/698 / iter-14 helper flag improves NH or PE numerics at FINER resolutions (C48, C72) — current results are at C36.
+- Look at SW Williamson 6 (Rossby-Haurwitz) cube wiring — currently only ico/spectral run W6.
