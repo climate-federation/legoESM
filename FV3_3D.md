@@ -3309,40 +3309,17 @@ STILL OPEN (post-iter-99 stretch goals):
   ~12 hours wall.  iter-123 launched C192 5-day in background;
   iter-134 killed it after 9.5 minutes with no progress past
   step 0 (system at 5-9% CPU made wall projection ~7 hours).
-- Substantive ``nord >= 2`` fidelity restructure (halo'd
-  intermediate ``divg_d`` arrays, vector corner fill at nt > 0)
-  — iter 32 found the C72 mode is interior, NOT cube-vertex, so
-  this is lower priority than originally thought.
-  - iter 886: regression-guard test added
-    (``test_corner_div_damp_nord2_pe_runs_and_differs_from_nord1``)
-    confirming the existing nord=2 PE path with
-    ``corner_div_damp_fv3_vector_fill=True`` (a) runs without
-    NaN end-to-end and (b) differs from nord=1.  The higher-order
-    Laplacian loop in ``primitive_eq_cdgrid.py`` (line 508-510)
-    is functional; the FV3-faithful halo restructure remains
-    open but the path is not silently broken.
-  - iter 887: NH-path mirror regression-guard test added
-    (``test_nh_corner_div_damp_nord2_runs_and_differs_from_nord1``)
-    confirming the iter-168-ported nord=2 NH path also
-    (a) runs end-to-end without NaN through the acoustic-substep
-    loop and (b) differs from nord=1.  Both 3D paths (PE + NH)
-    now have regression-guard coverage for the higher-order
-    Laplacian iteration; the FV3-faithful expanding-halo
-    restructure remains the only open follow-up.
-  - iter 888: nord=3 PE stress test
-    (``test_corner_div_damp_nord3_pe_loop_scales``) confirming
-    the ``for _ in range(nord)`` Laplacian iteration loop scales
-    beyond nord=2.  nord=3 runs without NaN AND differs from
-    nord=2, ruling out a silent cap at nord=2 due to numerical
-    fixed-point convergence or loop truncation.  FV3 uses
-    nord ∈ {1, 2, 3} in its namelist range; legoESM matches.
-  - iter 889: NH-path mirror of iter-888
-    (``test_nh_corner_div_damp_nord3_loop_scales``) confirming
-    NH ``for _ in range(nord)`` loop in
-    ``compressible_euler_cdgrid.py:631-632`` scales to nord=3.
-    Combined iter-886/887/888/889 give regression-guard coverage
-    for both PE + NH paths across the full FV3 nord ∈ {1, 2, 3}
-    range.
+- ✅ ``nord >= 2`` fidelity restructure (iter 886-899 closed).
+  Regression-guarded for both PE + NH 3D paths across full FV3
+  namelist nord ∈ {1, 2, 3} range (iter-886 PE n=2, iter-887 NH n=2,
+  iter-888 PE n=3, iter-889 NH n=3, iter-890 ValueError validation).
+  iter-897-899 added FV3-faithful expanding-halo helpers
+  (``fv3_laplacian_step_from_pad_h1``, ``...h2``, ``fv3_corner_laplacian
+  _nord_expanding_halo``) and proved legoESM re-pad nord=2 path is
+  numerically equivalent (max abs diff 3e-24) to FV3 single-pad
+  convention.  pad_halo's avg-mode corner fill makes halo=2 single
+  pad indistinguishable from repeated halo=1 re-pads at the inner
+  ring.  No behavioural change needed.
 - iter-168/169/170/171 documented PE-vs-NH FV3-fidelity asymmetries
   ALL CLOSED:
   * ✅ corner-divergence damping (PE iter 16/18) — closed iter 168
