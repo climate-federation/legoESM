@@ -76,6 +76,16 @@ NH cross-grid TC1 mass-drift after iter-10 (matrix runner `notes` line):
   was that, not the dynamics. Latlon HS sigma now `3.71e-07 → 1.61e-16`;
   hybrid `4.79e-07 → 1.61e-16`; topo `1.73e-07 → 0.00e+00`. Cumulative
   iter-0→iter-12 lat-lon HS reduction: ~10^13x.
+- **iter-13**: `_total_area(grid)` in `core/conservation.py` casts
+  `grid.grid_total_area` to the fp64 budget accumulator before being
+  used as the divisor of every mass-fixer correction. All five
+  `grid.total_area` callsites in this module migrated to the helper;
+  MPAS SW `fix_mass_mpas` does the same on `mesh.grid_total_area`.
+  Defensive change — on cube the storage cast is currently a no-op
+  due to `cast_pytree(..., allow_downcast=False)` keeping post-fixer
+  state in fp64 (the residual 4e-13 cube HS drift is fp64 accumulation
+  noise across ~430 steps, not fp32 quantization).  Protects against
+  future allow_downcast=True paths or fp32-only storage policies.
 
 ## Implementation patterns established (apply to any new dycore)
 

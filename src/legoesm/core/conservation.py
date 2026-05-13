@@ -152,8 +152,18 @@ def _batch_global_area_sums(
 
 
 def _total_area(grid) -> jax.Array:
-    """Total area for any grid."""
-    return grid.grid_total_area
+    """Total area for any grid, promoted to the fp64 budget accumulator.
+
+    iter-13: ``grid.grid_total_area`` is computed as
+    ``jnp.sum(self.area)`` on grid classes that store ``area`` in the
+    storage dtype (fp32 by default).  That reduction leaks ~N·eps into
+    the divisor of every mass-fixer correction — visible as a residual
+    ~10^-13 drift on the cube hydro PE even with the anchored
+    fixer + fp64 ``mass_target``.  Cast to the conservation
+    accumulator here so every fixer division sees an fp64 denominator.
+    """
+    acc = _conservation_accumulator()
+    return grid.grid_total_area.astype(acc)
 
 
 def fix_mass_shallow_water(
@@ -300,7 +310,7 @@ def fix_mass_hydrostatic(
     mass_old, mass_new = _batch_global_area_sums(
         [state_old.p_s.data, state_new.p_s.data], grid,
     )
-    correction = (mass_old - mass_new) / grid.total_area
+    correction = (mass_old - mass_new) / _total_area(grid)
     p_s_fixed = state_new.p_s.replace(data=state_new.p_s.data + correction)
 
     return state_new._replace(p_s=p_s_fixed)
@@ -334,7 +344,7 @@ def fix_mass_hydrostatic_latlon(
     mass_old, mass_new = _batch_global_area_sums(
         [state_old.p_s.data, state_new.p_s.data], grid,
     )
-    correction = (mass_old - mass_new) / grid.total_area
+    correction = (mass_old - mass_new) / _total_area(grid)
     p_s_fixed = state_new.p_s.replace(data=state_new.p_s.data + correction)
 
     return state_new._replace(p_s=p_s_fixed)
@@ -591,7 +601,7 @@ def fix_mass_hydrostatic_target(
             p_s=state_new.p_s.replace(data=p_s_fixed_data),
         )
     mass_new = global_integral(state_new.p_s, grid)
-    correction = (target_mass - mass_new) / grid.total_area
+    correction = (target_mass - mass_new) / _total_area(grid)
     p_s_fixed = state_new.p_s.replace(data=state_new.p_s.data + correction)
     return state_new._replace(p_s=p_s_fixed)
 
@@ -617,7 +627,7 @@ def fix_ps_mass(
     mass_old, mass_new = _batch_global_area_sums(
         [p_s_old, p_s_new], grid, owned_mask=owned_mask,
     )
-    correction = (mass_old - mass_new) / grid.total_area
+    correction = (mass_old - mass_new) / _total_area(grid)
     return p_s_new + correction
 
 
@@ -649,7 +659,7 @@ def fix_ps_mass_target(
     jax.Array : Corrected p_s with same shape.
     """
     mass_new = _global_area_sum(p_s, grid, owned_mask=owned_mask)
-    correction = (target_mass - mass_new) / grid.total_area
+    correction = (target_mass - mass_new) / _total_area(grid)
     return p_s + correction
 
 
@@ -918,8 +928,10 @@ def fix_mass_mpas(state, target_mass, mesh):
     # ``mesh.grid_total_area`` is precomputed at mesh construction —
     # avoid recomputing the global ``jnp.sum(areaCell)`` every step
     # (one extra reduction in serial; one extra allreduce under
-    # multi-rank Voronoi sharding).
-    total_area = mesh.grid_total_area
+    # multi-rank Voronoi sharding).  Iter-13: cast to fp64 so the
+    # divisor matches the fp64 ``current_mass`` and ``target_mass``;
+    # otherwise an fp32 ``total_area`` leaks ~N·eps into ``correction``.
+    total_area = mesh.grid_total_area.astype(_conservation_accumulator())
     correction = (target_mass - current_mass) / total_area
     h_fixed = state.h.replace(data=state.h.data + correction)
     return state._replace(h=h_fixed)
