@@ -30,7 +30,21 @@ def column_water_vapor(q_v, p_s, dsigma):
     jax.Array
         Column water vapor [...], same leading shape as p_s.
     """
-    return jnp.sum(q_v * p_s[..., None] * dsigma, axis=-1) / constants.g
+    # iter-48: promote to fp64 budget accumulator before the
+    # column product+sum.  Same fp32-field convention as iter-42..47:
+    # the canonical column-water-vapor helper is imported by the
+    # driver / model_driver / plotters, so promoting here cleans
+    # every downstream diagnostic in one place.  q_v·p_s·dσ is
+    # ~10⁻²·10⁵·10⁻¹ = 10² per cell, summed over nlev (~32) → ~10³
+    # column total; fp32 quantum at that magnitude is ~10⁻⁴.
+    from legoesm.core.conservation import _conservation_accumulator
+    _acc = _conservation_accumulator()
+    return jnp.sum(
+        q_v.astype(_acc)
+        * p_s.astype(_acc)[..., None]
+        * dsigma.astype(_acc),
+        axis=-1,
+    ) / jnp.asarray(constants.g, dtype=_acc)
 
 
 def column_mass_weighted_mean(field, mass_per_cell, axis: int = -1):

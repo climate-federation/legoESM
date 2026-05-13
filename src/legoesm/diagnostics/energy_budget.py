@@ -73,10 +73,26 @@ def column_moist_static_energy(
     E : array, shape (...)
         Column-integrated energy [J/m²].
     """
-    g = constants.g
-    c_p = constants.c_pd
-    L_v = constants.L_v
-    R_d = constants.R_d
+    # iter-47: promote to fp64 budget accumulator (see iter-42..46
+    # fp64-field convention).  Column MSE involves c_p·T (~10^5),
+    # L_v·q (~10^4), Φ (~10^4), 0.5(u²+v²) (~10²) summed over nlev
+    # levels — the fp32 product+sum in the pre-iter-47 path leaked
+    # ~7 bits of relative precision.
+    from legoesm.core.conservation import _conservation_accumulator
+    _acc_e = _conservation_accumulator()
+    T = T.astype(_acc_e)
+    q_v = q_v.astype(_acc_e)
+    u = u.astype(_acc_e)
+    v = v.astype(_acc_e)
+    phis = phis.astype(_acc_e)
+    p_s = p_s.astype(_acc_e)
+    dsigma = dsigma.astype(_acc_e)
+    sigma_full = sigma_full.astype(_acc_e)
+
+    g = jnp.asarray(constants.g, dtype=_acc_e)
+    c_p = jnp.asarray(constants.c_pd, dtype=_acc_e)
+    L_v = jnp.asarray(constants.L_v, dtype=_acc_e)
+    R_d = jnp.asarray(constants.R_d, dtype=_acc_e)
 
     # Compute geopotential at full levels (hydrostatic, bottom-up)
     # Φ_k = phis + R_d * Σ_{j>k} T_j * dln(p)_j + R_d * T_k * 0.5 * dln(p)_k
@@ -148,9 +164,17 @@ def column_dry_static_energy(
 
     Useful for checking the dry energy budget separately.
     """
-    g = constants.g
-    c_p = constants.c_pd
-    R_d = constants.R_d
+    # iter-47: fp64 budget accumulator (mirrors moist twin above).
+    from legoesm.core.conservation import _conservation_accumulator
+    _acc_d = _conservation_accumulator()
+    T = T.astype(_acc_d)
+    phis = phis.astype(_acc_d)
+    p_s = p_s.astype(_acc_d)
+    dsigma = dsigma.astype(_acc_d)
+    sigma_full = sigma_full.astype(_acc_d)
+    g = jnp.asarray(constants.g, dtype=_acc_d)
+    c_p = jnp.asarray(constants.c_pd, dtype=_acc_d)
+    R_d = jnp.asarray(constants.R_d, dtype=_acc_d)
 
     dp = p_s[..., None] * dsigma
     nlev = T.shape[-1]

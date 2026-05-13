@@ -384,6 +384,16 @@ def _compute_drift(values: list[float]) -> float:
     return compute_relative_drift(values)
 
 
+# iter-30: hoist the iter-23..28 1e-6 mass-drift PASS ceiling to a
+# single module constant so future re-tightening (or temporary loosening
+# during fixer development) is a one-line edit rather than five.
+# Applied at every PE/SW/NH gate in the matrix runner; the only
+# intentional outlier is the lat-lon cosine_bell ``CB`` constant below,
+# which preserves the raw-FV transport-drift benchmark at iter-29's 1e-4.
+_DYCORE_MASS_DRIFT_TOL = 1e-6
+_DYCORE_MASS_DRIFT_TOL_CB = 1e-4
+
+
 def _apply_mass_drift_tolerance(
     ok: bool, notes: str, mass_drift: float, tol: float,
     *, n_samples: int | None = None,
@@ -2362,7 +2372,17 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             np.max(np.abs(_err)) / np.max(np.abs(_init_h)))
         notes = f"L2={_l2:.2e}, Linf={_linf:.2e}"
     elif diag.get("mean_height"):
-        notes = f"mass drift={_compute_drift(diag['mean_height']):.2e}"
+        _w_mass_drift = _compute_drift(diag['mean_height'])
+        notes = f"mass drift={_w_mass_drift:.2e}"
+        # iter-27: SW Williamson 5/6 had no mass-drift PASS gate (only
+        # finiteness + blowup).  Apply the same 1e-6 ceiling as HS /
+        # baroclinic / NH (iter-23/24/26).  Post-iter-1..22 cube W5
+        # `1.46e-15`, latlon W5 `3.24e-16`, ico W5/W6 `0` / `1.62e-16`,
+        # spectral W5/W6 `1.91e-16` — 10 orders of headroom.
+        ok, notes = _apply_mass_drift_tolerance(
+            ok, notes, _w_mass_drift, _DYCORE_MASS_DRIFT_TOL,
+            n_samples=len(diag['mean_height']),
+        )
 
     _write_results_txt(output_dir, {
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
@@ -2447,7 +2467,6 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
         # then Lin-Rood split transport with Courant-number PPM.
         from legoesm.core.fv3_sw_core import _d2a2c_vect
         from legoesm.core.fv_tp_2d import transport_step
-        from legoesm.core.conservation import _accumulation_dtype
 
         # Pre-compute contravariant velocities (winds are frozen)
         _ua, _va, _uc, _vc, ut, vt = _d2a2c_vect(
@@ -2752,8 +2771,15 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
     # cosine_bell only WARNED.  iter-120: now applies to ALL
     # 4 grids via the unified mass_drift / n_mass_samples
     # path above.
+    # iter-29 (test_dycores): tighten from 1e-2 → 1e-4.  Post-iter-22
+    # cross-grid quick drifts are cube 2.18e-08 (transport_step fixer),
+    # latlon 1.49e-05 (intentional raw-FV benchmark — comment at line
+    # ~2513), ico 4.16e-07 (additive fixer in matrix runner), spectral
+    # 0.  The 1e-4 ceiling sits ~7x above the latlon raw-FV measurement
+    # so the intentional benchmark stays a PASS, but a true regression
+    # to the iter-22 1e-2 ceiling (100x looser) no longer slips through.
     ok, notes = _apply_mass_drift_tolerance(
-        ok, notes, mass_drift, 1e-2,
+        ok, notes, mass_drift, _DYCORE_MASS_DRIFT_TOL_CB,
         n_samples=n_mass_samples)
 
     _write_results_txt(output_dir, {
@@ -3201,7 +3227,12 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
     # iter-120 (codex iter-119 followup MEDIUM-1): also fail
     # on series with < 2 samples (pre-iter-120 returned 0.0
     # sentinel that silently passed).
-    HELD_SUAREZ_MASS_DRIFT_TOL = 1e-2
+    # iter-23 (test_dycores): after iter-1..22 every grid sits at
+    # ~1e-15 in this test path, so the 1e-2 ceiling is 13 orders
+    # too loose.  Tighten to 1e-6 — still 9 orders above the
+    # observed floor, but catches regressions that the previous
+    # bound silently accepted.
+    HELD_SUAREZ_MASS_DRIFT_TOL = _DYCORE_MASS_DRIFT_TOL
     ok, notes = _apply_mass_drift_tolerance(
         ok, notes, mass_drift, HELD_SUAREZ_MASS_DRIFT_TOL,
         n_samples=len(diag.get("mass", [])))
@@ -3664,8 +3695,12 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
     # a 1e-2 mass-drift tolerance to baroclinic.  Same
     # rationale as iter-117 HS.  iter-120 also gates on
     # n_samples >= 2 (codex iter-119 followup MEDIUM-1).
+    # iter-24 (test_dycores): observed quick-mode max across 4 grids
+    # is 2.62e-11 (cube) with the rest at exact 0 or ~1e-16.  Tighten
+    # to 1e-6 (5 orders of headroom on cube) to match the iter-23 HS
+    # ceiling.
     ok, notes = _apply_mass_drift_tolerance(
-        ok, notes, mass_drift, 1e-2,
+        ok, notes, mass_drift, _DYCORE_MASS_DRIFT_TOL,
         n_samples=len(diag.get("mass", [])))
 
     level_values = np.asarray(
@@ -4216,8 +4251,13 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
     # a 1e-2 mass-drift tolerance to AMIP.  Same rationale
     # as iter-117 HS / iter-118 baroclinic.  iter-120 also
     # gates on n_samples >= 2.
+    # iter-28 (test_dycores): cube AMIP days=1 with iter-1..22
+    # fixers drifts at 1.17e-12 (down from 1.76e-7 baseline).
+    # Over the 30-day quick run that scales to ~3.5e-11.  Tighten
+    # to 1e-6 — 5 orders of headroom on cube — matching the
+    # iter-23/24/26/27 HS / baroclinic / NH / SW ceilings.
     ok, notes = _apply_mass_drift_tolerance(
-        ok, notes, mass_drift, 1e-2,
+        ok, notes, mass_drift, _DYCORE_MASS_DRIFT_TOL,
         n_samples=len(diag.get("mass", [])))
 
     level_values = np.asarray(
@@ -4834,6 +4874,18 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
         notes = (
             f"|w|_max={w_max:.4f} m/s, mass_drift={mass_drift:.2e}, "
             f"dt={dt:.2f}s"
+        )
+        # iter-25/26: NH PASS gate on mass drift.  With iter-7/8/9
+        # fixers active every measured case sits at exact 0 or fp64
+        # ULP:
+        #   TC1  cube 0     ico 0    spec 0
+        #   TC2a cube 6e-16 ico 0    spec 5e-16
+        #   TC3  cube 1e-15 ico 0    spec SKIP (Kessler not wired)
+        # Iter-26 tightens to 1e-6 (matches HS / baroclinic in
+        # iter-23/24) — 9 orders of headroom above the noisiest case.
+        ok, notes = _apply_mass_drift_tolerance(
+            ok, notes, mass_drift, _DYCORE_MASS_DRIFT_TOL,
+            n_samples=len(_mass_series),
         )
     else:
         notes = f"|w|_max={w_max:.4f} m/s, dt={dt:.2f}s"

@@ -169,3 +169,176 @@ def test_mass_conservation_spectral_pe():
     for _ in range(N_STEPS):
         state = model.step(state, 600.0)
     assert _rel_drift(m0, _mass(state)) < DRIFT_TOL
+
+
+# ---------------------------------------------------------------------------
+# iter-33: long-run drift check.  Ensures the anchor doesn't accumulate
+# error across 5x the standard N_STEPS — catches any per-step drift the
+# 20-step gate would miss (e.g. a slow O(N_steps) bias rather than the
+# bounded O(ULP) random walk the anchor is supposed to enforce).
+# ---------------------------------------------------------------------------
+
+def test_long_run_mass_conservation_cubed_sphere_pe():
+    """100-step cube PE: anchor must NOT random-walk over long runs."""
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        CDGridPrimitiveEquationModel,
+        CDGridPrimitiveEquationConfig,
+    )
+    from legoesm.atmosphere.held_suarez import held_suarez_init
+
+    grid = create_cubed_sphere(12)
+    sigma = create_sigma_coordinate(10)
+    cfg = CDGridPrimitiveEquationConfig(
+        use_conservation_fixer=True,
+        fix_mass=True,
+        anchor_mass_to_initial=True,
+    )
+    model = CDGridPrimitiveEquationModel(grid, sigma, cfg)
+    state = held_suarez_init(grid, sigma)
+
+    def _mass(s):
+        return float(jnp.sum(
+            s.p_s.data.astype(jnp.float64)
+            * grid.area.astype(jnp.float64),
+        ))
+
+    m0 = _mass(state)
+    for _ in range(100):
+        state = model.step(state, 600.0)
+    drift = _rel_drift(m0, _mass(state))
+    # 100 steps × ULP(p_s) random walk ~ sqrt(100)·1e-15 ~ 1e-14.
+    # Direct measurement on cube C12 gives 4.18e-15.  Allow 1e-12 (a
+    # factor of ~200 above the observed floor) for resilience to
+    # JAX-version / platform jitter, while still catching a true O(1e-9)
+    # regression by 3 orders of magnitude.
+    assert drift < 1e-12, (
+        f"cube PE 100-step drift {drift:.2e} exceeds 1e-12 — possible "
+        f"per-step accumulation bug in the anchored fixer"
+    )
+
+
+def test_long_run_mass_conservation_spectral_pe():
+    """iter-61: 100-step spectral PE long-run guard.
+
+    Parallel to iter-33 cube PE.  Validates the iter-3 spectral PE
+    anchored fixer (`lnps_hat[0] += log(target/now)·sqrt(4π)`) holds
+    over 100 steps.  Direct measurement: drift = 8.03e-16 on T21
+    spectral PE with isothermal rest state.
+    """
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.atmosphere.dynamics.spectral_pe import (
+        SpectralPrimitiveEquationModel, SpectralPEConfig,
+        isothermal_rest_state_spectral, spectral_pe_to_grid,
+    )
+
+    grid = create_gaussian_grid(21)
+    sigma = create_sigma_coordinate(10)
+    cfg = SpectralPEConfig(
+        fix_mass=True, anchor_mass_to_initial=True,
+    )
+    model = SpectralPrimitiveEquationModel(
+        grid, sigma, cfg, allow_unsupported_backend=True,
+    )
+    state = isothermal_rest_state_spectral(grid, sigma)
+
+    def _mass(s):
+        fields = spectral_pe_to_grid(s, grid, sigma)
+        return float(jnp.sum(
+            fields["p_s"].astype(jnp.float64)
+            * grid.grid_area.astype(jnp.float64),
+        ))
+
+    m0 = _mass(state)
+    for _ in range(100):
+        state = model.step(state, 600.0)
+    drift = _rel_drift(m0, _mass(state))
+    assert drift < 1e-12, (
+        f"spectral PE 100-step drift {drift:.2e} exceeds 1e-12"
+    )
+
+
+def test_long_run_mass_conservation_latlon_pe():
+    """iter-62: 100-step lat-lon PE long-run guard.
+
+    Parallel to iter-33 cube PE / iter-61 spectral PE.  Exercises the
+    iter-2/12 lat-lon ``_apply_safety_rails`` (T-floor + p_s-floor +
+    mass fixer + tracer rescale) over 100 steps.  Direct measurement:
+    drift = 1.61e-16 on 36x72 lat-lon, dt=40.4s.
+    """
+    import math
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+        CGridLatLonPrimitiveEquationModel,
+        CGridLatLonPrimitiveEquationConfig,
+        hydrostatic_to_cgrid,
+    )
+    from legoesm.atmosphere.held_suarez import held_suarez_init_latlon
+
+    grid = create_latlon_grid(36, 72)
+    sigma = create_sigma_coordinate(10)
+    dx_pole = float(grid.radius) * grid.dlon * math.cos(
+        math.pi / 2 - grid.dlat / 2)
+    dt = min(200.0, 0.5 * dx_pole / 300.0)
+    cfg = CGridLatLonPrimitiveEquationConfig(
+        fix_mass=True, anchor_mass_to_initial=True,
+    )
+    model = CGridLatLonPrimitiveEquationModel(grid, sigma, cfg, dt=dt)
+    state = hydrostatic_to_cgrid(
+        held_suarez_init_latlon(grid, sigma), grid,
+    )
+
+    def _mass(s):
+        return float(jnp.sum(
+            s.p_s.astype(jnp.float64) * grid.area.astype(jnp.float64),
+        ))
+
+    m0 = _mass(state)
+    for _ in range(100):
+        state = model.step(state, dt)
+    drift = _rel_drift(m0, _mass(state))
+    assert drift < 1e-12, (
+        f"lat-lon PE 100-step drift {drift:.2e} exceeds 1e-12"
+    )
+
+
+def test_long_run_mass_conservation_mpas_pe():
+    """iter-63: 100-step MPAS PE long-run guard.
+
+    Completes the PE long-run matrix (cube iter-33, spectral iter-61,
+    lat-lon iter-62, MPAS iter-63).  Exercises iter-11's anchored
+    `_fix_mass_mpas_hydro` on a Voronoi mesh over the 100-step
+    horizon.  Direct measurement: drift = 1.61e-16 on level-4
+    Voronoi + 10 sigma levels.
+    """
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+        MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig,
+    )
+    from legoesm.atmosphere.held_suarez import held_suarez_init_mpas
+
+    mesh = create_voronoi_mesh(4)
+    sigma = create_sigma_coordinate(10)
+    cfg = MPASPrimitiveEquationConfig(
+        fix_mass=True, anchor_mass_to_initial=True,
+    )
+    model = MPASPrimitiveEquationModel(mesh, sigma, cfg)
+    state = held_suarez_init_mpas(mesh, sigma)
+
+    def _mass(s):
+        return float(jnp.sum(
+            s.p_s.data.astype(jnp.float64)
+            * mesh.areaCell.astype(jnp.float64),
+        ))
+
+    m0 = _mass(state)
+    for _ in range(100):
+        state = model.step(state, 200.0)
+    drift = _rel_drift(m0, _mass(state))
+    assert drift < 1e-12, (
+        f"MPAS PE 100-step drift {drift:.2e} exceeds 1e-12"
+    )
