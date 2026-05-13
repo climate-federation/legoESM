@@ -147,3 +147,41 @@ def test_long_run_nh_mass_conservation_cubed_sphere():
     assert drift < 1e-12, (
         f"cube NH 100-step dry-mass drift {drift:.2e} exceeds 1e-12"
     )
+
+
+def test_long_run_nh_mass_conservation_mpas():
+    """iter-60: 100-step MPAS NH parallel to iter-34 cube NH long-run.
+
+    Covers the MPAS code path on a longer integration than the iter-16
+    20-step short-run gate.  Direct measurement: drift = 3.89e-16
+    over 100 steps on level-4 Voronoi mesh + 10 levels.
+    """
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    from legoesm.atmosphere.dynamics.compressible_euler_mpas import (
+        MPASCompressibleEulerModel, MPASCompressibleEulerConfig,
+    )
+    from tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_1_mpas import (
+        dcmip25_tc1_init_mpas,
+    )
+    from legoesm.core.conservation import compute_nh_dry_mass_mpas
+
+    mesh = create_voronoi_mesh(4)
+    state, hcoord, tmetric = dcmip25_tc1_init_mpas(mesh, n_levels=10)
+    cfg = MPASCompressibleEulerConfig(
+        n_acoustic_substeps=10,
+        fix_mass=True, anchor_mass_to_initial=True,
+    )
+    model = MPASCompressibleEulerModel(mesh, hcoord, tmetric, cfg)
+
+    def _mass(s):
+        return float(compute_nh_dry_mass_mpas(
+            s.rho_prime.data, hcoord, tmetric, mesh,
+        ))
+
+    m0 = _mass(state)
+    for _ in range(100):
+        state = model.step(state, 5.0)
+    drift = _rel_drift(m0, _mass(state))
+    assert drift < 1e-12, (
+        f"MPAS NH 100-step dry-mass drift {drift:.2e} exceeds 1e-12"
+    )
