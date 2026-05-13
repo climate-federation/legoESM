@@ -464,6 +464,37 @@ Verified clean:
 
 No code changes this iteration.
 
+## Iter-119 — ocean MPAS GM/Redi audit
+Audited `ocean/physics/lateral_mixing/gm_redi_mpas.py` (625 LOC,
+centred + triads variants of the small-slope GM+Redi tracer-tendency
+operator on a Voronoi mesh).
+
+Verified clean:
+- **Horizontal flux at edge interfaces**: `F_n[edge, k_int] = κ_R ·
+  ∂_n q + (κ_R − κ_GM) · S_n · ∂_z q`, averaged to full-level edges
+  with zero pad at surface/bottom.  Same `F = +K · grad` convention
+  as the cubed-sphere helper.
+- **Partial-cell edge masking**: `bot_e =
+  compute_max_level_edge_bot(bottom_level)` zeros `F_n` at levels
+  below the shallower neighbour's seafloor; prevents Neumann-filled
+  sub-seafloor tracer values from contaminating the divergence at
+  deep cells.
+- **Land-boundary masking**: `edge_mask = mask[c1] · mask[c2]` zeros
+  coastline edge flux on BOTH horizontal F_n and the Perot input
+  `S_n_oc = S_n · edge_mask` (no spurious slope·gradient into the
+  cell mean).
+- **Vertical flux via Perot reconstruction**: `(S·∇q)_cell =
+  Perot_Σ_edges(S_n · ∂_n q)`, `|S|²_cell = Perot_Σ_edges(S_n²)`,
+  then `F_z = (κ_R + κ_GM)·(S·∇q)_cell + κ_R · |S|²_cell · ∂_z q`.
+- **Volume-conserving discretisation**: TRiSK `divergence_cell_3d`
+  horizontal + `vertical_flux_divergence` vertical.
+- **Neumann coastline fill** via `_voronoi_neumann_fill` before
+  differencing tracer.
+- **Visbeck adaptive κ_GM** (`_visbeck_kappa_gm_mpas`) mirrors the
+  cubed-sphere column-stability + Eady-growth-rate form.
+
+No code changes this iteration.
+
 ## Next iterations
 Continue addressing codex findings and direct-inspection sweeps until all schemes are
 provably conservative, monotone, CFL-safe, and AD-safe across mixed wet/dry grids.
