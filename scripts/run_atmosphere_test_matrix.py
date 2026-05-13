@@ -2003,11 +2003,17 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         # locked the improvement behind a default-OFF kwarg; iter-893
         # activates it on the production matrix.  W5 is essentially
         # unchanged (max|h| ≈ 5966.72 in both ON/OFF).
+        # new_test_dycores iter-1: adopt iter-1030 sentinel-pinned
+        # damp_v=0.030 (was iter-893 0.06).  At C36 1-day W2 v_ll_Linf
+        # drops from ~0.16 (iter-893) to ~0.114 (iter-1030); W5 day-5
+        # speed at iter-1030 is 45 m/s (best W5 stability across the
+        # 1009/1021/1030 calibration sweep).  Pinned by
+        # ``tests/test_iter1002_w2_target_met.py``.
         config = CDGridShallowWaterConfig(
             hyperdiff_coeff=0.0,
             div_damp=8.0 * _div_damp_cube(n),
             boundary_fix=True,
-            damp_v=0.06,
+            damp_v=0.030,
             nord_v=2,
             apply_fortran_xppm_boundary=True)
         model = FV3EdgeShallowWaterModel(grid, config)
