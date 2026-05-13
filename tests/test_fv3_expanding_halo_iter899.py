@@ -89,6 +89,37 @@ def test_nord_2_approximates_repad():
     )
 
 
+def test_nord_2_quantitative_equivalence_iter901():
+    """FV3_3D iter 901: pin the exact max-abs-diff between expanding-
+    halo and re-pad nord=2 paths.
+
+    iter-899 measured max abs diff = 3e-24 (machine-epsilon noise
+    around double-precision arithmetic with rearranged op order).
+    Pin upper bound at 1e-20 — well above machine epsilon (~2.2e-16
+    for f64) but tight enough to catch any non-trivial behavioural
+    divergence in either path.
+
+    If this test ever fails, one of:
+      - pad_halo corner-fill mode silently changed
+      - h1/h2 step arithmetic was modified
+      - re-pad legacy iter-892 wrapper was altered
+    Investigate which path drifted before relaxing the bound.
+    """
+    n = 8
+    cdgrid = _cdgrid(n)
+    rng = np.random.default_rng(seed=9011)
+    divg = jnp.asarray(rng.uniform(size=(6, n + 1, n + 1)))
+    out_expand = fv3_corner_laplacian_nord_expanding_halo(divg, cdgrid, nord=2)
+    out_repad = fv3_corner_laplacian_nord(divg, cdgrid, nord=2)
+    max_diff = float(jnp.max(jnp.abs(out_expand - out_repad)))
+    assert max_diff < 1e-20, (
+        f"expanding-halo vs re-pad nord=2 max_diff={max_diff:.2e} "
+        f"(expected < 1e-20 per iter-899 measurement of 3e-24).  "
+        f"Behavioural drift in one of pad_halo / h1-step / h2-step / "
+        f"legacy re-pad wrapper.  Investigate before relaxing bound."
+    )
+
+
 def test_nord_3_raises():
     """nord >= 3 not yet implemented — raises NotImplementedError."""
     n = 8
