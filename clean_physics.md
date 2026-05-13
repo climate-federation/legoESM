@@ -1,7 +1,7 @@
 # Clean Physics — Iterative Adversarial-Review Improvement Log
 
 Goal: Perfect physics across atmosphere, land, ocean, cryosphere parameterizations.
-Branch: `clean_physics`. Driven by Ralph loop + `/codex:adversarial-review`.
+Branch: `clean_physics`.  Driven by Ralph loop + `/codex:adversarial-review`.
 
 ## Scope
 - **Atmosphere** (`src/legoesm/atmosphere/physics/`): radiation, convection, microphysics, turbulence, clouds, GWD, _shared.
@@ -12,7 +12,7 @@ Branch: `clean_physics`. Driven by Ralph loop + `/codex:adversarial-review`.
 ## Iterations 1-50 — Summary (compressed 2026-05-13 after iter-50)
 
 ### Constants & shared utilities
-- `constants.p_atm_std`, `constants.R_universal` added.  Bulk-flux + stomata reference them.
+- `constants.p_atm_std`, `constants.R_universal`.  Bulk-flux + stomata reference them.
 - `convection/mass_flux._compute_column_geometry` delegates to `_shared.compute_layer_dz` /
   `compute_rho` with `q_v`; threaded through all 5 mass-flux schemes.
 - Constant-hygiene audit (iter-12): all physical constants routed through `constants.py`.
@@ -29,191 +29,133 @@ Branch: `clean_physics`. Driven by Ralph loop + `/codex:adversarial-review`.
 ### Donor clamps consolidated
 - `donor_clamp_scale(q_avail, sink_total, dt, divisor_floor=1e-15)` in `_warm_rain.py` —
   fp32-VJP-safe; all 8 microphysics donor clamps route through it.
-- Total-water conservation regression tests for all 4 schemes.
 
 ### CFL caps & stability
-- Enhanced-diffusion convection (ocean): explicit branch delegates per-interface CFL cap.
-- Ocean vertical mixing leafs: per-interface CFL cap.
-- Ocean lateral mixing: opt-in `enforce_cfl`.
-- EDMF mass flux: `M ≤ 0.5·ρ·dz/dt`.
+- Enhanced-diffusion convection + ocean vertical mixing leafs: per-interface CFL cap.
+- Ocean lateral mixing: opt-in `enforce_cfl`.  EDMF mass flux: `M ≤ 0.5·ρ·dz/dt`.
 
 ### Coupler / feedback paths
-- Sea-ice `_bulk_flux_dispatch` helper centralises MOST/COARE/Large-Yeager/simple_bulk.
-- Ice → ocean feedback uses per-ice-area `dh/dt` for FW flux; computes
-  `ocean_heat_extraction` and `ocean_stress_x/y`.
+- `_bulk_flux_dispatch` helper centralises MOST/COARE/Large-Yeager/simple_bulk.
+- Ice → ocean: per-ice-area `dh/dt` FW flux + `ocean_heat_extraction` + `ocean_stress_x/y`.
 - Multi-cat lead freeze via `open_water_fraction` + `enable_lead_freeze` kwargs.
-- Grey-surface emission `lw_up = ε·σ·T⁴ + (1−ε)·lw_down` for sea-ice / ocean / lake / land.
+- Grey-surface emission `lw_up = ε·σ·T⁴ + (1−ε)·lw_down` everywhere.
 - Multilayer + slab land: dew/deposition gated on `has_snow=False`; fresh-snow albedo
   uses surviving-fresh-snow guard.
 
-### Tracer mixing / ocean drag / BBL
-- BBL drag `min(H_BBL, total_overlap)` in `ocean_tendency_common.bbl_drag_distributed`
-  and `ocean_pe_latlon_cgrid._bbl_drag_for_face`.
-
-### Streamfunction diagnostics
-- `moc_streamfunction` and `barotropic_streamfunction` use grid attributes when present.
-
-### Ocean bulk-flux + Emanuel AD-safety
+### Ocean drag / streamfunction / bulk-flux
+- BBL drag `min(H_BBL, total_overlap)` in `ocean_tendency_common` + `ocean_pe_latlon_cgrid`.
+- MOC / barotropic streamfunctions use grid attributes when present.
 - `bulk_formulas._saturation_specific_humidity` mixing-ratio → specific-humidity (~3 % bias).
 - `Q_lw_up = ε σ T_s^4 + (1−ε)·LW_down` (~10 W/m² Q_net correction).
 - `emanuel.py:204` AD-safe floor 1e-30 → 1e-15.
 
 ## Iterations 51-69 — Summary (compressed 2026-05-13 after iter-70)
-
-### Real code fixes
-- **iter-52 / 53 / 54** (lateral_mixing no-flux BC): Neumann-fill tracers via
-  `fill_land_cells(T, mask, grid, n_passes=N)` BEFORE the harmonic / biharmonic operator;
-  N = stencil reach (2 / 3).
-- **iter-55** (Delta_min threading): `SeaIceConfig.Delta_min` routes through
-  `evp_solver → evp_stress_update → delta_deformation`.
-- **iter-56** (shortwave_penetration Inf/NaN on dry columns): `dz_actual > 0` guard +
+- **iter-52/53/54** (lateral_mixing no-flux BC): Neumann-fill tracers via
+  `fill_land_cells(T, mask, grid, n_passes=N)` before harmonic / biharmonic; N=stencil reach.
+- **iter-55** (Delta_min): `SeaIceConfig.Delta_min` → `evp_solver` → `evp_stress_update` →
+  `delta_deformation`.
+- **iter-56** (shortwave_penetration dry-column Inf/NaN): `dz_actual > 0` guard +
   safe-denominator + output mask.
-- **iter-57 / 58 / 59** (dry-column AD safety in vertical-diffusion leafs): KPP non-local
-  + `vertical_diffusion` + `vertical_diffusion_variable_K` use `dz_safe = jnp.where(dz >
-  0, dz, 1)` + substitution `field_safe = where(dz > 0, field, 0)` + `K_half = where(dry,
-  0, K_half)` to scrub upstream NaN before arithmetic.
-- **iter-62 / 63 / 64** (carbon conservation under R_auto > GPP): cascade C_lab → C_fol →
-  C_root → C_wood when NPP_day < 0; net-available pool budget; `jnp.maximum(x, 0)` clamp
-  replacing softplus.  rtol=1e-9 conservation.
-- **iter-67** (frozen-lake q_surface): post-step `q_sfc_new` applies same liquid/ice
+- **iter-57/58/59** (dry-column AD safety in vertical-diffusion leafs): KPP non-local +
+  `vertical_diffusion` + `vertical_diffusion_variable_K` use `dz_safe`/`field_safe`/`K_half`
+  substitution before arithmetic.
+- **iter-62/63/64** (carbon conservation under R_auto > GPP): cascade C_lab → C_fol →
+  C_root → C_wood when NPP_day < 0; `jnp.maximum(x, 0)` clamp replacing softplus.
+  rtol=1e-9 conservation.
+- **iter-67** (frozen-lake q_surface): post-step `q_sfc_new` uses same liquid/ice
   saturation phase switch as pre-step (~14 % bias removed).
-
-### Inspection-only iters
-- **iter-51, 61, 65, 66, 68, 69**: multilayer_land, ocean_pe backends, Bechtold/Emanuel
-  convection + coupler bulk_flux, sea-ice _thermo_single, thermo + surface_albedo,
-  land utils + ML ozone + insolation — all verified clean.
-
-## Iteration 83 — 2026-05-13
-
-**Inspection iteration on Richards solver units + ice module
-(no code changes).**
-
-- **`richards.py`**: Picard iteration units verified — coeff =
-  K_half / dz_if has units 1/s; rhs has 1/s; tridiag matrix has
-  1/(m·s); dpsi has m.  Consistent.
-- **Codex on ice/**: was killed after extensive investigation of
-  dynamics, itd, state, sea_ice, coupler tile-fractions, driver
-  component_factory; no actionable finding emerged.  Iter-45 had
-  already verified EVP algebra, VP constitutive law, PPM
-  transport, ITD remap and strain-rate FD denominators.
-
-No new fixes needed.
-
-## Iteration 82 — 2026-05-13
-
-**Scan-only iteration: confirmed no other `jnp.where`-traces-both-
-branches on static-shape gates (no code changes).**
-
-After iter-81 fix, scanned `src/legoesm/` for similar patterns:
-- `state.tracers.data[..., -1, 0]` indexing (only in iter-81's
-  `extract_atm_to_surface_nh`; now uses Python `if`).
-- `radiation/integration.py:689-707` already uses the Python-`if`
-  pattern correctly:
-  ```python
-  n_tracers = state.tracers.data.shape[-1]
-  if n_tracers > 0:
-      q_v = jnp.clip(state.tracers.data[..., 0], 0.0, None)
-  ```
-
-Also inspected `_warm_rain.py` (donor_clamp_scale, safe_pow,
-saturation_adjustment, effective_Nc, autoconversion_sb, accretion,
-self_collection_breakup, rain_evaporation), `_plume.py` (analytic
-exponential decay forms for `M_u`, `T_u_ent`, `q_u_ent`,
-`q_c_u_ent` for AD-safety), and `snow_budget.py` (energy-limited
-melt + degree-day fallback).  All clean.
-
-No new fixes needed.
-
-## Iteration 81 — 2026-05-13
-
-**Bug fix: `extract_atm_to_surface_nh` crashes for dry NH state.**
-
-`coupler/surface_exchange.py:138` used `jnp.where(has_tracers,
-state.tracers.data[..., -1, 0], 0.0)` to fall back when there
-are no tracers.  But `jnp.where` traces BOTH branches, and the
-`[..., -1, 0]` indexing crashes at trace time when the `n_tracers`
-axis has shape 0 (dry NH simulations).  The hydrostatic version
-(line 69-74) correctly uses a Python `if` based on the static
-shape — extended that pattern to the NH version.
-
-Codex review on coupler/ returned `verdict=approve, No new findings`
-(false negative — the bug is real but only fires for dry NH state,
-not currently in the test matrix).
-
-**Tests (post iter-81):** 9 / 9 lake tests pass (smoke).  Existing
-production setups all have q_v tracer so the bug was dormant.
+- **Inspection-only**: iter-51, 61, 65, 66, 68, 69.
 
 ## Iterations 71-79 — Summary (compressed 2026-05-13 after iter-80)
+- **iter-73** (codex-confirmed joint sed + in-column sink cap): Morrison + Thompson
+  sedimentation now passes `extra_sink=` for q_i (aggregation + melt_ice [+ rime_to_graupel
+  _from_i]), q_s (melt_snow [+ rime_to_graupel_from_s]), q_g (melt_graupel).
+- **iter-79** (codex stop-time RRTMGP humidity guard bypass): clip `q_v ∈ [0, 0.99]` AFTER
+  `_add_halos`, not before; halo extrapolation could otherwise push q_v outside the bounds
+  and produce a singular `(1 − q_v)` denominator.
+- **iter-81** (dry-NH coupler crash): `extract_atm_to_surface_nh` switched from
+  `jnp.where(has_tracers, state.tracers.data[..., -1, 0], 0.0)` (traces both branches +
+  crashes at trace time on shape-0 axis) to a Python `if` on the static `n_tracers` shape.
+- **Inspection-only**: iter-71 (YSU + surface_layer + EDMF), iter-72 (TKE + CLUBB-lite +
+  pbl_height), iter-74-78 (ocean surface_forcing + bulk_flux + 5 convection schemes +
+  ocean_tendency_common + barotropic substep solvers), iter-82-83 (scan + Richards units
+  + ice modules).
+
+## Iterations 84-89 — Summary (compressed 2026-05-13 after iter-90)
 
 ### Real code fixes
-- **iter-73** (joint sed + in-column-sink cap, codex-confirmed): Morrison + Thompson
-  sedimentation now passes `extra_sink=` for the in-column sinks competing with sed in
-  the same explicit step — q_i (aggregation + melt_ice [+ rime_to_graupel_from_i]),
-  q_s (melt_snow [+ rime_to_graupel_from_s]), q_g (melt_graupel).  Extends the iter-29
-  q_r/evaporation pattern to all solid-hydrometeor sed paths.
-- **iter-79** (codex stop-time: RRTMGP humidity guard bypassed by halo extrapolation):
-  `rrtmgp.py:636-640` applied `clip(q_v, 0, 0.99)` BEFORE `_add_halos`, but the linear
-  halo extrapolation could push q_v outside [0, 0.99] for steep boundary profiles
-  (`q_v = [0.99, 0.0, ...]` → halo = 1.98 → singular `(1−q_v)` denominator).  Fix:
-  clip AFTER `_add_halos`.  New regression test exercises the pathological profile.
+- **iter-84** (PDI hydraulic K wet-end smoothstep inverted, `land/soil_hydraulics.py:322`):
+  Cosine interpolation between `h_crit` and `h≈0` was `0.5·(1+cos(π·frac))`, giving
+  `Kr_interp = Kr_crit` at frac=0 (wet) and `Kr_interp = 1` at frac=1 — opposite of the
+  intended BC.  Loam defaults clamped saturated K at ~34 % of K_sat in the wet regime.
+  Fix replaces `(1+cos)` with `(1−cos)` so the smoothstep runs 1 → Kr_crit as frac goes
+  0 → 1.  Verification: `K(h=1e-12) = K_sat` exact, `K(h_crit) = K_sat · Kr_crit`
+  continuous.  38 soil-hydraulics tests green.
+- **iter-85a/b/c** (Thomas tridiag denominator-floor, `land/tridiag.py:42-55`): old
+  `jnp.sign(denom)*_tiny + _tiny` collapses to **exactly 0** for tiny negatives on a
+  non-FTZ backend (`sign(-x)·_tiny + _tiny = 0`).  On our XLA build the bug is masked by
+  subnormal flush-to-zero (`sign(-1e-40) → -0.0`), but the masking is platform-dependent.
+  Fix: branch-based `sign = where(denom >= 0, 1, -1); denom = where(|denom|<_tiny,
+  sign·_tiny, denom)` — guarantees a non-zero floor on every platform.  Note: does NOT
+  preserve sign under FTZ (`-0.0 >= 0` is True).  iter-85b/c reframed test and docs to
+  the honest "non-zero floor, not sign-preserving under FTZ" claim after codex stop-time
+  catches.  208 land+soil tests green.
+- **iter-86** (free-drift ice velocity dimensionally inconsistent, 300× too small,
+  `ice/dynamics.py:105`): old `u_ice = drag_ocean·U_w + (drag_atm·ρ_air/ρ_ice)·U_a`
+  treats dimensionless drag coefficients as velocity-mapping ratios and uses ρ_ice
+  instead of ρ_oc.  For U_a=5, U_w=0.1 yields ~5.7e-4 m/s drift vs physical Zubov
+  ~0.18 m/s.  Fix: steady-state air/ocean drag balance linearised to
+  `u_i = U_w + α·(U_a - U_w)` with `α = sqrt(ρ_air·C_ai / (ρ_oc·C_oi)) ≈ 0.017`
+  (Zubov / Nansen 1-2 % wind rule).  Signature: `rho_ice → rho_ocean`.  51+3+7 tests
+  green.
+- **iter-87** (slab-path free-drift, codex follow-up to iter-86, `ice/sea_ice.py:184-187`):
+  iter-86 missed an inlined copy of the broken formula in the slab thermo / diagnostic
+  path; replaced with a call to the shared `free_drift_velocity`.  117 tests green.
+- **iter-88** (EDMF updraft dimensionally inconsistent,
+  `atmosphere/physics/turbulence/edmf.py:201-204`): old `dw_dz = buoy - eps·w_u` mixed
+  [m/s²] and [1/s].  Lagrangian form is `dw/dz = B/w - ε·w`; dropping `B/w → B` flipped
+  the sign of dw/dz at small w_u, strangling buoyant updrafts that should accelerate.
+  Fix: integrate the squared form `d(w²)/dz = 2(B - ε·w²)`, AD-safe via
+  `sqrt(max(w², 1e-20))` floor + `where(w²>0, sqrt, 0)` gate.  101 tests green.
 
 ### Inspection-only iters
-- **iter-71**: YSU PBL + surface_layer + EDMF.  YSU/HB internal `L_v` hardcode noted
-  as known limitation (tile-side flux is authoritative in coupled mode).
-- **iter-72**: TKE + CLUBB-lite + pbl_height.  All differentiable with semi-implicit
-  dissipation and clip-to-tke_min final guards.
-- **iter-74**: ocean surface_forcing + bulk_flux (codex `verdict=approve`).
-- **iter-75**: kessler/SB/Kuo/DCA convection (codex `verdict=approve`, truncated).
-- **iter-76**: Tiedtke/Kain-Fritsch/Zhang-McFarlane mass-flux convection.  All 6 schemes
-  share the column-conservative `_apply_mass_flux_kernel` scaffold.
-- **iter-77**: ocean_tendency_common helpers (iterate_eos_and_pressure_anomaly,
-  bbl_distributed_drag_face_column, implicit_bottom_drag_factor).
-- **iter-78**: barotropic substep solvers (explicit + implicit Crank-Nicolson).
-  Explicit's Hu_avg is exact; implicit's trapezoidal Hu_avg differs from the eta-update
-  flux by O(θ²·dt²·g·∇²η).
+- **iter-89**: convection sweep (`_plume`, `mass_flux`, `zhang_mcfarlane`, `kessler`,
+  `_warm_rain`, `compute_cape`, `compute_moist_adiabat`).  No production hot-path defects.
+  Removed dead `e_sat = saturation_vapor_pressure(T_parcel)` in `compute_lcl` (Bolton
+  Eq. 22 uses RH directly) + unused import.  21 plume tests green.
 
-### Codex review activity
-- 5+ codex runs in this window; 2 returned actionable findings (iter-73 sed cap,
-  iter-79 q_v halo) — both confirmed and fixed.  Many runs returned
-  `verdict=approve`.
+### Codex stop-time review activity
+- Caught two real iter-86 follow-ups: (1) the iter-87 slab-path miss; (2) the iter-85
+  test misframing (asserted sign-preservation but XLA FTZ masks it — claim is only that
+  the floor is non-zero, sign-preservation only without FTZ).  Honest reframing landed in
+  iter-85b/c.
 
-## Iterations 41-50 — Detail (compressed 2026-05-13)
-
-- **iter-41**: compression milestone (iter-30..40 folded).
-- **iter-42**: ocean bulk-flux q_sat unit-bug + grey-surface LW + Emanuel floor.
-- **iter-43**: inspection-only (atmosphere radiation/turbulence).
-- **iter-44**: slab_land fresh-snow albedo.
-- **iter-45**: inspection-only (ice modules).
-- **iter-46**: inspection-only (ocean lateral_mixing).
-- **iter-47**: inspection-only (gravity_wave_drag).
-- **iter-48**: inspection-only (clouds + Louis turbulence).
-- **iter-49**: inspection-only (gray radiation + solar geometry).
-- **iter-50**: compression + land inspection.
-
-## Inspected & clean (as of iter-80)
+## Inspected & clean (as of iter-90)
 - **Land**: `snow_budget`, `carbon/{carbon_cycle,stomata}`, `richards`, `soil_thermal`,
-  `multilayer_land`, `slab_land`, `stomata_utils`, `surface_params`, `param_providers`.
+  `multilayer_land`, `slab_land`, `stomata_utils`, `surface_params`, `param_providers`,
+  `tridiag` (post iter-85), `soil_hydraulics` (post iter-84).
 - **Atmosphere turbulence**: `clubb_lite`, `holtslag_boville`, `louis`, `ysu`, `tke`,
-  `vertical_diffusion`, `surface_layer`, `pbl_height`.
+  `vertical_diffusion`, `surface_layer`, `pbl_height`, `edmf` (post iter-88).
 - **Atmosphere clouds**: `cloud_fraction`.
 - **Atmosphere GWD**: `rayleigh`, `lindzen`, `mcfarlane`, `hines`, `integration`.
 - **Atmosphere radiation**: `gray`, `solar`, `ozone_ml`, `integration`,
   `rrtmgp/rrtmgp` (post iter-79).
 - **Atmosphere convection**: `bechtold`, `emanuel`, `dca`, `kuo`, `zhang_mcfarlane`,
-  `tiedtke`, `kain_fritsch`, `mass_flux`.
+  `tiedtke`, `kain_fritsch`, `mass_flux`, `_plume` (post iter-89).
 - **Atmosphere microphysics**: `kessler`, `seifert_beheng`, `morrison`, `thompson`,
   `_warm_rain`, `output` (post iter-73).
 - **Ocean physics**: `lateral_mixing/{harmonic,biharmonic,gm_redi,gm_redi_latlon_cgrid,
-  gm_redi_mpas,backscatter,_gm_redi_common}` (post iter-52/53/54),
-  `shortwave_penetration`, `mixing` (post iter-58/59), `bottom_drag/quadratic`,
-  `vertical_mixing/{kpp,implicit_solver,mpas_integration}` (post iter-57),
-  `convection/{enhanced_diffusion,plume}`, `surface_forcing/{prescribed,restoring,
-  bulk_formulas,wind_profiles}`.
+  gm_redi_mpas,backscatter,_gm_redi_common}` (post iter-52/53/54), `shortwave_penetration`,
+  `mixing` (post iter-58/59), `bottom_drag/quadratic`, `vertical_mixing/{kpp,
+  implicit_solver,mpas_integration}` (post iter-57), `convection/{enhanced_diffusion,
+  plume}`, `surface_forcing/{prescribed,restoring,bulk_formulas,wind_profiles}`.
 - **Ocean dynamics**: `ocean_tendency_common`, `barotropic_common`,
   `barotropic_latlon_cgrid` (explicit), `barotropic_implicit_latlon_cgrid` (with
   known limitation).
-- **Coupler**: `surface_energy`, `bulk_flux`, `lake/two_layer_lake` (post iter-67).
-- **Ice**: `rheology`, `dynamics`, `itd`, `transport`, `sea_ice` (post iter-55).
+- **Coupler**: `surface_energy`, `bulk_flux`, `surface_exchange` (post iter-81),
+  `lake/two_layer_lake` (post iter-67).
+- **Ice**: `rheology`, `dynamics` (post iter-86), `itd`, `transport`, `sea_ice` (post
+  iter-55, iter-87).
 - **Shared**: `thermo`, `surface_albedo`.
 
 ## Outstanding / Deferred
@@ -222,190 +164,23 @@ production setups all have q_v tracer so the bug was dormant.
 - Threading `dt` into ocean `physics_fn` across 3 ocean PE backends + 3 model drivers.
 - Visual / long-run validation of new ice → ocean feedbacks.
 - σ-tensor rotation across cubed-sphere faces (O(dx) edge error in sea-ice EVP).
-- Codex `adversarial-review` runtime: ~50/50 success/failure when running.  Continue
-  alongside direct inspection.
 - Bottom drag double-application in explicit barotropic substep path (F_slow already
   carries depth-mean drag; effective `2·r/H`).  Requires cross-cutting refactor.
 - Implicit barotropic Hu_avg O(θ²·dt²·g·∇²η) inconsistency with eta-update flux.
   MOM6 / NEMO use iterative implicit methods for exact consistency.
 - Pre-existing test failure `test_b_salt_sign_freshening_is_stabilizing` (harness
   fragility — `jnp.mean(None)` when `out.K_v` is None) — needs harness fix.
-
-## Iter-84 — PDI hydraulic-conductivity wet-end smoothstep inverted
-`src/legoesm/land/soil_hydraulics.py:322` (Iden et al. 2015 PDI capillary K with
-max-pore-size constraint).  Cosine interpolation between `h_crit` and `h≈0` was
-written `0.5*(1+cos(π·frac))`, giving `Kr_interp = Kr_crit` at frac=0 (wet end)
-and `Kr_interp = 1` at frac=1 (h=h_crit) — the opposite of the intended boundary
-conditions.  Diagnosis: at h=h_crit, Kr_interp must match the standard
-capillary `Kr_c(h_crit) = Kr_crit` for continuity; at h≈0 it must approach 1 so
-K → K_sat.  Loam defaults gave Kr_crit ≈ 0.342, so saturated K was effectively
-clamped at 34 % of K_sat in the wet regime.  Fix replaces `(1 + cos)` with
-`(1 − cos)` so the smoothstep runs 1 → Kr_crit as frac goes 0 → 1.
-
-Quantitative check (loam defaults, JAX float64, CPU):
-- `K(h = h_crit = 0.06 m) = 9.871e-7 m/s = K_sat * Kr_crit` (continuous match)
-- `K(h = 1e-9 m) = 2.830e-6 m/s ≈ 0.979 * K_sat` (smoothly approaching K_sat)
-- `K(h = 1e-12 m) = 2.890e-6 m/s = K_sat` (exact to machine precision)
-
-Regression test `test_K_approaches_Ksat_at_saturation` walks h from h_crit down
-to 1e-12 m, asserts monotone K and `K(1e-12) = K_sat` to rtol=1e-6.  Full
-`tests/unit/test_land_ice_soil_hydraulics.py` (38 tests) green.
-
-## Iter-85 — Thomas tridiag denominator-floor lost sign for tiny negatives
-`src/legoesm/land/tridiag.py:42-55`.  The forward-sweep safety floor
-`denom = jnp.where(jnp.abs(denom) < _tiny, jnp.sign(denom)*_tiny + _tiny,
-denom)` collapsed to **exactly 0** whenever `denom` was a small negative
-number, because `sign(-x)*_tiny + _tiny = -_tiny + _tiny = 0`.  The very
-next line (`c_col[k] / denom`) then divided by zero.
-
-Trigger condition: any step that produces a denominator in `(-_tiny, 0)`
-on a backend that preserves subnormals.  **On our XLA build this is
-masked by subnormal flush-to-zero (FTZ)** — `jnp.sign(-1e-40)` returns
-`-0.0` (not `-1.0`) post-flush, so the old formula evaluates to
-`-0.0 * _tiny + _tiny = +_tiny` and divides cleanly.  Masking is
-platform/compilation-dependent (codex stop-time call-out), so the
-defensive fix is still warranted.
-
-Fix: replace `jnp.sign(denom)` with an explicit branch (`sign =
-jnp.where(denom >= 0.0, 1.0, -1.0)`) and floor magnitude with `sign *
-_tiny`; same fix applied to the init-row `denom0`.  **The fix
-guarantees a *non-zero* floor on every platform, but does NOT preserve
-sign under FTZ**: a negative subnormal becomes `-0.0`, `-0.0 >= 0.0` is
-`True`, so the new formula returns `+_tiny` (same as the old masked
-behavior).  Without FTZ the new formula maps negative inputs to
-`-_tiny` while the old formula collapses to `0`.
-
-Regression test `test_tridiag_denom_floor_is_never_zero` exercises the
-math directly (independent of XLA FTZ): asserts that the old formula
-evaluates to exactly 0 when fed `sign = -1`, and that the new branch-
-based floor returns a non-zero result for every negative / zero /
-positive subnormal input.  An end-to-end smoke check on the live
-`thomas_solve_batch` is included.  Full `tests/land/unit/` + soil-
-hydraulics suite (208 tests) green.
-
-## Iter-86 — free-drift ice velocity dimensionally inconsistent (300× too small)
-`src/legoesm/ice/dynamics.py:105` (`free_drift_velocity`, exposed via
-`SeaIceConfig(dynamics="free_drift")`).  The previous formula
-
-    u_ice = drag_ocean * U_w + (drag_atm * ρ_air / ρ_ice) * U_a
-
-treats the dimensionless drag coefficients (~5.5e-3, 1.3e-3) as if
-they were velocity-mapping ratios and uses ρ_ice in the denominator
-of the wind term — neither survives a dimensional analysis of the
-air/ocean drag balance.  Quantitatively the formula yields
-~5.7e-4 m/s ice drift for U_a=5 m/s, U_w=0.1 m/s; the physical
-Zubov estimate is ~0.18 m/s.  Off by O(300).
-
-Fix replaces it with the steady-state, no-Coriolis drag balance
-
-    ρ_air · C_ai · |U_a - u_i| (U_a - u_i)
-        = ρ_oc  · C_oi · |u_i - U_w| (u_i - U_w)
-
-linearised about U_w to
-
-    u_i = U_w + α · (U_a - U_w),
-    α   = sqrt(ρ_air · C_ai / (ρ_oc · C_oi))   ≈ 0.017.
-
-This is the canonical Nansen / Zubov ~2 % drift rule (Leppäranta 2011,
-§6.4).  Signature changes `rho_ice → rho_ocean` (the proper density in
-the drag balance); the lone caller in `sea_ice.py` and three test
-modules were updated accordingly.  Validation tests (sanity checks)
-unaffected; `test_matches_zubov_balance` replaces the old
-`test_matches_slab`, and `test_free_drift_bounds` asserts
-`u_ice ≈ U_w + α·(U_a - U_w)` plus 0.005 < α < 0.05.  Full
-`tests/unit/test_sea_ice_dynamics.py` (51) +
-`tests/sea_ice/validation/.../TestFreeDriftSanity` (3) +
-`tests/stress/test_phase1_sea_ice.py` (7) green.
-
-## Iter-87 — slab sea-ice path was *still* using the broken free-drift formula
-Codex stop-time review on iter-86 caught a second site:
-`src/legoesm/ice/sea_ice.py:184-187` had the same dimensionally-broken
-expression *inlined* in the slab thermo / diagnostic path (it predates
-`free_drift_velocity`).  Iter-86 only fixed the `dynamics="free_drift"`
-branch — the default `dynamics="none"` slab path still produced
-~5.7e-4 m/s drift.
-
-Fix: replace the inlined formula with a call to the shared
-`free_drift_velocity` helper (same Zubov-style drag balance).
-`tests/unit/test_coupler.py::test_sea_ice_ocean_back_reaction_*` was
-asserting expected ocean-back-reaction stress derived from the *old*
-formula — updated to derive the expected ice velocity from the new
-`alpha = sqrt(ρ_air · C_ai / (ρ_oc · C_oi))` balance.
-
-Run: `tests/unit/test_sea_ice_dynamics.py` (51) +
-`tests/unit/test_coupler.py` (59) + `tests/stress/test_phase1_sea_ice.py`
-(7) = 117 green.  `tests/sea_ice/validation/...::TestEVPSanity::
-test_zero_velocity_isotropic_stress` is a *pre-existing* failure
-(EVP doesn't fully relax to ‑P/2 in 10 subcycles at dt=3600 s, 15 %
-rtol too tight) — verified by re-running the test on HEAD~1; not
-caused by this iter.
-
-## Iter-88 — EDMF updraft equation dimensionally inconsistent
-`src/legoesm/atmosphere/physics/turbulence/edmf.py:201-204` (Siebesma
-2007 / Tan et al. 2018 simplified-EDMF updraft).  Code had
-
-    dw_dz = buoy - eps * w_u
-    w_u_new = w_u + dw_dz * dz_k
-
-`buoy` is `g·Δθ_v/θ_v` [m/s²]; `eps·w_u` is [1/m]·[m/s] = [1/s].
-Summing two terms with different units silently mixes the
-buoyancy-driven dw/dz term with the entrainment damping.  The
-Lagrangian plume equation is `w·dw/dz = B − ε·w²`; the linearised
-form is `dw/dz = B/w − ε·w` (both [1/s]).  Dropping `B/w → B` flips
-the sign of `dw/dz` at small `w_u` — buoyant updrafts that should
-accelerate were being damped.
-
-Fix: integrate the **squared form** which is dimensionally consistent
-on both sides and naturally handles `w → 0`:
-
-    d(w²)/dz = 2·(B − ε·w²),
-    w²_new   = max( w² + 2·(B − ε·w²)·dz_k, 0 ),
-    w_new    = sqrt( w²_new ).
-
-AD safety: `d/dx sqrt(x) = 1/(2 sqrt(x))` is singular at 0, so floor
-the argument before sqrt (`max(w²_new, 1e-20)`) and gate the result
-with `where(w² > 0, sqrt(...), 0)`.
-
-Verification: 53 `tests/atmosphere/hydrostatic/unit/test_turbulence.py`
-+ 45 `tests/unit/test_physics_turbulence.py` + 3 EDMF state /
-convection tests = 101 green.  Differentiability test
-`test_differentiable` now finite (previously NaN under the new sqrt
-without the AD-safe pattern, caught in the test loop).
-
-## Iter-89 — convection sweep (inspection + dead-code cleanup)
-Audited `convection/_plume.py`, `convection/mass_flux.py`,
-`convection/zhang_mcfarlane.py`, `microphysics/kessler.py`,
-`microphysics/_warm_rain.py`, and the supporting
-`thermodynamics.compute_cape` / `compute_moist_adiabat` helpers.
-
-Findings (no production hot-path defects this round):
-
-1. **Dead code removed** (`_plume.compute_lcl`): `e_sat =
-   saturation_vapor_pressure(T_parcel)` was computed and never used —
-   Bolton (1980) Eq. 22 uses RH directly.  Removed the call and the
-   corresponding `saturation_vapor_pressure` import.  All 21
-   `tests/unit/test_convection_plume.py` tests still green.
-
-2. **Deferred — plume buoyancy uses dry T, not virtual** (`_plume.py:653`
-   and `compute_lfc_lnb`).  The plume gate `B_u = T_u - T_e` is the
-   dry-temperature difference; the physically correct test is the
-   virtual-temperature difference with cloud-water drag,
-   `T_v,u - T_v,e = T_u(1 + 0.608 q_u - q_c,u) - T_e(1 + 0.608 q_e)`.
-   For tropical convection (q_u≈0.018, q_e≈0.012, q_c,u≈0.002) the
-   correction is up to ~1 K — comparable to the `buoyancy_sharpness
-   = 0.5 /K` plume-alive threshold.  Acknowledged in `compute_cape`
-   docstring (~1 % CAPE bias).  Folding virtual buoyancy through the
-   plume integrator is a scheme-wide recalibration; defer until a
-   dedicated tuning iteration.
-
-3. **Verified clean**: `_apply_mass_flux_kernel` compensating-subsidence
-   sign convention (`dT/dt = (M/ρ) · (dT/dz + g/c_p)`); Z-M closure
-   uses dimensionally-correct `M_b = ρ_BL · max(CAPE − thr, 0) / (g τ)`
-   (iter-2 fix held); `donor_clamp_scale` AD-safe pattern correct;
-   `compute_moist_adiabat` straddle interpolation across the LCL is
-   correct.
+- Pre-existing test failure `TestEVPSanity::test_zero_velocity_isotropic_stress` (EVP
+  doesn't relax to -P/2 in 10 subcycles at dt=3600s with 15 % rtol; verified on HEAD~1).
+- **Plume buoyancy uses dry T, not virtual** (`convection/_plume.py:653`; affects
+  `compute_lfc_lnb` too).  ~1 K virtual correction comparable to plume-alive threshold.
+  `compute_cape` already supports virtual-T mode when q_v threaded; the plume
+  integrator does not yet.  Scheme-wide recalibration — defer until a dedicated tuning
+  iter.
+- Codex `adversarial-review` runtime ~50/50 success/failure when running.  Continue
+  alongside direct inspection.
 
 ## Next iterations
 Continue addressing further codex findings and direct-inspection sweeps until all
 schemes are provably conservative, monotone, CFL-safe, and AD-safe across mixed
-wet/dry grids.  Next compression at iter-90 (current size: ~400 lines).
+wet/dry grids.  Next compression at iter-100.
