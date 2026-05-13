@@ -9573,6 +9573,89 @@ def daylight_hours_fv3(
     return 24.0 * omega_s / jnp.pi
 
 
+def solar_zenith_cos_fv3(
+    latitude_deg: jax.Array,
+    day_of_year: jax.Array,
+    hour_local: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 865: instantaneous cosine of solar zenith angle.
+
+    Standard astronomy / FAO-56 formula for instantaneous solar
+    geometry at a given local time:
+
+        cos(θ_s) = sin(φ)·sin(δ) + cos(φ)·cos(δ)·cos(ω)
+
+    Where:
+      * θ_s — solar zenith angle (radians from vertical).
+      * φ   — latitude (radians).
+      * δ   — solar declination
+              δ = 0.409·sin(2π·J/365 − 1.39)  (rad; FAO-56 fit).
+      * ω   — hour angle (rad):
+              ω = π · (t_local − 12) / 12
+              (zero at solar noon; ±π/2 at sunrise/sunset).
+
+    Clipped to ``cos(θ) ≥ 0`` since negative values correspond to
+    sun below horizon (night) — caller-visible 0 means no direct
+    SW.  (Polar night ⇒ cos(θ) ≤ 0 all day, returns 0.)
+
+    Canonical values:
+      | location/date/time          | cos(θ) |
+      |-----------------------------|--------|
+      | Equator equinox noon        | 1.000  |
+      | Equator equinox 06:00       | 0.000  |
+      | 30°N equinox noon           | 0.866  |
+      | 60°N June noon              | 0.872  |
+      | 60°N Dec noon               | 0.115  |
+      | Equator midnight            | 0      |
+      | 80°N polar night any time   | 0      |
+
+    Used by:
+      * **SW-radiation parameterization** at TOA: S_down(t) =
+        S_0 · d_r⁻² · cos(θ_s).  Integrating cos(θ) over day gives
+        iter-863 R_a daily-mean closure.
+      * **Photosynthesis light-curves**: PAR ∝ cos(θ) at high sun;
+        crop-canopy radiative-transfer models (Goudriaan 1977,
+        de Pury-Farquhar 1997 two-stream).
+      * **Solar PV yield**: Φ_panel = S·cos(θ−θ_tilt) for fixed
+        tilt; cos(θ) needed for sun-position tracking.
+      * **Satellite retrieval geometry**: SZA correction for
+        bidirectional reflectance, BRDF inversion.
+      * **Diurnal-cycle SW forcing** in single-column models /
+        SCM-driven offline runs.
+
+    Composes with iter-863 ``extraterrestrial_radiation_fv3`` and
+    iter-864 ``daylight_hours_fv3`` — together cover daily (R_a),
+    duration (N), and instantaneous (cos θ) solar geometry.
+
+    Hour-angle convention: ``hour_local = 12`` is solar noon at
+    given longitude (mean sun time, no equation-of-time correction).
+    Callers needing UTC must shift by longitude·24/360 hours.
+
+    Parameters
+    ----------
+    latitude_deg : jax.Array
+        Latitude (degrees).
+    day_of_year : jax.Array
+        Day-of-year (1–365).
+    hour_local : jax.Array
+        Local solar time (hours; 0–24, 12 = solar noon).
+
+    Returns
+    -------
+    cos_theta : jax.Array
+        Cosine of solar zenith angle, clipped to [0, 1].
+        0 = sun below horizon (night/polar night).
+    """
+    phi = latitude_deg * jnp.pi / 180.0
+    delta = 0.409 * jnp.sin(2.0 * jnp.pi * day_of_year / 365.0 - 1.39)
+    omega = jnp.pi * (hour_local - 12.0) / 12.0
+    raw = (
+        jnp.sin(phi) * jnp.sin(delta)
+        + jnp.cos(phi) * jnp.cos(delta) * jnp.cos(omega)
+    )
+    return jnp.maximum(raw, 0.0)
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

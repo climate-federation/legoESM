@@ -5507,3 +5507,64 @@ alt-Hargreaves PET forms.  Pure JAX, vmap-compatible.  FAO-56
 ephemeris coefficients are empirical (literal).  No
 `constants.py` additions.
 
+## Iter 865 — solar_zenith_cos_fv3 (instantaneous SZA primitive)
+
+Added `solar_zenith_cos_fv3(latitude_deg, day_of_year,
+hour_local)` to `grids/cubed_sphere.py`.  Standard astronomy /
+FAO-56 instantaneous solar geometry:
+
+```
+cos(θ_s) = sin(φ)·sin(δ) + cos(φ)·cos(δ)·cos(ω)
+ω        = π · (t_local − 12) / 12          (hour angle, rad)
+δ        = 0.409·sin(2π·J/365 − 1.39)        (declination, rad)
+```
+
+Clipped to cos(θ) ≥ 0 (negative values = sun below horizon = night).
+
+Canonical values:
+  | location/date/time          | cos(θ)  |
+  |-----------------------------|---------|
+  | Equator equinox noon        | ≈1.000  |
+  | Equator equinox 06:00       | ≈0.000  |
+  | 30°N equinox noon           | ≈0.866  |
+  | 60°N June noon              | ≈0.872  |
+  | 60°N Dec noon               | ≈0.115  |
+  | Polar night any time        | 0       |
+
+**Closes the solar-geometry triplet** with iter-863 (R_a, daily
+integral) + iter-864 (N, duration):
+  * iter-863 R_a      — daily-integrated TOA SW (MJ/m²/day)
+  * iter-864 N        — sun-up duration (hours)
+  * iter-865 cos(θ)   — instantaneous sun-angle factor
+
+Together they cover daily / duration / instantaneous solar input.
+
+Used by:
+  * **SW-radiation parameterization** at TOA: S_down(t) = S_0·
+    d_r⁻²·cos(θ).  Integrating cos(θ) over day → iter-863 R_a.
+  * **Photosynthesis light-curves**: PAR ∝ cos(θ) (Goudriaan 1977,
+    de Pury-Farquhar 1997 two-stream canopy).
+  * **Solar PV yield**: Φ = S·cos(θ−θ_tilt) for fixed-tilt arrays.
+  * **Satellite-retrieval geometry**: SZA correction for BRDF
+    inversion, bidirectional reflectance.
+  * **Diurnal-cycle SW forcing** in single-column models.
+
+Hour-angle convention: ``hour_local=12`` is solar noon (mean sun
+time; no equation-of-time correction).  UTC callers shift by
+longitude·24/360 hours externally.
+
+Test: `tests/test_fv3_solar_zenith_iter865.py` (8 tests: equator
+equinox noon ≈1.0, midnight 0 clipped, 30°N noon ≈0.866, 60°N Dec
+low <0.2, polar night zero, polar day midnight positive, sunrise/
+sunset ~0 at equator, 3-D shapes in [0, 1]).
+
+### Why this iteration was meaningful
+
+**Closes the solar-geometry primitive triplet** (R_a + N + cos θ
+covering daily / duration / instantaneous solar-input scales).
+Critical for: (1) two-stream radiative-transfer canopy models;
+(2) diurnal-cycle SCM forcing; (3) PV-yield + satellite retrievals;
+(4) photosynthesis light-curves.  Pure JAX, vmap-compatible.  No
+new physical constants (FAO-56 ephemeris coefficients are literal).
+No `constants.py` additions.
+
