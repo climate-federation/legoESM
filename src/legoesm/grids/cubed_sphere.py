@@ -8010,6 +8010,87 @@ def tcre_remaining_budget_fv3(
     return 1000.0 * (delta_t_target - delta_t_current) / tcre_safe
 
 
+def airborne_fraction_co2_fv3(
+    cumulative_emission: jax.Array,
+    airborne_fraction: jax.Array = 0.46,
+    gtco2_per_ppm: float = 7.81,
+) -> jax.Array:
+    """FV3_3D iter 847: airborne-fraction emission→atmospheric-CO₂.
+
+    Friedlingstein et al. 2022 AR6 Global Carbon Project closure
+    converting cumulative anthropogenic CO₂ emission to airborne
+    ppm increase:
+
+        ΔCO₂_atm (ppm) = AF · E_cum (Gt-CO₂) / k_C2ppm
+
+    Where:
+      * AF        — airborne fraction (dimensionless); fraction
+                    of cumulative CO₂ emissions remaining in the
+                    atmosphere after ocean + land carbon-cycle
+                    uptake.  AR6/GCB central 0.46 (range 0.40–0.50).
+      * k_C2ppm   — mass-to-mixing-ratio conversion 7.81 Gt-CO₂/ppm.
+                    Derived from atmospheric mass and CO₂ molar
+                    weight: M_atm = 5.148×10¹⁸ kg, M_CO₂ = 44.01,
+                    M_dry-air = 28.97 → 1 ppm = 5.148e18·44.01/
+                    (28.97·1e6·1e12) ≈ 7.81 Gt-CO₂.
+
+    Sign: positive for E_cum > 0 (typical anthropogenic emissions).
+    Land/ocean uptake handled implicitly by AF < 1 (~54% of human
+    emissions absorbed by sinks at present-day).
+
+    AR6 canonical:
+      * Cumulative anthropogenic 1750→2020 ≈ 2400 Gt-CO₂
+        → AF · 2400 / 7.81 ≈ 141 ppm
+        (matches observed 419 − 278 = 141 ppm).
+      * Future SSP3-7.0 cumulative 2020→2100 ≈ 7000 Gt-CO₂
+        → ΔCO₂_atm ≈ 412 ppm (atm reaches ~830 ppm).
+
+    Closes the **emission → atmospheric-concentration primitive
+    chain**, completing the full pipeline:
+
+        emission → iter-847 AF → ΔCO₂_atm (ppm)
+                  ↓
+                  iter-838 ΔF_CO₂ → iter-836/837 ECS/TCR → ΔT
+                  (concentration pathway)
+
+        emission → iter-846 TCRE → ΔT (cumulative-emission shortcut)
+
+    The AF-based path lets you separate the carbon-cycle response
+    (AF, varies 0.40–0.50 with feedbacks) from the radiative-
+    forcing-and-climate-feedback response (Myhre + AR6 quartet).
+
+    Used by: Friedlingstein et al. 2022 GCB carbon-budget tables,
+    IPCC AR6 §5 carbon cycle, FaIR/MAGICC simple-climate-model
+    emission-driven runs, integrated-assessment-model CO₂-cycle
+    closure, Bern-CC impulse-response replacement when only AF is
+    available.
+
+    Note: AF here is the *cumulative* airborne fraction (not the
+    annual flux ratio).  The two coincide for sustained emissions
+    over multi-century horizons; for net-zero pathways diverge —
+    AF_cumulative grows toward 1 because remaining airborne CO₂
+    has nowhere left to go.
+
+    Parameters
+    ----------
+    cumulative_emission : jax.Array
+        Cumulative anthropogenic CO₂ emission (Gt-CO₂; positive
+        for emissions to atmosphere).
+    airborne_fraction : jax.Array or float
+        Cumulative airborne fraction (dimensionless); default 0.46
+        (AR6/GCB central).
+    gtco2_per_ppm : float
+        Mass-to-mixing-ratio factor (Gt-CO₂/ppm); default 7.81.
+
+    Returns
+    -------
+    delta_co2_ppm : jax.Array
+        Atmospheric CO₂ mixing-ratio change (ppm); positive for
+        emission to atmosphere.
+    """
+    return airborne_fraction * cumulative_emission / gtco2_per_ppm
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

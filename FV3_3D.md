@@ -5545,6 +5545,77 @@ iter-837 TCR / iter-844 GWP / iter-845 GTP to span the complete
 compatible.  TCRE = 0.45 is AR6 likely-range central (default
 arg).  No `constants.py` additions.
 
+## Iter 847 — airborne_fraction_co2_fv3 (emission→ppm primitive)
+
+Added `airborne_fraction_co2_fv3(cumulative_emission,
+airborne_fraction=0.46, gtco2_per_ppm=7.81)` to
+`grids/cubed_sphere.py`.  Friedlingstein et al. 2022 AR6 / GCB
+carbon-cycle closure converting cumulative anthropogenic CO₂
+emission to atmospheric mixing-ratio change:
+
+```
+ΔCO₂_atm (ppm) = AF · E_cum (Gt-CO₂) / 7.81
+```
+
+Where AF = 0.46 (AR6/GCB central, range 0.40–0.50) is the
+fraction of cumulative emissions remaining airborne after land +
+ocean uptake.  k = 7.81 Gt-CO₂/ppm derives from atmospheric mass
+M_atm = 5.148×10¹⁸ kg, molar weight M_CO₂/M_air = 44.01/28.97.
+
+Canonical:
+  * 1750→2020 cumulative E ≈ 2400 Gt-CO₂ → ΔCO₂ ≈ 141 ppm
+    (matches observed 419 − 278 = 141 ppm).
+  * SSP3-7.0 2020→2100 E ≈ 7000 Gt-CO₂ → ΔCO₂ ≈ 412 ppm
+    (atmosphere reaches ~830 ppm).
+
+Closes the **emission → atmospheric-concentration primitive
+chain**, completing the full forcing pipeline:
+
+```
+emission → iter-847 AF → ΔCO₂_atm (ppm)
+                      ↓ iter-838 ΔF_CO₂ → iter-836/837 ECS/TCR → ΔT
+                                                                 ↑
+emission → iter-846 TCRE → ΔT (cumulative-emission shortcut) ────┘
+```
+
+The two pathways (AF-via-concentration and TCRE-direct) give
+independent decomposition of carbon-cycle response (AF, 0.40–0.50
+range) from radiative-and-climate response.  Test verifies AF-
+pathway present-day cumulative emission → CO₂-only ΔT ≈ 1.58 K
+at |λ|=1.4.
+
+CDR / CCS handled naturally: E_cum < 0 ⇒ ΔCO₂ < 0 (drawdown).
+
+Used by: Friedlingstein et al. 2022 GCB carbon-budget tables,
+IPCC AR6 §5 carbon cycle, FaIR/MAGICC simple-climate emission-
+driven runs, IAM CO₂-cycle closure, Bern-CC impulse-response
+replacement when only AF available.
+
+Note: cumulative AF differs from annual flux ratio.  For sustained
+multi-century emissions they coincide; for net-zero pathways
+cumulative AF grows toward 1 (remaining airborne CO₂ has nowhere
+to go).
+
+Test: `tests/test_fv3_airborne_fraction_iter847.py` (8 tests:
+AR6 present-day 141 ppm analytic, zero-emission zero, AF=1 no-
+uptake limit, AF=0 full-uptake limit, chain to iter-838 ΔF_CO₂
+≈ 2.21 W/m², chain via concentration to ECS ≈ 1.58 K, CDR
+drawdown E<0 → ΔCO₂<0, 3-D shapes).
+
+### Why this iteration was meaningful
+
+Closes the missing **emission → concentration** link in the
+forcing chain.  Together with iter-844 (per-mass GWP), iter-845
+(per-mass GTP), iter-846 (per-cumulative-emission TCRE), and the
+Myhre trio (iter-838–840 per-concentration), the climate
+emissions-to-warming primitive set is now complete in 2 parallel
+pathways: AF-via-concentration and TCRE-direct.  Friedlingstein
+et al. 2022 GCB users need this primitive specifically — most
+SCM emulators expose AF as a tunable parameter rather than a
+full carbon-cycle model.  Pure JAX, vmap-compatible.  AF=0.46
+and k=7.81 are AR6/GCB empirical values (default args).  No
+`constants.py` additions.
+
 
 
 
