@@ -635,6 +635,77 @@ def fv3_corner_laplacian_iteration(
     return lap_divg * cdgrid.rarea_c
 
 
+def fv3_corner_laplacian_nord(
+    divg_d: jnp.ndarray,
+    cdgrid: "CubedSphereCDGrid",
+    nord: int,
+    apply_vector_corner_fill: bool = False,
+) -> jnp.ndarray:
+    """FV3_3D iter 892: nord-fold Laplacian wrapper.
+
+    Apply ``fv3_corner_laplacian_iteration`` ``nord`` times in
+    sequence, equivalent to the loops at PE
+    ``primitive_eq_cdgrid.py:508-510`` and NH
+    ``compressible_euler_cdgrid.py:631-632``:
+
+        for _ in range(nord):
+            divg_d = fv3_corner_laplacian_iteration(divg_d, cdgrid, ...)
+
+    Extracting this into a named helper:
+
+      1. Provides a single-source-of-truth point for the nord-loop
+         pattern (currently duplicated across PE and NH paths).
+      2. Enables iter-893+ to swap in the expanding-halo
+         implementation behind one function rather than two
+         independent loop refactors.
+      3. Decouples the unit-test for the higher-order Laplacian
+         stack from the full PE/NH model dispatch (faster CI).
+
+    Bit-for-bit equivalent to the inline loop — no behaviour change
+    in this iteration.  Foundation for iter-893's expanding-halo
+    replacement.
+
+    Faithful to FV3 ``sw_core.F90:1746-1782``::
+
+        do n=1, nord
+           ! ... inner Laplacian arithmetic ...
+        enddo
+
+    Parameters
+    ----------
+    divg_d : jnp.ndarray, shape ``(6, n+1, n+1)``
+        Corner-staggered divergence (or its iterated Laplacian).
+    cdgrid : CubedSphereCDGrid
+    nord : int
+        Number of Laplacian iterations.  Must be in {0, 1, 2, 3}
+        per FV3 namelist range; caller should validate via
+        ``validate_corner_div_damp_nord`` (iter-890).  Pass-through
+        of nord=0 returns input unchanged.
+    apply_vector_corner_fill : bool
+        FV3-faithful vector cube-vertex fill (sw_core.F90:1762).
+        Default False (no-op at nord=1, changes output at nord>=2).
+
+    Returns
+    -------
+    lap_nord_divg : jnp.ndarray, same shape as ``divg_d``.
+        nord-fold iterated Laplacian.
+
+    Notes
+    -----
+    nord=0: returns input unchanged (degenerate).
+    nord=1: equivalent to single ``fv3_corner_laplacian_iteration``.
+    nord>=2: each iteration re-pads via ``pad_halo`` (current
+        legoESM behaviour; iter-893 replaces with FV3-faithful
+        expanding-halo pattern).
+    """
+    result = divg_d
+    for _ in range(nord):
+        result = fv3_corner_laplacian_iteration(
+            result, cdgrid, apply_vector_corner_fill=apply_vector_corner_fill,
+        )
+    return result
+
+
 def _laplacian_iteration_with_vector_fill(
     divg_pad: jnp.ndarray,
     cdgrid: CubedSphereCDGrid,
