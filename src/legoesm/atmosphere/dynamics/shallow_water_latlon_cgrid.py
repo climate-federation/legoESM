@@ -326,6 +326,16 @@ class CGridLatLonShallowWaterModel(IntegrationMixin):
         """
         self._target_mass = None
 
+    def set_target_mass(self, target_mass) -> None:
+        """Explicitly set the anchored mass target.
+
+        iter-19: complement to ``reset_target_mass`` — bypasses the
+        lazy snapshot path when the caller already knows the target
+        (e.g. restart from a checkpoint that recorded the original
+        initial-condition mass).  Accepts any fp64 scalar.
+        """
+        self._target_mass = target_mass
+
     def compute_mass(self, state: CGridLatLonShallowWaterState) -> jax.Array:
         """Compute total mass (for conservation fixer target).
 

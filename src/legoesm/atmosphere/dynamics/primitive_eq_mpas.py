@@ -464,6 +464,10 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
         """Clear the anchored mass target (iter-18; see iter-4 SW twin)."""
         self._target_mass = None
 
+    def set_target_mass(self, target_mass) -> None:
+        """Explicitly set the anchored mass target (iter-19)."""
+        self._target_mass = target_mass
+
     def compute_mass(self, state) -> jax.Array:
         """Compute global ``∫ p_s dA`` in the fp64 budget accumulator."""
         return jnp.sum(

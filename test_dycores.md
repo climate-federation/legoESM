@@ -122,6 +122,12 @@ NH cross-grid TC1 mass-drift after iter-10 (matrix runner `notes` line):
   floor; lossy downcast would worsen drift by ~10^5x).  Scan-based
   workflows currently need ``anchor_mass_to_initial=False`` until a
   dedicated dtype-stable path lands.  Regression tests 10/10 PASS.
+- **iter-19**: add ``set_target_mass(target_mass)`` setter to the same
+  seven anchored models.  Pairs with iter-18's ``reset_target_mass``;
+  lets users bypass the lazy snapshot path entirely (e.g. resume from a
+  checkpoint that recorded the original initial-condition mass, or
+  anchor to a reference run for cross-experiment comparison).
+  10/10 regression tests PASS.
 
 ## Implementation patterns established (apply to any new dycore)
 
