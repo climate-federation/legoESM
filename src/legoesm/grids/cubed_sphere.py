@@ -6527,6 +6527,60 @@ def cloud_optical_thickness_fv3(
     return 1.5 * lwp / (rho_w * r_safe)
 
 
+def cloud_albedo_two_stream_fv3(
+    tau: jax.Array,
+    mu_0: jax.Array,
+    g: float = 0.85,
+    mu_floor: float = 1e-6,
+) -> jax.Array:
+    """FV3_3D iter 826: Coakley-Chylek (1975) two-stream cloud albedo.
+
+    Closed-form two-stream cloud-top SW albedo for non-absorbing
+    conservative scattering:
+
+        α = τ · (1 − g) / (2·μ_0 + τ · (1 − g))
+
+    where:
+      * τ   — cloud optical thickness (iter-825).
+      * μ_0 — cosine of solar zenith angle.
+      * g   — Mie asymmetry parameter; default 0.85 for liquid
+              water (ice clouds use g ≈ 0.7).
+
+    Limits:
+      * τ → 0  → α → 0 (transparent atmosphere).
+      * τ → ∞  → α → 1 (totally reflective).
+      * μ_0 → 0 → α → 1 (grazing incidence saturates reflection).
+
+    Used by: Sc-deck shortwave-feedback decomposition (Stephens
+    2005 sensitivity formulation), McRad / Slingo 1989 radiation
+    parameterization, low-cloud climate-feedback Δα/Δτ analysis,
+    MODIS broadband albedo retrieval comparison.
+
+    ``mu_floor`` prevents division by zero at the terminator
+    (μ_0 → 0).
+
+    Composes iter-825 ``cloud_optical_thickness_fv3``.
+
+    Parameters
+    ----------
+    tau : jax.Array
+        Cloud optical thickness (dimensionless), from iter-825.
+    mu_0 : jax.Array
+        Cosine of solar zenith angle (0 ≤ μ_0 ≤ 1).
+    g : float
+        Mie asymmetry parameter; default 0.85 (water clouds).
+    mu_floor : float
+        Lower bound on μ_0; default 1e-6.
+
+    Returns
+    -------
+    alpha : jax.Array
+        Cloud-top albedo (0 ≤ α ≤ 1).
+    """
+    factor = tau * (1.0 - g)
+    return factor / (2.0 * jnp.maximum(mu_0, mu_floor) + factor)
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

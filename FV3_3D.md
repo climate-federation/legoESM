@@ -5304,6 +5304,48 @@ iter-824 f_low → iter-825 τ via Slingo Mie.  Pure JAX, vmap-
 compatible.  Uses `constants.rho_water` per CLAUDE.md hygiene.
 No new physical constants introduced.
 
+## Iter 826 — cloud_albedo_two_stream_fv3 (Coakley-Chylek 1975)
+
+Added `cloud_albedo_two_stream_fv3(tau, mu_0, g=0.85,
+mu_floor=1e-6)` to `grids/cubed_sphere.py`.  Closed-form
+two-stream cloud-top SW albedo:
+
+```
+α = τ · (1 − g) / (2·μ_0 + τ · (1 − g))
+```
+
+Limits:
+  * τ → 0  → α → 0 (transparent)
+  * τ → ∞  → α → 1 (totally reflective)
+  * μ_0 → 0 → α → 1 (grazing saturates reflection)
+
+Default g = 0.85 (water clouds); ice clouds use g ≈ 0.7.
+
+Used by Sc-deck SW-feedback decomposition (Stephens 2005),
+Slingo 1989 / McRad cloud-radiation parameterization, Δα/Δτ
+sensitivity analysis, MODIS broadband albedo comparison.
+
+Composes iter-825 ``cloud_optical_thickness_fv3``.
+
+Test: `tests/test_fv3_cloud_albedo_two_stream_iter826.py` (7
+tests: overhead-sun analytic (τ=15, μ=1, g=0.85 → α=0.529),
+τ=0 → α=0, τ→∞ → α→1, grazing μ_0 boosts α, monotone in τ, ice
+g=0.7 > water g=0.85 at same τ, 3-D shapes + finite in [0,1]).
+
+### Why this iteration was meaningful
+
+Closes the **Sc cloud-radiative-effect chain** end-to-end:
+  * iter-823 EIS                     — Sc-regime predictor
+  * iter-824 f_low(EIS)              — empirical cloud fraction
+  * iter-825 τ(LWP, r_eff)           — Slingo Mie optical thickness
+  * iter-826 α(τ, μ_0, g)            — two-stream cloud albedo
+
+The full pipeline from thermodynamic profile → low-cloud
+fraction → cloud optical properties → SW albedo is now reachable
+as a pure-JAX composition.  Pure JAX, vmap-compatible.  No new
+physical constants introduced (0.85, 0.70 are Mie-fit values,
+not generic physical constants).
+
 
 
 
