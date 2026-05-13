@@ -178,25 +178,88 @@ Each experiment gets its own output directory under
 `{grid}_{experiment_id}` (e.g., `mpas_e0a`, `latlon_e0`).
 
 ```
-Exp 0: Baseline (adcroft PGF, matched config, 30 days)
-├── mpas_e0a   — MPAS + adcroft PGF (use_h_actual=False) → BROKEN
-├── latlon_e0  — lat-lon + adcroft PGF                   → OK
+Exp 0: Baseline (30 days, fp64)
+├── mpas_e0a   — MPAS + adcroft PGF (use_h_actual=False) → BROKEN (SSH 4.1m)
+├── latlon_e0  — lat-lon + adcroft PGF                   → OK (SSH 0.22m)
+├── mpas_e0b   — MPAS + centered PGF                     → OK (SSH 0.15m)
+├── mpas_e0c   — MPAS + adcroft + h_actual=True fix      → OK (SSH 0.17m)
+├── mpas_e1    — MPAS + TVD stencil fix                   → OK (no S effect)
+├── mpas_e2    — MPAS + Hu_avg conservation fix           → OK (no S effect)
+├── mpas_e3    — MPAS + all 3 fixes                       → OK (S drift = fp32)
 │
-├─ Exp 0b: MPAS with centered PGF (workaround)
-│  └── mpas_e0b — MPAS + centered PGF                    → OK
+├── mpas/latlon_e4_fp64 — fp64 baseline (1yr + 5yr + 50yr MPAS)
+│   ├── Drake: MPAS ~25 Sv plateau, latlon ~126 Sv rising
+│   └── latlon develops zonal jets by year 2
 │
-├─ Exp 0c: MPAS with adcroft PGF + use_h_actual=True (bugfix)
-│  └── mpas_e0c — MPAS + adcroft + h_actual default fix  → NEXT
+├── MPAS K_zeta_bih sweep (branched from e4 year 6):
+│   ├── mpas_e5_kzb1e12  — K_zeta_bih=1e12  → Drake ~6 Sv (worse)
+│   ├── mpas_e4 baseline — K_zeta_bih=1e14  → Drake ~25 Sv
+│   ├── mpas_e6_kzb1e15  — K_zeta_bih=1e15  → Drake ~12 Sv
+│   └── mpas_e6_kzb1e16  — K_zeta_bih=1e16  → BLOWUP (10 steps)
 │
-(future branches)
-├── Exp 1: TVD sub-seafloor stencil fix
-├── Exp 2: Increase A_h / B_h
-├── Exp 3: Different C_smag_lap
-├── Exp 4: SMC03 PGF
-├── Exp 5: Higher vertical resolution
-├── Exp 6: Longer spinup (1-10 years)
-├── Exp 7: Visbeck adaptive GM
-└── Exp 8: Realistic forcing (JRA55-do)
+├── MPAS APVM experiments (branched from e4 year 6):
+│   ├── mpas_e7a_apvm     — APVM only (no K_zeta_bih)  → Drake ~2 Sv (declining)
+│   └── mpas_e7b_apvm_bh  — APVM + B_h=7.7e12          → 20yr stable, Drake TBD
+│
+├── Lat-lon biharmonic experiments:
+│   ├── latlon_e8_bih         — B_h=5e10 from yr-6 restart  → jets persist
+│   ├── latlon_e9_bih_fresh   — A_h=0, B_h=1e11 fresh      → BLOWUP day 48
+│   └── latlon_e9b_topo_bht   — B_h_barotropic tests        → TBD
+│
+├── Flat-bottom F experiments (lat-lon, baseline viscosity):
+│   ├── F1_flat_lap           — A_h=1e4, Csmag=0.33         → jets, survived 1yr
+│   ├── F2_flat_bih           — A_h=0, B_h=1e11             → BLOWUP day 40
+│   ├── F3_flat_bih_floor     — A_h=1e3, B_h=1e11           → BLOWUP day 49
+│   ├── F4_flat_bih_Ah1e4     — A_h=1e4, B_h=1e11           → BLOWUP day 64
+│   └── F5_flat_production    — A_h=2e5+latscale, B_h=5e9   → BLOWUP day 231
+│
+├── Hollingsworth KE fix experiments (lat-lon, flat bottom):
+│   ├── H1_flat_holfix        — KE fix, A_h=1e4             → BLOWUP day 113
+│   ├── H3_flat_Ah3e4         — KE fix, A_h=3e4             → oscillating, marginal
+│   └── H4_flat_bht           — KE fix, B_h_bt=1e14         → BLOWUP day 122
+│   Note: KE fix made things LESS stable (removed accidental diffusion)
+│   KE fix REVERTED.
+│
+├── 2Δy source isolation (lat-lon, flat bottom, 180 days each):
+│   ├── BT_uniform            — uniform T, wind only         → 2Δy saturates (not BT)
+│   ├── BC_strat_windonly      — stratified T, wind only      → RUNNING
+│   ├── BC_strat_windonly_kpp  — + KPP                        → RUNNING
+│   ├── BC_strat_windonly_conv — + enhanced diffusion          → RUNNING
+│   ├── BC_strat_restore       — + T/S restoring              → RUNNING
+│   └── BC_full_noGM           — + KPP + conv, no GM          → RUNNING
+│
+├── B_h_barotropic tests:
+│   ├── BHT_strat_windonly  — B_h_bt=2e12, strat+wind  → BLOWUP day 110 (too weak)
+│   └── BT_bht2e12          — B_h_bt=2e12, BT uniform  → RUNNING
+│
+└── (next) Stronger B_h_barotropic or address baroclinic amplification
+
+### 2Δy Root Cause Summary (2026-05-13)
+
+The 2Δy instability has two components:
+
+**Seed (barotropic):** Nonlinear quadratic aliasing in the centered KE
+gradient (v_cell=avg(v[j],v[j+1]) → v_cell² → grad_y(KE)). The
+face→center→square→gradient round-trip creates 2Δy power from resolved
+flow. Saturates at ~4e-5 in the barotropic case because Coriolis has
+zero transfer at 2Δy (can't couple or amplify it).
+
+**Amplifier (baroclinic):** When stratification is present, the
+baroclinic PGF amplifies the 2Δy seed exponentially. Growth rate
+~1 order of magnitude per 30 days. Does NOT require KPP, GM, or
+convection — stratification + wind alone is sufficient.
+
+**Isolation results (2026-05-13):**
+
+| Experiment | Day 90 2Δy | Day 180 2Δy | Grows? |
+|-----------|-----------|------------|--------|
+| BT uniform (no T gradient) | 4.5e-5 | 4.1e-5 | No |
+| Strat + wind only | 6.4e-4 | 3.8e-2 | YES |
+| Strat + wind + KPP | 5.8e-4 | 3.2e-2 | YES (same) |
+| Strat + wind + conv | 6.4e-4 | TBD | YES (same) |
+
+B_h_barotropic=2e12 tested on stratified case: blew up at day 110.
+Too weak to overcome baroclinic amplification.
 ```
 
 ---
@@ -479,41 +542,88 @@ References:
 
 ---
 
-### Issue 4: Lat-lon spurious zonal jets (missing biharmonic viscosity)
+### Issue 4: Lat-lon 2Δy instability (Hollingsworth + missing B_h_barotropic)
 
-**Found:** 2026-05-12  
-**Severity:** High (basin-spanning zonal jets after 6 years)  
-**Status:** Diagnosed, testing fix.
+**Found:** 2026-05-12/13  
+**Severity:** High (basin-spanning zonal jets, blowup on flat bottom)  
+**Status:** Root cause identified. Two-track fix planned.
 
-**Symptom:** After 6 years of spinup, the lat-lon 1° run develops
-alternating east-west velocity bands (zonal jets) spanning entire
-ocean basins. Meridional spacing ~3-5° (300-500 km ≈ 3-5Δx).
+**Symptom:** Exponentially growing 2Δy mode in surface u, visible in
+meridional wavenumber spectra (South Pacific, 70°S-10°S, 200°E-280°E):
+- Day 0: 2Δy power = 2e-13 (machine zero)
+- Day 30: peak at 222 km (2Δy) in all runs
+- Day 90: cascade to 445 km (4Δy)
+- Day 365: jets organized at 556 km (5Δy)
 
-**Root cause (two independent agents agree):** Missing biharmonic
-viscosity (B_h = 0). Our config uses only Laplacian (A_h=1e4 +
-C_smag_lap=0.33), which is not scale-selective enough. Laplacian
-damps 2Δx modes only 4× faster than 4Δx; biharmonic damps them
-16× faster. Without biharmonic, the enstrophy cascade organizes
-grid-scale noise into coherent jets at the Rhines scale (~4Δx).
+All viscosity configs show the same 2Δy seed. Higher A_h delays
+growth ~50 days but does not prevent it. Biharmonic B_h on full 3D
+velocity blows up from cold start (A_h=0 → day 40; A_h=1e4 → day 64).
 
-Every production 1° ocean model uses biharmonic as primary dissipation:
-- MOM6 OM4p5: B_h ~ 1e10-2e10 (Smagorinsky biharmonic)
-- NEMO ORCA1: B_h = 1.5e11
-- POP/CESM: B_h ~ 2.7e11
+**Flat-bottom experiments confirm** topography is NOT required:
+- F1 (flat, Laplacian): jets form, same 2Δy→4Δy cascade
+- F2-F4 (flat, biharmonic): blow up at day 40-64
+- F5 (flat, production A_h=2e5): delays to day 190, then blows up
 
-Contributing factor: zonally symmetric forcing (global_wind is purely
-latitude-dependent) preferentially excites zonal wavenumber k=0 modes.
+**ROOT CAUSE (dycore expert, 2026-05-13): Hollingsworth instability**
 
-**NOT the cause:** enhanced diffusion convection (sigmoid sharp enough),
-Smagorinsky anisotropy (uses sqrt(area), isotropic), Matsuno Coriolis
-(negligible asymmetry), AL81 PV flux (production-grade), GM κ=600
-(acts on tracers not momentum).
+The KE gradient in the vector-invariant momentum equation does
+face→center→face interpolation:
 
-**Fix:** Add B_h = 5e10 m⁴/s (MOM6 range) to the lat-lon config.
-Implementation already fully wired. Biharmonic CFL safe (1.4e-6).
+    v_cell = 0.5*(v[j] + v[j+1])      # average to centers
+    KE = 0.5*(u_cell² + v_cell²)       # square AFTER averaging ← BUG
+    dKE/dx = gradient(KE)              # back to faces
 
-**Experiment:** Exp e8_bih — lat-lon with B_h=5e10, from year-6
-restart, 5 years.
+The averaging `v_cell = 0.5*(v[j]+v[j+1])` has a 2Δy null space.
+The squaring `v_cell²` aliases grid-scale energy into the 2Δy mode.
+This is the Hollingsworth instability (Hollingsworth, Källberg &
+Renner 1983), well-known on C-grids. NEMO/ICON/MPAS-O all use the
+corrected form: **square first, then average**.
+
+Files: `ocean_pe_latlon_cgrid.py` lines 931-933 (KE computation).
+
+**PARAMETER DIAGNOSIS (ocean expert, 2026-05-13): B_h_barotropic**
+
+The 2Δy mode is barotropic. B_h_barotropic (biharmonic on depth-mean
+velocity only) provides:
+- 5.5/day damping at 2Δy with B_h_barotropic=1e14
+- Negligible damping at basin scale
+- Works from cold start (constant coefficient)
+- Does NOT damp baroclinic geostrophy (why 3D B_h blows up)
+Already implemented in config: `B_h_barotropic` field.
+
+**TWO-TRACK FIX PLAN:**
+
+Track 1 — Code fix (eliminates source):
+  Fix the KE gradient to use the Hollingsworth-corrected form:
+  ```python
+  # Square at native v-faces FIRST, then average to cells
+  v_sq_cell = 0.5 * (v[j]**2 + v[j+1]**2)
+  KE = 0.5 * (u_cell**2 + v_sq_cell)
+  ```
+  Symmetric change for u² in the v-tendency.
+  ~10 lines changed in ocean_pe_latlon_cgrid.py.
+
+Track 2 — Parameter fix (damps the mode):
+  Priority experiments with existing config parameters:
+
+  | Exp | Change | Mechanism |
+  |-----|--------|-----------|
+  | D1 | B_h_barotropic=1e14 | Surgical barotropic biharmonic |
+  | D2 | B_h_barotropic=5e13 + C_leith=1.0 | Floor + flow-adaptive |
+  | D3 | A_h=2e4 + B_h_barotropic=5e13 | Moderate lap + bih |
+  | D4 | WENO5 momentum + B_h_barotropic=5e13 | Higher-order advection |
+  | D5 | C_leith=1.5 alone | Flow-adaptive only |
+
+  All use existing config fields, no code changes.
+
+**Diagnostic metric:** Meridional wavenumber spectrum of surface u,
+lon-averaged over South Pacific (70°S-10°S, 200°E-280°E). Track
+2Δy power — must stay below 1e-6 (m/s)².
+
+References:
+- Hollingsworth, Källberg & Renner (1983) — KE aliasing instability
+- Fox-Kemper & Menemenlis (2008) — Leith viscosity
+- MOM6 `BIHARMONIC_BAROTROPIC` parameter
 
 ## Completed Steps
 
@@ -529,21 +639,43 @@ restart, 5 years.
 10. ✅ K_zeta_bih sensitivity sweep (1e12, 1e14, 1e15, 1e16)
 11. ✅ Drake transport decomposition (barotropic vs baroclinic)
 12. ✅ Production MPAS-Ocean research (APVM discovery)
+13. ✅ MPAS APVM experiment (K_zeta_bih=0, apvm_dt=1200 → 2 Sv, insufficient)
+14. ✅ MPAS APVM+B_h experiment (e7b, 20 years complete, max|u|=1.18)
+15. ✅ Lat-lon B_h experiments (e8, e9 — 3D B_h blows up from cold start)
+16. ✅ Flat-bottom experiment matrix (F1-F5)
+17. ✅ Meridional spectrum diagnostic (2Δy→4Δy cascade confirmed)
+18. ✅ Hollingsworth instability identified as root cause
+19. ✅ B_h_barotropic identified as parameter fix
 13. 🔄 APVM experiment (Exp e7a, next)
 
-## Next Steps
+## Next Steps (2026-05-13)
 
-1. **Exp e7a:** K_zeta_bih=0, apvm_dt=1200 — test if APVM alone
-   controls the checkerboard while allowing stronger ACC.
+### Lat-lon 2Δy fix (two tracks, run sequentially)
 
-2. **If e7a works:** Run 20 years, compare Drake transport and
-   vertical structure with baseline and lat-lon.
+**Track 1 — Hollingsworth KE fix (code change):**
+1. Implement corrected KE form in `ocean_pe_latlon_cgrid.py`:
+   square v² at v-faces first, then average to cells.
+2. Run 1-year flat bottom with baseline viscosity (A_h=1e4,
+   C_smag_lap=0.33, B_h=0) — if 2Δy mode is gone, the fix works.
+3. Run 1-year ETOPO with same config.
+4. If stable, extend to 5-10 years for Drake transport comparison.
 
-3. **If e7a shows checkerboard:** Try e7b (add B_h=7.7e12) or
-   e7c (add C_leith=1.0).
+**Track 2 — B_h_barotropic parameter fix:**
+1. Exp D1: Add B_h_barotropic=1e14 to the flat-bottom baseline
+   config (A_h=1e4, C_smag_lap=0.33). 1-year run.
+2. Monitor 2Δy power via meridional spectrum.
+3. If D1 works, try D1 on ETOPO and extend.
+4. If D1 insufficient, try D2 (+ C_leith) or D3 (+ higher A_h).
 
-4. **Once checkerboard strategy resolved:** Final 50-year
-   comparison with matched APVM config.
+### MPAS ACC strength
+- e7b (APVM+B_h) completed 20 years — compute Drake transport
+- If Drake still ~25 Sv, the MPAS ACC weakness is a resolution
+  issue, not a parameter issue. Document and accept for 1°.
+
+### Production comparison
+- Once lat-lon 2Δy is fixed, run matched 10-year comparison
+  with best configs on both grids.
+- Compare: Drake transport, WBC structure, SST, overturning.
 
 ---
 

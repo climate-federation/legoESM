@@ -280,9 +280,15 @@ def main():
                    help="Override A_h Laplacian viscosity [m²/s] (default: 1e4).")
     p.add_argument("--c-smag-lap", type=float, default=None,
                    help="Override C_smag_lap (default: 0.33).")
+    p.add_argument("--a-h-lat-scaling", action="store_true", default=False,
+                   help="Enable cos(lat) scaling on A_h.")
+    p.add_argument("--a-h-floor", type=float, default=None,
+                   help="Minimum A_h after lat scaling [m²/s].")
     p.add_argument("--flat-bottom", action="store_true",
                    help="Use flat bottom (H=H_MAX everywhere) with "
                         "same coastlines from ETOPO.")
+    p.add_argument("--b-h-barotropic", type=float, default=None,
+                   help="Override B_h_barotropic [m⁴/s] (default: 0).")
     p.add_argument("--etopo",
                    default="/home/dbalwada/legoESM/data/bathymetry/etopo_1deg.nc")
     args = p.parse_args()
@@ -383,7 +389,10 @@ def main():
     # --- Model config ---
     ocean_config = LatLonCGridOceanConfig(
         A_h=args.a_h if args.a_h is not None else A_H,
+        A_h_lat_scaling=args.a_h_lat_scaling,
+        A_h_floor=args.a_h_floor if args.a_h_floor is not None else 0.0,
         B_h=args.b_h if args.b_h is not None else 0.0,
+        B_h_barotropic=args.b_h_barotropic if args.b_h_barotropic is not None else 0.0,
         C_smag_lap=args.c_smag_lap if args.c_smag_lap is not None else C_SMAG_LAP,
         A_v=A_V,
         K_v=K_V,
