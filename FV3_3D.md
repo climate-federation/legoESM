@@ -5289,3 +5289,68 @@ is verifiable with unit tests in seconds rather than wall-time
 sweeps.  Users running the NH compressible-Euler 3D path now have
 the same cube-imprint defense as users running the PE 3D path.
 
+## Iter 871 — vpd_from_t_rh_fv3 (vapor-pressure deficit primitive)
+
+Added `vpd_from_t_rh_fv3(t, rh)` to `grids/cubed_sphere.py`.
+Standard meteorological closure for vapor-pressure deficit:
+
+```
+VPD = e_sat(T) · (1 − RH)        (Pa)
+```
+
+Uses canonical ``thermo.saturation_vapor_pressure(T)`` per
+CLAUDE.md hygiene — never re-derives Tetens/Magnus/Clausius-
+Clapeyron.  RH input as fraction (0–1, not %).
+
+Canonical:
+  | scenario             | T (°C)| RH  | VPD (Pa)| VPD (kPa) |
+  |----------------------|-------|-----|---------|-----------|
+  | Tropical noon humid  | 30    | 0.7 | ~1273   | 1.3       |
+  | Mid-lat summer       | 25    | 0.5 | ~1583   | 1.6       |
+  | Arid/Sahel midday    | 40    | 0.2 | ~5905   | 5.9       |
+  | Cool overcast        | 15    | 0.9 | ~170    | 0.17      |
+  | Saturated (any T)    | —     | 1.0 | 0       | 0         |
+
+Atmospheric demand under warming: VPD ∝ e_sat(T) scales by CC
+~7%/K at fixed RH — drives the **VPD-driven drought-stress
+amplification** in AR6 SSP projections (Yuan et al. 2019 Sci. Adv.,
+Grossiord et al. 2020 New Phyt.).
+
+**Closes the PM-input primitive set** — caller now has all
+iter-870 Penman-Monteith inputs derivable from baseline meteorology:
+
+```
+T, RH      → iter-871 VPD
+T          → Δ (caller-derived dE_sat/dT)
+elevation  → γ (caller-derived)
+u, z_0     → g_a (caller-derived)
+A_n,h_s,C_s → iter-869 g_s
+R_n, G     → A
+           ↓
+           iter-870 λE (Penman-Monteith)
+```
+
+Composes with iter-832/833 (fixed-RH CC scaling) — under warming
+VPD rises 7%/K, amplifying drought via SPEI (iter-861).
+
+Used by: WMO meteorological-station VPD reporting, FAO-56 ET
+calculations, plant-physiology drought-stress models (Anderegg
+2018 Nature Plants), CLM5/JULES/NoahMP atmospheric-demand forcing,
+FLUXNET eddy-covariance site analysis, AR6 §11.6 VPD-trend
+attribution.
+
+Test: `tests/test_fv3_vpd_iter871.py` (8 tests: saturated RH=1→0,
+RH=0 → e_sat full, tropical 30°C/70% ≈ 1273 Pa, arid 40°C/20% >
+5 kPa, monotone in T (CC) and inverse-RH, chain to iter-870 PM
+λE, 3-D shapes non-negative).
+
+### Why this iteration was meaningful
+
+**Closes the Penman-Monteith input primitive set** — caller now
+has all iter-870 inputs from baseline meteorology (T, RH, A_n,
+R_n, etc.) in pure JAX.  VPD is the canonical atmospheric-demand
+metric for drought, plant-stress, fire-risk, and ET-trend
+analysis.  Pure JAX, vmap-compatible.  Uses
+``thermo.saturation_vapor_pressure`` per CLAUDE.md hygiene.  No
+`constants.py` additions.
+

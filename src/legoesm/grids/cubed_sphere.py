@@ -10141,6 +10141,88 @@ def penman_monteith_le_fv3(
     return numer / denom
 
 
+def vpd_from_t_rh_fv3(
+    t: jax.Array,
+    rh: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 871: vapor-pressure deficit (VPD) primitive.
+
+    Standard meteorological closure linking temperature, RH, and
+    vapor-pressure deficit — required input for Penman-Monteith
+    iter-870, leaf-water-balance, drought-stress, and atmospheric-
+    demand diagnostics:
+
+        VPD = e_sat(T) · (1 − RH)        (Pa)
+
+    Where:
+      * e_sat(T) — saturation vapor pressure (canonical
+                   ``thermo.saturation_vapor_pressure``; Bolton 1980
+                   per CLAUDE.md hygiene — never re-derive Tetens
+                   / Magnus / Clausius-Clapeyron).
+      * RH       — relative humidity (fraction 0–1, not %).
+      * T        — temperature (K, passed to thermo).
+
+    Sign: VPD ≥ 0 (well-mixed atmosphere; saturated RH=1 → VPD=0).
+
+    Composes canonical ``thermo.saturation_vapor_pressure`` per
+    CLAUDE.md hygiene — never re-derives Tetens/Magnus/CC.
+
+    Canonical magnitudes (e_sat × (1−RH)):
+      | scenario             | T (°C)| RH  | VPD (Pa) | VPD (kPa) |
+      |----------------------|-------|-----|----------|-----------|
+      | Tropical noon humid  | 30    | 0.7 | 1273     | 1.3       |
+      | Mid-lat summer       | 25    | 0.5 | 1583     | 1.6       |
+      | Arid/Sahel midday    | 40    | 0.2 | 5905     | 5.9       |
+      | Cool overcast        | 15    | 0.9 | 170      | 0.17      |
+      | Freezing             | −10   | 0.5 | 130      | 0.13      |
+      | Saturated (any T)    | —     | 1.0 | 0        | 0         |
+
+    Atmospheric demand under warming: at fixed RH, VPD ∝ e_sat(T)
+    scales by Clausius-Clapeyron ~7%/K — this drives the
+    **VPD-driven drought-stress amplification** observed in AR6
+    SSP-scenario projections (Yuan et al. 2019 Sci. Adv., Grossiord
+    et al. 2020 New Phyt.).
+
+    Closes the **PM-input primitive set** — caller now has all
+    iter-870 Penman-Monteith inputs derivable from baseline
+    meteorology:
+
+        T, RH      → iter-871 VPD
+        T          → Δ (caller-derived dE_sat/dT)
+        elevation  → γ (caller-derived)
+        u, z_0     → g_a (caller-derived)
+        A_n, h_s, C_s → iter-869 g_s
+        R_n, G     → A
+                   ↓
+                   iter-870 λE (Penman-Monteith)
+
+    Composes with iter-832 ``clausius_clapeyron_dqdt_fv3`` (linear
+    CC) and iter-833 ``fixed_rh_humidity_change_fv3`` (finite CC) —
+    under fixed-RH warming VPD scales by 7%/K, amplifying drought
+    impact via SPEI (iter-861).
+
+    Used by: WMO meteorological-station VPD reporting, FAO-56 ET
+    calculations, plant-physiology drought-stress models (Anderegg
+    2018 Nature Plants), CLM5/JULES/NoahMP atmospheric-demand
+    forcing, eddy-covariance / FLUXNET site analysis, AR6 §11.6
+    VPD-trend attribution.
+
+    Parameters
+    ----------
+    t : jax.Array
+        Temperature (K).
+    rh : jax.Array
+        Relative humidity (fraction, 0–1).
+
+    Returns
+    -------
+    vpd : jax.Array
+        Vapor-pressure deficit (Pa); ≥ 0 in physical regimes.
+    """
+    from legoesm import thermo
+    return thermo.saturation_vapor_pressure(t) * (1.0 - rh)
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,
