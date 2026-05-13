@@ -10848,6 +10848,73 @@ def gray_body_lw_emission_fv3(
     )
 
 
+def vapor_pressure_from_rh_fv3(
+    t: jax.Array,
+    rh: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 879: actual vapor pressure from T, RH.
+
+    Standard relative-humidity definition closure:
+
+        e_a = RH · e_sat(T)        (Pa)
+
+    Uses canonical ``thermo.saturation_vapor_pressure(T)`` (Bolton
+    1980) per CLAUDE.md hygiene — never re-derives Tetens/Magnus/CC.
+
+    Where:
+      * T   — temperature (K).
+      * RH  — relative humidity (fraction 0–1, not %).
+
+    Output: e_a in Pa (matches iter-877 Brunt LW input convention).
+
+    Sign: e_a ≥ 0; bounded above by e_sat(T) at RH=1.
+
+    Canonical magnitudes:
+      | T (°C)| RH  | e_sat (Pa)| e_a (Pa)|
+      |-------|-----|-----------|---------|
+      | 30    | 0.7 | 4243      | 2970    |
+      | 25    | 0.5 | 3169      | 1585    |
+      | 15    | 0.9 | 1705      | 1535    |
+      | 0     | 0.5 | 611       | 306     |
+      | −20   | 0.5 | 125       | 63      |
+
+    **Closes humidity-state link to LW pipeline** — caller now has:
+
+        T, RH → iter-879 e_a → iter-877 LW_dn (Brunt)
+              → iter-871 VPD (= e_sat − e_a = (1 − RH)·e_sat)
+              (note iter-871 and iter-879 share the e_sat call;
+              caller can fuse if optimizing)
+
+    Pairs with iter-871 ``vpd_from_t_rh_fv3`` (same e_sat,
+    different combination):
+        iter-871: VPD = (1 − RH) · e_sat
+        iter-879: e_a = RH · e_sat
+        VPD + e_a = e_sat (identity)
+
+    Composes canonical ``thermo.saturation_vapor_pressure`` per
+    CLAUDE.md hygiene.
+
+    Used by: WMO humidity reporting, FAO-56 ET reference (Allen-
+    Pereira 1998 Eq. 17 e_a from RH_mean), Brunt 1932 LW
+    parameterization, eddy-covariance / FLUXNET site humidity
+    closure, CLM5/JULES/NoahMP atmospheric-state preprocessing.
+
+    Parameters
+    ----------
+    t : jax.Array
+        Temperature (K).
+    rh : jax.Array
+        Relative humidity (fraction, 0–1).
+
+    Returns
+    -------
+    e_a : jax.Array
+        Actual vapor pressure (Pa); ≥ 0.
+    """
+    from legoesm import thermo
+    return rh * thermo.saturation_vapor_pressure(t)
+
+
 def shear_squared_fv3(
     u: jax.Array,
     v: jax.Array,

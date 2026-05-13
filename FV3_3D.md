@@ -5798,3 +5798,58 @@ budget validation; (4) AR6 §11 land-atmosphere coupled
 diagnostics.  Pure JAX, vmap-compatible.  Uses ``constants.sigma_sb``
 per CLAUDE.md hygiene.  No `constants.py` additions.
 
+## Iter 879 — vapor_pressure_from_rh_fv3 (e_a primitive)
+
+Added `vapor_pressure_from_rh_fv3(t, rh)` to
+`grids/cubed_sphere.py`.  Standard relative-humidity definition:
+
+```
+e_a = RH · e_sat(T)        (Pa)
+```
+
+Uses canonical ``thermo.saturation_vapor_pressure(T)`` (Bolton 1980)
+per CLAUDE.md hygiene.  RH as fraction (0–1).
+
+Canonical:
+  | T (°C)| RH  | e_a (Pa) |
+  |-------|-----|----------|
+  | 30    | 0.7 | ~2970    |
+  | 25    | 0.5 | ~1585    |
+  | 15    | 0.9 | ~1535    |
+  | 0     | 0.5 | ~306     |
+  | −20   | 0.5 | ~63      |
+
+**Closes humidity-state link to LW pipeline**:
+
+```
+T, RH → iter-879 e_a → iter-877 LW_dn (Brunt)
+      → iter-871 VPD = e_sat − e_a = (1−RH)·e_sat
+```
+
+Test verifies identity VPD + e_a = e_sat (iter-871 + iter-879 sum
+to e_sat).
+
+Pairs with iter-871 (VPD): same e_sat call, complementary
+combination of RH (RH·e_sat vs (1−RH)·e_sat).
+
+Composes with iter-877 Brunt LW_dn — supplies the e_a input
+directly.
+
+Used by: WMO humidity reporting, FAO-56 Eq. 17 e_a from RH_mean,
+Brunt 1932 LW parameterization, FLUXNET site humidity closure,
+CLM5/JULES/NoahMP atmospheric-state preprocessing.
+
+Test: `tests/test_fv3_vapor_pressure_iter879.py` (8 tests: RH=0
+zero, RH=1 full e_sat, tropical 30°C/70% ≈ 2970 Pa, monotone in RH
+and T (CC), VPD+e_a=e_sat identity, chain to iter-877 Brunt LW,
+3-D shapes non-negative).
+
+### Why this iteration was meaningful
+
+Closes the **humidity-state link to LW pipeline** — caller
+provides only (T, RH) to derive both iter-871 VPD (for PM
+atmospheric demand) and iter-879 e_a (for Brunt LW_dn).  Together
+they exhaust the humidity-driven inputs to the full ET pipeline.
+Pure JAX, vmap-compatible.  Uses ``thermo.saturation_vapor_pressure``
+per CLAUDE.md hygiene.  No `constants.py` additions.
+

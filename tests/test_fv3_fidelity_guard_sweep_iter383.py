@@ -466,6 +466,7 @@ _GUARD_MODULES = (
     "test_fv3_net_radiation_iter876",                # iter-876 add
     "test_fv3_brunt_lw_iter877",                     # iter-877 add
     "test_fv3_lw_up_iter878",                        # iter-878 add
+    "test_fv3_vapor_pressure_iter879",               # iter-879 add
 )
 
 
