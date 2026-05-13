@@ -280,6 +280,9 @@ def main():
                    help="Override A_h Laplacian viscosity [m²/s] (default: 1e4).")
     p.add_argument("--c-smag-lap", type=float, default=None,
                    help="Override C_smag_lap (default: 0.33).")
+    p.add_argument("--flat-bottom", action="store_true",
+                   help="Use flat bottom (H=H_MAX everywhere) with "
+                        "same coastlines from ETOPO.")
     p.add_argument("--etopo",
                    default="/home/dbalwada/legoESM/data/bathymetry/etopo_1deg.nc")
     args = p.parse_args()
@@ -311,6 +314,11 @@ def main():
     H_bathy_raw, ocean_mask = init_ocean_bathymetry(grid, bathy_cfg)
     H_bathy_raw = jnp.asarray(H_bathy_raw, dtype=jnp.float64)
     ocean_mask = jnp.asarray(ocean_mask, dtype=jnp.float64)
+
+    # Flat bottom option: keep coastlines, set all ocean to H_MAX
+    if args.flat_bottom:
+        H_bathy_raw = jnp.where(ocean_mask > 0.5, H_MAX, 0.0)
+        print("  *** FLAT BOTTOM mode: H = H_MAX everywhere ***")
 
     # Snap partial cells (same 30% as MPAS)
     H_snapped = snap_partial_cells_2d(H_bathy_raw, z_coord_base)
