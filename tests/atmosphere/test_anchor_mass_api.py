@@ -416,3 +416,66 @@ def test_anchored_step_supports_jax_grad_multistep():
         )
     finally:
         set_policy(saved)
+
+
+def test_anchored_step_supports_jax_grad_spectral_pe():
+    """iter-39: ``jax.grad`` through anchored ``step()`` on spectral PE.
+
+    Different code path from iter-37's cube PE test:
+      * Prognostic state in spectral space (complex128 ``lnps_hat``).
+      * Mass fixer reaches grid space via ``sh_synthesis`` and writes
+        back to ``lnps_hat[0]`` via ``Δρ·sqrt(4π)`` (iter-3 pattern).
+      * AD chain therefore traverses an SH round-trip *inside* the
+        fixer in addition to the dycore tendencies.
+
+    Catches AD regressions specific to the spectral PE fixer — e.g.
+    a host callback inside the SH synthesis path, or a
+    ``stop_gradient`` slipped into the ``log(target/now)`` correction
+    computation.
+    """
+    from legoesm.core.precision import PrecisionPolicy, set_policy, get_policy
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.atmosphere.dynamics.spectral_pe import (
+        SpectralPrimitiveEquationModel,
+        SpectralPEConfig,
+        isothermal_rest_state_spectral,
+    )
+
+    saved = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp64())
+        grid = create_gaussian_grid(21)
+        sigma = create_sigma_coordinate(8)
+        cfg = SpectralPEConfig(
+            fix_mass=True, anchor_mass_to_initial=True,
+        )
+        model = SpectralPrimitiveEquationModel(
+            grid, sigma, cfg, allow_unsupported_backend=True,
+        )
+        state0 = isothermal_rest_state_spectral(grid, sigma)
+
+        def loss(lnps_hat_data):
+            state = state0._replace(
+                lnps_hat=state0.lnps_hat.replace(data=lnps_hat_data))
+            s = model.step(state, 600.0)
+            # |T_hat|^2 sums (complex → real magnitude).
+            return jnp.sum(jnp.abs(s.T_hat.data) ** 2)
+
+        model.reset_target_mass()
+        grad = jax.grad(loss)(state0.lnps_hat.data)
+
+        assert jnp.all(jnp.isfinite(jnp.abs(grad))), (
+            "spectral PE jax.grad produced non-finite gradient"
+        )
+        assert float(jnp.max(jnp.abs(grad))) > 0.0, (
+            "spectral PE jax.grad collapsed to zero — possible "
+            "stop_gradient or non-diff op in the SH round-trip fixer"
+        )
+        # Holomorphic AD on complex inputs yields complex gradients.
+        assert grad.dtype == jnp.complex128, (
+            f"Expected complex128 gradient on complex lnps_hat input, "
+            f"got {grad.dtype}"
+        )
+    finally:
+        set_policy(saved)
