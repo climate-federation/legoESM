@@ -635,6 +635,87 @@ def fv3_corner_laplacian_iteration(
     return lap_divg * cdgrid.rarea_c
 
 
+def fv3_laplacian_step_from_pad_h1(
+    divg_pad: jnp.ndarray,
+    cdgrid: "CubedSphereCDGrid",
+) -> jnp.ndarray:
+    """FV3_3D iter 897: one Laplacian step on h1-padded input.
+
+    Consumes pre-padded ``divg_pad`` of shape ``(6, n+3, n+3)``
+    (halo=1 around canonical ``(n+1, n+1)`` corner-staggered field)
+    and returns the Laplacian of shape ``(6, n+1, n+1)``.
+
+    Bit-for-bit equivalent to the post-pad arithmetic (steps 2-6)
+    of ``fv3_corner_laplacian_iteration``.  Foundation for the
+    FV3-faithful expanding-halo nord>=2 pattern: chaining
+    ``pad_halo(divg, halo=nord)`` once + nord calls without re-pad
+    avoids the JAX-level corner-fill discrepancy across iterations.
+
+    For nord=1: equivalent to existing ``fv3_corner_laplacian_iteration``
+    with default ``apply_vector_corner_fill=False``.
+
+    For nord>=2 (future iter-898+): caller will pad with wider halo
+    and call this helper / a wider variant in a shrinking-interior
+    loop matching FV3 sw_core.F90:1748-1785.
+
+    Parameters
+    ----------
+    divg_pad : jnp.ndarray, shape ``(6, n+3, n+3)``
+        Pre-padded corner-staggered divergence.
+    cdgrid : CubedSphereCDGrid
+
+    Returns
+    -------
+    lap_divg : jnp.ndarray, shape ``(6, n+1, n+1)``
+        Laplacian at canonical corner-staggered interior.
+    """
+    n = cdgrid.n
+
+    # Step 2: x-flux vc.
+    vc_raw = (
+        divg_pad[:, 1:n + 3, 1:n + 2]
+        - divg_pad[:, 0:n + 2, 1:n + 2]
+    )
+    divg_u = cdgrid.dy_edge_x * cdgrid.rdxc
+    divg_u_pad = jnp.pad(
+        divg_u, [(0, 0), (1, 0), (0, 1)], mode="edge",
+    )
+    vc = vc_raw * divg_u_pad
+
+    # Step 3: y-flux uc.
+    uc_raw = (
+        divg_pad[:, 1:n + 2, 1:n + 3]
+        - divg_pad[:, 1:n + 2, 0:n + 2]
+    )
+    divg_v = cdgrid.dx_edge_y * cdgrid.rdyc
+    divg_v_pad = jnp.pad(
+        divg_v, [(0, 0), (0, 1), (1, 0)], mode="edge",
+    )
+    uc = uc_raw * divg_v_pad
+
+    # Step 4: divergence at corner.
+    lap_divg_raw = (
+        uc[:, :, 0:n + 1]
+        - uc[:, :, 1:n + 2]
+        + vc[:, 0:n + 1, :]
+        - vc[:, 1:n + 2, :]
+    )
+
+    # Step 5: cube-vertex corner removal.
+    sw = uc[:, 0, 0]
+    se = uc[:, n, 0]
+    ne = uc[:, n, n + 1]
+    nw = uc[:, 0, n + 1]
+    lap_divg = lap_divg_raw
+    lap_divg = lap_divg.at[:, 0, 0].add(-sw)
+    lap_divg = lap_divg.at[:, n, 0].add(-se)
+    lap_divg = lap_divg.at[:, n, n].add(ne)
+    lap_divg = lap_divg.at[:, 0, n].add(nw)
+
+    # Step 6: normalise by rarea_c.
+    return lap_divg * cdgrid.rarea_c
+
+
 def fv3_corner_laplacian_nord(
     divg_d: jnp.ndarray,
     cdgrid: "CubedSphereCDGrid",
