@@ -714,3 +714,54 @@ def test_anchored_step_supports_jax_grad_mpas_pe():
         assert grad.dtype == jnp.float64
     finally:
         set_policy(saved)
+
+
+def test_anchored_step_supports_jax_grad_mpas_nh():
+    """iter-58: ``jax.grad`` through anchored ``step()`` on MPAS NH.
+
+    Final structural AD path — completes the 8-cover matrix:
+      cube PE / spectral PE / cube NH / spectral NH / lat-lon PE
+      / MPAS SW / MPAS PE / MPAS NH
+
+    MPAS NH adds the iter-8 ``fix_mass_nonhydrostatic_mpas`` (uniform
+    rho_prime correction normalised by ``∫ J·dz·dA``) on top of the
+    iter-56/57 Voronoi-mesh AD foundation.  AD now flows through the
+    split-explicit acoustic substeps + slow-tendency RK3 + the
+    rho_prime fixer.
+    """
+    from legoesm.core.precision import PrecisionPolicy, set_policy, get_policy
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    from legoesm.atmosphere.dynamics.compressible_euler_mpas import (
+        MPASCompressibleEulerModel, MPASCompressibleEulerConfig,
+    )
+    from tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_1_mpas import (
+        dcmip25_tc1_init_mpas,
+    )
+
+    saved = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp64())
+        mesh = create_voronoi_mesh(4)
+        state0, hcoord, tmetric = dcmip25_tc1_init_mpas(
+            mesh, n_levels=8)
+        cfg = MPASCompressibleEulerConfig(
+            n_acoustic_substeps=10,
+            fix_mass=True, anchor_mass_to_initial=True,
+        )
+        model = MPASCompressibleEulerModel(
+            mesh, hcoord, tmetric, cfg)
+
+        def loss(rho_prime_data):
+            state = state0._replace(
+                rho_prime=state0.rho_prime.replace(data=rho_prime_data))
+            s = model.step(state, 5.0)
+            return jnp.sum(s.theta_prime.data ** 2)
+
+        model.reset_target_mass()
+        grad = jax.grad(loss)(state0.rho_prime.data)
+
+        assert jnp.all(jnp.isfinite(grad))
+        assert float(jnp.max(jnp.abs(grad))) > 0.0
+        assert grad.dtype == jnp.float64
+    finally:
+        set_policy(saved)
