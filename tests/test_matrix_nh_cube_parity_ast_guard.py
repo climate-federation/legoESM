@@ -471,33 +471,34 @@ def test_w6_latlon_init_uses_w6_winds_geo():
 
 
 def test_sw_cube_propagating_tests_have_hyperdiff_override():
-    """iter-31/33/42 sentinel: cube SW config overrides the iter1009
-    baseline with ``hyperdiff_coeff=_hyperdiff_cube(n)`` for the
+    """iter-31/33/42/44 sentinel: cube SW config overrides the iter1009
+    baseline with ``hyperdiff_coeff=2.0 * _hyperdiff_cube(n)`` for the
     propagating-wave test gate ``test_num in (2, 5, 6)``.
 
     Without the override:
       - cube W5 BLOWS UP at day 14.58 (15-day; iter-33).
       - cube W6 BLOWS UP at day  9.03 (14-day; iter-31).
-      - cube W2 5-day v_ll_Linf = 3.65 m/s vs 0.82 with hyperdiff
-        (iter-42 measurement; 4.5x parity gain).
+      - cube W2 5-day v_ll_Linf = 3.65 m/s vs 0.51 with iter-44's
+        2x hyperdiff (vs 0.82 at iter-42's 1x); h_err 72 -> 14 m.
 
     Latlon W2/W5/W6 at the same durations PASS without hyperdiff.
-    This sentinel catches a regression that would re-introduce any
-    of the three instabilities.
+    iter-44 raised the coefficient from 1x to 2x after probing
+    (further 38% W2 gain, W5/W6 stable, 4x cube has diminishing
+    returns).
     """
     src = _runner_source()
     pat = re.search(
         r"if\s+test_num\s+in\s*\(\s*2\s*,\s*5\s*,\s*6\s*\)\s*:[^}]*?"
-        r"hyperdiff_coeff\s*=\s*_hyperdiff_cube\(\s*n\s*\)",
+        r"hyperdiff_coeff\s*=\s*2\.0\s*\*\s*_hyperdiff_cube\(\s*n\s*\)",
         src,
         re.DOTALL,
     )
     assert pat is not None, (
-        "iter-31/33/42 regression: cube SW propagating-test branch "
-        "no longer overrides ``hyperdiff_coeff=_hyperdiff_cube(n)`` "
-        "for (W2, W5, W6) — cube W5/W6 full-duration will re-BLOWUP "
-        "and cube W2 5-day v_ll_Linf will regress from 0.82 to "
-        "3.65 m/s (latlon stable; cube parity gap reopens)."
+        "iter-31/33/42/44 regression: cube SW propagating-test "
+        "branch no longer overrides ``hyperdiff_coeff=2.0 * "
+        "_hyperdiff_cube(n)`` for (W2, W5, W6) — cube W5/W6 "
+        "full-duration will re-BLOWUP and cube W2 5-day v_ll_Linf "
+        "will regress (latlon stable; cube parity gap reopens)."
     )
 
 

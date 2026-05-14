@@ -78,6 +78,13 @@ Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV /
   - W6 14-day: mass_drift=3.82e-16 (iter-31 hyperdiff stable).
   - CB 12-day: L2=1.09 (structural PPM positivity issue, mass_drift=7.42e-9 fine).
   Cross-grid SW W2 L2: **cube 7.16e-4** vs latlon 2.67e-4 (2.7×) vs ico 9.91e-5 (7×) vs spectral 3.61e-8 (truncation).  Cube SW parity gap most closed it's been since iter-1 began.
+- iter-44: **bumped matrix-runner hyperdiff coefficient from 1x to 2x `_hyperdiff_cube(n)`** after probing 1x/2x/4x.  Result (cube W2 5-day, full matrix):
+  - L2: 7.16e-4 → **4.58e-4** (1.6× better, 5.4× from iter-1 baseline).
+  - Linf: 1.10e-2 → **4.82e-3** (2.3× better).
+  - v_ll_Linf: 0.82 → **0.51 m/s** (1.6× better, **7.2× from iter-1's 3.65**).
+  - W5 15-day max|u_d|=36.27 / W6 14-day max|u_d|=98.41 — both stable, well below 1000 m/s BLOWUP threshold.
+  - 4× cube probed: v_ll=0.48 (diminishing returns), kept at 2× for cleaner margin.
+  Cube W2 L2 vs latlon ratio: **1.7×** (was 9× at iter-1, 2.7× at iter-42).  Best cube SW parity to date.
 
 ## Iter-41+ queued (status post iter-41)
 

@@ -2037,16 +2037,17 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             # iter-33: cube W5 (mountain) 15-day blows up at day 14.58
             # for the same reason — both long-duration propagating-
             # wave tests need biharmonic hyperdiffusion.
-            # iter-42: extended to W2 (test_num=2) — direct measurement
-            # shows hyperdiff reduces cube W2 5-day v_ll_Linf from
-            # 3.65 m/s to 0.82 m/s (4.5x parity improvement vs other
-            # grids).  h_err_max drops 72 m -> 33 m.  iter-1002 W2
-            # 1-day v_ll sentinel uses its own hyperdiff=0 config so
-            # is unaffected; matrix-runner-only effect.  All three
-            # cube SW propagating tests now use the same hyperdiff
-            # operator.
+            # iter-42: extended to W2 — hyperdiff reduces cube W2
+            # 5-day v_ll_Linf from 3.65 -> 0.82 m/s at 1x.
+            # iter-44: bumped to 2x — direct measurement at C36
+            # gives a further 38% W2 5-day v_ll improvement (0.82 ->
+            # 0.51 m/s, h_err_max 33 -> 14 m) without destabilizing
+            # W5 (max|u_d|=36 stable) or W6 (max|u_d|=98 stable;
+            # iter-31 BLOWUP threshold is 1000).  4x cube was probed
+            # but gave diminishing returns (v_ll 0.48 vs 0.51) with
+            # no clear margin gain.
             config = iter1009_dual_target_config(
-                n, hyperdiff_coeff=_hyperdiff_cube(n),
+                n, hyperdiff_coeff=2.0 * _hyperdiff_cube(n),
             )
         else:
             config = iter1009_dual_target_config(n)
