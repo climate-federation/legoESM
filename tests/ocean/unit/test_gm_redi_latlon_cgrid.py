@@ -76,7 +76,10 @@ def _stratified_with_meridional_tilt(n_lat=10, n_lon=20, nlev=5, slope=1e-4):
     lat_idx = jnp.arange(n_lat, dtype=jnp.float64)
     rho = jnp.zeros((n_lat, n_lon, nlev), dtype=jnp.float64)
     rho = rho + rho_z[jnp.newaxis, jnp.newaxis, :]
-    rho = rho + drho_dy * lat_idx[:, jnp.newaxis, jnp.newaxis] * grid.dy
+    # grid.dy is 1D (n_lat,); this regional channel has uniform dlat so
+    # take a scalar representative value for the linear background gradient.
+    dy_ref = float(grid.dy[0])
+    rho = rho + drho_dy * lat_idx[:, jnp.newaxis, jnp.newaxis] * dy_ref
 
     # T proportional to density (linear EOS: rho ~ 1025 - 0.2*T)
     T = (constants.rho_ocean - rho) / 0.2

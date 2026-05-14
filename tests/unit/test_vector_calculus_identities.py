@@ -174,7 +174,9 @@ class TestNullSpace:
         v_f = Field(data=v_data, name="v", dims=("lat", "lon"), units="m/s")
         div = divergence(u_f, v_f, ll_grid)
         max_div = float(jnp.max(jnp.abs(div.data)))
-        scale = U0 / float(ll_grid.dy)
+        # ll_grid.dy is now a 1D (n_lat,) array — use a scalar
+        # representative value (smallest cell height = most stringent).
+        scale = U0 / float(jnp.min(ll_grid.dy))
         assert max_div / scale < 0.05, f"div(solid-body) relative error {max_div/scale:.3e}"
 
     def test_div_solid_body_voronoi(self, voronoi_mesh):

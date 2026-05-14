@@ -132,11 +132,14 @@ def barotropic_streamfunction(u, h_partial, mask, grid):
     n_lat, n_lon_u, _ = u.shape
     n_lon = n_lon_u - 1
     R = getattr(grid, "radius", constants.R_earth)
-    # Use ``grid.dlat`` when available so regional grids integrate
-    # transport with their actual meridional spacing rather than the
-    # global ``π / n_lat``.  Codex iter-36 #2.
-    dlat = getattr(grid, "dlat", np.pi / n_lat)
-    dy = R * dlat                                                # uniform
+    # Cell-row meridional extent — prefer ``grid.dy`` (1D array,
+    # Mercator-safe) but fall back to a uniform ``R * dlat`` if absent
+    # (lightweight grid proxies in tests sometimes lack ``dy``).
+    if hasattr(grid, "dy"):
+        dy = np.asarray(grid.dy) * 0.5                            # (n_lat,)
+    else:
+        dlat = getattr(grid, "dlat", np.pi / n_lat)
+        dy = np.full((n_lat,), R * dlat)
 
     # MOM6/MITgcm "min-rule" thickness at u-faces:
     h_E = h_partial
@@ -150,6 +153,8 @@ def barotropic_streamfunction(u, h_partial, mask, grid):
     u_mask = np.concatenate([u_mask_int, u_mask_int[:, 0:1]], axis=1)
 
     U_dz = np.sum(u * h_u, axis=-1) * u_mask                     # (n_lat, n_lon+1)
-    psi_bt = -np.cumsum(U_dz, axis=0) * dy / 1.0e6               # (n_lat, n_lon+1) [Sv]
+    # Per-row dy weighting before cumsum so non-uniform grids integrate
+    # the correct meridional transport.
+    psi_bt = -np.cumsum(U_dz * dy[:, None], axis=0) / 1.0e6      # (n_lat, n_lon+1) [Sv]
 
     return psi_bt[:, :-1]
