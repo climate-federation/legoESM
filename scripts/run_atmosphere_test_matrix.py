@@ -4878,6 +4878,18 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             state, hcoord, tmetric, small_grid = dcmip25_tc3_init(
                 grid, n_levels=nlev)
             grid = small_grid
+            #
+            # new_test_dycores iter-108 CAUTION: TC3 cube was cached
+            # only at quick-mode 4 min (per iter-89 audit) — full-mode
+            # 2 hr behaviour not yet measured.  TC2 cube under the same
+            # iter-12..17 NH bundle blew up at day 0.13 of its 6-hr
+            # full run (iter-102 finding).  TC3 cube full-mode result
+            # is being refreshed in the current NH matrix re-run.  If
+            # TC3 cube also blows up at full duration, the same
+            # hypotheses listed in the TC2 cube branch comment apply
+            # here (acoustic substeps, hyperdiff, off-centering, FV3
+            # oracle).
+            #
             # Scale hyperdiffusion for 60x smaller Earth: coeff ∝ dx⁴.
             # 8x stronger than default scaling to stabilize the
             # convective dynamics in the squall line.
