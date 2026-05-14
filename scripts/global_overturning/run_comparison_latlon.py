@@ -301,6 +301,8 @@ def main():
                    help="Override kappa_Redi [m²/s] (default: 600).")
     p.add_argument("--k-h", type=float, default=None,
                    help="Override K_h horizontal tracer diffusivity [m²/s] (default: 0).")
+    p.add_argument("--s-max", type=float, default=None,
+                   help="Override GM/Redi S_max slope limit (default: 0.005).")
     p.add_argument("--dt", type=float, default=None,
                    help="Override timestep [s] (default: 1200).")
     p.add_argument("--no-bh-lat-scaling", action="store_true",
@@ -460,7 +462,7 @@ def main():
         gm_redi=GMRediConfig(
             kappa_GM=args.kappa_gm if args.kappa_gm is not None else KAPPA_GM,
             kappa_Redi=args.kappa_redi if args.kappa_redi is not None else KAPPA_REDI,
-            S_max=S_MAX,
+            S_max=args.s_max if args.s_max is not None else S_MAX,
             visbeck=VisbeckConfig(enabled=False),
             slope_scheme="centered",
         ),

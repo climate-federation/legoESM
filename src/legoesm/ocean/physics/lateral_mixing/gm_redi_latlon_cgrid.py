@@ -768,33 +768,29 @@ def gm_redi_tracer_tendency_latlon(
             S, S_x, S_y, mask, u_mask, v_mask,
             z_coord, jacobian, grid, kappa_GM, cfg.kappa_Redi,
         )
-        # --- Ferrari et al. (2008) boundary-layer complement ---
-        # Where DM95 tapers Redi to zero (mixed layer / weak strat),
-        # add horizontal diffusion so total diffusivity = kappa_Redi
-        # everywhere.  This prevents the surface mixed layer from
-        # having zero tracer mixing, which enables the 2Δy baroclinic
-        # feedback instability.
+        # --- Near-surface horizontal diffusion complement ---
+        # In the mixed layer, DM95 tapers Redi to zero, leaving no
+        # horizontal tracer mixing.  Following Ferrari et al. (2008,
+        # J. Climate, 21, 2770-2789), add horizontal diffusion with
+        # coefficient kappa_Redi in the boundary layer so total
+        # diffusivity is always kappa_Redi.
         #
-        # F_complement = kappa_Redi * (1 - taper) * ∇_h T
-        #
-        # The taper is at interfaces (nlev-1); average to full levels
-        # for the complement flux.
-        taper_full = 0.5 * (
-            jnp.concatenate([jnp.zeros((*_taper.shape[:2], 1),
-                                        dtype=_taper.dtype), _taper], axis=-1)
-            + jnp.concatenate([_taper, jnp.zeros((*_taper.shape[:2], 1),
-                                                  dtype=_taper.dtype)], axis=-1)
-        )  # (n_lat, n_lon, nlev): 0 at surface/bottom, taper in interior
-        complement = 1.0 - taper_full  # 1 in ML, 0 in interior
+        # Use a fixed MLD proxy (100m) rather than the DM95 taper,
+        # because the taper-based complement was ineffective (taper ≈ 1
+        # where the 2Δy feedback operates).  When KPP is active, this
+        # should be replaced with the KPP-diagnosed boundary layer depth.
+        _MLD_PROXY = 100.0  # meters
+        z_full = z_coord.z_full_ref  # (nlev,) — negative depths
+        complement = jnp.where(
+            jnp.abs(z_full) < _MLD_PROXY, 1.0, 0.0
+        )  # (nlev,) — broadcast over (n_lat, n_lon)
         for q_field, tend_ref in [(T, 'dT_dt'), (S, 'dS_dt')]:
             q_filled = _neumann_fill_cgrid(q_field, mask)
             dq_dx_u = gradient_x_cgrid(q_filled, grid) * u_mask[:, :, jnp.newaxis]
             dq_dy_v = gradient_y_cgrid(q_filled, grid) * v_mask[:, :, jnp.newaxis]
-            # Weight by complement (cell-center average of face gradients).
-            F_x = cfg.kappa_Redi * interp_cell_to_uface(
-                complement * mask[:, :, jnp.newaxis]) * dq_dx_u
-            F_y = cfg.kappa_Redi * interp_cell_to_vface(
-                complement * mask[:, :, jnp.newaxis]) * dq_dy_v
+            # complement is (nlev,) — broadcasts over spatial dims.
+            F_x = cfg.kappa_Redi * complement * dq_dx_u
+            F_y = cfg.kappa_Redi * complement * dq_dy_v
             dq_complement = divergence_cgrid(F_x, F_y, grid) * mask[:, :, jnp.newaxis]
             if tend_ref == 'dT_dt':
                 dT_dt = dT_dt + dq_complement

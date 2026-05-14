@@ -284,12 +284,23 @@ Exp 0: Baseline (30 days, fp64)
 │   └── BR13: same baroclinic → 2dy=1.2e-6 day 120 (BEST result!)
 │       870× better than isotropic A_h=1e5 at breaking baroclinic feedback
 │
-├── Ferrari complement (2026-05-13):
-│   ├── Implemented: (1-taper) × κ_Redi × ∇_h T in mixed layer
-│   │   (where DM95 tapers Redi to zero, add horizontal diffusion)
-│   ├── BR14: A_h=1e4 + Ferrari → no help (A_h too low for BT seed)
-│   └── BR15: A_h=1e5 + Ferrari → 2dy=9.9e-4 (no effect vs BR1)
-│       DM95 taper is already ~1 where 2Δy feedback operates
+├── Ferrari complement (2026-05-13/14):
+│   ├── v1 (taper-based): (1-taper) × κ_Redi × ∇_h T
+│   │   BR14: A_h=1e4 + taper complement → no help (A_h too low)
+│   │   BR15: A_h=1e5 + taper complement → 2dy=9.9e-4 (no effect)
+│   │   Reason: DM95 taper ≈ 0.65-0.89, complement ≈ 0.11-0.35 — too weak
+│   │
+│   ├── v2 (depth-based, 100m): full κ_Redi horizontal in top 100m
+│   │   Following Ferrari et al. (2008, J. Climate, 21, 2770-2789)
+│   │   BR16: A_h=1e5, kr=600, 100m  → 2dy=8.7e-4 day 120 (40% better)
+│   │   BR17: A_h=1e5, kr=1200, 100m → 2dy=6.0e-4 day 120 (6× at day 90)
+│   │   BR18: A_h=1e5, kr=2400, 100m → 2dy peaks 5.9e-4 (day 180)
+│   │         then DROPS to 3.7e-7 by year 10! ← SELF-STABILIZING
+│   │         Extended 20 more years (RUNNING on GPU 0)
+│   │
+│   └── v3 (higher GM + S_max):
+│       BR19: A_h=1e5, kGM=2400, kr=2400, S_max=0.01, 100m complement
+│       10 years (RUNNING on GPU 1)
 │
 ├── Key findings (2026-05-13):
 │   ├── 2Δy has TWO components: barotropic seed + baroclinic amplification
@@ -306,8 +317,18 @@ Exp 0: Baseline (30 days, fp64)
 │   └── Regular lat-lon grid anisotropy (dx/dy up to 6:1) is a
 │       fundamental challenge that tripolar/displaced-pole grids avoid
 │
-└── Best config so far: A_h=1e4 + A_h_merid=1e5 (BR13)
-    2Δy = 1.2e-6 at day 120, stabilized (not growing)
+├── Best configs so far (2026-05-14):
+│   ├── BR13: A_h=1e4 + A_h_merid=1e5 → 2dy=1.2e-6 day 120 (stabilized)
+│   └── BR18: A_h=1e5 + kr=2400 + 100m complement → 2dy=3.7e-7 year 10
+│       (self-stabilizing: peaks at day 180, then collapses)
+│
+└── Redi diagnostic (BR18 year 10):
+    DM95 taper = 0.65 (surface) to 0.89 (interior) — not reaching 1.0
+    because slopes ≈ 0.003-0.004 (close to S_max=0.005).
+    Residual horizontal diffusion from incomplete taper: ~360 m²/s.
+    100m complement adds κ_Redi horizontal in top 100m.
+    Total effective K_h: 2000-4000 m²/s everywhere.
+    BR19 tests S_max=0.01 to see if taper → 1 changes behavior.
 
 ### Issue 5: Viscosity applied to u_prime instead of u_total (ROOT CAUSE)
 
