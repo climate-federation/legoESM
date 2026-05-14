@@ -3407,7 +3407,16 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
             div_damp_coeff=dd, A_h=ah,
             use_conservation_fixer=True, fix_mass=True,
-            anchor_mass_to_initial=True)
+            anchor_mass_to_initial=True,
+            # new_test_dycores iter-18: enable PE iter-338 metric-
+            # aware d_con (factory ``make_fv3_faithful_pe_config``
+            # default).  PE analog of NH iter-339 enabled in iter-13.
+            # Composes with c_v / dynamic_exner equivalents elsewhere
+            # on PE path.  Should be neutral or near-neutral on
+            # cube max|v| at C36 short-duration tests (PE cube is
+            # already best-in-class on baroclinic / rotated_steady /
+            # gravity_wave per the matrix survey).
+            use_fv3_metric_aware_d_con=True)
         model = PrimitiveEquationModel(grid, sigma, config)
         if _rotated:
             from tests.test_cases.dcmip2008.jablonowski_rotated import (

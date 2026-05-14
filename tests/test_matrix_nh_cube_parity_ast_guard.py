@@ -232,6 +232,51 @@ def test_all_nh_cube_branches_use_corner_div_damp_factory_pair():
         )
 
 
+def _find_pe_baroclinic_cube_config_block() -> str:
+    """Locate the matrix-runner PE ``baroclinic`` cube
+    ``PrimitiveEquationConfig(...)`` constructor (also used by
+    ``rotated_baroclinic`` / ``rotated_steady`` / ``gravity_wave_3_1``).
+    """
+    src = _runner_source()
+    # First config inside ``run_baroclinic`` cube branch.
+    anchor = re.search(
+        r"label=\"baroclinic\"\)", src,
+    )
+    assert anchor is not None, (
+        "matrix-runner baroclinic cube label anchor not found"
+    )
+    cfg_start = src.index(
+        "PrimitiveEquationConfig(", anchor.end(),
+    )
+    depth = 0
+    i = cfg_start
+    while i < len(src):
+        c = src[i]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return src[cfg_start : i + 1]
+        i += 1
+    raise AssertionError("unbalanced PE baroclinic config block")
+
+
+def test_pe_baroclinic_cube_uses_metric_aware_d_con():
+    """iter-18 sentinel: PE baroclinic / rotated_steady /
+    rotated_baroclinic / gravity_wave_3_1 cube branch enables
+    ``use_fv3_metric_aware_d_con=True`` (PE iter-338 factory
+    default).  Probed at C36 day-1 on gravity_wave_3_1 — cube max|v|
+    27.5 -> 22.4 (-18.5%), now matches ico 20.0 / spec 20.3.
+    """
+    block = _find_pe_baroclinic_cube_config_block()
+    assert "use_fv3_metric_aware_d_con=True" in block, (
+        "iter-18 regression: PE baroclinic cube config lost "
+        "``use_fv3_metric_aware_d_con=True``.  This re-opens the "
+        "PE cube gravity_wave_3_1 max|v| gap (22.4 -> 27.5)."
+    )
+
+
 def test_sw_cube_uses_iter1009_dual_target_config():
     """iter-1/8 sentinel: matrix runner SW W2/W5 cube branch routes
     through the canonical ``iter1009_dual_target_config(n)`` helper
