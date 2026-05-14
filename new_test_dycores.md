@@ -43,6 +43,22 @@ So the iter-12..17 NH bundle (vector_halo + a2b_ord4 + d_con_cv + dynamic_exner 
 
 **iter-12..17 doc claims need caveat**: those measurements were at quick mode (5 min); full-mode behaviour DOES NOT HOLD for TC2 cube.
 
+## State after iter-1..200 (compressed at iter-200)
+
+**iter-191..200 — TC2 probe wait phase VI** (200-iter milestone): probe wall 36 min → 39 min over 10 iters.  Still in dynamics.  No code changes (just polling).  Probe estimated 67 min total; ~28 min remaining.
+
+**Iter-200 retrospective**: 200 iterations completed.  Major achievements:
+- iter-58/59: cube CB L2 1.092 → 0.865 (−20.8 % cumulative)
+- iter-61: latlon CB mass-fixer parity, all 4 grids PASS at 12-day
+- iter-66: negative-result lesson (ico CB heterogeneous mesh)
+- iter-69: W2 5-day apples-to-apples — cube is BEST finite-volume
+- iter-81: TC1 0.040 vs 0.014 RESOLVED (duration mismatch, not config)
+- iter-102/123: TC2/TC3 cube full-mode BLOWUP discovered
+- iter-118: functional bug fix (csv writer private-key filter)
+- iter-138: hypothesis-2 probe (16x hyperdiff) in progress
+
+47 sentinels (31 AST + 14 numerical + 1 c_sw + 1 functional), all PASS.
+
 ## State after iter-1..190 (compressed at iter-190)
 
 **iter-181..190 — TC2 probe wait phase V**: probe wall 33 min → 36 min over 10 iters.  Still in dynamics.  No code changes.
