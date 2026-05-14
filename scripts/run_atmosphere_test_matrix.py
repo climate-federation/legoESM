@@ -4807,6 +4807,25 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             state, hcoord, tmetric, small_grid = dcmip25_tc2_init(
                 grid, n_levels=nlev)
             grid = small_grid
+            #
+            # ⚠️ new_test_dycores iter-102 WARNING: TC2 cube BLOWS UP at
+            # day 0.13 (step 8500) of the full 6-hour run despite the
+            # iter-5/6/7/12..17 NH bundle (which were measured at
+            # quick-mode 5 minutes and gave |w|=0.32 m/s PASS).
+            # Pre-blowup mass_drift = 7.85e-16 (clean conservation),
+            # so the issue is dynamics propagation, not flux/halo.
+            # Hypotheses (probe iter-104+ once compute available):
+            #   1. Increase n_acoustic_substeps 20 -> 30+ (acoustic
+            #      instability hypothesis).
+            #   2. Increase hyperdiff_coeff for TC2 cube (over-edge
+            #      dissipation hypothesis).
+            #   3. Reduce acoustic_off_centering 0.15 -> 0.05
+            #      (semi-implicit instability hypothesis).
+            #   4. FV3 oracle: compare against test_case (mountain) at
+            #      /home/gentine/Documents/Code/FV3/atmos_cubed_sphere-
+            #      symmetryclean/ for n_split / d_con / delt_max settings.
+            # See new_test_dycores.md iter-102/103 for full discussion.
+            #
             # Scale hyperdiffusion for 20x smaller Earth: coeff ∝ dx⁴.
             # Use a shorter e-folding time (4x stronger diffusion) than
             # the full-Earth default because mountain-generated flow
