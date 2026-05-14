@@ -4,6 +4,22 @@ Branch: `new_test_dycores` (from `main` post merge of `test_dycores` PR #259).
 Oracle: `../../FV3/atmos_cubed_sphere-symmetryclean/model/`.
 Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV / MPAS Voronoi / spectral SH at the same resolution + duration.
 
+## State after iter-1..80 (compressed at iter-80)
+
+**iter-71..80 audit highlights**:
+
+- **PE matrix audit (iter-73)**: 13/13 cases × 4 grids = 52 tests PASS.  Cube max|v| parity vs ico in **0.95-1.15×** on most PE tests (held_suarez, gravity_wave_3_1, inertio_gravity_3_2, rossby_haurwitz_6_0, baroclinic).  2 cube outliers flagged for iter-74+:
+  - `rotated_baroclinic`: cube 31.8 vs ico 51.9, spec 47.1 m/s (cube 39 % LOWER — possibly over-damped on rotated-pole IC).
+  - `rest_state_topo`: cube 1.3 vs ico 0.1 m/s (analytic exact = 0 motion; cube has 13× residual — likely panel-edge metric errors interacting with topo).
+- **PE gravity_wave_3_1 (iter-72)**: refreshed cross-grid at 1-day apples-to-apples.  cube 22.4 / ico 19.7 / spec 20.3 / latlon 31.0 m/s.  Cube/ico=**1.14×**, cube/spec=**1.10×** — confirms iter-18's −18.5 % gain stable.
+- **SW W2 hyperdiff sweep (iter-71)**: probed mult 1.0/1.5/2.0/2.5/3.0 on cube W2 5-day.  Optimum near 2.5× (L2=4.42e-4) but only 3.5 % below iter-44's 2.0× (4.58e-4) — sub-noise-floor.  Kept 2.0×.
+- **Apples-to-apples completion (iter-75)**: post-iter-72 audit confirmed **NO remaining quick/full mode result mismatches** in SW or PE matrix (17 cases × 4 grids = 68 entries).
+- **iter-66 negative-result AST sentinel (iter-79)**: locked in via `test_iter66_cb_ico_uses_additive_correction` — guards against future ico CB multiplicative-fixer attempts that regress Linf 5×.
+- **Repo hygiene (iter-76)**: `_probe_*.py` added to `.gitignore` (prevents accidental commit of throwaway audit scripts).
+- **TC1 NH cube 0.040 vs claim 0.014 (iter-63 audit)**: matrix uses `nord_v=2` default; factory uses `nord_v=1`.  iter-64 queued — probe `nord_v=1` once NH matrix re-run completes (in progress, taking unusually long: TC1=28 min, TC2 ~80 min+ ongoing).
+
+**Cumulative sentinel coverage**: 28 AST + 14 numerical (iter-79 added iter-66 negative-result guard).
+
 ## State after iter-1..70 (compressed at iter-70)
 
 **Cross-grid apples-to-apples SW matrix audit (iter-61..70)**: refreshed all 4 grids at full duration (the matrix's quick-mode + full-mode results coexist; iter-61 caught the mixed-mode comparison issue).
@@ -164,29 +180,7 @@ Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV /
 - iter-66 negative result (reverted): ico CB multiplicative-fixer attempt regressed Linf 5× — additive uniform correction wins on heterogeneous unstructured mesh.  See top compressed block for lesson.
 - iter-69: W2 5-day apples-to-apples — cube is BEST finite-volume.  See top compressed block.
 - iter-70: W5 15-day apples-to-apples — all 4 grids machine-precision mass conservation.  See top compressed block.
-- iter-75: post-iter-72 audit confirmed **NO remaining quick/full mode result mismatches** anywhere in the SW or PE matrix (17 test cases × 4 grids = 68 entries; all `days` fields consistent within each case).  Full apples-to-apples cross-grid comparison is now possible at any time without ambiguity.  Net result of iter-61..72: 4 of the 5 quick/full-mode mismatches found (CB cross-grid, W2 cross-grid, W5 cross-grid, W6 cross-grid, gravity_wave_3_1 cross-grid) refreshed to full mode; 5th (W6 cross-grid) was already full mode from a prior re-run.  27/27 AST guards still PASS after iter-74 hyperdiff comment refresh.
-
-- iter-73: full PE matrix cross-grid audit at current cached results.  All 13 PE cases (held_suarez ±topo, baroclinic ±rotated, gravity_wave_3_1, inertio_gravity_3_2, mountain_rossby_5_0, rossby_haurwitz_6_0, rotated_steady, rest_state_topo, dcmip_transport_11/12/13, amip) PASS on all 4 grids.  Cube max|v| parity vs ico (the canonical FV reference):
-  - **Excellent (cube/ico in 0.95-1.15×)**: held_suarez, gravity_wave_3_1, inertio_gravity_3_2, rossby_haurwitz_6_0, baroclinic.
-  - **Investigate cube outliers**:
-    - `rotated_baroclinic`: cube 31.8 m/s vs ico 51.9, spec 47.1 m/s — cube 39 % LOWER than ico (possibly over-damped on the rotated-pole initial state).
-    - `rest_state_topo`: cube 1.3 m/s vs ico 0.1, latlon 0.1 m/s — cube residual motion at rest with topography is 13× ico/latlon (analytic exact: zero motion).  Likely cube panel-edge metric errors interacting with topo.  spectral pathological at 51.0 m/s (separate issue).
-  Cube mass drift across PE 30-day tests: 4-5e-12 (4 orders below 1e-4 tolerance; not zero like ico/latlon but well within budget — fp64 reduction noise on 7776 cells).  Queued for iter-74+: investigate rest_state_topo cube residual + rotated_baroclinic under-damping.
-
-- iter-72: PE gravity_wave_3_1 cross-grid apples-to-apples audit at 1-day full duration.  Pre-iter-72 results had ico/latlon/spectral cached at 0.25-day quick mode while cube ran 1.0 day.  Refreshed:
-  - **cube (C36)**: max|v|=22.4 m/s, drift=5.01e-12, **PASS**.
-  - ico (ico5): max|v|=19.7 m/s, drift=0, PASS.
-  - spectral (T21): max|v|=20.3 m/s, drift=1.6e-16, PASS.
-  - latlon (72×144): max|v|=31.0 m/s, drift=0, PASS (dt=10s; latlon resolves higher-frequency waves).
-  **Cube/ico max|v| ratio = 1.14×, cube/spec = 1.10×** — excellent PE parity (cube and ico both use 200s dt, similar transport schemes).  iter-18's claim "27.5 → 22.4 m/s (-18.5%)" confirmed at apples-to-apples; cube now within 10-14 % of ico/spectral cluster.  latlon outlier (31.0 m/s) tracks its 20× finer dt = different effective resolution in time; not a cube issue.
-
-- iter-71: hyperdiff coefficient multiplier sweep on cube W2 5-day (refines iter-44's 2× choice).  Probe results:
-  - mult=1.0×: L2=7.16e-4, v_d=0.96 m/s.
-  - mult=1.5×: L2=5.51e-4, v_d=0.70 m/s.
-  - mult=2.0× (iter-44): L2=4.58e-4, v_d=0.65 m/s.
-  - mult=2.5×: L2=**4.42e-4**, v_d=**0.63 m/s** (best on both).
-  - mult=3.0×: L2=4.47e-4, v_d=0.63 m/s.
-  Optimum near 2.5× gives 3.5 % L2 reduction over 2.0×.  Below the test-to-test noise floor (similar to iter-54's div_damp_factor sweep finding).  Going from 1.0 → 2.0 captures 87 % of the achievable improvement (7.16 → 4.58 vs 7.16 → 4.42).  **iter-44's 2.0× retained** — the 3.5 % marginal gain at 2.5 isn't compelling enough to deviate from the calibrated value, and over-damping risks regressing W5/W6 long-run mountain-wave structure (not visible in mass-drift-only PASS criteria).  Also: W6 14-day cross-grid apples-to-apples confirmed (this iter) — all 4 grids PASS at machine-precision mass conservation.  SW matrix is now fully apples-to-apples across all 4 cases (W2/W5/W6/CB) × all 4 grids.
+- iter-71..80: see compressed block at the top of this doc.
 
 ## Iter-51+ queued
 
