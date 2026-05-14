@@ -4,6 +4,18 @@ Branch: `new_test_dycores` (from `main` post merge of `test_dycores` PR #259).
 Oracle: `../../FV3/atmos_cubed_sphere-symmetryclean/model/`.
 Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV / MPAS Voronoi / spectral SH at the same resolution + duration.
 
+## State after iter-1..100 (compressed at iter-100)
+
+**iter-91..100 highlights** (audit & hygiene phase — NH matrix re-run still in progress throughout):
+
+- **iter-91**: pruned resolved queued items (iter-64 nord_v probe retired by iter-81).  Refreshed outstanding list to current state.
+- **iter-93/94**: added inline comments in matrix-runner cube branches for the two PE outliers (rest_state_topo iter-73 finding, rotated_baroclinic iter-87 2-day caveat).  Breadcrumbs for future investigators.
+- **iter-96/97**: documented bi-directionally the `_div_damp_cube` duplication between matrix runner + test side (`tests/test_iter921_w2_v_vs_h_pareto_sentinel.py`).  Both copies now mention each other so a future calibration change updates both.
+- **iter-99**: hard-fail assertion at `test_iter1002_w2_target_met.py` module import if `JAX_ENABLE_X64=1` is not set.  Pre-iter-99 the fp64-silently-disabled failure mode produced a confusing "mass_drift exceeds 1e-7" assertion; now the actual cause is pointed-finger.  Verified both directions.
+- **iter-92/95/98**: verification iters (no commit) — re-confirmed 43 sentinels (28 AST + 14 numerical + 1 c_sw residual) all PASS.
+
+**Active state**: all SW + PE + sentinels green; NH cube matrix re-run continues (started 04:13, now 138 min wall, TC2 still in dynamics).  Once complete: refresh TC2/TC3 cube measurements + re-evaluate cross-grid NH parity (cube full mode vs ico/spec quick — partial apples-to-apples).
+
 ## State after iter-1..90 (compressed at iter-90)
 
 **iter-81..90 audit highlights**:
