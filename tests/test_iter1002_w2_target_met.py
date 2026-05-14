@@ -566,6 +566,99 @@ def test_iter59_cube_cb_12day_matrix_config():
     )
 
 
+def test_iter61_latlon_cb_12day_mass_fixer():
+    """new_test_dycores iter-61: numerical sentinel for the
+    latlon CB anchored mass fixer applied to the matrix runner's
+    CB latlon step_fn.
+
+    Pre-iter-61 the latlon CB matrix branch was an intentional raw-FV
+    benchmark (no mass correction) leaving the 12-day mass drift at
+    5.35e-4 — above the iter-29 matrix tolerance (1e-4) → silent FAIL.
+    iter-61 imported the cube CB anchored fixer (clip negatives +
+    rescale positives to ``mass_target``) bringing the drift to
+    2.07e-8 (26000x tighter) so all 4 grids now PASS at 12-day
+    apples-to-apples.
+
+    This sentinel reproduces the matrix's latlon CB step_fn with
+    the iter-61 fixer applied and asserts:
+
+      - finite h
+      - mass_drift < 1e-7   (matrix measured 2.07e-8; the same 1e-7
+                              ceiling the iter-59 cube sentinel uses)
+
+    Together with `test_iter59_cube_cb_12day_matrix_config` and the
+    AST guard `test_iter61_cb_latlon_has_anchored_mass_fixer` these
+    cover the iter-61 cross-grid CB conservation parity result.
+    Run-time ~5 s post-warm (latlon CB is fast — 72x144 cells at
+    dt~126 s for 12 days).
+    """
+    import math
+    import jax
+    import jax.numpy as jnp_local
+    from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
+        CGridLatLonShallowWaterState,
+        cell_to_cgrid_winds,
+    )
+    from legoesm.core.operators_fv_latlon import (
+        cgrid_fv_flux_divergence_latlon,
+    )
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.timestepping.dispatch import dispatch_integrator
+    from legoesm.core.conservation import _conservation_accumulator
+    from tests.test_cases.cosine_bell import cosine_bell_latlon
+
+    n_lat, n_lon = 72, 144
+    beta = float(jnp_local.pi / 4.0)
+    grid = create_latlon_grid(n_lat, n_lon)
+    _u0 = 2.0 * math.pi * float(grid.radius) / (12.0 * 86400.0)
+    _dx_pole = float(grid.radius) * grid.dlon * math.cos(
+        math.pi / 2 - grid.dlat / 2)
+    dt = min(1800.0, 0.8 * _dx_pole / _u0)
+
+    cb = cosine_bell_latlon(grid, beta)
+    u_face, v_face = cell_to_cgrid_winds(cb.u.data, cb.v.data)
+    state = CGridLatLonShallowWaterState(
+        h=cb.h.data, u=u_face, v=v_face,
+        h_s=jnp_local.zeros_like(cb.h.data),
+    )
+    _acc = _conservation_accumulator()
+    area64 = grid.area.astype(_acc)
+    mass_target = jnp_local.sum(state.h.astype(_acc) * area64)
+
+    @jax.jit
+    def step(s):
+        def tendency_fn(st):
+            dh = cgrid_fv_flux_divergence_latlon(
+                st.h, u_face, v_face, grid)
+            return st._replace(
+                h=dh,
+                u=jnp_local.zeros_like(st.u),
+                v=jnp_local.zeros_like(st.v),
+                h_s=jnp_local.zeros_like(st.h_s))
+        s_new = dispatch_integrator(s, tendency_fn, dt, "ssp_rk3")
+        h_pos = jnp_local.maximum(s_new.h, 0.0)
+        mass_pos = jnp_local.sum(h_pos.astype(_acc) * area64)
+        scale = mass_target / jnp_local.maximum(mass_pos, 1.0)
+        return s_new._replace(h=h_pos * scale.astype(h_pos.dtype))
+
+    nsteps = int(12.0 * 86400.0 / dt)
+    s = state
+    for _ in range(nsteps):
+        s = step(s)
+
+    assert jnp_local.all(jnp_local.isfinite(s.h)), (
+        "iter-61 regression: latlon CB 12-day ``h`` non-finite"
+    )
+    mass_final = jnp_local.sum(s.h.astype(_acc) * area64)
+    drift = float(abs(mass_final - mass_target)
+                  / abs(mass_target))
+    assert drift < 1e-7, (
+        f"iter-61 regression: latlon CB 12-day mass drift {drift:.2e} "
+        "exceeds 1e-7 ceiling — matrix measured 2.07e-8 with the "
+        "iter-61 anchored fixer."
+    )
+
+
 def test_iter49_cube_w2_matrix_config_short_run():
     """new_test_dycores iter-49: numerical sentinel for cube W2 at
     the matrix-runner configuration (iter-44 2× hyperdiff).
