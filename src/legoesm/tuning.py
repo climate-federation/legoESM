@@ -284,6 +284,26 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
             "louis."
         ),
     ),
+    # iter-254 (AIMIP Phase 2.4): exposed l_mix_max (Louis maximum
+    # mixing length).  Default 100 m matches Holtslag (1998) / common
+    # weather-model convention; range 50-300 m spans shallow
+    # nocturnal PBL (50) to deep daytime convective PBL (300).
+    "l_mix_max": TuningParameter(
+        name="l_mix_max",
+        default=100.0,
+        min_val=50.0,
+        max_val=300.0,
+        units="m",
+        description="Louis maximum mixing length",
+        category="turbulence",
+        sensitivity="medium",
+        notes=(
+            "Caps the asymptotic mixing length in the Louis scheme.  "
+            "Higher = larger PBL eddies (deep convective regimes); "
+            "lower = restricted to shallow nocturnal PBL.  Only "
+            "consulted when --turbulence louis."
+        ),
+    ),
 }
 
 

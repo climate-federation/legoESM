@@ -65,11 +65,13 @@ _SBM_TRAINABLE = [
 # Louis-turbulence-specific trainable parameters.
 # iter-252 (AIMIP Phase 2.2): added Ri_crit (stable-PBL cutoff).
 # iter-253 (AIMIP Phase 2.3): added Ck (mixing-length coefficient).
+# iter-254 (AIMIP Phase 2.4): added l_mix_max (max mixing length).
 # Bounds match tuning.py::TUNING_PARAMETERS[...].  Only active when
 # --turbulence louis.
 _LOUIS_TURBULENCE_TRAINABLE = [
     ParamConstraint("Ri_crit", 0.20, 0.50, "sigmoid"),
     ParamConstraint("Ck", 0.20, 0.60, "sigmoid"),
+    ParamConstraint("l_mix_max", 50.0, 300.0, "sigmoid"),
 ]
 
 
