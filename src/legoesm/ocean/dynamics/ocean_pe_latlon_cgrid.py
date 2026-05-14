@@ -533,11 +533,11 @@ def _split_velocity_divergence(
     """
     R = grid.radius
     dlon = grid.dlon
-    dlat = grid.dlat
     lat = grid.lat
 
-    # Zonal flux divergence at cells.
-    face_dy = R * dlat
+    # Zonal flux divergence at cells. Cell-row meridional extent (1D
+    # array, Mercator-safe).
+    face_dy = (grid.dy * 0.5)[:, jnp.newaxis, jnp.newaxis]  # (n_lat,1,1)
     net_zonal = (u[:, 1:, :] - u[:, :-1, :]) * face_dy
 
     # Meridional flux divergence at cells (with cos(lat) at v-faces).
@@ -885,10 +885,14 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             delta_v_sq_cell, v_avg_cell, v, order=5)        # (n_lat+1, n_lon, nlev)
 
         # Convert "δ across one cell" → "gradient at face" by dividing
-        # by dx_u (cell width at u-face latitude) and dy_v (constant).
+        # by dx_u (cell width at u-face latitude) and dy_v (distance
+        # between adjacent cell-centre latitudes at the v-face row;
+        # Mercator-safe).
         R = grid.radius
         dx_u_at_face = (R * grid.dlon * grid.cos_lat)[:, jnp.newaxis, jnp.newaxis]  # (n_lat,1,1)
-        dy_v = R * grid.dlat
+        dy_h_arr = grid.dy * 0.5                                          # (n_lat,)
+        dy_v_int = 0.5 * (dy_h_arr[1:] + dy_h_arr[:-1])                    # (n_lat-1,)
+        dy_v = jnp.pad(dy_v_int, (1, 1), mode='edge')[:, jnp.newaxis, jnp.newaxis]  # (n_lat+1,1,1)
         # Gradient of <u²>_i at u-face (WENO upwind version).
         dKE_u2_dx_at_uface = 0.5 * delta_u_sq_at_uface / dx_u_at_face
         # Gradient of <v²>_j at v-face (WENO upwind version).

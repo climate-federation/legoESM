@@ -64,7 +64,8 @@ def gradient_y(field: Field, grid: LatLonGrid) -> Field:
     """
     padded = pad_halo_latlon(field.data)
     # Centered difference: (f[j+1, i] - f[j-1, i]) / dy
-    df_dy = (padded[2:, 1:-1] - padded[:-2, 1:-1]) / grid.dy
+    # grid.dy is (n_lat,) — broadcast over longitude.
+    df_dy = (padded[2:, 1:-1] - padded[:-2, 1:-1]) / grid.dy[:, None]
     return field.replace(data=df_dy, name=f"d{field.name}_dy", units=f"{field.units}/m")
 
 
@@ -99,9 +100,10 @@ def divergence(u_field: Field, v_field: Field, grid: LatLonGrid) -> Field:
     u = u_field.data
     v = v_field.data
 
-    # Form fluxes: multiply by single-cell edge length (half of 2-cell span)
-    flux_x = u * (grid.dy * 0.5)    # (n_lat, n_lon), dy is constant
-    flux_y = v * (grid.dx * 0.5)    # (n_lat, n_lon), dx varies with lat
+    # Form fluxes: multiply by single-cell edge length (half of 2-cell span).
+    # grid.dy is (n_lat,) — broadcast over longitude.
+    flux_x = u * (grid.dy[:, None] * 0.5)  # (n_lat, n_lon)
+    flux_y = v * (grid.dx * 0.5)            # (n_lat, n_lon), dx varies with lat
 
     flux_x_pad, flux_y_pad = pad_halo_vector_latlon(flux_x, flux_y)
 
@@ -136,9 +138,9 @@ def curl_z(u_field: Field, v_field: Field, grid: LatLonGrid) -> Field:
     u = u_field.data
     v = v_field.data
 
-    # Form metric-weighted fields
-    v_metric = v * (grid.dy * 0.5)   # v * single-cell dy
-    u_metric = u * (grid.dx * 0.5)   # u * single-cell dx (varies with lat)
+    # Form metric-weighted fields. grid.dy is (n_lat,) — broadcast over lon.
+    v_metric = v * (grid.dy[:, None] * 0.5)   # v * single-cell dy
+    u_metric = u * (grid.dx * 0.5)             # u * single-cell dx (varies with lat)
 
     v_pad = pad_halo_latlon_vector(v_metric)
     u_pad = pad_halo_latlon_vector(u_metric)
@@ -166,10 +168,10 @@ def laplacian(field: Field, grid: LatLonGrid) -> Field:
         padded[1:-1, 2:] - 2.0 * data + padded[1:-1, :-2]
     ) / (grid.dx**2 / 4.0)
 
-    # d^2f/dy^2
+    # d^2f/dy^2 — grid.dy is (n_lat,), broadcast over longitude.
     d2f_dy2 = (
         padded[2:, 1:-1] - 2.0 * data + padded[:-2, 1:-1]
-    ) / (grid.dy**2 / 4.0)
+    ) / (grid.dy[:, None]**2 / 4.0)
 
     lap_data = d2f_dx2 + d2f_dy2
 

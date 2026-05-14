@@ -121,7 +121,6 @@ def fv_flux_divergence_latlon_3d(
         ``dq/dt = -div(q · v)`` — the tracer-advection tendency.
     """
     R = grid.radius
-    dlat = grid.dlat
     dlon = grid.dlon
 
     # Pad all fields with halo=2, once for all levels
@@ -136,7 +135,8 @@ def fv_flux_divergence_latlon_3d(
 
     q_face_lon = jnp.where(u_iface >= 0, q_L_lon, q_R_lon)
 
-    hy = R * dlat
+    # Cell-row height (1D over latitude → Mercator-safe).
+    hy = (grid.dy * 0.5)[:, None, None]                      # (n_lat,1,1)
     Phi_lon = u_iface * hy * q_face_lon  # (n_lat, n_lon+1, nlev)
 
     # --- Latitude flux ---
@@ -216,7 +216,6 @@ def cgrid_fv_flux_divergence_latlon_3d(
         Flux divergence tendency: dq/dt = -div(q * v).
     """
     R = grid.radius
-    dlat = grid.dlat
     dlon = grid.dlon
     n_lat = grid.n_lat
 
@@ -227,7 +226,8 @@ def cgrid_fv_flux_divergence_latlon_3d(
     q_L_lon, q_R_lon = _ppm_reconstruct_lon_3d(q_pad, limiter)  # (n_lat, n_lon+1, nlev)
     q_face_lon = jnp.where(u_face_3d >= 0, q_L_lon, q_R_lon)
 
-    hy = R * dlat
+    # Cell-row height (1D over latitude → Mercator-safe).
+    hy = (grid.dy * 0.5)[:, None, None]                      # (n_lat,1,1)
     Phi_lon = u_face_3d * hy * q_face_lon  # (n_lat, n_lon+1, nlev)
 
     # --- Latitude flux ---
@@ -262,9 +262,8 @@ def _cgrid_velocity_divergence_3d(
     jax.Array, shape (n_lat, n_lon, nlev)
     """
     R = grid.radius
-    dlat = grid.dlat
     dlon = grid.dlon
-    hy = R * dlat
+    hy = (grid.dy * 0.5)[:, None, None]                      # (n_lat,1,1)
     lat_v = lat_v_interfaces(grid)
     hx_iface = R * dlon * jnp.maximum(jnp.cos(lat_v), 1e-10)[:, None, None]
 

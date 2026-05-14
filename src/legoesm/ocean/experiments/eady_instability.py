@@ -289,10 +289,13 @@ def _add_thermal_wind_latlon(state, grid, z_coord,
     lat_mid = np.radians(config.front_lat_center)
     f0 = 2.0 * Omega * np.sin(lat_mid)
 
-    # ∂T/∂y at u-face latitudes (between cell centers)
-    dy = grid.dy / 2.0  # grid.dy is "distance over 2 cells"
+    # ∂T/∂y at u-face latitudes (between cell centers): distance from
+    # centre-of-row(i-1) to centre-of-row(i). 1D over latitude →
+    # Mercator-safe.
+    dy_h = np.asarray(grid.dy) * 0.5  # (n_lat,) single-cell heights
+    dy_v = 0.5 * (dy_h[1:] + dy_h[:-1])  # (n_lat-1,) face-to-face distance
     # dT/dy at interior u-faces: (T[i] - T[i-1]) / dy
-    dTdy = (T_data[1:, :, :] - T_data[:-1, :, :]) / dy  # (n_lat-1, n_lon, nlev)
+    dTdy = (T_data[1:, :, :] - T_data[:-1, :, :]) / dy_v[:, None, None]  # (n_lat-1, n_lon, nlev)
     # Pad to (n_lat, n_lon+1, nlev) u-face shape:
     # Top/bottom rows: zero (solid wall), columns: periodic average
     dTdy_padded = np.zeros((n_lat, nlev), dtype=np.float64)
