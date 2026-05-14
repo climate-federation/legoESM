@@ -4,6 +4,27 @@ Branch: `new_test_dycores` (from `main` post merge of `test_dycores` PR #259).
 Oracle: `../../FV3/atmos_cubed_sphere-symmetryclean/model/`.
 Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV / MPAS Voronoi / spectral SH at the same resolution + duration.
 
+## State after iter-1..60 (compressed at iter-60)
+
+**New cube CB wins (iter-51..60)**:
+
+- **Cube CB 12-day L2 1.092 → 0.865 (−20.8 % cumulative)**.
+  - iter-58: `hord=10` + `apply_fortran_xppm_boundary=True` in matrix `transport_step` call → 1.092 → 0.931 (−14.7 %).  PPM hord=10 (slope-limiter monotone) retains more amplitude than hord=12 at multi-day integrations; xppm boundary applies Fortran-faithful cube-edge formulas.
+  - iter-59: N=6 temporal substepping (dt_sub=300s) inside CB cube step_fn → 0.931 → 0.865 (−7.0 %).  Latlon CB uses SSP-RK3 (O(dt³)); cube CB used single-stage forward-Euler PPM (O(dt)) — substep closes ~7 % of the temporal-truncation gap.  Saturation past n_sub=6 shallow (≤1.5 % per doubling).  Mass drift 28× tighter (3.6e-8 → 1.3e-9, per-substep fixer).
+  - iter-61: cross-grid L2 ratio CORRECTED from previously documented 35×.  The 35× figure was based on comparing cube 12-day vs latlon **1-day** stale results — apples-to-oranges.  True apples-to-apples 12-day cube/latlon L2 ratio = **6.5×** (cube 0.865 vs latlon 0.133).  Cube vs ico = 1.4×, cube vs spectral = 2.3×.  Cube is L2 outlier but BEST on mass conservation among finite-volume grids (1.28e-9 vs latlon 2.07e-8 vs ico 1.58e-6, with spectral 2e-16 exact).
+
+**Other iter-51..60 work**:
+
+- iter-51: cube CB C36 vs C48 L2 essentially identical (1.092 vs 1.094) → CB structural gap NOT dx²-convergence-limited; PPM limiter dissipation dominates.
+- iter-52..55: parameter sweeps on iter-1030 calibration (`nord_v`, `div_damp_factor`, `damp_v`) — all confirm current values near L2 optimum.  Wind-vs-height trade-off characterised.
+- iter-56: 1-day vs 5-day hyperdiff trade-off characterized; iter-1002 sentinel and matrix runner pin DIFFERENT operating points (1-day spectral character vs 5-day long-run stability).
+- iter-57: cube W2 5-day numerical sentinel at matrix-actual config (L2 < 1.5e-3, max|v_d| < 5 m/s).
+- iter-60: cleaned up 2 stale silent-noop warning sentinels (iter-1019/iter-1020) — both were pre-existing red CI tests asserting warnings from code paths the SW model doesn't traverse.  Inverted to positive guards: assert NO spurious warning fires.  Plus added `test_iter59_cube_cb_12day_matrix_config` numerical sentinel pinning the iter-58/59 cube CB win (L2 < 0.90, Linf < 0.90).
+
+**Sentinel coverage** (now 26 AST + 8 numerical + 1 c_sw residual):
+- AST: 26 in `tests/test_matrix_nh_cube_parity_ast_guard.py` (iter-59 added `test_iter59_cb_cube_uses_n_sub_substepping`).
+- Numerical: 8 in `tests/test_iter1002_w2_target_met.py` — W2 1-day (iter-1002), W5 day-5 (iter-1009), W6 2-day (iter-39), W5 2-day (iter-48), W2 2-day (iter-49), W2 5-day (iter-57), CB 12-day (iter-59), hyperdiff kwarg API (iter-35); plus 2 quiet-path guards (iter-60 inverted iter-1019/iter-1020).
+
 ## State after iter-1..49 (compressed at iter-50)
 
 **Headline cube parity wins**:
@@ -91,33 +112,14 @@ Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV /
 - iter-47: AMIP cube 30-day quick PASS bit-identical to pre-iter-22.
 - iter-48: W5 numerical sentinel (mirror of iter-39 W6).
 - iter-49: W2 matrix-config numerical sentinel (hyperdiff=2× variant).
-- iter-50 (compressed at this point): doc compression.
-- iter-51: probed cube CB at C48 to test resolution dependence — L2=1.094 (essentially identical to C36 L2=1.092).  CB structural transport gap is NOT a dx² convergence issue; PPM monotone limiter dissipation accumulates over the 12-day rotation regardless of resolution.  Added iter-46 C48 reference to the matrix-runner iter-44 hyperdiff comment.  No code change needed beyond comment.
-- iter-52: probed `nord_v=1` (del-4 post-step vorticity damping) vs the iter1009 default `nord_v=2` (del-6) for cube SW propagating tests.  Mixed result: v_ll_Linf improves 0.51 → 0.33 m/s but L2 DEGRADES 4.58e-4 → 8.02e-4 (cube/latlon L2 ratio 1.7× → 3.0×).  Kept at nord_v=2 since L2 is the more representative cross-grid parity metric.  W5/W6 unaffected either way.  Added probing rationale to matrix-runner comment.
-- iter-53: extended iter-49 W2 numerical sentinel with an additional `h_err_l2 < 3e-3` bound on the area-weighted height-field L2 error.  iter-44 matrix W2 5-day measures L2=4.58e-4 (cube/latlon ratio 1.7×); the day-2 subset stays well under 3e-3.  Now the iter-49 sentinel catches BOTH v_d calibration drift (max|v_d - v_d_init| < 3.0) AND h-field accuracy regression (L2 < 3e-3) — protecting against the iter-52 trade-off where nord_v=1 lowers v_d at the cost of higher L2.  Re-ran cube W2 5-day matrix to refresh cached output (iter-52 probe had left an L2=8.02e-4 stale value); now back at L2=4.58e-4.
-- iter-54: probed `div_damp_factor ∈ {6, 8, 10, 12}` at iter-44 baseline (hyperdiff=2×, nord_v=2) on cube W2 5-day.  All values give v_ll_Linf in [0.506, 0.509] m/s (essentially flat) and L2 in [4.48e-4, 5.03e-4].  Optimum is around 10.0 (L2=4.48e-4, ~2% better than 8.0) but the gain is below the test-to-test noise floor.  iter-1030's `div_damp_factor=8.0` retained — no compelling reason to deviate from the calibrated value.
-- iter-55: probed `damp_v ∈ {0.020, 0.025, 0.030, 0.035, 0.040}` at iter-44 baseline on cube W2 5-day.  Result: v_ll_Linf monotonically improves with higher damp_v (0.56 → 0.46 m/s); L2 has a shallow minimum at 0.030 (4.58e-4) and rises slightly toward both ends (4.77e-4 at 0.020 and 0.040).  iter-1030's `damp_v=0.030` is near the L2 optimum — kept.  Trade-off with v_ll is consistent with iter-52's nord_v finding: more damping reduces wind error but increases h-field error.
-- iter-56: probed iter-1002 vs iter-44 matrix configs at 1-day W2.
-  - iter-1002 config (hyperdiff=0, nord_v=2): 1-day v_ll=**0.114** m/s, h_err=8.49 m (matches the codex iter-1009 narrative).
-  - iter-44 matrix config (hyperdiff=2×, nord_v=2): 1-day v_ll=**0.339** m/s, h_err=3.18 m.
-  Hyperdiff trade-off at 1-day: 3× HIGHER v_ll (0.114 → 0.339) but 2.7× LOWER h_err (8.49 → 3.18).  At 5-day the trade-off REVERSES — matrix config gives v_ll=0.51 (vs hyperdiff=0 which would BLOW UP past day 9 for W6).  Confirms iter-1002 sentinel and matrix runner pin DIFFERENT operating points (1-day spectral character vs 5-day long-run stability); both are needed for full coverage.
-- iter-57: added cube W2 5-day numerical sentinel `test_iter57_cube_w2_matrix_config_5day` at the matrix-runner test-of-record duration.  Asserts finite + mass_drift < 1e-7 + h_err_l2 < 1.5e-3 + max|v_d - v_d_init| < 5.0 m/s.  PASS in 25 s.  Now the cube SW sentinel matrix covers 4 operating points: W2 1-day calibration (iter-1002), W2 2-day matrix (iter-49), W2 **5-day matrix** (iter-57), W5/W6 2-day matrix (iter-48/39).
-- iter-58: **cube CB L2 0.93 (was 1.09, 14.7 % improvement)** via `hord=10` + `apply_fortran_xppm_boundary=True` in the matrix CB cube `transport_step` call.  Probed default vs xppm_bdy vs hord=10 vs both at 12-day:
-  - default: L2=1.092, Linf=0.997 (iter-1 baseline).
-  - xppm_bdy: L2=1.003, Linf=0.970.
-  - hord=10:  L2=1.009, Linf=0.937.
-  - hord=10 + xppm_bdy: L2=**0.931**, Linf=**0.863** (best).
-  Mass drift unchanged at 3.64e-8 (anchored).  Cross-grid L2 ratio cube/latlon: 45× → 38× (still structural but improved).  iter-26's hord=12-best finding was at 1-day where the accumulated dissipation hasn't built up; at 12-day the slightly weaker hord=10 limiter retains more bell amplitude.
-- iter-59: **cube CB L2 0.865 (was 0.931, additional 7.0 % improvement)** via N=6 temporal substepping inside the matrix CB cube step_fn.  Probe `_probe_iter59_substep.py` 12-day cube CB at fixed outer dt=1800s:
-  - n_sub=1 (iter-58 baseline):  L2=0.931, Linf=0.863
-  - n_sub=2: L2=0.891 (−4.3 %)
-  - n_sub=3: L2=0.881 (−5.3 %)
-  - n_sub=4: L2=0.876 (−5.9 %)
-  - n_sub=6: L2=**0.865** (−7.0 %) ← matrix now uses
-  - n_sub=8: L2=0.856 (−8.1 %)
-  - n_sub=12: L2=0.851 (−8.6 %)
-  Root cause: the cube CB step used single-stage forward-Euler PPM transport (O(dt) phase error) while the latlon CB path uses SSP-RK3 (O(dt³)).  At outer dt=1800s temporal-truncation was contributing ~7 % to the 12-day error.  n_sub=6 (dt_sub=300s) closes most of it; saturation past n_sub=6 is shallow (~1.5 % per doubling).  Matrix wall: 3.2s → 5.8s (1.8× — not 6× due to JIT amortization).  Mass drift improved 28× (3.6e-8 → 1.3e-9, anchored fixer fires per-substep).  Cross-grid L2 ratio cube/latlon: 38× → 35× (still structural, dominated by limiter dissipation along corner-rotated trajectory).  hord-sweep at n_sub=3 confirmed hord=10 still optimal.
-- iter-60: cleaned up two stale silent-noop warning sentinels (`test_iter1019_hyperdiff_silent_noop_warning`, `test_iter1020_dddmp_silent_noop_warning`).  The originals asserted that warnings fire from code paths the SW model doesn't traverse — `cdgrid_momentum_tendencies` (iter-1020) and a stale signature-only NO-OP claim for `fv3_sw_tendencies` (iter-1019, removed in iter-41 once empirical evidence showed the biharmonic IS applied at operators_cdgrid.py L1444-1456).  Both were pre-existing red CI checks unrelated to the iter-58/59 cube CB work.  Inverted both to positive-guard pattern: assert NO spurious warning fires through `FV3EdgeShallowWaterModel.step` (because the SW model dispatches through `fv3_sw_tendencies`, not the cdgrid_momentum_tendencies path that owns the warning).  Plus added `test_iter59_cube_cb_12day_matrix_config` numerical sentinel: reproduces matrix CB cube branch with iter-58 hord=10/xppm_bdy + iter-59 N=6 substep, asserts L2 < 0.90, Linf < 0.90, mass_drift < 1e-7.  Run-time 18.7 s; 12/12 module sentinels PASS, 26/26 AST guards PASS.
+- iter-50 / iter-60: doc compressions (state of iter-1..49 and iter-51..60 summarised in the two "State after" blocks above).
+- iter-51..60: see compressed block above.  Headline: cube CB L2 1.092 → 0.865 (−20.8 % cumulative; iter-58 hord=10+xppm_bdy → −14.7 %; iter-59 N=6 substep → additional −7.0 %).
+- iter-61: cross-grid CB 12-day apples-to-apples audit + latlon CB mass-conservation parity.  Found previously documented "35× cube/latlon L2 ratio" was based on comparing cube **12-day** results vs latlon **1-day** stale results files (the matrix's quick-mode + full-mode results coexist in the same dir).  Re-ran all 4 grids at 12-day full duration:
+  - latlon (72×144): L2=0.125, mass_drift=5.35e-4 → **FAIL** (drift > matrix tol 1e-4).
+  - icosahedral (ico5): L2=0.620, mass_drift=1.58e-6, PASS.
+  - spectral (T21): L2=0.382, mass_drift=2.16e-16, PASS.
+  - cube (C36, iter-58/59): L2=0.865, mass_drift=1.28e-9, PASS.
+  Diagnosed: latlon CB step_fn was intentionally a "raw FV benchmark" (no mass fixer); iter-29 matrix-wide tolerance tightening from 1e-2 to 1e-4 dropped below the raw-FV mass drift.  Per the ralph-loop "consistency across grids" goal, applied the **same anchored mass fixer cube uses** (clip-negatives + rescale-positives to mass_target) to the latlon CB step_fn.  Result: latlon mass_drift 5.35e-4 → **2.07e-8** (26000× tighter), L2 0.125 → 0.133 (+6 % small redistribution cost), Linf 0.229 → 0.246 (+7 %), **PASS**.  **All 4 grids now PASS at 12-day apples-to-apples**.  True cube/latlon L2 ratio: **6.5×** (was claimed 35×), cube/ico 1.4×, cube/spectral 2.3× — all far closer than previous trail suggested.  iter-61 also probed the spatial decomposition of the cube CB error (`_probe_iter61_cb_error_map.py`): 99 % of the residual L2 lives in the panel-INTERIOR cells of the single face containing the bell at t=12 d; panel-edge cells contribute ~0.0003 (essentially zero).  Confirms residual is bulk PPM limiter dissipation along the rotated trajectory, NOT cube panel-coupling.
 
 ## Iter-51+ queued
 

@@ -665,6 +665,46 @@ def test_sw_cube_uses_iter1009_dual_target_config():
     )
 
 
+def test_iter61_cb_latlon_has_anchored_mass_fixer():
+    """new_test_dycores iter-61 sentinel: the latlon CB matrix branch
+    must apply the cube-style anchored mass fixer (clip-negatives +
+    rescale-positives to ``_mass_target_iter61``) at the tail of its
+    ``step_fn``.
+
+    Pre-iter-61 the latlon CB step was an intentional raw-FV benchmark
+    with no mass correction; the iter-29 matrix-wide tolerance tighten
+    (1e-2 -> 1e-4) silently turned it into a persistent FAIL because
+    the raw 12-day drift sits at 5.35e-4.  iter-61 imported the cube
+    CB fixer (transport_step's clip+rescale logic) and applied it to
+    the latlon step_fn, bringing all 4 grids onto the same
+    mass-conservation footing (drifts <1e-7) and apples-to-apples
+    error norms.
+
+    A refactor that drops the fixer or breaks the rescale call would
+    re-introduce a latlon CB FAIL.  We anchor on the constant name
+    ``_mass_target_iter61`` (specifically chosen with the iter-61
+    tag so it isn't accidentally renamed) and the ``jnp.maximum`` /
+    ``mass_target / max(mass_pos, 1.0)`` rescale pattern.
+    Whitespace-tolerant.
+    """
+    src = _runner_source()
+    assert "_mass_target_iter61" in src, (
+        "iter-61 regression: latlon CB step_fn no longer references "
+        "``_mass_target_iter61``.  Re-introduce the anchored mass "
+        "fixer (clip negatives, rescale positives) on the latlon CB "
+        "step_fn so the 12-day mass drift stays under the iter-29 "
+        "1e-4 matrix tolerance."
+    )
+    assert re.search(
+        r"_mass_target_iter61\s*/\s*jnp\.maximum\(\s*mass_pos\s*,\s*1\.0\s*\)",
+        src,
+    ), (
+        "iter-61 regression: latlon CB rescale pattern "
+        "``_mass_target_iter61 / jnp.maximum(mass_pos, 1.0)`` missing. "
+        "The rescale is what brings 12-day drift from 5e-4 to 2e-8."
+    )
+
+
 def test_iter59_cb_cube_uses_n_sub_substepping():
     """iter-59 sentinel: matrix runner CB cube branch uses N=6 temporal
     substepping of ``transport_step`` inside the per-outer-step
