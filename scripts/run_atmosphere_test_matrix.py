@@ -2804,6 +2804,24 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.core.operators_voronoi import (
             thickness_flux, divergence_cell)
 
+        # new_test_dycores iter-66 REVERTED.  Attempted to switch this
+        # branch from its per-step ADDITIVE correction to the same
+        # clip-negatives + multiplicative-rescale-to-INITIAL-mass
+        # scheme cube (iter-58) and latlon (iter-61) use, in pursuit
+        # of cross-grid mass-fixer consistency.  Mass drift improved
+        # 580× (1.58e-6 → 2.71e-9, matching cube/latlon) but the bell
+        # Linf REGRESSED 5× (0.561 → 2.83) and L2 +24 % (0.620 →
+        # 0.772).  Reason: ico mesh is heterogeneous (12 pentagons
+        # alongside hexagons; ~83 % cell-area ratio); multiplicative
+        # rescale of clipped-positive cells concentrates mass in the
+        # smaller pentagon cells, producing peak overshoot.  The
+        # additive uniform correction distributes the deficit
+        # area-uniformly which is the natural choice on a
+        # heterogeneous unstructured mesh.  Restored.  Lesson:
+        # cross-grid "consistency" does not imply identical fixer
+        # logic when grid topology differs — ico needs additive,
+        # cube/latlon need multiplicative-anchored, both achieve PASS
+        # within matrix tolerance.
         @jax.jit
         def step_fn(s, dt_):
             def tendency_fn_transport(st):
@@ -2819,7 +2837,9 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
                 s, tendency_fn_transport, dt_, config.time_integrator)
             # Positivity limiter + mass conservation fixer.
             # The centred thickness flux can produce negative h;
-            # clamp to zero then restore total mass.
+            # clamp to zero then restore total mass via uniform
+            # additive correction (preferred on heterogeneous mesh
+            # per iter-66 finding).
             h_new = jnp.maximum(s_new.h.data, 0.0)
             area = mesh.areaCell
             mass_old = jnp.sum(s.h.data * area)
