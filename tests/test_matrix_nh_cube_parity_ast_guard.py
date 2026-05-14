@@ -470,28 +470,33 @@ def test_w6_latlon_init_uses_w6_winds_geo():
     )
 
 
-def test_w6_cube_config_has_hyperdiff_override():
-    """iter-31 sentinel: cube W6 SW config overrides the iter1009
-    baseline with ``hyperdiff_coeff=_hyperdiff_cube(n)`` for
-    long-run 14-day stability.
+def test_w5_w6_cube_config_has_hyperdiff_override():
+    """iter-31/33 sentinel: cube SW config overrides the iter1009
+    baseline with ``hyperdiff_coeff=_hyperdiff_cube(n)`` on both
+    W5 (mountain, 15-day) AND W6 (Rossby-Haurwitz, 14-day) for
+    long-run stability.
 
     Without the override, the iter1009 calibration
-    (``hyperdiff_coeff=0.0``, tuned for W2/W5 stationary tests)
-    BLOWS UP cube W6 at day 9.  This sentinel catches a regression
-    that would re-introduce the pre-iter-31 instability.
+    (``hyperdiff_coeff=0.0``, tuned for W2 stationary test) BLOWS
+    UP:
+      - cube W5 at day 14.58 (15-day full duration; iter-33).
+      - cube W6 at day 9.03 (14-day full duration; iter-31).
+    Latlon W5/W6 at the same durations PASS.  This sentinel
+    catches a regression that would re-introduce either instability
+    (the gate is ``test_num in (5, 6)``).
     """
     src = _runner_source()
     pat = re.search(
-        r"if\s+test_num\s*==\s*6\s*:[^}]*?"
+        r"if\s+test_num\s+in\s*\(\s*5\s*,\s*6\s*\)\s*:[^}]*?"
         r"hyperdiff_coeff\s*=\s*_hyperdiff_cube\(\s*n\s*\)",
         src,
         re.DOTALL,
     )
     assert pat is not None, (
-        "iter-31 regression: cube SW W6 branch no longer overrides "
-        "``hyperdiff_coeff=_hyperdiff_cube(n)`` — cube W6 14-day "
-        "will re-BLOWUP at day 9 (latlon W6 stable; cube parity "
-        "gap reopens)."
+        "iter-31/33 regression: cube SW long-run branch no longer "
+        "overrides ``hyperdiff_coeff=_hyperdiff_cube(n)`` for "
+        "(W5, W6) — cube W5/W6 full-duration will re-BLOWUP "
+        "(latlon stable; cube parity gap reopens)."
     )
 
 

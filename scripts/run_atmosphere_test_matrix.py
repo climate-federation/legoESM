@@ -2031,16 +2031,18 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         # while latlon W6 14-day is stable.  Override the iter-1030
         # calibration to higher div_damp + damp_v on W6 only.  W2/W5
         # untouched (still pinned at iter-1030 dual-target).
-        if test_num == 6:
-            # W6 (Rossby-Haurwitz wave-4) is mildly unstable at C36;
-            # baseline iter1009_dual_target_config blows up around
-            # day 9.  Add biharmonic hyperdiffusion to damp short-
-            # wave noise without affecting the wave-4 long structure.
-            from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
-                CDGridShallowWaterConfig,
-            )
-            _w6 = iter1009_dual_target_config(n)
-            config = _w6._replace(hyperdiff_coeff=_hyperdiff_cube(n))
+        if test_num in (5, 6):
+            # iter-31: cube W6 (Rossby-Haurwitz wave-4) 14-day blows up
+            # at day 9 with the iter1009 baseline (hyperdiff=0).
+            # iter-33: cube W5 (mountain) 15-day blows up at day 14.58
+            # for the same reason — both long-duration propagating-
+            # wave tests need biharmonic hyperdiffusion to damp short-
+            # wave noise that the W2-tuned iter1009 calibration does
+            # not.  Add ``hyperdiff_coeff=_hyperdiff_cube(n)`` for
+            # both W5 and W6.  W2 cube unchanged (5-day at iter-1
+            # calibration is stable).
+            _wcfg = iter1009_dual_target_config(n)
+            config = _wcfg._replace(hyperdiff_coeff=_hyperdiff_cube(n))
         else:
             config = iter1009_dual_target_config(n)
         model = FV3EdgeShallowWaterModel(grid, config)

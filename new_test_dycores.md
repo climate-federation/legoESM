@@ -99,3 +99,5 @@ Probed alternatives first:
 - iter1009 baseline + `_hyperdiff_cube(n)`: PASS day 14, mass_drift bit-clean.
 
 iter-32: AST regression sentinel `test_w6_cube_config_has_hyperdiff_override` pins the iter-31 fix.  Catches inadvertent revert that would re-blow-up cube W6 at day 9.  Verified quick mode (day-1) still PASS with hyperdiff: mass_drift=7.64e-16.  AST guard now 23 tests; 0.10 s.
+
+iter-33: **discovered analogous cube W5 15-day instability + closed**.  Cube W5 BLOWS UP at day 14.58 with iter1009 baseline (`metric 1177 > 1000`); latlon W5 15-day PASSES.  Same root cause + same fix: extend the iter-31 hyperdiff override to test_num==5 too.  Gate changed from `if test_num == 6:` to `if test_num in (5, 6):`.  Cube W5 15-day with hyperdiff: PASS, `mass_drift=9.71e-16, wall=19.8 s`.  Sentinel renamed to `test_w5_w6_cube_config_has_hyperdiff_override` and updated to match the new gate.  AST guard still 23 tests; 0.07 s.
