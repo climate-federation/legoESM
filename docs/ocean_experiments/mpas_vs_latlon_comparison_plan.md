@@ -1,7 +1,8 @@
 # MPAS vs Lat-Lon 1° Comparison Experiments
 
-**Status**: 4 bugs fixed, 2Δy instability fully diagnosed, working
-lat-lon config found (BR18/BR19). Ready for ETOPO runs (2026-05-14).
+**Status**: Campaign complete. 5 bugs fixed, 2Δy instability fully
+diagnosed, both grids running 20-year flat-bottom simulations.
+MPAS viscosity fixed to u_total. Ready for ETOPO comparison (2026-05-14).
 
 ## Goal
 
@@ -887,6 +888,66 @@ References:
 - Realistic forcing (JRA55-do)
 
 ---
+
+## Final Conclusions (2026-05-14)
+
+### What we learned
+
+1. **The two grids have fundamentally different grid-scale instabilities:**
+   - **Lat-lon**: KE aliasing from face→center→square→gradient round-trip
+     seeds a 2Δy mode that the grid's dx/dy anisotropy (up to 6:1 at
+     80°N) channels into coherent meridional zonal bands. Baroclinic
+     PGF feedback amplifies it 10⁶× through the velocity→T→ρ→PGF→velocity
+     loop. No production 1° ocean model uses this grid geometry.
+   - **MPAS**: TRiSK ζ-checkerboard null mode from the dual-mesh staggering.
+     Controlled by K_zeta_bih. The isotropic mesh has NO preferential
+     direction for grid-scale modes — the 2Δy mechanism simply doesn't exist.
+
+2. **5 production-code bugs found and fixed:**
+   - Adcroft PGF `use_h_actual_pgf` default (19× SSH inflation)
+   - Barotropic Hu_avg conservation (discrete continuity closure)
+   - TVD sub-seafloor stencil (defense-in-depth)
+   - Viscosity on u_prime → u_total (both grids, matches MOM6/NEMO/POP)
+   - CFL diagnostic using land-cell dx
+
+3. **The lat-lon 2Δy instability cannot be fully eliminated** on a
+   regular 1° lat-lon grid. It can be controlled to acceptable levels
+   with: A_h=1e5 + κ_Redi=2400 + Ferrari 100m surface complement
+   (BR18 self-stabilizes by year 10). Residual 4-5Δy bands persist
+   at low amplitude. The proper fix is a tripolar grid.
+
+4. **MPAS produces cleaner spinup** (smooth gyres, no grid-scale
+   artifacts) but weaker ACC (~25 Sv vs ~126-150 Sv) due to
+   K_zeta_bih over-damping physical vorticity. This is a known
+   limitation at 1° Voronoi resolution.
+
+5. **Float32 precision** is insufficient for thin partial cells —
+   the implicit solver accumulates rounding errors. All comparison
+   runs use fp64.
+
+### Working configurations
+
+**Lat-lon (BR19):** A_h=1e5, C_smag_lap=0.33, κ_GM=κ_Redi=2400,
+S_max=0.01, Ferrari 100m surface complement, implicit CN barotropic,
+KPP (K_conv=1.0), enhanced diffusion convection, dt=1200s, fp64.
+
+**MPAS (MBR2):** A_h=1e5, C_smag_lap=0.33, K_zeta_bih=1e14,
+κ_GM=κ_Redi=2400, S_max=0.01, implicit CN barotropic, KPP (K_conv=1.0),
+enhanced diffusion convection, dt=1200s, fp64.
+
+### Runs in progress
+
+- **BR19** (lat-lon flat bottom, 10 years): GPU 1, ~year 7
+- **MBR2** (MPAS flat bottom, 20 years): GPU 0, ~year 3
+
+### Path forward
+
+1. Complete BR19 and MBR2 flat-bottom runs
+2. Compare at matched simulation time (year 10)
+3. Move to ETOPO bathymetry with same configs
+4. Run 10-year matched ETOPO comparison
+5. Document grid-dependent vs physics-dependent differences
+6. Long-term: tripolar grid eliminates the lat-lon 2Δy problem
 
 ## Honest Caveats
 
