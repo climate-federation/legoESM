@@ -77,9 +77,14 @@ def _parse_args():
              "50 = 1° R1, default).",
     )
     p.add_argument(
-        "--mpas-resolution-km", type=float, default=110.0,
+        "--mpas-resolution-km", type=float, default=97.0,
         help="Cell-spacing target for the MPAS Voronoi mesh "
-             "(MPAS only; 110 km ≈ 1° at equator).",
+             "(MPAS only). Default 97 km gives 9686 cells, matching "
+             "the 50-col Mercator basin's 9900 cells within 2% — cross-"
+             "grid comparison is at equivalent mean cell area. "
+             "(Theoretical area-equivalent is ~82 km but the regional "
+             "Voronoi generator has quantization gaps below ~85 km; "
+             "97 km is the closest working value to 9900-cell match.)",
     )
     p.add_argument(
         "--days", type=float, default=10.0,
