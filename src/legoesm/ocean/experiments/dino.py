@@ -511,6 +511,83 @@ def dino_Q_sr_annual_mean(lat_deg, cfg: DINOConfig | None = None,
 
 
 # ---------------------------------------------------------------------
+# Phase 2C-extra — Surface tendency functions with Q_sr / non-solar
+# split (paper eqs 7-9). Grid-agnostic: operate on whatever shape the
+# surface T, S, T*, S*, Q_sr arrays have. The DINO module owns these
+# because the general restoring/wind APIs in legoESM use simpler forms
+# (timescale instead of heat-flux coefficient; no Q_sr split).
+# ---------------------------------------------------------------------
+
+def dino_top_layer_heat_flux_split(T_surface, T_star, Q_sr,
+                                    cfg: DINOConfig | None = None):
+    """Surface heat-flux split per paper eq 8.
+
+    Q_ns = A_Θ · (T* − T) − Q_sr     (non-solar; applied to top layer)
+    Q_sr = Q_sr                        (solar; distributed via Jerlov)
+
+    Both in W/m². The solar component is returned unchanged so the
+    caller can apply it to the column via legoESM's
+    ``shortwave_penetration`` module.
+
+    Parameters
+    ----------
+    T_surface : array
+        Top-layer temperature [°C].
+    T_star : array
+        Restoring target [°C], same shape as T_surface.
+    Q_sr : array
+        Surface solar flux [W/m²], same shape as T_surface.
+    cfg : DINOConfig, optional
+
+    Returns
+    -------
+    Q_ns : array
+    Q_sr : array (passed through unchanged)
+    """
+    if cfg is None:
+        cfg = DINOConfig()
+    Q_ns = cfg.A_theta * (T_star - T_surface) - Q_sr
+    return Q_ns, Q_sr
+
+
+def dino_top_layer_T_tendency(T_surface, T_star, Q_sr, dz_0,
+                               cfg: DINOConfig | None = None):
+    """Top-layer temperature tendency from non-solar heat flux (eq 8).
+
+      dT/dt|_top = (A_Θ · (T* − T) − Q_sr) / (ρ₀ · c_p · dz_0)
+
+    Solar penetration through the column is NOT included here — apply
+    via Jerlov-I shortwave penetration separately.
+    """
+    if cfg is None:
+        cfg = DINOConfig()
+    Q_ns, _ = dino_top_layer_heat_flux_split(T_surface, T_star, Q_sr, cfg)
+    return Q_ns / (cfg.rho_0 * cfg.c_p * dz_0)
+
+
+def dino_top_layer_S_tendency(S_surface, S_star, dz_0,
+                               cfg: DINOConfig | None = None):
+    """Top-layer salinity tendency from Haney-style restoring (eq 9).
+
+      dS/dt|_top = A_S · (S* − S) / (ρ₀ · dz_0)
+    """
+    if cfg is None:
+        cfg = DINOConfig()
+    return cfg.A_S * (S_star - S_surface) / (cfg.rho_0 * dz_0)
+
+
+def dino_top_layer_u_tendency(tau_u, dz_0,
+                               cfg: DINOConfig | None = None):
+    """Top-layer zonal-velocity tendency from wind stress (eq 7).
+
+      dU/dt|_top = τ_u / (ρ₀ · dz_0)
+    """
+    if cfg is None:
+        cfg = DINOConfig()
+    return tau_u / (cfg.rho_0 * dz_0)
+
+
+# ---------------------------------------------------------------------
 # Phase 2D — Initial conditions (Appendix D; ported from
 # vopikamm/DINO@v0.2.0 MY_SRC/usrdef_istate.F90)
 #
