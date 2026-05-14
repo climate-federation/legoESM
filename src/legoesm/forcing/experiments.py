@@ -126,6 +126,10 @@ _GHG_TABLES: dict[str, dict[int, tuple[float, float, float]]] = {
     # mandates the same time-varying CO2/CH4/N2O as the historical run
     # (only the SST/SIC are observed rather than coupled).
     "amip": _GHG_HISTORICAL,
+    # AIMIP also shares historical GHG (2015-2020 era) — same physical
+    # forcing trajectory as AMIP, just with ERA5 ICs + trained physics
+    # parameters instead of fixed defaults.
+    "aimip": _GHG_HISTORICAL,
 }
 
 
@@ -342,6 +346,28 @@ EXPERIMENT_TEMPLATES: dict[str, ExperimentTemplate] = {
         base_co2_ppmv=336.78,
         base_ch4_ppbv=1550.0,
         base_n2o_ppbv=301.0,
+    ),
+    "aimip": ExperimentTemplate(
+        name="aimip",
+        description=(
+            "AIMIP (AI Model Intercomparison Project) experiment: ERA5 "
+            "initial conditions + RRTMGP radiation + ALL parameterized "
+            "physics parameters trained on 5-yr historical ERA5 "
+            "(2015-2019) and validated on the test year (2020).  Sea-"
+            "ice + skin-temperature come from ERA5 directly (no PCMDI "
+            "SST file).  GHGs follow the CMIP6 historical trajectory "
+            "(transient) just like AMIP; the 2015-2020 mean "
+            "(~410 ppm CO2, ~1880 ppb CH4, ~333 ppb N2O) is the "
+            "natural default."
+        ),
+        start_year=2015,
+        end_year=2020,
+        parent_experiment="historical",
+        forcing_type="transient",
+        variant_label="r1i1p1f1",
+        base_co2_ppmv=401.0,
+        base_ch4_ppbv=1877.0,
+        base_n2o_ppbv=328.9,
     ),
     "1pctCO2": ExperimentTemplate(
         name="1pctCO2",
