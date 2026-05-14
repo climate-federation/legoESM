@@ -43,6 +43,20 @@ So the iter-12..17 NH bundle (vector_halo + a2b_ord4 + d_con_cv + dynamic_exner 
 
 **iter-12..17 doc claims need caveat**: those measurements were at quick mode (5 min); full-mode behaviour DOES NOT HOLD for TC2 cube.
 
+## State after iter-1..130 (compressed at iter-130)
+
+**iter-121..130 highlights — NH matrix completion + iter-118 verification phase**:
+
+- **iter-123 TC3 cube ALSO BLEW UP at full mode**: NH cube matrix re-run completed.  TC3 cube FAIL at step 2250 (day 0.01, 8.3 min sim time) — `max|w|=1271 > 1000 threshold`.  TC3 fails MUCH earlier than TC2 (step 8500, day 0.13).  Both confirm iter-12..17 NH bundle insufficient for full-mode cube stability.
+- **iter-124 iter-118 fix VERIFIED**: ran `--quick` NH matrix.  TC1 cube quick: |w|=0.0142 m/s — matches iter-7 doc claim of 0.014.  `mean_timeseries.csv` now 22 lines (header + 21 data rows) with NO `_blowup_info` column.  iter-118 csv-fix operational for new matrix runs.
+- **iter-125 TC2 cube quick parity confirmed**: |w|=0.3177 m/s — matches iter-7 doc claim of 0.32.  cube/ico/spec parity holds at quick mode.
+- **iter-121 functional test**: `test_iter118_save_timeseries_csv_skips_blowup_info` in `tests/atmosphere/test_atmosphere_matrix_filter.py` — pairs with iter-119 AST sentinel to cover both source-code preservation + runtime behaviour.
+- **iter-126/127/128/129 TC3 quick run STUCK**: quick NH matrix has been on TC3 cube for 24+ min (expected 3-5 min).  Process is sleeping on I/O.  Likely writing the multi-GB `snapshots_native.npz`.  Investigation iter-131+ once it finishes (or kill+retry).
+
+**Cumulative sentinel coverage at iter-130**: **31 AST + 14 numerical + 1 c_sw + 1 functional = 47 sentinels**.
+
+**Active state**: TC3 cube quick-mode result is the only unrefreshed data point.  Once it completes, all 3 NH cube tests will have BOTH quick-mode (cube/ico/spec parity confirmed) AND full-mode (TC1 PASS, TC2 + TC3 BLOWUP) measurements.
+
 ## State after iter-1..120 (compressed at iter-120)
 
 **iter-111..120 highlights — investigation phase post-TC2-blowup discovery**:
