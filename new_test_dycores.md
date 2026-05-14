@@ -108,6 +108,15 @@ Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV /
   - hord=10:  L2=1.009, Linf=0.937.
   - hord=10 + xppm_bdy: L2=**0.931**, Linf=**0.863** (best).
   Mass drift unchanged at 3.64e-8 (anchored).  Cross-grid L2 ratio cube/latlon: 45× → 38× (still structural but improved).  iter-26's hord=12-best finding was at 1-day where the accumulated dissipation hasn't built up; at 12-day the slightly weaker hord=10 limiter retains more bell amplitude.
+- iter-59: **cube CB L2 0.865 (was 0.931, additional 7.0 % improvement)** via N=6 temporal substepping inside the matrix CB cube step_fn.  Probe `_probe_iter59_substep.py` 12-day cube CB at fixed outer dt=1800s:
+  - n_sub=1 (iter-58 baseline):  L2=0.931, Linf=0.863
+  - n_sub=2: L2=0.891 (−4.3 %)
+  - n_sub=3: L2=0.881 (−5.3 %)
+  - n_sub=4: L2=0.876 (−5.9 %)
+  - n_sub=6: L2=**0.865** (−7.0 %) ← matrix now uses
+  - n_sub=8: L2=0.856 (−8.1 %)
+  - n_sub=12: L2=0.851 (−8.6 %)
+  Root cause: the cube CB step used single-stage forward-Euler PPM transport (O(dt) phase error) while the latlon CB path uses SSP-RK3 (O(dt³)).  At outer dt=1800s temporal-truncation was contributing ~7 % to the 12-day error.  n_sub=6 (dt_sub=300s) closes most of it; saturation past n_sub=6 is shallow (~1.5 % per doubling).  Matrix wall: 3.2s → 5.8s (1.8× — not 6× due to JIT amortization).  Mass drift improved 28× (3.6e-8 → 1.3e-9, anchored fixer fires per-substep).  Cross-grid L2 ratio cube/latlon: 38× → 35× (still structural, dominated by limiter dissipation along corner-rotated trajectory).  hord-sweep at n_sub=3 confirmed hord=10 still optimal.
 
 ## Iter-51+ queued
 

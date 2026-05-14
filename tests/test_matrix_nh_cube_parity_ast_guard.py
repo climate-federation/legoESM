@@ -663,3 +663,51 @@ def test_sw_cube_uses_iter1009_dual_target_config():
         "the inlined config to ``damp_v=0.030`` / "
         "``div_damp=8*_div_damp_cube(n)``."
     )
+
+
+def test_iter59_cb_cube_uses_n_sub_substepping():
+    """iter-59 sentinel: matrix runner CB cube branch uses N=6 temporal
+    substepping of ``transport_step`` inside the per-outer-step
+    ``step_fn`` (dt_outer=1800s split into 6 sub-steps of dt_sub=300s).
+
+    Probe ``_probe_iter59_substep.py`` measured cube CB 12-day L2 0.931
+    (n_sub=1) -> 0.865 (n_sub=6), a 7.0 % improvement on top of iter-58.
+    Root cause: cube CB previously did single-stage forward-Euler PPM
+    transport (O(dt) phase error) while latlon CB uses SSP-RK3
+    (O(dt^3)).  At outer dt=1800s temporal-truncation was contributing
+    ~7 % to the 12-day error.
+
+    A refactor that drops the substep scan (or reduces n_sub below 4)
+    would silently lose the iter-59 improvement.  We anchor on the
+    integer-literal assignment to the dispatch-local
+    ``_CB_CUBE_N_SUB`` constant, and on the ``jax.lax.scan`` call that
+    consumes it.  Whitespace-tolerant so trivial reformatting does
+    not fire.
+    """
+    src = _runner_source()
+    # Anchor 1: a numeric assignment of the constant within the
+    # cube CB branch.  Allow integer >=4 to give a guardrail without
+    # over-pinning (probe shows n_sub=4 still beats n_sub=1 by 5.9 %).
+    m = re.search(r"_CB_CUBE_N_SUB\s*=\s*(\d+)", src)
+    assert m is not None, (
+        "iter-59 regression: ``_CB_CUBE_N_SUB`` constant no longer "
+        "present in matrix runner.  Re-introduce N=6 temporal "
+        "substepping in the CB cube step_fn."
+    )
+    n_sub = int(m.group(1))
+    assert n_sub >= 4, (
+        f"iter-59 regression: ``_CB_CUBE_N_SUB`` reduced to {n_sub}; "
+        "probe shows n_sub<4 loses >2 % of the iter-59 gain.  Pin >=4 "
+        "(matrix uses 6)."
+    )
+    # Anchor 2: the substep scan body must call transport_step.
+    assert re.search(
+        r"jax\.lax\.scan\(\s*_body\s*,\s*s\.h\s*,\s*None\s*,\s*"
+        r"length\s*=\s*_CB_CUBE_N_SUB\s*\)",
+        src,
+    ), (
+        "iter-59 regression: matrix CB cube step_fn no longer "
+        "calls ``jax.lax.scan(_body, s.h, None, length=_CB_CUBE_N_SUB)``. "
+        "The substep scan is what reduces the temporal-truncation "
+        "error from O(dt) toward the spatial-limiter plateau."
+    )

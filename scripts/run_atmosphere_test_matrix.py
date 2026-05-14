@@ -2599,12 +2599,35 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
         # CB structural gap (per iter-51 resolution-independence
         # finding) — the limiter family choice tunes within that
         # structural plateau.
+        #
+        # iter-59: temporal substepping — split dt=1800s into
+        # _CB_CUBE_N_SUB=6 sub-steps (dt_sub=300s) per outer step.
+        # The cube CB path used single-stage forward-Euler PPM
+        # transport (O(dt) phase error) while the latlon CB path
+        # uses SSP-RK3 (O(dt^3)).  At outer dt=1800s the temporal
+        # truncation error contributes a measurable share of the
+        # cube 12-day L2 gap.  n_sub=6 closes ~7% more L2 on top
+        # of iter-58: cube CB 12-day L2 0.931 → 0.865 (probe
+        # _probe_iter59_substep.py).  Linf flat at 0.867.  Mass
+        # drift unchanged (3.5e-8 vs 3.6e-8).  Saturation slope
+        # is shallow past n_sub=6 (n_sub=12 only buys another
+        # 1.6%) so we stop here.  Cube CB wall time grows ~6×
+        # (~3.2s → ~20s); still tiny vs matrix budget.
+        _CB_CUBE_N_SUB = 6
+
         @jax.jit
         def step_fn(s, dt_):
-            h_new = transport_step(s.h, ut, vt, dt_, cdgrid,
-                                   mass_target=_mass_target,
-                                   hord=10,
-                                   apply_fortran_xppm_boundary=True)
+            dt_sub = dt_ / _CB_CUBE_N_SUB
+
+            def _body(h, _):
+                return transport_step(
+                    h, ut, vt, dt_sub, cdgrid,
+                    mass_target=_mass_target,
+                    hord=10,
+                    apply_fortran_xppm_boundary=True), None
+
+            h_new, _ = jax.lax.scan(_body, s.h, None,
+                                    length=_CB_CUBE_N_SUB)
             return s._replace(h=h_new)
 
         def check_fn(s):
