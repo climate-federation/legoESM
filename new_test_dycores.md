@@ -43,6 +43,18 @@ So the iter-12..17 NH bundle (vector_halo + a2b_ord4 + d_con_cv + dynamic_exner 
 
 **iter-12..17 doc claims need caveat**: those measurements were at quick mode (5 min); full-mode behaviour DOES NOT HOLD for TC2 cube.
 
+## State after iter-1..150 (compressed at iter-150)
+
+**iter-141..150 highlights — TC2 hypothesis-2 probe wait phase**:
+
+- **iter-138 hypothesis-2 probe still running**: TC2 cube with 16× hyperdiff, --days 0.15.  14+ min wall at iter-150 (out of estimated 67 min total).  Result iter-155+ likely.
+- **iter-141..149**: most iterations were verification + waiting (no commits).  Sentinels remain 47.
+
+**Active state**: probe in dynamics phase.  No code/doc changes pending.  Once probe completes, iter-151+ will:
+  1. Read TC2 probe result (PASS = hypothesis 2 confirmed; FAIL = need hypothesis 3).
+  2. **REVERT** the temporary 16× hyperdiff edit in matrix runner if probe shows fix doesn't work, OR if probe shows it works, keep it + add sentinel.
+  3. Either way: update doc with findings.
+
 ## State after iter-1..140 (compressed at iter-140)
 
 **iter-131..140 highlights — TC2/TC3 cube blowup investigation phase**:
