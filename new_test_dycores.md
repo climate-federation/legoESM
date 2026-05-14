@@ -43,6 +43,16 @@ So the iter-12..17 NH bundle (vector_halo + a2b_ord4 + d_con_cv + dynamic_exner 
 
 **iter-12..17 doc claims need caveat**: those measurements were at quick mode (5 min); full-mode behaviour DOES NOT HOLD for TC2 cube.
 
+## State after iter-1..160 (compressed at iter-160)
+
+**iter-151..160 highlights — TC2 probe wait phase**:
+
+- iter-151..159: TC2 probe continues running.  Wall: 14 min (iter-151) → 18 min (iter-160).  Estimated total: ~67 min.  Probe is in dynamics phase; no file I/O until completion.
+- iter-156: verified iter-71 sweep doc intact in matrix runner.
+- iter-159: full sentinel run 55/55 PASS (31 AST + 24 matrix filter).
+
+**Active state**: TC2 probe continues.  Result expected iter-165+.  Stop hook fires me every ~30s during the wait; each iter only adds a tiny audit unless probe completes.
+
 ## State after iter-1..150 (compressed at iter-150)
 
 **iter-141..150 highlights — TC2 hypothesis-2 probe wait phase**:
