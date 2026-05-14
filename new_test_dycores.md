@@ -203,9 +203,15 @@ Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV /
 - iter-70: W5 15-day apples-to-apples — all 4 grids machine-precision mass conservation.  See top compressed block.
 - iter-71..80: see compressed block at the top of this doc.
 
-## Iter-51+ queued
+## Iter-91+ queued
 
-- C72 resolution sweep (extends iter-46's C36+C48 coverage).
-- Visual artifact inspection of cube W2/W5/W6 snapshots with vs without hyperdiff (reviewer item iter-45).
-- Cube CB structural — if a tracer-only del-4 operator is feasible without breaking transport_step's API.
-- **iter-64**: matrix TC1 cube measured |w|_max=0.0400 m/s (8× better than 0.327 baseline, but the iter-7 doc claim was 0.014 m/s = 23× — current matrix is ~3× higher than that claim).  iter-63 audit comparing matrix runner TC1 config vs `make_fv3_faithful_nh_config` factory revealed matrix is missing `nord_v=1` (factory sets to 1; matrix uses default 2 = del-6 instead of del-4 NH velocity hyperdiff).  Other factory-only flags (`use_fv3_cross_face_du_proj`, `use_fv3_sponge_damp_v/w`) are no-ops without `use_duogrid=True` (matrix doesn't set duogrid).  iter-64 will probe `nord_v=1` for the matrix TC1 cube branch to test whether it closes the 0.040 → 0.014 m/s gap.
+Open items requiring substantial compute (deferred):
+- **PE full-mode re-run** (iter-88 audit): all 13 PE cases × 4 grids currently at quick mode (10-30 % of spec full duration).  Full-mode runs of held_suarez (200d), AMIP (365d), held_suarez_topo (200d) are multi-hour each.  Cross-grid full-mode parity TBD.
+- **NH ico+spec full-mode re-run** (iter-81/89): TC1/TC2/TC3 cached at quick mode for ico/spec.  Cube currently refreshing to full mode (NH matrix in progress).  For true 3-grid full-mode comparison, ico+spec also need to re-run at TC1=3hr/TC2=6hr/TC3=2hr each.
+- **rotated_baroclinic 10-day full-mode** (iter-87): currently all 4 grids at 2-day quick mode where instability hasn't grown.  Need 10-day full to assess true rotated-pole cube parity vs ico (the apparent 39 % gap may be a quick-mode artifact).
+- **C72 resolution sweep** (iter-46 extension): probe whether cube SW/CB findings hold at higher resolution.
+
+Closed items (formerly queued):
+- ~~iter-64 nord_v=1 TC1 probe~~ — **resolved by iter-81** as duration-mismatch artifact, not config issue.
+- ~~iter-45 visual artifact inspection~~ — addressed by iter-58/59 numerical work; visual would require additional plotting work.
+- ~~Cube CB structural tracer del-4 op~~ — iter-58/59 cumulative 20.8 % L2 improvement makes this no longer the highest-value action.
