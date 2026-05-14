@@ -4762,6 +4762,13 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 # flags are core enablers in ``make_fv3_faithful_nh_config``
                 # but the matrix runner had remained on the legacy
                 # scalar-halo path.
+                #
+                # ⚠️ iter-114 clarification: the 22x baseline gap was at
+                # quick-mode 0.5 hr.  At full 3-hr cube TC1 measures
+                # |w|=0.040 m/s (iter-81), still 3x worse than ico/spec
+                # quick-mode but apples-to-oranges (different durations).
+                # ico+spec at full 3-hr would need to be measured for
+                # true cube/ico TC1 full-mode parity.
                 use_fv3_vector_halo_uv=True,
                 use_fv3_a2b_ord4_vector_uv=True,
                 # new_test_dycores iter-12: enable FV3 iter-320 c_v
@@ -4911,6 +4918,9 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 # ico 10.24 (~2.2x gap).  TC3 uses Kessler microphysics
                 # + squall-line dynamics; smallest expected improvement
                 # of the three NH cases since the cube's |w| is
+                # ⚠️ iter-114 clarification: 23.07 baseline + 7.36
+                # post-fix were measured at quick-mode 4 min.  Full 2-hr
+                # behaviour TBD (NH matrix re-run in progress).
                 # dominated by physical convective updrafts, not
                 # discretization noise.
                 use_fv3_vector_halo_uv=True,
