@@ -92,6 +92,7 @@ Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV /
   - hyp=2×:   v_ll_Linf = 0.38 m/s (vs C36 0.51) — best on both resolutions.
   - hyp=4×:   v_ll_Linf = 0.35 m/s (diminishing returns, same trend as C36).
   iter-44's 2× choice generalizes — same optimum across C36 + C48.  Resolution-dependent recalibration not needed.
+- iter-47: AMIP cube 30-day quick verification with cumulative iter-1..46 changes.  Result: PASS, mass_drift=**4.18e-11**, wall=456 s.  Bit-identical mass drift to pre-iter-22 cached (4.18e-11) — the iter-22 PE factory bundle propagation to AMIP cube didn't perturb the 30-day climate-equilibrium run.  Closes the last queued long-run verification.
 
 ## Iter-41+ queued (status post iter-41)
 
