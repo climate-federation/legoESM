@@ -4847,9 +4847,16 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             #      explicit, our docstring "0.1 long runs" so 0.30
             #      gives 3x the implicit weighting).  Note: this
             #      INVERTS iter-104's initial hypothesis direction.
-            #   4. FV3 oracle: compare against test_case (mountain) at
-            #      /home/gentine/Documents/Code/FV3/atmos_cubed_sphere-
-            #      symmetryclean/ for n_split / d_con / delt_max settings.
+            #   4. FV3 oracle (iter-136 partial audit): FV3 control
+            #      config for non-hydrostatic mountain test is
+            #      `n_split=10` (see test_cases.F90:2202, :5185).  Our
+            #      n_acoustic_substeps=20 is already 2x FV3's
+            #      recommendation — so hypothesis 1 (increase substeps)
+            #      is unlikely to be the fix.  d_con/delt_max namelist
+            #      defaults not yet found in FV3 oracle; FV3 source
+            #      defaults `d_con=0` + `delt_max=1.0`, matching ours.
+            #      Mountain-wave-breaking + insufficient damping
+            #      remains the leading hypothesis for full-mode blowup.
             # See new_test_dycores.md iter-102/103 for full discussion.
             #
             # Scale hyperdiffusion for 20x smaller Earth: coeff ∝ dx⁴.
