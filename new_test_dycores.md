@@ -9,7 +9,7 @@ Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV /
 **iter-71..80 audit highlights**:
 
 - **PE matrix audit (iter-73)**: 13/13 cases × 4 grids = 52 tests PASS.  Cube max|v| parity vs ico in **0.95-1.15×** on most PE tests (held_suarez, gravity_wave_3_1, inertio_gravity_3_2, rossby_haurwitz_6_0, baroclinic).  2 cube outliers flagged for iter-74+:
-  - `rotated_baroclinic`: cube 31.8 vs ico 51.9, spec 47.1 m/s (cube 39 % LOWER — possibly over-damped on rotated-pole IC).
+  - `rotated_baroclinic`: cube 31.8 vs ico 51.9, spec 47.1 m/s (cube 39 % LOWER — possibly over-damped on rotated-pole IC).  **iter-87 caveat**: this comparison is at **2-day quick mode** for ALL 4 grids; matrix spec full mode is **10 days** (instability development).  At 2 days the baroclinic perturbation hasn't grown enough to differ meaningfully from `rotated_steady` (which shows the same max|v| values across all 4 grids — see results files).  Quick-mode max|v| is dominated by the steady-state rotated jet, not the instability.  To audit the cube-vs-ico parity claim at the matrix-spec full duration, all 4 grids need to be re-run at 10 days (deferred until NH matrix run completes).
   - `rest_state_topo`: cube 1.3 vs ico 0.1 m/s (analytic exact = 0 motion; cube has 13× residual — likely panel-edge metric errors interacting with topo).
 - **PE gravity_wave_3_1 (iter-72)**: refreshed cross-grid at 1-day apples-to-apples.  cube 22.4 / ico 19.7 / spec 20.3 / latlon 31.0 m/s.  Cube/ico=**1.14×**, cube/spec=**1.10×** — confirms iter-18's −18.5 % gain stable.
 - **SW W2 hyperdiff sweep (iter-71)**: probed mult 1.0/1.5/2.0/2.5/3.0 on cube W2 5-day.  Optimum near 2.5× (L2=4.42e-4) but only 3.5 % below iter-44's 2.0× (4.58e-4) — sub-noise-floor.  Kept 2.0×.
