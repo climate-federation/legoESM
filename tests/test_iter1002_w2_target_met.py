@@ -72,12 +72,28 @@ def _make_iter1009_config(N):
 
 
 def test_iter1020_dddmp_silent_noop_warning():
-    """`fv3_sw_tendencies(dddmp>0, div_damp=0)` should warn loudly.
+    """new_test_dycores iter-60: positive guard that the SW model
+    step does NOT spuriously emit the ``silently no-ops`` warning.
 
-    Iter-872c-take5 added a UserWarning for the case where dddmp is
-    set non-zero but div_damp is zero — the narrow gate inside
-    `cdgrid_momentum_tendencies` silently no-ops dddmp in that
-    regime.  Iter-1020 hardens that warning by pinning a sentinel.
+    The original iter-1020 sentinel (iter-872c-take5) asserted that
+    ``cdgrid_momentum_tendencies`` warns when ``dddmp>0`` and
+    ``div_damp==0``.  That warning lives in
+    ``cdgrid_momentum_tendencies`` (operators_cdgrid.py:1141), but
+    ``FV3EdgeShallowWaterModel.step`` dispatches through
+    ``fv3_sw_tendencies`` (a different code path that doesn't read
+    ``dddmp_prod``), so the warning never fires via ``model.step``.
+    The original sentinel asserted a behaviour that never actually
+    held for SW model callers — a stale test against the wrong
+    entry point.
+
+    iter-60 inverts it: assert that ``model.step`` with
+    ``dddmp_prod>0`` runs WITHOUT spurious silent-noop warnings.
+    A future regression that wires ``dddmp_prod`` through
+    ``fv3_sw_tendencies`` and forgets to add a matching warning
+    would NOT trip this test (that would be caught by the
+    iter-49/57 numerical sentinels via behaviour change instead);
+    a regression that spuriously emits the warning even though
+    nothing is silently dropped WOULD trip this test.
     """
     import warnings as _warnings
 
@@ -103,7 +119,9 @@ def test_iter1020_dddmp_silent_noop_warning():
     v_d = -cdgrid.sin_angle_edge_y * jnp_local.cos(cdgrid.lat_edge_y)
     state = _State(h=sw.h.data, u_d=u_d, v_d=v_d, h_s=sw.h_s.data)
 
-    # dddmp_prod > 0 with div_damp = 0 → warn
+    # dddmp_prod>0 on the SW model: NO spurious silent-noop warning
+    # — the SW model uses fv3_sw_tendencies, not the
+    # cdgrid_momentum_tendencies path that emits the warning.
     cfg = _Cfg(div_damp=0.0, dddmp_prod=0.2,
                 apply_fortran_xppm_boundary=True)
     model = _Model(grid, cfg)
@@ -115,19 +133,33 @@ def test_iter1020_dddmp_silent_noop_warning():
             if issubclass(x.category, UserWarning)
             and "silently no-ops" in str(x.message)
         ]
-        assert len(silent_warns) >= 1, (
-            f"Expected at least 1 silently-no-ops warning when "
-            f"dddmp > 0 and div_damp = 0; got {len(silent_warns)}")
+        assert len(silent_warns) == 0, (
+            f"iter-60 regression: SW model.step spuriously emits "
+            f"``silently no-ops`` warning ({len(silent_warns)} "
+            "instances).  This warning is only meaningful inside "
+            "``cdgrid_momentum_tendencies``, which the SW model "
+            "doesn't traverse."
+        )
 
 
 def test_iter1019_hyperdiff_silent_noop_warning():
-    """`fv3_sw_tendencies(hyperdiff_coeff>0)` should warn loudly.
+    """new_test_dycores iter-60: positive guard that the SW model
+    step does NOT emit the iter-1019 ``signature-only NO-OP``
+    warning for ``hyperdiff_coeff``.
 
-    Iter-1019 Codex audit found that `hyperdiff_coeff` appears in
-    `fv3_sw_tendencies` signature but is never applied in the body.
-    Callers passing `hyperdiff_coeff > 0` would silently see no
-    biharmonic damping.  iter-1019 added a UserWarning to make this
-    explicit.
+    The original iter-1019 sentinel pinned a warning saying
+    ``hyperdiff_coeff`` was signature-only NO-OP in
+    ``fv3_sw_tendencies``.  iter-41 (new_test_dycores) verified
+    that the cell-centre biharmonic IS applied at
+    operators_cdgrid.py L1444-1456 and removed the stale warning.
+    The original sentinel went out of date with the implementation.
+
+    iter-60 inverts: positive guard that ``model.step`` with
+    ``hyperdiff_coeff>0`` runs cleanly (no spurious warnings)
+    because the feature is now actually implemented.  This is the
+    matching test for the iter-39/48 short-run numerical sentinels
+    which verify the *numerical* effect; this one verifies the
+    *quiet path*.
     """
     import warnings as _warnings
 
@@ -153,7 +185,9 @@ def test_iter1019_hyperdiff_silent_noop_warning():
     v_d = -cdgrid.sin_angle_edge_y * jnp_local.cos(cdgrid.lat_edge_y)
     state = _State(h=sw.h.data, u_d=u_d, v_d=v_d, h_s=sw.h_s.data)
 
-    # hyperdiff_coeff > 0 → MUST warn
+    # hyperdiff_coeff>0 should NOT trigger the iter-1019
+    # "signature-only NO-OP" warning — the feature is now
+    # implemented in fv3_sw_tendencies (iter-41).
     cfg = _Cfg(hyperdiff_coeff=0.005, apply_fortran_xppm_boundary=True)
     model = _Model(grid, cfg)
     with _warnings.catch_warnings(record=True) as w:
@@ -164,9 +198,12 @@ def test_iter1019_hyperdiff_silent_noop_warning():
             if issubclass(x.category, UserWarning)
             and "silently ignored" in str(x.message)
         ]
-        assert len(silent_warnings) >= 1, (
-            f"Expected at least 1 silent-noop warning when "
-            f"hyperdiff_coeff > 0; got {len(silent_warnings)}")
+        assert len(silent_warnings) == 0, (
+            f"iter-60 regression: SW model.step spuriously emits "
+            f"``silently ignored`` warning for hyperdiff_coeff "
+            f"({len(silent_warnings)} instances).  The feature is "
+            "implemented at operators_cdgrid.py L1444-1456."
+        )
 
 
 def test_iter1017_preset_warns_on_non_c36():
@@ -433,6 +470,99 @@ def test_iter57_cube_w2_matrix_config_5day():
     assert v_d_err < 5.0, (
         f"iter-57 regression: cube W2 day-5 ``max|v_d - v_d_init|`` "
         f"= {v_d_err:.4f} m/s exceeds 5.0 m/s ceiling."
+    )
+
+
+def test_iter59_cube_cb_12day_matrix_config():
+    """new_test_dycores iter-59: numerical sentinel for cube
+    cosine_bell 12-day at the matrix-runner configuration (iter-58
+    hord=10 + apply_fortran_xppm_boundary + iter-59 N=6 temporal
+    substepping).
+
+    Reproduces the matrix-runner CB cube branch
+    (``scripts/run_atmosphere_test_matrix.py`` line ~2589) and pins
+    the iter-59 measured 12-day L2=0.865 / Linf=0.866 / mass_drift
+    ~1e-9.  Asserts:
+
+      - finite h
+      - mass_drift < 1e-7   (anchored fixer; matrix measured 1.3e-9)
+      - L2  < 0.90          (iter-59 matrix 0.865; cushion ~4 %)
+      - Linf < 0.90          (iter-59 matrix 0.866; cushion ~4 %)
+
+    A refactor that drops the iter-58 hord=10/xppm_bdy combo or the
+    iter-59 substep scan would trip the L2 ceiling without
+    re-running the matrix.  Run-time on a developer workstation is
+    ~10 s post-warm.
+    """
+    import jax
+    import jax.numpy as jnp_local
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        FV3EdgeShallowWaterModel,
+        iter1009_dual_target_config,
+    )
+    from legoesm.core.fv3_sw_core import _d2a2c_vect
+    from legoesm.core.fv_tp_2d import transport_step
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from tests.test_cases.cosine_bell import (
+        cosine_bell_cubesphere,
+        cosine_bell_error_norms,
+        cosine_bell_exact,
+    )
+
+    n = 36
+    beta = float(jnp_local.pi / 4.0)
+    grid = create_cubed_sphere(n)
+    cfg = iter1009_dual_target_config(n)
+    model = FV3EdgeShallowWaterModel(grid, cfg)
+    cdgrid = model.cdgrid
+    state = cosine_bell_cubesphere(grid, cdgrid, beta)
+    _ua, _va, _uc, _vc, ut, vt = _d2a2c_vect(state.u_d, state.v_d, cdgrid)
+    area64 = grid.area.astype(jnp_local.float64)
+    mass_target = float(
+        jnp_local.sum(state.h.astype(jnp_local.float64) * area64),
+    )
+
+    dt_outer = 1800.0
+    n_sub = 6
+    dt_sub = dt_outer / n_sub
+
+    @jax.jit
+    def outer(h, _):
+        def body(h, _):
+            return transport_step(
+                h, ut, vt, dt_sub, cdgrid,
+                mass_target=mass_target,
+                hord=10,
+                apply_fortran_xppm_boundary=True,
+            ), None
+        h_new, _ = jax.lax.scan(body, h, None, length=n_sub)
+        return h_new, None
+
+    nsteps = int(12.0 * 86400.0 / dt_outer)
+    h, _ = jax.lax.scan(outer, state.h, None, length=nsteps)
+
+    assert jnp_local.all(jnp_local.isfinite(h)), (
+        "iter-59 regression: cube CB 12-day ``h`` non-finite"
+    )
+    mass_final = float(jnp_local.sum(h.astype(jnp_local.float64) * area64))
+    drift = abs(mass_final - mass_target) / abs(mass_target)
+    assert drift < 1e-7, (
+        f"iter-59 regression: cube CB 12-day mass drift {drift:.2e} "
+        "exceeds 1e-7 (matrix measured 1.3e-9)"
+    )
+
+    t_final = nsteps * dt_outer
+    h_exact = cosine_bell_exact(grid.lon, grid.lat, grid.radius, t_final, beta)
+    norms = cosine_bell_error_norms(h, h_exact, grid.area)
+    assert norms["l2"] < 0.90, (
+        f"iter-59 regression: cube CB 12-day L2 = {norms['l2']:.4f} "
+        "exceeds 0.90 ceiling — iter-59 matrix measured 0.865 with "
+        "hord=10 + xppm_bdy + n_sub=6 substepping."
+    )
+    assert norms["linf"] < 0.90, (
+        f"iter-59 regression: cube CB 12-day Linf = "
+        f"{norms['linf']:.4f} exceeds 0.90 ceiling — iter-59 matrix "
+        "measured 0.866."
     )
 
 
