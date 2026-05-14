@@ -3662,6 +3662,14 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             heat_source_del2_iters=2)
         model = PrimitiveEquationModel(grid, sigma, config)
         if _rotated:
+            # new_test_dycores iter-87 audit caveat: the cube rotated_baroclinic
+            # max|v|=31.8 m/s vs ico 51.9, spec 47.1 m/s (cube 39% LOWER)
+            # measurement is at quick mode (2 days), where the baroclinic
+            # instability hasn't grown enough to differ from rotated_steady.
+            # Same identical-result artifact between rotated_baroclinic and
+            # rotated_steady at 2 days.  Full-mode 10-day re-run is required
+            # to assess true rotated-pole cube parity vs ico.  Queued for
+            # iter-91+ investigation (significant compute).
             from tests.test_cases.dcmip2008.jablonowski_rotated import (
                 rotated_baroclinic_init)
             state = rotated_baroclinic_init(
