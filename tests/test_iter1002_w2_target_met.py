@@ -326,6 +326,92 @@ def test_iter39_cube_w6_short_run_stable_with_hyperdiff():
     )
 
 
+def test_iter48_cube_w5_short_run_stable_with_hyperdiff():
+    """new_test_dycores iter-48: numerical regression test for the
+    iter-33 cube W5 stability fix (extending iter-39's W6 sentinel).
+
+    Cube W5 (mountain) 15-day BLEW UP at day 14.58 pre-iter-33.
+    iter-33 added ``hyperdiff_coeff=_hyperdiff_cube(n)``; iter-44
+    bumped to 2x.  This test runs cube W5 for 576 steps (2 days at
+    dt=300 s) with the 2x hyperdiff override and asserts finite +
+    mass-clean + max|u_d| < 200 m/s (matrix BLOWUP threshold is
+    1000 m/s).
+    """
+    import jax
+    import jax.numpy as jnp_local
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        FV3EdgeShallowWaterModel,
+        FV3EdgeShallowWaterState,
+        iter1009_dual_target_config,
+    )
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.cubed_sphere_cdgrid import (
+        create_cubed_sphere_cdgrid,
+    )
+    from tests.test_cases.williamson import williamson_test5
+    import warnings
+
+    n = 36
+    grid = create_cubed_sphere(n)
+    cdgrid = create_cubed_sphere_cdgrid(grid)
+
+    def _hyperdiff_cube_local(nn, ref_n=48, ref_coeff=1e16):
+        return ref_coeff * (ref_n / nn) ** 4
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        cfg = iter1009_dual_target_config(
+            n, hyperdiff_coeff=2.0 * _hyperdiff_cube_local(n),
+        )
+    model = FV3EdgeShallowWaterModel(grid, cfg)
+
+    sw = williamson_test5(grid)
+    u0 = 20.0  # W5 standard
+    u_d = cdgrid.cos_angle_edge_x * (
+        u0 * jnp_local.cos(cdgrid.lat_edge_x))
+    v_d = -cdgrid.sin_angle_edge_y * (
+        u0 * jnp_local.cos(cdgrid.lat_edge_y))
+    state = FV3EdgeShallowWaterState(
+        h=sw.h.data, u_d=u_d, v_d=v_d, h_s=sw.h_s.data,
+    )
+    model.set_initial_mass(state)
+
+    dt = 300.0
+    area64 = grid.area.astype(jnp_local.float64)
+    mass_init = float(
+        jnp_local.sum(state.h.astype(jnp_local.float64) * area64),
+    )
+
+    @jax.jit
+    def step(s):
+        return model.step(s, dt)
+
+    s = state
+    for _ in range(576):  # 2 days at dt=300 s
+        s = step(s)
+
+    assert jnp_local.all(jnp_local.isfinite(s.h)), (
+        "iter-48 regression: cube W5 day-2 ``h`` non-finite"
+    )
+    assert jnp_local.all(jnp_local.isfinite(s.u_d)), (
+        "iter-48 regression: cube W5 day-2 ``u_d`` non-finite"
+    )
+    mass_final = float(
+        jnp_local.sum(s.h.astype(jnp_local.float64) * area64),
+    )
+    drift = abs(mass_final - mass_init) / abs(mass_init)
+    assert drift < 1e-7, (
+        f"iter-48 regression: cube W5 day-2 mass drift {drift:.2e} "
+        "exceeds 1e-7"
+    )
+    u_d_max = float(jnp_local.max(jnp_local.abs(s.u_d)))
+    assert u_d_max < 200.0, (
+        f"iter-48 regression: cube W5 day-2 ``max|u_d|`` = "
+        f"{u_d_max:.1f} m/s exceeds 200 m/s — wind blowup "
+        "(matrix BLOWUP threshold is 1000 m/s)."
+    )
+
+
 def test_iter35_hyperdiff_coeff_kwarg_threads_through():
     """new_test_dycores iter-35: ``iter1009_dual_target_config``
     accepts ``hyperdiff_coeff`` as an optional kwarg that threads
