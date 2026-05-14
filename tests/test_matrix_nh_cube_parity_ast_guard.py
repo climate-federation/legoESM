@@ -314,22 +314,66 @@ def test_pe_baroclinic_cube_uses_heat_source_del2_iters():
     )
 
 
-def _count_pe_cube_factory_bundle_occurrences() -> int:
-    """Count occurrences of the iter-18..21 PE factory bundle
-    settings.  Each PE cube branch (baroclinic, held_suarez, amip)
-    should contain all 4 settings, so 3 branches × 4 = 12.
+def _find_pe_held_suarez_cube_config_block() -> str:
+    """Locate the matrix-runner PE held_suarez cube branch
+    ``PrimitiveEquationConfig(...)`` constructor (the one inside
+    ``run_held_suarez``, distinguished from the baroclinic block by
+    the unique ``smagorinsky_cs=_smag_cs_env`` field that only the
+    held_suarez config sets).
     """
     src = _runner_source()
-    flags = (
-        "use_fv3_metric_aware_d_con=True",
-        "d_con_top_zero_levels=2",
-        "delt_max=1.0",
-        "heat_source_del2_iters=2",
+    anchor = re.search(r"smagorinsky_cs=_smag_cs_env,", src)
+    assert anchor is not None, (
+        "matrix-runner PE held_suarez ``smagorinsky_cs=_smag_cs_env`` "
+        "anchor not found"
     )
-    return sum(
-        len(re.findall(re.escape(flag), src))
-        for flag in flags
+    open_idx = src.rfind("PrimitiveEquationConfig(", 0, anchor.start())
+    assert open_idx != -1, (
+        "no PrimitiveEquationConfig( before held_suarez anchor"
     )
+    depth = 0
+    i = open_idx
+    while i < len(src):
+        c = src[i]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return src[open_idx : i + 1]
+        i += 1
+    raise AssertionError("unbalanced held_suarez config block")
+
+
+def _find_pe_amip_cube_config_block() -> str:
+    """Locate the matrix-runner PE AMIP cube branch
+    ``PrimitiveEquationConfig(...)`` constructor (inside ``run_amip``,
+    distinguished by the unique ``held_suarez_init(grid, sigma,
+    T_init=280.0)`` call that follows it).
+    """
+    src = _runner_source()
+    anchor = re.search(
+        r"held_suarez_init\(grid,\s*sigma,\s*T_init=280\.0\)", src,
+    )
+    assert anchor is not None, (
+        "matrix-runner AMIP ``T_init=280.0`` anchor not found"
+    )
+    open_idx = src.rfind("PrimitiveEquationConfig(", 0, anchor.start())
+    assert open_idx != -1, (
+        "no PrimitiveEquationConfig( before AMIP anchor"
+    )
+    depth = 0
+    i = open_idx
+    while i < len(src):
+        c = src[i]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return src[open_idx : i + 1]
+        i += 1
+    raise AssertionError("unbalanced AMIP config block")
 
 
 def test_sw_w6_wired_for_all_four_grids():
@@ -384,28 +428,39 @@ def test_w6_latlon_init_uses_w6_winds_geo():
 
 
 def test_pe_factory_bundle_present_in_three_cube_branches():
-    """iter-22 sentinel: the PE iter-18..21 factory bundle
-    (``use_fv3_metric_aware_d_con``, ``d_con_top_zero_levels=2``,
-    ``delt_max=1.0``, ``heat_source_del2_iters=2``) is present in
-    all 3 PE cube branches: baroclinic, held_suarez, amip.  The
-    bundle compositionally matches FV3
-    ``make_fv3_faithful_pe_config`` factory.
+    """iter-22 sentinel (tightened in iter-27 post-review): the PE
+    iter-18..21 factory bundle (``use_fv3_metric_aware_d_con``,
+    ``d_con_top_zero_levels=2``, ``delt_max=1.0``,
+    ``heat_source_del2_iters=2``) is present in EACH of the 3 PE
+    cube branches: baroclinic, held_suarez, amip.
 
-    NH branches (TC1/TC2/TC3) also contain a superset of these
-    flag names from iter-12..17 promotions, so the total count
-    includes those occurrences.  The minimum bound is the iter-22
-    PE bundle count (3 branches × 4 flags = 12), but the actual
-    count is larger since NH branches independently set the same
-    flag names with the same values.
+    iter-27 fix (post-review): the iter-22 implementation counted
+    GLOBAL occurrences across the file (NH + PE branches +
+    comments), so a regression that stripped all 4 flags from a
+    single PE branch (e.g., AMIP) would still pass because NH
+    branches set the same flag names.  This version walks each PE
+    branch independently and asserts presence of each flag in each
+    branch's actual ``PrimitiveEquationConfig(...)`` constructor
+    body — not in surrounding comments.
     """
-    # Lower bound is the PE bundle alone (3 PE branches × 4 flags).
-    count = _count_pe_cube_factory_bundle_occurrences()
-    assert count >= 12, (
-        f"iter-22 regression: PE factory bundle occurrences "
-        f"({count}) below minimum 12 (3 PE branches × 4 flags). "
-        "One of baroclinic / held_suarez / amip PE cube branches "
-        "is missing iter-18..21 factory flags."
+    flags = (
+        "use_fv3_metric_aware_d_con=True",
+        "d_con_top_zero_levels=2",
+        "delt_max=1.0",
+        "heat_source_del2_iters=2",
     )
+    block_finders = {
+        "baroclinic":  _find_pe_baroclinic_cube_config_block,
+        "held_suarez": _find_pe_held_suarez_cube_config_block,
+        "amip":        _find_pe_amip_cube_config_block,
+    }
+    for branch_name, finder in block_finders.items():
+        block = finder()
+        for flag in flags:
+            assert flag in block, (
+                f"iter-22 regression: PE {branch_name} cube config "
+                f"missing ``{flag}``."
+            )
 
 
 def test_sw_cube_uses_iter1009_dual_target_config():
