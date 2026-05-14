@@ -4843,7 +4843,11 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 fix_mass=True, anchor_mass_to_initial=True,
                 # new_test_dycores iter-6: same iter-697/698 flags as
                 # TC1.  Pre-change TC2 cube |w|_max = 4.65 m/s vs ico
-                # 0.36 / spec 0.36 (~13x gap).
+                # 0.36 / spec 0.36 (~13x gap).  ⚠️ iter-113 clarification:
+                # ALL these baseline numbers were measured at quick-mode
+                # 5 min (0.083 hr); iter-102 showed cube blows up at
+                # full 6-hr mode, so the quick-mode 13x ratio doesn't
+                # capture the actual cube/ico full-mode parity gap.
                 use_fv3_vector_halo_uv=True,
                 use_fv3_a2b_ord4_vector_uv=True,
                 # new_test_dycores iter-12: c_v denominator for NH
