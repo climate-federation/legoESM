@@ -196,17 +196,6 @@ class DINOConfig:
     bottom_drag_bg_velocity: float = 0.1   # u_bg [m/s] for MOM6 quadratic-with-floor form
     bottom_drag_bbl_thickness: float = 50.0  # BBL thickness [m] for distributed drag
     n_barotropic_substeps: int = 30   # baroclinic-to-barotropic step ratio
-    # Implicit vertical mixing: REQUIRED for KPP-driven cold restoring at
-    # the south wall. Diagnosed 2026-05-14: with explicit vertical mixing
-    # (legoESM default), KPP K_v at the cold-cap south-wall cells exceeds
-    # the explicit-diffusion CFL threshold (K_v·dt/dz² > 0.5; for our
-    # dz_0=10m, dt=2700s → K_v_crit=0.0185 m²/s, well below typical KPP
-    # values of 0.01-1 m²/s in active mixing). The result is a
-    # 2Δz vertical-mode tracer instability that explodes a single
-    # south-wall cell over 90 minutes, then cascades. Implicit-Euler
-    # vertical diffusion is unconditionally stable for any K_v
-    # (standard practice in MOM6, NEMO, GFDL ocean cores).
-    implicit_vertical_mixing: bool = True
 
     # ------------------------------------------------------------------
     # Time stepping
@@ -1114,7 +1103,6 @@ def dino_lat_lon_model_config(
         A_h_floor=cfg.A_h_floor,
         A_h_eq_boost=cfg.A_h_eq_boost,
         A_h_eq_sigma_deg=cfg.A_h_eq_sigma_deg,
-        implicit_vertical_mixing=cfg.implicit_vertical_mixing,
         gm_redi=gm_redi_cfg,           # lat-lon C-grid GM/Redi direct path
         physics=physics_cfg,
         eos="wright",

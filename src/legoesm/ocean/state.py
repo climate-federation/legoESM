@@ -644,7 +644,7 @@ class LatLonCGridOceanConfig(NamedTuple):
     #   nonlinear limiters (TVD, WENO, FCT).
     tracer_time_integrator: str = "euler"
     ab2_epsilon: float = 0.1  # AB2 stabilization (MITgcm ABepsBar)
-    # Implicit (backward-Euler) vertical mixing.  When True:
+    # Implicit (backward-Euler) vertical mixing.  When True (default):
     #   1. The PE tendency function skips the explicit ``A_v`` viscous
     #      block (lines tagged ``if config.A_v > 0 ...``).
     #   2. The vertical-mixing and ``enhanced_diffusion`` convection
@@ -659,5 +659,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     # Removes the explicit-diffusion CFL limit ``dt < dz² / (2 K)``,
     # which becomes binding when ``K_conv = 1 m²/s`` is active with
     # surface dz < 30 m or when vertical resolution is increased.
-    # MOM6 / NEMO / POP / MITgcm all use this approach.
-    implicit_vertical_mixing: bool = False
+    # MOM6 / NEMO / POP / MITgcm all use this approach, and MPAS
+    # (`MPASOceanConfig`) also defaults True. The lat-lon default was
+    # flipped from False to True on 2026-05-14 after a DINO forced run
+    # at j=0,i=26 hit the explicit-CFL bound under KPP-driven cold
+    # restoring (see docs/ocean_experiments/dino_replication_plan.md
+    # Finding 5). Set explicit ``implicit_vertical_mixing=False`` to
+    # reproduce the historical explicit-diffusion behavior.
+    implicit_vertical_mixing: bool = True
