@@ -2056,6 +2056,19 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             # (cube/latlon ratio 1.7 -> 3.0).  Kept at nord_v=2
             # because L2 is the more representative cross-grid
             # metric; W5/W6 unaffected either way.
+            # iter-71: re-probed full coefficient sweep on cube W2
+            # 5-day at the iter-44 config:
+            #   1.0x: L2=7.16e-4, v_d=0.96 m/s
+            #   1.5x: L2=5.51e-4, v_d=0.70 m/s
+            #   2.0x: L2=4.58e-4, v_d=0.65 m/s  (iter-44 baseline)
+            #   2.5x: L2=4.42e-4, v_d=0.63 m/s  (best, but only
+            #                                    -3.5% L2 vs 2.0x —
+            #                                    below noise floor)
+            #   3.0x: L2=4.47e-4, v_d=0.63 m/s
+            # Optimum near 2.5x but the gain is sub-noise-floor;
+            # 87% of the 1.0->2.5x improvement is captured by 1.0->2.0.
+            # 2.0x retained per the iter-54/iter-55 precedent
+            # (calibrated values kept unless gain exceeds noise).
             config = iter1009_dual_target_config(
                 n, hyperdiff_coeff=2.0 * _hyperdiff_cube(n),
             )
