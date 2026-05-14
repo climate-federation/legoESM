@@ -81,10 +81,14 @@ def test_vector_halo_gate_present(nh_source):
 
 
 def test_center_to_dgrid_vector_called_in_gate(nh_source):
-    """``center_to_dgrid_vector(u, v, cdgrid)`` appears."""
-    pat = r"center_to_dgrid_vector\(\s*u\s*,\s*v\s*,\s*cdgrid\s*\)"
+    """``center_to_dgrid_vector(u, v, cdgrid, ...)`` appears.
+
+    Accepts the 3-arg form (iter-328) or the 4+ arg form (iter-697
+    added ``use_fv3_a2b_ord4=`` keyword arg).
+    """
+    pat = r"center_to_dgrid_vector\(\s*u\s*,\s*v\s*,\s*cdgrid\b"
     assert re.search(pat, nh_source), (
-        "iter-328 call 'center_to_dgrid_vector(u, v, cdgrid)' "
+        "iter-328 call 'center_to_dgrid_vector(u, v, cdgrid, ...)' "
         f"missing from {SRC_PATH.name}.  The vector halo path is "
         f"a silent no-op."
     )

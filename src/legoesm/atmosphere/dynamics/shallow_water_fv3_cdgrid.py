@@ -420,6 +420,7 @@ def iter1009_dual_target_config(
     n: int,
     div_damp_factor: float = 8.0,
     damp_v: float = 0.030,
+    hyperdiff_coeff: float = 0.0,
 ) -> CDGridShallowWaterConfig:
     """Iter-1009/1021/1030 dual-target preset: W2 ≤ 0.119 m/s + W5 day-5 artifact-free.
 
@@ -457,12 +458,24 @@ def iter1009_dual_target_config(
         Vorticity damping coefficient.  Iter-1030 measured 0.030 as
         the W5-best damp_v (lower than iter-1009's 0.06 and
         iter-1021's 0.035).
+    hyperdiff_coeff : float, default 0.0
+        Biharmonic (del-4) hyperdiffusion coefficient [m^4/s].  Off
+        by default (iter-1030 dual-target preset deliberately uses no
+        hyperdiff because W2 / W5 day-5 are stable without it).  For
+        LONGER runs (W5 full 15-day, W6 full 14-day Rossby-Haurwitz),
+        the matrix runner sets ``hyperdiff_coeff=_hyperdiff_cube(n)``
+        — without that, cube W5/W6 blow up at days 14.58 / 9.03
+        respectively while latlon W5/W6 stay stable.  See
+        ``new_test_dycores.md`` iter-31/33.
 
     Returns
     -------
     CDGridShallowWaterConfig
         Pre-populated with the iter-1009/1021 calibration plus
         `apply_fortran_xppm_boundary=True` and `boundary_fix=True`.
+        Includes optional biharmonic hyperdiffusion via the
+        `hyperdiff_coeff` kwarg (iter-35; default 0.0 preserves the
+        original iter-1030 dual-target behavior).
     """
     # _div_damp_cube(n) = 1.5e7 * (48/n)^2 — same formula as
     # tests/test_iter921_w2_v_vs_h_pareto_sentinel.py.  Inlined here
@@ -486,7 +499,7 @@ def iter1009_dual_target_config(
         )
 
     return CDGridShallowWaterConfig(
-        hyperdiff_coeff=0.0,
+        hyperdiff_coeff=hyperdiff_coeff,
         div_damp=div_damp_factor * div_damp_base,
         boundary_fix=True,
         damp_v=damp_v, nord_v=2,

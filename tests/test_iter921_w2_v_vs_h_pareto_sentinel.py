@@ -27,9 +27,23 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import warnings
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+
+# new_test_dycores iter-101: hard-fail at module import if JAX is not
+# in fp64 mode (mirrors iter-99's protection in
+# test_iter1002_w2_target_met.py).  W2 v_ll/h_err sentinels lock fp32
+# round-off noise into the assertions if fp64 is silently disabled,
+# producing confusing failures.  Fail loudly so the actual env-var
+# issue is pointed-finger.
+assert jax.config.read("jax_enable_x64"), (
+    "tests/test_iter921_w2_v_vs_h_pareto_sentinel.py requires "
+    "JAX_ENABLE_X64=1.  JAX is currently in fp32 mode (likely because "
+    "an earlier test imported jax without setting the env var).  Run "
+    "with `JAX_ENABLE_X64=1 pytest ...` from the shell."
+)
 
 from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
     CDGridShallowWaterConfig,
@@ -57,6 +71,15 @@ TOL_PCT = 0.05  # ±5 % around iter-921 measurements
 
 
 def _div_damp_cube(n: int, ref_n: int = 48, ref_coeff: float = 1.5e7) -> float:
+    """Second-order divergence damping scale for cubed-sphere (FV3-style).
+
+    NOTE (iter-97): bit-identical mirror of
+    ``scripts/run_atmosphere_test_matrix.py:_div_damp_cube`` so SW W2
+    numerical sentinels can construct matching configs without
+    importing the matrix script.  ``ref_n=48`` and ``ref_coeff=1.5e7``
+    are the iter-1030 calibration values — keep both copies in sync
+    when changing the calibration.
+    """
     return ref_coeff * (ref_n / n) ** 2
 
 

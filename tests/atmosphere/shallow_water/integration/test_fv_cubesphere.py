@@ -159,3 +159,74 @@ class TestFVShallowWater:
         g = grad_fn(state.h)
         assert jnp.all(jnp.isfinite(g))
         assert float(jnp.max(jnp.abs(g))) > 0
+
+
+class TestCubeCswW2Residual:
+    """new_test_dycores iter-4: pin cube ``c_sw + p_grad_c`` residual on
+    Williamson 2 steady solid-body initial condition.
+
+    For W2 steady state the FB half-step (c_sw + p_grad_c) increment to
+    (uc, vc) should be exactly zero.  Discrete cube discretisation has
+    a structural residual at cube-vertex regions (codex iter-983
+    isolated face=4/5 polar vertices; iter-4 probe also flags
+    face=2 i=1 j=35 north-boundary).  The ceilings below pin the
+    current residual so future regressions WORSE than today fail; any
+    targeted improvement to ``_corner_vorticity`` / ``_vorticity_flux``
+    / ``_p_grad_c`` would tighten these and re-pin downwards.
+    """
+
+    def test_w2_csw_pgrad_c_residual_bounded(self):
+        from legoesm.core.fv3_sw_core import (
+            _c_sw, _d2a2c_vect, _p_grad_c,
+        )
+        from legoesm import constants
+
+        n = 36
+        grid = create_cubed_sphere(n)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+
+        u0 = 2.0 * jnp.pi * float(grid.radius) / (12.0 * 86400.0)
+        u_d = (cdgrid.cos_angle_edge_x
+               * jnp.cos(cdgrid.lat_edge_x) * u0).astype(jnp.float64)
+        v_d = (-cdgrid.sin_angle_edge_y
+               * jnp.cos(cdgrid.lat_edge_y) * u0).astype(jnp.float64)
+        from tests.test_cases.williamson import williamson_test2
+        h = williamson_test2(grid).h.data.astype(jnp.float64)
+        h_s = jnp.zeros_like(h)
+        dt = 1800.0
+        dt2 = 0.5 * dt
+
+        _ua, _va, uc_base, vc_base, _ut, _vt = _d2a2c_vect(
+            u_d, v_d, cdgrid)
+        h_star, uc_new, vc_new, _ua2, _va2 = _c_sw(
+            h, u_d, v_d, h_s, cdgrid, dt, constants.g)
+        duc = uc_new - uc_base
+        dvc = vc_new - vc_base
+        # iter-4 probe at C36: |duc|_max = 2.7076 m/s,
+        # |dvc|_max = 3.2887 m/s.  Pin 10 % above current.
+        duc_max = float(jnp.max(jnp.abs(duc)))
+        dvc_max = float(jnp.max(jnp.abs(dvc)))
+        assert duc_max < 3.0, (
+            f"c_sw |duc|_max = {duc_max:.4f} m/s exceeds 3.0 ceiling "
+            "(cube-vertex regression; check _corner_vorticity / "
+            "_vorticity_flux)"
+        )
+        assert dvc_max < 3.6, (
+            f"c_sw |dvc|_max = {dvc_max:.4f} m/s exceeds 3.6 ceiling"
+        )
+
+        # Combined c_sw + p_grad_c residual should be smaller (partial
+        # cancellation between vortex flux and pressure gradient).
+        dp_x, dp_y = _p_grad_c(h_star, h_s, cdgrid, dt2, constants.g)
+        # The duogrid FB step subtracts p_grad_c from c_sw output:
+        #   uc_final = uc_new - dp_x
+        # (sign matches fv3_fb_sw_step formulation).
+        sum_uc = float(jnp.max(jnp.abs(duc - dp_x)))
+        sum_vc = float(jnp.max(jnp.abs(dvc - dp_y)))
+        assert sum_uc < 6.0, (
+            f"|duc - dp_x|_max = {sum_uc:.4f} m/s exceeds 6.0 ceiling "
+            "(cube-vertex c_sw + p_grad_c residual regression)"
+        )
+        assert sum_vc < 6.0, (
+            f"|dvc - dp_y|_max = {sum_vc:.4f} m/s exceeds 6.0 ceiling"
+        )

@@ -1310,17 +1310,21 @@ def fv3_sw_tendencies(
     cube_edge_div_damp_factor=0.5,
     cube_edge_div_damp_band=2,
 ):
-    """SW tendencies on FV3 edge-midpoint D-grid. Momentum via A-L + circulation; PPM mass transport."""
-    n = cdgrid.n
+    """SW tendencies on FV3 edge-midpoint D-grid. Momentum via A-L + circulation; PPM mass transport.
 
-    # iter-1019: hyperdiff_coeff is signature-only here (NO-OP); use CDGridShallowWaterModel for biharmonic
-    if hyperdiff_coeff > 0:
-        import warnings
-        warnings.warn(
-            f"`fv3_sw_tendencies(hyperdiff_coeff={hyperdiff_coeff!r})` silently ignored; "
-            f"use `CDGridShallowWaterModel` for biharmonic.",
-            UserWarning, stacklevel=2,
-        )
+    Biharmonic hyperdiffusion (``hyperdiff_coeff``) IS applied at
+    cell centres downstream — see step (i) below.  Per
+    new_test_dycores iter-41, this is the path that stabilizes
+    cube W5 15-day + cube W6 14-day in the matrix runner
+    (without it, both BLOW UP per iter-31/33 measurements).
+
+    The original iter-1019 warning saying ``hyperdiff_coeff`` is
+    "signature-only NO-OP, use CDGridShallowWaterModel" was stale
+    — a later iter added the cell-centre biharmonic path without
+    retiring the warning.  Removed in iter-41 after empirical
+    verification that the kwarg has real algorithmic effect.
+    """
+    n = cdgrid.n
 
     # (a) Cell-centre and C-grid velocities for mass transport
     u_cc, v_cc = fv3_d2cc(u_d, v_d, cdgrid)
