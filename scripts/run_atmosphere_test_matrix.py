@@ -2613,6 +2613,24 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
         # is shallow past n_sub=6 (n_sub=12 only buys another
         # 1.6%) so we stop here.  Cube CB wall time grows ~6×
         # (~3.2s → ~20s); still tiny vs matrix budget.
+        #
+        # iter-61/62 cross-grid audit (apples-to-apples 12-day):
+        #   latlon (72×144): L2=0.133, drift=2.07e-8, PASS
+        #   ico (ico5):       L2=0.620, drift=1.58e-6, PASS
+        #   spectral (T21):   L2=0.382, drift=2.16e-16, PASS
+        #   cube (C36):       L2=0.865, drift=1.28e-9, PASS
+        # True cross-grid L2 ratios: cube/latlon = 6.5×,
+        # cube/ico = 1.4×, cube/spectral = 2.3× — far closer than
+        # the previously documented "45× / 38× / 35×" claims (which
+        # had been computed against stale 1-day latlon results).
+        # All 4 grids now PASS at 12-day apples-to-apples.  Cube
+        # is the L2 outlier but BEST at mass conservation among
+        # the finite-volume grids.  iter-61 spatial decomposition
+        # probe (_probe_iter61_cb_error_map.py): 99 % of residual
+        # cube L2 lives in panel-INTERIOR cells of the single face
+        # holding the bell at t=12d; panel-edge cells contribute
+        # ~0.0003.  Residual is bulk PPM limiter dissipation, NOT
+        # panel-coupling.
         _CB_CUBE_N_SUB = 6
 
         @jax.jit
