@@ -1474,7 +1474,20 @@ def _write_results_txt(output_dir: Path, rows: dict[str, Any],
 
 
 def _save_timeseries_csv(output_dir: Path, diag: dict, dt: float):
-    keys = [k for k in diag if k not in ("steps", "times")]
+    # new_test_dycores iter-118: exclude private-prefix keys (``_*``)
+    # from the csv columns.  Pre-iter-118 ``_blowup_info`` (a dict,
+    # added by ``_run_timeloop`` on FAIL) was included in ``keys``,
+    # which caused the writer to crash silently when indexing
+    # ``diag["_blowup_info"][i]`` (dict indices must be str, not int).
+    # The crash left a header-only csv on disk + no per-step diagnostics.
+    # This blocked post-mortem investigation of the iter-102 TC2 cube
+    # blowup (no pre-blowup timeseries data survived).  The fix
+    # restores the original intent: only LIST-valued diagnostic keys
+    # appear in the csv; private dict keys remain available in the
+    # diag dict for ``_write_results_txt`` to use.
+    keys = [k for k in diag
+            if k not in ("steps", "times")
+            and not k.startswith("_")]
     if not keys or not diag["steps"]:
         return
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1487,7 +1500,10 @@ def _save_timeseries_csv(output_dir: Path, diag: dict, dt: float):
 
 def _save_timeseries_plot(output_dir: Path, case_name: str, diag: dict,
                           scalar_units: dict[str, str]):
-    keys = [k for k in diag if k not in ("steps", "times")]
+    # iter-118: exclude private-prefix keys (matching _save_timeseries_csv).
+    keys = [k for k in diag
+            if k not in ("steps", "times")
+            and not k.startswith("_")]
     times = diag.get("times", [])
     if not keys or not times:
         return
