@@ -817,10 +817,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     )
     w = _diagnose_w_from_flux_div(flux_div_k, z_coord, thickness_weighted=True)
 
-    # --- 4b. Baroclinic perturbation velocity ---
-    # The barotropic solver handles the depth-averaged momentum.
-    # The baroclinic step must operate on the PERTURBATION velocity
-    # u' = u - U_bar to avoid double-counting the barotropic tendency.
+    # --- 4b. Depth-mean velocity (for diagnostics / KE gradient) ---
     # Fuse num/denom reductions per face — both share their h_u/h_v
     # weight on the level axis.
     _u_pair = jnp.sum(jnp.stack([u * h_u, h_u], axis=-1), axis=-2)
@@ -829,6 +826,14 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     V_bar = _v_pair[..., 0] / jnp.maximum(_v_pair[..., 1], 1e-10) * v_mask  # (n_lat+1, n_lon)
     u_prime = u - U_bar[..., jnp.newaxis]
     v_prime = v - V_bar[..., jnp.newaxis]
+
+    # NOTE: Viscosity, vertical advection, and vertical viscosity all
+    # operate on the TOTAL velocity (u, v), NOT u_prime.  The depth-
+    # average of the viscous tendency on u_total enters F_slow and
+    # provides barotropic damping.  This is the standard formulation
+    # used by MOM6, MPAS-Ocean, NEMO, and POP (Hallberg 1997).
+    # Previously viscosity acted on u_prime, which zeroed the depth-
+    # averaged viscous tendency and left the barotropic mode undamped.
 
     # --- 5. Coriolis ---
     # Coriolis is NOT included in the returned momentum tendencies.
@@ -1360,12 +1365,14 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     if config.A_h > 0 and config.B_h > 0:
         # Both A_h Laplacian and B_h biharmonic active: the biharmonic's
         # *inner* vector Laplacian is identical to the explicit A_h
-        # vector Laplacian, so compute ∇²(u', v') ONCE and feed it to
+        # vector Laplacian, so compute ∇²(u, v) ONCE and feed it to
         # both branches.  Saves one full vector_laplacian_cgrid call
         # (1 div + 1 curl + 2 gradients + 2 gradient_curl_to_*) per
         # RHS evaluation.
+        # NOTE: uses total velocity u, v (not u_prime) so the depth-
+        # averaged viscous tendency damps the barotropic mode via F_slow.
         _vlap_u, _vlap_v = vector_laplacian_cgrid(
-            u_prime, v_prime, grid,
+            u, v, grid,
             mask=mask, u_mask=u_mask, v_mask=v_mask)
         if config.A_h_lat_scaling:
             _floor = config.A_h_floor / config.A_h if config.A_h_floor > 0 else 0.0
@@ -1392,15 +1399,19 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         bilap_u, bilap_v = vector_laplacian_cgrid(
             _vlap_u, _vlap_v, grid,
             mask=mask, u_mask=u_mask, v_mask=v_mask)
-        scale_u, scale_v = biharmonic_scaling_factor(grid)
-        diag_Bh_bilap_u = -config.B_h * scale_u[:, None, None] * bilap_u
-        diag_Bh_bilap_v = -config.B_h * scale_v[:, None, None] * bilap_v
+        if getattr(config, "B_h_lat_scaling", True):
+            scale_u, scale_v = biharmonic_scaling_factor(grid)
+            diag_Bh_bilap_u = -config.B_h * scale_u[:, None, None] * bilap_u
+            diag_Bh_bilap_v = -config.B_h * scale_v[:, None, None] * bilap_v
+        else:
+            diag_Bh_bilap_u = -config.B_h * bilap_u
+            diag_Bh_bilap_v = -config.B_h * bilap_v
         diag_Bh_bilap_u, diag_Bh_bilap_v = _apply_slope_foot(diag_Bh_bilap_u, diag_Bh_bilap_v)
         du_dt = du_dt + diag_Bh_bilap_u
         dv_dt = dv_dt + diag_Bh_bilap_v
     elif config.A_h > 0:
         vlap_u, vlap_v = vector_laplacian_cgrid(
-            u_prime, v_prime, grid,
+            u, v, grid,
             mask=mask, u_mask=u_mask, v_mask=v_mask)
         if config.A_h_lat_scaling:
             _floor = config.A_h_floor / config.A_h if config.A_h_floor > 0 else 0.0
@@ -1426,20 +1437,24 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         dv_dt = dv_dt + diag_Ah_lap_v
     elif config.B_h > 0:
         bilap_u, bilap_v = vector_bilaplacian_cgrid(
-            u_prime, v_prime, grid,
+            u, v, grid,
             mask=mask, u_mask=u_mask, v_mask=v_mask)
-        # Scale biharmonic coefficient with (cos(lat)/cos_max)^4 to prevent
-        # CFL violation near poles where dx shrinks (MOM6 convention).
-        scale_u, scale_v = biharmonic_scaling_factor(grid)
-        diag_Bh_bilap_u = -config.B_h * scale_u[:, None, None] * bilap_u
-        diag_Bh_bilap_v = -config.B_h * scale_v[:, None, None] * bilap_v
+        if getattr(config, "B_h_lat_scaling", True):
+            # Scale biharmonic coefficient with (cos(lat)/cos_max)^4 to prevent
+            # CFL violation near poles where dx shrinks (MOM6 convention).
+            scale_u, scale_v = biharmonic_scaling_factor(grid)
+            diag_Bh_bilap_u = -config.B_h * scale_u[:, None, None] * bilap_u
+            diag_Bh_bilap_v = -config.B_h * scale_v[:, None, None] * bilap_v
+        else:
+            diag_Bh_bilap_u = -config.B_h * bilap_u
+            diag_Bh_bilap_v = -config.B_h * bilap_v
         diag_Bh_bilap_u, diag_Bh_bilap_v = _apply_slope_foot(diag_Bh_bilap_u, diag_Bh_bilap_v)
         du_dt = du_dt + diag_Bh_bilap_u
         dv_dt = dv_dt + diag_Bh_bilap_v
 
     if config.C_smag > 0:
         smag_u, smag_v = smagorinsky_biharmonic_tendency_cgrid(
-            u_prime, v_prime, grid, config.C_smag,
+            u, v, grid, config.C_smag,
             mask=mask, u_mask=u_mask, v_mask=v_mask)
         diag_Cs_smag_u = -smag_u
         diag_Cs_smag_v = -smag_v
@@ -1454,15 +1469,15 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         # Uses viscous_tendency_cgrid which is the exact discrete
         # adjoint of the strain rate — guarantees energy dissipation
         # for any non-negative spatially varying coefficient.
-        D_T, D_S = strain_rate_cgrid(u_prime, v_prime, grid,
+        D_T, D_S = strain_rate_cgrid(u, v, grid,
                                       mask=mask, u_mask=u_mask, v_mask=v_mask)
         A_smag_h = smagorinsky_viscosity_cgrid(
-            u_prime, v_prime, grid, config.C_smag_lap,
+            u, v, grid, config.C_smag_lap,
             mask=mask, u_mask=u_mask, v_mask=v_mask)
         A_smag_q = smagorinsky_viscosity_q_cgrid(
             D_T, D_S, grid, config.C_smag_lap, mask=mask)
         _smag_lap_u, _smag_lap_v = viscous_tendency_cgrid(
-            u_prime, v_prime, grid, A_smag_h, A_smag_q,
+            u, v, grid, A_smag_h, A_smag_q,
             mask=mask, u_mask=u_mask, v_mask=v_mask)
         _smag_lap_u, _smag_lap_v = _apply_slope_foot(_smag_lap_u, _smag_lap_v)
         du_dt = du_dt + _smag_lap_u
@@ -1473,7 +1488,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
 
     if getattr(config, "C_leith", 0.0) > 0:
         leith_u, leith_v = leith_biharmonic_tendency_cgrid(
-            u_prime, v_prime, grid, config.C_leith,
+            u, v, grid, config.C_leith,
             modified=getattr(config, "C_leith_modified", False),
             mask=mask, u_mask=u_mask, v_mask=v_mask)
         diag_Cl_leith_u = -leith_u
@@ -1481,6 +1496,28 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         diag_Cl_leith_u, diag_Cl_leith_v = _apply_slope_foot(diag_Cl_leith_u, diag_Cl_leith_v)
         du_dt = du_dt + diag_Cl_leith_u
         dv_dt = dv_dt + diag_Cl_leith_v
+
+    # --- 10b. Meridional-only Laplacian viscosity ---
+    # Scalar d²/dy² applied directly at faces, targeting the 2Δy mode
+    # without damping zonal flow.  Useful on lat-lon grids with large
+    # dx/dy anisotropy where isotropic A_h over-damps zonal structure.
+    # Acts on total velocity (like the main viscosity block above).
+    _A_h_merid = getattr(config, "A_h_merid", 0.0)
+    if _A_h_merid > 0:
+        _dy = grid.radius * (grid.lat[1] - grid.lat[0])  # constant
+        _inv_dy2 = 1.0 / (_dy * _dy)
+        # u: d²u/dy² at u-faces (u has shape n_lat, n_lon+1, nlev)
+        # Pad with zeros at pole boundaries (solid wall: u=0 beyond poles)
+        _u_pad = jnp.pad(u, ((1, 1), (0, 0), (0, 0)))
+        _d2u_dy2 = (_u_pad[2:, :, :] - 2.0 * _u_pad[1:-1, :, :] +
+                    _u_pad[:-2, :, :]) * _inv_dy2
+        du_dt = du_dt + _A_h_merid * _d2u_dy2
+        # v: d²v/dy² at v-faces (v has shape n_lat+1, n_lon, nlev)
+        # Pad with zeros at pole boundaries
+        _v_pad = jnp.pad(v, ((1, 1), (0, 0), (0, 0)))
+        _d2v_dy2 = (_v_pad[2:, :, :] - 2.0 * _v_pad[1:-1, :, :] +
+                    _v_pad[:-2, :, :]) * _inv_dy2
+        dv_dt = dv_dt + _A_h_merid * _d2v_dy2
 
     if config.bottom_drag_r > 0:
         # Drag acts on the full velocity (not perturbation) — the ocean

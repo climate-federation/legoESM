@@ -229,10 +229,118 @@ Exp 0: Baseline (30 days, fp64)
 │   └── BC_full_noGM           — + KPP + conv, no GM          → RUNNING
 │
 ├── B_h_barotropic tests:
-│   ├── BHT_strat_windonly  — B_h_bt=2e12, strat+wind  → BLOWUP day 110 (too weak)
-│   └── BT_bht2e12          — B_h_bt=2e12, BT uniform  → RUNNING
+│   ├── BHT_strat_windonly  — B_h_bt=2e12, strat+wind  → BLOWUP day 110
+│   └── BT_bht2e12          — B_h_bt=2e12, BT uniform  → no effect (too weak)
 │
-└── (next) Stronger B_h_barotropic or address baroclinic amplification
+├── Barotropic A_h sweep (flat, uniform T, wind only, 120 days):
+│   ├── BT1_baseline  — A_h=1e4                → 2Δy = 4.60e-5 (reference)
+│   ├── BT2_csmag     — + C_smag=0.06          → 2Δy = 4.56e-5 (no effect: on u_prime)
+│   ├── BT3_bht       — + B_h_bt=2e12          → 2Δy = 4.51e-5 (no effect: too weak)
+│   ├── BT4_combo     — Csmag+B_h_bt+Csmag_lap → BLOWUP day 29
+│   ├── BT5_bht1e14   — + B_h_bt=1e14          → 2Δy = 4.34e-5 (6% reduction)
+│   ├── BT6_csmag03   — C_smag=0.3             → not completed
+│   ├── BT7_utotal    — visc on u_total (all)   → BLOWUP day 49 (vert adv issue)
+│   ├── BT8_hvisc_ut  — horiz visc on u_total   → 2Δy = 4.09e-5 (10% reduction)
+│   ├── BT9_Ah1e5     — A_h=1e5                → 2Δy = 4.26e-12 ← SEED KILLED
+│   ├── BT10_Ah5e4    — A_h=5e4                → 2Δy = 2.29e-9
+│   └── BT11_Ah3e4    — A_h=3e4                → 2Δy = 9.14e-8
+│   Conclusion: A_h ≥ 1e5 kills seed completely; 3e4 reduces 540×
+│   but residual seed still amplified by baroclinic processes.
+│
+├── Baroclinic progression (flat, stratified T, full physics):
+│   All: flat bottom, stratified T(z), wind + T/S restoring,
+│   KPP (K_conv=1.0), enhanced diffusion, GM/Redi (κ=600 default)
+│   ├── BR1_Ah3e4     — A_h=3e4, dt=1200     → 2Δy=1.4e-2 day 90 (FAILED)
+│   ├── BR1_Ah1e5     — A_h=1e5, dt=1200     → 2Δy=1.0e-3 day 120 (delayed but grows)
+│   ├── BR2_GM2000    — A_h=1e5, κ_GM=κ_Redi=2000 → 2Δy=9.0e-4 day 120 (10% better)
+│   ├── BR3_Kh1000    — A_h=1e5, K_h=1000    → 2Δy=5.6e-4 day 120 (45% better)
+│   ├── BR4_Ah2e5     — A_h=2e5, dt=1200     → BLOWUP day 0.4 (visc CFL at pole)
+│   ├── BR5_Ah2e5_Kh  — A_h=2e5, K_h=1000, dt=1200 → BLOWUP day 0.4 (same)
+│   ├── BR4b,BR5b     — A_h=2e5 + lat scaling → killed (lat scaling weakens at 60°S)
+│   ├── BR6           — A_h=2e5, B_h=1e14 cos4, dt=600 → ran 120d (cos4 made B_h useless at 60°S)
+│   ├── BR7           — A_h=1e5, B_h=5e13 cos4, dt=600 → ran 120d (same issue)
+│   ├── BR8           — A_h=1e5, B_h=1e14 NO scale, dt=600 → BLOWUP day 0.1
+│   ├── BR9           — A_h=1e5, B_h=5e13 NO scale, dt=600 → BLOWUP day 0.1
+│   ├── BR10          — A_h=1e5, B_h=1e12 NO scale, dt=600 → 2dy=1.0e-3 day 120
+│   ├── BR11          — A_h=1e5, B_h=1e13 NO scale, dt=600 → 2dy=8.7e-4 day 120 (15% better)
+│   ├── BR12          — A_h=2e5, dt=600             → 2dy=8.4e-8 day 120 (clean but growing)
+│   ├── BR13_merid    — A_h=1e4 + A_h_merid=1e5     → 2dy=1.2e-6 day 120 (STABILIZED!)
+│   ├── BR14_ferrari  — A_h=1e4 + Ferrari complement → 2dy=9.6e-3 day 120 (no effect, too low A_h)
+│   └── BR15_ferrari  — A_h=1e5 + Ferrari complement → 2dy=9.9e-4 day 120 (no effect on 2dy)
+│
+├── Operator audits (2026-05-13):
+│   ├── Vector Laplacian: full transfer at 2Δy (no null space) ✓
+│   ├── Vector biharmonic: full transfer at 2Δy ✓
+│   ├── Stress-tensor (Smagorinsky): full transfer at 2Δy ✓
+│   ├── cos⁴ scaling on biharmonic: weakens B_h to 6% at 60°S
+│   │   → B_h_lat_scaling flag added (can disable cos⁴)
+│   │   → B_h without scaling blows up (even 5e13) — coastline issue
+│   └── Viscosity on u_prime: barotropic mode invisible to 3D visc
+│       → horiz visc changed to u_total, modest effect
+│
+├── Anisotropic viscosity (2026-05-13):
+│   ├── A_h_merid implemented: scalar d²u/dy² at u-faces
+│   ├── BT12: A_h=1e4 + merid=1e5 → 2dy=4.6e-12 (kills BT seed) ✓
+│   └── BR13: same baroclinic → 2dy=1.2e-6 day 120 (BEST result!)
+│       870× better than isotropic A_h=1e5 at breaking baroclinic feedback
+│
+├── Ferrari complement (2026-05-13):
+│   ├── Implemented: (1-taper) × κ_Redi × ∇_h T in mixed layer
+│   │   (where DM95 tapers Redi to zero, add horizontal diffusion)
+│   ├── BR14: A_h=1e4 + Ferrari → no help (A_h too low for BT seed)
+│   └── BR15: A_h=1e5 + Ferrari → 2dy=9.9e-4 (no effect vs BR1)
+│       DM95 taper is already ~1 where 2Δy feedback operates
+│
+├── Key findings (2026-05-13):
+│   ├── 2Δy has TWO components: barotropic seed + baroclinic amplification
+│   ├── Barotropic seed: killed by A_h ≥ 1e5 (or A_h_merid ≥ 1e5)
+│   ├── Baroclinic amplification: velocity→T advection→density→PGF→velocity
+│   │   loop (confirmed by ocean expert, growth rate ~ Eady at grid scale)
+│   ├── A_h_merid=1e5 is 870× more effective than isotropic A_h=1e5
+│   │   at suppressing baroclinic amplification
+│   ├── Ferrari complement ineffective: DM95 taper ≈ 1 where feedback
+│   │   operates (below mixed layer in stratified interior)
+│   ├── GM/Redi κ=2000 barely helps (10%) — wrong scale for 2Δy
+│   ├── K_h=1000 helps 45% — direct horizontal tracer diffusion
+│   ├── Biharmonic limited by CFL + cos⁴ scaling at Southern Ocean lats
+│   └── Regular lat-lon grid anisotropy (dx/dy up to 6:1) is a
+│       fundamental challenge that tripolar/displaced-pole grids avoid
+│
+└── Best config so far: A_h=1e4 + A_h_merid=1e5 (BR13)
+    2Δy = 1.2e-6 at day 120, stabilized (not growing)
+
+### Issue 5: Viscosity applied to u_prime instead of u_total (ROOT CAUSE)
+
+**Found:** 2026-05-13  
+**Severity:** Critical (undamped barotropic 2Δy mode in both lat-lon and MPAS)  
+**Status:** Root cause confirmed by both dycore and ocean experts.
+
+All horizontal viscosity (A_h, B_h, C_smag, C_smag_lap, C_leith)
+is applied to u_prime = u - U_bar in ocean_pe_latlon_cgrid.py
+(lines 1360-1483) and ocean_pe_mpas.py (line 510+). Since
+depth_avg(u_prime) = 0 by construction, the depth-averaged
+viscous contribution to F_slow is zero. The barotropic mode
+receives NO damping from 3D viscosity.
+
+**All four production models (MOM6, MPAS-Ocean, NEMO, POP) apply
+viscosity to u_total.** The depth-average of A_h × lap(u_total) =
+A_h × lap(U_bar) enters F_slow and damps the barotropic mode.
+
+With u_total: A_h=1000 at 2Δy gives 69/day damping.
+With u_prime: 0/day damping. This explains the undamped 2Δy seed.
+
+Barotropic experiments BT1-BT6 confirmed that no parameter change
+can fix this — the barotropic mode is invisible to all 3D viscosity
+when operating on u_prime.
+
+**Fix:** Change viscosity to act on u_total in both ocean_pe files.
+The perturbation tendency du_dt_pert = du_dt - F_slow automatically
+gets the correct baroclinic viscosity (no double-counting per
+Hallberg 1997).
+
+Files: ocean_pe_latlon_cgrid.py:820-831 (u_prime definition),
+ocean_pe_latlon_cgrid.py:1322-1483 (viscosity on u_prime),
+ocean_pe_mpas.py:510+ (same issue).
 
 ### 2Δy Root Cause Summary (2026-05-13)
 

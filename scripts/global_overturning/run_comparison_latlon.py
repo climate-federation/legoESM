@@ -289,6 +289,26 @@ def main():
                         "same coastlines from ETOPO.")
     p.add_argument("--b-h-barotropic", type=float, default=None,
                    help="Override B_h_barotropic [m⁴/s] (default: 0).")
+    p.add_argument("--momentum-advection", default=None,
+                   help="Override momentum_advection scheme "
+                        "(default: vector_invariant). Options: "
+                        "vector_invariant, weno5, weno7.")
+    p.add_argument("--c-smag", type=float, default=None,
+                   help="Override C_smag biharmonic Smagorinsky (default: 0).")
+    p.add_argument("--kappa-gm", type=float, default=None,
+                   help="Override kappa_GM [m²/s] (default: 600).")
+    p.add_argument("--kappa-redi", type=float, default=None,
+                   help="Override kappa_Redi [m²/s] (default: 600).")
+    p.add_argument("--k-h", type=float, default=None,
+                   help="Override K_h horizontal tracer diffusivity [m²/s] (default: 0).")
+    p.add_argument("--dt", type=float, default=None,
+                   help="Override timestep [s] (default: 1200).")
+    p.add_argument("--no-bh-lat-scaling", action="store_true",
+                   help="Disable cos⁴(lat) scaling on B_h.")
+    p.add_argument("--a-h-merid", type=float, default=None,
+                   help="Meridional-only Laplacian viscosity [m²/s] (default: 0).")
+    p.add_argument("--uniform-T", action="store_true",
+                   help="Initialize with uniform T=10°C (barotropic test).")
     p.add_argument("--etopo",
                    default="/home/dbalwada/legoESM/data/bathymetry/etopo_1deg.nc")
     args = p.parse_args()
@@ -347,44 +367,70 @@ def main():
         land_mask_override=ocean_mask,
         H_bathy_override=H_snapped,
     )
-    # Centroid-aware exponential T(z) — same as MPAS
-    centroid = compute_centroid_depth(
-        jnp.zeros_like(H_snapped), H_snapped, z_coord,
-    )
-    T_init = 2.0 + 18.0 * jnp.exp(-centroid / _SCALE_DEPTH)
-    T_init = jnp.where(z_coord.is_active, T_init, 0.0)
-    T_init = T_init * ocean_mask[..., jnp.newaxis]
+    # Temperature initialization
+    if args.uniform_T:
+        T_init = jnp.where(ocean_mask[..., jnp.newaxis] > 0.5,
+                            10.0 * jnp.ones_like(state.T.data), 0.0)
+        print("  *** UNIFORM T = 10°C (barotropic test) ***")
+    else:
+        # Centroid-aware exponential T(z) — same as MPAS
+        centroid = compute_centroid_depth(
+            jnp.zeros_like(H_snapped), H_snapped, z_coord,
+        )
+        T_init = 2.0 + 18.0 * jnp.exp(-centroid / _SCALE_DEPTH)
+        T_init = jnp.where(z_coord.is_active, T_init, 0.0)
+        T_init = T_init * ocean_mask[..., jnp.newaxis]
     state = state._replace(
         T=state.T.replace(data=T_init.astype(state.T.data.dtype)),
     )
 
     # --- Physics ---
-    physics = OceanPhysicsConfig(
-        surface_forcing=SurfaceForcingConfig(
-            scheme="combined",
-            prescribed=PrescribedForcingConfig(
-                wind_profile="global_wind", tau_max=TAU_MAX,
-                tropical_wind_scale=TROPICAL_WIND_SCALE,
-                tropical_wind_lat_deg=TROPICAL_WIND_LAT_DEG,
+    # For barotropic tests (--uniform-T): wind only, no T/S restoring,
+    # no KPP, no convection — purely barotropic dynamics.
+    if args.uniform_T:
+        physics = OceanPhysicsConfig(
+            surface_forcing=SurfaceForcingConfig(
+                scheme="prescribed",
+                prescribed=PrescribedForcingConfig(
+                    wind_profile="global_wind", tau_max=TAU_MAX,
+                    tropical_wind_scale=TROPICAL_WIND_SCALE,
+                    tropical_wind_lat_deg=TROPICAL_WIND_LAT_DEG,
+                ),
             ),
-            restoring=RestoringConfig(
-                tau_T=TAU_T, tau_S=TAU_S,
-                T_star_eq=T_STAR_EQ, T_star_pole=T_STAR_POLE,
-                S_star=S_STAR, T_profile="cosine",
+            vertical_mixing=VerticalMixingConfig(scheme="none"),
+            lateral_mixing=LateralMixingConfig(scheme="none"),
+            bottom_drag=BottomDragConfig(scheme="none"),
+            convection=OceanConvectionConfig(scheme="none"),
+            shortwave_penetration=None,
+        )
+        print("  *** BAROTROPIC PHYSICS: wind only, no T/S restoring ***")
+    else:
+        physics = OceanPhysicsConfig(
+            surface_forcing=SurfaceForcingConfig(
+                scheme="combined",
+                prescribed=PrescribedForcingConfig(
+                    wind_profile="global_wind", tau_max=TAU_MAX,
+                    tropical_wind_scale=TROPICAL_WIND_SCALE,
+                    tropical_wind_lat_deg=TROPICAL_WIND_LAT_DEG,
+                ),
+                restoring=RestoringConfig(
+                    tau_T=TAU_T, tau_S=TAU_S,
+                    T_star_eq=T_STAR_EQ, T_star_pole=T_STAR_POLE,
+                    S_star=S_STAR, T_profile="cosine",
+                ),
             ),
-        ),
-        vertical_mixing=VerticalMixingConfig(
-            scheme="kpp",
-            kpp=KPPConfig(K_conv=1.0),
-        ),
-        lateral_mixing=LateralMixingConfig(scheme="none"),
-        bottom_drag=BottomDragConfig(scheme="none"),
-        convection=OceanConvectionConfig(
-            scheme="enhanced_diffusion",
-            enhanced_diffusion=EnhancedDiffusionConfig(K_conv=1.0),
-        ),
-        shortwave_penetration=None,
-    )
+            vertical_mixing=VerticalMixingConfig(
+                scheme="kpp",
+                kpp=KPPConfig(K_conv=1.0),
+            ),
+            lateral_mixing=LateralMixingConfig(scheme="none"),
+            bottom_drag=BottomDragConfig(scheme="none"),
+            convection=OceanConvectionConfig(
+                scheme="enhanced_diffusion",
+                enhanced_diffusion=EnhancedDiffusionConfig(K_conv=1.0),
+            ),
+            shortwave_penetration=None,
+        )
 
     # --- Model config ---
     ocean_config = LatLonCGridOceanConfig(
@@ -392,23 +438,28 @@ def main():
         A_h_lat_scaling=args.a_h_lat_scaling,
         A_h_floor=args.a_h_floor if args.a_h_floor is not None else 0.0,
         B_h=args.b_h if args.b_h is not None else 0.0,
+        B_h_lat_scaling=not args.no_bh_lat_scaling,
         B_h_barotropic=args.b_h_barotropic if args.b_h_barotropic is not None else 0.0,
         C_smag_lap=args.c_smag_lap if args.c_smag_lap is not None else C_SMAG_LAP,
+        C_smag=args.c_smag if args.c_smag is not None else 0.0,
         A_v=A_V,
         K_v=K_V,
+        K_h=args.k_h if args.k_h is not None else 0.0,
+        A_h_merid=args.a_h_merid if args.a_h_merid is not None else 0.0,
         bottom_drag_r=BOTTOM_DRAG_R,
         bottom_drag_bbl_thickness=BOTTOM_DRAG_BBL,
         bottom_drag_bg_velocity=BOTTOM_DRAG_BG_VEL,
         pgf_scheme="adcroft",
         barotropic_solver="implicit_cn",
+        momentum_advection=args.momentum_advection if args.momentum_advection is not None else "vector_invariant",
         implicit_vertical_mixing=True,
         tracer_advection="tvd",
         eos="wright",
         freshwater_closure="virtual_salt_flux",
         S_ref=S_STAR,
         gm_redi=GMRediConfig(
-            kappa_GM=KAPPA_GM,
-            kappa_Redi=KAPPA_REDI,
+            kappa_GM=args.kappa_gm if args.kappa_gm is not None else KAPPA_GM,
+            kappa_Redi=args.kappa_redi if args.kappa_redi is not None else KAPPA_REDI,
             S_max=S_MAX,
             visbeck=VisbeckConfig(enabled=False),
             slope_scheme="centered",
@@ -439,7 +490,7 @@ def main():
 
     # --- Time loop ---
     total_days = args.days
-    dt = DT
+    dt = args.dt if args.dt is not None else DT
     n_steps = int(total_days * 86400 / dt)
     diag_every_day = args.save_every_days
     diag_steps = int(diag_every_day * 86400 / dt)
