@@ -49,7 +49,14 @@ with `periodic_x=True` + seam-wall land mask) are end-to-end functional.
 | Visualization script | `scripts/plot_dino.py` |
 | Unit tests (188 across 11 files) | `tests/ocean/unit/test_dino_*.py`, `test_levy_stretched_z_star.py`, `test_partial_periodic_seam_wall.py`, `test_ke_gradient_hollingsworth.py` |
 | Full plan, decisions log, lessons | `docs/ocean_experiments/dino_replication_plan.md` |
-| Diagnostic plots from local runs | `results/dino/` (gitignored) |
+| Documentation plots (committed) | `docs/ocean_experiments/dino_plots/` |
+| Run output from local simulations | `results/dino/` (gitignored) |
+
+Documentation plots in `dino_plots/` show what DINO looks like:
+`bathymetry.png` (basin shape + Drake sill ring), `initial_conditions.png`
+(T(lat,z) and S(lat,z)), `surface_forcing.png` (wind, Q_sr, T*, S*
+profiles vs latitude), `mpas_mesh.png` (regional Voronoi mesh + seam
+wall + bathymetry). Useful first-look before running anything.
 
 The DINO experiment is registered in
 `legoesm.ocean.experiments.AVAILABLE_EXPERIMENTS["dino"]` with
