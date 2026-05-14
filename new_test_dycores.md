@@ -85,6 +85,7 @@ Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV /
   - W5 15-day max|u_d|=36.27 / W6 14-day max|u_d|=98.41 — both stable, well below 1000 m/s BLOWUP threshold.
   - 4× cube probed: v_ll=0.48 (diminishing returns), kept at 2× for cleaner margin.
   Cube W2 L2 vs latlon ratio: **1.7×** (was 9× at iter-1, 2.7× at iter-42).  Best cube SW parity to date.
+- iter-45: review-driven hardening (cavecrew-reviewer pass on iter-31..44 flagged 2 actionable items): (a) the gate-pinning sentinel regex was too loose — matched the first `if test_num in (...):` in the file, which could silently pick up the line 2318 spectral filter conditional `(5, 6)` or the line 4068 NH `(11, 12)` gate if the SW cube gate moved/deleted.  Tightened to anchor on the immediately-following `config = iter1009_dual_target_config(n, ...)` call.  (b) Added `test_iter1002_w2_sentinel_independent_from_matrix_hyperdiff` that pins (i) `_make_iter1009_config` still exists in `tests/test_iter1002_w2_target_met.py`, and (ii) any `hyperdiff_coeff=` setting in its body is exactly 0 / 0.0 — documenting permanently that the iter-1002 W2 1-day sentinel is decoupled from matrix-runner hyperdiff changes (the assumption that made iter-42's gate widening safe).  25 AST sentinels PASS in 0.08 s.
 
 ## Iter-41+ queued (status post iter-41)
 

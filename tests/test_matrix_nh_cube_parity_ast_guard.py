@@ -503,7 +503,7 @@ def test_sw_cube_propagating_tests_have_hyperdiff_override():
 
 
 def test_sw_cube_hyperdiff_gate_matches_propagating_tests():
-    """iter-37/42 sentinel: the SW cube hyperdiff gate matches all
+    """iter-37/42/45 sentinel: the SW cube hyperdiff gate matches all
     propagating tests (W2, W5, W6) — exactly ``test_num in (2, 5, 6)``.
 
     iter-37 originally restricted the gate to ``{5, 6}`` under the
@@ -514,18 +514,29 @@ def test_sw_cube_hyperdiff_gate_matches_propagating_tests():
     is unaffected because it uses its own ``hyperdiff_coeff=0`` config
     (independent of matrix runner).
 
-    This sentinel now pins the wider gate ``{2, 5, 6}``.  Regressions
-    that shrink the gate back to ``{5, 6}`` or widen it to ``{1, 2,
-    5, 6}`` (CB has test_num=1 if numbered, or no test_num) would
-    trip this test.
+    This sentinel now pins the wider gate ``{2, 5, 6}``.  iter-45
+    review-driven fix: anchor the regex to the iter1009-helper call
+    immediately following the gate so a future unrelated
+    ``if test_num in (...):`` elsewhere in the file (e.g., line 2318
+    spectral filter at ``(5, 6)``, line 4068 NH ``(11, 12)``) can't
+    silently pin the wrong gate.
     """
     src = _runner_source()
+    # Anchor to the iter1009_dual_target_config call immediately
+    # following the gate (the gate is followed within ~300 chars by
+    # ``config = iter1009_dual_target_config(...)`` with hyperdiff
+    # kwarg).  This rules out the spectral filter conditional + the
+    # NH test_num gate elsewhere in the file.
     gate_pat = re.search(
-        r"if\s+test_num\s+in\s*\(\s*([\d,\s]+)\s*\)\s*:", src,
+        r"if\s+test_num\s+in\s*\(\s*([\d,\s]+)\s*\)\s*:"
+        r"[\s\S]{0,4000}?"
+        r"config\s*=\s*iter1009_dual_target_config\s*\(\s*n\s*,",
+        src,
     )
     assert gate_pat is not None, (
         "iter-31/33/42 regression: ``if test_num in (...):`` gate "
-        "not found in matrix runner SW cube branch."
+        "immediately followed by ``iter1009_dual_target_config(n, ...)``"
+        " call not found in matrix runner SW cube branch."
     )
     gate_values = {
         int(v.strip()) for v in gate_pat.group(1).split(",") if v.strip()
@@ -534,7 +545,66 @@ def test_sw_cube_hyperdiff_gate_matches_propagating_tests():
         f"iter-42 regression: SW cube hyperdiff gate now matches "
         f"test_num in {sorted(gate_values)} — must be exactly "
         "{{2, 5, 6}}.  Shrinking to {{5, 6}} would re-open the cube "
-        "W2 5-day v_ll_Linf gap (0.82 -> 3.65 m/s)."
+        "W2 5-day v_ll_Linf gap (0.51 -> 3.65 m/s)."
+    )
+
+
+def test_iter1002_w2_sentinel_independent_from_matrix_hyperdiff():
+    """iter-45 review-driven sentinel: pin the independence of the
+    ``test_iter1002_w2_v_ll_linf_meets_target`` unit test from the
+    matrix-runner SW cube hyperdiff gate.
+
+    iter-42 widened the matrix-runner hyperdiff gate from ``{5, 6}``
+    to ``{2, 5, 6}`` (adding W2), relying on the claim that the
+    iter-1002 sentinel uses ITS OWN ``hyperdiff_coeff=0`` config via
+    ``_make_iter1009_config(N)`` — independent of the matrix runner.
+
+    If a future refactor either (a) deletes ``_make_iter1009_config``
+    and routes iter-1002 through the matrix-runner config, or (b)
+    changes ``_make_iter1009_config`` to set hyperdiff_coeff > 0,
+    the iter-1002 sentinel would no longer faithfully test the
+    iter-1030 calibration that codex iter-1009/1021/1030 measured.
+
+    This sentinel pattern-matches the iter-1002 file for those two
+    properties.
+    """
+    sentinel_path = (
+        Path(__file__).resolve().parents[1]
+        / "tests"
+        / "test_iter1002_w2_target_met.py"
+    )
+    src = sentinel_path.read_text()
+    # (a) ``_make_iter1009_config`` is defined and used.
+    assert "def _make_iter1009_config(" in src, (
+        "iter-45 regression: ``_make_iter1009_config`` helper "
+        "deleted from iter-1002 sentinel — its W2 1-day test no "
+        "longer independent of the matrix runner."
+    )
+    # (b) That helper sets ``hyperdiff_coeff=0.0`` (or omits it,
+    # in which case the dataclass default 0.0 applies).
+    helper_pat = re.search(
+        r"def _make_iter1009_config[^}]*?return\s+CDGridShallowWaterConfig\("
+        r"[^)]*?\)",
+        src,
+        re.DOTALL,
+    )
+    assert helper_pat is not None, (
+        "iter-45 regression: ``_make_iter1009_config`` body did not "
+        "match the expected ``return CDGridShallowWaterConfig(...)``."
+    )
+    helper_body = helper_pat.group(0)
+    # If hyperdiff_coeff appears in the helper body, it must be set
+    # to 0 / 0.0 — not a nonzero value that would silently shift the
+    # iter-1002 calibration target.
+    bad_pat = re.search(
+        r"hyperdiff_coeff\s*=\s*(?!0\.0\b|0\b)\S",
+        helper_body,
+    )
+    assert bad_pat is None, (
+        "iter-45 regression: ``_make_iter1009_config`` now sets "
+        f"``hyperdiff_coeff={bad_pat.group(0).split('=')[1]!r}``.  The "
+        "iter-1002 W2 1-day sentinel was calibrated at hyperdiff=0; "
+        "any nonzero value silently shifts the v_ll_Linf target."
     )
 
 
