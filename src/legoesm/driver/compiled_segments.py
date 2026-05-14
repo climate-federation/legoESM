@@ -272,6 +272,15 @@ class SegmentForcing(NamedTuple):
     These change at every segment boundary (SST, solar, ozone, etc.)
     and are passed as explicit arguments to ``run_segment`` so that the
     compiled kernel can be reused across segments without recompilation.
+
+    ``land_fraction`` (iter-257, AIMIP Phase 2.6) is the land grid-cell
+    fraction in [0, 1].  Defaults to all-zero (pure ocean) for backward
+    compatibility with analytical AMIP runs; ERA5-IC AIMIP runs
+    populate it from the reanalysis land-sea mask.  When non-zero, the
+    surface albedo blend in
+    :meth:`legoesm.driver.physics_pipeline.PhysicsPipeline.compute_radiation_core`
+    becomes a 3-way blend
+    ``lf * albedo_land + (1 - lf) * (sic * albedo_ice + (1 - sic) * albedo_ocean)``.
     """
     sst: jax.Array
     sic: jax.Array
@@ -282,6 +291,7 @@ class SegmentForcing(NamedTuple):
     o3_vmr: jax.Array
     aerosol_od: jax.Array
     ghg_vmr: jax.Array  # shape (n_species,); empty (0,) when inactive
+    land_fraction: jax.Array  # in [0,1]; shape matches sst
 
 
 # Canonical GHG species ordering for the ghg_vmr array.
@@ -321,6 +331,7 @@ def pack_forcing(
     sst, sic, day_of_year, seconds_of_day,
     solar_weights, s_0, o3_vmr, aerosol_od,
     ghg_vmr=None,
+    land_fraction=None,
 ) -> SegmentForcing:
     """Pack per-segment forcing into a SegmentForcing pytree.
 
@@ -329,6 +340,12 @@ def pack_forcing(
     ghg_vmr : dict, jax.Array, or None
         GHG volume mixing ratios.  Accepts a dict (auto-converted via
         :func:`ghg_dict_to_array`), a pre-packed array, or None.
+    land_fraction : array-like or None
+        Land grid-cell fraction in [0, 1] (iter-257, AIMIP Phase 2.6).
+        ``None`` defaults to all-zero (pure ocean) for backward
+        compatibility with analytical AMIP runs.  ERA5 AIMIP runs pass
+        the reanalysis land-sea mask here; the surface-albedo blend in
+        radiation then becomes a 3-way ocean / ice / land blend.
     """
     if ghg_vmr is None:
         _ghg = jnp.zeros(0)
@@ -336,8 +353,13 @@ def pack_forcing(
         _ghg = ghg_dict_to_array(ghg_vmr)
     else:
         _ghg = jnp.asarray(ghg_vmr)
+    _sst = jnp.asarray(sst)
+    if land_fraction is None:
+        _lf = jnp.zeros_like(_sst)
+    else:
+        _lf = jnp.asarray(land_fraction)
     return SegmentForcing(
-        sst=jnp.asarray(sst),
+        sst=_sst,
         sic=jnp.asarray(sic),
         day_of_year=jnp.asarray(day_of_year),
         seconds_of_day=jnp.asarray(seconds_of_day),
@@ -346,6 +368,7 @@ def pack_forcing(
         o3_vmr=jnp.asarray(o3_vmr),
         aerosol_od=jnp.asarray(aerosol_od),
         ghg_vmr=_ghg,
+        land_fraction=_lf,
     )
 
 
@@ -375,6 +398,7 @@ def build_segment_fn(
     C_E=None,
     albedo_ice=None,
     albedo_ocean=None,
+    albedo_land=None,
     ghg_vmr_override=None,
     owned_face_ids=None,
     hs_newtonian_relax=None,
@@ -458,6 +482,7 @@ def build_segment_fn(
     _C_E = jnp.asarray(C_E) if C_E is not None else None
     _albedo_ice = jnp.asarray(albedo_ice) if albedo_ice is not None else None
     _albedo_ocean = jnp.asarray(albedo_ocean) if albedo_ocean is not None else None
+    _albedo_land = jnp.asarray(albedo_land) if albedo_land is not None else None
     # GHG VMR: species key order is static (captured in closure);
     # values are dynamic (passed via SegmentForcing.ghg_vmr).
     _ghg_keys: tuple[str, ...] = ()
@@ -573,6 +598,8 @@ def build_segment_fn(
                     sbm_tau_c=_sbm_tau_c, sbm_RH_ref=_sbm_RH_ref,
                     C_H=_C_H, C_E=_C_E,
                     albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
+                    albedo_land=_albedo_land,
+                    land_fraction=forcing.land_fraction,
                     ghg_vmr_override=_ghg_vmr_override,
                 )
 
@@ -629,6 +656,8 @@ def build_segment_fn(
                     sbm_tau_c=_sbm_tau_c, sbm_RH_ref=_sbm_RH_ref,
                     C_H=_C_H, C_E=_C_E,
                     albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
+                    albedo_land=_albedo_land,
+                    land_fraction=forcing.land_fraction,
                     ghg_vmr_override=_ghg_vmr_override,
                 )
 

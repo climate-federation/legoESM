@@ -47,13 +47,18 @@ DEFAULT_TRAINABLE = [
 # See ``tests/test_aimip_phase2_trainable_wired.py`` for the
 # regression guard that enforces this invariant.
 #
-# iter-251 history: ``albedo_land`` was added here but reverted in
-# iter-256 once an audit (see ``new_test_dycores.md``) confirmed that
-# (a) ``build_segment_fn`` has no ``albedo_land`` kwarg and (b) the
-# surface blend in ``physics_pipeline.compute_radiation_core`` is
-# ``sic * albedo_ice + (1 - sic) * albedo_ocean`` with no land term.
-# ``albedo_land`` will be re-added once the surface infra grows a land
-# fraction channel (AIMIP Phase 2.6 prerequisite).
+# iter-251 history: ``albedo_land`` was added, then reverted in
+# iter-256 because the surface blend in
+# ``physics_pipeline.compute_radiation_core`` was ice/ocean-only with
+# no land-fraction channel, so the gradient flowed into a value
+# nothing read.  iter-257 (AIMIP Phase 2.6) added
+# ``SegmentForcing.land_fraction`` + the 3-way albedo blend
+# ``lf * albedo_land + (1 - lf) * (sic * albedo_ice + (1 - sic) * albedo_ocean)``
+# and threaded ``albedo_land`` through
+# ``build_segment_fn`` -> ``step_unified`` ->
+# ``compute_radiation_core``, so the param is now safe to gradient-
+# couple again.  Analytical AMIP runs (land_fraction = 0) are
+# bit-for-bit unaffected.
 _COMMON_TRAINABLE = [
     ParamConstraint("tau_equator", 5.0, 10.0, "sigmoid"),
     ParamConstraint("tau_pole", 1.0, 3.0, "sigmoid"),
@@ -61,6 +66,7 @@ _COMMON_TRAINABLE = [
     ParamConstraint("C_E", 0.001, 0.005, "sigmoid"),
     ParamConstraint("albedo_ice", 0.4, 0.8, "sigmoid"),
     ParamConstraint("albedo_ocean", 0.03, 0.10, "sigmoid"),
+    ParamConstraint("albedo_land", 0.1, 0.4, "sigmoid"),
 ]
 
 # SBM-specific convection parameters

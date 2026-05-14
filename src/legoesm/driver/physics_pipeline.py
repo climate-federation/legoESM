@@ -93,6 +93,11 @@ class PhysicsPipeline:
         Sea-ice albedo.
     albedo_ocean : float
         Ocean albedo.
+    albedo_land : float
+        Land-surface albedo (iter-257, AIMIP Phase 2.6).  Only takes
+        effect when ``SegmentForcing.land_fraction`` is non-zero — i.e.
+        ERA5-IC AIMIP runs.  Analytical AMIP defaults (land_fraction=0)
+        are bit-for-bit unaffected.
     emissivity_ice : float
         Sea-ice emissivity.
     emissivity_ocean : float
@@ -119,6 +124,7 @@ class PhysicsPipeline:
         C_E=0.0044,
         albedo_ice=0.65,
         albedo_ocean=0.06,
+        albedo_land=0.3,
         emissivity_ice=0.95,
         emissivity_ocean=0.97,
         micro_fn=None,
@@ -142,6 +148,7 @@ class PhysicsPipeline:
         self.C_E = C_E
         self.albedo_ice = albedo_ice
         self.albedo_ocean = albedo_ocean
+        self.albedo_land = albedo_land
         self.emissivity_ice = emissivity_ice
         self.emissivity_ocean = emissivity_ocean
         self.micro_fn = micro_fn
@@ -505,10 +512,18 @@ class PhysicsPipeline:
                                o3_vmr_precomputed, aerosol_od_precomputed,
                                tau_equator=None, tau_pole=None,
                                albedo_ice=None, albedo_ocean=None,
+                               albedo_land=None,
+                               land_fraction=None,
                                ghg_vmr_override=None,
                                q_c=None, q_r=None,
                                cloud_scheme="none"):
         """Compute radiation tendencies and fluxes (pure JAX, no I/O).
+
+        ``land_fraction`` (iter-257, AIMIP Phase 2.6) is the per-column
+        land grid-cell fraction in [0, 1].  When ``None`` or all-zero
+        the call is bit-for-bit identical to the pre-iter-257 ice/ocean
+        blend.  When non-zero the surface albedo becomes a 3-way blend
+        ``lf * albedo_land + (1 - lf) * (sic * albedo_ice + (1 - sic) * albedo_ocean)``.
 
         Returns (dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa, lw_up_toa,
                  sw_down_toa) as a 6-tuple.
@@ -517,12 +532,18 @@ class PhysicsPipeline:
 
         _albedo_ice = self.albedo_ice if albedo_ice is None else albedo_ice
         _albedo_ocean = self.albedo_ocean if albedo_ocean is None else albedo_ocean
+        _albedo_land = self.albedo_land if albedo_land is None else albedo_land
 
         ad = self.adapter
         nlev = self.sigma_full.shape[0]
 
         T_sfc = blend_surface_temperature(sst, sic, self.T_ice)
-        albedo = blend_surface_property(sic, _albedo_ice, _albedo_ocean)
+        _ocean_ice_albedo = blend_surface_property(sic, _albedo_ice, _albedo_ocean)
+        if land_fraction is None:
+            albedo = _ocean_ice_albedo
+        else:
+            _lf = jnp.clip(land_fraction, 0.0, 1.0)
+            albedo = _lf * _albedo_land + (1.0 - _lf) * _ocean_ice_albedo
         emissivity = blend_surface_property(sic, self.emissivity_ice, self.emissivity_ocean)
 
         p_full = p_s[..., None] * self.sigma_full
@@ -635,6 +656,8 @@ class PhysicsPipeline:
                          C_H=pipeline.C_H, C_E=pipeline.C_E,
                          albedo_ice=pipeline.albedo_ice,
                          albedo_ocean=pipeline.albedo_ocean,
+                         albedo_land=pipeline.albedo_land,
+                         land_fraction=None,
                          ghg_vmr_override=None):
 
             def _rad_branch(args):
@@ -645,6 +668,7 @@ class PhysicsPipeline:
                  held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                  tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref,
                  C_H, C_E, albedo_ice, albedo_ocean,
+                 albedo_land, land_fraction,
                  ghg_vmr_override) = args
 
                 (dT_dt_rad, sw_net_sfc, lw_net_sfc,
@@ -655,6 +679,8 @@ class PhysicsPipeline:
                         solar_weights, s_0, o3_vmr, aerosol_od,
                         tau_equator=tau_equator, tau_pole=tau_pole,
                         albedo_ice=albedo_ice, albedo_ocean=albedo_ocean,
+                        albedo_land=albedo_land,
+                        land_fraction=land_fraction,
                         ghg_vmr_override=ghg_vmr_override,
                         q_c=q_c,
                         cloud_scheme=pipeline._cloud_scheme,
@@ -687,7 +713,9 @@ class PhysicsPipeline:
                  held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                  tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref,
                  C_H, C_E, albedo_ice, albedo_ocean,
+                 albedo_land, land_fraction,
                  ghg_vmr_override) = args
+                del albedo_land, land_fraction  # unused in no-rad branch
 
                 physics_out = pipeline.physics_step_no_rad(
                     T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, dt,
@@ -708,6 +736,12 @@ class PhysicsPipeline:
                 physics_out = jax.tree.map(_cast, physics_out)
                 return physics_out, new_held
 
+            # land_fraction default = zeros_like(sst) keeps the
+            # ice/ocean blend identical to pre-iter-257 behaviour.
+            _land_fraction = (
+                jnp.zeros_like(sst) if land_fraction is None
+                else land_fraction
+            )
             args = (T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
                     day_of_year, seconds_of_day, dt,
                     solar_weights, s_0, o3_vmr, aerosol_od,
@@ -715,6 +749,7 @@ class PhysicsPipeline:
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                     tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref,
                     C_H, C_E, albedo_ice, albedo_ocean,
+                    albedo_land, _land_fraction,
                     ghg_vmr_override)
 
             return jax.lax.cond(need_rad, _rad_branch, _no_rad_branch, args)

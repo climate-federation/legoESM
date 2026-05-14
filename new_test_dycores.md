@@ -491,5 +491,51 @@ Phase-2 trainable accounting (revised, iter-256):
 This is fewer params than the AIMIP plan target (~17-20) — but every entry now actually gradient-couples to the rollout.  `albedo_land`, `Ri_crit`, `Ck`, `l_mix_max` remain in `TUNING_PARAMETERS` as experiment-config knobs; they will re-enter the trainable set once their respective surface and turbulence wiring lands.
 
 Real Phase-2 wiring backlog (each a distinct future iter):
-- **Phase 2.6**: introduce `land_fraction` channel through `SegmentForcing` + surface blend, then thread `albedo_land` through `build_segment_fn` → `step_unified` → `compute_radiation_core` and add to `_COMMON_TRAINABLE`.
+- **Phase 2.6**: introduce `land_fraction` channel through `SegmentForcing` + surface blend, then thread `albedo_land` through `build_segment_fn` → `step_unified` → `compute_radiation_core` and add to `_COMMON_TRAINABLE`.  **LANDED iter-257** (see below).
 - **Phase 2.7**: thread `Ri_crit` / `Ck` / `l_mix_max` through `build_segment_fn` → `step_unified` → `physics_step_no_rad` → Louis turbulence scheme; add back to `_LOUIS_TURBULENCE_TRAINABLE`.
+
+## Iter-257 — AIMIP Phase 2.6 LANDED: land-fraction channel + 3-way albedo blend
+
+Wired `albedo_land` end-to-end so it actually gradient-couples to the rollout.  Multi-file change, every step verified before stacking the next:
+
+1. **`SegmentForcing` grew a `land_fraction` field** (`src/legoesm/driver/compiled_segments.py`).
+   - NamedTuple field count 9 → 10.
+   - `pack_forcing(..., land_fraction=None)` defaults to `jnp.zeros_like(sst)` so analytical AMIP runs are bit-for-bit identical to pre-iter-257.
+
+2. **`PhysicsPipeline.albedo_land` field** (`src/legoesm/driver/physics_pipeline.py`).
+   - Constructor default = 0.30 (mid-range desert/snow).
+   - Stored on the instance and consumed by `compute_radiation_core`.
+
+3. **3-way albedo blend in `compute_radiation_core`** (same file).
+   - Accepts new kwargs `albedo_land`, `land_fraction`.
+   - When `land_fraction is None` the blend is unchanged from pre-iter-257.
+   - Otherwise: `albedo = lf*albedo_land + (1-lf) * (sic*albedo_ice + (1-sic)*albedo_ocean)`, with `lf` clipped to `[0, 1]` for numerical safety.
+
+4. **`step_unified` threads the new kwargs** (same file).
+   - Signature grew `albedo_land=pipeline.albedo_land` and `land_fraction=None`.
+   - Both `_rad_branch` and `_no_rad_branch` accept them in their args-tuple; the no-rad branch deletes them locally (radiation-only relevance).
+   - Inside `step_unified` a default `_land_fraction = jnp.zeros_like(sst)` is built when the caller passes `None`, keeping the `lax.cond` branches dtype-consistent.
+
+5. **`build_segment_fn` propagates `albedo_land` + `forcing.land_fraction`** (`src/legoesm/driver/compiled_segments.py`).
+   - New `albedo_land=None` kwarg cast to `_albedo_land = jnp.asarray(...)` once at build time.
+   - Both `step_unified` call sites (owned-face MPI path + serial path) now pass `albedo_land=_albedo_land, land_fraction=forcing.land_fraction`.
+
+6. **`albedo_land` back in `_COMMON_TRAINABLE`** (`src/legoesm/training/trainable_params.py`).
+   - Updated the docstring to record the full revert→relanding history (iters 251→256→257).
+   - Sentinel expected-wired list now includes `albedo_land`; `UNWIRED_TODO` remains empty.
+
+7. **New unit-level sentinel** `tests/test_aimip_phase26_albedo_blend.py`.
+   - 6 parametrized cases pin the 3-way blend at canonical points (pure ocean, pure ice, pure land, lf=1 dominating ice, 50/50 land/ocean, generic mix).
+   - 2 tests pin `pack_forcing` default + round-trip behaviour for `land_fraction`.
+   - 1 test pins the `SegmentForcing._fields` count + presence of `land_fraction`.
+
+Test status: all 16 AIMIP-specific tests green; `tests/unit/test_compiled_segments.py` (28 tests) green.  Two pre-existing failures unrelated to this iter (`tests/unit/test_gradient_checkpointing.py`, `tests/validation/test_scaling_readiness.py::test_segment_carry_is_valid_pytree`) verified to fail identically on parent commit `b2c7a626`.
+
+Phase-2 trainable accounting (revised, iter-257):
+
+| Set | Count | Names | Wired? |
+|-----|-------|-------|--------|
+| `_COMMON_TRAINABLE` | 7 | `tau_equator, tau_pole, C_H, C_E, albedo_ice, albedo_ocean, albedo_land` | 7/7 |
+| `_SBM_TRAINABLE` | 2 | `sbm_tau_c, sbm_RH_ref` | 2/2 |
+| `_LOUIS_TURBULENCE_TRAINABLE` | 0 | — | 0/0 |
+| **Total wired trainable** | **9** | | **100 %** |

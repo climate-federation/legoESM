@@ -101,7 +101,11 @@ def test_wired_trainable_count_matches_expected():
     wired = sorted(n for n in all_trainable if n in kwargs)
     expected = sorted(
         ["tau_equator", "tau_pole", "sbm_tau_c", "sbm_RH_ref",
-         "C_H", "C_E", "albedo_ice", "albedo_ocean"]
+         "C_H", "C_E", "albedo_ice", "albedo_ocean",
+         # iter-257 (AIMIP Phase 2.6): albedo_land wired through
+         # build_segment_fn + step_unified + compute_radiation_core
+         # with the 3-way land/ice/ocean blend.
+         "albedo_land"]
     )
     assert wired == expected, (
         f"Wired-trainable param set changed.  Expected {expected}, "
