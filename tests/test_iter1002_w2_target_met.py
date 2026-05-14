@@ -218,6 +218,37 @@ def test_iter1013_preset_helper_matches_explicit_config():
     assert preset.hyperdiff_coeff == explicit.hyperdiff_coeff
 
 
+def test_iter35_hyperdiff_coeff_kwarg_threads_through():
+    """new_test_dycores iter-35: ``iter1009_dual_target_config``
+    accepts ``hyperdiff_coeff`` as an optional kwarg that threads
+    through to the returned ``CDGridShallowWaterConfig.hyperdiff_coeff``
+    field unchanged.
+
+    The matrix-runner SW W5/W6 cube paths rely on this kwarg to add
+    biharmonic hyperdiffusion that prevents long-run BLOWUP at day
+    14.58 (W5) / day 9.03 (W6).
+    """
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        iter1009_dual_target_config,
+    )
+    N = 36
+    # Default: 0.0 (preserves iter-1030 backward compat).
+    default_cfg = iter1009_dual_target_config(N)
+    assert default_cfg.hyperdiff_coeff == 0.0, (
+        f"iter-35 regression: helper default hyperdiff_coeff != 0.0 "
+        f"(got {default_cfg.hyperdiff_coeff!r})"
+    )
+    # Kwarg threads through.
+    custom = iter1009_dual_target_config(N, hyperdiff_coeff=1.234e16)
+    assert custom.hyperdiff_coeff == 1.234e16, (
+        f"iter-35 regression: hyperdiff_coeff kwarg did not thread "
+        f"through (got {custom.hyperdiff_coeff!r}, want 1.234e16)"
+    )
+    # Other fields stay at iter-1030 defaults.
+    assert custom.damp_v == 0.030
+    assert custom.div_damp == default_cfg.div_damp
+
+
 def test_iter1002_w2_v_ll_linf_meets_target():
     """W2 C36 1-day v_ll_Linf ≤ 0.119 m/s with iter-1009 calibration."""
     N = 36
