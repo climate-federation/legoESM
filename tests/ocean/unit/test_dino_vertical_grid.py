@@ -16,8 +16,6 @@ import pytest
 
 from legoesm.ocean.experiments.dino import (
     DINOConfig,
-    _dino_depth_at_k,
-    _dino_stretching_coefficients,
     create_dino_z_star,
 )
 
@@ -105,25 +103,28 @@ def test_dz_consistency_with_interfaces():
 
 
 def test_stretching_coefficients_satisfy_constraints():
-    """Verify the (a₀, a₁, a₂) constraints algebraically."""
+    """Verify the (a₀, a₁, a₂) constraints algebraically (via the
+    promoted general helper in legoesm.ocean.vertical)."""
+    from legoesm.ocean.vertical import (
+        _levy_depth_at_k, _levy_stretching_coefficients,
+    )
     cfg = DINOConfig()
     K_formula = cfg.n_levels + 1
-    a0, a1, a2 = _dino_stretching_coefficients(
+    a0, a1, a2 = _levy_stretching_coefficients(
         K_formula=K_formula, H=cfg.H_deep, dz_min=cfg.dz_min,
         k_th=float(cfg.k_th), a_cr=cfg.a_cr,
     )
     # Constraint 1: z(k=1) = 0 (surface)
-    z_at_1 = _dino_depth_at_k(1.0, a0, a1, a2, float(cfg.k_th), cfg.a_cr)
+    z_at_1 = _levy_depth_at_k(1.0, a0, a1, a2, float(cfg.k_th), cfg.a_cr)
     assert z_at_1 == pytest.approx(0.0, abs=1e-9)
 
     # Constraint 2: z(k=K_formula) = H (bottom)
-    z_at_K = _dino_depth_at_k(
+    z_at_K = _levy_depth_at_k(
         float(K_formula), a0, a1, a2, float(cfg.k_th), cfg.a_cr,
     )
     assert z_at_K == pytest.approx(cfg.H_deep, abs=1e-6)
 
     # Constraint 3: dz/dk at k=1 = dz_min (derivative)
-    # dz/dk = a1 + a0·tanh((k-k_th)/a_cr)
     import math
     deriv_at_1 = a1 + a0 * math.tanh((1 - cfg.k_th) / cfg.a_cr)
     assert deriv_at_1 == pytest.approx(cfg.dz_min, abs=1e-9)

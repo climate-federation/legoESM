@@ -35,7 +35,10 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm import constants
-from legoesm.ocean.vertical import OceanZStarCoordinate
+from legoesm.ocean.vertical import (
+    OceanZStarCoordinate,
+    create_levy_stretched_z_star,
+)
 
 
 @dataclass
@@ -711,104 +714,21 @@ def dino_initial_T_S(lat_deg, z_full_ref, cfg: DINOConfig | None = None):
 # Phase 2E — Vertical grid (Appendix C, eq C3)
 # ---------------------------------------------------------------------
 
-def _dino_stretching_coefficients(
-    K_formula: int,
-    H: float,
-    dz_min: float,
-    k_th: float,
-    a_cr: float,
-) -> tuple[float, float, float]:
-    """Compute (a₀, a₁, a₂) for the Lévy 2010 / DINO tanh+ln(cosh) stretching.
-
-    Paper eq C3 in the variable-name convention of NEMO's mi96_1d
-    (vopikamm/DINO@v0.2.0 MY_SRC/zgr_lib.F90). The paper text says
-    "K = 36 levels" (cell count) but writes K-1 in the formula
-    denominators; the NEMO source clarifies that K in the formula is
-    the *interface* count = n_levels + 1.
-
-    Constraints:
-      z(k=1)        = 0   (surface interface)
-      z(k=K_formula) = H  (bottom interface)
-      z(k=2) - z(k=1) ≈ dz_min  (top layer thickness)
-
-    where z(k) = a₂ + a₁·k + a₀·a_cr·ln(cosh((k-k_th)/a_cr)).
-    """
-    Km1 = K_formula - 1
-    th = math.tanh((1 - k_th) / a_cr)
-    log_cosh_K = math.log(math.cosh((K_formula - k_th) / a_cr))
-    log_cosh_1 = math.log(math.cosh((1 - k_th) / a_cr))
-    denom = th - (a_cr / Km1) * (log_cosh_K - log_cosh_1)
-    a0 = (dz_min - H / Km1) / denom
-    a1 = dz_min - a0 * th
-    a2 = -a1 - a0 * a_cr * log_cosh_1
-    return a0, a1, a2
-
-
-def _dino_depth_at_k(
-    k: float, a0: float, a1: float, a2: float, k_th: float, a_cr: float,
-) -> float:
-    """Evaluate z(k) = a₂ + a₁·k + a₀·a_cr·ln(cosh((k-k_th)/a_cr))."""
-    return a2 + a1 * k + a0 * a_cr * math.log(math.cosh((k - k_th) / a_cr))
-
-
 def create_dino_z_star(cfg: DINOConfig | None = None) -> OceanZStarCoordinate:
     """36-level Lévy 2010 stretched z* grid for DINO (Appendix C).
 
-    Top layer thickness ≈ ``dz_min`` (10 m); bottom layer is ~600 m.
-    Surface interface is exactly 0; bottom interface is snapped to
-    exactly ``-H_deep`` to absorb sub-meter rounding from the formula.
-
-    Returns
-    -------
-    OceanZStarCoordinate
-        With n_levels = cfg.n_levels (36 by default), H_max = cfg.H_deep.
+    Thin wrapper around ``legoesm.ocean.vertical.create_levy_stretched_z_star``
+    that supplies DINO's parameter values. Top layer thickness ≈ 10 m;
+    bottom layer ~454 m; surface interface = 0; bottom interface = -4000 m.
     """
     if cfg is None:
         cfg = DINOConfig()
-
-    n_levels = cfg.n_levels
-    H = cfg.H_deep
-    K_formula = n_levels + 1  # interface count (NEMO jpk convention)
-
-    a0, a1, a2 = _dino_stretching_coefficients(
-        K_formula=K_formula,
-        H=H,
+    return create_levy_stretched_z_star(
+        n_levels=cfg.n_levels,
+        H_max=cfg.H_deep,
         dz_min=cfg.dz_min,
         k_th=float(cfg.k_th),
         a_cr=cfg.a_cr,
-    )
-
-    # Interfaces at integer k = 1, 2, ..., K_formula → n_levels+1 interfaces
-    k_half = list(range(1, K_formula + 1))
-    z_half_pos = [
-        _dino_depth_at_k(float(k), a0, a1, a2, float(cfg.k_th), cfg.a_cr)
-        for k in k_half
-    ]
-
-    # legoESM convention: z negative below surface, surface at index 0
-    z_half_list = [-z for z in z_half_pos]
-    z_half_list[0] = 0.0   # snap surface (formula gives ~1e-12 residue)
-    z_half_list[-1] = -H   # snap bottom (formula gives sub-meter residue)
-    z_half_ref = jnp.asarray(z_half_list)
-
-    # Layer thicknesses (positive, surface-to-bottom)
-    dz_ref = z_half_ref[:-1] - z_half_ref[1:]
-
-    # Cell centers as midpoints of adjacent interfaces (matches legoESM
-    # convention; paper formula evaluated at k+0.5 gives nearly the same
-    # values but using midpoints keeps z_full_ref consistent with dz_ref).
-    z_full_ref = 0.5 * (z_half_ref[:-1] + z_half_ref[1:])
-
-    # Distance between adjacent full levels
-    dz_half_ref = z_full_ref[:-1] - z_full_ref[1:]
-
-    return OceanZStarCoordinate(
-        n_levels=n_levels,
-        H_max=H,
-        z_full_ref=z_full_ref,
-        z_half_ref=z_half_ref,
-        dz_ref=dz_ref,
-        dz_half_ref=dz_half_ref,
     )
 
 
@@ -832,64 +752,44 @@ def dino_mpas_land_mask(
     cfg: DINOConfig | None = None,
     seam_strip_width_deg: float | None = None,
 ):
-    """Per-cell land mask (1=ocean, 0=land) for a DINO MPAS regional mesh.
+    """Per-cell land mask for a DINO MPAS regional mesh.
 
-    Three sources of land:
-      1. Cells with latitude outside [-lat_max_deg, lat_max_deg] — the
-         buffer/land cells around the target domain.
-      2. Cells within ``seam_strip_width_deg`` of the periodic seam
-         (lon = lon_west = lon_east) AND outside the channel band:
-         creates a wall at the seam everywhere except in the channel.
-      3. (Future) Land cells inside the basin if needed for islands etc.
-         — none for DINO.
+    Thin wrapper around ``partial_periodic_seam_wall_mpas`` (which
+    provides the general partial-periodic seam-wall pattern) combined
+    with a lat-band buffer mask for cells outside ±lat_max_deg.
 
     Parameters
     ----------
     mesh : VoronoiMesh
-        Created by ``create_regional_voronoi_mesh(..., periodic_x=True)``.
     cfg : DINOConfig, optional
     seam_strip_width_deg : float, optional
-        Width (in degrees of longitude) of the wall strip near the
-        periodic seam. Defaults to one nominal cell width estimated
-        from the mesh's median ``dcEdge``. Set explicitly for
-        reproducibility.
+        See ``partial_periodic_seam_wall_mpas``.
 
     Returns
     -------
     land_mask : jax array, shape (nCells,)
         1.0 = ocean, 0.0 = land.
     """
+    from legoesm.ocean.init_mpas import partial_periodic_seam_wall_mpas
+
     if cfg is None:
         cfg = DINOConfig()
 
-    # Mesh lonCell is in [0, 2π); wrap to (-180, 180] to match DINOConfig
-    lon_deg = (jnp.degrees(mesh.lonCell) + 180.0) % 360.0 - 180.0
+    # Source 1: buffer cells outside lat band [-lat_max_deg, lat_max_deg]
     lat_deg = jnp.degrees(mesh.latCell)
+    in_lat_band = (
+        (lat_deg >= -cfg.lat_max_deg) & (lat_deg <= cfg.lat_max_deg)
+    ).astype(jnp.float32)
 
-    # --- Source 1: buffer cells outside lat-domain --------------------
-    in_lat_band = (lat_deg >= -cfg.lat_max_deg) & (lat_deg <= cfg.lat_max_deg)
-
-    # --- Source 2: seam wall outside channel band --------------------
-    if seam_strip_width_deg is None:
-        # Estimate one cell width from the mesh: dcEdge is the
-        # cell-center-to-cell-center distance. Convert to degrees of lon.
-        median_dc_m = float(jnp.median(mesh.dcEdge))
-        seam_strip_width_deg = (median_dc_m / mesh.radius) * (180.0 / math.pi)
-
-    # The seam is at lon_west = lon_east (identified). "Near the seam"
-    # = within seam_strip_width_deg of the western boundary
-    # (equivalently, of the eastern boundary, by periodicity).
-    near_seam = (lon_deg - cfg.lon_west_deg) < seam_strip_width_deg
-
-    # In the channel band, the seam is open (no wall)
-    in_channel = (
-        (lat_deg >= cfg.channel_lat_south_deg)
-        & (lat_deg <= cfg.channel_lat_north_deg)
+    # Source 2: seam wall outside channel band (general helper)
+    return partial_periodic_seam_wall_mpas(
+        mesh,
+        open_lat_south_deg=cfg.channel_lat_south_deg,
+        open_lat_north_deg=cfg.channel_lat_north_deg,
+        seam_lon_deg=cfg.lon_west_deg,
+        seam_strip_width_deg=seam_strip_width_deg,
+        base_mask=in_lat_band,
     )
-    seam_wall = near_seam & ~in_channel
-
-    is_ocean = in_lat_band & ~seam_wall
-    return is_ocean.astype(jnp.float32)
 
 
 def dino_mpas_initial_state_arrays(
@@ -1011,20 +911,16 @@ def dino_lat_lon_initial_state_arrays(
     S = jnp.broadcast_to(S_lat_z[:, None, :],
                          (grid.n_lat, grid.n_lon, z_coord.n_levels))
 
-    # Land mask: ocean everywhere in the basin EXCEPT the westernmost
-    # longitude column outside the channel band. Lat-lon C-grid
-    # operators wrap east-west via jnp.roll (always periodic), so
-    # without this seam-wall the basin would be re-entrant at every
-    # latitude — gyres would wrap around the world. Same approach as
-    # the MPAS land mask in dino_mpas_land_mask.
-    in_channel = (
-        (lat_deg_1d >= cfg.channel_lat_south_deg)
-        & (lat_deg_1d <= cfg.channel_lat_north_deg)
-    )
-    is_west_seam = jnp.zeros(grid.n_lon).at[0].set(1.0)        # (n_lon,)
-    is_outside_channel = jnp.where(in_channel, 0.0, 1.0)        # (n_lat,)
-    seam_wall_2d = is_outside_channel[:, None] * is_west_seam[None, :]
-    land_mask = (1.0 - seam_wall_2d).astype(T.dtype)
+    # Land mask: thin wrapper over the general lat-lon partial-
+    # periodic seam-wall helper. Channel is open between
+    # channel_lat_south_deg and channel_lat_north_deg.
+    from legoesm.ocean.init_latlon_cgrid import partial_periodic_seam_wall_latlon
+    land_mask = partial_periodic_seam_wall_latlon(
+        grid,
+        open_lat_south_deg=cfg.channel_lat_south_deg,
+        open_lat_north_deg=cfg.channel_lat_north_deg,
+        seam_column_index=0,
+    ).astype(T.dtype)
 
     # Mask T, S on land (keep ocean values)
     mask3d = land_mask[..., None]

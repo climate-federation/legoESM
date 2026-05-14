@@ -15,6 +15,7 @@ Reference z values are negative (below sea level).
 
 from __future__ import annotations
 
+import math
 from typing import NamedTuple
 
 import jax.numpy as jnp
@@ -125,6 +126,132 @@ def create_ocean_z_star(
 
     # Distance between full levels
     dz_half_ref = z_full_ref[:-1] - z_full_ref[1:]  # positive
+
+    return OceanZStarCoordinate(
+        n_levels=n_levels,
+        H_max=H_max,
+        z_full_ref=z_full_ref,
+        z_half_ref=z_half_ref,
+        dz_ref=dz_ref,
+        dz_half_ref=dz_half_ref,
+    )
+
+
+def _levy_stretching_coefficients(
+    K_formula: int,
+    H: float,
+    dz_min: float,
+    k_th: float,
+    a_cr: float,
+) -> tuple[float, float, float]:
+    """Compute (a₀, a₁, a₂) for the Lévy (2010) tanh+ln(cosh) vertical
+    stretching used by NEMO's mi96_1d routine (Madec-Imbard 1996).
+
+    The stretching function is::
+
+        z(k) = a₂ + a₁·k + a₀·a_cr·ln(cosh((k - k_th)/a_cr))
+
+    Coefficients are determined by three constraints:
+
+      z(k=1)         = 0     (surface interface)
+      z(k=K_formula) = H     (bottom interface)
+      dz/dk at k=1   = dz_min  (derivative-based top-layer scale)
+
+    Parameters
+    ----------
+    K_formula : int
+        Index of the bottom interface in the formula's k-coordinate.
+        In NEMO terminology this is ``jpk`` (interface count). For
+        ``n_levels`` cells the value is ``n_levels + 1``.
+    H : float
+        Total ocean depth [m] (positive).
+    dz_min : float
+        Target top-layer derivative ``dz/dk`` at k=1 [m].
+    k_th : float
+        Inflection-level index. Layers ``k > k_th`` are thicker than
+        ``k < k_th``. Typically ``k_th = n_levels - 1``.
+    a_cr : float
+        Stretching width parameter. Smaller = sharper transition near
+        ``k_th``. Typically 5-15.
+
+    Returns
+    -------
+    (a0, a1, a2) : tuple of float
+    """
+    Km1 = K_formula - 1
+    th = math.tanh((1 - k_th) / a_cr)
+    log_cosh_K = math.log(math.cosh((K_formula - k_th) / a_cr))
+    log_cosh_1 = math.log(math.cosh((1 - k_th) / a_cr))
+    denom = th - (a_cr / Km1) * (log_cosh_K - log_cosh_1)
+    a0 = (dz_min - H / Km1) / denom
+    a1 = dz_min - a0 * th
+    a2 = -a1 - a0 * a_cr * log_cosh_1
+    return a0, a1, a2
+
+
+def _levy_depth_at_k(k, a0, a1, a2, k_th, a_cr) -> float:
+    """Evaluate the Lévy stretching formula at arbitrary k (positive)."""
+    return a2 + a1 * k + a0 * a_cr * math.log(math.cosh((k - k_th) / a_cr))
+
+
+def create_levy_stretched_z_star(
+    n_levels: int,
+    H_max: float,
+    dz_min: float,
+    k_th: float,
+    a_cr: float,
+) -> OceanZStarCoordinate:
+    """Construct a Lévy (2010) / Madec-Imbard (1996) stretched z* grid.
+
+    Used by NEMO's ``mi96_1d`` routine and many idealized NEMO configs
+    (Neverworld 2, DINO, Munday-Marshall-Johnson). Top-layer derivative
+    is ``dz_min``; layer thickness grows smoothly to ~H/K_formula·tanh
+    in the deep abyss.
+
+    Returns
+    -------
+    OceanZStarCoordinate
+        With ``n_levels`` cells, surface interface at 0, bottom
+        interface snapped to exactly ``-H_max``.
+
+    Notes
+    -----
+    NEMO note on indexing: the formula's "K" in the literature is
+    the interface count (= n_levels + 1), NOT the cell count.
+    See Madec & Imbard 1996 / Lévy et al. 2010.
+    """
+    if n_levels < 2:
+        raise ValueError(f"n_levels must be >= 2, got {n_levels!r}")
+    if H_max <= 0.0:
+        raise ValueError(f"H_max must be > 0, got {H_max!r}")
+    if dz_min <= 0.0:
+        raise ValueError(f"dz_min must be > 0, got {dz_min!r}")
+
+    K_formula = n_levels + 1  # interface count (NEMO jpk convention)
+
+    a0, a1, a2 = _levy_stretching_coefficients(
+        K_formula=K_formula,
+        H=H_max,
+        dz_min=dz_min,
+        k_th=float(k_th),
+        a_cr=a_cr,
+    )
+
+    # Interfaces at integer k = 1, 2, ..., K_formula → n_levels+1 interfaces
+    z_half_pos = [
+        _levy_depth_at_k(float(k), a0, a1, a2, float(k_th), a_cr)
+        for k in range(1, K_formula + 1)
+    ]
+
+    # legoESM convention: z negative below surface
+    z_half_list = [-z for z in z_half_pos]
+    z_half_list[0] = 0.0     # snap surface
+    z_half_list[-1] = -H_max # snap bottom (kills sub-meter formula residue)
+    z_half_ref = jnp.asarray(z_half_list)
+
+    dz_ref = z_half_ref[:-1] - z_half_ref[1:]
+    z_full_ref = 0.5 * (z_half_ref[:-1] + z_half_ref[1:])
+    dz_half_ref = z_full_ref[:-1] - z_full_ref[1:]
 
     return OceanZStarCoordinate(
         n_levels=n_levels,
