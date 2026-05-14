@@ -16,7 +16,8 @@ Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV /
 - **Apples-to-apples completion (iter-75)**: post-iter-72 audit confirmed **NO remaining quick/full mode result mismatches** in SW or PE matrix (17 cases × 4 grids = 68 entries).
 - **iter-66 negative-result AST sentinel (iter-79)**: locked in via `test_iter66_cb_ico_uses_additive_correction` — guards against future ico CB multiplicative-fixer attempts that regress Linf 5×.
 - **Repo hygiene (iter-76)**: `_probe_*.py` added to `.gitignore` (prevents accidental commit of throwaway audit scripts).
-- **TC1 NH cube 0.040 vs claim 0.014 (iter-63 audit)**: matrix uses `nord_v=2` default; factory uses `nord_v=1`.  iter-64 queued — probe `nord_v=1` once NH matrix re-run completes (in progress, taking unusually long: TC1=28 min, TC2 ~80 min+ ongoing).
+- **TC1 NH cube 0.040 vs doc claim 0.014 — RESOLVED (iter-81)**: not a config issue.  Cached NH TC1 cube ran at **3.0 hours** (full mode); ico + spec cached at **0.5 hours** (quick mode).  The "0.040 vs 0.014" gap was **apples-to-oranges duration mismatch**, NOT a nord_v=1 vs nord_v=2 issue.  Quick-mode 0.5-hr cube measurement at iter-7 fixes gave 0.014 (matching ico/spec).  iter-63's nord_v hypothesis is **withdrawn**; iter-64 nord_v probe **no longer needed**.  TC1 cube is at parity when measured apples-to-apples.  NH duration mismatch is the 6th quick/full mode caching issue found this loop (SW W2/W5/W6/CB + PE gravity_wave_3_1 + NH TC1).
+- **NH TC2 / TC3 cube outliers (current cached, awaiting refresh)**: TC2 cube 4.54 m/s vs ico/spec 0.36 m/s (12.8× outlier — but iter-12..17 fixes pending matrix re-run).  TC3 cube 22.97 vs ico 10.24 m/s (2.24×).  When NH matrix re-run completes (TC2 currently ~80 min in), these will refresh with iter-12..17 effects applied.
 
 **Cumulative sentinel coverage**: 28 AST + 14 numerical (iter-79 added iter-66 negative-result guard).
 
