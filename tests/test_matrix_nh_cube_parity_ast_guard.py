@@ -236,17 +236,29 @@ def _find_pe_baroclinic_cube_config_block() -> str:
     """Locate the matrix-runner PE ``baroclinic`` cube
     ``PrimitiveEquationConfig(...)`` constructor (also used by
     ``rotated_baroclinic`` / ``rotated_steady`` / ``gravity_wave_3_1``).
+
+    Anchor: the unique ``_resolve_dt_cube(n, label="baroclinic")``
+    call, with whitespace tolerance.  Whitespace-flexible regex so
+    a reformat (``label = "baroclinic"``) doesn't break the anchor.
     """
     src = _runner_source()
-    # First config inside ``run_baroclinic`` cube branch.
     anchor = re.search(
-        r"label=\"baroclinic\"\)", src,
+        r'_resolve_dt_cube\s*\(\s*n\s*,\s*label\s*=\s*"baroclinic"\s*\)',
+        src,
     )
     assert anchor is not None, (
-        "matrix-runner baroclinic cube label anchor not found"
+        "matrix-runner baroclinic cube ``_resolve_dt_cube(n, "
+        "label=\"baroclinic\")`` anchor not found"
     )
     cfg_start = src.index(
         "PrimitiveEquationConfig(", anchor.end(),
+    )
+    # Sanity: anchor must be within ~2000 chars of the following PE
+    # config opening so we don't accidentally grab a much later block.
+    assert cfg_start - anchor.end() < 2000, (
+        f"baroclinic anchor too far ({cfg_start - anchor.end()} "
+        "chars) from next PrimitiveEquationConfig( — wrong block "
+        "likely matched"
     )
     depth = 0
     i = cfg_start
