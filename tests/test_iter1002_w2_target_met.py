@@ -424,6 +424,27 @@ def test_iter49_cube_w2_matrix_config_short_run():
         "hyperdiff coefficient regression (iter-44's 2x dropped "
         "back toward 0x or 0)."
     )
+    # iter-53: also bound the height-field error.  W2 is steady-
+    # state so h should stay close to ``sw.h.data``.  iter-44 matrix
+    # W2 5-day shows L2=4.58e-4 (cube/latlon ratio 1.7x).  Day-2
+    # subset should sit well under L2=3e-3 — would only exceed if
+    # hyperdiff or calibration regressed.
+    h_init = sw.h.data
+    area = grid.area.astype(jnp_local.float64)
+    h_err_l2 = float(
+        jnp_local.sqrt(
+            jnp_local.sum(
+                ((s.h - h_init).astype(jnp_local.float64) ** 2)
+                * area,
+            )
+            / jnp_local.sum(h_init.astype(jnp_local.float64) ** 2 * area)
+        ),
+    )
+    assert h_err_l2 < 3e-3, (
+        f"iter-53 regression: cube W2 day-2 h-field L2 = "
+        f"{h_err_l2:.4e} exceeds 3e-3 ceiling — iter-44 measured "
+        "5-day L2=4.58e-4."
+    )
 
 
 def test_iter48_cube_w5_short_run_stable_with_hyperdiff():
