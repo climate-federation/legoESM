@@ -2046,6 +2046,10 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             # iter-31 BLOWUP threshold is 1000).  4x cube was probed
             # but gave diminishing returns (v_ll 0.48 vs 0.51) with
             # no clear margin gain.
+            # iter-46: re-probed 1x/2x/4x at C48 — 2x remained the
+            # optimum (v_ll = 0.38 m/s; 4x gave 0.35 m/s with no
+            # margin gain), confirming the choice generalizes across
+            # resolutions C36 + C48.
             config = iter1009_dual_target_config(
                 n, hyperdiff_coeff=2.0 * _hyperdiff_cube(n),
             )

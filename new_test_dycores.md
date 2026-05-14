@@ -53,7 +53,7 @@ Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV /
 ## Structural cube parity findings (not closed)
 
 - **c_sw + p_grad_c cube-vertex residual** (codex iter-983 + iter-3/4/26 reproduced): |duc|_max = 2.71 m/s at face=2 i=1 j=35 on cube W2 IC.  STRUCTURAL to the duogrid c_sw path.  iter-1030 calibration + iter-44 hyperdiff partially mask this, but the per-step imbalance remains.
-- **Cube CB 12-day L2=1.09** (iter-26 hord sweep + iter-34): structural cube PPM transport accuracy at C36 over 12-day rotation.  Cube vs latlon L2 ratio 45× (cube 1.09 vs latlon 0.024 at iter-43 measurement).  CB uses `transport_step` directly, not `model.step()`; hyperdiff path doesn't engage.
+- **Cube CB 12-day L2=1.09** (iter-26 hord sweep + iter-34 + iter-51 resolution probe): structural cube PPM transport accuracy.  C36 L2=1.092, C48 L2=1.094 — virtually identical, confirming the issue is NOT dx² convergence-limited.  Root cause: PPM monotone limiter dissipation accumulates over 12-day rotation, eventually smearing the cosine bell to a near-flat field.  Cube vs latlon L2 ratio 45× (cube 1.09 vs latlon 0.024 at iter-43 measurement).  CB uses `transport_step` directly, not `model.step()`; hyperdiff path doesn't engage.  Would require a tracer-specific transport variant or a different limiter to address.
 - **C48 hyp=0 cube W2 v_ll = 5.55 m/s** (iter-46): finer grids amplify cube-vertex residual without hyperdiff coverage.  iter-44's 2× hyperdiff is essential, not optional.
 
 ## Iter trail (terse, iter-1..49)
@@ -92,6 +92,7 @@ Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV /
 - iter-48: W5 numerical sentinel (mirror of iter-39 W6).
 - iter-49: W2 matrix-config numerical sentinel (hyperdiff=2× variant).
 - iter-50 (compressed at this point): doc compression.
+- iter-51: probed cube CB at C48 to test resolution dependence — L2=1.094 (essentially identical to C36 L2=1.092).  CB structural transport gap is NOT a dx² convergence issue; PPM monotone limiter dissipation accumulates over the 12-day rotation regardless of resolution.  Added iter-46 C48 reference to the matrix-runner iter-44 hyperdiff comment.  No code change needed beyond comment.
 
 ## Iter-51+ queued
 
