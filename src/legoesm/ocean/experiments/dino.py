@@ -28,9 +28,13 @@ plan, decisions log, and audit findings.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
+import jax.numpy as jnp
+
 from legoesm import constants
+from legoesm.ocean.vertical import OceanZStarCoordinate
 
 
 @dataclass
@@ -195,6 +199,111 @@ class DINOConfig:
     sigma_2_ref_depth: float = 2000.0     # reference depth for σ_2 [m]
     rho_ref_z0: float = 1026.0            # ρ_ref(z=0) [kg/m³]
     rho_ref_z2000: float = 1035.0         # ρ_ref(z=2000) [kg/m³]
+
+
+# ---------------------------------------------------------------------
+# Phase 2E — Vertical grid (Appendix C, eq C3)
+# ---------------------------------------------------------------------
+
+def _dino_stretching_coefficients(
+    K_formula: int,
+    H: float,
+    dz_min: float,
+    k_th: float,
+    a_cr: float,
+) -> tuple[float, float, float]:
+    """Compute (a₀, a₁, a₂) for the Lévy 2010 / DINO tanh+ln(cosh) stretching.
+
+    Paper eq C3 in the variable-name convention of NEMO's mi96_1d
+    (vopikamm/DINO@v0.2.0 MY_SRC/zgr_lib.F90). The paper text says
+    "K = 36 levels" (cell count) but writes K-1 in the formula
+    denominators; the NEMO source clarifies that K in the formula is
+    the *interface* count = n_levels + 1.
+
+    Constraints:
+      z(k=1)        = 0   (surface interface)
+      z(k=K_formula) = H  (bottom interface)
+      z(k=2) - z(k=1) ≈ dz_min  (top layer thickness)
+
+    where z(k) = a₂ + a₁·k + a₀·a_cr·ln(cosh((k-k_th)/a_cr)).
+    """
+    Km1 = K_formula - 1
+    th = math.tanh((1 - k_th) / a_cr)
+    log_cosh_K = math.log(math.cosh((K_formula - k_th) / a_cr))
+    log_cosh_1 = math.log(math.cosh((1 - k_th) / a_cr))
+    denom = th - (a_cr / Km1) * (log_cosh_K - log_cosh_1)
+    a0 = (dz_min - H / Km1) / denom
+    a1 = dz_min - a0 * th
+    a2 = -a1 - a0 * a_cr * log_cosh_1
+    return a0, a1, a2
+
+
+def _dino_depth_at_k(
+    k: float, a0: float, a1: float, a2: float, k_th: float, a_cr: float,
+) -> float:
+    """Evaluate z(k) = a₂ + a₁·k + a₀·a_cr·ln(cosh((k-k_th)/a_cr))."""
+    return a2 + a1 * k + a0 * a_cr * math.log(math.cosh((k - k_th) / a_cr))
+
+
+def create_dino_z_star(cfg: DINOConfig | None = None) -> OceanZStarCoordinate:
+    """36-level Lévy 2010 stretched z* grid for DINO (Appendix C).
+
+    Top layer thickness ≈ ``dz_min`` (10 m); bottom layer is ~600 m.
+    Surface interface is exactly 0; bottom interface is snapped to
+    exactly ``-H_deep`` to absorb sub-meter rounding from the formula.
+
+    Returns
+    -------
+    OceanZStarCoordinate
+        With n_levels = cfg.n_levels (36 by default), H_max = cfg.H_deep.
+    """
+    if cfg is None:
+        cfg = DINOConfig()
+
+    n_levels = cfg.n_levels
+    H = cfg.H_deep
+    K_formula = n_levels + 1  # interface count (NEMO jpk convention)
+
+    a0, a1, a2 = _dino_stretching_coefficients(
+        K_formula=K_formula,
+        H=H,
+        dz_min=cfg.dz_min,
+        k_th=float(cfg.k_th),
+        a_cr=cfg.a_cr,
+    )
+
+    # Interfaces at integer k = 1, 2, ..., K_formula → n_levels+1 interfaces
+    k_half = list(range(1, K_formula + 1))
+    z_half_pos = [
+        _dino_depth_at_k(float(k), a0, a1, a2, float(cfg.k_th), cfg.a_cr)
+        for k in k_half
+    ]
+
+    # legoESM convention: z negative below surface, surface at index 0
+    z_half_list = [-z for z in z_half_pos]
+    z_half_list[0] = 0.0   # snap surface (formula gives ~1e-12 residue)
+    z_half_list[-1] = -H   # snap bottom (formula gives sub-meter residue)
+    z_half_ref = jnp.asarray(z_half_list)
+
+    # Layer thicknesses (positive, surface-to-bottom)
+    dz_ref = z_half_ref[:-1] - z_half_ref[1:]
+
+    # Cell centers as midpoints of adjacent interfaces (matches legoESM
+    # convention; paper formula evaluated at k+0.5 gives nearly the same
+    # values but using midpoints keeps z_full_ref consistent with dz_ref).
+    z_full_ref = 0.5 * (z_half_ref[:-1] + z_half_ref[1:])
+
+    # Distance between adjacent full levels
+    dz_half_ref = z_full_ref[:-1] - z_full_ref[1:]
+
+    return OceanZStarCoordinate(
+        n_levels=n_levels,
+        H_max=H,
+        z_full_ref=z_full_ref,
+        z_half_ref=z_half_ref,
+        dz_ref=dz_ref,
+        dz_half_ref=dz_half_ref,
+    )
 
 
 # Convenience: surface-layer restoring timescales derived from heat-flux
