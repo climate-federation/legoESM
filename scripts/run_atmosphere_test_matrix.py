@@ -2588,10 +2588,23 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
         # Pre-compute initial mass for conservation fixer (fp64 acc)
         _mass_target = _area_weighted_sum(state.h, grid.area)
 
+        # new_test_dycores iter-58: hord=10 (PPM with monotonicity
+        # via pert_ppm iv=0 + slope limiter) + Fortran-faithful
+        # xppm boundary cube-edge formulas — together reduce cube
+        # CB 12-day L2 from 1.09 to 0.93 (14% improvement) without
+        # affecting mass conservation.  iter-26's hord sweep at
+        # 1-day quick found hord=12 marginally best, but at 12-day
+        # the accumulated dissipation favours hord=10's slightly
+        # weaker limiter.  Confirms PPM transport accuracy is the
+        # CB structural gap (per iter-51 resolution-independence
+        # finding) — the limiter family choice tunes within that
+        # structural plateau.
         @jax.jit
         def step_fn(s, dt_):
             h_new = transport_step(s.h, ut, vt, dt_, cdgrid,
-                                   mass_target=_mass_target)
+                                   mass_target=_mass_target,
+                                   hord=10,
+                                   apply_fortran_xppm_boundary=True)
             return s._replace(h=h_new)
 
         def check_fn(s):
