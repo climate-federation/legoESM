@@ -2545,15 +2545,15 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
         # `transport_step` directly with pre-computed frozen winds
         # (_d2a2c_vect output).  The CDGridShallowWaterConfig fields
         # (div_damp, damp_v, nord_v, hyperdiff_coeff) are NOT READ by
-        # the cosine-bell stepping code.  Kept in sync with the W2/W5
-        # config for declaration consistency but the numerical
-        # behaviour is independent of these fields.
-        config = CDGridShallowWaterConfig(
-            hyperdiff_coeff=0.0,
-            div_damp=_div_damp_cube(n),
-            boundary_fix=True,
-            damp_v=0.06,
-            nord_v=2)
+        # the cosine-bell stepping code.  iter-34 (new_test_dycores):
+        # bring the declaration in line with the iter1009 dual-target
+        # helper used by the W2/W5 cube paths so the matrix runner
+        # has ONE canonical cube SW config source.  Numerical
+        # behaviour unchanged (config is unused for CB).
+        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+            iter1009_dual_target_config,
+        )
+        config = iter1009_dual_target_config(n)
         model = FV3EdgeShallowWaterModel(grid, config)
         cdgrid = model.cdgrid
         state = cosine_bell_cubesphere(grid, cdgrid, beta)
