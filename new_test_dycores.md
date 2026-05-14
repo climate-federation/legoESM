@@ -4,6 +4,22 @@ Branch: `new_test_dycores` (from `main` post merge of `test_dycores` PR #259).
 Oracle: `../../FV3/atmos_cubed_sphere-symmetryclean/model/`.
 Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV / MPAS Voronoi / spectral SH at the same resolution + duration.
 
+## CRITICAL FINDING (iter-102 + iter-123): NH cube TC2 AND TC3 full-mode BLOWUP
+
+**iter-123 update**: NH cube matrix re-run completed.  Both TC2 AND TC3 cube **BLEW UP at full mode**:
+
+| Test | Status | Blowup step | Sim time | Reason |
+|------|--------|-------------|----------|--------|
+| TC1  | PASS   | —            | 3 hr full | (clean) |
+| TC2  | **FAIL** | step 8500 | day 0.13 (3.14 hr) | state non-finite (NaN/Inf) |
+| TC3  | **FAIL** | step 2250 | day 0.01 (8.3 min)  | max\|w\|=1271 > 1000 threshold |
+
+TC3 blows up MUCH earlier than TC2 (step 2250 vs 8500; 8.3 min vs 3.14 hr sim time).  TC3 has Kessler microphysics + squall-line forcing → bigger w-amplitude → faster instability.
+
+Total NH matrix re-run: 4:13 - 7:12 = 3 hr wall.  TC1 PASS (1669s) + TC2 FAIL (6663s) + TC3 FAIL (2408s) = 10740s elapsed dynamics; rest was JIT compilation + plot generation.
+
+The iter-118 fix for empty-csv-on-FAIL was NOT yet applied to this running process (Python doesn't reload modules).  Both TC2 and TC3 csv files are still header-only.  Future NH matrix runs will benefit.
+
 ## CRITICAL FINDING (iter-102): NH TC2 cube full-mode BLOWUP
 
 NH cube matrix re-run completed TC2 at iter-102.  **TC2 cube BLEW UP at day 0.13 (step 8500) of the full 6-hour run** (`state non-finite (NaN/Inf)`).  Pre-blowup last-clean reading: `|w|_max=nan m/s, mass_drift=7.85e-16`.  Wall time: 6663 s (111 min).
