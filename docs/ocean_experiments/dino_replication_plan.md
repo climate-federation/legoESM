@@ -740,8 +740,20 @@ DINOConfig now sets:
   (existing legoESM knobs; turn on via DINOConfig — fixes late-time
   high-latitude / equatorial mode)
 
-Result: **DINO unforced + physics is stable through 30 days end-to-end**
-with bounded |u|≈0.4 m/s, |v|≈2.1 m/s, |η|≈0.7 m, physical T range.
+### Stability verification
+
+Confirmed stable in this configuration:
+- **30-day unforced + physics (lat-lon)**: bounded |u|≈0.4 m/s,
+  |v|≈2.1 m/s, |η|≈0.7 m, physical T range. (Was day-20 blowup pre-fix.)
+- **30-day unforced + physics (MPAS)**: stable already pre-fix.
+- **1-day forced + physics (lat-lon AND MPAS)**: stable; what the
+  smoke tests cover.
+
+Not yet confirmed (running 2026-05-14):
+- **1-year forced + physics on both grids** — the real production
+  scenario. Outputs in `results/dino/run_1yr_{latlon,mpas}_forced/`.
+  Will fill in this section with day-of-blowup (if any) and final
+  state magnitudes when complete.
 
 ### Lessons for future ocean experiments on legoESM
 
