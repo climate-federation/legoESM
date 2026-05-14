@@ -751,3 +751,50 @@ def test_iter59_cb_cube_uses_n_sub_substepping():
         "The substep scan is what reduces the temporal-truncation "
         "error from O(dt) toward the spatial-limiter plateau."
     )
+
+
+def test_iter66_cb_ico_uses_additive_correction():
+    """iter-66 negative-result sentinel: matrix runner CB ico branch
+    MUST keep its per-step additive uniform mass correction; it must
+    NOT be switched to the multiplicative-rescale-to-initial-mass
+    scheme used by cube (iter-58) and latlon (iter-61).
+
+    iter-66 attempted that switch in pursuit of cross-grid fixer
+    consistency.  Mass drift improved 580× (1.58e-6 → 2.71e-9) but
+    Linf REGRESSED 5× (0.561 → 2.83) and L2 +24 % (0.620 → 0.772).
+    Root cause: ico mesh is heterogeneous (12 pentagons alongside
+    hexagons; cell-area ratio ~83 %); multiplicative rescale of
+    clipped-positive cells concentrates mass into the smaller
+    pentagons producing peak overshoot.  Reverted.
+
+    This sentinel guards against future iter-66-like attempts.  We
+    anchor on the additive-correction pattern:
+    ``correction = (mass_old - mass_new) / total_area`` followed by
+    ``h_new + correction`` in the ico CB step_fn.
+    """
+    src = _runner_source()
+    # Anchor: the additive correction expression.  Whitespace-tolerant.
+    assert re.search(
+        r"correction\s*=\s*\(\s*mass_old\s*-\s*mass_new\s*\)\s*/\s*total_area",
+        src,
+    ), (
+        "iter-66 regression: matrix CB ico branch no longer uses the "
+        "per-step ADDITIVE correction ``(mass_old - mass_new) / "
+        "total_area`` + ``h_new + correction``.  iter-66 NEGATIVE "
+        "RESULT showed multiplicative-rescale on the heterogeneous "
+        "(hex+pent) ico mesh regresses Linf 5x.  Keep the additive "
+        "uniform correction — it is the natural choice on an "
+        "unstructured mesh.  See matrix-runner ico CB branch comment "
+        "for the full iter-66 lesson."
+    )
+    # Anchor 2: the ``h_new = h_new + correction`` line that applies
+    # the additive correction.  Distinct from the multiplicative
+    # ``h_pos * scale`` pattern cube/latlon use.
+    assert re.search(
+        r"h_new\s*=\s*h_new\s*\+\s*correction",
+        src,
+    ), (
+        "iter-66 regression: matrix CB ico branch is missing the "
+        "``h_new = h_new + correction`` additive fixer step.  See "
+        "iter-66 lesson in matrix-runner comment."
+    )
