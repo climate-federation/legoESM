@@ -93,6 +93,7 @@ Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV /
 - iter-49: W2 matrix-config numerical sentinel (hyperdiff=2× variant).
 - iter-50 (compressed at this point): doc compression.
 - iter-51: probed cube CB at C48 to test resolution dependence — L2=1.094 (essentially identical to C36 L2=1.092).  CB structural transport gap is NOT a dx² convergence issue; PPM monotone limiter dissipation accumulates over the 12-day rotation regardless of resolution.  Added iter-46 C48 reference to the matrix-runner iter-44 hyperdiff comment.  No code change needed beyond comment.
+- iter-52: probed `nord_v=1` (del-4 post-step vorticity damping) vs the iter1009 default `nord_v=2` (del-6) for cube SW propagating tests.  Mixed result: v_ll_Linf improves 0.51 → 0.33 m/s but L2 DEGRADES 4.58e-4 → 8.02e-4 (cube/latlon L2 ratio 1.7× → 3.0×).  Kept at nord_v=2 since L2 is the more representative cross-grid parity metric.  W5/W6 unaffected either way.  Added probing rationale to matrix-runner comment.
 
 ## Iter-51+ queued
 

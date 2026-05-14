@@ -2050,6 +2050,12 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             # optimum (v_ll = 0.38 m/s; 4x gave 0.35 m/s with no
             # margin gain), confirming the choice generalizes across
             # resolutions C36 + C48.
+            # iter-52 probed nord_v=1 (del-4) vs the iter1009 default
+            # nord_v=2 (del-6): mixed result — v_ll_Linf improves
+            # 0.51 -> 0.33, but L2 degrades 4.58e-4 -> 8.02e-4
+            # (cube/latlon ratio 1.7 -> 3.0).  Kept at nord_v=2
+            # because L2 is the more representative cross-grid
+            # metric; W5/W6 unaffected either way.
             config = iter1009_dual_target_config(
                 n, hyperdiff_coeff=2.0 * _hyperdiff_cube(n),
             )
