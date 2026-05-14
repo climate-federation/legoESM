@@ -1280,6 +1280,113 @@ def restoring_timescale_S_days(cfg: DINOConfig) -> float:
 
 
 # ---------------------------------------------------------------------
+# Experiment-registry interface (expected by AVAILABLE_EXPERIMENTS in
+# legoesm.ocean.experiments.__init__). Thin grid-type dispatchers that
+# call the lat-lon and MPAS builders defined above.
+# ---------------------------------------------------------------------
+
+def create_initial_conditions(grid_type: str, grid, z_coord,
+                               config: DINOConfig | None = None):
+    """Build the DINO initial state for ``grid_type ∈ {"latlon","mpas"}``."""
+    if config is None:
+        config = DINOConfig()
+    if grid_type == "latlon":
+        return dino_lat_lon_state(grid, z_coord, config)
+    if grid_type == "mpas":
+        return dino_mpas_state(grid, z_coord, config)
+    raise ValueError(f"Unknown grid_type: {grid_type!r}; "
+                     f"DINO supports 'latlon' (Mercator) and 'mpas' "
+                     f"(regional Voronoi).")
+
+
+def create_forcings(grid_type: str, grid, z_coord,
+                    config: DINOConfig | None = None):
+    """Return (model_config, physics_config, surface_forcing_arrays).
+
+    ``surface_forcing_arrays`` is a precomputed dict (wind τ, T*, S*,
+    Q_sr); apply per timestep via
+    ``apply_dino_{lat_lon,mpas}_surface_forcing``.
+    """
+    if config is None:
+        config = DINOConfig()
+    if grid_type == "latlon":
+        model_cfg, phys_cfg = dino_lat_lon_model_config(grid, config, physics=True)
+        forcing = dino_lat_lon_surface_forcing_arrays(grid, config)
+    elif grid_type == "mpas":
+        model_cfg, phys_cfg = dino_mpas_model_config(grid, config, physics=True)
+        forcing = dino_mpas_surface_forcing_arrays(grid, config)
+    else:
+        raise ValueError(f"Unknown grid_type: {grid_type!r}")
+    return {"model_config": model_cfg,
+            "physics_config": phys_cfg,
+            "surface_forcing": forcing}
+
+
+def validate_results(final_state, diagnostics: dict | None = None,
+                     config: DINOConfig | None = None) -> tuple[bool, str]:
+    """Basic shake-down validation: no NaN, T/S in physical range,
+    velocities not absurd. Multi-decade-spinup checks (ACC transport,
+    MOC topology, σ_2 stratification) are out of scope for the local
+    1-year cap and live in the long-run analysis pipeline."""
+    if config is None:
+        config = DINOConfig()
+    notes = []
+    for fld in ("u", "T", "S", "eta"):
+        data = getattr(final_state, fld).data
+        import jax.numpy as jnp
+        if not bool(jnp.all(jnp.isfinite(data))):
+            return False, f"NaN/Inf in final {fld}"
+    import numpy as np
+    mask = np.asarray(final_state.land_mask.data) > 0.5
+    T = np.asarray(final_state.T.data)
+    S = np.asarray(final_state.S.data)
+    if mask.any():
+        T_oc = T[mask, :] if T.ndim == 3 else T[mask]
+        S_oc = S[mask, :] if S.ndim == 3 else S[mask]
+        if not (-3.0 < T_oc.min() and T_oc.max() < 32.0):
+            return False, f"T out of range [{T_oc.min():.2f},{T_oc.max():.2f}]"
+        if not (30.0 < S_oc.min() and S_oc.max() < 40.0):
+            return False, f"S out of range [{S_oc.min():.2f},{S_oc.max():.2f}]"
+    u_max = float(np.max(np.abs(final_state.u.data)))
+    eta_max = float(np.max(np.abs(final_state.eta.data)))
+    if u_max > 5.0:
+        return False, f"|u| max = {u_max:.2f} m/s — instability"
+    if eta_max > 5.0:
+        return False, f"|η| max = {eta_max:.2f} m — barotropic blowup"
+    notes.append(f"|u|max={u_max:.3f}, |η|max={eta_max:.3f}")
+    return True, ", ".join(notes)
+
+
+EXPERIMENT_CONFIG = {
+    "name": "dino",
+    "description": (
+        "DINO (Diabatic Neverworld Ocean) — Kamm et al. 2025 GMD. "
+        "Pole-to-pole sector basin with a re-entrant channel; tests "
+        "diabatic processes (convection, deep water formation, MOC) "
+        "in an idealized configuration."
+    ),
+    "scientific_purpose": (
+        "Replicate the DINO 1° R1 reference experiment for testing "
+        "and training subgrid eddy parameterizations. Provides ACC, "
+        "MOC, MHT, and σ_2 stratification benchmarks."
+    ),
+    "reference": "Kamm, D., Deshayes, J., & Madec, G. (2025). DINO. GMD 18, 8091-8107.",
+    "config_class": DINOConfig,
+    "create_initial_conditions": create_initial_conditions,
+    "create_forcings": create_forcings,
+    "validate": validate_results,
+    "default_duration": 30.0,   # days (1-month shake-down)
+    "quick_duration": 1.0,      # days (smoke test)
+    "grid_support": {
+        "cubed_sphere": False,  # not implemented; basin-channel topology incompatible
+        "latlon": True,         # Mercator, n_lon=50 = 1° R1
+        "mpas": True,           # regional Voronoi, 97 km
+        "spectral": False,
+    },
+}
+
+
+# ---------------------------------------------------------------------
 # Production-time surface forcing applicators (Phase 4)
 #
 # Applied as explicit external tendencies after each model.step(), NOT

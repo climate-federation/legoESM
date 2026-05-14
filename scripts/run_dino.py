@@ -1,12 +1,17 @@
 #!/usr/bin/env python
 """DINO (Diabatic Neverworld Ocean) standalone production script.
 
-Replicates Kamm et al. (2025) DINO 1° R1 configuration on the lat-lon
-Mercator grid (Phase 4 v0). MPAS path will be added in v1.
+Replicates the Kamm, Deshayes & Madec (2025, GMD) DINO 1° R1
+configuration on the lat-lon Mercator grid OR on an MPAS regional
+Voronoi mesh, with full surface forcing (wind + T/S restoring +
+Q_sr split + Jerlov SW penetration) and physics (KPP + GM/Redi +
+enhanced-diffusion convection).
 
-Run with::
+Quick start::
 
     JAX_ENABLE_X64=1 python scripts/run_dino.py --days 10
+    JAX_ENABLE_X64=1 python scripts/run_dino.py --grid mpas --days 10
+    JAX_ENABLE_X64=1 python scripts/plot_dino.py results/dino   # visualize
 
 For the full list of options::
 
@@ -17,8 +22,9 @@ no test-matrix integration. The output directory is self-contained
 (NPZ snapshots + a JSON config dump) so it can be moved to a GPU
 machine for production runs.
 
-See ``docs/ocean_experiments/dino_replication_plan.md`` for the
-scientific configuration and decisions log.
+See ``docs/ocean_experiments/README.md`` for a 1-minute orientation
+and ``docs/ocean_experiments/dino_replication_plan.md`` for the full
+scientific configuration, decisions log, and stability investigation.
 """
 
 from __future__ import annotations
@@ -218,6 +224,19 @@ def _save_run_metadata(args, cfg: DINOConfig, grid, z, output_dir: Path,
 
 def main():
     args = _parse_args()
+
+    # JAX x64 sanity check: DINO uses Wright EOS + barotropic split;
+    # both need 64-bit precision to avoid silent eta drift and EOS noise.
+    import jax
+    if not jax.config.x64_enabled:
+        import warnings
+        warnings.warn(
+            "JAX_ENABLE_X64 is OFF. DINO needs 64-bit for the Wright EOS "
+            "and barotropic-baroclinic split — silent precision artifacts "
+            "will appear at multi-day integration. Re-run with "
+            "`JAX_ENABLE_X64=1 python scripts/run_dino.py ...`.",
+            stacklevel=2,
+        )
 
     # Local-machine policy: cap at 1 yr (decision logged in plan)
     if args.days > 365.0:

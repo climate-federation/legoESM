@@ -36,6 +36,7 @@ Available Experiments:
 - eady_instability: Eady baroclinic instability from meridional temperature front
 - acc_channel: ACC-like channel with Gaussian ridge and wind forcing
 - global_overturning: Global baroclinic overturning with stratification and SST restoring
+- dino: DINO (Diabatic Neverworld Ocean) — Kamm et al. 2025 GMD, pole-to-pole sector with re-entrant channel
 
 Design Principles:
 1. Each experiment is self-documenting with scientific context
@@ -60,6 +61,7 @@ from . import global_barotropic_wind
 from . import eady_instability
 from . import acc_channel
 from . import global_overturning
+from . import dino
 
 # Registry of all available experiments
 AVAILABLE_EXPERIMENTS = {
@@ -78,6 +80,7 @@ AVAILABLE_EXPERIMENTS = {
     "eady_instability": eady_instability.EXPERIMENT_CONFIG,
     "acc_channel": acc_channel.EXPERIMENT_CONFIG,
     "global_overturning": global_overturning.EXPERIMENT_CONFIG,
+    "dino": dino.EXPERIMENT_CONFIG,
 }
 
 __all__ = [
@@ -96,5 +99,6 @@ __all__ = [
     "eady_instability",
     "acc_channel",
     "global_overturning",
+    "dino",
     "AVAILABLE_EXPERIMENTS",
 ]
