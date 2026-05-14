@@ -798,3 +798,21 @@ def test_iter66_cb_ico_uses_additive_correction():
         "``h_new = h_new + correction`` additive fixer step.  See "
         "iter-66 lesson in matrix-runner comment."
     )
+    # Anti-anchor: the iter-66-attempted multiplicative pattern must
+    # NOT appear within the ico CB branch.  Locate the branch by
+    # the unique ``thickness_flux`` import + scan only its window
+    # (next ~3000 chars).  We look for the iter-66-named constant
+    # ``_mass_target_iter66`` which is the smoking-gun of the
+    # multiplicative attempt; if it appears in the ico CB branch
+    # someone has resurrected the regressed scheme.
+    ico_branch_start = src.find("from legoesm.core.operators_voronoi import")
+    if ico_branch_start == -1:
+        return  # No ico CB branch present (unlikely).
+    ico_window = src[ico_branch_start:ico_branch_start + 5000]
+    assert "_mass_target_iter66" not in ico_window, (
+        "iter-66 regression: matrix CB ico branch contains "
+        "``_mass_target_iter66`` — the iter-66-attempted "
+        "multiplicative-rescale constant.  This was REVERTED "
+        "because it regressed Linf 5x on the heterogeneous ico "
+        "mesh.  See iter-66 lesson in matrix-runner comment."
+    )
