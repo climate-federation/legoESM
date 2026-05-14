@@ -1010,3 +1010,142 @@ only landed change for Finding 5.
    mechanism (explicit-diffusion CFL violation under KPP K_v) only
    became visible with sub-day snapshots showing the alternating-sign
    vertical T pattern. Run the diagnostic before claiming the fix.
+
+---
+
+### Finding 6: 1-year forced runs — implicit-vmix bought 20× lat-lon improvement, but a *different* late-time eddy-growth instability now sets the limit (2026-05-14)
+
+After Finding 5 fixed the day-8 KPP-CFL bug, paired 1-year forced +
+physics runs (lat-lon and MPAS, paper-spec) revealed a **second,
+unrelated** instability that sets the new ceiling.
+
+#### Headline numbers
+
+| Grid | Day-8 baseline (pre-Finding-5) | Day-160 with implicit-vmix | Improvement |
+|---|---|---|---|
+| Lat-lon | day 8 blowup | **day 160 blowup** | **20× longer** |
+| MPAS | day 25 blowup | day 25 blowup (no change) | none — see below |
+
+The MPAS run got no benefit because MPAS already had
+`implicit_vertical_mixing=True` by default; what MPAS *lacks* is the
+Hollingsworth correction on TRiSK plus `A_h_floor` / `A_h_eq_boost`
+equivalents (open Finding 4 follow-ups, lat-lon-only at present).
+
+#### Lat-lon day-160 failure is baroclinic-eddy growth, not CFL
+
+Diagnostic across the slow-drift window (5-day snapshots, 0–160 d):
+
+| Day | \|η\|max | KE_total | \|η\|max location | Notes |
+|---:|---:|---:|---|---|
+| 50  | 0.88 m | 8.8e2 | random | clean spinup |
+| 100 | 1.05 m | 1.2e3 | j=18, i=3 (lat ~ -55°) | drift starts |
+| 130 | 1.57 m | 2.9e3 | j=15, i=3 | KE doubling every 30 d |
+| 150 | 1.73 m | 5.3e3 | j=26, i=0 (lat ~ -45°) | wind-jet band |
+| 155 | 6.88 m | — | — | catastrophic transition |
+| 160 | NaN (clipped 5.5e4) | — | — | full blowup |
+
+KE growth: **e-folding ~40 days from day 100 onward** — exponential,
+matches Eady baroclinic-instability growth-rate scaling
+σ ≈ 0.31·f/√Ri at the deformation scale.
+
+Zonal spectrum of η at j=20 (lat ~ -46°, the wind-jet band):
+
+| Wavenumber | Day 30 (clean) | Day 150 (drifting) |
+|---:|---:|---:|
+| k=0 (DC) | 988    | 77    |
+| k=1      | 0.5    | **130** |
+| k=2      | 0.13   | 53    |
+| k=3      | 0.04   | 28    |
+| Low-k (k≤3) fraction | 99.99 % | 94 % |
+
+**k=1 eddy energy grew by ×260 over 120 days** while the DC
+component dropped — classic energy transfer from the mean jet to
+planetary-scale eddies via baroclinic instability. *Not* a grid-scale
+or boundary mode.
+
+#### Why this happens here (and in NEMO/MOM6 at 1° R1 too)
+
+At -45° on the 1°-R1 Mercator grid, dx ≈ 78 km. The first baroclinic
+deformation radius in the wind-jet region is L_d ≈ NH/f ≈ 40 km. So
+**L_d ≈ dx/2 — eddies are *barely resolved***, exactly the regime
+where Visbeck (1997) GM parameterization is supposed to take over but
+is marginal. The mean state is unstable, eddies grow, the dissipation
+budget can't keep up beyond ~150 days.
+
+NEMO has the same problem at the same resolution and addresses it
+with several stability features we don't yet match (see Finding 4
+table). The cumulative ~10% extra dissipation budget that NEMO has
+buys multi-year stability at R1; we have ~150 days.
+
+#### What is NOT the problem
+
+- ❌ Day-8 KPP-CFL (fixed in Finding 5; we now reach day 160)
+- ❌ Single-cell numerical bug (94 % of energy in k≤3, distributed)
+- ❌ Boundary blowup (eddy is in mid-latitude interior, not corner/wall)
+- ❌ Wind-stress staggering or forcing path (verified Finding 5)
+- ❌ Restoring integrator (implicit-Euler from PR #267)
+- ❌ Tracer advection blowup (TVD bounded; failure is in eta/v first)
+
+#### Quick A/B knobs that should help (not tested)
+
+In order of cheapest-first:
+
+1. **Bump `A_h_floor`** from 1000 to 5000 m²/s — direct lateral-
+   viscosity dissipation increase. Doubles the budget.
+2. **Enable Smagorinsky** (`C_smag=0.1`) — adaptive viscosity that's
+   strong where shears are strong (eddy edges), weak elsewhere. NEMO
+   uses an equivalent.
+3. **Enable biharmonic** (`B_h=1e10`) — selectively damps small scales
+   without affecting large-scale flow. Standard in eddy-permitting
+   ocean configurations.
+
+Any of those probably gets us to ~300-500 days. Combinations may reach
+multi-year. None of them is the "right" fix.
+
+#### Real fix path (separate legoESM work, not DINO scope)
+
+The principled solution is to land the missing NEMO/MOM6 stability
+features that the rest of Finding 4 tracks:
+
+1. **MSC for iso-neutral diffusion** (Beckmann-Döscher 1997,
+   `ln_traldf_msc=.true.` in NEMO) — formal stabilizer for the Redi
+   off-diagonal terms on partially-resolved baroclinic flow. Both
+   NEMO and MOM6 use it. Plan Finding 4 lists this as an open
+   follow-up.
+2. **Robert-Asselin time filter on a leap-frog stepper** — explicitly
+   damps the 2Δt computational mode. Different time-error spectrum
+   than our forward-Euler-plus-implicit-barotropic.
+3. **Port Hollingsworth correction to MPAS TRiSK** (~50 LOC, mirrors
+   PR #264 on the TRiSK PV-flux stencil).
+4. **Port `A_h_floor` / `A_h_eq_boost` equivalents to MPAS** — adds
+   per-cell latitude-aware modulation to the currently-scalar MPAS
+   viscosity field.
+
+The first two help lat-lon multi-year stability. The last two would
+let MPAS reach the same ~day 160 budget that lat-lon now has.
+
+#### Decision (2026-05-14)
+
+The implicit-vmix fix (Finding 5) is the right thing to land *now*: it
+is a real legoESM bug fix (forward-Euler vertical diffusion under KPP
+is unsafe by anyone's standard), it survives 30 days at paper-spec,
+and the 20× improvement on the 1-year run is meaningful.
+
+The day-160 baroclinic-eddy ceiling is *expected* given our current
+dissipation budget and is consistent with the open follow-ups already
+listed in Finding 4. **Not chasing it further as part of DINO** —
+DINO's scientific deliverables (ACC transport, MOC topology, MHT,
+σ_2 stratification) are taken from multi-decadal spin-ups, which
+would require resolving these dissipation-budget gaps as separate
+legoESM work, not band-aided into the experiment config.
+
+Tracked as follow-up:
+- legoESM issue: implement MSC for iso-neutral diffusion
+- legoESM issue: port Hollingsworth + A_h_floor / A_h_eq_boost to MPAS
+- (optional) legoESM issue: leap-frog + Robert-Asselin time integrator
+
+#### Diagnostic artifacts
+
+In `results/` (gitignored):
+- `dino_1yr_latlon/snapshots/snapshot_*.npz` — 5-day cadence, 0-160 d clean, 160-365 d NaN-padded
+- `dino_1yr_mpas/snapshots/snapshot_*.npz` — 5-day cadence, 0-25 d clean, 25-150 d NaN-padded (run killed early; no value in stepping NaN forward to day 365)
