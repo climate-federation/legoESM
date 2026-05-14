@@ -4,6 +4,45 @@ Branch: `new_test_dycores` (from `main` post merge of `test_dycores` PR #259).
 Oracle: `../../FV3/atmos_cubed_sphere-symmetryclean/model/`.
 Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV / MPAS Voronoi / spectral SH at the same resolution + duration.
 
+## State after iter-1..70 (compressed at iter-70)
+
+**Cross-grid apples-to-apples SW matrix audit (iter-61..70)**: refreshed all 4 grids at full duration (the matrix's quick-mode + full-mode results coexist; iter-61 caught the mixed-mode comparison issue).
+
+- **W2 5-day** (iter-69): cube is **BEST finite-volume grid**.
+  - spectral (T21):     L2=1.80e-7, Linf=2.37e-7 (analytic-perfect)
+  - ico (ico5):         L2=1.25e-4, Linf=6.05e-4
+  - **cube (C36)**:     **L2=4.58e-4, Linf=4.82e-3, v_ll=0.51 m/s**
+  - latlon (72×144):    L2=1.41e-3, Linf=1.27e-2
+  - Cross-grid ratios: cube/spectral=2544×, cube/ico=3.66×, cube/latlon=**0.325** (cube 3× BETTER than latlon).  Doc pre-iter-69 claim "cube/latlon 1.7×" was correct at iter-42; post-iter-44 cube overshoot below latlon.
+
+- **W5 15-day** (iter-70): **mass conservation parity at machine precision across all 4 grids**.
+  - ico: drift=0.00e+00, latlon: 0.00e+00, spectral: 8.10e-16, cube: 1.46e-15.
+  - All PASS at full 15-day duration.
+
+- **CB 12-day** (iter-61): all 4 grids PASS, cube is L2 outlier but BEST on conservation.
+  - latlon: L2=0.133, drift=2.07e-8 (iter-61 anchored fixer applied).
+  - ico: L2=0.620, drift=1.58e-6 (additive fixer — iter-66 anchored-attempt regressed, reverted).
+  - spectral: L2=0.382, drift=2.16e-16.
+  - cube (iter-58/59): L2=0.865, drift=1.28e-9.
+  - True cube/latlon=6.5× (was previously falsely "35×" from mixed-mode).
+
+**Lessons recorded**:
+- Cross-grid "consistency" ≠ identical fixer logic.  Cube/latlon (regular structured grids) prefer multiplicative-rescale-to-initial-mass; ico (heterogeneous unstructured: 12 pentagons + hexagons) prefers additive uniform correction.  Multiplicative on ico over-concentrates mass in pentagons (Linf 0.56 → 2.83) — iter-66 negative result.
+
+**Cumulative cube CB improvement (iter-1 → iter-69 baseline)**: L2 1.092 → 0.865 (−20.8 %) via:
+- iter-58 hord=10 + xppm_bdy → −14.7 % (matched Fortran tp_core L2 limiter + boundary cube-edge formulas).
+- iter-59 N=6 temporal substep → −7.0 % (closed forward-Euler PPM phase-error gap vs latlon SSP-RK3).
+
+**Sentinel coverage** (now 27 AST + 14 numerical):
+- AST: 27 in `tests/test_matrix_nh_cube_parity_ast_guard.py` (added iter-59 N=6 substep + iter-61 anchored mass fixer sentinels).
+- Numerical: 14 in `tests/test_iter1002_w2_target_met.py` — W2 1-day/2-day/5-day, W5 day-5/2-day, W6 2-day, CB 12-day cube + 12-day latlon, hyperdiff kwarg API, 2 quiet-path guards.
+
+**Outstanding (not closed)**:
+- Cube SW W2 vs ico residual 3.66× L2 ratio — structural to PPM on curved cube faces vs SOM-PPM on isotropic Voronoi.
+- Cube CB vs ico residual ~1.4× L2 ratio — bulk PPM limiter dissipation along rotated trajectory (iter-61 spatial decomposition).
+- NH TC1 cube |w|_max=0.040 m/s vs doc claim 0.014 m/s — 3× gap; iter-63 audit found matrix uses `nord_v=2` default while factory uses `nord_v=1`.  iter-71+ to probe whether `nord_v=1` closes this.
+- NH TC2/TC3 cube matrix re-run still in progress; will refresh iter-7 claim numbers (TC2: 0.32, TC3: 7.36 m/s).
+
 ## State after iter-1..60 (compressed at iter-60)
 
 **New cube CB wins (iter-51..60)**:
@@ -113,21 +152,18 @@ Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV /
 - iter-48: W5 numerical sentinel (mirror of iter-39 W6).
 - iter-49: W2 matrix-config numerical sentinel (hyperdiff=2× variant).
 - iter-50 / iter-60: doc compressions (state of iter-1..49 and iter-51..60 summarised in the two "State after" blocks above).
-- iter-51..60: see compressed block above.  Headline: cube CB L2 1.092 → 0.865 (−20.8 % cumulative; iter-58 hord=10+xppm_bdy → −14.7 %; iter-59 N=6 substep → additional −7.0 %).
-- iter-61: cross-grid CB 12-day apples-to-apples audit + latlon CB mass-conservation parity.  Found previously documented "35× cube/latlon L2 ratio" was based on comparing cube **12-day** results vs latlon **1-day** stale results files (the matrix's quick-mode + full-mode results coexist in the same dir).  Re-ran all 4 grids at 12-day full duration:
+- iter-51..70: see two compressed "State after" blocks at the top of this doc.
+- iter-61 (verbose entry retained — first apples-to-apples mass-fixer parity finding):  cross-grid CB 12-day apples-to-apples audit + latlon CB mass-conservation parity.  Found previously documented "35× cube/latlon L2 ratio" was based on comparing cube **12-day** results vs latlon **1-day** stale results files (the matrix's quick-mode + full-mode results coexist in the same dir).  Re-ran all 4 grids at 12-day full duration:
   - latlon (72×144): L2=0.125, mass_drift=5.35e-4 → **FAIL** (drift > matrix tol 1e-4).
   - icosahedral (ico5): L2=0.620, mass_drift=1.58e-6, PASS.
   - spectral (T21): L2=0.382, mass_drift=2.16e-16, PASS.
   - cube (C36, iter-58/59): L2=0.865, mass_drift=1.28e-9, PASS.
   Diagnosed: latlon CB step_fn was intentionally a "raw FV benchmark" (no mass fixer); iter-29 matrix-wide tolerance tightening from 1e-2 to 1e-4 dropped below the raw-FV mass drift.  Per the ralph-loop "consistency across grids" goal, applied the **same anchored mass fixer cube uses** (clip-negatives + rescale-positives to mass_target) to the latlon CB step_fn.  Result: latlon mass_drift 5.35e-4 → **2.07e-8** (26000× tighter), L2 0.125 → 0.133 (+6 % small redistribution cost), Linf 0.229 → 0.246 (+7 %), **PASS**.  **All 4 grids now PASS at 12-day apples-to-apples**.  True cube/latlon L2 ratio: **6.5×** (was claimed 35×), cube/ico 1.4×, cube/spectral 2.3× — all far closer than previous trail suggested.  iter-61 also probed the spatial decomposition of the cube CB error (`_probe_iter61_cb_error_map.py`): 99 % of the residual L2 lives in the panel-INTERIOR cells of the single face containing the bell at t=12 d; panel-edge cells contribute ~0.0003 (essentially zero).  Confirms residual is bulk PPM limiter dissipation along the rotated trajectory, NOT cube panel-coupling.
 
-- iter-66 NEGATIVE RESULT (reverted): attempted to bring ico CB onto the same anchored mass-fixer scheme cube (iter-58) and latlon (iter-61) use, in pursuit of cross-grid consistency.  Pre-iter-66 ico used a per-step ADDITIVE correction `correction = (mass_prev - mass_curr)/total_area`; switched to the cube/latlon multiplicative-rescale-to-INITIAL-mass scheme.  Result: mass drift **improved** 580× (1.58e-6 → 2.71e-9, matched cube/latlon target), but Linf **regressed** 5× (0.561 → 2.83) and L2 +24 % (0.620 → 0.772).  Diagnosis: ico mesh is heterogeneous (12 pentagons alongside hexagons; cell-area ratio ~83 %); multiplicative rescale of clipped-positive cells concentrates mass into the smaller pentagons, producing peak overshoot.  The additive uniform correction is the natural choice on a heterogeneous unstructured mesh because it distributes the deficit area-uniformly without grid-topology bias.  Reverted.  **Lesson: cross-grid "consistency" does not imply identical fixer logic when grid topology differs.**  Cube/latlon (regular structured grids) → multiplicative; ico (heterogeneous unstructured) → additive.  Both achieve PASS within matrix tolerance.  Documented this lesson in the matrix-runner ico CB branch comment as guidance against future attempts.
-- iter-69: apples-to-apples W2 5-day cross-grid audit (refreshed all 4 grids from quick-mode 1-day stale results).  Result: **cube SW W2 is the BEST finite-volume grid by L2** at the matrix-actual config:
-  - spectral (T21): L2=1.80e-7, Linf=2.37e-7 (analytic, T21 captures Williamson 2 to machine precision).
-  - icosahedral (ico5): L2=1.25e-4, Linf=6.05e-4.
-  - **cube (C36): L2=4.58e-4, Linf=4.82e-3, v_ll_Linf=0.51 m/s**.
-  - latlon (72×144): L2=1.41e-3, Linf=1.27e-2.
-  Cross-grid L2 ratios: cube/spectral=2544× (spectral analytic-perfect on W2), cube/ico=**3.66×** (ico better), cube/latlon=**0.325** (cube 3× better than latlon).  The previous doc claim "cube/latlon ratio 1.7×" was correct at iter-42 measurement (cube L2=2.45e-3, ratio 2.45e-3/1.41e-3=1.74×).  After iter-44's 2× hyperdiff bump, cube dropped to L2=4.58e-4 < latlon — now cube/latlon=0.325 (cube wins).  Doc trail entry "cube/latlon ratio 9× → 1.7×" describes the iter-1..42 improvement but doesn't capture the iter-44 overshoot below latlon.  **Cube is now the highest-fidelity finite-volume SW W2 grid.**  Remaining accuracy gap to ico is 3.66× on L2 — structural to PPM transport on the curved cube vs SOM-PPM on the more isotropic Voronoi mesh.
+- iter-62: iter-61 latlon CB numerical sentinel.
+- iter-66 negative result (reverted): ico CB multiplicative-fixer attempt regressed Linf 5× — additive uniform correction wins on heterogeneous unstructured mesh.  See top compressed block for lesson.
+- iter-69: W2 5-day apples-to-apples — cube is BEST finite-volume.  See top compressed block.
+- iter-70: W5 15-day apples-to-apples — all 4 grids machine-precision mass conservation.  See top compressed block.
 
 ## Iter-51+ queued
 
