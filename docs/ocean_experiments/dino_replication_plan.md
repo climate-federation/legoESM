@@ -69,12 +69,24 @@ Nine critical issues were identified by the ocean expert and are incorporated be
 | Lat-lon Mercator smoke test | ✅ done | 12 | `ocean/experiments/dino.py` |
 | 4: standalone production script | ✅ done (v1) | manual | `scripts/run_dino.py` |
 
-**Total: 155 unit tests across 9 files + 2 end-to-end smoke tests.** Both lat-lon Mercator and MPAS regional paths integrate stably from rest with full physics and DINO surface forcing (lat-lon: 1-day in 6.8 s wall; MPAS: 3-day in 4.3 s wall).
+**Total: 166 unit tests across 11 files + 2 end-to-end smoke tests** (143 DINO-specific + 13 Lévy z* + 10 seam-wall, the latter two on the promoted general helpers). Both lat-lon Mercator and MPAS regional paths integrate stably from rest with full physics and DINO surface forcing (lat-lon: 1-day in 7.3 s wall; MPAS: 1-day in 3.0 s wall).
 
 ### v1 (2026-05-14): both v0 caveats closed
 
 - **Jerlov SW penetration** through the column now applied in both paths via `legoesm.ocean.physics.shortwave_penetration.shortwave_penetration_tendency`. Surface T tendency is the sum of eq 8 non-solar split + eq 10 column-distributed Q_sr. Reference Jacobian = 1 (η/H ≈ 1e-4).
 - **MPAS production path** added: `--grid {latlon,mpas}` dispatch flag in `scripts/run_dino.py`. New helpers `_build_mpas_forcing_arrays` and `apply_dino_mpas_surface_forcing` mirror the lat-lon versions; wind τ_u(lat) at edges is projected onto edge normal via `cos(angleEdge)`.
+
+### Post-replication refactors (2026-05-14): promote experiment-agnostic helpers to legoESM
+
+Two pieces of the DINO experiment turned out to be general-purpose utilities, not DINO-specific. They were extracted into the legoESM core so future experiments can reuse them; DINO retains thin wrappers.
+
+| Promoted helper | Now in | Old location |
+|---|---|---|
+| `create_levy_stretched_z_star(n_levels, H_max, dz_min, k_th, a_cr)` | `legoesm.ocean.vertical` | `dino.create_dino_z_star` body |
+| `partial_periodic_seam_wall_mpas(mesh, open_lat_south_deg, open_lat_north_deg, ...)` | `legoesm.ocean.init_mpas` | `dino.dino_mpas_land_mask` body |
+| `partial_periodic_seam_wall_latlon(grid, open_lat_south_deg, open_lat_north_deg, ...)` | `legoesm.ocean.init_latlon_cgrid` | inline in `dino.dino_lat_lon_initial_state_arrays` |
+
+The Lévy stretched z* is the NEMO `mi96_1d` (Madec-Imbard 1996 / Lévy 2010) formulation used by many idealized configs (NW2, DINO, Munday-Marshall-Johnson). The seam-wall helpers implement the general "closed basin with re-entrant channel band" topology on a periodic mesh — applicable to any Drake-passage-like setup. New direct unit tests: 13 for Lévy z* + 10 for the seam-wall helpers (23 new tests).
 
 Diagnostic plots (not committed; in `docs/ocean_experiments/dino_plots/`):
 - `bathymetry.png` — full basin + channel zoom with sill ring
@@ -108,6 +120,7 @@ Each entry is a deliberate choice made during planning, with the reasoning so a 
 | 2026-05-14 | **EOS: Wright (existing nonlinear).** Not Roquet simplified (paper). | Wright is more accurate, already implemented and AD-tested. Roquet is what paper uses, so ACC/MOC magnitudes won't match exactly. Not worth implementing Roquet just for paper-figure parity. | Density distribution is grossly wrong in some specific water mass and Wright extrapolation is suspected. |
 | 2026-05-14 | **Vertical mixing: KPP + enhanced-diffusion convection.** Not TKE (paper). | Both already implemented in legoESM. KPP is standard. TKE would be additional engineering with no obvious benefit at 1°. | Mixed-layer depth is consistently too shallow / too deep across seasons — TKE may be needed. |
 | 2026-05-14 | **Restoring + Q_sr split: implement inside DINO module, not refactor `restoring.py`.** | The general restoring API uses timescales (seconds), not flux coefficients. Doing the conversion + Q_sr subtraction inside the DINO module avoids changing a widely-used API for one experiment. | Another experiment needs the same pattern — then factor out. |
+| 2026-05-14 | **Promoted two DINO-derived helpers to legoESM proper**: Lévy stretched z* grid (`legoesm.ocean.vertical.create_levy_stretched_z_star`) and partial-periodic seam-wall mask helpers (`legoesm.ocean.init_mpas.partial_periodic_seam_wall_mpas` + `legoesm.ocean.init_latlon_cgrid.partial_periodic_seam_wall_latlon`). | Both are experiment-agnostic patterns that any future NEMO-style ocean config (or Drake-passage-like channel-in-basin geometry) can reuse. DINO retains thin wrappers; the experiment module is now ~150 LOC leaner. | Never (resolved). |
 | 2026-05-14 | **Phase 4 v1: both v0 caveats closed (Jerlov SW penetration + MPAS production path).** | Jerlov adds the column-distributed Q_sr tendency on top of the eq-8 surface flux. MPAS path adds an edge-normal-projected wind, cell-indexed T*/S*/Q_sr, and same eq-7-9-10 physics as lat-lon. Lat-lon: 7.3s wall for 1 day (25-col Mercator). MPAS: 3.0s wall for 1 day (2028 cells regional Voronoi). | Production runs reveal a need to bend any of these conventions. |
 | 2026-05-14 | **Phase 4 v0: DINO surface forcing applied as explicit external tendencies in the time loop, NOT through legoESM's `OceanSurfaceForcing` / surface-forcing physics path.** | The general surface-forcing physics in legoESM uses timescales (not heat-flux coefficients) and doesn't subtract Q_sr per paper eq 8. Going through it would require either bending the convention or adding a DINO-specific branch in `surface_forcing/integration.py`. Using the Phase 2C-extra top-layer tendency helpers directly is cleaner and self-contained. | Adding multi-experiment support; factor out a shared "external surface tendency applicator" into legoESM. |
 | 2026-05-14 | **Phase 4 v0: Jerlov SW penetration through the column is NOT applied.** Q_sr-split surface flux IS applied (paper eq 8); subsurface solar heating (paper eq 10) is deferred to v1. | Keeps the Phase 4 production script focused on getting end-to-end stable integration first. Subsurface thermocline structure will be biased without subsurface SW heating, but the script runs and produces NPZ snapshots. v1 wire-up uses existing `shortwave_penetration.py` module. | First production multi-decade run reveals subsurface T bias that interferes with diagnostics → wire in Jerlov. |
