@@ -49,7 +49,9 @@ class LatLonGrid(NamedTuple):
     dlon: float                 # longitude spacing [rad]
     dlat: float                 # representative latitude spacing [rad]
     # For uniform-dlat grids this is the constant cell-row dlat. For
-    # Mercator it is the smallest (equatorial) row's dlat — used only
+    # Mercator the cell-row dlat varies with latitude (largest at the
+    # equator, smallest near the truncation latitude); this scalar
+    # stores the smallest (most CFL-stringent) row's value. Used only
     # for scalar CFL diagnostics. Operators must use ``dy`` (1D array)
     # for per-row cell heights, not ``dlat``.
 
@@ -406,9 +408,10 @@ def create_mercator_grid(
     -------
     LatLonGrid
         Grid with ``n_lat = 2K`` rows and ``n_lon`` columns, ``dy`` a
-        1D ``(n_lat,)`` array, and ``dlat`` set to the equatorial
-        (smallest, most CFL-stringent) cell-row dlat for backward-compat
-        scalar usage.
+        1D ``(n_lat,)`` array, and ``dlat`` set to the *smallest* (most
+        CFL-stringent, polar) cell-row dlat for backward-compat scalar
+        usage. Mercator cell-row dlat is largest at the equator and
+        smallest near the truncation latitude.
 
     Notes
     -----
@@ -492,9 +495,12 @@ def create_mercator_grid(
     area = area_lat[:, None] * jnp.ones((1, n_lon))
     total_area = jnp.sum(area)
 
-    # Representative dlat — smallest cell-row dlat (at the poles, where
-    # Mercator cells are narrowest). Used only for scalar CFL diagnostics;
-    # operators must use ``grid.dy`` for per-row spacing.
+    # Representative dlat — smallest cell-row dlat. Mercator cell-row
+    # dlat is largest at the equator (φ = 0, cos φ = 1) and smallest
+    # near the truncation latitude (cos φ → 0 ⇒ dφ/dk → 0), so the
+    # min() here picks the polar/truncation rows. Used only for scalar
+    # CFL diagnostics; operators must use ``grid.dy`` for per-row
+    # spacing.
     dlat_repr = float(jnp.min(lat_face[1:] - lat_face[:-1]))
 
     _c = lambda a: a.astype(dtype) if hasattr(a, 'astype') else a

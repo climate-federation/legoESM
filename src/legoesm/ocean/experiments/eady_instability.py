@@ -336,11 +336,16 @@ def _add_thermal_wind_latlon(state, grid, z_coord,
     u_data = u_data * u_mask[:, :, np.newaxis]
 
     # Geostrophically balanced SSH: f0 * U_bar = -g * deta/dy
-    # => eta(y) = -(f0/g) * integral(U_bar, dy) from south wall
+    # => eta(y) = -(f0/g) * integral(U_bar, dy) from south wall.
+    # Step size between cell centres (i-1) → i is dy_v[i-1], the
+    # face-to-face distance (1D, Mercator-safe). For uniform-dlat
+    # regional grids dy_v is constant.
     eta_data = np.zeros((n_lat, n_lon), dtype=np.float64)
     for i in range(1, n_lat):
         idx = min(i - 1, len(U_bar_full) - 1)
-        eta_data[i, :] = eta_data[i - 1, :] - (f0 / g) * U_bar_full[idx] * dy
+        eta_data[i, :] = (
+            eta_data[i - 1, :] - (f0 / g) * U_bar_full[idx] * dy_v[i - 1]
+        )
     # Remove mean to keep eta centered around zero
     ocean = np.asarray(state.land_mask.data) > 0.5
     if np.any(ocean):

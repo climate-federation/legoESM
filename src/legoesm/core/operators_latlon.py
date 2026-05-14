@@ -63,8 +63,12 @@ def gradient_y(field: Field, grid: LatLonGrid) -> Field:
     Field : d(field)/dy, shape (n_lat, n_lon).
     """
     padded = pad_halo_latlon(field.data)
-    # Centered difference: (f[j+1, i] - f[j-1, i]) / dy
-    # grid.dy is (n_lat,) — broadcast over longitude.
+    # Centred difference: (f[j+1, i] - f[j-1, i]) / dy.
+    # The denominator is twice the cell-row's single-cell height.
+    # For uniform-dlat (the only setting this A-grid path is used in;
+    # Mercator is C-grid-only) this equals the cell-centre-to-cell-
+    # centre distance from row j-1 to j+1 exactly. On non-uniform
+    # grids it is a leading-order approximation.
     df_dy = (padded[2:, 1:-1] - padded[:-2, 1:-1]) / grid.dy[:, None]
     return field.replace(data=df_dy, name=f"d{field.name}_dy", units=f"{field.units}/m")
 
@@ -168,7 +172,11 @@ def laplacian(field: Field, grid: LatLonGrid) -> Field:
         padded[1:-1, 2:] - 2.0 * data + padded[1:-1, :-2]
     ) / (grid.dx**2 / 4.0)
 
-    # d^2f/dy^2 — grid.dy is (n_lat,), broadcast over longitude.
+    # d²f/dy² — grid.dy is (n_lat,), broadcast over longitude. The
+    # ``(grid.dy/2)²`` denominator is the uniform-dlat formula; this
+    # A-grid Laplacian is used only on uniform global lat-lon grids
+    # (Mercator is C-grid-only). On non-uniform grids it is a leading-
+    # order approximation.
     d2f_dy2 = (
         padded[2:, 1:-1] - 2.0 * data + padded[:-2, 1:-1]
     ) / (grid.dy[:, None]**2 / 4.0)

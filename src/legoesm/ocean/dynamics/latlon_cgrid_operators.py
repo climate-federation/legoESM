@@ -1745,10 +1745,23 @@ def _grad_div_mag_h(div_h: jnp.ndarray, grid: "LatLonGrid") -> jnp.ndarray:
     dd_dx = (jnp.roll(div_h, -1, axis=1) - jnp.roll(div_h, 1, axis=1)) / (2.0 * dx_h)
 
     # Meridional gradient: centred in interior, one-sided at pole rows.
-    # dy_h is (n_lat, 1, [1]); slice along the lat axis to match each segment.
-    dd_dy_interior = (div_h[2:] - div_h[:-2]) / (2.0 * dy_h[1:-1])
-    dd_dy_south = (div_h[1:2] - div_h[0:1]) / dy_h[0:1]
-    dd_dy_north = (div_h[-1:] - div_h[-2:-1]) / dy_h[-1:]
+    # Interior centred diff spans rows i-1..i+1; the correct denominator
+    # is the cell-centre-to-cell-centre distance from row i-1 to row i+1,
+    # computed directly from ``grid.lat`` (Mercator-safe). For uniform
+    # dlat this equals ``2 * dy_h[i]`` exactly.
+    lat = grid.lat
+    if div_h.ndim == 3:
+        d_2cell_interior = (R * (lat[2:] - lat[:-2]))[:, jnp.newaxis, jnp.newaxis]
+    else:
+        d_2cell_interior = (R * (lat[2:] - lat[:-2]))[:, jnp.newaxis]
+    dd_dy_interior = (div_h[2:] - div_h[:-2]) / d_2cell_interior
+    # One-sided diffs at pole rows: distance from cell-centre row 0 to
+    # row 1 (south) / from row n_lat-2 to n_lat-1 (north) — same as
+    # ``dy_v(½)``, i.e. ½(dy_h[0]+dy_h[1]).
+    dy_v_south = 0.5 * (dy_h[0:1] + dy_h[1:2])
+    dy_v_north = 0.5 * (dy_h[-1:] + dy_h[-2:-1])
+    dd_dy_south = (div_h[1:2] - div_h[0:1]) / dy_v_south
+    dd_dy_north = (div_h[-1:] - div_h[-2:-1]) / dy_v_north
     dd_dy = jnp.concatenate([dd_dy_south, dd_dy_interior, dd_dy_north], axis=0)
 
     return jnp.sqrt(dd_dx ** 2 + dd_dy ** 2 + 1e-30)

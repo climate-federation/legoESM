@@ -56,7 +56,11 @@ def gradient_y_3d(field_3d: jax.Array, grid: LatLonGrid) -> jax.Array:
     jax.Array : d(field)/dy, shape (n_lat, n_lon, nlev).
     """
     padded = pad_halo_latlon_3d(field_3d)
-    # grid.dy is (n_lat,) — broadcast over (n_lon, nlev).
+    # grid.dy is (n_lat,); broadcast over (n_lon, nlev). The denominator
+    # is twice the cell-row's single-cell height, which equals the
+    # cell-centre-to-cell-centre 2-cell distance on uniform-dlat grids
+    # (the only setting this A-grid path is used in; Mercator is
+    # C-grid-only). Leading-order approximation on non-uniform grids.
     df_dy = (padded[2:, 1:-1] - padded[:-2, 1:-1]) / grid.dy[:, None, None]
     return df_dy
 
@@ -135,6 +139,8 @@ def laplacian_3d(field_3d: jax.Array, grid: LatLonGrid) -> jax.Array:
         padded[1:-1, 2:] - 2.0 * field_3d + padded[1:-1, :-2]
     ) / (grid.dx**2 / 4.0)[:, :, None]
 
+    # Uniform-dlat second-derivative; this A-grid 3D Laplacian only
+    # runs on uniform global lat-lon grids (Mercator is C-grid-only).
     d2f_dy2 = (
         padded[2:, 1:-1] - 2.0 * field_3d + padded[:-2, 1:-1]
     ) / ((grid.dy**2 / 4.0)[:, None, None])
