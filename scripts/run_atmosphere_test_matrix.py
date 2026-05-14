@@ -4826,8 +4826,11 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             #      instability hypothesis).
             #   2. Increase hyperdiff_coeff for TC2 cube (over-edge
             #      dissipation hypothesis).
-            #   3. Reduce acoustic_off_centering 0.15 -> 0.05
-            #      (semi-implicit instability hypothesis).
+            #   3. INCREASE acoustic_off_centering 0.15 -> 0.30 (more
+            #      implicit = more stable; FV3 default `beta=0`
+            #      explicit, our docstring "0.1 long runs" so 0.30
+            #      gives 3x the implicit weighting).  Note: this
+            #      INVERTS iter-104's initial hypothesis direction.
             #   4. FV3 oracle: compare against test_case (mountain) at
             #      /home/gentine/Documents/Code/FV3/atmos_cubed_sphere-
             #      symmetryclean/ for n_split / d_con / delt_max settings.

@@ -254,7 +254,7 @@ Open items requiring substantial compute (deferred):
 - **HIGHEST PRIORITY (iter-102/103)**: investigate TC2 cube full-mode BLOWUP at day 0.13.  Hypothesis: gravity wave reflection off cube panel edges accumulates over 3 hours.  Pre-blowup mass_drift was 7.85e-16 (clean) — dynamics field blew up cleanly without conservation issues.  Possible fixes to probe:
   1. Increase n_acoustic_substeps from 20 → 30+ (acoustic instability hypothesis).
   2. Increase hyperdiff_coeff for TC2 cube (over-edge dissipation hypothesis).
-  3. Reduce acoustic_off_centering from 0.15 → 0.05 (semi-implicit-instability hypothesis).
+  3. INCREASE acoustic_off_centering from 0.15 → 0.30 (more implicit = more stable; iter-116 correction — initial direction was inverted, lower off-centering is LESS stable for long runs per `acoustic_off_centering: float = 0.0   # Off-centering beta; 0=centered, 0.1 long runs` doc string in `compressible_euler_cdgrid.py`).
   4. FV3 oracle comparison at /home/gentine/Documents/Code/FV3/atmos_cubed_sphere-symmetryclean/ for TC2-equivalent mountain test config.
 
 
