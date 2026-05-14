@@ -210,9 +210,12 @@ def _build_test_matrix() -> list[TestCase]:
         # ``docs/dycore_validation_catalog.md``.
         # new_test_dycores iter-24: extend W6 to cube (cubed_sphere)
         # via the edge-midpoint analytic init wired in run_shallow_water.
-        # Lat-lon W6 wiring still deferred (no W6 C-grid wind init yet;
-        # see ``tests/test_cases/williamson_extended.py``).
-        if g in ("icosahedral", "spectral", "cubed_sphere"):
+        # new_test_dycores iter-25: also extend W6 to lat-lon (C-grid)
+        # via face-midpoint inline init (no helper added; the W6 lon-
+        # and lat-face wind formulas are evaluated directly inline at
+        # the matrix-runner SW latlon path).  All 4 grid types
+        # (cube / latlon / ico / spectral) now run W6.
+        if g in ("icosahedral", "spectral", "cubed_sphere", "latlon"):
             matrix.append(TestCase(
                 "shallow_water", "williamson6", g, res[g], "none", 14, 1,
                 {"test_num": 6}))
@@ -2126,6 +2129,7 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.grids.latlon import create_latlon_grid
         from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
             CGridLatLonShallowWaterModel, CGridLatLonShallowWaterConfig,
+            CGridLatLonShallowWaterState,
             williamson_test2_cgrid, williamson_test5_cgrid,
             williamson_test2_exact_cgrid, compute_error_norms_cgrid)
 
@@ -2145,8 +2149,43 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             A_h=_A_h, anchor_mass_to_initial=True,
         )
         model = CGridLatLonShallowWaterModel(grid, config, dt=dt)
-        state = (williamson_test2_cgrid(grid) if test_num == 2
-                 else williamson_test5_cgrid(grid))
+        # new_test_dycores iter-25: extend SW latlon to W6
+        # (Rossby-Haurwitz wave-4).  W6 winds depend on both lon and
+        # lat, so the C-grid face-midpoint init evaluates
+        # ``_w6_winds_geo`` directly at the u-face / v-face
+        # coordinates (no rotation needed — latlon faces are aligned
+        # with east/north).  h field from
+        # ``williamson_test6_latlon(grid)``.
+        if test_num == 6:
+            from tests.test_cases.williamson_extended import (
+                williamson_test6_latlon, _w6_winds_geo,
+            )
+            _w6 = williamson_test6_latlon(grid)
+            _R = grid.radius
+            # u at lon-faces (n_lat, n_lon+1): wrap-periodic.
+            _lon_f_1d = grid.lon - 0.5 * grid.dlon
+            _lon_f_full = jnp.concatenate(
+                [_lon_f_1d, _lon_f_1d[0:1] + 2.0 * jnp.pi]
+            )
+            _u_east_uface, _ = _w6_winds_geo(
+                _lon_f_full[None, :], grid.lat[:, None], _R,
+            )
+            # v at lat-faces (n_lat+1, n_lon).  ``_w6_winds_geo``
+            # safely returns 0 at the poles since v_north has a
+            # ``cos(lat)^(R-1)`` factor (R=4 → cos^3=0 at ±π/2).
+            _lat_f_1d = jnp.linspace(
+                -0.5 * jnp.pi, 0.5 * jnp.pi, grid.n_lat + 1
+            )
+            _, _v_north_vface = _w6_winds_geo(
+                grid.lon[None, :], _lat_f_1d[:, None], _R,
+            )
+            state = CGridLatLonShallowWaterState(
+                h=_w6.h.data, u=_u_east_uface, v=_v_north_vface,
+                h_s=jnp.zeros_like(_w6.h.data),
+            )
+        else:
+            state = (williamson_test2_cgrid(grid) if test_num == 2
+                     else williamson_test5_cgrid(grid))
 
         def step_fn(s, dt_):
             return model.step(s, dt_)

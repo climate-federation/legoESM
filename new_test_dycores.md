@@ -72,6 +72,7 @@ Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV /
   
   Both NH cube parity (iter-5/6/7 win at 7.36 m/s on TC3) AND PE cube held_suarez stability are preserved through the iter-12..22 cumulative bundle.
 - iter-24: **SW Williamson 6 cube wired (deferred from iter-11).**  Add `test_num=6` branch to the matrix runner SW cube path using `_w6_winds_geo(lon_edge, lat_edge, R)` from `tests/test_cases/williamson_extended.py` for analytic edge-midpoint (u_east, v_north) at every D-grid edge; rotate to (u_d, v_d) via the cube's `(cos_angle_edge, sin_angle_edge)` matrices.  h field from `williamson_test6(grid)` cell-centre init.  Also extended the W6 GRID_TYPES iteration (line 211) to include `cubed_sphere`.  **Result at C36 day-1 quick**: cube `mass_drift=3.82e-16, wall 12.6 s` — machine precision; cross-grid table now shows cube/ico/spec at 3.82e-16 / 0.00e+00 / 1.91e-16.  Lat-lon W6 still deferred (no W6 C-grid wind init yet).
+- iter-25: **SW Williamson 6 lat-lon (C-grid) wired (deferred from iter-24).**  Add `test_num==6` inline init to the matrix runner SW latlon path using `_w6_winds_geo` evaluated directly at u-face (lon_face × cell-lat) and v-face (cell-lon × lat_face) coordinates — latlon C-grid faces align with east/north so no rotation needed.  v at the poles is safely 0 (W6 v_north has a `cos(lat)^(R-1)` factor with R=4).  Also imported `CGridLatLonShallowWaterState` (was missing).  Extended the W6 GRID_TYPES iteration to include `"latlon"`.  **Result at 72x144 day-1 quick**: latlon `mass_drift=1.91e-16, wall 6.1 s`.  **All 4 grid types now run W6 at machine-precision mass conservation** (cube 3.82e-16 / ico 0.0 / latlon 1.91e-16 / spec 1.91e-16).
 
 ## Iter-21+ queued (status post iter-24)
 
@@ -79,5 +80,5 @@ Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV /
 - ✅ iter-22: PE factory bundle propagated to held_suarez + AMIP cube.
 - ✅ iter-23: TC3 cube cumulative iter-12..17 verified (7.36 m/s bit-identical to iter-7).
 - ✅ iter-24: SW Williamson 6 cube wiring (mass_drift=3.82e-16, cross-grid table now includes cube W6).
+- ✅ iter-25: SW Williamson 6 lat-lon wiring (mass_drift=1.91e-16); all 4 grids on W6 cross-grid table.
 - AMIP cube cumulative bundle verification (slow — 30-day quick at 900 s wall).
-- Lat-lon SW Williamson 6 wiring (W6 C-grid wind init not yet implemented).
