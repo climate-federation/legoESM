@@ -301,6 +301,19 @@ def test_pe_baroclinic_cube_uses_delt_max():
     )
 
 
+def test_pe_baroclinic_cube_uses_heat_source_del2_iters():
+    """iter-21 sentinel: PE baroclinic cube branch enables
+    ``heat_source_del2_iters=2`` (PE iter-458 factory default;
+    del-2 smoothing of ``_d_con_sum`` heat source; analog of NH
+    iter-15 enabled on the matrix in iter-15).
+    """
+    block = _find_pe_baroclinic_cube_config_block()
+    assert "heat_source_del2_iters=2" in block, (
+        "iter-21 regression: PE baroclinic cube config lost "
+        "``heat_source_del2_iters=2``."
+    )
+
+
 def test_sw_cube_uses_iter1009_dual_target_config():
     """iter-1/8 sentinel: matrix runner SW W2/W5 cube branch routes
     through the canonical ``iter1009_dual_target_config(n)`` helper

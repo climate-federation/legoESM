@@ -3427,7 +3427,12 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             # new_test_dycores iter-20: PE ``delt_max=1.0`` (factory
             # default; PE iter-218 analog of NH iter-16; per-step
             # heating cap ``|Δθ_p · Π| ≤ dt · delt_max``).
-            delt_max=1.0)
+            delt_max=1.0,
+            # new_test_dycores iter-21: PE ``heat_source_del2_iters=2``
+            # (factory default; PE iter-458 del-2 smoothing of
+            # ``_d_con_sum`` heat source, analog of NH iter-15
+            # enabled in iter-15).
+            heat_source_del2_iters=2)
         model = PrimitiveEquationModel(grid, sigma, config)
         if _rotated:
             from tests.test_cases.dcmip2008.jablonowski_rotated import (
