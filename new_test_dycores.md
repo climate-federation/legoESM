@@ -164,6 +164,13 @@ Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV /
 - iter-66 negative result (reverted): ico CB multiplicative-fixer attempt regressed Linf 5× — additive uniform correction wins on heterogeneous unstructured mesh.  See top compressed block for lesson.
 - iter-69: W2 5-day apples-to-apples — cube is BEST finite-volume.  See top compressed block.
 - iter-70: W5 15-day apples-to-apples — all 4 grids machine-precision mass conservation.  See top compressed block.
+- iter-71: hyperdiff coefficient multiplier sweep on cube W2 5-day (refines iter-44's 2× choice).  Probe results:
+  - mult=1.0×: L2=7.16e-4, v_d=0.96 m/s.
+  - mult=1.5×: L2=5.51e-4, v_d=0.70 m/s.
+  - mult=2.0× (iter-44): L2=4.58e-4, v_d=0.65 m/s.
+  - mult=2.5×: L2=**4.42e-4**, v_d=**0.63 m/s** (best on both).
+  - mult=3.0×: L2=4.47e-4, v_d=0.63 m/s.
+  Optimum near 2.5× gives 3.5 % L2 reduction over 2.0×.  Below the test-to-test noise floor (similar to iter-54's div_damp_factor sweep finding).  Going from 1.0 → 2.0 captures 87 % of the achievable improvement (7.16 → 4.58 vs 7.16 → 4.42).  **iter-44's 2.0× retained** — the 3.5 % marginal gain at 2.5 isn't compelling enough to deviate from the calibrated value, and over-damping risks regressing W5/W6 long-run mountain-wave structure (not visible in mass-drift-only PASS criteria).  Also: W6 14-day cross-grid apples-to-apples confirmed (this iter) — all 4 grids PASS at machine-precision mass conservation.  SW matrix is now fully apples-to-apples across all 4 cases (W2/W5/W6/CB) × all 4 grids.
 
 ## Iter-51+ queued
 
