@@ -62,26 +62,41 @@ _SBM_TRAINABLE = [
     ParamConstraint("sbm_RH_ref", 0.6, 0.9, "sigmoid"),
 ]
 
+# Louis-turbulence-specific trainable parameters.
+# iter-252 (AIMIP Phase 2.2): added Ri_crit so the AIMIP training
+# loop tunes the stable-PBL cutoff in the Louis scheme.  Bounds
+# (0.20, 0.50) match tuning.py::TUNING_PARAMETERS["Ri_crit"].  Only
+# active when --turbulence louis.
+_LOUIS_TURBULENCE_TRAINABLE = [
+    ParamConstraint("Ri_crit", 0.20, 0.50, "sigmoid"),
+]
+
 
 def trainable_constraints_for_scheme(
     convection_scheme: str = "sbm",
+    turbulence_scheme: str = "none",
 ) -> list[ParamConstraint]:
-    """Return trainable parameter constraints appropriate for the given scheme.
+    """Return trainable parameter constraints appropriate for the given schemes.
 
     Parameters
     ----------
     convection_scheme : str
         Convection scheme name: "sbm", "dca", "kuo", "mass_flux", "edmf", "none".
         Only SBM has scheme-specific trainable parameters.
+    turbulence_scheme : str
+        Turbulence scheme name: "louis", "tke", "smagorinsky", ..., "none".
+        Only Louis has scheme-specific trainable parameters (iter-252).
 
     Returns
     -------
     list[ParamConstraint]
     """
+    result = list(_COMMON_TRAINABLE)
     if convection_scheme == "sbm":
-        return _COMMON_TRAINABLE + _SBM_TRAINABLE
-    else:
-        return list(_COMMON_TRAINABLE)
+        result = result + _SBM_TRAINABLE
+    if turbulence_scheme == "louis":
+        result = result + _LOUIS_TURBULENCE_TRAINABLE
+    return result
 
 
 def _sigmoid_to_range(raw: jax.Array, lo: float, hi: float) -> jax.Array:

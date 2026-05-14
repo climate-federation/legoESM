@@ -239,6 +239,30 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
         sensitivity="low",
         notes="Open-ocean reflectance. Typically 0.06 for diffuse light.",
     ),
+
+    # -- Turbulence (Louis stability-dependent PBL) ----------------------
+    # iter-252 (AIMIP Phase 2.2): exposed Ri_crit as a tunable so the
+    # AIMIP training loop can adjust the Louis stable-PBL cutoff against
+    # ERA5.  Default 0.25 follows Holtslag & De Bruin (1988); range
+    # 0.2-0.5 spans common literature values (Mahrt 1998, Sukoriansky
+    # 2005 push as high as 1.0 for very-stable PBL, but 0.5 is a safer
+    # upper bound for current Louis stability functions).
+    "Ri_crit": TuningParameter(
+        name="Ri_crit",
+        default=0.25,
+        min_val=0.20,
+        max_val=0.50,
+        units="1",
+        description="Critical Richardson number (Louis stability cutoff)",
+        category="turbulence",
+        sensitivity="medium",
+        notes=(
+            "Above Ri_crit Louis returns zero diffusivity (stable PBL "
+            "shutdown).  Higher = more vigorous nocturnal/polar PBL "
+            "mixing; lower = sharper PBL decoupling.  Only consulted "
+            "when --turbulence louis."
+        ),
+    ),
 }
 
 
