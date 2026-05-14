@@ -432,3 +432,27 @@ Closed items (formerly queued):
 - ~~iter-64 nord_v=1 TC1 probe~~ — **resolved by iter-81** as duration-mismatch artifact, not config issue.
 - ~~iter-45 visual artifact inspection~~ — addressed by iter-58/59 numerical work; visual would require additional plotting work.
 - ~~Cube CB structural tracer del-4 op~~ — iter-58/59 cumulative 20.8 % L2 improvement makes this no longer the highest-value action.
+
+## Iter-255 — AIMIP Phase 2 audit + S_0 demoted from tunable
+
+While continuing AIMIP Phase 2 (extending the trainable-physics set), discovered iters 251-254 had landed `albedo_land`, `Ri_crit`, `Ck`, `l_mix_max` in `_COMMON_TRAINABLE` / `_LOUIS_TURBULENCE_TRAINABLE` **without wiring them as kwargs of `build_segment_fn`**.  Net effect: gradients ran, but param values never reached the rollout — the training loop would optimise a constant.  CLAUDE.md explicitly bans this kind of half-impl.
+
+Landed two corrective changes:
+
+1. **`tests/test_aimip_phase2_trainable_wired.py`** — three-sentinel regression guard:
+   - every name in the trainable lists is either a `build_segment_fn` kwarg or in a documented `UNWIRED_TODO` whitelist;
+   - `UNWIRED_TODO` entries are not already wired (whitelist tightens monotonically);
+   - currently-wired-and-trainable param count is exactly the original 8 (`tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref, C_H, C_E, albedo_ice, albedo_ocean`).
+   `UNWIRED_TODO = {albedo_land (Phase 2.6), Ri_crit, Ck, l_mix_max (Phase 2.7)}`.
+
+2. **`src/legoesm/tuning.py`** — removed `S_0` from `TUNING_PARAMETERS` per user direction ("solar constant should be a constant not a parameter").  `constants.S_0 = 1361 W/m^2` remains the single source of truth; per-experiment overrides go via `ExperimentConfig.S_0` (already exists, defaults to `constants.S_0`).  Param count `TUNING_PARAMETERS` 19 → 18.  `tests/unit/test_constants_consistency.py:46` still passes (verifies `S_0` exists in `constants.py`, orthogonal to its tuning-registry status).
+
+Phase-2 trainable accounting (as of iter-255):
+
+| Set | Count | Names | Wired? |
+|-----|-------|-------|--------|
+| `_COMMON_TRAINABLE` | 7 | `tau_equator, tau_pole, C_H, C_E, albedo_ice, albedo_ocean, albedo_land` | 6/7 |
+| `_SBM_TRAINABLE` | 2 | `sbm_tau_c, sbm_RH_ref` | 2/2 |
+| `_LOUIS_TURBULENCE_TRAINABLE` | 3 | `Ri_crit, Ck, l_mix_max` | 0/3 |
+
+Next AIMIP iters: wire `albedo_land` (Phase 2.6) then the Louis triple (Phase 2.7) end-to-end (`build_segment_fn` → `step_unified` → surface/turbulence physics modules).

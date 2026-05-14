@@ -89,17 +89,14 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
         sensitivity="medium",
         notes="Controls polar longwave cooling. Lower = colder poles.",
     ),
-    "S_0": TuningParameter(
-        name="S_0",
-        default=1360.0,
-        min_val=1340.0,
-        max_val=1380.0,
-        units="W/m^2",
-        description="Solar constant",
-        category="radiation",
-        sensitivity="low",
-        notes="Total solar irradiance. Standard value ~1361 W/m^2.",
-    ),
+    # iter-255: ``S_0`` removed from TUNING_PARAMETERS — solar constant
+    # is a physical constant (``legoesm.constants.S_0 = 1361 W/m^2``),
+    # NOT a model tuning knob.  Any code that previously read
+    # ``TUNING_PARAMETERS["S_0"]`` should import ``constants.S_0``
+    # directly.  Per-experiment overrides (e.g. paleoclimate runs with
+    # a different solar luminosity) belong in the experiment's
+    # ``ExperimentConfig.S_0`` field, which already exists and
+    # defaults to ``constants.S_0``.
     "rad_update_steps": TuningParameter(
         name="rad_update_steps",
         default=1,
