@@ -43,6 +43,21 @@ So the iter-12..17 NH bundle (vector_halo + a2b_ord4 + d_con_cv + dynamic_exner 
 
 **iter-12..17 doc claims need caveat**: those measurements were at quick mode (5 min); full-mode behaviour DOES NOT HOLD for TC2 cube.
 
+## State after iter-1..140 (compressed at iter-140)
+
+**iter-131..140 highlights — TC2/TC3 cube blowup investigation phase**:
+
+- **iter-132 TC3 cube comment upgraded** from pre-emptive CAUTION to **CONFIRMED** full-mode BLOWUP warning (iter-123 verified TC3 cube FAILs at step 2250).
+- **iter-135 TC2 quick 3-grid parity verified**: cube 0.3177 / ico 0.3552 / spec 0.3597 (all within 12 %; cube is LOWEST at quick mode).
+- **iter-136 FV3 oracle audit (n_split)**: FV3 control for mountain test is `n_split=10`.  Our `n_acoustic_substeps=20` is already 2× FV3 — so **hypothesis 1** (increase acoustic substeps) is unlikely to be the fix.  iter-104 hypothesis list updated.
+- **iter-138 hypothesis 2 PROBE in progress**: TC2 cube with 16× hyperdiff (vs baseline 4×), running --days 0.15 (3.6 hr past current blowup at day 0.13).  Expected wall ~67 min.  Currently 11 min in.  Result iter-141+.
+- **iter-133 TC3 quick refresh FAILED twice** (~25 min stuck each).  TC3 quick parity vs iter-7 doc claim remains UNVERIFIED but full-mode FAIL is the critical finding (already documented).
+- **iter-130 doc compression** of iter-121..130 — NH matrix completion phase.
+
+**Cumulative sentinel coverage at iter-140**: **31 AST + 14 numerical + 1 c_sw + 1 functional = 47 sentinels** (unchanged from iter-130).
+
+**Active state**: TC2 hypothesis-2 probe running.  If 16× hyperdiff prevents the day-0.13 cube blowup, that's THE fix.  If still blows up, hypothesis 3 (acoustic_off_centering) is next probe.
+
 ## State after iter-1..130 (compressed at iter-130)
 
 **iter-121..130 highlights — NH matrix completion + iter-118 verification phase**:
