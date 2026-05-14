@@ -21,6 +21,16 @@ Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV /
 
 **Cumulative sentinel coverage**: **28 AST + 14 numerical + 1 c_sw residual = 43 sentinels total** (iter-79 added iter-66 negative-result guard; iter-83 hardened it with anti-anchor).  Latest full-suite check (iter-85): 41 AST+numerical PASS in 152 s; c_sw residual (iter-86 verified) PASS in 19 s.
 
+**iter-89 full matrix mode summary** (3-suite audit):
+- **SW matrix**: 4 cases × 4 grids = **16/16 at full-spec duration** ✓ (W2 5d, W5 15d, W6 14d, CB 12d).
+- **PE matrix**: 13 cases × 4 grids = **51/52 at quick mode** (only gravity_wave_3_1 at full per iter-72 refresh).  Cross-grid quick-mode parity is apples-to-apples; full-mode behaviour TBD.
+- **NH matrix**: 3 cases × 3 grids = **6/9 at quick mode** (TC1 ico/spec quick; TC2/TC3 all 3 grids at quick); **1/9 at full mode** (TC1 cube 3hr); **2/9 currently refreshing in re-run** (TC2/TC3 cube — NH matrix in progress).
+
+So:
+- SW: full audit confidence = HIGH.
+- PE: quick-mode audit confidence = HIGH; full-mode audit = TBD.
+- NH: partial mode mix; ico/spec at quick, cube refreshing to full.  Cross-grid will still be mixed-mode after NH matrix completes (cube full vs ico/spec quick).  To truly compare cube/ico/spec at full mode would require also re-running ico+spec at full duration.
+
 **iter-88 audit**: confirmed **ALL** cached PE matrix results are at **quick mode** duration (not full spec).  Specifically:
   - held_suarez: cached 30 days (spec full 200).
   - amip: cached 30 days (spec full 365).
