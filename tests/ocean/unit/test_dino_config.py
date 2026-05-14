@@ -43,7 +43,6 @@ def test_dino_config_bathymetry_zenodo_locked():
     assert cfg.H_deep == pytest.approx(4000.0)        # rn_H
     assert cfg.H_shallow == pytest.approx(2000.0)     # rn_hborder
     assert cfg.s_lambda_inv_deg == pytest.approx(1.0 / 3.0)  # 1/rn_distLam
-    assert cfg.channel_wall_slope == pytest.approx(1.5)      # rn_slp_cha
     assert cfg.sill_gaussian_width_s == pytest.approx(4.0)   # rn_ds_width
     assert cfg.H_sill == pytest.approx(2500.0)               # rn_ds_depth
 
@@ -61,7 +60,7 @@ def test_dino_config_vertical_grid():
 def test_dino_config_wind_knots_match_paper_eq_7():
     cfg = DINOConfig()
 
-    # Sect 2.3, eq 7 — fixed knots interpolated by PCHIP
+    # Sect 2.3, eq 7 — fixed knots interpolated by cubic-Hermite smooth-step
     assert cfg.wind_tau_lats_deg == (-70.0, -45.0, -15.0, 0.0, 15.0, 45.0, 70.0)
     assert cfg.wind_tau_values == (0.0, 0.2, -0.1, -0.02, -0.1, 0.1, 0.0)
     assert len(cfg.wind_tau_lats_deg) == len(cfg.wind_tau_values)
@@ -124,7 +123,6 @@ def test_dino_config_locked_scheme_choices():
     assert cfg.pgf_scheme == "adcroft"
     assert cfg.barotropic_solver == "implicit_cn"
     assert cfg.tracer_advection == "tvd"
-    assert cfg.hi_precision_pressure is True
     assert cfg.barotropic_implicit_theta_eta == pytest.approx(0.55)
 
 

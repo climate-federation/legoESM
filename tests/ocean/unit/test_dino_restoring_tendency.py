@@ -62,7 +62,7 @@ def test_T_tendency_negative_when_warmer_than_star_no_solar():
     """T > T* with no solar → cooling."""
     cfg = DINOConfig()
     dT_dt = dino_top_layer_T_tendency(
-        T_surface=jnp.array(25.0), T_star=jnp.array(20.0),
+        T_sfc_C=jnp.array(25.0), T_star=jnp.array(20.0),
         Q_sr=jnp.array(0.0), dz_0=cfg.dz_min, cfg=cfg,
     )
     assert float(dT_dt) < 0.0
@@ -71,7 +71,7 @@ def test_T_tendency_negative_when_warmer_than_star_no_solar():
 def test_T_tendency_positive_when_colder_than_star_no_solar():
     cfg = DINOConfig()
     dT_dt = dino_top_layer_T_tendency(
-        T_surface=jnp.array(10.0), T_star=jnp.array(20.0),
+        T_sfc_C=jnp.array(10.0), T_star=jnp.array(20.0),
         Q_sr=jnp.array(0.0), dz_0=cfg.dz_min, cfg=cfg,
     )
     assert float(dT_dt) > 0.0
@@ -96,7 +96,7 @@ def test_T_tendency_solar_warms_when_at_target():
     via Jerlov, not here). Sign is intentional."""
     cfg = DINOConfig()
     dT_dt = dino_top_layer_T_tendency(
-        T_surface=jnp.array(20.0), T_star=jnp.array(20.0),
+        T_sfc_C=jnp.array(20.0), T_star=jnp.array(20.0),
         Q_sr=jnp.array(150.0), dz_0=cfg.dz_min, cfg=cfg,
     )
     assert float(dT_dt) < 0.0

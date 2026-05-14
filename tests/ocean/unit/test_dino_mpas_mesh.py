@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 import numpy as np
-import pytest
 
 from legoesm.grids.voronoi import create_regional_voronoi_mesh
 from legoesm.ocean.experiments.dino import (

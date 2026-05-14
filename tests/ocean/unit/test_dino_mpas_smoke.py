@@ -7,8 +7,8 @@ state magnitudes stay sensible (small velocities, T/S stay in physical
 range, η stays small).
 
 This is the first end-to-end DINO test that actually integrates time.
-The lat-lon path is not exercised here — that's blocked on the
-Mercator grid PR.
+Lat-lon path is exercised separately in
+``tests/ocean/unit/test_dino_lat_lon_smoke.py``.
 """
 
 from __future__ import annotations

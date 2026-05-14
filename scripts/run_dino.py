@@ -29,33 +29,24 @@ import json
 import time
 from pathlib import Path
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 
-from legoesm.core.field import Field
 from legoesm.grids.voronoi import create_regional_voronoi_mesh
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
-from legoesm.ocean.physics.shortwave_penetration import (
-    ShortwavePenetrationConfig,
-    shortwave_penetration_tendency,
-)
 from legoesm.ocean.experiments.dino import (
     DINOConfig,
+    apply_dino_lat_lon_surface_forcing,
+    apply_dino_mpas_surface_forcing,
     create_dino_z_star,
     dino_lat_lon_grid,
     dino_lat_lon_model_config,
     dino_lat_lon_state,
+    dino_lat_lon_surface_forcing_arrays,
     dino_mpas_model_config,
     dino_mpas_state,
-    dino_Q_sr_annual_mean,
-    dino_S_star,
-    dino_T_star_annual_mean,
-    dino_top_layer_S_tendency,
-    dino_top_layer_T_tendency,
-    dino_top_layer_u_tendency,
-    dino_wind_stress,
+    dino_mpas_surface_forcing_arrays,
 )
 
 
@@ -100,8 +91,10 @@ def _parse_args():
         help="Baroclinic timestep [s]. Default uses DINOConfig.dt = 2700.",
     )
     p.add_argument(
-        "--output-dir", type=Path, default=Path("dino_output"),
-        help="Directory to write snapshots + log.",
+        "--output-dir", type=Path, default=Path("results/dino"),
+        help="Directory to write snapshots + log. Default 'results/dino' "
+             "(relative to CWD). Note: `results/` should be gitignored — "
+             "snapshots can be many MB.",
     )
     p.add_argument(
         "--no-forcing", action="store_true",
@@ -113,216 +106,6 @@ def _parse_args():
         help="Disable KPP / GM-Redi / convection — dycore only.",
     )
     return p.parse_args()
-
-
-# ---------------------------------------------------------------------
-# DINO surface forcing on the lat-lon Mercator grid
-#
-# Applied as explicit external tendencies after each model step. This
-# sidesteps legoESM's surface_forcing physics convention (which uses
-# timescales, not heat-flux coefficients, and doesn't subtract Q_sr
-# per paper eq 8). Q_sr split: surface T tendency uses the FULL eq 8
-# formula `(A_θ(T*-T) - Q_sr) / (ρ₀ c_p dz_0)`. Jerlov shortwave
-# penetration through the column is NOT applied in v0 — the column
-# simply doesn't see solar heating below the surface. This means the
-# subsurface stratification will be biased (no penetrating SW). v1
-# will add proper Jerlov penetration.
-# ---------------------------------------------------------------------
-
-def _build_lat_lon_forcing_arrays(grid, cfg: DINOConfig):
-    """Pre-compute forcing fields that don't depend on the state.
-
-    Returns dict with:
-      tau_u_face: (n_lat, n_lon+1) — wind stress at u-faces
-      T_star_2d:  (n_lat, n_lon)
-      S_star_2d:  (n_lat, n_lon)
-      Q_sr_2d:    (n_lat, n_lon) — annual-mean solar
-    """
-    lat_1d = jnp.degrees(grid.lat)              # (n_lat,)
-
-    T_star_1d = dino_T_star_annual_mean(lat_1d, cfg)
-    S_star_1d = dino_S_star(lat_1d, cfg)
-    Q_sr_1d = dino_Q_sr_annual_mean(lat_1d, cfg)
-    tau_u_1d = dino_wind_stress(lat_1d, cfg)    # (n_lat,)
-
-    # Broadcast to 2D
-    T_star_2d = jnp.broadcast_to(T_star_1d[:, None], (grid.n_lat, grid.n_lon))
-    S_star_2d = jnp.broadcast_to(S_star_1d[:, None], (grid.n_lat, grid.n_lon))
-    Q_sr_2d = jnp.broadcast_to(Q_sr_1d[:, None], (grid.n_lat, grid.n_lon))
-
-    # Wind at u-faces: u shape (n_lat, n_lon+1), zonally uniform
-    tau_u_face = jnp.broadcast_to(tau_u_1d[:, None], (grid.n_lat, grid.n_lon + 1))
-
-    return {
-        "tau_u_face": tau_u_face,
-        "T_star_2d": T_star_2d,
-        "S_star_2d": S_star_2d,
-        "Q_sr_2d": Q_sr_2d,
-    }
-
-
-def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt):
-    """Apply DINO surface forcing on the lat-lon Mercator grid.
-
-    Components (paper eqs 7-10):
-      - Wind:  τ_u → top-layer u tendency (eq 7)
-      - T:     non-solar restoring (A_θ(T*-T) - Q_sr) at top layer (eq 8)
-      - S:     A_S(S*-S) at top layer (eq 9)
-      - SW:    Jerlov type I column-distributed Q_sr through all
-               levels (eq 10) — uses
-               ``legoesm.ocean.physics.shortwave_penetration``.
-
-    Returns
-    -------
-    LatLonCGridOceanState
-    """
-    dz_0 = float(z_coord.dz_ref[0])
-    cell_mask = state.land_mask.data
-
-    # T tendency at top layer (eq 8; subtracts Q_sr from non-solar component)
-    T_top = state.T.data[..., 0]
-    dT_dt_top = dino_top_layer_T_tendency(
-        T_top, forcing["T_star_2d"], forcing["Q_sr_2d"], dz_0, cfg,
-    )
-
-    # Jerlov SW penetration through the column (eq 10): full 3D tendency
-    # added to dT/dt at every level. The reference Jacobian ≈ 1
-    # (η/H_max ~ 1e-4) — using 1.0 keeps the code simple and matches
-    # standard practice in MOM6 / NEMO / POP.
-    jacobian = jnp.ones_like(state.eta.data)
-    sw_cfg = ShortwavePenetrationConfig(water_type=cfg.jerlov_water_type)
-    dT_dt_sw = shortwave_penetration_tendency(
-        sw_down=forcing["Q_sr_2d"],
-        z_coord_dz_ref=z_coord.dz_ref,
-        z_coord_z_half_ref=z_coord.z_half_ref,
-        jacobian=jacobian,
-        config=sw_cfg,
-        rho_0=cfg.rho_0,
-        c_sw=cfg.c_p,
-    )  # (n_lat, n_lon, nlev)
-
-    # Combine: top layer gets eq-8 surface flux + eq-10 surface absorption;
-    # subsurface levels get only eq-10 SW absorption.
-    new_T = state.T.data + dt * dT_dt_sw * cell_mask[..., None]
-    new_T_top = new_T[..., 0] + dt * dT_dt_top * cell_mask
-    new_T = new_T.at[..., 0].set(new_T_top)
-
-    # S tendency at top layer (eq 9)
-    S_top = state.S.data[..., 0]
-    dS_dt_top = dino_top_layer_S_tendency(
-        S_top, forcing["S_star_2d"], dz_0, cfg,
-    )
-    new_S_top = S_top + dt * dS_dt_top * cell_mask
-    new_S = state.S.data.at[..., 0].set(new_S_top)
-
-    # u tendency at u-faces (eq 7)
-    u_top = state.u.data[..., 0]
-    du_dt_top = dino_top_layer_u_tendency(forcing["tau_u_face"], dz_0, cfg)
-    u_face_mask = state.u_mask.data
-    new_u_top = u_top + dt * du_dt_top * u_face_mask
-    new_u = state.u.data.at[..., 0].set(new_u_top)
-
-    return state._replace(
-        T=Field(data=new_T, name=state.T.name, dims=state.T.dims, units=state.T.units),
-        S=Field(data=new_S, name=state.S.name, dims=state.S.dims, units=state.S.units),
-        u=Field(data=new_u, name=state.u.name, dims=state.u.dims, units=state.u.units),
-    )
-
-
-# ---------------------------------------------------------------------
-# DINO surface forcing on the MPAS regional mesh
-# ---------------------------------------------------------------------
-
-def _build_mpas_forcing_arrays(mesh, cfg: DINOConfig):
-    """Pre-compute MPAS forcing fields.
-
-    Wind τ_u(lat) is computed at edge latitudes and projected onto the
-    edge-normal direction via ``cos(angleEdge)`` (tau_v=0 for DINO).
-    T*, S*, Q_sr are computed at cell latitudes.
-
-    Returns dict with keys:
-      tau_normal: (nEdges,) — wind stress along edge normal
-      T_star_1d: (nCells,)
-      S_star_1d: (nCells,)
-      Q_sr_1d:   (nCells,)
-    """
-    # Cell-center latitudes (radians → degrees)
-    lat_c_deg = jnp.degrees(mesh.latCell)
-    T_star_1d = dino_T_star_annual_mean(lat_c_deg, cfg)
-    S_star_1d = dino_S_star(lat_c_deg, cfg)
-    Q_sr_1d = dino_Q_sr_annual_mean(lat_c_deg, cfg)
-
-    # Edge-projected wind stress (tau_v = 0 for DINO so tau_n = tau_u·cos(angle))
-    lat_e_deg = jnp.degrees(mesh.latEdge)
-    tau_u_e = dino_wind_stress(lat_e_deg, cfg)         # (nEdges,)
-    tau_normal = tau_u_e * jnp.cos(mesh.angleEdge)     # (nEdges,)
-
-    return {
-        "tau_normal": tau_normal,
-        "T_star_1d": T_star_1d,
-        "S_star_1d": S_star_1d,
-        "Q_sr_1d": Q_sr_1d,
-    }
-
-
-def apply_dino_mpas_surface_forcing(state, forcing, z_coord, cfg, dt):
-    """Apply DINO surface forcing on the MPAS regional mesh.
-
-    Same physics as the lat-lon applicator (paper eqs 7-10) with edge-
-    projected wind and 1D cell-indexed T*, S*, Q_sr.
-
-    Returns
-    -------
-    MPASOceanState
-    """
-    dz_0 = float(z_coord.dz_ref[0])
-    cell_mask = state.land_mask.data                  # (nCells,)
-
-    # T tendency at top layer (eq 8)
-    T_top = state.T.data[:, 0]                         # (nCells,)
-    dT_dt_top = dino_top_layer_T_tendency(
-        T_top, forcing["T_star_1d"], forcing["Q_sr_1d"], dz_0, cfg,
-    )
-
-    # Jerlov SW penetration through the column (eq 10)
-    jacobian = jnp.ones_like(state.eta.data)           # (nCells,)
-    sw_cfg = ShortwavePenetrationConfig(water_type=cfg.jerlov_water_type)
-    dT_dt_sw = shortwave_penetration_tendency(
-        sw_down=forcing["Q_sr_1d"],
-        z_coord_dz_ref=z_coord.dz_ref,
-        z_coord_z_half_ref=z_coord.z_half_ref,
-        jacobian=jacobian,
-        config=sw_cfg,
-        rho_0=cfg.rho_0,
-        c_sw=cfg.c_p,
-    )  # (nCells, nlev)
-
-    new_T = state.T.data + dt * dT_dt_sw * cell_mask[:, None]
-    new_T_top = new_T[:, 0] + dt * dT_dt_top * cell_mask
-    new_T = new_T.at[:, 0].set(new_T_top)
-
-    # S tendency at top layer (eq 9)
-    S_top = state.S.data[:, 0]
-    dS_dt_top = dino_top_layer_S_tendency(
-        S_top, forcing["S_star_1d"], dz_0, cfg,
-    )
-    new_S_top = S_top + dt * dS_dt_top * cell_mask
-    new_S = state.S.data.at[:, 0].set(new_S_top)
-
-    # u tendency at edges (eq 7): du/dt = tau_normal / (rho_0 · dz_0).
-    # The MPAS dynamics handles dry-edge masking internally (edges to
-    # land cells have their fluxes zeroed by the operators), so we
-    # don't apply a per-edge mask here.
-    u_top = state.u.data[:, 0]                          # (nEdges,)
-    du_dt_top = dino_top_layer_u_tendency(forcing["tau_normal"], dz_0, cfg)
-    new_u_top = u_top + dt * du_dt_top
-    new_u = state.u.data.at[:, 0].set(new_u_top)
-
-    return state._replace(
-        T=Field(data=new_T, name=state.T.name, dims=state.T.dims, units=state.T.units),
-        S=Field(data=new_S, name=state.S.name, dims=state.S.dims, units=state.S.units),
-        u=Field(data=new_u, name=state.u.name, dims=state.u.dims, units=state.u.units),
-    )
 
 
 # ---------------------------------------------------------------------
@@ -459,7 +242,7 @@ def main():
         )
         model = LatLonCGridOceanModel(grid, z, model_cfg)
         forcing = (None if args.no_forcing
-                   else _build_lat_lon_forcing_arrays(grid, cfg))
+                   else dino_lat_lon_surface_forcing_arrays(grid, cfg))
         apply_forcing = apply_dino_lat_lon_surface_forcing
         grid_desc = f"{grid.n_lat}x{grid.n_lon} lat-lon Mercator"
     else:  # mpas
@@ -475,7 +258,7 @@ def main():
         )
         model = MPASOceanModel(grid, z, model_cfg)
         forcing = (None if args.no_forcing
-                   else _build_mpas_forcing_arrays(grid, cfg))
+                   else dino_mpas_surface_forcing_arrays(grid, cfg))
         apply_forcing = apply_dino_mpas_surface_forcing
         grid_desc = f"{grid.nCells} cells MPAS regional Voronoi"
 

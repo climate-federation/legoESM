@@ -34,7 +34,11 @@ from dataclasses import dataclass
 import jax.numpy as jnp
 import numpy as np
 
-from legoesm import constants
+from legoesm.core.field import Field
+from legoesm.ocean.physics.shortwave_penetration import (
+    ShortwavePenetrationConfig,
+    shortwave_penetration_tendency,
+)
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     create_levy_stretched_z_star,
@@ -81,7 +85,11 @@ class DINOConfig:
     H_deep: float = 4000.0         # max depth (deep basin) [m]; namelist rn_H
     H_shallow: float = 2000.0      # min depth (at coast) [m]; namelist rn_hborder
     s_lambda_inv_deg: float = 1.0 / 3.0   # zonal slope param 1/rn_distLam = 1/3 deg⁻¹
-    channel_wall_slope: float = 1.5       # rn_slp_cha (deg⁻¹) — channel-boundary slope
+    # rn_slp_cha (channel-boundary slope tapering) is intentionally NOT
+    # ported: paper Fig 1 reproduction is visually correct without it
+    # at our resolution. If a future visual regression shows it matters,
+    # add a `channel_wall_slope: float = 1.5` field and thread into
+    # `_exp_bathy` for the channel-band tapering.
 
     # Sill (Scotia Ridge analog), eq. A5 + namelist
     sill_lon_m_deg: float = -50.0  # λ_m, anchored at western wall (Drake Passage)
@@ -102,7 +110,7 @@ class DINOConfig:
     a_cr: float = 10.5             # stretching parameter
 
     # ------------------------------------------------------------------
-    # Surface forcing — wind (Sect 2.3, eq 7; piecewise cubic / PCHIP)
+    # Surface forcing — wind (Sect 2.3, eq 7; cubic-Hermite smooth-step
     # tau_u(φ) interpolated through the (lat, tau) knots below.
     # ------------------------------------------------------------------
     wind_tau_lats_deg: tuple = (-70.0, -45.0, -15.0, 0.0, 15.0, 45.0, 70.0)
@@ -176,6 +184,9 @@ class DINOConfig:
     # rn_drag = 1e-3 quadratic).
     # ------------------------------------------------------------------
     C_d_bottom: float = 1.0e-3     # quadratic drag coefficient
+    bottom_drag_bg_velocity: float = 0.1   # u_bg [m/s] for MOM6 quadratic-with-floor form
+    bottom_drag_bbl_thickness: float = 50.0  # BBL thickness [m] for distributed drag
+    n_barotropic_substeps: int = 30   # baroclinic-to-barotropic step ratio
 
     # ------------------------------------------------------------------
     # Time stepping
@@ -195,7 +206,9 @@ class DINOConfig:
     barotropic_solver: str = "implicit_cn"
     barotropic_implicit_theta_eta: float = 0.55
     tracer_advection: str = "tvd"
-    hi_precision_pressure: bool = True
+    # hi_precision_pressure is intentionally NOT a DINOConfig field —
+    # the lat-lon dycore already pins it True at ocean_pe_latlon_cgrid.py
+    # so a field on this config would never be read.
 
     # ------------------------------------------------------------------
     # Diagnostics (paper Figs 5-6: MOC and σ_2 referenced to 2000 m)
@@ -521,7 +534,7 @@ def dino_Q_sr_annual_mean(lat_deg, cfg: DINOConfig | None = None,
 # (timescale instead of heat-flux coefficient; no Q_sr split).
 # ---------------------------------------------------------------------
 
-def dino_top_layer_heat_flux_split(T_surface, T_star, Q_sr,
+def dino_top_layer_heat_flux_split(T_sfc_C, T_star, Q_sr,
                                     cfg: DINOConfig | None = None):
     """Surface heat-flux split per paper eq 8.
 
@@ -534,12 +547,12 @@ def dino_top_layer_heat_flux_split(T_surface, T_star, Q_sr,
 
     Parameters
     ----------
-    T_surface : array
+    T_sfc_C : array
         Top-layer temperature [°C].
     T_star : array
-        Restoring target [°C], same shape as T_surface.
+        Restoring target [°C], same shape as T_sfc_C.
     Q_sr : array
-        Surface solar flux [W/m²], same shape as T_surface.
+        Surface solar flux [W/m²], same shape as T_sfc_C.
     cfg : DINOConfig, optional
 
     Returns
@@ -549,11 +562,11 @@ def dino_top_layer_heat_flux_split(T_surface, T_star, Q_sr,
     """
     if cfg is None:
         cfg = DINOConfig()
-    Q_ns = cfg.A_theta * (T_star - T_surface) - Q_sr
+    Q_ns = cfg.A_theta * (T_star - T_sfc_C) - Q_sr
     return Q_ns, Q_sr
 
 
-def dino_top_layer_T_tendency(T_surface, T_star, Q_sr, dz_0,
+def dino_top_layer_T_tendency(T_sfc_C, T_star, Q_sr, dz_0,
                                cfg: DINOConfig | None = None):
     """Top-layer temperature tendency from non-solar heat flux (eq 8).
 
@@ -564,7 +577,7 @@ def dino_top_layer_T_tendency(T_surface, T_star, Q_sr, dz_0,
     """
     if cfg is None:
         cfg = DINOConfig()
-    Q_ns, _ = dino_top_layer_heat_flux_split(T_surface, T_star, Q_sr, cfg)
+    Q_ns, _ = dino_top_layer_heat_flux_split(T_sfc_C, T_star, Q_sr, cfg)
     return Q_ns / (cfg.rho_0 * cfg.c_p * dz_0)
 
 
@@ -995,20 +1008,21 @@ def dino_lat_lon_model_config(
     A_h_base = 0.5 * cfg.U_M * R * dlon_rad
     K_h_base = 0.5 * cfg.U_T * R * dlon_rad
 
-    # Quadratic-with-floor drag (MOM6 form); same conversion as MPAS
-    u_bg = 0.1
-    bottom_drag_r = cfg.C_d_bottom * u_bg
+    # Quadratic-with-floor drag (MOM6 form): r = C_d * u_bg recovers
+    # C_d*|u| at |u| >> u_bg.
+    bottom_drag_r = cfg.C_d_bottom * cfg.bottom_drag_bg_velocity
 
     # Lat-lon C-grid GM/Redi is wired through LatLonCGridOceanConfig.gm_redi
-    # field (NOT through the OceanPhysicsConfig.lateral_mixing factory,
-    # which only supports the cubed-sphere version). Build the GMRediConfig
-    # separately and attach to the model config.
+    # (NOT OceanPhysicsConfig.lateral_mixing — that factory only supports
+    # cubed-sphere). When Visbeck is enabled (always for DINO per the
+    # Decisions Log), the kappa_GM/kappa_Redi fields are ignored at
+    # runtime — kept at 1000 m²/s as a non-degenerate placeholder.
     from legoesm.ocean.physics.lateral_mixing.config import (
         GMRediConfig, VisbeckConfig,
     )
     gm_redi_cfg = GMRediConfig(
-        kappa_GM=1000.0,  # ignored when Visbeck enabled
-        kappa_Redi=1000.0,
+        kappa_GM=1000.0,    # placeholder; overridden by Visbeck
+        kappa_Redi=1000.0,  # placeholder; overridden by Visbeck
         S_max=cfg.redi_S_max,
         slope_scheme=cfg.gm_redi_slope_scheme,
         visbeck=VisbeckConfig(
@@ -1064,9 +1078,9 @@ def dino_lat_lon_model_config(
         A_v=cfg.A_v_bg,
         K_v=cfg.K_v_bg,
         bottom_drag_r=bottom_drag_r,
-        bottom_drag_bg_velocity=u_bg,
-        bottom_drag_bbl_thickness=50.0,
-        n_barotropic_substeps=30,
+        bottom_drag_bg_velocity=cfg.bottom_drag_bg_velocity,
+        bottom_drag_bbl_thickness=cfg.bottom_drag_bbl_thickness,
+        n_barotropic_substeps=cfg.n_barotropic_substeps,
         barotropic_solver=cfg.barotropic_solver,
         barotropic_implicit_theta_eta=cfg.barotropic_implicit_theta_eta,
         tracer_advection=cfg.tracer_advection,
@@ -1139,8 +1153,9 @@ def dino_mpas_model_config(
         Used to derive a representative cell-resolution scalar for
         lateral mixing coefficients (``A_h ≈ 0.5·U_M·sqrt(<area>)``).
         For a quasi-uniform regional mesh this is the right magnitude;
-        the proper grid-dependent computation lives in Phase 1B
-        (blocked on Mercator).
+        the per-cell variant matters more, but is unimplemented here
+        and not pursued (Decisions Log 2026-05-14): a uniform-mesh
+        approximation is within ~10% of the proper per-cell scaling.
     cfg : DINOConfig, optional
     physics : bool
         If True, include KPP + GM/Redi + enhanced-diffusion convection
@@ -1162,10 +1177,8 @@ def dino_mpas_model_config(
     A_h = 0.5 * cfg.U_M * cell_dx_m
     K_h = 0.5 * cfg.U_T * cell_dx_m
 
-    # Convert DINO's quadratic C_d to MPAS linear-with-floor (MOM6 form):
-    # r = C_d * u_bg recovers C_d * |u| at |u| >> u_bg.
-    u_bg = 0.1
-    bottom_drag_r = cfg.C_d_bottom * u_bg
+    # MOM6 quadratic-with-floor drag: r = C_d * u_bg.
+    bottom_drag_r = cfg.C_d_bottom * cfg.bottom_drag_bg_velocity
 
     model_config = MPASOceanConfig(
         rho_0=cfg.rho_0,
@@ -1174,9 +1187,9 @@ def dino_mpas_model_config(
         A_v=cfg.A_v_bg,
         K_v=cfg.K_v_bg,
         bottom_drag_r=bottom_drag_r,
-        bottom_drag_bg_velocity=u_bg,
-        bottom_drag_bbl_thickness=50.0,  # spread drag over 50 m at thin partials
-        n_barotropic_substeps=30,
+        bottom_drag_bg_velocity=cfg.bottom_drag_bg_velocity,
+        bottom_drag_bbl_thickness=cfg.bottom_drag_bbl_thickness,
+        n_barotropic_substeps=cfg.n_barotropic_substeps,
         barotropic_solver=cfg.barotropic_solver,
         tracer_advection=cfg.tracer_advection,
         implicit_vertical_mixing=True,
@@ -1209,8 +1222,8 @@ def dino_mpas_model_config(
         lateral_mixing=LateralMixingConfig(
             scheme="gm_redi" if cfg.use_gm_redi else "none",
             gm_redi=GMRediConfig(
-                kappa_GM=1000.0,  # ignored when Visbeck is enabled
-                kappa_Redi=1000.0,
+                kappa_GM=1000.0,    # placeholder; overridden by Visbeck
+                kappa_Redi=1000.0,  # placeholder; overridden by Visbeck
                 S_max=cfg.redi_S_max,
                 slope_scheme=cfg.gm_redi_slope_scheme,
                 visbeck=VisbeckConfig(
@@ -1246,3 +1259,185 @@ def restoring_timescale_S_days(cfg: DINOConfig) -> float:
     """τ_S = ρ₀ · Δz₀ / A_S, in days (≈ 30.8 d for default)."""
     seconds = cfg.rho_0 * cfg.dz_min / cfg.A_S
     return seconds / 86400.0
+
+
+# ---------------------------------------------------------------------
+# Production-time surface forcing applicators (Phase 4)
+#
+# Applied as explicit external tendencies after each model.step(), NOT
+# through legoESM's `OceanSurfaceForcing` / surface_forcing physics path
+# (the general API uses timescales not heat-flux coefficients, and
+# doesn't subtract Q_sr per paper eq 8). See Decisions Log 2026-05-14.
+# ---------------------------------------------------------------------
+
+def dino_lat_lon_surface_forcing_arrays(grid, cfg: DINOConfig | None = None):
+    """Pre-compute lat-lon Mercator forcing fields that don't depend on state.
+
+    Returns dict with:
+      ``tau_u_face`` (n_lat, n_lon+1) — zonal wind stress at u-faces
+      ``T_star_2d``  (n_lat, n_lon)   — annual-mean T restoring target
+      ``S_star_2d``  (n_lat, n_lon)   — S restoring target with eq dip
+      ``Q_sr_2d``    (n_lat, n_lon)   — annual-mean surface solar
+    """
+    if cfg is None:
+        cfg = DINOConfig()
+
+    lat_1d = jnp.degrees(grid.lat)               # (n_lat,)
+    T_star_1d = dino_T_star_annual_mean(lat_1d, cfg)
+    S_star_1d = dino_S_star(lat_1d, cfg)
+    Q_sr_1d = dino_Q_sr_annual_mean(lat_1d, cfg)
+    tau_u_1d = dino_wind_stress(lat_1d, cfg)     # (n_lat,)
+
+    shape_2d = (grid.n_lat, grid.n_lon)
+    return {
+        "T_star_2d": jnp.broadcast_to(T_star_1d[:, None], shape_2d),
+        "S_star_2d": jnp.broadcast_to(S_star_1d[:, None], shape_2d),
+        "Q_sr_2d":   jnp.broadcast_to(Q_sr_1d[:, None], shape_2d),
+        "tau_u_face": jnp.broadcast_to(
+            tau_u_1d[:, None], (grid.n_lat, grid.n_lon + 1)
+        ),
+    }
+
+
+def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt):
+    """Apply DINO surface forcing on the lat-lon Mercator grid.
+
+    Components (paper eqs 7-10):
+      eq 7  — wind τ_u → top-layer u tendency
+      eq 8  — non-solar T restoring (A_θ(T*-T) − Q_sr) at top layer
+      eq 9  — A_S(S*-S) salinity restoring at top layer
+      eq 10 — Jerlov type I column-distributed Q_sr through all levels
+
+    Returns a new state (immutable update of T, S, u).
+    """
+    dz_0 = float(z_coord.dz_ref[0])
+    cell_mask = state.land_mask.data
+
+    # T tendency at top layer (eq 8; subtracts Q_sr from non-solar component)
+    T_top = state.T.data[..., 0]
+    dT_dt_top = dino_top_layer_T_tendency(
+        T_top, forcing["T_star_2d"], forcing["Q_sr_2d"], dz_0, cfg,
+    )
+
+    # Jerlov SW penetration through the column (eq 10): full 3D tendency
+    # added to dT/dt at every level. Reference Jacobian = 1 (η/H ≈ 1e-4).
+    jacobian = jnp.ones_like(state.eta.data)
+    sw_cfg = ShortwavePenetrationConfig(water_type=cfg.jerlov_water_type)
+    dT_dt_sw = shortwave_penetration_tendency(
+        sw_down=forcing["Q_sr_2d"],
+        z_coord_dz_ref=z_coord.dz_ref,
+        z_coord_z_half_ref=z_coord.z_half_ref,
+        jacobian=jacobian,
+        config=sw_cfg,
+        rho_0=cfg.rho_0,
+        c_sw=cfg.c_p,
+    )  # (n_lat, n_lon, nlev)
+
+    new_T = state.T.data + dt * dT_dt_sw * cell_mask[..., None]
+    new_T_top = new_T[..., 0] + dt * dT_dt_top * cell_mask
+    new_T = new_T.at[..., 0].set(new_T_top)
+
+    # S tendency at top layer (eq 9)
+    S_top = state.S.data[..., 0]
+    dS_dt_top = dino_top_layer_S_tendency(
+        S_top, forcing["S_star_2d"], dz_0, cfg,
+    )
+    new_S_top = S_top + dt * dS_dt_top * cell_mask
+    new_S = state.S.data.at[..., 0].set(new_S_top)
+
+    # u tendency at u-faces (eq 7)
+    u_top = state.u.data[..., 0]
+    du_dt_top = dino_top_layer_u_tendency(forcing["tau_u_face"], dz_0, cfg)
+    u_face_mask = state.u_mask.data
+    new_u_top = u_top + dt * du_dt_top * u_face_mask
+    new_u = state.u.data.at[..., 0].set(new_u_top)
+
+    return state._replace(
+        T=Field(data=new_T, name=state.T.name, dims=state.T.dims, units=state.T.units),
+        S=Field(data=new_S, name=state.S.name, dims=state.S.dims, units=state.S.units),
+        u=Field(data=new_u, name=state.u.name, dims=state.u.dims, units=state.u.units),
+    )
+
+
+def dino_mpas_surface_forcing_arrays(mesh, cfg: DINOConfig | None = None):
+    """Pre-compute MPAS regional forcing fields.
+
+    Returns dict with:
+      ``T_star_1d`` (nCells,) — annual-mean T restoring target
+      ``S_star_1d`` (nCells,) — S restoring target with eq dip
+      ``Q_sr_1d``   (nCells,) — annual-mean surface solar
+      ``tau_normal`` (nEdges,) — wind stress projected onto edge normal
+        (τ_v = 0 for DINO, so τ_n = τ_u · cos(angleEdge))
+    """
+    if cfg is None:
+        cfg = DINOConfig()
+
+    lat_c_deg = jnp.degrees(mesh.latCell)
+    T_star_1d = dino_T_star_annual_mean(lat_c_deg, cfg)
+    S_star_1d = dino_S_star(lat_c_deg, cfg)
+    Q_sr_1d = dino_Q_sr_annual_mean(lat_c_deg, cfg)
+
+    lat_e_deg = jnp.degrees(mesh.latEdge)
+    tau_u_e = dino_wind_stress(lat_e_deg, cfg)         # (nEdges,)
+    tau_normal = tau_u_e * jnp.cos(mesh.angleEdge)     # (nEdges,)
+
+    return {
+        "T_star_1d": T_star_1d,
+        "S_star_1d": S_star_1d,
+        "Q_sr_1d": Q_sr_1d,
+        "tau_normal": tau_normal,
+    }
+
+
+def apply_dino_mpas_surface_forcing(state, forcing, z_coord, cfg, dt):
+    """Apply DINO surface forcing on the MPAS regional mesh.
+
+    Same physics as lat-lon (paper eqs 7-10) with edge-projected wind
+    and 1D cell-indexed T*, S*, Q_sr.
+    """
+    dz_0 = float(z_coord.dz_ref[0])
+    cell_mask = state.land_mask.data                  # (nCells,)
+
+    # T tendency at top layer (eq 8)
+    T_top = state.T.data[:, 0]                         # (nCells,)
+    dT_dt_top = dino_top_layer_T_tendency(
+        T_top, forcing["T_star_1d"], forcing["Q_sr_1d"], dz_0, cfg,
+    )
+
+    # Jerlov SW penetration through the column (eq 10)
+    jacobian = jnp.ones_like(state.eta.data)           # (nCells,)
+    sw_cfg = ShortwavePenetrationConfig(water_type=cfg.jerlov_water_type)
+    dT_dt_sw = shortwave_penetration_tendency(
+        sw_down=forcing["Q_sr_1d"],
+        z_coord_dz_ref=z_coord.dz_ref,
+        z_coord_z_half_ref=z_coord.z_half_ref,
+        jacobian=jacobian,
+        config=sw_cfg,
+        rho_0=cfg.rho_0,
+        c_sw=cfg.c_p,
+    )  # (nCells, nlev)
+
+    new_T = state.T.data + dt * dT_dt_sw * cell_mask[:, None]
+    new_T_top = new_T[:, 0] + dt * dT_dt_top * cell_mask
+    new_T = new_T.at[:, 0].set(new_T_top)
+
+    # S tendency at top layer (eq 9)
+    S_top = state.S.data[:, 0]
+    dS_dt_top = dino_top_layer_S_tendency(
+        S_top, forcing["S_star_1d"], dz_0, cfg,
+    )
+    new_S_top = S_top + dt * dS_dt_top * cell_mask
+    new_S = state.S.data.at[:, 0].set(new_S_top)
+
+    # u tendency at edges (eq 7). The MPAS dynamics gates fluxes to
+    # land cells internally, so no explicit per-edge mask is needed.
+    u_top = state.u.data[:, 0]
+    du_dt_top = dino_top_layer_u_tendency(forcing["tau_normal"], dz_0, cfg)
+    new_u_top = u_top + dt * du_dt_top
+    new_u = state.u.data.at[:, 0].set(new_u_top)
+
+    return state._replace(
+        T=Field(data=new_T, name=state.T.name, dims=state.T.dims, units=state.T.units),
+        S=Field(data=new_S, name=state.S.name, dims=state.S.dims, units=state.S.units),
+        u=Field(data=new_u, name=state.u.name, dims=state.u.dims, units=state.u.units),
+    )
