@@ -326,6 +326,116 @@ def test_iter39_cube_w6_short_run_stable_with_hyperdiff():
     )
 
 
+def test_iter57_cube_w2_matrix_config_5day():
+    """new_test_dycores iter-57: numerical sentinel at the matrix
+    runner's test-of-record duration (5 days, matching the
+    matrix-runner Williamson 2 test definition at line 198 of
+    ``scripts/run_atmosphere_test_matrix.py``).
+
+    Pins iter-44's measured matrix W2 5-day numerics
+    (L2=4.58e-4, v_ll-equivalent peak ~0.51 m/s) so a regression
+    that drops the 2x hyperdiff or shifts the iter-1030
+    calibration would trip the test without re-running the matrix.
+
+    Asserts:
+      - finite h, u_d
+      - mass_drift < 1e-7  (anchored fixer)
+      - h-field L2 < 1.5e-3 (iter-44 measured 4.58e-4; ceiling has
+                              3x headroom)
+      - max|v_d - v_d_init| < 5.0 m/s (iter-44 measured ~3 m/s;
+                                        ceiling has ~1.5x headroom)
+    """
+    import jax
+    import jax.numpy as jnp_local
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        FV3EdgeShallowWaterModel,
+        FV3EdgeShallowWaterState,
+        iter1009_dual_target_config,
+    )
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.cubed_sphere_cdgrid import (
+        create_cubed_sphere_cdgrid,
+    )
+    from tests.test_cases.williamson import williamson_test2
+    import warnings
+
+    n = 36
+    grid = create_cubed_sphere(n)
+    cdgrid = create_cubed_sphere_cdgrid(grid)
+
+    def _hyperdiff_cube_local(nn, ref_n=48, ref_coeff=1e16):
+        return ref_coeff * (ref_n / nn) ** 4
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        cfg = iter1009_dual_target_config(
+            n, hyperdiff_coeff=2.0 * _hyperdiff_cube_local(n),
+        )
+    model = FV3EdgeShallowWaterModel(grid, cfg)
+
+    sw = williamson_test2(grid)
+    u0 = 2.0 * jnp_local.pi * grid.radius / (12.0 * 86400.0)
+    u_d = cdgrid.cos_angle_edge_x * (
+        u0 * jnp_local.cos(cdgrid.lat_edge_x))
+    v_d_init = -cdgrid.sin_angle_edge_y * (
+        u0 * jnp_local.cos(cdgrid.lat_edge_y))
+    state = FV3EdgeShallowWaterState(
+        h=sw.h.data, u_d=u_d, v_d=v_d_init, h_s=sw.h_s.data,
+    )
+    model.set_initial_mass(state)
+
+    dt = 300.0
+    area64 = grid.area.astype(jnp_local.float64)
+    mass_init = float(
+        jnp_local.sum(state.h.astype(jnp_local.float64) * area64),
+    )
+
+    @jax.jit
+    def step(s):
+        return model.step(s, dt)
+
+    s = state
+    for _ in range(1440):  # 5 days at dt=300 s
+        s = step(s)
+
+    assert jnp_local.all(jnp_local.isfinite(s.h)), (
+        "iter-57 regression: cube W2 day-5 ``h`` non-finite"
+    )
+    assert jnp_local.all(jnp_local.isfinite(s.u_d)), (
+        "iter-57 regression: cube W2 day-5 ``u_d`` non-finite"
+    )
+    mass_final = float(
+        jnp_local.sum(s.h.astype(jnp_local.float64) * area64),
+    )
+    drift = abs(mass_final - mass_init) / abs(mass_init)
+    assert drift < 1e-7, (
+        f"iter-57 regression: cube W2 day-5 mass drift {drift:.2e} "
+        "exceeds 1e-7"
+    )
+    h_init = sw.h.data
+    h_err_l2 = float(
+        jnp_local.sqrt(
+            jnp_local.sum(
+                ((s.h - h_init).astype(jnp_local.float64) ** 2)
+                * area64,
+            )
+            / jnp_local.sum(h_init.astype(jnp_local.float64) ** 2 * area64)
+        ),
+    )
+    assert h_err_l2 < 1.5e-3, (
+        f"iter-57 regression: cube W2 day-5 h-field L2 = "
+        f"{h_err_l2:.4e} exceeds 1.5e-3 ceiling — iter-44 measured "
+        "L2=4.58e-4."
+    )
+    v_d_err = float(
+        jnp_local.max(jnp_local.abs(s.v_d - v_d_init)),
+    )
+    assert v_d_err < 5.0, (
+        f"iter-57 regression: cube W2 day-5 ``max|v_d - v_d_init|`` "
+        f"= {v_d_err:.4f} m/s exceeds 5.0 m/s ceiling."
+    )
+
+
 def test_iter49_cube_w2_matrix_config_short_run():
     """new_test_dycores iter-49: numerical sentinel for cube W2 at
     the matrix-runner configuration (iter-44 2× hyperdiff).

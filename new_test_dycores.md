@@ -101,6 +101,7 @@ Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV /
   - iter-1002 config (hyperdiff=0, nord_v=2): 1-day v_ll=**0.114** m/s, h_err=8.49 m (matches the codex iter-1009 narrative).
   - iter-44 matrix config (hyperdiff=2×, nord_v=2): 1-day v_ll=**0.339** m/s, h_err=3.18 m.
   Hyperdiff trade-off at 1-day: 3× HIGHER v_ll (0.114 → 0.339) but 2.7× LOWER h_err (8.49 → 3.18).  At 5-day the trade-off REVERSES — matrix config gives v_ll=0.51 (vs hyperdiff=0 which would BLOW UP past day 9 for W6).  Confirms iter-1002 sentinel and matrix runner pin DIFFERENT operating points (1-day spectral character vs 5-day long-run stability); both are needed for full coverage.
+- iter-57: added cube W2 5-day numerical sentinel `test_iter57_cube_w2_matrix_config_5day` at the matrix-runner test-of-record duration.  Asserts finite + mass_drift < 1e-7 + h_err_l2 < 1.5e-3 + max|v_d - v_d_init| < 5.0 m/s.  PASS in 25 s.  Now the cube SW sentinel matrix covers 4 operating points: W2 1-day calibration (iter-1002), W2 2-day matrix (iter-49), W2 **5-day matrix** (iter-57), W5/W6 2-day matrix (iter-48/39).
 
 ## Iter-51+ queued
 
