@@ -2031,17 +2031,20 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         # while latlon W6 14-day is stable.  Override the iter-1030
         # calibration to higher div_damp + damp_v on W6 only.  W2/W5
         # untouched (still pinned at iter-1030 dual-target).
-        if test_num in (5, 6):
+        if test_num in (2, 5, 6):
             # iter-31: cube W6 (Rossby-Haurwitz wave-4) 14-day blows up
             # at day 9 with the iter1009 baseline (hyperdiff=0).
             # iter-33: cube W5 (mountain) 15-day blows up at day 14.58
             # for the same reason — both long-duration propagating-
-            # wave tests need biharmonic hyperdiffusion to damp short-
-            # wave noise that the W2-tuned iter1009 calibration does
-            # not.  Pass ``hyperdiff_coeff=_hyperdiff_cube(n)`` via
-            # the iter-35 helper kwarg (cleaner than the iter-31
-            # ``_replace`` pattern).  W2 cube unchanged (5-day at
-            # iter-1 calibration is stable without hyperdiff).
+            # wave tests need biharmonic hyperdiffusion.
+            # iter-42: extended to W2 (test_num=2) — direct measurement
+            # shows hyperdiff reduces cube W2 5-day v_ll_Linf from
+            # 3.65 m/s to 0.82 m/s (4.5x parity improvement vs other
+            # grids).  h_err_max drops 72 m -> 33 m.  iter-1002 W2
+            # 1-day v_ll sentinel uses its own hyperdiff=0 config so
+            # is unaffected; matrix-runner-only effect.  All three
+            # cube SW propagating tests now use the same hyperdiff
+            # operator.
             config = iter1009_dual_target_config(
                 n, hyperdiff_coeff=_hyperdiff_cube(n),
             )

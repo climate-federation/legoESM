@@ -470,66 +470,70 @@ def test_w6_latlon_init_uses_w6_winds_geo():
     )
 
 
-def test_w5_w6_cube_config_has_hyperdiff_override():
-    """iter-31/33 sentinel: cube SW config overrides the iter1009
-    baseline with ``hyperdiff_coeff=_hyperdiff_cube(n)`` on both
-    W5 (mountain, 15-day) AND W6 (Rossby-Haurwitz, 14-day) for
-    long-run stability.
+def test_sw_cube_propagating_tests_have_hyperdiff_override():
+    """iter-31/33/42 sentinel: cube SW config overrides the iter1009
+    baseline with ``hyperdiff_coeff=_hyperdiff_cube(n)`` for the
+    propagating-wave test gate ``test_num in (2, 5, 6)``.
 
-    Without the override, the iter1009 calibration
-    (``hyperdiff_coeff=0.0``, tuned for W2 stationary test) BLOWS
-    UP:
-      - cube W5 at day 14.58 (15-day full duration; iter-33).
-      - cube W6 at day 9.03 (14-day full duration; iter-31).
-    Latlon W5/W6 at the same durations PASS.  This sentinel
-    catches a regression that would re-introduce either instability
-    (the gate is ``test_num in (5, 6)``).
+    Without the override:
+      - cube W5 BLOWS UP at day 14.58 (15-day; iter-33).
+      - cube W6 BLOWS UP at day  9.03 (14-day; iter-31).
+      - cube W2 5-day v_ll_Linf = 3.65 m/s vs 0.82 with hyperdiff
+        (iter-42 measurement; 4.5x parity gain).
+
+    Latlon W2/W5/W6 at the same durations PASS without hyperdiff.
+    This sentinel catches a regression that would re-introduce any
+    of the three instabilities.
     """
     src = _runner_source()
     pat = re.search(
-        r"if\s+test_num\s+in\s*\(\s*5\s*,\s*6\s*\)\s*:[^}]*?"
+        r"if\s+test_num\s+in\s*\(\s*2\s*,\s*5\s*,\s*6\s*\)\s*:[^}]*?"
         r"hyperdiff_coeff\s*=\s*_hyperdiff_cube\(\s*n\s*\)",
         src,
         re.DOTALL,
     )
     assert pat is not None, (
-        "iter-31/33 regression: cube SW long-run branch no longer "
-        "overrides ``hyperdiff_coeff=_hyperdiff_cube(n)`` for "
-        "(W5, W6) — cube W5/W6 full-duration will re-BLOWUP "
-        "(latlon stable; cube parity gap reopens)."
+        "iter-31/33/42 regression: cube SW propagating-test branch "
+        "no longer overrides ``hyperdiff_coeff=_hyperdiff_cube(n)`` "
+        "for (W2, W5, W6) — cube W5/W6 full-duration will re-BLOWUP "
+        "and cube W2 5-day v_ll_Linf will regress from 0.82 to "
+        "3.65 m/s (latlon stable; cube parity gap reopens)."
     )
 
 
-def test_w2_cube_config_excludes_hyperdiff_override():
-    """iter-37 sentinel (review fix): the W2 cube SW path is the
-    ``else`` branch of the iter-31/33 gate ``test_num in (5, 6)``,
-    so it MUST call ``iter1009_dual_target_config(n)`` with default
-    ``hyperdiff_coeff=0.0`` (the iter-1030 calibration without
-    hyperdiff that ``test_iter1002_w2_v_ll_linf_meets_target`` pins).
+def test_sw_cube_hyperdiff_gate_matches_propagating_tests():
+    """iter-37/42 sentinel: the SW cube hyperdiff gate matches all
+    propagating tests (W2, W5, W6) — exactly ``test_num in (2, 5, 6)``.
 
-    Catches a regression that would widen the gate to include W2
-    (e.g., ``if test_num in (2, 5, 6):`` or ``if True:``) — that
-    would silently apply hyperdiff to W2 and break the iter-1030
-    calibration the W2 sentinel pins.
+    iter-37 originally restricted the gate to ``{5, 6}`` under the
+    assumption that hyperdiff would break the iter-1002 W2 1-day
+    sentinel.  iter-42 measurement disproved this: matrix runner W2
+    with hyperdiff actually IMPROVES cube W2 5-day v_ll_Linf from
+    3.65 to 0.82 m/s (4.5x parity gain), and the iter-1002 sentinel
+    is unaffected because it uses its own ``hyperdiff_coeff=0`` config
+    (independent of matrix runner).
+
+    This sentinel now pins the wider gate ``{2, 5, 6}``.  Regressions
+    that shrink the gate back to ``{5, 6}`` or widen it to ``{1, 2,
+    5, 6}`` (CB has test_num=1 if numbered, or no test_num) would
+    trip this test.
     """
     src = _runner_source()
-    # Find the exact gate line.
     gate_pat = re.search(
         r"if\s+test_num\s+in\s*\(\s*([\d,\s]+)\s*\)\s*:", src,
     )
     assert gate_pat is not None, (
-        "iter-31/33 regression: ``if test_num in (...):`` gate not "
-        "found in matrix runner SW cube branch."
+        "iter-31/33/42 regression: ``if test_num in (...):`` gate "
+        "not found in matrix runner SW cube branch."
     )
     gate_values = {
         int(v.strip()) for v in gate_pat.group(1).split(",") if v.strip()
     }
-    assert gate_values == {5, 6}, (
-        f"iter-37 regression: W5/W6 hyperdiff gate now matches "
+    assert gate_values == {2, 5, 6}, (
+        f"iter-42 regression: SW cube hyperdiff gate now matches "
         f"test_num in {sorted(gate_values)} — must be exactly "
-        "{{5, 6}}.  Adding W2 (test_num=2) would silently apply "
-        "hyperdiff to the W2 cube path and break "
-        "``test_iter1002_w2_v_ll_linf_meets_target``."
+        "{{2, 5, 6}}.  Shrinking to {{5, 6}} would re-open the cube "
+        "W2 5-day v_ll_Linf gap (0.82 -> 3.65 m/s)."
     )
 
 
