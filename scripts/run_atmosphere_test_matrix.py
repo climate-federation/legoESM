@@ -4513,7 +4513,11 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 # default; FV3 iter-218 dyn_core.F90:1774 per-step
                 # heating cap |Δθ_p · Π| ≤ dt · delt_max).
                 # Non-active for TC1 (steady NH; near-zero ΔT).
-                delt_max=1.0)
+                delt_max=1.0,
+                # new_test_dycores iter-17: corner-div damping del-4
+                # background pair (factory defaults).
+                corner_div_damp_nord=1,
+                corner_div_damp_d4_bg=0.16)
         elif test_case == "tc2a":
             from tests.test_cases.dcmip2025 import dcmip25_tc2_init
             state, hcoord, tmetric, small_grid = dcmip25_tc2_init(
@@ -4557,7 +4561,15 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 heat_source_del2_iters=2,
                 # new_test_dycores iter-16: delt_max=1.0 (factory
                 # default per-step heating cap).
-                delt_max=1.0)
+                delt_max=1.0,
+                # new_test_dycores iter-17: corner-div damping
+                # del-4 background pair (factory defaults).  FV3
+                # iter-168 corner del-4 damping at d4_bg=0.16,
+                # nord=1.  Provides small-scale corner-divergence
+                # damping that the matrix had remained at d4_bg=0
+                # (effectively off) for.
+                corner_div_damp_nord=1,
+                corner_div_damp_d4_bg=0.16)
         elif test_case == "tc3":
             from tests.test_cases.dcmip2025 import dcmip25_tc3_init
             state, hcoord, tmetric, small_grid = dcmip25_tc3_init(
@@ -4602,7 +4614,15 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 heat_source_del2_iters=2,
                 # new_test_dycores iter-16: delt_max=1.0 (factory
                 # default per-step heating cap).
-                delt_max=1.0)
+                delt_max=1.0,
+                # new_test_dycores iter-17: corner-div damping
+                # del-4 background pair (factory defaults).  FV3
+                # iter-168 corner del-4 damping at d4_bg=0.16,
+                # nord=1.  Provides small-scale corner-divergence
+                # damping that the matrix had remained at d4_bg=0
+                # (effectively off) for.
+                corner_div_damp_nord=1,
+                corner_div_damp_d4_bg=0.16)
         else:
             raise ValueError(f"Unknown NH test case: {test_case}")
 

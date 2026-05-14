@@ -43,6 +43,7 @@ Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV /
 - iter-14: enable `d_con_top_zero_levels=2` on all 3 NH cube branches (factory default; FV3 iter-431 sponge behaviour zeroes d_con heating in top 2 model levels per `dyn_core.F90:773-805`).  TC1 cube C36 quick |w|_max=0.0142 m/s unchanged.  Skipped `use_fv3_cross_face_du_proj=True` (NO-OP without `use_duogrid=True` on the grid; matrix runner uses default `use_duogrid=False`).  AST guard now 11 tests.
 - iter-15: enable `heat_source_del2_iters=2` on all 3 NH cube branches (factory default; FV3 iter-457 `dyn_core.F90:1755-1756` del-2 smoothing of `_d_con_sum` heat source, `nf_ke=2` at `nord=1`).  TC1 cube C36 quick |w|_max=0.0142 m/s unchanged.  AST guard now 12 tests; 0.11 s.
 - iter-16: enable `delt_max=1.0` on all 3 NH cube branches (factory default; FV3 iter-218 per-step heating cap `|Δθ_p · Π| ≤ dt · delt_max` per `dyn_core.F90:1774`).  Verified TC1 cube C36 quick |w|_max=0.0142 m/s unchanged AND TC2 cube C36 quick |w|_max=0.3177 m/s unchanged with the full iter-12..16 cumulative flag bundle (5 added factory flags).  AST guard now 13 tests; 0.15 s.
+- iter-17: enable corner-div del-4 background pair `corner_div_damp_nord=1` + `corner_div_damp_d4_bg=0.16` on all 3 NH cube branches (factory defaults; FV3 iter-168 `sw_core.F90:1641-1822 d_sw5`).  Provides small-scale corner-divergence damping that the matrix had remained at d4_bg=0 (effectively off) for.  TC1 cube C36 quick |w|_max=0.0142 m/s unchanged.  AST guard now 14 tests; 0.15 s.
 
 ## Iter-11+ queued
 

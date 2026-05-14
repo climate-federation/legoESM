@@ -214,6 +214,24 @@ def test_all_nh_cube_branches_use_delt_max():
         )
 
 
+def test_all_nh_cube_branches_use_corner_div_damp_factory_pair():
+    """iter-17 sentinel: all 3 NH cube branches set the FV3 factory
+    ``corner_div_damp_nord=1`` + ``corner_div_damp_d4_bg=0.16``
+    pair (del-4 corner-divergence damping; FV3 iter-168
+    ``sw_core.F90:1641-1822 d_sw5``).
+    """
+    blocks = _find_nh_config_blocks()
+    for tc in ("tc1", "tc2a", "tc3"):
+        assert "corner_div_damp_nord=1" in blocks[tc], (
+            f"iter-17 regression: {tc} cube NH config lost "
+            "``corner_div_damp_nord=1``."
+        )
+        assert "corner_div_damp_d4_bg=0.16" in blocks[tc], (
+            f"iter-17 regression: {tc} cube NH config lost "
+            "``corner_div_damp_d4_bg=0.16``."
+        )
+
+
 def test_sw_cube_uses_iter1009_dual_target_config():
     """iter-1/8 sentinel: matrix runner SW W2/W5 cube branch routes
     through the canonical ``iter1009_dual_target_config(n)`` helper
