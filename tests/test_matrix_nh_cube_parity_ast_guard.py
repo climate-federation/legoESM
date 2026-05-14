@@ -437,22 +437,36 @@ def test_w6_cube_init_uses_w6_winds_geo():
     analytic edge-midpoint wind init.  A regression that strips
     the W6 branch + falls through to the W2/W5 ``u0*cos(lat)``
     init would silently use wrong winds.
+
+    Whitespace-flexible regex (iter-30): tolerates a reflow /
+    reindent of the call site.
     """
     src = _runner_source()
-    assert "_w6_winds_geo(\n                cdgrid.lon_edge_x" in src, (
+    pat = re.search(
+        r"_w6_winds_geo\(\s*cdgrid\.lon_edge_x\s*,\s*cdgrid\.lat_edge_x",
+        src,
+    )
+    assert pat is not None, (
         "iter-24 regression: cube W6 init no longer evaluates "
-        "``_w6_winds_geo`` at ``cdgrid.lon_edge_x, lat_edge_x``."
+        "``_w6_winds_geo(cdgrid.lon_edge_x, cdgrid.lat_edge_x, ...)``."
     )
 
 
 def test_w6_latlon_init_uses_w6_winds_geo():
     """iter-25 sentinel: latlon W6 init in the matrix runner SW
     branch uses ``_w6_winds_geo`` at u-face / v-face coords.
+
+    Whitespace-flexible regex (iter-30): tolerates a reflow /
+    reindent of the call site.
     """
     src = _runner_source()
-    assert "_w6_winds_geo(\n                _lon_f_full" in src, (
+    pat = re.search(
+        r"_w6_winds_geo\(\s*_lon_f_full\s*\[\s*None\s*,\s*:\s*\]",
+        src,
+    )
+    assert pat is not None, (
         "iter-25 regression: latlon W6 init no longer evaluates "
-        "``_w6_winds_geo`` at u-face coords."
+        "``_w6_winds_geo`` at u-face coords ``_lon_f_full[None, :]``."
     )
 
 
