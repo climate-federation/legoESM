@@ -25,6 +25,22 @@ So the iter-12..17 NH bundle (vector_halo + a2b_ord4 + d_con_cv + dynamic_exner 
 
 **iter-12..17 doc claims need caveat**: those measurements were at quick mode (5 min); full-mode behaviour DOES NOT HOLD for TC2 cube.
 
+## State after iter-1..120 (compressed at iter-120)
+
+**iter-111..120 highlights — investigation phase post-TC2-blowup discovery**:
+
+- **iter-118 FUNCTIONAL BUG FIX** ⭐: `_save_timeseries_csv` and `_save_timeseries_plot` in matrix runner included `_blowup_info` (a dict value added by `_run_timeloop` on FAIL) in column keys.  Writer crashed silently on `diag["_blowup_info"][i]` → empty csv with header only.  Fix: exclude private-prefix (`_*`) keys.  Future FAILed runs now preserve pre-blowup timeseries for post-mortem investigation.  **First functional code fix this loop** (vs. comment/sentinel additions).
+- **iter-119 AST sentinel**: `test_iter118_timeseries_csv_excludes_private_keys` guards both filter sites.
+- **iter-112 TC3 caution AST sentinel**: pins iter-108 TC3 cube branch caution comment.
+- **iter-113/114 TC1/TC2/TC3 baseline clarifications**: all three NH cube branches now carry consistent breadcrumbs noting the iter-5/6/7 measurements were at quick mode.
+- **iter-116 hypothesis direction correction**: iter-104 hypothesis 3 ("Reduce acoustic_off_centering 0.15 → 0.05") was inverted; lower off-centering is LESS stable per `compressible_euler_cdgrid.py:85` docstring.  Corrected to "INCREASE 0.15 → 0.30".
+- **iter-117 matrix runner diagnostic limitation noted** (which iter-118 then FIXED).
+- **iter-111 probe attempt FAILED**: tried to run TC2 cube growth-trace probe; competed with NH matrix CPU + tracer-leak issue.  Lesson: don't probe NH cube while NH matrix busy.
+
+**Cumulative sentinel coverage at iter-120**: **31 AST + 14 numerical + 1 c_sw = 46 sentinels** (added iter-112 + iter-119).
+
+**Active state**: NH cube matrix re-run still in TC3 phase (TC2 BLOWUP at iter-102 documented).  Expected TC3 completion: ~10:00 AM (4 hr after TC2 finish).
+
 ## State after iter-1..110 (compressed at iter-110)
 
 **iter-101..110 highlights — the TC2 cube BLOWUP discovery phase**:
