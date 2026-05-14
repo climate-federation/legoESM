@@ -138,7 +138,7 @@ So the iter-12..17 NH bundle (vector_halo + a2b_ord4 + d_con_cv + dynamic_exner 
 
 - **NH cube parity CLOSED** for all 3 DCMIP cases (iter-5/6/7).  Pre→post:
   - TC1: 0.327 → **0.014 m/s** (23×).  Matches ico 0.015 / spec 0.014 within 1 ULP.
-  - TC2: 4.65 → **0.32 m/s** (14.6×).  Matches ico 0.36 / spec 0.36.
+  - TC2: 4.65 → **0.32 m/s** (14.6×).  Matches ico 0.36 / spec 0.36.  ⚠️ **CAVEAT (iter-102)**: these numbers are at quick mode (5 min = 0.083 hr); cube TC2 **BLOWS UP at full 6-hr mode** at day 0.13 (step 8500).  See critical finding at top of doc.  iter-12..17 fixes are NOT sufficient for full-duration TC2 cube stability.
   - TC3: 23.1 → **7.36 m/s** (3.1×).  BEATS ico 10.24.
   Mechanism: `use_fv3_vector_halo_uv` + `use_fv3_a2b_ord4_vector_uv` (iter-697/698 FV3-faithful pair) promoted from the factory to the matrix runner NH cube branches.
 
@@ -190,7 +190,7 @@ So the iter-12..17 NH bundle (vector_halo + a2b_ord4 + d_con_cv + dynamic_exner 
 - iter-2: cube CB raw-transport leak diagnostic.
 - iter-3: `transport_step` fp64 + cube flux closure verified bit-clean.
 - iter-4: c_sw W2 residual sentinel.
-- iter-5/6/7: **NH cube parity CLOSED** (TC1/TC2/TC3 23×/14.6×/3.1×) via vector_halo + a2b_ord4.
+- iter-5/6/7: **NH cube parity CLOSED** (TC1/TC2/TC3 23×/14.6×/3.1×) via vector_halo + a2b_ord4.  ⚠️ iter-102 found TC2 was measured at quick mode only — full mode BLOWS UP at day 0.13.
 - iter-9: PE `use_fv3_a2b_zeta_corner` neutral, reverted.
 - iter-10/20/30/40/50: doc compress + iter-329 regex fix (iter-10).
 - iter-11: AST sentinel for SW helper substitution.
@@ -237,6 +237,13 @@ So the iter-12..17 NH bundle (vector_halo + a2b_ord4 + d_con_cv + dynamic_exner 
 ## Iter-91+ queued
 
 Open items requiring substantial compute (deferred):
+- **HIGHEST PRIORITY (iter-102/103)**: investigate TC2 cube full-mode BLOWUP at day 0.13.  Hypothesis: gravity wave reflection off cube panel edges accumulates over 3 hours.  Pre-blowup mass_drift was 7.85e-16 (clean) — dynamics field blew up cleanly without conservation issues.  Possible fixes to probe:
+  1. Increase n_acoustic_substeps from 20 → 30+ (acoustic instability hypothesis).
+  2. Increase hyperdiff_coeff for TC2 cube (over-edge dissipation hypothesis).
+  3. Reduce acoustic_off_centering from 0.15 → 0.05 (semi-implicit-instability hypothesis).
+  4. FV3 oracle comparison at /home/gentine/Documents/Code/FV3/atmos_cubed_sphere-symmetryclean/ for TC2-equivalent mountain test config.
+
+
 - **PE full-mode re-run** (iter-88 audit): all 13 PE cases × 4 grids currently at quick mode (10-30 % of spec full duration).  Full-mode runs of held_suarez (200d), AMIP (365d), held_suarez_topo (200d) are multi-hour each.  Cross-grid full-mode parity TBD.
 - **NH ico+spec full-mode re-run** (iter-81/89): TC1/TC2/TC3 cached at quick mode for ico/spec.  Cube currently refreshing to full mode (NH matrix in progress).  For true 3-grid full-mode comparison, ico+spec also need to re-run at TC1=3hr/TC2=6hr/TC3=2hr each.
 - **rotated_baroclinic 10-day full-mode** (iter-87): currently all 4 grids at 2-day quick mode where instability hasn't grown.  Need 10-day full to assess true rotated-pole cube parity vs ico (the apparent 39 % gap may be a quick-mode artifact).
