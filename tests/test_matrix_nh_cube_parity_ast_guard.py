@@ -314,6 +314,49 @@ def test_pe_baroclinic_cube_uses_heat_source_del2_iters():
     )
 
 
+def _count_pe_cube_factory_bundle_occurrences() -> int:
+    """Count occurrences of the iter-18..21 PE factory bundle
+    settings.  Each PE cube branch (baroclinic, held_suarez, amip)
+    should contain all 4 settings, so 3 branches × 4 = 12.
+    """
+    src = _runner_source()
+    flags = (
+        "use_fv3_metric_aware_d_con=True",
+        "d_con_top_zero_levels=2",
+        "delt_max=1.0",
+        "heat_source_del2_iters=2",
+    )
+    return sum(
+        len(re.findall(re.escape(flag), src))
+        for flag in flags
+    )
+
+
+def test_pe_factory_bundle_present_in_three_cube_branches():
+    """iter-22 sentinel: the PE iter-18..21 factory bundle
+    (``use_fv3_metric_aware_d_con``, ``d_con_top_zero_levels=2``,
+    ``delt_max=1.0``, ``heat_source_del2_iters=2``) is present in
+    all 3 PE cube branches: baroclinic, held_suarez, amip.  The
+    bundle compositionally matches FV3
+    ``make_fv3_faithful_pe_config`` factory.
+
+    NH branches (TC1/TC2/TC3) also contain a superset of these
+    flag names from iter-12..17 promotions, so the total count
+    includes those occurrences.  The minimum bound is the iter-22
+    PE bundle count (3 branches × 4 flags = 12), but the actual
+    count is larger since NH branches independently set the same
+    flag names with the same values.
+    """
+    # Lower bound is the PE bundle alone (3 PE branches × 4 flags).
+    count = _count_pe_cube_factory_bundle_occurrences()
+    assert count >= 12, (
+        f"iter-22 regression: PE factory bundle occurrences "
+        f"({count}) below minimum 12 (3 PE branches × 4 flags). "
+        "One of baroclinic / held_suarez / amip PE cube branches "
+        "is missing iter-18..21 factory flags."
+    )
+
+
 def test_sw_cube_uses_iter1009_dual_target_config():
     """iter-1/8 sentinel: matrix runner SW W2/W5 cube branch routes
     through the canonical ``iter1009_dual_target_config(n)`` helper

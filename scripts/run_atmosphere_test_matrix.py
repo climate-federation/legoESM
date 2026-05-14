@@ -2968,7 +2968,17 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
             corner_div_damp_fv3_vector_fill=_cdd_fv3_vfill_env,
             smagorinsky_cs=_smag_cs_env,
             use_conservation_fixer=True, fix_mass=True,
-            anchor_mass_to_initial=True)
+            anchor_mass_to_initial=True,
+            # new_test_dycores iter-22: promote PE factory bundle to
+            # held_suarez cube branch (matches iter-18/19/20/21
+            # promotions on baroclinic).  PE iters 218/338/433/458 —
+            # all correctness flags (no calibration shift on the
+            # PE max|v| diagnostic for the gravity_wave probe; HS
+            # cube wall 900 s precludes per-iter re-verification).
+            use_fv3_metric_aware_d_con=True,
+            d_con_top_zero_levels=2,
+            delt_max=1.0,
+            heat_source_del2_iters=2)
         model = PrimitiveEquationModel(grid, sigma, config)
         if _topo:
             from legoesm.atmosphere.idealized.held_suarez_topo import (
@@ -4040,7 +4050,13 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
             hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
             div_damp_coeff=dd, A_h=ah,
             use_conservation_fixer=True, fix_mass=True,
-            anchor_mass_to_initial=True)
+            anchor_mass_to_initial=True,
+            # new_test_dycores iter-22: same PE factory bundle as
+            # held_suarez + baroclinic (iter-18/19/20/21).
+            use_fv3_metric_aware_d_con=True,
+            d_con_top_zero_levels=2,
+            delt_max=1.0,
+            heat_source_del2_iters=2)
         model = PrimitiveEquationModel(grid, sigma, config)
         state = held_suarez_init(grid, sigma, T_init=280.0)
 

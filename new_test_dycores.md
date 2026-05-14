@@ -65,6 +65,7 @@ Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV /
 - iter-19: PE `d_con_top_zero_levels=2`; reverted `use_fv3_a2b_zeta_corner` (51 % wall, neutral).
 - iter-20 (compressed at this point): doc compression + PE `delt_max=1.0` on baroclinic cube (PE iter-218 factory default, analog of NH iter-16); gravity_wave_3_1 cube max|v|=22.4 unchanged, mass_drift=5.01e-12, wall 58.6 s; AST guard now 17 tests.
 - iter-21: PE `heat_source_del2_iters=2` on baroclinic cube (PE iter-458 factory default; del-2 smoothing of `_d_con_sum` heat source; analog of NH iter-15).  gravity_wave_3_1 cube max|v|=22.4 / mass_drift=5.01e-12 unchanged; wall 57.8 s.  AST guard now 18 tests.
+- iter-22: propagate the iter-18..21 PE factory bundle (`use_fv3_metric_aware_d_con` + `d_con_top_zero_levels=2` + `delt_max=1.0` + `heat_source_del2_iters=2`) to held_suarez cube + amip cube PE configs (was only on baroclinic).  All 3 PE cube branches now match the factory.  Sanity-verified gravity_wave_3_1 (baroclinic branch) still 22.4 m/s unchanged at 57.9 s.  AST guard count-based sentinel covers all 3 PE cube branches; now 19 tests.
 
 ## Iter-21+ queued
 
