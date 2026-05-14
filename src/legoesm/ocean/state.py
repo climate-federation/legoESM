@@ -603,6 +603,17 @@ class LatLonCGridOceanConfig(NamedTuple):
     slope_foot_threshold: float = 0.1   # MOM6 default
     slope_foot_n_levels: int = 5        # bottom 5 levels
     momentum_advection: str = "vector_invariant"  # "vector_invariant", "weno5", or "weno7"
+    # Kinetic-energy gradient scheme for the vector-invariant form.
+    # ``"centered"`` (default; legacy bit-exact): legoESM's existing
+    # ``KE = 0.5·((⟨u⟩ᵢ)² + (⟨v⟩ⱼ)²)`` form. The standard centered
+    # C-grid scheme suffers the Hollingsworth-Kallberg instability over
+    # stratified flow on sloping bathymetry (see #263).
+    # ``"hollingsworth"``: NEMO 4.2.1 dynkeg.F90 ``nkeg_HW`` form
+    # (Hollingsworth, Kållberg & Renner 1983; Arakawa & Hsu 1990).
+    # Wider (3-row) stencil that smooths spurious vortex stretching.
+    # Strongly recommended for stratified ocean over realistic
+    # bathymetry (NEMO turns this on by default via ``nn_dynkeg=1``).
+    ke_gradient_scheme: str = "centered"
     weno_d_term: bool = True  # Include WENO D-term (divergence flux, Silvestri Eqs. 31-32).
                               # Implemented with proper split: matching-direction divergence
                               # is WENO-upwinded, cross-direction stays centered (Appendix C).

@@ -930,16 +930,61 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         # K_v = 0.5 * (centered ∂_y <u²>_i + WENO_upwind ∂_y <v²>_j)
         dKE_dy = 0.5 * dusq_dy + dKE_v2_dy_at_vface
     else:
-        # --- 6/7. Centered KE + pressure gradients (batched) ---
-        # Centered baseline: KE = 0.5 * ((<u>_i)² + (<v>_j)²).
-        # Batch (KE, p_prime_filled) gradients — both share the (n_lat,
-        # n_lon, nlev) cell-center shape and ``gradient_*_cgrid`` treats
-        # the trailing axis as a passive batch.  Stack along trailing
-        # axis, fold into the level dim, run each gradient once on the
-        # thicker (n_lat, n_lon, nlev*2) tensor.  4 gradient calls → 2.
-        u_cell = 0.5 * (u[:, :-1, :] + u[:, 1:, :])
-        v_cell = 0.5 * (v[:-1, :, :] + v[1:, :, :])
-        KE = 0.5 * (u_cell**2 + v_cell**2)
+        # --- 6/7. KE + pressure gradients (batched) ---
+        #
+        # The KE form is selected by ``config.ke_gradient_scheme``:
+        #
+        # ``"centered"`` (default, legacy):
+        #   KE = 0.5 * ((<u>_i)² + (<v>_j)²)
+        #   Standard C-grid centered KE. Has the Hollingsworth-Kallberg
+        #   instability over stratified flow on sloping bathymetry.
+        #
+        # ``"hollingsworth"`` (NEMO ``nkeg_HW``, Hollingsworth-Kållberg-
+        # Renner 1983 / Arakawa-Hsu 1990):
+        #   K(i,j) = ( zu + zv ) / 48
+        #     zu = 8*(u(i-1,j)² + u(i,j)²)
+        #        + (u(i-1,j-1)+u(i-1,j+1))²
+        #        + (u(i,  j-1)+u(i,  j+1))²
+        #     zv = 8*(v(i,j-1)² + v(i,j)²)
+        #        + (v(i-1,j-1)+v(i+1,j-1))²
+        #        + (v(i-1,j)  +v(i+1,j))²
+        #   3-row stencil widens the K computation, removing spurious
+        #   vortex stretching from the geopotential coordinate's KE
+        #   gradient near sloping bathymetry. Required for stable
+        #   stratified flow on Mercator grids over realistic topography.
+        if config.ke_gradient_scheme == "hollingsworth":
+            # u shape (n_lat, n_lon+1, nlev) — u(i-1,j) = u[:, :-1, :], u(i,j) = u[:, 1:, :]
+            u_l = u[:, :-1, :]                                  # (n_lat, n_lon, nlev)
+            u_r = u[:, 1:, :]
+            # j±1 with Neumann (edge) BC at south/north walls
+            u_l_jm1 = jnp.concatenate([u_l[:1], u_l[:-1]], axis=0)
+            u_l_jp1 = jnp.concatenate([u_l[1:], u_l[-1:]], axis=0)
+            u_r_jm1 = jnp.concatenate([u_r[:1], u_r[:-1]], axis=0)
+            u_r_jp1 = jnp.concatenate([u_r[1:], u_r[-1:]], axis=0)
+            # v shape (n_lat+1, n_lon, nlev) — v(i,j-1) = v[:-1, :, :], v(i,j) = v[1:, :, :]
+            v_s = v[:-1, :, :]                                  # (n_lat, n_lon, nlev)
+            v_n = v[1:, :, :]
+            # i±1 periodic in longitude (jnp.roll matches existing convention)
+            v_s_im1 = jnp.roll(v_s, shift=+1, axis=1)
+            v_s_ip1 = jnp.roll(v_s, shift=-1, axis=1)
+            v_n_im1 = jnp.roll(v_n, shift=+1, axis=1)
+            v_n_ip1 = jnp.roll(v_n, shift=-1, axis=1)
+            zu = 8.0 * (u_l ** 2 + u_r ** 2) \
+                 + (u_l_jm1 + u_l_jp1) ** 2 \
+                 + (u_r_jm1 + u_r_jp1) ** 2
+            zv = 8.0 * (v_s ** 2 + v_n ** 2) \
+                 + (v_s_im1 + v_s_ip1) ** 2 \
+                 + (v_n_im1 + v_n_ip1) ** 2
+            KE = (zu + zv) / 48.0
+        elif config.ke_gradient_scheme == "centered":
+            u_cell = 0.5 * (u[:, :-1, :] + u[:, 1:, :])
+            v_cell = 0.5 * (v[:-1, :, :] + v[1:, :, :])
+            KE = 0.5 * (u_cell ** 2 + v_cell ** 2)
+        else:
+            raise ValueError(
+                f"Unknown ke_gradient_scheme: {config.ke_gradient_scheme!r}. "
+                f"Must be 'centered' or 'hollingsworth'."
+            )
         _Kp_stack = jnp.stack([KE, p_prime_filled], axis=-1)
         _Kp_flat = _Kp_stack.reshape(n_lat_g, n_lon_g, nlev_g * 2)
         _dKp_dx_flat = gradient_x_cgrid(_Kp_flat, grid)  # (n_lat, n_lon+1, nlev*2)
