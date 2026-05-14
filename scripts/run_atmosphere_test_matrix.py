@@ -4864,6 +4864,13 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             # the full-Earth default because mountain-generated flow
             # disturbances produce grid-scale noise that the standard
             # 52-hour e-fold cannot damp in a 6-hour simulation.
+            #
+            # iter-138 PROBE attempted 16x scaling to test hypothesis 2.
+            # Probe killed at user request after 51 min wall without
+            # completion (iter-248).  Reverted to 4x baseline.
+            # Hypothesis 2 remains untested; future investigation
+            # should use a different probe strategy (smaller test
+            # config, shorter duration, or env-var override path).
             hd_tc2 = hd / 20.0 ** 4 * 4.0
             dt = max(0.15, 3.0 * (16.0 / n))
             nh_config = CompressibleEulerConfig(
