@@ -4508,7 +4508,12 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 # (factory default; FV3 iter-457
                 # dyn_core.F90:1755-1756 del-2 smoothing of
                 # _d_con_sum heat source, nf_ke=2 at nord=1).
-                heat_source_del2_iters=2)
+                heat_source_del2_iters=2,
+                # new_test_dycores iter-16: delt_max=1.0 (factory
+                # default; FV3 iter-218 dyn_core.F90:1774 per-step
+                # heating cap |Δθ_p · Π| ≤ dt · delt_max).
+                # Non-active for TC1 (steady NH; near-zero ΔT).
+                delt_max=1.0)
         elif test_case == "tc2a":
             from tests.test_cases.dcmip2025 import dcmip25_tc2_init
             state, hcoord, tmetric, small_grid = dcmip25_tc2_init(
@@ -4549,7 +4554,10 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 # (factory default; FV3 iter-457 dyn_core.F90:1755-1756
                 # del-2 smoothing of _d_con_sum heat source, nf_ke=2
                 # at nord=1).
-                heat_source_del2_iters=2)
+                heat_source_del2_iters=2,
+                # new_test_dycores iter-16: delt_max=1.0 (factory
+                # default per-step heating cap).
+                delt_max=1.0)
         elif test_case == "tc3":
             from tests.test_cases.dcmip2025 import dcmip25_tc3_init
             state, hcoord, tmetric, small_grid = dcmip25_tc3_init(
@@ -4591,7 +4599,10 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 # (factory default; FV3 iter-457 dyn_core.F90:1755-1756
                 # del-2 smoothing of _d_con_sum heat source, nf_ke=2
                 # at nord=1).
-                heat_source_del2_iters=2)
+                heat_source_del2_iters=2,
+                # new_test_dycores iter-16: delt_max=1.0 (factory
+                # default per-step heating cap).
+                delt_max=1.0)
         else:
             raise ValueError(f"Unknown NH test case: {test_case}")
 

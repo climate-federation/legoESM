@@ -201,6 +201,19 @@ def test_all_nh_cube_branches_use_heat_source_del2_iters():
         )
 
 
+def test_all_nh_cube_branches_use_delt_max():
+    """iter-16 sentinel: all 3 NH cube branches set ``delt_max=1.0``
+    (factory default per-step heating cap; FV3 iter-218
+    ``dyn_core.F90:1774``: |Δθ_p · Π| ≤ dt · delt_max).
+    """
+    blocks = _find_nh_config_blocks()
+    for tc in ("tc1", "tc2a", "tc3"):
+        assert "delt_max=1.0" in blocks[tc], (
+            f"iter-16 regression: {tc} cube NH config lost "
+            "``delt_max=1.0``."
+        )
+
+
 def test_sw_cube_uses_iter1009_dual_target_config():
     """iter-1/8 sentinel: matrix runner SW W2/W5 cube branch routes
     through the canonical ``iter1009_dual_target_config(n)`` helper
