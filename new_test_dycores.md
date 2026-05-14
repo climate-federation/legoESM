@@ -132,7 +132,7 @@ So the iter-12..17 NH bundle (vector_halo + a2b_ord4 + d_con_cv + dynamic_exner 
 - AST: 26 in `tests/test_matrix_nh_cube_parity_ast_guard.py` (iter-59 added `test_iter59_cb_cube_uses_n_sub_substepping`).
 - Numerical: 8 in `tests/test_iter1002_w2_target_met.py` — W2 1-day (iter-1002), W5 day-5 (iter-1009), W6 2-day (iter-39), W5 2-day (iter-48), W2 2-day (iter-49), W2 5-day (iter-57), CB 12-day (iter-59), hyperdiff kwarg API (iter-35); plus 2 quiet-path guards (iter-60 inverted iter-1019/iter-1020).
 
-## State after iter-1..49 (compressed at iter-50)
+## State after iter-1..50 (compressed at iter-50)
 
 **Headline cube parity wins**:
 
