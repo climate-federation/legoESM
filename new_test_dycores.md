@@ -15,6 +15,8 @@ This is a **REGRESSION from quick-mode**:
 
 So the iter-12..17 NH bundle (vector_halo + a2b_ord4 + d_con_cv + dynamic_exner + metric_aware_d_con + d_con_top_zero=2 + heat_source_del2=2 + delt_max=1.0 + corner_div_damp_pair) is **NOT sufficient for full-duration TC2 cube stability**.  The matrix has been silently PASSing TC2 cube at quick mode (5 min) where the instability hasn't grown.
 
+**Diagnostic limitation (iter-117 audit)**: the matrix runner writes `mean_timeseries.csv` only after a successful run completes.  For the iter-102 TC2 FAIL, the csv is empty (header only) — no per-step diagnostics survived the blowup detection.  Snapshots saved every `n_steps/10` would have captured the field at step 8120 (last clean) and step 9744 (post-blowup, all NaN), but `snapshots_native.npz` from the current run also wasn't written (timestamp still May 13 = pre-iter-72 baseline).  To investigate the blowup mechanism, a future probe (iter-118+) needs to run TC2 cube up to step ~8400 only (~30 min wall) with custom diagnostics dumping.  The matrix runner's blowup-detection-then-discard-diagnostics pattern is a limitation worth addressing in a future iter.
+
 **Action required (iter-103+)**: investigate the day-0.13 blowup mechanism (mountain-wave breaking? acoustic substep insufficient? halo error at panel edges in NH solver?).  Possible fixes:
 - More acoustic substeps (currently 20).
 - Stronger hyperdiff at full duration.
