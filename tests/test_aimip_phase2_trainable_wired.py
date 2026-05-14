@@ -30,12 +30,15 @@ from legoesm.training.trainable_params import (
 # kwargs on ``build_segment_fn``.  Each line must cite the iter that
 # added it to the trainable list + the AIMIP phase that will land the
 # wiring.  As wiring lands, the entry leaves this set.
-UNWIRED_TODO: set[str] = {
-    "albedo_land",   # iter-251, wiring planned in AIMIP Phase 2.6
-    "Ri_crit",       # iter-252, wiring planned in AIMIP Phase 2.7
-    "Ck",            # iter-253, wiring planned in AIMIP Phase 2.7
-    "l_mix_max",     # iter-254, wiring planned in AIMIP Phase 2.7
-}
+#
+# iter-256: the previous UNWIRED_TODO entries
+# (``albedo_land``, ``Ri_crit``, ``Ck``, ``l_mix_max``) were all
+# reverted out of the constraint lists rather than left as nominal-
+# only trainables.  Surface and turbulence infra (land-fraction
+# blend; Louis kwargs through ``step_unified``) must land before they
+# are re-added.  Set is intentionally empty so any new addition
+# without wiring trips ``test_all_trainable_param_names_are_segment_fn_kwargs_or_todo``.
+UNWIRED_TODO: set[str] = set()
 
 
 def _kwargs_of_build_segment_fn() -> set[str]:

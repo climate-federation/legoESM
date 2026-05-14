@@ -456,3 +456,40 @@ Phase-2 trainable accounting (as of iter-255):
 | `_LOUIS_TURBULENCE_TRAINABLE` | 3 | `Ri_crit, Ck, l_mix_max` | 0/3 |
 
 Next AIMIP iters: wire `albedo_land` (Phase 2.6) then the Louis triple (Phase 2.7) end-to-end (`build_segment_fn` → `step_unified` → surface/turbulence physics modules).
+
+## Iter-256 — AIMIP Phase 2 honest revert + surface-blend gap surfaced
+
+Investigated the Phase 2.6 wiring of `albedo_land` and found a deeper infrastructure gap that blocks it.  In `src/legoesm/driver/physics_pipeline.py::compute_radiation_core` the surface blend is
+
+```python
+albedo = sic * albedo_ice + (1 - sic) * albedo_ocean
+```
+
+— ice/ocean only, no land term.  `blend_surface_property` in `src/legoesm/forcing/surface_utils.py` is the same 2-way blend.  There is no `land_mask` / `land_fraction` channel in the surface-state pipeline at all.  Wiring `albedo_land` as a `build_segment_fn` kwarg today would produce a kwarg that has no consumer downstream — gradient would flow into a node nothing reads.
+
+Same problem affects the Louis turbulence triple (`Ri_crit`, `Ck`, `l_mix_max`): `build_segment_fn` does not take them as kwargs and `step_unified` does not forward them to the turbulence physics, so they were also nominal-only trainables in iters 252-254.
+
+Honest correction (iter-256):
+
+- `src/legoesm/training/trainable_params.py`:
+  - Removed `albedo_land` from `_COMMON_TRAINABLE` (was iter-251).
+  - Cleared `_LOUIS_TURBULENCE_TRAINABLE` to `[]` (was iters 252-254).
+  - Docstrings now explain the wiring prerequisites and cite the regression sentinel.
+- `tests/test_aimip_phase2_trainable_wired.py`:
+  - `UNWIRED_TODO` set is now empty: any future addition that lands without wiring trips the sentinel.
+  - All three sentinels remain green; wired-trainable count stays at 8.
+
+Phase-2 trainable accounting (revised, iter-256):
+
+| Set | Count | Names | Wired? |
+|-----|-------|-------|--------|
+| `_COMMON_TRAINABLE` | 6 | `tau_equator, tau_pole, C_H, C_E, albedo_ice, albedo_ocean` | 6/6 |
+| `_SBM_TRAINABLE` | 2 | `sbm_tau_c, sbm_RH_ref` | 2/2 |
+| `_LOUIS_TURBULENCE_TRAINABLE` | 0 | — | 0/0 |
+| **Total wired trainable** | **8** | | **100 %** |
+
+This is fewer params than the AIMIP plan target (~17-20) — but every entry now actually gradient-couples to the rollout.  `albedo_land`, `Ri_crit`, `Ck`, `l_mix_max` remain in `TUNING_PARAMETERS` as experiment-config knobs; they will re-enter the trainable set once their respective surface and turbulence wiring lands.
+
+Real Phase-2 wiring backlog (each a distinct future iter):
+- **Phase 2.6**: introduce `land_fraction` channel through `SegmentForcing` + surface blend, then thread `albedo_land` through `build_segment_fn` → `step_unified` → `compute_radiation_core` and add to `_COMMON_TRAINABLE`.
+- **Phase 2.7**: thread `Ri_crit` / `Ck` / `l_mix_max` through `build_segment_fn` → `step_unified` → `physics_step_no_rad` → Louis turbulence scheme; add back to `_LOUIS_TURBULENCE_TRAINABLE`.

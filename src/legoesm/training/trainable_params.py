@@ -37,15 +37,23 @@ DEFAULT_TRAINABLE = [
     ParamConstraint("albedo_ocean", 0.03, 0.10, "sigmoid"),
 ]
 
-# Non-convection trainable parameters (shared by all schemes)
-# iter-251 (AIMIP Phase 2.1): added ``albedo_land`` so the AIMIP
-# training loop tunes the full surface-albedo triple (ice, ocean,
-# land) rather than just two of three.  Bounds match
-# ``tuning.py::TUNING_PARAMETERS["albedo_land"]`` (0.1 - 0.4) which
-# spans desert -> snow-covered transitions.  AMIP-style runs with
-# fixed ``--dataset analytical`` will see no behavioural change
-# because ``albedo_land`` is only consulted by the surface module
-# when a non-trivial land fraction is in the IC; ERA5 ICs activate it.
+# Non-convection trainable parameters (shared by all schemes).
+#
+# Only includes names that are actually threaded as kwargs through
+# ``legoesm.driver.compiled_segments.build_segment_fn`` (which is the
+# differentiable rollout entry point used by the training driver).
+# A name appearing here that is NOT a ``build_segment_fn`` kwarg is a
+# bug — the gradient runs, but the value never affects the rollout.
+# See ``tests/test_aimip_phase2_trainable_wired.py`` for the
+# regression guard that enforces this invariant.
+#
+# iter-251 history: ``albedo_land`` was added here but reverted in
+# iter-256 once an audit (see ``new_test_dycores.md``) confirmed that
+# (a) ``build_segment_fn`` has no ``albedo_land`` kwarg and (b) the
+# surface blend in ``physics_pipeline.compute_radiation_core`` is
+# ``sic * albedo_ice + (1 - sic) * albedo_ocean`` with no land term.
+# ``albedo_land`` will be re-added once the surface infra grows a land
+# fraction channel (AIMIP Phase 2.6 prerequisite).
 _COMMON_TRAINABLE = [
     ParamConstraint("tau_equator", 5.0, 10.0, "sigmoid"),
     ParamConstraint("tau_pole", 1.0, 3.0, "sigmoid"),
@@ -53,7 +61,6 @@ _COMMON_TRAINABLE = [
     ParamConstraint("C_E", 0.001, 0.005, "sigmoid"),
     ParamConstraint("albedo_ice", 0.4, 0.8, "sigmoid"),
     ParamConstraint("albedo_ocean", 0.03, 0.10, "sigmoid"),
-    ParamConstraint("albedo_land", 0.1, 0.4, "sigmoid"),
 ]
 
 # SBM-specific convection parameters
@@ -63,16 +70,16 @@ _SBM_TRAINABLE = [
 ]
 
 # Louis-turbulence-specific trainable parameters.
-# iter-252 (AIMIP Phase 2.2): added Ri_crit (stable-PBL cutoff).
-# iter-253 (AIMIP Phase 2.3): added Ck (mixing-length coefficient).
-# iter-254 (AIMIP Phase 2.4): added l_mix_max (max mixing length).
-# Bounds match tuning.py::TUNING_PARAMETERS[...].  Only active when
-# --turbulence louis.
-_LOUIS_TURBULENCE_TRAINABLE = [
-    ParamConstraint("Ri_crit", 0.20, 0.50, "sigmoid"),
-    ParamConstraint("Ck", 0.20, 0.60, "sigmoid"),
-    ParamConstraint("l_mix_max", 50.0, 300.0, "sigmoid"),
-]
+#
+# iter-252..254 history: Ri_crit, Ck, l_mix_max were added here but
+# reverted in iter-256 once an audit confirmed they are not kwargs of
+# ``build_segment_fn`` and therefore never reached the rollout.  They
+# will be re-added once the Louis turbulence parameters are threaded
+# through ``build_segment_fn`` -> ``step_unified`` ->
+# ``physics_step_no_rad`` -> the Louis scheme (AIMIP Phase 2.7).  The
+# entries remain in ``tuning.py::TUNING_PARAMETERS`` as
+# experiment-config knobs (just not yet differentiable).
+_LOUIS_TURBULENCE_TRAINABLE: list[ParamConstraint] = []
 
 
 def trainable_constraints_for_scheme(
