@@ -735,6 +735,137 @@ def create_dino_z_star(cfg: DINOConfig | None = None) -> OceanZStarCoordinate:
     )
 
 
+# ---------------------------------------------------------------------
+# Phase 3 — MPAS regional mesh wiring (partial-periodic via land mask)
+#
+# DINO has closed walls at lon = lon_west and lon = lon_east everywhere
+# EXCEPT in the channel band (−65 to −45°S). The regional Voronoi mesh
+# supports `periodic_x=True` (full re-entrant) and `periodic_x=False`
+# (closed everywhere), but not partial periodicity.
+#
+# Solution: use `periodic_x=True` so the mesh wraps east-west, then
+# mark cells in a thin strip near the periodic seam as LAND wherever
+# the latitude is outside the channel band. This creates a wall along
+# the seam everywhere except in the channel — exactly the DINO
+# topology.
+# ---------------------------------------------------------------------
+
+def dino_mpas_land_mask(
+    mesh,
+    cfg: DINOConfig | None = None,
+    seam_strip_width_deg: float | None = None,
+):
+    """Per-cell land mask (1=ocean, 0=land) for a DINO MPAS regional mesh.
+
+    Three sources of land:
+      1. Cells with latitude outside [-lat_max_deg, lat_max_deg] — the
+         buffer/land cells around the target domain.
+      2. Cells within ``seam_strip_width_deg`` of the periodic seam
+         (lon = lon_west = lon_east) AND outside the channel band:
+         creates a wall at the seam everywhere except in the channel.
+      3. (Future) Land cells inside the basin if needed for islands etc.
+         — none for DINO.
+
+    Parameters
+    ----------
+    mesh : VoronoiMesh
+        Created by ``create_regional_voronoi_mesh(..., periodic_x=True)``.
+    cfg : DINOConfig, optional
+    seam_strip_width_deg : float, optional
+        Width (in degrees of longitude) of the wall strip near the
+        periodic seam. Defaults to one nominal cell width estimated
+        from the mesh's median ``dcEdge``. Set explicitly for
+        reproducibility.
+
+    Returns
+    -------
+    land_mask : jax array, shape (nCells,)
+        1.0 = ocean, 0.0 = land.
+    """
+    if cfg is None:
+        cfg = DINOConfig()
+
+    # Mesh lonCell is in [0, 2π); wrap to (-180, 180] to match DINOConfig
+    lon_deg = (jnp.degrees(mesh.lonCell) + 180.0) % 360.0 - 180.0
+    lat_deg = jnp.degrees(mesh.latCell)
+
+    # --- Source 1: buffer cells outside lat-domain --------------------
+    in_lat_band = (lat_deg >= -cfg.lat_max_deg) & (lat_deg <= cfg.lat_max_deg)
+
+    # --- Source 2: seam wall outside channel band --------------------
+    if seam_strip_width_deg is None:
+        # Estimate one cell width from the mesh: dcEdge is the
+        # cell-center-to-cell-center distance. Convert to degrees of lon.
+        median_dc_m = float(jnp.median(mesh.dcEdge))
+        seam_strip_width_deg = (median_dc_m / mesh.radius) * (180.0 / math.pi)
+
+    # The seam is at lon_west = lon_east (identified). "Near the seam"
+    # = within seam_strip_width_deg of the western boundary
+    # (equivalently, of the eastern boundary, by periodicity).
+    near_seam = (lon_deg - cfg.lon_west_deg) < seam_strip_width_deg
+
+    # In the channel band, the seam is open (no wall)
+    in_channel = (
+        (lat_deg >= cfg.channel_lat_south_deg)
+        & (lat_deg <= cfg.channel_lat_north_deg)
+    )
+    seam_wall = near_seam & ~in_channel
+
+    is_ocean = in_lat_band & ~seam_wall
+    return is_ocean.astype(jnp.float32)
+
+
+def dino_mpas_initial_state_arrays(
+    mesh,
+    z_coord: OceanZStarCoordinate,
+    cfg: DINOConfig | None = None,
+    seam_strip_width_deg: float | None = None,
+):
+    """Build (T, S, H_bathy, land_mask) for a DINO MPAS regional mesh.
+
+    Convenience that combines land mask (Phase 3), bathymetry (Phase
+    2B), and initial T/S (Phase 2D) for the MPAS path. Does not yet
+    construct the full ``MPASOceanState`` — that wiring lives in
+    Phase 2F.
+
+    Parameters
+    ----------
+    mesh : VoronoiMesh
+    z_coord : OceanZStarCoordinate
+    cfg : DINOConfig, optional
+    seam_strip_width_deg : float, optional
+
+    Returns
+    -------
+    T : jax array, shape (nCells, n_levels)
+    S : jax array, shape (nCells, n_levels)
+    H_bathy : jax array, shape (nCells,)
+    land_mask : jax array, shape (nCells,)
+    """
+    if cfg is None:
+        cfg = DINOConfig()
+
+    land_mask = dino_mpas_land_mask(
+        mesh, cfg=cfg, seam_strip_width_deg=seam_strip_width_deg,
+    )
+
+    # Mesh lonCell is in [0, 2π); wrap to (-180, 180]
+    lon_deg = (jnp.degrees(mesh.lonCell) + 180.0) % 360.0 - 180.0
+    lat_deg = jnp.degrees(mesh.latCell)
+
+    H_bathy = dino_bathymetry(lon_deg, lat_deg, cfg)
+    # Land cells: set H_bathy to 0 so dynamics doesn't try to use them
+    H_bathy = jnp.where(land_mask > 0.5, H_bathy, 0.0)
+
+    T, S = dino_initial_T_S(lat_deg, z_coord.z_full_ref, cfg)
+    # Mask T, S on land
+    mask3d = land_mask[:, None]
+    T = jnp.where(mask3d > 0.5, T, 0.0)
+    S = jnp.where(mask3d > 0.5, S, 0.0)
+
+    return T, S, H_bathy, land_mask
+
+
 # Convenience: surface-layer restoring timescales derived from heat-flux
 # coefficients (eq 8 of paper). Useful for sanity printouts.
 def restoring_timescale_T_days(cfg: DINOConfig) -> float:
