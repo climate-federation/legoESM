@@ -332,6 +332,57 @@ def _count_pe_cube_factory_bundle_occurrences() -> int:
     )
 
 
+def test_sw_w6_wired_for_all_four_grids():
+    """iter-24/25 sentinel: SW Williamson 6 (Rossby-Haurwitz wave-4)
+    is wired for all 4 grid types in the matrix runner — the
+    ``if g in (...):`` gate at the W6 ``matrix.append`` site must
+    include ``cubed_sphere`` (iter-24) AND ``latlon`` (iter-25)
+    alongside the pre-existing ``icosahedral`` and ``spectral``.
+    """
+    src = _runner_source()
+    # Find the line that gates the W6 grid-type iteration.
+    pat = re.search(
+        r'if g in \([^)]*\):\s*\n\s*matrix\.append\(\s*TestCase\(\s*\n'
+        r'\s*"shallow_water",\s*"williamson6"',
+        src,
+    )
+    assert pat is not None, (
+        "Could not locate W6 grid-type gate in matrix runner"
+    )
+    gate = pat.group(0)
+    for grid in ("cubed_sphere", "latlon", "icosahedral", "spectral"):
+        assert f'"{grid}"' in gate, (
+            f"iter-24/25 regression: W6 grid-type gate no longer "
+            f"includes ``{grid}``; that grid will be skipped on W6 "
+            f"cross-grid runs."
+        )
+
+
+def test_w6_cube_init_uses_w6_winds_geo():
+    """iter-24 sentinel: cube W6 init in the matrix runner SW
+    branch uses ``_w6_winds_geo(lon_edge, lat_edge, R)`` for
+    analytic edge-midpoint wind init.  A regression that strips
+    the W6 branch + falls through to the W2/W5 ``u0*cos(lat)``
+    init would silently use wrong winds.
+    """
+    src = _runner_source()
+    assert "_w6_winds_geo(\n                cdgrid.lon_edge_x" in src, (
+        "iter-24 regression: cube W6 init no longer evaluates "
+        "``_w6_winds_geo`` at ``cdgrid.lon_edge_x, lat_edge_x``."
+    )
+
+
+def test_w6_latlon_init_uses_w6_winds_geo():
+    """iter-25 sentinel: latlon W6 init in the matrix runner SW
+    branch uses ``_w6_winds_geo`` at u-face / v-face coords.
+    """
+    src = _runner_source()
+    assert "_w6_winds_geo(\n                _lon_f_full" in src, (
+        "iter-25 regression: latlon W6 init no longer evaluates "
+        "``_w6_winds_geo`` at u-face coords."
+    )
+
+
 def test_pe_factory_bundle_present_in_three_cube_branches():
     """iter-22 sentinel: the PE iter-18..21 factory bundle
     (``use_fv3_metric_aware_d_con``, ``d_con_top_zero_levels=2``,
