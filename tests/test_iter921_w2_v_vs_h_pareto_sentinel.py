@@ -27,9 +27,23 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import warnings
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+
+# new_test_dycores iter-101: hard-fail at module import if JAX is not
+# in fp64 mode (mirrors iter-99's protection in
+# test_iter1002_w2_target_met.py).  W2 v_ll/h_err sentinels lock fp32
+# round-off noise into the assertions if fp64 is silently disabled,
+# producing confusing failures.  Fail loudly so the actual env-var
+# issue is pointed-finger.
+assert jax.config.read("jax_enable_x64"), (
+    "tests/test_iter921_w2_v_vs_h_pareto_sentinel.py requires "
+    "JAX_ENABLE_X64=1.  JAX is currently in fp32 mode (likely because "
+    "an earlier test imported jax without setting the env var).  Run "
+    "with `JAX_ENABLE_X64=1 pytest ...` from the shell."
+)
 
 from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
     CDGridShallowWaterConfig,
