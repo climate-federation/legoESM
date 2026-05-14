@@ -164,6 +164,13 @@ Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV /
 - iter-66 negative result (reverted): ico CB multiplicative-fixer attempt regressed Linf 5× — additive uniform correction wins on heterogeneous unstructured mesh.  See top compressed block for lesson.
 - iter-69: W2 5-day apples-to-apples — cube is BEST finite-volume.  See top compressed block.
 - iter-70: W5 15-day apples-to-apples — all 4 grids machine-precision mass conservation.  See top compressed block.
+- iter-72: PE gravity_wave_3_1 cross-grid apples-to-apples audit at 1-day full duration.  Pre-iter-72 results had ico/latlon/spectral cached at 0.25-day quick mode while cube ran 1.0 day.  Refreshed:
+  - **cube (C36)**: max|v|=22.4 m/s, drift=5.01e-12, **PASS**.
+  - ico (ico5): max|v|=19.7 m/s, drift=0, PASS.
+  - spectral (T21): max|v|=20.3 m/s, drift=1.6e-16, PASS.
+  - latlon (72×144): max|v|=31.0 m/s, drift=0, PASS (dt=10s; latlon resolves higher-frequency waves).
+  **Cube/ico max|v| ratio = 1.14×, cube/spec = 1.10×** — excellent PE parity (cube and ico both use 200s dt, similar transport schemes).  iter-18's claim "27.5 → 22.4 m/s (-18.5%)" confirmed at apples-to-apples; cube now within 10-14 % of ico/spectral cluster.  latlon outlier (31.0 m/s) tracks its 20× finer dt = different effective resolution in time; not a cube issue.
+
 - iter-71: hyperdiff coefficient multiplier sweep on cube W2 5-day (refines iter-44's 2× choice).  Probe results:
   - mult=1.0×: L2=7.16e-4, v_d=0.96 m/s.
   - mult=1.5×: L2=5.51e-4, v_d=0.70 m/s.
