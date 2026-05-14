@@ -3412,11 +3412,18 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             # aware d_con (factory ``make_fv3_faithful_pe_config``
             # default).  PE analog of NH iter-339 enabled in iter-13.
             # Composes with c_v / dynamic_exner equivalents elsewhere
-            # on PE path.  Should be neutral or near-neutral on
-            # cube max|v| at C36 short-duration tests (PE cube is
-            # already best-in-class on baroclinic / rotated_steady /
-            # gravity_wave per the matrix survey).
-            use_fv3_metric_aware_d_con=True)
+            # on PE path.  Cube gravity_wave_3_1 max|v| 27.5 -> 22.4
+            # at C36 day-1 (-18.5 %; matches ico/spec/latlon cluster).
+            use_fv3_metric_aware_d_con=True,
+            # new_test_dycores iter-19: enable PE iter-433
+            # ``d_con_top_zero_levels=2`` sponge behaviour (factory
+            # default; PE analog of NH iter-14).  Skipped
+            # ``use_fv3_a2b_zeta_corner=True``: iter-9 measured
+            # neutral on rotated_steady (probed); iter-19 measured
+            # neutral on gravity_wave_3_1 cube max|v| (22.4 m/s
+            # with vs 22.4 without) but +51 % wall (81.8 s vs
+            # 54.2 s) — not worth the cost.
+            d_con_top_zero_levels=2)
         model = PrimitiveEquationModel(grid, sigma, config)
         if _rotated:
             from tests.test_cases.dcmip2008.jablonowski_rotated import (

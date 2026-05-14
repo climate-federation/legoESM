@@ -277,6 +277,18 @@ def test_pe_baroclinic_cube_uses_metric_aware_d_con():
     )
 
 
+def test_pe_baroclinic_cube_uses_d_con_top_zero_levels():
+    """iter-19 sentinel: PE baroclinic cube branch enables
+    ``d_con_top_zero_levels=2`` (PE iter-433 factory default,
+    analog of NH iter-14 enabled on the matrix in iter-14).
+    """
+    block = _find_pe_baroclinic_cube_config_block()
+    assert "d_con_top_zero_levels=2" in block, (
+        "iter-19 regression: PE baroclinic cube config lost "
+        "``d_con_top_zero_levels=2``."
+    )
+
+
 def test_sw_cube_uses_iter1009_dual_target_config():
     """iter-1/8 sentinel: matrix runner SW W2/W5 cube branch routes
     through the canonical ``iter1009_dual_target_config(n)`` helper
