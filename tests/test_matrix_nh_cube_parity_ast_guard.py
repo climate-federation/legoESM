@@ -289,6 +289,18 @@ def test_pe_baroclinic_cube_uses_d_con_top_zero_levels():
     )
 
 
+def test_pe_baroclinic_cube_uses_delt_max():
+    """iter-20 sentinel: PE baroclinic cube branch enables
+    ``delt_max=1.0`` (PE iter-218 factory default per-step heating
+    cap; analog of NH iter-16 enabled on the matrix).
+    """
+    block = _find_pe_baroclinic_cube_config_block()
+    assert "delt_max=1.0" in block, (
+        "iter-20 regression: PE baroclinic cube config lost "
+        "``delt_max=1.0``."
+    )
+
+
 def test_sw_cube_uses_iter1009_dual_target_config():
     """iter-1/8 sentinel: matrix runner SW W2/W5 cube branch routes
     through the canonical ``iter1009_dual_target_config(n)`` helper

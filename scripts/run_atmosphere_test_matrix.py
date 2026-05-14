@@ -3423,7 +3423,11 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             # neutral on gravity_wave_3_1 cube max|v| (22.4 m/s
             # with vs 22.4 without) but +51 % wall (81.8 s vs
             # 54.2 s) — not worth the cost.
-            d_con_top_zero_levels=2)
+            d_con_top_zero_levels=2,
+            # new_test_dycores iter-20: PE ``delt_max=1.0`` (factory
+            # default; PE iter-218 analog of NH iter-16; per-step
+            # heating cap ``|Δθ_p · Π| ≤ dt · delt_max``).
+            delt_max=1.0)
         model = PrimitiveEquationModel(grid, sigma, config)
         if _rotated:
             from tests.test_cases.dcmip2008.jablonowski_rotated import (
