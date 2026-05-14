@@ -23,6 +23,20 @@ So the iter-12..17 NH bundle (vector_halo + a2b_ord4 + d_con_cv + dynamic_exner 
 
 **iter-12..17 doc claims need caveat**: those measurements were at quick mode (5 min); full-mode behaviour DOES NOT HOLD for TC2 cube.
 
+## State after iter-1..110 (compressed at iter-110)
+
+**iter-101..110 highlights — the TC2 cube BLOWUP discovery phase**:
+
+- **iter-102 CRITICAL FINDING**: NH cube matrix re-run completed TC2 at iter-102.  Result: **TC2 cube BLEW UP at day 0.13 (step 8500) of the full 6-hour run**.  Pre-blowup `mass_drift=7.85e-16` (clean conservation), so the dynamics propagation itself fails — not flux/halo.  iter-12..17 NH bundle was sufficient at quick-mode 5 min (cube |w|=0.32 m/s PASS) but is **insufficient for full-duration TC2 cube stability**.  See in-doc CRITICAL FINDING section at top.
+- **iter-103/104/108 breadcrumbs**: doc caveats applied to all iter-5/6/7 quick-mode claims; inline WARNING block added to matrix runner TC2 cube branch with 4 hypothesis-driven probe directions for iter-110+ investigation (acoustic substeps, hyperdiff, off-centering, FV3 oracle).  Pre-emptive CAUTION comment added to TC3 cube branch (TC3 also at quick mode, full-mode behaviour unknown).
+- **iter-105 AST sentinel**: `test_iter102_tc2_cube_blowup_warning_present` pins the iter-104 WARNING comment + 4-hypothesis list against future refactor stripping.
+- **iter-101 fp64 hard-fail mirror**: `test_iter921_w2_v_vs_h_pareto_sentinel.py` matches iter-99's assert (both numerical sentinel files now fail loudly if `JAX_ENABLE_X64=1` not set).
+- **iter-106/107/109**: verification + heading normalisation.
+
+**Cumulative sentinel coverage at iter-110**: **29 AST + 14 numerical + 1 c_sw = 44 sentinels** (added `test_iter102_tc2_cube_blowup_warning_present` at iter-105).  Latest full-suite check (iter-106): 42 AST+numerical PASS in 154 s.
+
+**NH cube matrix re-run status**: TC1 cube done at full 3-hr (PASS, |w|=0.040 m/s — duration-mismatch artifact vs ico/spec quick-mode 0.014).  TC2 cube done with FAIL at day 0.13.  TC3 cube currently refreshing (since 06:32; estimated ~3.5 hr more given dt=0.22s + 25 acoustic substeps; expected completion ~10:00).
+
 ## State after iter-1..100 (compressed at iter-100)
 
 **iter-91..100 highlights** (audit & hygiene phase — NH matrix re-run still in progress throughout):
