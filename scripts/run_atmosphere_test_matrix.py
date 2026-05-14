@@ -3668,6 +3668,15 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
                 grid, sigma_for_init,
                 perturbed=_rot_perturbed, alpha=_rot_alpha)
         elif _rest:
+            # new_test_dycores iter-73 audit finding: cube rest_state_topo
+            # shows ~1.3 m/s residual motion at quick-mode 1-day vs ico/latlon
+            # 0.1 m/s (13x worse).  Analytic exact solution is zero motion.
+            # Likely cube panel-edge metric errors interacting with non-trivial
+            # phis at face boundaries.  PASS by current matrix tolerance; not
+            # a regression — recorded as queued investigation.  iter-88 noted
+            # this measurement is at quick mode (1 day); full 7-day behaviour
+            # may differ.  Investigation requires probing the per-step PGF
+            # field on cube near panel corners with non-zero topography.
             from tests.test_cases.dcmip2012.rest_state_topography import (
                 rest_state_topography_init)
             state = rest_state_topography_init(grid, sigma, h_0=_rest_h0)
