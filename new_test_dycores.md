@@ -79,8 +79,21 @@ Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV /
 - iter-29: harden PE baroclinic anchor for consistency with held_suarez + AMIP walkers.
 - iter-30 (compressed at this point): doc compression.
 
-## Iter-31+ queued
+## Iter-31+ queued (status post iter-31)
 
+- ✅ iter-31: Cube W6 14-day stability — fixed with `hyperdiff_coeff=_hyperdiff_cube(n)`.
 - Possibly another cavecrew-reviewer pass on iter-29 anchor hardening.
 - AMIP cube cumulative bundle verification (slow — 30-day quick at ~900 s wall).
 - W6 cube h-field cross-grid comparison (current matrix only reports mass_drift).
+
+## iter-31 finding (new structural cube parity item)
+
+Discovered iter-31: cube W6 14-day BLOWS UP at day 9 with the iter1009 dual-target SW config (which was tuned for W2/W5).  Latlon W6 14-day PASSes.  Root cause: Rossby-Haurwitz wave-4 is mildly unstable at C36; the iter1009 config has no biharmonic hyperdiffusion (`hyperdiff_coeff=0.0`) so short-wave noise grows.
+
+**Fix**: matrix-runner SW cube W6 path now overrides the iter1009 baseline with `hyperdiff_coeff=_hyperdiff_cube(n)` (the same del-4 hyperdiff used by PE cube paths).  Confirmed cube W6 14-day PASS at C36 (`mass_drift=3.82e-16, wall=26.3 s`).  W2/W5 cube unchanged.
+
+Probed alternatives first:
+- iter-1030 baseline (8, 0.030, hyperdiff=0): BLOWUP day 9, metric 1150 m.
+- (12, 0.04, hyperdiff=0): BLOWUP day 7.64, metric 1440 m (worse — more damping doesn't help wave-4 instability).
+- (16, 0.06, hyperdiff=0): BLOWUP day 0.69, NaN (over-damped, numerical artifact).
+- iter1009 baseline + `_hyperdiff_cube(n)`: PASS day 14, mass_drift bit-clean.
