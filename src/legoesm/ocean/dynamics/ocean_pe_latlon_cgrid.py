@@ -824,10 +824,10 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     U_bar = _u_pair[..., 0] / jnp.maximum(_u_pair[..., 1], 1e-10) * u_mask  # (n_lat, n_lon+1)
     _v_pair = jnp.sum(jnp.stack([v * h_v, h_v], axis=-1), axis=-2)
     V_bar = _v_pair[..., 0] / jnp.maximum(_v_pair[..., 1], 1e-10) * v_mask  # (n_lat+1, n_lon)
-    u_prime = u - U_bar[..., jnp.newaxis]
-    v_prime = v - V_bar[..., jnp.newaxis]
+    u_prime = u - U_bar[..., jnp.newaxis]  # used by: vertical momentum advection (§8),
+    v_prime = v - V_bar[..., jnp.newaxis]  # explicit vertical viscosity A_v (§11)
 
-    # NOTE: Viscosity, vertical advection, and vertical viscosity all
+    # NOTE: HORIZONTAL viscosity (§10) operates on TOTAL velocity (u, v),
     # operate on the TOTAL velocity (u, v), NOT u_prime.  The depth-
     # average of the viscous tendency on u_total enters F_slow and
     # provides barotropic damping.  This is the standard formulation
@@ -1507,17 +1507,24 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         _dy = grid.radius * (grid.lat[1] - grid.lat[0])  # constant
         _inv_dy2 = 1.0 / (_dy * _dy)
         # u: d²u/dy² at u-faces (u has shape n_lat, n_lon+1, nlev)
-        # Pad with zeros at pole boundaries (solid wall: u=0 beyond poles)
-        _u_pad = jnp.pad(u, ((1, 1), (0, 0), (0, 0)))
+        # Mask u at land faces before differencing to avoid reading
+        # land zeros as no-slip boundary (free-slip: land neighbors
+        # should not contribute to the stencil).
+        _u_masked = u * u_mask[:, :, jnp.newaxis]
+        _u_pad = jnp.pad(_u_masked, ((1, 1), (0, 0), (0, 0)))
         _d2u_dy2 = (_u_pad[2:, :, :] - 2.0 * _u_pad[1:-1, :, :] +
                     _u_pad[:-2, :, :]) * _inv_dy2
-        du_dt = du_dt + _A_h_merid * _d2u_dy2
+        _merid_u, _ = _apply_slope_foot(_A_h_merid * _d2u_dy2,
+                                         jnp.zeros_like(_d2u_dy2))
+        du_dt = du_dt + _merid_u * u_mask[:, :, jnp.newaxis]
         # v: d²v/dy² at v-faces (v has shape n_lat+1, n_lon, nlev)
-        # Pad with zeros at pole boundaries
-        _v_pad = jnp.pad(v, ((1, 1), (0, 0), (0, 0)))
+        _v_masked = v * v_mask[:, :, jnp.newaxis]
+        _v_pad = jnp.pad(_v_masked, ((1, 1), (0, 0), (0, 0)))
         _d2v_dy2 = (_v_pad[2:, :, :] - 2.0 * _v_pad[1:-1, :, :] +
                     _v_pad[:-2, :, :]) * _inv_dy2
-        dv_dt = dv_dt + _A_h_merid * _d2v_dy2
+        _, _merid_v = _apply_slope_foot(jnp.zeros_like(_d2v_dy2),
+                                         _A_h_merid * _d2v_dy2)
+        dv_dt = dv_dt + _merid_v * v_mask[:, :, jnp.newaxis]
 
     if config.bottom_drag_r > 0:
         # Drag acts on the full velocity (not perturbation) — the ocean
