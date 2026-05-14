@@ -42,7 +42,7 @@ Nine critical issues were identified by the ocean expert and are incorporated be
 1. **Non-solar/solar heat flux split**: Q_sr must be subtracted from restoring in surface layer (eq. 8), then distributed via Jerlov penetration (eq. 10). Without this, solar heating is double-counted.
 2. **Restoring uses heat-flux coefficients, not timescales**: A_Θ=40 W/m²/K → tau_T = ρ₀·cp·Δz₀/A_Θ ≈ 11.85 days for 10m layer. A_S=3.858e-3 kg/m²/s → tau_S = ρ₀·Δz₀/A_S ≈ 30.8 days.
 3. **Salinity restoring Gaussian equatorial dip**: eq. B2 has −1.25·exp(−φ²/7.5²) reducing S at equator.
-4. **IC meridional gradient goes to surface values at poles** (isothermal columns), NOT bottom values.
+4. **IC meridional gradient goes to bottom values at poles** (isothermal columns at the abyssal T_bot ≈ 4°C and S_bot ≈ 35.12 g/kg, promoting deep convection). Paper eq D4 has a typo — it shows `Θ|_{z=0}` (surface), but the paper text says "bottom values" and the Zenodo source (`usrdef_istate.F90` case 4) uses `zTbot`. We follow the source/text, not the equation. *(Corrected 2026-05-14 after porting; the original "Expert Review Correction #4" in this section was the wrong reading.)*
 5. **Wind must be piecewise cubic** (PCHIP), not linear interpolation.
 6. **Tréguier(1997) ≈ Visbeck(1997)** for practical purposes at 1° — use Visbeck as approximation.
 7. **Isopycnal momentum viscosity**: paper uses isoneutral viscosity; we use geopotential. Known approximation — affects ACC where slopes are steep.
@@ -319,9 +319,10 @@ The DINO experiment module will compute Q_sr(φ) internally and pass it to the f
 
 - **T(z)**: Complex multi-branch tanh profile (eq. D2) — two terms weighted by complementary smoothed step functions around z=500m
 - **S(z)**: Similar multi-branch tanh profile (eq. D3)
-- **Meridional gradient** (eqs. D4-D5): `T̃(φ,z) = [T(z) - T(z=0)] · (φ₁ - |φ|)/φ₁ + T(z=0)`
-  - **CORRECTED**: At poles (|φ|=φ₁), T̃ = T(z=0) for ALL z → isothermal columns at the surface temperature value
-  - This is NOT "transition to bottom values" — it's transition to surface values (isothermal columns)
+- **Meridional gradient** (eqs. D4-D5; paper formula has typo, see Expert Review Correction #4):
+  `T̃(φ,z) = [T_1D(z) - T_bot] · (φ_max - |φ|)/φ_max + T_bot`
+  - At equator (|φ|=0): T̃ = T_1D(z) (full equatorial profile)
+  - At poles (|φ|=φ_max): T̃ = T_bot for ALL z → isothermal columns at the abyssal value (~4°C). Promotes high-latitude deep convection — the whole physical point of the IC.
 - Initialize from rest: u=v=0, η=0
 
 ### 2E. DINO Vertical Grid (Appendix C, eq. C3)
