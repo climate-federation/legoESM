@@ -174,6 +174,15 @@ class DINOConfig:
     # confirmed match with NEMO via Zenodo namelist 2026-05-14)
     # ------------------------------------------------------------------
     U_M: float = 0.27              # viscous velocity scale [m/s] (rn_Uv)
+    # High-latitude / equatorial protection (MOM6 OM4 standard knobs).
+    # Diagnosed empirically (2026-05-14) as the late-time stability fix:
+    # without these, A_h(j)·cos(φ) drops to 34% at 70°N/S and the
+    # equatorial waveguide goes unconstrained (f→0). Enabling them
+    # turns a day-28 blowup into a 35-day-stable run with the
+    # Hollingsworth correction.
+    A_h_floor: float = 1000.0      # min effective A_h [m²/s] after cos(lat) scaling
+    A_h_eq_boost: float = 3.0      # equatorial Laplacian-viscosity boost factor
+    A_h_eq_sigma_deg: float = 5.0  # boost Gaussian half-width [deg]
     # Tracer iso-neutral diffusion velocity scale (R1 only; eq below
     # Table 2). At R1 our GM/Redi handles this — we keep U_T for
     # reference but do not apply a separate harmonic tracer diffusion.
@@ -1090,6 +1099,10 @@ def dino_lat_lon_model_config(
         tracer_advection=cfg.tracer_advection,
         pgf_scheme=cfg.pgf_scheme,
         ke_gradient_scheme=cfg.ke_gradient_scheme,  # #263 Hollingsworth fix
+        # MOM6-style stability protection (diagnosed 2026-05-14)
+        A_h_floor=cfg.A_h_floor,
+        A_h_eq_boost=cfg.A_h_eq_boost,
+        A_h_eq_sigma_deg=cfg.A_h_eq_sigma_deg,
         gm_redi=gm_redi_cfg,           # lat-lon C-grid GM/Redi direct path
         physics=physics_cfg,
         eos="wright",

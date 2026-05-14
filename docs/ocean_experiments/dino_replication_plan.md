@@ -708,25 +708,53 @@ and substantially flattens the |u| and |η| growth. `|v|` still grows
 + stratified-bathymetry instability is *suppressed* by Hollingsworth
 but not *eliminated*.
 
-### Remaining work (Phase 5+)
+### Diagnostic A/B matrix (2026-05-14): identifying the late-stage instability
 
-1. **Method of Stabilizing Correction (MSC)** for iso-neutral
-   diffusion (Beckmann-Döscher 1997; NEMO `ln_traldf_msc=.true.`).
-   Likely the next biggest stability gap.
-2. **Slope-foot viscosity enhancement** (`LatLonCGridOceanConfig.
-   slope_foot_alpha=3.0`, MOM6 OM4 default) — already exists in
-   legoESM, just needs to be turned on for DINO.
-3. **A_h floor** (`A_h_floor=1000`) for high-latitude grid-Reynolds
-   protection.
-4. **Equatorial A_h boost** (`A_h_eq_boost=3.0`) if equatorial cold
-   tongue runaway emerges.
+Hollingsworth alone left a residual instability that crashed at day 28.
+A control matrix isolated the actual cause:
 
-Items 2-4 are bespoke knobs already in legoESM and could be
-turned on via DINOConfig fields without new code. They were
-deliberately left off in the original DINO plan to "match paper
-parameters first". Now that the principled Hollingsworth fix is
-in, enabling these for stability is justified — they're standard
-production-OGCM defaults (MOM6 OM4 turns them all on).
+| Test | 35-day result |
+|---|---|
+| 0. Hollingsworth + Visbeck (baseline) | Blowup day 28 |
+| 1. `gm_redi=None` | Blowup day 25 ← *worse*; iso-neutral helps |
+| 2. `slope_foot_alpha=3.0` | Blowup day 27 ← marginal |
+| 3. **`A_h_floor=1000` + `A_h_eq_boost=3.0`** | **STABLE 35 days ✓** |
+| 4. `tracer_advection="upwind"` | Blowup day 32 ← minor help |
+
+**Verdict**: The MSC speculation was wrong — turning off iso-neutral
+diffusion made things slightly *worse*, ruling out iso-neutral
+overshoot. The actual culprit is **lateral viscosity dropping to
+34% at high latitudes** (because Mercator's `A_h(j) = A_h_base · cos(φ)`
+goes to zero at the poles) and **vanishing rotational stiffness at the
+equator**. Both fixes already exist in legoESM as MOM6 OM4 standard
+production knobs (`A_h_floor`, `A_h_eq_boost`); they were deliberately
+left off in the original DINO config to "match paper parameters first".
+
+### Final stability fix
+
+DINOConfig now sets:
+- `ke_gradient_scheme = "hollingsworth"` (PR #264 — fixes early-time
+  Hollingsworth-Kallberg mode)
+- `A_h_floor = 1000.0`, `A_h_eq_boost = 3.0`, `A_h_eq_sigma_deg = 5.0`
+  (existing legoESM knobs; turn on via DINOConfig — fixes late-time
+  high-latitude / equatorial mode)
+
+Result: **DINO unforced + physics is stable through 30 days end-to-end**
+with bounded |u|≈0.4 m/s, |v|≈2.1 m/s, |η|≈0.7 m, physical T range.
+
+### Lessons for future ocean experiments on legoESM
+
+1. **Hollingsworth correction is a real legoESM bug**, not a DINO-specific
+   issue. Any lat-lon C-grid ocean experiment over realistic stratified
+   bathymetry needs `ke_gradient_scheme="hollingsworth"`. PR #264
+   makes it opt-in (default centered for back-compat).
+2. **Match paper parameters ≠ stable run**. Standard production OGCM
+   defaults (`A_h_floor`, `A_h_eq_boost`, `slope_foot_alpha`) are not
+   in the paper namelist because they're considered solver hygiene,
+   not science. New experiments should turn them on by default.
+3. **Diagnose before fixing**. The MSC speculation cost ~30 minutes of
+   thinking before the A/B matrix took 5 minutes to run and isolated
+   the actual cause. Run the diagnostic first.
 
 ### Diagnostic plots
 
