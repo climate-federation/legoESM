@@ -326,6 +326,106 @@ def test_iter39_cube_w6_short_run_stable_with_hyperdiff():
     )
 
 
+def test_iter49_cube_w2_matrix_config_short_run():
+    """new_test_dycores iter-49: numerical sentinel for cube W2 at
+    the matrix-runner configuration (iter-44 2× hyperdiff).
+
+    The iter-1002 sentinel
+    (``test_iter1002_w2_v_ll_linf_meets_target``) tests cube W2
+    1-day at the iter-1030 dual-target calibration with
+    ``hyperdiff_coeff=0`` — pinning the codex-iter-985..1030
+    calibration narrative.  iter-49 adds a complementary sentinel
+    that tests cube W2 2-day at the matrix-runner-actual config
+    (iter-44 hyperdiff_coeff=2 × _hyperdiff_cube(n)) so a
+    regression to the matrix-runner SW cube path also has a
+    runtime check (the AST gate sentinel pins the SOURCE; this
+    pins the OUTPUT).
+
+    Asserts:
+      - finite h, u_d
+      - mass_drift < 1e-7
+      - max|v_d - v_d_init| < 3.0 m/s  (iter-44 measured 0.96 m/s
+        at day 5; at day 2 < 1 m/s; 3.0 is conservative ceiling)
+    """
+    import jax
+    import jax.numpy as jnp_local
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        FV3EdgeShallowWaterModel,
+        FV3EdgeShallowWaterState,
+        iter1009_dual_target_config,
+    )
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.cubed_sphere_cdgrid import (
+        create_cubed_sphere_cdgrid,
+    )
+    from tests.test_cases.williamson import williamson_test2
+    import warnings
+
+    n = 36
+    grid = create_cubed_sphere(n)
+    cdgrid = create_cubed_sphere_cdgrid(grid)
+
+    def _hyperdiff_cube_local(nn, ref_n=48, ref_coeff=1e16):
+        return ref_coeff * (ref_n / nn) ** 4
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        cfg = iter1009_dual_target_config(
+            n, hyperdiff_coeff=2.0 * _hyperdiff_cube_local(n),
+        )
+    model = FV3EdgeShallowWaterModel(grid, cfg)
+
+    sw = williamson_test2(grid)
+    u0 = 2.0 * jnp_local.pi * grid.radius / (12.0 * 86400.0)
+    u_d = cdgrid.cos_angle_edge_x * (
+        u0 * jnp_local.cos(cdgrid.lat_edge_x))
+    v_d_init = -cdgrid.sin_angle_edge_y * (
+        u0 * jnp_local.cos(cdgrid.lat_edge_y))
+    state = FV3EdgeShallowWaterState(
+        h=sw.h.data, u_d=u_d, v_d=v_d_init, h_s=sw.h_s.data,
+    )
+    model.set_initial_mass(state)
+
+    dt = 300.0
+    area64 = grid.area.astype(jnp_local.float64)
+    mass_init = float(
+        jnp_local.sum(state.h.astype(jnp_local.float64) * area64),
+    )
+
+    @jax.jit
+    def step(s):
+        return model.step(s, dt)
+
+    s = state
+    for _ in range(576):  # 2 days
+        s = step(s)
+
+    assert jnp_local.all(jnp_local.isfinite(s.h)), (
+        "iter-49 regression: cube W2 day-2 ``h`` non-finite"
+    )
+    assert jnp_local.all(jnp_local.isfinite(s.u_d)), (
+        "iter-49 regression: cube W2 day-2 ``u_d`` non-finite"
+    )
+    mass_final = float(
+        jnp_local.sum(s.h.astype(jnp_local.float64) * area64),
+    )
+    drift = abs(mass_final - mass_init) / abs(mass_init)
+    assert drift < 1e-7, (
+        f"iter-49 regression: cube W2 day-2 mass drift {drift:.2e} "
+        "exceeds 1e-7"
+    )
+    # W2 is steady state — v_d error indicates calibration drift.
+    v_d_err = float(
+        jnp_local.max(jnp_local.abs(s.v_d - v_d_init)),
+    )
+    assert v_d_err < 3.0, (
+        f"iter-49 regression: cube W2 day-2 ``max|v_d - v_d_init|`` "
+        f"= {v_d_err:.4f} m/s exceeds 3.0 m/s ceiling — likely "
+        "hyperdiff coefficient regression (iter-44's 2x dropped "
+        "back toward 0x or 0)."
+    )
+
+
 def test_iter48_cube_w5_short_run_stable_with_hyperdiff():
     """new_test_dycores iter-48: numerical regression test for the
     iter-33 cube W5 stability fix (extending iter-39's W6 sentinel).
