@@ -21,6 +21,18 @@ Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV /
 
 **Cumulative sentinel coverage**: **28 AST + 14 numerical + 1 c_sw residual = 43 sentinels total** (iter-79 added iter-66 negative-result guard; iter-83 hardened it with anti-anchor).  Latest full-suite check (iter-85): 41 AST+numerical PASS in 152 s; c_sw residual (iter-86 verified) PASS in 19 s.
 
+**iter-88 audit**: confirmed **ALL** cached PE matrix results are at **quick mode** duration (not full spec).  Specifically:
+  - held_suarez: cached 30 days (spec full 200).
+  - amip: cached 30 days (spec full 365).
+  - baroclinic / rotated_baroclinic: cached 2 days (spec full 10).
+  - rotated_steady: cached 2 days (spec full 30).
+  - rest_state_topo: cached 1 day (spec full 7).
+  - held_suarez_topo: cached 2 days (spec full 200).
+  - inertio_gravity_3_2: cached 0.5 days (spec full 3.0).
+  - mountain_rossby_5_0 / rossby_haurwitz_6_0: cached 2 days (spec full 10/14).
+  - gravity_wave_3_1: cached 1.0 day (= full; ONLY PE case at full mode, per iter-72 refresh).
+  Cross-grid PE comparisons (iter-73 audit) are valid **apples-to-apples within quick mode** — all 4 grids consistent at same days field per case.  Two cube outliers (rotated_baroclinic, rest_state_topo) findings still stand at quick mode, but full-mode behaviour TBD.  Future full-mode PE re-runs are a significant compute commitment (held_suarez/AMIP at 200/365 days each).
+
 ## State after iter-1..70 (compressed at iter-70)
 
 **Cross-grid apples-to-apples SW matrix audit (iter-61..70)**: refreshed all 4 grids at full duration (the matrix's quick-mode + full-mode results coexist; iter-61 caught the mixed-mode comparison issue).
