@@ -51,6 +51,33 @@ Nine critical issues were identified by the ocean expert and are incorporated be
 
 ---
 
+## Implementation Status (as of 2026-05-14)
+
+| Phase | Status | Tests | Module |
+|---|---|---|---|
+| 2A: DINOConfig | ✅ done | 15 | `ocean/experiments/dino.py` |
+| 2B: bathymetry (port from Zenodo) | ✅ done | 21 | `ocean/experiments/dino.py` |
+| 2C: surface forcing profiles | ✅ done | 22 | `ocean/experiments/dino.py` |
+| 2C-extra: Q_sr-split tendencies | ✅ done | 18 | `ocean/experiments/dino.py` |
+| 2D: initial conditions | ✅ done | 16 | `ocean/experiments/dino.py` |
+| 2E: 36-level z* grid | ✅ done | 14 | `ocean/experiments/dino.py` |
+| 3: MPAS regional mesh + seam-wall | ✅ done | 14 | `ocean/experiments/dino.py` |
+| MPAS state + smoke test | ✅ done | 11 | `ocean/experiments/dino.py` |
+| 1A: Mercator grid | ⏳ delegated to PR #262 | — | (separate branch) |
+| 1B: grid-dep mixing | 🔒 Mercator-blocked | — | — |
+| 2F: lat-lon dispatch wiring | 🔒 Mercator-blocked | — | — |
+| 4: standalone production script | 🔒 needs everything | — | — |
+
+**Total tests: 131 across 8 files.** First end-to-end DINO simulation (MPAS, 3-day rest-state) validated 2026-05-14.
+
+Diagnostic plots (not committed; in `docs/ocean_experiments/dino_plots/`):
+- `bathymetry.png` — full basin + channel zoom with sill ring
+- `initial_conditions.png` — T(lat, z) and S(lat, z)
+- `surface_forcing.png` — wind, Q_sr, T*, S* vs latitude
+- `mpas_mesh.png` — land mask + bathymetry on regional Voronoi mesh
+
+---
+
 ## Decisions Log
 
 Each entry is a deliberate choice made during planning, with the reasoning so a future reader (or future-us) can decide whether to revisit. Newest at top.
@@ -75,7 +102,14 @@ Each entry is a deliberate choice made during planning, with the reasoning so a 
 | 2026-05-14 | **EOS: Wright (existing nonlinear).** Not Roquet simplified (paper). | Wright is more accurate, already implemented and AD-tested. Roquet is what paper uses, so ACC/MOC magnitudes won't match exactly. Not worth implementing Roquet just for paper-figure parity. | Density distribution is grossly wrong in some specific water mass and Wright extrapolation is suspected. |
 | 2026-05-14 | **Vertical mixing: KPP + enhanced-diffusion convection.** Not TKE (paper). | Both already implemented in legoESM. KPP is standard. TKE would be additional engineering with no obvious benefit at 1°. | Mixed-layer depth is consistently too shallow / too deep across seasons — TKE may be needed. |
 | 2026-05-14 | **Restoring + Q_sr split: implement inside DINO module, not refactor `restoring.py`.** | The general restoring API uses timescales (seconds), not flux coefficients. Doing the conversion + Q_sr subtraction inside the DINO module avoids changing a widely-used API for one experiment. | Another experiment needs the same pattern — then factor out. |
-| 2026-05-14 | **Wind PCHIP: implement inside DINO module, not extend `prescribed.py`.** | PCHIP at arbitrary tau-vs-lat knots is one-off for DINO; not worth a general framework. | Multiple experiments end up needing arbitrary-knot wind profiles. |
+| 2026-05-14 | **Wind interpolation: cubic Hermite smooth-step `(3-2s)·s²` between knots, NOT true PCHIP.** Implemented inside DINO module, not extending `prescribed.py`. | Discovered while porting `znl_cbc` from Zenodo `usrdef_sbc.F90`: NEMO uses the simple cubic smooth-step (zero derivative at knots), not PCHIP. The earlier "PCHIP" wording in the plan was based on the paper text "piecewise cubic" which is ambiguous. The cubic-smooth-step implementation matches NEMO bit-for-bit. | Comparison with NEMO reveals the wind profile is materially different from ours. |
+| 2026-05-14 | **Vertical-grid eq C3 indexing: `K_formula = n_levels + 1 = 37`** for the coefficient denominators (not `K = 36` as paper text suggests). | Paper writes "K = 36 levels" and uses `K-1` in the formula denominators, but the Zenodo source (`mi96_1d` in `zgr_lib.F90`) uses `jpkm1` which is the *interface* count minus 1. With 36 cells you have 37 interfaces, so `K_formula = 37` and `K_formula - 1 = 36` in the denominators. Verified by reproducing Fig C2: top dz = 10.12 m, bottom dz = 453.76 m, total = 4000 m. | NEMO source revision changes the indexing convention. |
+| 2026-05-14 | **IC poles use BOTTOM values, not surface.** Paper eq D4 has a typo (`Θ\|_{z=0}`); paper text says "bottom values" and Zenodo source uses `zTbot`. | Reversed my earlier "Expert Review Correction #4" which had taken the equation at face value. The bottom-value reading promotes high-latitude deep convection (whole physical point of the IC). T_pole ≈ 4°C, S_pole ≈ 35.12 g/kg. | Never (resolved). |
+| 2026-05-14 | **Annual-mean Q_sr by quadrature of eq B5 over 360 days, not lazy `230·cos(φ)`.** | Polar-night clipping of `max(., 0)` makes the quadrature drop below the lazy estimate at high latitudes (small effect at 60°, growing at 70°+). Quadrature is cheap (one-time at config). | Never (resolved). |
+| 2026-05-14 | **MPAS partial-periodic walls via land mask, NOT mesh modification.** Cells within one cell-width of the periodic seam AND outside the channel band are flagged as land. | The regional Voronoi mesh supports `periodic_x=True` (full re-entrant) or `periodic_x=False` (closed everywhere) but not partial periodicity. Adding partial periodicity to the mesh generator would be a major effort. The land-mask approach achieves identical physics — masked cells act as walls because edges to them have zero flux — without touching the mesh code. Default strip width = one cell from `mesh.dcEdge` median. | The MPAS dynamics doesn't fully respect the seam-wall (e.g., barotropic mode leaks across); revisit by extending the mesh generator. |
+| 2026-05-14 | **MPAS lateral mixing: scalar `A_h = 0.5·U_M·√⟨areaCell⟩`** pending Phase 1B. | Quasi-uniform regional Voronoi cell sizes vary little within the basin, so a representative-cell scalar is within 10% of the proper grid-dependent computation. Phase 1B (blocked on Mercator) will provide per-cell scaling. | Phase 1B lands. |
+| 2026-05-14 | **MPAS bottom drag: linear-with-floor (`r = C_d·u_bg`, `u_bg = 0.1` m/s)** as MPAS's quadratic-equivalent.  | DINO's nominal `C_d = 1e-3` is quadratic. MPAS's `MPASOceanConfig.bottom_drag_r` is linear, but the `bottom_drag_bg_velocity` field upgrades it to quadratic-with-floor (MOM6 `DRAG_BG_VEL` form): `r_eff = (r/u_bg)·√(u² + u_bg²)` recovers `C_d·\|u\|` at speed >> u_bg. Setting r=1e-4, u_bg=0.1 gives effective C_d=1e-3 ✓. | Bottom flow regimes far from u_bg (≪0.01 or ≫1 m/s) where the floor matters. |
+| 2026-05-14 | **MPAS smoke test passes**: 3-day rest-state integration on 220 km regional mesh, no NaN, |u|<0.5 m/s, |η|<1.5 m, T stays 4.0–23.2 °C. First end-to-end DINO simulation. | Confirms the bathymetry + IC + seam-wall + KPP + dycore combination is internally consistent and stable. Lat-lon path remains blocked on Mercator PR #262. | New Mercator-related changes affect MPAS-path stability. |
 | 2026-05-14 | **Bathymetry: port directly from Zenodo source code.** | Eq A5 sill has an undocumented Gaussian-width parameter `s`; paper text omits its value. Translating equations by eye risks getting it subtly wrong. | A bathymetry generator port reveals deeper paper inconsistencies that change the geometry. |
 
 ---
