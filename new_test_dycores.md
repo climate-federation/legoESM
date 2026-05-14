@@ -4,6 +4,15 @@ Branch: `new_test_dycores` (from `main` post merge of `test_dycores` PR #259).
 Oracle: `../../FV3/atmos_cubed_sphere-symmetryclean/model/`.
 Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV / MPAS Voronoi / spectral SH at the same resolution + duration.
 
+## AIMIP workstream (iter-249+, parallel to dycore audit)
+
+Phase 1 landed at commit `db4d88a0` (mid-loop user request):
+- `forcing/experiments.py` AIMIP template (2015-2020, transient GHG via CMIP6 historical).
+- `scripts/run_aimip.py` CLI wrapper (ERA5 IC + RRTMGP + latlon C-grid defaults).
+- 4 unit tests in `tests/test_cases/test_aimip_template.py` (template registration + GHG interpolation).
+
+Phase 2-5 (TrainablePhysicsParams expansion, training script, validation, corrections) queued.  Plan file at `/home/gentine/.claude/plans/jolly-humming-gray.md`.
+
 ## CRITICAL FINDING (iter-102 + iter-123): NH cube TC2 AND TC3 full-mode BLOWUP
 
 **iter-124 update**: ran a quick NH matrix (--quick) to verify iter-118 fix in practice.  TC1 cube quick-mode result: |w|=0.0142 m/s — **MATCHES iter-7 doc claim of 0.014** (cube/ico/spec parity at quick mode confirmed).  Critically, the `mean_timeseries.csv` now has 22 lines (header + 21 data rows) with NO `_blowup_info` column — **iter-118 fix is operational** for new matrix runs.  TC2 + TC3 quick-mode running; will verify cube/ico/spec quick-mode parity confirmed once they complete.
