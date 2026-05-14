@@ -6,6 +6,8 @@ Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV /
 
 ## CRITICAL FINDING (iter-102 + iter-123): NH cube TC2 AND TC3 full-mode BLOWUP
 
+**iter-124 update**: ran a quick NH matrix (--quick) to verify iter-118 fix in practice.  TC1 cube quick-mode result: |w|=0.0142 m/s — **MATCHES iter-7 doc claim of 0.014** (cube/ico/spec parity at quick mode confirmed).  Critically, the `mean_timeseries.csv` now has 22 lines (header + 21 data rows) with NO `_blowup_info` column — **iter-118 fix is operational** for new matrix runs.  TC2 + TC3 quick-mode running; will verify cube/ico/spec quick-mode parity confirmed once they complete.
+
 **iter-123 update**: NH cube matrix re-run completed.  Both TC2 AND TC3 cube **BLEW UP at full mode**:
 
 | Test | Status | Blowup step | Sim time | Reason |
