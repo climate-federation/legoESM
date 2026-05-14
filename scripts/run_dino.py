@@ -1,0 +1,351 @@
+#!/usr/bin/env python
+"""DINO (Diabatic Neverworld Ocean) standalone production script.
+
+Replicates Kamm et al. (2025) DINO 1° R1 configuration on the lat-lon
+Mercator grid (Phase 4 v0). MPAS path will be added in v1.
+
+Run with::
+
+    JAX_ENABLE_X64=1 python scripts/run_dino.py --days 10
+
+For the full list of options::
+
+    python scripts/run_dino.py --help
+
+This script is **portable** by design: no project-internal CI hooks,
+no test-matrix integration. The output directory is self-contained
+(NPZ snapshots + a JSON config dump) so it can be moved to a GPU
+machine for production runs.
+
+See ``docs/ocean_experiments/dino_replication_plan.md`` for the
+scientific configuration and decisions log.
+"""
+
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import json
+import time
+from pathlib import Path
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+
+from legoesm.core.field import Field
+from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+from legoesm.ocean.experiments.dino import (
+    DINOConfig,
+    create_dino_z_star,
+    dino_lat_lon_grid,
+    dino_lat_lon_model_config,
+    dino_lat_lon_state,
+    dino_Q_sr_annual_mean,
+    dino_S_star,
+    dino_T_star_annual_mean,
+    dino_top_layer_S_tendency,
+    dino_top_layer_T_tendency,
+    dino_top_layer_u_tendency,
+    dino_wind_stress,
+)
+
+
+# ---------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------
+
+def _parse_args():
+    p = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument(
+        "--n-lon", type=int, default=50,
+        help="Zonal cell count for the Mercator grid (50 = 1° R1, default).",
+    )
+    p.add_argument(
+        "--days", type=float, default=10.0,
+        help="Total simulated duration in days (default 10; capped at "
+             "365 by local-machine policy — see plan).",
+    )
+    p.add_argument(
+        "--snapshot-every-days", type=float, default=1.0,
+        help="Snapshot interval in days (default 1).",
+    )
+    p.add_argument(
+        "--dt", type=float, default=None,
+        help="Baroclinic timestep [s]. Default uses DINOConfig.dt = 2700.",
+    )
+    p.add_argument(
+        "--output-dir", type=Path, default=Path("dino_output"),
+        help="Directory to write snapshots + log.",
+    )
+    p.add_argument(
+        "--no-forcing", action="store_true",
+        help="Run dycore-only from rest (no wind, no restoring) — for "
+             "shake-down tests of the model + bathymetry combination.",
+    )
+    p.add_argument(
+        "--physics-off", action="store_true",
+        help="Disable KPP / GM-Redi / convection — dycore only.",
+    )
+    return p.parse_args()
+
+
+# ---------------------------------------------------------------------
+# DINO surface forcing on the lat-lon Mercator grid
+#
+# Applied as explicit external tendencies after each model step. This
+# sidesteps legoESM's surface_forcing physics convention (which uses
+# timescales, not heat-flux coefficients, and doesn't subtract Q_sr
+# per paper eq 8). Q_sr split: surface T tendency uses the FULL eq 8
+# formula `(A_θ(T*-T) - Q_sr) / (ρ₀ c_p dz_0)`. Jerlov shortwave
+# penetration through the column is NOT applied in v0 — the column
+# simply doesn't see solar heating below the surface. This means the
+# subsurface stratification will be biased (no penetrating SW). v1
+# will add proper Jerlov penetration.
+# ---------------------------------------------------------------------
+
+def _build_lat_lon_forcing_arrays(grid, cfg: DINOConfig):
+    """Pre-compute forcing fields that don't depend on the state.
+
+    Returns dict with:
+      tau_u_face: (n_lat, n_lon+1) — wind stress at u-faces
+      T_star_2d:  (n_lat, n_lon)
+      S_star_2d:  (n_lat, n_lon)
+      Q_sr_2d:    (n_lat, n_lon) — annual-mean solar
+    """
+    lat_1d = jnp.degrees(grid.lat)              # (n_lat,)
+
+    T_star_1d = dino_T_star_annual_mean(lat_1d, cfg)
+    S_star_1d = dino_S_star(lat_1d, cfg)
+    Q_sr_1d = dino_Q_sr_annual_mean(lat_1d, cfg)
+    tau_u_1d = dino_wind_stress(lat_1d, cfg)    # (n_lat,)
+
+    # Broadcast to 2D
+    T_star_2d = jnp.broadcast_to(T_star_1d[:, None], (grid.n_lat, grid.n_lon))
+    S_star_2d = jnp.broadcast_to(S_star_1d[:, None], (grid.n_lat, grid.n_lon))
+    Q_sr_2d = jnp.broadcast_to(Q_sr_1d[:, None], (grid.n_lat, grid.n_lon))
+
+    # Wind at u-faces: u shape (n_lat, n_lon+1), zonally uniform
+    tau_u_face = jnp.broadcast_to(tau_u_1d[:, None], (grid.n_lat, grid.n_lon + 1))
+
+    return {
+        "tau_u_face": tau_u_face,
+        "T_star_2d": T_star_2d,
+        "S_star_2d": S_star_2d,
+        "Q_sr_2d": Q_sr_2d,
+    }
+
+
+def apply_dino_lat_lon_surface_forcing(state, forcing, dz_0, cfg, dt):
+    """Apply DINO wind + T/S restoring (with Q_sr split) to the state.
+
+    Uses paper eqs 7-9 via the Phase-2C-extra top-layer tendency
+    helpers. Jerlov SW penetration through the column is NOT applied
+    in v0.
+
+    Returns
+    -------
+    LatLonCGridOceanState
+    """
+    # T tendency at top layer (eq 8; subtracts Q_sr from non-solar component)
+    T_top = state.T.data[..., 0]
+    dT_dt_top = dino_top_layer_T_tendency(
+        T_top, forcing["T_star_2d"], forcing["Q_sr_2d"], dz_0, cfg,
+    )
+    # Apply only on ocean cells
+    cell_mask = state.land_mask.data
+    new_T_top = T_top + dt * dT_dt_top * cell_mask
+    new_T = state.T.data.at[..., 0].set(new_T_top)
+
+    # S tendency at top layer (eq 9)
+    S_top = state.S.data[..., 0]
+    dS_dt_top = dino_top_layer_S_tendency(
+        S_top, forcing["S_star_2d"], dz_0, cfg,
+    )
+    new_S_top = S_top + dt * dS_dt_top * cell_mask
+    new_S = state.S.data.at[..., 0].set(new_S_top)
+
+    # u tendency at u-points (eq 7)
+    u_top = state.u.data[..., 0]
+    du_dt_top = dino_top_layer_u_tendency(forcing["tau_u_face"], dz_0, cfg)
+    u_face_mask = state.u_mask.data
+    new_u_top = u_top + dt * du_dt_top * u_face_mask
+    new_u = state.u.data.at[..., 0].set(new_u_top)
+
+    return state._replace(
+        T=Field(data=new_T, name=state.T.name, dims=state.T.dims, units=state.T.units),
+        S=Field(data=new_S, name=state.S.name, dims=state.S.dims, units=state.S.units),
+        u=Field(data=new_u, name=state.u.name, dims=state.u.dims, units=state.u.units),
+    )
+
+
+# ---------------------------------------------------------------------
+# Diagnostics
+# ---------------------------------------------------------------------
+
+def _diagnose(state, grid):
+    """Compact per-snapshot diagnostics."""
+    cell_mask = np.asarray(state.land_mask.data) > 0.5
+    u = np.asarray(state.u.data)
+    v = np.asarray(state.v.data)
+    T = np.asarray(state.T.data)
+    S = np.asarray(state.S.data)
+    eta = np.asarray(state.eta.data)
+
+    u_max = float(np.max(np.abs(u)))
+    v_max = float(np.max(np.abs(v)))
+    eta_max = float(np.max(np.abs(eta)))
+    T_max = float(np.max(T[cell_mask, :])) if cell_mask.any() else float("nan")
+    T_min = float(np.min(T[cell_mask, :])) if cell_mask.any() else float("nan")
+    S_max = float(np.max(S[cell_mask, :])) if cell_mask.any() else float("nan")
+    S_min = float(np.min(S[cell_mask, :])) if cell_mask.any() else float("nan")
+
+    # Domain-integrated KE: 0.5 * (u² + v²) summed over volume
+    # (rough approximation — averages u, v to cell centers via mid-stencil)
+    u_cc = 0.5 * (u[:, :-1, :] + u[:, 1:, :])
+    v_cc = 0.5 * (v[:-1, :, :] + v[1:, :, :])
+    ke = 0.5 * (u_cc**2 + v_cc**2)
+    area = np.asarray(grid.area)  # (n_lat, n_lon)
+    # Layer thickness ≈ dz_ref (constant for rest-state z*)
+    ke_total = float(np.sum(ke * area[..., None] * cell_mask[..., None]))
+
+    return {
+        "u_max": u_max, "v_max": v_max, "eta_max": eta_max,
+        "T_max": T_max, "T_min": T_min,
+        "S_max": S_max, "S_min": S_min,
+        "ke_total": ke_total,
+    }
+
+
+def _save_snapshot(state, grid, t_seconds, snapshot_dir: Path, idx: int):
+    """Save a snapshot as NPZ."""
+    np.savez_compressed(
+        snapshot_dir / f"snapshot_{idx:05d}.npz",
+        time_seconds=t_seconds,
+        time_days=t_seconds / 86400.0,
+        eta=np.asarray(state.eta.data),
+        T=np.asarray(state.T.data),
+        S=np.asarray(state.S.data),
+        u=np.asarray(state.u.data),
+        v=np.asarray(state.v.data),
+        land_mask=np.asarray(state.land_mask.data),
+        H_bathy=np.asarray(state.H_bathy.data),
+    )
+
+
+def _save_run_metadata(args, cfg: DINOConfig, grid, z, output_dir: Path):
+    """Write a JSON file with the run config + grid info."""
+    metadata = {
+        "args": vars(args),
+        "config": dataclasses.asdict(cfg),
+        "grid": {
+            "n_lat": int(grid.n_lat),
+            "n_lon": int(grid.n_lon),
+            "radius": float(grid.radius),
+            "lat_min_deg": float(np.degrees(np.min(grid.lat))),
+            "lat_max_deg": float(np.degrees(np.max(grid.lat))),
+            "dx_eq_km": float(np.max(grid.dx) / 1000.0),
+            "dx_pole_km": float(np.min(grid.dx) / 1000.0),
+        },
+        "vertical": {
+            "n_levels": int(z.n_levels),
+            "H_max": float(z.H_max),
+            "dz_top": float(z.dz_ref[0]),
+            "dz_bot": float(z.dz_ref[-1]),
+        },
+    }
+    # Convert tuples in cfg to lists for JSON
+    metadata["config"]["wind_tau_lats_deg"] = list(cfg.wind_tau_lats_deg)
+    metadata["config"]["wind_tau_values"] = list(cfg.wind_tau_values)
+    # Convert Path to str
+    metadata["args"]["output_dir"] = str(metadata["args"]["output_dir"])
+    with open(output_dir / "run_metadata.json", "w") as f:
+        json.dump(metadata, f, indent=2)
+
+
+# ---------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------
+
+def main():
+    args = _parse_args()
+
+    # Local-machine policy: cap at 1 yr (decision logged in plan)
+    if args.days > 365.0:
+        raise SystemExit(
+            f"--days={args.days} exceeds the 1-year local-machine cap. "
+            "Long spin-ups should run on a GPU machine — see plan."
+        )
+
+    cfg = DINOConfig()
+    if args.dt is not None:
+        cfg = dataclasses.replace(cfg, dt=args.dt)
+    dt = cfg.dt
+
+    # Build everything
+    grid = dino_lat_lon_grid(cfg, n_lon=args.n_lon)
+    z = create_dino_z_star(cfg)
+    state = dino_lat_lon_state(grid, z, cfg)
+    model_cfg, _ = dino_lat_lon_model_config(
+        grid, cfg, physics=not args.physics_off,
+    )
+    model = LatLonCGridOceanModel(grid, z, model_cfg)
+
+    # Pre-compute forcing arrays
+    forcing = None if args.no_forcing else _build_lat_lon_forcing_arrays(grid, cfg)
+    dz_0 = float(z.dz_ref[0])
+
+    # Output directory
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    snapshot_dir = args.output_dir / "snapshots"
+    snapshot_dir.mkdir(exist_ok=True)
+    _save_run_metadata(args, cfg, grid, z, args.output_dir)
+
+    # Time loop
+    n_steps_total = int(round(args.days * 86400.0 / dt))
+    snapshot_every_steps = max(1, int(round(args.snapshot_every_days * 86400.0 / dt)))
+
+    print(f"DINO lat-lon Mercator: {grid.n_lat}x{grid.n_lon} cells, "
+          f"{z.n_levels} levels, dt={dt}s")
+    print(f"Run: {n_steps_total} steps = {args.days:.2f} days, "
+          f"snapshot every {snapshot_every_steps} steps "
+          f"= {snapshot_every_steps * dt / 86400.0:.2f} days")
+    print(f"Forcing: {'OFF (dycore only)' if args.no_forcing else 'wind + T/S restoring (Q_sr split)'}")
+    print(f"Physics: {'OFF' if args.physics_off else 'KPP + GM/Redi + enhanced-diffusion convection'}")
+    print(f"Output:  {args.output_dir}")
+    print()
+    print(f"{'step':>6} {'day':>7} {'|u|':>10} {'|v|':>10} {'|eta|':>10} "
+          f"{'T_max':>7} {'T_min':>7} {'KE':>10}")
+
+    t_wall_start = time.time()
+    snapshot_idx = 0
+    _save_snapshot(state, grid, 0.0, snapshot_dir, snapshot_idx)
+
+    for k in range(n_steps_total):
+        # 1. Apply DINO surface forcing externally (if enabled)
+        if forcing is not None:
+            state = apply_dino_lat_lon_surface_forcing(state, forcing, dz_0, cfg, dt)
+
+        # 2. Advance dynamics
+        state = model.step(state, dt=dt)
+
+        # 3. Snapshot + log
+        is_last = (k == n_steps_total - 1)
+        if (k + 1) % snapshot_every_steps == 0 or is_last:
+            snapshot_idx += 1
+            t_seconds = (k + 1) * dt
+            _save_snapshot(state, grid, t_seconds, snapshot_dir, snapshot_idx)
+            d = _diagnose(state, grid)
+            print(f"{k+1:6d} {t_seconds/86400.0:7.2f} "
+                  f"{d['u_max']:10.4e} {d['v_max']:10.4e} {d['eta_max']:10.4e} "
+                  f"{d['T_max']:7.2f} {d['T_min']:7.2f} {d['ke_total']:10.4e}")
+
+    wall = time.time() - t_wall_start
+    print()
+    print(f"Done. Wall time: {wall:.1f}s ({wall/n_steps_total*1000:.1f} ms/step). "
+          f"Snapshots: {snapshot_idx + 1}")
+
+
+if __name__ == "__main__":
+    main()

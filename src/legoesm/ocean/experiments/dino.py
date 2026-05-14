@@ -1103,6 +1103,26 @@ def dino_lat_lon_model_config(
     u_bg = 0.1
     bottom_drag_r = cfg.C_d_bottom * u_bg
 
+    # Lat-lon C-grid GM/Redi is wired through LatLonCGridOceanConfig.gm_redi
+    # field (NOT through the OceanPhysicsConfig.lateral_mixing factory,
+    # which only supports the cubed-sphere version). Build the GMRediConfig
+    # separately and attach to the model config.
+    from legoesm.ocean.physics.lateral_mixing.config import (
+        GMRediConfig, VisbeckConfig,
+    )
+    gm_redi_cfg = GMRediConfig(
+        kappa_GM=1000.0,  # ignored when Visbeck enabled
+        kappa_Redi=1000.0,
+        S_max=cfg.redi_S_max,
+        slope_scheme=cfg.gm_redi_slope_scheme,
+        visbeck=VisbeckConfig(
+            enabled=True,
+            alpha=cfg.visbeck_alpha,
+            kappa_min=cfg.visbeck_kappa_min,
+            kappa_max=cfg.visbeck_kappa_max,
+        ),
+    ) if cfg.use_gm_redi else None
+
     physics_cfg = None
     if physics:
         from legoesm.ocean.physics.combined import OceanPhysicsConfig
@@ -1110,7 +1130,7 @@ def dino_lat_lon_model_config(
             EnhancedDiffusionConfig, OceanConvectionConfig,
         )
         from legoesm.ocean.physics.lateral_mixing.config import (
-            GMRediConfig, LateralMixingConfig, VisbeckConfig,
+            LateralMixingConfig,
         )
         from legoesm.ocean.physics.shortwave_penetration import (
             ShortwavePenetrationConfig,
@@ -1127,21 +1147,8 @@ def dino_lat_lon_model_config(
                 scheme="kpp",
                 kpp=KPPConfig(K_bg=cfg.K_v_bg, A_bg=cfg.A_v_bg),
             ),
-            lateral_mixing=LateralMixingConfig(
-                scheme="gm_redi" if cfg.use_gm_redi else "none",
-                gm_redi=GMRediConfig(
-                    kappa_GM=1000.0,  # ignored when Visbeck enabled
-                    kappa_Redi=1000.0,
-                    S_max=cfg.redi_S_max,
-                    slope_scheme=cfg.gm_redi_slope_scheme,
-                    visbeck=VisbeckConfig(
-                        enabled=True,
-                        alpha=cfg.visbeck_alpha,
-                        kappa_min=cfg.visbeck_kappa_min,
-                        kappa_max=cfg.visbeck_kappa_max,
-                    ),
-                ),
-            ),
+            # GM/Redi goes on the model config directly, not here.
+            lateral_mixing=LateralMixingConfig(scheme="none"),
             convection=OceanConvectionConfig(
                 scheme="enhanced_diffusion",
                 enhanced_diffusion=EnhancedDiffusionConfig(K_conv=cfg.K_conv),
@@ -1168,6 +1175,7 @@ def dino_lat_lon_model_config(
         barotropic_implicit_theta_eta=cfg.barotropic_implicit_theta_eta,
         tracer_advection=cfg.tracer_advection,
         pgf_scheme=cfg.pgf_scheme,
+        gm_redi=gm_redi_cfg,           # lat-lon C-grid GM/Redi direct path
         physics=physics_cfg,
         eos="wright",
     )
