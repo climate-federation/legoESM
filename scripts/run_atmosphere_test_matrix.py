@@ -4909,16 +4909,19 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 grid, n_levels=nlev)
             grid = small_grid
             #
-            # new_test_dycores iter-108 CAUTION: TC3 cube was cached
-            # only at quick-mode 4 min (per iter-89 audit) — full-mode
-            # 2 hr behaviour not yet measured.  TC2 cube under the same
-            # iter-12..17 NH bundle blew up at day 0.13 of its 6-hr
-            # full run (iter-102 finding).  TC3 cube full-mode result
-            # is being refreshed in the current NH matrix re-run.  If
-            # TC3 cube also blows up at full duration, the same
+            # ⚠️ new_test_dycores iter-108 CAUTION (CONFIRMED by iter-123):
+            # TC3 cube BLOWS UP at full mode at step 2250 (day 0.01,
+            # 8.3 min sim time) with `metric 1271.0 > threshold 1000.0`
+            # (max|w| exceeds threshold).  Same iter-12..17 NH bundle
+            # that gives PASS at quick mode (|w|=7.36 m/s per iter-7
+            # claim) is INSUFFICIENT for full-duration cube stability.
+            # TC3 fails MUCH earlier than TC2 (8.3 min vs 3.14 hr) —
+            # Kessler microphysics + squall-line forcing produces
+            # larger w-amplitude → faster instability.  The 4
             # hypotheses listed in the TC2 cube branch comment apply
             # here (acoustic substeps, hyperdiff, off-centering, FV3
-            # oracle).
+            # oracle).  iter-118 csv-fix preserves pre-blowup
+            # diagnostics for post-mortem investigation.
             #
             # Scale hyperdiffusion for 60x smaller Earth: coeff ∝ dx⁴.
             # 8x stronger than default scaling to stabilize the
