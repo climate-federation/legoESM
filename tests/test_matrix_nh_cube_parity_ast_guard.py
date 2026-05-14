@@ -470,6 +470,31 @@ def test_w6_latlon_init_uses_w6_winds_geo():
     )
 
 
+def test_w6_cube_config_has_hyperdiff_override():
+    """iter-31 sentinel: cube W6 SW config overrides the iter1009
+    baseline with ``hyperdiff_coeff=_hyperdiff_cube(n)`` for
+    long-run 14-day stability.
+
+    Without the override, the iter1009 calibration
+    (``hyperdiff_coeff=0.0``, tuned for W2/W5 stationary tests)
+    BLOWS UP cube W6 at day 9.  This sentinel catches a regression
+    that would re-introduce the pre-iter-31 instability.
+    """
+    src = _runner_source()
+    pat = re.search(
+        r"if\s+test_num\s*==\s*6\s*:[^}]*?"
+        r"hyperdiff_coeff\s*=\s*_hyperdiff_cube\(\s*n\s*\)",
+        src,
+        re.DOTALL,
+    )
+    assert pat is not None, (
+        "iter-31 regression: cube SW W6 branch no longer overrides "
+        "``hyperdiff_coeff=_hyperdiff_cube(n)`` — cube W6 14-day "
+        "will re-BLOWUP at day 9 (latlon W6 stable; cube parity "
+        "gap reopens)."
+    )
+
+
 def test_pe_factory_bundle_present_in_three_cube_branches():
     """iter-22 sentinel (tightened in iter-27 post-review): the PE
     iter-18..21 factory bundle (``use_fv3_metric_aware_d_con``,

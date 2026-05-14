@@ -97,3 +97,5 @@ Probed alternatives first:
 - (12, 0.04, hyperdiff=0): BLOWUP day 7.64, metric 1440 m (worse — more damping doesn't help wave-4 instability).
 - (16, 0.06, hyperdiff=0): BLOWUP day 0.69, NaN (over-damped, numerical artifact).
 - iter1009 baseline + `_hyperdiff_cube(n)`: PASS day 14, mass_drift bit-clean.
+
+iter-32: AST regression sentinel `test_w6_cube_config_has_hyperdiff_override` pins the iter-31 fix.  Catches inadvertent revert that would re-blow-up cube W6 at day 9.  Verified quick mode (day-1) still PASS with hyperdiff: mass_drift=7.64e-16.  AST guard now 23 tests; 0.10 s.
