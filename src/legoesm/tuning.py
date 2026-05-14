@@ -263,6 +263,27 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
             "when --turbulence louis."
         ),
     ),
+    # iter-253 (AIMIP Phase 2.3): exposed Ck (Louis mixing-length
+    # coefficient — the Blackadar/Holtslag von-Karman analogue for
+    # asymptotic mixing length l_mix = Ck * l_mix_max).  Default 0.4
+    # matches the von Karman constant; range 0.2-0.6 spans literature
+    # values for stable-PBL through neutral free-tropospheric mixing.
+    "Ck": TuningParameter(
+        name="Ck",
+        default=0.4,
+        min_val=0.2,
+        max_val=0.6,
+        units="1",
+        description="Louis mixing-length coefficient (von Karman analogue)",
+        category="turbulence",
+        sensitivity="medium",
+        notes=(
+            "Sets asymptotic mixing length scale.  Higher = stronger "
+            "free-tropospheric mixing (smoother profiles); lower = "
+            "sharper PBL inversion.  Only consulted when --turbulence "
+            "louis."
+        ),
+    ),
 }
 
 
