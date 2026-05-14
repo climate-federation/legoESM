@@ -51,24 +51,30 @@ Nine critical issues were identified by the ocean expert and are incorporated be
 
 ---
 
-## Implementation Status (as of 2026-05-14)
+## Implementation Status (as of 2026-05-14, **all phases complete**)
 
 | Phase | Status | Tests | Module |
 |---|---|---|---|
+| 1A: Mercator grid | ✅ merged to main (PR #262) | (in legoESM) | `legoesm/grids/latlon.py` |
+| 1B: grid-dep mixing | ✅ free in legoESM | (in legoESM) | `A_h_lat_scaling=True` flag |
 | 2A: DINOConfig | ✅ done | 15 | `ocean/experiments/dino.py` |
 | 2B: bathymetry (port from Zenodo) | ✅ done | 21 | `ocean/experiments/dino.py` |
 | 2C: surface forcing profiles | ✅ done | 22 | `ocean/experiments/dino.py` |
 | 2C-extra: Q_sr-split tendencies | ✅ done | 18 | `ocean/experiments/dino.py` |
 | 2D: initial conditions | ✅ done | 16 | `ocean/experiments/dino.py` |
 | 2E: 36-level z* grid | ✅ done | 14 | `ocean/experiments/dino.py` |
+| 2F: lat-lon dispatch wiring | ✅ done | 12 | `ocean/experiments/dino.py` |
 | 3: MPAS regional mesh + seam-wall | ✅ done | 14 | `ocean/experiments/dino.py` |
 | MPAS state + smoke test | ✅ done | 11 | `ocean/experiments/dino.py` |
-| 1A: Mercator grid | ⏳ delegated to PR #262 | — | (separate branch) |
-| 1B: grid-dep mixing | 🔒 Mercator-blocked | — | — |
-| 2F: lat-lon dispatch wiring | 🔒 Mercator-blocked | — | — |
-| 4: standalone production script | 🔒 needs everything | — | — |
+| Lat-lon Mercator smoke test | ✅ done | 12 | `ocean/experiments/dino.py` |
+| 4: standalone production script | ✅ done (v0) | manual | `scripts/run_dino.py` |
 
-**Total tests: 131 across 8 files.** First end-to-end DINO simulation (MPAS, 3-day rest-state) validated 2026-05-14.
+**Total: 155 unit tests across 9 files + 2 end-to-end smoke tests.** Both lat-lon Mercator and MPAS regional paths integrate stably from rest with full physics and DINO surface forcing (lat-lon: 1-day in 6.8 s wall; MPAS: 3-day in 4.3 s wall).
+
+### v0 caveats (filed for v1)
+
+- **Jerlov SW penetration not yet applied through column in the production script.** The Q_sr / non-solar split per paper eq 8 IS applied at the surface (so the net surface heat flux is correct), but Q_sr does NOT redistribute through the column via Jerlov as paper eq 10 specifies. Below the surface mixed layer, the model sees no solar heating — biases the subsurface thermocline structure. v1 wire-up: pre-compute Jerlov column-distribution profile, add it as an extra T tendency in `apply_dino_lat_lon_surface_forcing`. Existing module `legoesm/ocean/physics/shortwave_penetration.py` already has Jerlov type I.
+- **Only the lat-lon production script exists; no MPAS equivalent.** MPAS dycore+physics smoke test passes, but the wind/restoring forcing applicator for the MPAS path isn't written. v1 wire-up: add `apply_dino_mpas_surface_forcing(state, forcing, dz_0, cfg, dt)` analogous to the lat-lon version, mapping `dino_wind_stress(lat)` onto edges via the existing MPAS surface-stress projection.
 
 Diagnostic plots (not committed; in `docs/ocean_experiments/dino_plots/`):
 - `bathymetry.png` — full basin + channel zoom with sill ring
@@ -102,6 +108,10 @@ Each entry is a deliberate choice made during planning, with the reasoning so a 
 | 2026-05-14 | **EOS: Wright (existing nonlinear).** Not Roquet simplified (paper). | Wright is more accurate, already implemented and AD-tested. Roquet is what paper uses, so ACC/MOC magnitudes won't match exactly. Not worth implementing Roquet just for paper-figure parity. | Density distribution is grossly wrong in some specific water mass and Wright extrapolation is suspected. |
 | 2026-05-14 | **Vertical mixing: KPP + enhanced-diffusion convection.** Not TKE (paper). | Both already implemented in legoESM. KPP is standard. TKE would be additional engineering with no obvious benefit at 1°. | Mixed-layer depth is consistently too shallow / too deep across seasons — TKE may be needed. |
 | 2026-05-14 | **Restoring + Q_sr split: implement inside DINO module, not refactor `restoring.py`.** | The general restoring API uses timescales (seconds), not flux coefficients. Doing the conversion + Q_sr subtraction inside the DINO module avoids changing a widely-used API for one experiment. | Another experiment needs the same pattern — then factor out. |
+| 2026-05-14 | **Phase 4 v0: DINO surface forcing applied as explicit external tendencies in the time loop, NOT through legoESM's `OceanSurfaceForcing` / surface-forcing physics path.** | The general surface-forcing physics in legoESM uses timescales (not heat-flux coefficients) and doesn't subtract Q_sr per paper eq 8. Going through it would require either bending the convention or adding a DINO-specific branch in `surface_forcing/integration.py`. Using the Phase 2C-extra top-layer tendency helpers directly is cleaner and self-contained. | Adding multi-experiment support; factor out a shared "external surface tendency applicator" into legoESM. |
+| 2026-05-14 | **Phase 4 v0: Jerlov SW penetration through the column is NOT applied.** Q_sr-split surface flux IS applied (paper eq 8); subsurface solar heating (paper eq 10) is deferred to v1. | Keeps the Phase 4 production script focused on getting end-to-end stable integration first. Subsurface thermocline structure will be biased without subsurface SW heating, but the script runs and produces NPZ snapshots. v1 wire-up uses existing `shortwave_penetration.py` module. | First production multi-decade run reveals subsurface T bias that interferes with diagnostics → wire in Jerlov. |
+| 2026-05-14 | **Phase 4 v0: lat-lon production script only; no MPAS production script yet.** | The MPAS dycore+physics smoke test passes, but the wind/restoring forcing applicator on MPAS edges (with normal-projection) is a separate piece of work. v1 wire-up: add `apply_dino_mpas_surface_forcing` analogous to the lat-lon version. | First production run validates the lat-lon path → add MPAS so cross-grid comparison is possible. |
+| 2026-05-14 | **GM/Redi on the lat-lon C-grid is wired through `LatLonCGridOceanConfig.gm_redi` (model-config field), NOT `OceanPhysicsConfig.lateral_mixing` (factory path).** | Discovered while running the Phase 4 production script: the factory `make_lateral_mixing_physics` raises `TypeError: Factory GM/Redi only supports CubedSphereGrid`. The lat-lon path uses a separate hand-written entry point (`gm_redi_latlon_cgrid.py`). | The factory is extended to dispatch on grid type. |
 | 2026-05-14 | **Wind interpolation: cubic Hermite smooth-step `(3-2s)·s²` between knots, NOT true PCHIP.** Implemented inside DINO module, not extending `prescribed.py`. | Discovered while porting `znl_cbc` from Zenodo `usrdef_sbc.F90`: NEMO uses the simple cubic smooth-step (zero derivative at knots), not PCHIP. The earlier "PCHIP" wording in the plan was based on the paper text "piecewise cubic" which is ambiguous. The cubic-smooth-step implementation matches NEMO bit-for-bit. | Comparison with NEMO reveals the wind profile is materially different from ours. |
 | 2026-05-14 | **Vertical-grid eq C3 indexing: `K_formula = n_levels + 1 = 37`** for the coefficient denominators (not `K = 36` as paper text suggests). | Paper writes "K = 36 levels" and uses `K-1` in the formula denominators, but the Zenodo source (`mi96_1d` in `zgr_lib.F90`) uses `jpkm1` which is the *interface* count minus 1. With 36 cells you have 37 interfaces, so `K_formula = 37` and `K_formula - 1 = 36` in the denominators. Verified by reproducing Fig C2: top dz = 10.12 m, bottom dz = 453.76 m, total = 4000 m. | NEMO source revision changes the indexing convention. |
 | 2026-05-14 | **IC poles use BOTTOM values, not surface.** Paper eq D4 has a typo (`Θ\|_{z=0}`); paper text says "bottom values" and Zenodo source uses `zTbot`. | Reversed my earlier "Expert Review Correction #4" which had taken the equation at face value. The bottom-value reading promotes high-latitude deep convection (whole physical point of the IC). T_pole ≈ 4°C, S_pole ≈ 35.12 g/kg. | Never (resolved). |
