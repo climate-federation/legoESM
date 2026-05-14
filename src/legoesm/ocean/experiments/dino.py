@@ -206,6 +206,10 @@ class DINOConfig:
     barotropic_solver: str = "implicit_cn"
     barotropic_implicit_theta_eta: float = 0.55
     tracer_advection: str = "tvd"
+    # Hollingsworth correction for KE gradient (fixes Hollingsworth-
+    # Kallberg instability over stratified bathymetry; legoESM #263).
+    # Matches NEMO's nn_dynkeg=1 default.
+    ke_gradient_scheme: str = "hollingsworth"
     # hi_precision_pressure is intentionally NOT a DINOConfig field —
     # the lat-lon dycore already pins it True at ocean_pe_latlon_cgrid.py
     # so a field on this config would never be read.
@@ -1085,6 +1089,7 @@ def dino_lat_lon_model_config(
         barotropic_implicit_theta_eta=cfg.barotropic_implicit_theta_eta,
         tracer_advection=cfg.tracer_advection,
         pgf_scheme=cfg.pgf_scheme,
+        ke_gradient_scheme=cfg.ke_gradient_scheme,  # #263 Hollingsworth fix
         gm_redi=gm_redi_cfg,           # lat-lon C-grid GM/Redi direct path
         physics=physics_cfg,
         eos="wright",

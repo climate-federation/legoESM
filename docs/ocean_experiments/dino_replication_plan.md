@@ -674,25 +674,59 @@ available for instability than the unforced run. The reason forced
 fails earlier is that wind injects KE faster than the system can
 dissipate.
 
-### Recommended action
+### Action taken: Hollingsworth landed (legoESM PR #264)
 
-The principled fix is to **implement the Hollingsworth correction in
-the legoESM lat-lon C-grid vector-invariant momentum scheme**. This
-should be a legoESM-level feature (benefits any ocean experiment over
-realistic stratified bathymetry, not just DINO), gated by a config
-field on `LatLonCGridOceanConfig` (e.g. `ke_gradient_scheme:
-str = "centered" | "hollingsworth"`).
+Filed legoESM issue **#263** ("Lat-lon C-grid ocean: missing
+Hollingsworth correction causes blowup over stratified bathymetry"),
+implemented the fix on `feature/hollingsworth-correction-latlon-ocean`,
+and opened **PR #264**. The Hollingsworth correction is now an opt-in
+config field `LatLonCGridOceanConfig.ke_gradient_scheme` (default
+`"centered"` for back-compat; set to `"hollingsworth"` to enable the
+NEMO `nkeg_HW` form). DINO sets it to `"hollingsworth"` by default.
 
-Scope estimate: ~50 LOC in
-`ocean/dynamics/ocean_pe_latlon_cgrid.py` (the KE gradient block
-around lines 928–940), plus reference-implementation tests
-(stratified rest-state at variable bathymetry should reach a
-near-steady balanced state, not blow up). MSC for iso-neutral
-diffusion is a separate, smaller follow-on if blowup persists.
+### Result with Hollingsworth ON
 
-This work is **out of scope of the DINO replication plan** itself —
-it's a general-purpose legoESM stability fix that DINO surfaced.
-Tracked as a separate issue / PR.
+Re-ran the 30-day lat-lon DINO unforced test with Hollingsworth ON
+(otherwise identical to the original failing run). Verdict:
+**Hollingsworth fixes the bulk of the instability** — but not all
+of it.
+
+| Day | Centered (no fix) | Hollingsworth (PR #264) |
+|---:|:---|:---|
+|  5 | `\|u\|` ~0.22, `\|v\|` ~0.59  ✓ | `\|u\|` ~0.22, `\|v\|` ~0.59  ✓ |
+| 10 | `\|u\|` ~0.47, `\|v\|` ~1.15  ✓ | `\|u\|` ~0.48, `\|v\|` ~1.09  ✓ |
+| 15 | `\|u\|` ~0.61, `\|v\|` ~2.06  ✓ | `\|u\|` ~0.43, `\|v\|` ~1.66  ✓ |
+| 20 | **NaN** (`\|η\|` →4.3 km) ✗ | `\|u\|` ~0.41, `\|v\|` ~2.19  ✓ |
+| 25 | NaN | `\|u\|` ~0.53, `\|v\|` ~2.48  ✓ |
+| 30 | NaN | **NaN** (`\|η\|` →2.4 km) ✗ |
+
+Comparison plot: `results/dino/hollingsworth_comparison.png`.
+
+Hollingsworth pushes the failure ~5-8 days later (day 20 → day ~28)
+and substantially flattens the |u| and |η| growth. `|v|` still grows
+(~25-30% per 5 days vs ~60-70% before). The fundamental Mercator-shrinking
++ stratified-bathymetry instability is *suppressed* by Hollingsworth
+but not *eliminated*.
+
+### Remaining work (Phase 5+)
+
+1. **Method of Stabilizing Correction (MSC)** for iso-neutral
+   diffusion (Beckmann-Döscher 1997; NEMO `ln_traldf_msc=.true.`).
+   Likely the next biggest stability gap.
+2. **Slope-foot viscosity enhancement** (`LatLonCGridOceanConfig.
+   slope_foot_alpha=3.0`, MOM6 OM4 default) — already exists in
+   legoESM, just needs to be turned on for DINO.
+3. **A_h floor** (`A_h_floor=1000`) for high-latitude grid-Reynolds
+   protection.
+4. **Equatorial A_h boost** (`A_h_eq_boost=3.0`) if equatorial cold
+   tongue runaway emerges.
+
+Items 2-4 are bespoke knobs already in legoESM and could be
+turned on via DINOConfig fields without new code. They were
+deliberately left off in the original DINO plan to "match paper
+parameters first". Now that the principled Hollingsworth fix is
+in, enabling these for stability is justified — they're standard
+production-OGCM defaults (MOM6 OM4 turns them all on).
 
 ### Diagnostic plots
 
