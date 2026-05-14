@@ -218,6 +218,114 @@ def test_iter1013_preset_helper_matches_explicit_config():
     assert preset.hyperdiff_coeff == explicit.hyperdiff_coeff
 
 
+def test_iter39_cube_w6_short_run_stable_with_hyperdiff():
+    """new_test_dycores iter-39: numerical regression test for the
+    iter-31 cube W6 stability fix.
+
+    The iter-32 AST sentinel pins the FLAG (matrix runner sets
+    ``hyperdiff_coeff=_hyperdiff_cube(n)``) but doesn't validate
+    that the flag has the intended numerical effect.  A regression
+    where the flag is correctly set but the hyperdiff implementation
+    is broken (e.g., del-4 stencil bug) would silently re-introduce
+    cube W6 instability past day 9.
+
+    This test runs cube W6 for 576 steps (2 days at dt=300 s,
+    matching the matrix-runner SW cube ``dt = 300.0``; ~10-15 s
+    wall) with the iter-31 hyperdiff override and asserts finite
+    state + small mass drift.  Catches a numerical break that the
+    AST sentinel cannot.
+    """
+    import jax
+    import jax.numpy as jnp_local
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        FV3EdgeShallowWaterModel,
+        FV3EdgeShallowWaterState,
+        iter1009_dual_target_config,
+    )
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.cubed_sphere_cdgrid import (
+        create_cubed_sphere_cdgrid,
+    )
+    from tests.test_cases.williamson_extended import (
+        williamson_test6, _w6_winds_geo,
+    )
+    import warnings
+
+    n = 36
+    grid = create_cubed_sphere(n)
+    cdgrid = create_cubed_sphere_cdgrid(grid)
+
+    def _div_damp_cube_local(nn, ref_n=48, ref_coeff=1.5e7):
+        return ref_coeff * (ref_n / nn) ** 2
+
+    def _hyperdiff_cube_local(nn, ref_n=48, ref_coeff=1e16):
+        return ref_coeff * (ref_n / nn) ** 4
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        cfg = iter1009_dual_target_config(
+            n, hyperdiff_coeff=_hyperdiff_cube_local(n),
+        )
+    model = FV3EdgeShallowWaterModel(grid, cfg)
+
+    sw = williamson_test6(grid)
+    R = grid.radius
+    u_east_x, v_north_x = _w6_winds_geo(
+        cdgrid.lon_edge_x, cdgrid.lat_edge_x, R,
+    )
+    u_d = (cdgrid.cos_angle_edge_x * u_east_x
+           + cdgrid.sin_angle_edge_x * v_north_x)
+    u_east_y, v_north_y = _w6_winds_geo(
+        cdgrid.lon_edge_y, cdgrid.lat_edge_y, R,
+    )
+    v_d = (-cdgrid.sin_angle_edge_y * u_east_y
+           + cdgrid.cos_angle_edge_y * v_north_y)
+    state = FV3EdgeShallowWaterState(
+        h=sw.h.data, u_d=u_d, v_d=v_d, h_s=sw.h_s.data,
+    )
+    model.set_initial_mass(state)
+
+    dt = 300.0
+    area64 = grid.area.astype(jnp_local.float64)
+    mass_init = float(
+        jnp_local.sum(state.h.astype(jnp_local.float64) * area64),
+    )
+
+    @jax.jit
+    def step(s):
+        return model.step(s, dt)
+
+    s = state
+    for _ in range(576):  # 2 days at dt=300 s
+        s = step(s)
+
+    # Finiteness check.
+    assert jnp_local.all(jnp_local.isfinite(s.h)), (
+        "iter-39 regression: cube W6 day-2 ``h`` field non-finite"
+    )
+    assert jnp_local.all(jnp_local.isfinite(s.u_d)), (
+        "iter-39 regression: cube W6 day-2 ``u_d`` field non-finite"
+    )
+    # Mass conservation (anchored fixer should give bit-clean).
+    mass_final = float(
+        jnp_local.sum(s.h.astype(jnp_local.float64) * area64),
+    )
+    drift = abs(mass_final - mass_init) / abs(mass_init)
+    assert drift < 1e-7, (
+        f"iter-39 regression: cube W6 day-2 mass drift {drift:.2e} "
+        "exceeds 1e-7"
+    )
+    # Match the matrix-runner's BLOWUP criterion: max|u_d| > 1000
+    # m/s flags a blowup.  W6 initial winds peak at ~50 m/s, so a
+    # 2-day max|u_d| under 100 m/s indicates stable propagation.
+    u_d_max = float(jnp_local.max(jnp_local.abs(s.u_d)))
+    assert u_d_max < 100.0, (
+        f"iter-39 regression: cube W6 day-2 ``max|u_d|`` = "
+        f"{u_d_max:.1f} m/s exceeds 100 m/s — wind blowup "
+        "(matrix BLOWUP threshold is 1000 m/s)."
+    )
+
+
 def test_iter35_hyperdiff_coeff_kwarg_threads_through():
     """new_test_dycores iter-35: ``iter1009_dual_target_config``
     accepts ``hyperdiff_coeff`` as an optional kwarg that threads
