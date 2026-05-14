@@ -52,6 +52,20 @@ So the iter-12..17 NH bundle (vector_halo + a2b_ord4 + d_con_cv + dynamic_exner 
 
 **iter-12..17 doc claims need caveat**: those measurements were at quick mode (5 min); full-mode behaviour DOES NOT HOLD for TC2 cube.
 
+## State after iter-1..250 (compressed at iter-250)
+
+**iter-241..250 — TC2 probe abort, ralph-loop stopped, AIMIP Phase 1 landed**:
+
+- **iter-248**: TC2 hypothesis-2 probe killed at 51 min wall (user request to stop ralph-loop).  Matrix runner reverted from 16× → 4× baseline (commit `a9c7e2f3`).  Hypothesis 2 (more hyperdiff prevents day-0.13 blowup) remains UNTESTED.
+- **iter-249 AIMIP Phase 1** (parallel workstream, commit `db4d88a0`):
+  - `forcing/experiments.py` adds `"aimip"` template (2015-2020 transient GHG via CMIP6 historical).
+  - `scripts/run_aimip.py` CLI wrapper (ERA5 IC + RRTMGP + latlon C-grid defaults).
+  - 4 unit tests in `tests/test_cases/test_aimip_template.py`.
+
+**Cumulative sentinels at iter-250**: 31 AST + 14 numerical + 1 c_sw + 1 functional + 4 AIMIP = **51 total**, all PASS in <1 s for AST+AIMIP layer (numerical layer ~150 s).
+
+**Active state**: ralph-loop dycore audit is at steady state.  AIMIP Phase 1 complete; Phases 2-5 (TrainablePhysicsParams expansion, training script, validation, corrections) require ~80 hr training compute + ERA5 data fetch.
+
 ## State after iter-1..240 (compressed at iter-240)
 
 **iter-231..240 — TC2 probe wait phase X**: probe wall 47 → 50 min over 10 iters.  Still in dynamics.
