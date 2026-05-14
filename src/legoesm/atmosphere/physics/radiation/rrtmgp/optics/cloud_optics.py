@@ -25,6 +25,7 @@ def _tiny(x=None):
   dtype = x.dtype if x is not None else jnp.float_
   return float(jnp.finfo(dtype).tiny)
 
+from legoesm.atmosphere.physics._shared import safe_divide
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import lookup_cloud_optics
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import optics_utils
 
@@ -149,21 +150,23 @@ def compute_optical_properties(
     optical_props.append(props)
 
   combined_props = jax.tree.map(jnp.add, *optical_props)
-  # Use safe denominators: jnp.where evaluates both branches so the division
-  # must never produce inf/NaN even on the "inactive" branch.
-  _floor = _tiny(combined_props['tau'])
-  safe_tau = jnp.maximum(combined_props['tau'], _floor)
-  safe_tau_ssa = jnp.maximum(combined_props['tau_ssa'], _floor)
+  # AD-safe denominators.  The previous ``safe_tau = jnp.maximum(tau, tiny)``
+  # pattern is forward-safe but NOT backward-safe under fp64: the local VJP
+  # ``-num/denom**2`` evaluates ``denom**2 = tiny**2 = 4.8e-616`` which
+  # underflows to 0, so ``-num/0 = NaN`` even on the masked-out branch
+  # (JAX's ``jnp.where`` differentiates both branches and the inactive
+  # branch's NaN propagates via 0 * inf).  ``safe_divide`` uses
+  # ``where(mask, denom, 1.0)`` so the inactive branch's denom is exactly 1.0
+  # (no underflow on square), keeping backward finite.  Bug pinpointed
+  # 2026-05-13 via jax.checkify(nan_checks) on AMIP+RRTMG reverse-mode AD.
   return {
       'optical_depth': combined_props['tau'],
-      'ssa': jnp.where(
-          combined_props['tau'] > 0,
-          combined_props['tau_ssa'] / safe_tau,
-          0.0,
+      'ssa': safe_divide(
+          combined_props['tau_ssa'], combined_props['tau'],
+          eps=_EPSILON, fill=0.0,
       ),
-      'asymmetry_factor': jnp.where(
-          combined_props['tau_ssa'] > 0,
-          combined_props['tau_ssa_g'] / safe_tau_ssa,
-          0.0,
+      'asymmetry_factor': safe_divide(
+          combined_props['tau_ssa_g'], combined_props['tau_ssa'],
+          eps=_EPSILON, fill=0.0,
       ),
   }

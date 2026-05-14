@@ -18,6 +18,7 @@ from typing import TypeAlias, cast
 
 import jax
 import jax.numpy as jnp
+from legoesm.atmosphere.physics._shared import safe_divide
 from legoesm.atmosphere.physics.radiation.rrtmgp import constants
 from legoesm.atmosphere.physics.radiation.rrtmgp import kernel_ops
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import atmospheric_state
@@ -328,13 +329,27 @@ def solve_sw(
       w_bg = sw_optical_props['ssa']
       g_bg = sw_optical_props['asymmetry_factor']
       w_num = tau_bg * w_bg + tau_aer * aerosol_single_scattering_albedo
-      w_tot = jnp.clip(w_num / jnp.maximum(tau_tot, 1.0e-12), 0.0, 1.0)
+      # AD-safe SW optical-property mixing.  ``a / jnp.maximum(b, eps)`` has
+      # a ``-a/b**2`` VJP that overflows when ``b`` is at the floor — for
+      # cloud-free, low-water-vapor stratospheric layers ``tau_tot`` can
+      # reach the 1e-12 floor and the backward propagates NaN to every
+      # upstream traced parameter whose state path touches gas absorption
+      # (e.g. C_H/C_E via boundary-layer-driven T/q_v perturbations).
+      # ``safe_divide`` masks the bad branch before the divide.  The outer
+      # ``jnp.clip`` preserves the original output range; with ``fill=0.0``
+      # the bad branch lands inside that range.
+      w_tot = jnp.clip(
+          safe_divide(w_num, tau_tot, eps=1.0e-12, fill=0.0),
+          0.0,
+          1.0,
+      )
       g_num = (
           tau_bg * w_bg * g_bg
           + tau_aer * aerosol_single_scattering_albedo * aerosol_asymmetry_factor
       )
+      g_denom = tau_tot * jnp.maximum(w_tot, 1.0e-12)
       g_tot = jnp.clip(
-          g_num / jnp.maximum(tau_tot * jnp.maximum(w_tot, 1.0e-12), 1.0e-12),
+          safe_divide(g_num, g_denom, eps=1.0e-12, fill=0.0),
           -1.0,
           1.0,
       )
