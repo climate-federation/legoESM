@@ -70,7 +70,7 @@ Each entry is a deliberate choice made during planning, with the reasoning so a 
 | 2026-05-14 | **Sea ice: none.** | Paper has no sea ice either; not an approximation we're making, just a property of the configuration. Limits AABW realism for both. | Pursuing realistic AABW formation as a separate study. |
 | 2026-05-14 | **GM coefficient: Visbeck (1997).** Will not implement Tréguier (1997). | Both growth-rate-dependent. Typical 10–20% ACC transport difference at 1°, absorbed by `α` tuning. ~50 LOC to add Tréguier but not worth the time given other approximations dominate. | ACC transport is consistently low and adding viscosity tuning isn't enough — try Tréguier as a final knob. |
 | 2026-05-14 | **Momentum viscosity: geopotential (iso-level) Laplacian.** Confirmed match with NEMO via Zenodo namelist (`ln_dynldf_lev=.true.`). | Paper text "Laplacian friction along isopycnal surfaces" was a wording slip — applies only to tracers. | Never (resolved). |
-| 2026-05-14 | **PGF scheme: `"smc03"`.** Not the default `"adcroft"`. | SMC03 is 100–150× more accurate for rest-state PGF on stratified bathymetry (per `pgf_test_plan.md`). DINO has steep continental slopes — PGF accuracy matters a lot here. | SMC03 has unforeseen issues at this domain size; revert to `"adcroft"`. |
+| 2026-05-14 | **PGF scheme: `"adcroft"`** (default). Not `"smc03"`. | Zenodo namelist shows NEMO uses `ln_hpg_sco=.true.` — standard s-coordinate Jacobian, the *simplest* PGF NEMO offers (NOT the density-Jacobian-cubic `djc` or pressure-Jacobian `prj`). `adcroft` (centered-difference Jacobian + AC04 partial-cell correction) is the closest legoESM match. SMC03 (Shchepetkin-McWilliams density-Jacobian) is MORE accurate than what NEMO uses but is a different algorithm class — choosing it would mean we're not replicating the paper's PGF, just running something "better". For principled replication we stay in the same algorithm family. Earlier 2026-05-14 entry recommending SMC03 was reversed on 2026-05-14 once the namelist was inspected. | Rest-state PGF noise dominates the answer (per `pgf_test_plan.md`, ~100-150× worse than SMC03 on stratified bathymetry) → switch to `smc03` as an explicit "improved-PGF run" comparison. |
 | 2026-05-14 | **Barotropic solver: `"implicit_cn"`.** Not the default `"explicit_substep"`. | Cosine-filter explicit substep is implicated in checkerboard barotropic noise (`barotropic_mode_noise.md`). Implicit CN eliminates by construction. | CN solver too dissipative or too slow at production resolution. |
 | 2026-05-14 | **EOS: Wright (existing nonlinear).** Not Roquet simplified (paper). | Wright is more accurate, already implemented and AD-tested. Roquet is what paper uses, so ACC/MOC magnitudes won't match exactly. Not worth implementing Roquet just for paper-figure parity. | Density distribution is grossly wrong in some specific water mass and Wright extrapolation is suspected. |
 | 2026-05-14 | **Vertical mixing: KPP + enhanced-diffusion convection.** Not TKE (paper). | Both already implemented in legoESM. KPP is standard. TKE would be additional engineering with no obvious benefit at 1°. | Mixed-layer depth is consistently too shallow / too deep across seasons — TKE may be needed. |
@@ -121,7 +121,7 @@ After reading the full Kamm et al. (2025) paper (incl. Appendices A–E) and aud
 
 ```python
 # To pass to ExperimentConfig / state construction
-pgf_scheme = "smc03"                 # density-Jacobian PGF (PR #250)
+pgf_scheme = "adcroft"               # closest to NEMO's ln_hpg_sco (standard Jacobian); see Decisions Log
 barotropic_solver = "implicit_cn"     # avoid cosine-filter checkerboard noise
 barotropic_implicit_theta_eta = 0.55  # CN default
 tracer_advection = "tvd"              # see Decisions Log — start simple, sensitivity study later
@@ -356,7 +356,7 @@ Follow pattern of `global_overturning.py`:
   - **Bottom drag**: `QuadraticDragConfig(C_d=1.0e-3)`
   - **Shortwave**: `ShortwavePenetrationConfig(water_type="I")`
   - **Numerical-scheme selections** (locked in based on audit; see "Recommended scheme selections for DINO" above):
-    - `pgf_scheme="smc03"` (NOT default `"adcroft"`) — eliminates known PGF accuracy bugs on stratified bathymetry
+    - `pgf_scheme="adcroft"` (default; closest legoESM match to NEMO's `ln_hpg_sco` standard Jacobian — what the paper uses)
     - `barotropic_solver="implicit_cn"` (NOT default `"explicit_substep"`) — eliminates checkerboard barotropic noise documented in `docs/issues/barotropic_mode_noise.md`
     - `barotropic_implicit_theta_eta=0.55` (CN default)
     - `tracer_advection="tvd"` (start simple; sensitivity to `dst3`/`ppm_fct`/`som` deferred to a separate study)
