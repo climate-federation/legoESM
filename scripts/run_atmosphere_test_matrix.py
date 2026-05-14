@@ -2038,11 +2038,13 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             # for the same reason — both long-duration propagating-
             # wave tests need biharmonic hyperdiffusion to damp short-
             # wave noise that the W2-tuned iter1009 calibration does
-            # not.  Add ``hyperdiff_coeff=_hyperdiff_cube(n)`` for
-            # both W5 and W6.  W2 cube unchanged (5-day at iter-1
-            # calibration is stable).
-            _wcfg = iter1009_dual_target_config(n)
-            config = _wcfg._replace(hyperdiff_coeff=_hyperdiff_cube(n))
+            # not.  Pass ``hyperdiff_coeff=_hyperdiff_cube(n)`` via
+            # the iter-35 helper kwarg (cleaner than the iter-31
+            # ``_replace`` pattern).  W2 cube unchanged (5-day at
+            # iter-1 calibration is stable without hyperdiff).
+            config = iter1009_dual_target_config(
+                n, hyperdiff_coeff=_hyperdiff_cube(n),
+            )
         else:
             config = iter1009_dual_target_config(n)
         model = FV3EdgeShallowWaterModel(grid, config)

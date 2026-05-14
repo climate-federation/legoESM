@@ -420,6 +420,7 @@ def iter1009_dual_target_config(
     n: int,
     div_damp_factor: float = 8.0,
     damp_v: float = 0.030,
+    hyperdiff_coeff: float = 0.0,
 ) -> CDGridShallowWaterConfig:
     """Iter-1009/1021/1030 dual-target preset: W2 ≤ 0.119 m/s + W5 day-5 artifact-free.
 
@@ -486,7 +487,7 @@ def iter1009_dual_target_config(
         )
 
     return CDGridShallowWaterConfig(
-        hyperdiff_coeff=0.0,
+        hyperdiff_coeff=hyperdiff_coeff,
         div_damp=div_damp_factor * div_damp_base,
         boundary_fix=True,
         damp_v=damp_v, nord_v=2,
