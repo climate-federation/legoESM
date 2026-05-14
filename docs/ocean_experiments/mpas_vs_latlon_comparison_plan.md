@@ -1,8 +1,104 @@
 # MPAS vs Lat-Lon 1° Comparison Experiments
 
-**Status**: Campaign complete. 5 bugs fixed, 2Δy instability fully
-diagnosed, both grids running 20-year flat-bottom simulations.
-MPAS viscosity fixed to u_total. Ready for ETOPO comparison (2026-05-14).
+**Status**: ETOPO runs in progress (2026-05-14). 5 bugs fixed, 2Δy
+instability fully diagnosed, Mercator grid confirmed as fix. MPAS 20yr
+flat-bottom completed. MPAS ETOPO + Mercator baroclinic running.
+
+## Quick Start: How to Run Experiments
+
+All experiments use two scripts in `scripts/global_overturning/`.
+Each run saves a `config.json` to its output directory with all actual
+parameter values. Results go to `results/ocean/comparison_mpas_v_latlon/`.
+
+### MPAS (production config — stable 20yr)
+
+```bash
+# Flat bottom (validated)
+CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 python scripts/global_overturning/run_comparison_mpas.py \
+  --tag MPAS_FLAT_20yr \
+  --days 7300 --save-every-days 30 \
+  --flat-bottom \
+  --a-h 1e5 --kappa-gm 2400 --kappa-redi 2400 --s-max 0.01
+
+# ETOPO bathymetry (same params, drop --flat-bottom)
+CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 python scripts/global_overturning/run_comparison_mpas.py \
+  --tag MPAS_ETOPO_20yr \
+  --days 7300 --save-every-days 30 \
+  --a-h 1e5 --kappa-gm 2400 --kappa-redi 2400 --s-max 0.01
+```
+
+Key MPAS parameters: A_h=1e5, C_smag_lap=0.33 (script default),
+K_zeta_bih=1e14 (script default), dt=1200s. No Ferrari complement
+needed (no 2Δy problem on isotropic mesh).
+
+### Mercator lat-lon (production config — in testing)
+
+```bash
+# Flat bottom baroclinic
+CUDA_VISIBLE_DEVICES=1 JAX_ENABLE_X64=1 python scripts/global_overturning/run_comparison_latlon.py \
+  --tag MERC_FLAT_10yr \
+  --days 3650 --save-every-days 30 \
+  --mercator \
+  --flat-bottom \
+  --a-h 1e5 --kappa-gm 2400 --kappa-redi 2400 --s-max 0.01 \
+  --dt 600
+
+# ETOPO bathymetry (same params, drop --flat-bottom)
+CUDA_VISIBLE_DEVICES=1 JAX_ENABLE_X64=1 python scripts/global_overturning/run_comparison_latlon.py \
+  --tag MERC_ETOPO_10yr \
+  --days 3650 --save-every-days 30 \
+  --mercator \
+  --a-h 1e5 --kappa-gm 2400 --kappa-redi 2400 --s-max 0.01 \
+  --dt 600
+```
+
+Key Mercator parameters: same as MPAS except dt=600s (required because
+polar cells are 19 km — half the regular lat-lon dy). Grid is 278×360
+(vs 180×360 regular). No Ferrari complement needed (isotropic grid).
+
+### Regular lat-lon (legacy — has 2Δy instability)
+
+```bash
+CUDA_VISIBLE_DEVICES=1 JAX_ENABLE_X64=1 python scripts/global_overturning/run_comparison_latlon.py \
+  --tag LATLON_FLAT_10yr \
+  --days 3650 --save-every-days 30 \
+  --flat-bottom \
+  --a-h 1e5 --kappa-gm 2400 --kappa-redi 2400 --s-max 0.01
+```
+
+Regular lat-lon develops 4-5Δy meridional bands from grid anisotropy.
+Mercator grid is the recommended replacement.
+
+### Barotropic test (quick, ~2 min for 120 days)
+
+```bash
+# Add --uniform-T for barotropic mode (uniform T=10°C, wind only)
+CUDA_VISIBLE_DEVICES=1 JAX_ENABLE_X64=1 python scripts/global_overturning/run_comparison_latlon.py \
+  --tag BT_TEST --days 120 --save-every-days 10 \
+  --mercator --flat-bottom --uniform-T --a-h 1e4 --dt 1200
+```
+
+### Diagnostics
+
+```bash
+# Meridional wavenumber spectrum (Mercator or regular lat-lon)
+JAX_ENABLE_X64=1 python scripts/global_overturning/_jet_spectrum_mercator.py \
+  latlon_TAG --mercator --n-lon 360
+
+# MPAS section plots (surface maps + zonal-mean + Drake + Atlantic)
+JAX_ENABLE_X64=1 python scripts/global_overturning/_plot_mpas_sections.py \
+  results/ocean/comparison_mpas_v_latlon/mpas_TAG/restarts/restart_dayNNNNNN.npz
+
+# Drake Passage transport time series
+python scripts/global_overturning/_drake_timeseries.py
+```
+
+### Important notes
+- Always use `JAX_ENABLE_X64=1` (fp64 required for thin partial cells)
+- Use `CUDA_VISIBLE_DEVICES=N` to pin to specific GPU (machine has 2× V100S)
+- Each run creates `config.json` with all actual parameters used
+- `--restart path/to/restart.npz` to continue from a previous run
+- `--tag NAME` sets output directory name (required for organization)
 
 ## Goal
 
