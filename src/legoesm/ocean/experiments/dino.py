@@ -202,6 +202,172 @@ class DINOConfig:
 
 
 # ---------------------------------------------------------------------
+# Phase 2B — Analytical bathymetry (Appendix A; ported from
+# vopikamm/DINO@v0.2.0 MY_SRC/usrdef_zgr.F90)
+# ---------------------------------------------------------------------
+
+def _smooth_step(x, a: float, b: float):
+    """Quintic smooth step: 6t⁵ - 15t⁴ + 10t³ with t = (x-a)/(b-a) clipped.
+
+    Paper eq A2; matches Zenodo `smooth_step` (zgr_lib lines 823-825).
+    Returns 0 for x ≤ a, 1 for x ≥ b, smooth in between.
+    """
+    t = jnp.clip((x - a) / (b - a), 0.0, 1.0)
+    return 6.0 * t**5 - 15.0 * t**4 + 10.0 * t**3
+
+
+def _exp_bathy(x, x_left: float, x_right: float, width: float,
+               dist_lam: float, dist_taper: float):
+    """Tapered exponential — paper eq A1, matches Zenodo `exp_bathy`.
+
+    Three-piece piecewise function: 0 outside [x_left, x_right], rises
+    via tapered exponential to 1 in the interior.
+    """
+    znorm = 1.0 + jnp.exp(-width / dist_lam)
+
+    # Left taper region: x ∈ [x_left, x_left + dist_taper]
+    s_left = _smooth_step(x, x_left, x_left + dist_taper)
+    val_left = (1.0 - jnp.exp(-(x - x_left) / dist_lam) / znorm) * (1.0 - s_left) + s_left
+
+    # Right taper region: x ∈ [x_right - dist_taper, x_right]
+    s_right = 1.0 - _smooth_step(x, x_right - dist_taper, x_right)
+    val_right = (1.0 - jnp.exp((x - x_right) / dist_lam) / znorm) * (1.0 - s_right) + s_right
+
+    in_left = (x >= x_left) & (x < x_left + dist_taper)
+    in_right = (x > x_right - dist_taper) & (x <= x_right)
+    in_interior = (x >= x_left + dist_taper) & (x <= x_right - dist_taper)
+
+    return jnp.where(
+        in_left, val_left,
+        jnp.where(in_right, val_right,
+                  jnp.where(in_interior, jnp.ones_like(x),
+                            jnp.zeros_like(x))),
+    )
+
+
+def _gauss_ring(lon, lat, lon0: float, lat0: float, ring_radius: float,
+                dist_lam: float, depth_top: float, depth_bot):
+    """Gaussian ring centered at (lon0, lat0) with given radius.
+
+    Matches Zenodo `gauss_ring`:
+      arg = (-x² - y² + 2·rad·sqrt(x²+y²) - rad²) / dist_lam²
+          = -(sqrt(x²+y²) - rad)² / dist_lam²
+
+    Returns depth_bot away from the ring, depth_top on the ring.
+    `depth_bot` may be a scalar or an array (e.g., the underlying
+    bathymetry, so the ring can only shoal — never deepen — a column).
+    """
+    x = lon - lon0
+    y = lat - lat0
+    r = jnp.sqrt(x**2 + y**2)
+    arg = -(r - ring_radius) ** 2 / dist_lam ** 2
+    return (depth_top - depth_bot) * jnp.exp(arg) + depth_bot
+
+
+def dino_bathymetry(lon_deg, lat_deg, cfg: DINOConfig | None = None):
+    """Build DINO basin bathymetry at the given (lon, lat) points.
+
+    Ports the analytical bathymetry construction from Kamm et al. 2025
+    Appendix A (eqs A1-A5) and the upstream NEMO source
+    (vopikamm/DINO@v0.2.0 MY_SRC/usrdef_zgr.F90, nn_botcase=1, the
+    "bowl_cosh" basin).
+
+    The Mid-Atlantic Ridge is intentionally omitted (paper Sect 2.2;
+    `ln_mid_ridge=.false.` in the upstream namelist).
+
+    Sign convention: ``H_bathy`` is positive (depth below sea level),
+    bounded between ``H_shallow`` (at coasts) and ``H_deep`` (in the
+    deep interior), and ``H_sill`` along the Drake-passage sill ring.
+
+    Parameters
+    ----------
+    lon_deg, lat_deg : array
+        Same-shape arrays of longitudes/latitudes in degrees. Can be
+        any rank (will broadcast).
+    cfg : DINOConfig, optional
+        DINO configuration; defaults to ``DINOConfig()``.
+
+    Returns
+    -------
+    H_bathy : array
+        Same shape as ``lon_deg``. Depth in meters (positive).
+    """
+    if cfg is None:
+        cfg = DINOConfig()
+
+    lon_deg = jnp.asarray(lon_deg)
+    lat_deg = jnp.asarray(lat_deg)
+
+    # Domain extents
+    lon_min = cfg.lon_west_deg
+    lon_max = cfg.lon_east_deg
+    lat_min = -cfg.lat_max_deg
+    lat_max = cfg.lat_max_deg
+
+    width_lon = lon_max - lon_min     # = 50°
+    cha_min = cfg.channel_lat_south_deg
+    cha_max = cfg.channel_lat_north_deg
+    cha_width = cfg.channel_width_deg  # = 20°
+
+    # Length scales (degrees) — note the Mercator correction on the
+    # meridional scale matches the Zenodo code, NOT the paper text.
+    # The code computes dist_phi = cos(rad·phi_max) · rn_distLam, which
+    # SHRINKS the meridional taper length at high latitudes. Paper text
+    # writes s_phi = cos(rad·phi_max) · s_lambda, which is the inverse
+    # convention. Trusting the code (produces Fig 1).
+    dist_lam_deg = 1.0 / cfg.s_lambda_inv_deg                              # 3°
+    dist_phi_deg = math.cos(math.radians(cfg.lat_max_deg)) * dist_lam_deg  # ~1.03°
+
+    # ------------------------------------------------------------------
+    # Channel modification (paper eq A4): inside the channel band, the
+    # zonal walls vanish so the flow is re-entrant.
+    # ------------------------------------------------------------------
+    g_phi_cha = _exp_bathy(
+        lat_deg, cha_min, cha_max,
+        width=width_lon, dist_lam=dist_lam_deg, dist_taper=cha_width / 2.0,
+    )
+    g_lambda = _exp_bathy(
+        lon_deg, lon_min, lon_max,
+        width=width_lon, dist_lam=dist_lam_deg, dist_taper=cha_width / 2.0,
+    )
+    # In the channel band, force g_lambda = 1 (no zonal walls)
+    g_lambda = g_lambda * (1.0 - g_phi_cha) + g_phi_cha
+
+    # Meridional taper for the full N/S extent (paper eq A3)
+    g_phi = _exp_bathy(
+        lat_deg, lat_min, lat_max,
+        width=width_lon, dist_lam=dist_phi_deg, dist_taper=cha_width / 2.0,
+    )
+
+    # Bathymetry: deep at interior (g=1), shallow at boundaries (g=0)
+    bathy = g_lambda * g_phi * (cfg.H_deep - cfg.H_shallow) + cfg.H_shallow
+
+    # ------------------------------------------------------------------
+    # Drake-passage sill (paper eq A5): Gaussian ring anchored at the
+    # western wall, extending east into the channel. Only allowed to
+    # SHOAL the column (depth_bot=bathy means it never deepens).
+    # ------------------------------------------------------------------
+    sill_taper = _smooth_step(
+        lon_deg,
+        cfg.sill_lon_m_deg,
+        cfg.sill_lon_m_deg + cfg.sill_gaussian_width_s,
+    )
+    ring_radius = cha_width / 2.0  # zrad in Zenodo code
+    sill = _gauss_ring(
+        lon_deg, lat_deg,
+        lon0=cfg.sill_lon_m_deg,
+        lat0=cfg.sill_lat_m_deg,
+        ring_radius=ring_radius,
+        dist_lam=cfg.sill_gaussian_width_s,
+        depth_top=cfg.H_sill,
+        depth_bot=bathy,
+    )
+    bathy = sill_taper * sill + (1.0 - sill_taper) * bathy
+
+    return bathy
+
+
+# ---------------------------------------------------------------------
 # Phase 2E — Vertical grid (Appendix C, eq C3)
 # ---------------------------------------------------------------------
 
