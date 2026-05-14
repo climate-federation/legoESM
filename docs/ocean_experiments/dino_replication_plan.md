@@ -749,11 +749,38 @@ Confirmed stable in this configuration:
 - **1-day forced + physics (lat-lon AND MPAS)**: stable; what the
   smoke tests cover.
 
-Not yet confirmed (running 2026-05-14):
-- **1-year forced + physics on both grids** — the real production
-  scenario. Outputs in `results/dino/run_1yr_{latlon,mpas}_forced/`.
-  Will fill in this section with day-of-blowup (if any) and final
-  state magnitudes when complete.
+Tested and **not yet stable**:
+- **1-year forced + physics, lat-lon**: NaN by day 30 (30-day snapshot
+  gap; precise blowup day unknown — need finer snapshotting). Forcing
+  injects KE faster than the current dissipation budget can handle.
+- **1-year forced + physics, MPAS**: NaN by day 30. MPAS has NONE of
+  the lat-lon stability fixes (Hollingsworth and A_h_floor /
+  A_h_eq_boost are both lat-lon-only — TRiSK on hex cells is a
+  separate code path). MPAS forced was always going to fail until
+  the equivalent fixes are ported there too.
+
+### Open work to make forced runs stable
+
+1. **Port Hollingsworth correction to the MPAS code path**
+   (`ocean_pe_mpas.py`). NEMO's `nn_dynkeg=1` is grid-agnostic in
+   spec; the implementation needs to be done per-discretization.
+   ~50 LOC analogous to PR #264 but on the TRiSK PV-flux stencil.
+2. **Add A_h-floor / equatorial-boost equivalents to
+   `MPASOceanConfig`**. MPAS lateral viscosity is currently a
+   scalar with no per-cell modulation; need to add latitude-aware
+   boost.
+3. **Diagnose lat-lon forced blowup** — run with finer snapshots
+   (e.g., `--snapshot-every-days 1`) to find exact failure day,
+   then run the same A/B matrix that worked for unforced (test
+   slope_foot, larger A_h_floor, MSC, smaller dt). Plausible that
+   the forcing-driven KE injection is hitting a different failure
+   mode than the unforced case.
+4. **Smaller dt for forced runs** — paper uses 2700 s; with all
+   the surface-flux gradients, half that may be needed.
+
+These are out of scope for the v1 PR but tracked as follow-on
+issues. The unforced 30-day stability + scientific completeness
+of the experiment configuration is the v1 deliverable.
 
 ### Lessons for future ocean experiments on legoESM
 
