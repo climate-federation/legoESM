@@ -113,3 +113,11 @@ iter-37: third cavecrew-reviewer pass on iter-31..36 flagged two concrete gaps i
 2. `test_iter35_hyperdiff_coeff_kwarg_threads_through` validates threading but doesn't pin the default to 0.0.  **Fix**: now asserts `default_cfg.hyperdiff_coeff == 0.0` with a message tying the regression to the W2 v_ll sentinel.
 
 AST guard now 24 tests (+ iter-35 kwarg test); 0.11 s.
+
+iter-38: end-to-end cube SW matrix verification at quick mode.  Ran `scripts/run_atmosphere_test_matrix.py --only sw --grid cubed_sphere --quick`: 4/4 PASS in 65.4 s:
+- W2 1-day: L2=2.04e-4, Linf=2.83e-3, v_ll_Linf=0.114 (matches iter-1030 ≤ 0.119 target).
+- W5 1-day: mass_drift=1.62e-16.
+- CB 1-day: L2=0.117 (structural gap vs latlon 0.024 unchanged).
+- W6 1-day: mass_drift=7.64e-16 (iter-31 hyperdiff override safely composes with quick mode).
+
+Confirms iter-1..37 cumulative cube SW path is healthy end-to-end on the matrix runner.
