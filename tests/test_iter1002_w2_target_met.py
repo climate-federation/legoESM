@@ -30,8 +30,25 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import warnings
 
+import jax
 import jax.numpy as jnp
 import numpy as np
+
+# new_test_dycores iter-99: hard-fail at module import if JAX is not in
+# fp64 mode.  The `os.environ.setdefault` above only helps if this is
+# the FIRST file in pytest's session to touch the JAX env (otherwise
+# JAX is already configured fp32).  Without fp64, the iter-3/iter-6
+# anchored-fixer thresholds (mass_drift < 1e-7) reduce to fp32 round-
+# off noise (~1e-7 already) and tests trip on environmental issues
+# rather than real regressions.  Fail loudly so the user sees the
+# fp64-not-enabled cause directly instead of a confusing mass-drift
+# assertion failure.
+assert jax.config.read("jax_enable_x64"), (
+    "tests/test_iter1002_w2_target_met.py requires JAX_ENABLE_X64=1.  "
+    "JAX is currently in fp32 mode (likely because an earlier test "
+    "imported jax without setting the env var).  Run with "
+    "`JAX_ENABLE_X64=1 pytest ...` from the shell."
+)
 
 from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
     CDGridShallowWaterConfig,
