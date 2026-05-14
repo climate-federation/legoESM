@@ -43,6 +43,15 @@ So the iter-12..17 NH bundle (vector_halo + a2b_ord4 + d_con_cv + dynamic_exner 
 
 **iter-12..17 doc claims need caveat**: those measurements were at quick mode (5 min); full-mode behaviour DOES NOT HOLD for TC2 cube.
 
+## State after iter-1..180 (compressed at iter-180)
+
+**iter-171..180 highlights — TC2 probe wait phase IV**:
+
+- iter-171..179: TC2 probe continues running.  Wall: 30 min → 33 min over 10 iters.
+- iter-180: compression milestone.
+
+**Active state**: probe slow.  Estimated ~67 min total wall; current 33 min = halfway.  ~34 min remaining.  Result expected iter-200+ if cadence holds.
+
 ## State after iter-1..170 (compressed at iter-170)
 
 **iter-161..170 highlights — continued TC2 probe wait phase**:
