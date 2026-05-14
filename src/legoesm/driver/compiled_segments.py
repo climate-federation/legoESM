@@ -399,6 +399,7 @@ def build_segment_fn(
     albedo_ice=None,
     albedo_ocean=None,
     albedo_land=None,
+    l_mix_max=None,
     ghg_vmr_override=None,
     owned_face_ids=None,
     hs_newtonian_relax=None,
@@ -483,6 +484,7 @@ def build_segment_fn(
     _albedo_ice = jnp.asarray(albedo_ice) if albedo_ice is not None else None
     _albedo_ocean = jnp.asarray(albedo_ocean) if albedo_ocean is not None else None
     _albedo_land = jnp.asarray(albedo_land) if albedo_land is not None else None
+    _l_mix_max = jnp.asarray(l_mix_max) if l_mix_max is not None else None
     # GHG VMR: species key order is static (captured in closure);
     # values are dynamic (passed via SegmentForcing.ghg_vmr).
     _ghg_keys: tuple[str, ...] = ()
@@ -600,6 +602,7 @@ def build_segment_fn(
                     albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
                     albedo_land=_albedo_land,
                     land_fraction=forcing.land_fraction,
+                    l_mix_max=_l_mix_max,
                     ghg_vmr_override=_ghg_vmr_override,
                 )
 
@@ -658,6 +661,7 @@ def build_segment_fn(
                     albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
                     albedo_land=_albedo_land,
                     land_fraction=forcing.land_fraction,
+                    l_mix_max=_l_mix_max,
                     ghg_vmr_override=_ghg_vmr_override,
                 )
 

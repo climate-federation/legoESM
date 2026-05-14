@@ -166,9 +166,15 @@ class PhysicsPipeline:
                             sw_up_toa, lw_up_toa, sw_down_toa,
                             sbm_tau_c=None, sbm_RH_ref=None,
                             C_H=None, C_E=None,
+                            l_mix_max=None,
                             q_i=None, q_s=None, q_g=None,
                             N_c=None, N_r=None, N_i=None):
-        """Convection + microphysics + BL exchange with held radiation."""
+        """Convection + microphysics + BL exchange with held radiation.
+
+        ``l_mix_max`` (iter-258, AIMIP Phase 2.7) is an optional traced
+        override forwarded to the Louis turbulence scheme.  ``None``
+        means use the static value baked into the LouisConfig.
+        """
         _C_H = self.C_H if C_H is None else C_H
         _C_E = self.C_E if C_E is None else C_E
 
@@ -453,12 +459,22 @@ class PhysicsPipeline:
             q_sat_sfc_col = ad.flatten_2d(
                 saturation_specific_humidity(T_sfc, p_s)
             )
+            # iter-258 (AIMIP Phase 2.7): only Louis consumes
+            # ``l_mix_max`` today.  Forward as a kwarg only when the
+            # active scheme is Louis; other schemes' signatures do not
+            # accept it.
+            _louis_overrides: dict = {}
+            from legoesm.atmosphere.physics.turbulence.config import LouisConfig
+            if (l_mix_max is not None
+                    and isinstance(self.turbulence_config, LouisConfig)):
+                _louis_overrides["l_mix_max"] = l_mix_max
             turb_out = self.turbulence_fn(
                 u=u_col, v=v_col, T=T_col, q_v=q_v_col,
                 p_full=p_full_col, p_half=p_half_col,
                 z_full=z_full_col, z_half=z_half_col,
                 T_sfc=T_sfc_col, q_sfc=q_sat_sfc_col,
                 rho=rho_col_phys, dt=dt, config=self.turbulence_config,
+                **_louis_overrides,
             )
             du_dt = du_dt + ad.unflatten_3d(turb_out.du_dt)
             dv_dt = dv_dt + ad.unflatten_3d(turb_out.dv_dt)
@@ -658,6 +674,7 @@ class PhysicsPipeline:
                          albedo_ocean=pipeline.albedo_ocean,
                          albedo_land=pipeline.albedo_land,
                          land_fraction=None,
+                         l_mix_max=None,
                          ghg_vmr_override=None):
 
             def _rad_branch(args):
@@ -669,6 +686,7 @@ class PhysicsPipeline:
                  tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref,
                  C_H, C_E, albedo_ice, albedo_ocean,
                  albedo_land, land_fraction,
+                 l_mix_max,
                  ghg_vmr_override) = args
 
                 (dT_dt_rad, sw_net_sfc, lw_net_sfc,
@@ -692,6 +710,7 @@ class PhysicsPipeline:
                     sw_up_toa, lw_up_toa, sw_down_toa,
                     sbm_tau_c=sbm_tau_c, sbm_RH_ref=sbm_RH_ref,
                     C_H=C_H, C_E=C_E,
+                    l_mix_max=l_mix_max,
                 )
 
                 # Cast to storage dtype so both lax.cond branches match
@@ -714,6 +733,7 @@ class PhysicsPipeline:
                  tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref,
                  C_H, C_E, albedo_ice, albedo_ocean,
                  albedo_land, land_fraction,
+                 l_mix_max,
                  ghg_vmr_override) = args
                 del albedo_land, land_fraction  # unused in no-rad branch
 
@@ -723,6 +743,7 @@ class PhysicsPipeline:
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                     sbm_tau_c=sbm_tau_c, sbm_RH_ref=sbm_RH_ref,
                     C_H=C_H, C_E=C_E,
+                    l_mix_max=l_mix_max,
                 )
 
                 # Cast to storage dtype — must match _rad_branch
@@ -750,6 +771,7 @@ class PhysicsPipeline:
                     tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref,
                     C_H, C_E, albedo_ice, albedo_ocean,
                     albedo_land, _land_fraction,
+                    l_mix_max,
                     ghg_vmr_override)
 
             return jax.lax.cond(need_rad, _rad_branch, _no_rad_branch, args)

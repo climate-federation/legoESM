@@ -77,15 +77,25 @@ _SBM_TRAINABLE = [
 
 # Louis-turbulence-specific trainable parameters.
 #
-# iter-252..254 history: Ri_crit, Ck, l_mix_max were added here but
-# reverted in iter-256 once an audit confirmed they are not kwargs of
-# ``build_segment_fn`` and therefore never reached the rollout.  They
-# will be re-added once the Louis turbulence parameters are threaded
-# through ``build_segment_fn`` -> ``step_unified`` ->
-# ``physics_step_no_rad`` -> the Louis scheme (AIMIP Phase 2.7).  The
-# entries remain in ``tuning.py::TUNING_PARAMETERS`` as
-# experiment-config knobs (just not yet differentiable).
-_LOUIS_TURBULENCE_TRAINABLE: list[ParamConstraint] = []
+# History:
+#   iter-252..254 added Ri_crit, Ck, l_mix_max as nominal-only
+#   trainables (no wiring).  iter-256 reverted to [] once the audit
+#   confirmed none of them reached the rollout.
+#   iter-258 (AIMIP Phase 2.7) re-added ``l_mix_max`` after wiring it
+#   end-to-end (build_segment_fn -> step_unified -> physics_step_no_rad
+#   -> louis_turbulence kwarg override).
+#   ``Ri_crit`` and ``Ck`` are intentionally NOT re-added: audit of
+#   ``atmosphere/physics/turbulence/louis.py`` confirmed that neither
+#   field is read by the scheme — they live on ``LouisConfig`` only as
+#   forward-compatibility placeholders and are consumed instead by the
+#   holtslag_boville / TKE / YSU configs.  Making them "Louis
+#   trainable" would re-introduce the same nominal-only bug iter-256
+#   reverted.  They will be re-added under a separate scheme-specific
+#   trainable list (e.g. ``_HOLTSLAG_BOVILLE_TRAINABLE``) when those
+#   schemes become AIMIP-active.
+_LOUIS_TURBULENCE_TRAINABLE = [
+    ParamConstraint("l_mix_max", 50.0, 300.0, "sigmoid"),
+]
 
 
 def trainable_constraints_for_scheme(

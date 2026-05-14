@@ -44,6 +44,7 @@ def louis_turbulence(
     rho: jax.Array,
     dt: float,
     config: LouisConfig,
+    l_mix_max: jax.Array | float | None = None,
 ) -> TurbulenceOutput:
     """Compute turbulence tendencies using Louis (1979) stability functions.
 
@@ -83,10 +84,14 @@ def louis_turbulence(
     # z_half_inner[k] = 0.5 * (z_full[k] + z_full[k+1])  (nlev-1 interfaces)
     z_half_inner = 0.5 * (z_full[:, :-1] + z_full[:, 1:])  # (ncol, nlev-1)
 
-    # Mixing length at half-levels: l = kappa * z / (1 + kappa * z / l_max)
+    # Mixing length at half-levels: l = kappa * z / (1 + kappa * z / l_max).
+    # ``l_mix_max`` may be passed as a traced override so the
+    # differentiable training loop can tune it (iter-258, AIMIP Phase
+    # 2.7); when None we use the static value baked into LouisConfig.
+    _l_mix_max = config.l_mix_max if l_mix_max is None else l_mix_max
     z_abs = jnp.clip(jnp.abs(z_half_inner), 1.0, None)
     l_mix = constants.kappa_vk * z_abs / (
-        1.0 + constants.kappa_vk * z_abs / config.l_mix_max
+        1.0 + constants.kappa_vk * z_abs / _l_mix_max
     )  # (ncol, nlev-1)
 
     # Layer thickness for gradient computation

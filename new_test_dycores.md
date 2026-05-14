@@ -539,3 +539,34 @@ Phase-2 trainable accounting (revised, iter-257):
 | `_SBM_TRAINABLE` | 2 | `sbm_tau_c, sbm_RH_ref` | 2/2 |
 | `_LOUIS_TURBULENCE_TRAINABLE` | 0 | — | 0/0 |
 | **Total wired trainable** | **9** | | **100 %** |
+
+## Iter-258 — AIMIP Phase 2.7 partial LAND: l_mix_max wired through Louis
+
+Wired `l_mix_max` (Louis maximum mixing length) end-to-end so the AIMIP training loop can tune it.  `Ri_crit` and `Ck` deliberately NOT re-added — audit of `src/legoesm/atmosphere/physics/turbulence/louis.py` confirmed Louis never reads them.  They live on `LouisConfig` only as forward-compat placeholders (consumed instead by holtslag_boville / TKE / YSU).  Making them "Louis trainable" would re-introduce the same nominal-only bug iter-256 reverted.
+
+Three-file edit:
+
+1. `src/legoesm/atmosphere/physics/turbulence/louis.py` — `louis_turbulence` signature grew `l_mix_max: jax.Array | float | None = None`.  Inside the body the mixing-length formula reads `_l_mix_max = config.l_mix_max if l_mix_max is None else l_mix_max` so the static-config path is bit-for-bit unchanged.
+
+2. `src/legoesm/driver/physics_pipeline.py` — `physics_step_no_rad` grew an `l_mix_max=None` kwarg.  Inside, the turbulence-call site checks `isinstance(self.turbulence_config, LouisConfig)` at Python time and forwards `l_mix_max` only when the active scheme is Louis (so TKE / YSU / Smagorinsky paths see no unexpected kwarg).  `step_unified` threads `l_mix_max` through both `lax.cond` branches' args-tuple to `physics_step_no_rad`.
+
+3. `src/legoesm/driver/compiled_segments.py` — `build_segment_fn` grew an `l_mix_max=None` kwarg cast to `_l_mix_max = jnp.asarray(...)` once at build time.  Both `step_unified` call sites (owned-face MPI path + serial path) pass `l_mix_max=_l_mix_max`.
+
+`_LOUIS_TURBULENCE_TRAINABLE` re-populated to `[ParamConstraint("l_mix_max", 50.0, 300.0, "sigmoid")]`.  Phase-2 wiring sentinel expected wired count: 9 → 10.
+
+New `tests/test_aimip_phase27_louis_l_mix_max.py` (4 tests, all green):
+- Signature check: `l_mix_max` is a `louis_turbulence` kwarg.
+- Numerical override: 100 → 200 produces ≥10 % rel diff in du/dt.
+- Backward-compat: `l_mix_max=None` reproduces no-kwarg call bit-for-bit.
+- Equivalence: kwarg override matches `config._replace(l_mix_max=...)`.
+
+Phase-2 trainable accounting (revised, iter-258):
+
+| Set | Count | Names | Wired? |
+|-----|-------|-------|--------|
+| `_COMMON_TRAINABLE` | 7 | `tau_equator, tau_pole, C_H, C_E, albedo_ice, albedo_ocean, albedo_land` | 7/7 |
+| `_SBM_TRAINABLE` | 2 | `sbm_tau_c, sbm_RH_ref` | 2/2 |
+| `_LOUIS_TURBULENCE_TRAINABLE` | 1 | `l_mix_max` | 1/1 |
+| **Total wired trainable** | **10** | | **100 %** |
+
+`Ri_crit` and `Ck` remain in `tuning.py::TUNING_PARAMETERS` as experiment-config knobs.  They will re-enter the trainable set under a scheme-appropriate list (e.g. `_HOLTSLAG_BOVILLE_TRAINABLE`) when those schemes become AIMIP-relevant.

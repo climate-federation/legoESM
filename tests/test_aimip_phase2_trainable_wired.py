@@ -105,7 +105,11 @@ def test_wired_trainable_count_matches_expected():
          # iter-257 (AIMIP Phase 2.6): albedo_land wired through
          # build_segment_fn + step_unified + compute_radiation_core
          # with the 3-way land/ice/ocean blend.
-         "albedo_land"]
+         "albedo_land",
+         # iter-258 (AIMIP Phase 2.7): l_mix_max wired through
+         # build_segment_fn + step_unified + physics_step_no_rad ->
+         # louis_turbulence kwarg override.
+         "l_mix_max"]
     )
     assert wired == expected, (
         f"Wired-trainable param set changed.  Expected {expected}, "
