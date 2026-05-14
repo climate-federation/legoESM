@@ -570,3 +570,27 @@ Phase-2 trainable accounting (revised, iter-258):
 | **Total wired trainable** | **10** | | **100 %** |
 
 `Ri_crit` and `Ck` remain in `tuning.py::TUNING_PARAMETERS` as experiment-config knobs.  They will re-enter the trainable set under a scheme-appropriate list (e.g. `_HOLTSLAG_BOVILLE_TRAINABLE`) when those schemes become AIMIP-relevant.
+
+## Iter-259 — AIMIP Phase-2 capstone: TrainablePhysicsParams integration sentinel
+
+Locks in the cumulative iter-251 → iter-258 wiring work with a 5-test integration sentinel `tests/test_aimip_trainable_params_integration.py`:
+
+1. `trainable_constraints_for_scheme("sbm", "louis")` returns exactly 10 names in the documented order.
+2. `TrainablePhysicsParams.from_defaults(...).to_segment_kwargs()` round-trips: every constrained value lands inside its `(min_val, max_val)` bounds.
+3. Every key emitted by `to_segment_kwargs` is also a kwarg of `build_segment_fn` — the trainable pytree can be `**kw`'d directly into the rollout entry point.
+4. `eqx.filter_grad` flows **finite, non-zero** gradients to every raw_value (differentiability guard against silently orphaned leaves).
+5. Constraint bounds match the canonical `tuning.py::TUNING_PARAMETERS` registry (prevents drift between the two sources of truth).
+
+All 5 tests green.  Combined with the iter-255 wire-status sentinel + the iter-257/iter-258 numerical sentinels, the AIMIP Phase-2 trainable surface is now monotonically enforced: any future addition that lands without complete wiring (constraint list ↔ `build_segment_fn` kwarg ↔ physics consumer ↔ tuning registry ↔ live gradient) trips at least one sentinel.
+
+Phase-2 sentinel coverage matrix:
+
+| Sentinel file | Pins |
+|---------------|------|
+| `test_aimip_phase2_trainable_wired.py` | every trainable name is a `build_segment_fn` kwarg; `UNWIRED_TODO` is empty; wired count = 10 |
+| `test_aimip_phase26_albedo_blend.py` | 3-way albedo blend numerical oracle; `SegmentForcing.land_fraction` default + field count |
+| `test_aimip_phase27_louis_l_mix_max.py` | `louis_turbulence` kwarg override changes output; backward-compat preserved |
+| `test_aimip_trainable_params_integration.py` | 10-param set complete + bounds + diff-flow + registry-bounds parity (this iter) |
+| `test_cases/test_aimip_template.py` | AIMIP experiment template registration + CMIP6 historical-GHG interpolation |
+
+Phase 2 closed.  Phase 3 (training script) is the next AIMIP focus.
