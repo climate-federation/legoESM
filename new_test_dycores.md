@@ -164,6 +164,8 @@ Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV /
 - iter-66 negative result (reverted): ico CB multiplicative-fixer attempt regressed Linf 5× — additive uniform correction wins on heterogeneous unstructured mesh.  See top compressed block for lesson.
 - iter-69: W2 5-day apples-to-apples — cube is BEST finite-volume.  See top compressed block.
 - iter-70: W5 15-day apples-to-apples — all 4 grids machine-precision mass conservation.  See top compressed block.
+- iter-75: post-iter-72 audit confirmed **NO remaining quick/full mode result mismatches** anywhere in the SW or PE matrix (17 test cases × 4 grids = 68 entries; all `days` fields consistent within each case).  Full apples-to-apples cross-grid comparison is now possible at any time without ambiguity.  Net result of iter-61..72: 4 of the 5 quick/full-mode mismatches found (CB cross-grid, W2 cross-grid, W5 cross-grid, W6 cross-grid, gravity_wave_3_1 cross-grid) refreshed to full mode; 5th (W6 cross-grid) was already full mode from a prior re-run.  27/27 AST guards still PASS after iter-74 hyperdiff comment refresh.
+
 - iter-73: full PE matrix cross-grid audit at current cached results.  All 13 PE cases (held_suarez ±topo, baroclinic ±rotated, gravity_wave_3_1, inertio_gravity_3_2, mountain_rossby_5_0, rossby_haurwitz_6_0, rotated_steady, rest_state_topo, dcmip_transport_11/12/13, amip) PASS on all 4 grids.  Cube max|v| parity vs ico (the canonical FV reference):
   - **Excellent (cube/ico in 0.95-1.15×)**: held_suarez, gravity_wave_3_1, inertio_gravity_3_2, rossby_haurwitz_6_0, baroclinic.
   - **Investigate cube outliers**:
