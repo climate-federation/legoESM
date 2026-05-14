@@ -368,6 +368,126 @@ def dino_bathymetry(lon_deg, lat_deg, cfg: DINOConfig | None = None):
 
 
 # ---------------------------------------------------------------------
+# Phase 2D — Initial conditions (Appendix D; ported from
+# vopikamm/DINO@v0.2.0 MY_SRC/usrdef_istate.F90)
+#
+# Note: paper eq D4-D5 has a typo. The formula reads
+#   T̃(φ,z) = (Θ(z) - Θ|_{z=0}) · (φ_1 - |φ|)/φ_1 + Θ|_{z=0}
+# but the surrounding text says "towards bottom values at the poles"
+# and the Zenodo source uses `zTbot` (depth-bottom value), not z=0.
+# We follow the source / text, not the equation: at the poles, columns
+# are isothermal/isohaline at the deep-abyss value (~4°C, ~35.12 g/kg).
+# ---------------------------------------------------------------------
+
+def dino_T_profile_1d(z_pos):
+    """Equatorial 1D temperature profile Θ(z) per paper eq D2 / Zenodo
+    source (usrdef_istate.F90, case 1 vertical profile).
+
+    Parameters
+    ----------
+    z_pos : array
+        Depth (positive down) in meters.
+
+    Returns
+    -------
+    T : array
+        Temperature in °C, same shape as ``z_pos``.
+    """
+    z = jnp.asarray(z_pos)
+    deep = 16.0 - 12.0 * jnp.tanh((z - 400.0) / 700.0)
+    shallow = (
+        15.0 * (1.0 - jnp.tanh((z - 50.0) / 1500.0))
+        - 1.4 * jnp.tanh((z - 100.0) / 100.0)
+        + 7.0 * (1500.0 - z) / 1500.0
+    )
+    weight_deep = (1.0 - jnp.tanh((500.0 - z) / 150.0)) / 2.0
+    weight_shallow = (1.0 - jnp.tanh((z - 500.0) / 150.0)) / 2.0
+    return deep * weight_deep + shallow * weight_shallow
+
+
+def dino_S_profile_1d(z_pos):
+    """Equatorial 1D salinity profile S(z) per paper eq D3 / Zenodo
+    source (usrdef_istate.F90).
+
+    Parameters
+    ----------
+    z_pos : array
+        Depth (positive down) in meters.
+
+    Returns
+    -------
+    S : array
+        Absolute salinity in g/kg, same shape as ``z_pos``.
+    """
+    z = jnp.asarray(z_pos)
+    deep = 36.25 - 1.13 * jnp.tanh((z - 305.0) / 460.0)
+    shallow = (
+        35.55 + 1.25 * (5000.0 - z) / 5000.0
+        - 1.62 * jnp.tanh((z - 60.0) / 650.0)
+        + 0.2 * jnp.tanh((z - 35.0) / 100.0)
+        + 0.2 * jnp.tanh((z - 1000.0) / 5000.0)
+    )
+    weight_deep = (1.0 - jnp.tanh((500.0 - z) / 150.0)) / 2.0
+    weight_shallow = (1.0 - jnp.tanh((z - 500.0) / 150.0)) / 2.0
+    return deep * weight_deep + shallow * weight_shallow
+
+
+def dino_initial_T_S(lat_deg, z_full_ref, cfg: DINOConfig | None = None):
+    """Compute T(lat, z) and S(lat, z) initial conditions for DINO.
+
+    Applies the meridional gradient (paper eq D4-D5 / Zenodo "case 4"):
+
+      T̃(φ, z) = (T_1D(z) - T_bot) · (φ_max - |φ|) / φ_max + T_bot
+
+    At the equator (|φ|=0): T̃ = T_1D(z) (full equatorial profile).
+    At the poles (|φ|=φ_max): T̃ = T_bot for all z (isothermal abyssal
+    columns — promotes high-latitude deep convection).
+
+    Parameters
+    ----------
+    lat_deg : array, shape (..., n_lat) or any broadcastable shape
+        Latitude in degrees.
+    z_full_ref : array, shape (n_levels,)
+        Cell-center z values (legoESM convention: NEGATIVE below
+        surface). Internally converted to positive depths.
+    cfg : DINOConfig, optional
+
+    Returns
+    -------
+    T : array, shape (*lat_deg.shape, n_levels)
+        Initial conservative temperature [°C].
+    S : array, shape (*lat_deg.shape, n_levels)
+        Initial absolute salinity [g/kg].
+    """
+    if cfg is None:
+        cfg = DINOConfig()
+
+    lat_deg = jnp.asarray(lat_deg)
+    z_full_ref = jnp.asarray(z_full_ref)
+    z_pos = -z_full_ref  # legoESM uses z negative below surface; the
+                         # Zenodo formulas use depth positive down.
+
+    T_1d = dino_T_profile_1d(z_pos)
+    S_1d = dino_S_profile_1d(z_pos)
+
+    # Bottom values (deepest cell-center). For the default DINO config
+    # (H_deep=4000 m, 36 levels), these are T_bot ≈ 3.9°C, S_bot ≈ 35.12.
+    T_bot = T_1d[-1]
+    S_bot = S_1d[-1]
+
+    # Meridional gradient factor (eq D4-D5; matches Zenodo case 4)
+    phi_max = cfg.lat_max_deg
+    factor = (phi_max - jnp.abs(lat_deg)) / phi_max  # 1 at equator, 0 at poles
+
+    # Broadcast: factor has shape lat_deg.shape; profiles have shape (n_levels,)
+    factor_b = factor[..., None]
+    T = (T_1d - T_bot) * factor_b + T_bot  # shape (*lat_deg.shape, n_levels)
+    S = (S_1d - S_bot) * factor_b + S_bot
+
+    return T, S
+
+
+# ---------------------------------------------------------------------
 # Phase 2E — Vertical grid (Appendix C, eq C3)
 # ---------------------------------------------------------------------
 
