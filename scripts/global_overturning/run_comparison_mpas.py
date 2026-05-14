@@ -433,7 +433,7 @@ def main():
                         jnp.full_like(T_data, S_STAR), 0.0)
 
     state = rest_state_mpas_ocean(
-        mesh, z_coord, T_surface=20.0, T_deep=2.0,
+        mesh, z_coord, T_water_init_C=20.0, T_deep=2.0,
         S_uniform=S_STAR, H_max=H_MAX, land_lat_threshold=90.0,
     )
     dtype = state.eta.data.dtype
@@ -453,20 +453,73 @@ def main():
         state, start_day = load_restart(args.restart, state)
         print(f"  Resumed from {args.restart} at day {start_day:.0f}")
 
-    # --- Print config ---
-    print(f"\n  Config (matched with lat-lon except K_zeta_bih):")
-    print(f"    A_h={A_H:.0e}, C_smag_lap={C_SMAG_LAP}")
-    print(f"    A_v={A_V:.0e}, K_v={K_V:.0e}")
-    print(f"    KPP(K_conv=1.0), enhanced_diffusion(K_conv=1.0)")
-    print(f"    bottom_drag: r={BOTTOM_DRAG_R:.0e}, "
-          f"BBL={BOTTOM_DRAG_BBL}m, u_bg={BOTTOM_DRAG_BG_VEL}")
-    print(f"    GM/Redi: κ_GM={KAPPA_GM}, κ_Redi={KAPPA_REDI}")
-    print(f"    PGF=adcroft, barotropic=implicit_cn")
-    _kzb = args.k_zeta_bih if args.k_zeta_bih is not None else 1e14
-    print(f"    K_zeta_bih={_kzb:.0e} (MPAS-only)")
-    print(f"    dt={DT}s, tracer_advection=tvd")
-    print(f"    Wind: global_wind τ_max={TAU_MAX}, "
-          f"tropical_scale={TROPICAL_WIND_SCALE}")
+    # --- Save and print actual config ---
+    import json
+    dt = args.dt if args.dt is not None else DT
+    run_config = {
+        "tag": args.tag or "default",
+        "grid_type": "mpas",
+        "subdivision": SUBDIVISION,
+        "n_cells": int(mesh.nCells),
+        "n_edges": int(mesh.nEdges),
+        "n_levels": N_LEVELS,
+        "H_max": H_MAX,
+        "dz_surface": DZ_SURFACE,
+        "dz_deep": DZ_DEEP,
+        "flat_bottom": args.flat_bottom,
+        "uniform_T": args.uniform_T,
+        "dt": float(dt),
+        "days": float(args.days),
+        "save_every_days": float(args.save_every_days),
+        "A_h": float(config.A_h),
+        "A_v": float(config.A_v),
+        "K_v": float(config.K_v),
+        "C_smag_lap": float(config.C_smag_lap),
+        "B_h": float(config.B_h),
+        "K_zeta_bih": float(config.K_zeta_bih),
+        "apvm_dt": float(config.apvm_dt),
+        "equatorial_visc_boost": float(config.equatorial_visc_boost),
+        "bottom_drag_r": float(config.bottom_drag_r),
+        "bottom_drag_bbl_thickness": float(config.bottom_drag_bbl_thickness),
+        "bottom_drag_bg_velocity": float(config.bottom_drag_bg_velocity),
+        "pgf_scheme": config.pgf_scheme,
+        "barotropic_solver": config.barotropic_solver,
+        "momentum_advection": getattr(config, "momentum_advection", "vector_invariant"),
+        "tracer_advection": config.tracer_advection,
+        "implicit_vertical_mixing": config.implicit_vertical_mixing,
+        "kappa_GM": float(config.gm_redi.kappa_GM),
+        "kappa_Redi": float(config.gm_redi.kappa_Redi),
+        "S_max": float(config.gm_redi.S_max),
+        "slope_scheme": config.gm_redi.slope_scheme,
+        "visbeck_enabled": config.gm_redi.visbeck.enabled,
+        "wind_profile": "global_wind",
+        "tau_max": TAU_MAX,
+        "tropical_wind_scale": TROPICAL_WIND_SCALE,
+        "tropical_wind_lat_deg": TROPICAL_WIND_LAT_DEG,
+        "T_star_eq": T_STAR_EQ,
+        "T_star_pole": T_STAR_POLE,
+        "S_star": S_STAR,
+        "tau_T_days": TAU_T / 86400,
+        "tau_S_days": TAU_S / 86400,
+        "precision": "fp64",
+        "restart_from": str(args.restart) if args.restart else None,
+        "command": " ".join(sys.argv),
+    }
+    config_path = outdir / "config.json"
+    with open(config_path, "w") as f:
+        json.dump(run_config, f, indent=2)
+    print(f"\n  Config saved to {config_path}")
+
+    # Print key parameters (from actual config object)
+    print(f"  Config:")
+    print(f"    A_h={config.A_h:.0e}, C_smag_lap={config.C_smag_lap}")
+    print(f"    A_v={config.A_v:.0e}, K_v={config.K_v:.0e}")
+    print(f"    K_zeta_bih={config.K_zeta_bih:.0e} (MPAS-only)")
+    print(f"    GM/Redi: κ_GM={config.gm_redi.kappa_GM}, "
+          f"κ_Redi={config.gm_redi.kappa_Redi}, "
+          f"S_max={config.gm_redi.S_max}")
+    print(f"    dt={dt}s, tracer_advection={config.tracer_advection}")
+    print(f"    Wind: τ_max={TAU_MAX}, tropical_scale={TROPICAL_WIND_SCALE}")
 
     # --- Time loop ---
     total_days = args.days

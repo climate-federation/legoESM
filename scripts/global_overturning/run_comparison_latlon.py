@@ -49,7 +49,7 @@ set_policy(PrecisionPolicy.fp64())
 
 from legoesm import constants
 from legoesm.core.field import Field
-from legoesm.grids.latlon import create_latlon_grid
+from legoesm.grids.latlon import create_latlon_grid, create_mercator_grid
 from legoesm.ocean.bathymetry import BathymetryConfig, init_ocean_bathymetry
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 from legoesm.ocean.eos import scale_depth as _SCALE_DEPTH
@@ -311,6 +311,15 @@ def main():
                    help="Meridional-only Laplacian viscosity [m²/s] (default: 0).")
     p.add_argument("--uniform-T", action="store_true",
                    help="Initialize with uniform T=10°C (barotropic test).")
+    p.add_argument("--mercator", action="store_true",
+                   help="Use Mercator grid (isotropic cells) instead of "
+                        "regular lat-lon.")
+    p.add_argument("--n-lon", type=int, default=None,
+                   help="Override N_LON (default: 360). For quick tests "
+                        "use 180 (2° resolution).")
+    p.add_argument("--lat-max", type=float, default=None,
+                   help="Override NORTH_CAP_LAT for Mercator grid [deg]. "
+                        "Lower values give larger polar cells (default: 80).")
     p.add_argument("--etopo",
                    default="/home/dbalwada/legoESM/data/bathymetry/etopo_1deg.nc")
     args = p.parse_args()
@@ -325,9 +334,18 @@ def main():
     snapshot_dir.mkdir(parents=True, exist_ok=True)
 
     # --- Grid ---
-    print(f"=== Lat-lon comparison run: {N_LAT}x{N_LON}, "
-          f"{args.days} days ===")
-    grid = create_latlon_grid(N_LAT, N_LON)
+    n_lon = args.n_lon if args.n_lon else N_LON
+    n_lat = N_LAT * n_lon // N_LON  # scale proportionally
+    lat_max = args.lat_max if args.lat_max else NORTH_CAP_LAT
+    if args.mercator:
+        grid = create_mercator_grid(n_lon=n_lon, lat_max_deg=lat_max)
+        print(f"=== Mercator comparison run: {grid.n_lat}x{grid.n_lon}, "
+              f"{args.days} days ===")
+        print("  *** MERCATOR grid (isotropic cells) ***")
+    else:
+        grid = create_latlon_grid(n_lat, n_lon)
+        print(f"=== Lat-lon comparison run: {n_lat}x{n_lon}, "
+              f"{args.days} days ===")
     z_coord_base = create_ocean_z_star(n_levels=N_LEVELS, H_max=H_MAX,
                                        dz_surface=DZ_SURFACE, dz_deep=DZ_DEEP)
 
@@ -336,7 +354,7 @@ def main():
         source="file", path=args.etopo,
         H_max=H_MAX, H_min=10.0, smoothing_passes=2,
         r_factor_max=0.2, depth_is_negative=True,
-        north_cap_lat=NORTH_CAP_LAT,
+        north_cap_lat=lat_max,
         south_cap_lat=None,     # full Southern Ocean
     )
     H_bathy_raw, ocean_mask = init_ocean_bathymetry(grid, bathy_cfg)
@@ -356,7 +374,7 @@ def main():
 
     n_ocean = int(jnp.sum(ocean_mask > 0.5))
     n_total = int(ocean_mask.size)
-    print(f"  Grid: {N_LAT}x{N_LON}, {N_LEVELS} levels")
+    print(f"  Grid: {grid.n_lat}x{grid.n_lon}, {N_LEVELS} levels")
     print(f"  Ocean cells: {n_ocean}/{n_total} "
           f"({100.0*n_ocean/n_total:.1f}%)")
     print(f"  Vertical: dz_sfc={DZ_SURFACE}m, dz_deep={DZ_DEEP}m")
@@ -364,7 +382,7 @@ def main():
     # --- Initial condition ---
     state = rest_state_latlon_cgrid_ocean(
         grid, z_coord_base,
-        T_surface=20.0, T_deep=2.0,
+        T_water_init_C=20.0, T_deep=2.0,
         S_uniform=S_STAR, H_max=H_MAX,
         land_mask_override=ocean_mask,
         H_bathy_override=H_snapped,
@@ -477,18 +495,80 @@ def main():
         state, start_day = load_restart(args.restart, state)
         print(f"  Resumed from {args.restart} at day {start_day:.0f}")
 
-    # --- Print config ---
-    print(f"\n  Config (matched with MPAS):")
-    print(f"    A_h={A_H:.0e}, C_smag_lap={C_SMAG_LAP}")
-    print(f"    A_v={A_V:.0e}, K_v={K_V:.0e}")
-    print(f"    KPP(K_conv=1.0), enhanced_diffusion(K_conv=1.0)")
-    print(f"    bottom_drag: r={BOTTOM_DRAG_R:.0e}, "
-          f"BBL={BOTTOM_DRAG_BBL}m, u_bg={BOTTOM_DRAG_BG_VEL}")
-    print(f"    GM/Redi: κ_GM={KAPPA_GM}, κ_Redi={KAPPA_REDI}")
-    print(f"    PGF=adcroft, barotropic=implicit_cn")
-    print(f"    dt={DT}s, tracer_advection=tvd")
-    print(f"    Wind: global_wind τ_max={TAU_MAX}, "
-          f"tropical_scale={TROPICAL_WIND_SCALE}")
+    # --- Save and print actual config ---
+    import json
+    dt = args.dt if args.dt is not None else DT
+    run_config = {
+        "tag": args.tag or "default",
+        "grid_type": "mercator" if args.mercator else "latlon",
+        "n_lat": int(grid.n_lat),
+        "n_lon": int(grid.n_lon),
+        "lat_max": float(lat_max),
+        "n_levels": N_LEVELS,
+        "H_max": H_MAX,
+        "dz_surface": DZ_SURFACE,
+        "dz_deep": DZ_DEEP,
+        "flat_bottom": args.flat_bottom,
+        "uniform_T": args.uniform_T,
+        "dt": float(dt),
+        "days": float(args.days),
+        "save_every_days": float(args.save_every_days),
+        "A_h": float(ocean_config.A_h),
+        "A_h_lat_scaling": float(ocean_config.A_h_lat_scaling),
+        "A_h_floor": float(ocean_config.A_h_floor),
+        "A_h_merid": float(ocean_config.A_h_merid),
+        "B_h": float(ocean_config.B_h),
+        "B_h_lat_scaling": ocean_config.B_h_lat_scaling,
+        "B_h_barotropic": float(ocean_config.B_h_barotropic),
+        "C_smag_lap": float(ocean_config.C_smag_lap),
+        "C_smag": float(ocean_config.C_smag),
+        "A_v": float(ocean_config.A_v),
+        "K_v": float(ocean_config.K_v),
+        "K_h": float(ocean_config.K_h),
+        "bottom_drag_r": float(ocean_config.bottom_drag_r),
+        "bottom_drag_bbl_thickness": float(ocean_config.bottom_drag_bbl_thickness),
+        "bottom_drag_bg_velocity": float(ocean_config.bottom_drag_bg_velocity),
+        "pgf_scheme": ocean_config.pgf_scheme,
+        "barotropic_solver": ocean_config.barotropic_solver,
+        "momentum_advection": ocean_config.momentum_advection,
+        "tracer_advection": ocean_config.tracer_advection,
+        "eos": ocean_config.eos,
+        "freshwater_closure": ocean_config.freshwater_closure,
+        "S_ref": float(ocean_config.S_ref),
+        "implicit_vertical_mixing": ocean_config.implicit_vertical_mixing,
+        "kappa_GM": float(ocean_config.gm_redi.kappa_GM),
+        "kappa_Redi": float(ocean_config.gm_redi.kappa_Redi),
+        "S_max": float(ocean_config.gm_redi.S_max),
+        "slope_scheme": ocean_config.gm_redi.slope_scheme,
+        "surface_complement": ocean_config.gm_redi.surface_complement,
+        "visbeck_enabled": ocean_config.gm_redi.visbeck.enabled,
+        "wind_profile": "global_wind",
+        "tau_max": TAU_MAX,
+        "tropical_wind_scale": TROPICAL_WIND_SCALE,
+        "tropical_wind_lat_deg": TROPICAL_WIND_LAT_DEG,
+        "T_star_eq": T_STAR_EQ,
+        "T_star_pole": T_STAR_POLE,
+        "S_star": S_STAR,
+        "tau_T_days": TAU_T / 86400,
+        "tau_S_days": TAU_S / 86400,
+        "precision": "fp64",
+        "restart_from": str(args.restart) if args.restart else None,
+        "command": " ".join(sys.argv),
+    }
+    config_path = outdir / "config.json"
+    with open(config_path, "w") as f:
+        json.dump(run_config, f, indent=2)
+    print(f"\n  Config saved to {config_path}")
+
+    # Print key parameters (from actual config, not constants)
+    print(f"  Config:")
+    print(f"    A_h={ocean_config.A_h:.0e}, C_smag_lap={ocean_config.C_smag_lap}")
+    print(f"    A_v={ocean_config.A_v:.0e}, K_v={ocean_config.K_v:.0e}")
+    print(f"    GM/Redi: κ_GM={ocean_config.gm_redi.kappa_GM}, "
+          f"κ_Redi={ocean_config.gm_redi.kappa_Redi}, "
+          f"S_max={ocean_config.gm_redi.S_max}")
+    print(f"    dt={dt}s, tracer_advection={ocean_config.tracer_advection}")
+    print(f"    Wind: τ_max={TAU_MAX}, tropical_scale={TROPICAL_WIND_SCALE}")
 
     # --- Time loop ---
     total_days = args.days

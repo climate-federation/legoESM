@@ -935,19 +935,78 @@ KPP (K_conv=1.0), enhanced diffusion convection, dt=1200s, fp64.
 κ_GM=κ_Redi=2400, S_max=0.01, implicit CN barotropic, KPP (K_conv=1.0),
 enhanced diffusion convection, dt=1200s, fp64.
 
-### Runs in progress
+### Completed runs
 
-- **BR19** (lat-lon flat bottom, 10 years): GPU 1, ~year 7
-- **MBR2** (MPAS flat bottom, 20 years): GPU 0, ~year 3
+- **BR19** (regular lat-lon flat bottom, 10yr): Stable but persistent
+  4-5Δy meridional bands. 2Δy seed suppressed by A_h=1e5 but
+  baroclinic amplification at larger scales persists due to grid
+  anisotropy (dx/dy up to 6:1).
+- **MBR2** (MPAS flat bottom, 20yr): **COMPLETED day 7300.** Stable,
+  clean circulation, no meridional bands. T range 1.87–24.83°C at
+  year 20. Section plots generated. Confirms MPAS config is sound.
+
+### Mercator grid experiments (2026-05-14)
+
+The regular lat-lon grid's dx/dy anisotropy (up to 6:1 at 80°N) is
+the root cause of the 2Δy instability. A Mercator grid has dx/dy = 1
+everywhere (isotropic cells) — both dx and dy shrink toward poles as
+R × cos(lat) × Δλ.
+
+`create_mercator_grid()` merged from main (PR #262). Same operators,
+same dynamics code — just different latitude spacing. For n_lon=360,
+lat_max=80°: grid is 278×360 (more rows because equatorial cells wider,
+polar cells narrower).
+
+**Mercator grid properties:**
+- Equatorial: dx = dy ≈ 111 km (same as regular 1°)
+- 60°S: dx = dy ≈ 56 km
+- 80°: dx = dy ≈ 19 km (CFL-limiting — need dt=600s vs 1200s)
+
+**Completed Mercator experiments:**
+
+| Exp | Config | Result |
+|-----|--------|--------|
+| MRC_BT1 (1°) | 278×360, uniform T, A_h=1e4, dt=1200s, 120d | **2Δy fraction = 0.0%** through day 240. Regular lat-lon BT1 had 0.1%. Mercator eliminates barotropic 2Δy seed. |
+| MRC_BT1 (2°) | 138×180, uniform T, A_h=1e4, dt=2400s, 120d | 2Δy frac 78-85% (vs 98-99% regular lat-lon). Equatorial blowup at day 120. Deleted. |
+| BT1_2deg | 90×180, regular lat-lon baseline for comparison | 2Δy frac 98-99% (dominated by grid noise). Deleted. |
+
+**Key barotropic finding:** Mercator 1° has **zero** 2Δy power through
+8 months of barotropic integration. The grid anisotropy hypothesis is
+**confirmed** — isotropic cells eliminate the barotropic KE aliasing seed.
+
+**Mercator baroclinic attempts:**
+
+| Exp | Config | Result |
+|-----|--------|--------|
+| MRC_BR1 (A_h=1e4) | dt=600s, C_smag=0.33, κ=2400 | Ran 210 days stable. Polar waves visible (Mercator resolves high-k waves at 80° that regular lat-lon's coarse dy filters out). Killed to increase A_h. |
+| MRC_BR1 (A_h=1e5, dt=1200s) | Full physics | BLOWUP day 20. Polar cells (dx=19km) too small for dt=1200s with baroclinic PGF. |
+| MRC_BR1 (lat_max=75°) | dt=1200s | BLOWUP day 51. Still too aggressive. |
+
+**Mercator polar cell issue:** At 80° latitude, Mercator cells are
+19×19 km — effectively eddy-permitting. Baroclinic adjustment generates
+fast waves on these tiny cells. Needs dt=600s (half of MPAS/regular
+lat-lon). Also generates visible Kelvin-like waves along the 80° wall
+that propagate into the interior. Regular lat-lon has the same wall but
+its 111 km dy acts as a low-pass filter hiding these waves.
+
+### Runs in progress (2026-05-14)
+
+- **MRC_BR1** (Mercator 278×360, flat bottom, baroclinic, A_h=1e5,
+  C_smag_lap=0.33, κ_GM=κ_Redi=2400, S_max=0.01, dt=600s, 10yr):
+  GPU 1, just started.
+- **METOPO1** (MPAS ico5, ETOPO bathymetry, A_h=1e5, C_smag_lap=0.33,
+  κ_GM=κ_Redi=2400, S_max=0.01, K_zeta_bih=1e14, dt=1200s, 20yr):
+  GPU 0, just started. First ETOPO run with validated config.
 
 ### Path forward
 
-1. Complete BR19 and MBR2 flat-bottom runs
-2. Compare at matched simulation time (year 10)
-3. Move to ETOPO bathymetry with same configs
-4. Run 10-year matched ETOPO comparison
-5. Document grid-dependent vs physics-dependent differences
-6. Long-term: tripolar grid eliminates the lat-lon 2Δy problem
+1. If METOPO1 stable: this becomes the MPAS production baseline.
+2. If MRC_BR1 stable and clean: launch Mercator ETOPO for matched
+   comparison.
+3. Compare MPAS ETOPO vs Mercator ETOPO: circulation, ACC, WBCs,
+   overturning, energetics.
+4. `config.json` now saved automatically for all new runs (added
+   2026-05-14).
 
 ## Honest Caveats
 
