@@ -32,6 +32,7 @@ import math
 from dataclasses import dataclass
 
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm import constants
 from legoesm.ocean.vertical import OceanZStarCoordinate
@@ -365,6 +366,148 @@ def dino_bathymetry(lon_deg, lat_deg, cfg: DINOConfig | None = None):
     bathy = sill_taper * sill + (1.0 - sill_taper) * bathy
 
     return bathy
+
+
+# ---------------------------------------------------------------------
+# Phase 2C — Surface forcing (Sect 2.3, Appendix B; ported from
+# vopikamm/DINO@v0.2.0 MY_SRC/usrdef_sbc.F90)
+#
+# Surprising findings vs paper text (locked in 2026-05-14):
+# - Wind interpolation is NOT PCHIP; the Zenodo source uses cubic
+#   Hermite smooth-step (3-2s)·s² between adjacent (lat, tau) knots.
+#   See `znl_cbc` in usrdef_sbc.F90.
+# - Temperature restoring T*(lat) uses sin((φ+φ_max)·π/(φ_max-φ_min))
+#   which is algebraically equivalent to cos(π·φ/L_φ) with L_φ=140 —
+#   paper's cosine form is correct.
+# - Q_sr (annual mean) is the time-average of the seasonal eq B5,
+#   computed by numerical quadrature over a 360-day year.
+# - Q_sr / non-solar split (paper eq 8) is applied where the
+#   restoring tendency is evaluated, NOT here.
+# ---------------------------------------------------------------------
+
+def dino_wind_stress(lat_deg, cfg: DINOConfig | None = None):
+    """Zonal wind stress τ_u(lat) using cubic Hermite smooth-step
+    interpolation between (lat, tau) knots — matches Zenodo `znl_cbc`.
+
+    Each segment is interpolated with `(3 - 2s)·s²` where
+    s = clamp((φ - φ_left) / (φ_right - φ_left), 0, 1). This is a
+    cubic with zero derivative at both endpoints — smoother than
+    linear interpolation, NOT a true PCHIP.
+
+    Parameters
+    ----------
+    lat_deg : array
+        Latitude in degrees.
+    cfg : DINOConfig, optional
+
+    Returns
+    -------
+    tau_u : array, same shape as lat_deg
+        Zonal wind stress [N/m²]. Purely zonal (no meridional component).
+    """
+    if cfg is None:
+        cfg = DINOConfig()
+
+    lat_deg = jnp.asarray(lat_deg, dtype=jnp.float64)
+    lats = jnp.asarray(cfg.wind_tau_lats_deg, dtype=jnp.float64)
+    taus = jnp.asarray(cfg.wind_tau_values, dtype=jnp.float64)
+
+    # Find the segment containing each lat (vectorized).
+    # For each lat point: locate the index ks s.t. lats[ks] <= lat <= lats[ks+1].
+    # Use right-side searchsorted so that lat == lats[i] maps to segment [i-1, i].
+    idx = jnp.clip(
+        jnp.searchsorted(lats, lat_deg, side="right") - 1,
+        0, lats.shape[0] - 2,
+    )
+    lat_lo = lats[idx]
+    lat_hi = lats[idx + 1]
+    tau_lo = taus[idx]
+    tau_hi = taus[idx + 1]
+
+    s = jnp.clip((lat_deg - lat_lo) / (lat_hi - lat_lo), 0.0, 1.0)
+    weight = (3.0 - 2.0 * s) * s ** 2  # cubic Hermite smooth-step
+    return tau_lo + (tau_hi - tau_lo) * weight
+
+
+def dino_T_star_annual_mean(lat_deg, cfg: DINOConfig | None = None):
+    """Annual-mean temperature restoring target T*(lat), per paper eq B1.
+
+    T*(φ) = T*_n/s + (T*_eq - T*_n/s) · cos(π·φ/L_φ)
+
+    where the n/s subscript switches at the equator. L_φ = 140°.
+    Equivalent to the sin-form used in the Zenodo source.
+    """
+    if cfg is None:
+        cfg = DINOConfig()
+    lat = jnp.asarray(lat_deg)
+    T_star_ns = jnp.where(lat <= 0.0, cfg.T_star_s_mean, cfg.T_star_n_mean)
+    # Use cos form (paper); equivalent to NEMO's sin((φ+φ_max)π/L_φ).
+    profile = jnp.cos(jnp.pi * lat / cfg.L_phi_deg)
+    return T_star_ns + (cfg.T_star_eq - T_star_ns) * profile
+
+
+def dino_S_star(lat_deg, cfg: DINOConfig | None = None):
+    """Salinity restoring target S*(lat) with equatorial Gaussian dip
+    per paper eq B2 / Zenodo source.
+
+    S*(φ) = S*_n/s + (S*_eq - S*_n/s) · (1 + cos(2π·φ/L_φ))/2
+            − 1.25·exp(−φ²/7.5²)
+    """
+    if cfg is None:
+        cfg = DINOConfig()
+    lat = jnp.asarray(lat_deg)
+    S_star_ns = jnp.where(lat <= 0.0, cfg.S_star_s, cfg.S_star_n)
+    cos_factor = (1.0 + jnp.cos(2.0 * jnp.pi * lat / cfg.L_phi_deg)) / 2.0
+    dip = cfg.S_star_eq_dip_amp * jnp.exp(
+        -(lat ** 2) / cfg.S_star_eq_dip_sigma_deg ** 2,
+    )
+    return S_star_ns + (cfg.S_star_eq - S_star_ns) * cos_factor - dip
+
+
+def _Q_sr_instantaneous(lat_deg, day_of_year, cfg: DINOConfig):
+    """Q_sr at (lat, day) per paper eq B5.
+
+    Q_sr(t, φ) = max(230 · cos(π/180 · [φ − 23.5·cos(π·(d−171)/180)]), 0)
+    """
+    decl = cfg.solar_declination_amp_deg * jnp.cos(
+        jnp.pi * (day_of_year - 171.0) / 180.0,
+    )
+    arg = jnp.pi / 180.0 * (lat_deg - decl)
+    return jnp.maximum(cfg.Q_sr_amp * jnp.cos(arg), 0.0)
+
+
+def dino_Q_sr_annual_mean(lat_deg, cfg: DINOConfig | None = None,
+                          n_days: int = 360):
+    """Annual-mean Q_sr(lat) by trapezoid quadrature of paper eq B5
+    over a 360-day year.
+
+    Computed once at config time (NumPy-side); result is a JAX array.
+    Not just `230·cos(φ)` — the polar-night max(., 0) clipping makes
+    the high-latitude annual mean fall off faster than cos(φ).
+
+    Parameters
+    ----------
+    lat_deg : array
+    cfg : DINOConfig, optional
+    n_days : int
+        Number of days per year used for quadrature (DINO uses 360).
+
+    Returns
+    -------
+    Q_sr_bar : array, same shape as lat_deg, in W/m².
+    """
+    if cfg is None:
+        cfg = DINOConfig()
+    lat = np.asarray(lat_deg, dtype=np.float64)
+    days = np.arange(1, n_days + 1, dtype=np.float64)
+    # Broadcast: (n_days, *lat.shape)
+    decl = cfg.solar_declination_amp_deg * np.cos(
+        np.pi * (days - 171.0) / 180.0,
+    )
+    decl_b = decl.reshape((n_days,) + (1,) * lat.ndim)
+    arg = np.pi / 180.0 * (lat[None, ...] - decl_b)
+    q = np.maximum(cfg.Q_sr_amp * np.cos(arg), 0.0)
+    return jnp.asarray(q.mean(axis=0))
 
 
 # ---------------------------------------------------------------------
