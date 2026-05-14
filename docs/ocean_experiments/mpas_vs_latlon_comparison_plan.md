@@ -323,6 +323,33 @@ Exp 0: Baseline (30 days, fp64)
 │   └── BR18: A_h=1e5 + kr=2400 + 100m complement → 2dy=3.7e-7 year 10
 │       (self-stabilizing: peaks at day 180, then collapses)
 │
+├── MPAS flat-bottom progression (2026-05-14):
+│   ├── MBT1: A_h=1e4, uniform T → BLOWUP day 24 (needs more visc)
+│   ├── MBT2: A_h=1e5, uniform T → stable 120d, max|u|=0.83
+│   ├── MBR1: A_h=1e5, stratified, full physics → stable 120d, max|u|=0.67
+│   │   NO 2Δy instability! Confirms it's lat-lon-specific (grid anisotropy)
+│   └── MBR2: A_h=1e5, kGM=kRedi=2400, S_max=0.01, 20yr → RUNNING
+│
+├── MPAS vs lat-lon spinup comparison (day ~1000):
+│   ├── MPAS (MBR2): smooth, classic linear spinup. max|u|=0.51
+│   ├── Lat-lon (BR19): meridional zonal bands propagating equatorward.
+│   │   max|u|=1.26. Bands are completely absent on MPAS.
+│   ├── Ocean expert: bands are residual 2Δy instability at 4-5Δy scale.
+│   │   A_h=1e5 kills 2Δy seed but baroclinic amplification operates at
+│   │   slightly larger scales. Grid anisotropy (dx/dy up to 6:1) channels
+│   │   energy into zonal bands. MPAS immune due to isotropic mesh.
+│   ├── Dycore expert: MPAS has NO KE aliasing 2Δy seed (Voronoi KE
+│   │   computation has no face→center→square→gradient round-trip).
+│   │   K_zeta_bih on u_total is the only barotropic-mode viscosity on MPAS
+│   │   (A_h acts on u_prime there too — not yet fixed).
+│   ├── SST difference (17.9 vs 14.6°C): mostly time difference (year 2.3
+│   │   vs 6.8); both converging toward ~14-16°C equilibrium.
+│   └── Conclusion: the two grids have fundamentally DIFFERENT grid-scale
+│       instability pathways requiring DIFFERENT remedies:
+│       - Lat-lon: KE aliasing + anisotropy → 2Δy → needs high A_h + Ferrari
+│       - MPAS: TRiSK ζ-checkerboard → needs K_zeta_bih (or APVM+B_h)
+│       This is inherent to the comparison, not a fixable discrepancy.
+│
 └── Redi diagnostic (BR18 year 10):
     DM95 taper = 0.65 (surface) to 0.89 (interior) — not reaching 1.0
     because slopes ≈ 0.003-0.004 (close to S_max=0.005).
