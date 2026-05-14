@@ -71,10 +71,13 @@ Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV /
   - **PE held_suarez cube iter-22 bundle (sigma vertical)**: ran C36 30-day.  max|v|=**10.8 m/s, mass_drift=4.97e-12** — bit-identical to pre-iter-22 measurement.  Wall 1131 s (+1.5 % vs 1116 s pre-change).  The PE factory bundle is also stable on the 30-day climate-equilibrium run.
   
   Both NH cube parity (iter-5/6/7 win at 7.36 m/s on TC3) AND PE cube held_suarez stability are preserved through the iter-12..22 cumulative bundle.
+- iter-24: **SW Williamson 6 cube wired (deferred from iter-11).**  Add `test_num=6` branch to the matrix runner SW cube path using `_w6_winds_geo(lon_edge, lat_edge, R)` from `tests/test_cases/williamson_extended.py` for analytic edge-midpoint (u_east, v_north) at every D-grid edge; rotate to (u_d, v_d) via the cube's `(cos_angle_edge, sin_angle_edge)` matrices.  h field from `williamson_test6(grid)` cell-centre init.  Also extended the W6 GRID_TYPES iteration (line 211) to include `cubed_sphere`.  **Result at C36 day-1 quick**: cube `mass_drift=3.82e-16, wall 12.6 s` — machine precision; cross-grid table now shows cube/ico/spec at 3.82e-16 / 0.00e+00 / 1.91e-16.  Lat-lon W6 still deferred (no W6 C-grid wind init yet).
 
-## Iter-21+ queued
+## Iter-21+ queued (status post iter-24)
 
-- PE `delt_max=1.0` and `heat_source_del2_iters=2` on baroclinic cube (factory defaults; cheap correctness flags).
-- Re-verify cube TC3 cumulative iter-12..17 quietly when matrix runner has slack.
-- Cube SW Williamson 6 wiring (deferred from iter-11 due to ~30 LOC effort).
-- AMIP cube vs other grids cross-comparison after factory flags fully promoted.
+- ✅ iter-21: PE `heat_source_del2_iters=2` on baroclinic cube.
+- ✅ iter-22: PE factory bundle propagated to held_suarez + AMIP cube.
+- ✅ iter-23: TC3 cube cumulative iter-12..17 verified (7.36 m/s bit-identical to iter-7).
+- ✅ iter-24: SW Williamson 6 cube wiring (mass_drift=3.82e-16, cross-grid table now includes cube W6).
+- AMIP cube cumulative bundle verification (slow — 30-day quick at 900 s wall).
+- Lat-lon SW Williamson 6 wiring (W6 C-grid wind init not yet implemented).

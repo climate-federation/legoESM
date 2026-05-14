@@ -208,7 +208,11 @@ def _build_test_matrix() -> list[TestCase]:
         # offsets (W6 winds depend on both lon and lat, unlike W2/W5),
         # so they are deferred to M1.b.  See
         # ``docs/dycore_validation_catalog.md``.
-        if g in ("icosahedral", "spectral"):
+        # new_test_dycores iter-24: extend W6 to cube (cubed_sphere)
+        # via the edge-midpoint analytic init wired in run_shallow_water.
+        # Lat-lon W6 wiring still deferred (no W6 C-grid wind init yet;
+        # see ``tests/test_cases/williamson_extended.py``).
+        if g in ("icosahedral", "spectral", "cubed_sphere"):
             matrix.append(TestCase(
                 "shallow_water", "williamson6", g, res[g], "none", 14, 1,
                 {"test_num": 6}))
@@ -2023,13 +2027,39 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         cdgrid = model.cdgrid
 
         # Initialise edge-midpoint D-grid winds analytically.
-        sw = williamson_test2(grid) if test_num == 2 else williamson_test5(grid)
-        u0 = (2.0 * np.pi * float(grid.radius) / (12.0 * 86400.0)
-              if test_num == 2 else 20.0)
-        u_east_x = u0 * jnp.cos(cdgrid.lat_edge_x)
-        u_d = cdgrid.cos_angle_edge_x * u_east_x
-        u_east_y = u0 * jnp.cos(cdgrid.lat_edge_y)
-        v_d = -cdgrid.sin_angle_edge_y * u_east_y
+        # new_test_dycores iter-24: extend cube SW init to W6
+        # (Rossby-Haurwitz wave-4).  W6 winds depend on both lon
+        # and lat, so the edge-midpoint analytic init uses
+        # ``_w6_winds_geo(lon_edge, lat_edge, R)`` from
+        # ``tests/test_cases/williamson_extended.py`` and rotates
+        # ``(u_east, v_north) → (u_d, v_d)`` via the cube's
+        # ``(cos_angle_edge, sin_angle_edge)`` rotation matrices.
+        # h field from the W6 cube cell-centre init.
+        if test_num == 6:
+            from tests.test_cases.williamson_extended import (
+                williamson_test6, _w6_winds_geo,
+            )
+            sw = williamson_test6(grid)
+            R = grid.radius
+            u_east_x, v_north_x = _w6_winds_geo(
+                cdgrid.lon_edge_x, cdgrid.lat_edge_x, R,
+            )
+            u_d = (cdgrid.cos_angle_edge_x * u_east_x
+                   + cdgrid.sin_angle_edge_x * v_north_x)
+            u_east_y, v_north_y = _w6_winds_geo(
+                cdgrid.lon_edge_y, cdgrid.lat_edge_y, R,
+            )
+            v_d = (-cdgrid.sin_angle_edge_y * u_east_y
+                   + cdgrid.cos_angle_edge_y * v_north_y)
+        else:
+            sw = (williamson_test2(grid) if test_num == 2
+                  else williamson_test5(grid))
+            u0 = (2.0 * np.pi * float(grid.radius) / (12.0 * 86400.0)
+                  if test_num == 2 else 20.0)
+            u_east_x = u0 * jnp.cos(cdgrid.lat_edge_x)
+            u_d = cdgrid.cos_angle_edge_x * u_east_x
+            u_east_y = u0 * jnp.cos(cdgrid.lat_edge_y)
+            v_d = -cdgrid.sin_angle_edge_y * u_east_y
         state = FV3EdgeShallowWaterState(
             h=sw.h.data, u_d=u_d, v_d=v_d, h_s=sw.h_s.data)
         model.set_initial_mass(state)
