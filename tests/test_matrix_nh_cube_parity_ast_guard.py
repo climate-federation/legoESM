@@ -816,3 +816,37 @@ def test_iter66_cb_ico_uses_additive_correction():
         "because it regressed Linf 5x on the heterogeneous ico "
         "mesh.  See iter-66 lesson in matrix-runner comment."
     )
+
+
+def test_iter102_tc2_cube_blowup_warning_present():
+    """iter-105 sentinel: the iter-102 critical-finding warning comment
+    must remain in the matrix runner TC2 cube branch.
+
+    iter-102 discovered that NH TC2 cube blows up at day 0.13 (step
+    8500) of the full 6-hour run, despite the iter-5/6/7/12..17 NH
+    bundle which had measured |w|=0.32 m/s at quick-mode 5 minutes.
+    iter-104 added an inline WARNING block citing the day-0.13 BLOWUP
+    + 4 hypothesis-driven probe directions for iter-104+ investigation.
+
+    This sentinel ensures the warning is preserved across future
+    refactors so any maintainer touching the TC2 cube config sees the
+    known full-mode issue and doesn't waste time re-discovering it.
+    """
+    src = _runner_source()
+    # Anchor: a distinctive phrase from the iter-102 warning that is
+    # unlikely to appear elsewhere in the matrix runner.
+    assert "TC2 cube BLOWS UP at" in src, (
+        "iter-105 regression: matrix CB cube branch no longer contains "
+        "the iter-102 critical-finding WARNING comment "
+        "(``TC2 cube BLOWS UP at day 0.13...``).  Re-add the warning "
+        "block so future maintainers see the known full-mode blowup "
+        "issue + the 4 hypothesis-driven probe directions documented "
+        "in new_test_dycores.md iter-102/103."
+    )
+    # Anchor 2: the hypothesis list header.
+    assert "Hypotheses (probe iter-104+" in src, (
+        "iter-105 regression: matrix CB cube branch is missing the "
+        "iter-104 hypothesis list.  The 4 probe directions "
+        "(n_acoustic_substeps, hyperdiff, acoustic_off_centering, FV3 "
+        "oracle) need to remain visible to future investigators."
+    )
