@@ -72,6 +72,12 @@ Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV /
 - iter-40: investigated iter-31 mechanism — initially concluded "JAX-trace artifact" based on the stale iter-1019 warning at `operators_cdgrid.py:1316`.  Document compressed.
 - iter-41: **iter-40 CORRECTION** — found the real biharmonic hyperdiff implementation at `fv3_sw_tendencies` cell-centre geographic path (`operators_cdgrid.py:1444-1456`).  The iter-1019 warning was stale (written before that implementation landed in a later iter; the warning was never retired).  Removed the misleading warning and replaced the function docstring with an accurate explanation.  Confirmed via damp_v sweep (0.040/0.050/0.060 all BLOW UP) that hyperdiff IS the right operator, not a happy accident.  All 26 sentinels (24 AST + 2 numerical) PASS.
 - iter-42: **MAJOR cube W2 parity gain** — armed by the iter-41 confirmation that hyperdiff is algorithmic, extended the SW cube hyperdiff override gate from `test_num in (5, 6)` to `test_num in (2, 5, 6)`.  **Matrix W2 cube 5-day**: L2 2.45e-3 → **7.16e-4** (3.4× better); Linf 2.40e-2 → **1.10e-2** (2.2× better); v_ll_Linf **3.65 → 0.82 m/s (4.5× better)**.  Cross-grid: cube was 9× worse than latlon on L2; now 2.7× — cube W2 parity gap meaningfully closed.  iter-1002 1-day W2 sentinel uses its own config (independent of matrix runner) so unaffected; verified PASS.  iter-37 sentinel renamed `test_sw_cube_propagating_tests_have_hyperdiff_override` and updated to pin gate `{2, 5, 6}`.
+- iter-43: cumulative cube SW matrix full-duration verification.  4/4 PASS in 84 s:
+  - W2 5-day: L2=7.16e-4, Linf=1.10e-2, v_ll_Linf=0.82 m/s (iter-42 win locked).
+  - W5 15-day: mass_drift=9.71e-16 (iter-33 hyperdiff stable).
+  - W6 14-day: mass_drift=3.82e-16 (iter-31 hyperdiff stable).
+  - CB 12-day: L2=1.09 (structural PPM positivity issue, mass_drift=7.42e-9 fine).
+  Cross-grid SW W2 L2: **cube 7.16e-4** vs latlon 2.67e-4 (2.7×) vs ico 9.91e-5 (7×) vs spectral 3.61e-8 (truncation).  Cube SW parity gap most closed it's been since iter-1 began.
 
 ## Iter-41+ queued (status post iter-41)
 
