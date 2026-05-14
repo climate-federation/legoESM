@@ -943,6 +943,162 @@ def dino_mpas_initial_state_arrays(
     return T, S, H_bathy, land_mask
 
 
+def dino_mpas_state(
+    mesh,
+    z_coord: OceanZStarCoordinate,
+    cfg: DINOConfig | None = None,
+    seam_strip_width_deg: float | None = None,
+):
+    """Build a full MPASOceanState for DINO from rest with IC stratification.
+
+    Wraps the (T, S, H_bathy, land_mask) arrays from
+    ``dino_mpas_initial_state_arrays`` into Field objects matching the
+    legoESM MPAS convention, with u = 0, η = 0, w = 0.
+
+    Returns
+    -------
+    MPASOceanState
+    """
+    from legoesm.core.field import Field
+    from legoesm.core.state import MPASOceanState
+
+    if cfg is None:
+        cfg = DINOConfig()
+
+    T, S, H_bathy, land_mask = dino_mpas_initial_state_arrays(
+        mesh, z_coord, cfg, seam_strip_width_deg=seam_strip_width_deg,
+    )
+
+    nlev = z_coord.n_levels
+    nCells = mesh.nCells
+    nEdges = mesh.nEdges
+    dtype = T.dtype
+
+    return MPASOceanState(
+        u=Field(jnp.zeros((nEdges, nlev), dtype=dtype),
+                "u", ("nEdges", "nlev"), "m/s"),
+        T=Field(T, "T", ("nCells", "nlev"), "degC"),
+        S=Field(S, "S", ("nCells", "nlev"), "PSU"),
+        eta=Field(jnp.zeros(nCells, dtype=dtype),
+                  "eta", ("nCells",), "m"),
+        w=Field(jnp.zeros((nCells, nlev + 1), dtype=dtype),
+                "w", ("nCells", "nlev+1"), "m/s"),
+        H_bathy=Field(H_bathy, "H_bathy", ("nCells",), "m"),
+        land_mask=Field(land_mask, "land_mask", ("nCells",), "1"),
+    )
+
+
+def dino_mpas_model_config(
+    mesh,
+    cfg: DINOConfig | None = None,
+    physics: bool = True,
+):
+    """Build (MPASOceanConfig, OceanPhysicsConfig) for DINO.
+
+    Translates DINOConfig fields to the MPAS model + physics configs
+    needed by ``MPASOceanModel``.
+
+    Parameters
+    ----------
+    mesh : VoronoiMesh
+        Used to derive a representative cell-resolution scalar for
+        lateral mixing coefficients (``A_h ≈ 0.5·U_M·sqrt(<area>)``).
+        For a quasi-uniform regional mesh this is the right magnitude;
+        the proper grid-dependent computation lives in Phase 1B
+        (blocked on Mercator).
+    cfg : DINOConfig, optional
+    physics : bool
+        If True, include KPP + GM/Redi + enhanced-diffusion convection
+        + Jerlov SW. If False, return ``physics=None`` (dycore only —
+        for rest-state smoke tests).
+
+    Returns
+    -------
+    model_config : MPASOceanConfig
+    physics_config : OceanPhysicsConfig or None
+    """
+    from legoesm.ocean.mpas_config import MPASOceanConfig
+
+    if cfg is None:
+        cfg = DINOConfig()
+
+    # Representative cell size from mean cell area (m).
+    cell_dx_m = float(jnp.sqrt(jnp.mean(mesh.areaCell)))
+    A_h = 0.5 * cfg.U_M * cell_dx_m
+    K_h = 0.5 * cfg.U_T * cell_dx_m
+
+    # Convert DINO's quadratic C_d to MPAS linear-with-floor (MOM6 form):
+    # r = C_d * u_bg recovers C_d * |u| at |u| >> u_bg.
+    u_bg = 0.1
+    bottom_drag_r = cfg.C_d_bottom * u_bg
+
+    model_config = MPASOceanConfig(
+        rho_0=cfg.rho_0,
+        A_h=A_h,
+        K_h=K_h,
+        A_v=cfg.A_v_bg,
+        K_v=cfg.K_v_bg,
+        bottom_drag_r=bottom_drag_r,
+        bottom_drag_bg_velocity=u_bg,
+        bottom_drag_bbl_thickness=50.0,  # spread drag over 50 m at thin partials
+        n_barotropic_substeps=30,
+        barotropic_solver=cfg.barotropic_solver,
+        tracer_advection=cfg.tracer_advection,
+        implicit_vertical_mixing=True,
+    )
+
+    if not physics:
+        return model_config, None
+
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.physics.convection.config import (
+        EnhancedDiffusionConfig, OceanConvectionConfig,
+    )
+    from legoesm.ocean.physics.lateral_mixing.config import (
+        GMRediConfig, LateralMixingConfig, VisbeckConfig,
+    )
+    from legoesm.ocean.physics.shortwave_penetration import (
+        ShortwavePenetrationConfig,
+    )
+    from legoesm.ocean.physics.surface_forcing.config import SurfaceForcingConfig
+    from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
+    from legoesm.ocean.physics.vertical_mixing.config import (
+        KPPConfig, VerticalMixingConfig,
+    )
+
+    physics_config = OceanPhysicsConfig(
+        vertical_mixing=VerticalMixingConfig(
+            scheme="kpp",
+            kpp=KPPConfig(K_bg=cfg.K_v_bg, A_bg=cfg.A_v_bg),
+        ),
+        lateral_mixing=LateralMixingConfig(
+            scheme="gm_redi" if cfg.use_gm_redi else "none",
+            gm_redi=GMRediConfig(
+                kappa_GM=1000.0,  # ignored when Visbeck is enabled
+                kappa_Redi=1000.0,
+                S_max=cfg.redi_S_max,
+                slope_scheme=cfg.gm_redi_slope_scheme,
+                visbeck=VisbeckConfig(
+                    enabled=True,
+                    alpha=cfg.visbeck_alpha,
+                    kappa_min=cfg.visbeck_kappa_min,
+                    kappa_max=cfg.visbeck_kappa_max,
+                ),
+            ),
+        ),
+        convection=OceanConvectionConfig(
+            scheme="enhanced_diffusion",
+            enhanced_diffusion=EnhancedDiffusionConfig(K_conv=cfg.K_conv),
+        ),
+        shortwave_penetration=ShortwavePenetrationConfig(
+            water_type=cfg.jerlov_water_type,
+        ),
+        surface_forcing=SurfaceForcingConfig(scheme="none"),
+        bottom_drag=BottomDragConfig(scheme="none"),  # using model-level drag
+    )
+    return model_config, physics_config
+
+
 # Convenience: surface-layer restoring timescales derived from heat-flux
 # coefficients (eq 8 of paper). Useful for sanity printouts.
 def restoring_timescale_T_days(cfg: DINOConfig) -> float:
