@@ -196,6 +196,17 @@ class DINOConfig:
     bottom_drag_bg_velocity: float = 0.1   # u_bg [m/s] for MOM6 quadratic-with-floor form
     bottom_drag_bbl_thickness: float = 50.0  # BBL thickness [m] for distributed drag
     n_barotropic_substeps: int = 30   # baroclinic-to-barotropic step ratio
+    # Implicit vertical mixing: REQUIRED for KPP-driven cold restoring at
+    # the south wall. Diagnosed 2026-05-14: with explicit vertical mixing
+    # (legoESM default), KPP K_v at the cold-cap south-wall cells exceeds
+    # the explicit-diffusion CFL threshold (K_v·dt/dz² > 0.5; for our
+    # dz_0=10m, dt=2700s → K_v_crit=0.0185 m²/s, well below typical KPP
+    # values of 0.01-1 m²/s in active mixing). The result is a
+    # 2Δz vertical-mode tracer instability that explodes a single
+    # south-wall cell over 90 minutes, then cascades. Implicit-Euler
+    # vertical diffusion is unconditionally stable for any K_v
+    # (standard practice in MOM6, NEMO, GFDL ocean cores).
+    implicit_vertical_mixing: bool = True
 
     # ------------------------------------------------------------------
     # Time stepping
@@ -1103,6 +1114,7 @@ def dino_lat_lon_model_config(
         A_h_floor=cfg.A_h_floor,
         A_h_eq_boost=cfg.A_h_eq_boost,
         A_h_eq_sigma_deg=cfg.A_h_eq_sigma_deg,
+        implicit_vertical_mixing=cfg.implicit_vertical_mixing,
         gm_redi=gm_redi_cfg,           # lat-lon C-grid GM/Redi direct path
         physics=physics_cfg,
         eos="wright",
@@ -1429,46 +1441,64 @@ def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt):
 
     Components (paper eqs 7-10):
       eq 7  — wind τ_u → top-layer u tendency
-      eq 8  — non-solar T restoring (A_θ(T*-T) − Q_sr) at top layer
-      eq 9  — A_S(S*-S) salinity restoring at top layer
+      eq 8  — non-solar T restoring (A_θ(T*-T) − Q_sr) at top layer,
+               via legoesm.ocean.physics.surface_forcing.restoring with
+               implicit=True (analytical implicit-Euler — stable for
+               any dt; required for DINO at paper-spec K_conv=100,
+               τ_T=11.85 days; see issue #266 / PR #267)
+      eq 9  — A_S(S*-S) salinity restoring at top layer (also implicit)
       eq 10 — Jerlov type I column-distributed Q_sr through all levels
 
     Returns a new state (immutable update of T, S, u).
     """
+    from legoesm.ocean.physics.surface_forcing.config import (
+        RestoringConfig, tau_from_flux_coefficient,
+    )
+    from legoesm.ocean.physics.surface_forcing.restoring import (
+        restoring_surface_forcing,
+    )
+
     dz_0 = float(z_coord.dz_ref[0])
     cell_mask = state.land_mask.data
 
-    # T tendency at top layer (eq 8; subtracts Q_sr from non-solar component)
-    T_top = state.T.data[..., 0]
-    dT_dt_top = dino_top_layer_T_tendency(
-        T_top, forcing["T_star_2d"], forcing["Q_sr_2d"], dz_0, cfg,
+    # T/S restoring via the legoESM module with implicit=True. Paper
+    # eq 8 split = subtract_qsr=True (Q_sr provided as sw_down).
+    tau_T = tau_from_flux_coefficient(cfg.A_theta, cfg.rho_0, cfg.c_p, dz_0)
+    tau_S = tau_from_flux_coefficient(cfg.A_S, cfg.rho_0, 1.0, dz_0)
+    restoring_cfg = RestoringConfig(
+        tau_T=tau_T, tau_S=tau_S,
+        T_star_array=forcing["T_star_2d"],
+        S_star_array=forcing["S_star_2d"],
+        subtract_qsr=True,
+        implicit=True,
+    )
+    rest_out = restoring_surface_forcing(
+        state.T.data, state.S.data, _LatLonGridShim(state, cell_mask),
+        restoring_cfg,
+        sw_down=forcing["Q_sr_2d"], dt=dt,
+        rho_0=cfg.rho_0, c_p=cfg.c_p, dz_0=dz_0,
     )
 
-    # Jerlov SW penetration through the column (eq 10): full 3D tendency
-    # added to dT/dt at every level. Reference Jacobian = 1 (η/H ≈ 1e-4).
+    # Jerlov SW penetration through the column (eq 10): 3D tendency.
+    # Q_sr is added to the column distribution AND subtracted from the
+    # surface non-solar flux (handled by restoring.subtract_qsr above)
+    # so total heat is conserved (eq 8 + eq 10 = A_θ(T*-T)).
     jacobian = jnp.ones_like(state.eta.data)
     sw_cfg = ShortwavePenetrationConfig(water_type=cfg.jerlov_water_type)
     dT_dt_sw = shortwave_penetration_tendency(
         sw_down=forcing["Q_sr_2d"],
         z_coord_dz_ref=z_coord.dz_ref,
         z_coord_z_half_ref=z_coord.z_half_ref,
-        jacobian=jacobian,
-        config=sw_cfg,
-        rho_0=cfg.rho_0,
-        c_sw=cfg.c_p,
-    )  # (n_lat, n_lon, nlev)
-
-    new_T = state.T.data + dt * dT_dt_sw * cell_mask[..., None]
-    new_T_top = new_T[..., 0] + dt * dT_dt_top * cell_mask
-    new_T = new_T.at[..., 0].set(new_T_top)
-
-    # S tendency at top layer (eq 9)
-    S_top = state.S.data[..., 0]
-    dS_dt_top = dino_top_layer_S_tendency(
-        S_top, forcing["S_star_2d"], dz_0, cfg,
+        jacobian=jacobian, config=sw_cfg,
+        rho_0=cfg.rho_0, c_sw=cfg.c_p,
     )
-    new_S_top = S_top + dt * dS_dt_top * cell_mask
-    new_S = state.S.data.at[..., 0].set(new_S_top)
+
+    # Combine: forward-Euler tracer update with all tendencies summed.
+    # Restoring tendency is "effective" (already accounts for implicit
+    # Euler at given dt — stable for any dt). Mask land everywhere.
+    mask3 = cell_mask[..., None]
+    new_T = state.T.data + dt * (rest_out.dT_dt + dT_dt_sw) * mask3
+    new_S = state.S.data + dt * rest_out.dS_dt * mask3
 
     # u tendency at u-faces (eq 7)
     u_top = state.u.data[..., 0]
@@ -1482,6 +1512,18 @@ def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt):
         S=Field(data=new_S, name=state.S.name, dims=state.S.dims, units=state.S.units),
         u=Field(data=new_u, name=state.u.name, dims=state.u.dims, units=state.u.units),
     )
+
+
+class _LatLonGridShim:
+    """Tiny adapter so restoring_surface_forcing can pull a (n_lat, n_lon)
+    grid_lat from the state's land_mask shape — avoids passing the full
+    grid object through the applicator signature."""
+    def __init__(self, state, cell_mask):
+        # The arrays we feed already have shape (n_lat, n_lon, nlev) for T/S
+        # and (n_lat, n_lon) for sw_down/T_star_array, so grid_lat just
+        # needs to broadcast to (n_lat, n_lon).
+        self.grid_lat = jnp.zeros_like(cell_mask)  # values irrelevant
+                                                    # (T*/S* are user-arrays)
 
 
 def dino_mpas_surface_forcing_arrays(mesh, cfg: DINOConfig | None = None):

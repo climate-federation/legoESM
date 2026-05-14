@@ -871,3 +871,142 @@ Saved during the investigation (in `results/dino/`, gitignored):
   (days 0, 8, 14, 20) showing surface T, η, edge-mean |u|
 - `timeseries_comparison.png` — log-scale |u|, |η|, T extrema vs time
   with NaN markers showing when each run crashed
+
+---
+
+### Finding 5: Forced 30-day blowup is a 2Δz vertical-mode tracer instability — explicit-diffusion CFL violation under KPP (2026-05-14)
+
+After the unforced 30-day run was stable (Finding 4 + Hollingsworth +
+A_h_floor / A_h_eq_boost), the **forced** 30-day run still blew up at
+**day 8** (single-day snapshot resolution). Six A/B variants all blew
+up at the same step regardless of dycore tweaks, eventually localizing
+the cause to the explicit vertical diffusion CFL bound.
+
+#### Diagnostic A/B matrix — what was tested and falsified
+
+All seven runs use DINOConfig defaults (paper spec) on the lat-lon
+Mercator grid, varying the indicated knob, full forcing + physics,
+1-day snapshots:
+
+| # | Variant | Day blowup | `\|η\|` peak | Where | Verdict |
+|---|---|---|---|---|---|
+| 0 | Default (Hollingsworth + A_h fixes) | 8 | 223 m | SW corner (j=0, i=4-7) | baseline |
+| 1 | + implicit-Euler restoring (PR #267) | 8 | 223 m | SW corner | bit-identical → **restoring integrator innocent** |
+| 2 | + `maxvel_barotropic=1.0` | 8 | 223 m | SW corner | bit-identical → **`implicit_cn` solver ignores this knob** (architectural gap; explicit-substep path only) |
+| 3 | + `slope_foot_alpha=0.5` | 8 | **714 m** | SW corner | **worse** → PGF-noise-on-steep-bathy hypothesis falsified |
+| 4 | `--physics-off` (KPP/GM-Redi/convection off) | **3** | 540 m | SW + SE corners | **worse** → physics was *stabilizing*, not causing |
+| 5 | wind-off (only restoring + Q_sr) | 8 | 318 m | SW corner | same → **wind innocent**; staggering verified clean |
+| 6 | T*_s=+2°C, T*_n=+5°C (warmer targets) | **survived 30 days ✓** | 0.78 m | n/a | confirms cold T* is in the trigger chain |
+
+#### Root cause: explicit-diffusion CFL violation at j=0, i=26
+
+Re-running the cold-T* failure with **2-hourly snapshots** (every 2
+steps = 90 minutes) localized the blowup to a single 90-minute window
+between step 244 (clean) and step 246 (T anomaly). At step 246 a
+**single cell** (j=0, i=26 — south wall, mid-basin longitude) showed
+the T column jump from physical values to alternating-sign anomalies:
+
+```
+            k=0      k=1     k=2     k=3     k=4     k=5
+clean:     +3.27    +3.54   +3.63   +3.96   +4.08   +4.17     °C
+bad:      +19.81    +9.12   −8.00   +8.76   −9.19   +4.62     °C
+```
+
+The **alternating-sign vertical pattern** is the textbook signature of
+a **2Δz unstable vertical mode** of explicit diffusion. Once T blows
+up in one cell, lateral diffusion smears the anomaly to neighbors over
+the next 2-3 steps; one step later the cascade reaches velocities, eta
+goes to ±200 m, full NaN-bound by step 252. This is *not* a barotropic
+or PGF instability — it is a **tracer-equation failure** that drives
+everything downstream.
+
+#### Why the cold T* triggered it but warm T* did not
+
+The DINO paper assumes NEMO-with-sea-ice — once surface T reaches
+freezing, ice forms and latent heat absorbs further cooling. Without
+sea ice in our model, the cold restoring target T*_s=-0.5°C drives
+sustained surface cooling at the south wall. KPP responds to the
+buoyancy flux by enlarging K_v in the surface mixed layer (active
+deepening). At some critical configuration, KPP K_v at j=0,i=26
+exceeded the explicit-diffusion CFL bound:
+
+$$ \frac{K_v \cdot \Delta t}{\Delta z^2} > \tfrac{1}{2}
+   \quad\Longleftrightarrow\quad
+   K_v > \frac{\Delta z^2}{2 \Delta t} = \frac{(10\text{ m})^2}{2 \cdot 2700\text{ s}}
+        = 0.0185 \text{ m}^2/\text{s} $$
+
+KPP routinely produces K_v of 0.01-1 m²/s in active mixing regions
+(MOM6/NEMO docs). Once the threshold is crossed, the explicit forward-
+Euler diffusion step amplifies tracer noise by a factor of $(2K_v\Delta t/\Delta z^2)^n$
+per step — exponential blowup in 1-2 timesteps.
+
+The warm-T* run kept KPP K_v below the threshold by gentler cooling.
+This is a **band-aid on a numerical bug**, not a physical fix.
+
+#### Fix: `implicit_vertical_mixing=True` in DINOConfig
+
+The proper fix is unconditionally-stable implicit-Euler vertical
+diffusion. The implementation already exists in legoESM
+(`ocean_model_latlon_cgrid.py:1117 _apply_implicit_vertical_mixing`,
+calls `implicit_vertical_diffusion_ocean`) and is gated by
+`LatLonCGridOceanConfig.implicit_vertical_mixing` (default `False`
+for back-compat). DINO simply hadn't enabled it.
+
+```python
+# DINOConfig
+implicit_vertical_mixing: bool = True
+```
+
+Result: **30-day forced + physics paper-spec run survives end-to-end**
+with original cold T*_s = -0.5°C. KE grows healthily 4.0→8.9 ×10¹²,
+|v| grows to 1.7 m/s, T_min slowly approaches T* as expected (3.82°C
+day 1 → 2.44°C day 30), |η| bounded ≤ 0.78 m.
+
+#### What was tried and turned out wrong (knobs reverted)
+
+To preserve a clean diff, three speculative knobs added during the
+investigation were **reverted** once the implicit-vmix root cause was
+confirmed:
+
+- `slope_foot_alpha=0.5` default in DINOConfig — diagnostic test #3
+  made things *worse*; PGF-noise hypothesis falsified. Reverted.
+- `maxvel_barotropic=1.0` default in DINOConfig — diagnostic test #2
+  was a no-op (the `implicit_cn` barotropic solver doesn't honor this
+  knob; only the explicit-substep path does). Reverted.
+- `T_min_freeze` field added to `RestoringConfig` (sea-ice-surrogate
+  cap on T*) — based on a wrong "T* below freezing" mechanism story.
+  At -0.5°C target, T* is *above* seawater freezing (-1.81°C), so the
+  cap wouldn't fire; mechanism turned out to be K_v not T. Reverted.
+
+These are documented for the historical record but are not in the
+landed code. The `implicit_vertical_mixing` field on DINOConfig is the
+only landed change for Finding 5.
+
+#### Lessons
+
+1. **Single-day snapshots are too coarse for forced-run diagnostics.**
+   Sub-day (≤ hourly) snapshots were essential to isolate the failure
+   to a single cell and a 2Δz vertical mode. Add hourly snapshots as
+   default for new ocean experiments during commissioning.
+2. **Physical-spec knobs (T*, A_θ) and numerical-stability knobs
+   (`implicit_vertical_mixing`) live on different axes.** When a forced
+   run blows up and the unforced run is stable, the failure is usually
+   in the time-step / mixing-coupling, not the physics targets.
+3. **KPP-style nonlinear K_v parameterizations REQUIRE implicit
+   vertical diffusion.** This is standard practice in MOM6, NEMO, and
+   GFDL ocean cores. Should consider flipping
+   `LatLonCGridOceanConfig.implicit_vertical_mixing` default to `True`
+   model-wide as a separate legoESM PR (back-compat impact: experiments
+   that explicitly want explicit mixing — currently none — would need
+   to set `False` explicitly). Tracked as a follow-up.
+4. **Architectural gap discovered:** the implicit-CN barotropic solver
+   silently ignores `maxvel_barotropic` (only the explicit-substep
+   path honors it). Either both should support it or the field should
+   be moved to a barotropic-scheme-specific config. Not a blocker for
+   DINO; tracked as a follow-up issue.
+5. **Be honest about wrong hypotheses.** The "horizontal density
+   gradient" and "T* below freezing" stories were both speculative
+   and turned out to be wrong on closer inspection. The actual
+   mechanism (explicit-diffusion CFL violation under KPP K_v) only
+   became visible with sub-day snapshots showing the alternating-sign
+   vertical T pattern. Run the diagnostic before claiming the fix.
