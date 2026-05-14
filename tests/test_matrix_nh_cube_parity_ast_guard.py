@@ -850,3 +850,28 @@ def test_iter102_tc2_cube_blowup_warning_present():
         "(n_acoustic_substeps, hyperdiff, acoustic_off_centering, FV3 "
         "oracle) need to remain visible to future investigators."
     )
+
+
+def test_iter108_tc3_cube_caution_present():
+    """iter-112 sentinel: the iter-108 CAUTION comment must remain in
+    the matrix runner TC3 cube branch.
+
+    iter-108 added a pre-emptive caution noting that TC3 cube was
+    cached only at quick-mode 4 min (per iter-89 audit), and that the
+    same TC2-style full-mode BLOWUP at day 0.13 (iter-102 finding)
+    could plausibly recur for TC3.  The caution lists the same 4
+    probe directions (acoustic substeps, hyperdiff, off-centering,
+    FV3 oracle).
+
+    Once NH matrix refresh completes and TC3 cube full-mode result is
+    known, this sentinel can be tightened (or removed if TC3 cube is
+    confirmed stable at full duration).
+    """
+    src = _runner_source()
+    # Anchor on the iter-108 CAUTION header.
+    assert "iter-108 CAUTION" in src, (
+        "iter-112 regression: matrix CB cube branch (TC3) no longer "
+        "contains the iter-108 CAUTION comment.  Re-add the caution "
+        "block so future maintainers see the pre-emptive note about "
+        "TC3 cube full-mode behaviour being TBD."
+    )
