@@ -38,6 +38,14 @@ DEFAULT_TRAINABLE = [
 ]
 
 # Non-convection trainable parameters (shared by all schemes)
+# iter-251 (AIMIP Phase 2.1): added ``albedo_land`` so the AIMIP
+# training loop tunes the full surface-albedo triple (ice, ocean,
+# land) rather than just two of three.  Bounds match
+# ``tuning.py::TUNING_PARAMETERS["albedo_land"]`` (0.1 - 0.4) which
+# spans desert -> snow-covered transitions.  AMIP-style runs with
+# fixed ``--dataset analytical`` will see no behavioural change
+# because ``albedo_land`` is only consulted by the surface module
+# when a non-trivial land fraction is in the IC; ERA5 ICs activate it.
 _COMMON_TRAINABLE = [
     ParamConstraint("tau_equator", 5.0, 10.0, "sigmoid"),
     ParamConstraint("tau_pole", 1.0, 3.0, "sigmoid"),
@@ -45,6 +53,7 @@ _COMMON_TRAINABLE = [
     ParamConstraint("C_E", 0.001, 0.005, "sigmoid"),
     ParamConstraint("albedo_ice", 0.4, 0.8, "sigmoid"),
     ParamConstraint("albedo_ocean", 0.03, 0.10, "sigmoid"),
+    ParamConstraint("albedo_land", 0.1, 0.4, "sigmoid"),
 ]
 
 # SBM-specific convection parameters
