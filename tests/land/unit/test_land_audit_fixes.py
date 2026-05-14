@@ -263,6 +263,73 @@ class TestSoilThermalX64(unittest.TestCase):
         npt.assert_allclose(x, 0.5, atol=1e-12)
         self.assertEqual(x.dtype, jnp.float64)
 
+    def test_tridiag_denom_floor_is_never_zero(self):
+        """Iter-85 math regression for the Thomas-solver denom safety floor.
+
+        The previous formulation
+
+            denom_safe = jnp.where(|denom| < _tiny,
+                                   jnp.sign(denom)*_tiny + _tiny, denom)
+
+        can evaluate to *exactly zero* whenever ``denom`` is a tiny
+        negative number under full IEEE subnormal arithmetic
+        (``sign(-_subnormal) = -1`` ⇒ ``-_tiny + _tiny = 0``).  The next
+        line ``c_col[k] / denom`` then divides by zero.
+
+        Under XLA's default subnormal flush-to-zero (FTZ) ``sign`` on a
+        negative subnormal returns ``-0.0``, so the old formula
+        already produces ``+_tiny`` and is safe in practice — but the
+        masking is platform-dependent and the code is fragile.
+
+        The fix replaces ``sign(denom)`` with an explicit
+        ``where(denom >= 0.0, 1.0, -1.0)`` branch.  **Note that this does
+        *not* preserve sign on a backend that flushes subnormals**: under
+        FTZ a negative subnormal becomes ``-0.0``, ``-0.0 >= 0.0`` is
+        ``True``, and the new formula returns ``+_tiny`` (same as the old
+        masked behavior).  The point of the fix is *non-zero floor* on
+        every platform — without FTZ the old formula produces 0 while
+        the new one produces ``-_tiny``.
+
+        This test verifies the bug existed (old math) and that the new
+        formula never produces 0, both checked at the math level so the
+        result is independent of XLA's subnormal handling.
+        """
+        _tiny = float(jnp.finfo(jnp.float32).tiny)
+
+        # Old formula with the IEEE-correct sign = -1 (no FTZ): exactly 0.
+        old_floored = (-1.0) * _tiny + _tiny
+        self.assertEqual(old_floored, 0.0,
+                         "old denom-floor must reproduce divide-by-zero")
+
+        def new_floor(denom_val: float) -> float:
+            sign = 1.0 if denom_val >= 0.0 else -1.0
+            return sign * _tiny if abs(denom_val) < _tiny else denom_val
+
+        # The defining property of the fix: floored value is never zero.
+        for denom_val in (-1e-40, -1.4e-45, 0.0, +1e-40, +1.4e-45):
+            self.assertNotEqual(new_floor(denom_val), 0.0,
+                                f"new floor returned 0 for denom={denom_val!r}")
+
+        # Without FTZ the new formula additionally maps negative inputs
+        # to ``-_tiny`` (sign preserved).
+        self.assertEqual(new_floor(-1e-40), -_tiny)
+        self.assertEqual(new_floor(+1e-40), +_tiny)
+        # Exactly zero treated as the positive branch.
+        self.assertEqual(new_floor(0.0), +_tiny)
+        # Normal values pass through unchanged.
+        self.assertEqual(new_floor(-2.5), -2.5)
+        self.assertEqual(new_floor(+1.7), +1.7)
+
+        # Smoke check that the live solver remains finite on a system that
+        # would land in the floor branch under default XLA FTZ.
+        from legoesm.land.tridiag import thomas_solve_batch
+        a = jnp.array([[0.0, 0.0]], dtype=jnp.float32)
+        b = jnp.array([[1.0, -1e-40]], dtype=jnp.float32)
+        c = jnp.array([[0.0, 0.0]], dtype=jnp.float32)
+        d = jnp.array([[0.0, 1.0]], dtype=jnp.float32)
+        x = thomas_solve_batch(a, b, c, d)
+        assert jnp.all(jnp.isfinite(x)), f"tridiag produced non-finite x: {x}"
+
 
 # =========================================================================
 # 4. Root-zone moisture sensitivity with transpiration

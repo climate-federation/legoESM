@@ -543,8 +543,8 @@ def test_pgf_adcroft_bounded_at_rest_over_step(mesh, z_coord):
     centroid = compute_centroid_depth(
         jnp.zeros_like(H_step), H_step, pc_coord,
     )  # (nCells, nlev)
-    T_surface, T_deep = 20.0, 2.0
-    T_per_cell = T_deep + (T_surface - T_deep) * jnp.exp(
+    T_water_init_C, T_deep = 20.0, 2.0
+    T_per_cell = T_deep + (T_water_init_C - T_deep) * jnp.exp(
         -centroid / _SCALE_DEPTH,
     )
     T_per_cell = jnp.where(pc_coord.is_active, T_per_cell, T_deep)

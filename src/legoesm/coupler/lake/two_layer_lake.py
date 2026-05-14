@@ -171,8 +171,17 @@ def step_lake(
         + (1.0 - config.emissivity_lake) * forcing.lw_down
     )
 
-    # Recompute q_surface from updated epilimnion temperature for consistency
-    q_sfc_new = saturation_mixing_ratio(T_epi_new, forcing.p_surface)
+    # Recompute q_surface from updated epilimnion temperature for
+    # consistency.  Apply the same liquid / ice saturation phase
+    # switch used pre-step (line 50-53): frozen lakes (T_epi ≤
+    # T_freeze) sublimate, not evaporate.  Without the switch, the
+    # response.q_surface reported to the atmosphere was biased high
+    # by ~14 % at T = −10 °C (liquid vs ice saturation), feeding the
+    # next-step bulk-flux computation a non-physical q_sfc.
+    is_frozen_new = T_epi_new <= config.T_freeze
+    q_sfc_liq_new = saturation_mixing_ratio(T_epi_new, forcing.p_surface)
+    q_sfc_ice_new = saturation_mixing_ratio_ice(T_epi_new, forcing.p_surface)
+    q_sfc_new = jnp.where(is_frozen_new, q_sfc_ice_new, q_sfc_liq_new)
 
     # ``jnp.full(shape, scalar, dtype=...)`` lowers to a single
     # ``Broadcast`` HLO op, whereas ``jnp.broadcast_to(jnp.array(scalar), ...)``

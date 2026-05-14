@@ -69,10 +69,8 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import (
-    saturation_mixing_ratio,
-    saturation_vapor_pressure,
-)
+from legoesm.thermo import saturation_mixing_ratio
+from legoesm.atmosphere.physics._shared import virtual_temperature
 from legoesm.atmosphere.physics.thermodynamics import (
     compute_cape,
     compute_moist_adiabat,
@@ -163,8 +161,8 @@ def compute_lcl(
     LCL
         ``p_lcl, T_lcl, k_lcl_smooth``.
     """
-    # Vapor pressure and relative humidity at parcel level.
-    e_sat = saturation_vapor_pressure(T_parcel)
+    # Relative humidity at parcel level.  ``q_sat`` is enough — Bolton
+    # Eq. 22 uses RH directly, not the saturation vapor pressure.
     q_sat = saturation_mixing_ratio(T_parcel, p_parcel)
     # RH = q / q_sat, clipped to (0, 1] so log is well-defined and
     # supersaturated parcels produce LCL at parcel level.
@@ -649,8 +647,24 @@ def entraining_detraining_plume(
 
         T_u = T_u.astype(_dtype)
 
-        # Buoyancy at this level.
-        B_u = T_u - T_e
+        # Buoyancy at this level — use virtual temperature so that the
+        # vapor-loading effect (moister plumes are lighter at fixed T)
+        # is captured.  Both parcel and environment use the same
+        # ``virtual_temperature`` helper from ``_shared.py`` so the ε
+        # convention is centralised and audit-consistent with the
+        # turbulence / PBL paths.  The plume cloud-water mass loading
+        # ``q_c_u`` is folded in as a density-temperature correction
+        # ``T_v_u·(1 − q_c_u)``; environmental ``q_c = 0`` so the
+        # correction is one-sided (positive ``q_c_u`` reduces plume
+        # buoyancy ~0.1–0.3 K, the canonical "water loading" effect
+        # known to suppress weak-CAPE convection).  Previous form
+        # ``T_u − T_e`` used dry temperature and missed both effects;
+        # virtual-T contribution alone is ~0.6 K for a 10 g/kg moist
+        # parcel, i.e. comparable to the ``1/buoyancy_sharpness = 2 K``
+        # plume-alive threshold.
+        T_v_u = virtual_temperature(T_u, q_u) * (1.0 - q_c_u)
+        T_v_e = virtual_temperature(T_e, q_e)
+        B_u = T_v_u - T_v_e
 
         # Reporting filters: smoothly suppress the mass flux below
         # cloud base (``abv``) and where the plume has lost buoyancy

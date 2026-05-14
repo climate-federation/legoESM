@@ -519,4 +519,13 @@ def bbl_distributed_drag_face_column(
         jnp.minimum(z_top, bbl_top) - jnp.maximum(z_bot, z_seafloor),
     )
     h_safe = jnp.maximum(h_face, eps)
-    return -drag_r * u_field * overlap / (h_safe * H_BBL)
+    # Effective BBL thickness for the per-layer rate: when the total
+    # wet column is shallower than ``H_BBL`` the bottom-boundary layer
+    # cannot extend to its full nominal thickness, so divide by the
+    # ACTUAL total overlap (which equals the wet depth in that case)
+    # rather than the nominal ``H_BBL``.  Otherwise shelf/coastal
+    # cells with total depth < H_BBL see a BBL drag rate that is too
+    # weak by ``total_wet_depth / H_BBL`` (codex iter-39 #2).
+    total_overlap = jnp.sum(overlap, axis=-1, keepdims=True)
+    h_bbl_eff = jnp.minimum(jnp.maximum(total_overlap, eps), H_BBL)
+    return -drag_r * u_field * overlap / (h_safe * h_bbl_eff)

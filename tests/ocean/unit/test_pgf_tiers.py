@@ -150,7 +150,7 @@ def _build_state_and_model(grid, z_coord, H_bathy, land_mask,
     # Build state
     state = rest_state_latlon_cgrid_ocean(
         grid, z_coord,
-        T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+        T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
         H_max=H_MAX,
         H_bathy_override=H_bathy,
         land_mask_override=land_mask,

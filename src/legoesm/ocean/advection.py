@@ -204,15 +204,16 @@ def dst3_to_v_points(
     eps = 1e-30
     n_lat = f.shape[0]
 
-    # Cell height: dy = R * dlat (uniform)
-    dy = grid.radius * grid.dlat
+    # Face-to-face distance at interior v-faces (Mercator-safe).
+    dy_h = grid.dy * 0.5                                # (n_lat,)
+    dy_v_int = 0.5 * (dy_h[1:] + dy_h[:-1])              # (n_lat-1,)
 
     # Interior v-faces: indices 1 to n_lat-1 (between cells 0..n_lat-2 and 1..n_lat-1)
     # Face i sits between cell i-1 (south) and cell i (north).
     mf_int = mass_flux_v[1:-1, :, :]   # (n_lat-1, n_lon, nlev)
     h_v_int = h_v[1:-1, :, :]
     vel_int = mf_int / jnp.maximum(h_v_int, eps)
-    cfl = jnp.minimum(jnp.abs(vel_int) * dt / dy, 1.0)
+    cfl = jnp.minimum(jnp.abs(vel_int) * dt / dy_v_int[:, jnp.newaxis, jnp.newaxis], 1.0)
 
     # Build stencil with ghost cells at boundaries (Neumann: copy boundary value)
     # Ghost: f[-1] = f[0], f[-2] = f[0] at south; f[n_lat] = f[n_lat-1] at north
@@ -1231,8 +1232,8 @@ def _zalesak_signsplit_face_alphas(
     # Spherical face metrics (mirroring divergence_cgrid).
     R_planet = grid.radius
     dlon = grid.dlon
-    dlat = grid.dlat
-    face_dy = R_planet * dlat
+    # face_dy at h-points: cell-row meridional extent (1D, Mercator-safe).
+    face_dy = (grid.dy * 0.5)[:, jnp.newaxis, jnp.newaxis]  # (n_lat,1,1)
     lat = grid.lat
     # cos(±π/2) ≈ 0; build cos_lat_v directly via Pad of cos(interior).
     # Single Pad HLO op replaces alloc-2-singletons + concatenate-of-three

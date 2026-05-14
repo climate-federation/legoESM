@@ -166,6 +166,7 @@ def kpp_vertical_mixing(
     Q_sfc_S: jnp.ndarray | None = None,
     h_bl_prev: jnp.ndarray | None = None,
     apply_diffusion: bool = True,
+    dt: float | None = None,
 ) -> VerticalMixingOutput:
     """Apply LMD94-style KPP vertical mixing.
 
@@ -345,15 +346,24 @@ def kpp_vertical_mixing(
     # non-local KPP transport (counter-gradient flux) below is *not* a
     # diffusion and is always returned in dT/dS.
     if apply_diffusion:
+        # Pass ``dt`` (when provided) so the explicit-Euler CFL cap
+        # added in clean_physics iter-5 fires inside
+        # ``vertical_diffusion_variable_K``.  KPP's own ``cfg.K_max``
+        # bounds K from above but cannot enforce ``K·dt/dz²≤½`` on
+        # thin upper layers; the leaf cap is the safety net.
         vel = jnp.stack([u, v], axis=0)
         vel_tend = jax.vmap(
-            lambda q: vertical_diffusion_variable_K(q, z_coord, jacobian, A_v),
+            lambda q: vertical_diffusion_variable_K(
+                q, z_coord, jacobian, A_v, dt=dt,
+            ),
             in_axes=0, out_axes=0,
         )(vel)
 
         tracers = jnp.stack([T, S], axis=0)
         tr_tend = jax.vmap(
-            lambda q: vertical_diffusion_variable_K(q, z_coord, jacobian, K_v),
+            lambda q: vertical_diffusion_variable_K(
+                q, z_coord, jacobian, K_v, dt=dt,
+            ),
             in_axes=0, out_axes=0,
         )(tracers)
     else:
@@ -416,27 +426,35 @@ def kpp_vertical_mixing(
     # finding #1).  Keep only the column-level ``is_unstable_col``
     # gate.
     F_T = cfg.gamma_T * Q_T[..., jnp.newaxis] * G_half  # (..., nlev-1)
-    # Tendency = -dF/dz at full levels (zero-flux BCs at surface and bottom)
-    dT_nonlocal_top = -F_T[..., :1] / dz_actual[..., :1]
-    dT_nonlocal_int = (F_T[..., :-1] - F_T[..., 1:]) / dz_actual[..., 1:-1]
-    dT_nonlocal_bot = F_T[..., -1:] / dz_actual[..., -1:]
+    # Tendency = -dF/dz at full levels (zero-flux BCs at surface and bottom).
+    # AD-safe divisor: dry columns have ``dz_actual = 0`` and the
+    # column-level ``is_unstable_col`` mask scrubs the forward value,
+    # but the 0/0 division produces NaN gradients in the backward
+    # pass.  Safe denominator (``where dz>0, dz, 1``) gives clean
+    # gradients while the where-mask still zeroes the forward output.
+    dz_safe = jnp.where(dz_actual > 0.0, dz_actual, 1.0)
+    dT_nonlocal_top = -F_T[..., :1] / dz_safe[..., :1]
+    dT_nonlocal_int = (F_T[..., :-1] - F_T[..., 1:]) / dz_safe[..., 1:-1]
+    dT_nonlocal_bot = F_T[..., -1:] / dz_safe[..., -1:]
     dT_nonlocal = jnp.concatenate(
         [dT_nonlocal_top, dT_nonlocal_int, dT_nonlocal_bot], axis=-1
     )  # (..., nlev)  [K/s]
     dT_nonlocal = jnp.where(
-        is_unstable_col[..., jnp.newaxis], dT_nonlocal, 0.0
+        is_unstable_col[..., jnp.newaxis] & (dz_actual > 0.0),
+        dT_nonlocal, 0.0,
     )
 
     # --- Salinity non-local tendency ---
     F_S = cfg.gamma_S * Q_S[..., jnp.newaxis] * G_half  # (..., nlev-1)
-    dS_nonlocal_top = -F_S[..., :1] / dz_actual[..., :1]
-    dS_nonlocal_int = (F_S[..., :-1] - F_S[..., 1:]) / dz_actual[..., 1:-1]
-    dS_nonlocal_bot = F_S[..., -1:] / dz_actual[..., -1:]
+    dS_nonlocal_top = -F_S[..., :1] / dz_safe[..., :1]
+    dS_nonlocal_int = (F_S[..., :-1] - F_S[..., 1:]) / dz_safe[..., 1:-1]
+    dS_nonlocal_bot = F_S[..., -1:] / dz_safe[..., -1:]
     dS_nonlocal = jnp.concatenate(
         [dS_nonlocal_top, dS_nonlocal_int, dS_nonlocal_bot], axis=-1
     )  # (..., nlev)  [psu/s]
     dS_nonlocal = jnp.where(
-        is_unstable_col[..., jnp.newaxis], dS_nonlocal, 0.0
+        is_unstable_col[..., jnp.newaxis] & (dz_actual > 0.0),
+        dS_nonlocal, 0.0,
     )
 
     return VerticalMixingOutput(

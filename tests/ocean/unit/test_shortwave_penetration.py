@@ -96,6 +96,29 @@ def test_zero_swdown_gives_zero_tendency():
     assert jnp.allclose(out, 0.0)
 
 
+def test_dry_column_gives_zero_finite_tendency():
+    """Dry / land cells (jacobian = 0 → dz_actual = 0) must yield zero
+    tendency, not NaN/Inf.
+
+    Before the iter-56 fix, the division ``sw / (rho · c · dz)`` produced
+    Inf on land cells, contaminating the summed ocean tendency.
+    ``NaN * 0 = NaN`` in IEEE so a downstream output mask cannot scrub
+    the contamination; the leaf must produce zero on dry columns
+    directly.
+    """
+    sw_down, dz_ref, z_half_ref, J = _setup()
+    # Mark half the grid as dry (J = 0); other half wet (J = 1).
+    J_mixed = J.at[: J.shape[0] // 2, :].set(0.0)
+    out = shortwave_penetration_tendency(
+        sw_down, dz_ref, z_half_ref, J_mixed,
+    )
+    assert jnp.all(jnp.isfinite(out))
+    # Dry rows: zero everywhere.
+    assert jnp.allclose(out[: J.shape[0] // 2, :, :], 0.0)
+    # Wet rows: non-zero (positive heating).
+    assert float(jnp.max(out[J.shape[0] // 2 :, :, :])) > 0.0
+
+
 def test_water_type_changes_result():
     sw_down, dz_ref, z_half_ref, J = _setup()
     out_I = shortwave_penetration_tendency(

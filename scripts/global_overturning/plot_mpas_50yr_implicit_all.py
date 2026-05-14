@@ -38,6 +38,7 @@ import matplotlib.pyplot as plt
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
+from legoesm import constants
 from ocean_test_matrix.regridding import _bin_to_latlon
 
 
@@ -124,7 +125,7 @@ def main():
     depth = -z_full  # positive m for plotting
 
     # Earth radius (matches grids.voronoi default)
-    R_earth = 6.371e6
+    R_earth = constants.R_earth
     dy_drake = R_earth * np.deg2rad(2 * DRAKE_BIN_HALFWIDTH_DEG)  # bin meridional extent (m)
 
     # Source cell coordinates

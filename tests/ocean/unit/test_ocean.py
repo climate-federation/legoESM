@@ -83,7 +83,7 @@ def ocean_state(ocean_grid, ocean_z_coord):
     """Rest-state ocean initial condition."""
     return rest_state_ocean(
         ocean_grid, ocean_z_coord,
-        T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+        T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
         H_max=4000.0,
     )
 
@@ -537,7 +537,7 @@ class TestOceanTendencies:
         """FV tendencies should include planetary Coriolis on shear flow."""
         state = rest_state_ocean(
             ocean_grid, ocean_z_coord, H_max=4000.0, land_lat_threshold=90.0,
-            T_surface=15.0, T_deep=15.0,
+            T_water_init_C=15.0, T_deep=15.0,
         )
         nlev = ocean_z_coord.n_levels
         shear_profile = jnp.linspace(-1.0, 1.0, nlev, dtype=jnp.float32)
@@ -763,6 +763,98 @@ class TestVerticalMixing:
 
         assert tendency.dtype == field.dtype
         assert jnp.all(jnp.isfinite(tendency))
+
+    def test_vertical_diffusion_cfl_cap_keeps_step_stable(self, ocean_z_coord):
+        """With dt supplied, the CFL cap keeps explicit Euler stable.
+
+        A diffusivity of 10 m²/s on dz ~ 10 m and dt = 3600 s gives a
+        bare Courant number K·dt/dz² ≈ 360 — single explicit step
+        explodes.  The cap should bring it down to ≤ 0.5 so a single
+        explicit step is bounded.
+        """
+        nlev = ocean_z_coord.n_levels
+        field = jnp.linspace(0.0, 1.0, nlev, dtype=jnp.float64)[
+            jnp.newaxis, jnp.newaxis, jnp.newaxis, :
+        ]
+        jac = jnp.ones((1, 1, 1), dtype=jnp.float64)
+        dt = 3600.0
+
+        tendency = vertical_diffusion(
+            field, ocean_z_coord, jac, coeff=10.0, dt=dt,
+        )
+        field_new = field + dt * tendency
+
+        # With the cap K·dt/dz² ≤ cfl_safety < 1, the explicit update
+        # cannot blow up beyond ~2× the initial range.
+        assert jnp.all(jnp.isfinite(field_new))
+        assert jnp.max(jnp.abs(field_new)) < 5.0  # well-bounded
+        # Without the cap (passing the same 10 m²/s with no dt arg)
+        # the same step would overshoot dramatically — sanity check.
+        tendency_uncapped = vertical_diffusion(
+            field, ocean_z_coord, jac, coeff=10.0,
+        )
+        field_new_uncapped = field + dt * tendency_uncapped
+        assert jnp.max(jnp.abs(field_new_uncapped)) > jnp.max(
+            jnp.abs(field_new)
+        )
+
+    def test_vertical_diffusion_variable_K_dry_column_scrubs_nan_input(
+        self, ocean_z_coord,
+    ):
+        """Variable-K dry-column path must scrub NaN inputs (codex
+        iter-58 stop-time review).
+
+        Upstream KPP / Richardson callers can produce NaN K_half on
+        dry columns (e.g. ``h_bl·w_s·G(σ)`` with ``h_bl = 0``).  The
+        leaf operator must SUBSTITUTE the dry-cell value before the
+        flux multiplication so neither forward nor backward leaks NaN.
+        """
+        from legoesm.ocean.physics.mixing import vertical_diffusion_variable_K
+
+        nlev = ocean_z_coord.n_levels
+        # Field has NaN sentinel on the dry column (col 1).
+        field = jnp.linspace(0.0, 1.0, nlev, dtype=jnp.float64)
+        field_wet = jnp.broadcast_to(field, (1, nlev))
+        field_dry = jnp.full((1, nlev), jnp.nan, dtype=jnp.float64)
+        field2 = jnp.concatenate([field_wet, field_dry], axis=0)
+        # K_half also NaN on dry column (mimicking KPP output).
+        K_half_wet = jnp.full((1, nlev - 1), 1.0e-4, dtype=jnp.float64)
+        K_half_dry = jnp.full((1, nlev - 1), jnp.nan, dtype=jnp.float64)
+        K_half = jnp.concatenate([K_half_wet, K_half_dry], axis=0)
+        jac = jnp.array([1.0, 0.0], dtype=jnp.float64)
+        tendency = vertical_diffusion_variable_K(
+            field2, ocean_z_coord, jac, K_half,
+        )
+        assert jnp.all(jnp.isfinite(tendency)), \
+            "Variable-K leaf must scrub NaN inputs on dry columns"
+        assert jnp.allclose(tendency[1, :], 0.0)
+
+    def test_vertical_diffusion_dry_column_gives_zero_finite_tendency(
+        self, ocean_z_coord,
+    ):
+        """Dry / land columns (jacobian = 0) must yield zero, finite tendency.
+
+        Before the iter-58 fix, ``vertical_diffusion`` divided by
+        ``dz_actual = dz_ref · jacobian`` directly.  For dry columns
+        ``dz_actual = 0`` so ``0/0 = NaN`` in IEEE; downstream
+        summation propagated NaN into the tendency.  Mirrors the
+        iter-56 shortwave_penetration fix.
+        """
+        nlev = ocean_z_coord.n_levels
+        field = jnp.linspace(0.0, 1.0, nlev, dtype=jnp.float64)[
+            jnp.newaxis, :
+        ]  # (1, nlev)
+        # Two-column case: wet (J=1), dry (J=0).
+        jac = jnp.array([[1.0], [0.0]], dtype=jnp.float64)
+        field2 = jnp.broadcast_to(field, (2, nlev))
+        tendency = vertical_diffusion(
+            field2, ocean_z_coord, jac.squeeze(-1), coeff=1.0e-4,
+        )
+        assert jnp.all(jnp.isfinite(tendency))
+        # Dry row: zero everywhere.
+        assert jnp.allclose(tendency[1, :], 0.0)
+        # Wet row: non-zero somewhere (smoothing of a non-uniform field).
+        assert float(jnp.max(jnp.abs(tendency[0, :]))) > 0.0
 
 
 # ==============================================================================
@@ -1240,8 +1332,8 @@ class TestSpectralOcean:
             rest_state_spectral_ocean(grid, z_coord, land_lat_threshold=-1.0)
         with pytest.raises(ValueError, match="land_lat_threshold"):
             rest_state_spectral_ocean(grid, z_coord, land_lat_threshold=91.0)
-        with pytest.raises(ValueError, match="T_surface"):
-            rest_state_spectral_ocean(grid, z_coord, T_surface=float("inf"))
+        with pytest.raises(ValueError, match="T_water_init_C"):
+            rest_state_spectral_ocean(grid, z_coord, T_water_init_C=float("inf"))
 
     def test_model_warns_for_ignored_barotropic_substeps(self):
         from legoesm.grids.gaussian import create_gaussian_grid
@@ -1326,7 +1418,7 @@ class TestLongRunConservation:
         grid = create_cubed_sphere(8)
         z_coord = create_ocean_z_star(n_levels=10, H_max=4000.0)
         state = rest_state_ocean(
-            grid, z_coord, T_surface=20.0, T_deep=2.0,
+            grid, z_coord, T_water_init_C=20.0, T_deep=2.0,
             S_uniform=35.0, H_max=4000.0,
         )
         config = OceanConfig(
@@ -1375,7 +1467,7 @@ class TestLongRunConservation:
         grid = create_cubed_sphere(8)
         z_coord = create_ocean_z_star(n_levels=10, H_max=4000.0)
         state = rest_state_ocean(
-            grid, z_coord, T_surface=20.0, T_deep=2.0,
+            grid, z_coord, T_water_init_C=20.0, T_deep=2.0,
             S_uniform=35.0, H_max=4000.0,
         )
         config = OceanConfig(

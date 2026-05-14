@@ -95,7 +95,7 @@ class TestVerticalVelocityAtSeafloor:
 
         state = rest_state_latlon_cgrid_ocean(
             grid, z_coord,
-            T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+            T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
             H_bathy_override=H_bathy,
         )
         state = state._replace(T=state.T.replace(data=T_per_cell))
@@ -145,7 +145,7 @@ class TestVerticalAdvectionAtRest:
 
         state = rest_state_latlon_cgrid_ocean(
             grid, z_coord,
-            T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+            T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
             H_bathy_override=H_bathy,
         )
         state = state._replace(T=state.T.replace(data=T_per_cell))
@@ -185,7 +185,7 @@ class TestFlatBottomWDiagnosisBitExact:
         H_bathy = jnp.full((grid.n_lat, grid.n_lon), z_coord.H_max)
         state = rest_state_latlon_cgrid_ocean(
             grid, z_coord,
-            T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+            T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
             H_bathy_override=H_bathy,
         )
         partial_coord = create_partial_cell_coordinate(z_coord, H_bathy)

@@ -213,7 +213,7 @@ def test_sea_ice_concentration_bounds():
 
 def test_sea_ice_no_spurious_growth_from_open_water():
     """Cells without ice should not grow ice under net warming conditions."""
-    state = _make_ice_state(h=0.0, conc=0.0, T=271.35)
+    state = _make_ice_state(h=0.0, conc=0.0, T=constants.T_freeze_ocean)
     forcing = _make_forcing(T_lowest=280.0, sw=300.0, lw=350.0)
     config = SeaIceConfig()
     ocean_sst = jnp.full(SHAPE, 275.0)
@@ -252,7 +252,7 @@ def test_sea_ice_sublimation_mass_term_is_included():
     forcing_dry = base_forcing._replace(q_lowest=jnp.full(SHAPE, 1e-5))
     forcing_moist = base_forcing._replace(q_lowest=jnp.full(SHAPE, 5e-3))
     config = SeaIceConfig()
-    ocean_sst = jnp.full(SHAPE, 271.35)
+    ocean_sst = jnp.full(SHAPE, constants.T_freeze_ocean)
 
     # Run both cases.
     state_dry, resp_dry = step_sea_ice(
@@ -347,7 +347,7 @@ def test_sea_ice_freshwater_flux_balances_ice_mass_change():
     ocean → flux > 0.
     """
     from legoesm import constants
-    state = _make_ice_state(h=0.5, conc=0.9, T=271.35)
+    state = _make_ice_state(h=0.5, conc=0.9, T=constants.T_freeze_ocean)
     forcing = _make_forcing(T_lowest=280.0, sw=400.0, lw=350.0)
     config = SeaIceConfig()
     ocean_sst = jnp.full(SHAPE, 275.0)
@@ -406,7 +406,7 @@ def test_sea_ice_ocean_stress_opposes_ocean_ice_drag():
     # exercise the back-reaction stress.
     forcing = _make_forcing()
     config = SeaIceConfig()
-    ocean_sst = jnp.full(SHAPE, 271.35)
+    ocean_sst = jnp.full(SHAPE, constants.T_freeze_ocean)
     ocean_u = jnp.zeros(SHAPE)
     ocean_v = jnp.zeros(SHAPE)
 
@@ -415,15 +415,19 @@ def test_sea_ice_ocean_stress_opposes_ocean_ice_drag():
         config, U_min=1.0, dt=DT,
     )
 
-    # Ice velocity from free-drift formula uses drag_atm·rho_air/rho_ice·wind
-    rho_air_ratio = config.rho_air_ref / config.rho_ice
-    u_ice_expected = (
-        config.drag_ocean * 0.0  # ocean at rest contributes 0
-        + config.drag_atm * rho_air_ratio * 5.0
+    # Ice velocity from Zubov-style drag-balance free drift (iter-86):
+    #   u_i = U_w + alpha * (U_a - U_w),
+    #   alpha = sqrt(rho_air * C_ai / (rho_ocean * C_oi)).
+    # With ocean at rest, u_i = alpha * U_a.
+    import math
+    alpha = math.sqrt(
+        config.rho_air_ref * config.drag_atm
+        / (config.rho_ocean_ref * config.drag_ocean)
     )
+    u_ice_expected = alpha * 5.0
+    v_ice_expected = alpha * (-3.0)
     # Relative velocity ocean - ice = -u_ice (ocean at rest)
     du_oi = -u_ice_expected
-    v_ice_expected = config.drag_atm * rho_air_ratio * (-3.0)
     dv_oi = -v_ice_expected
     speed_oi = float(jnp.sqrt(du_oi ** 2 + dv_oi ** 2 + 1e-10))
     tau_oi_x = config.rho_ocean_ref * config.drag_ocean * speed_oi * du_oi
@@ -445,7 +449,7 @@ def test_sea_ice_surface_mass_flux_equals_lhflx_over_Ls():
     state = _make_ice_state(h=1.0, conc=0.7, T=263.0)
     forcing = _make_forcing()
     config = SeaIceConfig()
-    ocean_sst = jnp.full(SHAPE, 271.35)
+    ocean_sst = jnp.full(SHAPE, constants.T_freeze_ocean)
 
     _, resp = step_sea_ice(
         state, forcing, ocean_sst, jnp.zeros(SHAPE), jnp.zeros(SHAPE),
@@ -581,13 +585,13 @@ def test_tile_fractions_sanitize_invalid_static_masks():
 
 
 def test_blending_is_area_weighted():
-    """Blended T_surface is correct area-weighted average."""
+    """Blended T_water_init_C is correct area-weighted average."""
     z = jnp.zeros(SHAPE)
     one = jnp.ones(SHAPE)
 
     def _make_tile_resp(T):
         return TileResponse(
-            T_surface=jnp.full(SHAPE, T),
+            T_water_init_C=jnp.full(SHAPE, T),
             albedo=z, emissivity=z, z0=z, q_surface=z,
             shflx=z, lhflx=z, tau_x=z, tau_y=z, lw_up=z,
             u_ocean_sfc=z, v_ocean_sfc=z, co2_flux=z,
@@ -612,7 +616,7 @@ def test_blending_is_area_weighted():
     )
 
     expected = 0.5 * 300 + 0.1 * 260 + 0.3 * 280 + 0.1 * 285
-    assert jnp.allclose(blended.T_surface, expected, atol=1e-6)
+    assert jnp.allclose(blended.T_water_init_C, expected, atol=1e-6)
 
 
 # ==============================================================================
@@ -633,7 +637,7 @@ def test_accumulator_mean():
 
     # Step 1: shflx=10, dt=100
     sfc1 = SurfaceToAtm(
-        T_surface=jnp.full(SHAPE, 280.0),
+        T_water_init_C=jnp.full(SHAPE, 280.0),
         albedo=z, emissivity=z, z0=z, q_surface=z,
         shflx=jnp.full(SHAPE, 10.0), lhflx=z,
         tau_x=z, tau_y=z, lw_up=z,
@@ -652,7 +656,7 @@ def test_accumulator_mean():
 
     # Expected: (10*100 + 30*300) / 400 = 10000/400 = 25
     assert jnp.allclose(result.shflx, 25.0, atol=1e-6)
-    assert jnp.allclose(result.T_surface, 280.0, atol=1e-6)
+    assert jnp.allclose(result.T_water_init_C, 280.0, atol=1e-6)
 
 
 # ==============================================================================
@@ -684,7 +688,7 @@ def test_full_coupler_step():
         sfc_state, forcing, tile_cfg, ocean_sst, ocean_u, ocean_v, DT)
 
     # All outputs finite
-    assert jnp.all(jnp.isfinite(blended.T_surface))
+    assert jnp.all(jnp.isfinite(blended.T_water_init_C))
     assert jnp.all(jnp.isfinite(blended.shflx))
     assert jnp.all(jnp.isfinite(blended.lhflx))
     assert jnp.all(jnp.isfinite(blended.tau_x))
@@ -712,7 +716,7 @@ def test_coupler_multiple_steps():
         sfc_state, blended = step_fn(
             sfc_state, forcing, tile_cfg, ocean_sst, zu, zu, DT)
 
-    assert jnp.all(jnp.isfinite(blended.T_surface))
+    assert jnp.all(jnp.isfinite(blended.T_water_init_C))
     assert jnp.allclose(sfc_state.accumulator.total_dt, 5 * DT, atol=1e-6)
 
 
@@ -917,7 +921,7 @@ def test_slab_ocean_warming():
 
 def test_slab_ocean_freezing_clamp():
     """SST stays >= T_freeze even with extreme cooling."""
-    cfg = SimpleOceanConfig(mode="slab", T_freeze=271.35)
+    cfg = SimpleOceanConfig(mode="slab", T_freeze=constants.T_freeze_ocean)
     step_fn = make_ocean(cfg)
 
     state = init_slab_state(SHAPE, T_sfc_init=272.0)
@@ -1059,7 +1063,7 @@ def test_coupler_differentiable_through_surface_state():
         )
         _, blended = step_fn(
             sfc_state, forcing, tile_cfg, ocean_sst, zu, zu, DT)
-        return jnp.sum(blended.T_surface)
+        return jnp.sum(blended.T_water_init_C)
 
     T_soil = jnp.full(SHAPE, 280.0)
     grad_T = jax.grad(loss)(T_soil)
@@ -1091,11 +1095,11 @@ def test_ocean_albedo_constant_honoured():
 
 
 # ==============================================================================
-# Test q_surface consistency with T_surface (P0-2)
+# Test q_surface consistency with T_water_init_C (P0-2)
 # ==============================================================================
 
 def test_land_q_surface_uses_updated_temperature():
-    """Slab land q_surface should be consistent with updated T_surface."""
+    """Slab land q_surface should be consistent with updated T_water_init_C."""
     from legoesm.thermo import saturation_mixing_ratio
 
     state = _make_land_state(T=280.0, W=75.0)
@@ -1104,8 +1108,8 @@ def test_land_q_surface_uses_updated_temperature():
 
     new_state, resp, _ = step_land(state, forcing, config, U_min=1.0, dt=DT)
 
-    # q_surface should correspond to updated T_surface, not initial
-    T_new = resp.T_surface
+    # q_surface should correspond to updated T_water_init_C, not initial
+    T_new = resp.T_water_init_C
     assert not jnp.allclose(T_new, 280.0, atol=0.01), "T should have changed"
 
     q_sat_new = saturation_mixing_ratio(T_new, forcing.p_surface)
@@ -1116,7 +1120,7 @@ def test_land_q_surface_uses_updated_temperature():
 
 
 def test_ice_q_surface_uses_updated_temperature():
-    """Sea ice q_surface should be consistent with updated T_surface."""
+    """Sea ice q_surface should be consistent with updated T_water_init_C."""
     from legoesm.thermo import saturation_mixing_ratio_ice
 
     state = _make_ice_state(h=1.0, T=260.0, conc=0.8)
@@ -1128,7 +1132,7 @@ def test_ice_q_surface_uses_updated_temperature():
         state, forcing, ocean_sst, jnp.zeros(SHAPE), jnp.zeros(SHAPE),
         config, U_min=1.0, dt=DT)
 
-    T_new = resp.T_surface
+    T_new = resp.T_water_init_C
     q_expected = saturation_mixing_ratio_ice(T_new, forcing.p_surface)
     assert jnp.allclose(resp.q_surface, q_expected, rtol=1e-5)
 
@@ -1169,7 +1173,7 @@ def test_lake_freezing_energy_conservation():
 
 
 def test_lake_q_surface_uses_updated_temperature():
-    """Lake q_surface should be consistent with updated T_surface."""
+    """Lake q_surface should be consistent with updated T_water_init_C."""
     from legoesm.thermo import saturation_mixing_ratio
 
     state = _make_lake_state(T_epi=285.0, T_hypo=278.0)
@@ -1178,7 +1182,7 @@ def test_lake_q_surface_uses_updated_temperature():
 
     new_state, resp = step_lake(state, forcing, config, U_min=1.0, dt=DT)
 
-    T_new = resp.T_surface
+    T_new = resp.T_water_init_C
     assert not jnp.allclose(T_new, 285.0, atol=0.01), "T should have changed"
 
     q_expected = saturation_mixing_ratio(T_new, forcing.p_surface)
@@ -1196,7 +1200,7 @@ def test_coupler_with_3d_ocean_fc_gram():
     grid = create_cubed_sphere(8)
     z_coord = create_ocean_z_star(n_levels=5, H_max=4000.0)
     ocean_state = rest_state_ocean(
-        grid, z_coord, T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+        grid, z_coord, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
         H_max=4000.0,
     )
 
@@ -1230,10 +1234,10 @@ def test_coupler_with_3d_ocean_fc_gram():
 
     new_sfc, blended = step_fn(
         sfc_state, forcing, tile_cfg,
-        sst + 273.15,  # degC → K
+        sst + constants.T_freeze,  # degC → K
         ocean_u, ocean_v, DT,
     )
-    assert jnp.all(jnp.isfinite(blended.T_surface))
+    assert jnp.all(jnp.isfinite(blended.T_water_init_C))
     assert jnp.all(jnp.isfinite(blended.shflx))
 
 
@@ -1248,7 +1252,7 @@ def test_coupler_with_fv_ocean_tracer_transport():
     grid = create_cubed_sphere(8)
     z_coord = create_ocean_z_star(n_levels=5, H_max=4000.0)
     ocean_state = rest_state_ocean(
-        grid, z_coord, T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+        grid, z_coord, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
         H_max=4000.0,
     )
 
@@ -1280,5 +1284,5 @@ def test_coupler_with_fv_ocean_tracer_transport():
         sst + constants.T_freeze,  # iter-166: was 273.15 literal
         jnp.zeros(shape), jnp.zeros(shape), DT,
     )
-    assert jnp.all(jnp.isfinite(blended.T_surface))
+    assert jnp.all(jnp.isfinite(blended.T_water_init_C))
     assert jnp.all(jnp.isfinite(blended.shflx))

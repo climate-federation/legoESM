@@ -140,6 +140,16 @@ class SpectralPEConfig(NamedTuple):
     # 1.0 recovers the original Robert-Asselin filter (3rd-order phase
     # error retained).
     robert_asselin_alpha: float = 0.53
+    # Iter-3: optional initial-mass anchor for the spectral primitive
+    # equations.  When ``fix_mass`` is on and
+    # ``anchor_mass_to_initial`` is True, ``step()`` snapshots the
+    # initial total dry mass (∫ p_s dA, fp64) on first call and rescales
+    # ``lnps_hat[0]`` after each step so the global integral returns to
+    # the snapshot.  Mirrors ``primitive_eq_cdgrid``/``primitive_eq_latlon_cgrid``
+    # behaviour.  Disabled by default to preserve pre-iter-3 baseline
+    # numerics for tests that intentionally measure drift.
+    fix_mass: bool = False
+    anchor_mass_to_initial: bool = False
 
 
 # =============================================================================
@@ -1066,6 +1076,11 @@ class SpectralPrimitiveEquationModel:
         # tracers entirely.
         self._tracer_filter = None
         self._tracer_filter_dt = None
+        # Iter-3: anchored mass target.  Lazily filled by ``step()`` on
+        # first call when ``fix_mass`` and ``anchor_mass_to_initial`` are
+        # both set.  Stored in fp64 so per-step corrections aren't
+        # contaminated by storage round-trips.
+        self._target_mass = None
 
         if legoesm_config is not None:
             allow_unsupported_backend = bool(
@@ -1315,7 +1330,74 @@ class SpectralPrimitiveEquationModel:
         # active or ``state.tracers is None``).
         result = self._apply_tracer_filter(result)
 
+        # Iter-3: anchored-mass fixer.  ``_target_mass`` is None when
+        # disabled (``fix_mass`` off or ``anchor_mass_to_initial`` off)
+        # OR on the very first call (snapshot happens in ``step()``
+        # OUTSIDE this JIT).  When set, it's a fp64 scalar that JIT
+        # captures as a closure constant — same pattern as cubed-sphere
+        # ``self._target_mass`` access in ``_step_fv3``.
+        if (self.config.fix_mass
+                and self.config.anchor_mass_to_initial
+                and self._target_mass is not None):
+            result = self._apply_mass_fixer(result)
+
         return result
+
+    def _apply_mass_fixer(self, state):
+        """Rescale ``lnps_hat[0]`` so the global integral matches ``_target_mass``.
+
+        With the spectral basis ``(4π)``-normalised on the unit sphere
+        (``sh_analysis(ones)[0] = sqrt(4π)``), adding a constant ``Δ`` to
+        ``lnps`` in physical space is equivalent to adding ``Δ·sqrt(4π)``
+        to ``lnps_hat[0]``.  We solve ``Δ = log(target / current)`` so
+        that ``exp(lnps + Δ) = (target/current) · exp(lnps)`` and the
+        integral is restored multiplicatively (gradients of ``p_s`` are
+        preserved exactly — same property as the cubed-sphere/lat-lon
+        ``fix_ps_mass`` additive uniform correction, just expressed in
+        log-space because ``lnps`` is the prognostic variable).
+        """
+        lnps_grid = sh_synthesis(self.grid, state.lnps_hat.data)
+        p_s_grid = jnp.exp(lnps_grid)
+        acc = jnp.float64
+        mass_now = jnp.sum(
+            p_s_grid.astype(acc) * self.grid.grid_area.astype(acc),
+        )
+        log_scale = jnp.log(self._target_mass / mass_now)
+        # sqrt(4π) is the (0,0) coefficient of a constant=1 field under
+        # the (4π)-normalised real-SH convention this module uses.
+        sqrt_4pi = jnp.sqrt(jnp.asarray(4.0 * jnp.pi, dtype=acc))
+        lnps_hat_new = state.lnps_hat.data.at[0].add(
+            (log_scale * sqrt_4pi).astype(state.lnps_hat.data.dtype),
+        )
+        return state._replace(
+            lnps_hat=state.lnps_hat.replace(data=lnps_hat_new),
+        )
+
+    def _compute_initial_mass(self, state):
+        """Compute total dry mass ``∫ p_s dA`` in fp64 from a spectral state."""
+        lnps_grid = sh_synthesis(self.grid, state.lnps_hat.data)
+        p_s_grid = jnp.exp(lnps_grid)
+        return jnp.sum(
+            p_s_grid.astype(jnp.float64)
+            * self.grid.grid_area.astype(jnp.float64),
+        )
+
+    def compute_mass(self, state) -> jax.Array:
+        """Public alias of ``_compute_initial_mass`` (iter-22).
+
+        Provides the same name as the cube / lat-lon / MPAS PE
+        ``compute_mass(state)`` helpers — single API across all four
+        hydrostatic dycores.
+        """
+        return self._compute_initial_mass(state)
+
+    def reset_target_mass(self) -> None:
+        """Clear the anchored mass target (iter-18; see iter-4 SW twin)."""
+        self._target_mass = None
+
+    def set_target_mass(self, target_mass) -> None:
+        """Explicitly set the anchored mass target (iter-19)."""
+        self._target_mass = target_mass
 
     def step(
         self,
@@ -1342,6 +1424,14 @@ class SpectralPrimitiveEquationModel:
             3-arg ``physics_fn(state, grid, sigma_coord)`` API for
             backward compatibility.
         """
+        # Iter-3: anchor mass on first call (outside JIT so the fp64
+        # scalar becomes a closure constant).  Mirrors
+        # ``primitive_eq_cdgrid.step()`` precompute pattern.
+        if (self.config.fix_mass
+                and self.config.anchor_mass_to_initial
+                and self._target_mass is None):
+            self._target_mass = self._compute_initial_mass(state)
+
         integrator = self.config.time_integrator.lower()
         if integrator in ("leapfrog", "leapfrog_si"):
             return self._leapfrog_step(state, dt, physics_fn, forcing_data)
@@ -1389,6 +1479,11 @@ class SpectralPrimitiveEquationModel:
             result = self._apply_implicit_hyperdiff(result)
             # Same combined filter applied to grid-space tracers
             result = self._apply_tracer_filter(result)
+            # Iter-3: anchored mass fixer (leapfrog Euler-startup branch).
+            if (self.config.fix_mass
+                    and self.config.anchor_mass_to_initial
+                    and self._target_mass is not None):
+                result = self._apply_mass_fixer(result)
             self._state_prev = state
             return result
         else:
@@ -1425,6 +1520,14 @@ class SpectralPrimitiveEquationModel:
             else:
                 state_n_filtered = state
                 state_np1_filtered = state_np1
+            # Iter-3: anchored mass fixer (leapfrog body).  Applied to
+            # the time-(n+1) state AFTER the Robert-Asselin filter so
+            # the computational mode is damped first, then mass is
+            # restored exactly to the initial integral.
+            if (self.config.fix_mass
+                    and self.config.anchor_mass_to_initial
+                    and self._target_mass is not None):
+                state_np1_filtered = self._apply_mass_fixer(state_np1_filtered)
             self._state_prev = state_n_filtered
             return state_np1_filtered
 

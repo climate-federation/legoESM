@@ -39,7 +39,7 @@ def z_coord():
 def state(grid, z_coord):
     return rest_state_latlon_cgrid_ocean(
         grid, z_coord,
-        T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+        T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
         H_max=4000.0,
     )
 
@@ -277,7 +277,7 @@ class TestCGridOceanModel:
         """
         state = rest_state_latlon_cgrid_ocean(
             grid, z_coord,
-            T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+            T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
             H_max=4000.0,
         )
 

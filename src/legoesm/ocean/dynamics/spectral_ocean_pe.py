@@ -919,7 +919,7 @@ class SpectralOceanModel:
 def rest_state_spectral_ocean(
     grid: GaussianGrid,
     z_coord: OceanZStarCoordinate,
-    T_surface: float = 20.0,
+    T_water_init_C: float = 20.0,
     T_deep: float = 2.0,
     S_uniform: float = 35.0,
     H_max: float = 5500.0,
@@ -933,7 +933,7 @@ def rest_state_spectral_ocean(
         Gaussian grid.
     z_coord : OceanZStarCoordinate
         Vertical coordinate.
-    T_surface, T_deep : float
+    T_water_init_C, T_deep : float
         Surface and deep temperature [degC].
     S_uniform : float
         Uniform salinity [PSU].
@@ -950,7 +950,7 @@ def rest_state_spectral_ocean(
             f"got {land_lat_threshold!r}",
         )
     for name, value in {
-        "T_surface": T_surface,
+        "T_water_init_C": T_water_init_C,
         "T_deep": T_deep,
         "S_uniform": S_uniform,
     }.items():
@@ -979,7 +979,7 @@ def rest_state_spectral_ocean(
     # comes from ``legoesm.ocean.eos`` (the canonical 1000 m e-folding
     # depth for ocean stratification) rather than a local literal —
     # iter-66 audit fix.
-    T_profile = T_deep + (T_surface - T_deep) * jnp.exp(z_coord.z_full_ref / scale_depth)
+    T_profile = T_deep + (T_water_init_C - T_deep) * jnp.exp(z_coord.z_full_ref / scale_depth)
     T_grid = jnp.broadcast_to(
         T_profile[jnp.newaxis, jnp.newaxis, :],
         (grid.n_lat, grid.n_lon, nlev),

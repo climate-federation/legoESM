@@ -25,6 +25,8 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
+
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
@@ -128,20 +130,20 @@ def _make_rrtmgp_physics(model_type: str, dt: float, hs_fn=None):
 
 # Diffusion coefficient helpers (match test matrix)
 def _hyperdiff_cube(n):
-    dx = 6.371e6 * np.pi / (2 * n)
+    dx = constants.R_earth * np.pi / (2 * n)
     tau = 3600.0
     return dx ** 4 / tau
 
 def _div_damp_cube(n):
-    dx = 6.371e6 * np.pi / (2 * n)
+    dx = constants.R_earth * np.pi / (2 * n)
     return 0.15 * dx ** 2
 
 def _laplacian_visc_cube(n):
-    dx = 6.371e6 * np.pi / (2 * n)
+    dx = constants.R_earth * np.pi / (2 * n)
     return 0.01 * dx ** 2
 
 def _laplacian_visc_latlon(n_lat):
-    dx = 6.371e6 * np.pi / n_lat
+    dx = constants.R_earth * np.pi / n_lat
     return 0.01 * dx ** 2
 
 def _hyperdiff_ico(mesh):

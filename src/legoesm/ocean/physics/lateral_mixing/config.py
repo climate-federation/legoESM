@@ -6,15 +6,33 @@ from typing import NamedTuple
 
 
 class HarmonicConfig(NamedTuple):
-    """Laplacian (harmonic) lateral mixing."""
+    """Laplacian (harmonic) lateral mixing.
+
+    The explicit 2-D Laplacian operator is stable only when
+    ``A_h · dt / dx² ≤ 1/4`` (2-D diffusive CFL, safety factor
+    incorporated).  ``cfl_dt_estimate`` lets the scheme cap the
+    diffusivity at the explicit limit without knowing the runtime dt;
+    set higher (=longer dt) for stricter caps.  The cap is opt-in via
+    ``enforce_cfl=True``.
+    """
     A_h: float = 1e4   # Horizontal viscosity [m^2/s]
     K_h: float = 1e3   # Horizontal tracer diffusivity [m^2/s]
+    enforce_cfl: bool = False         # Apply 2-D explicit CFL cap
+    cfl_dt_estimate: float = 3600.0   # Reference dt for the cap [s]
+    cfl_safety: float = 0.20          # Margin below 1/4 stability bound
 
 
 class BiharmonicConfig(NamedTuple):
-    """Biharmonic lateral mixing."""
+    """Biharmonic lateral mixing.
+
+    Explicit biharmonic CFL is ``B_h · dt / dx⁴ ≤ 1/16`` (2-D, with a
+    safety factor).  See ``HarmonicConfig`` for the analogous CFL knobs.
+    """
     B_h_momentum: float = 0.0   # Biharmonic viscosity [m^4/s]
     B_h_tracer: float = 0.0     # Biharmonic tracer diffusivity [m^4/s]
+    enforce_cfl: bool = False
+    cfl_dt_estimate: float = 3600.0
+    cfl_safety: float = 0.05    # Margin below 1/16 stability bound
 
 
 class VisbeckConfig(NamedTuple):

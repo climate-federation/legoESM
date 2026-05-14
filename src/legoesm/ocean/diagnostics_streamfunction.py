@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from legoesm import constants
+
 
 def moc_streamfunction(v, h_partial, eta, H_bathy, mask, grid):
     """Eulerian-mean meridional overturning streamfunction [Sv].
@@ -58,9 +60,28 @@ def moc_streamfunction(v, h_partial, eta, H_bathy, mask, grid):
     """
     del eta, H_bathy  # accepted for API symmetry
     n_lat_v, n_lon, _ = v.shape  # n_lat_v = n_lat + 1
-    R = getattr(grid, "radius", 6.371e6)
-    cos_lat_v = np.cos(np.linspace(-np.pi / 2, np.pi / 2, n_lat_v))
-    dlon = 2.0 * np.pi / n_lon
+    R = getattr(grid, "radius", constants.R_earth)
+    # Derive v-face latitudes from grid metadata when available so
+    # regional grids get the correct zonal face lengths.  Falls back
+    # to the legacy global ``linspace(-π/2, π/2)`` only when the
+    # grid object does not expose ``lat_v`` / ``lat`` / ``dlat``.
+    # Codex iter-36 #1.
+    lat_v = getattr(grid, "lat_v", None)
+    if lat_v is None:
+        grid_lat = getattr(grid, "lat", None)
+        grid_dlat = getattr(grid, "dlat", None)
+        if grid_lat is not None and grid_dlat is not None:
+            # Cell centres + half-cell offset → v-face latitudes.
+            lat_v = np.concatenate([
+                [grid_lat[0] - 0.5 * grid_dlat],
+                grid_lat + 0.5 * grid_dlat,
+            ])
+        else:
+            lat_v = np.linspace(-np.pi / 2, np.pi / 2, n_lat_v)
+    cos_lat_v = np.cos(np.asarray(lat_v))
+    # Longitudinal spacing: prefer ``grid.dlon`` (correct on regional
+    # grids); fall back to the global 2π/n_lon.
+    dlon = getattr(grid, "dlon", 2.0 * np.pi / n_lon)
     dx_v = R * dlon * cos_lat_v[:, None]                        # (n_lat+1, 1)
 
     h_v = np.zeros_like(v)                                      # (n_lat+1, n_lon, nlev)
@@ -110,9 +131,15 @@ def barotropic_streamfunction(u, h_partial, mask, grid):
     """
     n_lat, n_lon_u, _ = u.shape
     n_lon = n_lon_u - 1
-    R = getattr(grid, "radius", 6.371e6)
-    dlat = np.pi / n_lat
-    dy = R * dlat                                                # uniform
+    R = getattr(grid, "radius", constants.R_earth)
+    # Cell-row meridional extent — prefer ``grid.dy`` (1D array,
+    # Mercator-safe) but fall back to a uniform ``R * dlat`` if absent
+    # (lightweight grid proxies in tests sometimes lack ``dy``).
+    if hasattr(grid, "dy"):
+        dy = np.asarray(grid.dy) * 0.5                            # (n_lat,)
+    else:
+        dlat = getattr(grid, "dlat", np.pi / n_lat)
+        dy = np.full((n_lat,), R * dlat)
 
     # MOM6/MITgcm "min-rule" thickness at u-faces:
     h_E = h_partial
@@ -126,6 +153,8 @@ def barotropic_streamfunction(u, h_partial, mask, grid):
     u_mask = np.concatenate([u_mask_int, u_mask_int[:, 0:1]], axis=1)
 
     U_dz = np.sum(u * h_u, axis=-1) * u_mask                     # (n_lat, n_lon+1)
-    psi_bt = -np.cumsum(U_dz, axis=0) * dy / 1.0e6               # (n_lat, n_lon+1) [Sv]
+    # Per-row dy weighting before cumsum so non-uniform grids integrate
+    # the correct meridional transport.
+    psi_bt = -np.cumsum(U_dz * dy[:, None], axis=0) / 1.0e6      # (n_lat, n_lon+1) [Sv]
 
     return psi_bt[:, :-1]

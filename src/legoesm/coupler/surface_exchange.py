@@ -73,8 +73,14 @@ def extract_atm_to_surface(
     else:
         q_lowest = jnp.zeros(shape, dtype=_state_dtype)
 
-    # Air density from ideal gas law
-    rho_lowest = p_lowest / (constants.R_d * T_lowest)
+    # Air density from ideal gas law for moist air: ``p = ρ · R_d · T_v``
+    # where ``T_v = T · (1 + (1/ε − 1) · q_v)``.  The previous dry form
+    # ``ρ = p / (R_d · T)`` underestimated density by ~0.6 % in the
+    # tropics (q_v ~ 17 g/kg, T_v − T ~ 1.7 K), biasing bulk-flux
+    # surface stress and turbulent fluxes via every downstream caller
+    # that uses ``forcing.rho_lowest``.
+    T_v_lowest = T_lowest * (1.0 + (1.0 / constants.epsilon - 1.0) * q_lowest)
+    rho_lowest = p_lowest / (constants.R_d * T_v_lowest)
 
     # Default unavailable fields to zero with flags
     zero = jnp.zeros(shape, dtype=_state_dtype)
@@ -133,9 +139,17 @@ def extract_atm_to_surface_nh(
     u_lowest = state.u.data[..., -1]
     v_lowest = state.v.data[..., -1]
 
-    # Humidity from tracers if available
-    has_tracers = state.tracers.data.shape[-1] > 0
-    q_lowest = jnp.where(has_tracers, state.tracers.data[..., -1, 0], 0.0)
+    # Humidity from tracers if available.  Use a Python ``if`` rather
+    # than ``jnp.where`` because the latter still traces both branches,
+    # and ``state.tracers.data[..., -1, 0]`` crashes at trace time when
+    # the n_tracers axis is empty (dry NH simulations have shape
+    # ``(..., nlev, 0)`` and indexing axis-0 position 0 is out of
+    # bounds).  Mirrors the hydrostatic branch's static-shape check
+    # (lines 69-74).
+    if state.tracers.data.shape[-1] > 0:
+        q_lowest = state.tracers.data[..., -1, 0]
+    else:
+        q_lowest = jnp.zeros_like(T_lowest)
 
     rho_lowest = rho_low
 

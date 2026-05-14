@@ -10,6 +10,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm import constants
+
 jax.config.update("jax_enable_x64", True)
 
 
@@ -108,7 +110,7 @@ class TestSlabCarbon1Year:
         assert jnp.all(jnp.isfinite(driver._co2_field)), "CO2 has NaN/inf"
         assert float(jnp.min(driver._co2_field)) > 0, "CO2 went negative"
         # Convert to ppmv and check wide bounds (uncalibrated model)
-        M_CO2, M_air = 44.01, 28.97
+        M_CO2, M_air = constants.M_CO2, constants.M_air
         co2_ppmv = float(jnp.mean(driver._co2_field)) / (M_CO2 / M_air) * 1e6
         assert 100.0 < co2_ppmv < 2000.0, f"CO2 = {co2_ppmv:.1f} ppmv"
 

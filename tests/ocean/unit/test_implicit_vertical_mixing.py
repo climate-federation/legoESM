@@ -47,7 +47,7 @@ def _build_model(implicit: bool, A_v=1e-3, K_v=1e-4,
     grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
     z_coord = create_ocean_z_star(n_levels=n_lev, H_max=4000.0)
     state = rest_state_latlon_cgrid_ocean(
-        grid, z_coord, T_surface=20.0, T_deep=2.0,
+        grid, z_coord, T_water_init_C=20.0, T_deep=2.0,
         S_uniform=35.0, H_max=4000.0,
     )
     # Add some shear/stratification so vertical diffusion has work to do.
@@ -152,7 +152,7 @@ class TestStabilityAtLargeK:
         grid = create_latlon_grid(n_lat=18, n_lon=36)
         z_coord = create_ocean_z_star(n_levels=20, H_max=5500.0)
         state = rest_state_latlon_cgrid_ocean(
-            grid, z_coord, T_surface=20.0, T_deep=2.0,
+            grid, z_coord, T_water_init_C=20.0, T_deep=2.0,
             S_uniform=35.0, H_max=5500.0,
         )
         # Cold surface, warm below → statically unstable, fires convection.

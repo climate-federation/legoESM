@@ -101,12 +101,12 @@ def _analytical_woa_profiles(
 
     # --- Temperature ---
     # SST: ~28 degC at equator, ~0 degC at poles
-    T_surface = 28.0 * np.cos(np.radians(lat)) ** 2
+    T_water_init_C = 28.0 * np.cos(np.radians(lat)) ** 2
     T_deep = 1.5  # Bottom water ~1.5 degC globally
     scale = 500.0  # e-folding depth [m]
 
     # z_full is negative; exp(z/scale) = exp(-depth/scale)
-    T = T_deep + (T_surface[..., np.newaxis] - T_deep) * np.exp(z_full / scale)
+    T = T_deep + (T_water_init_C[..., np.newaxis] - T_deep) * np.exp(z_full / scale)
 
     # --- Salinity ---
     # Surface: fresher near equator (ITCZ precip) and poles; saltier subtropics

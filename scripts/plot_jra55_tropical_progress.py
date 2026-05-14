@@ -45,6 +45,7 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
+from legoesm import constants
 from legoesm.ocean.diagnostics_streamfunction import (
     barotropic_streamfunction,
     moc_streamfunction,
@@ -109,7 +110,7 @@ class _GridShim:
     via this shim — keeps the plot script free of run-specific config
     coupling.
     """
-    def __init__(self, n_lat: int, n_lon: int, radius: float = 6.371e6):
+    def __init__(self, n_lat: int, n_lon: int, radius: float = constants.R_earth):
         self.n_lat = n_lat
         self.n_lon = n_lon
         self.radius = radius

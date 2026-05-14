@@ -9,6 +9,7 @@ os.environ["JAX_ENABLE_X64"] = "1"
 import numpy as np
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.ocean.vertical import create_ocean_z_star
 from legoesm.ocean.physics.combined import OceanPhysicsConfig
 from legoesm.ocean.physics.surface_forcing.config import SurfaceForcingConfig, PrescribedForcingConfig
@@ -26,7 +27,7 @@ DAYS = 30.0
 N_STEPS = int(DAYS * 86400 / DT)
 T_UNIFORM = 10.0
 S_UNIFORM = 35.0
-RHO0 = 1025.0
+RHO0 = constants.rho_ocean
 R_DRAG = 1e-4
 TAU_MAX = 0.1
 
@@ -76,7 +77,7 @@ ll_grid = create_latlon_grid(36, 72)
 ll_config = LatLonCGridOceanConfig(n_barotropic_substeps=30, physics=physics, A_h=5e5)
 ll_model = LatLonCGridOceanModel(ll_grid, z_coord, ll_config)
 ll_state = rest_state_latlon_cgrid_ocean(
-    ll_grid, z_coord, T_surface=T_UNIFORM, T_deep=T_UNIFORM, S_uniform=S_UNIFORM)
+    ll_grid, z_coord, T_water_init_C=T_UNIFORM, T_deep=T_UNIFORM, S_uniform=S_UNIFORM)
 lon_2d = np.asarray(ll_grid.lon) * 180 / np.pi
 lat_1d = np.asarray(ll_grid.lat) * 180 / np.pi
 lon_g, lat_g = np.meshgrid(lon_2d, lat_1d)
@@ -97,7 +98,7 @@ mpas_mesh = create_voronoi_mesh(3)
 mpas_config = MPASOceanConfig(n_barotropic_substeps=30, physics=physics, A_h=5e5)
 mpas_model = MPASOceanModel(mpas_mesh, z_coord, mpas_config)
 mpas_state = rest_state_mpas_ocean(
-    mpas_mesh, z_coord, T_surface=T_UNIFORM, T_deep=T_UNIFORM, S_uniform=S_UNIFORM)
+    mpas_mesh, z_coord, T_water_init_C=T_UNIFORM, T_deep=T_UNIFORM, S_uniform=S_UNIFORM)
 lon_deg_c = np.asarray(mpas_mesh.lonCell) * 180 / np.pi
 lat_deg_c = np.asarray(mpas_mesh.latCell) * 180 / np.pi
 mpas_mask = _create_simplified_continent_mask(lon_deg_c, lat_deg_c)

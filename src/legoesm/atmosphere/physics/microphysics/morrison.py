@@ -28,7 +28,9 @@ from legoesm.atmosphere.physics.microphysics._warm_rain import (
     self_collection_breakup,
     rain_evaporation,
     safe_pow,
+    donor_clamp_scale,
 )
+from legoesm.atmosphere.physics._shared import safe_divide
 from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
 from legoesm.atmosphere.physics.microphysics.output import (
     HydrometeorState,
@@ -79,13 +81,14 @@ def morrison_microphysics(
         T, q_v, p_full, dt, sharpness, q_c=q_c,
     )
     dq_c_au, dN_r_au, x_c = autoconversion_sb(
-        q_c, N_c_eff, rho, config.k_au, config.x_star, sharpness,
+        q_c, N_c_eff, rho, config.k_au, config.x_star,
+        config.autoconversion_sharpness,
     )
     dq_c_ac = accretion(q_c, q_r, rho, config.k_ac)
     dN_r_sc, dN_r_br = self_collection_breakup(
         N_r, q_r, rho, config.k_sc, config.breakup_sharpness, config.D_eq,
     )
-    evaporation = rain_evaporation(q_v, q_r, q_sat, config.evap_coeff)
+    evaporation = rain_evaporation(q_v, q_r, q_sat, config.evap_coeff, dt=dt)
 
     # === ICE PHASE ===
     T_freeze = constants.T_freeze
@@ -152,10 +155,7 @@ def morrison_microphysics(
     # uniform rescale of both pieces preserves the budget.
     qi_sink_total = aggregation + melt_ice
     qi_avail = jnp.clip(q_i, 0.0)
-    qi_scale = jnp.minimum(
-        1.0,
-        qi_avail / jnp.maximum(qi_sink_total * jnp.maximum(dt, 1e-10), 1e-30),
-    )
+    qi_scale = donor_clamp_scale(qi_avail, qi_sink_total, dt)
     aggregation = aggregation * qi_scale
     melt_ice = melt_ice * qi_scale
 
@@ -163,10 +163,7 @@ def morrison_microphysics(
     # melt_snow is a q_s sink.  Same logic as the q_i clamp.
     qs_sink_total = melt_snow
     qs_avail = jnp.clip(q_s, 0.0)
-    qs_scale = jnp.minimum(
-        1.0,
-        qs_avail / jnp.maximum(qs_sink_total * jnp.maximum(dt, 1e-10), 1e-30),
-    )
+    qs_scale = donor_clamp_scale(qs_avail, qs_sink_total, dt)
     melt_snow = melt_snow * qs_scale
 
     # === DONOR CLAMP for q_c sinks ===
@@ -190,10 +187,7 @@ def morrison_microphysics(
     cond_evap_sink = jnp.maximum(-condensation, 0.0)
     qc_sink_total = dq_c_au + dq_c_ac + bergeron + riming_i + riming_s + cond_evap_sink
     qc_avail = jnp.clip(q_c, 0.0)
-    qc_scale = jnp.minimum(
-        1.0,
-        qc_avail / jnp.maximum(qc_sink_total * jnp.maximum(dt, 1e-10), 1e-30),
-    )
+    qc_scale = donor_clamp_scale(qc_avail, qc_sink_total, dt)
     dq_c_au = dq_c_au * qc_scale
     dq_c_ac = dq_c_ac * qc_scale
     bergeron = bergeron * qc_scale
@@ -210,6 +204,31 @@ def morrison_microphysics(
     # Number tendency for autoconverted droplets must scale identically.
     dN_r_au = dN_r_au * qc_scale
 
+    # === DONOR CLAMP for q_v sinks ===
+    # The vapor budget in this scheme is ``dq_v_dt = -condensation +
+    # evaporation - dq_i_dep``.  Positive ``condensation`` and positive
+    # ``dq_i_dep`` together remove vapor; if their combined rate · dt
+    # exceeds available ``q_v``, the explicit step drives q_v < 0.
+    # ``saturation_adjustment`` clamps ``condensation`` against q_v in
+    # isolation, but in a supersaturated icy layer the ice deposition
+    # ``dq_i_dep`` can still over-draw q_v on its own or jointly with
+    # condensation.  Mirror the q_c / q_i clamps: rescale all positive
+    # vapor sinks (and their matching sources / latent heat) so the
+    # combined removal cannot exceed the locally-available vapor mass.
+    # Codex iter-25 finding #3.
+    # Vapor donor clamp via the shared AD-safe helper
+    # (donor_clamp_scale).  The helper's ``divisor_floor`` (default
+    # 1e-15) keeps the VJP bounded under fp32 even for tiny
+    # supersaturated icy layers where the sink is small but positive.
+    cond_pos = jnp.maximum(condensation, 0.0)
+    qv_sink_total = cond_pos + jnp.maximum(dq_i_dep, 0.0)
+    qv_avail = jnp.clip(q_v, 0.0)
+    qv_scale = donor_clamp_scale(qv_avail, qv_sink_total, dt)
+    # Scale only the positive (vapor-consuming) branch of condensation;
+    # negative condensation (evaporation) is unaffected.
+    condensation = jnp.where(condensation > 0.0, condensation * qv_scale, condensation)
+    dq_i_dep = dq_i_dep * qv_scale
+
     # === SEDIMENTATION ===
     # Marshall-Palmer fall speeds V_t = a_v * (q * rho / rho_sfc)^b_v use
     # fractional exponents (b_v_r=0.5, b_v_i=0.25, b_v_s=0.3); guard the
@@ -223,9 +242,25 @@ def morrison_microphysics(
     V_t_s = config.a_v_s * safe_pow(jnp.clip(q_s, 0.0) * rho_ratio, config.b_v_s)
     V_t_s = jnp.clip(V_t_s, 0.0, 5.0)
 
-    sed_r = sedimentation_tendency(q_r, rho, V_t_r, dz)
-    sed_i = sedimentation_tendency(q_i, rho, V_t_i, dz)
-    sed_s = sedimentation_tendency(q_s, rho, V_t_s, dz)
+    # Joint donor caps: each `extra_sink` is the in-column sink that
+    # shares the same explicit-Euler step as sedimentation.
+    # Without these, the post-donor-clamp in-column sinks (aggregation +
+    # melt_ice for q_i, melt_snow for q_s, evaporation for q_r) ALREADY
+    # consume up to q/dt, AND sed independently can drain another q/dt
+    # — driving the pool negative.  Mirrors the iter-29 q_r/evap fix.
+    sed_r, precip_r = sedimentation_tendency(
+        q_r, rho, V_t_r, dz, dt=dt,
+        return_surface_flux=True,
+        extra_sink=evaporation,
+    )
+    sed_i, precip_i = sedimentation_tendency(
+        q_i, rho, V_t_i, dz, dt=dt, return_surface_flux=True,
+        extra_sink=aggregation + melt_ice,
+    )
+    sed_s, precip_s = sedimentation_tendency(
+        q_s, rho, V_t_s, dz, dt=dt, return_surface_flux=True,
+        extra_sink=melt_snow,
+    )
 
     # === LATENT HEATING ===
     L_v = constants.L_v
@@ -255,14 +290,37 @@ def morrison_microphysics(
     dq_i_dt = dq_i_dep + bergeron + riming_i - aggregation - melt_ice + sed_i
     dq_s_dt = aggregation + riming_s - melt_snow + sed_s
 
-    dN_c_dt = -dq_c_au * rho / jnp.clip(x_c, 1e-20)
+    # AD-safe number-concentration tendencies (issue #249).
+    #
+    # ``dN_c_dt = -dq_c_au · ρ / x_c``: ``x_c = q_c·ρ/N_c`` has no
+    # upstream clip (``effective_Nc`` clips ``N_c`` only), so ``x_c``
+    # can land anywhere in ``(0, ∞)`` including the AD-unsafe range
+    # ``(1e-20, 1e-15)`` where the legacy ``clip(x_c, 1e-20)`` floor
+    # was inactive but ``-dq_c_au·ρ / x_c²`` cotangents reached
+    # ``∼1e30`` — the dominant NaN-gradient source in the issue's
+    # repro.  ``safe_divide(eps=1e-15)`` masks the unphysical residue
+    # below the cloud-water scale (``q_c=1e-7 kg/kg`` → ``x_c ≈ 1e-15
+    # kg``); cells that legitimately contain cloud stay in the divide
+    # branch.  ``dq_c_au ∝ q_c² ∝ x_c²`` also vanishes there, so
+    # ``fill=0.0`` matches the physical limit.
+    #
+    # ``dN_i_dt`` keeps the legacy ``clip(q_i, 1e-15) + divide`` form:
+    # the floor is large enough relative to ``aggregation ∝ q_i`` that
+    # the divide's cotangent stays bounded, and ``clip``'s zero VJP in
+    # the floor-active branch already breaks the AD propagation.
+    # ``safe_divide`` here would lose the trace-positive
+    # ``q_i ∈ (0, 1e-15)`` scaling of the legacy expression
+    # (``aggregation · N_i / 1e-15 ∝ q_i``); the per-mass-rate rewrite
+    # is also non-equivalent in that regime (codex round 4).  Issue
+    # #249 listed this as a vanishing-numerator site, but the
+    # ``q_i``-floor clip already saves the AD path.
+    dN_c_dt = safe_divide(-dq_c_au * rho, x_c, eps=1e-15)
     dN_r_dt = dN_r_au + dN_r_sc + dN_r_br
     dN_i_dt = dN_i_nuc - aggregation * jnp.clip(N_i, 0.0) / jnp.clip(q_i, 1e-15)
 
-    # Precipitation (rain + ice + snow at surface)
-    precip_r = jnp.clip(q_r[:, -1], 0.0) * rho[:, -1] * jnp.clip(V_t_r[:, -1], 0.0)
-    precip_i = jnp.clip(q_i[:, -1], 0.0) * rho[:, -1] * jnp.clip(V_t_i[:, -1], 0.0)
-    precip_s = jnp.clip(q_s[:, -1], 0.0) * rho[:, -1] * jnp.clip(V_t_s[:, -1], 0.0)
+    # Precipitation (rain + ice + snow at surface) uses the dt-limited
+    # surface flux from ``sedimentation_tendency`` so column water
+    # conservation holds exactly when the CFL limiter fires.
     precipitation = precip_r + precip_i + precip_s
 
     # Pin dtype to the input precision so we never silently promote

@@ -61,7 +61,7 @@ def idealized_bathymetry(
 def rest_state_ocean(
     grid: CubedSphereGrid,
     z_coord: OceanZStarCoordinate,
-    T_surface: float = 20.0,
+    T_water_init_C: float = 20.0,
     T_deep: float = 2.0,
     S_uniform: float = 35.0,
     H_max: float = 5500.0,
@@ -69,7 +69,7 @@ def rest_state_ocean(
 ) -> OceanState:
     """Create a rest-state initial condition with stratification.
 
-    Temperature: exponential profile T(z) = T_deep + (T_surface - T_deep) * exp(z/scale)
+    Temperature: exponential profile T(z) = T_deep + (T_water_init_C - T_deep) * exp(z/scale)
     Salinity: uniform.
     Velocity: zero.
     Eta: zero.
@@ -80,7 +80,7 @@ def rest_state_ocean(
         Horizontal grid.
     z_coord : OceanZStarCoordinate
         Vertical coordinate.
-    T_surface : float
+    T_water_init_C : float
         Surface temperature [degC].
     T_deep : float
         Deep ocean temperature [degC].
@@ -103,7 +103,7 @@ def rest_state_ocean(
 
     # Temperature: exponential stratification
     # z_full_ref is negative, scale depth = 1000m
-    T_profile = T_deep + (T_surface - T_deep) * jnp.exp(z_coord.z_full_ref / _SCALE_DEPTH)
+    T_profile = T_deep + (T_water_init_C - T_deep) * jnp.exp(z_coord.z_full_ref / _SCALE_DEPTH)
     dtype = get_policy().storage
     T_3d = jnp.broadcast_to(
         T_profile[jnp.newaxis, jnp.newaxis, jnp.newaxis, :],

@@ -37,8 +37,10 @@ from matplotlib.collections import PolyCollection
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
+from legoesm import constants
 
-R_EARTH = 6371.0e3
+
+R_EARTH = constants.R_earth
 TARGET_DAYS = [0.0, 60.0, 120.0, 240.0, 420.0, 600.0]
 
 

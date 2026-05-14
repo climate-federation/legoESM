@@ -11,6 +11,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from legoesm import constants
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
@@ -33,8 +34,8 @@ config = CDGridShallowWaterConfig(
 model = FV3FBShallowWaterModel(grid, config)
 
 # --- Williamson 2 IC for edge-midpoint D-grid ---
-g = 9.80616
-omega = 7.292e-5
+g = constants.g
+omega = constants.Omega
 u_0 = 38.61068276698372
 h_0 = 29400.0 / g
 R = cdgrid.radius

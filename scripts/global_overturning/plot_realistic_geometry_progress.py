@@ -44,6 +44,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import jax.numpy as jnp
+from legoesm import constants
 from legoesm.grids.latlon import create_latlon_grid
 from legoesm.ocean.vertical import (
     create_ocean_z_star,
@@ -56,7 +57,7 @@ from legoesm.ocean.bathymetry import BathymetryConfig, init_ocean_bathymetry
 
 RUN_DIR = Path("results/ocean/global_overturning_realistic_geometry")
 ETOPO_FILE = Path("data/bathymetry/etopo_1deg.nc")
-RHO_0 = 1025.0  # reference density [kg/m^3]
+RHO_0 = constants.rho_ocean  # reference density [kg/m^3]
 
 
 def _gather_restarts(d):

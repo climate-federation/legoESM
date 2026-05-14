@@ -13,6 +13,8 @@ from __future__ import annotations
 import jax.numpy as jnp
 import pytest
 
+from legoesm import constants
+
 from legoesm.driver.config import (
     DycoreConfig,
     ExperimentConfig,
@@ -46,7 +48,7 @@ class TestSolarSourceSpectralFile:
 
     def test_solar_config_constructed_with_spectral_var(self):
         cfg = SolarConfig(
-            S_0=1361.0,
+            S_0=constants.S_0,
             source="spectral_file",
             path="dummy.nc",
             tsi_var="tsi",

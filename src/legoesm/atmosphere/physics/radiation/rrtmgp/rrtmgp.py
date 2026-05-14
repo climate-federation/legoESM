@@ -86,6 +86,19 @@ def _standard_o3_profile(p_full):
     return jnp.clip(o3, 1.0e-10, None)
 
 
+def standard_o3_profile(p_full):
+    """Public alias of the climatological ozone-VMR profile.
+
+    Use this when an external ozone source is not configured but RRTMGP
+    must still see a realistic ozone column — driver code historically
+    initialised ``o3_vmr`` to zeros, which RRTMGP then clipped to
+    ``1e-10`` and which silently disabled stratospheric heating.  Pass
+    the result of ``standard_o3_profile(p_full)`` instead of zeros, or
+    pass ``None`` to let RRTMGP build the same profile internally.
+    """
+    return _standard_o3_profile(p_full)
+
+
 def _humidity_to_volume_mixing_ratio(
     q_t: Array, q_c: Array
 ) -> Array:
@@ -615,7 +628,21 @@ class RRTMGP:
       T_3d = _add_halos(T[:, None, ::-1])
       p_3d = _add_halos(p_full[:, None, ::-1])
       p_3d = jnp.clip(p_3d, 1.0, None)
-      q_v_3d = _add_halos(jnp.clip(q_v, 0.0, None)[:, None, ::-1])
+      # Upper-clip q_v strictly below 1 so the (1 - q_v) denominator in
+      # the VMR conversion is bounded away from zero.  0.99 is far above
+      # any physically plausible specific humidity (peak tropical surface
+      # values are ~0.025); the bound only ever fires on numerical
+      # pathology during spin-up and prevents singular/negative VMRs.
+      #
+      # **Clip AFTER ``_add_halos``**: linear extrapolation of a steep
+      # boundary profile can produce halo values OUTSIDE [0, 0.99]
+      # (e.g. q_v = [0.99, 0.0, ...] extrapolates to halo = 1.98), which
+      # would yield singular / negative h2o_vmr via the
+      # ``1 − q_v`` denominator.  Clipping the interior alone is not
+      # enough — the halo cells are passed straight to the RRTMGP
+      # solve.  Codex iter-79 stop-time review.
+      q_v_3d = _add_halos(q_v[:, None, ::-1])
+      q_v_3d = jnp.clip(q_v_3d, 0.0, 0.99)
 
       # --- 2. Build VMR fields ---
       mol_ratio = constants.R_V / constants.R_D

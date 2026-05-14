@@ -21,6 +21,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
+from legoesm import constants
 from legoesm.core.field import Field
 
 
@@ -165,7 +166,7 @@ class TestTaylorIce:
             co2_ppmv=400.0 * ones,
             has_radiation=1.0 * ones, has_precipitation=1.0 * ones,
         )
-        ocean_sst = 271.35 * ones
+        ocean_sst = constants.T_freeze_ocean * ones
 
         def loss(T_data):
             s = state._replace(T_ice=state.T_ice.replace(data=T_data))

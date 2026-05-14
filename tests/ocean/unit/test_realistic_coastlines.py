@@ -123,7 +123,7 @@ class TestDiagonalCoastline:
         mask = _make_diagonal_mask(grid_18x36.n_lat, grid_18x36.n_lon)
         state = rest_state_latlon_cgrid_ocean(
             grid_18x36, z_coord,
-            T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+            T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
             land_mask_override=mask,
         )
         cfg = LatLonCGridOceanConfig()
@@ -142,7 +142,7 @@ class TestDiagonalCoastline:
         mask = _make_diagonal_mask(grid_18x36.n_lat, grid_18x36.n_lon)
         state = rest_state_latlon_cgrid_ocean(
             grid_18x36, z_coord,
-            T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+            T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
             land_mask_override=mask,
         )
         cfg = LatLonCGridOceanConfig(
@@ -227,7 +227,7 @@ class TestIslandTopology:
         mask = _make_island_mask(grid_18x36)
         state = rest_state_latlon_cgrid_ocean(
             grid_18x36, z_coord,
-            T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+            T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
             land_mask_override=mask,
         )
         # Integrated heat and salt at t=0
@@ -282,7 +282,7 @@ class TestIslandTopology:
         mask = _make_island_mask(grid_18x36)
         state = rest_state_latlon_cgrid_ocean(
             grid_18x36, z_coord,
-            T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+            T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
             land_mask_override=mask,
         )
         # Pick a cell that's currently ocean and mutate it to land
@@ -378,7 +378,7 @@ class TestRealisticMaskConsistency:
         # Start from idealised flat-bottom + 80° land threshold
         state = rest_state_latlon_cgrid_ocean(
             grid, z,
-            T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+            T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
             H_max=5500.0, land_lat_threshold=80.0,
         )
         # Now replace mask with a real ETOPO-derived one

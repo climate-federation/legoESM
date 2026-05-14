@@ -25,6 +25,8 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import numpy as np
 
+from legoesm import constants
+
 # ---------------------------------------------------------------------------
 # Edge-jump metric
 # ---------------------------------------------------------------------------
@@ -205,7 +207,7 @@ def run_hydro_validation(output_dir):
     # iter-159: centralized drift helper.
     from legoesm.diagnostics import compute_relative_drift
     mass_drift = compute_relative_drift([mass_init, mass_final])
-    ps_drift = float(jnp.max(jnp.abs(s.p_s.data - state.p_s.data))) / 1e5
+    ps_drift = float(jnp.max(jnp.abs(s.p_s.data - state.p_s.data))) / constants.p_ref
     edge_T = cube_edge_jump(s.T.data[..., -1], grid)
 
     r = {

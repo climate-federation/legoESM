@@ -277,6 +277,25 @@ class SpectralShallowWaterModel:
         else:
             self._spectral_filter = None
 
+    def compute_mass(self, state: SpectralSWState) -> jax.Array:
+        """Global ``∫ h dA = (1/g) ∫ phi dA`` (fp64).
+
+        iter-35: API parity with the other SW models (cube FV3Edge/FV3FB
+        iter-21, lat-lon SW iter-18, MPAS SW iter-18).  Spectral SW has
+        no in-step mass fixer because the SSP-RK3 + spectral-filter
+        path is already bit-clean (matrix runner measures ≤ 1.91e-16
+        across W2/W5/W6), but exposing the helper keeps the public
+        anchor API uniform across all four SW grids.
+        """
+        from legoesm.grids.gaussian import sh_synthesis
+        from legoesm import constants
+        phi_grid = sh_synthesis(self.grid, state.phi_hat.data)
+        h_grid = phi_grid / constants.g
+        return jnp.sum(
+            h_grid.astype(jnp.float64)
+            * self.grid.grid_area.astype(jnp.float64),
+        )
+
     @partial(jax.jit, static_argnums=(0,))
     def step(self, state: SpectralSWState, dt: float) -> SpectralSWState:
         """Advance one time step using SSP-RK3.

@@ -89,7 +89,7 @@ class TierConfig:
     H_min: float = 50.0  # ETOPO: minimum ocean depth before masking as land
     # Stratification
     stratification: str = "uniform"  # "uniform", "exponential", "woa"
-    T_surface: float = 20.0
+    T_water_init_C: float = 20.0
     T_deep: float = 2.0
     S_uniform: float = 35.0
     # Model config
@@ -277,7 +277,7 @@ def build_initial_state(grid, z_coord, config: TierConfig):
     # Build state with flat-bottom init, then override T/S and bathymetry
     state = rest_state_latlon_cgrid_ocean(
         grid, z_coord,
-        T_surface=config.T_surface,
+        T_water_init_C=config.T_water_init_C,
         T_deep=config.T_deep,
         S_uniform=config.S_uniform,
         H_max=config.H_max,
@@ -308,7 +308,7 @@ def build_initial_state(grid, z_coord, config: TierConfig):
             centroid = compute_centroid_depth(
                 jnp.zeros_like(H_bathy), H_bathy, coord,
             )
-            T_per_cell = config.T_deep + (config.T_surface - config.T_deep) * jnp.exp(
+            T_per_cell = config.T_deep + (config.T_water_init_C - config.T_deep) * jnp.exp(
                 -centroid / _SCALE_DEPTH
             )
             T_per_cell = jnp.where(coord.is_active, T_per_cell, config.T_deep)
@@ -711,7 +711,7 @@ def tier_config_from_args(args) -> TierConfig:
         dt=args.dt,
         record_every_days=args.record_every_days,
         H_min=args.H_min,
-        T_surface=preset.get("T_surface", 20.0),
+        T_water_init_C=preset.get("T_water_init_C", 20.0),
         T_deep=preset.get("T_deep", 2.0),
         S_uniform=preset.get("S_uniform", 35.0),
     )

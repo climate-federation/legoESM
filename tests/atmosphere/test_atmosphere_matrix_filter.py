@@ -183,3 +183,50 @@ def test_dcmip2016_is_a_reserved_choice(matrix_module):
     choice (catalog documents it as the M3 family)."""
     assert "dcmip2016" in matrix_module._FAMILY_CHOICES
     assert "dcmip2016" in matrix_module._RESERVED_FAMILIES
+
+
+def test_iter118_save_timeseries_csv_skips_blowup_info(matrix_module, tmp_path):
+    """new_test_dycores iter-121 functional test for iter-118 fix.
+
+    `_save_timeseries_csv` must skip underscore-prefixed metadata keys
+    (e.g., `_blowup_info` from `_run_timeloop` on FAIL) which are
+    dicts not lists.  Pre-iter-118, a FAIL would crash the writer
+    silently with `KeyError: 0` after writing the header — leaving an
+    empty header-only csv that blocked post-mortem investigation of
+    the iter-102 TC2 cube full-mode BLOWUP.
+
+    Parallel to the existing ocean-side test
+    `test_save_timeseries_csv_skips_blowup_info_metadata` in
+    `test_ocean_cross_grid_plots.py` (ocean-side fix landed earlier
+    as ocean-iter-125).
+    """
+    diag = {
+        "steps": [0, 100, 200],
+        "times": [0.0, 0.5, 1.0],
+        "max_abs_w": [0.0, 0.1, 0.2],
+        "_blowup_info": {  # iter-105 metadata; dict, not list.
+            "step": 200, "day": 1.0, "metric": 1234.5,
+            "is_finite": False, "threshold": 1000.0,
+            "reason": "test",
+        },
+    }
+    # Pre-iter-118 this would crash silently with KeyError: 0 after
+    # writing the header row.
+    matrix_module._save_timeseries_csv(tmp_path, diag, dt=300.0)
+    csv_text = (tmp_path / "mean_timeseries.csv").read_text()
+    assert "_blowup_info" not in csv_text, (
+        "iter-118 regression: ``_blowup_info`` metadata column "
+        "appearing in mean_timeseries.csv — the private-key filter "
+        "was dropped.  See iter-118 fix in matrix runner."
+    )
+    assert "max_abs_w" in csv_text, (
+        "iter-118 regression: legitimate timeseries column missing "
+        "from csv.  Writer is not iterating the keys correctly."
+    )
+    # Verify data rows are present (not just header).
+    lines = csv_text.strip().splitlines()
+    assert len(lines) == 4, (  # header + 3 data rows
+        f"iter-118 regression: expected 4 lines in csv (header + "
+        f"3 data rows from diag); got {len(lines)}.  This was the "
+        "pre-iter-118 failure mode — empty header-only csv on FAIL."
+    )

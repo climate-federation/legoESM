@@ -93,7 +93,7 @@ def _stratified_partial_state(grid, z_coord, H_bathy, partial_coord):
     T_per_cell = jnp.where(partial_coord.is_active, T_per_cell, 2.0)
     state = rest_state_latlon_cgrid_ocean(
         grid, z_coord,
-        T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+        T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
         H_bathy_override=H_bathy,
     )
     return state._replace(T=state.T.replace(data=T_per_cell))
@@ -153,7 +153,7 @@ class TestZStarUnaffected:
         H_bathy = jnp.full((grid.n_lat, grid.n_lon), z_coord.H_max)
         state = rest_state_latlon_cgrid_ocean(
             grid, z_coord,
-            T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+            T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
             H_bathy_override=H_bathy,
         )
 

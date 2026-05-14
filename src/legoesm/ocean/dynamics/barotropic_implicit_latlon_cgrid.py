@@ -211,11 +211,18 @@ def _make_diag_preconditioner(
     """
     R = grid.radius
     dlon = grid.dlon
-    dlat = grid.dlat
     cos_lat_c = grid.cos_lat
     dx_u = R * dlon * cos_lat_c                         # (n_lat,)
-    dy_v = R * dlat                                     # scalar
-    dy_u = R * dlat                                     # u-face meridional extent
+
+    # u-face meridional extent: cell row j's height.
+    dy_h = grid.dy * 0.5                                # (n_lat,)
+    dy_u = dy_h                                         # alias
+
+    # v-face cell-centre-to-cell-centre distance: depends on row pair.
+    # dy_v_face has length n_lat+1 (one per v-face row); for pole faces
+    # use edge-padded value (these rows have zero H_v in practice).
+    dy_v_int = 0.5 * (dy_h[1:] + dy_h[:-1])             # (n_lat-1,)
+    dy_v_face = jnp.pad(dy_v_int, (1, 1), mode='edge')   # (n_lat+1,)
 
     lat = grid.lat
     lat_v_int = 0.5 * (lat[:-1] + lat[1:])
@@ -236,11 +243,12 @@ def _make_diag_preconditioner(
 
     inv_area = 1.0 / area
     diag_zonal = (
-        (H_u_E + H_u_W) * dy_u / dx_u[:, None]
+        (H_u_E + H_u_W) * dy_u[:, None] / dx_u[:, None]
     ) * inv_area
     diag_merid = (
-        H_v_N * dx_v[1:, None] + H_v_S * dx_v[:-1, None]
-    ) / dy_v * inv_area
+        H_v_N * dx_v[1:, None] / dy_v_face[1:, None]
+        + H_v_S * dx_v[:-1, None] / dy_v_face[:-1, None]
+    ) * inv_area
 
     # Diagonal of the Helmholtz operator A = I - coeff·∇·(H·∇):
     # diag(A) = 1 + coeff · (diag_zonal + diag_merid)

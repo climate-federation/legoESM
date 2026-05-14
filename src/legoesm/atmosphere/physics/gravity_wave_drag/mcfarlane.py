@@ -33,6 +33,7 @@ def mcfarlane_gwd(
     lat: jax.Array,
     dt: float,
     config: McFarlaneConfig,
+    h_topo_col: jax.Array | None = None,
 ) -> GWDOutput:
     """Compute McFarlane orographic GWD tendencies.
 
@@ -40,6 +41,11 @@ def mcfarlane_gwd(
     ----------
     u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt, config
         Standard GWD backend signature. All column arrays (ncol, nlev).
+    h_topo_col : jax.Array, shape (ncol,) or None
+        Optional per-column subgrid orographic standard deviation [m]
+        overriding the global ``config.h_topo`` (audit 2026-05-12
+        MEDIUM #9).  When ``None`` the scalar config value is used
+        everywhere (legacy behaviour).
 
     Returns
     -------
@@ -90,12 +96,16 @@ def mcfarlane_gwd(
     # (audit's "McFarlane stress dimensionally suspect").
     rho_sfc = rho[:, -1]
     N_sfc = N_full[:, -1]
+    if h_topo_col is None:
+        h_topo_sq = config.h_topo ** 2
+    else:
+        h_topo_sq = jnp.clip(h_topo_col, 0.0, None) ** 2
     tau_0 = (
         config.G_0
         * rho_sfc
         * N_sfc
         * config.k_wave
-        * config.h_topo ** 2
+        * h_topo_sq
         * U_activated
     )
     tau_0 = tau_0 * config.directional_spread

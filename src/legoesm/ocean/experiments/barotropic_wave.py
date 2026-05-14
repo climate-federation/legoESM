@@ -57,7 +57,7 @@ class BarotropicWaveConfig:
     different grid types and resolutions.
     """
     # Initial state (inherits from rest_state)
-    T_surface: float = 20.0        # Surface temperature [°C]
+    T_water_init_C: float = 20.0        # Surface temperature [°C]
     T_deep: float = 2.0            # Deep ocean temperature [°C]
     scale_depth: float = 1000.0    # Temperature e-folding depth [m]
     S_uniform: float = 35.0        # Salinity [PSU]
@@ -114,7 +114,7 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         from legoesm.ocean.init import rest_state_ocean
         state = rest_state_ocean(
             grid, z_coord,
-            T_surface=config.T_surface,
+            T_water_init_C=config.T_water_init_C,
             T_deep=config.T_deep,
             S_uniform=config.S_uniform,
             H_max=config.H_max,
@@ -125,7 +125,7 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
         state = rest_state_latlon_cgrid_ocean(
             grid, z_coord,
-            T_surface=config.T_surface,
+            T_water_init_C=config.T_water_init_C,
             T_deep=config.T_deep,
             S_uniform=config.S_uniform,
             H_max=config.H_max,
@@ -136,7 +136,7 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         from legoesm.ocean.init_mpas import rest_state_mpas_ocean
         state = rest_state_mpas_ocean(
             grid, z_coord,
-            T_surface=config.T_surface,
+            T_water_init_C=config.T_water_init_C,
             T_deep=config.T_deep,
             S_uniform=config.S_uniform,
             H_max=config.H_max,
@@ -147,7 +147,7 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         from legoesm.ocean.dynamics.spectral_ocean_pe import rest_state_spectral_ocean
         state = rest_state_spectral_ocean(
             grid, z_coord,
-            T_surface=config.T_surface,
+            T_water_init_C=config.T_water_init_C,
             T_deep=config.T_deep,
             S_uniform=config.S_uniform,
             H_max=config.H_max,

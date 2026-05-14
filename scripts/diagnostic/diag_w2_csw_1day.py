@@ -35,7 +35,7 @@ for label, use_dg, use_csw in [
 
     u0 = 2 * jnp.pi * grid.radius / (12.0 * 86400.0)
     h0 = 2.94e4 / G
-    omega = 7.292e-5
+    omega = constants.Omega
     h = h0 - (1.0 / G) * (grid.radius * omega * u0 + 0.5 * u0**2) * grid.sin_lat**2
     u_east = u0 * grid.cos_lat
     v_north = jnp.zeros_like(u_east)

@@ -165,7 +165,17 @@ class TestBarotropicSolver:
         assert_gradient_ok(grad, "Barotropic solver w.r.t. eta")
 
     def test_grad_3_steps(self):
-        """Multi-step gradient through ocean model with differentiable barotropic."""
+        """Multi-step gradient through ocean model with differentiable barotropic.
+
+        Regression for the ``cast_pytree(..., "storage")`` round-trip:
+        ``OceanModel.step`` upcasts to compute precision on entry and
+        used to leave the output at compute precision because the
+        storage cast defaulted to ``allow_downcast=False``.  Under
+        ``JAX_ENABLE_X64`` that turned fp32 inputs into fp64 outputs and
+        ``jax.lax.scan`` rejected the carry-dtype mismatch.  The fix
+        passes ``allow_downcast=True`` for the storage cast so the
+        output dtype matches the input dtype.
+        """
         model, state, dt = self.model, self.state, self.dt
 
         def loss(T_data):

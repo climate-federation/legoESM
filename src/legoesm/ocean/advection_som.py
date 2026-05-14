@@ -760,8 +760,8 @@ def som_advect_tracers(
 
     # --- Volume transports ---
     # X: mass_flux_u is h*u at u-faces [m²/s].  Volume transport = h*u * dy_face * dt.
-    # dy at u-face = R * dlat (uniform in latitude for regular grids)
-    face_dy = grid.radius * grid.dlat
+    # dy at u-face = cell-row meridional extent (1D, Mercator-safe).
+    face_dy = (grid.dy * 0.5)[:, jnp.newaxis, jnp.newaxis]  # (n_lat,1,1)
     # Use interior faces only (periodic: n_lon faces)
     vol_flux_x = mass_flux_u[:, :grid.n_lon, :] * face_dy * dt
 

@@ -27,6 +27,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.grids.latlon import LatLonGrid
 
 
@@ -223,14 +224,16 @@ def gradient_y_cgrid(
     -------
     df_dy : array, shape (n_lat+1, n_lon, ...) at v-points.
     """
-    R = grid.radius
-    dlat = grid.dlat
-
-    # dy at v-point: R * dlat (single cell height)
-    dy_v = R * dlat
+    # dy at interior v-faces: distance between cell centers j-1 and j.
+    # For uniform grid this is R * dlat; for non-uniform (Mercator)
+    # it is the average of adjacent cell heights.
+    dy_h = grid.dy * 0.5                           # (n_lat,) cell-row heights
+    dy_v_interior = 0.5 * (dy_h[1:] + dy_h[:-1])    # (n_lat-1,)
 
     # Interior v-faces: i=1..n_lat-1
-    df_interior = (f[1:] - f[:-1]) / dy_v  # (n_lat-1, n_lon, ...)
+    f_diff = f[1:] - f[:-1]
+    bcast = (slice(None),) + (jnp.newaxis,) * (f_diff.ndim - 1)
+    df_interior = f_diff / dy_v_interior[bcast]    # (n_lat-1, n_lon, ...)
 
     # Boundary faces at poles: zero gradient (wall BC).
     # Single Pad HLO op replaces alloc-zeros + concatenate-of-three.
@@ -298,7 +301,6 @@ def divergence_cgrid(
     """
     R = grid.radius
     dlon = grid.dlon
-    dlat = grid.dlat
     cos_lat = grid.cos_lat  # (n_lat,)
 
     u_eff = u
@@ -310,8 +312,14 @@ def divergence_cgrid(
         vm = v_mask[..., jnp.newaxis] if v.ndim == 3 and v_mask.ndim == 2 else v_mask
         v_eff = v * vm
 
-    # Zonal face length (meridional extent): R * dlat
-    face_dy = R * dlat
+    # Zonal face length (meridional extent): cell-row height. 1D array
+    # over latitude so non-uniform grids (Mercator) work; broadcast over
+    # longitude (and level, if 3D).
+    face_dy = grid.dy * 0.5  # (n_lat,)
+    if u.ndim == 2:
+        face_dy_b = face_dy[:, jnp.newaxis]
+    else:
+        face_dy_b = face_dy[:, jnp.newaxis, jnp.newaxis]
 
     # East face flux - west face flux
     # u[:, j+1] is east face of cell j, u[:, j] is west face
@@ -327,7 +335,7 @@ def divergence_cgrid(
     # cell j has east face at j+1, west face at j.
     # u_east[:, j] = u[:, j+1], u_west[:, j] = u[:, j]
     # With periodic wrap, u[:, n_lon] = u[:, 0] (already included).
-    net_zonal = (u_east - u_west) * face_dy  # (n_lat, n_lon, ...)
+    net_zonal = (u_east - u_west) * face_dy_b  # (n_lat, n_lon, ...)
 
     # Meridional face length (zonal extent) at lat interface:
     # R * cos(lat_face) * dlon
@@ -557,7 +565,6 @@ def curl_vertex_cgrid(
     is_3d = u.ndim == 3
     R = grid.radius
     dlon = grid.dlon
-    dlat = grid.dlat
     lat = grid.lat  # cell-center latitudes (n_lat,)
     cos_lat = grid.cos_lat  # (n_lat,)
 
@@ -570,13 +577,19 @@ def curl_vertex_cgrid(
 
     # Edge lengths
     dx_cell = R * cos_lat * dlon  # (n_lat,) zonal edge at each cell latitude
-    dy_edge = R * dlat             # scalar, meridional edge length
+    # Meridional edge length at vertex rows: distance between adjacent
+    # cell-center latitudes. Interior vertices i=1..n_lat-1; pole rows
+    # padded with edge value (pole circulations are masked out below).
+    dy_h = grid.dy * 0.5                              # (n_lat,) cell heights
+    dy_edge_interior = 0.5 * (dy_h[1:] + dy_h[:-1])    # (n_lat-1,)
+    dy_edge = jnp.pad(dy_edge_interior, (1, 1), mode='edge')  # (n_lat+1,)
 
-    # v contribution: v[i, j]*dy - v[i, (j-1)%n_lon]*dy.  Works for 2D
-    # and 3D directly.
+    # v contribution: v[i, j]*dy[i] - v[i, (j-1)%n_lon]*dy[i]. Works for
+    # 2D and 3D; broadcast dy_edge over longitude (and level).
+    bcast_lat = (slice(None),) + (jnp.newaxis,) * (v.ndim - 1)
     v_east = v
     v_west = jnp.roll(v, 1, axis=1)
-    dv_circ = (v_east - v_west) * dy_edge
+    dv_circ = (v_east - v_west) * dy_edge[bcast_lat]
 
     # u contribution: u[i-1, j]*dx[i-1] - u[i, j]*dx[i].
     # Pad with zeros at poles along the lat axis (axis 0).  Extra
@@ -626,10 +639,13 @@ def _gradient_curl_to_u(
     -------
     grad : (n_lat, n_lon+1) or (n_lat, n_lon+1, nlev)
     """
-    R = grid.radius
-    dlat = grid.dlat
-    dy = R * dlat
-    return (zeta[1:] - zeta[:-1]) / dy
+    # zeta is at vertex rows i=0..n_lat. The gradient at u-face row i
+    # uses (zeta[i+1] - zeta[i]) over the meridional distance between
+    # those two vertex rows, which equals cell row i's height.
+    dy = grid.dy * 0.5  # (n_lat,)
+    diff = zeta[1:] - zeta[:-1]
+    bcast = (slice(None),) + (jnp.newaxis,) * (diff.ndim - 1)
+    return diff / dy[bcast]
 
 
 def _gradient_curl_to_v(
@@ -997,24 +1013,23 @@ def slope_foot_enhancement_3d(
     -------
     E_3d : (n_lat, n_lon, nlev) — multiplicative factor, ≥1.
     """
-    R = getattr(grid, "radius", 6.371e6)
+    R = getattr(grid, "radius", constants.R_earth)
     n_lat, n_lon = H_bathy.shape
 
     # ∇H at cell centres via centred differences (periodic in lon, walls in lat)
     cos_lat = jnp.maximum(grid.cos_lat, 1e-3)
-    dlat = jnp.pi / n_lat
     dlon = 2.0 * jnp.pi / n_lon
-    dy = R * dlat
     dx = R * cos_lat[:, None] * dlon
 
     H_e = jnp.roll(H_bathy, -1, axis=1)
     H_w = jnp.roll(H_bathy, 1, axis=1)
     dHdx = (H_e - H_w) / (2.0 * dx)
 
-    # No wrap in lat — use one-sided differences at boundaries
+    # No wrap in lat — use one-sided differences at boundaries.
+    # 2-cell distance per row from grid.dy (Mercator-safe).
     H_n = jnp.concatenate([H_bathy[1:, :], H_bathy[-1:, :]], axis=0)
     H_s = jnp.concatenate([H_bathy[:1, :], H_bathy[:-1, :]], axis=0)
-    dHdy = (H_n - H_s) / (2.0 * dy)
+    dHdy = (H_n - H_s) / grid.dy[:, None]
 
     grad_H_mag = jnp.sqrt(dHdx ** 2 + dHdy ** 2)
     H_safe = jnp.maximum(H_bathy, 1.0)
@@ -1072,7 +1087,6 @@ def strain_rate_cgrid(
     is_3d = u.ndim == 3
     R = grid.radius
     dlon = grid.dlon
-    dlat = grid.dlat
     lat = grid.lat
     cos_lat = grid.cos_lat
     n_lon = grid.n_lon
@@ -1091,10 +1105,11 @@ def strain_rate_cgrid(
     u_eff = jnp.concatenate([u_eff[:, :n_lon], u_eff[:, 0:1]], axis=1)
 
     # --- D_T at h-points: du/dx - dv/dy ---
-    face_dy = R * dlat
+    # face_dy at h-point: cell-row meridional extent (cell height).
+    face_dy = grid.dy * 0.5  # (n_lat,)
     u_east = u_eff[:, 1:]
     u_west = u_eff[:, :-1]
-    du_dx = (u_east - u_west) * face_dy
+    du_dx = (u_east - u_west) * face_dy[lat_bcast]
 
     lat_interior = 0.5 * (lat[:-1] + lat[1:])
     cos_lat_v = jnp.pad(
@@ -1121,12 +1136,17 @@ def strain_rate_cgrid(
     A_vertex = jnp.maximum(A_vertex, 1e-30)
 
     dx_cell = R * cos_lat * dlon
-    dy_edge = R * dlat
+    # dy_edge at vertex rows: cell-center-to-cell-center meridional
+    # distance. Interior vertices i=1..n_lat-1; pole rows padded (their
+    # D_S contributions are zeroed below).
+    dy_h = grid.dy * 0.5
+    dy_edge_interior = 0.5 * (dy_h[1:] + dy_h[:-1])
+    dy_edge = jnp.pad(dy_edge_interior, (1, 1), mode='edge')  # (n_lat+1,)
 
     # dv/dx at vertex: (v_east - v_west) * dy / A_vertex
     v_east = v_eff
     v_west = jnp.roll(v_eff, 1, axis=1)
-    dv_circ = (v_east - v_west) * dy_edge
+    dv_circ = (v_east - v_west) * dy_edge[lat_bcast]
     dv_circ_full = jnp.concatenate([dv_circ, dv_circ[:, 0:1]], axis=1)
 
     # du/dy at vertex: sign FLIPPED vs curl.
@@ -1258,12 +1278,18 @@ def stress_divergence_cgrid(
     """
     R = grid.radius
     dlon = grid.dlon
-    dlat = grid.dlat
     lat = grid.lat
     cos_lat = grid.cos_lat
 
-    dy = R * dlat       # face_dy: meridional edge length
-    dy_edge = R * dlat  # same as dy (edge length for vertex circulation)
+    # Two distinct y-lengths needed:
+    #   dy_h(j) = cell row j's meridional extent (used at h-points).
+    #   dy_edge(i) = distance between cell-center latitudes of rows
+    #                i-1 and i (used at vertex rows). Pole rows padded
+    #                with edge value; D_T/D_S contributions from poles
+    #                are masked elsewhere.
+    dy_h = grid.dy * 0.5                                          # (n_lat,)
+    dy_edge_interior = 0.5 * (dy_h[1:] + dy_h[:-1])               # (n_lat-1,)
+    dy_edge = jnp.pad(dy_edge_interior, (1, 1), mode='edge')      # (n_lat+1,)
     dx_cell = R * cos_lat * dlon  # (n_lat,) zonal edge at cell-center latitude
 
     # v-face latitudes and zonal edge lengths.  cos(±π/2) is roundoff-
@@ -1284,11 +1310,11 @@ def stress_divergence_cgrid(
     # tend_u: contribution from D_T adjoint
     # =====================================================================
     # u[i,k] in D_T_num[i,j]:  coeff +dy at j=k-1, coeff -dy at j=k
-    # Adjoint: dy * (sh[i,k] - sh[i,k-1]) with periodic wrap.
+    # Adjoint: dy_h * (sh[i,k] - sh[i,k-1]) with periodic wrap.
     sh_west = jnp.roll(stress_h, 1, axis=1)
     dsh = stress_h - sh_west
     dsh_full = jnp.concatenate([dsh, dsh[:, 0:1]], axis=1)
-    tend_u_DT = dy * dsh_full  # (n_lat, n_lon+1, ...)
+    tend_u_DT = dy_h[lat_bcast] * dsh_full  # (n_lat, n_lon+1, ...)
 
     # =====================================================================
     # tend_u: contribution from D_S adjoint
@@ -1328,7 +1354,7 @@ def stress_divergence_cgrid(
     dsq_zonal = stress_q[:, 1:] - stress_q[:, :-1]  # (n_lat+1, n_lon, ...)
     # stress_q[:, n_lon] is the periodic wrap = stress_q[:, 0], so
     # dsq_zonal[:, j] = sq[:, j+1] - sq[:, j] for j=0..n_lon-1
-    tend_v_DS = dy_edge * dsq_zonal
+    tend_v_DS = dy_edge[lat_bcast] * dsq_zonal
 
     tend_v = tend_v_DT + tend_v_DS
 
@@ -1337,14 +1363,14 @@ def stress_divergence_cgrid(
     # Dividing by the dual cell area converts to a proper acceleration
     # (m/s²), consistent with vector_laplacian_cgrid units.
     #
-    # u-face dual cell area: dy * dx_cell[i] = R²*dlat*dlon*cos(lat[i])
-    # v-face dual cell area: dy_edge * dx_v[m] = R²*dlat*dlon*cos(lat_v[m])
+    # u-face dual cell area: dy_h[i] * dx_cell[i]
+    # v-face dual cell area: dy_edge[m] * dx_v[m]
     #
     # These are the products of the SAME edge lengths used in the stencil,
     # ensuring the adjoint identity:
     #   sum u * tend * area_u_dual = sum u * tend_raw = -sum A*D²*area_h - ...
     # holds exactly (area_u_dual cancels in the energy diagnostic).
-    area_u_dual = dy * dx_cell  # (n_lat,)
+    area_u_dual = dy_h * dx_cell  # (n_lat,)
     area_v_dual = dy_edge * dx_v  # (n_lat+1,)
     # Floor to avoid division by zero at poles
     area_u_dual = jnp.maximum(area_u_dual, 1e-30)
@@ -1664,17 +1690,18 @@ def _grad_zeta_mag_h(zeta_q: jnp.ndarray, grid: "LatLonGrid") -> jnp.ndarray:
     """
     R = grid.radius
     dlon = grid.dlon
-    dlat = grid.dlat
     cos_lat = grid.cos_lat
 
     if zeta_q.ndim == 3:
         cos_lat_b = cos_lat[:, jnp.newaxis, jnp.newaxis]
+        dy_h_b = (grid.dy * 0.5)[:, jnp.newaxis, jnp.newaxis]
     else:
         cos_lat_b = cos_lat[:, jnp.newaxis]
+        dy_h_b = (grid.dy * 0.5)[:, jnp.newaxis]
 
     # Cell-centre spacings.  cos_lat evaluated at cell-centre latitudes.
     dx_h = R * cos_lat_b * dlon                           # (n_lat,1[,1])
-    dy_h = R * dlat                                       # scalar
+    dy_h = dy_h_b                                         # (n_lat,1[,1])
 
     # ∂ζ/∂x at (i,j): average of north/south vertex-pair zonal differences.
     dz_dx = 0.5 * ((zeta_q[:-1, 1:] - zeta_q[:-1, :-1])
@@ -1703,24 +1730,38 @@ def _grad_div_mag_h(div_h: jnp.ndarray, grid: "LatLonGrid") -> jnp.ndarray:
     """
     R = grid.radius
     dlon = grid.dlon
-    dlat = grid.dlat
     cos_lat = grid.cos_lat
 
     if div_h.ndim == 3:
         cos_lat_b = cos_lat[:, jnp.newaxis, jnp.newaxis]
+        dy_h = (grid.dy * 0.5)[:, jnp.newaxis, jnp.newaxis]
     else:
         cos_lat_b = cos_lat[:, jnp.newaxis]
+        dy_h = (grid.dy * 0.5)[:, jnp.newaxis]
 
     dx_h = R * cos_lat_b * dlon
-    dy_h = R * dlat
 
     # Zonal gradient: centred difference with periodic wrap (works for any ndim).
     dd_dx = (jnp.roll(div_h, -1, axis=1) - jnp.roll(div_h, 1, axis=1)) / (2.0 * dx_h)
 
     # Meridional gradient: centred in interior, one-sided at pole rows.
-    dd_dy_interior = (div_h[2:] - div_h[:-2]) / (2.0 * dy_h)
-    dd_dy_south = (div_h[1:2] - div_h[0:1]) / dy_h
-    dd_dy_north = (div_h[-1:] - div_h[-2:-1]) / dy_h
+    # Interior centred diff spans rows i-1..i+1; the correct denominator
+    # is the cell-centre-to-cell-centre distance from row i-1 to row i+1,
+    # computed directly from ``grid.lat`` (Mercator-safe). For uniform
+    # dlat this equals ``2 * dy_h[i]`` exactly.
+    lat = grid.lat
+    if div_h.ndim == 3:
+        d_2cell_interior = (R * (lat[2:] - lat[:-2]))[:, jnp.newaxis, jnp.newaxis]
+    else:
+        d_2cell_interior = (R * (lat[2:] - lat[:-2]))[:, jnp.newaxis]
+    dd_dy_interior = (div_h[2:] - div_h[:-2]) / d_2cell_interior
+    # One-sided diffs at pole rows: distance from cell-centre row 0 to
+    # row 1 (south) / from row n_lat-2 to n_lat-1 (north) — same as
+    # ``dy_v(½)``, i.e. ½(dy_h[0]+dy_h[1]).
+    dy_v_south = 0.5 * (dy_h[0:1] + dy_h[1:2])
+    dy_v_north = 0.5 * (dy_h[-1:] + dy_h[-2:-1])
+    dd_dy_south = (div_h[1:2] - div_h[0:1]) / dy_v_south
+    dd_dy_north = (div_h[-1:] - div_h[-2:-1]) / dy_v_north
     dd_dy = jnp.concatenate([dd_dy_south, dd_dy_interior, dd_dy_north], axis=0)
 
     return jnp.sqrt(dd_dx ** 2 + dd_dy ** 2 + 1e-30)
@@ -1830,7 +1871,6 @@ def leith_viscosity_q_cgrid(
 
     # --- ∇ζ magnitude AT q-points via centred differences of ζ itself ---
     R = grid.radius
-    dlat = grid.dlat
     dlon = grid.dlon
 
     # Cosine of q-point latitudes: cos(±π/2) is roundoff-level, so
@@ -1847,8 +1887,13 @@ def leith_viscosity_q_cgrid(
     bcast = (slice(None),) + (jnp.newaxis,) * (zeta_q.ndim - 1)
     cos_lat_q_b = cos_lat_q[bcast]
 
+    # dy_q at q-point (vertex row): cell-center-to-cell-center distance.
+    # Interior vertices; pole rows padded (their ζ contributions are 0).
+    dy_h_arr = grid.dy * 0.5
+    dy_q_interior = 0.5 * (dy_h_arr[1:] + dy_h_arr[:-1])               # (n_lat-1,)
+    dy_q_1d = jnp.pad(dy_q_interior, (1, 1), mode='edge')              # (n_lat+1,)
     dx_q = R * cos_lat_q_b * dlon
-    dy_q = R * dlat
+    dy_q = dy_q_1d[bcast]
 
     # Zonal difference of ζ at q-points.  ``zeta_q`` has shape
     # ``(n_lat+1, n_lon+1)`` with the wrap column ``[:, n_lon] == [:, 0]``;
@@ -2198,9 +2243,10 @@ def partial_cell_pgf_correction_y(
 
     Output shape: ``(n_lat+1, n_lon, nlev)``.
     """
-    R = grid.radius
-    dlat = grid.dlat
-    dy_v = R * dlat
+    # dy_v at interior v-faces: distance between adjacent cell-center
+    # latitudes (Mercator-safe).
+    dy_h = grid.dy * 0.5                              # (n_lat,)
+    dy_v_interior = 0.5 * (dy_h[1:] + dy_h[:-1])       # (n_lat-1,)
 
     # Interior v-faces: between cell i and cell i+1 in latitude
     centroid_north = centroid_depth[1:]                 # (n_lat-1, n_lon, nlev)
@@ -2216,12 +2262,15 @@ def partial_cell_pgf_correction_y(
         rho_prime_north * excess_north
         - rho_prime_south * excess_south
     )
+    # Divide before padding so we only divide interior rows.
+    bcast = (slice(None),) + (jnp.newaxis,) * (correction_interior.ndim - 1)
+    correction_interior = correction_interior / dy_v_interior[bcast]
 
     # Pad pole faces with zero (wall BC: no v-flux through poles)
     pad_axes = ((0, 0),) * (correction_interior.ndim - 1)
     correction = jnp.pad(correction_interior, ((1, 1), *pad_axes))
 
-    return correction / dy_v
+    return correction
 
 
 # =============================================================================
@@ -2370,13 +2419,17 @@ def density_jacobian_pgf_smc03_y(
     )
     diff_interior = P_N - P_S
 
+    # dy_v at interior v-faces: distance between adjacent cell-center
+    # latitudes (Mercator-safe).
+    dy_h = grid.dy * 0.5                                # (n_lat,)
+    dy_v_interior = 0.5 * (dy_h[1:] + dy_h[:-1])         # (n_lat-1,)
+    bcast = (slice(None),) + (jnp.newaxis,) * (diff_interior.ndim - 1)
+    diff_interior = diff_interior / dy_v_interior[bcast]
+
     pad_axes = ((0, 0),) * (diff_interior.ndim - 1)
     diff = jnp.pad(diff_interior, ((1, 1), *pad_axes))
 
-    R = grid.radius
-    dlat = grid.dlat
-    dy_v = R * dlat
-    return diff / dy_v
+    return diff
 
 
 def pv_flux_al81_partial_cell(

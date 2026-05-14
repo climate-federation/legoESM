@@ -275,6 +275,39 @@ class TestEVPStressUpdate:
         # Larger N_evp → smaller per-subcycle relaxation → smaller stress.
         assert abs(float(s11_n240)) < abs(float(s11_new))
 
+    def test_delta_min_threads_through_evp_stress_update(self):
+        """SeaIceConfig.Delta_min reaches delta_deformation via evp_stress_update.
+
+        Sub-yield deformation should saturate `Delta` at `Delta_min`,
+        capping viscosity `zeta = P/(2·Delta)` and producing distinct
+        stress responses for distinct Delta_min values.  Catches a
+        regression where the config field is ignored and the rheology
+        default is used regardless of the user-set value.
+        """
+        # Sub-yield strain — without regularisation, Delta would be ~0
+        # and zeta would diverge.  The regulariser sets Delta = Delta_min.
+        eps_11 = jnp.array(1e-12)
+        eps_22 = jnp.array(0.0)
+        eps_12 = jnp.array(0.0)
+        s11 = jnp.array(0.0); s22 = jnp.array(0.0); s12 = jnp.array(0.0)
+        P = jnp.array(1e4)
+
+        s11_a, _, _ = evp_stress_update(
+            s11, s22, s12, eps_11, eps_22, eps_12,
+            P, e_yield=2.0, T_evp=0.36, dt_s=100.0, N_evp=120,
+            Delta_min=2.0e-9,
+        )
+        s11_b, _, _ = evp_stress_update(
+            s11, s22, s12, eps_11, eps_22, eps_12,
+            P, e_yield=2.0, T_evp=0.36, dt_s=100.0, N_evp=120,
+            Delta_min=2.0e-7,  # 100× larger floor → 100× smaller zeta
+        )
+        # Larger Delta_min → smaller viscosity → smaller deviatoric stress
+        # response.  Both stresses include the −P/2 isotropic term, so
+        # compare deviation from that baseline.
+        baseline = -float(P) / 2.0
+        assert abs(float(s11_a) - baseline) > abs(float(s11_b) - baseline)
+
 
 # ==============================================================================
 # Test Dynamics
@@ -302,8 +335,15 @@ class TestStressDivergence:
 
 
 class TestFreeDrift:
-    def test_matches_slab(self):
-        """Free drift should match the original slab diagnostic velocity."""
+    def test_matches_zubov_balance(self):
+        """Free drift = U_w + alpha*(U_a - U_w) with alpha ≈ 1.7 % (Zubov).
+
+        Iter-86 replaced the dimensionally-inconsistent slab formula
+        (``drag_ocean * U_w + (drag_atm * rho_air / rho_ice) * U_a``,
+        which produced O(10^-4 m/s) ice drift) with the standard
+        steady-state air/ocean drag balance.
+        """
+        import math
         config = SeaIceConfig()
         ou = jnp.array(0.1)
         ov = jnp.array(-0.05)
@@ -315,12 +355,20 @@ class TestFreeDrift:
             drag_ocean=config.drag_ocean,
             drag_atm=config.drag_atm,
             rho_air=config.rho_air_ref,
-            rho_ice=config.rho_ice,
+            rho_ocean=config.rho_ocean_ref,
         )
 
-        u_slab = (config.drag_ocean * ou
-                   + config.drag_atm * (config.rho_air_ref / config.rho_ice) * wu)
-        assert float(u_fd) == pytest.approx(float(u_slab), rel=1e-10)
+        alpha = math.sqrt(
+            config.rho_air_ref * config.drag_atm
+            / (config.rho_ocean_ref * config.drag_ocean)
+        )
+        u_expected = float(ou) + alpha * (float(wu) - float(ou))
+        v_expected = float(ov) + alpha * (float(wv) - float(ov))
+        assert float(u_fd) == pytest.approx(u_expected, rel=1e-10)
+        assert float(v_fd) == pytest.approx(v_expected, rel=1e-10)
+        # Sanity: drift magnitude is in the physical 1-3 % of wind range,
+        # not the 0.001 % the old formula produced.
+        assert 0.005 < alpha < 0.05
 
 
 class TestEVPSolver:
@@ -521,19 +569,6 @@ class TestLinearRemap:
         assert jnp.all(a_remap >= 0.0)
         assert jnp.all(a_remap <= 1.0)
 
-    @pytest.mark.xfail(
-        reason=(
-            "Iter-85 audit: linear_remap leaks 1-4% volume per call when "
-            "h_new straddles category bounds.  The naive lo/hi clamp "
-            "overwrites h_remap without adjusting a_remap, so the post-"
-            "clamp volume differs from the pre-clamp volume.  Proper fix "
-            "requires CICE-style Lipscomb piecewise-linear g(h) remapping "
-            "— deferred to future structural work.  This xfail test "
-            "documents the expected post-fix behavior so future "
-            "maintainers see the contract."
-        ),
-        strict=True,
-    )
     def test_strict_volume_conservation_under_clamping(self):
         """Volume drift through linear_remap should be < 0.1% even when
         category bounds activate the clamp.
@@ -633,6 +668,33 @@ class TestTransport:
         _, a_new, _ = advect_ice_tracers(h, a, T, u, v, grid, 3600.0)
         assert jnp.all(a_new >= 0.0)
         assert jnp.all(a_new <= 1.0)
+
+    def test_grad_no_nan_at_ice_free_cells(self):
+        """Iter-122 regression: AD-safe ``where(has_ice, vol/conc_safe, 0)``
+        recovery pattern must not produce NaN gradients at fully ice-free
+        cells (vol=conc=0).  The previous ``conc_safe = max(conc, 1e-20)``
+        floor produced a subnormal squared denominator in fp32 (FTZ → 0)
+        whose VJP cotangent flowed back through ``jnp.where`` as NaN.
+        """
+        import jax
+        grid = _make_grid()
+        n = grid.n
+        shape = (6, n, n)
+        # Mostly ice-free cells with a small ice patch.
+        h = jnp.zeros(shape).at[0, n // 2, n // 2].set(1.0)
+        a = jnp.zeros(shape).at[0, n // 2, n // 2].set(0.5)
+        T = jnp.full(shape, 260.0)
+        u = jnp.full(shape, 0.01)
+        v = jnp.zeros(shape)
+
+        def _loss(h_in):
+            h_new, _, _ = advect_ice_tracers(
+                h_in, a, T, u, v, grid, 3600.0,
+            )
+            return jnp.sum(h_new)
+
+        g = jax.grad(_loss)(h)
+        assert jnp.all(jnp.isfinite(g)), "NaN/Inf in grad through advect_ice_tracers at ice-free cells"
 
 
 # ==============================================================================

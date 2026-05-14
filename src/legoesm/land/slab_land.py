@@ -86,10 +86,23 @@ def step_land(
     C_soil = _get(lp, "C_soil", config.C_soil)
     d_soil = _get(lp, "d_soil", config.d_soil)
 
-    # --- Surface albedo (from current snow state) ---
+    # Account for fresh snowfall that will survive this step when the
+    # surface is below freezing.  Used both by the albedo block here
+    # AND by the later ``has_snow`` dispatch — they must agree.  Codex
+    # iter-44 #1: previously the albedo block used only the pre-step
+    # ``snow`` while later latent fluxes treated ``precip_snow*dt`` as
+    # snow-covered, so a snow-free cell receiving fresh snow absorbed
+    # bare-land SW for one timestep.
+    fresh_snow_mass = forcing.precip_snow * dt
+    fresh_snow_surviving = jnp.where(
+        T_soil < constants.T_freeze, fresh_snow_mass, 0.0,
+    )
+    snow_for_albedo = snow + fresh_snow_surviving
+
+    # --- Surface albedo (from current snow state + surviving fresh snow) ---
     if config.snow_albedo_feedback and lat is not None:
         alpha = compute_land_albedo(
-            lat, snow, snow_age, config.land_albedo,
+            lat, snow_for_albedo, snow_age, config.land_albedo,
         )
     else:
         alpha = jnp.full(T_soil.shape, albedo_land, dtype=T_soil.dtype)
@@ -123,7 +136,7 @@ def step_land(
     # snow-covered.
     q_sat_liq = saturation_mixing_ratio(T_soil, forcing.p_surface)
     q_sat_ice = saturation_mixing_ratio_ice(T_soil, forcing.p_surface)
-    fresh_snow_mass = forcing.precip_snow * dt
+    # ``fresh_snow_mass`` already computed for the albedo block above.
     has_existing_snow = snow > 1e-6
     has_surviving_fresh_snow = (fresh_snow_mass > 1e-6) & (T_soil < constants.T_freeze)
     has_snow = has_existing_snow | has_surviving_fresh_snow
