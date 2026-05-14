@@ -51,7 +51,7 @@ So the iter-12..17 NH bundle (vector_halo + a2b_ord4 + d_con_cv + dynamic_exner 
 - **iter-124 iter-118 fix VERIFIED**: ran `--quick` NH matrix.  TC1 cube quick: |w|=0.0142 m/s — matches iter-7 doc claim of 0.014.  `mean_timeseries.csv` now 22 lines (header + 21 data rows) with NO `_blowup_info` column.  iter-118 csv-fix operational for new matrix runs.
 - **iter-125 TC2 cube quick parity confirmed**: |w|=0.3177 m/s — matches iter-7 doc claim of 0.32.  cube/ico/spec parity holds at quick mode.
 - **iter-121 functional test**: `test_iter118_save_timeseries_csv_skips_blowup_info` in `tests/atmosphere/test_atmosphere_matrix_filter.py` — pairs with iter-119 AST sentinel to cover both source-code preservation + runtime behaviour.
-- **iter-126/127/128/129 TC3 quick run STUCK**: quick NH matrix has been on TC3 cube for 24+ min (expected 3-5 min).  Process is sleeping on I/O.  Likely writing the multi-GB `snapshots_native.npz`.  Investigation iter-131+ once it finishes (or kill+retry).
+- **iter-126/127/128/129/131/132/133 TC3 quick refresh FAILED**: 2 attempts to refresh TC3 cube quick result both stuck for 25+ min in sleeping/IO state.  Process never wrote `mean_timeseries.csv` or refreshed `results.txt`.  Likely JAX async dispatch + Kessler microphysics graph compile issue specific to TC3 cube quick mode.  Skipped; TC3 cube full-mode FAIL result already documented at iter-123 (the more critical finding).  TC3 cube quick parity (vs iter-7 doc claim 7.36 m/s) remains UNVERIFIED but is lower priority — the full-mode BLOWUP is the actual cube-parity issue.
 
 **Cumulative sentinel coverage at iter-130**: **31 AST + 14 numerical + 1 c_sw + 1 functional = 47 sentinels**.
 
