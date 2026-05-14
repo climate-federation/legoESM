@@ -51,6 +51,67 @@ Nine critical issues were identified by the ocean expert and are incorporated be
 
 ---
 
+## Pre-Implementation Audit Findings (2026-05-14)
+
+After reading the full Kamm et al. (2025) paper (incl. Appendices A–E) and auditing the lat-lon C-grid ocean codebase, here is the concrete state of play.
+
+### Already in repo (no work needed beyond configuration)
+
+| Capability | Module | Notes |
+|---|---|---|
+| Wright EOS, differentiable | `ocean/eos.py:72–129` (`make_eos_fn("wright")`) | Valid T∈[-2,40]°C, S∈[0,42] PSU; ρ₀=1026 kg/m³ |
+| KPP with configurable backgrounds | `ocean/physics/vertical_mixing/kpp.py`; `config.py:43–44` | Defaults A_bg=1e-4, K_bg=1e-5 → set 1.2e-4, 1.2e-5 |
+| Enhanced-diffusion convection | `ocean/physics/convection/enhanced_diffusion.py`; `config.py:10` | K_conv default 1.0 m²/s → set 100 |
+| GM/Redi (lat-lon C-grid) + Visbeck adaptive κ_GM | `ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py`; `_gm_redi_common.py` | α=0.015, κ_min/κ_max configurable via `GMRediConfig`; tracer diffusion = Griffies-1998 triads |
+| Jerlov type I shortwave penetration | `ocean/physics/shortwave_penetration.py:37–80` | `water_type="I"` → R=0.58, ζ₀=0.35m, ζ₁=23m (exact DINO) |
+| Quadratic bottom drag | `ocean/physics/bottom_drag/quadratic.py`; `config.py:19–21` | Default C_d=2.5e-3 → set 1e-3 |
+| Free-slip lateral BC | `ocean/dynamics/ocean_pe_latlon_cgrid.py:14–16` | Implicit via v=0 at poles; matches NEMO |
+| Vector-invariant momentum + EEN-like Coriolis | `ocean/dynamics/ocean_pe_latlon_cgrid.py:1139–1167` | Arakawa-Lamb 1981 12-point PV-flux (Stewart-Dellar partial-cell); energy + enstrophy conserving |
+| Tracer FCT (NEMO-equivalent) | `ocean/state.py:569`; `ocean/advection.py` | `tracer_advection="ppm_fct"` (TVD is current default; FCT is the NEMO match) |
+| SMC03 density-Jacobian PGF (PR #250) | `ocean/dynamics/pgf_smc03.py`; `state.py:612–621` | `pgf_scheme="smc03"` — 100–150× more accurate than `"adcroft"` for stratified flow on bathymetry |
+| Nonlinear z* free surface | `ocean/vertical.py:25–100` | Dynamic Jacobian J=(η+H)/H rescales layer thicknesses each step |
+| Implicit-CN barotropic solver | `ocean/state.py:596–611` | `barotropic_solver="implicit_cn"` — eliminates checkerboard noise (recommended for DINO; see issue `docs/issues/barotropic_mode_noise.md`) |
+| MPAS physics wiring | `ocean/init_mpas.py`, `gm_redi_mpas.py`, etc. | KPP / GM/Redi / restoring / SW / drag all present or grid-agnostic |
+| Experiment dispatch | `ocean/experiments/__init__.py:64–100` | Pattern: `create_initial_conditions(grid_type, grid, z_coord, config)` + `create_forcings(...)` |
+
+### Real implementation gaps (must build)
+
+1. **Mercator grid generator** — `src/legoesm/grids/latlon.py` only has `create_latlon_grid()` (equirectangular). `LatLonGrid` NamedTuple already carries per-cell `dx(n_lat, n_lon)` so grid-dependent mixing will work once Mercator generator lands.
+2. **Grid-dependent mixing coefficient infrastructure** — `HarmonicConfig` and `BiharmonicConfig` (`ocean/physics/lateral_mixing/config.py:8–17`) only support constant A_h/K_h/B_h. Need to add `U_viscosity`, `U_diffusivity`, `scaling: "constant"|"linear"|"cubic"` fields and thread Δx through `harmonic.py` / `biharmonic.py`.
+3. **PCHIP wind interpolation** — `PrescribedForcingConfig.wind_profile` (`ocean/physics/surface_forcing/config.py:10–29`) supports `"constant"`, `"cosine_latitude"`, `"single_gyre"`, `"double_gyre"`, ERA5 — but **not piecewise-cubic Hermite interpolation of arbitrary tau-vs-lat knots**. Cleanest fix: implement PCHIP entirely inside the DINO module (precompute coefficients with NumPy at config time, evaluate analytically on the grid), do not modify the general infrastructure.
+4. **Q_sr / non-solar split for restoring** — existing `restoring.py` uses **timescale (seconds)** not flux coefficient (W/m²/K) and does NOT subtract Q_sr from the restoring tendency before applying. DINO requires both. Cleanest fix: implement a custom restoring-with-Q_sr-split tendency entirely inside the DINO module rather than refactoring the general API. The conversion at construction time is `tau_T = ρ₀·c_p·Δz₀ / A_Θ ≈ 11.85 days` and `tau_S = ρ₀·Δz₀ / A_S ≈ 30.8 days` for a 10 m surface layer.
+
+### Known limitations to call out (cannot fix in Phase 1–4)
+
+- **No isoneutral momentum viscosity in lat-lon C-grid** — `gm_redi_latlon_cgrid.py` only diffuses tracers along isopycnals; momentum uses geopotential Laplacian via `harmonic.py`. Paper uses isoneutral for both. Affects ACC magnitude where slopes are steep. Documented as approximation; fix is Phase 5.
+- **No sea-ice component in DINO (paper limitation)** — Paper Sect 2.3 explicitly notes this limits AABW formation realism. Worth documenting prominently because it bounds what the validation can plausibly demand.
+- **Tracer scheme is FCT-via-PPM, not the exact NEMO FCT** — `ppm_fct` is the closest available; bit-exact reproduction of paper figures should not be expected.
+- **GM coefficient is Visbeck (1997) approximation of Tréguier (1997)** — both growth-rate-dependent; paper notes ACC transport is sensitive to GM tuning.
+
+### Recommended scheme selections for DINO
+
+```python
+# To pass to ExperimentConfig / state construction
+pgf_scheme = "smc03"                 # density-Jacobian PGF (PR #250)
+barotropic_solver = "implicit_cn"     # avoid cosine-filter checkerboard noise
+barotropic_implicit_theta_eta = 0.55  # CN default
+tracer_advection = "ppm_fct"          # matches NEMO FCT
+free_surface = "z_star_nonlinear"     # OceanZStarCoordinate
+hi_precision_pressure = True          # avoid float32 PGF error (issue #2 in pgf_test_plan.md)
+```
+
+### Open issues from cross-checking the paper
+
+- **Sill Gaussian width `s` in eq A5 is not stated in the paper text.** Need to extract from Zenodo source code (https://doi.org/10.5281/zenodo.15016824) — bathymetry generator should be a near-direct port to lock down all sill parameters.
+- **Reference density profile ρ_ref(z) for σ_2 diagnostics** — paper uses `ρ_ref(0)=1026`, `ρ_ref(2000)=1035` to compute σ_2. Need to compute potential density referenced to 2000 m for MOC-in-density-space (Fig 5) and stratification (Fig 6).
+- **Annual-mean Q_sr is NOT `230·cos(φ)`** — the time average of `max(230·cos(π/180·[φ - 23.5·cos(...)]), 0)` over 360 days is what should be used. Compute by NumPy quadrature once at config time.
+- **Bathymetry H_max / H_min naming convention** — paper appendix uses `H_max=2000m` to mean *shallowest seafloor* (largest z) and `H_min=4000m` to mean *deepest seafloor* (smallest z). In our `DINOConfig` we use `H_shallow=2000m`, `H_deep=4000m` for clarity. Worked example for eq A3 with these conventions:
+  - In interior (`g_φ=g_λ=1`): `b = 1·(2000 - 4000) + 4000 = 2000` ❌ wrong — gives 2000m at deep interior
+  - Therefore implement as `b = g_φ·g_λ·(H_deep - H_shallow) + H_shallow` so that `g=1` (interior) → 4000m, `g=0` (boundary) → 2000m, matching Fig 1.
+- **Sill is anchored at the western wall and extends EAST into the channel** (the smooth-step `S(λ, λ_m, λ_m+s)` with `λ_m=-50°E` is 0 west of `-50°E` and 1 east of `-50°E+s`). Earlier wording "restricted to western side" was misleading.
+
+---
+
 ## Phase 1: Infrastructure (Mercator grid + grid-dependent coefficients)
 
 ### 1A. Mercator Grid Generator
@@ -165,18 +226,32 @@ n_barotropic_substeps = 30 # default
 # Bathymetry slope parameters (Appendix A)
 s_lambda = 1.0/3.0         # 1/degrees (zonal slope)
 # s_phi = cos(pi*phi_max/180) * s_lambda  (Mercator-corrected meridional slope)
+channel_width_deg = 20.0   # Δφ_c in eq A4 (channel from -65 to -45°N)
+
+# Sill (eq. A5) — semicircular ridge anchored at western wall
+sill_lon_m = -50.0         # λ_m (Drake-passage anchor longitude)
+sill_lat_m = -55.0         # φ_m (Drake-passage anchor latitude)
+sill_gaussian_width_s = None  # TBD — extract from Zenodo source (https://doi.org/10.5281/zenodo.15016824); paper text omits this value
+
+# Reference density profile (for σ_2 diagnostics, MOC-in-density plots, paper Figs 5-6)
+rho_ref_z0 = 1026.0        # kg/m³ at surface
+rho_ref_z2000 = 1035.0     # kg/m³ at 2000 m depth
+sigma_2_ref_depth = 2000.0 # m (depth used for potential-density anomaly)
 ```
 
 ### 2B. Analytical Bathymetry (Appendix A, eqs. A1-A5)
+
+**Strongly recommended**: port from the Zenodo reference implementation (https://doi.org/10.5281/zenodo.15016824) rather than translate equations by eye, especially for the sill (eq A5) where one parameter (`s`, Gaussian width) is not stated in the paper text.
 
 Implement carefully:
 - `_smooth_step(x, a, b)` — eq. A2 (6th-degree polynomial: `6t⁵ - 15t⁴ + 10t³`)
 - `_tapered_exponential(x, x1, x2, s, d, delta_lambda)` — eq. A1 (3-branch piecewise with tapering)
 - `_dino_bathymetry(lon_deg, lat_deg, config)`:
   - Compute `g_phi` (meridional shape) and `g_lambda` (zonal shape) per eq. A3
+  - **Sign convention check** (paper Appendix A's `H_max=2000m`/`H_min=4000m` is opposite of intuitive labeling — see Pre-Implementation Audit, "Open issues from cross-checking the paper"). Implement as `b = g_φ·g_λ·(H_deep - H_shallow) + H_shallow` so that interior (g=1) → 4000m and boundary (g=0) → 2000m, matching Fig 1.
   - **Slope parameter correction**: `s_phi = cos(π·φ_max/180) · s_lambda` for Mercator grid
-  - Apply channel modification (eq. A4): remove zonal walls within channel latitudes
-  - Add Scotia Ridge sill (eq. A5): Gaussian ring at (-50°E, -55°N), only where depth < H_sill, restricted to western side via smooth step
+  - Apply channel modification (eq. A4): remove zonal walls within channel latitudes (Δφ_c=20°)
+  - Add Scotia Ridge sill (eq. A5): Gaussian ring centered at (λ_m, φ_m)=(-50°E, -55°N), applied only where current depth ≤ H_sill, **anchored at the western wall and extending east** into the channel via the smooth step `S(λ, λ_m, λ_m+s)`. The Gaussian width `s` is **not in the paper text — extract from Zenodo source**.
 - Return (H_bathy, land_mask) — H_bathy in meters (positive down), land_mask (1=ocean, 0=land)
 
 ### 2C. Surface Forcing Profiles (Annual Mean)
@@ -199,8 +274,9 @@ Implement carefully:
 - Convert A_S to timescale: `tau_S = rho_0 * dz_0 / A_S`
 
 **Solar radiation** (eq. B5, annual mean):
-- `Q_sr(φ) = max(230·cos(φ), 0)` (zeroth-order annual mean, overestimates at high lat)
-- Shortwave penetration: Jerlov type I (ζ₀=0.35m, ζ₁=23m) — use existing module
+- Full seasonal expression (eq B5): `Q_sr(t,φ) = max(230·cos(π/180·[φ - 23.5·cos(π·(d-171)/180)]), 0)` (the 23.5° term is solar declination)
+- **For Phase 1 (annual mean)**: numerically integrate eq B5 over 360 days at each grid latitude using NumPy quadrature, once at config time. Do NOT use the lazy `230·cos(π·φ/180)` approximation — the polar-night clipping makes the analytical annual mean fall off faster than `cos(φ)` and the right answer is cheap to compute.
+- Shortwave penetration: Jerlov type I (ζ₀=0.35m, ζ₁=23m) — `ShortwavePenetrationConfig.water_type="I"` (already exact match in `shortwave_penetration.py:37–80`)
 
 **Implementation note on non-solar/solar split**:
 The DINO experiment module will compute Q_sr(φ) internally and pass it to the forcing. The restoring tendency for T must subtract Q_sr before dividing by dz_0. If the existing restoring module doesn't support this, implement it directly in the DINO experiment's forcing function rather than modifying the general restoring infrastructure.
@@ -237,16 +313,23 @@ Create helper `create_dino_z_star(config)` → `OceanZStarCoordinate`:
 Follow pattern of `global_overturning.py`:
 - `create_initial_conditions(grid_type, grid, z_coord, config)` — T, S, u, v, η, bathymetry, land mask
 - `create_forcings(grid_type, grid, z_coord, config)` — returns physics config with:
-  - Wind: DINO piecewise cubic profile (custom, computed in experiment module)
-  - Restoring: T and S with DINO-specific profiles and coefficients
-  - Non-solar/solar split: Q_sr subtracted from T restoring in surface layer
-  - KPP: with A_v_bg=1.2e-4, K_v_bg=1.2e-5
-  - Convection: enhanced diffusion with K_conv=100
-  - GM/Redi: Visbeck adaptive, kappa_min=200, kappa_max=2000
-  - Harmonic viscosity: grid-dependent, U_M=0.27 m/s (momentum only, geopotential)
-  - Bottom drag: quadratic, C_d=1e-3
-  - Shortwave: Jerlov type I
-- `validate_results(final_state, diagnostics, config)` — basic checks
+  - **Wind**: custom PCHIP profile in DINO module (general infrastructure does not support arbitrary tau-vs-lat knots — see audit gap #3). Pre-compute coefficients with NumPy at config time, evaluate analytically on the grid, apply via prescribed forcing as F_u = τ_u/(ρ₀·dz_0).
+  - **Restoring + Q_sr split**: custom restoring tendency in DINO module (not a refactor of `restoring.py` — see audit gap #4). Convert A_Θ=40 W/m²/K → τ_T = ρ₀·c_p·dz_0/A_Θ ≈ 11.85 days; A_S=3.858e-3 → τ_S ≈ 30.8 days; subtract Q_sr from T restoring before applying.
+  - **KPP**: `KPPConfig(A_bg=1.2e-4, K_bg=1.2e-5)`
+  - **Convection**: `EnhancedDiffusionConfig(K_conv=100.0)`
+  - **GM/Redi**: `GMRediConfig(visbeck=VisbeckConfig(enabled=True, alpha=0.015), kappa_min=200, kappa_max=2000, slope_scheme="triads")`
+  - **Harmonic viscosity (momentum only, geopotential)**: `HarmonicConfig(U_viscosity=0.27, scaling="linear", U_diffusivity=0.0)` — geopotential is a documented approximation vs paper's isoneutral
+  - **Bottom drag**: `QuadraticDragConfig(C_d=1.0e-3)`
+  - **Shortwave**: `ShortwavePenetrationConfig(water_type="I")`
+  - **Numerical-scheme selections** (locked in based on audit; see "Recommended scheme selections for DINO" above):
+    - `pgf_scheme="smc03"` (NOT default `"adcroft"`) — eliminates known PGF accuracy bugs on stratified bathymetry
+    - `barotropic_solver="implicit_cn"` (NOT default `"explicit_substep"`) — eliminates checkerboard barotropic noise documented in `docs/issues/barotropic_mode_noise.md`
+    - `barotropic_implicit_theta_eta=0.55` (CN default)
+    - `tracer_advection="ppm_fct"` (the NEMO-FCT match)
+    - `hi_precision_pressure=True` (avoid float32 PGF cumsum error)
+    - Free-slip lateral BC: already the default; nothing to set
+    - Vector-invariant momentum + AL81 EEN PV-flux: already the default; nothing to set
+- `validate_results(final_state, diagnostics, config)` — see Verification section for the numeric targets
 
 Support both `grid_type="latlon"` and `grid_type="mpas"`.
 
@@ -254,15 +337,23 @@ Support both `grid_type="latlon"` and `grid_type="mpas"`.
 
 ## Phase 3: MPAS Mesh for DINO
 
-**Approach**: Use a global icosahedral MPAS mesh with land masking.
+**Approach**: Use **regional spherical Voronoi mesh with sub-360° periodic-x**, via existing `create_regional_voronoi_mesh()` in `src/legoesm/grids/voronoi.py:1465`.
 
-On a global MPAS mesh, the re-entrant channel is naturally open — there are no zonal walls at the channel latitudes because the mesh covers the entire globe. The DINO basin is carved by masking out all cells outside the 50°-wide sector as land, EXCEPT within the channel latitudes (45-65°S) where ocean extends around the full globe (or at least wraps continuously). The key insight: the channel doesn't need periodic BCs on a global mesh because the flow can literally go around the world.
+Call signature:
+```python
+mesh = create_regional_voronoi_mesh(
+    lon_range=(-50.0, 0.0),     # match lat-lon Mercator basin
+    lat_range=(-70.0, 70.0),
+    resolution_km=110.0,         # ~1° at equator
+    periodic_x=True,             # east/west meridians identified through channel
+)
+```
 
-However, this means the MPAS DINO domain will have a larger channel than the lat-lon version (360° vs 50° wide). This is an acceptable difference for a first implementation — the channel dynamics are set by the wind and bathymetry, not the domain width.
+The `periodic_x=True` path uses the unroll-and-ghost Delaunay scheme so TRiSK operators see correct through-the-seam distances, midpoints, and areas. **This gives a true 50°-wide re-entrant channel matching the lat-lon Mercator domain** — no full-globe channel-width mismatch.
 
-**Alternative** (if exact match needed): Use `mpas_channel` mode for the channel latitudes + closed basin for the rest. This is more complex and deferred.
+Land mask: apply same DINO bathymetry outside the channel latitudes (-65 to -45°N), so the meridians are walled north and south of the channel and open through it. Inside the channel, the periodic-x identification provides the re-entrant flow.
 
-**Resolution**: ico5 (~240 km) or ico6 (~120 km). ico6 is closer to 1° (111 km at equator).
+**Resolution**: 110 km ≈ 1° at equator (matches paper R1). Use 220 km for the test-matrix smoke test.
 
 ---
 
@@ -284,24 +375,26 @@ Add DINO as a test case:
 **File**: `scripts/run_dino.py`
 
 - Full 1° DINO configuration
-- Configurable duration (default: 400 years for R1)
-- Diagnostics output: barotropic stream function, MOC in density space, meridional heat transport, KE time series
-- Support both lat-lon and MPAS via command-line flag
-- Snapshot output every N years
-- dt = 2700s (45 min)
+- Configurable duration. Default: short (50 yr) for shake-down; `--mode spin-up` for long runs (paper does 3000 yr).
+- Diagnostics output: barotropic stream function, MOC in σ_2 space (referenced to 2000 m), meridional heat transport (mean + eddy + GM decomposition), zonal-mean potential density σ_2, KE time series
+- Support both lat-lon (Mercator) and MPAS via `--grid {latlon,mpas}` flag
+- Snapshot output every N years (configurable)
+- dt = 2700 s (45 min) for R1; will need shorter dt at higher resolution (R4: 900 s, R16: 180 s per Table 2)
 
 ---
 
 ## Phase 5 (Deferred): Enhancements
 
-- Seasonal cycle forcing (time-dependent T_star, Q_sr with 1-month lag)
-- FCT tracer advection for MPAS
-- Simplified Roquet EOS option (eq. 6 with cabbeling + thermobaric)
-- Higher resolution variants (R4=1/4°, R16=1/16°) with biharmonic + Smagorinsky
+- **Seasonal cycle forcing**:
+  - T_star with 1-month lag (eqs B3-B4): `Θ_n*(d) = 5 + 3·cos(π·(d-201)/180)`, `Θ_s*(d) = -0.5 - 0.5·cos(π·(d-201)/180)`
+  - Seasonal Q_sr (eq B5 full form, NOT annual mean): `Q_sr(t,φ) = max(230·cos(π/180·[φ - 23.5·cos(π·(d-171)/180)]), 0)`. The 23.5° solar declination shift is the dominant seasonal driver.
+- FCT tracer advection for MPAS (currently TVD)
+- Simplified Roquet EOS option (eq. 6 with cabbeling + thermobaric) for closer paper match
+- Higher resolution variants (R4=1/4°, R16=1/16°) with biharmonic (Δx³ scaling for tracers) + Smagorinsky (C_smag=3.5) for momentum
 - TKE vertical mixing closure (Blanke & Delecluse 1993)
-- Coarse-graining and subgrid flux diagnostics (Sect. 2.4 of paper)
-- Isopycnal momentum viscosity (currently using geopotential approximation)
-- Tréguier (1997) GM coefficient (currently using Visbeck approximation)
+- **Coarse-graining and subgrid flux diagnostics** (Sect 2.4 of paper, eqs 11-14) — required for the "ML eddy parameterization training" use case stated as goal #2 of this plan; currently NOT in scope of Phases 1-4
+- Isopycnal (isoneutral) momentum viscosity — currently using geopotential Laplacian. Affects ACC where slopes are steep.
+- ~~Tréguier (1997) GM coefficient~~ — **decided: stick with Visbeck (1997)**, will not implement Tréguier
 
 ---
 
@@ -309,19 +402,24 @@ Add DINO as a test case:
 
 | File | Description | Est. LOC |
 |------|-------------|----------|
-| `src/legoesm/ocean/experiments/dino.py` | DINO experiment module | ~600 |
+| `src/legoesm/ocean/experiments/dino.py` | DINO experiment module (config, bathymetry port from Zenodo, PCHIP wind, custom restoring + Q_sr split, ICs) | ~700 |
+| `tests/ocean/experiments/test_dino.py` | Unit + smoke tests (rest-state PGF, bathymetry shape, IC values, forcing profiles match paper figures) | ~250 |
 | `scripts/run_dino.py` | Standalone production script | ~150 |
 
 ## Files to Modify
 
 | File | Change | Est. LOC |
 |------|--------|----------|
-| `src/legoesm/grids/latlon.py` | Add `create_mercator_grid()` | ~80 |
-| `src/legoesm/ocean/physics/lateral_mixing/config.py` | Add scaling params to Harmonic/BiharmonicConfig | ~20 |
-| `src/legoesm/ocean/physics/lateral_mixing/harmonic.py` | Grid-dependent coefficient computation | ~30 |
-| `src/legoesm/ocean/physics/lateral_mixing/biharmonic.py` | Grid-dependent coefficient computation | ~30 |
-| `src/legoesm/ocean/experiments/__init__.py` | Register DINO experiment | ~5 |
-| `scripts/run_ocean_test_matrix.py` | Add DINO test case | ~20 |
+| `src/legoesm/grids/latlon.py` | Add `create_mercator_grid()` (audit gap #1) | ~80 |
+| `src/legoesm/ocean/physics/lateral_mixing/config.py` | Add `U_viscosity`, `U_diffusivity`, `scaling` to Harmonic/BiharmonicConfig (audit gap #2) | ~25 |
+| `src/legoesm/ocean/physics/lateral_mixing/harmonic.py` | Grid-dependent coefficient when `scaling="linear"` | ~40 |
+| `src/legoesm/ocean/physics/lateral_mixing/biharmonic.py` | Grid-dependent coefficient when `scaling="cubic"` | ~40 |
+| `src/legoesm/ocean/experiments/__init__.py` | Register DINO experiment in `AVAILABLE_EXPERIMENTS` | ~5 |
+| `scripts/run_ocean_test_matrix.py` | Add 60-day DINO smoke test | ~25 |
+| `tests/ocean/unit/test_lateral_mixing_scaling.py` | Direct test for new grid-dependent scaling fields (per CLAUDE.md "every new dispatch branch must have a test") | ~80 |
+| `tests/grids/test_mercator.py` | Direct test for `create_mercator_grid` (latitude placement, dx isotropy, area integration) | ~60 |
+
+**Note on what is NOT modified**: `restoring.py` and `prescribed.py` (wind) infrastructure are NOT changed. The Q_sr-split restoring and PCHIP wind are implemented in the DINO experiment module so that the general-purpose modules retain their simpler API. If a future experiment needs the same patterns, factor them out then.
 
 ## Existing Code to Reuse
 
@@ -347,21 +445,50 @@ Add DINO as a test case:
 
 | Aspect | DINO (paper) | legoESM (this implementation) | Impact |
 |--------|-------------|-------------------------------|--------|
-| EOS | Simplified Roquet (cabbeling+thermobaric) | Wright (full nonlinear) | Quantitative density differences; metrics won't match paper exactly |
-| Vertical mixing | TKE (Blanke & Delecluse 1993) | KPP (LMD94) + enhanced diffusion | Different BL depth diagnosis; similar bulk behavior |
-| Momentum viscosity | Isopycnal Laplacian | Geopotential Laplacian | Affects ACC where isopycnal slopes are steep |
-| GM coefficient | Tréguier (1997) | Visbeck (1997) | Both growth-rate-dependent; Visbeck uses Eady approximation |
-| Solar forcing | Seasonal cycle | Annual mean (Phase 1) | Loses seasonal variability; mean state similar |
-| MPAS channel | 50° wide periodic | Full-globe (360°) channel | Different channel width; dynamics set by local wind+bathymetry |
+| EOS | Simplified Roquet (linear + cabbeling + thermobaric) | Wright (full nonlinear) | Quantitative density differences; ACC and MOC magnitudes won't match paper exactly |
+| Vertical mixing | TKE (Blanke & Delecluse 1993) | KPP (LMD94) + enhanced diffusion | Different BL depth diagnosis; bulk behavior similar |
+| Momentum viscosity | Isoneutral Laplacian | Geopotential Laplacian | Affects ACC where slopes are steep; documented audit gap |
+| GM coefficient | Tréguier (1997) | Visbeck (1997) — **deliberate choice, not to be revisited** | Both growth-rate-dependent; Visbeck uses depth-averaged Eady. Typical ~10-20% ACC transport difference at 1°, absorbed by `α` tuning. |
+| Solar forcing | Seasonal cycle | Annual mean by quadrature of eq B5 (Phase 1) | Loses seasonal MLD cycle; mean state similar |
+| Restoring | Native heat-flux coefficient (W/m²/K) | Coefficient → timescale conversion done in DINO module | Mathematically equivalent in surface layer; conversion uses Δz_0 |
+| Tracer advection | NEMO FCT | `ppm_fct` (closest available) | Bit-exact match not expected; numerical diffusion comparable |
+| MPAS channel | 50° wide periodic | 50° wide periodic via `create_regional_voronoi_mesh(periodic_x=True)` | Match. Cross-grid comparison can be quantitative. |
+| Sea ice | Absent (paper limitation) | Absent (matches paper) | Limits AABW formation realism in both |
+| Spin-up duration | 3000 yr R1 + 400 yr production | TBD (likely 50-200 yr at first) | Mean state will not be fully equilibrated; deep cells especially slow to adjust |
 
 ## Verification
 
-1. **Rest-state test**: Initialize DINO with no forcing → velocities should stay < 1e-6 m/s
-2. **Wind spin-up**: Apply wind only (no restoring) → gyres should develop within 30 days
-3. **Full forcing**: Wind + restoring + solar → check:
-   - Subtropical/subpolar gyres form
-   - ACC develops in channel
-   - SST distribution matches restoring profile qualitatively
-   - Conservation: volume, heat, salt drift < 0.1% over 10 years
-4. **Cross-grid comparison**: Lat-lon vs MPAS should produce qualitatively similar circulations
-5. **Benchmark against paper**: After 400-year spin-up, compare ACC transport (~150-200 Sv), MOC structure, meridional heat transport against Figs 4-7 of Kamm et al.
+### Stage gates (pass before moving on)
+
+1. **Rest-state test** (lat-lon AND MPAS): Initialize DINO with no forcing, run 30 days → max|u|, max|v| < 1e-4 m/s. With SMC03 PGF this should be at the float64 noise floor; with the default `"adcroft"` PGF it would be 100–150× larger (see `docs/ocean_experiments/pgf_test_plan.md`).
+2. **Wind spin-up**: Apply wind only (no restoring, no solar) → after 30 days, subtropical and subpolar gyres should be visible in the barotropic stream function with sensible western intensification. ACC should be ramping up in the channel.
+3. **Short full-forcing run** (60 days, test-matrix entry): wind + restoring + solar. Checks:
+   - SST distribution tracks restoring profile (RMS error < 5 K after 60 d at 2°)
+   - No NaN, no |η| > 2 m, no SST outside [-2, 32] °C
+   - Volume drift < 0.01%; heat content drift consistent with surface flux integral (within 1%)
+   - σ_2 stratification monotonically increases with depth on average (no static instability surviving past convective adjustment)
+4. **Cross-grid comparison** (lat-lon Mercator vs MPAS, both at ~1° equatorial): qualitatively similar gyre structure and channel flow direction. **Quantitative ACC transport will differ** because the MPAS channel is full-globe (360°) vs lat-lon's 50° — see Phase 3 caveat.
+
+### Numeric targets vs Kamm et al. 2025 (after multi-century spin-up)
+
+The paper's R1 production uses **3000 yr spin-up + 400 yr R1**, with diagnostics averaged over the last 50 yr. Our short runs cannot reproduce these magnitudes. Treat as targets for *long-run* production-script validation, not Phase 4 test-matrix gates.
+
+| Metric | Paper R1 | Paper R4 | Notes |
+|---|---|---|---|
+| ACC transport (Sv) | **206.0** | 149.7 | Sensitive to GM tuning (Visbeck≠Tréguier) and momentum-viscosity formulation (geopotential vs isoneutral). Acceptable band for our R1: 150–250 Sv. |
+| Total domain KE (J) | n/a in paper | ≈0.8 × 10¹⁸ | Paper Fig 8 |
+| Total domain KE (J) — R16 | n/a | ≈2.1 × 10¹⁸ | Paper Fig 8; not a Phase-1 target |
+| MHT peak northward (PW) | ≈0.4 | ≈0.25 | Paper Fig 7 |
+| MOC topology | 3 cells (tropical, subtropical, deep) | same | In σ_2 space referenced to 2000 m; paper Fig 5 |
+| σ_2 surface | < 35 kg/m³ | same | Paper E1 water-mass partition |
+| σ_2 NADW | 35–36 kg/m³ | same | |
+| σ_2 AABW | > 36 kg/m³ | same | Limited by no sea-ice — see Known Approximations |
+
+### Required diagnostics for paper-style figures
+
+- Barotropic stream function (lat-lon: integrate U·dz then take meridional cumsum; MPAS: same on dual grid)
+- Zonal-mean MOC in σ_2 space referenced to 2000 m (using `ρ_ref(z=0)=1026`, `ρ_ref(z=2000)=1035`)
+- Zonal-mean potential density σ_2 (Fig 6)
+- Meridional heat transport: total + eddy decomposition (mean-flow MHT vs eddy MHT vs GM-bolus MHT)
+- KE time series (domain-integrated)
+- (Eddy-permitting only, deferred Phase 5) KE spectra and coarse-grained subgrid flux fields
