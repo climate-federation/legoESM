@@ -943,6 +943,237 @@ def dino_mpas_initial_state_arrays(
     return T, S, H_bathy, land_mask
 
 
+# ---------------------------------------------------------------------
+# Phase 1B + 2F — Lat-lon (Mercator) path. Phase 1B is essentially
+# free in legoESM: setting LatLonCGridOceanConfig.A_h_lat_scaling=True
+# applies the cos(lat) per-row factor the paper requires, because on
+# the Mercator grid dx(j) = R·cos(φ(j))·Δλ and DINO's
+# A_h(j) = 0.5·U_M·dx(j) = (0.5·U_M·R·Δλ)·cos(φ(j)).
+# ---------------------------------------------------------------------
+
+def dino_lat_lon_grid(cfg: DINOConfig | None = None, n_lon: int = 50):
+    """Build a Mercator lat-lon grid covering the DINO basin.
+
+    Wraps ``legoesm.grids.latlon.create_mercator_grid`` with the
+    DINO-specific domain (lon ∈ [-50°, 0°], lat ∈ [-70°, 70°]).
+    Default ``n_lon = 50`` gives 1° equatorial cells — paper R1.
+    """
+    from legoesm.grids.latlon import create_mercator_grid
+
+    if cfg is None:
+        cfg = DINOConfig()
+
+    return create_mercator_grid(
+        n_lon=n_lon,
+        lat_max_deg=cfg.lat_max_deg,
+        lon_west_deg=cfg.lon_west_deg,
+        lon_east_deg=cfg.lon_east_deg,
+    )
+
+
+def dino_lat_lon_initial_state_arrays(
+    grid,
+    z_coord: OceanZStarCoordinate,
+    cfg: DINOConfig | None = None,
+):
+    """Build (T, S, H_bathy, land_mask) for a DINO Mercator grid.
+
+    Combines Phase 2B bathymetry, Phase 2D ICs, and a Phase-3-style
+    seam-wall land mask. The lat-lon C-grid uses periodic-X (jnp.roll)
+    for longitude operators, so without a land-mask wall the basin
+    would be re-entrant at every latitude. We mark the westernmost
+    longitude column as land outside the channel band, replicating the
+    MPAS approach.
+
+    Returns
+    -------
+    T : array (n_lat, n_lon, n_levels) [°C]
+    S : array (n_lat, n_lon, n_levels) [g/kg]
+    H_bathy : array (n_lat, n_lon) [m]
+    land_mask : array (n_lat, n_lon) (1=ocean, 0=land)
+    """
+    if cfg is None:
+        cfg = DINOConfig()
+
+    lat_deg_1d = jnp.degrees(grid.lat)                        # (n_lat,)
+    lon_deg_1d = jnp.degrees(grid.lon)                        # (n_lon,)
+    # Wrap longitudes to (-180, 180] to match DINOConfig
+    lon_deg_1d = (lon_deg_1d + 180.0) % 360.0 - 180.0
+    lon2d, lat2d = jnp.meshgrid(lon_deg_1d, lat_deg_1d, indexing="xy")
+
+    # Bathymetry
+    H_bathy = dino_bathymetry(lon2d, lat2d, cfg)
+
+    # ICs: T(lat, z), S(lat, z) — broadcast over longitude
+    T_lat_z, S_lat_z = dino_initial_T_S(lat_deg_1d, z_coord.z_full_ref, cfg)
+    T = jnp.broadcast_to(T_lat_z[:, None, :],
+                         (grid.n_lat, grid.n_lon, z_coord.n_levels))
+    S = jnp.broadcast_to(S_lat_z[:, None, :],
+                         (grid.n_lat, grid.n_lon, z_coord.n_levels))
+
+    # Land mask: ocean everywhere in the basin EXCEPT the westernmost
+    # longitude column outside the channel band. Lat-lon C-grid
+    # operators wrap east-west via jnp.roll (always periodic), so
+    # without this seam-wall the basin would be re-entrant at every
+    # latitude — gyres would wrap around the world. Same approach as
+    # the MPAS land mask in dino_mpas_land_mask.
+    in_channel = (
+        (lat_deg_1d >= cfg.channel_lat_south_deg)
+        & (lat_deg_1d <= cfg.channel_lat_north_deg)
+    )
+    is_west_seam = jnp.zeros(grid.n_lon).at[0].set(1.0)        # (n_lon,)
+    is_outside_channel = jnp.where(in_channel, 0.0, 1.0)        # (n_lat,)
+    seam_wall_2d = is_outside_channel[:, None] * is_west_seam[None, :]
+    land_mask = (1.0 - seam_wall_2d).astype(T.dtype)
+
+    # Mask T, S on land (keep ocean values)
+    mask3d = land_mask[..., None]
+    T = jnp.where(mask3d > 0.5, T, 0.0)
+    S = jnp.where(mask3d > 0.5, S, 0.0)
+    H_bathy = jnp.where(land_mask > 0.5, H_bathy, 0.0)
+
+    return T, S, H_bathy, land_mask
+
+
+def dino_lat_lon_state(
+    grid,
+    z_coord: OceanZStarCoordinate,
+    cfg: DINOConfig | None = None,
+):
+    """Build a full ``LatLonCGridOceanState`` for DINO from rest with
+    paper IC stratification + bathymetry + seam-wall land mask.
+
+    Returns
+    -------
+    LatLonCGridOceanState
+    """
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+
+    if cfg is None:
+        cfg = DINOConfig()
+
+    T, S, H_bathy, land_mask = dino_lat_lon_initial_state_arrays(
+        grid, z_coord, cfg,
+    )
+
+    # Build a base rest-state with our overrides, then replace T, S
+    state = rest_state_latlon_cgrid_ocean(
+        grid=grid,
+        z_coord=z_coord,
+        H_max=cfg.H_deep,
+        land_mask_override=land_mask,
+        H_bathy_override=H_bathy,
+    )
+    # Replace T, S with our lat-z structured ICs
+    from legoesm.core.field import Field
+    state = state._replace(
+        T=Field(data=T, name="T", dims=state.T.dims, units=state.T.units),
+        S=Field(data=S, name="S", dims=state.S.dims, units=state.S.units),
+    )
+    return state
+
+
+def dino_lat_lon_model_config(
+    grid,
+    cfg: DINOConfig | None = None,
+    physics: bool = True,
+):
+    """Build (LatLonCGridOceanConfig, OceanPhysicsConfig) for DINO.
+
+    A_h is a SCALAR; the model multiplies it by ``cos(lat)`` per row
+    when ``A_h_lat_scaling=True``. With the Mercator grid this exactly
+    reproduces DINO's ``A_h(j) = 0.5·U_M·dx(j)``:
+
+        A_h_base = 0.5 · U_M · R · Δλ_rad
+        A_h(j)   = A_h_base · cos(φ(j))     [m²/s]
+
+    Same logic for K_h with ``U_T``.
+    """
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+
+    if cfg is None:
+        cfg = DINOConfig()
+
+    R = grid.radius
+    dlon_rad = grid.dlon
+    A_h_base = 0.5 * cfg.U_M * R * dlon_rad
+    K_h_base = 0.5 * cfg.U_T * R * dlon_rad
+
+    # Quadratic-with-floor drag (MOM6 form); same conversion as MPAS
+    u_bg = 0.1
+    bottom_drag_r = cfg.C_d_bottom * u_bg
+
+    physics_cfg = None
+    if physics:
+        from legoesm.ocean.physics.combined import OceanPhysicsConfig
+        from legoesm.ocean.physics.convection.config import (
+            EnhancedDiffusionConfig, OceanConvectionConfig,
+        )
+        from legoesm.ocean.physics.lateral_mixing.config import (
+            GMRediConfig, LateralMixingConfig, VisbeckConfig,
+        )
+        from legoesm.ocean.physics.shortwave_penetration import (
+            ShortwavePenetrationConfig,
+        )
+        from legoesm.ocean.physics.surface_forcing.config import (
+            SurfaceForcingConfig,
+        )
+        from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
+        from legoesm.ocean.physics.vertical_mixing.config import (
+            KPPConfig, VerticalMixingConfig,
+        )
+        physics_cfg = OceanPhysicsConfig(
+            vertical_mixing=VerticalMixingConfig(
+                scheme="kpp",
+                kpp=KPPConfig(K_bg=cfg.K_v_bg, A_bg=cfg.A_v_bg),
+            ),
+            lateral_mixing=LateralMixingConfig(
+                scheme="gm_redi" if cfg.use_gm_redi else "none",
+                gm_redi=GMRediConfig(
+                    kappa_GM=1000.0,  # ignored when Visbeck enabled
+                    kappa_Redi=1000.0,
+                    S_max=cfg.redi_S_max,
+                    slope_scheme=cfg.gm_redi_slope_scheme,
+                    visbeck=VisbeckConfig(
+                        enabled=True,
+                        alpha=cfg.visbeck_alpha,
+                        kappa_min=cfg.visbeck_kappa_min,
+                        kappa_max=cfg.visbeck_kappa_max,
+                    ),
+                ),
+            ),
+            convection=OceanConvectionConfig(
+                scheme="enhanced_diffusion",
+                enhanced_diffusion=EnhancedDiffusionConfig(K_conv=cfg.K_conv),
+            ),
+            shortwave_penetration=ShortwavePenetrationConfig(
+                water_type=cfg.jerlov_water_type,
+            ),
+            surface_forcing=SurfaceForcingConfig(scheme="none"),
+            bottom_drag=BottomDragConfig(scheme="none"),  # use model-level
+        )
+
+    model_cfg = LatLonCGridOceanConfig(
+        rho_0=cfg.rho_0,
+        A_h=A_h_base,
+        A_h_lat_scaling=True,         # cos(lat) per-row scaling — Phase 1B
+        K_h=K_h_base,
+        A_v=cfg.A_v_bg,
+        K_v=cfg.K_v_bg,
+        bottom_drag_r=bottom_drag_r,
+        bottom_drag_bg_velocity=u_bg,
+        bottom_drag_bbl_thickness=50.0,
+        n_barotropic_substeps=30,
+        barotropic_solver=cfg.barotropic_solver,
+        barotropic_implicit_theta_eta=cfg.barotropic_implicit_theta_eta,
+        tracer_advection=cfg.tracer_advection,
+        pgf_scheme=cfg.pgf_scheme,
+        physics=physics_cfg,
+        eos="wright",
+    )
+    return model_cfg, physics_cfg
+
+
 def dino_mpas_state(
     mesh,
     z_coord: OceanZStarCoordinate,
