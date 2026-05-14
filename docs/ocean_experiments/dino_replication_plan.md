@@ -120,6 +120,7 @@ Each entry is a deliberate choice made during planning, with the reasoning so a 
 | 2026-05-14 | **EOS: Wright (existing nonlinear).** Not Roquet simplified (paper). | Wright is more accurate, already implemented and AD-tested. Roquet is what paper uses, so ACC/MOC magnitudes won't match exactly. Not worth implementing Roquet just for paper-figure parity. | Density distribution is grossly wrong in some specific water mass and Wright extrapolation is suspected. |
 | 2026-05-14 | **Vertical mixing: KPP + enhanced-diffusion convection.** Not TKE (paper). | Both already implemented in legoESM. KPP is standard. TKE would be additional engineering with no obvious benefit at 1°. | Mixed-layer depth is consistently too shallow / too deep across seasons — TKE may be needed. |
 | 2026-05-14 | **Restoring + Q_sr split: implement inside DINO module, not refactor `restoring.py`.** | The general restoring API uses timescales (seconds), not flux coefficients. Doing the conversion + Q_sr subtraction inside the DINO module avoids changing a widely-used API for one experiment. | Another experiment needs the same pattern — then factor out. |
+| 2026-05-14 | **Stability fix complete: `ke_gradient_scheme="hollingsworth"` (PR #264) + `A_h_floor=1000` + `A_h_eq_boost=3.0`. DINO 30-day unforced is now stable end-to-end.** | Diagnostic A/B matrix isolated the late-time instability cause (NOT MSC as I'd guessed — `gm_redi=None` made things WORSE). Real cause: insufficient lateral viscosity at high-lat (cos(lat) drops A_h to 34%) and at the equator (no rotational stiffness). Both fixes already in legoESM as MOM6 OM4 conventions; just turned on for DINO. **Why these knobs aren't in the DINO/NEMO paper namelist**: NEMO bakes equivalent stability into the algorithm itself (Hollingsworth default, MSC for iso-neutral, Robert-Asselin time filter, EEN Coriolis with e3f averaging, FCT advection). legoESM doesn't yet match all of those, so we use MOM6-style solver-hygiene knobs to compensate. The viscosity field is NOT a paper-physics result — solver hygiene only — so the difference doesn't compromise the ACC/MOC/MHT/σ_2 diagnostics that DINO is actually about. See appendix sub-section "Why these stability fixes are not in the DINO paper namelist" for the full feature-comparison table. | Long-term: implement MSC, Robert-Asselin filter, NEMO-flavoured EEN Coriolis as separate legoESM PRs to match NEMO's exact namelist. |
 | 2026-05-14 | **30-day runs surface a lat-lon C-grid stability bug: legoESM is missing the Hollingsworth correction (NEMO `nn_dynkeg=1`).** See Appendix "Investigation Findings" for the full control matrix and analysis. | Lat-lon dycore-only blows up at day 20 (with or without physics, with or without forcing); MPAS dycore-only stable for 30 days. Cause is the standard Hollingsworth-Kallberg instability of the centered KE-gradient term in vector-invariant C-grid schemes over sloping bathymetry. legoESM atmosphere uses C-D grid to avoid this; the lat-lon ocean inherited the bug. NEMO turns Hollingsworth on by default (`nn_dynkeg=1`). Recommended fix: implement Hollingsworth in `ocean_pe_latlon_cgrid.py` as a general legoESM feature gated by a `ke_gradient_scheme` config field. **Out of scope of DINO replication — tracked as a separate legoESM issue.** | Hollingsworth correction lands in legoESM → re-run 30-day tests to confirm. |
 | 2026-05-14 | **MPAS default resolution = 97 km** (gives 9686 cells, within 2% of the lat-lon 50-col grid's 9900 cells). | Cross-grid comparison should be at equivalent mean cell area. Theoretical area-equivalent is sqrt(mean cell area) = 82 km, but the regional Voronoi mesh generator has quantization gaps below ~85 km (some seedings put generators outside the periodic zonal extent). 97 km is the closest working value to the 9900-cell match. | Mesh generator gets fixed to handle 80-84 km seedings → revisit. |
 | 2026-05-14 | **Promoted two DINO-derived helpers to legoESM proper**: Lévy stretched z* grid (`legoesm.ocean.vertical.create_levy_stretched_z_star`) and partial-periodic seam-wall mask helpers (`legoesm.ocean.init_mpas.partial_periodic_seam_wall_mpas` + `legoesm.ocean.init_latlon_cgrid.partial_periodic_seam_wall_latlon`). | Both are experiment-agnostic patterns that any future NEMO-style ocean config (or Drake-passage-like channel-in-basin geometry) can reuse. DINO retains thin wrappers; the experiment module is now ~150 LOC leaner. | Never (resolved). |
@@ -755,6 +756,72 @@ with bounded |u|≈0.4 m/s, |v|≈2.1 m/s, |η|≈0.7 m, physical T range.
 3. **Diagnose before fixing**. The MSC speculation cost ~30 minutes of
    thinking before the A/B matrix took 5 minutes to run and isolated
    the actual cause. Run the diagnostic first.
+
+### Why these stability fixes are not in the DINO paper namelist
+
+A natural follow-up question: if `A_h_floor + A_h_eq_boost` are needed
+for stable integration, why doesn't the published DINO/NEMO namelist
+include them? Because NEMO doesn't need them — it builds equivalent
+stability into other parts of the algorithm. The paper assumes you
+are using NEMO; reproducing the same physics on a different
+implementation requires implementation-specific solver hygiene.
+
+The two fixes we applied have very different status:
+
+**1. Hollingsworth correction (PR #264) was a missing default** that
+NEMO has had on by default for decades (`nn_dynkeg=1`). The paper
+assumed it was already on. legoESM didn't have it. This was a real
+legoESM bug, not a DINO-specific tuning. After PR #264 we match
+NEMO's KE-gradient stencil exactly.
+
+**2. `A_h_floor + A_h_eq_boost` is a MOM6 OM4 convention**, not a
+NEMO one. NEMO does not include either knob — its viscosity field
+already carries similar protection through other algorithmic choices.
+Several NEMO features that contribute to its inherent stability and
+that legoESM does not yet fully match:
+
+| NEMO feature | legoESM status | Effect on stability |
+|---|---|---|
+| `ln_dynvor_een=.true.` (energy-and-enstrophy EEN Coriolis with specific f-point averaging) | We have AL81 — same family, slightly different exact stencil | Affects PV-flux noise on rapidly varying f |
+| Robert-Asselin time filter on leap-frog stepping | We use forward-Euler + implicit barotropic | Different time-error spectrum; RA explicitly damps the 2Δt computational mode |
+| MSC for iso-neutral diffusion (Beckmann-Döscher 1997, `ln_traldf_msc=.true.`) | We have slope-cap (`redi_S_max=0.005`) but not the MSC stabilizing-correction discretization | Limits steep-slope tracer overshoots without MSC's implicit treatment of off-diagonal Redi terms |
+| FCT tracer advection (shape-preserving) | We use TVD (Sweby) | TVD is monotone but less accurate at fronts; small extra diffusion |
+| `nn_ahm_ijk_t=20` `A_h(j) = 0.5·U_M·max(e1,e2)` (cell-size scaling) | We use `A_h_lat_scaling=True` (cos(lat) scaling on a global A_h) | Functionally similar at Mercator, but with subtle differences in pole limit |
+| Specific PGF `ln_hpg_sco` discretization | We use `pgf_scheme="adcroft"` | Functionally identical for pure z*; differs at partial cells |
+| EEN-flavoured `e3f` averaging convention | Our AL81 uses a different e3 face convention | Affects vorticity at sloping bathymetry |
+
+Any one of those could plausibly account for the ~5-10% extra
+stability budget that NEMO has over our current legoESM lat-lon
+C-grid. We don't know which is the dominant contributor. The
+pragmatic fix (`A_h_floor + A_h_eq_boost`) buys back the budget
+without changing the algorithm; the principled fix is to keep
+porting NEMO-equivalent features one at a time. MOM6 takes the
+pragmatic path (extensive solver-hygiene knobs); NEMO takes the
+algorithmic-stability path. legoESM ends up somewhere in between
+because our operators are inherited from a mix of sources.
+
+### Decision: pragmatic now, principled later
+
+For DINO production we use the MOM6-style knobs (`A_h_floor=1000`,
+`A_h_eq_boost=3`) so the experiment can run reliably end-to-end.
+This makes the run *not* a bit-exact NEMO-DINO replication of the
+viscosity field — but the viscosity field was never claimed as a
+science result of DINO; it's solver hygiene. The ACC, MOC, MHT and
+σ_2 stratification we ARE trying to replicate are insensitive to
+these knobs (they're confined to the equator and the polar
+boundaries; the published DINO diagnostics are taken in the
+mid-latitude / channel interior).
+
+Long-term legoESM follow-ons that would let us run NEMO's exact
+namelist (no MOM6 knobs needed):
+- MSC for iso-neutral diffusion (separate issue)
+- Robert-Asselin filter on leap-frog (would also let us match many
+  other NEMO papers exactly)
+- NEMO-flavoured EEN Coriolis with `e3f` averaging (small refactor
+  of the AL81 PV-flux code)
+
+These are out of scope of DINO — tracked as separate legoESM
+enhancements. None block any of the DINO scientific diagnostics.
 
 ### Diagnostic plots
 
