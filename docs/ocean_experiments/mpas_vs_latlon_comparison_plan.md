@@ -1,6 +1,7 @@
 # MPAS vs Lat-Lon 1° Comparison Experiments
 
-**Status**: Two bugs found and diagnosed. Fixing Adcroft PGF first (2026-05-12).
+**Status**: 4 bugs fixed, 2Δy instability fully diagnosed, working
+lat-lon config found (BR18/BR19). Ready for ETOPO runs (2026-05-14).
 
 ## Goal
 
@@ -777,45 +778,113 @@ References:
 19. ✅ B_h_barotropic identified as parameter fix
 13. 🔄 APVM experiment (Exp e7a, next)
 
-## Next Steps (2026-05-13)
+## Journey Summary (2026-05-12 to 2026-05-14)
 
-### Lat-lon 2Δy fix (two tracks, run sequentially)
+### Phase 1: Setup and initial comparison (day 1 morning)
+- Designed matched config (identical physics, forcing, bathymetry)
+- Ran 30-day baselines on both grids
+- Found Adcroft PGF bug (max|η| 4.1m on MPAS → fixed, 0.17m)
+- Found S drift (float32 precision → switched to fp64)
+- TVD stencil + Hu_avg conservation fixes (defense-in-depth)
 
-**Track 1 — Hollingsworth KE fix (code change):**
-1. Implement corrected KE form in `ocean_pe_latlon_cgrid.py`:
-   square v² at v-faces first, then average to cells.
-2. Run 1-year flat bottom with baseline viscosity (A_h=1e4,
-   C_smag_lap=0.33, B_h=0) — if 2Δy mode is gone, the fix works.
-3. Run 1-year ETOPO with same config.
-4. If stable, extend to 5-10 years for Drake transport comparison.
+### Phase 2: Multi-year runs (day 1 afternoon)
+- 1-year and 5-year runs on both grids
+- MPAS 50-year baseline (Drake ~25 Sv, barotropic ACC)
+- Lat-lon reached 126 Sv Drake but developed zonal jets
+- K_zeta_bih sweep on MPAS: 1e14 optimal, can't be improved
+- APVM experiments: insufficient alone for MPAS ACC
 
-**Track 2 — B_h_barotropic parameter fix:**
-1. Exp D1: Add B_h_barotropic=1e14 to the flat-bottom baseline
-   config (A_h=1e4, C_smag_lap=0.33). 1-year run.
-2. Monitor 2Δy power via meridional spectrum.
-3. If D1 works, try D1 on ETOPO and extend.
-4. If D1 insufficient, try D2 (+ C_leith) or D3 (+ higher A_h).
+### Phase 3: 2Δy instability diagnosis (day 1 evening - day 2)
+- Identified basin-spanning zonal jets as 2Δy grid-scale instability
+- Meridional wavenumber spectrum diagnostic developed
+- Barotropic isolation: 2Δy seed from KE aliasing (4e-5), saturates
+- Baroclinic isolation: seed amplified 10⁶× by PGF feedback loop
+- KPP/GM/convection not required — stratification + wind sufficient
+- FB Coriolis ruled out (zero transfer at 2Δy)
+- Hollingsworth KE fix tested and reverted (removed accidental diffusion)
+- All viscosity acts on u_prime → barotropic mode invisible → fixed
+- Operator audits: vector Laplacian has full transfer at 2Δy (no null space)
+- cos⁴ biharmonic scaling cripples meridional damping at 60°S
+- Production models (NEMO/POP) use tripolar grids avoiding this problem
 
-### MPAS ACC strength
-- e7b (APVM+B_h) completed 20 years — compute Drake transport
-- If Drake still ~25 Sv, the MPAS ACC weakness is a resolution
-  issue, not a parameter issue. Document and accept for 1°.
+### Phase 4: Parameter tuning (day 2)
+- Barotropic A_h sweep: threshold at 3e4, killed at 1e5
+- Biharmonic limited by CFL + cos⁴ scaling — wrong tool at 1° for 2Δy
+- B_h_barotropic had zero effect (operates on depth-mean, 2Δy is
+  baroclinic in stratified case)
+- A_h_merid (anisotropic meridional viscosity) implemented:
+  870× more effective than isotropic A_h (BR13: 1.2e-6 at day 120)
+- Ferrari complement v1 (taper-based): ineffective (taper ≈ 1 in interior)
+- Ferrari complement v2 (100m depth-based): combined with κ_Redi=2400,
+  self-stabilizing (BR18: peaks at 5.9e-4, drops to 3.7e-7 by year 10)
+- GM κ=2400 + S_max=0.01 testing in progress (BR19)
 
-### Production comparison
-- Once lat-lon 2Δy is fixed, run matched 10-year comparison
-  with best configs on both grids.
-- Compare: Drake transport, WBC structure, SST, overturning.
+### Key insights
+1. The 2Δy instability has two components that require separate fixes:
+   barotropic seed (needs A_h ≥ 1e5) and baroclinic amplification
+   (needs surface tracer diffusion via Ferrari complement)
+2. Regular lat-lon grids at 1° have fundamental dx/dy anisotropy that
+   tripolar grids avoid — this drives the 2Δy problem
+3. DM95 slope tapering kills Redi in the mixed layer, leaving zero
+   horizontal tracer mixing where the feedback operates most strongly
+4. Viscosity on u_prime (not u_total) left the barotropic mode
+   invisible to all 3D dissipation — a non-standard choice compared
+   to MOM6/NEMO/POP
+
+---
+
+## Next Steps (2026-05-14)
+
+### 1. Finalize lat-lon config
+- Wait for BR19 (κ_GM=κ_Redi=2400, S_max=0.01) results
+- If stable: this becomes the working lat-lon config
+- If not: use BR18 config (κ_Redi=2400 + 100m complement)
+
+### 2. Move to ETOPO bathymetry
+- Run the working flat-bottom config on ETOPO
+- Expect slope_foot_alpha=3.0 may be needed for coastal stability
+- Monitor 2Δy spectrum to confirm flat-bottom fix transfers to ETOPO
+
+### 3. Matched MPAS-vs-latlon comparison (the original goal)
+- MPAS: existing production config (K_zeta_bih=1e14, A_h=0,
+  C_smag_lap=0.33) — already ran 50 years
+- Lat-lon: BR18/BR19-derived config on ETOPO
+- 10-year matched runs with identical forcing
+- Compare: Drake transport, WBC structure, SST, overturning,
+  ACC vertical structure (barotropic vs baroclinic)
+
+### 4. Future improvements (not blocking comparison)
+- Tripolar grid (eliminates dx/dy anisotropy)
+- KPP-aware Ferrari complement (use BLD instead of fixed 100m)
+- Visbeck-adaptive GM
+- Realistic forcing (JRA55-do)
 
 ---
 
 ## Honest Caveats
 
-1. Smagorinsky single-pass on MPAS vs stress-tensor on lat-lon is
-   an implementation difference. For smoothly varying A_smag the
-   difference is small, but near coastlines or fronts where
-   ∇A_smag is large, the MPAS version misses the cross-term.
+1. The lat-lon 2Δy fix requires A_h=1e5 + κ_Redi=2400 surface
+   complement — higher dissipation than the original A_h=1e4 config.
+   This may over-damp some physical features (WBC structure, eddy
+   variability). The MPAS comparison uses different dissipation
+   (K_zeta_bih + C_smag_lap), so the comparison includes
+   dissipation-scheme differences in addition to grid differences.
 
-2. The 80°N polar cap removes MPAS's advantage of pole-free coverage.
+2. The regular lat-lon grid at 1° has up to 6:1 dx/dy aspect ratio
+   at 80°N, which no production model uses. Results may not be
+   representative of what a properly-constructed 1° ocean model
+   (tripolar, displaced-pole) would produce.
+
+3. MPAS ACC (~25 Sv) is much weaker than lat-lon (~126 Sv) and
+   observations (~150 Sv). The MPAS ACC is barotropic while lat-lon
+   is baroclinic. K_zeta_bih damps physical vorticity alongside the
+   TRiSK null mode. This is a known MPAS limitation at 1°.
+
+4. Smagorinsky single-pass on MPAS vs stress-tensor on lat-lon is
+   an implementation difference that affects effective viscosity
+   near coastlines and fronts.
+
+5. The 80°N polar cap removes MPAS's advantage of pole-free coverage.
    Arctic circulation cannot be compared in this setup.
 
 3. Lat-lon cells near 80°N are ~19 km — effectively eddy-permitting
