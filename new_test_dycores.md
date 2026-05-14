@@ -4,6 +4,24 @@ Branch: `new_test_dycores` (from `main` post merge of `test_dycores` PR #259).
 Oracle: `../../FV3/atmos_cubed_sphere-symmetryclean/model/`.
 Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV / MPAS Voronoi / spectral SH at the same resolution + duration.
 
+## State after iter-1..90 (compressed at iter-90)
+
+**iter-81..90 audit highlights**:
+
+- **TC1 NH 0.040 vs 0.014 gap RESOLVED (iter-81)**: matrix runner caches were mixed-mode — cube TC1 ran 3.0 hr (full), ico/spec at 0.5 hr (quick).  Apples-to-oranges duration NOT a config issue.  iter-63 nord_v hypothesis withdrawn; iter-64 nord_v probe retired.  Cube TC1 is at parity with ico/spec when measured at same duration (~0.014 m/s).
+- **Full matrix mode survey (iter-88/89)**:
+  - SW matrix: **16/16 at full-spec** duration.
+  - PE matrix: **51/52 at quick mode** (only gravity_wave_3_1 at full per iter-72).
+  - NH matrix: **6/9 at quick + 1/9 at full + 2/9 refreshing** (TC1 cube full done; TC2/TC3 cube in progress).
+  Implications: SW audit = HIGH confidence; PE quick-mode audit = HIGH within quick mode but full-mode TBD; NH = mode-mixed.
+- **rotated_baroclinic 39% gap caveat (iter-87)**: the cube-39%-lower-than-ico claim was at 2-day quick mode where the baroclinic instability hasn't grown.  Same identical-result artifact between rotated_baroclinic and rotated_steady at 2 days.  Full-mode 10-day re-run TBD.
+- **Sentinel hygiene**:
+  - iter-83 hardened iter-79's iter-66 sentinel with anti-anchor (forbids `_mass_target_iter66` constant in ico CB branch — guards against incomplete revert).
+  - iter-86 verified c_sw cube residual still PASS (19s).
+- **Total sentinel coverage**: **28 AST + 14 numerical + 1 c_sw = 43 sentinels**, all PASS at last full check (iter-85 + iter-86).
+
+**NH cube matrix re-run still in progress** (since 4:13 AM, now ~122 min wall, TC2 phase).  Expected total 4-6 hr; TC2 needs ~25 min more, TC3 ~3.5 hr.  Once complete: TC2/TC3 cube will refresh with iter-12..17 fixes applied.
+
 ## State after iter-1..80 (compressed at iter-80)
 
 **iter-71..80 audit highlights**:
@@ -21,27 +39,7 @@ Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV /
 
 **Cumulative sentinel coverage**: **28 AST + 14 numerical + 1 c_sw residual = 43 sentinels total** (iter-79 added iter-66 negative-result guard; iter-83 hardened it with anti-anchor).  Latest full-suite check (iter-85): 41 AST+numerical PASS in 152 s; c_sw residual (iter-86 verified) PASS in 19 s.
 
-**iter-89 full matrix mode summary** (3-suite audit):
-- **SW matrix**: 4 cases × 4 grids = **16/16 at full-spec duration** ✓ (W2 5d, W5 15d, W6 14d, CB 12d).
-- **PE matrix**: 13 cases × 4 grids = **51/52 at quick mode** (only gravity_wave_3_1 at full per iter-72 refresh).  Cross-grid quick-mode parity is apples-to-apples; full-mode behaviour TBD.
-- **NH matrix**: 3 cases × 3 grids = **6/9 at quick mode** (TC1 ico/spec quick; TC2/TC3 all 3 grids at quick); **1/9 at full mode** (TC1 cube 3hr); **2/9 currently refreshing in re-run** (TC2/TC3 cube — NH matrix in progress).
-
-So:
-- SW: full audit confidence = HIGH.
-- PE: quick-mode audit confidence = HIGH; full-mode audit = TBD.
-- NH: partial mode mix; ico/spec at quick, cube refreshing to full.  Cross-grid will still be mixed-mode after NH matrix completes (cube full vs ico/spec quick).  To truly compare cube/ico/spec at full mode would require also re-running ico+spec at full duration.
-
-**iter-88 audit**: confirmed **ALL** cached PE matrix results are at **quick mode** duration (not full spec).  Specifically:
-  - held_suarez: cached 30 days (spec full 200).
-  - amip: cached 30 days (spec full 365).
-  - baroclinic / rotated_baroclinic: cached 2 days (spec full 10).
-  - rotated_steady: cached 2 days (spec full 30).
-  - rest_state_topo: cached 1 day (spec full 7).
-  - held_suarez_topo: cached 2 days (spec full 200).
-  - inertio_gravity_3_2: cached 0.5 days (spec full 3.0).
-  - mountain_rossby_5_0 / rossby_haurwitz_6_0: cached 2 days (spec full 10/14).
-  - gravity_wave_3_1: cached 1.0 day (= full; ONLY PE case at full mode, per iter-72 refresh).
-  Cross-grid PE comparisons (iter-73 audit) are valid **apples-to-apples within quick mode** — all 4 grids consistent at same days field per case.  Two cube outliers (rotated_baroclinic, rest_state_topo) findings still stand at quick mode, but full-mode behaviour TBD.  Future full-mode PE re-runs are a significant compute commitment (held_suarez/AMIP at 200/365 days each).
+**iter-88/89 detail**: see compressed iter-81..90 block above.  PE cached at quick mode (51/52 entries); only gravity_wave_3_1 at full.  NH cube refreshing; ico/spec NH cached at quick.
 
 ## State after iter-1..70 (compressed at iter-70)
 
