@@ -4,6 +4,25 @@ Branch: `new_test_dycores` (from `main` post merge of `test_dycores` PR #259).
 Oracle: `../../FV3/atmos_cubed_sphere-symmetryclean/model/`.
 Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV / MPAS Voronoi / spectral SH at the same resolution + duration.
 
+## CRITICAL FINDING (iter-102): NH TC2 cube full-mode BLOWUP
+
+NH cube matrix re-run completed TC2 at iter-102.  **TC2 cube BLEW UP at day 0.13 (step 8500) of the full 6-hour run** (`state non-finite (NaN/Inf)`).  Pre-blowup last-clean reading: `|w|_max=nan m/s, mass_drift=7.85e-16`.  Wall time: 6663 s (111 min).
+
+This is a **REGRESSION from quick-mode**:
+- TC2 quick-mode (5 min, 0.083 hr): cube |w|_max=4.5 m/s, PASS (per cached pre-iter-72 result).
+- TC2 with iter-12..17 fixes at quick-mode (per doc claim): cube |w|_max=0.32 m/s, PASS.
+- TC2 with iter-12..17 fixes at **full-mode (6 hr)**: cube **BLOWUP at step 8500 = 3.14 hr in**.
+
+So the iter-12..17 NH bundle (vector_halo + a2b_ord4 + d_con_cv + dynamic_exner + metric_aware_d_con + d_con_top_zero=2 + heat_source_del2=2 + delt_max=1.0 + corner_div_damp_pair) is **NOT sufficient for full-duration TC2 cube stability**.  The matrix has been silently PASSing TC2 cube at quick mode (5 min) where the instability hasn't grown.
+
+**Action required (iter-103+)**: investigate the day-0.13 blowup mechanism (mountain-wave breaking? acoustic substep insufficient? halo error at panel edges in NH solver?).  Possible fixes:
+- More acoustic substeps (currently 20).
+- Stronger hyperdiff at full duration.
+- Re-evaluate which iter-12..17 flags help vs hurt at long duration.
+- FV3 oracle comparison for TC2 mountain stability.
+
+**iter-12..17 doc claims need caveat**: those measurements were at quick mode (5 min); full-mode behaviour DOES NOT HOLD for TC2 cube.
+
 ## State after iter-1..100 (compressed at iter-100)
 
 **iter-91..100 highlights** (audit & hygiene phase — NH matrix re-run still in progress throughout):
