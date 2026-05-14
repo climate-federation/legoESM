@@ -51,6 +51,32 @@ Nine critical issues were identified by the ocean expert and are incorporated be
 
 ---
 
+## Decisions Log
+
+Each entry is a deliberate choice made during planning, with the reasoning so a future reader (or future-us) can decide whether to revisit. Newest at top.
+
+| Date | Decision | Reasoning | Revisit when |
+|---|---|---|---|
+| 2026-05-14 | **Confirmed via Zenodo namelist**: sill width `rn_ds_width = 4.0°`, sill depth = 2500 m, `s_λ = 1/3 deg⁻¹` (`rn_distLam = 3.0`), channel-wall slope `rn_slp_cha = 1.5`. Bathymetry parameters now fully locked. | Source: `EXPREF/namelist_cfg` in https://github.com/vopikamm/DINO/tree/v0.2.0. Removes need to "tune by eye" against Fig 1. | Bathymetry shape mismatch with paper Fig 1 — re-check namelist for any updated revision. |
+| 2026-05-14 | **Confirmed via Zenodo namelist**: NEMO uses iso-level momentum viscosity (`ln_dynldf_lev=.true.`), NOT isoneutral as the paper text claims. | Paper Sect 3 wording "Laplacian friction along isopycnal surfaces" applies to *tracers* (Redi), not momentum. The isoneutral-momentum item is dropped from the limitations list — our geopotential viscosity matches NEMO exactly. | Never (resolved). |
+| 2026-05-14 | **Tracer advection: `"tvd"` to start.** Sensitivity to `dst3` / `ppm_fct` / `som` deferred to a separate study. | TVD is project default and most-tested. PPM_FCT is closer to NEMO but less exercised — risk of latent bugs. Get end-to-end pipeline working first, then study advection separately. The sensitivity study can also surface bugs in less-used schemes. | Deep cell / AABW comes out anomalously weak (suggests numerical diapycnal mixing too high) — switch to `som` or `ppm_fct`. |
+| 2026-05-14 | **Resolution: 1° R1 only.** R4 (¼°) and R16 (1/16°) explicitly out of scope. | Goal is to replicate the eddy-parameterizing regime, not the eddy-resolving cascade. Cuts scope substantially. | Want to test ML eddy parameterizations against truth — then need at least R4 for a target. |
+| 2026-05-14 | **No test-matrix entry; standalone experiment only.** | DINO runs are slow even at 60 days; matrix is for fast smoke tests. The value is in the long production runs (which won't run on this machine anyway). | Test matrix grows enough infrastructure to run 60-day ocean tests routinely. |
+| 2026-05-14 | **Compute scope: ≤ 1 year on this machine.** Multi-decade / multi-century spin-ups deferred to GPU hand-off. | Local box can shake down code correctness in 1-yr runs (rest state, gyre spin-up, conservation, no NaN). Equilibrating the SO stratification needs 100+ years which is GPU work. | Code is fully validated at 1 year and someone is ready to run on GPU. Pack experiment as portable script + config. |
+| 2026-05-14 | **MPAS path: regional Voronoi mesh with `periodic_x=True`.** Use `create_regional_voronoi_mesh(lon_range=(-50,0), lat_range=(-70,70), periodic_x=True)`. | Existing infrastructure already supports sub-360° periodic-x via unroll-and-ghost Delaunay. Gives true 50°-wide re-entrant channel matching paper geometry. Earlier "global mesh + land mask" plan would have given a 360° channel and made cross-grid ACC comparison meaningless. | Regional periodic Voronoi has bugs at the seam; fall back to global. |
+| 2026-05-14 | **Sea ice: none.** | Paper has no sea ice either; not an approximation we're making, just a property of the configuration. Limits AABW realism for both. | Pursuing realistic AABW formation as a separate study. |
+| 2026-05-14 | **GM coefficient: Visbeck (1997).** Will not implement Tréguier (1997). | Both growth-rate-dependent. Typical 10–20% ACC transport difference at 1°, absorbed by `α` tuning. ~50 LOC to add Tréguier but not worth the time given other approximations dominate. | ACC transport is consistently low and adding viscosity tuning isn't enough — try Tréguier as a final knob. |
+| 2026-05-14 | **Momentum viscosity: geopotential Laplacian (existing).** No isoneutral. | Paper text says "Laplacian friction along isopycnal surfaces" but this is almost certainly a wording slip — isoneutral momentum viscosity is non-physical and not standard in NEMO production. Verify against Zenodo namelist (`nam_dynldf`). | Zenodo namelist confirms isoneutral was actually used (unlikely). |
+| 2026-05-14 | **PGF scheme: `"smc03"`.** Not the default `"adcroft"`. | SMC03 is 100–150× more accurate for rest-state PGF on stratified bathymetry (per `pgf_test_plan.md`). DINO has steep continental slopes — PGF accuracy matters a lot here. | SMC03 has unforeseen issues at this domain size; revert to `"adcroft"`. |
+| 2026-05-14 | **Barotropic solver: `"implicit_cn"`.** Not the default `"explicit_substep"`. | Cosine-filter explicit substep is implicated in checkerboard barotropic noise (`barotropic_mode_noise.md`). Implicit CN eliminates by construction. | CN solver too dissipative or too slow at production resolution. |
+| 2026-05-14 | **EOS: Wright (existing nonlinear).** Not Roquet simplified (paper). | Wright is more accurate, already implemented and AD-tested. Roquet is what paper uses, so ACC/MOC magnitudes won't match exactly. Not worth implementing Roquet just for paper-figure parity. | Density distribution is grossly wrong in some specific water mass and Wright extrapolation is suspected. |
+| 2026-05-14 | **Vertical mixing: KPP + enhanced-diffusion convection.** Not TKE (paper). | Both already implemented in legoESM. KPP is standard. TKE would be additional engineering with no obvious benefit at 1°. | Mixed-layer depth is consistently too shallow / too deep across seasons — TKE may be needed. |
+| 2026-05-14 | **Restoring + Q_sr split: implement inside DINO module, not refactor `restoring.py`.** | The general restoring API uses timescales (seconds), not flux coefficients. Doing the conversion + Q_sr subtraction inside the DINO module avoids changing a widely-used API for one experiment. | Another experiment needs the same pattern — then factor out. |
+| 2026-05-14 | **Wind PCHIP: implement inside DINO module, not extend `prescribed.py`.** | PCHIP at arbitrary tau-vs-lat knots is one-off for DINO; not worth a general framework. | Multiple experiments end up needing arbitrary-knot wind profiles. |
+| 2026-05-14 | **Bathymetry: port directly from Zenodo source code.** | Eq A5 sill has an undocumented Gaussian-width parameter `s`; paper text omits its value. Translating equations by eye risks getting it subtly wrong. | A bathymetry generator port reveals deeper paper inconsistencies that change the geometry. |
+
+---
+
 ## Pre-Implementation Audit Findings (2026-05-14)
 
 After reading the full Kamm et al. (2025) paper (incl. Appendices A–E) and auditing the lat-lon C-grid ocean codebase, here is the concrete state of play.
@@ -83,7 +109,7 @@ After reading the full Kamm et al. (2025) paper (incl. Appendices A–E) and aud
 
 ### Known limitations to call out (cannot fix in Phase 1–4)
 
-- **No isoneutral momentum viscosity in lat-lon C-grid** — `gm_redi_latlon_cgrid.py` only diffuses tracers along isopycnals; momentum uses geopotential Laplacian via `harmonic.py`. Paper uses isoneutral for both. Affects ACC magnitude where slopes are steep. Documented as approximation; fix is Phase 5.
+- ~~No isoneutral momentum viscosity in lat-lon C-grid~~ — **resolved 2026-05-14**: Zenodo namelist confirms `ln_dynldf_lev = .true.` (iso-level / geopotential). Paper text "Laplacian friction along isopycnal surfaces" was a wording slip — momentum is on iso-level, only tracers are isoneutral. **Our existing geopotential momentum viscosity matches NEMO exactly.**
 - **No sea-ice component in DINO (paper limitation)** — Paper Sect 2.3 explicitly notes this limits AABW formation realism. Worth documenting prominently because it bounds what the validation can plausibly demand.
 - **Tracer scheme is FCT-via-PPM, not the exact NEMO FCT** — `ppm_fct` is the closest available; bit-exact reproduction of paper figures should not be expected.
 - **GM coefficient is Visbeck (1997) approximation of Tréguier (1997)** — both growth-rate-dependent; paper notes ACC transport is sensitive to GM tuning.
@@ -95,14 +121,16 @@ After reading the full Kamm et al. (2025) paper (incl. Appendices A–E) and aud
 pgf_scheme = "smc03"                 # density-Jacobian PGF (PR #250)
 barotropic_solver = "implicit_cn"     # avoid cosine-filter checkerboard noise
 barotropic_implicit_theta_eta = 0.55  # CN default
-tracer_advection = "ppm_fct"          # matches NEMO FCT
+tracer_advection = "tvd"              # see Decisions Log — start simple, sensitivity study later
 free_surface = "z_star_nonlinear"     # OceanZStarCoordinate
 hi_precision_pressure = True          # avoid float32 PGF error (issue #2 in pgf_test_plan.md)
 ```
 
 ### Open issues from cross-checking the paper
 
-- **Sill Gaussian width `s` in eq A5 is not stated in the paper text.** Need to extract from Zenodo source code (https://doi.org/10.5281/zenodo.15016824) — bathymetry generator should be a near-direct port to lock down all sill parameters.
+- **Sill Gaussian width `s`**: confirmed from Zenodo namelist (`EXPREF/namelist_cfg`, https://github.com/vopikamm/DINO/tree/v0.2.0): `rn_ds_width = 4.0°`. Locked.
+- **Channel-wall slope** `rn_slp_cha = 1.5` (deg⁻¹) — additional parameter NEMO uses to taper the channel boundaries. Not in paper text; port directly from `usrdef_zgr.F90` / `zgr_lib.F90`.
+- **Mid-Atlantic ridge** — paper Sect 2.2 says "We do not add a mid-Atlantic ridge to the bathymetry, unlike NW2," but the Zenodo namelist defines `rn_mr_*` parameters. They are gated by `nn_botcase` in the source. Verify that the R1 namelist sets `nn_botcase` to the no-MAR option.
 - **Reference density profile ρ_ref(z) for σ_2 diagnostics** — paper uses `ρ_ref(0)=1026`, `ρ_ref(2000)=1035` to compute σ_2. Need to compute potential density referenced to 2000 m for MOC-in-density-space (Fig 5) and stratification (Fig 6).
 - **Annual-mean Q_sr is NOT `230·cos(φ)`** — the time average of `max(230·cos(π/180·[φ - 23.5·cos(...)]), 0)` over 360 days is what should be used. Compute by NumPy quadrature once at config time.
 - **Bathymetry H_max / H_min naming convention** — paper appendix uses `H_max=2000m` to mean *shallowest seafloor* (largest z) and `H_min=4000m` to mean *deepest seafloor* (smallest z). In our `DINOConfig` we use `H_shallow=2000m`, `H_deep=4000m` for clarity. Worked example for eq A3 with these conventions:
@@ -229,9 +257,11 @@ s_lambda = 1.0/3.0         # 1/degrees (zonal slope)
 channel_width_deg = 20.0   # Δφ_c in eq A4 (channel from -65 to -45°N)
 
 # Sill (eq. A5) — semicircular ridge anchored at western wall
-sill_lon_m = -50.0         # λ_m (Drake-passage anchor longitude)
-sill_lat_m = -55.0         # φ_m (Drake-passage anchor latitude)
-sill_gaussian_width_s = None  # TBD — extract from Zenodo source (https://doi.org/10.5281/zenodo.15016824); paper text omits this value
+sill_lon_m = -50.0          # λ_m (Drake-passage anchor longitude)
+sill_lat_m = -55.0          # φ_m (Drake-passage anchor latitude)
+sill_gaussian_width_s = 4.0 # degrees (Zenodo namelist rn_ds_width = 4.0)
+H_sill = 2500.0             # m (Zenodo namelist rn_ds_depth = 2500)
+channel_wall_slope = 1.5    # rn_slp_cha (deg^-1) — channel-boundary slope (NEMO extra param, not in paper text)
 
 # Reference density profile (for σ_2 diagnostics, MOC-in-density plots, paper Figs 5-6)
 rho_ref_z0 = 1026.0        # kg/m³ at surface
@@ -325,7 +355,7 @@ Follow pattern of `global_overturning.py`:
     - `pgf_scheme="smc03"` (NOT default `"adcroft"`) — eliminates known PGF accuracy bugs on stratified bathymetry
     - `barotropic_solver="implicit_cn"` (NOT default `"explicit_substep"`) — eliminates checkerboard barotropic noise documented in `docs/issues/barotropic_mode_noise.md`
     - `barotropic_implicit_theta_eta=0.55` (CN default)
-    - `tracer_advection="ppm_fct"` (the NEMO-FCT match)
+    - `tracer_advection="tvd"` (start simple; sensitivity to `dst3`/`ppm_fct`/`som` deferred to a separate study)
     - `hi_precision_pressure=True` (avoid float32 PGF cumsum error)
     - Free-slip lateral BC: already the default; nothing to set
     - Vector-invariant momentum + AL81 EEN PV-flux: already the default; nothing to set
@@ -357,25 +387,17 @@ Land mask: apply same DINO bathymetry outside the channel latitudes (-65 to -45�
 
 ---
 
-## Phase 4: Test Matrix Integration + Standalone Script
+## Phase 4: Standalone Script
 
-### 4A. Test Matrix Entry
+DINO is a standalone experiment, **not part of the routine test matrix**. The matrix is for fast smoke tests; DINO runs are slow even at 60 days and the value is in the long-spin-up production runs (deferred to GPU hand-off). Keep it out of `run_ocean_test_matrix.py`.
 
-**File**: `scripts/run_ocean_test_matrix.py`
-
-Add DINO as a test case:
-- Short run: 60 days
-- Grids: latlon (Mercator), mpas (global+mask)
-- Validation: conservation check, SSH within [-2, 2] m, SST within [-2, 30] °C, no NaN
-- Resolution: use 2° Mercator for test matrix speed (fewer lat points)
-- Default dt: 2700s (45 min)
-
-### 4B. Standalone Production Script
+### 4A. Standalone Production Script
 
 **File**: `scripts/run_dino.py`
 
 - Full 1° DINO configuration
-- Configurable duration. Default: short (50 yr) for shake-down; `--mode spin-up` for long runs (paper does 3000 yr).
+- **Compute scope on this machine: ≤ 1 year runs only.** All Phase 1–4 development and validation happens on the local CPU box and is capped at 1 simulated year per run. This is enough to shake down the code (rest state, wind spin-up, short full-forcing run, conservation checks). Multi-decade and multi-century spin-ups (paper does 3000 yr + 400 yr production) are **out of scope on this machine**. When the code is fully wired and validated at 1 year, the production runs will be handed off to a GPU machine — pack the experiment as a self-contained script + config + bathymetry/IC artifacts so it can be moved.
+- Configurable duration. Default: short (60 days) for shake-down; cap at 1 simulated year locally.
 - Diagnostics output: barotropic stream function, MOC in σ_2 space (referenced to 2000 m), meridional heat transport (mean + eddy + GM decomposition), zonal-mean potential density σ_2, KE time series
 - Support both lat-lon (Mercator) and MPAS via `--grid {latlon,mpas}` flag
 - Snapshot output every N years (configurable)
@@ -385,16 +407,20 @@ Add DINO as a test case:
 
 ## Phase 5 (Deferred): Enhancements
 
+**Scope decision: 1° R1 only.** R4 (1/4°) and R16 (1/16°) variants are **out of scope** — paper's eddy-permitting / eddy-resolving regimes are not a target of this replication.
+
 - **Seasonal cycle forcing**:
   - T_star with 1-month lag (eqs B3-B4): `Θ_n*(d) = 5 + 3·cos(π·(d-201)/180)`, `Θ_s*(d) = -0.5 - 0.5·cos(π·(d-201)/180)`
   - Seasonal Q_sr (eq B5 full form, NOT annual mean): `Q_sr(t,φ) = max(230·cos(π/180·[φ - 23.5·cos(π·(d-171)/180)]), 0)`. The 23.5° solar declination shift is the dominant seasonal driver.
-- FCT tracer advection for MPAS (currently TVD)
 - Simplified Roquet EOS option (eq. 6 with cabbeling + thermobaric) for closer paper match
-- Higher resolution variants (R4=1/4°, R16=1/16°) with biharmonic (Δx³ scaling for tracers) + Smagorinsky (C_smag=3.5) for momentum
 - TKE vertical mixing closure (Blanke & Delecluse 1993)
-- **Coarse-graining and subgrid flux diagnostics** (Sect 2.4 of paper, eqs 11-14) — required for the "ML eddy parameterization training" use case stated as goal #2 of this plan; currently NOT in scope of Phases 1-4
-- Isopycnal (isoneutral) momentum viscosity — currently using geopotential Laplacian. Affects ACC where slopes are steep.
-- ~~Tréguier (1997) GM coefficient~~ — **decided: stick with Visbeck (1997)**, will not implement Tréguier
+- **Coarse-graining and subgrid flux diagnostics** (Sect 2.4 of paper, eqs 11-14) — only relevant if/when ML eddy parameterization training is pursued.
+
+### Decisions locked in (not to revisit)
+- GM coefficient: **Visbeck (1997)** — will not implement Tréguier.
+- Momentum viscosity: **geopotential Laplacian** — will not implement isoneutral (paper text likely a wording slip; verify against Zenodo namelist).
+- Sea ice: **none** (paper inherits same).
+- Resolution scope: **R1 (1°) only**.
 
 ---
 
@@ -447,14 +473,14 @@ Add DINO as a test case:
 |--------|-------------|-------------------------------|--------|
 | EOS | Simplified Roquet (linear + cabbeling + thermobaric) | Wright (full nonlinear) | Quantitative density differences; ACC and MOC magnitudes won't match paper exactly |
 | Vertical mixing | TKE (Blanke & Delecluse 1993) | KPP (LMD94) + enhanced diffusion | Different BL depth diagnosis; bulk behavior similar |
-| Momentum viscosity | Isoneutral Laplacian | Geopotential Laplacian | Affects ACC where slopes are steep; documented audit gap |
+| Momentum viscosity | Iso-level Laplacian | Iso-level Laplacian | **Match** (NEMO `ln_dynldf_lev=.true.`; paper text was wording slip — confirmed via Zenodo namelist 2026-05-14) |
 | GM coefficient | Tréguier (1997) | Visbeck (1997) — **deliberate choice, not to be revisited** | Both growth-rate-dependent; Visbeck uses depth-averaged Eady. Typical ~10-20% ACC transport difference at 1°, absorbed by `α` tuning. |
 | Solar forcing | Seasonal cycle | Annual mean by quadrature of eq B5 (Phase 1) | Loses seasonal MLD cycle; mean state similar |
 | Restoring | Native heat-flux coefficient (W/m²/K) | Coefficient → timescale conversion done in DINO module | Mathematically equivalent in surface layer; conversion uses Δz_0 |
 | Tracer advection | NEMO FCT | `ppm_fct` (closest available) | Bit-exact match not expected; numerical diffusion comparable |
 | MPAS channel | 50° wide periodic | 50° wide periodic via `create_regional_voronoi_mesh(periodic_x=True)` | Match. Cross-grid comparison can be quantitative. |
 | Sea ice | Absent (paper limitation) | Absent (matches paper) | Limits AABW formation realism in both |
-| Spin-up duration | 3000 yr R1 + 400 yr production | TBD (likely 50-200 yr at first) | Mean state will not be fully equilibrated; deep cells especially slow to adjust |
+| Spin-up duration | 3000 yr R1 + 400 yr production | ≤ 1 yr on this machine; multi-century runs deferred to GPU hand-off | Local runs only exercise code correctness, not equilibrated mean state. Paper-comparable diagnostics require the GPU production hand-off. |
 
 ## Verification
 
@@ -475,7 +501,7 @@ The paper's R1 production uses **3000 yr spin-up + 400 yr R1**, with diagnostics
 
 | Metric | Paper R1 | Paper R4 | Notes |
 |---|---|---|---|
-| ACC transport (Sv) | **206.0** | 149.7 | Sensitive to GM tuning (Visbeck≠Tréguier) and momentum-viscosity formulation (geopotential vs isoneutral). Acceptable band for our R1: 150–250 Sv. |
+| ACC transport (Sv) | **206.0** | 149.7 | Sensitive to GM tuning (Visbeck≠Tréguier) and EOS choice (Wright vs Roquet). Acceptable band for our R1: **100–250 Sv** — wide because none of the knobs are tuned and we have no sub-100-yr way to equilibrate the SO stratification. |
 | Total domain KE (J) | n/a in paper | ≈0.8 × 10¹⁸ | Paper Fig 8 |
 | Total domain KE (J) — R16 | n/a | ≈2.1 × 10¹⁸ | Paper Fig 8; not a Phase-1 target |
 | MHT peak northward (PW) | ≈0.4 | ≈0.25 | Paper Fig 7 |
