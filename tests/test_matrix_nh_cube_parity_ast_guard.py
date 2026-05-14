@@ -852,6 +852,43 @@ def test_iter102_tc2_cube_blowup_warning_present():
     )
 
 
+def test_iter118_timeseries_csv_excludes_private_keys():
+    """iter-119 sentinel: `_save_timeseries_csv` + `_save_timeseries_plot`
+    must exclude private-prefix (`_*`) keys from the csv/plot columns.
+
+    iter-118 discovered that pre-fix the writer included `_blowup_info`
+    (a dict value added on FAIL by `_run_timeloop`) in the column keys.
+    Indexing `diag["_blowup_info"][i]` crashed silently after writing
+    the header, leaving an empty csv that blocked post-mortem
+    investigation of the iter-102 TC2 cube full-mode BLOWUP.
+
+    The fix added `and not k.startswith("_")` to BOTH the csv writer
+    and the plot writer's key-filter list comprehensions.  This
+    sentinel ensures both filters remain in place.
+    """
+    src = _runner_source()
+    # Anchor: distinctive iter-118 comment + 2x ``startswith("_")`` filter.
+    assert "iter-118: exclude private-prefix keys" in src, (
+        "iter-119 regression: `_save_timeseries_plot` no longer carries "
+        "the iter-118 comment explaining the private-key filter.  Either "
+        "the comment was deleted or the function moved — verify the "
+        "private-key filter is still applied to BOTH "
+        "`_save_timeseries_csv` and `_save_timeseries_plot`."
+    )
+    # Count the ``not k.startswith("_")`` filter occurrences — should be
+    # at least 2 (csv + plot).
+    n_filter = src.count('not k.startswith("_")')
+    assert n_filter >= 2, (
+        f"iter-119 regression: matrix runner has only {n_filter} "
+        "occurrences of the private-key filter `not k.startswith(\"_\")`.  "
+        "Expected at least 2 (`_save_timeseries_csv` + "
+        "`_save_timeseries_plot`).  Either filter was removed or the "
+        "writers were refactored without preserving the iter-118 fix.  "
+        "Pre-iter-118 the missing filter caused FAILed runs to write an "
+        "empty header-only csv, blocking blowup post-mortem."
+    )
+
+
 def test_iter108_tc3_cube_caution_present():
     """iter-112 sentinel: the iter-108 CAUTION comment must remain in
     the matrix runner TC3 cube branch.
