@@ -318,14 +318,16 @@ def _find_pe_held_suarez_cube_config_block() -> str:
     """Locate the matrix-runner PE held_suarez cube branch
     ``PrimitiveEquationConfig(...)`` constructor (the one inside
     ``run_held_suarez``, distinguished from the baroclinic block by
-    the unique ``smagorinsky_cs=_smag_cs_env`` field that only the
-    held_suarez config sets).
+    the unique ``smagorinsky_cs=`` field that only the held_suarez
+    config sets).
+
+    Anchor robust to whitespace variations around the assignment.
     """
     src = _runner_source()
-    anchor = re.search(r"smagorinsky_cs=_smag_cs_env,", src)
+    anchor = re.search(r"smagorinsky_cs\s*=\s*\S", src)
     assert anchor is not None, (
-        "matrix-runner PE held_suarez ``smagorinsky_cs=_smag_cs_env`` "
-        "anchor not found"
+        "matrix-runner PE held_suarez ``smagorinsky_cs=`` anchor "
+        "not found"
     )
     open_idx = src.rfind("PrimitiveEquationConfig(", 0, anchor.start())
     assert open_idx != -1, (
@@ -349,18 +351,33 @@ def _find_pe_amip_cube_config_block() -> str:
     """Locate the matrix-runner PE AMIP cube branch
     ``PrimitiveEquationConfig(...)`` constructor (inside ``run_amip``,
     distinguished by the unique ``held_suarez_init(grid, sigma,
-    T_init=280.0)`` call that follows it).
+    T_init=…)`` call that follows it.  Anchor accepts any numeric
+    value for ``T_init`` so a default-tweak doesn't silently break
+    the sentinel).
     """
     src = _runner_source()
     anchor = re.search(
-        r"held_suarez_init\(grid,\s*sigma,\s*T_init=280\.0\)", src,
+        r"held_suarez_init\(\s*grid\s*,\s*sigma\s*,\s*T_init\s*=\s*[\d.]+\s*\)",
+        src,
     )
     assert anchor is not None, (
-        "matrix-runner AMIP ``T_init=280.0`` anchor not found"
+        "matrix-runner AMIP ``held_suarez_init(grid, sigma, T_init=...)``"
+        " anchor not found"
     )
     open_idx = src.rfind("PrimitiveEquationConfig(", 0, anchor.start())
     assert open_idx != -1, (
         "no PrimitiveEquationConfig( before AMIP anchor"
+    )
+    # Sanity: the anchor must be within ~2000 chars of the preceding
+    # ``PrimitiveEquationConfig(`` opening, otherwise an unrelated
+    # earlier ``PrimitiveEquationConfig(`` (e.g., the held_suarez or
+    # baroclinic block) was picked up and the walker would return
+    # the wrong block.  Today's measured gap is 563 chars; the
+    # ceiling here is generous to allow for typical comment growth.
+    assert anchor.start() - open_idx < 2000, (
+        f"AMIP anchor too far ({anchor.start() - open_idx} chars) "
+        "from preceding PrimitiveEquationConfig( — wrong block "
+        "likely matched"
     )
     depth = 0
     i = open_idx
