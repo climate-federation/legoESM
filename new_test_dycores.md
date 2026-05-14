@@ -37,7 +37,7 @@ Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV /
 
 - **c_sw + p_grad_c cube-vertex residual** (codex iter-983; iter-3/4/26 confirmed): |duc|_max = 2.71 m/s at face=2 i=1 j=35 on cube W2 IC.  STRUCTURAL to duogrid c_sw path; codex 1000+ iters reached v_ll=0.114 via calibration damping, not by closing the gap.
 - **Cube CB hord all blow up similarly** (iter-26 sweep): hord 8/9/10/11/12 all give L2 ≈ 0.12 with anchor; hord=12 BEST.  Cube vs latlon (L2=0.024) 5× gap is structural to cube PPM transport accuracy.
-- **iter-31 cube W5/W6 hyperdiff fix is a JAX-trace artifact** (iter-40 investigation): `fv3_sw_tendencies(hyperdiff_coeff=...)` is signature-only NO-OP per `operators_cdgrid.py:1316` (warning fires).  The matrix-runner FV3EdgeShallowWaterModel.step routes through `fv3_sw_tendencies`, not `cdgrid_momentum_tendencies` (where hyperdiff IS actually applied at line 1116).  But empirically — cube W6 with `hyperdiff_coeff=0` BLOWS UP at day 9-10 (max|u_d| 1290) while `hyperdiff_coeff=3.16e16` stays stable (max|u_d|≈98 throughout).  Mechanism: setting the kwarg via `_replace` changes the NamedTuple hash → JAX retraces with a different op order → tiny FP differences perturb the cusp-of-stability trajectory.  The runtime sentinel iter-39 catches if this happy accident regresses.
+- **iter-31 cube W5/W6 hyperdiff fix IS algorithmic** (iter-41 correction of iter-40's mistaken JAX-trace hypothesis): `fv3_sw_tendencies` HAS a real biharmonic hyperdiffusion implementation at the cell-centre geographic path (`operators_cdgrid.py:1444-1456`).  iter-40 was misled by a stale iter-1019 warning at line 1316 saying "signature-only NO-OP" — that warning was written when hyperdiff was actually no-op, but a later iter added the real implementation without retiring the warning.  iter-41 removed the stale warning.  Probed alternative damp_v=0.040/0.050/0.060 — all BLOW UP at day 10-14; only `hyperdiff_coeff=_hyperdiff_cube(n)` keeps cube W5/W6 stable.  The fix is the right algorithmic operator, not a JAX accident.
 - **PE cube already best-in-class** (iter-9/26 probes): on baroclinic / rotated_steady / mountain_rossby / inertio_gravity_3_2; latlon is the outlier on some, not cube.
 
 ## Iter trail (terse, iter-1..39)
@@ -69,9 +69,10 @@ Scope: cube SW/PE/NH error norms within close numerical proximity of latlon FV /
 - iter-37: review-driven W2 gate-exclusion sentinel + default-0.0 pin.
 - iter-38: end-to-end SW cube matrix subset verified (4/4 PASS at quick).
 - iter-39: numerical regression sentinel for cube W6 stability — discovered hyperdiff_coeff is signature-only no-op in fv3_sw_tendencies.
-- iter-40: investigated iter-31 mechanism — confirmed hyperdiff fix is JAX-trace-induced (cube W6 with hyperdiff=0 BLOWS UP at day 9-10; with hyperdiff=3.16e16 stays stable max|u_d|≈98).  Document compressed.
+- iter-40: investigated iter-31 mechanism — initially concluded "JAX-trace artifact" based on the stale iter-1019 warning at `operators_cdgrid.py:1316`.  Document compressed.
+- iter-41: **iter-40 CORRECTION** — found the real biharmonic hyperdiff implementation at `fv3_sw_tendencies` cell-centre geographic path (`operators_cdgrid.py:1444-1456`).  The iter-1019 warning was stale (written before that implementation landed in a later iter; the warning was never retired).  Removed the misleading warning and replaced the function docstring with an accurate explanation.  Confirmed via damp_v sweep (0.040/0.050/0.060 all BLOW UP) that hyperdiff IS the right operator, not a happy accident.  All 26 sentinels (24 AST + 2 numerical) PASS.
 
-## Iter-41+ queued
+## Iter-41+ queued (status post iter-41)
 
-- Longer-term: implement REAL cube SW hyperdiff (wire `hyperdiff_coeff` through `fv3_sw_tendencies` properly) so the iter-31 fix is algorithmic, not trace-induced.
+- ✅ iter-41: REAL hyperdiff confirmed already wired at `operators_cdgrid.py:1444-1456`; stale warning removed.  No further hyperdiff work needed.
 - AMIP cube cumulative bundle verification (slow — 30-day quick at ~900 s wall).
