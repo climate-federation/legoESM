@@ -500,6 +500,39 @@ def test_w5_w6_cube_config_has_hyperdiff_override():
     )
 
 
+def test_w2_cube_config_excludes_hyperdiff_override():
+    """iter-37 sentinel (review fix): the W2 cube SW path is the
+    ``else`` branch of the iter-31/33 gate ``test_num in (5, 6)``,
+    so it MUST call ``iter1009_dual_target_config(n)`` with default
+    ``hyperdiff_coeff=0.0`` (the iter-1030 calibration without
+    hyperdiff that ``test_iter1002_w2_v_ll_linf_meets_target`` pins).
+
+    Catches a regression that would widen the gate to include W2
+    (e.g., ``if test_num in (2, 5, 6):`` or ``if True:``) — that
+    would silently apply hyperdiff to W2 and break the iter-1030
+    calibration the W2 sentinel pins.
+    """
+    src = _runner_source()
+    # Find the exact gate line.
+    gate_pat = re.search(
+        r"if\s+test_num\s+in\s*\(\s*([\d,\s]+)\s*\)\s*:", src,
+    )
+    assert gate_pat is not None, (
+        "iter-31/33 regression: ``if test_num in (...):`` gate not "
+        "found in matrix runner SW cube branch."
+    )
+    gate_values = {
+        int(v.strip()) for v in gate_pat.group(1).split(",") if v.strip()
+    }
+    assert gate_values == {5, 6}, (
+        f"iter-37 regression: W5/W6 hyperdiff gate now matches "
+        f"test_num in {sorted(gate_values)} — must be exactly "
+        "{{5, 6}}.  Adding W2 (test_num=2) would silently apply "
+        "hyperdiff to the W2 cube path and break "
+        "``test_iter1002_w2_v_ll_linf_meets_target``."
+    )
+
+
 def test_pe_factory_bundle_present_in_three_cube_branches():
     """iter-22 sentinel (tightened in iter-27 post-review): the PE
     iter-18..21 factory bundle (``use_fv3_metric_aware_d_con``,

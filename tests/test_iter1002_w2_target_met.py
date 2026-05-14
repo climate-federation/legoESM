@@ -227,16 +227,24 @@ def test_iter35_hyperdiff_coeff_kwarg_threads_through():
     The matrix-runner SW W5/W6 cube paths rely on this kwarg to add
     biharmonic hyperdiffusion that prevents long-run BLOWUP at day
     14.58 (W5) / day 9.03 (W6).
+
+    iter-37 (review fix): also pin the default to exactly 0.0 so a
+    future change that flips the default to nonzero would trip this
+    test without needing the matrix runner to flag the W2 v_ll
+    sentinel regression.
     """
     from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
         iter1009_dual_target_config,
     )
     N = 36
-    # Default: 0.0 (preserves iter-1030 backward compat).
+    # Default: 0.0 (preserves iter-1030 backward compat).  W2 cube
+    # path relies on this default being 0.0 — see W2 sentinel
+    # ``test_iter1002_w2_v_ll_linf_meets_target``.
     default_cfg = iter1009_dual_target_config(N)
     assert default_cfg.hyperdiff_coeff == 0.0, (
         f"iter-35 regression: helper default hyperdiff_coeff != 0.0 "
-        f"(got {default_cfg.hyperdiff_coeff!r})"
+        f"(got {default_cfg.hyperdiff_coeff!r}).  This would silently "
+        "change the W2 cube path behaviour."
     )
     # Kwarg threads through.
     custom = iter1009_dual_target_config(N, hyperdiff_coeff=1.234e16)

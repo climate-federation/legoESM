@@ -107,3 +107,9 @@ iter-34: probed cube CB 12-day full duration — PASS (`mass_drift=7.42e-9, wall
 iter-35: API cleanup — `iter1009_dual_target_config(n, ...)` helper now accepts `hyperdiff_coeff` as an optional kwarg (default 0.0, preserving backward compat for existing callers).  Matrix runner W5/W6 cube branch updated to pass `hyperdiff_coeff=_hyperdiff_cube(n)` directly via the kwarg instead of the iter-31 ``_replace`` workaround.  All 23 AST sentinels + `test_iter1002_w2_v_ll_linf_meets_target` + `test_iter1009_w5_day5_artifact_free` PASS unchanged.
 
 iter-36: documented the iter-35 `hyperdiff_coeff` kwarg in the `iter1009_dual_target_config` docstring (the Parameters section + Returns note).  Added unit test `test_iter35_hyperdiff_coeff_kwarg_threads_through` that pins the kwarg threading: default 0.0 + custom value flows through to the returned config's `hyperdiff_coeff` field, while other iter-1030 fields stay unchanged.  All sentinels PASS.
+
+iter-37: third cavecrew-reviewer pass on iter-31..36 flagged two concrete gaps in coverage:
+1. `test_w5_w6_cube_config_has_hyperdiff_override` doesn't catch a regression that widens the gate to include W2 (e.g., `test_num in (2, 5, 6)`).  **Fix**: added `test_w2_cube_config_excludes_hyperdiff_override` that parses the gate's values and asserts they are exactly `{5, 6}` — would trip on accidental gate widening or `if True:`.
+2. `test_iter35_hyperdiff_coeff_kwarg_threads_through` validates threading but doesn't pin the default to 0.0.  **Fix**: now asserts `default_cfg.hyperdiff_coeff == 0.0` with a message tying the regression to the W2 v_ll sentinel.
+
+AST guard now 24 tests (+ iter-35 kwarg test); 0.11 s.
