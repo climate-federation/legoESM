@@ -120,6 +120,7 @@ Each entry is a deliberate choice made during planning, with the reasoning so a 
 | 2026-05-14 | **EOS: Wright (existing nonlinear).** Not Roquet simplified (paper). | Wright is more accurate, already implemented and AD-tested. Roquet is what paper uses, so ACC/MOC magnitudes won't match exactly. Not worth implementing Roquet just for paper-figure parity. | Density distribution is grossly wrong in some specific water mass and Wright extrapolation is suspected. |
 | 2026-05-14 | **Vertical mixing: KPP + enhanced-diffusion convection.** Not TKE (paper). | Both already implemented in legoESM. KPP is standard. TKE would be additional engineering with no obvious benefit at 1°. | Mixed-layer depth is consistently too shallow / too deep across seasons — TKE may be needed. |
 | 2026-05-14 | **Restoring + Q_sr split: implement inside DINO module, not refactor `restoring.py`.** | The general restoring API uses timescales (seconds), not flux coefficients. Doing the conversion + Q_sr subtraction inside the DINO module avoids changing a widely-used API for one experiment. | Another experiment needs the same pattern — then factor out. |
+| 2026-05-14 | **30-day runs surface a lat-lon C-grid stability bug: legoESM is missing the Hollingsworth correction (NEMO `nn_dynkeg=1`).** See Appendix "Investigation Findings" for the full control matrix and analysis. | Lat-lon dycore-only blows up at day 20 (with or without physics, with or without forcing); MPAS dycore-only stable for 30 days. Cause is the standard Hollingsworth-Kallberg instability of the centered KE-gradient term in vector-invariant C-grid schemes over sloping bathymetry. legoESM atmosphere uses C-D grid to avoid this; the lat-lon ocean inherited the bug. NEMO turns Hollingsworth on by default (`nn_dynkeg=1`). Recommended fix: implement Hollingsworth in `ocean_pe_latlon_cgrid.py` as a general legoESM feature gated by a `ke_gradient_scheme` config field. **Out of scope of DINO replication — tracked as a separate legoESM issue.** | Hollingsworth correction lands in legoESM → re-run 30-day tests to confirm. |
 | 2026-05-14 | **MPAS default resolution = 97 km** (gives 9686 cells, within 2% of the lat-lon 50-col grid's 9900 cells). | Cross-grid comparison should be at equivalent mean cell area. Theoretical area-equivalent is sqrt(mean cell area) = 82 km, but the regional Voronoi mesh generator has quantization gaps below ~85 km (some seedings put generators outside the periodic zonal extent). 97 km is the closest working value to the 9900-cell match. | Mesh generator gets fixed to handle 80-84 km seedings → revisit. |
 | 2026-05-14 | **Promoted two DINO-derived helpers to legoESM proper**: Lévy stretched z* grid (`legoesm.ocean.vertical.create_levy_stretched_z_star`) and partial-periodic seam-wall mask helpers (`legoesm.ocean.init_mpas.partial_periodic_seam_wall_mpas` + `legoesm.ocean.init_latlon_cgrid.partial_periodic_seam_wall_latlon`). | Both are experiment-agnostic patterns that any future NEMO-style ocean config (or Drake-passage-like channel-in-basin geometry) can reuse. DINO retains thin wrappers; the experiment module is now ~150 LOC leaner. | Never (resolved). |
 | 2026-05-14 | **Phase 4 v1: both v0 caveats closed (Jerlov SW penetration + MPAS production path).** | Jerlov adds the column-distributed Q_sr tendency on top of the eq-8 surface flux. MPAS path adds an edge-normal-projected wind, cell-indexed T*/S*/Q_sr, and same eq-7-9-10 physics as lat-lon. Lat-lon: 7.3s wall for 1 day (25-col Mercator). MPAS: 3.0s wall for 1 day (2028 cells regional Voronoi). | Production runs reveal a need to bend any of these conventions. |
@@ -583,3 +584,122 @@ The paper's R1 production uses **3000 yr spin-up + 400 yr R1**, with diagnostics
 - Meridional heat transport: total + eddy decomposition (mean-flow MHT vs eddy MHT vs GM-bolus MHT)
 - KE time series (domain-integrated)
 - (Eddy-permitting only, deferred Phase 5) KE spectra and coarse-grained subgrid flux fields
+
+---
+
+## Appendix: Investigation Findings (Lessons Learned)
+
+This section captures lessons learned during the implementation that
+matter for future ocean experiments on legoESM, especially anything that
+pushes stratified flow over realistic bathymetry.
+
+### Finding 1: 30-day runs reveal a lat-lon C-grid instability missing from the 1-day smoke tests (2026-05-14)
+
+After end-to-end Phase 4 v1 was complete and the 1-day smoke runs were
+green on both grids, we ran 30-day production attempts to validate the
+integrated behavior. Both blew up:
+
+- Lat-lon (full forcing + physics): NaN by **day 8** (`|η|` jumped from
+  ±0.5 m to ±410 m in 64 timesteps).
+- MPAS (full forcing + physics): NaN by **day 22** with exponential
+  `|u|` growth (factor of ~3 per 10 days).
+
+A control matrix isolated the cause:
+
+| Variant | Result |
+|---|---|
+| Lat-lon, forced + physics | Blowup day 8 |
+| Lat-lon, unforced + physics | Blowup **day 20** |
+| Lat-lon, unforced + dycore only (no physics) | Blowup **day 20** (identical) |
+| Lat-lon, `pgf_scheme="smc03"` | Bit-identical to `"adcroft"` (both reduce to ln_hpg_sco for pure-z*) |
+| **MPAS**, unforced + dycore only | **Stable 30 days** |
+
+Spectral analysis of `v` at day 15 (lat-lon, last stable snapshot):
+along-longitude FFT had `DC=0.009, k=1=0.090, k=5=0.007, …, Nyquist=0.009`.
+Energy concentrated at low wavenumbers, **no grid-scale** signature —
+ruling out a CFL or checkerboard instability.
+
+### Finding 2: Hollingsworth correction is missing in the lat-lon C-grid ocean
+
+Cross-checking against the upstream NEMO namelist
+(`vopikamm/DINO@v0.2.0 EXPREF/namelist_cfg`) showed two stability
+features that are turned ON in NEMO and absent / non-default in legoESM:
+
+1. **`nn_dynkeg = 1`** in `&namdyn_adv` — selects the **Hollingsworth
+   correction** (Hollingsworth, Kållberg & Renner 1983; Arakawa & Hsu
+   1990) for the kinetic-energy gradient term. Without it, the
+   vector-invariant C-grid scheme generates spurious vortex stretching
+   on stratified flow over sloping bathymetry — the well-known
+   "Hollingsworth instability". This is a *required* stability feature
+   for any C-grid model with realistic topography. legoESM's lat-lon
+   C-grid (`ocean_pe_latlon_cgrid.py`) uses naive centered KE
+   `K = 0.5·((⟨u⟩ᵢ)² + (⟨v⟩ⱼ)²)` everywhere, with no Hollingsworth
+   variant. (For contrast, legoESM's *atmosphere* uses C-D grid
+   precisely to avoid this — see `core/operators_cdgrid.py:458`,
+   `atmosphere/dynamics/__init__.py:11`.)
+
+2. **`ln_traldf_msc = .true.`** + **`rn_slpmax = 0.01`** in
+   `&namtra_ldf` — Method of Stabilizing Correction (Beckmann &
+   Döscher 1997) for the iso-neutral diffusion operator on steep
+   slopes. legoESM has slope tapering but the explicit MSC formulation
+   was not investigated.
+
+### Finding 3: MPAS dodges the bullet because it sits on a different stencil
+
+The MPAS regional Voronoi mesh ran 30 days unforced without blowup
+under exactly the same DINOConfig parameters and same vertical grid.
+Two reasons make MPAS less exposed:
+
+- MPAS uses TRiSK with the AL81-style enstrophy-conserving PV flux on
+  hex cells, where the Hollingsworth issue manifests differently (it's
+  a property of the C-grid quad-cell K-gradient stencil specifically).
+- MPAS cells are quasi-uniform (~100 km here), avoiding the
+  high-latitude grid-aspect-ratio extremes that Mercator's polar
+  shrinkage produces (38 km at 70°). Hollingsworth instability is
+  amplified by anisotropic / strongly varying grid spacing.
+
+### Finding 4: Forcing is not the issue (counterintuitive)
+
+We initially suspected the surface forcing (wind + restoring + Q_sr
+split + Jerlov). It is not the issue:
+
+- Lat-lon with full forcing blows up at day 8.
+- Lat-lon with no forcing blows up at day 20 (later, but same mode).
+- The forcing **accelerates** the underlying dynamical instability by
+  injecting KE; it doesn't *cause* it.
+
+In fact, restoring keeps T closer to T*, which has weaker meridional
+gradients than the IC — so the forced run actually has less APE
+available for instability than the unforced run. The reason forced
+fails earlier is that wind injects KE faster than the system can
+dissipate.
+
+### Recommended action
+
+The principled fix is to **implement the Hollingsworth correction in
+the legoESM lat-lon C-grid vector-invariant momentum scheme**. This
+should be a legoESM-level feature (benefits any ocean experiment over
+realistic stratified bathymetry, not just DINO), gated by a config
+field on `LatLonCGridOceanConfig` (e.g. `ke_gradient_scheme:
+str = "centered" | "hollingsworth"`).
+
+Scope estimate: ~50 LOC in
+`ocean/dynamics/ocean_pe_latlon_cgrid.py` (the KE gradient block
+around lines 928–940), plus reference-implementation tests
+(stratified rest-state at variable bathymetry should reach a
+near-steady balanced state, not blow up). MSC for iso-neutral
+diffusion is a separate, smaller follow-on if blowup persists.
+
+This work is **out of scope of the DINO replication plan** itself —
+it's a general-purpose legoESM stability fix that DINO surfaced.
+Tracked as a separate issue / PR.
+
+### Diagnostic plots
+
+Saved during the investigation (in `results/dino/`, gitignored):
+- `run_30d_latlon/snapshots_evolution.png` — 4 stable lat-lon snapshots
+  (days 0, 2, 4, 6) showing surface T, η, |u|, zonal-mean T(lat,z)
+- `run_30d_mpas/snapshots_evolution.png` — 4 stable MPAS snapshots
+  (days 0, 8, 14, 20) showing surface T, η, edge-mean |u|
+- `timeseries_comparison.png` — log-scale |u|, |η|, T extrema vs time
+  with NaN markers showing when each run crashed
