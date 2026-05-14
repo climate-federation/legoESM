@@ -925,15 +925,56 @@ References:
    the implicit solver accumulates rounding errors. All comparison
    runs use fp64.
 
-### Working configurations
+### Configuration progression: how we arrived at stable configs
 
-**Lat-lon (BR19):** A_h=1e5, C_smag_lap=0.33, κ_GM=κ_Redi=2400,
-S_max=0.01, Ferrari 100m surface complement, implicit CN barotropic,
-KPP (K_conv=1.0), enhanced diffusion convection, dt=1200s, fp64.
+**MPAS path (simpler — no 2Δy problem):**
+
+| Step | Change | Exp | Result | Why |
+|------|--------|-----|--------|-----|
+| 1 | Start: A_h=1e4, C_smag_lap=0.33, κ_GM=600 | e4_fp64 | Stable but weak ACC (25 Sv) | Baseline |
+| 2 | A_h=1e4, uniform T (flat bottom) | MBT1 | BLOWUP day 24 | Viscosity too low for barotropic mode without stratification |
+| 3 | A_h → 1e5 | MBT2 | Stable 120d | Higher A_h stabilizes |
+| 4 | Add stratification + full physics | MBR1 | Stable 120d | No 2Δy on isotropic mesh |
+| 5 | κ_GM → 2400, κ_Redi → 2400, S_max → 0.01 | MBR2 | **Stable 20yr** | Production config |
+
+**Regular lat-lon path (long — fighting 2Δy):**
+
+| Step | Change | Exp | Result | Why |
+|------|--------|-----|--------|-----|
+| 1 | Start: A_h=1e4, C_smag_lap=0.33, κ_GM=600 | e4_fp64 | Zonal jets by year 2 | 2Δy instability |
+| 2 | Flat bottom isolation | F1 | Jets survive 1yr | Not topography-related |
+| 3 | Biharmonic (B_h=1e11) | F2-F4 | BLOWUP day 40-64 | B_h CFL too aggressive |
+| 4 | A_h → 2e5 + lat scaling | F5 | BLOWUP day 231 | Lat scaling weakens at S. Ocean |
+| 5 | Barotropic sweep: A_h=1e5 | BT9 | 2Δy seed = 4e-12 (killed) | Threshold for barotropic seed |
+| 6 | A_h=1e5, stratified | BR1 | 2Δy = 1e-3 day 120 (growing) | Seed dead but baroclinic amplification |
+| 7 | + κ_GM/κ_Redi → 2000 | BR2 | 10% better | GM wrong scale for 2Δy |
+| 8 | + K_h=1000 | BR3 | 45% better | Horizontal T diffusion helps |
+| 9 | + A_h_merid=1e5 | BR13 | 2Δy = 1.2e-6 (**870× better**) | Meridional visc targets anisotropy |
+| 10 | + Ferrari complement (κ_Redi=2400, 100m) | BR18 | Self-stabilizes by yr 10 | Surface T mixing breaks PGF feedback |
+| 11 | κ_GM → 2400, S_max → 0.01 | BR19 | Stable 10yr, residual 4-5Δy | **Working config for regular lat-lon** |
+
+**Mercator path (2026-05-14 — eliminates root cause):**
+
+| Step | Change | Exp | Result | Why |
+|------|--------|-----|--------|-----|
+| 1 | Mercator grid, A_h=1e4, uniform T | MRC_BT1 | **0.0% 2Δy power** 8 months | Isotropic cells eliminate KE aliasing channel |
+| 2 | A_h=1e5, stratified, dt=1200s | MRC_BR1 | BLOWUP day 20 | Polar cells (19km) need smaller dt |
+| 3 | dt → 600s | MRC_BR1 | **Running** | CFL resolved |
+
+### Working configurations
 
 **MPAS (MBR2):** A_h=1e5, C_smag_lap=0.33, K_zeta_bih=1e14,
 κ_GM=κ_Redi=2400, S_max=0.01, implicit CN barotropic, KPP (K_conv=1.0),
-enhanced diffusion convection, dt=1200s, fp64.
+enhanced diffusion convection, dt=1200s, fp64. **Stable 20yr.**
+
+**Regular lat-lon (BR19):** A_h=1e5, C_smag_lap=0.33, κ_GM=κ_Redi=2400,
+S_max=0.01, Ferrari 100m surface complement, implicit CN barotropic,
+KPP (K_conv=1.0), enhanced diffusion convection, dt=1200s, fp64.
+**Stable 10yr, residual 4-5Δy bands.**
+
+**Mercator (MRC_BR1):** A_h=1e5, C_smag_lap=0.33, κ_GM=κ_Redi=2400,
+S_max=0.01, implicit CN barotropic, KPP (K_conv=1.0), enhanced diffusion
+convection, dt=600s, fp64. **In progress.**
 
 ### Completed runs
 
