@@ -103,7 +103,7 @@ def parse_args():
                    help="Laplacian smoothing passes for bathymetry (default 2).")
     p.add_argument("--r-factor-max", type=float, default=0.2,
                    help="Maximum bathymetric slope r-factor for partial cells (default 0.2).")
-    p.add_argument("--north-cap-lat", type=float, default=80.0,
+    p.add_argument("--north-cap-lat", type=float, default=90.0,
                    help="Latitude [°N] above which all cells become land (default 80).")
     p.add_argument("--south-cap-lat", type=float, default=-80.0,
                    help=(
