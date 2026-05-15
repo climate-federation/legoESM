@@ -320,6 +320,19 @@ def main():
     p.add_argument("--lat-max", type=float, default=None,
                    help="Override NORTH_CAP_LAT for Mercator grid [deg]. "
                         "Lower values give larger polar cells (default: 80).")
+    p.add_argument("--ke-gradient-scheme", default=None,
+                   help="KE gradient scheme: 'centered' (default) or "
+                        "'hollingsworth' (NEMO nkeg_HW; required for "
+                        "stratified ocean over sloping bathymetry, "
+                        "fixes Hollingsworth-Kallberg instability).")
+    p.add_argument("--a-h-eq-boost", type=float, default=None,
+                   help="Equatorial A_h boost factor (DINO uses 3.0). "
+                        "Stabilizes weak-Coriolis equatorial region.")
+    p.add_argument("--a-h-eq-sigma-deg", type=float, default=None,
+                   help="Equatorial boost Gaussian half-width [deg] "
+                        "(DINO uses 5.0).")
+    p.add_argument("--slope-foot-alpha", type=float, default=None,
+                   help="Adcroft PGF slope foot alpha (DINO production: 3.0).")
     p.add_argument("--etopo",
                    default="/home/dbalwada/legoESM/data/bathymetry/etopo_1deg.nc")
     args = p.parse_args()
@@ -472,6 +485,10 @@ def main():
         pgf_scheme="adcroft",
         barotropic_solver="implicit_cn",
         momentum_advection=args.momentum_advection if args.momentum_advection is not None else "vector_invariant",
+        ke_gradient_scheme=args.ke_gradient_scheme if args.ke_gradient_scheme is not None else "centered",
+        A_h_eq_boost=args.a_h_eq_boost if args.a_h_eq_boost is not None else 1.0,
+        A_h_eq_sigma_deg=args.a_h_eq_sigma_deg if args.a_h_eq_sigma_deg is not None else 5.0,
+        slope_foot_alpha=args.slope_foot_alpha if args.slope_foot_alpha is not None else 0.0,
         implicit_vertical_mixing=True,
         tracer_advection="tvd",
         eos="wright",
@@ -517,6 +534,10 @@ def main():
         "A_h_lat_scaling": float(ocean_config.A_h_lat_scaling),
         "A_h_floor": float(ocean_config.A_h_floor),
         "A_h_merid": float(ocean_config.A_h_merid),
+        "A_h_eq_boost": float(ocean_config.A_h_eq_boost),
+        "A_h_eq_sigma_deg": float(ocean_config.A_h_eq_sigma_deg),
+        "ke_gradient_scheme": ocean_config.ke_gradient_scheme,
+        "slope_foot_alpha": float(ocean_config.slope_foot_alpha),
         "B_h": float(ocean_config.B_h),
         "B_h_lat_scaling": ocean_config.B_h_lat_scaling,
         "B_h_barotropic": float(ocean_config.B_h_barotropic),

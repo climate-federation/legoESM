@@ -1013,9 +1013,17 @@ References:
    at low amplitude. The proper fix is a tripolar grid.
 
 4. **MPAS produces cleaner spinup** (smooth gyres, no grid-scale
-   artifacts) but weaker ACC (~25 Sv vs ~126-150 Sv) due to
-   K_zeta_bih over-damping physical vorticity. This is a known
-   limitation at 1° Voronoi resolution.
+   artifacts). With ETOPO bathymetry, ACC reaches **73 Sv** at year 20
+   (A_h=1e5) — much stronger than flat bottom (25 Sv) due to bottom
+   form drag. Lower A_h (1e4) gives 2× more kinetic energy but
+   actually slows ACC spinup (23 Sv at year 10 vs 39 Sv).
+
+4b. **Mercator grid eliminates 2Δy instability** — confirmed with
+   0.0% grid-scale power through 8 months barotropic and 10yr
+   baroclinic runs. Requires dt=600s (half of MPAS) due to small
+   polar cells (19 km at 80°). Production Mercator config validated
+   for flat bottom; ETOPO run in progress with DINO stability knobs
+   (Hollingsworth correction + slope_foot_alpha).
 
 5. **Float32 precision** is insufficient for thin partial cells —
    the implicit solver accumulates rounding errors. All comparison
@@ -1031,7 +1039,9 @@ References:
 | 2 | A_h=1e4, uniform T (flat bottom) | MBT1 | BLOWUP day 24 | Viscosity too low for barotropic mode without stratification |
 | 3 | A_h → 1e5 | MBT2 | Stable 120d | Higher A_h stabilizes |
 | 4 | Add stratification + full physics | MBR1 | Stable 120d | No 2Δy on isotropic mesh |
-| 5 | κ_GM → 2400, κ_Redi → 2400, S_max → 0.01 | MBR2 | **Stable 20yr** | Production config |
+| 5 | κ_GM → 2400, κ_Redi → 2400, S_max → 0.01 | MBR2 | **Stable 20yr** | Production flat-bottom config |
+| 6 | Add ETOPO bathymetry (A_h=1e5) | METOPO1 | **Stable 20yr**, ACC=73 Sv | ETOPO boosts ACC 3× via form drag |
+| 7 | ETOPO + A_h → 1e4 | METOPO2 | **Stable 10yr**, ACC=23 Sv | Lower visc → more KE but slower ACC spinup |
 
 **Regular lat-lon path (long — fighting 2Δy):**
 
@@ -1055,7 +1065,8 @@ References:
 |------|--------|-----|--------|-----|
 | 1 | Mercator grid, A_h=1e4, uniform T | MRC_BT1 | **0.0% 2Δy power** 8 months | Isotropic cells eliminate KE aliasing channel |
 | 2 | A_h=1e5, stratified, dt=1200s | MRC_BR1 | BLOWUP day 20 | Polar cells (19km) need smaller dt |
-| 3 | dt → 600s | MRC_BR1 | **Running** | CFL resolved |
+| 3 | dt → 600s | MRC_BR1 | **Stable 10yr** | CFL resolved; production flat-bottom config |
+| 4 | Add ETOPO + Hollingsworth + slope_foot | MRC_ETOPO1 | **Running (~yr 7)** | DINO stability knobs for sloping bathy |
 
 ### Working configurations
 
@@ -1081,6 +1092,17 @@ convection, dt=600s, fp64. **In progress.**
 - **MBR2** (MPAS flat bottom, 20yr): **COMPLETED day 7300.** Stable,
   clean circulation, no meridional bands. T range 1.87–24.83°C at
   year 20. Section plots generated. Confirms MPAS config is sound.
+- **MRC_BR1** (Mercator flat bottom, 10yr): **COMPLETED day 3650.**
+  Stable, max|u|=0.78, SST=11.75°C, CFL=0.024. No 2Δy instability
+  on isotropic grid. Velocity transient at day 2700 settled down.
+- **METOPO1** (MPAS ETOPO, 20yr, A_h=1e5): **COMPLETED day 7300.**
+  Extremely stable, max|u|=0.46, CFL=0.003. Drake transport = 73 Sv
+  at year 20 (much stronger than flat-bottom 25 Sv — bottom form drag
+  supports barotropic transport).
+- **METOPO2** (MPAS ETOPO, 10yr, A_h=1e4): **COMPLETED day 3650.**
+  Stable, max|u|=0.86 (2× higher than METOPO1). Drake transport =
+  23 Sv at year 10 (vs 39 Sv for METOPO1 at year 10). Lower viscosity
+  allows more energy in small scales but actually slows ACC spinup.
 
 ### Mercator grid experiments (2026-05-14)
 
@@ -1111,13 +1133,14 @@ polar cells narrower).
 8 months of barotropic integration. The grid anisotropy hypothesis is
 **confirmed** — isotropic cells eliminate the barotropic KE aliasing seed.
 
-**Mercator baroclinic attempts:**
+**Mercator baroclinic experiments:**
 
 | Exp | Config | Result |
 |-----|--------|--------|
 | MRC_BR1 (A_h=1e4) | dt=600s, C_smag=0.33, κ=2400 | Ran 210 days stable. Polar waves visible (Mercator resolves high-k waves at 80° that regular lat-lon's coarse dy filters out). Killed to increase A_h. |
 | MRC_BR1 (A_h=1e5, dt=1200s) | Full physics | BLOWUP day 20. Polar cells (dx=19km) too small for dt=1200s with baroclinic PGF. |
 | MRC_BR1 (lat_max=75°) | dt=1200s | BLOWUP day 51. Still too aggressive. |
+| **MRC_BR1 (A_h=1e5, dt=600s)** | Full physics, flat bottom | **Stable 10yr.** max|u|=0.78, CFL=0.024. Production Mercator config. |
 
 **Mercator polar cell issue:** At 80° latitude, Mercator cells are
 19×19 km — effectively eddy-permitting. Baroclinic adjustment generates
@@ -1126,24 +1149,66 @@ lat-lon). Also generates visible Kelvin-like waves along the 80° wall
 that propagate into the interior. Regular lat-lon has the same wall but
 its 111 km dy acts as a low-pass filter hiding these waves.
 
+### ETOPO runs (2026-05-14)
+
+**MPAS ETOPO comparison — A_h sensitivity:**
+
+| Exp | A_h | Duration | Drake (yr 10) | Drake (yr 20) | max|u| (final) |
+|-----|-----|----------|---------------|---------------|----------------|
+| METOPO1 | 1e5 | 20yr | -39 Sv | **-73 Sv** | 0.46 m/s |
+| METOPO2 | 1e4 | 10yr | -23 Sv | (not run) | 0.86 m/s |
+
+Both stable. Higher A_h (1e5) spins up ACC faster and produces stronger
+transport. Lower A_h (1e4) allows 2× more kinetic energy in small scales
+but produces weaker ACC at year 10. ETOPO bathymetry boosts ACC
+significantly vs flat bottom (73 Sv vs 25 Sv at A_h=1e5, 20yr) — bottom
+form drag supports barotropic transport.
+
+**ACC spinup time series (Sv, negative = eastward):**
+
+| Year | METOPO1 (A_h=1e5) | METOPO2 (A_h=1e4) |
+|------|-------------------|-------------------|
+| 1 | -2 | +4 |
+| 2 | -7 | +9 |
+| 3 | -12 | +7 |
+| 5 | -21 | -7 |
+| 8 | -31 | -18 |
+| 10 | -39 | -23 |
+| 20 | -73 | — |
+
+METOPO2 had reversed transport in years 1-2 (transient oscillation from
+lower viscosity) before settling into eastward ACC by year 5.
+
+**DINO stability lessons applied to Mercator ETOPO (from PR #265):**
+
+Merged Hollingsworth correction from main (PR #264). New CLI flags
+added for ETOPO stability: `--ke-gradient-scheme hollingsworth`,
+`--a-h-floor`, `--a-h-eq-boost`, `--slope-foot-alpha`.
+
+Key DINO findings relevant to our ETOPO runs:
+1. **Hollingsworth correction** (`ke_gradient_scheme="hollingsworth"`)
+   required for stratified flow over sloping bathymetry — fixes
+   Hollingsworth-Kallberg instability (PR #264, merged).
+2. **A_h_floor = 1000** — MOM6 OM4 viscosity floor (safety net).
+3. **slope_foot_alpha = 3.0** — Adcroft PGF smoothing for steep slopes.
+4. **implicit_vertical_mixing = True** — mandatory with KPP (already on).
+5. **A_h_eq_boost** — equatorial viscosity boost. NOT used in our runs
+   (flat-bottom MRC_BR1 was stable without it, so not needed).
+
 ### Runs in progress (2026-05-14)
 
-- **MRC_BR1** (Mercator 278×360, flat bottom, baroclinic, A_h=1e5,
-  C_smag_lap=0.33, κ_GM=κ_Redi=2400, S_max=0.01, dt=600s, 10yr):
-  GPU 1, just started.
-- **METOPO1** (MPAS ico5, ETOPO bathymetry, A_h=1e5, C_smag_lap=0.33,
-  κ_GM=κ_Redi=2400, S_max=0.01, K_zeta_bih=1e14, dt=1200s, 20yr):
-  GPU 0, just started. First ETOPO run with validated config.
+- **MRC_ETOPO1** (Mercator 278×360, ETOPO bathymetry, A_h=1e5,
+  A_h_floor=1000, ke_gradient=hollingsworth, slope_foot_alpha=3.0,
+  κ_GM=κ_Redi=2400, S_max=0.01, dt=600s, 10yr): GPU 1, ~year 7.
 
 ### Path forward
 
-1. If METOPO1 stable: this becomes the MPAS production baseline.
-2. If MRC_BR1 stable and clean: launch Mercator ETOPO for matched
-   comparison.
-3. Compare MPAS ETOPO vs Mercator ETOPO: circulation, ACC, WBCs,
-   overturning, energetics.
-4. `config.json` now saved automatically for all new runs (added
-   2026-05-14).
+1. If MRC_ETOPO1 stable: compare with METOPO1 (MPAS ETOPO) — first
+   matched isotropic-grid vs Voronoi comparison with real bathymetry.
+2. Extend METOPO2 (A_h=1e4) to 20yr on GPU 0 to see if ACC catches up.
+3. Compare all three ETOPO runs: circulation, ACC, WBCs, overturning.
+4. Consider lowering Mercator A_h if ETOPO run is over-damped.
+5. `config.json` saved automatically for all new runs (added 2026-05-14).
 
 ## Honest Caveats
 
