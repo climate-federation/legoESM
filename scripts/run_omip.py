@@ -1200,6 +1200,101 @@ def _preload_jra55_forcing_block(start_step_idx, n_steps, dt, jra55_state):
     return atm_stack, runoff_stack
 
 
+def _preload_jra55_full_cache(jra55_state):
+    """Pre-load and regrid the entire JRA55 cache into RAM.
+
+    For repeat-year forcing (``--jra55-cycle``), the same 2920 records
+    are read over and over.  Loading everything once at startup and
+    regridding to the target grid eliminates all per-block Zarr I/O.
+
+    Returns ``(all_records, record_days, cache_length_days)`` where:
+    - ``all_records``: dict of ``(n_total_records, n_spatial)`` arrays
+    - ``record_days``: ``(n_total_records,)`` fractional days
+    - ``cache_length_days``: float, total cache duration
+    """
+    import xarray as xr
+    from legoesm.forcing.jra55_do import JRA55_VARIABLES, RECORDS_PER_DAY
+
+    cache_path = jra55_state["cache_path"]
+    ds = xr.open_zarr(str(cache_path), decode_times=False)
+    n_cache_records = int(ds.attrs["n_records"])
+    cache_length_days = n_cache_records / RECORDS_PER_DAY
+
+    t0 = time.time()
+    all_records = {}
+    for var in JRA55_VARIABLES:
+        all_records[var] = jnp.asarray(ds[var].values, dtype=jnp.float64)
+    ds.close()
+
+    # Regrid from lat-lon to MPAS cells if needed.
+    if "regrid_weights" in jra55_state:
+        from legoesm.grids.regridding import regrid_scalar
+        rw = jra55_state["regrid_weights"]
+        for var in all_records:
+            arr = all_records[var]  # (n_records, n_lat, n_lon)
+            all_records[var] = jnp.stack([
+                regrid_scalar(arr[i], rw)
+                for i in range(arr.shape[0])
+            ])
+
+    record_days = jnp.asarray(
+        np.arange(n_cache_records, dtype=np.float64) / RECORDS_PER_DAY,
+    )
+
+    elapsed = time.time() - t0
+    nbytes = sum(a.nbytes for a in all_records.values())
+    print(f"  Pre-loaded full JRA55 cache: {n_cache_records} records, "
+          f"{nbytes / 1e9:.1f} GB, {elapsed:.1f}s")
+
+    return all_records, record_days, cache_length_days
+
+
+def _slice_preloaded_records(start_step_idx, n_steps, dt, jra55_state,
+                             all_records, all_record_days, cache_length_days):
+    """Slice bracketing records from the pre-loaded cache for one block.
+
+    Same interface as ``_preload_jra55_raw_records`` but reads from
+    in-memory arrays instead of Zarr.
+    """
+    from legoesm.forcing.jra55_do import RECORDS_PER_DAY
+
+    cycle = jra55_state.get("cycle", False)
+    n_cache_records = all_record_days.shape[0]
+
+    start_day = start_step_idx * dt / 86400.0
+    end_day = (start_step_idx + n_steps - 1) * dt / 86400.0
+
+    if cycle:
+        start_day_c = start_day % cache_length_days
+        end_day_c = end_day % cache_length_days
+    else:
+        start_day_c = start_day
+        end_day_c = end_day
+
+    i_first = int(np.floor(start_day_c * RECORDS_PER_DAY))
+    i_last = int(np.floor(end_day_c * RECORDS_PER_DAY)) + 1
+    i_last = min(i_last, n_cache_records - 1)
+
+    if cycle and i_last < i_first:
+        indices = list(range(i_first, n_cache_records)) + list(range(0, i_last + 1))
+    else:
+        indices = list(range(i_first, i_last + 1))
+
+    raw_stack = {var: all_records[var][jnp.array(indices)] for var in all_records}
+    runoff_stack = raw_stack["friver"]
+    record_days = all_record_days[jnp.array(indices)]
+
+    record_meta = {
+        "record_days": record_days,
+        "block_start_day": float(start_day),
+        "dt": float(dt),
+        "n_steps": int(n_steps),
+        "cache_length_days": float(cache_length_days),
+        "cycle": cycle,
+    }
+    return raw_stack, runoff_stack, record_meta
+
+
 def _preload_jra55_raw_records(start_step_idx, n_steps, dt, jra55_state):
     """Pre-load only the native 3-hourly JRA55 records that bracket a block.
 
@@ -1988,8 +2083,16 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
             _get_block_fn_interp = _build_jra55_block_fn_interp(
                 model, jra55_state, dt)
             print("  GPU-interp mode: forcing interpolation on GPU")
+            # Pre-load the full JRA55 cache for repeat-year runs to
+            # eliminate per-block Zarr I/O (~0.3s/block → ~0s/block).
+            _full_cache = None
+            if jra55_state.get("cycle", False):
+                _fc_all, _fc_days, _fc_len = _preload_jra55_full_cache(
+                    jra55_state)
+                _full_cache = (_fc_all, _fc_days, _fc_len)
         else:
             block_fn = _build_jra55_block_fn(model, jra55_state, dt)
+            _full_cache = None
         block_size = max(1, diag_every)
         if checkpoint_days is not None:
             steps_per_ckpt = max(1, int(round(checkpoint_days * 86400.0 / dt)))
@@ -2001,7 +2104,12 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
             actual = min(block_size, n_steps - block_start)
             t_io_start = time.time()
 
-            if use_gpu_interp:
+            if use_gpu_interp and _full_cache is not None:
+                raw_stack, runoff_records, record_meta = (
+                    _slice_preloaded_records(
+                        block_start, actual, dt, jra55_state,
+                        *_full_cache))
+            elif use_gpu_interp:
                 raw_stack, runoff_records, record_meta = (
                     _preload_jra55_raw_records(
                         block_start, actual, dt, jra55_state))
