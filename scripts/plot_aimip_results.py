@@ -67,31 +67,29 @@ def plot_loss_curves(scorecard: dict, out_path: Path) -> None:
 
 
 def plot_rmse_per_variable(scorecard: dict, out_path: Path) -> None:
-    """Bar chart: per-variable RMSE for each variant."""
+    """Per-variable bar charts (one subplot per variable, distinct scales)."""
     variants = list(scorecard["variants"].keys())
     if not variants:
         return
 
-    n_vars = len(_VARIABLES)
-    n_variants = len(variants)
-    bar_width = 0.8 / n_variants
-    x = list(range(n_vars))
-
-    fig, ax = plt.subplots(figsize=(8, 4.5))
-    for i, variant in enumerate(variants):
-        rmse_payload = scorecard["variants"][variant]["eval_metrics"]["rmse"]
-        values = [rmse_payload[v]["mean"] for v in _VARIABLES]
-        positions = [xi + (i - (n_variants - 1) / 2) * bar_width for xi in x]
-        ax.bar(positions, values, width=bar_width, label=variant)
-
-    ax.set_xticks(x)
-    ax.set_xticklabels([_VAR_LABELS[v] for v in _VARIABLES])
-    ax.set_ylabel("area-weighted RMSE @ mid-level")
-    ax.set_title("AIMIP — eval RMSE per variable")
-    ax.grid(True, axis="y", linestyle=":", alpha=0.6)
-    ax.legend(loc="best", frameon=True)
+    fig, axes = plt.subplots(1, len(_VARIABLES), figsize=(13, 3.8))
+    colors = ["tab:blue", "tab:orange", "tab:green", "tab:red"]
+    for ax, var in zip(axes, _VARIABLES):
+        values = [
+            scorecard["variants"][v]["eval_metrics"]["rmse"][var]["mean"]
+            for v in variants
+        ]
+        ax.bar(variants, values, color=colors[:len(variants)])
+        ax.set_title(_VAR_LABELS[var])
+        ax.set_ylabel("RMSE")
+        ax.grid(True, axis="y", linestyle=":", alpha=0.6)
+        for i, v in enumerate(values):
+            fmt = f"{v:.2f}" if v < 100 else f"{v:.0f}"
+            ax.text(i, v, fmt, ha="center", va="bottom", fontsize=8)
+        ax.tick_params(axis="x", rotation=15)
+    fig.suptitle("AIMIP — eval RMSE per variable (mid-level)", y=1.02)
     fig.tight_layout()
-    fig.savefig(out_path, dpi=150)
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 

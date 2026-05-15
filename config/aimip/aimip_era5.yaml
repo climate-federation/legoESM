@@ -23,19 +23,23 @@ train_period: ["2015-01-01", "2015-01-08"]
 eval_period:  ["2015-02-01", "2015-02-03"]
 years: [2015]
 
-n_train_days: 4
-n_eval_days: 2
+n_train_days: 2
+n_eval_days: 1
 
 # ----- Grid + dycore ------------------------------------------------
 # Gaussian grid (SFNO requires this; classical + column_nn also run
 # on it, giving every AIMIP variant a common evaluation grid).
+#
+# T28 L8 is a tractable production-relevant intercomparison size that
+# fits in a ~10-min compute budget per variant on a single GPU.  Bump
+# to T42 L10 for a fuller run (~30 min per variant).
 aimip_grid: "gaussian"
-n_max: 42            # spectral truncation (T42 ≈ 2.8° grid)
-nlev: 10             # vertical levels (sigma)
+n_max: 28            # spectral truncation (T28 ≈ 4.3° grid)
+nlev: 8              # vertical levels (sigma)
 dt: 1800.0           # 30-minute dycore timestep
 
 # ----- Training -----------------------------------------------------
-aimip_n_epochs: 5
+aimip_n_epochs: 3
 aimip_lr: 3.0e-4
 aimip_warmup: 2
 aimip_weight_decay: 1.0e-5

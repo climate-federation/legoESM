@@ -384,6 +384,13 @@ def main():
         "--smoke", action="store_true",
         help="Override config with a minimal smoke-test profile.",
     )
+    parser.add_argument(
+        "--variants", type=str, default="",
+        help=(
+            "Comma-separated subset of suite variants to run "
+            "(overrides the suite manifest list when set)."
+        ),
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -402,7 +409,10 @@ def main():
 
     suite = _load_yaml(args.suite)
     base = _load_yaml(Path(suite["base"]))
-    variants = list(suite.get("variants") or ())
+    if args.variants:
+        variants = [v.strip() for v in args.variants.split(",") if v.strip()]
+    else:
+        variants = list(suite.get("variants") or ())
     if not variants:
         raise ValueError(f"Suite {args.suite} lists no variants")
     for v in variants:
@@ -465,7 +475,16 @@ def main():
             f"train_time={train_elapsed:.1f}s"
         )
 
+    # Merge with any existing scorecard so multiple --variants invocations
+    # share one results/.../aimip_scorecard.json.
     scorecard_path = output_dir / "aimip_scorecard.json"
+    if scorecard_path.exists():
+        with scorecard_path.open() as fh:
+            existing = json.load(fh)
+        existing_variants = existing.get("variants", {}) if isinstance(existing, dict) else {}
+        merged = dict(existing_variants)
+        merged.update(results["variants"])
+        results["variants"] = merged
     with scorecard_path.open("w") as fh:
         json.dump(results, fh, indent=2)
     logger.info(f"Wrote AIMIP scorecard: {scorecard_path}")
