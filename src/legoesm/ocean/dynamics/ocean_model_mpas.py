@@ -249,8 +249,7 @@ class MPASOceanModel:
             sponge=sponge,
         )
 
-    @partial(jax.jit, static_argnums=(0,))
-    def step(
+    def _step_impl(
         self,
         state: MPASOceanState,
         dt: float,
@@ -258,7 +257,11 @@ class MPASOceanModel:
         surface_forcing=None,
         sponge=None,
     ) -> MPASOceanState:
-        """Advance one full timestep (baroclinic + barotropic).
+        """Core step logic — no JIT wrapper.
+
+        Use this directly inside an outer ``@jax.jit`` context (e.g.
+        ``lax.scan``) to avoid nested JIT boundaries.  For standalone
+        calls, use :meth:`step` which adds the ``@jax.jit`` decorator.
 
         Parameters
         ----------
@@ -759,6 +762,25 @@ class MPASOceanModel:
             )
 
         return cast_pytree(state_new, None, "storage")
+
+    @partial(jax.jit, static_argnums=(0,))
+    def step(
+        self,
+        state: MPASOceanState,
+        dt: float,
+        freshwater: FreshwaterForcing | None = None,
+        surface_forcing=None,
+        sponge=None,
+    ) -> MPASOceanState:
+        """JIT-compiled wrapper around :meth:`_step_impl`.
+
+        For use inside an outer JIT context (e.g. ``lax.scan``), call
+        ``_step_impl`` directly to avoid nested JIT boundaries.
+        """
+        return self._step_impl(
+            state, dt, freshwater=freshwater,
+            surface_forcing=surface_forcing, sponge=sponge,
+        )
 
     def step_checked(
         self,

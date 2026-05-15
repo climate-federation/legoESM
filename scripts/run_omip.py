@@ -1264,7 +1264,19 @@ def _preload_jra55_raw_records(start_step_idx, n_steps, dt, jra55_state):
     )
 
     raw_stack = {var: var_data[var] for var in JRA55_VARIABLES}
-    runoff_stack = var_data["friver"]
+
+    # Regrid from lat-lon cache to MPAS cell centres if needed.
+    # Each variable is (n_records, n_lat, n_lon) → (n_records, nCells).
+    if "regrid_weights" in jra55_state:
+        from legoesm.grids.regridding import regrid_scalar
+        rw = jra55_state["regrid_weights"]
+        for var in raw_stack:
+            raw_stack[var] = jnp.stack([
+                regrid_scalar(raw_stack[var][i], rw)
+                for i in range(raw_stack[var].shape[0])
+            ])
+
+    runoff_stack = raw_stack["friver"]
 
     record_meta = {
         "record_days": record_days,          # (n_records,) fractional days
@@ -2901,12 +2913,9 @@ def run_omip_single(grid_type: str, args) -> dict:
         )
         # Provide the ocean mask for global freeze-cap when no sponge.
         jra55_state["_ocean_mask_2d"] = state.land_mask.data > 0.5
-        jra55_state["_gpu_interp"] = getattr(args, "gpu_interp", False)
-        # MPAS uses the single-step Python loop (not the lax.scan block
-        # path) because the block functions assume lat-lon array shapes
-        # and embed the lat-lon coupler logic in the JIT-compiled closure.
-        if grid_type == "mpas":
-            jra55_state["_use_single_step"] = True
+        # GPU-interp path: use lax.scan block for all grids (MPAS
+        # regridding is handled in _preload_jra55_raw_records).
+        jra55_state["_gpu_interp"] = True
         flags = []
         if jra55_state.get("enable_sponge"):
             flags.append("sponge")
