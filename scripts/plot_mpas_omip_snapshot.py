@@ -93,7 +93,13 @@ def plot_snapshot(restart_path, mesh, z_coord, output_dir=None):
     # Build Delaunay triangulation; mask land triangles
     tri = mtri.Triangulation(lon_shifted, lat)
     mask_tri = np.all(mask_np[tri.triangles], axis=1)
-    tri.set_mask(~mask_tri)
+    # Remove triangles whose edges span >90° in longitude — these are
+    # spurious Delaunay connections across the projection seam (at 20°E
+    # for central_longitude=200) that tripcolor renders as stretched
+    # artifacts.
+    tri_lons = lon_shifted[tri.triangles]  # (n_tri, 3)
+    seam_tri = (np.max(tri_lons, axis=1) - np.min(tri_lons, axis=1)) > 90.0
+    tri.set_mask(~mask_tri | seam_tri)
 
     def ocean_field(f):
         return np.where(mask_np, f, np.nan)

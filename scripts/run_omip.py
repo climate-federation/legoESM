@@ -1887,7 +1887,8 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                    jra55_state=None,
                    checkpoint_days=None, checkpoint_dir=None,
                    start_step=0,
-                   nudge_woa_tau=0.0, T_woa_3d=None):
+                   nudge_woa_tau=0.0, T_woa_3d=None,
+                   snapshot_fn=None):
     """Run time loop with diagnostics.
 
     Two forcing paths, mutually exclusive:
@@ -1927,6 +1928,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
         raise ValueError(
             "_run_omip_loop: checkpoint_days requires checkpoint_dir."
         )
+    _snapshot_fn = snapshot_fn
     diag: dict[str, list] = {"day": [], "step": []}
     snapshots: dict[int, dict] = {}
     snap_steps = {0, n_steps}
@@ -2094,6 +2096,11 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
             if (steps_per_ckpt is not None and
                     (step % steps_per_ckpt == 0 or step == n_steps)):
                 fname = _save_restart(state, day, step, checkpoint_dir)
+                if _snapshot_fn is not None:
+                    try:
+                        _snapshot_fn(fname)
+                    except Exception as e:
+                        print(f"    Snapshot failed: {e}", flush=True)
                 print(f"    Restart saved: {fname.name}", flush=True)
 
         # After the block loop, jump to the post-loop tally below.
@@ -2141,6 +2148,11 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                 if (steps_per_ckpt is not None and
                         (step % steps_per_ckpt == 0 or step == n_steps)):
                     fname = _save_restart(state, day, step, checkpoint_dir)
+                    if _snapshot_fn is not None:
+                        try:
+                            _snapshot_fn(fname)
+                        except Exception as e:
+                            print(f"    Snapshot failed: {e}", flush=True)
                     print(f"    Restart saved: {fname.name}", flush=True)
 
         jax.block_until_ready(state.T.data)
@@ -2249,6 +2261,12 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
             steps_per_ckpt = max(1, int(round(checkpoint_days * 86400.0 / dt)))
             if step % steps_per_ckpt == 0 or step == n_steps:
                 fname = _save_restart(state, day_now, step, checkpoint_dir)
+                # Auto-generate snapshot plot alongside the restart.
+                if _snapshot_fn is not None:
+                    try:
+                        _snapshot_fn(fname)
+                    except Exception as e:
+                        print(f"    Snapshot failed: {e}", flush=True)
                 # Friendly progress; gated on the same 15-s cadence as
                 # the diag print so we don't spam.
                 if time.time() - last_print < 1.0:
@@ -2828,13 +2846,16 @@ def run_omip_single(grid_type: str, args) -> dict:
         )
         H_bathy_raw, ocean_mask = load_bathymetry_mpas(grid, mpas_bathy_cfg)
 
-        # North cap at 80°N (parity with lat-lon runs)
-        lat_cell_deg = np.degrees(np.asarray(grid.latCell))
-        north_cap_lat = getattr(args, "north_cap_lat", 80.0)
-        cap_mask = jnp.asarray(lat_cell_deg <= north_cap_lat,
-                               dtype=H_bathy_raw.dtype)
-        H_bathy_raw = H_bathy_raw * cap_mask
-        ocean_mask = ocean_mask * cap_mask
+        # Optional north cap (default: 90° = full globe, no cap).
+        # The comparison scripts used 80°N for parity with lat-lon;
+        # for production OMIP runs the full Arctic is desired.
+        north_cap_lat = getattr(args, "north_cap_lat", 90.0)
+        if north_cap_lat < 90.0:
+            lat_cell_deg = np.degrees(np.asarray(grid.latCell))
+            cap_mask = jnp.asarray(lat_cell_deg <= north_cap_lat,
+                                   dtype=H_bathy_raw.dtype)
+            H_bathy_raw = H_bathy_raw * cap_mask
+            ocean_mask = ocean_mask * cap_mask
 
         # Snap thin partial cells to nearest interface (30% threshold)
         snap_frac = 0.30
@@ -2872,8 +2893,9 @@ def run_omip_single(grid_type: str, args) -> dict:
         model = MPASOceanModel(grid, pc_coord, config)
 
         n_ocean = int(jnp.sum(ocean_mask > 0.5))
+        cap_str = f"cap={north_cap_lat}°N" if north_cap_lat < 90.0 else "no cap"
         print(f"  MPAS ETOPO: {n_ocean}/{grid.nCells} ocean cells "
-              f"(cap={north_cap_lat}°N, snap={snap_frac}, "
+              f"({cap_str}, snap={snap_frac}, "
               f"smooth={args.smoothing_passes})")
 
     if args.woa_init and T_woa is not None and S_woa is not None:
@@ -2996,6 +3018,21 @@ def run_omip_single(grid_type: str, args) -> dict:
             f"→ {checkpoint_dir}"
         )
 
+    # Build snapshot function for auto-plotting with each restart save.
+    # Only for MPAS with the tripcolor/cartopy plotter; other grids use
+    # the end-of-run timeseries plot only.
+    _snapshot_fn = None
+    if grid_type == "mpas":
+        try:
+            from plot_mpas_omip_snapshot import plot_snapshot as _plot_snap
+            _snap_mesh = grid
+            _snap_z = z_coord
+
+            def _snapshot_fn(restart_path):
+                _plot_snap(restart_path, _snap_mesh, _snap_z)
+        except ImportError:
+            pass
+
     # Run time loop
     state, diag, wall_time, ok, blowup_info = _run_omip_loop(
         model, state, grid_type, grid, z_coord,
@@ -3010,6 +3047,7 @@ def run_omip_single(grid_type: str, args) -> dict:
         nudge_woa_tau=args.nudge_woa_tau,
         T_woa_3d=(T_woa * state.land_mask.data[..., jnp.newaxis]).astype(
             state.T.data.dtype) if args.nudge_woa_tau > 0 and T_woa is not None else None,
+        snapshot_fn=_snapshot_fn,
     )
 
     status = "PASS" if ok else "FAIL"
