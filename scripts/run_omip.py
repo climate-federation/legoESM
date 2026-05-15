@@ -2976,37 +2976,45 @@ def run_omip_single(grid_type: str, args) -> dict:
     print(f"  Setup: {setup_time:.1f}s")
 
     # --- Save full run configuration ---
-    # Dump every CLI arg plus the constructed physics config so that
-    # restarts can be relaunched with identical parameters.  The file
-    # is written at the START of the run (not the end) so it exists
-    # even if the run crashes.
+    # Every parameter that the model actually uses is recorded here,
+    # including defaults.  This is the authoritative record of what
+    # ran — not the CLI args (which may differ from effective values
+    # due to grid-specific overrides in _create_setup).
     config_dir = Path(args.output) / grid_type / resolution
     config_dir.mkdir(parents=True, exist_ok=True)
-    run_config = {"cli_args": vars(args)}
-    # Include the actual ocean config fields (these reflect defaults
-    # that were applied inside _create_setup, not just the CLI overrides).
-    if hasattr(config, "_fields"):
-        ocean_cfg = {}
-        for field_name in config._fields:
-            val = getattr(config, field_name)
-            # Serialize NamedTuples and configs as dicts recursively
-            if hasattr(val, "_fields"):
-                sub = {}
-                for sf in val._fields:
-                    sv = getattr(val, sf)
-                    if hasattr(sv, "_fields"):
-                        sub[sf] = {ssf: getattr(sv, ssf) for ssf in sv._fields
-                                   if not callable(getattr(sv, ssf))}
-                    elif callable(sv):
-                        sub[sf] = str(sv)
-                    else:
-                        sub[sf] = sv
-                ocean_cfg[field_name] = sub
-            elif callable(val):
-                ocean_cfg[field_name] = str(val)
-            else:
-                ocean_cfg[field_name] = val
-        run_config["ocean_config"] = ocean_cfg
+
+    def _namedtuple_to_dict(obj):
+        """Recursively convert NamedTuples to dicts with field names."""
+        if obj is None:
+            return None
+        if hasattr(obj, "_fields"):
+            return {
+                f: _namedtuple_to_dict(getattr(obj, f))
+                for f in obj._fields
+            }
+        if isinstance(obj, (list, tuple)):
+            return [_namedtuple_to_dict(x) for x in obj]
+        if callable(obj):
+            return f"<callable: {getattr(obj, '__name__', str(obj))}>"
+        # JAX arrays → Python scalars for JSON
+        if hasattr(obj, "item"):
+            try:
+                return obj.item()
+            except (ValueError, AttributeError):
+                return str(obj)
+        return obj
+
+    run_config = {
+        "grid_type": grid_type,
+        "resolution": resolution,
+        "n_levels": int(z_coord.n_levels),
+        "dt_seconds": float(dt),
+        "days": float(args.days),
+        "forcing_mode": getattr(args, "forcing_mode", "restoring"),
+        "initial_condition": "woa18" if args.woa_init else "rest_state",
+        "ocean_config": _namedtuple_to_dict(config),
+        "cli_args": vars(args),
+    }
     config_path = config_dir / "run_config.json"
     try:
         with open(config_path, "w") as f:
