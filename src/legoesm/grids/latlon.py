@@ -809,9 +809,12 @@ class LatLonCGridGeometry(NamedTuple):
         return 2.0 * self.dx_T
 
     @property
-    def dy(self) -> float:
-        """Two-cell meridional span [m], matching LatLonGrid.dy."""
-        return 2.0 * float(jnp.mean(self.dy_T))
+    def dy(self) -> jax.Array:
+        """Two-cell meridional span [m], shape (n_lat,), matching LatLonGrid.dy."""
+        # dy_T is (n_lat, n_lon); take column 0 for 1D — on regular grids
+        # all columns are identical; on tripolar the representative 1D dy
+        # is used only for CFL diagnostics, not operator metrics.
+        return 2.0 * self.dy_T[:, 0]
 
 
 def create_latlon_geometry(

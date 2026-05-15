@@ -239,7 +239,7 @@ class TestTripoleRestState:
         model = LatLonCGridOceanModel(tripole_grid, z_coord, config)
         state = rest_state_latlon_cgrid_ocean(
             tripole_grid, z_coord,
-            T_surface=20.0, T_deep=2.0, S_uniform=35.0, H_max=4000.0,
+            T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0, H_max=4000.0,
         )
         state_new = model.step(state, dt=600.0)
 
@@ -275,7 +275,7 @@ class TestTripoleRestState:
         model = LatLonCGridOceanModel(tripole_grid, z_coord, config)
         state = rest_state_latlon_cgrid_ocean(
             tripole_grid, z_coord,
-            T_surface=20.0, T_deep=2.0, S_uniform=35.0, H_max=4000.0,
+            T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0, H_max=4000.0,
         )
         # Apply a zonal velocity kick
         u_data = state.u.data
@@ -311,7 +311,7 @@ class TestTripoleRestState:
         model = LatLonCGridOceanModel(tripole_grid, z_coord, config)
         state = rest_state_latlon_cgrid_ocean(
             tripole_grid, z_coord,
-            T_surface=20.0, T_deep=2.0, S_uniform=35.0, H_max=4000.0,
+            T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0, H_max=4000.0,
         )
 
         def loss_fn(T_init):
