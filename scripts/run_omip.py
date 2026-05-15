@@ -337,7 +337,8 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                   slope_foot_alpha: float = 0.0,
                   no_lat_scaling: bool = False,
                   no_gm_redi: bool = False,
-                  implicit_vertical_mixing: bool = False):
+                  implicit_vertical_mixing: bool = False,
+                  forcing_mode: str = "restoring"):
     """Create grid, z_coord, config, model for any grid type.
 
     All grids use the SAME config-based diffusion (A_h, K_h, A_v, K_v)
@@ -534,7 +535,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         # tau/q_net from the bulk-flux solver are applied via the
         # surface_forcing argument to model.step().  For restoring mode,
         # use the same "combined" config as the comparison scripts.
-        forcing_mode = getattr(args, "forcing_mode", "restoring")
+        # forcing_mode is passed from run_omip_single() via the parameter.
         if forcing_mode == "jra55_do_tropical":
             sf_config = SurfaceForcingConfig(scheme="none")
         else:
@@ -2086,7 +2087,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
             jax.block_until_ready(state.T.data)
         wall = time.time() - t0
         ok = not blown_up and _check_finite(state, grid_type)
-        return state, diag, wall, ok
+        return state, diag, wall, ok, blowup_info
     # --------------------------------------------------------------------
 
     # ----- JRA55-do single-step path (partial-cell fallback) -----------
@@ -2129,7 +2130,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
         jax.block_until_ready(state.T.data)
         wall = time.time() - t0
         ok = not blown_up and _check_finite(state, grid_type)
-        return state, diag, wall, ok
+        return state, diag, wall, ok, blowup_info
     # --------------------------------------------------------------------
 
     for i in range(start_step, n_steps):
@@ -2458,6 +2459,7 @@ def run_omip_single(grid_type: str, args) -> dict:
         no_gm_redi=getattr(args, "no_gm_redi", False),
         implicit_vertical_mixing=getattr(
             args, "implicit_vertical_mixing", False),
+        forcing_mode=getattr(args, "forcing_mode", "restoring"),
     )
 
     # --- Initialization strategy ---
