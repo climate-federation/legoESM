@@ -289,7 +289,30 @@ def _evaluate_variant(
     else:
         raise ValueError(f"Unknown variant in eval: {variant!r}")
 
-    losses = []
+    from legoesm.atmosphere.dynamics.spectral_pe import spectral_pe_to_grid
+
+    def _area_weighted_rmse(pred, target, w_lat):
+        sq = (pred - target) ** 2
+        return float(
+            jnp.sqrt(jnp.sum(sq * w_lat[:, None]) / jnp.sum(
+                w_lat[:, None] * jnp.ones(sq.shape[-1:])[None, :]
+            ))
+        )
+
+    def _area_weighted_bias(pred, target, w_lat):
+        diff = pred - target
+        return float(
+            jnp.sum(diff * w_lat[:, None]) / jnp.sum(
+                w_lat[:, None] * jnp.ones(diff.shape[-1:])[None, :]
+            )
+        )
+
+    losses: list[float] = []
+    per_var_rmse: dict[str, list[float]] = {k: [] for k in ("T", "u", "v", "p_s")}
+    per_var_bias: dict[str, list[float]] = {k: [] for k in ("T", "u", "v", "p_s")}
+
+    weights = jnp.asarray(grid.weights)
+
     for ic, target in zip(ic_states, target_carries):
         pred = spectral_rollout(
             ic, physics_fn, grid, sigma, pe_config,
@@ -302,11 +325,48 @@ def _evaluate_variant(
             )
         ))
 
+        # Per-variable area-weighted RMSE/bias on the Gaussian grid.
+        pred_grid = spectral_pe_to_grid(pred, grid, sigma)
+        # Target carry stores 3D arrays with axes (n_lat, n_lon, nlev).
+        targets_3d = {
+            "T": jnp.asarray(target.T),
+            "u": jnp.asarray(target.u),
+            "v": jnp.asarray(target.v),
+        }
+        for name, t_arr in targets_3d.items():
+            p_arr = pred_grid[name]
+            # Mid-level (nlev//2) cross-section for the scorecard so
+            # RMSE numbers are comparable to WeatherBench T@500 hPa.
+            mid = p_arr.shape[-1] // 2
+            per_var_rmse[name].append(
+                _area_weighted_rmse(p_arr[..., mid], t_arr[..., mid], weights)
+            )
+            per_var_bias[name].append(
+                _area_weighted_bias(p_arr[..., mid], t_arr[..., mid], weights)
+            )
+        # Surface pressure (2D).
+        p_s_target = jnp.asarray(target.p_s)
+        per_var_rmse["p_s"].append(
+            _area_weighted_rmse(pred_grid["p_s"], p_s_target, weights)
+        )
+        per_var_bias["p_s"].append(
+            _area_weighted_bias(pred_grid["p_s"], p_s_target, weights)
+        )
+
+    def _agg(lst: list[float]) -> dict[str, float]:
+        if not lst:
+            return {"mean": float("nan"), "min": float("nan"), "max": float("nan")}
+        return {
+            "mean": float(sum(lst) / len(lst)),
+            "min": float(min(lst)),
+            "max": float(max(lst)),
+        }
+
     return {
         "n_eval_days": len(losses),
-        "loss_mean": float(sum(losses) / max(1, len(losses))),
-        "loss_min": float(min(losses)) if losses else float("nan"),
-        "loss_max": float(max(losses)) if losses else float("nan"),
+        "loss": _agg(losses),
+        "rmse": {k: _agg(v) for k, v in per_var_rmse.items()},
+        "bias": {k: _agg(v) for k, v in per_var_bias.items()},
     }
 
 
@@ -397,7 +457,11 @@ def main():
         }
         logger.info(
             f"{variant}: train_loss[-1]={loss_history[-1]:.6f}, "
-            f"eval_loss_mean={eval_metrics['loss_mean']:.6f}, "
+            f"eval_loss={eval_metrics['loss']['mean']:.6f}, "
+            f"RMSE T={eval_metrics['rmse']['T']['mean']:.3f}K "
+            f"u={eval_metrics['rmse']['u']['mean']:.3f}m/s "
+            f"v={eval_metrics['rmse']['v']['mean']:.3f}m/s "
+            f"p_s={eval_metrics['rmse']['p_s']['mean']:.1f}Pa, "
             f"train_time={train_elapsed:.1f}s"
         )
 
