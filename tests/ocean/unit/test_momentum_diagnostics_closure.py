@@ -37,7 +37,7 @@ def _perturbed_state(grid, z_coord):
     are exercised (rest state would zero out vortcor, vertadv, etc.)."""
     state = rest_state_latlon_cgrid_ocean(
         grid, z_coord,
-        T_surface=20.0, T_deep=2.0, S_uniform=35.0, H_max=4000.0,
+        T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0, H_max=4000.0,
     )
     rng = np.random.default_rng(42)
     n_lat, n_lon = grid.n_lat, grid.n_lon

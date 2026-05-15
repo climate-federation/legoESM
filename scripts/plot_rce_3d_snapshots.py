@@ -210,7 +210,7 @@ def _plot_latlon(snap: dict, scheme: str, time_idx: int, out_dir: Path):
     T = snap["T"][time_idx, ..., -1]        # surface level
     qv = snap["q_v"][time_idx, ..., -1] * 1e3   # g/kg
     precip = snap["precip"][time_idx] * 86400.0  # mm/day
-    p_s = 1e5
+    p_s = constants.p_ref
     sigma = snap["sigma_full"]
     dp = np.diff(np.concatenate(
         [[0.0], 0.5 * (sigma[:-1] + sigma[1:]), [1.0]])) * p_s
@@ -255,7 +255,7 @@ def _plot_vertlat(snap: dict, scheme: str, time_idx: int, out_dir: Path):
     lat_deg = np.rad2deg(snap["lat"][:, 0])
     sigma = snap["sigma_full"]
     p_full_hPa = sigma * 1e3                # σ × p_s/100 [hPa]
-    p_full_Pa = sigma * 1e5
+    p_full_Pa = sigma * constants.p_ref
     T = np.nanmean(snap["T"][time_idx], axis=1)        # (n_lat, nlev)
     qv = np.nanmean(snap["q_v"][time_idx], axis=1)
     u = np.nanmean(snap["u"][time_idx], axis=1)
@@ -312,7 +312,7 @@ def _plot_vertlon(snap: dict, scheme: str, time_idx: int, out_dir: Path):
     lon_deg = np.rad2deg(snap["lon"][0, :])
     sigma = snap["sigma_full"]
     p_full_hPa = sigma * 1e3
-    p_full_Pa = sigma * 1e5
+    p_full_Pa = sigma * constants.p_ref
     T = np.nanmean(snap["T"][time_idx], axis=0)        # (n_lon, nlev)
     qv = np.nanmean(snap["q_v"][time_idx], axis=0)
     v = np.nanmean(snap["v"][time_idx], axis=0)

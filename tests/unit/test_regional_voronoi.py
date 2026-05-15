@@ -203,7 +203,7 @@ class TestBarotropicWave:
         # Create rest state with land at high latitudes
         state = rest_state_mpas_ocean(
             mesh, z_coord,
-            T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+            T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
             H_max=5500.0, land_lat_threshold=80.0,
         )
 

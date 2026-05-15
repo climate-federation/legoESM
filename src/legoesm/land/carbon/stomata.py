@@ -47,7 +47,8 @@ from legoesm.thermo import saturation_vapor_pressure
 # Constants
 # =====================================================================
 
-_R_GAS = 8.314     # Universal gas constant [J/mol/K]
+# Universal gas constant lives in legoesm.constants (CODATA 2018, exact).
+_R_GAS = constants.R_universal     # [J/(mol·K)]
 _T_REF = 298.15    # Reference temperature 25 deg C [K]
 _PAR_FRAC = 0.48   # Fraction of shortwave that is PAR
 _PAR_CONV = 4.6    # umol photons per J of PAR

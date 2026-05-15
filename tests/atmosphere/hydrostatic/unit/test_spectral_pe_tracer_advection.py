@@ -222,9 +222,10 @@ class TestSpectralPEHybridTracerVerticalAdvection:
         loop — falsifies the missing-call version by construction.
         """
         from pathlib import Path
-        spectral_pe_src = Path(
-            "/home/gentine/Documents/Code/legoESM/legoESM/src/legoesm/"
-            "atmosphere/dynamics/spectral_pe.py"
+        import legoesm
+        spectral_pe_src = (
+            Path(legoesm.__file__).parent
+            / "atmosphere" / "dynamics" / "spectral_pe.py"
         )
         text = spectral_pe_src.read_text()
         # Look for the hybrid branch tracer call inside spectral_pe_tendencies

@@ -26,6 +26,7 @@ from legoesm.atmosphere.physics.turbulence.surface_layer import (
 )
 from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
     implicit_vertical_diffusion,
+    implicit_vertical_diffusion_theta,
 )
 
 
@@ -204,9 +205,13 @@ def holtslag_boville_turbulence(
     sflx_T_enhanced = sflx_T + rho[:, -1] * jnp.mean(Kh_half, axis=1) * counter_grad
 
     # ----- Implicit vertical diffusion -----
+    # Heat in θ-space so a dry adiabat is neutral; moisture and momentum
+    # use raw diffusion (their conserved form needs no exner conversion).
     u_new = implicit_vertical_diffusion(u, Km_half, rho, dz_layer, dz_half, dt, sflx_u)
     v_new = implicit_vertical_diffusion(v, Km_half, rho, dz_layer, dz_half, dt, sflx_v)
-    T_new = implicit_vertical_diffusion(T, Kh_half, rho, dz_layer, dz_half, dt, sflx_T_enhanced)
+    T_new = implicit_vertical_diffusion_theta(
+        T, Kh_half, rho, dz_layer, dz_half, p_full, dt, sflx_T_enhanced,
+    )
     q_new = implicit_vertical_diffusion(q_v, Kh_half, rho, dz_layer, dz_half, dt, sflx_q)
 
     return TurbulenceOutput(

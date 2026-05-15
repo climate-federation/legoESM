@@ -15,6 +15,8 @@ from legoesm.grids.latlon import (
     FoldDescriptor,
     create_latlon_geometry,
     ensure_geometry,
+    create_mercator_grid,
+    create_regional_latlon_grid,
 )
 from legoesm.grids.tripole import (
     create_tripole_grid,

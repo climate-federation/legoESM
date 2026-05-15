@@ -23,8 +23,14 @@ def enhanced_diffusion_convection(
     jacobian: jnp.ndarray,
     cfg: EnhancedDiffusionConfig,
     apply_diffusion: bool = True,
+    dt: float | None = None,
 ) -> OceanConvectionOutput:
     """Apply enhanced diffusion where the water column is unstable.
+
+    When ``dt`` is supplied, the explicit-branch CFL cap uses the
+    actual physics step instead of ``cfg.cfl_dt_estimate`` — preserves
+    stability and correct convection strength when runtime ``dt``
+    differs from the config-time estimate.  Codex iter-3 finding #7.
 
     Parameters
     ----------
@@ -33,6 +39,12 @@ def enhanced_diffusion_convection(
     z_coord : OceanZStarCoordinate
     jacobian : array (6, n, n)
     cfg : EnhancedDiffusionConfig
+    apply_diffusion : bool
+        Run the explicit diffusion branch.  When False, K is returned
+        in the output for downstream implicit solvers.
+    dt : float, optional
+        Physics step [s].  When provided, used in the CFL cap instead
+        of ``cfg.cfl_dt_estimate``.
 
     Returns
     -------
@@ -56,14 +68,29 @@ def enhanced_diffusion_convection(
     else:
         flag = jnp.where(N2 < 0.0, 1.0, 0.0)
 
-    # Apply variable-K vertical diffusion to T and S.  When
-    # ``apply_diffusion`` is False, return zero tendencies; the caller
-    # will apply K (combined with KPP / background diffusivities) via
-    # an unconditionally-stable backward-Euler implicit solve.
+    # CFL safety cap on the EXPLICIT branch.  Backward-Euler (implicit)
+    # mixing is unconditionally stable; explicit-Euler vertical
+    # diffusion requires ``K · dt / dz² ≤ 1/2``.  Without the cap a
+    # ``K_conv = 1 m²/s`` over ``dz = 10 m`` would need ``dt ≤ 50 s`` —
+    # 70× tighter than typical ocean physics steps.  See
+    # ``EnhancedDiffusionConfig`` for ``cfl_dt_estimate`` and
+    # ``cfl_safety``.
+    #
+    # The earlier coarse cap used the reference ``dz_ref`` alone and
+    # ignored ``jacobian`` (z-star contracts layers when ``eta + H``
+    # shrinks): a column with jacobian = 0.5 has dz_actual half of
+    # dz_ref, so K must be 4× tighter.  Delegating the per-interface
+    # cap to ``vertical_diffusion_variable_K(..., dt=dt_eff)`` uses the
+    # actual layer thicknesses ``dz_ref · jacobian`` and the per-
+    # interface dz_min that the leaf already computes.
     if apply_diffusion:
+        dt_eff = cfg.cfl_dt_estimate if dt is None else dt
         tracers = jnp.stack([T, S], axis=0)
         tr_tend = jax.vmap(
-            lambda q: vertical_diffusion_variable_K(q, z_coord, jacobian, K),
+            lambda q: vertical_diffusion_variable_K(
+                q, z_coord, jacobian, K,
+                dt=dt_eff, cfl_safety=cfg.cfl_safety,
+            ),
             in_axes=0, out_axes=0,
         )(tracers)
         dT_dt = tr_tend[0]

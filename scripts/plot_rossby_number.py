@@ -35,9 +35,9 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 from legoesm.ocean.experiments.eady_uniform import EadyUniformConfig
 from legoesm.ocean.vertical import create_ocean_z_star
-from legoesm.constants import Omega
+from legoesm.constants import Omega, R_earth
 
-R_EARTH = 6371.0e3
+R_EARTH = R_earth
 
 
 def _coriolis(lat_deg: np.ndarray) -> np.ndarray:

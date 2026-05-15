@@ -50,11 +50,18 @@ class SeifertBehengConfig(NamedTuple):
     k_ac: float = 5.25               # Accretion rate [m^3/(kg*s)]
     k_sc: float = 1e-3               # Self-collection rate [m^3/(kg*s)]
     D_eq: float = 1.1e-3             # Equilibrium breakup diameter [m]
-    breakup_sharpness: float = 1e4   # Sigmoid sharpness for breakup
+    breakup_sharpness: float = 1e4   # Sigmoid sharpness for breakup [1/m]
     a_v_r: float = 130.0             # Rain fall speed coefficient a [m^(1-b)/s]
     b_v_r: float = 0.5               # Rain fall speed exponent b
     evap_coeff: float = 1.0          # Evaporation coefficient
-    saturation_sharpness: float = 100.0  # Sigmoid sharpness for saturation
+    saturation_sharpness: float = 100.0  # Sigmoid sharpness for saturation [1/(kg/kg)]
+    # Autoconversion onset sharpness — dimensionless steepness on the
+    # normalised argument ``x_c / x_star − 1`` (iter-97 fix).  Default
+    # of 10 gives transition over ~10 % of x_star around the threshold;
+    # set higher for a sharper SB-style step, lower for a smoother
+    # Kessler-like onset.  Distinct from ``saturation_sharpness`` which
+    # is in units of kg/kg and would be 100× too steep here.
+    autoconversion_sharpness: float = 10.0
 
 
 class MorrisonConfig(NamedTuple):
@@ -71,6 +78,7 @@ class MorrisonConfig(NamedTuple):
     b_v_r: float = 0.5
     evap_coeff: float = 1.0
     saturation_sharpness: float = 100.0
+    autoconversion_sharpness: float = 10.0  # See SB config — iter-97/99
     # Ice nucleation (Cooper 1986)
     # Cooper (1986) per-volume base number; nucleation divides by rho
     # to produce the per-mass ``N_i`` stored in HydrometeorState.
@@ -117,6 +125,7 @@ class ThompsonConfig(NamedTuple):
     b_v_r: float = 0.5
     evap_coeff: float = 1.0
     saturation_sharpness: float = 100.0
+    autoconversion_sharpness: float = 10.0  # See SB config — iter-97/99
     N_i0: float = 5e3
     cooper_a: float = 0.304
     cooper_T_act: float = 265.0

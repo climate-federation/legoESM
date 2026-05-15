@@ -754,7 +754,6 @@ def _compute_exact_cell_areas(n: int, radius: float) -> jax.Array:
     return jnp.stack(all_areas, axis=0)
 
 
-
 def _compute_grid_spacing(
     lon: jax.Array, lat: jax.Array, n: int, radius: float
 ) -> tuple[jax.Array, jax.Array]:
@@ -1256,6 +1255,2123 @@ def dist2side_latlon(
     # side = great-circle distance v1 → p on UNIT sphere (radius=1)
     side = great_circle_distance(lon1, lat1, lon_p, lat_p, radius=1.0)
     return jnp.arcsin(jnp.clip(jnp.sin(side) * jnp.sin(angle), -1.0, 1.0))
+
+
+def get_center_vect(
+    pp: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 618: cell-center tangent unit vectors (u1, u2).
+
+    Faithful port of FV3 ``get_center_vect`` (fv_grid_utils.F90:
+    1795-1845), non-``OLD_VECT`` branch (FV3 default).  Given an
+    array of cell corner positions ``pp`` of shape
+    ``(..., n+1, n+1, 3)``, returns the two unit tangent vectors
+    at each cell center::
+
+        pc = cell_center3(SW, SE, NW, NE)
+        # u1 (along i / x-direction):
+        p1_w = mid_pt3_cart(SW, NW)   # west edge midpoint
+        p2_e = mid_pt3_cart(SE, NE)   # east edge midpoint
+        p3   = p2_e × p1_w
+        u1   = normalize(pc × p3)
+        # u2 (along j / y-direction):
+        p1_s = mid_pt3_cart(SW, SE)   # south edge midpoint
+        p2_n = mid_pt3_cart(NW, NE)   # north edge midpoint
+        p3   = p2_n × p1_s
+        u2   = normalize(pc × p3)
+
+    Returns ``(u1, u2)`` each of shape ``(..., n, n, 3)``.
+
+    Used by FV3 vector-halo rotation: edges between faces project
+    vector components onto these per-cell tangent vectors.
+    """
+    sw = pp[..., :-1, :-1, :]
+    se = pp[..., 1:, :-1, :]
+    nw = pp[..., :-1, 1:, :]
+    ne = pp[..., 1:, 1:, :]
+    pc = cell_center3(sw, se, nw, ne)
+    # u1 along i-direction (east-west edges)
+    p1_w = mid_pt3_cart(sw, nw)
+    p2_e = mid_pt3_cart(se, ne)
+    p3_1 = vect_cross(p2_e, p1_w)
+    u1 = normalize_vect(vect_cross(pc, p3_1))
+    # u2 along j-direction (north-south edges)
+    p1_s = mid_pt3_cart(sw, se)
+    p2_n = mid_pt3_cart(nw, ne)
+    p3_2 = vect_cross(p2_n, p1_s)
+    u2 = normalize_vect(vect_cross(pc, p3_2))
+    return u1, u2
+
+
+def init_cubed_to_latlon(
+    agrid_lon: jax.Array, agrid_lat: jax.Array,
+    ec1: jax.Array, ec2: jax.Array,
+    sin_sg5: jax.Array,
+) -> tuple[
+    jax.Array, jax.Array, jax.Array, jax.Array,
+    jax.Array, jax.Array, jax.Array, jax.Array,
+    jax.Array, jax.Array,
+]:
+    """FV3_3D iter 626: D-grid → latlon wind rotation matrices.
+
+    Faithful port of FV3 ``init_cubed_to_latlon``
+    (fv_grid_utils.F90:2321-2384), grid_type<4 branch.  Computes
+    the 8 rotation-matrix entries used by FV3 ``c2l_ord4`` to
+    rotate D-grid winds to (east, north) at cell centers.
+
+    Algorithm:
+        1. vlon, vlat = unit_vect_latlon(agrid)  — local frame
+        2. z11 = ec1 · vlon                       — inner products
+           z12 = ec1 · vlat
+           z21 = ec2 · vlon
+           z22 = ec2 · vlat
+        3. a11 =  0.5·z22 / sin_sg5
+           a12 = -0.5·z12 / sin_sg5
+           a21 = -0.5·z21 / sin_sg5
+           a22 =  0.5·z11 / sin_sg5
+
+    The (a11, a12, a21, a22) matrix gives the D-grid → (u_east,
+    v_north) projection at each cell center.
+
+    Parameters
+    ----------
+    agrid_lon, agrid_lat : jax.Array, shape ``(..., n, n)``
+        Cell-center positions (radians).
+    ec1, ec2 : jax.Array, shape ``(..., n, n, 3)``
+        Cell-edge unit tangent vectors (FV3 ``ec1``, ``ec2``).
+    sin_sg5 : jax.Array, shape ``(..., n, n)``
+        sin of the cell-area diagonal (FV3 ``sin_sg(:,:,5)``).
+
+    Returns
+    -------
+    (a11, a12, a21, a22, z11, z12, z21, z22, vlon, vlat) : tuple
+        Rotation matrix entries + intermediate z and unit vectors.
+    """
+    vlon, vlat = unit_vect_latlon(agrid_lon, agrid_lat)
+    z11 = inner_prod(ec1, vlon)
+    z12 = inner_prod(ec1, vlat)
+    z21 = inner_prod(ec2, vlon)
+    z22 = inner_prod(ec2, vlat)
+    safe_sin = jnp.where(jnp.abs(sin_sg5) > 1e-30, sin_sg5, 1.0)
+    a11 = 0.5 * z22 / safe_sin
+    a12 = -0.5 * z12 / safe_sin
+    a21 = -0.5 * z21 / safe_sin
+    a22 = 0.5 * z11 / safe_sin
+    return a11, a12, a21, a22, z11, z12, z21, z22, vlon, vlat
+
+
+def mirror_grid_face1_symmetrize(
+    face1_lon: jax.Array, face1_lat: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 625: face-1 SIGN-averaging symmetrization.
+
+    Faithful port of FV3 ``mirror_grid`` first loop
+    (fv_grid_tools.F90:2774-2807).  Symmetrizes face 1 about both
+    the lon=0 meridian (i-axis) and the equator (j-axis) by:
+
+        1. For each symmetric 4-tuple of grid points
+           ``(i, j), (npx-i+1, j), (i, npy-j+1), (npx-i+1, npy-j+1)``:
+        2. Compute the average of the absolute values, then assign
+           ``SIGN(avg, original_value)`` to each of the 4 corners.
+
+    Result: ``|lon|`` and ``|lat|`` are pairwise-equal across the
+    mirror, preserving the sign-pattern of the original grid.
+
+    For odd ``npx``, the central column ``i = (npx+1)/2`` is
+    forced to ``lon = 0`` (FV3 lines 2799-2804).
+
+    Parameters
+    ----------
+    face1_lon, face1_lat : jax.Array, shape ``(npx, npy)``
+        Face-1 corner positions in radians.
+
+    Returns
+    -------
+    lon_sym, lat_sym : jax.Array, shape ``(npx, npy)``
+        Symmetrized face-1 grid.
+    """
+    npx = face1_lon.shape[0]
+    npy = face1_lon.shape[1]
+
+    # Build mirrors via reverse-indexing
+    lon = face1_lon
+    lat = face1_lat
+    # 4-tuple of absolute lons
+    avg_abs_lon = 0.25 * (
+        jnp.abs(lon)
+        + jnp.abs(lon[::-1, :])
+        + jnp.abs(lon[:, ::-1])
+        + jnp.abs(lon[::-1, ::-1])
+    )
+    avg_abs_lat = 0.25 * (
+        jnp.abs(lat)
+        + jnp.abs(lat[::-1, :])
+        + jnp.abs(lat[:, ::-1])
+        + jnp.abs(lat[::-1, ::-1])
+    )
+    # Apply SIGN(avg, original_value)
+    lon_sym = jnp.copysign(avg_abs_lon, lon)
+    lat_sym = jnp.copysign(avg_abs_lat, lat)
+
+    # Odd-npx central column: lon = 0
+    if npx % 2 == 1:
+        center_i = (npx - 1) // 2
+        lon_sym = lon_sym.at[center_i, :].set(0.0)
+    if npy % 2 == 1:
+        # FV3 doesn't have a corresponding odd-npy clause for lat=0,
+        # but if the grid is symmetric about the equator, lat=0
+        # naturally at j-center; SIGN-averaging already enforces this.
+        center_j = (npy - 1) // 2
+        # lat at center row is already 0 by symmetry; force exactly 0
+        lat_sym = lat_sym.at[:, center_j].set(
+            jnp.where(jnp.abs(lat_sym[:, center_j]) < 1e-12, 0.0,
+                      lat_sym[:, center_j])
+        )
+
+    return lon_sym, lat_sym
+
+
+def mirror_grid_faces(
+    face1_lon: jax.Array, face1_lat: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 624: build 6-face cubed-sphere from face 1.
+
+    Faithful port of FV3 ``mirror_grid`` faces-2-to-6 construction
+    (fv_grid_tools.F90:2809-2897).  Takes face-1 (lon, lat) and
+    builds faces 2-6 via FV3's exact rot_3d (iter 623) sequences:
+
+        face 2: rot_z(-90°)
+        face 3: rot_z(-90°) → rot_x(+90°)
+        face 4: rot_z(-180°) → rot_x(+90°)
+        face 5: rot_z(+90°) → rot_y(+90°)
+        face 6: rot_y(+90°)  (FV3 also applies rot_z(0°) = identity)
+
+    Parameters
+    ----------
+    face1_lon, face1_lat : jax.Array, shape ``(n+1, n+1)``
+        Face-1 corner positions in radians (e.g., output of
+        ``gnomonic_grids``).
+
+    Returns
+    -------
+    lons, lats : jax.Array, shape ``(6, n+1, n+1)``
+        6-face cubed-sphere corner positions in radians.  Face 1
+        is the input.
+
+    Note: this port covers the rotation sequence for faces 2-6.
+    FV3's first loop (lines 2774-2807, intra-face-1 symmetrization
+    via SIGN-of-(|...|) averaging) is NOT included — input is
+    assumed already symmetrized (e.g., post-``symm_ed``).
+    """
+    x1, y1, z1 = latlon2xyz(face1_lon, face1_lat)
+
+    # Face 2: rot_z(-90°)
+    x2, y2, z2 = rot_3d(3, x1, y1, z1, jnp.asarray(-90.0), degrees=True)
+    lon2, lat2 = xyz2latlon(x2, y2, z2)
+
+    # Face 3: rot_z(-90°) → rot_x(+90°)
+    xa, ya, za = rot_3d(3, x1, y1, z1, jnp.asarray(-90.0), degrees=True)
+    x3, y3, z3 = rot_3d(1, xa, ya, za, jnp.asarray(90.0), degrees=True)
+    lon3, lat3 = xyz2latlon(x3, y3, z3)
+
+    # Face 4: rot_z(-180°) → rot_x(+90°)
+    xa, ya, za = rot_3d(3, x1, y1, z1, jnp.asarray(-180.0), degrees=True)
+    x4, y4, z4 = rot_3d(1, xa, ya, za, jnp.asarray(90.0), degrees=True)
+    lon4, lat4 = xyz2latlon(x4, y4, z4)
+
+    # Face 5: rot_z(+90°) → rot_y(+90°)
+    xa, ya, za = rot_3d(3, x1, y1, z1, jnp.asarray(90.0), degrees=True)
+    x5, y5, z5 = rot_3d(2, xa, ya, za, jnp.asarray(90.0), degrees=True)
+    lon5, lat5 = xyz2latlon(x5, y5, z5)
+
+    # Face 6: rot_y(+90°)  (rot_z(0°) is identity, omitted)
+    x6, y6, z6 = rot_3d(2, x1, y1, z1, jnp.asarray(90.0), degrees=True)
+    lon6, lat6 = xyz2latlon(x6, y6, z6)
+
+    lons = jnp.stack([face1_lon, lon2, lon3, lon4, lon5, lon6], axis=0)
+    lats = jnp.stack([face1_lat, lat2, lat3, lat4, lat5, lat6], axis=0)
+    return lons, lats
+
+
+def rot_3d(
+    axis: int,
+    x1: jax.Array, y1: jax.Array, z1: jax.Array,
+    angle: jax.Array,
+    degrees: bool = False,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """FV3_3D iter 623: 3D rotation about coordinate axis.
+
+    Faithful port of FV3 ``rot_3d`` (fv_grid_tools.F90:2410-2467).
+    Rotates Cartesian (x1, y1, z1) by ``angle`` about axis::
+
+        axis = 1: x-axis (y, z rotated)
+        axis = 2: y-axis (x, z rotated)
+        axis = 3: z-axis (x, y rotated)
+
+    FV3 sign convention (left-handed about each axis as the code
+    is written):
+        axis 1: y' = c·y + s·z,    z' = -s·y + c·z
+        axis 2: x' = c·x - s·z,    z' =  s·x + c·z
+        axis 3: x' = c·x + s·y,    y' = -s·x + c·y
+
+    Parameters
+    ----------
+    axis : int
+        Rotation axis (1, 2, or 3).
+    x1, y1, z1 : jax.Array
+        Input Cartesian coordinates (any shape).
+    angle : jax.Array
+        Rotation angle (radians unless ``degrees=True``).
+    degrees : bool, default False
+        If True, ``angle`` is in degrees.
+    """
+    a = jnp.deg2rad(angle) if degrees else angle
+    c = jnp.cos(a)
+    s = jnp.sin(a)
+    if axis == 1:
+        return x1, c * y1 + s * z1, -s * y1 + c * z1
+    if axis == 2:
+        return c * x1 - s * z1, y1, s * x1 + c * z1
+    if axis == 3:
+        return c * x1 + s * y1, -s * x1 + c * y1, z1
+    raise ValueError(f"Invalid axis: {axis} (must be 1, 2, or 3)")
+
+
+def fill_ghost(
+    q: jax.Array, ng: int, value: float,
+) -> jax.Array:
+    """FV3_3D iter 633: fill 4 corner-ghost regions with constant.
+
+    Faithful JAX port of FV3 ``fill_ghost_r4`` / ``fill_ghost_r8``
+    (fv_grid_utils.F90:3070-3147).  Fills the 4 corner-ghost
+    rectangular regions OUTSIDE the face corners with ``value``.
+    Used to mask FV3's cube-vertex singularity (no well-defined
+    neighbor at the 8 cube corners, propagated to 4 corner-ghost
+    blocks per face).
+
+    Input ``q`` has shape ``(..., npx-1+2·ng, npy-1+2·ng)`` where:
+        - npx-1 = number of interior cells in x (cell-centered)
+        - ng = number of halo cells on each side
+
+    The 4 corner-ghost regions are the rectangles in the halo
+    where BOTH i and j are outside the interior range:
+        - SW corner ghost: i ∈ [0, ng-1], j ∈ [0, ng-1]
+        - SE corner ghost: i ∈ [-ng:], j ∈ [0, ng-1]
+        - NE corner ghost: i ∈ [-ng:], j ∈ [-ng:]
+        - NW corner ghost: i ∈ [0, ng-1], j ∈ [-ng:]
+
+    Parameters
+    ----------
+    q : jax.Array, shape ``(..., n_x_halo, n_y_halo)``
+        Field with halo.  Two trailing axes interpreted as (i, j).
+    ng : int
+        Number of halo cells on each side.
+    value : float
+        Fill value for corner ghost cells.
+
+    Returns
+    -------
+    q_filled : jax.Array
+        Copy of ``q`` with the 4 corner-ghost regions set to ``value``.
+    """
+    n_x = q.shape[-2]
+    n_y = q.shape[-1]
+    i_idx = jnp.arange(n_x)[:, None]
+    j_idx = jnp.arange(n_y)[None, :]
+    # Interior: ng <= i < n_x - ng, ng <= j < n_y - ng
+    # Corner ghost: (i < ng AND j < ng) OR (i >= n_x-ng AND j < ng) OR
+    #               (i >= n_x-ng AND j >= n_y-ng) OR (i < ng AND j >= n_y-ng)
+    i_lo = i_idx < ng
+    i_hi = i_idx >= (n_x - ng)
+    j_lo = j_idx < ng
+    j_hi = j_idx >= (n_y - ng)
+    corner_mask = (
+        (i_lo & j_lo) | (i_hi & j_lo) | (i_hi & j_hi) | (i_lo & j_hi)
+    )
+    # Broadcast mask over leading axes
+    return jnp.where(corner_mask, value, q)
+
+
+def global_qsum(p: jax.Array) -> jax.Array:
+    """FV3_3D iter 632: quick global sum without area weighting.
+
+    Faithful JAX port of FV3 ``global_qsum`` (fv_grid_utils.F90:
+    2999-3018).  Serial (non-MPI) implementation; for distributed
+    runs use ``legoesm.distributed.global_sum_mpi``.
+
+    Returns the scalar sum of all elements in ``p`` (no area
+    weighting; unlike iter-623 ``g_sum``).
+    """
+    return jnp.sum(p)
+
+
+def global_mx(q: jax.Array) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 632: global min / max reduction.
+
+    Faithful JAX port of FV3 ``global_mx`` (fv_grid_utils.F90:
+    3020-3046).  Serial (non-MPI) implementation; for distributed
+    runs use ``legoesm.distributed.global_min_mpi`` /
+    ``global_max_mpi``.
+
+    Returns ``(qmin, qmax)`` over all elements of ``q``.
+    """
+    return jnp.min(q), jnp.max(q)
+
+
+def global_mx_c(q: jax.Array) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 632: global min / max at cell corners.
+
+    Faithful JAX port of FV3 ``global_mx_c`` (fv_grid_utils.F90:
+    3048-3067).  Identical to ``global_mx`` but FV3 distinguishes
+    cell-center vs corner indexing in the signature; for legoESM
+    they're identical operations on the input array.
+    """
+    return jnp.min(q), jnp.max(q)
+
+
+def g_sum(
+    p: jax.Array, area: jax.Array, mode: int = 0,
+) -> jax.Array:
+    """FV3_3D iter 623: area-weighted global sum.
+
+    Faithful JAX port of FV3 ``g_sum`` (fv_grid_utils.F90:2946-2996),
+    serial branch.  Computes::
+
+        gsum = Σ_ij  p(i,j) · area(i,j)
+
+    If ``mode == 1``, returns ``gsum / global_area`` (area-weighted
+    global mean).  Otherwise returns ``gsum`` (area-weighted total).
+
+    Parameters
+    ----------
+    p : jax.Array
+        Field to be summed (any shape; must match ``area`` shape).
+    area : jax.Array
+        Cell areas (matching shape).
+    mode : int, default 0
+        If 1, divide by global area (returns area-weighted mean).
+
+    Returns
+    -------
+    g : jax.Array
+        Scalar global sum (or area-weighted mean if mode=1).
+
+    Note: serial (non-MPI) implementation.  MPI reduction is the
+    caller's responsibility (legoESM uses ``global_sum_mpi`` for
+    distributed runs).
+    """
+    weighted = p * area
+    gsum = jnp.sum(weighted)
+    if mode == 1:
+        global_area = jnp.sum(area)
+        return gsum / global_area
+    return gsum
+
+
+def edge_factor_along_axis_nonortho(
+    agrid_outside_lon: jax.Array, agrid_outside_lat: jax.Array,
+    agrid_inside_lon: jax.Array, agrid_inside_lat: jax.Array,
+    grid_corner_lon: jax.Array, grid_corner_lat: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 631: A→B grid interpolation weights at face boundary.
+
+    Faithful port of FV3 ``edge_factors`` non-ortho branch
+    (fv_grid_utils.F90:1212-1289).  Single-axis 1D variant: for
+    one face boundary, computes per-corner interpolation weights
+    ``edge_factor[j] = d2 / (d1 + d2)`` where:
+
+        py[j]     = mid_pt_sphere(agrid_outside[j], agrid_inside[j])
+        d1[j+1]   = great_circle_dist(py[j],   grid_corner[j+1])
+        d2[j+1]   = great_circle_dist(py[j+1], grid_corner[j+1])
+
+    This is used by FV3's A-grid → B-grid (corner-located)
+    interpolation at non-orthogonal cubed-sphere face boundaries::
+
+        q_corner[j+1] = (1 - edge[j+1]) · q_A[j+1] + edge[j+1] · q_A[j]
+
+    Parameters
+    ----------
+    agrid_outside_lon, agrid_outside_lat : jax.Array, shape ``(n,)``
+        A-grid cell-center positions just OUTSIDE the boundary
+        (the halo cells across the face edge).
+    agrid_inside_lon, agrid_inside_lat : jax.Array, shape ``(n,)``
+        A-grid cell-center positions just INSIDE the boundary.
+    grid_corner_lon, grid_corner_lat : jax.Array, shape ``(n+1,)``
+        B-grid (corner) positions along the boundary.
+
+    Returns
+    -------
+    edge_factor : jax.Array, shape ``(n+1,)``
+        Per-corner interpolation weights.  Corner j+1 (interior)
+        gets ``d2/(d1+d2)``; corners 0 and n (the face corners
+        themselves) get NaN — FV3 also leaves them as ``big_number``
+        (lines 1213-1216) since the edge factor formula degenerates
+        there.
+    """
+    # Midpoints between outside and inside cells at each row
+    py_lon, py_lat = mid_pt_sphere(
+        agrid_outside_lon, agrid_outside_lat,
+        agrid_inside_lon, agrid_inside_lat,
+    )  # shape (n,)
+    # For each interior corner j ∈ [1, n-1]: d1 = dist(py[j-1], grid[j]);
+    # d2 = dist(py[j], grid[j])
+    # py[j-1] = py[:-1], py[j] = py[1:]
+    # grid corners interior: grid[1:-1] (shape (n-1,))
+    d1 = great_circle_distance(
+        py_lon[:-1], py_lat[:-1],
+        grid_corner_lon[1:-1], grid_corner_lat[1:-1],
+        radius=1.0,
+    )
+    d2 = great_circle_distance(
+        py_lon[1:], py_lat[1:],
+        grid_corner_lon[1:-1], grid_corner_lat[1:-1],
+        radius=1.0,
+    )
+    safe_sum = jnp.where(d1 + d2 > 0.0, d1 + d2, 1.0)
+    interior = d2 / safe_sum
+    # Build full (n+1,) array with NaN at endpoints (FV3 big_number)
+    edge_factor = jnp.full(grid_corner_lon.shape[0], jnp.nan)
+    edge_factor = edge_factor.at[1:-1].set(interior)
+    return edge_factor
+
+
+def make_fv3_native_grid(
+    im: int,
+    grid_type: int = 0,
+    symmetrize_face1: bool = True,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 629: end-to-end FV3 native cubed-sphere grid builder.
+
+    Integration wrapper for iters 622, 625, 624:
+
+        1. ``gnomonic_grids(im, grid_type)``       — face-1 (iter 622)
+        2. ``mirror_grid_face1_symmetrize``        — face-1 sym (iter 625)
+        3. ``mirror_grid_faces``                   — faces 2-6 (iter 624)
+
+    Reproduces FV3's full cubed-sphere construction pipeline as
+    a single public API.  Returns the 6-face (lon, lat) arrays
+    matching the FV3 face numbering convention (1..6 → indices 0..5).
+
+    Parameters
+    ----------
+    im : int
+        Number of cells per face edge.
+    grid_type : int, default 0
+        Grid type forwarded to ``gnomonic_grids``:
+            0 → ``gnomonic_ed``   (FV3 canonical)
+            1 → ``gnomonic_dist``
+            2 → ``gnomonic_angl``
+    symmetrize_face1 : bool, default True
+        If True, apply ``mirror_grid_face1_symmetrize`` (FV3
+        first-loop SIGN-averaging) before mirroring to 6 faces.
+
+    Returns
+    -------
+    lons, lats : jax.Array, shape ``(6, im+1, im+1)``
+        Cubed-sphere corner positions for all 6 faces in radians.
+    """
+    lon1, lat1 = gnomonic_grids(im, grid_type=grid_type)
+    if symmetrize_face1:
+        lon1, lat1 = mirror_grid_face1_symmetrize(lon1, lat1)
+    return mirror_grid_faces(lon1, lat1)
+
+
+def gnomonic_grids(
+    im: int, grid_type: int = 0,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 622: dispatcher for FV3 ``gnomonic_grids``.
+
+    Faithful port of FV3 ``gnomonic_grids`` (fv_grid_utils.F90:
+    1290-1311).  Dispatches to one of three grid generators by
+    ``grid_type``:
+
+        grid_type = 0 → ``gnomonic_ed``   (canonical, equal-distance edges; FV3 default)
+        grid_type = 1 → ``gnomonic_dist`` (linear equi-distance gnomonic)
+        grid_type = 2 → ``gnomonic_angl`` (equi-angular gnomonic)
+
+    Post-processing (FV3 lines 1301-1308) for all grid_type < 3:
+        1. ``symm_ed`` symmetrizes about i/j midplanes.
+        2. Longitude shift by -π to bring grid into FV3's standard
+           orientation (face 2 center → 0, not π).
+
+    Parameters
+    ----------
+    im : int
+        Number of cells per face edge.  Grid has shape ``(im+1, im+1)``.
+    grid_type : int, default 0
+        Grid construction algorithm (0, 1, or 2).
+
+    Returns
+    -------
+    lon, lat : jax.Array, shape ``(im+1, im+1)``
+        Cubed-sphere face corner positions in radians (FV3
+        orientation after the -π shift).
+    """
+    if grid_type == 0:
+        lon, lat = gnomonic_ed(im)
+    elif grid_type == 1:
+        lon, lat = gnomonic_dist(im)
+    elif grid_type == 2:
+        lon, lat = gnomonic_angl(im)
+    else:
+        raise ValueError(
+            f"Unsupported grid_type: {grid_type} (must be 0, 1, or 2)"
+        )
+    # grid_type < 3 post-processing (FV3 lines 1301-1308)
+    lon, lat = symm_ed(lon, lat)
+    lon = lon - jnp.pi
+    return lon, lat
+
+
+def gnomonic_ed(im: int) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 621: equal-distance-edge cubed-sphere grid for face 2.
+
+    Faithful port of FV3 ``gnomonic_ed`` (fv_grid_utils.F90:1313-1407).
+    This is FV3's grid of choice for global cloud-resolving runs.
+
+    Properties (FV3 docstring):
+        - Defined by intersections of great circles
+        - max(dx,dy) / min(dx,dy) = √2 ≈ 1.4142
+        - Max aspect ratio = 1.06089
+        - N-S coordinate curves are const longitude on the 4 faces
+          with the equator
+
+    Algorithm:
+        1. East/West edges at constant longitude (0.75π, 1.25π).
+        2. North/South edges obtained by ``mirror_latlon`` of W
+           edge across the (NW, SE) diagonal.
+        3. Interior Cartesian coordinates obtained by projecting
+           edge values onto the constant-x = -1/√3 face cube.
+        4. Convert back to (lon, lat).
+
+    Parameters
+    ----------
+    im : int
+        Number of cells per face edge.  Grid has shape ``(im+1, im+1)``.
+
+    Returns
+    -------
+    lon, lat : jax.Array, shape ``(im+1, im+1)``
+        Cubed-sphere face-2 corner positions in radians.
+    """
+    rsq3 = 1.0 / jnp.sqrt(3.0)
+    alpha = jnp.arcsin(rsq3)
+    pi = jnp.pi
+    dely = 2.0 * alpha / im
+
+    n = im + 1
+
+    # Step 1: W and E edges (FV3 lines 1345-1350)
+    j_idx = jnp.arange(n, dtype=jnp.float64)
+    lon = jnp.zeros((n, n), dtype=jnp.float64)
+    lat = jnp.zeros((n, n), dtype=jnp.float64)
+    west_theta = -alpha + dely * j_idx
+    lon = lon.at[0, :].set(0.75 * pi)
+    lon = lon.at[im, :].set(1.25 * pi)
+    lat = lat.at[0, :].set(west_theta)
+    lat = lat.at[im, :].set(west_theta)
+
+    # Step 2: S and N edges by mirror_latlon of W edge column (FV3 lines 1354-1359)
+    # FV3 loop: for i in 2..im:
+    #   mirror_latlon( (lon[0,0], lat[0,0]),  (lon[im,im], lat[im,im]),
+    #                  (lon[0,i-1], lat[0,i-1]), (lon[i-1, 0], lat[i-1, 0]) )
+    # Vectorize over i ∈ [1, im-1] (0-indexed)
+    i_idx = jnp.arange(1, im, dtype=jnp.float64)
+    # Reference: SW corner (already at lon[0,0], lat[0,0]) and NE corner
+    # (already at lon[im,im], lat[im,im]).  But these are not yet set
+    # — lon[im,im] = lat[im,im] are from the W/E edge assignments.
+    # W/E edges already set lon[0,0]=0.75π, lat[0,0]=-α; lon[im,im]=1.25π,
+    # lat[im,im]=alpha.
+    lon_sw, lat_sw = lon[0, 0], lat[0, 0]
+    lon_ne, lat_ne = lon[im, im], lat[im, im]
+    # Source points (W edge column at j=i): vary i in [1, im-1]
+    i_int = jnp.arange(1, im)
+    lon_src = lon[0, i_int]
+    lat_src = lat[0, i_int]
+    lon_s_row, lat_s_row = mirror_latlon(
+        lon_sw, lat_sw,
+        lon_ne, lat_ne,
+        lon_src, lat_src,
+    )
+    # South edge (j=0): row i, S edge → (lamda(i,1), theta(i,1))
+    lon = lon.at[i_int, 0].set(lon_s_row)
+    lat = lat.at[i_int, 0].set(lat_s_row)
+    # North edge (j=im): same lon, theta flipped
+    lon = lon.at[i_int, im].set(lon_s_row)
+    lat = lat.at[i_int, im].set(-lat_s_row)
+
+    # Step 3: Convert edges to Cartesian, project onto constant-x face
+    # (FV3 lines 1370-1382)
+    # i=0 column (W edge), j ∈ [1, im-1]
+    x_w_full, y_w_full, z_w_full = latlon2xyz(lon[0, :], lat[0, :])
+    safe_x_w = jnp.where(jnp.abs(x_w_full) > 1e-30, x_w_full, 1.0)
+    pp2_i0 = -y_w_full * rsq3 / safe_x_w  # y' = -y * rsq3 / x
+    pp3_i0 = -z_w_full * rsq3 / safe_x_w
+    # j=0 row (S edge), i ∈ [1, im-1]
+    x_s_full, y_s_full, z_s_full = latlon2xyz(lon[:, 0], lat[:, 0])
+    safe_x_s = jnp.where(jnp.abs(x_s_full) > 1e-30, x_s_full, 1.0)
+    pp2_j0 = -y_s_full * rsq3 / safe_x_s
+    pp3_j0 = -z_s_full * rsq3 / safe_x_s
+    # 4 corners: latlon2xyz directly
+    x_corners_w = x_w_full  # (im+1,) — W edge i=0 has all j
+    y_corners_w = y_w_full
+    z_corners_w = z_w_full
+    # FV3 uses raw latlon2xyz for corners but the same projection is needed
+    # for j=0 and j=im endpoints too.  For interior points, we use the
+    # projection.  For the corners, latlon2xyz gives the position on the
+    # unit sphere.  But the FV3 algorithm explicitly sets pp(i, 1) and
+    # pp(1, j) from the projection then sets corner positions from raw
+    # latlon2xyz2.  Final step is pp(2,i,j) = pp(2,i,1) and
+    # pp(3,i,j) = pp(3,1,j) for interior (i>1, j>1).
+    # This means the interior i=0, j ∈ [1, im-1] uses the projected
+    # values; for i=0 and j=0 corners use direct latlon2xyz.
+    # FV3 line 1386: pp(1,i,j) = -rsq3 for ALL i, j → constant x face.
+
+    # Step 4: Build full (pp2, pp3) by taking pp2 from j=0 row (i-varying)
+    # and pp3 from i=0 column (j-varying).  This gives the cube-face
+    # coordinates on the constant-x face.
+    pp1 = jnp.full((n, n), -rsq3)
+    # pp2[i, j] = pp2_j0[i] (varies with i, constant in j)
+    pp2 = jnp.broadcast_to(pp2_j0[:, None], (n, n))
+    # pp3[i, j] = pp3_i0[j] (varies with j, constant in i)
+    pp3 = jnp.broadcast_to(pp3_i0[None, :], (n, n))
+    # At the 4 corners use direct latlon2xyz (FV3 lines 1362-1365)
+    # Corner SW (i=0, j=0): use lon[0,0]/lat[0,0] → (x, y, z) directly
+    # We need to override the broadcast values at the 4 corners and
+    # the i=0/j=0 edges with the exact values from the projection above.
+    # i=0 column: pp2[0, j] should be from latlon2xyz directly (W edge);
+    # but the projection above already gives the right answer when
+    # pp2_j0[0] = pp2_i0[0] = 0 (W-edge has lon=0.75π, so y/x ratio is
+    # known).  Verify by ensuring pp2[0, j] doesn't break and pp3[i, 0]
+    # likewise.
+
+    # j=0 row: pp3 should be pp3_j0 (S edge i-vary), NOT pp3_i0[0]
+    pp3 = pp3.at[:, 0].set(pp3_j0)
+    # i=0 col: pp2 should be pp2_i0 (W edge j-vary), NOT pp2_j0[0]
+    pp2 = pp2.at[0, :].set(pp2_i0)
+    # j=im row: similar, use S edge mirrored to N
+    pp3 = pp3.at[:, im].set(-pp3_j0)  # N edge: theta flipped → z flipped
+    # i=im col: E edge mirror of W edge: lon=1.25π so y/x ratio flipped
+    pp2 = pp2.at[im, :].set(-pp2_i0)  # E edge: y flipped relative to W
+
+    # Step 5: Convert pp back to (lon, lat) (FV3 line 1399)
+    lon_out, lat_out = xyz2latlon(pp1, pp2, pp3)
+    return lon_out, lat_out
+
+
+def symm_ed(
+    lamda: jax.Array, theta: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 619: enforce ED-grid symmetry about i/j midplanes.
+
+    Faithful port of FV3 ``symm_ed`` (fv_grid_utils.F90:1587-1626).
+    Operates on a face-2 ED grid of shape ``(im+1, im+1)`` and
+    enforces symmetry in both axes via three passes:
+
+    1. Copy lamda's first column into all interior columns
+       (FV3 lines 1595-1599).
+    2. Symmetrize about i=im/2+1: pair (i, im+2-i) gets avg/π
+       reflection (lines 1601-1611).
+    3. Symmetrize about j=im/2+1: pair (j, im+2-j) gets avg in
+       theta (with sign flip) and avg in lamda (lines 1614-1624).
+
+    Assumes input is the FV3 face-2 orientation produced by
+    ``gnomonic_dist`` — symmetries use the FV3 ``+π/-π``
+    convention that's specific to that face orientation.
+
+    Parameters
+    ----------
+    lamda, theta : jax.Array, shape ``(im+1, im+1)``
+        Longitude, latitude in radians (FV3 face-2 layout).
+
+    Returns
+    -------
+    lamda_sym, theta_sym : jax.Array, shape ``(im+1, im+1)``
+        Symmetrized grid.
+    """
+    n = lamda.shape[0]
+    im = n - 1
+    pi = jnp.pi
+
+    # Step 1: lamda[i, 1:im+1] = lamda[i, 0] for i ∈ [1, im-1]
+    # FV3 lines 1595-1599: only interior columns (j>0) updated;
+    # row i=0 and i=im untouched.
+    lamda = lamda.at[1:im, 1:im + 1].set(lamda[1:im, 0:1])
+
+    # Step 2: symmetrize about i=im/2+1 (FV3 1601-1611)
+    i_half = im // 2
+    i_idx = jnp.arange(i_half)
+    ip_idx = im - i_idx
+    avg_lon = 0.5 * (lamda[i_idx, :] - lamda[ip_idx, :])
+    lamda = lamda.at[i_idx, :].set(avg_lon + pi)
+    lamda = lamda.at[ip_idx, :].set(pi - avg_lon)
+    avg_lat = 0.5 * (theta[i_idx, :] + theta[ip_idx, :])
+    theta = theta.at[i_idx, :].set(avg_lat)
+    theta = theta.at[ip_idx, :].set(avg_lat)
+
+    # Step 3: symmetrize about j=im/2+1 (FV3 1614-1624)
+    # Only i ∈ [1, im-1] (interior columns) are updated
+    j_half = im // 2
+    j_idx = jnp.arange(j_half)
+    jp_idx = im - j_idx
+    int_i = slice(1, im)
+    avg_lon_j = 0.5 * (lamda[int_i, :][:, j_idx] + lamda[int_i, :][:, jp_idx])
+    lamda = lamda.at[int_i, j_idx].set(avg_lon_j)
+    lamda = lamda.at[int_i, jp_idx].set(avg_lon_j)
+    avg_lat_j = 0.5 * (theta[int_i, :][:, j_idx] - theta[int_i, :][:, jp_idx])
+    theta = theta.at[int_i, j_idx].set(avg_lat_j)
+    theta = theta.at[int_i, jp_idx].set(-avg_lat_j)
+
+    return lamda, theta
+
+
+def gnomonic_angl(im: int) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 617: equi-angular gnomonic grid for FV3 face 2.
+
+    Faithful port of FV3 ``gnomonic_angl`` (fv_grid_utils.F90:
+    1531-1556).  Builds the canonical FV3 equi-angular cubed-
+    sphere grid for face 2 (-x face)::
+
+        dp = π/(2·im)
+        p1 = -1/√3                                (constant)
+        p2 = -1/√3 · tan(-π/4 + (j-1)·dp)
+        p3 =  1/√3 · tan(-π/4 + (k-1)·dp)
+
+    Then ``cart_to_latlon`` to (lon, lat).
+
+    Parameters
+    ----------
+    im : int
+        Number of cells per face edge.  Grid has shape ``(im+1, im+1)``.
+
+    Returns
+    -------
+    lon, lat : jax.Array, shape ``(im+1, im+1)``
+        Cubed-sphere corner positions in radians.
+    """
+    dp = 0.5 * jnp.pi / im
+    rsq3 = 1.0 / jnp.sqrt(3.0)
+    idx = jnp.arange(im + 1, dtype=jnp.float64)
+    # Match FV3 (j, k) layout: j varies axis 0, k varies axis 1
+    j_grid, k_grid = jnp.meshgrid(idx, idx, indexing="ij")
+    p1 = jnp.full_like(j_grid, -rsq3)
+    p2 = -rsq3 * jnp.tan(-0.25 * jnp.pi + j_grid * dp)
+    p3 = rsq3 * jnp.tan(-0.25 * jnp.pi + k_grid * dp)
+    return xyz2latlon(p1, p2, p3)
+
+
+def gnomonic_dist(im: int) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 617: equi-distance gnomonic grid for FV3 face 2.
+
+    Faithful port of FV3 ``gnomonic_dist`` (fv_grid_utils.F90:
+    1558-1585).  Builds the equi-distance cubed-sphere grid for
+    face 2 (-x face)::
+
+        p1 = -1/√3                                (constant)
+        p2 =  1/√3 - (j-1)·2/(im·√3)
+        p3 = -1/√3 + (k-1)·2/(im·√3)
+
+    Then ``cart_to_latlon`` to (lon, lat).
+
+    Same return convention as ``gnomonic_angl``.
+    """
+    rsq3 = 1.0 / jnp.sqrt(3.0)
+    xf = -rsq3
+    y0 = rsq3
+    dy = -2.0 * rsq3 / im
+    z0 = -rsq3
+    dz = 2.0 * rsq3 / im
+    idx = jnp.arange(im + 1, dtype=jnp.float64)
+    j_grid, k_grid = jnp.meshgrid(idx, idx, indexing="ij")
+    p1 = jnp.full_like(j_grid, xf)
+    p2 = y0 + j_grid * dy
+    p3 = z0 + k_grid * dz
+    return xyz2latlon(p1, p2, p3)
+
+
+def rotate_winds_sphere_cube(
+    u: jax.Array, v: jax.Array,
+    lon1: jax.Array, lat1: jax.Array,
+    lon2: jax.Array, lat2: jax.Array,
+    lon3: jax.Array, lat3: jax.Array,
+    lon4: jax.Array, lat4: jax.Array,
+    lon_t: jax.Array, lat_t: jax.Array,
+    direction: int = 1,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 661: rotate winds between sphere and cube frames at point.
+
+    Faithful JAX port of FV3 ``rotate_winds``
+    (tools/test_cases.F90:8183-8226).
+
+    Geometry: at central point ``t1=(lon_t, lat_t)``, the i-axis
+    of the cube goes from p3 → p1 (projected to tangent plane);
+    j-axis goes from p4 → p2.  FV3 lon-shift by π convention is
+    applied to (e_lon, e_lat) of the geographic frame at t1.
+
+    Algorithm:
+
+        ee1 = get_unit_vector_fv3(p3, t1, p1)        # cube i-axis
+        ee2 = get_unit_vector_fv3(p4, t1, p2)        # cube j-axis
+        elon = (-sin(λ-π), cos(λ-π), 0)              # geo east at t1
+        elat = (-sin(φ)·cos(λ-π), -sin(φ)·sin(λ-π), cos(φ))
+        g_ij = ee_i · e_lonlat_j
+        if dir=1 (sphere → cube):
+            newu = u·g11 + v·g12
+            newv = u·g21 + v·g22
+        else (cube → sphere):
+            det = g11·g22 - g21·g12
+            newu = (u·g22 - v·g12) / det
+            newv = (-u·g21 + v·g11) / det
+
+    Parameters
+    ----------
+    u, v : jax.Array
+        Wind components (broadcastable to scalar or matching p1..t1).
+    lon1, lat1, ..., lon4, lat4 : jax.Array
+        4 neighboring points (p1, p2, p3, p4) in lat/lon.
+    lon_t, lat_t : jax.Array
+        Central point t1.
+    direction : int, default 1
+        1 = sphere-to-cube; 2 = cube-to-sphere.
+
+    Returns
+    -------
+    newu, newv : jax.Array
+    """
+    ee1 = get_unit_vector_fv3(lon3, lat3, lon_t, lat_t, lon1, lat1)
+    ee2 = get_unit_vector_fv3(lon4, lat4, lon_t, lat_t, lon2, lat2)
+    # FV3 lon-shift by π convention
+    lon_shifted = lon_t - jnp.pi
+    sin_lon = jnp.sin(lon_shifted)
+    cos_lon = jnp.cos(lon_shifted)
+    sin_lat = jnp.sin(lat_t)
+    cos_lat = jnp.cos(lat_t)
+    elon = jnp.stack([-sin_lon, cos_lon, jnp.zeros_like(sin_lon)], axis=-1)
+    elat = jnp.stack(
+        [-sin_lat * cos_lon, -sin_lat * sin_lon, cos_lat], axis=-1,
+    )
+    g11 = inner_prod(ee1, elon)
+    g12 = inner_prod(ee1, elat)
+    g21 = inner_prod(ee2, elon)
+    g22 = inner_prod(ee2, elat)
+    if direction == 1:
+        new_u = u * g11 + v * g12
+        new_v = u * g21 + v * g22
+    elif direction == 2:
+        det = g11 * g22 - g21 * g12
+        safe_det = jnp.where(jnp.abs(det) > 1e-30, det, 1.0)
+        new_u = (u * g22 - v * g12) / safe_det
+        new_v = (-u * g21 + v * g11) / safe_det
+    else:
+        raise ValueError(f"direction must be 1 or 2, got {direction}")
+    return new_u, new_v
+
+
+def dcmip16_bc_uwind_pert(
+    z: jax.Array, lat: jax.Array, lon: jax.Array,
+    up: float = 1.0,
+    zp: float = 1.5e4,
+    Rp: float | None = None,
+    center_lon: float | None = None,
+    center_lat: float | None = None,
+) -> jax.Array:
+    """FV3_3D iter 671: DCMIP16 BC localized wind perturbation.
+
+    Faithful JAX port of FV3 ``DCMIP16_BC_uwind_pert``
+    (tools/test_cases.F90:6823-6838).  Localized Gaussian-in-x,
+    Hermite-cubic-in-z wind perturbation for triggering the
+    baroclinic instability in DCMIP16 Test 410.
+
+    Algorithm:
+        zrat = z / zp
+        ZZ   = max(1 - 3·zrat² + 2·zrat³, 0)        (Hermite vertical taper)
+        dst  = great_circle_distance(point, center)
+        pert = max(0, up · ZZ · exp(-(dst/Rp)²))
+
+    Default FV3 constants:
+        up=1 m/s (peak amplitude)
+        zp=15000 m (vertical scale)
+        Rp=R_earth/10 (horizontal scale)
+        center = (π/9, 2π/9) (FV3 perturbation focal point)
+
+    Parameters
+    ----------
+    z : jax.Array
+        Height (m).
+    lat, lon : jax.Array
+        Cell-center positions (radians).
+    up, zp, Rp, center_lon, center_lat : float, optional
+        DCMIP16 BC perturbation parameters.
+
+    Returns
+    -------
+    pert : jax.Array
+        Wind perturbation (m/s).
+    """
+    pi = jnp.pi
+    if Rp is None:
+        Rp = constants.R_earth / 10.0
+    if center_lon is None:
+        center_lon = pi / 9.0
+    if center_lat is None:
+        center_lat = 2.0 * pi / 9.0
+    zrat = z / zp
+    ZZ = jnp.maximum(1.0 - 3.0 * zrat * zrat + 2.0 * zrat * zrat * zrat, 0.0)
+    dst = great_circle_distance(
+        lon, lat,
+        jnp.asarray(center_lon), jnp.asarray(center_lat),
+        radius=constants.R_earth,
+    )
+    return jnp.maximum(0.0, up * ZZ * jnp.exp(-((dst / Rp) ** 2)))
+
+
+def dcmip16_bc_uwind(
+    z: jax.Array, T: jax.Array, lat: jax.Array,
+    KK: float = 3.0,
+    Te: float = 310.0,
+    Tp: float = 240.0,
+    b: float = 2.0,
+) -> jax.Array:
+    """FV3_3D iter 668: DCMIP16 BC zonal wind profile.
+
+    Faithful JAX port of FV3 ``DCMIP16_BC_uwind``
+    (tools/test_cases.F90:6807-6821).  Baroclinic-wind profile
+    derived from T via geostrophic balance + centripetal::
+
+        Tir = z·exp(-(z·g/(b·R_d·T0))²)
+        Ti2 = 0.5·(K+2)·(Te-Tp)/(Te·Tp)·Tir
+        UU  = g·K/R · Ti2 · (cos(lat)^(K-1) - cos(lat)^(K+1)) · T
+        u   = -Ω·R·cos(lat) + sqrt((Ω·R·cos(lat))² + R·cos(lat)·UU)
+
+    Used with iter-667 ``dcmip16_bc_temperature`` to build the
+    DCMIP16 Test 410 IC.
+
+    Parameters
+    ----------
+    z : jax.Array
+        Height (m).
+    T : jax.Array
+        Temperature (K), from ``dcmip16_bc_temperature``.
+    lat : jax.Array
+        Latitude (radians).
+    """
+    g = constants.g
+    Rdgas = constants.R_d
+    radius = constants.R_earth
+    omega = constants.Omega
+    T0 = 0.5 * (Te + Tp)
+    zsc = z * g / (b * Rdgas * T0)
+    Tir = z * jnp.exp(-zsc * zsc)
+    Ti2 = 0.5 * (KK + 2.0) * (Te - Tp) / (Te * Tp) * Tir
+    cos_lat = jnp.cos(lat)
+    K_int = int(KK)
+    UU = (
+        g * KK / radius * Ti2
+        * (cos_lat ** (K_int - 1) - cos_lat ** (K_int + 1)) * T
+    )
+    discriminant = (omega * radius * cos_lat) ** 2 + radius * cos_lat * UU
+    safe_disc = jnp.maximum(discriminant, 0.0)
+    return -omega * radius * cos_lat + jnp.sqrt(safe_disc)
+
+
+def dcmip16_bc_sphum(
+    p: jax.Array, ps: jax.Array, lat: jax.Array,
+    q0: float = 0.018,
+    qt: float = 1.0e-12,
+    phiW: float | None = None,
+    pw: float = 34000.0,
+    p0: float = 1.0e5,
+    ptrop: float = 1.0e4,
+) -> jax.Array:
+    """FV3_3D iter 668: DCMIP16 BC specific humidity profile.
+
+    Faithful JAX port of FV3 ``DCMIP16_BC_sphum``
+    (tools/test_cases.F90:6840-6852).
+
+    Algorithm:
+
+        eta = p / ps
+        if p > ptrop:
+            q = q0·exp(-(lat/phiW)⁴)·exp(-((eta-1)·p0/pw)²)
+        else:
+            q = qt
+
+    Default DCMIP16 BC constants (FV3 lines 6499-6503):
+        q0=0.018, qt=1e-12, phiW=2π/9, pw=34000, p0=1e5, ptrop=1e4
+
+    Used in FV3 DCMIP16 Test 410 BC moist IC.
+    """
+    if phiW is None:
+        phiW = 2.0 * jnp.pi / 9.0
+    eta = p / ps
+    q_moist = (
+        q0
+        * jnp.exp(-((lat / phiW) ** 4))
+        * jnp.exp(-((eta - 1.0) * p0 / pw) ** 2)
+    )
+    return jnp.where(p > ptrop, q_moist, qt)
+
+
+def dcmip16_bc_temperature(
+    z: jax.Array, lat: jax.Array,
+    KK: float = 3.0,
+    Te: float = 310.0,
+    Tp: float = 240.0,
+    b: float = 2.0,
+    lapse: float = 0.005,
+) -> jax.Array:
+    """FV3_3D iter 667: DCMIP16 baroclinic-instability temperature profile.
+
+    Faithful JAX port of FV3 ``DCMIP16_BC_temperature``
+    (tools/test_cases.F90:6774-6789).  Jablonowski-Williamson
+    BC test temperature::
+
+        IT = cos(lat)^K - K/(K+2) · cos(lat)^(K+2)
+        zsc = z·g/(b·R_d·T0)
+        Tr = (1 - 2·zsc²) · exp(-zsc²)
+        T1 = (1/T0)·exp(lapse·z/T0) + (T0-Tp)/(T0·Tp)·Tr
+        T2 = 0.5·(K+2)·(Te-Tp)/(Te·Tp)·Tr
+        T  = 1 / (T1 - T2·IT)
+
+    Default DCMIP16 BC constants:
+        KK = 3 (zonal wave number)
+        Te = 310 K, Tp = 240 K, T0 = (Te+Tp)/2 = 275 K
+        b = 2, lapse = 0.005 K/m
+    """
+    g = constants.g
+    Rdgas = constants.R_d
+    T0 = 0.5 * (Te + Tp)  # FV3 note: WRONG in document, here = 275
+    IT = (
+        jnp.cos(lat) ** KK
+        - KK / (KK + 2.0) * jnp.cos(lat) ** (KK + 2.0)
+    )
+    zsc = z * g / (b * Rdgas * T0)
+    Tr = (1.0 - 2.0 * zsc * zsc) * jnp.exp(-zsc * zsc)
+    T1 = (1.0 / T0) * jnp.exp(lapse * z / T0) + (T0 - Tp) / (T0 * Tp) * Tr
+    T2 = 0.5 * (KK + 2.0) * (Te - Tp) / (Te * Tp) * Tr
+    return 1.0 / (T1 - T2 * IT)
+
+
+def dcmip16_bc_pressure(
+    z: jax.Array, lat: jax.Array,
+    KK: float = 3.0,
+    Te: float = 310.0,
+    Tp: float = 240.0,
+    b: float = 2.0,
+    lapse: float = 0.005,
+    p0: float = 1.0e5,
+) -> jax.Array:
+    """FV3_3D iter 667: DCMIP16 BC pressure profile (companion to T).
+
+    Faithful JAX port of FV3 ``DCMIP16_BC_pressure``
+    (tools/test_cases.F90:6791-6805):
+
+        IT  = cos(lat)^K - K/(K+2) · cos(lat)^(K+2)
+        Tir = z · exp(-(z·g/(b·R_d·T0))²)
+        Ti1 = (1/lapse)·(exp(lapse·z/T0) - 1) + Tir·(T0-Tp)/(T0·Tp)
+        Ti2 = 0.5·(K+2)·(Te-Tp)/(Te·Tp)·Tir
+        p   = p0·exp(-g/R_d · (Ti1 - Ti2·IT))
+
+    Used in FV3 DCMIP16 baroclinic-instability test (Test 410).
+    """
+    g = constants.g
+    Rdgas = constants.R_d
+    T0 = 0.5 * (Te + Tp)
+    IT = (
+        jnp.cos(lat) ** KK
+        - KK / (KK + 2.0) * jnp.cos(lat) ** (KK + 2.0)
+    )
+    zsc = z * g / (b * Rdgas * T0)
+    Tir = z * jnp.exp(-zsc * zsc)
+    Ti1 = (
+        (1.0 / lapse) * (jnp.exp(lapse * z / T0) - 1.0)
+        + Tir * (T0 - Tp) / (T0 * Tp)
+    )
+    Ti2 = 0.5 * (KK + 2.0) * (Te - Tp) / (Te * Tp) * Tir
+    return p0 * jnp.exp(-g / Rdgas * (Ti1 - Ti2 * IT))
+
+
+def bilinear_interp_apply(
+    src_field: jax.Array,
+    id1: jax.Array, id2: jax.Array, jc: jax.Array,
+    s2c: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 675: apply bilinear remap weights to source field.
+
+    Faithful JAX port of FV3 ``apply_inc_on_3d_scalar`` core
+    (tools/fv_treat_da_inc.F90:339-360, inner bilinear loop).
+
+    Algorithm:
+
+        target[..., i, j] = s2c[..., i, j, 0] · src[id1[i, j], jc[i, j]    ]
+                          + s2c[..., i, j, 1] · src[id2[i, j], jc[i, j]    ]
+                          + s2c[..., i, j, 2] · src[id2[i, j], jc[i, j]+1  ]
+                          + s2c[..., i, j, 3] · src[id1[i, j], jc[i, j]+1  ]
+
+    Pairs with iter-673 ``remap_coef_fv3`` (produces id1, id2, jc, s2c)
+    to provide full lat-lon → cubed-sphere bilinear interpolation.
+
+    Parameters
+    ----------
+    src_field : jax.Array, shape (im, jm) or (im, jm, km)
+        Source field on regular lat-lon grid.  Trailing axes
+        broadcast.
+    id1, id2 : jax.Array (int), shape (...,)
+        Source longitude indices.
+    jc : jax.Array (int), shape (...,)
+        Source latitude index (jc and jc+1 are used for bilinear).
+    s2c : jax.Array, shape (..., 4)
+        Bilinear weights (SW, SE, NE, NW).
+
+    Returns
+    -------
+    target : jax.Array, shape matches id1 (+ trailing dims of src_field)
+    """
+    # Gather source values at the 4 corners
+    f_sw = src_field[id1, jc]                    # (..., [km])
+    f_se = src_field[id2, jc]
+    f_ne = src_field[id2, jc + 1]
+    f_nw = src_field[id1, jc + 1]
+    # Combine
+    w_sw = s2c[..., 0]
+    w_se = s2c[..., 1]
+    w_ne = s2c[..., 2]
+    w_nw = s2c[..., 3]
+    # Add level-axis broadcast if needed
+    if f_sw.ndim > id1.ndim:
+        extra = f_sw.ndim - id1.ndim
+        for _ in range(extra):
+            w_sw = w_sw[..., None]
+            w_se = w_se[..., None]
+            w_ne = w_ne[..., None]
+            w_nw = w_nw[..., None]
+    return w_sw * f_sw + w_se * f_se + w_ne * f_ne + w_nw * f_nw
+
+
+def dcmip16_tc_uwind_pert(
+    z: jax.Array, r: jax.Array,
+    lon: jax.Array, lat: jax.Array,
+    Tv0: float | None = None,
+    lapse: float = 7.0e-3,
+    zt: float = 15000.0,
+    rp: float = 282000.0,
+    zp: float = 7000.0,
+    pb: float = 101500.0,
+    dp: float = 1115.0,
+    q0: float = 0.021,
+    lamp: float = None,
+    phip: float | None = None,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 672: DCMIP16 TC vortex wind perturbation.
+
+    Faithful JAX port of FV3 ``DCMIP16_TC_uwind_pert``
+    (tools/test_cases.F90:7168-7197).
+
+    Algorithm (z ≤ zt):
+        rfac = (r/rp)^1.5
+        fr5  = 0.5·fc·r              # fc = 2·Ω·sin(phip)
+        Tvrd = (Tv0 - lapse·z)·R_d
+        vt = -fr5 + sqrt(fr5² - 1.5·rfac·Tvrd /
+                          (1 + 2·Tvrd·z/(g·zp²) - (pb/dp)·exp(rfac + (z/zp)²)))
+        d1  = sin(phip)·cos(lat) - cos(phip)·sin(lat)·cos(lon - lamp)
+        d2  = cos(phip)·sin(lon - lamp)
+        d   = max(1e-25, sqrt(d1² + d2²))
+        uu = vt · d1 / d
+        vv = vt · d2 / d
+    z > zt: uu = vv = 0
+
+    Default FV3 constants:
+        lamp = π (TC center longitude)
+        phip = π/18 (TC center latitude, ~10°N)
+        Tv0  = 302.15·(1+0.608·q0)
+        fc   = 2·Ω·sin(phip)
+
+    Used in FV3 DCMIP16 Test 411 (TC).  With iter-666/669/671:
+    full TC IC stack available.
+
+    Returns (uu, vv) wind perturbation components.
+    """
+    pi = jnp.pi
+    if Tv0 is None:
+        Tv0 = 302.15 * (1.0 + 0.608 * q0)
+    if lamp is None:
+        lamp = pi
+    if phip is None:
+        phip = pi / 18.0
+    g = constants.g
+    Rdgas = constants.R_d
+    # iter-778: delegate Coriolis to coriolis_parameter_fv3
+    fc = coriolis_parameter_fv3(jnp.asarray(phip))
+    rfac = jnp.sqrt(r / rp) ** 3
+    fr5 = 0.5 * fc * r
+    Tv = Tv0 - lapse * z
+    Tvrd = Tv * Rdgas
+    denom = (
+        1.0
+        + 2.0 * Tvrd * z / (g * zp * zp)
+        - (pb / dp) * jnp.exp(rfac + (z / zp) ** 2)
+    )
+    safe_denom = jnp.where(jnp.abs(denom) > 1e-30, denom, 1.0)
+    radicand = fr5 ** 2 - (1.5 * rfac * Tvrd) / safe_denom
+    vt = -fr5 + jnp.sqrt(jnp.maximum(radicand, 0.0))
+    d1 = (
+        jnp.sin(phip) * jnp.cos(lat)
+        - jnp.cos(phip) * jnp.sin(lat) * jnp.cos(lon - lamp)
+    )
+    d2 = jnp.cos(phip) * jnp.sin(lon - lamp)
+    d = jnp.maximum(1.0e-25, jnp.sqrt(d1 * d1 + d2 * d2))
+    uu_below = vt * d1 / d
+    vv_below = vt * d2 / d
+    uu = jnp.where(z > zt, 0.0, uu_below)
+    vv = jnp.where(z > zt, 0.0, vv_below)
+    return uu, vv
+
+
+def dcmip16_tc_temperature(
+    z: jax.Array, r: jax.Array,
+    Tv0: float | None = None,
+    lapse: float = 7.0e-3,
+    zt: float = 15000.0,
+    rp: float = 282000.0,
+    zp: float = 7000.0,
+    pb: float = 101500.0,
+    dp: float = 1115.0,
+    q0: float = 0.021,
+) -> jax.Array:
+    """FV3_3D iter 669: DCMIP16 TC temperature profile.
+
+    Faithful JAX port of FV3 ``DCMIP16_TC_temperature``
+    (tools/test_cases.F90:7137-7152).
+
+    Algorithm:
+        z > zt:  T = Tvt = Tv0 - lapse·zt
+        else:
+          Tv    = Tv0 - lapse·z
+          term1 = g·zp²·(1 - (pb/dp)·exp((r/rp)^1.5 + (z/zp)²))
+          term2 = 2·R_d·Tv·z
+          T     = Tv·(1 + (1/(1 + term2/term1) - 1))
+
+    Used in FV3 DCMIP16 Test 411 (TC).
+
+    Defaults from FV3 lines 6880-6897: Tv0 = 302.15·(1+0.608·q0).
+
+    Parameters
+    ----------
+    z : jax.Array
+        Height (m).
+    r : jax.Array
+        Great-circle distance from TC center (m).
+    Tv0 : float, optional
+        Sea-level virtual temperature; default 302.15·(1+0.608·q0).
+    lapse, zt, rp, zp, pb, dp, q0 : float
+        DCMIP16 TC parameters (see defaults).
+    """
+    g = constants.g
+    Rdgas = constants.R_d
+    if Tv0 is None:
+        Tv0 = 302.15 * (1.0 + 0.608 * q0)
+    Tvt = Tv0 - lapse * zt
+    Tv = Tv0 - lapse * z
+    rfac = jnp.sqrt(r / rp) ** 3
+    term1 = g * zp * zp * (1.0 - (pb / dp) * jnp.exp(rfac + (z / zp) ** 2))
+    term2 = 2.0 * Rdgas * Tv * z
+    # Safe-divide for term2/term1
+    safe_term1 = jnp.where(jnp.abs(term1) > 1e-30, term1, 1.0)
+    T_below = Tv + Tv * (1.0 / (1.0 + term2 / safe_term1) - 1.0)
+    return jnp.where(z > zt, Tvt, T_below)
+
+
+def dcmip16_tc_pressure(
+    z: jax.Array, r: jax.Array,
+    Tv0: float | None = None,
+    lapse: float = 7.0e-3,
+    zt: float = 15000.0,
+    rp: float = 282000.0,
+    zp: float = 7000.0,
+    pb: float = 101500.0,
+    dp: float = 1115.0,
+    q0: float = 0.021,
+) -> jax.Array:
+    """FV3_3D iter 669: DCMIP16 TC pressure profile.
+
+    Faithful JAX port of FV3 ``DCMIP16_TC_pressure``
+    (tools/test_cases.F90:7155-7167).
+
+    Algorithm:
+        z <= zt:
+          p = pb·exp(g/(R_d·lapse)·ln((Tv0-lapse·z)/Tv0))
+              - dp·exp(-(r/rp)^1.5 - (z/zp)²)·exp(g/(R_d·lapse)·ln(...))
+        z > zt:
+          p = ptt·exp(g·(zt-z)/(R_d·Tvt))
+          where ptt = pb·(Tvt/Tv0)^(g/R_d/lapse)
+    """
+    g = constants.g
+    Rdgas = constants.R_d
+    if Tv0 is None:
+        Tv0 = 302.15 * (1.0 + 0.608 * q0)
+    Tvt = Tv0 - lapse * zt
+    ptt = pb * (Tvt / Tv0) ** (g / (Rdgas * lapse))
+    # z <= zt branch
+    Tv = Tv0 - lapse * z
+    ratio = jnp.maximum(Tv / Tv0, 1e-30)
+    p_base = pb * jnp.exp(g / (Rdgas * lapse) * jnp.log(ratio))
+    rfac = jnp.sqrt(r / rp) ** 3
+    p_below = p_base - dp * jnp.exp(-rfac - (z / zp) ** 2) * jnp.exp(
+        g / (Rdgas * lapse) * jnp.log(ratio)
+    )
+    # z > zt branch
+    p_above = ptt * jnp.exp(g * (zt - z) / (Rdgas * Tvt))
+    return jnp.where(z <= zt, p_below, p_above)
+
+
+def dcmip16_tc_sphum(
+    z: jax.Array,
+    q0: float = 0.021,
+    qt: float = 1.0e-11,
+    zq1: float = 3000.0,
+    zq2: float = 8000.0,
+    zt: float = 15000.0,
+) -> jax.Array:
+    """FV3_3D iter 666: DCMIP16 Reed-Jablonowski TC humidity profile.
+
+    Faithful JAX port of FV3 ``DCMIP16_TC_sphum`` (tools/test_cases.F90:
+    7198-7208, DCMIP16 TC test).  Specific humidity (kg/kg) as
+    function of height:
+
+        if z >= zt: q = qt   (stratospheric background)
+        else:       q = q0 · exp(-z/zq1) · exp(-(z/zq2)²)
+
+    Default DCMIP16 TC constants (FV3 lines 6880-6886):
+        q0  = 0.021 kg/kg  (surface peak)
+        qt  = 1e-11 kg/kg  (stratospheric)
+        zq1 = 3000 m       (exponential decay)
+        zq2 = 8000 m       (Gaussian truncation)
+        zt  = 15000 m      (tropopause)
+
+    Used in FV3 DCMIP16 idealized tropical-cyclone test.
+
+    Parameters
+    ----------
+    z : jax.Array
+        Height(s) in meters.
+    q0, qt, zq1, zq2, zt : float
+        TC profile constants (see defaults).
+
+    Returns
+    -------
+    q : jax.Array
+        Specific humidity (kg/kg).
+    """
+    q_below = q0 * jnp.exp(-z / zq1) * jnp.exp(-(z / zq2) ** 2)
+    return jnp.where(z < zt, q_below, qt)
+
+
+def case9_B(
+    lon: jax.Array, lat: jax.Array, gh0: float | None = None,
+) -> jax.Array:
+    """FV3_3D iter 664: Williamson case 9 spatial forcing pattern B(λ, φ).
+
+    Faithful JAX port of FV3 ``get_case9_B`` (tools/test_cases.F90:
+    4361-4389).  Returns::
+
+        if sin(φ) > 0:
+            yy = (cos(φ) / sin(φ))² = cot²(φ)
+            B  = gh0 · yy · exp(1 - yy) · sin(λ)
+        else:
+            B = 0
+
+    Default gh0 = 720·g (FV3 calibrated for the SW orographic
+    forcing test).  The forcing peaks where yy=1 (i.e., lat=π/4)
+    with magnitude gh0·sin(λ).
+
+    Parameters
+    ----------
+    lon, lat : jax.Array
+        Cell-center positions (radians).
+    gh0 : float, optional
+        Forcing peak amplitude (default 720·g).
+
+    Returns
+    -------
+    B : jax.Array
+        Spatial forcing field.
+    """
+    if gh0 is None:
+        gh0 = 720.0 * constants.g
+    sin_lat = jnp.sin(lat)
+    cos_lat = jnp.cos(lat)
+    # Safe cot²: avoid divide-by-zero at equator and poles
+    safe_sin = jnp.where(jnp.abs(sin_lat) > 1e-30, sin_lat, 1.0)
+    yy = (cos_lat / safe_sin) ** 2
+    myB = gh0 * yy * jnp.exp(1.0 - yy)
+    B = myB * jnp.sin(lon)
+    # Zero in southern hemisphere (and equator)
+    return jnp.where(sin_lat > 0.0, B, 0.0)
+
+
+def case9_AofT(
+    tday: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 664: Williamson case 9 amplitude modulation AofT(t).
+
+    Faithful JAX port of FV3 ``case9_forcing1`` amplitude logic
+    (tools/test_cases.F90:4391-4424).  Time-varying amplitude:
+
+        tday ≤ 4:           A = 0.5·(1 - cos(π·tday/4))   [ramp up]
+        4 < tday ≤ 16:      A = 1                          [peak]
+        16 < tday ≤ 20:     A = 0.5·(1 + cos(π·(tday-16)/4)) [ramp down]
+        tday > 20:          A = 0.5·(1 - cos(π·(tday-20)/4)) [new cycle]
+
+    Parameters
+    ----------
+    tday : jax.Array
+        Time in days.
+
+    Returns
+    -------
+    A : jax.Array
+        Amplitude ∈ [0, 1].
+    """
+    pi = jnp.pi
+    ramp_up = 0.5 * (1.0 - jnp.cos(0.25 * pi * tday))
+    peak = jnp.ones_like(ramp_up)
+    ramp_down = 0.5 * (1.0 + jnp.cos(0.25 * pi * (tday - 16.0)))
+    new_cycle = 0.5 * (1.0 - jnp.cos(0.25 * pi * (tday - 20.0)))
+    A = jnp.where(
+        tday <= 4.0, ramp_up,
+        jnp.where(
+            tday <= 16.0, peak,
+            jnp.where(tday <= 20.0, ramp_down, new_cycle),
+        ),
+    )
+    return A
+
+
+def add_rankine_vortex(
+    u: jax.Array, v: jax.Array,
+    grid_lon: jax.Array, grid_lat: jax.Array,
+    ubar: float, r0: float,
+    center_lon: float, center_lat: float,
+    radius: float = constants.R_earth,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 662: add Rankine vortex to D-grid winds.
+
+    Faithful JAX port of FV3 ``rankine_vortex``
+    (tools/test_cases.F90:4207-4292).  Adds a Rankine-vortex
+    tangential wind onto the D-grid u, v fields at face corners,
+    projected onto the local cube-grid tangent vectors.
+
+    Tangential wind profile:
+        vr = ubar · r/r0    if r < r0  (solid-body core)
+        vr = ubar · r0/r    if r ≥ r0  (1/r decay outside)
+
+    where r is great-circle distance from cell-edge midpoint to
+    vortex center (radius·acos(cos_p)).
+
+    Parameters
+    ----------
+    u : jax.Array, shape (..., n_x, n_y+1)
+        D-grid u-wind (north/south edges); updated in-place style.
+    v : jax.Array, shape (..., n_x+1, n_y)
+        D-grid v-wind (east/west edges).
+    grid_lon : jax.Array, shape (..., n_x+1, n_y+1)
+        Cubed-sphere corner longitudes.
+    grid_lat : jax.Array, shape (..., n_x+1, n_y+1)
+        Cubed-sphere corner latitudes.
+    ubar : float
+        Maximum tangential wind (m/s).
+    r0 : float
+        Radius of maximum wind (m).
+    center_lon, center_lat : float
+        Vortex center (radians).
+    radius : float, default constants.R_earth
+        Sphere radius (m).
+
+    Returns
+    -------
+    u_new, v_new : jax.Array
+        D-grid winds with vortex added.
+    """
+    pi = jnp.pi
+
+    def _tangential_wind_at(p2_lon, p2_lat):
+        """Compute vortex contributions (utmp, vtmp) at point p2."""
+        # Shift p2_lon by -center_lon
+        p2_lon_s = p2_lon - center_lon
+        cos_p = (
+            jnp.sin(p2_lat) * jnp.sin(center_lat)
+            + jnp.cos(p2_lat) * jnp.cos(center_lat) * jnp.cos(p2_lon_s)
+        )
+        cos_p = jnp.clip(cos_p, -1.0, 1.0)
+        r = radius * jnp.arccos(cos_p)
+        # Tangential wind magnitude
+        vr_inside = ubar * r / r0
+        vr_outside = ubar * r0 / jnp.maximum(r, 1e-30)
+        vr = jnp.where(r < r0, vr_inside, vr_outside)
+        # Direction of vortex motion (in shifted frame)
+        x1 = jnp.cos(p2_lat) * jnp.sin(p2_lon_s)
+        y1 = (
+            jnp.sin(p2_lat) * jnp.cos(center_lat)
+            - jnp.cos(p2_lat) * jnp.sin(center_lat) * jnp.cos(p2_lon_s)
+        )
+        d2 = jnp.maximum(jnp.sqrt(x1 * x1 + y1 * y1), 1.0e-25)
+        utmp = -vr * y1 / d2
+        vtmp = vr * x1 / d2
+        # Return utmp, vtmp + shifted p2 for elon/elat
+        return utmp, vtmp, p2_lon_s, p2_lat
+
+    # ---- u-wind on j-edges: average grid[i, j] and grid[i+1, j] in lon
+    # u shape (..., n_x, n_y+1); grid shape (..., n_x+1, n_y+1)
+    # j-edge midpoint p2[i, j] = mid_pt_sphere(grid[i, j], grid[i+1, j])
+    sw_lon = grid_lon[..., :-1, :]   # (..., n_x, n_y+1)
+    sw_lat = grid_lat[..., :-1, :]
+    se_lon = grid_lon[..., 1:, :]
+    se_lat = grid_lat[..., 1:, :]
+    p2_lon_u, p2_lat_u = mid_pt_sphere(sw_lon, sw_lat, se_lon, se_lat)
+    utmp_u, vtmp_u, p2_lon_s, p2_lat_s = _tangential_wind_at(p2_lon_u, p2_lat_u)
+    # Cube tangent e1 at p2 from p3=(grid[i,j]-center, grid[i,j].lat)
+    # to p4=(grid[i+1,j]-center, grid[i+1,j].lat)
+    e1 = get_unit_vect2(
+        sw_lon - center_lon, sw_lat,
+        se_lon - center_lon, se_lat,
+    )
+    elon_u, elat_u = unit_vect_latlon(p2_lon_s, p2_lat_s)
+    u_add = utmp_u * inner_prod(e1, elon_u) + vtmp_u * inner_prod(e1, elat_u)
+    u_new = u + u_add
+
+    # ---- v-wind on i-edges: average grid[i, j] and grid[i, j+1] in lat
+    # v shape (..., n_x+1, n_y); grid shape (..., n_x+1, n_y+1)
+    s_lon = grid_lon[..., :, :-1]
+    s_lat = grid_lat[..., :, :-1]
+    n_lon = grid_lon[..., :, 1:]
+    n_lat = grid_lat[..., :, 1:]
+    p2_lon_v, p2_lat_v = mid_pt_sphere(s_lon, s_lat, n_lon, n_lat)
+    utmp_v, vtmp_v, p2_lon_s2, p2_lat_s2 = _tangential_wind_at(p2_lon_v, p2_lat_v)
+    e2 = get_unit_vect2(
+        s_lon - center_lon, s_lat,
+        n_lon - center_lon, n_lat,
+    )
+    elon_v, elat_v = unit_vect_latlon(p2_lon_s2, p2_lat_s2)
+    v_add = utmp_v * inner_prod(e2, elon_v) + vtmp_v * inner_prod(e2, elat_v)
+    v_new = v + v_add
+    return u_new, v_new
+
+
+def project_sphere_v(
+    f: jax.Array, e: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 659: project vector onto sphere-tangent plane.
+
+    Faithful JAX port of FV3 ``project_sphere_v``
+    (fv_grid_utils.F90:3345-3361).  Given a unit-sphere position
+    ``e`` and a 3-vector ``f``, returns ``f`` projected onto the
+    tangent plane at ``e``::
+
+        ap = f · e
+        f_tangent = f - ap·e
+
+    Takes the last axis as the 3-vector component; broadcasts on
+    leading axes.
+    """
+    ap = jnp.sum(f * e, axis=-1, keepdims=True)
+    return f - ap * e
+
+
+def terminator_tracers(
+    lon: jax.Array, lat: jax.Array,
+    km: int,
+    qcly: float = 4.0e-6,
+    k2: float = 1.0,
+    lc: float | None = None,
+    thc: float | None = None,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 658: DCMIP 2016 terminator chemistry tracer IC.
+
+    Faithful JAX port of FV3 ``terminator_tracers``
+    (tools/test_cases.F90:4136-4205).  DCMIP 2016 idealized
+    chemistry test (Lauritzen et al.); paired Cl / Cl2 tracers
+    that exchange under photolysis at a localized "sun":
+
+        k1   = max(0, sin(lat)·sin(thc) + cos(lat)·cos(thc)·cos(lon - lc))
+        r    = k1/k2 · 0.25
+        D    = sqrt(r² + 2·r·qcly)
+        Cl   = D - r
+        Cl2  = 0.5·(qcly - Cl)
+
+    Same pattern at every vertical level.  Assumes DRY mixing
+    ratio (FV3 docstring note).
+
+    Default sun position lc=5π/3, thc=π/9 matches FV3.
+
+    Parameters
+    ----------
+    lon, lat : jax.Array, shape (..., n_x, n_y)
+        Cell-center positions in radians.
+    km : int
+        Number of vertical levels.
+    qcly : float, default 4e-6
+        Total chlorine family mixing ratio (kg/kg, DRY).
+    k2 : float, default 1.0
+        Recombination rate constant.
+    lc, thc : float, optional
+        Sun position (radians); default FV3 values.
+
+    Returns
+    -------
+    Cl, Cl2 : jax.Array, shape (..., n_x, n_y, km)
+        Chemical species mixing ratios.
+    """
+    if lc is None:
+        lc = 5.0 * jnp.pi / 3.0
+    if thc is None:
+        thc = jnp.pi / 9.0
+    sinthc = jnp.sin(thc)
+    costhc = jnp.cos(thc)
+    cos_phot = (
+        jnp.sin(lat) * sinthc
+        + jnp.cos(lat) * costhc * jnp.cos(lon - lc)
+    )
+    k1 = jnp.maximum(0.0, cos_phot)
+    r = k1 / k2 * 0.25
+    D = jnp.sqrt(r * r + 2.0 * r * qcly)
+    Cl_2d = D - r
+    Cl2_2d = 0.5 * (qcly - Cl_2d)
+    # Broadcast over km
+    Cl = jnp.broadcast_to(Cl_2d[..., None], Cl_2d.shape + (km,))
+    Cl2 = jnp.broadcast_to(Cl2_2d[..., None], Cl2_2d.shape + (km,))
+    return Cl, Cl2
+
+
+def checker_tracers(
+    lon: jax.Array, lat: jax.Array,
+    nq: int, km: int,
+    nx: float = 9.0, ny: float = 9.0,
+    rn: float | None = None,
+    rng_key: jax.Array | None = None,
+) -> jax.Array:
+    """FV3_3D iter 657: checkerboard tracer pattern with optional noise.
+
+    Faithful JAX port of FV3 ``checker_tracers`` (tools/test_cases.F90:
+    4067-4135).  Builds a checkerboard tracer pattern based on::
+
+        qt[i, j] = 0.01  if sin(nx·lon)·sin(ny·lat) > 0
+                   0     otherwise
+
+    Defaults nx=ny=9 give 20°×20° checker boxes (per FV3 docstring).
+    Optional ``rn`` adds uniform random perturbation rn·U(0,1).
+    Broadcast across vertical levels (km) and tracer count (nq).
+
+    Coded for the HIWPP benchmark by S.-J. Lin (2014).
+
+    Parameters
+    ----------
+    lon, lat : jax.Array, shape (..., n_x, n_y)
+        Cell-center positions in radians.
+    nq : int
+        Number of tracers.
+    km : int
+        Number of vertical levels.
+    nx, ny : float, default 9.0
+        East-west / North-south wave numbers.
+    rn : float, optional
+        Magnitude of random perturbation (FV3 suggests 0.1).
+    rng_key : jax.Array, optional
+        JAX PRNG key required if ``rn is not None``.
+
+    Returns
+    -------
+    q : jax.Array, shape (..., n_x, n_y, km, nq)
+        Tracer field.
+    """
+    qt = jnp.where(
+        jnp.sin(nx * lon) * jnp.sin(ny * lat) > 0.0,
+        0.01,
+        0.0,
+    )
+    # Broadcast to (..., n_x, n_y, km, nq)
+    q = jnp.broadcast_to(qt[..., None, None], qt.shape + (km, nq))
+    if rn is not None:
+        if rng_key is None:
+            raise ValueError("rng_key required when rn is not None")
+        noise = rn * jax.random.uniform(rng_key, q.shape)
+        q = q + noise
+    return q
+
+
+def atod_vort_on(
+    uin: jax.Array, vin: jax.Array,
+    dxa: jax.Array, dya: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 655: A-grid → D-grid winds (circulation-conserving).
+
+    Analog of FV3 ``atod`` (tools/test_cases.F90:7833-7892) using
+    the circulation-conserving formula consistent with iter-652
+    ``dtoa_vort_on`` (the inverse mapping).  FV3's source uses
+    ``interp_left_edge_1d`` (interpOrder-dependent); the
+    circulation-conserving variant is::
+
+        uout[i, j] = (uin[i, j-1]·dya[i, j-1] + uin[i, j]·dya[i, j])
+                    / (dya[i, j-1] + dya[i, j])
+        vout[i, j] = (vin[i-1, j]·dxa[i-1, j] + vin[i, j]·dxa[i, j])
+                    / (dxa[i-1, j] + dxa[i, j])
+
+    D-grid u lives on north/south edges (n_x, n_y+1); D-grid v
+    on east/west edges (n_x+1, n_y).  Interior edges only;
+    boundary edges (uout[:, 0], uout[:, -1], vout[0, :], vout[-1, :])
+    zero-initialized (FV3 fills via halo).
+
+    Pairs with iter-652 ``dtoa_vort_on`` (D→A) for round-trip
+    A-grid ↔ D-grid via circulation-conserving averages.
+
+    Parameters
+    ----------
+    uin, vin : jax.Array, shape (..., n_x, n_y)
+        A-grid wind components.
+    dxa, dya : jax.Array, shape (..., n_x, n_y)
+        A-grid (cell-center) edge lengths.
+
+    Returns
+    -------
+    uout : jax.Array, shape (..., n_x, n_y+1)
+        D-grid u (north/south edges).
+    vout : jax.Array, shape (..., n_x+1, n_y)
+        D-grid v (east/west edges).
+    """
+    n_x = uin.shape[-2]
+    n_y = uin.shape[-1]
+    leading_shape = uin.shape[:-2]
+
+    # uout: average A-grid uin along j (n_y → n_y-1 interior edges)
+    interior_u = (
+        (uin[..., :, :-1] * dya[..., :, :-1]
+         + uin[..., :, 1:] * dya[..., :, 1:])
+        / (dya[..., :, :-1] + dya[..., :, 1:])
+    )  # shape (..., n_x, n_y-1)
+    uout = jnp.zeros(leading_shape + (n_x, n_y + 1))
+    uout = uout.at[..., :, 1:n_y].set(interior_u)
+
+    # vout: average A-grid vin along i (n_x → n_x-1 interior edges)
+    interior_v = (
+        (vin[..., :-1, :] * dxa[..., :-1, :]
+         + vin[..., 1:, :] * dxa[..., 1:, :])
+        / (dxa[..., :-1, :] + dxa[..., 1:, :])
+    )  # shape (..., n_x-1, n_y)
+    vout = jnp.zeros(leading_shape + (n_x + 1, n_y))
+    vout = vout.at[..., 1:n_x, :].set(interior_v)
+    return uout, vout
+
+
+def atoc_vort_on(
+    uin: jax.Array, vin: jax.Array,
+    dxa: jax.Array, dya: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 654: A-grid → C-grid winds (circulation-conserving).
+
+    Faithful JAX port of FV3 ``atoc`` (tools/test_cases.F90:7965-
+    8112, ``VORT_ON`` branch, no ``ALT_INTERP``).
+
+    Algorithm (interior C-grid edges only):
+
+        uout[i, j] = (uin[i, j]·dxa[i, j] + uin[i-1, j]·dxa[i-1, j])
+                    / (dxa[i, j] + dxa[i-1, j])
+        vout[i, j] = (vin[i, j]·dya[i, j] + vin[i, j-1]·dya[i, j-1])
+                    / (dya[i, j] + dya[i, j-1])
+
+    Interior edges only (FV3 ``i ∈ [isd+1, ied]``, ``j ∈ [jsd+1, jed]``).
+    Boundary edges (uout[0, :] / uout[-1, :] / vout[:, 0] / vout[:, -1])
+    are zero-initialized; FV3 sets them via halo communication or
+    fill_corners afterward.
+
+    Parameters
+    ----------
+    uin : jax.Array, shape (..., n_x, n_y)
+        A-grid u (cell-center).
+    vin : jax.Array, shape (..., n_x, n_y)
+        A-grid v (cell-center).
+    dxa, dya : jax.Array, shape (..., n_x, n_y)
+        A-grid (cell-center) edge lengths.
+
+    Returns
+    -------
+    uout : jax.Array, shape (..., n_x+1, n_y)
+        C-grid u (east/west edges).  Boundary edges = 0.
+    vout : jax.Array, shape (..., n_x, n_y+1)
+        C-grid v (north/south edges).  Boundary edges = 0.
+    """
+    # Build C-grid uout via vectorized average of adjacent A-grid columns.
+    # uout[i, j] for i ∈ [1, n_x-1] uses uin[i-1, j] and uin[i, j].
+    interior_u = (
+        (uin[..., 1:, :] * dxa[..., 1:, :]
+         + uin[..., :-1, :] * dxa[..., :-1, :])
+        / (dxa[..., 1:, :] + dxa[..., :-1, :])
+    )  # shape (..., n_x-1, n_y)
+    n_x = uin.shape[-2]
+    n_y = uin.shape[-1]
+    # Allocate full uout (..., n_x+1, n_y) with zeros and fill interior
+    leading_shape = uin.shape[:-2]
+    uout = jnp.zeros(leading_shape + (n_x + 1, n_y))
+    uout = uout.at[..., 1:n_x, :].set(interior_u)
+
+    interior_v = (
+        (vin[..., :, 1:] * dya[..., :, 1:]
+         + vin[..., :, :-1] * dya[..., :, :-1])
+        / (dya[..., :, 1:] + dya[..., :, :-1])
+    )  # shape (..., n_x, n_y-1)
+    vout = jnp.zeros(leading_shape + (n_x, n_y + 1))
+    vout = vout.at[..., :, 1:n_y].set(interior_v)
+    return uout, vout
+
+
+def ctoa_vort_on(
+    uin: jax.Array, vin: jax.Array,
+    dx: jax.Array, dy: jax.Array,
+    dxa: jax.Array, dya: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 653: C-grid → A-grid winds (circulation-conserving).
+
+    Faithful JAX port of FV3 ``ctoa`` (tools/test_cases.F90:8114-
+    8174, simple/circulation-conserving branch — the
+    commented-out FV3 lines 8147-8157).  Note C-grid u is on
+    east/west edges (shape (n_x+1, n_y), opposite of D-grid u);
+    C-grid v is on north/south edges (shape (n_x, n_y+1)).
+
+    Algorithm:
+
+        uout[i, j] = 0.5·(uin[i, j]·dy[i, j] + uin[i+1, j]·dy[i+1, j])
+                       / dya[i, j]
+        vout[i, j] = 0.5·(vin[i, j]·dx[i, j] + vin[i, j+1]·dx[i, j+1])
+                       / dxa[i, j]
+
+    Mirror of iter-652 ``dtoa_vort_on`` with input axes swapped
+    (C-grid puts u on east/west edges; D-grid puts u on north/
+    south edges).
+
+    Parameters
+    ----------
+    uin : jax.Array, shape (..., n_x+1, n_y)
+        C-grid u (east/west edges).
+    vin : jax.Array, shape (..., n_x, n_y+1)
+        C-grid v (north/south edges).
+    dx, dy : jax.Array, shape (..., n_x, n_y+1) and (..., n_x+1, n_y)
+        Edge lengths.
+    dxa, dya : jax.Array, shape (..., n_x, n_y)
+        A-grid (cell-center) edge lengths.
+
+    Returns
+    -------
+    uout, vout : jax.Array, shape (..., n_x, n_y)
+        A-grid cell-center wind components (covariant).
+    """
+    # uout: average uin·dy along i (axis -2 of uin)
+    uout = 0.5 * (
+        uin[..., :-1, :] * dy[..., :-1, :]
+        + uin[..., 1:, :] * dy[..., 1:, :]
+    ) / dya
+    # vout: average vin·dx along j (axis -1 of vin)
+    vout = 0.5 * (
+        vin[..., :, :-1] * dx[..., :, :-1]
+        + vin[..., :, 1:] * dx[..., :, 1:]
+    ) / dxa
+    return uout, vout
+
+
+def dtoa_vort_on(
+    uin: jax.Array, vin: jax.Array,
+    dx: jax.Array, dy: jax.Array,
+    dxa: jax.Array, dya: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 652: D-grid → A-grid winds (circulation-conserving).
+
+    Faithful JAX port of FV3 ``dtoa`` (tools/test_cases.F90:
+    7896-7955, ``VORT_ON`` branch).  Circulation- (vorticity-)
+    conserving interpolation from D-grid covariant winds to
+    A-grid cell-center winds::
+
+        uout[i, j] = 0.5·(uin[i, j]·dx[i, j] + uin[i, j+1]·dx[i, j+1])
+                       / dxa[i, j]
+        vout[i, j] = 0.5·(vin[i, j]·dy[i, j] + vin[i+1, j]·dy[i+1, j])
+                       / dya[i, j]
+
+    Used by FV3 test-case diagnostics + visualizations.  Differs
+    from iter-627 ``c2l_ord2_fv3`` (which applies the a-matrix
+    rotation); this is the raw covariant→cell-center step.
+
+    Parameters
+    ----------
+    uin : jax.Array, shape (..., n_x, n_y+1)
+        D-grid u (north/south edges, covariant).
+    vin : jax.Array, shape (..., n_x+1, n_y)
+        D-grid v (east/west edges, covariant).
+    dx, dy : jax.Array, shape (..., n_x, n_y+1) and (..., n_x+1, n_y)
+        Edge lengths (matching uin, vin shapes).
+    dxa, dya : jax.Array, shape (..., n_x, n_y)
+        A-grid (cell-center) edge lengths.
+
+    Returns
+    -------
+    uout, vout : jax.Array, shape (..., n_x, n_y)
+        A-grid cell-center wind components (covariant).
+    """
+    # uout: average uin·dx along j (axis -1 of uin)
+    uout = 0.5 * (
+        uin[..., :, :-1] * dx[..., :, :-1]
+        + uin[..., :, 1:] * dx[..., :, 1:]
+    ) / dxa
+    # vout: average vin·dy along i (axis -2 of vin)
+    vout = 0.5 * (
+        vin[..., :-1, :] * dy[..., :-1, :]
+        + vin[..., 1:, :] * dy[..., 1:, :]
+    ) / dya
+    return uout, vout
+
+
+def get_pt_on_great_circle(
+    lon1: jax.Array, lat1: jax.Array,
+    dist: jax.Array, heading: jax.Array,
+    radius: float = constants.R_earth,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3_3D iter 651: point on great circle at given distance + heading.
+
+    Faithful JAX port of FV3 ``get_pt_on_great_circle``
+    (tools/test_cases.F90:4805-4826).  Given a start point
+    (lon1, lat1), great-circle distance ``dist``, and initial
+    heading (radians clockwise from north), returns the target
+    point (lon3, lat3) on the same great circle.
+
+    Algorithm:
+        pha = dist / radius                            # angular dist
+        lat3 = asin(cos(heading)·cos(lat1)·sin(pha)
+                    + sin(lat1)·cos(pha))
+        dp   = atan2(sin(heading)·sin(pha)·cos(lat1),
+                     cos(pha) - sin(lat1)·sin(lat3))
+        lon3 = ((lon1 - π) - dp + π) mod 2π            # FV3 0-2π
+                                                       # wrap
+
+    Used in FV3 for tropical-cyclone test cases (placing vortex
+    along a path) and spherical-trajectory computations.
+
+    Parameters
+    ----------
+    lon1, lat1 : jax.Array
+        Start point (radians).  Broadcasting on leading axes
+        supported.
+    dist : jax.Array
+        Great-circle distance from start (meters; same units as
+        ``radius``).
+    heading : jax.Array
+        Initial heading at start (radians; 0 = north, π/2 = east).
+    radius : float, default constants.R_earth
+
+    Returns
+    -------
+    lon3, lat3 : jax.Array
+        Target point on great circle (radians).  lon3 wrapped to
+        [0, 2π).
+    """
+    pha = dist / radius
+    sin_pha = jnp.sin(pha)
+    cos_pha = jnp.cos(pha)
+    sin_lat1 = jnp.sin(lat1)
+    cos_lat1 = jnp.cos(lat1)
+    sin_heading = jnp.sin(heading)
+    cos_heading = jnp.cos(heading)
+    lat3 = jnp.arcsin(jnp.clip(
+        cos_heading * cos_lat1 * sin_pha + sin_lat1 * cos_pha,
+        -1.0, 1.0,
+    ))
+    dp = jnp.arctan2(
+        sin_heading * sin_pha * cos_lat1,
+        cos_pha - sin_lat1 * jnp.sin(lat3),
+    )
+    two_pi = 2.0 * jnp.pi
+    lon3 = jnp.mod((lon1 - jnp.pi) - dp + jnp.pi, two_pi)
+    return lon3, lat3
+
+
+def intersect_great_circles(
+    a1: jax.Array, a2: jax.Array,
+    b1: jax.Array, b2: jax.Array,
+    radius: float = 1.0,
+    eps: float = 1e-30,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """FV3_3D iter 616: intersection of two great circles (Cartesian inputs).
+
+    Faithful port of FV3 ``intersect`` (fv_grid_utils.F90:2096-2194).
+    Two great circles are defined by:
+        - Circle A: arc through ``a1`` and ``a2``
+        - Circle B: arc through ``b1`` and ``b2``
+
+    Returns:
+        - ``x_inter``: the intersection point on sphere closest to
+          the centroid of (a1, a2, b1, b2) (FV3's ``get_nearest``
+          branch); scaled to ``radius``.
+        - ``local_a``: ``True`` if ``x_inter`` lies between ``a1``
+          and ``a2`` on circle A (chord distance check, F90:2186).
+        - ``local_b``: same for circle B.
+
+    Each ``ai``, ``bi`` shape ``(..., 3)``; broadcasts on leading
+    axes.  ``local_a`` / ``local_b`` are boolean arrays.
+
+    Matches FV3's exact determinant formulation (lines 2128-2147)
+    for bit-equivalence; handles the FV3 degenerate branches
+    (``b1_xyz=0`` → x_inter=b1; ``b2_xyz=0`` → x_inter=b2) via
+    ``jnp.where``.
+    """
+    a1x = a1[..., 0]; a1y = a1[..., 1]; a1z = a1[..., 2]
+    a2x = a2[..., 0]; a2y = a2[..., 1]; a2z = a2[..., 2]
+    b1x = b1[..., 0]; b1y = b1[..., 1]; b1z = b1[..., 2]
+    b2x = b2[..., 0]; b2y = b2[..., 1]; b2z = b2[..., 2]
+
+    a2_xy = a2x * a1y - a2y * a1x
+    b1_xy = b1x * a1y - b1y * a1x
+    b2_xy = b2x * a1y - b2y * a1x
+
+    a2_xz = a2x * a1z - a2z * a1x
+    b1_xz = b1x * a1z - b1z * a1x
+    b2_xz = b2x * a1z - b2z * a1x
+
+    b1_xyz = b1_xy * a2_xz - b1_xz * a2_xy
+    b2_xyz = b2_xy * a2_xz - b2_xz * a2_xy
+
+    # General branch: x_raw = b2 - b1 * (b2_xyz / b1_xyz), normalized to radius
+    safe_b1_xyz = jnp.where(jnp.abs(b1_xyz) > eps, b1_xyz, 1.0)
+    ratio = b2_xyz / safe_b1_xyz
+    x_general = b2 - b1 * ratio[..., None]
+    length = jnp.sqrt(jnp.sum(x_general * x_general, axis=-1, keepdims=True))
+    safe_len = jnp.where(length > eps, length, 1.0)
+    x_general = radius * x_general / safe_len
+
+    # FV3 degenerate branches (F90:2139-2142)
+    b1_zero = jnp.abs(b1_xyz) <= eps
+    b2_zero = (~b1_zero) & (jnp.abs(b2_xyz) <= eps)
+    x_inter = jnp.where(
+        b1_zero[..., None], b1,
+        jnp.where(b2_zero[..., None], b2, x_general),
+    )
+
+    # get_nearest: pick ±x_inter closer to centroid (F90:2157-2169)
+    center = 0.25 * (a1 + a2 + b1 + b2)
+    dx_pos = x_inter - center
+    dx_neg = -x_inter - center
+    d_pos = jnp.sum(dx_pos * dx_pos, axis=-1)
+    d_neg = jnp.sum(dx_neg * dx_neg, axis=-1)
+    x_inter = jnp.where(
+        (d_neg < d_pos)[..., None], -x_inter, x_inter,
+    )
+
+    # check_local for A and B (F90:2171-2192): chord-distance test
+    def _check_local(x1: jax.Array, x2: jax.Array) -> jax.Array:
+        dx = x1 - x2
+        dist = jnp.sum(dx * dx, axis=-1)
+        dx1 = x1 - x_inter
+        dx2 = x2 - x_inter
+        d1 = jnp.sum(dx1 * dx1, axis=-1)
+        d2 = jnp.sum(dx2 * dx2, axis=-1)
+        return (d1 <= dist) & (d2 <= dist)
+
+    local_a = _check_local(a1, a2)
+    local_b = _check_local(b1, b2)
+    return x_inter, local_a, local_b
 
 
 def unit_vect_latlon(

@@ -69,7 +69,7 @@ def plume_convection(
 
         # Plume is active where it's denser than environment (sinking):
         # delta_rho > 0 means rho_plume > rho_env → plume sinks → stay active
-        active = active * jax.nn.sigmoid(delta_rho * 1e4)
+        active = active * jax.nn.sigmoid(delta_rho * cfg.active_sigmoid_sharpness)
 
         # Detrainment tendency at this level [K/s], [PSU/s].
         #

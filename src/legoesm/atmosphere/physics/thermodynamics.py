@@ -192,47 +192,76 @@ def moist_adiabat_lapse_rate(
     return (R_d * T / (c_pd * p)) * numerator / denominator
 
 
+def _bolton_lcl_temperature(
+    T_base: jax.Array,
+    p_base: jax.Array,
+    q_v_base: jax.Array,
+) -> jax.Array:
+    """Bolton (1980) Eq. 22 LCL temperature [K].
+
+    ``T_LCL = 1 / [ 1/(T - 55) - ln(RH)/2840 ] + 55``.
+
+    Inlined here (rather than imported from
+    :mod:`legoesm.atmosphere.physics.convection._plume`) to avoid a
+    convection → thermodynamics import cycle: the plume helper already
+    imports :func:`compute_moist_adiabat` from this module.
+    """
+    from legoesm.thermo import saturation_mixing_ratio as _q_sat
+
+    q_sat_base = _q_sat(T_base, p_base)
+    RH = jnp.clip(q_v_base / jnp.maximum(q_sat_base, 1.0e-12), 1.0e-4, 1.0)
+    T_minus_55 = jnp.maximum(T_base - 55.0, 1.0)
+    return 1.0 / (1.0 / T_minus_55 - jnp.log(RH) / 2840.0) + 55.0
+
+
 def compute_moist_adiabat(
     T_base: jax.Array,
     p_levels: jax.Array,
+    q_v_base: jax.Array | None = None,
+    lcl_sigmoid_width_pa: float = 100.0,
 ) -> jax.Array:
-    """Compute moist adiabatic temperature profile from surface upward.
+    """Compute parcel temperature profile from surface upward.
 
-    Integrates dT/dp = Gamma_m(T, p) upward from the lowest pressure
-    level using trapezoidal predictor-corrector via jax.lax.scan.
+    When ``q_v_base`` is not provided the parcel is assumed saturated at
+    every level and the routine integrates the moist adiabatic lapse rate
+    ``dT/dp = Gamma_m(T, p)`` upward from the base via trapezoidal
+    predictor-corrector with :func:`jax.lax.scan`.  This matches the
+    historical (pre-audit-2026-05-12) behaviour and is preserved for
+    callers that have not yet been migrated to thread launch humidity.
+
+    When ``q_v_base`` is provided the parcel is lifted along a **dry
+    adiabat** from the base until reaching the lifting condensation
+    level (LCL — Bolton 1980 Eq. 22), then along the **moist adiabat**
+    above LCL.  This gives the physically correct parcel curve for
+    unsaturated boundary layers — the previous saturated-from-base
+    assumption underestimated parcel buoyancy aloft and systematically
+    biased CAPE *low* for typical tropical / midlatitude soundings
+    where the launch parcel has RH < 100% (audit 2026-05-12 finding
+    HIGH #4).
 
     Parameters
     ----------
-    T_base : jax.Array
-        Temperature at the lowest level (surface) [K], shape (ncol,).
-    p_levels : jax.Array
-        Pressure at full levels [Pa], shape (ncol, nlev).
-        Ordered top-to-bottom (p increasing with index).
+    T_base : jax.Array, shape (ncol,)
+        Temperature at the lowest level (surface) [K].
+    p_levels : jax.Array, shape (ncol, nlev)
+        Pressure at full levels [Pa], top-to-bottom ordering.
+    q_v_base : jax.Array, shape (ncol,) or None
+        Optional water-vapor mixing ratio at the launch level [kg/kg].
+    lcl_sigmoid_width_pa : float
+        Sigmoid transition width [Pa] for the smooth dry/moist switch
+        across the LCL.  Default 100 Pa (~1 hPa) gives a tight
+        differentiable transition relative to the ~10⁵ Pa column range.
 
     Returns
     -------
-    jax.Array
-        Moist adiabatic temperature profile [K], shape (ncol, nlev).
-
-    Notes
-    -----
-    **Saturated-everywhere assumption.**  ``moist_adiabat_lapse_rate`` calls
-    ``saturation_mixing_ratio(T, p)`` at every level, i.e. the parcel is
-    treated as saturated all the way down to the surface.  For an
-    unsaturated launch parcel (LCL above the base) the *true* parcel curve
-    follows a dry adiabat from the base to the LCL and only switches to the
-    moist adiabat above LCL.  The current implementation uses the moist
-    rate the entire way down, which UNDERESTIMATES the parcel-environment
-    contrast in subsaturated boundary layers and therefore systematically
-    biases CAPE diagnosed from this profile *low* for unsaturated parcels.
-    See ``compute_lcl`` for explicit LCL diagnosis.  Fixing this requires
-    threading ``q_v_base`` through the 8 convection schemes that consume
-    this function and is intentionally deferred (audit B4 / 2026-05-01).
+    jax.Array, shape (ncol, nlev)
+        Parcel temperature [K], top-to-bottom ordering.
     """
     ncol, nlev = p_levels.shape
 
     # Reverse to scan from surface (bottom) upward (top)
     p_rev = p_levels[:, ::-1]  # (ncol, nlev), surface first
+    p_base = p_rev[:, 0]
 
     # Promote to common dtype so scan carry types are consistent.
     # Physical constants in moist_adiabat_lapse_rate are Python float64;
@@ -241,42 +270,84 @@ def compute_moist_adiabat(
     _dtype = jnp.result_type(T_base, p_rev)
     T_base = T_base.astype(_dtype)
     p_rev = p_rev.astype(_dtype)
+    p_base = p_rev[:, 0]
 
-    def scan_step(T_prev, p_k):
-        """Trapezoidal predictor-corrector step."""
-        T_prev_val, p_prev_val = T_prev
+    if q_v_base is None:
+        # Saturated-from-base path (legacy callers).  Sentinel: T_lcl
+        # equals T_base so the dry branch is never taken inside the
+        # scan body and the result reproduces the historical curve.
+        T_lcl = T_base
+        p_lcl = p_base
+    else:
+        q_v_base = q_v_base.astype(_dtype)
+        T_lcl = _bolton_lcl_temperature(T_base, p_base, q_v_base).astype(_dtype)
+        # Poisson relation: dry-adiabatic descent (or ascent) between
+        # the base and the LCL.
+        p_lcl = p_base * (T_lcl / jnp.clip(T_base, 1.0, None)) ** (
+            constants.c_pd / constants.R_d
+        )
+        p_lcl = p_lcl.astype(_dtype)
+        # Guard against pathological RH = 1 columns where T_lcl ≈ T_base
+        # and p_lcl ≈ p_base (no dry leg).  Numerically harmless.
 
-        dp = p_k - p_prev_val  # negative (going upward)
+    # Pre-compute the dry-adiabat constant ``theta = T (p_ref/p)^kappa``
+    # at the base — same theta is preserved on the dry leg.
+    theta_dry = T_base * (constants.p_ref / jnp.clip(p_base, 1.0, None)) ** constants.kappa
+    theta_dry = theta_dry.astype(_dtype)
 
-        # Predictor: Euler step
-        gamma_1 = moist_adiabat_lapse_rate(T_prev_val, p_prev_val)
-        T_pred = T_prev_val + gamma_1 * dp
+    def scan_step(carry, p_k):
+        T_prev_val, p_prev_val = carry
 
-        # Corrector: trapezoidal
-        gamma_2 = moist_adiabat_lapse_rate(T_pred, p_k)
-        T_new = T_prev_val + 0.5 * (gamma_1 + gamma_2) * dp
+        # Smooth dry/moist switches.  Pressure decreases upward, so
+        # ``p > p_lcl`` ⇔ below LCL.  Transition width is configurable
+        # via ``lcl_sigmoid_width_pa`` (default 100 Pa ≈ 1 hPa).
+        if q_v_base is None:
+            below_lcl_k = jnp.zeros_like(p_k)
+            prev_below_lcl = jnp.zeros_like(p_k)
+        else:
+            below_lcl_k = jax.nn.sigmoid((p_k - p_lcl) / lcl_sigmoid_width_pa)
+            prev_below_lcl = jax.nn.sigmoid((p_prev_val - p_lcl) / lcl_sigmoid_width_pa)
 
-        # Ensure temperature stays physical
+        # Straddling steps (previous below LCL, current above) must
+        # start the moist integration at the LCL itself rather than
+        # the previous (still-dry) level.  Otherwise the moist lapse
+        # rate is applied across the entire dry-leg slab and warms
+        # the first saturated level — the bias Codex 2026-05-12 P3
+        # flagged.  Codex review (2026-05-12) explicitly calls for
+        # initialising the moist scan at the diagnosed LCL on
+        # cross-LCL steps; that is exactly what ``straddle_weight``
+        # interpolates.
+        straddle_weight = prev_below_lcl * (1.0 - below_lcl_k)
+        # On a straddle, the *moist* starting point is (T_lcl, p_lcl)
+        # because the dry leg has carried the parcel from p_prev to
+        # p_lcl.  On a pure above-LCL step (straddle_weight ≈ 0) the
+        # moist integration starts at the previous level.
+        T_moist_start = straddle_weight * T_lcl + (1.0 - straddle_weight) * T_prev_val
+        p_moist_start = straddle_weight * p_lcl + (1.0 - straddle_weight) * p_prev_val
+        dp_moist = p_k - p_moist_start
+
+        # Moist adiabat trapezoidal predictor-corrector from the
+        # (possibly shifted) start to p_k.
+        gamma_1 = moist_adiabat_lapse_rate(T_moist_start, p_moist_start)
+        T_pred_moist = T_moist_start + gamma_1 * dp_moist
+        gamma_2 = moist_adiabat_lapse_rate(T_pred_moist, p_k)
+        T_moist = T_moist_start + 0.5 * (gamma_1 + gamma_2) * dp_moist
+
+        # Dry adiabat exact: T = theta_dry * (p / p_ref)^kappa.
+        T_dry = theta_dry * (
+            jnp.clip(p_k, 1.0, None) / constants.p_ref
+        ) ** constants.kappa
+
+        T_new = below_lcl_k * T_dry + (1.0 - below_lcl_k) * T_moist
         T_new = jnp.clip(T_new, 100.0, 350.0).astype(_dtype)
-
         return (T_new, p_k.astype(_dtype)), T_new
 
-    # Initial state: temperature at surface level
-    init = (T_base, p_rev[:, 0])
-
-    # Scan over levels 1..nlev-1 (moving upward from surface)
-    # Transpose to (nlev-1, ncol) for scan
+    init = (T_base, p_base)
     p_scan = jnp.moveaxis(p_rev[:, 1:], 1, 0)  # (nlev-1, ncol)
-
     _, T_scan = jax.lax.scan(scan_step, init, p_scan)
-    # T_scan: (nlev-1, ncol) — levels from surface+1 to top
-
     T_scan = jnp.moveaxis(T_scan, 0, 1)  # (ncol, nlev-1)
 
-    # Prepend surface temperature
-    T_moist_rev = jnp.concatenate([T_base[:, None], T_scan], axis=1)  # (ncol, nlev)
-
-    # Reverse back to top-to-bottom ordering
+    T_moist_rev = jnp.concatenate([T_base[:, None], T_scan], axis=1)
     return T_moist_rev[:, ::-1]
 
 
@@ -285,32 +356,56 @@ def compute_cape(
     T_parcel: jax.Array,
     p_full: jax.Array,
     p_half: jax.Array,
+    q_v_env: jax.Array | None = None,
+    q_v_parcel: jax.Array | None = None,
 ) -> jax.Array:
     """Compute Convective Available Potential Energy (CAPE).
 
-    CAPE = R_d * sum(max(0, T_parcel - T_env) * dp / p)
+    ``CAPE = R_d * Σ max(0, T_v_parcel - T_v_env) * dp / p_mid``
 
-    where dp is the layer pressure thickness and the sum is over
-    all levels where the parcel is warmer than the environment.
+    where ``dp`` is the layer pressure thickness, ``p_mid`` is the
+    half-level midpoint, and the sum is over all levels where the
+    parcel is buoyant.  When ``q_v_env`` and ``q_v_parcel`` are
+    provided the buoyancy proxy is the **virtual temperature**
+    ``T_v = T (1 + (1/ε - 1) q_v)``; otherwise dry temperature is used
+    (legacy behaviour, ≈1% bias in tropical columns — audit
+    2026-05-12 HIGH #4).
+
+    The parcel virtual-T uses ``q_sat(T_parcel, p)`` above the LCL
+    (saturated adiabat) and ``q_v_parcel`` below the LCL.  For
+    simplicity we use ``q_v_parcel`` everywhere when provided; for a
+    parcel rising along a saturated moist adiabat this is approximate
+    above LCL but the dominant CAPE contribution comes from the
+    saturated upper troposphere where ``q_v_parcel`` and ``q_sat`` are
+    close in the warm-rain regime.  Callers wanting the strict
+    saturated-parcel T_v should pass the saturated column from
+    :func:`saturation_mixing_ratio`.
 
     Parameters
     ----------
-    T_env : jax.Array
-        Environmental temperature [K], shape (ncol, nlev).
-    T_parcel : jax.Array
-        Parcel temperature [K], shape (ncol, nlev).
-    p_full : jax.Array
-        Pressure at full levels [Pa], shape (ncol, nlev).
-    p_half : jax.Array
-        Pressure at half levels [Pa], shape (ncol, nlev+1).
+    T_env, T_parcel : jax.Array, shape (ncol, nlev)
+        Environmental and parcel temperatures [K].
+    p_full : jax.Array, shape (ncol, nlev)
+        Full-level pressure [Pa].
+    p_half : jax.Array, shape (ncol, nlev+1)
+        Half-level pressure [Pa].
+    q_v_env, q_v_parcel : jax.Array, shape (ncol, nlev) or None
+        Optional water-vapor mixing ratio profiles [kg/kg].  Pass both
+        for the virtual-temperature CAPE.
 
     Returns
     -------
-    jax.Array
-        CAPE [J/kg], shape (ncol,).
+    jax.Array, shape (ncol,)
+        CAPE [J/kg].
     """
     dp = p_half[:, 1:] - p_half[:, :-1]  # (ncol, nlev)
-    buoyancy = jnp.maximum(0.0, T_parcel - T_env)
+    if q_v_env is not None and q_v_parcel is not None:
+        coeff = 1.0 / constants.epsilon - 1.0
+        Tv_env = T_env * (1.0 + coeff * q_v_env)
+        Tv_parcel = T_parcel * (1.0 + coeff * q_v_parcel)
+        buoyancy = jnp.maximum(0.0, Tv_parcel - Tv_env)
+    else:
+        buoyancy = jnp.maximum(0.0, T_parcel - T_env)
 
     # Use the half-level midpoint pressure for the discrete ``∫ dlnp``
     # approximation: ``(p_half[k+1] - p_half[k]) / p_mid`` with

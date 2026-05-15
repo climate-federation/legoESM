@@ -114,6 +114,7 @@ def tvd_tracer_to_edges(
     mesh: VoronoiMesh,
     upup_pos: jnp.ndarray,
     upup_neg: jnp.ndarray,
+    cell_active: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Van Leer TVD interpolation of cell-center tracer to edges.
 
@@ -131,6 +132,11 @@ def tvd_tracer_to_edges(
         Upwind-of-upwind cell for positive flow (from compute_upup_cells).
     upup_neg : jnp.ndarray, shape (nEdges,)
         Upwind-of-upwind cell for negative flow (from compute_upup_cells).
+    cell_active : jnp.ndarray, shape (nCells, nlev), optional
+        Per-cell, per-level active mask (1=ocean, 0=sub-seafloor).
+        When provided, sub-seafloor upup values are replaced with the
+        donor cell value, preventing the TVD limiter from seeing
+        T=0/S=0 below the seafloor and producing biased fluxes.
 
     Returns
     -------
@@ -148,6 +154,10 @@ def tvd_tracer_to_edges(
 
     # --- Positive flow (c1 → c2): donor = c1 ---
     tr_upup_pos = tr[upup_pos]                       # (nEdges, nlev)
+    # Replace sub-seafloor upup with donor value → r=0 → pure upwind
+    if cell_active is not None:
+        active_upup_pos = cell_active[upup_pos]      # (nEdges, nlev)
+        tr_upup_pos = jnp.where(active_upup_pos > 0.5, tr_upup_pos, tr_c1)
     delta_pos = tr_c2 - tr_c1                        # downstream - donor
     r_pos = (tr_c1 - tr_upup_pos) / jnp.where(
         jnp.abs(delta_pos) > eps, delta_pos, eps)
@@ -155,6 +165,9 @@ def tvd_tracer_to_edges(
 
     # --- Negative flow (c2 → c1): donor = c2 ---
     tr_upup_neg = tr[upup_neg]                       # (nEdges, nlev)
+    if cell_active is not None:
+        active_upup_neg = cell_active[upup_neg]      # (nEdges, nlev)
+        tr_upup_neg = jnp.where(active_upup_neg > 0.5, tr_upup_neg, tr_c2)
     delta_neg = tr_c1 - tr_c2                        # downstream - donor
     r_neg = (tr_c2 - tr_upup_neg) / jnp.where(
         jnp.abs(delta_neg) > eps, delta_neg, eps)

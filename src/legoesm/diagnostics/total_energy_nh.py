@@ -46,34 +46,41 @@ def compute_total_energy_nh(state, grid, hc) -> tuple[jax.Array, float]:
     te_total : float
         Globally-integrated total energy [J].
     """
-    # Reference profile broadcasts
-    dz_b = jnp.asarray(hc.dz)[None, None, None, :]            # (1,1,1,nlev)
-    rho_ref_b = jnp.asarray(hc.rho_ref)[None, None, None, :]
-    theta_ref_b = jnp.asarray(hc.theta_ref)[None, None, None, :]
-    exner_ref_b = jnp.asarray(hc.exner_ref)[None, None, None, :]
-    z_full_b = jnp.asarray(hc.z_full)[None, None, None, :]
+    # iter-45: promote to fp64 budget accumulator (see total_energy_pe).
+    from legoesm.core.conservation import _conservation_accumulator
+    acc = _conservation_accumulator()
 
-    rho_full = rho_ref_b + state.rho_prime.data            # (6,n,n,nlev)
-    theta_full = theta_ref_b + state.theta_prime.data
+    # Reference profile broadcasts
+    dz_b = jnp.asarray(hc.dz, dtype=acc)[None, None, None, :]
+    rho_ref_b = jnp.asarray(hc.rho_ref, dtype=acc)[None, None, None, :]
+    theta_ref_b = jnp.asarray(hc.theta_ref, dtype=acc)[None, None, None, :]
+    exner_ref_b = jnp.asarray(hc.exner_ref, dtype=acc)[None, None, None, :]
+    z_full_b = jnp.asarray(hc.z_full, dtype=acc)[None, None, None, :]
+
+    rho_full = rho_ref_b + state.rho_prime.data.astype(acc)  # (6,n,n,nlev)
+    theta_full = theta_ref_b + state.theta_prime.data.astype(acc)
     T = theta_full * exner_ref_b                          # K
 
     # KE: 0.5·(u² + v² + w_avg²) where w_avg is full-level average of
     # half-level w (legoESM convention).
-    u = state.u.data
-    v = state.v.data
-    w_half = state.w.data                                  # (..., nlev+1)
+    u = state.u.data.astype(acc)
+    v = state.v.data.astype(acc)
+    w_half = state.w.data.astype(acc)                      # (..., nlev+1)
     w_full = 0.5 * (w_half[..., :-1] + w_half[..., 1:])    # (..., nlev)
     ke = 0.5 * (u * u + v * v + w_full * w_full)
 
+    c_vd_acc = jnp.asarray(constants.c_vd, dtype=acc)
+    g_acc = jnp.asarray(constants.g, dtype=acc)
+
     # Internal energy + KE + PE per unit mass
-    e_specific = constants.c_vd * T + ke + constants.g * z_full_b
+    e_specific = c_vd_acc * T + ke + g_acc * z_full_b
     # Per-cell energy: mass × specific energy
     dm = rho_full * dz_b                                   # kg/m² per cell
     te_cell = dm * e_specific                              # J/m² per cell
     # Column integral
     te_per_m2 = jnp.sum(te_cell, axis=-1)                  # J/m² per column
     # Globally-summed: multiply by area
-    te_column = te_per_m2 * grid.area                       # J per column
+    te_column = te_per_m2 * grid.area.astype(acc)          # J per column
     te_total = float(jnp.sum(te_column))
     return te_column, te_total
 

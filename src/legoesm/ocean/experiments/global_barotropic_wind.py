@@ -122,7 +122,7 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         from legoesm.ocean.init import rest_state_ocean
         state = rest_state_ocean(
             grid, z_coord,
-            T_surface=config.T_uniform, T_deep=config.T_uniform,
+            T_water_init_C=config.T_uniform, T_deep=config.T_uniform,
             S_uniform=config.S_uniform,
         )
         lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
@@ -132,7 +132,7 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
         state = rest_state_latlon_cgrid_ocean(
             grid, z_coord,
-            T_surface=config.T_uniform, T_deep=config.T_uniform,
+            T_water_init_C=config.T_uniform, T_deep=config.T_uniform,
             S_uniform=config.S_uniform,
         )
         lon_1d = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
@@ -149,7 +149,7 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         from legoesm.ocean.init_mpas import rest_state_mpas_ocean
         state = rest_state_mpas_ocean(
             grid, z_coord,
-            T_surface=config.T_uniform, T_deep=config.T_uniform,
+            T_water_init_C=config.T_uniform, T_deep=config.T_uniform,
             S_uniform=config.S_uniform,
         )
         lon_deg = np.asarray(grid.lonCell, dtype=np.float64) * 180 / np.pi

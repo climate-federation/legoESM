@@ -207,18 +207,21 @@ def dst3_to_v_points(
     eps = 1e-30
     n_lat = f.shape[0]
 
-    # Cell height
+    # Face-to-face distance at interior v-faces.
     if hasattr(grid, "dy_v") and grid.dlat == 0.0:
-        dy = grid.dy_v[1, 0]  # scalar from interior row
+        # Tripolar: per-cell meridional spacing from 2D metrics.
+        dy_v_int = grid.dy_v[1:-1, 0]  # (n_lat-1,) from interior rows
     else:
-        dy = grid.radius * grid.dlat
+        # Regular or Mercator: variable-dy safe.
+        dy_h = grid.dy * 0.5                                # (n_lat,)
+        dy_v_int = 0.5 * (dy_h[1:] + dy_h[:-1])              # (n_lat-1,)
 
     # Interior v-faces: indices 1 to n_lat-1 (between cells 0..n_lat-2 and 1..n_lat-1)
     # Face i sits between cell i-1 (south) and cell i (north).
     mf_int = mass_flux_v[1:-1, :, :]   # (n_lat-1, n_lon, nlev)
     h_v_int = h_v[1:-1, :, :]
     vel_int = mf_int / jnp.maximum(h_v_int, eps)
-    cfl = jnp.minimum(jnp.abs(vel_int) * dt / dy, 1.0)
+    cfl = jnp.minimum(jnp.abs(vel_int) * dt / dy_v_int[:, jnp.newaxis, jnp.newaxis], 1.0)
 
     # Build stencil with ghost cells at boundaries (Neumann: copy boundary value)
     # Ghost: f[-1] = f[0], f[-2] = f[0] at south; f[n_lat] = f[n_lat-1] at north
@@ -1236,13 +1239,14 @@ def _zalesak_signsplit_face_alphas(
 
     # Spherical face metrics (mirroring divergence_cgrid).
     if hasattr(grid, "dy_u") and grid.dlat == 0.0:
+        # Tripolar: use full 2D metrics.
         face_dy = grid.dy_u[0, 0]                        # scalar
         face_dx = grid.dx_v[:, 0]                         # (n_lat+1,)
     else:
         R_planet = grid.radius
         dlon = grid.dlon
-        dlat = grid.dlat
-        face_dy = R_planet * dlat
+        # face_dy at h-points: cell-row meridional extent (1D, Mercator-safe).
+        face_dy = (grid.dy * 0.5)[:, jnp.newaxis, jnp.newaxis]  # (n_lat,1,1)
         lat = grid.lat
         lat_interior = 0.5 * (lat[:-1] + lat[1:])
         face_dx = R_planet * dlon * jnp.pad(

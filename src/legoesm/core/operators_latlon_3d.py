@@ -56,7 +56,12 @@ def gradient_y_3d(field_3d: jax.Array, grid: LatLonGrid) -> jax.Array:
     jax.Array : d(field)/dy, shape (n_lat, n_lon, nlev).
     """
     padded = pad_halo_latlon_3d(field_3d)
-    df_dy = (padded[2:, 1:-1] - padded[:-2, 1:-1]) / grid.dy
+    # grid.dy is (n_lat,); broadcast over (n_lon, nlev). The denominator
+    # is twice the cell-row's single-cell height, which equals the
+    # cell-centre-to-cell-centre 2-cell distance on uniform-dlat grids
+    # (the only setting this A-grid path is used in; Mercator is
+    # C-grid-only). Leading-order approximation on non-uniform grids.
+    df_dy = (padded[2:, 1:-1] - padded[:-2, 1:-1]) / grid.dy[:, None, None]
     return df_dy
 
 
@@ -76,8 +81,8 @@ def divergence_3d(u_3d: jax.Array, v_3d: jax.Array, grid: LatLonGrid) -> jax.Arr
     -------
     jax.Array : Divergence, shape (n_lat, n_lon, nlev).
     """
-    # Form fluxes with metric factors
-    flux_x = u_3d * (grid.dy * 0.5)
+    # Form fluxes with metric factors. grid.dy is (n_lat,) → broadcast.
+    flux_x = u_3d * (grid.dy * 0.5)[:, None, None]
     flux_y = v_3d * (grid.dx * 0.5)[:, :, None]
 
     flux_x_pad, flux_y_pad = pad_halo_vector_latlon_3d(flux_x, flux_y)
@@ -100,7 +105,7 @@ def vorticity_3d(u_3d: jax.Array, v_3d: jax.Array, grid: LatLonGrid) -> jax.Arra
     -------
     jax.Array : Vorticity, shape (n_lat, n_lon, nlev).
     """
-    v_metric = v_3d * (grid.dy * 0.5)
+    v_metric = v_3d * (grid.dy * 0.5)[:, None, None]
     u_metric = u_3d * (grid.dx * 0.5)[:, :, None]
 
     v_pad = pad_halo_latlon_vector_3d(v_metric)
@@ -134,9 +139,11 @@ def laplacian_3d(field_3d: jax.Array, grid: LatLonGrid) -> jax.Array:
         padded[1:-1, 2:] - 2.0 * field_3d + padded[1:-1, :-2]
     ) / (grid.dx**2 / 4.0)[:, :, None]
 
+    # Uniform-dlat second-derivative; this A-grid 3D Laplacian only
+    # runs on uniform global lat-lon grids (Mercator is C-grid-only).
     d2f_dy2 = (
         padded[2:, 1:-1] - 2.0 * field_3d + padded[:-2, 1:-1]
-    ) / (grid.dy**2 / 4.0)
+    ) / ((grid.dy**2 / 4.0)[:, None, None])
 
     return d2f_dx2 + d2f_dy2
 

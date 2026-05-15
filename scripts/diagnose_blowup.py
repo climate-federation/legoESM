@@ -164,7 +164,7 @@ def main():
         sponge_tau_inner_days=5.0,
         sponge_tau_outer_days=30.0,
         sss_piston_velocity=5.0e-7,
-        T_freeze_ocean=271.35,
+        T_freeze_ocean=_consts.T_freeze_ocean,
         H_max=H_max,
     )
     jra55_state = _setup_jra55_forcing_state(args, grid, "latlon", z_coord=z_coord)

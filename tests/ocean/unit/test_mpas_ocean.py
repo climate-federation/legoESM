@@ -71,7 +71,7 @@ def state(mesh, z_coord):
     """Rest-state initial condition."""
     return rest_state_mpas_ocean(
         mesh, z_coord,
-        T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+        T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
         H_max=500.0, land_lat_threshold=85.0,
     )
 
@@ -1238,7 +1238,7 @@ class TestMPASTVDAdvection:
         from legoesm.ocean.init_mpas import rest_state_mpas_ocean
 
         state = rest_state_mpas_ocean(
-            mesh, z_coord, T_surface=20.0, T_deep=2.0,
+            mesh, z_coord, T_water_init_C=20.0, T_deep=2.0,
             S_uniform=35.0, H_max=500.0, land_lat_threshold=85.0,
         )
         # Sharp T front at equator — broadcast to (nCells, nlev)

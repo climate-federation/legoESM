@@ -125,11 +125,24 @@ class Test8g_ConcentrationBounds:
 
 class Test8i_StefanBoltzmann:
     def test_lw_up_matches(self):
+        """Upward longwave from a grey surface.
+
+        For a surface with emissivity ε < 1, ``lw_up`` is the sum of
+        the surface emission ``ε σ T^4`` AND the reflected component
+        of the incident longwave ``(1 - ε) · lw_down``.  An earlier
+        version of this test omitted the reflection term and expected
+        only ``ε σ T^4``, which failed by ``(1 - ε) · lw_down / σ T^4``
+        — about 2-3 % at typical sea-ice conditions.
+        """
         state = make_ice_state(h=2.0, T_ice=260.0)
         forcing = make_forcing()
         new_state, resp = step_sea_ice(state, forcing, OCEAN_SST, OCEAN_U, OCEAN_V, CONFIG, 1.0, DT)
         T_sfc = new_state.T_ice.data
-        expected = CONFIG.emissivity_ice * constants.sigma_sb * T_sfc ** 4
+        lw_down = forcing.lw_down
+        expected = (
+            CONFIG.emissivity_ice * constants.sigma_sb * T_sfc ** 4
+            + (1.0 - CONFIG.emissivity_ice) * lw_down
+        )
         rel_err = jnp.abs(resp.lw_up - expected) / expected
         assert jnp.all(rel_err < 0.001)
 

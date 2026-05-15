@@ -26,7 +26,7 @@ def ocean_z_coord():
 def ocean_state(ocean_grid, ocean_z_coord):
     return rest_state_ocean(
         ocean_grid, ocean_z_coord,
-        T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+        T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
         H_max=4000.0,
     )
 

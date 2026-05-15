@@ -116,7 +116,11 @@ def bechtold_convection(
     ncol, nlev = T.shape
 
     # -- Column geometry, moist adiabat, CAPE ------------------------------
-    dz, rho, z = _compute_column_geometry(T, p_full, p_half)
+    # Pass q_v so dz / rho / z use virtual-temperature moist hydrostatic
+    # geometry (~1 % thicker / less dense in tropics) — consistent with
+    # the mass-flux closure path (mass_flux.diagnose_mass_flux_closure)
+    # and the simplified EDMF entry point.  See clean_physics iter-2 #2.
+    dz, rho, z = _compute_column_geometry(T, p_full, p_half, q_v=q_v)
     T_base = T[:, -1]
     q_base = q_v[:, -1]
     p_base = p_full[:, -1]
@@ -365,7 +369,18 @@ def bechtold_convection(
     # -- CMT --------------------------------------------------------------
     if config.enable_cmt:
         if config.enable_downdraft:
-            M_d = -config.downdraft_alpha * M_u_new * 0.3
+            # CMT downdraft profile = -downdraft_alpha · M_u · trigger,
+            # matching ``M_d_base = -downdraft_alpha · M_b · trigger``
+            # used by the subcloud rain-evap path above.  An earlier
+            # formulation had an extra hardcoded ``× 0.3`` factor on
+            # top of ``downdraft_alpha`` (effective 9 % instead of the
+            # canonical Tiedtke 30 %) AND omitted the RH trigger gate
+            # — fixed jointly with the Tiedtke scheme in iter-102/103.
+            M_d = (
+                -config.downdraft_alpha
+                * M_u_new
+                * downdraft_trigger[:, None]
+            )
         else:
             M_d = None
         du_dt_conv, dv_dt_conv = cmt_gregory_1997(

@@ -109,7 +109,7 @@ class TestMPIOceanConservationLongrun:
         state0 = rest_state_ocean(
             grid,
             z_coord,
-            T_surface=20.0,
+            T_water_init_C=20.0,
             T_deep=2.0,
             S_uniform=35.0,
             H_max=4000.0,

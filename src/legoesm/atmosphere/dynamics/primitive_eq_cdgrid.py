@@ -202,6 +202,33 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # FV3_3D iter 188: dt fallback for adaptive cap when dt_actual not passed. PE typical 50-200s.
 
 
+def validate_corner_div_damp_nord(nord: int) -> None:
+    """FV3_3D iter 890: explicit nord range validation.
+
+    FV3 namelist `nord` is documented integer in {0, 1, 2, 3}:
+      0  — del-2 only (no higher-order Laplacian)
+      1  — del-4 (one Laplacian iteration)
+      2  — del-6 (two Laplacian iterations)
+      3  — del-8 (three Laplacian iterations)
+
+    legoESM tested range: nord ∈ {0, 1, 2, 3} (regression-guarded
+    in iter-886/887/888/889).  Higher values are not FV3-canonical
+    and not regression-tested; raise to prevent silent misuse.
+
+    Raises
+    ------
+    ValueError
+        If nord < 0 or nord > 3.
+    """
+    if not isinstance(nord, (int,)) or nord < 0 or nord > 3:
+        raise ValueError(
+            f"corner_div_damp_nord={nord!r} outside FV3 namelist "
+            f"range {{0, 1, 2, 3}}.  legoESM only regression-tested "
+            f"for these values (iter 886-889).  Use 0 (del-2 only), "
+            f"1 (del-4, FV3 default), 2 (del-6), or 3 (del-8)."
+        )
+
+
 # ==============================================================================
 # FV3 D-grid tendency function (core implementation)
 # ==============================================================================
@@ -490,6 +517,9 @@ def fv3_hydrostatic_tendencies(
 
         # FV3_3D iter 18: del-(2*(nord+1)) damping (FV3 sw_core.F90:1725-1822, nord>0 path)
         # dd8 = (da_min_c*d4_bg)^(nord+1); ke_corr = damp2*delpc + dd8*divg_d
+        # FV3_3D iter 893: nord-loop preserved inline (1-ULP trace-reorder
+        # diff vs fv3_corner_laplacian_nord wrapper would break iter-22
+        # bit-for-bit test).  The wrapper is for unit tests only.
         if config.corner_div_damp_d4_bg > 0.0 and config.corner_div_damp_nord > 0:
             from legoesm.core._fv3_divergence_corner import (
                 fv3_corner_laplacian_iteration,
@@ -1055,8 +1085,29 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         self.grid = grid
         self.sigma_coord = sigma_coord
         self.config = config or CDGridPrimitiveEquationConfig()
+        # FV3_3D iter 902: enforce iter-890 nord range validation at
+        # model construction (fail-fast vs silent misuse).
+        validate_corner_div_damp_nord(self.config.corner_div_damp_nord)
         self.cdgrid = create_cubed_sphere_cdgrid(grid)
         self._target_mass = None
+
+    def reset_target_mass(self) -> None:
+        """Clear the anchored mass target (iter-20; mirrors iter-18 API)."""
+        self._target_mass = None
+
+    def set_target_mass(self, target_mass) -> None:
+        """Explicitly set the anchored mass target (iter-20; iter-19 API)."""
+        self._target_mass = target_mass
+
+    def compute_mass(self, state) -> jax.Array:
+        """Compute global ``∫ p_s dA`` in fp64 via ``global_integral``.
+
+        iter-21: API parity with the MPAS PE (iter-11), lat-lon PE
+        (iter-2/12), and spectral PE (iter-3) ``compute_mass``
+        helpers.  Reuses the existing fp64-clean ``global_integral``
+        path used by ``step()`` for the initial-mass snapshot.
+        """
+        return global_integral(state.p_s, self.grid)
 
     def _sync_dgrid_boundary(self, state: FV3HydrostaticState):
         """No-op: cross-face continuity via halo exchange (explicit sync seeds spurious v-wind)."""

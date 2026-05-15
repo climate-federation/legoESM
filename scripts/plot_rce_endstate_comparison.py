@@ -131,7 +131,7 @@ def main():
     sigma_full = next(iter(snaps.values()))["sigma_full"]
     # Reference p_full for the moist-adiabat overlay only — uses 1e5 Pa
     # surface pressure as a representative tropical value.
-    p_full_ref = sigma_full * 1e5
+    p_full_ref = sigma_full * constants.p_ref
     p_full_hPa = p_full_ref / 100.0
     T_sfc_ref = float(_scalar(next(iter(snaps.values()))["sst"]))
     T_madiabat = _moist_adiabat(T_sfc_ref, p_full_ref)

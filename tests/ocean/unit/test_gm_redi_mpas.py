@@ -576,7 +576,7 @@ def test_dycore_hook_runs_one_step_with_gm_redi():
     )
     state = rest_state_mpas_ocean(
         mesh_local, z_coord_local,
-        T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+        T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
         H_max=500.0, land_lat_threshold=85.0,
     )
     # Strong horizontal T gradient so GM/Redi has a clearly resolvable
@@ -635,7 +635,7 @@ def test_dycore_hook_default_none_unchanged():
     )
     state = rest_state_mpas_ocean(
         mesh_local, z_coord_local,
-        T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+        T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
         H_max=500.0, land_lat_threshold=85.0,
     )
     cfg = MPASOceanConfig(eos="linear", n_barotropic_substeps=8)

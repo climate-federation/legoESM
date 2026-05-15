@@ -133,7 +133,7 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         from legoesm.ocean.init import rest_state_ocean
         state = rest_state_ocean(
             grid, z_coord,
-            T_surface=config.T_reference,  # Use reference T as background
+            T_water_init_C=config.T_reference,  # Use reference T as background
             T_deep=config.T_reference,
             S_uniform=config.S_uniform,
             H_max=config.H_max,
@@ -144,7 +144,7 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
         state = rest_state_latlon_cgrid_ocean(
             grid, z_coord,
-            T_surface=config.T_reference,
+            T_water_init_C=config.T_reference,
             T_deep=config.T_reference,
             S_uniform=config.S_uniform,
             H_max=config.H_max,
@@ -155,7 +155,7 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         from legoesm.ocean.init_mpas import rest_state_mpas_ocean
         state = rest_state_mpas_ocean(
             grid, z_coord,
-            T_surface=config.T_reference,
+            T_water_init_C=config.T_reference,
             T_deep=config.T_reference,
             S_uniform=config.S_uniform,
             H_max=config.H_max,
@@ -166,7 +166,7 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         from legoesm.ocean.dynamics.spectral_ocean_pe import rest_state_spectral_ocean
         state = rest_state_spectral_ocean(
             grid, z_coord,
-            T_surface=config.T_reference,
+            T_water_init_C=config.T_reference,
             T_deep=config.T_reference,
             S_uniform=config.S_uniform,
             H_max=config.H_max,

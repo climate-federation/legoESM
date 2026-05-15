@@ -49,6 +49,43 @@ def safe_pow(x, p):
     return jnp.where(positive, safe_x ** p, 0.0)
 
 
+def donor_clamp_scale(q_avail, sink_total, dt, divisor_floor=1.0e-15):
+    """AD-safe donor clamp scale ``min(1, q / (sink·dt))``.
+
+    Returns the multiplicative scale that should be applied to all
+    sinks of a single hydrometeor species so the per-step removal does
+    not exceed the locally-available mass.  The naive
+    ``q / max(sink·dt, 1e-30)`` form has a VJP of ``-q / (sink·dt)²``
+    that overflows fp32 (max ≈ 3.4e38) whenever ``sink·dt`` is
+    smaller than ~1e-20.  The ``divisor_floor`` (default 1e-15)
+    bounds the divisor from below so the worst-case VJP magnitude is
+    ``q / 1e-30 ≈ 1e30`` — comfortably within fp32.  At the floor
+    ``jnp.maximum`` has zero subgradient, which is physically correct
+    (no scaling, no sensitivity to the tiny sink).
+
+    Parameters
+    ----------
+    q_avail : array
+        Available mass per unit air (positive part of the hydrometeor
+        mixing ratio).
+    sink_total : array
+        Combined sink rate [kg/kg/s] for the species in this step.
+    dt : float or array
+        Physics step [s].
+    divisor_floor : float, default 1e-15
+        Floor on ``sink_total · dt`` for AD safety.
+
+    Returns
+    -------
+    array
+        Multiplicative scale in ``[0, 1]``.  Identity (1.0) wherever
+        the per-step sink is below the floor (no clamp needed).
+    """
+    sink_dt_safe = jnp.maximum(sink_total * jnp.maximum(dt, 1.0e-10),
+                               divisor_floor)
+    return jnp.minimum(1.0, q_avail / sink_dt_safe)
+
+
 def saturation_adjustment(T, q_v, p_full, dt, sharpness=50.0, q_c=None):
     """Compute smooth saturation adjustment (condensation tendency).
 
@@ -172,7 +209,19 @@ def autoconversion_sb(q_c, N_c_eff, rho, k_au, x_star, sharpness=50.0, gamma_nor
     """
     q_c_pos = jnp.clip(q_c, 0.0)
     x_c = q_c_pos * rho / jnp.clip(N_c_eff, 1.0)
-    onset = jax.nn.sigmoid(sharpness * (x_c - x_star))
+    # SB autoconversion onset is a smooth transition at the
+    # mean-droplet-mass threshold ``x_star`` (~2.6e-10 kg).  Argument to
+    # the sigmoid must be NORMALISED by ``x_star`` so the switch sits
+    # at the right scale: with un-normalised ``sharpness · (x_c − x_star)``
+    # at ``sharpness = 50`` the sigmoid argument is O(5e-9) for any
+    # physical ``x_c`` and ``onset`` stuck at ≈ 0.5 — the threshold is
+    # effectively disabled and droplet-poor columns auto-converted at
+    # half strength.  Normalising by ``x_star`` makes ``sharpness`` a
+    # dimensionless steepness in fractional units of ``x_star``: the
+    # sigmoid then sweeps from 0 (x_c ≪ x_star) to 1 (x_c ≫ x_star)
+    # over an O(1/sharpness) range around x_c = x_star, matching the
+    # canonical SB 2001 / Seifert 2008 switch behaviour.
+    onset = jax.nn.sigmoid(sharpness * (x_c / x_star - 1.0))
     dq_c_au = k_au * q_c_pos ** 2 * onset * gamma_norm * rho
     dN_r_au = dq_c_au * rho / (x_star * 20.0)
     return dq_c_au, dN_r_au, x_c
@@ -233,13 +282,26 @@ def self_collection_breakup(N_r, q_r, rho, k_sc, breakup_sharpness, D_eq):
         / (jnp.pi / 6.0 * constants.rho_water)
     )
     D_r = safe_pow(D_r_arg, 1.0 / 3.0)
+    # ``breakup_sharpness`` has units of [1/m] — the default
+    # ``1e4 /m`` × ``(D_r − D_eq)`` with diameters O(1e-3 m) gives a
+    # sigmoid argument of O(1) at the canonical ~0.1 mm transition
+    # width around ``D_eq``.  Iter-98 incorrectly normalised this to
+    # ``(D_r/D_eq − 1.0)`` without lowering the default, producing
+    # an essentially-step-function transition; reverted in iter-99
+    # after codex stop-time review.
     breakup_frac = jax.nn.sigmoid(breakup_sharpness * (D_r - D_eq))
     dN_r_br = -dN_r_sc * breakup_frac
     return dN_r_sc, dN_r_br
 
 
-def rain_evaporation(q_v, q_r, q_sat, evap_coeff):
+def rain_evaporation(q_v, q_r, q_sat, evap_coeff, dt=None):
     """Compute rain evaporation in subsaturated air.
+
+    When ``dt`` is provided the returned evaporation rate is
+    donor-limited: ``evap · dt ≤ q_r``.  Without the limit one explicit
+    step can evaporate more rain than exists (and over-heat/cool the
+    column), since the Marshall-Palmer rate scales as ``q_r^0.525``
+    rather than ``q_r``.  Codex finding iter-3 #6.
 
     Parameters
     ----------
@@ -251,12 +313,20 @@ def rain_evaporation(q_v, q_r, q_sat, evap_coeff):
         Saturation mixing ratio [kg/kg].
     evap_coeff : float
         Evaporation rate coefficient.
+    dt : float, optional
+        Physics step [s].  When provided, clamp the evaporation rate
+        so ``evap · dt ≤ q_r`` (donor positivity).
 
     Returns
     -------
     array : Evaporation rate [kg/kg/s].
     """
     subsaturation = jnp.clip(q_sat - q_v, 0.0) / jnp.clip(q_sat, 1e-10)
+    q_r_pos = jnp.clip(q_r, 0.0, None)
     # Marshall-Palmer ventilation factor q_r^0.525 — fractional power has
     # an unbounded derivative at q_r=0; safe_pow handles the AD guard.
-    return evap_coeff * subsaturation * safe_pow(q_r, 0.525)
+    rate = evap_coeff * subsaturation * safe_pow(q_r_pos, 0.525)
+    if dt is not None:
+        max_rate = q_r_pos / jnp.maximum(dt, 1.0e-12)
+        rate = jnp.minimum(rate, max_rate)
+    return rate

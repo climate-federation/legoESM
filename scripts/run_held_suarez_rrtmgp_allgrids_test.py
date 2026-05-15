@@ -15,6 +15,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from legoesm import constants
+
 DAYS = 100
 NLEV = 20
 
@@ -38,7 +40,7 @@ def run_cubed_sphere(days, nlev):
     n = 16
     grid = create_cubed_sphere(n)
     sigma = standard_hybrid_levels(nlev)
-    dx = 6.371e6 * np.pi / (2 * n)
+    dx = constants.R_earth * np.pi / (2 * n)
     dt = 300.0  # Conservative dt
 
     config = CDGridPrimitiveEquationConfig(

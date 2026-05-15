@@ -211,6 +211,66 @@ _GUARD_MODULES = (
     "test_fv3_spherical_geometry_iter613",           # iter-613 add
     "test_fv3_get_area_iter614",                     # iter-614 add
     "test_fv3_unit_vect_iter615",                    # iter-615 add
+    "test_fv3_intersect_iter616",                    # iter-616 add
+    "test_fv3_gnomonic_iter617",                     # iter-617 add
+    "test_fv3_get_center_vect_iter618",              # iter-618 add
+    "test_fv3_symm_ed_iter619",                      # iter-619 add
+    "test_fv3_gnomonic_ed_iter621",                  # iter-621 add
+    "test_fv3_gnomonic_grids_iter622",               # iter-622 add
+    "test_fv3_rot3d_gsum_iter623",                   # iter-623 add
+    "test_fv3_mirror_grid_iter624",                  # iter-624 add
+    "test_fv3_mirror_grid_sym_iter625",              # iter-625 add
+    "test_fv3_init_c2l_iter626",                     # iter-626 add
+    "test_fv3_native_grid_iter629",                  # iter-629 add
+    "test_fv3_edge_factors_iter631",                 # iter-631 add
+    "test_fv3_global_reductions_iter632",            # iter-632 add
+    "test_fv3_fill_ghost_iter633",                   # iter-633 add
+    "test_fv3_get_eta_level_iter634",                # iter-634 add
+    "test_fv3_compute_dz_zflip_iter635",             # iter-635 add
+    "test_fv3_sm1_edge_iter636",                     # iter-636 add
+    "test_fv3_compute_dz_L101_iter637",              # iter-637 add
+    "test_fv3_compute_dz_L32_iter638",               # iter-638 add
+    "test_fv3_hybrid_z_dz_iter639",                  # iter-639 add
+    "test_fv3_compute_dz_var_iter641",               # iter-641 add
+    "test_fv3_gw_1d_iter642",                        # iter-642 add
+    "test_fv3_mount_waves_iter643",                  # iter-643 add
+    "test_fv3_p_var_core_iter644",                   # iter-644 add
+    "test_fv3_drymadj_iter645",                      # iter-645 add
+    "test_fv3_hydro_eq_iter646",                     # iter-646 add
+    "test_fv3_set_eta_L60_iter647",                  # iter-647 add
+    "test_fv3_get_pt_on_gc_iter651",                 # iter-651 add
+    "test_fv3_dtoa_iter652",                         # iter-652 add
+    "test_fv3_ctoa_iter653",                         # iter-653 add
+    "test_fv3_atoc_iter654",                         # iter-654 add
+    "test_fv3_atod_iter655",                         # iter-655 add
+    "test_fv3_checker_tracers_iter657",              # iter-657 add
+    "test_fv3_terminator_iter658",                   # iter-658 add
+    "test_fv3_rotate_winds_iter661",                 # iter-661 add
+    "test_fv3_rankine_vortex_iter662",               # iter-662 add
+    "test_fv3_case9_iter664",                        # iter-664 add
+    "test_fv3_dcmip16_tc_sphum_iter666",             # iter-666 add
+    "test_fv3_dcmip16_bc_iter667",                   # iter-667 add
+    "test_fv3_dcmip16_bc_wind_iter668",              # iter-668 add
+    "test_fv3_dcmip16_tc_iter669",                   # iter-669 add
+    "test_fv3_bc_uwind_pert_iter671",                # iter-671 add
+    "test_fv3_tc_uwind_pert_iter672",                # iter-672 add
+    "test_fv3_a2b_ord4_vector_cc_to_corner_iter696", # iter-696 add
+    "test_fv3_a2b_ord4_nh_wiring_iter697",           # iter-697 add
+    "test_fv3_a2b_ord4_vector_uv_edge_impact_iter698", # iter-698 add
+    "test_fv3_a2b_ord4_vector_uv_c16_iter699",       # iter-699 add
+    "test_fv3_a2b_ord4_theta_corner_iter700",        # iter-700 add
+    "test_fv3_a2b_ord4_theta_corner_edge_impact_iter701", # iter-701 add
+    "test_fv3_a2b_zeta_corner_nh_impact_iter702",    # iter-702 add
+    "test_fv3_a2b_ord4_vector_uv_c24_iter703",       # iter-703 add
+    "test_fv3_nord_validation_iter890",              # iter-890 add
+    "test_fv3_wide_halo_iter891",                    # iter-891 add
+    "test_fv3_laplacian_nord_iter892",               # iter-892 add
+    "test_fv3_laplacian_step_pad_iter897",           # iter-897 add
+    "test_fv3_laplacian_step_pad_h2_iter898",        # iter-898 add
+    "test_fv3_expanding_halo_iter899",               # iter-899 add
+    "test_fv3_model_nord_validation_iter902",        # iter-902 add
+    "test_fv3_laplacian_step_pad_h3_iter903",        # iter-903 add
+    "test_fv3_expanding_halo_jit_grad_iter904",      # iter-904 add
 )
 
 
@@ -244,3 +304,17 @@ def test_guard_set_inventory_complete():
             f"Guard module {mod_name!r} declared in sweep but "
             f"file not found at {path}."
         )
+
+
+def test_guard_set_non_trivial_count_iter896():
+    """FV3_3D iter 896: sweep must contain >= 80 guard modules.
+
+    Regression guard against accidental sweep deletion / mass-truncate.
+    Pinned at conservative floor below current count to allow normal
+    additions/removals while catching destructive refactors.
+    """
+    assert len(_GUARD_MODULES) >= 80, (
+        f"FV3-fidelity guard sweep has {len(_GUARD_MODULES)} entries "
+        f"(< 80 floor).  Possible accidental truncation; verify "
+        f"iter-383+ guard accumulation is intact."
+    )

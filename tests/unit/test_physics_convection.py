@@ -459,26 +459,28 @@ def test_all_outputs_finite(scheme):
 #     EDMF with a_u=0.1 already active, the residual is order 1500 W/m^2.
 
 def test_dca_extended_mse_conservation():
-    """DCA: c_pd*int(dT) + L_v*int(dq_v + dq_c) ~ 0.
+    """DCA: c_pd*int(dT) + L_v*int(dq_v) ~ 0 (STANDARD MSE).
 
-    DCA preserves layer-mean T per pair (col_dT ~ 0) and conserves total
-    water (col_dqv = -col_dqc in net-drying columns).  The extended MSE
-    test passes by both effects independently.  The standard MSE
-    (c_pd*dT + L_v*dq_v) is intentionally NOT zero for DCA -- see the
-    block comment above.
+    DCA releases the latent heat of condensation inside the scheme via
+    the ``delta_T_lh`` per-pair correction (see ``dca.py`` lines
+    154-167) — the moist adjustment is internally consistent with
+    ``c_p ⟨ΔT⟩ + L_v ⟨Δq⟩ = 0`` per adjusting pair.  The earlier
+    documentation in this module described an older "no in-scheme
+    latent heating" version of DCA whose natural invariant was the
+    extended form ``c_pd·∫dT + L_v·∫(dq_v + dq_c) ~ 0``; the
+    current implementation closes the STANDARD form instead.  The
+    extended form is large positive (≈ L_v · column-condensate) by
+    design — the latent heating is in ``dT_dt``, not deferred.
     """
     T, q_v, p_full, p_half = _make_unstable_column()
     out = _call_scheme("dca", T, q_v, p_full, p_half)
 
     dp = p_half[:, 1:] - p_half[:, :-1]
-    ext = (
-        constants.c_pd * out.dT_dt
-        + constants.L_v * (out.dq_v_dt + out.dq_c_conv_dt)
-    )
-    col = jnp.sum(ext * dp / constants.g, axis=1)
+    std = constants.c_pd * out.dT_dt + constants.L_v * out.dq_v_dt
+    col = jnp.sum(std * dp / constants.g, axis=1)
     max_imbalance = float(jnp.max(jnp.abs(col)))
     assert max_imbalance < 10.0, (
-        f"DCA extended-MSE imbalance = {max_imbalance:.3e} W/m^2 > 10"
+        f"DCA standard-MSE imbalance = {max_imbalance:.3e} W/m^2 > 10"
     )
 
 

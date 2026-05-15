@@ -1332,7 +1332,7 @@ def rest_state_ocean_realistic(
     grid,
     z_coord,
     cfg: BathymetryConfig,
-    T_surface: float = 20.0,
+    T_water_init_C: float = 20.0,
     T_deep: float = 2.0,
     S_uniform: float = 35.0,
 ):
@@ -1346,7 +1346,7 @@ def rest_state_ocean_realistic(
     grid : CubedSphereGrid, VoronoiMesh, or GaussianGrid
     z_coord : OceanZStarCoordinate
     cfg : BathymetryConfig
-    T_surface : float
+    T_water_init_C : float
         Surface temperature [degC].
     T_deep : float
         Deep ocean temperature [degC].
@@ -1362,28 +1362,28 @@ def rest_state_ocean_realistic(
     # LatLonGrid: check first
     if _is_latlon_cgrid(grid):
         return _rest_state_latlon_cgrid(grid, z_coord, H_bathy, ocean_mask,
-                                          T_surface, T_deep, S_uniform)
+                                          T_water_init_C, T_deep, S_uniform)
 
     # CubedSphereGrid
     if hasattr(grid, 'n') and hasattr(grid, 'lat') and not hasattr(grid, 'nCells'):
         return _rest_state_cubed(grid, z_coord, H_bathy, ocean_mask,
-                                 T_surface, T_deep, S_uniform)
+                                 T_water_init_C, T_deep, S_uniform)
 
     # VoronoiMesh
     if hasattr(grid, 'nCells') and hasattr(grid, 'latCell'):
         return _rest_state_mpas(grid, z_coord, H_bathy, ocean_mask,
-                                T_surface, T_deep, S_uniform)
+                                T_water_init_C, T_deep, S_uniform)
 
     # GaussianGrid
     if hasattr(grid, 'n_lat') and not hasattr(grid, 'n'):
         return _rest_state_spectral(grid, z_coord, H_bathy, ocean_mask,
-                                    T_surface, T_deep, S_uniform)
+                                    T_water_init_C, T_deep, S_uniform)
 
     raise TypeError(f"Unsupported grid type: {type(grid)}")
 
 
 def _rest_state_latlon_cgrid(grid, z_coord, H_bathy, ocean_mask,
-                              T_surface, T_deep, S_uniform):
+                              T_water_init_C, T_deep, S_uniform):
     """Create lat-lon C-grid ocean rest state with given bathymetry.
 
     Delegates to ``rest_state_latlon_cgrid_ocean`` (which handles the
@@ -1394,7 +1394,7 @@ def _rest_state_latlon_cgrid(grid, z_coord, H_bathy, ocean_mask,
     from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
     return rest_state_latlon_cgrid_ocean(
         grid, z_coord,
-        T_surface=T_surface,
+        T_water_init_C=T_water_init_C,
         T_deep=T_deep,
         S_uniform=S_uniform,
         land_mask_override=ocean_mask,
@@ -1403,7 +1403,7 @@ def _rest_state_latlon_cgrid(grid, z_coord, H_bathy, ocean_mask,
 
 
 def _rest_state_cubed(grid, z_coord, H_bathy, ocean_mask,
-                      T_surface, T_deep, S_uniform):
+                      T_water_init_C, T_deep, S_uniform):
     """Create cubed-sphere ocean rest state with given bathymetry."""
     from legoesm.core.field import Field
     from legoesm.ocean.state import OceanState
@@ -1412,7 +1412,7 @@ def _rest_state_cubed(grid, z_coord, H_bathy, ocean_mask,
     nlev = z_coord.n_levels
 
     scale_depth = 1000.0
-    T_profile = T_deep + (T_surface - T_deep) * jnp.exp(z_coord.z_full_ref / scale_depth)
+    T_profile = T_deep + (T_water_init_C - T_deep) * jnp.exp(z_coord.z_full_ref / scale_depth)
     T_3d = jnp.broadcast_to(
         T_profile[jnp.newaxis, jnp.newaxis, jnp.newaxis, :],
         (6, n, n, nlev),
@@ -1437,7 +1437,7 @@ def _rest_state_cubed(grid, z_coord, H_bathy, ocean_mask,
 
 
 def _rest_state_mpas(mesh, z_coord, H_bathy, ocean_mask,
-                     T_surface, T_deep, S_uniform):
+                     T_water_init_C, T_deep, S_uniform):
     """Create MPAS ocean rest state with given bathymetry."""
     from legoesm.core.field import Field
     from legoesm.core.state import MPASOceanState
@@ -1447,7 +1447,7 @@ def _rest_state_mpas(mesh, z_coord, H_bathy, ocean_mask,
     nlev = z_coord.n_levels
 
     scale_depth = 1000.0
-    T_profile = T_deep + (T_surface - T_deep) * jnp.exp(z_coord.z_full_ref / scale_depth)
+    T_profile = T_deep + (T_water_init_C - T_deep) * jnp.exp(z_coord.z_full_ref / scale_depth)
     T_data = jnp.broadcast_to(T_profile[jnp.newaxis, :], (nCells, nlev))
 
     S_data = jnp.full((nCells, nlev), S_uniform)
@@ -1469,7 +1469,7 @@ def _rest_state_mpas(mesh, z_coord, H_bathy, ocean_mask,
 
 
 def _rest_state_spectral(grid, z_coord, H_bathy, ocean_mask,
-                         T_surface, T_deep, S_uniform):
+                         T_water_init_C, T_deep, S_uniform):
     """Create spectral ocean rest state with given bathymetry.
 
     Spectral ocean is soft-retired (#99); custom bathymetry and land masks
@@ -1491,7 +1491,7 @@ def _rest_state_spectral(grid, z_coord, H_bathy, ocean_mask,
         )
     return rest_state_spectral_ocean(
         grid, z_coord,
-        T_surface=T_surface,
+        T_water_init_C=T_water_init_C,
         T_deep=T_deep,
         S_uniform=S_uniform,
         H_max=float(H_np.flat[0]),

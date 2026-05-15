@@ -15,6 +15,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm import constants
+
 jax.config.update("jax_enable_x64", True)
 
 from legoesm.forcing.amip_config import (
@@ -51,7 +53,7 @@ class TestAMIPExperimentConfig:
         assert cfg.checkpoint_days == 0
 
     def test_to_dict_roundtrip(self):
-        cfg = AMIPExperimentConfig(resolution=24, days=365, S_0=1361.0)
+        cfg = AMIPExperimentConfig(resolution=24, days=365, S_0=constants.S_0)
         d = config_to_dict(cfg)
         cfg2 = config_from_dict(d)
         assert cfg == cfg2

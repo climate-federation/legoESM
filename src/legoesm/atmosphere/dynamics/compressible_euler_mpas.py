@@ -30,6 +30,10 @@ import jax.numpy as jnp
 
 from legoesm.core.field import Field
 from legoesm.core.state import MPASNonHydrostaticState, MPASNonHydrostaticTendencies
+from legoesm.core.conservation import (
+    compute_nh_dry_mass_mpas,
+    fix_mass_nonhydrostatic_mpas,
+)
 from legoesm.core.operators_voronoi import (
     # 3D-native operators (loop-free per-level computation).
     divergence_cell_3d,
@@ -69,6 +73,8 @@ class MPASCompressibleEulerConfig(NamedTuple):
     n_acoustic_substeps: int = 6
     use_coriolis: bool = True
     outer_integrator: str = "ssp_rk3"
+    fix_mass: bool = False                 # iter-8: opt-in anchored dry-mass fixer
+    anchor_mass_to_initial: bool = False   # iter-8: snapshot target on first step
 
 
 # ============================================================================
@@ -540,6 +546,23 @@ class MPASCompressibleEulerModel(IntegrationMixin):
         self.height_coord = height_coord
         self.terrain_metric = terrain_metric
         self.config = config or MPASCompressibleEulerConfig()
+        # iter-8: lazy fp64 dry-mass snapshot for anchor-to-initial.
+        self._target_mass: jax.Array | None = None
+
+    def reset_target_mass(self) -> None:
+        """Clear the anchored mass target (iter-18; see iter-4 SW twin)."""
+        self._target_mass = None
+
+    def set_target_mass(self, target_mass) -> None:
+        """Explicitly set the anchored mass target (iter-19)."""
+        self._target_mass = target_mass
+
+    def compute_dry_mass(self, state) -> jax.Array:
+        """Global dry mass ``∫ J · (rho_ref + rho_prime) · dz · dA`` (fp64)."""
+        return compute_nh_dry_mass_mpas(
+            state.rho_prime.data, self.height_coord,
+            self.terrain_metric, self.mesh,
+        )
 
     def tendencies(
         self,
@@ -551,12 +574,27 @@ class MPASCompressibleEulerModel(IntegrationMixin):
             self.config, physics_tendency,
         )
 
-    @partial(jax.jit, static_argnums=(0, 3))
     def step(
         self,
         state: MPASNonHydrostaticState,
         dt: float,
         physics_fn=None,
+    ) -> MPASNonHydrostaticState:
+        """Outer wrapper: snapshots dry mass on first call when
+        ``anchor_mass_to_initial`` is on (fp64, outside JIT)."""
+        if (self.config.fix_mass
+                and self.config.anchor_mass_to_initial
+                and self._target_mass is None):
+            self._target_mass = self.compute_dry_mass(state)
+        return self._step_jit(state, dt, physics_fn, self._target_mass)
+
+    @partial(jax.jit, static_argnums=(0, 3))
+    def _step_jit(
+        self,
+        state: MPASNonHydrostaticState,
+        dt: float,
+        physics_fn=None,
+        target_mass=None,
     ) -> MPASNonHydrostaticState:
         """Advance one time step using split-explicit RK3.
 
@@ -566,6 +604,9 @@ class MPASCompressibleEulerModel(IntegrationMixin):
         dt : float
         physics_fn : callable, optional
             Function (state, mesh, height_coord, terrain_metric) -> tendencies.
+        target_mass : jax.Array | None
+            Anchored dry mass; passed by ``step()``.  Skipped when fix_mass
+            is off OR ``anchor_mass_to_initial`` is off.
         """
         se_config = SplitExplicitConfig(
             n_substeps=self.config.n_acoustic_substeps,
@@ -598,8 +639,20 @@ class MPASCompressibleEulerModel(IntegrationMixin):
                 self.height_coord, self.terrain_metric, self.config,
             )
 
-        return split_explicit_step(
+        state_new = split_explicit_step(
             state, slow_tendency_fn, acoustic_update_fn, dt, se_config,
         )
+
+        # iter-8: anchored dry-mass fixer (opt-in via fix_mass +
+        # anchor_mass_to_initial).  Uniform additive correction to
+        # ``rho_prime``; preserves rho gradients (same property as
+        # cubed-sphere ``fix_mass_nonhydrostatic``).
+        if (self.config.fix_mass and target_mass is not None):
+            state_new = fix_mass_nonhydrostatic_mpas(
+                state_new, target_mass,
+                self.height_coord, self.terrain_metric, self.mesh,
+            )
+
+        return state_new
 
     # integrate() and integrate_scan() inherited from IntegrationMixin

@@ -108,7 +108,8 @@ def tiedtke_convection(
     ncol, nlev = T.shape
 
     # -- Column geometry, moist adiabat, CAPE ------------------------------
-    dz, rho, z = _compute_column_geometry(T, p_full, p_half)
+    # Use virtual-T moist hydrostatic geometry (clean_physics iter-2 #2).
+    dz, rho, z = _compute_column_geometry(T, p_full, p_half, q_v=q_v)
     T_base = T[:, -1]
     q_base = q_v[:, -1]
     p_base = p_full[:, -1]
@@ -371,7 +372,28 @@ def tiedtke_convection(
     # -- CMT --------------------------------------------------------------
     if config.enable_cmt:
         if config.enable_downdraft:
-            M_d = -config.downdraft_alpha * M_u_for_kernel * 0.3
+            # Downdraft mass flux profile for CMT:
+            #     M_d(z) = -downdraft_alpha · M_u(z) · downdraft_trigger
+            # where ``downdraft_alpha`` is the canonical Tiedtke 1989
+            # ~30 % LFS ratio and ``downdraft_trigger`` is the RH-based
+            # column gate computed for the subcloud rain-evap branch
+            # (sigmoid on below-LCL RH < downdraft_RH_min, ≈1 in dry
+            # columns, ≈0 in moist columns).
+            #
+            # An earlier formulation multiplied by a hardcoded ``× 0.3``
+            # on top of ``downdraft_alpha`` and *omitted* the
+            # ``downdraft_trigger`` gate (iter-102): the literal × 0.3
+            # gave a 9 % effective ratio, and removing it alone (without
+            # the trigger) amplified CMT downdraft in moist columns
+            # where no real downdraft forms — codex stop-time follow-up.
+            # iter-103 applies BOTH the canonical ``downdraft_alpha``
+            # ratio AND the RH trigger so CMT downdraft is consistent
+            # with the rain-evap path's M_d_base.
+            M_d = (
+                -config.downdraft_alpha
+                * M_u_for_kernel
+                * downdraft_trigger[:, None]
+            )
         else:
             M_d = None
         du_dt_conv, dv_dt_conv = cmt_gregory_1997(

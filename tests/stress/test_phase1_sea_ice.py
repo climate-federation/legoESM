@@ -8,6 +8,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
+from legoesm import constants
 from legoesm.ice.sea_ice import step_sea_ice
 from legoesm.ice.state import SeaIceState, DynamicSeaIceState, init_dynamic_ice_state
 from legoesm.ice.config import SeaIceConfig
@@ -321,17 +322,25 @@ class TestSeaIceComponent:
     # 1A.7  Free-drift velocity bounds
     # ------------------------------------------------------------------
     def test_free_drift_bounds(self):
-        """Free-drift velocity should have physically reasonable magnitude.
+        """Free-drift velocity should match the Zubov-style drag balance.
 
-        The formula is: u_ice = drag_ocean * u_ocean + drag_atm * (rho_air/rho_ice) * u_wind.
-        Both drag coefficients are O(1e-3), so ice speed is much smaller than
-        either wind or ocean current.
+        Iter-86: switched the heuristic from the dimensionally-inconsistent
+        ``drag_ocean*U_w + (drag_atm*rho_air/rho_ice)*U_a`` (which produced
+        ~1e-4 m/s ice drift) to the steady-state air/ocean drag balance
+
+            u_ice = U_w + alpha * (U_a - U_w),
+            alpha = sqrt(rho_air * C_ai / (rho_ocean * C_oi)).
+
+        With CICE-default drag coefficients ``alpha ≈ 0.017`` (the 1-2 %
+        Nansen / Zubov rule).
         """
+        import math
         shape = (6, 4, 4)
         drag_ocean = 5.5e-3
         drag_atm = 1.3e-3
-        rho_air = 1.225
-        rho_ice = 917.0
+        rho_air = constants.rho_air
+        rho_ocean = constants.rho_ocean
+        alpha = math.sqrt(rho_air * drag_atm / (rho_ocean * drag_ocean))
 
         # Case 1: nonzero wind, small ocean current
         wind_u = jnp.full(shape, 10.0)
@@ -347,28 +356,29 @@ class TestSeaIceComponent:
         # Ice speed should be positive (both forces push in +x)
         assert jnp.all(speed > 0.0), "Ice speed should be nonzero"
 
-        # Ice speed should be much less than wind speed (drag << 1)
+        # Ice speed should be much less than wind speed (alpha << 1)
         wind_speed = jnp.sqrt(wind_u**2 + wind_v**2)
         assert jnp.all(speed < wind_speed), (
             f"Ice speed should be less than wind speed: "
             f"max ice = {jnp.max(speed).item():.4f}"
         )
 
-        # Check expected magnitude:
-        # drag_ocean * 0.1 + drag_atm * (rho_air/rho_ice) * 10
-        expected = drag_ocean * 0.1 + drag_atm * (rho_air / rho_ice) * 10.0
-        assert jnp.allclose(speed, expected, rtol=1e-10), (
-            f"Ice speed mismatch: got {jnp.mean(speed).item():.6e}, expected {expected:.6e}"
+        # u_ice = 0.1 + alpha * (10 - 0.1)
+        expected = 0.1 + alpha * (10.0 - 0.1)
+        assert jnp.allclose(speed, expected, rtol=1e-6), (
+            f"Ice speed mismatch: got {jnp.mean(speed).item():.6e}, "
+            f"expected {expected:.6e}"
         )
 
-        # Case 2: zero wind => ice speed = drag_ocean * ocean_current
+        # Case 2: zero wind => ice moves with ocean current minus alpha*ocean.
         u_ice_calm, v_ice_calm = free_drift_velocity(
             ocean_u, ocean_v,
             jnp.zeros(shape), jnp.zeros(shape),
         )
         speed_calm = jnp.sqrt(u_ice_calm**2 + v_ice_calm**2)
-        expected_calm = drag_ocean * 0.1
+        # u_calm = 0.1 + alpha * (0 - 0.1) = 0.1 * (1 - alpha)
+        expected_calm = 0.1 * (1.0 - alpha)
         assert jnp.allclose(speed_calm, expected_calm, atol=1e-10), (
-            f"Zero-wind ice speed should be drag_ocean * ocean_speed: "
+            f"Zero-wind ice speed mismatch: "
             f"got {jnp.mean(speed_calm).item():.6e}, expected {expected_calm:.6e}"
         )

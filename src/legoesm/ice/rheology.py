@@ -214,6 +214,7 @@ def evp_stress_update(
     T_evp: float,
     dt_s: float,
     N_evp: int,
+    Delta_min: float = 2.0e-9,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Single EVP subcycle stress update (Hunke & Dukowicz 1997).
 
@@ -249,6 +250,11 @@ def evp_stress_update(
     N_evp : int
         Number of EVP subcycles per dynamic step.  Required to recover
         the correct relaxation timescale.
+    Delta_min : float
+        Deformation-rate regulariser [1/s] passed through to
+        :func:`delta_deformation`.  Threaded from ``SeaIceConfig.Delta_min``
+        so users can tune the EVP plastic-yield smoothness from the
+        config rather than relying on the hard-coded default.
 
     Returns
     -------
@@ -256,7 +262,7 @@ def evp_stress_update(
         Updated stress tensor [N/m].
     """
     del dt_s  # currently unused; see docstring
-    Delta = delta_deformation(eps_11, eps_22, eps_12, e_yield)
+    Delta = delta_deformation(eps_11, eps_22, eps_12, e_yield, Delta_min)
 
     # VP target stress
     s11_vp, s22_vp, s12_vp = vp_stress(

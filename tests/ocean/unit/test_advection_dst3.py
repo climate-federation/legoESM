@@ -12,6 +12,8 @@ import jax
 import jax.numpy as jnp
 import pytest
 
+from legoesm import constants
+
 jax.config.update("jax_enable_x64", True)
 
 
@@ -230,7 +232,7 @@ class TestDST3Horizontal:
 
     def _make_grid(self, n_lat=10, n_lon=20):
         from legoesm.grids.latlon import create_latlon_grid
-        return create_latlon_grid(n_lat=n_lat, n_lon=n_lon, radius=6.371e6)
+        return create_latlon_grid(n_lat=n_lat, n_lon=n_lon, radius=constants.R_earth)
 
     def test_uniform_tracer_at_u_points(self):
         """Uniform tracer gives T_face = T everywhere."""
@@ -324,7 +326,7 @@ class TestMultidimAdvection:
 
     def _make_grid(self, n_lat=10, n_lon=20):
         from legoesm.grids.latlon import create_latlon_grid
-        return create_latlon_grid(n_lat=n_lat, n_lon=n_lon, radius=6.371e6)
+        return create_latlon_grid(n_lat=n_lat, n_lon=n_lon, radius=constants.R_earth)
 
     def test_conservation(self):
         """Total tracer (sum h*T*area) is conserved by multi-dim advection."""

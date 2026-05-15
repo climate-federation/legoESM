@@ -160,7 +160,6 @@ def fv_flux_divergence_latlon(q, u, v, grid, limiter=True):
         Flux divergence tendency: dq/dt = -div(q * v).
     """
     R = grid.radius
-    dlat = grid.dlat
     dlon = grid.dlon
 
     # Pad with halo=2
@@ -176,8 +175,9 @@ def fv_flux_divergence_latlon(q, u, v, grid, limiter=True):
 
     q_face_lon = jnp.where(u_iface >= 0, q_L_lon, q_R_lon)
 
-    # Edge length perpendicular to longitude (hy = R * dlat, constant)
-    hy = R * dlat
+    # Edge length perpendicular to longitude: cell-row height
+    # (1D over latitude → Mercator-safe).
+    hy = (grid.dy * 0.5)[:, None]                            # (n_lat, 1)
     Phi_lon = u_iface * hy * q_face_lon  # (n_lat, n_lon+1)
 
     # --- Latitude flux ---
@@ -293,8 +293,8 @@ def fv_gradient_lat(q, grid):
     # Gradient: (right - left) / cell_width
     dq = q_edges[1:, :] - q_edges[:-1, :]  # (n_lat, n_lon)
 
-    # grid.dy spans 2 cells, single-cell = dy/2
-    return dq / (grid.dy / 2.0)
+    # grid.dy spans 2 cells, single-cell = dy/2 (broadcast over lon).
+    return dq / (grid.dy[:, None] / 2.0)
 
 
 def fv_gradient_lon_3d(q_3d, grid, padded=None):
@@ -358,7 +358,7 @@ def fv_gradient_lat_3d(q_3d, grid, padded=None):
     q_hat_t = _ppm_edge_values(q_t)                      # (n_lon, n_lat+3, nlev)
     q_edges_t = q_hat_t[:, 1:-1, :]                      # (n_lon, n_lat+1, nlev)
     dq_t = q_edges_t[:, 1:, :] - q_edges_t[:, :-1, :]    # (n_lon, n_lat, nlev)
-    return jnp.swapaxes(dq_t, 0, 1) / (grid.dy / 2.0)
+    return jnp.swapaxes(dq_t, 0, 1) / (grid.dy[:, None, None] / 2.0)
 
 
 # ==============================================================================
@@ -390,7 +390,6 @@ def cgrid_fv_flux_divergence_latlon(q, u_face, v_face, grid, limiter=True):
         Flux divergence tendency: dq/dt = -div(q * v).
     """
     R = grid.radius
-    dlat = grid.dlat
     dlon = grid.dlon
     n_lat = grid.n_lat
 
@@ -401,8 +400,9 @@ def cgrid_fv_flux_divergence_latlon(q, u_face, v_face, grid, limiter=True):
     q_L_lon, q_R_lon = _ppm_reconstruct_lon(q_pad, limiter)  # (n_lat, n_lon+1)
     q_face_lon = jnp.where(u_face >= 0, q_L_lon, q_R_lon)
 
-    # Face length perpendicular to longitude: R * dlat (constant)
-    hy = R * dlat
+    # Face length perpendicular to longitude: cell-row height (1D over
+    # latitude → Mercator-safe).
+    hy = (grid.dy * 0.5)[:, None]                            # (n_lat, 1)
     Phi_lon = u_face * hy * q_face_lon  # (n_lat, n_lon+1)
 
     # --- Latitude flux ---
@@ -433,9 +433,8 @@ def _cgrid_velocity_divergence(u_face, v_face, grid):
     jax.Array, shape (n_lat, n_lon)
     """
     R = grid.radius
-    dlat = grid.dlat
     dlon = grid.dlon
-    hy = R * dlat
+    hy = (grid.dy * 0.5)[:, None]                            # (n_lat, 1)
     lat_v = lat_v_interfaces(grid)
     hx_iface = R * dlon * jnp.maximum(jnp.cos(lat_v), 1e-10)[:, None]
 

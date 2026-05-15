@@ -92,7 +92,7 @@ class SilvestriConfig:
 
     # --- Linear EOS ---
     alpha_T: float = 2.0e-4
-    rho_0: float = 1025.0
+    rho_0: float = constants.rho_ocean
     T_ref: float = 10.0
     S_uniform: float = 35.0
 
@@ -217,7 +217,7 @@ def create_initial_state(grid, z_coord, wall_mask, cfg: SilvestriConfig):
     """
     state = rest_state_latlon_cgrid_ocean(
         grid, z_coord,
-        T_surface=cfg.T_ref, T_deep=cfg.T_ref,
+        T_water_init_C=cfg.T_ref, T_deep=cfg.T_ref,
         S_uniform=cfg.S_uniform,
         H_max=cfg.H_max,
         land_mask_override=jnp.array(wall_mask),

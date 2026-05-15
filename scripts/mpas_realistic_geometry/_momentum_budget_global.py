@@ -106,7 +106,7 @@ def main():
     T_data = jnp.broadcast_to(T_ref[None, :], (mesh.nCells, 20))
     T_data = jnp.where(pc_coord.is_active, T_data, 0.0)
     S_data = jnp.where(pc_coord.is_active, jnp.full_like(T_data, 35.0), 0.0)
-    state = rest_state_mpas_ocean(mesh, z_coord, T_surface=20.0, T_deep=2.0,
+    state = rest_state_mpas_ocean(mesh, z_coord, T_water_init_C=20.0, T_deep=2.0,
         S_uniform=35.0, H_max=5500.0, land_lat_threshold=90.0)
     dtype = state.eta.data.dtype
     state = state._replace(

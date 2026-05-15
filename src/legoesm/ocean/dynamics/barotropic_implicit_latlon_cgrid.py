@@ -47,9 +47,9 @@ Differentiability: ``jax.scipy.sparse.linalg.cg`` is differentiable
 through implicit-function-theorem custom-VJP.
 
 Tracer transport consistency: returns ``(Hu_avg, Hv_avg)`` =
-``½·(H_old·U^n + H_new·U^{n+1})`` (and similar for V) — trapezoidal-rule
-estimator of the time-integrated face transport, matching the explicit
-substep's box-averaged Hu_avg interface.
+``H_old · [(1-θ)·U^n + θ·U^{n+1}]`` — time-averaged face transport using
+the OLD face thickness, ensuring ``div(Hu_avg) = (η_old − η_new)/dt``
+exactly (required for flux-form tracer conservation on partial cells).
 """
 
 from __future__ import annotations
@@ -253,15 +253,20 @@ def _make_diag_preconditioner(
             + H_v_S * dx_v_S / jnp.maximum(dy_v_S, 1.0e-30)
         ) * inv_area
     else:
-        # Regular lat-lon: dy_u, dy_v constant; dx_u 1D in lat;
-        # dx_v 1D in lat with poles=0.  Bit-exact with prior code.
+        # Regular lat-lon or Mercator: variable-dy safe.
         R = grid.radius
         dlon = grid.dlon
-        dlat = grid.dlat
         cos_lat_c = grid.cos_lat
         dx_u = R * dlon * cos_lat_c                      # (n_lat,)
-        dy_v = R * dlat                                  # scalar
-        dy_u = R * dlat                                  # scalar
+
+        # u-face meridional extent: cell row j's height.
+        dy_h = grid.dy * 0.5                             # (n_lat,)
+        dy_u = dy_h                                      # alias
+
+        # v-face cell-centre-to-cell-centre distance: depends on row pair.
+        dy_v_int = 0.5 * (dy_h[1:] + dy_h[:-1])          # (n_lat-1,)
+        dy_v_face = jnp.pad(dy_v_int, (1, 1), mode='edge')  # (n_lat+1,)
+
         lat = grid.lat
         lat_v_int = 0.5 * (lat[:-1] + lat[1:])
         lat_v = jnp.concatenate([
@@ -273,11 +278,12 @@ def _make_diag_preconditioner(
         dx_v = R * cos_lat_v * dlon                      # (n_lat+1,)
 
         diag_zonal = (
-            (H_u_E + H_u_W) * dy_u / dx_u[:, None]
+            (H_u_E + H_u_W) * dy_u[:, None] / dx_u[:, None]
         ) * inv_area
         diag_merid = (
-            H_v_N * dx_v[1:, None] + H_v_S * dx_v[:-1, None]
-        ) / dy_v * inv_area
+            H_v_N * dx_v[1:, None] / dy_v_face[1:, None]
+            + H_v_S * dx_v[:-1, None] / dy_v_face[:-1, None]
+        ) * inv_area
 
     # Diagonal of the Helmholtz operator A = I - coeff·∇·(H·∇):
     # diag(A) = 1 + coeff · (diag_zonal + diag_merid)
@@ -484,11 +490,15 @@ def barotropic_implicit_latlon_cgrid(
     H_u_new, H_v_new = _h_total_at_faces(
         h_k_new, min_water_col, mask, grid,
     )
-    Hu_avg = (
-        (1.0 - theta_eta) * H_u_old * U_old + theta_eta * H_u_new * U_new
+    # Use H_old consistently so that div(Hu_avg) = (eta_old - eta_new)/dt
+    # exactly — required for flux-form tracer conservation.  The Helmholtz
+    # solve used H_old throughout; using H_new here breaks the discrete
+    # continuity closure on partial cells.
+    Hu_avg = H_u_old * (
+        (1.0 - theta_eta) * U_old + theta_eta * U_new
     ) * u_mask
-    Hv_avg = (
-        (1.0 - theta_eta) * H_v_old * V_old + theta_eta * H_v_new * V_new
+    Hv_avg = H_v_old * (
+        (1.0 - theta_eta) * V_old + theta_eta * V_new
     ) * v_mask
 
     # ----- Step 8: update 3D velocity (preserve baroclinic structure) --

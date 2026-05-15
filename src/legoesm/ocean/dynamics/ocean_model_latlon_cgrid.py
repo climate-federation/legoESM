@@ -542,8 +542,12 @@ class LatLonCGridOceanModel:
         g = self.config.g
         H_max = self.z_coord.H_max
         n_sub = self.config.n_barotropic_substeps
-        # grid.dx and grid.dy are "distance over 2 cells", so cell width = dx/2
-        dx_min = min(float(jnp.min(self.grid.dx)) / 2.0, self.grid.dy / 2.0)
+        # grid.dx and grid.dy are "distance over 2 cells", so cell width = dx/2.
+        # grid.dy is (n_lat,) — take the global min (Mercator-safe).
+        dx_min = min(
+            float(jnp.min(self.grid.dx)) / 2.0,
+            float(jnp.min(self.grid.dy)) / 2.0,
+        )
 
         c_baro = math.sqrt(g * H_max)
         dt_baro = dt / n_sub
