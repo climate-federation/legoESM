@@ -469,8 +469,13 @@ def gradient_y_cgrid(
 
     # Interior v-faces: i=1..n_lat-1
     f_diff = f[1:] - f[:-1]
-    bcast = (slice(None),) + (jnp.newaxis,) * (f_diff.ndim - 1)
-    df_interior = f_diff / dy_v_interior[bcast]    # (n_lat-1, n_lon, ...)
+    if dy_v_interior.ndim < f_diff.ndim:
+        # 1D dy (regular/Mercator): broadcast over lon and level axes
+        bcast = (slice(None),) + (jnp.newaxis,) * (f_diff.ndim - 1)
+        df_interior = f_diff / dy_v_interior[bcast]
+    else:
+        # 2D/3D dy (tripolar): already shaped for direct division
+        df_interior = f_diff / dy_v_interior
 
     # Boundary: wall BC (zero) on regular lat-lon; fold gradient on tripolar.
     fold = getattr(grid, "fold", None)
