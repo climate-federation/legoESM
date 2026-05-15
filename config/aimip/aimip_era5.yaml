@@ -1,0 +1,61 @@
+# AIMIP shared base configuration.
+#
+# Loaded by ``scripts/run_aimip.py``.  Variant overlays under this
+# directory are merged on top of this base (dict-merge — overlay keys
+# replace base keys).  See ``config/aimip/variant_*.yaml`` and
+# ``config/aimip/aimip_suite.yaml``.
+#
+# Loss:
+#   - Variants {classical, column_nn, sfno_physics} share
+#     ``combined_loss`` (training/losses.py) with the per-variable
+#     weights below.  Variant ``sfno_full`` (when enabled) uses the
+#     internal spectral loss of ``train_neural_gcm_spectral``; values
+#     are still comparable in rank-order to the grid-MSE because of
+#     ``normalize_by_scale=True``.
+# Optimizer:
+#   - Default is MUON (``optax.contrib.muon``) per the project's
+#     training preference.  Variants may override.
+
+# ----- ERA5 source --------------------------------------------------
+era5_zarr: "gs://weatherbench2/datasets/era5/1959-2023_01_10-wb13-6h-1440x721_with_derived_variables.zarr"
+cache_dir: ".cache/aimip_era5"
+train_period: ["2015-01-01", "2015-01-08"]
+eval_period:  ["2015-02-01", "2015-02-03"]
+years: [2015]
+
+n_train_days: 4
+n_eval_days: 2
+
+# ----- Grid + dycore ------------------------------------------------
+# Gaussian grid (SFNO requires this; classical + column_nn also run
+# on it, giving every AIMIP variant a common evaluation grid).
+aimip_grid: "gaussian"
+n_max: 42            # spectral truncation (T42 ≈ 2.8° grid)
+nlev: 10             # vertical levels (sigma)
+dt: 1800.0           # 30-minute dycore timestep
+
+# ----- Training -----------------------------------------------------
+aimip_n_epochs: 5
+aimip_lr: 3.0e-4
+aimip_warmup: 2
+aimip_weight_decay: 1.0e-5
+aimip_grad_clip: 1.0
+aimip_optimizer: "muon"   # muon | adamw | adam — see ml/training.create_optimizer
+
+# ----- Loss (LossConfig fields from training/losses.py) ------------
+loss:
+  w_T: 1.0
+  w_u: 0.5
+  w_v: 0.5
+  w_q: 0.2
+  w_ps: 0.3
+  spectral_weight: 0.0
+  level_weighting: "pressure"
+  normalize_by_scale: true
+  T_scale: 30.0
+  wind_scale: 20.0
+  q_scale: 5.0e-3
+  ps_scale: 1000.0
+
+# ----- Output -------------------------------------------------------
+output_dir: "results/aimip_001"

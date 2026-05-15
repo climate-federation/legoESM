@@ -1,0 +1,22 @@
+# AIMIP variant: classical physics.
+#
+# Tunes the scheme parameters of Tiedtke (convection), Louis
+# (turbulence), surface bulk fluxes, McFarlane (gravity wave drag),
+# and Xu-Randall (cloud fraction diagnostic) via end-to-end
+# differentiation through the dycore + physics rollout.
+#
+# See ``training/aimip_params.AIMIPClassicalParams`` for the
+# full list of trainable scheme knobs (~26 sigmoid-constrained
+# scalars).  Radiation is intentionally off in the smoke harness
+# so the loss reflects dynamic + tendency error against ERA5.
+
+aimip_variant: "classical"
+
+# Scheme selection — validated by ExperimentConfig.validate_strict.
+convection: "tiedtke"
+turbulence: "louis"
+gravity_wave_drag: "mcfarlane"
+cloud_scheme: "xu_randall"
+microphysics: "none"
+radiation: "gray"          # gray ≈ radiation-off for AIMIP smoke
+physics_parameterization: "none"

@@ -1,0 +1,22 @@
+# AIMIP variant: SFNO replaces grid-space physics, dycore retained.
+#
+# Trains an ``SFNOPhysics`` module (``training/sfno_dycore_coupling.py``)
+# in replacement-mode so the spectral PE dycore advances state while
+# physics tendencies come from the spherical Fourier neural operator.
+
+aimip_variant: "sfno_physics"
+
+convection: "none"
+turbulence: "none"
+gravity_wave_drag: "none"
+cloud_scheme: "none"
+microphysics: "none"
+radiation: "gray"
+physics_parameterization: "none"
+
+# SFNO architecture (matches the SFNOConfig defaults used in
+# ``training/sfno_dycore_coupling.py``).
+sfno_embed_dim: 128
+sfno_n_blocks: 4
+sfno_mlp_expansion: 4
+sfno_seed: 0

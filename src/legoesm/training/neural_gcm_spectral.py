@@ -101,6 +101,8 @@ class NeuralGCMSpectralConfig(NamedTuple):
     lr: float = 3e-4
     weight_decay: float = 1e-5
     grad_clip_norm: float = 1.0
+    optimizer: str = "adamw"     # adamw | adam | muon — passed to ml.training.create_optimizer
+    warmup_steps: int = 100      # used by the warmup-cosine schedule
 
     # Data
     n_train_days: int = 365      # Number of daily IC/target pairs
@@ -785,13 +787,18 @@ def _train_spectral_loop(
             cutoff_fraction=pe_config.spectral_filter_strength,
         )
 
-    optimizer = optax.chain(
-        optax.clip_by_global_norm(config.grad_clip_norm),
-        optax.adamw(config.lr, weight_decay=config.weight_decay),
-    )
-    opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
+    from legoesm.ml.training import TrainingConfig, create_optimizer
 
     n_steps_per_day = int(86400 / config.dt)
+    optimizer = create_optimizer(TrainingConfig(
+        lr=config.lr,
+        warmup_steps=config.warmup_steps,
+        total_steps=max(1, config.n_epochs * max(1, len(ic_states))),
+        weight_decay=config.weight_decay,
+        grad_clip_norm=config.grad_clip_norm,
+        optimizer=config.optimizer,
+    ))
+    opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
     loss_history = []
 
     logger.info(
