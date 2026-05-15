@@ -398,10 +398,27 @@ def _ascending_lat(da, lat_name: str):
     return da
 
 
-def _grid_edges_from_centers(centers_deg: np.ndarray) -> np.ndarray:
+def _grid_edges_from_centers(
+    centers_deg: np.ndarray,
+    periodic: bool = False,
+) -> np.ndarray:
     """Edges of a regular lat-lon grid given cell centres in degrees.
 
     Assumes uniform spacing.  Returns edges in **radians**.
+
+    Parameters
+    ----------
+    centers_deg : 1-D array
+        Cell centre coordinates in degrees.
+    periodic : bool
+        If True, force the last edge to be exactly ``first_edge + 360``
+        so the grid spans the full longitude circle.  This prevents
+        the conservative regridding from under-weighting the last cell
+        when the source grid's last centre is slightly less than
+        ``360 - dx/2`` (e.g. JRA55 TL319 at 640 points has its last
+        centre at 359.4375° and an inferred last edge at 359.72° —
+        0.28° short of 360°, causing a ~28% weight deficit on the
+        target grid's last column).
     """
     if centers_deg.size < 2:
         raise ValueError("Need at least 2 centres to infer edges")
@@ -409,6 +426,8 @@ def _grid_edges_from_centers(centers_deg: np.ndarray) -> np.ndarray:
     edges_deg = np.empty(centers_deg.size + 1, dtype=np.float64)
     edges_deg[:-1] = centers_deg - dx / 2.0
     edges_deg[-1] = centers_deg[-1] + dx / 2.0
+    if periodic:
+        edges_deg[-1] = edges_deg[0] + 360.0
     return np.deg2rad(edges_deg)
 
 
@@ -475,7 +494,8 @@ def build_jra55_cache(
     sample_da = _ascending_lat(ds[sample_var], _resolve_lat_lon_dims(ds[sample_var])[0])
     lat_name, lon_name = _resolve_lat_lon_dims(sample_da)
     src_lat_edges = _grid_edges_from_centers(sample_da[lat_name].values)
-    src_lon_edges = _grid_edges_from_centers(sample_da[lon_name].values)
+    src_lon_edges = _grid_edges_from_centers(
+        sample_da[lon_name].values, periodic=True)
 
     weights = compute_overlap_weights(
         src_lat_edges, src_lon_edges,
