@@ -2480,7 +2480,12 @@ def run_omip_single(grid_type: str, args) -> dict:
     H_bathy_init = None
     land_mask_init = None
     bathy_cfg = None
-    if args.bathymetry is not None:
+    if args.bathymetry is not None and grid_type != "mpas":
+        # MPAS bathymetry is handled after _init_rest_state via the
+        # PR 261 recipe (load_bathymetry_mpas + north cap + snap +
+        # partial cells). The generic path here has lat-lon-specific
+        # post-processing (equatorial smoothing, passage widening) that
+        # doesn't apply to unstructured meshes.
         from legoesm.ocean.bathymetry import BathymetryConfig, init_ocean_bathymetry
         bathy_cfg = BathymetryConfig(
             source="file",
