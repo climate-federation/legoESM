@@ -103,6 +103,16 @@ class NeuralGCMSpectralConfig(NamedTuple):
     grad_clip_norm: float = 1.0
     optimizer: str = "adamw"     # adamw | adam | muon — passed to ml.training.create_optimizer
     warmup_steps: int = 100      # used by the warmup-cosine schedule
+    # Early stopping (AIMIP-style "stop if no improvement after months
+    # of training" -- one epoch = full pass over the windowed train
+    # set).  ``early_stop_patience <= 0`` disables early stopping.
+    early_stop_patience: int = 0
+    early_stop_min_delta: float = 1.0e-3
+    # Optional list of ``(year, day_offset, n_days)`` windows for
+    # contiguous-within-window multi-year sampling without temporal
+    # leakage across windows.  ``None`` falls back to legacy
+    # single-window behaviour (``start_year``+``n_train_days``).
+    windows: tuple | None = None
 
     # Data
     n_train_days: int = 365      # Number of daily IC/target pairs
@@ -612,6 +622,7 @@ def load_training_data(
     grid: GaussianGrid,
     sigma: SigmaCoordinate,
     cache_dir: str = "data/era5_cache",
+    windows: list | None = None,
 ):
     """Load ERA5 daily IC/target pairs and convert to spectral states.
 
@@ -621,10 +632,18 @@ def load_training_data(
     Parameters
     ----------
     config : NeuralGCMSpectralConfig
+        Used for ``n_train_days`` / ``start_year`` when ``windows`` is None.
     grid : GaussianGrid
     sigma : SigmaCoordinate
     cache_dir : str
         Local cache directory for ERA5 Zarr data.
+    windows : list[tuple[int, int, int]] | None
+        Optional list of ``(year, day_offset, n_days)`` tuples.  When
+        provided, each window is sampled CONTIGUOUSLY (no cross-window
+        IC/target pairs, so no temporal leakage between windows) and
+        the results are concatenated.  This is the AIMIP-style
+        multi-year / multi-season sampling protocol.  When ``None``
+        the legacy single-window behaviour applies.
 
     Returns
     -------
@@ -639,7 +658,6 @@ def load_training_data(
         regrid_latlon_to_gaussian, regrid_2d_to_gaussian,
     )
     era5_config = TrainingERA5Config(dt_hours=6)
-    n_days = config.n_train_days
 
     # Open store once
     store = era5_config.zarr_store
@@ -652,23 +670,47 @@ def load_training_data(
     # time after that target to tolerate leap-day drift.
     import numpy as _np
 
-    try:
-        year_times = _np.array(
-            ds.time.values, dtype="datetime64[ns]",
+    def _year_to_idx(year: int) -> int:
+        try:
+            year_times = _np.array(ds.time.values, dtype="datetime64[ns]")
+            target_t = _np.datetime64(f"{int(year):04d}-01-01")
+            return int(_np.searchsorted(year_times, target_t))
+        except Exception:
+            return max(0, int(round((int(year) - 1959) * 365.25 * 4)))
+
+    if windows:
+        # AIMIP-style multi-window contiguous sampling.  Each window
+        # contributes its own (n_days+1) snapshots; pairs are only
+        # formed within a window so no cross-window leakage occurs.
+        window_specs: list[tuple[int, int, int]] = [
+            (int(y), int(off), int(n)) for (y, off, n) in windows
+        ]
+        time_indices: list[int] = []
+        window_offsets: list[tuple[int, int]] = []  # (start_in_time_indices, n_days)
+        for (year, day_offset, n_days_w) in window_specs:
+            start_idx_w = _year_to_idx(year) + int(day_offset) * 4
+            base = len(time_indices)
+            time_indices.extend(
+                start_idx_w + d * 4 for d in range(n_days_w + 1)
+            )
+            window_offsets.append((base, n_days_w))
+        n_days = sum(w[2] for w in window_specs)
+        logger.info(
+            f"Loading {n_days} daily ERA5 pairs across "
+            f"{len(window_specs)} windows: "
+            + ", ".join(f"{y}@day{o}+{n}" for (y, o, n) in window_specs)
+            + f" ({len(time_indices)} snapshots)..."
         )
-        target = _np.datetime64(f"{int(config.start_year):04d}-01-01")
-        start_idx = int(_np.searchsorted(year_times, target))
-    except Exception:
-        # Fallback: linear extrapolation from 1959-01-01 baseline.
-        start_idx = max(0, int(round((int(config.start_year) - 1959) * 365.25 * 4)))
-
-    time_indices = [start_idx + d * 4 for d in range(n_days + 1)]
-
-    logger.info(
-        f"Loading {n_days} daily ERA5 pairs from year "
-        f"{config.start_year} (start_idx={start_idx}; opening Zarr "
-        f"store once, reading {len(time_indices)} snapshots)..."
-    )
+    else:
+        n_days = config.n_train_days
+        start_idx = _year_to_idx(config.start_year)
+        time_indices = [start_idx + d * 4 for d in range(n_days + 1)]
+        window_offsets = [(0, n_days)]
+        logger.info(
+            f"Loading {n_days} daily ERA5 pairs from year "
+            f"{config.start_year} (start_idx={start_idx}; opening Zarr "
+            f"store once, reading {len(time_indices)} snapshots)..."
+        )
 
     # Read lat/lon and pressure levels
     lat = np.deg2rad(ds.lat.values.astype(np.float64))
@@ -745,14 +787,15 @@ def load_training_data(
 
     logger.info(f"Loaded {len(time_indices)} snapshots ({_time.time()-t0:.0f}s)")
 
-    # Build IC/target pairs
+    # Build IC/target pairs (per-window so no cross-window leakage)
     ic_states = []
     target_carries = []
-    for d in range(n_days):
-        ic_states.append(carry_to_spectral_state(carries[d], grid))
-        target_carries.append(carries[d + 1])
+    for (base, n_w) in window_offsets:
+        for d in range(n_w):
+            ic_states.append(carry_to_spectral_state(carries[base + d], grid))
+            target_carries.append(carries[base + d + 1])
 
-    logger.info(f"Built {n_days} IC/target pairs")
+    logger.info(f"Built {n_days} IC/target pairs across {len(window_offsets)} window(s)")
     return ic_states, target_carries
 
 
@@ -839,6 +882,11 @@ def _train_spectral_loop(
             )
         return loss_fn
 
+    best_loss = float("inf")
+    patience_counter = 0
+    early_stop_patience = int(getattr(config, "early_stop_patience", 0) or 0)
+    early_stop_min_delta = float(getattr(config, "early_stop_min_delta", 1.0e-3))
+
     for epoch in range(config.n_epochs):
         epoch_loss = 0.0
         t0 = time.time()
@@ -893,6 +941,24 @@ def _train_spectral_loop(
             save_checkpoint(model, ckpt_path)
             logger.info(f"Saved checkpoint: {ckpt_path}")
 
+        # AIMIP-style early stopping.  Stop when the rolling loss has
+        # not improved by more than ``early_stop_min_delta`` for
+        # ``early_stop_patience`` consecutive epochs.
+        if early_stop_patience > 0:
+            if best_loss - avg_loss > early_stop_min_delta:
+                best_loss = avg_loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= early_stop_patience:
+                    logger.info(
+                        f"Early stop at epoch {epoch}: no improvement "
+                        f"> {early_stop_min_delta} for "
+                        f"{early_stop_patience} consecutive epochs "
+                        f"(best={best_loss:.6f}, last={avg_loss:.6f})."
+                    )
+                    break
+
     return model, loss_history
 
 
@@ -925,7 +991,9 @@ def train_neural_gcm_spectral(
     logger.info(f"SFNO: {spec.n_channels}ch, {config.sfno_embed_dim}d, "
                 f"{config.sfno_n_blocks} blocks, {n_p:,} params")
 
-    ic_states, target_carries = load_training_data(config, grid, sigma, cache_dir)
+    ic_states, target_carries = load_training_data(
+        config, grid, sigma, cache_dir, windows=config.windows,
+    )
 
     return _train_spectral_loop(
         sfno, make_sfno_spectral_physics,
@@ -959,7 +1027,9 @@ def train_column_mlp_spectral(
     logger.info(f"Column MLP: {config.n_levels} levels, {hidden_dim}d, "
                 f"{n_layers} layers, {n_p:,} params")
 
-    ic_states, target_carries = load_training_data(config, grid, sigma, cache_dir)
+    ic_states, target_carries = load_training_data(
+        config, grid, sigma, cache_dir, windows=config.windows,
+    )
 
     return _train_spectral_loop(
         nn_phys, make_column_mlp_spectral_physics,
@@ -995,7 +1065,9 @@ def train_physics_params_spectral(
     for k, v in params.as_dict().items():
         logger.info(f"  {k} = {float(v):.4f}")
 
-    ic_states, target_carries = load_training_data(config, grid, sigma, cache_dir)
+    ic_states, target_carries = load_training_data(
+        config, grid, sigma, cache_dir, windows=config.windows,
+    )
 
     dt = config.dt
 

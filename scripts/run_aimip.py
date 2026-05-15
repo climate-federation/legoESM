@@ -129,6 +129,12 @@ def _build_spectral_config(cfg: dict[str, Any]):
         warmup_steps=int(cfg.get("aimip_warmup", 100)),
         n_train_days=int(cfg["n_train_days"]),
         start_year=int(cfg.get("train_year", cfg.get("years", [2015])[0])),
+        early_stop_patience=int(cfg.get("aimip_patience", 0)),
+        early_stop_min_delta=float(cfg.get("aimip_min_delta", 1.0e-3)),
+        windows=tuple(
+            tuple(int(x) for x in w[:3])
+            for w in (cfg.get("train_windows") or ())
+        ) or None,
         loss_config=loss_config,
         log_every=int(cfg.get("log_every", 1)),
         checkpoint_dir=str(Path(cfg["output_dir"]) / cfg["aimip_variant"]),
@@ -140,7 +146,7 @@ def _train_variant(variant: str, cfg: dict[str, Any], cache_dir: str):
     spec_cfg = _build_spectral_config(cfg)
 
     if variant == "classical":
-        return _train_aimip_classical(spec_cfg, cache_dir)
+        return _train_aimip_classical(spec_cfg, cache_dir, cfg=cfg)
 
     if variant == "column_nn":
         from legoesm.training.neural_gcm_spectral import (
@@ -167,7 +173,8 @@ def _train_variant(variant: str, cfg: dict[str, Any], cache_dir: str):
     raise ValueError(f"Unknown AIMIP variant: {variant!r}")
 
 
-def _train_aimip_classical(spec_cfg, cache_dir: str):
+def _train_aimip_classical(spec_cfg, cache_dir: str, *, cfg: dict | None = None):
+    cfg = cfg or {}
     """Train the AIMIP classical variant (Tiedtke/Louis/Surface/McFarlane/XR).
 
     Builds a Gaussian grid + spectral PE dycore, loads ERA5 daily
@@ -199,6 +206,7 @@ def _train_aimip_classical(spec_cfg, cache_dir: str):
 
     ic_states, target_carries = load_training_data(
         spec_cfg, grid, sigma, cache_dir,
+        windows=spec_cfg.windows,
     )
 
     dt = spec_cfg.dt
@@ -253,9 +261,14 @@ def _evaluate_variant(
     )
 
     spec_cfg = _build_spectral_config(cfg)
+    eval_windows_raw = cfg.get("eval_windows") or ()
+    eval_windows = tuple(
+        tuple(int(x) for x in w[:3]) for w in eval_windows_raw
+    ) or None
     eval_cfg = spec_cfg._replace(
         n_train_days=int(cfg.get("n_eval_days", 2)),
         start_year=int(cfg.get("eval_year", spec_cfg.start_year)),
+        windows=eval_windows,
     )
 
     grid = create_gaussian_grid(spec_cfg.n_max, dealiasing="quadratic")
@@ -263,7 +276,7 @@ def _evaluate_variant(
         spec_cfg.n_levels, sigma_top=spec_cfg.sigma_top,
     )
     ic_states, target_carries = load_training_data(
-        eval_cfg, grid, sigma, cache_dir,
+        eval_cfg, grid, sigma, cache_dir, windows=eval_cfg.windows,
     )
 
     pe_config = spec_cfg.pe_config
