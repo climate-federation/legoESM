@@ -1006,3 +1006,34 @@ def jra55_to_freshwater(
         runoff=slice.friver,
         ice_fw=jnp.zeros_like(slice.prra),
     )
+
+
+def regrid_jra55_slice(
+    slc: JRA55Slice,
+    regrid_weights,
+) -> JRA55Slice:
+    """Regrid all fields of a :class:`JRA55Slice` to a new grid.
+
+    Uses precomputed :class:`~legoesm.grids.regridding.RegridWeights`
+    (e.g. from :func:`~legoesm.grids.regridding.compute_latlon_to_voronoi_weights`)
+    to interpolate every 2-D field in *slc* from the cache lat-lon grid
+    onto the target mesh (e.g. MPAS Voronoi cell centres).
+
+    Parameters
+    ----------
+    slc : JRA55Slice
+        Source slice on the cache grid.
+    regrid_weights : RegridWeights
+        Precomputed interpolation weights.
+
+    Returns
+    -------
+    JRA55Slice
+        Slice with all fields on the target grid.
+    """
+    from legoesm.grids.regridding import regrid_scalar
+
+    return JRA55Slice(**{
+        name: regrid_scalar(getattr(slc, name), regrid_weights)
+        for name in JRA55Slice._fields
+    })

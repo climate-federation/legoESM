@@ -513,11 +513,80 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         from legoesm.grids.voronoi import create_voronoi_mesh
         from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
         from legoesm.ocean.mpas_config import MPASOceanConfig
+        from legoesm.ocean.physics.combined import OceanPhysicsConfig
+        from legoesm.ocean.physics.surface_forcing.config import (
+            SurfaceForcingConfig, PrescribedForcingConfig, RestoringConfig,
+        )
+        from legoesm.ocean.physics.vertical_mixing.config import (
+            VerticalMixingConfig, KPPConfig,
+        )
+        from legoesm.ocean.physics.convection.config import (
+            OceanConvectionConfig, EnhancedDiffusionConfig,
+        )
+        from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
+        from legoesm.ocean.physics.lateral_mixing.config import (
+            LateralMixingConfig, GMRediConfig, VisbeckConfig,
+        )
 
         mesh = create_voronoi_mesh(params["level"])
+
+        # For JRA55 forcing mode, use scheme="none" so that external
+        # tau/q_net from the bulk-flux solver are applied via the
+        # surface_forcing argument to model.step().  For restoring mode,
+        # use the same "combined" config as the comparison scripts.
+        forcing_mode = getattr(args, "forcing_mode", "restoring")
+        if forcing_mode == "jra55_do_tropical":
+            sf_config = SurfaceForcingConfig(scheme="none")
+        else:
+            sf_config = SurfaceForcingConfig(
+                scheme="combined",
+                prescribed=PrescribedForcingConfig(
+                    wind_profile="global_wind", tau_max=0.1,
+                    tropical_wind_scale=0.5,
+                    tropical_wind_lat_deg=15.0,
+                ),
+                restoring=RestoringConfig(
+                    tau_T=2592000.0, tau_S=2592000.0,
+                    T_star_eq=25.0, T_star_pole=0.0,
+                    S_star=35.0, T_profile="cosine",
+                ),
+            )
+
+        physics = OceanPhysicsConfig(
+            surface_forcing=sf_config,
+            vertical_mixing=VerticalMixingConfig(
+                scheme="kpp",
+                kpp=KPPConfig(K_conv=1.0),
+            ),
+            lateral_mixing=LateralMixingConfig(scheme="none"),
+            bottom_drag=BottomDragConfig(scheme="none"),
+            convection=OceanConvectionConfig(
+                scheme="enhanced_diffusion",
+                enhanced_diffusion=EnhancedDiffusionConfig(K_conv=1.0),
+            ),
+            shortwave_penetration=None,
+        )
+
         config = MPASOceanConfig(
-            A_h=A_h, K_h=K_h, A_v=A_v, K_v=K_v,
-            n_barotropic_substeps=30,
+            A_h=A_h, A_v=A_v, K_v=K_v,
+            C_smag_lap=0.33,
+            K_zeta_bih=1e14,
+            barotropic_solver="implicit_cn",
+            barotropic_implicit_pcg_tol=1e-10,
+            barotropic_implicit_pcg_maxiter=300,
+            pgf_scheme="adcroft",
+            implicit_vertical_mixing=True,
+            tracer_advection="tvd",
+            bottom_drag_r=1e-3,
+            bottom_drag_bbl_thickness=100.0,
+            bottom_drag_bg_velocity=0.1,
+            gm_redi=GMRediConfig(
+                kappa_GM=600.0, kappa_Redi=600.0,
+                S_max=0.005,
+                visbeck=VisbeckConfig(enabled=False),
+                slope_scheme="centered",
+            ),
+            physics=physics,
         )
         model = MPASOceanModel(mesh, z_coord, config)
         return mesh, z_coord, config, model, "mpas"
@@ -595,8 +664,7 @@ def _build_surface_forcing(grid_type, grid, sw_down_value):
     elif grid_type == "latlon":
         shape = (grid.lat.shape[0], grid.lon.shape[0])
     elif grid_type == "mpas":
-        # MPAS model.step doesn't accept surface_forcing yet
-        return None
+        shape = (grid.nCells,)
     elif grid_type == "spectral":
         # Spectral model doesn't use surface_forcing pipeline
         return None
@@ -714,11 +782,11 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
         the corresponding feature is disabled regardless of the
         ``--jra55-no-...`` flags.
     """
-    if grid_type != "latlon":
+    _supported_jra55_grids = ("latlon", "mpas")
+    if grid_type not in _supported_jra55_grids:
         raise ValueError(
             "--forcing-mode jra55_do_tropical currently supports only "
-            f"--grid latlon (got {grid_type!r}). Other grids will need "
-            "an additional regridding step."
+            f"--grid {_supported_jra55_grids} (got {grid_type!r})."
         )
     if args.jra55_cache is None:
         raise ValueError(
@@ -735,18 +803,36 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
     ds = xr.open_zarr(str(cache_path), decode_times=False)
     cache_n_lat = int(ds.sizes["lat"])
     cache_n_lon = int(ds.sizes["lon"])
-    model_n_lat = int(grid.lat.shape[0])
-    model_n_lon = int(grid.lon.shape[0])
-    if (cache_n_lat, cache_n_lon) != (model_n_lat, model_n_lon):
-        raise ValueError(
-            f"JRA55-do cache grid ({cache_n_lat}×{cache_n_lon}) does not "
-            f"match model grid ({model_n_lat}×{model_n_lon}). Rebuild the "
-            "cache with prepare_omip_forcing.py at the matching resolution."
-        )
 
-    # Build 2-D lat/lon (in radians) for cos_zenith / atm_to_surface.
-    lat_2d = jnp.asarray(np.deg2rad(np.asarray(grid.lat))[:, None])
-    lon_2d = jnp.asarray(np.deg2rad(np.asarray(grid.lon))[None, :])
+    # For MPAS we need regrid weights; for lat-lon we validate grid match.
+    regrid_weights = None
+    if grid_type == "mpas":
+        from legoesm.grids.regridding import compute_latlon_to_voronoi_weights
+        src_lat_rad = np.deg2rad(np.asarray(ds["lat"]))
+        src_lon_rad = np.deg2rad(np.asarray(ds["lon"]))
+        tgt_lat_rad = np.asarray(grid.latCell)
+        tgt_lon_rad = np.asarray(grid.lonCell)
+        regrid_weights = compute_latlon_to_voronoi_weights(
+            src_lat_rad, src_lon_rad, tgt_lat_rad, tgt_lon_rad,
+        )
+        print(f"  JRA55 regrid: {cache_n_lat}×{cache_n_lon} lat-lon → "
+              f"{grid.nCells} MPAS cells (k=4 IDW)")
+        # lat/lon for zenith angle (1-D, radians, on MPAS cells)
+        lat_2d = jnp.asarray(tgt_lat_rad)
+        lon_2d = jnp.asarray(tgt_lon_rad)
+    else:
+        # lat-lon: validate cache matches model grid
+        model_n_lat = int(grid.lat.shape[0])
+        model_n_lon = int(grid.lon.shape[0])
+        if (cache_n_lat, cache_n_lon) != (model_n_lat, model_n_lon):
+            raise ValueError(
+                f"JRA55-do cache grid ({cache_n_lat}×{cache_n_lon}) does not "
+                f"match model grid ({model_n_lat}×{model_n_lon}). Rebuild the "
+                "cache with prepare_omip_forcing.py at the matching resolution."
+            )
+        # Build 2-D lat/lon (in radians) for cos_zenith / atm_to_surface.
+        lat_2d = jnp.asarray(np.deg2rad(np.asarray(grid.lat))[:, None])
+        lon_2d = jnp.asarray(np.deg2rad(np.asarray(grid.lon))[None, :])
 
     # Coupler config: LY09 bulk flux at 10 m winds, 2 m T/q (the JRA55-do
     # convention). The Item 1 fixes (LY09 U^6 term, 0.98 q_sat, separate
@@ -766,6 +852,7 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
         "lon_2d": lon_2d,
         "coupler_cfg": coupler_cfg,
         "co2_ppmv": float(args.jra55_co2_ppmv),
+        "grid_type": grid_type,
         # Cycle the cache modulo its length when --jra55-cycle is set.
         # This is the Stewart 2020 RYF path: a single-year cache drives
         # a multi-year run by replaying the same 12 months.
@@ -774,6 +861,8 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
         # Stored in seconds for direct use in the step functions.
         "T_ramp_seconds": float(getattr(args, "T_ramp_days", 1.0)) * 86400.0,
     }
+    if regrid_weights is not None:
+        state["regrid_weights"] = regrid_weights
 
     # Sponge layer at 60°S/60°N — uses the existing
     # legoesm.ocean.sponge.compute_sponge_gamma_latlon utility. Active
@@ -784,14 +873,24 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
         and S_woa is not None
     )
     if sponge_enabled:
-        from legoesm.ocean.sponge import compute_sponge_gamma_latlon
-        sponge_gamma = compute_sponge_gamma_latlon(
-            grid,
-            lat_south=args.sponge_lat_min,
-            lat_north=args.sponge_lat_max,
-            width_deg=args.sponge_width_deg,
-            timescale_days=args.sponge_tau_days,
-        )
+        if grid_type == "mpas":
+            from legoesm.ocean.sponge import compute_sponge_gamma_mpas
+            sponge_gamma = compute_sponge_gamma_mpas(
+                grid,
+                lat_south=args.sponge_lat_min,
+                lat_north=args.sponge_lat_max,
+                width_deg=args.sponge_width_deg,
+                timescale_days=args.sponge_tau_days,
+            )
+        else:
+            from legoesm.ocean.sponge import compute_sponge_gamma_latlon
+            sponge_gamma = compute_sponge_gamma_latlon(
+                grid,
+                lat_south=args.sponge_lat_min,
+                lat_north=args.sponge_lat_max,
+                width_deg=args.sponge_width_deg,
+                timescale_days=args.sponge_tau_days,
+            )
         state["sponge_gamma_2d"] = jnp.asarray(sponge_gamma)
         state["sponge_T_ref_3d"] = jnp.asarray(T_woa)
         state["sponge_S_ref_3d"] = jnp.asarray(S_woa)
@@ -935,6 +1034,10 @@ def _jra55_step(state, step_idx, dt, model, jra55_state):
         ref_year=jra55_state["ref_year"],
         cycle=jra55_state.get("cycle", False),
     )
+    # Regrid from lat-lon cache to MPAS cell centres if needed.
+    if "regrid_weights" in jra55_state:
+        from legoesm.forcing.jra55_do import regrid_jra55_slice
+        slc = regrid_jra55_slice(slc, jra55_state["regrid_weights"])
     atm = jra55_to_atm_surface(
         slc,
         jra55_state["lat_2d"],
@@ -2721,6 +2824,11 @@ def run_omip_single(grid_type: str, args) -> dict:
         # Provide the ocean mask for global freeze-cap when no sponge.
         jra55_state["_ocean_mask_2d"] = state.land_mask.data > 0.5
         jra55_state["_gpu_interp"] = getattr(args, "gpu_interp", False)
+        # MPAS uses the single-step Python loop (not the lax.scan block
+        # path) because the block functions assume lat-lon array shapes
+        # and embed the lat-lon coupler logic in the JIT-compiled closure.
+        if grid_type == "mpas":
+            jra55_state["_use_single_step"] = True
         flags = []
         if jra55_state.get("enable_sponge"):
             flags.append("sponge")
