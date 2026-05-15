@@ -99,6 +99,25 @@ python scripts/global_overturning/_drake_timeseries.py
 - Each run creates `config.json` with all actual parameters used
 - `--restart path/to/restart.npz` to continue from a previous run
 - `--tag NAME` sets output directory name (required for organization)
+- `--from-config path/to/config.json` to replicate a previous run exactly
+
+### Reproducing a previous experiment
+
+Every run saves `config.json` to its output directory. To replicate:
+
+```bash
+# Exact reproduction
+CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 python scripts/global_overturning/run_comparison_mpas.py \
+  --from-config results/ocean/comparison_mpas_v_latlon/mpas_METOPO1_20yr/config.json \
+  --tag METOPO1_reproduce
+
+# Reproduce but override one parameter
+CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 python scripts/global_overturning/run_comparison_mpas.py \
+  --from-config results/ocean/comparison_mpas_v_latlon/mpas_METOPO1_20yr/config.json \
+  --tag METOPO1_lower_visc --a-h 5e4
+```
+
+Explicit CLI flags always override config.json values.
 
 ## Goal
 

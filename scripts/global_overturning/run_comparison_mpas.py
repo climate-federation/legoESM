@@ -264,9 +264,48 @@ def save_snapshot(state, mesh, ocean_mask, day, output_dir):
 # Main
 # ============================================================================
 
+def _apply_from_config(args, p):
+    """Load a config.json and use it to fill in unset CLI args.
+
+    Explicit CLI flags always win. config.json values are used only
+    for args that were not provided on the command line.
+    """
+    import json
+    if not args.from_config:
+        return args
+    with open(args.from_config) as f:
+        cfg = json.load(f)
+    mapping = {
+        "dt": "dt", "days": "days",
+        "A_h": "a_h", "B_h": "b_h",
+        "K_zeta_bih": "k_zeta_bih", "apvm_dt": "apvm_dt",
+        "kappa_GM": "kappa_gm", "kappa_Redi": "kappa_redi",
+        "S_max": "s_max",
+        "save_every_days": "save_every_days",
+        "C_smag_lap": "c_smag_lap",
+    }
+    bool_mapping = {
+        "flat_bottom": "flat_bottom",
+        "uniform_T": "uniform_T",
+    }
+    defaults = vars(p.parse_args([]))
+    current = vars(args)
+    for cfg_key, arg_key in mapping.items():
+        if cfg_key in cfg and current.get(arg_key) == defaults.get(arg_key):
+            setattr(args, arg_key, cfg[cfg_key])
+    for cfg_key, arg_key in bool_mapping.items():
+        if cfg_key in cfg and not current.get(arg_key):
+            setattr(args, arg_key, cfg[cfg_key])
+    print(f"  Loaded config from {args.from_config}")
+    return args
+
+
 def main():
     p = argparse.ArgumentParser(
         description="MPAS side of MPAS-vs-LatLon comparison.")
+    p.add_argument("--from-config", default=None,
+                   help="Load parameters from a previous run's config.json. "
+                        "Explicit CLI flags override config.json values.")
     p.add_argument("--days", type=float, default=30.0)
     p.add_argument("--restart", default=None)
     p.add_argument("--tag", default=None,
@@ -282,6 +321,8 @@ def main():
                    help="Override B_h biharmonic viscosity [m⁴/s] (default: 0).")
     p.add_argument("--a-h", type=float, default=None,
                    help="Override A_h Laplacian viscosity [m²/s] (default: 1e4).")
+    p.add_argument("--c-smag-lap", type=float, default=None,
+                   help="Override C_smag_lap (default: 0.33). Set 0 to disable.")
     p.add_argument("--flat-bottom", action="store_true",
                    help="Use flat bottom (H=H_MAX everywhere) with same coastlines.")
     p.add_argument("--uniform-T", action="store_true",
@@ -297,6 +338,7 @@ def main():
     p.add_argument("--etopo",
                    default="/home/dbalwada/legoESM/data/bathymetry/etopo_1deg.nc")
     args = p.parse_args()
+    args = _apply_from_config(args, p)
 
     if args.tag:
         outdir = OUTPUT_DIR.parent / f"mpas_{args.tag}"
@@ -396,7 +438,7 @@ def main():
         barotropic_implicit_pcg_maxiter=300,
         A_h=args.a_h if args.a_h is not None else A_H,
         A_v=A_V,
-        C_smag_lap=C_SMAG_LAP,
+        C_smag_lap=args.c_smag_lap if args.c_smag_lap is not None else C_SMAG_LAP,
         K_v=K_V,
         bottom_drag_r=BOTTOM_DRAG_R,
         bottom_drag_bbl_thickness=BOTTOM_DRAG_BBL,

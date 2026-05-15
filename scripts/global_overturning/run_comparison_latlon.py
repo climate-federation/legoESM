@@ -264,9 +264,64 @@ def save_snapshot(state, grid, ocean_mask, day, output_dir):
 # Main
 # ============================================================================
 
+def _apply_from_config(args, p):
+    """Load a config.json and use it to fill in unset CLI args.
+
+    Explicit CLI flags always win. config.json values are used only
+    for args that were not provided on the command line.
+    """
+    import json
+    if not args.from_config:
+        return args
+    with open(args.from_config) as f:
+        cfg = json.load(f)
+    # Map config.json keys → argparse dest names
+    mapping = {
+        "dt": "dt", "days": "days",
+        "A_h": "a_h", "B_h": "b_h", "C_smag_lap": "c_smag_lap",
+        "C_smag": "c_smag", "K_h": "k_h",
+        "A_h_floor": "a_h_floor", "A_h_merid": "a_h_merid",
+        "A_h_eq_boost": "a_h_eq_boost",
+        "A_h_eq_sigma_deg": "a_h_eq_sigma_deg",
+        "B_h_barotropic": "b_h_barotropic",
+        "kappa_GM": "kappa_gm", "kappa_Redi": "kappa_redi",
+        "S_max": "s_max",
+        "ke_gradient_scheme": "ke_gradient_scheme",
+        "slope_foot_alpha": "slope_foot_alpha",
+        "momentum_advection": "momentum_advection",
+        "save_every_days": "save_every_days",
+        "n_lon": "n_lon", "lat_max": "lat_max",
+    }
+    # Boolean flags
+    bool_mapping = {
+        "flat_bottom": "flat_bottom",
+        "uniform_T": "uniform_T",
+        "mercator": "mercator",
+    }
+    # Detect which args were explicitly set on the command line
+    # (argparse doesn't track this, so we compare against defaults)
+    defaults = vars(p.parse_args([]))
+    current = vars(args)
+    for cfg_key, arg_key in mapping.items():
+        if cfg_key in cfg and current.get(arg_key) == defaults.get(arg_key):
+            setattr(args, arg_key, cfg[cfg_key])
+    for cfg_key, arg_key in bool_mapping.items():
+        if cfg_key in cfg and not current.get(arg_key):
+            setattr(args, arg_key, cfg[cfg_key])
+    print(f"  Loaded config from {args.from_config}")
+    # Print which values came from config vs CLI
+    for cfg_key, arg_key in {**mapping, **bool_mapping}.items():
+        if cfg_key in cfg:
+            src = "config" if current.get(arg_key) == defaults.get(arg_key) else "CLI"
+    return args
+
+
 def main():
     p = argparse.ArgumentParser(
         description="Lat-lon side of MPAS-vs-LatLon comparison.")
+    p.add_argument("--from-config", default=None,
+                   help="Load parameters from a previous run's config.json. "
+                        "Explicit CLI flags override config.json values.")
     p.add_argument("--days", type=float, default=30.0)
     p.add_argument("--restart", default=None)
     p.add_argument("--tag", default=None,
@@ -336,6 +391,7 @@ def main():
     p.add_argument("--etopo",
                    default="/home/dbalwada/legoESM/data/bathymetry/etopo_1deg.nc")
     args = p.parse_args()
+    args = _apply_from_config(args, p)
 
     if args.tag:
         outdir = OUTPUT_DIR.parent / f"latlon_{args.tag}"
