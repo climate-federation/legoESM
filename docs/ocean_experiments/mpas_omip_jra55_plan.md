@@ -182,12 +182,75 @@ SSS drift is 0.04 PSU/year (no SSS restoring active).
 
 ## Next Steps
 
+### Immediate: WOA18 Initialization (next run)
+
+The current v4 run starts from an idealized rest state (exponential T
+profile, uniform S=35 PSU).  The next iteration will use WOA18
+climatological T/S as the initial condition, which is the standard
+OMIP spin-up approach.
+
+**What exists already:**
+- `init_ocean_from_woa(grid, z_coord, T_path, S_path)` in
+  `src/legoesm/ocean/init_woa.py` already supports VoronoiMesh
+  (line 245-248: dispatches on `hasattr(grid, 'latCell')`).
+- Performs nearest-neighbor horizontal interpolation from WOA18 1°
+  to MPAS cell centres, then vertical interpolation to model levels.
+- NaN fill with 1.5°C / 34.5 PSU for cells outside WOA coverage.
+- WOA18 data available at `data/woa18/woa18_decav_t00_01.nc` and
+  `data/woa18/woa18_decav_s00_01.nc`.
+- `run_omip.py` already calls `init_ocean_from_woa` at line ~2514
+  and applies the WOA T/S when `--woa-init` is passed (line ~2909).
+- The WOA masking uses `state.land_mask.data` which is correct
+  because the MPAS ETOPO block sets the real land mask *before*
+  the WOA init block runs.
+
+**What needs to change:** Nothing in the code — it's already wired.
+Just add the CLI flags to the launch command:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 JAX_ENABLE_X64=1 nohup .venv/bin/python scripts/run_omip.py \
+  --grid mpas --resolution ico5 --nlev 20 --days 36500 --dt 1200 \
+  --H-max 5500 --H-min 10 \
+  --bathymetry data/bathymetry/etopo_1deg.nc --smoothing-passes 2 \
+  --forcing-mode jra55_do_tropical \
+  --jra55-cache data/jra55_ryf_cache/jra55_do_v14_omip2_1deg_noleap_fixed.zarr \
+  --jra55-cycle \
+  --woa-init \
+  --woa-t data/woa18/woa18_decav_t00_01.nc \
+  --woa-s data/woa18/woa18_decav_s00_01.nc \
+  --jra55-no-sponge --jra55-no-sss-restoring --jra55-no-freeze-cap \
+  --output results/mpas_jra55_etopo_100yr_woa \
+  > results/mpas_jra55_etopo_100yr_woa.log 2>&1 &
+```
+
+**Potential concerns:**
+- WOA T/S creates strong horizontal pressure gradients (warm tropics,
+  cold poles, realistic halocline).  Geostrophic adjustment from rest
+  (u=0, eta=0) will produce transient currents of O(1 m/s) in the
+  first few days.  The 1200s timestep should handle this (CFL ~0.2
+  with max baro speed ~200 m/s), but monitor day-1 max_speed.
+- Sub-seafloor WOA values are NaN-filled to 1.5°C / 34.5 PSU, then
+  masked by `land_mask * partial_cell.is_active`.  Verify no stale
+  sub-seafloor values leak into active cells.
+- WOA S has a different range (~33-37 PSU) than uniform 35 — the
+  virtual salt flux and freshwater forcing interact differently.
+
+**Validation:**
+- Compare day-1 max_speed against the rest-state run (expect ~2-5x
+  higher initial transient, then relaxation over ~30 days).
+- Compare year-1 SST seasonal cycle — should be similar to v4 but
+  with faster adjustment since the initial state is already close
+  to the forced equilibrium.
+- Check that the zonal-mean T section at day 0 matches WOA18
+  (thermocline depth, polar cold water, etc.).
+
+### Later Steps
+
 1. **Monitor 100-year run** — check for drift, instabilities, blowup
-2. **Enable SSS restoring** — add `--jra55-no-sss-restoring` removal
-   once stability is confirmed
+2. **Enable SSS restoring** — weak piston velocity (~5e-7 m/s) to
+   prevent long-term freshwater drift
 3. **Enable freeze cap** — prevent unphysical sub-freezing SST at poles
-4. **WOA initialization** — test with realistic T/S initial condition
-5. **Enable sponge** — polar damping at ±60° if needed for stability
-6. **Production OMIP config** — 5-cycle (300-year) run per OMIP-2 protocol
-7. **Diagnostics** — OMIP Table fields (~150 variables) for comparison
+4. **Enable sponge** — polar damping at ±60° if needed for stability
+5. **Production OMIP config** — 5-cycle (300-year) run per OMIP-2 protocol
+6. **Diagnostics** — OMIP Table fields (~150 variables) for comparison
    with other models
