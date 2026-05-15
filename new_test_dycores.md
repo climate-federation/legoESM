@@ -594,3 +594,33 @@ Phase-2 sentinel coverage matrix:
 | `test_cases/test_aimip_template.py` | AIMIP experiment template registration + CMIP6 historical-GHG interpolation |
 
 Phase 2 closed.  Phase 3 (training script) is the next AIMIP focus.
+
+## Iter-260 — AIMIP Phase 3.0: convection trainable batch — `sbm_CAPE_threshold`
+
+User-driven Phase 3 kickoff: "Add the other parameters from convection, gravity waves, cloud cover (if needed) and microphysics as tunable parameters."  First end-to-end wiring: `sbm_CAPE_threshold` (SBM convective trigger).
+
+Audit confirmed `sbm.py` reads `config.CAPE_threshold` at line 82 inside `_compute_cape -> sigmoid(smooth_trigger_sharpness * (cape - CAPE_threshold))`.  Genuine trainable lever — gates convection on/off.
+
+Wired through the standard SBM trainable pipeline (same pattern as `sbm_tau_c` / `sbm_RH_ref`):
+
+1. `src/legoesm/tuning.py` — registered `sbm_CAPE_threshold` (default 70 J/kg, range [10, 200], category=convection, sensitivity=high).
+2. `src/legoesm/driver/physics_pipeline.py::physics_step_no_rad` — added `sbm_CAPE_threshold=None` kwarg; `_conv_cfg._replace(CAPE_threshold=...)` block.  `step_unified` threads it through both `lax.cond` branches.
+3. `src/legoesm/driver/compiled_segments.py::build_segment_fn` — added `sbm_CAPE_threshold=None` kwarg cast to `_sbm_CAPE_threshold = jnp.asarray(...)`; both `step_unified` call sites pass it.
+4. `src/legoesm/training/trainable_params.py::_SBM_TRAINABLE` — added `ParamConstraint("sbm_CAPE_threshold", 10.0, 200.0, "sigmoid")`.
+5. Sentinel updates: `test_aimip_phase2_trainable_wired.py` expected wired list grows by `sbm_CAPE_threshold` (10 → 11); `test_aimip_trainable_params_integration.py::_EXPECTED_NAMES` similarly.
+
+New `tests/test_aimip_phase30_sbm_cape_threshold.py` (6 tests, all green):
+- `build_segment_fn` signature pin.
+- `physics_step_no_rad` signature pin.
+- `tuning.py` registry pin.
+- Numerical: threshold below CAPE -> non-zero `dT_dt`.
+- Numerical: threshold above CAPE -> ~zero `dT_dt`.
+- Numerical: low vs high threshold yields > 90 % relative diff.
+
+Phase-2 sentinel coverage matrix extended (iter-260 row):
+
+| Sentinel file | Pins |
+|---------------|------|
+| `test_aimip_phase30_sbm_cape_threshold.py` | sbm trigger gate gates as expected; wiring + registry pinned (this iter) |
+
+Total wired trainable: 10 → 11.

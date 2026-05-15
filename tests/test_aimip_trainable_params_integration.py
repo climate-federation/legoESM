@@ -43,12 +43,12 @@ _EXPECTED_NAMES = [
     "tau_equator", "tau_pole",
     "C_H", "C_E",
     "albedo_ice", "albedo_ocean", "albedo_land",
-    "sbm_tau_c", "sbm_RH_ref",
+    "sbm_tau_c", "sbm_RH_ref", "sbm_CAPE_threshold",
     "l_mix_max",
 ]
 
 
-def test_trainable_constraints_for_sbm_louis_count_is_10():
+def test_trainable_constraints_for_sbm_louis_count_is_11():
     """Pin the exact count + names of the AIMIP-default trainable set
     (``convection=sbm`` + ``turbulence=louis``).  Any silent drop or
     add changes the count and trips this sentinel."""

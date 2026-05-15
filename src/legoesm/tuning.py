@@ -138,6 +138,21 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
         sensitivity="high",
         notes="Column moistened toward this RH. Higher = wetter atmosphere.",
     ),
+    "sbm_CAPE_threshold": TuningParameter(
+        name="sbm_CAPE_threshold",
+        default=70.0,
+        min_val=10.0,
+        max_val=200.0,
+        units="J/kg",
+        description="Minimum CAPE to trigger SBM convection",
+        category="convection",
+        sensitivity="high",
+        notes=(
+            "Lower = looser trigger -> more frequent convection -> "
+            "wetter, cooler atmosphere.  Smoothed via "
+            "smooth_trigger_sharpness * (CAPE - threshold) sigmoid."
+        ),
+    ),
 
     # -- Diffusion / turbulence -----------------------------------------
     "k_free_per_day": TuningParameter(

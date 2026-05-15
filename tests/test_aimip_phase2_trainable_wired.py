@@ -109,7 +109,11 @@ def test_wired_trainable_count_matches_expected():
          # iter-258 (AIMIP Phase 2.7): l_mix_max wired through
          # build_segment_fn + step_unified + physics_step_no_rad ->
          # louis_turbulence kwarg override.
-         "l_mix_max"]
+         "l_mix_max",
+         # iter-260 (AIMIP Phase 3.0): sbm_CAPE_threshold wired
+         # through build_segment_fn + step_unified +
+         # physics_step_no_rad -> _conv_cfg._replace.
+         "sbm_CAPE_threshold"]
     )
     assert wired == expected, (
         f"Wired-trainable param set changed.  Expected {expected}, "

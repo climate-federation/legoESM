@@ -165,6 +165,7 @@ class PhysicsPipeline:
                             lat, dt, dT_dt_rad, sw_net_sfc, lw_net_sfc,
                             sw_up_toa, lw_up_toa, sw_down_toa,
                             sbm_tau_c=None, sbm_RH_ref=None,
+                            sbm_CAPE_threshold=None,
                             C_H=None, C_E=None,
                             l_mix_max=None,
                             q_i=None, q_s=None, q_g=None,
@@ -211,6 +212,10 @@ class PhysicsPipeline:
             _conv_cfg = _conv_cfg._replace(tau_c=sbm_tau_c)
         if sbm_RH_ref is not None and _conv_cfg is not None and hasattr(_conv_cfg, 'RH_ref'):
             _conv_cfg = _conv_cfg._replace(RH_ref=sbm_RH_ref)
+        # iter-260 (AIMIP Phase 3.0): CAPE threshold trainable.
+        if (sbm_CAPE_threshold is not None and _conv_cfg is not None
+                and hasattr(_conv_cfg, 'CAPE_threshold')):
+            _conv_cfg = _conv_cfg._replace(CAPE_threshold=sbm_CAPE_threshold)
 
         if conv_prog is None:
             if _conv_cfg is not None and hasattr(_conv_cfg, 'M_c_init'):
@@ -669,6 +674,7 @@ class PhysicsPipeline:
                          held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                          tau_equator=None, tau_pole=None,
                          sbm_tau_c=None, sbm_RH_ref=None,
+                         sbm_CAPE_threshold=None,
                          C_H=pipeline.C_H, C_E=pipeline.C_E,
                          albedo_ice=pipeline.albedo_ice,
                          albedo_ocean=pipeline.albedo_ocean,
@@ -684,6 +690,7 @@ class PhysicsPipeline:
                  held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                  held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                  tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref,
+                 sbm_CAPE_threshold,
                  C_H, C_E, albedo_ice, albedo_ocean,
                  albedo_land, land_fraction,
                  l_mix_max,
@@ -709,6 +716,7 @@ class PhysicsPipeline:
                     dT_dt_rad, sw_net_sfc, lw_net_sfc,
                     sw_up_toa, lw_up_toa, sw_down_toa,
                     sbm_tau_c=sbm_tau_c, sbm_RH_ref=sbm_RH_ref,
+                    sbm_CAPE_threshold=sbm_CAPE_threshold,
                     C_H=C_H, C_E=C_E,
                     l_mix_max=l_mix_max,
                 )
@@ -731,6 +739,7 @@ class PhysicsPipeline:
                  held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                  held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                  tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref,
+                 sbm_CAPE_threshold,
                  C_H, C_E, albedo_ice, albedo_ocean,
                  albedo_land, land_fraction,
                  l_mix_max,
@@ -742,6 +751,7 @@ class PhysicsPipeline:
                     held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                     sbm_tau_c=sbm_tau_c, sbm_RH_ref=sbm_RH_ref,
+                    sbm_CAPE_threshold=sbm_CAPE_threshold,
                     C_H=C_H, C_E=C_E,
                     l_mix_max=l_mix_max,
                 )
@@ -769,6 +779,7 @@ class PhysicsPipeline:
                     held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                     tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref,
+                    sbm_CAPE_threshold,
                     C_H, C_E, albedo_ice, albedo_ocean,
                     albedo_land, _land_fraction,
                     l_mix_max,

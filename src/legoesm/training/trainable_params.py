@@ -69,10 +69,15 @@ _COMMON_TRAINABLE = [
     ParamConstraint("albedo_land", 0.1, 0.4, "sigmoid"),
 ]
 
-# SBM-specific convection parameters
+# SBM-specific convection parameters.
+# iter-260 (AIMIP Phase 3.0): added ``sbm_CAPE_threshold`` after
+# wiring it through build_segment_fn -> step_unified ->
+# physics_step_no_rad -> _conv_cfg._replace.  Bounds match
+# tuning.py::TUNING_PARAMETERS["sbm_CAPE_threshold"] (10-200 J/kg).
 _SBM_TRAINABLE = [
     ParamConstraint("sbm_tau_c", 3600.0, 14400.0, "sigmoid"),
     ParamConstraint("sbm_RH_ref", 0.6, 0.9, "sigmoid"),
+    ParamConstraint("sbm_CAPE_threshold", 10.0, 200.0, "sigmoid"),
 ]
 
 # Louis-turbulence-specific trainable parameters.

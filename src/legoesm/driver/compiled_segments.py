@@ -394,6 +394,7 @@ def build_segment_fn(
     tau_pole=None,
     sbm_tau_c=None,
     sbm_RH_ref=None,
+    sbm_CAPE_threshold=None,
     C_H=None,
     C_E=None,
     albedo_ice=None,
@@ -479,6 +480,9 @@ def build_segment_fn(
     _tau_pole = jnp.asarray(tau_pole) if tau_pole is not None else None
     _sbm_tau_c = jnp.asarray(sbm_tau_c) if sbm_tau_c is not None else None
     _sbm_RH_ref = jnp.asarray(sbm_RH_ref) if sbm_RH_ref is not None else None
+    _sbm_CAPE_threshold = (
+        jnp.asarray(sbm_CAPE_threshold) if sbm_CAPE_threshold is not None else None
+    )
     _C_H = jnp.asarray(C_H) if C_H is not None else None
     _C_E = jnp.asarray(C_E) if C_E is not None else None
     _albedo_ice = jnp.asarray(albedo_ice) if albedo_ice is not None else None
@@ -598,6 +602,7 @@ def build_segment_fn(
                     carry.held_sw_down_toa[_ofi],
                     tau_equator=_tau_equator, tau_pole=_tau_pole,
                     sbm_tau_c=_sbm_tau_c, sbm_RH_ref=_sbm_RH_ref,
+                    sbm_CAPE_threshold=_sbm_CAPE_threshold,
                     C_H=_C_H, C_E=_C_E,
                     albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
                     albedo_land=_albedo_land,
@@ -657,6 +662,7 @@ def build_segment_fn(
                     carry.held_sw_up_toa, carry.held_lw_up_toa, carry.held_sw_down_toa,
                     tau_equator=_tau_equator, tau_pole=_tau_pole,
                     sbm_tau_c=_sbm_tau_c, sbm_RH_ref=_sbm_RH_ref,
+                    sbm_CAPE_threshold=_sbm_CAPE_threshold,
                     C_H=_C_H, C_E=_C_E,
                     albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
                     albedo_land=_albedo_land,
