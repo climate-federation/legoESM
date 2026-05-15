@@ -2989,7 +2989,7 @@ def run_omip_single(grid_type: str, args) -> dict:
     checkpoint_dir = None
     checkpoint_days = None
     if jra55_state is not None and args.checkpoint_days > 0.0:
-        checkpoint_dir = Path(args.output) / grid_type / resolution
+        checkpoint_dir = Path(args.output) / grid_type / resolution / "restarts"
         checkpoint_days = float(args.checkpoint_days)
         print(
             f"  Restart cadence: every {checkpoint_days:g} simulated days "
