@@ -561,12 +561,15 @@ def _split_velocity_divergence(
     dV_dj_cell : (n_lat, n_lon, nlev)  meridional divergence component.
     """
     if hasattr(grid, "dy_u") and grid.dlat == 0.0:
-        # Tripolar: use full 2D metrics.
-        face_dy = grid.dy_u[:, 0:1, jnp.newaxis]       # (n_lat, 1, 1)
+        # Tripolar: use full 2D metrics — column-0 extraction is NOT
+        # valid on the bipolar cap where dy_u varies in longitude.
+        face_dy = grid.dy_u                              # (n_lat, n_lon+1)
+        _is_2d_dy = True
         face_dx = grid.dx_v                              # (n_lat+1, n_lon)
         fd = face_dx[:, :, jnp.newaxis]
     else:
         # Regular or Mercator: variable-dy safe.
+        _is_2d_dy = False
         R = grid.radius
         dlon = grid.dlon
         lat = grid.lat
@@ -580,7 +583,13 @@ def _split_velocity_divergence(
         fd = face_dx[:, jnp.newaxis, jnp.newaxis]
 
     # Zonal flux divergence at cells.
-    net_zonal = (u[:, 1:, :] - u[:, :-1, :]) * face_dy
+    if _is_2d_dy:
+        # Per-face dy: each u-face has its own meridional extent.
+        face_dy_e = face_dy[:, 1:, jnp.newaxis]         # (n_lat, n_lon, 1)
+        face_dy_w = face_dy[:, :-1, jnp.newaxis]        # (n_lat, n_lon, 1)
+        net_zonal = u[:, 1:, :] * face_dy_e - u[:, :-1, :] * face_dy_w
+    else:
+        net_zonal = (u[:, 1:, :] - u[:, :-1, :]) * face_dy
 
     # Meridional flux divergence at cells.
     net_merid = v[1:, :, :] * fd[1:] - v[:-1, :, :] * fd[:-1]

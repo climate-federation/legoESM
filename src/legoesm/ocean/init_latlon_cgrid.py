@@ -316,8 +316,8 @@ def replace_land_mask(
     Parameters
     ----------
     grid : optional LatLonGrid or LatLonCGridGeometry.
-        When provided and a tripolar fold is active, the fold-boundary
-        v-face mask is computed from fold-partner cells.
+        Currently unused.  Fold face kept as wall (zero) -- see
+        ``compute_face_masks`` comment.
     """
     new_land_mask = jnp.asarray(new_land_mask)
     u_mask, v_mask = compute_face_masks(new_land_mask, grid)

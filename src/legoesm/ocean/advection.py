@@ -1239,9 +1239,12 @@ def _zalesak_signsplit_face_alphas(
 
     # Spherical face metrics (mirroring divergence_cgrid).
     if hasattr(grid, "dy_u") and grid.dlat == 0.0:
-        # Tripolar: use full 2D metrics.
-        face_dy = grid.dy_u[0, 0]                        # scalar
-        face_dx = grid.dx_v[:, 0]                         # (n_lat+1,)
+        # Tripolar: use full 2D metrics — column-0 extraction is NOT
+        # valid on the bipolar cap where dy_u/dx_v vary in longitude.
+        face_dy = grid.dy_u                               # (n_lat, n_lon+1)
+        face_dx = grid.dx_v                               # (n_lat+1, n_lon)
+        _is_2d_dy = True
+        _is_2d_dx = True
     else:
         R_planet = grid.radius
         dlon = grid.dlon
@@ -1252,6 +1255,8 @@ def _zalesak_signsplit_face_alphas(
         face_dx = R_planet * dlon * jnp.pad(
             jnp.cos(lat_interior), (1, 1),
         )  # (n_lat+1,)
+        _is_2d_dy = False
+        _is_2d_dx = False
     area = grid.area[..., jnp.newaxis]            # (n_lat, n_lon, 1)
 
     # Per-cell magnitudes of incoming / outgoing horizontal flux.
@@ -1259,18 +1264,33 @@ def _zalesak_signsplit_face_alphas(
     # Per cell c (index j):
     #   incoming  = F_u_pos at WEST face (eastward in)  + F_u_neg at EAST face (westward in)
     #   outgoing  = F_u_neg at WEST face (westward out) + F_u_pos at EAST face (eastward out)
-    in_u  = F_u_pos[:, :-1, :] + F_u_neg[:, 1:, :]
-    out_u = F_u_neg[:, :-1, :] + F_u_pos[:, 1:, :]
+    if _is_2d_dy:
+        # Per-face dy weighting: west face = face_dy[:, :-1], east = face_dy[:, 1:].
+        dy_w = face_dy[:, :-1, jnp.newaxis]              # (n_lat, n_lon, 1)
+        dy_e = face_dy[:, 1:, jnp.newaxis]               # (n_lat, n_lon, 1)
+        in_u_w  = F_u_pos[:, :-1, :] * dy_w + F_u_neg[:, 1:, :] * dy_e
+        out_u_w = F_u_neg[:, :-1, :] * dy_w + F_u_pos[:, 1:, :] * dy_e
+    else:
+        in_u  = F_u_pos[:, :-1, :] + F_u_neg[:, 1:, :]
+        out_u = F_u_neg[:, :-1, :] + F_u_pos[:, 1:, :]
 
     # v-face j is the SOUTH face of cell j and NORTH face of cell j-1; weighted by face_dx[j].
-    in_v_w = (F_v_pos[:-1, :, :] * face_dx[:-1, jnp.newaxis, jnp.newaxis]
-              + F_v_neg[1:, :, :] * face_dx[1:, jnp.newaxis, jnp.newaxis])
-    out_v_w = (F_v_neg[:-1, :, :] * face_dx[:-1, jnp.newaxis, jnp.newaxis]
-               + F_v_pos[1:, :, :] * face_dx[1:, jnp.newaxis, jnp.newaxis])
+    if _is_2d_dx:
+        dx_s = face_dx[:-1, :, jnp.newaxis]              # (n_lat, n_lon, 1)
+        dx_n = face_dx[1:, :, jnp.newaxis]               # (n_lat, n_lon, 1)
+    else:
+        dx_s = face_dx[:-1, jnp.newaxis, jnp.newaxis]
+        dx_n = face_dx[1:, jnp.newaxis, jnp.newaxis]
+    in_v_w = F_v_pos[:-1, :, :] * dx_s + F_v_neg[1:, :, :] * dx_n
+    out_v_w = F_v_neg[:-1, :, :] * dx_s + F_v_pos[1:, :, :] * dx_n
 
     # Horizontal-incoming / outgoing tracer increment per cell (same units as ad·dt).
-    P_in_h = (in_u * face_dy + in_v_w) / area
-    P_out_h = (out_u * face_dy + out_v_w) / area
+    if _is_2d_dy:
+        P_in_h = (in_u_w + in_v_w) / area
+        P_out_h = (out_u_w + out_v_w) / area
+    else:
+        P_in_h = (in_u * face_dy + in_v_w) / area
+        P_out_h = (out_u * face_dy + out_v_w) / area
 
     # Vertical: pad with zeros at the top / bottom (rigid lid + floor) so
     # cell-c indexing is uniform.  ad_vert_int has shape (n_lat, n_lon,

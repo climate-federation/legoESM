@@ -2457,9 +2457,8 @@ def compute_face_masks_3d(
         False/0.0 below the seafloor.  Typically
         ``partial_coord.is_active.astype(...)``.
     grid : optional LatLonGrid or LatLonCGridGeometry.
-        When provided and a tripolar fold is active, the north-boundary
-        v-face mask is computed from the fold-partner cells rather than
-        being zero (wall BC).
+        Currently unused.  Fold face kept as wall (zero) -- see
+        ``compute_face_masks`` comment.
 
     Returns
     -------
@@ -2475,7 +2474,7 @@ def compute_face_masks_3d(
         [u_mask_interior, u_mask_interior[:, 0:1, :]], axis=1,
     )
     # v-face i is between cell i-1 (south) and cell i (north).
-    # Fold face kept as wall (see compute_face_masks comment).
+    # Fold face kept as wall (zero) -- see compute_face_masks comment.
     v_mask_interior = a[:-1] * a[1:]
     south = jnp.zeros_like(a[:1])
     north = jnp.zeros_like(south)
@@ -3151,9 +3150,8 @@ def compute_face_masks(
     land_mask : array, shape (n_lat, n_lon)
         Cell-center ocean mask (1 = ocean, 0 = land).
     grid : optional LatLonGrid or LatLonCGridGeometry.
-        When provided and a tripolar fold is active, the north-boundary
-        v-face mask is computed from the fold-partner cells rather than
-        being zero (wall BC).
+        Currently unused.  Fold face kept as wall (zero) until a
+        proper halo exchange architecture (Option B) is implemented.
 
     Returns
     -------

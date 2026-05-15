@@ -299,12 +299,13 @@ def create_tripole_grid(
     # extra row at the fold boundary needs special handling.
     e1v = raw["e1v"].astype(dtype)
     e2v = raw["e2v"].astype(dtype)
-    # Pad south (wall) and fold row will be handled by fold descriptor.
-    # For now, pad with zeros at south and copy of last row at north.
+    # Prepend a south zero row (wall BC); the NEMO e1v/e2v arrays
+    # already include the fold row as their last (northernmost) row,
+    # so no north padding is needed — just the south zero gives
+    # (n_lat+1, n_lon).
     dx_v = jnp.concatenate(
         [jnp.zeros((1, n_lon), dtype=dtype), e1v], axis=0
-    )  # (n_lat+1, n_lon) -- but this is approximate; the fold row
-    # metrics will be symmetrized later.
+    )  # (n_lat+1, n_lon)
     dy_v = jnp.concatenate(
         [jnp.zeros((1, n_lon), dtype=dtype), e2v], axis=0
     )
