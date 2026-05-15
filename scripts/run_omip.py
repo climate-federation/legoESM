@@ -2794,6 +2794,71 @@ def run_omip_single(grid_type: str, args) -> dict:
         H_bathy=H_bathy_init, land_mask=land_mask_init,
         bathy_cfg=bathy_cfg,
     )
+    # --- MPAS ETOPO post-processing (matches run_comparison_mpas.py) ---
+    # The generic init_ocean_bathymetry path doesn't do north-cap masking,
+    # partial-cell snapping, or partial-cell coordinate creation for MPAS.
+    # Apply the proven PR 261 recipe here.
+    if grid_type == "mpas" and args.bathymetry is not None:
+        from legoesm.ocean.bathymetry import BathymetryConfig, load_bathymetry_mpas
+        from legoesm.ocean.vertical import create_partial_cell_coordinate
+
+        mpas_bathy_cfg = BathymetryConfig(
+            source="file", path=args.bathymetry,
+            H_max=args.H_max, H_min=args.H_min,
+            smoothing_passes=args.smoothing_passes,
+            r_factor_max=args.r_factor_max,
+            depth_is_negative=True,
+        )
+        H_bathy_raw, ocean_mask = load_bathymetry_mpas(grid, mpas_bathy_cfg)
+
+        # North cap at 80°N (parity with lat-lon runs)
+        lat_cell_deg = np.degrees(np.asarray(grid.latCell))
+        north_cap_lat = getattr(args, "north_cap_lat", 80.0)
+        cap_mask = jnp.asarray(lat_cell_deg <= north_cap_lat,
+                               dtype=H_bathy_raw.dtype)
+        H_bathy_raw = H_bathy_raw * cap_mask
+        ocean_mask = ocean_mask * cap_mask
+
+        # Snap thin partial cells to nearest interface (30% threshold)
+        snap_frac = 0.30
+        abs_z_half = jnp.abs(z_coord.z_half_ref)
+        nlev = z_coord.n_levels
+        n_above = jnp.sum(
+            abs_z_half[None, :] < H_bathy_raw[:, None], axis=1)
+        bottom_level = jnp.clip(n_above - 1, 0, nlev - 1)
+        dz_at_bottom = z_coord.dz_ref[bottom_level]
+        partial_thick = H_bathy_raw - abs_z_half[bottom_level]
+        frac = partial_thick / jnp.maximum(dz_at_bottom, 1e-10)
+        z_upper = abs_z_half[bottom_level]
+        z_lower = abs_z_half[jnp.minimum(bottom_level + 1, nlev)]
+        H_snapped = jnp.where(
+            H_bathy_raw - z_upper < z_lower - H_bathy_raw,
+            z_upper, z_lower)
+        needs_snap = (frac < snap_frac) & (frac > 0) & (H_bathy_raw > 0)
+        H_bathy_final = jnp.where(needs_snap, H_snapped, H_bathy_raw)
+        H_bathy_final = jnp.where(H_bathy_final <= 0, 0.0, H_bathy_final)
+        ocean_mask = jnp.where(H_bathy_final > 0, ocean_mask, 0.0)
+
+        # Create partial cell coordinate and rebuild model
+        pc_coord = create_partial_cell_coordinate(z_coord, H_bathy_final)
+        z_coord = pc_coord
+
+        from legoesm.core.field import Field
+        state = state._replace(
+            H_bathy=Field(data=H_bathy_final, name="H_bathy",
+                          dims=("nCells",), units="m"),
+            land_mask=Field(data=ocean_mask, name="land_mask",
+                            dims=("nCells",), units="1"),
+        )
+        # Rebuild model with partial cell coordinate
+        from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
+        model = MPASOceanModel(grid, pc_coord, config)
+
+        n_ocean = int(jnp.sum(ocean_mask > 0.5))
+        print(f"  MPAS ETOPO: {n_ocean}/{grid.nCells} ocean cells "
+              f"(cap={north_cap_lat}°N, snap={snap_frac}, "
+              f"smooth={args.smoothing_passes})")
+
     if args.woa_init and T_woa is not None and S_woa is not None:
         # Replace rest-state T/S with WOA18 climatology.
         # Keep zero velocity, zero eta — let the model adjust.
