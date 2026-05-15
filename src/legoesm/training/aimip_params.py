@@ -265,6 +265,9 @@ def make_aimip_classical_spectral_physics(
     params: AIMIPClassicalParams,
     grid,
     dt: float,
+    *,
+    radiation: str = "gray",
+    rad_update_interval_steps: int = 6,
 ):
     """Build a SpectralPE physics function for the AIMIP classical variant.
 
@@ -290,17 +293,42 @@ def make_aimip_classical_spectral_physics(
     from legoesm.atmosphere.physics.radiation.config import (
         GrayRadiationConfig,
         RadiationConfig,
+        RRTMGPConfig,
     )
 
     p = params.as_dict()
 
-    rad_cfg = RadiationConfig(
-        scheme="gray",
-        gray=GrayRadiationConfig(
-            tau_equator=p["tau_equator"],
-            tau_pole=p["tau_pole"],
-        ),
-    )
+    # Radiation backend toggle.  ``rrtmgp`` is the production
+    # correlated-k path: it explicitly couples Xu-Randall cloud
+    # fraction into shortwave + longwave fluxes and makes the
+    # cloud knobs trainable end-to-end (via
+    # ``RadiationConfig.cloud_config`` -> ``radiation/integration.py``).
+    # ``gray`` is the Frierson-style two-stream analytic path:
+    # cheap, no cloud coupling, only ``tau_equator`` /
+    # ``tau_pole`` are differentiated.  Default ``gray`` keeps the
+    # AIMIP harness tractable on a single GPU; bump to ``rrtmgp``
+    # for production-grade physics realism.
+    if radiation == "rrtmgp":
+        rad_cfg = RadiationConfig(
+            scheme="rrtmgp",
+            rrtmgp=RRTMGPConfig(),
+            cloud_scheme="xu_randall",
+            cloud_config=params.to_cloud_config(),
+            update_interval_steps=rad_update_interval_steps,
+        )
+    elif radiation == "gray":
+        rad_cfg = RadiationConfig(
+            scheme="gray",
+            gray=GrayRadiationConfig(
+                tau_equator=p["tau_equator"],
+                tau_pole=p["tau_pole"],
+            ),
+        )
+    else:
+        raise ValueError(
+            f"Unknown AIMIP radiation backend: {radiation!r} "
+            f"(expected 'gray' or 'rrtmgp')."
+        )
     conv_cfg = ConvectionConfig(
         scheme="tiedtke", tiedtke=params.to_tiedtke_config(),
     )
@@ -311,6 +339,9 @@ def make_aimip_classical_spectral_physics(
         scheme="mcfarlane", mcfarlane=params.to_mcfarlane_config(),
     )
 
+    # Note: ``p = params.as_dict()`` is already computed above for
+    # gray-radiation tau knobs; reused here only when gray is active.
+    del p  # avoid leaking variable into nested closure
     physics_config = PhysicsConfig(
         radiation=rad_cfg,
         convection=conv_cfg,

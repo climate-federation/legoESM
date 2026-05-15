@@ -53,6 +53,17 @@ aimip_weight_decay: 1.0e-5
 aimip_grad_clip: 1.0
 aimip_optimizer: "muon"   # muon | adamw | adam — see ml/training.create_optimizer
 
+# Radiation backend for the classical variant:
+#   gray   — Frierson two-stream analytic (default, tractable);
+#            differentiates tau_equator, tau_pole only.  ~30s/sample
+#            at T21 L8 on a single GPU after compile.
+#   rrtmgp — Correlated-k LW+SW with explicit cloud-radiation
+#            coupling driven by the trainable Xu-Randall config.
+#            Production-grade realism but ~10-100x slower; needs
+#            GPU acceleration for multi-week training.
+aimip_radiation: "gray"
+aimip_rad_update_interval: 6   # RRTMGP fire every N dycore steps (3h at dt=1800s)
+
 # ----- Loss (LossConfig fields from training/losses.py) ------------
 loss:
   w_T: 1.0

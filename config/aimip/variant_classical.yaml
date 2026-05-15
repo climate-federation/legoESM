@@ -18,5 +18,8 @@ turbulence: "louis"
 gravity_wave_drag: "mcfarlane"
 cloud_scheme: "xu_randall"
 microphysics: "none"
-radiation: "gray"          # gray ≈ radiation-off for AIMIP smoke
+radiation: "gray"          # Base scheme tag (informational).  The actual
+                           # radiation backend used by AIMIPClassicalParams
+                           # is controlled by ``aimip_radiation`` in the
+                           # base config (gray | rrtmgp).
 physics_parameterization: "none"

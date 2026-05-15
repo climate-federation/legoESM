@@ -202,9 +202,15 @@ def _train_aimip_classical(spec_cfg, cache_dir: str):
     )
 
     dt = spec_cfg.dt
+    radiation = str(cfg.get("aimip_radiation", "gray"))
+    rad_update_interval = int(cfg.get("aimip_rad_update_interval", 6))
 
     def _make_physics_fn(p, grid_):
-        return make_aimip_classical_spectral_physics(p, grid_, dt)
+        return make_aimip_classical_spectral_physics(
+            p, grid_, dt,
+            radiation=radiation,
+            rad_update_interval_steps=rad_update_interval,
+        )
 
     return _train_spectral_loop(
         params, _make_physics_fn,
@@ -282,6 +288,8 @@ def _evaluate_variant(
     if variant == "classical":
         physics_fn = make_aimip_classical_spectral_physics(
             trained_model, grid, spec_cfg.dt,
+            radiation=str(cfg.get("aimip_radiation", "gray")),
+            rad_update_interval_steps=int(cfg.get("aimip_rad_update_interval", 6)),
         )
     elif variant == "column_nn":
         physics_fn = make_column_mlp_spectral_physics(trained_model, grid)
