@@ -1896,7 +1896,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                    jra55_state=None,
                    checkpoint_days=None, checkpoint_dir=None,
                    start_step=0,
-                   nudge_woa_tau=0.0, T_woa_3d=None,
+                   nudge_woa_tau=0.0, T_woa_3d=None, S_woa_3d=None,
                    snapshot_fn=None):
     """Run time loop with diagnostics.
 
@@ -2036,7 +2036,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                 blown_up = True
                 break
 
-            # WOA T nudging: dT/dt += (T_woa - T) / tau
+            # WOA T/S nudging: dX/dt += (X_woa - X) / tau
             if nudge_woa_tau > 0 and T_woa_3d is not None:
                 nudge_per_step = dt / (nudge_woa_tau * 86400.0)
                 daily_frac = 1.0 - (1.0 - nudge_per_step) ** actual
@@ -2045,6 +2045,11 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                     T_woa_3d - state.T.data) * mask_3d
                 state = state._replace(
                     T=state.T.replace(data=T_nudged.astype(state.T.data.dtype)))
+                if S_woa_3d is not None:
+                    S_nudged = state.S.data + daily_frac * (
+                        S_woa_3d - state.S.data) * mask_3d
+                    state = state._replace(
+                        S=state.S.replace(data=S_nudged.astype(state.S.data.dtype)))
 
             scalars = _extract_scalars(state, grid_type, grid, z_coord)
 
@@ -3065,6 +3070,8 @@ def run_omip_single(grid_type: str, args) -> dict:
         nudge_woa_tau=args.nudge_woa_tau,
         T_woa_3d=(T_woa * state.land_mask.data[..., jnp.newaxis]).astype(
             state.T.data.dtype) if args.nudge_woa_tau > 0 and T_woa is not None else None,
+        S_woa_3d=(S_woa * state.land_mask.data[..., jnp.newaxis]).astype(
+            state.S.data.dtype) if args.nudge_woa_tau > 0 and S_woa is not None else None,
         snapshot_fn=_snapshot_fn,
     )
 
