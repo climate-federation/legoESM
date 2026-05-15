@@ -617,7 +617,8 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
 # ===========================================================================
 
 def _init_rest_state(grid_type, grid, z_coord, H_max,
-                     H_bathy=None, land_mask=None):
+                     H_bathy=None, land_mask=None,
+                     bathy_cfg=None):
     """Create rest-state initial condition (zero velocity, exponential T, uniform S).
 
     Uses each grid's standard rest_state function, which provides a
@@ -645,7 +646,10 @@ def _init_rest_state(grid_type, grid, z_coord, H_max,
         )
     elif grid_type == "mpas":
         from legoesm.ocean.init_mpas import rest_state_mpas_ocean
-        return rest_state_mpas_ocean(grid, z_coord, H_max=H_max)
+        return rest_state_mpas_ocean(
+            grid, z_coord, H_max=H_max,
+            bathymetry=bathy_cfg,
+        )
     elif grid_type == "spectral":
         from legoesm.ocean.dynamics.spectral_ocean_pe import rest_state_spectral_ocean
         return rest_state_spectral_ocean(grid, z_coord, H_max=H_max)
@@ -2475,6 +2479,7 @@ def run_omip_single(grid_type: str, args) -> dict:
     # Bathymetry: realistic (ETOPO) or flat-bottom.
     H_bathy_init = None
     land_mask_init = None
+    bathy_cfg = None
     if args.bathymetry is not None:
         from legoesm.ocean.bathymetry import BathymetryConfig, init_ocean_bathymetry
         bathy_cfg = BathymetryConfig(
@@ -2787,6 +2792,7 @@ def run_omip_single(grid_type: str, args) -> dict:
     state = _init_rest_state(
         grid_type, grid, z_coord, args.H_max,
         H_bathy=H_bathy_init, land_mask=land_mask_init,
+        bathy_cfg=bathy_cfg,
     )
     if args.woa_init and T_woa is not None and S_woa is not None:
         # Replace rest-state T/S with WOA18 climatology.
