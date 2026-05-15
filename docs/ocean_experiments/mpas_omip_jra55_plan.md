@@ -172,13 +172,70 @@ SSS drift is 0.04 PSU/year (no SSS restoring active).
 - **SSS restoring**: Disabled.  Standard OMIP practice is weak global
   SSS restoring (piston velocity ~5e-7 m/s) to prevent freshwater
   drift.  Should be enabled for production runs.
-- **Freeze cap / sea ice**: Disabled.  Polar SST can go below freezing.
-  Phase B of OMIP requires a coupled sea-ice model.
+- **Freeze cap / sea ice**: See critical note below.
 - **WOA initialization**: Starting from rest state with idealized T(z)
   profile, not WOA18 climatology.  WOA init available via `--woa-init`.
 - **Equatorial bathymetry smoothing**: The lat-lon-specific equatorial
   smoothing in `run_omip.py` doesn't apply to MPAS.  The 20-year PR #261
   ETOPO run was stable without it, but 100-year stability is TBD.
+
+## Critical: Sea Ice and the Freeze Cap
+
+**OMIP is defined as ocean/sea-ice** (Griffies et al. 2016, Section 2).
+Sea ice is mandatory for protocol compliance.  Running without it
+produces a forced-ocean validation experiment, not an OMIP submission.
+
+### Why it matters physically
+
+Without sea ice, polar regions are catastrophically affected:
+
+1. **Enormous heat loss**: Bulk-flux solver sees SST ~ -1.8°C against
+   air at -30 to -50°C → 500-1000 W/m² heat loss.  In reality, sea
+   ice insulates the ocean (heat flux through ice is limited by its
+   thermal resistance).
+
+2. **Sub-freezing SST**: Without frazil ice formation to absorb latent
+   heat, SST drops below -1.8°C → unphysical densities in the Wright
+   EOS (never calibrated below freezing).
+
+3. **Catastrophic deep convection**: Unrealistically cold, dense surface
+   water triggers deep convection everywhere in the polar ocean
+   simultaneously (in reality, deep water formation is localized and
+   driven by brine rejection from ice formation).
+
+4. **Broken freshwater budget**: Sea ice is the polar freshwater pump
+   (brine rejection + melt cycle).  Without it, the Arctic halocline
+   disappears and AMOC source water formation is wrong.
+
+### The freeze cap: minimal band-aid
+
+`_apply_freeze_cap` clamps SST ≥ -1.8°C (seawater freezing point).
+
+**What it does**: Prevents sub-freezing SST, avoids unphysical
+densities and model blowup.
+
+**What it does NOT do**: No brine rejection, no freshwater from melt,
+no momentum damping (ice reduces wind stress on ocean), no albedo
+change, and the heat removed by clamping is NOT conserved (it
+vanishes silently).
+
+### Decision for current runs
+
+All current runs have `--jra55-no-freeze-cap` (freeze cap DISABLED).
+This is a known limitation:
+
+- **Tropical/mid-latitude results are meaningful** — the bulk-flux
+  forcing, SSS restoring, and WOA nudging all work correctly there.
+- **Polar results are unphysical** — SST can go below freezing,
+  deep convection will be too vigorous, AMOC source water is wrong.
+- **Global-mean diagnostics** (mean SST, total KE) are contaminated
+  by polar artifacts.
+
+**Recommendation for production**: Enable the freeze cap at minimum
+(`remove --jra55-no-freeze-cap`).  It is not physically correct but
+prevents the worst artifacts.  For OMIP compliance, the full sea-ice
+model (EVP dynamics + thermodynamics, already in `src/legoesm/ice/`)
+must be coupled — this is Phase B.
 
 ## Next Steps
 
