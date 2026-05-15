@@ -10,84 +10,107 @@ All experiments use two scripts in `scripts/global_overturning/`.
 Each run saves a `config.json` to its output directory with all actual
 parameter values. Results go to `results/ocean/comparison_mpas_v_latlon/`.
 
-### MPAS (production config — stable 20yr)
+### Best MPAS run (METOPO1 — stable 20yr, ACC=73 Sv)
 
 ```bash
-# Flat bottom (validated)
 CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 python scripts/global_overturning/run_comparison_mpas.py \
-  --tag MPAS_FLAT_20yr \
+  --tag MPAS_ETOPO \
   --days 7300 --save-every-days 30 \
-  --flat-bottom \
-  --a-h 1e5 --kappa-gm 2400 --kappa-redi 2400 --s-max 0.01
-
-# ETOPO bathymetry (same params, drop --flat-bottom)
-CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 python scripts/global_overturning/run_comparison_mpas.py \
-  --tag MPAS_ETOPO_20yr \
-  --days 7300 --save-every-days 30 \
-  --a-h 1e5 --kappa-gm 2400 --kappa-redi 2400 --s-max 0.01
+  --a-h 1e5 \
+  --kappa-gm 2400 --kappa-redi 2400 --s-max 0.01
 ```
 
-Key MPAS parameters: A_h=1e5, C_smag_lap=0.33 (script default),
-K_zeta_bih=1e14 (script default), dt=1200s. No Ferrari complement
-needed (no 2Δy problem on isotropic mesh).
+Full parameter list (explicit + script defaults):
 
-### Mercator lat-lon (production config — in testing)
+| Parameter | Value | Source |
+|-----------|-------|--------|
+| A_h | 1e5 m²/s | `--a-h 1e5` |
+| C_smag_lap | 0.33 | script default (override with `--c-smag-lap`) |
+| K_zeta_bih | 1e14 m⁴/s | script default (override with `--k-zeta-bih`) |
+| κ_GM | 2400 m²/s | `--kappa-gm 2400` |
+| κ_Redi | 2400 m²/s | `--kappa-redi 2400` |
+| S_max | 0.01 | `--s-max 0.01` |
+| dt | 1200 s | script default |
+| A_v | 1e-4 m²/s | script default |
+| K_v | 1e-5 m²/s | script default |
+| Bottom drag | r=1e-3, BBL=100m, u_bg=0.1 | script default |
+| KPP | K_conv=1.0 | script default |
+| Convection | enhanced diffusion, K_conv=1.0 | script default |
+| Barotropic | implicit_cn | script default |
+| PGF | adcroft | script default |
+| Tracer advection | TVD | script default |
+| EOS | Wright | script default |
+| Wind | global_wind, τ_max=0.1, tropical_scale=0.5 | script default |
+| T restoring | τ=30d, T_eq=25°C, T_pole=0°C | script default |
+| S restoring | τ=30d, S_star=35 PSU | script default |
+
+For flat bottom, add `--flat-bottom` (validated in MBR2, 20yr stable).
+
+### Best Mercator run (MRC_ETOPO1 — in progress)
 
 ```bash
-# Flat bottom baroclinic
 CUDA_VISIBLE_DEVICES=1 JAX_ENABLE_X64=1 python scripts/global_overturning/run_comparison_latlon.py \
-  --tag MERC_FLAT_10yr \
+  --tag MERC_ETOPO \
   --days 3650 --save-every-days 30 \
   --mercator \
-  --flat-bottom \
-  --a-h 1e5 --kappa-gm 2400 --kappa-redi 2400 --s-max 0.01 \
-  --dt 600
-
-# ETOPO bathymetry (same params, drop --flat-bottom)
-CUDA_VISIBLE_DEVICES=1 JAX_ENABLE_X64=1 python scripts/global_overturning/run_comparison_latlon.py \
-  --tag MERC_ETOPO_10yr \
-  --days 3650 --save-every-days 30 \
-  --mercator \
-  --a-h 1e5 --kappa-gm 2400 --kappa-redi 2400 --s-max 0.01 \
+  --a-h 1e5 \
+  --a-h-floor 1000 \
+  --ke-gradient-scheme hollingsworth \
+  --slope-foot-alpha 3.0 \
+  --kappa-gm 2400 --kappa-redi 2400 --s-max 0.01 \
   --dt 600
 ```
 
-Key Mercator parameters: same as MPAS except dt=600s (required because
-polar cells are 19 km — half the regular lat-lon dy). Grid is 278×360
-(vs 180×360 regular). No Ferrari complement needed (isotropic grid).
+Full parameter list (explicit + script defaults):
 
-### Regular lat-lon (legacy — has 2Δy instability)
+| Parameter | Value | Source |
+|-----------|-------|--------|
+| Grid | Mercator 278×360 | `--mercator` |
+| A_h | 1e5 m²/s | `--a-h 1e5` |
+| A_h_floor | 1000 m²/s | `--a-h-floor 1000` (DINO lesson) |
+| C_smag_lap | 0.33 | script default (override with `--c-smag-lap`) |
+| ke_gradient_scheme | hollingsworth | `--ke-gradient-scheme hollingsworth` (DINO lesson) |
+| slope_foot_alpha | 3.0 | `--slope-foot-alpha 3.0` (DINO lesson) |
+| κ_GM | 2400 m²/s | `--kappa-gm 2400` |
+| κ_Redi | 2400 m²/s | `--kappa-redi 2400` |
+| S_max | 0.01 | `--s-max 0.01` |
+| dt | 600 s | `--dt 600` (required: Mercator polar cells = 19 km) |
+| A_v, K_v, KPP, etc. | same as MPAS | script defaults |
+
+For flat bottom, add `--flat-bottom` (validated in MRC_BR1, 10yr stable).
+
+**Why dt=600s?** Mercator cells shrink to 19×19 km at 80° latitude.
+With baroclinic PGF, dt=1200s exceeds CFL and blows up at day 20.
+
+**DINO stability knobs** (from PR #265 lessons, needed for ETOPO only):
+- `hollingsworth`: fixes Hollingsworth-Kallberg instability over slopes
+- `A_h_floor=1000`: MOM6 OM4 viscosity floor (safety net)
+- `slope_foot_alpha=3.0`: Adcroft PGF smoothing for steep bathymetry
+
+### Quick tests
 
 ```bash
-CUDA_VISIBLE_DEVICES=1 JAX_ENABLE_X64=1 python scripts/global_overturning/run_comparison_latlon.py \
-  --tag LATLON_FLAT_10yr \
-  --days 3650 --save-every-days 30 \
-  --flat-bottom \
-  --a-h 1e5 --kappa-gm 2400 --kappa-redi 2400 --s-max 0.01
-```
-
-Regular lat-lon develops 4-5Δy meridional bands from grid anisotropy.
-Mercator grid is the recommended replacement.
-
-### Barotropic test (quick, ~2 min for 120 days)
-
-```bash
-# Add --uniform-T for barotropic mode (uniform T=10°C, wind only)
+# Barotropic test (~2 min for 120 days)
 CUDA_VISIBLE_DEVICES=1 JAX_ENABLE_X64=1 python scripts/global_overturning/run_comparison_latlon.py \
   --tag BT_TEST --days 120 --save-every-days 10 \
   --mercator --flat-bottom --uniform-T --a-h 1e4 --dt 1200
+
+# MPAS flat-bottom short test (~5 min for 120 days)
+CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 python scripts/global_overturning/run_comparison_mpas.py \
+  --tag MPAS_TEST --days 120 --save-every-days 10 \
+  --flat-bottom --a-h 1e5 --kappa-gm 2400 --kappa-redi 2400 --s-max 0.01
 ```
 
 ### Diagnostics
 
 ```bash
-# Meridional wavenumber spectrum (Mercator or regular lat-lon)
-JAX_ENABLE_X64=1 python scripts/global_overturning/_jet_spectrum_mercator.py \
-  latlon_TAG --mercator --n-lon 360
-
 # MPAS section plots (surface maps + zonal-mean + Drake + Atlantic)
 JAX_ENABLE_X64=1 python scripts/global_overturning/_plot_mpas_sections.py \
   results/ocean/comparison_mpas_v_latlon/mpas_TAG/restarts/restart_dayNNNNNN.npz
+
+# Meridional wavenumber spectrum (Mercator or regular lat-lon)
+JAX_ENABLE_X64=1 python scripts/global_overturning/_jet_spectrum_mercator.py \
+  latlon_TAG --mercator --n-lon 360
 
 # Drake Passage transport time series
 python scripts/global_overturning/_drake_timeseries.py
@@ -95,11 +118,11 @@ python scripts/global_overturning/_drake_timeseries.py
 
 ### Important notes
 - Always use `JAX_ENABLE_X64=1` (fp64 required for thin partial cells)
-- Use `CUDA_VISIBLE_DEVICES=N` to pin to specific GPU (machine has 2× V100S)
-- Each run creates `config.json` with all actual parameters used
+- Use `CUDA_VISIBLE_DEVICES=N` to pin to specific GPU
+- Each run saves `config.json` with all actual parameters used
 - `--restart path/to/restart.npz` to continue from a previous run
 - `--tag NAME` sets output directory name (required for organization)
-- `--from-config path/to/config.json` to replicate a previous run exactly
+- `--from-config path/to/config.json` to replicate a previous run
 
 ### Reproducing a previous experiment
 
