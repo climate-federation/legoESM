@@ -569,7 +569,9 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         )
 
         config = MPASOceanConfig(
-            A_h=A_h, A_v=A_v, K_v=K_v,
+            A_h=A_h,
+            A_v=1.0e-4,   # PR #261 value (generic is 1e-3, too high for MPAS)
+            K_v=1.0e-5,   # PR #261 value (generic is 1e-4, too high for MPAS)
             C_smag_lap=0.33,
             K_zeta_bih=1e14,
             barotropic_solver="implicit_cn",
