@@ -283,7 +283,7 @@ def _evaluate_variant(
             trained_model, grid, spec_cfg.dt,
         )
     elif variant == "column_nn":
-        physics_fn = make_column_mlp_spectral_physics(trained_model)
+        physics_fn = make_column_mlp_spectral_physics(trained_model, grid)
     elif variant in ("sfno_physics", "sfno_full"):
         physics_fn = make_sfno_spectral_physics(trained_model, grid)
     else:
