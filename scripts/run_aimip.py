@@ -128,7 +128,7 @@ def _build_spectral_config(cfg: dict[str, Any]):
         optimizer=str(cfg.get("aimip_optimizer", "muon")),
         warmup_steps=int(cfg.get("aimip_warmup", 100)),
         n_train_days=int(cfg["n_train_days"]),
-        start_year=int(cfg.get("years", [2015])[0]),
+        start_year=int(cfg.get("train_year", cfg.get("years", [2015])[0])),
         loss_config=loss_config,
         log_every=int(cfg.get("log_every", 1)),
         checkpoint_dir=str(Path(cfg["output_dir"]) / cfg["aimip_variant"]),
@@ -249,6 +249,7 @@ def _evaluate_variant(
     spec_cfg = _build_spectral_config(cfg)
     eval_cfg = spec_cfg._replace(
         n_train_days=int(cfg.get("n_eval_days", 2)),
+        start_year=int(cfg.get("eval_year", spec_cfg.start_year)),
     )
 
     grid = create_gaussian_grid(spec_cfg.n_max, dealiasing="quadratic")

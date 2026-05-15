@@ -640,17 +640,35 @@ def load_training_data(
     )
     era5_config = TrainingERA5Config(dt_hours=6)
     n_days = config.n_train_days
-    # Time indices: need days 0..n_days (n_days+1 snapshots for n_days pairs)
-    time_indices = [d * 4 for d in range(n_days + 1)]
-
-    logger.info(
-        f"Loading {n_days} daily ERA5 pairs "
-        f"(opening Zarr store once, reading {len(time_indices)} snapshots)..."
-    )
 
     # Open store once
     store = era5_config.zarr_store
     ds = _open_era5_zarr(store)
+
+    # Resolve start offset from config.start_year (defaults to 2015).
+    # The WeatherBench2 ERA5 zarr starts at 1959-01-01 00:00 UTC with
+    # 6-hour spacing, so day 0 of year Y maps to time-index
+    # round((Y - 1959) * 365.25 * 4).  Snap to the nearest available
+    # time after that target to tolerate leap-day drift.
+    import numpy as _np
+
+    try:
+        year_times = _np.array(
+            ds.time.values, dtype="datetime64[ns]",
+        )
+        target = _np.datetime64(f"{int(config.start_year):04d}-01-01")
+        start_idx = int(_np.searchsorted(year_times, target))
+    except Exception:
+        # Fallback: linear extrapolation from 1959-01-01 baseline.
+        start_idx = max(0, int(round((int(config.start_year) - 1959) * 365.25 * 4)))
+
+    time_indices = [start_idx + d * 4 for d in range(n_days + 1)]
+
+    logger.info(
+        f"Loading {n_days} daily ERA5 pairs from year "
+        f"{config.start_year} (start_idx={start_idx}; opening Zarr "
+        f"store once, reading {len(time_indices)} snapshots)..."
+    )
 
     # Read lat/lon and pressure levels
     lat = np.deg2rad(ds.lat.values.astype(np.float64))

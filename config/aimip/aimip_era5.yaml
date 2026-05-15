@@ -19,29 +19,36 @@
 # ----- ERA5 source --------------------------------------------------
 era5_zarr: "gs://weatherbench2/datasets/era5/1959-2023_01_10-wb13-6h-1440x721_with_derived_variables.zarr"
 cache_dir: ".cache/aimip_era5"
-train_period: ["2015-01-01", "2015-01-08"]
-eval_period:  ["2015-02-01", "2015-02-03"]
-years: [2015]
+# Train on one year, evaluate on a held-out subsequent year
+# (true AIMIP-style cross-year intercomparison).  Bump
+# n_train_days for a fuller multi-year sweep; ~25 days per
+# variant per 10-min compute budget at T21 L8.
+train_year: 2015
+eval_year:  2016
+train_period: ["2015-01-01", "2015-02-01"]
+eval_period:  ["2016-01-01", "2016-01-15"]
 
-n_train_days: 2
-n_eval_days: 1
+n_train_days: 25
+n_eval_days: 10
 
 # ----- Grid + dycore ------------------------------------------------
 # Gaussian grid (SFNO requires this; classical + column_nn also run
 # on it, giving every AIMIP variant a common evaluation grid).
 #
-# T28 L8 is a tractable production-relevant intercomparison size that
-# fits in a ~10-min compute budget per variant on a single GPU.  Bump
-# to T42 L10 for a fuller run (~30 min per variant).
+# T21 L8 is a tractable production-relevant intercomparison size
+# that fits a 25-day single-epoch run per variant in a ~10-min
+# compute budget on a single GPU.  Bump to T28 L8 or T42 L10 for a
+# fuller multi-month / multi-epoch sweep (will require multi-hour
+# wall clock per variant).
 aimip_grid: "gaussian"
-n_max: 28            # spectral truncation (T28 ≈ 4.3° grid)
+n_max: 21            # spectral truncation (T21 ≈ 5.6° grid)
 nlev: 8              # vertical levels (sigma)
 dt: 1800.0           # 30-minute dycore timestep
 
 # ----- Training -----------------------------------------------------
-aimip_n_epochs: 3
+aimip_n_epochs: 1
 aimip_lr: 3.0e-4
-aimip_warmup: 2
+aimip_warmup: 5
 aimip_weight_decay: 1.0e-5
 aimip_grad_clip: 1.0
 aimip_optimizer: "muon"   # muon | adamw | adam — see ml/training.create_optimizer
