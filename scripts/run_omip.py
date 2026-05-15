@@ -618,7 +618,8 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
 
 def _init_rest_state(grid_type, grid, z_coord, H_max,
                      H_bathy=None, land_mask=None,
-                     bathy_cfg=None):
+                     bathy_cfg=None,
+                     use_etopo_postinit=False):
     """Create rest-state initial condition (zero velocity, exponential T, uniform S).
 
     Uses each grid's standard rest_state function, which provides a
@@ -646,9 +647,15 @@ def _init_rest_state(grid_type, grid, z_coord, H_max,
         )
     elif grid_type == "mpas":
         from legoesm.ocean.init_mpas import rest_state_mpas_ocean
+        # When ETOPO bathymetry will be applied post-init, use
+        # land_lat_threshold=90 so the initial state has ocean
+        # everywhere (including the Arctic). The ETOPO block will
+        # set the real land_mask and H_bathy afterwards.
+        lat_thresh = 90.0 if use_etopo_postinit else 80.0
         return rest_state_mpas_ocean(
             grid, z_coord, H_max=H_max,
             bathymetry=bathy_cfg,
+            land_lat_threshold=lat_thresh,
         )
     elif grid_type == "spectral":
         from legoesm.ocean.dynamics.spectral_ocean_pe import rest_state_spectral_ocean
@@ -2828,6 +2835,7 @@ def run_omip_single(grid_type: str, args) -> dict:
         grid_type, grid, z_coord, args.H_max,
         H_bathy=H_bathy_init, land_mask=land_mask_init,
         bathy_cfg=bathy_cfg,
+        use_etopo_postinit=(grid_type == "mpas" and args.bathymetry is not None),
     )
     # --- MPAS ETOPO post-processing (matches run_comparison_mpas.py) ---
     # The generic init_ocean_bathymetry path doesn't do north-cap masking,
