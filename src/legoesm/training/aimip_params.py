@@ -268,6 +268,11 @@ def make_aimip_classical_spectral_physics(
     *,
     radiation: str = "gray",
     rad_update_interval_steps: int = 6,
+    convection_scheme: str = "tiedtke",
+    turbulence_scheme: str = "louis",
+    gwd_scheme: str = "mcfarlane",
+    microphysics_scheme: str = "none",
+    cloud_scheme: str = "xu_randall",
 ):
     """Build a SpectralPE physics function for the AIMIP classical variant.
 
@@ -308,12 +313,22 @@ def make_aimip_classical_spectral_physics(
     # ``tau_pole`` are differentiated.  Default ``gray`` keeps the
     # AIMIP harness tractable on a single GPU; bump to ``rrtmgp``
     # for production-grade physics realism.
+    # ---- Cloud config (trained when xu_randall, defaults otherwise) ----
+    if cloud_scheme == "xu_randall":
+        cloud_cfg_trained = params.to_cloud_config()
+    elif cloud_scheme == "none":
+        cloud_cfg_trained = None
+    else:
+        from legoesm.atmosphere.physics.clouds.config import CloudConfig as _CC
+        cloud_cfg_trained = _CC(scheme=cloud_scheme)
+
+    # ---- Radiation ----
     if radiation == "rrtmgp":
         rad_cfg = RadiationConfig(
             scheme="rrtmgp",
             rrtmgp=RRTMGPConfig(),
-            cloud_scheme="xu_randall",
-            cloud_config=params.to_cloud_config(),
+            cloud_scheme=cloud_scheme,
+            cloud_config=cloud_cfg_trained,
             update_interval_steps=rad_update_interval_steps,
         )
     elif radiation == "gray":
@@ -329,15 +344,38 @@ def make_aimip_classical_spectral_physics(
             f"Unknown AIMIP radiation backend: {radiation!r} "
             f"(expected 'gray' or 'rrtmgp')."
         )
-    conv_cfg = ConvectionConfig(
-        scheme="tiedtke", tiedtke=params.to_tiedtke_config(),
+
+    # ---- Convection ----
+    if convection_scheme == "tiedtke":
+        conv_cfg = ConvectionConfig(
+            scheme="tiedtke", tiedtke=params.to_tiedtke_config(),
+        )
+    else:
+        conv_cfg = ConvectionConfig(scheme=convection_scheme)
+
+    # ---- Turbulence ----
+    if turbulence_scheme == "louis":
+        turb_cfg = TurbulenceConfig(
+            scheme="louis", louis=params.to_louis_config(),
+        )
+    else:
+        turb_cfg = TurbulenceConfig(scheme=turbulence_scheme)
+
+    # ---- Gravity wave drag ----
+    if gwd_scheme == "mcfarlane":
+        gwd_cfg = GravityWaveDragConfig(
+            scheme="mcfarlane", mcfarlane=params.to_mcfarlane_config(),
+        )
+    elif gwd_scheme == "none":
+        gwd_cfg = GravityWaveDragConfig(scheme="none")
+    else:
+        gwd_cfg = GravityWaveDragConfig(scheme=gwd_scheme)
+
+    # ---- Microphysics ----
+    from legoesm.atmosphere.physics.microphysics.config import (
+        MicrophysicsConfig,
     )
-    turb_cfg = TurbulenceConfig(
-        scheme="louis", louis=params.to_louis_config(),
-    )
-    gwd_cfg = GravityWaveDragConfig(
-        scheme="mcfarlane", mcfarlane=params.to_mcfarlane_config(),
-    )
+    micro_cfg = MicrophysicsConfig(scheme=microphysics_scheme)
 
     # Note: ``p = params.as_dict()`` is already computed above for
     # gray-radiation tau knobs; reused here only when gray is active.
@@ -346,6 +384,7 @@ def make_aimip_classical_spectral_physics(
         radiation=rad_cfg,
         convection=conv_cfg,
         turbulence=turb_cfg,
+        microphysics=micro_cfg,
         gravity_wave_drag=gwd_cfg,
     )
     raw_fn = make_physics(physics_config, model_type="spectral_pe", dt=dt)
