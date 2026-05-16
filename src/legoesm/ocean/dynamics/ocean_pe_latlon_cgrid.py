@@ -1519,7 +1519,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         bilap_u, bilap_v = vector_laplacian_cgrid(
             _vlap_u, _vlap_v, grid,
             mask=mask, u_mask=u_mask, v_mask=v_mask)
-        if getattr(config, "B_h_lat_scaling", True):
+        if config.B_h_lat_scaling:
             scale_u, scale_v = biharmonic_scaling_factor(grid)
             diag_Bh_bilap_u = -config.B_h * scale_u[:, None, None] * bilap_u
             diag_Bh_bilap_v = -config.B_h * scale_v[:, None, None] * bilap_v
@@ -1559,7 +1559,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         bilap_u, bilap_v = vector_bilaplacian_cgrid(
             u, v, grid,
             mask=mask, u_mask=u_mask, v_mask=v_mask)
-        if getattr(config, "B_h_lat_scaling", True):
+        if config.B_h_lat_scaling:
             # Scale biharmonic coefficient with (cos(lat)/cos_max)^4 to prevent
             # CFL violation near poles where dx shrinks (MOM6 convention).
             scale_u, scale_v = biharmonic_scaling_factor(grid)
@@ -1622,7 +1622,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # without damping zonal flow.  Useful on lat-lon grids with large
     # dx/dy anisotropy where isotropic A_h over-damps zonal structure.
     # Acts on total velocity (like the main viscosity block above).
-    _A_h_merid = getattr(config, "A_h_merid", 0.0)
+    _A_h_merid = config.A_h_merid
     if _A_h_merid > 0:
         _dy = grid.radius * (grid.lat[1] - grid.lat[0])  # constant
         _inv_dy2 = 1.0 / (_dy * _dy)

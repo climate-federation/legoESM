@@ -131,11 +131,14 @@ def zonal_mean_section(lat_c, field, mask, lat_bins, dz=None):
 
 
 def compute_density(T, S):
-    """Simple linear EOS for plotting: rho = rho0 - alpha*T + beta*S."""
-    rho0 = 1025.0
-    alpha = 0.2  # kg/m³/K
-    beta = 0.8   # kg/m³/PSU
-    return rho0 - alpha * T + beta * (S - 35.0)
+    """Linear EOS for plotting via the model's canonical helper.
+
+    Imports :func:`legoesm.ocean.eos.linear_eos` so the plotter cannot
+    drift from the production EOS (CLAUDE.md: plotters NOT exempt from
+    the "no re-derivation" rule).
+    """
+    from legoesm.ocean.eos import linear_eos
+    return np.asarray(linear_eos(T, S))
 
 
 def main():

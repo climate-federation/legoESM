@@ -526,7 +526,7 @@ class LatLonCGridOceanConfig(NamedTuple):
                                     # either too strong (zonal) or too weak
                                     # (meridional).
     B_h: float = 0.0
-    B_h_lat_scaling: bool = True   # Apply cos⁴(lat) scaling to B_h.
+    B_h_lat_scaling: bool = True   # Apply (cos(lat)/cos_max)⁴ scaling to B_h.
                                     # Default True (MOM6 convention) prevents
                                     # CFL violation at poles where dx shrinks.
                                     # Set False to keep full B_h everywhere
