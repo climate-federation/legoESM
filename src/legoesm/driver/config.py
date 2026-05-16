@@ -136,7 +136,11 @@ class ExperimentConfig(NamedTuple):
     carbon_cycle: str = "none"
 
     # Initial conditions
-    ic: str = "default"   # "default" (held_suarez_init) or "era5"
+    #   "default"  — isothermal held_suarez_init at T_init (e.g. 300 K)
+    #   "standard" — realistic lapse-rate profile (held_suarez_init with the
+    #                temperature replaced by a standard atmosphere)
+    #   "era5"     — ERA5 reanalysis snapshot (requires ic_path)
+    ic: str = "default"
     ic_path: str = ""     # ERA5 Zarr path when ic="era5"
 
     # CMIP
@@ -246,7 +250,7 @@ class ExperimentConfig(NamedTuple):
                 f"ModelDriver is atmosphere-only with prescribed SST/SIC. "
                 f"Set carbon_cycle='none' or use a coupled driver."
             )
-        _valid_ic = ("default", "era5")
+        _valid_ic = ("default", "era5", "standard")
         if self.ic not in _valid_ic:
             errors.append(f"ic must be one of {_valid_ic}, got {self.ic!r}")
         if self.ic == "era5" and not self.ic_path:

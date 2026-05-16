@@ -405,6 +405,36 @@ class ModelDriver:
                         phis=self.state.phis.replace(data=self._phis_data),
                     )
 
+        # Standard-atmosphere IC override.  The default held_suarez_init is
+        # ISOTHERMAL at T_init (e.g. 300 K at every level), which leaves the
+        # upper atmosphere ~80 K too warm and — because q_sat(300 K) is large
+        # at all levels — seeds an absurdly humid column.  With ic="standard"
+        # the temperature is replaced by a realistic lapse-rate profile
+        # (warm surface, 6.5 K/km tropospheric lapse, isothermal stratosphere).
+        # Done BEFORE the moisture init below so q_v is built from the
+        # realistic (cold-aloft) temperature and stays physical.
+        if cfg.ic == "standard" and hasattr(self.state, "T"):
+            sigma_full = self.sigma.sigma_full                       # (nlev,)
+            _H = 8000.0          # scale height [m]
+            _z = -_H * jnp.log(jnp.clip(sigma_full, 1.0e-6, 1.0))    # height [m]
+            _T_surf = 288.0      # global-mean near-surface air temperature [K]
+            _lapse = 6.5e-3      # tropospheric lapse rate [K/m]
+            _T_strat = 210.0     # isothermal-stratosphere floor [K]
+            T_prof = jnp.maximum(_T_surf - _lapse * _z, _T_strat)    # (nlev,)
+            T_new = jnp.broadcast_to(
+                T_prof.astype(self.state.T.data.dtype),
+                self.state.T.data.shape,
+            )
+            self.state = self.state._replace(
+                T=self.state.T.replace(data=T_new),
+            )
+            logger.info(
+                "  IC: standard atmosphere — T %.1f-%.1f K "
+                "(%.1f K/km lapse, isothermal %.0f K stratosphere)",
+                float(jnp.min(T_prof)), float(jnp.max(T_prof)),
+                _lapse * 1000.0, _T_strat,
+            )
+
         # Initialize all tracers via registry
         self.tracers = init_tracers(self.tracer_registry, shape_3d)
 
