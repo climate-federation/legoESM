@@ -23,10 +23,12 @@ from legoesm.ocean.vertical import OceanZStarCoordinate, compute_layer_thickness
 from legoesm.ocean.state import LatLonCGridOceanState, LatLonCGridOceanConfig
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     divergence_cgrid,
+    fold_vface_row,
     gradient_x_cgrid,
     gradient_y_cgrid,
     min_cell_to_uface,
     min_cell_to_vface,
+    pad_ns_vector_u,
 )
 from legoesm.ocean.dynamics.eta_floor import clamp_and_redistribute as _clamp_redistribute
 from legoesm.ocean.dynamics.barotropic_common import (
@@ -45,6 +47,7 @@ def _depth_average_to_faces(
     mask: jnp.ndarray,
     u_mask: jnp.ndarray,
     v_mask: jnp.ndarray,
+    grid=None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Compute depth-averaged velocities at C-grid face points.
 
@@ -69,7 +72,7 @@ def _depth_average_to_faces(
     # overestimates face depth at topographic steps, creating a
     # barotropic-baroclinic residual that drives spurious currents.
     h_u = min_cell_to_uface(h_k)
-    h_v = min_cell_to_vface(h_k)
+    h_v = min_cell_to_vface(h_k, grid)
 
     # Fuse the per-face thickness + barotropic-mean column reductions —
     # both reduce ``... * h`` over the same level axis.
@@ -167,17 +170,19 @@ def barotropic_substeps_latlon_cgrid(
         eta, H_bathy, z_coord, min_water_column_m=config.min_water_column_m,
     ).astype(_dt)
     U_bar, V_bar = _depth_average_to_faces(
-        u, v, h_k, min_water_col, mask, u_mask, v_mask,
+        u, v, h_k, min_water_col, mask, u_mask, v_mask, grid,
     )
 
     # Semi-implicit Coriolis parameter at face points
-    f_cell = grid.f.astype(eta.dtype)
-    # f at u-points: face j is between cell (j-1) mod n_lon and cell j
-    f_u = 0.5 * (jnp.roll(f_cell, 1, axis=1) + f_cell)
-    f_u = jnp.concatenate([f_u, f_u[:, 0:1]], axis=1)
-    # f at v-points
-    f_v_interior = 0.5 * (f_cell[:-1] + f_cell[1:])
-    f_v = jnp.concatenate([f_cell[0:1], f_v_interior, f_cell[-1:]], axis=0)
+    if hasattr(grid, "f_u") and hasattr(grid, "f_v"):
+        f_u = grid.f_u.astype(eta.dtype)
+        f_v = grid.f_v.astype(eta.dtype)
+    else:
+        f_cell = grid.f.astype(eta.dtype)
+        f_u = 0.5 * (jnp.roll(f_cell, 1, axis=1) + f_cell)
+        f_u = jnp.concatenate([f_u, f_u[:, 0:1]], axis=1)
+        f_v_interior = 0.5 * (f_cell[:-1] + f_cell[1:])
+        f_v = jnp.concatenate([f_cell[0:1], f_v_interior, f_cell[-1:]], axis=0)
 
     # Barotropic diffusion — flux-form with face-centered coefficient.
     # Using div(nu_face * grad(eta)) instead of nu_cell * div(grad(eta))
@@ -210,7 +215,16 @@ def barotropic_substeps_latlon_cgrid(
             [diff_u_mask, diff_u_mask[:, 0:1]], axis=1,
         )
         diff_v_mask_interior = mask[:-1] * mask[1:]
-        diff_v_mask = jnp.pad(diff_v_mask_interior, ((1, 1), (0, 0)))
+        _fold_dm = getattr(grid, "fold", None)
+        if _fold_dm is not None and _fold_dm.is_active:
+            south_dm = jnp.zeros_like(diff_v_mask_interior[:1])
+            north_dm = mask[-1:] * mask[-1:, _fold_dm.perm_T]
+            diff_v_mask = jnp.concatenate(
+                [south_dm, diff_v_mask_interior, north_dm], axis=0,
+            )
+        else:
+            from legoesm.ocean.dynamics.latlon_cgrid_operators import _pad_ns_zero
+            diff_v_mask = _pad_ns_zero(diff_v_mask_interior)
 
     # Divergence damping on barotropic velocity: grad(div(u_bar)).
     # Targets the divergent mode that creates the eta checkerboard,
@@ -280,10 +294,19 @@ def barotropic_substeps_latlon_cgrid(
         # topographic steps, creating a transport mismatch.
         H_u = jnp.minimum(jnp.roll(H_total_c, 1, axis=1), H_total_c)
         H_u = jnp.concatenate([H_u, H_u[:, 0:1]], axis=1)
-        # Pole rows are zero (wall BC); single Pad HLO op replaces
-        # alloc-zeros + concatenate-of-three (called every substep).
+        # Pole rows are zero (wall BC) on regular lat-lon; fold min-rule
+        # on tripolar.
         H_v_interior = jnp.minimum(H_total_c[:-1], H_total_c[1:])
-        H_v = jnp.pad(H_v_interior, ((1, 1), (0, 0)))
+        _fold = getattr(grid, "fold", None)
+        if _fold is not None and _fold.is_active:
+            south = jnp.zeros_like(H_v_interior[:1])
+            north = jnp.minimum(
+                H_total_c[-1:], fold_vface_row(H_total_c, grid),
+            )
+            H_v = jnp.concatenate([south, H_v_interior, north], axis=0)
+        else:
+            from legoesm.ocean.dynamics.latlon_cgrid_operators import _pad_ns_zero
+            H_v = _pad_ns_zero(H_v_interior)
 
         flux_u = H_u * U_bar_c * u_mask
         flux_v = H_v * V_bar_c * v_mask
@@ -312,13 +335,12 @@ def barotropic_substeps_latlon_cgrid(
         V_at_u = jnp.concatenate([V_at_u, V_at_u[:, 0:1]], axis=1)
 
         # Average U to v-points for Coriolis.  Pole rows are zero
-        # (wall BC); single Pad HLO op replaces alloc-zeros +
-        # concatenate-of-three (called every substep).
+        # (wall BC on regular lat-lon) or fold-reflected (tripolar).
         U_at_v_interior = 0.25 * (
             U_bar_c[:-1, :-1] + U_bar_c[:-1, 1:]
             + U_bar_c[1:, :-1] + U_bar_c[1:, 1:]
         )
-        U_at_v = jnp.pad(U_at_v_interior, ((1, 1), (0, 0)))
+        U_at_v = pad_ns_vector_u(U_at_v_interior, grid)
 
         # Forward-backward Coriolis (Matsuno) + PGF + slow forcing
         U_bar_new = (U_bar_c + dt_s * (
@@ -329,8 +351,7 @@ def barotropic_substeps_latlon_cgrid(
             U_bar_new[:-1, :-1] + U_bar_new[:-1, 1:]
             + U_bar_new[1:, :-1] + U_bar_new[1:, 1:]
         )
-        # Pole rows are zero; single Pad HLO op (substep hot path).
-        U_new_at_v = jnp.pad(U_new_at_v_interior, ((1, 1), (0, 0)))
+        U_new_at_v = pad_ns_vector_u(U_new_at_v_interior, grid)
         V_bar_new = (V_bar_c + dt_s * (
             -f_v * U_new_at_v - g * deta_dy + F_slow_v
         )) * v_mask

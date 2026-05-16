@@ -77,6 +77,7 @@ def _depth_average_to_faces(
     min_water_col: jnp.ndarray,
     u_mask: jnp.ndarray,
     v_mask: jnp.ndarray,
+    grid=None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Depth-average 3D velocity to C-grid face points (thickness-weighted).
 
@@ -89,6 +90,8 @@ def _depth_average_to_faces(
     columns where every cell has ``h_k > 0`` (full cells everywhere),
     the mask is 1 and the result is bit-exact unchanged.
     """
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import fold_vface_row
+
     # Use ``min(h_left, h_right)`` instead of the arithmetic mean.  This
     # is the physically correct face thickness — the partial cell is
     # the constraint on flux capacity at the face.  Identical to the
@@ -104,8 +107,13 @@ def _depth_average_to_faces(
     h_v_int = jnp.minimum(h_k[:-1], h_k[1:])
     n_lon = h_k.shape[1]
     nlev = h_k.shape[2]
-    zero_row = jnp.zeros((1, n_lon, nlev), dtype=h_k.dtype)
-    h_v = jnp.concatenate([zero_row, h_v_int, zero_row], axis=0)
+    south_row = jnp.zeros((1, n_lon, nlev), dtype=h_k.dtype)
+    # On tripolar grids, the fold face connects cell (fold_j, i) with
+    # its fold partner (fold_j, perm_T[i]).  Face thickness is the min
+    # of both sides — identical to the interior min-rule.
+    h_k_partner = fold_vface_row(h_k, grid)
+    north_row = jnp.minimum(h_k[-1:], h_k_partner)
+    h_v = jnp.concatenate([south_row, h_v_int, north_row], axis=0)
     _v_pair = jnp.sum(jnp.stack([h_v, v_3d * h_v], axis=-1), axis=-2)
     H_v = jnp.maximum(_v_pair[..., 0], min_water_col)
     V_bar = _v_pair[..., 1] / H_v * v_mask
@@ -117,6 +125,7 @@ def _h_total_at_faces(
     h_k: jnp.ndarray,
     min_water_col: jnp.ndarray,
     mask: jnp.ndarray,
+    grid=None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Total water-column thickness ``H = sum_k(h_k)`` at u/v faces.
 
@@ -138,6 +147,8 @@ def _h_total_at_faces(
 
     Multiplied by the *cell* mask so that dry-face transport is zero.
     """
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import fold_vface_row
+
     H_total = jnp.maximum(jnp.sum(h_k, axis=-1), min_water_col) * mask
 
     H_u_inner = jnp.minimum(jnp.roll(H_total, 1, axis=1), H_total)
@@ -145,8 +156,10 @@ def _h_total_at_faces(
 
     H_v_int = jnp.minimum(H_total[:-1], H_total[1:])
     n_lon = H_total.shape[1]
-    zero_row = jnp.zeros((1, n_lon), dtype=H_total.dtype)
-    H_v = jnp.concatenate([zero_row, H_v_int, zero_row], axis=0)
+    south_row = jnp.zeros((1, n_lon), dtype=H_total.dtype)
+    H_total_partner = fold_vface_row(H_total, grid)
+    north_row = jnp.minimum(H_total[-1:], H_total_partner)
+    H_v = jnp.concatenate([south_row, H_v_int, north_row], axis=0)
 
     return H_u, H_v
 
@@ -209,46 +222,68 @@ def _make_diag_preconditioner(
         - (H_u(j,i+1) + H_u(j,i)) · dy_u / (dx_u(j) · A_cell(j,i))
         - (H_v(j+1,i)·dx_v(j+1) + H_v(j,i)·dx_v(j)) / (dy_v · A_cell(j,i))
     """
-    R = grid.radius
-    dlon = grid.dlon
-    cos_lat_c = grid.cos_lat
-    dx_u = R * dlon * cos_lat_c                         # (n_lat,)
-
-    # u-face meridional extent: cell row j's height.
-    dy_h = grid.dy * 0.5                                # (n_lat,)
-    dy_u = dy_h                                         # alias
-
-    # v-face cell-centre-to-cell-centre distance: depends on row pair.
-    # dy_v_face has length n_lat+1 (one per v-face row); for pole faces
-    # use edge-padded value (these rows have zero H_v in practice).
-    dy_v_int = 0.5 * (dy_h[1:] + dy_h[:-1])             # (n_lat-1,)
-    dy_v_face = jnp.pad(dy_v_int, (1, 1), mode='edge')   # (n_lat+1,)
-
-    lat = grid.lat
-    lat_v_int = 0.5 * (lat[:-1] + lat[1:])
-    lat_v = jnp.concatenate([
-        jnp.array([-jnp.pi / 2], dtype=lat.dtype),
-        lat_v_int,
-        jnp.array([jnp.pi / 2], dtype=lat.dtype),
-    ])
-    cos_lat_v = jnp.cos(lat_v)                          # (n_lat+1,)
-    dx_v = R * cos_lat_v * dlon                         # (n_lat+1,)
-
-    area = grid.area                                    # (n_lat, n_lon)
+    area = grid.area                                     # (n_lat, n_lon)
+    inv_area = 1.0 / area
 
     H_u_E = H_u[:, 1:]   # east face of cell j: u-face (j, i+1)
     H_u_W = H_u[:, :-1]  # west face of cell j: u-face (j, i)
     H_v_N = H_v[1:, :]   # north face of cell j: v-face (j+1, i)
     H_v_S = H_v[:-1, :]  # south face of cell j: v-face (j, i)
 
-    inv_area = 1.0 / area
-    diag_zonal = (
-        (H_u_E + H_u_W) * dy_u[:, None] / dx_u[:, None]
-    ) * inv_area
-    diag_merid = (
-        H_v_N * dx_v[1:, None] / dy_v_face[1:, None]
-        + H_v_S * dx_v[:-1, None] / dy_v_face[:-1, None]
-    ) * inv_area
+    if hasattr(grid, "dx_u") and grid.dlat == 0.0:
+        # Tripolar: use full per-face 2D metrics so the preconditioner
+        # captures the longitude variation of cell sizes in the bipolar
+        # cap.  Taking only column 0 (as the previous version did) gives
+        # an unrepresentative preconditioner that makes PCG diverge.
+        dy_u_E = grid.dy_u[:, 1:]    # (n_lat, n_lon)
+        dy_u_W = grid.dy_u[:, :-1]
+        dx_u_E = grid.dx_u[:, 1:]
+        dx_u_W = grid.dx_u[:, :-1]
+        dx_v_N = grid.dx_v[1:, :]    # (n_lat, n_lon)
+        dx_v_S = grid.dx_v[:-1, :]
+        dy_v_N = grid.dy_v[1:, :]
+        dy_v_S = grid.dy_v[:-1, :]
+
+        diag_zonal = (
+            H_u_E * dy_u_E / jnp.maximum(dx_u_E, 1.0e-30)
+            + H_u_W * dy_u_W / jnp.maximum(dx_u_W, 1.0e-30)
+        ) * inv_area
+        diag_merid = (
+            H_v_N * dx_v_N / jnp.maximum(dy_v_N, 1.0e-30)
+            + H_v_S * dx_v_S / jnp.maximum(dy_v_S, 1.0e-30)
+        ) * inv_area
+    else:
+        # Regular lat-lon or Mercator: variable-dy safe.
+        R = grid.radius
+        dlon = grid.dlon
+        cos_lat_c = grid.cos_lat
+        dx_u = R * dlon * cos_lat_c                      # (n_lat,)
+
+        # u-face meridional extent: cell row j's height.
+        dy_h = grid.dy * 0.5                             # (n_lat,)
+        dy_u = dy_h                                      # alias
+
+        # v-face cell-centre-to-cell-centre distance: depends on row pair.
+        dy_v_int = 0.5 * (dy_h[1:] + dy_h[:-1])          # (n_lat-1,)
+        dy_v_face = jnp.pad(dy_v_int, (1, 1), mode='edge')  # (n_lat+1,)
+
+        lat = grid.lat
+        lat_v_int = 0.5 * (lat[:-1] + lat[1:])
+        lat_v = jnp.concatenate([
+            jnp.array([-jnp.pi / 2], dtype=lat.dtype),
+            lat_v_int,
+            jnp.array([jnp.pi / 2], dtype=lat.dtype),
+        ])
+        cos_lat_v = jnp.cos(lat_v)                      # (n_lat+1,)
+        dx_v = R * cos_lat_v * dlon                      # (n_lat+1,)
+
+        diag_zonal = (
+            (H_u_E + H_u_W) * dy_u[:, None] / dx_u[:, None]
+        ) * inv_area
+        diag_merid = (
+            H_v_N * dx_v[1:, None] / dy_v_face[1:, None]
+            + H_v_S * dx_v[:-1, None] / dy_v_face[:-1, None]
+        ) * inv_area
 
     # Diagonal of the Helmholtz operator A = I - coeff·∇·(H·∇):
     # diag(A) = 1 + coeff · (diag_zonal + diag_merid)
@@ -335,7 +370,7 @@ def barotropic_implicit_latlon_cgrid(
         min_water_column_m=config.min_water_column_m,
     ).astype(eta_dtype)
     U_old, V_old = _depth_average_to_faces(
-        u_3d, v_3d, h_k_old, min_water_col, u_mask, v_mask,
+        u_3d, v_3d, h_k_old, min_water_col, u_mask, v_mask, grid,
     )
 
     # ----- Step 2: face total depth from eta_old -------------------------
@@ -344,15 +379,19 @@ def barotropic_implicit_latlon_cgrid(
     # H_u_old as sum_k(min_cell_to_uface(h_k_old)).  This is required
     # for the Hallberg-Adcroft 2009 column-sum identity.
     H_u_old, H_v_old = _h_total_at_faces(
-        h_k_old, min_water_col, mask,
+        h_k_old, min_water_col, mask, grid,
     )
 
     # ----- Step 3: Coriolis face values ---------------------------------
-    f_cell = grid.f.astype(eta_dtype)
-    f_u = 0.5 * (jnp.roll(f_cell, 1, axis=1) + f_cell)
-    f_u = jnp.concatenate([f_u, f_u[:, 0:1]], axis=1)
-    f_v_int = 0.5 * (f_cell[:-1] + f_cell[1:])
-    f_v = jnp.concatenate([f_cell[0:1], f_v_int, f_cell[-1:]], axis=0)
+    if hasattr(grid, "f_u") and hasattr(grid, "f_v"):
+        f_u = grid.f_u.astype(eta_dtype)
+        f_v = grid.f_v.astype(eta_dtype)
+    else:
+        f_cell = grid.f.astype(eta_dtype)
+        f_u = 0.5 * (jnp.roll(f_cell, 1, axis=1) + f_cell)
+        f_u = jnp.concatenate([f_u, f_u[:, 0:1]], axis=1)
+        f_v_int = 0.5 * (f_cell[:-1] + f_cell[1:])
+        f_v = jnp.concatenate([f_cell[0:1], f_v_int, f_cell[-1:]], axis=0)
 
     # ----- Step 4: predictor (FB Coriolis, OLD eta gradient) -----------
     grad_x_eta_old = gradient_x_cgrid(eta_old, grid).astype(eta_dtype)
@@ -368,15 +407,12 @@ def barotropic_implicit_latlon_cgrid(
     ) * u_mask
 
     # U_pred at v-points (4-pt average) for FB Coriolis on V
-    n_lon = u_3d.shape[1] - 1
-    zero_row_u = jnp.zeros((1, n_lon), dtype=eta_dtype)
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import pad_ns_vector_u
     U_pred_at_v_int = 0.25 * (
         U_pred[:-1, :-1] + U_pred[:-1, 1:]
         + U_pred[1:, :-1] + U_pred[1:, 1:]
     )
-    U_pred_at_v = jnp.concatenate(
-        [zero_row_u, U_pred_at_v_int, zero_row_u], axis=0,
-    )
+    U_pred_at_v = pad_ns_vector_u(U_pred_at_v_int, grid)
 
     V_pred = (
         V_old + dt_t * (-g * grad_y_eta_old - f_v * U_pred_at_v + F_slow_v)
@@ -452,7 +488,7 @@ def barotropic_implicit_latlon_cgrid(
         min_water_column_m=config.min_water_column_m,
     )
     H_u_new, H_v_new = _h_total_at_faces(
-        h_k_new, min_water_col, mask,
+        h_k_new, min_water_col, mask, grid,
     )
     # Use H_old consistently so that div(Hu_avg) = (eta_old - eta_new)/dt
     # exactly — required for flux-form tracer conservation.  The Helmholtz
@@ -481,14 +517,22 @@ def barotropic_implicit_latlon_cgrid(
         [u_active_3d_inner, u_active_3d_inner[:, 0:1, :]], axis=1,
     )
     v_active_3d_int = h_active_3d[:-1] * h_active_3d[1:]
-    n_lon_grid = h_active_3d.shape[1]
-    nlev_g = h_active_3d.shape[2]
-    zero_row_3d = jnp.zeros(
-        (1, n_lon_grid, nlev_g), dtype=u_3d.dtype,
-    )
-    v_active_3d = jnp.concatenate(
-        [zero_row_3d, v_active_3d_int, zero_row_3d], axis=0,
-    )
+    fold = getattr(grid, "fold", None)
+    if fold is not None and fold.is_active:
+        south_3d = jnp.zeros_like(v_active_3d_int[:1])
+        north_3d = h_active_3d[-1:] * h_active_3d[-1:, fold.perm_T, :]
+        v_active_3d = jnp.concatenate(
+            [south_3d, v_active_3d_int, north_3d], axis=0,
+        )
+    else:
+        n_lon_grid = h_active_3d.shape[1]
+        nlev_g = h_active_3d.shape[2]
+        zero_row_3d = jnp.zeros(
+            (1, n_lon_grid, nlev_g), dtype=u_3d.dtype,
+        )
+        v_active_3d = jnp.concatenate(
+            [zero_row_3d, v_active_3d_int, zero_row_3d], axis=0,
+        )
     u_new_3d = (
         (u_prime + U_new[..., jnp.newaxis])
         * u_mask[..., jnp.newaxis] * u_active_3d
