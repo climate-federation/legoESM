@@ -434,10 +434,12 @@ def compute_heating_rate(
 ) -> Array:
   """Computes cell-center heating rate from pressure and net radiative flux.
 
-  The net radiative flux corresponds to the bottom cell face. The difference
-  of the net flux at the top face and that at the bottom face gives the total
-  net flux out of the grid cell. Using the pressure difference across the grid
-  cell, the net flux can be converted to a heating rate, in K/s.
+  ``flux_net`` is the net upward radiative flux on cell faces.  A layer's
+  radiative heating is the flux *convergence* — net upward flux entering the
+  bottom face minus that leaving the top face — divided by the layer mass
+  (dp / g), giving a tendency in K/s.  See the sign-convention note in the
+  body: the leading minus is required because ``forward_difference`` returns
+  the top-minus-bottom difference, the negative of the convergence.
 
   Args:
     flux_net: The net flux at the bottom face [W/m²].
