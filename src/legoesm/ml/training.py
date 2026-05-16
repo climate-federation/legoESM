@@ -1,7 +1,7 @@
 """Training loop for SFNO.
 
 Provides a complete training pipeline with:
-- AdamW optimizer with warmup + cosine decay schedule
+- AdamW / Adam / MUON optimizer dispatch with warmup + cosine decay schedule
 - Gradient clipping
 - JIT-compiled training step using equinox
 - Checkpoint save/load via equinox serialization
@@ -9,6 +9,7 @@ Provides a complete training pipeline with:
 References
 ----------
 - Watt-Meyer et al. (2023). ACE. arXiv:2310.02074.
+- Jordan et al. (2024). MUON: Momentum Orthogonalized via Newton-Schulz.
 """
 
 from __future__ import annotations
@@ -37,7 +38,7 @@ class TrainingConfig(NamedTuple):
     total_steps : int
         Total training steps (for cosine decay).
     weight_decay : float
-        AdamW weight decay.
+        AdamW weight decay (ignored when optimizer='adam' or 'muon').
     batch_size : int
         Training batch size.
     n_autoregressive_steps : int
@@ -48,6 +49,13 @@ class TrainingConfig(NamedTuple):
         Directory for saving checkpoints.
     checkpoint_every : int
         Save checkpoint every N steps.
+    optimizer : str
+        Optimizer kind: 'adamw' (default, preserves SFNO behavior),
+        'adam' (no weight decay), or 'muon' (Momentum Orthogonalized
+        via Newton-Schulz; uses ``optax.contrib.muon``).  Muon
+        orthogonalizes matrix-shaped parameters and is a no-op on
+        scalar leaves, so it composes cleanly with mixed
+        scheme-scalar + neural-weight parameter pytrees.
     """
     lr: float = 5e-4
     warmup_steps: int = 1000
@@ -58,12 +66,20 @@ class TrainingConfig(NamedTuple):
     grad_clip_norm: float = 1.0
     checkpoint_dir: str = "checkpoints"
     checkpoint_every: int = 1000
+    optimizer: str = "adamw"
 
 
 def create_optimizer(config: TrainingConfig) -> optax.GradientTransformation:
     """Create optimizer with warmup, cosine decay, and gradient clipping.
 
-    Schedule: linear warmup → cosine decay to 0.
+    Schedule: linear warmup -> cosine decay to 0.
+
+    Optimizer selected by ``config.optimizer``:
+
+    - ``adamw`` (default): legacy SFNO behavior, uses ``config.weight_decay``.
+    - ``adam``: plain Adam (weight_decay ignored).
+    - ``muon``: Momentum Orthogonalized via Newton-Schulz (``optax.contrib.muon``).
+      Recommended for AIMIP and mixed scheme-scalar + neural-weight pytrees.
 
     Parameters
     ----------
@@ -74,6 +90,11 @@ def create_optimizer(config: TrainingConfig) -> optax.GradientTransformation:
     -------
     optax.GradientTransformation
         Composed optimizer.
+
+    Raises
+    ------
+    ValueError
+        If ``config.optimizer`` is not one of 'adamw', 'adam', 'muon'.
     """
     schedule = optax.warmup_cosine_decay_schedule(
         init_value=0.0,
@@ -83,9 +104,24 @@ def create_optimizer(config: TrainingConfig) -> optax.GradientTransformation:
         end_value=0.0,
     )
 
+    if config.optimizer == "adamw":
+        core = optax.adamw(
+            learning_rate=schedule, weight_decay=config.weight_decay,
+        )
+    elif config.optimizer == "adam":
+        core = optax.adam(learning_rate=schedule)
+    elif config.optimizer == "muon":
+        from optax.contrib import muon
+        core = muon(learning_rate=schedule)
+    else:
+        raise ValueError(
+            f"Unknown optimizer {config.optimizer!r}; "
+            f"expected one of 'adamw', 'adam', 'muon'."
+        )
+
     return optax.chain(
         optax.clip_by_global_norm(config.grad_clip_norm),
-        optax.adamw(learning_rate=schedule, weight_decay=config.weight_decay),
+        core,
     )
 
 

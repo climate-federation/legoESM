@@ -52,7 +52,7 @@ _OPTIONAL_3D_OUTPUT_FIELDS = (
 _PHYSICS_OUTPUT_FIELDS = set(getattr(PhysicsOutput, "_fields", ()))
 
 
-def _parse_step_unified_tail(args):
+def parse_step_unified_tail(args):
     """Support both legacy and conv_prog-extended step_unified signatures."""
     if len(args) == 19:
         return None, args
@@ -64,7 +64,7 @@ def _parse_step_unified_tail(args):
     )
 
 
-def _physics_output_kwargs(
+def build_physics_output_kwargs(
     *,
     dT_dt,
     dq_v_dt,
@@ -235,7 +235,7 @@ def _unpack_column_output(
     dq_r_dt = y[3 * nlev:4 * nlev]
     sfc = y[4 * nlev:]
     return PhysicsOutput(
-        **_physics_output_kwargs(
+        **build_physics_output_kwargs(
             dT_dt=dT_dt,
             dq_v_dt=dq_v_dt,
             dq_c_dt=dq_c_dt,
@@ -282,7 +282,7 @@ def make_neural_step_unified(
     nlev = neural_physics.nlev
 
     def step_unified(need_rad, T, p_s, q_v, q_c, q_r, *args, **kwargs):
-        conv_prog, tail = _parse_step_unified_tail(args)
+        conv_prog, tail = parse_step_unified_tail(args)
         (
             u,
             v,
@@ -328,7 +328,7 @@ def make_neural_step_unified(
         col_out = jax.vmap(lambda yi: _unpack_column_output(yi, nlev))(y)
 
         phys_out = PhysicsOutput(
-            **_physics_output_kwargs(
+            **build_physics_output_kwargs(
                 dT_dt=adapter.unflatten_3d(col_out.dT_dt),
                 dq_v_dt=adapter.unflatten_3d(col_out.dq_v_dt),
                 dq_c_dt=adapter.unflatten_3d(col_out.dq_c_dt),
@@ -393,7 +393,7 @@ def make_hybrid_step_unified(
     neural_step = make_neural_step_unified(neural_physics, adapter)
 
     def step_unified(need_rad, T, p_s, q_v, q_c, q_r, *args, **kwargs):
-        conv_prog, tail = _parse_step_unified_tail(args)
+        conv_prog, tail = parse_step_unified_tail(args)
         (
             u,
             v,
@@ -435,7 +435,7 @@ def make_hybrid_step_unified(
         # Blend: traditional + alpha * neural correction
         _alpha = jnp.asarray(alpha)
         blended = PhysicsOutput(
-            **_physics_output_kwargs(
+            **build_physics_output_kwargs(
                 dT_dt=trad_out.dT_dt + _alpha * neural_out.dT_dt,
                 dq_v_dt=trad_out.dq_v_dt + _alpha * neural_out.dq_v_dt,
                 dq_c_dt=trad_out.dq_c_dt + _alpha * neural_out.dq_c_dt,
