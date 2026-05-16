@@ -8,7 +8,7 @@
 
 set -uo pipefail
 
-OUT_DIR="results/aimip_001/ablation"
+OUT_DIR="${OUT_DIR:-results/aimip_001/ablation_v2}"
 mkdir -p "$OUT_DIR"
 
 SUITE="config/aimip/aimip_suite.yaml"
