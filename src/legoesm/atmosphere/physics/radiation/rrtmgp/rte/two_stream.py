@@ -449,12 +449,25 @@ def compute_heating_rate(
     The heating rate of the grid cell [K/s].
   """
   if dp is None:
-      # Fallback: centered-difference approximation.
-      dp = 0.5 * kernel_ops.centered_difference(pressure, dim=2)
+      # Fallback: centered-difference layer-thickness estimate.  abs()
+      # because the vertical index runs surface -> TOA, so the raw
+      # centered difference of (downward-increasing) pressure is negative;
+      # a layer thickness must be positive.
+      dp = 0.5 * jnp.abs(kernel_ops.centered_difference(pressure, dim=2))
 
-  # Compute the forward pressure difference of fluxes on faces (like a
-  # derivative of face_to_node).
+  # forward_difference gives flux_net[i+1] - flux_net[i].  The vertical
+  # index runs surface -> TOA, so i+1 is the layer's UPPER face and i its
+  # LOWER face: dflux = F_net_up(top) - F_net_up(bottom).  The radiative
+  # heating of a layer is the flux *convergence* -- net upward flux
+  # entering the bottom minus that leaving the top, i.e.
+  # F_net_up(bottom) - F_net_up(top) = -dflux -- divided by the positive
+  # layer thickness dp.
+  #
+  # The leading minus is essential.  Without it the heating rate is
+  # sign-flipped whenever an explicit (positive) ``dp`` is supplied
+  # (the solve_columns path), which turns radiative cooling into heating
+  # and drives an unbounded thermal runaway.  The None-dp fallback above
+  # used to mask this by returning a *negative* dp; abs() makes dp a
+  # genuine thickness so this expression is correct for both callers.
   dflux = kernel_ops.forward_difference(flux_net, dim=2)
-
-  # Compute the heating rate at the grid cell center in K/s.
-  return constants.G * dflux / dp / constants.CP_D
+  return -constants.G * dflux / dp / constants.CP_D
