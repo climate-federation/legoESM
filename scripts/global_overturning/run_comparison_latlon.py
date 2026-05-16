@@ -49,7 +49,7 @@ set_policy(PrecisionPolicy.fp64())
 
 from legoesm import constants
 from legoesm.core.field import Field
-from legoesm.grids.latlon import create_latlon_grid
+from legoesm.grids.latlon import create_latlon_grid, create_mercator_grid
 from legoesm.ocean.bathymetry import BathymetryConfig, init_ocean_bathymetry
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 from legoesm.ocean.eos import scale_depth as _SCALE_DEPTH
@@ -264,9 +264,64 @@ def save_snapshot(state, grid, ocean_mask, day, output_dir):
 # Main
 # ============================================================================
 
+def _apply_from_config(args, p):
+    """Load a config.json and use it to fill in unset CLI args.
+
+    Explicit CLI flags always win. config.json values are used only
+    for args that were not provided on the command line.
+    """
+    import json
+    if not args.from_config:
+        return args
+    with open(args.from_config) as f:
+        cfg = json.load(f)
+    # Map config.json keys → argparse dest names
+    mapping = {
+        "dt": "dt", "days": "days",
+        "A_h": "a_h", "B_h": "b_h", "C_smag_lap": "c_smag_lap",
+        "C_smag": "c_smag", "K_h": "k_h",
+        "A_h_floor": "a_h_floor", "A_h_merid": "a_h_merid",
+        "A_h_eq_boost": "a_h_eq_boost",
+        "A_h_eq_sigma_deg": "a_h_eq_sigma_deg",
+        "B_h_barotropic": "b_h_barotropic",
+        "kappa_GM": "kappa_gm", "kappa_Redi": "kappa_redi",
+        "S_max": "s_max",
+        "ke_gradient_scheme": "ke_gradient_scheme",
+        "slope_foot_alpha": "slope_foot_alpha",
+        "momentum_advection": "momentum_advection",
+        "save_every_days": "save_every_days",
+        "n_lon": "n_lon", "lat_max": "lat_max",
+    }
+    # Boolean flags
+    bool_mapping = {
+        "flat_bottom": "flat_bottom",
+        "uniform_T": "uniform_T",
+        "mercator": "mercator",
+    }
+    # Detect which args were explicitly set on the command line
+    # (argparse doesn't track this, so we compare against defaults)
+    defaults = vars(p.parse_args([]))
+    current = vars(args)
+    for cfg_key, arg_key in mapping.items():
+        if cfg_key in cfg and current.get(arg_key) == defaults.get(arg_key):
+            setattr(args, arg_key, cfg[cfg_key])
+    for cfg_key, arg_key in bool_mapping.items():
+        if cfg_key in cfg and not current.get(arg_key):
+            setattr(args, arg_key, cfg[cfg_key])
+    print(f"  Loaded config from {args.from_config}")
+    # Print which values came from config vs CLI
+    for cfg_key, arg_key in {**mapping, **bool_mapping}.items():
+        if cfg_key in cfg:
+            src = "config" if current.get(arg_key) == defaults.get(arg_key) else "CLI"
+    return args
+
+
 def main():
     p = argparse.ArgumentParser(
         description="Lat-lon side of MPAS-vs-LatLon comparison.")
+    p.add_argument("--from-config", default=None,
+                   help="Load parameters from a previous run's config.json. "
+                        "Explicit CLI flags override config.json values.")
     p.add_argument("--days", type=float, default=30.0)
     p.add_argument("--restart", default=None)
     p.add_argument("--tag", default=None,
@@ -280,12 +335,63 @@ def main():
                    help="Override A_h Laplacian viscosity [m²/s] (default: 1e4).")
     p.add_argument("--c-smag-lap", type=float, default=None,
                    help="Override C_smag_lap (default: 0.33).")
+    p.add_argument("--a-h-lat-scaling", action="store_true", default=False,
+                   help="Enable cos(lat) scaling on A_h.")
+    p.add_argument("--a-h-floor", type=float, default=None,
+                   help="Minimum A_h after lat scaling [m²/s].")
     p.add_argument("--flat-bottom", action="store_true",
                    help="Use flat bottom (H=H_MAX everywhere) with "
                         "same coastlines from ETOPO.")
+    p.add_argument("--b-h-barotropic", type=float, default=None,
+                   help="Override B_h_barotropic [m⁴/s] (default: 0).")
+    p.add_argument("--momentum-advection", default=None,
+                   help="Override momentum_advection scheme "
+                        "(default: vector_invariant). Options: "
+                        "vector_invariant, weno5, weno7.")
+    p.add_argument("--c-smag", type=float, default=None,
+                   help="Override C_smag biharmonic Smagorinsky (default: 0).")
+    p.add_argument("--kappa-gm", type=float, default=None,
+                   help="Override kappa_GM [m²/s] (default: 600).")
+    p.add_argument("--kappa-redi", type=float, default=None,
+                   help="Override kappa_Redi [m²/s] (default: 600).")
+    p.add_argument("--k-h", type=float, default=None,
+                   help="Override K_h horizontal tracer diffusivity [m²/s] (default: 0).")
+    p.add_argument("--s-max", type=float, default=None,
+                   help="Override GM/Redi S_max slope limit (default: 0.005).")
+    p.add_argument("--dt", type=float, default=None,
+                   help="Override timestep [s] (default: 1200).")
+    p.add_argument("--no-bh-lat-scaling", action="store_true",
+                   help="Disable cos⁴(lat) scaling on B_h.")
+    p.add_argument("--a-h-merid", type=float, default=None,
+                   help="Meridional-only Laplacian viscosity [m²/s] (default: 0).")
+    p.add_argument("--uniform-T", action="store_true",
+                   help="Initialize with uniform T=10°C (barotropic test).")
+    p.add_argument("--mercator", action="store_true",
+                   help="Use Mercator grid (isotropic cells) instead of "
+                        "regular lat-lon.")
+    p.add_argument("--n-lon", type=int, default=None,
+                   help="Override N_LON (default: 360). For quick tests "
+                        "use 180 (2° resolution).")
+    p.add_argument("--lat-max", type=float, default=None,
+                   help="Override NORTH_CAP_LAT for Mercator grid [deg]. "
+                        "Lower values give larger polar cells (default: 80).")
+    p.add_argument("--ke-gradient-scheme", default=None,
+                   help="KE gradient scheme: 'centered' (default) or "
+                        "'hollingsworth' (NEMO nkeg_HW; required for "
+                        "stratified ocean over sloping bathymetry, "
+                        "fixes Hollingsworth-Kallberg instability).")
+    p.add_argument("--a-h-eq-boost", type=float, default=None,
+                   help="Equatorial A_h boost factor (DINO uses 3.0). "
+                        "Stabilizes weak-Coriolis equatorial region.")
+    p.add_argument("--a-h-eq-sigma-deg", type=float, default=None,
+                   help="Equatorial boost Gaussian half-width [deg] "
+                        "(DINO uses 5.0).")
+    p.add_argument("--slope-foot-alpha", type=float, default=None,
+                   help="Adcroft PGF slope foot alpha (DINO production: 3.0).")
     p.add_argument("--etopo",
                    default="/home/dbalwada/legoESM/data/bathymetry/etopo_1deg.nc")
     args = p.parse_args()
+    args = _apply_from_config(args, p)
 
     if args.tag:
         outdir = OUTPUT_DIR.parent / f"latlon_{args.tag}"
@@ -297,9 +403,18 @@ def main():
     snapshot_dir.mkdir(parents=True, exist_ok=True)
 
     # --- Grid ---
-    print(f"=== Lat-lon comparison run: {N_LAT}x{N_LON}, "
-          f"{args.days} days ===")
-    grid = create_latlon_grid(N_LAT, N_LON)
+    n_lon = args.n_lon if args.n_lon else N_LON
+    n_lat = N_LAT * n_lon // N_LON  # scale proportionally
+    lat_max = args.lat_max if args.lat_max else NORTH_CAP_LAT
+    if args.mercator:
+        grid = create_mercator_grid(n_lon=n_lon, lat_max_deg=lat_max)
+        print(f"=== Mercator comparison run: {grid.n_lat}x{grid.n_lon}, "
+              f"{args.days} days ===")
+        print("  *** MERCATOR grid (isotropic cells) ***")
+    else:
+        grid = create_latlon_grid(n_lat, n_lon)
+        print(f"=== Lat-lon comparison run: {n_lat}x{n_lon}, "
+              f"{args.days} days ===")
     z_coord_base = create_ocean_z_star(n_levels=N_LEVELS, H_max=H_MAX,
                                        dz_surface=DZ_SURFACE, dz_deep=DZ_DEEP)
 
@@ -308,7 +423,7 @@ def main():
         source="file", path=args.etopo,
         H_max=H_MAX, H_min=10.0, smoothing_passes=2,
         r_factor_max=0.2, depth_is_negative=True,
-        north_cap_lat=NORTH_CAP_LAT,
+        north_cap_lat=lat_max,
         south_cap_lat=None,     # full Southern Ocean
     )
     H_bathy_raw, ocean_mask = init_ocean_bathymetry(grid, bathy_cfg)
@@ -328,7 +443,7 @@ def main():
 
     n_ocean = int(jnp.sum(ocean_mask > 0.5))
     n_total = int(ocean_mask.size)
-    print(f"  Grid: {N_LAT}x{N_LON}, {N_LEVELS} levels")
+    print(f"  Grid: {grid.n_lat}x{grid.n_lon}, {N_LEVELS} levels")
     print(f"  Ocean cells: {n_ocean}/{n_total} "
           f"({100.0*n_ocean/n_total:.1f}%)")
     print(f"  Vertical: dz_sfc={DZ_SURFACE}m, dz_deep={DZ_DEEP}m")
@@ -336,71 +451,109 @@ def main():
     # --- Initial condition ---
     state = rest_state_latlon_cgrid_ocean(
         grid, z_coord_base,
-        T_surface=20.0, T_deep=2.0,
+        T_water_init_C=20.0, T_deep=2.0,
         S_uniform=S_STAR, H_max=H_MAX,
         land_mask_override=ocean_mask,
         H_bathy_override=H_snapped,
     )
-    # Centroid-aware exponential T(z) — same as MPAS
-    centroid = compute_centroid_depth(
-        jnp.zeros_like(H_snapped), H_snapped, z_coord,
-    )
-    T_init = 2.0 + 18.0 * jnp.exp(-centroid / _SCALE_DEPTH)
-    T_init = jnp.where(z_coord.is_active, T_init, 0.0)
-    T_init = T_init * ocean_mask[..., jnp.newaxis]
+    # Temperature initialization
+    if args.uniform_T:
+        T_init = jnp.where(ocean_mask[..., jnp.newaxis] > 0.5,
+                            10.0 * jnp.ones_like(state.T.data), 0.0)
+        print("  *** UNIFORM T = 10°C (barotropic test) ***")
+    else:
+        # Centroid-aware exponential T(z) — same as MPAS
+        centroid = compute_centroid_depth(
+            jnp.zeros_like(H_snapped), H_snapped, z_coord,
+        )
+        T_init = 2.0 + 18.0 * jnp.exp(-centroid / _SCALE_DEPTH)
+        T_init = jnp.where(z_coord.is_active, T_init, 0.0)
+        T_init = T_init * ocean_mask[..., jnp.newaxis]
     state = state._replace(
         T=state.T.replace(data=T_init.astype(state.T.data.dtype)),
     )
 
     # --- Physics ---
-    physics = OceanPhysicsConfig(
-        surface_forcing=SurfaceForcingConfig(
-            scheme="combined",
-            prescribed=PrescribedForcingConfig(
-                wind_profile="global_wind", tau_max=TAU_MAX,
-                tropical_wind_scale=TROPICAL_WIND_SCALE,
-                tropical_wind_lat_deg=TROPICAL_WIND_LAT_DEG,
+    # For barotropic tests (--uniform-T): wind only, no T/S restoring,
+    # no KPP, no convection — purely barotropic dynamics.
+    if args.uniform_T:
+        physics = OceanPhysicsConfig(
+            surface_forcing=SurfaceForcingConfig(
+                scheme="prescribed",
+                prescribed=PrescribedForcingConfig(
+                    wind_profile="global_wind", tau_max=TAU_MAX,
+                    tropical_wind_scale=TROPICAL_WIND_SCALE,
+                    tropical_wind_lat_deg=TROPICAL_WIND_LAT_DEG,
+                ),
             ),
-            restoring=RestoringConfig(
-                tau_T=TAU_T, tau_S=TAU_S,
-                T_star_eq=T_STAR_EQ, T_star_pole=T_STAR_POLE,
-                S_star=S_STAR, T_profile="cosine",
+            vertical_mixing=VerticalMixingConfig(scheme="none"),
+            lateral_mixing=LateralMixingConfig(scheme="none"),
+            bottom_drag=BottomDragConfig(scheme="none"),
+            convection=OceanConvectionConfig(scheme="none"),
+            shortwave_penetration=None,
+        )
+        print("  *** BAROTROPIC PHYSICS: wind only, no T/S restoring ***")
+    else:
+        physics = OceanPhysicsConfig(
+            surface_forcing=SurfaceForcingConfig(
+                scheme="combined",
+                prescribed=PrescribedForcingConfig(
+                    wind_profile="global_wind", tau_max=TAU_MAX,
+                    tropical_wind_scale=TROPICAL_WIND_SCALE,
+                    tropical_wind_lat_deg=TROPICAL_WIND_LAT_DEG,
+                ),
+                restoring=RestoringConfig(
+                    tau_T=TAU_T, tau_S=TAU_S,
+                    T_star_eq=T_STAR_EQ, T_star_pole=T_STAR_POLE,
+                    S_star=S_STAR, T_profile="cosine",
+                ),
             ),
-        ),
-        vertical_mixing=VerticalMixingConfig(
-            scheme="kpp",
-            kpp=KPPConfig(K_conv=1.0),
-        ),
-        lateral_mixing=LateralMixingConfig(scheme="none"),
-        bottom_drag=BottomDragConfig(scheme="none"),
-        convection=OceanConvectionConfig(
-            scheme="enhanced_diffusion",
-            enhanced_diffusion=EnhancedDiffusionConfig(K_conv=1.0),
-        ),
-        shortwave_penetration=None,
-    )
+            vertical_mixing=VerticalMixingConfig(
+                scheme="kpp",
+                kpp=KPPConfig(K_conv=1.0),
+            ),
+            lateral_mixing=LateralMixingConfig(scheme="none"),
+            bottom_drag=BottomDragConfig(scheme="none"),
+            convection=OceanConvectionConfig(
+                scheme="enhanced_diffusion",
+                enhanced_diffusion=EnhancedDiffusionConfig(K_conv=1.0),
+            ),
+            shortwave_penetration=None,
+        )
 
     # --- Model config ---
     ocean_config = LatLonCGridOceanConfig(
         A_h=args.a_h if args.a_h is not None else A_H,
+        A_h_lat_scaling=args.a_h_lat_scaling,
+        A_h_floor=args.a_h_floor if args.a_h_floor is not None else 0.0,
         B_h=args.b_h if args.b_h is not None else 0.0,
+        B_h_lat_scaling=not args.no_bh_lat_scaling,
+        B_h_barotropic=args.b_h_barotropic if args.b_h_barotropic is not None else 0.0,
         C_smag_lap=args.c_smag_lap if args.c_smag_lap is not None else C_SMAG_LAP,
+        C_smag=args.c_smag if args.c_smag is not None else 0.0,
         A_v=A_V,
         K_v=K_V,
+        K_h=args.k_h if args.k_h is not None else 0.0,
+        A_h_merid=args.a_h_merid if args.a_h_merid is not None else 0.0,
         bottom_drag_r=BOTTOM_DRAG_R,
         bottom_drag_bbl_thickness=BOTTOM_DRAG_BBL,
         bottom_drag_bg_velocity=BOTTOM_DRAG_BG_VEL,
         pgf_scheme="adcroft",
         barotropic_solver="implicit_cn",
+        momentum_advection=args.momentum_advection if args.momentum_advection is not None else "vector_invariant",
+        ke_gradient_scheme=args.ke_gradient_scheme if args.ke_gradient_scheme is not None else "centered",
+        A_h_eq_boost=args.a_h_eq_boost if args.a_h_eq_boost is not None else 1.0,
+        A_h_eq_sigma_deg=args.a_h_eq_sigma_deg if args.a_h_eq_sigma_deg is not None else 5.0,
+        slope_foot_alpha=args.slope_foot_alpha if args.slope_foot_alpha is not None else 0.0,
         implicit_vertical_mixing=True,
         tracer_advection="tvd",
         eos="wright",
         freshwater_closure="virtual_salt_flux",
         S_ref=S_STAR,
         gm_redi=GMRediConfig(
-            kappa_GM=KAPPA_GM,
-            kappa_Redi=KAPPA_REDI,
-            S_max=S_MAX,
+            kappa_GM=args.kappa_gm if args.kappa_gm is not None else KAPPA_GM,
+            kappa_Redi=args.kappa_redi if args.kappa_redi is not None else KAPPA_REDI,
+            S_max=args.s_max if args.s_max is not None else S_MAX,
             visbeck=VisbeckConfig(enabled=False),
             slope_scheme="centered",
         ),
@@ -415,22 +568,88 @@ def main():
         state, start_day = load_restart(args.restart, state)
         print(f"  Resumed from {args.restart} at day {start_day:.0f}")
 
-    # --- Print config ---
-    print(f"\n  Config (matched with MPAS):")
-    print(f"    A_h={A_H:.0e}, C_smag_lap={C_SMAG_LAP}")
-    print(f"    A_v={A_V:.0e}, K_v={K_V:.0e}")
-    print(f"    KPP(K_conv=1.0), enhanced_diffusion(K_conv=1.0)")
-    print(f"    bottom_drag: r={BOTTOM_DRAG_R:.0e}, "
-          f"BBL={BOTTOM_DRAG_BBL}m, u_bg={BOTTOM_DRAG_BG_VEL}")
-    print(f"    GM/Redi: κ_GM={KAPPA_GM}, κ_Redi={KAPPA_REDI}")
-    print(f"    PGF=adcroft, barotropic=implicit_cn")
-    print(f"    dt={DT}s, tracer_advection=tvd")
-    print(f"    Wind: global_wind τ_max={TAU_MAX}, "
-          f"tropical_scale={TROPICAL_WIND_SCALE}")
+    # --- Save and print actual config ---
+    import json
+    dt = args.dt if args.dt is not None else DT
+    run_config = {
+        "tag": args.tag or "default",
+        "grid_type": "mercator" if args.mercator else "latlon",
+        "n_lat": int(grid.n_lat),
+        "n_lon": int(grid.n_lon),
+        "lat_max": float(lat_max),
+        "n_levels": N_LEVELS,
+        "H_max": H_MAX,
+        "dz_surface": DZ_SURFACE,
+        "dz_deep": DZ_DEEP,
+        "flat_bottom": args.flat_bottom,
+        "uniform_T": args.uniform_T,
+        "dt": float(dt),
+        "days": float(args.days),
+        "save_every_days": float(args.save_every_days),
+        "A_h": float(ocean_config.A_h),
+        "A_h_lat_scaling": float(ocean_config.A_h_lat_scaling),
+        "A_h_floor": float(ocean_config.A_h_floor),
+        "A_h_merid": float(ocean_config.A_h_merid),
+        "A_h_eq_boost": float(ocean_config.A_h_eq_boost),
+        "A_h_eq_sigma_deg": float(ocean_config.A_h_eq_sigma_deg),
+        "ke_gradient_scheme": ocean_config.ke_gradient_scheme,
+        "slope_foot_alpha": float(ocean_config.slope_foot_alpha),
+        "B_h": float(ocean_config.B_h),
+        "B_h_lat_scaling": ocean_config.B_h_lat_scaling,
+        "B_h_barotropic": float(ocean_config.B_h_barotropic),
+        "C_smag_lap": float(ocean_config.C_smag_lap),
+        "C_smag": float(ocean_config.C_smag),
+        "A_v": float(ocean_config.A_v),
+        "K_v": float(ocean_config.K_v),
+        "K_h": float(ocean_config.K_h),
+        "bottom_drag_r": float(ocean_config.bottom_drag_r),
+        "bottom_drag_bbl_thickness": float(ocean_config.bottom_drag_bbl_thickness),
+        "bottom_drag_bg_velocity": float(ocean_config.bottom_drag_bg_velocity),
+        "pgf_scheme": ocean_config.pgf_scheme,
+        "barotropic_solver": ocean_config.barotropic_solver,
+        "momentum_advection": ocean_config.momentum_advection,
+        "tracer_advection": ocean_config.tracer_advection,
+        "eos": ocean_config.eos,
+        "freshwater_closure": ocean_config.freshwater_closure,
+        "S_ref": float(ocean_config.S_ref),
+        "implicit_vertical_mixing": ocean_config.implicit_vertical_mixing,
+        "kappa_GM": float(ocean_config.gm_redi.kappa_GM),
+        "kappa_Redi": float(ocean_config.gm_redi.kappa_Redi),
+        "S_max": float(ocean_config.gm_redi.S_max),
+        "slope_scheme": ocean_config.gm_redi.slope_scheme,
+        "surface_complement": ocean_config.gm_redi.surface_complement,
+        "visbeck_enabled": ocean_config.gm_redi.visbeck.enabled,
+        "wind_profile": "global_wind",
+        "tau_max": TAU_MAX,
+        "tropical_wind_scale": TROPICAL_WIND_SCALE,
+        "tropical_wind_lat_deg": TROPICAL_WIND_LAT_DEG,
+        "T_star_eq": T_STAR_EQ,
+        "T_star_pole": T_STAR_POLE,
+        "S_star": S_STAR,
+        "tau_T_days": TAU_T / 86400,
+        "tau_S_days": TAU_S / 86400,
+        "precision": "fp64",
+        "restart_from": str(args.restart) if args.restart else None,
+        "command": " ".join(sys.argv),
+    }
+    config_path = outdir / "config.json"
+    with open(config_path, "w") as f:
+        json.dump(run_config, f, indent=2)
+    print(f"\n  Config saved to {config_path}")
+
+    # Print key parameters (from actual config, not constants)
+    print(f"  Config:")
+    print(f"    A_h={ocean_config.A_h:.0e}, C_smag_lap={ocean_config.C_smag_lap}")
+    print(f"    A_v={ocean_config.A_v:.0e}, K_v={ocean_config.K_v:.0e}")
+    print(f"    GM/Redi: κ_GM={ocean_config.gm_redi.kappa_GM}, "
+          f"κ_Redi={ocean_config.gm_redi.kappa_Redi}, "
+          f"S_max={ocean_config.gm_redi.S_max}")
+    print(f"    dt={dt}s, tracer_advection={ocean_config.tracer_advection}")
+    print(f"    Wind: τ_max={TAU_MAX}, tropical_scale={TROPICAL_WIND_SCALE}")
 
     # --- Time loop ---
     total_days = args.days
-    dt = DT
+    dt = args.dt if args.dt is not None else DT
     n_steps = int(total_days * 86400 / dt)
     diag_every_day = args.save_every_days
     diag_steps = int(diag_every_day * 86400 / dt)

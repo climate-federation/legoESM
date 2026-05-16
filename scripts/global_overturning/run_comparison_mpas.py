@@ -172,7 +172,15 @@ def load_restart(restart_path, template_state):
 
 
 def save_snapshot(state, mesh, ocean_mask, day, output_dir):
-    """Save 6-panel diagnostic PNG."""
+    """Save 6-panel diagnostic PNG using tripcolor + cartopy."""
+    import matplotlib.tri as mtri
+    try:
+        import cartopy.crs as ccrs
+        import cartopy.feature as cfeature
+        _has_cartopy = True
+    except ImportError:
+        _has_cartopy = False
+
     output_dir.mkdir(parents=True, exist_ok=True)
     mask_np = np.asarray(ocean_mask) > 0.5
     lon = np.degrees(np.asarray(mesh.lonCell))
@@ -183,55 +191,72 @@ def save_snapshot(state, mesh, ocean_mask, day, output_dir):
     eta = np.asarray(state.eta.data)
     sst = np.asarray(state.T.data[:, 0])
 
-    fig, axes = plt.subplots(2, 3, figsize=(22, 12))
+    # Shift lon to [-180, 180] for cartopy
+    lon_shifted = np.where(lon > 180, lon - 360, lon)
 
-    spd = np.where(mask_np, speed[:, 0], np.nan)
-    vmax = max(0.01, np.nanpercentile(spd, 99))
-    sc = axes[0, 0].scatter(lon, lat, c=spd, s=3, cmap="magma",
-                             vmin=0, vmax=vmax)
-    plt.colorbar(sc, ax=axes[0, 0], label="m/s")
-    axes[0, 0].set_title("Surface speed")
+    # Build Delaunay triangulation; mask land triangles
+    tri = mtri.Triangulation(lon_shifted, lat)
+    mask_tri = np.all(mask_np[tri.triangles], axis=1)
+    tri.set_mask(~mask_tri)
 
-    eta_p = np.where(mask_np, eta, np.nan)
-    vm = max(0.01, np.nanmax(np.abs(eta_p)))
-    sc = axes[0, 1].scatter(lon, lat, c=eta_p, s=3, cmap="RdBu_r",
-                             vmin=-vm, vmax=vm)
-    plt.colorbar(sc, ax=axes[0, 1], label="m")
-    axes[0, 1].set_title("SSH")
+    def ocean_field(f):
+        return np.where(mask_np, f, np.nan)
 
-    sst_p = np.where(mask_np, sst, np.nan)
-    sc = axes[0, 2].scatter(lon, lat, c=sst_p, s=3, cmap="RdYlBu_r")
-    plt.colorbar(sc, ax=axes[0, 2], label="°C")
-    axes[0, 2].set_title("SST")
+    if _has_cartopy:
+        proj = ccrs.Robinson(central_longitude=200)
+        fig, axes = plt.subplots(2, 3, figsize=(24, 12),
+                                 subplot_kw={"projection": proj})
+    else:
+        fig, axes = plt.subplots(2, 3, figsize=(22, 12))
 
-    spd_max = np.where(mask_np, np.max(speed, axis=1), np.nan)
-    sc = axes[1, 0].scatter(lon, lat, c=spd_max, s=3, cmap="magma",
-                             vmin=0,
-                             vmax=max(0.01, np.nanpercentile(spd_max, 99)))
-    plt.colorbar(sc, ax=axes[1, 0], label="m/s")
-    axes[1, 0].set_title("Max-depth speed")
+    def plot_panel(ax, field, title, cmap, vmin=None, vmax=None,
+                   symmetric=False):
+        f = ocean_field(field)
+        if vmin is None:
+            vmin = np.nanpercentile(f, 1)
+        if vmax is None:
+            vmax = np.nanpercentile(f, 99)
+        if symmetric:
+            vm = max(abs(vmin), abs(vmax))
+            vmin, vmax = -vm, vm
+        if _has_cartopy:
+            tc = ax.tripcolor(tri, f, cmap=cmap, vmin=vmin, vmax=vmax,
+                              transform=ccrs.PlateCarree(), rasterized=True)
+            ax.add_feature(cfeature.LAND, facecolor="0.85",
+                           edgecolor="0.5", linewidth=0.3)
+            ax.coastlines(linewidth=0.3, color="0.4")
+            ax.set_global()
+        else:
+            tc = ax.tripcolor(tri, f, cmap=cmap, vmin=vmin, vmax=vmax,
+                              rasterized=True)
+        ax.set_title(title, fontsize=12)
+        plt.colorbar(tc, ax=ax, shrink=0.7, pad=0.02)
 
+    # Surface speed
+    spd_sfc = speed[:, 0]
+    plot_panel(axes[0, 0], spd_sfc, "Surface speed [m/s]", "magma",
+               vmin=0, vmax=max(0.1, np.nanpercentile(ocean_field(spd_sfc), 99)))
+    # SSH
+    plot_panel(axes[0, 1], eta, "SSH [m]", "RdBu_r", symmetric=True)
+    # SST
+    plot_panel(axes[0, 2], sst, "SST [°C]", "RdYlBu_r")
+    # Max-depth speed
+    spd_max = np.max(speed, axis=1)
+    plot_panel(axes[1, 0], spd_max, "Max-depth speed [m/s]", "magma",
+               vmin=0, vmax=max(0.1, np.nanpercentile(ocean_field(spd_max), 99)))
+    # SSS
     sss = np.asarray(state.S.data[:, 0])
-    sss_p = np.where(mask_np, sss, np.nan)
-    sc = axes[1, 1].scatter(lon, lat, c=sss_p, s=3, cmap="YlGnBu")
-    plt.colorbar(sc, ax=axes[1, 1], label="PSU")
-    axes[1, 1].set_title("SSS")
-
+    plot_panel(axes[1, 1], sss, "SSS [PSU]", "YlGnBu")
+    # Deep T
     deep_lev = min(15, state.T.data.shape[1] - 1)
     T_deep = np.asarray(state.T.data[:, deep_lev])
-    T_deep_p = np.where(mask_np, T_deep, np.nan)
-    sc = axes[1, 2].scatter(lon, lat, c=T_deep_p, s=3, cmap="RdYlBu_r")
-    plt.colorbar(sc, ax=axes[1, 2], label="°C")
-    axes[1, 2].set_title(f"T at level {deep_lev}")
-
-    for ax in axes.flat:
-        ax.set_xlabel("lon"); ax.set_ylabel("lat")
+    plot_panel(axes[1, 2], T_deep, f"T at level {deep_lev} [°C]", "RdYlBu_r")
 
     fig.suptitle(f"MPAS comparison — day {day:.1f} "
-                 f"(year {day/365.25:.2f})", fontsize=14)
-    fig.tight_layout()
+                 f"(year {day/365.25:.2f})", fontsize=14, y=0.98)
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
     fig.savefig(output_dir / f"snapshot_day{int(round(day)):06d}.png",
-                dpi=120, bbox_inches="tight")
+                dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -239,9 +264,48 @@ def save_snapshot(state, mesh, ocean_mask, day, output_dir):
 # Main
 # ============================================================================
 
+def _apply_from_config(args, p):
+    """Load a config.json and use it to fill in unset CLI args.
+
+    Explicit CLI flags always win. config.json values are used only
+    for args that were not provided on the command line.
+    """
+    import json
+    if not args.from_config:
+        return args
+    with open(args.from_config) as f:
+        cfg = json.load(f)
+    mapping = {
+        "dt": "dt", "days": "days",
+        "A_h": "a_h", "B_h": "b_h",
+        "K_zeta_bih": "k_zeta_bih", "apvm_dt": "apvm_dt",
+        "kappa_GM": "kappa_gm", "kappa_Redi": "kappa_redi",
+        "S_max": "s_max",
+        "save_every_days": "save_every_days",
+        "C_smag_lap": "c_smag_lap",
+    }
+    bool_mapping = {
+        "flat_bottom": "flat_bottom",
+        "uniform_T": "uniform_T",
+    }
+    defaults = vars(p.parse_args([]))
+    current = vars(args)
+    for cfg_key, arg_key in mapping.items():
+        if cfg_key in cfg and current.get(arg_key) == defaults.get(arg_key):
+            setattr(args, arg_key, cfg[cfg_key])
+    for cfg_key, arg_key in bool_mapping.items():
+        if cfg_key in cfg and not current.get(arg_key):
+            setattr(args, arg_key, cfg[cfg_key])
+    print(f"  Loaded config from {args.from_config}")
+    return args
+
+
 def main():
     p = argparse.ArgumentParser(
         description="MPAS side of MPAS-vs-LatLon comparison.")
+    p.add_argument("--from-config", default=None,
+                   help="Load parameters from a previous run's config.json. "
+                        "Explicit CLI flags override config.json values.")
     p.add_argument("--days", type=float, default=30.0)
     p.add_argument("--restart", default=None)
     p.add_argument("--tag", default=None,
@@ -255,9 +319,26 @@ def main():
                    help="Override apvm_dt [s] (default: 0 = disabled).")
     p.add_argument("--b-h", type=float, default=None,
                    help="Override B_h biharmonic viscosity [m⁴/s] (default: 0).")
+    p.add_argument("--a-h", type=float, default=None,
+                   help="Override A_h Laplacian viscosity [m²/s] (default: 1e4).")
+    p.add_argument("--c-smag-lap", type=float, default=None,
+                   help="Override C_smag_lap (default: 0.33). Set 0 to disable.")
+    p.add_argument("--flat-bottom", action="store_true",
+                   help="Use flat bottom (H=H_MAX everywhere) with same coastlines.")
+    p.add_argument("--uniform-T", action="store_true",
+                   help="Initialize with uniform T=10°C (barotropic test).")
+    p.add_argument("--kappa-gm", type=float, default=None,
+                   help="Override kappa_GM [m²/s] (default: 600).")
+    p.add_argument("--kappa-redi", type=float, default=None,
+                   help="Override kappa_Redi [m²/s] (default: 600).")
+    p.add_argument("--s-max", type=float, default=None,
+                   help="Override GM/Redi S_max (default: 0.005).")
+    p.add_argument("--dt", type=float, default=None,
+                   help="Override timestep [s] (default: 1200).")
     p.add_argument("--etopo",
                    default="/home/dbalwada/legoESM/data/bathymetry/etopo_1deg.nc")
     args = p.parse_args()
+    args = _apply_from_config(args, p)
 
     if args.tag:
         outdir = OUTPUT_DIR.parent / f"mpas_{args.tag}"
@@ -288,6 +369,11 @@ def main():
     H_bathy_raw = H_bathy_raw * north_cap_mask
     ocean_mask = ocean_mask * north_cap_mask
 
+    # Flat bottom option: keep coastlines, set all ocean to H_MAX
+    if args.flat_bottom:
+        H_bathy_raw = jnp.where(ocean_mask > 0.5, H_MAX, 0.0)
+        print("  *** FLAT BOTTOM mode: H = H_MAX everywhere ***")
+
     H_snapped = snap_partial_cells(H_bathy_raw, z_coord)
     ocean_mask = jnp.where(H_snapped > 0, ocean_mask, 0.0)
     pc_coord = create_partial_cell_coordinate(z_coord, H_snapped)
@@ -300,41 +386,59 @@ def main():
           f"dz_deep={DZ_DEEP}m")
 
     # --- Physics ---
-    physics = OceanPhysicsConfig(
-        surface_forcing=SurfaceForcingConfig(
-            scheme="combined",
-            prescribed=PrescribedForcingConfig(
-                wind_profile="global_wind", tau_max=TAU_MAX,
-                tropical_wind_scale=TROPICAL_WIND_SCALE,
-                tropical_wind_lat_deg=TROPICAL_WIND_LAT_DEG,
+    if args.uniform_T:
+        physics = OceanPhysicsConfig(
+            surface_forcing=SurfaceForcingConfig(
+                scheme="prescribed",
+                prescribed=PrescribedForcingConfig(
+                    wind_profile="global_wind", tau_max=TAU_MAX,
+                    tropical_wind_scale=TROPICAL_WIND_SCALE,
+                    tropical_wind_lat_deg=TROPICAL_WIND_LAT_DEG,
+                ),
             ),
-            restoring=RestoringConfig(
-                tau_T=TAU_T, tau_S=TAU_S,
-                T_star_eq=T_STAR_EQ, T_star_pole=T_STAR_POLE,
-                S_star=S_STAR, T_profile="cosine",
+            vertical_mixing=VerticalMixingConfig(scheme="none"),
+            lateral_mixing=LateralMixingConfig(scheme="none"),
+            bottom_drag=BottomDragConfig(scheme="none"),
+            convection=OceanConvectionConfig(scheme="none"),
+            shortwave_penetration=None,
+        )
+        print("  *** BAROTROPIC PHYSICS: wind only, no T/S restoring ***")
+    else:
+        physics = OceanPhysicsConfig(
+            surface_forcing=SurfaceForcingConfig(
+                scheme="combined",
+                prescribed=PrescribedForcingConfig(
+                    wind_profile="global_wind", tau_max=TAU_MAX,
+                    tropical_wind_scale=TROPICAL_WIND_SCALE,
+                    tropical_wind_lat_deg=TROPICAL_WIND_LAT_DEG,
+                ),
+                restoring=RestoringConfig(
+                    tau_T=TAU_T, tau_S=TAU_S,
+                    T_star_eq=T_STAR_EQ, T_star_pole=T_STAR_POLE,
+                    S_star=S_STAR, T_profile="cosine",
+                ),
             ),
-        ),
-        vertical_mixing=VerticalMixingConfig(
-            scheme="kpp",
-            kpp=KPPConfig(K_conv=1.0),
-        ),
-        lateral_mixing=LateralMixingConfig(scheme="none"),
-        bottom_drag=BottomDragConfig(scheme="none"),
-        convection=OceanConvectionConfig(
-            scheme="enhanced_diffusion",
-            enhanced_diffusion=EnhancedDiffusionConfig(K_conv=1.0),
-        ),
-        shortwave_penetration=None,
-    )
+            vertical_mixing=VerticalMixingConfig(
+                scheme="kpp",
+                kpp=KPPConfig(K_conv=1.0),
+            ),
+            lateral_mixing=LateralMixingConfig(scheme="none"),
+            bottom_drag=BottomDragConfig(scheme="none"),
+            convection=OceanConvectionConfig(
+                scheme="enhanced_diffusion",
+                enhanced_diffusion=EnhancedDiffusionConfig(K_conv=1.0),
+            ),
+            shortwave_penetration=None,
+        )
 
     # --- Model config ---
     config = MPASOceanConfig(
         barotropic_solver="implicit_cn",
         barotropic_implicit_pcg_tol=1e-10,
         barotropic_implicit_pcg_maxiter=300,
-        A_h=A_H,
+        A_h=args.a_h if args.a_h is not None else A_H,
         A_v=A_V,
-        C_smag_lap=C_SMAG_LAP,
+        C_smag_lap=args.c_smag_lap if args.c_smag_lap is not None else C_SMAG_LAP,
         K_v=K_V,
         bottom_drag_r=BOTTOM_DRAG_R,
         bottom_drag_bbl_thickness=BOTTOM_DRAG_BBL,
@@ -347,9 +451,9 @@ def main():
         implicit_vertical_mixing=True,
         tracer_advection="tvd",
         gm_redi=GMRediConfig(
-            kappa_GM=KAPPA_GM,
-            kappa_Redi=KAPPA_REDI,
-            S_max=S_MAX,
+            kappa_GM=args.kappa_gm if args.kappa_gm is not None else KAPPA_GM,
+            kappa_Redi=args.kappa_redi if args.kappa_redi is not None else KAPPA_REDI,
+            S_max=args.s_max if args.s_max is not None else S_MAX,
             visbeck=VisbeckConfig(enabled=False),
             slope_scheme="centered",
         ),
@@ -359,14 +463,19 @@ def main():
     model = MPASOceanModel(mesh, pc_coord, config)
 
     # --- Initial condition ---
-    T_ref = 2.0 + 18.0 * jnp.exp(z_coord.z_full_ref / _SCALE_DEPTH)
-    T_data = jnp.broadcast_to(T_ref[None, :], (mesh.nCells, N_LEVELS))
-    T_data = jnp.where(pc_coord.is_active, T_data, 0.0)
+    if args.uniform_T:
+        T_data = jnp.where(pc_coord.is_active,
+                            10.0 * jnp.ones((mesh.nCells, N_LEVELS)), 0.0)
+        print("  *** UNIFORM T = 10°C (barotropic test) ***")
+    else:
+        T_ref = 2.0 + 18.0 * jnp.exp(z_coord.z_full_ref / _SCALE_DEPTH)
+        T_data = jnp.broadcast_to(T_ref[None, :], (mesh.nCells, N_LEVELS))
+        T_data = jnp.where(pc_coord.is_active, T_data, 0.0)
     S_data = jnp.where(pc_coord.is_active,
                         jnp.full_like(T_data, S_STAR), 0.0)
 
     state = rest_state_mpas_ocean(
-        mesh, z_coord, T_surface=20.0, T_deep=2.0,
+        mesh, z_coord, T_water_init_C=20.0, T_deep=2.0,
         S_uniform=S_STAR, H_max=H_MAX, land_lat_threshold=90.0,
     )
     dtype = state.eta.data.dtype
@@ -386,24 +495,77 @@ def main():
         state, start_day = load_restart(args.restart, state)
         print(f"  Resumed from {args.restart} at day {start_day:.0f}")
 
-    # --- Print config ---
-    print(f"\n  Config (matched with lat-lon except K_zeta_bih):")
-    print(f"    A_h={A_H:.0e}, C_smag_lap={C_SMAG_LAP}")
-    print(f"    A_v={A_V:.0e}, K_v={K_V:.0e}")
-    print(f"    KPP(K_conv=1.0), enhanced_diffusion(K_conv=1.0)")
-    print(f"    bottom_drag: r={BOTTOM_DRAG_R:.0e}, "
-          f"BBL={BOTTOM_DRAG_BBL}m, u_bg={BOTTOM_DRAG_BG_VEL}")
-    print(f"    GM/Redi: κ_GM={KAPPA_GM}, κ_Redi={KAPPA_REDI}")
-    print(f"    PGF=adcroft, barotropic=implicit_cn")
-    _kzb = args.k_zeta_bih if args.k_zeta_bih is not None else 1e14
-    print(f"    K_zeta_bih={_kzb:.0e} (MPAS-only)")
-    print(f"    dt={DT}s, tracer_advection=tvd")
-    print(f"    Wind: global_wind τ_max={TAU_MAX}, "
-          f"tropical_scale={TROPICAL_WIND_SCALE}")
+    # --- Save and print actual config ---
+    import json
+    dt = args.dt if args.dt is not None else DT
+    run_config = {
+        "tag": args.tag or "default",
+        "grid_type": "mpas",
+        "subdivision": SUBDIVISION,
+        "n_cells": int(mesh.nCells),
+        "n_edges": int(mesh.nEdges),
+        "n_levels": N_LEVELS,
+        "H_max": H_MAX,
+        "dz_surface": DZ_SURFACE,
+        "dz_deep": DZ_DEEP,
+        "flat_bottom": args.flat_bottom,
+        "uniform_T": args.uniform_T,
+        "dt": float(dt),
+        "days": float(args.days),
+        "save_every_days": float(args.save_every_days),
+        "A_h": float(config.A_h),
+        "A_v": float(config.A_v),
+        "K_v": float(config.K_v),
+        "C_smag_lap": float(config.C_smag_lap),
+        "B_h": float(config.B_h),
+        "K_zeta_bih": float(config.K_zeta_bih),
+        "apvm_dt": float(config.apvm_dt),
+        "equatorial_visc_boost": float(config.equatorial_visc_boost),
+        "bottom_drag_r": float(config.bottom_drag_r),
+        "bottom_drag_bbl_thickness": float(config.bottom_drag_bbl_thickness),
+        "bottom_drag_bg_velocity": float(config.bottom_drag_bg_velocity),
+        "pgf_scheme": config.pgf_scheme,
+        "barotropic_solver": config.barotropic_solver,
+        "momentum_advection": getattr(config, "momentum_advection", "vector_invariant"),
+        "tracer_advection": config.tracer_advection,
+        "implicit_vertical_mixing": config.implicit_vertical_mixing,
+        "kappa_GM": float(config.gm_redi.kappa_GM),
+        "kappa_Redi": float(config.gm_redi.kappa_Redi),
+        "S_max": float(config.gm_redi.S_max),
+        "slope_scheme": config.gm_redi.slope_scheme,
+        "visbeck_enabled": config.gm_redi.visbeck.enabled,
+        "wind_profile": "global_wind",
+        "tau_max": TAU_MAX,
+        "tropical_wind_scale": TROPICAL_WIND_SCALE,
+        "tropical_wind_lat_deg": TROPICAL_WIND_LAT_DEG,
+        "T_star_eq": T_STAR_EQ,
+        "T_star_pole": T_STAR_POLE,
+        "S_star": S_STAR,
+        "tau_T_days": TAU_T / 86400,
+        "tau_S_days": TAU_S / 86400,
+        "precision": "fp64",
+        "restart_from": str(args.restart) if args.restart else None,
+        "command": " ".join(sys.argv),
+    }
+    config_path = outdir / "config.json"
+    with open(config_path, "w") as f:
+        json.dump(run_config, f, indent=2)
+    print(f"\n  Config saved to {config_path}")
+
+    # Print key parameters (from actual config object)
+    print(f"  Config:")
+    print(f"    A_h={config.A_h:.0e}, C_smag_lap={config.C_smag_lap}")
+    print(f"    A_v={config.A_v:.0e}, K_v={config.K_v:.0e}")
+    print(f"    K_zeta_bih={config.K_zeta_bih:.0e} (MPAS-only)")
+    print(f"    GM/Redi: κ_GM={config.gm_redi.kappa_GM}, "
+          f"κ_Redi={config.gm_redi.kappa_Redi}, "
+          f"S_max={config.gm_redi.S_max}")
+    print(f"    dt={dt}s, tracer_advection={config.tracer_advection}")
+    print(f"    Wind: τ_max={TAU_MAX}, tropical_scale={TROPICAL_WIND_SCALE}")
 
     # --- Time loop ---
     total_days = args.days
-    dt = DT
+    dt = args.dt if args.dt is not None else DT
     n_steps = int(total_days * 86400 / dt)
     diag_every_day = args.save_every_days
     diag_steps = int(diag_every_day * 86400 / dt)

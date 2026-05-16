@@ -516,7 +516,21 @@ class LatLonCGridOceanConfig(NamedTuple):
     A_h_eq_sigma_deg: float = 5.0  # Gaussian half-width in degrees of the
                                     # equatorial boost.  Typical 3-7°
                                     # (~equatorial waveguide width).
+    A_h_merid: float = 0.0        # Meridional-only Laplacian viscosity [m²/s].
+                                    # Applies d²u/dy² directly at u-faces and
+                                    # d²v/dy² at v-faces — a scalar operator
+                                    # that damps meridional structure (2Δy mode)
+                                    # without affecting zonal flow.  Independent
+                                    # of A_h.  Use on lat-lon grids where
+                                    # dx/dy anisotropy makes isotropic A_h
+                                    # either too strong (zonal) or too weak
+                                    # (meridional).
     B_h: float = 0.0
+    B_h_lat_scaling: bool = True   # Apply cos⁴(lat) scaling to B_h.
+                                    # Default True (MOM6 convention) prevents
+                                    # CFL violation at poles where dx shrinks.
+                                    # Set False to keep full B_h everywhere
+                                    # (requires smaller dt for CFL safety).
     B_h_barotropic: float = 0.0  # Biharmonic hyperviscosity coeff [m^4/s]
                                    # applied to the DEPTH-MEAN (U_bar,
                                    # V_bar) only, via the F_slow channel

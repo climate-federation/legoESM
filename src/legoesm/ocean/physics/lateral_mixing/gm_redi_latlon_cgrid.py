@@ -768,6 +768,36 @@ def gm_redi_tracer_tendency_latlon(
             S, S_x, S_y, mask, u_mask, v_mask,
             z_coord, jacobian, grid, kappa_GM, cfg.kappa_Redi,
         )
+        # --- Near-surface horizontal diffusion complement ---
+        # In the mixed layer, DM95 tapers Redi to zero, leaving no
+        # horizontal tracer mixing.  Following Ferrari et al. (2008,
+        # J. Climate, 21, 2770-2789), add horizontal diffusion with
+        # coefficient kappa_Redi in the boundary layer so total
+        # diffusivity is always kappa_Redi.
+        #
+        # Use a fixed depth proxy rather than the DM95 taper,
+        # because the taper-based complement was ineffective (taper ≈ 1
+        # where the 2Δy feedback operates).  When KPP is active, this
+        # should be replaced with the KPP-diagnosed boundary layer depth.
+        _sfc_complement = getattr(cfg, "surface_complement", True)
+        _sfc_depth = getattr(cfg, "surface_complement_depth", 100.0)
+        if _sfc_complement:
+            z_full = z_coord.z_full_ref  # (nlev,) — negative depths
+            complement = jnp.where(
+                jnp.abs(z_full) < _sfc_depth, 1.0, 0.0
+            )  # (nlev,) — broadcast over (n_lat, n_lon)
+            for q_field, tend_ref in [(T, 'dT_dt'), (S, 'dS_dt')]:
+                q_filled = _neumann_fill_cgrid(q_field, mask)
+                dq_dx_u = gradient_x_cgrid(q_filled, grid) * u_mask[:, :, jnp.newaxis]
+                dq_dy_v = gradient_y_cgrid(q_filled, grid) * v_mask[:, :, jnp.newaxis]
+                # complement is (nlev,) — broadcasts over spatial dims.
+                F_x = cfg.kappa_Redi * complement * dq_dx_u
+                F_y = cfg.kappa_Redi * complement * dq_dy_v
+                dq_complement = divergence_cgrid(F_x, F_y, grid) * mask[:, :, jnp.newaxis]
+                if tend_ref == 'dT_dt':
+                    dT_dt = dT_dt + dq_complement
+                else:
+                    dS_dt = dS_dt + dq_complement
     else:
         raise ValueError(
             f"Unknown GMRediConfig.slope_scheme={scheme!r}; "
