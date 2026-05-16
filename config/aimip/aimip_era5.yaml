@@ -13,8 +13,12 @@
 #     are still comparable in rank-order to the grid-MSE because of
 #     ``normalize_by_scale=True``.
 # Optimizer:
-#   - Default is MUON (``optax.contrib.muon``) per the project's
-#     training preference.  Variants may override.
+#   - Default is AdamW (set by ``aimip_optimizer`` below).  MUON
+#     (``optax.contrib.muon``) is also supported and was the original
+#     project preference, but caused silent epoch-1 exits on the 34M-
+#     parameter SFNO variant under the 20-day windowed multi-year
+#     setup -- AdamW is the safe default until the MUON / SFNO
+#     instability is resolved.  Override via ``aimip_optimizer``.
 
 # ----- ERA5 source --------------------------------------------------
 era5_zarr: "gs://weatherbench2/datasets/era5/1959-2023_01_10-wb13-6h-1440x721_with_derived_variables.zarr"

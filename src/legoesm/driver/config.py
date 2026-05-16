@@ -19,6 +19,15 @@ from typing import NamedTuple
 from legoesm import constants
 
 
+# Canonical AIMIP variant set.  Single source of truth — imported by
+# ``scripts/run_aimip.py`` and the ``validate_strict`` rule below.
+# Empty string = not an AIMIP run (preserves backward-compat for
+# existing AMIP configs).
+AIMIP_VARIANTS: tuple[str, ...] = (
+    "", "classical", "column_nn", "sfno_physics", "sfno_full",
+)
+
+
 class GridConfig(NamedTuple):
     """Horizontal and vertical grid configuration."""
     grid_type: str = "cubed_sphere"  # cubed_sphere, gaussian, latlon, voronoi
@@ -259,12 +268,9 @@ class ExperimentConfig(NamedTuple):
         if self.ic == "era5" and not self.ic_path:
             errors.append("ic='era5' requires ic_path to be set")
 
-        _valid_aimip_variants = (
-            "", "classical", "column_nn", "sfno_physics", "sfno_full",
-        )
-        if self.aimip_variant not in _valid_aimip_variants:
+        if self.aimip_variant not in AIMIP_VARIANTS:
             errors.append(
-                f"aimip_variant must be one of {_valid_aimip_variants}, "
+                f"aimip_variant must be one of {AIMIP_VARIANTS}, "
                 f"got {self.aimip_variant!r}"
             )
         if self.aimip_variant == "classical":

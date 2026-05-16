@@ -56,7 +56,10 @@ import yaml
 logger = logging.getLogger("aimip")
 
 
-_VALID_VARIANTS = ("classical", "column_nn", "sfno_physics", "sfno_full")
+from legoesm.driver.config import AIMIP_VARIANTS as _AIMIP_VARIANTS_FULL
+
+# Run-time variants (drop the empty string which means "not AIMIP").
+_VALID_VARIANTS = tuple(v for v in _AIMIP_VARIANTS_FULL if v)
 
 
 # ----------------------------------------------------------------------
@@ -314,20 +317,15 @@ def _evaluate_variant(
     from legoesm.atmosphere.dynamics.spectral_pe import spectral_pe_to_grid
 
     def _area_weighted_rmse(pred, target, w_lat):
-        sq = (pred - target) ** 2
-        return float(
-            jnp.sqrt(jnp.sum(sq * w_lat[:, None]) / jnp.sum(
-                w_lat[:, None] * jnp.ones(sq.shape[-1:])[None, :]
-            ))
-        )
+        # Zonal mean over lon (axis -1) then latitude-weighted mean.
+        sq_zonal_mean = jnp.mean((pred - target) ** 2, axis=-1)
+        return float(jnp.sqrt(
+            jnp.sum(sq_zonal_mean * w_lat) / jnp.sum(w_lat)
+        ))
 
     def _area_weighted_bias(pred, target, w_lat):
-        diff = pred - target
-        return float(
-            jnp.sum(diff * w_lat[:, None]) / jnp.sum(
-                w_lat[:, None] * jnp.ones(diff.shape[-1:])[None, :]
-            )
-        )
+        diff_zonal_mean = jnp.mean(pred - target, axis=-1)
+        return float(jnp.sum(diff_zonal_mean * w_lat) / jnp.sum(w_lat))
 
     losses: list[float] = []
     per_var_rmse: dict[str, list[float]] = {k: [] for k in ("T", "u", "v", "p_s")}

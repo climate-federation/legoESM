@@ -668,15 +668,20 @@ def load_training_data(
     # 6-hour spacing, so day 0 of year Y maps to time-index
     # round((Y - 1959) * 365.25 * 4).  Snap to the nearest available
     # time after that target to tolerate leap-day drift.
-    import numpy as _np
-
     def _year_to_idx(year: int) -> int:
         try:
-            year_times = _np.array(ds.time.values, dtype="datetime64[ns]")
-            target_t = _np.datetime64(f"{int(year):04d}-01-01")
-            return int(_np.searchsorted(year_times, target_t))
-        except Exception:
-            return max(0, int(round((int(year) - 1959) * 365.25 * 4)))
+            year_times = np.array(ds.time.values, dtype="datetime64[ns]")
+            target_t = np.datetime64(f"{int(year):04d}-01-01")
+            return int(np.searchsorted(year_times, target_t))
+        except Exception as exc:
+            heuristic = max(0, int(round((int(year) - 1959) * 365.25 * 4)))
+            logger.warning(
+                f"load_training_data: ds.time access failed ({exc!r}); "
+                f"falling back to heuristic start index {heuristic} for "
+                f"year {year}.  Verify the ERA5 zarr time coordinate is "
+                f"accessible if downstream metrics look off."
+            )
+            return heuristic
 
     if windows:
         # AIMIP-style multi-window contiguous sampling.  Each window

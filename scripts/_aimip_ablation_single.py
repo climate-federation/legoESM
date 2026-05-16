@@ -83,16 +83,13 @@ def _per_var_metrics(pred_grid, target_carry, grid):
     weights = jnp.asarray(grid.weights)
 
     def _rmse(p, t):
-        sq = (p - t) ** 2
-        return float(jnp.sqrt(jnp.sum(sq * weights[:, None]) / jnp.sum(
-            weights[:, None] * jnp.ones(sq.shape[-1:])[None, :]
-        )))
+        # Zonal-mean square error, then latitude-weighted mean.
+        sq_zonal = jnp.mean((p - t) ** 2, axis=-1)
+        return float(jnp.sqrt(jnp.sum(sq_zonal * weights) / jnp.sum(weights)))
 
     def _bias(p, t):
-        d = p - t
-        return float(jnp.sum(d * weights[:, None]) / jnp.sum(
-            weights[:, None] * jnp.ones(d.shape[-1:])[None, :]
-        ))
+        diff_zonal = jnp.mean(p - t, axis=-1)
+        return float(jnp.sum(diff_zonal * weights) / jnp.sum(weights))
 
     nlev = pred_grid["T"].shape[-1]
     mid = nlev // 2
