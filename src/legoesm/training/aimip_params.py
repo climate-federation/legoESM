@@ -42,8 +42,8 @@ from legoesm.atmosphere.physics.turbulence.config import (
 )
 from legoesm.training.trainable_params import (
     ParamConstraint,
-    _range_to_sigmoid,
-    _sigmoid_to_range,
+    range_to_sigmoid,
+    sigmoid_to_range,
 )
 
 
@@ -217,7 +217,7 @@ class AIMIPClassicalParams(eqx.Module):
         for c in AIMIP_CLASSICAL_CONSTRAINTS:
             default = scheme_defaults.get(c.name, 0.5 * (c.min_val + c.max_val))
             raw[c.name] = jnp.asarray(
-                _range_to_sigmoid(default, c.min_val, c.max_val),
+                range_to_sigmoid(default, c.min_val, c.max_val),
                 dtype=param_dtype,
             )
         return AIMIPClassicalParams(
@@ -228,7 +228,7 @@ class AIMIPClassicalParams(eqx.Module):
     def as_dict(self) -> dict[str, jax.Array]:
         """Return constrained physical values for every knob."""
         return {
-            c.name: _sigmoid_to_range(self.raw_values[c.name], c.min_val, c.max_val)
+            c.name: sigmoid_to_range(self.raw_values[c.name], c.min_val, c.max_val)
             for c in self.constraints
         }
 
@@ -518,8 +518,6 @@ def make_aimip_classical_spectral_physics(
         RRTMGPConfig,
     )
 
-    p = params.as_dict()
-
     # Radiation backend toggle.  ``rrtmgp`` is the production
     # correlated-k path: it explicitly couples Xu-Randall cloud
     # fraction into shortwave + longwave fluxes and makes the
@@ -604,9 +602,6 @@ def make_aimip_classical_spectral_physics(
     else:
         micro_cfg = MicrophysicsConfig(scheme=microphysics_scheme)
 
-    # Note: ``p = params.as_dict()`` is already computed above for
-    # gray-radiation tau knobs; reused here only when gray is active.
-    del p  # avoid leaking variable into nested closure
     physics_config = PhysicsConfig(
         radiation=rad_cfg,
         convection=conv_cfg,

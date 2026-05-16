@@ -217,6 +217,16 @@ def test_experiment_config_aimip_variant_classical_requires_tiedtke():
         cfg.validate_strict()
 
 
+@pytest.mark.parametrize("variant", ["column_nn", "sfno_physics", "sfno_full"])
+def test_experiment_config_aimip_variant_non_classical_round_trip(variant):
+    """The column_nn / sfno_* variants have no prerequisite scheme
+    constraints; ``validate_strict`` must accept them out of the box."""
+    from legoesm.driver.config import ExperimentConfig
+    cfg = ExperimentConfig(aimip_variant=variant)
+    cfg.validate_strict()
+    assert cfg.aimip_variant == variant
+
+
 # ----------------------------------------------------------------------
 # Section 4: Muon optimizer dispatch
 # ----------------------------------------------------------------------

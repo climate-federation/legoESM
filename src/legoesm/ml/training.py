@@ -111,7 +111,14 @@ def create_optimizer(config: TrainingConfig) -> optax.GradientTransformation:
     elif config.optimizer == "adam":
         core = optax.adam(learning_rate=schedule)
     elif config.optimizer == "muon":
-        from optax.contrib import muon
+        try:
+            from optax.contrib import muon
+        except ImportError as exc:
+            raise ImportError(
+                "config.optimizer='muon' requires a version of optax that "
+                "ships optax.contrib.muon (>= 0.2.4). Upgrade optax or "
+                "select optimizer='adamw'/'adam'."
+            ) from exc
         core = muon(learning_rate=schedule)
     else:
         raise ValueError(
