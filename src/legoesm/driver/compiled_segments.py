@@ -63,8 +63,11 @@ class SegmentCarry(NamedTuple):
     ----------
     u, v, T, p_s, phis : jax.Array
         Prognostic dynamics fields.
-    q_v, q_c, q_r : jax.Array
-        Moisture tracers.
+    q_v, q_c, q_r, q_i : jax.Array
+        Moisture tracers (vapour, cloud liquid, rain, cloud ice).
+    N_i : jax.Array
+        Cloud-ice number concentration [1/m^3] (Morrison double-moment;
+        required by the depositional-growth term).
     conv_prog : jax.Array
         Prognostic convection control state for mass_flux / EDMF schemes.
     held_dT_rad, held_sw_net_sfc, held_lw_net_sfc : jax.Array
@@ -98,6 +101,8 @@ class SegmentCarry(NamedTuple):
     q_v: jax.Array
     q_c: jax.Array
     q_r: jax.Array
+    q_i: jax.Array
+    N_i: jax.Array
     conv_prog: jax.Array
     held_dT_rad: jax.Array
     held_sw_net_sfc: jax.Array
@@ -115,6 +120,7 @@ class SegmentCarry(NamedTuple):
 
 
 def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
+               q_i=None, N_i=None,
                held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                step_index,
@@ -152,6 +158,10 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
         lhflx_accum = jnp.zeros_like(state.p_s.data)
     if conv_prog is None:
         conv_prog = jnp.zeros((state.p_s.data.size,), dtype=storage)
+    if q_i is None:
+        q_i = jnp.zeros_like(q_c)
+    if N_i is None:
+        N_i = jnp.zeros_like(q_c)
     return SegmentCarry(
         u=_promote(state.u.data, storage),
         v=_promote(state.v.data, storage),
@@ -161,6 +171,8 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
         q_v=_promote(q_v, storage),
         q_c=_promote(q_c, storage),
         q_r=_promote(q_r, storage),
+        q_i=_promote(q_i, storage),
+        N_i=_promote(N_i, storage),
         conv_prog=_promote(conv_prog, storage),
         held_dT_rad=_promote(held_dT_rad, storage),
         held_sw_net_sfc=_promote(held_sw_net_sfc, storage),
@@ -369,8 +381,10 @@ def build_segment_fn(
     hyperdiffusion_3d_fn=None,
     tau_equator=None,
     tau_pole=None,
+    tau_moist_coeff=None,
     sbm_tau_c=None,
     sbm_RH_ref=None,
+    sundqvist_auto_rate=None,
     C_H=None,
     C_E=None,
     albedo_ice=None,
@@ -452,8 +466,15 @@ def build_segment_fn(
     _fric_decay = jnp.asarray(fric_decay)
     _tau_equator = jnp.asarray(tau_equator) if tau_equator is not None else None
     _tau_pole = jnp.asarray(tau_pole) if tau_pole is not None else None
+    _tau_moist_coeff = (
+        jnp.asarray(tau_moist_coeff) if tau_moist_coeff is not None else None
+    )
     _sbm_tau_c = jnp.asarray(sbm_tau_c) if sbm_tau_c is not None else None
     _sbm_RH_ref = jnp.asarray(sbm_RH_ref) if sbm_RH_ref is not None else None
+    _sundqvist_auto_rate = (
+        jnp.asarray(sundqvist_auto_rate)
+        if sundqvist_auto_rate is not None else None
+    )
     _C_H = jnp.asarray(C_H) if C_H is not None else None
     _C_E = jnp.asarray(C_E) if C_E is not None else None
     _albedo_ice = jnp.asarray(albedo_ice) if albedo_ice is not None else None
@@ -559,7 +580,7 @@ def build_segment_fn(
                     need_rad,
                     T_new[_ofi], p_s_new[_ofi],
                     carry.q_v[_ofi], carry.q_c[_ofi], carry.q_r[_ofi],
-                    carry.conv_prog,
+                    carry.q_i[_ofi], carry.N_i[_ofi], carry.conv_prog,
                     u_new[_ofi], v_new[_ofi],
                     forcing.sst, forcing.sic, lat, lon,
                     forcing.day_of_year, forcing.seconds_of_day, _dt,
@@ -570,7 +591,9 @@ def build_segment_fn(
                     carry.held_sw_up_toa[_ofi], carry.held_lw_up_toa[_ofi],
                     carry.held_sw_down_toa[_ofi],
                     tau_equator=_tau_equator, tau_pole=_tau_pole,
+                    tau_moist_coeff=_tau_moist_coeff,
                     sbm_tau_c=_sbm_tau_c, sbm_RH_ref=_sbm_RH_ref,
+                    sundqvist_auto_rate=_sundqvist_auto_rate,
                     C_H=_C_H, C_E=_C_E,
                     albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
                     ghg_vmr_override=_ghg_vmr_override,
@@ -591,6 +614,12 @@ def build_segment_fn(
                 )
                 q_r_upd = carry.q_r.at[_ofi].set(
                     jnp.maximum(carry.q_r[_ofi] + _dt * phys_out.dq_r_dt, 0.0)
+                )
+                q_i_upd = carry.q_i.at[_ofi].set(
+                    jnp.maximum(carry.q_i[_ofi] + _dt * phys_out.dq_i_dt, 0.0)
+                )
+                N_i_upd = carry.N_i.at[_ofi].set(
+                    jnp.maximum(carry.N_i[_ofi] + _dt * phys_out.dN_i_dt, 0.0)
                 )
                 conv_prog_upd = phys_out.conv_prog
 
@@ -617,7 +646,8 @@ def build_segment_fn(
                 phys_out, held_new = step_unified(
                     need_rad,
                     T_new, p_s_new,
-                    carry.q_v, carry.q_c, carry.q_r, carry.conv_prog,
+                    carry.q_v, carry.q_c, carry.q_r, carry.q_i, carry.N_i,
+                    carry.conv_prog,
                     u_new, v_new,
                     forcing.sst, forcing.sic, lat, lon,
                     forcing.day_of_year, forcing.seconds_of_day, _dt,
@@ -626,7 +656,9 @@ def build_segment_fn(
                     carry.held_dT_rad, carry.held_sw_net_sfc, carry.held_lw_net_sfc,
                     carry.held_sw_up_toa, carry.held_lw_up_toa, carry.held_sw_down_toa,
                     tau_equator=_tau_equator, tau_pole=_tau_pole,
+                    tau_moist_coeff=_tau_moist_coeff,
                     sbm_tau_c=_sbm_tau_c, sbm_RH_ref=_sbm_RH_ref,
+                    sundqvist_auto_rate=_sundqvist_auto_rate,
                     C_H=_C_H, C_E=_C_E,
                     albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
                     ghg_vmr_override=_ghg_vmr_override,
@@ -640,6 +672,8 @@ def build_segment_fn(
                 q_v_upd = jnp.maximum(carry.q_v + _dt * phys_out.dq_v_dt, 0.0)
                 q_c_upd = jnp.maximum(carry.q_c + _dt * phys_out.dq_c_dt, 0.0)
                 q_r_upd = jnp.maximum(carry.q_r + _dt * phys_out.dq_r_dt, 0.0)
+                q_i_upd = jnp.maximum(carry.q_i + _dt * phys_out.dq_i_dt, 0.0)
+                N_i_upd = jnp.maximum(carry.N_i + _dt * phys_out.dN_i_dt, 0.0)
                 conv_prog_upd = phys_out.conv_prog
 
                 # --- Accumulate precipitation ---
@@ -694,6 +728,8 @@ def build_segment_fn(
                 q_v=_match_dtype(q_v_upd, carry.q_v),
                 q_c=_match_dtype(q_c_upd, carry.q_c),
                 q_r=_match_dtype(q_r_upd, carry.q_r),
+                q_i=_match_dtype(q_i_upd, carry.q_i),
+                N_i=_match_dtype(N_i_upd, carry.N_i),
                 conv_prog=_match_dtype(conv_prog_upd, carry.conv_prog),
                 held_dT_rad=_match_dtype(held_new[0], carry.held_dT_rad),
                 held_sw_net_sfc=_match_dtype(held_new[1], carry.held_sw_net_sfc),

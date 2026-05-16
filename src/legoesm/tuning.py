@@ -89,6 +89,21 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
         sensitivity="medium",
         notes="Controls polar longwave cooling. Lower = colder poles.",
     ),
+    "tau_moist_coeff": TuningParameter(
+        name="tau_moist_coeff",
+        default=0.0115,
+        min_val=0.005,
+        max_val=0.030,
+        units="m^2/kg",
+        description="Gray radiation moisture LW optical-depth coefficient",
+        category="radiation",
+        sensitivity="high",
+        notes=(
+            "Strength of the water-vapour longwave greenhouse in the gray "
+            "scheme: dtau_moist = tau_moist_coeff * column_water. Higher = "
+            "stronger greenhouse, lower OLR. Frierson (2006) default 0.0115."
+        ),
+    ),
     "S_0": TuningParameter(
         name="S_0",
         default=1360.0,
@@ -140,6 +155,22 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
         category="convection",
         sensitivity="high",
         notes="Column moistened toward this RH. Higher = wetter atmosphere.",
+    ),
+    "sundqvist_auto_rate": TuningParameter(
+        name="sundqvist_auto_rate",
+        default=1e-3,
+        min_val=2e-4,
+        max_val=5e-3,
+        units="1/s",
+        description="Sundqvist autoconversion rate (cloud water -> rain)",
+        category="convection",
+        sensitivity="high",
+        notes=(
+            "Rate at which cloud water converts to (diagnostic, instantly "
+            "falling) rain: P_auto = auto_rate * q_c. Higher = more "
+            "efficient precipitation and lower cloud water (LWP); lower = "
+            "more cloud water retained. Sundqvist et al. (1989)."
+        ),
     ),
 
     # -- Diffusion / turbulence -----------------------------------------
@@ -231,13 +262,18 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
     "albedo_ocean": TuningParameter(
         name="albedo_ocean",
         default=0.06,
-        min_val=0.03,
-        max_val=0.10,
+        min_val=0.05,
+        max_val=0.35,
         units="1",
-        description="Ocean surface albedo",
+        description="Surface albedo (effective planetary albedo under gray rad)",
         category="surface",
-        sensitivity="low",
-        notes="Open-ocean reflectance. Typically 0.06 for diffuse light.",
+        sensitivity="high",
+        notes=(
+            "Open-ocean reflectance is ~0.06, but under gray radiation "
+            "(no cloud SW scattering) this acts as the effective planetary "
+            "albedo and is the only knob on OSR — the calibration may drive "
+            "it toward ~0.3 to reach the observed OSR."
+        ),
     ),
 }
 

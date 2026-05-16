@@ -156,9 +156,11 @@ class ExperimentConfig(NamedTuple):
     emissivity_ice: float = 0.95
     tau_equator: float = 7.2
     tau_pole: float = 1.8
+    tau_moist_coeff: float = 0.0115        # gray-rad moisture LW optical depth [m²/kg]
     sbm_tau_c: float = 7200.0
     sbm_RH_ref: float = 0.7
     sbm_cape_threshold: float = 70.0
+    sundqvist_auto_rate: float = 1e-3      # Sundqvist autoconversion rate [1/s]
     sigma_b: float = 0.7
     k_BL_max_per_day: float = 1.0
     k_free_per_day: float = 0.1
@@ -412,6 +414,8 @@ class ExperimentConfig(NamedTuple):
             emissivity_ice=amip_cfg.emissivity_ice,
             tau_equator=amip_cfg.tau_equator,
             tau_pole=amip_cfg.tau_pole,
+            tau_moist_coeff=getattr(amip_cfg, 'tau_moist_coeff', 0.0115),
+            sundqvist_auto_rate=getattr(amip_cfg, 'sundqvist_auto_rate', 1e-3),
             sbm_tau_c=amip_cfg.sbm_tau_c,
             sbm_RH_ref=amip_cfg.sbm_RH_ref,
             sbm_cape_threshold=getattr(amip_cfg, 'sbm_cape_threshold', 70.0),
@@ -514,6 +518,8 @@ class ExperimentConfig(NamedTuple):
             emissivity_ice=self.emissivity_ice,
             tau_equator=self.tau_equator,
             tau_pole=self.tau_pole,
+            tau_moist_coeff=getattr(self, 'tau_moist_coeff', 0.0115),
+            sundqvist_auto_rate=getattr(self, 'sundqvist_auto_rate', 1e-3),
             sbm_tau_c=self.sbm_tau_c,
             sbm_RH_ref=self.sbm_RH_ref,
             sbm_cape_threshold=self.sbm_cape_threshold,

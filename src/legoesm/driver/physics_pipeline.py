@@ -158,6 +158,7 @@ class PhysicsPipeline:
                             lat, dt, dT_dt_rad, sw_net_sfc, lw_net_sfc,
                             sw_up_toa, lw_up_toa, sw_down_toa,
                             sbm_tau_c=None, sbm_RH_ref=None,
+                            sundqvist_auto_rate=None,
                             C_H=None, C_E=None,
                             q_i=None, q_s=None, q_g=None,
                             N_c=None, N_r=None, N_i=None):
@@ -198,6 +199,14 @@ class PhysicsPipeline:
             _conv_cfg = _conv_cfg._replace(tau_c=sbm_tau_c)
         if sbm_RH_ref is not None and _conv_cfg is not None and hasattr(_conv_cfg, 'RH_ref'):
             _conv_cfg = _conv_cfg._replace(RH_ref=sbm_RH_ref)
+
+        # Microphysics config: override the autoconversion rate with the
+        # traced ``sundqvist_auto_rate`` when supplied.  Only the Sundqvist
+        # scheme has an ``auto_rate`` field; other schemes are untouched.
+        _micro_cfg = self.micro_config
+        if (sundqvist_auto_rate is not None and _micro_cfg is not None
+                and hasattr(_micro_cfg, 'auto_rate')):
+            _micro_cfg = _micro_cfg._replace(auto_rate=sundqvist_auto_rate)
 
         if conv_prog is None:
             if _conv_cfg is not None and hasattr(_conv_cfg, 'M_c_init'):
@@ -350,14 +359,14 @@ class PhysicsPipeline:
                     rho=rho_col,
                     dz=dz_col,
                     dt=dt,
-                    config=self.micro_config,
+                    config=_micro_cfg,
                 )
             else:
                 micro_out = self.micro_fn(
                     T=T_col, q_v=q_v_col, hydrometeors=hydrometeors,
                     p_full=p_full_col, p_half=p_half_col,
                     rho=rho_col, dz=dz_col, dt=dt,
-                    config=self.micro_config,
+                    config=_micro_cfg,
                 )
             dT_dt_micro = ad.unflatten_3d(micro_out.dT_dt)
             dq_v_dt_micro = ad.unflatten_3d(micro_out.dq_v_dt)
@@ -474,6 +483,7 @@ class PhysicsPipeline:
                                solar_weights, s_0,
                                o3_vmr_precomputed, aerosol_od_precomputed,
                                tau_equator=None, tau_pole=None,
+                               tau_moist_coeff=None,
                                albedo_ice=None, albedo_ocean=None,
                                ghg_vmr_override=None,
                                q_c=None, q_r=None,
@@ -540,6 +550,7 @@ class PhysicsPipeline:
             o3_vmr_precomputed, aerosol_od_precomputed,
             solar_weights, s_0,
             tau_equator=tau_equator, tau_pole=tau_pole,
+            tau_moist_coeff=tau_moist_coeff,
             ghg_vmr_override=ghg_vmr_override,
             **cloud_kwargs,
         )
@@ -569,27 +580,30 @@ class PhysicsPipeline:
         pipeline = self
 
         @jax.jit
-        def step_unified(need_rad, T, p_s, q_v, q_c, q_r, conv_prog, u, v,
+        def step_unified(need_rad, T, p_s, q_v, q_c, q_r, q_i, N_i, conv_prog,
+                         u, v,
                          sst, sic, lat, lon,
                          day_of_year, seconds_of_day, dt,
                          solar_weights, s_0,
                          o3_vmr, aerosol_od,
                          held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                          held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
-                         tau_equator=None, tau_pole=None,
+                         tau_equator=None, tau_pole=None, tau_moist_coeff=None,
                          sbm_tau_c=None, sbm_RH_ref=None,
+                         sundqvist_auto_rate=None,
                          C_H=pipeline.C_H, C_E=pipeline.C_E,
                          albedo_ice=pipeline.albedo_ice,
                          albedo_ocean=pipeline.albedo_ocean,
                          ghg_vmr_override=None):
 
             def _rad_branch(args):
-                (T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
+                (T, p_s, q_v, q_c, q_r, q_i, N_i, conv_prog, u, v, sst, sic, lat, lon,
                  day_of_year, seconds_of_day, dt,
                  solar_weights, s_0, o3_vmr, aerosol_od,
                  held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                  held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
-                 tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref,
+                 tau_equator, tau_pole, tau_moist_coeff, sbm_tau_c, sbm_RH_ref,
+                 sundqvist_auto_rate,
                  C_H, C_E, albedo_ice, albedo_ocean,
                  ghg_vmr_override) = args
 
@@ -600,6 +614,7 @@ class PhysicsPipeline:
                         day_of_year, seconds_of_day,
                         solar_weights, s_0, o3_vmr, aerosol_od,
                         tau_equator=tau_equator, tau_pole=tau_pole,
+                        tau_moist_coeff=tau_moist_coeff,
                         albedo_ice=albedo_ice, albedo_ocean=albedo_ocean,
                         ghg_vmr_override=ghg_vmr_override,
                         q_c=q_c,
@@ -611,7 +626,9 @@ class PhysicsPipeline:
                     dT_dt_rad, sw_net_sfc, lw_net_sfc,
                     sw_up_toa, lw_up_toa, sw_down_toa,
                     sbm_tau_c=sbm_tau_c, sbm_RH_ref=sbm_RH_ref,
+                    sundqvist_auto_rate=sundqvist_auto_rate,
                     C_H=C_H, C_E=C_E,
+                    q_i=q_i, N_i=N_i,
                 )
 
                 # Cast to storage dtype so both lax.cond branches match
@@ -626,12 +643,13 @@ class PhysicsPipeline:
                 return physics_out, new_held
 
             def _no_rad_branch(args):
-                (T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
+                (T, p_s, q_v, q_c, q_r, q_i, N_i, conv_prog, u, v, sst, sic, lat, lon,
                  day_of_year, seconds_of_day, dt,
                  solar_weights, s_0, o3_vmr, aerosol_od,
                  held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                  held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
-                 tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref,
+                 tau_equator, tau_pole, tau_moist_coeff, sbm_tau_c, sbm_RH_ref,
+                 sundqvist_auto_rate,
                  C_H, C_E, albedo_ice, albedo_ocean,
                  ghg_vmr_override) = args
 
@@ -640,7 +658,9 @@ class PhysicsPipeline:
                     held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                     sbm_tau_c=sbm_tau_c, sbm_RH_ref=sbm_RH_ref,
+                    sundqvist_auto_rate=sundqvist_auto_rate,
                     C_H=C_H, C_E=C_E,
+                    q_i=q_i, N_i=N_i,
                 )
 
                 # Cast to storage dtype — must match _rad_branch
@@ -654,12 +674,13 @@ class PhysicsPipeline:
                 physics_out = jax.tree.map(_cast, physics_out)
                 return physics_out, new_held
 
-            args = (T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
+            args = (T, p_s, q_v, q_c, q_r, q_i, N_i, conv_prog, u, v, sst, sic, lat, lon,
                     day_of_year, seconds_of_day, dt,
                     solar_weights, s_0, o3_vmr, aerosol_od,
                     held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
-                    tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref,
+                    tau_equator, tau_pole, tau_moist_coeff, sbm_tau_c, sbm_RH_ref,
+                    sundqvist_auto_rate,
                     C_H, C_E, albedo_ice, albedo_ocean,
                     ghg_vmr_override)
 
@@ -699,19 +720,28 @@ def _build_gray_radiation_fn(config):
                      lat_col, lon_col, day_of_year, seconds_of_day,
                      albedo_col, emis_col, o3_vmr_col, aerosol_od_col,
                      solar_weights, s_0=S_0,
-                     tau_equator=None, tau_pole=None,
+                     tau_equator=None, tau_pole=None, tau_moist_coeff=None,
                      ghg_vmr_override=None,
                      cloud_path_liq=None, cloud_path_ice=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None,
                      cloud_fraction=None):
         del ghg_vmr_override  # gray radiation does not use GHG concentrations
         del cloud_path_liq, cloud_path_ice, cloud_r_eff_liq, cloud_r_eff_ice, cloud_fraction
-        # Rebuild config with traced tau values when provided
+        # Rebuild config with traced values when provided.  tau_equator /
+        # tau_pole / tau_moist_coeff are the gray-radiation LW optical-depth
+        # knobs; albedo_col is the (traced) surface albedo blended from
+        # albedo_ocean / albedo_ice — under gray radiation it acts as the
+        # effective planetary SW albedo (the only knob on OSR).  RRTMG bakes
+        # its solar constant / albedo differently; this only affects gray.
         _cfg = gray_config
         if tau_equator is not None:
             _cfg = _cfg._replace(tau_equator=tau_equator)
         if tau_pole is not None:
             _cfg = _cfg._replace(tau_pole=tau_pole)
+        if tau_moist_coeff is not None:
+            _cfg = _cfg._replace(tau_moist_coeff=tau_moist_coeff)
+        if albedo_col is not None:
+            _cfg = _cfg._replace(sfc_albedo=albedo_col)
 
         if diurnal:
             hour = seconds_of_day / 3600.0
@@ -761,12 +791,12 @@ def _build_rrtmgp_radiation_fn(config):
                      lat_col, lon_col, day_of_year, seconds_of_day,
                      albedo_col, emis_col, o3_vmr_col, aerosol_od_col,
                      solar_weights, s_0=S_0,
-                     tau_equator=None, tau_pole=None,
+                     tau_equator=None, tau_pole=None, tau_moist_coeff=None,
                      ghg_vmr_override=None,
                      cloud_path_liq=None, cloud_path_ice=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None,
                      cloud_fraction=None):
-        del tau_equator, tau_pole  # RRTMGP does not use gray optical depth
+        del tau_equator, tau_pole, tau_moist_coeff  # RRTMGP: no gray optical depth
         _sw_scale = None
         if diurnal:
             hour = seconds_of_day / 3600.0
@@ -938,6 +968,15 @@ def _resolve_microphysics(config):
     micro_fn = resolve_kernel(MICROPHYSICS_REGISTRY, scheme)
     mc = MicrophysicsConfig(scheme=scheme)
     micro_config = getattr(mc, scheme)
+
+    # Bake the ExperimentConfig autoconversion rate into the Sundqvist
+    # config so a standalone (non-calibration) run honours it.  The
+    # calibration additionally overrides it per-step via the traced
+    # ``sundqvist_auto_rate`` argument threaded through step_unified.
+    if (scheme == "sundqvist" and hasattr(micro_config, 'auto_rate')
+            and hasattr(config, 'sundqvist_auto_rate')):
+        micro_config = micro_config._replace(
+            auto_rate=config.sundqvist_auto_rate)
 
     return micro_fn, micro_config
 
