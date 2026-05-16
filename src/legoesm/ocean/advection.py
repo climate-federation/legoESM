@@ -24,6 +24,7 @@ import jax.numpy as jnp
 
 from legoesm.core.weno import weno5_z, weno7_z, weno_upwind
 from legoesm.grids.latlon import LatLonGrid
+from legoesm.ocean.dynamics.latlon_cgrid_operators import is_tripolar
 
 
 # =============================================================================
@@ -116,7 +117,7 @@ def dst3_to_u_points(
     n_lon = f.shape[1]
 
     # Cell-width at u-face latitudes
-    if hasattr(grid, "dx_u") and grid.dlat == 0.0:
+    if is_tripolar(grid):
         dx_3d = grid.dx_u[:, :, jnp.newaxis]  # (n_lat, n_lon+1, 1)
     else:
         dx = grid.radius * grid.dlon * grid.cos_lat  # (n_lat,)
@@ -208,7 +209,7 @@ def dst3_to_v_points(
     n_lat = f.shape[0]
 
     # Face-to-face distance at interior v-faces.
-    if hasattr(grid, "dy_v") and grid.dlat == 0.0:
+    if is_tripolar(grid):
         # Tripolar: per-cell meridional spacing from 2D metrics.
         dy_v_int = grid.dy_v[1:-1, 0]  # (n_lat-1,) from interior rows
     else:
@@ -1238,7 +1239,7 @@ def _zalesak_signsplit_face_alphas(
     F_w_neg = jnp.maximum(-ad_vert_int, 0.0)
 
     # Spherical face metrics (mirroring divergence_cgrid).
-    if hasattr(grid, "dy_u") and grid.dlat == 0.0:
+    if is_tripolar(grid):
         # Tripolar: use full 2D metrics — column-0 extraction is NOT
         # valid on the bipolar cap where dy_u/dx_v vary in longitude.
         face_dy = grid.dy_u                               # (n_lat, n_lon+1)

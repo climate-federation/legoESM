@@ -47,7 +47,7 @@ def prescribed_surface_forcing(
     # use, but catastrophic when du_dt is interpolated to neighbouring
     # u/v faces (T->u, T->v) where the ocean side gets contaminated.
     dz_0 = z_coord.dz_ref[0] * jacobian  # T-point shape; 0 on land
-    is_ocean = dz_0 > 1.0e-3   # > 1 mm cell thickness ⇒ ocean
+    is_ocean = dz_0 > cfg.min_wet_cell_thickness_m
     inv_rho_dz = jnp.where(
         is_ocean, 1.0 / (rho_0_ref * jnp.maximum(dz_0, 1.0e-10)), 0.0,
     )

@@ -49,7 +49,7 @@ from legoesm.grids.latlon import LatLonGrid  # noqa: F401 — kept for type comp
 # they reduce to jnp.pad — bit-exact to the current code.
 
 
-def _pad_ns_zero(interior: jnp.ndarray) -> jnp.ndarray:
+def pad_ns_zero(interior: jnp.ndarray) -> jnp.ndarray:
     """Zero-pad south and north rows (wall BC).
 
     Parameters
@@ -63,6 +63,18 @@ def _pad_ns_zero(interior: jnp.ndarray) -> jnp.ndarray:
     """
     pad_axes = ((0, 0),) * (interior.ndim - 1)
     return jnp.pad(interior, ((1, 1), *pad_axes))
+
+
+def is_tripolar(grid) -> bool:
+    """Return True if ``grid`` carries an active tripolar fold descriptor.
+
+    Replaces the legacy ``hasattr(grid, "<metric>") and grid.dlat == 0.0``
+    sentinel dispatch.  Tripolar geometries always carry a ``fold`` field
+    with ``is_active=True``; regular/Mercator ``LatLonCGridGeometry`` have
+    ``is_active=False``; the old ``LatLonGrid`` lacks the field entirely.
+    """
+    fold = getattr(grid, "fold", None)
+    return fold is not None and bool(fold.is_active)
 
 
 def fold_vface_row(cell_field: jnp.ndarray, grid) -> jnp.ndarray:
@@ -124,7 +136,7 @@ def pad_ns_scalar(interior: jnp.ndarray, grid) -> jnp.ndarray:
             core = last_row[:, :n_lon][:, fold.perm_T]
             north = jnp.concatenate([core, core[:, 0:1]], axis=1)
         return jnp.concatenate([south, interior, north], axis=0)
-    return _pad_ns_zero(interior)
+    return pad_ns_zero(interior)
 
 
 def _fold_row(last_row, perm, sign, n_lon):
@@ -149,7 +161,7 @@ def pad_ns_vector_u(interior: jnp.ndarray, grid) -> jnp.ndarray:
         n_lon = fold.perm_T.shape[0]
         north = _fold_row(interior[-1:], fold.perm_T, fold.vector_sign_u, n_lon)
         return jnp.concatenate([south, interior, north], axis=0)
-    return _pad_ns_zero(interior)
+    return pad_ns_zero(interior)
 
 
 def pad_ns_vector_v(interior: jnp.ndarray, grid) -> jnp.ndarray:
@@ -164,7 +176,7 @@ def pad_ns_vector_v(interior: jnp.ndarray, grid) -> jnp.ndarray:
         n_lon = fold.perm_v.shape[0]
         north = _fold_row(interior[-1:], fold.perm_v, fold.vector_sign_v, n_lon)
         return jnp.concatenate([south, interior, north], axis=0)
-    return _pad_ns_zero(interior)
+    return pad_ns_zero(interior)
 
 
 def pad_ns_vector_pair(
@@ -202,7 +214,7 @@ def pad_ns_vector_pair(
     """
     fold = getattr(grid, "fold", None)
     if fold is None or not fold.is_active:
-        return _pad_ns_zero(u_interior), _pad_ns_zero(v_interior)
+        return pad_ns_zero(u_interior), pad_ns_zero(v_interior)
 
     n_lon = fold.perm_T.shape[0]
     south_u = jnp.zeros_like(u_interior[:1])
@@ -377,7 +389,7 @@ def cell_to_cgrid_winds(
     if fold is not None and fold.is_active:
         v_face = pad_ns_vector_v(v_interior, grid)
     else:
-        v_face = _pad_ns_zero(v_interior)
+        v_face = pad_ns_zero(v_interior)
     return u_face, v_face
 
 
@@ -421,7 +433,7 @@ def gradient_x_cgrid(
     # dx at u-point.  On a regular lat-lon grid (dlat > 0), use the
     # legacy 1D path for bit-exact backward compat.  On a tripolar
     # grid (dlat == 0 sentinel), use the pre-computed 2D metric.
-    if hasattr(grid, "dx_u") and grid.dlat == 0.0:
+    if is_tripolar(grid):
         dx_u = grid.dx_u  # (n_lat, n_lon+1)
         if f.ndim == 2:
             return df_full / dx_u
@@ -458,7 +470,7 @@ def gradient_y_cgrid(
     # dy at v-point: on a regular lat-lon grid this is the scalar
     # R*dlat; on a tripolar grid it varies per cell.  Use the scalar
     # when dlat > 0 (regular grid) for bit-exact backward compat.
-    if hasattr(grid, "dy_v") and grid.dlat == 0.0:
+    if is_tripolar(grid):
         # Tripolar: per-cell meridional spacing
         dy_v_int = grid.dy_v[1:-1]  # (n_lat-1, n_lon)
         dy_v_interior = dy_v_int if f.ndim == 2 else dy_v_int[:, :, jnp.newaxis]
@@ -487,13 +499,15 @@ def gradient_y_cgrid(
         dy_fold = grid.dy_v[-1:]  # (1, n_lon) — fold-face distance
         if f.ndim == 3:
             dy_fold = dy_fold[:, :, jnp.newaxis]
-        # Clamp dy_fold to avoid division by zero at degenerate fold cells
-        dy_fold_safe = jnp.maximum(dy_fold, 1.0)
+        # Pure numerical guard against division by zero at degenerate
+        # fold cells. Real ocean fold cells are O(km); 1e-30 only kicks
+        # in when ``dy_v`` is identically zero (e.g. synthetic test).
+        dy_fold_safe = jnp.maximum(dy_fold, 1.0e-30)
         df_fold = (f_partner - f[-1:]) / dy_fold_safe
         south = jnp.zeros_like(df_interior[:1])
         df_dy = jnp.concatenate([south, df_interior, df_fold], axis=0)
     else:
-        df_dy = _pad_ns_zero(df_interior)
+        df_dy = pad_ns_zero(df_interior)
     return df_dy
 
 
@@ -564,7 +578,7 @@ def divergence_cgrid(
         v_eff = v * vm
 
     # --- Zonal face length (meridional extent of u-face) ---
-    if hasattr(grid, "dy_u") and grid.dlat == 0.0:
+    if is_tripolar(grid):
         # Tripolar: use full 2D dy_u.  On a regular lat-lon grid dy_u
         # is constant in longitude, but on the bipolar cap it varies
         # significantly — column-0 extraction is NOT valid.
@@ -602,7 +616,7 @@ def divergence_cgrid(
     # On a regular lat-lon grid this is the 1D array
     # R*cos(lat_v)*dlon; on a tripolar grid (dlat==0 sentinel) it
     # is the 2D array grid.dx_v.
-    if hasattr(grid, "dx_v") and grid.dlat == 0.0:
+    if is_tripolar(grid):
         face_dx = grid.dx_v  # (n_lat+1, n_lon) — 2D for tripolar
     else:
         lat = grid.lat
@@ -827,7 +841,7 @@ def curl_vertex_cgrid(
     # moveaxis round-trip.
     is_3d = u.ndim == 3
 
-    if hasattr(grid, "area_q") and grid.dlat == 0.0:
+    if is_tripolar(grid):
         # Tripolar: use full 2D per-cell metrics.  On the bipolar cap,
         # metrics vary significantly in BOTH lat and lon — column-0
         # extraction is not valid.
@@ -935,7 +949,7 @@ def _gradient_curl_to_u(
     -------
     grad : (n_lat, n_lon+1) or (n_lat, n_lon+1, nlev)
     """
-    if hasattr(grid, "dy_v") and grid.dlat == 0.0:
+    if is_tripolar(grid):
         # Tripolar: full 2D dy at u-face stagger.
         dy = grid.dy_u  # (n_lat, n_lon+1)
         if zeta.ndim == 3:
@@ -966,7 +980,7 @@ def _gradient_curl_to_v(
     -------
     grad : (n_lat+1, n_lon) or (n_lat+1, n_lon, nlev)
     """
-    if hasattr(grid, "dx_v") and grid.dlat == 0.0:
+    if is_tripolar(grid):
         dx_v_int = grid.dx_v[1:-1]  # (n_lat-1, n_lon) — full 2D
     else:
         R = grid.radius
@@ -2236,7 +2250,7 @@ def leith_viscosity_q_cgrid(
             + gd_roll[:-1] + gd_roll[1:]
         )
         # Pole rows zero; single Pad HLO op replaces alloc-zeros +
-        grad_div_q = _pad_ns_zero(gd_q_int)
+        grad_div_q = pad_ns_zero(gd_q_int)
         grad_div_q = jnp.concatenate(
             [grad_div_q, grad_div_q[:, 0:1]], axis=1)
         total_sq = total_sq + grad_div_q ** 2
@@ -2429,7 +2443,7 @@ def _compute_vertex_mask(land_mask: jnp.ndarray, grid=None) -> jnp.ndarray:
     fold = getattr(grid, "fold", None) if grid is not None else None
     if fold is not None and fold.is_active:
         return pad_ns_scalar(interior_full, grid)
-    return _pad_ns_zero(interior_full)
+    return pad_ns_zero(interior_full)
 
 
 # =============================================================================
@@ -2534,7 +2548,7 @@ def partial_cell_pgf_correction_x(
         [correction, correction[:, 0:1, :]], axis=1,
     )
 
-    if hasattr(grid, "dx_u") and grid.dlat == 0.0:
+    if is_tripolar(grid):
         return correction_full / grid.dx_u[:, :, jnp.newaxis]
     else:
         dx_u = grid.radius * grid.dlon * grid.cos_lat
@@ -2555,7 +2569,7 @@ def partial_cell_pgf_correction_y(
 
     Output shape: ``(n_lat+1, n_lon, nlev)``.
     """
-    if hasattr(grid, "dy_v") and grid.dlat == 0.0:
+    if is_tripolar(grid):
         dy_v = grid.dy_v  # (n_lat+1, n_lon) — full 2D
     else:
         # Regular or Mercator: variable-dy safe.
@@ -2577,7 +2591,7 @@ def partial_cell_pgf_correction_y(
         - rho_prime_south * excess_south
     )
 
-    _tripolar_pgf = hasattr(grid, "dy_v") and grid.dlat == 0.0
+    _tripolar_pgf = is_tripolar(grid)
     if not _tripolar_pgf:
         # Regular or Mercator: divide before padding so we only divide
         # interior rows.
@@ -2600,7 +2614,7 @@ def partial_cell_pgf_correction_y(
             [south, correction_interior, correction_fold], axis=0,
         )
     else:
-        correction = _pad_ns_zero(correction_interior)
+        correction = pad_ns_zero(correction_interior)
 
     if _tripolar_pgf:
         # Tripolar: divide by full 2D dy_v after padding.
@@ -2708,7 +2722,7 @@ def density_jacobian_pgf_smc03_x(
     diff_interior = P_E - P_W
     diff = jnp.concatenate([diff_interior, diff_interior[:, 0:1, :]], axis=1)
 
-    if hasattr(grid, "dx_u") and grid.dlat == 0.0:
+    if is_tripolar(grid):
         return diff / grid.dx_u[:, :, jnp.newaxis]
     else:
         dx_u = grid.radius * grid.dlon * grid.cos_lat
@@ -2776,9 +2790,9 @@ def density_jacobian_pgf_smc03_y(
         south = jnp.zeros_like(diff_interior[:1])
         diff = jnp.concatenate([south, diff_interior, diff_fold], axis=0)
     else:
-        diff = _pad_ns_zero(diff_interior)
+        diff = pad_ns_zero(diff_interior)
 
-    if hasattr(grid, "dy_v") and grid.dlat == 0.0:
+    if is_tripolar(grid):
         # Tripolar: divide by full 2D dy_v.
         dy_v = grid.dy_v  # full 2D
         return diff / dy_v[:, :, jnp.newaxis]

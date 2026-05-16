@@ -64,6 +64,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     divergence_cgrid,
     gradient_x_cgrid,
     gradient_y_cgrid,
+    is_tripolar,
 )
 from legoesm.ocean.dynamics.eta_floor import (
     clamp_and_redistribute as _clamp_redistribute,
@@ -230,7 +231,7 @@ def _make_diag_preconditioner(
     H_v_N = H_v[1:, :]   # north face of cell j: v-face (j+1, i)
     H_v_S = H_v[:-1, :]  # south face of cell j: v-face (j, i)
 
-    if hasattr(grid, "dx_u") and grid.dlat == 0.0:
+    if is_tripolar(grid):
         # Tripolar: use full per-face 2D metrics so the preconditioner
         # captures the longitude variation of cell sizes in the bipolar
         # cap.  Taking only column 0 (as the previous version did) gives

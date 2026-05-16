@@ -29,6 +29,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     min_cell_to_uface,
     min_cell_to_vface,
     pad_ns_vector_u,
+    pad_ns_zero,
 )
 from legoesm.ocean.dynamics.eta_floor import clamp_and_redistribute as _clamp_redistribute
 from legoesm.ocean.dynamics.barotropic_common import (
@@ -223,8 +224,7 @@ def barotropic_substeps_latlon_cgrid(
                 [south_dm, diff_v_mask_interior, north_dm], axis=0,
             )
         else:
-            from legoesm.ocean.dynamics.latlon_cgrid_operators import _pad_ns_zero
-            diff_v_mask = _pad_ns_zero(diff_v_mask_interior)
+            diff_v_mask = pad_ns_zero(diff_v_mask_interior)
 
     # Divergence damping on barotropic velocity: grad(div(u_bar)).
     # Targets the divergent mode that creates the eta checkerboard,
@@ -305,8 +305,7 @@ def barotropic_substeps_latlon_cgrid(
             )
             H_v = jnp.concatenate([south, H_v_interior, north], axis=0)
         else:
-            from legoesm.ocean.dynamics.latlon_cgrid_operators import _pad_ns_zero
-            H_v = _pad_ns_zero(H_v_interior)
+            H_v = pad_ns_zero(H_v_interior)
 
         flux_u = H_u * U_bar_c * u_mask
         flux_v = H_v * V_bar_c * v_mask

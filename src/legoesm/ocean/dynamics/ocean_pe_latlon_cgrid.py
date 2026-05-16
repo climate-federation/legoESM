@@ -70,10 +70,12 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     vector_bilaplacian_cgrid,
     vector_laplacian_cgrid,
     interp_cell_to_uface,
+    is_tripolar,
     min_cell_to_uface,
     min_cell_to_vface,
     curl_vertex_cgrid,
     pad_ns_scalar,
+    pad_ns_zero,
     smagorinsky_biharmonic_tendency_cgrid,
     smagorinsky_viscosity_cgrid,
     smagorinsky_viscosity_q_cgrid,
@@ -119,11 +121,10 @@ def _interp_to_v_points(f: jnp.ndarray, grid=None) -> jnp.ndarray:
     -------
     f_v : array, shape (n_lat+1, n_lon, ...) at v-points.
     """
-    from legoesm.ocean.dynamics.latlon_cgrid_operators import _pad_ns_zero
     f_interior = 0.5 * (f[:-1] + f[1:])  # (n_lat-1, n_lon, ...)
     if grid is not None:
         return pad_ns_scalar(f_interior, grid)
-    return _pad_ns_zero(f_interior)
+    return pad_ns_zero(f_interior)
 
 
 def _van_leer_limiter(r: jnp.ndarray) -> jnp.ndarray:
@@ -164,11 +165,10 @@ def _tvd_to_v_points(f: jnp.ndarray, mass_flux_v: jnp.ndarray, grid=None) -> jnp
     r_neg = (f_north2 - f_north) / jnp.where(jnp.abs(delta_neg) > eps, delta_neg, eps)
     f_pos = f_south + 0.5 * _van_leer_limiter(r_pos) * delta_pos
     f_neg = f_north + 0.5 * _van_leer_limiter(r_neg) * delta_neg
-    from legoesm.ocean.dynamics.latlon_cgrid_operators import _pad_ns_zero
     f_tvd = jnp.where(mass_flux_v[1:-1] > 0, f_pos, f_neg)
     if grid is not None:
         return pad_ns_scalar(f_tvd, grid)
-    return _pad_ns_zero(f_tvd)
+    return pad_ns_zero(f_tvd)
 
 
 def _upwind_to_u_points(
@@ -235,10 +235,9 @@ def _upwind_to_v_points(
     mf_interior = mass_flux_v[1:-1]
     f_upwind = jnp.where(mf_interior > 0, f_south, f_north)
 
-    from legoesm.ocean.dynamics.latlon_cgrid_operators import _pad_ns_zero
     if grid is not None:
         return pad_ns_scalar(f_upwind, grid)
-    return _pad_ns_zero(f_upwind)
+    return pad_ns_zero(f_upwind)
 
 
 def _neumann_fill_cgrid(
@@ -560,7 +559,7 @@ def _split_velocity_divergence(
     dU_di_cell : (n_lat, n_lon, nlev)  zonal divergence component at cells.
     dV_dj_cell : (n_lat, n_lon, nlev)  meridional divergence component.
     """
-    if hasattr(grid, "dy_u") and grid.dlat == 0.0:
+    if is_tripolar(grid):
         # Tripolar: use full 2D metrics — column-0 extraction is NOT
         # valid on the bipolar cap where dy_u varies in longitude.
         face_dy = grid.dy_u                              # (n_lat, n_lon+1)
@@ -931,7 +930,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         # Convert "δ across one cell" → "gradient at face" by dividing
         # by dx_u (cell width at u-face latitude) and dy_v (distance
         # between adjacent cell-centre latitudes at the v-face row).
-        if hasattr(grid, "dx_u") and grid.dlat == 0.0:
+        if is_tripolar(grid):
             # Tripolar: full 2D metrics.
             dx_u_at_face = grid.dx_u[:, :, jnp.newaxis]      # (n_lat, n_lon+1, 1)
             dy_v = grid.dy_v[1, 0]                            # scalar (interior row)

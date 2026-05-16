@@ -107,6 +107,9 @@ def _detect_fold(
     gphit: jax.Array,
     n_lat: int,
     n_lon: int,
+    *,
+    max_fold_asym_deg: float = 0.1,
+    cap_dlat_rel_deviation: float = 0.1,
 ) -> FoldDescriptor:
     """Detect the tripolar fold from the T-point coordinates.
 
@@ -118,6 +121,13 @@ def _detect_fold(
     ----------
     glamt, gphit : (n_lat, n_lon) arrays of T-point lon/lat [degrees].
     n_lat, n_lon : grid dimensions.
+    max_fold_asym_deg : float, default 0.1
+        Maximum allowed absolute latitude asymmetry across the fold
+        permutation [deg]. Larger values are treated as a non-NEMO grid
+        and raise.
+    cap_dlat_rel_deviation : float, default 0.1
+        Relative deviation of per-row dlat from the southern-half median
+        used to detect where the bipolar cap begins (dimensionless).
 
     Returns
     -------
@@ -134,7 +144,7 @@ def _detect_fold(
     lat_fold = gphit[fold_j]
     lat_fold_rev = lat_fold[perm_T]
     max_asym = float(jnp.max(jnp.abs(lat_fold - lat_fold_rev)))
-    if max_asym > 0.1:
+    if max_asym > max_fold_asym_deg:
         raise ValueError(
             f"Fold symmetry check failed: max lat asymmetry = {max_asym:.3f} deg "
             f"at j={fold_j}. This may not be a standard NEMO T-fold grid."
@@ -147,7 +157,7 @@ def _detect_fold(
     dlat = jnp.diff(lat_col)
     median_dlat = jnp.median(dlat[:n_lat // 2])  # use southern half
     deviation = jnp.abs(dlat - median_dlat) / jnp.abs(median_dlat)
-    cap_candidates = jnp.where(deviation > 0.1, size=n_lat - 1)
+    cap_candidates = jnp.where(deviation > cap_dlat_rel_deviation, size=n_lat - 1)
     if len(cap_candidates[0]) > 0:
         cap_j = int(cap_candidates[0][0])
     else:
@@ -475,6 +485,8 @@ def create_synthetic_tripole(
 
 def download_orca1_grid(
     dest_dir: str | Path = "data/grids",
+    *,
+    connect_timeout_s: float = 30.0,
 ) -> Path:
     """Download the eORCA1 mesh_mask from Zenodo.
 
@@ -482,12 +494,17 @@ def download_orca1_grid(
     ----------
     dest_dir : str or Path
         Directory to save the file.
+    connect_timeout_s : float, default 30.0
+        Socket connect/read timeout in seconds. Prevents an unreachable
+        Zenodo mirror from hanging the caller indefinitely.
 
     Returns
     -------
     Path
         Path to the downloaded ``eORCA1.2_mesh_mask.nc`` file.
     """
+    import shutil
+    import socket
     import urllib.request
 
     dest = Path(dest_dir)
@@ -503,6 +520,20 @@ def download_orca1_grid(
         "eORCA1.2_mesh_mask.nc?download=1"
     )
     print(f"Downloading eORCA1 mesh_mask (~484 MB) to {filepath}...")
-    urllib.request.urlretrieve(url, filepath)
+    # Stream to a temp file and rename on success so a partial download
+    # does not masquerade as a finished grid file on disk.
+    tmp_path = filepath.with_suffix(filepath.suffix + ".part")
+    try:
+        with urllib.request.urlopen(url, timeout=connect_timeout_s) as response, \
+                open(tmp_path, "wb") as fout:
+            shutil.copyfileobj(response, fout)
+    except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise RuntimeError(
+            f"Failed to download eORCA1 mesh_mask from {url}: {e}. "
+            f"Increase connect_timeout_s or download manually to {filepath}."
+        ) from e
+    tmp_path.rename(filepath)
     print(f"Download complete: {filepath}")
     return filepath
