@@ -164,7 +164,8 @@ def _extract_state(setup, *, capture_vars: tuple[str, ...]) -> dict[str, np.ndar
 def _extract_grid_metadata(setup) -> dict[str, Any]:
     out: dict[str, Any] = {}
     variables = setup.state.variables
-    for name in ("xt", "xu", "yt", "yu", "zt", "zw", "maskT", "maskU", "maskV"):
+    for name in ("xt", "xu", "yt", "yu", "zt", "zw", "dxt", "dyt", "dzt",
+                 "maskT", "maskU", "maskV"):
         value = getattr(variables, name, None)
         if value is not None:
             out[name] = np.asarray(value)

@@ -30,6 +30,8 @@ def test_available_cases_includes_implemented_adapters(isolated_cache):
     assert "global_overturning" in cases
     assert "lock_exchange" in cases
     assert "overflow" in cases
+    assert "eady_uniform" in cases
+    assert "dino" in cases
 
 
 def test_lock_exchange_factory_returns_setup_with_target_runlen(isolated_cache):
@@ -57,6 +59,64 @@ def test_overflow_geometry_has_shelf_slope_abyss():
     assert overflow.SHELF_DEPTH_M < overflow.ABYSS_DEPTH_M
     assert overflow.SHELF_X_END_M < overflow.SLOPE_X_END_M
     assert overflow.DOMAIN_LZ_M == overflow.ABYSS_DEPTH_M
+
+
+def test_eady_uniform_factory_returns_setup_with_target_runlen(isolated_cache):
+    from legoesm.ocean.fidelity.veros_configs import eady_uniform
+    setup = eady_uniform.make_setup(runlen_s=21.0)
+    assert setup._legoesm_target_runlen_s == 21.0
+
+
+def test_eady_uniform_constants_match_channel_geometry():
+    from legoesm.ocean.fidelity.veros_configs import eady_uniform
+    assert eady_uniform.LAT_SOUTH_DEG < eady_uniform.LAT_CENTER_DEG
+    assert eady_uniform.LAT_CENTER_DEG < eady_uniform.LAT_NORTH_DEG
+    assert eady_uniform.LON_WEST_DEG < eady_uniform.LON_EAST_DEG
+    # Thermal wind sets dT/dy < 0 on the warm side, so the meridional T
+    # gradient must be negative for the chosen U_surface.
+    assert eady_uniform._dT_dy() < 0.0
+    # And N^2 > 0 implies dT/dz > 0 under the linear EOS used by Veros.
+    assert eady_uniform._dT_dz() > 0.0
+
+
+def test_dino_factory_returns_setup_with_target_runlen(isolated_cache):
+    from legoesm.ocean.fidelity.veros_configs import dino
+    setup = dino.make_setup(runlen_s=84.0, nx=20, ny=40, nz=12)
+    assert setup._legoesm_target_runlen_s == 84.0
+
+
+def test_dino_constants_match_paper_geometry():
+    from legoesm.ocean.fidelity.veros_configs import dino
+    assert dino.LAT_MAX_DEG == 70.0
+    assert dino.CHANNEL_LAT_SOUTH_DEG == -65.0
+    assert dino.CHANNEL_LAT_NORTH_DEG == -45.0
+    assert dino.H_DEEP_M > dino.H_SHALLOW_M
+    assert len(dino.WIND_TAU_LATS_DEG) == len(dino.WIND_TAU_VALUES)
+    # Paper Table 2 R1 defaults
+    assert dino.NX_DEFAULT == 50
+    assert dino.NY_DEFAULT == 140
+    assert dino.NZ_DEFAULT == 36
+
+
+def test_dino_wind_stress_matches_knots():
+    import numpy as np
+    from legoesm.ocean.fidelity.veros_configs import dino
+    lats = np.asarray(dino.WIND_TAU_LATS_DEG)
+    tau = dino._wind_stress(lats, np)
+    np.testing.assert_allclose(tau, dino.WIND_TAU_VALUES, atol=1e-12)
+
+
+def test_dino_t_star_endpoints():
+    import numpy as np
+    from legoesm.ocean.fidelity.veros_configs import dino
+    # cos(pi*70/140) = 0 -> T_star(+/- LAT_MAX) collapses to T_STAR_N/S.
+    assert dino._T_star(np.asarray(70.0), np) == pytest.approx(dino.T_STAR_N)
+    assert dino._T_star(np.asarray(-70.0), np) == pytest.approx(dino.T_STAR_S)
+    # At the equator the cos profile peaks: T_star(0) == T_STAR_EQ on the
+    # northern side (lat=0 hits the lat<=0 branch -> southern profile;
+    # both branches share the equatorial value, so this checks the n side
+    # explicitly via a tiny positive offset).
+    assert dino._T_star(np.asarray(1e-6), np) == pytest.approx(dino.T_STAR_EQ, abs=1e-3)
 
 
 def test_unknown_case_raises_value_error(isolated_cache):
@@ -192,6 +252,51 @@ def test_overflow_smoke_run_produces_realistic_field(isolated_cache):
     # Cold (5°C) shelf water present; warm (20°C) abyssal water present.
     assert float(temp.min()) < 6.0
     assert float(temp.max()) > 19.0
+
+
+@pytest.mark.slow
+def test_eady_uniform_smoke_run(isolated_cache):
+    """Eady channel runs for a couple of timesteps and produces finite u/T.
+
+    The full Eady growth-rate diagnostic lives in a fidelity-tier test; here
+    we only assert the setup integrates without crashing and that the
+    initial shear has been applied (|u|max > 0).
+    """
+    runner = _import_runner_module()
+    # Two momentum timesteps of the default dt_mom (1800 s) -> 1 hour.
+    result = runner.run_veros(
+        "eady_uniform", runlen_s=3600.0, force_recompute=True,
+    )
+    assert result.case_name == "eady_uniform"
+    temp = result.variables["temp"]
+    u = result.variables["u"]
+    assert np.isfinite(temp).all()
+    assert np.isfinite(u).all()
+    assert float(np.abs(u).max()) > 0.0
+
+
+@pytest.mark.slow
+def test_dino_smoke_run(isolated_cache):
+    """DINO basin integrates a couple of timesteps on a coarsened grid.
+
+    Uses the smallest grid that still exercises the bathymetry, channel
+    seam, and surface-forcing code paths (nx=20 lon, ny=40 lat, nz=12).
+    """
+    runner = _import_runner_module()
+    result = runner.run_veros(
+        "dino", runlen_s=2700.0 * 2,
+        force_recompute=True,
+        factory_kwargs={"nx": 20, "ny": 40, "nz": 12},
+    )
+    assert result.case_name == "dino"
+    temp = result.variables["temp"]
+    salt = result.variables["salt"]
+    taux = result.variables["surface_taux"]
+    assert np.isfinite(temp).all()
+    assert np.isfinite(salt).all()
+    # Wind stress profile spans the paper's [-0.1, 0.2] N/m^2 range.
+    assert float(taux.min()) < -0.05
+    assert float(taux.max()) > 0.05
 
 
 @pytest.mark.slow
