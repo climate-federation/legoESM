@@ -165,6 +165,9 @@ class ExperimentConfig(NamedTuple):
     sbm_RH_ref: float = 0.7
     sbm_cape_threshold: float = 70.0
     sundqvist_auto_rate: float = 1e-3      # Sundqvist autoconversion rate [1/s]
+    sundqvist_evap_coeff: float = 5e-4     # Sundqvist sub-cloud rain evaporation coeff
+    cloud_rh_crit: float = 0.7             # cloud-fraction critical RH (CloudConfig)
+    cloud_r_eff_liq: float = 10.0e-6       # cloud droplet effective radius [m]
     sigma_b: float = 0.7
     k_BL_max_per_day: float = 1.0
     k_free_per_day: float = 0.1
@@ -420,6 +423,9 @@ class ExperimentConfig(NamedTuple):
             tau_pole=amip_cfg.tau_pole,
             tau_moist_coeff=getattr(amip_cfg, 'tau_moist_coeff', 0.0115),
             sundqvist_auto_rate=getattr(amip_cfg, 'sundqvist_auto_rate', 1e-3),
+            sundqvist_evap_coeff=getattr(amip_cfg, 'sundqvist_evap_coeff', 5e-4),
+            cloud_rh_crit=getattr(amip_cfg, 'cloud_rh_crit', 0.7),
+            cloud_r_eff_liq=getattr(amip_cfg, 'cloud_r_eff_liq', 10.0e-6),
             sbm_tau_c=amip_cfg.sbm_tau_c,
             sbm_RH_ref=amip_cfg.sbm_RH_ref,
             sbm_cape_threshold=getattr(amip_cfg, 'sbm_cape_threshold', 70.0),
@@ -524,6 +530,9 @@ class ExperimentConfig(NamedTuple):
             tau_pole=self.tau_pole,
             tau_moist_coeff=getattr(self, 'tau_moist_coeff', 0.0115),
             sundqvist_auto_rate=getattr(self, 'sundqvist_auto_rate', 1e-3),
+            sundqvist_evap_coeff=getattr(self, 'sundqvist_evap_coeff', 5e-4),
+            cloud_rh_crit=getattr(self, 'cloud_rh_crit', 0.7),
+            cloud_r_eff_liq=getattr(self, 'cloud_r_eff_liq', 10.0e-6),
             sbm_tau_c=self.sbm_tau_c,
             sbm_RH_ref=self.sbm_RH_ref,
             sbm_cape_threshold=self.sbm_cape_threshold,

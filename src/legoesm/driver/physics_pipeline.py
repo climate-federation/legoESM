@@ -158,7 +158,9 @@ class PhysicsPipeline:
                             lat, dt, dT_dt_rad, sw_net_sfc, lw_net_sfc,
                             sw_up_toa, lw_up_toa, sw_down_toa,
                             sbm_tau_c=None, sbm_RH_ref=None,
+                            sbm_cape_threshold=None,
                             sundqvist_auto_rate=None,
+                            sundqvist_evap_coeff=None,
                             C_H=None, C_E=None,
                             q_i=None, q_s=None, q_g=None,
                             N_c=None, N_r=None, N_i=None):
@@ -199,6 +201,9 @@ class PhysicsPipeline:
             _conv_cfg = _conv_cfg._replace(tau_c=sbm_tau_c)
         if sbm_RH_ref is not None and _conv_cfg is not None and hasattr(_conv_cfg, 'RH_ref'):
             _conv_cfg = _conv_cfg._replace(RH_ref=sbm_RH_ref)
+        if (sbm_cape_threshold is not None and _conv_cfg is not None
+                and hasattr(_conv_cfg, 'CAPE_threshold')):
+            _conv_cfg = _conv_cfg._replace(CAPE_threshold=sbm_cape_threshold)
 
         # Microphysics config: override the autoconversion rate with the
         # traced ``sundqvist_auto_rate`` when supplied.  Only the Sundqvist
@@ -207,6 +212,9 @@ class PhysicsPipeline:
         if (sundqvist_auto_rate is not None and _micro_cfg is not None
                 and hasattr(_micro_cfg, 'auto_rate')):
             _micro_cfg = _micro_cfg._replace(auto_rate=sundqvist_auto_rate)
+        if (sundqvist_evap_coeff is not None and _micro_cfg is not None
+                and hasattr(_micro_cfg, 'evap_coeff')):
+            _micro_cfg = _micro_cfg._replace(evap_coeff=sundqvist_evap_coeff)
 
         if conv_prog is None:
             if _conv_cfg is not None and hasattr(_conv_cfg, 'M_c_init'):
@@ -487,7 +495,7 @@ class PhysicsPipeline:
                                albedo_ice=None, albedo_ocean=None,
                                ghg_vmr_override=None,
                                q_c=None, q_r=None,
-                               cloud_scheme="none"):
+                               cloud_scheme="none", cloud_cfg_overrides=None):
         """Compute radiation tendencies and fluxes (pure JAX, no I/O).
 
         Returns (dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa, lw_up_toa,
@@ -529,7 +537,11 @@ class PhysicsPipeline:
             dp_col = p_half_col[:, 1:] - p_half_col[:, :-1]
             q_c_col = ad.flatten_3d(q_c)
             q_i_col = None
-            cloud_config = CloudConfig(scheme=cloud_scheme)
+            # Traced cloud-config overrides (rh_crit, r_eff_liq, ...) injected
+            # by the calibration; empty dict for a normal run -> defaults.
+            cloud_config = CloudConfig(
+                scheme=cloud_scheme, **(cloud_cfg_overrides or {})
+            )
             cloud_props = compute_cloud_properties(
                 T=T_col, p_full=p_full_col, q_v=q_v_col, dp=dp_col,
                 config=cloud_config, q_cloud=q_c_col, q_ice=q_i_col,
@@ -590,11 +602,14 @@ class PhysicsPipeline:
                          held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                          tau_equator=None, tau_pole=None, tau_moist_coeff=None,
                          sbm_tau_c=None, sbm_RH_ref=None,
+                         sbm_cape_threshold=None,
                          sundqvist_auto_rate=None,
+                         sundqvist_evap_coeff=None,
                          C_H=pipeline.C_H, C_E=pipeline.C_E,
                          albedo_ice=pipeline.albedo_ice,
                          albedo_ocean=pipeline.albedo_ocean,
-                         ghg_vmr_override=None):
+                         ghg_vmr_override=None,
+                         cloud_cfg_overrides=None):
 
             def _rad_branch(args):
                 (T, p_s, q_v, q_c, q_r, q_i, N_i, conv_prog, u, v, sst, sic, lat, lon,
@@ -605,7 +620,8 @@ class PhysicsPipeline:
                  tau_equator, tau_pole, tau_moist_coeff, sbm_tau_c, sbm_RH_ref,
                  sundqvist_auto_rate,
                  C_H, C_E, albedo_ice, albedo_ocean,
-                 ghg_vmr_override) = args
+                 ghg_vmr_override, cloud_cfg_overrides,
+                 sbm_cape_threshold, sundqvist_evap_coeff) = args
 
                 (dT_dt_rad, sw_net_sfc, lw_net_sfc,
                  sw_up_toa, lw_up_toa, sw_down_toa) = \
@@ -619,6 +635,7 @@ class PhysicsPipeline:
                         ghg_vmr_override=ghg_vmr_override,
                         q_c=q_c,
                         cloud_scheme=pipeline._cloud_scheme,
+                        cloud_cfg_overrides=cloud_cfg_overrides,
                     )
 
                 physics_out = pipeline.physics_step_no_rad(
@@ -626,7 +643,9 @@ class PhysicsPipeline:
                     dT_dt_rad, sw_net_sfc, lw_net_sfc,
                     sw_up_toa, lw_up_toa, sw_down_toa,
                     sbm_tau_c=sbm_tau_c, sbm_RH_ref=sbm_RH_ref,
+                    sbm_cape_threshold=sbm_cape_threshold,
                     sundqvist_auto_rate=sundqvist_auto_rate,
+                    sundqvist_evap_coeff=sundqvist_evap_coeff,
                     C_H=C_H, C_E=C_E,
                     q_i=q_i, N_i=N_i,
                 )
@@ -651,14 +670,17 @@ class PhysicsPipeline:
                  tau_equator, tau_pole, tau_moist_coeff, sbm_tau_c, sbm_RH_ref,
                  sundqvist_auto_rate,
                  C_H, C_E, albedo_ice, albedo_ocean,
-                 ghg_vmr_override) = args
+                 ghg_vmr_override, cloud_cfg_overrides,
+                 sbm_cape_threshold, sundqvist_evap_coeff) = args
 
                 physics_out = pipeline.physics_step_no_rad(
                     T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, dt,
                     held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                     sbm_tau_c=sbm_tau_c, sbm_RH_ref=sbm_RH_ref,
+                    sbm_cape_threshold=sbm_cape_threshold,
                     sundqvist_auto_rate=sundqvist_auto_rate,
+                    sundqvist_evap_coeff=sundqvist_evap_coeff,
                     C_H=C_H, C_E=C_E,
                     q_i=q_i, N_i=N_i,
                 )
@@ -682,7 +704,8 @@ class PhysicsPipeline:
                     tau_equator, tau_pole, tau_moist_coeff, sbm_tau_c, sbm_RH_ref,
                     sundqvist_auto_rate,
                     C_H, C_E, albedo_ice, albedo_ocean,
-                    ghg_vmr_override)
+                    ghg_vmr_override, cloud_cfg_overrides,
+                    sbm_cape_threshold, sundqvist_evap_coeff)
 
             return jax.lax.cond(need_rad, _rad_branch, _no_rad_branch, args)
 
@@ -977,6 +1000,10 @@ def _resolve_microphysics(config):
             and hasattr(config, 'sundqvist_auto_rate')):
         micro_config = micro_config._replace(
             auto_rate=config.sundqvist_auto_rate)
+    if (scheme == "sundqvist" and hasattr(micro_config, 'evap_coeff')
+            and hasattr(config, 'sundqvist_evap_coeff')):
+        micro_config = micro_config._replace(
+            evap_coeff=config.sundqvist_evap_coeff)
 
     return micro_fn, micro_config
 

@@ -172,6 +172,69 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
             "more cloud water retained. Sundqvist et al. (1989)."
         ),
     ),
+    "cloud_rh_crit": TuningParameter(
+        name="cloud_rh_crit",
+        default=0.7,
+        min_val=0.5,
+        max_val=0.95,
+        units="1",
+        description="Critical relative humidity for cloud onset",
+        category="radiation",
+        sensitivity="high",
+        notes=(
+            "Sundqvist cloud-fraction threshold: cloud fraction = "
+            "clamp((RH - rh_crit)/(1 - rh_crit), 0, 1). Higher = less cloud "
+            "cover, higher OSR/OLR. The primary cloud-amount knob."
+        ),
+    ),
+    "cloud_r_eff_liq": TuningParameter(
+        name="cloud_r_eff_liq",
+        default=10.0e-6,
+        min_val=4.0e-6,
+        max_val=20.0e-6,
+        units="m",
+        description="Cloud liquid droplet effective radius",
+        category="radiation",
+        sensitivity="high",
+        notes=(
+            "Sets cloud shortwave optical thickness (tau ~ LWP / r_eff). "
+            "Smaller droplets => optically thicker, brighter clouds => "
+            "higher OSR. Genuinely uncertain (depends on CCN / aerosol)."
+        ),
+    ),
+    "sundqvist_evap_coeff": TuningParameter(
+        name="sundqvist_evap_coeff",
+        default=5e-4,
+        min_val=1e-4,
+        max_val=2e-3,
+        units="1",
+        description="Sundqvist sub-cloud rain evaporation coefficient",
+        category="convection",
+        sensitivity="high",
+        notes=(
+            "Rate at which falling rain re-evaporates in subsaturated "
+            "layers: evap = evap_coeff * subsaturation * P_total. Higher "
+            "= more rain lost to evaporation, drier surface precip and "
+            "moister mid-troposphere; lower = more rain reaches the "
+            "surface. Sundqvist et al. (1989)."
+        ),
+    ),
+    "sbm_cape_threshold": TuningParameter(
+        name="sbm_cape_threshold",
+        default=70.0,
+        min_val=0.0,
+        max_val=200.0,
+        units="J/kg",
+        description="Minimum CAPE to trigger SBM convection",
+        category="convection",
+        sensitivity="high",
+        notes=(
+            "Columns with CAPE below this are gated off via a smooth "
+            "sigmoid trigger. Higher = convection fires less readily, "
+            "fewer/weaker convective columns; lower = more widespread "
+            "convection."
+        ),
+    ),
 
     # -- Diffusion / turbulence -----------------------------------------
     "k_free_per_day": TuningParameter(

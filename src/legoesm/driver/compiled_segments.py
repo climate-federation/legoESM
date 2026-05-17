@@ -384,12 +384,15 @@ def build_segment_fn(
     tau_moist_coeff=None,
     sbm_tau_c=None,
     sbm_RH_ref=None,
+    sbm_cape_threshold=None,
     sundqvist_auto_rate=None,
+    sundqvist_evap_coeff=None,
     C_H=None,
     C_E=None,
     albedo_ice=None,
     albedo_ocean=None,
     ghg_vmr_override=None,
+    cloud_cfg_overrides=None,
     owned_face_ids=None,
     hs_newtonian_relax=None,
 ):
@@ -471,9 +474,23 @@ def build_segment_fn(
     )
     _sbm_tau_c = jnp.asarray(sbm_tau_c) if sbm_tau_c is not None else None
     _sbm_RH_ref = jnp.asarray(sbm_RH_ref) if sbm_RH_ref is not None else None
+    _sbm_cape_threshold = (
+        jnp.asarray(sbm_cape_threshold)
+        if sbm_cape_threshold is not None else None
+    )
     _sundqvist_auto_rate = (
         jnp.asarray(sundqvist_auto_rate)
         if sundqvist_auto_rate is not None else None
+    )
+    _sundqvist_evap_coeff = (
+        jnp.asarray(sundqvist_evap_coeff)
+        if sundqvist_evap_coeff is not None else None
+    )
+    # Cloud-config overrides: a dict of traced scalars (rh_crit, r_eff_liq, ...)
+    # or None.  jax.tree.map converts each leaf to a JAX array.
+    _cloud_cfg_overrides = (
+        jax.tree.map(jnp.asarray, cloud_cfg_overrides)
+        if cloud_cfg_overrides else None
     )
     _C_H = jnp.asarray(C_H) if C_H is not None else None
     _C_E = jnp.asarray(C_E) if C_E is not None else None
@@ -593,10 +610,13 @@ def build_segment_fn(
                     tau_equator=_tau_equator, tau_pole=_tau_pole,
                     tau_moist_coeff=_tau_moist_coeff,
                     sbm_tau_c=_sbm_tau_c, sbm_RH_ref=_sbm_RH_ref,
+                    sbm_cape_threshold=_sbm_cape_threshold,
                     sundqvist_auto_rate=_sundqvist_auto_rate,
+                    sundqvist_evap_coeff=_sundqvist_evap_coeff,
                     C_H=_C_H, C_E=_C_E,
                     albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
                     ghg_vmr_override=_ghg_vmr_override,
+                    cloud_cfg_overrides=_cloud_cfg_overrides,
                 )
 
                 # Write physics tendencies back at owned indices.
@@ -658,10 +678,13 @@ def build_segment_fn(
                     tau_equator=_tau_equator, tau_pole=_tau_pole,
                     tau_moist_coeff=_tau_moist_coeff,
                     sbm_tau_c=_sbm_tau_c, sbm_RH_ref=_sbm_RH_ref,
+                    sbm_cape_threshold=_sbm_cape_threshold,
                     sundqvist_auto_rate=_sundqvist_auto_rate,
+                    sundqvist_evap_coeff=_sundqvist_evap_coeff,
                     C_H=_C_H, C_E=_C_E,
                     albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
                     ghg_vmr_override=_ghg_vmr_override,
+                    cloud_cfg_overrides=_cloud_cfg_overrides,
                 )
 
                 # --- State update ---
