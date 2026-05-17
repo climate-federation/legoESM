@@ -111,6 +111,16 @@ class OceanConfig(NamedTuple):
     fix_volume: bool = True
     fix_heat: bool = True
     fix_salt: bool = True
+    # Bottom drag (mirror of LatLonCGridOceanConfig). ``bottom_drag_r > 0``
+    # enables linear drag ``du/dt|_drag = -r*u/h_bot`` on the bottom
+    # cell; setting ``bottom_drag_bg_velocity > 0`` lifts it to the
+    # MOM6 quadratic-with-floor form. ``bottom_drag_bbl_thickness > 0``
+    # spreads the drag over a fixed Ekman thickness (Killworth &
+    # Edwards 1999) instead of dumping it into a possibly very thin
+    # partial cell.
+    bottom_drag_r: float = 0.0
+    bottom_drag_bg_velocity: float = 0.0
+    bottom_drag_bbl_thickness: float = 0.0
     # 2-D Laplacian damping used in barotropic subcycling.
     # Per-substep coefficient is alpha * (dt_s / dt_ref) * area * laplacian(...),
     # so the damping is explicitly dt-scaled and tunable.
