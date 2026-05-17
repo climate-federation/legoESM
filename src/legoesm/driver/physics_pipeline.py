@@ -546,12 +546,26 @@ class PhysicsPipeline:
                 T=T_col, p_full=p_full_col, q_v=q_v_col, dp=dp_col,
                 config=cloud_config, q_cloud=q_c_col, q_ice=q_i_col,
             )
+            # NB: cloud_fraction is deliberately NOT forwarded to RRTMG.
+            # compute_cloud_properties returns GRID-MEAN water paths
+            # (lwp = q_c * dp / g, with q_c the grid-mean prognostic cloud
+            # water), which already carry the partial-coverage discount
+            # LWP_grid = cf * LWP_in-cloud.  RRTMG's optics, however,
+            # multiplies the cloud optical depth by cloud_fraction again
+            # ("scale cloud optical depth by cloud fraction for partial
+            # coverage", optics.py) — that scaling expects IN-CLOUD paths.
+            # Passing grid-mean LWP *and* cloud_fraction double-counts the
+            # discount: tau_used = cf**2 * tau_in-cloud instead of
+            # cf * tau_in-cloud, making clouds ~cf x too optically thin in
+            # both SW and LW (=> OSR too low, OLR too high).  Since tau is
+            # linear in LWP, "grid-mean LWP, no cf scaling" is identical to
+            # the correct "in-cloud LWP, x cf scaling"; omitting
+            # cloud_fraction gives RRTMG the right grid-mean optical depth.
             cloud_kwargs = {
                 "cloud_path_liq": cloud_props.lwp,
                 "cloud_path_ice": cloud_props.iwp,
                 "cloud_r_eff_liq": cloud_props.r_eff_liq,
                 "cloud_r_eff_ice": cloud_props.r_eff_ice,
-                "cloud_fraction": cloud_props.cloud_fraction,
             }
 
         rad_out = self.radiation_fn(
