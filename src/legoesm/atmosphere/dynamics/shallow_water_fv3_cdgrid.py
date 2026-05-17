@@ -507,6 +507,114 @@ def iter1009_dual_target_config(
     )
 
 
+# ---------------------------------------------------------------------------
+# Resolution-scaling helpers used by both the production matrix runner and
+# the ``legoesm test williamson`` CLI.  Iter-1030 calibration values; matching
+# constants in ``scripts/run_atmosphere_test_matrix.py`` (``_hyperdiff_cube``,
+# ``_div_damp_cube``) and ``tests/test_iter921_w2_v_vs_h_pareto_sentinel.py``
+# (``_div_damp_cube``) must stay in sync — these are the single source of
+# truth and the script-local mirrors should defer to these helpers.
+# ---------------------------------------------------------------------------
+
+
+def _validate_cube_resolution(n: int) -> int:
+    import operator
+    if isinstance(n, bool):
+        raise ValueError(
+            f"cubed-sphere resolution `n` must be a positive integer, "
+            f"got {n!r}"
+        )
+    try:
+        n_int = operator.index(n)
+    except TypeError:
+        raise ValueError(
+            f"cubed-sphere resolution `n` must be a positive integer, "
+            f"got {n!r}"
+        ) from None
+    if n_int <= 0:
+        raise ValueError(
+            f"cubed-sphere resolution `n` must be a positive integer, "
+            f"got {n!r}"
+        )
+    return n_int
+
+
+def cdgrid_hyperdiff_cube(
+    n: int, ref_n: int = 48, ref_coeff: float = 1.0e16,
+) -> float:
+    """Biharmonic hyperdiffusion coefficient [m^4/s] for a C-N cubed-sphere
+    grid, scaled with ``(ref_n/n)^4`` to keep ``hyperdiff_coeff * dx^-4``
+    constant across resolutions.
+
+    Default ``ref_n=48``, ``ref_coeff=1e16`` is the iter-1030 calibration
+    (validated at C36/C48/C72 in the matrix runner — see
+    ``scripts/run_atmosphere_test_matrix.py`` and the ``new_test_dycores``
+    log).  Reuse this helper rather than re-deriving ``1e16``/``ref_n``
+    inline.
+    """
+    n_int = _validate_cube_resolution(n)
+    return ref_coeff * (ref_n / n_int) ** 4
+
+
+def cdgrid_div_damp_cube(
+    n: int, ref_n: int = 48, ref_coeff: float = 1.5e7,
+) -> float:
+    """Base divergence-damping coefficient for a cubed-sphere C-D grid,
+    scaled with ``(ref_n/n)^2`` (FV3-style; see ``d_sw5`` corner damping).
+    Iter-1030 calibration value ``1.5e7`` at C48.
+
+    The validated dual-target preset ``iter1009_dual_target_config`` uses
+    ``8.0 * cdgrid_div_damp_cube(n)`` at C36; the
+    ``williamson_cli_calibration`` preset below uses ``2.0 *`` to stay
+    stable at C24 and C48 (the 8× factor is C36-specific and overshoots
+    at C48 — see iter1009 docstring).
+    """
+    n_int = _validate_cube_resolution(n)
+    return ref_coeff * (ref_n / n_int) ** 2
+
+
+def williamson_cli_calibration(
+    n: int,
+    div_damp_factor: float = 2.0,
+) -> CDGridShallowWaterConfig:
+    """Pre-built ``CDGridShallowWaterConfig`` for the
+    ``legoesm test williamson`` CLI (#269).
+
+    Differences from ``iter1009_dual_target_config`` (which targets C36
+    dual W2/W5 acceptance and is unstable at C48 with its 8×
+    divergence-damping factor):
+      * Uses ``cdgrid_hyperdiff_cube(n)`` (= iter-1030 calibration) by
+        default so the height/v-wind edge artifacts that motivated #269
+        get the production-quality diffusion bound — the prior CLI used
+        a heuristic ``1e-4 * mean_dx**4 / dt`` that under-damped at C48.
+      * Uses a gentler 2× ``cdgrid_div_damp_cube(n)`` so the CLI stays
+        stable at C24/C48 (8× blows up W5 day-5 at C48, per the
+        ``iter1009_dual_target_config`` docstring caveat).
+
+    Other flags match ``iter1009_dual_target_config``:
+      ``damp_v=0.030``, ``nord_v=2``, ``boundary_fix=True``,
+      ``apply_fortran_xppm_boundary=True``, ``use_conservation_fixer=True``.
+
+    Parameters
+    ----------
+    n : int
+        Cubed-sphere face cells per side.
+    div_damp_factor : float, default 2.0
+        Multiplier on ``cdgrid_div_damp_cube(n)``.  Lower = looser
+        damping (more accurate, less robust); higher = more damping
+        (cleaner artifacts, may blow up at coarse/fine resolution).
+    """
+    return CDGridShallowWaterConfig(
+        hyperdiff_coeff=cdgrid_hyperdiff_cube(n),
+        div_damp=div_damp_factor * cdgrid_div_damp_cube(n),
+        damp_v=0.030,
+        nord_v=2,
+        boundary_fix=True,
+        apply_fortran_xppm_boundary=True,
+        use_conservation_fixer=True,
+    )
+
+
 # ==============================================================================
 # Tendencies
 # ==============================================================================
