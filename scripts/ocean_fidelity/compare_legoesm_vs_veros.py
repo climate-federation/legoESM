@@ -290,9 +290,16 @@ def _legoesm_latlon_cell_views(state, grid, z_coord, with_salt: bool):
 def _legoesm_mpas_cell_views(state, mesh, z_coord, with_salt: bool):
     """Reduce an MPAS state to (Ncols, Nz) cell-centred arrays.
 
-    ``u_cell`` and ``|u|^2_cell`` are reconstructed by averaging over the
-    wet edges of each cell. This keeps the means comparable to the
-    Veros side's collocated-velocity reduction.
+    The edge-normal velocity ``u_edge = u_x·cos(angleEdge) + u_y·sin(angleEdge)``.
+    Projecting onto the local east/north basis via a least-squares fit
+    on each cell's wet edges recovers the true cell-centred (u_x, u_y).
+    For an isotropically-sampled hexagonal stencil this reduces to
+
+      u_x_cell = (2 / n_wet) · Σ_e (u_edge · cos(angleEdge_e))
+      u_y_cell = (2 / n_wet) · Σ_e (u_edge · sin(angleEdge_e))
+
+    which preserves the magnitude of zonal flows (e.g., the Eady jet) —
+    plain ``mean(u_edge)`` underestimates it by ``⟨cos(angleEdge)⟩ ≈ 1/2``.
     """
     T = np.asarray(state.T.data, dtype=np.float64)
     u_edge = np.asarray(state.u.data, dtype=np.float64)
@@ -300,28 +307,40 @@ def _legoesm_mpas_cell_views(state, mesh, z_coord, with_salt: bool):
     nCells, n_z = T.shape
     cellsOnEdge = np.asarray(mesh.cellsOnEdge, dtype=np.int64)
     edgesOnCell = np.asarray(mesh.edgesOnCell, dtype=np.int64)
+    angleEdge = np.asarray(mesh.angleEdge, dtype=np.float64)
     areaCell = np.asarray(mesh.areaCell, dtype=np.float64)
     dz = np.asarray(z_coord.dz_ref, dtype=np.float64)
     c1 = cellsOnEdge[0, :]
     c2 = cellsOnEdge[1, :]
     edge_wet = ((mask[c1] > 0.5) & (mask[c2] > 0.5)).astype(np.float64)
     u_edge_masked = u_edge * edge_wet[:, None]
-    u_sq_edge_masked = (u_edge_masked ** 2)
-    # For each cell, average over its wet edges. edgesOnCell shape
-    # (maxEdges, nCells); pad with -1 sentinels for cells with fewer
-    # edges, so we clip indices and zero those contributions via
-    # edge_wet masking.
-    maxEdges = edgesOnCell.shape[0]
+    cos_e = np.cos(angleEdge)
+    sin_e = np.sin(angleEdge)
+
     edge_idx = np.where(edgesOnCell >= 0, edgesOnCell, 0)            # (maxEdges, nCells)
     valid = (edgesOnCell >= 0).astype(np.float64)
-    u_gather = u_edge_masked[edge_idx]                               # (maxEdges, nCells, n_z)
-    usq_gather = u_sq_edge_masked[edge_idx]
-    valid_3d = valid[..., None]
-    n_wet_edges = np.maximum(
-        (valid * edge_wet[edge_idx]).sum(axis=0), 1e-12,
-    )
-    u_cell = (u_gather * valid_3d).sum(axis=0) / n_wet_edges[..., None]
-    usq_cell = (usq_gather * valid_3d).sum(axis=0) / n_wet_edges[..., None]
+    contrib = valid * edge_wet[edge_idx]                              # (maxEdges, nCells)
+    u_gather = u_edge_masked[edge_idx]                                # (maxEdges, nCells, n_z)
+    cos_gather = cos_e[edge_idx]                                      # (maxEdges, nCells)
+    sin_gather = sin_e[edge_idx]
+    # Per-cell weighted least-squares fit recovering (u_x, u_y) from
+    # the wet-edge normal projections ``u_e ≈ u_x cos α_e + u_y sin α_e``:
+    #   [Σ cos²     Σ cos·sin] [u_x]   [Σ u_e · cos α_e]
+    #   [Σ cos·sin  Σ sin²   ] [u_y] = [Σ u_e · sin α_e]
+    # Dry edges contribute zero weight; cells with <2 wet edges fall
+    # back to (0, 0) via the determinant guard.
+    A = (cos_gather ** 2 * contrib).sum(axis=0)                       # (nCells,)
+    B = (cos_gather * sin_gather * contrib).sum(axis=0)
+    C = (sin_gather ** 2 * contrib).sum(axis=0)
+    rhs_x = (u_gather * (cos_gather * contrib)[..., None]).sum(axis=0)  # (nCells, n_z)
+    rhs_y = (u_gather * (sin_gather * contrib)[..., None]).sum(axis=0)
+    det = A * C - B ** 2
+    safe = det > 1e-12
+    inv_det = np.where(safe, 1.0 / np.where(safe, det, 1.0), 0.0)[..., None]
+    u_x_cell = (C[..., None] * rhs_x - B[..., None] * rhs_y) * inv_det
+    u_y_cell = (A[..., None] * rhs_y - B[..., None] * rhs_x) * inv_det
+    u_cell = u_x_cell                                                 # scalar zonal proxy
+    usq_cell = u_x_cell ** 2 + u_y_cell ** 2                          # true |u|^2
 
     w = (areaCell[:, None] * dz[None, :] * mask[:, None]).astype(np.float64)
     dz_col = (dz[None, :] * mask[:, None]).sum(axis=1)
