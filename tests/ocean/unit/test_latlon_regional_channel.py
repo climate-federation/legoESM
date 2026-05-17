@@ -57,6 +57,17 @@ def test_lock_exchange_test_matrix_includes_latlon_regional_entry():
     assert kw["A_h"] == 0.0
     assert kw["A_v"] == 0.0
     assert kw["bottom_drag_r"] == 0.0
+    # Free-surface diffusion / semi-implicit barotropic must be disabled
+    # so the gravity-current signal is not damped before the comparison.
+    assert kw["barotropic_diffusion_alpha"] == 0.0
+    assert kw["bebt"] == 0.0
+    assert kw["barotropic_time_filter"] == "box"
+    assert kw["n_barotropic_substeps"] == 1
+    # Linear EOS matching the Veros peer (eq_of_state_type = 1).
+    assert kw["eos"] == "linear"
+    assert kw["alpha_T"] == 2.0e-4
+    assert kw["beta_S"] == 0.0
+    assert kw["T_ref"] == 17.5
     # ~64 km zonal, ~4 km meridional, centred on the equator
     assert kw["lon_east"] - kw["lon_west"] > 0.5
     assert kw["lat_north"] - kw["lat_south"] < 0.05

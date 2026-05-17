@@ -352,6 +352,32 @@ def _build_test_matrix() -> list[TestCase]:
             "A_h": 0.0,
             "A_v": 0.0,
             "bottom_drag_r": 0.0,
+            # Disable the lat-lon C-grid default ``barotropic_diffusion_alpha``
+            # (0.01) — at 1 km dx it diffuses eta on a ~10 h timescale and
+            # silently damps the gravity-current free-surface signal.
+            "barotropic_diffusion_alpha": 0.0,
+            # Forward-backward barotropic (bebt=0) is non-dissipative;
+            # the default semi-implicit value (0.2) adds free-surface
+            # damping that does not exist in the Veros peer.
+            "bebt": 0.0,
+            # Box time-averaging instead of cosine: the cosine filter is
+            # MOM6-style shaped for global-ocean noise reduction, but on
+            # the Petersen channel it preferentially damps the high-
+            # frequency barotropic adjustment that carries the gravity
+            # current signal.
+            "barotropic_time_filter": "box",
+            # Fewer barotropic substeps reduce the cumulative effect of
+            # the time filter while still satisfying the CFL_baro at
+            # sqrt(g H) = 14 m/s, dx = 1 km, dt_baro = 30 s -> CFL = 0.42.
+            "n_barotropic_substeps": 1,
+            # Linear EOS to match Veros (eq_of_state_type=1); ``beta_S=0``
+            # makes salinity passive so the buoyancy contrast comes solely
+            # from the T front, mirroring the Veros lock_exchange setup.
+            "eos": "linear",
+            "alpha_T": 2.0e-4,
+            "beta_S": 0.0,
+            "T_ref": 17.5,
+            "S_ref": 35.0,
         },
     ))
 
@@ -4897,6 +4923,47 @@ def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
             A_h=A_h_override, A_v=A_v_override,
             bottom_drag_r=bottom_drag_override,
         ))
+
+    # Petersen-scale channel: the legoESM lat-lon C-grid default
+    # ``barotropic_diffusion_alpha = 0.01`` damps the free-surface
+    # gradient on the order of ``L^2 / (alpha * area / dt_ref)`` which is
+    # ~tens of hours at 1 km resolution. The Veros peer setup has zero
+    # barotropic diffusion. Match it.
+    #
+    # Also swap the default Wright nonlinear EOS for the linear EOS used
+    # by the Veros peer (``eq_of_state_type=1``) so the buoyancy contrast
+    # for a given T contrast is identical on both sides.
+    if (tc.grid_type == "latlon_regional"
+            and run_kw.get("barotropic_diffusion_alpha") is not None):
+        from legoesm.ocean.eos import LinearEOSConfig
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        replace_kwargs = {
+            "barotropic_diffusion_alpha": float(
+                run_kw["barotropic_diffusion_alpha"]
+            ),
+        }
+        if run_kw.get("bebt") is not None:
+            replace_kwargs["bebt"] = float(run_kw["bebt"])
+        if run_kw.get("n_barotropic_substeps") is not None:
+            replace_kwargs["n_barotropic_substeps"] = int(
+                run_kw["n_barotropic_substeps"]
+            )
+        if run_kw.get("barotropic_time_filter") is not None:
+            replace_kwargs["barotropic_time_filter"] = str(
+                run_kw["barotropic_time_filter"]
+            )
+        if run_kw.get("eos") == "linear":
+            replace_kwargs["eos"] = "linear"
+            replace_kwargs["eos_linear"] = LinearEOSConfig(
+                alpha_T=run_kw.get("alpha_T", 2.0e-4),
+                beta_S=run_kw.get("beta_S", 0.0),  # passive salinity
+                T_ref=run_kw.get("T_ref", 17.5),
+                S_ref=run_kw.get("S_ref", 35.0),
+            )
+        config = config._replace(**replace_kwargs)
+        model = LatLonCGridOceanModel(grid, z_coord, config)
     state = _create_rest_state(tc, grid, z_coord, H_max=H_max)
     state = _init_lock_exchange(state, tc.grid_type, grid, z_coord)
 
