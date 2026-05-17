@@ -118,6 +118,13 @@ class NeuralGCMSpectralConfig(NamedTuple):
     n_train_days: int = 365      # Number of daily IC/target pairs
     start_year: int = 2015       # ERA5 year to use
 
+    # Multi-day rollout supervision.  Each IC/target pair is integrated
+    # for ``rollout_days * n_steps_per_day`` dycore steps and the loss
+    # compares the final state to the target snapshot
+    # ``rollout_days`` days after the IC.  Default 1 preserves the
+    # legacy single-day forecast-skill loss.
+    rollout_days: int = 1
+
     # Loss
     loss_config: LossConfig = LossConfig()
 
@@ -683,38 +690,54 @@ def load_training_data(
             )
             return heuristic
 
+    rollout_days = int(getattr(config, "rollout_days", 1) or 1)
+    if rollout_days < 1:
+        raise ValueError(
+            f"config.rollout_days must be >= 1, got {rollout_days!r}."
+        )
+
     if windows:
         # AIMIP-style multi-window contiguous sampling.  Each window
-        # contributes its own (n_days+1) snapshots; pairs are only
-        # formed within a window so no cross-window leakage occurs.
+        # contributes its own (n_days + rollout_days) snapshots; pairs
+        # are only formed within a window so no cross-window leakage
+        # occurs.  Setting ``rollout_days > 1`` requires each window to
+        # contain at least ``rollout_days + 1`` days so we can form at
+        # least one (IC, target_at_d+rollout) pair.
         window_specs: list[tuple[int, int, int]] = [
             (int(y), int(off), int(n)) for (y, off, n) in windows
         ]
         time_indices: list[int] = []
         window_offsets: list[tuple[int, int]] = []  # (start_in_time_indices, n_days)
         for (year, day_offset, n_days_w) in window_specs:
+            if n_days_w < 1:
+                raise ValueError(
+                    f"Window {(year, day_offset, n_days_w)} has n_days < 1."
+                )
             start_idx_w = _year_to_idx(year) + int(day_offset) * 4
             base = len(time_indices)
+            # Load n_days_w + rollout_days snapshots so we can pair
+            # (carry[d], carry[d + rollout_days]) for d in [0, n_days_w).
+            n_snapshots_w = n_days_w + rollout_days
             time_indices.extend(
-                start_idx_w + d * 4 for d in range(n_days_w + 1)
+                start_idx_w + d * 4 for d in range(n_snapshots_w)
             )
             window_offsets.append((base, n_days_w))
         n_days = sum(w[2] for w in window_specs)
         logger.info(
-            f"Loading {n_days} daily ERA5 pairs across "
-            f"{len(window_specs)} windows: "
+            f"Loading {n_days} daily ERA5 pairs (rollout={rollout_days}d) "
+            f"across {len(window_specs)} windows: "
             + ", ".join(f"{y}@day{o}+{n}" for (y, o, n) in window_specs)
             + f" ({len(time_indices)} snapshots)..."
         )
     else:
         n_days = config.n_train_days
         start_idx = _year_to_idx(config.start_year)
-        time_indices = [start_idx + d * 4 for d in range(n_days + 1)]
+        time_indices = [start_idx + d * 4 for d in range(n_days + rollout_days)]
         window_offsets = [(0, n_days)]
         logger.info(
-            f"Loading {n_days} daily ERA5 pairs from year "
-            f"{config.start_year} (start_idx={start_idx}; opening Zarr "
-            f"store once, reading {len(time_indices)} snapshots)..."
+            f"Loading {n_days} daily ERA5 pairs (rollout={rollout_days}d) "
+            f"from year {config.start_year} (start_idx={start_idx}; "
+            f"opening Zarr store once, reading {len(time_indices)} snapshots)..."
         )
 
     # Read lat/lon and pressure levels
@@ -792,15 +815,20 @@ def load_training_data(
 
     logger.info(f"Loaded {len(time_indices)} snapshots ({_time.time()-t0:.0f}s)")
 
-    # Build IC/target pairs (per-window so no cross-window leakage)
+    # Build IC/target pairs (per-window so no cross-window leakage).
+    # Target is ``carry[base + d + rollout_days]`` so the loss
+    # supervises the rollout end-state ``rollout_days`` days ahead.
     ic_states = []
     target_carries = []
     for (base, n_w) in window_offsets:
         for d in range(n_w):
             ic_states.append(carry_to_spectral_state(carries[base + d], grid))
-            target_carries.append(carries[base + d + 1])
+            target_carries.append(carries[base + d + rollout_days])
 
-    logger.info(f"Built {n_days} IC/target pairs across {len(window_offsets)} window(s)")
+    logger.info(
+        f"Built {n_days} IC/target pairs (rollout={rollout_days}d) "
+        f"across {len(window_offsets)} window(s)"
+    )
     return ic_states, target_carries
 
 
@@ -856,6 +884,8 @@ def _train_spectral_loop(
     from legoesm.ml.training import TrainingConfig, create_optimizer
 
     n_steps_per_day = int(86400 / config.dt)
+    rollout_days = int(getattr(config, "rollout_days", 1) or 1)
+    n_steps_rollout = n_steps_per_day * rollout_days
     optimizer = create_optimizer(TrainingConfig(
         lr=config.lr,
         warmup_steps=config.warmup_steps,
@@ -870,7 +900,8 @@ def _train_spectral_loop(
     logger.info(
         f"Training: {config.n_epochs} epochs, "
         f"{len(ic_states)} samples/epoch, "
-        f"{n_steps_per_day} dycore steps/day (dt={config.dt}s)"
+        f"{n_steps_per_day} dycore steps/day (dt={config.dt}s), "
+        f"rollout_days={rollout_days} -> {n_steps_rollout} steps/sample"
     )
 
     def make_loss_fn(ic_spectral, target_carry):
@@ -878,7 +909,7 @@ def _train_spectral_loop(
             physics_fn = make_physics_fn(m, grid)
             pred = spectral_rollout(
                 ic_spectral, physics_fn, grid, sigma, pe_config,
-                config.dt, n_steps_per_day,
+                config.dt, n_steps_rollout,
                 sponge_factor, spectral_filter,
             )
             return spectral_state_vs_carry_loss(

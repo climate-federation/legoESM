@@ -13,12 +13,15 @@
 #     are still comparable in rank-order to the grid-MSE because of
 #     ``normalize_by_scale=True``.
 # Optimizer:
-#   - Default is AdamW (set by ``aimip_optimizer`` below).  MUON
-#     (``optax.contrib.muon``) is also supported and was the original
-#     project preference, but caused silent epoch-1 exits on the 34M-
-#     parameter SFNO variant under the 20-day windowed multi-year
-#     setup -- AdamW is the safe default until the MUON / SFNO
-#     instability is resolved.  Override via ``aimip_optimizer``.
+#   - Default is AdamW (set by ``aimip_optimizer`` below).  Plain
+#     ``muon`` applied MUON to every parameter leaf and caused
+#     silent epoch-1 exits on the 34M-parameter SFNO under the
+#     20-day windowed multi-year setup -- the Newton-Schulz
+#     orthogonalization was degenerate on the 1-D biases and small
+#     embedding tables.  Use ``muon_partitioned`` instead: it
+#     routes MUON to 2-D weight matrices (smaller dim >= 32) and
+#     AdamW to biases, scalars, and small matrices, matching the
+#     original Jordan et al. (2024) SFNO-safe recipe.
 
 # ----- ERA5 source --------------------------------------------------
 era5_zarr: "gs://weatherbench2/datasets/era5/1959-2023_01_10-wb13-6h-1440x721_with_derived_variables.zarr"
@@ -78,7 +81,7 @@ aimip_lr: 3.0e-4
 aimip_warmup: 5
 aimip_weight_decay: 1.0e-5
 aimip_grad_clip: 1.0
-aimip_optimizer: "adamw"  # muon | adamw | adam — see ml/training.create_optimizer
+aimip_optimizer: "adamw"  # adamw | adam | muon | muon_partitioned — see ml/training.create_optimizer
 
 # Radiation backend for the classical variant:
 #   gray   — Frierson two-stream analytic (default, tractable);
@@ -87,18 +90,47 @@ aimip_optimizer: "adamw"  # muon | adamw | adam — see ml/training.create_optim
 #   rrtmgp — Correlated-k LW+SW with explicit cloud-radiation
 #            coupling driven by the trainable Xu-Randall config.
 #            Production-grade realism but ~10-100x slower; needs
-#            GPU acceleration for multi-week training.
-aimip_radiation: "gray"
-aimip_rad_update_interval: 6   # RRTMGP fire every N dycore steps (3h at dt=1800s)
+#            GPU acceleration for multi-week training.  Recommended
+#            for closing the residual cold T bias (-2.06 K in
+#            ablation-v2 winner) — gray two-stream cannot
+#            represent cloud LW/SW interaction.
+aimip_radiation: "rrtmgp"
+aimip_rad_update_interval: 12  # RRTMGP fired every N dycore steps (6h at dt=1800s).
+                               # Was 6 (3h).  Bumped to 12 so the RRTMGP gas-optics
+                               # call dominates cost only every 6 simulated hours,
+                               # keeping the single-GPU AIMIP budget tractable.
+
+# ----- Spatial surface parameters (over land) ----------------------
+# When true, the AIMIP classical variant exposes seven surface and
+# surface-radiation knobs (Cd_neutral, Ch_neutral, z0, sfc_emissivity,
+# sfc_albedo, albedo_ocean, albedo_ice) as low-rank lat-lon fields
+# parameterized by a Legendre x Fourier basis truncated at l_max=4,
+# m_max=2 (13 coefficients per field, 91 total).  The fields are
+# gated by a soft land mask derived from surface geopotential, so
+# over-ocean columns retain the global scalar baseline and the new
+# flexibility expresses where surface heterogeneity matters most
+# (land roughness, albedo).  See ``training/aimip_spatial.py``.
+aimip_spatial_surface: true
+
+# ----- Multi-day rollout supervision -------------------------------
+# Number of consecutive simulated days each training rollout
+# integrates before the loss compares the final state to the target.
+# Default 1 preserves single-day forecast-skill supervision; 3-5
+# propagates the bias signal more strongly and disambiguates physics
+# knobs that saturate at day-1.  Eval uses the same rollout length.
+aimip_rollout_days: 1
 
 # ----- Loss (LossConfig fields from training/losses.py) ------------
+# spectral_weight > 0 adds a spectral L^2 penalty on the predicted
+# temperature field; reduces the residual synoptic-scale RMSE that
+# the grid-MSE alone underweights.
 loss:
   w_T: 1.0
   w_u: 0.5
   w_v: 0.5
   w_q: 0.2
   w_ps: 0.3
-  spectral_weight: 0.0
+  spectral_weight: 0.3
   level_weighting: "pressure"
   normalize_by_scale: true
   T_scale: 30.0

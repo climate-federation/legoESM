@@ -45,6 +45,10 @@ from legoesm.training.trainable_params import (
     _range_to_sigmoid,
     _sigmoid_to_range,
 )
+from legoesm.training.aimip_spatial import (
+    AIMIPSpatialSurfaceParams,
+    SPATIAL_FIELD_NAMES,
+)
 
 
 # ----------------------------------------------------------------------
@@ -198,13 +202,33 @@ class AIMIPClassicalParams(eqx.Module):
     scheme-tunable fields (all other fields take their scheme defaults
     so that future scheme changes do not silently mutate AIMIP
     behavior).
+
+    When ``spatial_surface`` is non-None, the surface-aerodynamic and
+    surface-radiation fields (``Cd_neutral``, ``Ch_neutral``, ``z0``,
+    ``sfc_emissivity``, ``sfc_albedo``, ``albedo_ocean``,
+    ``albedo_ice``) become low-rank learnable lat-lon fields gated by
+    a land mask (see :mod:`legoesm.training.aimip_spatial`).  The
+    corresponding scalar knobs in ``raw_values`` are still trained
+    and used as the spatial-field baselines for ocean columns; the
+    spatial perturbation only takes effect where ``land_mask > 0``.
     """
     raw_values: dict[str, jax.Array]
     constraints: list[ParamConstraint] = eqx.field(static=True)
+    spatial_surface: AIMIPSpatialSurfaceParams | None = None
 
     @staticmethod
-    def from_defaults() -> "AIMIPClassicalParams":
-        """Initialize all knobs at their canonical scheme defaults."""
+    def from_defaults(
+        spatial_surface: bool = False,
+    ) -> "AIMIPClassicalParams":
+        """Initialize all knobs at their canonical scheme defaults.
+
+        Parameters
+        ----------
+        spatial_surface : bool
+            If True, also initialize a :class:`AIMIPSpatialSurfaceParams`
+            bundle for the surface and surface-radiation knobs at
+            zero perturbation (i.e. equal to the scalar baseline).
+        """
         scheme_defaults = _canonical_scheme_defaults()
         try:
             from legoesm.core.precision import get_policy
@@ -220,9 +244,14 @@ class AIMIPClassicalParams(eqx.Module):
                 _range_to_sigmoid(default, c.min_val, c.max_val),
                 dtype=param_dtype,
             )
+        spatial = (
+            AIMIPSpatialSurfaceParams.from_defaults(dtype=param_dtype)
+            if spatial_surface else None
+        )
         return AIMIPClassicalParams(
             raw_values=raw,
             constraints=AIMIP_CLASSICAL_CONSTRAINTS,
+            spatial_surface=spatial,
         )
 
     def as_dict(self) -> dict[str, jax.Array]:
@@ -490,6 +519,7 @@ def make_aimip_classical_spectral_physics(
     gwd_scheme: str = "mcfarlane",
     microphysics_scheme: str = "none",
     cloud_scheme: str = "xu_randall",
+    land_mask: "jax.Array | None" = None,
 ):
     """Build a SpectralPE physics function for the AIMIP classical variant.
 
@@ -505,6 +535,14 @@ def make_aimip_classical_spectral_physics(
     surface-energy-balance gradients flow back through radiation as
     well as through the dynamic schemes.
 
+    When ``params.spatial_surface`` is set and ``land_mask`` is
+    provided, the surface (``Cd_neutral``, ``Ch_neutral``, ``z0``) and
+    surface-radiation (``sfc_emissivity``, ``sfc_albedo``) knobs are
+    replaced with column-flattened lat-lon fields produced by the
+    spatial-parameter bundle.  Over-ocean columns fall back to the
+    global scalar baseline (per the user-facing semantics in
+    ``aimip_spatial.SpatialField.evaluate``).
+
     Mirrors the role of :func:`make_physics_params_spectral_physics`
     in ``training.neural_gcm_spectral`` but with the full AIMIP scheme
     set, including the profile-prognostic Tiedtke path that
@@ -519,6 +557,19 @@ def make_aimip_classical_spectral_physics(
     )
 
     p = params.as_dict()
+
+    # ---- Spatial surface fields (optional) ----
+    # When ``params.spatial_surface`` is non-None, each spatial field
+    # is evaluated on the grid (with optional land-mask gating) and
+    # flattened to (ncol,) so the downstream surface_layer / gray-
+    # radiation code paths receive arrays that broadcast against the
+    # column-wise prognostic fields.
+    spatial_fields_col: dict[str, jax.Array] = {}
+    if params.spatial_surface is not None:
+        fields_2d = params.spatial_surface.evaluate(grid, land_mask=land_mask)
+        n_lat, n_lon = grid.n_lat, grid.n_lon
+        for name, arr in fields_2d.items():
+            spatial_fields_col[name] = arr.reshape(n_lat * n_lon)
 
     # Radiation backend toggle.  ``rrtmgp`` is the production
     # correlated-k path: it explicitly couples Xu-Randall cloud
@@ -541,9 +592,24 @@ def make_aimip_classical_spectral_physics(
 
     # ---- Radiation ----
     if radiation == "rrtmgp":
+        rrtmgp_cfg = params.to_rrtmgp_config()
+        # Substitute spatial sfc_emissivity / sfc_albedo when present.
+        # ``rrtmgp_radiation`` accepts array overrides via the
+        # integration bridge (rrtmgp_radiation.py: sfc_albedo_override /
+        # sfc_emissivity_override), and ``RRTMGPConfig.sfc_*`` fields
+        # broadcast naturally over the column dimension when set to
+        # ``(ncol,)`` arrays here.
+        if "sfc_emissivity" in spatial_fields_col:
+            rrtmgp_cfg = rrtmgp_cfg._replace(
+                sfc_emissivity=spatial_fields_col["sfc_emissivity"],
+            )
+        if "sfc_albedo" in spatial_fields_col:
+            rrtmgp_cfg = rrtmgp_cfg._replace(
+                sfc_albedo=spatial_fields_col["sfc_albedo"],
+            )
         rad_cfg = RadiationConfig(
             scheme="rrtmgp",
-            rrtmgp=params.to_rrtmgp_config(),
+            rrtmgp=rrtmgp_cfg,
             cloud_scheme=cloud_scheme,
             cloud_config=cloud_cfg_trained,
             update_interval_steps=rad_update_interval_steps,
@@ -553,9 +619,22 @@ def make_aimip_classical_spectral_physics(
         # only ``tau_equator`` / ``tau_pole`` — the residual T bias
         # was traced to fixed-default ``tau_moist_coeff``,
         # ``lw_diff_factor``, ``sfc_emissivity`` etc.
+        gray_cfg = params.to_gray_radiation_config()
+        # Substitute spatial sfc_emissivity / sfc_albedo when present.
+        # ``gray.py`` lines 175-176 and 250 use these as scalars that
+        # broadcast against column-shaped arrays — passing (ncol,)
+        # arrays substitutes pointwise without code changes.
+        if "sfc_emissivity" in spatial_fields_col:
+            gray_cfg = gray_cfg._replace(
+                sfc_emissivity=spatial_fields_col["sfc_emissivity"],
+            )
+        if "sfc_albedo" in spatial_fields_col:
+            gray_cfg = gray_cfg._replace(
+                sfc_albedo=spatial_fields_col["sfc_albedo"],
+            )
         rad_cfg = RadiationConfig(
             scheme="gray",
-            gray=params.to_gray_radiation_config(),
+            gray=gray_cfg,
         )
     else:
         raise ValueError(
@@ -575,12 +654,48 @@ def make_aimip_classical_spectral_physics(
     else:
         conv_cfg = ConvectionConfig(scheme=convection_scheme)
 
-    # ---- Turbulence ----
+    # ---- Turbulence (with optional spatial surface params) ----
+    # When the surface knobs (``Cd_neutral``, ``Ch_neutral``, ``z0``)
+    # are spatial, replace the corresponding ``SurfaceLayerConfig``
+    # fields with (ncol,) arrays.  ``compute_surface_fluxes`` in
+    # ``turbulence/surface_layer.py`` already treats these fields as
+    # broadcastable scalars (lines 83-84, 90-100), so no scheme-side
+    # code change is required.
+    def _spatial_surface_override(inner_cfg):
+        if not spatial_fields_col or not hasattr(inner_cfg, "surface"):
+            return inner_cfg
+        new_surface = inner_cfg.surface._replace(
+            Cd_neutral=spatial_fields_col.get(
+                "Cd_neutral", inner_cfg.surface.Cd_neutral,
+            ),
+            Ch_neutral=spatial_fields_col.get(
+                "Ch_neutral", inner_cfg.surface.Ch_neutral,
+            ),
+            z0=spatial_fields_col.get("z0", inner_cfg.surface.z0),
+        )
+        return inner_cfg._replace(surface=new_surface)
+
     if turbulence_scheme == "louis":
+        louis_cfg = _spatial_surface_override(params.to_louis_config())
+        turb_cfg = TurbulenceConfig(scheme="louis", louis=louis_cfg)
+    elif turbulence_scheme == "tke":
+        from legoesm.atmosphere.physics.turbulence.config import TKEConfig
         turb_cfg = TurbulenceConfig(
-            scheme="louis", louis=params.to_louis_config(),
+            scheme="tke",
+            tke=_spatial_surface_override(TKEConfig()),
+        )
+    elif turbulence_scheme == "smagorinsky":
+        from legoesm.atmosphere.physics.turbulence.config import (
+            SmagorinskyConfig,
+        )
+        turb_cfg = TurbulenceConfig(
+            scheme="smagorinsky",
+            smagorinsky=_spatial_surface_override(SmagorinskyConfig()),
         )
     else:
+        # Other schemes (holtslag_boville, ysu, edmf, clubb_lite, none).
+        # Spatial surface override silently skipped — extend this
+        # branch when those become AIMIP ablation candidates.
         turb_cfg = TurbulenceConfig(scheme=turbulence_scheme)
 
     # ---- Gravity wave drag ----
