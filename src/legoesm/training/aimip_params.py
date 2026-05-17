@@ -387,14 +387,28 @@ class AIMIPClassicalParams(eqx.Module):
         )
 
     def to_rrtmgp_config(self):
-        """Build a RRTMGPConfig with trained gas + surface + aerosol knobs."""
+        """Build a RRTMGPConfig with trained surface + aerosol knobs.
+
+        Gas concentrations (CO2, CH4, N2O) are intentionally NOT
+        pulled from the trained sigmoid leaves: the RRTMGP optics
+        cache (``rrtmgp.RRTMGP._cache_key``) hashes them, and a
+        traced JAX array is unhashable under
+        ``eqx.filter_value_and_grad``.  Cold-bias closure under
+        AIMIP is driven by cloud-LW coupling + surface
+        emissivity/albedo, not by the modest gas-absorption
+        perturbations the sigmoid bounds would allow, so we freeze
+        gas concentrations to the canonical RRTMGP defaults and
+        keep surface + aerosol knobs trainable.  The corresponding
+        ``rrtmgp_co2_ppmv`` / ``ch4_ppbv`` / ``n2o_ppbv`` raw
+        leaves still exist for forward-compatibility but are not
+        wired into the radiation config until the cache-key bug is
+        addressed in ``radiation/rrtmgp/rrtmgp.py``.
+        """
         from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
         d = self.as_dict()
         base = RRTMGPConfig()
         return base._replace(
-            co2_ppmv=d["rrtmgp_co2_ppmv"],
-            ch4_ppbv=d["rrtmgp_ch4_ppbv"],
-            n2o_ppbv=d["rrtmgp_n2o_ppbv"],
+            # Gas concentrations frozen to scheme defaults (see docstring).
             sfc_emissivity=d["rrtmgp_sfc_emissivity"],
             sfc_albedo=d["rrtmgp_sfc_albedo"],
             aerosol_ssa=d["rrtmgp_aerosol_ssa"],
