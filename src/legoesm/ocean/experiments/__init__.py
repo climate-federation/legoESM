@@ -34,6 +34,7 @@ Available Experiments:
 - geostrophic_adjustment: Geostrophic adjustment from temperature front
 - global_barotropic_wind: Global barotropic wind-driven circulation
 - eady_instability: Eady baroclinic instability from meridional temperature front
+- eady_uniform: Classical Eady (uniform N², linear shear, linear EOS) on channel grids
 - acc_channel: ACC-like channel with Gaussian ridge and wind forcing
 - global_overturning: Global baroclinic overturning with stratification and SST restoring
 - dino: Double-gyre Idealized North Ocean (DINO) — symmetric two-hemisphere
@@ -62,6 +63,7 @@ from . import stommel_gyre_tracer
 from . import geostrophic_adjustment
 from . import global_barotropic_wind
 from . import eady_instability
+from . import eady_uniform
 from . import acc_channel
 from . import global_overturning
 from . import dino
@@ -81,6 +83,7 @@ AVAILABLE_EXPERIMENTS = {
     "geostrophic_adjustment": geostrophic_adjustment.EXPERIMENT_CONFIG,
     "global_barotropic_wind": global_barotropic_wind.EXPERIMENT_CONFIG,
     "eady_instability": eady_instability.EXPERIMENT_CONFIG,
+    "eady_uniform": eady_uniform.EXPERIMENT_CONFIG,
     "acc_channel": acc_channel.EXPERIMENT_CONFIG,
     "global_overturning": global_overturning.EXPERIMENT_CONFIG,
     "dino": dino.EXPERIMENT_CONFIG,
@@ -100,6 +103,7 @@ __all__ = [
     "geostrophic_adjustment",
     "global_barotropic_wind",
     "eady_instability",
+    "eady_uniform",
     "acc_channel",
     "global_overturning",
     "dino",

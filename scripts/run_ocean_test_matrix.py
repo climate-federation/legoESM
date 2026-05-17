@@ -328,6 +328,33 @@ def _build_test_matrix() -> list[TestCase]:
         matrix.append(TestCase(
             "lock_exchange", g, res[g], 1.0, 0.1))
 
+    # Petersen 2015 Fig. 5 channel geometry on latlon_regional (paired with
+    # the Veros lock_exchange setup under src/legoesm/ocean/fidelity/
+    # veros_configs/lock_exchange.py): 64 km x 4 km equatorial channel
+    # (f ~ 0 by construction at lat ~ 0), 1 km dx, 4 cells meridional,
+    # 20 m depth with 20 levels. ``--quick`` shortens 17 h -> ~1.7 h.
+    matrix.append(TestCase(
+        "lock_exchange", "latlon_regional", "4x64",
+        duration_days=17.0 / 24.0,
+        quick_days=1.7 / 24.0,
+        run_kwargs={
+            "lat_south": -0.018,
+            "lat_north": +0.018,
+            "lon_west": 0.0,
+            "lon_east": 0.576,
+            # Petersen geometry has dx ~ 1 km, sqrt(g*H) ~ 14 m/s, so the
+            # default 300 s timestep violates CFL by ~4x and silently
+            # damps the gravity current. Use 30 s to match Veros peer.
+            "dt": 30.0,
+            # Match the Veros lock_exchange setup: zero explicit
+            # viscosity / bottom drag so the only mixing comes from the
+            # advection scheme (the whole point of Petersen's diagnostic).
+            "A_h": 0.0,
+            "A_v": 0.0,
+            "bottom_drag_r": 0.0,
+        },
+    ))
+
     # --- Overflow (NEMO / Petersen et al. 2015): cubed_sphere, latlon ---
     for g in ["cubed_sphere", "latlon"]:
         matrix.append(TestCase(
@@ -2244,16 +2271,33 @@ def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
 
 
 def _create_rest_state(tc: TestCase, grid, z_coord, H_max=DEFAULT_H_MAX):
-    """Create rest-state initial condition for any grid type."""
+    """Create rest-state initial condition for any grid type.
+
+    ``latlon_regional`` reuses the same lat-lon C-grid rest-state helper as
+    the global ``latlon`` path, and passes ``land_lat_threshold=90.0`` so
+    no equator-spanning channel is accidentally clipped by the global land
+    mask (regional grids already carry their own wall mask from
+    ``create_regional_latlon_grid``).
+    """
     if tc.grid_type == "cubed_sphere":
         from legoesm.ocean.init import rest_state_ocean
         return rest_state_ocean(grid, z_coord, H_max=H_max)
     elif tc.grid_type == "latlon":
         from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
         return rest_state_latlon_cgrid_ocean(grid, z_coord, H_max=H_max)
+    elif tc.grid_type == "latlon_regional":
+        from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+        return rest_state_latlon_cgrid_ocean(
+            grid, z_coord, H_max=H_max, land_lat_threshold=90.0,
+        )
     elif tc.grid_type == "mpas":
         from legoesm.ocean.init_mpas import rest_state_mpas_ocean
         return rest_state_mpas_ocean(grid, z_coord, H_max=H_max)
+    elif tc.grid_type == "mpas_regional":
+        from legoesm.ocean.init_mpas import rest_state_mpas_ocean
+        return rest_state_mpas_ocean(
+            grid, z_coord, H_max=H_max, land_lat_threshold=90.0,
+        )
     elif tc.grid_type == "spectral":
         from legoesm.ocean.dynamics.spectral_ocean_pe import rest_state_spectral_ocean
         # Use land with tanh taper (same as other grids); hyperdiffusion mitigates Gibbs
@@ -4442,15 +4486,15 @@ def run_phillips_two_layer(tc: TestCase, output_dir: Path, days: float
 
 def _get_cell_latlon_rad(grid_type, grid):
     """Return (lat, lon) in radians, broadcast to match cell shape."""
-    if grid_type == "mpas":
+    if grid_type in ("mpas", "mpas_regional"):
         return (np.asarray(grid.latCell, dtype=np.float64),
                 np.asarray(grid.lonCell, dtype=np.float64))
-    elif grid_type in ("latlon", "spectral"):
+    elif grid_type in ("latlon", "latlon_regional", "spectral"):
         lat_1d = np.asarray(grid.lat, dtype=np.float64)
         lon_1d = np.asarray(grid.lon, dtype=np.float64)
         lon_2d, lat_2d = np.meshgrid(lon_1d, lat_1d, indexing='xy')
         return lat_2d, lon_2d
-    else:  # cubed_sphere
+    else:  # cubed_sphere, cs_regional
         return (np.asarray(grid.lat, dtype=np.float64),
                 np.asarray(grid.lon, dtype=np.float64))
 
@@ -4736,20 +4780,26 @@ def run_inertia_gravity_wave(tc: TestCase, output_dir: Path, days: float
 # ===========================================================================
 
 def _init_lock_exchange(state, grid_type, grid, z_coord):
-    """Initialize lock-exchange: cold dense (western hemisphere) / warm light (eastern).
+    """Initialize lock-exchange: cold dense west / warm light east.
 
-    Adapted to global ocean grids following Petersen et al. (2015):
-      - Left (lon < 0): T = 5 degC  (dense, rho ~ 1027 kg/m^3)
-      - Right (lon > 0): T = 30 degC (light, rho ~ 1022 kg/m^3)
+    Following Petersen et al. (2015) Fig. 5:
+      - West of basin midpoint: T = 5 degC  (dense, rho ~ 1027 kg/m^3)
+      - East of basin midpoint: T = 30 degC (light, rho ~ 1022 kg/m^3)
       - Salinity: uniform 35 PSU
       - Velocity: zero (lock released at t=0)
+
+    Front position is the median of the grid's longitude coordinate so the
+    initial split is robust to both [0, 2pi] and [-pi, pi] lon conventions
+    (legoESM lat-lon grids use [0, 2pi], an earlier copy of this helper
+    assumed [-pi, pi] and silently initialized every cell to T_warm).
     """
     from legoesm.core.field import Field
 
-    T_cold = 5.0    # degC (dense side)
-    T_warm = 30.0   # degC (light side)
+    T_cold = 5.0    # degC (dense side, matches Petersen 2015)
+    T_warm = 30.0   # degC (light side, matches Petersen 2015)
 
     lat, lon = _get_cell_latlon_rad(grid_type, grid)
+    lon_front = float(np.median(np.asarray(lon)))
 
     if grid_type == "spectral":
         from legoesm.grids.gaussian import sh_analysis_3d
@@ -4758,8 +4808,7 @@ def _init_lock_exchange(state, grid_type, grid, z_coord):
         T_grid = np.array(sh_synthesis_3d(grid, T_hat), dtype=np.float64)
         nlev = T_grid.shape[-1]
         mask = np.asarray(state.land_mask_grid.data, dtype=np.float64)
-        # Front at prime meridian (lon=0)
-        T_field = np.where(lon[..., None] < 0, T_cold, T_warm) * mask[..., None]
+        T_field = np.where(lon[..., None] < lon_front, T_cold, T_warm) * mask[..., None]
         new_T_hat = sh_analysis_3d(grid, jnp.array(T_field))
         return state._replace(T_hat=Field(new_T_hat))
 
@@ -4767,9 +4816,8 @@ def _init_lock_exchange(state, grid_type, grid, z_coord):
         T_data = np.array(state.T.data, dtype=np.float64, copy=True)
         mask = np.asarray(state.land_mask.data, dtype=np.float64)
         nlev = T_data.shape[-1]
-        # Temperature front at prime meridian
         for k in range(nlev):
-            T_data[..., k] = np.where(lon < 0, T_cold, T_warm) * mask
+            T_data[..., k] = np.where(lon < lon_front, T_cold, T_warm) * mask
         return state._replace(T=Field(jnp.array(T_data)))
 
 
@@ -4820,18 +4868,42 @@ def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
 
     Cold dense water in western hemisphere, warm light in eastern.
     Monitors potential energy evolution as a proxy for spurious mixing.
+
+    Depth and vertical resolution come from
+    ``lock_exchange.LockExchangeConfig`` so the geometry stays in lockstep
+    with the Veros peer setup under
+    ``src/legoesm/ocean/fidelity/veros_configs/lock_exchange.py`` (Petersen
+    Fig. 5: 20 m, 20 levels).
     """
-    H_max = 500.0  # shallow basin
-    nlev = 20
+    from legoesm.ocean.experiments.lock_exchange import LockExchangeConfig
+    le_config = LockExchangeConfig()
+    H_max = le_config.H_max
+    nlev = le_config.nlev
+    # Channel-scale Petersen geometry needs a CFL-stable timestep; the
+    # global DEFAULT_DT (300 s) was tuned for ~2.5 deg lat-lon and
+    # violates CFL by ~4x at 1 km dx, sqrt(g*H)=14 m/s. Allow the
+    # TestCase to override via run_kwargs["dt"]. The same kwargs path
+    # carries Petersen-aligned physics overrides (A_h, A_v,
+    # bottom_drag_r = 0) so the gravity current is not damped by the
+    # default lat-lon viscosity / bottom drag.
+    run_kw = tc.run_kwargs or {}
+    dt_override = run_kw.get("dt")
+    A_h_override = run_kw.get("A_h")
+    A_v_override = run_kw.get("A_v")
+    bottom_drag_override = run_kw.get("bottom_drag_r")
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
-        _create_ocean_setup(tc, nlev=nlev, H_max=H_max))
+        _create_ocean_setup(
+            tc, nlev=nlev, H_max=H_max,
+            A_h=A_h_override, A_v=A_v_override,
+            bottom_drag_r=bottom_drag_override,
+        ))
     state = _create_rest_state(tc, grid, z_coord, H_max=H_max)
     state = _init_lock_exchange(state, tc.grid_type, grid, z_coord)
 
     # Compute initial PE
     pe_init = _compute_rpe(state, tc.grid_type, grid, z_coord)
 
-    dt = DEFAULT_DT
+    dt = float(dt_override) if dt_override is not None else DEFAULT_DT
     n_steps = int(days * 86400 / dt)
     diag_every = max(1, n_steps // 40)
 
@@ -5367,6 +5439,20 @@ RUNNERS: dict[str, Callable] = {
     "lock_exchange": run_lock_exchange,
     "overflow": run_overflow,
     "stommel_gyre_tracer": run_stommel_gyre_tracer,
+    # NOTE: ocean-fidelity tracking issue — the following experiments live in
+    # ``src/legoesm/ocean/experiments/`` and are listed in AVAILABLE_EXPERIMENTS
+    # but currently have no runner here, so they cannot be exercised by the
+    # test matrix. They are gated by the ocean fidelity plan (tiers 5/7/8) and
+    # need bespoke runners that mirror the pattern of e.g. run_phillips_two_layer
+    # (initial conditions + forcing applicator + time loop + snapshot writer):
+    #   - eady_instability  (tier 5; latlon, mpas)
+    #   - eady_uniform      (tier 5; latlon_channel, mpas_channel — channel
+    #                        grid plumbing missing from _create_ocean_setup)
+    #   - acc_channel       (tier 6; latlon, mpas)
+    #   - global_overturning(tier 8; latlon, mpas)
+    #   - dino              (tier 7; latlon Mercator, mpas regional)
+    # When their runners land, also register them here and add corresponding
+    # entries to ``_build_test_matrix()``.
 }
 
 
@@ -5412,6 +5498,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--replot", action="store_true",
         help="Skip simulations; regenerate all plots from existing NPZ data")
+    p.add_argument(
+        "--emit-fidelity-artifacts", action="store_true",
+        help=(
+            "Guarantee that per-case results/<case>/<grid>/<res>/ directories "
+            "contain the snapshot NetCDFs and conservation CSVs that the "
+            "ocean fidelity layer (tests/ocean/fidelity, "
+            "scripts/ocean_fidelity/build_fidelity_report.py) reads. "
+            "Default-off: runners only emit their full per-case diagnostics "
+            "when this flag is passed or when a tier explicitly requires it."
+        ))
     return p
 
 
