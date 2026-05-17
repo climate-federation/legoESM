@@ -87,11 +87,12 @@ def test_dino_factory_returns_setup_with_target_runlen(isolated_cache):
 
 def test_dino_constants_match_paper_geometry():
     from legoesm.ocean.fidelity.veros_configs import dino
-    assert dino.LAT_MAX_DEG == 70.0
-    assert dino.CHANNEL_LAT_SOUTH_DEG == -65.0
-    assert dino.CHANNEL_LAT_NORTH_DEG == -45.0
-    assert dino.H_DEEP_M > dino.H_SHALLOW_M
-    assert len(dino.WIND_TAU_LATS_DEG) == len(dino.WIND_TAU_VALUES)
+    cfg = dino._CFG
+    assert cfg.lat_max_deg == 70.0
+    assert cfg.channel_lat_south_deg == -65.0
+    assert cfg.channel_lat_north_deg == -45.0
+    assert cfg.H_deep > cfg.H_shallow
+    assert len(cfg.wind_tau_lats_deg) == len(cfg.wind_tau_values)
     # Paper Table 2 R1 defaults
     assert dino.NX_DEFAULT == 50
     assert dino.NY_DEFAULT == 140
@@ -100,23 +101,37 @@ def test_dino_constants_match_paper_geometry():
 
 def test_dino_wind_stress_matches_knots():
     import numpy as np
-    from legoesm.ocean.fidelity.veros_configs import dino
-    lats = np.asarray(dino.WIND_TAU_LATS_DEG)
-    tau = dino._wind_stress(lats, np)
-    np.testing.assert_allclose(tau, dino.WIND_TAU_VALUES, atol=1e-12)
+    from legoesm.ocean.experiments.dino import dino_wind_stress
+    from legoesm.ocean.fidelity.veros_configs import dino as dino_veros
+    cfg = dino_veros._CFG
+    lats = np.asarray(cfg.wind_tau_lats_deg)
+    tau = np.asarray(dino_wind_stress(lats, cfg))
+    np.testing.assert_allclose(tau, cfg.wind_tau_values, atol=1e-12)
 
 
 def test_dino_t_star_endpoints():
     import numpy as np
-    from legoesm.ocean.fidelity.veros_configs import dino
-    # cos(pi*70/140) = 0 -> T_star(+/- LAT_MAX) collapses to T_STAR_N/S.
-    assert dino._T_star(np.asarray(70.0), np) == pytest.approx(dino.T_STAR_N)
-    assert dino._T_star(np.asarray(-70.0), np) == pytest.approx(dino.T_STAR_S)
-    # At the equator the cos profile peaks: T_star(0) == T_STAR_EQ on the
+    from legoesm.ocean.experiments.dino import dino_T_star_annual_mean
+    from legoesm.ocean.fidelity.veros_configs import dino as dino_veros
+    cfg = dino_veros._CFG
+    # The legoESM helper executes under whatever JAX precision the
+    # pytest harness has configured (float32 by default), so allow a
+    # small absolute slack on the endpoint identities.
+    tol = 1e-3
+    # cos(pi * 70 / 140) = 0 -> T_star(+/- lat_max) collapses to T_star_n/s.
+    assert float(dino_T_star_annual_mean(np.asarray(70.0), cfg)) == pytest.approx(
+        cfg.T_star_n_mean, abs=tol
+    )
+    assert float(dino_T_star_annual_mean(np.asarray(-70.0), cfg)) == pytest.approx(
+        cfg.T_star_s_mean, abs=tol
+    )
+    # At the equator the cos profile peaks: T_star(0) == T_star_eq on the
     # northern side (lat=0 hits the lat<=0 branch -> southern profile;
     # both branches share the equatorial value, so this checks the n side
     # explicitly via a tiny positive offset).
-    assert dino._T_star(np.asarray(1e-6), np) == pytest.approx(dino.T_STAR_EQ, abs=1e-3)
+    assert float(dino_T_star_annual_mean(np.asarray(1e-6), cfg)) == pytest.approx(
+        cfg.T_star_eq, abs=tol
+    )
 
 
 def test_unknown_case_raises_value_error(isolated_cache):

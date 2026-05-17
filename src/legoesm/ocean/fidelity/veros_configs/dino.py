@@ -36,45 +36,27 @@ and a shorter run length.
 
 from __future__ import annotations
 
-import math
+from legoesm.ocean.experiments.dino import DINOConfig
 
-# ---------------------------------------------------------------------------
-# Domain (Kamm et al. 2025 Sect 2.2, Table 2)
-# ---------------------------------------------------------------------------
-LON_WEST_DEG: float = -50.0
-LON_EAST_DEG: float = 0.0
-LAT_MAX_DEG: float = 70.0                       # symmetric N/S truncation
-CHANNEL_LAT_SOUTH_DEG: float = -65.0
-CHANNEL_LAT_NORTH_DEG: float = -45.0
-
-H_DEEP_M: float = 4000.0
-H_SHALLOW_M: float = 2000.0
-COAST_TAPER_DEG: float = 5.0                    # half-width of the H taper near walls
-
-# Wind-stress knots (paper eq 7)
-WIND_TAU_LATS_DEG: tuple[float, ...] = (
-    -70.0, -45.0, -15.0, 0.0, 15.0, 45.0, 70.0,
-)
-WIND_TAU_VALUES: tuple[float, ...] = (
-    0.0, 0.2, -0.1, -0.02, -0.1, 0.1, 0.0,
-)  # N/m^2
-
-# Surface restoring targets (paper eqs B1-B2; annual mean)
-T_STAR_EQ: float = 27.0
-T_STAR_N: float = 5.0
-T_STAR_S: float = -0.5
-S_STAR_EQ: float = 37.25
-S_STAR_N: float = 35.0
-S_STAR_S: float = 35.1
-S_STAR_EQ_DIP_AMP: float = 1.25
-S_STAR_EQ_DIP_SIGMA_DEG: float = 7.5
-L_PHI_DEG: float = 140.0
+# Single source of truth for every DINO numeric value (domain, channel
+# extent, wind-stress knots, T*/S* restoring profiles, paper R1 grid).
+# Anything that diverges from the paper -- restoring timescales,
+# Veros-specific bathymetry taper width, smoke-test grid defaults --
+# lives as a module constant below.
+_CFG: DINOConfig = DINOConfig()
 
 # Restoring timescale (days): chosen to match the paper coefficients
 # A_theta = 40 W/m^2/K with dz_top = 10 m, rho_0=1026, c_p=3991.86
-# tau_T = rho_0 * c_p * dz_top / A_theta ~ 11.85 d.
+# tau_T = rho_0 * c_p * dz_top / A_theta ~ 11.85 d. These are Veros-side
+# only; the legoESM port applies the heat-flux coefficients directly.
 T_RESTORING_DAYS: float = 11.85
 S_RESTORING_DAYS: float = 30.8
+
+# Coast taper half-width for the simpler Veros-side bathymetry (the
+# legoESM port uses Madec's exponential ramp plus a Drake-passage
+# Gaussian ring; for the Veros reference we use a quintic smooth-step
+# taper to ``H_shallow`` near every basin wall).
+COAST_TAPER_DEG: float = 5.0
 
 # Default resolution (paper R1)
 NX_DEFAULT: int = 50
@@ -87,72 +69,10 @@ DEFAULT_RUNLEN_S: float = 30.0 * 86400.0   # 30 days shake-down
 
 
 # ---------------------------------------------------------------------------
-# Pure-NumPy helpers (no Veros / JAX imports). Used both inside and outside
-# the setup class so the smoke-test code can re-derive the same forcing.
+# Veros-specific bathymetry taper. The legoESM port uses a different
+# ramp shape (``_exp_bathy`` + ``_gauss_ring`` for the Drake sill), so
+# this helper is kept here rather than reused.
 # ---------------------------------------------------------------------------
-
-def _wind_stress(lat_deg, npx):
-    """Cubic-Hermite smooth-step interpolation of tau_u through the knots."""
-    lats = npx.asarray(WIND_TAU_LATS_DEG)
-    taus = npx.asarray(WIND_TAU_VALUES)
-    out = npx.zeros_like(lat_deg, dtype=lats.dtype)
-    for i in range(len(WIND_TAU_LATS_DEG) - 1):
-        lat_lo = WIND_TAU_LATS_DEG[i]
-        lat_hi = WIND_TAU_LATS_DEG[i + 1]
-        tau_lo = WIND_TAU_VALUES[i]
-        tau_hi = WIND_TAU_VALUES[i + 1]
-        s = npx.clip((lat_deg - lat_lo) / (lat_hi - lat_lo), 0.0, 1.0)
-        weight = (3.0 - 2.0 * s) * s ** 2
-        seg_val = tau_lo + (tau_hi - tau_lo) * weight
-        in_seg = (lat_deg >= lat_lo) & (lat_deg <= lat_hi)
-        out = npx.where(in_seg, seg_val, out)
-    return out
-
-
-def _T_star(lat_deg, npx):
-    """Annual-mean T*(lat) per paper eq B1."""
-    T_star_ns = npx.where(lat_deg <= 0.0, T_STAR_S, T_STAR_N)
-    return T_star_ns + (T_STAR_EQ - T_star_ns) * npx.cos(
-        math.pi * lat_deg / L_PHI_DEG,
-    )
-
-
-def _S_star(lat_deg, npx):
-    """Annual-mean S*(lat) with equatorial Gaussian dip (paper eq B2)."""
-    S_star_ns = npx.where(lat_deg <= 0.0, S_STAR_S, S_STAR_N)
-    cos_factor = (1.0 + npx.cos(2.0 * math.pi * lat_deg / L_PHI_DEG)) / 2.0
-    dip = S_STAR_EQ_DIP_AMP * npx.exp(
-        -(lat_deg ** 2) / (S_STAR_EQ_DIP_SIGMA_DEG ** 2),
-    )
-    return S_star_ns + (S_STAR_EQ - S_star_ns) * cos_factor - dip
-
-
-def _T_profile_1d(z_pos, npx):
-    """Equatorial T(z) profile (paper eq D2; z_pos = depth, positive down)."""
-    deep = 16.0 - 12.0 * npx.tanh((z_pos - 400.0) / 700.0)
-    shallow = (
-        15.0 * (1.0 - npx.tanh((z_pos - 50.0) / 1500.0))
-        - 1.4 * npx.tanh((z_pos - 100.0) / 100.0)
-        + 7.0 * (1500.0 - z_pos) / 1500.0
-    )
-    w_deep = (1.0 - npx.tanh((500.0 - z_pos) / 150.0)) / 2.0
-    w_shallow = (1.0 - npx.tanh((z_pos - 500.0) / 150.0)) / 2.0
-    return deep * w_deep + shallow * w_shallow
-
-
-def _S_profile_1d(z_pos, npx):
-    """Equatorial S(z) profile (paper eq D3)."""
-    deep = 36.25 - 1.13 * npx.tanh((z_pos - 305.0) / 460.0)
-    shallow = (
-        35.55 + 1.25 * (5000.0 - z_pos) / 5000.0
-        - 1.62 * npx.tanh((z_pos - 60.0) / 650.0)
-        + 0.2 * npx.tanh((z_pos - 35.0) / 100.0)
-        + 0.2 * npx.tanh((z_pos - 1000.0) / 5000.0)
-    )
-    w_deep = (1.0 - npx.tanh((500.0 - z_pos) / 150.0)) / 2.0
-    w_shallow = (1.0 - npx.tanh((z_pos - 500.0) / 150.0)) / 2.0
-    return deep * w_deep + shallow * w_shallow
-
 
 def _bathy_taper(coord_deg, lo_deg, hi_deg, npx):
     """Smooth ramp from 0 (within COAST_TAPER_DEG of the boundary) to 1
@@ -177,6 +97,16 @@ def _build_dino_setup_class(*,
     from veros.variables import Variable
     from veros.core.operators import numpy as npx, update, at
 
+    # Canonical DINO formulas. Imported here (not at module top) so this
+    # file is safe to import when JAX is not installed.
+    from legoesm.ocean.experiments.dino import (
+        dino_S_profile_1d,
+        dino_S_star,
+        dino_T_profile_1d,
+        dino_T_star_annual_mean,
+        dino_wind_stress,
+    )
+
     class DINOSetup(VerosSetup):
         """Kamm et al. 2025 DINO reference setup."""
 
@@ -194,8 +124,8 @@ def _build_dino_setup_class(*,
             settings.dt_tracer = dt_tracer
             settings.runlen = DEFAULT_RUNLEN_S
 
-            settings.x_origin = LON_WEST_DEG
-            settings.y_origin = -LAT_MAX_DEG
+            settings.x_origin = _CFG.lon_west_deg
+            settings.y_origin = -_CFG.lat_max_deg
 
             settings.coord_degree = True
             # Cyclic-X so the channel band is naturally re-entrant. The
@@ -271,28 +201,28 @@ def _build_dino_setup_class(*,
         @veros_routine
         def set_grid(self, state):
             vs = state.variables
-            dx_deg = (LON_EAST_DEG - LON_WEST_DEG) / nx
-            dy_deg = (2.0 * LAT_MAX_DEG) / ny
+            dx_deg = (_CFG.lon_east_deg - _CFG.lon_west_deg) / nx
+            dy_deg = (2.0 * _CFG.lat_max_deg) / ny
             vs.dxt = update(vs.dxt, at[...], dx_deg)
             vs.dyt = update(vs.dyt, at[...], dy_deg)
 
             # Two paths:
             # * ``uniform_z=True`` (used by the cross-model fidelity
-            #   comparison): a single uniform thickness ``H_DEEP / nz``
+            #   comparison): a single uniform thickness ``H_deep / nz``
             #   so the Veros and legoESM vertical grids match exactly.
             # * Default: cosh-stretched grid (modest top→bottom thinning
             #   matched to Veros's ACC stretched setup) — preserved for
             #   future production runs even though it is not Madec's
             #   thin-top Lévy stretch.
             if uniform_z:
-                dz_uniform = H_DEEP_M / nz
+                dz_uniform = _CFG.H_deep / nz
                 vs.dzt = update(vs.dzt, at[...], dz_uniform)
             else:
                 k = npx.arange(nz, dtype="float64")
-                a_cr = 10.5
+                a_cr = _CFG.a_cr
                 k_th = float(nz) - 1.0
                 raw = npx.cosh((k - k_th) / a_cr)
-                dz = raw / npx.sum(raw) * H_DEEP_M
+                dz = raw / npx.sum(raw) * _CFG.H_deep
                 vs.dzt = update(vs.dzt, at[...], dz)
 
         @veros_routine
@@ -311,17 +241,26 @@ def _build_dino_setup_class(*,
             x, y = npx.meshgrid(vs.xt, vs.yt, indexing="ij")
 
             # Basin bathymetry -- smooth taper near the lat/lon walls.
-            taper_x = _bathy_taper(x, LON_WEST_DEG, LON_EAST_DEG, npx)
-            taper_y = _bathy_taper(y, -LAT_MAX_DEG, LAT_MAX_DEG, npx)
-            depth = H_SHALLOW_M + (H_DEEP_M - H_SHALLOW_M) * taper_x * taper_y
+            taper_x = _bathy_taper(
+                x, _CFG.lon_west_deg, _CFG.lon_east_deg, npx,
+            )
+            taper_y = _bathy_taper(
+                y, -_CFG.lat_max_deg, _CFG.lat_max_deg, npx,
+            )
+            depth = _CFG.H_shallow + (
+                _CFG.H_deep - _CFG.H_shallow
+            ) * taper_x * taper_y
 
             # Re-entrant channel band: drop the western-wall taper inside
             # the channel so the column is open right at the wall.
-            in_channel = (y >= CHANNEL_LAT_SOUTH_DEG) & (
-                y <= CHANNEL_LAT_NORTH_DEG
+            in_channel = (y >= _CFG.channel_lat_south_deg) & (
+                y <= _CFG.channel_lat_north_deg
             )
-            depth = npx.where(in_channel, H_SHALLOW_M
-                              + (H_DEEP_M - H_SHALLOW_M) * taper_y, depth)
+            depth = npx.where(
+                in_channel,
+                _CFG.H_shallow + (_CFG.H_deep - _CFG.H_shallow) * taper_y,
+                depth,
+            )
 
             # Translate depth -> kbot (first wet level from below; cells
             # below `depth` are land).
@@ -337,9 +276,9 @@ def _build_dino_setup_class(*,
             # Cells with depth less than the top cell thickness become land.
             kbot = npx.where(depth < float(vs.dzt[-1]), 0, kbot)
             # Outside the lat band, mark land (the Veros y-axis already
-            # spans only [-LAT_MAX, +LAT_MAX], so this is a no-op for the
+            # spans only [-lat_max, +lat_max], so this is a no-op for the
             # default grid; kept for safety if a caller widens y).
-            in_lat_band = (y >= -LAT_MAX_DEG) & (y <= LAT_MAX_DEG)
+            in_lat_band = (y >= -_CFG.lat_max_deg) & (y <= _CFG.lat_max_deg)
             kbot = npx.where(in_lat_band, kbot, 0)
 
             # Close the western wall everywhere except in the channel band
@@ -356,20 +295,27 @@ def _build_dino_setup_class(*,
 
         @veros_routine
         def set_initial_conditions(self, state):
+            import numpy as _np
+
             vs = state.variables
 
-            # Vertical profiles (depth positive downward in the formulas;
-            # vs.zt is negative below surface).
-            z_pos = -vs.zt                              # (nz,) positive
-            T_1d = _T_profile_1d(z_pos, npx)            # (nz,)
-            S_1d = _S_profile_1d(z_pos, npx)            # (nz,)
-            T_bot = T_1d[0]                              # deepest level
+            # Pull lat / depth coordinates as plain numpy arrays so the
+            # legoESM helpers (which return JAX arrays) compose cleanly
+            # with Veros's ``update`` regardless of backend.
+            lat_np = _np.asarray(vs.yt)                  # (ny,) deg
+            z_pos_np = -_np.asarray(vs.zt)               # (nz,) positive
+
+            # Vertical T(z) / S(z) profiles -- canonical legoESM source.
+            T_1d = _np.asarray(dino_T_profile_1d(z_pos_np))
+            S_1d = _np.asarray(dino_S_profile_1d(z_pos_np))
+            T_bot = T_1d[0]
             S_bot = S_1d[0]
 
             # Meridional taper (paper eq D4-D5 / case 4):
             #   T(lat, z) = (T_1d(z) - T_bot) * (phi_max - |lat|) / phi_max + T_bot
-            lat = vs.yt                                  # (ny,)
-            factor = (LAT_MAX_DEG - npx.abs(lat)) / LAT_MAX_DEG  # (ny,)
+            factor = (
+                (_CFG.lat_max_deg - npx.abs(vs.yt)) / _CFG.lat_max_deg
+            )
             factor_3d = factor[npx.newaxis, :, npx.newaxis]
 
             T_field = (
@@ -385,10 +331,12 @@ def _build_dino_setup_class(*,
                 vs.salt = update(vs.salt, at[..., tau], S_field)
 
             # ---------- Surface forcing fields ----------
-            # T*(lat), S*(lat) restoring targets and the corresponding
-            # rate constants (1/s).
-            vs.t_star = update(vs.t_star, at[...], _T_star(lat, npx))
-            vs.s_star = update(vs.s_star, at[...], _S_star(lat, npx))
+            # T*(lat), S*(lat) restoring targets -- canonical legoESM
+            # source so the Veros and legoESM ports cannot drift.
+            t_star_np = _np.asarray(dino_T_star_annual_mean(lat_np, _CFG))
+            s_star_np = _np.asarray(dino_S_star(lat_np, _CFG))
+            vs.t_star = update(vs.t_star, at[...], t_star_np)
+            vs.s_star = update(vs.s_star, at[...], s_star_np)
 
             tau_T = T_RESTORING_DAYS * 86400.0
             tau_S = S_RESTORING_DAYS * 86400.0
@@ -403,8 +351,10 @@ def _build_dino_setup_class(*,
                 vs.dzt[-1] / tau_S * vs.maskT[:, :, -1],
             )
 
-            # Zonal wind stress on the U-grid at the top level.
-            taux_1d = _wind_stress(vs.yt, npx)           # (ny,)
+            # Zonal wind stress on the U-grid at the top level. The
+            # cubic-Hermite knot interpolation lives in the legoESM DINO
+            # module; reuse it directly.
+            taux_1d = _np.asarray(dino_wind_stress(lat_np, _CFG))   # (ny,)
             taux_2d = (
                 taux_1d[npx.newaxis, :]
                 * npx.ones((nx + 4, 1))                 # broadcast through halos
