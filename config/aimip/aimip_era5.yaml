@@ -64,7 +64,14 @@ n_eval_days:  8    # sum of eval_windows[*][2]
 # fuller multi-month / multi-epoch sweep (will require multi-hour
 # wall clock per variant).
 aimip_grid: "gaussian"
-n_max: 21            # spectral truncation (T21 ≈ 5.6° grid)
+n_max: 15            # spectral truncation (T15 ≈ 7.5°, 24x48 grid).
+                     # Reduced from T21 (34x68) so RRTMGP + spatial
+                     # surface + 48-step daily rollout fits on a
+                     # 24 GiB GPU.  T21 plus RRTMGP requires a 72 GiB
+                     # single allocation in the backward pass (verified
+                     # 2026-05-17 on RTX 5090); halving ncol roughly
+                     # halves that.  Bump back to T21 on a >= 40 GiB
+                     # GPU.
 nlev: 8              # vertical levels (sigma)
 dt: 1800.0           # 30-minute dycore timestep
 
