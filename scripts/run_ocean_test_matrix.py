@@ -400,6 +400,40 @@ def _build_test_matrix() -> list[TestCase]:
         matrix.append(TestCase(
             "stommel_gyre_tracer", g, res[g], 60.0, 5.0))
 
+    # --- Classical Eady baroclinic instability (uniform N^2, linear shear) ---
+    # Re-entrant zonal channel; default 200 days, ``--quick`` 60 days.
+    eady_uniform_res = {"latlon_channel": "30x30", "mpas_channel": "70km"}
+    for g in ["latlon_channel", "mpas_channel"]:
+        matrix.append(TestCase(
+            "eady_uniform", g, eady_uniform_res[g], 200.0, 60.0))
+
+    # --- Eady-instability (front-based variant, channel) ---
+    eady_inst_res = {"latlon_channel": "24x72", "mpas_channel": "300km"}
+    for g in ["latlon_channel", "mpas_channel"]:
+        matrix.append(TestCase(
+            "eady_instability", g, eady_inst_res[g], 60.0, 5.0))
+
+    # --- ACC channel (Zhang et al. 2024 idealised Gaussian-ridge channel) ---
+    acc_res = {"latlon_channel": "20x18", "mpas_channel": "100km"}
+    for g in ["latlon_channel", "mpas_channel"]:
+        matrix.append(TestCase(
+            "acc_channel", g, acc_res[g], 30.0, 2.0))
+
+    # --- Global overturning (Wolfe & Cessi 2010 idealised THC) ---
+    # Long spinup for full equilibrium; ``--quick`` shortens to 10 days.
+    go_res = {"latlon": "36x72", "mpas": "ico3"}
+    for g in ["latlon", "mpas"]:
+        matrix.append(TestCase(
+            "global_overturning", g, go_res[g], 365.0, 10.0))
+
+    # --- DINO (Kamm et al. 2025 idealised diabatic basin) ---
+    # Mercator lat-lon @ n_lon=20 (coarsened R1) + 500 km MPAS regional;
+    # smoke uses 1 day; production wants 30 d shake-down.
+    matrix.append(TestCase(
+        "dino", "latlon", "20x20", 30.0, 1.0))
+    matrix.append(TestCase(
+        "dino", "mpas", "500km", 30.0, 1.0))
+
     return matrix
 
 
@@ -2551,7 +2585,7 @@ def _make_check_fn(grid_type: str):
                    bool(jnp.all(jnp.isfinite(s.T_hat.data))))
             return fin, eta_max
         return check_fn
-    elif grid_type in ("mpas", "mpas_regional"):
+    elif grid_type in ("mpas", "mpas_regional", "mpas_channel"):
         def check_fn(s):
             fin = check_finite({"eta": s.eta.data, "T": s.T.data,
                                 "u": s.u.data})
@@ -2613,7 +2647,7 @@ def _make_scalar_fn(grid_type: str, grid=None, z_coord=None):
                     "mean_S": float(jnp.mean(S_phys)),               # PSU
                 }
         return scalar_fn
-    elif grid_type in ("mpas", "mpas_regional"):
+    elif grid_type in ("mpas", "mpas_regional", "mpas_channel"):
         # Capture z_coord layer thicknesses and cell areas for
         # volume-weighted diagnostics.
         # Use actual h_k (which depends on eta) rather than reference dz_ref,
@@ -2814,7 +2848,7 @@ def _make_extract_fn(grid_type: str, grid, lon_deg, lat_deg,
         def extract_fn(s):
             return _extract_spectral_ocean(s, grid)
         return extract_fn
-    elif grid_type in ("mpas", "mpas_regional"):
+    elif grid_type in ("mpas", "mpas_regional", "mpas_channel"):
         _mesh = grid if include_velocity_3d else None
         def extract_fn(s):
             return _extract_mpas_ocean(s, lon_deg, lat_deg, mesh=_mesh,
@@ -2911,14 +2945,14 @@ def _add_wind_gyre_forcing(state, grid_type: str, grid, z_coord,
             lon_west=lon_west, lon_east=lon_east,
             lat_south=lat_south, lat_north=lat_north,
         )
-    elif grid_type in ("latlon", "latlon_regional"):
+    elif grid_type in ("latlon", "latlon_regional", "latlon_channel"):
         from legoesm.ocean.init_latlon_cgrid import wind_driven_gyre_latlon_cgrid
         return wind_driven_gyre_latlon_cgrid(
             grid, z_coord,
             lon_west=lon_west, lon_east=lon_east,
             lat_south=lat_south, lat_north=lat_north,
         )
-    elif grid_type in ("mpas", "mpas_regional"):
+    elif grid_type in ("mpas", "mpas_regional", "mpas_channel"):
         from legoesm.ocean.init_mpas import wind_driven_gyre_mpas
         return wind_driven_gyre_mpas(
             grid, z_coord,
@@ -4533,10 +4567,10 @@ def run_phillips_two_layer(tc: TestCase, output_dir: Path, days: float
 
 def _get_cell_latlon_rad(grid_type, grid):
     """Return (lat, lon) in radians, broadcast to match cell shape."""
-    if grid_type in ("mpas", "mpas_regional"):
+    if grid_type in ("mpas", "mpas_regional", "mpas_channel"):
         return (np.asarray(grid.latCell, dtype=np.float64),
                 np.asarray(grid.lonCell, dtype=np.float64))
-    elif grid_type in ("latlon", "latlon_regional", "spectral"):
+    elif grid_type in ("latlon", "latlon_regional", "latlon_channel", "spectral"):
         lat_1d = np.asarray(grid.lat, dtype=np.float64)
         lon_1d = np.asarray(grid.lon, dtype=np.float64)
         lon_2d, lat_2d = np.meshgrid(lon_1d, lat_1d, indexing='xy')
@@ -4907,6 +4941,361 @@ def _compute_rpe(state, grid_type, grid, z_coord):
     for k in range(len(z_full)):
         pe += float(np.nansum(rho[..., k] * z_full[k] * dz[k] * area_bc))
     return _G_EARTH * pe
+
+
+# ===========================================================================
+# Generic registry-driven runner for EXPERIMENT_CONFIG-style experiments
+# (eady_uniform, eady_instability, acc_channel, dino, global_overturning).
+# Each of these expose a uniform ``EXPERIMENT_CONFIG`` dict; the helper
+# below wires the registry into the matrix's standard time loop +
+# diagnostics so we don't repeat ~100 lines of boilerplate per case.
+# ===========================================================================
+
+def _run_experiment_via_registry(
+    tc, output_dir, days, *,
+    exp_config,
+    label,
+    eos_linear_factory=None,
+    apply_per_step=None,
+    extra_setup_kwargs=None,
+):
+    """Drive an experiment that exposes ``EXPERIMENT_CONFIG``.
+
+    Optional hooks:
+    * ``eos_linear_factory(cfg) -> LinearEOSConfig`` to wire a linear EOS.
+    * ``apply_per_step(state, dt) -> state`` for post-step external
+      forcing (used by DINO's surface-forcing applicator).
+    * ``extra_setup_kwargs`` for case-specific ``_create_ocean_setup``
+      kwargs that aren't derivable from the config class.
+    """
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).parent))
+    from ocean_test_matrix.setup import (
+        _create_ocean_setup as _create_ocean_setup_rich,
+    )
+
+    cfg_class = exp_config["config_class"]
+    cfg = cfg_class()
+    if not exp_config.get("grid_support", {}).get(tc.grid_type, False):
+        raise NotImplementedError(
+            f"{exp_config.get('name', label)} does not support "
+            f"grid_type={tc.grid_type!r}"
+        )
+
+    physics = exp_config["create_forcings"](tc.grid_type, None, cfg)
+    H_max = getattr(cfg, "H_max",
+                    getattr(cfg, "H_deep", DEFAULT_H_MAX))
+    nlev = getattr(cfg, "n_levels", DEFAULT_NLEV)
+
+    setup_kw: dict = dict(physics=physics, H_max=H_max, nlev=nlev)
+    for attr in ("A_h", "A_v", "K_h", "K_v", "K_bih", "B_h", "C_smag"):
+        if hasattr(cfg, attr):
+            setup_kw[attr] = getattr(cfg, attr)
+    if hasattr(cfg, "bottom_drag_coeff"):
+        setup_kw["bottom_drag_r"] = cfg.bottom_drag_coeff
+    elif hasattr(cfg, "bottom_drag_r"):
+        setup_kw["bottom_drag_r"] = cfg.bottom_drag_r
+    for attr in ("tracer_advection", "barotropic_diffusion_alpha",
+                 "barotropic_div_damp"):
+        if hasattr(cfg, attr):
+            setup_kw[attr] = getattr(cfg, attr)
+    if eos_linear_factory is not None:
+        setup_kw["eos"] = "linear"
+        setup_kw["eos_linear"] = eos_linear_factory(cfg)
+    if extra_setup_kwargs:
+        setup_kw.update(extra_setup_kwargs)
+
+    # Plumb channel / regional bounds into ``tc.run_kwargs``.
+    bounds = {}
+    for attr in ("lat_south", "lat_north", "lon_west", "lon_east"):
+        if hasattr(cfg, attr):
+            bounds[attr] = getattr(cfg, attr)
+    if bounds:
+        tc = TestCase(
+            case=tc.case, grid_type=tc.grid_type, resolution=tc.resolution,
+            duration_days=tc.duration_days, quick_days=tc.quick_days,
+            run_kwargs=dict(tc.run_kwargs, **bounds),
+        )
+
+    grid, z_coord, _, model, coord_kind, lon_deg, lat_deg = (
+        _create_ocean_setup_rich(tc, **setup_kw)
+    )
+    state = exp_config["create_initial_conditions"](
+        tc.grid_type, grid, z_coord, cfg
+    )
+
+    dt = DEFAULT_DT
+    n_steps = int(days * 86400 / dt)
+    diag_every = max(1, n_steps // 40)
+    check_fn = _make_check_fn(tc.grid_type)
+    scalar_fn = _make_scalar_fn(tc.grid_type, grid, z_coord)
+    extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
+
+    if apply_per_step is None:
+        step_fn = lambda s, dt_: model.step(s, dt_)
+    else:
+        step_fn = lambda s, dt_: apply_per_step(model.step(s, dt_), dt_)
+
+    state, snapshots, diag, wall, ok = _run_timeloop(
+        step_fn, state, dt, n_steps,
+        check_fn, scalar_fn, extract_fn, diag_every,
+        lambda s: _key_array_fn(s, tc.grid_type),
+        label=f"{label} ({tc.grid_type})", total_days=days,
+    )
+
+    validate = exp_config.get("validate")
+    if validate is not None:
+        ok_v, notes = validate(state, diag, cfg)
+        ok = ok and ok_v
+    else:
+        notes = ""
+
+    z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+    depth = -z_full
+    _write_results_txt(output_dir, {
+        "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
+        "days": days, "dt": dt, "levels": z_coord.n_levels, "H_max": H_max,
+        "reference": exp_config.get("reference", ""),
+        "status": "PASS" if ok else "FAIL", "notes": notes,
+        "wall_time": f"{wall:.1f}s"},
+        diag=diag,
+    )
+    field_specs = exp_config.get("get_field_specs", lambda: [])()
+    scalar_units = exp_config.get("get_scalar_units", lambda: {})()
+    _save_case_diagnostics(
+        output_dir, f"{label} {tc.grid_type} {tc.resolution}",
+        dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
+        field_specs_2d=field_specs,
+        field_3d_key="T_3d", level_values=depth, level_label="Depth (m)",
+        vol_key="mean_eta", heat_key="mean_T", salt_key="mean_S",
+        scalar_units=scalar_units,
+        mesh=grid if coord_kind == "mpas" else None,
+    )
+    return "PASS" if ok else "FAIL", wall, notes
+
+
+# ---------------------------------------------------------------------------
+# Runner: Eady-uniform (Eady 1949; Vallis 2017 Ch. 9)
+# ---------------------------------------------------------------------------
+
+def run_eady_uniform(tc: TestCase, output_dir: Path, days: float
+                     ) -> tuple[str, float, str]:
+    """Classical Eady instability (re-entrant channel, uniform N², linear
+    shear). Validates against the Eady σ_max ≈ 0.31 f₀ Λ / N growth rate.
+    """
+    from legoesm.ocean.experiments.eady_uniform import (
+        EXPERIMENT_CONFIG as EU_CONFIG,
+    )
+    from legoesm.ocean.eos import LinearEOSConfig
+
+    def _eos(cfg):
+        return LinearEOSConfig(
+            rho_ref=cfg.rho_0, alpha_T=cfg.alpha_T,
+            beta_S=0.0,                # T-only buoyancy
+            T_ref=cfg.T_ref, S_ref=cfg.S_uniform,
+        )
+
+    return _run_experiment_via_registry(
+        tc, output_dir, days,
+        exp_config=EU_CONFIG, label="Eady Uniform",
+        eos_linear_factory=_eos,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Runner: Eady-instability (front-based variant)
+# ---------------------------------------------------------------------------
+
+def run_eady_instability(tc: TestCase, output_dir: Path, days: float
+                          ) -> tuple[str, float, str]:
+    """Eady-instability with a localised meridional T front (channel)."""
+    from legoesm.ocean.experiments.eady_instability import (
+        EXPERIMENT_CONFIG as EI_CONFIG,
+    )
+    return _run_experiment_via_registry(
+        tc, output_dir, days,
+        exp_config=EI_CONFIG, label="Eady Instability",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Runner: ACC channel (Zhang et al. 2024-style Gaussian-ridge channel)
+# ---------------------------------------------------------------------------
+
+def run_acc_channel(tc: TestCase, output_dir: Path, days: float
+                     ) -> tuple[str, float, str]:
+    """ACC-like channel with Gaussian ridge + zonal wind stress."""
+    from legoesm.ocean.experiments.acc_channel import (
+        EXPERIMENT_CONFIG as ACC_CONFIG,
+    )
+    return _run_experiment_via_registry(
+        tc, output_dir, days,
+        exp_config=ACC_CONFIG, label="ACC Channel",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Runner: Global overturning (Wolfe & Cessi 2010 idealised THC)
+# ---------------------------------------------------------------------------
+
+def run_global_overturning(tc: TestCase, output_dir: Path, days: float
+                            ) -> tuple[str, float, str]:
+    """Global overturning circulation with prescribed wind + SST restoring."""
+    from legoesm.ocean.experiments.global_overturning import (
+        EXPERIMENT_CONFIG as GO_CONFIG,
+        create_eos_config as _go_eos,
+        create_gm_redi_config as _go_gm_redi,
+    )
+
+    extra: dict = {}
+    gm_redi = _go_gm_redi(GO_CONFIG["config_class"]())
+    if gm_redi is not None:
+        extra["gm_redi"] = gm_redi
+
+    return _run_experiment_via_registry(
+        tc, output_dir, days,
+        exp_config=GO_CONFIG, label="Global Overturning",
+        eos_linear_factory=_go_eos,
+        extra_setup_kwargs=extra,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Runner: DINO (Diabatic Neverworld Ocean, Kamm et al. 2025 GMD 18, 8091)
+# ---------------------------------------------------------------------------
+
+def run_dino(tc: TestCase, output_dir: Path, days: float
+              ) -> tuple[str, float, str]:
+    """Pole-to-pole sector basin with re-entrant Drake-passage channel
+    (Kamm et al. 2025). DINO has bespoke surface forcing (cubic-Hermite
+    τ_u, cos T*/S* restoring, Jerlov SW penetration) applied as an
+    explicit per-step tendency outside ``OceanPhysicsConfig``."""
+    from legoesm.ocean.experiments.dino import (
+        DINOConfig,
+        create_dino_z_star,
+        dino_lat_lon_state,
+        dino_lat_lon_model_config,
+        dino_lat_lon_surface_forcing_arrays,
+        apply_dino_lat_lon_surface_forcing,
+        dino_mpas_state,
+        dino_mpas_model_config,
+        dino_mpas_surface_forcing_arrays,
+        apply_dino_mpas_surface_forcing,
+    )
+
+    if tc.grid_type not in ("latlon", "mpas"):
+        raise NotImplementedError(
+            f"DINO supports only latlon (Mercator) / mpas (regional); "
+            f"got {tc.grid_type}"
+        )
+
+    cfg = DINOConfig()
+    z_coord = create_dino_z_star(cfg)
+
+    # NB: coarsen the lat-lon grid via ``tc.resolution`` (e.g. "20x40")
+    # so smoke runs are tractable. The Mercator helper expects only
+    # ``n_lon``; ``n_lat`` is determined by the Mercator projection.
+    if tc.grid_type == "latlon":
+        from legoesm.ocean.experiments.dino import dino_lat_lon_grid
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        # Resolution "<n_lat>x<n_lon>" — DINO uses ``n_lon`` here; the
+        # paper R1 is n_lon=50.
+        parts = tc.resolution.split("x")
+        n_lon = int(parts[-1])
+        grid = dino_lat_lon_grid(cfg, n_lon=n_lon)
+        state = dino_lat_lon_state(grid, z_coord, cfg)
+        model_cfg, _phys_cfg = dino_lat_lon_model_config(
+            grid, cfg, physics=True
+        )
+        model = LatLonCGridOceanModel(grid, z_coord, model_cfg)
+        forcing = dino_lat_lon_surface_forcing_arrays(grid, cfg)
+        apply_forcing = (
+            lambda s, dt_: apply_dino_lat_lon_surface_forcing(
+                s, forcing, z_coord, cfg, dt_
+            )
+        )
+        lon_deg = np.degrees(np.asarray(grid.lon, dtype=np.float64))
+        lat_deg = np.degrees(np.asarray(grid.lat, dtype=np.float64))
+        coord_kind = "latlon"
+    else:  # mpas
+        from legoesm.grids.voronoi import create_regional_voronoi_mesh
+        from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
+        # Resolution string "<res>km".
+        resolution_km = int(tc.resolution.replace("km", ""))
+        mesh = create_regional_voronoi_mesh(
+            (cfg.lon_west_deg, cfg.lon_east_deg),
+            (-cfg.lat_max_deg, cfg.lat_max_deg),
+            resolution_km=resolution_km, periodic_x=True,
+        )
+        state = dino_mpas_state(mesh, z_coord, cfg)
+        model_cfg, _phys_cfg = dino_mpas_model_config(
+            mesh, cfg, physics=True
+        )
+        model = MPASOceanModel(mesh, z_coord, model_cfg)
+        forcing = dino_mpas_surface_forcing_arrays(mesh, cfg)
+        apply_forcing = (
+            lambda s, dt_: apply_dino_mpas_surface_forcing(
+                s, forcing, z_coord, cfg, dt_
+            )
+        )
+        grid = mesh
+        lon_deg = np.degrees(np.asarray(mesh.lonCell, dtype=np.float64))
+        lat_deg = np.degrees(np.asarray(mesh.latCell, dtype=np.float64))
+        coord_kind = "mpas"
+
+    dt = float(cfg.dt)
+    n_steps = int(days * 86400 / dt)
+    diag_every = max(1, n_steps // 40)
+    check_fn = _make_check_fn(tc.grid_type)
+    scalar_fn = _make_scalar_fn(tc.grid_type, grid, z_coord)
+    extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
+
+    step_fn = (
+        lambda s, dt_: apply_forcing(model.step(s, dt_), dt_)
+    )
+    state, snapshots, diag, wall, ok = _run_timeloop(
+        step_fn, state, dt, n_steps,
+        check_fn, scalar_fn, extract_fn, diag_every,
+        lambda s: _key_array_fn(s, tc.grid_type),
+        label=f"DINO ({tc.grid_type})", total_days=days,
+    )
+
+    # Validation: re-use the experiment's basic shake-down asserts.
+    from legoesm.ocean.experiments.dino import (
+        validate_results as _validate_dino,
+    )
+    ok_v, notes = _validate_dino(state, diag, cfg)
+    ok = ok and ok_v
+
+    z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+    depth = -z_full
+    _write_results_txt(output_dir, {
+        "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
+        "days": days, "dt": dt, "levels": z_coord.n_levels,
+        "H_max": float(cfg.H_deep),
+        "reference": "Kamm et al. 2025, GMD 18, 8091-8107",
+        "status": "PASS" if ok else "FAIL", "notes": notes,
+        "wall_time": f"{wall:.1f}s"},
+        diag=diag,
+    )
+    _save_case_diagnostics(
+        output_dir, f"DINO {tc.grid_type} {tc.resolution}",
+        dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
+        field_specs_2d=[
+            ("eta", "SSH (m)", "RdBu_r"),
+            ("SST", "SST (degC)", "RdYlBu_r"),
+            ("SSS", "SSS (PSU)", "YlGnBu"),
+        ],
+        field_3d_key="T_3d", level_values=depth, level_label="Depth (m)",
+        vol_key="mean_eta", heat_key="mean_T", salt_key="mean_S",
+        scalar_units={
+            "mean_eta": "m", "mean_T": "degC", "mean_S": "PSU",
+        },
+        mesh=grid if coord_kind == "mpas" else None,
+    )
+    return "PASS" if ok else "FAIL", wall, notes
 
 
 def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
@@ -5535,20 +5924,11 @@ RUNNERS: dict[str, Callable] = {
     "lock_exchange": run_lock_exchange,
     "overflow": run_overflow,
     "stommel_gyre_tracer": run_stommel_gyre_tracer,
-    # NOTE: ocean-fidelity tracking issue — the following experiments live in
-    # ``src/legoesm/ocean/experiments/`` and are listed in AVAILABLE_EXPERIMENTS
-    # but currently have no runner here, so they cannot be exercised by the
-    # test matrix. They are gated by the ocean fidelity plan (tiers 5/7/8) and
-    # need bespoke runners that mirror the pattern of e.g. run_phillips_two_layer
-    # (initial conditions + forcing applicator + time loop + snapshot writer):
-    #   - eady_instability  (tier 5; latlon, mpas)
-    #   - eady_uniform      (tier 5; latlon_channel, mpas_channel — channel
-    #                        grid plumbing missing from _create_ocean_setup)
-    #   - acc_channel       (tier 6; latlon, mpas)
-    #   - global_overturning(tier 8; latlon, mpas)
-    #   - dino              (tier 7; latlon Mercator, mpas regional)
-    # When their runners land, also register them here and add corresponding
-    # entries to ``_build_test_matrix()``.
+    "eady_uniform": run_eady_uniform,
+    "eady_instability": run_eady_instability,
+    "acc_channel": run_acc_channel,
+    "global_overturning": run_global_overturning,
+    "dino": run_dino,
 }
 
 
@@ -5568,6 +5948,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--grid", type=str, default="all",
         choices=["cubed_sphere", "latlon", "mpas",
                  "mpas_regional", "latlon_regional", "cs_regional",
+                 "latlon_channel", "mpas_channel",
+                 "spectral",
                  "all"],
         help="Run only a specific grid type (default: all)")
     p.add_argument(
