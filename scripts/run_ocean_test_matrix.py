@@ -5965,6 +5965,16 @@ def build_parser() -> argparse.ArgumentParser:
             "Default-off: runners only emit their full per-case diagnostics "
             "when this flag is passed or when a tier explicitly requires it."
         ))
+    p.add_argument(
+        "--emit-diagnostics", type=str, default="",
+        help=(
+            "Comma-separated list of long-term-simulation diagnostics to "
+            "emit alongside each PASS/FAIL run. Supported names: "
+            "``rpe`` (Reference Potential Energy), ``energy`` (KE + APE), "
+            "``tracer`` (volume / heat / salt integrals). Diagnostics are "
+            "computed at t=0 and t=T and dumped to "
+            "``results/ocean/<case>/<grid>/<res>/diagnostics.json``."
+        ))
     return p
 
 
