@@ -15,6 +15,7 @@ from __future__ import annotations
 import math
 from typing import Callable
 
+import jax
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
@@ -795,10 +796,27 @@ def _make_spectral_pe_radiation(
 
     Transforms spectral state to Gaussian grid, computes radiation,
     then transforms temperature tendency back to spectral space.
+
+    Memory note (RRTMGP path)
+    -------------------------
+    ``two_stream.solve_lw`` / ``solve_sw`` iterate over 16 LW + 14 SW
+    bands, each accumulating per-layer flux intermediates that would
+    otherwise be stored for the autodiff backward pass.  Under
+    ``eqx.filter_value_and_grad`` over a 48-step daily rollout this
+    materializes hundreds of GiB at T21 L8 -- well past a single
+    consumer GPU (RTX 5090, 24 GiB).  We wrap the inner
+    ``_physics_fn_core`` in :func:`jax.checkpoint` with
+    ``nothing_saveable`` so the entire RRTMGP solve is recomputed
+    from scratch during backward.  The outer
+    ``jax.checkpoint(step_fn, prevent_cse=True)`` in
+    ``spectral_rollout`` already recomputes per-step activations; the
+    nested radiation checkpoint trades ~2x extra forward compute for
+    the activation-storage relief that lets the production AIMIP
+    run finish on a single GPU.
     """
     _time, set_time = _make_time_state()
 
-    def physics_fn(state, grid, sigma_coord, grid_fields=None):
+    def _physics_fn_core(state, grid, sigma_coord, grid_fields=None):
         # 1. Transform spectral state to grid space
         fields = grid_fields
         if fields is None:
@@ -890,6 +908,24 @@ def _make_spectral_pe_radiation(
             lnps_hat=state.lnps_hat.replace(data=zero_2d),
             phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
         )
+
+    # Wrap the inner radiation compute in ``jax.checkpoint`` only for
+    # the RRTMGP path -- gray two-stream is cheap enough that the
+    # extra recompute on backward is wasted.  ``static_argnums`` skips
+    # ``grid`` and ``sigma_coord`` which are static (non-array)
+    # NamedTuples; ``grid_fields`` may be a pytree of grid-space
+    # arrays and flows through normally.
+    if radiation_config.scheme == "rrtmgp":
+        _physics_fn_ckpt = jax.checkpoint(
+            _physics_fn_core,
+            static_argnums=(1, 2),
+            prevent_cse=True,
+        )
+
+        def physics_fn(state, grid, sigma_coord, grid_fields=None):
+            return _physics_fn_ckpt(state, grid, sigma_coord, grid_fields)
+    else:
+        physics_fn = _physics_fn_core
 
     physics_fn.set_time = set_time
     return physics_fn

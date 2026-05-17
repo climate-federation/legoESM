@@ -125,6 +125,18 @@ class NeuralGCMSpectralConfig(NamedTuple):
     # legacy single-day forecast-skill loss.
     rollout_days: int = 1
 
+    # Per-group learning-rate multiplier for AIMIP spatial-surface
+    # coefficients.  When the trainable model carries a
+    # ``spatial_surface`` field (AIMIPClassicalParams under
+    # ``spatial_surface=True``), these coefficients live in a
+    # low-rank Legendre x Fourier basis whose gradient magnitudes are
+    # typically much smaller than the sigmoid-bounded scheme scalars,
+    # so the base AIMIP LR (~3e-4) leaves them effectively untrained.
+    # A multiplier of 5-10 brings spatial-coef updates to the same
+    # rough scale as scheme-knob updates per step.  Default 1.0
+    # disables the per-group split (single-LR behavior).
+    spatial_lr_scale: float = 1.0
+
     # Loss
     loss_config: LossConfig = LossConfig()
 
@@ -528,7 +540,17 @@ def spectral_rollout(
 
         return new_state, None
 
-    step_fn_ckpt = jax.checkpoint(step_fn, prevent_cse=False)
+    # ``prevent_cse=True`` plus ``policy=nothing_saveable`` is the
+    # most aggressive memory-saving mode: every intermediate is
+    # recomputed during backward.  Necessary on a 48-step daily
+    # rollout with RRTMGP enabled (the gas-optics + two-stream
+    # solver allocate hundreds of GiB of activations otherwise).
+    # Gray-radiation runs are insensitive to this choice.
+    step_fn_ckpt = jax.checkpoint(
+        step_fn,
+        prevent_cse=True,
+        policy=jax.checkpoint_policies.nothing_saveable,
+    )
 
     final_state, _ = jax.lax.scan(
         step_fn_ckpt, initial_state, None, length=n_steps,
@@ -886,14 +908,57 @@ def _train_spectral_loop(
     n_steps_per_day = int(86400 / config.dt)
     rollout_days = int(getattr(config, "rollout_days", 1) or 1)
     n_steps_rollout = n_steps_per_day * rollout_days
-    optimizer = create_optimizer(TrainingConfig(
+    total_steps = max(1, config.n_epochs * max(1, len(ic_states)))
+    base_optimizer = create_optimizer(TrainingConfig(
         lr=config.lr,
         warmup_steps=config.warmup_steps,
-        total_steps=max(1, config.n_epochs * max(1, len(ic_states))),
+        total_steps=total_steps,
         weight_decay=config.weight_decay,
         grad_clip_norm=config.grad_clip_norm,
         optimizer=config.optimizer,
     ))
+
+    # Per-group LR partitioning for AIMIP spatial-surface coefficients.
+    # When ``model.spatial_surface`` is present and the user has asked
+    # for a non-default ``spatial_lr_scale``, build a second optimizer
+    # at the scaled LR and route spatial-coef leaves to it via
+    # ``optax.multi_transform``.  Detection is purely structural: any
+    # leaf whose path contains the substring ``spatial_surface`` is
+    # treated as a spatial coefficient, so the partition works for any
+    # eqx.Module that nests a :class:`AIMIPSpatialSurfaceParams` under
+    # that attribute name.
+    spatial_lr_scale = float(getattr(config, "spatial_lr_scale", 1.0) or 1.0)
+    has_spatial = getattr(model, "spatial_surface", None) is not None
+    if has_spatial and spatial_lr_scale != 1.0:
+        spatial_optimizer = create_optimizer(TrainingConfig(
+            lr=config.lr * spatial_lr_scale,
+            warmup_steps=config.warmup_steps,
+            total_steps=total_steps,
+            weight_decay=config.weight_decay,
+            grad_clip_norm=config.grad_clip_norm,
+            optimizer=config.optimizer,
+        ))
+
+        def _label_aimip_params(params):
+            def _label(path, _leaf):
+                path_str = "/".join(
+                    str(getattr(p, "name", p) if hasattr(p, "name") else p)
+                    for p in path
+                )
+                return "spatial" if "spatial_surface" in path_str else "base"
+            return jax.tree_util.tree_map_with_path(_label, params)
+
+        optimizer = optax.multi_transform(
+            {"spatial": spatial_optimizer, "base": base_optimizer},
+            _label_aimip_params,
+        )
+        logger.info(
+            f"Per-group LR: spatial coefs at lr={config.lr * spatial_lr_scale:.2e} "
+            f"(x{spatial_lr_scale}), scalar/MLP at lr={config.lr:.2e}"
+        )
+    else:
+        optimizer = base_optimizer
+
     opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
     loss_history = []
 

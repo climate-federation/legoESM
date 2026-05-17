@@ -74,11 +74,19 @@ dt: 1800.0           # 30-minute dycore timestep
 # AIMIP guideline of "stop training when no improvement after
 # several months" (one epoch = full pass over the windowed train
 # set, ~tens of model-days of physics integration).
-aimip_n_epochs: 3
-aimip_patience: 2          # stop if no improvement for 2 consecutive epochs
+aimip_n_epochs: 15         # was 3.  Scaled up so the cosine schedule has a
+                           # meaningful budget for the 91 spatial-surface
+                           # coefficients introduced in commit 7f5edfef
+                           # (which barely moved at the previous 3-epoch /
+                           # 60-step budget -- post-train loss matched the
+                           # init loss to within 1e-4).
+aimip_patience: 4          # was 2.  Bumped along with n_epochs so cosine
+                           # decay can finish ramping before early-stop
+                           # fires.
 aimip_min_delta: 1.0e-3    # minimum loss improvement to reset patience
 aimip_lr: 3.0e-4
-aimip_warmup: 5
+aimip_warmup: 10           # was 5.  Doubled to give the larger param tree
+                           # (scheme scalars + spatial coefs) a stable warm-up.
 aimip_weight_decay: 1.0e-5
 aimip_grad_clip: 1.0
 aimip_optimizer: "adamw"  # adamw | adam | muon | muon_partitioned — see ml/training.create_optimizer
@@ -94,24 +102,25 @@ aimip_optimizer: "adamw"  # adamw | adam | muon | muon_partitioned — see ml/tr
 #            for closing the residual cold T bias (-2.06 K in
 #            ablation-v2 winner) — gray two-stream cannot
 #            represent cloud LW/SW interaction.
-aimip_radiation: "gray"   # gray | rrtmgp.  RRTMGP is recommended for
-                          # closing the residual cold T bias but its
-                          # backward pass through ``solve_columns`` under
-                          # ``eqx.filter_value_and_grad`` materializes
-                          # ~200 GiB of intermediates at T21 L8 with a
-                          # 48-step daily rollout (verified 2026-05-17
-                          # on RTX 5090, 24 GiB).  Use ``gray`` on
-                          # single-GPU hardware until either (a) RRTMGP
-                          # gains explicit gradient checkpointing per
-                          # ``solve_columns`` call, or (b) the daily
-                          # rad-update interval is bumped to >= 48 (one
-                          # rad call per day).  The trainable spatial
-                          # ``sfc_emissivity`` / ``sfc_albedo`` knobs
-                          # flow through the gray path too, so the
-                          # spatial surface flexibility (commit 7f5edfef)
-                          # remains active.
-aimip_rad_update_interval: 12  # Used only when aimip_radiation: rrtmgp;
-                               # ignored in the gray path.
+aimip_radiation: "rrtmgp"  # gray | rrtmgp.  RRTMGP is required for AIMIP
+                           # physics cases per the project policy: gray
+                           # two-stream cannot represent cloud LW/SW
+                           # interaction, which dominates the residual
+                           # cold T bias.  The single-GPU memory
+                           # footprint is contained by the explicit
+                           # ``jax.checkpoint`` wrapper in
+                           # ``radiation/integration.py``
+                           # (``_make_spectral_pe_radiation``) plus the
+                           # aggressive per-step
+                           # ``policy=nothing_saveable`` checkpoint on
+                           # ``spectral_rollout``'s scan body.  Both
+                           # trade ~2-3x forward compute for the
+                           # activation-storage relief that lets a
+                           # 48-step daily rollout fit in 24 GiB.
+aimip_rad_update_interval: 12  # Reserved knob; the spectral_pe path does
+                               # not yet implement step-counter gating
+                               # for RRTMGP, so the interval is informational
+                               # for now.  Tracked as a follow-up.
 
 # ----- Spatial surface parameters (over land) ----------------------
 # When true, the AIMIP classical variant exposes seven surface and
@@ -124,6 +133,20 @@ aimip_rad_update_interval: 12  # Used only when aimip_radiation: rrtmgp;
 # flexibility expresses where surface heterogeneity matters most
 # (land roughness, albedo).  See ``training/aimip_spatial.py``.
 aimip_spatial_surface: true
+
+# ----- Spatial-coefficient initialization + per-group LR -----------
+# ``aimip_spatial_init_std > 0`` breaks the zero-gradient symmetry at
+# initialization so the optimizer can move spatial coefficients from
+# step one.  ``aimip_spatial_lr_scale > 1`` routes the spatial-coef
+# leaves through a scaled-LR copy of the base optimizer via
+# ``optax.multi_transform``; the scaled LR brings the per-step update
+# magnitudes of the 91 spatial coefficients to roughly match the
+# sigmoid-bounded scheme scalars (which carry ~3 orders of magnitude
+# more gradient signal at init).  Both knobs only take effect when
+# ``aimip_spatial_surface: true``.
+aimip_spatial_init_std: 0.02
+aimip_spatial_seed: 0
+aimip_spatial_lr_scale: 5.0
 
 # ----- Multi-day rollout supervision -------------------------------
 # Number of consecutive simulated days each training rollout

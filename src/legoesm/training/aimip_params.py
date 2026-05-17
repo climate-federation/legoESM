@@ -219,15 +219,29 @@ class AIMIPClassicalParams(eqx.Module):
     @staticmethod
     def from_defaults(
         spatial_surface: bool = False,
+        spatial_init_std: float = 0.0,
+        spatial_seed: int = 0,
     ) -> "AIMIPClassicalParams":
         """Initialize all knobs at their canonical scheme defaults.
 
         Parameters
         ----------
         spatial_surface : bool
-            If True, also initialize a :class:`AIMIPSpatialSurfaceParams`
-            bundle for the surface and surface-radiation knobs at
-            zero perturbation (i.e. equal to the scalar baseline).
+            If True, initialize a :class:`AIMIPSpatialSurfaceParams`
+            bundle for the surface and surface-radiation knobs.
+        spatial_init_std : float
+            Standard deviation of the Gaussian initialization in
+            spatial-coefficient space.  ``0.0`` keeps the spatial
+            field equal to the scalar baseline at step zero (useful
+            for sanity-checking that ``spatial_surface=True`` reduces
+            to the scalar mode at init); a small positive value
+            (e.g. 0.02) breaks the zero-gradient symmetry and lets
+            the optimizer explore the spatial degrees of freedom
+            immediately.  Only used when ``spatial_surface=True``.
+        spatial_seed : int
+            PRNG seed for the spatial-coefficient initialization.
+            Only used when ``spatial_surface=True`` and
+            ``spatial_init_std > 0``.
         """
         scheme_defaults = _canonical_scheme_defaults()
         try:
@@ -244,10 +258,13 @@ class AIMIPClassicalParams(eqx.Module):
                 _range_to_sigmoid(default, c.min_val, c.max_val),
                 dtype=param_dtype,
             )
-        spatial = (
-            AIMIPSpatialSurfaceParams.from_defaults(dtype=param_dtype)
-            if spatial_surface else None
-        )
+        spatial = None
+        if spatial_surface:
+            spatial = AIMIPSpatialSurfaceParams.from_defaults(
+                dtype=param_dtype,
+                init_std=spatial_init_std,
+                key=jax.random.PRNGKey(int(spatial_seed)),
+            )
         return AIMIPClassicalParams(
             raw_values=raw,
             constraints=AIMIP_CLASSICAL_CONSTRAINTS,

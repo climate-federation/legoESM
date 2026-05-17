@@ -163,6 +163,44 @@ def test_aimip_spatial_surface_params_n_trainable_count():
     assert p.n_trainable() == 91
 
 
+def test_aimip_spatial_surface_nonzero_init_breaks_symmetry():
+    """``init_std > 0`` produces non-baseline spatial fields at init."""
+    from legoesm.training.aimip_spatial import (
+        AIMIPSpatialSurfaceParams,
+        SPATIAL_FIELD_NAMES,
+    )
+    grid = _grid_t11()
+    p = AIMIPSpatialSurfaceParams.from_defaults(
+        init_std=0.05, key=jax.random.PRNGKey(42),
+    )
+    fields_2d = p.evaluate(grid)
+    # Every field should now have a non-trivial spatial profile (min != max).
+    for name in SPATIAL_FIELD_NAMES:
+        v = fields_2d[name]
+        v_min = float(jnp.min(v))
+        v_max = float(jnp.max(v))
+        assert v_max - v_min > 1e-6, (
+            f"{name}: field is uniform under non-zero init "
+            f"(min={v_min}, max={v_max})"
+        )
+
+
+def test_aimip_classical_params_spatial_seed_reproducibility():
+    """Same seed -> identical spatial-coef tree across two builds."""
+    from legoesm.training.aimip_params import AIMIPClassicalParams
+    p1 = AIMIPClassicalParams.from_defaults(
+        spatial_surface=True, spatial_init_std=0.02, spatial_seed=7,
+    )
+    p2 = AIMIPClassicalParams.from_defaults(
+        spatial_surface=True, spatial_init_std=0.02, spatial_seed=7,
+    )
+    for name in p1.spatial_surface.fields:
+        assert jnp.array_equal(
+            p1.spatial_surface.fields[name].coeffs,
+            p2.spatial_surface.fields[name].coeffs,
+        ), f"seed=7 reproducibility broken for field {name}"
+
+
 # ----------------------------------------------------------------------
 # land_mask_from_phis
 # ----------------------------------------------------------------------

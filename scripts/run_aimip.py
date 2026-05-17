@@ -147,6 +147,7 @@ def _build_spectral_config(cfg: dict[str, Any]):
             for w in (cfg.get("train_windows") or ())
         ) or None,
         rollout_days=int(cfg.get("aimip_rollout_days", 1)),
+        spatial_lr_scale=float(cfg.get("aimip_spatial_lr_scale", 1.0)),
         loss_config=loss_config,
         log_every=int(cfg.get("log_every", 1)),
         checkpoint_dir=str(Path(cfg["output_dir"]) / cfg["aimip_variant"]),
@@ -212,7 +213,11 @@ def _train_aimip_classical(spec_cfg, cache_dir: str, *, cfg: dict | None = None)
     )
 
     spatial_surface = bool(cfg.get("aimip_spatial_surface", False))
-    params = AIMIPClassicalParams.from_defaults(spatial_surface=spatial_surface)
+    params = AIMIPClassicalParams.from_defaults(
+        spatial_surface=spatial_surface,
+        spatial_init_std=float(cfg.get("aimip_spatial_init_std", 0.0)),
+        spatial_seed=int(cfg.get("aimip_spatial_seed", 0)),
+    )
     n_scalar = len(params.raw_values)
     n_spatial = (
         params.spatial_surface.n_trainable() if params.spatial_surface else 0

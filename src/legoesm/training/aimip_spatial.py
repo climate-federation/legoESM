@@ -174,10 +174,30 @@ class SpatialField(eqx.Module):
         l_max: int = _DEFAULT_L_MAX,
         m_max: int = _DEFAULT_M_MAX,
         dtype: jnp.dtype = jnp.float32,
+        init_std: float = 0.0,
+        key: jax.Array | None = None,
     ) -> "SpatialField":
+        """Build a spatial field with zero or small-random initial coefs.
+
+        ``init_std`` controls the standard deviation of an isotropic
+        Gaussian initialization in coefficient space.  ``init_std=0``
+        (default) keeps the spatial field equal to the baseline
+        ``f_0`` everywhere -- useful as a sanity-check fallback and
+        for the AIMIP regression that the spatial mode reduces to the
+        scalar mode at zero coefficients.  Non-zero ``init_std``
+        breaks the symmetry of zero gradient at zero coefficients
+        and lets the optimizer explore the spatial degrees of
+        freedom from step one.
+        """
         nb = n_basis(l_max, m_max)
+        if init_std > 0.0:
+            if key is None:
+                key = jax.random.PRNGKey(0)
+            coeffs = init_std * jax.random.normal(key, (nb,), dtype=dtype)
+        else:
+            coeffs = jnp.zeros(nb, dtype=dtype)
         return SpatialField(
-            coeffs=jnp.zeros(nb, dtype=dtype),
+            coeffs=coeffs,
             f_0=float(f_0),
             scale=float(scale),
             transform=transform,
@@ -262,7 +282,22 @@ class AIMIPSpatialSurfaceParams(eqx.Module):
         l_max: int = _DEFAULT_L_MAX,
         m_max: int = _DEFAULT_M_MAX,
         dtype: jnp.dtype = jnp.float32,
+        init_std: float = 0.0,
+        key: jax.Array | None = None,
     ) -> "AIMIPSpatialSurfaceParams":
+        """Build the AIMIP spatial-surface bundle.
+
+        Each :class:`SpatialField` receives an independently-keyed
+        random init when ``init_std > 0``; the key is split per field
+        so swapping the field set leaves earlier inits stable across
+        runs that touch different field names.
+        """
+        if init_std > 0.0 and key is None:
+            key = jax.random.PRNGKey(0)
+        keys = (
+            jax.random.split(key, len(_FIELD_SPECS))
+            if (init_std > 0.0 and key is not None) else (None,) * len(_FIELD_SPECS)
+        )
         return AIMIPSpatialSurfaceParams(
             fields={
                 name: SpatialField.from_defaults(
@@ -272,8 +307,10 @@ class AIMIPSpatialSurfaceParams(eqx.Module):
                     l_max=l_max,
                     m_max=m_max,
                     dtype=dtype,
+                    init_std=init_std,
+                    key=keys[i],
                 )
-                for name, spec in _FIELD_SPECS.items()
+                for i, (name, spec) in enumerate(_FIELD_SPECS.items())
             }
         )
 
