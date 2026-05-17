@@ -27,8 +27,12 @@ Runs:
   adapter takes ``uniform_z=True`` to match. Both use the cubic-Hermite τ_u
   knots and cos-profile T*/S* restoring from Kamm et al. 2025 Appendix B.
 
-Result summary: **27 / 30 metrics within 5 %** across the four
-(case × variant) combinations. The three remaining outliers
+Result summary: **27 / 30 metrics within tolerance** across the four
+(case × variant) combinations. Two of those passes (the ``u_abs_max`` rows
+for the DINO MPAS and DINO lat-lon runs) clear the gate via the
+absolute floor rather than the relative one — their headline ``rel Δ``
+exceeds 5 % but the absolute residual is below the ``u_abs_max`` floor
+of ``0.01 m/s``. The relative-only tally is 25 / 30 within 5 %. The three remaining outliers
 (`eady_uniform/mpas u_abs_max`, `u_mean`, `ke_mean`) are an inherent
 transient difference between the legoESM MPAS vector-invariant momentum
 formulation and Veros's B-grid momentum advection — the MPAS dycore

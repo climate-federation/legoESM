@@ -273,6 +273,13 @@ def test_eady_uniform_smoke_run(isolated_cache):
     assert np.isfinite(temp).all()
     assert np.isfinite(u).all()
     assert float(np.abs(u).max()) > 0.0
+    # The cross-model comparison harness relies on the runner capturing
+    # ``dxt`` / ``dyt`` / ``dzt`` in grid_metadata so the bulk-metric
+    # reduction can recover per-level cell thicknesses without inferring
+    # them from ``zw`` interface arrays.
+    for key in ("dxt", "dyt", "dzt"):
+        assert key in result.grid_metadata, f"grid_metadata missing {key!r}"
+        assert np.asarray(result.grid_metadata[key]).size > 0
 
 
 @pytest.mark.slow

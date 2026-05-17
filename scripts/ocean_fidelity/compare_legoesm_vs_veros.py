@@ -29,18 +29,18 @@ import argparse
 import os
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import numpy as np
 import jax
-import jax.numpy as jnp
 
 jax.config.update("jax_enable_x64", True)
+
+from legoesm import constants  # noqa: E402  -- imported after JAX env setup
 
 
 # ---------------------------------------------------------------------------
@@ -219,7 +219,9 @@ def run_veros_dino(nx: int = 20, ny: int = 40, nz: int = 12) -> dict[str, float]
 _VEROS_RHO_REF = 1024.0
 _VEROS_BETA_T = 1.67e-4
 _VEROS_BETA_S = 0.78e-3
-_VEROS_T_REF_C = 283.0 - 273.15   # theta0 - 273.15 = 9.85 deg C
+# Veros stores ``theta0 = 283.0`` Kelvin and references the linear EOS
+# against ``theta0 - T_freeze`` in degrees Celsius.
+_VEROS_T_REF_C = 283.0 - constants.T_freeze   # 9.85 deg C
 _VEROS_S_REF = 35.0
 
 
@@ -276,7 +278,6 @@ def _legoesm_latlon_cell_views(state, grid, z_coord, with_salt: bool):
               if with_salt else None)
     u_flat = u_cell.reshape(Ncols, n_z)
     usq_flat = usq_cell.reshape(Ncols, n_z)
-    mask3 = (mask[..., None] * np.ones((1, 1, n_z))).reshape(Ncols, n_z)
     w = (area_2d[..., None] * dz[None, None, :]
          * mask[..., None]).reshape(Ncols, n_z)
     dz_col = (dz[None, None, :] * mask[..., None]).sum(axis=2).reshape(Ncols)
@@ -299,7 +300,6 @@ def _legoesm_mpas_cell_views(state, mesh, z_coord, with_salt: bool):
     nCells, n_z = T.shape
     cellsOnEdge = np.asarray(mesh.cellsOnEdge, dtype=np.int64)
     edgesOnCell = np.asarray(mesh.edgesOnCell, dtype=np.int64)
-    nEdgesOnCell = np.asarray(mesh.nEdgesOnCell, dtype=np.int64)
     areaCell = np.asarray(mesh.areaCell, dtype=np.float64)
     dz = np.asarray(z_coord.dz_ref, dtype=np.float64)
     c1 = cellsOnEdge[0, :]

@@ -174,7 +174,7 @@ def _build_dino_setup_class(*,
                              uniform_z: bool = False):
     """Build the DINOSetup class with the requested grid parameters."""
     from veros import VerosSetup, veros_routine
-    from veros.variables import allocate, Variable
+    from veros.variables import Variable
     from veros.core.operators import numpy as npx, update, at
 
     class DINOSetup(VerosSetup):

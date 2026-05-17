@@ -190,10 +190,8 @@ def _build_eady_uniform_setup_class():
             # zt is negative below surface (Veros convention) — use it
             # directly for the linear T(z) and u(z) profiles.
             z_full = vs.zt                                # shape (nz,)
-            y_deg = vs.yt[npx.newaxis, :, npx.newaxis]    # (1, ny, 1)
-            x_deg = vs.xt[:, npx.newaxis, npx.newaxis]    # (nx, 1, 1)
 
-            # Gaussian jet envelope on T grid (centres) and on U grid (faces).
+            # Gaussian jet envelope (same array used for T and u).
             env_t = npx.exp(
                 -((vs.yt - LAT_CENTER_DEG) / JET_WIDTH_DEG) ** 2
             )                                              # (ny,)
@@ -203,9 +201,11 @@ def _build_eady_uniform_setup_class():
             dTdy = _dT_dy()
 
             # Meridional integral of dTdy * envelope using the cell
-            # latitudes converted to metres.
-            R_earth = 6_371_229.0   # m, matches Veros's default radius
-            lat_center_rad = math.radians(LAT_CENTER_DEG)
+            # latitudes converted to metres. Use Veros's default Earth
+            # radius (``radius=6370e3`` in ``veros/settings.py``) so the
+            # numerator of the thermal-wind integral matches Veros's
+            # internal metric exactly.
+            R_earth = 6.370e6
             y_m = npx.radians(vs.yt - LAT_CENTER_DEG) * R_earth   # (ny,)
             # Trapezoid: T_anom(j) = sum_{i<j} 0.5*(env[i]+env[i+1])
             #                      * (y[i+1]-y[i]) * dTdy
@@ -258,14 +258,11 @@ def _build_eady_uniform_setup_class():
             U_bar = npx.sum(U_prof * dz) / H_col
             U_baroclinic = U_prof - U_bar                # (nz,)
 
-            # Envelope on U-grid latitudes (yt and yu both index latitude
-            # in Veros's lon-lat C-grid).
-            env_u = npx.exp(
-                -((vs.yt - LAT_CENTER_DEG) / JET_WIDTH_DEG) ** 2
-            )
+            # Same Gaussian-in-latitude envelope is used for u as for T
+            # (yt and yu both index latitude in Veros's lon-lat C-grid).
             u_field = (
                 U_baroclinic[npx.newaxis, npx.newaxis, :]
-                * env_u[npx.newaxis, :, npx.newaxis]
+                * env_t[npx.newaxis, :, npx.newaxis]
             ) * vs.maskU                                  # (nx, ny, nz)
             for tau in range(vs.u.shape[-1]):
                 vs.u = update(vs.u, at[..., tau], u_field)
