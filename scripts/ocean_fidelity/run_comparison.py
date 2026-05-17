@@ -217,7 +217,15 @@ def _format_overlap_section(case: str, veros_result, legoesm_bundles: list) -> l
         lines.append(_overlap_row("T mean (°C)", veros_t["mean"], legoesm_T_mean))
 
     if veros_u:
-        legoesm_u_max = [_legoesm_scalar(b, "max_speed") for b in legoesm_bundles]
+        # Prefer ``max_abs_u`` (full-column max — matches Veros's 3D max);
+        # fall back to ``max_speed`` for legacy bundles that only stored
+        # the surface-level metric.
+        legoesm_u_max = []
+        for b in legoesm_bundles:
+            val = _legoesm_scalar(b, "max_abs_u")
+            if val is None:
+                val = _legoesm_scalar(b, "max_speed")
+            legoesm_u_max.append(val)
         veros_u_max = max(abs(veros_u["min"]), abs(veros_u["max"]))
         lines.append(_overlap_row("max |u| (m/s)", veros_u_max, legoesm_u_max))
 

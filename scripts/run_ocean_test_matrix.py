@@ -378,6 +378,15 @@ def _build_test_matrix() -> list[TestCase]:
             "beta_S": 0.0,
             "T_ref": 17.5,
             "S_ref": 35.0,
+            # WENO5 tracer advection: less front-diffusive than the
+            # default TVD scheme, comparable in sharpness to Veros's
+            # superbee flux limiter. A diffused front weakens the local
+            # density gradient that drives the gravity current.
+            "tracer_advection": "weno5",
+            # WENO5 momentum advection: removes the intrinsic dissipation
+            # of the vector_invariant scheme that can damp the baroclinic
+            # mode on this small, sharply-stratified geometry.
+            "momentum_advection": "weno5",
         },
     ))
 
@@ -2744,8 +2753,17 @@ def _make_scalar_fn(grid_type: str, grid=None, z_coord=None):
                         speed_sfc = jnp.sqrt(u_sfc ** 2 + v_sfc ** 2)
                         speed_ocean = jnp.where(ocean_mask, speed_sfc, jnp.nan)
                         max_speed = float(jnp.nanmax(speed_ocean))
+                    # Full-column ``max |u|`` matches the metric the MPAS
+                    # path already reports and the Veros peer extracts —
+                    # surface-only ``max_speed`` undercounts gravity-current
+                    # cases where the strongest flow lives at the bottom
+                    # boundary (Petersen lock_exchange).
+                    max_abs_u = float(jnp.maximum(
+                        jnp.max(jnp.abs(s.u.data)),
+                        jnp.max(jnp.abs(s.v.data))))
                 else:
                     max_speed = 0.0
+                    max_abs_u = 0.0
 
                 # Volume-weighted KE
                 mean_ke = 0.0
@@ -2769,18 +2787,21 @@ def _make_scalar_fn(grid_type: str, grid=None, z_coord=None):
                     "mean_T": mean_T,
                     "mean_S": mean_S,
                     "max_speed": max_speed,
+                    "max_abs_u": max_abs_u,
                     "mean_ke": mean_ke,
                 }
             else:
                 # Fallback without masking
+                _max_abs_u_fb = float(jnp.maximum(
+                    jnp.max(jnp.abs(s.u.data)),
+                    jnp.max(jnp.abs(s.v.data))))
                 return {
                     "mean_eta": float(jnp.mean(s.eta.data)),
                     "max_abs_eta": float(jnp.max(jnp.abs(s.eta.data))),
                     "mean_T": float(jnp.mean(s.T.data)),
                     "mean_S": float(jnp.mean(s.S.data)),
-                    "max_speed": float(jnp.maximum(
-                        jnp.max(jnp.abs(s.u.data)),
-                        jnp.max(jnp.abs(s.v.data)))),
+                    "max_speed": _max_abs_u_fb,
+                    "max_abs_u": _max_abs_u_fb,
                     "mean_ke": 0.0,
                 }
         return scalar_fn
@@ -4953,6 +4974,14 @@ def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
         if run_kw.get("barotropic_time_filter") is not None:
             replace_kwargs["barotropic_time_filter"] = str(
                 run_kw["barotropic_time_filter"]
+            )
+        if run_kw.get("tracer_advection") is not None:
+            replace_kwargs["tracer_advection"] = str(
+                run_kw["tracer_advection"]
+            )
+        if run_kw.get("momentum_advection") is not None:
+            replace_kwargs["momentum_advection"] = str(
+                run_kw["momentum_advection"]
             )
         if run_kw.get("eos") == "linear":
             replace_kwargs["eos"] = "linear"

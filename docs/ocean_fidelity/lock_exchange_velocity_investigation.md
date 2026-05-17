@@ -48,10 +48,27 @@ develop.
 | `bebt` (semi-implicit barotropic) | 0.2 | 0.0 (forward-backward) | none measurable |
 | `n_barotropic_substeps` | 30 | 1 | small (-15 %) |
 | `barotropic_time_filter` | "cosine" | "box" | small (-15 %) |
+| `tracer_advection` | "tvd" | "weno5" | none measurable |
+| `momentum_advection` | "vector_invariant" | "weno5" | none measurable |
 
 `barotropic_diffusion_alpha` is the only knob that moves the needle.
 Even with all of the above stacked, the gravity current saturates at
-~0.06 - 0.08 m/s — still ~10x below theory.
+~0.06 - 0.08 m/s (full-column ``max |u|`` = 0.070 m/s, surface
+``max_speed`` = 0.063 m/s — both reported now via the ``max_abs_u``
+extension to the lat-lon scalar function) — still ~10x below theory.
+
+## Diagnostic fix landed alongside the investigation
+
+The lat-lon C-grid scalar function (``_make_scalar_fn``,
+``scripts/run_ocean_test_matrix.py``) used to report only the surface-
+level velocity as ``max_speed``. The MPAS path already exposed the
+full-column ``max |u|``; the latlon path did not. With a strong subsurface
+flow (Petersen lock-exchange bottom layer ≈ surface layer in this
+counter-flow geometry), the difference is small (0.063 vs 0.070 m/s on
+this case), but the metric is now consistent across grids so future
+gravity-current cases get apples-to-apples comparison out of the box.
+``run_comparison.py`` prefers ``max_abs_u`` over ``max_speed`` when both
+are present in the legoESM bundle.
 
 ## Suspects for the remaining gap
 
