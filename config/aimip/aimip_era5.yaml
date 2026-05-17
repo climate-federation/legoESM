@@ -94,11 +94,24 @@ aimip_optimizer: "adamw"  # adamw | adam | muon | muon_partitioned — see ml/tr
 #            for closing the residual cold T bias (-2.06 K in
 #            ablation-v2 winner) — gray two-stream cannot
 #            represent cloud LW/SW interaction.
-aimip_radiation: "rrtmgp"
-aimip_rad_update_interval: 12  # RRTMGP fired every N dycore steps (6h at dt=1800s).
-                               # Was 6 (3h).  Bumped to 12 so the RRTMGP gas-optics
-                               # call dominates cost only every 6 simulated hours,
-                               # keeping the single-GPU AIMIP budget tractable.
+aimip_radiation: "gray"   # gray | rrtmgp.  RRTMGP is recommended for
+                          # closing the residual cold T bias but its
+                          # backward pass through ``solve_columns`` under
+                          # ``eqx.filter_value_and_grad`` materializes
+                          # ~200 GiB of intermediates at T21 L8 with a
+                          # 48-step daily rollout (verified 2026-05-17
+                          # on RTX 5090, 24 GiB).  Use ``gray`` on
+                          # single-GPU hardware until either (a) RRTMGP
+                          # gains explicit gradient checkpointing per
+                          # ``solve_columns`` call, or (b) the daily
+                          # rad-update interval is bumped to >= 48 (one
+                          # rad call per day).  The trainable spatial
+                          # ``sfc_emissivity`` / ``sfc_albedo`` knobs
+                          # flow through the gray path too, so the
+                          # spatial surface flexibility (commit 7f5edfef)
+                          # remains active.
+aimip_rad_update_interval: 12  # Used only when aimip_radiation: rrtmgp;
+                               # ignored in the gray path.
 
 # ----- Spatial surface parameters (over land) ----------------------
 # When true, the AIMIP classical variant exposes seven surface and
