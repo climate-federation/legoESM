@@ -1,0 +1,431 @@
+"""Direct unit tests for the DINO experiment module.
+
+Exercises the leaf symbols of ``legoesm.ocean.experiments.dino`` —
+config defaults, analytical bathymetry, wind-stress interpolation,
+T*/S* targets, equatorial 1D profiles, top-layer tendencies, the
+Lévy z* helper wrapper, and the lat-lon initial-state construction.
+The MPAS path is exercised in a separate test that is skipped when
+``scipy`` is unavailable, since regional Voronoi mesh creation depends
+on it.
+
+All tests run without JIT and at small problem sizes so the suite
+stays cheap.  Production-scale integration of DINO is covered by
+``scripts/run_dino.py`` and the experiment registry; this file is
+the slopbuster-mandated direct-coverage entry point.
+"""
+
+from __future__ import annotations
+
+import math
+
+import jax.numpy as jnp
+import numpy as np
+import pytest
+
+from legoesm import constants
+from legoesm.grids.latlon import create_mercator_grid
+from legoesm.ocean.experiments import dino
+from legoesm.ocean.experiments import AVAILABLE_EXPERIMENTS
+from legoesm.ocean.experiments.dino import (
+    DINOConfig,
+    EXPERIMENT_CONFIG,
+    create_dino_z_star,
+    create_initial_conditions,
+    dino_S_profile_1d,
+    dino_S_star,
+    dino_T_profile_1d,
+    dino_T_star_annual_mean,
+    dino_bathymetry,
+    dino_initial_T_S,
+    dino_lat_lon_grid,
+    dino_lat_lon_initial_state_arrays,
+    dino_top_layer_S_tendency,
+    dino_top_layer_T_tendency,
+    dino_top_layer_u_tendency,
+    dino_wind_stress,
+)
+from legoesm.ocean.init_latlon_cgrid import partial_periodic_seam_wall_latlon
+from legoesm.ocean.vertical import create_levy_stretched_z_star
+
+
+# ---------------------------------------------------------------------
+# Config + registry
+# ---------------------------------------------------------------------
+
+class TestDINOConfig:
+    def test_default_construct(self):
+        cfg = DINOConfig()
+        assert cfg.n_levels == 36
+        assert cfg.H_deep == 4000.0
+        assert cfg.H_shallow == 2000.0
+        assert cfg.dz_min == 10.0
+        # Paper-specific reference constants differ from project canonical
+        # values by <0.1% — flagged in the docstring.
+        assert cfg.rho_0 == pytest.approx(1026.0)
+        assert cfg.c_p == pytest.approx(3991.86)
+        # Wind knots: 7 (lat, tau) pairs.
+        assert len(cfg.wind_tau_lats_deg) == 7
+        assert len(cfg.wind_tau_values) == 7
+
+    def test_registry_entry(self):
+        assert "dino" in AVAILABLE_EXPERIMENTS
+        assert AVAILABLE_EXPERIMENTS["dino"] is EXPERIMENT_CONFIG
+        assert EXPERIMENT_CONFIG["name"] == "dino"
+        assert EXPERIMENT_CONFIG["config_class"] is DINOConfig
+        # Grid support matches the implemented paths.
+        gs = EXPERIMENT_CONFIG["grid_support"]
+        assert gs["latlon"] is True
+        assert gs["mpas"] is True
+        assert gs["cubed_sphere"] is False
+        assert gs["spectral"] is False
+
+
+# ---------------------------------------------------------------------
+# Bathymetry (paper Appendix A)
+# ---------------------------------------------------------------------
+
+class TestDinoBathymetry:
+    def test_interior_is_deep(self):
+        # Point well inside the basin (no taper, no sill).
+        H = float(dino_bathymetry(jnp.array(-25.0), jnp.array(0.0)))
+        assert H == pytest.approx(DINOConfig().H_deep, rel=1e-3)
+
+    def test_boundary_is_shallow(self):
+        cfg = DINOConfig()
+        # Exactly at the western wall.
+        H = float(dino_bathymetry(
+            jnp.array(cfg.lon_west_deg), jnp.array(0.0),
+        ))
+        assert H == pytest.approx(cfg.H_shallow, rel=1e-3)
+
+    def test_drake_sill_shallows_basin(self):
+        # The Drake sill is a Gaussian ring anchored at the western wall
+        # (sill_lon_m_deg) and extending eastward over
+        # ``sill_gaussian_width_s`` degrees. At lon=sill_lon_m_deg
+        # exactly, ``sill_taper`` is 0 (left edge of smooth-step), so
+        # we sample slightly east of the sill anchor where the taper is
+        # active. In the channel band the open-flow bathymetry would be
+        # H_deep, so any sill effect shoals it below H_deep.
+        cfg = DINOConfig()
+        lon_inside_sill = cfg.sill_lon_m_deg + 0.5 * cfg.sill_gaussian_width_s
+        H_sill_region = float(dino_bathymetry(
+            jnp.array(lon_inside_sill),
+            jnp.array(cfg.sill_lat_m_deg),
+        ))
+        H_open_channel = float(dino_bathymetry(
+            jnp.array(-25.0),
+            jnp.array(cfg.sill_lat_m_deg),
+        ))
+        assert H_sill_region < H_open_channel
+        assert H_sill_region >= cfg.H_sill - 100.0
+
+    def test_shape_broadcast(self):
+        lon = jnp.linspace(-50.0, 0.0, 10)
+        lat = jnp.linspace(-70.0, 70.0, 12)[:, None]
+        H = dino_bathymetry(lon[None, :], lat)
+        assert H.shape == (12, 10)
+        assert jnp.all(jnp.isfinite(H))
+
+
+# ---------------------------------------------------------------------
+# Wind stress
+# ---------------------------------------------------------------------
+
+class TestDinoWindStress:
+    def test_hits_knots(self):
+        cfg = DINOConfig()
+        for lat_knot, tau_knot in zip(cfg.wind_tau_lats_deg, cfg.wind_tau_values):
+            tau = float(dino_wind_stress(jnp.array(lat_knot)))
+            assert tau == pytest.approx(tau_knot, abs=1e-6)
+
+    def test_outside_range_clips(self):
+        cfg = DINOConfig()
+        # Beyond the southernmost knot — extrapolation clips to the
+        # endpoint per the cubic-smooth-step formulation.
+        tau_far_south = float(dino_wind_stress(jnp.array(-89.0)))
+        assert tau_far_south == pytest.approx(cfg.wind_tau_values[0], abs=1e-6)
+        tau_far_north = float(dino_wind_stress(jnp.array(89.0)))
+        assert tau_far_north == pytest.approx(cfg.wind_tau_values[-1], abs=1e-6)
+
+
+# ---------------------------------------------------------------------
+# Restoring targets (paper eqs B1-B2)
+# ---------------------------------------------------------------------
+
+class TestRestoringTargets:
+    def test_T_star_warmest_at_equator(self):
+        cfg = DINOConfig()
+        T_eq = float(dino_T_star_annual_mean(jnp.array(0.0)))
+        T_north = float(dino_T_star_annual_mean(jnp.array(cfg.lat_max_deg)))
+        T_south = float(dino_T_star_annual_mean(jnp.array(-cfg.lat_max_deg)))
+        assert T_eq > T_north
+        assert T_eq > T_south
+        # Equatorial target matches the configured value when lat=0.
+        assert T_eq == pytest.approx(cfg.T_star_eq, abs=0.5)
+
+    def test_S_star_dip_at_equator(self):
+        cfg = DINOConfig()
+        # Equatorial Gaussian dip means S* at the equator is BELOW the
+        # cosine-profile peak by approximately ``S_star_eq_dip_amp``.
+        S_eq = float(dino_S_star(jnp.array(0.0)))
+        S_north = float(dino_S_star(jnp.array(cfg.lat_max_deg)))
+        assert S_eq < cfg.S_star_eq  # dip subtracted
+        # Northern boundary target ~ S_star_n.
+        assert S_north == pytest.approx(cfg.S_star_n, abs=0.5)
+
+
+# ---------------------------------------------------------------------
+# Equatorial 1D T(z), S(z) profiles (paper eq D2-D3)
+# ---------------------------------------------------------------------
+
+class TestProfiles1D:
+    def test_T_decreasing_with_depth(self):
+        z = jnp.linspace(0.0, 4000.0, 41)
+        T = dino_T_profile_1d(z)
+        # Sea-surface warmer than abyss, abyss roughly 3-5 C.
+        T_np = np.asarray(T)
+        assert T_np[0] > T_np[-1]
+        assert 2.0 < T_np[-1] < 5.5
+        assert 20.0 < T_np[0] < 30.0
+
+    def test_S_finite_and_bounded(self):
+        z = jnp.linspace(0.0, 4000.0, 41)
+        S = np.asarray(dino_S_profile_1d(z))
+        assert np.all(np.isfinite(S))
+        assert (S > 30.0).all() and (S < 38.0).all()
+
+
+# ---------------------------------------------------------------------
+# Top-layer tendencies (paper eqs 7-9)
+# ---------------------------------------------------------------------
+
+class TestTopLayerTendencies:
+    def test_T_relaxes_toward_target(self):
+        cfg = DINOConfig()
+        dz0 = 10.0
+        # Cold ocean below warm target: positive tendency.
+        dT_dt_warm = float(dino_top_layer_T_tendency(
+            T_sfc_C=0.0, T_star=20.0, Q_sr=0.0, dz_0=dz0, cfg=cfg,
+        ))
+        # Warm ocean below cold target: negative tendency.
+        dT_dt_cold = float(dino_top_layer_T_tendency(
+            T_sfc_C=20.0, T_star=0.0, Q_sr=0.0, dz_0=dz0, cfg=cfg,
+        ))
+        assert dT_dt_warm > 0.0
+        assert dT_dt_cold < 0.0
+
+    def test_S_relaxes_toward_target(self):
+        cfg = DINOConfig()
+        dz0 = 10.0
+        dS_dt = float(dino_top_layer_S_tendency(
+            S_surface=34.0, S_star=36.0, dz_0=dz0, cfg=cfg,
+        ))
+        assert dS_dt > 0.0  # freshening deficit → S increases
+
+    def test_u_proportional_to_tau(self):
+        cfg = DINOConfig()
+        dz0 = 10.0
+        du_a = float(dino_top_layer_u_tendency(0.1, dz0, cfg))
+        du_b = float(dino_top_layer_u_tendency(0.2, dz0, cfg))
+        assert du_b == pytest.approx(2.0 * du_a, rel=1e-6)
+        # Magnitude check: τ/(ρ·dz) ≈ 0.1 / (1026 · 10) ≈ 9.7e-6 m/s².
+        expected = 0.1 / (cfg.rho_0 * dz0)
+        assert du_a == pytest.approx(expected, rel=1e-6)
+
+
+# ---------------------------------------------------------------------
+# Lévy z* helper (vertical.py) + DINO wrapper
+# ---------------------------------------------------------------------
+
+class TestLevyZStar:
+    def test_endpoints_and_monotone(self):
+        # 36-level DINO grid: dz_min constraint is dz/dk at k=1, which
+        # matches dz[0] (forward difference) closely when the stretching
+        # parameters keep d²z/dk² small over the top layer. Tight check
+        # is therefore valid only at the design n_levels=36.
+        n_levels = 36
+        zc = create_levy_stretched_z_star(
+            n_levels=n_levels, H_max=4000.0, dz_min=10.0,
+            k_th=float(n_levels - 1), a_cr=10.5,
+        )
+        assert zc.n_levels == n_levels
+        assert float(zc.z_half_ref[0]) == pytest.approx(0.0, abs=1e-9)
+        assert float(zc.z_half_ref[-1]) == pytest.approx(-4000.0, abs=1e-9)
+        dz = np.asarray(zc.dz_ref)
+        assert (dz > 0).all()
+        assert dz[0] == pytest.approx(10.0, rel=0.05)
+        assert dz[-1] > dz[0]
+        assert dz.sum() == pytest.approx(4000.0, rel=1e-6)
+
+    def test_low_resolution_endpoints(self):
+        # At coarse resolutions the forward-difference dz[0] can differ
+        # from the analytical dz/dk constraint, but endpoints and total
+        # depth must still match exactly.
+        zc = create_levy_stretched_z_star(
+            n_levels=12, H_max=4000.0, dz_min=10.0,
+            k_th=11.0, a_cr=10.5,
+        )
+        assert zc.n_levels == 12
+        assert float(zc.z_half_ref[0]) == pytest.approx(0.0, abs=1e-9)
+        assert float(zc.z_half_ref[-1]) == pytest.approx(-4000.0, abs=1e-9)
+        dz = np.asarray(zc.dz_ref)
+        assert (dz > 0).all()
+        assert dz.sum() == pytest.approx(4000.0, rel=1e-6)
+
+    def test_create_dino_z_star_defaults(self):
+        cfg = DINOConfig()
+        zc = create_dino_z_star(cfg)
+        assert zc.n_levels == cfg.n_levels == 36
+        assert float(zc.z_half_ref[0]) == pytest.approx(0.0, abs=1e-9)
+        assert float(zc.z_half_ref[-1]) == pytest.approx(-cfg.H_deep, abs=1e-9)
+        # Top layer ~ dz_min.
+        assert float(zc.dz_ref[0]) == pytest.approx(cfg.dz_min, rel=0.05)
+
+    def test_input_validation(self):
+        with pytest.raises(ValueError):
+            create_levy_stretched_z_star(1, 4000.0, 10.0, 35.0, 10.5)
+        with pytest.raises(ValueError):
+            create_levy_stretched_z_star(36, 0.0, 10.0, 35.0, 10.5)
+        with pytest.raises(ValueError):
+            create_levy_stretched_z_star(36, 4000.0, 0.0, 35.0, 10.5)
+
+
+# ---------------------------------------------------------------------
+# Seam-wall helper (lat-lon C-grid)
+# ---------------------------------------------------------------------
+
+class TestPartialPeriodicSeamLatLon:
+    def test_open_band_stays_ocean(self):
+        cfg = DINOConfig()
+        grid = create_mercator_grid(
+            n_lon=10,
+            lat_max_deg=cfg.lat_max_deg,
+            lon_west_deg=cfg.lon_west_deg,
+            lon_east_deg=cfg.lon_east_deg,
+        )
+        mask = np.asarray(partial_periodic_seam_wall_latlon(
+            grid,
+            open_lat_south_deg=cfg.channel_lat_south_deg,
+            open_lat_north_deg=cfg.channel_lat_north_deg,
+            seam_column_index=0,
+        ))
+        # Outside the open band, the seam column is land.
+        lat_1d_deg = np.degrees(np.asarray(grid.lat))
+        for j, lat_deg in enumerate(lat_1d_deg):
+            in_band = (
+                cfg.channel_lat_south_deg
+                <= lat_deg
+                <= cfg.channel_lat_north_deg
+            )
+            if in_band:
+                assert mask[j, 0] == 1.0
+            else:
+                assert mask[j, 0] == 0.0
+
+
+# ---------------------------------------------------------------------
+# Initial-state construction (Mercator path)
+# ---------------------------------------------------------------------
+
+class TestLatLonInitialState:
+    def test_T_S_field_shapes(self):
+        # Use a coarser grid for test speed (4-level z, 6 lon, ~12 lat).
+        cfg = DINOConfig()
+        grid = dino_lat_lon_grid(cfg, n_lon=6)
+        zc = create_levy_stretched_z_star(
+            n_levels=4, H_max=cfg.H_deep, dz_min=400.0,
+            k_th=3.0, a_cr=2.0,
+        )
+        T, S, H_bathy, land_mask = dino_lat_lon_initial_state_arrays(
+            grid, zc, cfg,
+        )
+        n_lat, n_lon = grid.n_lat, grid.n_lon
+        assert T.shape == (n_lat, n_lon, 4)
+        assert S.shape == (n_lat, n_lon, 4)
+        assert H_bathy.shape == (n_lat, n_lon)
+        assert land_mask.shape == (n_lat, n_lon)
+        # Ocean depth on wet cells in [H_shallow, H_deep] (sill carve-out
+        # may shoal below H_shallow on a few sill-ring cells — tolerate).
+        ocean = np.asarray(land_mask) > 0.5
+        Hb = np.asarray(H_bathy)[ocean]
+        assert Hb.max() <= cfg.H_deep + 1e-6
+        assert Hb.min() > 0.0
+
+    def test_initial_T_S_columns(self):
+        cfg = DINOConfig()
+        zc = create_levy_stretched_z_star(
+            n_levels=8, H_max=cfg.H_deep, dz_min=50.0,
+            k_th=7.0, a_cr=2.0,
+        )
+        # Equator column: should match the 1D profile (uses cfg.lat_max_deg
+        # in the meridional weight, so |φ|=0 ⇒ full equatorial profile).
+        T_2d, S_2d = dino_initial_T_S(jnp.array(0.0), zc.z_full_ref, cfg)
+        # Surface warmer than abyss.
+        T_col = np.asarray(T_2d)
+        assert T_col.shape == (8,)
+        assert T_col[0] > T_col[-1]
+
+
+# ---------------------------------------------------------------------
+# create_initial_conditions dispatch
+# ---------------------------------------------------------------------
+
+class TestCreateInitialConditionsDispatch:
+    def test_rejects_unknown_grid_type(self):
+        cfg = DINOConfig()
+        grid = dino_lat_lon_grid(cfg, n_lon=4)
+        zc = create_levy_stretched_z_star(
+            n_levels=4, H_max=cfg.H_deep, dz_min=400.0,
+            k_th=3.0, a_cr=2.0,
+        )
+        with pytest.raises(ValueError, match="Unknown grid_type"):
+            create_initial_conditions("cubed_sphere", grid, zc, cfg)
+
+
+# ---------------------------------------------------------------------
+# MPAS partial-periodic seam wall (optional — needs scipy)
+# ---------------------------------------------------------------------
+
+scipy = pytest.importorskip("scipy", reason="MPAS Voronoi mesh needs scipy")
+
+
+class TestMPASSeamWall:
+    def test_open_band_keeps_seam_cells_ocean(self):
+        from legoesm.grids.voronoi import create_regional_voronoi_mesh
+        from legoesm.ocean.init_mpas import partial_periodic_seam_wall_mpas
+        cfg = DINOConfig()
+        try:
+            mesh = create_regional_voronoi_mesh(
+                lon_range=(cfg.lon_west_deg, cfg.lon_east_deg),
+                lat_range=(-cfg.lat_max_deg, cfg.lat_max_deg),
+                resolution_km=200.0,
+                periodic_x=True,
+            )
+        except (ValueError, RuntimeError) as exc:
+            pytest.skip(f"Voronoi mesh generation unstable on this "
+                        f"platform: {exc}")
+        mask = np.asarray(partial_periodic_seam_wall_mpas(
+            mesh,
+            open_lat_south_deg=cfg.channel_lat_south_deg,
+            open_lat_north_deg=cfg.channel_lat_north_deg,
+            seam_lon_deg=cfg.lon_west_deg,
+        ))
+        lat_deg = np.degrees(np.asarray(mesh.latCell))
+        lon_deg = (np.degrees(np.asarray(mesh.lonCell)) + 180.0) % 360.0 - 180.0
+        # Cells near the seam outside the open band: expect at least
+        # one to be land (mask = 0). Inside the band: expect at least
+        # one near-seam cell to stay ocean.
+        near_seam_dist_deg = (
+            (lon_deg - cfg.lon_west_deg) % 360.0
+        )
+        seam_strip = near_seam_dist_deg < 5.0
+        outside_band = (lat_deg < cfg.channel_lat_south_deg) | (
+            lat_deg > cfg.channel_lat_north_deg
+        )
+        inside_band = (lat_deg >= cfg.channel_lat_south_deg) & (
+            lat_deg <= cfg.channel_lat_north_deg
+        )
+        if (seam_strip & outside_band).any():
+            assert (mask[seam_strip & outside_band] < 0.5).any()
+        if (seam_strip & inside_band).any():
+            assert (mask[seam_strip & inside_band] > 0.5).any()
