@@ -69,10 +69,16 @@ n_max: 11            # spectral truncation (T11 ≈ 10°, 18x36 grid).
                      # RRTMGP + spatial surface + 48-step daily
                      # rollout fits on a 24 GiB GPU.  T21 needs a
                      # 72 GiB single allocation in the backward pass,
-                     # T15 still needs 35.9 GiB (verified 2026-05-17
-                     # on RTX 5090); T11 should fit at ~20 GiB.
+                     # T15 needs 35.9 GiB, T11 needs 20.25 GiB
+                     # (verified 2026-05-17 on RTX 5090); T11 L6
+                     # should fit at ~15 GiB after the nlev cut below.
                      # Bump to T15+ on >= 40 GiB or T21 on >= 80 GiB.
-nlev: 8              # vertical levels (sigma)
+nlev: 6              # vertical levels (sigma).  Was 8 -- dropped to 6
+                     # to cut another ~25% off the per-step backward
+                     # peak so the RRTMGP path fits on a 24 GiB GPU.
+                     # The sigma coord still resolves troposphere ->
+                     # stratosphere transitions adequately for the
+                     # AIMIP-scale daily forecast loss.
 dt: 1800.0           # 30-minute dycore timestep
 
 # ----- Training -----------------------------------------------------
