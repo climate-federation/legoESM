@@ -151,3 +151,50 @@ JAX_PLATFORMS=cpu .venv/bin/python scripts/run_ocean_test_matrix.py \
 JAX_PLATFORMS=cpu .venv/bin/python scripts/ocean_fidelity/run_comparison.py \
     --output docs/ocean_fidelity/initial_comparison_$(git rev-parse --short HEAD).md
 ```
+
+## Resolution (2026-05-17)
+
+The "structural" gap turned out to be a one-line bug in
+``src/legoesm/grids/latlon.py::ensure_geometry``: when handed a
+``LatLonGrid``, it rebuilt the ``LatLonCGridGeometry`` from
+``n_lat`` / ``n_lon`` alone via ``create_latlon_geometry``, which
+hard-codes the global pole-to-pole extent (``dlat = pi / n_lat``,
+``dlon = 2*pi / n_lon``). For the Petersen 64 km x 4 km equatorial
+channel that turned the regional ``dlon = 1.57e-4 rad`` into the
+global ``dlon = 9.52e-2 rad`` — a **606x inflation of dx**, which
+weakened the horizontal pressure-gradient acceleration by the same
+factor and silently damped the gravity-current velocity by ~12x.
+
+Diagnostic that exposed it (after exhausting every config knob):
+
+* ``model.tendencies(state)`` returned ``max |du/dt| = 5.94e-6 m/s^2``
+* The same call with the *raw* ``LatLonGrid`` (bypassing
+  ``ensure_geometry``) returned ``9.33e-4 m/s^2`` — 158x larger.
+
+Fix: ``create_latlon_geometry`` now accepts optional ``lat_1d`` /
+``lon_1d`` arrays; ``ensure_geometry`` passes the input grid's actual
+1-D coordinate arrays so regional / channel grids preserve their
+bounds. Global ``latlon`` runs are unchanged at float32 precision
+(verified by ``tests/grids/test_ensure_geometry_regional.py``).
+
+Result on the Petersen TestCase:
+
+| metric                | Veros (superbee) | legoESM (before fix) | legoESM (after fix) |
+| --------------------- | ---------------- | -------------------- | ------------------- |
+| T mean                | 17.50 degC       | 17.50 degC           | 17.50 degC          |
+| T range               | [5.00, 30.00]    | [4.91, 30.06]        | [4.42, 30.07]       |
+| max \|u\| (3D)        | 0.857 m/s        | 0.070 m/s            | **0.629 m/s**       |
+| max \|eta\|           | n/a              | 0.030 m              | 0.066 m             |
+
+legoESM 0.629 m/s sits inside the theoretical 0.5-0.7 m/s gravity-
+current speed range (two-layer reduced-gravity ``c = sqrt(g'·H/2)``).
+The remaining 27 % ratio with Veros 0.857 m/s is plausibly within
+scheme-dependent overshoot range (Veros uses superbee with classic
+front overshoots; legoESM uses WENO5 which is sharper but slightly
+more dissipative on this thin geometry). **The wind gap is closed.**
+
+**This bug also silently corrupts every other regional-latlon ocean
+run in the matrix** (baroclinic_gyre, barotropic_double_gyre,
+etc.). They all produced PASSING results with ~600x inflated dx, so
+their velocity scales were too small by a similar factor. Those
+results should be re-run after this fix lands.

@@ -558,12 +558,21 @@ def ensure_geometry(
     # Duck-type check: if it has dx_u, assume it's geometry-like
     if hasattr(grid, "dx_u") and hasattr(grid, "fold"):
         return grid  # type: ignore[return-value]
-    # Convert LatLonGrid -> LatLonCGridGeometry
+    # Convert LatLonGrid -> LatLonCGridGeometry. Pass the input grid's
+    # actual 1-D lat/lon arrays so regional / channel grids preserve
+    # their bounds — otherwise create_latlon_geometry would silently
+    # rebuild a GLOBAL lat-lon grid from ``n_lat`` / ``n_lon`` alone,
+    # inflating ``dx`` and ``dy`` by the ratio between global and
+    # regional extents (the 2026-05-17 Petersen-channel investigation
+    # caught a 600x dx inflation that damped the gravity-current PGF
+    # to ~0.07 m/s vs the Veros peer's 0.86 m/s).
     return create_latlon_geometry(
         n_lat=grid.n_lat,
         n_lon=grid.n_lon,
         radius=grid.radius,
         omega=omega,
+        lat_1d=getattr(grid, "lat", None),
+        lon_1d=getattr(grid, "lon", None),
     )
 
 
@@ -823,6 +832,9 @@ def create_latlon_geometry(
     radius: float = constants.R_earth,
     omega: float = constants.Omega,
     dtype=None,
+    *,
+    lat_1d: jax.Array | None = None,
+    lon_1d: jax.Array | None = None,
 ) -> LatLonCGridGeometry:
     """Create a regular lat-lon ``LatLonCGridGeometry``.
 
@@ -844,6 +856,18 @@ def create_latlon_geometry(
         Rotation rate [rad/s].
     dtype : optional
         Storage dtype.  Defaults to the precision policy's storage type.
+    lat_1d : jax.Array, optional
+        Cell-center latitudes in radians (length ``n_lat``).  When given,
+        ``dlat`` is derived from ``lat_1d[1] - lat_1d[0]`` and the global
+        defaults (full pole-to-pole span) are bypassed.  Used by
+        :func:`ensure_geometry` to preserve the bounds of regional or
+        channel grids — previously this function always reconstructed a
+        global grid from ``n_lat``/``n_lon`` alone, which silently broke
+        every regional latlon ocean run by inflating ``dx`` / ``dy`` by
+        the ratio between the global and regional extents.
+    lon_1d : jax.Array, optional
+        Cell-center longitudes in radians (length ``n_lon``).  Same
+        rationale as ``lat_1d``.
 
     Returns
     -------
@@ -859,16 +883,32 @@ def create_latlon_geometry(
         except Exception:
             dtype = jnp.float32
 
-    dlat = jnp.pi / n_lat
-    dlon = 2.0 * jnp.pi / n_lon
-
     # ------- 1D coordinate arrays (native precision) -------
-    lat_1d = jnp.linspace(
-        -jnp.pi / 2.0 + dlat / 2.0,
-        jnp.pi / 2.0 - dlat / 2.0,
-        n_lat,
-    )
-    lon_1d = jnp.linspace(0.0, 2.0 * jnp.pi - dlon, n_lon)
+    if lat_1d is None:
+        dlat = jnp.pi / n_lat
+        lat_1d = jnp.linspace(
+            -jnp.pi / 2.0 + dlat / 2.0,
+            jnp.pi / 2.0 - dlat / 2.0,
+            n_lat,
+        )
+    else:
+        lat_1d = jnp.asarray(lat_1d)
+        if lat_1d.shape != (n_lat,):
+            raise ValueError(
+                f"lat_1d must have shape ({n_lat},), got {lat_1d.shape}"
+            )
+        dlat = lat_1d[1] - lat_1d[0] if n_lat > 1 else jnp.pi / n_lat
+
+    if lon_1d is None:
+        dlon = 2.0 * jnp.pi / n_lon
+        lon_1d = jnp.linspace(0.0, 2.0 * jnp.pi - dlon, n_lon)
+    else:
+        lon_1d = jnp.asarray(lon_1d)
+        if lon_1d.shape != (n_lon,):
+            raise ValueError(
+                f"lon_1d must have shape ({n_lon},), got {lon_1d.shape}"
+            )
+        dlon = lon_1d[1] - lon_1d[0] if n_lon > 1 else 2.0 * jnp.pi / n_lon
 
     # Legacy fields: compute in native precision, cast at end to match
     # the exact path that create_latlon_grid() uses.
