@@ -293,7 +293,7 @@ def _make_diag_preconditioner(
     inv_diag = jnp.where(mask > 0.5, 1.0 / jnp.maximum(diag, 1.0e-30), 0.0)
 
     def M_inv(r: jnp.ndarray) -> jnp.ndarray:
-        return r * inv_diag
+        return r * inv_diag.astype(r.dtype)
 
     return M_inv
 
