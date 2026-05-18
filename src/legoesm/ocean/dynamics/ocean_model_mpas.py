@@ -551,6 +551,17 @@ class MPASOceanModel:
         if freshwater is not None and config.freshwater_closure != "none":
             F_slow_eta = freshwater_eta_tendency(freshwater, config.rho_0) * mask
 
+            # Global freshwater normalization: subtract the area-weighted
+            # mean so the global integral of F_slow_eta is exactly zero.
+            # This prevents global volume drift from unbalanced P-E+R
+            # (standard OMIP practice for runs without sea ice).
+            if config.normalize_freshwater:
+                area = mesh.areaCell
+                ocean_area = jnp.sum(area * mask)
+                F_mean = jnp.sum(F_slow_eta * area) / jnp.maximum(
+                    ocean_area, 1e-10)
+                F_slow_eta = (F_slow_eta - F_mean * mask)
+
         F_slow_u_data = tend.F_slow_u.data if tend.F_slow_u is not None else None
 
         if config.barotropic_solver == "implicit_cn":
