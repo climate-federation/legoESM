@@ -25,7 +25,9 @@ _PRIMARY_ENV = "LEGOESM_OCEAN_FIDELITY_CACHE"
 _FALLBACK_ENV = "LEGOESM_CACHE_DIR"
 _DEFAULT_REL = Path(".cache") / "legoesm" / "ocean_fidelity"
 
-ALLOWED_SUBDIRS: tuple[str, ...] = ("veros", "obs", "regrid_weights")
+ALLOWED_SUBDIRS: tuple[str, ...] = (
+    "veros", "obs", "regrid_weights", "forcing",
+)
 
 
 def get_cache_root() -> Path:
