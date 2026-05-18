@@ -1110,6 +1110,26 @@ def _train_spectral_loop(
         getattr(config, "rad_update_interval", 1) or 1
     )
 
+    # Pre-warm the RRTMGP optics-table cache OUTSIDE the
+    # ``filter_jit``-wrapped train step.  ``RRTMGP.preload`` reads
+    # NetCDF gas-optics tables (``bnd_limits_gpt`` et al.) at first
+    # call and stashes the resulting ``optics_lib`` in a module-level
+    # cache keyed by the static file paths.  When the first
+    # invocation happens inside ``eqx.filter_value_and_grad`` the
+    # NetCDF-load path hits the Equinox-tracer state and crashes with
+    # ``TracerArrayConversionError`` (verified 2026-05-18).  A
+    # concrete-args call here populates the cache so the inside-trace
+    # calls hit the cache and skip the load entirely.
+    try:
+        _warmup_physics = make_physics_fn(model, grid)
+        del _warmup_physics
+    except Exception as exc:
+        logger.warning(
+            f"RRTMGP cache warm-up call raised {exc!r}; continuing "
+            "(the first jitted train step will retry under tracing -- "
+            "if that also fails you likely hit a non-AIMIP physics path)."
+        )
+
     def _train_step(model, opt_state, ic_spectral, target_carry):
         def loss_fn(m):
             physics = make_physics_fn(m, grid)
