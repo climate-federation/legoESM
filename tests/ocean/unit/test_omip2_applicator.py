@@ -102,7 +102,50 @@ def test_applicator_temperature_responds_to_heat_flux():
     assert np.abs(delta).max() < 5.0
 
 
+def test_woa_synthetic_sst_in_realistic_range():
+    """WOA synthetic SST falls inside the global-ocean range."""
+    from legoesm.ocean.forcing import synthetic_woa_sst
+    sst_K, lat, lon = synthetic_woa_sst(nlon=72, nlat=36)
+    assert sst_K.shape == (36, 72)
+    assert sst_K.min() >= 263.0
+    assert sst_K.max() <= 305.0
+    # Unweighted global mean is ~ 293 K for the synthetic profile
+    # (uniform-dlat integration overweights mid-latitudes vs the
+    # area-weighted WOA ~290 K).
+    assert 285.0 < sst_K.mean() < 297.0
+
+
+def test_load_woa_sst_synthetic_fallback():
+    from legoesm.ocean.forcing import load_woa_sst
+    sst_K, lat, lon = load_woa_sst(nlon=72, nlat=36)
+    assert sst_K.shape == (36, 72)
+    # Sanity: equator is warmer than poles.
+    eq_band = sst_K[16:20, :].mean()
+    pole_band = sst_K[0:4, :].mean()
+    assert eq_band > pole_band + 10.0
+
+
+def test_load_woa_sst_raises_when_synthetic_disabled(tmp_path):
+    from legoesm.ocean.forcing import load_woa_sst
+    with pytest.raises(FileNotFoundError):
+        load_woa_sst(cache_dir=tmp_path, allow_synthetic=False)
+
+
+def test_woa_into_sst_climatology_bias():
+    """Plug WOA loader into the climate-bias diagnostic."""
+    from legoesm.ocean.forcing import load_woa_sst
+    from legoesm.ocean.diagnostics_climate import sst_climatology_bias
+    sst_ref, _, _ = load_woa_sst(nlon=36, nlat=18)
+    # Model = WOA + uniform 1 K warm bias.
+    sst_model = sst_ref + 1.0
+    area = np.ones_like(sst_ref)
+    res = sst_climatology_bias(sst_model, sst_ref, area)
+    assert res.bias_K == pytest.approx(1.0, abs=1e-12)
+    assert res.rmse_K == pytest.approx(1.0, abs=1e-12)
+
+
 def test_applicator_raises_on_unsupported_grid():
+    """Spectral grid type is not supported by the applicator."""
     from legoesm.ocean.coupler import apply_omip2_surface_fluxes
     from legoesm.ocean.forcing import synthetic_ocean_forcing
     state, grid, z, _ = _rest_state_latlon()
@@ -110,5 +153,51 @@ def test_applicator_raises_on_unsupported_grid():
     with pytest.raises(NotImplementedError):
         apply_omip2_surface_fluxes(
             state, forcing=forcing, idx_t=0,
-            z_coord=z, grid=grid, grid_type="cubed_sphere", dt=1800.0,
+            z_coord=z, grid=grid, grid_type="spectral", dt=1800.0,
         )
+
+
+def _rest_state(grid_type, res, H_max=5500.0, nlev=10):
+    import importlib.util
+    repo_root = Path(__file__).resolve().parents[3]
+    scripts_dir = repo_root / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    from ocean_test_matrix.setup import _create_ocean_setup
+    from ocean_test_matrix.testcase import TestCase
+    matrix_mod = _matrix_module()
+    tc = TestCase("omip_applicator", grid_type, res, 1.0, 0.1)
+    grid, z, _, model, _, _, _ = _create_ocean_setup(
+        tc, H_max=H_max, nlev=nlev,
+    )
+    state = matrix_mod._create_rest_state(tc, grid, z, H_max=H_max)
+    return state, grid, z, model
+
+
+@pytest.mark.parametrize("grid_type,res", [
+    ("cubed_sphere", "C24"),
+    ("mpas", "ico3"),
+])
+def test_applicator_on_cube_and_mpas(grid_type, res):
+    """Applicator builds + steps cube + MPAS states without errors."""
+    from legoesm.ocean.coupler import apply_omip2_surface_fluxes
+    from legoesm.ocean.forcing import synthetic_ocean_forcing
+    state, grid, z, _ = _rest_state(grid_type, res)
+    forcing = synthetic_ocean_forcing(2000, n_time=4, nlon=72, nlat=36)
+    new_state = apply_omip2_surface_fluxes(
+        state, forcing=forcing, idx_t=0,
+        z_coord=z, grid=grid, grid_type=grid_type, dt=1800.0,
+    )
+    assert type(new_state) is type(state)
+    # u must respond: cube has collocated u, MPAS u on edges.
+    u_new = np.asarray(new_state.u.data)
+    assert np.isfinite(u_new).all()
+    assert np.abs(u_new).max() > 0.0
+    # T top-cell must respond.
+    T_top = (np.asarray(new_state.T.data)[..., 0]
+             if grid_type == "cubed_sphere"
+             else np.asarray(new_state.T.data)[:, 0])
+    T0_top = (np.asarray(state.T.data)[..., 0]
+              if grid_type == "cubed_sphere"
+              else np.asarray(state.T.data)[:, 0])
+    assert (T_top != T0_top).any()

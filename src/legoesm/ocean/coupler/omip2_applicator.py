@@ -55,38 +55,110 @@ def _bolton_q_sat(T_K, p_hpa: float = 1013.25):
     return 0.622 * e_s / (p_hpa - 0.378 * e_s)
 
 
-def _interp_to_model_grid(field, src_lat_deg, src_lon_deg,
-                          dst_lat_deg, dst_lon_deg):
-    """Nearest-neighbour 1-D interpolation from (src_lat, src_lon) to
-    (dst_lat, dst_lon). Smoke-grade; production uses
-    ``legoesm.grids.conservative_regrid``.
+def _nn_interp_to_points(field, src_lat_deg, src_lon_deg,
+                         dst_lat_deg_pts, dst_lon_deg_pts):
+    """Nearest-neighbour 1-D-axis lookup from (src_lat, src_lon) to a
+    1-D set of target points ``(dst_lat_pts, dst_lon_pts)``.
 
-    ``field`` has shape ``(n_lat_src, n_lon_src)``.
+    Used for cube + MPAS grids where the target lives on unstructured
+    cell centres rather than a regular lat-lon mesh; the lat-lon-
+    coupled path goes through ``conservative_regrid`` instead.
     """
     src_lat = np.asarray(src_lat_deg)
     src_lon = np.asarray(src_lon_deg) % 360.0
-    dst_lat = np.asarray(dst_lat_deg)
-    dst_lon = np.asarray(dst_lon_deg) % 360.0
-    i = np.clip(
-        np.searchsorted(src_lat, dst_lat), 0, src_lat.size - 1,
-    )
-    j = np.clip(
-        np.searchsorted(src_lon, dst_lon), 0, src_lon.size - 1,
-    )
-    return np.asarray(field)[i[:, None], j[None, :]]
+    dst_lat = np.asarray(dst_lat_deg_pts)
+    dst_lon = np.asarray(dst_lon_deg_pts) % 360.0
+    i = np.clip(np.searchsorted(src_lat, dst_lat), 0, src_lat.size - 1)
+    j = np.clip(np.searchsorted(src_lon, dst_lon), 0, src_lon.size - 1)
+    return np.asarray(field)[i, j]
 
 
-def _sample_forcing_at_time(forcing, idx_t: int, lat_deg, lon_deg):
-    """Sample one time slice of the seven-channel forcing onto a
-    target lat-lon grid (nearest-neighbour). Returns a dict of arrays
-    of shape ``(n_lat, n_lon)``.
+# Cache of pre-computed conservative-regrid weights, keyed by
+# (src_lat_shape, src_lon_shape, src_lat_first, src_lon_first,
+#  dst_lat_shape, dst_lon_shape, dst_lat_first, dst_lon_first).
+_REGRID_WEIGHTS_CACHE: dict = {}
+
+
+def _edges_from_centers_deg(centers_deg, *, periodic: bool = False):
+    """Derive uniform-spaced cell edges (radians) from cell centres.
+
+    Assumes the centres are uniformly spaced. ``periodic`` only changes
+    the conventional first / last edge offsets.
     """
+    c = np.asarray(centers_deg, dtype=np.float64)
+    if c.size < 2:
+        raise ValueError("Need >= 2 cell centres to infer edges.")
+    dc = float(c[1] - c[0])
+    edges = np.empty(c.size + 1, dtype=np.float64)
+    edges[:-1] = c - 0.5 * dc
+    edges[-1] = c[-1] + 0.5 * dc
+    return np.radians(edges)
+
+
+def _conservative_regrid_to_latlon(
+    field_2d, src_lat_deg, src_lon_deg, dst_lat_deg, dst_lon_deg,
+):
+    """Conservatively regrid a 2-D ``(n_src_lat, n_src_lon)`` field to a
+    regular lat-lon model grid.
+
+    Builds + caches the overlap weights on first call for each
+    (src_shape, dst_shape) pair; subsequent calls are a sparse matmul.
+    """
+    from legoesm.grids.conservative_regrid import (
+        compute_overlap_weights, apply_conservative_regrid,
+    )
+    import jax.numpy as jnp_local
+    key = (
+        np.asarray(src_lat_deg).shape,
+        np.asarray(src_lon_deg).shape,
+        float(src_lat_deg[0]), float(src_lon_deg[0]),
+        np.asarray(dst_lat_deg).shape,
+        np.asarray(dst_lon_deg).shape,
+        float(dst_lat_deg[0]), float(dst_lon_deg[0]),
+    )
+    if key not in _REGRID_WEIGHTS_CACHE:
+        src_lat_edges = _edges_from_centers_deg(src_lat_deg)
+        src_lon_edges = _edges_from_centers_deg(src_lon_deg, periodic=True)
+        dst_lat_edges = _edges_from_centers_deg(dst_lat_deg)
+        dst_lon_edges = _edges_from_centers_deg(dst_lon_deg, periodic=True)
+        # Clamp lat edges into [-pi/2, pi/2] in case the inferred edge
+        # spills over the pole due to rounding.
+        src_lat_edges = np.clip(src_lat_edges, -np.pi / 2, np.pi / 2)
+        dst_lat_edges = np.clip(dst_lat_edges, -np.pi / 2, np.pi / 2)
+        _REGRID_WEIGHTS_CACHE[key] = compute_overlap_weights(
+            src_lat_edges, src_lon_edges,
+            dst_lat_edges, dst_lon_edges,
+        )
+    weights = _REGRID_WEIGHTS_CACHE[key]
+    return np.asarray(apply_conservative_regrid(
+        jnp_local.asarray(field_2d), weights,
+    ))
+
+
+def _sample_forcing_latlon(forcing, idx_t, dst_lat_deg, dst_lon_deg):
+    """Conservative-regrid the seven channels at time ``idx_t`` onto a
+    regular destination lat-lon grid."""
     out = {}
     for name in ("u10", "v10", "T_air", "q_air",
                   "sw_down", "lw_down", "precip"):
-        src = getattr(forcing, name)[idx_t]
-        out[name] = _interp_to_model_grid(
-            src, forcing.lat, forcing.lon, lat_deg, lon_deg,
+        out[name] = _conservative_regrid_to_latlon(
+            getattr(forcing, name)[idx_t],
+            forcing.lat, forcing.lon,
+            dst_lat_deg, dst_lon_deg,
+        )
+    return out
+
+
+def _sample_forcing_points(forcing, idx_t, lat_pts_deg, lon_pts_deg):
+    """Nearest-neighbour sample the seven channels at a set of points
+    (cube / MPAS cell centres)."""
+    out = {}
+    for name in ("u10", "v10", "T_air", "q_air",
+                  "sw_down", "lw_down", "precip"):
+        out[name] = _nn_interp_to_points(
+            getattr(forcing, name)[idx_t],
+            forcing.lat, forcing.lon,
+            lat_pts_deg, lon_pts_deg,
         )
     return out
 
@@ -112,82 +184,163 @@ def apply_omip2_surface_fluxes(state, *, forcing, idx_t: int,
     if c_p is None:
         c_p = float(constants.c_sw)
 
-    if grid_type not in ("latlon", "latlon_regional"):
-        raise NotImplementedError(
-            f"OMIP-2 applicator currently lat-lon only; got {grid_type!r}. "
-            "MPAS + cube support requires edge / corner stress projection "
-            "and is a follow-up commit."
-        )
-
-    lat_deg = np.degrees(np.asarray(grid.lat))
-    lon_deg = np.degrees(np.asarray(grid.lon))
-    forc = _sample_forcing_at_time(forcing, idx_t, lat_deg, lon_deg)
-    # Diagnostic surface state (SST in Kelvin, sea-surface q from
-    # Bolton saturation at SST).
-    T_sfc_C = np.asarray(state.T.data, dtype=np.float64)[..., 0]
-    T_sfc_K = T_sfc_C + 273.15
-    q_sfc = np.asarray(_bolton_q_sat(jnp.asarray(T_sfc_K)),
-                       dtype=np.float64)
-
-    tau_x, tau_y, sh, lh = air_sea_fluxes(
-        u10=jnp.asarray(forc["u10"]),
-        v10=jnp.asarray(forc["v10"]),
-        T_air_K=jnp.asarray(forc["T_air"]),
-        q_air=jnp.asarray(forc["q_air"]),
-        T_sfc_K=jnp.asarray(T_sfc_K),
-        q_sfc=jnp.asarray(q_sfc),
-        rho_air=jnp.asarray(rho_air),
-    )
-    tau_x_np = np.asarray(tau_x)
-    tau_y_np = np.asarray(tau_y)
-    sh_np = np.asarray(sh)
-    lh_np = np.asarray(lh)
-    # Net heat flux into the ocean = turbulent + radiative (SW down -
-    # LW up). LW up is sigma * T_sfc^4 (Stefan-Boltzmann); for the
-    # smoke path we use the canonical surface emissivity = 0.97.
     sigma_sb = float(getattr(constants, "sigma_sb", 5.67e-8))
-    lw_up = 0.97 * sigma_sb * T_sfc_K ** 4
-    Q_net = sh_np + lh_np + forc["sw_down"] - lw_up + forc["lw_down"]
-
-    # Top-layer thickness.
     dz_0 = float(np.asarray(z_coord.dz_ref)[0])
 
-    # ---- Temperature update (cell-centred) ----
-    mask = np.asarray(state.land_mask.data, dtype=np.float64)
-    dT_top = Q_net / (rho_0 * c_p * dz_0) * dt * mask
-    T_new = np.asarray(state.T.data, dtype=np.float64).copy()
-    T_new[..., 0] = T_new[..., 0] + dT_top
+    if grid_type in ("latlon", "latlon_regional"):
+        lat_deg = np.degrees(np.asarray(grid.lat))
+        lon_deg = np.degrees(np.asarray(grid.lon))
+        forc = _sample_forcing_latlon(forcing, idx_t, lat_deg, lon_deg)
+        T_sfc_K = np.asarray(state.T.data, dtype=np.float64)[..., 0] + 273.15
+        q_sfc = np.asarray(_bolton_q_sat(jnp.asarray(T_sfc_K)),
+                           dtype=np.float64)
+        tau_x, tau_y, sh, lh = air_sea_fluxes(
+            u10=jnp.asarray(forc["u10"]),
+            v10=jnp.asarray(forc["v10"]),
+            T_air_K=jnp.asarray(forc["T_air"]),
+            q_air=jnp.asarray(forc["q_air"]),
+            T_sfc_K=jnp.asarray(T_sfc_K),
+            q_sfc=jnp.asarray(q_sfc),
+            rho_air=jnp.asarray(rho_air),
+        )
+        tau_x_np = np.asarray(tau_x)
+        tau_y_np = np.asarray(tau_y)
+        lw_up = 0.97 * sigma_sb * T_sfc_K ** 4
+        Q_net = (np.asarray(sh) + np.asarray(lh)
+                 + forc["sw_down"] - lw_up + forc["lw_down"])
+        mask = np.asarray(state.land_mask.data, dtype=np.float64)
+        dT_top = Q_net / (rho_0 * c_p * dz_0) * dt * mask
+        T_new = np.asarray(state.T.data, dtype=np.float64).copy()
+        T_new[..., 0] = T_new[..., 0] + dT_top
+        # C-grid face interpolation for tau_x, tau_y.
+        u_face = np.asarray(state.u.data, dtype=np.float64).copy()
+        v_face = np.asarray(state.v.data, dtype=np.float64).copy()
+        n_lat, n_lon = tau_x_np.shape
+        tau_x_face = np.zeros((n_lat, n_lon + 1), dtype=np.float64)
+        tau_x_face[:, 1:-1] = 0.5 * (tau_x_np[:, :-1] + tau_x_np[:, 1:])
+        tau_x_face[:, 0] = tau_x_np[:, 0]
+        tau_x_face[:, -1] = tau_x_np[:, -1]
+        u_mask = np.asarray(state.u_mask.data, dtype=np.float64)
+        u_face[..., 0] = u_face[..., 0] + (
+            tau_x_face / (rho_0 * dz_0) * dt * u_mask
+        )
+        tau_y_face = np.zeros((n_lat + 1, n_lon), dtype=np.float64)
+        tau_y_face[1:-1, :] = 0.5 * (tau_y_np[:-1, :] + tau_y_np[1:, :])
+        tau_y_face[0, :] = tau_y_np[0, :]
+        tau_y_face[-1, :] = tau_y_np[-1, :]
+        v_mask = np.asarray(state.v_mask.data, dtype=np.float64)
+        v_face[..., 0] = v_face[..., 0] + (
+            tau_y_face / (rho_0 * dz_0) * dt * v_mask
+        )
+        return state._replace(
+            T=Field(jnp.asarray(T_new), name=state.T.name,
+                    dims=state.T.dims, units=state.T.units),
+            u=Field(jnp.asarray(u_face), name=state.u.name,
+                    dims=state.u.dims, units=state.u.units),
+            v=Field(jnp.asarray(v_face), name=state.v.name,
+                    dims=state.v.dims, units=state.v.units),
+        )
 
-    # ---- Velocity update (C-grid face interpolation) ----
-    # Cell-centred tau_x -> east-west face: 0.5*(left + right).
-    # tau_x_np shape (n_lat, n_lon); pad zonally with periodic /
-    # zero on edge cells to match the (n_lat, n_lon+1) face grid.
-    u_face = np.asarray(state.u.data, dtype=np.float64).copy()
-    v_face = np.asarray(state.v.data, dtype=np.float64).copy()
-    n_lat, n_lon = tau_x_np.shape
-    tau_x_face = np.zeros((n_lat, n_lon + 1), dtype=np.float64)
-    tau_x_face[:, 1:-1] = 0.5 * (tau_x_np[:, :-1] + tau_x_np[:, 1:])
-    tau_x_face[:, 0] = tau_x_np[:, 0]
-    tau_x_face[:, -1] = tau_x_np[:, -1]
-    u_mask = np.asarray(state.u_mask.data, dtype=np.float64)
-    du_top = tau_x_face / (rho_0 * dz_0) * dt * u_mask
-    u_face[..., 0] = u_face[..., 0] + du_top
+    if grid_type == "cubed_sphere":
+        # Cube C-D grid stores u, v collocated on cell centres -- no
+        # face interpolation needed. Sample forcing at the (lat, lon)
+        # of each cell centre via nearest-neighbour.
+        lat_pts = np.degrees(np.asarray(grid.lat))   # (6, n, n)
+        lon_pts = np.degrees(np.asarray(grid.lon))
+        flat_shape = lat_pts.shape
+        forc = _sample_forcing_points(
+            forcing, idx_t, lat_pts.reshape(-1), lon_pts.reshape(-1),
+        )
+        for k, v in forc.items():
+            forc[k] = v.reshape(flat_shape)
+        T_sfc_K = np.asarray(state.T.data, dtype=np.float64)[..., 0] + 273.15
+        q_sfc = np.asarray(_bolton_q_sat(jnp.asarray(T_sfc_K)),
+                           dtype=np.float64)
+        tau_x, tau_y, sh, lh = air_sea_fluxes(
+            u10=jnp.asarray(forc["u10"]),
+            v10=jnp.asarray(forc["v10"]),
+            T_air_K=jnp.asarray(forc["T_air"]),
+            q_air=jnp.asarray(forc["q_air"]),
+            T_sfc_K=jnp.asarray(T_sfc_K),
+            q_sfc=jnp.asarray(q_sfc),
+            rho_air=jnp.asarray(rho_air),
+        )
+        lw_up = 0.97 * sigma_sb * T_sfc_K ** 4
+        Q_net = (np.asarray(sh) + np.asarray(lh)
+                 + forc["sw_down"] - lw_up + forc["lw_down"])
+        mask = np.asarray(state.land_mask.data, dtype=np.float64)
+        T_new = np.asarray(state.T.data, dtype=np.float64).copy()
+        T_new[..., 0] = T_new[..., 0] + (
+            Q_net / (rho_0 * c_p * dz_0) * dt * mask
+        )
+        u_new = np.asarray(state.u.data, dtype=np.float64).copy()
+        v_new = np.asarray(state.v.data, dtype=np.float64).copy()
+        u_new[..., 0] = u_new[..., 0] + (
+            np.asarray(tau_x) / (rho_0 * dz_0) * dt * mask
+        )
+        v_new[..., 0] = v_new[..., 0] + (
+            np.asarray(tau_y) / (rho_0 * dz_0) * dt * mask
+        )
+        return state._replace(
+            T=Field(jnp.asarray(T_new), name=state.T.name,
+                    dims=state.T.dims, units=state.T.units),
+            u=Field(jnp.asarray(u_new), name=state.u.name,
+                    dims=state.u.dims, units=state.u.units),
+            v=Field(jnp.asarray(v_new), name=state.v.name,
+                    dims=state.v.dims, units=state.v.units),
+        )
 
-    tau_y_face = np.zeros((n_lat + 1, n_lon), dtype=np.float64)
-    tau_y_face[1:-1, :] = 0.5 * (tau_y_np[:-1, :] + tau_y_np[1:, :])
-    tau_y_face[0, :] = tau_y_np[0, :]
-    tau_y_face[-1, :] = tau_y_np[-1, :]
-    v_mask = np.asarray(state.v_mask.data, dtype=np.float64)
-    dv_top = tau_y_face / (rho_0 * dz_0) * dt * v_mask
-    v_face[..., 0] = v_face[..., 0] + dv_top
+    if grid_type in ("mpas", "mpas_regional"):
+        # MPAS stores u on edge-normals; cell-centred tau is projected
+        # via ``tau_normal = tau_x * cos(angleEdge) + tau_y *
+        # sin(angleEdge)`` then averaged from neighbouring cells onto
+        # the shared edge.
+        lat_pts = np.degrees(np.asarray(grid.latCell))
+        lon_pts = np.degrees(np.asarray(grid.lonCell))
+        forc = _sample_forcing_points(
+            forcing, idx_t, lat_pts, lon_pts,
+        )
+        T_sfc_K = np.asarray(state.T.data, dtype=np.float64)[:, 0] + 273.15
+        q_sfc = np.asarray(_bolton_q_sat(jnp.asarray(T_sfc_K)),
+                           dtype=np.float64)
+        tau_x, tau_y, sh, lh = air_sea_fluxes(
+            u10=jnp.asarray(forc["u10"]),
+            v10=jnp.asarray(forc["v10"]),
+            T_air_K=jnp.asarray(forc["T_air"]),
+            q_air=jnp.asarray(forc["q_air"]),
+            T_sfc_K=jnp.asarray(T_sfc_K),
+            q_sfc=jnp.asarray(q_sfc),
+            rho_air=jnp.asarray(rho_air),
+        )
+        lw_up = 0.97 * sigma_sb * T_sfc_K ** 4
+        Q_net = (np.asarray(sh) + np.asarray(lh)
+                 + forc["sw_down"] - lw_up + forc["lw_down"])
+        mask = np.asarray(state.land_mask.data, dtype=np.float64)
+        T_new = np.asarray(state.T.data, dtype=np.float64).copy()
+        T_new[:, 0] = T_new[:, 0] + (
+            Q_net / (rho_0 * c_p * dz_0) * dt * mask
+        )
+        # Project tau onto edge normal via the two adjacent cells.
+        c1 = np.asarray(grid.cellsOnEdge[0], dtype=np.int64)
+        c2 = np.asarray(grid.cellsOnEdge[1], dtype=np.int64)
+        angle = np.asarray(grid.angleEdge, dtype=np.float64)
+        tau_x_edge = 0.5 * (np.asarray(tau_x)[c1] + np.asarray(tau_x)[c2])
+        tau_y_edge = 0.5 * (np.asarray(tau_y)[c1] + np.asarray(tau_y)[c2])
+        tau_n = tau_x_edge * np.cos(angle) + tau_y_edge * np.sin(angle)
+        edge_wet = ((mask[c1] > 0.5) & (mask[c2] > 0.5)).astype(np.float64)
+        u_new = np.asarray(state.u.data, dtype=np.float64).copy()
+        u_new[:, 0] = u_new[:, 0] + (
+            tau_n / (rho_0 * dz_0) * dt * edge_wet
+        )
+        return state._replace(
+            T=Field(jnp.asarray(T_new), name=state.T.name,
+                    dims=state.T.dims, units=state.T.units),
+            u=Field(jnp.asarray(u_new), name=state.u.name,
+                    dims=state.u.dims, units=state.u.units),
+        )
 
-    return state._replace(
-        T=Field(jnp.asarray(T_new), name=state.T.name,
-                dims=state.T.dims, units=state.T.units),
-        u=Field(jnp.asarray(u_face), name=state.u.name,
-                dims=state.u.dims, units=state.u.units),
-        v=Field(jnp.asarray(v_face), name=state.v.name,
-                dims=state.v.dims, units=state.v.units),
+    raise NotImplementedError(
+        f"OMIP-2 applicator does not support grid_type={grid_type!r}"
     )
 
 

@@ -27,10 +27,13 @@ from __future__ import annotations
 
 from .jra55_do import OceanForcing, load_jra55_do, synthetic_ocean_forcing
 from .core2 import load_core2_nyf
+from .woa import load_woa_sst, synthetic_woa_sst
 
 __all__ = [
     "OceanForcing",
     "load_jra55_do",
     "load_core2_nyf",
+    "load_woa_sst",
     "synthetic_ocean_forcing",
+    "synthetic_woa_sst",
 ]
