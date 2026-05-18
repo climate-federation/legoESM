@@ -67,6 +67,10 @@ from . import eady_uniform
 from . import acc_channel
 from . import global_overturning
 from . import dino
+from . import munk_gyre
+from . import held_larichev
+from . import neverworld2_lite
+from . import isomip_plus
 
 # Registry of all available experiments
 AVAILABLE_EXPERIMENTS = {
@@ -87,6 +91,10 @@ AVAILABLE_EXPERIMENTS = {
     "acc_channel": acc_channel.EXPERIMENT_CONFIG,
     "global_overturning": global_overturning.EXPERIMENT_CONFIG,
     "dino": dino.EXPERIMENT_CONFIG,
+    "munk_gyre": munk_gyre.EXPERIMENT_CONFIG,
+    "held_larichev": held_larichev.EXPERIMENT_CONFIG,
+    "neverworld2_lite": neverworld2_lite.EXPERIMENT_CONFIG,
+    "isomip_plus": isomip_plus.EXPERIMENT_CONFIG,
 }
 
 __all__ = [
@@ -107,5 +115,9 @@ __all__ = [
     "acc_channel",
     "global_overturning",
     "dino",
+    "munk_gyre",
+    "held_larichev",
+    "neverworld2_lite",
+    "isomip_plus",
     "AVAILABLE_EXPERIMENTS",
 ]

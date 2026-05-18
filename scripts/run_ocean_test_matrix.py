@@ -427,12 +427,29 @@ def _build_test_matrix() -> list[TestCase]:
             "global_overturning", g, go_res[g], 365.0, 10.0))
 
     # --- DINO (Kamm et al. 2025 idealised diabatic basin) ---
-    # Mercator lat-lon @ n_lon=20 (coarsened R1) + 500 km MPAS regional;
-    # smoke uses 1 day; production wants 30 d shake-down.
     matrix.append(TestCase(
         "dino", "latlon", "20x20", 30.0, 1.0))
     matrix.append(TestCase(
         "dino", "mpas", "500km", 30.0, 1.0))
+
+    # --- Munk gyre (Munk 1950 WBC + lateral-viscosity benchmark) ---
+    for g in ["latlon_regional", "mpas_regional"]:
+        matrix.append(TestCase(
+            "munk_gyre", g, GRID_RESOLUTIONS[g], 365.0, 30.0))
+
+    # --- Held-Larichev (eddying channel + k^-3 spectrum saturation) ---
+    hl_res = {"latlon_channel": "30x30", "mpas_channel": "70km"}
+    for g in ["latlon_channel", "mpas_channel"]:
+        matrix.append(TestCase(
+            "held_larichev", g, hl_res[g], 200.0, 30.0))
+
+    # --- NeverWorld2-lite (idealised global basin + ACC band) ---
+    matrix.append(TestCase(
+        "neverworld2_lite", "latlon", "180x360", 365.0, 5.0))
+
+    # --- ISOMIP+ (ice-shelf cavity, Asay-Davis 2016) ---
+    matrix.append(TestCase(
+        "isomip_plus", "latlon_regional", "32x16", 365.0, 5.0))
 
     return matrix
 
@@ -5140,6 +5157,160 @@ def run_global_overturning(tc: TestCase, output_dir: Path, days: float
 
 
 # ---------------------------------------------------------------------------
+# Runner: Munk gyre (Munk 1950 WBC + lateral viscosity benchmark)
+# ---------------------------------------------------------------------------
+
+def run_munk_gyre(tc: TestCase, output_dir: Path, days: float
+                   ) -> tuple[str, float, str]:
+    """Single-gyre Sverdrup balance + Munk boundary layer."""
+    from legoesm.ocean.experiments.munk_gyre import (
+        EXPERIMENT_CONFIG as MUNK_CONFIG,
+    )
+    return _run_experiment_via_registry(
+        tc, output_dir, days,
+        exp_config=MUNK_CONFIG, label="Munk Gyre",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Runner: Held-Larichev (eddying channel + k^-3 spectrum saturation)
+# ---------------------------------------------------------------------------
+
+def run_held_larichev(tc: TestCase, output_dir: Path, days: float
+                       ) -> tuple[str, float, str]:
+    """Held-Larichev eddying-channel APE -> eddy KE cascade."""
+    from legoesm.ocean.experiments.held_larichev import (
+        EXPERIMENT_CONFIG as HL_CONFIG,
+    )
+    from legoesm.ocean.eos import LinearEOSConfig
+
+    def _eos(cfg):
+        return LinearEOSConfig(
+            rho_ref=cfg.rho_0, alpha_T=cfg.alpha_T,
+            beta_S=0.0, T_ref=cfg.T_ref, S_ref=cfg.S_uniform,
+        )
+
+    return _run_experiment_via_registry(
+        tc, output_dir, days,
+        exp_config=HL_CONFIG, label="Held-Larichev",
+        eos_linear_factory=_eos,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Runner: NeverWorld2-lite (idealised global basin + ACC band)
+# ---------------------------------------------------------------------------
+
+def run_neverworld2_lite(tc: TestCase, output_dir: Path, days: float
+                          ) -> tuple[str, float, str]:
+    """NeverWorld2-lite reusing the DINO surface-forcing applicator.
+
+    The experiment exposes the same dict-style ``create_forcings`` as
+    DINO + an ``apply_per_step`` helper, so we mirror ``run_dino``.
+    """
+    from legoesm.ocean.experiments.neverworld2_lite import (
+        NeverWorld2LiteConfig,
+        create_initial_conditions, create_forcings, apply_per_step,
+        validate_results as _nw_validate,
+    )
+    from legoesm.ocean.experiments.dino import create_dino_z_star
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.grids.latlon import create_regional_latlon_grid
+
+    if tc.grid_type != "latlon":
+        raise NotImplementedError(
+            f"NeverWorld2-lite supports only latlon in Phase D; got "
+            f"{tc.grid_type}"
+        )
+
+    cfg = NeverWorld2LiteConfig()
+    # Translate ``cfg.n_lon`` into the resolution / grid.
+    n_lon = cfg.n_lon
+    n_lat = max(40, n_lon // 2)
+    grid, _wall = create_regional_latlon_grid(
+        n_lat=n_lat, n_lon=n_lon,
+        lat_south=-cfg.lat_max_deg, lat_north=cfg.lat_max_deg,
+        lon_west=cfg.lon_west_deg, lon_east=cfg.lon_east_deg,
+        periodic_x=True,
+    )
+    # Reuse the DINO Levy stretched z grid (NeverWorld2 has the same
+    # vertical structure for the smoke port).
+    from legoesm.ocean.experiments.dino import DINOConfig
+    z_coord = create_dino_z_star(DINOConfig())
+    state = create_initial_conditions(tc.grid_type, grid, z_coord, cfg)
+    forc_dict = create_forcings(tc.grid_type, grid, cfg)
+    model = LatLonCGridOceanModel(grid, z_coord, forc_dict["model_config"])
+    surface_forcing = forc_dict["surface_forcing"]
+
+    dt = 2700.0
+    n_steps = int(days * 86400 / dt)
+    diag_every = max(1, n_steps // 40)
+    check_fn = _make_check_fn(tc.grid_type)
+    scalar_fn = _make_scalar_fn(tc.grid_type, grid, z_coord)
+    lon_deg = np.degrees(np.asarray(grid.lon, dtype=np.float64))
+    lat_deg = np.degrees(np.asarray(grid.lat, dtype=np.float64))
+    extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
+
+    step_fn = (
+        lambda s, dt_: apply_per_step(
+            model.step(s, dt_), surface_forcing, z_coord, cfg, dt_,
+        )
+    )
+    state, snapshots, diag, wall, ok = _run_timeloop(
+        step_fn, state, dt, n_steps,
+        check_fn, scalar_fn, extract_fn, diag_every,
+        lambda s: _key_array_fn(s, tc.grid_type),
+        label=f"NeverWorld2-lite ({tc.grid_type})", total_days=days,
+    )
+    ok_v, notes = _nw_validate(state, diag, cfg)
+    ok = ok and ok_v
+
+    z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+    _write_results_txt(output_dir, {
+        "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
+        "days": days, "dt": dt, "levels": z_coord.n_levels,
+        "H_max": float(cfg.H_deep),
+        "reference": "Marques et al. 2022, GMD 15, 6567-6579",
+        "status": "PASS" if ok else "FAIL", "notes": notes,
+        "wall_time": f"{wall:.1f}s"},
+        diag=diag,
+    )
+    _save_case_diagnostics(
+        output_dir, f"NeverWorld2-lite {tc.grid_type} {tc.resolution}",
+        dt, diag, snapshots, "latlon", lon_deg, lat_deg,
+        field_specs_2d=[
+            ("eta", "SSH (m)", "RdBu_r"),
+            ("SST", "SST (degC)", "RdYlBu_r"),
+        ],
+        field_3d_key="T_3d", level_values=-z_full,
+        level_label="Depth (m)",
+        vol_key="mean_eta", heat_key="mean_T", salt_key="mean_S",
+        scalar_units={"mean_eta": "m", "mean_T": "degC", "mean_S": "PSU"},
+    )
+    return "PASS" if ok else "FAIL", wall, notes
+
+
+# ---------------------------------------------------------------------------
+# Runner: ISOMIP+ (Asay-Davis 2016 ice-shelf cavity)
+# ---------------------------------------------------------------------------
+
+def run_isomip_plus(tc: TestCase, output_dir: Path, days: float
+                     ) -> tuple[str, float, str]:
+    """ISOMIP+ cavity benchmark. The cavity-aware top boundary is a
+    Phase D follow-up; this runner integrates the rectangular box +
+    basal-melt post-process."""
+    from legoesm.ocean.experiments.isomip_plus import (
+        EXPERIMENT_CONFIG as ISO_CONFIG,
+    )
+    return _run_experiment_via_registry(
+        tc, output_dir, days,
+        exp_config=ISO_CONFIG, label="ISOMIP+",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Runner: DINO (Diabatic Neverworld Ocean, Kamm et al. 2025 GMD 18, 8091)
 # ---------------------------------------------------------------------------
 
@@ -5908,6 +6079,10 @@ RUNNERS: dict[str, Callable] = {
     "acc_channel": run_acc_channel,
     "global_overturning": run_global_overturning,
     "dino": run_dino,
+    "munk_gyre": run_munk_gyre,
+    "held_larichev": run_held_larichev,
+    "neverworld2_lite": run_neverworld2_lite,
+    "isomip_plus": run_isomip_plus,
 }
 
 
