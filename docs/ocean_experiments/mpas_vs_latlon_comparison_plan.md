@@ -1306,3 +1306,9 @@ ACC transport timeseries:
    C_smag_lap was lowered to 0.15 (Step 2 of tuning plan). With
    C_smag_lap=0.33 this should be stable, but watch the first
    few months carefully.
+
+6. **Volume leak on Mercator lat-lon** (issue #271): mean eta drifts
+   ~0.4 mm/yr with ETOPO (0.06 mm/yr flat bottom). MPAS conserves to
+   machine precision. Root cause likely in 3D↔barotropic coupling with
+   partial-cell face masking. Negligible for decadal science but would
+   matter for century-scale runs.
