@@ -731,19 +731,50 @@ def spectral_state_vs_carry_loss(
     else:
         T_norm = wind_norm = q_norm = ps_norm = 1.0
 
+    # Latitude-weighted mean over the Gaussian grid for the bias-
+    # penalty term.  ``grid.weights`` are Gaussian-quadrature
+    # latitude weights; combined with uniform longitude weighting
+    # this gives an area-weighted global mean.
+    lat_w = grid.weights.astype(jnp.float32)
+    lat_w_sum = jnp.sum(lat_w)
+
+    def _area_weighted_mean_3d(field):
+        # (n_lat, n_lon, nlev) -> level-weighted scalar bias.
+        # Average over lon, weight by Gaussian quadrature in lat,
+        # then sum over level (already level-weighted via lev_w).
+        zonal = jnp.mean(field, axis=1)        # (n_lat, nlev)
+        weighted_lat = jnp.sum(zonal * lat_w[:, None], axis=0) / lat_w_sum
+        return jnp.sum(weighted_lat * lev_w) / lev_w.shape[0]
+
+    def _area_weighted_mean_2d(field):
+        zonal = jnp.mean(field, axis=1)        # (n_lat,)
+        return jnp.sum(zonal * lat_w) / lat_w_sum
+
     # Temperature: (n_lat, n_lon, nlev)
     dT = fields['T'].astype(jnp.float32) - target_carry.T
     loss = loss + config.w_T * jnp.mean(dT ** 2 * lev_w) / T_norm
+    if config.w_bias_T > 0.0:
+        bias_T = _area_weighted_mean_3d(dT)
+        loss = loss + config.w_bias_T * bias_T ** 2 / T_norm
 
     # Winds: (n_lat, n_lon, nlev)
     du = fields['u'].astype(jnp.float32) - target_carry.u
     dv = fields['v'].astype(jnp.float32) - target_carry.v
     loss = loss + config.w_u * jnp.mean(du ** 2 * lev_w) / wind_norm
     loss = loss + config.w_v * jnp.mean(dv ** 2 * lev_w) / wind_norm
+    if config.w_bias_u > 0.0:
+        bias_u = _area_weighted_mean_3d(du)
+        loss = loss + config.w_bias_u * bias_u ** 2 / wind_norm
+    if config.w_bias_v > 0.0:
+        bias_v = _area_weighted_mean_3d(dv)
+        loss = loss + config.w_bias_v * bias_v ** 2 / wind_norm
 
     # Surface pressure: (n_lat, n_lon)
     dp = fields['p_s'].astype(jnp.float32) - target_carry.p_s
     loss = loss + config.w_ps * jnp.mean(dp ** 2) / ps_norm
+    if config.w_bias_ps > 0.0:
+        bias_ps = _area_weighted_mean_2d(dp)
+        loss = loss + config.w_bias_ps * bias_ps ** 2 / ps_norm
 
     # Specific humidity (q_v): contribute to the loss only when the
     # predicted state actually carries a ``q_v`` tracer (i.e., the

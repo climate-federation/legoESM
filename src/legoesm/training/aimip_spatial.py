@@ -240,26 +240,29 @@ class SpatialFieldSpec(NamedTuple):
     transform: Literal["log_perturb", "shift"]
 
 
-# Per-field defaults.  Scales are chosen so the bounds match the
-# corresponding ``ParamConstraint`` ranges in ``aimip_params.py`` to a
-# factor of e^scale or +/- scale:
-#   - Cd_neutral default 1.5e-3, range [5e-4, 3e-3] -> log range ~ ln(2),
-#     so scale=0.7 covers it.
-#   - Ch_neutral default 1.5e-3 -> scale=0.7
-#   - z0 default 1e-4, range [1e-5, 1e-3] -> log range ~ ln(10) ~ 2.3,
-#     scale=2.3 covers it.
-#   - sfc_emissivity centered at 0.95, range [0.85, 1.0] -> scale=0.075
-#   - sfc_albedo centered at 0.2, range [0.05, 0.4] -> scale=0.18
-#   - albedo_ocean centered at 0.06, range [0.03, 0.10] -> scale=0.04
-#   - albedo_ice centered at 0.6, range [0.4, 0.8] -> scale=0.2
+# Per-field defaults.  The ``scale`` parameter bounds the
+# perturbation magnitude:
+#   - log_perturb fields: value in ``[f_0 * exp(-scale), f_0 * exp(+scale)]``.
+#   - shift fields:       value in ``[f_0 - scale, f_0 + scale]``.
+#
+# v6 (2026-05-18): shift-transform scales tightened after the v5 run
+# at T11 L8 produced a +1.07 K warm T bias driven by the surface
+# energy-balance fields over-correcting (was -2.74 K cold at the T21
+# baseline; the per-group LR x5 plus 15-epoch budget pushed them
+# past the bias-zero crossing).  Narrower bounds on
+# ``sfc_emissivity`` / ``sfc_albedo`` / ``albedo_ocean`` /
+# ``albedo_ice`` constrain the optimizer's spatial perturbation to
+# the physically plausible cold-side correction range.
+# Log-perturb fields (Cd, Ch, z0) drive momentum and BL physics, not
+# the radiation budget, so their scales are left alone.
 _FIELD_SPECS: dict[str, SpatialFieldSpec] = {
-    "Cd_neutral":     SpatialFieldSpec(f_0=1.5e-3, scale=0.7, transform="log_perturb"),
-    "Ch_neutral":     SpatialFieldSpec(f_0=1.5e-3, scale=0.7, transform="log_perturb"),
-    "z0":             SpatialFieldSpec(f_0=1.0e-4, scale=2.3, transform="log_perturb"),
-    "sfc_emissivity": SpatialFieldSpec(f_0=0.95,   scale=0.05, transform="shift"),
-    "sfc_albedo":     SpatialFieldSpec(f_0=0.20,   scale=0.18, transform="shift"),
-    "albedo_ocean":   SpatialFieldSpec(f_0=0.06,   scale=0.04, transform="shift"),
-    "albedo_ice":     SpatialFieldSpec(f_0=0.60,   scale=0.20, transform="shift"),
+    "Cd_neutral":     SpatialFieldSpec(f_0=1.5e-3, scale=0.7,  transform="log_perturb"),
+    "Ch_neutral":     SpatialFieldSpec(f_0=1.5e-3, scale=0.7,  transform="log_perturb"),
+    "z0":             SpatialFieldSpec(f_0=1.0e-4, scale=2.3,  transform="log_perturb"),
+    "sfc_emissivity": SpatialFieldSpec(f_0=0.95,   scale=0.02, transform="shift"),
+    "sfc_albedo":     SpatialFieldSpec(f_0=0.20,   scale=0.05, transform="shift"),
+    "albedo_ocean":   SpatialFieldSpec(f_0=0.06,   scale=0.02, transform="shift"),
+    "albedo_ice":     SpatialFieldSpec(f_0=0.60,   scale=0.05, transform="shift"),
 }
 
 

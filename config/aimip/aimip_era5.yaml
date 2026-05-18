@@ -162,7 +162,15 @@ aimip_spatial_surface: true
 # sigmoid-bounded scheme scalars (which carry ~3 orders of magnitude
 # more gradient signal at init).  Both knobs only take effect when
 # ``aimip_spatial_surface: true``.
-aimip_spatial_init_std: 0.02
+aimip_spatial_init_std: 0.005   # v6: was 0.02 -- v5 produced a +1.07 K
+                                # warm T bias at T11 L8, suggesting the
+                                # spatial coefs started too far from
+                                # baseline and the optimizer pushed past
+                                # the bias-zero crossing.  0.005
+                                # keeps the initial perturbation in the
+                                # linear-tanh regime so the gradient
+                                # signal still flows but the field
+                                # remains close to ``f_0`` at step 0.
 aimip_spatial_seed: 0
 aimip_spatial_lr_scale: 5.0
 
@@ -184,6 +192,15 @@ loss:
   w_v: 0.5
   w_q: 0.2
   w_ps: 0.3
+  # Bias-penalty weights.  v5 classical hit +1.07 K warm T bias at
+  # T11 L8; per-cell MSE only weakly constrains constant offsets, so
+  # we add an explicit squared-global-mean-error term per variable.
+  # w_bias_T at 10 puts the bias penalty at the same order as the
+  # MSE term once the bias drops to ~1/3 of the per-cell RMSE.
+  w_bias_T: 10.0
+  w_bias_u: 1.0
+  w_bias_v: 1.0
+  w_bias_ps: 1.0
   spectral_weight: 0.3
   level_weighting: "pressure"
   normalize_by_scale: true

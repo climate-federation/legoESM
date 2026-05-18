@@ -37,6 +37,19 @@ class LossConfig(NamedTuple):
     w_v: float = 0.5          # meridional wind
     w_q: float = 0.2          # specific humidity
     w_ps: float = 0.3         # surface pressure
+    # Bias-penalty weights.  ``w_bias_<var>`` multiplies the squared
+    # global-mean error ``(area_weighted_mean(pred - target))^2``,
+    # normalized by the same variable scale as the MSE term.  Adds
+    # an explicit penalty on constant offsets that the per-cell MSE
+    # only weakly constrains -- e.g. the +1.07 K warm T bias the
+    # AIMIP v5 classical variant produced at T11 L8 (residual after
+    # the spatial-surface fields over-corrected).  Default 0.0
+    # preserves legacy behaviour; set ``w_bias_T`` ~ 1-10 in AIMIP
+    # configs to drive the bias toward zero.
+    w_bias_T: float = 0.0
+    w_bias_u: float = 0.0
+    w_bias_v: float = 0.0
+    w_bias_ps: float = 0.0
     # Loss components
     spectral_weight: float = 0.0   # weight for spectral loss term
     level_weighting: str = "pressure"  # "uniform", "pressure", or "boundary_layer"
