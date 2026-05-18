@@ -13,6 +13,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.core.state import HydrostaticState
 from legoesm.driver.compiled_segments import (
@@ -103,7 +104,7 @@ def _make_carry(T_val=280.0):
 _FORCING = pack_forcing(
     sst=jnp.full((6,N,N), 300.0), sic=jnp.zeros((6,N,N)),
     day_of_year=1.0, seconds_of_day=0.0,
-    solar_weights=jnp.ones(14), s_0=1361.0,
+    solar_weights=jnp.ones(14), s_0=constants.S_0,
     o3_vmr=jnp.zeros((6,N,N,NLEV)), aerosol_od=jnp.zeros((6,N,N)),
 )
 

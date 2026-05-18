@@ -57,6 +57,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
+from legoesm import constants
 from legoesm.constants import g
 from legoesm.core.field import Field
 
@@ -96,7 +97,7 @@ class OverflowConfig:
     depth_decay_factor: float = 0.5  # Temperature decay with depth
 
     # Physical parameters for RPE calculation
-    rho_reference: float = 1025.0   # = eos.rho_0
+    rho_reference: float = constants.rho_ocean
     alpha_T: float = 2.0e-4         # Thermal expansion coefficient [1/K]
     T_reference: float = 12.5       # Reference temperature [°C]
 
@@ -145,7 +146,7 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         from legoesm.ocean.init import rest_state_ocean
         state = rest_state_ocean(
             grid, z_coord,
-            T_surface=config.T_reference,
+            T_water_init_C=config.T_reference,
             T_deep=config.T_deep,
             S_uniform=config.S_uniform,
             H_max=config.H_max,
@@ -156,7 +157,7 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
         state = rest_state_latlon_cgrid_ocean(
             grid, z_coord,
-            T_surface=config.T_reference,
+            T_water_init_C=config.T_reference,
             T_deep=config.T_deep,
             S_uniform=config.S_uniform,
             H_max=config.H_max,
@@ -167,7 +168,7 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         from legoesm.ocean.init_mpas import rest_state_mpas_ocean
         state = rest_state_mpas_ocean(
             grid, z_coord,
-            T_surface=config.T_reference,
+            T_water_init_C=config.T_reference,
             T_deep=config.T_deep,
             S_uniform=config.S_uniform,
             H_max=config.H_max,
@@ -178,7 +179,7 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         from legoesm.ocean.dynamics.spectral_ocean_pe import rest_state_spectral_ocean
         state = rest_state_spectral_ocean(
             grid, z_coord,
-            T_surface=config.T_reference,
+            T_water_init_C=config.T_reference,
             T_deep=config.T_deep,
             S_uniform=config.S_uniform,
             H_max=config.H_max,
@@ -224,7 +225,7 @@ def _add_overflow_structure(state, grid_type: str, grid, z_coord,
 
     # Temperature profile: tanh transition at lat_front
     # Cold dense water poleward, warm light water equatorward
-    T_surface = T_warm + (T_cold - T_warm) * 0.5 * (
+    T_water_init_C = T_warm + (T_cold - T_warm) * 0.5 * (
         1.0 + np.tanh((abs_lat - lat_front) / sigma_front))
 
     # Bathymetry: tanh transition at lat_shelf
@@ -233,14 +234,14 @@ def _add_overflow_structure(state, grid_type: str, grid, z_coord,
         1.0 - np.tanh((abs_lat - lat_shelf) / sigma_shelf))
 
     if grid_type == "spectral":
-        return _add_overflow_spectral(state, grid, z_coord, T_surface, T_deep,
+        return _add_overflow_spectral(state, grid, z_coord, T_water_init_C, T_deep,
                                     depth_decay, config)
     else:
-        return _add_overflow_fv(state, grid, z_coord, T_surface, T_deep,
+        return _add_overflow_fv(state, grid, z_coord, T_water_init_C, T_deep,
                               H_bathy_new, depth_decay, config)
 
 
-def _add_overflow_spectral(state, grid, z_coord, T_surface, T_deep,
+def _add_overflow_spectral(state, grid, z_coord, T_water_init_C, T_deep,
                          depth_decay, config):
     """Add overflow for spectral grid (temperature only - no bathymetry)."""
     from legoesm.grids.gaussian import sh_analysis_3d, sh_synthesis_3d
@@ -253,7 +254,7 @@ def _add_overflow_spectral(state, grid, z_coord, T_surface, T_deep,
     # Apply temperature profile with depth decay
     for k in range(nlev):
         depth_frac = float(z_coord.z_full_ref[k] / z_coord.z_full_ref[-1])
-        T_k = T_surface * (1.0 - depth_decay * depth_frac) + T_deep * depth_frac
+        T_k = T_water_init_C * (1.0 - depth_decay * depth_frac) + T_deep * depth_frac
         T_grid[..., k] = T_k * mask
 
     new_T_hat = sh_analysis_3d(grid, jnp.array(T_grid))
@@ -263,7 +264,7 @@ def _add_overflow_spectral(state, grid, z_coord, T_surface, T_deep,
                                     dims=state.T_hat.dims, units="K"))
 
 
-def _add_overflow_fv(state, grid, z_coord, T_surface, T_deep, H_bathy_new,
+def _add_overflow_fv(state, grid, z_coord, T_water_init_C, T_deep, H_bathy_new,
                    depth_decay, config):
     """Add overflow for finite volume grids (temperature + bathymetry)."""
     T_data = np.array(state.T.data, dtype=np.float64, copy=True)
@@ -276,7 +277,7 @@ def _add_overflow_fv(state, grid, z_coord, T_surface, T_deep, H_bathy_new,
     # Apply temperature profile with depth decay
     for k in range(nlev):
         depth_frac = float(z_coord.z_full_ref[k] / z_coord.z_full_ref[-1])
-        T_k = T_surface * (1.0 - depth_decay * depth_frac) + T_deep * depth_frac
+        T_k = T_water_init_C * (1.0 - depth_decay * depth_frac) + T_deep * depth_frac
         T_data[..., k] = T_k * mask
 
     # Update bathymetry with land mask

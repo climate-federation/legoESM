@@ -182,6 +182,17 @@ class Test3g_PDI:
         theta_0 = pdi_theta(jnp.array([0.0]), CONFIG)
         assert jnp.allclose(theta_0, CONFIG.theta_sat, atol=1e-6)
 
+    def test_K_approaches_Ksat_at_saturation(self):
+        # Regression: the wet-end smoothstep used to be inverted, so K(h~0)
+        # collapsed to K_sat * Kr_crit (~0.34 * K_sat) instead of K_sat.
+        # Walk h from h_crit down through 1e-12 m and confirm K converges
+        # monotonically to K_sat.
+        psi_wet = -jnp.array([1e-12, 1e-9, 1e-6, 1e-3])
+        K_wet = pdi_K(psi_wet, CONFIG)
+        assert jnp.all(K_wet <= CONFIG.K_sat * (1.0 + 1e-6))
+        assert jnp.all(K_wet >= K_wet[-1])  # monotone increase toward h=0
+        assert jnp.isclose(K_wet[0], CONFIG.K_sat, rtol=1e-6, atol=0.0)
+
 
 # ===================================================================
 # 3h  Lu three-regime -- consistency

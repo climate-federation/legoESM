@@ -16,7 +16,7 @@ Domain Configuration:
 - Rectangular ocean basin (0-120°E, 15-75°N) — channel-like regional domain
 - Solid walls on all four sides
 - Uniform depth: 5500m
-- Background stratification: T_surface=20°C → T_deep=2°C, 1000m e-fold
+- Background stratification: T_water_init_C=20°C → T_deep=2°C, 1000m e-fold
 
 Physical Setup:
 - Meridional temperature front: tanh profile centered at 45°N,
@@ -64,7 +64,7 @@ class EadyInstabilityConfig:
     lat_north: float = 65.0
 
     # Background stratification
-    T_surface: float = 20.0        # Surface temperature [degC]
+    T_water_init_C: float = 20.0        # Surface temperature [degC]
     T_deep: float = 2.0            # Deep ocean temperature [degC]
     T_scale_depth: float = 1000.0  # Temperature e-folding depth [m]
     S_uniform: float = 35.0        # Salinity [PSU]
@@ -81,7 +81,7 @@ class EadyInstabilityConfig:
 
     # Thermal wind parameters
     alpha_T: float = 2.0e-4        # Thermal expansion [1/K] (matches LinearEOS)
-    rho_0: float = 1025.0          # = eos.rho_0
+    rho_0: float = constants.rho_ocean
 
     # Perturbation to seed instability
     eta_perturbation_m: float = 0.01  # SSH perturbation amplitude [m]
@@ -161,7 +161,7 @@ def _channel_rest_state_latlon(grid, z_coord, config: EadyInstabilityConfig):
     wall_mask[-1, :] = 0.0  # north wall
     return rest_state_latlon_cgrid_ocean(
         grid, z_coord, H_max=config.H_max,
-        T_surface=config.T_surface, T_deep=config.T_deep,
+        T_water_init_C=config.T_water_init_C, T_deep=config.T_deep,
         S_uniform=config.S_uniform,
         land_mask_override=wall_mask,
     )
@@ -177,7 +177,7 @@ def _channel_rest_state_mpas(mesh, z_coord, config: EadyInstabilityConfig):
     from legoesm.ocean.init_mpas import rest_state_mpas_ocean
     state = rest_state_mpas_ocean(
         mesh, z_coord, H_max=config.H_max,
-        T_surface=config.T_surface, T_deep=config.T_deep,
+        T_water_init_C=config.T_water_init_C, T_deep=config.T_deep,
         S_uniform=config.S_uniform,
     )
     # Land mask: cells outside target latitude band are land
@@ -196,7 +196,7 @@ def _add_stratification_and_front(state, z_coord, config: EadyInstabilityConfig)
 
     # Background exponential profile: T(z) = T_deep + (T_s - T_d)*exp(z/scale)
     decay = np.exp(z_full / config.T_scale_depth)
-    T_bg = config.T_deep + (config.T_surface - config.T_deep) * decay  # (nlev,)
+    T_bg = config.T_deep + (config.T_water_init_C - config.T_deep) * decay  # (nlev,)
 
     # Meridional front: tanh(lat - lat_center) * depth_decay
     T_data = np.array(state.T.data)
@@ -289,10 +289,13 @@ def _add_thermal_wind_latlon(state, grid, z_coord,
     lat_mid = np.radians(config.front_lat_center)
     f0 = 2.0 * Omega * np.sin(lat_mid)
 
-    # ∂T/∂y at u-face latitudes (between cell centers)
-    dy = grid.dy / 2.0  # grid.dy is "distance over 2 cells"
+    # ∂T/∂y at u-face latitudes (between cell centers): distance from
+    # centre-of-row(i-1) to centre-of-row(i). 1D over latitude →
+    # Mercator-safe.
+    dy_h = np.asarray(grid.dy) * 0.5  # (n_lat,) single-cell heights
+    dy_v = 0.5 * (dy_h[1:] + dy_h[:-1])  # (n_lat-1,) face-to-face distance
     # dT/dy at interior u-faces: (T[i] - T[i-1]) / dy
-    dTdy = (T_data[1:, :, :] - T_data[:-1, :, :]) / dy  # (n_lat-1, n_lon, nlev)
+    dTdy = (T_data[1:, :, :] - T_data[:-1, :, :]) / dy_v[:, None, None]  # (n_lat-1, n_lon, nlev)
     # Pad to (n_lat, n_lon+1, nlev) u-face shape:
     # Top/bottom rows: zero (solid wall), columns: periodic average
     dTdy_padded = np.zeros((n_lat, nlev), dtype=np.float64)
@@ -333,11 +336,16 @@ def _add_thermal_wind_latlon(state, grid, z_coord,
     u_data = u_data * u_mask[:, :, np.newaxis]
 
     # Geostrophically balanced SSH: f0 * U_bar = -g * deta/dy
-    # => eta(y) = -(f0/g) * integral(U_bar, dy) from south wall
+    # => eta(y) = -(f0/g) * integral(U_bar, dy) from south wall.
+    # Step size between cell centres (i-1) → i is dy_v[i-1], the
+    # face-to-face distance (1D, Mercator-safe). For uniform-dlat
+    # regional grids dy_v is constant.
     eta_data = np.zeros((n_lat, n_lon), dtype=np.float64)
     for i in range(1, n_lat):
         idx = min(i - 1, len(U_bar_full) - 1)
-        eta_data[i, :] = eta_data[i - 1, :] - (f0 / g) * U_bar_full[idx] * dy
+        eta_data[i, :] = (
+            eta_data[i - 1, :] - (f0 / g) * U_bar_full[idx] * dy_v[i - 1]
+        )
     # Remove mean to keep eta centered around zero
     ocean = np.asarray(state.land_mask.data) > 0.5
     if np.any(ocean):

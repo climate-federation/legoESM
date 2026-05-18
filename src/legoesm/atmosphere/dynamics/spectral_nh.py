@@ -102,6 +102,13 @@ class SpectralNHConfig(NamedTuple):
     n_acoustic_substeps: int = 6
     small_earth_factor: float = 1.0
     semi_implicit_acoustic: bool = False  # Use tridiagonal solve for acoustics
+    # iter-9: opt-in anchored dry-mass fixer.  Mirrors the spectral PE
+    # iter-3 mechanism (rescale the (n=0,m=0) coefficient of the
+    # prognostic variable so the global integral returns to the
+    # initial snapshot).  Disabled by default to preserve bit-for-bit
+    # baseline for drift-measurement tests.
+    fix_mass: bool = False
+    anchor_mass_to_initial: bool = False
 
 
 # =============================================================================
@@ -752,6 +759,61 @@ class SpectralCompressibleEulerModel:
             check_spectral_backend(
                 allow_unsupported=allow_unsupported_backend,
             )
+        # iter-9: lazy fp64 dry-mass snapshot for anchor-to-initial.
+        self._target_mass = None
+
+    def reset_target_mass(self) -> None:
+        """Clear the anchored mass target (iter-18; see iter-4 SW twin)."""
+        self._target_mass = None
+
+    def set_target_mass(self, target_mass) -> None:
+        """Explicitly set the anchored mass target (iter-19)."""
+        self._target_mass = target_mass
+
+    def compute_dry_mass(self, state) -> jax.Array:
+        """Global dry mass ``∫ J · (rho_ref + rho') · dz · dA`` (fp64)."""
+        rho_p_grid = sh_synthesis_3d(self.grid, state.rho_prime_hat.data)
+        rho_total = self.height_coord.rho_ref + rho_p_grid  # (n_lat, n_lon, nlev)
+        J = self.terrain_metric.jacobian                    # (n_lat, n_lon)
+        dz = self.height_coord.dz                           # (nlev,)
+        col_mass = jnp.sum(
+            J[..., None] * rho_total * dz[None, None, :], axis=-1,
+        )                                                   # (n_lat, n_lon)
+        acc = jnp.float64
+        return jnp.sum(
+            col_mass.astype(acc) * self.grid.grid_area.astype(acc),
+        )
+
+    def _apply_mass_fixer(self, state):
+        """Anchor ``∫ J · (rho_ref + rho') · dz · dA`` to ``_target_mass``.
+
+        Uniform additive correction in physical space (matches the
+        cubed-sphere / MPAS ``fix_mass_nonhydrostatic`` convention):
+        ``Δρ = (target − current) / (∫ J · dz · dA)``.  Adding ``Δρ`` to
+        ``rho'`` in physical space is equivalent to adding
+        ``Δρ · sqrt(4π)`` to ``rho_prime_hat[0, :]`` (the (n=0,m=0) row),
+        broadcast across all vertical levels.
+        """
+        rho_p_grid = sh_synthesis_3d(self.grid, state.rho_prime_hat.data)
+        rho_total = self.height_coord.rho_ref + rho_p_grid
+        J = self.terrain_metric.jacobian
+        dz = self.height_coord.dz
+        col_mass = jnp.sum(
+            J[..., None] * rho_total * dz[None, None, :], axis=-1,
+        )
+        acc = jnp.float64
+        area_acc = self.grid.grid_area.astype(acc)
+        current_mass = jnp.sum(col_mass.astype(acc) * area_acc)
+        total_vol = jnp.sum(J.astype(acc) * area_acc) * jnp.sum(dz.astype(acc))
+        delta_rho = (self._target_mass - current_mass) / total_vol
+        sqrt_4pi = jnp.sqrt(jnp.asarray(4.0 * jnp.pi, dtype=acc))
+        rho_hat = state.rho_prime_hat.data
+        rho_hat_new = rho_hat.at[0, :].add(
+            (delta_rho * sqrt_4pi).astype(rho_hat.dtype),
+        )
+        return state._replace(
+            rho_prime_hat=state.rho_prime_hat.replace(data=rho_hat_new),
+        )
 
     def _build_se_functions(self):
         """Build slow tendency and acoustic update functions for split-explicit."""
@@ -821,8 +883,17 @@ class SpectralCompressibleEulerModel:
 
         return slow_tendency_fn, acoustic_update_fn
 
-    @partial(jax.jit, static_argnums=(0,))
     def step(self, state: SpectralNHState, dt: float) -> SpectralNHState:
+        """Outer wrapper: snapshots dry mass on first call when
+        ``anchor_mass_to_initial`` is on (fp64, outside JIT)."""
+        if (self.config.fix_mass
+                and self.config.anchor_mass_to_initial
+                and self._target_mass is None):
+            self._target_mass = self.compute_dry_mass(state)
+        return self._step_jit(state, dt)
+
+    @partial(jax.jit, static_argnums=(0,))
+    def _step_jit(self, state: SpectralNHState, dt: float) -> SpectralNHState:
         """Advance one time step using split-explicit RK3.
 
         Slow tendencies use spectral horizontal operators.
@@ -839,11 +910,22 @@ class SpectralCompressibleEulerModel:
                 state_cpu, slow_tendency_fn, acoustic_update_fn,
                 dt, se_config,
             )
-            return jax.device_put(result_cpu, self._default_device)
+            state_new = jax.device_put(result_cpu, self._default_device)
+        else:
+            state_new = split_explicit_step(
+                state, slow_tendency_fn, acoustic_update_fn, dt, se_config,
+            )
 
-        return split_explicit_step(
-            state, slow_tendency_fn, acoustic_update_fn, dt, se_config,
-        )
+        # iter-9: anchored dry-mass fixer.  ``_target_mass`` is None
+        # when disabled OR before the first ``step()`` call (snapshot
+        # happens in the Python wrapper).  When set, it's a fp64 scalar
+        # that JIT captures as a closure constant.
+        if (self.config.fix_mass
+                and self.config.anchor_mass_to_initial
+                and self._target_mass is not None):
+            state_new = self._apply_mass_fixer(state_new)
+
+        return state_new
 
     @partial(jax.jit, static_argnums=(0,))
     def _step_on_cpu(self, state: SpectralNHState, dt: float) -> SpectralNHState:

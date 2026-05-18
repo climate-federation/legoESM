@@ -57,6 +57,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
+from legoesm import constants
 from legoesm.constants import g
 from legoesm.core.field import Field
 
@@ -70,9 +71,9 @@ class LockExchangeConfig:
 
     Parameters based on Petersen et al. (2015) and NEMO test suite.
     """
-    # Domain configuration (high resolution for mixing study)
-    nlev: int = 20                 # High vertical resolution
-    H_max: float = 500.0           # Shallow depth [m] for clear gravity current
+    # Domain configuration (Petersen 2015 Fig. 5: 20 m depth, 20 levels)
+    nlev: int = 20                 # 20 levels → ~1 m / level at H_max = 20 m
+    H_max: float = 20.0            # Petersen 2015 Fig. 5 channel depth [m]
     land_lat_threshold: float = 80.0  # Latitude threshold for land [degrees]
     spectral_land_lat_threshold: float = 90.0  # No land for spectral grid
 
@@ -85,7 +86,7 @@ class LockExchangeConfig:
     front_longitude: float = 0.0   # Prime meridian [degrees]
 
     # Physical parameters for RPE calculation
-    rho_reference: float = 1025.0   # = eos.rho_0
+    rho_reference: float = constants.rho_ocean
     alpha_T: float = 2.0e-4         # Thermal expansion coefficient [1/K]
     T_reference: float = 15.0       # Reference temperature [°C]
 
@@ -132,7 +133,7 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         from legoesm.ocean.init import rest_state_ocean
         state = rest_state_ocean(
             grid, z_coord,
-            T_surface=config.T_reference,  # Use reference T as background
+            T_water_init_C=config.T_reference,  # Use reference T as background
             T_deep=config.T_reference,
             S_uniform=config.S_uniform,
             H_max=config.H_max,
@@ -143,7 +144,7 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
         state = rest_state_latlon_cgrid_ocean(
             grid, z_coord,
-            T_surface=config.T_reference,
+            T_water_init_C=config.T_reference,
             T_deep=config.T_reference,
             S_uniform=config.S_uniform,
             H_max=config.H_max,
@@ -154,7 +155,7 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         from legoesm.ocean.init_mpas import rest_state_mpas_ocean
         state = rest_state_mpas_ocean(
             grid, z_coord,
-            T_surface=config.T_reference,
+            T_water_init_C=config.T_reference,
             T_deep=config.T_reference,
             S_uniform=config.S_uniform,
             H_max=config.H_max,
@@ -165,7 +166,7 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         from legoesm.ocean.dynamics.spectral_ocean_pe import rest_state_spectral_ocean
         state = rest_state_spectral_ocean(
             grid, z_coord,
-            T_surface=config.T_reference,
+            T_water_init_C=config.T_reference,
             T_deep=config.T_reference,
             S_uniform=config.S_uniform,
             H_max=config.H_max,
@@ -533,8 +534,8 @@ EXPERIMENT_CONFIG = {
         "spectral": False  # RPE calculation complex for spectral
     },
     "special_config": {
-        "nlev": 20,         # High vertical resolution
-        "H_max": 500.0,     # Shallow depth
+        "nlev": 20,
+        "H_max": 20.0,      # Petersen 2015 Fig. 5
         "density_front": True,
         "rpe_diagnostics": True
     }

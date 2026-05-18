@@ -28,6 +28,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from legoesm import constants
+
 jax.config.update("jax_enable_x64", True)
 
 ALL_SCHEMES = ["upwind", "tvd", "dst3", "weno5", "weno7"]
@@ -77,7 +79,7 @@ def _solid_body_velocity(lon_u, lat_u, lon_v, lat_v, t, T=T_PERIOD_SBR,
     u_east : (n_lat_grid, n_lon+1, 1) at u-faces [m/s]
     v_north : (n_lat_grid+1, n_lon, 1) at v-faces [m/s]
     """
-    R = 6371.0e3
+    R = constants.R_earth
     u0 = 2.0 * jnp.pi * R / T
     alpha = jnp.radians(alpha_deg)
     cos_a = jnp.cos(alpha)
@@ -165,7 +167,7 @@ def _swirl_velocity(lon_u, lat_u, lon_v, lat_v, t, T=T_PERIOD):
     u_east : array at u-faces [m/s]
     v_north : array at v-faces [m/s]
     """
-    R = 6371.0e3  # Earth radius
+    R = constants.R_earth  # Earth radius
     # Stream function ψ = A*sin²(λ)*cos²(φ) gives non-divergent flow:
     #   u = -(1/R)∂ψ/∂φ = +(A/R)*sin²(λ)*sin(2φ)
     #   v = +(1/(R*cosφ))∂ψ/∂λ = +(A/R)*sin(2λ)*cos(φ)
@@ -322,7 +324,7 @@ def _run_single_2d(scheme, n_lat, n_lon, output_dir, time_integrator="euler",
     elif flow == "solid_body":
         T_total = T_PERIOD_SBR
         # u0 = 2*pi*R/T → ~38 m/s for R=6371km, T=12d
-        max_velocity = 2.0 * float(np.pi) * 6371.0e3 / T_total
+        max_velocity = 2.0 * float(np.pi) * constants.R_earth / T_total
     else:
         raise ValueError(f"Unknown flow: {flow}")
 

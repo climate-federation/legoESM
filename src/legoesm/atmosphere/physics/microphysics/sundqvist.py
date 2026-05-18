@@ -65,7 +65,16 @@ def diagnose_sundqvist_process_rates(
 
     # 2. Autoconversion
     # condensation is a tendency [kg/kg/s]; multiply by dt to get increment [kg/kg]
-    P_auto = config.auto_rate * jnp.maximum(q_c + condensation * dt, 0.0)
+    # Cap the autoconversion against the available cloud water + new
+    # condensation so an explicit Euler step (``q_c_new = q_c + dt·dq_c_dt``)
+    # never drives q_c below zero.  Without this, default
+    # ``auto_rate · dt = 1e-3·1800 = 1.8`` over ~30 min for typical
+    # ``q_c ≈ 1e-4 kg/kg`` overshoots the available mass by ~80 %.
+    qc_avail = jnp.maximum(q_c + condensation * dt, 0.0)
+    P_auto_demand = config.auto_rate * qc_avail
+    # Donor cap: rate · dt ≤ qc_avail → rate ≤ qc_avail / dt.
+    dt_safe = jnp.maximum(dt, 1.0e-12)
+    P_auto = jnp.minimum(P_auto_demand, qc_avail / dt_safe)
 
     # 3. Sub-cloud evaporation
     evap_mask = jax.nn.sigmoid(sharpness * (config.RH_crit - RH))

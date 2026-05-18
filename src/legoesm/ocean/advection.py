@@ -24,6 +24,7 @@ import jax.numpy as jnp
 
 from legoesm.core.weno import weno5_z, weno7_z, weno_upwind
 from legoesm.grids.latlon import LatLonGrid
+from legoesm.ocean.dynamics.latlon_cgrid_operators import is_tripolar
 
 
 # =============================================================================
@@ -115,9 +116,12 @@ def dst3_to_u_points(
     eps = 1e-30
     n_lon = f.shape[1]
 
-    # Cell-width at u-face latitudes: dx = R * dlon * cos(lat)
-    dx = grid.radius * grid.dlon * grid.cos_lat  # (n_lat,)
-    dx_3d = dx[:, jnp.newaxis, jnp.newaxis]  # broadcast to (n_lat, 1, 1)
+    # Cell-width at u-face latitudes
+    if is_tripolar(grid):
+        dx_3d = grid.dx_u[:, :, jnp.newaxis]  # (n_lat, n_lon+1, 1)
+    else:
+        dx = grid.radius * grid.dlon * grid.cos_lat  # (n_lat,)
+        dx_3d = dx[:, jnp.newaxis, jnp.newaxis]
 
     # Velocity and CFL at interior faces (n_lat, n_lon, nlev)
     # Face j sits between cell (j-1) mod n_lon and cell j.
@@ -204,15 +208,21 @@ def dst3_to_v_points(
     eps = 1e-30
     n_lat = f.shape[0]
 
-    # Cell height: dy = R * dlat (uniform)
-    dy = grid.radius * grid.dlat
+    # Face-to-face distance at interior v-faces.
+    if is_tripolar(grid):
+        # Tripolar: per-cell meridional spacing from 2D metrics.
+        dy_v_int = grid.dy_v[1:-1, 0]  # (n_lat-1,) from interior rows
+    else:
+        # Regular or Mercator: variable-dy safe.
+        dy_h = grid.dy * 0.5                                # (n_lat,)
+        dy_v_int = 0.5 * (dy_h[1:] + dy_h[:-1])              # (n_lat-1,)
 
     # Interior v-faces: indices 1 to n_lat-1 (between cells 0..n_lat-2 and 1..n_lat-1)
     # Face i sits between cell i-1 (south) and cell i (north).
     mf_int = mass_flux_v[1:-1, :, :]   # (n_lat-1, n_lon, nlev)
     h_v_int = h_v[1:-1, :, :]
     vel_int = mf_int / jnp.maximum(h_v_int, eps)
-    cfl = jnp.minimum(jnp.abs(vel_int) * dt / dy, 1.0)
+    cfl = jnp.minimum(jnp.abs(vel_int) * dt / dy_v_int[:, jnp.newaxis, jnp.newaxis], 1.0)
 
     # Build stencil with ghost cells at boundaries (Neumann: copy boundary value)
     # Ghost: f[-1] = f[0], f[-2] = f[0] at south; f[n_lat] = f[n_lat-1] at north
@@ -1229,18 +1239,25 @@ def _zalesak_signsplit_face_alphas(
     F_w_neg = jnp.maximum(-ad_vert_int, 0.0)
 
     # Spherical face metrics (mirroring divergence_cgrid).
-    R_planet = grid.radius
-    dlon = grid.dlon
-    dlat = grid.dlat
-    face_dy = R_planet * dlat
-    lat = grid.lat
-    # cos(±π/2) ≈ 0; build cos_lat_v directly via Pad of cos(interior).
-    # Single Pad HLO op replaces alloc-2-singletons + concatenate-of-three
-    # + cos tower.
-    lat_interior = 0.5 * (lat[:-1] + lat[1:])
-    face_dx = R_planet * dlon * jnp.pad(
-        jnp.cos(lat_interior), (1, 1),
-    )  # (n_lat+1,)
+    if is_tripolar(grid):
+        # Tripolar: use full 2D metrics — column-0 extraction is NOT
+        # valid on the bipolar cap where dy_u/dx_v vary in longitude.
+        face_dy = grid.dy_u                               # (n_lat, n_lon+1)
+        face_dx = grid.dx_v                               # (n_lat+1, n_lon)
+        _is_2d_dy = True
+        _is_2d_dx = True
+    else:
+        R_planet = grid.radius
+        dlon = grid.dlon
+        # face_dy at h-points: cell-row meridional extent (1D, Mercator-safe).
+        face_dy = (grid.dy * 0.5)[:, jnp.newaxis, jnp.newaxis]  # (n_lat,1,1)
+        lat = grid.lat
+        lat_interior = 0.5 * (lat[:-1] + lat[1:])
+        face_dx = R_planet * dlon * jnp.pad(
+            jnp.cos(lat_interior), (1, 1),
+        )  # (n_lat+1,)
+        _is_2d_dy = False
+        _is_2d_dx = False
     area = grid.area[..., jnp.newaxis]            # (n_lat, n_lon, 1)
 
     # Per-cell magnitudes of incoming / outgoing horizontal flux.
@@ -1248,18 +1265,33 @@ def _zalesak_signsplit_face_alphas(
     # Per cell c (index j):
     #   incoming  = F_u_pos at WEST face (eastward in)  + F_u_neg at EAST face (westward in)
     #   outgoing  = F_u_neg at WEST face (westward out) + F_u_pos at EAST face (eastward out)
-    in_u  = F_u_pos[:, :-1, :] + F_u_neg[:, 1:, :]
-    out_u = F_u_neg[:, :-1, :] + F_u_pos[:, 1:, :]
+    if _is_2d_dy:
+        # Per-face dy weighting: west face = face_dy[:, :-1], east = face_dy[:, 1:].
+        dy_w = face_dy[:, :-1, jnp.newaxis]              # (n_lat, n_lon, 1)
+        dy_e = face_dy[:, 1:, jnp.newaxis]               # (n_lat, n_lon, 1)
+        in_u_w  = F_u_pos[:, :-1, :] * dy_w + F_u_neg[:, 1:, :] * dy_e
+        out_u_w = F_u_neg[:, :-1, :] * dy_w + F_u_pos[:, 1:, :] * dy_e
+    else:
+        in_u  = F_u_pos[:, :-1, :] + F_u_neg[:, 1:, :]
+        out_u = F_u_neg[:, :-1, :] + F_u_pos[:, 1:, :]
 
     # v-face j is the SOUTH face of cell j and NORTH face of cell j-1; weighted by face_dx[j].
-    in_v_w = (F_v_pos[:-1, :, :] * face_dx[:-1, jnp.newaxis, jnp.newaxis]
-              + F_v_neg[1:, :, :] * face_dx[1:, jnp.newaxis, jnp.newaxis])
-    out_v_w = (F_v_neg[:-1, :, :] * face_dx[:-1, jnp.newaxis, jnp.newaxis]
-               + F_v_pos[1:, :, :] * face_dx[1:, jnp.newaxis, jnp.newaxis])
+    if _is_2d_dx:
+        dx_s = face_dx[:-1, :, jnp.newaxis]              # (n_lat, n_lon, 1)
+        dx_n = face_dx[1:, :, jnp.newaxis]               # (n_lat, n_lon, 1)
+    else:
+        dx_s = face_dx[:-1, jnp.newaxis, jnp.newaxis]
+        dx_n = face_dx[1:, jnp.newaxis, jnp.newaxis]
+    in_v_w = F_v_pos[:-1, :, :] * dx_s + F_v_neg[1:, :, :] * dx_n
+    out_v_w = F_v_neg[:-1, :, :] * dx_s + F_v_pos[1:, :, :] * dx_n
 
     # Horizontal-incoming / outgoing tracer increment per cell (same units as ad·dt).
-    P_in_h = (in_u * face_dy + in_v_w) / area
-    P_out_h = (out_u * face_dy + out_v_w) / area
+    if _is_2d_dy:
+        P_in_h = (in_u_w + in_v_w) / area
+        P_out_h = (out_u_w + out_v_w) / area
+    else:
+        P_in_h = (in_u * face_dy + in_v_w) / area
+        P_out_h = (out_u * face_dy + out_v_w) / area
 
     # Vertical: pad with zeros at the top / bottom (rigid lid + floor) so
     # cell-c indexing is uniform.  ad_vert_int has shape (n_lat, n_lon,

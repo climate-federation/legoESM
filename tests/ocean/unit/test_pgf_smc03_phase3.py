@@ -31,6 +31,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm import constants
 from legoesm.grids.latlon import create_latlon_grid
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     density_jacobian_pgf_smc03_x,
@@ -55,7 +56,7 @@ def _enable_x64():
     jax.config.update("jax_enable_x64", orig)
 
 
-G = 9.80616
+G = constants.g
 
 
 # ---------------------------------------------------------------------------

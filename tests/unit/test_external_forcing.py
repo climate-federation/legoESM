@@ -10,6 +10,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm import constants
 from legoesm.forcing.external import (
     GHGConfig,
     OzoneConfig,
@@ -216,8 +217,8 @@ class TestGHG:
 
 class TestSolar:
     def test_constant_mode(self):
-        cfg = SolarConfig(S_0=1361.0)
-        assert get_tsi_at_time(cfg, day=100.0) == 1361.0
+        cfg = SolarConfig(S_0=constants.S_0)
+        assert get_tsi_at_time(cfg, day=100.0) == constants.S_0
 
     def test_file_interpolation(self, tmp_path):
         nc_path = str(tmp_path / "tsi.nc")
@@ -228,7 +229,7 @@ class TestSolar:
         cfg = SolarConfig(source="file", path=nc_path)
         assert abs(get_tsi_at_time(cfg, day=0.0) - 1360.0) < 1e-6
         assert abs(get_tsi_at_time(cfg, day=365.0) - 1362.0) < 1e-6
-        assert abs(get_tsi_at_time(cfg, day=182.5) - 1361.0) < 1e-6
+        assert abs(get_tsi_at_time(cfg, day=182.5) - constants.S_0) < 1e-6
 
     def test_file_missing_path_raises(self):
         cfg = SolarConfig(source="file", path="")
@@ -249,7 +250,7 @@ class TestSolar:
 
         cfg = SolarConfig(source="spectral_file", path=nc_path)
         forcing = get_solar_forcing_at_time(cfg, day=182.5)
-        assert abs(forcing["tsi"] - 1361.0) < 1.0e-6
+        assert abs(forcing["tsi"] - constants.S_0) < 1.0e-6
         weights = np.asarray(forcing["solar_fraction_by_gpt"])
         np.testing.assert_allclose(np.sum(weights), 1.0, atol=1.0e-12)
         np.testing.assert_allclose(weights, np.array([0.45, 0.55]), atol=1.0e-6)

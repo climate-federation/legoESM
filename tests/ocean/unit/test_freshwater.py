@@ -12,6 +12,7 @@ import jax.numpy as jnp
 
 jax.config.update("jax_enable_x64", True)
 
+from legoesm import constants
 from legoesm.ocean.freshwater import (
     FreshwaterForcing,
     zero_freshwater,
@@ -49,7 +50,7 @@ def z_coord():
 def state0(mesh, z_coord):
     return rest_state_mpas_ocean(
         mesh, z_coord,
-        T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+        T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
         H_max=500.0, land_lat_threshold=85.0,
     )
 
@@ -121,12 +122,12 @@ class TestEtaTendency:
 
     def test_eta_tendency_shape(self):
         fw = zero_freshwater(10)
-        deta = freshwater_eta_tendency(fw, rho_0=1025.0)
+        deta = freshwater_eta_tendency(fw, rho_0=constants.rho_ocean)
         assert deta.shape == (10,)
 
     def test_eta_tendency_zero(self):
         fw = zero_freshwater(10)
-        deta = freshwater_eta_tendency(fw, rho_0=1025.0)
+        deta = freshwater_eta_tendency(fw, rho_0=constants.rho_ocean)
         assert jnp.allclose(deta, 0.0)
 
     def test_eta_tendency_precip_positive(self):
@@ -138,10 +139,10 @@ class TestEtaTendency:
             runoff=jnp.zeros(n),
             ice_fw=jnp.zeros(n),
         )
-        deta = freshwater_eta_tendency(fw, rho_0=1025.0)
+        deta = freshwater_eta_tendency(fw, rho_0=constants.rho_ocean)
         assert jnp.all(deta > 0)
         # deta/dt = P / rho_0 = 1e-3 / 1025 ≈ 9.76e-7 m/s
-        expected = 1e-3 / 1025.0
+        expected = 1e-3 / constants.rho_ocean
         assert jnp.allclose(deta, expected, rtol=1e-10)
 
     def test_eta_tendency_evap_negative(self):
@@ -153,7 +154,7 @@ class TestEtaTendency:
             runoff=jnp.zeros(n),
             ice_fw=jnp.zeros(n),
         )
-        deta = freshwater_eta_tendency(fw, rho_0=1025.0)
+        deta = freshwater_eta_tendency(fw, rho_0=constants.rho_ocean)
         assert jnp.all(deta < 0)
 
 
@@ -166,13 +167,13 @@ class TestVirtualSaltFlux:
     def test_vsf_shape(self):
         fw = zero_freshwater(10)
         dz = jnp.ones(10) * 20.0
-        dS = virtual_salt_flux(fw, S_ref=35.0, dz_0=dz, rho_0=1025.0)
+        dS = virtual_salt_flux(fw, S_ref=35.0, dz_0=dz, rho_0=constants.rho_ocean)
         assert dS.shape == (10,)
 
     def test_vsf_zero_freshwater(self):
         fw = zero_freshwater(10)
         dz = jnp.ones(10) * 20.0
-        dS = virtual_salt_flux(fw, S_ref=35.0, dz_0=dz, rho_0=1025.0)
+        dS = virtual_salt_flux(fw, S_ref=35.0, dz_0=dz, rho_0=constants.rho_ocean)
         assert jnp.allclose(dS, 0.0)
 
     def test_vsf_precip_dilutes(self):
@@ -185,7 +186,7 @@ class TestVirtualSaltFlux:
             ice_fw=jnp.zeros(n),
         )
         dz = jnp.ones(n) * 20.0
-        dS = virtual_salt_flux(fw, S_ref=35.0, dz_0=dz, rho_0=1025.0)
+        dS = virtual_salt_flux(fw, S_ref=35.0, dz_0=dz, rho_0=constants.rho_ocean)
         assert jnp.all(dS < 0)  # salinity decreases
 
     def test_vsf_evap_concentrates(self):
@@ -198,7 +199,7 @@ class TestVirtualSaltFlux:
             ice_fw=jnp.zeros(n),
         )
         dz = jnp.ones(n) * 20.0
-        dS = virtual_salt_flux(fw, S_ref=35.0, dz_0=dz, rho_0=1025.0)
+        dS = virtual_salt_flux(fw, S_ref=35.0, dz_0=dz, rho_0=constants.rho_ocean)
         assert jnp.all(dS > 0)  # salinity increases
 
     def test_vsf_formula(self):
@@ -206,7 +207,7 @@ class TestVirtualSaltFlux:
         n = 3
         P = 2e-4
         S_ref = 35.0
-        rho_0 = 1025.0
+        rho_0 = constants.rho_ocean
         dz_0 = 20.0
         fw = FreshwaterForcing(
             precip=jnp.ones(n) * P,
@@ -227,8 +228,8 @@ class TestVirtualSaltFlux:
             runoff=jnp.zeros(n),
             ice_fw=jnp.zeros(n),
         )
-        dS_thick = virtual_salt_flux(fw, S_ref=35.0, dz_0=jnp.ones(n) * 50.0, rho_0=1025.0)
-        dS_thin = virtual_salt_flux(fw, S_ref=35.0, dz_0=jnp.ones(n) * 10.0, rho_0=1025.0)
+        dS_thick = virtual_salt_flux(fw, S_ref=35.0, dz_0=jnp.ones(n) * 50.0, rho_0=constants.rho_ocean)
+        dS_thin = virtual_salt_flux(fw, S_ref=35.0, dz_0=jnp.ones(n) * 10.0, rho_0=constants.rho_ocean)
         assert jnp.all(jnp.abs(dS_thin) > jnp.abs(dS_thick))
 
 
@@ -242,7 +243,7 @@ class TestFreshwaterFromCoupler:
         n = 10
         precip = jnp.ones(n) * 1e-4
         lhflx = jnp.ones(n) * 50.0  # W/m2
-        L_v = 2.5e6
+        L_v = constants.L_v
         mask = jnp.ones(n)
         fw = freshwater_from_coupler(precip, lhflx, L_v, ocean_mask=mask)
         assert fw.precip.shape == (n,)
@@ -256,7 +257,7 @@ class TestFreshwaterFromCoupler:
         precip = jnp.ones(n) * 1e-4
         lhflx = jnp.ones(n) * 50.0
         mask = jnp.zeros(n).at[:5].set(1.0)  # only first 5 are ocean
-        fw = freshwater_from_coupler(precip, lhflx, 2.5e6, ocean_mask=mask)
+        fw = freshwater_from_coupler(precip, lhflx, constants.L_v, ocean_mask=mask)
         assert jnp.all(fw.precip[5:] == 0.0)
         assert jnp.all(fw.precip[:5] > 0.0)
 
@@ -267,7 +268,7 @@ class TestFreshwaterFromCoupler:
         runoff_sfc = jnp.ones(n) * 1e-5
         runoff_sub = jnp.ones(n) * 0.5e-5
         fw = freshwater_from_coupler(
-            precip, lhflx, 2.5e6,
+            precip, lhflx, constants.L_v,
             runoff_surface=runoff_sfc,
             runoff_subsurface=runoff_sub,
         )
@@ -299,7 +300,7 @@ class TestFreshwaterFromCoupler:
         ice_cfg = SeaIceConfig()
 
         fw = freshwater_from_coupler(
-            jnp.zeros(n), jnp.zeros(n), 2.5e6,
+            jnp.zeros(n), jnp.zeros(n), constants.L_v,
             ice_state_old=ice_old, ice_state_new=ice_new,
             ice_config=ice_cfg, dt=3600.0,
         )
@@ -329,7 +330,7 @@ class TestFreshwaterFromCoupler:
         )
 
         fw = freshwater_from_coupler(
-            jnp.zeros(n), jnp.zeros(n), 2.5e6,
+            jnp.zeros(n), jnp.zeros(n), constants.L_v,
             ice_state_old=ice_old, ice_state_new=ice_new,
             ice_config=SeaIceConfig(), dt=dt,
         )
@@ -359,7 +360,7 @@ class TestFreshwaterFromCoupler:
         )
 
         fw = freshwater_from_coupler(
-            jnp.zeros(n), jnp.zeros(n), 2.5e6,
+            jnp.zeros(n), jnp.zeros(n), constants.L_v,
             ice_state_old=ice_old, ice_state_new=ice_new,
             ice_config=SeaIceConfig(), dt=dt,
         )
@@ -394,7 +395,7 @@ class TestFreshwaterFromCoupler:
         )
 
         fw = freshwater_from_coupler(
-            jnp.zeros(n), jnp.zeros(n), 2.5e6,
+            jnp.zeros(n), jnp.zeros(n), constants.L_v,
             ice_state_old=ice_old, ice_state_new=ice_new,
             ice_config=SeaIceConfig(), dt=dt,
         )
@@ -605,7 +606,7 @@ def ll_z_coord():
 def ll_state0(ll_grid, ll_z_coord):
     return rest_state_latlon_cgrid_ocean(
         ll_grid, ll_z_coord,
-        T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+        T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
         H_max=500.0, land_lat_threshold=85.0,
     )
 
@@ -789,7 +790,7 @@ class TestDifferentiability:
                 ice_fw=jnp.zeros(n),
             )
             dz = jnp.ones(n) * 20.0
-            dS = virtual_salt_flux(fw, S_ref=35.0, dz_0=dz, rho_0=1025.0)
+            dS = virtual_salt_flux(fw, S_ref=35.0, dz_0=dz, rho_0=constants.rho_ocean)
             return jnp.sum(dS ** 2)
 
         grad_fn = jax.grad(loss)
@@ -808,7 +809,7 @@ class TestDifferentiability:
                 runoff=jnp.zeros(n),
                 ice_fw=jnp.zeros(n),
             )
-            deta = freshwater_eta_tendency(fw, rho_0=1025.0)
+            deta = freshwater_eta_tendency(fw, rho_0=constants.rho_ocean)
             return jnp.sum(deta ** 2)
 
         grad_fn = jax.grad(loss)
@@ -844,7 +845,7 @@ class TestCouplerAdapter:
             cos_zenith=z, co2_ppmv=z, has_radiation=z, has_precipitation=ones,
         )
         sfc = SurfaceToAtm(
-            T_surface=z, albedo=z, emissivity=z, z0=z,
+            T_water_init_C=z, albedo=z, emissivity=z, z0=z,
             q_surface=z, shflx=z,
             lhflx=ones * 100.0,  # 100 W/m2
             tau_x=z, tau_y=z, lw_up=z,
@@ -855,11 +856,11 @@ class TestCouplerAdapter:
             freshwater_flux=z,
             ocean_heat_extraction=z,
             ocean_stress_x=z, ocean_stress_y=z,
-            surface_mass_flux=ones * 100.0 / 2.5e6,
+            surface_mass_flux=ones * 100.0 / constants.L_v,
         )
         mask = ones
 
-        fw = compute_mpas_freshwater(atm, sfc, mask, L_v=2.5e6)
+        fw = compute_mpas_freshwater(atm, sfc, mask, L_v=constants.L_v)
         assert fw.precip.shape == (n,)
         assert jnp.allclose(fw.precip, 1e-4)
-        assert jnp.allclose(fw.evap, 100.0 / 2.5e6)
+        assert jnp.allclose(fw.evap, 100.0 / constants.L_v)

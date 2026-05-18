@@ -30,6 +30,7 @@ import pytest
 # machine precision rather than float32 reduction noise.
 jax.config.update("jax_enable_x64", True)
 
+from legoesm import constants
 from legoesm.core.precision import PrecisionPolicy, set_policy
 set_policy(PrecisionPolicy(storage=jnp.float64, compute=jnp.float64))
 
@@ -57,7 +58,7 @@ def setup():
     z_coord = create_ocean_z_star(n_levels=10, H_max=5500.0)
     state = rest_state_mpas_ocean(
         mesh, z_coord,
-        T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+        T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
         H_max=5500.0, land_lat_threshold=80.0,
     )
     pc_coord = create_partial_cell_coordinate(z_coord, state.H_bathy.data)
@@ -112,7 +113,7 @@ def test_static_matches_dynamic_at_init(setup):
     eos_fn = make_eos_fn("wright", None)
     rho_dyn, rho_prime_dyn, _p = iterate_eos_and_pressure_anomaly(
         state.T.data, state.S.data, mask, _fill, eos_fn,
-        pc_coord.dz_ref, 1025.0, 9.80616, n_iter=2,
+        pc_coord.dz_ref, constants.rho_ocean, constants.g, n_iter=2,
         use_depth_dependent_ref=True,
         is_active_3d=pc_coord.is_active.astype(state.T.data.dtype),
         h_actual=None,
@@ -141,7 +142,7 @@ def test_runtime_uses_static_profile(setup):
     rho, rho_prime, _p = iterate_eos_and_pressure_anomaly(
         state.T.data, state.S.data, mask,
         lambda f: fill_land_cells_mpas(f, mask, c1, c2),
-        eos_fn, pc_coord.dz_ref, 1025.0, 9.80616, n_iter=2,
+        eos_fn, pc_coord.dz_ref, constants.rho_ocean, constants.g, n_iter=2,
         rho_ref_z_static=state_static.rho_ref_z.data,
         h_actual=None,
     )

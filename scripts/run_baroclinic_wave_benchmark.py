@@ -297,7 +297,7 @@ def _default_dt(grid_type: str) -> float:
     return 450.0
 
 
-def _estimate_min_dx_icosahedral(level: int, radius: float = 6.371229e6) -> float:
+def _estimate_min_dx_icosahedral(level: int, radius: float = constants.R_earth) -> float:
     """Estimate minimum grid spacing on an icosahedral Voronoi mesh.
 
     Parameters

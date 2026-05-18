@@ -371,7 +371,14 @@ class OceanModel:
                 state_new, state, self.grid, self.z_coord, self.config,
             )
 
-        return cast_pytree(state_new, None, "storage")
+        # ``allow_downcast=True`` is required here so the output state
+        # matches the user-provided input dtype.  Without it the
+        # ``cast_pytree(..., "compute")`` upcast at the top of ``step``
+        # silently ratchets fp32 inputs to fp64 outputs under
+        # ``JAX_ENABLE_X64``, breaking ``jax.lax.scan`` carry-dtype
+        # invariants and any downstream consumer that expects
+        # the storage-precision policy to be respected.
+        return cast_pytree(state_new, None, "storage", allow_downcast=True)
 
     def step_checked(self, state: OceanState, dt: float,
                      surface_forcing=None) -> OceanState:

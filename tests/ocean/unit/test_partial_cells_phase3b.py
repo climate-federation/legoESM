@@ -29,6 +29,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm import constants
 from legoesm.grids.latlon import create_latlon_grid
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     partial_cell_pgf_correction_x,
@@ -67,7 +68,7 @@ class TestCorrectionShape:
         nlev = 5
         centroid = jnp.zeros((8, 16, nlev))
         rho_prime = jnp.zeros((8, 16, nlev))
-        out = partial_cell_pgf_correction_x(centroid, rho_prime, grid, 9.81)
+        out = partial_cell_pgf_correction_x(centroid, rho_prime, grid, constants.g)
         assert out.shape == (8, 17, nlev)
 
     def test_y_output_shape(self):
@@ -75,7 +76,7 @@ class TestCorrectionShape:
         nlev = 5
         centroid = jnp.zeros((8, 16, nlev))
         rho_prime = jnp.zeros((8, 16, nlev))
-        out = partial_cell_pgf_correction_y(centroid, rho_prime, grid, 9.81)
+        out = partial_cell_pgf_correction_y(centroid, rho_prime, grid, constants.g)
         assert out.shape == (9, 16, nlev)
 
     def test_zero_when_centroids_align(self):
@@ -87,8 +88,8 @@ class TestCorrectionShape:
         centroid_1d = jnp.linspace(50.0, 4000.0, nlev)
         centroid = jnp.broadcast_to(centroid_1d, (8, 16, nlev))
         rho_prime = jnp.full((8, 16, nlev), -1.0)
-        cx = partial_cell_pgf_correction_x(centroid, rho_prime, grid, 9.81)
-        cy = partial_cell_pgf_correction_y(centroid, rho_prime, grid, 9.81)
+        cx = partial_cell_pgf_correction_x(centroid, rho_prime, grid, constants.g)
+        cy = partial_cell_pgf_correction_y(centroid, rho_prime, grid, constants.g)
         assert float(jnp.max(jnp.abs(cx))) == 0.0
         assert float(jnp.max(jnp.abs(cy))) == 0.0
 
@@ -102,7 +103,7 @@ class TestCorrectionShape:
         rho_prime = jnp.asarray(
             np.random.default_rng(1).uniform(-2.0, 2.0, size=(8, 16, nlev))
         )
-        cy = partial_cell_pgf_correction_y(centroid, rho_prime, grid, 9.81)
+        cy = partial_cell_pgf_correction_y(centroid, rho_prime, grid, constants.g)
         assert float(jnp.max(jnp.abs(cy[0]))) == 0.0
         assert float(jnp.max(jnp.abs(cy[-1]))) == 0.0
 
@@ -209,7 +210,7 @@ class TestRestStateZeroPGFOnStepBathymetry:
         centroid = compute_centroid_depth(
             jnp.zeros_like(H_bathy), H_bathy, partial_coord,
         )
-        # T(z) = T_deep + (T_surface - T_deep) * exp(-z/scale_depth)
+        # T(z) = T_deep + (T_water_init_C - T_deep) * exp(-z/scale_depth)
         # Using the same scale_depth as rest_state_latlon_cgrid_ocean.
         from legoesm.ocean.eos import scale_depth as _SCALE_DEPTH
         T_per_cell = 2.0 + (20.0 - 2.0) * jnp.exp(-centroid / _SCALE_DEPTH)
@@ -220,7 +221,7 @@ class TestRestStateZeroPGFOnStepBathymetry:
         # Build the state, then override T with the centroid-aware values.
         state = rest_state_latlon_cgrid_ocean(
             grid, z_coord,
-            T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+            T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
             H_bathy_override=H_bathy,
         )
         state = state._replace(T=state.T.replace(data=T_per_cell))
@@ -276,7 +277,7 @@ class TestRestStateZeroPGFOnStepBathymetry:
         H_bathy = _make_step_bathymetry(grid)
         state = rest_state_latlon_cgrid_ocean(
             grid, z_coord,
-            T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+            T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
             H_bathy_override=H_bathy,
         )
         cfg = LatLonCGridOceanConfig()
@@ -298,7 +299,7 @@ class TestRestStateZeroPGFOnStepBathymetry:
         H_bathy = jnp.full((grid.n_lat, grid.n_lon), z_coord.H_max)
         state = rest_state_latlon_cgrid_ocean(
             grid, z_coord,
-            T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+            T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
             H_bathy_override=H_bathy,
         )
         partial_coord = create_partial_cell_coordinate(z_coord, H_bathy)

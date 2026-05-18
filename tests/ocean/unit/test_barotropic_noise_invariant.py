@@ -169,7 +169,7 @@ def test_implicit_solver_meets_crit1_in_rest_plus_wind_spinup():
     physics = _make_physics(tau_max=0.05)
     model = _build_model("implicit_cn", physics)
     state0 = rest_state_latlon_cgrid_ocean(
-        grid, z_coord, T_surface=10.0, T_deep=2.0, S_uniform=35.0,
+        grid, z_coord, T_water_init_C=10.0, T_deep=2.0, S_uniform=35.0,
         H_max=4000.0, land_lat_threshold=80.0,
     )
 
@@ -211,7 +211,7 @@ def test_implicit_solver_cleaner_than_explicit_substep():
     z_coord = create_ocean_z_star(n_levels=5, H_max=4000.0)
     physics = _make_physics(tau_max=0.05)
     state0 = rest_state_latlon_cgrid_ocean(
-        grid, z_coord, T_surface=10.0, T_deep=2.0, S_uniform=35.0,
+        grid, z_coord, T_water_init_C=10.0, T_deep=2.0, S_uniform=35.0,
         H_max=4000.0, land_lat_threshold=80.0,
     )
     dt = 1800.0
@@ -257,7 +257,7 @@ def test_implicit_solver_conserves_mass():
     )
     model = LatLonCGridOceanModel(grid, z_coord, cfg)
     state = rest_state_latlon_cgrid_ocean(
-        grid, z_coord, T_surface=10.0, T_deep=2.0, S_uniform=35.0,
+        grid, z_coord, T_water_init_C=10.0, T_deep=2.0, S_uniform=35.0,
         H_max=4000.0, land_lat_threshold=80.0,
     )
 
@@ -298,7 +298,7 @@ def test_implicit_solver_grad_smoke():
     )
     model = LatLonCGridOceanModel(grid, z_coord, cfg)
     state0 = rest_state_latlon_cgrid_ocean(
-        grid, z_coord, T_surface=10.0, T_deep=2.0, S_uniform=35.0,
+        grid, z_coord, T_water_init_C=10.0, T_deep=2.0, S_uniform=35.0,
         H_max=4000.0, land_lat_threshold=80.0,
     )
 

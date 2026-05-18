@@ -507,16 +507,15 @@ def mpas_ocean_baroclinic_tendencies(
             u_3d, h_k, q_relative, mesh, h_edge_3d=h_e_3d,
         )
 
-    # Horizontal viscosity on perturbation velocity (shear, not depth-mean).
-    # When both A_h > 0 and B_h > 0, the biharmonic
-    # ``vector_laplacian_del4_3d(u) = -∇²(∇²u)``, so its inner ∇² is
-    # identical to the explicit A_h Laplacian — compute it once and
-    # share between both branches.  Same exploit as Loop 135 for the
-    # latlon ocean and Loop 139 for the MPAS atmosphere.  Also adds an
-    # ``if A_h > 0`` guard so a configuration with A_h = 0 (Smag-only,
-    # Leith-only, or B_h-only) skips the unconditional del2 the
-    # previous code paid for and discarded.
-    visc = jnp.zeros_like(u_prime_3d)
+    # Horizontal viscosity on TOTAL velocity (not perturbation).
+    # The depth-average of the viscous tendency enters F_slow and damps
+    # the barotropic mode.  This matches MOM6, NEMO, POP, and the
+    # lat-lon implementation (Hallberg 1997).  Previously acted on
+    # u_prime_3d, which zeroed the barotropic viscous contribution.
+    # On MPAS, K_zeta_bih already provided barotropic damping (it acts
+    # on u_3d), so the effect is secondary — but switching to u_3d
+    # for A_h/B_h/C_smag is the correct formulation.
+    visc = jnp.zeros_like(u_3d)
     # Per-edge equatorial-boost factor for A_h (and B_h).  Boosts
     # damping at low latitudes where the implicit-CN solver's Coriolis
     # restoring fails (f→0).  Diagnosed in project_mpas_etopo_
@@ -531,25 +530,25 @@ def mpas_ocean_baroclinic_tendencies(
         _sigma_rad = jnp.radians(
             getattr(config, "equatorial_visc_sigma_deg", 5.0)
         )
-        _lat_e = mesh.latEdge.astype(u_prime_3d.dtype)
+        _lat_e = mesh.latEdge.astype(u_3d.dtype)
         _gauss = jnp.exp(-0.5 * (_lat_e / _sigma_rad) ** 2)
         _lat_factor = (1.0 + _eq_boost * _gauss)[:, jnp.newaxis]  # (nEdges, 1)
     else:
         _lat_factor = 1.0
     if config.A_h > 0 and config.B_h > 0:
-        _del2_u_visc = vector_laplacian_del2_3d(u_prime_3d, mesh)
+        _del2_u_visc = vector_laplacian_del2_3d(u_3d, mesh)
         visc = visc + config.A_h * _lat_factor * _del2_u_visc
         # vector_laplacian_del4 = -del2(del2); fold the sign into the
         # subtraction so the arithmetic matches ``+ B_h * del4``.
         visc = visc - config.B_h * _lat_factor * vector_laplacian_del2_3d(_del2_u_visc, mesh)
     elif config.A_h > 0:
-        visc = visc + config.A_h * _lat_factor * vector_laplacian_del2_3d(u_prime_3d, mesh)
+        visc = visc + config.A_h * _lat_factor * vector_laplacian_del2_3d(u_3d, mesh)
     elif config.B_h > 0:
-        visc = visc + config.B_h * _lat_factor * vector_laplacian_del4_3d(u_prime_3d, mesh)
+        visc = visc + config.B_h * _lat_factor * vector_laplacian_del4_3d(u_3d, mesh)
 
     # Flow-dependent Smagorinsky biharmonic viscosity
     if config.C_smag > 0:
-        visc = visc + smagorinsky_biharmonic_3d(u_prime_3d, mesh, config.C_smag)
+        visc = visc + smagorinsky_biharmonic_3d(u_3d, mesh, config.C_smag)
 
     # Flow-dependent Smagorinsky Laplacian viscosity
     # Unlike the biharmonic variant, this damps ALL scales where strain
@@ -558,12 +557,12 @@ def mpas_ocean_baroclinic_tendencies(
     # Matches the lat-lon ``C_smag_lap`` scheme.
     if getattr(config, "C_smag_lap", 0.0) > 0:
         visc = visc + _lat_factor * smagorinsky_laplacian_3d(
-            u_prime_3d, mesh, config.C_smag_lap)
+            u_3d, mesh, config.C_smag_lap)
 
     # Flow-dependent Leith biharmonic viscosity
     if getattr(config, "C_leith", 0.0) > 0:
         visc = visc + leith_biharmonic_3d(
-            u_prime_3d, mesh, config.C_leith,
+            u_3d, mesh, config.C_leith,
             modified=getattr(config, "C_leith_modified", False))
 
     # Biharmonic dissipation on relative vorticity ζ (scale-selective damping

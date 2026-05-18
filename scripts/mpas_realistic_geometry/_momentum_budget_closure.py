@@ -245,7 +245,7 @@ def main():
     )
 
     state = rest_state_mpas_ocean(
-        mesh, z_coord, T_surface=20.0, T_deep=2.0,
+        mesh, z_coord, T_water_init_C=20.0, T_deep=2.0,
         S_uniform=35.0, H_max=H_MAX, land_lat_threshold=90.0,
     )
     dtype = state.eta.data.dtype

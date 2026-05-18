@@ -15,6 +15,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
+from legoesm import constants
 from legoesm.core.field import Field
 
 
@@ -209,7 +210,7 @@ class TestIceAlbedoChain:
                 has_precipitation=1.0 * ones,
             )
             _, response = step_sea_ice(
-                state, forcing, 271.35 * ones,
+                state, forcing, constants.T_freeze_ocean * ones,
                 jnp.zeros(shape), jnp.zeros(shape),
                 config, U_min=1.0, dt=3600.0,
             )

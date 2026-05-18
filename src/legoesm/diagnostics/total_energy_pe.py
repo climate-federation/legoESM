@@ -52,9 +52,16 @@ def compute_total_energy_pe(state, grid, coord) -> tuple[jax.Array, float]:
     """
     n_face, n, _ = state.p_s.data.shape
     nlev = state.T.data.shape[-1]
-    p_s = state.p_s.data                              # (6, n, n)
-    phis = state.phis.data                            # (6, n, n)
-    T = state.T.data                                  # (6, n, n, nlev)
+    # iter-45: promote state arrays to the fp64 budget accumulator
+    # before the per-cell te = delp·(c_p·T + ke) computation.  The
+    # pre-iter-45 path did u·u + v·v, T-products, and the final
+    # global sum in fp32 storage dtype — the same fp32-field bug
+    # iter-42/43/44 fixed across the conservation helpers.
+    from legoesm.core.conservation import _conservation_accumulator
+    acc = _conservation_accumulator()
+    p_s = state.p_s.data.astype(acc)                  # (6, n, n)
+    phis = state.phis.data.astype(acc)                # (6, n, n)
+    T = state.T.data.astype(acc)                      # (6, n, n, nlev)
 
     # Hybrid pressure at half levels: p_half[k] = A[k]·p_ref + B[k]·p_s
     p_ref = coord.p_ref
@@ -101,21 +108,22 @@ def compute_total_energy_pe(state, grid, coord) -> tuple[jax.Array, float]:
     te = pe_sfc * phi_sfc - pe_top * phi_top           # (6,n,n)
 
     # Cell-center u, v from D-grid corners (simple average).
-    u_d = state.u_d.data                               # (6, n+1, n+1, nlev)
-    v_d = state.v_d.data
+    u_d = state.u_d.data.astype(acc)                   # (6, n+1, n+1, nlev)
+    v_d = state.v_d.data.astype(acc)
     u_c = 0.25 * (u_d[:, :-1, :-1, :] + u_d[:, 1:, :-1, :]
                   + u_d[:, :-1, 1:, :] + u_d[:, 1:, 1:, :])
     v_c = 0.25 * (v_d[:, :-1, :-1, :] + v_d[:, 1:, :-1, :]
                   + v_d[:, :-1, 1:, :] + v_d[:, 1:, 1:, :])
-    ke = 0.5 * (u_c * u_c + v_c * v_c)                 # (6,n,n,nlev)
+    ke = 0.5 * (u_c * u_c + v_c * v_c)                 # (6,n,n,nlev) fp64
 
     # cp·T + KE per cell
-    contribution = delp * (constants.c_pd * T + ke)
-    te = te + jnp.sum(contribution, axis=-1)           # (6,n,n)
+    c_pd = jnp.asarray(constants.c_pd, dtype=acc)
+    contribution = delp * (c_pd * T + ke)
+    te = te + jnp.sum(contribution, axis=-1)           # (6,n,n) fp64
 
     # Multiply by area for J per column (delp already kg·m/s²/m² → J/m² when
     # times specific energy).  FV3's te_2d before area mult is in J/m².
-    te_column = te * grid.area
+    te_column = te * grid.area.astype(acc)
     te_total = float(jnp.sum(te_column))
     return te_column, te_total
 

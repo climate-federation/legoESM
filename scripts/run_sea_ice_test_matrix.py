@@ -251,7 +251,7 @@ def _make_forcing(shape, dims, **kw):
     f = jnp.float64
     defaults = dict(
         sw_down=100.0, lw_down=200.0, T_lowest=250.0, q_lowest=1e-3,
-        u_lowest=5.0, v_lowest=-3.0, p_lowest=9.5e4, p_surface=1e5,
+        u_lowest=5.0, v_lowest=-3.0, p_lowest=9.5e4, p_surface=constants.p_ref,
         rho_lowest=1.2, cos_zenith=0.5, co2_ppmv=400.0,
     )
     defaults.update(kw)
@@ -668,7 +668,7 @@ def run_advect_step(tc: TestCase, outdir: Path, quick: bool) -> tuple[str, str]:
 
     h_nonneg = float(jnp.min(h)) >= -1e-10
     a_bounded = float(jnp.min(a)) >= -1e-10 and float(jnp.max(a)) <= 1.0 + 1e-10
-    T_bounded = float(jnp.min(T)) >= 180.0 - 1e-6 and float(jnp.max(T)) <= 271.35 + 1e-6
+    T_bounded = float(jnp.min(T)) >= 180.0 - 1e-6 and float(jnp.max(T)) <= constants.T_freeze_ocean + 1e-6
     vol_final = float(jnp.sum(h * a))
     vol_drift = compute_relative_drift([vol_init, vol_final])
 
@@ -710,7 +710,7 @@ def run_itd_growth_remap(tc: TestCase, outdir: Path, quick: bool) -> tuple[str, 
                 bounds_ok = False
 
     vol_drift = compute_relative_drift([vol_before, vol_after])
-    T_bounded = jnp.all(T_r >= 180.0) and jnp.all(T_r <= 271.35)
+    T_bounded = jnp.all(T_r >= 180.0) and jnp.all(T_r <= constants.T_freeze_ocean)
 
     diag = {"times": [1], "vol_before": [vol_before], "vol_after": [vol_after],
             "vol_drift": [vol_drift]}

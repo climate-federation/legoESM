@@ -23,6 +23,7 @@ from legoesm.atmosphere.physics.turbulence.surface_layer import (
 )
 from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
     implicit_vertical_diffusion,
+    implicit_vertical_diffusion_theta,
 )
 
 
@@ -118,10 +119,14 @@ def smagorinsky_turbulence(
     # Moisture: lhflx = rho * L_v * Ch * |V| * (q_sfc - q_v) [W/m^2]
     sflx_q = lhflx / constants.L_v
 
-    # Apply implicit vertical diffusion
+    # Apply implicit vertical diffusion.  Heat is mixed in θ-space so a
+    # dry adiabat stays neutral; momentum and moisture are conserved on
+    # adiabatic motion and use raw T-style diffusion.
     u_new = implicit_vertical_diffusion(u, K_half_m, rho, dz, dz_half, dt, sflx_u)
     v_new = implicit_vertical_diffusion(v, K_half_m, rho, dz, dz_half, dt, sflx_v)
-    T_new = implicit_vertical_diffusion(T, K_half_h, rho, dz, dz_half, dt, sflx_T)
+    T_new = implicit_vertical_diffusion_theta(
+        T, K_half_h, rho, dz, dz_half, p_full, dt, sflx_T,
+    )
     q_new = implicit_vertical_diffusion(q_v, K_half_h, rho, dz, dz_half, dt, sflx_q)
 
     # Tendencies

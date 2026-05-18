@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
+from legoesm import constants
+
 
 class MPASOceanConfig(NamedTuple):
     """Configuration for MPAS ocean primitive equation solver.
@@ -84,8 +86,8 @@ class MPASOceanConfig(NamedTuple):
         "tvd" uses second-order Van Leer limiter (less diffusive,
         monotone) for both horizontal and vertical advection.
     """
-    g: float = 9.80616           # = constants.g
-    rho_0: float = 1025.0        # = eos.rho_0
+    g: float = constants.g
+    rho_0: float = constants.rho_ocean
     A_h: float = 1.0e4
     B_h: float = 0.0
     C_smag: float = 0.0
@@ -178,15 +180,21 @@ class MPASOceanConfig(NamedTuple):
                                          # but with controllable strength.
                                          # Typical 3-10 for ico4 ETOPO.
                                          # 0 = uniform viscosity.
-    use_h_actual_pgf: bool = False         # When True, the baroclinic
-                                            # pressure cumsum integrates
-                                            # against the actual partial-
+    use_h_actual_pgf: bool = True          # Integrate baroclinic pressure
+                                            # cumsum against actual partial-
                                             # cell thickness h_k rather
                                             # than the reference dz_ref.
-                                            # Matches NEMO ``ln_hpg_zps``
-                                            # and MITgcm conventions for
-                                            # z* + partial cells.  Off by
-                                            # default for back-compat.
+                                            # Matches NEMO ``ln_hpg_zps``,
+                                            # MITgcm, and our own lat-lon
+                                            # implementation.  Required for
+                                            # Adcroft PGF consistency: the
+                                            # AC correction computes centroid
+                                            # depths from h_partial, so
+                                            # p_prime must also be on the
+                                            # h_partial grid.  When False,
+                                            # p_prime uses dz_ref while AC
+                                            # uses h_partial → mismatch →
+                                            # spurious PGF at step edges.
     use_baroclinic_rho_ref: bool = False  # DYNAMIC (legacy / discouraged):
                                            # subtracts ρ_ref(z) computed
                                            # as wet-cell mean of ρ on
@@ -366,15 +374,15 @@ class MPASSimpleOceanConfig(NamedTuple):
     mode: str = "fixed"
     sst_constant: float = 300.0
     h_mix: float = 50.0
-    rho_ocean: float = 1025.0           # = eos.rho_0
-    c_ocean: float = 3994.0             # = eos.c_sw
+    rho_ocean: float = constants.rho_ocean
+    c_ocean: float = constants.c_sw
     Q_flux: float = 0.0
     albedo_ocean: float = 0.06
     emissivity_ocean: float = 0.97
     Cd_ocean: float = 1.5e-3
     Ch_ocean: float = 1.5e-3
     U_min: float = 1.0
-    T_freeze: float = 271.35            # = constants.T_freeze_ocean
+    T_freeze: float = constants.T_freeze_ocean
     h_deep: float = 200.0
     k_mix: float = 1.0e-4
     restore_deep: bool = False

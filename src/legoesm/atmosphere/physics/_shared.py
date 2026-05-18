@@ -25,55 +25,61 @@ from legoesm.core.operators_fv_latlon_3d import fv_flux_divergence_latlon_3d
 
 
 # ---------------------------------------------------------------------------
-# AD-safe divide
+# AD-safe arithmetic helpers
 # ---------------------------------------------------------------------------
 
 def safe_divide(
-    numerator,
-    denominator,
+    numerator: jnp.ndarray,
+    denominator: jnp.ndarray,
     eps: float,
     fill: float = 0.0,
-):
+) -> jnp.ndarray:
     """Return ``numerator / denominator`` with AD-safe behaviour near zero.
 
     Equivalent in the forward path to::
 
-        jnp.where(denominator > eps, numerator / denominator, fill)
+        jnp.where(jnp.abs(denominator) > eps, numerator / denominator, fill)
 
     but written so the reverse-mode VJP never differentiates ``1/x`` or
-    ``-a/x**2`` at tiny ``x``.  The masked branch evaluates
-    ``numerator / 1.0`` whose cotangents are bounded, while the outer
-    ``jnp.where`` selects ``fill`` for both the forward output and the
-    cotangent path so the bad branch contributes nothing to gradients.
+    ``-a/x**2`` at tiny ``x``.  Use this anywhere both ``numerator`` and
+    ``denominator`` can legitimately approach zero together (column
+    mass-conservation rescalings, autoconversion/aggregation rates that
+    vanish with their cloud field, geometric singularities at the poles
+    or at the grid origin, etc.).
 
-    Use this anywhere both ``numerator`` and ``denominator`` can
-    legitimately approach zero together (column mass-conservation
-    rescalings, autoconversion/aggregation rates that vanish with their
-    cloud field, geometric singularities such as the polar day/night
-    sunset hour angle).
+    The ``where``-before-divide ordering is required for AD safety; the
+    common idiom ``numerator / jnp.clip(denominator, eps, None)`` is
+    forward-equivalent for the unmasked branch but still differentiates
+    the divide at the floor and emits ``-a / eps**2`` cotangents that
+    overflow to ``inf``/``NaN`` — the very bug this helper exists to
+    avoid.
 
-    Forward outputs are bitwise identical to
-    ``numerator / jnp.clip(denominator, eps, None)`` for any sample
-    where ``denominator > eps``.  Choose ``eps`` one or two decades
-    above any prior ``clip`` floor to preserve that property.
+    Forward outputs are bitwise identical to ``numerator / denominator``
+    for any sample where ``|denominator| > eps``.  The mask uses
+    ``|denominator|`` rather than ``denominator`` so that both polarities
+    of the singularity are caught (e.g. wind shears near zero, signed
+    metric quantities approaching zero from either side).
 
     Parameters
     ----------
-    numerator, denominator : array-like
-        Operands.  Either may be a scalar or jax array.
+    numerator : jnp.ndarray
+        Dividend.
+    denominator : jnp.ndarray
+        Divisor.  May contain zeros or values with ``|x| ≤ eps``.
     eps : float
-        Threshold below which the divide is masked.  Must be strictly
-        positive.
+        Magnitude floor below which the divide is masked out.  Choose
+        ``eps`` one or two decades above any prior ``clip`` floor so the
+        forward stays bit-identical wherever the old code was sound.
     fill : float, optional
-        Value returned where ``denominator <= eps``.  Default ``0.0``
-        matches the physical limit at the singularity for all current
-        call sites (vanishing-cloud rates, polar sunset).
+        Value substituted into the output where ``|denominator| ≤ eps``.
+        Defaults to ``0.0`` — appropriate when ``numerator`` also
+        vanishes with ``denominator`` (the common physical limit) or
+        when downstream logic clips the result back to a valid range.
     """
-    denom = jnp.asarray(denominator)
-    mask = denom > eps
-    safe_denom = jnp.where(mask, denom, jnp.asarray(1.0, denom.dtype))
-    quotient = numerator / safe_denom
-    return jnp.where(mask, quotient, jnp.asarray(fill, quotient.dtype))
+    denom_abs = jnp.abs(denominator)
+    mask = denom_abs > eps
+    safe_denom = jnp.where(mask, denominator, jnp.asarray(1.0, denominator.dtype))
+    return jnp.where(mask, numerator / safe_denom, jnp.asarray(fill, numerator.dtype))
 
 
 # ---------------------------------------------------------------------------

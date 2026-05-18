@@ -152,8 +152,18 @@ def _batch_global_area_sums(
 
 
 def _total_area(grid) -> jax.Array:
-    """Total area for any grid."""
-    return grid.grid_total_area
+    """Total area for any grid, promoted to the fp64 budget accumulator.
+
+    iter-13: ``grid.grid_total_area`` is computed as
+    ``jnp.sum(self.area)`` on grid classes that store ``area`` in the
+    storage dtype (fp32 by default).  That reduction leaks ~N·eps into
+    the divisor of every mass-fixer correction — visible as a residual
+    ~10^-13 drift on the cube hydro PE even with the anchored
+    fixer + fp64 ``mass_target``.  Cast to the conservation
+    accumulator here so every fixer division sees an fp64 denominator.
+    """
+    acc = _conservation_accumulator()
+    return grid.grid_total_area.astype(acc)
 
 
 def fix_mass_shallow_water(
@@ -221,17 +231,27 @@ def fix_energy_shallow_water(
     """
     # Compute all three energy integrals as local sums, then batch
     # into a single MPI allreduce (3 separate allreduces -> 1).
-    h_old = state_old.h.data
-    u_old = state_old.u.data
-    v_old = state_old.v.data
-    h_s_old = state_old.h_s.data
-    E_old_field = 0.5 * h_old * (u_old**2 + v_old**2) + 0.5 * g * (h_old + h_s_old)**2
+    # iter-42: promote the per-cell energy *field* computation to the
+    # fp64 budget accumulator before the area-weighted sum.  The pre-
+    # iter-42 path computed ``0.5 * h * (u² + v²)`` in fp32 (input
+    # storage dtype), so the square+multiply lost ~7 bits of precision
+    # before ``_batch_global_area_sums`` ever cast to fp64 — the same
+    # fp32-field bug iter-1/4/5 fixed for the mass diagnostic, just on
+    # the energy path.
+    acc = _conservation_accumulator()
+    h_old = state_old.h.data.astype(acc)
+    u_old = state_old.u.data.astype(acc)
+    v_old = state_old.v.data.astype(acc)
+    h_s_old = state_old.h_s.data.astype(acc)
+    g_acc = jnp.asarray(g, dtype=acc)
+    E_old_field = 0.5 * h_old * (u_old**2 + v_old**2) + 0.5 * g_acc * (h_old + h_s_old)**2
 
-    h_new = state_new.h.data
-    u_new = state_new.u.data
-    v_new = state_new.v.data
+    h_new = state_new.h.data.astype(acc)
+    u_new = state_new.u.data.astype(acc)
+    v_new = state_new.v.data.astype(acc)
+    h_s_new = state_new.h_s.data.astype(acc)
     KE_new_field = 0.5 * h_new * (u_new**2 + v_new**2)
-    PE_new_field = 0.5 * g * (h_new + state_new.h_s.data)**2
+    PE_new_field = 0.5 * g_acc * (h_new + h_s_new)**2
 
     E_old, KE_new, PE_new = _batch_global_area_sums(
         [E_old_field, KE_new_field, PE_new_field], grid,
@@ -300,41 +320,7 @@ def fix_mass_hydrostatic(
     mass_old, mass_new = _batch_global_area_sums(
         [state_old.p_s.data, state_new.p_s.data], grid,
     )
-    correction = (mass_old - mass_new) / grid.total_area
-    p_s_fixed = state_new.p_s.replace(data=state_new.p_s.data + correction)
-
-    return state_new._replace(p_s=p_s_fixed)
-
-
-def fix_mass_hydrostatic_latlon(
-    state_new: HydrostaticState,
-    state_old: HydrostaticState,
-    grid,
-) -> HydrostaticState:
-    """Fix mass conservation for the hydrostatic PE on a lat-lon grid.
-
-    Same logic as fix_mass_hydrostatic but uses lat-lon global integral.
-    Batches the two mass sums into a single MPI allreduce — was
-    previously two separate ``jnp.sum`` calls, which doubled the
-    reduction latency at every fixer call under multi-rank runs.
-
-    Parameters
-    ----------
-    state_new : HydrostaticState
-        State after time integration.
-    state_old : HydrostaticState
-        State before time integration (reference mass).
-    grid : LatLonGrid
-        The lat-lon grid.
-
-    Returns
-    -------
-    HydrostaticState : Mass-conserving state.
-    """
-    mass_old, mass_new = _batch_global_area_sums(
-        [state_old.p_s.data, state_new.p_s.data], grid,
-    )
-    correction = (mass_old - mass_new) / grid.total_area
+    correction = (mass_old - mass_new) / _total_area(grid)
     p_s_fixed = state_new.p_s.replace(data=state_new.p_s.data + correction)
 
     return state_new._replace(p_s=p_s_fixed)
@@ -431,7 +417,13 @@ def compute_global_moisture(
     jax.Array : Scalar global moisture integral [kg].
     """
     # Column water vapor: ∫ q_v dp/g = q_v * p_s * dsigma / g
-    cwv = jnp.sum(q_v * p_s[..., None] * dsigma, axis=-1) / constants.g
+    # iter-44: promote field computation to fp64 budget accumulator
+    # (same fp32-field bug as iter-42/43 energy diagnostics).
+    acc = _conservation_accumulator()
+    cwv = jnp.sum(
+        q_v.astype(acc) * p_s.astype(acc)[..., None] * dsigma.astype(acc),
+        axis=-1,
+    ) / jnp.asarray(constants.g, dtype=acc)
     return _global_area_sum(cwv, grid, owned_mask=owned_mask)
 
 
@@ -591,7 +583,7 @@ def fix_mass_hydrostatic_target(
             p_s=state_new.p_s.replace(data=p_s_fixed_data),
         )
     mass_new = global_integral(state_new.p_s, grid)
-    correction = (target_mass - mass_new) / grid.total_area
+    correction = (target_mass - mass_new) / _total_area(grid)
     p_s_fixed = state_new.p_s.replace(data=state_new.p_s.data + correction)
     return state_new._replace(p_s=p_s_fixed)
 
@@ -617,7 +609,7 @@ def fix_ps_mass(
     mass_old, mass_new = _batch_global_area_sums(
         [p_s_old, p_s_new], grid, owned_mask=owned_mask,
     )
-    correction = (mass_old - mass_new) / grid.total_area
+    correction = (mass_old - mass_new) / _total_area(grid)
     return p_s_new + correction
 
 
@@ -649,7 +641,7 @@ def fix_ps_mass_target(
     jax.Array : Corrected p_s with same shape.
     """
     mass_new = _global_area_sum(p_s, grid, owned_mask=owned_mask)
-    correction = (target_mass - mass_new) / grid.total_area
+    correction = (target_mass - mass_new) / _total_area(grid)
     return p_s + correction
 
 
@@ -743,14 +735,20 @@ def compute_hydrostatic_energy(
         'potential_energy': ∫ Φ·p_s·dσ·dA / g
         'total_energy': sum of all three
     """
-    u = state.u.data
-    v = state.v.data
-    T = state.T.data
-    p_s = state.p_s.data
-    phis = state.phis.data
-    g = constants.g
-    c_v = constants.c_vd
-    dsigma = sigma_coord.dsigma
+    # iter-43: promote energy fields to the fp64 budget accumulator
+    # before the column + area-weighted sums.  Same fp32-field bug as
+    # iter-1/4/5 mass path and iter-42 SW/MPAS energy fixer — the
+    # 0.5·(u²+v²) square+multiply lost ~7 bits of precision when the
+    # state was stored in fp32.
+    acc = _conservation_accumulator()
+    u = state.u.data.astype(acc)
+    v = state.v.data.astype(acc)
+    T = state.T.data.astype(acc)
+    p_s = state.p_s.data.astype(acc)
+    phis = state.phis.data.astype(acc)
+    g = jnp.asarray(constants.g, dtype=acc)
+    c_v = jnp.asarray(constants.c_vd, dtype=acc)
+    dsigma = sigma_coord.dsigma.astype(acc)
 
     # Mass weight per layer: p_s * dsigma / g
     # Use [..., None] broadcasting so this works for both cubed-sphere
@@ -801,20 +799,23 @@ def compute_nh_energy(
         'potential_energy': ∫ g·z·rho·J·dz·dA
         'total_energy': sum of all three
     """
-    u = state.u.data
-    v = state.v.data
-    w = state.w.data
-    theta_p = state.theta_prime.data
-    rho_p = state.rho_prime.data
+    # iter-43: promote energy fields to fp64 budget accumulator (see
+    # compute_hydrostatic_energy docstring above).
+    acc = _conservation_accumulator()
+    u = state.u.data.astype(acc)
+    v = state.v.data.astype(acc)
+    w = state.w.data.astype(acc)
+    theta_p = state.theta_prime.data.astype(acc)
+    rho_p = state.rho_prime.data.astype(acc)
 
-    g = constants.g
-    c_v = constants.c_vd
-    theta_0 = height_coord.theta_ref
-    rho_0 = height_coord.rho_ref
-    exner_0 = height_coord.exner_ref
-    dz = height_coord.dz
-    z_full = height_coord.z_full
-    J = terrain_metric.jacobian
+    g = jnp.asarray(constants.g, dtype=acc)
+    c_v = jnp.asarray(constants.c_vd, dtype=acc)
+    theta_0 = height_coord.theta_ref.astype(acc)
+    rho_0 = height_coord.rho_ref.astype(acc)
+    exner_0 = height_coord.exner_ref.astype(acc)
+    dz = height_coord.dz.astype(acc)
+    z_full = height_coord.z_full.astype(acc)
+    J = terrain_metric.jacobian.astype(acc)
 
     rho_total = rho_0 + rho_p
     theta_total = theta_0 + theta_p
@@ -863,13 +864,19 @@ def compute_conservation_diagnostics(
         'total_mass': Global integral of h*area
         'total_energy': Global integral of (KE + PE)*area
     """
-    h = state.h.data
-    u = state.u.data
-    v = state.v.data
-    h_s = state.h_s.data
+    # iter-44: promote energy field to fp64 budget accumulator before
+    # the area-sum (same fp32-field bug as iter-42/43).  The mass
+    # integrand (h alone) is already correct via _batch_global_area_sums
+    # internal cast.
+    acc = _conservation_accumulator()
+    h = state.h.data.astype(acc)
+    u = state.u.data.astype(acc)
+    v = state.v.data.astype(acc)
+    h_s = state.h_s.data.astype(acc)
+    g_acc = jnp.asarray(g, dtype=acc)
 
     ke = 0.5 * h * (u**2 + v**2)
-    pe = 0.5 * g * (h + h_s)**2
+    pe = 0.5 * g_acc * (h + h_s)**2
     total_mass, total_energy = _batch_global_area_sums(
         [h, ke + pe], grid,
     )
@@ -918,11 +925,106 @@ def fix_mass_mpas(state, target_mass, mesh):
     # ``mesh.grid_total_area`` is precomputed at mesh construction —
     # avoid recomputing the global ``jnp.sum(areaCell)`` every step
     # (one extra reduction in serial; one extra allreduce under
-    # multi-rank Voronoi sharding).
-    total_area = mesh.grid_total_area
+    # multi-rank Voronoi sharding).  Iter-13: cast to fp64 so the
+    # divisor matches the fp64 ``current_mass`` and ``target_mass``;
+    # otherwise an fp32 ``total_area`` leaks ~N·eps into ``correction``.
+    total_area = mesh.grid_total_area.astype(_conservation_accumulator())
     correction = (target_mass - current_mass) / total_area
     h_fixed = state.h.replace(data=state.h.data + correction)
     return state._replace(h=h_fixed)
+
+
+def compute_nh_dry_mass_mpas(
+    rho_prime: jax.Array,
+    height_coord,
+    terrain_metric,
+    mesh,
+) -> jax.Array:
+    """Global dry mass on a Voronoi mesh for the non-hydrostatic model.
+
+    M = sum_k(sum_cells J · (rho_ref_k + rho_prime_k) · dz_k · areaCell).
+
+    Parameters
+    ----------
+    rho_prime : jax.Array, shape (nCells, nlev)
+    height_coord : HeightCoordinate (rho_ref, dz attrs as in
+        ``compute_nh_dry_mass`` cubed-sphere variant).
+    terrain_metric : TerrainMetric (jacobian shape ``(nCells,)``).
+    mesh : VoronoiMesh.
+
+    Returns
+    -------
+    jax.Array : scalar dry mass [kg].
+    """
+    rho_total = height_coord.rho_ref + rho_prime  # (nCells, nlev)
+    J = terrain_metric.jacobian                   # (nCells,)
+    dz = height_coord.dz                          # (nlev,)
+    col_mass = jnp.sum(
+        J[:, None] * rho_total * dz[None, :], axis=-1,
+    )                                             # (nCells,)
+    return global_integral_voronoi(col_mass, mesh)
+
+
+def fix_mass_nonhydrostatic_mpas(
+    state,
+    target_mass: jax.Array,
+    height_coord,
+    terrain_metric,
+    mesh,
+):
+    """Fix dry-mass conservation on a Voronoi mesh.
+
+    Applies a uniform additive correction to ``rho_prime`` so the
+    global dry mass matches ``target_mass``.  Volume normalisation is
+    ``∫ J · dz · dA`` so the correction has units of density (kg/m³)
+    and is broadcast across levels — matches the cubed-sphere
+    ``fix_mass_nonhydrostatic`` convention.
+
+    Parameters
+    ----------
+    state : MPASNonHydrostaticState
+    target_mass : jax.Array
+        Target dry mass (e.g. computed once via
+        ``compute_nh_dry_mass_mpas`` on the initial state).
+    height_coord, terrain_metric, mesh : as for
+        :func:`compute_nh_dry_mass_mpas`.
+    """
+    rho_total = height_coord.rho_ref + state.rho_prime.data
+    J = terrain_metric.jacobian
+    dz = height_coord.dz
+    col_mass = jnp.sum(
+        J[:, None] * rho_total * dz[None, :], axis=-1,
+    )                                             # (nCells,)
+    col_vol = J * jnp.sum(dz)                     # (nCells,)
+    current_mass, total_vol = _batch_global_area_sums_voronoi(
+        [col_mass, col_vol], mesh,
+    )
+    correction = (target_mass - current_mass) / total_vol
+    rho_fixed = state.rho_prime.replace(
+        data=state.rho_prime.data + correction,
+    )
+    return state._replace(rho_prime=rho_fixed)
+
+
+def _batch_global_area_sums_voronoi(
+    arrays: list[jax.Array],
+    mesh,
+) -> list[jax.Array]:
+    """Voronoi analogue of :func:`_batch_global_area_sums`.
+
+    Stacks the arrays along a new trailing axis, multiplies by
+    ``mesh.areaCell`` (cast to the fp64 conservation accumulator),
+    reduces once locally, then applies the multi-rank allreduce when
+    the mesh is sharded.
+    """
+    acc = _conservation_accumulator()
+    area_acc = mesh.areaCell.astype(acc)
+    stacked = jnp.stack([arr.astype(acc) for arr in arrays], axis=-1)
+    summed = jnp.sum(stacked * area_acc[..., None], axis=0)  # (n_arrays,)
+    local_sums = [summed[..., i] for i in range(len(arrays))]
+    if _is_distributed():
+        return batch_allreduce_mpi(local_sums, op="sum")
+    return local_sums
 
 
 def fix_energy_mpas(state, target_energy, mesh, g=constants.g):
@@ -946,10 +1048,15 @@ def fix_energy_mpas(state, target_energy, mesh, g=constants.g):
     -------
     MPASShallowWaterState
     """
-    h = state.h.data
-    u = state.u.data
-    h_s = state.h_s.data
-    area = mesh.areaCell
+    # iter-42: promote energy fields to the fp64 budget accumulator
+    # before the area-weighted sum (same fix as
+    # ``fix_energy_shallow_water`` for the SW-on-any-grid path).
+    acc = _conservation_accumulator()
+    h = state.h.data.astype(acc)
+    u = state.u.data.astype(acc)
+    h_s = state.h_s.data.astype(acc)
+    area = mesh.areaCell.astype(acc)
+    g_acc = jnp.asarray(g, dtype=acc)
 
     KE_cells = kinetic_energy_cell(u, mesh)
     # Both KE and PE share the ``area`` weight on the horizontal axes —
@@ -957,7 +1064,7 @@ def fix_energy_mpas(state, target_energy, mesh, g=constants.g):
     # sum kernel; the stacked result still yields a 2-vector for the
     # downstream ``KE / PE`` split (and a future allreduce, if any).
     _energy_intg = jnp.stack(
-        [KE_cells * h, 0.5 * g * (h + h_s) ** 2], axis=-1,
+        [KE_cells * h, 0.5 * g_acc * (h + h_s) ** 2], axis=-1,
     ) * area[..., None]
     energy_terms = jnp.sum(_energy_intg, axis=tuple(range(area.ndim)))
     KE, PE = energy_terms[0], energy_terms[1]

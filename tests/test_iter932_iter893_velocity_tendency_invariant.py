@@ -39,6 +39,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm import constants
 from legoesm.core.operators_cdgrid import fv3_sw_tendencies
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
@@ -66,7 +67,7 @@ def _bare_al_tendencies(apply_xppm: bool):
         warnings.simplefilter("ignore")
         dh, du, dv = fv3_sw_tendencies(
             sw.h.data, u_d, v_d, sw.h_s.data, cdgrid,
-            g=9.80616,
+            g=constants.g,
             div_damp=0.0,
             boundary_fix=False,
             apply_fortran_xppm_boundary=apply_xppm,

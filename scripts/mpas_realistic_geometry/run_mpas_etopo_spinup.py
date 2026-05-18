@@ -108,12 +108,12 @@ def run(args):
     if bathy_cfg is not None:
         state = rest_state_mpas_ocean(
             mesh, z_coord, bathymetry=bathy_cfg,
-            T_surface=args.T_surf, T_deep=args.T_deep, S_uniform=args.S_uniform,
+            T_water_init_C=args.T_surf, T_deep=args.T_deep, S_uniform=args.S_uniform,
         )
     else:
         state = rest_state_mpas_ocean(
             mesh, z_coord, H_max=args.H_max,
-            T_surface=args.T_surf, T_deep=args.T_deep, S_uniform=args.S_uniform,
+            T_water_init_C=args.T_surf, T_deep=args.T_deep, S_uniform=args.S_uniform,
         )
 
     H_bathy = state.H_bathy.data

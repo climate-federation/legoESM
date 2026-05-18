@@ -55,7 +55,7 @@ class EadyUniformConfig:
 
     # Linear EOS
     alpha_T: float = 2.0e-4
-    rho_0: float = 1025.0        # = eos.rho_0
+    rho_0: float = constants.rho_ocean
 
     # Shear: U = Λz (zero at bottom, U_surface at top)
     # U_surface=0.8 gives τ≈5 days (classical Eady e-folding time).
@@ -198,7 +198,7 @@ def _rest_state_latlon(grid, z_coord, config):
     wall_mask[-1, :] = 0.0
     return rest_state_latlon_cgrid_ocean(
         grid, z_coord, H_max=config.H_max,
-        T_surface=config.T_ref, T_deep=config.T_ref,
+        T_water_init_C=config.T_ref, T_deep=config.T_ref,
         S_uniform=config.S_uniform,
         land_mask_override=wall_mask,
     )
@@ -208,7 +208,7 @@ def _rest_state_mpas(mesh, z_coord, config):
     from legoesm.ocean.init_mpas import rest_state_mpas_ocean
     state = rest_state_mpas_ocean(
         mesh, z_coord, H_max=config.H_max,
-        T_surface=config.T_ref, T_deep=config.T_ref,
+        T_water_init_C=config.T_ref, T_deep=config.T_ref,
         S_uniform=config.S_uniform,
     )
     lat_deg = np.degrees(np.asarray(mesh.latCell))

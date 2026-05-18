@@ -50,7 +50,7 @@ from legoesm.grids.cubed_sphere_cdgrid import (
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
-from legoesm.core.conservation import _accumulation_dtype
+from legoesm.core.conservation import _conservation_accumulator
 from legoesm.core.fv3_sw_core import (
     _d2a2c_vect,
     _d_sw5_corner_divergence,
@@ -420,6 +420,7 @@ def iter1009_dual_target_config(
     n: int,
     div_damp_factor: float = 8.0,
     damp_v: float = 0.030,
+    hyperdiff_coeff: float = 0.0,
 ) -> CDGridShallowWaterConfig:
     """Iter-1009/1021/1030 dual-target preset: W2 ≤ 0.119 m/s + W5 day-5 artifact-free.
 
@@ -457,12 +458,24 @@ def iter1009_dual_target_config(
         Vorticity damping coefficient.  Iter-1030 measured 0.030 as
         the W5-best damp_v (lower than iter-1009's 0.06 and
         iter-1021's 0.035).
+    hyperdiff_coeff : float, default 0.0
+        Biharmonic (del-4) hyperdiffusion coefficient [m^4/s].  Off
+        by default (iter-1030 dual-target preset deliberately uses no
+        hyperdiff because W2 / W5 day-5 are stable without it).  For
+        LONGER runs (W5 full 15-day, W6 full 14-day Rossby-Haurwitz),
+        the matrix runner sets ``hyperdiff_coeff=_hyperdiff_cube(n)``
+        — without that, cube W5/W6 blow up at days 14.58 / 9.03
+        respectively while latlon W5/W6 stay stable.  See
+        ``new_test_dycores.md`` iter-31/33.
 
     Returns
     -------
     CDGridShallowWaterConfig
         Pre-populated with the iter-1009/1021 calibration plus
         `apply_fortran_xppm_boundary=True` and `boundary_fix=True`.
+        Includes optional biharmonic hyperdiffusion via the
+        `hyperdiff_coeff` kwarg (iter-35; default 0.0 preserves the
+        original iter-1030 dual-target behavior).
     """
     # _div_damp_cube(n) = 1.5e7 * (48/n)^2 — same formula as
     # tests/test_iter921_w2_v_vs_h_pareto_sentinel.py.  Inlined here
@@ -486,11 +499,119 @@ def iter1009_dual_target_config(
         )
 
     return CDGridShallowWaterConfig(
-        hyperdiff_coeff=0.0,
+        hyperdiff_coeff=hyperdiff_coeff,
         div_damp=div_damp_factor * div_damp_base,
         boundary_fix=True,
         damp_v=damp_v, nord_v=2,
         apply_fortran_xppm_boundary=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Resolution-scaling helpers used by both the production matrix runner and
+# the ``legoesm test williamson`` CLI.  Iter-1030 calibration values; matching
+# constants in ``scripts/run_atmosphere_test_matrix.py`` (``_hyperdiff_cube``,
+# ``_div_damp_cube``) and ``tests/test_iter921_w2_v_vs_h_pareto_sentinel.py``
+# (``_div_damp_cube``) must stay in sync — these are the single source of
+# truth and the script-local mirrors should defer to these helpers.
+# ---------------------------------------------------------------------------
+
+
+def _validate_cube_resolution(n: int) -> int:
+    import operator
+    if isinstance(n, bool):
+        raise ValueError(
+            f"cubed-sphere resolution `n` must be a positive integer, "
+            f"got {n!r}"
+        )
+    try:
+        n_int = operator.index(n)
+    except TypeError:
+        raise ValueError(
+            f"cubed-sphere resolution `n` must be a positive integer, "
+            f"got {n!r}"
+        ) from None
+    if n_int <= 0:
+        raise ValueError(
+            f"cubed-sphere resolution `n` must be a positive integer, "
+            f"got {n!r}"
+        )
+    return n_int
+
+
+def cdgrid_hyperdiff_cube(
+    n: int, ref_n: int = 48, ref_coeff: float = 1.0e16,
+) -> float:
+    """Biharmonic hyperdiffusion coefficient [m^4/s] for a C-N cubed-sphere
+    grid, scaled with ``(ref_n/n)^4`` to keep ``hyperdiff_coeff * dx^-4``
+    constant across resolutions.
+
+    Default ``ref_n=48``, ``ref_coeff=1e16`` is the iter-1030 calibration
+    (validated at C36/C48/C72 in the matrix runner — see
+    ``scripts/run_atmosphere_test_matrix.py`` and the ``new_test_dycores``
+    log).  Reuse this helper rather than re-deriving ``1e16``/``ref_n``
+    inline.
+    """
+    n_int = _validate_cube_resolution(n)
+    return ref_coeff * (ref_n / n_int) ** 4
+
+
+def cdgrid_div_damp_cube(
+    n: int, ref_n: int = 48, ref_coeff: float = 1.5e7,
+) -> float:
+    """Base divergence-damping coefficient for a cubed-sphere C-D grid,
+    scaled with ``(ref_n/n)^2`` (FV3-style; see ``d_sw5`` corner damping).
+    Iter-1030 calibration value ``1.5e7`` at C48.
+
+    The validated dual-target preset ``iter1009_dual_target_config`` uses
+    ``8.0 * cdgrid_div_damp_cube(n)`` at C36; the
+    ``williamson_cli_calibration`` preset below uses ``2.0 *`` to stay
+    stable at C24 and C48 (the 8× factor is C36-specific and overshoots
+    at C48 — see iter1009 docstring).
+    """
+    n_int = _validate_cube_resolution(n)
+    return ref_coeff * (ref_n / n_int) ** 2
+
+
+def williamson_cli_calibration(
+    n: int,
+    div_damp_factor: float = 2.0,
+) -> CDGridShallowWaterConfig:
+    """Pre-built ``CDGridShallowWaterConfig`` for the
+    ``legoesm test williamson`` CLI (#269).
+
+    Differences from ``iter1009_dual_target_config`` (which targets C36
+    dual W2/W5 acceptance and is unstable at C48 with its 8×
+    divergence-damping factor):
+      * Uses ``cdgrid_hyperdiff_cube(n)`` (= iter-1030 calibration) by
+        default so the height/v-wind edge artifacts that motivated #269
+        get the production-quality diffusion bound — the prior CLI used
+        a heuristic ``1e-4 * mean_dx**4 / dt`` that under-damped at C48.
+      * Uses a gentler 2× ``cdgrid_div_damp_cube(n)`` so the CLI stays
+        stable at C24/C48 (8× blows up W5 day-5 at C48, per the
+        ``iter1009_dual_target_config`` docstring caveat).
+
+    Other flags match ``iter1009_dual_target_config``:
+      ``damp_v=0.030``, ``nord_v=2``, ``boundary_fix=True``,
+      ``apply_fortran_xppm_boundary=True``, ``use_conservation_fixer=True``.
+
+    Parameters
+    ----------
+    n : int
+        Cubed-sphere face cells per side.
+    div_damp_factor : float, default 2.0
+        Multiplier on ``cdgrid_div_damp_cube(n)``.  Lower = looser
+        damping (more accurate, less robust); higher = more damping
+        (cleaner artifacts, may blow up at coarse/fine resolution).
+    """
+    return CDGridShallowWaterConfig(
+        hyperdiff_coeff=cdgrid_hyperdiff_cube(n),
+        div_damp=div_damp_factor * cdgrid_div_damp_cube(n),
+        damp_v=0.030,
+        nord_v=2,
+        boundary_fix=True,
+        apply_fortran_xppm_boundary=True,
+        use_conservation_fixer=True,
     )
 
 
@@ -630,7 +751,29 @@ class CDGridShallowWaterModel(IntegrationMixin):
 
     def set_initial_mass(self, state: CDGridShallowWaterState):
         """Anchor conservation fixer to initial state mass."""
-        self._target_mass = jnp.sum(state.h * self.cdgrid.base.area)
+        # iter-5: fp64 budget accumulator — fp32 reductions on ~6·N²
+        # cubed-sphere arrays leak ~N·eps noise into the anchor and
+        # produced ~10^-7 spurious "mass drift" in W5.  Matches the
+        # cubed-sphere PE ``_batch_global_area_sums`` precision.
+        _acc = _conservation_accumulator()
+        self._target_mass = jnp.sum(
+            state.h.astype(_acc) * self.cdgrid.base.area.astype(_acc),
+        )
+
+    def reset_target_mass(self) -> None:
+        """Clear the anchored mass target (iter-20; mirrors iter-18 API)."""
+        self._target_mass = None
+
+    def set_target_mass(self, target_mass) -> None:
+        """Explicitly set the anchored mass target (iter-20; iter-19 API)."""
+        self._target_mass = target_mass
+
+    def compute_mass(self, state) -> jax.Array:
+        """Global ``∫ h dA`` (fp64).  iter-21: API parity with PE / NH twins."""
+        _acc = _conservation_accumulator()
+        return jnp.sum(
+            state.h.astype(_acc) * self.cdgrid.base.area.astype(_acc),
+        )
 
     def _sync_dgrid_boundary(self, state: CDGridShallowWaterState):
         """Owner-based sync of D-grid corner winds at shared edges.
@@ -738,7 +881,8 @@ class CDGridShallowWaterModel(IntegrationMixin):
 
         # Conservation fixer
         if self.config.use_conservation_fixer and self.config.fix_mass:
-            acc = _accumulation_dtype()
+            # iter-5: fp64 budget accumulator (see set_initial_mass).
+            acc = _conservation_accumulator()
             area = self.cdgrid.base.area.astype(acc)
             total_area = jnp.sum(area)
             if self._target_mass is not None:
@@ -756,7 +900,9 @@ class CDGridShallowWaterModel(IntegrationMixin):
                 )
                 mass_target, mass_new = _mass_pair[0], _mass_pair[1]
             correction = (mass_target - mass_new) / total_area
-            h_fixed = state_new.h + correction.astype(state_new.h.dtype)
+            # iter-5: drop ``.astype(state_new.h.dtype)`` so the fp64
+            # correction promotes the add (matches ``fix_ps_mass``).
+            h_fixed = state_new.h + correction
             state_new = state_new._replace(h=h_fixed)
 
         # Cast back to storage precision.
@@ -838,7 +984,33 @@ class FV3FBShallowWaterModel:
                 UserWarning, stacklevel=2)
 
     def set_initial_mass(self, state):
-        self._target_mass = jnp.sum(state.h * self.cdgrid.base.area)
+        # iter-5: fp64 budget accumulator — fp32 reductions on ~6·N²
+        # cubed-sphere arrays leak ~N·eps noise into the anchor and
+        # produced ~10^-7 spurious "mass drift" in W5.  Matches the
+        # cubed-sphere PE ``_batch_global_area_sums`` precision.
+        _acc = _conservation_accumulator()
+        self._target_mass = jnp.sum(
+            state.h.astype(_acc) * self.cdgrid.base.area.astype(_acc),
+        )
+
+    def reset_target_mass(self) -> None:
+        """Clear the anchored mass target (iter-20; mirrors iter-18 API).
+
+        After this, the next ``step()`` falls back to the pre-state path.
+        Call ``set_initial_mass(state)`` to re-anchor.
+        """
+        self._target_mass = None
+
+    def set_target_mass(self, target_mass) -> None:
+        """Explicitly set the anchored mass target (iter-20; iter-19 API)."""
+        self._target_mass = target_mass
+
+    def compute_mass(self, state) -> jax.Array:
+        """Global ``∫ h dA`` (fp64).  iter-21: API parity with PE / NH twins."""
+        _acc = _conservation_accumulator()
+        return jnp.sum(
+            state.h.astype(_acc) * self.cdgrid.base.area.astype(_acc),
+        )
 
     @partial(jax.jit, static_argnums=(0,))
     def step(self, state, dt):
@@ -884,7 +1056,8 @@ class FV3FBShallowWaterModel:
 
         # Conservation fixer
         if self.config.use_conservation_fixer and self.config.fix_mass:
-            acc = _accumulation_dtype()
+            # iter-5: fp64 budget accumulator (see set_initial_mass).
+            acc = _conservation_accumulator()
             area = self.cdgrid.base.area.astype(acc)
             total_area = jnp.sum(area)
             if self._target_mass is not None:
@@ -901,7 +1074,9 @@ class FV3FBShallowWaterModel:
                 )
                 mass_target, mass_new = _mass_pair[0], _mass_pair[1]
             correction = (mass_target - mass_new) / total_area
-            h_fixed = state_new.h + correction.astype(state_new.h.dtype)
+            # iter-5: drop ``.astype(state_new.h.dtype)`` so the fp64
+            # correction promotes the add (matches ``fix_ps_mass``).
+            h_fixed = state_new.h + correction
             state_new = state_new._replace(h=h_fixed)
 
         return cast_pytree(state_new, None, "storage")
@@ -948,7 +1123,33 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
         self._target_mass = None
 
     def set_initial_mass(self, state):
-        self._target_mass = jnp.sum(state.h * self.cdgrid.base.area)
+        # iter-5: fp64 budget accumulator — fp32 reductions on ~6·N²
+        # cubed-sphere arrays leak ~N·eps noise into the anchor and
+        # produced ~10^-7 spurious "mass drift" in W5.  Matches the
+        # cubed-sphere PE ``_batch_global_area_sums`` precision.
+        _acc = _conservation_accumulator()
+        self._target_mass = jnp.sum(
+            state.h.astype(_acc) * self.cdgrid.base.area.astype(_acc),
+        )
+
+    def reset_target_mass(self) -> None:
+        """Clear the anchored mass target (iter-20; mirrors iter-18 API).
+
+        After this, the next ``step()`` falls back to the pre-state path.
+        Call ``set_initial_mass(state)`` to re-anchor.
+        """
+        self._target_mass = None
+
+    def set_target_mass(self, target_mass) -> None:
+        """Explicitly set the anchored mass target (iter-20; iter-19 API)."""
+        self._target_mass = target_mass
+
+    def compute_mass(self, state) -> jax.Array:
+        """Global ``∫ h dA`` (fp64).  iter-21: API parity with PE / NH twins."""
+        _acc = _conservation_accumulator()
+        return jnp.sum(
+            state.h.astype(_acc) * self.cdgrid.base.area.astype(_acc),
+        )
 
     @partial(jax.jit, static_argnums=(0,))
     def step(self, state, dt):
@@ -1190,7 +1391,8 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
 
         # Conservation fixer
         if self.config.use_conservation_fixer and self.config.fix_mass:
-            acc = _accumulation_dtype()
+            # iter-5: fp64 budget accumulator (see set_initial_mass).
+            acc = _conservation_accumulator()
             area = self.cdgrid.base.area.astype(acc)
             total_area = jnp.sum(area)
             if self._target_mass is not None:
@@ -1207,7 +1409,9 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
                 )
                 mass_target, mass_new = _mass_pair[0], _mass_pair[1]
             correction = (mass_target - mass_new) / total_area
-            h_fixed = state_new.h + correction.astype(state_new.h.dtype)
+            # iter-5: drop ``.astype(state_new.h.dtype)`` so the fp64
+            # correction promotes the add (matches ``fix_ps_mass``).
+            h_fixed = state_new.h + correction
             state_new = state_new._replace(h=h_fixed)
 
         return cast_pytree(state_new, None, "storage")

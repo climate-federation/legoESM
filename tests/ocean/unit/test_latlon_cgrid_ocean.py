@@ -39,7 +39,7 @@ def z_coord():
 def state(grid, z_coord):
     return rest_state_latlon_cgrid_ocean(
         grid, z_coord,
-        T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+        T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
         H_max=4000.0,
     )
 
@@ -277,7 +277,7 @@ class TestCGridOceanModel:
         """
         state = rest_state_latlon_cgrid_ocean(
             grid, z_coord,
-            T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+            T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
             H_max=4000.0,
         )
 
@@ -321,3 +321,56 @@ class TestCGridOceanModel:
         grad_fn = jax.grad(loss_fn)
         g = grad_fn(state.eta.data)
         assert jnp.all(jnp.isfinite(g))
+
+
+# =========================================================================
+# Bugfix-knob coverage (PR #261)
+# =========================================================================
+
+
+class TestPR261ConfigDispatch:
+    """Each new public-config dispatch branch from PR #261 must select
+    cleanly via :class:`LatLonCGridOceanConfig` and produce finite
+    tendencies.  These tests guard the slopbuster-flagged untested
+    dispatch knobs (`A_h_merid`, `B_h_lat_scaling`)."""
+
+    def test_A_h_merid_branch_active(self, grid, z_coord, state):
+        cfg = LatLonCGridOceanConfig(A_h_merid=5.0e4)
+        assert cfg.A_h_merid > 0.0
+        tend = latlon_cgrid_ocean_baroclinic_tendencies(
+            state, grid, z_coord, cfg,
+        )
+        assert jnp.all(jnp.isfinite(tend.du_dt.data))
+        assert jnp.all(jnp.isfinite(tend.dv_dt.data))
+
+    def test_A_h_merid_default_inactive(self, grid, z_coord, state):
+        cfg = LatLonCGridOceanConfig()
+        assert cfg.A_h_merid == 0.0
+
+    def test_B_h_lat_scaling_on(self, grid, z_coord, state):
+        cfg = LatLonCGridOceanConfig(B_h=1.0e10, B_h_lat_scaling=True)
+        tend = latlon_cgrid_ocean_baroclinic_tendencies(
+            state, grid, z_coord, cfg,
+        )
+        assert jnp.all(jnp.isfinite(tend.du_dt.data))
+
+    def test_B_h_lat_scaling_off(self, grid, z_coord, state):
+        cfg = LatLonCGridOceanConfig(B_h=1.0e10, B_h_lat_scaling=False)
+        tend = latlon_cgrid_ocean_baroclinic_tendencies(
+            state, grid, z_coord, cfg,
+        )
+        assert jnp.all(jnp.isfinite(tend.du_dt.data))
+
+
+def test_gm_redi_surface_complement_config_defaults_round_trip():
+    """The two new ``GMRediConfig`` surface-complement knobs from
+    PR #261 must round-trip through the NamedTuple cleanly."""
+    from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+
+    cfg = GMRediConfig()
+    assert cfg.surface_complement is True
+    assert cfg.surface_complement_depth == 100.0
+
+    cfg2 = GMRediConfig(surface_complement=False, surface_complement_depth=50.0)
+    assert cfg2.surface_complement is False
+    assert cfg2.surface_complement_depth == 50.0

@@ -59,6 +59,41 @@ def area_weighted_mse(
     return jnp.mean(weighted) * n_lat / jnp.sum(weights)
 
 
+def latitude_weighted_rmse(
+    pred: jnp.ndarray,
+    target: jnp.ndarray,
+    lat_weights: jnp.ndarray,
+) -> jnp.ndarray:
+    """Zonal-mean square-error, then latitude-weighted RMSE.
+
+    Used by the AIMIP scorecard and per-variant evaluation scripts. Takes
+    a 2D ``(n_lat, n_lon)`` field (a single mid-level slice or surface
+    field), computes the zonal-mean square error per latitude row, then
+    forms the latitude-weighted mean and returns its square root.
+
+    Equivalent to ``sqrt(area_weighted_mse(...))`` for a 2D field, but
+    keeps the explicit zonal-then-meridional formula used in WeatherBench
+    scorecards.
+    """
+    sq_zonal = jnp.mean((pred - target) ** 2, axis=-1)
+    return jnp.sqrt(jnp.sum(sq_zonal * lat_weights) / jnp.sum(lat_weights))
+
+
+def latitude_weighted_bias(
+    pred: jnp.ndarray,
+    target: jnp.ndarray,
+    lat_weights: jnp.ndarray,
+) -> jnp.ndarray:
+    """Zonal-mean bias, then latitude-weighted mean.
+
+    Companion to :func:`latitude_weighted_rmse` for the AIMIP scorecard.
+    Returns the signed area-weighted mean error of a 2D
+    ``(n_lat, n_lon)`` field.
+    """
+    diff_zonal = jnp.mean(pred - target, axis=-1)
+    return jnp.sum(diff_zonal * lat_weights) / jnp.sum(lat_weights)
+
+
 def per_variable_mse(
     pred: jnp.ndarray,
     target: jnp.ndarray,

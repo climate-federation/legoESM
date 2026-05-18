@@ -466,7 +466,7 @@ class TestRestStateRealistic:
         cfg = BathymetryConfig(source="idealized")
         state = rest_state_ocean_realistic(
             small_grid, z_coord, cfg,
-            T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+            T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
         )
 
         assert state.T.data.shape == (6, 8, 8, 10)

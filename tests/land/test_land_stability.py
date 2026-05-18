@@ -67,7 +67,7 @@ def _make_forcing(
     )
     cos_sza = jnp.maximum(cos_sza, 0.0)
 
-    S0 = 1361.0  # W/m2
+    S0 = constants.S_0  # W/m2
     sw_down = (S0 * cos_sza).astype(dtype)
 
     # Atmospheric temperature: baseline from latitude, small diurnal range
@@ -82,8 +82,8 @@ def _make_forcing(
     lw_down = (0.75 * constants.sigma_sb * T_atm ** 4).astype(dtype)
 
     # Humidity: ~60% RH equivalent (rough Clausius-Clapeyron)
-    e_sat = 611.2 * jnp.exp(17.67 * (T_atm - 273.15) / (T_atm - 29.65))
-    q_atm = (0.6 * 0.622 * e_sat / 1e5).astype(dtype)
+    e_sat = 611.2 * jnp.exp(17.67 * (T_atm - constants.T_freeze) / (T_atm - 29.65))
+    q_atm = (0.6 * constants.epsilon * e_sat / 1e5).astype(dtype)
 
     # Precipitation
     precip_total = jnp.full(ncol, precip_rate, dtype=dtype)

@@ -279,7 +279,7 @@ def dca_convection(
     )
     col_local_cond = _col_pair[..., 0:1]
     col_net_drying = jnp.clip(-_col_pair[..., 1:2], 0.0, None)
-    # AD-safe column rescaling — see sbm.py for the same fix.
+    # AD-safe column rescaling — see sbm.py for derivation; issue #249.
     dq_c_conv_dt = local_cond * safe_divide(
         col_net_drying, col_local_cond, eps=1e-20,
     )  # (ncol, nlev) [kg/kg/s]

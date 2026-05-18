@@ -680,12 +680,26 @@ class ModelDriver:
         p_half_col = p_half.reshape(ncol, nlev + 1)
         lat_col = lat.reshape(ncol)
 
-        o3_vmr = jnp.zeros((ncol, nlev), dtype=p_s.dtype)
         if self._ozone_ext_active:
             o3_vmr = jnp.asarray(get_ozone_at_time(
                 self._ozone_ext_config, day,
                 lat_grid=lat_col, p_grid=p_full_col,
             ))
+        else:
+            # External ozone forcing inactive — fall back to the
+            # climatological ozone-VMR column (US Std Atm 1976 fit) that
+            # RRTMGP uses internally when ``o3_vmr=None``.  Previously
+            # ``o3_vmr`` was initialised to zeros and threaded into the
+            # solver, which then clipped it to 1e-10 and effectively
+            # disabled stratospheric ozone heating (audit 2026-05-12
+            # HIGH #3).  Building the profile here keeps the radiation
+            # JIT signature stable (it always sees a real array) while
+            # still producing physical stratospheric heating in
+            # gray/RRTMGP runs without an external ozone file.
+            from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import (
+                standard_o3_profile,
+            )
+            o3_vmr = standard_o3_profile(p_full_col).astype(p_s.dtype)
 
         aerosol_od = jnp.zeros((ncol, nlev), dtype=p_s.dtype)
         if self._aerosol_active:

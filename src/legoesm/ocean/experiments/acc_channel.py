@@ -43,6 +43,7 @@ import jax.numpy as jnp
 import numpy as np
 from dataclasses import dataclass
 
+from legoesm import constants
 from legoesm.core.field import Field
 
 
@@ -72,7 +73,7 @@ class ACCChannelConfig:
 
     # Linear EOS
     alpha_T: float = 2.0e-4
-    rho_0: float = 1025.0        # = eos.rho_0
+    rho_0: float = constants.rho_ocean
     T_ref: float = 4.0              # reference T for EOS
 
     # Wind forcing
@@ -161,7 +162,7 @@ def _init_latlon(grid, z_coord, config):
 
     state = rest_state_latlon_cgrid_ocean(
         grid, z_coord, H_max=config.H_max,
-        T_surface=config.delta_T, T_deep=0.0,
+        T_water_init_C=config.delta_T, T_deep=0.0,
         S_uniform=config.S_uniform,
         land_mask_override=wall_mask,
     )
@@ -211,7 +212,7 @@ def _init_mpas(mesh, z_coord, config):
 
     state = rest_state_mpas_ocean(
         mesh, z_coord, H_max=config.H_max,
-        T_surface=config.delta_T, T_deep=0.0,
+        T_water_init_C=config.delta_T, T_deep=0.0,
         S_uniform=config.S_uniform,
     )
 

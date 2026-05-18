@@ -62,23 +62,31 @@ def compute_atmospheric_angular_momentum(
     aam_total : float
         Globally-summed AAM [kg·m²/s].
     """
+    # iter-46: promote to fp64 budget accumulator before the per-cell
+    # AAM product (same fp32-field bug as iter-42..45).  AAM is a
+    # ~10^32 magnitude diagnostic with O(1) sensitivity to drift; fp32
+    # accumulation noise would mask the very drift this function is
+    # designed to monitor.
+    from legoesm.core.conservation import _conservation_accumulator
+    acc = _conservation_accumulator()
+
     R = float(grid.radius)
-    cos_lat = jnp.cos(grid.lat)               # (6, n, n)
-    r1 = R * cos_lat                          # (6, n, n)
+    cos_lat = jnp.cos(grid.lat).astype(acc)            # (6, n, n)
+    r1 = R * cos_lat                                    # (6, n, n)
     r2 = r1 * r1
-    omega = constants.Omega
+    omega = jnp.asarray(constants.Omega, dtype=acc)
 
     # Per-cell mass: rho * dz * area (kg)
-    dz_b = jnp.asarray(hc.dz)[None, None, None, :]  # (1, 1, 1, nlev)
-    area_b = grid.area[..., None]                    # (6, n, n, 1)
-    dm = rho_full * dz_b * area_b                    # (6, n, n, nlev)
+    dz_b = jnp.asarray(hc.dz, dtype=acc)[None, None, None, :]  # (1,1,1,nlev)
+    area_b = grid.area.astype(acc)[..., None]          # (6, n, n, 1)
+    dm = rho_full.astype(acc) * dz_b * area_b          # (6, n, n, nlev)
 
     # AAM per cell: (r²·Ω + r·u) · dm
-    r1_b = r1[..., None]                              # (6, n, n, 1)
+    r1_b = r1[..., None]                                # (6, n, n, 1)
     r2_b = r2[..., None]
-    aam_cell = (r2_b * omega + r1_b * u_center) * dm
+    aam_cell = (r2_b * omega + r1_b * u_center.astype(acc)) * dm
     # Column integral
-    aam_column = jnp.sum(aam_cell, axis=-1)           # (6, n, n)
+    aam_column = jnp.sum(aam_cell, axis=-1)             # (6, n, n)
     aam_total = float(jnp.sum(aam_column))
     return aam_column, aam_total
 
@@ -154,12 +162,15 @@ def apply_aam_correction_nh(state_old, state_new, grid, hc):
     _, aam_new = aam_from_nh_state(state_new, grid, hc)
     amdt = aam_new - aam_old  # kg·m²/s
 
-    # M_fac_total = sum over all cells of R²·cos²(lat) · column_mass
-    cos2_lat = jnp.cos(grid.lat) ** 2                   # (6, n, n)
-    dz_b = jnp.asarray(hc.dz)[None, None, None, :]
-    rho_ref_b = jnp.asarray(hc.rho_ref)[None, None, None, :]
-    rho_full = rho_ref_b + state_new.rho_prime.data
-    column_mass = jnp.sum(rho_full * dz_b, axis=-1) * grid.area  # (6, n, n)
+    # iter-46: promote to fp64 budget accumulator for the M_fac
+    # mass-moment integral (same fp32-field fix as the AAM helper).
+    from legoesm.core.conservation import _conservation_accumulator
+    acc = _conservation_accumulator()
+    cos2_lat = (jnp.cos(grid.lat) ** 2).astype(acc)     # (6, n, n)
+    dz_b = jnp.asarray(hc.dz, dtype=acc)[None, None, None, :]
+    rho_ref_b = jnp.asarray(hc.rho_ref, dtype=acc)[None, None, None, :]
+    rho_full = rho_ref_b + state_new.rho_prime.data.astype(acc)
+    column_mass = jnp.sum(rho_full * dz_b, axis=-1) * grid.area.astype(acc)
     M_fac_total = jnp.sum(
         (grid.radius ** 2) * cos2_lat * column_mass
     )
@@ -236,34 +247,40 @@ def aam_from_pe_state(state, grid, coord) -> tuple[jax.Array, float]:
     -------
     aam_column, aam_total
     """
+    # iter-46: promote to fp64 budget accumulator (see NH twin).
+    from legoesm.core.conservation import _conservation_accumulator
+    acc = _conservation_accumulator()
+
     # D-grid → cell-center wind
-    u_d = state.u_d.data
-    v_d = state.v_d.data
+    u_d = state.u_d.data.astype(acc)
+    v_d = state.v_d.data.astype(acc)
     u_c = 0.25 * (u_d[:, :-1, :-1, :] + u_d[:, 1:, :-1, :]
                   + u_d[:, :-1, 1:, :] + u_d[:, 1:, 1:, :])
     v_c = 0.25 * (v_d[:, :-1, :-1, :] + v_d[:, 1:, :-1, :]
                   + v_d[:, :-1, 1:, :] + v_d[:, 1:, 1:, :])
 
     # Rotate to u_east
-    angle = grid.angle[..., None]
+    angle = grid.angle.astype(acc)[..., None]
     cos_a = jnp.cos(angle)
     sin_a = jnp.sin(angle)
     u_east = cos_a * u_c - sin_a * v_c                # (6, n, n, nlev)
 
     # Column mass per cell: delp / g
-    p_s = state.p_s.data
-    A_h = jnp.asarray(coord.A_half)[None, None, None, :]
-    B_h = jnp.asarray(coord.B_half)[None, None, None, :]
+    p_s = state.p_s.data.astype(acc)
+    A_h = jnp.asarray(coord.A_half, dtype=acc)[None, None, None, :]
+    B_h = jnp.asarray(coord.B_half, dtype=acc)[None, None, None, :]
     p_half = A_h * coord.p_ref + B_h * p_s[..., None]
     delp = p_half[..., 1:] - p_half[..., :-1]
-    dm = delp * grid.area[..., None] / constants.g   # kg per cell
+    g_acc = jnp.asarray(constants.g, dtype=acc)
+    dm = delp * grid.area.astype(acc)[..., None] / g_acc   # kg per cell
 
     # AAM per cell: (r²·Ω + r·u_east) · dm
     R = float(grid.radius)
-    cos_lat = jnp.cos(grid.lat)
+    cos_lat = jnp.cos(grid.lat).astype(acc)
     r1 = R * cos_lat
     r2 = r1 * r1
-    aam_cell = (r2[..., None] * constants.Omega
+    omega_acc = jnp.asarray(constants.Omega, dtype=acc)
+    aam_cell = (r2[..., None] * omega_acc
                 + r1[..., None] * u_east) * dm
     aam_column = jnp.sum(aam_cell, axis=-1)            # (6, n, n)
     aam_total = float(jnp.sum(aam_column))
@@ -311,15 +328,22 @@ def apply_aam_correction_pe(state_old, state_new, grid, coord):
     _, aam_target = aam_from_pe_state(state_old, grid, coord)
     _, aam_curr = aam_from_pe_state(state_new, grid, coord)
 
+    # iter-46: promote to fp64 budget accumulator for M_fac integral.
+    from legoesm.core.conservation import _conservation_accumulator
+    acc = _conservation_accumulator()
+
     # M_fac_total = sum over cells of R²·cos²·column_mass.
     # Used as the analytic Jacobian estimate dAAM/du0.
-    p_s = state_new.p_s.data
-    A_h = jnp.asarray(coord.A_half)[None, None, None, :]
-    B_h = jnp.asarray(coord.B_half)[None, None, None, :]
+    p_s = state_new.p_s.data.astype(acc)
+    A_h = jnp.asarray(coord.A_half, dtype=acc)[None, None, None, :]
+    B_h = jnp.asarray(coord.B_half, dtype=acc)[None, None, None, :]
     p_half = A_h * coord.p_ref + B_h * p_s[..., None]
     delp = p_half[..., 1:] - p_half[..., :-1]
-    column_mass_per_cell = jnp.sum(delp, axis=-1) * grid.area / constants.g
-    cos2_lat = jnp.cos(grid.lat) ** 2
+    g_acc = jnp.asarray(constants.g, dtype=acc)
+    column_mass_per_cell = (
+        jnp.sum(delp, axis=-1) * grid.area.astype(acc) / g_acc
+    )
+    cos2_lat = (jnp.cos(grid.lat) ** 2).astype(acc)
     M_fac_total = jnp.sum(
         (grid.radius ** 2) * cos2_lat * column_mass_per_cell
     )

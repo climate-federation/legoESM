@@ -399,8 +399,8 @@ def make_ozone_clim(out_path: Path, *, nlat: int = 36, nlev: int = 30,
     # Column ozone in Dobson Units. DU = molecules/cm² / 2.687e16.
     # Column molecules/m² = ∫ vmro3 * (n_air) dz, with n_air dz = -dp/(m_air g).
     # ⇒ N(O3) [molec/m²] = (N_A / m_air / g) * ∫ vmro3 * |dp|.
-    N_A = 6.022e23
-    m_air = 28.97e-3  # kg/mol
+    N_A = constants.N_A
+    m_air = constants.M_dry  # kg/mol
     g = constants.g
     # |dp| over levels from interface midpoints (assume cell-bottom = plev[i+1] etc.)
     dp = np.abs(np.diff(np.concatenate([[0.0], plev])))  # shape (nlev,)
@@ -431,7 +431,7 @@ def make_solar(out_path: Path, start_year: int, end_year: int) -> None:
     # 11-year solar cycle, peak ~ 1361.5, trough ~ 1360.0
     years = times / days_per_year + 1850
     cycle = 0.6 * np.sin(2 * np.pi * (years - 1986.0) / 11.0)
-    tsi = 1361.0 + cycle  # W/m²
+    tsi = constants.S_0 + cycle  # W/m²
 
     # 14-band spectral fractions (RRTMG-SW order). Time-invariant baseline
     # plus ~0.5% UV variability across the cycle (UV varies ~10× more than VIS).

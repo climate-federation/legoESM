@@ -53,7 +53,7 @@ def z_coord():
 def state(mesh, z_coord):
     return rest_state_mpas_ocean(
         mesh, z_coord,
-        T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+        T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
         H_max=500.0, land_lat_threshold=85.0,
     )
 
@@ -156,7 +156,7 @@ def _convection_physics_config(scheme: str) -> OceanPhysicsConfig:
 def _flip_state_to_unstable(state):
     """Invert the surface-layer T to make the column statically unstable.
 
-    Default rest_state has T_surface > T_deep (stable).  Setting the top
+    Default rest_state has T_water_init_C > T_deep (stable).  Setting the top
     layer cooler than the second layer creates an N² < 0 condition that
     the enhanced_diffusion branch must detect.
     """
@@ -192,7 +192,7 @@ class TestConvectionDispatch:
         )
 
     def test_stable_column_no_convection(self, mesh, z_coord, state):
-        """Default rest_state is stable (T_surface=20 > T_deep=2).  With
+        """Default rest_state is stable (T_water_init_C=20 > T_deep=2).  With
         K_bg=0 the only source of vertical mixing is the convection
         branch when N²<0 — so dT/dt must be zero (or below numerical
         noise) for a strictly stable column."""

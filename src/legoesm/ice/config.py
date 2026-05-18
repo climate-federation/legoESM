@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
+from legoesm import constants
 from legoesm.surface_albedo import IceAlbedoConfig
 
 
@@ -19,10 +20,10 @@ class SeaIceConfig(NamedTuple):
     - ``n_categories=1``: Single-category slab (default, backward compatible).
     - ``n_categories=5``: 5-category CICE-standard ITD.
     """
-    rho_ice: float = 917.0          # Ice density [kg/m3] (= constants.rho_ice)
-    c_ice: float = 2106.0           # Ice specific heat [J/kg/K] (= constants.c_pi)
+    rho_ice: float = constants.rho_ice
+    c_ice: float = constants.c_pi
     k_ice: float = 2.04             # Ice thermal conductivity [W/m/K]
-    L_f: float = 3.337e5            # Latent heat of fusion [J/kg] (= constants.L_f)
+    L_f: float = constants.L_f
     h_ice_min: float = 0.01         # Min ice thickness for smooth ops [m]
     albedo_ice: float = 0.65        # Fallback constant albedo
     albedo_ocean: float = 0.06      # Ocean albedo for open-water freezing calc
@@ -33,9 +34,9 @@ class SeaIceConfig(NamedTuple):
     # Transport
     drag_ocean: float = 5.5e-3      # Ocean-ice drag coefficient
     drag_atm: float = 1.3e-3        # Air-ice drag coefficient
-    rho_air_ref: float = 1.225      # Reference air density [kg/m3] (= constants.rho_air)
-    rho_ocean_ref: float = 1025.0   # Reference ocean density [kg/m3] (= constants.rho_ocean = eos.rho_0)
-    T_freeze_ocean: float = 271.35  # Ocean freezing point [K] (= constants.T_freeze_ocean)
+    rho_air_ref: float = constants.rho_air
+    rho_ocean_ref: float = constants.rho_ocean
+    T_freeze_ocean: float = constants.T_freeze_ocean
     T_ice_min: float = 180.0        # Lower bound for numerical stability [K]
     ocean_heat_transfer_coeff: float = 20.0  # Ocean-ice heat transfer [W/m^2/K]
     # Concentration dynamics
@@ -61,3 +62,8 @@ class SeaIceConfig(NamedTuple):
     n_categories: int = 1           # 1=single-category (backward compat), 5=CICE ITD
     # --- Tracer transport ---
     transport: str = "none"         # "none" or "advect"
+    # PPM transport is monotone only when |u·dt/dx| ≤ 1.  Default 1
+    # substep covers the typical sea-ice regime (u ~ 0.1 m/s, dx ~
+    # 50 km, dt ~ 1 h → C ~ 0.007).  Raise for storm / fine-grid
+    # conditions where the Courant number can exceed 1.
+    transport_subcycles: int = 1

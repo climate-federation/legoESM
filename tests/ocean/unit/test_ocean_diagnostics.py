@@ -50,7 +50,7 @@ def z_coord():
 class TestDeformationRadius:
     """Tests for ``first_baroclinic_deformation_radius``."""
 
-    def _uniform_rho(self, z_coord, N_target, rho_ref=1025.0):
+    def _uniform_rho(self, z_coord, N_target, rho_ref=constants.rho_ocean):
         """Build a density profile with uniform N^2 = N_target^2.
 
         From N^2 = -(g/rho_ref) * drho/dz, with dz > 0 downward and
@@ -133,7 +133,7 @@ class TestDeformationRadius:
 
     def test_zero_stratification(self, z_coord):
         """Uniform density (N=0) gives L_d ≈ 0."""
-        rho_ref = 1025.0
+        rho_ref = constants.rho_ocean
         rho_3d = jnp.full((1, z_coord.n_levels), rho_ref)
         jacobian = jnp.ones((1,))
         f = 1e-4 * jnp.ones((1,))

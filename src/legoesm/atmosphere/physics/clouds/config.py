@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
+from legoesm import constants
+
 
 class CloudConfig(NamedTuple):
     """Configuration for diagnostic cloud fraction and cloud-radiation coupling.
@@ -47,5 +49,5 @@ class CloudConfig(NamedTuple):
     r_eff_liq: float = 10.0e-6
     r_eff_ice: float = 30.0e-6
     q_c_diagnostic: float = 0.2e-3
-    T_freeze: float = 273.15  # = constants.T_freeze
+    T_freeze: float = constants.T_freeze
     T_ice_only: float = 233.15

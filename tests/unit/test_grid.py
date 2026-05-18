@@ -4,6 +4,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
+from legoesm import constants
 from legoesm.grids.cubed_sphere import create_cubed_sphere, CubedSphereGrid
 
 
@@ -50,7 +51,7 @@ class TestCubedSphereGrid:
 
     def test_coriolis_parameter(self, small_grid):
         """Coriolis at equator ~ 0, at poles ~ +/- 2*Omega."""
-        Omega = 7.292e-5
+        Omega = constants.Omega
         f_max = jnp.max(jnp.abs(small_grid.f))
         assert f_max <= 2 * Omega * 1.01
 

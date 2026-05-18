@@ -94,13 +94,13 @@ def _build_initial_state(grid, z_coord_base, H_bathy, ocean_mask, config):
     z_coord = create_partial_cell_coordinate(z_coord_base, H_bathy)
     state = rest_state_latlon_cgrid_ocean(
         grid, z_coord_base,
-        T_surface=config.T_surface, T_deep=config.T_surface,
+        T_water_init_C=config.T_water_init_C, T_deep=config.T_water_init_C,
         S_uniform=config.S_uniform,
         H_bathy_override=H_bathy,
         land_mask_override=ocean_mask,
     )
     centroid = compute_centroid_depth(jnp.zeros_like(H_bathy), H_bathy, z_coord)
-    T_per_cell = config.T_deep + (config.T_surface - config.T_deep) * jnp.exp(
+    T_per_cell = config.T_deep + (config.T_water_init_C - config.T_deep) * jnp.exp(
         -centroid / config.T_scale_depth,
     )
     T_per_cell = jnp.where(z_coord.is_active, T_per_cell, config.T_deep)
@@ -127,7 +127,7 @@ def run_d1_blowup(grid, z_coord_base, H_bathy, ocean_mask,
     config = GlobalOverturningConfig(
         use_gm_redi=True, bottom_drag_coeff=2.5e-3, A_h=A_h,
         H_max=5000.0, dz_surface=20.0, kappa_GM=800.0, kappa_Redi=800.0,
-        T_surface=20.0, T_deep=2.0, T_scale_depth=1000.0,
+        T_water_init_C=20.0, T_deep=2.0, T_scale_depth=1000.0,
     )
     state, z_coord = _build_initial_state(
         grid, z_coord_base, H_bathy, ocean_mask, config,
@@ -334,7 +334,7 @@ def run_d2_weno5(grid, z_coord_base, H_bathy, ocean_mask,
     config = GlobalOverturningConfig(
         use_gm_redi=True, bottom_drag_coeff=2.5e-3, A_h=A_h,
         H_max=5000.0, dz_surface=20.0, kappa_GM=800.0, kappa_Redi=800.0,
-        T_surface=20.0, T_deep=2.0, T_scale_depth=1000.0,
+        T_water_init_C=20.0, T_deep=2.0, T_scale_depth=1000.0,
     )
     state, z_coord = _build_initial_state(
         grid, z_coord_base, H_bathy, ocean_mask, config,

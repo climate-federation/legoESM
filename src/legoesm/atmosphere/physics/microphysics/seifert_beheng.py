@@ -19,13 +19,13 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.atmosphere.physics._shared import safe_divide
 from legoesm.atmosphere.physics.microphysics.config import SeifertBehengConfig
 from legoesm.atmosphere.physics.microphysics.output import (
     HydrometeorState,
     MicrophysicsOutput,
     sedimentation_tendency,
 )
-from legoesm.atmosphere.physics._shared import safe_divide
 from legoesm.atmosphere.physics.microphysics._warm_rain import (
     saturation_adjustment,
     effective_Nc,
@@ -34,6 +34,7 @@ from legoesm.atmosphere.physics.microphysics._warm_rain import (
     self_collection_breakup,
     rain_evaporation,
     safe_pow,
+    donor_clamp_scale,
 )
 
 
@@ -74,9 +75,14 @@ def seifert_beheng_microphysics(
         T, q_v, p_full, dt, sharpness, q_c=q_c,
     )
 
-    # 1. Autoconversion (mass-dependent)
+    # 1. Autoconversion (mass-dependent).  Use the autoconversion-
+    # specific sharpness so the normalised-argument sigmoid (iter-97)
+    # is not driven 100× too steep by ``saturation_sharpness`` (which
+    # is calibrated for kg/kg-scale ``excess``, not for the
+    # dimensionless ``x_c/x_star − 1``).
     dq_c_au, dN_r_au, x_c = autoconversion_sb(
-        q_c, N_c_eff, rho, config.k_au, config.x_star, sharpness,
+        q_c, N_c_eff, rho, config.k_au, config.x_star,
+        config.autoconversion_sharpness,
     )
 
     # 2. Accretion
@@ -88,7 +94,7 @@ def seifert_beheng_microphysics(
     )
 
     # 5. Rain evaporation
-    evaporation = rain_evaporation(q_v, q_r, q_sat, config.evap_coeff)
+    evaporation = rain_evaporation(q_v, q_r, q_sat, config.evap_coeff, dt=dt)
 
     # === Joint donor clamp on q_c sinks ===
     # ``saturation_adjustment`` already donor-clamps the evaporation
@@ -102,10 +108,7 @@ def seifert_beheng_microphysics(
     cond_evap_sink = jnp.maximum(-condensation, 0.0)
     qc_sink_total = cond_evap_sink + dq_c_au + dq_c_ac
     qc_avail = jnp.clip(q_c, 0.0)
-    qc_scale = jnp.minimum(
-        1.0,
-        qc_avail / jnp.maximum(qc_sink_total * jnp.maximum(dt, 1e-10), 1e-30),
-    )
+    qc_scale = donor_clamp_scale(qc_avail, qc_sink_total, dt)
     dq_c_au = dq_c_au * qc_scale
     dq_c_ac = dq_c_ac * qc_scale
     condensation = jnp.where(
@@ -122,7 +125,14 @@ def seifert_beheng_microphysics(
         jnp.clip(q_r, 0.0) * rho / jnp.clip(rho_sfc, 0.1), config.b_v_r,
     )
     V_t_r = jnp.clip(V_t_r, 0.0, 20.0)
-    sed_r = sedimentation_tendency(q_r, rho, V_t_r, dz)
+    # Joint q_r donor cap: pass evaporation as ``extra_sink`` so sed +
+    # evap together cannot remove more rain than is locally available
+    # (codex iter-29 #1).
+    sed_r, precipitation = sedimentation_tendency(
+        q_r, rho, V_t_r, dz, dt=dt,
+        return_surface_flux=True,
+        extra_sink=evaporation,
+    )
 
     # 7. Latent heating
     dT_dt = constants.L_v * (condensation - evaporation) / constants.c_pd
@@ -133,13 +143,17 @@ def seifert_beheng_microphysics(
     dq_v_dt = -condensation + evaporation
     dq_c_dt = condensation - dq_c_au - dq_c_ac
     dq_r_dt = dq_c_au + dq_c_ac - evaporation + sed_r
-    # AD-safe divide — see morrison.py for the same fix.
+    # AD-safe N_c tendency (issue #249).  ``eps=1e-15`` sits well below
+    # the physical droplet-mass scale (``x_c ≈ 1e-15 kg`` at
+    # ``q_c=1e-7 kg/kg``) and 5 decades above the prior ``clip(x_c,
+    # 1e-20)`` floor; the masked-out residue is unphysical.  See
+    # ``morrison.py`` for the derivation.
     dN_c_dt = safe_divide(-dq_c_au * rho, x_c, eps=1e-15)
     dN_r_dt = dN_r_au + dN_r_sc + dN_r_br
 
-    # Precipitation
-    q_r_bot = jnp.clip(q_r[:, -1], 0.0)
-    precipitation = q_r_bot * rho[:, -1] * jnp.clip(V_t_r[:, -1], 0.0)
+    # Precipitation now comes from the dt-limited bottom flux returned
+    # by ``sedimentation_tendency`` so column water conservation holds
+    # exactly when the CFL limiter fires.
 
     # Pin dtype to the input precision so we never silently promote
     # the unused-species placeholders to f64 under x64 mode.

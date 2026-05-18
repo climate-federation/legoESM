@@ -18,6 +18,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import numpy as np
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.grids.latlon import create_latlon_grid
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     laplacian_scaling_factor,
@@ -28,7 +29,13 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
 
 def test_laplacian_scaling_factor_shape_and_endpoints():
     grid = create_latlon_grid(36, 72)                     # 5° resolution
-    scale_u, scale_v = laplacian_scaling_factor(grid)
+    # Explicit ``power=2`` mirrors the legacy constant-CFL convention.
+    # The function's current default is ``power=1`` (constant grid
+    # Reynolds number, which is the recommended convention and is what
+    # the ocean PE backends use in production); pass ``power=2``
+    # explicitly so these legacy regression tests still check the
+    # cos²(lat) form they were written for.
+    scale_u, scale_v = laplacian_scaling_factor(grid, power=2)
 
     # Shape conventions: scale_u at u-face (cell-center) lat → (n_lat,);
     # scale_v at v-face lat → (n_lat+1,).
@@ -58,9 +65,12 @@ def test_laplacian_scaling_factor_shape_and_endpoints():
 
 
 def test_laplacian_scaling_factor_consistency_with_biharmonic():
-    """B_h scaling is cos⁴, A_h scaling is cos² → A_h scaling = sqrt(B_h scaling)."""
+    """B_h scaling is cos⁴, A_h scaling at power=2 is cos² → A_h² = B_h."""
     grid = create_latlon_grid(36, 72)
-    lap_u, lap_v = laplacian_scaling_factor(grid)
+    # Pass ``power=2`` so the (cos² · cos² = cos⁴) identity matches
+    # the biharmonic cos⁴ convention.  The Laplacian production default
+    # is ``power=1``; this test is documenting the legacy cos² form.
+    lap_u, lap_v = laplacian_scaling_factor(grid, power=2)
     bih_u, bih_v = biharmonic_scaling_factor(grid)
     np.testing.assert_allclose(np.asarray(lap_u) ** 2,
                                 np.asarray(bih_u),
@@ -78,7 +88,7 @@ def test_laplacian_scaling_equator_near_unity():
     instead of exact 1.0; the same convention is used elsewhere.
     """
     grid = create_latlon_grid(36, 72)
-    _, scale_v = laplacian_scaling_factor(grid)
+    _, scale_v = laplacian_scaling_factor(grid, power=2)
     # v-face at index 18 (out of 37) sits at lat = 0; with the averaging
     # convention it returns ½(cos(-2.5°) + cos(+2.5°))² = cos²(2.5°)
     cos_2p5 = float(np.cos(np.deg2rad(2.5)))
@@ -118,7 +128,8 @@ def test_ah_scaling_on_reduces_high_lat_tendency():
     u_jax = jnp.asarray(u); v_jax = jnp.asarray(v)
 
     vlap_u, vlap_v = vector_laplacian_cgrid(u_jax, v_jax, grid)
-    scale_u, scale_v = laplacian_scaling_factor(grid)
+    # Legacy cos²(lat) convention — see other tests in this module.
+    scale_u, scale_v = laplacian_scaling_factor(grid, power=2)
 
     # Unscaled tendency (legacy path)
     tend_u_unscaled = 1e5 * np.asarray(vlap_u)
@@ -155,7 +166,7 @@ def test_viscous_cfl_latitude_independent():
     the effective viscous CFL ``A_h_eff(lat) * dt / dx²(lat)`` is
     latitude-independent (up to the spherical metric)."""
     grid = create_latlon_grid(36, 72)
-    R = 6.371e6
+    R = constants.R_earth
     dlon = 2.0 * np.pi / 72                                # radians
     dt = 600.0
     A_h_global = 2.0e5

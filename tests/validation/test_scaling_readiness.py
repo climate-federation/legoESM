@@ -20,6 +20,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm import constants
 from legoesm.driver.compiled_segments import (
     SegmentCarry, SegmentForcing,
     pack_carry, pack_forcing, build_segment_fn,
@@ -96,7 +97,7 @@ class TestScalingReadiness:
         forcing = pack_forcing(
             sst=jnp.zeros(s2), sic=jnp.zeros(s2),
             day_of_year=1.0, seconds_of_day=0.0,
-            solar_weights=jnp.ones(14), s_0=1361.0,
+            solar_weights=jnp.ones(14), s_0=constants.S_0,
             o3_vmr=jnp.zeros(s3), aerosol_od=jnp.zeros(s2),
         )
         leaves, treedef = jax.tree.flatten(forcing)

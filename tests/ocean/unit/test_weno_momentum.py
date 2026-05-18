@@ -13,6 +13,8 @@ import jax
 import jax.numpy as jnp
 import pytest
 
+from legoesm import constants
+
 jax.config.update("jax_enable_x64", True)
 
 
@@ -22,7 +24,7 @@ jax.config.update("jax_enable_x64", True)
 
 def _make_grid(n_lat=10, n_lon=20):
     from legoesm.grids.latlon import create_latlon_grid
-    return create_latlon_grid(n_lat=n_lat, n_lon=n_lon, radius=6.371e6)
+    return create_latlon_grid(n_lat=n_lat, n_lon=n_lon, radius=constants.R_earth)
 
 
 # =====================================================================
@@ -700,11 +702,11 @@ class TestFullTendencyWENODK:
             rest_state_latlon_cgrid_ocean,
         )
 
-        grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon, radius=6.371e6)
+        grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon, radius=constants.R_earth)
         z_coord = create_ocean_z_star(n_levels=nlev, H_max=1000.0)
         state = rest_state_latlon_cgrid_ocean(
             grid, z_coord,
-            T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+            T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
             H_max=1000.0,
         )
         # Add small velocity perturbation (respecting mask types).

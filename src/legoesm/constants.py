@@ -25,6 +25,7 @@ c_pd = 1004.64                  # Specific heat at constant pressure [J/(kg*K)]
 c_vd = c_pd - R_d               # Specific heat at constant volume [J/(kg*K)] = 717.59
 kappa = R_d / c_pd              # Poisson constant R_d/c_pd (~0.2857)
 p_ref = 1.0e5                   # Reference pressure [Pa] (1000 hPa)
+p_atm_std = 101325.0            # Standard atmosphere [Pa] (1013.25 hPa)
 
 # ==============================================================================
 # Water Thermodynamics
@@ -48,8 +49,10 @@ T_freshwater_max_density = 277.133  # Max-density temperature [K] (~3.983 C)
 rho_freshwater_curvature = 8.0e-6   # ρ-anomaly curvature [K^-2] from d²ρ/dT² at T_max
 
 # Molar masses (g/mol) — used for CO2 ↔ mixing-ratio conversions, etc.
-# Dry-air mean molar mass (NIST, US Standard Atmosphere 1976)
-M_air = 28.9647        # [g/mol] dry air
+# Dry-air mean molar mass (CODATA / Mohr et al. 2024 = 28.96546 g/mol).
+# The kg/mol forms ``M_dry`` and ``M_h2o`` (below) are derived from these
+# via ``* 1e-3`` so future drift between g/mol and kg/mol forms is impossible.
+M_air = 28.96546        # [g/mol] dry air (CODATA)
 M_CO2 = 44.01           # [g/mol] CO2
 M_H2O = 18.01528        # [g/mol] water
 
@@ -79,7 +82,7 @@ emissivity_ice = 0.97           # [-] fresh sea ice / fresh snow
 emissivity_land = 0.95          # [-] generic land surface
 
 # ==============================================================================
-# Molecular Weights
+# Molecular Weights (kg/mol)
 # ==============================================================================
 # These are needed by forcing loaders to convert between mass-mixing-ratio
 # (kg/kg) and volume-mixing-ratio (mol/mol) when an external file uses
@@ -87,24 +90,20 @@ emissivity_land = 0.95          # [-] generic land surface
 # input4MIPs ozone uses ``vmro3`` in mol/mol (no conversion required), but
 # older NCAR/E3SM pathways supply ``tro3`` in kg/kg, which has to be
 # multiplied by ``M_dry / M_o3`` to land back in mol/mol before the
-# radiation solver consumes it.  Values from NIST CODATA / IUPAC.
-M_dry = 0.0289644               # Molecular weight of dry air [kg/mol]
-M_o3 = 0.0479982                # Molecular weight of ozone [kg/mol]
-M_h2o = 0.018015                # Molecular weight of water [kg/mol]
+# radiation solver consumes it.  Values are derived from the g/mol forms
+# above via ``* 1e-3`` so the two views never drift.
+M_dry = M_air * 1e-3            # [kg/mol] = 0.02896546 (CODATA dry air)
+M_o3 = 0.0479982                # [kg/mol] ozone (NIST CODATA / IUPAC)
+M_h2o = M_H2O * 1e-3            # [kg/mol] = 0.01801528 (water)
 
-# ==============================================================================
-# Molecular Weights
-# ==============================================================================
-# These are needed by forcing loaders to convert between mass-mixing-ratio
-# (kg/kg) and volume-mixing-ratio (mol/mol) when an external file uses
-# one convention and the radiation kernel expects the other.  CMIP6
-# input4MIPs ozone uses ``vmro3`` in mol/mol (no conversion required), but
-# older NCAR/E3SM pathways supply ``tro3`` in kg/kg, which has to be
-# multiplied by ``M_dry / M_o3`` to land back in mol/mol before the
-# radiation solver consumes it.  Values from NIST CODATA / IUPAC.
-M_dry = 0.0289644               # Molecular weight of dry air [kg/mol]
-M_o3 = 0.0479982                # Molecular weight of ozone [kg/mol]
-M_h2o = 0.018015                # Molecular weight of water [kg/mol]
+# Avogadro's number (CODATA 2019 SI redefinition — exact value).
+N_A = 6.02214076e23             # [1/mol] particles per mole
+
+# Universal gas constant (CODATA 2018 / SI redefinition — exact).
+# Used by biochemistry / photosynthesis (Arrhenius temperature factors)
+# and any other code that needs R independent of a specific gas (R_d,
+# R_v are gas-specific = R / M).
+R_universal = 8.314462618       # [J/(mol·K)] = N_A · k_B
 
 # ==============================================================================
 # Mathematical Constants

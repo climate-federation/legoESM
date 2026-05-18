@@ -120,9 +120,14 @@ def shortwave_penetration_tendency(
     # Actual layer thickness
     dz_actual = z_coord_dz_ref * jacobian[..., jnp.newaxis]  # (..., nlev)
 
-    # Temperature tendency: dT/dt = Q_sw * frac / (rho_0 * c_sw * dz)
-    dT_dt = (
-        sw_down[..., jnp.newaxis] * frac_absorbed / (rho_0 * c_sw * dz_actual)
+    # Temperature tendency: dT/dt = Q_sw * frac / (rho_0 * c_sw * dz).
+    # Dry / land cells have ``jacobian = 0`` → ``dz_actual = 0`` so the
+    # division would produce Inf/NaN that downstream summation cannot
+    # mask out (``NaN * 0 = NaN`` in IEEE).  Use a safe denominator and
+    # gate the output by ``dz_actual > 0`` so dry columns contribute
+    # exactly zero heating and gradients stay clean.
+    dz_safe = jnp.where(dz_actual > 0.0, dz_actual, 1.0)
+    dT_dt_raw = (
+        sw_down[..., jnp.newaxis] * frac_absorbed / (rho_0 * c_sw * dz_safe)
     )
-
-    return dT_dt
+    return jnp.where(dz_actual > 0.0, dT_dt_raw, 0.0)

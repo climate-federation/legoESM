@@ -13,6 +13,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm import constants
 from legoesm.diagnostics.energy_budget import MoistureBudgetTracker
 
 
@@ -57,8 +58,8 @@ class TestMoistureBudgetTracker:
 
         budget = tracker.update(q_v, p_s, dsigma, precip, 0.0)
 
-        # Expected: W = q * p_s * sum(dsigma) / g = 0.01 * 100000 * 1.0 / 9.80616
-        expected_W = 0.01 * 100000.0 / 9.80616
+        # Expected: W = q * p_s * sum(dsigma) / g = 0.01 * 100000 * 1.0 / g
+        expected_W = 0.01 * 100000.0 / constants.g
         np.testing.assert_allclose(budget.column_water, expected_W, rtol=1e-4)
 
     def test_precip_in_mm_per_day(self):

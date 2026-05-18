@@ -16,6 +16,17 @@ import json
 from pathlib import Path
 from typing import NamedTuple
 
+from legoesm import constants
+
+
+# Canonical AIMIP variant set.  Single source of truth — imported by
+# ``scripts/run_aimip.py`` and the ``validate_strict`` rule below.
+# Empty string = not an AIMIP run (preserves backward-compat for
+# existing AMIP configs).
+AIMIP_VARIANTS: tuple[str, ...] = (
+    "", "classical", "column_nn", "sfno_physics", "sfno_full",
+)
+
 
 class GridConfig(NamedTuple):
     """Horizontal and vertical grid configuration."""
@@ -92,7 +103,7 @@ class ExperimentConfig(NamedTuple):
     co2_ppmv: float = 415.0
     ch4_ppbv: float = 1900.0
     n2o_ppbv: float = 332.0
-    S_0: float = 1361.0                    # = constants.S_0
+    S_0: float = constants.S_0
     ozone_source: str = "standard"
     ozone_forcing: str = "inline"       # inline, external, off
     ozone_file: str = ""
@@ -153,7 +164,7 @@ class ExperimentConfig(NamedTuple):
     # T_ice is the seawater freezing point used as the SST floor /
     # SIC ramp threshold — NOT the ice surface temperature.  Legacy
     # name kept for AMIP config compatibility.
-    T_ice: float = 271.35                  # = constants.T_freeze_ocean
+    T_ice: float = constants.T_freeze_ocean
     albedo_ice: float = 0.65
     albedo_ocean: float = 0.06
     sfc_emissivity: float = 0.97
@@ -182,6 +193,13 @@ class ExperimentConfig(NamedTuple):
     physics_parameterization_hidden_dim: int = 128
     physics_parameterization_layers: int = 3
     physics_parameterization_seed: int = 0
+
+    # AIMIP intercomparison variant tag.  Empty string => not an AIMIP run
+    # (preserves backward compatibility for all existing AMIP configs).
+    # When set, ``scripts/run_aimip.py`` dispatches to the matching
+    # training entry point and ``validate_strict`` enforces the
+    # corresponding scheme prerequisites.
+    aimip_variant: str = ""  # "", classical, column_nn, sfno_physics, sfno_full
 
     # Performance
     precision: str = "fp32"           # fp32, fp64, mixed, or mixed_fp64_storage
@@ -258,6 +276,35 @@ class ExperimentConfig(NamedTuple):
             errors.append(f"ic must be one of {_valid_ic}, got {self.ic!r}")
         if self.ic == "era5" and not self.ic_path:
             errors.append("ic='era5' requires ic_path to be set")
+
+        if self.aimip_variant not in AIMIP_VARIANTS:
+            errors.append(
+                f"aimip_variant must be one of {AIMIP_VARIANTS}, "
+                f"got {self.aimip_variant!r}"
+            )
+        if self.aimip_variant == "classical":
+            if self.convection != "tiedtke":
+                errors.append(
+                    "aimip_variant='classical' requires convection='tiedtke', "
+                    f"got {self.convection!r}"
+                )
+            if self.turbulence != "louis":
+                errors.append(
+                    "aimip_variant='classical' requires turbulence='louis', "
+                    f"got {self.turbulence!r}"
+                )
+            if self.gravity_wave_drag != "mcfarlane":
+                errors.append(
+                    "aimip_variant='classical' requires "
+                    "gravity_wave_drag='mcfarlane', "
+                    f"got {self.gravity_wave_drag!r}"
+                )
+            if self.cloud_scheme != "xu_randall":
+                errors.append(
+                    "aimip_variant='classical' requires "
+                    "cloud_scheme='xu_randall', "
+                    f"got {self.cloud_scheme!r}"
+                )
 
         if errors:
             raise ValueError(

@@ -14,6 +14,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
+from legoesm import constants
 from legoesm.forcing.amip import (
     AMIPForcingConfig,
     load_amip_forcing,
@@ -141,7 +142,7 @@ class TestAMIPPresets:
     def test_hadisst_preset(self):
         cfg = get_amip_preset("hadisst")
         assert cfg.sst_var == "sst"
-        assert cfg.sst_offset == 273.15
+        assert cfg.sst_offset == constants.T_freeze
 
     def test_unknown_preset_raises(self):
         with pytest.raises(ValueError, match="Unknown dataset"):
@@ -154,7 +155,7 @@ class TestLoadForcing:
             path=forcing_path,
             sst_var="sst",
             sic_var="sic",
-            sst_offset=273.15,  # C -> K
+            sst_offset=constants.T_freeze,  # C -> K
             sic_scale=0.01,     # percent -> fraction
         )
         forcing = load_amip_forcing(config, grid)
@@ -169,7 +170,7 @@ class TestLoadForcing:
             path=forcing_path,
             sst_var="sst",
             sic_var="sic",
-            sst_offset=273.15,
+            sst_offset=constants.T_freeze,
             sic_scale=0.01,
         )
         forcing = load_amip_forcing(config, grid)
@@ -183,7 +184,7 @@ class TestLoadForcing:
             path=forcing_path,
             sst_var="sst",
             sic_var="sic",
-            sst_offset=273.15,
+            sst_offset=constants.T_freeze,
             sic_scale=0.01,
         )
         forcing = load_amip_forcing(config, grid)
@@ -196,7 +197,7 @@ class TestLoadForcing:
             path=forcing_path_nans,
             sst_var="sst",
             sic_var="sic",
-            sst_offset=273.15,
+            sst_offset=constants.T_freeze,
             sic_scale=0.01,
         )
         forcing = load_amip_forcing(config, grid)
@@ -225,7 +226,7 @@ class TestLoadForcing:
             time_var="time",
             lat_var="ylat",
             lon_var="xlon",
-            sst_offset=273.15,
+            sst_offset=constants.T_freeze,
             sic_scale=1.0,
         )
         forcing = load_amip_forcing(config, grid)
@@ -244,7 +245,7 @@ class TestTimeInterpolation:
             path=forcing_path,
             sst_var="sst",
             sic_var="sic",
-            sst_offset=273.15,
+            sst_offset=constants.T_freeze,
             sic_scale=0.01,
         )
         forcing = load_amip_forcing(config, grid)
@@ -257,7 +258,7 @@ class TestTimeInterpolation:
             path=forcing_path,
             sst_var="sst",
             sic_var="sic",
-            sst_offset=273.15,
+            sst_offset=constants.T_freeze,
             sic_scale=0.01,
         )
         forcing = load_amip_forcing(config, grid)
@@ -271,7 +272,7 @@ class TestTimeInterpolation:
             path=forcing_path,
             sst_var="sst",
             sic_var="sic",
-            sst_offset=273.15,
+            sst_offset=constants.T_freeze,
             sic_scale=0.01,
         )
         forcing = load_amip_forcing(config, grid)

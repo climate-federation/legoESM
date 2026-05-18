@@ -366,6 +366,126 @@ class TestDifferLandStep(unittest.TestCase):
         npt.assert_allclose(dC_total, expected_dC, rtol=0.05,
                             err_msg="Carbon not approximately conserved")
 
+    def test_total_carbon_conservation_under_carbon_starvation(self):
+        """Conservation must hold even when GPP < R_auto (polar winter /
+        drought) — the iter-62 fix draws the NPP deficit from C_lab so
+        the atmosphere gain equals the biomass loss exactly.
+
+        Before the fix, ``R_auto`` was emitted to NEE without debiting
+        any pool when GPP < R_auto, creating ``(R_auto − GPP)·dt`` of
+        ghost carbon every step.
+        """
+        cfg = _default_config(scheme="differland")
+        ncol = 2
+        state = _make_carbon_state(shape=(ncol,))
+        # Carbon-starvation forcing: zero light + cold + dry.
+        sw = jnp.zeros(ncol)
+        T = jnp.full(ncol, 285.0)   # cold-ish (above freezing, still respiring)
+        lat = jnp.full(ncol, 0.7)
+        precip = jnp.full(ncol, 1e-6)
+        beta = jnp.ones(ncol)
+        co2 = jnp.full(ncol, 400.0)
+        dt = 600.0
+
+        new_state, co2_flux = step_carbon_differland(
+            state, sw, T, co2, beta, lat, 15.0, precip, cfg, dt,
+        )
+        dC_total = sum(
+            getattr(new_state, f) - getattr(state, f)
+            for f in state._fields
+        )
+        nee_gC = co2_flux / ((44.0 / 12.0) * 1e-3)
+        expected_dC = -nee_gC * dt
+        # Tight tolerance — bounded only by the C_lab cap if respiration
+        # exceeds the labile reserves over one step (not the case here).
+        npt.assert_allclose(dC_total, expected_dC, rtol=1e-3,
+                            err_msg="Carbon not conserved under starvation")
+
+    def test_total_carbon_conservation_with_exhausted_labile_pool(self):
+        """Carbon conservation holds even when C_lab is exhausted — the
+        iter-63 cascade fix routes the remainder to C_fol → C_root →
+        C_wood.
+
+        Before iter-63 the deficit draw was capped at C_lab only, so a
+        column with depleted labile reserves AND ongoing R_auto bleed
+        leaked (R_auto·dt − C_lab) of ghost carbon per step.
+        """
+        cfg = _default_config(scheme="differland")
+        ncol = 1
+        # Build a state with C_lab ≈ 0 (exhausted) but biomass intact.
+        from legoesm.land.carbon.config import CarbonState
+        state = CarbonState(
+            C_lab=jnp.full((ncol,), 0.5),     # near-zero labile
+            C_fol=jnp.full((ncol,), 300.0),
+            C_root=jnp.full((ncol,), 400.0),
+            C_wood=jnp.full((ncol,), 10000.0),
+            C_lit=jnp.full((ncol,), 600.0),
+            C_som=jnp.full((ncol,), 12000.0),
+        )
+        sw = jnp.zeros(ncol)            # no GPP
+        T = jnp.full(ncol, 290.0)
+        lat = jnp.full(ncol, 0.7)
+        precip = jnp.full(ncol, 1e-6)
+        beta = jnp.ones(ncol)
+        co2 = jnp.full(ncol, 400.0)
+        dt = 600.0
+
+        new_state, co2_flux = step_carbon_differland(
+            state, sw, T, co2, beta, lat, 15.0, precip, cfg, dt,
+        )
+        dC_total = sum(
+            getattr(new_state, f) - getattr(state, f)
+            for f in state._fields
+        )
+        nee_gC = co2_flux / ((44.0 / 12.0) * 1e-3)
+        expected_dC = -nee_gC * dt
+        npt.assert_allclose(
+            dC_total, expected_dC, rtol=1e-3,
+            err_msg="Carbon not conserved when C_lab exhausted",
+        )
+
+    def test_total_carbon_conservation_machine_precision(self):
+        """Iter-64: with the natural-turnover-aware cascade cap and the
+        ``jnp.maximum`` (vs softplus) clamp, conservation should hold
+        at near-machine precision under any forcing — not just the
+        loose 5% / 0.1% bounds of the earlier tests.
+
+        Tests carbon-starvation forcing AND a state with a depleted
+        labile pool, then asserts rtol=1e-9 conservation.
+        """
+        cfg = _default_config(scheme="differland")
+        ncol = 1
+        from legoesm.land.carbon.config import CarbonState
+        state = CarbonState(
+            C_lab=jnp.full((ncol,), 0.5),
+            C_fol=jnp.full((ncol,), 300.0),
+            C_root=jnp.full((ncol,), 400.0),
+            C_wood=jnp.full((ncol,), 10000.0),
+            C_lit=jnp.full((ncol,), 600.0),
+            C_som=jnp.full((ncol,), 12000.0),
+        )
+        sw = jnp.zeros(ncol)            # no GPP
+        T = jnp.full(ncol, 290.0)
+        lat = jnp.full(ncol, 0.7)
+        precip = jnp.full(ncol, 1e-6)
+        beta = jnp.ones(ncol)
+        co2 = jnp.full(ncol, 400.0)
+        dt = 600.0
+
+        new_state, co2_flux = step_carbon_differland(
+            state, sw, T, co2, beta, lat, 15.0, precip, cfg, dt,
+        )
+        dC_total = sum(
+            getattr(new_state, f) - getattr(state, f)
+            for f in state._fields
+        )
+        nee_gC = co2_flux / ((44.0 / 12.0) * 1e-3)
+        expected_dC = -nee_gC * dt
+        npt.assert_allclose(
+            dC_total, expected_dC, rtol=1e-9, atol=1e-9,
+            err_msg="Carbon conservation must hold at near-machine precision",
+        )
+
 
 # ===================================================================
 # Seasonal Cycle

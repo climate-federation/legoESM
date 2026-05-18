@@ -24,6 +24,7 @@ sys.path.insert(0, str(_REPO_ROOT / "scripts"))
 
 import generate_amip_forcing as gaf  # noqa: E402
 
+from legoesm import constants  # noqa: E402
 from legoesm.forcing.external import (  # noqa: E402
     GHGConfig,
     OzoneConfig,
@@ -72,7 +73,7 @@ class TestSST:
         with netCDF4.Dataset(deck["sst"]) as ds:
             sst_C = ds["sst"][:].astype(np.float64)
             lat = ds["lat"][:].astype(np.float64)
-        sst_K = sst_C + 273.15
+        sst_K = sst_C + constants.T_freeze
         # Area-weighted (cos lat) global mean
         w = np.cos(np.deg2rad(lat))
         w /= w.sum()
@@ -82,7 +83,7 @@ class TestSST:
     def test_no_freezing_violations(self, deck):
         import netCDF4
         with netCDF4.Dataset(deck["sst"]) as ds:
-            sst_K = ds["sst"][:].astype(np.float64) + 273.15
+            sst_K = ds["sst"][:].astype(np.float64) + constants.T_freeze
         # Seawater freezing point ~ 271.35 K (S=35 psu)
         assert sst_K.min() >= 271.0
 
@@ -205,7 +206,7 @@ class TestSolar:
     def test_tsi_loads(self, deck):
         # Case-insensitive lookup must accept upper-case 'TSI'
         cfg = SolarConfig(
-            S_0=1361.0, source="file", path=str(deck["solar"]),
+            S_0=constants.S_0, source="file", path=str(deck["solar"]),
             tsi_var="TSI",
             start_year=deck["start_year"],
         )
@@ -214,7 +215,7 @@ class TestSolar:
 
     def test_spectral_expansion(self, deck):
         cfg = SolarConfig(
-            S_0=1361.0, source="spectral_file", path=str(deck["solar"]),
+            S_0=constants.S_0, source="spectral_file", path=str(deck["solar"]),
             tsi_var="TSI", spectral_var="SSI_frac",
             start_year=deck["start_year"],
         )

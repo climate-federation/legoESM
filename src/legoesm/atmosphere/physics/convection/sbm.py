@@ -165,9 +165,12 @@ def sbm_convection(
     )
     col_local_cond = _col_pair[..., 0:1]
     col_net_drying = jnp.clip(-_col_pair[..., 1:2], 0.0, None)
-    # AD-safe column rescaling: clip+divide produces inf cotangents
-    # via the -a/b^2 term in the VJP at the clip floor.  ``safe_divide``
-    # masks the bad branch before the division.
+    # AD-safe column rescaling: ``col_local_cond`` and ``col_net_drying``
+    # vanish together when the column is barely triggered.  ``clip + divide``
+    # is forward-safe but the divide's reverse-mode VJP still emits
+    # ``-a/eps**2`` terms that overflow under ``jax.value_and_grad``
+    # (issue #249).  ``safe_divide`` masks the bad branch *before* the
+    # divide so neither cotangent path differentiates ``1/x²`` at tiny ``x``.
     dq_c_conv_dt = local_cond * safe_divide(
         col_net_drying, col_local_cond, eps=1e-20,
     )  # (ncol, nlev) [kg/kg/s]

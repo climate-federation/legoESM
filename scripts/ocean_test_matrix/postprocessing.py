@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from legoesm import constants
 from ocean_test_matrix import config
 from ocean_test_matrix.testcase import TestCase
 from ocean_test_matrix.diagnostic_io import (
@@ -1068,7 +1069,7 @@ def _save_forcing_profile(test_case_dir: Path) -> None:
     axes[0].annotate('Westerlies', xy=(-50, 0.085), ha='center', fontsize=9, color='red')
 
     # Panel 2: Wind stress curl (proportional to Sverdrup transport)
-    R = 6.371e6
+    R = constants.R_earth
     dtau_dlat = np.gradient(tau_x, lat_rad)
     curl_z = dtau_dlat / R
     axes[1].plot(lat_deg, curl_z * 1e7, 'b-', linewidth=2)

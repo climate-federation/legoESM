@@ -24,7 +24,7 @@ def _make_ocean_state(n=8, nlev=10):
     grid = create_cubed_sphere(n)
     z_coord = create_ocean_z_star(n_levels=nlev, H_max=4000.0)
     state = rest_state_ocean(
-        grid, z_coord, T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+        grid, z_coord, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
         H_max=4000.0,
     )
     # Add small currents
@@ -88,7 +88,7 @@ def test_richardson_prandtl_grows_with_ri():
     u_quiet = jnp.zeros_like(state.u.data)
     nlev = state.T.data.shape[-1]
     # Strong stratification: T decreasing with depth (warm at top)
-    T_stratified = state.T.data  # already has T_surface=20, T_deep=2
+    T_stratified = state.T.data  # already has T_water_init_C=20, T_deep=2
     rho_strong = jnp.broadcast_to(
         jnp.linspace(1024.0, 1030.0, nlev)[None, None, None, :],
         state.T.data.shape,

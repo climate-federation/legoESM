@@ -53,7 +53,9 @@ from legoesm.ocean.physics.surface_forcing.config import (
     PrescribedForcingConfig, RestoringConfig, SurfaceForcingConfig,
 )
 from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig, KPPConfig
-from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
+from legoesm.ocean.physics.lateral_mixing.config import (
+    LateralMixingConfig, GMRediConfig, VisbeckConfig,
+)
 from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
 from legoesm.ocean.physics.convection.config import OceanConvectionConfig
 from legoesm.ocean.vertical import create_ocean_z_star, create_partial_cell_coordinate
@@ -63,7 +65,7 @@ from legoesm.ocean.vertical import create_ocean_z_star, create_partial_cell_coor
 # Configuration
 # ============================================================================
 
-OUTPUT_DIR = Path("results/ocean/global_overturning_mpas_etopo_smag")
+OUTPUT_DIR = Path("results/ocean/global_overturning_mpas_etopo_tropred")
 SUBDIVISION = 5       # ico5 ~ 120 km ~ 1°
 N_LEVELS = 20
 H_MAX = 5500.0
@@ -233,6 +235,7 @@ def main():
             scheme="combined",
             prescribed=PrescribedForcingConfig(
                 wind_profile="global_wind", tau_max=0.1,
+                tropical_wind_scale=0.5, tropical_wind_lat_deg=15.0,
             ),
             restoring=RestoringConfig(
                 tau_T=2592000.0, tau_S=2592000.0,  # 30-day restoring
@@ -250,21 +253,33 @@ def main():
         shortwave_penetration=None,
     )
 
-    # --- Model config: the production recipe ---
+    # --- Model config: production-tuned recipe (2026-05-11) ---
+    # H1: quadratic bottom drag (bg_velocity=0.1 → Cd=0.01)
+    # H3: TVD tracer advection (warmer SST, less spurious flow)
+    # M1: GM/Redi centered κ=600 (isopycnal mixing for ACC + MOC structure)
     config = MPASOceanConfig(
         barotropic_solver="implicit_cn",
         barotropic_implicit_pcg_tol=1e-10,
         barotropic_implicit_pcg_maxiter=300,
-        A_h=0.0,                        # no constant viscosity — Smagorinsky provides it
-        A_v=1e-4,                       # production value (matches MOM6/NEMO/E3SM)
-        C_smag_lap=0.33,               # Laplacian Smagorinsky (flow-adaptive)
-        K_v=1e-5,                       # background tracer diffusivity
+        A_h=0.0,                        # Smagorinsky provides damping
+        A_v=1e-4,                       # production scalar (MOM6/NEMO/E3SM)
+        C_smag_lap=0.33,                # Laplacian Smagorinsky
+        K_v=1e-5,
         bottom_drag_r=1e-3,
         bottom_drag_bbl_thickness=100.0,
-        K_zeta_bih=1e14,               # Voronoi checkerboard damping
+        bottom_drag_bg_velocity=0.1,    # H1: quadratic-with-floor
+        K_zeta_bih=1e14,                # Voronoi checkerboard damping
         equatorial_visc_boost=0.0,
         pgf_scheme="centered",
-        implicit_vertical_mixing=True,   # THE KEY
+        implicit_vertical_mixing=True,
+        tracer_advection="tvd",         # H3: less spurious diffusion
+        gm_redi=GMRediConfig(           # M1: isopycnal eddy mixing
+            kappa_GM=600.0,
+            kappa_Redi=600.0,
+            S_max=0.005,
+            visbeck=VisbeckConfig(enabled=False),
+            slope_scheme="centered",
+        ),
         physics=physics,
     )
 
@@ -277,7 +292,7 @@ def main():
     S_data = jnp.where(pc_coord.is_active, jnp.full_like(T_data, 35.0), 0.0)
 
     state = rest_state_mpas_ocean(
-        mesh, z_coord, T_surface=20.0, T_deep=2.0,
+        mesh, z_coord, T_water_init_C=20.0, T_deep=2.0,
         S_uniform=35.0, H_max=H_MAX, land_lat_threshold=90.0,
     )
     dtype = state.eta.data.dtype

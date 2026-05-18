@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
+from legoesm import constants
 from legoesm.core.field import Field
 
 
@@ -53,6 +54,11 @@ class OceanTendencies(NamedTuple):
 
     Same structure as OceanState. Static fields (H_bathy, land_mask)
     have zero tendencies, matching the phis pattern in the atmosphere.
+
+    K_v / A_v are optional interface-level diffusivity / viscosity
+    profiles populated by the physics function when
+    ``implicit_vertical_mixing`` is enabled.  Shape
+    ``(..., nlev-1)`` at interior interfaces, or None.
     """
     du_dt: Field
     dv_dt: Field
@@ -61,6 +67,8 @@ class OceanTendencies(NamedTuple):
     deta_dt: Field
     dH_bathy_dt: Field
     dland_mask_dt: Field
+    K_v: object = None   # tracer diffusivity at interfaces [m²/s]
+    A_v: object = None   # momentum viscosity at interfaces [m²/s]
 
 
 class OceanSurfaceForcing(NamedTuple):
@@ -91,8 +99,8 @@ class OceanSurfaceForcing(NamedTuple):
 
 class OceanConfig(NamedTuple):
     """Configuration for the ocean model."""
-    g: float = 9.80616           # = constants.g
-    rho_0: float = 1025.0        # = eos.rho_0
+    g: float = constants.g
+    rho_0: float = constants.rho_ocean
     A_h: float = 1.0e4           # Horizontal viscosity [m^2/s]
     K_h: float = 0.0           # Horizontal tracer diffusivity [m^2/s]
     A_v: float = 1.0e-3          # Vertical viscosity [m^2/s]
@@ -103,6 +111,16 @@ class OceanConfig(NamedTuple):
     fix_volume: bool = True
     fix_heat: bool = True
     fix_salt: bool = True
+    # Bottom drag (mirror of LatLonCGridOceanConfig). ``bottom_drag_r > 0``
+    # enables linear drag ``du/dt|_drag = -r*u/h_bot`` on the bottom
+    # cell; setting ``bottom_drag_bg_velocity > 0`` lifts it to the
+    # MOM6 quadratic-with-floor form. ``bottom_drag_bbl_thickness > 0``
+    # spreads the drag over a fixed Ekman thickness (Killworth &
+    # Edwards 1999) instead of dumping it into a possibly very thin
+    # partial cell.
+    bottom_drag_r: float = 0.0
+    bottom_drag_bg_velocity: float = 0.0
+    bottom_drag_bbl_thickness: float = 0.0
     # 2-D Laplacian damping used in barotropic subcycling.
     # Per-substep coefficient is alpha * (dt_s / dt_ref) * area * laplacian(...),
     # so the damping is explicitly dt-scaled and tunable.
@@ -166,8 +184,8 @@ class SpectralOceanState(NamedTuple):
 
 class SpectralOceanConfig(NamedTuple):
     """Configuration for the spectral ocean model."""
-    g: float = 9.80616  # = constants.g
-    rho_0: float = 1025.0        # = eos.rho_0
+    g: float = constants.g
+    rho_0: float = constants.rho_ocean
     A_h: float = 1.0e4
     K_h: float = 0.0
     A_v: float = 1.0e-3
@@ -239,8 +257,8 @@ class LatLonOceanTendencies(NamedTuple):
 
 class LatLonOceanConfig(NamedTuple):
     """Configuration for the lat-lon FV ocean model."""
-    g: float = 9.80616  # = constants.g
-    rho_0: float = 1025.0        # = eos.rho_0
+    g: float = constants.g
+    rho_0: float = constants.rho_ocean
     A_h: float = 1.0e4           # Horizontal viscosity [m^2/s]
     K_h: float = 0.0           # Horizontal tracer diffusivity [m^2/s]
     A_v: float = 1.0e-3          # Vertical viscosity [m^2/s]
@@ -374,8 +392,11 @@ class LatLonCGridOceanDiagnostics(NamedTuple):
 
 
 class LatLonCGridOceanTendencies(NamedTuple):
-    """Tendencies for the lat-lon C-grid ocean primitive equations."""
+    """Tendencies for the lat-lon C-grid ocean primitive equations.
 
+    K_v / A_v are optional interface-level diffusivity / viscosity
+    profiles populated when ``implicit_vertical_mixing`` is enabled.
+    """
     du_dt: Field
     dv_dt: Field
     dT_dt: Field
@@ -383,6 +404,8 @@ class LatLonCGridOceanTendencies(NamedTuple):
     deta_dt: Field
     dH_bathy_dt: Field
     dland_mask_dt: Field
+    K_v: object = None
+    A_v: object = None
 
 
 class MomentumTendencyDiagnostics(NamedTuple):
@@ -477,8 +500,8 @@ class LatLonCGridOceanConfig(NamedTuple):
     since operator semantics differ (compact stencils vs centered).
     """
 
-    g: float = 9.80616  # = constants.g
-    rho_0: float = 1025.0        # = eos.rho_0
+    g: float = constants.g
+    rho_0: float = constants.rho_ocean
     A_h: float = 1.0e4
     A_h_lat_scaling: bool = False  # When True, A_h is scaled by cos(lat) to
                                     # keep the grid Reynolds number latitude-
@@ -503,7 +526,21 @@ class LatLonCGridOceanConfig(NamedTuple):
     A_h_eq_sigma_deg: float = 5.0  # Gaussian half-width in degrees of the
                                     # equatorial boost.  Typical 3-7°
                                     # (~equatorial waveguide width).
+    A_h_merid: float = 0.0        # Meridional-only Laplacian viscosity [m²/s].
+                                    # Applies d²u/dy² directly at u-faces and
+                                    # d²v/dy² at v-faces — a scalar operator
+                                    # that damps meridional structure (2Δy mode)
+                                    # without affecting zonal flow.  Independent
+                                    # of A_h.  Use on lat-lon grids where
+                                    # dx/dy anisotropy makes isotropic A_h
+                                    # either too strong (zonal) or too weak
+                                    # (meridional).
     B_h: float = 0.0
+    B_h_lat_scaling: bool = True   # Apply (cos(lat)/cos_max)⁴ scaling to B_h.
+                                    # Default True (MOM6 convention) prevents
+                                    # CFL violation at poles where dx shrinks.
+                                    # Set False to keep full B_h everywhere
+                                    # (requires smaller dt for CFL safety).
     B_h_barotropic: float = 0.0  # Biharmonic hyperviscosity coeff [m^4/s]
                                    # applied to the DEPTH-MEAN (U_bar,
                                    # V_bar) only, via the F_slow channel
@@ -576,6 +613,17 @@ class LatLonCGridOceanConfig(NamedTuple):
     slope_foot_threshold: float = 0.1   # MOM6 default
     slope_foot_n_levels: int = 5        # bottom 5 levels
     momentum_advection: str = "vector_invariant"  # "vector_invariant", "weno5", or "weno7"
+    # Kinetic-energy gradient scheme for the vector-invariant form.
+    # ``"centered"`` (default; legacy bit-exact): legoESM's existing
+    # ``KE = 0.5·((⟨u⟩ᵢ)² + (⟨v⟩ⱼ)²)`` form. The standard centered
+    # C-grid scheme suffers the Hollingsworth-Kallberg instability over
+    # stratified flow on sloping bathymetry (see #263).
+    # ``"hollingsworth"``: NEMO 4.2.1 dynkeg.F90 ``nkeg_HW`` form
+    # (Hollingsworth, Kållberg & Renner 1983; Arakawa & Hsu 1990).
+    # Wider (3-row) stencil that smooths spurious vortex stretching.
+    # Strongly recommended for stratified ocean over realistic
+    # bathymetry (NEMO turns this on by default via ``nn_dynkeg=1``).
+    ke_gradient_scheme: str = "centered"
     weno_d_term: bool = True  # Include WENO D-term (divergence flux, Silvestri Eqs. 31-32).
                               # Implemented with proper split: matching-direction divergence
                               # is WENO-upwinded, cross-direction stays centered (Appendix C).
@@ -620,3 +668,26 @@ class LatLonCGridOceanConfig(NamedTuple):
     #   nonlinear limiters (TVD, WENO, FCT).
     tracer_time_integrator: str = "euler"
     ab2_epsilon: float = 0.1  # AB2 stabilization (MITgcm ABepsBar)
+    # Implicit (backward-Euler) vertical mixing.  When True (default):
+    #   1. The PE tendency function skips the explicit ``A_v`` viscous
+    #      block (lines tagged ``if config.A_v > 0 ...``).
+    #   2. The vertical-mixing and ``enhanced_diffusion`` convection
+    #      schemes are called with ``apply_diffusion=False`` — they
+    #      return zero local-diffusion tendency but still produce the
+    #      K_v / A_v profile and (for KPP) the non-local counter-
+    #      gradient flux.
+    #   3. After the barotropic step, tracer advection, and GM/Redi,
+    #      the model step applies an unconditionally-stable backward-
+    #      Euler tridiagonal solve to ``T, S, u, v`` using the summed
+    #      K_v / A_v profiles.
+    # Removes the explicit-diffusion CFL limit ``dt < dz² / (2 K)``,
+    # which becomes binding when ``K_conv = 1 m²/s`` is active with
+    # surface dz < 30 m or when vertical resolution is increased.
+    # MOM6 / NEMO / POP / MITgcm all use this approach, and MPAS
+    # (`MPASOceanConfig`) also defaults True. The lat-lon default was
+    # flipped from False to True on 2026-05-14 after a DINO forced run
+    # at j=0,i=26 hit the explicit-CFL bound under KPP-driven cold
+    # restoring (see docs/ocean_experiments/dino_replication_plan.md
+    # Finding 5). Set explicit ``implicit_vertical_mixing=False`` to
+    # reproduce the historical explicit-diffusion behavior.
+    implicit_vertical_mixing: bool = True

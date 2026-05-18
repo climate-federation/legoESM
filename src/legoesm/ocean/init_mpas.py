@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.core.precision import get_policy
 from legoesm.core.state import MPASOceanState
@@ -17,6 +18,90 @@ from legoesm.ocean.vertical import (
     OceanPartialCellCoordinate,
     OceanZStarCoordinate,
 )
+
+
+def partial_periodic_seam_wall_mpas(
+    mesh: VoronoiMesh,
+    open_lat_south_deg: float,
+    open_lat_north_deg: float,
+    seam_lon_deg: float | None = None,
+    seam_strip_width_deg: float | None = None,
+    base_mask: jnp.ndarray | None = None,
+):
+    """Build a per-cell land mask that creates a wall along a periodic
+    seam everywhere EXCEPT in a specified latitude band.
+
+    Use case: a regional Voronoi mesh constructed with
+    ``periodic_x=True`` represents a basin whose east-west boundaries
+    should be CLOSED everywhere except in a re-entrant channel band
+    (Drake passage, Bering strait, ACC channel, etc.). Without
+    intervention the periodicity makes flow wrap around at every
+    latitude, including the subtropical / subpolar gyre region — which
+    is non-physical for a closed basin. This helper marks cells within
+    one cell-width of the periodic seam as LAND outside the open band,
+    creating a wall there while leaving the band open.
+
+    Parameters
+    ----------
+    mesh : VoronoiMesh
+        Created by ``create_regional_voronoi_mesh(..., periodic_x=True)``.
+    open_lat_south_deg, open_lat_north_deg : float
+        Latitude band [°N] in which the seam stays open (no wall).
+    seam_lon_deg : float, optional
+        Longitude [°E] of the periodic seam (= ``lon_west`` of the
+        regional mesh). Defaults to the minimum lon of the mesh.
+    seam_strip_width_deg : float, optional
+        Width of the wall strip in degrees of longitude. Defaults to
+        one nominal cell width estimated from the mesh's median
+        ``dcEdge``. Set explicitly for reproducibility.
+    base_mask : array, optional
+        Optional pre-existing land mask (e.g., to also mask buffer
+        cells outside a lat-domain). The seam wall is intersected
+        with this mask: cells already land stay land; cells that
+        were ocean become land where the seam strip + outside-band
+        condition holds.
+
+    Returns
+    -------
+    land_mask : jax array, shape (nCells,)
+        1.0 = ocean, 0.0 = land.
+
+    Examples
+    --------
+    Drake-passage-like channel between -65°S and -45°N::
+
+        mask = partial_periodic_seam_wall_mpas(
+            mesh,
+            open_lat_south_deg=-65.0,
+            open_lat_north_deg=-45.0,
+        )
+    """
+    lon_deg = (jnp.degrees(mesh.lonCell) + 180.0) % 360.0 - 180.0
+    lat_deg = jnp.degrees(mesh.latCell)
+
+    if seam_lon_deg is None:
+        seam_lon_deg = float(jnp.min(lon_deg))
+
+    if seam_strip_width_deg is None:
+        median_dc_m = float(jnp.median(mesh.dcEdge))
+        seam_strip_width_deg = (
+            (median_dc_m / mesh.radius) * float(constants.RAD_TO_DEG)
+        )
+
+    # Modulo wrap so cells near the antipodal side of the periodic seam
+    # don't get false-positive matches via negative differences.
+    seam_dist = (lon_deg - seam_lon_deg) % 360.0
+    near_seam = seam_dist < seam_strip_width_deg
+    in_open_band = (
+        (lat_deg >= open_lat_south_deg) & (lat_deg <= open_lat_north_deg)
+    )
+    seam_wall = near_seam & ~in_open_band
+
+    if base_mask is None:
+        is_ocean = ~seam_wall
+    else:
+        is_ocean = (base_mask > 0.5) & ~seam_wall
+    return is_ocean.astype(jnp.float32)
 
 
 def idealized_bathymetry_mpas(
@@ -54,7 +139,7 @@ def idealized_bathymetry_mpas(
 def rest_state_mpas_ocean(
     mesh: VoronoiMesh,
     z_coord: OceanZStarCoordinate,
-    T_surface: float = 20.0,
+    T_water_init_C: float = 20.0,
     T_deep: float = 2.0,
     S_uniform: float = 35.0,
     H_max: float = 5500.0,
@@ -70,7 +155,7 @@ def rest_state_mpas_ocean(
     ----------
     mesh : VoronoiMesh
     z_coord : OceanZStarCoordinate
-    T_surface : float
+    T_water_init_C : float
         Surface temperature [degC].
     T_deep : float
         Deep temperature [degC].
@@ -114,7 +199,7 @@ def rest_state_mpas_ocean(
 
     # Temperature: exponential profile
     z_full = z_coord.z_full_ref  # (nlev,), negative values
-    T_profile = T_deep + (T_surface - T_deep) * jnp.exp(z_full / _SCALE_DEPTH)
+    T_profile = T_deep + (T_water_init_C - T_deep) * jnp.exp(z_full / _SCALE_DEPTH)
     T_data = jnp.broadcast_to(T_profile[jnp.newaxis, :], (nCells, nlev)).astype(dtype)
 
     # Salinity: uniform

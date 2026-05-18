@@ -26,7 +26,7 @@ import numpy as np
 
 from legoesm.core.field import Field
 from legoesm.core.precision import cast_pytree
-from legoesm.grids.latlon import LatLonGrid
+from legoesm.grids.latlon import LatLonGrid, ensure_geometry
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     OceanPartialCellCoordinate,
@@ -184,10 +184,10 @@ def _compute_advection_flux_div(
         # upwind or tvd
         if tracer_advection == "tvd":
             tr_u = _tvd_to_u_points(tr, mass_flux_u)
-            tr_v = _tvd_to_v_points(tr, mass_flux_v)
+            tr_v = _tvd_to_v_points(tr, mass_flux_v, grid=grid)
         else:
             tr_u = _upwind_to_u_points(tr, mass_flux_u)
-            tr_v = _upwind_to_v_points(tr, mass_flux_v)
+            tr_v = _upwind_to_v_points(tr, mass_flux_v, grid=grid)
         tracer_flux_u = mass_flux_u * tr_u
         tracer_flux_v = mass_flux_v * tr_v
         div_hut = divergence_cgrid(tracer_flux_u, tracer_flux_v, grid)
@@ -336,7 +336,7 @@ def _forward_backward_coriolis_3d(
     # overestimates face depth at topographic steps, creating a
     # barotropic-baroclinic residual that drives spurious currents.
     h_u = min_cell_to_uface(h_k)
-    h_v = min_cell_to_vface(h_k)
+    h_v = min_cell_to_vface(h_k, grid)
 
     # --- Depth-averaged velocity (barotropic component) ---
     # Per-face thickness + barotropic-mean column reductions share the
@@ -354,17 +354,17 @@ def _forward_backward_coriolis_3d(
     v_prime = (v - V_bar[..., jnp.newaxis]) * v_mask_3d
 
     # --- Coriolis parameter at face points ---
-    f_cell = grid.f.astype(u.dtype)
-
-    # f at u-points: average of flanking cells
-    f_u = 0.5 * (jnp.roll(f_cell, 1, axis=1) + f_cell)
-    f_u = jnp.concatenate([f_u, f_u[:, 0:1]], axis=1)  # (n_lat, n_lon+1)
-
-    # f at v-points: average of flanking cells
-    f_v_interior = 0.5 * (f_cell[:-1] + f_cell[1:])
-    f_v = jnp.concatenate(
-        [f_cell[0:1], f_v_interior, f_cell[-1:]], axis=0,
-    )  # (n_lat+1, n_lon)
+    if hasattr(grid, "f_u") and hasattr(grid, "f_v"):
+        f_u = grid.f_u.astype(u.dtype)  # (n_lat, n_lon+1)
+        f_v = grid.f_v.astype(u.dtype)  # (n_lat+1, n_lon)
+    else:
+        f_cell = grid.f.astype(u.dtype)
+        f_u = 0.5 * (jnp.roll(f_cell, 1, axis=1) + f_cell)
+        f_u = jnp.concatenate([f_u, f_u[:, 0:1]], axis=1)
+        f_v_interior = 0.5 * (f_cell[:-1] + f_cell[1:])
+        f_v = jnp.concatenate(
+            [f_cell[0:1], f_v_interior, f_cell[-1:]], axis=0,
+        )
 
     # --- Forward step: update u' using old v' ---
     # Average v' to u-points (Sadourny 4-point average)
@@ -377,13 +377,13 @@ def _forward_backward_coriolis_3d(
 
     # --- Backward step: update v' using NEW u' ---
     # Average u'_new to v-points (Sadourny 4-point average).
-    # Pole rows are zero (wall BC); single Pad HLO op replaces
-    # alloc-zeros + concatenate-of-three.
+    # Boundary: wall BC on regular lat-lon; fold halo on tripolar.
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import pad_ns_vector_u
     u_at_v_interior = 0.25 * (
         u_prime_new[:-1, :-1] + u_prime_new[:-1, 1:]
         + u_prime_new[1:, :-1] + u_prime_new[1:, 1:]
     )
-    u_at_v = jnp.pad(u_at_v_interior, ((1, 1), (0, 0), (0, 0)))
+    u_at_v = pad_ns_vector_u(u_at_v_interior, grid)
 
     v_prime_new = (v_prime - dt * f_v[:, :, jnp.newaxis] * u_at_v) * v_mask_3d
 
@@ -424,14 +424,22 @@ class LatLonCGridOceanModel:
         z_coord: OceanZStarCoordinate,
         config: LatLonCGridOceanConfig | None = None,
     ):
-        self.grid = grid
+        # Convert LatLonGrid -> LatLonCGridGeometry once at construction.
+        # All downstream operators see the enriched geometry with per-cell
+        # metric arrays.  For a plain LatLonGrid this is a no-op on field
+        # access (legacy fields are identical); for a tripolar grid the
+        # geometry carries fold descriptor and rotation angles.
+        self.grid = ensure_geometry(grid)
         self.z_coord = z_coord
         self.config = config or LatLonCGridOceanConfig()
         self._validate_config(self.config)
         self._cfl_checked = False
 
         if self.config.physics is not None:
-            self._physics_fn = make_ocean_physics(self.config.physics)
+            self._physics_fn = make_ocean_physics(
+                self.config.physics,
+                apply_vertical_diffusion=not self.config.implicit_vertical_mixing,
+            )
         else:
             self._physics_fn = None
 
@@ -534,8 +542,12 @@ class LatLonCGridOceanModel:
         g = self.config.g
         H_max = self.z_coord.H_max
         n_sub = self.config.n_barotropic_substeps
-        # grid.dx and grid.dy are "distance over 2 cells", so cell width = dx/2
-        dx_min = min(float(jnp.min(self.grid.dx)) / 2.0, self.grid.dy / 2.0)
+        # grid.dx and grid.dy are "distance over 2 cells", so cell width = dx/2.
+        # grid.dy is (n_lat,) — take the global min (Mercator-safe).
+        dx_min = min(
+            float(jnp.min(self.grid.dx)) / 2.0,
+            float(jnp.min(self.grid.dy)) / 2.0,
+        )
 
         c_baro = math.sqrt(g * H_max)
         dt_baro = dt / n_sub
@@ -668,7 +680,7 @@ class LatLonCGridOceanModel:
         # topographic steps, creating a barotropic-baroclinic residual.
         h_u_pre = min_cell_to_uface(h_k_pre)
         # h at v-faces — same min-rule for meridional direction.
-        h_v_pre = min_cell_to_vface(h_k_pre)
+        h_v_pre = min_cell_to_vface(h_k_pre, self.grid)
 
         # H + F_slow share the per-face h weight on the level axis —
         # fuse the two reductions per face into one stacked sum.
@@ -804,7 +816,7 @@ class LatLonCGridOceanModel:
         # so that sum_k(h_k * u_corrected_k) = Hu_avg exactly.
         # (Hallberg & Adcroft 2009, Shchepetkin & McWilliams 2005).
         _min_uface_op = min_cell_to_uface
-        _min_vface_op = min_cell_to_vface
+        _min_vface_op = lambda f: min_cell_to_vface(f, self.grid)
         from legoesm.ocean.dynamics.latlon_cgrid_operators import (
             divergence_cgrid, interp_cell_to_uface,
         )
@@ -832,7 +844,7 @@ class LatLonCGridOceanModel:
         # tracer values inside the ground.
         if isinstance(self.z_coord, OceanPartialCellCoordinate):
             u_mask_3d_tracer, v_mask_3d_tracer = compute_face_masks_3d(
-                self.z_coord.is_active,
+                self.z_coord.is_active, self.grid,
             )
             u_mask_3d_tracer = u_mask_3d_tracer.astype(h_u_old.dtype)
             v_mask_3d_tracer = v_mask_3d_tracer.astype(h_v_old.dtype)
@@ -1077,6 +1089,28 @@ class LatLonCGridOceanModel:
                 S=state_new.S.replace(data=S_fw),
             )
 
+        # 8b. Implicit (backward-Euler) vertical mixing for u, v, T, S.
+        #
+        # When this branch is active, the PE tendency function has
+        # skipped its explicit ``config.A_v`` block and every vertical-
+        # mixing / convection scheme has been called with
+        # ``apply_diffusion=False`` (so they only contributed K_v/A_v
+        # *profiles* — and KPP non-local fluxes — to the explicit
+        # update).  We now apply the full diffusion implicitly so the
+        # stiff ``K_conv = 1 m²/s`` and surface-BL diffusivities are
+        # not constrained by the explicit CFL limit
+        # ``dt < dz² / (2K)`` — see issue #204.
+        #
+        # The solve uses zero-flux boundary conditions at the surface
+        # and bottom and is split-stepped (Lie splitting, 1st-order)
+        # after tracer advection, GM/Redi, and the freshwater virtual
+        # salt flux — matching MOM6's diabatic-process ordering.
+        if self.config.implicit_vertical_mixing:
+            state_new = self._apply_implicit_vertical_mixing(
+                state_new, dt, surface_forcing,
+                K_v_phys=tend.K_v, A_v_phys=tend.A_v,
+            )
+
         # 9. Conservation fixers
         if self.config.use_conservation_fixer:
             state_new = ocean_conservation_fixer(
@@ -1084,6 +1118,161 @@ class LatLonCGridOceanModel:
             )
 
         return cast_pytree(state_new, None, "storage", allow_downcast=True)
+
+    @staticmethod
+    def _symmetrize_fold(state, fold):
+        """Enforce fold symmetry on the fold row.
+
+        Scalars (eta, T, S) at fold-partner cells must be equal.
+        Velocity v at the fold face must be antisymmetric.
+        """
+        perm = fold.perm_T
+
+        # Scalars: average fold partners
+        eta = state.eta.data
+        eta_sym = 0.5 * (eta[-1:] + eta[-1:, perm])
+        eta = eta.at[-1].set(eta_sym[0])
+
+        T = state.T.data
+        T_sym = 0.5 * (T[-1:] + T[-1:, perm, :])
+        T = T.at[-1].set(T_sym[0])
+
+        S = state.S.data
+        S_sym = 0.5 * (S[-1:] + S[-1:, perm, :])
+        S = S.at[-1].set(S_sym[0])
+
+        # v at fold face (last v-row): antisymmetric
+        v = state.v.data
+        v_fold = v[-1:]  # (1, n_lon, nlev)
+        v_partner = v_fold[:, perm, :]
+        v_sym = 0.5 * (v_fold - v_partner)
+        v = v.at[-1].set(v_sym[0])
+
+        return state._replace(
+            eta=state.eta.replace(data=eta),
+            T=state.T.replace(data=T),
+            S=state.S.replace(data=S),
+            v=state.v.replace(data=v),
+        )
+
+    def _apply_implicit_vertical_mixing(
+        self,
+        state: LatLonCGridOceanState,
+        dt: float,
+        surface_forcing,
+        K_v_phys=None,
+        A_v_phys=None,
+    ) -> LatLonCGridOceanState:
+        """Backward-Euler vertical diffusion for ``u, v, T, S``.
+
+        Uses the K_v / A_v profiles already computed by the physics
+        function (passed via ``K_v_phys`` / ``A_v_phys``), adds the
+        ``LatLonCGridOceanConfig.A_v`` / ``K_v`` background floors,
+        and applies one tridiagonal solve per column to each prognostic
+        field.  The solver enforces zero-flux boundary conditions, so
+        the column-mean (and hence the barotropic mode for u, v) is
+        preserved exactly.
+
+        When K_v_phys / A_v_phys are None (no physics function, or
+        physics that doesn't produce K profiles), falls back to
+        ``compute_vertical_K_profiles`` for a fresh computation.
+
+        Called only when ``config.implicit_vertical_mixing == True``.
+        """
+        from legoesm.ocean.physics.vertical_mixing import (
+            implicit_vertical_diffusion_ocean, build_dz_half,
+            compute_vertical_K_profiles,
+        )
+        from legoesm.ocean.vertical import compute_ocean_jacobian
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+            interp_cell_to_uface,
+        )
+
+        if K_v_phys is not None and A_v_phys is not None:
+            # Fast path: use K profiles already computed by the physics
+            # function, just add the config background floors.
+            nlev = state.T.data.shape[-1]
+            dtype = state.T.data.dtype
+            K_v_cell = K_v_phys + jnp.asarray(self.config.K_v, dtype=dtype)
+            A_v_cell = A_v_phys + jnp.asarray(self.config.A_v, dtype=dtype)
+        else:
+            # Fallback: recompute K profiles (expensive for KPP).
+            physics_config = self.config.physics
+            if physics_config is None:
+                from legoesm.ocean.physics.combined import OceanPhysicsConfig
+                from legoesm.ocean.physics.vertical_mixing.config import (
+                    VerticalMixingConfig,
+                )
+                from legoesm.ocean.physics.convection.config import (
+                    OceanConvectionConfig,
+                )
+                physics_config = OceanPhysicsConfig(
+                    vertical_mixing=VerticalMixingConfig(scheme="none"),
+                    convection=OceanConvectionConfig(scheme="none"),
+                )
+            u_cell = 0.5 * (state.u.data[:, :-1, :] + state.u.data[:, 1:, :])
+            v_cell = 0.5 * (state.v.data[:-1, :, :] + state.v.data[1:, :, :])
+            cc_state = state._replace(
+                u=state.u.replace(data=u_cell),
+                v=state.v.replace(data=v_cell),
+            )
+            K_v_cell, A_v_cell = compute_vertical_K_profiles(
+                cc_state, self.z_coord, surface_forcing, physics_config,
+                A_v_background=float(self.config.A_v),
+                K_v_background=float(self.config.K_v),
+            )
+
+        # dz at cell centers (jacobian-corrected so the eta-stretched
+        # column heights match the partial-cell / z* layer thicknesses
+        # used by every other operator in this step).
+        J_cell = compute_ocean_jacobian(
+            state.eta.data, state.H_bathy.data, self.z_coord,
+        )
+        dz_cell = self.z_coord.dz_ref * J_cell[..., jnp.newaxis]
+        dz_half_cell = build_dz_half(dz_cell)
+
+        mask_3d = state.land_mask.data[..., jnp.newaxis]
+
+        # ---- Tracers (cell-centered: K aligns with T, S directly) ----
+        K_v_cell = K_v_cell.astype(state.T.data.dtype)
+        T_new = implicit_vertical_diffusion_ocean(
+            state.T.data, K_v_cell, dz_cell, dz_half_cell, dt,
+        )
+        S_new = implicit_vertical_diffusion_ocean(
+            state.S.data, K_v_cell, dz_cell, dz_half_cell, dt,
+        )
+        T_new = jnp.where(mask_3d > 0.5, T_new, state.T.data)
+        S_new = jnp.where(mask_3d > 0.5, S_new, state.S.data)
+
+        # ---- Momentum (u at u-faces, v at v-faces) ----
+        # Interpolate A_v and dz from cell centers to face centers.  The
+        # solver only needs dz to be positive (it clips internally) and
+        # the resulting tridiagonal system is well-posed on any column
+        # with at least two wet levels.
+        A_v_cell = A_v_cell.astype(state.u.data.dtype)
+        A_v_u = interp_cell_to_uface(A_v_cell)            # (n_lat, n_lon+1, nlev-1)
+        A_v_v = _interp_to_v_points(A_v_cell)             # (n_lat+1, n_lon, nlev-1)
+        dz_u = interp_cell_to_uface(dz_cell)
+        dz_v = _interp_to_v_points(dz_cell)
+        dz_half_u = build_dz_half(dz_u)
+        dz_half_v = build_dz_half(dz_v)
+        u_mask_3d = state.u_mask.data[..., jnp.newaxis]
+        v_mask_3d = state.v_mask.data[..., jnp.newaxis]
+        u_new = implicit_vertical_diffusion_ocean(
+            state.u.data, A_v_u, dz_u, dz_half_u, dt,
+        )
+        v_new = implicit_vertical_diffusion_ocean(
+            state.v.data, A_v_v, dz_v, dz_half_v, dt,
+        )
+        u_new = jnp.where(u_mask_3d > 0.5, u_new, state.u.data)
+        v_new = jnp.where(v_mask_3d > 0.5, v_new, state.v.data)
+
+        return state._replace(
+            u=state.u.replace(data=u_new),
+            v=state.v.replace(data=v_new),
+            T=state.T.replace(data=T_new),
+            S=state.S.replace(data=S_new),
+        )
 
     @partial(jax.jit, static_argnums=(0,))
     def step(self, state: LatLonCGridOceanState, dt: float,

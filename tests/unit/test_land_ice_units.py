@@ -143,7 +143,7 @@ class Test13f_ConsistentSignConventions:
         ice_state = SeaIceState(
             h_ice=_field(1.0), T_ice=_field(265.0), concentration=_field(0.9),
         )
-        sst = jnp.full(SHAPE, 271.35, jnp.float64)
+        sst = jnp.full(SHAPE, constants.T_freeze_ocean, jnp.float64)
         _, resp_ice = step_sea_ice(
             ice_state, forcing, sst, jnp.zeros(SHAPE), jnp.zeros(SHAPE),
             SeaIceConfig(), 1.0, DT,
