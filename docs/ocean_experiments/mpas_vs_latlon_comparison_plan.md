@@ -1,9 +1,10 @@
 # MPAS vs Lat-Lon 1° Comparison Experiments
 
-**Status** (2026-05-18): All ETOPO runs completed. MPAS ETOPO 20yr
-reaches 132 Sv ACC (near observed 137 Sv). Mercator ETOPO 10yr stable
-at 105 Sv. Lower viscosity MPAS ETOPO (A_h=1e4) also stable, 95 Sv
-at yr 10. Ready for analysis and longer runs.
+**Status** (2026-05-18): All ETOPO runs completed. CRITICAL finding:
+ico5 is ~223 km (~2°), not ~120 km — the MPAS-vs-Mercator comparison
+has a 4× resolution mismatch at 60°S. ACC differences (132 vs 105 Sv)
+are likely resolution-dominated, not grid-type-dominated. Need ico6
+(~112 km, 1°) for a fair comparison.
 
 ## Quick Start: How to Run Experiments
 
@@ -145,7 +146,7 @@ Explicit CLI flags always override config.json values.
 
 ## Goal
 
-Run matched MPAS Voronoi (ico5, ~120 km) and lat-lon C-grid (180×360, 1°)
+Run matched MPAS Voronoi (ico5, ~223 km / ~2°) and lat-lon C-grid
 global ocean simulations with ETOPO bathymetry and identical idealized
 forcing. Isolate grid-dependent vs physics-dependent behavior in
 circulation, energetics, noise, and stability.
@@ -187,7 +188,8 @@ circulation, energetics, noise, and stability.
 | B_h | 0.0 |
 
 Note: effective Smagorinsky viscosity differs because Δ differs
-(uniform ~120 km on MPAS, varies ~111→19 km with latitude on lat-lon).
+(uniform ~223 km on ico5 MPAS, varies ~111→19 km with latitude on Mercator).
+**WARNING**: ico5 is ~2°, not ~1°. See "Resolution mismatch" section.
 This is by design — same coefficient, grid-adapted effective viscosity.
 
 ### Vertical Mixing (matched)
@@ -275,7 +277,7 @@ This is by design — same coefficient, grid-adapted effective viscosity.
 
 | Aspect | MPAS | Lat-Lon |
 |--------|------|---------|
-| Cell geometry | Quasi-uniform ~120 km | ~111 km (eq) → ~19 km (80°N) |
+| Cell geometry | Quasi-uniform ~223 km (ico5) | ~111 km (eq) → ~19 km (80°N) |
 | Staggering | TRiSK (normal vel on edges) | C-grid (u,v on faces) |
 | K_zeta_bih | 1e14 (TRiSK null mode) | N/A (C-grid has no null mode) |
 | Smoothing topology | Voronoi neighbors | 4-neighbor roll |
@@ -1238,13 +1240,52 @@ Key DINO findings relevant to our ETOPO runs:
 5. **A_h_eq_boost** — equatorial viscosity boost. NOT used in our runs
    (flat-bottom MRC_BR1 was stable without it, so not needed).
 
+### CRITICAL: Resolution mismatch between grids (2026-05-18)
+
+The comparison is confounded by a **large resolution mismatch**. ico5
+is ~223 km (~2°), NOT the ~120 km (~1°) assumed earlier. Verified:
+
+| Grid | Resolution | nCells | Cell spacing |
+|------|-----------|--------|--------------|
+| MPAS ico5 | ~2° uniform | 10,242 | 223 km everywhere |
+| MPAS ico6 | ~1° uniform | 40,962 | 112 km everywhere |
+| Mercator 278×360 | variable | 100,080 | 111 km (eq) → 19 km (80°) |
+
+Resolution comparison at key latitudes:
+
+| Latitude | Mercator dx=dy | MPAS ico5 dx | Ratio |
+|----------|---------------|-------------|-------|
+| Equator | 111 km | 223 km | 2× |
+| 40°S | 85 km | 223 km | 2.6× |
+| **60°S (ACC)** | **56 km** | **223 km** | **4×** |
+| 70°S | 38 km | 223 km | 6× |
+
+**Mercator is 4-6× finer than MPAS in the Southern Ocean where the
+ACC lives.** This resolution difference likely dominates the ACC
+transport difference (105 Sv Mercator vs 80 Sv MPAS at year 10).
+The comparison is NOT grid-type-at-matched-resolution — it is
+coarse-MPAS vs fine-Mercator.
+
+**Implications:**
+1. ACC transport differences cannot be attributed to grid type alone.
+2. For a fair grid-type comparison, need either:
+   - MPAS ico6 (~112 km, matches Mercator at equator but still 2×
+     coarser at 60°S). 4× more cells → 4× slower.
+   - Mercator at 2° (`--n-lon 180`, ~138×180) to match ico5. Quick
+     to run but poor resolution in the ACC region.
+3. The K_zeta_bih damping on MPAS (which has no Mercator equivalent)
+   further confounds the comparison beyond resolution.
+4. Previous statements about "MPAS produces weaker ACC" should be
+   read as "coarser MPAS produces weaker ACC" — expected from
+   resolution alone.
+
 ### All ETOPO runs completed (2026-05-18)
 
-| Run | Grid | A_h | Duration | ACC yr 10 | ACC yr 20 | max|u| |
-|-----|------|-----|----------|-----------|-----------|--------|
-| METOPO1 | MPAS ico5 | 1e5 | 20yr | ~80 Sv | **132 Sv** | 0.46 |
-| METOPO2 | MPAS ico5 | 1e4 | 10yr | **95 Sv** | — | 0.86 |
-| MRC_ETOPO1 | Mercator 278×360 | 1e5 | 10yr | **105 Sv** | — | 1.03 |
+| Run | Grid | Resolution | A_h | Duration | ACC yr 10 | ACC yr 20 | max|u| |
+|-----|------|-----------|-----|----------|-----------|-----------|--------|
+| METOPO1 | MPAS ico5 | ~223 km | 1e5 | 20yr | ~80 Sv | **132 Sv** | 0.46 |
+| METOPO2 | MPAS ico5 | ~223 km | 1e4 | 10yr | **95 Sv** | — | 0.86 |
+| MRC_ETOPO1 | Mercator | 56-111 km | 1e5 | 10yr | **105 Sv** | — | 1.03 |
 | Observed | | | | ~137 Sv | ~137 Sv | |
 
 Key findings:
@@ -1264,12 +1305,28 @@ ACC transport timeseries:
 
 ### Path forward
 
-1. Extend METOPO2 (A_h=1e4) to 20yr to see if ACC catches up with METOPO1.
-2. Extend MRC_ETOPO1 to 20yr for matched comparison with METOPO1.
-3. Compare: circulation patterns, WBC structure, overturning, energetics.
-4. Consider lowering Mercator A_h if ETOPO run is over-damped.
-5. Make surface snapshot comparisons (SST, SSH, speed) across grids.
-6. `config.json` saved automatically for all new runs (added 2026-05-14).
+**Priority 1: Fix resolution mismatch.** Current comparison (ico5 vs
+Mercator) has 4× resolution difference at 60°S. Options:
+- **MPAS ico6** (~112 km, ~1°): matches Mercator at equator. 40,962
+  cells = 4× more than ico5. ~4× slower per simulated year. Still 2×
+  coarser than Mercator at 60°S (inherent to uniform vs variable grid).
+- **Mercator 2°** (`--n-lon 180`): matches ico5 at equator. Quick to
+  run. But 2° Mercator at 60°S is ~111 km (still finer than ico5's
+  223 km due to Mercator's cos(lat) compression).
+- **Best approach**: run ico6 ETOPO and compare with current Mercator.
+  The equatorial resolution matches; the Southern Ocean difference
+  (112 km vs 56 km) is the inherent uniform-vs-variable-grid trade-off
+  that IS scientifically interesting to compare.
+
+**Priority 2: Continue current analysis.** The existing runs are still
+valuable for understanding each grid's behavior individually:
+1. Extend METOPO2 (A_h=1e4) to 20yr — does low-visc ACC catch up?
+2. Extend MRC_ETOPO1 to 20yr — does Mercator ACC plateau?
+3. Surface snapshot comparisons across grids (qualitative).
+
+**Priority 3: Other improvements.**
+4. Volume leak fix (#271) for century-scale Mercator runs.
+5. `config.json` saved automatically for all new runs.
 
 ## Honest Caveats
 
