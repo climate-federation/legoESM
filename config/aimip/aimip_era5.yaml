@@ -64,19 +64,16 @@ n_eval_days:  8    # sum of eval_windows[*][2]
 # fuller multi-month / multi-epoch sweep (will require multi-hour
 # wall clock per variant).
 aimip_grid: "gaussian"
-n_max: 21            # T21 ≈ 5.6° production resolution.  Now feasible
-                     # under RRTMGP after the v5 refactor:
-                     # (a) ``make_physics_fn`` factored out of
-                     #     ``loss_fn`` (commit pending) eliminates the
-                     #     ~1.5 GiB/sample RAM leak from rebuilding
-                     #     Python closures inside ``eqx.filter_value_and_grad``.
-                     # (b) ``rad_update_interval=48`` (1 RRTMGP call
-                     #     per daily rollout) gates the radiation call
-                     #     via lax.cond + scan-carry cache so the
-                     #     backward pass holds a single RRTMGP-step's
-                     #     activations, not 48.
-nlev: 8              # full vertical resolution restored (was 6 during
-                     # the pre-refactor memory-pressure mitigations).
+n_max: 15            # T15 ≈ 7.5°.  T21 backward at T21 ncol=2312 still
+                     # requires ~50 GiB for a single RRTMGP solve
+                     # (verified 2026-05-18 on v5 with rad gating
+                     # active -- rad_update_interval=48 collapses the
+                     # 48-call chain to one but doesn't shrink the
+                     # per-call cost).  T15 backward is ~25 GiB,
+                     # which just fits on 24 GiB after the JIT-cache
+                     # refactor stops the host RAM leak.  Bump back
+                     # to T21 on a >= 40 GiB GPU once that's available.
+nlev: 8              # full vertical resolution.
 dt: 1800.0           # 30-minute dycore timestep
 
 # ----- Training -----------------------------------------------------
