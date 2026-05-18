@@ -503,23 +503,15 @@ def _area_weighted_sum(field, area) -> float:
 # ---------------------------------------------------------------------------
 # Hyperdiffusion helpers
 # ---------------------------------------------------------------------------
-
-def _hyperdiff_cube(n: int, ref_n: int = 48, ref_coeff: float = 1e16) -> float:
-    return ref_coeff * (ref_n / n) ** 4
-
-
-def _div_damp_cube(n: int, ref_n: int = 48, ref_coeff: float = 1.5e7) -> float:
-    """Scale second-order divergence damping for cubed-sphere (FV3-style).
-
-    NOTE (iter-96): a bit-identical mirror lives in
-    ``tests/test_iter921_w2_v_vs_h_pareto_sentinel.py`` (imported by
-    ``test_iter1002_w2_target_met.py``) so SW W2 numerical sentinels
-    can construct ``CDGridShallowWaterConfig`` instances matching the
-    matrix runner's iter-1030 / iter-44 calibration without depending
-    on this script.  Both copies must stay in sync — `ref_n` and
-    `ref_coeff` are the canonical iter-1030 calibration values.
-    """
-    return ref_coeff * (ref_n / n) ** 2
+# Canonical source: ``legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid``
+# (issue #269 — pulled the iter-1030 cube-resolution scaling formulas into
+# a shared module so the CLI, matrix runner, and tests reference one place).
+# Sentinel tests under ``tests/test_iter9*`` keep their own bit-identical
+# mirrors so that pinning is independent of script imports.
+from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    cdgrid_div_damp_cube as _div_damp_cube,
+    cdgrid_hyperdiff_cube as _hyperdiff_cube,
+)
 
 
 def _hyperdiff_ico(mesh) -> float:

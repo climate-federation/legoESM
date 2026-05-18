@@ -17,9 +17,12 @@ References
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 from legoesm import constants
+
+if TYPE_CHECKING:
+    from legoesm.atmosphere.physics.clouds.config import CloudConfig
 
 
 class GrayRadiationConfig(NamedTuple):
@@ -220,3 +223,12 @@ class RadiationConfig(NamedTuple):
     diurnal_cycle: bool = False
     ozone: OzoneProfileConfig = OzoneProfileConfig()
     cloud_scheme: str = "none"
+    # Optional full ``CloudConfig`` (rh_crit, xu_p, alpha_xr, q_c_diagnostic, ...).
+    # When ``None`` the integration bridge builds a default
+    # ``CloudConfig(scheme=cloud_scheme)`` — backward-compatible.
+    # When supplied, its scalar fields flow through the AD graph so
+    # cloud-fraction knobs become trainable end-to-end via the
+    # cloud-radiation coupling (AIMIP).  Forward-reference avoids a
+    # circular import (clouds.config is a downstream consumer that
+    # already imports from this module via the integration bridge).
+    cloud_config: "CloudConfig | None" = None

@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "tier": 7,
+  "description": "DINO closed-basin overturning vs Veros DINO-equivalent + Kamm 2025 scalars",
+  "common": {
+    "precision": "x64",
+    "grid": "latlon_cgrid",
+    "resolution": "1deg"
+  },
+  "cases": {
+    "dino_amoc_max_Sv": {
+      "metric": "amoc_max_Sv",
+      "tolerance_window": [6.0, 20.0],
+      "reference": {
+        "kind": "literature_scalar",
+        "source": "Kamm et al. 2025 DINO R1 / Veros baseline",
+        "value": 12.0
+      },
+      "ci_marker": "manual_only",
+      "expected_runtime_s": 7200
+    },
+    "dino_thermocline_depth_m": {
+      "metric": "thermocline_depth_T10C_m",
+      "tolerance_window": [400.0, 1200.0],
+      "reference": {
+        "kind": "literature_scalar",
+        "source": "Kamm et al. 2025",
+        "value": 800.0
+      },
+      "ci_marker": "manual_only",
+      "expected_runtime_s": 7200
+    },
+    "dino_moc_pattern_corr_veros": {
+      "metric": "moc_pattern_correlation_with_veros",
+      "tolerance_window": [0.8, 1.0],
+      "reference": {
+        "kind": "veros",
+        "source": "Veros DINOLikeSetup, cached via refresh_veros_baselines.py"
+      },
+      "ci_marker": "manual_only",
+      "expected_runtime_s": 7200
+    }
+  }
+}

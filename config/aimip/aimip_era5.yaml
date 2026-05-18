@@ -1,0 +1,110 @@
+# AIMIP shared base configuration.
+#
+# Loaded by ``scripts/run_aimip.py``.  Variant overlays under this
+# directory are merged on top of this base (dict-merge — overlay keys
+# replace base keys).  See ``config/aimip/variant_*.yaml`` and
+# ``config/aimip/aimip_suite.yaml``.
+#
+# Loss:
+#   - Variants {classical, column_nn, sfno_physics} share
+#     ``combined_loss`` (training/losses.py) with the per-variable
+#     weights below.  Variant ``sfno_full`` (when enabled) uses the
+#     internal spectral loss of ``train_neural_gcm_spectral``; values
+#     are still comparable in rank-order to the grid-MSE because of
+#     ``normalize_by_scale=True``.
+# Optimizer:
+#   - Default is AdamW (set by ``aimip_optimizer`` below).  MUON
+#     (``optax.contrib.muon``) is also supported and was the original
+#     project preference, but caused silent epoch-1 exits on the 34M-
+#     parameter SFNO variant under the 20-day windowed multi-year
+#     setup -- AdamW is the safe default until the MUON / SFNO
+#     instability is resolved.  Override via ``aimip_optimizer``.
+
+# ----- ERA5 source --------------------------------------------------
+era5_zarr: "gs://weatherbench2/datasets/era5/1959-2023_01_10-wb13-6h-1440x721_with_derived_variables.zarr"
+cache_dir: ".cache/aimip_era5"
+# AIMIP multi-year contiguous sampling.  Each window contributes
+# ``n_days`` consecutive IC/target pairs; no cross-window pairing
+# avoids temporal leakage between windows.  Train years 2015 +
+# 2016 (winter + summer windows per year for seasonal coverage);
+# eval year 2017 is held out entirely.  Bump windows + add
+# years for fuller multi-year sweep.
+#
+# Format per window: [year, day_offset_in_year, n_days].
+train_windows:
+  - [2015,   0,  5]     # 2015 Jan (winter)
+  - [2015, 180,  5]     # 2015 Jun (summer)
+  - [2016,   0,  5]     # 2016 Jan
+  - [2016, 180,  5]     # 2016 Jun
+
+eval_windows:
+  - [2017,   0,  4]     # 2017 Jan (held-out year, winter)
+  - [2017, 180,  4]     # 2017 Jun (held-out year, summer)
+
+# Legacy fields kept for backward compatibility when ``train_windows`` /
+# ``eval_windows`` are absent.
+train_year: 2015
+eval_year:  2017
+train_period: ["2015-01-01", "2016-12-31"]
+eval_period:  ["2017-01-01", "2017-12-31"]
+
+n_train_days: 20   # sum of train_windows[*][2]
+n_eval_days:  8    # sum of eval_windows[*][2]
+
+# ----- Grid + dycore ------------------------------------------------
+# Gaussian grid (SFNO requires this; classical + column_nn also run
+# on it, giving every AIMIP variant a common evaluation grid).
+#
+# T21 L8 is a tractable production-relevant intercomparison size
+# that fits a 25-day single-epoch run per variant in a ~10-min
+# compute budget on a single GPU.  Bump to T28 L8 or T42 L10 for a
+# fuller multi-month / multi-epoch sweep (will require multi-hour
+# wall clock per variant).
+aimip_grid: "gaussian"
+n_max: 21            # spectral truncation (T21 ≈ 5.6° grid)
+nlev: 8              # vertical levels (sigma)
+dt: 1800.0           # 30-minute dycore timestep
+
+# ----- Training -----------------------------------------------------
+# Cap epochs at a generous upper bound; early stopping (patience +
+# min_delta) will terminate once the loss plateaus, matching the
+# AIMIP guideline of "stop training when no improvement after
+# several months" (one epoch = full pass over the windowed train
+# set, ~tens of model-days of physics integration).
+aimip_n_epochs: 3
+aimip_patience: 2          # stop if no improvement for 2 consecutive epochs
+aimip_min_delta: 1.0e-3    # minimum loss improvement to reset patience
+aimip_lr: 3.0e-4
+aimip_warmup: 5
+aimip_weight_decay: 1.0e-5
+aimip_grad_clip: 1.0
+aimip_optimizer: "adamw"  # muon | adamw | adam — see ml/training.create_optimizer
+
+# Radiation backend for the classical variant:
+#   gray   — Frierson two-stream analytic (default, tractable);
+#            differentiates tau_equator, tau_pole only.  ~30s/sample
+#            at T21 L8 on a single GPU after compile.
+#   rrtmgp — Correlated-k LW+SW with explicit cloud-radiation
+#            coupling driven by the trainable Xu-Randall config.
+#            Production-grade realism but ~10-100x slower; needs
+#            GPU acceleration for multi-week training.
+aimip_radiation: "gray"
+aimip_rad_update_interval: 6   # RRTMGP fire every N dycore steps (3h at dt=1800s)
+
+# ----- Loss (LossConfig fields from training/losses.py) ------------
+loss:
+  w_T: 1.0
+  w_u: 0.5
+  w_v: 0.5
+  w_q: 0.2
+  w_ps: 0.3
+  spectral_weight: 0.0
+  level_weighting: "pressure"
+  normalize_by_scale: true
+  T_scale: 30.0
+  wind_scale: 20.0
+  q_scale: 5.0e-3
+  ps_scale: 1000.0
+
+# ----- Output -------------------------------------------------------
+output_dir: "results/aimip_001"

@@ -111,6 +111,16 @@ class OceanConfig(NamedTuple):
     fix_volume: bool = True
     fix_heat: bool = True
     fix_salt: bool = True
+    # Bottom drag (mirror of LatLonCGridOceanConfig). ``bottom_drag_r > 0``
+    # enables linear drag ``du/dt|_drag = -r*u/h_bot`` on the bottom
+    # cell; setting ``bottom_drag_bg_velocity > 0`` lifts it to the
+    # MOM6 quadratic-with-floor form. ``bottom_drag_bbl_thickness > 0``
+    # spreads the drag over a fixed Ekman thickness (Killworth &
+    # Edwards 1999) instead of dumping it into a possibly very thin
+    # partial cell.
+    bottom_drag_r: float = 0.0
+    bottom_drag_bg_velocity: float = 0.0
+    bottom_drag_bbl_thickness: float = 0.0
     # 2-D Laplacian damping used in barotropic subcycling.
     # Per-substep coefficient is alpha * (dt_s / dt_ref) * area * laplacian(...),
     # so the damping is explicitly dt-scaled and tunable.
@@ -526,7 +536,7 @@ class LatLonCGridOceanConfig(NamedTuple):
                                     # either too strong (zonal) or too weak
                                     # (meridional).
     B_h: float = 0.0
-    B_h_lat_scaling: bool = True   # Apply cos⁴(lat) scaling to B_h.
+    B_h_lat_scaling: bool = True   # Apply (cos(lat)/cos_max)⁴ scaling to B_h.
                                     # Default True (MOM6 convention) prevents
                                     # CFL violation at poles where dx shrinks.
                                     # Set False to keep full B_h everywhere
@@ -658,7 +668,7 @@ class LatLonCGridOceanConfig(NamedTuple):
     #   nonlinear limiters (TVD, WENO, FCT).
     tracer_time_integrator: str = "euler"
     ab2_epsilon: float = 0.1  # AB2 stabilization (MITgcm ABepsBar)
-    # Implicit (backward-Euler) vertical mixing.  When True:
+    # Implicit (backward-Euler) vertical mixing.  When True (default):
     #   1. The PE tendency function skips the explicit ``A_v`` viscous
     #      block (lines tagged ``if config.A_v > 0 ...``).
     #   2. The vertical-mixing and ``enhanced_diffusion`` convection
@@ -673,5 +683,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     # Removes the explicit-diffusion CFL limit ``dt < dz² / (2 K)``,
     # which becomes binding when ``K_conv = 1 m²/s`` is active with
     # surface dz < 30 m or when vertical resolution is increased.
-    # MOM6 / NEMO / POP / MITgcm all use this approach.
-    implicit_vertical_mixing: bool = False
+    # MOM6 / NEMO / POP / MITgcm all use this approach, and MPAS
+    # (`MPASOceanConfig`) also defaults True. The lat-lon default was
+    # flipped from False to True on 2026-05-14 after a DINO forced run
+    # at j=0,i=26 hit the explicit-CFL bound under KPP-driven cold
+    # restoring (see docs/ocean_experiments/dino_replication_plan.md
+    # Finding 5). Set explicit ``implicit_vertical_mixing=False`` to
+    # reproduce the historical explicit-diffusion behavior.
+    implicit_vertical_mixing: bool = True

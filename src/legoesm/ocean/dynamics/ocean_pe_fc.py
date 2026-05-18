@@ -354,6 +354,66 @@ def ocean_baroclinic_tendencies_fc(
         dT_dt = dT_dt + phys.dT_dt.data
         dS_dt = dS_dt + phys.dS_dt.data
 
+    # --- 11b. Bottom drag (linear or MOM6-style quadratic-with-floor) ---
+    # Mirror of the lat-lon C-grid path in ``ocean_pe_latlon_cgrid.py:1649``.
+    # Drag acts on the full velocity (not the baroclinic perturbation).
+    # Two modes selected by ``config.bottom_drag_bbl_thickness``:
+    #   * ``H_BBL <= 0`` -- single-cell drag at the bottom level:
+    #         du/dt |_drag = -r_eff * u / max(h_bot, 1e-10)
+    #   * ``H_BBL > 0``  -- distributed BBL drag spread over a fixed
+    #         Ekman thickness ``H_BBL`` near the seafloor (Killworth &
+    #         Edwards 1999 / MOM6 BBL_thick_min); reduces the partial-
+    #         cell rate spike when the bottom layer is thin.
+    # Setting ``config.bottom_drag_bg_velocity > 0`` lifts the linear
+    # form to the MOM6 quadratic-with-floor formula.
+    if getattr(config, "bottom_drag_r", 0.0) > 0.0:
+        u_bg = float(getattr(config, "bottom_drag_bg_velocity", 0.0))
+        if u_bg > 0.0:
+            Cd_eq = config.bottom_drag_r / u_bg
+            r_eff_u = Cd_eq * jnp.sqrt(u * u + u_bg * u_bg)
+            r_eff_v = Cd_eq * jnp.sqrt(v * v + u_bg * u_bg)
+        else:
+            r_eff_u = jnp.broadcast_to(config.bottom_drag_r, u.shape)
+            r_eff_v = jnp.broadcast_to(config.bottom_drag_r, v.shape)
+
+        H_BBL = float(getattr(config, "bottom_drag_bbl_thickness", 0.0))
+        if H_BBL > 0.0:
+            # Distributed-BBL drag. h_k shape (6, n, n, nlev) so we can
+            # build the interface depths along the last axis and compute
+            # the overlap of each cell with the band [z_seafloor,
+            # z_seafloor + H_BBL].
+            z_half_top = jnp.zeros(h_k.shape[:-1] + (1,), dtype=h_k.dtype)
+            z_half = jnp.concatenate(
+                [z_half_top, -jnp.cumsum(h_k, axis=-1)], axis=-1,
+            )
+            z_top = z_half[..., :-1]
+            z_bot = z_half[..., 1:]
+            z_seafloor = z_half[..., -1:]
+            bbl_top = z_seafloor + H_BBL
+            overlap = jnp.maximum(
+                0.0,
+                jnp.minimum(z_top, bbl_top)
+                - jnp.maximum(z_bot, z_seafloor),
+            )
+            total_overlap = jnp.sum(overlap, axis=-1, keepdims=True)
+            h_bbl_eff = jnp.minimum(
+                jnp.maximum(total_overlap, 1e-10), H_BBL,
+            )
+            h_safe = jnp.maximum(h_k, 1e-10)
+            drag_factor = overlap / (h_safe * h_bbl_eff)
+            du_dt = du_dt - r_eff_u * u * drag_factor
+            dv_dt = dv_dt - r_eff_v * v * drag_factor
+        else:
+            # Single-cell drag at the bottom level only. h_k bottom is
+            # ``h_k[..., -1]``; we add ``-r_eff * u / h_bot`` to that
+            # level via a one-hot mask along the level axis.
+            h_bot = jnp.maximum(h_k[..., -1:], 1e-10)
+            nlev_local = u.shape[-1]
+            bot_onehot = jnp.zeros_like(h_k)
+            bot_onehot = bot_onehot.at[..., -1].set(1.0)
+            du_dt = du_dt - r_eff_u * u * bot_onehot / h_bot
+            dv_dt = dv_dt - r_eff_v * v * bot_onehot / h_bot
+
     # --- 12. Land masking ---
     du_dt = du_dt * mask_3d
     dv_dt = dv_dt * mask_3d

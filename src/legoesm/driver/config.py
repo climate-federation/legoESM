@@ -19,6 +19,15 @@ from typing import NamedTuple
 from legoesm import constants
 
 
+# Canonical AIMIP variant set.  Single source of truth — imported by
+# ``scripts/run_aimip.py`` and the ``validate_strict`` rule below.
+# Empty string = not an AIMIP run (preserves backward-compat for
+# existing AMIP configs).
+AIMIP_VARIANTS: tuple[str, ...] = (
+    "", "classical", "column_nn", "sfno_physics", "sfno_full",
+)
+
+
 class GridConfig(NamedTuple):
     """Horizontal and vertical grid configuration."""
     grid_type: str = "cubed_sphere"  # cubed_sphere, gaussian, latlon, voronoi
@@ -176,6 +185,13 @@ class ExperimentConfig(NamedTuple):
     physics_parameterization_layers: int = 3
     physics_parameterization_seed: int = 0
 
+    # AIMIP intercomparison variant tag.  Empty string => not an AIMIP run
+    # (preserves backward compatibility for all existing AMIP configs).
+    # When set, ``scripts/run_aimip.py`` dispatches to the matching
+    # training entry point and ``validate_strict`` enforces the
+    # corresponding scheme prerequisites.
+    aimip_variant: str = ""  # "", classical, column_nn, sfno_physics, sfno_full
+
     # Performance
     precision: str = "fp32"           # fp32, fp64, mixed, or mixed_fp64_storage
     gradient_checkpoint: bool = False  # wrap scan body with jax.checkpoint for AD
@@ -251,6 +267,35 @@ class ExperimentConfig(NamedTuple):
             errors.append(f"ic must be one of {_valid_ic}, got {self.ic!r}")
         if self.ic == "era5" and not self.ic_path:
             errors.append("ic='era5' requires ic_path to be set")
+
+        if self.aimip_variant not in AIMIP_VARIANTS:
+            errors.append(
+                f"aimip_variant must be one of {AIMIP_VARIANTS}, "
+                f"got {self.aimip_variant!r}"
+            )
+        if self.aimip_variant == "classical":
+            if self.convection != "tiedtke":
+                errors.append(
+                    "aimip_variant='classical' requires convection='tiedtke', "
+                    f"got {self.convection!r}"
+                )
+            if self.turbulence != "louis":
+                errors.append(
+                    "aimip_variant='classical' requires turbulence='louis', "
+                    f"got {self.turbulence!r}"
+                )
+            if self.gravity_wave_drag != "mcfarlane":
+                errors.append(
+                    "aimip_variant='classical' requires "
+                    "gravity_wave_drag='mcfarlane', "
+                    f"got {self.gravity_wave_drag!r}"
+                )
+            if self.cloud_scheme != "xu_randall":
+                errors.append(
+                    "aimip_variant='classical' requires "
+                    "cloud_scheme='xu_randall', "
+                    f"got {self.cloud_scheme!r}"
+                )
 
         if errors:
             raise ValueError(
