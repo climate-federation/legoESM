@@ -457,6 +457,37 @@ def _laplacian_smooth_gaussian(arr: np.ndarray, passes: int = 1) -> np.ndarray:
     return result
 
 
+def smooth_phis_cubed_sphere(
+    phis: jnp.ndarray,
+    smoothing_passes: int = 4,
+    edge_blend_strength: float = 0.3,
+) -> jnp.ndarray:
+    """Apply standard cubed-sphere topography smoothing to a phis field.
+
+    Applies the same Laplacian + edge-blend pipeline used by
+    :func:`load_real_topography` so that ERA5-derived or other externally
+    regridded phis fields receive equivalent gradient reduction at face
+    boundaries before being used as model initial conditions.
+
+    Parameters
+    ----------
+    phis : (6, n, n) surface geopotential [m^2/s^2]
+    smoothing_passes : int
+        Number of Laplacian smoothing passes.  Default matches
+        ``TopographyConfig.smoothing_passes = 4``.
+    edge_blend_strength : float
+        Face-edge blend strength.  Default matches
+        ``TopographyConfig.edge_blend_strength = 0.3``.
+
+    Returns
+    -------
+    (6, n, n) smoothed surface geopotential [m^2/s^2]
+    """
+    phis_np = np.asarray(phis)
+    phis_np = _laplacian_smooth_cubed_sphere(phis_np, passes=smoothing_passes)
+    return blend_scalar_cube_edges_2d(jnp.asarray(phis_np), strength=edge_blend_strength)
+
+
 def load_real_topography(
     grid,
     config: TopographyConfig | None = None,

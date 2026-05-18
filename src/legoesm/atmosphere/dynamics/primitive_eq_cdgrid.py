@@ -1387,30 +1387,14 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         dt: float,
         physics_fn=None,
     ) -> HydrostaticState:
-        """Cell-centre wrapper: cc winds → D-grid corners (entry); back to cc (exit)."""
-        # Batched cc → D-grid interp for (u, v)
-        _u_in = state.u.data
-        _v_in = state.v.data
-        _ni_face, _ni_i, _ni_j, _ni_lev = _u_in.shape
-        _uv_in = jnp.stack([_u_in, _v_in], axis=-1)
-        _uv_d_flat = _interp_center_to_corner(
-            _uv_in.reshape(_ni_face, _ni_i, _ni_j, _ni_lev * 2),
-            self.cdgrid,
-        )
-        _uv_d = _uv_d_flat.reshape(
-            _uv_d_flat.shape[0], _uv_d_flat.shape[1], _uv_d_flat.shape[2],
-            _ni_lev, 2,
-        )
-        u_d = _uv_d[..., 0]
-        v_d = _uv_d[..., 1]
-        fv3_state = FV3HydrostaticState(
-            u_d=state.u.replace(data=u_d, name="u_d"),
-            v_d=state.v.replace(data=v_d, name="v_d"),
-            T=state.T,
-            p_s=state.p_s,
-            phis=state.phis,
-            tracers=state.tracers,
-        )
+        """Cell-centre wrapper: cc winds → D-grid corners (entry); back to cc (exit).
+
+        Uses hydrostatic_to_fv3 (vector-aware halo exchange) to convert from
+        cell-centred to D-grid.  The old scalar _interp_center_to_corner left
+        spurious face-edge divergence ∝ wind speed — visible as immediate blowup
+        for ERA5 ICs with ~100 m/s polar-vortex winds.
+        """
+        fv3_state = hydrostatic_to_fv3(state, self.cdgrid)
         fv3_new = self._step_fv3(fv3_state, dt, physics_fn=physics_fn)
         return fv3_to_hydrostatic(fv3_new, self.cdgrid)
 
