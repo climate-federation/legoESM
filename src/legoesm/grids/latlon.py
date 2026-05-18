@@ -898,6 +898,13 @@ def create_latlon_geometry(
                 f"lat_1d must have shape ({n_lat},), got {lat_1d.shape}"
             )
         dlat = lat_1d[1] - lat_1d[0] if n_lat > 1 else jnp.pi / n_lat
+        # Check for variable dlat (Mercator): compare spacing at the
+        # boundary vs the middle of the domain.
+        if n_lat > 4:
+            _dlat_mid = lat_1d[n_lat // 2] - lat_1d[n_lat // 2 - 1]
+            _is_variable_dlat = abs(float(_dlat_mid - dlat)) > 1e-6 * abs(float(dlat))
+        else:
+            _is_variable_dlat = False
 
     if lon_1d is None:
         dlon = 2.0 * jnp.pi / n_lon
@@ -921,9 +928,33 @@ def create_latlon_geometry(
 
     # Legacy fields that match create_latlon_grid bit-exact
     f_legacy = 2.0 * omega * sin_lat_1d[:, None] * jnp.ones((1, n_lon))
-    area_legacy = (
-        radius**2 * dlat * dlon * cos_lat_1d[:, None] * jnp.ones((1, n_lon))
-    )
+
+    # For variable-dlat grids (Mercator), compute per-row cell heights
+    # from lat_face differences (exact spherical area).
+    if _is_variable_dlat:
+        # Reconstruct face latitudes from cell centers (inverse of
+        # Mercator center placement).  Face j sits halfway between
+        # center j-1 and center j.
+        lat_face_interior = 0.5 * (lat_1d[:-1] + lat_1d[1:])  # (n_lat-1,)
+        # Extend to south and north boundaries symmetrically
+        lat_face_south = lat_1d[0] - 0.5 * (lat_1d[1] - lat_1d[0])
+        lat_face_north = lat_1d[-1] + 0.5 * (lat_1d[-1] - lat_1d[-2])
+        lat_face = jnp.concatenate([
+            jnp.array([lat_face_south]),
+            lat_face_interior,
+            jnp.array([lat_face_north]),
+        ])  # (n_lat+1,)
+        dlat_1d = lat_face[1:] - lat_face[:-1]  # (n_lat,) per-row dlat
+        # Exact spherical area: R² * dlon * |sin(φ_face[j+1]) - sin(φ_face[j])|
+        sin_face = jnp.sin(lat_face)
+        area_lat_1d = radius**2 * dlon * jnp.abs(sin_face[1:] - sin_face[:-1])
+        area_legacy = area_lat_1d[:, None] * jnp.ones((1, n_lon))
+    else:
+        dlat_1d = None  # uniform — use scalar dlat everywhere
+        area_legacy = (
+            radius**2 * dlat * dlon * cos_lat_1d[:, None] * jnp.ones((1, n_lon))
+        )
+
     total_area = jnp.sum(area_legacy)
 
     # Cast 1D coordinates + legacy fields to storage dtype.  All
@@ -937,9 +968,13 @@ def create_latlon_geometry(
     # ------- T-point metrics -------
     # Single-cell zonal width: R * dlon * cos(lat)
     dx_T = radius * dlon * cos_lat_s[:, jnp.newaxis] * jnp.ones((1, n_lon))
-    # Single-cell meridional height: R * dlat (constant)
-    dy_T = jnp.full((n_lat, n_lon), float(radius * dlat), dtype=dtype)
-    # Cell area — use the cast cos_lat so this matches the operator path
+    # Single-cell meridional height
+    if dlat_1d is not None:
+        # Variable dlat (Mercator): per-row cell height
+        dy_T = (_c(radius * dlat_1d))[:, jnp.newaxis] * jnp.ones((1, n_lon))
+    else:
+        dy_T = jnp.full((n_lat, n_lon), float(radius * dlat), dtype=dtype)
+    # Cell area — use exact spherical area for variable-dlat grids
     area_T = _c(area_legacy)
 
     # ------- u-point metrics (n_lat, n_lon+1) -------
@@ -948,8 +983,11 @@ def create_latlon_geometry(
         radius * dlon * cos_lat_s[:, jnp.newaxis]
         * jnp.ones((1, n_lon + 1))
     )
-    # dy_u = R * dlat (meridional extent of the u-face)
-    dy_u = jnp.full((n_lat, n_lon + 1), float(radius * dlat), dtype=dtype)
+    # dy_u = meridional extent of the u-face
+    if dlat_1d is not None:
+        dy_u = (_c(radius * dlat_1d))[:, jnp.newaxis] * jnp.ones((1, n_lon + 1))
+    else:
+        dy_u = jnp.full((n_lat, n_lon + 1), float(radius * dlat), dtype=dtype)
 
     # ------- v-point metrics (n_lat+1, n_lon) -------
     # v-face latitudes: midpoints between cell centers, with poles at
@@ -964,8 +1002,22 @@ def create_latlon_geometry(
         radius * cos_lat_v[:, jnp.newaxis] * dlon
         * jnp.ones((1, n_lon))
     )
-    # dy_v = R * dlat — meridional spacing
-    dy_v = jnp.full((n_lat + 1, n_lon), float(radius * dlat), dtype=dtype)
+    # dy_v = meridional spacing at v-faces
+    if dlat_1d is not None:
+        # Variable dlat: v-face spacing = distance between adjacent cell
+        # centers.  Interior: 0.5*(dlat[j] + dlat[j+1]).  Boundary: dlat[0]
+        # and dlat[-1] for the half-cells at the poles.
+        dy_v_interior = 0.5 * radius * (dlat_1d[:-1] + dlat_1d[1:])  # (n_lat-1,)
+        dy_v_south = radius * dlat_1d[0]
+        dy_v_north = radius * dlat_1d[-1]
+        dy_v_1d = jnp.concatenate([
+            jnp.array([float(dy_v_south)]),
+            _c(dy_v_interior),
+            jnp.array([float(dy_v_north)]),
+        ])  # (n_lat+1,)
+        dy_v = dy_v_1d[:, jnp.newaxis] * jnp.ones((1, n_lon))
+    else:
+        dy_v = jnp.full((n_lat + 1, n_lon), float(radius * dlat), dtype=dtype)
 
     # ------- Vertex (q-point) area (n_lat+1, n_lon+1) -------
     # Matches curl_vertex_cgrid: A_q(i) = R^2 * dlon * |sin(lat[i]) - sin(lat[i-1])|

@@ -1,8 +1,10 @@
 # MPAS vs Lat-Lon 1° Comparison Experiments
 
-**Status**: ETOPO runs in progress (2026-05-14). 5 bugs fixed, 2Δy
-instability fully diagnosed, Mercator grid confirmed as fix. MPAS 20yr
-flat-bottom completed. MPAS ETOPO + Mercator baroclinic running.
+**Status** (2026-05-18): All ETOPO runs completed. CRITICAL finding:
+ico5 is ~223 km (~2°), not ~120 km — the MPAS-vs-Mercator comparison
+has a 4× resolution mismatch at 60°S. ACC differences (132 vs 105 Sv)
+are likely resolution-dominated, not grid-type-dominated. Need ico6
+(~112 km, 1°) for a fair comparison.
 
 ## Quick Start: How to Run Experiments
 
@@ -46,7 +48,7 @@ Full parameter list (explicit + script defaults):
 
 For flat bottom, add `--flat-bottom` (validated in MBR2, 20yr stable).
 
-### Best Mercator run (MRC_ETOPO1 — in progress)
+### Best Mercator run (MRC_ETOPO1 — completed 10yr, ACC=105 Sv)
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 JAX_ENABLE_X64=1 python scripts/global_overturning/run_comparison_latlon.py \
@@ -144,7 +146,7 @@ Explicit CLI flags always override config.json values.
 
 ## Goal
 
-Run matched MPAS Voronoi (ico5, ~120 km) and lat-lon C-grid (180×360, 1°)
+Run matched MPAS Voronoi (ico5, ~223 km / ~2°) and lat-lon C-grid
 global ocean simulations with ETOPO bathymetry and identical idealized
 forcing. Isolate grid-dependent vs physics-dependent behavior in
 circulation, energetics, noise, and stability.
@@ -186,7 +188,8 @@ circulation, energetics, noise, and stability.
 | B_h | 0.0 |
 
 Note: effective Smagorinsky viscosity differs because Δ differs
-(uniform ~120 km on MPAS, varies ~111→19 km with latitude on lat-lon).
+(uniform ~223 km on ico5 MPAS, varies ~111→19 km with latitude on Mercator).
+**WARNING**: ico5 is ~2°, not ~1°. See "Resolution mismatch" section.
 This is by design — same coefficient, grid-adapted effective viscosity.
 
 ### Vertical Mixing (matched)
@@ -274,7 +277,7 @@ This is by design — same coefficient, grid-adapted effective viscosity.
 
 | Aspect | MPAS | Lat-Lon |
 |--------|------|---------|
-| Cell geometry | Quasi-uniform ~120 km | ~111 km (eq) → ~19 km (80°N) |
+| Cell geometry | Quasi-uniform ~223 km (ico5) | ~111 km (eq) → ~19 km (80°N) |
 | Staggering | TRiSK (normal vel on edges) | C-grid (u,v on faces) |
 | K_zeta_bih | 1e14 (TRiSK null mode) | N/A (C-grid has no null mode) |
 | Smoothing topology | Voronoi neighbors | 4-neighbor roll |
@@ -362,11 +365,11 @@ Exp 0: Baseline (30 days, fp64)
 │
 ├── 2Δy source isolation (lat-lon, flat bottom, 180 days each):
 │   ├── BT_uniform            — uniform T, wind only         → 2Δy saturates (not BT)
-│   ├── BC_strat_windonly      — stratified T, wind only      → RUNNING
-│   ├── BC_strat_windonly_kpp  — + KPP                        → RUNNING
-│   ├── BC_strat_windonly_conv — + enhanced diffusion          → RUNNING
-│   ├── BC_strat_restore       — + T/S restoring              → RUNNING
-│   └── BC_full_noGM           — + KPP + conv, no GM          → RUNNING
+│   ├── BC_strat_windonly      — stratified T, wind only      → killed (superseded)
+│   ├── BC_strat_windonly_kpp  — + KPP                        → killed (superseded)
+│   ├── BC_strat_windonly_conv — + enhanced diffusion          → killed (superseded)
+│   ├── BC_strat_restore       — + T/S restoring              → killed (superseded)
+│   └── BC_full_noGM           — + KPP + conv, no GM          → killed (superseded)
 │
 ├── B_h_barotropic tests:
 │   ├── BHT_strat_windonly  — B_h_bt=2e12, strat+wind  → BLOWUP day 110
@@ -436,11 +439,11 @@ Exp 0: Baseline (30 days, fp64)
 │   │   BR17: A_h=1e5, kr=1200, 100m → 2dy=6.0e-4 day 120 (6× at day 90)
 │   │   BR18: A_h=1e5, kr=2400, 100m → 2dy peaks 5.9e-4 (day 180)
 │   │         then DROPS to 3.7e-7 by year 10! ← SELF-STABILIZING
-│   │         Extended 20 more years (RUNNING on GPU 0)
+│   │         Extended 20 more years (COMPLETED)
 │   │
 │   └── v3 (higher GM + S_max):
 │       BR19: A_h=1e5, kGM=2400, kr=2400, S_max=0.01, 100m complement
-│       10 years (RUNNING on GPU 1)
+│       10 years (COMPLETED, stable, residual 4-5Δy bands)
 │
 ├── Key findings (2026-05-13):
 │   ├── 2Δy has TWO components: barotropic seed + baroclinic amplification
@@ -467,7 +470,7 @@ Exp 0: Baseline (30 days, fp64)
 │   ├── MBT2: A_h=1e5, uniform T → stable 120d, max|u|=0.83
 │   ├── MBR1: A_h=1e5, stratified, full physics → stable 120d, max|u|=0.67
 │   │   NO 2Δy instability! Confirms it's lat-lon-specific (grid anisotropy)
-│   └── MBR2: A_h=1e5, kGM=kRedi=2400, S_max=0.01, 20yr → RUNNING
+│   └── MBR2: A_h=1e5, kGM=kRedi=2400, S_max=0.01, 20yr → COMPLETED
 │
 ├── MPAS vs lat-lon spinup comparison (day ~1000):
 │   ├── MPAS (MBR2): smooth, classic linear spinup. max|u|=0.51
@@ -983,7 +986,7 @@ References:
 - Ferrari complement v1 (taper-based): ineffective (taper ≈ 1 in interior)
 - Ferrari complement v2 (100m depth-based): combined with κ_Redi=2400,
   self-stabilizing (BR18: peaks at 5.9e-4, drops to 3.7e-7 by year 10)
-- GM κ=2400 + S_max=0.01 testing in progress (BR19)
+- GM κ=2400 + S_max=0.01 (BR19): completed 10yr, stable with residual bands
 
 ### Key insights
 1. The 2Δy instability has two components that require separate fixes:
@@ -1064,7 +1067,7 @@ References:
    0.0% grid-scale power through 8 months barotropic and 10yr
    baroclinic runs. Requires dt=600s (half of MPAS) due to small
    polar cells (19 km at 80°). Production Mercator config validated
-   for flat bottom; ETOPO run in progress with DINO stability knobs
+   for flat bottom; ETOPO run completed with DINO stability knobs
    (Hollingsworth correction + slope_foot_alpha).
 
 5. **Float32 precision** is insufficient for thin partial cells —
@@ -1108,7 +1111,7 @@ References:
 | 1 | Mercator grid, A_h=1e4, uniform T | MRC_BT1 | **0.0% 2Δy power** 8 months | Isotropic cells eliminate KE aliasing channel |
 | 2 | A_h=1e5, stratified, dt=1200s | MRC_BR1 | BLOWUP day 20 | Polar cells (19km) need smaller dt |
 | 3 | dt → 600s | MRC_BR1 | **Stable 10yr** | CFL resolved; production flat-bottom config |
-| 4 | Add ETOPO + Hollingsworth + slope_foot | MRC_ETOPO1 | **Running (~yr 7)** | DINO stability knobs for sloping bathy |
+| 4 | Add ETOPO + Hollingsworth + slope_foot | MRC_ETOPO1 | **Stable 10yr, ACC=105 Sv** | DINO stability knobs for sloping bathy |
 
 ### Working configurations
 
@@ -1123,7 +1126,7 @@ KPP (K_conv=1.0), enhanced diffusion convection, dt=1200s, fp64.
 
 **Mercator (MRC_BR1):** A_h=1e5, C_smag_lap=0.33, κ_GM=κ_Redi=2400,
 S_max=0.01, implicit CN barotropic, KPP (K_conv=1.0), enhanced diffusion
-convection, dt=600s, fp64. **In progress.**
+convection, dt=600s, fp64. **Completed 10yr, ACC=105 Sv.**
 
 ### Completed runs
 
@@ -1237,20 +1240,93 @@ Key DINO findings relevant to our ETOPO runs:
 5. **A_h_eq_boost** — equatorial viscosity boost. NOT used in our runs
    (flat-bottom MRC_BR1 was stable without it, so not needed).
 
-### Runs in progress (2026-05-14)
+### CRITICAL: Resolution mismatch between grids (2026-05-18)
 
-- **MRC_ETOPO1** (Mercator 278×360, ETOPO bathymetry, A_h=1e5,
-  A_h_floor=1000, ke_gradient=hollingsworth, slope_foot_alpha=3.0,
-  κ_GM=κ_Redi=2400, S_max=0.01, dt=600s, 10yr): GPU 1, ~year 7.
+The comparison is confounded by a **large resolution mismatch**. ico5
+is ~223 km (~2°), NOT the ~120 km (~1°) assumed earlier. Verified:
+
+| Grid | Resolution | nCells | Cell spacing |
+|------|-----------|--------|--------------|
+| MPAS ico5 | ~2° uniform | 10,242 | 223 km everywhere |
+| MPAS ico6 | ~1° uniform | 40,962 | 112 km everywhere |
+| Mercator 278×360 | variable | 100,080 | 111 km (eq) → 19 km (80°) |
+
+Resolution comparison at key latitudes:
+
+| Latitude | Mercator dx=dy | MPAS ico5 dx | Ratio |
+|----------|---------------|-------------|-------|
+| Equator | 111 km | 223 km | 2× |
+| 40°S | 85 km | 223 km | 2.6× |
+| **60°S (ACC)** | **56 km** | **223 km** | **4×** |
+| 70°S | 38 km | 223 km | 6× |
+
+**Mercator is 4-6× finer than MPAS in the Southern Ocean where the
+ACC lives.** This resolution difference likely dominates the ACC
+transport difference (105 Sv Mercator vs 80 Sv MPAS at year 10).
+The comparison is NOT grid-type-at-matched-resolution — it is
+coarse-MPAS vs fine-Mercator.
+
+**Implications:**
+1. ACC transport differences cannot be attributed to grid type alone.
+2. For a fair grid-type comparison, need either:
+   - MPAS ico6 (~112 km, matches Mercator at equator but still 2×
+     coarser at 60°S). 4× more cells → 4× slower.
+   - Mercator at 2° (`--n-lon 180`, ~138×180) to match ico5. Quick
+     to run but poor resolution in the ACC region.
+3. The K_zeta_bih damping on MPAS (which has no Mercator equivalent)
+   further confounds the comparison beyond resolution.
+4. Previous statements about "MPAS produces weaker ACC" should be
+   read as "coarser MPAS produces weaker ACC" — expected from
+   resolution alone.
+
+### All ETOPO runs completed (2026-05-18)
+
+| Run | Grid | Resolution | A_h | Duration | ACC yr 10 | ACC yr 20 | max|u| |
+|-----|------|-----------|-----|----------|-----------|-----------|--------|
+| METOPO1 | MPAS ico5 | ~223 km | 1e5 | 20yr | ~80 Sv | **132 Sv** | 0.46 |
+| METOPO2 | MPAS ico5 | ~223 km | 1e4 | 10yr | **95 Sv** | — | 0.86 |
+| MRC_ETOPO1 | Mercator | 56-111 km | 1e5 | 10yr | **105 Sv** | — | 1.03 |
+| Observed | | | | ~137 Sv | ~137 Sv | |
+
+Key findings:
+- MPAS METOPO1 reaches **132 Sv** at year 20 — near observed ACC.
+- Lower viscosity MPAS (METOPO2, A_h=1e4) has stronger ACC at yr 10
+  (95 vs 80 Sv) and 2× more KE. Still spinning up.
+- Mercator ETOPO stable with DINO knobs (Hollingsworth + slope_foot).
+- All three are physically reasonable at year 10.
+- Drake transport computation on MPAS required proper edge-crossing
+  method (old longitude-band method underestimated by 2-30×).
+
+Drake Passage sections (u, T) at year 10: 
+`results/ocean/comparison_mpas_v_latlon/drake_sections_year10_comparison.png`
+
+ACC transport timeseries:
+`results/ocean/comparison_mpas_v_latlon/drake_transport_etopo_comparison.png`
 
 ### Path forward
 
-1. If MRC_ETOPO1 stable: compare with METOPO1 (MPAS ETOPO) — first
-   matched isotropic-grid vs Voronoi comparison with real bathymetry.
-2. Extend METOPO2 (A_h=1e4) to 20yr on GPU 0 to see if ACC catches up.
-3. Compare all three ETOPO runs: circulation, ACC, WBCs, overturning.
-4. Consider lowering Mercator A_h if ETOPO run is over-damped.
-5. `config.json` saved automatically for all new runs (added 2026-05-14).
+**Priority 1: Fix resolution mismatch.** Current comparison (ico5 vs
+Mercator) has 4× resolution difference at 60°S. Options:
+- **MPAS ico6** (~112 km, ~1°): matches Mercator at equator. 40,962
+  cells = 4× more than ico5. ~4× slower per simulated year. Still 2×
+  coarser than Mercator at 60°S (inherent to uniform vs variable grid).
+- **Mercator 2°** (`--n-lon 180`): matches ico5 at equator. Quick to
+  run. But 2° Mercator at 60°S is ~111 km (still finer than ico5's
+  223 km due to Mercator's cos(lat) compression).
+- **Best approach**: run ico6 ETOPO and compare with current Mercator.
+  The equatorial resolution matches; the Southern Ocean difference
+  (112 km vs 56 km) is the inherent uniform-vs-variable-grid trade-off
+  that IS scientifically interesting to compare.
+
+**Priority 2: Continue current analysis.** The existing runs are still
+valuable for understanding each grid's behavior individually:
+1. Extend METOPO2 (A_h=1e4) to 20yr — does low-visc ACC catch up?
+2. Extend MRC_ETOPO1 to 20yr — does Mercator ACC plateau?
+3. Surface snapshot comparisons across grids (qualitative).
+
+**Priority 3: Other improvements.**
+4. Volume leak fix (#271) for century-scale Mercator runs.
+5. `config.json` saved automatically for all new runs.
 
 ## Honest Caveats
 
@@ -1287,3 +1363,9 @@ Key DINO findings relevant to our ETOPO runs:
    C_smag_lap was lowered to 0.15 (Step 2 of tuning plan). With
    C_smag_lap=0.33 this should be stable, but watch the first
    few months carefully.
+
+6. **Volume leak on Mercator lat-lon** (issue #271): mean eta drifts
+   ~0.4 mm/yr with ETOPO (0.06 mm/yr flat bottom). MPAS conserves to
+   machine precision. Root cause likely in 3D↔barotropic coupling with
+   partial-cell face masking. Negligible for decadal science but would
+   matter for century-scale runs.
