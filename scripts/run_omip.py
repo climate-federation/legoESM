@@ -569,7 +569,8 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         )
 
         config = MPASOceanConfig(
-            A_h=A_h,
+            A_h=1.0e5,    # Higher than PR #261 (1e4) for stability under
+                          # JRA55 forcing over centennial integrations.
             A_v=1.0e-4,   # PR #261 value (generic is 1e-3, too high for MPAS)
             K_v=1.0e-5,   # PR #261 value (generic is 1e-4, too high for MPAS)
             C_smag_lap=0.33,
@@ -2146,10 +2147,21 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                 break
 
             # WOA T/S nudging: dX/dt += (X_woa - X) / tau
+            # After nudging, correct global-mean eta to prevent steric
+            # volume drift from the density change.
             if nudge_woa_tau > 0 and T_woa_3d is not None:
                 nudge_per_step = dt / (nudge_woa_tau * 86400.0)
                 daily_frac = 1.0 - (1.0 - nudge_per_step) ** actual
                 mask_3d = state.land_mask.data[..., jnp.newaxis]
+                mask_2d = state.land_mask.data
+
+                # Save pre-nudge eta mean for volume correction
+                area = grid.areaCell if hasattr(grid, 'areaCell') else None
+                if area is not None:
+                    eta_mean_before = jnp.sum(
+                        state.eta.data * mask_2d * area
+                    ) / jnp.maximum(jnp.sum(mask_2d * area), 1e-10)
+
                 T_nudged = state.T.data + daily_frac * (
                     T_woa_3d - state.T.data) * mask_3d
                 state = state._replace(
@@ -2159,6 +2171,17 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                         S_woa_3d - state.S.data) * mask_3d
                     state = state._replace(
                         S=state.S.replace(data=S_nudged.astype(state.S.data.dtype)))
+
+                # Restore global-mean eta to pre-nudge value so the
+                # nudge doesn't inject/remove volume stericly.
+                if area is not None:
+                    eta_mean_after = jnp.sum(
+                        state.eta.data * mask_2d * area
+                    ) / jnp.maximum(jnp.sum(mask_2d * area), 1e-10)
+                    eta_correction = eta_mean_before - eta_mean_after
+                    eta_corrected = state.eta.data + eta_correction * mask_2d
+                    state = state._replace(
+                        eta=state.eta.replace(data=eta_corrected))
 
             scalars = _extract_scalars(state, grid_type, grid, z_coord)
 
