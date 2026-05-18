@@ -3000,6 +3000,29 @@ def run_omip_single(grid_type: str, args) -> dict:
         H_bathy_final = jnp.where(H_bathy_final <= 0, 0.0, H_bathy_final)
         ocean_mask = jnp.where(H_bathy_final > 0, ocean_mask, 0.0)
 
+        # Mask out semi-enclosed basins that are unresolvable at ico5
+        # (~120 km).  These basins (Baltic, Black Sea, Caspian, White
+        # Sea) have straits narrower than the grid scale, trapping
+        # water and producing 100+ meter SSH accumulation over decades.
+        # Identified from the year-100 WOA run SSH field.
+        _enclosed_basin_cells = {
+            561, 608, 2253, 2286, 2447, 2466, 2472,
+            8787, 8789, 8936, 9064, 9065, 9066, 9083,
+            9579, 9580, 9581, 9735, 9736, 9737, 9742,
+            9825, 9828, 9829, 9849, 9853, 9854, 9855,
+            9861, 9862, 9869, 9872,
+        }
+        basin_mask = np.zeros(grid.nCells, dtype=np.float64)
+        for c in _enclosed_basin_cells:
+            if c < grid.nCells:
+                basin_mask[c] = 1.0
+        n_masked = int(np.sum(basin_mask * np.asarray(ocean_mask > 0.5)))
+        ocean_mask = ocean_mask * (1.0 - jnp.asarray(basin_mask))
+        H_bathy_final = H_bathy_final * (1.0 - jnp.asarray(basin_mask))
+        if n_masked > 0:
+            print(f"  Masked {n_masked} enclosed-basin cells "
+                  f"(Baltic, Black Sea, Caspian, White Sea)")
+
         # Create partial cell coordinate and rebuild model
         pc_coord = create_partial_cell_coordinate(z_coord, H_bathy_final)
         z_coord = pc_coord
