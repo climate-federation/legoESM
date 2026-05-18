@@ -393,6 +393,8 @@ def build_segment_fn(
     albedo_ocean=None,
     ghg_vmr_override=None,
     cloud_cfg_overrides=None,
+    gray_cfg_overrides=None,
+    physics_cfg_overrides=None,
     owned_face_ids=None,
     hs_newtonian_relax=None,
 ):
@@ -491,6 +493,19 @@ def build_segment_fn(
     _cloud_cfg_overrides = (
         jax.tree.map(jnp.asarray, cloud_cfg_overrides)
         if cloud_cfg_overrides else None
+    )
+    # Gray-radiation overrides: a dict of traced scalars (linear_frac,
+    # lw_diff_factor, sfc_emissivity, sw_tau_0, sw_exponent, ...) or None.
+    _gray_cfg_overrides = (
+        jax.tree.map(jnp.asarray, gray_cfg_overrides)
+        if gray_cfg_overrides else None
+    )
+    # Physics-scheme overrides: a dict-of-dicts keyed by scheme
+    # (micro / conv / turb / gwd), each a dict of traced scalar config
+    # fields, or None.  jax.tree.map converts every leaf to a JAX array.
+    _physics_cfg_overrides = (
+        jax.tree.map(jnp.asarray, physics_cfg_overrides)
+        if physics_cfg_overrides else None
     )
     _C_H = jnp.asarray(C_H) if C_H is not None else None
     _C_E = jnp.asarray(C_E) if C_E is not None else None
@@ -617,6 +632,8 @@ def build_segment_fn(
                     albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
                     ghg_vmr_override=_ghg_vmr_override,
                     cloud_cfg_overrides=_cloud_cfg_overrides,
+                    gray_cfg_overrides=_gray_cfg_overrides,
+                    physics_cfg_overrides=_physics_cfg_overrides,
                 )
 
                 # Write physics tendencies back at owned indices.
@@ -685,6 +702,8 @@ def build_segment_fn(
                     albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
                     ghg_vmr_override=_ghg_vmr_override,
                     cloud_cfg_overrides=_cloud_cfg_overrides,
+                    gray_cfg_overrides=_gray_cfg_overrides,
+                    physics_cfg_overrides=_physics_cfg_overrides,
                 )
 
                 # --- State update ---

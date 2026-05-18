@@ -172,6 +172,14 @@ class ExperimentConfig(NamedTuple):
     tau_equator: float = 7.2
     tau_pole: float = 1.8
     tau_moist_coeff: float = 0.0115        # gray-rad moisture LW optical depth [m²/kg]
+    # Additional gray-radiation knobs (GrayRadiationConfig fields), exposed on
+    # ExperimentConfig so the calibration can tune them.  They are threaded to
+    # the gray radiation kernel as a `gray_cfg_overrides` dict; sfc_emissivity
+    # (above) is the fifth gray knob and is reused as-is.
+    linear_frac: float = 0.2               # linear vs sigma^4 LW weighting
+    lw_diff_factor: float = 1.66           # LW diffusivity factor D
+    sw_tau_0: float = 0.22                 # SW optical-depth scale
+    sw_exponent: float = 2.0               # SW optical-depth vertical exponent
     sbm_tau_c: float = 7200.0
     sbm_RH_ref: float = 0.7
     sbm_cape_threshold: float = 70.0
@@ -179,6 +187,23 @@ class ExperimentConfig(NamedTuple):
     sundqvist_evap_coeff: float = 5e-4     # Sundqvist sub-cloud rain evaporation coeff
     cloud_rh_crit: float = 0.7             # cloud-fraction critical RH (CloudConfig)
     cloud_r_eff_liq: float = 10.0e-6       # cloud droplet effective radius [m]
+    # Convection / microphysics / turbulence / GWD scheme knobs exposed for
+    # calibration (AIMIP commit 0c747d4).  These mirror the scheme-config
+    # defaults; the calibration threads them to the schemes as a
+    # `physics_cfg_overrides` dict-of-dicts (keys: micro/conv/turb/gwd).
+    sundqvist_sigmoid_sharpness: float = 20.0   # SundqvistConfig.sigmoid_sharpness
+    sbm_T_min_convect: float = 200.0            # SBMConfig.T_min_convect [K]
+    louis_l_mix_max: float = 100.0              # LouisConfig.l_mix_max [m]
+    louis_Ck: float = 0.4                       # LouisConfig.Ck
+    louis_Ri_crit: float = 0.25                 # LouisConfig.Ri_crit
+    louis_b_louis: float = 5.0                  # LouisConfig.b_louis
+    louis_c_louis: float = 16.6                 # LouisConfig.c_louis
+    louis_d_louis: float = 5.0                  # LouisConfig.d_louis
+    louis_z0: float = 1.0e-4                    # SurfaceLayerConfig.z0 [m]
+    mcfarlane_k_wave: float = 6.283185307e-5    # McFarlaneConfig.k_wave [1/m]
+    mcfarlane_N_ref: float = 0.01               # McFarlaneConfig.N_ref [1/s]
+    mcfarlane_directional_spread: float = 1.0   # McFarlaneConfig.directional_spread
+    mcfarlane_tau_max: float = 10.0             # McFarlaneConfig.tau_max [Pa]
     sigma_b: float = 0.7
     k_BL_max_per_day: float = 1.0
     k_free_per_day: float = 0.1
@@ -469,10 +494,27 @@ class ExperimentConfig(NamedTuple):
             tau_equator=amip_cfg.tau_equator,
             tau_pole=amip_cfg.tau_pole,
             tau_moist_coeff=getattr(amip_cfg, 'tau_moist_coeff', 0.0115),
+            linear_frac=getattr(amip_cfg, 'linear_frac', 0.2),
+            lw_diff_factor=getattr(amip_cfg, 'lw_diff_factor', 1.66),
+            sw_tau_0=getattr(amip_cfg, 'sw_tau_0', 0.22),
+            sw_exponent=getattr(amip_cfg, 'sw_exponent', 2.0),
             sundqvist_auto_rate=getattr(amip_cfg, 'sundqvist_auto_rate', 1e-3),
             sundqvist_evap_coeff=getattr(amip_cfg, 'sundqvist_evap_coeff', 5e-4),
             cloud_rh_crit=getattr(amip_cfg, 'cloud_rh_crit', 0.7),
             cloud_r_eff_liq=getattr(amip_cfg, 'cloud_r_eff_liq', 10.0e-6),
+            sundqvist_sigmoid_sharpness=getattr(amip_cfg, 'sundqvist_sigmoid_sharpness', 20.0),
+            sbm_T_min_convect=getattr(amip_cfg, 'sbm_T_min_convect', 200.0),
+            louis_l_mix_max=getattr(amip_cfg, 'louis_l_mix_max', 100.0),
+            louis_Ck=getattr(amip_cfg, 'louis_Ck', 0.4),
+            louis_Ri_crit=getattr(amip_cfg, 'louis_Ri_crit', 0.25),
+            louis_b_louis=getattr(amip_cfg, 'louis_b_louis', 5.0),
+            louis_c_louis=getattr(amip_cfg, 'louis_c_louis', 16.6),
+            louis_d_louis=getattr(amip_cfg, 'louis_d_louis', 5.0),
+            louis_z0=getattr(amip_cfg, 'louis_z0', 1.0e-4),
+            mcfarlane_k_wave=getattr(amip_cfg, 'mcfarlane_k_wave', 6.283185307e-5),
+            mcfarlane_N_ref=getattr(amip_cfg, 'mcfarlane_N_ref', 0.01),
+            mcfarlane_directional_spread=getattr(amip_cfg, 'mcfarlane_directional_spread', 1.0),
+            mcfarlane_tau_max=getattr(amip_cfg, 'mcfarlane_tau_max', 10.0),
             sbm_tau_c=amip_cfg.sbm_tau_c,
             sbm_RH_ref=amip_cfg.sbm_RH_ref,
             sbm_cape_threshold=getattr(amip_cfg, 'sbm_cape_threshold', 70.0),
@@ -576,10 +618,27 @@ class ExperimentConfig(NamedTuple):
             tau_equator=self.tau_equator,
             tau_pole=self.tau_pole,
             tau_moist_coeff=getattr(self, 'tau_moist_coeff', 0.0115),
+            linear_frac=getattr(self, 'linear_frac', 0.2),
+            lw_diff_factor=getattr(self, 'lw_diff_factor', 1.66),
+            sw_tau_0=getattr(self, 'sw_tau_0', 0.22),
+            sw_exponent=getattr(self, 'sw_exponent', 2.0),
             sundqvist_auto_rate=getattr(self, 'sundqvist_auto_rate', 1e-3),
             sundqvist_evap_coeff=getattr(self, 'sundqvist_evap_coeff', 5e-4),
             cloud_rh_crit=getattr(self, 'cloud_rh_crit', 0.7),
             cloud_r_eff_liq=getattr(self, 'cloud_r_eff_liq', 10.0e-6),
+            sundqvist_sigmoid_sharpness=getattr(self, 'sundqvist_sigmoid_sharpness', 20.0),
+            sbm_T_min_convect=getattr(self, 'sbm_T_min_convect', 200.0),
+            louis_l_mix_max=getattr(self, 'louis_l_mix_max', 100.0),
+            louis_Ck=getattr(self, 'louis_Ck', 0.4),
+            louis_Ri_crit=getattr(self, 'louis_Ri_crit', 0.25),
+            louis_b_louis=getattr(self, 'louis_b_louis', 5.0),
+            louis_c_louis=getattr(self, 'louis_c_louis', 16.6),
+            louis_d_louis=getattr(self, 'louis_d_louis', 5.0),
+            louis_z0=getattr(self, 'louis_z0', 1.0e-4),
+            mcfarlane_k_wave=getattr(self, 'mcfarlane_k_wave', 6.283185307e-5),
+            mcfarlane_N_ref=getattr(self, 'mcfarlane_N_ref', 0.01),
+            mcfarlane_directional_spread=getattr(self, 'mcfarlane_directional_spread', 1.0),
+            mcfarlane_tau_max=getattr(self, 'mcfarlane_tau_max', 10.0),
             sbm_tau_c=self.sbm_tau_c,
             sbm_RH_ref=self.sbm_RH_ref,
             sbm_cape_threshold=self.sbm_cape_threshold,

@@ -162,6 +162,7 @@ class PhysicsPipeline:
                             sundqvist_auto_rate=None,
                             sundqvist_evap_coeff=None,
                             C_H=None, C_E=None,
+                            physics_cfg_overrides=None,
                             q_i=None, q_s=None, q_g=None,
                             N_c=None, N_r=None, N_i=None):
         """Convection + microphysics + BL exchange with held radiation."""
@@ -215,6 +216,35 @@ class PhysicsPipeline:
         if (sundqvist_evap_coeff is not None and _micro_cfg is not None
                 and hasattr(_micro_cfg, 'evap_coeff')):
             _micro_cfg = _micro_cfg._replace(evap_coeff=sundqvist_evap_coeff)
+
+        # Turbulence / GWD scheme configs — base values, optionally
+        # overridden below from the traced ``physics_cfg_overrides``.
+        _turb_cfg = self.turbulence_config
+        _gwd_cfg = self.gwd_config
+        # Traced physics-scheme overrides (calibration): a dict-of-dicts
+        # keyed micro / conv / turb / gwd, each a dict of scheme-config
+        # field values.  Applied here via ``_replace``; fields absent from
+        # the active scheme's config are skipped (hasattr filter).  The
+        # ``turb`` dict may carry a nested ``surface`` sub-dict whose keys
+        # are SurfaceLayerConfig fields (e.g. ``z0``).
+        if physics_cfg_overrides:
+            def _apply_cfg(cfg, ov):
+                if cfg is None or not ov:
+                    return cfg
+                return cfg._replace(
+                    **{k: v for k, v in ov.items() if hasattr(cfg, k)})
+            _micro_cfg = _apply_cfg(_micro_cfg, physics_cfg_overrides.get('micro'))
+            _conv_cfg = _apply_cfg(_conv_cfg, physics_cfg_overrides.get('conv'))
+            _gwd_cfg = _apply_cfg(_gwd_cfg, physics_cfg_overrides.get('gwd'))
+            _turb_ov = physics_cfg_overrides.get('turb')
+            if _turb_ov and _turb_cfg is not None:
+                _surf_ov = _turb_ov.get('surface')
+                _turb_cfg = _apply_cfg(
+                    _turb_cfg,
+                    {k: v for k, v in _turb_ov.items() if k != 'surface'})
+                if _surf_ov and hasattr(_turb_cfg, 'surface'):
+                    _turb_cfg = _turb_cfg._replace(
+                        surface=_apply_cfg(_turb_cfg.surface, _surf_ov))
 
         if conv_prog is None:
             if _conv_cfg is not None and hasattr(_conv_cfg, 'M_c_init'):
@@ -277,7 +307,7 @@ class PhysicsPipeline:
                 M_c=conv_prog,
                 dt=dt,
                 mass_flux_config=_conv_cfg,
-                louis_config=self.turbulence_config,
+                louis_config=_turb_cfg,
             )
         # Convection (resolved kernel — no dispatch here)
         elif _conv_cfg is not None and hasattr(_conv_cfg, 'M_c_init'):
@@ -468,7 +498,7 @@ class PhysicsPipeline:
                 p_full=p_full_col, p_half=p_half_col,
                 z_full=z_full_col, z_half=z_half_col,
                 T_sfc=T_sfc_col, q_sfc=q_sat_sfc_col,
-                rho=rho_col_phys, dt=dt, config=self.turbulence_config,
+                rho=rho_col_phys, dt=dt, config=_turb_cfg,
             )
             du_dt = du_dt + ad.unflatten_3d(turb_out.du_dt)
             dv_dt = dv_dt + ad.unflatten_3d(turb_out.dv_dt)
@@ -486,7 +516,7 @@ class PhysicsPipeline:
                 p_full=p_full_col, p_half=p_half_col,
                 z_full=z_full_col, z_half=z_half_col,
                 rho=rho_col_phys, lat=lat_col,
-                dt=dt, config=self.gwd_config,
+                dt=dt, config=_gwd_cfg,
             )
             du_dt = du_dt + ad.unflatten_3d(gwd_out.du_dt)
             dv_dt = dv_dt + ad.unflatten_3d(gwd_out.dv_dt)
@@ -525,7 +555,8 @@ class PhysicsPipeline:
                                albedo_ice=None, albedo_ocean=None,
                                ghg_vmr_override=None,
                                q_c=None, q_r=None,
-                               cloud_scheme="none", cloud_cfg_overrides=None):
+                               cloud_scheme="none", cloud_cfg_overrides=None,
+                               gray_cfg_overrides=None):
         """Compute radiation tendencies and fluxes (pure JAX, no I/O).
 
         Returns (dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa, lw_up_toa,
@@ -631,6 +662,7 @@ class PhysicsPipeline:
             solar_weights, s_0,
             tau_equator=tau_equator, tau_pole=tau_pole,
             tau_moist_coeff=tau_moist_coeff,
+            gray_cfg_overrides=gray_cfg_overrides,
             ghg_vmr_override=ghg_vmr_override,
             **cloud_kwargs,
         )
@@ -677,7 +709,9 @@ class PhysicsPipeline:
                          albedo_ice=pipeline.albedo_ice,
                          albedo_ocean=pipeline.albedo_ocean,
                          ghg_vmr_override=None,
-                         cloud_cfg_overrides=None):
+                         cloud_cfg_overrides=None,
+                         gray_cfg_overrides=None,
+                         physics_cfg_overrides=None):
 
             def _rad_branch(args):
                 (T, p_s, q_v, q_c, q_r, q_i, N_i, conv_prog, u, v, sst, sic, lat, lon,
@@ -689,7 +723,8 @@ class PhysicsPipeline:
                  sundqvist_auto_rate,
                  C_H, C_E, albedo_ice, albedo_ocean,
                  ghg_vmr_override, cloud_cfg_overrides,
-                 sbm_cape_threshold, sundqvist_evap_coeff) = args
+                 sbm_cape_threshold, sundqvist_evap_coeff,
+                 gray_cfg_overrides, physics_cfg_overrides) = args
 
                 (dT_dt_rad, sw_net_sfc, lw_net_sfc,
                  sw_up_toa, lw_up_toa, sw_down_toa) = \
@@ -704,6 +739,7 @@ class PhysicsPipeline:
                         q_c=q_c,
                         cloud_scheme=pipeline._cloud_scheme,
                         cloud_cfg_overrides=cloud_cfg_overrides,
+                        gray_cfg_overrides=gray_cfg_overrides,
                     )
 
                 physics_out = pipeline.physics_step_no_rad(
@@ -715,6 +751,7 @@ class PhysicsPipeline:
                     sundqvist_auto_rate=sundqvist_auto_rate,
                     sundqvist_evap_coeff=sundqvist_evap_coeff,
                     C_H=C_H, C_E=C_E,
+                    physics_cfg_overrides=physics_cfg_overrides,
                     q_i=q_i, N_i=N_i,
                 )
 
@@ -739,7 +776,8 @@ class PhysicsPipeline:
                  sundqvist_auto_rate,
                  C_H, C_E, albedo_ice, albedo_ocean,
                  ghg_vmr_override, cloud_cfg_overrides,
-                 sbm_cape_threshold, sundqvist_evap_coeff) = args
+                 sbm_cape_threshold, sundqvist_evap_coeff,
+                 gray_cfg_overrides, physics_cfg_overrides) = args
 
                 physics_out = pipeline.physics_step_no_rad(
                     T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, dt,
@@ -750,6 +788,7 @@ class PhysicsPipeline:
                     sundqvist_auto_rate=sundqvist_auto_rate,
                     sundqvist_evap_coeff=sundqvist_evap_coeff,
                     C_H=C_H, C_E=C_E,
+                    physics_cfg_overrides=physics_cfg_overrides,
                     q_i=q_i, N_i=N_i,
                 )
 
@@ -773,7 +812,8 @@ class PhysicsPipeline:
                     sundqvist_auto_rate,
                     C_H, C_E, albedo_ice, albedo_ocean,
                     ghg_vmr_override, cloud_cfg_overrides,
-                    sbm_cape_threshold, sundqvist_evap_coeff)
+                    sbm_cape_threshold, sundqvist_evap_coeff,
+                    gray_cfg_overrides, physics_cfg_overrides)
 
             return jax.lax.cond(need_rad, _rad_branch, _no_rad_branch, args)
 
@@ -812,6 +852,7 @@ def _build_gray_radiation_fn(config):
                      albedo_col, emis_col, o3_vmr_col, aerosol_od_col,
                      solar_weights, s_0=S_0,
                      tau_equator=None, tau_pole=None, tau_moist_coeff=None,
+                     gray_cfg_overrides=None,
                      ghg_vmr_override=None,
                      cloud_path_liq=None, cloud_path_ice=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None,
@@ -831,6 +872,11 @@ def _build_gray_radiation_fn(config):
             _cfg = _cfg._replace(tau_pole=tau_pole)
         if tau_moist_coeff is not None:
             _cfg = _cfg._replace(tau_moist_coeff=tau_moist_coeff)
+        # Extra gray knobs threaded as a dict of traced scalars whose keys are
+        # GrayRadiationConfig field names (linear_frac, lw_diff_factor,
+        # sfc_emissivity, sw_tau_0, sw_exponent) — see build_segment_fn.
+        if gray_cfg_overrides:
+            _cfg = _cfg._replace(**gray_cfg_overrides)
         if albedo_col is not None:
             _cfg = _cfg._replace(sfc_albedo=albedo_col)
 
@@ -883,11 +929,13 @@ def _build_rrtmgp_radiation_fn(config):
                      albedo_col, emis_col, o3_vmr_col, aerosol_od_col,
                      solar_weights, s_0=S_0,
                      tau_equator=None, tau_pole=None, tau_moist_coeff=None,
+                     gray_cfg_overrides=None,
                      ghg_vmr_override=None,
                      cloud_path_liq=None, cloud_path_ice=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None,
                      cloud_fraction=None):
         del tau_equator, tau_pole, tau_moist_coeff  # RRTMGP: no gray optical depth
+        del gray_cfg_overrides  # RRTMGP: gray-radiation knobs do not apply
         _sw_scale = None
         if diurnal:
             hour = seconds_of_day / 3600.0

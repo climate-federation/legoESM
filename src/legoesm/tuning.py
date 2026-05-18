@@ -104,6 +104,78 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
             "stronger greenhouse, lower OLR. Frierson (2006) default 0.0115."
         ),
     ),
+    "linear_frac": TuningParameter(
+        name="linear_frac",
+        default=0.2,
+        min_val=0.05,
+        max_val=0.6,
+        units="1",
+        description="Gray radiation linear vs sigma^4 LW weighting fraction",
+        category="radiation",
+        sensitivity="medium",
+        notes=(
+            "Fraction f_l of the linear-in-sigma LW optical-depth profile "
+            "vs the sigma^4 profile. Shifts where the gray greenhouse acts "
+            "vertically. Frierson (2006) default 0.2."
+        ),
+    ),
+    "lw_diff_factor": TuningParameter(
+        name="lw_diff_factor",
+        default=1.66,
+        min_val=1.4,
+        max_val=2.0,
+        units="1",
+        description="Gray radiation LW diffusivity factor D",
+        category="radiation",
+        sensitivity="medium",
+        notes=(
+            "Hemispheric-mean two-stream diffusivity factor. Scales the "
+            "effective LW path length; ~5/3 (1.66) is the standard value."
+        ),
+    ),
+    "sfc_emissivity": TuningParameter(
+        name="sfc_emissivity",
+        default=0.97,
+        min_val=0.90,
+        max_val=1.0,
+        units="1",
+        description="Surface longwave emissivity",
+        category="radiation",
+        sensitivity="medium",
+        notes=(
+            "Surface LW emissivity for the gray scheme. Lower emissivity "
+            "reduces upward surface LW, warming the surface."
+        ),
+    ),
+    "sw_tau_0": TuningParameter(
+        name="sw_tau_0",
+        default=0.22,
+        min_val=0.0,
+        max_val=0.6,
+        units="1",
+        description="Gray radiation SW optical-depth scale",
+        category="radiation",
+        sensitivity="medium",
+        notes=(
+            "Shortwave optical-depth scale: tau_sw(sigma) = sw_tau_0 * "
+            "sigma^sw_exponent. Higher = more atmospheric SW absorption, "
+            "less SW reaching the surface. 0.0 = surface-absorbing limit."
+        ),
+    ),
+    "sw_exponent": TuningParameter(
+        name="sw_exponent",
+        default=2.0,
+        min_val=1.0,
+        max_val=4.0,
+        units="1",
+        description="Gray radiation SW optical-depth vertical exponent",
+        category="radiation",
+        sensitivity="low",
+        notes=(
+            "Exponent of the SW optical-depth profile sigma^sw_exponent; "
+            "controls how SW absorption is distributed in the vertical."
+        ),
+    ),
     "S_0": TuningParameter(
         name="S_0",
         default=1360.0,
@@ -233,6 +305,174 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
             "sigmoid trigger. Higher = convection fires less readily, "
             "fewer/weaker convective columns; lower = more widespread "
             "convection."
+        ),
+    ),
+
+    # -- Scheme knobs added for calibration (AIMIP commit 0c747d4) -------
+    # Threaded to the schemes via the calibration's physics_cfg_overrides
+    # dict-of-dicts (keys micro / conv / turb / gwd).
+    "sundqvist_sigmoid_sharpness": TuningParameter(
+        name="sundqvist_sigmoid_sharpness",
+        default=20.0,
+        min_val=5.0,
+        max_val=60.0,
+        units="1",
+        description="Sundqvist cloud-fraction smooth-activation sharpness",
+        category="convection",
+        sensitivity="medium",
+        notes=(
+            "Sharpness of the sigmoid that ramps cloud fraction across the "
+            "critical RH. Higher = sharper (more step-like) cloud onset."
+        ),
+    ),
+    "sbm_T_min_convect": TuningParameter(
+        name="sbm_T_min_convect",
+        default=200.0,
+        min_val=180.0,
+        max_val=260.0,
+        units="K",
+        description="SBM minimum temperature for convective activity",
+        category="convection",
+        sensitivity="medium",
+        notes=(
+            "Layers colder than this are excluded from the SBM convective "
+            "column; caps how high convection can reach."
+        ),
+    ),
+    "louis_l_mix_max": TuningParameter(
+        name="louis_l_mix_max",
+        default=100.0,
+        min_val=20.0,
+        max_val=400.0,
+        units="m",
+        description="Louis turbulence asymptotic mixing length",
+        category="turbulence",
+        sensitivity="high",
+        notes=(
+            "Asymptotic (free-troposphere) mixing length for the Louis "
+            "boundary-layer scheme. Higher = stronger vertical mixing."
+        ),
+    ),
+    "louis_Ck": TuningParameter(
+        name="louis_Ck",
+        default=0.4,
+        min_val=0.1,
+        max_val=0.6,
+        units="1",
+        description="Louis turbulence eddy-diffusivity coefficient",
+        category="turbulence",
+        sensitivity="medium",
+        notes="Scales the Louis eddy diffusivity. Higher = more BL mixing.",
+    ),
+    "louis_Ri_crit": TuningParameter(
+        name="louis_Ri_crit",
+        default=0.25,
+        min_val=0.1,
+        max_val=0.6,
+        units="1",
+        description="Louis turbulence critical Richardson number",
+        category="turbulence",
+        sensitivity="medium",
+        notes=(
+            "Richardson-number scale in the Louis stability functions; "
+            "sets how readily stable layers suppress turbulence."
+        ),
+    ),
+    "louis_b_louis": TuningParameter(
+        name="louis_b_louis",
+        default=5.0,
+        min_val=2.0,
+        max_val=10.0,
+        units="1",
+        description="Louis turbulence stability-function coefficient b",
+        category="turbulence",
+        sensitivity="low",
+        notes="Coefficient b in the Louis (1979/1982) stability functions.",
+    ),
+    "louis_c_louis": TuningParameter(
+        name="louis_c_louis",
+        default=16.6,
+        min_val=5.0,
+        max_val=30.0,
+        units="1",
+        description="Louis turbulence stability-function coefficient c",
+        category="turbulence",
+        sensitivity="low",
+        notes="Coefficient c in the Louis stability functions (1979: 5, updated 16.6).",
+    ),
+    "louis_d_louis": TuningParameter(
+        name="louis_d_louis",
+        default=5.0,
+        min_val=2.0,
+        max_val=15.0,
+        units="1",
+        description="Louis turbulence stability-function coefficient d",
+        category="turbulence",
+        sensitivity="low",
+        notes="Coefficient d in the Louis stability functions.",
+    ),
+    "louis_z0": TuningParameter(
+        name="louis_z0",
+        default=1.0e-4,
+        min_val=1.0e-5,
+        max_val=1.0e-2,
+        units="m",
+        description="Surface-layer aerodynamic roughness length",
+        category="surface",
+        sensitivity="medium",
+        notes=(
+            "Roughness length z0 of the Louis surface layer; sets surface "
+            "drag and exchange. Tuned in log space (spans decades)."
+        ),
+    ),
+    "mcfarlane_k_wave": TuningParameter(
+        name="mcfarlane_k_wave",
+        default=6.283185307e-5,
+        min_val=1.0e-5,
+        max_val=2.0e-4,
+        units="1/m",
+        description="McFarlane orographic GWD horizontal wavenumber",
+        category="gwd",
+        sensitivity="medium",
+        notes=(
+            "Horizontal wavenumber of the launched orographic gravity "
+            "waves; scales the launch stress tau_0 ~ G_0*rho*N*k*h^2*U."
+        ),
+    ),
+    "mcfarlane_N_ref": TuningParameter(
+        name="mcfarlane_N_ref",
+        default=0.01,
+        min_val=0.005,
+        max_val=0.025,
+        units="1/s",
+        description="McFarlane GWD reference Brunt-Vaisala frequency",
+        category="gwd",
+        sensitivity="medium",
+        notes="Reference stratification used in the orographic launch-stress closure.",
+    ),
+    "mcfarlane_directional_spread": TuningParameter(
+        name="mcfarlane_directional_spread",
+        default=1.0,
+        min_val=0.5,
+        max_val=2.0,
+        units="1",
+        description="McFarlane GWD multi-directional spreading factor",
+        category="gwd",
+        sensitivity="low",
+        notes="Spreads the launched wave stress over multiple directions.",
+    ),
+    "mcfarlane_tau_max": TuningParameter(
+        name="mcfarlane_tau_max",
+        default=10.0,
+        min_val=1.0,
+        max_val=30.0,
+        units="Pa",
+        description="McFarlane GWD upper clip on launch stress",
+        category="gwd",
+        sensitivity="low",
+        notes=(
+            "Upper bound on orographic launch stress; protects against "
+            "runaway drag in pathological columns."
         ),
     ),
 
