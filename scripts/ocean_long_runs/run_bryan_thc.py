@@ -79,8 +79,11 @@ def _build_basin(resolution, *, H_max=4000.0, nlev=15,
             "lat_south": lat_south, "lat_north": lat_north,
         },
     )
+    # Bryan THC needs bottom drag + lateral viscosity to balance forcing.
     grid, z_coord, _, model, _, _, _ = _create_ocean_setup(
         tc, H_max=H_max, nlev=nlev,
+        A_h=5.0e4, A_v=1.0e-4,
+        bottom_drag_r=1.0e-3,
     )
     state = matrix_mod._create_rest_state(tc, grid, z_coord, H_max=H_max)
     return state, grid, z_coord, model

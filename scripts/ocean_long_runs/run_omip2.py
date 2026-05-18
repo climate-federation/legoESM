@@ -80,8 +80,15 @@ def _build_state(grid_type, resolution, *, H_max=5500.0, nlev=15,
     tc = TestCase(case="omip2", grid_type=grid_type,
                   resolution=resolution, duration_days=365.0,
                   quick_days=1.0)
+    # OMIP-2 forced run requires bottom drag to balance wind input; without
+    # it the wind continuously pumps momentum into the top layer and the
+    # baroclinic adjustment runs away. A_h = 5e4 dissipates the Munk
+    # boundary layer + intermediate-scale eddies at 1 deg resolution
+    # (matches NEMO ORCA default).
     grid, z_coord, _, model, _, _, _ = _create_ocean_setup(
         tc, H_max=H_max, nlev=nlev,
+        A_h=5.0e4, A_v=1.0e-4,
+        bottom_drag_r=1.0e-3,
     )
     state = matrix_mod._create_rest_state(tc, grid, z_coord, H_max=H_max)
     return state, grid, z_coord, model
