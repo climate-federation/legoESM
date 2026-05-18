@@ -137,6 +137,18 @@ class NeuralGCMSpectralConfig(NamedTuple):
     # disables the per-group split (single-LR behavior).
     spatial_lr_scale: float = 1.0
 
+    # Step period between radiation re-evaluations during the rollout.
+    # When > 1, ``make_physics_fn`` is expected to return a tuple
+    # ``(non_rad_fn, rad_fn)`` and :func:`spectral_rollout` gates the
+    # rad call via ``lax.cond`` on the scan step index, caching the
+    # last heating tendency between recomputes.  This drops RRTMGP
+    # backward-pass memory and forward compute by ``N`` x at the cost
+    # of holding the radiation tendency constant for the gating window
+    # (acceptable for AIMIP forecast losses where the rad time scale
+    # is ~hours, not seconds).  Default 1 = compute every step
+    # (legacy combined physics_fn).
+    rad_update_interval: int = 1
+
     # Loss
     loss_config: LossConfig = LossConfig()
 
@@ -452,6 +464,25 @@ def _compute_tracer_filter(
     return combined
 
 
+def _add_phys_tendencies(a, b):
+    """Sum two physics tendency :class:`SpectralHydrostaticState`s.
+
+    Both inputs share the dycore-tendency layout used by
+    ``make_physics`` (Equinox Fields wrapping per-mode/per-level
+    arrays).  This helper walks the field tree and adds the
+    underlying ``.data`` arrays so that "non-rad" and "rad-only"
+    physics_fn outputs can be combined under :func:`spectral_rollout`
+    when the rad branch is gated by ``rad_update_interval > 1``.
+    """
+    def _sum(x, y):
+        if hasattr(x, "data") and hasattr(y, "data"):
+            return x.replace(data=x.data + y.data)
+        return x + y
+    return jax.tree_util.tree_map(
+        _sum, a, b, is_leaf=lambda obj: hasattr(obj, "data"),
+    )
+
+
 def spectral_rollout(
     initial_state: SpectralHydrostaticState,
     physics_fn,
@@ -462,6 +493,8 @@ def spectral_rollout(
     n_steps: int,
     sponge_factor: jnp.ndarray | None = None,
     spectral_filter: jnp.ndarray | None = None,
+    rad_physics_fn=None,
+    rad_update_interval: int = 1,
 ) -> SpectralHydrostaticState:
     """Roll out spectral PE + SFNO physics for n_steps using lax.scan.
 
@@ -483,7 +516,9 @@ def spectral_rollout(
         Initial condition in spectral space.
     physics_fn : callable
         ``(state, grid, sigma_coord) -> SpectralHydrostaticState``
-        SFNO physics function from ``make_sfno_spectral_physics``.
+        Physics-tendency function for every-step schemes.  When
+        ``rad_physics_fn`` is supplied this should be the *non-rad*
+        contribution; otherwise it is the combined contribution.
     grid : GaussianGrid
     sigma_coord : SigmaCoordinate
     pe_config : SpectralPEConfig
@@ -495,6 +530,21 @@ def spectral_rollout(
         Precomputed sponge damping factors per level.
     spectral_filter : array or None
         Precomputed exponential spectral filter.
+    rad_physics_fn : callable or None
+        Optional separate radiation-tendency callable.  When provided,
+        the radiation contribution is evaluated only at step indices
+        divisible by ``rad_update_interval`` (and at step 0); on
+        intervening steps the cached previous heating tendency is
+        added to ``physics_fn``'s non-rad contribution.  This keeps
+        the backward-pass memory footprint and forward compute of the
+        expensive RRTMGP solve under control on a 48-step daily
+        rollout (one rad call instead of 48 when
+        ``rad_update_interval=48``).  None disables gating; the
+        legacy single-physics_fn path runs.
+    rad_update_interval : int
+        Step period between radiation re-evaluations.  Only used when
+        ``rad_physics_fn`` is non-None.  Default 1 = compute every
+        step (same as a single combined physics_fn).
 
     Returns
     -------
@@ -511,26 +561,102 @@ def spectral_rollout(
         grid, pe_config, spectral_filter, dt,
     )
 
-    def tendency_fn(s):
-        phys = physics_fn(s, grid, sigma_coord)
-        return spectral_pe_tendencies(s, grid, sigma_coord, pe_config, phys)
+    use_rad_gating = rad_physics_fn is not None and rad_update_interval > 1
 
-    def step_fn(state, _):
-        new_state = dispatch_integrator(state, tendency_fn, dt, integrator_name)
+    if not use_rad_gating:
+        # Legacy single-physics path -- physics_fn computes the full
+        # tendency (radiation included or absent) every dycore step.
+        def tendency_fn(s):
+            phys = physics_fn(s, grid, sigma_coord)
+            return spectral_pe_tendencies(s, grid, sigma_coord, pe_config, phys)
 
-        # Implicit sponge damping at model top
+        def step_fn(state, _):
+            new_state = dispatch_integrator(
+                state, tendency_fn, dt, integrator_name,
+            )
+
+            # Implicit sponge damping at model top
+            if sponge_factor is not None:
+                new_state = _apply_sponge_filter(new_state, sponge_factor, ms)
+
+            # Exponential spectral filter on highest wavenumbers
+            if spectral_filter is not None:
+                new_state = _apply_spectral_filter_to_state(
+                    new_state, spectral_filter,
+                )
+
+            # Combined spectral + implicit hyperdiff applied to grid-space
+            # tracers via one SH round-trip per tracer per step (no-op when
+            # tracer_filter is None or state.tracers is None).
+            if tracer_filter is not None and new_state.tracers is not None:
+                new_state = new_state._replace(
+                    tracers=_apply_filter_to_tracers(
+                        new_state.tracers, tracer_filter, grid,
+                    )
+                )
+
+            return new_state, None
+
+        # ``prevent_cse=True`` plus ``policy=nothing_saveable`` is the
+        # most aggressive memory-saving mode: every intermediate is
+        # recomputed during backward.  Necessary on a 48-step daily
+        # rollout with RRTMGP enabled (the gas-optics + two-stream
+        # solver allocate hundreds of GiB of activations otherwise).
+        # Gray-radiation runs are insensitive to this choice.
+        step_fn_ckpt = jax.checkpoint(
+            step_fn,
+            prevent_cse=True,
+            policy=jax.checkpoint_policies.nothing_saveable,
+        )
+
+        final_state, _ = jax.lax.scan(
+            step_fn_ckpt, initial_state, None, length=n_steps,
+        )
+        return final_state
+
+    # Rad-gating path: ``physics_fn`` is the *non-rad* contribution,
+    # evaluated every dycore step; ``rad_physics_fn`` is evaluated
+    # only when ``step_idx % rad_update_interval == 0``, and its
+    # output is cached in the scan carry for the intervening
+    # ``rad_update_interval - 1`` steps.  This drops RRTMGP backward-
+    # pass memory and forward compute by ``rad_update_interval`` x at
+    # the cost of holding the radiation tendency constant for the
+    # gating window (acceptable for the AIMIP daily forecast loss
+    # where the rad time scale is ~hours, not seconds).
+    init_rad_tendency = rad_physics_fn(initial_state, grid, sigma_coord)
+
+    def step_fn_gated(carry, step_idx):
+        state, cached_rad_tendency = carry
+
+        # Refresh rad tendency at the start of every gating window.
+        # ``lax.cond`` retains backward-mode differentiability through
+        # the rad branch; on skipped steps the cached tensor flows
+        # through unchanged.
+        should_refresh = (step_idx % rad_update_interval) == 0
+        new_rad_tendency = jax.lax.cond(
+            should_refresh,
+            lambda _: rad_physics_fn(state, grid, sigma_coord),
+            lambda _: cached_rad_tendency,
+            operand=None,
+        )
+
+        def tendency_fn(s):
+            non_rad_phys = physics_fn(s, grid, sigma_coord)
+            combined_phys = _add_phys_tendencies(non_rad_phys, new_rad_tendency)
+            return spectral_pe_tendencies(
+                s, grid, sigma_coord, pe_config, combined_phys,
+            )
+
+        new_state = dispatch_integrator(
+            state, tendency_fn, dt, integrator_name,
+        )
+
         if sponge_factor is not None:
             new_state = _apply_sponge_filter(new_state, sponge_factor, ms)
-
-        # Exponential spectral filter on highest wavenumbers
         if spectral_filter is not None:
             new_state = _apply_spectral_filter_to_state(
                 new_state, spectral_filter,
             )
-
-        # Combined spectral + implicit hyperdiff applied to grid-space
-        # tracers via one SH round-trip per tracer per step (no-op when
-        # tracer_filter is None or state.tracers is None).
         if tracer_filter is not None and new_state.tracers is not None:
             new_state = new_state._replace(
                 tracers=_apply_filter_to_tracers(
@@ -538,22 +664,18 @@ def spectral_rollout(
                 )
             )
 
-        return new_state, None
+        return (new_state, new_rad_tendency), None
 
-    # ``prevent_cse=True`` plus ``policy=nothing_saveable`` is the
-    # most aggressive memory-saving mode: every intermediate is
-    # recomputed during backward.  Necessary on a 48-step daily
-    # rollout with RRTMGP enabled (the gas-optics + two-stream
-    # solver allocate hundreds of GiB of activations otherwise).
-    # Gray-radiation runs are insensitive to this choice.
     step_fn_ckpt = jax.checkpoint(
-        step_fn,
+        step_fn_gated,
         prevent_cse=True,
         policy=jax.checkpoint_policies.nothing_saveable,
     )
 
-    final_state, _ = jax.lax.scan(
-        step_fn_ckpt, initial_state, None, length=n_steps,
+    (final_state, _), _ = jax.lax.scan(
+        step_fn_ckpt,
+        (initial_state, init_rad_tendency),
+        jnp.arange(n_steps),
     )
     return final_state
 
@@ -969,19 +1091,64 @@ def _train_spectral_loop(
         f"rollout_days={rollout_days} -> {n_steps_rollout} steps/sample"
     )
 
-    def make_loss_fn(ic_spectral, target_carry):
+    # Build the JIT-compiled train step ONCE outside the per-sample
+    # loop.  The previous implementation built ``loss_fn`` -- and
+    # therefore the ``physics_fn`` Python closure tree -- on every
+    # gradient call, hitting the ``CLAUDE.md`` anti-pattern documented
+    # under "Never build closures inside training loops" and leaking
+    # ~1.5 GiB of Python/XLA metadata per sample at T11 L6 under
+    # RRTMGP (verified 2026-05-17; OOM-killed mid-epoch-1).  Wrapping
+    # the whole step in :func:`eqx.filter_jit` traces the build path
+    # exactly once and caches the resulting XLA graph; subsequent
+    # samples are pure GPU-bound forward+backward+update calls.
+    #
+    # ``make_physics_fn`` is a Python callable captured in the closure
+    # (non-array, not a JIT input).  ``optimizer`` is likewise an
+    # ``optax.GradientTransformation`` captured in the closure --
+    # ``filter_jit`` traces it as a static argument.
+    rad_update_interval = int(
+        getattr(config, "rad_update_interval", 1) or 1
+    )
+
+    def _train_step(model, opt_state, ic_spectral, target_carry):
         def loss_fn(m):
-            physics_fn = make_physics_fn(m, grid)
-            pred = spectral_rollout(
-                ic_spectral, physics_fn, grid, sigma, pe_config,
-                config.dt, n_steps_rollout,
-                sponge_factor, spectral_filter,
-            )
+            physics = make_physics_fn(m, grid)
+            # ``make_physics_fn`` may return either a single
+            # combined-physics callable (legacy / sfno / column_nn
+            # paths) or a ``(non_rad_fn, rad_fn)`` tuple (AIMIP
+            # classical with ``split_rad=True``).  Dispatch through
+            # the rad-gating branch of spectral_rollout when we get a
+            # tuple AND the configured interval is greater than 1.
+            if isinstance(physics, tuple):
+                non_rad_fn, rad_fn = physics
+                pred = spectral_rollout(
+                    ic_spectral, non_rad_fn, grid, sigma, pe_config,
+                    config.dt, n_steps_rollout,
+                    sponge_factor, spectral_filter,
+                    rad_physics_fn=rad_fn,
+                    rad_update_interval=rad_update_interval,
+                )
+            else:
+                pred = spectral_rollout(
+                    ic_spectral, physics, grid, sigma, pe_config,
+                    config.dt, n_steps_rollout,
+                    sponge_factor, spectral_filter,
+                )
             return spectral_state_vs_carry_loss(
                 pred, target_carry, grid, sigma,
                 sigma_full, config.loss_config,
             )
-        return loss_fn
+        loss, grads = eqx.filter_value_and_grad(loss_fn)(model)
+        grad_norm = optax.global_norm(eqx.filter(grads, eqx.is_array))
+        updates, new_opt_state = optimizer.update(
+            eqx.filter(grads, eqx.is_array),
+            opt_state,
+            eqx.filter(model, eqx.is_array),
+        )
+        new_model = eqx.apply_updates(model, updates)
+        return new_model, new_opt_state, loss, grad_norm
+
+    train_step = eqx.filter_jit(_train_step)
 
     best_loss = float("inf")
     patience_counter = 0
@@ -994,8 +1161,9 @@ def _train_spectral_loop(
         grad_norm_val = 0.0
 
         for sample_idx, (ic, target) in enumerate(zip(ic_states, target_carries)):
-            loss_fn = make_loss_fn(ic, target)
-            loss, grads = eqx.filter_value_and_grad(loss_fn)(model)
+            model, opt_state, loss, grad_norm = train_step(
+                model, opt_state, ic, target,
+            )
 
             # --- NaN / Inf detection (outside JIT, values are materialized) ---
             loss_val = float(loss)
@@ -1005,7 +1173,6 @@ def _train_spectral_loop(
                     f"(loss={loss_val}). "
                     "Check CFL conditions, parameter bounds, and input data."
                 )
-            grad_norm = optax.global_norm(eqx.filter(grads, eqx.is_array))
             grad_norm_val = float(grad_norm)
             if jnp.isnan(grad_norm) or jnp.isinf(grad_norm):
                 raise RuntimeError(
@@ -1015,13 +1182,6 @@ def _train_spectral_loop(
                 )
 
             epoch_loss += loss_val
-
-            updates, opt_state = optimizer.update(
-                eqx.filter(grads, eqx.is_array),
-                opt_state,
-                eqx.filter(model, eqx.is_array),
-            )
-            model = eqx.apply_updates(model, updates)
 
         avg_loss = epoch_loss / max(len(ic_states), 1)
         loss_history.append(avg_loss)

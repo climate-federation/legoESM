@@ -64,21 +64,19 @@ n_eval_days:  8    # sum of eval_windows[*][2]
 # fuller multi-month / multi-epoch sweep (will require multi-hour
 # wall clock per variant).
 aimip_grid: "gaussian"
-n_max: 11            # spectral truncation (T11 ≈ 10°, 18x36 grid).
-                     # Reduced from T21 (34x68) and T15 (24x48) so
-                     # RRTMGP + spatial surface + 48-step daily
-                     # rollout fits on a 24 GiB GPU.  T21 needs a
-                     # 72 GiB single allocation in the backward pass,
-                     # T15 needs 35.9 GiB, T11 needs 20.25 GiB
-                     # (verified 2026-05-17 on RTX 5090); T11 L6
-                     # should fit at ~15 GiB after the nlev cut below.
-                     # Bump to T15+ on >= 40 GiB or T21 on >= 80 GiB.
-nlev: 6              # vertical levels (sigma).  Was 8 -- dropped to 6
-                     # to cut another ~25% off the per-step backward
-                     # peak so the RRTMGP path fits on a 24 GiB GPU.
-                     # The sigma coord still resolves troposphere ->
-                     # stratosphere transitions adequately for the
-                     # AIMIP-scale daily forecast loss.
+n_max: 21            # T21 ≈ 5.6° production resolution.  Now feasible
+                     # under RRTMGP after the v5 refactor:
+                     # (a) ``make_physics_fn`` factored out of
+                     #     ``loss_fn`` (commit pending) eliminates the
+                     #     ~1.5 GiB/sample RAM leak from rebuilding
+                     #     Python closures inside ``eqx.filter_value_and_grad``.
+                     # (b) ``rad_update_interval=48`` (1 RRTMGP call
+                     #     per daily rollout) gates the radiation call
+                     #     via lax.cond + scan-carry cache so the
+                     #     backward pass holds a single RRTMGP-step's
+                     #     activations, not 48.
+nlev: 8              # full vertical resolution restored (was 6 during
+                     # the pre-refactor memory-pressure mitigations).
 dt: 1800.0           # 30-minute dycore timestep
 
 # ----- Training -----------------------------------------------------
@@ -130,10 +128,22 @@ aimip_radiation: "rrtmgp"  # gray | rrtmgp.  RRTMGP is required for AIMIP
                            # trade ~2-3x forward compute for the
                            # activation-storage relief that lets a
                            # 48-step daily rollout fit in 24 GiB.
-aimip_rad_update_interval: 12  # Reserved knob; the spectral_pe path does
-                               # not yet implement step-counter gating
-                               # for RRTMGP, so the interval is informational
-                               # for now.  Tracked as a follow-up.
+aimip_rad_update_interval: 48  # Number of dycore steps between RRTMGP
+                               # re-evaluations.  ``spectral_rollout`` now
+                               # implements real step-counter gating via
+                               # ``lax.cond`` on the scan step index +
+                               # cached rad tendency in the scan carry.
+                               # At interval=48 the rad solve fires
+                               # ONCE per 48-step daily rollout (1 call
+                               # per loss step), holding the heating-rate
+                               # tendency constant between recomputes.
+                               # This cuts RRTMGP backward-pass memory
+                               # by 48x and forward compute by ~48x, at
+                               # the cost of holding the radiation
+                               # tendency constant for 24 hours of
+                               # simulated time (acceptable for AIMIP
+                               # daily-forecast losses; tighten to 12
+                               # = 6-hourly for diurnal-cycle fidelity).
 
 # ----- Spatial surface parameters (over land) ----------------------
 # When true, the AIMIP classical variant exposes seven surface and

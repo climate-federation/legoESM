@@ -551,6 +551,7 @@ def make_aimip_classical_spectral_physics(
     microphysics_scheme: str = "none",
     cloud_scheme: str = "xu_randall",
     land_mask: "jax.Array | None" = None,
+    split_rad: bool = False,
 ):
     """Build a SpectralPE physics function for the AIMIP classical variant.
 
@@ -753,17 +754,59 @@ def make_aimip_classical_spectral_physics(
     # Note: ``p = params.as_dict()`` is already computed above for
     # gray-radiation tau knobs; reused here only when gray is active.
     del p  # avoid leaking variable into nested closure
-    physics_config = PhysicsConfig(
-        radiation=rad_cfg,
+
+    if not split_rad:
+        physics_config = PhysicsConfig(
+            radiation=rad_cfg,
+            convection=conv_cfg,
+            turbulence=turb_cfg,
+            microphysics=micro_cfg,
+            gravity_wave_drag=gwd_cfg,
+        )
+        raw_fn = make_physics(physics_config, model_type="spectral_pe", dt=dt)
+
+        def physics_fn(state, grid_, sigma_coord):
+            result = raw_fn(state, grid_, sigma_coord)
+            return result[0] if isinstance(result, tuple) else result
+
+        return physics_fn
+
+    # ---- Split rad / non-rad branch ----
+    # When the caller asks for ``split_rad=True`` (typical when
+    # ``rad_update_interval_steps > 1`` and the rollout will gate the
+    # radiation call via :func:`spectral_rollout`'s ``lax.cond`` path)
+    # we build TWO physics_fns:
+    #   - ``non_rad_fn``: every scheme except radiation, evaluated on
+    #     every dycore step.
+    #   - ``rad_fn``: radiation only, evaluated periodically by
+    #     ``spectral_rollout`` and cached in the scan carry.
+    # The two outputs are summed downstream (see
+    # ``_add_phys_tendencies`` in training/neural_gcm_spectral.py).
+    non_rad_cfg = PhysicsConfig(
+        radiation=RadiationConfig(scheme="none"),
         convection=conv_cfg,
         turbulence=turb_cfg,
         microphysics=micro_cfg,
         gravity_wave_drag=gwd_cfg,
     )
-    raw_fn = make_physics(physics_config, model_type="spectral_pe", dt=dt)
+    rad_only_cfg = PhysicsConfig(
+        radiation=rad_cfg,
+        convection=ConvectionConfig(scheme="none"),
+        turbulence=TurbulenceConfig(scheme="none"),
+        microphysics=__import__(
+            "legoesm.atmosphere.physics.microphysics.config", fromlist=["MicrophysicsConfig"],
+        ).MicrophysicsConfig(scheme="none"),
+        gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
+    )
+    non_rad_raw = make_physics(non_rad_cfg, model_type="spectral_pe", dt=dt)
+    rad_only_raw = make_physics(rad_only_cfg, model_type="spectral_pe", dt=dt)
 
-    def physics_fn(state, grid_, sigma_coord):
-        result = raw_fn(state, grid_, sigma_coord)
+    def non_rad_fn(state, grid_, sigma_coord):
+        result = non_rad_raw(state, grid_, sigma_coord)
         return result[0] if isinstance(result, tuple) else result
 
-    return physics_fn
+    def rad_fn(state, grid_, sigma_coord):
+        result = rad_only_raw(state, grid_, sigma_coord)
+        return result[0] if isinstance(result, tuple) else result
+
+    return non_rad_fn, rad_fn

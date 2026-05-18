@@ -148,6 +148,7 @@ def _build_spectral_config(cfg: dict[str, Any]):
         ) or None,
         rollout_days=int(cfg.get("aimip_rollout_days", 1)),
         spatial_lr_scale=float(cfg.get("aimip_spatial_lr_scale", 1.0)),
+        rad_update_interval=int(cfg.get("aimip_rad_update_interval", 1)),
         loss_config=loss_config,
         log_every=int(cfg.get("log_every", 1)),
         checkpoint_dir=str(Path(cfg["output_dir"]) / cfg["aimip_variant"]),
@@ -251,12 +252,20 @@ def _train_aimip_classical(spec_cfg, cache_dir: str, *, cfg: dict | None = None)
             jnp.asarray(target_carries[0].phis), smooth=True,
         )
 
+    # When rad gating is on (``aimip_rad_update_interval > 1``),
+    # ``make_aimip_classical_spectral_physics`` returns a
+    # ``(non_rad_fn, rad_fn)`` tuple and the rollout uses lax.cond
+    # to compute the RRTMGP step periodically.  Otherwise the legacy
+    # single-callable path runs.
+    split_rad = rad_update_interval > 1
+
     def _make_physics_fn(p, grid_):
         return make_aimip_classical_spectral_physics(
             p, grid_, dt,
             radiation=radiation,
             rad_update_interval_steps=rad_update_interval,
             land_mask=land_mask,
+            split_rad=split_rad,
         )
 
     return _train_spectral_loop(
@@ -337,8 +346,10 @@ def _evaluate_variant(
     n_steps_per_day = int(86400 / spec_cfg.dt)
     eval_rollout_days = int(getattr(spec_cfg, "rollout_days", 1) or 1)
     n_steps_eval = n_steps_per_day * eval_rollout_days
+    eval_rad_interval = int(cfg.get("aimip_rad_update_interval", 1))
 
     # Build the per-variant physics_fn (model is frozen for eval).
+    eval_physics_pair = None  # (non_rad_fn, rad_fn) when split active
     if variant == "classical":
         eval_land_mask = None
         if bool(cfg.get("aimip_spatial_surface", False)) and target_carries:
@@ -346,12 +357,19 @@ def _evaluate_variant(
             eval_land_mask = land_mask_from_phis(
                 jnp.asarray(target_carries[0].phis), smooth=True,
             )
-        physics_fn = make_aimip_classical_spectral_physics(
+        eval_split_rad = eval_rad_interval > 1
+        built = make_aimip_classical_spectral_physics(
             trained_model, grid, spec_cfg.dt,
             radiation=str(cfg.get("aimip_radiation", "gray")),
-            rad_update_interval_steps=int(cfg.get("aimip_rad_update_interval", 6)),
+            rad_update_interval_steps=eval_rad_interval,
             land_mask=eval_land_mask,
+            split_rad=eval_split_rad,
         )
+        if isinstance(built, tuple):
+            eval_physics_pair = built
+            physics_fn = built[0]  # non-rad; rad threaded separately
+        else:
+            physics_fn = built
     elif variant == "column_nn":
         physics_fn = make_column_mlp_spectral_physics(trained_model, grid)
     elif variant in ("sfno_physics", "sfno_full"):
@@ -379,11 +397,21 @@ def _evaluate_variant(
     weights = jnp.asarray(grid.weights)
 
     for ic, target in zip(ic_states, target_carries):
-        pred = spectral_rollout(
-            ic, physics_fn, grid, sigma, pe_config,
-            spec_cfg.dt, n_steps_eval,
-            sponge_factor, spectral_filter,
-        )
+        if eval_physics_pair is not None:
+            non_rad_fn, rad_fn = eval_physics_pair
+            pred = spectral_rollout(
+                ic, non_rad_fn, grid, sigma, pe_config,
+                spec_cfg.dt, n_steps_eval,
+                sponge_factor, spectral_filter,
+                rad_physics_fn=rad_fn,
+                rad_update_interval=eval_rad_interval,
+            )
+        else:
+            pred = spectral_rollout(
+                ic, physics_fn, grid, sigma, pe_config,
+                spec_cfg.dt, n_steps_eval,
+                sponge_factor, spectral_filter,
+            )
         losses.append(float(
             spectral_state_vs_carry_loss(
                 pred, target, grid, sigma, sigma_full, spec_cfg.loss_config,

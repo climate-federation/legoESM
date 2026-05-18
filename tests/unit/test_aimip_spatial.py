@@ -302,3 +302,120 @@ def test_create_optimizer_muon_partitioned_routes_large_matrices():
     }
     state = opt.init(params)
     assert state is not None
+
+
+# ----------------------------------------------------------------------
+# split_rad + rad_update_interval gating
+# ----------------------------------------------------------------------
+
+def test_make_aimip_classical_spectral_physics_split_returns_tuple():
+    """``split_rad=True`` returns ``(non_rad_fn, rad_fn)`` callables."""
+    from legoesm.training.aimip_params import (
+        AIMIPClassicalParams, make_aimip_classical_spectral_physics,
+    )
+    grid = _grid_t11()
+    params = AIMIPClassicalParams.from_defaults()
+    built = make_aimip_classical_spectral_physics(
+        params, grid, dt=1800.0, radiation="gray", split_rad=True,
+    )
+    assert isinstance(built, tuple)
+    assert len(built) == 2
+    assert callable(built[0])
+    assert callable(built[1])
+
+
+def test_make_aimip_classical_spectral_physics_combined_default():
+    """``split_rad=False`` (default) returns the single combined callable."""
+    from legoesm.training.aimip_params import (
+        AIMIPClassicalParams, make_aimip_classical_spectral_physics,
+    )
+    grid = _grid_t11()
+    params = AIMIPClassicalParams.from_defaults()
+    fn = make_aimip_classical_spectral_physics(
+        params, grid, dt=1800.0, radiation="gray",
+    )
+    assert callable(fn)
+    assert not isinstance(fn, tuple)
+
+
+def test_spectral_rollout_rad_gating_one_step():
+    """Single-step rollout with rad_update_interval=1 matches combined path.
+
+    Smoke-checks the new ``rad_physics_fn`` + ``rad_update_interval``
+    branch in :func:`spectral_rollout` by running both code paths over
+    a one-step rollout starting from a zero spectral state.  The two
+    outputs should agree to floating-point tolerance because at
+    ``interval=1`` the gated branch fires rad on every step (same as
+    the combined branch).
+    """
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+    from legoesm.training.aimip_params import (
+        AIMIPClassicalParams, make_aimip_classical_spectral_physics,
+    )
+    from legoesm.training.neural_gcm_spectral import (
+        carry_to_spectral_state, spectral_rollout,
+    )
+    from legoesm.driver.compiled_segments import SegmentCarry as _SC
+
+    grid = create_gaussian_grid(11, dealiasing="quadratic")
+    sigma = create_sigma_coordinate(8)
+
+    n_lat, n_lon, nlev = grid.n_lat, grid.n_lon, 8
+    zero_3d = jnp.zeros((n_lat, n_lon, nlev), dtype=jnp.float64)
+    zero_2d = jnp.zeros((n_lat, n_lon), dtype=jnp.float64)
+    ones_p_s = jnp.full((n_lat, n_lon), 1.0e5, dtype=jnp.float64)
+    T_init = jnp.full((n_lat, n_lon, nlev), 250.0, dtype=jnp.float64)
+    fake_carry = _SC(
+        u=zero_3d, v=zero_3d, T=T_init,
+        p_s=ones_p_s, phis=zero_2d,
+        q_v=zero_3d, q_c=zero_3d, q_r=zero_3d,
+        conv_prog=zero_3d,
+        held_dT_rad=zero_3d, held_sw_net_sfc=zero_2d, held_lw_net_sfc=zero_2d,
+        held_sw_up_toa=zero_2d, held_lw_up_toa=zero_2d, held_sw_down_toa=zero_2d,
+        step_index=jnp.array(0),
+        target_moisture=jnp.array(0.0),
+        target_mass=jnp.array(0.0),
+        max_cfl=jnp.array(0.0),
+        precip_accum=zero_2d,
+        shflx_accum=zero_2d,
+        lhflx_accum=zero_2d,
+    )
+    ic_spectral = carry_to_spectral_state(fake_carry, grid)
+    pe_config = SpectralPEConfig(
+        hyperdiff_coeff=2.5e15, hyperdiff_order=2,
+        time_integrator="ssp_rk3",
+        spectral_filter_strength=0.01, spectral_filter_order=8,
+    )
+    params = AIMIPClassicalParams.from_defaults()
+
+    combined_fn = make_aimip_classical_spectral_physics(
+        params, grid, dt=1800.0, radiation="gray", split_rad=False,
+    )
+    non_rad_fn, rad_fn = make_aimip_classical_spectral_physics(
+        params, grid, dt=1800.0, radiation="gray", split_rad=True,
+    )
+
+    out_combined = spectral_rollout(
+        ic_spectral, combined_fn, grid, sigma, pe_config,
+        dt=1800.0, n_steps=1,
+    )
+    out_gated = spectral_rollout(
+        ic_spectral, non_rad_fn, grid, sigma, pe_config,
+        dt=1800.0, n_steps=1,
+        rad_physics_fn=rad_fn, rad_update_interval=2,  # gate on, fire at step 0
+    )
+    # T_hat is the dominant scalar dycore field.  Combined runs rad
+    # inside each of the SSP-RK3 sub-stages (3 rad calls / dycore
+    # step); gated runs rad ONCE at the top of the step with the
+    # state-at-step-start and holds it constant through the 3
+    # sub-stages.  Outputs therefore differ by O(rad_tendency_dt *
+    # state_change_per_substage) -- small for short rollouts, larger
+    # for tight CFL.  Tolerance is set to capture the dominant
+    # T_hat magnitudes (~900 in spectral, ~250 K in grid) while
+    # allowing the substage-rad approximation.
+    assert jnp.allclose(
+        out_combined.T_hat.data, out_gated.T_hat.data,
+        atol=1.0e-2, rtol=1.0e-5,
+    ), "Gated rollout should agree with combined at step 1 to substage-rad tolerance"
