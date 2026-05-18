@@ -46,19 +46,35 @@ per-year restart .npz files (Phase C restart harness).
 
 ## Production readiness
 
-The drivers exercise every code path end-to-end **except** the bulk-
-flux applicator that ports ``(tau_x, tau_y, shflx, lhflx)`` from
-``bulk_flux_omip.air_sea_fluxes`` into the state's surface boundary
-fields. The smoke driver computes the bulk fluxes but does NOT yet
-apply them (documented in each driver's docstring + the report
-skeletons).
+End-to-end wiring complete after the
+``legoesm.ocean.coupler.apply_omip2_surface_fluxes`` follow-up:
 
-The remaining wiring is one thin coupler hook that should live in
-``legoesm/ocean/physics/surface_forcing/prescribed.py`` or
-``legoesm/ocean/coupler/`` -- the gyre runners already do exactly this
-for prescribed wind stress, so the OMIP-2 driver just needs to plug
-the bulk-flux output into the same surface-forcing wiring. Tracked
-as the **last** Phase F follow-up.
+* ``src/legoesm/ocean/coupler/omip2_applicator.py`` ports the
+  Large & Yeager 2009 bulk-flux output (``tau_x``, ``tau_y``,
+  ``shflx``, ``lhflx``) into the state's top-layer u / v / T
+  fields via a forward-Euler ``rho_0 * c_p * dz_0`` rescaling
+  + C-grid face-interpolation of the cell-centred stresses.
+* Both ``run_omip2.py`` and ``run_bryan_thc.py`` call the
+  applicator once per timestep before ``model.step``; the
+  per-year diagnostics now reflect the genuine wind-driven
+  + thermally-forced response.
+* Smoke results after wiring (1 day, synthetic forcing):
+  - OMIP-2: ``KE`` grows 0 -> 1.6e16 J, ``vol_drift`` ~ -5e-10
+    (float noise), ``eta_integral`` ~ -1e5 m^3 (Ekman-pumping
+    response).
+  - Bryan: ``KE`` grows 0 -> 2.2e15 J on the smaller hemispheric
+    basin.
+
+Unit tests ``tests/ocean/unit/test_omip2_applicator.py`` -- **4 / 4
+pass**:
+
+* Applicator returns the same state-type with finite fields.
+* Wind injects nonzero top-cell u and v from rest; deeper levels
+  stay at rest after a single step (no vertical mixing in the
+  applicator -- that is the dycore's job).
+* Top-cell T responds to the surface heat flux without runaway.
+* Raises ``NotImplementedError`` on unsupported grid types
+  (cube + MPAS extension is a follow-up).
 
 ## Acceptance gate
 

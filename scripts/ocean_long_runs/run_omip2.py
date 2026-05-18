@@ -87,49 +87,11 @@ def _build_state(grid_type, resolution, *, H_max=5500.0, nlev=15,
     return state, grid, z_coord, model
 
 
-def _bulk_flux_step(state, forcing, idx_t, grid_type, grid, z_coord, *,
-                    rho_air=1.2):
-    """Apply one timestep of JRA55-do forcing via L&Y bulk fluxes.
-
-    Returns ``(tau_x_2d, tau_y_2d, shflx_2d, lhflx_2d)`` on the cell
-    grid; the integrating loop adds these to the state's surface
-    boundary condition fields.
-    """
-    from legoesm.ocean.bulk_flux_omip import air_sea_fluxes
-    import jax.numpy as jnp
-    # Top-cell T as SST proxy; salinity is q_sfc surrogate (we use a
-    # Magnus-rule q_sat at SST so this stays simple for the smoke
-    # driver; full coupled physics goes through the coupler layer).
-    T_sfc_K = np.asarray(state.T.data, dtype=np.float64)[..., 0] + 273.15
-    # Bolton (1980) q_sat at SST.
-    T_C = T_sfc_K - 273.15
-    e_s = 6.112 * np.exp(17.67 * T_C / (T_C + 243.5))   # hPa
-    p_sfc = 1013.25
-    q_sfc = 0.622 * e_s / (p_sfc - 0.378 * e_s)
-    # Regrid forcing to the model grid (nearest-neighbour for the
-    # smoke driver; production uses ``conservative_regrid``).
-    u10_t = forcing.u10[idx_t]
-    v10_t = forcing.v10[idx_t]
-    T_air_t = forcing.T_air[idx_t]
-    q_air_t = forcing.q_air[idx_t]
-    # Match grid by nearest-neighbour: forcing is on a 36x72 grid for
-    # the synthetic fallback; model lat/lon might differ. For a 1-day
-    # smoke we just broadcast a global mean.
-    u10_m = float(np.nanmean(u10_t))
-    v10_m = float(np.nanmean(v10_t))
-    T_air_m = float(np.nanmean(T_air_t))
-    q_air_m = float(np.nanmean(q_air_t))
-    tau_x, tau_y, sh, lh = air_sea_fluxes(
-        u10=jnp.full_like(jnp.asarray(T_sfc_K), u10_m),
-        v10=jnp.full_like(jnp.asarray(T_sfc_K), v10_m),
-        T_air_K=jnp.full_like(jnp.asarray(T_sfc_K), T_air_m),
-        q_air=jnp.full_like(jnp.asarray(T_sfc_K), q_air_m),
-        T_sfc_K=jnp.asarray(T_sfc_K),
-        q_sfc=jnp.asarray(q_sfc),
-        rho_air=rho_air,
-    )
-    return (np.asarray(tau_x), np.asarray(tau_y),
-            np.asarray(sh), np.asarray(lh))
+# NOTE: the inline bulk-flux step used by the Phase F skeleton has
+# been promoted to the shared coupler hook
+# ``legoesm.ocean.coupler.apply_omip2_surface_fluxes`` which both
+# this driver and ``run_bryan_thc.py`` import. The skeleton lives on
+# only as a docstring beacon.
 
 
 def main() -> int:
@@ -174,6 +136,8 @@ def main() -> int:
     print(f"   RPE_0 = {rpe0:.4e} J  |  KE_0 = {eb0.KE:.3e}  |  "
           f"vol_0 = {tb0.volume:.3e}")
 
+    from legoesm.ocean.coupler import apply_omip2_surface_fluxes
+
     yearly_diag: list[dict] = []
     dt = float(args.dt)
     n_years = 1 if args.smoke else args.years
@@ -190,15 +154,11 @@ def main() -> int:
         n_forc = forcing.u10.shape[0]
         for step in range(steps_per_year):
             idx_t = (step * n_forc) // steps_per_year
-            tau_x, tau_y, sh, lh = _bulk_flux_step(
-                state, forcing, idx_t, args.grid, grid, z_coord,
+            state = apply_omip2_surface_fluxes(
+                state, forcing=forcing, idx_t=idx_t,
+                z_coord=z_coord, grid=grid, grid_type=args.grid,
+                dt=dt,
             )
-            # Note: the smoke driver does NOT yet plumb tau / shflx
-            # into the state's surface boundary fields -- that needs
-            # the coupler-level surface-forcing applicator. The smoke
-            # path exercises every other code path so we can develop
-            # the coupling wiring in a follow-up commit without
-            # breaking the present skeleton.
             state = model.step(state, dt)
         state = jax.block_until_ready(state)
 

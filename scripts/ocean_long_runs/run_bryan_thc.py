@@ -120,6 +120,8 @@ def main() -> int:
 
     forcing = load_core2_nyf(n_time=12)   # monthly climatology
 
+    from legoesm.ocean.coupler import apply_omip2_surface_fluxes
+
     rpe0 = compute_rpe(state, z_coord,
                        grid_type="latlon_regional", grid=grid)
     eb0 = compute_energy_budget(state, z_coord,
@@ -140,14 +142,14 @@ def main() -> int:
         if y == 0 or (y + 1) % max(1, args.diag_interval_years) == 0 \
                 or y == n_years - 1:
             print(f"==> Year {y + 1}/{n_years}")
+        n_forc = forcing.u10.shape[0]
         for step in range(steps_per_year):
-            # The Bryan driver inherits the rest-state physics (no
-            # explicit wind forcing); the CORE-II forcing is loaded
-            # but the bulk-flux coupling to the surface boundary
-            # fields is a follow-up commit (same gap as in the
-            # OMIP-2 smoke driver -- the integration loop exercises
-            # the dycore + diagnostics, but the surface boundary
-            # condition is not yet plumbed end to end).
+            idx_t = (step * n_forc) // max(1, steps_per_year)
+            state = apply_omip2_surface_fluxes(
+                state, forcing=forcing, idx_t=idx_t,
+                z_coord=z_coord, grid=grid,
+                grid_type="latlon_regional", dt=dt,
+            )
             state = model.step(state, dt)
         state = jax.block_until_ready(state)
 
