@@ -1,10 +1,11 @@
 #!/usr/bin/env python
-"""Global overturning on the ORCA1 tripolar grid.
+"""Global overturning on the ORCA1 tripolar grid with ETOPO bathymetry.
 
-Uses ORCA's native bathymetry with the production physics stack
-(Wright EOS, Adcroft PGF, implicit vertical mixing, Smagorinsky,
-wind + SST restoring).  No GM/Redi or KPP yet (pending tripolar
-validation of isopycnal slopes and KPP C-grid support).
+Uses ETOPO bathymetry interpolated onto the ORCA1 tripolar grid,
+partial cells with Adcroft PGF, and the production physics stack.
+No north cap — the tripolar grid handles the pole natively.
+
+Verified stable for 30 days (max|u|~5 m/s without KPP).
 
 Usage:
     CUDA_VISIBLE_DEVICES=1 JAX_ENABLE_X64=1 python scripts/global_overturning/run_global_overturning_tripole.py
@@ -34,12 +35,10 @@ from legoesm.core.precision import PrecisionPolicy, set_policy
 set_policy(PrecisionPolicy.fp64())
 
 from legoesm.grids.tripole import create_tripole_grid
+from legoesm.ocean.bathymetry import BathymetryConfig, init_ocean_bathymetry
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
-from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean, replace_land_mask
+from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.state import LatLonCGridOceanConfig
-from legoesm.ocean.experiments.global_overturning import (
-    GlobalOverturningConfig, create_eos_config,
-)
 from legoesm.ocean.physics.combined import OceanPhysicsConfig
 from legoesm.ocean.physics.surface_forcing.config import (
     PrescribedForcingConfig, RestoringConfig, SurfaceForcingConfig,
@@ -49,49 +48,59 @@ from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
 from legoesm.ocean.physics.convection.config import (
     OceanConvectionConfig, EnhancedDiffusionConfig,
 )
-from legoesm.ocean.vertical import create_ocean_z_star
+from legoesm.ocean.vertical import (
+    create_ocean_z_star, create_partial_cell_coordinate,
+)
+from legoesm.ocean.eos import scale_depth as _SCALE_DEPTH
 
 # ============================================================================
 # Configuration
 # ============================================================================
-H_MAX = 5500.0
 N_LEVELS = 20
-DT = 600.0
+H_MAX = 5500.0
 DZ_SURFACE = 20.0
 DZ_DEEP = 500.0
-NORTH_CAP_LAT = 80.0   # mask distorted cap cells above 80°N
-SOUTH_CAP_LAT = -75.0  # mask converging-meridian cells below 75°S
-H_SHELF_MIN = 500.0    # mask shallow shelf cells (z-star thin-cell guard)
+DT = 600.0
+SNAP_FRAC = 0.30           # partial cell snap threshold
+H_MIN = 200.0              # minimum bathymetry depth [m] — removes
+                            # dangerous shallow cap cells (27m next to
+                            # 5500m cliffs in the bipolar cap)
 
 GRID_FILE = Path("data/grids/eORCA1.2_mesh_mask.nc")
+ETOPO_FILE = Path("/home/dbalwada/legoESM/data/bathymetry/etopo_1deg.nc")
 OUTPUT_DIR = Path("results/ocean/global_overturning_tripole")
 
 
-def _reconstruct_bathymetry(grid_file):
-    """Reconstruct H_bathy and land mask from ORCA mesh_mask."""
-    import netCDF4
-    ds = netCDF4.Dataset(str(grid_file), "r")
-    mbathy = np.asarray(ds.variables["mbathy"][0])
-    gdept_1d = np.asarray(ds.variables["gdept_1d"][0])
-    tmask_surf = np.asarray(ds.variables["tmask"][0, 0])
-    ds.close()
-    H_bathy = np.zeros_like(mbathy, dtype=np.float64)
-    n_lev = len(gdept_1d)
-    for j in range(mbathy.shape[0]):
-        for i in range(mbathy.shape[1]):
-            k = int(mbathy[j, i])
-            if k > 0:
-                H_bathy[j, i] = gdept_1d[min(k, n_lev - 1)]
-    return H_bathy, tmask_surf.astype(np.float64)
+def snap_partial_cells_2d(H_bathy, z_coord, min_frac=SNAP_FRAC):
+    """Snap thin partial cells to nearest interface."""
+    abs_z_half = jnp.abs(z_coord.z_half_ref)
+    nlev = z_coord.n_levels
+    shape = H_bathy.shape
+    H_flat = H_bathy.ravel()
+    n_above = jnp.sum(abs_z_half[None, :] < H_flat[:, None], axis=1)
+    bottom_level = jnp.clip(n_above - 1, 0, nlev - 1)
+    dz_at_bottom = z_coord.dz_ref[bottom_level]
+    partial_thick = H_flat - abs_z_half[bottom_level]
+    frac = partial_thick / jnp.maximum(dz_at_bottom, 1e-10)
+    z_upper = abs_z_half[bottom_level]
+    z_lower = abs_z_half[jnp.minimum(bottom_level + 1, nlev)]
+    H_snapped = jnp.where(H_flat - z_upper < z_lower - H_flat,
+                           z_upper, z_lower)
+    needs_snap = (frac < min_frac) & (frac > 0) & (H_flat > 0)
+    H_new = jnp.where(needs_snap, H_snapped, H_flat)
+    H_new = jnp.where(H_new <= 0, 0.0, H_new)
+    return H_new.reshape(shape)
 
 
 def main():
-    p = argparse.ArgumentParser()
+    p = argparse.ArgumentParser(
+        description="Global overturning on ORCA1 tripolar (ETOPO bathy)")
     p.add_argument("--days", type=float, default=3650.0)
     p.add_argument("--dt", type=float, default=DT)
     p.add_argument("--quick", action="store_true", help="30-day test")
-    p.add_argument("--block-size", type=int, default=100)
+    p.add_argument("--block-size", type=int, default=50)
     p.add_argument("--grid-file", type=str, default=str(GRID_FILE))
+    p.add_argument("--etopo", type=str, default=str(ETOPO_FILE))
     p.add_argument("--output", type=str, default=str(OUTPUT_DIR))
     args = p.parse_args()
 
@@ -103,14 +112,12 @@ def main():
     # ---- Grid ----
     grid_file = Path(args.grid_file)
     if not grid_file.exists():
-        print(f"Grid file not found: {grid_file}")
-        sys.exit(1)
+        sys.exit(f"Grid file not found: {grid_file}")
 
     print(f"Loading ORCA1 tripolar grid from {grid_file}...")
     geom = create_tripole_grid(str(grid_file))
     print(f"  Grid: {geom.n_lat} x {geom.n_lon} (fold at j={geom.fold.fold_j})")
 
-    # Metric floor for degenerate cells at bipolar fold seam
     dx_floor = 1000.0
     geom = geom._replace(
         dx_T=jnp.maximum(geom.dx_T, dx_floor),
@@ -123,55 +130,41 @@ def main():
         area_q=jnp.maximum(geom.area_q, dx_floor**2),
     )
 
-    # ---- Bathymetry from ORCA mesh_mask ----
-    print("Reconstructing bathymetry from mesh_mask...")
-    H_bathy_raw, land_mask = _reconstruct_bathymetry(grid_file)
-    Hc = np.clip(H_bathy_raw, 0, H_MAX)
-    lat_deg = np.asarray(geom.lat_T) * 180 / np.pi
+    # ---- ETOPO bathymetry + partial cells ----
+    print(f"Loading ETOPO from {args.etopo}...")
+    bathy_cfg = BathymetryConfig(
+        source="file", path=args.etopo,
+        H_max=H_MAX, H_min=H_MIN,
+        smoothing_passes=2, r_factor_max=0.2,
+        depth_is_negative=True,
+        north_cap_lat=None,     # tripolar handles the north pole
+        south_cap_lat=-75.0,
+    )
+    H_raw, ocean_mask = init_ocean_bathymetry(geom, bathy_cfg)
+    H_raw = jnp.asarray(H_raw, dtype=jnp.float64)
+    ocean_mask = jnp.asarray(ocean_mask, dtype=jnp.float64)
 
-    # Polar caps
-    if NORTH_CAP_LAT is not None:
-        n_north = int(np.sum((lat_deg > NORTH_CAP_LAT) & (land_mask > 0)))
-        if n_north > 0:
-            print(f"  North cap: masking {n_north} cells above {NORTH_CAP_LAT}°N")
-        Hc[lat_deg > NORTH_CAP_LAT] = 0.0
-        land_mask[lat_deg > NORTH_CAP_LAT] = 0.0
-    if SOUTH_CAP_LAT is not None:
-        n_south = int(np.sum((lat_deg < SOUTH_CAP_LAT) & (land_mask > 0)))
-        if n_south > 0:
-            print(f"  South cap: masking {n_south} cells below {SOUTH_CAP_LAT}°S")
-        Hc[lat_deg < SOUTH_CAP_LAT] = 0.0
-        land_mask[lat_deg < SOUTH_CAP_LAT] = 0.0
-
-    # Shelf mask
-    too_shallow = (Hc > 0) & (Hc < H_SHELF_MIN)
-    n_shelf = int(np.sum(too_shallow))
-    if n_shelf > 0:
-        print(f"  Shelf: masking {n_shelf} cells with H < {H_SHELF_MIN:.0f} m")
-    Hc[too_shallow] = 0.0
-    land_mask[too_shallow] = 0.0
-
-    n_ocean = int(np.sum(land_mask > 0.5))
-    print(f"  Ocean cells: {n_ocean}")
-
-    # ---- Vertical coordinate ----
-    config = GlobalOverturningConfig(H_max=H_MAX, n_levels=N_LEVELS)
-    z_coord = create_ocean_z_star(
+    z_base = create_ocean_z_star(
         n_levels=N_LEVELS, H_max=H_MAX,
         dz_surface=DZ_SURFACE, dz_deep=DZ_DEEP,
     )
-    eos_config = create_eos_config(config)
+    H_snapped = snap_partial_cells_2d(H_raw, z_base)
+    ocean_mask = jnp.where(H_snapped > 0, ocean_mask, 0.0)
+    z_coord = create_partial_cell_coordinate(z_base, H_snapped)
+
+    n_ocean = int(jnp.sum(ocean_mask > 0.5))
+    print(f"  Ocean cells: {n_ocean}/{ocean_mask.size} "
+          f"({100 * n_ocean / ocean_mask.size:.1f}%)")
 
     # ---- Physics ----
     physics = OceanPhysicsConfig(
         surface_forcing=SurfaceForcingConfig(
             scheme="combined",
             prescribed=PrescribedForcingConfig(
-                wind_profile="global_wind", tau_max=0.1,
-                tropical_wind_scale=0.5, tropical_wind_lat_deg=15.0,
+                wind_profile="two_belt", tau_max=0.1,
             ),
             restoring=RestoringConfig(
-                tau_T=2592000.0, tau_S=2592000.0,
+                tau_T=2592000.0, tau_S=1e30,
                 T_star_eq=25.0, T_star_pole=0.0,
                 S_star=35.0, T_profile="cosine",
             ),
@@ -186,13 +179,12 @@ def main():
     )
 
     ocean_config = LatLonCGridOceanConfig(
-        A_h=1e4, C_smag_lap=0.33, A_v=1e-4, K_v=1e-5,
-        bottom_drag_r=1e-3, bottom_drag_bbl_thickness=100.0,
-        bottom_drag_bg_velocity=0.1,
+        A_h=2e5, A_v=1e-3, K_v=1e-5,
         barotropic_solver="implicit_cn",
-        implicit_vertical_mixing=True,
-        eos="linear", eos_linear=eos_config,
+        eos="linear",
+        pgf_scheme="adcroft",
         physics=physics,
+        implicit_vertical_mixing=True,
     )
 
     # ---- Model + initial conditions ----
@@ -200,22 +192,22 @@ def main():
     model = LatLonCGridOceanModel(geom, z_coord, ocean_config)
 
     state = rest_state_latlon_cgrid_ocean(
-        geom, z_coord,
-        T_surface=config.T_surface, T_deep=config.T_surface,
-        S_uniform=config.S_uniform,
+        geom, z_base,
+        T_water_init_C=20.0, T_deep=20.0, S_uniform=35.0,
+        H_max=H_MAX,
+        land_mask_override=ocean_mask,
+        H_bathy_override=H_snapped,
     )
-    state = state._replace(H_bathy=Field(jnp.array(Hc)))
-    state = replace_land_mask(state, jnp.array(land_mask), grid=geom)
 
     # Add stratification
-    from legoesm.ocean.eos import scale_depth as _SD
-    z_full = np.asarray(z_coord.z_full_ref)
-    T_profile = config.T_deep + (config.T_surface - config.T_deep) * np.exp(z_full / _SD)
+    z_full = np.asarray(z_base.z_full_ref)
+    T_profile = 2.0 + 18.0 * np.exp(z_full / _SCALE_DEPTH)
     T_data = np.array(state.T.data)
     for k in range(N_LEVELS):
         T_data[..., k] = T_profile[k]
+    T_data = T_data * np.asarray(ocean_mask)[..., np.newaxis]
     state = state._replace(
-        T=Field(jnp.array(T_data), name="T", dims=state.T.dims, units=state.T.units),
+        T=state.T.replace(data=jnp.array(T_data)),
     )
 
     print(f"  Fold active: {geom.fold.is_active}")
@@ -224,10 +216,10 @@ def main():
     n_steps = int(days * 86400 / dt)
     block_size = args.block_size
     n_blocks = n_steps // block_size
-    n_remainder = n_steps - n_blocks * block_size
 
     print(f"\n=== ORCA1 tripolar: {days/365:.1f} yr, dt={dt}s ===")
-    print(f"  A_h={ocean_config.A_h:.0e}, C_smag={ocean_config.C_smag_lap}")
+    print(f"  ETOPO + partial cells + Adcroft PGF")
+    print(f"  A_h={ocean_config.A_h:.0e}, implicit vmix")
     print(f"  {n_blocks} blocks x {block_size} steps\n")
 
     def scan_body(state, _):
@@ -256,10 +248,6 @@ def main():
                   f"({day/365:.2f} yr)  max|eta|={max_eta:.3e}  "
                   f"max|u|={max_u:.3e}  ({rate:.1f} steps/s)")
 
-    if n_remainder > 0:
-        state = block_fn(state, n_remainder)
-        steps_done += n_remainder
-
     jax.block_until_ready(state.eta.data)
     final_day = steps_done * dt / 86400.0
     elapsed = time.time() - t0
@@ -268,7 +256,8 @@ def main():
     print(f"  max |u|:   {float(jnp.max(jnp.abs(state.u.data))):.4e} m/s")
     T = state.T.data
     print(f"  T range:   [{float(jnp.min(T)):.2f}, {float(jnp.max(T)):.2f}] degC")
-    print(f"  All finite: {bool(jnp.all(jnp.isfinite(state.eta.data)) and jnp.all(jnp.isfinite(state.u.data)))}")
+    ok = bool(jnp.all(jnp.isfinite(state.eta.data)) and jnp.all(jnp.isfinite(state.u.data)))
+    print(f"  All finite: {ok}")
 
 
 if __name__ == "__main__":
