@@ -125,14 +125,25 @@ _XU_RANDALL_TRAINABLE: list[ParamConstraint] = [
 # audit identified this as the biggest gap — radiation is the
 # dominant lever on the residual T bias.  ``tau_equator`` and
 # ``tau_pole`` were already exposed via ``_AIMIP_COMMON_TRAINABLE``.
+#
+# v7 (2026-05-19): widened sfc_emissivity / sfc_albedo bounds.
+# v5+v6 produced a +1.07 K warm T bias that the optimizer could
+# not close because the scalar trained leaves were saturated near
+# their published defaults (sfc_emissivity bound 0.85-1.0, default
+# 1.0 -> sigmoid pinned at upper edge, gradient ~0; sfc_albedo
+# bound 0.05-0.4 with default 0.31 = 77 % of range).  Wider bounds
+# put the defaults closer to the sigmoid interior so the
+# bias-penalty gradient can move the knobs.  Centering the defaults
+# inside the new range is left to a follow-up that adjusts
+# ``_canonical_scheme_defaults`` consistently.
 _GRAY_RAD_TRAINABLE: list[ParamConstraint] = [
     ParamConstraint("gray_linear_frac", 0.0, 0.6, "sigmoid"),
     ParamConstraint("gray_tau_moist_coeff", 5.0e-3, 2.5e-2, "sigmoid"),
     ParamConstraint("gray_lw_diff_factor", 1.2, 2.0, "sigmoid"),
-    ParamConstraint("gray_sfc_emissivity", 0.85, 1.0, "sigmoid"),
+    ParamConstraint("gray_sfc_emissivity", 0.5, 1.0, "sigmoid"),
     ParamConstraint("gray_sw_tau_0", 0.0, 0.5, "sigmoid"),
     ParamConstraint("gray_sw_exponent", 1.0, 4.0, "sigmoid"),
-    ParamConstraint("gray_sfc_albedo", 0.05, 0.4, "sigmoid"),
+    ParamConstraint("gray_sfc_albedo", 0.03, 0.6, "sigmoid"),
 ]
 
 # Sundqvist large-scale condensation (now the AIMIP-winning
@@ -153,24 +164,27 @@ _SBM_TRAINABLE: list[ParamConstraint] = [
     ParamConstraint("sbm_T_min_convect", 180.0, 220.0, "sigmoid"),
 ]
 
-# RRTMGP knobs (parked; active when ``aimip_radiation=rrtmgp``).
+# RRTMGP knobs (active when ``aimip_radiation=rrtmgp``).
+# v7: widened sfc_emissivity / sfc_albedo bounds (see _GRAY_RAD_TRAINABLE
+# comment); the same saturation problem hit the RRTMGP path at v6.
 _RRTMGP_TRAINABLE: list[ParamConstraint] = [
     ParamConstraint("rrtmgp_co2_ppmv", 200.0, 800.0, "sigmoid"),
     ParamConstraint("rrtmgp_ch4_ppbv", 700.0, 3000.0, "sigmoid"),
     ParamConstraint("rrtmgp_n2o_ppbv", 250.0, 400.0, "sigmoid"),
-    ParamConstraint("rrtmgp_sfc_emissivity", 0.85, 1.0, "sigmoid"),
-    ParamConstraint("rrtmgp_sfc_albedo", 0.03, 0.4, "sigmoid"),
+    ParamConstraint("rrtmgp_sfc_emissivity", 0.5, 1.0, "sigmoid"),
+    ParamConstraint("rrtmgp_sfc_albedo", 0.03, 0.6, "sigmoid"),
     ParamConstraint("rrtmgp_aerosol_ssa", 0.8, 1.0, "sigmoid"),
     ParamConstraint("rrtmgp_aerosol_g", 0.5, 0.9, "sigmoid"),
 ]
 
 # Shared surface-energy-balance knobs (also feed gray radiation
-# ``tau_equator`` / ``tau_pole``).
+# ``tau_equator`` / ``tau_pole``).  v7: widened albedo_ice /
+# albedo_ocean for the same reason as the rad scalars above.
 _AIMIP_COMMON_TRAINABLE: list[ParamConstraint] = [
     ParamConstraint("tau_equator", 3.0, 12.0, "sigmoid"),
     ParamConstraint("tau_pole", 0.5, 4.0, "sigmoid"),
-    ParamConstraint("albedo_ice", 0.4, 0.8, "sigmoid"),
-    ParamConstraint("albedo_ocean", 0.03, 0.10, "sigmoid"),
+    ParamConstraint("albedo_ice", 0.3, 0.95, "sigmoid"),
+    ParamConstraint("albedo_ocean", 0.02, 0.25, "sigmoid"),
 ]
 
 
@@ -251,11 +265,24 @@ class AIMIPClassicalParams(eqx.Module):
         except Exception:
             param_dtype = jnp.float32
 
+        # v7: clamp the inverse-sigmoid input away from the bounds so
+        # the initial gradient is non-trivial even when the canonical
+        # default sits at the saturation edge.  Without this,
+        # ``sfc_emissivity`` (canonical default 0.98 or 1.0) maps to
+        # raw values where ``sigmoid'`` is ~1e-2 or less and the
+        # bias-penalty loss cannot move the knob.  5% of the range
+        # is a small physical perturbation (emissivity 0.98 -> 0.975
+        # in [0.5, 1.0]) but bumps the sigmoid gradient by ~3x.
+        sigmoid_margin = 0.05
         raw: dict[str, jax.Array] = {}
         for c in AIMIP_CLASSICAL_CONSTRAINTS:
             default = scheme_defaults.get(c.name, 0.5 * (c.min_val + c.max_val))
+            margin = sigmoid_margin * (c.max_val - c.min_val)
+            default_clamped = min(
+                c.max_val - margin, max(c.min_val + margin, default),
+            )
             raw[c.name] = jnp.asarray(
-                _range_to_sigmoid(default, c.min_val, c.max_val),
+                _range_to_sigmoid(default_clamped, c.min_val, c.max_val),
                 dtype=param_dtype,
             )
         spatial = None
@@ -596,9 +623,38 @@ def make_aimip_classical_spectral_physics(
     # flattened to (ncol,) so the downstream surface_layer / gray-
     # radiation code paths receive arrays that broadcast against the
     # column-wise prognostic fields.
+    #
+    # v7: pass the trained sigmoid-bounded scalar leaves as the per-
+    # field baseline (``f_0_override``) so the scalar gradient flows
+    # through the spatial field and the bias-penalty loss can move
+    # the scalar knob.  Without this, the static ``f_0`` in
+    # ``_FIELD_SPECS`` is the only baseline and the scalar
+    # ``rrtmgp_sfc_emissivity`` / ``rrtmgp_sfc_albedo`` etc. leaves
+    # are effectively bypassed under ``aimip_spatial_surface: true``.
+    # Surface aerodynamic baselines use the (already-traced) surface
+    # config values; radiation baselines pick the active scheme's
+    # leaves.
     spatial_fields_col: dict[str, jax.Array] = {}
     if params.spatial_surface is not None:
-        fields_2d = params.spatial_surface.evaluate(grid, land_mask=land_mask)
+        baselines: dict[str, jax.Array] = {}
+        # Surface aerodynamic fields -- scalar trained leaves.
+        baselines["Cd_neutral"] = p["surface_Cd_neutral"]
+        baselines["Ch_neutral"] = p["surface_Ch_neutral"]
+        baselines["z0"] = p["surface_z0"]
+        # Radiation surface fields -- pick the active scheme's leaf.
+        if radiation == "rrtmgp":
+            baselines["sfc_emissivity"] = p["rrtmgp_sfc_emissivity"]
+            baselines["sfc_albedo"] = p["rrtmgp_sfc_albedo"]
+        else:  # gray (or unknown -> use gray defaults)
+            baselines["sfc_emissivity"] = p["gray_sfc_emissivity"]
+            baselines["sfc_albedo"] = p["gray_sfc_albedo"]
+        # Shared albedo knobs.
+        baselines["albedo_ocean"] = p["albedo_ocean"]
+        baselines["albedo_ice"] = p["albedo_ice"]
+
+        fields_2d = params.spatial_surface.evaluate(
+            grid, land_mask=land_mask, baselines=baselines,
+        )
         n_lat, n_lon = grid.n_lat, grid.n_lon
         for name, arr in fields_2d.items():
             spatial_fields_col[name] = arr.reshape(n_lat * n_lon)

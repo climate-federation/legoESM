@@ -209,14 +209,36 @@ class SpatialField(eqx.Module):
         self,
         grid,
         land_mask: jax.Array | None = None,
+        f_0_override: "jax.Array | float | None" = None,
     ) -> jax.Array:
+        """Synthesize the lat-lon field from current coefficients.
+
+        Parameters
+        ----------
+        grid : GaussianGrid
+        land_mask : array or None
+            Optional soft (0..1) land mask.  When provided, the
+            spatial value applies only on land columns; ocean
+            columns fall back to the baseline ``f_0``.
+        f_0_override : scalar JAX array or float or None
+            When non-None, replaces the static ``self.f_0`` for this
+            evaluation.  Lets AIMIP plumb the *trained* scalar
+            value (sigmoid-bounded leaf in ``AIMIPClassicalParams``)
+            as the baseline so the scalar gradient flows through
+            the spatial field's gradient and the bias-penalty loss
+            can move the scalar knob.  Without this, the static
+            ``self.f_0`` is the only baseline and the scalar trained
+            leaf is effectively bypassed under
+            ``aimip_spatial_surface: true``.
+        """
         basis = spatial_basis(grid, self.l_max, self.m_max)
         z = jnp.einsum("k,kij->ij", self.coeffs.astype(basis.dtype), basis)
         z_bounded = jnp.tanh(z)
+        f_0_eff = self.f_0 if f_0_override is None else f_0_override
         if self.transform == "log_perturb":
-            value = self.f_0 * jnp.exp(self.scale * z_bounded)
+            value = f_0_eff * jnp.exp(self.scale * z_bounded)
         elif self.transform == "shift":
-            value = self.f_0 + self.scale * z_bounded
+            value = f_0_eff + self.scale * z_bounded
         else:
             raise ValueError(
                 f"Unknown transform {self.transform!r} "
@@ -224,7 +246,7 @@ class SpatialField(eqx.Module):
             )
         if land_mask is not None:
             land = land_mask.astype(value.dtype)
-            value = value * land + self.f_0 * (1.0 - land)
+            value = value * land + f_0_eff * (1.0 - land)
         return value
 
 
@@ -321,9 +343,23 @@ class AIMIPSpatialSurfaceParams(eqx.Module):
         self,
         grid,
         land_mask: jax.Array | None = None,
+        baselines: dict[str, "jax.Array | float"] | None = None,
     ) -> dict[str, jax.Array]:
+        """Evaluate all spatial fields on the grid.
+
+        ``baselines`` is an optional dict mapping field-name to a
+        scalar (or array) that overrides the static ``f_0`` for that
+        field.  AIMIP passes the trained sigmoid-bounded scalar
+        leaves here so the spatial fields perturb around the
+        trainable scalar baseline; missing names fall back to the
+        per-field static ``f_0``.
+        """
+        baselines = baselines or {}
         return {
-            name: field.evaluate(grid, land_mask=land_mask)
+            name: field.evaluate(
+                grid, land_mask=land_mask,
+                f_0_override=baselines.get(name),
+            )
             for name, field in self.fields.items()
         }
 

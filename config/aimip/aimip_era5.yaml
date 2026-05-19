@@ -192,12 +192,17 @@ loss:
   w_v: 0.5
   w_q: 0.2
   w_ps: 0.3
-  # Bias-penalty weights.  v5 classical hit +1.07 K warm T bias at
-  # T11 L8; per-cell MSE only weakly constrains constant offsets, so
-  # we add an explicit squared-global-mean-error term per variable.
-  # w_bias_T at 10 puts the bias penalty at the same order as the
-  # MSE term once the bias drops to ~1/3 of the per-cell RMSE.
-  w_bias_T: 10.0
+  # Bias-penalty weights.  v6 with w_bias_T=10 worked for NN-based
+  # variants (column_nn bias -0.94 -> -0.28, SFNO -0.16 -> -0.04)
+  # but classical stayed at +1.07 K because its scalar trained
+  # leaves were saturated near the bounds (now widened in v7) and
+  # bypassed by spatial fields (now using trained scalars as the
+  # baseline via f_0_override).  v7 bumps w_bias_T to 100 so the
+  # per-variable bias term dominates over the per-cell MSE once the
+  # bias is non-trivial: at +1.07 K the bias contributes
+  # 100 * (1.07/30)^2 = 0.127 to the loss versus the per-cell MSE
+  # contribution of (4.46/30)^2 = 0.022.
+  w_bias_T: 100.0
   w_bias_u: 1.0
   w_bias_v: 1.0
   w_bias_ps: 1.0
