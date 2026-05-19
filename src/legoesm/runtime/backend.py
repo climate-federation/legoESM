@@ -315,7 +315,7 @@ def _detect_backend_pre_init() -> str | None:
     return None
 
 
-def configure_backend(backend: str | None = None) -> str:
+def configure_backend(backend: str | None = None, *, distributed: bool = False) -> str:
     """Apply backend-specific XLA flags and JAX options.
 
     This should be called **once at startup**, before any JAX computation.
@@ -324,6 +324,11 @@ def configure_backend(backend: str | None = None) -> str:
     ``TPU_NAME``).  We deliberately avoid ``jax.default_backend()`` /
     ``jax.devices()`` until **after** the GPU XLA scheduler flags are
     set — otherwise PJRT initialises with the wrong flags.
+
+    When *distributed* is ``True`` (multi-node MPI), ``jax.devices()``
+    is skipped entirely in this function.  ``jax.distributed.initialize()``
+    must be called before XLA backend init, so ``bootstrap()`` defers all
+    device queries to after ``initialize_distributed()`` completes.
 
     Returns the resolved backend name (lowercase).
     """
@@ -368,9 +373,12 @@ def configure_backend(backend: str | None = None) -> str:
         # single-process runs (preallocation reduces fragmentation
         # over a long simulation).  User overrides win.
         if "XLA_PYTHON_CLIENT_PREALLOCATE" not in os.environ:
+            # SLURM_NTASKS covers srun multi-node (ntasks-per-node=1 gives
+            # SLURM_NTASKS_PER_NODE=1 even with 6 total ranks, so check both).
             _multi_proc = (
                 int(os.environ.get("OMPI_COMM_WORLD_SIZE", "1")) > 1
                 or int(os.environ.get("PMI_SIZE", "1")) > 1
+                or int(os.environ.get("SLURM_NTASKS", "1")) > 1
                 or int(os.environ.get("SLURM_NTASKS_PER_NODE", "1")) > 1
             )
             if _multi_proc:
@@ -382,35 +390,46 @@ def configure_backend(backend: str | None = None) -> str:
         elif pre_init_vendor == "amd":
             _set_xla_flags(_AMD_GPU_XLA_FLAGS)
 
-        devices = jax.devices()
-        vendor = gpu_vendor()
-        if pre_init_vendor is None:
-            # Vendor was only known after JAX init; XLA_FLAGS already
-            # locked in.  Still apply best-effort matmul precision
-            # below, and warn so the user can pre-set ``CUDA_VISIBLE_DEVICES``
-            # / ``HIP_VISIBLE_DEVICES`` for the next run.
+        if distributed:
+            # Multi-node MPI: jax.distributed.initialize() must be called
+            # before XLA backend init (jax.devices()).  Skip the device query
+            # here; bootstrap() calls initialize_distributed() after this
+            # function returns, which both inits JAX distributed and queries
+            # devices.  Use pre_init_vendor for vendor-dependent settings.
+            vendor = pre_init_vendor or "nvidia"  # safe default for Levante
             if vendor == "nvidia":
-                _set_xla_flags(_NVIDIA_GPU_XLA_FLAGS)
-                logger.warning(
-                    "GPU vendor detected post-init; XLA scheduler flags "
-                    "may not take effect this run.  Set "
-                    "CUDA_VISIBLE_DEVICES or JAX_PLATFORMS=cuda before "
-                    "import to enable latency-hiding flags.",
-                )
-            elif vendor == "amd":
-                _set_xla_flags(_AMD_GPU_XLA_FLAGS)
-                logger.warning(
-                    "GPU vendor detected post-init; XLA scheduler flags "
-                    "may not take effect this run.  Set "
-                    "HIP_VISIBLE_DEVICES before import to enable "
-                    "latency-hiding flags.",
-                )
+                jax.config.update("jax_default_matmul_precision", "tensorfloat32")
+            logger.info("GPU vendor: %s (distributed — device count deferred)", vendor)
+        else:
+            devices = jax.devices()
+            vendor = gpu_vendor()
+            if pre_init_vendor is None:
+                # Vendor was only known after JAX init; XLA_FLAGS already
+                # locked in.  Still apply best-effort matmul precision
+                # below, and warn so the user can pre-set ``CUDA_VISIBLE_DEVICES``
+                # / ``HIP_VISIBLE_DEVICES`` for the next run.
+                if vendor == "nvidia":
+                    _set_xla_flags(_NVIDIA_GPU_XLA_FLAGS)
+                    logger.warning(
+                        "GPU vendor detected post-init; XLA scheduler flags "
+                        "may not take effect this run.  Set "
+                        "CUDA_VISIBLE_DEVICES or JAX_PLATFORMS=cuda before "
+                        "import to enable latency-hiding flags.",
+                    )
+                elif vendor == "amd":
+                    _set_xla_flags(_AMD_GPU_XLA_FLAGS)
+                    logger.warning(
+                        "GPU vendor detected post-init; XLA scheduler flags "
+                        "may not take effect this run.  Set "
+                        "HIP_VISIBLE_DEVICES before import to enable "
+                        "latency-hiding flags.",
+                    )
 
-        # TensorFloat32 is an NVIDIA Ampere+ feature (19-bit mantissa).
-        # AMD GPUs do not have TF32 hardware; use default float32.
-        if vendor == "nvidia":
-            jax.config.update("jax_default_matmul_precision", "tensorfloat32")
-        logger.info("GPU vendor: %s (%d device(s))", vendor, len(devices))
+            # TensorFloat32 is an NVIDIA Ampere+ feature (19-bit mantissa).
+            # AMD GPUs do not have TF32 hardware; use default float32.
+            if vendor == "nvidia":
+                jax.config.update("jax_default_matmul_precision", "tensorfloat32")
+            logger.info("GPU vendor: %s (%d device(s))", vendor, len(devices))
 
     elif backend == "metal":
         ensure_metal_or_fallback()

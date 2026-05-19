@@ -108,7 +108,7 @@ def bootstrap(
     )
 
     if configure_xla:
-        resolved_backend = configure_backend(backend)
+        resolved_backend = configure_backend(backend, distributed=distributed)
     else:
         resolved_backend = backend or get_backend()
 
