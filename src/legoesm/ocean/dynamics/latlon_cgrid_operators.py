@@ -1430,61 +1430,92 @@ def strain_rate_cgrid(
     u_eff = jnp.concatenate([u_eff[:, :n_lon], u_eff[:, 0:1]], axis=1)
 
     # --- D_T at h-points: du/dx - dv/dy ---
-    # face_dy at h-point: cell-row meridional extent (cell height).
-    face_dy = grid.dy * 0.5  # (n_lat,)
-    u_east = u_eff[:, 1:]
-    u_west = u_eff[:, :-1]
-    du_dx = (u_east - u_west) * face_dy[lat_bcast]
+    if is_tripolar(grid):
+        # Tripolar: full 2D metrics (same logic as divergence_cgrid).
+        face_dy = grid.dy_u  # (n_lat, n_lon+1)
+        u_east = u_eff[:, 1:]
+        u_west = u_eff[:, :-1]
+        du_dx = u_east * _bcast2d(face_dy[:, 1:]) - u_west * _bcast2d(face_dy[:, :-1])
 
-    lat_interior = 0.5 * (lat[:-1] + lat[1:])
-    cos_lat_v = jnp.pad(
-        jnp.maximum(jnp.cos(lat_interior), 1e-10),
-        (1, 1), constant_values=1e-10,
-    )
-    face_dx = R * cos_lat_v * dlon  # (n_lat+1,)
+        face_dx = grid.dx_v  # (n_lat+1, n_lon)
+        v_north = v_eff[1:]
+        v_south = v_eff[:-1]
+        dv_dy = v_north * _bcast2d(face_dx[1:]) - v_south * _bcast2d(face_dx[:-1])
+    else:
+        face_dy = grid.dy * 0.5  # (n_lat,)
+        u_east = u_eff[:, 1:]
+        u_west = u_eff[:, :-1]
+        du_dx = (u_east - u_west) * face_dy[lat_bcast]
 
-    v_north = v_eff[1:]
-    v_south = v_eff[:-1]
-    dv_dy = (v_north * face_dx[1:][lat_bcast]
-             - v_south * face_dx[:-1][lat_bcast])
+        lat_interior = 0.5 * (lat[:-1] + lat[1:])
+        cos_lat_v = jnp.pad(
+            jnp.maximum(jnp.cos(lat_interior), 1e-10),
+            (1, 1), constant_values=1e-10,
+        )
+        face_dx = R * cos_lat_v * dlon  # (n_lat+1,)
+        v_north = v_eff[1:]
+        v_south = v_eff[:-1]
+        dv_dy = (v_north * face_dx[1:][lat_bcast]
+                 - v_south * face_dx[:-1][lat_bcast])
 
-    area = grid.area  # (n_lat, n_lon) — broadcasts naturally over (...,, nlev)
-    D_T = (du_dx - dv_dy) / area[..., jnp.newaxis] if is_3d else \
-        (du_dx - dv_dy) / area
+    area = grid.area  # (n_lat, n_lon)
+    D_T = (du_dx - dv_dy) / _bcast2d(area)
     if mask is not None:
         D_T = D_T * _bcast2d(mask)
 
     # --- D_S at q-points: dv/dx + du/dy ---
-    sin_lat = jnp.sin(lat)
-    sin_ext = jnp.pad(sin_lat, (1, 1), constant_values=(-1.0, 1.0))
-    A_vertex = R**2 * dlon * jnp.abs(sin_ext[1:] - sin_ext[:-1])
-    A_vertex = jnp.maximum(A_vertex, 1e-30)
+    if is_tripolar(grid):
+        # Tripolar: full 2D vertex area and edge lengths
+        # (same logic as curl_vertex_cgrid).
+        A_vertex = grid.area_q  # (n_lat+1, n_lon+1)
+        A_vertex = jnp.maximum(A_vertex, 1e-30)
+        dx_cell = grid.dx_T  # (n_lat, n_lon)
+        dy_v_2d = grid.dy_v  # (n_lat+1, n_lon)
 
-    dx_cell = R * cos_lat * dlon
-    # dy_edge at vertex rows: cell-center-to-cell-center meridional
-    # distance. Interior vertices i=1..n_lat-1; pole rows padded (their
-    # D_S contributions are zeroed below).
-    dy_h = grid.dy * 0.5
-    dy_edge_interior = 0.5 * (dy_h[1:] + dy_h[:-1])
-    dy_edge = jnp.pad(dy_edge_interior, (1, 1), mode='edge')  # (n_lat+1,)
+        v_east = v_eff
+        v_west = jnp.roll(v_eff, 1, axis=1)
+        dy_east = _bcast2d(dy_v_2d)
+        dy_west = _bcast2d(jnp.roll(dy_v_2d, 1, axis=1))
+        dv_circ = v_east * dy_east - v_west * dy_west
+        dv_circ_full = jnp.concatenate([dv_circ, dv_circ[:, 0:1]], axis=1)
 
-    # dv/dx at vertex: (v_east - v_west) * dy / A_vertex
-    v_east = v_eff
-    v_west = jnp.roll(v_eff, 1, axis=1)
-    dv_circ = (v_east - v_west) * dy_edge[lat_bcast]
-    dv_circ_full = jnp.concatenate([dv_circ, dv_circ[:, 0:1]], axis=1)
+        dx_pad = jnp.pad(dx_cell, ((1, 1), (0, 0)))
+        dx_pad = jnp.concatenate([dx_pad, dx_pad[:, 0:1]], axis=1)
+        u_ext = jnp.pad(u_eff, ((1, 1), (0, 0), *pad_extra))
+        u_south = u_ext[:-1]
+        u_north = u_ext[1:]
+        dx_south = _bcast2d(dx_pad[:-1])
+        dx_north = _bcast2d(dx_pad[1:])
+        # Sign FLIPPED vs curl: du/dy = u_north*dx_north - u_south*dx_south
+        du_circ = u_north * dx_north - u_south * dx_south
 
-    # du/dy at vertex: sign FLIPPED vs curl.
-    u_ext = jnp.pad(u_eff, ((1, 1), (0, 0), *pad_extra))
-    dx_ext = jnp.pad(dx_cell, (1, 1))
-    u_south = u_ext[:-1]
-    u_north = u_ext[1:]
-    dx_south = dx_ext[:-1]
-    dx_north = dx_ext[1:]
-    du_circ = (u_north * dx_north[lat_bcast]
-               - u_south * dx_south[lat_bcast])
+        D_S = (dv_circ_full + du_circ) / _bcast2d(A_vertex)
+    else:
+        sin_lat = jnp.sin(lat)
+        sin_ext = jnp.pad(sin_lat, (1, 1), constant_values=(-1.0, 1.0))
+        A_vertex = R**2 * dlon * jnp.abs(sin_ext[1:] - sin_ext[:-1])
+        A_vertex = jnp.maximum(A_vertex, 1e-30)
 
-    D_S = (dv_circ_full + du_circ) / A_vertex[lat_bcast]
+        dx_cell = R * cos_lat * dlon
+        dy_h = grid.dy * 0.5
+        dy_edge_interior = 0.5 * (dy_h[1:] + dy_h[:-1])
+        dy_edge = jnp.pad(dy_edge_interior, (1, 1), mode='edge')
+
+        v_east = v_eff
+        v_west = jnp.roll(v_eff, 1, axis=1)
+        dv_circ = (v_east - v_west) * dy_edge[lat_bcast]
+        dv_circ_full = jnp.concatenate([dv_circ, dv_circ[:, 0:1]], axis=1)
+
+        u_ext = jnp.pad(u_eff, ((1, 1), (0, 0), *pad_extra))
+        dx_ext = jnp.pad(dx_cell, (1, 1))
+        u_south = u_ext[:-1]
+        u_north = u_ext[1:]
+        dx_south = dx_ext[:-1]
+        dx_north = dx_ext[1:]
+        du_circ = (u_north * dx_north[lat_bcast]
+                   - u_south * dx_south[lat_bcast])
+
+        D_S = (dv_circ_full + du_circ) / A_vertex[lat_bcast]
     # Boundary: wall BC on regular lat-lon; fold on tripolar.
     D_S = pad_ns_scalar(D_S[1:-1], grid)
 
@@ -1601,107 +1632,98 @@ def stress_divergence_cgrid(
     tend_u : (n_lat, n_lon+1, ...) at u-faces
     tend_v : (n_lat+1, n_lon, ...) at v-faces
     """
-    R = grid.radius
-    dlon = grid.dlon
-    lat = grid.lat
-    cos_lat = grid.cos_lat
-
-    # Two distinct y-lengths needed:
-    #   dy_h(j) = cell row j's meridional extent (used at h-points).
-    #   dy_edge(i) = distance between cell-center latitudes of rows
-    #                i-1 and i (used at vertex rows). Pole rows padded
-    #                with edge value; D_T/D_S contributions from poles
-    #                are masked elsewhere.
-    dy_h = grid.dy * 0.5                                          # (n_lat,)
-    dy_edge_interior = 0.5 * (dy_h[1:] + dy_h[:-1])               # (n_lat-1,)
-    dy_edge = jnp.pad(dy_edge_interior, (1, 1), mode='edge')      # (n_lat+1,)
-    dx_cell = R * cos_lat * dlon  # (n_lat,) zonal edge at cell-center latitude
-
-    # v-face latitudes and zonal edge lengths.  cos(±π/2) is roundoff-
-    # level; build cos_lat_v directly with a 1e-10 floor at the pole
-    # rows via Pad constant_values.
-    lat_interior = 0.5 * (lat[:-1] + lat[1:])
-    cos_lat_v = jnp.pad(
-        jnp.maximum(jnp.cos(lat_interior), 1e-10),
-        (1, 1), constant_values=1e-10,
-    )
-    dx_v = R * cos_lat_v * dlon  # (n_lat+1,) face_dx at v-face latitudes
-
-    # Reshape lat metric to broadcast over (n_lat, n_lon[+1][, nlev]).
     is_3d = stress_h.ndim == 3
-    lat_bcast = (slice(None),) + (jnp.newaxis,) * (stress_h.ndim - 1)
 
-    # =====================================================================
-    # tend_u: contribution from D_T adjoint
-    # =====================================================================
-    # u[i,k] in D_T_num[i,j]:  coeff +dy at j=k-1, coeff -dy at j=k
-    # Adjoint: dy_h * (sh[i,k] - sh[i,k-1]) with periodic wrap.
-    sh_west = jnp.roll(stress_h, 1, axis=1)
-    dsh = stress_h - sh_west
-    dsh_full = jnp.concatenate([dsh, dsh[:, 0:1]], axis=1)
-    tend_u_DT = dy_h[lat_bcast] * dsh_full  # (n_lat, n_lon+1, ...)
+    def _bcast(m):
+        return m[..., jnp.newaxis] if is_3d else m
 
-    # =====================================================================
-    # tend_u: contribution from D_S adjoint
-    # =====================================================================
-    # Adjoint: dx_cell[i] * (sq[i+1,k] - sq[i,k])
-    dsq_meridional = stress_q[1:] - stress_q[:-1]  # (n_lat, n_lon+1, ...)
-    tend_u_DS = dx_cell[lat_bcast] * dsq_meridional
+    if is_tripolar(grid):
+        # Tripolar: full 2D metrics — must match strain_rate_cgrid's
+        # 2D path so the adjoint identity holds.
+        dy_u = grid.dy_u           # (n_lat, n_lon+1)
+        dx_T = grid.dx_T           # (n_lat, n_lon)
+        dx_v_2d = grid.dx_v        # (n_lat+1, n_lon)
+        dy_v_2d = grid.dy_v        # (n_lat+1, n_lon)
 
-    tend_u = tend_u_DT + tend_u_DS
+        # tend_u from D_T: dy_u[:, k] * (sh[:, k] - sh[:, k-1])
+        sh_west = jnp.roll(stress_h, 1, axis=1)
+        dsh = stress_h - sh_west
+        dsh_full = jnp.concatenate([dsh, dsh[:, 0:1]], axis=1)
+        tend_u_DT = _bcast(dy_u) * dsh_full
 
-    # =====================================================================
-    # tend_v: contribution from D_T adjoint
-    # =====================================================================
-    # Adjoint: dx_v[m] * (sh[m-1,j] - sh[m,j]).  Interior v-faces only;
-    # pole rows zero (wall BC).
-    dsh_merid = stress_h[:-1] - stress_h[1:]
-    tend_v_DT_interior = dx_v[1:-1][lat_bcast] * dsh_merid
-    tend_v_DT = pad_ns_scalar(tend_v_DT_interior, grid)
+        # tend_u from D_S: dx_T with wrap → (n_lat, n_lon+1)
+        dx_T_wrap = jnp.concatenate([dx_T, dx_T[:, 0:1]], axis=1)
+        dsq_meridional = stress_q[1:] - stress_q[:-1]
+        tend_u_DS = _bcast(dx_T_wrap) * dsq_meridional
 
-    # =====================================================================
-    # tend_v: contribution from D_S adjoint
-    # =====================================================================
-    # v[m,j] in D_S_num[m',j']:
-    #   v[m,j] appears at vertex (m, j) as v_east: coeff +dy_edge
-    #   v[m,j] appears at vertex (m, (j+1)%n) as v_west: coeff -dy_edge
-    #
-    # Wait: D_S_num uses v_east = v[i,j] and v_west = v[i,(j-1)%n],
-    # so at vertex (m, j'): v_east = v[m,j'], v_west = v[m,(j'-1)%n]
-    #
-    # v[m,j] appears at vertex (m, j) as v_east: coeff +dy_edge
-    # v[m,j] appears at vertex (m, j+1) as v_west (since (j+1-1)%n = j): coeff -dy_edge
-    #
-    # Adjoint: -[+dy_edge*sq[m,j] + (-dy_edge)*sq[m,j+1]]
-    #        = dy_edge * (sq[m,j+1] - sq[m,j])
-    dsq_zonal = stress_q[:, 1:] - stress_q[:, :-1]  # (n_lat+1, n_lon, ...)
-    # stress_q[:, n_lon] is the periodic wrap = stress_q[:, 0], so
-    # dsq_zonal[:, j] = sq[:, j+1] - sq[:, j] for j=0..n_lon-1
-    tend_v_DS = dy_edge[lat_bcast] * dsq_zonal
+        tend_u = tend_u_DT + tend_u_DS
 
-    tend_v = tend_v_DT + tend_v_DS
+        # tend_v from D_T: dx_v * (sh[m-1] - sh[m])
+        dsh_merid = stress_h[:-1] - stress_h[1:]
+        tend_v_DT_interior = _bcast(dx_v_2d[1:-1]) * dsh_merid
+        tend_v_DT = pad_ns_scalar(tend_v_DT_interior, grid)
 
-    # --- Area normalization ---
-    # The raw adjoint gives "sum of edge fluxes" around the face dual cell.
-    # Dividing by the dual cell area converts to a proper acceleration
-    # (m/s²), consistent with vector_laplacian_cgrid units.
-    #
-    # u-face dual cell area: dy_h[i] * dx_cell[i]
-    # v-face dual cell area: dy_edge[m] * dx_v[m]
-    #
-    # These are the products of the SAME edge lengths used in the stencil,
-    # ensuring the adjoint identity:
-    #   sum u * tend * area_u_dual = sum u * tend_raw = -sum A*D²*area_h - ...
-    # holds exactly (area_u_dual cancels in the energy diagnostic).
-    area_u_dual = dy_h * dx_cell  # (n_lat,)
-    area_v_dual = dy_edge * dx_v  # (n_lat+1,)
-    # Floor to avoid division by zero at poles
-    area_u_dual = jnp.maximum(area_u_dual, 1e-30)
-    area_v_dual = jnp.maximum(area_v_dual, 1e-30)
+        # tend_v from D_S: per-face dy_v * (sq[:, j+1] - sq[:, j])
+        dsq_zonal = stress_q[:, 1:] - stress_q[:, :-1]
+        # Per-face: east edge dy and west edge dy
+        dy_v_east = dy_v_2d
+        dy_v_west = jnp.roll(dy_v_2d, 1, axis=1)
+        # Adjoint of (v_east*dy_east - v_west*dy_west): same dy weighting
+        tend_v_DS = _bcast(dy_v_2d) * dsq_zonal
+
+        tend_v = tend_v_DT + tend_v_DS
+
+        # Area normalization: u-face dual = dy_u * dx_T_wrap
+        area_u_dual = dy_u * dx_T_wrap
+        # v-face dual = dy_v * dx_v
+        area_v_dual = dy_v_2d * dx_v_2d
+        area_u_dual = jnp.maximum(area_u_dual, 1e-30)
+        area_v_dual = jnp.maximum(area_v_dual, 1e-30)
+    else:
+        R = grid.radius
+        dlon = grid.dlon
+        lat = grid.lat
+        cos_lat = grid.cos_lat
+        lat_bcast = (slice(None),) + (jnp.newaxis,) * (stress_h.ndim - 1)
+
+        dy_h = grid.dy * 0.5
+        dy_edge_interior = 0.5 * (dy_h[1:] + dy_h[:-1])
+        dy_edge = jnp.pad(dy_edge_interior, (1, 1), mode='edge')
+        dx_cell = R * cos_lat * dlon
+        lat_interior = 0.5 * (lat[:-1] + lat[1:])
+        cos_lat_v = jnp.pad(
+            jnp.maximum(jnp.cos(lat_interior), 1e-10),
+            (1, 1), constant_values=1e-10,
+        )
+        dx_v = R * cos_lat_v * dlon
+
+        sh_west = jnp.roll(stress_h, 1, axis=1)
+        dsh = stress_h - sh_west
+        dsh_full = jnp.concatenate([dsh, dsh[:, 0:1]], axis=1)
+        tend_u_DT = dy_h[lat_bcast] * dsh_full
+
+        dsq_meridional = stress_q[1:] - stress_q[:-1]
+        tend_u_DS = dx_cell[lat_bcast] * dsq_meridional
+
+        tend_u = tend_u_DT + tend_u_DS
+
+        dsh_merid = stress_h[:-1] - stress_h[1:]
+        tend_v_DT_interior = dx_v[1:-1][lat_bcast] * dsh_merid
+        tend_v_DT = pad_ns_scalar(tend_v_DT_interior, grid)
+
+        dsq_zonal = stress_q[:, 1:] - stress_q[:, :-1]
+        tend_v_DS = dy_edge[lat_bcast] * dsq_zonal
+
+        tend_v = tend_v_DT + tend_v_DS
+
+        area_u_dual = dy_h * dx_cell
+        area_v_dual = dy_edge * dx_v
+        area_u_dual = jnp.maximum(area_u_dual, 1e-30)
+        area_v_dual = jnp.maximum(area_v_dual, 1e-30)
 
     if normalize:
-        tend_u = tend_u / area_u_dual[lat_bcast]
-        tend_v = tend_v / area_v_dual[lat_bcast]
+        tend_u = tend_u / _bcast(area_u_dual)
+        tend_v = tend_v / _bcast(area_v_dual)
 
     if u_mask is not None:
         um = u_mask[..., jnp.newaxis] if is_3d and u_mask.ndim == 2 else u_mask
