@@ -194,20 +194,18 @@ loss:
   w_v: 0.5
   w_q: 0.2
   w_ps: 0.3
-  # Bias-penalty weights.  v8 bumps w_bias_T to 1000 (was 100 in
-  # v7) and pairs it with the 3-day rollout above.  v7 kept
-  # classical bias at +1.08 K even with w_bias_T=100 because the
-  # 1-day rollout horizon couldn't see emissivity changes
-  # equilibrate.  At w_bias_T=1000 the bias term contributes
-  # 1000 * (1.07/30)^2 = 1.27 to the loss -- ~50x larger than the
-  # per-cell MSE contribution (0.022) -- forcing the optimizer to
-  # prioritise the bias.  The 3-day rollout gives the gradient a
-  # meaningful signal on how surface emissivity / albedo changes
-  # actually propagate.
-  w_bias_T: 1000.0
-  w_bias_u: 10.0
-  w_bias_v: 10.0
-  w_bias_ps: 10.0
+  # Bias-penalty weights.  v8 with w_bias_T=1000 over-corrected:
+  # classical T bias exploded +1.08 -> +4.40 K and SFNO destabilized
+  # (loss best 10.7 -> end 14.5, early-stopped at epoch 5).  v9
+  # backs off to w_bias_T=300 (with 3-day rollout still on): bias
+  # term contributes 300 * (1.07/30)^2 = 0.38 to the loss, ~17x the
+  # per-cell MSE contribution -- enough to drive bias reduction
+  # without dominating the MSE.  Wind / ps weights scaled to keep
+  # the ratio to w_bias_T constant.
+  w_bias_T: 300.0
+  w_bias_u: 3.0
+  w_bias_v: 3.0
+  w_bias_ps: 3.0
   spectral_weight: 0.3
   level_weighting: "pressure"
   normalize_by_scale: true
