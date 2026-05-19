@@ -203,11 +203,40 @@ def make_mpas_ocean_physics(
 
             if _sf_q_net is not None:
                 from legoesm.ocean.eos import c_sw
-                dz_0_cell_q = z_coord.dz_ref[0] * jacobian
-                inv_rho_csw_dz = 1.0 / (
-                    rho_0_ref * c_sw * jnp.maximum(dz_0_cell_q, 1e-10))
-                dT_dt = dT_dt.at[:, 0].add(
-                    _sf_q_net * inv_rho_csw_dz * mask)
+                _sf_sw = getattr(surface_forcing, "sw_down", None)
+
+                if _sf_sw is not None:
+                    # Split heat flux: non-solar at surface + solar
+                    # penetrating through the column (Jerlov).
+                    # q_net = sw_absorbed + lw_down - lw_up - sh - lh
+                    # sw_absorbed = sw_down * (1 - albedo) — already
+                    # included in q_net.  Extract it for penetration.
+                    sw_absorbed = _sf_sw * 0.94  # ~6% reflected (albedo)
+                    q_nonsolar = _sf_q_net - sw_absorbed
+
+                    # Non-solar part: surface cell only
+                    dz_0_cell_q = z_coord.dz_ref[0] * jacobian
+                    inv_rho_csw_dz = 1.0 / (
+                        rho_0_ref * c_sw * jnp.maximum(dz_0_cell_q, 1e-10))
+                    dT_dt = dT_dt.at[:, 0].add(
+                        q_nonsolar * inv_rho_csw_dz * mask)
+
+                    # Solar part: Jerlov penetration through column
+                    from legoesm.ocean.physics.shortwave_penetration import (
+                        shortwave_penetration_tendency,
+                    )
+                    sw_tend = shortwave_penetration_tendency(
+                        sw_absorbed, z_coord.dz_ref, z_coord.z_half_ref,
+                        jacobian, rho_0=rho_0_ref, c_sw=c_sw,
+                    )
+                    dT_dt = dT_dt + sw_tend * mask[:, None]
+                else:
+                    # No SW field — all heat into surface (legacy)
+                    dz_0_cell_q = z_coord.dz_ref[0] * jacobian
+                    inv_rho_csw_dz = 1.0 / (
+                        rho_0_ref * c_sw * jnp.maximum(dz_0_cell_q, 1e-10))
+                    dT_dt = dT_dt.at[:, 0].add(
+                        _sf_q_net * inv_rho_csw_dz * mask)
 
         # --- T/S restoring (under "restoring" or "combined") ---
         if apply_restoring:
