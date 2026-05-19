@@ -466,6 +466,19 @@ def barotropic_implicit_latlon_cgrid(
     )
     eta_new = eta_new * mask
 
+    # Global mass conservation correction.  The CG solve minimizes the
+    # L2 residual but does not guarantee that sum(r * area) = 0 — the
+    # area-weighted integral of the residual can have a small nonzero
+    # bias that accumulates over 10⁵-10⁶ steps.  Project out the global
+    # mean drift so that sum(eta_new * area) = sum(rhs * area) exactly.
+    # This is standard practice (MOM6, NEMO, MITgcm).
+    _area_eta = grid.area.astype(eta_dtype)
+    _ocean_area = jnp.sum(_area_eta * mask)
+    _target_mass = jnp.sum(rhs * _area_eta)
+    _actual_mass = jnp.sum(eta_new * _area_eta)
+    _correction = (_target_mass - _actual_mass) / jnp.maximum(_ocean_area, 1e-30)
+    eta_new = (eta_new + _correction * mask) * mask
+
     # Floor clamp (mass-conserving redistribution).  In normal operation
     # this never fires; it is a safety net for extreme transients.
     eta_new = _clamp_redistribute(
