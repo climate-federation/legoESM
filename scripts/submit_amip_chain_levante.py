@@ -79,10 +79,17 @@ def _sbatch_script(
     account: str,
     time_limit: str,
     dry_run: bool,
+    distributed: bool = False,
+    n_ranks: int = 2,
 ) -> str:
     """Return the sbatch script content for one segment."""
     job_name = f"lego-{year}-{seg:02d}"
     log_base = _LOGS / f"amip-{year}-{seg:02d}-%j"
+
+    # Multi-node: allocate n_ranks nodes (1 MPI rank per node, 4 GPUs each)
+    nodes_line = f"#SBATCH --nodes={n_ranks}" if distributed else "#SBATCH --nodes=1"
+    ntasks_line = (f"#SBATCH --ntasks={n_ranks}\n#SBATCH --ntasks-per-node=1"
+                   if distributed else "")
 
     levante_args = [
         f"--year {year}",
@@ -102,6 +109,8 @@ def _sbatch_script(
         "--clear-sky-diag",
         f"--output {output_dir}",
     ]
+    if distributed:
+        levante_args.append(f"--distributed --n-ranks {n_ranks}")
 
     if restart_from:
         levante_args.append(f"--restart-from {restart_from}")
@@ -119,8 +128,8 @@ def _sbatch_script(
 #SBATCH --job-name={job_name}
 #SBATCH --account={account}
 #SBATCH --partition=gpu
-#SBATCH --nodes=1
-#SBATCH --gpus-per-node=a100_80:4
+{nodes_line}
+{ntasks_line + chr(10) if ntasks_line else ""}#SBATCH --gpus-per-node=a100_80:4
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=0
 #SBATCH --time={time_limit}
@@ -170,6 +179,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="Gravity-wave-drag scheme: none, rayleigh, lindzen, mcfarlane")
     parser.add_argument("--account",    type=str,   default="bd1083")
     parser.add_argument("--time-limit", type=str,   default="12:00:00")
+    parser.add_argument("--distributed", action="store_true", default=False,
+                        help="Enable multi-node MPI (1 rank per node, srun launcher)")
+    parser.add_argument("--n-ranks",   type=int,   default=2,
+                        help="Number of MPI ranks / nodes (default 2, giving 6 GPUs)")
     parser.add_argument("--dry-run",    action="store_true",
                         help="Print all sbatch scripts and dependency graph; do not submit")
     args = parser.parse_args(argv)
@@ -182,7 +195,9 @@ def main(argv: list[str] | None = None) -> int:
           f"({len(years)} years × {_N_SEGS} segments = {total} jobs)")
     print(f"  Base output : {base}")
     print(f"  dt          : {args.dt}s  radiation: {args.radiation}  gwd: {args.gwd}")
-    print(f"  SLURM       : account={args.account}  time={args.time_limit}")
+    print(f"  SLURM       : account={args.account}  time={args.time_limit}"
+          f"  distributed: {args.distributed}"
+          + (f"  n_ranks={args.n_ranks}" if args.distributed else ""))
     print(f"  Dry run     : {args.dry_run}")
     print()
 
@@ -223,6 +238,8 @@ def main(argv: list[str] | None = None) -> int:
                 account=args.account,
                 time_limit=args.time_limit,
                 dry_run=args.dry_run,
+                distributed=args.distributed,
+                n_ranks=args.n_ranks,
             )
 
             dep_flag = f"--dependency=afterok:{prev_job_id} " if prev_job_id else ""

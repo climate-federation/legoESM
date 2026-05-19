@@ -145,6 +145,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--monthly-means", action="store_true", default=True)
     parser.add_argument("--cmip-output", action="store_true", default=False)
 
+    # Multi-node MPI
+    parser.add_argument("--distributed", action="store_true", default=False,
+                        help="Launch run_amip.py via srun for multi-node MPI execution. "
+                             "The SLURM job must allocate multiple nodes with "
+                             "--ntasks-per-node=1. Number of ranks is read from "
+                             "SLURM_NTASKS (override with --n-ranks).")
+    parser.add_argument("--n-ranks", type=int, default=None,
+                        help="Number of MPI ranks. Defaults to $SLURM_NTASKS when "
+                             "--distributed is set.")
+
     parser.add_argument("--dry-run", action="store_true", default=False,
                         help="Print run_amip.py command and exit without running")
     parser.add_argument("--extra", nargs=argparse.REMAINDER,
@@ -285,6 +295,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  ERA5 IC           {args.ic_zarr}")
     else:
         print(f"  ERA5 IC           (none — using held_suarez default IC)")
+
+    # Wrap with srun for multi-node MPI execution
+    if args.distributed:
+        n_ranks = args.n_ranks or int(os.environ.get("SLURM_NTASKS", 2))
+        srun_prefix = [
+            "srun",
+            f"--ntasks={n_ranks}",
+            "--ntasks-per-node=1",
+            "--cpu-bind=none",
+        ]
+        cmd = srun_prefix + cmd
+        print(f"[levante] Multi-node MPI: {n_ranks} ranks via srun")
 
     print("\n[levante] Command:")
     print("  " + " \\\n    ".join(cmd))
