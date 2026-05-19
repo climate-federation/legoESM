@@ -123,22 +123,14 @@ aimip_radiation: "rrtmgp"  # gray | rrtmgp.  RRTMGP is required for AIMIP
                            # trade ~2-3x forward compute for the
                            # activation-storage relief that lets a
                            # 48-step daily rollout fit in 24 GiB.
-aimip_rad_update_interval: 48  # Number of dycore steps between RRTMGP
-                               # re-evaluations.  ``spectral_rollout`` now
-                               # implements real step-counter gating via
-                               # ``lax.cond`` on the scan step index +
-                               # cached rad tendency in the scan carry.
-                               # At interval=48 the rad solve fires
-                               # ONCE per 48-step daily rollout (1 call
-                               # per loss step), holding the heating-rate
-                               # tendency constant between recomputes.
-                               # This cuts RRTMGP backward-pass memory
-                               # by 48x and forward compute by ~48x, at
-                               # the cost of holding the radiation
-                               # tendency constant for 24 hours of
-                               # simulated time (acceptable for AIMIP
-                               # daily-forecast losses; tighten to 12
-                               # = 6-hourly for diurnal-cycle fidelity).
+aimip_rad_update_interval: 144 # v8: bumped to match the new 3-day
+                               # rollout (n_steps_rollout = 48 * 3).
+                               # One RRTMGP call per loss step keeps
+                               # the backward-pass memory at the
+                               # single-call ceiling (~14 GiB at T11
+                               # L8); a smaller interval would scale
+                               # the backward linearly and break the
+                               # 24 GiB budget.
 
 # ----- Spatial surface parameters (over land) ----------------------
 # When true, the AIMIP classical variant exposes seven surface and
@@ -180,7 +172,17 @@ aimip_spatial_lr_scale: 5.0
 # Default 1 preserves single-day forecast-skill supervision; 3-5
 # propagates the bias signal more strongly and disambiguates physics
 # knobs that saturate at day-1.  Eval uses the same rollout length.
-aimip_rollout_days: 1
+aimip_rollout_days: 3   # v8: bumped from 1 day so the bias signal
+                        # propagates through a horizon where surface
+                        # energy-balance perturbations actually
+                        # manifest (~3-5 days for the equivalent
+                        # equilibration).  v7 left classical bias
+                        # frozen at +1.07 K because the 1-day rollout
+                        # let the optimizer correctly conclude that
+                        # moving emissivity does not help within the
+                        # supervised horizon.  3 days is the smallest
+                        # bump that survives the wall budget
+                        # (~3x training wall vs v7).
 
 # ----- Loss (LossConfig fields from training/losses.py) ------------
 # spectral_weight > 0 adds a spectral L^2 penalty on the predicted
@@ -192,20 +194,20 @@ loss:
   w_v: 0.5
   w_q: 0.2
   w_ps: 0.3
-  # Bias-penalty weights.  v6 with w_bias_T=10 worked for NN-based
-  # variants (column_nn bias -0.94 -> -0.28, SFNO -0.16 -> -0.04)
-  # but classical stayed at +1.07 K because its scalar trained
-  # leaves were saturated near the bounds (now widened in v7) and
-  # bypassed by spatial fields (now using trained scalars as the
-  # baseline via f_0_override).  v7 bumps w_bias_T to 100 so the
-  # per-variable bias term dominates over the per-cell MSE once the
-  # bias is non-trivial: at +1.07 K the bias contributes
-  # 100 * (1.07/30)^2 = 0.127 to the loss versus the per-cell MSE
-  # contribution of (4.46/30)^2 = 0.022.
-  w_bias_T: 100.0
-  w_bias_u: 1.0
-  w_bias_v: 1.0
-  w_bias_ps: 1.0
+  # Bias-penalty weights.  v8 bumps w_bias_T to 1000 (was 100 in
+  # v7) and pairs it with the 3-day rollout above.  v7 kept
+  # classical bias at +1.08 K even with w_bias_T=100 because the
+  # 1-day rollout horizon couldn't see emissivity changes
+  # equilibrate.  At w_bias_T=1000 the bias term contributes
+  # 1000 * (1.07/30)^2 = 1.27 to the loss -- ~50x larger than the
+  # per-cell MSE contribution (0.022) -- forcing the optimizer to
+  # prioritise the bias.  The 3-day rollout gives the gradient a
+  # meaningful signal on how surface emissivity / albedo changes
+  # actually propagate.
+  w_bias_T: 1000.0
+  w_bias_u: 10.0
+  w_bias_v: 10.0
+  w_bias_ps: 10.0
   spectral_weight: 0.3
   level_weighting: "pressure"
   normalize_by_scale: true
