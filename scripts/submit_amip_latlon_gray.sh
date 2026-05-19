@@ -1,39 +1,36 @@
 #!/bin/bash
-#SBATCH --job-name=lego-75d-6node
+#SBATCH --job-name=lego-latlon-gray
 #SBATCH --account=bd1083
 #SBATCH --partition=gpu
-#SBATCH --nodes=6
-#SBATCH --ntasks=6
-#SBATCH --ntasks-per-node=1
+#SBATCH --nodes=1
 #SBATCH --gpus-per-node=a100_80:4
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=0
-#SBATCH --time=04:00:00
-#SBATCH --output=/work/bd1083/b309178/logs/lego-75d-6node-%j.out
-#SBATCH --error=/work/bd1083/b309178/logs/lego-75d-6node-%j.err
+#SBATCH --time=01:00:00
+#SBATCH --output=/work/bd1083/b309178/logs/lego-latlon-gray-%j.out
+#SBATCH --error=/work/bd1083/b309178/logs/lego-latlon-gray-%j.err
 #SBATCH --mail-type=FAIL,END
 
-# 75-day RRTMG AMIP run: 6 nodes × 4 A100-80GB = 24 GPUs total.
-# Cubed-sphere: 6 faces / 6 MPI ranks = 1 face per rank.
-# Expected speedup: ~5× over single-node (3 GPUs → 24 GPUs active on physics).
-# 75-day RRTMG: ~10.5h (single-node) → ~2.1h (6-node estimate).
+# 120-day AMIP run on a 90×180 lat-lon C-grid (~2°, comparable to C48)
+# with gray radiation.  dt=90s keeps CFL safe at high latitudes where
+# the longitudinal grid spacing shrinks as cos(lat).
 #
 # Usage:
-#   sbatch scripts/submit_amip_75d_6node.sh
+#   sbatch scripts/submit_amip_latlon_gray.sh
 
 set -euo pipefail
 
 REPO=/work/bd1083/b309178/diffESM/legoESM
 PYTHON=/work/bd1083/b309178/mambaforge/envs/diffesm/bin/python
 IC_ZARR=/scratch/b/b309178/era5_ic_1979-01-01.zarr
-OUTPUT=/scratch/b/b309178/amip_75d_6node_${SLURM_JOB_ID}
+OUTPUT=/scratch/b/b309178/amip_latlon_gray_${SLURM_JOB_ID}
 
 mkdir -p /work/bd1083/b309178/logs
 
 echo "=============================="
-echo "legoESM AMIP 75-day RRTMG 6-node MPI"
+echo "legoESM AMIP lat-lon gray 120d"
 echo "Job ID:  $SLURM_JOB_ID"
-echo "Nodes:   $SLURM_NODELIST"
+echo "Node:    $SLURMD_NODENAME"
 echo "Output:  $OUTPUT"
 echo "Started: $(date)"
 echo "=============================="
@@ -45,15 +42,17 @@ cd "$REPO"
 
 $PYTHON scripts/run_amip_levante.py \
     --year 1979 \
-    --days 75 \
-    --dt 150 \
+    --days 120 \
+    --dt 90 \
+    --grid-type latlon \
+    --discretization latlon_cgrid \
+    --resolution 90 \
     --ic-zarr "$IC_ZARR" \
+    --radiation gray \
     --diag-days 5 \
-    --checkpoint-days 75 \
-    --cmip-output \
+    --checkpoint-days 60 \
     --monthly-means \
-    --distributed \
-    --n-ranks 6 \
+    --cmip-output \
     --output "$OUTPUT"
 
 echo "=============================="

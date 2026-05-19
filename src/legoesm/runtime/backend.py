@@ -391,15 +391,21 @@ def configure_backend(backend: str | None = None, *, distributed: bool = False) 
             _set_xla_flags(_AMD_GPU_XLA_FLAGS)
 
         if distributed:
-            # Multi-node MPI: jax.distributed.initialize() must be called
-            # before XLA backend init (jax.devices()).  Skip the device query
-            # here; bootstrap() calls initialize_distributed() after this
-            # function returns, which both inits JAX distributed and queries
-            # devices.  Use pre_init_vendor for vendor-dependent settings.
-            vendor = pre_init_vendor or "nvidia"  # safe default for Levante
-            if vendor == "nvidia":
+            # Multi-node MPI: jax.distributed.initialize() must run before
+            # XLA backend init, so skip jax.devices() / gpu_vendor() here.
+            if pre_init_vendor == "nvidia":
                 jax.config.update("jax_default_matmul_precision", "tensorfloat32")
-            logger.info("GPU vendor: %s (distributed — device count deferred)", vendor)
+            elif pre_init_vendor is None:
+                logger.warning(
+                    "Distributed GPU run with no pre-init vendor hint. "
+                    "Set CUDA_VISIBLE_DEVICES (NVIDIA) or HIP_VISIBLE_DEVICES "
+                    "(AMD) before bootstrap to enable vendor-specific matmul "
+                    "precision."
+                )
+            logger.info(
+                "GPU vendor: %s (distributed — device count deferred)",
+                pre_init_vendor or "unknown",
+            )
         else:
             devices = jax.devices()
             vendor = gpu_vendor()

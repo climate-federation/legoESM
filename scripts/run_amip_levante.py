@@ -182,10 +182,11 @@ def main(argv: list[str] | None = None) -> int:
         print("[levante] ERROR — missing files:")
         for p in missing:
             print(f"  {p}")
-        if kinne_f in [Path(m) for m in missing]:
-            print(f"\n  Kinne aerosol: available years "
-                  f"{min(y for p in [_kinne_file(y) for y in range(1845, 2101) if _kinne_file(y).exists()])}–"
-                  f"{max(y for p in [_kinne_file(y) for y in range(1845, 2101) if _kinne_file(y).exists()])}")
+        if str(kinne_f) in missing:
+            available = [y for y in range(1845, 2101) if _kinne_file(y).exists()]
+            if available:
+                print(f"\n  Kinne aerosol: available years "
+                      f"{min(available)}–{max(available)}")
         return 2
 
     # --- Build run_amip.py command ---
