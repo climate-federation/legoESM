@@ -44,6 +44,12 @@ rho_ocean = 1025.0              # Reference seawater density [kg/m^3] (= ocean.e
 c_sw = 3994.0                   # Specific heat of seawater [J/(kg*K)] (Gill 1982)
 T_freeze = 273.15               # Freezing point of water [K]
 T_freeze_ocean = 271.35         # Freezing point of seawater [K] (~-1.8 C)
+T_deep_ocean_ref_C = 1.5        # Global mean deep-ocean potential T [degC]
+                                # (WOCE / WOA18 abyssal climatology — used as
+                                # fallback fill when an interpolated profile
+                                # has no valid data, e.g. below bathymetry)
+S_deep_ocean_ref_psu = 34.7     # Global mean deep-ocean practical salinity
+                                # [PSU] (WOCE / WOA18 abyssal climatology)
 # Freshwater EOS local-parabolic fit (Kell 1975 / Jones-Harris)
 T_freshwater_max_density = 277.133  # Max-density temperature [K] (~3.983 C)
 rho_freshwater_curvature = 8.0e-6   # ρ-anomaly curvature [K^-2] from d²ρ/dT² at T_max

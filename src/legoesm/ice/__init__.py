@@ -4,6 +4,8 @@ Sea ice model with switchable dynamics and multi-category support:
 - ``dynamics="none"``: Slab thermodynamics (default, backward compatible).
 - ``dynamics="free_drift"``: Heuristic linear-combination velocity.
 - ``dynamics="evp"``: EVP rheology (Hunke & Dukowicz 1997).
+- ``dynamics="mevp"``: Modified-EVP pseudo-time relaxation
+  (Bouillon 2013 / Kimmritz 2015).
 
 Multi-category ice (``n_categories > 1``) uses a simplified category
 transfer scheme for ice thickness redistribution.  Snow depth is not
@@ -25,10 +27,12 @@ from legoesm.ice.rheology import (
     delta_deformation,
     vp_stress,
     evp_stress_update,
+    mevp_stress_update,
 )
 from legoesm.ice.dynamics import (
     stress_divergence,
     evp_solver,
+    mevp_solver,
     free_drift_velocity,
     air_ice_stress,
     ocean_ice_stress,
@@ -58,9 +62,11 @@ __all__ = [
     "delta_deformation",
     "vp_stress",
     "evp_stress_update",
+    "mevp_stress_update",
     # Dynamics
     "stress_divergence",
     "evp_solver",
+    "mevp_solver",
     "free_drift_velocity",
     "air_ice_stress",
     "ocean_ice_stress",
