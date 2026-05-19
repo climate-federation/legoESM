@@ -1716,9 +1716,10 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt):
 
                 if enable_sss:
                     S = new_state.S.data
+                    _sss_mask = new_state.land_mask.data
                     S_new = S.at[..., 0].set(
                         S[..., 0] - sss_alpha_static * (
-                            S[..., 0] - sss_target_static))
+                            S[..., 0] - sss_target_static) * _sss_mask)
                     new_state = new_state._replace(
                         S=new_state.S.replace(data=S_new))
                 if enable_freeze:
