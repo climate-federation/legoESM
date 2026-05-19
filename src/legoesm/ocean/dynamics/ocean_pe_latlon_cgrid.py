@@ -158,7 +158,13 @@ def _tvd_to_v_points(f: jnp.ndarray, mass_flux_v: jnp.ndarray, grid=None) -> jnp
     eps = 1e-30
     f_south = f[:-1]; f_north = f[1:]
     f_south2 = jnp.concatenate([f[:1], f[:-2]], axis=0)
-    f_north2 = jnp.concatenate([f[2:], f[-1:]], axis=0)
+    # f_north2: 2 cells north. On tripolar, the fold row's north-2
+    # neighbor is the fold partner of the row below the fold.
+    fold = getattr(grid, "fold", None) if grid is not None else None
+    if fold is not None and fold.is_active:
+        f_north2 = jnp.concatenate([f[2:], f[-1:, fold.perm_T]], axis=0)
+    else:
+        f_north2 = jnp.concatenate([f[2:], f[-1:]], axis=0)
     delta_pos = f_north - f_south
     r_pos = (f_south - f_south2) / jnp.where(jnp.abs(delta_pos) > eps, delta_pos, eps)
     delta_neg = f_south - f_north
