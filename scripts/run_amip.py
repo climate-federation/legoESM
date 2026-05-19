@@ -87,6 +87,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=str, default=None)
     parser.add_argument("--checkpoint-days", type=int, default=0)
     parser.add_argument("--restart-from", type=str, default=None)
+    parser.add_argument("--restart-start-day", type=float, default=None,
+                        help="Override start_day after loading checkpoint. "
+                             "Pass 0.0 at year boundaries to reset the day counter.")
 
     # Initial atmospheric state
     parser.add_argument("--t-init", type=float, default=None,
@@ -549,6 +552,10 @@ def main(argv: list[str] | None = None):
         start_step, start_day = driver.load_checkpoint(restart_path)
         if _is_root:
             print(f"  Resumed at step={start_step}, day={start_day:.2f}")
+        if args.restart_start_day is not None:
+            start_day = args.restart_start_day
+            if _is_root:
+                print(f"  start_day overridden to {start_day:.2f} (year-boundary restart)")
 
     if args.profile > 0:
         import jax

@@ -123,11 +123,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--diurnal-cycle", action="store_true", default=True)
     parser.add_argument("--no-diurnal-cycle", dest="diurnal_cycle", action="store_false")
 
-    # Initial conditions
+    # Initial conditions / restart
     parser.add_argument("--ic-zarr", type=str, default="",
                         help="Path to ERA5 IC Zarr store "
                              "(from scripts/prep_levante_era5_ic.py). "
                              "If empty, uses held_suarez default IC.")
+    parser.add_argument("--restart-from", type=str, default="",
+                        help="Checkpoint .npz from a previous segment. "
+                             "When set, overrides --ic-zarr (state comes from checkpoint).")
+    parser.add_argument("--restart-start-day", type=float, default=None,
+                        help="Override start_day after loading checkpoint. "
+                             "Pass 0.0 at year boundaries to reset the day counter to Jan 1.")
 
     # Forcing toggles
     parser.add_argument("--no-aerosol", action="store_true", default=False)
@@ -242,8 +248,12 @@ def main(argv: list[str] | None = None) -> int:
             "--volcanic-aerosol-scale", str(args.volcanic_scale),
         ]
 
-    # ERA5 IC
-    if args.ic_zarr:
+    # ERA5 IC / restart — mutually exclusive; restart takes precedence
+    if args.restart_from:
+        cmd += ["--restart-from", args.restart_from]
+        if args.restart_start_day is not None:
+            cmd += ["--restart-start-day", str(args.restart_start_day)]
+    elif args.ic_zarr:
         cmd += ["--ic", "era5", "--ic-path", args.ic_zarr]
 
     # Output
@@ -268,7 +278,10 @@ def main(argv: list[str] | None = None) -> int:
     if not args.no_volcanic and not args.no_aerosol and args.volcanic_scale > 0:
         print(f"  Volcanic AOD      {volc_f.name}  "
               f"{'ACTIVE' if rad_active else 'inert (gray radiation)'}")
-    if args.ic_zarr:
+    if args.restart_from:
+        day_info = f"  (start_day→{args.restart_start_day:.0f})" if args.restart_start_day is not None else ""
+        print(f"  Restart           {args.restart_from}{day_info}")
+    elif args.ic_zarr:
         print(f"  ERA5 IC           {args.ic_zarr}")
     else:
         print(f"  ERA5 IC           (none — using held_suarez default IC)")
