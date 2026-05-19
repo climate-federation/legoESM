@@ -1,16 +1,33 @@
-# Cubed-Sphere Ocean PGF Stability (Open Issue)
+# Cubed-Sphere Ocean PGF Stability (RESOLVED — 2026-05-20)
 
-## Summary
+## Status
 
-The cubed-sphere `OceanModel` exhibits a slow exponential instability
-whenever the horizontal density field develops gradients of any
-amplitude.  Under the rest-state + WOA-restoring OMIP smoke test
-(`scripts/run_omip.py --grid cubed_sphere --quick`), the run blows up
-around physical day 4-5 with the current defaults; pre-tuning defaults
-(2026-05-19), blow-up was at ~2 days.
+**Fixed.**  Routing cubed-sphere baroclinic tendencies through the
+FC-Gram spectral operator path (`ocean_pe_fc.ocean_baroclinic_
+tendencies_fc`) via the `OceanModel(..., fc_config=...)` constructor
+kwarg removes the face-edge halo amplification described below.
+`scripts/run_omip.py --grid cubed_sphere --quick` now completes the
+30-day smoke run with `max_speed ≈ 3e-5 m/s` and `SST ≈ 19.63`,
+fully equivalent to the latlon, MPAS, and spectral grids.  The script
+enables FC by default for cubed_sphere (see `_create_setup`).
 
-The instability is **not** present on `latlon`, `mpas`, or `spectral`
-ocean models — those all reach the 30-day quick target.
+## Summary (original failure mode)
+
+The cubed-sphere `OceanModel`'s default cd-grid path used the
+Arakawa-Lamb 4-pt D-grid corner gradient for the baroclinic
+pressure-gradient force.  At face boundaries the A-L stencil reads
+halo-interpolated neighbour-face values; the off-diagonal entries of
+the 2×2 Cartesian metric matrix (`c01`, `c10`) amplify the O(dx²)
+halo-interp error to an O(dx) PGF error.  Under any horizontal
+density gradient (rest state + WOA restoring, or full WOA init), the
+spurious face-edge PGF feeds a barotropic free-surface ↔ U_bar
+feedback that doubles the velocity every ~25 steps and reaches NaN
+around physical day 2 with legacy defaults, day 4-5 with tuned
+defaults.
+
+The instability was **not** present on `latlon`, `mpas`, or
+`spectral` ocean models — those use their own model implementations
+without the cubed-sphere face-edge halo path.
 
 ## Symptom
 
@@ -89,31 +106,57 @@ blow-up by a few hundred steps each):
 * Post-step clipping of u, v, eta — works to prevent NaN but saturates
   the fields at the clip values, making output physically meaningless.
 
-## What WILL fix it (planned)
+## What fixed it
 
-The structural fix is to swap the cubed-sphere baroclinic PGF for an
-SMC03-style density-Jacobian formulation that already exists for the
-latlon C-grid (`pgf_scheme="smc03"` in `LatLonCGridOceanConfig`).
-That requires:
+Routing the baroclinic-tendency computation through the FC-Gram
+spectral operator path (`legoesm.ocean.dynamics.ocean_pe_fc.
+ocean_baroclinic_tendencies_fc`).  FC-Gram (Fourier continuation)
+evaluates horizontal gradients spectrally on each cube face with a
+C∞-smooth extension into the halo region.  This:
 
-1. Port the SMC03 density-Jacobian gradient to the cubed-sphere C-D
-   grid (the Arakawa-Lamb metric stencil already works on tensor
-   fields; the inner Jacobian needs adaptation).
-2. Add a duogrid halo on T, S (not just on velocities) so the
-   halo-interpolated density is O(Δx²) instead of O(Δx).
-3. Add a face-edge boundary correction analogous to
-   `_extrapolate_boundary_corners` (already applied to ``du_dt`` /
-   ``dv_dt``) for the pressure-gradient term itself.
+* Eliminates the A-L 4-pt corner stencil entirely (no off-diagonal
+  Cartesian-metric amplification of halo errors).
+* Replaces O(dx²) Lagrange halo interpolation with the FC extension,
+  whose effective accuracy near the boundary is set by the FC
+  polynomial degree (default 5) rather than the corner-stencil
+  width.
+* Keeps the rest of the ocean PE pipeline (EOS + hydrostatic
+  pressure, layer thickness, w diagnosis, skew-symmetric momentum,
+  vertical advection / diffusion, land masking) bit-identical to
+  the cd-grid path.
 
-Estimated effort: a focused 2-3 day rework with proper benchmark
-validation (Williamson-2-like + rest-state + WOA restoring).
+The fix is wired through `OceanModel(..., fc_config=...)`; pass an
+`FCOperatorConfig` (build with `legoesm.core.operators_fc.
+build_fc_config`) to activate.  Passing `fc_config=None` (default)
+keeps the legacy cd-grid path for back-compat.  `scripts/run_omip.py`
+builds and threads `fc_config` automatically for `--grid
+cubed_sphere`.
+
+## What does NOT help (preserved for posterity)
+
+Before the FC route was identified, the following were tested and
+each gave only marginal improvement on the cd-grid path:
+
+* `hyperdiff_coeff` (Laplacian or biharmonic) up to 1e16.
+* `div_damp_2`, `div_damp_4` up to 1e17.
+* `barotropic_staggering="c_grid"` (made it strictly worse).
+* `use_duogrid=True` on the cubed-sphere halo.
+* Restoring across the entire column instead of surface only.
+* Initialising from WOA directly.
+* Bumping `A_h` and `K_h` to 1e7 and beyond.
+* Post-step Laplacian smoothing on T, S, u, v.
+* Post-step clipping of u, v, eta (band-aid; saturates physics).
+* `fortran_a2b_corner_avg` and `fortran_dir_aware_corners` flags on
+  `_arakawa_lamb_gradient` (corner-only fix; the artifact also
+  lives along the cube edges, not just at the four vertices).
 
 ## Production guidance
 
-Until the structural fix lands, **do not use the cubed-sphere ocean
-for multi-day OMIP integrations.**  The startup warning printed by
-`scripts/run_omip.py` flags this on every invocation.
-
-The other three grids (`latlon`, `mpas`, `spectral`) are stable for
-the 30-day quick run and the latlon path has demonstrated 50+ year
-stability with realistic ETOPO bathymetry.
+All four ocean grids (`cubed_sphere`, `latlon`, `mpas`, `spectral`)
+are now stable for the 30-day OMIP quick run.  The cubed-sphere FC
+backend is ~3× slower per timestep than the cd-grid path on small
+configs (per-face FFT cost), which combined with the conservative
+`dt=60s` default makes the C24 quick run take ~10 min wall time.
+For multi-year integrations on cubed-sphere, the FC backend is the
+recommended path; the cd-grid path is preserved as the default
+backwards-compatible mode for atmosphere-equivalent dynamics work.

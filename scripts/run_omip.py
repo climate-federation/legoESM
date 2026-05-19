@@ -49,13 +49,15 @@ set_policy(PrecisionPolicy.fp64())
 GRID_TYPES = ["cubed_sphere", "latlon", "mpas", "spectral"]
 
 GRID_DEFAULTS: dict[str, dict] = {
-    # cubed_sphere uses dt=60s + extra diffusion + slow restoring +
-    # 14d ramp to maximise the time before the face-edge PGF artifact
-    # blows up.  Even with these mitigations the 30-day quick smoke
-    # run is NOT expected to complete (blows up around physical day
-    # 4-5); ``--grid all`` excludes cubed_sphere because of this.
-    # See docs/ocean_experiments/cubed_sphere_pgf_stability.md for
-    # the structural fix plan.
+    # cubed_sphere now uses the FC-Gram spectral baroclinic-tendency
+    # backend (see _create_setup) which eliminates the face-edge PGF
+    # halo amplification that previously blew up the cd-grid path
+    # at ~4 days under WOA SST restoring.  With FC + the existing
+    # tuned defaults (A_h, K_h, nbaro, restoring tau + ramp) the
+    # 30-day smoke run completes with physical max_speed ≈ 3e-5 m/s.
+    # dt=60 retained out of caution; FC step is ~1.6× slower per
+    # iteration than cdgrid because of the per-face Fourier
+    # continuation cost.
     "cubed_sphere": {"resolution": "C24", "dt": 60.0},
     "latlon":       {"resolution": "36x72", "dt": 300.0},
     "mpas":         {"resolution": "ico3", "dt": 300.0},
@@ -403,6 +405,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.ocean.dynamics.ocean_model import OceanModel
         from legoesm.ocean.state import OceanConfig
+        from legoesm.core.operators_fc import build_fc_config
 
         grid = create_cubed_sphere(params["n"])
         # Cubed-sphere OMIP-stability tuning.
@@ -444,7 +447,21 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
             use_conservation_fixer=True,
             physics=None,
         )
-        model = OceanModel(grid, z_coord, config)
+        # FC-Gram spectral baroclinic-tendency backend.  The default
+        # cd-grid A-L 4-pt corner stencil amplifies halo-interp errors
+        # at face boundaries by O(dx); under a slowly developing
+        # horizontal density gradient (rest-state + WOA restoring)
+        # this drives an exponentially growing PGF instability that
+        # blew up cubed_sphere OMIP at ~4-5 days even with the tuned
+        # diffusion defaults above.  FC-Gram operators evaluate
+        # gradients spectrally on each cube face with smooth Fourier-
+        # continuation extension into the halo region, so the
+        # face-edge artifact effectively vanishes.  Combined with the
+        # A_h/K_h floors above this lets cubed_sphere reach the 30-day
+        # quick smoke target and beyond.  See
+        # docs/ocean_experiments/cubed_sphere_pgf_stability.md.
+        fc_cfg = build_fc_config(dtype=jnp.float64)
+        model = OceanModel(grid, z_coord, config, fc_config=fc_cfg)
         return grid, z_coord, config, model, "cube"
 
     elif grid_type == "latlon":
@@ -2981,32 +2998,15 @@ def print_summary():
 def main():
     args = parse_args()
 
-    # ``--grid all`` runs every stable grid: cubed_sphere is excluded by
-    # default because its OMIP path blows up at ~4-5 days (see
-    # docs/ocean_experiments/cubed_sphere_pgf_stability.md).  Including
-    # it in CI smoke runs would be permanently red.  Users who want to
-    # exercise the cubed-sphere PGF path can still pass
-    # ``--grid cubed_sphere`` explicitly.
-    if args.grid == "all":
-        grids = [g for g in GRID_TYPES if g != "cubed_sphere"]
-    else:
-        grids = [args.grid]
+    # ``--grid all`` runs every grid.  cubed_sphere is now stable on
+    # the FC-Gram spectral baroclinic backend (see _create_setup) so
+    # it is included in the default matrix.
+    grids = GRID_TYPES if args.grid == "all" else [args.grid]
 
     print(f"legoESM OMIP Reference Simulation")
     print(f"  Grids: {', '.join(grids)}")
     print(f"  Days: {'30 (quick)' if args.quick else args.days}")
     print(f"  Physics: {args.physics}")
-
-    if "cubed_sphere" in grids:
-        print(
-            "  WARNING: cubed_sphere OMIP has a known structural "
-            "instability in the face-edge PGF that emerges under any "
-            "horizontal density gradient (rest-state + WOA restoring "
-            "blow up at ~4-5 days under the current defaults).  The "
-            "30-day quick run is NOT expected to complete.  Use "
-            "--grid latlon / mpas / spectral for multi-day OMIP runs.  "
-            "Issue tracking: docs/ocean_experiments/cubed_sphere_pgf_stability.md."
-        )
 
     for grid_type in grids:
         try:

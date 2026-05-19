@@ -123,6 +123,17 @@ class OceanModel:
         else:
             self._cdgrid = create_cubed_sphere_cdgrid(grid)
 
+        # FC-Gram spectral baroclinic-tendency backend (optional).
+        # When ``fc_config`` is provided, the baroclinic tendencies are
+        # computed by ``ocean_baroclinic_tendencies_fc`` using FC-Gram
+        # spectral horizontal operators on each cube face — eliminating
+        # the face-edge halo amplification that the default A-L
+        # cd-grid path exhibits under horizontal density gradients
+        # (see docs/ocean_experiments/cubed_sphere_pgf_stability.md).
+        # Required to make cubed-sphere OMIP integrations survive
+        # multi-day WOA restoring at ~5° resolution.
+        self._fc_config = fc_config
+
         # Build physics function if configured
         if self.config.physics is not None:
             self._physics_fn = make_ocean_physics(self.config.physics)
@@ -293,7 +304,20 @@ class OceanModel:
         return self._compute_tendencies(state, surface_forcing)
 
     def _compute_tendencies(self, state: OceanState, surface_forcing=None):
-        """Compute baroclinic tendencies using C-D grid operators."""
+        """Compute baroclinic tendencies on the configured backend."""
+        if self._fc_config is not None:
+            # FC-Gram spectral operators on each cube face — used to
+            # bypass the cd-grid A-L face-edge halo instability under
+            # horizontal density gradients (cubed-sphere OMIP fix).
+            from legoesm.ocean.dynamics.ocean_pe_fc import (
+                ocean_baroclinic_tendencies_fc,
+            )
+            return ocean_baroclinic_tendencies_fc(
+                state, self.grid, self.z_coord,
+                self._fc_config, self.config,
+                physics_fn=self._physics_fn,
+                surface_forcing=surface_forcing,
+            )
         return ocean_baroclinic_tendencies_cdgrid(
             state, self.grid, self.z_coord,
             self._cdgrid, self.config,
