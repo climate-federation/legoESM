@@ -35,7 +35,6 @@ import json
 import time
 from pathlib import Path
 
-import jax.numpy as jnp
 import numpy as np
 
 from legoesm.grids.voronoi import create_regional_voronoi_mesh
@@ -77,7 +76,7 @@ def _parse_args():
         "--mpas-resolution-km", type=float, default=97.0,
         help="Cell-spacing target for the MPAS Voronoi mesh "
              "(MPAS only). Default 97 km gives 9686 cells, matching "
-             "the 50-col Mercator basin's 9900 cells within 2% — cross-"
+             "the 50-col Mercator basin's 9900 cells within 2%% -- cross-"
              "grid comparison is at equivalent mean cell area. "
              "(Theoretical area-equivalent is ~82 km but the regional "
              "Voronoi generator has quantization gaps below ~85 km; "

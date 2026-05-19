@@ -139,9 +139,11 @@ def cmd_test(args):
     rc = bootstrap(precision="fp32")
 
     import jax
-    import jax.numpy as jnp
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import CDGridShallowWaterModel as ShallowWaterModel, CDGridShallowWaterConfig as ShallowWaterConfig
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        CDGridShallowWaterModel as ShallowWaterModel,
+        williamson_cli_calibration,
+    )
     from tests.test_cases.williamson import (
         williamson_test2, williamson_test5, williamson_test2_exact,
         compute_error_norms,
@@ -182,14 +184,15 @@ def cmd_test(args):
     u_d, v_d = center_to_dgrid_vector(u_cc, v_cc, _cdgrid_tmp)
     state = CDGridShallowWaterState(h=h, u_d=u_d, v_d=v_d, h_s=h_s)
 
-    # Create model with hyperdiffusion for stability
-    # Scale hyperdiffusion coefficient with grid spacing^4 for scale-selectivity
-    mean_dx = float(jnp.mean(grid.dx))
-    hyperdiff = 1e-4 * mean_dx**4 / args.dt  # CFL-scaled hyperdiffusion
-    config = ShallowWaterConfig(
-        hyperdiff_coeff=hyperdiff,
-        use_conservation_fixer=True,
-    )
+    # Use the production-calibrated cubed-sphere shallow-water knobs
+    # (see #269).  Earlier CLI defaults used a heuristic
+    # ``1e-4 * mean_dx**4 / dt`` hyperdiffusion with no boundary fix,
+    # divergence damping, or vorticity damping, which left visible
+    # O(dx) v-wind streaks on one cube panel at C48 + 5 days even
+    # though L2 error was small.  ``williamson_cli_calibration`` is
+    # the single source of truth that the matrix runner and tests also
+    # use, so future calibration updates flow through one place.
+    config = williamson_cli_calibration(int(args.resolution))
     model = ShallowWaterModel(grid, config)
 
     # Integrate

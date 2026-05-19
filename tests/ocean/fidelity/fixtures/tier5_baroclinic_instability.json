@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "tier": 5,
+  "description": "Baroclinic-instability growth: Eady sigma_max=0.31 f Lambda/N; Phillips ~25 day period",
+  "common": {
+    "precision": "x64",
+    "grid": "latlon_cgrid",
+    "resolution": "2p5deg"
+  },
+  "cases": {
+    "eady_instability_growth_rate_over_sigma_eady": {
+      "metric": "linear_growth_rate_over_sigma_eady",
+      "tolerance_window": [0.6, 1.2],
+      "reference": {
+        "kind": "analytical",
+        "fn": "legoesm.ocean.fidelity.references:eady_growth_rate"
+      },
+      "ci_marker": "nightly",
+      "expected_runtime_s": 900
+    },
+    "eady_uniform_dominant_wavelength_over_L_d": {
+      "metric": "dominant_wavelength_over_L_d",
+      "tolerance_window": [0.7, 1.5],
+      "reference": {
+        "kind": "analytical",
+        "fn": "legoesm.ocean.fidelity.references:eady_most_unstable_wavelength"
+      },
+      "ci_marker": "nightly",
+      "expected_runtime_s": 900
+    },
+    "phillips_two_layer_period_days": {
+      "metric": "most_unstable_period_days",
+      "tolerance_window": [15.0, 40.0],
+      "reference": {
+        "kind": "literature_scalar",
+        "source": "Phillips 1954 / Vallis 2017 Ch. 9",
+        "value": 25.0
+      },
+      "ci_marker": "nightly",
+      "expected_runtime_s": 1200
+    }
+  }
+}

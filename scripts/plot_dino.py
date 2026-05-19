@@ -136,7 +136,6 @@ def _build_mpas_triangulation(meta: dict):
     """Rebuild the MPAS mesh + Delaunay (drops triangles spanning the
     periodic seam) so we can draw smooth contour fills."""
     from legoesm.grids.voronoi import create_regional_voronoi_mesh
-    from matplotlib.tri import Triangulation
     from scipy.spatial import Delaunay
     cfg = meta["config"]
     res_km = float(meta["args"]["mpas_resolution_km"])

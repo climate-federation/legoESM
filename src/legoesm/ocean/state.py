@@ -111,6 +111,16 @@ class OceanConfig(NamedTuple):
     fix_volume: bool = True
     fix_heat: bool = True
     fix_salt: bool = True
+    # Bottom drag (mirror of LatLonCGridOceanConfig). ``bottom_drag_r > 0``
+    # enables linear drag ``du/dt|_drag = -r*u/h_bot`` on the bottom
+    # cell; setting ``bottom_drag_bg_velocity > 0`` lifts it to the
+    # MOM6 quadratic-with-floor form. ``bottom_drag_bbl_thickness > 0``
+    # spreads the drag over a fixed Ekman thickness (Killworth &
+    # Edwards 1999) instead of dumping it into a possibly very thin
+    # partial cell.
+    bottom_drag_r: float = 0.0
+    bottom_drag_bg_velocity: float = 0.0
+    bottom_drag_bbl_thickness: float = 0.0
     # 2-D Laplacian damping used in barotropic subcycling.
     # Per-substep coefficient is alpha * (dt_s / dt_ref) * area * laplacian(...),
     # so the damping is explicitly dt-scaled and tunable.
@@ -516,7 +526,21 @@ class LatLonCGridOceanConfig(NamedTuple):
     A_h_eq_sigma_deg: float = 5.0  # Gaussian half-width in degrees of the
                                     # equatorial boost.  Typical 3-7°
                                     # (~equatorial waveguide width).
+    A_h_merid: float = 0.0        # Meridional-only Laplacian viscosity [m²/s].
+                                    # Applies d²u/dy² directly at u-faces and
+                                    # d²v/dy² at v-faces — a scalar operator
+                                    # that damps meridional structure (2Δy mode)
+                                    # without affecting zonal flow.  Independent
+                                    # of A_h.  Use on lat-lon grids where
+                                    # dx/dy anisotropy makes isotropic A_h
+                                    # either too strong (zonal) or too weak
+                                    # (meridional).
     B_h: float = 0.0
+    B_h_lat_scaling: bool = True   # Apply (cos(lat)/cos_max)⁴ scaling to B_h.
+                                    # Default True (MOM6 convention) prevents
+                                    # CFL violation at poles where dx shrinks.
+                                    # Set False to keep full B_h everywhere
+                                    # (requires smaller dt for CFL safety).
     B_h_barotropic: float = 0.0  # Biharmonic hyperviscosity coeff [m^4/s]
                                    # applied to the DEPTH-MEAN (U_bar,
                                    # V_bar) only, via the F_slow channel

@@ -113,8 +113,12 @@ class DINOConfig:
     # Surface forcing — wind (Sect 2.3, eq 7; cubic-Hermite smooth-step
     # tau_u(φ) interpolated through the (lat, tau) knots below.
     # ------------------------------------------------------------------
-    wind_tau_lats_deg: tuple = (-70.0, -45.0, -15.0, 0.0, 15.0, 45.0, 70.0)
-    wind_tau_values: tuple = (0.0, 0.2, -0.1, -0.02, -0.1, 0.1, 0.0)  # [N/m²]
+    wind_tau_lats_deg: tuple[float, ...] = (
+        -70.0, -45.0, -15.0, 0.0, 15.0, 45.0, 70.0,
+    )
+    wind_tau_values: tuple[float, ...] = (
+        0.0, 0.2, -0.1, -0.02, -0.1, 0.1, 0.0,
+    )  # [N/m²]
 
     # ------------------------------------------------------------------
     # Surface forcing — restoring (Sect 2.3, eqs 8-9; Appendix B eqs B1-B2)
@@ -987,7 +991,6 @@ def dino_lat_lon_state(
         H_bathy_override=H_bathy,
     )
     # Replace T, S with our lat-z structured ICs
-    from legoesm.core.field import Field
     state = state._replace(
         T=Field(data=T, name="T", dims=state.T.dims, units=state.T.units),
         S=Field(data=S, name="S", dims=state.S.dims, units=state.S.units),
@@ -1029,13 +1032,17 @@ def dino_lat_lon_model_config(
     # (NOT OceanPhysicsConfig.lateral_mixing — that factory only supports
     # cubed-sphere). When Visbeck is enabled (always for DINO per the
     # Decisions Log), the kappa_GM/kappa_Redi fields are ignored at
-    # runtime — kept at 1000 m²/s as a non-degenerate placeholder.
+    # runtime — anchored to ``cfg.visbeck_kappa_min`` so the static
+    # value stays non-degenerate if the Visbeck path is ever mis-wired.
     from legoesm.ocean.physics.lateral_mixing.config import (
         GMRediConfig, VisbeckConfig,
     )
     gm_redi_cfg = GMRediConfig(
-        kappa_GM=1000.0,    # placeholder; overridden by Visbeck
-        kappa_Redi=1000.0,  # placeholder; overridden by Visbeck
+        # Placeholders; ignored at runtime because Visbeck is enabled.
+        # Anchored to visbeck_kappa_min so the static value is non-
+        # degenerate if the Visbeck path is ever mis-wired.
+        kappa_GM=cfg.visbeck_kappa_min,
+        kappa_Redi=cfg.visbeck_kappa_min,
         S_max=cfg.redi_S_max,
         slope_scheme=cfg.gm_redi_slope_scheme,
         visbeck=VisbeckConfig(
@@ -1126,7 +1133,6 @@ def dino_mpas_state(
     -------
     MPASOceanState
     """
-    from legoesm.core.field import Field
     from legoesm.core.state import MPASOceanState
 
     if cfg is None:
@@ -1240,8 +1246,11 @@ def dino_mpas_model_config(
         lateral_mixing=LateralMixingConfig(
             scheme="gm_redi" if cfg.use_gm_redi else "none",
             gm_redi=GMRediConfig(
-                kappa_GM=1000.0,    # placeholder; overridden by Visbeck
-                kappa_Redi=1000.0,  # placeholder; overridden by Visbeck
+                # Placeholders; ignored at runtime because Visbeck is enabled.
+                # Anchored to visbeck_kappa_min so the static value is non-
+                # degenerate if the Visbeck path is ever mis-wired.
+                kappa_GM=cfg.visbeck_kappa_min,
+                kappa_Redi=cfg.visbeck_kappa_min,
                 S_max=cfg.redi_S_max,
                 slope_scheme=cfg.gm_redi_slope_scheme,
                 visbeck=VisbeckConfig(

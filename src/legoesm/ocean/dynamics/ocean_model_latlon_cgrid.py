@@ -26,7 +26,7 @@ import numpy as np
 
 from legoesm.core.field import Field
 from legoesm.core.precision import cast_pytree
-from legoesm.grids.latlon import LatLonGrid
+from legoesm.grids.latlon import LatLonGrid, ensure_geometry
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     OceanPartialCellCoordinate,
@@ -184,10 +184,10 @@ def _compute_advection_flux_div(
         # upwind or tvd
         if tracer_advection == "tvd":
             tr_u = _tvd_to_u_points(tr, mass_flux_u)
-            tr_v = _tvd_to_v_points(tr, mass_flux_v)
+            tr_v = _tvd_to_v_points(tr, mass_flux_v, grid=grid)
         else:
             tr_u = _upwind_to_u_points(tr, mass_flux_u)
-            tr_v = _upwind_to_v_points(tr, mass_flux_v)
+            tr_v = _upwind_to_v_points(tr, mass_flux_v, grid=grid)
         tracer_flux_u = mass_flux_u * tr_u
         tracer_flux_v = mass_flux_v * tr_v
         div_hut = divergence_cgrid(tracer_flux_u, tracer_flux_v, grid)
@@ -336,7 +336,7 @@ def _forward_backward_coriolis_3d(
     # overestimates face depth at topographic steps, creating a
     # barotropic-baroclinic residual that drives spurious currents.
     h_u = min_cell_to_uface(h_k)
-    h_v = min_cell_to_vface(h_k)
+    h_v = min_cell_to_vface(h_k, grid)
 
     # --- Depth-averaged velocity (barotropic component) ---
     # Per-face thickness + barotropic-mean column reductions share the
@@ -354,17 +354,17 @@ def _forward_backward_coriolis_3d(
     v_prime = (v - V_bar[..., jnp.newaxis]) * v_mask_3d
 
     # --- Coriolis parameter at face points ---
-    f_cell = grid.f.astype(u.dtype)
-
-    # f at u-points: average of flanking cells
-    f_u = 0.5 * (jnp.roll(f_cell, 1, axis=1) + f_cell)
-    f_u = jnp.concatenate([f_u, f_u[:, 0:1]], axis=1)  # (n_lat, n_lon+1)
-
-    # f at v-points: average of flanking cells
-    f_v_interior = 0.5 * (f_cell[:-1] + f_cell[1:])
-    f_v = jnp.concatenate(
-        [f_cell[0:1], f_v_interior, f_cell[-1:]], axis=0,
-    )  # (n_lat+1, n_lon)
+    if hasattr(grid, "f_u") and hasattr(grid, "f_v"):
+        f_u = grid.f_u.astype(u.dtype)  # (n_lat, n_lon+1)
+        f_v = grid.f_v.astype(u.dtype)  # (n_lat+1, n_lon)
+    else:
+        f_cell = grid.f.astype(u.dtype)
+        f_u = 0.5 * (jnp.roll(f_cell, 1, axis=1) + f_cell)
+        f_u = jnp.concatenate([f_u, f_u[:, 0:1]], axis=1)
+        f_v_interior = 0.5 * (f_cell[:-1] + f_cell[1:])
+        f_v = jnp.concatenate(
+            [f_cell[0:1], f_v_interior, f_cell[-1:]], axis=0,
+        )
 
     # --- Forward step: update u' using old v' ---
     # Average v' to u-points (Sadourny 4-point average)
@@ -377,13 +377,13 @@ def _forward_backward_coriolis_3d(
 
     # --- Backward step: update v' using NEW u' ---
     # Average u'_new to v-points (Sadourny 4-point average).
-    # Pole rows are zero (wall BC); single Pad HLO op replaces
-    # alloc-zeros + concatenate-of-three.
+    # Boundary: wall BC on regular lat-lon; fold halo on tripolar.
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import pad_ns_vector_u
     u_at_v_interior = 0.25 * (
         u_prime_new[:-1, :-1] + u_prime_new[:-1, 1:]
         + u_prime_new[1:, :-1] + u_prime_new[1:, 1:]
     )
-    u_at_v = jnp.pad(u_at_v_interior, ((1, 1), (0, 0), (0, 0)))
+    u_at_v = pad_ns_vector_u(u_at_v_interior, grid)
 
     v_prime_new = (v_prime - dt * f_v[:, :, jnp.newaxis] * u_at_v) * v_mask_3d
 
@@ -424,7 +424,12 @@ class LatLonCGridOceanModel:
         z_coord: OceanZStarCoordinate,
         config: LatLonCGridOceanConfig | None = None,
     ):
-        self.grid = grid
+        # Convert LatLonGrid -> LatLonCGridGeometry once at construction.
+        # All downstream operators see the enriched geometry with per-cell
+        # metric arrays.  For a plain LatLonGrid this is a no-op on field
+        # access (legacy fields are identical); for a tripolar grid the
+        # geometry carries fold descriptor and rotation angles.
+        self.grid = ensure_geometry(grid)
         self.z_coord = z_coord
         self.config = config or LatLonCGridOceanConfig()
         self._validate_config(self.config)
@@ -675,7 +680,7 @@ class LatLonCGridOceanModel:
         # topographic steps, creating a barotropic-baroclinic residual.
         h_u_pre = min_cell_to_uface(h_k_pre)
         # h at v-faces — same min-rule for meridional direction.
-        h_v_pre = min_cell_to_vface(h_k_pre)
+        h_v_pre = min_cell_to_vface(h_k_pre, self.grid)
 
         # H + F_slow share the per-face h weight on the level axis —
         # fuse the two reductions per face into one stacked sum.
@@ -811,7 +816,7 @@ class LatLonCGridOceanModel:
         # so that sum_k(h_k * u_corrected_k) = Hu_avg exactly.
         # (Hallberg & Adcroft 2009, Shchepetkin & McWilliams 2005).
         _min_uface_op = min_cell_to_uface
-        _min_vface_op = min_cell_to_vface
+        _min_vface_op = lambda f: min_cell_to_vface(f, self.grid)
         from legoesm.ocean.dynamics.latlon_cgrid_operators import (
             divergence_cgrid, interp_cell_to_uface,
         )
@@ -839,7 +844,7 @@ class LatLonCGridOceanModel:
         # tracer values inside the ground.
         if isinstance(self.z_coord, OceanPartialCellCoordinate):
             u_mask_3d_tracer, v_mask_3d_tracer = compute_face_masks_3d(
-                self.z_coord.is_active,
+                self.z_coord.is_active, self.grid,
             )
             u_mask_3d_tracer = u_mask_3d_tracer.astype(h_u_old.dtype)
             v_mask_3d_tracer = v_mask_3d_tracer.astype(h_v_old.dtype)
@@ -1113,6 +1118,42 @@ class LatLonCGridOceanModel:
             )
 
         return cast_pytree(state_new, None, "storage", allow_downcast=True)
+
+    @staticmethod
+    def _symmetrize_fold(state, fold):
+        """Enforce fold symmetry on the fold row.
+
+        Scalars (eta, T, S) at fold-partner cells must be equal.
+        Velocity v at the fold face must be antisymmetric.
+        """
+        perm = fold.perm_T
+
+        # Scalars: average fold partners
+        eta = state.eta.data
+        eta_sym = 0.5 * (eta[-1:] + eta[-1:, perm])
+        eta = eta.at[-1].set(eta_sym[0])
+
+        T = state.T.data
+        T_sym = 0.5 * (T[-1:] + T[-1:, perm, :])
+        T = T.at[-1].set(T_sym[0])
+
+        S = state.S.data
+        S_sym = 0.5 * (S[-1:] + S[-1:, perm, :])
+        S = S.at[-1].set(S_sym[0])
+
+        # v at fold face (last v-row): antisymmetric
+        v = state.v.data
+        v_fold = v[-1:]  # (1, n_lon, nlev)
+        v_partner = v_fold[:, perm, :]
+        v_sym = 0.5 * (v_fold - v_partner)
+        v = v.at[-1].set(v_sym[0])
+
+        return state._replace(
+            eta=state.eta.replace(data=eta),
+            T=state.T.replace(data=T),
+            S=state.S.replace(data=S),
+            v=state.v.replace(data=v),
+        )
 
     def _apply_implicit_vertical_mixing(
         self,

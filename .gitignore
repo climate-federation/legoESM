@@ -79,3 +79,9 @@ keys
 # iterations.  These are local-only audit scripts (e.g. _probe_iter59_substep.py,
 # _probe_iter61_cb_error_map.py, _probe_iter63_c72.py) — never to be committed.
 _probe_*.py
+
+# Local codex-bridge SQLite review database; per-clone artifact carrying
+# session metadata and review findings. Never commit; narrow rule
+# anchored at the repo root to avoid catching other intentionally
+# tracked `.db` files elsewhere.
+/reviews.db

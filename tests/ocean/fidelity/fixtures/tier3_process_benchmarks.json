@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "tier": 3,
+  "description": "Process benchmarks against committed literature scalars: Petersen 2015 lock_exchange RPE and overflow plume",
+  "common": {
+    "precision": "x64",
+    "grid": "latlon_cgrid",
+    "resolution": "2p5deg"
+  },
+  "cases": {
+    "lock_exchange_rpe_rate": {
+      "metric": "rpe_rate_over_petersen2015",
+      "tolerance_window": [0.8, 1.3],
+      "reference": {
+        "kind": "literature_scalar",
+        "source": "Petersen et al. 2015 Fig. 5",
+        "value": 1.0
+      },
+      "ci_marker": "fast",
+      "expected_runtime_s": 300
+    },
+    "overflow_nose_descent_time": {
+      "metric": "nose_descent_time_over_petersen2015",
+      "tolerance_window": [0.8, 1.4],
+      "reference": {
+        "kind": "literature_scalar",
+        "source": "Petersen et al. 2015 Fig. 7",
+        "value": 1.0
+      },
+      "ci_marker": "fast",
+      "expected_runtime_s": 300
+    },
+    "overflow_vertical_mass_flux_sign": {
+      "metric": "vertical_mass_flux_sign_score",
+      "tolerance_window": [0.99, 1.01],
+      "reference": {"kind": "analytical", "value": 1.0},
+      "ci_marker": "fast",
+      "expected_runtime_s": 300
+    }
+  }
+}

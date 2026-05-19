@@ -10,6 +10,7 @@ import math
 
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.core.precision import get_policy
 from legoesm.core.state import MPASOceanState
@@ -85,9 +86,14 @@ def partial_periodic_seam_wall_mpas(
 
     if seam_strip_width_deg is None:
         median_dc_m = float(jnp.median(mesh.dcEdge))
-        seam_strip_width_deg = (median_dc_m / mesh.radius) * (180.0 / math.pi)
+        seam_strip_width_deg = (
+            (median_dc_m / mesh.radius) * float(constants.RAD_TO_DEG)
+        )
 
-    near_seam = (lon_deg - seam_lon_deg) < seam_strip_width_deg
+    # Modulo wrap so cells near the antipodal side of the periodic seam
+    # don't get false-positive matches via negative differences.
+    seam_dist = (lon_deg - seam_lon_deg) % 360.0
+    near_seam = seam_dist < seam_strip_width_deg
     in_open_band = (
         (lat_deg >= open_lat_south_deg) & (lat_deg <= open_lat_north_deg)
     )

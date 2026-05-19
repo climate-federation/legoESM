@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "tier": 8,
+  "description": "Global realism: SST vs OISST, T/S vs WOA, AMOC vs RAPID, SSH vs AVISO, MLD vs Argo",
+  "common": {
+    "precision": "x64",
+    "grid": "latlon_cgrid",
+    "resolution": "4deg"
+  },
+  "cases": {
+    "global_overturning_sst_rmse_vs_oisst": {
+      "metric": "sst_rmse_K",
+      "tolerance_window": [0.0, 2.5],
+      "reference": {
+        "kind": "observation",
+        "source": "obs/oisst (NOAA NCEI OISST v2.1)"
+      },
+      "ci_marker": "manual_only",
+      "expected_runtime_s": 21600
+    },
+    "global_overturning_amoc_26N_Sv": {
+      "metric": "amoc_26N_mean_Sv",
+      "tolerance_window": [10.0, 25.0],
+      "reference": {
+        "kind": "observation",
+        "source": "obs/rapid_mocha (RAPID-MOCHA AMOC 26.5N)"
+      },
+      "ci_marker": "manual_only",
+      "expected_runtime_s": 21600
+    },
+    "global_overturning_T_rmse_0_2000m_vs_woa": {
+      "metric": "T_rmse_0_2000m_K",
+      "tolerance_window": [0.0, 3.0],
+      "reference": {
+        "kind": "observation",
+        "source": "obs/woa18_t (WOA18 1-deg climatology)"
+      },
+      "ci_marker": "manual_only",
+      "expected_runtime_s": 21600
+    },
+    "global_overturning_ssh_variance_pattern_corr_aviso": {
+      "metric": "ssh_variance_pattern_correlation",
+      "tolerance_window": [0.5, 1.0],
+      "reference": {
+        "kind": "observation",
+        "source": "obs/aviso_ssh (CMEMS SEALEVEL_GLO_PHY_L4_MY_008_047)"
+      },
+      "ci_marker": "manual_only",
+      "expected_runtime_s": 21600
+    },
+    "global_overturning_mld_seasonal_cycle_rmse_argo": {
+      "metric": "mld_seasonal_cycle_rmse_m",
+      "tolerance_window": [0.0, 60.0],
+      "reference": {
+        "kind": "observation",
+        "source": "obs/argo_mld (Holte-Talley monthly climatology)"
+      },
+      "ci_marker": "manual_only",
+      "expected_runtime_s": 21600
+    }
+  }
+}

@@ -104,6 +104,14 @@ class GMRediConfig(NamedTuple):
     S_max: float = 0.01         # Maximum isopycnal slope for tapering
     visbeck: VisbeckConfig = VisbeckConfig()
     slope_scheme: str = "triads"     # "triads" (default) or "centered"
+    surface_complement: bool = True  # Add horizontal diffusion (kappa_Redi)
+                                      # in the surface layer where DM95 tapers
+                                      # Redi to zero.  Ferrari et al. (2008).
+                                      # Uses a fixed 100m depth proxy for the
+                                      # mixed layer (should be replaced with
+                                      # KPP boundary-layer depth when available).
+                                      # Only active for slope_scheme="centered".
+    surface_complement_depth: float = 100.0  # Depth [m] of the surface layer
 
 
 class LateralMixingConfig(NamedTuple):
