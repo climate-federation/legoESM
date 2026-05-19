@@ -778,6 +778,16 @@ class ModelDriver:
                 phis=np.asarray(self._phis_data),
                 land_fraction=np.asarray(self._f_land),
             )
+        # Register grid rotation angle for geographic wind rotation in
+        # zonal-mean profile_u.  Cubed-sphere only: on lat-lon / Gaussian
+        # grids the panel-local u is already eastward so no rotation needed.
+        if (self.config.output.monthly_means
+                and self.config.grid.grid_type == "cubed_sphere"
+                and hasattr(self.grid, 'angle')):
+            import numpy as _np
+            self.diagnostics.set_wind_rotation_angle(
+                _np.asarray(self.grid.angle)
+            )
 
     def _sync_and_collect_diagnostics(self, **kwargs) -> dict:
         """Synchronize device computation and collect diagnostics.

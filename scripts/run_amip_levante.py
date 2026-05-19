@@ -119,7 +119,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--turbulence", type=str, default="louis")
     parser.add_argument("--clouds", type=str, default="sundqvist")
     parser.add_argument("--microphysics", type=str, default="sundqvist")
-    parser.add_argument("--gravity-wave-drag", type=str, default="none")
+    parser.add_argument("--gravity-wave-drag", type=str, default="rayleigh")
     parser.add_argument("--diurnal-cycle", action="store_true", default=True)
     parser.add_argument("--no-diurnal-cycle", dest="diurnal_cycle", action="store_false")
 

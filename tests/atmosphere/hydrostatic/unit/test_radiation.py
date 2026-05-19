@@ -1005,7 +1005,7 @@ class TestCloudFraction:
         assert jnp.all(props.cloud_fraction <= 1.0)
 
     def test_cloud_properties_diagnostic_condensate(self):
-        """Without explicit condensate, diagnostic q_c should scale with cf."""
+        """Without explicit condensate, in-cloud LWP should be nonzero where cf > 0."""
         config = CloudConfig(scheme="sundqvist", rh_crit=0.7)
         ncol, nlev = 4, 20
         T, p_full, p_half, T_sfc, lat, insol = _make_column_data(ncol, nlev)
@@ -1017,7 +1017,9 @@ class TestCloudFraction:
         q_v_moist = 0.9 * q_sat  # RH = 0.9 > rh_crit
 
         props = compute_cloud_properties(T, p_full, q_v_moist, dp, config)
-        # Should have nonzero cloud fraction and water paths
+        # Should have nonzero cloud fraction and in-cloud water paths.
+        # lwp/iwp store IN-CLOUD values; RRTMGP multiplies by cloud_fraction
+        # to get the grid-mean optical depth.
         assert float(jnp.max(props.cloud_fraction)) > 0.5
         assert float(jnp.sum(props.lwp + props.iwp)) > 0.0
 

@@ -166,7 +166,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dt",         type=float, default=150.0)
     parser.add_argument("--radiation",  type=str,   default="rrtmg",
                         choices=["rrtmg", "gray"])
-    parser.add_argument("--gwd",        type=str,   default="none",
+    parser.add_argument("--gwd",        type=str,   default="rayleigh",
                         help="Gravity-wave-drag scheme: none, rayleigh, lindzen, mcfarlane")
     parser.add_argument("--account",    type=str,   default="bd1083")
     parser.add_argument("--time-limit", type=str,   default="12:00:00")

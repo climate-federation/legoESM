@@ -190,8 +190,15 @@ class DiagnosticCollector:
         self.sw_net_sfc: list[float] = []
         self.lw_net_sfc: list[float] = []
         self.dry_mass: list[float] = []
+        self.rsdt: list[float] = []
+        self.hfss: list[float] = []
+        self.hfls: list[float] = []
         self.profiles_T: list[np.ndarray] = []
         self.profiles_qv: list[np.ndarray] = []
+
+        # Grid rotation angle for cubed-sphere wind rotation to geographic
+        # components.  Set via set_wind_rotation_angle(); None for other grids.
+        self._wind_rotation_angle: np.ndarray | None = None
 
         # Energy budget tracker
         self.energy_tracker = EnergyBudgetTracker()
@@ -346,6 +353,20 @@ class DiagnosticCollector:
             self._fixed_phis = np.asarray(phis)
         if land_fraction is not None:
             self._fixed_land_fraction = np.asarray(land_fraction)
+
+    def set_wind_rotation_angle(self, angle) -> None:
+        """Register the grid-to-geographic wind rotation angle.
+
+        Parameters
+        ----------
+        angle : array
+            Grid rotation angle [rad] on the native model grid.
+            For cubed-sphere, shape is (6, n, n).  Stored as a NumPy
+            array so the diagnostics path has no JAX dependency at
+            save time.  Used to rotate panel-local (u, v) to geographic
+            (east, north) before computing zonal-mean profile_u.
+        """
+        self._wind_rotation_angle = np.asarray(angle)
 
     def _regrid_to_latlon_2d(self, field) -> np.ndarray | None:
         """Regrid a 2-D field to the CMIP lat-lon grid.
@@ -507,6 +528,10 @@ class DiagnosticCollector:
         else:
             wind_term = jnp.max(jnp.abs(state.u.data))
         cwv = column_water_vapor(q_v, state.p_s.data, self.dsigma)
+        # Build a zero-padded sentinel for optional fields (shflx, lhflx,
+        # sw_down_toa) so they can be fused into the single device→host
+        # transfer.  Using jnp.zeros(()) keeps the scalar shape uniform.
+        _zero = jnp.zeros((), dtype=state.T.data.dtype)
         _stats = jnp.stack([
             jnp.mean(sst),
             jnp.mean(sic),
@@ -520,6 +545,9 @@ class DiagnosticCollector:
             jnp.mean(state.p_s.data),
             jnp.mean(sw_net_sfc),
             jnp.mean(lw_net_sfc),
+            jnp.mean(sw_down_toa) if sw_down_toa is not None else _zero,
+            jnp.mean(shflx) if shflx is not None else _zero,
+            jnp.mean(lhflx) if lhflx is not None else _zero,
         ])
         _stats_host = np.asarray(_stats)
         mean_sst = float(_stats_host[0])
@@ -534,6 +562,9 @@ class DiagnosticCollector:
         mean_ps = float(_stats_host[9])
         mean_sw_sfc = float(_stats_host[10])
         mean_lw_sfc = float(_stats_host[11])
+        mean_rsdt = float(_stats_host[12]) if sw_down_toa is not None else float('nan')
+        mean_hfss = float(_stats_host[13]) if shflx is not None else float('nan')
+        mean_hfls = float(_stats_host[14]) if lhflx is not None else float('nan')
 
         self.times.append(elapsed_day)
         self.sst.append(mean_sst)
@@ -548,6 +579,9 @@ class DiagnosticCollector:
         self.sw_net_sfc.append(mean_sw_sfc)
         self.lw_net_sfc.append(mean_lw_sfc)
         self.dry_mass.append(mean_ps)
+        self.rsdt.append(mean_rsdt)
+        self.hfss.append(mean_hfss)
+        self.hfls.append(mean_hfls)
 
         # Mean over all spatial axes except the last (vertical).
         # Cubed-sphere: (6,n,n,nlev) → mean over (0,1,2) → (nlev,)
@@ -600,6 +634,7 @@ class DiagnosticCollector:
 
         # Monthly means
         if self.monthly_means and self.monthly_accum is not None and lat_deg_grid is not None:
+            from legoesm import constants as _c
             doy, _ = day_to_calendar(day)
             year = int(day // 365.0)
             fields_2d = {
@@ -610,10 +645,41 @@ class DiagnosticCollector:
                 'sw_net_sfc': np.asarray(sw_net_sfc),
                 'lw_net_sfc': np.asarray(lw_net_sfc),
             }
+            # rsdt: TOA incoming SW [W/m²] — available unconditionally
+            if sw_down_toa is not None:
+                fields_2d['rsdt'] = np.asarray(sw_down_toa)
+            # hfss / hfls: surface heat fluxes [W/m²]
+            if shflx is not None:
+                fields_2d['hfss'] = np.asarray(shflx)
+            if lhflx is not None:
+                fields_2d['hfls'] = np.asarray(lhflx)
+            # psl: sea-level pressure via hypsometric equation
+            # p_sl = p_s * exp(phis / (R_d * T_lowest))
+            # Reuse the T_low array already materialised above.
+            _phis_np = np.asarray(state.phis.data)
+            _ps_np = np.asarray(state.p_s.data)
+            fields_2d['psl'] = _ps_np * np.exp(
+                _phis_np / (_c.R_d * np.maximum(fields_2d['T_low'], 200.0))
+            )
             self.monthly_accum.add_2d(doy, year, fields_2d, lat_deg_grid)
+            # profile_u: use geographic eastward wind when rotation angle is
+            # available (cubed-sphere).  Panel-local u averaged over latitude
+            # bands produces sign cancellations across cube faces.
+            # Rotation: u_east = cos(angle)*u_grid - sin(angle)*v_grid
+            # (pure NumPy — no JAX dependency in this diagnostic path).
+            if (self._wind_rotation_angle is not None
+                    and hasattr(state, 'v') and state.v is not None):
+                _angle = self._wind_rotation_angle
+                _cos_a = np.cos(_angle)
+                _sin_a = np.sin(_angle)
+                _u_np = np.asarray(state.u.data)
+                _v_np = np.asarray(state.v.data)
+                _u_for_profile = _cos_a * _u_np - _sin_a * _v_np
+            else:
+                _u_for_profile = np.asarray(state.u.data)
             self.monthly_accum.add_3d(doy, year, {
                 'T': np.asarray(state.T.data),
-                'u': np.asarray(state.u.data),
+                'u': _u_for_profile,
                 'q_v': np.asarray(q_v) * 1000.0,
             }, lat_deg_grid)
             ebudget = self.energy_tracker
@@ -623,6 +689,9 @@ class DiagnosticCollector:
                 'precip': mean_precip,
                 'sw_up_toa': mean_sw_toa,
                 'lw_up_toa': mean_lw_toa,
+                'rsdt': mean_rsdt,
+                'hfss': mean_hfss,
+                'hfls': mean_hfls,
             })
 
         # Spatial monthly accumulation for CMIP output
@@ -843,6 +912,11 @@ class DiagnosticCollector:
         self.sw_net_sfc.append(mean_sw_sfc)
         self.lw_net_sfc.append(mean_lw_sfc)
         self.dry_mass.append(mean_ps)
+        # rsdt/hfss/hfls not available in lightweight mode — fill with NaN
+        # so timeseries arrays stay aligned across flush chunks.
+        self.rsdt.append(float('nan'))
+        self.hfss.append(float('nan'))
+        self.hfls.append(float('nan'))
 
         return {
             'mean_sst': mean_sst,
@@ -892,6 +966,9 @@ class DiagnosticCollector:
             sw_net_sfc=np.array(self.sw_net_sfc),
             lw_net_sfc=np.array(self.lw_net_sfc),
             dry_mass_ps=np.array(self.dry_mass),
+            rsdt=np.array(self.rsdt),
+            hfss=np.array(self.hfss),
+            hfls=np.array(self.hfls),
             profiles_T=np.array(self.profiles_T) if self.profiles_T else np.array([]),
             profiles_qv=np.array(self.profiles_qv) if self.profiles_qv else np.array([]),
         )
@@ -918,6 +995,9 @@ class DiagnosticCollector:
         self.sw_net_sfc.clear()
         self.lw_net_sfc.clear()
         self.dry_mass.clear()
+        self.rsdt.clear()
+        self.hfss.clear()
+        self.hfls.clear()
         self.profiles_T.clear()
         self.profiles_qv.clear()
 
@@ -974,6 +1054,9 @@ class DiagnosticCollector:
             sw_net_sfc=np.array(self.sw_net_sfc),
             lw_net_sfc=np.array(self.lw_net_sfc),
             dry_mass_ps=np.array(self.dry_mass),
+            rsdt=np.array(self.rsdt),
+            hfss=np.array(self.hfss),
+            hfls=np.array(self.hfls),
             sigma=sigma,
             profiles_T=np.array(self.profiles_T) if self.profiles_T else np.array([]),
             profiles_qv=np.array(self.profiles_qv) if self.profiles_qv else np.array([]),

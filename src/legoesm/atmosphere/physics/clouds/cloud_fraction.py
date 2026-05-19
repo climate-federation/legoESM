@@ -43,9 +43,13 @@ class CloudProperties(NamedTuple):
     cloud_fraction : jnp.ndarray
         Cloud fraction per layer [0, 1].
     lwp : jnp.ndarray
-        Grid-mean liquid water path per layer [kg/m^2].
+        In-cloud liquid water path per layer [kg/m^2].  RRTMGP multiplies
+        the derived optical depth by ``cloud_fraction`` internally, so
+        ``lwp`` must be the in-cloud (not grid-mean) value.  The effective
+        grid-mean optical depth is ``tau_in_cloud × cloud_fraction``.
     iwp : jnp.ndarray
-        Grid-mean ice water path per layer [kg/m^2].
+        In-cloud ice water path per layer [kg/m^2].  Same convention as
+        ``lwp``.
     r_eff_liq : jnp.ndarray
         Effective radius for liquid droplets [m].
     r_eff_ice : jnp.ndarray
@@ -177,20 +181,35 @@ def compute_cloud_properties(
     # --- Cloud condensate ---
     has_explicit_condensate = q_cloud is not None or q_ice is not None
     if has_explicit_condensate:
-        q_c = jnp.zeros_like(T) if q_cloud is None else jnp.maximum(q_cloud, 0.0)
-        q_i = jnp.zeros_like(T) if q_ice is None else jnp.maximum(q_ice, 0.0)
+        # q_cloud / q_ice are grid-mean mixing ratios from the microphysics
+        # tracer.  Convert to in-cloud values by dividing by cloud fraction so
+        # that RRTMGP's internal ``optical_depth × cloud_fraction`` scaling
+        # yields the correct grid-mean optical depth.
+        # Safe denominator: where cf → 0 the condensate is also → 0, so the
+        # LWP approaches 0/0; the masked form keeps it zero in clear sky.
+        cf_safe = jnp.where(cf > 1.0e-6, cf, 1.0)
+        q_c_raw = jnp.zeros_like(T) if q_cloud is None else jnp.maximum(q_cloud, 0.0)
+        q_i_raw = jnp.zeros_like(T) if q_ice is None else jnp.maximum(q_ice, 0.0)
+        # In-cloud mixing ratios (zero in clear-sky cells)
+        q_c = jnp.where(cf > 1.0e-6, q_c_raw / cf_safe, 0.0)
+        q_i = jnp.where(cf > 1.0e-6, q_i_raw / cf_safe, 0.0)
     else:
-        # Diagnose condensate from cloud fraction and a typical in-cloud value.
-        # Total condensate = cf * q_c_diagnostic, partitioned by temperature.
-        q_total = cf * config.q_c_diagnostic
+        # Diagnose condensate from a typical in-cloud liquid water content.
+        # q_c_diagnostic is the IN-CLOUD mixing ratio; do NOT pre-multiply by
+        # cf here — RRTMGP applies the cloud-fraction scaling to the optical
+        # depth.  Pre-multiplying would cause tau ∝ cf², a factor-of-cf
+        # underestimate of the cloud radiative effect (SW bias audit).
         f_ice = _ice_fraction(T, config)
-        q_c = q_total * (1.0 - f_ice)
-        q_i = q_total * f_ice
+        q_diag = config.q_c_diagnostic * (1.0 - f_ice)
+        q_diag_i = config.q_c_diagnostic * f_ice
+        # Zero out condensate in clear-sky cells (cf < threshold)
+        q_c = jnp.where(cf > 1.0e-6, q_diag, 0.0)
+        q_i = jnp.where(cf > 1.0e-6, q_diag_i, 0.0)
 
-    # --- Cloud water/ice paths [kg/m^2] ---
-    # Grid-mean water/ice paths: q * dp / g
-    # These are grid-mean (not in-cloud) values, which is what RRTMGP expects
-    # when treating each layer independently (no overlap assumption).
+    # --- In-cloud water/ice paths [kg/m^2] ---
+    # RRTMGP multiplies the derived optical depth by cloud_fraction, so these
+    # must be in-cloud (not grid-mean) paths.  The effective grid-mean optical
+    # depth seen by the radiation solver is tau_in_cloud × cloud_fraction.
     lwp = q_c * dp / constants.g
     iwp = q_i * dp / constants.g
 
