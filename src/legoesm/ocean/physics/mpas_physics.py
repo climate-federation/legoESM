@@ -192,8 +192,14 @@ def make_mpas_ocean_physics(
 
             if _sf_tau_x is not None and _sf_tau_y is not None:
                 dz_0_cell = z_coord.dz_ref[0] * jacobian  # (nCells,)
-                tau_x_e = 0.5 * (_sf_tau_x[c1] + _sf_tau_x[c2])
-                tau_y_e = 0.5 * (_sf_tau_y[c1] + _sf_tau_y[c2])
+                # Negate: the bulk-flux solver returns tau in the
+                # atmosphere convention (opposing the wind).  The ocean
+                # needs the reaction force (in the direction of the
+                # wind).  The prescribed-wind path (wind_profiles.py)
+                # already uses the ocean convention, so this negation
+                # only applies to externally-provided bulk-flux tau.
+                tau_x_e = -0.5 * (_sf_tau_x[c1] + _sf_tau_x[c2])
+                tau_y_e = -0.5 * (_sf_tau_y[c1] + _sf_tau_y[c2])
                 tau_n = (tau_x_e * jnp.cos(mesh.angleEdge)
                          + tau_y_e * jnp.sin(mesh.angleEdge))
                 dz_0_e = 0.5 * (dz_0_cell[c1] + dz_0_cell[c2])
