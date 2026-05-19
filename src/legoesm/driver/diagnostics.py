@@ -670,8 +670,9 @@ class DiagnosticCollector:
             if (self._wind_rotation_angle is not None
                     and hasattr(state, 'v') and state.v is not None):
                 _angle = self._wind_rotation_angle
-                _cos_a = np.cos(_angle)
-                _sin_a = np.sin(_angle)
+                # Angle is (6,n,n); winds are (6,n,n,nlev) — broadcast vertically
+                _cos_a = np.cos(_angle)[..., np.newaxis]
+                _sin_a = np.sin(_angle)[..., np.newaxis]
                 _u_np = np.asarray(state.u.data)
                 _v_np = np.asarray(state.v.data)
                 _u_for_profile = _cos_a * _u_np - _sin_a * _v_np
