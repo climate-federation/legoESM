@@ -3185,11 +3185,20 @@ def run_omip_single(grid_type: str, args) -> dict:
     if grid_type == "mpas":
         try:
             from plot_mpas_omip_snapshot import plot_snapshot as _plot_snap
+            import threading
             _snap_mesh = grid
             _snap_z = z_coord
+            _snap_lock = threading.Lock()
 
             def _snapshot_fn(restart_path):
-                _plot_snap(restart_path, _snap_mesh, _snap_z)
+                """Plot snapshot in a background thread so the GPU isn't blocked."""
+                def _render():
+                    try:
+                        _plot_snap(restart_path, _snap_mesh, _snap_z)
+                    except Exception as e:
+                        print(f"    Snapshot failed: {e}", flush=True)
+                t = threading.Thread(target=_render, daemon=True)
+                t.start()
         except ImportError:
             pass
 
