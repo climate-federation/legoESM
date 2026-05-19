@@ -718,8 +718,13 @@ class MPASOceanModel:
 
         # Final state construction with explicit land masking
         T_final = T_corrected
-        S_final = S_corrected
-        
+        # Clamp salinity >= 0.  The virtual_salt_flux closure uses a
+        # constant S_ref (not local S) so it can overshoot to negative
+        # values in shallow cells with large freshwater input (e.g.
+        # Hudson Bay).  The real_freshwater closure would avoid this
+        # but virtual_salt_flux is the standard Boussinesq approach.
+        S_final = jnp.maximum(S_corrected, 0.0)
+
         state_new = MPASOceanState(
             u=state.u.replace(data=u_3d_new),
             T=state.T.replace(data=T_final),
