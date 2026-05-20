@@ -226,6 +226,78 @@ class TestSSSRestoringFlux:
 # WOA SSS interp to model grid
 # ==============================================================================
 
+class TestWithSSSRestoring:
+    """Integration: augment FreshwaterForcing with SSS restoring channel."""
+
+    def test_disabled_is_noop(self):
+        from legoesm.ocean.freshwater import (
+            FreshwaterForcing, zero_freshwater, with_sss_restoring,
+            net_freshwater_flux,
+        )
+        n = 16
+        fw = zero_freshwater(n)
+        net_before = float(jnp.sum(net_freshwater_flux(fw)))
+        cfg = SSSRestoringConfig(enabled=False)
+        fw2 = with_sss_restoring(
+            fw,
+            S_model_top=jnp.full((n,), 34.0),
+            S_target=jnp.full((n,), 35.0),
+            lat_deg=jnp.zeros((n,)),
+            lon_deg=jnp.zeros((n,)),
+            ice_concentration=jnp.zeros((n,)),
+            restoring_config=cfg,
+        )
+        assert fw is fw2  # identity preserved when disabled
+        assert float(jnp.sum(net_freshwater_flux(fw2))) == net_before
+
+    def test_enabled_adds_restoring_channel(self):
+        from legoesm.ocean.freshwater import (
+            zero_freshwater, with_sss_restoring, net_freshwater_flux,
+        )
+        n = 16
+        fw = zero_freshwater(n)
+        cfg = SSSRestoringConfig(
+            enabled=True, tau_restore_days_default=365.0, regions=(),
+        )
+        S_model = jnp.full((n,), 34.0)
+        S_target = jnp.full((n,), 35.0)
+        fw2 = with_sss_restoring(
+            fw,
+            S_model_top=S_model,
+            S_target=S_target,
+            lat_deg=jnp.zeros((n,)),
+            lon_deg=jnp.zeros((n,)),
+            ice_concentration=jnp.zeros((n,)),
+            restoring_config=cfg,
+        )
+        # Fresh-bias model → restoring should REMOVE water (negative FW).
+        assert jnp.all(fw2.restoring < 0.0)
+        # net_freshwater_flux picks up the restoring contribution.
+        net = net_freshwater_flux(fw2)
+        assert jnp.all(net < 0.0)
+
+    def test_stacks_with_prior_restoring(self):
+        from legoesm.ocean.freshwater import (
+            zero_freshwater, with_sss_restoring,
+        )
+        n = 8
+        fw = zero_freshwater(n)._replace(restoring=jnp.full((n,), 1.0e-5))
+        cfg = SSSRestoringConfig(
+            enabled=True, tau_restore_days_default=365.0, regions=(),
+        )
+        fw2 = with_sss_restoring(
+            fw,
+            S_model_top=jnp.full((n,), 35.0),  # zero bias
+            S_target=jnp.full((n,), 35.0),
+            lat_deg=jnp.zeros((n,)),
+            lon_deg=jnp.zeros((n,)),
+            ice_concentration=jnp.zeros((n,)),
+            restoring_config=cfg,
+        )
+        # Zero-bias case → existing 1e-5 restoring component preserved.
+        assert jnp.allclose(fw2.restoring, 1.0e-5, atol=1e-9)
+
+
 class TestInterpWOASSSToGrid:
 
     def test_interp_uniform_preserves_value(self):

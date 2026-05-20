@@ -1060,6 +1060,7 @@ def jra55_to_freshwater(
         evap=evap,
         runoff=slice.friver,
         ice_fw=jnp.zeros_like(slice.prra),
+        restoring=jnp.zeros_like(slice.prra),
     )
 
 
