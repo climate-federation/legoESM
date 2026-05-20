@@ -11,8 +11,16 @@ from legoesm.grids.gaussian import GaussianGrid, create_gaussian_grid
 from legoesm.grids.latlon import (
     LatLonGrid,
     create_latlon_grid,
+    LatLonCGridGeometry,
+    FoldDescriptor,
+    create_latlon_geometry,
+    ensure_geometry,
     create_mercator_grid,
     create_regional_latlon_grid,
+)
+from legoesm.grids.tripole import (
+    create_tripole_grid,
+    create_synthetic_tripole,
 )
 from legoesm.grids.vertical import (
     SigmaCoordinate,

@@ -71,9 +71,9 @@ class LockExchangeConfig:
 
     Parameters based on Petersen et al. (2015) and NEMO test suite.
     """
-    # Domain configuration (high resolution for mixing study)
-    nlev: int = 20                 # High vertical resolution
-    H_max: float = 500.0           # Shallow depth [m] for clear gravity current
+    # Domain configuration (Petersen 2015 Fig. 5: 20 m depth, 20 levels)
+    nlev: int = 20                 # 20 levels → ~1 m / level at H_max = 20 m
+    H_max: float = 20.0            # Petersen 2015 Fig. 5 channel depth [m]
     land_lat_threshold: float = 80.0  # Latitude threshold for land [degrees]
     spectral_land_lat_threshold: float = 90.0  # No land for spectral grid
 
@@ -534,8 +534,8 @@ EXPERIMENT_CONFIG = {
         "spectral": False  # RPE calculation complex for spectral
     },
     "special_config": {
-        "nlev": 20,         # High vertical resolution
-        "H_max": 500.0,     # Shallow depth
+        "nlev": 20,
+        "H_max": 20.0,      # Petersen 2015 Fig. 5
         "density_front": True,
         "rpe_diagnostics": True
     }

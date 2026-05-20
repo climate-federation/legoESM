@@ -1,0 +1,13 @@
+"""Ocean-coupler surface-flux applicators.
+
+The legoESM ocean dycores expose generic prognostic state containers
+(``OceanState`` cube, ``LatLonCGridOceanState``, ``MPASOceanState``);
+this module ports atmospheric / land flux output into those state
+containers as explicit per-timestep top-layer tendencies. The Phase F
+climate-scale drivers use ``omip2_applicator`` to wire JRA55-do
+forcing + L&Y 2009 bulk fluxes into the ocean state.
+"""
+
+from .omip2_applicator import apply_omip2_surface_fluxes
+
+__all__ = ["apply_omip2_surface_fluxes"]

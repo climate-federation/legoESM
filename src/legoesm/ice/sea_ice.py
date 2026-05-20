@@ -7,6 +7,9 @@ Modes (controlled by ``SeaIceConfig``):
   velocity (not a force-balance solver) with optional tracer advection.
 - **EVP** (``dynamics="evp"``): Elastic-Viscous-Plastic rheology with
   subcycled momentum solver (Hunke & Dukowicz 1997).
+- **mEVP** (``dynamics="mevp"``): Modified-EVP pseudo-time relaxation
+  (Bouillon 2013 / Kimmritz 2015). Converges to the implicit VP
+  solution without the EVP elastic CFL constraint.
 
 Multi-category ice (``n_categories > 1``) uses a simplified category
 transfer scheme to redistribute ice across thickness bins.  This is
@@ -28,7 +31,7 @@ from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio_ice
 from legoesm.coupler.bulk_flux import simple_bulk_fluxes, compute_most_fluxes
 from legoesm.coupler.coupling_fields import AtmToSurface, TileResponse
-from legoesm.ice.dynamics import evp_solver, free_drift_velocity
+from legoesm.ice.dynamics import evp_solver, mevp_solver, free_drift_velocity
 from legoesm.ice.transport import advect_ice_tracers
 from legoesm.ice.itd import aggregate_state, linear_remap
 from legoesm.coupler.surface_energy import surface_radiation_fluxes
@@ -84,10 +87,15 @@ def step_sea_ice(
     new_state : SeaIceState or DynamicSeaIceState
     response : TileResponse
     """
-    # Validate: dynamics/transport requiring grid must have grid != None
-    if config.dynamics == "evp" and grid is None:
+    # Validate: dynamics literal + grid requirement
+    if config.dynamics not in ("none", "free_drift", "evp", "mevp"):
         raise ValueError(
-            "dynamics='evp' requires a grid argument. "
+            f"Unknown sea-ice dynamics scheme: {config.dynamics!r}. "
+            "Expected one of: 'none', 'free_drift', 'evp', 'mevp'."
+        )
+    if config.dynamics in ("evp", "mevp") and grid is None:
+        raise ValueError(
+            f"dynamics={config.dynamics!r} requires a grid argument. "
             "Pass grid=<CubedSphereGrid> to step_sea_ice()."
         )
     if config.transport == "advect" and grid is None:
@@ -361,6 +369,27 @@ def _step_dynamic(
             P_star=config.P_star,
             C_strength=config.C_strength,
             T_evp=config.T_evp,
+            Delta_min=config.Delta_min,
+            rho_ice=config.rho_ice,
+            rho_air=config.rho_air_ref,
+            rho_ocean=config.rho_ocean_ref,
+            C_ai=config.drag_atm,
+            C_oi=config.drag_ocean,
+            differentiable=config.differentiable_dynamics,
+        )
+    elif config.dynamics == "mevp" and grid is not None:
+        u_ice, v_ice, s11, s22, s12 = mevp_solver(
+            u_ice, v_ice, s11, s22, s12,
+            h_agg, conc_agg,
+            forcing.u_lowest, forcing.v_lowest,
+            ocean_u, ocean_v,
+            grid, dt,
+            N_mevp=config.N_mevp,
+            e_yield=config.e_yield,
+            P_star=config.P_star,
+            C_strength=config.C_strength,
+            alpha_mevp=config.alpha_mevp,
+            beta_mevp=config.beta_mevp,
             Delta_min=config.Delta_min,
             rho_ice=config.rho_ice,
             rho_air=config.rho_air_ref,

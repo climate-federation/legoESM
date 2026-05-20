@@ -468,6 +468,7 @@ _LMON_VARIABLES: Dict[str, Dict[str, str]] = {
 }
 
 _OMON_VARIABLES: Dict[str, Dict[str, str]] = {
+    # --- 2-D surface ocean (OMIP-2 core, CMIP6 Omon table) ---
     "tos": {
         "standard_name": "sea_surface_temperature",
         "long_name": "Sea Surface Temperature",
@@ -475,11 +476,168 @@ _OMON_VARIABLES: Dict[str, Dict[str, str]] = {
         "cell_methods": "time: mean area: mean where sea",
         "dimensions": ("time", "lat", "lon"),
     },
+    "sos": {
+        "standard_name": "sea_surface_salinity",
+        "long_name": "Sea Surface Salinity",
+        "units": "0.001",  # CMIP6 dimensionless salinity
+        "cell_methods": "time: mean area: mean where sea",
+        "dimensions": ("time", "lat", "lon"),
+    },
+    "zos": {
+        "standard_name": "sea_surface_height_above_geoid",
+        "long_name": "Sea Surface Height Above Geoid",
+        "units": "m",
+        "cell_methods": "time: mean area: mean where sea",
+        "dimensions": ("time", "lat", "lon"),
+    },
+    "mlotst": {
+        "standard_name": "ocean_mixed_layer_thickness_defined_by_sigma_t",
+        "long_name": "Ocean Mixed Layer Thickness Defined by Sigma T",
+        "units": "m",
+        "cell_methods": "time: mean area: mean where sea",
+        "dimensions": ("time", "lat", "lon"),
+    },
+    "hfds": {
+        "standard_name": "surface_downward_heat_flux_in_sea_water",
+        "long_name": "Downward Heat Flux at Sea Water Surface",
+        "units": "W m-2",
+        "cell_methods": "time: mean area: mean where sea",
+        "dimensions": ("time", "lat", "lon"),
+    },
+    "wfo": {
+        "standard_name": "water_flux_into_sea_water",
+        "long_name": "Water Flux Into Sea Water",
+        "units": "kg m-2 s-1",
+        "cell_methods": "time: mean area: mean where sea",
+        "dimensions": ("time", "lat", "lon"),
+    },
+    "tauuo": {
+        "standard_name": "surface_downward_x_stress",
+        "long_name": "Surface Downward X Stress",
+        "units": "N m-2",
+        "cell_methods": "time: mean area: mean where sea",
+        "dimensions": ("time", "lat", "lon"),
+    },
+    "tauvo": {
+        "standard_name": "surface_downward_y_stress",
+        "long_name": "Surface Downward Y Stress",
+        "units": "N m-2",
+        "cell_methods": "time: mean area: mean where sea",
+        "dimensions": ("time", "lat", "lon"),
+    },
+    # --- 3-D ocean (OMIP-2 core).  ``depth`` carries ocean depth
+    # (positive down).  The writer attaches OMIP-2 attrs when
+    # ``table_id == "Omon"``.
+    "thetao": {
+        # CMIP6 Omon spec: thetao is reported in degC (NOT Kelvin).
+        # Callers writing this variable must convert model temperature
+        # (typically held in Kelvin internally) to Celsius before
+        # passing it to CFWriter.write_field.
+        "standard_name": "sea_water_potential_temperature",
+        "long_name": "Sea Water Potential Temperature",
+        "units": "degC",
+        "cell_methods": "time: mean area: mean where sea",
+        "dimensions": ("time", "depth", "lat", "lon"),
+    },
+    "so": {
+        "standard_name": "sea_water_salinity",
+        "long_name": "Sea Water Salinity",
+        "units": "0.001",
+        "cell_methods": "time: mean area: mean where sea",
+        "dimensions": ("time", "depth", "lat", "lon"),
+    },
+    "uo": {
+        "standard_name": "sea_water_x_velocity",
+        "long_name": "Sea Water X Velocity",
+        "units": "m s-1",
+        "cell_methods": "time: mean area: mean where sea",
+        "dimensions": ("time", "depth", "lat", "lon"),
+    },
+    "vo": {
+        "standard_name": "sea_water_y_velocity",
+        "long_name": "Sea Water Y Velocity",
+        "units": "m s-1",
+        "cell_methods": "time: mean area: mean where sea",
+        "dimensions": ("time", "depth", "lat", "lon"),
+    },
+    "wo": {
+        # Sign convention: ``standard_name = upward_sea_water_velocity``
+        # — values are POSITIVE UPWARD.  Ocean models that carry
+        # vertical velocity positive-downward on a depth-positive-down
+        # vertical coordinate (e.g. legoESM's z* core) MUST negate the
+        # field before passing it to CFWriter.write_field.
+        "standard_name": "upward_sea_water_velocity",
+        "long_name": "Upward Sea Water Velocity",
+        "units": "m s-1",
+        "cell_methods": "time: mean area: mean where sea",
+        "dimensions": ("time", "depth", "lat", "lon"),
+    },
+    "rhopoto": {
+        "standard_name": "sea_water_potential_density",
+        "long_name": "Sea Water Potential Density",
+        "units": "kg m-3",
+        "cell_methods": "time: mean area: mean where sea",
+        "dimensions": ("time", "depth", "lat", "lon"),
+    },
+    # --- Sea ice (kept under Omon for backward-compat; CMIP6 places
+    # ``siconc``/``sithick``/``siu``/``siv`` in SImon — see
+    # ``_SIMON_VARIABLES`` below).
     "sic": {
         "standard_name": "sea_ice_area_fraction",
         "long_name": "Sea-Ice Area Percentage (Ocean Grid)",
         "units": "%",
         "cell_methods": "time: mean area: mean where sea",
+        "dimensions": ("time", "lat", "lon"),
+    },
+}
+
+
+# --- CMIP6 SImon (sea-ice monthly) — the OMIP-2 protocol points here
+# for the sea-ice prognostic variables produced by the ocean / coupled
+# experiments.  All fields live on the ocean grid.
+_SIMON_VARIABLES: Dict[str, Dict[str, str]] = {
+    "siconc": {
+        "standard_name": "sea_ice_area_fraction",
+        "long_name": "Sea-Ice Area Fraction",
+        "units": "%",
+        "cell_methods": "time: mean area: mean where sea",
+        "dimensions": ("time", "lat", "lon"),
+    },
+    "sithick": {
+        # CMIP6 SImon cell_methods string is the canonical CF form
+        # ``time: mean area: mean where sea_ice``; do not append
+        # mask references in parentheses (CMOR/CF validators reject
+        # those).  The mask is conveyed by the CMIP6 ``ancillary``
+        # mechanism, not by cell_methods.
+        "standard_name": "sea_ice_thickness",
+        "long_name": "Sea Ice Thickness",
+        "units": "m",
+        "cell_methods": "time: mean area: mean where sea_ice",
+        "dimensions": ("time", "lat", "lon"),
+    },
+    # Sea-ice velocity components.  CMIP6 SImon expects
+    # eastward/northward components on the **lat-lon** output grid —
+    # native curvilinear (cubed-sphere, MPAS, tripole) vectors MUST be
+    # rotated to the geographic east/north basis before writing.
+    "siu": {
+        "standard_name": "sea_ice_x_velocity",
+        "long_name": "X-Component of Sea-Ice Velocity",
+        "units": "m s-1",
+        "cell_methods": "time: mean area: mean where sea_ice",
+        "dimensions": ("time", "lat", "lon"),
+    },
+    "siv": {
+        "standard_name": "sea_ice_y_velocity",
+        "long_name": "Y-Component of Sea-Ice Velocity",
+        "units": "m s-1",
+        "cell_methods": "time: mean area: mean where sea_ice",
+        "dimensions": ("time", "lat", "lon"),
+    },
+    "sitemptop": {
+        "standard_name": "sea_ice_surface_temperature",
+        "long_name": "Surface Temperature of Sea Ice",
+        "units": "K",
+        "cell_methods": "time: mean area: mean where sea_ice",
         "dimensions": ("time", "lat", "lon"),
     },
 }
@@ -583,6 +741,7 @@ CMOR_TABLES: Dict[str, Dict[str, Dict[str, str]]] = {
     "Amon": _AMON_VARIABLES,
     "Lmon": _LMON_VARIABLES,
     "Omon": _OMON_VARIABLES,
+    "SImon": _SIMON_VARIABLES,
     "day": _DAY_VARIABLES,
     "Aday": _DAY_VARIABLES,
     "fx": _FX_VARIABLES,
@@ -771,15 +930,31 @@ def _make_plev_da(plev: np.ndarray):
     )
 
 
-def _make_depth_da(depth: np.ndarray):
-    """Build a CF-compliant soil depth DataArray."""
+def _make_depth_da(depth: np.ndarray, *, kind: str = "soil"):
+    """Build a CF-compliant depth DataArray.
+
+    ``kind="soil"`` (default): depth below land surface (used by ``Lmon``
+    soil fields like ``tsl``).
+    ``kind="ocean"``: depth below sea surface (used by ``Omon`` 3-D ocean
+    fields like ``thetao``, ``so``, ``uo``, ``vo``, ``wo``,
+    ``rhopoto``).  CMIP6 OMIP uses the same dim name ``depth`` for the
+    ocean vertical axis with ``positive="down"``.
+    """
     xr = _import_xarray()
+    if kind == "ocean":
+        long_name = "Ocean Depth"
+    elif kind == "soil":
+        long_name = "Depth Below Land Surface"
+    else:
+        raise ValueError(
+            f"_make_depth_da: kind must be 'ocean' or 'soil'; got {kind!r}."
+        )
     return xr.DataArray(
         np.asarray(depth, dtype=np.float64),
         dims=("depth",),
         attrs={
             "standard_name": "depth",
-            "long_name": "Depth Below Land Surface",
+            "long_name": long_name,
             "units": "m",
             "axis": "Z",
             "positive": "down",
@@ -1262,7 +1437,29 @@ class CFWriter:
                     f"Variable {var_name!r} requires depth levels, "
                     f"but none were provided."
                 )
-            coords["depth"] = _make_depth_da(_to_numpy(depth))
+            # Explicit per-table depth-kind dispatch: every table that
+            # uses a ``depth`` dimension MUST appear here so the
+            # coordinate carries the right CF ``long_name``.  An
+            # unknown table fails fast rather than silently writing
+            # ``Depth Below Land Surface`` for ocean variables.
+            _DEPTH_KIND_BY_TABLE = {
+                "Omon": "ocean",
+                "Lmon": "soil",
+                # Add new tables here as variables with ``depth``
+                # are introduced.
+            }
+            try:
+                depth_kind = _DEPTH_KIND_BY_TABLE[table_id]
+            except KeyError as exc:
+                raise ValueError(
+                    f"Variable {var_name!r} uses dim 'depth' but its "
+                    f"table {table_id!r} is not registered in the "
+                    f"depth-kind dispatch.  Add it to _DEPTH_KIND_BY_TABLE "
+                    f"in cmor_output.py."
+                ) from exc
+            coords["depth"] = _make_depth_da(
+                _to_numpy(depth), kind=depth_kind,
+            )
             dims.append("depth")
 
         lat_np = _to_numpy(lat)

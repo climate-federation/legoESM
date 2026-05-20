@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "tier": 1,
+  "description": "Linear wave dispersion vs analytical (IGW Bishnu 2024, Kelvin c=sqrt(gH), barotropic Rossby)",
+  "common": {
+    "precision": "x64",
+    "grid": "latlon_cgrid",
+    "resolution": "2p5deg"
+  },
+  "cases": {
+    "inertia_gravity_wave": {
+      "metric": "dispersion_rms_error",
+      "tolerance_window": [0.0, 0.02],
+      "reference": {
+        "kind": "analytical",
+        "fn": "legoesm.ocean.fidelity.references:igw_omega"
+      },
+      "subcase_filters": {"k_max_dx": 4},
+      "ci_marker": "fast",
+      "expected_runtime_s": 60
+    },
+    "barotropic_wave_phase_speed": {
+      "metric": "phase_speed_relative_error",
+      "tolerance_window": [-0.05, 0.05],
+      "reference": {
+        "kind": "analytical",
+        "fn": "legoesm.ocean.fidelity.references:kelvin_wave_speed"
+      },
+      "ci_marker": "fast",
+      "expected_runtime_s": 60
+    },
+    "kelvin_wave_equator": {
+      "metric": "phase_speed_relative_error",
+      "tolerance_window": [-0.05, 0.05],
+      "reference": {
+        "kind": "analytical",
+        "fn": "legoesm.ocean.fidelity.references:kelvin_wave_speed"
+      },
+      "ci_marker": "nightly",
+      "expected_runtime_s": 180
+    }
+  }
+}

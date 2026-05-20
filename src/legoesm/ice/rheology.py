@@ -1,8 +1,19 @@
 """VP/EVP sea ice rheology: constitutive law and ice strength.
 
-Implements the Elastic-Viscous-Plastic (EVP) rheology of Hunke & Dukowicz
-(1997) for sea ice dynamics. The yield curve is an ellipse in principal
-stress space with eccentricity *e* (default 2).
+Implements two ice-stress relaxation laws sharing the same VP target:
+
+- **EVP** (Hunke & Dukowicz 1997): elastic-viscous-plastic relaxation
+  parameterised by the damping ratio ``T_evp`` and the subcycle count
+  ``N_evp``.
+- **mEVP** (Bouillon et al. 2013; Kimmritz et al. 2015): modified-EVP
+  pseudo-time relaxation parameterised by ``alpha_mevp`` (stress) and
+  ``beta_mevp`` (velocity). At convergence the system reproduces the
+  implicit VP solution; ``alpha`` and ``beta`` only control the
+  pseudo-time relaxation rate and are not subject to the EVP elastic
+  CFL constraint.
+
+The yield curve is an ellipse in principal stress space with
+eccentricity *e* (default 2).
 
 Key functions:
 - ``ice_strength``: Hibler (1979) P = P* h exp(-C(1-A))
@@ -10,6 +21,7 @@ Key functions:
 - ``delta_deformation``: Deformation rate invariant
 - ``vp_stress``: Viscous-plastic stress from VP constitutive law
 - ``evp_stress_update``: Single EVP subcycle stress update
+- ``mevp_stress_update``: Single mEVP pseudo-time stress update
 
 All functions are JAX-compatible (differentiable, JIT-friendly).
 
@@ -19,11 +31,17 @@ References
   J. Phys. Oceanogr., 9, 815-846.
 - Hunke, E. C. & Dukowicz, J. K. (1997): An elastic-viscous-plastic model
   for sea ice dynamics. J. Phys. Oceanogr., 27, 1849-1867.
+- Bouillon, S., T. Fichefet, V. Legat, G. Madec (2013): The
+  elastic-viscous-plastic method revisited. Ocean Modelling, 71, 2-12.
+- Kimmritz, M., S. Danilov, M. Losch (2015): On the convergence of the
+  modified elastic-viscous-plastic method for solving the sea ice
+  momentum equation. J. Comput. Phys., 296, 90-100.
 """
 
 from __future__ import annotations
 
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm.core.field import Field
 from legoesm.grids.cubed_sphere import CubedSphereGrid
@@ -277,5 +295,107 @@ def evp_stress_update(
     sigma_11_new = (sigma_11 + E_factor * s11_vp) / denom
     sigma_22_new = (sigma_22 + E_factor * s22_vp) / denom
     sigma_12_new = (sigma_12 + E_factor * s12_vp) / denom
+
+    return sigma_11_new, sigma_22_new, sigma_12_new
+
+
+# ==============================================================================
+# mEVP pseudo-time stress update
+# ==============================================================================
+
+def mevp_stress_update(
+    sigma_11: jnp.ndarray,
+    sigma_22: jnp.ndarray,
+    sigma_12: jnp.ndarray,
+    eps_11: jnp.ndarray,
+    eps_22: jnp.ndarray,
+    eps_12: jnp.ndarray,
+    P: jnp.ndarray,
+    e_yield: float,
+    alpha: float,
+    Delta_min: float = 2.0e-9,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Single mEVP pseudo-time stress update (Bouillon 2013 / Kimmritz 2015).
+
+    Pseudo-time relaxation toward the VP target with a single
+    relaxation parameter ``alpha``:
+
+        σ^(p+1) = (1 − 1/α) · σ^p + (1/α) · σ_VP(ε(u^p))
+
+    Equivalent to the EVP elastic relaxation with ``E_factor = 1 /
+    (alpha − 1)``, but with no implicit dependence on the subcycle
+    count or a damping-ratio parameter — the pseudo-time iteration
+    converges to the implicit VP solution as ``N_mevp → ∞`` regardless
+    of the physical timestep.
+
+    Stability (Kimmritz 2015): ``alpha · beta ≥ (e_yield²/4) · γ²``
+    where ``γ = ζ · Δt / (ρ_ice · h · L²)`` is the dimensionless
+    viscosity-stride product.  The bound is not enforced here — it
+    depends on the realised ``ζ = P / (2 Δ)`` and grid spacing, so a
+    static check would be either too conservative or unreliable.  The
+    CICE / FESOM default ``alpha = beta = 500`` covers typical Arctic
+    regimes with Δt ≤ 1 h on 50 km grids.  For larger Δt, finer grids,
+    or thinner marginal ice raise ``alpha`` and ``beta`` and confirm
+    convergence by running with doubled ``N_mevp``.
+
+    Parameters
+    ----------
+    sigma_11, sigma_22, sigma_12 : arrays
+        Current pseudo-time stress tensor [N/m].
+    eps_11, eps_22, eps_12 : arrays
+        Strain rate tensor at the current pseudo-time velocity ``u^p``
+        [1/s].
+    P : array
+        Ice strength [N/m].
+    e_yield : float
+        Yield curve eccentricity.
+    alpha : float
+        mEVP stress-relaxation parameter (dimensionless, typically
+        ≥ 100, default 500).
+    Delta_min : float
+        Deformation-rate regulariser [1/s] passed through to
+        :func:`delta_deformation`.
+
+    Returns
+    -------
+    sigma_11_new, sigma_22_new, sigma_12_new : arrays
+        Updated stress tensor [N/m].
+
+    Raises
+    ------
+    ValueError
+        If ``alpha < 1`` (relaxation factor ``1/alpha > 1`` produces
+        anti-relaxation past the VP target, including the ``alpha=0``
+        divide-by-zero corner).
+
+    Notes
+    -----
+    ``e_yield``, ``alpha``, and ``Delta_min`` are **static** Python
+    scalars: they appear in the relaxation factor and the validation
+    branches.  Pass them as Python ``float`` constants, never as
+    JAX-traced arrays.  Under ``jax.jit`` declare them with
+    ``static_argnames`` so the Python control flow does not run on
+    tracers.
+    """
+    if not np.isfinite(alpha) or alpha < 1.0:
+        raise ValueError(
+            f"mevp_stress_update: alpha must be a finite scalar >= 1 to "
+            f"contract toward the VP target; got {alpha}.  "
+            f"alpha=NaN/inf silently poisons the stress; "
+            f"alpha=0 divides by zero; alpha<1 extrapolates past the VP "
+            f"target (anti-relaxation)."
+        )
+
+    Delta = delta_deformation(eps_11, eps_22, eps_12, e_yield, Delta_min)
+
+    s11_vp, s22_vp, s12_vp = vp_stress(
+        eps_11, eps_22, eps_12, P, Delta, e_yield,
+    )
+
+    inv_alpha = 1.0 / alpha
+    one_minus = 1.0 - inv_alpha
+    sigma_11_new = one_minus * sigma_11 + inv_alpha * s11_vp
+    sigma_22_new = one_minus * sigma_22 + inv_alpha * s22_vp
+    sigma_12_new = one_minus * sigma_12 + inv_alpha * s12_vp
 
     return sigma_11_new, sigma_22_new, sigma_12_new

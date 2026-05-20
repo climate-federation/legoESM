@@ -15,6 +15,8 @@ class SeaIceConfig(NamedTuple):
     - ``"none"``: Slab thermodynamics only (diagnostic free-drift).
     - ``"free_drift"``: Free-drift velocity with tracer advection.
     - ``"evp"``: Elastic-Viscous-Plastic rheology (Hunke & Dukowicz 1997).
+    - ``"mevp"``: Modified-EVP pseudo-time relaxation toward implicit VP
+      (Bouillon 2013 / Kimmritz 2015).
 
     Multi-category ice:
     - ``n_categories=1``: Single-category slab (default, backward compatible).
@@ -58,6 +60,10 @@ class SeaIceConfig(NamedTuple):
     C_strength: float = 20.0        # Strength exponential decay constant
     Delta_min: float = 2.0e-9       # Minimum deformation rate [1/s]
     T_evp: float = 0.36             # EVP damping timescale ratio
+    # --- mEVP rheology parameters ---
+    N_mevp: int = 120               # mEVP pseudo-time iteration count
+    alpha_mevp: float = 500.0       # mEVP stress relaxation parameter
+    beta_mevp: float = 500.0        # mEVP velocity relaxation parameter
     # --- Multi-category ice ---
     n_categories: int = 1           # 1=single-category (backward compat), 5=CICE ITD
     # --- Tracer transport ---

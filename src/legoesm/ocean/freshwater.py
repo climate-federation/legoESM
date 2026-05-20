@@ -134,8 +134,13 @@ def virtual_salt_flux(
         Salinity tendency [PSU/s] for top layer.
     """
     F_fw = net_freshwater_flux(fw)
-    dz_safe = jnp.maximum(dz_0, 1e-10)
-    return -S_ref * F_fw / (rho_0 * dz_safe)
+    # Guard thin cells: on partial-cell grids, dz_0 can be O(cm) at
+    # shallow coastal cells.  Dividing by tiny dz produces huge dS/dt.
+    # Zero the tendency where dz_0 < 1mm (same guard as prescribed
+    # surface forcing's is_ocean threshold).
+    is_wet = dz_0 > 1.0e-3
+    dz_safe = jnp.maximum(dz_0, 1.0e-3)
+    return jnp.where(is_wet, -S_ref * F_fw / (rho_0 * dz_safe), 0.0)
 
 
 def freshwater_from_coupler(

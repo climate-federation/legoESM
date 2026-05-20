@@ -406,7 +406,13 @@ def _call_radiation_backend(
     # Compute cloud properties if cloud scheme is active.
     cloud_kwargs = {}
     if radiation_config.cloud_scheme != "none":
-        cloud_config = CloudConfig(scheme=radiation_config.cloud_scheme)
+        # Honor a caller-supplied ``cloud_config`` (e.g., AIMIP's
+        # trainable Xu-Randall knobs) when present; otherwise build a
+        # default cloud config matching the scheme string.
+        if radiation_config.cloud_config is not None:
+            cloud_config = radiation_config.cloud_config
+        else:
+            cloud_config = CloudConfig(scheme=radiation_config.cloud_scheme)
         dp = p_half[:, 1:] - p_half[:, :-1]  # (ncol, nlev)
         cloud_props = compute_cloud_properties(
             T=T,

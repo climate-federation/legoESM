@@ -26,6 +26,11 @@ class PrescribedForcingConfig(NamedTuple):
     lat_south_deg: float = 15.0  # Southern basin boundary [degrees]
     lat_north_deg: float = 75.0  # Northern basin boundary [degrees]
     wind_buffer_deg: float = 0.0  # Buffer zone width [degrees] where wind tapers to zero at basin edges
+    # Minimum cell thickness [m] used to discriminate ocean vs land cells
+    # for the inv_rho_dz / inv_rho_csw_dz mask.  1 mm is well below any
+    # real partial-cell thickness (typical floors are O(m)) but well above
+    # numerical noise from jacobian * dz_ref.
+    min_wet_cell_thickness_m: float = 1.0e-3
 
 
 class RestoringConfig(NamedTuple):

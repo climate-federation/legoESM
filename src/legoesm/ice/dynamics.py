@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm import constants
 from legoesm.core.field import Field
@@ -38,6 +39,7 @@ from legoesm.ice.rheology import (
     ice_strength,
     strain_rates,
     evp_stress_update,
+    mevp_stress_update,
 )
 
 
@@ -406,6 +408,252 @@ def evp_solver(
     else:
         u_f, v_f, s11_f, s22_f, s12_f = jax.lax.fori_loop(
             0, N_evp, substep_body, init_carry,
+        )
+
+    return u_f, v_f, s11_f, s22_f, s12_f
+
+
+# ==============================================================================
+# mEVP solver
+# ==============================================================================
+
+def mevp_solver(
+    u_ice: jnp.ndarray,
+    v_ice: jnp.ndarray,
+    sigma_11: jnp.ndarray,
+    sigma_22: jnp.ndarray,
+    sigma_12: jnp.ndarray,
+    h_ice: jnp.ndarray,
+    concentration: jnp.ndarray,
+    wind_u: jnp.ndarray,
+    wind_v: jnp.ndarray,
+    ocean_u: jnp.ndarray,
+    ocean_v: jnp.ndarray,
+    grid: CubedSphereGrid,
+    dt: float,
+    N_mevp: int = 120,
+    e_yield: float = 2.0,
+    P_star: float = 2.75e4,
+    C_strength: float = 20.0,
+    alpha_mevp: float = 500.0,
+    beta_mevp: float = 500.0,
+    Delta_min: float = 2.0e-9,
+    rho_ice: float = constants.rho_ice,
+    rho_air: float = constants.rho_air,
+    rho_ocean: float = constants.rho_ocean,
+    C_ai: float = 1.3e-3,
+    C_oi: float = 5.5e-3,
+    differentiable: bool = False,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    r"""Run the modified-EVP pseudo-time momentum solver.
+
+    Iterates ``N_mevp`` pseudo-time steps toward the implicit VP solution
+    using the Bouillon (2013) / Kimmritz (2015) update with two
+    relaxation parameters ``alpha`` (stress) and ``beta`` (velocity):
+
+        σ^(p+1) = (1 − 1/α) σ^p + (1/α) σ_VP(ε(u^p))
+
+        (β + 1) m u^(p+1) + Δt · m f k × u^(p+1)
+            = β m u^p + m u^n + Δt · (∇·σ^(p+1) + τ_a + τ_o)
+
+    where the air- and ocean-stress are evaluated at the current
+    pseudo-time velocity ``u^p`` (Picard iteration) and the Coriolis
+    term is treated implicitly on ``u^(p+1)``.  At convergence
+    (``u^(p+1) ≈ u^p``) the discrete momentum balance with implicit VP
+    rheology is recovered, irrespective of ``alpha`` and ``beta``.
+
+    Compared with the Hunke & Dukowicz (1997) EVP path (``evp_solver``):
+        * No subcycle timestep ``dt_s = dt / N``: the relaxation is in
+          pseudo-time, not physical time, so the elastic-wave CFL
+          constraint (``c_E · dt_s / dx ≤ 1``) does not apply.
+        * No ``T_evp`` damping ratio: ``alpha`` and ``beta`` directly
+          set the relaxation rate.  Larger values → slower per-iteration
+          relaxation but better stability margin.
+        * No N-dependence in the per-iteration relaxation: doubling
+          ``N_mevp`` halves the residual roughly, rather than changing
+          the per-iteration scaling.
+
+    Parameters
+    ----------
+    u_ice, v_ice : arrays (6, n, n)
+        Initial ice velocity ``u^n`` at the start of the dynamic step
+        [m/s].  Held fixed during the pseudo-time iteration.
+    sigma_11, sigma_22, sigma_12 : arrays (6, n, n)
+        Initial stress tensor [N/m].
+    h_ice : array (6, n, n)
+        Ice thickness [m].
+    concentration : array (6, n, n)
+        Ice concentration [0-1].
+    wind_u, wind_v : arrays (6, n, n)
+        Atmospheric wind [m/s].
+    ocean_u, ocean_v : arrays (6, n, n)
+        Ocean surface currents [m/s].
+    grid : CubedSphereGrid
+    dt : float
+        Full dynamical timestep [s].
+    N_mevp : int
+        Number of mEVP pseudo-time iterations.
+    e_yield : float
+        Yield curve eccentricity.
+    P_star, C_strength : float
+        Ice strength parameters.
+    alpha_mevp : float
+        mEVP stress relaxation parameter.  Stability requires
+        ``alpha · beta ≥ (e²/4) · γ²``; default 500 matches CICE / FESOM
+        recommendations for hourly Δt on coarse-to-medium grids.
+    beta_mevp : float
+        mEVP velocity relaxation parameter.  Typically set equal to
+        ``alpha`` (Kimmritz 2015).
+    Delta_min : float
+        Deformation-rate regulariser [1/s].
+    rho_ice, rho_air, rho_ocean : float
+        Densities [kg/m^3].
+    C_ai, C_oi : float
+        Drag coefficients.
+    differentiable : bool
+        Use scan (True) or fori_loop (False).
+
+    Returns
+    -------
+    u_new, v_new : arrays (6, n, n)
+        Updated ice velocity [m/s].
+    sigma_11_new, sigma_22_new, sigma_12_new : arrays (6, n, n)
+        Updated stress tensor [N/m].
+
+    Raises
+    ------
+    ValueError
+        If ``N_mevp`` < 1, ``alpha_mevp`` < 1 (extrapolation past the VP
+        target), or ``beta_mevp`` <= 0 (degenerate velocity update —
+        ``alpha * beta = 0`` cannot satisfy the Kimmritz stability bound
+        for any nonzero ice viscosity).
+
+    Notes
+    -----
+    Configuration parameters ``N_mevp``, ``alpha_mevp``, ``beta_mevp``,
+    ``e_yield``, ``P_star``, ``C_strength``, ``Delta_min``, ``rho_*``,
+    ``C_*``, and ``differentiable`` are **static** Python scalars
+    (they appear in the iteration count, the relaxation factors and
+    the validation branches).  Pass them as Python ``int``/``float``
+    constants; they must NOT be JAX-traced arrays.  When wrapping the
+    solver in ``jax.jit`` declare them with ``static_argnames`` so the
+    Python branches do not run on tracers.
+
+    The Kimmritz stability bound ``alpha * beta >= (e_yield**2 / 4) *
+    gamma**2`` with ``gamma`` proportional to ``zeta_max * dt / (m * L**2)``
+    is **not** enforced automatically.  ``gamma`` depends on the realised
+    bulk viscosity ``zeta = P / (2 Delta)`` which varies in space and time,
+    so a static check would be either overly conservative or unreliable.
+    Users running fine grids, large ``dt``, or thin marginal ice
+    (small ``m``) should raise ``alpha_mevp`` and ``beta_mevp`` and verify
+    convergence by comparing two runs with doubled ``N_mevp``.
+
+    The ``differentiable=False`` ``fori_loop`` path matches the EVP
+    convention: production runs prefer ``fori_loop`` for compile-time
+    speed; training / VJP workflows must set ``differentiable=True`` so
+    the iteration becomes a ``lax.scan`` with native reverse-mode AD.
+    """
+    if N_mevp < 1:
+        raise ValueError(
+            f"mevp_solver: N_mevp must be >= 1, got {N_mevp}."
+        )
+    if not np.isfinite(alpha_mevp) or alpha_mevp < 1.0:
+        raise ValueError(
+            f"mevp_solver: alpha_mevp must be a finite scalar >= 1; "
+            f"got {alpha_mevp}.  NaN/inf silently poisons the stress "
+            f"update; alpha<1 extrapolates past the VP target."
+        )
+    if not np.isfinite(beta_mevp) or beta_mevp <= 0.0:
+        raise ValueError(
+            f"mevp_solver: beta_mevp must be a finite scalar > 0; got "
+            f"{beta_mevp}.  beta_mevp=0 makes alpha*beta=0 (Kimmritz "
+            f"bound violated) and degenerates the velocity update to "
+            f"explicit Euler; NaN/inf silently poisons the iteration."
+        )
+
+    # Per-area ice mass.  See evp_solver for the bookkeeping note —
+    # the bulk-stress functions already return stress per unit
+    # ice-covered area, so m = rho_ice · h is the correct scaling.
+    m_ice = rho_ice * jnp.maximum(h_ice, 0.01)
+
+    # Ice strength is held fixed during the pseudo-time relaxation
+    # (depends only on the start-of-step h, A).
+    P = ice_strength(h_ice, concentration, P_star, C_strength)
+
+    # Implicit Coriolis: solve the 2x2 system
+    #   A · u^(p+1) − B · v^(p+1) = rhs_u
+    #   B · u^(p+1) + A · v^(p+1) = rhs_v
+    # with A = β + 1 and B = Δt · f.
+    f = grid.f.astype(u_ice.dtype)
+    A_cor = beta_mevp + 1.0
+    B_cor = dt * f
+    inv_det = 1.0 / (A_cor ** 2 + B_cor ** 2)
+
+    # u^n (held fixed during pseudo-time iteration)
+    u_n = u_ice
+    v_n = v_ice
+
+    # Ice mask — only update where ice exists
+    ice_mask = concentration > 0.01
+
+    def substep_body(i, carry):
+        u_p, v_p, s11_p, s22_p, s12_p = carry
+
+        # 1. Strain rates from pseudo-time velocity
+        eps_11, eps_22, eps_12 = strain_rates(u_p, v_p, grid)
+
+        # 2. mEVP stress update toward VP target
+        s11_new, s22_new, s12_new = mevp_stress_update(
+            s11_p, s22_p, s12_p,
+            eps_11, eps_22, eps_12,
+            P, e_yield, alpha_mevp, Delta_min,
+        )
+
+        # 3. Stress divergence
+        Fx, Fy = stress_divergence(s11_new, s22_new, s12_new, grid)
+
+        # 4. External stresses at u^p (Picard linearisation)
+        tau_air_x, tau_air_y = air_ice_stress(
+            u_p, v_p, wind_u, wind_v, rho_air, C_ai,
+        )
+        tau_ocean_x, tau_ocean_y = ocean_ice_stress(
+            u_p, v_p, ocean_u, ocean_v, rho_ocean, C_oi,
+        )
+
+        # 5. RHS forcing / unit mass
+        ax = (tau_air_x + tau_ocean_x + Fx) / m_ice
+        ay = (tau_air_y + tau_ocean_y + Fy) / m_ice
+
+        # 6. mEVP velocity update (Kimmritz 2015 eq. 8) with implicit
+        #    Coriolis — solve the 2x2 system in closed form.
+        rhs_u = beta_mevp * u_p + u_n + dt * ax
+        rhs_v = beta_mevp * v_p + v_n + dt * ay
+        u_new = (A_cor * rhs_u + B_cor * rhs_v) * inv_det
+        v_new = (-B_cor * rhs_u + A_cor * rhs_v) * inv_det
+
+        # Zero in ice-free cells (smooth-grad multiply, as in evp_solver)
+        ice_mask_f = ice_mask.astype(u_new.dtype)
+        u_new = u_new * ice_mask_f
+        v_new = v_new * ice_mask_f
+        s11_new = s11_new * ice_mask_f
+        s22_new = s22_new * ice_mask_f
+        s12_new = s12_new * ice_mask_f
+
+        return (u_new, v_new, s11_new, s22_new, s12_new)
+
+    init_carry = (u_ice, v_ice, sigma_11, sigma_22, sigma_12)
+
+    if differentiable:
+        def scan_body(carry, _):
+            new_carry = substep_body(0, carry)
+            return new_carry, None
+
+        (u_f, v_f, s11_f, s22_f, s12_f), _ = jax.lax.scan(
+            scan_body, init_carry, xs=None, length=N_mevp,
+        )
+    else:
+        u_f, v_f, s11_f, s22_f, s12_f = jax.lax.fori_loop(
+            0, N_mevp, substep_body, init_carry,
         )
 
     return u_f, v_f, s11_f, s22_f, s12_f

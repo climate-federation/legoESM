@@ -779,12 +779,10 @@ def gm_redi_tracer_tendency_latlon(
         # because the taper-based complement was ineffective (taper ≈ 1
         # where the 2Δy feedback operates).  When KPP is active, this
         # should be replaced with the KPP-diagnosed boundary layer depth.
-        _sfc_complement = getattr(cfg, "surface_complement", True)
-        _sfc_depth = getattr(cfg, "surface_complement_depth", 100.0)
-        if _sfc_complement:
+        if cfg.surface_complement:
             z_full = z_coord.z_full_ref  # (nlev,) — negative depths
             complement = jnp.where(
-                jnp.abs(z_full) < _sfc_depth, 1.0, 0.0
+                jnp.abs(z_full) < cfg.surface_complement_depth, 1.0, 0.0
             )  # (nlev,) — broadcast over (n_lat, n_lon)
             for q_field, tend_ref in [(T, 'dT_dt'), (S, 'dS_dt')]:
                 q_filled = _neumann_fill_cgrid(q_field, mask)

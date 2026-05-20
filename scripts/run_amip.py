@@ -103,7 +103,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Radiation
     parser.add_argument("--radiation", type=str, default="gray",
                         choices=["gray", "rrtmg", "rrtmgp"])
-    parser.add_argument("--rad-update-steps", type=int, default=1)
+    # Default is ``None`` so ``_postprocess_args`` can tell an explicit
+    # ``--rad-update-steps 1`` from "the user did not pass this flag".
+    # ``--production-profile`` only auto-sets the production cadence
+    # when the user did not provide a value.  Resolved to ``1`` after
+    # production-profile processing.
+    parser.add_argument("--rad-update-steps", type=int, default=None)
     parser.add_argument("--diurnal-cycle", action="store_true", default=False)
     parser.add_argument("--co2-ppmv", type=float, default=415.0)
     parser.add_argument("--ch4-ppbv", type=float, default=1900.0)
@@ -240,6 +245,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Enable gradient checkpointing for O(sqrt(N)) AD memory")
     parser.add_argument("--profile", type=int, default=0, metavar="N_STEPS",
                         help="Profile first N steps with jax.profiler and exit")
+    parser.add_argument(
+        "--production-profile", action="store_true", default=False,
+        help=(
+            "Bundle of conservative production-AMIP defaults aimed at "
+            "long (1+ year) MPI/GPU runs.  Applied AFTER explicit user "
+            "flags so any individual override still wins.  Currently "
+            "raises ``--rad-update-steps`` to floor(3600/dt) (≈1-hour "
+            "radiation cadence — the CESM/E3SM standard) and warns if "
+            "``--fix-moisture`` is paired with prognostic-condensate "
+            "microphysics (incorrect mass-budget closure).  See issue "
+            "#275 for the perf rationale."
+        ),
+    )
 
     # Distributed / MPI
     parser.add_argument("--distributed", action="store_true", default=False,
@@ -394,6 +412,54 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
     # triple.  ``cdgrid`` is the cubed-sphere C-D grid; keep it as-is.
     if args.discretization == "cgrid" and args.grid_type == "latlon":
         args.discretization = "latlon_cgrid"
+
+    # Issue #275 fix C: ``--production-profile`` bundles defaults that
+    # the CLI cannot ship as global defaults (because they would silently
+    # change behaviour for non-production callers).  Honor explicit user
+    # overrides — ``--rad-update-steps`` uses ``default=None`` so we can
+    # distinguish "user did not pass the flag" from "user passed
+    # ``--rad-update-steps 1``".  An explicit value always wins.
+    _rad_explicit = args.rad_update_steps is not None
+    if args.production_profile:
+        # 1-hour radiation cadence ≈ CESM/E3SM standard.  For dt < 3600
+        # this means rad_update_steps = floor(3600/dt).  Only auto-set
+        # when the user did not pass ``--rad-update-steps`` at all.
+        if not _rad_explicit:
+            rad_floor = max(1, int(3600.0 / max(args.dt, 1e-6)))
+            args.rad_update_steps = rad_floor
+            print(
+                f"[production-profile] --rad-update-steps={rad_floor} "
+                f"(≈ floor(3600/dt) for 1-hour radiation cadence)"
+            )
+        cadence_seconds = args.dt * args.rad_update_steps
+        if cadence_seconds > 3 * 3600.0:
+            print(
+                f"[production-profile] WARNING: radiation cadence "
+                f"{cadence_seconds:.0f}s (>3h) may smear the diurnal "
+                f"cycle; consider lowering --rad-update-steps."
+            )
+
+        # Conservation closure: ``fix_moisture`` rescales only q_v and
+        # ignores q_c/q_r/precipitation, so combining it with a
+        # prognostic-condensate microphysics scheme silently breaks the
+        # mass budget (config.py validation already warns).  Surface
+        # the same warning at the AMIP CLI so production launchers
+        # cannot miss it.
+        _prog_microphys = args.microphysics in (
+            "kessler", "sundqvist", "seifert_beheng", "morrison", "thompson",
+        )
+        if args.fix_moisture and _prog_microphys:
+            print(
+                "[production-profile] WARNING: --fix-moisture with "
+                f"prognostic microphysics ({args.microphysics}) breaks "
+                "total-water conservation (rescales q_v only).  Drop "
+                "--fix-moisture or wait for a total-water fixer."
+            )
+
+    # Resolve the rad-update-steps default last so explicit overrides
+    # and production-profile-derived values are both visible upstream.
+    if args.rad_update_steps is None:
+        args.rad_update_steps = 1
 
     return args
 

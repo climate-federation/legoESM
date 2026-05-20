@@ -344,6 +344,14 @@ def barotropic_implicit_mpas(
     )
     eta_new = eta_new * mask
 
+    # Global mass conservation correction (same as lat-lon solver).
+    _area_cell = mesh.areaCell.astype(eta_dtype)
+    _ocean_area = jnp.sum(_area_cell * mask)
+    _target_mass = jnp.sum(rhs * _area_cell)
+    _actual_mass = jnp.sum(eta_new * _area_cell)
+    _correction = (_target_mass - _actual_mass) / jnp.maximum(_ocean_area, 1e-30)
+    eta_new = (eta_new + _correction * mask) * mask
+
     # Mass-conserving floor clamp (safety net for extreme transients;
     # in normal operation this is a no-op since the PCG converges to
     # well-resolved η).

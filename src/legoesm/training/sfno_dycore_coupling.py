@@ -25,75 +25,16 @@ from legoesm.ml.channel_packing import PE3DChannelSpec
 from legoesm.driver.physics_pipeline import PhysicsOutput
 
 
-_OPTIONAL_3D_OUTPUT_FIELDS = (
-    "du_dt",
-    "dv_dt",
-    "dq_i_dt",
-    "dq_s_dt",
-    "dq_g_dt",
-    "dN_c_dt",
-    "dN_r_dt",
-    "dN_i_dt",
+# Re-use the canonical helpers from ``atmosphere.physics.neural_physics``
+# rather than maintaining a duplicate parse + PhysicsOutput-kwargs
+# logic here.  The two had identical behavior and silently risked
+# drift as the ``step_unified`` contract evolved.
+from legoesm.atmosphere.physics.neural_physics import (
+    build_physics_output_kwargs as _physics_output_kwargs,
+    parse_step_unified_tail as _parse_step_unified_tail,
 )
+
 _PHYSICS_OUTPUT_FIELDS = set(getattr(PhysicsOutput, "_fields", ()))
-
-
-def _parse_step_unified_tail(args):
-    """Support both legacy and conv_prog-extended step_unified signatures."""
-    if len(args) == 19:
-        return None, args
-    if len(args) == 20:
-        return args[0], args[1:]
-    raise TypeError(
-        "step_unified expected 19 positional tail arguments "
-        "(legacy) or 20 (with conv_prog)"
-    )
-
-
-def _physics_output_kwargs(
-    *,
-    dT_dt,
-    dq_v_dt,
-    dq_c_dt,
-    dq_r_dt,
-    precip,
-    sw_net_sfc,
-    lw_net_sfc,
-    sw_up_toa,
-    lw_up_toa,
-    sw_down_toa,
-    reference_3d,
-    template=None,
-    conv_prog=None,
-):
-    kwargs = dict(
-        dT_dt=dT_dt,
-        dq_v_dt=dq_v_dt,
-        dq_c_dt=dq_c_dt,
-        dq_r_dt=dq_r_dt,
-        precip=precip,
-        sw_net_sfc=sw_net_sfc,
-        lw_net_sfc=lw_net_sfc,
-        sw_up_toa=sw_up_toa,
-        lw_up_toa=lw_up_toa,
-        sw_down_toa=sw_down_toa,
-    )
-    zeros_3d = jnp.zeros_like(reference_3d)
-    for field_name in _OPTIONAL_3D_OUTPUT_FIELDS:
-        if field_name in _PHYSICS_OUTPUT_FIELDS:
-            kwargs[field_name] = (
-                getattr(template, field_name, zeros_3d)
-                if template is not None else zeros_3d
-            )
-    if "conv_prog" in _PHYSICS_OUTPUT_FIELDS:
-        conv_prog_value = (
-            getattr(template, "conv_prog", conv_prog)
-            if template is not None else conv_prog
-        )
-        if conv_prog_value is None:
-            conv_prog_value = jnp.asarray(0.0, dtype=reference_3d.dtype)
-        kwargs["conv_prog"] = conv_prog_value
-    return kwargs
 
 
 class SFNOPhysics(eqx.Module):

@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "tier": 6,
+  "description": "ACC channel: zonal transport (Zhang 2024) and Held-Larichev k^-3 interior EKE slope",
+  "common": {
+    "precision": "x64",
+    "grid": "latlon_cgrid",
+    "resolution": "2p5deg"
+  },
+  "cases": {
+    "acc_channel_zonal_transport_Sv": {
+      "metric": "zonal_transport_Sv",
+      "tolerance_window": [60.0, 250.0],
+      "reference": {
+        "kind": "literature_scalar",
+        "source": "Zhang 2024 (range broadened for coarse 2.5 deg resolution)",
+        "value": 150.0
+      },
+      "ci_marker": "nightly",
+      "expected_runtime_s": 1800
+    },
+    "acc_channel_eke_spectrum_slope": {
+      "metric": "interior_eke_spectrum_slope",
+      "tolerance_window": [-3.6, -2.4],
+      "reference": {
+        "kind": "analytical",
+        "fn": "legoesm.ocean.fidelity.references:held_larichev_slope"
+      },
+      "ci_marker": "nightly",
+      "expected_runtime_s": 1800
+    },
+    "acc_channel_bottom_form_stress_vs_wind_stress": {
+      "metric": "form_stress_over_wind_stress",
+      "tolerance_window": [0.5, 1.5],
+      "reference": {"kind": "analytical", "value": 1.0},
+      "ci_marker": "nightly",
+      "expected_runtime_s": 1800
+    }
+  }
+}
