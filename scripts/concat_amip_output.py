@@ -56,9 +56,6 @@ def _concat_npz(paths: list[Path], time_key: str = "days") -> dict[str, np.ndarr
     for d in parts[1:]:
         common_keys &= set(d.keys())
 
-    n_time = [len(d[time_key]) for d in parts if time_key in d]
-    time_len_consistent = all(len(d[time_key]) > 0 for d in parts if time_key in d)
-
     result: dict[str, np.ndarray] = {}
     for key in sorted(common_keys):
         arrays = [d[key] for d in parts]
