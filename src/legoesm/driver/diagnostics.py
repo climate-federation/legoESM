@@ -659,7 +659,7 @@ class DiagnosticCollector:
             _phis_np = np.asarray(state.phis.data)
             _ps_np = np.asarray(state.p_s.data)
             fields_2d['psl'] = _ps_np * np.exp(
-                _phis_np / (_c.R_d * np.maximum(fields_2d['T_low'], 200.0))
+                _phis_np / (_c.R_d * np.maximum(fields_2d['T_low'], _c.T_min_atmosphere))
             )
             self.monthly_accum.add_2d(doy, year, fields_2d, lat_deg_grid)
             # profile_u: use geographic eastward wind when rotation angle is
@@ -745,7 +745,7 @@ class DiagnosticCollector:
             T_lowest = np.asarray(state.T.data[..., -1])
             phis = np.asarray(state.phis.data)
             p_s_np = np.asarray(state.p_s.data)
-            T_lowest_safe = np.maximum(T_lowest, 200.0)  # avoid div-by-zero
+            T_lowest_safe = np.maximum(T_lowest, _c.T_min_atmosphere)
             psl = p_s_np * np.exp(phis / (_c.R_d * T_lowest_safe))
             r = self._regrid_to_latlon_2d(psl)
             if r is not None:

@@ -21,6 +21,7 @@ from legoesm.grids.topography import (
     gaussian_mountain,
     phis_from_topography,
     land_mask_from_topography,
+    smooth_phis_cubed_sphere,
 )
 
 
@@ -468,6 +469,41 @@ class TestInitialization(unittest.TestCase):
         p_s_grid = jnp.exp(lnps_grid)
         p_s_range = float(jnp.max(p_s_grid) - jnp.min(p_s_grid))
         self.assertGreater(p_s_range, 100.0)
+
+
+class TestSmoothPhisCubedSphere(unittest.TestCase):
+    """Direct tests for smooth_phis_cubed_sphere (public ERA5 IC helper)."""
+
+    def setUp(self):
+        self.n = 8
+        self.grid = create_cubed_sphere(self.n)
+        rng = np.random.default_rng(42)
+        # Synthetic phis with a sharp peak on one face to simulate ERA5 terrain
+        self.phis_raw = np.zeros((6, self.n, self.n), dtype=np.float32)
+        self.phis_raw[0, self.n // 2, self.n // 2] = 5e4   # sharp Himalaya-like peak
+        self.phis_raw += rng.random((6, self.n, self.n)).astype(np.float32) * 1e3
+
+    def test_output_shape_and_dtype(self):
+        out = smooth_phis_cubed_sphere(self.phis_raw)
+        self.assertEqual(out.shape, (6, self.n, self.n))
+        self.assertEqual(out.dtype, self.phis_raw.dtype)
+
+    def test_reduces_max_gradient(self):
+        """Smoothing must reduce the peak gradient at face boundaries."""
+        def _max_grad(phis):
+            return float(np.max(np.abs(np.diff(phis, axis=1))))
+        self.assertLess(_max_grad(smooth_phis_cubed_sphere(self.phis_raw)),
+                        _max_grad(self.phis_raw))
+
+    def test_non_negative_flat_input(self):
+        """Flat non-negative phis should remain non-negative after smoothing."""
+        flat = np.full((6, self.n, self.n), 1000.0, dtype=np.float32)
+        out = smooth_phis_cubed_sphere(flat)
+        self.assertTrue(np.all(out >= 0.0))
+
+    def test_all_finite(self):
+        out = smooth_phis_cubed_sphere(self.phis_raw)
+        self.assertTrue(np.all(np.isfinite(out)))
 
 
 if __name__ == "__main__":

@@ -47,6 +47,10 @@ c_snow = 2090.0                 # Specific heat of snow [J/(kg*K)] (≈ c_pi, CI
 k_ice_default = 2.04            # Thermal conductivity of pure ice [W/(m*K)]
 k_snow = 0.31                   # Thermal conductivity of dry snow [W/(m*K)] (CICE default)
 T_freeze = 273.15               # Freezing point of water [K]
+T_min_atmosphere = 200.0        # Lower-bound floor for atmospheric temperature [K]
+                                # Used as safety floor in hypsometric psl extrapolation
+                                # to avoid division by near-zero T in clear-sky columns.
+                                # Matches Held-Suarez T_MIN and DCMIP lower bounds.
 T_freeze_ocean = 271.35         # Freezing point of seawater [K] (~-1.8 C)
 S_ice_bulk_default = 4.0        # Default bulk ice salinity [g/kg or PSU] (CICE-style)
 S_ocean_ref = 34.7              # Reference ocean salinity [g/kg or PSU] (~WOA mean)
