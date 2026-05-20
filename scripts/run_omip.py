@@ -3191,12 +3191,16 @@ def run_omip_single(grid_type: str, args) -> dict:
             _snap_lock = threading.Lock()
 
             def _snapshot_fn(restart_path):
-                """Plot snapshot in a background thread so the GPU isn't blocked."""
+                """Plot snapshot in a background thread so the GPU isn't blocked.
+
+                Uses a lock to serialize matplotlib calls (not thread-safe).
+                """
                 def _render():
-                    try:
-                        _plot_snap(restart_path, _snap_mesh, _snap_z)
-                    except Exception as e:
-                        print(f"    Snapshot failed: {e}", flush=True)
+                    with _snap_lock:
+                        try:
+                            _plot_snap(restart_path, _snap_mesh, _snap_z)
+                        except Exception as e:
+                            print(f"    Snapshot failed: {e}", flush=True)
                 t = threading.Thread(target=_render, daemon=True)
                 t.start()
         except ImportError:
