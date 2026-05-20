@@ -108,11 +108,11 @@ def test_coupling_fields_shapes():
     # and ``surface_mass_flux`` (F3) slots in the Physical_Consistency
     # cycle for tile-blended water, ice→ocean heat, ice→ocean stress
     # reaction, and phase-aware moisture mass closure.
-    sfc = SurfaceToAtm(z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z)
-    assert len(sfc) == 18  # 13 → 14 (F4) → 15 (F8) → 17 (F9 +2) → 18 (F3 +1)
+    sfc = SurfaceToAtm(z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z)
+    assert len(sfc) == 19  # 13 → 14 (F4) → 15 (F8) → 17 (F9 +2) → 18 (F3 +1) → 19 (salt_flux)
 
-    tile = TileResponse(z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z)
-    assert len(tile) == 18
+    tile = TileResponse(z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z)
+    assert len(tile) == 19
 
 
 # ==============================================================================
@@ -597,7 +597,7 @@ def test_blending_is_area_weighted():
             u_ocean_sfc=z, v_ocean_sfc=z, co2_flux=z,
             freshwater_flux=z, ocean_heat_extraction=z,
             ocean_stress_x=z, ocean_stress_y=z,
-            surface_mass_flux=z,
+            surface_mass_flux=z, salt_flux=z,
         )
 
     fracs = TileFractions(

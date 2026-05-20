@@ -93,6 +93,7 @@ class TestTileBlendingGrad:
                 ocean_stress_x=jnp.zeros(shape),
                 ocean_stress_y=jnp.zeros(shape),
                 surface_mass_flux=jnp.zeros(shape),
+                salt_flux=jnp.zeros(shape),
             )
 
         ocean_resp = make_tile_response(295.0 * ones)
@@ -238,6 +239,7 @@ class TestFluxAccumulatorGrad:
                 ocean_stress_x=jnp.zeros(shape),
                 ocean_stress_y=jnp.zeros(shape),
                 surface_mass_flux=jnp.zeros(shape),
+                salt_flux=jnp.zeros(shape),
             )
 
         def loss(T_surface):

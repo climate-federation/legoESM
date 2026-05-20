@@ -219,6 +219,8 @@ def step_lake(
         # L_s on frozen lakes, iter-11; ``evap_rate`` was just
         # computed above for freshwater_flux).
         surface_mass_flux=evap_rate,
+        # Lake tile does not exchange salt with the ocean.
+        salt_flux=jnp.zeros_like(T_epi),
     )
 
     return new_state, response

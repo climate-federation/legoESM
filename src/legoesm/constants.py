@@ -39,11 +39,17 @@ L_s = 2.834e6                   # Latent heat of sublimation at 0C [J/kg]
 L_f = 3.337e5                   # Latent heat of fusion at 0C [J/kg]
 rho_water = 1000.0              # Density of liquid water [kg/m^3]
 rho_ice = 917.0                 # Density of ice [kg/m^3]
+rho_snow = 330.0                # Density of dry snow on sea ice [kg/m^3] (CICE default)
 rho_air = 1.225                 # Reference dry-air density at sea level [kg/m^3]
 rho_ocean = 1025.0              # Reference seawater density [kg/m^3] (= ocean.eos.rho_0)
 c_sw = 3994.0                   # Specific heat of seawater [J/(kg*K)] (Gill 1982)
+c_snow = 2090.0                 # Specific heat of snow [J/(kg*K)] (≈ c_pi, CICE default)
+k_ice_default = 2.04            # Thermal conductivity of pure ice [W/(m*K)]
+k_snow = 0.31                   # Thermal conductivity of dry snow [W/(m*K)] (CICE default)
 T_freeze = 273.15               # Freezing point of water [K]
 T_freeze_ocean = 271.35         # Freezing point of seawater [K] (~-1.8 C)
+S_ice_bulk_default = 4.0        # Default bulk ice salinity [g/kg or PSU] (CICE-style)
+S_ocean_ref = 34.7              # Reference ocean salinity [g/kg or PSU] (~WOA mean)
 T_deep_ocean_ref_C = 1.5        # Global mean deep-ocean potential T [degC]
                                 # (WOCE / WOA18 abyssal climatology — used as
                                 # fallback fill when an interpolated profile
@@ -86,6 +92,24 @@ S_0 = 1361.0                    # Total solar irradiance [W/m^2]
 emissivity_ocean = 0.97         # [-] open ocean / lake water
 emissivity_ice = 0.97           # [-] fresh sea ice / fresh snow
 emissivity_land = 0.95          # [-] generic land surface
+
+# Broadband sea-ice / snow surface albedos used as Delta-Eddington
+# fallback or for the constant-albedo configuration.  Values follow
+# CICE6 conventions (Briegleb & Light 2007).  Spectral splits:
+#   - VIS = 0.2–0.7 μm (visible band)
+#   - NIR = 0.7–5.0 μm (near-IR band, decays faster with melt / wetness)
+alpha_snow_cold_vis = 0.98      # Dry cold snow, visible band
+alpha_snow_cold_nir = 0.70      # Dry cold snow, near-IR band
+alpha_snow_melt_vis = 0.80      # Melting snow, visible band
+alpha_snow_melt_nir = 0.55      # Melting snow, near-IR band
+alpha_ice_cold_vis = 0.78       # Bare cold sea ice, visible band
+alpha_ice_cold_nir = 0.36       # Bare cold sea ice, near-IR band
+alpha_ice_melt_vis = 0.68       # Melting bare ice, visible band
+alpha_ice_melt_nir = 0.30       # Melting bare ice, near-IR band
+alpha_pond_max_vis = 0.27       # Deep melt pond, visible band (Briegleb-Light)
+alpha_pond_max_nir = 0.07       # Deep melt pond, near-IR band
+i0_vis = 0.70                   # Fraction of incident VIS that penetrates bare ice
+i0_nir = 0.0                    # NIR has negligible penetration
 
 # ==============================================================================
 # Molecular Weights (kg/mol)

@@ -12,7 +12,13 @@ transfer scheme for ice thickness redistribution.  Snow depth is not
 tracked.
 """
 
-from legoesm.ice.config import SeaIceConfig
+from legoesm.ice.config import (
+    SeaIceConfig,
+    SnowConfig,
+    BrineConfig,
+    RidgingConfig,
+    MeltPondConfig,
+)
 from legoesm.ice.state import (
     SeaIceState,
     DynamicSeaIceState,
@@ -43,8 +49,29 @@ from legoesm.ice.itd import (
     aggregate_state,
     distribute_to_categories,
     linear_remap,
+    lipscomb_2001_remap,
 )
 from legoesm.ice.transport import advect_ice_tracers
+from legoesm.ice.snow import (
+    accumulate_snowfall,
+    combined_conductive_flux,
+    consume_from_snow_then_ice,
+    consume_sublimation_from_snow_then_ice,
+    snow_ice_flooding,
+)
+from legoesm.ice.brine import (
+    update_salinity_and_salt_flux,
+    aggregate_salt_flux,
+    SaltBudgetResult,
+)
+from legoesm.ice.ridging import apply_ridging, participation_weights
+from legoesm.ice.shortwave import (
+    compute_ice_sw,
+    delta_eddington_albedo,
+    maykut_untersteiner_albedo,
+    IceSWResult,
+)
+from legoesm.ice.ponds import step_ponds
 
 __all__ = [
     # Config and state
@@ -76,6 +103,32 @@ __all__ = [
     "aggregate_state",
     "distribute_to_categories",
     "linear_remap",
+    "lipscomb_2001_remap",
     # Transport
     "advect_ice_tracers",
+    # Configs
+    "SnowConfig",
+    "BrineConfig",
+    "RidgingConfig",
+    "MeltPondConfig",
+    # Snow physics
+    "accumulate_snowfall",
+    "combined_conductive_flux",
+    "consume_from_snow_then_ice",
+    "consume_sublimation_from_snow_then_ice",
+    "snow_ice_flooding",
+    # Brine physics
+    "update_salinity_and_salt_flux",
+    "aggregate_salt_flux",
+    "SaltBudgetResult",
+    # Ridging
+    "apply_ridging",
+    "participation_weights",
+    # Shortwave
+    "compute_ice_sw",
+    "delta_eddington_albedo",
+    "maykut_untersteiner_albedo",
+    "IceSWResult",
+    # Ponds
+    "step_ponds",
 ]

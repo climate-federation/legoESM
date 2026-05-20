@@ -24,21 +24,36 @@ from jax import lax
 from legoesm import constants
 from legoesm.core.operators_3d import fv_flux_divergence_3d
 from legoesm.core.operators_fv import fv_flux_divergence
+from legoesm.core.operators_fv_latlon import fv_flux_divergence_latlon
 from legoesm.grids.cubed_sphere import CubedSphereGrid
+from legoesm.grids.latlon import LatLonGrid
+
+
+def _is_latlon_grid(grid) -> bool:
+    return isinstance(grid, LatLonGrid)
+
+
+def _is_cubed_sphere_grid(grid) -> bool:
+    return isinstance(grid, CubedSphereGrid)
 
 
 def _ppm_tendency_2d(
     q: jnp.ndarray,
     u: jnp.ndarray,
     v: jnp.ndarray,
-    grid: CubedSphereGrid,
+    grid,
 ) -> jnp.ndarray:
-    """PPM flux-divergence tendency for a 2D ``(6, n, n)`` scalar.
+    """PPM flux-divergence tendency for a single-category scalar.
 
-    Returns ``dq/dt = -div(q · v)`` from the monotonicity-limited PPM
-    operator (Colella–Woodward).  Sign convention: integrate as
-    ``q_new = q + dt · tendency``.
+    Dispatches on grid type:
+      * ``CubedSphereGrid``: ``fv_flux_divergence`` (shape ``(6, n, n)``).
+      * ``LatLonGrid``: ``fv_flux_divergence_latlon`` (shape
+        ``(n_lat, n_lon)``).
+
+    Sign convention: ``q_new = q + dt · tendency``.
     """
+    if _is_latlon_grid(grid):
+        return fv_flux_divergence_latlon(q, u, v, grid, limiter=True)
     return fv_flux_divergence(q, u, v, grid, limiter=True)
 
 
@@ -46,15 +61,21 @@ def _ppm_tendency_per_category(
     q_cat: jnp.ndarray,
     u: jnp.ndarray,
     v: jnp.ndarray,
-    grid: CubedSphereGrid,
+    grid,
 ) -> jnp.ndarray:
-    """PPM tendency for a multi-category ``(6, n, n, n_cat)`` scalar.
+    """PPM tendency for a multi-category scalar (trailing category axis).
 
-    The ice velocity ``u``, ``v`` is the same across categories; we
-    broadcast it to the category axis and reuse the existing
+    Cubed-sphere path reuses the existing
     ``fv_flux_divergence_3d`` helper which vmaps over the trailing
-    axis (originally the vertical-level axis).
+    axis (originally the vertical-level axis).  Lat-lon path vmaps
+    ``fv_flux_divergence_latlon`` over the trailing category axis
+    using ``jax.vmap``.
     """
+    if _is_latlon_grid(grid):
+        # q_cat: (n_lat, n_lon, n_cat).  Vmap over the trailing axis.
+        def _kernel(qk):
+            return fv_flux_divergence_latlon(qk, u, v, grid, limiter=True)
+        return jax.vmap(_kernel, in_axes=-1, out_axes=-1)(q_cat)
     u_3d = jnp.broadcast_to(u[..., None], q_cat.shape)
     v_3d = jnp.broadcast_to(v[..., None], q_cat.shape)
     return fv_flux_divergence_3d(q_cat, u_3d, v_3d, grid, limiter=True)
@@ -66,7 +87,7 @@ def _ppm_one_substep(
     enth: jnp.ndarray,
     u_ice: jnp.ndarray,
     v_ice: jnp.ndarray,
-    grid: CubedSphereGrid,
+    grid,
     dt_sub: float,
     is_multicat: bool,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
@@ -90,7 +111,7 @@ def advect_ice_tracers(
     T_ice: jnp.ndarray,
     u_ice: jnp.ndarray,
     v_ice: jnp.ndarray,
-    grid: CubedSphereGrid,
+    grid,
     dt: float,
     T_ice_min: float = 180.0,
     T_freeze_ocean: float = constants.T_freeze_ocean,
@@ -139,7 +160,11 @@ def advect_ice_tracers(
     enth = T_ice * vol                           # K · m
     conc = concentration
 
-    is_multicat = h_ice.ndim == 4
+    # Multi-category detection: base ndim depends on grid (cubed-
+    # sphere = 3D (6, n, n), lat-lon = 2D (n_lat, n_lon)); a trailing
+    # category axis adds one rank.
+    base_ndim = 2 if _is_latlon_grid(grid) else 3
+    is_multicat = h_ice.ndim == (base_ndim + 1)
     dt_sub = dt / n_subcycles
 
     if n_subcycles == 1:

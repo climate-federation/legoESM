@@ -827,15 +827,21 @@ class TestMultiCategoryIntegration:
             jnp.full(shape, 1.5), jnp.full(shape, 255.0),
             jnp.full(shape, 0.7), 5,
         )
+        cat_dims_local = ("face", "x", "y", "cat")
+        _z_cat = jnp.zeros(h_mc.shape)
         state = DynamicSeaIceState(
-            h_ice=Field(data=h_mc, name="h_ice", dims=("face", "x", "y", "cat"), units="m"),
-            T_ice=Field(data=T_mc, name="T_ice", dims=("face", "x", "y", "cat"), units="K"),
-            concentration=Field(data=a_mc, name="conc", dims=("face", "x", "y", "cat"), units="1"),
+            h_ice=Field(data=h_mc, name="h_ice", dims=cat_dims_local, units="m"),
+            T_ice=Field(data=T_mc, name="T_ice", dims=cat_dims_local, units="K"),
+            concentration=Field(data=a_mc, name="conc", dims=cat_dims_local, units="1"),
             u_ice=Field(data=jnp.zeros(shape), name="u_ice", dims=dims, units="m/s"),
             v_ice=Field(data=jnp.zeros(shape), name="v_ice", dims=dims, units="m/s"),
             sigma_11=Field(data=jnp.zeros(shape), name="s11", dims=dims, units="N/m"),
             sigma_22=Field(data=jnp.zeros(shape), name="s22", dims=dims, units="N/m"),
             sigma_12=Field(data=jnp.zeros(shape), name="s12", dims=dims, units="N/m"),
+            h_snow=Field(data=_z_cat, name="h_snow", dims=cat_dims_local, units="m"),
+            S_ice=Field(data=_z_cat, name="S_ice", dims=cat_dims_local, units="g/kg"),
+            pond_area=Field(data=_z_cat, name="pond_area", dims=cat_dims_local, units="1"),
+            pond_depth=Field(data=_z_cat, name="pond_depth", dims=cat_dims_local, units="m"),
         )
         forcing = _make_forcing()
         new_state, response = step_sea_ice(
@@ -1594,6 +1600,7 @@ class TestMEVPMultiCategory:
             jnp.full(shape, 0.7), 5,
         )
         cat_dims = ("face", "x", "y", "cat")
+        _z_cat = jnp.zeros(h_mc.shape)
         state = DynamicSeaIceState(
             h_ice=Field(data=h_mc, name="h_ice", dims=cat_dims, units="m"),
             T_ice=Field(data=T_mc, name="T_ice", dims=cat_dims, units="K"),
@@ -1603,6 +1610,10 @@ class TestMEVPMultiCategory:
             sigma_11=Field(data=jnp.zeros(shape), name="s11", dims=dims, units="N/m"),
             sigma_22=Field(data=jnp.zeros(shape), name="s22", dims=dims, units="N/m"),
             sigma_12=Field(data=jnp.zeros(shape), name="s12", dims=dims, units="N/m"),
+            h_snow=Field(data=_z_cat, name="h_snow", dims=cat_dims, units="m"),
+            S_ice=Field(data=_z_cat, name="S_ice", dims=cat_dims, units="g/kg"),
+            pond_area=Field(data=_z_cat, name="pond_area", dims=cat_dims, units="1"),
+            pond_depth=Field(data=_z_cat, name="pond_depth", dims=cat_dims, units="m"),
         )
         forcing = _make_forcing()
         new_state, response = step_sea_ice(

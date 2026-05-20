@@ -8,6 +8,91 @@ from legoesm import constants
 from legoesm.surface_albedo import IceAlbedoConfig
 
 
+class SnowConfig(NamedTuple):
+    """Snow-on-ice layer configuration.
+
+    Snow is tracked as a single bulk layer per ice category with
+    constant density.  Conductive heat flux through the combined
+    snow-ice column uses harmonic averaging of conductivities.
+    Snow-ice (white-ice) formation by Archimedes flooding is enabled
+    when ``flooding`` is True.
+    """
+    enabled: bool = False              # Master gate (False = no snow tracking)
+    rho_snow: float = constants.rho_snow
+    k_snow: float = constants.k_snow
+    c_snow: float = constants.c_snow
+    h_snow_min: float = 1.0e-4         # Min snow depth for active conductivity [m]
+    snow_to_ice_density: float = constants.rho_ice / constants.rho_snow
+    flooding: bool = True              # Enable snow-ice (white-ice) flooding
+    sublim_partition: float = 1.0      # Fraction of sublimation mass drawn from snow
+                                        # (1.0 = sublimate snow first, then ice)
+
+
+class BrineConfig(NamedTuple):
+    """Sea-ice bulk salinity + brine-rejection configuration.
+
+    Tracks a single bulk ice salinity ``S_ice`` per category and routes
+    the salt budget into the ocean coupler channel.
+
+    - During freezing of new ice in a lead: a fraction
+      ``(S_ocean - S_ice_new) / S_ocean`` of the salt mass stays in the
+      ocean (brine rejection); ``S_ice_new`` is captured by the ice as
+      bulk salinity.
+    - During basal/surface melt: ice salt is returned to the ocean.
+    - Snow-ice (flooding) consolidates salty seawater into the ice
+      column at ocean salinity (Notz / Maykut Untersteiner convention).
+    """
+    enabled: bool = False              # Master gate (False = freshwater convention)
+    S_ice_new: float = constants.S_ice_bulk_default  # Salinity of newly frozen ice [PSU]
+    S_ocean_ref: float = constants.S_ocean_ref       # Reference ocean salinity [PSU]
+    S_ice_min: float = 0.0
+    S_ice_max: float = 12.0            # Cap for numerical stability
+
+
+class RidgingConfig(NamedTuple):
+    """Mechanical ridging configuration (Lipscomb 2007).
+
+    Convergence-driven thickness redistribution: thin-ice categories
+    "donate" area + volume to ridged ice that is added to thicker
+    categories.  Participation by category follows an exponential
+    function of category mean thickness; ridge thickness range follows
+    the Hibler / Lipscomb formula  H_min = 2*h_part,  H_max =
+    sqrt(H_star * h_part).
+    """
+    enabled: bool = False
+    e_star: float = 0.36               # Participation e-folding thickness [m]
+                                        # (Lipscomb 2007 default e* = 0.36 m)
+    mu_rdg: float = 4.0                # Ridge-thickness multiplier
+                                        # (H_max = mu * sqrt(h_part))
+    H_star: float = 100.0              # Maximum ridge thickness scale [m]
+    snow_fraction_retained: float = 0.5  # Fraction of donor snow retained
+                                          # in ridges (remainder enters ocean
+                                          # via runoff, CICE convention).
+    closing_rate_max: float = 1.0      # Cap on convergence rate [1/s]
+                                        # (sanity bound; physical Δ rarely
+                                        # exceeds 1e-5)
+
+
+class MeltPondConfig(NamedTuple):
+    """CESM-style melt-pond configuration.
+
+    Tracks pond area fraction (relative to ice area) and mean depth
+    per category.  Pond water is sourced from surface melt and
+    rainfall on bare ice; drains via simple linear Darcy parameter to
+    the ocean.  Pond freezing returns water to bulk ice volume.
+    """
+    enabled: bool = False
+    refreeze_threshold: float = 273.15   # Air T below which ponds refreeze [K]
+    drainage_timescale: float = 86400.0  # Drainage e-folding time [s] (1 day)
+    pond_to_ice_max_area: float = 0.6    # Cap pond fraction per category
+    depth_to_area_ratio: float = 0.8     # Volume → area conversion (CICE)
+    # Minimum snow depth that blocks pond formation [m].  Snow
+    # thinner than this is treated as transparent to surface melt
+    # water so deposition / patchy snow does not lock out pond
+    # capture.  CICE uses ~5 mm.
+    snow_block_threshold: float = 5.0e-3
+
+
 class SeaIceConfig(NamedTuple):
     """Thermodynamic slab + optional dynamics sea ice configuration.
 
@@ -21,10 +106,18 @@ class SeaIceConfig(NamedTuple):
     Multi-category ice:
     - ``n_categories=1``: Single-category slab (default, backward compatible).
     - ``n_categories=5``: 5-category CICE-standard ITD.
+
+    New-physics gates (all default off for backward compatibility):
+    - ``snow.enabled``: track snow-on-ice
+    - ``brine.enabled``: track bulk ice salinity + route salt flux
+    - ``ridging.enabled``: Lipscomb 2007 mechanical ridging
+    - ``ponds.enabled``: CESM-style melt ponds
+    - ``shortwave_scheme``: "constant" (default) | "maykut_untersteiner" |
+      "delta_eddington"
     """
     rho_ice: float = constants.rho_ice
     c_ice: float = constants.c_pi
-    k_ice: float = 2.04             # Ice thermal conductivity [W/m/K]
+    k_ice: float = constants.k_ice_default
     L_f: float = constants.L_f
     h_ice_min: float = 0.01         # Min ice thickness for smooth ops [m]
     albedo_ice: float = 0.65        # Fallback constant albedo
@@ -73,3 +166,19 @@ class SeaIceConfig(NamedTuple):
     # 50 km, dt ~ 1 h → C ~ 0.007).  Raise for storm / fine-grid
     # conditions where the Courant number can exceed 1.
     transport_subcycles: int = 1
+    # --- ITD remap scheme ---
+    # "simple" preserves legacy behaviour (volume-conserving local rescale).
+    # "lipscomb2001" uses the piecewise-linear g(h) remapping (Lipscomb 2001).
+    itd_remap: str = "simple"
+    # --- New-physics modules (each gated off by default) ---
+    snow: SnowConfig = SnowConfig()
+    brine: BrineConfig = BrineConfig()
+    ridging: RidgingConfig = RidgingConfig()
+    ponds: MeltPondConfig = MeltPondConfig()
+    # --- Shortwave / albedo scheme ---
+    # "constant"            → uniform ``albedo_ice``
+    # "maykut_untersteiner" → α(T_sfc, h_ice) thin-ice ramp
+    # "delta_eddington"     → Briegleb & Light 2007 two-band albedo with
+    #                         snow / pond modifications + interior SW
+    #                         penetration coefficient ``i0_vis``.
+    shortwave_scheme: str = "constant"
