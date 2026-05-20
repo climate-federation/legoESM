@@ -217,7 +217,27 @@ def solve_lw(
   flux_keys = ['flux_up', 'flux_down', 'flux_net']
   init_val = {key: jnp.zeros_like(temperature) for key in flux_keys}
 
-  fluxes = jax.lax.fori_loop(0, optics_lib.n_gpt_lw, step_fn, init_val)
+  # Replace ``jax.lax.fori_loop`` with ``jax.lax.scan`` wrapping
+  # ``step_fn`` in ``jax.checkpoint(policy=nothing_saveable)`` so the
+  # backward pass recomputes per-g-point intermediates one at a time
+  # instead of materialising all 256 g-points' activations.  Memory
+  # for the per-call backward drops from ~21 MiB/col (T11 -> ~14 GiB
+  # at v7 settings) to roughly ~1 MiB/col (~0.7 GiB at T11), making
+  # T127 (~1°) feasible on a 24 GiB GPU under
+  # ``eqx.filter_value_and_grad``.  Forward semantics are identical:
+  # ``scan`` and ``fori_loop`` both iterate the same step function
+  # and accumulate the cumulative flux.
+  def _scan_step(carry, igpt):
+    return step_fn(igpt, carry), None
+
+  _scan_step_ckpt = jax.checkpoint(
+      _scan_step,
+      prevent_cse=True,
+      policy=jax.checkpoint_policies.nothing_saveable,
+  )
+  fluxes, _ = jax.lax.scan(
+      _scan_step_ckpt, init_val, jnp.arange(optics_lib.n_gpt_lw),
+  )
   # There are problematic values for the fluxes at the top boundary (the top
   # halo), so fix using a quadratic polynomial to evaluate the flux at the top
   # boundary.
@@ -389,7 +409,21 @@ def solve_sw(
   fluxes_0 = {key: jnp.zeros_like(temperature) for key in flux_keys}
 
   def _compute_fluxes(_):
-    fluxes = jax.lax.fori_loop(0, optics_lib.n_gpt_sw, step_fn, fluxes_0)
+    # ``fori_loop`` -> ``scan`` + per-g-point ``jax.checkpoint`` so the
+    # backward pass recomputes one g-point at a time instead of
+    # storing all 224 SW g-points' activations.  See solve_lw above
+    # for the longwave companion change.
+    def _scan_step(carry, igpt):
+      return step_fn(igpt, carry), None
+
+    _scan_step_ckpt = jax.checkpoint(
+        _scan_step,
+        prevent_cse=True,
+        policy=jax.checkpoint_policies.nothing_saveable,
+    )
+    fluxes, _ = jax.lax.scan(
+        _scan_step_ckpt, fluxes_0, jnp.arange(optics_lib.n_gpt_sw),
+    )
     # There are problematic values for the fluxes at the top boundary (the top
     # halo), so fix using a quadratic polynomial to evaluate the flux at the top
     # boundary.

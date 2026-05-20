@@ -64,15 +64,21 @@ n_eval_days:  8    # sum of eval_windows[*][2]
 # fuller multi-month / multi-epoch sweep (will require multi-hour
 # wall clock per variant).
 aimip_grid: "gaussian"
-n_max: 11            # T11 ≈ 10° (18x36 grid, ncol=648).  Single
-                     # RRTMGP backward at v5 with rad gating costs
-                     # ~21.5 MiB / column (verified 2026-05-18 on
-                     # RTX 5090): T21 -> 50 GiB, T15 -> 24.8 GiB
-                     # (right at the 24 GiB edge), T11 -> ~14 GiB
-                     # (comfortable margin).  Bump to T15 / T21 on a
-                     # >= 30 / >= 60 GiB GPU.
+n_max: 127           # v10: T127 ≈ 0.94° (192x256 grid, ncol=49152).
+                     # Feasible after the per-g-point gradient
+                     # checkpoint refactor in
+                     # ``rrtmgp/rte/two_stream.py`` (fori_loop ->
+                     # scan + ``jax.checkpoint(nothing_saveable)``)
+                     # collapsed the RRTMGP backward from ~1 TB at
+                     # T127 to ~1 MiB / column (~0.5 GiB at T127 L8)
+                     # by recomputing per-g-point intermediates one
+                     # at a time on backward instead of storing all
+                     # 256 LW + 224 SW g-points' activations.
 nlev: 8              # full vertical resolution.
-dt: 1800.0           # 30-minute dycore timestep
+dt: 900.0            # 15-minute dycore timestep.  T127 has dx ~ 156
+                     # km; max wind ~ 100 m/s gives explicit CFL
+                     # ~ 0.58 at dt=900 (vs 1.15 at dt=1800), well
+                     # inside the SSP-RK3 stability envelope.
 
 # ----- Training -----------------------------------------------------
 # Cap epochs at a generous upper bound; early stopping (patience +
@@ -80,19 +86,13 @@ dt: 1800.0           # 30-minute dycore timestep
 # AIMIP guideline of "stop training when no improvement after
 # several months" (one epoch = full pass over the windowed train
 # set, ~tens of model-days of physics integration).
-aimip_n_epochs: 15         # was 3.  Scaled up so the cosine schedule has a
-                           # meaningful budget for the 91 spatial-surface
-                           # coefficients introduced in commit 7f5edfef
-                           # (which barely moved at the previous 3-epoch /
-                           # 60-step budget -- post-train loss matched the
-                           # init loss to within 1e-4).
-aimip_patience: 4          # was 2.  Bumped along with n_epochs so cosine
-                           # decay can finish ramping before early-stop
-                           # fires.
+aimip_n_epochs: 8          # v10: reduced from 15 to keep the T127 single-
+                           # GPU budget tractable (one classical epoch at
+                           # T127 L8 is ~10x more expensive than T11).
+aimip_patience: 3          # tightened along with n_epochs.
 aimip_min_delta: 1.0e-3    # minimum loss improvement to reset patience
 aimip_lr: 3.0e-4
-aimip_warmup: 10           # was 5.  Doubled to give the larger param tree
-                           # (scheme scalars + spatial coefs) a stable warm-up.
+aimip_warmup: 10           # unchanged.
 aimip_weight_decay: 1.0e-5
 aimip_grad_clip: 1.0
 aimip_optimizer: "adamw"  # adamw | adam | muon | muon_partitioned — see ml/training.create_optimizer
@@ -123,14 +123,13 @@ aimip_radiation: "rrtmgp"  # gray | rrtmgp.  RRTMGP is required for AIMIP
                            # trade ~2-3x forward compute for the
                            # activation-storage relief that lets a
                            # 48-step daily rollout fit in 24 GiB.
-aimip_rad_update_interval: 144 # v8: bumped to match the new 3-day
-                               # rollout (n_steps_rollout = 48 * 3).
-                               # One RRTMGP call per loss step keeps
-                               # the backward-pass memory at the
-                               # single-call ceiling (~14 GiB at T11
-                               # L8); a smaller interval would scale
-                               # the backward linearly and break the
-                               # 24 GiB budget.
+aimip_rad_update_interval: 96 # v10: 1 RRTMGP call per 1-day rollout at
+                              # dt=900 (96 steps/day).  Per-g-point
+                              # checkpoint refactor keeps per-call
+                              # memory at ~0.5 GiB regardless of the
+                              # number of calls, but we still amortise
+                              # the rad-solve compute (~30 g-pts each
+                              # scan iteration) by gating to once / day.
 
 # ----- Spatial surface parameters (over land) ----------------------
 # When true, the AIMIP classical variant exposes seven surface and
@@ -172,17 +171,11 @@ aimip_spatial_lr_scale: 5.0
 # Default 1 preserves single-day forecast-skill supervision; 3-5
 # propagates the bias signal more strongly and disambiguates physics
 # knobs that saturate at day-1.  Eval uses the same rollout length.
-aimip_rollout_days: 3   # v8: bumped from 1 day so the bias signal
-                        # propagates through a horizon where surface
-                        # energy-balance perturbations actually
-                        # manifest (~3-5 days for the equivalent
-                        # equilibration).  v7 left classical bias
-                        # frozen at +1.07 K because the 1-day rollout
-                        # let the optimizer correctly conclude that
-                        # moving emissivity does not help within the
-                        # supervised horizon.  3 days is the smallest
-                        # bump that survives the wall budget
-                        # (~3x training wall vs v7).
+aimip_rollout_days: 1   # v10: back to 1 day after v8/v9 saw the
+                        # 3-day rollout destabilise classical (T_bias
+                        # +1.07 -> +4.40 K) and over-stress SFNO.  At
+                        # T127 finer-scale dynamics give the gradient
+                        # more signal even at 1-day horizon.
 
 # ----- Loss (LossConfig fields from training/losses.py) ------------
 # spectral_weight > 0 adds a spectral L^2 penalty on the predicted
@@ -202,10 +195,11 @@ loss:
   # per-cell MSE contribution -- enough to drive bias reduction
   # without dominating the MSE.  Wind / ps weights scaled to keep
   # the ratio to w_bias_T constant.
-  w_bias_T: 300.0
-  w_bias_u: 3.0
-  w_bias_v: 3.0
-  w_bias_ps: 3.0
+  w_bias_T: 100.0  # v10: back to v7's setting after v8/v9's larger
+                   # weights destabilised classical.
+  w_bias_u: 1.0
+  w_bias_v: 1.0
+  w_bias_ps: 1.0
   spectral_weight: 0.3
   level_weighting: "pressure"
   normalize_by_scale: true
