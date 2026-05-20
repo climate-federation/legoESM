@@ -23,6 +23,34 @@ from pathlib import Path
 sys.stdout.reconfigure(line_buffering=True)
 logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
 
+# Early JAX distributed init — must happen before any legoESM/JAX import that
+# triggers XLA backend discovery (jax.numpy import in core/precision.py).
+# When SLURM launches >1 rank, use MPI to exchange hostnames and call
+# jax.distributed.initialize() here so the backend is set up correctly.
+import socket as _socket
+
+_ntasks = int(
+    os.environ.get(
+        "SLURM_NTASKS",
+        os.environ.get("PMI_SIZE", os.environ.get("OMPI_COMM_WORLD_SIZE", "1")),
+    )
+)
+if _ntasks > 1:
+    from mpi4py import MPI as _MPI
+
+    _comm = _MPI.COMM_WORLD
+    _rank, _size = _comm.Get_rank(), _comm.Get_size()
+    _hosts = _comm.allgather(_socket.gethostname())
+    if len(set(_hosts)) > 1:
+        import jax as _jax
+
+        _jax.distributed.initialize(
+            coordinator_address=f"{_hosts[0]}:1234",
+            num_processes=_size,
+            process_id=_rank,
+        )
+del _socket, _ntasks
+
 from legoesm.driver.config import (
     DycoreConfig,
     ExperimentConfig,
