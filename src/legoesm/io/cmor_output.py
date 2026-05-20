@@ -84,7 +84,10 @@ _TABLE_REALM: Dict[str, str] = {
     "Aday": "atmos",   # legacy alias — "day" is the CMIP6 CV value
     "Lmon": "land",
     "Omon": "ocean",
+    "Oyr": "ocean",
+    "Ofx": "ocean",
     "SImon": "seaIce",
+    "SIyr": "seaIce",
     "fx": "atmos",
 }
 
@@ -560,6 +563,70 @@ _OMON_VARIABLES: Dict[str, Dict[str, str]] = {
         "cell_methods": "time: mean area: mean where sea",
         "dimensions": ("time", "depth", "lat", "lon"),
     },
+    # --- Meridional overturning streamfunction (CMIP6 Omon).
+    # ``basin`` is a CMIP6 named-coordinate dimension with three values
+    # (global, atlantic_arctic, indian_pacific); writer expands it as
+    # an integer index axis with attached string coordinate variable.
+    "msftmz": {
+        "standard_name": "ocean_meridional_overturning_mass_streamfunction",
+        "long_name": "Ocean Meridional Overturning Mass Streamfunction",
+        "units": "kg s-1",
+        "cell_methods": "time: mean",
+        "dimensions": ("time", "basin", "depth", "lat"),
+    },
+    "msftyz": {
+        # Mass-stream-function on geometric depth coordinate.
+        "standard_name": "ocean_y_overturning_mass_streamfunction",
+        "long_name": "Ocean Y Overturning Mass Streamfunction",
+        "units": "kg s-1",
+        "cell_methods": "time: mean",
+        "dimensions": ("time", "basin", "depth", "lat"),
+    },
+    # --- Global mean scalars (single-point per timestep).  ``dimensions
+    # = ("time",)`` triggers the CMOR ``zg=0`` integer-axis placeholder
+    # in CFWriter so the field carries the correct CMIP6 metadata.
+    "tosga": {
+        "standard_name": "sea_surface_temperature",
+        "long_name": "Global Average Sea Surface Temperature",
+        "units": "K",
+        "cell_methods": "area: mean where sea time: mean",
+        "dimensions": ("time",),
+    },
+    "sosga": {
+        "standard_name": "sea_surface_salinity",
+        "long_name": "Global Average Sea Surface Salinity",
+        "units": "0.001",
+        "cell_methods": "area: mean where sea time: mean",
+        "dimensions": ("time",),
+    },
+    "thetaoga": {
+        "standard_name": "sea_water_potential_temperature",
+        "long_name": "Global Average Sea Water Potential Temperature",
+        "units": "degC",
+        "cell_methods": "area: mean volume: mean where sea time: mean",
+        "dimensions": ("time",),
+    },
+    "soga": {
+        "standard_name": "sea_water_salinity",
+        "long_name": "Global Mean Sea Water Salinity",
+        "units": "0.001",
+        "cell_methods": "area: mean volume: mean where sea time: mean",
+        "dimensions": ("time",),
+    },
+    "masso": {
+        "standard_name": "sea_water_mass",
+        "long_name": "Sea Water Mass",
+        "units": "kg",
+        "cell_methods": "area: sum where sea time: mean",
+        "dimensions": ("time",),
+    },
+    "volo": {
+        "standard_name": "sea_water_volume",
+        "long_name": "Sea Water Volume",
+        "units": "m3",
+        "cell_methods": "area: sum where sea time: mean",
+        "dimensions": ("time",),
+    },
     "wo": {
         # Sign convention: ``standard_name = upward_sea_water_velocity``
         # — values are POSITIVE UPWARD.  Ocean models that carry
@@ -734,6 +801,68 @@ _FX_VARIABLES: Dict[str, Dict[str, str]] = {
     },
 }
 
+# --- CMIP6 ``Oyr`` (annual ocean) — same variables as ``Omon`` but
+# accumulated to annual means.  Production OMIP-2 + CMIP6 archive
+# expects long centennial integrations to ship ``Oyr`` rather than
+# ``Omon`` for the deep / global-mean diagnostics.  Reuses the
+# ``Omon`` variable specs verbatim — only the table_id differs (which
+# the writer uses to build the filename + DRS path).
+_OYR_VARIABLES: Dict[str, Dict[str, str]] = dict(_OMON_VARIABLES)
+
+
+# --- CMIP6 ``SIyr`` (annual sea ice) — annual means of ``SImon``.
+_SIYR_VARIABLES: Dict[str, Dict[str, str]] = dict(_SIMON_VARIABLES)
+
+
+# --- CMIP6 ``Ofx`` (time-invariant ocean fields).  Bathymetry, cell
+# area, sea-area fraction, and per-layer mass / volume of the
+# reference state.  Written once per run.
+_OFX_VARIABLES: Dict[str, Dict[str, str]] = {
+    "areacello": {
+        "standard_name": "cell_area",
+        "long_name": "Grid-Cell Area for Ocean Variables",
+        "units": "m2",
+        "cell_methods": "area: sum",
+        "dimensions": ("lat", "lon"),
+    },
+    "deptho": {
+        "standard_name": "sea_floor_depth_below_geoid",
+        "long_name": "Sea Floor Depth Below Geoid",
+        "units": "m",
+        "cell_methods": "area: mean where sea",
+        "dimensions": ("lat", "lon"),
+    },
+    "sftof": {
+        "standard_name": "sea_area_fraction",
+        "long_name": "Sea Area Fraction",
+        "units": "%",
+        "cell_methods": "area: mean",
+        "dimensions": ("lat", "lon"),
+    },
+    "masscello": {
+        "standard_name": "sea_water_mass_per_unit_area",
+        "long_name": "Sea Water Mass Per Unit Area",
+        "units": "kg m-2",
+        "cell_methods": "area: mean where sea time: mean",
+        "dimensions": ("depth", "lat", "lon"),
+    },
+    "volcello": {
+        "standard_name": "ocean_volume",
+        "long_name": "Ocean Grid-Cell Volume",
+        "units": "m3",
+        "cell_methods": "area: sum where sea time: mean",
+        "dimensions": ("depth", "lat", "lon"),
+    },
+    "thkcello": {
+        "standard_name": "cell_thickness",
+        "long_name": "Ocean Model Cell Thickness",
+        "units": "m",
+        "cell_methods": "area: mean where sea time: mean",
+        "dimensions": ("depth", "lat", "lon"),
+    },
+}
+
+
 # Combined lookup for convenience. ``Aday`` is a legacy alias for
 # ``day`` (the CMIP6 CV value); keep both so pre-existing tests and
 # callers continue to work.
@@ -741,7 +870,10 @@ CMOR_TABLES: Dict[str, Dict[str, Dict[str, str]]] = {
     "Amon": _AMON_VARIABLES,
     "Lmon": _LMON_VARIABLES,
     "Omon": _OMON_VARIABLES,
+    "Oyr": _OYR_VARIABLES,
+    "Ofx": _OFX_VARIABLES,
     "SImon": _SIMON_VARIABLES,
+    "SIyr": _SIYR_VARIABLES,
     "day": _DAY_VARIABLES,
     "Aday": _DAY_VARIABLES,
     "fx": _FX_VARIABLES,
