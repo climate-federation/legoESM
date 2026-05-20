@@ -7,6 +7,7 @@ checkpointing into a single reusable class.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from datetime import datetime
 from pathlib import Path
@@ -29,6 +30,34 @@ from legoesm.driver.diagnostics import DiagnosticCollector
 from legoesm.io.restart import save_restart, load_restart
 
 logger = logging.getLogger("legoesm.driver")
+
+
+def _meshes_compatible(a, b) -> bool:
+    """Return True when JAX device meshes *a* and *b* match enough to
+    safely share the SPMD halo backend.
+
+    Two meshes are compatible when they have the same axis names in the
+    same order and the same device ids in the same flat layout.  Object
+    identity is the fast path; semantic equality is the fallback so two
+    independently-constructed but equivalent ``Mesh`` objects compare
+    equal (Codex review for issue #275 fix A).
+    """
+    if a is None or b is None:
+        return a is b
+    if a is b:
+        return True
+    try:
+        if tuple(a.axis_names) != tuple(b.axis_names):
+            return False
+        # ``mesh.devices`` is a NumPy array of JAX devices.  Flatten
+        # and compare device ids — identity of the Device objects is
+        # itself a fast check, but ``int(d.id)`` works across both
+        # local and distributed runtimes.
+        ids_a = tuple(int(d.id) for d in a.devices.flat)
+        ids_b = tuple(int(d.id) for d in b.devices.flat)
+        return ids_a == ids_b
+    except Exception:  # noqa: BLE001 — opaque mesh objects must not crash
+        return False
 
 
 class ModelDriver:
@@ -79,6 +108,17 @@ class ModelDriver:
         self._layout = None  # DistributedLayout for scatter/gather
         self._physics_lat = None  # rank-local lat for physics
         self._physics_lon = None  # rank-local lon for physics
+
+        # SPMD halo backend lifecycle.  When the driver activates the
+        # explicit SPMD halo backend for multi-GPU single-node cubed-
+        # sphere runs, it records the previous backend here so that
+        # ``_restore_halo_backend()`` can return the process-global
+        # halo dispatch to its prior state on teardown.  Keeps test
+        # isolation when several drivers are instantiated in one
+        # process and prevents leaked state from affecting later
+        # single-rank runs (issue #275 follow-up).
+        self._spmd_halo_activated: bool = False
+        self._previous_halo_backend: str | None = None
 
         if output_dir is not None:
             self._output_dir = Path(output_dir)
@@ -1036,10 +1076,229 @@ class ModelDriver:
             from legoesm.parallel.mesh import shard_pytree
             self.tracers = shard_pytree(self.tracers, self._device_config)
 
+            # Issue #275 fix A: activate explicit SPMD halo backend so
+            # ``pad_halo_4d`` lowers to ``ppermute`` / ``all_gather``
+            # collectives instead of implicit cross-shard
+            # ``dynamic_slice`` reads.  Without this call, multi-GPU
+            # cubed-sphere AMIP pays an implicit-collective tax that
+            # XLA's latency-hiding scheduler cannot pipeline.
+            #
+            # Activation predicate mirrors ``make_sharded_step``'s
+            # supported set in ``parallel/sharded_dynamics.py``: face-
+            # only sharding (no sub-face tiling), a ``face`` mesh axis,
+            # cubed-sphere grid type, and ``n_devices in (1, 2, 3, 6)``
+            # because ppermute / all_gather kernels assume divisors of
+            # 6 faces.  Other tilings or device counts silently keep
+            # the local backend.
+            self._maybe_activate_spmd_halo_backend()
+
         logger.info(
             f"  Parallel: {self._device_config.n_devices} devices, "
             f"tiling={self._device_config.tiling}"
         )
+
+    def _maybe_activate_spmd_halo_backend(self) -> None:
+        """Activate the explicit SPMD halo backend when supported.
+
+        Unsupported configurations (non-cubed-sphere grids, sub-face
+        tiling, unsupported device counts, no mesh) are skipped
+        silently — they cannot benefit from the SPMD halo collectives
+        in the first place.
+
+        For supported configurations, activation must either succeed
+        or fail loudly.  Both import failures and activation failures
+        raise ``RuntimeError`` unless ``LEGOESM_ALLOW_LOCAL_HALO_FALLBACK=1``
+        is set in the environment, which is the explicit escape hatch
+        for users who want to keep running on the slow local backend
+        (e.g. while debugging a JAX or mpi4jax upgrade).
+
+        Nested activation by a second driver in the same process is
+        rejected when the existing SPMD mesh does not match this
+        driver's mesh — reusing a mismatched mesh would route halo
+        exchange through the wrong device topology.  When the meshes
+        match identically, the second driver is a non-owner of the
+        activation and ``_restore_halo_backend`` is a no-op for it.
+
+        The supported predicate matches the SPMD halo kernels:
+
+        * grid type is ``"cubed_sphere"`` (only grid with SPMD
+          connectivity tables);
+        * a JAX device mesh exists with a ``"face"`` axis;
+        * face-only sharding (``tiling == (1, 1)``) — the ppermute
+          kernel assumes one face per shard;
+        * ``n_devices`` in ``(1, 2, 3, 6)`` — divisors of 6 faces.
+        """
+        cfg = self.config
+        dc = self._device_config
+        if dc is None or dc.mesh is None:
+            return
+        if getattr(cfg.grid, "grid_type", None) != "cubed_sphere":
+            return
+        if "face" not in dc.mesh.axis_names:
+            return
+        if getattr(dc, "tiling", (1, 1)) != (1, 1):
+            return
+        if dc.n_devices not in (1, 2, 3, 6):
+            return
+
+        # Codex review (issue #275): both import and activation must
+        # fail loudly for supported configurations.  Silent fallback
+        # would mask the exact regression this fix is meant to
+        # prevent.  ``LEGOESM_ALLOW_LOCAL_HALO_FALLBACK=1`` opts back
+        # into the legacy warn-and-skip behaviour.
+        allow_fallback = os.environ.get(
+            "LEGOESM_ALLOW_LOCAL_HALO_FALLBACK", "",
+        ).strip().lower() in {"1", "true", "yes", "on"}
+
+        try:
+            from legoesm.grids.halo import get_halo_backend
+            from legoesm.parallel.cubesphere_exchange import (
+                activate_spmd_halo_backend,
+            )
+        except ImportError as exc:
+            if allow_fallback:
+                logger.warning(
+                    "SPMD halo backend unavailable (import failed: %s); "
+                    "LEGOESM_ALLOW_LOCAL_HALO_FALLBACK=1 set, so "
+                    "falling back to local halo backend.  Multi-GPU "
+                    "performance will be degraded.",
+                    exc,
+                )
+                return
+            raise RuntimeError(
+                f"SPMD halo backend imports failed for a supported "
+                f"config (grid=cubed_sphere, n_devices={dc.n_devices}, "
+                f"tiling={dc.tiling}). Install the optional "
+                f"``cubesphere_exchange`` deps or set "
+                f"LEGOESM_ALLOW_LOCAL_HALO_FALLBACK=1 to degrade "
+                f"silently.  Underlying error: {exc}"
+            ) from exc
+
+        # Refuse to overwrite an already-active SPMD activation: a
+        # second driver in the same process must either share the
+        # exact same mesh (non-owner reuse) or wait for the prior
+        # driver to tear down.  See ``_meshes_compatible`` for the
+        # comparison semantics — object identity is the fast path,
+        # axis-names + device-ids is the fallback so two
+        # semantically-equivalent ``Mesh`` objects (e.g. independently
+        # constructed in coupled-model code) still compare equal.
+        #
+        # Known limitation (tracked as a follow-up): when the prior
+        # driver tears down (refcount goes to zero) the global
+        # backend reverts to ``"local"`` while the non-owner second
+        # driver is mid-run, breaking its halo exchange.  Production
+        # use is single-driver-per-process, so this is acceptable
+        # short-term; the proper fix is a refcount inside
+        # ``cubesphere_exchange.py``.
+        previous_backend = get_halo_backend()
+        if previous_backend == "spmd":
+            from legoesm.grids import halo as _halo_mod
+            active_mesh = getattr(_halo_mod, "_spmd_mesh", None)
+            if not _meshes_compatible(active_mesh, dc.mesh):
+                raise RuntimeError(
+                    "SPMD halo backend is already active in this "
+                    "process with a different mesh.  Reusing it for "
+                    "the current driver would route halo exchange "
+                    "through the wrong device topology.  Tear down "
+                    "the prior driver (or call "
+                    "``deactivate_spmd_halo_backend()``) before "
+                    "creating a new driver."
+                )
+            logger.info(
+                "  Parallel: reusing existing SPMD halo backend "
+                "(matching mesh, non-owner driver)"
+            )
+            return
+
+        # Resolution and vertical level count drive the
+        # ppermute / all_gather auto-selection inside
+        # ``activate_spmd_halo_backend``.  ``self.state.T.data`` has
+        # shape ``(6, n, n, nlev)`` for cubed-sphere hydrostatic
+        # states.
+        n_face = int(self.state.T.data.shape[1])
+        nlev = (
+            int(self.state.T.data.shape[-1])
+            if self.state.T.data.ndim >= 4
+            else 1
+        )
+
+        try:
+            activate_spmd_halo_backend(
+                dc.mesh, n=n_face, nlev=nlev,
+            )
+        except Exception as exc:  # noqa: BLE001
+            if allow_fallback:
+                logger.warning(
+                    "SPMD halo activation failed (%s); "
+                    "LEGOESM_ALLOW_LOCAL_HALO_FALLBACK=1 set, so "
+                    "falling back to local halo backend.  Multi-GPU "
+                    "performance will be degraded.",
+                    exc,
+                )
+                return
+            raise RuntimeError(
+                f"SPMD halo activation failed for a supported config "
+                f"(grid=cubed_sphere, n_devices={dc.n_devices}, "
+                f"tiling={dc.tiling}, n={n_face}, nlev={nlev}). "
+                f"Set LEGOESM_ALLOW_LOCAL_HALO_FALLBACK=1 to degrade "
+                f"silently to the local halo backend.  Underlying "
+                f"error: {exc}"
+            ) from exc
+
+        self._spmd_halo_activated = True
+        self._previous_halo_backend = previous_backend
+        logger.info(
+            "  Parallel: SPMD halo backend activated "
+            "(n=%d, nlev=%d, devices=%d)",
+            n_face, nlev, dc.n_devices,
+        )
+
+    def _restore_halo_backend(self) -> None:
+        """Restore the halo backend captured before SPMD activation.
+
+        Always safe to call — no-op when SPMD activation never
+        happened.  Idempotent.  Used by :meth:`_finalize_run`,
+        :meth:`__del__`, and tests that need to reset the
+        process-global halo dispatch between runs.
+        """
+        if not self._spmd_halo_activated:
+            return
+        try:
+            from legoesm.parallel.cubesphere_exchange import (
+                deactivate_spmd_halo_backend,
+            )
+            deactivate_spmd_halo_backend()
+            if self._previous_halo_backend == "mpi":
+                # An MPI driver in the same process would have
+                # already set the MPI backend; ``deactivate`` reverts
+                # to ``"local"`` so reinstate MPI when that was the
+                # prior dispatch.  This is defensive — the typical
+                # case is ``"local"`` → ``"spmd"`` → ``"local"``.
+                from legoesm.grids.halo import (
+                    set_halo_backend, _mpi_topology,
+                )
+                if _mpi_topology is not None:
+                    set_halo_backend("mpi", _mpi_topology)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "SPMD halo deactivation failed (%s); halo backend "
+                "may be left in 'spmd' state for subsequent code in "
+                "this process.",
+                exc,
+            )
+        finally:
+            self._spmd_halo_activated = False
+            self._previous_halo_backend = None
+
+    def __del__(self):
+        # Defensive: never let a leaked driver leave the halo backend
+        # in ``"spmd"`` state.  ``__del__`` is best-effort and may run
+        # during interpreter shutdown when imports fail, so swallow
+        # everything.
+        try:
+            self._restore_halo_backend()
+        except Exception:  # noqa: BLE001
+            pass
 
     def save_checkpoint(self, step: int, day: float) -> None:
         """Save checkpoint to output directory using unified restart API.
@@ -1212,15 +1471,28 @@ class ModelDriver:
             Run status ("COMPLETED" or "BLOWUP at day ...").
         """
         self._segment_callback = segment_callback
-        # MPAS and spectral states use different pytree layouts;
-        # use dedicated simple run loops.
-        if self.config.grid.grid_type == "voronoi":
-            return self._run_mpas(start_step, start_day)
-        if self.config.dycore.discretization == "spectral":
-            return self._run_spectral(start_step, start_day)
-        if compiled:
-            return self._run_compiled(start_step, start_day)
-        return self._run_per_step(start_step, start_day)
+        # Issue #275 fix A: ``try/finally`` here — not inside
+        # ``_finalize_run`` — so that an exception thrown anywhere in
+        # the time loop still triggers SPMD halo backend restoration.
+        # Without this, a Blowup / NaN that propagates out of
+        # ``_run_compiled`` would leave the process-global halo
+        # backend stuck in ``"spmd"`` state and break subsequent
+        # drivers or tests in the same Python process.
+        try:
+            # MPAS and spectral states use different pytree layouts;
+            # use dedicated simple run loops.
+            if self.config.grid.grid_type == "voronoi":
+                return self._run_mpas(start_step, start_day)
+            if self.config.dycore.discretization == "spectral":
+                return self._run_spectral(start_step, start_day)
+            if compiled:
+                return self._run_compiled(start_step, start_day)
+            return self._run_per_step(start_step, start_day)
+        finally:
+            # Idempotent — no-op if activation never happened or if
+            # ``_finalize_run`` already restored the backend on the
+            # success path.
+            self._restore_halo_backend()
 
     # ==================================================================
     # MPAS execution path (uses unified physics pipeline)
@@ -1863,6 +2135,11 @@ class ModelDriver:
 
         if checkpoint_interval > 0:
             self.save_checkpoint(n_steps_total, START_DAY + N_DAYS)
+
+        # Issue #275 fix A lifecycle: restore the halo backend captured
+        # at activation time so subsequent drivers / tests in the same
+        # process see a clean ``"local"`` (or pre-existing MPI) state.
+        self._restore_halo_backend()
 
         return run_status
 
