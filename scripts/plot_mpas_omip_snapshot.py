@@ -90,16 +90,23 @@ def plot_snapshot(restart_path, mesh, z_coord, output_dir=None):
     print(f"  |U|_sfc: [{speed[mask_np, 0].min():.3f}, "
           f"{speed[mask_np, 0].max():.3f}] m/s")
 
-    # Build Delaunay triangulation; mask land triangles
+    # Build Delaunay triangulation; mask bad triangles.
+    # The Delaunay connects ALL points, including ocean cells on
+    # opposite sides of continents.  Three filters:
+    # 1. All 3 vertices must be ocean
+    # 2. No edge spans >90° longitude (projection seam)
+    # 3. No edge longer than ~5° (~500 km) — removes cross-land
+    #    connections that the Delaunay creates at coastlines
     tri = mtri.Triangulation(lon_shifted, lat)
     mask_tri = np.all(mask_np[tri.triangles], axis=1)
-    # Remove triangles whose edges span >90° in longitude — these are
-    # spurious Delaunay connections across the projection seam (at 20°E
-    # for central_longitude=200) that tripcolor renders as stretched
-    # artifacts.
     tri_lons = lon_shifted[tri.triangles]  # (n_tri, 3)
+    tri_lats = lat[tri.triangles]
     seam_tri = (np.max(tri_lons, axis=1) - np.min(tri_lons, axis=1)) > 90.0
-    tri.set_mask(~mask_tri | seam_tri)
+    # Max edge length in degrees (approximate, ignoring cos(lat) for speed)
+    dlon = np.max(tri_lons, axis=1) - np.min(tri_lons, axis=1)
+    dlat = np.max(tri_lats, axis=1) - np.min(tri_lats, axis=1)
+    long_tri = (dlon > 5.0) | (dlat > 5.0)
+    tri.set_mask(~mask_tri | seam_tri | long_tri)
 
     def ocean_field(f):
         return np.where(mask_np, f, np.nan)
