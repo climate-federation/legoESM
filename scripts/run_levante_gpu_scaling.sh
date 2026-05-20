@@ -37,7 +37,7 @@ PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # -------------------------------------------------------------------------
 # Default configuration
 # -------------------------------------------------------------------------
-ACCOUNT="${SLURM_ACCOUNT:-bm1183}"
+ACCOUNT="${SLURM_ACCOUNT:-bd1083}"
 PARTITION="gpu"
 GPUS_PER_NODE=4
 TIME_LIMIT="02:00:00"
@@ -155,9 +155,14 @@ for N_GPUS in "${GPU_LIST[@]}"; do
         N_NODES=1
     fi
 
-    # Determine ntasks-per-node for MPI (1 task per GPU)
+    # Determine ntasks-per-node for MPI (1 task per GPU).
+    # Single-node runs use ntasks=1 so SLURM_NTASKS=1 and JAX does NOT
+    # try to launch a multi-process distributed job from the batch env.
+    # (With ntasks-per-node=N, SLURM_PROCID=0 and SLURM_NTASKS=N are
+    # both set, which tricks jax.distributed.initialize() into waiting
+    # for N-1 processes that never arrive → Deadline Exceeded.)
     if [ "${N_GPUS}" -le "${GPUS_PER_NODE}" ]; then
-        NTASKS_PER_NODE=${N_GPUS}
+        NTASKS_PER_NODE=1
     else
         NTASKS_PER_NODE=${GPUS_PER_NODE}
     fi
@@ -169,7 +174,7 @@ for N_GPUS in "${GPU_LIST[@]}"; do
     # Build the Python command.  Iter 18 fix: pass ``--grid`` (the
     # wrapper previously omitted it, so multi-rank jobs silently
     # ran the default ``spectral`` grid which has no MPI dispatch).
-    PYTHON_CMD=".venv/bin/python scripts/run_levante_gpu_scaling.py"
+    PYTHON_CMD="/work/bd1083/b309178/mambaforge/envs/diffesm/bin/python scripts/run_levante_gpu_scaling.py"
     PYTHON_CMD="${PYTHON_CMD} --grid ${GRID}"
     PYTHON_CMD="${PYTHON_CMD} --mode ${MODE}"
     PYTHON_CMD="${PYTHON_CMD} --precision ${PRECISION}"
@@ -214,12 +219,12 @@ echo "========================================"
 # --- Environment setup ---
 cd ${PROJECT_DIR}
 
-# Load required modules
-module purge
-module load python3 cuda/12
+# Activate conda env (provides CUDA libs on LD_LIBRARY_PATH)
+source /work/bd1083/b309178/mambaforge/etc/profile.d/conda.sh
+conda activate diffesm
 
-# Activate the project venv
-source .venv/bin/activate
+# Make tests/ and src/ importable (baroclinic_wave init lives in tests/)
+export PYTHONPATH="${PROJECT_DIR}:\${PYTHONPATH:-}"
 
 # --- JAX / XLA configuration ---
 # Iter 22/26: ``JAX_PLATFORMS="gpu,cpu"`` is the legacy alias and is

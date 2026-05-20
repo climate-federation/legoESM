@@ -157,6 +157,11 @@ def main(argv: list[str] | None = None) -> int:
                         help="Number of MPI ranks. Defaults to $SLURM_NTASKS when "
                              "--distributed is set.")
 
+    parser.add_argument("--production-profile", action="store_true", default=False,
+                        help="Pass --production-profile to run_amip.py (auto-sets rad-update-steps "
+                             "to floor(3600/dt) and activates SPMD halo backend). "
+                             "When set, --rad-update-steps is NOT forwarded explicitly so "
+                             "run_amip.py can compute the production cadence from --dt.")
     parser.add_argument("--dry-run", action="store_true", default=False,
                         help="Print run_amip.py command and exit without running")
     parser.add_argument("--extra", nargs=argparse.REMAINDER,
@@ -219,7 +224,10 @@ def main(argv: list[str] | None = None) -> int:
         "--experiment", "amip",
         # Radiation
         "--radiation", args.radiation,
-        "--rad-update-steps", str(args.rad_update_steps),
+        # Only forward --rad-update-steps when --production-profile is NOT set;
+        # production-profile auto-computes the 1-hour cadence from --dt.
+        *(["--rad-update-steps", str(args.rad_update_steps)]
+          if not args.production_profile else []),
         # Solar (14-band spectral MPI-M file)
         "--solar-source", "spectral_file",
         "--solar-file", str(_SOLAR_FILE),
@@ -273,6 +281,9 @@ def main(argv: list[str] | None = None) -> int:
     # Output
     if args.output:
         cmd += ["--output", args.output]
+
+    if args.production_profile:
+        cmd.append("--production-profile")
 
     if args.extra:
         cmd += list(args.extra)

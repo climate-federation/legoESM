@@ -14,10 +14,10 @@
 # ---------------------------------------------------------------------------
 # legoESM AMIP run — Levante GPU node
 #
-# Timing reference (C48/L40, dt=150s, RRTMG, 3×A100-80GB):
+# Timing reference (C48/L40, dt=150s, RRTMG, 4×A100-80GB, --production-profile):
 #   JIT first segment:  ~2650s  (warm XLA cache)
-#   Per simulated day:  ~530s   (~9 min/day)
-#   75 days total:      ~42500s (~11.8h) — safe within 12h
+#   Per simulated day:  TBD     (SPMD halo + rad_update_steps=24 vs old 6)
+#   75 days total:      est. <12h — safe within 12h limit
 #
 # Usage:
 #   sbatch scripts/submit_amip_levante.sh
@@ -62,6 +62,9 @@ $PYTHON scripts/run_amip_levante.py \
     --ic-zarr "$IC_ZARR" \
     --diag-days 5 \
     --checkpoint-days 30 \
+    --cmip-output \
+    --monthly-means \
+    --production-profile \
     --output "$OUTPUT"
 
 echo "=============================="
