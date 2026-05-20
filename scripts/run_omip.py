@@ -46,7 +46,7 @@ set_policy(PrecisionPolicy.fp64())
 # Grid types and default resolutions / timesteps
 # ===========================================================================
 
-GRID_TYPES = ["cubed_sphere", "latlon", "mpas", "spectral"]
+GRID_TYPES = ["cubed_sphere", "latlon", "mpas", "spectral", "tripole"]
 
 GRID_DEFAULTS: dict[str, dict] = {
     # cubed_sphere now uses the FC-Gram spectral baroclinic-tendency
@@ -62,6 +62,10 @@ GRID_DEFAULTS: dict[str, dict] = {
     "latlon":       {"resolution": "36x72", "dt": 300.0},
     "mpas":         {"resolution": "ico3", "dt": 300.0},
     "spectral":     {"resolution": "T21", "dt": 300.0},
+    # Tripolar eORCA1 (332×362 mesh). Matches the validated 20-yr
+    # idealized production runner (run_tripole_20yr.py): dt=600s,
+    # 20 levels, ETOPO bathymetry + 80°N cap removal.
+    "tripole":      {"resolution": "eorca1", "dt": 600.0},
 }
 
 ALL_RESULTS: list[dict] = []
@@ -301,6 +305,18 @@ def _parse_resolution(grid_type: str, resolution: str) -> dict:
         return {"level": int(resolution.replace("ico", ""))}
     elif grid_type == "spectral":
         return {"truncation": int(resolution.lstrip("Tt"))}
+    elif grid_type == "tripole":
+        # Resolution maps to a mesh-file. Only eORCA1 supported today.
+        meshes = {
+            "eorca1": "data/grids/eORCA1.2_mesh_mask.nc",
+        }
+        key = resolution.lower()
+        if key not in meshes:
+            raise ValueError(
+                f"Unknown tripole resolution {resolution!r}. "
+                f"Available: {sorted(meshes)}."
+            )
+        return {"mesh_path": meshes[key]}
     raise ValueError(f"Unknown grid type: {grid_type}")
 
 
@@ -684,6 +700,92 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         model = SpectralOceanModel(grid, z_coord, config)
         return grid, z_coord, config, model, "gaussian"
 
+    elif grid_type == "tripole":
+        # eORCA1 tripolar via LatLonCGridOceanModel.  Mirrors the
+        # MPAS JRA55 path: SurfaceForcingConfig(scheme="none") when
+        # forcing_mode=="jra55_do_tropical" so the dynamics-core
+        # external-tau block (ocean_pe_latlon_cgrid.py:1838+) is the
+        # sole consumer of tau / q_net / sw_down from
+        # OceanSurfaceForcing.  Bathymetry + dissipation defaults are
+        # lifted from run_tripole_20yr.py (validated by the 20-yr
+        # idealized production run).
+        from legoesm.grids.tripole import create_tripole_grid
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        from legoesm.ocean.state import LatLonCGridOceanConfig
+        from legoesm.ocean.physics.combined import OceanPhysicsConfig
+        from legoesm.ocean.physics.surface_forcing.config import (
+            SurfaceForcingConfig, RestoringConfig,
+        )
+        from legoesm.ocean.physics.vertical_mixing.config import (
+            VerticalMixingConfig, KPPConfig,
+        )
+        from legoesm.ocean.physics.convection.config import (
+            OceanConvectionConfig, EnhancedDiffusionConfig,
+        )
+        from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
+        from legoesm.ocean.physics.lateral_mixing.config import (
+            LateralMixingConfig, GMRediConfig, VisbeckConfig,
+        )
+
+        geom = create_tripole_grid(params["mesh_path"])
+
+        if forcing_mode == "jra55_do_tropical":
+            sf_config = SurfaceForcingConfig(scheme="none")
+        else:
+            sf_config = SurfaceForcingConfig(
+                scheme="restoring",
+                restoring=RestoringConfig(
+                    tau_T=2592000.0, tau_S=2592000.0,
+                    T_star_eq=25.0, T_star_pole=0.0,
+                    S_star=35.0, T_profile="cosine",
+                ),
+            )
+
+        physics = OceanPhysicsConfig(
+            surface_forcing=sf_config,
+            vertical_mixing=VerticalMixingConfig(
+                scheme="kpp",
+                kpp=KPPConfig(K_conv=1.0),
+            ),
+            lateral_mixing=LateralMixingConfig(scheme="none"),
+            bottom_drag=BottomDragConfig(scheme="none"),
+            convection=OceanConvectionConfig(
+                scheme="enhanced_diffusion",
+                enhanced_diffusion=EnhancedDiffusionConfig(K_conv=1.0),
+            ),
+            shortwave_penetration=None,
+        )
+
+        config = LatLonCGridOceanConfig(
+            A_h=1.0e5,
+            A_v=1.0e-4,
+            K_v=1.0e-5,
+            B_h=0.0,
+            C_smag_lap=0.33,
+            n_barotropic_substeps=30,
+            barotropic_solver="implicit_cn",
+            barotropic_implicit_pcg_tol=1e-10,
+            barotropic_implicit_pcg_maxiter=300,
+            pgf_scheme="adcroft",
+            implicit_vertical_mixing=True,
+            tracer_advection="tvd",
+            bottom_drag_r=1e-3,
+            bottom_drag_bbl_thickness=100.0,
+            bottom_drag_bg_velocity=0.1,
+            freshwater_closure="virtual_salt_flux",
+            gm_redi=GMRediConfig(
+                kappa_GM=600.0, kappa_Redi=600.0,
+                S_max=0.005,
+                visbeck=VisbeckConfig(enabled=False),
+                slope_scheme="centered",
+            ),
+            physics=physics,
+        )
+        model = LatLonCGridOceanModel(geom, z_coord, config)
+        return geom, z_coord, config, model, "tripole"
+
     raise ValueError(f"Unknown grid type: {grid_type}")
 
 
@@ -735,6 +837,16 @@ def _init_rest_state(grid_type, grid, z_coord, H_max,
     elif grid_type == "spectral":
         from legoesm.ocean.dynamics.spectral_ocean_pe import rest_state_spectral_ocean
         return rest_state_spectral_ocean(grid, z_coord, H_max=H_max)
+    elif grid_type == "tripole":
+        from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+        # Reuse the lat-lon C-grid rest-state (tripole shares the same
+        # geometry struct + state layout). H_bathy / land_mask come
+        # from ETOPO post-init, same as MPAS.
+        return rest_state_latlon_cgrid_ocean(
+            grid, z_coord, H_max=H_max,
+            H_bathy_override=H_bathy,
+            land_mask_override=land_mask,
+        )
     raise ValueError(f"Unknown grid type: {grid_type}")
 
 
@@ -875,7 +987,7 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
         the corresponding feature is disabled regardless of the
         ``--jra55-no-...`` flags.
     """
-    _supported_jra55_grids = ("latlon", "mpas")
+    _supported_jra55_grids = ("latlon", "mpas", "tripole")
     if grid_type not in _supported_jra55_grids:
         raise ValueError(
             "--forcing-mode jra55_do_tropical currently supports only "
@@ -897,7 +1009,8 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
     cache_n_lat = int(ds.sizes["lat"])
     cache_n_lon = int(ds.sizes["lon"])
 
-    # For MPAS we need regrid weights; for lat-lon we validate grid match.
+    # For MPAS / tripole we need regrid weights; for lat-lon we validate
+    # grid match (cache is pre-built at lat-lon resolution).
     regrid_weights = None
     if grid_type == "mpas":
         from legoesm.grids.regridding import compute_latlon_to_voronoi_weights
@@ -913,6 +1026,30 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
         # lat/lon for zenith angle (1-D, radians, on MPAS cells)
         lat_2d = jnp.asarray(tgt_lat_rad)
         lon_2d = jnp.asarray(tgt_lon_rad)
+    elif grid_type == "tripole":
+        # Same KDTree IDW path as MPAS, but the target is a 2-D
+        # curvilinear array (lat_T, lon_T).  Flatten for the regrid
+        # weight builder, then reshape the output in _jra55_step (the
+        # latlon-cgrid model consumes 2-D surface fields).
+        from legoesm.grids.regridding import compute_latlon_to_voronoi_weights
+        src_lat_rad = np.deg2rad(np.asarray(ds["lat"]))
+        src_lon_rad = np.deg2rad(np.asarray(ds["lon"]))
+        tgt_lat_rad_2d = np.asarray(grid.lat_T)
+        tgt_lon_rad_2d = np.asarray(grid.lon_T)
+        n_lat = int(tgt_lat_rad_2d.shape[0])
+        n_lon = int(tgt_lat_rad_2d.shape[1])
+        regrid_weights = compute_latlon_to_voronoi_weights(
+            src_lat_rad, src_lon_rad,
+            tgt_lat_rad_2d.ravel(), tgt_lon_rad_2d.ravel(),
+        )
+        # Mark the regrid output as 2-D so _jra55_step can reshape.
+        regrid_weights = regrid_weights._replace(
+            target_shape=(n_lat, n_lon),
+        )
+        print(f"  JRA55 regrid: {cache_n_lat}×{cache_n_lon} lat-lon → "
+              f"{n_lat}×{n_lon} tripole T-points (k=4 IDW)")
+        lat_2d = jnp.asarray(tgt_lat_rad_2d)
+        lon_2d = jnp.asarray(tgt_lon_rad_2d)
     else:
         # lat-lon: validate cache matches model grid
         model_n_lat = int(grid.lat.shape[0])
@@ -1884,7 +2021,7 @@ def _extract_scalars(state, grid_type, grid, z_coord):
         v_raw = np.asarray(state.v.data) if hasattr(state, 'v') else np.zeros_like(u_raw)
         # C-grid lat-lon: u is (nlat, nlon+1, nlev), v is (nlat+1, nlon, nlev).
         # Interpolate staggered velocities to cell centers before computing speed.
-        if grid_type == "latlon" and u_raw.shape[1] != T.shape[1]:
+        if grid_type in ("latlon", "tripole") and u_raw.shape[1] != T.shape[1]:
             u_c = 0.5 * (u_raw[:, :-1] + u_raw[:, 1:])
             v_c = 0.5 * (v_raw[:-1, :] + v_raw[1:, :])
         else:
@@ -2744,12 +2881,14 @@ def run_omip_single(grid_type: str, args) -> dict:
     H_bathy_init = None
     land_mask_init = None
     bathy_cfg = None
-    if args.bathymetry is not None and grid_type != "mpas":
+    if args.bathymetry is not None and grid_type not in ("mpas", "tripole"):
         # MPAS bathymetry is handled after _init_rest_state via the
         # PR 261 recipe (load_bathymetry_mpas + north cap + snap +
-        # partial cells). The generic path here has lat-lon-specific
-        # post-processing (equatorial smoothing, passage widening) that
-        # doesn't apply to unstructured meshes.
+        # partial cells). Tripole follows the same post-init pattern,
+        # with init_ocean_bathymetry on the curvilinear geom. The
+        # generic path here has lat-lon-specific post-processing
+        # (equatorial smoothing, passage widening) that doesn't apply
+        # to MPAS or tripole.
         from legoesm.ocean.bathymetry import BathymetryConfig, init_ocean_bathymetry
         bathy_cfg = BathymetryConfig(
             source="file",
@@ -3136,6 +3275,74 @@ def run_omip_single(grid_type: str, args) -> dict:
         print(f"  MPAS ETOPO: {n_ocean}/{grid.nCells} ocean cells "
               f"({cap_str}, snap={snap_frac}, "
               f"smooth={args.smoothing_passes})")
+
+    # Tripole post-init for ETOPO bathymetry — mirrors the validated
+    # run_tripole_20yr.py recipe (H_min=200, south_cap=-75, snap+partial
+    # cells). Mandatory whenever JRA55 forcing is used on tripole: the
+    # bipolar-fold cells have dx_v floor=1000m and would otherwise be
+    # treated as ocean, violating CFL within ~3 steps under JRA55 wind.
+    if grid_type == "tripole" and args.bathymetry is not None:
+        from legoesm.ocean.bathymetry import BathymetryConfig, init_ocean_bathymetry
+        from legoesm.ocean.vertical import create_partial_cell_coordinate
+        from legoesm.ocean.init_latlon_cgrid import (
+            rest_state_latlon_cgrid_ocean,
+        )
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+
+        tri_bathy_cfg = BathymetryConfig(
+            source="file", path=args.bathymetry,
+            H_max=args.H_max, H_min=args.H_min,
+            smoothing_passes=args.smoothing_passes,
+            r_factor_max=args.r_factor_max,
+            depth_is_negative=True,
+            north_cap_lat=None,
+            south_cap_lat=args.south_cap_lat,
+        )
+        H_raw, mask_raw = init_ocean_bathymetry(grid, tri_bathy_cfg)
+        H_raw = jnp.asarray(H_raw, dtype=jnp.float64)
+        mask_raw = jnp.asarray(mask_raw, dtype=jnp.float64)
+
+        # Snap thin partial cells to the nearest interface (30% threshold).
+        snap_frac = 0.30
+        abs_z_half = jnp.abs(z_coord.z_half_ref)
+        nlev = z_coord.n_levels
+        Hf = H_raw.ravel()
+        n_above = jnp.sum(abs_z_half[None, :] < Hf[:, None], axis=1)
+        bottom_level = jnp.clip(n_above - 1, 0, nlev - 1)
+        dzb = z_coord.dz_ref[bottom_level]
+        partial_thick = Hf - abs_z_half[bottom_level]
+        frac = partial_thick / jnp.maximum(dzb, 1e-10)
+        z_upper = abs_z_half[bottom_level]
+        z_lower = abs_z_half[jnp.minimum(bottom_level + 1, nlev)]
+        Hs = jnp.where(Hf - z_upper < z_lower - Hf, z_upper, z_lower)
+        needs_snap = (frac < snap_frac) & (frac > 0) & (Hf > 0)
+        H_snap = jnp.where(needs_snap, Hs, Hf)
+        H_snap = jnp.where(H_snap <= 0, 0.0, H_snap).reshape(H_raw.shape)
+        mask_snap = jnp.where(H_snap > 0, mask_raw, 0.0)
+
+        # Partial-cell coordinate + model rebuild (the eta-stretched
+        # operators expect this z_coord to match the bathymetry).
+        pc_coord = create_partial_cell_coordinate(z_coord, H_snap)
+        z_coord = pc_coord
+        model = LatLonCGridOceanModel(grid, z_coord, config)
+
+        # Rebuild the rest state with the real bathymetry + mask.
+        # rest_state_latlon_cgrid_ocean enforces u_mask/v_mask
+        # consistency with land_mask atomically.
+        state = rest_state_latlon_cgrid_ocean(
+            grid, z_coord, H_max=args.H_max,
+            T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
+            H_bathy_override=H_snap,
+            land_mask_override=mask_snap,
+        )
+
+        n_ocean = int(jnp.sum(mask_snap > 0.5))
+        n_total = int(np.prod(np.asarray(mask_snap).shape))
+        print(f"  Tripole ETOPO: {n_ocean}/{n_total} ocean cells "
+              f"(H_min={args.H_min}m, south_cap={args.south_cap_lat}°, "
+              f"snap={snap_frac}, smooth={args.smoothing_passes})")
 
     if args.woa_init and T_woa is not None and S_woa is not None:
         # Replace rest-state T/S with WOA18 climatology.
