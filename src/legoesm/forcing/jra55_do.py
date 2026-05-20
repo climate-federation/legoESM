@@ -398,10 +398,27 @@ def _ascending_lat(da, lat_name: str):
     return da
 
 
-def _grid_edges_from_centers(centers_deg: np.ndarray) -> np.ndarray:
+def _grid_edges_from_centers(
+    centers_deg: np.ndarray,
+    periodic: bool = False,
+) -> np.ndarray:
     """Edges of a regular lat-lon grid given cell centres in degrees.
 
     Assumes uniform spacing.  Returns edges in **radians**.
+
+    Parameters
+    ----------
+    centers_deg : 1-D array
+        Cell centre coordinates in degrees.
+    periodic : bool
+        If True, force the last edge to be exactly ``first_edge + 360``
+        so the grid spans the full longitude circle.  This prevents
+        the conservative regridding from under-weighting the last cell
+        when the source grid's last centre is slightly less than
+        ``360 - dx/2`` (e.g. JRA55 TL319 at 640 points has its last
+        centre at 359.4375° and an inferred last edge at 359.72° —
+        0.28° short of 360°, causing a ~28% weight deficit on the
+        target grid's last column).
     """
     if centers_deg.size < 2:
         raise ValueError("Need at least 2 centres to infer edges")
@@ -409,7 +426,23 @@ def _grid_edges_from_centers(centers_deg: np.ndarray) -> np.ndarray:
     edges_deg = np.empty(centers_deg.size + 1, dtype=np.float64)
     edges_deg[:-1] = centers_deg - dx / 2.0
     edges_deg[-1] = centers_deg[-1] + dx / 2.0
+    if periodic:
+        edges_deg[-1] = edges_deg[0] + 360.0
     return np.deg2rad(edges_deg)
+
+
+def _lon_wrap_dataarray(da, lon_name: str):
+    """Append the first longitude column at the end as a ghost wrap column.
+
+    This ensures conservative regridding has source coverage across the
+    periodic boundary.  The ghost column's coordinate is first_lon + 360.
+    """
+    import xarray as xr
+    first_col = da.isel({lon_name: 0})
+    ghost_lon = float(da[lon_name][0]) + 360.0
+    ghost_col = first_col.assign_coords({lon_name: ghost_lon})
+    ghost_col = ghost_col.expand_dims(lon_name)
+    return xr.concat([da, ghost_col], dim=lon_name)
 
 
 # ---------------------------------------------------------------------------
@@ -477,6 +510,23 @@ def build_jra55_cache(
     src_lat_edges = _grid_edges_from_centers(sample_da[lat_name].values)
     src_lon_edges = _grid_edges_from_centers(sample_da[lon_name].values)
 
+    # Periodic longitude wrap: the source grid may not cover the full
+    # [0°, 360°] range of the target (e.g. JRA55 TL319 at 640 points
+    # has edges [-0.28°, 359.72°] which leaves a 0.28° gap at the
+    # wrap point).  Fix by appending one ghost column at +360°.
+    # The ghost column's data will be the first column's data (wrap).
+    src_lon_edges_deg = np.degrees(src_lon_edges)
+    target_lon_max = np.degrees(config.target_lon_edges[-1])
+    if src_lon_edges_deg[-1] < target_lon_max - 1e-6:
+        # Add a ghost cell that wraps the first source cell to the end.
+        # Ghost edge = second_edge + 360 (so the ghost cell has the
+        # same width as the first cell).
+        ghost_edge_deg = src_lon_edges_deg[1] + 360.0
+        src_lon_edges = np.append(src_lon_edges, np.deg2rad(ghost_edge_deg))
+        _lon_wrap_pad = True
+    else:
+        _lon_wrap_pad = False
+
     weights = compute_overlap_weights(
         src_lat_edges, src_lon_edges,
         config.target_lat_edges, config.target_lon_edges,
@@ -495,8 +545,13 @@ def build_jra55_cache(
             )
         if progress:
             print(f"[jra55_do] regridding {var} ...", flush=True)
+        da_var = ds[var]
+        # If we added a ghost longitude column, pad the DataArray so
+        # the source shape matches the extended weights.
+        if _lon_wrap_pad:
+            da_var = _lon_wrap_dataarray(da_var, lon_name)
         out_arr = _regrid_and_align_variable(
-            ds[var], var, weights, keep_mask, cache_index,
+            da_var, var, weights, keep_mask, cache_index,
             n_records, n_dst_lat, n_dst_lon,
         )
         _check_plausible(var, out_arr)
@@ -1006,3 +1061,34 @@ def jra55_to_freshwater(
         runoff=slice.friver,
         ice_fw=jnp.zeros_like(slice.prra),
     )
+
+
+def regrid_jra55_slice(
+    slc: JRA55Slice,
+    regrid_weights,
+) -> JRA55Slice:
+    """Regrid all fields of a :class:`JRA55Slice` to a new grid.
+
+    Uses precomputed :class:`~legoesm.grids.regridding.RegridWeights`
+    (e.g. from :func:`~legoesm.grids.regridding.compute_latlon_to_voronoi_weights`)
+    to interpolate every 2-D field in *slc* from the cache lat-lon grid
+    onto the target mesh (e.g. MPAS Voronoi cell centres).
+
+    Parameters
+    ----------
+    slc : JRA55Slice
+        Source slice on the cache grid.
+    regrid_weights : RegridWeights
+        Precomputed interpolation weights.
+
+    Returns
+    -------
+    JRA55Slice
+        Slice with all fields on the target grid.
+    """
+    from legoesm.grids.regridding import regrid_scalar
+
+    return JRA55Slice(**{
+        name: regrid_scalar(getattr(slc, name), regrid_weights)
+        for name in JRA55Slice._fields
+    })

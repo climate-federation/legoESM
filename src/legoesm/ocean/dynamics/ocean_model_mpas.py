@@ -249,8 +249,7 @@ class MPASOceanModel:
             sponge=sponge,
         )
 
-    @partial(jax.jit, static_argnums=(0,))
-    def step(
+    def _step_impl(
         self,
         state: MPASOceanState,
         dt: float,
@@ -258,7 +257,11 @@ class MPASOceanModel:
         surface_forcing=None,
         sponge=None,
     ) -> MPASOceanState:
-        """Advance one full timestep (baroclinic + barotropic).
+        """Core step logic — no JIT wrapper.
+
+        Use this directly inside an outer ``@jax.jit`` context (e.g.
+        ``lax.scan``) to avoid nested JIT boundaries.  For standalone
+        calls, use :meth:`step` which adds the ``@jax.jit`` decorator.
 
         Parameters
         ----------
@@ -548,6 +551,17 @@ class MPASOceanModel:
         if freshwater is not None and config.freshwater_closure != "none":
             F_slow_eta = freshwater_eta_tendency(freshwater, config.rho_0) * mask
 
+            # Global freshwater normalization: subtract the area-weighted
+            # mean so the global integral of F_slow_eta is exactly zero.
+            # This prevents global volume drift from unbalanced P-E+R
+            # (standard OMIP practice for runs without sea ice).
+            if config.normalize_freshwater:
+                area = mesh.areaCell
+                ocean_area = jnp.sum(area * mask)
+                F_mean = jnp.sum(F_slow_eta * area) / jnp.maximum(
+                    ocean_area, 1e-10)
+                F_slow_eta = (F_slow_eta - F_mean * mask)
+
         F_slow_u_data = tend.F_slow_u.data if tend.F_slow_u is not None else None
 
         if config.barotropic_solver == "implicit_cn":
@@ -704,8 +718,13 @@ class MPASOceanModel:
 
         # Final state construction with explicit land masking
         T_final = T_corrected
-        S_final = S_corrected
-        
+        # Clamp salinity >= 0.  The virtual_salt_flux closure uses a
+        # constant S_ref (not local S) so it can overshoot to negative
+        # values in shallow cells with large freshwater input (e.g.
+        # Hudson Bay).  The real_freshwater closure would avoid this
+        # but virtual_salt_flux is the standard Boussinesq approach.
+        S_final = jnp.maximum(S_corrected, 0.0)
+
         state_new = MPASOceanState(
             u=state.u.replace(data=u_3d_new),
             T=state.T.replace(data=T_final),
@@ -759,6 +778,25 @@ class MPASOceanModel:
             )
 
         return cast_pytree(state_new, None, "storage")
+
+    @partial(jax.jit, static_argnums=(0,))
+    def step(
+        self,
+        state: MPASOceanState,
+        dt: float,
+        freshwater: FreshwaterForcing | None = None,
+        surface_forcing=None,
+        sponge=None,
+    ) -> MPASOceanState:
+        """JIT-compiled wrapper around :meth:`_step_impl`.
+
+        For use inside an outer JIT context (e.g. ``lax.scan``), call
+        ``_step_impl`` directly to avoid nested JIT boundaries.
+        """
+        return self._step_impl(
+            state, dt, freshwater=freshwater,
+            surface_forcing=surface_forcing, sponge=sponge,
+        )
 
     def step_checked(
         self,

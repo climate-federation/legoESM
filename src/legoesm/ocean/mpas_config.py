@@ -246,6 +246,16 @@ class MPASOceanConfig(NamedTuple):
     barotropic_implicit_pcg_tol: float = 1.0e-10
     barotropic_implicit_pcg_maxiter: int = 200
     freshwater_closure: str = "virtual_salt_flux"
+    normalize_freshwater: bool = False  # When True, subtract the global
+                                        # area-weighted mean freshwater flux
+                                        # at each step so that net deta/dt
+                                        # integrates to zero globally.
+                                        # Standard OMIP practice for runs
+                                        # without a sea-ice model where the
+                                        # P-E+R budget doesn't close.
+                                        # Preserves the spatial pattern of
+                                        # forcing; only removes the global
+                                        # imbalance.
     S_ref: float = 35.0
     physics: object = None  # OceanPhysicsConfig or None
     eos: str = "wright"    # "wright" or "linear"
