@@ -28,12 +28,29 @@ from __future__ import annotations
 from .jra55_do import OceanForcing, load_jra55_do, synthetic_ocean_forcing
 from .core2 import load_core2_nyf
 from .woa import load_woa_sst, synthetic_woa_sst
+from .woa_sss import load_woa_sss, synthetic_woa_sss
+from .sss_restoring import (
+    SSSRestoringConfig,
+    RegionMaskSpec,
+    DEFAULT_OMIP2_REGIONS,
+    build_region_masks,
+    compute_sss_restoring_flux,
+    interp_woa_sss_to_grid,
+)
 
 __all__ = [
     "OceanForcing",
     "load_jra55_do",
     "load_core2_nyf",
     "load_woa_sst",
+    "load_woa_sss",
     "synthetic_ocean_forcing",
     "synthetic_woa_sst",
+    "synthetic_woa_sss",
+    "SSSRestoringConfig",
+    "RegionMaskSpec",
+    "DEFAULT_OMIP2_REGIONS",
+    "build_region_masks",
+    "compute_sss_restoring_flux",
+    "interp_woa_sss_to_grid",
 ]
