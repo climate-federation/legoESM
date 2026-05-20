@@ -64,21 +64,21 @@ n_eval_days:  8    # sum of eval_windows[*][2]
 # fuller multi-month / multi-epoch sweep (will require multi-hour
 # wall clock per variant).
 aimip_grid: "gaussian"
-n_max: 127           # v10: T127 ≈ 0.94° (192x256 grid, ncol=49152).
-                     # Feasible after the per-g-point gradient
-                     # checkpoint refactor in
-                     # ``rrtmgp/rte/two_stream.py`` (fori_loop ->
-                     # scan + ``jax.checkpoint(nothing_saveable)``)
-                     # collapsed the RRTMGP backward from ~1 TB at
-                     # T127 to ~1 MiB / column (~0.5 GiB at T127 L8)
-                     # by recomputing per-g-point intermediates one
-                     # at a time on backward instead of storing all
-                     # 256 LW + 224 SW g-points' activations.
+n_max: 63            # v10: T63 ≈ 1.9° (96x128 grid, ncol=12288).
+                     # Per-g-point checkpoint refactor in
+                     # ``rrtmgp/rte/two_stream.py`` brought RRTMGP
+                     # backward down to ~0.1 MiB/col, but T127 still
+                     # OOM'd at 20.6 GiB single allocation -- root
+                     # cause is the dycore's spectral-PE backward
+                     # (SH analysis Jacobian materialises
+                     # ``n_lat * n_lon * n_sh * nlev`` ~ 320 GB at
+                     # T127).  T63 keeps n_sh ~ 2080 so the same
+                     # intermediate drops to ~5 GB and the run fits.
+                     # T127 needs a dycore-level gradient checkpoint
+                     # (separate refactor).
 nlev: 8              # full vertical resolution.
-dt: 900.0            # 15-minute dycore timestep.  T127 has dx ~ 156
-                     # km; max wind ~ 100 m/s gives explicit CFL
-                     # ~ 0.58 at dt=900 (vs 1.15 at dt=1800), well
-                     # inside the SSP-RK3 stability envelope.
+dt: 1200.0           # 20-minute dycore timestep.  T63 dx ~ 310 km;
+                     # wind 100 m/s gives CFL ~ 0.39 at dt=1200.
 
 # ----- Training -----------------------------------------------------
 # Cap epochs at a generous upper bound; early stopping (patience +
@@ -123,13 +123,8 @@ aimip_radiation: "rrtmgp"  # gray | rrtmgp.  RRTMGP is required for AIMIP
                            # trade ~2-3x forward compute for the
                            # activation-storage relief that lets a
                            # 48-step daily rollout fit in 24 GiB.
-aimip_rad_update_interval: 96 # v10: 1 RRTMGP call per 1-day rollout at
-                              # dt=900 (96 steps/day).  Per-g-point
-                              # checkpoint refactor keeps per-call
-                              # memory at ~0.5 GiB regardless of the
-                              # number of calls, but we still amortise
-                              # the rad-solve compute (~30 g-pts each
-                              # scan iteration) by gating to once / day.
+aimip_rad_update_interval: 72 # v10 T63: 1 RRTMGP call per 1-day rollout
+                              # at dt=1200 (72 steps/day).
 
 # ----- Spatial surface parameters (over land) ----------------------
 # When true, the AIMIP classical variant exposes seven surface and
