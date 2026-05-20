@@ -1722,8 +1722,21 @@ def stress_divergence_cgrid(
         area_v_dual = jnp.maximum(area_v_dual, 1e-30)
 
     if normalize:
-        tend_u = tend_u / _bcast(area_u_dual)
-        tend_v = tend_v / _bcast(area_v_dual)
+        # _bcast appends a level axis only when stress_h is 3D. For
+        # the non-tripolar branch area_u_dual / area_v_dual are 1D
+        # (n_lat,) — broadcasting (n_lat, n_lon+1, n_lev) /
+        # (n_lat, 1) is illegal; we need (n_lat, 1, 1). lat_bcast
+        # below appends the right number of trailing newaxes.
+        _lat_bcast = (slice(None),) + (jnp.newaxis,) * (tend_u.ndim - 1)
+        if jnp.asarray(area_u_dual).ndim == 1:
+            tend_u = tend_u / area_u_dual[_lat_bcast]
+        else:
+            tend_u = tend_u / _bcast(area_u_dual)
+        _lat_bcast_v = (slice(None),) + (jnp.newaxis,) * (tend_v.ndim - 1)
+        if jnp.asarray(area_v_dual).ndim == 1:
+            tend_v = tend_v / area_v_dual[_lat_bcast_v]
+        else:
+            tend_v = tend_v / _bcast(area_v_dual)
 
     if u_mask is not None:
         um = u_mask[..., jnp.newaxis] if is_3d and u_mask.ndim == 2 else u_mask

@@ -26,6 +26,25 @@ import jax.numpy as jnp
 from legoesm import constants
 
 
+def _exact_uniform_cell_area_lat(
+    radius, lat_centers, dlat, dlon, n_lon
+):
+    """Exact spherical-cap cell area on a uniform-dlat lat-lon grid.
+
+    area[j, :] = R² dλ (sin(φ_face[j+1]) - sin(φ_face[j]))
+              = 2 R² dλ sin(dφ/2) cos(φ_center[j])
+
+    Midpoint formula `R² dφ dλ cos(φ)` overestimates total area by
+    factor `dφ / (2 sin(dφ/2)) ≈ 1 + dφ²/24` — 79 ppm at n_lat=72,
+    317 ppm at n_lat=36 — the dominant source of cross-grid total-
+    area inconsistency on uniform lat-lon. Exact form sums to 4πR²
+    for global cell-centered grids.
+    """
+    cos_lat = jnp.maximum(jnp.cos(lat_centers), 1e-10)
+    area_lat = 2.0 * radius**2 * dlon * jnp.sin(0.5 * dlat) * cos_lat
+    return area_lat[:, None] * jnp.ones((1, n_lon))
+
+
 class LatLonGrid(NamedTuple):
     """Latitude-longitude horizontal grid.
 
@@ -172,8 +191,8 @@ def create_latlon_grid(
     # uniformly.
     dy = radius * 2.0 * dlat * jnp.ones((n_lat,))
 
-    # Cell area
-    area = radius**2 * dlat * dlon * cos_lat[:, None] * jnp.ones((1, n_lon))
+    # Cell area: exact spherical cap (sums to 4πR² for global grid)
+    area = _exact_uniform_cell_area_lat(radius, lat, dlat, dlon, n_lon)
     total_area = jnp.sum(area)
 
     _c = lambda a: a.astype(dtype) if hasattr(a, 'astype') else a
@@ -306,7 +325,7 @@ def create_regional_latlon_grid(
     # values, but stored as an array for API uniformity with Mercator).
     dy = radius * 2.0 * dlat * jnp.ones((ny,))
 
-    area = radius**2 * dlat * dlon * cos_lat[:, None] * jnp.ones((1, nx))
+    area = _exact_uniform_cell_area_lat(radius, lat, dlat, dlon, nx)
     total_area = jnp.sum(area)
 
     # Wall mask: walls at N/S always; E/W walls only for closed basin
@@ -884,6 +903,7 @@ def create_latlon_geometry(
             dtype = jnp.float32
 
     # ------- 1D coordinate arrays (native precision) -------
+    _is_variable_dlat = False
     if lat_1d is None:
         dlat = jnp.pi / n_lat
         lat_1d = jnp.linspace(
@@ -951,8 +971,8 @@ def create_latlon_geometry(
         area_legacy = area_lat_1d[:, None] * jnp.ones((1, n_lon))
     else:
         dlat_1d = None  # uniform — use scalar dlat everywhere
-        area_legacy = (
-            radius**2 * dlat * dlon * cos_lat_1d[:, None] * jnp.ones((1, n_lon))
+        area_legacy = _exact_uniform_cell_area_lat(
+            radius, lat_1d, dlat, dlon, n_lon
         )
 
     total_area = jnp.sum(area_legacy)
