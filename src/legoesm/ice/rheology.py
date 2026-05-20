@@ -46,6 +46,12 @@ import numpy as np
 from legoesm.core.field import Field
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.halo import pad_halo, pad_halo_vector
+from legoesm.grids.halo_latlon import pad_halo_vector_latlon
+from legoesm.grids.latlon import LatLonGrid
+
+
+def _is_latlon_grid(grid) -> bool:
+    return isinstance(grid, LatLonGrid)
 
 
 # ==============================================================================
@@ -85,50 +91,98 @@ def ice_strength(
 # Strain rates
 # ==============================================================================
 
-def strain_rates(
+def _strain_rates_cubed_sphere(
     u_ice: jnp.ndarray,
     v_ice: jnp.ndarray,
     grid: CubedSphereGrid,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Compute the symmetric strain rate tensor on the cubed sphere.
-
-    eps_11 = du/dx
-    eps_22 = dv/dy
-    eps_12 = 0.5 * (du/dy + dv/dx)
-
-    Uses centered finite differences with proper vector halo exchange
-    at face boundaries.
-
-    Parameters
-    ----------
-    u_ice, v_ice : array (6, n, n)
-        Ice velocity components [m/s].
-    grid : CubedSphereGrid
-
-    Returns
-    -------
-    eps_11, eps_22, eps_12 : arrays (6, n, n)
-        Strain rate tensor components [1/s].
-    """
-    # Vector halo exchange for correct cross-face rotation
+    """Strain rate tensor on the cubed sphere (centered FD, halo-2 vector exchange)."""
     u_pad, v_pad = pad_halo_vector(
         u_ice, v_ice,
         grid.cos_angle, grid.sin_angle,
         grid.cos_angle_padded, grid.sin_angle_padded,
         interp_offsets=grid.halo_interp_offsets,
     )
-
-    # Centered differences
     du_dx = (u_pad[:, 2:, 1:-1] - u_pad[:, :-2, 1:-1]) / grid.dx
     du_dy = (u_pad[:, 1:-1, 2:] - u_pad[:, 1:-1, :-2]) / grid.dy
     dv_dx = (v_pad[:, 2:, 1:-1] - v_pad[:, :-2, 1:-1]) / grid.dx
     dv_dy = (v_pad[:, 1:-1, 2:] - v_pad[:, 1:-1, :-2]) / grid.dy
+    eps_11 = du_dx
+    eps_22 = dv_dy
+    eps_12 = 0.5 * (du_dy + dv_dx)
+    return eps_11, eps_22, eps_12
+
+
+def _strain_rates_latlon(
+    u_ice: jnp.ndarray,
+    v_ice: jnp.ndarray,
+    grid: LatLonGrid,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Strain rate tensor on a lat-lon A-grid (local-Cartesian approximation).
+
+    Centered finite differences in (x = r·cosθ·dλ, y = r·dθ)
+    coordinates.  ``grid.dx`` is the 2-cell zonal distance
+    ``2 · r · cosθ · dλ`` and ``grid.dy`` is the 2-cell meridional
+    distance ``2 · r · dθ``, so the centered differences
+
+        eps_11 = (u[i, j+1] - u[i, j-1]) / dx(i)
+        eps_22 = (v[i+1, j] - v[i-1, j]) / dy(i)
+
+    give the strain rate to leading order in the local-Cartesian
+    sense.  Full spherical-metric correction (``tanθ/r · v``) is
+    omitted — acceptable for mid- to low-latitude ice; high-
+    latitude integrations should keep using the cubed-sphere
+    backend or wait for the tripolar fold + metric terms.
+
+    Polar rows: the halo padder folds across the pole; centered
+    differences then see physical neighbours.  The Coriolis /
+    drift code already treats pole columns as solid wall in the
+    coupler, so additional masking is not required here.
+
+    Parameters
+    ----------
+    u_ice, v_ice : array ``(n_lat, n_lon)``
+        Ice velocity components [m/s].
+    grid : LatLonGrid
+
+    Returns
+    -------
+    eps_11, eps_22, eps_12 : arrays ``(n_lat, n_lon)``
+        Strain rate tensor components [1/s].
+    """
+    u_pad, v_pad = pad_halo_vector_latlon(u_ice, v_ice, halo=1)
+    dx = grid.dx                       # (n_lat, n_lon)
+    dy = grid.dy[:, None]              # broadcast to (n_lat, 1)
+
+    du_dx = (u_pad[1:-1, 2:] - u_pad[1:-1, :-2]) / dx
+    du_dy = (u_pad[2:, 1:-1] - u_pad[:-2, 1:-1]) / dy
+    dv_dx = (v_pad[1:-1, 2:] - v_pad[1:-1, :-2]) / dx
+    dv_dy = (v_pad[2:, 1:-1] - v_pad[:-2, 1:-1]) / dy
 
     eps_11 = du_dx
     eps_22 = dv_dy
     eps_12 = 0.5 * (du_dy + dv_dx)
-
     return eps_11, eps_22, eps_12
+
+
+def strain_rates(
+    u_ice: jnp.ndarray,
+    v_ice: jnp.ndarray,
+    grid,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Compute the symmetric strain rate tensor.
+
+    Grid-agnostic dispatcher:
+        * ``CubedSphereGrid`` → cubed-sphere FD with halo-2 vector
+          exchange + cross-face rotation.
+        * ``LatLonGrid`` → A-grid centered FD in local-Cartesian
+          (r·cosθ·dλ, r·dθ) coordinates.
+
+    eps_11 = du/dx, eps_22 = dv/dy, eps_12 = 0.5·(du/dy + dv/dx).
+    """
+    if _is_latlon_grid(grid):
+        return _strain_rates_latlon(u_ice, v_ice, grid)
+    return _strain_rates_cubed_sphere(u_ice, v_ice, grid)
 
 
 # ==============================================================================

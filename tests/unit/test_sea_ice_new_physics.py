@@ -425,3 +425,130 @@ class TestLatLonTransport:
             V0 = float(jnp.sum(h[..., k] * a[..., k]))
             V1 = float(jnp.sum(h_new[..., k] * a_new[..., k]))
             assert abs(V1 - V0) / max(V0, 1e-12) < 1e-6
+
+
+# ==============================================================================
+# Lat-lon EVP rheology (grid-agnostic strain rates + stress divergence)
+# ==============================================================================
+
+class TestLatLonEVP:
+    """Lat-lon A-grid EVP rheology dispatch."""
+
+    def _make_grid(self):
+        return create_latlon_grid(n_lat=36, n_lon=72)
+
+    def test_strain_rates_uniform_velocity_is_zero(self):
+        from legoesm.ice.rheology import strain_rates
+        grid = self._make_grid()
+        shape = (36, 72)
+        u = jnp.full(shape, 0.1)
+        v = jnp.zeros(shape)
+        e11, e22, e12 = strain_rates(u, v, grid)
+        # Pole-fold can introduce tiny strain at the rows adjacent to
+        # the poles; restrict the check to mid-latitudes.
+        assert jnp.all(jnp.abs(e11[5:-5]) < 1e-9)
+        assert jnp.all(jnp.abs(e22[5:-5]) < 1e-9)
+
+    def test_strain_rates_linear_u_produces_nonzero_eps11(self):
+        from legoesm.ice.rheology import strain_rates
+        grid = self._make_grid()
+        n_lat, n_lon = 36, 72
+        # Linear u in lon direction
+        u = jnp.broadcast_to(jnp.arange(n_lon, dtype=jnp.float64) * 0.01,
+                             (n_lat, n_lon))
+        v = jnp.zeros((n_lat, n_lon))
+        e11, e22, e12 = strain_rates(u, v, grid)
+        # eps_11 = du/dx > 0 in interior
+        assert jnp.all(e11[5:-5, 5:-5] > 0.0)
+
+    def test_stress_divergence_zero_stress_is_zero(self):
+        from legoesm.ice.dynamics import stress_divergence
+        grid = self._make_grid()
+        shape = (36, 72)
+        Fx, Fy = stress_divergence(
+            jnp.zeros(shape), jnp.zeros(shape), jnp.zeros(shape), grid,
+        )
+        assert jnp.all(Fx == 0.0)
+        assert jnp.all(Fy == 0.0)
+
+    def test_stress_divergence_linear_sigma11(self):
+        """Linear σ_11 in x produces positive Fx (gradient > 0)."""
+        from legoesm.ice.dynamics import stress_divergence
+        grid = self._make_grid()
+        n_lat, n_lon = 36, 72
+        sigma_11 = jnp.broadcast_to(jnp.arange(n_lon, dtype=jnp.float64),
+                                    (n_lat, n_lon))
+        Fx, Fy = stress_divergence(
+            sigma_11, jnp.zeros((n_lat, n_lon)), jnp.zeros((n_lat, n_lon)), grid,
+        )
+        # Interior Fx should be positive (∂σ_11/∂x > 0).
+        assert jnp.all(Fx[5:-5, 5:-5] > 0.0)
+
+    def test_evp_solver_lat_lon_finite_no_blowup(self):
+        from legoesm.ice.dynamics import evp_solver
+        grid = self._make_grid()
+        shape = (36, 72)
+        u_new, v_new, s11, s22, s12 = evp_solver(
+            jnp.zeros(shape), jnp.zeros(shape),
+            jnp.zeros(shape), jnp.zeros(shape), jnp.zeros(shape),
+            jnp.full(shape, 1.5), jnp.full(shape, 0.9),
+            jnp.full(shape, 10.0), jnp.zeros(shape),
+            jnp.zeros(shape), jnp.zeros(shape),
+            grid, dt=3600.0, N_evp=30,
+        )
+        assert jnp.all(jnp.isfinite(u_new))
+        assert jnp.all(jnp.isfinite(v_new))
+        assert jnp.all(jnp.isfinite(s11))
+        # Wind-driven free-drift estimate: α ≈ 0.017 × |U_wind| =
+        # 0.17 m/s; EVP solution should be of the same order.
+        assert float(jnp.max(jnp.abs(u_new))) < 1.0
+        assert float(jnp.max(jnp.abs(u_new))) > 0.01
+
+    def test_stress_divergence_nonzero_sigma12(self):
+        """σ_12 contributes to both Fx (via ∂/∂y) and Fy (via ∂/∂x).
+
+        Linear σ_12(λ) in the zonal direction produces a positive
+        ``Fy`` in the interior with no ``Fx`` contribution (since
+        ∂σ_12/∂y = 0).  Lat-only variation σ_12(θ) does the
+        opposite.
+        """
+        from legoesm.ice.dynamics import stress_divergence
+        grid = self._make_grid()
+        n_lat, n_lon = 36, 72
+        sigma_12_lon = jnp.broadcast_to(
+            jnp.arange(n_lon, dtype=jnp.float64), (n_lat, n_lon),
+        )
+        Fx, Fy = stress_divergence(
+            jnp.zeros((n_lat, n_lon)), jnp.zeros((n_lat, n_lon)),
+            sigma_12_lon, grid,
+        )
+        # Linear σ_12(lon) → Fy = ∂σ_12/∂x > 0 in interior.
+        assert jnp.all(Fy[5:-5, 5:-5] > 0.0)
+        # ∂σ_12/∂y is zero (no lat variation) → Fx ≈ 0 in interior.
+        assert jnp.all(jnp.abs(Fx[5:-5, 5:-5]) < 1e-9)
+
+        # Now linear σ_12(lat): contributes to Fx but not Fy.
+        sigma_12_lat = jnp.broadcast_to(
+            jnp.arange(n_lat, dtype=jnp.float64)[:, None], (n_lat, n_lon),
+        )
+        Fx2, Fy2 = stress_divergence(
+            jnp.zeros((n_lat, n_lon)), jnp.zeros((n_lat, n_lon)),
+            sigma_12_lat, grid,
+        )
+        assert jnp.all(Fx2[5:-5, 5:-5] > 0.0)
+        assert jnp.all(jnp.abs(Fy2[5:-5, 5:-5]) < 1e-9)
+
+    def test_mevp_solver_lat_lon_finite(self):
+        from legoesm.ice.dynamics import mevp_solver
+        grid = self._make_grid()
+        shape = (36, 72)
+        u_new, v_new, s11, s22, s12 = mevp_solver(
+            jnp.zeros(shape), jnp.zeros(shape),
+            jnp.zeros(shape), jnp.zeros(shape), jnp.zeros(shape),
+            jnp.full(shape, 1.5), jnp.full(shape, 0.9),
+            jnp.full(shape, 10.0), jnp.zeros(shape),
+            jnp.zeros(shape), jnp.zeros(shape),
+            grid, dt=3600.0, N_mevp=30,
+        )
+        assert jnp.all(jnp.isfinite(u_new))
+        assert jnp.all(jnp.isfinite(s11))

@@ -35,12 +35,18 @@ from legoesm.core.field import Field
 from legoesm.core.operators import gradient_x, gradient_y
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.halo import pad_halo, pad_halo_vector
+from legoesm.grids.halo_latlon import pad_halo_latlon
+from legoesm.grids.latlon import LatLonGrid
 from legoesm.ice.rheology import (
     ice_strength,
     strain_rates,
     evp_stress_update,
     mevp_stress_update,
 )
+
+
+def _is_latlon_grid(grid) -> bool:
+    return isinstance(grid, LatLonGrid)
 
 
 # ==============================================================================
@@ -61,43 +67,83 @@ def _gradient_y_raw(data: jnp.ndarray, grid: CubedSphereGrid) -> jnp.ndarray:
 # Stress divergence
 # ==============================================================================
 
-def stress_divergence(
+def _stress_divergence_cubed_sphere(
     sigma_11: jnp.ndarray,
     sigma_22: jnp.ndarray,
     sigma_12: jnp.ndarray,
     grid: CubedSphereGrid,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Stress divergence on the cubed sphere."""
+    Fx = _gradient_x_raw(sigma_11, grid) + _gradient_y_raw(sigma_12, grid)
+    Fy = _gradient_x_raw(sigma_12, grid) + _gradient_y_raw(sigma_22, grid)
+    return Fx, Fy
+
+
+def _stress_divergence_latlon(
+    sigma_11: jnp.ndarray,
+    sigma_22: jnp.ndarray,
+    sigma_12: jnp.ndarray,
+    grid: LatLonGrid,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Stress divergence on a lat-lon A-grid.
+
+    Centered finite differences in local-Cartesian coordinates,
+    with periodic-lon + pole-fold halo.
+
+        F_x = ∂σ_11/∂x + ∂σ_12/∂y
+        F_y = ∂σ_12/∂x + ∂σ_22/∂y
+
+    All three stress components are folded with the scalar pole
+    halo.  Justification: at the pole, the local (east, north)
+    basis is rotated by 180° relative to its image on the other
+    side of the pole.  Under a 180° basis rotation,
+    σ_11 → (−1)(−1) σ_11 = σ_11, σ_22 → σ_22, and
+    σ_12 → (−1)(−1) σ_12 = σ_12.  All three are even under the
+    fold and the scalar halo gives the correct parity.  (Velocity
+    components ``u``, ``v`` ARE odd and use ``pad_halo_vector_latlon``
+    with ``negate=True`` — see ``_strain_rates_latlon``.)
+
+    Full spherical-metric correction (``tanθ/r·v``) is omitted —
+    same approximation as ``_strain_rates_latlon``; high-latitude
+    runs should use the cubed-sphere backend until the tripolar
+    fold + metric terms land.
+    """
+    s11_pad = pad_halo_latlon(sigma_11, halo=1)
+    s22_pad = pad_halo_latlon(sigma_22, halo=1)
+    s12_pad = pad_halo_latlon(sigma_12, halo=1)
+    dx = grid.dx
+    dy = grid.dy[:, None]
+
+    ds11_dx = (s11_pad[1:-1, 2:] - s11_pad[1:-1, :-2]) / dx
+    ds12_dy = (s12_pad[2:, 1:-1] - s12_pad[:-2, 1:-1]) / dy
+    ds12_dx = (s12_pad[1:-1, 2:] - s12_pad[1:-1, :-2]) / dx
+    ds22_dy = (s22_pad[2:, 1:-1] - s22_pad[:-2, 1:-1]) / dy
+
+    Fx = ds11_dx + ds12_dy
+    Fy = ds12_dx + ds22_dy
+    return Fx, Fy
+
+
+def stress_divergence(
+    sigma_11: jnp.ndarray,
+    sigma_22: jnp.ndarray,
+    sigma_12: jnp.ndarray,
+    grid,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
     r"""Compute the divergence of the internal stress tensor.
 
-    F_x = d(sigma_11)/dx + d(sigma_12)/dy
-    F_y = d(sigma_12)/dx + d(sigma_22)/dy
+    Grid-agnostic dispatcher:
+        * ``CubedSphereGrid`` → cubed-sphere FD gradients (treats σ
+          as local scalar; cross-face rotation incurs O(dx) error
+          at coarse resolution, damped by EVP elastic relaxation).
+        * ``LatLonGrid`` → A-grid centered FD with periodic-lon +
+          pole-fold halo.
 
-    The stress components are treated as scalars in local grid-aligned
-    coordinates. At cubed-sphere face boundaries, this introduces an
-    O(dx) error in the tensor rotation, which is acceptable at coarse
-    resolution and is damped by the EVP's elastic relaxation.
-
-    For higher accuracy, a full tensor halo exchange would rotate
-    (sigma_11, sigma_22, sigma_12) between faces. This simpler
-    approach avoids that complexity.
-
-    Parameters
-    ----------
-    sigma_11, sigma_22, sigma_12 : arrays (6, n, n)
-        Stress tensor components [N/m].
-    grid : CubedSphereGrid
-
-    Returns
-    -------
-    Fx, Fy : arrays (6, n, n)
-        Internal stress force per unit area [N/m^2].
+    F_x = ∂σ_11/∂x + ∂σ_12/∂y, F_y = ∂σ_12/∂x + ∂σ_22/∂y.
     """
-    # d(sigma_11)/dx + d(sigma_12)/dy
-    Fx = _gradient_x_raw(sigma_11, grid) + _gradient_y_raw(sigma_12, grid)
-    # d(sigma_12)/dx + d(sigma_22)/dy
-    Fy = _gradient_x_raw(sigma_12, grid) + _gradient_y_raw(sigma_22, grid)
-
-    return Fx, Fy
+    if _is_latlon_grid(grid):
+        return _stress_divergence_latlon(sigma_11, sigma_22, sigma_12, grid)
+    return _stress_divergence_cubed_sphere(sigma_11, sigma_22, sigma_12, grid)
 
 
 # ==============================================================================
@@ -256,7 +302,7 @@ def evp_solver(
     wind_v: jnp.ndarray,
     ocean_u: jnp.ndarray,
     ocean_v: jnp.ndarray,
-    grid: CubedSphereGrid,
+    grid,
     dt: float,
     N_evp: int = 120,
     e_yield: float = 2.0,
@@ -429,7 +475,7 @@ def mevp_solver(
     wind_v: jnp.ndarray,
     ocean_u: jnp.ndarray,
     ocean_v: jnp.ndarray,
-    grid: CubedSphereGrid,
+    grid,
     dt: float,
     N_mevp: int = 120,
     e_yield: float = 2.0,
