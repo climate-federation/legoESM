@@ -35,6 +35,171 @@ SV = 1.0e6  # 1 Sverdrup [m³/s]
 
 
 # ==============================================================================
+# AMOC computation from C-grid ocean state
+# ==============================================================================
+
+def _grid_lat_v_deg(grid, n_lat_v: int) -> np.ndarray:
+    """v-face latitudes in degrees, with sensible fallbacks.
+
+    Prefers ``grid.lat_v`` (the canonical attribute on lat-lon C-grid
+    geometries), falls back to ``grid.lat + grid.dlat`` shifts, and
+    finally to a uniform ``linspace`` over the pole range.  The chosen
+    fallback matches ``moc_streamfunction``'s lat_v derivation so the
+    AMOC index resolves consistently with the streamfunction.
+    """
+    lat_v = getattr(grid, "lat_v", None)
+    if lat_v is not None:
+        return np.degrees(np.asarray(lat_v))
+    lat = getattr(grid, "lat", None)
+    dlat = getattr(grid, "dlat", None)
+    if lat is not None and dlat is not None:
+        lat_arr = np.asarray(lat)
+        lat_v_rad = np.concatenate([
+            [lat_arr[0] - 0.5 * float(dlat)],
+            lat_arr + 0.5 * float(dlat),
+        ])
+        return np.degrees(lat_v_rad)
+    return np.degrees(np.linspace(-np.pi / 2, np.pi / 2, n_lat_v))
+
+
+def atlantic_basin_mask(
+    grid,
+    *,
+    lon_min_deg: float = -75.0,
+    lon_max_deg: float = 15.0,
+) -> np.ndarray:
+    """Crude Atlantic basin mask via longitude band.
+
+    Produces a ``(n_lon,)`` boolean mask broadcast-compatible with
+    ``land_mask`` of shape ``(n_lat, n_lon)``.  Default longitude
+    band 75 W → 15 E covers the Atlantic from the American to the
+    African / European coasts.  For ORCA-class production the
+    caller should supply a proper basin mask file; this geometric
+    proxy is adequate for spin-up monitoring at 26.5 °N where the
+    Atlantic is well-isolated.
+
+    Parameters
+    ----------
+    grid : LatLonGrid-like
+        Must expose ``lon`` in radians.
+    lon_min_deg, lon_max_deg : float
+        Longitude band in degrees, ``[-180, 180]``-wrapped.  ``min``
+        and ``max`` may straddle the prime meridian.
+
+    Returns
+    -------
+    mask : ndarray ``(n_lon,)`` of bool
+    """
+    lon_rad = np.asarray(grid.lon)
+    lon_deg = np.degrees(lon_rad)
+    lon_wrapped = ((lon_deg + 180.0) % 360.0) - 180.0
+    if lon_min_deg <= lon_max_deg:
+        return (lon_wrapped >= lon_min_deg) & (lon_wrapped <= lon_max_deg)
+    # Wrap-around band (e.g. [170°E, -170°E]).
+    return (lon_wrapped >= lon_min_deg) | (lon_wrapped <= lon_max_deg)
+
+
+def compute_amoc_from_state(
+    v_face: np.ndarray,
+    h_partial: np.ndarray,
+    land_mask: np.ndarray,
+    grid,
+    *,
+    target_lat_deg: float = 26.5,
+    basin: str = "atlantic",
+    basin_lon_min_deg: float = -75.0,
+    basin_lon_max_deg: float = 15.0,
+    lat_tol_deg: float = 5.0,
+) -> float:
+    """AMOC maximum at ``target_lat_deg`` from a C-grid ocean state.
+
+    Wraps :func:`legoesm.ocean.diagnostics_streamfunction.moc_streamfunction`
+    with basin-mask preprocessing and latitude-index resolution.
+    Returns the maximum overturning streamfunction value [Sv] at the
+    requested latitude, or NaN when the latitude is not on the grid
+    within ``lat_tol_deg``.
+
+    Parameters
+    ----------
+    v_face : array ``(n_lat+1, n_lon, nlev)``
+        Meridional velocity at v-faces [m/s].
+    h_partial : array ``(n_lat, n_lon, nlev)``
+        Layer thickness [m] at cell centres (e.g. from
+        :func:`legoesm.ocean.vertical.compute_layer_thickness`).
+    land_mask : array ``(n_lat, n_lon)``
+        Ocean mask (1 = ocean, 0 = land).
+    grid : LatLonGrid-like
+        Lat-lon C-grid metadata; must expose ``radius``, ``lon`` and
+        either ``lat_v`` or (``lat`` + ``dlat``).
+    target_lat_deg : float
+        Target latitude in degrees (default 26.5 °N — RAPID array).
+    basin : {"atlantic", "global"}
+        Basin filter applied via ``land_mask × atlantic_lon_band``.
+        ``"global"`` skips the longitude filter.
+    basin_lon_min_deg, basin_lon_max_deg : float
+        Longitude band (degrees) used when ``basin="atlantic"``.
+    lat_tol_deg : float
+        Maximum allowed distance between ``target_lat_deg`` and the
+        nearest v-face latitude [°].  Beyond this the function
+        returns NaN (target latitude not represented on the grid).
+
+    Returns
+    -------
+    amoc_Sv : float
+        Maximum overturning streamfunction at the target latitude
+        in Sverdrups, or NaN when the latitude is off-grid or no
+        finite streamfunction exists.
+    """
+    # Local import to avoid circular legoesm.ocean ← legoesm.ocean.spinup
+    # at module import time.
+    from legoesm.ocean.diagnostics_streamfunction import moc_streamfunction
+
+    v_np = np.asarray(v_face)
+    h_np = np.asarray(h_partial)
+    mask_np = np.asarray(land_mask).astype(np.float64)
+
+    if basin == "atlantic":
+        atl_mask = atlantic_basin_mask(
+            grid,
+            lon_min_deg=basin_lon_min_deg,
+            lon_max_deg=basin_lon_max_deg,
+        ).astype(np.float64)
+        # Broadcast (n_lon,) → (1, n_lon) so we get a per-cell mask.
+        mask_eff = mask_np * atl_mask[None, :]
+    elif basin == "global":
+        mask_eff = mask_np
+    else:
+        raise ValueError(
+            f"compute_amoc_from_state: unknown basin {basin!r}; "
+            "expected one of 'atlantic', 'global'."
+        )
+
+    psi_Sv = moc_streamfunction(v_np, h_np, None, None, mask_eff, grid)
+    # shape (n_lat+1, nlev) in Sv (moc_streamfunction already
+    # divides by 1e6).
+
+    n_lat_v = psi_Sv.shape[0]
+    lat_v_deg = _grid_lat_v_deg(grid, n_lat_v)
+    j = int(np.argmin(np.abs(lat_v_deg - target_lat_deg)))
+    if abs(float(lat_v_deg[j]) - target_lat_deg) > lat_tol_deg:
+        return float("nan")
+
+    profile = psi_Sv[j, :]
+    if not np.any(np.isfinite(profile)):
+        return float("nan")
+    # ``moc_streamfunction`` uses ``psi = -cumsum(V_zonal)`` so for the
+    # canonical Atlantic overturning cell — northward upper transport,
+    # NADW return flow below — ψ has its EXTREMUM as a NEGATIVE peak
+    # at the interface between the two branches (typically 1000–2000 m
+    # for Atlantic AMOC).  The RAPID convention reports AMOC as a
+    # positive number, so we negate the minimum.  An anomalous run
+    # with REVERSED circulation (collapsed AMOC, southward at surface)
+    # would yield a negative reported value, which is the desired
+    # signed-strength behaviour for spin-up monitoring.
+    return float(-np.nanmin(profile))
+
+
+# ==============================================================================
 # AMOC timeseries
 # ==============================================================================
 

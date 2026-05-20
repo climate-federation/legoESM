@@ -35,6 +35,8 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
+
 
 def _load_history_csv(path: Path) -> list[dict]:
     if not path.exists():
@@ -81,6 +83,13 @@ def main() -> int:
     p.add_argument("--bryan-phase2-years", type=int, default=100)
     p.add_argument("--convergence-check-every", type=int, default=50,
                    help="Check convergence criteria every N years.")
+    p.add_argument("--amoc-target-lat", type=float, default=26.5,
+                   help="Latitude (°N) for AMOC monitoring (default 26.5).")
+    p.add_argument("--amoc-basin", choices=["atlantic", "global"],
+                   default="atlantic",
+                   help="Basin filter for AMOC streamfunction.")
+    p.add_argument("--amoc-lon-min-deg", type=float, default=-75.0)
+    p.add_argument("--amoc-lon-max-deg", type=float, default=15.0)
     p.add_argument("--smoke", action="store_true",
                    help="Run a single model day to exercise code paths.")
     args = p.parse_args()
@@ -99,7 +108,9 @@ def main() -> int:
         SpinupHealth, evaluate_health, is_converged,
         ConvergenceCriteria, compute_amoc_timeseries,
         find_latest_restart, bryan_accelerated_dt,
+        compute_amoc_from_state,
     )
+    from legoesm.ocean.vertical import compute_layer_thickness
     from run_omip2 import _build_state  # type: ignore
     import jax
 
@@ -243,10 +254,26 @@ def main() -> int:
         )
         last_rpe = rpe_y
 
-        # AMOC: not yet wired in this driver — placeholder.  The
-        # production wiring will live in a follow-up that hooks the
-        # MOC-streamfunction diagnostic into the per-year cadence.
-        amoc_Sv = float("nan")
+        # AMOC@target-lat — computed on the lat-lon C-grid path only.
+        # MPAS support requires a basin-aware mesh-aware MOC routine
+        # that is a separate follow-up; MPAS runs report NaN until
+        # then (and the convergence helper auto-skips the criterion).
+        if args.grid == "latlon":
+            h_partial_now = compute_layer_thickness(
+                state.eta.data, state.H_bathy.data, z_coord,
+            )
+            amoc_Sv = compute_amoc_from_state(
+                v_face=state.v.data,
+                h_partial=h_partial_now,
+                land_mask=state.land_mask.data,
+                grid=grid,
+                target_lat_deg=args.amoc_target_lat,
+                basin=args.amoc_basin,
+                basin_lon_min_deg=args.amoc_lon_min_deg,
+                basin_lon_max_deg=args.amoc_lon_max_deg,
+            )
+        else:
+            amoc_Sv = float("nan")
 
         # ``tb0_*`` baselines were captured at year 0 (fresh) or
         # loaded from ``initial_diagnostics.json`` (resume); drift
@@ -266,10 +293,14 @@ def main() -> int:
         _append_history_csv(history_csv, health._asdict())
         last_year = y + 1
 
+        if np.isfinite(amoc_Sv):
+            amoc_str = f"{amoc_Sv:.2f} Sv"
+        else:
+            amoc_str = "n/a"
         print(
             f"   RPE_flux = {rpe_flux:.3e} W/m²  |  KE = {eb_y.KE:.3e}  "
             f"|  vol_drift = {health.volume_drift_frac:+.3e}  "
-            f"|  AMOC = {amoc_Sv}"
+            f"|  AMOC@{args.amoc_target_lat:.1f}°N({args.amoc_basin}) = {amoc_str}"
         )
 
         # Yearly restart.

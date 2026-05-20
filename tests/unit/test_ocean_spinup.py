@@ -15,6 +15,9 @@ from legoesm.ocean.spinup import (
     is_converged,
     find_latest_restart,
     bryan_accelerated_dt,
+    compute_amoc_from_state,
+    atlantic_basin_mask,
+    _grid_lat_v_deg,
 )
 
 
@@ -326,3 +329,178 @@ class TestBryanAcceleratedDt:
             phase1_years=200, phase2_years=100,
         )
         assert dt_t == dt_m == 1800.0
+
+
+# ==============================================================================
+# AMOC computation from state
+# ==============================================================================
+
+class _FakeGrid:
+    """Minimal LatLonGrid-like stub for moc_streamfunction + AMOC tests."""
+
+    def __init__(self, n_lat=36, n_lon=72, radius=6.371e6):
+        self.n_lat = n_lat
+        self.n_lon = n_lon
+        self.radius = radius
+        # Uniform lat in [-87.5, 87.5], lon in [0, 360-d).
+        dlat = np.pi / n_lat
+        dlon = 2.0 * np.pi / n_lon
+        self.dlat = float(dlat)
+        self.dlon = float(dlon)
+        self.lat = np.linspace(-np.pi / 2 + 0.5 * dlat,
+                                np.pi / 2 - 0.5 * dlat, n_lat)
+        self.lon = np.linspace(0.0, 2.0 * np.pi - dlon, n_lon)
+
+
+class TestGridLatVHelpers:
+
+    def test_lat_v_from_grid_lat_dlat(self):
+        g = _FakeGrid(n_lat=10, n_lon=20)
+        lat_v_deg = _grid_lat_v_deg(g, n_lat_v=g.n_lat + 1)
+        assert lat_v_deg.shape == (11,)
+        # First v-face = lat[0] - dlat/2 = south boundary near -90°.
+        assert lat_v_deg[0] == pytest.approx(-90.0, abs=1e-6)
+        assert lat_v_deg[-1] == pytest.approx(90.0, abs=1e-6)
+
+
+class TestAtlanticBasinMask:
+
+    def test_default_band_picks_atlantic_longitudes(self):
+        g = _FakeGrid(n_lat=18, n_lon=36)  # 10° resolution
+        mask = atlantic_basin_mask(g)
+        lon_deg = np.degrees(np.asarray(g.lon))
+        lon_wrapped = ((lon_deg + 180.0) % 360.0) - 180.0
+        # All True cells must sit inside the band.
+        for i in range(len(mask)):
+            if bool(mask[i]):
+                assert -75.0 <= lon_wrapped[i] <= 15.0
+        # 0 °E (prime meridian) must be inside.
+        idx0 = int(np.argmin(np.abs(lon_wrapped)))
+        assert bool(mask[idx0])
+        # 180 °E must be outside.
+        idx180 = int(np.argmin(np.abs(lon_wrapped - 180.0)))
+        # Could be 180 or -180 after wrap; test the diametric point.
+        for i in (idx180, len(mask) - idx180):
+            if 0 <= i < len(mask):
+                lwi = lon_wrapped[i]
+                if abs(abs(lwi) - 180.0) < 1e-6:
+                    assert not bool(mask[i])
+
+    def test_wraparound_band(self):
+        g = _FakeGrid(n_lat=10, n_lon=36)
+        mask = atlantic_basin_mask(g, lon_min_deg=170.0, lon_max_deg=-170.0)
+        lon_deg = np.degrees(np.asarray(g.lon))
+        lon_wrapped = ((lon_deg + 180.0) % 360.0) - 180.0
+        for i in range(len(mask)):
+            inside_pred = (lon_wrapped[i] >= 170.0) or (lon_wrapped[i] <= -170.0)
+            assert bool(mask[i]) == inside_pred
+
+
+class TestComputeAMOCFromState:
+
+    def _make_synthetic(self, *, sign=+1.0, amplitude=0.01,
+                        n_lat=36, n_lon=72, nlev=10):
+        """Build a synthetic v field whose zonal-mean is non-zero only at
+        cell j_target (a single latitude row) so the AMOC max sits there.
+
+        Returns ``(v_face, h_partial, mask, grid, j_target)``.
+        """
+        grid = _FakeGrid(n_lat=n_lat, n_lon=n_lon)
+        v = np.zeros((n_lat + 1, n_lon, nlev), dtype=np.float64)
+        # Set a uniform v at one v-face row.
+        lat_v_deg = _grid_lat_v_deg(grid, n_lat + 1)
+        j_target = int(np.argmin(np.abs(lat_v_deg - 26.5)))
+        v[j_target, :, :nlev // 2] = sign * amplitude  # upper-half only
+        # Uniform 50-m layers.
+        h = np.full((n_lat, n_lon, nlev), 50.0, dtype=np.float64)
+        mask = np.ones((n_lat, n_lon), dtype=np.float64)
+        return v, h, mask, grid, j_target
+
+    def test_returns_finite_value_for_uniform_v(self):
+        v, h, mask, grid, _ = self._make_synthetic()
+        amoc = compute_amoc_from_state(
+            v, h, mask, grid, target_lat_deg=26.5, basin="global",
+        )
+        assert np.isfinite(amoc)
+        assert amoc != 0.0
+
+    def test_sign_convention_positive_v_gives_positive_amoc(self):
+        """Northward upper transport (v > 0 at v-face) corresponds to
+        the classical Atlantic-style overturning cell.  With the
+        ``moc_streamfunction`` convention ``psi = -cumsum(V_zonal)``
+        this drives ψ negative at the interface depth; the AMOC
+        helper returns ``-min(profile)``, which must come back
+        POSITIVE.
+        """
+        v_pos, h, mask, grid, _ = self._make_synthetic(sign=+1.0)
+        a_pos = compute_amoc_from_state(
+            v_pos, h, mask, grid, target_lat_deg=26.5, basin="global",
+        )
+        assert a_pos > 0.0, (
+            f"Positive v should give positive (RAPID-style) AMOC; "
+            f"got {a_pos}"
+        )
+
+    def test_sign_convention_negative_v_gives_negative_amoc(self):
+        """Anomalous reversed cell (v<0 surface) → reported AMOC negative.
+
+        ``moc_streamfunction`` makes ψ positive in this case; the
+        helper returns ``-min(positive)`` which is ≤ 0 (only the
+        non-zero positive peak counts so ``min`` picks zero —
+        meaning the AMOC is reported as a magnitude bounded above
+        by zero, signalling a collapsed cell).  The sign convention
+        is unambiguous: a reversed-cell run yields ≤ 0, never the
+        same positive value as the normal case.
+        """
+        v_neg, h, mask, grid, _ = self._make_synthetic(sign=-1.0)
+        a_neg = compute_amoc_from_state(
+            v_neg, h, mask, grid, target_lat_deg=26.5, basin="global",
+        )
+        assert a_neg <= 0.0, (
+            f"Negative v should give non-positive AMOC; got {a_neg}"
+        )
+
+    def test_target_lat_out_of_range_returns_nan(self):
+        v, h, mask, grid, _ = self._make_synthetic()
+        amoc = compute_amoc_from_state(
+            v, h, mask, grid, target_lat_deg=200.0, basin="global",
+            lat_tol_deg=5.0,
+        )
+        assert np.isnan(amoc)
+
+    def test_atlantic_basin_excludes_pacific_signal(self):
+        """Place a strong signal at Pacific longitudes only;
+        Atlantic basin mask should suppress it."""
+        grid = _FakeGrid(n_lat=18, n_lon=36)  # 10° lon
+        n_lat, n_lon, nlev = 18, 36, 6
+        v = np.zeros((n_lat + 1, n_lon, nlev), dtype=np.float64)
+        lat_v_deg = _grid_lat_v_deg(grid, n_lat + 1)
+        j = int(np.argmin(np.abs(lat_v_deg - 26.5)))
+        lon_deg = np.degrees(np.asarray(grid.lon))
+        lon_wrapped = ((lon_deg + 180.0) % 360.0) - 180.0
+        # Signal at 150 °E (Pacific).
+        pac_i = np.argmin(np.abs(lon_wrapped - 150.0))
+        v[j, pac_i, :3] = 0.1
+        h = np.full((n_lat, n_lon, nlev), 100.0, dtype=np.float64)
+        mask = np.ones((n_lat, n_lon), dtype=np.float64)
+
+        amoc_global = compute_amoc_from_state(
+            v, h, mask, grid, target_lat_deg=26.5, basin="global",
+        )
+        amoc_atlantic = compute_amoc_from_state(
+            v, h, mask, grid, target_lat_deg=26.5, basin="atlantic",
+        )
+        # Atlantic-only AMOC sees no signal — close to zero.
+        # Global sees the Pacific peak.
+        assert abs(amoc_atlantic) < 1.0e-3, (
+            f"Atlantic basin should suppress Pacific signal, got "
+            f"{amoc_atlantic} Sv"
+        )
+        assert abs(amoc_global) > abs(amoc_atlantic)
+
+    def test_unknown_basin_raises(self):
+        v, h, mask, grid, _ = self._make_synthetic()
+        with pytest.raises(ValueError):
+            compute_amoc_from_state(
+                v, h, mask, grid, basin="indian",
+            )
