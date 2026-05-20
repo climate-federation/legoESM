@@ -61,6 +61,7 @@ $PYTHON scripts/run_amip_levante.py \
     --checkpoint-days 30 \
     --cmip-output \
     --monthly-means \
+    --use-duogrid \
     --distributed \
     --output "$OUTPUT"
 

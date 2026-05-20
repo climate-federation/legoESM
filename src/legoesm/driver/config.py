@@ -36,6 +36,7 @@ class GridConfig(NamedTuple):
     vertical_coord: str = "hybrid"   # sigma, hybrid
     p_top_Pa: float = 200.0
     stretching: float = 2.0
+    use_duogrid: bool = False        # enable FV3 Duo-Grid halo (required for MPI multi-node)
 
 
 class DycoreConfig(NamedTuple):

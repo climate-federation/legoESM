@@ -1484,12 +1484,17 @@ def hydrostatic_to_fv3(
     _u_in = state.u.data
     _v_in = state.v.data
     base = cdgrid.base
+    # Duogrid: MPI-compatible vector halo via lat/lon rotation + scalar exchange.
+    # interp_offsets path is faster on single-node but not supported under MPI.
+    _dg = base.duogrid
+    _interp_offs = None if _dg is not None else base.halo_interp_offsets
     if _u_in.ndim == 4:
         u_pad, v_pad = pad_halo_vector_4d(
             _u_in, _v_in,
             base.cos_angle, base.sin_angle,
             base.cos_angle_padded, base.sin_angle_padded,
-            interp_offsets=base.halo_interp_offsets,
+            interp_offsets=_interp_offs,
+            duogrid=_dg,
         )
         u_d = 0.25 * (u_pad[:, :-1, :-1] + u_pad[:, 1:, :-1]
                       + u_pad[:, :-1, 1:] + u_pad[:, 1:, 1:])
@@ -1500,7 +1505,8 @@ def hydrostatic_to_fv3(
             _u_in, _v_in,
             base.cos_angle, base.sin_angle,
             base.cos_angle_padded, base.sin_angle_padded,
-            interp_offsets=base.halo_interp_offsets,
+            interp_offsets=_interp_offs,
+            duogrid=_dg,
         )
         u_d = 0.25 * (u_pad[:, :-1, :-1] + u_pad[:, 1:, :-1]
                       + u_pad[:, :-1, 1:] + u_pad[:, 1:, 1:])

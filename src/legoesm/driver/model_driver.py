@@ -221,7 +221,7 @@ class ModelDriver:
 
         if gc.grid_type == "cubed_sphere":
             from legoesm.grids.cubed_sphere import create_cubed_sphere
-            self.grid = create_cubed_sphere(gc.resolution)
+            self.grid = create_cubed_sphere(gc.resolution, use_duogrid=gc.use_duogrid)
         elif gc.grid_type == "gaussian":
             from legoesm.grids.gaussian import create_gaussian_grid
             self.grid = create_gaussian_grid(gc.resolution)

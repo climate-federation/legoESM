@@ -88,6 +88,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stretching", type=float, default=None)
     parser.add_argument("--grid-type", type=str, default="cubed_sphere",
                         choices=["cubed_sphere", "gaussian", "latlon", "voronoi"])
+    parser.add_argument("--use-duogrid", action="store_true", default=False,
+                        help="Enable FV3 Duo-Grid halo exchange (required for MPI multi-node)")
     # The canonical names in `supported_matrix.py` are:
     #   - centered       (cubed_sphere, latlon)
     #   - finite_volume  (cubed_sphere, latlon)
@@ -310,6 +312,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         vertical_coord=args.vertical_coord,
         p_top_Pa=args.p_top or 200.0,
         stretching=args.stretching or 2.0,
+        use_duogrid=getattr(args, "use_duogrid", False),
     )
 
     dycore_config = DycoreConfig(

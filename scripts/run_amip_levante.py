@@ -110,6 +110,8 @@ def main(argv: list[str] | None = None) -> int:
                         choices=["cubed_sphere", "latlon"])
     parser.add_argument("--discretization", type=str, default="centered",
                         choices=["centered", "finite_volume", "latlon_cgrid"])
+    parser.add_argument("--use-duogrid", action="store_true", default=False,
+                        help="Enable FV3 Duo-Grid halo exchange (required for MPI multi-node)")
 
     # Physics stack
     parser.add_argument("--radiation", type=str, default="rrtmg",
@@ -207,6 +209,7 @@ def main(argv: list[str] | None = None) -> int:
         "--nlev", str(args.nlev),
         "--grid-type", args.grid_type,
         "--discretization", args.discretization,
+        *(["--use-duogrid"] if args.use_duogrid else []),
         # Integration
         "--days", str(args.days),
         "--dt", str(args.dt),
