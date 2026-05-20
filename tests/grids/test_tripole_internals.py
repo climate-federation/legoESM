@@ -2,7 +2,7 @@
 
 Addresses PR #268 slopbuster REJECT #2: ``_detect_fold``,
 ``_compute_rotation_angles``, ``_read_nemo_mesh_mask`` were reachable
-only via the ``run_global_overturning_tripole.py`` script.  These tests
+only via the global-overturning tripolar runner.  These tests
 exercise each one against a synthetic NEMO-style mesh.
 """
 

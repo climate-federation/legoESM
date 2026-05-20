@@ -252,6 +252,7 @@ def create_tripole_grid(
     radius: float = constants.R_earth,
     omega: float = constants.Omega,
     dtype=None,
+    min_dx_m: float = 1000.0,
 ) -> LatLonCGridGeometry:
     """Load a tripolar grid from a NEMO mesh_mask NetCDF file.
 
@@ -266,6 +267,15 @@ def create_tripole_grid(
         Rotation rate [rad/s].
     dtype : optional
         Storage dtype.
+    min_dx_m : float, optional
+        Floor (m) clamped onto every per-cell length metric
+        (``dx_T``, ``dy_T``, ``dx_u``, ``dy_u``, ``dx_v``, ``dy_v``)
+        and squared onto every area metric (``area_T``, ``area_q``).
+        ORCA1 has ~2.4% of cells with raw ``dx`` down to 1–4 m at
+        the bipolar-cap convergence, which crushes the CFL even
+        with implicit barotropics. Default 1 000 m matches the
+        runner-side floor used in the 20-yr ORCA1 production run.
+        Pass 0.0 to disable.
 
     Returns
     -------
@@ -377,6 +387,16 @@ def create_tripole_grid(
     lon_1d = lon_T[0, :]
     cos_lat_1d = jnp.maximum(jnp.cos(lat_1d), 1e-10)
     sin_lat_1d = jnp.sin(lat_1d)
+
+    if min_dx_m > 0.0:
+        dx_T = jnp.maximum(dx_T, min_dx_m)
+        dy_T = jnp.maximum(dy_T, min_dx_m)
+        dx_u = jnp.maximum(dx_u, min_dx_m)
+        dy_u = jnp.maximum(dy_u, min_dx_m)
+        dx_v = jnp.maximum(dx_v, min_dx_m)
+        dy_v = jnp.maximum(dy_v, min_dx_m)
+        area_T = jnp.maximum(area_T, min_dx_m * min_dx_m)
+        area_q = jnp.maximum(area_q, min_dx_m * min_dx_m)
 
     return LatLonCGridGeometry(
         n_lat=n_lat,

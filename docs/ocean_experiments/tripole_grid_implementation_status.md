@@ -4,20 +4,23 @@ Companion to `tripole_grid_plan.md` (the 2026-04-29 scoping document).
 This doc tracks what has actually been implemented on `feature/latlon-pole-fix`,
 what was learned during bring-up, and what remains.
 
-**Last updated:** 2026-05-08
-**Branch:** `feature/latlon-pole-fix`
+**Last updated:** 2026-05-20
+**Branch:** merged to `main`
 
 ## TL;DR
 
-- **Phases 0–5 complete.** Tripolar infrastructure landed and validated on a
-  synthetic tripolar grid: 39 unit tests pass, rest-state preserved at
-  machine precision, wind-forced runs stable, `jax.grad` works through a
-  tripolar timestep.
-- **Phase 6a (real ORCA1 bring-up) in progress.** 4 distinct bugs identified
-  and fixed. Step 1 of forced overturning on eORCA1 now produces physical
-  velocities (`max|u| = 0.024 m/s`, ~6× analytical estimate). The run still
-  cascades to NaN by step 5 — the next layer of issues lives in the
-  bipolar-cap dynamics under sustained wind forcing.
+- **Phases 0–6a complete.** Tripolar infrastructure landed, validated
+  on a synthetic grid (39 unit tests), brought up on real eORCA1, and
+  exercised in a clean 20-year ORCA1 production run.
+- **20-yr ORCA1 production run** (`tripole_orca1_etopo_20yr_production/`)
+  completed in 14.5 h wall on a single GPU at dt=600 s with 81 quarterly
+  restarts/snapshots, no NaNs, final-state `max|u|≈1.02 m/s`,
+  `|eta|≤1.7 m`, T ∈ [0, 27] °C.
+- **Cap-region cascade** flagged here on 2026-05-08 (the original
+  remaining blocker) was resolved by the mid-May fix sequence
+  documented under "Phase 6a — Resolution" below.
+- The 1 km `dx` floor is now an argument on `create_tripole_grid`
+  (`min_dx_m`, default 1000.0) instead of a runner-side `_replace(...)`.
 
 ## What got built (Phases 0–5)
 
@@ -123,7 +126,10 @@ sign flip `(-u, -v)`, matching the existing fold behaviour.
 the eORCA1 tripolar grid (332×362, ~1°) using NEMO's native bathymetry
 and land mask.
 
-**Runner:** `scripts/global_overturning/run_global_overturning_tripole.py`
+**Runner:** `scripts/global_overturning/run_tripole_20yr.py` (the runner
+referenced earlier in this doc — `run_global_overturning_tripole.py` —
+was the bring-up version with the 4 documented bugs and was deleted on
+2026-05-20 after the production runner stabilised.)
 
 **Grid file:** `data/grids/eORCA1.2_mesh_mask.nc` (484 MB, downloaded from
 Zenodo via `download_orca1_grid()`).
@@ -196,7 +202,7 @@ Applied to all three surface tendency formulas (momentum, heat, freshwater).
 
 #### Bug 4: Shelf cell masking
 **Commit:** `9a3c5ad3`
-**File:** `scripts/global_overturning/run_global_overturning_tripole.py`
+**File:** `scripts/global_overturning/run_tripole_20yr.py` (then `run_global_overturning_tripole.py`)
 
 z-star vertical coordinate scales the first-layer thickness as
 `dz_ref[0] · H_bathy / H_max`. On a 27 m shelf cell with `H_max = 5500 m`
@@ -210,71 +216,71 @@ z/z-star coordinate or partial cells; for now we mask cells with
 0.024 m/s** with this fix (vs analytical ~4×10⁻³ m/s; 6× over-estimate is
 reasonable for geometric variation).
 
-#### Workaround: 1 km dx floor (in runner only)
-**File:** `scripts/global_overturning/run_global_overturning_tripole.py`
+#### 1 km dx floor — lifted into `create_tripole_grid`
+**Commit (lift):** 2026-05-20 cleanup
+**File:** `src/legoesm/grids/tripole.py`
 
-eORCA's design places the displaced "northern poles" on Canada and Russia
-(land) — the cells with tiny `dx` (~2 m) at the bipolar fold seam are all
-land. They shouldn't matter to ocean dynamics, but during PCG iterations
-the divergence operator divides by these small dx and produces large
-intermediate values that the land mask then has to zero out.
+eORCA's design places the displaced "northern poles" on Canada and
+Russia (land) — the cells with tiny `dx` at the bipolar fold seam are
+all land. On the raw eORCA1.2 mesh ~2.4 % of cells have `dx_T <
+1000 m`, and the minimum `dx_v`/`dy_v` reaches **0 m** (degenerate
+seam cells), which is a hard NaN trigger via division, not merely a
+CFL slow-down. The previous runner-side `_replace(...)` floor was
+therefore load-bearing.
 
-The runner clamps `dx_T, dy_T, area_T, dx_u, dy_u, dx_v, dy_v, area_q` to
-a minimum of 1 km via `jnp.maximum`. This affects ~6000 cells, all on
-land. Main-domain ocean cells (~50 km at 1°) are untouched. This is a
-workaround, not a fix — a cleaner approach would be to clamp at the
-operator level only.
+The clamp is now an argument on `create_tripole_grid` — `min_dx_m`
+(default `1000.0`, pass `0.0` to disable) — applied uniformly to
+`dx_T, dy_T, dx_u, dy_u, dx_v, dy_v`, with `area_T, area_q` clamped
+to `min_dx_m**2`. Bit-exact with the old runner-side post-construction
+floor (verified on eORCA1.2 mesh, 2026-05-20). Callers no longer need
+to know about it.
 
-### Remaining blocker: cap-region cascade
+### Phase 6a — Resolution (cap-region cascade fixed)
 
-After all four fixes, the run still cascades to NaN. Step-by-step:
-```
-Step 1: max|u|=2.4e-2  max|eta|=2.2e-4   (PHYSICAL — fixed)
-Step 2: ?
-Step 5: max|u|=8e169   max|eta|=6.5e+52   (BLOWN UP)
-Step 6: NaN
-```
-The argmax of `|u|` migrates from -51° (step 1, normal ocean) to ~75–77°N
-(steps 3+, bipolar cap) during the cascade.
+The cap-region cascade flagged on 2026-05-08 was closed by a sequence
+of mid-May fixes. The argmax-`|u|` had been migrating from -51° (step
+1, normal ocean) to ~75–77°N (steps 3+, bipolar cap) during the
+cascade; the root causes turned out to be Hypothesis 3 (a hidden
+column-0 metric extraction in the strain/stress operators) and a
+preconditioner dtype-promotion bug, not the viscosity / PCG /
+time-step hypotheses speculated about above.
 
-**Hypotheses (untested as of 2026-05-08):**
+Commits that landed the resolution (newest first):
 
-1. **Cap viscosity insufficient.** `A_h_lat_scaling` may not be wired
-   for the tripolar path; the cap cells may need stronger lateral
-   viscosity to damp the gradients that develop after the wind starts.
-2. **Implicit barotropic still ill-conditioned.** Even with per-face
-   metrics in the preconditioner, the bipolar cap has order-of-magnitude
-   variation in cell sizes that PCG may not handle well. May need a
-   stronger preconditioner (block Jacobi? AMG?).
-3. **Hidden column-0 metric extraction.** Phase 1A migrated many
-   operators but it's possible at least one (`compute_isopycnal_slopes`?
-   `gm_redi`?) still has a `[:, 0]` extraction that wasn't caught.
-4. **Fold halo edge case under sustained forcing.** The fold tests use
-   small-magnitude fields. With wind forcing producing larger gradients,
-   a subtle issue (e.g., area mismatch at fold-adjacent cells) could
-   amplify.
-5. **Time-stepping CFL.** Even with `n_barotropic_substeps=10` and the
-   implicit solver, the dt=600s may be too long for the cap region.
+- `860a54ed` (2026-05-19) — Fix `sys.path` in tripolar runner: point
+  to `src/` not repo root.
+- `c2f5ba46` (2026-05-18) — Runner: rewrite with ORCA bathy + 80°N
+  cap + linear EOS + production config. `H_min=200` removes dangerous
+  shallow cap cells (the "27 m shelves next to 5500 m cliffs in the
+  bipolar cap" called out as Bug 4 above). Adcroft PGF + partial cells.
+- `1fb210df` (2026-05-18) — Fix `strain_rate_cgrid` +
+  `stress_divergence_cgrid` for tripolar 2D metrics. The remaining
+  column-0 metric extraction (Hypothesis 3) — caught.
+- `bb51083b` (2026-05-18) — Fix preconditioner dtype promotion on
+  tripolar geometry. PCG was silently downcasting to float32 in the
+  cap, where the order-of-magnitude `dx` variation needs full
+  double-precision arithmetic to converge.
+- `5deaa2bb` (2026-05-14) — Fix `gradient_y_cgrid` broadcast for
+  tripolar + variable-`dy` merge.
 
-### How to investigate (for future sessions)
+**Production validation:** 20-yr eORCA1 idealized forced run
+(`tripole_orca1_etopo_20yr_production/`) — see TL;DR above. 81
+quarterly restarts, no NaNs end to end, scientifically reasonable
+ACC/AMOC structure visible in the cross-grid comparison plots
+(`comparison_idealized_*` and `comparison_idealized_sections_*` in
+`~/saved_legoESM_data/`).
+
+### Reproducing the 20-yr production run
 
 ```bash
-# Reproduce the cascade
-JAX_ENABLE_X64=1 python scripts/global_overturning/run_global_overturning_tripole.py \
-    --quick --days 1 --block-size 10 --nlev 20
-
-# At step 2, check where max|u| is — that's where the instability seeds
-# Print the (j, i) of argmax|u| each step and watch it migrate
-
-# Test hypothesis 1: enable A_h_lat_scaling
-# Add to LatLonCGridOceanConfig: A_h_lat_scaling=True, A_h_floor=1000.0
-
-# Test hypothesis 3: grep for column-0 extractions in operators
-grep -n '\[:, 0\]' src/legoesm/ocean/dynamics/*.py src/legoesm/ocean/physics/lateral_mixing/*.py
-
-# Test hypothesis 5: try smaller dt
-# --dt 300 instead of default 600
+JAX_ENABLE_X64=1 python scripts/global_overturning/run_tripole_20yr.py \
+    --grid data/grids/eORCA1.2_mesh_mask.nc \
+    --etopo data/bathymetry/etopo_1deg.nc --years 20
 ```
+
+Output lands under `results/tripole_orca1_etopo_20yr/`; the
+2026-05-19/20 run was archived to
+`~/saved_legoESM_data/tripole_orca1_etopo_20yr_production/`.
 
 ## Architectural decisions
 
@@ -317,8 +323,12 @@ shaped the entire phased rollout:
   C-grid T→u/v interpolation, land-cell zeroing.
 - `tests/ocean/unit/test_tripole_fold.py` — 21 fold/rotation/integration
   tests.
-- `scripts/global_overturning/run_global_overturning_tripole.py` —
-  ORCA1 production runner (with all current workarounds).
+- `scripts/global_overturning/run_tripole_20yr.py` — ORCA1
+  production runner used for the 20-year reference run. The bring-up
+  variant `run_global_overturning_tripole.py` plus the
+  `_diagnose_tripole_blowup.py`, `_probe_fold_cells.py`,
+  `_probe_rest_state.py`, `_probe_rest_uniform.py` probe scripts
+  were deleted on 2026-05-20 after the production runner stabilised.
 
 ## See also
 

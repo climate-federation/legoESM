@@ -52,13 +52,6 @@ def main():
     n_blocks = n_steps // BLOCK
 
     geom = create_tripole_grid(args.grid)
-    dx_floor = 1000.0
-    geom = geom._replace(
-        dx_T=jnp.maximum(geom.dx_T, dx_floor), dy_T=jnp.maximum(geom.dy_T, dx_floor),
-        area_T=jnp.maximum(geom.area_T, dx_floor**2),
-        dx_u=jnp.maximum(geom.dx_u, dx_floor), dy_u=jnp.maximum(geom.dy_u, dx_floor),
-        dx_v=jnp.maximum(geom.dx_v, dx_floor), dy_v=jnp.maximum(geom.dy_v, dx_floor),
-        area_q=jnp.maximum(geom.area_q, dx_floor**2))
 
     H_raw, mask = init_ocean_bathymetry(geom, BathymetryConfig(
         source="file", path=args.etopo, H_max=5500.0, H_min=200.0,
