@@ -90,6 +90,17 @@ def main() -> int:
                    help="Basin filter for AMOC streamfunction.")
     p.add_argument("--amoc-lon-min-deg", type=float, default=-75.0)
     p.add_argument("--amoc-lon-max-deg", type=float, default=15.0)
+    # --- OMIP-2 SSS restoring ---
+    p.add_argument("--sss-restoring", action="store_true",
+                   help="Enable OMIP-2 surface salinity restoring to WOA "
+                        "climatology with region-aware tau.")
+    p.add_argument("--sss-tau-days", type=float, default=365.0,
+                   help="Default interior SSS restoring timescale [days].")
+    p.add_argument("--sss-z1-m", type=float, default=10.0,
+                   help="Surface restoring layer thickness [m].")
+    p.add_argument("--sss-cache", type=Path, default=None,
+                   help="WOA SSS NetCDF cache directory; falls back to "
+                        "synthetic climatology when missing.")
     p.add_argument("--smoke", action="store_true",
                    help="Run a single model day to exercise code paths.")
     args = p.parse_args()
@@ -111,6 +122,11 @@ def main() -> int:
         compute_amoc_from_state,
     )
     from legoesm.ocean.vertical import compute_layer_thickness
+    from legoesm.ocean.forcing.sss_restoring import (
+        SSSRestoringConfig, interp_woa_sss_to_grid,
+    )
+    from legoesm.ocean.forcing.woa_sss import load_woa_sss
+    from legoesm.ocean.coupler import apply_sss_restoring_step
     from run_omip2 import _build_state  # type: ignore
     import jax
 
@@ -118,6 +134,47 @@ def main() -> int:
     state, grid, z_coord, model = _build_state(
         args.grid, args.resolution, scripts_dir=scripts_dir,
     )
+
+    # --- OMIP-2 SSS restoring setup (post-grid) -----------------------
+    sss_config = None
+    S_target_on_grid = None
+    if args.sss_restoring and args.grid == "latlon":
+        sss_config = SSSRestoringConfig(
+            enabled=True,
+            tau_restore_days_default=args.sss_tau_days,
+            z1_m=args.sss_z1_m,
+        )
+        print(
+            f"==> Loading WOA SSS climatology "
+            f"(cache: {args.sss_cache or 'synthetic'})"
+        )
+        sss_woa, lat_woa, lon_woa = load_woa_sss(cache_dir=args.sss_cache)
+        import jax.numpy as _jnp
+        lat_deg = np.degrees(np.asarray(grid.lat))
+        lon_deg = np.degrees(np.asarray(grid.lon))
+        lat2d = np.broadcast_to(
+            lat_deg[:, None], (lat_deg.size, lon_deg.size),
+        )
+        lon2d = np.broadcast_to(
+            lon_deg[None, :], (lat_deg.size, lon_deg.size),
+        )
+        S_target_on_grid = np.asarray(interp_woa_sss_to_grid(
+            _jnp.asarray(sss_woa),
+            _jnp.asarray(lat_woa),
+            _jnp.asarray(lon_woa),
+            _jnp.asarray(lat2d),
+            _jnp.asarray(lon2d),
+        ))
+        print(
+            f"   SSS target range: "
+            f"{float(np.min(S_target_on_grid)):.2f}"
+            f" – {float(np.max(S_target_on_grid)):.2f} PSU"
+        )
+    elif args.sss_restoring and args.grid != "latlon":
+        print(
+            f"==> WARNING: --sss-restoring not yet supported on grid="
+            f"{args.grid!r}; ignoring."
+        )
 
     # Auto-resume: prefer ``--restart-from``, fallback to latest in
     # ``--output``.
@@ -241,6 +298,29 @@ def main() -> int:
                 z_coord=z_coord, grid=grid, grid_type=args.grid,
                 dt=dt,
             )
+            # OMIP-2 SSS restoring (when enabled and on lat-lon).
+            # This driver is ocean-only: no sea-ice tile is coupled
+            # in, so we pass an explicit zero ice-fraction field
+            # (open water everywhere) rather than ``None``.  When a
+            # coupled-ice driver consumes ``apply_sss_restoring_step``
+            # it should pass the live ``ice_state.concentration``
+            # field so the ice-gate path in
+            # ``compute_sss_restoring_flux`` suppresses restoring
+            # under ice and lets the brine channel drive the salt
+            # budget there.  (Sea-ice brine flux already lives in
+            # ``TileResponse.salt_flux`` from the prior coupling
+            # work.)
+            if sss_config is not None and S_target_on_grid is not None:
+                ice_open = np.zeros_like(S_target_on_grid)
+                state = apply_sss_restoring_step(
+                    state,
+                    S_target=S_target_on_grid,
+                    ice_concentration=ice_open,
+                    config=sss_config,
+                    grid=grid,
+                    z_coord=z_coord,
+                    dt=dt,
+                )
             state = model.step(state, dt)
         state = jax.block_until_ready(state)
 

@@ -1,0 +1,122 @@
+"""Apply OMIP-2 SSS restoring to the ocean state at every timestep.
+
+Bridges the standalone restoring kernel
+(``legoesm.ocean.forcing.sss_restoring.compute_sss_restoring_flux``)
+with the per-step ocean update.  Convention follows the virtual-
+salt formulation:
+
+    dS_top/dt = − (S_top − S_target) / τ_eff
+
+with ``τ_eff`` carrying the region masks + ice gating.  The
+helper applies the discrete step
+
+    S_top_new = S_top_old + dt · dS_top/dt
+
+clipped to the land mask so dry cells are untouched.
+
+Currently supports the lat-lon C-grid ocean state
+(``LatLonCGridOceanState``).  Other grids may use the standalone
+``compute_sss_restoring_flux`` directly and assemble the dS
+themselves.
+"""
+
+from __future__ import annotations
+
+import jax.numpy as jnp
+import numpy as np
+
+from legoesm.core.field import Field
+from legoesm.ocean.forcing.sss_restoring import (
+    SSSRestoringConfig,
+    compute_sss_restoring_flux,
+)
+
+
+def apply_sss_restoring_step(
+    state,
+    *,
+    S_target: np.ndarray | jnp.ndarray,
+    ice_concentration: np.ndarray | jnp.ndarray | None,
+    config: SSSRestoringConfig,
+    grid,
+    z_coord,
+    dt: float,
+) -> object:
+    """Apply one timestep of OMIP-2 SSS restoring to ``state``.
+
+    Updates the surface-layer salinity via
+
+        S_top_new = S_top_old + dt · dS/dt|_restore
+
+    where ``dS/dt|_restore`` comes from
+    :func:`compute_sss_restoring_flux`.  Land cells (``land_mask=0``)
+    are left untouched.
+
+    Parameters
+    ----------
+    state : LatLonCGridOceanState
+        Current ocean state (lat-lon C-grid).  ``state.S`` is a
+        ``Field`` with shape ``(n_lat, n_lon, nlev)``.
+    S_target : array ``(n_lat, n_lon)``
+        Climatological target SSS interpolated to the grid [PSU].
+    ice_concentration : array ``(n_lat, n_lon)`` or None
+        Cell ice fraction in [0, 1].  When ``None``, restoring is
+        applied everywhere without ice gating — appropriate for
+        ocean-only experiments without a sea-ice tile.
+    config : SSSRestoringConfig
+        Restoring configuration (region masks, τ, ice gate,
+        flux cap).
+    grid : LatLonGrid-like
+        Provides ``grid.lat`` and ``grid.lon`` (radians) for the
+        region-mask builder.
+    z_coord : OceanZStarCoordinate / OceanPartialCellCoordinate
+        Used to read ``dz_ref[0]`` for the surface-layer thickness.
+    dt : float
+        Time step [s].
+
+    Returns
+    -------
+    new_state : LatLonCGridOceanState
+        Same state with the top-layer salinity updated.
+    """
+    if not config.enabled:
+        return state
+
+    # Surface salinity from the existing state.
+    S_arr = np.asarray(state.S.data, dtype=np.float64)
+    S_top = S_arr[..., 0]
+
+    lat_deg = np.degrees(np.asarray(grid.lat))
+    lon_deg = np.degrees(np.asarray(grid.lon))
+    # Broadcast to 2D (n_lat, n_lon) for the kernel.
+    lat2d = np.broadcast_to(lat_deg[:, None], S_top.shape)
+    lon2d = np.broadcast_to(lon_deg[None, :], S_top.shape)
+
+    if ice_concentration is None:
+        ice = np.zeros_like(S_top)
+    else:
+        ice = np.asarray(ice_concentration, dtype=np.float64)
+
+    out = compute_sss_restoring_flux(
+        S_model_top=jnp.asarray(S_top),
+        S_target=jnp.asarray(S_target),
+        lat_deg=jnp.asarray(lat2d),
+        lon_deg=jnp.asarray(lon2d),
+        ice_concentration=jnp.asarray(ice),
+        config=config,
+    )
+
+    dS_dt = np.asarray(out["dS_dt_top"], dtype=np.float64)
+    land_mask = np.asarray(state.land_mask.data, dtype=np.float64)
+
+    S_new = S_arr.copy()
+    S_new[..., 0] = S_top + dt * dS_dt * land_mask
+
+    return state._replace(
+        S=Field(
+            jnp.asarray(S_new),
+            name=state.S.name,
+            dims=state.S.dims,
+            units=state.S.units,
+        ),
+    )
