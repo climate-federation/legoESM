@@ -48,10 +48,93 @@ from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.halo import pad_halo, pad_halo_vector
 from legoesm.grids.halo_latlon import pad_halo_vector_latlon
 from legoesm.grids.latlon import LatLonGrid
+from legoesm.grids.voronoi import VoronoiMesh
 
 
 def _is_latlon_grid(grid) -> bool:
     return isinstance(grid, LatLonGrid)
+
+
+def _is_voronoi_mesh(grid) -> bool:
+    return isinstance(grid, VoronoiMesh)
+
+
+def _cell_gradient_voronoi(
+    f_cell: jnp.ndarray,
+    mesh: VoronoiMesh,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Cell-centered Green-Gauss gradient on a Voronoi mesh.
+
+    ∂f/∂x|_C = (1/A_C) Σ_e f_e · n_e_x · L_e · s_{e,C}
+    ∂f/∂y|_C = (1/A_C) Σ_e f_e · n_e_y · L_e · s_{e,C}
+
+    where ``f_e = 0.5 · (f_{c1} + f_{c2})`` is the edge-averaged
+    value, ``n_e = (cos(angleEdge), sin(angleEdge))`` is the
+    edge-normal direction (oriented c1→c2 in ``cellsOnEdge``),
+    ``L_e = dvEdge`` is the edge length, ``s_{e,C} =
+    edgeSignOnCell`` is +1 if the edge-normal points out of C,
+    −1 otherwise, and ``A_C = areaCell``.
+
+    Boundary edges (single-cell) use ``f_e = f_{c1}`` (one-sided).
+
+    Returns
+    -------
+    df_dx, df_dy : array ``(nCells,)``
+    """
+    eoc = mesh.edgesOnCell                 # (maxEdges, nCells)
+    sign = mesh.edgeSignOnCell             # (maxEdges, nCells)
+    mask = (eoc >= 0).astype(f_cell.dtype)
+    eoc_safe = jnp.maximum(eoc, 0)
+
+    c1 = mesh.cellsOnEdge[0]
+    c2 = mesh.cellsOnEdge[1]
+    c1_safe = jnp.maximum(c1, 0)
+    c2_safe = jnp.maximum(c2, 0)
+    interior = c2 >= 0
+    f_edge = jnp.where(
+        interior, 0.5 * (f_cell[c1_safe] + f_cell[c2_safe]), f_cell[c1_safe],
+    )
+
+    cos_a = jnp.cos(mesh.angleEdge)
+    sin_a = jnp.sin(mesh.angleEdge)
+    dv = mesh.dvEdge
+
+    f_e_x = f_edge * cos_a * dv
+    f_e_y = f_edge * sin_a * dv
+
+    f_e_x_gathered = f_e_x[eoc_safe]       # (maxEdges, nCells)
+    f_e_y_gathered = f_e_y[eoc_safe]
+
+    flux_x = sign * f_e_x_gathered * mask
+    flux_y = sign * f_e_y_gathered * mask
+
+    df_dx = jnp.sum(flux_x, axis=0) / mesh.areaCell
+    df_dy = jnp.sum(flux_y, axis=0) / mesh.areaCell
+    return df_dx, df_dy
+
+
+def _strain_rates_voronoi(
+    u_ice: jnp.ndarray,
+    v_ice: jnp.ndarray,
+    mesh: VoronoiMesh,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Strain rate tensor on a Voronoi mesh via Green-Gauss cell gradients.
+
+    Cell-centered (u, v) on the MPAS mesh use the same local
+    east-north basis as cubed-sphere / lat-lon.  The Green-Gauss
+    gradient is a first-order-accurate cell-centered estimator
+    that is exact for linear fields.
+
+    Returns
+    -------
+    eps_11, eps_22, eps_12 : array ``(nCells,)``
+    """
+    du_dx, du_dy = _cell_gradient_voronoi(u_ice, mesh)
+    dv_dx, dv_dy = _cell_gradient_voronoi(v_ice, mesh)
+    eps_11 = du_dx
+    eps_22 = dv_dy
+    eps_12 = 0.5 * (du_dy + dv_dx)
+    return eps_11, eps_22, eps_12
 
 
 # ==============================================================================
@@ -177,9 +260,14 @@ def strain_rates(
           exchange + cross-face rotation.
         * ``LatLonGrid`` → A-grid centered FD in local-Cartesian
           (r·cosθ·dλ, r·dθ) coordinates.
+        * ``VoronoiMesh`` → Green-Gauss cell-centered gradient via
+          existing MPAS connectivity (``edgesOnCell``,
+          ``edgeSignOnCell``, ``angleEdge``).
 
     eps_11 = du/dx, eps_22 = dv/dy, eps_12 = 0.5·(du/dy + dv/dx).
     """
+    if _is_voronoi_mesh(grid):
+        return _strain_rates_voronoi(u_ice, v_ice, grid)
     if _is_latlon_grid(grid):
         return _strain_rates_latlon(u_ice, v_ice, grid)
     return _strain_rates_cubed_sphere(u_ice, v_ice, grid)

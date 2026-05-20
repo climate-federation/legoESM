@@ -25,8 +25,13 @@ from legoesm import constants
 from legoesm.core.operators_3d import fv_flux_divergence_3d
 from legoesm.core.operators_fv import fv_flux_divergence
 from legoesm.core.operators_fv_latlon import fv_flux_divergence_latlon
+from legoesm.core.operators_voronoi import (
+    divergence_cell,
+    thickness_flux,
+)
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.latlon import LatLonGrid
+from legoesm.grids.voronoi import VoronoiMesh
 
 
 def _is_latlon_grid(grid) -> bool:
@@ -35,6 +40,105 @@ def _is_latlon_grid(grid) -> bool:
 
 def _is_cubed_sphere_grid(grid) -> bool:
     return isinstance(grid, CubedSphereGrid)
+
+
+def _is_voronoi_mesh(grid) -> bool:
+    return isinstance(grid, VoronoiMesh)
+
+
+def _cell_velocity_to_edge_normal(
+    u_cell: jnp.ndarray,
+    v_cell: jnp.ndarray,
+    mesh: VoronoiMesh,
+) -> jnp.ndarray:
+    """Project cell-centered (u_east, v_north) onto edge-normal direction.
+
+    Cell-to-edge interpolation: average the two cells adjacent to
+    each edge (boundary edges get the single valid cell repeated).
+    Then dot with the edge-normal (cos(angleEdge), sin(angleEdge)).
+
+    Parameters
+    ----------
+    u_cell, v_cell : array ``(nCells,)``
+        Cell-centered east-north velocity components [m/s].
+    mesh : VoronoiMesh
+
+    Returns
+    -------
+    u_edge_normal : array ``(nEdges,)``
+        Normal component of velocity at each edge [m/s].
+    """
+    c1 = mesh.cellsOnEdge[0]
+    c2 = mesh.cellsOnEdge[1]
+    # Boundary edges have c2 = -1; clamp + use c1 only via mask.
+    c1_safe = jnp.maximum(c1, 0)
+    c2_safe = jnp.maximum(c2, 0)
+    interior = c2 >= 0
+    u_e_x = jnp.where(
+        interior,
+        0.5 * (u_cell[c1_safe] + u_cell[c2_safe]),
+        u_cell[c1_safe],
+    )
+    v_e_y = jnp.where(
+        interior,
+        0.5 * (v_cell[c1_safe] + v_cell[c2_safe]),
+        v_cell[c1_safe],
+    )
+    cos_a = jnp.cos(mesh.angleEdge)
+    sin_a = jnp.sin(mesh.angleEdge)
+    return u_e_x * cos_a + v_e_y * sin_a
+
+
+def fv_flux_divergence_voronoi(
+    q: jnp.ndarray,
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    mesh: VoronoiMesh,
+) -> jnp.ndarray:
+    """Cell-centered flux divergence on a Voronoi mesh.
+
+    Returns ``dq/dt = -div(q · v)`` so the caller integrates as
+    ``q_new = q + dt · tendency`` — matching the cubed-sphere and
+    lat-lon dispatchers.
+
+    Edge scalar reconstruction is computed locally here (not via
+    the shared ``thickness_flux``) so boundary edges where
+    ``cellsOnEdge[1] == −1`` correctly fall back to the one valid
+    cell.  No-flux closure is also applied at boundary edges
+    (``u_edge_normal = 0``) to prevent spurious mass leaks on
+    regional meshes.
+
+    Parameters
+    ----------
+    q : array ``(nCells,)``
+        Conservative scalar at cell centers (e.g. ice volume per cell).
+    u, v : array ``(nCells,)``
+        Cell-centered east-north velocity components [m/s].
+    mesh : VoronoiMesh
+
+    Returns
+    -------
+    tendency : array ``(nCells,)``
+        Time tendency of ``q`` from flux-form transport.
+    """
+    c1 = mesh.cellsOnEdge[0]
+    c2 = mesh.cellsOnEdge[1]
+    interior_edge = c2 >= 0
+    c1_safe = jnp.maximum(c1, 0)
+    c2_safe = jnp.maximum(c2, 0)
+
+    u_edge_normal = _cell_velocity_to_edge_normal(u, v, mesh)
+    # No-flux closure at boundary edges.
+    u_edge_normal = jnp.where(interior_edge, u_edge_normal, 0.0)
+
+    # Boundary-safe edge reconstruction of the transported scalar.
+    q_edge = jnp.where(
+        interior_edge, 0.5 * (q[c1_safe] + q[c2_safe]), q[c1_safe],
+    )
+    flux_edge = q_edge * u_edge_normal
+
+    div = divergence_cell(flux_edge, mesh)
+    return -div
 
 
 def _ppm_tendency_2d(
@@ -54,6 +158,8 @@ def _ppm_tendency_2d(
     """
     if _is_latlon_grid(grid):
         return fv_flux_divergence_latlon(q, u, v, grid, limiter=True)
+    if _is_voronoi_mesh(grid):
+        return fv_flux_divergence_voronoi(q, u, v, grid)
     return fv_flux_divergence(q, u, v, grid, limiter=True)
 
 
@@ -65,17 +171,19 @@ def _ppm_tendency_per_category(
 ) -> jnp.ndarray:
     """PPM tendency for a multi-category scalar (trailing category axis).
 
-    Cubed-sphere path reuses the existing
-    ``fv_flux_divergence_3d`` helper which vmaps over the trailing
-    axis (originally the vertical-level axis).  Lat-lon path vmaps
-    ``fv_flux_divergence_latlon`` over the trailing category axis
-    using ``jax.vmap``.
+    Cubed-sphere path reuses ``fv_flux_divergence_3d`` (vmaps over
+    trailing axis).  Lat-lon path vmaps ``fv_flux_divergence_latlon``
+    over the trailing category axis.  MPAS Voronoi path vmaps
+    ``fv_flux_divergence_voronoi`` similarly.
     """
     if _is_latlon_grid(grid):
-        # q_cat: (n_lat, n_lon, n_cat).  Vmap over the trailing axis.
         def _kernel(qk):
             return fv_flux_divergence_latlon(qk, u, v, grid, limiter=True)
         return jax.vmap(_kernel, in_axes=-1, out_axes=-1)(q_cat)
+    if _is_voronoi_mesh(grid):
+        def _kernel_v(qk):
+            return fv_flux_divergence_voronoi(qk, u, v, grid)
+        return jax.vmap(_kernel_v, in_axes=-1, out_axes=-1)(q_cat)
     u_3d = jnp.broadcast_to(u[..., None], q_cat.shape)
     v_3d = jnp.broadcast_to(v[..., None], q_cat.shape)
     return fv_flux_divergence_3d(q_cat, u_3d, v_3d, grid, limiter=True)
@@ -160,10 +268,16 @@ def advect_ice_tracers(
     enth = T_ice * vol                           # K · m
     conc = concentration
 
-    # Multi-category detection: base ndim depends on grid (cubed-
-    # sphere = 3D (6, n, n), lat-lon = 2D (n_lat, n_lon)); a trailing
-    # category axis adds one rank.
-    base_ndim = 2 if _is_latlon_grid(grid) else 3
+    # Multi-category detection: base ndim depends on grid layout.
+    # MPAS Voronoi: ``(nCells,)`` (1D); lat-lon: ``(n_lat, n_lon)`` (2D);
+    # cubed-sphere: ``(6, n, n)`` (3D).  Trailing category axis adds one
+    # rank.
+    if _is_voronoi_mesh(grid):
+        base_ndim = 1
+    elif _is_latlon_grid(grid):
+        base_ndim = 2
+    else:
+        base_ndim = 3
     is_multicat = h_ice.ndim == (base_ndim + 1)
     dt_sub = dt / n_subcycles
 

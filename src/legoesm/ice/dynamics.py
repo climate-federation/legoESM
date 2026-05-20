@@ -37,16 +37,27 @@ from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.halo import pad_halo, pad_halo_vector
 from legoesm.grids.halo_latlon import pad_halo_latlon
 from legoesm.grids.latlon import LatLonGrid
+from legoesm.grids.voronoi import VoronoiMesh
 from legoesm.ice.rheology import (
     ice_strength,
     strain_rates,
     evp_stress_update,
     mevp_stress_update,
+    _cell_gradient_voronoi,
 )
 
 
 def _is_latlon_grid(grid) -> bool:
     return isinstance(grid, LatLonGrid)
+
+
+def _is_voronoi_mesh(grid) -> bool:
+    return isinstance(grid, VoronoiMesh)
+
+
+def _grid_coriolis(grid) -> jnp.ndarray:
+    """Cell-centered Coriolis parameter array for any supported grid."""
+    return grid.grid_coriolis
 
 
 # ==============================================================================
@@ -124,6 +135,29 @@ def _stress_divergence_latlon(
     return Fx, Fy
 
 
+def _stress_divergence_voronoi(
+    sigma_11: jnp.ndarray,
+    sigma_22: jnp.ndarray,
+    sigma_12: jnp.ndarray,
+    mesh: VoronoiMesh,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Stress divergence on a Voronoi mesh via Green-Gauss cell gradients.
+
+    Treats σ_ij as scalars at cell centers in the local east-north
+    basis (same convention as the lat-lon path; valid because a
+    180° basis rotation leaves all three components even).
+
+        F_x = ∂σ_11/∂x + ∂σ_12/∂y
+        F_y = ∂σ_12/∂x + ∂σ_22/∂y
+    """
+    ds11_dx, _ = _cell_gradient_voronoi(sigma_11, mesh)
+    ds12_dx, ds12_dy = _cell_gradient_voronoi(sigma_12, mesh)
+    _, ds22_dy = _cell_gradient_voronoi(sigma_22, mesh)
+    Fx = ds11_dx + ds12_dy
+    Fy = ds12_dx + ds22_dy
+    return Fx, Fy
+
+
 def stress_divergence(
     sigma_11: jnp.ndarray,
     sigma_22: jnp.ndarray,
@@ -138,9 +172,12 @@ def stress_divergence(
           at coarse resolution, damped by EVP elastic relaxation).
         * ``LatLonGrid`` → A-grid centered FD with periodic-lon +
           pole-fold halo.
+        * ``VoronoiMesh`` → Green-Gauss cell-centered gradient.
 
     F_x = ∂σ_11/∂x + ∂σ_12/∂y, F_y = ∂σ_12/∂x + ∂σ_22/∂y.
     """
+    if _is_voronoi_mesh(grid):
+        return _stress_divergence_voronoi(sigma_11, sigma_22, sigma_12, grid)
     if _is_latlon_grid(grid):
         return _stress_divergence_latlon(sigma_11, sigma_22, sigma_12, grid)
     return _stress_divergence_cubed_sphere(sigma_11, sigma_22, sigma_12, grid)
@@ -387,7 +424,7 @@ def evp_solver(
     P = ice_strength(h_ice, concentration, P_star, C_strength)
 
     # Coriolis parameter at cell centers
-    f = grid.f.astype(u_ice.dtype)  # (6, n, n)
+    f = _grid_coriolis(grid).astype(u_ice.dtype)
     alpha = 0.5 * f * dt_s
     coriolis_denom = 1.0 + alpha ** 2
 
@@ -630,7 +667,7 @@ def mevp_solver(
     #   A · u^(p+1) − B · v^(p+1) = rhs_u
     #   B · u^(p+1) + A · v^(p+1) = rhs_v
     # with A = β + 1 and B = Δt · f.
-    f = grid.f.astype(u_ice.dtype)
+    f = _grid_coriolis(grid).astype(u_ice.dtype)
     A_cor = beta_mevp + 1.0
     B_cor = dt * f
     inv_det = 1.0 / (A_cor ** 2 + B_cor ** 2)

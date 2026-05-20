@@ -552,3 +552,114 @@ class TestLatLonEVP:
         )
         assert jnp.all(jnp.isfinite(u_new))
         assert jnp.all(jnp.isfinite(s11))
+
+
+# ==============================================================================
+# MPAS Voronoi ice support (transport + rheology + dynamics)
+# ==============================================================================
+
+class TestMPASVoronoi:
+    """Ice physics on MPAS Voronoi mesh."""
+
+    def _make_mesh(self, level=2):
+        from legoesm.grids.voronoi import create_voronoi_mesh
+        return create_voronoi_mesh(subdivision_level=level, lloyd_iterations=5)
+
+    def test_transport_uniform_field_conserved(self):
+        from legoesm.ice.transport import advect_ice_tracers
+        mesh = self._make_mesh()
+        n = mesh.nCells
+        h = jnp.full((n,), 1.0)
+        a = jnp.full((n,), 0.5)
+        T = jnp.full((n,), 263.0)
+        u = jnp.full((n,), 0.05)
+        v = jnp.zeros((n,))
+        h_new, a_new, T_new = advect_ice_tracers(h, a, T, u, v, mesh, dt=3600.0)
+        V0 = float(jnp.sum(h * a))
+        V1 = float(jnp.sum(h_new * a_new))
+        assert abs(V1 - V0) / max(V0, 1e-12) < 1e-6
+        A0 = float(jnp.sum(a))
+        A1 = float(jnp.sum(a_new))
+        assert abs(A1 - A0) / max(A0, 1e-12) < 1e-6
+
+    def test_multi_cat_transport(self):
+        from legoesm.ice.transport import advect_ice_tracers
+        mesh = self._make_mesh()
+        n = mesh.nCells
+        n_cat = 5
+        shape = (n, n_cat)
+        h = jnp.full(shape, 1.0)
+        a = jnp.full(shape, 0.15)
+        T = jnp.full(shape, 263.0)
+        u = jnp.full((n,), 0.05)
+        v = jnp.zeros((n,))
+        h_new, a_new, T_new = advect_ice_tracers(h, a, T, u, v, mesh, dt=3600.0)
+        assert h_new.shape == shape
+
+    def test_strain_rates_uniform_velocity_near_zero(self):
+        from legoesm.ice.rheology import strain_rates
+        mesh = self._make_mesh()
+        n = mesh.nCells
+        u = jnp.full((n,), 0.1)
+        v = jnp.zeros((n,))
+        e11, e22, e12 = strain_rates(u, v, mesh)
+        # Green-Gauss on a uniform field gives zero gradient up to
+        # mesh-irregularity noise; coarse SCVT meshes can reach
+        # ~1e-7 in e12.
+        assert jnp.all(jnp.abs(e11) < 1e-6)
+        assert jnp.all(jnp.abs(e22) < 1e-6)
+
+    def test_strain_rates_linear_u_gradient(self):
+        from legoesm.ice.rheology import strain_rates
+        mesh = self._make_mesh()
+        n = mesh.nCells
+        # u = 1e-6 · x_cell (m/s) → ∂u/∂x ≈ 1e-6
+        u = 1.0e-6 * mesh.xCell
+        v = jnp.zeros((n,))
+        e11, _, _ = strain_rates(u, v, mesh)
+        # Max |e11| should be O(1e-6); strict equality breaks because
+        # spherical projection of the linear field varies.
+        max_abs = float(jnp.max(jnp.abs(e11)))
+        assert 1e-7 < max_abs < 1e-5
+
+    def test_stress_divergence_zero_stress(self):
+        from legoesm.ice.dynamics import stress_divergence
+        mesh = self._make_mesh()
+        n = mesh.nCells
+        Fx, Fy = stress_divergence(
+            jnp.zeros((n,)), jnp.zeros((n,)), jnp.zeros((n,)), mesh,
+        )
+        assert jnp.all(Fx == 0.0)
+        assert jnp.all(Fy == 0.0)
+
+    def test_evp_solver_mpas_finite(self):
+        from legoesm.ice.dynamics import evp_solver
+        mesh = self._make_mesh()
+        n = mesh.nCells
+        u_new, v_new, s11, s22, s12 = evp_solver(
+            jnp.zeros((n,)), jnp.zeros((n,)),
+            jnp.zeros((n,)), jnp.zeros((n,)), jnp.zeros((n,)),
+            jnp.full((n,), 1.5), jnp.full((n,), 0.9),
+            jnp.full((n,), 10.0), jnp.zeros((n,)),
+            jnp.zeros((n,)), jnp.zeros((n,)),
+            mesh, dt=3600.0, N_evp=20,
+        )
+        assert jnp.all(jnp.isfinite(u_new))
+        assert jnp.all(jnp.isfinite(s11))
+        # Zubov-magnitude drift response.
+        assert 0.01 < float(jnp.max(jnp.abs(u_new))) < 1.0
+
+    def test_mevp_solver_mpas_finite(self):
+        from legoesm.ice.dynamics import mevp_solver
+        mesh = self._make_mesh()
+        n = mesh.nCells
+        u_new, v_new, s11, s22, s12 = mevp_solver(
+            jnp.zeros((n,)), jnp.zeros((n,)),
+            jnp.zeros((n,)), jnp.zeros((n,)), jnp.zeros((n,)),
+            jnp.full((n,), 1.5), jnp.full((n,), 0.9),
+            jnp.full((n,), 10.0), jnp.zeros((n,)),
+            jnp.zeros((n,)), jnp.zeros((n,)),
+            mesh, dt=3600.0, N_mevp=20,
+        )
+        assert jnp.all(jnp.isfinite(u_new))
+        assert jnp.all(jnp.isfinite(s11))
