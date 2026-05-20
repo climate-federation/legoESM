@@ -311,3 +311,101 @@ CUDA_VISIBLE_DEVICES=1 JAX_ENABLE_X64=1 nohup .venv/bin/python scripts/run_omip.
 5. **Production OMIP config** — 5-cycle (300-year) run per OMIP-2 protocol
 6. **Diagnostics** — OMIP Table fields (~150 variables) for comparison
    with other models
+
+## Run Status (as of 2026-05-20)
+
+### Completed Runs
+
+**ico5 v5 — 100 years, PASSED** (the reference run)
+- Output: `results/mpas_jra55_etopo_100yr_woa_v5/mpas/ico5/`
+- IC: 9-year WOA nudge (tau=365d), then free run from day 3300
+- Config: A_h=1e5, correct wind stress, SW penetration, freshwater
+  normalization, freeze cap, SSS restoring (5e-7), basin removal
+- Wall time: 12.6 hours on 1× V100S
+- Key results:
+  - AMOC at 26.5°N: 34 Sv (z-space), 33 Sv (sigma-space) — too
+    strong (observed ~17 Sv), common in no-ice models
+  - ACC Drake transport: ~163 Sv mean (observed 130-170 Sv) — good
+  - Pacific MOC: 0.7 Sv z-space (correct), 12.8 Sv sigma-space
+  - AABW: -3.4 Sv (observed -4 to -6 Sv) — reasonable
+  - Warm pool SST stuck at ~38-39°C (legacy from 32 years of
+    reversed wind forcing before the sign fix)
+  - Equatorial upwelling correct after wind fix
+
+**ico5 10-year WOA nudge v2** (IC source for ico5 v5)
+- Output: `results/mpas_jra55_etopo_10yr_nudge_v2/mpas/ico5/`
+- SSH mean: -0.003m (volume-neutral nudging working)
+- Deep T converged to 0.08°C RMS of WOA
+
+**ico6 10-year WOA nudge** (IC source for ico6 free run)
+- Output: `results/mpas_jra55_etopo_10yr_nudge_ico6/mpas/ico6/`
+- Final restart: `restarts/restart_day003650.npz`
+
+### In Progress (stopped, can restart)
+
+**ico6 100-year free run — stopped at day 14490 (year 29.7 of free run)**
+- Output: `results/mpas_jra55_etopo_100yr_ico6/mpas/ico6/`
+- Latest restart: `restarts/restart_day014490.npz`
+- Config: same as ico5 v5 but at ico6 (~112 km, 40962 cells)
+- Performance: 1.7s compute + 3.8s io = 5.5s/day (io-bound from
+  per-block JRA55 regridding at 40k cells)
+- Known issue: per-block regridding is the bottleneck — should be
+  done once at preload time, not per block
+
+### How to Restart the ico6 Run
+
+```bash
+CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 nohup .venv/bin/python scripts/run_omip.py \
+  --grid mpas --resolution ico6 --nlev 20 --days 40150 --dt 1200 \
+  --H-max 5500 --H-min 10 \
+  --bathymetry data/bathymetry/etopo_1deg.nc --smoothing-passes 2 \
+  --forcing-mode jra55_do_tropical \
+  --jra55-cache data/jra55_ryf_cache/jra55_do_v14_omip2_1deg_noleap_fixed.zarr \
+  --jra55-cycle \
+  --woa-t data/woa18/woa18_decav_t00_01.nc \
+  --woa-s data/woa18/woa18_decav_s00_01.nc \
+  --sss-piston-velocity 5e-7 \
+  --jra55-no-sponge \
+  --restart results/mpas_jra55_etopo_100yr_ico6/mpas/ico6/restarts/restart_day014490.npz \
+  --output results/mpas_jra55_etopo_100yr_ico6 \
+  > results/mpas_jra55_etopo_100yr_ico6.log 2>&1 &
+```
+
+### How to Generate Snapshots
+
+```bash
+bash scripts/gen_yearly_snapshots.sh results/mpas_jra55_etopo_100yr_ico6/mpas/ico6 6
+```
+
+### Performance Optimization Needed for ico6
+
+The io=3.8s/day bottleneck is from regridding the JRA55 preloaded
+cache (lat-lon → 40k MPAS cells) at every block.  The fix: regrid
+the entire cache once during preload, not per block.  Currently in
+`_preload_jra55_raw_records` the regridding happens per block; for
+`_preload_jra55_full_cache` + `_slice_preloaded_records` the data
+is already regridded at preload time but the slicing still triggers
+a JAX computation.  Needs investigation.
+
+### Bugs Found and Fixed During This Campaign
+
+1. **Wind stress sign** — bulk-flux tau was in atmosphere convention,
+   applied without negation to ocean. Fixed in mpas_physics.py.
+2. **SW penetration missing** — all heat into 21m surface cell.
+   Added Jerlov penetration in mpas_physics.py.
+3. **Freshwater normalization** — P-E+R imbalance without ice caused
+   -0.34 m/yr SSH drift. Fixed with global-mean subtraction.
+4. **Volume-neutral WOA nudging** — nudge-induced density changes
+   caused +5m SSH bias. Fixed with eta correction post-nudge.
+5. **Enclosed basin removal** — flood-fill algorithm for all grids
+   (Baltic, Black Sea, Caspian, White Sea at ico5; 10 basins at ico6).
+6. **Salinity clamp** — virtual salt flux can overshoot to S<0 in
+   shallow cells with heavy runoff. Clamped at 0.
+7. **Greenwich meridian cache bug** — conservative regrid longitude
+   wrap missing ghost column.
+8. **North cap default** — CLI default was 80°N, should be 90°.
+9. **SSS restoring land mask** — missing in GPU-interp scan path.
+10. **Matplotlib thread safety** — background snapshot threads crash
+    without lock serialization.
+11. **Tripcolor long triangles** — Delaunay creates cross-land
+    connections, filtered by max edge length.
