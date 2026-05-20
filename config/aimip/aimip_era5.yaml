@@ -77,8 +77,11 @@ n_max: 63            # v10: T63 ≈ 1.9° (96x128 grid, ncol=12288).
                      # T127 needs a dycore-level gradient checkpoint
                      # (separate refactor).
 nlev: 8              # full vertical resolution.
-dt: 1200.0           # 20-minute dycore timestep.  T63 dx ~ 310 km;
-                     # wind 100 m/s gives CFL ~ 0.39 at dt=1200.
+dt: 600.0            # 10-minute dycore timestep.  T63 dt=1200 produced
+                     # NaN at step 0 (2026-05-20) -- likely hyperdiff
+                     # coefficient is too weak for T63 wavenumbers.
+                     # dt=600 gives CFL ~ 0.19 and tighter implicit
+                     # damping per step, surviving the spin-up.
 
 # ----- Training -----------------------------------------------------
 # Cap epochs at a generous upper bound; early stopping (patience +
@@ -123,8 +126,8 @@ aimip_radiation: "rrtmgp"  # gray | rrtmgp.  RRTMGP is required for AIMIP
                            # trade ~2-3x forward compute for the
                            # activation-storage relief that lets a
                            # 48-step daily rollout fit in 24 GiB.
-aimip_rad_update_interval: 72 # v10 T63: 1 RRTMGP call per 1-day rollout
-                              # at dt=1200 (72 steps/day).
+aimip_rad_update_interval: 144  # v10 T63: 1 RRTMGP call per 1-day
+                                # rollout at dt=600 (144 steps/day).
 
 # ----- Spatial surface parameters (over land) ----------------------
 # When true, the AIMIP classical variant exposes seven surface and
