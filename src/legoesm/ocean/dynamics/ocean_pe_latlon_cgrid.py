@@ -1870,6 +1870,92 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         phys_K_v = getattr(phys, "K_v", None)
         phys_A_v = getattr(phys, "A_v", None)
 
+    # --- 10b'. External surface forcing (e.g. from JRA55 bulk fluxes) ---
+    # When the caller passes an OceanSurfaceForcing carrying tau_x /
+    # tau_y / q_net / sw_down, apply them here.  Mirrors
+    # mpas_physics.py:183-245 so MPAS and the lat-lon C-grid behave
+    # identically under coupled / OMIP forcing.  The bulk-flux solver
+    # returns tau in atmospheric (eastward / northward) convention; the
+    # ocean needs the reaction force, hence the sign flip.  On tripolar
+    # geometries, geographic east/north is rotated to grid-aligned
+    # (i, j) components via geom.cos_alpha_u / sin_alpha_u (identity
+    # outside the bipolar cap, so regular lat-lon C-grids are
+    # bit-exact unchanged).
+    if surface_forcing is not None:
+        _sf_tau_x = getattr(surface_forcing, "tau_x", None)
+        _sf_tau_y = getattr(surface_forcing, "tau_y", None)
+        _sf_q_net = getattr(surface_forcing, "q_net", None)
+        _sf_sw = getattr(surface_forcing, "sw_down", None)
+
+        if _sf_tau_x is not None and _sf_tau_y is not None:
+            # Atmosphere convention (opposes wind) -> ocean reaction.
+            tau_e_T = -jnp.asarray(_sf_tau_x, dtype=u.dtype)
+            tau_n_T = -jnp.asarray(_sf_tau_y, dtype=u.dtype)
+            tau_e_u_face = interp_cell_to_uface(tau_e_T)       # (n_lat, n_lon+1)
+            tau_n_u_face = interp_cell_to_uface(tau_n_T)
+            tau_e_v_face = _interp_to_v_points(tau_e_T, grid=grid)  # (n_lat+1, n_lon)
+            tau_n_v_face = _interp_to_v_points(tau_n_T, grid=grid)
+
+            cos_a_u = getattr(grid, "cos_alpha_u", None)
+            sin_a_u = getattr(grid, "sin_alpha_u", None)
+            cos_a_v = getattr(grid, "cos_alpha_v", None)
+            sin_a_v = getattr(grid, "sin_alpha_v", None)
+            if cos_a_u is not None and sin_a_u is not None:
+                ca_u = jnp.asarray(cos_a_u, dtype=u.dtype)
+                sa_u = jnp.asarray(sin_a_u, dtype=u.dtype)
+                tau_i_u = tau_e_u_face * ca_u + tau_n_u_face * sa_u
+            else:
+                tau_i_u = tau_e_u_face
+            if cos_a_v is not None and sin_a_v is not None:
+                ca_v = jnp.asarray(cos_a_v, dtype=u.dtype)
+                sa_v = jnp.asarray(sin_a_v, dtype=u.dtype)
+                tau_j_v = -tau_e_v_face * sa_v + tau_n_v_face * ca_v
+            else:
+                tau_j_v = tau_n_v_face
+
+            dz_0_T = jnp.asarray(z_coord.dz_ref[0], dtype=u.dtype) * J
+            dz_0_u = interp_cell_to_uface(dz_0_T)
+            dz_0_v = _interp_to_v_points(dz_0_T, grid=grid)
+            rho_0_dt = jnp.asarray(rho_0, dtype=u.dtype)
+            inv_rho_dz_u = 1.0 / (rho_0_dt * jnp.maximum(dz_0_u, 1e-10))
+            inv_rho_dz_v = 1.0 / (rho_0_dt * jnp.maximum(dz_0_v, 1e-10))
+
+            du_dt = du_dt.at[..., 0].add(tau_i_u * inv_rho_dz_u)
+            dv_dt = dv_dt.at[..., 0].add(tau_j_v * inv_rho_dz_v)
+
+        if _sf_q_net is not None:
+            from legoesm.ocean.eos import c_sw as _c_sw
+            dz_0_T_q = jnp.asarray(z_coord.dz_ref[0], dtype=T.dtype) * J
+            inv_rho_csw_dz = 1.0 / (
+                jnp.asarray(rho_0, dtype=T.dtype)
+                * jnp.asarray(_c_sw, dtype=T.dtype)
+                * jnp.maximum(dz_0_T_q, 1e-10)
+            )
+            q_net_T = jnp.asarray(_sf_q_net, dtype=T.dtype)
+            if _sf_sw is not None:
+                # Split: non-solar at surface, solar penetrating column.
+                sw_T = jnp.asarray(_sf_sw, dtype=T.dtype)
+                sw_absorbed = sw_T * jnp.asarray(0.94, dtype=T.dtype)
+                q_nonsolar = q_net_T - sw_absorbed
+                dT_dt = dT_dt.at[..., 0].add(
+                    q_nonsolar * inv_rho_csw_dz * mask
+                )
+                from legoesm.ocean.physics.shortwave_penetration import (
+                    shortwave_penetration_tendency,
+                )
+                sw_tend = shortwave_penetration_tendency(
+                    sw_absorbed,
+                    z_coord.dz_ref,
+                    z_coord.z_half_ref,
+                    J,
+                    rho_0=float(rho_0),
+                )
+                dT_dt = dT_dt + sw_tend * mask_3d
+            else:
+                dT_dt = dT_dt.at[..., 0].add(
+                    q_net_T * inv_rho_csw_dz * mask
+                )
+
     # --- 10c. Sponge layer relaxation ---
     # Cast sponge arrays to state dtype to prevent float64 promotion when
     # the precision policy stores state in float32 (crashes barotropic scan).
