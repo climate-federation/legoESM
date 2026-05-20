@@ -1716,14 +1716,22 @@ def stress_divergence_cgrid(
 
         tend_v = tend_v_DT + tend_v_DS
 
-        area_u_dual = dy_h * dx_cell
-        area_v_dual = dy_edge * dx_v
+        area_u_dual = dy_h * dx_cell   # (n_lat,) — 1D
+        area_v_dual = dy_edge * dx_v   # (n_lat+1,) — 1D
         area_u_dual = jnp.maximum(area_u_dual, 1e-30)
         area_v_dual = jnp.maximum(area_v_dual, 1e-30)
 
     if normalize:
-        tend_u = tend_u / _bcast(area_u_dual)
-        tend_v = tend_v / _bcast(area_v_dual)
+        # area_*_dual may be 1D (non-tripolar) or 2D (tripolar).
+        # For 3D tendencies we need (lat, 1, 1) or (lat, lon, 1).
+        # Use lat_bcast-style indexing for 1D areas so the lon and
+        # level axes are broadcast-compatible.
+        if is_3d and area_u_dual.ndim == 1:
+            tend_u = tend_u / area_u_dual[:, jnp.newaxis, jnp.newaxis]
+            tend_v = tend_v / area_v_dual[:, jnp.newaxis, jnp.newaxis]
+        else:
+            tend_u = tend_u / _bcast(area_u_dual)
+            tend_v = tend_v / _bcast(area_v_dual)
 
     if u_mask is not None:
         um = u_mask[..., jnp.newaxis] if is_3d and u_mask.ndim == 2 else u_mask

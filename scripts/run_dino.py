@@ -237,12 +237,8 @@ def main():
             stacklevel=2,
         )
 
-    # Local-machine policy: cap at 1 yr (decision logged in plan)
-    if args.days > 365.0:
-        raise SystemExit(
-            f"--days={args.days} exceeds the 1-year local-machine cap. "
-            "Long spin-ups should run on a GPU machine — see plan."
-        )
+    # Original local-machine policy capped at 1 yr. Removed 2026-05-18:
+    # V100S GPU completes 1 yr in ~4.4 min, so multi-year runs are feasible.
 
     cfg = DINOConfig()
     if args.dt is not None:

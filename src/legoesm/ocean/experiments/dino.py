@@ -179,13 +179,12 @@ class DINOConfig:
     # ------------------------------------------------------------------
     U_M: float = 0.27              # viscous velocity scale [m/s] (rn_Uv)
     # High-latitude / equatorial protection (MOM6 OM4 standard knobs).
-    # Diagnosed empirically (2026-05-14) as the late-time stability fix:
-    # without these, A_h(j)·cos(φ) drops to 34% at 70°N/S and the
-    # equatorial waveguide goes unconstrained (f→0). Enabling them
-    # turns a day-28 blowup into a 35-day-stable run with the
-    # Hollingsworth correction.
-    A_h_floor: float = 1000.0      # min effective A_h [m²/s] after cos(lat) scaling
-    A_h_eq_boost: float = 3.0      # equatorial Laplacian-viscosity boost factor
+    # MOM6-style stability knobs. Originally A_h_floor=1000, A_h_eq_boost=3
+    # were needed before implicit_vertical_mixing landed. With implicit
+    # vmix + Hollingsworth, paper-exact settings (floor=0, boost=1) are
+    # stable for 1-year forced runs (verified 2026-05-18).
+    A_h_floor: float = 0.0         # min effective A_h [m²/s] after cos(lat) scaling
+    A_h_eq_boost: float = 1.0      # equatorial Laplacian-viscosity boost factor (1.0 = off)
     A_h_eq_sigma_deg: float = 5.0  # boost Gaussian half-width [deg]
     # Tracer iso-neutral diffusion velocity scale (R1 only; eq below
     # Table 2). At R1 our GM/Redi handles this — we keep U_T for
