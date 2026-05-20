@@ -138,20 +138,24 @@ def initialize_distributed(
         coordinator_port = 1234
         coordinator_bind = f"{coordinator_address}:{coordinator_port}"
 
-        try:
-            jax.distributed.initialize(
-                coordinator_address=coordinator_bind,
-                num_processes=n_processes,
-                process_id=rank,
-            )
-        except RuntimeError as e:
-            raise RuntimeError(
-                f"jax.distributed.initialize() failed on rank {rank}/{n_processes} "
-                f"with coordinator={coordinator_bind}. "
-                f"Ensure the coordinator port {coordinator_port} is not in use "
-                f"and all ranks can reach {coordinator_address}. "
-                f"Original error: {e}"
-            ) from e
+        # Skip if already initialized (e.g. by early-init block in run_amip.py
+        # which must call jax.distributed.initialize() before any legoESM
+        # import triggers XLA backend discovery).
+        if jax.process_count() == 1:
+            try:
+                jax.distributed.initialize(
+                    coordinator_address=coordinator_bind,
+                    num_processes=n_processes,
+                    process_id=rank,
+                )
+            except RuntimeError as e:
+                raise RuntimeError(
+                    f"jax.distributed.initialize() failed on rank {rank}/{n_processes} "
+                    f"with coordinator={coordinator_bind}. "
+                    f"Ensure the coordinator port {coordinator_port} is not in use "
+                    f"and all ranks can reach {coordinator_address}. "
+                    f"Original error: {e}"
+                ) from e
 
         # Validate JAX agrees with MPI.
         jax_rank = jax.process_index()
