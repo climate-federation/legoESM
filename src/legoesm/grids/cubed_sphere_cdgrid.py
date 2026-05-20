@@ -40,7 +40,10 @@ from legoesm.grids.halo import (
     WEST,
     _face_gnomonic_to_lonlat,
     _fill_corners_h1,
+    get_halo_backend,
+    get_mpi_topology,
     pad_halo,
+    set_halo_backend,
 )
 
 
@@ -1103,11 +1106,23 @@ def create_cubed_sphere_cdgrid(
     # runtime `_arakawa_lamb_gradient` operator.  Previously these
     # positions were pinned to `interp_offsets` even in duogrid mode,
     # creating a silent inconsistency between grid-build and runtime halos.
+    #
+    # MPI note: pad_halo_mpi does not support interp_offsets.  The
+    # coordinate arrays are computed from the full global grid (each rank
+    # holds all 6 faces at init time), so the local (non-MPI) path is
+    # correct here.  Temporarily switch to local backend if needed.
     _base_dg = base.duogrid
     _pos_offs = None if _base_dg is not None else base.halo_interp_offsets
+    _active_backend = get_halo_backend()
+    _need_local = _active_backend == "mpi" and _pos_offs is not None
+    if _need_local:
+        _saved_topology = get_mpi_topology()
+        set_halo_backend("local")
     x_pad = pad_halo(x_cc, interp_offsets=_pos_offs, duogrid=_base_dg)
     y_pad = pad_halo(y_cc, interp_offsets=_pos_offs, duogrid=_base_dg)
     z_pad = pad_halo(z_cc, interp_offsets=_pos_offs, duogrid=_base_dg)
+    if _need_local:
+        set_halo_backend("mpi", _saved_topology)
     x_pad = _fill_corners_h1(x_pad)
     y_pad = _fill_corners_h1(y_pad)
     z_pad = _fill_corners_h1(z_pad)

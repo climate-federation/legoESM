@@ -412,6 +412,11 @@ def get_halo_backend() -> str:
     return _halo_backend
 
 
+def get_mpi_topology():
+    """Return the current MPI topology (None if backend is not 'mpi')."""
+    return _mpi_topology
+
+
 # ==============================================================================
 # Scalar halo exchange
 # ==============================================================================
