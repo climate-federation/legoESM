@@ -61,6 +61,7 @@ from legoesm.ocean.dynamics.ocean_tendency_common import (
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     biharmonic_scaling_factor,
     equatorial_boost_factor,
+    polar_cap_boost_factor,
     laplacian_scaling_factor,
     divergence_cgrid,
     gradient_x_cgrid,
@@ -1509,13 +1510,30 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
                     grid, config.A_h_eq_sigma_deg, config.A_h_eq_boost)
                 lap_scale_u = lap_scale_u * eb_u
                 lap_scale_v = lap_scale_v * eb_v
+            if config.A_h_cap_boost > 1.0:
+                cap_u, cap_v = polar_cap_boost_factor(
+                    grid, config.A_h_cap_lat_deg,
+                    config.A_h_cap_boost, config.A_h_cap_width_deg)
+                lap_scale_u = lap_scale_u * cap_u
+                lap_scale_v = lap_scale_v * cap_v
             diag_Ah_lap_u = config.A_h * lap_scale_u[:, None, None] * _vlap_u
             diag_Ah_lap_v = config.A_h * lap_scale_v[:, None, None] * _vlap_v
-        elif config.A_h_eq_boost > 1.0:
-            eb_u, eb_v = equatorial_boost_factor(
-                grid, config.A_h_eq_sigma_deg, config.A_h_eq_boost)
-            diag_Ah_lap_u = config.A_h * eb_u[:, None, None] * _vlap_u
-            diag_Ah_lap_v = config.A_h * eb_v[:, None, None] * _vlap_v
+        elif config.A_h_eq_boost > 1.0 or config.A_h_cap_boost > 1.0:
+            scale_u = jnp.ones((grid.lat.shape[0],), dtype=grid.lat.dtype)
+            scale_v = jnp.ones((grid.lat.shape[0] + 1,), dtype=grid.lat.dtype)
+            if config.A_h_eq_boost > 1.0:
+                eb_u, eb_v = equatorial_boost_factor(
+                    grid, config.A_h_eq_sigma_deg, config.A_h_eq_boost)
+                scale_u = scale_u * eb_u
+                scale_v = scale_v * eb_v
+            if config.A_h_cap_boost > 1.0:
+                cap_u, cap_v = polar_cap_boost_factor(
+                    grid, config.A_h_cap_lat_deg,
+                    config.A_h_cap_boost, config.A_h_cap_width_deg)
+                scale_u = scale_u * cap_u
+                scale_v = scale_v * cap_v
+            diag_Ah_lap_u = config.A_h * scale_u[:, None, None] * _vlap_u
+            diag_Ah_lap_v = config.A_h * scale_v[:, None, None] * _vlap_v
         else:
             diag_Ah_lap_u = config.A_h * _vlap_u
             diag_Ah_lap_v = config.A_h * _vlap_v
@@ -1548,13 +1566,30 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
                     grid, config.A_h_eq_sigma_deg, config.A_h_eq_boost)
                 lap_scale_u = lap_scale_u * eb_u
                 lap_scale_v = lap_scale_v * eb_v
+            if config.A_h_cap_boost > 1.0:
+                cap_u, cap_v = polar_cap_boost_factor(
+                    grid, config.A_h_cap_lat_deg,
+                    config.A_h_cap_boost, config.A_h_cap_width_deg)
+                lap_scale_u = lap_scale_u * cap_u
+                lap_scale_v = lap_scale_v * cap_v
             diag_Ah_lap_u = config.A_h * lap_scale_u[:, None, None] * vlap_u
             diag_Ah_lap_v = config.A_h * lap_scale_v[:, None, None] * vlap_v
-        elif config.A_h_eq_boost > 1.0:
-            eb_u, eb_v = equatorial_boost_factor(
-                grid, config.A_h_eq_sigma_deg, config.A_h_eq_boost)
-            diag_Ah_lap_u = config.A_h * eb_u[:, None, None] * vlap_u
-            diag_Ah_lap_v = config.A_h * eb_v[:, None, None] * vlap_v
+        elif config.A_h_eq_boost > 1.0 or config.A_h_cap_boost > 1.0:
+            scale_u = jnp.ones((grid.lat.shape[0],), dtype=grid.lat.dtype)
+            scale_v = jnp.ones((grid.lat.shape[0] + 1,), dtype=grid.lat.dtype)
+            if config.A_h_eq_boost > 1.0:
+                eb_u, eb_v = equatorial_boost_factor(
+                    grid, config.A_h_eq_sigma_deg, config.A_h_eq_boost)
+                scale_u = scale_u * eb_u
+                scale_v = scale_v * eb_v
+            if config.A_h_cap_boost > 1.0:
+                cap_u, cap_v = polar_cap_boost_factor(
+                    grid, config.A_h_cap_lat_deg,
+                    config.A_h_cap_boost, config.A_h_cap_width_deg)
+                scale_u = scale_u * cap_u
+                scale_v = scale_v * cap_v
+            diag_Ah_lap_u = config.A_h * scale_u[:, None, None] * vlap_u
+            diag_Ah_lap_v = config.A_h * scale_v[:, None, None] * vlap_v
         else:
             diag_Ah_lap_u = config.A_h * vlap_u
             diag_Ah_lap_v = config.A_h * vlap_v

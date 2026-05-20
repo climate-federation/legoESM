@@ -691,3 +691,21 @@ class LatLonCGridOceanConfig(NamedTuple):
     # Finding 5). Set explicit ``implicit_vertical_mixing=False`` to
     # reproduce the historical explicit-diffusion behavior.
     implicit_vertical_mixing: bool = True
+
+    # --- Polar-cap viscosity boost (tripolar fold support) ---
+    # Appended at the end of the NamedTuple to preserve positional
+    # construction semantics for legacy callers.  When > 1, multiplies
+    # A_h by 1 + (boost − 1) · S(|lat| − cap_lat_deg) where S is a
+    # smooth tanh ramp of width ``A_h_cap_width_deg``.  Damps the
+    # bipolar-cap cascade on tripolar grids where the cos(lat) scaling
+    # drops to zero at the fold boundary but the deformed cap cells
+    # need stronger dissipation than ``A_h_floor`` alone provides.
+    # Typical ORCA1 production: 5–20.  Disabled by default (1.0) to
+    # preserve bit-exact regression on legacy lat-lon configs.
+    A_h_cap_boost: float = 1.0
+    # Latitude (°N) at which the polar-cap boost ramp begins.  For
+    # tripolar grids, set close to the ``fold_lat`` of the
+    # FoldDescriptor.  Typical 70–80°.
+    A_h_cap_lat_deg: float = 75.0
+    # Half-width of the polar-cap boost tanh transition [°]; default 5°.
+    A_h_cap_width_deg: float = 5.0

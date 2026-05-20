@@ -1262,6 +1262,72 @@ def equatorial_boost_factor(
     return boost_u, boost_v
 
 
+def polar_cap_boost_factor(
+    grid: LatLonGrid,
+    cap_lat_deg: float,
+    boost: float,
+    width_deg: float = 5.0,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Latitude-dependent polar-cap enhancement factor for A_h.
+
+    Returns a multiplier ``1 + (boost - 1) · S(|lat| − cap_lat_deg)``
+    where ``S`` is a smooth tanh ramp of width ``width_deg``.  Active
+    only at high latitudes; transparent (factor 1) below the cap.
+
+    Designed to damp the bipolar-cap cascade on tripolar grids where
+    the ``cos(lat)`` viscosity scaling drops to zero at the fold
+    boundary even though the deformed cells require stronger lateral
+    dissipation than the ``A_h_floor`` alone provides.  At a typical
+    ORCA1-like cap (start at 75°N), a 5–20× boost over ±5° width
+    matches MOM6 ORCA1 ``KH_VEL_LAT_RES`` profile semantics.
+
+    Multiplicative on top of the ``laplacian_scaling_factor`` cos(lat)
+    scaling (or the cos²(lat) biharmonic scaling).  On a regular
+    lat-lon grid with no fold this still applies — the boost is a
+    function of latitude only — so callers should leave it off
+    (``boost=1.0``) unless they want extra polar diffusion.
+
+    Parameters
+    ----------
+    grid : LatLonGrid
+    cap_lat_deg : float
+        Latitude (degrees, North) at which the boost ramp begins.
+        Typical values 70–80°.  For tripolar grids, set close to the
+        ``fold_lat`` of the ``FoldDescriptor``.
+    boost : float
+        Multiplier in the asymptotic limit (deep inside the cap).
+        Values ≥ 1.0; ``boost = 1.0`` disables the enhancement.
+        Typical values 5–20.
+    width_deg : float
+        Half-width of the tanh transition [°].  Default 5°.
+
+    Returns
+    -------
+    boost_u : (n_lat,)
+        Boost factor at u-face (cell-centre) latitudes.
+    boost_v : (n_lat+1,)
+        Boost factor at v-face latitudes.
+    """
+    if boost <= 1.0:
+        n_lat = grid.lat.shape[0]
+        ones_u = jnp.ones(n_lat, dtype=grid.lat.dtype)
+        ones_v = jnp.ones(n_lat + 1, dtype=grid.lat.dtype)
+        return ones_u, ones_v
+
+    cap_rad = jnp.deg2rad(cap_lat_deg)
+    width_rad = jnp.deg2rad(jnp.maximum(width_deg, 1e-6))
+
+    lat_u = grid.lat
+    lat_v_interior = 0.5 * (lat_u[:-1] + lat_u[1:])
+    lat_v = jnp.concatenate([lat_u[:1], lat_v_interior, lat_u[-1:]])
+
+    ramp_u = 0.5 * (1.0 + jnp.tanh((jnp.abs(lat_u) - cap_rad) / width_rad))
+    ramp_v = 0.5 * (1.0 + jnp.tanh((jnp.abs(lat_v) - cap_rad) / width_rad))
+    boost_u = 1.0 + (boost - 1.0) * ramp_u
+    boost_v = 1.0 + (boost - 1.0) * ramp_v
+    return boost_u, boost_v
+
+
 def biharmonic_scaling_factor(grid: LatLonGrid) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Grid-dependent scaling for biharmonic viscosity on a lat-lon grid.
 
