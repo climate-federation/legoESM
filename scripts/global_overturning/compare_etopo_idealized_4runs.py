@@ -64,6 +64,19 @@ RUN_SETS: dict[str, list] = {
         ("MPAS ico6 (from nudge, JRA55)", "mpas",
          DATA_ROOT / "mpas_jra55_etopo_100yr_ico6" / "mpas" / "ico6"),
     ],
+    # 3-way intercomparison once the tripole JRA55 spinup completes
+    # (Step 2 of docs/ocean_experiments/tripole_omip_plan.md). The
+    # tripole entry resolves to results/omip/tripole/eorca1/ during
+    # the run, then to ~/saved_legoESM_data/tripole_jra55_etopo_10yr_nudge/
+    # after archival.
+    "jra55_3way": [
+        ("MPAS ico5 (WOA-init, JRA55)", "mpas",
+         DATA_ROOT / "mpas_jra55_etopo_100yr_woa_v5" / "mpas" / "ico5"),
+        ("MPAS ico6 (from nudge, JRA55)", "mpas",
+         DATA_ROOT / "mpas_jra55_etopo_100yr_ico6" / "mpas" / "ico6"),
+        ("Tripole eORCA1 (JRA55)", "tripole",
+         DATA_ROOT / "tripole_jra55_etopo_10yr_nudge"),
+    ],
 }
 
 # Common target grid for binning.
