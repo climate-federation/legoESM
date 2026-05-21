@@ -1,0 +1,302 @@
+"""Unit tests for MPAS Voronoi-mesh AMOC + SSS apply helpers."""
+
+from __future__ import annotations
+
+import jax.numpy as jnp
+import numpy as np
+import pytest
+
+from legoesm.core.field import Field
+from legoesm.ocean.spinup import (
+    atlantic_basin_mask_mpas,
+    compute_amoc_from_state_mpas,
+)
+from legoesm.ocean.coupler.sss_apply import (
+    apply_sss_restoring_step_mpas,
+)
+from legoesm.ocean.forcing.sss_restoring import SSSRestoringConfig
+
+
+# ==============================================================================
+# Fake VoronoiMesh — minimal connectivity for tests
+# ==============================================================================
+
+class _FakeMesh:
+    """Tiny stub with the fields ``compute_amoc_from_state_mpas`` reads.
+
+    Builds a 4-cell mesh with 3 edges (a single row of cells at
+    different latitudes) so we can drive edge-normal velocities and
+    verify the meridional flux + cumulative-depth integral.
+    """
+
+    def __init__(self):
+        # 4 cells in a north-south chain at lon=0.
+        self.nCells = 4
+        self.nEdges = 3
+        self.latCell = np.deg2rad(np.array([20.0, 25.0, 30.0, 35.0]))
+        self.lonCell = np.deg2rad(np.array([0.0, 0.0, 0.0, 0.0]))
+        # Edges connect adjacent cells (north–south).
+        self.latEdge = np.deg2rad(np.array([22.5, 27.5, 32.5]))
+        self.lonEdge = np.deg2rad(np.array([0.0, 0.0, 0.0]))
+        # Edge normal points north — angleEdge = π/2 (from east).
+        self.angleEdge = np.array([np.pi / 2, np.pi / 2, np.pi / 2])
+        # Edge length: 5° lat × 111 km/deg ≈ 555 km
+        self.dvEdge = np.array([5.55e5, 5.55e5, 5.55e5])
+        # Connectivity (c1 south of c2).
+        self.cellsOnEdge = np.array([
+            [0, 1, 2],  # c1: south cell
+            [1, 2, 3],  # c2: north cell
+        ])
+
+
+class _FakeMeshTwoBasins:
+    """6-cell mesh — 3 cells at Atlantic longitudes + 3 at Pacific.
+
+    Used to verify the Atlantic basin mask filters out Pacific
+    contributions.  All cells at the same latitude (26.5 °N) so a
+    constant edge flux maps to one band.
+    """
+
+    def __init__(self):
+        self.nCells = 6
+        self.nEdges = 4
+        # Three Atlantic cells at lon=0°, three Pacific at lon=180°.
+        self.latCell = np.deg2rad(np.array([
+            26.0, 27.0, 28.0,    # Atlantic
+            26.0, 27.0, 28.0,    # Pacific
+        ]))
+        self.lonCell = np.deg2rad(np.array([
+            0.0, 0.0, 0.0,       # Atlantic (within -75 → 15 band)
+            180.0, 180.0, 180.0, # Pacific
+        ]))
+        self.latEdge = np.deg2rad(np.array([26.5, 27.5, 26.5, 27.5]))
+        self.lonEdge = np.deg2rad(np.array([0.0, 0.0, 180.0, 180.0]))
+        self.angleEdge = np.array([np.pi / 2] * 4)
+        self.dvEdge = np.array([1e5, 1e5, 1e5, 1e5])
+        # Edge 0,1: Atlantic; Edge 2,3: Pacific.
+        self.cellsOnEdge = np.array([
+            [0, 1, 3, 4],
+            [1, 2, 4, 5],
+        ])
+
+
+# ==============================================================================
+# Atlantic basin mask on MPAS
+# ==============================================================================
+
+class TestAtlanticBasinMaskMPAS:
+
+    def test_default_band(self):
+        mesh = _FakeMeshTwoBasins()
+        mask = atlantic_basin_mask_mpas(mesh)
+        # Atlantic cells (lon=0°) → True.
+        assert bool(mask[0]) and bool(mask[1]) and bool(mask[2])
+        # Pacific cells (lon=180°) → False.
+        assert not bool(mask[3])
+        assert not bool(mask[4])
+        assert not bool(mask[5])
+
+    def test_wraparound_band(self):
+        mesh = _FakeMeshTwoBasins()
+        mask = atlantic_basin_mask_mpas(
+            mesh, lon_min_deg=170.0, lon_max_deg=-170.0,
+        )
+        # Now Pacific cells (lon=180°) → True; Atlantic cells (lon=0°) → False.
+        assert bool(mask[3]) and bool(mask[4]) and bool(mask[5])
+        assert not bool(mask[0])
+
+
+# ==============================================================================
+# MPAS AMOC computation
+# ==============================================================================
+
+class TestComputeAMOCFromStateMPAS:
+
+    def test_zero_velocity_returns_zero(self):
+        mesh = _FakeMesh()
+        nlev = 4
+        u = np.zeros((mesh.nEdges, nlev))
+        h = np.full((mesh.nCells, nlev), 100.0)
+        amoc = compute_amoc_from_state_mpas(
+            u, h, mesh, target_lat_deg=22.5, basin="global",
+        )
+        assert amoc == 0.0
+
+    def test_northward_upper_transport_gives_positive_amoc(self):
+        """Synthetic state with positive v at surface levels +
+        negative v at depth (overturning cell) must produce a
+        positive RAPID-style AMOC magnitude at the target band."""
+        mesh = _FakeMesh()
+        nlev = 6
+        u = np.zeros((mesh.nEdges, nlev))
+        # Northward (positive) at top 3 levels, southward (return) at bottom 3.
+        u[:, :3] = 0.05    # 5 cm/s northward
+        u[:, 3:] = -0.05
+        h = np.full((mesh.nCells, nlev), 200.0)  # uniform 200-m layers
+        amoc = compute_amoc_from_state_mpas(
+            u, h, mesh, target_lat_deg=22.5, basin="global",
+            lat_band_width_deg=1.0,
+        )
+        assert amoc > 0.0, f"AMOC should be positive, got {amoc}"
+
+    def test_southward_upper_collapsed_cell_gives_nonpositive(self):
+        mesh = _FakeMesh()
+        nlev = 6
+        u = np.zeros((mesh.nEdges, nlev))
+        # Reversed: southward at surface, northward at depth.
+        u[:, :3] = -0.05
+        u[:, 3:] = 0.05
+        h = np.full((mesh.nCells, nlev), 200.0)
+        amoc = compute_amoc_from_state_mpas(
+            u, h, mesh, target_lat_deg=22.5, basin="global",
+            lat_band_width_deg=1.0,
+        )
+        assert amoc <= 0.0, f"Reversed cell should give AMOC ≤ 0, got {amoc}"
+
+    def test_target_lat_outside_grid_returns_nan(self):
+        mesh = _FakeMesh()
+        nlev = 4
+        u = np.full((mesh.nEdges, nlev), 0.05)
+        h = np.full((mesh.nCells, nlev), 100.0)
+        amoc = compute_amoc_from_state_mpas(
+            u, h, mesh, target_lat_deg=80.0, basin="global",
+            lat_tol_deg=2.0,
+        )
+        assert np.isnan(amoc)
+
+    def test_atlantic_basin_suppresses_pacific_signal(self):
+        mesh = _FakeMeshTwoBasins()
+        nlev = 4
+        u = np.zeros((mesh.nEdges, nlev))
+        # Strong northward flow ONLY at Pacific edges (index 2, 3).
+        u[2:, :2] = 0.1
+        u[2:, 2:] = -0.1
+        h = np.full((mesh.nCells, nlev), 200.0)
+        amoc_global = compute_amoc_from_state_mpas(
+            u, h, mesh, target_lat_deg=26.5, basin="global",
+            lat_band_width_deg=1.5,
+        )
+        amoc_atlantic = compute_amoc_from_state_mpas(
+            u, h, mesh, target_lat_deg=26.5, basin="atlantic",
+            lat_band_width_deg=1.5,
+        )
+        # Atlantic filter must hide the Pacific signal.
+        assert abs(amoc_atlantic) < 1e-6, (
+            f"Atlantic mask should suppress Pacific signal; got "
+            f"amoc_atlantic={amoc_atlantic}"
+        )
+        # Global picks the Pacific signal.
+        assert abs(amoc_global) > abs(amoc_atlantic)
+
+    def test_unknown_basin_raises(self):
+        mesh = _FakeMesh()
+        u = np.full((mesh.nEdges, 2), 0.05)
+        h = np.full((mesh.nCells, 2), 100.0)
+        with pytest.raises(ValueError):
+            compute_amoc_from_state_mpas(u, h, mesh, basin="southern")
+
+    def test_shape_mismatch_raises(self):
+        mesh = _FakeMesh()
+        u = np.zeros((mesh.nEdges, 4))
+        h = np.zeros((mesh.nCells, 6))  # different nlev
+        with pytest.raises(ValueError):
+            compute_amoc_from_state_mpas(u, h, mesh)
+
+
+# ==============================================================================
+# MPAS SSS apply
+# ==============================================================================
+
+class _FakeMPASState:
+    """Minimal MPAS-state stub: ``S`` and ``land_mask`` only."""
+
+    def __init__(self, n_cells=6, nlev=3, S_init=34.0, mask_init=1.0):
+        self.S = Field(
+            jnp.full((n_cells, nlev), S_init, dtype=jnp.float64),
+            name="S", dims=("nCells", "nlev"), units="PSU",
+        )
+        self.land_mask = Field(
+            jnp.full((n_cells,), mask_init, dtype=jnp.float64),
+            name="land_mask", dims=("nCells",), units="1",
+        )
+
+    def _replace(self, **kw):
+        new = _FakeMPASState.__new__(_FakeMPASState)
+        new.S = self.S
+        new.land_mask = self.land_mask
+        for k, v in kw.items():
+            setattr(new, k, v)
+        return new
+
+
+class TestApplySSSRestoringMPAS:
+
+    def test_disabled_is_noop(self):
+        mesh = _FakeMeshTwoBasins()
+        state = _FakeMPASState(n_cells=mesh.nCells)
+        out = apply_sss_restoring_step_mpas(
+            state,
+            S_target=np.full(mesh.nCells, 35.0),
+            ice_concentration=None,
+            config=SSSRestoringConfig(enabled=False),
+            mesh=mesh,
+            dt=3600.0,
+        )
+        assert out is state
+
+    def test_salty_bias_freshens_surface(self):
+        mesh = _FakeMeshTwoBasins()
+        state = _FakeMPASState(n_cells=mesh.nCells, S_init=35.5)
+        out = apply_sss_restoring_step_mpas(
+            state,
+            S_target=np.full(mesh.nCells, 34.7),
+            ice_concentration=None,
+            config=SSSRestoringConfig(
+                enabled=True, tau_restore_days_default=30.0, regions=(),
+            ),
+            mesh=mesh,
+            dt=86400.0,
+        )
+        S_top_new = np.asarray(out.S.data)[..., 0]
+        assert np.all(S_top_new < 35.5)
+
+    def test_only_surface_layer_modified(self):
+        mesh = _FakeMeshTwoBasins()
+        state = _FakeMPASState(n_cells=mesh.nCells, S_init=35.5, nlev=3)
+        out = apply_sss_restoring_step_mpas(
+            state,
+            S_target=np.full(mesh.nCells, 34.7),
+            ice_concentration=None,
+            config=SSSRestoringConfig(
+                enabled=True, tau_restore_days_default=10.0, regions=(),
+            ),
+            mesh=mesh,
+            dt=86400.0,
+        )
+        S_new = np.asarray(out.S.data)
+        assert np.allclose(S_new[..., 1], 35.5)
+        assert np.allclose(S_new[..., 2], 35.5)
+        assert np.all(S_new[..., 0] < 35.5)
+
+    def test_land_cells_untouched(self):
+        mesh = _FakeMeshTwoBasins()
+        state = _FakeMPASState(n_cells=mesh.nCells, S_init=35.5)
+        mask_arr = np.asarray(state.land_mask.data).copy()
+        mask_arr[:3] = 0.0
+        state.land_mask = Field(
+            jnp.asarray(mask_arr), name=state.land_mask.name,
+            dims=state.land_mask.dims, units=state.land_mask.units,
+        )
+        out = apply_sss_restoring_step_mpas(
+            state,
+            S_target=np.full(mesh.nCells, 34.7),
+            ice_concentration=None,
+            config=SSSRestoringConfig(
+                enabled=True, tau_restore_days_default=10.0, regions=(),
+            ),
+            mesh=mesh,
+            dt=86400.0,
+        )
+        S_top_new = np.asarray(out.S.data)[..., 0]
+        assert np.allclose(S_top_new[:3], 35.5)
+        assert np.all(S_top_new[3:] < 35.5)

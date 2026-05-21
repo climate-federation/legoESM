@@ -120,3 +120,77 @@ def apply_sss_restoring_step(
             units=state.S.units,
         ),
     )
+
+
+def apply_sss_restoring_step_mpas(
+    state,
+    *,
+    S_target: np.ndarray | jnp.ndarray,
+    ice_concentration: np.ndarray | jnp.ndarray | None,
+    config: SSSRestoringConfig,
+    mesh,
+    dt: float,
+) -> object:
+    """Apply one timestep of OMIP-2 SSS restoring on a Voronoi mesh.
+
+    Counterpart of :func:`apply_sss_restoring_step` for MPAS-style
+    ocean states where:
+        * ``state.S.data`` has shape ``(nCells, nlev)``;
+        * ``mesh.latCell`` / ``mesh.lonCell`` are 1-D ``(nCells,)``
+          arrays (radians).
+
+    Parameters
+    ----------
+    state : MPAS-style ocean state
+        ``state.S`` (``(nCells, nlev)``) and ``state.land_mask``
+        (``(nCells,)``) are read; ``S`` is updated in-place via the
+        NamedTuple ``_replace`` API.
+    S_target : array ``(nCells,)``
+        Climatological target SSS interpolated to the mesh [PSU].
+    ice_concentration : array ``(nCells,)`` or None
+        Cell ice fraction in [0, 1].  None ⇒ no ice gating.
+    config : SSSRestoringConfig
+    mesh : VoronoiMesh
+    dt : float
+
+    Returns
+    -------
+    new_state : same type as input
+        With the surface salinity layer updated.
+    """
+    if not config.enabled:
+        return state
+
+    S_arr = np.asarray(state.S.data, dtype=np.float64)
+    S_top = S_arr[..., 0]                                    # (nCells,)
+
+    lat_deg = np.degrees(np.asarray(mesh.latCell))           # (nCells,)
+    lon_deg = np.degrees(np.asarray(mesh.lonCell))           # (nCells,)
+
+    if ice_concentration is None:
+        ice = np.zeros_like(S_top)
+    else:
+        ice = np.asarray(ice_concentration, dtype=np.float64)
+
+    out = compute_sss_restoring_flux(
+        S_model_top=jnp.asarray(S_top),
+        S_target=jnp.asarray(S_target),
+        lat_deg=jnp.asarray(lat_deg),
+        lon_deg=jnp.asarray(lon_deg),
+        ice_concentration=jnp.asarray(ice),
+        config=config,
+    )
+    dS_dt = np.asarray(out["dS_dt_top"], dtype=np.float64)
+    land_mask = np.asarray(state.land_mask.data, dtype=np.float64)
+
+    S_new = S_arr.copy()
+    S_new[..., 0] = S_top + dt * dS_dt * land_mask
+
+    return state._replace(
+        S=Field(
+            jnp.asarray(S_new),
+            name=state.S.name,
+            dims=state.S.dims,
+            units=state.S.units,
+        ),
+    )

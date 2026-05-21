@@ -120,13 +120,17 @@ def main() -> int:
         ConvergenceCriteria, compute_amoc_timeseries,
         find_latest_restart, bryan_accelerated_dt,
         compute_amoc_from_state,
+        compute_amoc_from_state_mpas,
     )
     from legoesm.ocean.vertical import compute_layer_thickness
     from legoesm.ocean.forcing.sss_restoring import (
         SSSRestoringConfig, interp_woa_sss_to_grid,
     )
     from legoesm.ocean.forcing.woa_sss import load_woa_sss
-    from legoesm.ocean.coupler import apply_sss_restoring_step
+    from legoesm.ocean.coupler import (
+        apply_sss_restoring_step,
+        apply_sss_restoring_step_mpas,
+    )
     from run_omip2 import _build_state  # type: ignore
     import jax
 
@@ -136,9 +140,11 @@ def main() -> int:
     )
 
     # --- OMIP-2 SSS restoring setup (post-grid) -----------------------
+    # Supported on lat-lon and MPAS Voronoi.  WOA SSS lives on a 1°
+    # regular lat-lon grid; bilinear interp lands it on either target.
     sss_config = None
     S_target_on_grid = None
-    if args.sss_restoring and args.grid == "latlon":
+    if args.sss_restoring:
         sss_config = SSSRestoringConfig(
             enabled=True,
             tau_restore_days_default=args.sss_tau_days,
@@ -150,31 +156,45 @@ def main() -> int:
         )
         sss_woa, lat_woa, lon_woa = load_woa_sss(cache_dir=args.sss_cache)
         import jax.numpy as _jnp
-        lat_deg = np.degrees(np.asarray(grid.lat))
-        lon_deg = np.degrees(np.asarray(grid.lon))
-        lat2d = np.broadcast_to(
-            lat_deg[:, None], (lat_deg.size, lon_deg.size),
-        )
-        lon2d = np.broadcast_to(
-            lon_deg[None, :], (lat_deg.size, lon_deg.size),
-        )
-        S_target_on_grid = np.asarray(interp_woa_sss_to_grid(
-            _jnp.asarray(sss_woa),
-            _jnp.asarray(lat_woa),
-            _jnp.asarray(lon_woa),
-            _jnp.asarray(lat2d),
-            _jnp.asarray(lon2d),
-        ))
-        print(
-            f"   SSS target range: "
-            f"{float(np.min(S_target_on_grid)):.2f}"
-            f" – {float(np.max(S_target_on_grid)):.2f} PSU"
-        )
-    elif args.sss_restoring and args.grid != "latlon":
-        print(
-            f"==> WARNING: --sss-restoring not yet supported on grid="
-            f"{args.grid!r}; ignoring."
-        )
+        if args.grid == "latlon":
+            lat_deg = np.degrees(np.asarray(grid.lat))
+            lon_deg = np.degrees(np.asarray(grid.lon))
+            lat2d = np.broadcast_to(
+                lat_deg[:, None], (lat_deg.size, lon_deg.size),
+            )
+            lon2d = np.broadcast_to(
+                lon_deg[None, :], (lat_deg.size, lon_deg.size),
+            )
+            S_target_on_grid = np.asarray(interp_woa_sss_to_grid(
+                _jnp.asarray(sss_woa),
+                _jnp.asarray(lat_woa),
+                _jnp.asarray(lon_woa),
+                _jnp.asarray(lat2d),
+                _jnp.asarray(lon2d),
+            ))
+        elif args.grid == "mpas":
+            lat_cell_deg = np.degrees(np.asarray(grid.latCell))
+            lon_cell_deg = np.degrees(np.asarray(grid.lonCell))
+            S_target_on_grid = np.asarray(interp_woa_sss_to_grid(
+                _jnp.asarray(sss_woa),
+                _jnp.asarray(lat_woa),
+                _jnp.asarray(lon_woa),
+                _jnp.asarray(lat_cell_deg),
+                _jnp.asarray(lon_cell_deg),
+            ))
+        else:
+            print(
+                f"==> WARNING: --sss-restoring not supported on grid="
+                f"{args.grid!r}; disabling."
+            )
+            sss_config = None
+            S_target_on_grid = None
+        if S_target_on_grid is not None:
+            print(
+                f"   SSS target range: "
+                f"{float(np.min(S_target_on_grid)):.2f}"
+                f" – {float(np.max(S_target_on_grid)):.2f} PSU"
+            )
 
     # Auto-resume: prefer ``--restart-from``, fallback to latest in
     # ``--output``.
@@ -298,29 +318,32 @@ def main() -> int:
                 z_coord=z_coord, grid=grid, grid_type=args.grid,
                 dt=dt,
             )
-            # OMIP-2 SSS restoring (when enabled and on lat-lon).
-            # This driver is ocean-only: no sea-ice tile is coupled
-            # in, so we pass an explicit zero ice-fraction field
-            # (open water everywhere) rather than ``None``.  When a
-            # coupled-ice driver consumes ``apply_sss_restoring_step``
-            # it should pass the live ``ice_state.concentration``
-            # field so the ice-gate path in
-            # ``compute_sss_restoring_flux`` suppresses restoring
-            # under ice and lets the brine channel drive the salt
-            # budget there.  (Sea-ice brine flux already lives in
-            # ``TileResponse.salt_flux`` from the prior coupling
-            # work.)
+            # OMIP-2 SSS restoring (when enabled).  Ocean-only driver
+            # passes explicit zero ice-fraction; coupled-ice driver
+            # should plumb the live ``ice_state.concentration`` so
+            # restoring is suppressed under ice and the brine flux
+            # (TileResponse.salt_flux) drives the budget there.
             if sss_config is not None and S_target_on_grid is not None:
                 ice_open = np.zeros_like(S_target_on_grid)
-                state = apply_sss_restoring_step(
-                    state,
-                    S_target=S_target_on_grid,
-                    ice_concentration=ice_open,
-                    config=sss_config,
-                    grid=grid,
-                    z_coord=z_coord,
-                    dt=dt,
-                )
+                if args.grid == "latlon":
+                    state = apply_sss_restoring_step(
+                        state,
+                        S_target=S_target_on_grid,
+                        ice_concentration=ice_open,
+                        config=sss_config,
+                        grid=grid,
+                        z_coord=z_coord,
+                        dt=dt,
+                    )
+                elif args.grid == "mpas":
+                    state = apply_sss_restoring_step_mpas(
+                        state,
+                        S_target=S_target_on_grid,
+                        ice_concentration=ice_open,
+                        config=sss_config,
+                        mesh=grid,
+                        dt=dt,
+                    )
             state = model.step(state, dt)
         state = jax.block_until_ready(state)
 
@@ -334,10 +357,9 @@ def main() -> int:
         )
         last_rpe = rpe_y
 
-        # AMOC@target-lat — computed on the lat-lon C-grid path only.
-        # MPAS support requires a basin-aware mesh-aware MOC routine
-        # that is a separate follow-up; MPAS runs report NaN until
-        # then (and the convergence helper auto-skips the criterion).
+        # AMOC@target-lat — computed on the lat-lon C-grid and MPAS
+        # Voronoi paths.  Other grids fall back to NaN and the
+        # convergence helper auto-skips the criterion.
         if args.grid == "latlon":
             h_partial_now = compute_layer_thickness(
                 state.eta.data, state.H_bathy.data, z_coord,
@@ -347,6 +369,19 @@ def main() -> int:
                 h_partial=h_partial_now,
                 land_mask=state.land_mask.data,
                 grid=grid,
+                target_lat_deg=args.amoc_target_lat,
+                basin=args.amoc_basin,
+                basin_lon_min_deg=args.amoc_lon_min_deg,
+                basin_lon_max_deg=args.amoc_lon_max_deg,
+            )
+        elif args.grid == "mpas":
+            h_cell_now = compute_layer_thickness(
+                state.eta.data, state.H_bathy.data, z_coord,
+            )
+            amoc_Sv = compute_amoc_from_state_mpas(
+                u_edge=state.u.data,
+                h_cell=h_cell_now,
+                mesh=grid,
                 target_lat_deg=args.amoc_target_lat,
                 basin=args.amoc_basin,
                 basin_lon_min_deg=args.amoc_lon_min_deg,

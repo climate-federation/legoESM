@@ -200,6 +200,179 @@ def compute_amoc_from_state(
 
 
 # ==============================================================================
+# MPAS Voronoi-mesh AMOC
+# ==============================================================================
+
+def atlantic_basin_mask_mpas(
+    mesh,
+    *,
+    lon_min_deg: float = -75.0,
+    lon_max_deg: float = 15.0,
+) -> np.ndarray:
+    """Per-cell Atlantic basin mask on a Voronoi mesh.
+
+    Returns a ``(nCells,)`` boolean mask of cells whose centres fall
+    inside the longitude band ``[lon_min_deg, lon_max_deg]``
+    (degrees, ``-180..180`` after wrap).  Wrap-around bands
+    (``lon_min > lon_max``) span the dateline.
+
+    Parameters
+    ----------
+    mesh : VoronoiMesh
+        Must expose ``lonCell`` in radians.
+    """
+    lon_deg = np.degrees(np.asarray(mesh.lonCell))
+    lon_wrapped = ((lon_deg + 180.0) % 360.0) - 180.0
+    if lon_min_deg <= lon_max_deg:
+        return (lon_wrapped >= lon_min_deg) & (lon_wrapped <= lon_max_deg)
+    return (lon_wrapped >= lon_min_deg) | (lon_wrapped <= lon_max_deg)
+
+
+def compute_amoc_from_state_mpas(
+    u_edge: np.ndarray,
+    h_cell: np.ndarray,
+    mesh,
+    *,
+    target_lat_deg: float = 26.5,
+    lat_band_width_deg: float = 1.0,
+    basin: str = "atlantic",
+    basin_lon_min_deg: float = -75.0,
+    basin_lon_max_deg: float = 15.0,
+    lat_tol_deg: float = 5.0,
+) -> float:
+    """AMOC at ``target_lat_deg`` from a Voronoi-mesh ocean state.
+
+    Latitude-bin meridional volume flux across cell edges, then take
+    the cumulative depth integral to get the overturning
+    streamfunction in Sv.  Returns the RAPID-style positive value
+    ``-min(ψ)`` over the depth profile at the target band; NaN when
+    the target latitude has no edges within ``lat_tol_deg``.
+
+    Algorithm
+    ---------
+    For each edge ``e`` with normal angle ``α_e`` measured from
+    east, the meridional component of the edge-normal velocity is
+    ``v_north = u_edge · sin(α_e)``.  Edge volume flux per level is
+
+        F_e(k) = u_edge(k) · sin(α_e) · dvEdge(e) · h_edge(e, k)
+
+    where ``h_edge = 0.5 · (h_{c1} + h_{c2})`` is the centred edge
+    thickness (one-sided at boundary edges).  Edges are binned by
+    their cell-centre latitude ``latEdge`` into bands centred on the
+    target latitude; the sum across all edges in a band gives the
+    band's per-level meridional volume flux.  The streamfunction is
+    the cumulative integral from the surface downward (matching the
+    lat-lon ``moc_streamfunction`` sign convention).
+
+    Atlantic basin filter: builds a per-cell Atlantic mask, projects
+    to edges as the AND of both adjacent cells' Atlantic flags, then
+    zeros out non-Atlantic edges before binning.
+
+    Parameters
+    ----------
+    u_edge : array ``(nEdges, nlev)``
+        Edge-normal velocity [m/s].  Shape may also be ``(nEdges,)``
+        for a single-layer test field.
+    h_cell : array ``(nCells, nlev)``
+        Cell-centre layer thickness [m].
+    mesh : VoronoiMesh
+    target_lat_deg : float
+        Latitude (°N) at which to evaluate AMOC.  Default 26.5°N.
+    lat_band_width_deg : float
+        Half-width of the latitude band around ``target_lat_deg`` [°].
+        All edges with ``|latEdge - target| <= width`` participate.
+    basin : {"atlantic", "global"}
+        Basin filter.
+    basin_lon_min_deg, basin_lon_max_deg : float
+        Atlantic longitude band [°].
+    lat_tol_deg : float
+        If no edges fall within ``lat_tol_deg`` of the target
+        latitude, return NaN.
+
+    Returns
+    -------
+    amoc_Sv : float
+        RAPID-style positive AMOC magnitude at ``target_lat_deg``
+        in Sverdrups, or NaN if the target latitude is empty.
+    """
+    u = np.asarray(u_edge, dtype=np.float64)
+    if u.ndim == 1:
+        u = u[:, None]
+    h = np.asarray(h_cell, dtype=np.float64)
+    if h.ndim == 1:
+        h = h[:, None]
+    if u.shape[-1] != h.shape[-1]:
+        raise ValueError(
+            f"compute_amoc_from_state_mpas: u_edge has {u.shape[-1]} "
+            f"levels but h_cell has {h.shape[-1]}"
+        )
+    n_edges, nlev = u.shape
+
+    angle = np.asarray(mesh.angleEdge, dtype=np.float64)
+    dv = np.asarray(mesh.dvEdge, dtype=np.float64)
+    sin_a = np.sin(angle)                                   # (nEdges,)
+
+    # Centred edge thickness from cellsOnEdge.
+    c1 = np.asarray(mesh.cellsOnEdge[0])
+    c2 = np.asarray(mesh.cellsOnEdge[1])
+    interior = c2 >= 0
+    c1_safe = np.where(c1 >= 0, c1, 0)
+    c2_safe = np.where(c2 >= 0, c2, 0)
+    h_e = np.where(
+        interior[:, None],
+        0.5 * (h[c1_safe] + h[c2_safe]),
+        h[c1_safe],
+    )                                                       # (nEdges, nlev)
+
+    # Basin filter applied via per-edge mask.
+    if basin == "atlantic":
+        cell_mask = atlantic_basin_mask_mpas(
+            mesh,
+            lon_min_deg=basin_lon_min_deg,
+            lon_max_deg=basin_lon_max_deg,
+        ).astype(np.float64)
+        edge_mask = np.where(
+            interior,
+            cell_mask[c1_safe] * cell_mask[c2_safe],
+            cell_mask[c1_safe],
+        )
+    elif basin == "global":
+        edge_mask = np.ones(n_edges, dtype=np.float64)
+    else:
+        raise ValueError(
+            f"compute_amoc_from_state_mpas: unknown basin {basin!r}; "
+            "expected one of 'atlantic', 'global'."
+        )
+
+    # Per-edge per-level meridional volume flux.
+    F_edge = (u * sin_a[:, None] * dv[:, None] * edge_mask[:, None]) * h_e
+    # shape (nEdges, nlev) — [m/s · m · m] = m³/s.
+
+    # Latitude binning.
+    lat_edge_deg = np.degrees(np.asarray(mesh.latEdge))
+    band = np.abs(lat_edge_deg - target_lat_deg) <= lat_band_width_deg
+    if not np.any(band):
+        # Try a wider tolerance fallback.
+        band = np.abs(lat_edge_deg - target_lat_deg) <= lat_tol_deg
+        if not np.any(band):
+            return float("nan")
+
+    F_band = F_edge[band, :].sum(axis=0)                    # (nlev,)
+    if not np.any(np.isfinite(F_band)):
+        return float("nan")
+
+    # Cumulative depth integral (surface → bottom).  Matching the
+    # lat-lon ``moc_streamfunction`` convention: ``ψ = -cumsum``.
+    # A genuinely-zero band (e.g. Atlantic-filter excludes all
+    # transport at this latitude) produces a flat zero ψ; the
+    # ``-nanmin`` then returns 0.0 which is the physically correct
+    # answer (no overturning).
+    psi_m3s = -np.cumsum(F_band)
+    psi_Sv = psi_m3s / 1.0e6
+    return float(-np.nanmin(psi_Sv))
+
+
+# ==============================================================================
 # AMOC timeseries
 # ==============================================================================
 
