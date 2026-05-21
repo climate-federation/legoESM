@@ -41,6 +41,14 @@ class CloudConfig(NamedTuple):
         (default 273.15).
     T_ice_only : float
         Temperature [K] below which all condensate is ice (default 233.15).
+    rh_crit_bl : float
+        Critical relative humidity in the boundary layer (default 0.7 = same
+        as rh_crit, i.e. no BL adjustment). Recommended ~0.55 for AMIP runs
+        with Sundqvist to allow marine BL cloud at lower RH.  Only active
+        when ``sigma_bl < 1.0``.
+    sigma_bl : float
+        Sigma level (p/p_s) above which rh_crit_bl replaces rh_crit
+        (default 1.0 = disabled). Use 0.85 to cover the lowest ~1.5 km.
     """
     scheme: str = "none"
     rh_crit: float = 0.7
@@ -51,3 +59,5 @@ class CloudConfig(NamedTuple):
     q_c_diagnostic: float = 0.2e-3
     T_freeze: float = constants.T_freeze
     T_ice_only: float = 233.15
+    rh_crit_bl: float = 0.7
+    sigma_bl: float = 1.0

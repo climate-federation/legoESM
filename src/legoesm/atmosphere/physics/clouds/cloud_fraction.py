@@ -171,6 +171,17 @@ def compute_cloud_properties(
         cf = xu_randall_cloud_fraction(RH, q_condensate, q_sat, config)
     elif config.scheme == "sundqvist":
         cf = sundqvist_cloud_fraction(RH, config)
+        if config.sigma_bl < 1.0:
+            # Boundary-layer override: use lower rh_crit in the lowest layers
+            # (sigma > sigma_bl) where the warm lower troposphere keeps RH
+            # structurally below the free-troposphere threshold.
+            # Python `if` on static config value — compiles away when disabled.
+            sigma_approx = p_full / jnp.maximum(p_full[:, -1:], 1.0)
+            cf_bl = (RH - config.rh_crit_bl) / jnp.maximum(
+                1.0 - config.rh_crit_bl, 1.0e-6
+            )
+            cf_bl = jnp.clip(cf_bl, 0.0, 1.0)
+            cf = jnp.where(sigma_approx > config.sigma_bl, cf_bl, cf)
     else:
         raise ValueError(
             f"Unknown cloud scheme: {config.scheme!r}. "

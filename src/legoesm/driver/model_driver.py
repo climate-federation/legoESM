@@ -2279,6 +2279,7 @@ class ModelDriver:
             ghg_vmr_override=ghg_vmr,
             owned_face_ids=self._owned_face_ids,
             hs_newtonian_relax=self._hs_newtonian_relax,
+            cloud_rh_crit_bl=getattr(cfg, 'cloud_rh_crit_bl', 0.7),
         )
 
         logger.info(
@@ -2509,6 +2510,7 @@ class ModelDriver:
                         ghg_vmr_override=ghg_vmr,
                         owned_face_ids=self._owned_face_ids,
                         hs_newtonian_relax=self._hs_newtonian_relax,
+                        cloud_rh_crit_bl=getattr(cfg, 'cloud_rh_crit_bl', 0.7),
                     )
 
             # Checkpoint

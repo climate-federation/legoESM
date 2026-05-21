@@ -152,7 +152,9 @@ class PhysicsPipeline:
         self.gwd_fn = gwd_fn
         self.gwd_config = gwd_config
         self.physics_parameterization = physics_parameterization
-        self._cloud_scheme = "none"  # set by build_physics_pipeline
+        self._cloud_scheme = "none"    # set by build_physics_pipeline
+        self._cloud_rh_crit_bl = 0.7   # set by build_physics_pipeline
+        self._cloud_sigma_bl = 1.0     # set by build_physics_pipeline
 
     def physics_step_no_rad(self, T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic,
                             lat, dt, dT_dt_rad, sw_net_sfc, lw_net_sfc,
@@ -507,7 +509,9 @@ class PhysicsPipeline:
                                albedo_ice=None, albedo_ocean=None,
                                ghg_vmr_override=None,
                                q_c=None, q_r=None,
-                               cloud_scheme="none"):
+                               cloud_scheme="none",
+                               cloud_rh_crit_bl=0.7,
+                               cloud_sigma_bl=1.0):
         """Compute radiation tendencies and fluxes (pure JAX, no I/O).
 
         Returns (dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa, lw_up_toa,
@@ -554,7 +558,20 @@ class PhysicsPipeline:
                 compute_cloud_properties,
             )
             dp_col = p_half_col[:, 1:] - p_half_col[:, :-1]
-            cloud_config = CloudConfig(scheme=cloud_scheme)
+            # cloud_rh_crit_bl may be a traced JAX array (from step_unified) or
+            # a Python float (direct call).  Both work in CloudConfig — the
+            # NamedTuple stores whatever is passed, and arithmetic in
+            # compute_cloud_properties flows gradients through traced values.
+            _rh_crit_bl_eff = (
+                self._cloud_rh_crit_bl
+                if cloud_rh_crit_bl is None
+                else cloud_rh_crit_bl
+            )
+            cloud_config = CloudConfig(
+                scheme=cloud_scheme,
+                rh_crit_bl=_rh_crit_bl_eff,
+                sigma_bl=cloud_sigma_bl,
+            )
             # When no microphysics is wired (``self.micro_fn is None``)
             # the prognostic ``q_c`` is a zero tracer and feeding it to
             # ``compute_cloud_properties`` short-circuits the diagnostic
@@ -635,7 +652,8 @@ class PhysicsPipeline:
                          C_H=pipeline.C_H, C_E=pipeline.C_E,
                          albedo_ice=pipeline.albedo_ice,
                          albedo_ocean=pipeline.albedo_ocean,
-                         ghg_vmr_override=None):
+                         ghg_vmr_override=None,
+                         cloud_rh_crit_bl=None):
 
             def _rad_branch(args):
                 (T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
@@ -645,7 +663,7 @@ class PhysicsPipeline:
                  held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                  tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref,
                  C_H, C_E, albedo_ice, albedo_ocean,
-                 ghg_vmr_override) = args
+                 ghg_vmr_override, cloud_rh_crit_bl) = args
 
                 (dT_dt_rad, sw_net_sfc, lw_net_sfc,
                  sw_up_toa, lw_up_toa, sw_down_toa) = \
@@ -658,6 +676,8 @@ class PhysicsPipeline:
                         ghg_vmr_override=ghg_vmr_override,
                         q_c=q_c,
                         cloud_scheme=pipeline._cloud_scheme,
+                        cloud_rh_crit_bl=cloud_rh_crit_bl,
+                        cloud_sigma_bl=pipeline._cloud_sigma_bl,
                     )
 
                 physics_out = pipeline.physics_step_no_rad(
@@ -687,7 +707,7 @@ class PhysicsPipeline:
                  held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                  tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref,
                  C_H, C_E, albedo_ice, albedo_ocean,
-                 ghg_vmr_override) = args
+                 ghg_vmr_override, _cloud_rh_crit_bl) = args
 
                 physics_out = pipeline.physics_step_no_rad(
                     T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, dt,
@@ -708,6 +728,15 @@ class PhysicsPipeline:
                 physics_out = jax.tree.map(_cast, physics_out)
                 return physics_out, new_held
 
+            # cloud_rh_crit_bl default: use pipeline value when caller passes None.
+            # When passed as a traced JAX array, it flows through _rad_branch into
+            # CloudConfig so gradients propagate through the BL cloud fraction.
+            _cloud_rh_crit_bl_eff = (
+                jnp.asarray(pipeline._cloud_rh_crit_bl)
+                if cloud_rh_crit_bl is None
+                else cloud_rh_crit_bl
+            )
+
             args = (T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
                     day_of_year, seconds_of_day, dt,
                     solar_weights, s_0, o3_vmr, aerosol_od,
@@ -715,7 +744,7 @@ class PhysicsPipeline:
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                     tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref,
                     C_H, C_E, albedo_ice, albedo_ocean,
-                    ghg_vmr_override)
+                    ghg_vmr_override, _cloud_rh_crit_bl_eff)
 
             return jax.lax.cond(need_rad, _rad_branch, _no_rad_branch, args)
 
@@ -1163,4 +1192,6 @@ def build_physics_pipeline(grid, sigma, config):
         physics_parameterization=physics_parameterization,
     )
     pipeline._cloud_scheme = getattr(config, 'cloud_scheme', 'none')
+    pipeline._cloud_rh_crit_bl = getattr(config, 'cloud_rh_crit_bl', 0.7)
+    pipeline._cloud_sigma_bl = getattr(config, 'cloud_sigma_bl', 1.0)
     return pipeline

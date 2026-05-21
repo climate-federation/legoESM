@@ -1,31 +1,26 @@
 #!/bin/bash
-#SBATCH --job-name=legoesm-amip
+#SBATCH --job-name=legoesm-amip-rst
 #SBATCH --account=bd1083
 #SBATCH --partition=gpu
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=a100_80:4
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=0
-#SBATCH --time=12:00:00
+#SBATCH --time=6:00:00
 #SBATCH --output=/work/bd1083/b309178/logs/legoesm-amip-%j.out
 #SBATCH --error=/work/bd1083/b309178/logs/legoesm-amip-%j.err
 #SBATCH --mail-type=FAIL,END
 
 # ---------------------------------------------------------------------------
-# legoESM AMIP run — Levante GPU node
-#
-# Physics stack:
-#   RRTMG radiation, Sundqvist clouds (BL cloud fix rh_crit_bl=0.55/sigma=0.85),
-#   Sundqvist microphysics, SBM convection, Louis turbulence, Rayleigh GWD
-#
-# Timing reference (C48/L40, dt=150s, 4×A100-80GB, --production-profile):
-#   rad_update_steps = floor(3600/150) = 24  (1-hour radiation cadence)
-#   ~26 simulated days per wall-clock hour (from job 25023151 baseline)
-#   270-day run: ~10.4h → 12h limit gives ~1.6h margin
-#   Remaining 95 days (days 271-365) submitted via submit_amip_levante_restart.sh
+# legoESM AMIP restart — days 271-365 (continuation of submit_amip_levante.sh)
 #
 # Usage:
-#   sbatch scripts/submit_amip_levante.sh
+#   sbatch scripts/submit_amip_levante_restart.sh \
+#       --export=RESTART_DIR=/scratch/b/b309178/amip_1979_270d_<JOBID>
+#
+# Or set RESTART_DIR before calling sbatch:
+#   export RESTART_DIR=/scratch/b/b309178/amip_1979_270d_<JOBID>
+#   sbatch scripts/submit_amip_levante_restart.sh
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -35,35 +30,43 @@ PYTHON=/work/bd1083/b309178/mambaforge/envs/diffesm/bin/python
 
 # --- run parameters ---
 YEAR=1979
-DAYS=270
+START_DAY=270
+DAYS=95
 DT=150
-IC_ZARR=/scratch/b/b309178/era5_ic_1979-01-01.zarr
-OUTPUT=/scratch/b/b309178/amip_${YEAR}_${DAYS}d_${SLURM_JOB_ID}
+
+# RESTART_DIR must be set by caller (the output dir from the 270-day run)
+: "${RESTART_DIR:?ERROR: RESTART_DIR must be set to the 270-day output directory}"
+
+RESTART_CHECKPOINT="${RESTART_DIR}/checkpoint_day270.npz"
+OUTPUT="${RESTART_DIR}"   # append into same directory
 
 mkdir -p /work/bd1083/b309178/logs
 
 echo "=============================="
-echo "legoESM AMIP run"
+echo "legoESM AMIP restart run"
 echo "Job ID:  $SLURM_JOB_ID"
 echo "Node:    $SLURMD_NODENAME"
-echo "Year:    $YEAR  Days: $DAYS  dt: ${DT}s"
+echo "Year:    $YEAR  Start day: $START_DAY  Days: $DAYS  dt: ${DT}s"
+echo "Restart: $RESTART_CHECKPOINT"
 echo "Output:  $OUTPUT"
 echo "Started: $(date)"
 echo "=============================="
+
+if [[ ! -f "$RESTART_CHECKPOINT" ]]; then
+    echo "ERROR: checkpoint not found: $RESTART_CHECKPOINT"
+    ls "$RESTART_DIR"/*.npz 2>/dev/null || echo "(no .npz files found)"
+    exit 1
+fi
 
 # --- environment ---
 source /work/bd1083/b309178/mambaforge/etc/profile.d/conda.sh
 conda activate diffesm
 
-# JAX/XLA settings — must be set before any Python/JAX import
 export JAX_PLATFORMS="${JAX_PLATFORMS:-cuda,cpu}"
 export JAX_ENABLE_X64=1
-# Disable pre-allocation so JAX grows memory on demand (avoids OOM on 4 GPUs)
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
-# Deterministic GPU ordering
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-# Prevent CPU thread oversubscription from BLAS/OpenMP
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
@@ -82,7 +85,8 @@ $PYTHON scripts/run_amip_levante.py \
     --year "$YEAR" \
     --days "$DAYS" \
     --dt "$DT" \
-    --ic-zarr "$IC_ZARR" \
+    --restart-from "$RESTART_CHECKPOINT" \
+    --restart-start-day "$START_DAY" \
     --diag-days 5 \
     --checkpoint-days 30 \
     --cmip-output \

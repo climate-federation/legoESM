@@ -1043,6 +1043,67 @@ class TestCloudFraction:
         total_liq = float(jnp.sum(props.lwp))
         assert total_ice > total_liq
 
+    def test_bl_cloud_disabled_by_default(self):
+        """sigma_bl=1.0 (default) leaves cloud fraction unchanged."""
+        ncol, nlev = 4, 10
+        T, p_full, p_half, _, _, _ = _make_column_data(ncol, nlev)
+        dp = p_half[:, 1:] - p_half[:, :-1]
+        q_v = jnp.full((ncol, nlev), 0.006)
+
+        # Default config: no BL override
+        cfg_default = CloudConfig(scheme="sundqvist", rh_crit=0.7, sigma_bl=1.0)
+        # Config with BL active but rh_crit_bl == rh_crit: identical result
+        cfg_same = CloudConfig(scheme="sundqvist", rh_crit=0.7, rh_crit_bl=0.7, sigma_bl=0.85)
+
+        props_default = compute_cloud_properties(T, p_full, q_v, dp, cfg_default)
+        props_same = compute_cloud_properties(T, p_full, q_v, dp, cfg_same)
+        # Equal rh_crit_bl == rh_crit => same result regardless of sigma_bl
+        assert jnp.allclose(props_default.cloud_fraction, props_same.cloud_fraction, atol=1e-6)
+
+    def test_bl_cloud_lower_rh_crit_produces_more_cloud(self):
+        """Lower rh_crit_bl in the BL should produce more cloud in near-surface layers."""
+        ncol, nlev = 4, 20
+        # Use a warm lower troposphere: T=300K at surface, 250K at TOA
+        T, p_full, p_half, _, _, _ = _make_column_data(ncol, nlev, T_surface=300.0, T_top=250.0)
+        dp = p_half[:, 1:] - p_half[:, :-1]
+        # RH = 0.6 everywhere: below standard rh_crit=0.7 but above rh_crit_bl=0.5
+        from legoesm.thermo import saturation_mixing_ratio
+        q_sat = saturation_mixing_ratio(T, p_full)
+        q_v = 0.6 * q_sat
+
+        cfg_standard = CloudConfig(scheme="sundqvist", rh_crit=0.7, sigma_bl=1.0)
+        cfg_bl = CloudConfig(scheme="sundqvist", rh_crit=0.7, rh_crit_bl=0.5, sigma_bl=0.85)
+
+        props_standard = compute_cloud_properties(T, p_full, q_v, dp, cfg_standard)
+        props_bl = compute_cloud_properties(T, p_full, q_v, dp, cfg_bl)
+
+        # Standard scheme: all zeros (RH < rh_crit everywhere)
+        assert jnp.allclose(props_standard.cloud_fraction, 0.0, atol=1e-6)
+        # BL scheme: near-surface layers (sigma > 0.85) should have nonzero cf
+        sigma_approx = p_full / jnp.maximum(p_full[:, -1:], 1.0)
+        bl_mask = sigma_approx > 0.85
+        assert float(jnp.sum(jnp.where(bl_mask, props_bl.cloud_fraction, 0.0))) > 0.0
+        # Free-troposphere layers still zero
+        ft_mask = ~bl_mask
+        assert jnp.allclose(
+            jnp.where(ft_mask, props_bl.cloud_fraction, 0.0), 0.0, atol=1e-6
+        )
+
+    def test_bl_cloud_bounded(self):
+        """BL cloud fraction must remain in [0, 1]."""
+        ncol, nlev = 4, 10
+        T, p_full, p_half, _, _, _ = _make_column_data(ncol, nlev)
+        dp = p_half[:, 1:] - p_half[:, :-1]
+        # Saturated atmosphere
+        from legoesm.thermo import saturation_mixing_ratio
+        q_sat = saturation_mixing_ratio(T, p_full)
+        q_v = 1.5 * q_sat  # supersaturated
+
+        cfg = CloudConfig(scheme="sundqvist", rh_crit=0.7, rh_crit_bl=0.3, sigma_bl=0.85)
+        props = compute_cloud_properties(T, p_full, q_v, dp, cfg)
+        assert jnp.all(props.cloud_fraction >= 0.0)
+        assert jnp.all(props.cloud_fraction <= 1.0)
+
     def test_rrtmgp_with_clouds(self):
         """RRTMGP should accept cloud properties and produce valid output."""
         from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (

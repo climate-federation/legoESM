@@ -1245,7 +1245,9 @@ class DiagnosticCollector:
                     continue
                 nlev = field_slice.shape[2]
                 plev = np.sort(CMIP6_PLEV19)[:nlev] if nlev <= len(CMIP6_PLEV19) else None
-                field_plev = np.transpose(field_slice, (2, 0, 1))
+                # _make_plev_da sorts plev descending (highest pressure first).
+                # Flip the pressure axis so data[0] aligns with plev[0]=max pressure.
+                field_plev = np.transpose(field_slice, (2, 0, 1))[::-1]
                 try:
                     self.cf_writer.write_field(
                         var_name=var_name,

@@ -7,7 +7,7 @@ Provides injection into ``build_segment_fn`` kwargs.
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import ClassVar, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -35,6 +35,7 @@ DEFAULT_TRAINABLE = [
     ParamConstraint("C_E", 0.001, 0.005, "sigmoid"),
     ParamConstraint("albedo_ice", 0.4, 0.8, "sigmoid"),
     ParamConstraint("albedo_ocean", 0.03, 0.10, "sigmoid"),
+    ParamConstraint("rh_crit_bl", 0.4, 0.85, "sigmoid"),
 ]
 
 # Non-convection trainable parameters (shared by all schemes)
@@ -45,6 +46,7 @@ _COMMON_TRAINABLE = [
     ParamConstraint("C_E", 0.001, 0.005, "sigmoid"),
     ParamConstraint("albedo_ice", 0.4, 0.8, "sigmoid"),
     ParamConstraint("albedo_ocean", 0.03, 0.10, "sigmoid"),
+    ParamConstraint("rh_crit_bl", 0.4, 0.85, "sigmoid"),
 ]
 
 # SBM-specific convection parameters
@@ -154,6 +156,19 @@ class TrainablePhysicsParams(eqx.Module):
                 result[c.name] = raw
         return result
 
+    # Mapping from tuning-registry name → build_segment_fn kwarg name.
+    # Most params share the same name; exceptions listed here.
+    # ClassVar so eqx.Module (dataclass) doesn't treat it as a field.
+    _KWARG_RENAME: ClassVar[dict[str, str]] = {"rh_crit_bl": "cloud_rh_crit_bl"}
+
     def to_segment_kwargs(self) -> dict[str, jax.Array]:
-        """Return kwargs compatible with build_segment_fn."""
-        return self.as_dict()
+        """Return kwargs compatible with build_segment_fn.
+
+        Renames ``rh_crit_bl`` → ``cloud_rh_crit_bl`` since build_segment_fn
+        uses the prefixed form to avoid collision with free-troposphere rh_crit.
+        """
+        result = {}
+        for name, val in self.as_dict().items():
+            kwarg_name = self._KWARG_RENAME.get(name, name)
+            result[kwarg_name] = val
+        return result

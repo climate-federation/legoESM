@@ -126,6 +126,8 @@ class ExperimentConfig(NamedTuple):
 
     # Clouds & Microphysics
     cloud_scheme: str = "none"
+    cloud_rh_crit_bl: float = 0.7
+    cloud_sigma_bl: float = 1.0
     microphysics: str = "none"
 
     # Convection / Turbulence / GWD
@@ -437,6 +439,8 @@ class ExperimentConfig(NamedTuple):
             volcanic_aerosol_file=getattr(amip_cfg, 'volcanic_aerosol_file', ''),
             volcanic_aerosol_scale=getattr(amip_cfg, 'volcanic_aerosol_scale', 1.0),
             cloud_scheme=amip_cfg.cloud_scheme,
+            cloud_rh_crit_bl=getattr(amip_cfg, 'cloud_rh_crit_bl', 0.7),
+            cloud_sigma_bl=getattr(amip_cfg, 'cloud_sigma_bl', 1.0),
             microphysics=amip_cfg.microphysics,
             convection=getattr(amip_cfg, 'convection', 'sbm'),
             turbulence=getattr(amip_cfg, 'turbulence', 'none'),

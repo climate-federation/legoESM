@@ -378,6 +378,7 @@ def build_segment_fn(
     ghg_vmr_override=None,
     owned_face_ids=None,
     hs_newtonian_relax=None,
+    cloud_rh_crit_bl=None,
 ):
     """Build a compiled segment function.
 
@@ -458,6 +459,7 @@ def build_segment_fn(
     _C_E = jnp.asarray(C_E) if C_E is not None else None
     _albedo_ice = jnp.asarray(albedo_ice) if albedo_ice is not None else None
     _albedo_ocean = jnp.asarray(albedo_ocean) if albedo_ocean is not None else None
+    _cloud_rh_crit_bl = jnp.asarray(cloud_rh_crit_bl) if cloud_rh_crit_bl is not None else None
     # GHG VMR: species key order is static (captured in closure);
     # values are dynamic (passed via SegmentForcing.ghg_vmr).
     _ghg_keys: tuple[str, ...] = ()
@@ -574,6 +576,7 @@ def build_segment_fn(
                     C_H=_C_H, C_E=_C_E,
                     albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
                     ghg_vmr_override=_ghg_vmr_override,
+                    cloud_rh_crit_bl=_cloud_rh_crit_bl,
                 )
 
                 # Write physics tendencies back at owned indices.
@@ -630,6 +633,7 @@ def build_segment_fn(
                     C_H=_C_H, C_E=_C_E,
                     albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
                     ghg_vmr_override=_ghg_vmr_override,
+                    cloud_rh_crit_bl=_cloud_rh_crit_bl,
                 )
 
                 # --- State update ---

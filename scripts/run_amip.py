@@ -249,6 +249,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Clouds & microphysics
     parser.add_argument("--clouds", type=str, default="none",
                         choices=["none", "sundqvist", "xu_randall"])
+    parser.add_argument("--cloud-rh-crit-bl", type=float, default=0.7,
+                        help="Critical RH for BL cloud onset (Sundqvist). "
+                             "Only active when --cloud-sigma-bl < 1.0. "
+                             "Recommended ~0.55 for AMIP. Default 0.7 (disabled).")
+    parser.add_argument("--cloud-sigma-bl", type=float, default=1.0,
+                        help="Sigma level (p/p_s) above which rh_crit_bl applies. "
+                             "Use 0.85 to cover the lowest ~1.5 km. Default 1.0 (disabled).")
     parser.add_argument("--microphysics", type=str, default="none",
                         choices=["none", "kessler", "sundqvist",
                                  "seifert_beheng", "morrison", "thompson"])
@@ -366,6 +373,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         volcanic_aerosol_file=args.volcanic_aerosol_file,
         volcanic_aerosol_scale=args.volcanic_aerosol_scale,
         cloud_scheme=args.clouds,
+        cloud_rh_crit_bl=args.cloud_rh_crit_bl,
+        cloud_sigma_bl=args.cloud_sigma_bl,
         microphysics=args.microphysics,
         convection=args.convection,
         turbulence=args.turbulence,
