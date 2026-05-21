@@ -29,6 +29,12 @@ from .jra55_do import OceanForcing, load_jra55_do, synthetic_ocean_forcing
 from .core2 import load_core2_nyf
 from .woa import load_woa_sst, synthetic_woa_sst
 from .woa_sss import load_woa_sss, synthetic_woa_sss
+from .dai_trenberth import (
+    RiverRunoffData,
+    load_dai_trenberth,
+    synthetic_dai_trenberth,
+    project_runoff_to_grid,
+)
 from .sss_restoring import (
     SSSRestoringConfig,
     RegionMaskSpec,
@@ -47,6 +53,10 @@ __all__ = [
     "synthetic_ocean_forcing",
     "synthetic_woa_sst",
     "synthetic_woa_sss",
+    "RiverRunoffData",
+    "load_dai_trenberth",
+    "synthetic_dai_trenberth",
+    "project_runoff_to_grid",
     "SSSRestoringConfig",
     "RegionMaskSpec",
     "DEFAULT_OMIP2_REGIONS",
