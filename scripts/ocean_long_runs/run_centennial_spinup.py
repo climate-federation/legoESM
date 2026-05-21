@@ -118,11 +118,10 @@ def main() -> int:
     p.add_argument("--ice-shelf-scheme",
                    choices=["three_equation", "linear"],
                    default="three_equation")
-    # --- Tidal mixing (diagnostic only at driver level for now) ---
+    # --- Tidal mixing (Jayne-StLaurent abyssal κ + per-step tracer mixing) ---
     p.add_argument("--tidal-mixing", action="store_true",
-                   help="Compute synthetic Jayne-StLaurent tidal κ "
-                        "diagnostic each year (not yet wired into the "
-                        "tracer mixing step).")
+                   help="Enable Jayne-StLaurent abyssal tidal κ + per-step "
+                        "implicit-Euler vertical tracer mixing of T + S.")
     p.add_argument("--smoke", action="store_true",
                    help="Run a single model day to exercise code paths.")
     args = p.parse_args()
@@ -131,6 +130,7 @@ def main() -> int:
     scripts_dir = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(scripts_dir))
 
+    from legoesm import constants
     from legoesm.ocean import restart as _restart
     from legoesm.ocean.rpe import compute_rpe, rpe_drift_rate_per_m2
     from legoesm.ocean.budgets import (
@@ -155,6 +155,7 @@ def main() -> int:
         apply_runoff_step,
         apply_runoff_step_mpas,
         apply_ice_shelf_basal_step,
+        apply_tidal_mixing_step,
     )
     from legoesm.ocean.forcing.dai_trenberth import (
         load_dai_trenberth, project_runoff_to_grid,
@@ -162,7 +163,6 @@ def main() -> int:
     from legoesm.ocean.physics.ice_shelf import IceShelfConfig
     from legoesm.ocean.physics.vertical_mixing.tidal import (
         TidalMixingConfig,
-        compute_tidal_diffusivity,
         synthetic_baroclinic_tide_energy_from_bathy,
     )
     import jax.numpy as jnp
@@ -305,27 +305,44 @@ def main() -> int:
                 f"{int(ice_shelf_mask_arr.sum())} cavity cells)"
             )
 
-    # --- Tidal mixing diagnostic setup -------------------------------
+    # --- Tidal mixing setup (Jayne-StLaurent abyssal κ + tracer mix) -
+    # Pre-compute the static fields ONCE: E_BT (depends only on
+    # bathymetry), layer-depth column (depends only on z_coord +
+    # nlev), and the H_bathy snapshot.  Per-step we then recompute
+    # h_partial + N² from the current state, evaluate K_tidal, and
+    # apply implicit Euler vertical tracer mixing to (T, S).
     tidal_config = None
-    E_BT_field = None
+    tidal_static = None
     if args.tidal_mixing:
         if args.grid != "latlon":
             print(
-                f"==> WARNING: --tidal-mixing diagnostic not yet "
-                f"supported on grid={args.grid!r}; ignoring."
+                f"==> WARNING: --tidal-mixing not yet supported on "
+                f"grid={args.grid!r}; ignoring."
             )
         else:
             tidal_config = TidalMixingConfig(enabled=True)
-            H_bathy = np.asarray(state.H_bathy.data, dtype=np.float64)
-            E_BT_field = np.asarray(
+            H_bathy_arr = np.asarray(state.H_bathy.data, dtype=np.float64)
+            E_BT_arr = np.asarray(
                 synthetic_baroclinic_tide_energy_from_bathy(
-                    jnp.asarray(H_bathy),
+                    jnp.asarray(H_bathy_arr),
                 )
             )
+            nlev_static = int(np.asarray(z_coord.dz_ref).shape[0])
+            dz_ref_arr = np.asarray(z_coord.dz_ref, dtype=np.float64)[:nlev_static]
+            z_edges = np.concatenate([[0.0], np.cumsum(dz_ref_arr)])
+            layer_depths_1d = 0.5 * (z_edges[:-1] + z_edges[1:])
+            lat_n, lon_n = E_BT_arr.shape
+            layer_depths_3d = np.broadcast_to(
+                layer_depths_1d, (lat_n, lon_n, nlev_static),
+            ).copy()
+            tidal_static = {
+                "E_BT": E_BT_arr,
+                "layer_depths": layer_depths_3d,
+                "H_bathy": H_bathy_arr,
+            }
             print(
-                f"==> Tidal mixing diagnostic enabled "
-                f"(E_BT global mean: "
-                f"{float(np.mean(E_BT_field)):.3e} W/m²)"
+                f"==> Tidal mixing enabled (per-step tracer mixing); "
+                f"E_BT global mean: {float(np.mean(E_BT_arr)):.3e} W/m²"
             )
 
 
@@ -444,6 +461,10 @@ def main() -> int:
             cache_dir=args.jra55_cache,
         )
         n_forc = forcing.u10.shape[0]
+        # Yearly tidal-κ accumulators (mean/max diagnostic only).
+        K_tidal_year_sum = 0.0
+        K_tidal_year_max = 0.0
+        K_tidal_year_steps = 0
         for step in range(steps_per_year):
             idx_t = (step * n_forc) // steps_per_year
             state = apply_omip2_surface_fluxes(
@@ -500,6 +521,106 @@ def main() -> int:
                         dt=dt,
                     )
             state = model.step(state, dt)
+
+            # Jayne-StLaurent tidal vertical mixing — applied AFTER
+            # the dycore's own step so it layers on top of any other
+            # vertical diffusion already inside ``model.step``.  The
+            # whole tidal path runs in NumPy on host: ``state.T``
+            # and ``state.S`` are already pulled to host in the
+            # implicit solver inside ``apply_tidal_mixing_step``,
+            # so we keep N², F(z), and K_tidal in NumPy too rather
+            # than ping-ponging arrays across the host/device
+            # boundary every step.
+            if tidal_config is not None and tidal_static is not None:
+                h_partial_now = np.asarray(compute_layer_thickness(
+                    state.eta.data, state.H_bathy.data, z_coord,
+                ), dtype=np.float64)
+                T_arr = np.asarray(state.T.data, dtype=np.float64)
+                S_arr = np.asarray(state.S.data, dtype=np.float64)
+                nlev_loc = h_partial_now.shape[-1]
+                # Linear-EOS density for N² (Boussinesq, ρ-anomaly).
+                # α_T / β_S match the defaults in ``ocean/eos.py``.
+                alpha_T = 2.0e-4
+                beta_S = 7.4e-4
+                rho_0_loc = float(np.asarray(constants.rho_ocean))
+                g_loc = float(constants.g)
+                N2_min = float(tidal_config.N_squared_min)
+                if nlev_loc < 2:
+                    # Degenerate single-layer column — diffusion is a
+                    # no-op but we still want the diagnostic + a sane
+                    # ``N2`` floor to feed ``K_tidal``.
+                    N2_cell = np.full_like(h_partial_now, N2_min)
+                else:
+                    rho = rho_0_loc * (
+                        1.0 - alpha_T * T_arr + beta_S * S_arr
+                    )
+                    dz_int = 0.5 * (
+                        h_partial_now[..., :-1] + h_partial_now[..., 1:]
+                    )
+                    dz_int = np.where(dz_int > 1.0e-12, dz_int, 1.0)
+                    N2_iface = -(g_loc / rho_0_loc) * (
+                        rho[..., :-1] - rho[..., 1:]
+                    ) / dz_int
+                    # Pad to cell centres: replicate end interfaces at
+                    # top and bottom, average adjacent interfaces
+                    # inside.
+                    N2_top = N2_iface[..., :1]
+                    N2_bot = N2_iface[..., -1:]
+                    if N2_iface.shape[-1] >= 2:
+                        N2_avg = 0.5 * (
+                            N2_iface[..., :-1] + N2_iface[..., 1:]
+                        )
+                        N2_cell = np.concatenate(
+                            [N2_top, N2_avg, N2_bot], axis=-1,
+                        )
+                    else:
+                        # nlev == 2 → one interface → broadcast.
+                        N2_cell = np.broadcast_to(
+                            N2_iface, h_partial_now.shape,
+                        ).copy()
+                    N2_cell = np.maximum(N2_cell, N2_min)
+
+                # Numpy mirror of ``compute_tidal_diffusivity``:
+                # K_tidal = Γ q E_BT F(z) / (ρ_0 N²), clipped to K_max,
+                # with F(z) = bottom-intensified exp-decay normalised
+                # to ``Σ F·h = 1`` per column.
+                E_BT_arr = tidal_static["E_BT"]
+                layer_depths = tidal_static["layer_depths"]
+                H_bathy_loc = tidal_static["H_bathy"]
+                h_decay = max(float(tidal_config.h_decay_m), 1.0e-6)
+                dist_from_bottom = np.maximum(
+                    H_bathy_loc[..., None] - layer_depths, 0.0,
+                )
+                F_raw = np.exp(-dist_from_bottom / h_decay)
+                integral = np.sum(
+                    F_raw * h_partial_now, axis=-1, keepdims=True,
+                )
+                F_norm = np.where(
+                    integral > 1.0e-12, F_raw / np.where(
+                        integral > 1.0e-12, integral, 1.0,
+                    ), 0.0,
+                )
+                K_tidal = (
+                    float(tidal_config.Gamma)
+                    * float(tidal_config.q_local)
+                    * E_BT_arr[..., None]
+                    * F_norm
+                ) / (rho_0_loc * N2_cell)
+                K_tidal = np.clip(
+                    K_tidal, 0.0, float(tidal_config.K_max),
+                )
+
+                state = apply_tidal_mixing_step(
+                    state,
+                    K_tidal=K_tidal,
+                    h_partial=h_partial_now,
+                    dt=dt,
+                )
+                K_tidal_year_sum += float(np.mean(K_tidal))
+                K_tidal_year_max = max(
+                    K_tidal_year_max, float(np.max(K_tidal)),
+                )
+                K_tidal_year_steps += 1
         state = jax.block_until_ready(state)
 
         # Yearly diagnostics.
@@ -545,45 +666,14 @@ def main() -> int:
         else:
             amoc_Sv = float("nan")
 
-        # Tidal-mixing diagnostic (lat-lon only, when enabled).
-        if tidal_config is not None and E_BT_field is not None:
-            try:
-                h_partial_tidal = compute_layer_thickness(
-                    state.eta.data, state.H_bathy.data, z_coord,
-                )
-                nlev = int(np.asarray(h_partial_tidal).shape[-1])
-                # Cell-centred depth ≈ half-thickness running cumulative
-                # sum.  Crude but adequate for the diagnostic.
-                dz_ref = np.asarray(z_coord.dz_ref)[:nlev]
-                z_edges = np.concatenate([[0.0], np.cumsum(dz_ref)])
-                layer_depths_1d = 0.5 * (z_edges[:-1] + z_edges[1:])
-                lat_n, lon_n = E_BT_field.shape
-                layer_depths_3d = np.broadcast_to(
-                    layer_depths_1d, (lat_n, lon_n, nlev),
-                )
-                # N² placeholder ≈ 1e-5 1/s² (typical pycnocline); the
-                # diagnostic K depends inversely on N² so a uniform
-                # value yields the structure of the bottom-intensified
-                # F(z) profile.
-                N2 = np.full((lat_n, lon_n, nlev), 1.0e-5)
-                K_tidal = compute_tidal_diffusivity(
-                    jnp.asarray(E_BT_field),
-                    jnp.asarray(layer_depths_3d),
-                    jnp.asarray(h_partial_tidal),
-                    jnp.asarray(np.asarray(state.H_bathy.data)),
-                    jnp.asarray(N2),
-                    config=tidal_config,
-                )
-                K_mean = float(jnp.mean(K_tidal))
-                K_max_diag = float(jnp.max(K_tidal))
-                print(
-                    f"   tidal-κ diag: mean={K_mean:.3e} m²/s, "
-                    f"max={K_max_diag:.3e} m²/s"
-                )
-            except Exception as exc:
-                # Diagnostic only — never fail the run on a bad
-                # tidal-mixing computation.
-                print(f"   tidal-κ diag SKIPPED: {exc!r}")
+        # Yearly tidal-κ summary from the per-step accumulator.
+        if tidal_config is not None and K_tidal_year_steps > 0:
+            K_year_mean = K_tidal_year_sum / K_tidal_year_steps
+            print(
+                f"   tidal-κ: year-mean(<K>) = {K_year_mean:.3e} m²/s, "
+                f"year-max = {K_tidal_year_max:.3e} m²/s "
+                f"({K_tidal_year_steps} steps)"
+            )
 
         # ``tb0_*`` baselines were captured at year 0 (fresh) or
         # loaded from ``initial_diagnostics.json`` (resume); drift
