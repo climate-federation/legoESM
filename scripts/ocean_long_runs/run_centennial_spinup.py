@@ -101,6 +101,28 @@ def main() -> int:
     p.add_argument("--sss-cache", type=Path, default=None,
                    help="WOA SSS NetCDF cache directory; falls back to "
                         "synthetic climatology when missing.")
+    # --- Dai-Trenberth river runoff ---
+    p.add_argument("--runoff", action="store_true",
+                   help="Enable Dai-Trenberth global river runoff.")
+    p.add_argument("--runoff-cache", type=Path, default=None,
+                   help="Dai-Trenberth NetCDF cache directory; "
+                        "falls back to 16-river synthetic climatology.")
+    # --- Ice-shelf basal melt ---
+    p.add_argument("--ice-shelf", action="store_true",
+                   help="Enable Holland-Jenkins ice-shelf basal melt "
+                        "(requires --ice-shelf-mask + --ice-draft NPY).")
+    p.add_argument("--ice-shelf-mask", type=Path, default=None,
+                   help="NPY file with (n_lat, n_lon) {0,1} cavity mask.")
+    p.add_argument("--ice-draft", type=Path, default=None,
+                   help="NPY file with (n_lat, n_lon) ice-base depth [m].")
+    p.add_argument("--ice-shelf-scheme",
+                   choices=["three_equation", "linear"],
+                   default="three_equation")
+    # --- Tidal mixing (diagnostic only at driver level for now) ---
+    p.add_argument("--tidal-mixing", action="store_true",
+                   help="Compute synthetic Jayne-StLaurent tidal κ "
+                        "diagnostic each year (not yet wired into the "
+                        "tracer mixing step).")
     p.add_argument("--smoke", action="store_true",
                    help="Run a single model day to exercise code paths.")
     args = p.parse_args()
@@ -130,7 +152,20 @@ def main() -> int:
     from legoesm.ocean.coupler import (
         apply_sss_restoring_step,
         apply_sss_restoring_step_mpas,
+        apply_runoff_step,
+        apply_runoff_step_mpas,
+        apply_ice_shelf_basal_step,
     )
+    from legoesm.ocean.forcing.dai_trenberth import (
+        load_dai_trenberth, project_runoff_to_grid,
+    )
+    from legoesm.ocean.physics.ice_shelf import IceShelfConfig
+    from legoesm.ocean.physics.vertical_mixing.tidal import (
+        TidalMixingConfig,
+        compute_tidal_diffusivity,
+        synthetic_baroclinic_tide_energy_from_bathy,
+    )
+    import jax.numpy as jnp
     from run_omip2 import _build_state  # type: ignore
     import jax
 
@@ -195,6 +230,104 @@ def main() -> int:
                 f"{float(np.min(S_target_on_grid)):.2f}"
                 f" – {float(np.max(S_target_on_grid)):.2f} PSU"
             )
+
+    # --- Dai-Trenberth runoff setup ----------------------------------
+    runoff_on_grid = None
+    if args.runoff:
+        if args.grid != "latlon":
+            print(
+                f"==> WARNING: --runoff not yet supported on grid="
+                f"{args.grid!r}; ignoring."
+            )
+        else:
+            print(
+                f"==> Loading Dai-Trenberth rivers "
+                f"(cache: {args.runoff_cache or 'synthetic'})"
+            )
+            rivers = load_dai_trenberth(cache_dir=args.runoff_cache)
+            lat_deg = np.degrees(np.asarray(grid.lat))
+            lon_deg = np.degrees(np.asarray(grid.lon))
+            cell_area = np.asarray(getattr(grid, "area", None))
+            if cell_area is None or cell_area.shape != (
+                lat_deg.size, lon_deg.size
+            ):
+                # Fallback: cos(lat)-weighted nominal cell area.
+                R_e = float(getattr(grid, "radius", 6.371e6))
+                dlon_g = 2.0 * np.pi / lon_deg.size
+                dlat_g = np.pi / lat_deg.size
+                cell_area = (
+                    R_e * R_e * dlon_g * dlat_g
+                    * np.cos(np.deg2rad(lat_deg))[:, None]
+                    * np.ones((1, lon_deg.size))
+                )
+            ocean_mask = np.asarray(state.land_mask.data, dtype=np.int32)
+            runoff_on_grid = project_runoff_to_grid(
+                rivers,
+                grid_lat_deg=lat_deg,
+                grid_lon_deg=lon_deg,
+                cell_area_m2=cell_area,
+                month=None,
+                ocean_mask=ocean_mask,
+            )
+            print(
+                f"   Runoff grid total: "
+                f"{float((runoff_on_grid * cell_area).sum()):.3e} kg/s"
+            )
+
+    # --- Ice-shelf setup ---------------------------------------------
+    ice_shelf_config = None
+    ice_shelf_mask_arr = None
+    ice_draft_arr = None
+    if args.ice_shelf:
+        if args.grid != "latlon":
+            print(
+                f"==> WARNING: --ice-shelf not yet supported on grid="
+                f"{args.grid!r}; ignoring."
+            )
+        elif args.ice_shelf_mask is None or args.ice_draft is None:
+            print(
+                "==> WARNING: --ice-shelf requires --ice-shelf-mask + "
+                "--ice-draft NPY files; ignoring."
+            )
+        else:
+            ice_shelf_config = IceShelfConfig(
+                enabled=True, scheme=args.ice_shelf_scheme,
+            )
+            ice_shelf_mask_arr = np.asarray(
+                np.load(args.ice_shelf_mask), dtype=np.float64,
+            )
+            ice_draft_arr = np.asarray(
+                np.load(args.ice_draft), dtype=np.float64,
+            )
+            print(
+                f"==> Ice-shelf cavity coupling enabled "
+                f"(scheme={args.ice_shelf_scheme}, "
+                f"{int(ice_shelf_mask_arr.sum())} cavity cells)"
+            )
+
+    # --- Tidal mixing diagnostic setup -------------------------------
+    tidal_config = None
+    E_BT_field = None
+    if args.tidal_mixing:
+        if args.grid != "latlon":
+            print(
+                f"==> WARNING: --tidal-mixing diagnostic not yet "
+                f"supported on grid={args.grid!r}; ignoring."
+            )
+        else:
+            tidal_config = TidalMixingConfig(enabled=True)
+            H_bathy = np.asarray(state.H_bathy.data, dtype=np.float64)
+            E_BT_field = np.asarray(
+                synthetic_baroclinic_tide_energy_from_bathy(
+                    jnp.asarray(H_bathy),
+                )
+            )
+            print(
+                f"==> Tidal mixing diagnostic enabled "
+                f"(E_BT global mean: "
+                f"{float(np.mean(E_BT_field)):.3e} W/m²)"
+            )
+
 
     # Auto-resume: prefer ``--restart-from``, fallback to latest in
     # ``--output``.
@@ -318,6 +451,28 @@ def main() -> int:
                 z_coord=z_coord, grid=grid, grid_type=args.grid,
                 dt=dt,
             )
+            # Dai-Trenberth runoff (when enabled + lat-lon).
+            if runoff_on_grid is not None:
+                state = apply_runoff_step(
+                    state,
+                    R_kg_m2_s=runoff_on_grid,
+                    z_coord=z_coord,
+                    dt=dt,
+                )
+
+            # Ice-shelf basal melt (when enabled + lat-lon).
+            if (ice_shelf_config is not None
+                    and ice_shelf_mask_arr is not None
+                    and ice_draft_arr is not None):
+                state, _ = apply_ice_shelf_basal_step(
+                    state,
+                    ice_shelf_mask=ice_shelf_mask_arr,
+                    ice_draft_m=ice_draft_arr,
+                    z_coord=z_coord,
+                    dt=dt,
+                    config=ice_shelf_config,
+                )
+
             # OMIP-2 SSS restoring (when enabled).  Ocean-only driver
             # passes explicit zero ice-fraction; coupled-ice driver
             # should plumb the live ``ice_state.concentration`` so
@@ -389,6 +544,46 @@ def main() -> int:
             )
         else:
             amoc_Sv = float("nan")
+
+        # Tidal-mixing diagnostic (lat-lon only, when enabled).
+        if tidal_config is not None and E_BT_field is not None:
+            try:
+                h_partial_tidal = compute_layer_thickness(
+                    state.eta.data, state.H_bathy.data, z_coord,
+                )
+                nlev = int(np.asarray(h_partial_tidal).shape[-1])
+                # Cell-centred depth ≈ half-thickness running cumulative
+                # sum.  Crude but adequate for the diagnostic.
+                dz_ref = np.asarray(z_coord.dz_ref)[:nlev]
+                z_edges = np.concatenate([[0.0], np.cumsum(dz_ref)])
+                layer_depths_1d = 0.5 * (z_edges[:-1] + z_edges[1:])
+                lat_n, lon_n = E_BT_field.shape
+                layer_depths_3d = np.broadcast_to(
+                    layer_depths_1d, (lat_n, lon_n, nlev),
+                )
+                # N² placeholder ≈ 1e-5 1/s² (typical pycnocline); the
+                # diagnostic K depends inversely on N² so a uniform
+                # value yields the structure of the bottom-intensified
+                # F(z) profile.
+                N2 = np.full((lat_n, lon_n, nlev), 1.0e-5)
+                K_tidal = compute_tidal_diffusivity(
+                    jnp.asarray(E_BT_field),
+                    jnp.asarray(layer_depths_3d),
+                    jnp.asarray(h_partial_tidal),
+                    jnp.asarray(np.asarray(state.H_bathy.data)),
+                    jnp.asarray(N2),
+                    config=tidal_config,
+                )
+                K_mean = float(jnp.mean(K_tidal))
+                K_max_diag = float(jnp.max(K_tidal))
+                print(
+                    f"   tidal-κ diag: mean={K_mean:.3e} m²/s, "
+                    f"max={K_max_diag:.3e} m²/s"
+                )
+            except Exception as exc:
+                # Diagnostic only — never fail the run on a bad
+                # tidal-mixing computation.
+                print(f"   tidal-κ diag SKIPPED: {exc!r}")
 
         # ``tb0_*`` baselines were captured at year 0 (fresh) or
         # loaded from ``initial_diagnostics.json`` (resume); drift

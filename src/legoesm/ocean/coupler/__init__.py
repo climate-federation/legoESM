@@ -10,9 +10,14 @@ forcing + L&Y 2009 bulk fluxes into the ocean state.
 
 from .omip2_applicator import apply_omip2_surface_fluxes
 from .sss_apply import apply_sss_restoring_step, apply_sss_restoring_step_mpas
+from .runoff_apply import apply_runoff_step, apply_runoff_step_mpas
+from .ice_shelf_apply import apply_ice_shelf_basal_step
 
 __all__ = [
     "apply_omip2_surface_fluxes",
     "apply_sss_restoring_step",
     "apply_sss_restoring_step_mpas",
+    "apply_runoff_step",
+    "apply_runoff_step_mpas",
+    "apply_ice_shelf_basal_step",
 ]
