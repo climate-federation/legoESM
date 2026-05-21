@@ -2,21 +2,24 @@
 
 Routes the per-cell basal-melt computation from
 :func:`legoesm.ocean.physics.ice_shelf.compute_basal_melt` into the
-ocean's surface forcing:
+ocean column at cavity cells.
 
-* Freshwater INTO ocean column at cavity cells (positive η + virtual-
-  salt dilution of the top layer).
-* Heat EXTRACTED from the top-layer T (cavity draws latent + sensible
-  heat from the ocean).
+Effects per step (at the cavity cell containing the ice base):
 
-Lat-lon C-grid + MPAS counterparts.  The driver supplies a static
+* Cavity ambient ``(T, S)`` is read from the layer that contains the
+  ice-base depth (``ice_draft_m``).  Antarctic shelves with 200 –
+  1500 m drafts therefore see realistic Circumpolar Deep Water
+  ambient, not the surface mixed-layer temperature.
+* Heat extracted from that draft layer cools its in-situ T.
+* Virtual-salt dilution of that draft layer freshens its in-situ S.
+* Free surface ``η`` rises by ``F_FW · dt / ρ_0`` (barotropic mass
+  response — net freshwater addition raises sea level).
+
+Lat-lon C-grid + MPAS counterparts.  Driver supplies a static
 ``ice_shelf_mask`` (1 = cavity cell, 0 = no shelf) + ``ice_draft_m``
-field providing the local ice-base depth that converts to the
-hydrostatic pressure inside the basal-melt parameterisation.  The
-basal-melt scheme reads the cavity ambient (T, S) from the top
-ocean layer at each cavity cell — a simplification valid for the
-mixed-layer-style cavity heat budget.  For multi-layer cavities the
-caller should supply an explicit cavity-cell layer index instead.
+field giving the local ice-base depth that converts to the
+hydrostatic pressure inside the basal-melt parameterisation AND
+picks the cavity-ambient layer index.
 """
 
 from __future__ import annotations
@@ -31,6 +34,41 @@ from legoesm.ocean.physics.ice_shelf import (
     compute_basal_melt,
     ice_base_pressure_dbar,
 )
+
+
+def _ice_base_layer_index(
+    draft_m: np.ndarray, dz_ref: np.ndarray,
+) -> np.ndarray:
+    """Per-cell layer index ``k`` containing the ice base.
+
+    Uses reference layer thicknesses ``dz_ref`` to build interface
+    depths ``z_iface = [0, dz_0, dz_0+dz_1, ...]``.  The cavity layer
+    index is the largest ``k`` such that ``z_iface[k] <= draft_m``,
+    clipped to ``[0, nlev-1]`` so deep drafts collapse to the
+    deepest layer and shallow / zero drafts collapse to the
+    surface layer.
+
+    Parameters
+    ----------
+    draft_m : ndarray ``(...)``
+        Ice-base depth [m, positive down].
+    dz_ref : ndarray ``(nlev,)``
+        Reference layer thickness, top → bottom.
+
+    Returns
+    -------
+    k : ndarray ``(...)`` int64
+    """
+    if dz_ref.ndim != 1:
+        raise ValueError(
+            f"_ice_base_layer_index: dz_ref must be 1-D, got "
+            f"shape {dz_ref.shape}"
+        )
+    z_iface = np.concatenate([[0.0], np.cumsum(dz_ref)])
+    # ``searchsorted(side='right')`` gives the count of interfaces
+    # strictly <= draft; subtract 1 for the cell-centred layer index.
+    k = np.searchsorted(z_iface, draft_m, side="right") - 1
+    return np.clip(k, 0, dz_ref.size - 1).astype(np.int64)
 
 
 def apply_ice_shelf_basal_step(
@@ -86,6 +124,9 @@ def apply_ice_shelf_basal_step(
             "m_dot_m_s": zero,
             "freshwater_kg_m2_s": zero,
             "heat_extracted_W_m2": zero,
+            "ice_base_layer_idx": jnp.zeros_like(
+                state.land_mask.data, dtype=jnp.int32,
+            ),
         }
     if rho_0 is None:
         rho_0 = float(constants.rho_ocean)
@@ -101,13 +142,21 @@ def apply_ice_shelf_basal_step(
     T_arr = np.asarray(state.T.data, dtype=np.float64)
     eta_arr = np.asarray(state.eta.data, dtype=np.float64).copy()
 
-    T_top = T_arr[..., 0]
-    S_top = S_arr[..., 0]
+    nlev = S_arr.shape[-1]
+    dz_ref = np.asarray(z_coord.dz_ref, dtype=np.float64)[:nlev]
+    # Per-cell layer index containing the ice base.
+    k_draft = _ice_base_layer_index(draft, dz_ref)      # (...,)
+    k_exp = k_draft[..., None]                          # (..., 1)
+    # Cavity ambient: read T, S at the draft layer rather than the
+    # surface (the latter would yield mixed-layer values, not the
+    # deep-water mass actually in contact with the ice shelf base).
+    T_amb = np.take_along_axis(T_arr, k_exp, axis=-1)[..., 0]
+    S_amb = np.take_along_axis(S_arr, k_exp, axis=-1)[..., 0]
     p_ice = ice_base_pressure_dbar(jnp.asarray(draft))
 
     melt = compute_basal_melt(
-        jnp.asarray(T_top),
-        jnp.asarray(S_top),
+        jnp.asarray(T_amb),
+        jnp.asarray(S_amb),
         p_ice,
         config=config,
     )
@@ -121,19 +170,31 @@ def apply_ice_shelf_basal_step(
     fw = fw * active
     Q = Q * active
 
-    # Free-surface rise from melt FW.
+    # Free-surface rise from melt FW (barotropic mass response).
     eta_new = eta_arr + fw / rho_0 * dt
 
-    # Top-layer salinity dilution: dS = -S_top · F_FW · dt / (ρ_0 · dz_0)
-    dz_0 = float(np.asarray(z_coord.dz_ref)[0])
-    S_new = S_arr.copy()
-    S_new[..., 0] = S_top + (
-        -S_top * fw / (rho_0 * max(dz_0, 1.0e-6)) * dt
+    # Distribute the FW dilution + heat cooling INTO the draft layer
+    # only.  Vectorised per-layer scatter: ``lev_one_hot[..., k]`` is
+    # 1 where the layer matches the per-cell draft index, 0 else.
+    lev_idx = np.arange(nlev, dtype=np.int64)            # (nlev,)
+    one_hot = (lev_idx == k_exp).astype(np.float64)      # (..., nlev)
+    dz_per_layer = dz_ref                                # (nlev,)
+    # Per-layer thickness at the draft layer of each cell (zeros
+    # elsewhere thanks to the one-hot mask).
+    dz_draft = np.maximum(
+        np.take_along_axis(
+            np.broadcast_to(dz_per_layer, S_arr.shape),
+            k_exp, axis=-1,
+        )[..., 0],
+        1.0e-6,
     )
-
-    # Top-layer temperature cooling: dT = -Q · dt / (ρ_0 · c_p · dz_0).
-    T_new = T_arr.copy()
-    T_new[..., 0] = T_top - Q * dt / (rho_0 * c_p * max(dz_0, 1.0e-6))
+    # Salinity dilution at draft layer: dS_k = -S_amb · F_FW · dt /
+    # (ρ_0 · dz_k).  Multiplied by the one-hot mask so other layers
+    # are unaffected.
+    dS_at_k = -S_amb * fw / (rho_0 * dz_draft) * dt
+    dT_at_k = -Q * dt / (rho_0 * c_p * dz_draft)
+    S_new = S_arr + one_hot * dS_at_k[..., None]
+    T_new = T_arr + one_hot * dT_at_k[..., None]
 
     new_state = state._replace(
         S=Field(jnp.asarray(S_new), name=state.S.name,
@@ -147,6 +208,7 @@ def apply_ice_shelf_basal_step(
         "m_dot_m_s": m_dot,
         "freshwater_kg_m2_s": fw,
         "heat_extracted_W_m2": Q,
+        "ice_base_layer_idx": k_draft.astype(np.int32),
     }
     return new_state, diagnostics
 
@@ -176,6 +238,9 @@ def apply_ice_shelf_basal_step_mpas(
             "m_dot_m_s": zero,
             "freshwater_kg_m2_s": zero,
             "heat_extracted_W_m2": zero,
+            "ice_base_layer_idx": jnp.zeros_like(
+                state.land_mask.data, dtype=jnp.int32,
+            ),
         }
     if rho_0 is None:
         rho_0 = float(constants.rho_ocean)
@@ -214,13 +279,17 @@ def apply_ice_shelf_basal_step_mpas(
         )
     active = mask * land_mask
 
-    T_top = T_arr[..., 0]
-    S_top = S_arr[..., 0]
+    nlev = S_arr.shape[-1]
+    dz_ref = np.asarray(z_coord.dz_ref, dtype=np.float64)[:nlev]
+    k_draft = _ice_base_layer_index(draft, dz_ref)        # (nCells,)
+    k_exp = k_draft[..., None]                            # (nCells, 1)
+    T_amb = np.take_along_axis(T_arr, k_exp, axis=-1)[..., 0]
+    S_amb = np.take_along_axis(S_arr, k_exp, axis=-1)[..., 0]
     p_ice = ice_base_pressure_dbar(jnp.asarray(draft))
 
     melt = compute_basal_melt(
-        jnp.asarray(T_top),
-        jnp.asarray(S_top),
+        jnp.asarray(T_amb),
+        jnp.asarray(S_amb),
         p_ice,
         config=config,
     )
@@ -234,14 +303,19 @@ def apply_ice_shelf_basal_step_mpas(
 
     eta_new = eta_arr + fw / rho_0 * dt
 
-    dz_0 = float(np.asarray(z_coord.dz_ref)[0])
-    S_new = S_arr.copy()
-    S_new[..., 0] = S_top + (
-        -S_top * fw / (rho_0 * max(dz_0, 1.0e-6)) * dt
+    lev_idx = np.arange(nlev, dtype=np.int64)
+    one_hot = (lev_idx == k_exp).astype(np.float64)        # (nCells, nlev)
+    dz_draft = np.maximum(
+        np.take_along_axis(
+            np.broadcast_to(dz_ref, S_arr.shape),
+            k_exp, axis=-1,
+        )[..., 0],
+        1.0e-6,
     )
-
-    T_new = T_arr.copy()
-    T_new[..., 0] = T_top - Q * dt / (rho_0 * c_p * max(dz_0, 1.0e-6))
+    dS_at_k = -S_amb * fw / (rho_0 * dz_draft) * dt
+    dT_at_k = -Q * dt / (rho_0 * c_p * dz_draft)
+    S_new = S_arr + one_hot * dS_at_k[..., None]
+    T_new = T_arr + one_hot * dT_at_k[..., None]
 
     new_state = state._replace(
         S=Field(jnp.asarray(S_new), name=state.S.name,
@@ -255,5 +329,6 @@ def apply_ice_shelf_basal_step_mpas(
         "m_dot_m_s": m_dot,
         "freshwater_kg_m2_s": fw,
         "heat_extracted_W_m2": Q,
+        "ice_base_layer_idx": k_draft.astype(np.int32),
     }
     return new_state, diagnostics

@@ -9,6 +9,7 @@ import pytest
 from legoesm.core.field import Field
 from legoesm.ocean.coupler.runoff_apply import apply_runoff_step
 from legoesm.ocean.coupler.ice_shelf_apply import (
+    _ice_base_layer_index,
     apply_ice_shelf_basal_step,
     apply_ice_shelf_basal_step_mpas,
 )
@@ -50,6 +51,47 @@ class _FakeState:
         for k, v in kw.items():
             setattr(new, k, v)
         return new
+
+
+# ==============================================================================
+# _ice_base_layer_index
+# ==============================================================================
+
+class TestIceBaseLayerIndex:
+
+    def test_zero_draft_picks_layer_0(self):
+        dz = np.array([10.0, 50.0, 100.0])
+        assert int(_ice_base_layer_index(np.array(0.0), dz)) == 0
+
+    def test_shallow_within_top_layer(self):
+        # 5 m draft within layer 0 (0–10 m).
+        dz = np.array([10.0, 50.0, 100.0])
+        assert int(_ice_base_layer_index(np.array(5.0), dz)) == 0
+
+    def test_mid_layer(self):
+        # 30 m draft → between interfaces 10 + 60 → layer 1.
+        dz = np.array([10.0, 50.0, 100.0])
+        assert int(_ice_base_layer_index(np.array(30.0), dz)) == 1
+
+    def test_at_interface_picks_lower_layer(self):
+        # Exactly at interface 60 m → layer 2 (side='right').
+        dz = np.array([10.0, 50.0, 100.0])
+        assert int(_ice_base_layer_index(np.array(60.0), dz)) == 2
+
+    def test_deeper_than_column_clips_to_deepest(self):
+        dz = np.array([10.0, 50.0, 100.0])
+        assert int(_ice_base_layer_index(np.array(9999.0), dz)) == 2
+
+    def test_2d_broadcast(self):
+        dz = np.array([10.0, 50.0, 100.0])
+        drafts = np.array([[0.0, 5.0, 30.0], [70.0, 200.0, 9.9]])
+        k = _ice_base_layer_index(drafts, dz)
+        assert k.shape == drafts.shape
+        np.testing.assert_array_equal(k, np.array([[0, 0, 1], [2, 2, 0]]))
+
+    def test_1d_dz_required(self):
+        with pytest.raises(ValueError):
+            _ice_base_layer_index(np.array(5.0), np.array([[10.0, 50.0]]))
 
 
 # ==============================================================================
@@ -135,7 +177,9 @@ class TestApplyIceShelfBasalStep:
 
     def test_warm_cavity_melts_and_freshens(self):
         st = _FakeState(T_init=0.0, S_init=34.7)
-        # Single cavity cell at (1, 1) with 500 m draft.
+        # Single cavity cell at (1, 1) with 500 m draft.  dz_ref =
+        # [10, 50, 100] → z_iface = [0, 10, 60, 160].  500 m > 160
+        # → draft layer clipped to deepest (k=2).
         mask = np.zeros((4, 4))
         mask[1, 1] = 1.0
         draft = np.full((4, 4), 500.0)
@@ -151,11 +195,18 @@ class TestApplyIceShelfBasalStep:
         # Non-cavity cells unchanged.
         assert np.all(m_dot[0, :] == 0.0)
         assert np.all(m_dot[2:, :] == 0.0)
-        # Top-layer S at cavity cell dilutes; T cools.
+        # Draft-layer (k=2) S dilutes + T cools at cavity cell.
         S_arr = np.asarray(new.S.data)
         T_arr = np.asarray(new.T.data)
-        assert S_arr[1, 1, 0] < 34.7
-        assert T_arr[1, 1, 0] < 0.0
+        assert S_arr[1, 1, 2] < 34.7
+        assert T_arr[1, 1, 2] < 0.0
+        # Top + middle layers untouched.
+        assert S_arr[1, 1, 0] == 34.7
+        assert S_arr[1, 1, 1] == 34.7
+        assert T_arr[1, 1, 0] == 0.0
+        assert T_arr[1, 1, 1] == 0.0
+        # Diagnostic reports the layer index.
+        assert int(diag["ice_base_layer_idx"][1, 1]) == 2
 
     def test_basal_melt_raises_eta(self):
         """Meltwater entering the ocean must raise the free surface
@@ -181,12 +232,13 @@ class TestApplyIceShelfBasalStep:
         # Non-cavity cells stay at zero.
         assert eta_new[0, 0] == 0.0
 
-    def test_only_top_layer_modified(self):
+    def test_only_draft_layer_modified(self):
         st = _FakeState(T_init=0.0, S_init=34.7, nlev=3)
         mask = np.zeros((4, 4))
         mask[1, 1] = 1.0
-        draft = np.full((4, 4), 500.0)
-        new, _ = apply_ice_shelf_basal_step(
+        # Draft 30 m → z_iface=[0,10,60,160], 30 > 10 but < 60 → k=1.
+        draft = np.full((4, 4), 30.0)
+        new, diag = apply_ice_shelf_basal_step(
             st,
             ice_shelf_mask=mask, ice_draft_m=draft,
             z_coord=_FakeZCoord(), dt=3600.0,
@@ -194,10 +246,34 @@ class TestApplyIceShelfBasalStep:
         )
         S_new = np.asarray(new.S.data)
         T_new = np.asarray(new.T.data)
-        # Layers 1 + 2 untouched at cavity cell.
+        # Mid-layer (k=1) modified; top + deepest untouched.
+        assert S_new[1, 1, 1] < 34.7
+        assert T_new[1, 1, 1] < 0.0
+        assert S_new[1, 1, 0] == 34.7
+        assert S_new[1, 1, 2] == 34.7
+        assert T_new[1, 1, 0] == 0.0
+        assert T_new[1, 1, 2] == 0.0
+        assert int(diag["ice_base_layer_idx"][1, 1]) == 1
+
+    def test_shallow_draft_picks_top_layer(self):
+        """Shallow shelf (draft < dz_ref[0]=10 m) → layer 0."""
+        st = _FakeState(T_init=0.0, S_init=34.7, nlev=3)
+        mask = np.zeros((4, 4))
+        mask[1, 1] = 1.0
+        draft = np.full((4, 4), 5.0)
+        new, diag = apply_ice_shelf_basal_step(
+            st,
+            ice_shelf_mask=mask, ice_draft_m=draft,
+            z_coord=_FakeZCoord(), dt=3600.0,
+            config=IceShelfConfig(enabled=True, scheme="three_equation"),
+        )
+        S_new = np.asarray(new.S.data)
+        T_new = np.asarray(new.T.data)
+        assert S_new[1, 1, 0] < 34.7
+        assert T_new[1, 1, 0] < 0.0
         assert S_new[1, 1, 1] == 34.7
         assert S_new[1, 1, 2] == 34.7
-        assert T_new[1, 1, 1] == 0.0
+        assert int(diag["ice_base_layer_idx"][1, 1]) == 0
 
     def test_land_cells_skipped(self):
         st = _FakeState(T_init=0.0)
@@ -279,6 +355,8 @@ class TestApplyIceShelfBasalStepMPAS:
         st = _FakeMPASState(T_init=0.0, S_init=34.7)
         mask = np.zeros(8)
         mask[3] = 1.0
+        # Draft 500 m → deepest layer k=2 (dz_ref=[10,50,100],
+        # z_iface=[0,10,60,160], 500 > 160 → clipped to nlev-1).
         draft = np.full(8, 500.0)
         new, diag = apply_ice_shelf_basal_step_mpas(
             st,
@@ -291,8 +369,12 @@ class TestApplyIceShelfBasalStepMPAS:
         assert np.all(np.delete(m_dot, 3) == 0.0)
         S_arr = np.asarray(new.S.data)
         T_arr = np.asarray(new.T.data)
-        assert S_arr[3, 0] < 34.7
-        assert T_arr[3, 0] < 0.0
+        # Draft layer (k=2) modified; top layer untouched.
+        assert S_arr[3, 2] < 34.7
+        assert T_arr[3, 2] < 0.0
+        assert S_arr[3, 0] == 34.7
+        assert T_arr[3, 0] == 0.0
+        assert int(diag["ice_base_layer_idx"][3]) == 2
 
     def test_basal_melt_raises_eta(self):
         st = _FakeMPASState(T_init=0.0, S_init=34.7)
@@ -313,12 +395,13 @@ class TestApplyIceShelfBasalStepMPAS:
         assert eta_new[3] == pytest.approx(expected, rel=1e-6)
         assert eta_new[0] == 0.0
 
-    def test_only_top_layer_modified(self):
+    def test_only_draft_layer_modified(self):
         st = _FakeMPASState(T_init=0.0, S_init=34.7, nlev=3)
         mask = np.zeros(8)
         mask[3] = 1.0
-        draft = np.full(8, 500.0)
-        new, _ = apply_ice_shelf_basal_step_mpas(
+        # Draft 30 m → k=1 (10 < 30 < 60).
+        draft = np.full(8, 30.0)
+        new, diag = apply_ice_shelf_basal_step_mpas(
             st,
             ice_shelf_mask=mask, ice_draft_m=draft,
             z_coord=_FakeZCoord(), dt=3600.0,
@@ -326,9 +409,33 @@ class TestApplyIceShelfBasalStepMPAS:
         )
         S_new = np.asarray(new.S.data)
         T_new = np.asarray(new.T.data)
+        # Mid-layer modified; top + deepest untouched.
+        assert S_new[3, 1] < 34.7
+        assert T_new[3, 1] < 0.0
+        assert S_new[3, 0] == 34.7
+        assert S_new[3, 2] == 34.7
+        assert T_new[3, 0] == 0.0
+        assert T_new[3, 2] == 0.0
+        assert int(diag["ice_base_layer_idx"][3]) == 1
+
+    def test_shallow_draft_picks_top_layer_mpas(self):
+        st = _FakeMPASState(T_init=0.0, S_init=34.7, nlev=3)
+        mask = np.zeros(8)
+        mask[3] = 1.0
+        draft = np.full(8, 5.0)
+        new, diag = apply_ice_shelf_basal_step_mpas(
+            st,
+            ice_shelf_mask=mask, ice_draft_m=draft,
+            z_coord=_FakeZCoord(), dt=3600.0,
+            config=IceShelfConfig(enabled=True, scheme="three_equation"),
+        )
+        S_new = np.asarray(new.S.data)
+        T_new = np.asarray(new.T.data)
+        assert S_new[3, 0] < 34.7
+        assert T_new[3, 0] < 0.0
         assert S_new[3, 1] == 34.7
         assert S_new[3, 2] == 34.7
-        assert T_new[3, 1] == 0.0
+        assert int(diag["ice_base_layer_idx"][3]) == 0
 
     def test_land_cells_skipped(self):
         st = _FakeMPASState(T_init=0.0)
@@ -390,10 +497,11 @@ class TestApplyIceShelfBasalStepMPAS:
 
     def test_linear_scheme(self):
         """Mirror of the lat-lon ``scheme='linear'`` path on Voronoi cells:
-        positive melt + freshwater, top-layer-only T/S response."""
+        positive melt + freshwater, draft-layer-only T/S response."""
         st = _FakeMPASState(T_init=1.0, S_init=34.7, nlev=3)
         mask = np.zeros(8)
         mask[4] = 1.0
+        # 500 m draft → k=2 (deepest layer).
         draft = np.full(8, 500.0)
         new, diag = apply_ice_shelf_basal_step_mpas(
             st,
@@ -408,10 +516,11 @@ class TestApplyIceShelfBasalStepMPAS:
         assert np.all(np.delete(m_dot, 4) == 0.0)
         S_new = np.asarray(new.S.data)
         T_new = np.asarray(new.T.data)
-        assert S_new[4, 0] < 34.7
-        assert T_new[4, 0] < 1.0
-        # Layers 1, 2 untouched.
+        # Deepest layer modified; top + middle untouched.
+        assert S_new[4, 2] < 34.7
+        assert T_new[4, 2] < 1.0
+        assert S_new[4, 0] == 34.7
         assert S_new[4, 1] == 34.7
-        assert S_new[4, 2] == 34.7
+        assert T_new[4, 0] == 1.0
         assert T_new[4, 1] == 1.0
-        assert T_new[4, 2] == 1.0
+        assert int(diag["ice_base_layer_idx"][4]) == 2
