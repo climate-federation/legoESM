@@ -149,6 +149,7 @@ def main(argv: list[str] | None = None) -> int:
     # Output
     parser.add_argument("--output", type=str, default="")
     parser.add_argument("--monthly-means", action="store_true", default=True)
+    parser.add_argument("--no-monthly-means", dest="monthly_means", action="store_false")
     parser.add_argument("--cmip-output", action="store_true", default=False)
 
     # Multi-node MPI

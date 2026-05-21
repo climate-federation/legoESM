@@ -110,7 +110,7 @@ def _sbatch_script(
         f"--output {output_dir}",
     ]
     if distributed:
-        levante_args.append(f"--distributed --n-ranks {n_ranks}")
+        levante_args.append(f"--distributed --n-ranks {n_ranks} --use-duogrid")
 
     if restart_from:
         levante_args.append(f"--restart-from {restart_from}")

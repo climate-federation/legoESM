@@ -518,23 +518,24 @@ def era5_to_cubedsphere_carry(
     q_specific = jnp.clip(q_specific, 0.0, 0.99)
     q_model = q_specific / (1.0 - q_specific)
 
-    import jax as _jax
-    _hT = _jax.device_get(T_model)
-    _hu = _jax.device_get(u_model)
-    _hv = _jax.device_get(v_model)
-    _hps = _jax.device_get(p_s_cs)
-    _hphis = _jax.device_get(phis_cs)
-    _hphis_raw = _jax.device_get(phis_cs_raw)
-    _p_s_floor_val = _hybrid_p_s_floor(sigma, dp_floor=100.0) if _is_hybrid else 0.0
-    logger.info(
-        f"  ERA5→CS IC: T=[{float(_hT.min()):.0f},{float(_hT.max()):.0f}]K "
-        f"u=[{float(_hu.min()):.0f},{float(_hu.max()):.0f}]m/s "
-        f"v=[{float(_hv.min()):.0f},{float(_hv.max()):.0f}]m/s "
-        f"p_s=[{float(_hps.min()):.0f},{float(_hps.max()):.0f}]Pa "
-        f"phis=[{float(_hphis.min()):.0f},{float(_hphis.max()):.0f}]m2/s2 "
-        f"(raw phis peak={float(_hphis_raw.max()):.0f}, "
-        f"p_s_floor={_p_s_floor_val:.0f}Pa)"
-    )
+    if logger.isEnabledFor(logging.INFO):
+        import jax as _jax
+        _hT = _jax.device_get(T_model)
+        _hu = _jax.device_get(u_model)
+        _hv = _jax.device_get(v_model)
+        _hps = _jax.device_get(p_s_cs)
+        _hphis = _jax.device_get(phis_cs)
+        _hphis_raw = _jax.device_get(phis_cs_raw)
+        _p_s_floor_val = _hybrid_p_s_floor(sigma, dp_floor=100.0) if _is_hybrid else 0.0
+        logger.info(
+            f"  ERA5→CS IC: T=[{float(_hT.min()):.0f},{float(_hT.max()):.0f}]K "
+            f"u=[{float(_hu.min()):.0f},{float(_hu.max()):.0f}]m/s "
+            f"v=[{float(_hv.min()):.0f},{float(_hv.max()):.0f}]m/s "
+            f"p_s=[{float(_hps.min()):.0f},{float(_hps.max()):.0f}]Pa "
+            f"phis=[{float(_hphis.min()):.0f},{float(_hphis.max()):.0f}]m2/s2 "
+            f"(raw phis peak={float(_hphis_raw.max()):.0f}, "
+            f"p_s_floor={_p_s_floor_val:.0f}Pa)"
+        )
 
     dims_3d = ("face", "x", "y", "level")
     dims_2d = ("face", "x", "y")

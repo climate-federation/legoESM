@@ -1104,6 +1104,47 @@ class TestCloudFraction:
         assert jnp.all(props.cloud_fraction >= 0.0)
         assert jnp.all(props.cloud_fraction <= 1.0)
 
+    def test_lwp_iwp_are_in_cloud_not_grid_mean(self):
+        """LWP/IWP returned by compute_cloud_properties must be in-cloud values.
+
+        RRTMGP multiplies the derived optical depth by cloud_fraction, so if
+        compute_cloud_properties returns grid-mean LWP (= in_cloud × cf), the
+        effective tau ∝ cf² — the cf² bug.  Verify: for two identical
+        atmospheres that differ only in RH (hence different cf), the
+        in-cloud LWP values are equal (both cases saturate q_c = q_c_diagnostic),
+        while the grid-mean equivalent lwp × cf would differ linearly with cf.
+        """
+        from legoesm.thermo import saturation_mixing_ratio
+        config = CloudConfig(
+            scheme="sundqvist", rh_crit=0.5, q_c_diagnostic=0.2e-3
+        )
+        ncol, nlev = 4, 20
+        T, p_full, p_half, _, _, _ = _make_column_data(ncol, nlev)
+        dp = p_half[:, 1:] - p_half[:, :-1]
+        q_sat = saturation_mixing_ratio(T, p_full)
+
+        # Case A: RH = 0.7 → cf = (0.7-0.5)/(1-0.5) = 0.4
+        props_a = compute_cloud_properties(T, p_full, 0.7 * q_sat, dp, config)
+        # Case B: RH = 0.9 → cf = (0.9-0.5)/(1-0.5) = 0.8
+        props_b = compute_cloud_properties(T, p_full, 0.9 * q_sat, dp, config)
+
+        # Cloud fractions must differ (sanity check)
+        assert float(jnp.mean(props_b.cloud_fraction)) > float(
+            jnp.mean(props_a.cloud_fraction)
+        ) + 0.1
+
+        # In-cloud LWP: q_c_diagnostic is constant above threshold →
+        # in-cloud LWP must be equal for both cases where cf > 0.
+        cloudy_a = props_a.cloud_fraction > 1e-6
+        cloudy_b = props_b.cloud_fraction > 1e-6
+        jointly_cloudy = cloudy_a & cloudy_b
+        lwp_a = jnp.where(jointly_cloudy, props_a.lwp, 0.0)
+        lwp_b = jnp.where(jointly_cloudy, props_b.lwp, 0.0)
+        assert jnp.allclose(lwp_a, lwp_b, rtol=1e-5), (
+            "LWP appears to be grid-mean (∝ cf) rather than in-cloud (constant "
+            "above threshold) — cf² bug may have been reintroduced"
+        )
+
     def test_rrtmgp_with_clouds(self):
         """RRTMGP should accept cloud properties and produce valid output."""
         from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (

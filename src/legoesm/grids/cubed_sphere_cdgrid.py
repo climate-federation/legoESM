@@ -1118,11 +1118,13 @@ def create_cubed_sphere_cdgrid(
     if _need_local:
         _saved_topology = get_mpi_topology()
         set_halo_backend("local")
-    x_pad = pad_halo(x_cc, interp_offsets=_pos_offs, duogrid=_base_dg)
-    y_pad = pad_halo(y_cc, interp_offsets=_pos_offs, duogrid=_base_dg)
-    z_pad = pad_halo(z_cc, interp_offsets=_pos_offs, duogrid=_base_dg)
-    if _need_local:
-        set_halo_backend("mpi", _saved_topology)
+    try:
+        x_pad = pad_halo(x_cc, interp_offsets=_pos_offs, duogrid=_base_dg)
+        y_pad = pad_halo(y_cc, interp_offsets=_pos_offs, duogrid=_base_dg)
+        z_pad = pad_halo(z_cc, interp_offsets=_pos_offs, duogrid=_base_dg)
+    finally:
+        if _need_local:
+            set_halo_backend("mpi", _saved_topology)
     x_pad = _fill_corners_h1(x_pad)
     y_pad = _fill_corners_h1(y_pad)
     z_pad = _fill_corners_h1(z_pad)

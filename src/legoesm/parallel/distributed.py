@@ -138,9 +138,8 @@ def initialize_distributed(
         coordinator_port = 1234
         coordinator_bind = f"{coordinator_address}:{coordinator_port}"
 
-        # Skip if already initialized (e.g. by early-init block in run_amip.py
-        # which must call jax.distributed.initialize() before any legoESM
-        # import triggers XLA backend discovery).
+        # Skip if already initialized by maybe_init_jax_distributed()
+        # (legoesm.parallel.early_init) called before any legoESM imports.
         if jax.process_count() == 1:
             try:
                 jax.distributed.initialize(

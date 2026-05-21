@@ -78,6 +78,7 @@ $PYTHON scripts/run_amip_levante.py \
     --monthly-means \
     --distributed \
     --n-ranks 6 \
+    --use-duogrid \
     --output "$OUTPUT"
 
 echo "=============================="
