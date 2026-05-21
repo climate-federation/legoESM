@@ -149,3 +149,111 @@ def apply_ice_shelf_basal_step(
         "heat_extracted_W_m2": Q,
     }
     return new_state, diagnostics
+
+
+def apply_ice_shelf_basal_step_mpas(
+    state,
+    *,
+    ice_shelf_mask: np.ndarray | jnp.ndarray,
+    ice_draft_m: np.ndarray | jnp.ndarray,
+    z_coord,
+    dt: float,
+    config: IceShelfConfig,
+    rho_0: float | None = None,
+    c_p: float | None = None,
+) -> tuple[object, dict]:
+    """MPAS counterpart of :func:`apply_ice_shelf_basal_step`.
+
+    Expects ``state.S.data`` and ``state.T.data`` shape
+    ``(nCells, nlev)``; ``state.eta.data`` and
+    ``state.land_mask.data`` shape ``(nCells,)``.  ``ice_shelf_mask``
+    + ``ice_draft_m`` are 1-D ``(nCells,)``.  Same three-equation /
+    linear basal-melt convention as the lat-lon path.
+    """
+    if not config.enabled:
+        zero = jnp.zeros_like(state.land_mask.data)
+        return state, {
+            "m_dot_m_s": zero,
+            "freshwater_kg_m2_s": zero,
+            "heat_extracted_W_m2": zero,
+        }
+    if rho_0 is None:
+        rho_0 = float(constants.rho_ocean)
+    if c_p is None:
+        c_p = float(constants.c_sw)
+
+    mask = np.asarray(ice_shelf_mask, dtype=np.float64)
+    draft = np.asarray(ice_draft_m, dtype=np.float64)
+    land_mask = np.asarray(state.land_mask.data, dtype=np.float64)
+    S_arr = np.asarray(state.S.data, dtype=np.float64)
+    T_arr = np.asarray(state.T.data, dtype=np.float64)
+    eta_arr = np.asarray(state.eta.data, dtype=np.float64).copy()
+    # Validate every 1-D cell-axis input matches the MPAS contract:
+    # ``S/T`` are ``(nCells, nlev)``; ``eta``, ``land_mask``,
+    # ``ice_shelf_mask``, ``ice_draft_m`` are ``(nCells,)``.
+    if mask.ndim != 1:
+        raise ValueError(
+            "apply_ice_shelf_basal_step_mpas: ice_shelf_mask must be 1-D, "
+            f"got shape {mask.shape}"
+        )
+    nC = mask.shape[0]
+    if (
+        draft.shape != mask.shape
+        or land_mask.shape != mask.shape
+        or eta_arr.shape != mask.shape
+    ):
+        raise ValueError(
+            "apply_ice_shelf_basal_step_mpas: cell-axis shapes mismatch — "
+            f"mask {mask.shape}, draft {draft.shape}, "
+            f"land_mask {land_mask.shape}, eta {eta_arr.shape}"
+        )
+    if S_arr.ndim != 2 or T_arr.shape != S_arr.shape or S_arr.shape[0] != nC:
+        raise ValueError(
+            "apply_ice_shelf_basal_step_mpas: state.S/T must be "
+            f"(nCells={nC}, nlev), got S {S_arr.shape}, T {T_arr.shape}"
+        )
+    active = mask * land_mask
+
+    T_top = T_arr[..., 0]
+    S_top = S_arr[..., 0]
+    p_ice = ice_base_pressure_dbar(jnp.asarray(draft))
+
+    melt = compute_basal_melt(
+        jnp.asarray(T_top),
+        jnp.asarray(S_top),
+        p_ice,
+        config=config,
+    )
+    m_dot = np.asarray(melt.m_dot_m_s, dtype=np.float64)
+    fw = np.asarray(melt.freshwater_to_ocean, dtype=np.float64)
+    Q = np.asarray(melt.heat_extracted_from_ocean, dtype=np.float64)
+
+    m_dot = m_dot * active
+    fw = fw * active
+    Q = Q * active
+
+    eta_new = eta_arr + fw / rho_0 * dt
+
+    dz_0 = float(np.asarray(z_coord.dz_ref)[0])
+    S_new = S_arr.copy()
+    S_new[..., 0] = S_top + (
+        -S_top * fw / (rho_0 * max(dz_0, 1.0e-6)) * dt
+    )
+
+    T_new = T_arr.copy()
+    T_new[..., 0] = T_top - Q * dt / (rho_0 * c_p * max(dz_0, 1.0e-6))
+
+    new_state = state._replace(
+        S=Field(jnp.asarray(S_new), name=state.S.name,
+                dims=state.S.dims, units=state.S.units),
+        T=Field(jnp.asarray(T_new), name=state.T.name,
+                dims=state.T.dims, units=state.T.units),
+        eta=Field(jnp.asarray(eta_new), name=state.eta.name,
+                  dims=state.eta.dims, units=state.eta.units),
+    )
+    diagnostics = {
+        "m_dot_m_s": m_dot,
+        "freshwater_kg_m2_s": fw,
+        "heat_extracted_W_m2": Q,
+    }
+    return new_state, diagnostics

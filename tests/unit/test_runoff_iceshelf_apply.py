@@ -8,7 +8,10 @@ import pytest
 
 from legoesm.core.field import Field
 from legoesm.ocean.coupler.runoff_apply import apply_runoff_step
-from legoesm.ocean.coupler.ice_shelf_apply import apply_ice_shelf_basal_step
+from legoesm.ocean.coupler.ice_shelf_apply import (
+    apply_ice_shelf_basal_step,
+    apply_ice_shelf_basal_step_mpas,
+)
 from legoesm.ocean.physics.ice_shelf import IceShelfConfig
 
 
@@ -220,3 +223,195 @@ class TestApplyIceShelfBasalStep:
         assert m[0, 0] == 0.0
         # Ocean cavity cell melts.
         assert m[1, 1] > 0.0
+
+
+# ==============================================================================
+# MPAS ice-shelf apply
+# ==============================================================================
+
+class _FakeMPASState:
+    """MPAS Voronoi state stub: 1-D cell axis."""
+
+    def __init__(self, n_cells=8, nlev=3, T_init=0.0, S_init=34.7,
+                 mask_init=1.0):
+        self.S = Field(
+            jnp.full((n_cells, nlev), S_init, dtype=jnp.float64),
+            name="S", dims=("nCells", "lev"), units="PSU",
+        )
+        self.T = Field(
+            jnp.full((n_cells, nlev), T_init, dtype=jnp.float64),
+            name="T", dims=("nCells", "lev"), units="degC",
+        )
+        self.eta = Field(
+            jnp.zeros((n_cells,), dtype=jnp.float64),
+            name="eta", dims=("nCells",), units="m",
+        )
+        self.land_mask = Field(
+            jnp.full((n_cells,), mask_init, dtype=jnp.float64),
+            name="land_mask", dims=("nCells",), units="1",
+        )
+
+    def _replace(self, **kw):
+        new = _FakeMPASState.__new__(_FakeMPASState)
+        for attr in ("S", "T", "eta", "land_mask"):
+            setattr(new, attr, getattr(self, attr))
+        for k, v in kw.items():
+            setattr(new, k, v)
+        return new
+
+
+class TestApplyIceShelfBasalStepMPAS:
+
+    def test_disabled_is_noop(self):
+        st = _FakeMPASState()
+        mask = np.zeros(8)
+        draft = np.full(8, 500.0)
+        new, diag = apply_ice_shelf_basal_step_mpas(
+            st,
+            ice_shelf_mask=mask, ice_draft_m=draft,
+            z_coord=_FakeZCoord(), dt=3600.0,
+            config=IceShelfConfig(enabled=False),
+        )
+        assert new is st
+        assert np.all(np.asarray(diag["m_dot_m_s"]) == 0.0)
+
+    def test_warm_cavity_melts_and_freshens(self):
+        st = _FakeMPASState(T_init=0.0, S_init=34.7)
+        mask = np.zeros(8)
+        mask[3] = 1.0
+        draft = np.full(8, 500.0)
+        new, diag = apply_ice_shelf_basal_step_mpas(
+            st,
+            ice_shelf_mask=mask, ice_draft_m=draft,
+            z_coord=_FakeZCoord(), dt=3600.0,
+            config=IceShelfConfig(enabled=True, scheme="three_equation"),
+        )
+        m_dot = np.asarray(diag["m_dot_m_s"])
+        assert m_dot[3] > 0.0
+        assert np.all(np.delete(m_dot, 3) == 0.0)
+        S_arr = np.asarray(new.S.data)
+        T_arr = np.asarray(new.T.data)
+        assert S_arr[3, 0] < 34.7
+        assert T_arr[3, 0] < 0.0
+
+    def test_basal_melt_raises_eta(self):
+        st = _FakeMPASState(T_init=0.0, S_init=34.7)
+        mask = np.zeros(8)
+        mask[3] = 1.0
+        draft = np.full(8, 500.0)
+        new, diag = apply_ice_shelf_basal_step_mpas(
+            st,
+            ice_shelf_mask=mask, ice_draft_m=draft,
+            z_coord=_FakeZCoord(), dt=3600.0,
+            config=IceShelfConfig(enabled=True, scheme="three_equation"),
+        )
+        fw = np.asarray(diag["freshwater_kg_m2_s"])
+        eta_new = np.asarray(new.eta.data)
+        rho_0 = 1025.0
+        dt = 3600.0
+        expected = fw[3] / rho_0 * dt
+        assert eta_new[3] == pytest.approx(expected, rel=1e-6)
+        assert eta_new[0] == 0.0
+
+    def test_only_top_layer_modified(self):
+        st = _FakeMPASState(T_init=0.0, S_init=34.7, nlev=3)
+        mask = np.zeros(8)
+        mask[3] = 1.0
+        draft = np.full(8, 500.0)
+        new, _ = apply_ice_shelf_basal_step_mpas(
+            st,
+            ice_shelf_mask=mask, ice_draft_m=draft,
+            z_coord=_FakeZCoord(), dt=3600.0,
+            config=IceShelfConfig(enabled=True, scheme="three_equation"),
+        )
+        S_new = np.asarray(new.S.data)
+        T_new = np.asarray(new.T.data)
+        assert S_new[3, 1] == 34.7
+        assert S_new[3, 2] == 34.7
+        assert T_new[3, 1] == 0.0
+
+    def test_land_cells_skipped(self):
+        st = _FakeMPASState(T_init=0.0)
+        mask_l = np.ones(8)
+        mask_l[0] = 0.0
+        st.land_mask = Field(
+            jnp.asarray(mask_l), name=st.land_mask.name,
+            dims=st.land_mask.dims, units=st.land_mask.units,
+        )
+        cavity_mask = np.zeros(8)
+        cavity_mask[0] = 1.0  # land + cavity → skip
+        cavity_mask[3] = 1.0  # ocean + cavity → apply
+        draft = np.full(8, 500.0)
+        new, diag = apply_ice_shelf_basal_step_mpas(
+            st,
+            ice_shelf_mask=cavity_mask, ice_draft_m=draft,
+            z_coord=_FakeZCoord(), dt=3600.0,
+            config=IceShelfConfig(enabled=True),
+        )
+        m = np.asarray(diag["m_dot_m_s"])
+        assert m[0] == 0.0
+        assert m[3] > 0.0
+
+    def test_shape_mismatch_raises(self):
+        st = _FakeMPASState(n_cells=8)
+        mask = np.zeros(7)  # wrong size
+        draft = np.zeros(7)
+        with pytest.raises(ValueError):
+            apply_ice_shelf_basal_step_mpas(
+                st,
+                ice_shelf_mask=mask, ice_draft_m=draft,
+                z_coord=_FakeZCoord(), dt=3600.0,
+                config=IceShelfConfig(enabled=True),
+            )
+
+    def test_draft_shape_mismatch_raises(self):
+        st = _FakeMPASState(n_cells=8)
+        mask = np.zeros(8)
+        draft = np.zeros(7)  # mismatched draft
+        with pytest.raises(ValueError):
+            apply_ice_shelf_basal_step_mpas(
+                st,
+                ice_shelf_mask=mask, ice_draft_m=draft,
+                z_coord=_FakeZCoord(), dt=3600.0,
+                config=IceShelfConfig(enabled=True),
+            )
+
+    def test_2d_mask_raises(self):
+        st = _FakeMPASState(n_cells=8)
+        mask = np.zeros((2, 4))
+        draft = np.zeros((2, 4))
+        with pytest.raises(ValueError):
+            apply_ice_shelf_basal_step_mpas(
+                st,
+                ice_shelf_mask=mask, ice_draft_m=draft,
+                z_coord=_FakeZCoord(), dt=3600.0,
+                config=IceShelfConfig(enabled=True),
+            )
+
+    def test_linear_scheme(self):
+        """Mirror of the lat-lon ``scheme='linear'`` path on Voronoi cells:
+        positive melt + freshwater, top-layer-only T/S response."""
+        st = _FakeMPASState(T_init=1.0, S_init=34.7, nlev=3)
+        mask = np.zeros(8)
+        mask[4] = 1.0
+        draft = np.full(8, 500.0)
+        new, diag = apply_ice_shelf_basal_step_mpas(
+            st,
+            ice_shelf_mask=mask, ice_draft_m=draft,
+            z_coord=_FakeZCoord(), dt=3600.0,
+            config=IceShelfConfig(enabled=True, scheme="linear"),
+        )
+        m_dot = np.asarray(diag["m_dot_m_s"])
+        fw = np.asarray(diag["freshwater_kg_m2_s"])
+        assert m_dot[4] > 0.0
+        assert fw[4] > 0.0
+        assert np.all(np.delete(m_dot, 4) == 0.0)
+        S_new = np.asarray(new.S.data)
+        T_new = np.asarray(new.T.data)
+        assert S_new[4, 0] < 34.7
+        assert T_new[4, 0] < 1.0
+        # Layers 1, 2 untouched.
+        assert S_new[4, 1] == 34.7
+        assert S_new[4, 2] == 34.7
+        assert T_new[4, 1] == 1.0
+        assert T_new[4, 2] == 1.0
