@@ -1438,8 +1438,13 @@ def _preload_jra55_full_cache(jra55_state):
 
     t0 = time.time()
     all_records = {}
+    # float32 cache: JRA55 fields are atmospheric forcing accurate to
+    # ~0.1%, so f32 (~7 sig figs) is well within the precision budget.
+    # Halves the staged memory footprint (28 GB -> 14 GB) so the cache
+    # fits on a 32 GB V100S alongside a 120k-cell tripole state.
+    # The model promotes back to float64 at the per-step consumer.
     for var in JRA55_VARIABLES:
-        all_records[var] = jnp.asarray(ds[var].values, dtype=jnp.float64)
+        all_records[var] = jnp.asarray(ds[var].values, dtype=jnp.float32)
     ds.close()
 
     # Regrid from lat-lon to MPAS cells if needed.
