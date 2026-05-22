@@ -121,6 +121,8 @@ class PhysicsPipeline:
         albedo_ocean=0.06,
         emissivity_ice=0.95,
         emissivity_ocean=0.97,
+        emissivity_land=0.96,
+        C_land=2.0e5,
         micro_fn=None,
         micro_config=None,
         dynamic_albedo=False,
@@ -144,6 +146,20 @@ class PhysicsPipeline:
         self.albedo_ocean = albedo_ocean
         self.emissivity_ice = emissivity_ice
         self.emissivity_ocean = emissivity_ocean
+        self.emissivity_land = emissivity_land
+        # Slab-land heat capacity [J/m^2/K] — effective for a ~0.15 m
+        # active soil layer (rho*c ~ 1.4e6 J/m^3/K).  Updated once per
+        # radiation call via a semi-implicit surface energy balance.
+        self.C_land = C_land
+        # Land surface fields — None disables the land tile entirely
+        # (pure ocean/ice surface).  Set post-construction by the driver:
+        #   f_land      : (..., ) land fraction in [0, 1]
+        #   albedo_land : (..., ) land surface albedo
+        # rad_update_steps is the radiation sub-cycle cadence; the slab
+        # land steps by ``rad_update_steps * dt`` each radiation call.
+        self.f_land = None
+        self.albedo_land = None
+        self.rad_update_steps = 1
         self.micro_fn = micro_fn
         self.micro_config = micro_config
         self.dynamic_albedo = dynamic_albedo
@@ -156,14 +172,67 @@ class PhysicsPipeline:
         self._cloud_rh_crit_bl = 0.7   # set by build_physics_pipeline
         self._cloud_sigma_bl = 1.0     # set by build_physics_pipeline
 
+    def _blend_land(self, ocean_field, land_field):
+        """Blend an ocean/ice surface field with a land field by ``f_land``.
+
+        ``f_land`` broadcasts against the 2-D surface fields.  Only called
+        when ``self.f_land is not None`` (the land tile is active).
+        """
+        return self.f_land * land_field + (1.0 - self.f_land) * ocean_field
+
+    def _step_slab_land(self, T_land, sw_down_sfc, lw_down_sfc,
+                        T, p_s, q_v, u, v, dt):
+        """Advance the slab-land skin temperature by one radiation step.
+
+        Semi-implicit surface energy balance::
+
+            C_land dT/dt = SW_net + eps*LW_down - eps*sigma*T^4 - SH - LH
+
+        linearized about the current ``T_land``.  Every flux term damps
+        (``dF/dT < 0``), so the denominator ``C_land - dt*dF/dT`` is
+        always larger than ``C_land`` and the update is unconditionally
+        stable for any radiation cadence.  Land evaporation uses the
+        saturated (wet-surface) bulk flux — no soil-moisture limit.
+        """
+        T_air = T[..., -1]
+        q_air = q_v[..., -1]
+        rho_low = (p_s * self.sigma_full[-1]) / (constants.R_d * T_air)
+        wind_speed = jnp.sqrt(u[..., -1] ** 2 + v[..., -1] ** 2 + 1.0)
+        sh_coef = rho_low * constants.c_pd * self.C_H * wind_speed
+        lh_coef = rho_low * constants.L_v * self.C_E * wind_speed
+        eps = self.emissivity_land
+        sb = constants.sigma_sb
+
+        q_sat_land = saturation_specific_humidity(T_land, p_s)
+        sw_net = sw_down_sfc * (1.0 - self.albedo_land)
+        lw_net = eps * lw_down_sfc - eps * sb * T_land ** 4
+        shflx = sh_coef * (T_land - T_air)
+        lhflx = lh_coef * (q_sat_land - q_air)
+        flux = sw_net + lw_net - shflx - lhflx
+
+        # Clausius-Clapeyron derivative of saturation specific humidity.
+        dqsat_dT = q_sat_land * constants.L_v / (constants.R_v * T_land ** 2)
+        dflux_dT = (-4.0 * eps * sb * T_land ** 3
+                    - sh_coef - lh_coef * dqsat_dT)
+
+        dt_rad = dt * self.rad_update_steps
+        return T_land + dt_rad * flux / (self.C_land - dt_rad * dflux_dT)
+
     def physics_step_no_rad(self, T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic,
                             lat, dt, dT_dt_rad, sw_net_sfc, lw_net_sfc,
                             sw_up_toa, lw_up_toa, sw_down_toa,
                             sbm_tau_c=None, sbm_RH_ref=None,
                             C_H=None, C_E=None,
                             q_i=None, q_s=None, q_g=None,
-                            N_c=None, N_r=None, N_i=None):
-        """Convection + microphysics + BL exchange with held radiation."""
+                            N_c=None, N_r=None, N_i=None,
+                            T_land=None):
+        """Convection + microphysics + BL exchange with held radiation.
+
+        ``T_land`` is the slab-land skin temperature.  When the land tile
+        is active (``self.f_land is not None``) the surface temperature
+        used for bulk turbulent fluxes is the land/ocean blend, so land
+        columns exchange heat and moisture against the land surface.
+        """
         _C_H = self.C_H if C_H is None else C_H
         _C_E = self.C_E if C_E is None else C_E
 
@@ -173,6 +242,8 @@ class PhysicsPipeline:
         shape_2d = p_s.shape
 
         T_sfc = blend_surface_temperature(sst, sic, self.T_ice)
+        if self.f_land is not None and T_land is not None:
+            T_sfc = self._blend_land(T_sfc, T_land)
 
         p_full = p_s[..., None] * self.sigma_full
         p_half = p_s[..., None] * self.sigma_half
@@ -511,11 +582,19 @@ class PhysicsPipeline:
                                q_c=None, q_r=None,
                                cloud_scheme="none",
                                cloud_rh_crit_bl=0.7,
-                               cloud_sigma_bl=1.0):
+                               cloud_sigma_bl=1.0,
+                               u=None, v=None, dt=None, T_land=None):
         """Compute radiation tendencies and fluxes (pure JAX, no I/O).
 
-        Returns (dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa, lw_up_toa,
-                 sw_down_toa) as a 6-tuple.
+        Returns ``(dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa,
+        lw_up_toa, sw_down_toa, T_land_new)`` as a 7-tuple.
+
+        When the land tile is active (``self.f_land is not None``) the
+        surface temperature/albedo/emissivity passed to the radiation
+        solver are land/ocean blends, and the slab-land skin temperature
+        ``T_land`` is advanced one radiation step by a semi-implicit
+        surface energy balance.  Otherwise ``T_land`` is returned
+        unchanged and the surface is pure ocean/ice.
         """
         from legoesm.forcing.surface_utils import blend_surface_property
 
@@ -528,6 +607,13 @@ class PhysicsPipeline:
         T_sfc = blend_surface_temperature(sst, sic, self.T_ice)
         albedo = blend_surface_property(sic, _albedo_ice, _albedo_ocean)
         emissivity = blend_surface_property(sic, self.emissivity_ice, self.emissivity_ocean)
+
+        # --- Land tile: blend land surface into T_sfc / albedo / emissivity
+        _land_active = self.f_land is not None and T_land is not None
+        if _land_active:
+            T_sfc = self._blend_land(T_sfc, T_land)
+            albedo = self._blend_land(albedo, self.albedo_land)
+            emissivity = self._blend_land(emissivity, self.emissivity_land)
 
         p_full = p_s[..., None] * self.sigma_full
         p_half = p_s[..., None] * self.sigma_half
@@ -626,16 +712,30 @@ class PhysicsPipeline:
         lw_up_toa = ad.unflatten_2d(rad_out.lw_flux_up[:, 0])
         sw_down_toa = ad.unflatten_2d(rad_out.sw_flux_down[:, 0])
 
+        # --- Slab-land skin temperature update (semi-implicit SEB) ---
+        if _land_active:
+            lw_down_sfc = ad.unflatten_2d(rad_out.lw_flux_down[:, -1])
+            T_land_new = self._step_slab_land(
+                T_land, sw_down_sfc, lw_down_sfc, T, p_s, q_v, u, v, dt,
+            )
+        else:
+            T_land_new = T_land
+
         return (dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa, lw_up_toa,
-                sw_down_toa)
+                sw_down_toa, T_land_new)
 
     def build_step_unified(self):
         """Build a JIT-compiled unified physics step with radiation sub-cycling.
 
         Returns a function ``step_unified(need_rad, T, p_s, q_v, q_c, q_r,
         conv_prog, u, v, sst, sic, lat, lon, day_of_year, seconds_of_day, dt,
-        solar_weights, s_0, o3_vmr, aerosol_od, held) -> (PhysicsOutput,
-        HeldRadiation)``.
+        solar_weights, s_0, o3_vmr, aerosol_od, held, ..., T_land) ->
+        (PhysicsOutput, HeldRadiation, T_land_new)``.
+
+        ``T_land`` is the slab-land skin temperature carried through the
+        radiation sub-cycle; it is advanced on radiation steps and held
+        constant otherwise.  Pass ``None`` (the default) for ocean-only
+        runs — the land tile is then inert.
         """
         pipeline = self
 
@@ -653,7 +753,8 @@ class PhysicsPipeline:
                          albedo_ice=pipeline.albedo_ice,
                          albedo_ocean=pipeline.albedo_ocean,
                          ghg_vmr_override=None,
-                         cloud_rh_crit_bl=None):
+                         cloud_rh_crit_bl=None,
+                         T_land=None):
 
             def _rad_branch(args):
                 (T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
@@ -663,10 +764,10 @@ class PhysicsPipeline:
                  held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                  tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref,
                  C_H, C_E, albedo_ice, albedo_ocean,
-                 ghg_vmr_override, cloud_rh_crit_bl) = args
+                 ghg_vmr_override, cloud_rh_crit_bl, T_land) = args
 
                 (dT_dt_rad, sw_net_sfc, lw_net_sfc,
-                 sw_up_toa, lw_up_toa, sw_down_toa) = \
+                 sw_up_toa, lw_up_toa, sw_down_toa, T_land_new) = \
                     pipeline.compute_radiation_core(
                         T, p_s, q_v, sst, sic, lat, lon,
                         day_of_year, seconds_of_day,
@@ -678,6 +779,7 @@ class PhysicsPipeline:
                         cloud_scheme=pipeline._cloud_scheme,
                         cloud_rh_crit_bl=cloud_rh_crit_bl,
                         cloud_sigma_bl=pipeline._cloud_sigma_bl,
+                        u=u, v=v, dt=dt, T_land=T_land,
                     )
 
                 physics_out = pipeline.physics_step_no_rad(
@@ -685,7 +787,7 @@ class PhysicsPipeline:
                     dT_dt_rad, sw_net_sfc, lw_net_sfc,
                     sw_up_toa, lw_up_toa, sw_down_toa,
                     sbm_tau_c=sbm_tau_c, sbm_RH_ref=sbm_RH_ref,
-                    C_H=C_H, C_E=C_E,
+                    C_H=C_H, C_E=C_E, T_land=T_land,
                 )
 
                 # Cast to storage dtype so both lax.cond branches match
@@ -697,7 +799,7 @@ class PhysicsPipeline:
                     sw_up_toa, lw_up_toa, sw_down_toa,
                 ))
                 physics_out = jax.tree.map(_cast, physics_out)
-                return physics_out, new_held
+                return physics_out, new_held, _cast(T_land_new)
 
             def _no_rad_branch(args):
                 (T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
@@ -707,14 +809,14 @@ class PhysicsPipeline:
                  held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                  tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref,
                  C_H, C_E, albedo_ice, albedo_ocean,
-                 ghg_vmr_override, _cloud_rh_crit_bl) = args
+                 ghg_vmr_override, _cloud_rh_crit_bl, T_land) = args
 
                 physics_out = pipeline.physics_step_no_rad(
                     T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, dt,
                     held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                     sbm_tau_c=sbm_tau_c, sbm_RH_ref=sbm_RH_ref,
-                    C_H=C_H, C_E=C_E,
+                    C_H=C_H, C_E=C_E, T_land=T_land,
                 )
 
                 # Cast to storage dtype — must match _rad_branch
@@ -726,7 +828,7 @@ class PhysicsPipeline:
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                 ))
                 physics_out = jax.tree.map(_cast, physics_out)
-                return physics_out, new_held
+                return physics_out, new_held, _cast(T_land)
 
             # cloud_rh_crit_bl default: use pipeline value when caller passes None.
             # When passed as a traced JAX array, it flows through _rad_branch into
@@ -744,7 +846,7 @@ class PhysicsPipeline:
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                     tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref,
                     C_H, C_E, albedo_ice, albedo_ocean,
-                    ghg_vmr_override, _cloud_rh_crit_bl_eff)
+                    ghg_vmr_override, _cloud_rh_crit_bl_eff, T_land)
 
             return jax.lax.cond(need_rad, _rad_branch, _no_rad_branch, args)
 

@@ -128,7 +128,8 @@ def _mock_step_unified(
         held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
         held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
     )
-    return phys_out, held_new
+    # Slab-land temperature passes through unchanged (mock has no land).
+    return phys_out, held_new, kwargs.get("T_land")
 
 
 # ===========================================================================
@@ -518,7 +519,7 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args,
         # Physics
         need_rad = jnp.bool_(True) if args["rad_update_steps"] <= 1 else \
             ((step_idx + 1) % args["rad_update_steps"]) == 0
-        phys_out, held_new = step_unified(
+        phys_out, held_new, _T_land_ref = step_unified(
             need_rad,
             T_new, p_s_new,
             carry.q_v, carry.q_c, carry.q_r, carry.conv_prog,
@@ -585,6 +586,7 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args,
             precip_accum=precip_accum,
             shflx_accum=carry.shflx_accum,
             lhflx_accum=carry.lhflx_accum,
+            T_land=carry.T_land,
         )
     return carry
 

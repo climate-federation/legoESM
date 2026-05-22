@@ -568,7 +568,7 @@ class TestStepUnified:
         o3 = jnp.zeros((ad.ncol, NLEV), dtype=jnp.float32)
         aerosol = jnp.zeros((ad.ncol, NLEV), dtype=jnp.float32)
 
-        phys_out, new_held = step_fn(
+        phys_out, new_held, _ = step_fn(
             jnp.bool_(True),
             T, p_s, q_v, q_c, q_r, jnp.zeros((ad.ncol,), dtype=T.dtype), u, v, sst, sic, lat, lon,
             100.0, 43200.0, 600.0,
@@ -611,7 +611,7 @@ class TestStepUnified:
         o3 = jnp.zeros((1, NLEV), dtype=jnp.float32)
         aerosol = jnp.zeros((1, NLEV), dtype=jnp.float32)
 
-        phys_out, new_held = step_fn(
+        phys_out, new_held, _ = step_fn(
             jnp.bool_(True),
             T, p_s, q_v, q_c, q_r, jnp.zeros((ad.ncol,), dtype=T.dtype), u, v, sst, sic, lat, lon,
             100.0, 43200.0, 600.0,
@@ -653,7 +653,7 @@ class TestStepUnified:
         o3 = jnp.zeros((ad.ncol, NLEV), dtype=jnp.float32)
         aerosol = jnp.zeros((ad.ncol, NLEV), dtype=jnp.float32)
 
-        phys_out, _ = step_fn(
+        phys_out, _, _ = step_fn(
             jnp.bool_(True),
             T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
             100.0, 43200.0, 300.0,

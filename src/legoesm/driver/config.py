@@ -142,6 +142,10 @@ class ExperimentConfig(NamedTuple):
     topography: str = "flat"
     topo_smoothing: int = 4
     topo_edge_blend: float = 0.3
+    # Optional land-sea-mask NetCDF (CMIP6 sftlf / ERA5 lsm).  When set,
+    # the land fraction is taken from this file and the slab-land tile
+    # is activated; empty → ocean-only surface.
+    land_mask_path: str = ""
 
     # Surface
     T_init: float = 300.0
@@ -449,6 +453,7 @@ class ExperimentConfig(NamedTuple):
             topography=amip_cfg.topography,
             topo_smoothing=amip_cfg.topo_smoothing,
             topo_edge_blend=amip_cfg.topo_edge_blend,
+            land_mask_path=getattr(amip_cfg, 'land_mask_path', ''),
             T_init=amip_cfg.T_init,
             RH_init=amip_cfg.RH_init,
             dynamic_albedo=amip_cfg.dynamic_albedo,

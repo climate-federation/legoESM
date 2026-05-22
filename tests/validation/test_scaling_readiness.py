@@ -73,6 +73,7 @@ class TestScalingReadiness:
             u=jnp.zeros(s3), v=jnp.zeros(s3), T=jnp.zeros(s3),
             p_s=jnp.zeros(s2), phis=jnp.zeros(s2),
             q_v=jnp.zeros(s3), q_c=jnp.zeros(s3), q_r=jnp.zeros(s3),
+            conv_prog=jnp.zeros(s2).reshape(-1),
             held_dT_rad=jnp.zeros(s3),
             held_sw_net_sfc=jnp.zeros(s2), held_lw_net_sfc=jnp.zeros(s2),
             held_sw_up_toa=jnp.zeros(s2), held_lw_up_toa=jnp.zeros(s2),
@@ -84,6 +85,7 @@ class TestScalingReadiness:
             precip_accum=jnp.zeros(s2),
             shflx_accum=jnp.zeros(s2),
             lhflx_accum=jnp.zeros(s2),
+            T_land=jnp.zeros(s2),
         )
         leaves, treedef = jax.tree.flatten(carry)
         reconstructed = treedef.unflatten(leaves)
@@ -139,6 +141,7 @@ class TestScalingReadiness:
             u=jnp.zeros(s3), v=jnp.zeros(s3), T=jnp.zeros(s3),
             p_s=jnp.zeros(s2), phis=jnp.zeros(s2),
             q_v=jnp.zeros(s3), q_c=jnp.zeros(s3), q_r=jnp.zeros(s3),
+            conv_prog=jnp.zeros(s2).reshape(-1),
             held_dT_rad=jnp.zeros(s3),
             held_sw_net_sfc=jnp.zeros(s2), held_lw_net_sfc=jnp.zeros(s2),
             held_sw_up_toa=jnp.zeros(s2), held_lw_up_toa=jnp.zeros(s2),
@@ -150,6 +153,7 @@ class TestScalingReadiness:
             precip_accum=jnp.zeros(s2),
             shflx_accum=jnp.zeros(s2),
             lhflx_accum=jnp.zeros(s2),
+            T_land=jnp.zeros(s2),
         )
         for field_name in SegmentCarry._fields:
             val = getattr(carry, field_name)

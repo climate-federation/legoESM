@@ -241,6 +241,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--topography", type=str, default="flat")
     parser.add_argument("--topo-smoothing", type=int, default=4)
     parser.add_argument("--topo-edge-blend", type=float, default=0.3)
+    parser.add_argument("--land-mask-file", type=str, default="",
+                        help="Land-sea-mask NetCDF (CMIP6 sftlf / ERA5 lsm). "
+                             "When set, activates the slab-land surface tile "
+                             "with the land fraction from this file.")
 
     # Surface / diagnostics
     parser.add_argument("--monthly-means", action="store_true", default=False)
@@ -360,6 +364,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         topography=args.topography,
         topo_smoothing=args.topo_smoothing,
         topo_edge_blend=args.topo_edge_blend,
+        land_mask_path=args.land_mask_file,
         dynamic_albedo=False,
         experiment=args.experiment,
         start_year=args.start_year,

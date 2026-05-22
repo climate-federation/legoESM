@@ -89,6 +89,10 @@ class SegmentCarry(NamedTuple):
         Accumulated sensible heat flux [W/m2 * s] over the segment.
     lhflx_accum : jax.Array
         Accumulated latent heat flux [W/m2 * s] over the segment.
+    T_land : jax.Array or None
+        Slab-land skin temperature [K].  ``None`` for ocean-only runs
+        (the land tile is then inert).  Prognostic — advanced once per
+        radiation sub-cycle by the slab surface energy balance.
     """
     u: jax.Array
     v: jax.Array
@@ -112,6 +116,7 @@ class SegmentCarry(NamedTuple):
     precip_accum: jax.Array
     shflx_accum: jax.Array
     lhflx_accum: jax.Array
+    T_land: jax.Array = None
 
 
 def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
@@ -120,7 +125,8 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
                step_index,
                target_moisture=None, target_mass=None,
                max_cfl=None, precip_accum=None,
-               shflx_accum=None, lhflx_accum=None):
+               shflx_accum=None, lhflx_accum=None,
+               T_land=None):
     """Pack driver state into a SegmentCarry for the compiled kernel.
 
     Prognostic fields are cast to at least the precision policy's storage
@@ -152,6 +158,12 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
         lhflx_accum = jnp.zeros_like(state.p_s.data)
     if conv_prog is None:
         conv_prog = jnp.zeros((state.p_s.data.size,), dtype=storage)
+    # T_land is always a real array in the carry (never None) so the
+    # SegmentCarry pytree has no Python-object leaves.  The land tile is
+    # gated by PhysicsPipeline.f_land, not by T_land being None — for
+    # ocean-only runs this zeros array is carried but never read.
+    if T_land is None:
+        T_land = jnp.zeros_like(state.p_s.data)
     return SegmentCarry(
         u=_promote(state.u.data, storage),
         v=_promote(state.v.data, storage),
@@ -175,6 +187,7 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
         precip_accum=_promote(precip_accum, storage),
         shflx_accum=_promote(shflx_accum, storage),
         lhflx_accum=_promote(lhflx_accum, storage),
+        T_land=_promote(T_land, storage),
     )
 
 
@@ -557,7 +570,9 @@ def build_segment_fn(
                 # (forcing, lat/lon) are rank-local.  Extract owned faces
                 # from dynamics fields, run physics, write back.
                 _ofi = owned_face_ids
-                phys_out, held_new_local = step_unified(
+                _T_land_in = (carry.T_land[_ofi]
+                              if carry.T_land is not None else None)
+                phys_out, held_new_local, _T_land_local = step_unified(
                     need_rad,
                     T_new[_ofi], p_s_new[_ofi],
                     carry.q_v[_ofi], carry.q_c[_ofi], carry.q_r[_ofi],
@@ -577,6 +592,7 @@ def build_segment_fn(
                     albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
                     ghg_vmr_override=_ghg_vmr_override,
                     cloud_rh_crit_bl=_cloud_rh_crit_bl,
+                    T_land=_T_land_in,
                 )
 
                 # Write physics tendencies back at owned indices.
@@ -616,8 +632,14 @@ def build_segment_fn(
                 _lh = phys_out.lhflx if phys_out.lhflx is not None else jnp.zeros_like(p_s_new[_ofi])
                 shflx_accum = carry.shflx_accum.at[_ofi].add(_sh * _dt)
                 lhflx_accum = carry.lhflx_accum.at[_ofi].add(_lh * _dt)
+
+                # Slab-land temperature: update at owned indices
+                T_land_new = (
+                    carry.T_land.at[_ofi].set(_T_land_local)
+                    if carry.T_land is not None else None
+                )
             else:
-                phys_out, held_new = step_unified(
+                phys_out, held_new, T_land_new = step_unified(
                     need_rad,
                     T_new, p_s_new,
                     carry.q_v, carry.q_c, carry.q_r, carry.conv_prog,
@@ -634,6 +656,7 @@ def build_segment_fn(
                     albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
                     ghg_vmr_override=_ghg_vmr_override,
                     cloud_rh_crit_bl=_cloud_rh_crit_bl,
+                    T_land=carry.T_land,
                 )
 
                 # --- State update ---
@@ -712,6 +735,8 @@ def build_segment_fn(
                 precip_accum=_match_dtype(precip_accum, carry.precip_accum),
                 shflx_accum=_match_dtype(shflx_accum, carry.shflx_accum),
                 lhflx_accum=_match_dtype(lhflx_accum, carry.lhflx_accum),
+                T_land=(None if carry.T_land is None
+                        else _match_dtype(T_land_new, carry.T_land)),
             )
             return new_carry, None
         return _single_step

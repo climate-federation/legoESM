@@ -283,6 +283,19 @@ class ModelDriver:
                 self.grid, config=topo_config
             )
 
+        # Real land-sea mask overrides the elevation-derived land fraction
+        # (works with any ``topography`` setting, including "flat").
+        land_mask_path = getattr(self.config, "land_mask_path", "")
+        if land_mask_path:
+            from legoesm.grids.topography import load_land_fraction
+            self._f_land = load_land_fraction(
+                self.grid, land_mask_path
+            ).astype(_sd)
+            logger.info(
+                f"  Land-sea mask: {land_mask_path} "
+                f"(land fraction mean={float(jnp.mean(self._f_land)):.3f})"
+            )
+
     def _create_dycore(self) -> None:
         """Create the dynamical core model via the component factory.
 
@@ -561,6 +574,23 @@ class ModelDriver:
         rad_str = self.config.radiation or "none"
         conv_str = self.config.convection or "none"
         logger.info(f"  Physics: radiation={rad_str}, convection={conv_str}")
+
+        # Activate the slab-land surface tile when a land-sea mask was
+        # loaded in _create_topography.  f_land / albedo_land are static
+        # surface fields; the slab steps once per radiation sub-cycle.
+        if getattr(self.config, "land_mask_path", "") and self._f_land is not None:
+            from legoesm.surface_albedo import land_vegetation_albedo
+            from legoesm.core.precision import get_policy
+            _sd = get_policy().storage
+            self.physics.f_land = self._f_land.astype(_sd)
+            self.physics.albedo_land = (
+                land_vegetation_albedo(self.grid.grid_lat).astype(_sd)
+            )
+            self.physics.rad_update_steps = self.config.rad_update_steps
+            logger.info(
+                f"  Land tile: ACTIVE (slab land, C_land="
+                f"{self.physics.C_land:.1e} J/m2/K)"
+            )
 
     def _setup_external_forcing(self) -> None:
         """Configure external forcing: solar, ozone, aerosol, GHG."""
@@ -1060,6 +1090,14 @@ class ModelDriver:
                 local_adapter = ColumnAdapter(ncol=local_ncol, shape_2d=local_shape_2d)
                 if self.physics is not None:
                     self.physics.adapter = local_adapter
+                    # Scatter the slab-land surface fields to owned faces
+                    # so the rank-local physics columns match f_land /
+                    # albedo_land (the MPI ``owned_face_ids`` path).
+                    if self.physics.f_land is not None:
+                        self.physics.f_land = scatter(
+                            self.physics.f_land, layout)
+                        self.physics.albedo_land = scatter(
+                            self.physics.albedo_land, layout)
 
                 # Wrap SST/SIC forcing to return rank-local arrays
                 _global_get_sst_sic = self.get_sst_sic
@@ -2100,6 +2138,17 @@ class ModelDriver:
             conv_prog_default = jnp.zeros(conv_shape, dtype=_sd)
         conv_prog = _aux.get("conv_prog", conv_prog_default)
 
+        # Slab-land skin temperature — restored from the checkpoint when
+        # available, otherwise initialized from the lowest model-level
+        # air temperature (the thin slab equilibrates within ~1 day).
+        # ``None`` when the land tile is inactive (ocean-only run).
+        if self.physics is not None and self.physics.f_land is not None:
+            T_land = _aux.get(
+                "T_land", self.state.T.data[..., -1].astype(_sd)
+            )
+        else:
+            T_land = None
+
         # External forcing (rank-local p_s and lat for MPI)
         _phys_p_s, _phys_lat = self._owned_p_s_and_lat()
         o3_vmr, aerosol_od, ghg_vmr = self._precompute_external_forcing(
@@ -2125,6 +2174,7 @@ class ModelDriver:
             "held_lw_up_toa": held_lw_up_toa,
             "held_sw_down_toa": held_sw_down_toa,
             "conv_prog": conv_prog,
+            "T_land": T_land,
             "o3_vmr": o3_vmr, "aerosol_od": aerosol_od, "ghg_vmr": ghg_vmr,
             "lat_deg_grid": lat_deg_grid,
             "_sd": _sd,
@@ -2193,6 +2243,7 @@ class ModelDriver:
         held_lw_up_toa = ctx["held_lw_up_toa"]
         held_sw_down_toa = ctx["held_sw_down_toa"]
         conv_prog = ctx["conv_prog"]
+        T_land = ctx["T_land"]
         o3_vmr = ctx["o3_vmr"]
         aerosol_od = ctx["aerosol_od"]
         ghg_vmr = ctx["ghg_vmr"]
@@ -2332,6 +2383,7 @@ class ModelDriver:
                 target_moisture=_target_moisture,
                 target_mass=_target_mass,
                 precip_accum=jnp.zeros(_ens_2d, dtype=_sd),
+                T_land=T_land,
             )
 
             # Shard carry across devices for SPMD execution
@@ -2387,6 +2439,11 @@ class ModelDriver:
                 "seg_shflx": seg_shflx,
                 "seg_lhflx": seg_lhflx,
             }
+            # Carry the slab-land temperature to the next segment and
+            # into the checkpoint (mirrors the held-radiation fields).
+            if carry.T_land is not None:
+                T_land = carry.T_land
+                self._carry_aux["T_land"] = T_land
 
             current_step = seg_end_step
 
@@ -2600,7 +2657,7 @@ class ModelDriver:
         self.state = self.model.step_with_physics(self.state, DT)
 
         phys_out, (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
-                    held_sw_up_toa, held_lw_up_toa, held_sw_down_toa) = \
+                    held_sw_up_toa, held_lw_up_toa, held_sw_down_toa), _ = \
             step_unified(
                 jnp.bool_(True),
                 self.state.T.data, self.state.p_s.data,
@@ -2684,7 +2741,7 @@ class ModelDriver:
                 # _precompute_external_forcing for transient experiments.
 
             phys_out, (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
-                        held_sw_up_toa, held_lw_up_toa, held_sw_down_toa) = \
+                        held_sw_up_toa, held_lw_up_toa, held_sw_down_toa), _ = \
                 step_unified(
                     need_rad_jax,
                     self.state.T.data, self.state.p_s.data,
