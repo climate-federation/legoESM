@@ -800,6 +800,62 @@ class LatLonCGridOceanModel:
                 F_slow_v=F_slow_v,
             )
 
+        # 6b. Issue #271: project out global mean-eta drift right after
+        # the barotropic solve, BEFORE the flux-form tracer step
+        # recomputes ``h_k_new`` and consumes ``Hu_avg``.  Applying the
+        # correction here keeps the tracer step's layer thicknesses
+        # consistent with the corrected eta, and preserves the
+        # barotropic-solver invariant ``div(Hu_avg) ==
+        # (eta_old - eta_new) / dt`` up to a global mean drift that the
+        # projection is exactly removing.
+        #
+        # Target volume = vol(eta_old) + dt * area-weighted F_slow_eta.
+        # The implicit-CN solver already conserves this internally so
+        # the correction is round-off; the explicit substepping path and
+        # any partial-cell-induced bias get fixed here.
+        if self.config.fix_eta_drift:
+            mask_eta = state.land_mask.data
+            area_eta = self.grid.area
+            eta_old_d = state.eta.data
+            eta_new_d = state_new.eta.data
+            target_local = jnp.sum(eta_old_d * area_eta * mask_eta)
+            if F_slow_eta is not None:
+                target_local = target_local + dt * jnp.sum(
+                    F_slow_eta * area_eta * mask_eta
+                )
+            actual_local = jnp.sum(eta_new_d * area_eta * mask_eta)
+            ocean_area_local = jnp.sum(area_eta * mask_eta)
+            # MPI-aware reduction: returns global totals on the
+            # distributed path, identity on a single rank.
+            from legoesm.ocean.conservation import _ocean_global_sum
+            target_mass, actual_mass, ocean_area = _ocean_global_sum(
+                jnp.stack([target_local, actual_local, ocean_area_local])
+            )
+            eta_correction = (target_mass - actual_mass) / jnp.maximum(
+                ocean_area, 1.0e-30
+            )
+            eta_fixed = eta_new_d + eta_correction.astype(eta_new_d.dtype) * mask_eta
+            # Apply the same mass-conserving floor that the barotropic
+            # solvers use, so a hard-floored cell does not silently
+            # break the volume guarantee we just enforced.
+            if self.config.min_water_column_m is not None:
+                from legoesm.ocean.dynamics.eta_floor import (
+                    clamp_and_redistribute as _clamp_redistribute,
+                )
+                eta_floor = (
+                    jnp.asarray(
+                        self.config.min_water_column_m,
+                        dtype=eta_fixed.dtype,
+                    )
+                    - state_new.H_bathy.data
+                )
+                eta_fixed = _clamp_redistribute(
+                    eta_fixed, eta_floor, mask_eta, area_eta,
+                )
+            state_new = state_new._replace(
+                eta=state_new.eta.replace(data=eta_fixed),
+            )
+
         # 7. Flux-form tracer update using full 3D velocity
         #
         # The barotropic solver returns Hu_avg (time-averaged depth-
