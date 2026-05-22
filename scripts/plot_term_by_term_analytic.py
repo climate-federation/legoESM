@@ -80,6 +80,7 @@ def _all_wet_state(grid, z_coord, H_max=1000.0):
 def _zero_dynamics_config(*, A_h=0.0, B_h=0.0, bottom_drag_r=0.0,
                           momentum_advection="vector_invariant",
                           tracer_advection="upwind",
+                          tracer_time_integrator="euler",
                           barotropic_solver="explicit_substep",
                           n_barotropic_substeps=10):
     return LatLonCGridOceanConfig(
@@ -96,6 +97,7 @@ def _zero_dynamics_config(*, A_h=0.0, B_h=0.0, bottom_drag_r=0.0,
         barotropic_time_filter="box",
         barotropic_solver=barotropic_solver,
         use_conservation_fixer=False, tracer_advection=tracer_advection,
+        tracer_time_integrator=tracer_time_integrator,
         pgf_scheme="adcroft", momentum_advection=momentum_advection,
         ke_gradient_scheme="centered", weno_d_term=False,
         physics=None, gm_redi=None, eos="linear",
@@ -484,7 +486,8 @@ def _run_transport_sweep(scheme):
         c_gw = float(np.sqrt(constants.g * H_max))
         n_subs = max(10, int(np.ceil(10.0 * c_gw * dt / dx)))
         config = _zero_dynamics_config(
-            tracer_advection=scheme, n_barotropic_substeps=n_subs,
+            tracer_advection=scheme, tracer_time_integrator="rk3",
+            n_barotropic_substeps=n_subs,
         )
         model = LatLonCGridOceanModel(grid, z_coord=z_coord, config=config)
 
@@ -578,15 +581,17 @@ def plot_convergence():
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
     ax = axes[0]
-    ax.loglog(dxs_dst3 / 1e3, errs_dst3, "C0o-", label="dst3")
-    ax.loglog(dxs_weno5 / 1e3, errs_weno5, "C3s-", label="weno5")
-    ref = errs_dst3[-1] * (dxs_dst3 / dxs_dst3[-1])
-    ax.loglog(dxs_dst3 / 1e3, ref, "k--", lw=0.8, label="O(dx)")
+    ax.loglog(dxs_dst3 / 1e3, errs_dst3, "C0o-", label="dst3 (~O(dx))")
+    ax.loglog(dxs_weno5 / 1e3, errs_weno5, "C3s-", label="weno5 (~O(dx²))")
+    ref1 = errs_dst3[-1] * (dxs_dst3 / dxs_dst3[-1])
+    ax.loglog(dxs_dst3 / 1e3, ref1, "C0:", lw=0.8, label="O(dx) ref")
+    ref2 = errs_weno5[-1] * (dxs_weno5 / dxs_weno5[-1]) ** 2
+    ax.loglog(dxs_weno5 / 1e3, ref2, "C3:", lw=0.8, label="O(dx²) ref")
     ax.set_xlabel("dx [km]")
     ax.set_ylabel("L2 error in T(x, T_end)")
-    ax.set_title("Transport: C_a = U0 dt/dx = const")
+    ax.set_title("Transport: C_a = U0 dt/dx = const  (rk3 tracer step)")
     ax.grid(True, which="both", alpha=0.4)
-    ax.legend()
+    ax.legend(fontsize=8)
 
     ax = axes[1]
     ax.loglog(dxs_wave / 1e3, errs_wave, "C2o-", label="implicit_cn")

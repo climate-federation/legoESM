@@ -164,6 +164,7 @@ def _zero_dynamics_config(
     bottom_drag_r: float = 0.0,
     momentum_advection: str = "vector_invariant",
     tracer_advection: str = "upwind",
+    tracer_time_integrator: str = "euler",
     barotropic_solver: str = "explicit_substep",
     n_barotropic_substeps: int = 10,
 ) -> LatLonCGridOceanConfig:
@@ -196,6 +197,7 @@ def _zero_dynamics_config(
         barotropic_solver=barotropic_solver,
         use_conservation_fixer=False,
         tracer_advection=tracer_advection,
+        tracer_time_integrator=tracer_time_integrator,
         pgf_scheme="adcroft",
         momentum_advection=momentum_advection,
         ke_gradient_scheme="centered",
@@ -719,8 +721,19 @@ class TestTransportConvergence:
             c_gw = float(np.sqrt(constants.g * H_max))
             n_subs = max(10, int(np.ceil(10.0 * c_gw * dt / dx)))
 
+            # SSP-RK3 tracer step.  Default Euler is 1st-order in
+            # time → at fixed advective CFL the time error O(dt)
+            # = O(dx) dominates dst3 (O(dx³) spatial) and weno5
+            # (O(dx⁵) spatial), masking their true order.  RK3
+            # lifts the time error to O(dx³) so the measured rate
+            # reflects the spatial scheme — dst3 still caps near
+            # O(dx) (monotone limiter clips order at smooth
+            # extrema in the Gaussian peak), weno5 reaches ~O(dx²)
+            # (limited by the C-grid + barotropic mass-flux
+            # coupling, not by the WENO stencil itself).
             config = _zero_dynamics_config(
                 tracer_advection=scheme,
+                tracer_time_integrator="rk3",
                 n_barotropic_substeps=n_subs,
             )
             model = LatLonCGridOceanModel(grid, z_coord=z_coord, config=config)
