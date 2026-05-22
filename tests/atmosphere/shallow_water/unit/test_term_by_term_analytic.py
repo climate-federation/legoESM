@@ -559,9 +559,12 @@ class TestWaveConvergenceSW:
         H = 100.0
         c = float(np.sqrt(constants.g * H))
         lon_extent_deg = 4.0
-        # The lat-lon C-grid SW solver needs CFL ≲ 0.2 on a narrow
-        # equatorial channel; 0.25 triggers NaN at the coarsest level.
-        cfl_target = 0.2
+        # CFL = 0.1: stable at all four refinement levels and keeps
+        # the per-step phase error small enough to recover full
+        # 2nd-order convergence.  CFL = 0.2 was stable through
+        # n_lon = 256 but blew up at n_lon = 512, and left a
+        # ~1.7× residual at the finest level.
+        cfl_target = 0.1
 
         radius = float(constants.R_earth)
         Lx = radius * lon_extent_deg * (np.pi / 180.0)
@@ -580,10 +583,16 @@ class TestWaveConvergenceSW:
         rows = []
         for n_lon in CONV_N_LONS:
             n_lat_inner = max(4, n_lon // 8)
+            # lat_half_deg = 0.2: narrower than 0.05° left the N/S
+            # walls close enough to the action that boundary
+            # reflections contaminated the L2 error at the finest
+            # dx and pulled the rate below 2nd-order.  Widening to
+            # 0.2° drops the finest-level error 3× and restores
+            # clean 2nd-order convergence across all four levels.
             grid, _f0 = _build_fplane_patch(
                 center_lat_deg=0.0,
                 n_lat_inner=n_lat_inner, n_lon=n_lon,
-                lon_extent_deg=lon_extent_deg, lat_half_deg=0.05,
+                lon_extent_deg=lon_extent_deg, lat_half_deg=0.2,
             )
             config = _zero_dynamics_config()
             model = CGridLatLonShallowWaterModel(grid, config)

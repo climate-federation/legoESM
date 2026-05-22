@@ -342,7 +342,9 @@ def _run_wave_sweep_sw():
     H = 100.0
     c = float(np.sqrt(constants.g * H))
     lon_extent_deg = 4.0
-    cfl_target = 0.2
+    # CFL = 0.1 + lat_half = 0.2°: matches the test setup that
+    # recovers clean 2nd-order convergence across all four levels.
+    cfl_target = 0.1
     radius = float(constants.R_earth)
     Lx = radius * lon_extent_deg * (np.pi / 180.0)
     T_end = 0.1 * Lx / c
@@ -357,7 +359,7 @@ def _run_wave_sweep_sw():
         grid, _f0 = _build_fplane_patch(
             center_lat_deg=0.0,
             n_lat_inner=n_lat_inner, n_lon=n_lon,
-            lon_extent_deg=lon_extent_deg, lat_half_deg=0.05,
+            lon_extent_deg=lon_extent_deg, lat_half_deg=0.2,
         )
         config = _zero_dynamics_config()
         model = CGridLatLonShallowWaterModel(grid, config)
