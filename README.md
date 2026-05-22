@@ -163,8 +163,8 @@ JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu python scripts/run_scm_rce.py --days 50
 # Run a fully coupled simulation (slab ocean + bucket land)
 JAX_ENABLE_X64=1 python scripts/run_coupled.py --preset slab_simple --days 365
 
-# Run an OMIP-2 centennial spin-up on the tripolar eORCA1 grid
-JAX_ENABLE_X64=1 python scripts/run_omip.py --grid tripole --years 30
+# Run an OMIP-2 spin-up on the tripolar eORCA1 grid (30 years)
+JAX_ENABLE_X64=1 python scripts/run_omip.py --grid tripole --days 10950
 
 # Single-point multi-year multilayer land spin-up
 JAX_ENABLE_X64=1 python scripts/run_lmip.py --lat 45.5 --lon -93.1 --days 3650
