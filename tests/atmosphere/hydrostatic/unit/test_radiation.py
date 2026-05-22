@@ -556,6 +556,85 @@ class TestRRTMGP:
         assert jnp.all(jnp.isfinite(out.heating_rate))
         assert out.heating_rate.shape == (ncol, nlev)
 
+    def test_rrtmgp_clear_sky_heating_rate_signs(self):
+        """Clear-sky heating rates must have the physically correct sign.
+
+        Regression test for a sign-inverted flux-divergence → heating-rate
+        conversion in ``two_stream.compute_heating_rate``: the function's
+        formula assumed a signed pressure difference, but ``solve_columns``
+        passes a positive layer thickness, which flipped the sign of every
+        heating rate.  The result was a free troposphere that *heated*
+        radiatively (+1.7 K/day) instead of *cooling* (~-1.7 K/day),
+        producing an unbounded thermal runaway in long AMIP integrations.
+
+        The two invariants checked here are basic radiative physics:
+          * Shortwave absorption can only *heat* a layer — ``sw_heating_rate``
+            is non-negative everywhere.
+          * Clear-sky longwave radiation *cools* the free troposphere
+            (water-vapor rotation-band emission to space).
+
+        The pre-fix tests only checked that heating rates were *finite*,
+        which is why the sign error shipped.
+        """
+        import numpy as np
+        from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (
+            rrtmgp_radiation,
+        )
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+
+        nlev = 40
+        # Realistic mid-latitude profile, top-to-bottom (index 0 = model top).
+        p_half = np.geomspace(10.0, 1.01325e5, nlev + 1)
+        p_full = 0.5 * (p_half[:-1] + p_half[1:])
+        T = np.zeros(nlev)
+        q_v = np.zeros(nlev)
+        for k in range(nlev):
+            p = p_full[k]
+            if p > 2.0e4:  # troposphere: 216 K @ 200 hPa → 288 K @ 1000 hPa
+                frac = np.log(p / 2.0e4) / np.log(1.0e5 / 2.0e4)
+                T[k] = 216.0 + frac * (288.0 - 216.0)
+                q_v[k] = 0.010 * (p / 1.0e5) ** 3
+            else:  # stratosphere: warms upward (ozone)
+                frac = np.log(2.0e4 / p) / np.log(2.0e4 / 10.0)
+                T[k] = 216.0 + frac * (270.0 - 216.0)
+                q_v[k] = 3.0e-6
+        q_v = np.maximum(q_v, 3.0e-6)
+
+        T_j = jnp.asarray(T[None, :])
+        p_full_j = jnp.asarray(p_full[None, :])
+        p_half_j = jnp.asarray(p_half[None, :])
+        q_v_j = jnp.asarray(q_v[None, :])
+        T_sfc_j = jnp.full(1, 288.0)
+        cos_zen = jnp.full(1, 0.5)
+
+        out = rrtmgp_radiation(
+            T_j, p_full_j, p_half_j, T_sfc_j, q_v_j, cos_zen, RRTMGPConfig()
+        )
+
+        sw = out.sw_heating_rate[0] * 86400.0  # K/day
+        lw = out.lw_heating_rate[0] * 86400.0
+
+        # SW absorption can never cool a layer.
+        assert jnp.all(sw >= -1.0e-6), (
+            f"shortwave heating rate must be non-negative; "
+            f"got min={float(jnp.min(sw)):.3f} K/day"
+        )
+
+        # Clear-sky LW cools the free troposphere (200-900 hPa).
+        ft = (p_full > 2.0e4) & (p_full < 9.0e4)
+        lw_ft = float(jnp.mean(lw[jnp.asarray(ft)]))
+        assert lw_ft < -0.5, (
+            f"clear-sky longwave must cool the free troposphere; "
+            f"got mean LW heating = {lw_ft:+.3f} K/day (expected < -0.5)"
+        )
+
+        # Net free-troposphere radiation is a modest cooling, not a runaway.
+        net_ft = float(jnp.mean(out.heating_rate[0][jnp.asarray(ft)] * 86400.0))
+        assert -5.0 < net_ft < 0.5, (
+            f"net free-troposphere radiative heating = {net_ft:+.3f} K/day "
+            f"is outside the physical range (-5, 0.5)"
+        )
+
     def test_rrtmgp_differentiable_temperature(self):
         """jax.grad w.r.t. temperature should work through rrtmgp_radiation."""
         from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (

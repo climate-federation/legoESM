@@ -419,15 +419,23 @@ def compute_heating_rate(
 ) -> Array:
   """Computes cell-center heating rate from pressure and net radiative flux.
 
-  The net radiative flux corresponds to the bottom cell face. The difference
-  of the net flux at the top face and that at the bottom face gives the total
-  net flux out of the grid cell. Using the pressure difference across the grid
-  cell, the net flux can be converted to a heating rate, in K/s.
+  ``flux_net`` is the net **upward** flux at cell faces (``flux_up -
+  flux_down``).  The forward difference ``flux_net[k+1] - flux_net[k]`` is
+  the net upward flux leaving the top face minus that entering the bottom
+  face — i.e. the net flux **out** of cell ``k`` — so a positive difference
+  means the cell is *losing* energy and must *cool*.  The heating rate
+  therefore carries an explicit minus sign.
+
+  ``dp`` is treated as a layer thickness *magnitude*: ``abs`` is applied so
+  the result is independent of whether the caller passes a signed pressure
+  difference (top-to-bottom vs. surface-to-top ordering) or an unsigned
+  thickness.  The sign of the heating rate comes solely from the flux
+  divergence, not from the orientation of the pressure axis.
 
   Args:
-    flux_net: The net flux at the bottom face [W/m²].
+    flux_net: The net upward flux at cell faces [W/m²].
     pressure: The pressure field [Pa].
-    dp: Exact layer pressure thickness [Pa].  When provided, used directly
+    dp: Layer pressure thickness [Pa].  When provided, used directly
         instead of the centered-difference approximation from ``pressure``.
 
   Returns:
@@ -438,8 +446,11 @@ def compute_heating_rate(
       dp = 0.5 * kernel_ops.centered_difference(pressure, dim=2)
 
   # Compute the forward pressure difference of fluxes on faces (like a
-  # derivative of face_to_node).
+  # derivative of face_to_node).  This is the net upward flux out of the
+  # cell; a positive value means the cell radiates away energy and cools.
   dflux = kernel_ops.forward_difference(flux_net, dim=2)
 
-  # Compute the heating rate at the grid cell center in K/s.
-  return constants.G * dflux / dp / constants.CP_D
+  # Heating rate at the grid cell center [K/s].  Minus sign: net flux *out*
+  # cools the cell.  ``abs(dp)`` so the sign is set by the flux divergence
+  # alone, not by the vertical-axis orientation.
+  return -constants.G * dflux / jnp.abs(dp) / constants.CP_D
