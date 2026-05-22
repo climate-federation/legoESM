@@ -701,6 +701,7 @@ def make_aimip_classical_spectral_physics(
             cloud_scheme=cloud_scheme,
             cloud_config=cloud_cfg_trained,
             update_interval_steps=rad_update_interval_steps,
+            diurnal_cycle=True,
         )
     elif radiation == "gray":
         # Full 9-knob gray radiation (audit pass).  Was previously
@@ -723,6 +724,7 @@ def make_aimip_classical_spectral_physics(
         rad_cfg = RadiationConfig(
             scheme="gray",
             gray=gray_cfg,
+            diurnal_cycle=True,
         )
     else:
         raise ValueError(

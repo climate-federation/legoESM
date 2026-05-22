@@ -816,7 +816,10 @@ def _make_spectral_pe_radiation(
     """
     _time, set_time = _make_time_state()
 
-    def _physics_fn_core(state, grid, sigma_coord, grid_fields=None):
+    def _physics_fn_core(
+        state, grid, sigma_coord, grid_fields=None,
+        sim_time_seconds=0.0,
+    ):
         # 1. Transform spectral state to grid space
         fields = grid_fields
         if fields is None:
@@ -835,6 +838,22 @@ def _make_spectral_pe_radiation(
         # Surface temperature = lowest level
         T_sfc = T[..., -1]  # (n_lat, n_lon)
 
+        # Effective time-of-day for the diurnal cycle.  ``_time`` holds
+        # the *initial* day_of_year + seconds_of_day captured at module
+        # import (or set via ``set_time`` between epochs); the scan
+        # body in :func:`spectral_rollout` passes the current
+        # in-rollout elapsed time as ``sim_time_seconds`` so each
+        # radiation evaluation sees the correct cos(SZA) at its hour
+        # of day.  Without this thread, all rad calls within a
+        # rollout would share the static initial-IC time and the
+        # diurnal pattern would be frozen (verified 2026-05-22 --
+        # the v10 production setup had this bug).
+        secs_init = _time["seconds_of_day"]
+        day_init = _time["day_of_year"]
+        total_secs = secs_init + sim_time_seconds
+        secs_eff = jnp.mod(total_secs, 86400.0)
+        day_eff = day_init + jnp.floor_divide(total_secs, 86400.0)
+
         # Insolation (with diurnal cycle support).
         # For diurnal cycle we need 2-D lat/lon; otherwise lat is 1-D and
         # the result is broadcast to (n_lat, n_lon).
@@ -844,14 +863,14 @@ def _make_spectral_pe_radiation(
             insol, cos_sza, f_day = _compute_insolation(
                 lat_2d, radiation_config,
                 lon=lon_2d,
-                day_of_year=_time["day_of_year"],
-                seconds_of_day=_time["seconds_of_day"],
+                day_of_year=day_eff,
+                seconds_of_day=secs_eff,
             )
         else:
             insol_1d, _, f_day_1d = _compute_insolation(
                 lat, radiation_config,
-                day_of_year=_time["day_of_year"],
-                seconds_of_day=_time["seconds_of_day"],
+                day_of_year=day_eff,
+                seconds_of_day=secs_eff,
             )
             insol = jnp.broadcast_to(insol_1d[:, None], (n_lat, n_lon))
             cos_sza = None
@@ -922,8 +941,13 @@ def _make_spectral_pe_radiation(
             prevent_cse=True,
         )
 
-        def physics_fn(state, grid, sigma_coord, grid_fields=None):
-            return _physics_fn_ckpt(state, grid, sigma_coord, grid_fields)
+        def physics_fn(
+            state, grid, sigma_coord, grid_fields=None,
+            sim_time_seconds=0.0,
+        ):
+            return _physics_fn_ckpt(
+                state, grid, sigma_coord, grid_fields, sim_time_seconds,
+            )
     else:
         physics_fn = _physics_fn_core
 

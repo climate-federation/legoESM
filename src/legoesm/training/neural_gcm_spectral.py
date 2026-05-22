@@ -623,7 +623,26 @@ def spectral_rollout(
     # the cost of holding the radiation tendency constant for the
     # gating window (acceptable for the AIMIP daily forecast loss
     # where the rad time scale is ~hours, not seconds).
-    init_rad_tendency = rad_physics_fn(initial_state, grid, sigma_coord)
+    # ``rad_physics_fn`` accepts an optional ``sim_time_seconds``
+    # kwarg used by the radiation diurnal cycle in
+    # :func:`_make_spectral_pe_radiation` -- threading the current
+    # scan step's elapsed time lets each rad evaluation see the
+    # correct hour-of-day cos(SZA) instead of the static IC time
+    # (the latter was the v10 behaviour and froze the diurnal
+    # pattern; v11 fix).  Callers whose rad function predates the
+    # kwarg still work because they ignore extra kwargs via the
+    # ``physics_fn(... , grid_fields=None, sim_time_seconds=0.0)``
+    # default in the integration wrapper.
+    def _call_rad(s, t_seconds):
+        try:
+            return rad_physics_fn(
+                s, grid, sigma_coord, sim_time_seconds=t_seconds,
+            )
+        except TypeError:
+            # Legacy rad_physics_fn signature without sim_time_seconds.
+            return rad_physics_fn(s, grid, sigma_coord)
+
+    init_rad_tendency = _call_rad(initial_state, 0.0)
 
     def step_fn_gated(carry, step_idx):
         state, cached_rad_tendency = carry
@@ -633,9 +652,10 @@ def spectral_rollout(
         # the rad branch; on skipped steps the cached tensor flows
         # through unchanged.
         should_refresh = (step_idx % rad_update_interval) == 0
+        sim_time_seconds = step_idx.astype(jnp.float64) * dt
         new_rad_tendency = jax.lax.cond(
             should_refresh,
-            lambda _: rad_physics_fn(state, grid, sigma_coord),
+            lambda _: _call_rad(state, sim_time_seconds),
             lambda _: cached_rad_tendency,
             operand=None,
         )

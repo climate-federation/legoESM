@@ -126,8 +126,21 @@ aimip_radiation: "rrtmgp"  # gray | rrtmgp.  RRTMGP is required for AIMIP
                            # trade ~2-3x forward compute for the
                            # activation-storage relief that lets a
                            # 48-step daily rollout fit in 24 GiB.
-aimip_rad_update_interval: 144  # v10 T63: 1 RRTMGP call per 1-day
-                                # rollout at dt=600 (144 steps/day).
+aimip_rad_update_interval: 24   # v11: 1 RRTMGP call per 4 simulated
+                                # hours (24 steps × 600 s = 4 h).  Was
+                                # 144 (1 call/day) which froze the
+                                # diurnal cycle since the rad solve
+                                # only ran at one moment of the
+                                # forecast.  v11 also flips
+                                # ``RadiationConfig.diurnal_cycle=True``
+                                # and threads ``sim_time_seconds``
+                                # through the scan so each rad call
+                                # sees the correct hour-of-day
+                                # cos(SZA).  Memory roughly 6x of the
+                                # interval=144 setting (6 rad calls
+                                # per backward, each ~0.5 GiB at T63
+                                # after the per-g-point checkpoint
+                                # refactor) -- fits 24 GiB GPU.
 
 # ----- Spatial surface parameters (over land) ----------------------
 # When true, the AIMIP classical variant exposes seven surface and
