@@ -375,15 +375,16 @@ class SingleColumnModel:
         stateful_turb = physics_config.turbulence.scheme in (
             "tke", "clubb_lite", "edmf"
         )
-        # Every convection scheme except the diagnostic ``sbm``, ``dca``,
-        # ``kuo`` and ``none`` reads/writes ``conv_prog_profile`` (M_b
-        # relaxation, mass-flux carry, profile-carrying closures) or
-        # the AR1 noise state — all unsafe to evaluate with a stale
-        # stage-1 carry under a multi-stage integrator.
+        # Schemes that *read* the previous ``conv_prog_profile`` or
+        # ``conv_stoch_state`` — and therefore must not be advanced
+        # with a stale stage-1 carry under multi-stage integrators.
+        # The other convection schemes (``sbm``, ``dca``, ``kuo``,
+        # ``kain_fritsch``, ``emanuel``) are diagnostic: they `del`
+        # the incoming profile and emit a fresh one each call, so RK
+        # stages may freely re-evaluate them.
         stateful_conv_schemes = (
             "mass_flux", "edmf",
-            "zhang_mcfarlane", "kain_fritsch", "emanuel",
-            "tiedtke", "bechtold",
+            "zhang_mcfarlane", "tiedtke", "bechtold",
         )
         stateful_conv = physics_config.convection.scheme in stateful_conv_schemes
         throttled_conv = (

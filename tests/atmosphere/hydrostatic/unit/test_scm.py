@@ -211,8 +211,7 @@ def test_scm_swap_physics_scheme():
 
 @pytest.mark.parametrize(
     "conv_scheme",
-    ["mass_flux", "edmf", "zhang_mcfarlane", "kain_fritsch",
-     "emanuel", "tiedtke", "bechtold"],
+    ["mass_flux", "edmf", "zhang_mcfarlane", "tiedtke", "bechtold"],
 )
 def test_rk_rejects_stateful_convection(conv_scheme):
     """Every convection scheme that reads/writes conv_prog_profile or
@@ -230,6 +229,26 @@ def test_rk_rejects_stateful_convection(conv_scheme):
             T_profile=_default_T_profile(),
             time_integrator="rk4",
         )
+
+
+@pytest.mark.parametrize("conv_scheme", ["sbm", "kain_fritsch", "emanuel"])
+def test_rk_allows_diagnostic_convection(conv_scheme):
+    """Diagnostic convection schemes (no read of conv_prog_profile) are
+    safe under multi-stage integrators and must not be rejected."""
+    cfg = PhysicsConfig(
+        radiation=RadiationConfig(scheme="none"),
+        convection=ConvectionConfig(scheme=conv_scheme),
+        turbulence=TurbulenceConfig(scheme="none"),
+        microphysics=MicrophysicsConfig(scheme="none"),
+        gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
+    )
+    # Must not raise.
+    SingleColumnModel.create(
+        physics_config=cfg, nlev=NLEV, dt=300.0,
+        T_profile=_default_T_profile(),
+        q_v_profile=_default_qv_profile(),
+        time_integrator="rk2",
+    )
 
 
 def test_rk_rejects_throttled_convection():
