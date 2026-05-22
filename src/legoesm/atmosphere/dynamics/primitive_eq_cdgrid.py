@@ -213,6 +213,31 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # Default ``False`` keeps the legacy tendency-form path
         # bit-exact.  Field appended to the end of the NamedTuple
         # to preserve positional construction for legacy call sites.
+    implicit_grav_wave_use_pcg: bool = False
+        # Reserved config switch for the Phase 2 Hoskins–Simmons
+        # (1975) FV3 D-grid port — issue #273 throughput work.
+        # **Currently raises ``NotImplementedError`` when set to
+        # True**; only ``False`` (the default) runs the legacy
+        # explicit forward-Euler ``p_s ← p_s + α dt ∇²p_s`` path.
+        #
+        # Phase 2 (future): when True, this flag will gate a true
+        # implicit Helmholtz solve
+        # ``(I − α dt ∇²) p_s_new = p_s_explicit`` on the FV3
+        # D-grid surface pressure, lifting the explicit
+        # ``α dt / dx² < 0.5`` CFL bound.  The blocker for this
+        # release is that the existing ``laplacian_compact``
+        # operator is non-symmetric on cubed-sphere panel seams
+        # (the halo interpolation is not the metric-weighted
+        # adjoint of an FV gradient), and ``jax.scipy.sparse.linalg``
+        # iterative solvers route through a transpose-solve that
+        # is not implemented for the halo's non-unique scatter
+        # indices.  Phase 2 will build a true symmetric Helmholtz
+        # operator from the FV gradient / divergence adjoint pair
+        # on the D-grid (template:
+        # ``barotropic_implicit_latlon_cgrid._make_helmholtz``),
+        # then ``cg`` is correct and ``custom_linear_solve`` is
+        # happy.  Full Hoskins–Simmons coupling of T, divergence,
+        # and lnp_s via the Γ matrix is a further extension.
 
 
 def validate_corner_div_damp_nord(nord: int) -> None:
@@ -1403,7 +1428,49 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                     v_d=state_new.v_d.replace(data=v_corner + dv_corner),
                 )
 
-        # Implicit gravity wave damping — post-step Laplacian diffusion on p_s.
+        # Implicit gravity wave damping — post-step Laplacian operation on p_s.
+        #
+        # Default path (and currently the only implemented path):
+        # explicit forward-Euler diffusion ``p_s ← p_s + α dt ∇²p_s``.
+        # Conditionally stable at ``α dt / dx² < 0.5``.
+        #
+        # ``implicit_grav_wave_use_pcg = True`` is the scaffolding
+        # config flag for Phase 2 of the issue #273 Hoskins–Simmons
+        # port — when wired, it will replace the explicit form with
+        # a true implicit Helmholtz solve
+        # ``(I − α dt ∇²) p_s_new = p_s_explicit``.  The blocker
+        # surfaced by Codex review (session
+        # ``019e5084-28e6-79a3-9f1b-7eb53386da84``): the existing
+        # ``laplacian_compact`` cubed-sphere operator is *not*
+        # symmetric across panel seams (empirical asymmetry ~5 %
+        # on a random IC because the halo interpolation is not the
+        # metric-weighted adjoint of an FV gradient).  ``cg`` is
+        # therefore not guaranteed to converge, and BiCGSTAB /
+        # GMRES via ``jax.scipy.sparse.linalg`` route through
+        # ``lax.custom_linear_solve``'s transpose-solve path —
+        # which trips a ``NotImplementedError: scatter transpose is
+        # only implemented where unique_indices=True`` deep inside
+        # the halo scatter.
+        #
+        # Phase 2 work: replace the operator with a true symmetric
+        # Helmholtz built from the FV gradient / divergence adjoint
+        # pair on the cubed-sphere D-grid (analogous to
+        # ``barotropic_implicit_latlon_cgrid._make_helmholtz``), then
+        # solve with CG.  Tracked in issue #273.  Until then the
+        # flag is accepted but raises a clear error so a
+        # configuration intended for Phase 2 fails loudly rather
+        # than silently running the explicit path.
+        if self.config.implicit_grav_wave_use_pcg:
+            raise NotImplementedError(
+                "implicit_grav_wave_use_pcg=True is scaffolding "
+                "for the Hoskins–Simmons FV3 D-grid port (issue "
+                "#273) and is not yet wired.  The required "
+                "symmetric Helmholtz operator on the cubed-sphere "
+                "D-grid is not yet implemented (see comment above "
+                "this raise for details).  Set "
+                "implicit_grav_wave_use_pcg=False to use the "
+                "legacy explicit forward-Euler diffusion path."
+            )
         if self.config.implicit_grav_wave_damping > 0:
             alpha = self.config.implicit_grav_wave_damping
             lap_ps = laplacian_compact(state_new.p_s.data, self.grid)
