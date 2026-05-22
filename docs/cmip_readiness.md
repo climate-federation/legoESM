@@ -57,10 +57,24 @@ Status of legoESM components for CMIP-class production experiments.
 | Fixed SST (AMIP-style) | Done | Constant or spatial map |
 | Slab ocean (mixed layer) | Done | Freezing clamp |
 | Two-layer ocean | Done | Deep restoring option |
-| 3D ocean dynamics (multiple discretizations) | Done | Centered, FV, FC-Gram, FC-Gram C-grid |
+| 3D ocean dynamics (multiple discretizations) | Done | Centered, FV, FC-Gram, FC-Gram C-grid, MPAS Voronoi |
+| Tripolar grid (eORCA1) | Done | NEMO mesh_mask loader + tensor pole-fold halo (`grids/tripole.py`) |
+| Cross-grid metric consistency | Done | Ocean test matrix 57/57 PASS across lat-lon / tripolar / cubed-sphere / MPAS |
+| Realistic bathymetry | Done | ETOPO/GEBCO/ERDDAP + Laplacian smoothing + MEO r-cap + flood-fill basin removal |
+| Ice-shelf cavity coupling | Done | Holland & Jenkins (1999) basal melt at ice base; lat-lon + MPAS apply paths |
+| Tidal mixing | Done | Jayne & St-Laurent (2001) abyssal K with tracer-mixing integration |
+| River runoff | Done | Dai–Trenberth point→grid projection |
+| OMIP-2 SSS restoring | Done | WOA SSS climatology loader + FreshwaterForcing channel |
+| OMIP-2 atmospheric forcing | Done | JRA55-do RYF, float32 preload for 32 GB GPUs |
+| External τ / q_net / sw_down pathway | Done | C-grid PE supports prescribed surface forcing |
+| AMOC@26.5°N diagnostic | Done | `ocean.spinup.compute_amoc_timeseries` |
+| Centennial spin-up workflow | Done | Auto-restart, RPE / volume drift, Bryan–Lewis acceleration |
+| Mass conservation projection | Done | Lat-lon and MPAS implicit barotropic solvers |
 | Ocean biogeochemistry (abiotic) | Done | DIC + ALK, carbonate equilibria, air-sea CO₂ (Wanninkhof 2014) |
 | Ocean biogeochemistry (NPZD) | Done | N-P-Z-D ecosystem + Redfield coupling to DIC/ALK |
-| Ocean tracer transport | Done | FV tracer option |
+| Ocean tracer transport | Done | FV / PPM-FCT (Zalesak) / TVD; DST-3 vertical advection |
+| Ocean lateral mixing | Done | Harmonic, biharmonic, GM-Redi, Visbeck adaptive-GM, Leith viscosity, backscatter |
+| Ocean fidelity vs Veros | Done | `ocean/fidelity/` Veros DINO / Eady adapters and comparison reports |
 
 ## Sea Ice
 
@@ -70,7 +84,15 @@ Status of legoESM components for CMIP-class production experiments.
 | Ice concentration (prognostic) | Done | |
 | Ice velocity (free drift) | Done | Diagnostic |
 | EVP rheology / dynamics | Done | Hunke & Dukowicz 1997, subcycled momentum, `dynamics="evp"` |
+| mEVP rheology | Done | Bouillon 2013 / Kimmritz 2015 pseudo-time relaxation, `dynamics="mevp"` |
+| MPAS Voronoi sea-ice support | Done | Transport + rheology + dynamics + no-flux boundary on icosahedral mesh |
+| Tensor pole-fold halo (tripolar) | Done | Lat-lon dispatch documented in `ice/rheology.py` |
 | Multi-category ice | Done | CICE framework, Lipscomb 2001 linear remapping, `n_categories > 1` |
+| Snow on ice | Done | `ice/snow.py` |
+| Brine pockets | Done | `ice/brine.py` |
+| Ridging | Done | `ice/ridging.py` |
+| Delta-Eddington shortwave | Done | `ice/shortwave.py` |
+| Melt ponds | Done | `ice/ponds.py` |
 
 ## Land Surface
 
@@ -114,10 +136,15 @@ Status of legoESM components for CMIP-class production experiments.
 
 | Feature | Status | Notes |
 |---|---|---|
-| CMOR/CF-compliant output | Done | `CFWriter` with CF-1.8, CMIP6 DRS naming, 27 variables (Amon + Lmon) |
+| CMOR/CF-compliant output | Done | `CFWriter` + `io/cmor_output.py` with CF-1.8, CMIP6 DRS naming |
+| CMIP6 tables wired | Done | **Amon, Lmon, Omon, Oyr, Ofx, SImon, SIyr** |
+| Ocean overturning + OSNAP transports | Done | Per the CMIP6 diagnostic expansion |
+| Global ocean / sea-ice scalars | Done | Variance, dianeutral mixing, mass, heat, salt |
 | Experiment templates | Done | piControl, historical, SSP2-4.5, SSP5-8.5, AMIP, 1pctCO₂ |
 | Built-in GHG time series | Done | Linear interpolation for historical + SSP scenarios |
 | Restart/reproducibility | Done | SHA-256 state digests, config hashes, platform metadata |
+| Persistent JAX JIT cache | Done | Issue #273; opt-out via `LEGOESM_JAX_CACHE_DISABLE=1` |
+| SPMD halo backend (AMIP production) | Done | Issue #275 |
 | Tuning guide | Done | 16 parameters, validation, resolution-appropriate defaults |
 
 ## Remaining Gaps for CMIP Production

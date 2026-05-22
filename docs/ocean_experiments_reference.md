@@ -7,6 +7,17 @@ for developers modifying the experiments or interpreting test matrix results.
 Source modules live in `src/legoesm/ocean/experiments/`. The test matrix runner is
 `scripts/run_ocean_test_matrix.py`.
 
+**Status (2026-05):** 57/57 PASS across lat-lon, tripolar (eORCA1), cubed-sphere,
+and MPAS Voronoi grids — see commit `55ccddc3` "Cross-grid metric consistency".
+
+**Recent additions** (Phases A–F + 6a closeout):
+- **Phase A**: tier 5–8 runners — `eady_uniform`, `eady_*`, `acc_channel`, `dino`, `global_overturning`
+- **Phase D**: Munk, Held–Larichev, NeverWorld2-lite, ISOMIP+
+- **Centennial spin-up**: AMOC@26.5°N, RPE drift, Bryan–Lewis accelerated protocol (`ocean.spinup`)
+- **Realistic forcing**: JRA55-do RYF preload, Dai–Trenberth river runoff, OMIP-2 SSS restoring + WOA climatology, ice-shelf basal melt
+- **Tidal mixing**: Jayne & St-Laurent (2001) abyssal K (`ocean/physics/vertical_mixing/tidal.py`)
+- **Peer fidelity**: Veros DINO / Eady adapters under `ocean/fidelity/` and reports in `docs/ocean_fidelity/`
+
 ---
 
 ## Shared Infrastructure

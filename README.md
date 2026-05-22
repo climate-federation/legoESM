@@ -32,7 +32,8 @@ estimation, sensitivity analysis, and hybrid AI–physics modeling.
   - **Lat-lon C-grid** (finite volume): shallow water, hydrostatic
   - **MPAS / Voronoi icosahedral**: hydrostatic, non-hydrostatic
   - **SFNO data-driven cores**: shallow water and hydrostatic learned solvers
-  - **Tracer transport** modules on cubed-sphere, lat-lon, and Voronoi
+  - **Tracer transport** modules on cubed-sphere, lat-lon, and Voronoi, with RK3 time stepping for full 3rd-order convergence
+- **Single-column model (SCM)** (`legoesm.atmosphere.scm.SingleColumnModel`, `scripts/run_scm_rce.py`): dycore-free driver that reuses the full physics factory for RCE, GABLS-style boundary-layer cases, parameterization integration tests, and any-scheme × any-integrator swap-matrix sweeps
 - **Vertical coordinates**: pure sigma and hybrid sigma–pressure (L20–L60, sinh stretching)
 - **Physics packages** (each with a config NamedTuple, factory dispatch in `integration.py`, and direct unit tests):
   - **Radiation**: gray (Frierson-style) and RRTMGP correlated-k (LW + SW) with diurnal cycle, prescribed/transient ozone, aerosols, solar TSI, and cloud–radiation coupling
@@ -45,12 +46,17 @@ estimation, sensitivity analysis, and hybrid AI–physics modeling.
 
 ### Ocean
 
-- **3D ocean dynamics**: split-explicit baroclinic / barotropic (cubed-sphere C-D, lat-lon C-grid, MPAS, FC-Gram) with implicit-barotropic, BEBT-blended free-surface, MAXVEL clip, sponge relaxation, and shared baroclinic helpers (EOS-pressure iteration, virtual-salt freshwater flux, implicit bottom-drag factor)
+- **3D ocean dynamics**: split-explicit baroclinic / barotropic (cubed-sphere C-D, lat-lon C-grid, MPAS Voronoi, FC-Gram) with implicit-barotropic, BEBT-blended free-surface, MAXVEL clip, sponge relaxation, mass-conservation projection, and shared baroclinic helpers (EOS-pressure iteration, virtual-salt freshwater flux, implicit bottom-drag factor)
+- **Grids**: lat-lon (regular + Mercator), tripolar (NEMO eORCA1 mesh_mask loader + tensor pole-fold halo), cubed-sphere C-D, MPAS Voronoi (LSQ edge-to-cell + Thuburn kite-area TRiSK); cross-grid metric-consistency test matrix at 57/57 PASS
 - **Spectral ocean** (research path) and **SFNO learned ocean**
-- **Ocean physics**: KPP / Richardson / constant vertical mixing; harmonic, biharmonic, GM-Redi (cubed-sphere, lat-lon, MPAS variants) and backscatter lateral mixing; convective adjustment (enhanced diffusion + plume); linear / quadratic bottom drag; bulk-formula / restoring / prescribed surface forcing; shortwave penetration
+- **Ocean physics**: KPP / Richardson / constant vertical mixing; Jayne–St-Laurent (2001) abyssal tidal mixing with tracer-mixing integration; harmonic, biharmonic, GM-Redi (cubed-sphere, lat-lon, MPAS variants), Visbeck adaptive-GM, Leith viscosity, and backscatter lateral mixing; convective adjustment (enhanced diffusion + plume); linear / quadratic bottom drag with implicit factor; bulk-formula / restoring / prescribed surface forcing; shortwave penetration (Jerlov)
+- **Ice-shelf cavity coupling**: Holland & Jenkins (1999) three-equation basal-melt at the ice base, lat-lon C-grid and MPAS apply paths
+- **External forcing**: Dai–Trenberth global river runoff (point→grid projection), OMIP-2 sea-surface salinity restoring + WOA SSS climatology loader, JRA55-do RYF preload (float32-safe for 32 GB GPUs), and an external `tau` / `q_net` / `sw_down` pathway for C-grid PE
 - **Biogeochemistry**: abiotic carbon (DIC + ALK with carbonate equilibria and air-sea CO₂ flux) and an NPZD ecosystem
-- **Idealized experiments suite** (`ocean/experiments/`): rest state, Eady / Phillips / baroclinic gyres, ACC channel, Drake/Stommel, lock exchange, overflow, baroclinic & barotropic wave, geostrophic adjustment, inertia–gravity wave, global overturning, Silvestri baroclinic jet
-- **Realistic geometry**: NetCDF bathymetry (ETOPO/GEBCO/ERDDAP) with bilinear regridding, Laplacian smoothing, MEO r-cap steepness limiter, polar-cap masking, isolated-basin filling, and strait enforcement
+- **Idealized experiments suite** (`ocean/experiments/`): rest state, Eady / Phillips / baroclinic gyres, ACC channel, Drake/Stommel, lock exchange, overflow, baroclinic & barotropic wave, geostrophic adjustment, inertia–gravity wave, global overturning, Silvestri baroclinic jet, Munk, Held–Larichev, NeverWorld2-lite, ISOMIP+
+- **Realistic geometry**: NetCDF bathymetry (ETOPO/GEBCO/ERDDAP) with bilinear regridding, Laplacian smoothing, MEO r-cap steepness limiter, polar-cap masking, flood-fill isolated-basin removal, and strait enforcement
+- **Centennial spin-up library** (`ocean.spinup`): AMOC@26.5°N tracker, RPE / volume / heat / salt drift diagnostics, declarative `ConvergenceCriteria`, Bryan–Lewis (1984) distorted-physics accelerated protocol, and auto-restart discovery (`scripts/run_omip.py`)
+- **Peer-comparison fidelity harness** (`ocean/fidelity/`): Veros DINO / Eady adapters, regridder, and `docs/ocean_fidelity/legoesm_vs_veros_v2.md`
 - **Simple ocean**: slab mixed-layer and two-layer (cubed-sphere and MPAS variants)
 
 ### Land Surface
@@ -63,7 +69,8 @@ estimation, sensitivity analysis, and hybrid AI–physics modeling.
 
 ### Cryosphere
 
-- **Sea ice**: thermodynamic slab + free-drift + EVP rheology (Hunke & Dukowicz 1997), multi-category ITD (Lipscomb 2001), temperature-dependent albedo, transport
+- **Sea ice**: thermodynamic slab + free-drift + EVP / mEVP rheology (Hunke & Dukowicz 1997; Bouillon 2013 / Kimmritz 2015) on lat-lon C-grid and MPAS Voronoi with tensor pole-fold halo, multi-category ITD (Lipscomb 2001 linear remap), temperature-dependent albedo, transport
+- **Tier 1+2 extensions**: snow on ice, brine pockets, ridging, delta-Eddington shortwave, and melt ponds
 - Sea-ice test matrix (`scripts/run_sea_ice_test_matrix.py`): 15 standard tests covering thermo, dynamics, transport, ITD, integration
 
 ### Lakes
@@ -82,7 +89,7 @@ estimation, sensitivity analysis, and hybrid AI–physics modeling.
 - **Energy budget**: column moist/dry static energy, TOA / surface flux tracking, dE/dt residual monitoring
 - **Monthly means**: zonal-mean profiles, global-mean scalars, multi-year accumulation
 - **Column integrals** (CWV, CIWV, MSE) and precision-drift monitors
-- **CMIP6-style output**: CF-1.8 + CMIP6 DRS (Amon + Lmon, 27 variables) via `CFWriter`
+- **CMIP6-style output**: CF-1.8 + CMIP6 DRS via `CFWriter` / `cmor_output.py` with **Amon, Lmon, Omon, Oyr, Ofx, SImon, SIyr** tables, overturning streamfunction, OSNAP transports, dianeutral mixing, and global ocean / sea-ice scalars
 
 ### External Forcing
 
@@ -108,6 +115,9 @@ estimation, sensitivity analysis, and hybrid AI–physics modeling.
 - **`ModelDriver`** — single entry point for AMIP-style atmosphere-only simulations (`run_amip.py` is a thin CLI wrapper)
 - **`CoupledESMDriver`** — fully coupled atmosphere / ocean / sea-ice / land / lake / carbon (`scripts/run_coupled.py`) with presets: `aquaplanet`, `slab_simple`, `slab_pft`, `slab_richards`, `slab_carbon`, `full_coupled`
 - **`EarthSystemDriver`** — research orchestration for arbitrary component compositions
+- **OMIP / centennial ocean driver** (`scripts/run_omip.py`) — multi-decade JRA55-do or idealized OMIP-2 spin-up across lat-lon, tripolar (eORCA1), cubed-sphere, and MPAS Voronoi grids, with auto-restart, AMOC / OSNAP / RPE tracking, and a `jra55_3way` run set (MPAS ico5 / ico6 / tripole eORCA1)
+- **Single-column driver** (`scripts/run_scm_rce.py`) — radiative-convective equilibrium and stability sweeps with any-scheme × any-integrator swap matrix
+- **Offline land driver** (`scripts/run_lmip.py`) — single-point multilayer land 10-year soil spin-up before ERA5 coupling
 - **`PhysicsPipeline`** — radiation sub-cycling via `jax.lax.cond`, with cloud-radiation coupling and ML-physics dispatch
 - **`DiagnosticCollector`** — energy budget, monthly means, snapshot history
 
@@ -124,11 +134,13 @@ estimation, sensitivity analysis, and hybrid AI–physics modeling.
 ### Validation Infrastructure
 
 - **Test matrices**:
-  - Atmosphere: `scripts/run_atmosphere_test_matrix.py` (Williamson 2/5/6, Jablonowski–Williamson + rotated DCMIP-2008 §4-1/§4-2, Held–Suarez ± topography, DCMIP 2012 §2-0-0 rest-with-topography, DCMIP transport, RCE, …) — selectable via `--family {sw,hydro,nh,climate,tracer,dcmip2008,dcmip2012,dcmip2016,hughes,all}`
-  - Ocean: `scripts/run_ocean_test_matrix.py` (16 idealized experiments)
+  - Atmosphere: `scripts/run_atmosphere_test_matrix.py` (Williamson 2/5/6, Jablonowski–Williamson + rotated DCMIP-2008 §4-1/§4-2, Held–Suarez ± topography, DCMIP 2012 §2-0-0 rest-with-topography, DCMIP transport, RCE, …) — selectable via `--family {sw,hydro,nh,climate,tracer,dcmip2008,dcmip2012,dcmip2016,hughes,all}`. Williamson CLI emits both PlateCarree u/v and native D-grid winds for plotting (issue #274)
+  - Ocean: `scripts/run_ocean_test_matrix.py` (57/57 PASS across lat-lon, tripolar, cubed-sphere, MPAS Voronoi)
   - Sea ice: `scripts/run_sea_ice_test_matrix.py` (15 benchmark tests)
+- **CFL-aware numerical-convergence tests + plotters**: term-by-term analytic shallow-water and ocean tests
 - **Dycore validation catalog**: [`docs/dycore_validation_catalog.md`](docs/dycore_validation_catalog.md) — complete have/missing inventory against Hughes (2026) *"How to validate a 3D spherical dynamical core"* tutorial
 - **Dycore progression suite** (`tests/validation/run_dycore_progression_suite.py`)
+- **Ocean fidelity assessment harness** (`ocean/fidelity/`): Veros DINO / Eady adapters and cross-model comparison reports under `docs/ocean_fidelity/`
 - **Distributed tests** including MPI differentiability (`tests/distributed/test_mpi_differentiability.py`)
 - **Scaling benchmarks** (`scripts/run_levante_gpu_scaling.py`, `scripts/run_cpu_mpi_scaling.py`)
 
@@ -145,8 +157,17 @@ legoesm test williamson --case 2 --resolution 48 --days 5
 # Run an atmosphere AMIP simulation
 JAX_ENABLE_X64=1 python scripts/run_amip.py --grid-type cubed_sphere --resolution 16 --days 365
 
+# Single-column radiative-convective equilibrium (issue #277)
+JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu python scripts/run_scm_rce.py --days 50
+
 # Run a fully coupled simulation (slab ocean + bucket land)
 JAX_ENABLE_X64=1 python scripts/run_coupled.py --preset slab_simple --days 365
+
+# Run an OMIP-2 centennial spin-up on the tripolar eORCA1 grid
+JAX_ENABLE_X64=1 python scripts/run_omip.py --grid tripole --years 30
+
+# Single-point multi-year multilayer land spin-up
+JAX_ENABLE_X64=1 python scripts/run_lmip.py --lat 45.5 --lon -93.1 --days 3650
 
 # Run the AMIP CMIP6 deck (transient GHG / ozone / aerosol / solar / volcanic)
 JAX_ENABLE_X64=1 python scripts/run_amip_cmip6_deck.py
@@ -206,6 +227,17 @@ Unsupported counts (4, 5, 7, 8, 12, 36, 48, …) raise `ValueError` with the nea
 
 **Deprecated APIs**: `partition_state()` (zero-masked global arrays) emits `DeprecationWarning`. Use `ParallelRuntime.scatter()` / `.gather()` instead.
 
+### Performance & Compile-Cache
+
+- **Persistent JAX JIT cache** (issue #273) is enabled by default; the
+  first segment compile is cached to disk and reused across runs.
+  Override with `LEGOESM_JAX_CACHE_DIR=/path/to/cache`, or disable with
+  `LEGOESM_JAX_CACHE_DISABLE=1`.
+- **SPMD halo backend** (issue #275) is activated in the AMIP
+  production profile for multi-device runs; single-process runs are
+  unchanged.
+- AMIP throughput target tracking continues under issue #273.
+
 ### Apple Silicon (Metal/MPS backend)
 
 The **spectral solver** (Gaussian grid + spherical harmonic transforms) requires
@@ -228,16 +260,20 @@ python -c "import jax; print(jax.default_backend())"
 
 ## Documentation
 
+- [docs/getting_started.md](docs/getting_started.md) — **Newbie onboarding guide** (start here)
+- [CHANGELOG.md](CHANGELOG.md) — Release notes / what changed
 - [SPECIFICATION.md](SPECIFICATION.md) — Full technical specification
 - [docs/implementation_summary.md](docs/implementation_summary.md) — Comprehensive summary of implementations and tests
 - [docs/cmip_readiness.md](docs/cmip_readiness.md) — CMIP production readiness checklist
 - [docs/amip.md](docs/amip.md) — AMIP experiment guide
+- [docs/scm.md](docs/scm.md) — Single-column model (SCM) guide
 - [docs/ml_physics_parameterization.md](docs/ml_physics_parameterization.md) — Joint ML physics workflow and canonical moist run
 - [docs/slab_s2s_documentation.md](docs/slab_s2s_documentation.md) — NeuralGCM/SFNO slab-coupled S2S workflow
 - [docs/REAL_HARDWARE_SCALING.md](docs/REAL_HARDWARE_SCALING.md) — Multi-GPU/MPI scaling guide
 - [docs/LATLON_CGRID_MIGRATION.md](docs/LATLON_CGRID_MIGRATION.md) — Lat-lon C-grid migration notes
 - [docs/cubed_sphere_edge_artifacts.md](docs/cubed_sphere_edge_artifacts.md) — FV3-faithful cubed-sphere notes
 - [docs/ocean_experiments_reference.md](docs/ocean_experiments_reference.md) — Ocean idealized-experiment reference
+- [docs/ocean_fidelity/legoesm_vs_veros_v2.md](docs/ocean_fidelity/legoesm_vs_veros_v2.md) — legoESM ↔ Veros peer-comparison report
 
 ## Acknowledgments
 
