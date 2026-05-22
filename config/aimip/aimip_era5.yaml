@@ -126,21 +126,14 @@ aimip_radiation: "rrtmgp"  # gray | rrtmgp.  RRTMGP is required for AIMIP
                            # trade ~2-3x forward compute for the
                            # activation-storage relief that lets a
                            # 48-step daily rollout fit in 24 GiB.
-aimip_rad_update_interval: 24   # v11: 1 RRTMGP call per 4 simulated
-                                # hours (24 steps × 600 s = 4 h).  Was
-                                # 144 (1 call/day) which froze the
-                                # diurnal cycle since the rad solve
-                                # only ran at one moment of the
-                                # forecast.  v11 also flips
-                                # ``RadiationConfig.diurnal_cycle=True``
-                                # and threads ``sim_time_seconds``
-                                # through the scan so each rad call
-                                # sees the correct hour-of-day
-                                # cos(SZA).  Memory roughly 6x of the
-                                # interval=144 setting (6 rad calls
-                                # per backward, each ~0.5 GiB at T63
-                                # after the per-g-point checkpoint
-                                # refactor) -- fits 24 GiB GPU.
+aimip_rad_update_interval: 36   # v12: 1 RRTMGP call per 6 sim hours
+                                # (36 steps × 600 s = 21600 s = 6 h).
+                                # Matches the 6-hour rollout +
+                                # diurnal-cycle setup below: each
+                                # training pair sees rad once at its
+                                # IC time-of-day (00/06/12/18 UTC).
+                                # Across pairs the optimizer sees all
+                                # four diurnal phases.
 
 # ----- Spatial surface parameters (over land) ----------------------
 # When true, the AIMIP classical variant exposes seven surface and
@@ -182,11 +175,18 @@ aimip_spatial_lr_scale: 5.0
 # Default 1 preserves single-day forecast-skill supervision; 3-5
 # propagates the bias signal more strongly and disambiguates physics
 # knobs that saturate at day-1.  Eval uses the same rollout length.
-aimip_rollout_days: 1   # v10: back to 1 day after v8/v9 saw the
-                        # 3-day rollout destabilise classical (T_bias
-                        # +1.07 -> +4.40 K) and over-stress SFNO.  At
-                        # T127 finer-scale dynamics give the gradient
-                        # more signal even at 1-day horizon.
+aimip_rollout_days: 1   # legacy daily horizon.  When
+                        # ``aimip_rollout_hours`` is set below, that
+                        # takes precedence.
+aimip_rollout_hours: 6  # v12: 6-hour AIMIP / NeuralGCM training
+                        # convention.  ERA5 cadence is 6 h, so each
+                        # IC/target pair is consecutive snapshots.
+                        # ~4 IC/target pairs per window-day instead
+                        # of 1, with rollouts of 36 dycore steps
+                        # (vs 144 for daily).  Net training cost
+                        # roughly unchanged; the diversity of IC
+                        # time-of-day exposes the diurnal cycle to
+                        # the optimizer in the same epoch budget.
 
 # ----- Loss (LossConfig fields from training/losses.py) ------------
 # spectral_weight > 0 adds a spectral L^2 penalty on the predicted

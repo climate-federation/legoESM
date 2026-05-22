@@ -118,12 +118,16 @@ class NeuralGCMSpectralConfig(NamedTuple):
     n_train_days: int = 365      # Number of daily IC/target pairs
     start_year: int = 2015       # ERA5 year to use
 
-    # Multi-day rollout supervision.  Each IC/target pair is integrated
-    # for ``rollout_days * n_steps_per_day`` dycore steps and the loss
-    # compares the final state to the target snapshot
-    # ``rollout_days`` days after the IC.  Default 1 preserves the
-    # legacy single-day forecast-skill loss.
+    # Rollout supervision horizon.  Legacy semantics: each IC/target
+    # pair is integrated for ``rollout_days * 24`` simulated hours.
+    # v12 adds ``rollout_hours`` for sub-daily horizons (AIMIP /
+    # NeuralGCM convention is 6-hour pairs).  When ``rollout_hours``
+    # is set explicitly it takes precedence; otherwise the loader
+    # falls back to ``rollout_days * 24``.  The ERA5 snapshots are
+    # loaded at the ``TrainingERA5Config.dt_hours`` cadence (6 h by
+    # default), so ``rollout_hours`` must be a multiple of 6.
     rollout_days: int = 1
+    rollout_hours: int = 0   # 0 -> use rollout_days * 24
 
     # Per-group learning-rate multiplier for AIMIP spatial-surface
     # coefficients.  When the trainable model carries a
@@ -890,47 +894,70 @@ def load_training_data(
         raise ValueError(
             f"config.rollout_days must be >= 1, got {rollout_days!r}."
         )
+    # v12: ``rollout_hours`` lets the supervision horizon drop below
+    # one day (AIMIP / NeuralGCM convention is 6 h).  Fallback to the
+    # legacy daily horizon when not set.  ERA5 cadence is fixed at
+    # ``era5_config.dt_hours`` (6 h by default); ``rollout_hours``
+    # must be a multiple of that, and so must the per-IC stride
+    # ``ic_stride_units`` (which advances the IC by one ERA5 snapshot
+    # = 6 h between consecutive pairs).
+    rollout_hours_cfg = int(getattr(config, "rollout_hours", 0) or 0)
+    if rollout_hours_cfg > 0:
+        rollout_hours = rollout_hours_cfg
+    else:
+        rollout_hours = rollout_days * 24
+    era5_dt_hours = int(era5_config.dt_hours)
+    if rollout_hours % era5_dt_hours != 0:
+        raise ValueError(
+            f"rollout_hours={rollout_hours} must be a multiple of "
+            f"era5_dt_hours={era5_dt_hours}."
+        )
+    rollout_stride = rollout_hours // era5_dt_hours          # snapshot units between IC and target
+    snapshots_per_day = 24 // era5_dt_hours                  # 4 at 6h cadence
+    ic_stride_units = 1                                      # one snapshot between consecutive ICs
 
     if windows:
         # AIMIP-style multi-window contiguous sampling.  Each window
-        # contributes its own (n_days + rollout_days) snapshots; pairs
-        # are only formed within a window so no cross-window leakage
-        # occurs.  Setting ``rollout_days > 1`` requires each window to
-        # contain at least ``rollout_days + 1`` days so we can form at
-        # least one (IC, target_at_d+rollout) pair.
+        # spec is ``(year, day_offset, n_days)``.  v12: with sub-daily
+        # rollouts we still describe windows in DAYS at the YAML
+        # level, but expand each window to one IC per ERA5 snapshot
+        # (4 per day at 6 h cadence).  Pairs are formed inside the
+        # window only -- no cross-window leakage.
         window_specs: list[tuple[int, int, int]] = [
             (int(y), int(off), int(n)) for (y, off, n) in windows
         ]
         time_indices: list[int] = []
-        window_offsets: list[tuple[int, int]] = []  # (start_in_time_indices, n_days)
+        window_offsets: list[tuple[int, int]] = []  # (start_in_time_indices, n_ics)
         for (year, day_offset, n_days_w) in window_specs:
             if n_days_w < 1:
                 raise ValueError(
                     f"Window {(year, day_offset, n_days_w)} has n_days < 1."
                 )
-            start_idx_w = _year_to_idx(year) + int(day_offset) * 4
+            start_idx_w = _year_to_idx(year) + int(day_offset) * snapshots_per_day
             base = len(time_indices)
-            # Load n_days_w + rollout_days snapshots so we can pair
-            # (carry[d], carry[d + rollout_days]) for d in [0, n_days_w).
-            n_snapshots_w = n_days_w + rollout_days
+            n_ics_w = n_days_w * snapshots_per_day
+            n_snapshots_w = n_ics_w + rollout_stride
             time_indices.extend(
-                start_idx_w + d * 4 for d in range(n_snapshots_w)
+                start_idx_w + s for s in range(n_snapshots_w)
             )
-            window_offsets.append((base, n_days_w))
-        n_days = sum(w[2] for w in window_specs)
+            window_offsets.append((base, n_ics_w))
+        n_pairs = sum(w[1] for w in window_offsets)
         logger.info(
-            f"Loading {n_days} daily ERA5 pairs (rollout={rollout_days}d) "
+            f"Loading {n_pairs} ERA5 pairs "
+            f"(rollout={rollout_hours}h, era5 cadence={era5_dt_hours}h) "
             f"across {len(window_specs)} windows: "
             + ", ".join(f"{y}@day{o}+{n}" for (y, o, n) in window_specs)
             + f" ({len(time_indices)} snapshots)..."
         )
     else:
         n_days = config.n_train_days
+        n_ics = n_days * snapshots_per_day
         start_idx = _year_to_idx(config.start_year)
-        time_indices = [start_idx + d * 4 for d in range(n_days + rollout_days)]
-        window_offsets = [(0, n_days)]
+        time_indices = [start_idx + s for s in range(n_ics + rollout_stride)]
+        window_offsets = [(0, n_ics)]
         logger.info(
-            f"Loading {n_days} daily ERA5 pairs (rollout={rollout_days}d) "
+            f"Loading {n_ics} ERA5 pairs "
+            f"(rollout={rollout_hours}h, era5 cadence={era5_dt_hours}h) "
             f"from year {config.start_year} (start_idx={start_idx}; "
             f"opening Zarr store once, reading {len(time_indices)} snapshots)..."
         )
@@ -1011,18 +1038,21 @@ def load_training_data(
     logger.info(f"Loaded {len(time_indices)} snapshots ({_time.time()-t0:.0f}s)")
 
     # Build IC/target pairs (per-window so no cross-window leakage).
-    # Target is ``carry[base + d + rollout_days]`` so the loss
-    # supervises the rollout end-state ``rollout_days`` days ahead.
+    # Target is ``carry[base + d + rollout_stride]`` where stride is
+    # in ERA5-snapshot units (1 = era5_dt_hours).  The loss
+    # supervises the rollout end-state ``rollout_hours`` ahead.
     ic_states = []
     target_carries = []
+    n_total_pairs = 0
     for (base, n_w) in window_offsets:
         for d in range(n_w):
             ic_states.append(carry_to_spectral_state(carries[base + d], grid))
-            target_carries.append(carries[base + d + rollout_days])
+            target_carries.append(carries[base + d + rollout_stride])
+            n_total_pairs += 1
 
     logger.info(
-        f"Built {n_days} IC/target pairs (rollout={rollout_days}d) "
-        f"across {len(window_offsets)} window(s)"
+        f"Built {n_total_pairs} IC/target pairs "
+        f"(rollout={rollout_hours}h) across {len(window_offsets)} window(s)"
     )
     return ic_states, target_carries
 
@@ -1080,7 +1110,9 @@ def _train_spectral_loop(
 
     n_steps_per_day = int(86400 / config.dt)
     rollout_days = int(getattr(config, "rollout_days", 1) or 1)
-    n_steps_rollout = n_steps_per_day * rollout_days
+    rollout_hours_cfg = int(getattr(config, "rollout_hours", 0) or 0)
+    rollout_hours = rollout_hours_cfg if rollout_hours_cfg > 0 else rollout_days * 24
+    n_steps_rollout = int(round(rollout_hours * 3600.0 / config.dt))
     total_steps = max(1, config.n_epochs * max(1, len(ic_states)))
     base_optimizer = create_optimizer(TrainingConfig(
         lr=config.lr,
@@ -1139,7 +1171,7 @@ def _train_spectral_loop(
         f"Training: {config.n_epochs} epochs, "
         f"{len(ic_states)} samples/epoch, "
         f"{n_steps_per_day} dycore steps/day (dt={config.dt}s), "
-        f"rollout_days={rollout_days} -> {n_steps_rollout} steps/sample"
+        f"rollout_hours={rollout_hours} -> {n_steps_rollout} steps/sample"
     )
 
     # Build the JIT-compiled train step ONCE outside the per-sample

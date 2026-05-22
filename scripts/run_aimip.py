@@ -147,6 +147,7 @@ def _build_spectral_config(cfg: dict[str, Any]):
             for w in (cfg.get("train_windows") or ())
         ) or None,
         rollout_days=int(cfg.get("aimip_rollout_days", 1)),
+        rollout_hours=int(cfg.get("aimip_rollout_hours", 0)),
         spatial_lr_scale=float(cfg.get("aimip_spatial_lr_scale", 1.0)),
         rad_update_interval=int(cfg.get("aimip_rad_update_interval", 1)),
         loss_config=loss_config,
@@ -345,7 +346,13 @@ def _evaluate_variant(
     sigma_full = jnp.asarray(sigma.sigma_full)
     n_steps_per_day = int(86400 / spec_cfg.dt)
     eval_rollout_days = int(getattr(spec_cfg, "rollout_days", 1) or 1)
-    n_steps_eval = n_steps_per_day * eval_rollout_days
+    eval_rollout_hours_cfg = int(getattr(spec_cfg, "rollout_hours", 0) or 0)
+    eval_rollout_hours = (
+        eval_rollout_hours_cfg
+        if eval_rollout_hours_cfg > 0
+        else eval_rollout_days * 24
+    )
+    n_steps_eval = int(round(eval_rollout_hours * 3600.0 / spec_cfg.dt))
     eval_rad_interval = int(cfg.get("aimip_rad_update_interval", 1))
 
     # Build the per-variant physics_fn (model is frozen for eval).
