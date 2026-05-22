@@ -813,21 +813,36 @@ class LatLonCGridOceanModel:
         # The implicit-CN solver already conserves this internally so
         # the correction is round-off; the explicit substepping path and
         # any partial-cell-induced bias get fixed here.
+        #
+        # All area-weighted sums are computed in ``ocean_diagnostics``
+        # accumulation precision (f64 even when state runs at f32) so
+        # the ``target_mass - actual_mass`` subtraction does not lose
+        # the entire signal to catastrophic cancellation.
         if self.config.fix_eta_drift:
+            from legoesm.ocean.conservation import _ocean_global_sum
+            from legoesm.core.precision import cast as _cast
+
+            _M = "ocean_diagnostics"
             mask_eta = state.land_mask.data
             area_eta = self.grid.area
             eta_old_d = state.eta.data
             eta_new_d = state_new.eta.data
-            target_local = jnp.sum(eta_old_d * area_eta * mask_eta)
+
+            mask_acc = _cast(mask_eta, _M, "accumulate")
+            area_acc = _cast(area_eta, _M, "accumulate")
+            eta_old_acc = _cast(eta_old_d, _M, "accumulate")
+            eta_new_acc = _cast(eta_new_d, _M, "accumulate")
+            wa = area_acc * mask_acc
+
+            target_local = jnp.sum(eta_old_acc * wa)
             if F_slow_eta is not None:
-                target_local = target_local + dt * jnp.sum(
-                    F_slow_eta * area_eta * mask_eta
-                )
-            actual_local = jnp.sum(eta_new_d * area_eta * mask_eta)
-            ocean_area_local = jnp.sum(area_eta * mask_eta)
+                F_acc = _cast(F_slow_eta, _M, "accumulate")
+                target_local = target_local + dt * jnp.sum(F_acc * wa)
+            actual_local = jnp.sum(eta_new_acc * wa)
+            ocean_area_local = jnp.sum(wa)
             # MPI-aware reduction: returns global totals on the
-            # distributed path, identity on a single rank.
-            from legoesm.ocean.conservation import _ocean_global_sum
+            # distributed path, identity on a single rank.  Stack so
+            # the reduction is one allreduce call.
             target_mass, actual_mass, ocean_area = _ocean_global_sum(
                 jnp.stack([target_local, actual_local, ocean_area_local])
             )

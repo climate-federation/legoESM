@@ -367,6 +367,64 @@ class TestCGridOceanModel:
             f"Substepping volume leak: mean eta drift {mean_drift} m"
         )
 
+    def test_freshwater_target_volume(self, grid, z_coord, state):
+        """With non-zero freshwater the projection target is
+        ``vol(eta_old) + dt * sum(F_eta * area)``, not just
+        ``vol(eta_old)``.  Drive a precipitation excess and verify the
+        post-step volume matches that target."""
+        from legoesm.ocean.freshwater import (
+            zero_freshwater, freshwater_eta_tendency,
+        )
+
+        # Lat-lon C-grid uses 2-D freshwater forcing shape (n_lat, n_lon).
+        z2 = jnp.zeros((grid.n_lat, grid.n_lon))
+        precip = jnp.full_like(z2, 1.0e-4)  # ~ 8 mm/day
+        from legoesm.ocean.freshwater import FreshwaterForcing
+        fw = FreshwaterForcing(
+            precip=precip, evap=z2, runoff=z2, ice_fw=z2, restoring=z2,
+        )
+        cfg = LatLonCGridOceanConfig(freshwater_closure="virtual_salt_flux")
+        model = LatLonCGridOceanModel(grid, z_coord, cfg)
+        area = grid.area
+        mask = state.land_mask.data
+        vol0 = float(jnp.sum(state.eta.data * area * mask))
+        F_eta = freshwater_eta_tendency(fw, cfg.rho_0) * mask
+        expected_change = float(jnp.sum(F_eta * area * mask)) * 3600.0
+        s = model.step(state, 3600.0, freshwater=fw)
+        vol_final = float(jnp.sum(s.eta.data * area * mask))
+        observed_change = vol_final - vol0
+        ocean_area = float(jnp.sum(area * mask))
+        # The relative match must be tight; the storage-precision cast
+        # at the end of step bounds the absolute error to ~1e-9 m * area.
+        rel_err = abs(observed_change - expected_change) / max(
+            abs(expected_change), 1.0
+        )
+        assert rel_err < 1.0e-4, (
+            f"Freshwater volume target mismatch: rel_err={rel_err} "
+            f"(expected {expected_change}, observed {observed_change})"
+        )
+
+    def test_implicit_cn_no_op_when_no_leak(self, grid, z_coord, state):
+        """When the implicit-CN solver already projects volume
+        internally, our end-of-step projection must be a near-no-op
+        — verify that toggling ``fix_eta_drift`` on vs off gives
+        bit-close eta fields on a single step where no real leak
+        exists."""
+        cfg_on = LatLonCGridOceanConfig(
+            barotropic_solver="implicit_cn", fix_eta_drift=True,
+        )
+        cfg_off = LatLonCGridOceanConfig(
+            barotropic_solver="implicit_cn", fix_eta_drift=False,
+        )
+        s_on = LatLonCGridOceanModel(grid, z_coord, cfg_on).step(state, 3600.0)
+        s_off = LatLonCGridOceanModel(grid, z_coord, cfg_off).step(state, 3600.0)
+        diff = float(jnp.max(jnp.abs(s_on.eta.data - s_off.eta.data)))
+        # Implicit-CN already conserves volume to ~1e-10 m, so our
+        # extra projection should not visibly perturb eta.
+        assert diff < 1.0e-7, (
+            f"fix_eta_drift perturbed implicit-CN eta by {diff} m"
+        )
+
     def test_eta_projection_consistent_with_layer_thickness(
         self, grid, z_coord, state,
     ):
