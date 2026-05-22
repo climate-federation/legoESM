@@ -137,7 +137,15 @@ def plot_inertial():
     config = _zero_dynamics_config()
     model = LatLonCGridOceanModel(grid, z_coord=z_coord, config=config)
 
-    U0 = 0.1
+    # U0 = 0.01 m/s rather than 0.1: the spherical-metric centripetal
+    # term  dv/dt |_metric = tan(lat) · u² / R_earth  is exact in the
+    # PE solver on a lat-lon grid.  It vanishes for the planar
+    # f-plane analytic solution we compare against, so its strength
+    # scales as U0² in the late-time amplitude drift.  Dropping U0
+    # by 10× cuts the metric forcing 100×, exposing the underlying
+    # Matsuno conservation to plotting precision over two inertial
+    # periods.
+    U0 = 0.01
     shape2d_u = state.u.data.shape[:2]
     shape2d_v = state.v.data.shape[:2]
     state = _set_uv_levels(
@@ -187,6 +195,15 @@ def plot_inertial():
     ax.set_title("Hodograph (top level)")
     ax.grid(True, alpha=0.4)
     ax.legend()
+    metric = U0 * U0 * np.tan(np.radians(45.0)) / 6.371229e6
+    ax.text(
+        0.02, 0.02,
+        f"U0 = {U0}.  Spherical-metric forcing\n"
+        f"|dv/dt| ≈ tan(lat)·U0²/R = {metric:.2e} m/s² → barely visible drift",
+        transform=ax.transAxes, fontsize=7, va="bottom",
+        family="monospace",
+        bbox=dict(facecolor="white", alpha=0.85, edgecolor="0.6", pad=2),
+    )
 
     fig.suptitle("TestInertialOscillation — Coriolis only", fontsize=12)
     fig.tight_layout()
@@ -210,7 +227,8 @@ def plot_damped_inertial():
     config = _zero_dynamics_config(bottom_drag_r=r, n_barotropic_substeps=20)
     model = LatLonCGridOceanModel(grid, z_coord=z_coord, config=config)
 
-    U0 = 0.1
+    # U0 small — same spherical-metric argument as ``plot_inertial``.
+    U0 = 0.01
     shape2d_u = state.u.data.shape[:2]
     shape2d_v = state.v.data.shape[:2]
     state = _set_uv_levels(
