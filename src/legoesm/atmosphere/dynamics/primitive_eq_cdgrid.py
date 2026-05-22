@@ -200,6 +200,19 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # FV3_3D iter 23: FV3-faithful vector cube-vertex fill (sw_core.F90:1762). NO-OP at nord=1.
     corner_div_damp_dt_proxy: float = 200.0
         # FV3_3D iter 188: dt fallback for adaptive cap when dt_actual not passed. PE typical 50-200s.
+    sponge_implicit: bool = False
+        # Issue-#273 throughput work: when True, skip the explicit
+        # ``-α u`` Rayleigh-sponge tendency contribution inside
+        # ``fv3_hydrostatic_tendencies`` and apply the sponge as an
+        # operator-split multiplicative damping
+        # ``u ← u · exp(-α dt)`` after the RK3 integrator inside
+        # ``CDGridPrimitiveEquationModel._step_fv3``.  Unconditionally
+        # stable for any ``α · dt > 0`` — takes the sponge out of
+        # the explicit-CFL budget so future work on issue #273 can
+        # push ``dt`` upward without re-tuning ``sponge_tau_sec``.
+        # Default ``False`` keeps the legacy tendency-form path
+        # bit-exact.  Field appended to the end of the NamedTuple
+        # to preserve positional construction for legacy call sites.
 
 
 def validate_corner_div_damp_nord(nord: int) -> None:
@@ -999,7 +1012,34 @@ def fv3_hydrostatic_tendencies(
         dp_s_dt_data = dp_s_dt_data + diff_ps.data
 
     # --- 13. Upper-atmosphere Rayleigh sponge (D-grid) ---
-    if config.sponge_tau_sec > 0 and config.sponge_sigma > 0:
+    #
+    # Two paths:
+    #
+    # * ``config.sponge_implicit = False`` (default) — legacy
+    #   explicit-tendency form ``du/dt = -α u``.  Conditionally
+    #   stable: forward Euler diverges at ``α · dt > 2`` and
+    #   SSP-RK3 around ``α · dt ≳ 2.5``.  At production parameters
+    #   (τ = 3600 s, dt = 150 s, peak α ≈ 2.8e-4 s⁻¹) the margin
+    #   is comfortable, so this path stays bit-exact for legacy
+    #   configs and direct callers of ``fv3_hydrostatic_tendencies``.
+    #
+    # * ``config.sponge_implicit = True`` — operator-split path.
+    #   The sponge contribution is *omitted* from the tendency and
+    #   instead applied once per macro step as the analytic
+    #   multiplicative damping ``u ← u · exp(-α dt)`` inside
+    #   ``CDGridPrimitiveEquationModel._step_fv3``.  Unconditionally
+    #   stable for any ``α · dt > 0`` — takes the sponge out of
+    #   the explicit-CFL budget so issue-#273 throughput work can
+    #   push ``dt`` upward without re-tuning ``sponge_tau_sec``.
+    #
+    # The naive ``expm1(-α dt) / dt · u`` "effective-tendency"
+    # trick is intentionally *not* used: SSP-RK3 re-evaluates the
+    # tendency on each stage's state, so the multi-stage update
+    # saturates at ``u_new ≈ u_old / 3`` for ``α dt → ∞`` instead
+    # of damping to zero (Codex review iter-1 catch).
+    if (config.sponge_tau_sec > 0
+            and config.sponge_sigma > 0
+            and not config.sponge_implicit):
         sigma_full = sigma_coord.sigma_full
         sponge_frac = jnp.clip(
             (config.sponge_sigma - sigma_full) / config.sponge_sigma, 0.0, 1.0
@@ -1176,6 +1216,40 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         state_new = dispatch_integrator(
             state, tendency_fn, dt, self.config.time_integrator,
         )
+
+        # Operator-split upper-atmosphere Rayleigh sponge — opt-in
+        # path (``config.sponge_implicit = True``).  Replaces the
+        # explicit ``-α u`` tendency contribution that is skipped
+        # inside ``fv3_hydrostatic_tendencies`` when this flag is
+        # set, with the analytic multiplicative damping
+        # ``u_new = u_old · exp(−sponge_rate · dt)``.  Exact integrator
+        # of the linear ODE ``du/dt = −α u``, unconditionally stable
+        # for any ``α · dt > 0`` — takes the sponge out of the
+        # explicit-CFL budget so issue-#273 throughput work can
+        # push ``dt`` upward without re-tuning ``sponge_tau_sec``.
+        #
+        # Default ``sponge_implicit = False`` keeps the legacy
+        # tendency-form path bit-exact (see the matching branch in
+        # ``fv3_hydrostatic_tendencies``).
+        if (self.config.sponge_tau_sec > 0
+                and self.config.sponge_sigma > 0
+                and self.config.sponge_implicit):
+            sigma_full = self.sigma_coord.sigma_full
+            sponge_frac = jnp.clip(
+                (self.config.sponge_sigma - sigma_full)
+                / self.config.sponge_sigma,
+                0.0, 1.0,
+            )
+            sponge_rate = sponge_frac**2 / self.config.sponge_tau_sec
+            damp_factor = jnp.exp(-sponge_rate * dt)
+            state_new = state_new._replace(
+                u_d=state_new.u_d.replace(
+                    data=state_new.u_d.data * damp_factor,
+                ),
+                v_d=state_new.v_d.replace(
+                    data=state_new.v_d.data * damp_factor,
+                ),
+            )
 
         # Synchronize D-grid boundary corners across cubed-sphere faces
         state_new = self._sync_dgrid_boundary(state_new)
