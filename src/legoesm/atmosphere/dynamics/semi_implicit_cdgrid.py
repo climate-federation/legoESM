@@ -68,6 +68,7 @@ __all__ = (
     "cdgrid_scalar_laplacian",
     "adjoint_residual_norm",
     "make_helmholtz_op",
+    "richardson_helmholtz_solve",
 )
 
 
@@ -162,6 +163,190 @@ def adjoint_residual_norm(
         denom = max(abs(xLy), abs(yLx), 1.0e-30)
         worst = max(worst, abs(xLy - yLx) / denom)
     return worst
+
+
+def _power_iteration_spectral_radius(
+    op: Callable[[jnp.ndarray], jnp.ndarray],
+    shape,
+    n_iter: int = 20,
+    seed: int = 0,
+) -> jnp.ndarray:
+    """Estimate spectral radius of ``op`` via power iteration.
+
+    Returns ``|λ_max(op)|`` as a traced scalar so the result can be
+    used inside JIT to size the Richardson damping factor without
+    triggering a recompile per ``coeff``.
+    """
+    # Deterministic seed via host random; the iteration itself is
+    # traced so the result is JIT-friendly.
+    rng = np.random.default_rng(seed)
+    v = jnp.asarray(rng.standard_normal(shape))
+    v = v / (jnp.linalg.norm(v.ravel()) + 1.0e-30)
+
+    def _step(carry, _):
+        u = op(carry)
+        norm = jnp.linalg.norm(u.ravel()) + 1.0e-30
+        return u / norm, None
+
+    v, _ = jax.lax.scan(_step, v, None, length=n_iter)
+    return jnp.linalg.norm(op(v).ravel())
+
+
+def richardson_helmholtz_solve(
+    p_explicit,
+    coeff,
+    grid,
+    *,
+    n_iter_max: int = 60,
+    tol: float = 1.0e-6,
+    tau: float | None = None,
+    return_residual: bool = False,
+):
+    """Solve ``(I − coeff · ∇²) p_new = p_explicit`` via damped
+    Richardson iteration with residual-monitored early stop.
+
+    Phase 2 first-cut backend for the issue #273 Hoskins–Simmons
+    FV3 D-grid port.  Bypasses both blockers identified in Phase 1:
+
+    1. **No SPD requirement** — the ``cdgrid_scalar_laplacian`` is
+       non-symmetric (~13 % area-weighted asymmetry), so
+       ``jax.scipy.sparse.linalg.cg`` is undefined.  Richardson is
+       a fixed-point method.
+    2. **No transpose-solve** — Richardson uses only forward
+       matrix-vector products, so the
+       ``NotImplementedError: scatter transpose is only implemented
+       where unique_indices=True`` blocker inside
+       ``lax.custom_linear_solve`` does not apply.
+
+    Iteration:
+
+      ``p^{k+1} = p^k + τ · (p_explicit − (I − coeff · ∇²) p^k)``
+
+    .. warning::
+       The cubed-sphere ``laplacian_compact`` is *non-normal* (the
+       halo interpolation breaks the FV adjoint identity at cube
+       panel seams).  For non-normal ``A``, the eigenvalue bound
+       ``|λ_max|`` is not sufficient to guarantee
+       ``ρ(I − τ A) < 1`` — pseudospectral / transient growth can
+       still inflate the iteration norm.  We therefore (a) use a
+       conservative damping ``τ ≈ 1 / (1 + 1.5 · coeff · |λ_max|)``
+       (safety factor over the optimal-spectral choice
+       ``2 / (2 + coeff · |λ_max|)``), and (b) monitor the actual
+       residual ``‖p_explicit − A p^k‖`` inside a
+       ``lax.while_loop`` that stops as soon as the configured
+       ``tol`` is reached or ``n_iter_max`` is hit.  Callers
+       requesting ``return_residual=True`` get the final relative
+       residual back and can decide whether to skip the damping
+       step (the policy used by ``_step_fv3``), retry with a
+       smaller coefficient, or use any other stable fallback —
+       falling back to the *legacy explicit forward-Euler* update
+       at the same ``coeff`` is NOT safe, since that path is
+       unstable exactly in the regime where Richardson fails.
+
+    Parameters
+    ----------
+    p_explicit : jax.Array
+        Right-hand side ``b = p_explicit``.  Used as warm start.
+    coeff : float | jax.Array
+        ``α · dt`` in the diffusion form.  May be a traced JAX
+        scalar so ``α · dt`` can change between JIT'd calls
+        without re-tracing.
+    grid : CubedSphereGrid
+        Used by ``laplacian_compact``.
+    n_iter_max : int, keyword-only
+        Hard cap on Richardson iterations.  Default 60.
+    tol : float, keyword-only
+        Stop early when ``‖b − A p^k‖ / ‖b‖`` falls below this
+        value.  Default 1e-6 (production-grade implicit-solve
+        tolerance).
+    tau : float, keyword-only
+        Override the auto-computed damping.  When ``None``
+        (default), the damping is
+        ``τ = 1 / (1 + 1.5 · coeff · |λ_max(∇²)|)``
+        with ``|λ_max(∇²)|`` estimated via 20-step power
+        iteration on ``laplacian_compact``.  The ``1.5`` factor
+        is a conservative safety margin over the optimal spectral
+        choice ``2 / (2 + coeff · |λ_max|)`` to absorb the non-
+        normal pseudospectral inflation.
+    return_residual : bool, keyword-only
+        When True, returns ``(p_new, rel_res)`` instead of just
+        ``p_new``.  ``rel_res`` is the final relative L2 residual,
+        a traced scalar suitable for JIT-safe downstream branching.
+
+    Returns
+    -------
+    p_new : jax.Array
+        Approximate solution.
+    rel_res : jax.Array, optional
+        Final relative residual ``‖b − A p_new‖ / ‖b‖``.  Returned
+        only when ``return_residual=True``.
+
+    Notes
+    -----
+    Phase-3 upgrade path: replace this iteration with
+    ``jax.scipy.sparse.linalg.cg`` once
+    ``cdgrid_scalar_laplacian`` is made FV-adjoint-symmetric (the
+    canary regression test in
+    ``tests/atmosphere/hydrostatic/unit/test_semi_implicit_cdgrid.py``
+    will fail and force the upgrade to be visible in CI).
+    """
+    from legoesm.core.operators import laplacian_compact
+
+    def L(p):
+        return laplacian_compact(p, grid)
+
+    if tau is None:
+        # Conservative safety factor over the optimal spectral
+        # choice ``τ_opt = 2 / (2 + coeff · |λ_max(L)|)`` for the
+        # diffusion-dominated regime — absorbs pseudospectral
+        # inflation from the operator's non-normality without
+        # relying on a Hermitian-part bound (which would need the
+        # transpose-solve infrastructure that is blocked on this
+        # operator; see module docstring).
+        lam_max = _power_iteration_spectral_radius(L, p_explicit.shape)
+        _tau = 1.0 / (1.0 + 1.5 * coeff * lam_max)
+    else:
+        _tau = jnp.asarray(tau, dtype=p_explicit.dtype)
+
+    _rhs_norm = jnp.maximum(
+        jnp.linalg.norm(p_explicit.ravel()), 1.0e-30,
+    )
+
+    def _residual_norm(p):
+        return jnp.linalg.norm(
+            (p_explicit - (p - coeff * L(p))).ravel(),
+        )
+
+    # Initial state: warm start at p_explicit, residual ‖b − A b‖.
+    init_residual = _residual_norm(p_explicit)
+    init_state = (
+        p_explicit,                  # p
+        init_residual,               # absolute residual
+        jnp.int32(0),                # iteration count
+    )
+
+    def _cond(state):
+        _p, abs_res, k = state
+        return jnp.logical_and(
+            abs_res > tol * _rhs_norm,
+            k < n_iter_max,
+        )
+
+    def _body(state):
+        p, _abs_res, k = state
+        Ap = p - coeff * L(p)
+        residual_field = p_explicit - Ap
+        p_new = p + _tau * residual_field
+        abs_res_new = _residual_norm(p_new)
+        return (p_new, abs_res_new, k + 1)
+
+    p_final, abs_res_final, _k_final = jax.lax.while_loop(
+        _cond, _body, init_state,
+    )
+
+    if return_residual:
+        return p_final, abs_res_final / _rhs_norm
+    return p_final
 
 
 def make_helmholtz_op(

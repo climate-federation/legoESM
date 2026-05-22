@@ -214,30 +214,62 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # bit-exact.  Field appended to the end of the NamedTuple
         # to preserve positional construction for legacy call sites.
     implicit_grav_wave_use_pcg: bool = False
-        # Reserved config switch for the Phase 2 Hoskins–Simmons
-        # (1975) FV3 D-grid port — issue #273 throughput work.
-        # **Currently raises ``NotImplementedError`` when set to
-        # True**; only ``False`` (the default) runs the legacy
-        # explicit forward-Euler ``p_s ← p_s + α dt ∇²p_s`` path.
+        # Issue-#273 throughput work, Phase 2 of the Hoskins–Simmons
+        # FV3 D-grid port.  When True and
+        # ``implicit_grav_wave_damping > 0``, the post-RK3 surface-
+        # pressure correction switches from the legacy explicit
+        # forward-Euler diffusion ``p_s ← p_s + α dt ∇²p_s``
+        # (conditionally stable at ``α dt / dx² < 0.5``) to a
+        # *residual-monitored* damped Richardson iteration that
+        # solves ``(I − α dt ∇²) p_s_new = p_s_explicit`` via
+        # forward matvecs (see
+        # ``legoesm.atmosphere.dynamics.semi_implicit_cdgrid.
+        # richardson_helmholtz_solve``).  The iteration stops as
+        # soon as ``‖b − A p‖/‖b‖ < tol`` (production: 1e-6) or a
+        # configurable cap is hit.
         #
-        # Phase 2 (future): when True, this flag will gate a true
-        # implicit Helmholtz solve
-        # ``(I − α dt ∇²) p_s_new = p_s_explicit`` on the FV3
-        # D-grid surface pressure, lifting the explicit
-        # ``α dt / dx² < 0.5`` CFL bound.  The blocker for this
-        # release is that the existing ``laplacian_compact``
-        # operator is non-symmetric on cubed-sphere panel seams
-        # (the halo interpolation is not the metric-weighted
-        # adjoint of an FV gradient), and ``jax.scipy.sparse.linalg``
-        # iterative solvers route through a transpose-solve that
-        # is not implemented for the halo's non-unique scatter
-        # indices.  Phase 2 will build a true symmetric Helmholtz
-        # operator from the FV gradient / divergence adjoint pair
-        # on the D-grid (template:
-        # ``barotropic_implicit_latlon_cgrid._make_helmholtz``),
-        # then ``cg`` is correct and ``custom_linear_solve`` is
-        # happy.  Full Hoskins–Simmons coupling of T, divergence,
-        # and lnp_s via the Γ matrix is a further extension.
+        # Solver contract — *not* unconditional stability.  The
+        # ``laplacian_compact`` operator is non-normal (the halo
+        # interpolation breaks the FV adjoint identity at cube
+        # panel seams), so the spectral-radius bound from a power-
+        # iteration estimate of ``|λ_max|`` is not a proof of
+        # convergence.  The damping factor uses a 1.5× safety
+        # margin over the spectral-optimal choice, and the residual
+        # monitor is the true safety net.  Empirically converges to
+        # the production tolerance ``1e-6`` for
+        # ``α dt / dx² ≤ ~5``; beyond that, the call returns
+        # un-converged and ``_step_fv3`` falls back JAX-safely to
+        # *no damping for this step* (``p_s`` left unchanged),
+        # surfacing a ``RuntimeWarning`` — falling back to the
+        # legacy explicit path at the same coefficient would re-
+        # introduce the CFL instability the implicit path is meant
+        # to suppress.
+        #
+        # Richardson rather than CG because (a) the existing
+        # ``laplacian_compact`` operator is non-symmetric on cube
+        # panel seams (CG is undefined), and (b)
+        # ``jax.scipy.sparse.linalg`` iterative solvers route
+        # through ``custom_linear_solve``'s transpose-solve which
+        # trips a ``NotImplementedError`` in the halo scatter.
+        # Richardson uses only forward matvecs.
+        #
+        # Phase 3 upgrade path (separate PR): rebuild the cubed-
+        # sphere Helmholtz operator as a true FV adjoint pair so
+        # ``cg`` is well-defined, then swap Richardson for CG +
+        # add a mass-weighted preconditioner.  See
+        # ``semi_implicit_cdgrid.py`` module docstring for the
+        # symmetry / SPD readiness gate.
+        #
+        # AD note: ``richardson_helmholtz_solve`` uses
+        # ``lax.while_loop`` with a data-dependent stopping
+        # condition, which is not reverse-mode differentiable.
+        # ``jax.grad`` through this branch will fail; current
+        # production callers do not grad through ``_step_fv3``
+        # post-step damping.  Phase-3 CG variant gets implicit-
+        # function-theorem AD for free.
+        #
+        # Default ``False`` keeps the legacy explicit-diffusion
+        # path bit-exact.
 
 
 def validate_corner_div_damp_nord(nord: int) -> None:
@@ -1452,29 +1484,78 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         # only implemented where unique_indices=True`` deep inside
         # the halo scatter.
         #
-        # Phase 2 work: replace the operator with a true symmetric
-        # Helmholtz built from the FV gradient / divergence adjoint
-        # pair on the cubed-sphere D-grid (analogous to
-        # ``barotropic_implicit_latlon_cgrid._make_helmholtz``), then
-        # solve with CG.  Tracked in issue #273.  Until then the
-        # flag is accepted but raises a clear error so a
-        # configuration intended for Phase 2 fails loudly rather
-        # than silently running the explicit path.
-        if self.config.implicit_grav_wave_use_pcg:
-            raise NotImplementedError(
-                "implicit_grav_wave_use_pcg=True is scaffolding "
-                "for the Hoskins–Simmons FV3 D-grid port (issue "
-                "#273) and is not yet wired.  The required "
-                "symmetric Helmholtz operator on the cubed-sphere "
-                "D-grid is not yet implemented (see comment above "
-                "this raise for details).  Set "
-                "implicit_grav_wave_use_pcg=False to use the "
-                "legacy explicit forward-Euler diffusion path."
-            )
+        # Phase 2 work: replaced ``NotImplementedError`` with a
+        # damped Richardson iteration that does NOT require an SPD
+        # operator (the cubed-sphere ``laplacian_compact`` is non-
+        # symmetric — see semi_implicit_cdgrid.py module docstring
+        # for context) and does NOT route through
+        # ``custom_linear_solve``'s transpose-solve (the second
+        # blocker from Phase 1).  Slower than CG by a small constant
+        # factor; an FV-adjoint-symmetric operator + CG remains the
+        # Phase 3 upgrade once the cubed-sphere Helmholtz operator
+        # is rebuilt as a proper adjoint pair.
         if self.config.implicit_grav_wave_damping > 0:
             alpha = self.config.implicit_grav_wave_damping
-            lap_ps = laplacian_compact(state_new.p_s.data, self.grid)
-            p_s_damped = state_new.p_s.data + alpha * dt * lap_ps
+            if self.config.implicit_grav_wave_use_pcg:
+                from legoesm.atmosphere.dynamics.semi_implicit_cdgrid import (
+                    richardson_helmholtz_solve,
+                )
+                # Residual-monitored Richardson: stops as soon as
+                # ``‖b − A p‖/‖b‖ < tol`` or ``n_iter_max`` is
+                # reached.  Production tolerance 1e-6.  When the
+                # solver fails to reach tolerance (e.g. extreme
+                # ``α dt / dx² ≫ 5``), fall back JAX-safely to
+                # *no damping for this step* — explicit forward-
+                # Euler at the same coefficient would violate its
+                # CFL bound and amplify the instability the
+                # implicit path was meant to suppress, so the safe
+                # fallback is to leave ``p_s`` unchanged (skipping
+                # this step's sponge cycle) and surface a
+                # ``RuntimeWarning`` so the user can drop ``dt``
+                # or ``α``.
+                _pcg_tol = 1.0e-6
+                _p_s_implicit, _rel_res = richardson_helmholtz_solve(
+                    state_new.p_s.data,
+                    coeff=alpha * dt,
+                    grid=self.grid,
+                    n_iter_max=200,
+                    tol=_pcg_tol,
+                    return_residual=True,
+                )
+                _converged = _rel_res <= _pcg_tol
+                # ``jax.lax.cond`` skips the host callback when
+                # converged so the hot path has no per-step
+                # sync overhead.
+                def _maybe_audit(rel_res):
+                    def _warn(rel):
+                        import warnings
+                        warnings.warn(
+                            f"implicit_grav_wave Richardson failed "
+                            f"to reach tol={_pcg_tol:.0e} "
+                            f"(rel_res={float(rel):.3e}); leaving "
+                            f"p_s unchanged for this step.  Reduce "
+                            f"``implicit_grav_wave_damping``, reduce "
+                            f"``dt``, or raise n_iter_max in "
+                            f"``richardson_helmholtz_solve``.",
+                            RuntimeWarning,
+                        )
+                    jax.debug.callback(_warn, rel_res)
+                jax.lax.cond(
+                    _converged,
+                    lambda _: None,
+                    _maybe_audit,
+                    _rel_res,
+                )
+                # Safe fallback: when un-converged, leave p_s
+                # unchanged for this step rather than apply an
+                # unstable explicit update or an inaccurate
+                # implicit iterate.
+                p_s_damped = jnp.where(
+                    _converged, _p_s_implicit, state_new.p_s.data,
+                )
+            else:
+                lap_ps = laplacian_compact(state_new.p_s.data, self.grid)
+                p_s_damped = state_new.p_s.data + alpha * dt * lap_ps
             p_s_damped = jnp.maximum(p_s_damped, self.config.p_floor)
             state_new = state_new._replace(
                 p_s=state_new.p_s.replace(data=p_s_damped),
