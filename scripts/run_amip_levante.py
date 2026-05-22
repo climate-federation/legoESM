@@ -128,6 +128,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--gravity-wave-drag", type=str, default="rayleigh")
     parser.add_argument("--diurnal-cycle", action="store_true", default=True)
     parser.add_argument("--no-diurnal-cycle", dest="diurnal_cycle", action="store_false")
+    parser.add_argument("--land-mask-file", type=str, default="",
+                        help="Land-sea-mask NetCDF (CMIP6 sftlf / ERA5 lsm). "
+                             "Activates the slab-land surface tile.")
 
     # Initial conditions / restart
     parser.add_argument("--ic-zarr", type=str, default="",
@@ -188,6 +191,8 @@ def main(argv: list[str] | None = None) -> int:
         required.append(volc_f)
     if args.ic_zarr:
         required.append(Path(args.ic_zarr))
+    if args.land_mask_file:
+        required.append(Path(args.land_mask_file))
 
     missing = _check_files(required)
     if missing:
@@ -284,6 +289,10 @@ def main(argv: list[str] | None = None) -> int:
             cmd += ["--restart-start-day", str(args.restart_start_day)]
     elif args.ic_zarr:
         cmd += ["--ic", "era5", "--ic-path", args.ic_zarr]
+
+    # Land-sea mask — activates the slab-land surface tile
+    if args.land_mask_file:
+        cmd += ["--land-mask-file", args.land_mask_file]
 
     # Output
     if args.output:
