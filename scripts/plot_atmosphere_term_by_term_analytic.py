@@ -27,6 +27,7 @@ import matplotlib.pyplot as plt
 from legoesm import constants
 from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
     CGridLatLonShallowWaterConfig,
+    CGridLatLonShallowWaterModel,
     CGridLatLonShallowWaterState,
     cgrid_latlon_sw_tendencies,
 )
@@ -327,12 +328,117 @@ def plot_rayleigh_skip():
     print(f"wrote {out}")
 
 
+CONV_OUT_DIR = REPO_ROOT / "results" / "atmosphere" / "convergence"
+CONV_OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+CONV_N_LONS = (32, 64, 128, 256)
+
+
+def _l2(a):
+    return float(np.sqrt(np.mean(a ** 2)))
+
+
+def _run_wave_sweep_sw():
+    H = 100.0
+    c = float(np.sqrt(constants.g * H))
+    lon_extent_deg = 4.0
+    cfl_target = 0.2
+    radius = float(constants.R_earth)
+    Lx = radius * lon_extent_deg * (np.pi / 180.0)
+    T_end = 0.1 * Lx / c
+    sigma = Lx / 12.0; x0 = Lx / 2.0
+    eps = 0.005 * H
+
+    dxs, errs = [], []
+    for n_lon in CONV_N_LONS:
+        n_lat_inner = max(4, n_lon // 8)
+        grid, _f0 = _build_fplane_patch(
+            center_lat_deg=0.0,
+            n_lat_inner=n_lat_inner, n_lon=n_lon,
+            lon_extent_deg=lon_extent_deg, lat_half_deg=0.05,
+        )
+        config = _zero_dynamics_config()
+        model = CGridLatLonShallowWaterModel(grid, config)
+
+        dx = float(grid.dx[grid.n_lat // 2, grid.n_lon // 2]) / 2.0
+        dt = cfl_target * dx / c
+        n_steps = max(1, int(np.ceil(T_end / dt)))
+        dt = T_end / n_steps
+
+        lon_rad = np.asarray(grid.lon); dlon = float(grid.dlon)
+        x_centres = radius * (lon_rad - 0.5 * dlon)
+        x_centres = x_centres - x_centres[0]
+        dh_p = eps * np.exp(-((x_centres - x0) / sigma) ** 2)
+        h_1d = H + dh_p
+
+        state = _rest_state(grid, H=H)
+        h_2d = jnp.asarray(np.broadcast_to(h_1d[None, :], state.h.shape).copy())
+        state = state._replace(h=h_2d)
+
+        for _ in range(n_steps):
+            state = model.step(state, dt)
+        dh_end = np.asarray(state.h[1:-1, :]).mean(axis=0) - H
+
+        def _gp(x):
+            d = (x - x0 + Lx / 2.0) % Lx - Lx / 2.0
+            return np.exp(-(d / sigma) ** 2)
+
+        dh_exact = 0.5 * eps * (_gp(x_centres - c * T_end)
+                                 + _gp(x_centres + c * T_end))
+        dxs.append(dx); errs.append(_l2(dh_end - dh_exact))
+    return np.array(dxs), np.array(errs)
+
+
+def plot_convergence_sw():
+    dxs_wave, errs_wave = _run_wave_sweep_sw()
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+    ax = axes[0]
+    ax.loglog(dxs_wave / 1e3, errs_wave, "C2o-", label="atmos SW")
+    ref2 = errs_wave[-2] * (dxs_wave / dxs_wave[-2]) ** 2
+    ax.loglog(dxs_wave / 1e3, ref2, "k--", lw=0.8, label="O(dx²)")
+    ax.set_xlabel("dx [km]")
+    ax.set_ylabel("L2 error in δh(x, T_end)")
+    ax.set_title("Gravity wave: C_g = c dt/dx = const")
+    ax.grid(True, which="both", alpha=0.4)
+    ax.legend()
+
+    ax = axes[1]
+    ax.axis("off")
+    ax.text(
+        0.5, 0.5,
+        "Transport convergence: documented gap\n"
+        "  (atmosphere SW has no passive tracer;\n"
+        "   momentum-Gaussian setup excites a\n"
+        "   spurious gravity wave via continuity).\n\n"
+        "Diffusion convergence: documented gap\n"
+        "  (gravity-wave CFL is binding so dt ∝ dx,\n"
+        "   not dx² → parabolic CFL drifts).",
+        ha="center", va="center", fontsize=10, family="monospace",
+        bbox=dict(facecolor="lightyellow", edgecolor="0.4", pad=10),
+    )
+    ax.set_title("Transport + Diffusion — documented gaps")
+
+    fig.suptitle(
+        "Atmosphere SW CFL-aware convergence — wave covered, transport / "
+        "diffusion deferred",
+        fontsize=11,
+    )
+    fig.tight_layout()
+    out = CONV_OUT_DIR / "convergence_atmosphere.png"
+    fig.savefig(out, dpi=140)
+    plt.close(fig)
+    print(f"wrote {out}")
+
+
 def main():
     plot_coriolis_tendency()
     plot_burgers_tendency()
     plot_viscous_tendency()
     plot_rayleigh_skip()
-    print(f"\nAll PNGs written to {OUT_DIR}")
+    plot_convergence_sw()
+    print(f"\nAll PNGs written to {OUT_DIR} and {CONV_OUT_DIR}")
 
 
 if __name__ == "__main__":

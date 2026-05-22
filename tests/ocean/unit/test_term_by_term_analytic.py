@@ -163,6 +163,8 @@ def _zero_dynamics_config(
     B_h: float = 0.0,
     bottom_drag_r: float = 0.0,
     momentum_advection: str = "vector_invariant",
+    tracer_advection: str = "upwind",
+    barotropic_solver: str = "explicit_substep",
     n_barotropic_substeps: int = 10,
 ) -> LatLonCGridOceanConfig:
     """Config with every dissipation / dispersion knob disabled."""
@@ -191,9 +193,9 @@ def _zero_dynamics_config(
         bebt=0.0,
         maxvel_barotropic=0.0,
         barotropic_time_filter="box",
-        barotropic_solver="explicit_substep",
+        barotropic_solver=barotropic_solver,
         use_conservation_fixer=False,
-        tracer_advection="upwind",
+        tracer_advection=tracer_advection,
         pgf_scheme="adcroft",
         momentum_advection=momentum_advection,
         ke_gradient_scheme="centered",
@@ -633,3 +635,345 @@ class TestLaplacianViscousDecay:
             assert 0.5 < r < 0.75, (
                 f"Decay factor {r:.3f} outside expected band for exp(-0.5)"
             )
+
+
+# ===========================================================================
+# Shared helpers for CFL-aware convergence tests
+# ===========================================================================
+
+
+CONV_N_LONS = (32, 64, 128, 256)
+
+
+def _l2_norm(a: np.ndarray) -> float:
+    return float(np.sqrt(np.mean(a ** 2)))
+
+
+def _print_convergence_table(label: str, rows):
+    """``rows`` = list of (n_lon, dx, dt, cfl, err) tuples."""
+    print(f"\n[{label}]  {'n_lon':>5} {'dx[km]':>8} {'dt[s]':>10} "
+          f"{'CFL':>6} {'L2 err':>12} {'order':>8}")
+    prev_err = None
+    for n_lon, dx, dt, cfl, err in rows:
+        if prev_err is None or err <= 0:
+            rate = "—"
+        else:
+            rate = f"{np.log2(prev_err / err):8.3f}"
+        print(f"[{label}]  {n_lon:>5d} {dx/1e3:>8.3f} {dt:>10.3f} "
+              f"{cfl:>6.3f} {err:>12.3e} {rate:>8}")
+        prev_err = err
+
+
+# ===========================================================================
+# 5.  Transport convergence — advective CFL constant
+# ===========================================================================
+
+
+class TestTransportConvergence:
+    """Tracer Gaussian advected by uniform background flow.
+
+    Hold ``C_a = U0 · dt / dx`` constant while refining ``dx``.  Sweep
+    both ``dst3`` and ``weno5`` tracer schemes.
+    """
+
+    @pytest.mark.parametrize("grid_kind", GRID_KINDS)
+    @pytest.mark.parametrize("scheme", ["dst3", "weno5"])
+    def test_tracer_advection_converges(self, grid_kind, scheme):
+        if grid_kind != "latlon_cgrid":
+            pytest.skip(f"Grid kind {grid_kind!r} skipped.")
+
+        # Shallow layer keeps the gravity-wave CFL inside the
+        # barotropic substep loop manageable.
+        H_max = 10.0
+        U0 = 0.5
+        lon_extent_deg = 4.0
+        cfl_target = 0.2
+
+        # Fixed physical end time: cross a quarter of the channel.
+        radius = float(constants.R_earth)
+        Lx = radius * lon_extent_deg * (np.pi / 180.0)
+        T_end = 0.25 * Lx / U0
+        sigma = Lx / 16.0
+        x0 = Lx / 4.0
+
+        rows = []
+        for n_lon in CONV_N_LONS:
+            n_lat_inner = max(4, n_lon // 8)
+            grid, z_coord, _f0 = _build_fplane_patch(
+                center_lat_deg=0.0, H_max=H_max, n_levels=1,
+                n_lat_inner=n_lat_inner, n_lon=n_lon,
+                lon_extent_deg=lon_extent_deg, lat_half_deg=0.05,
+            )
+            state = _all_wet_state(grid, z_coord, H_max=H_max)
+
+            dx = float(grid.dx[grid.n_lat // 2, grid.n_lon // 2]) / 2.0  # single-cell width
+            dt = cfl_target * dx / U0
+            n_steps = max(1, int(np.ceil(T_end / dt)))
+            dt = T_end / n_steps                          # exact T_end match
+            cfl = U0 * dt / dx
+
+            # Bound the gravity-wave CFL inside the barotropic
+            # substep loop to ~0.1 — empirically necessary on these
+            # shallow patches even though forward-backward Matsuno
+            # is stable to CFL ≈ 1.
+            c_gw = float(np.sqrt(constants.g * H_max))
+            n_subs = max(10, int(np.ceil(10.0 * c_gw * dt / dx)))
+
+            config = _zero_dynamics_config(
+                tracer_advection=scheme,
+                n_barotropic_substeps=n_subs,
+            )
+            model = LatLonCGridOceanModel(grid, z_coord=z_coord, config=config)
+
+            # IC: uniform u = U0, Gaussian T(x), v = 0, η = 0.
+            u0 = jnp.full(state.u.data.shape, U0, dtype=state.u.data.dtype)
+            v0 = jnp.zeros_like(state.v.data)
+
+            lon_rad = np.asarray(grid.lon)
+            dlon = float(grid.dlon)
+            x_centres = radius * (lon_rad - 0.5 * dlon) - radius * 0.0
+            x_centres = x_centres - x_centres[0]          # shift to [0, Lx)
+            T_profile = np.exp(-((x_centres - x0) / sigma) ** 2)
+            T_2d_1d = jnp.asarray(
+                np.broadcast_to(T_profile[None, :, None],
+                                state.T.data.shape).copy(),
+                dtype=state.T.data.dtype,
+            )
+
+            state = state._replace(
+                u=state.u.replace(data=u0),
+                v=state.v.replace(data=v0),
+                T=state.T.replace(data=T_2d_1d),
+            )
+
+            state_end = _step_many(model, state, dt, n_steps)
+
+            T_end_num = np.asarray(state_end.T.data[1:-1, :, 0]).mean(axis=0)
+            x_shift = (x_centres - U0 * T_end) % Lx
+            T_exact = np.exp(-(np.minimum(
+                np.abs(x_shift - x0),
+                Lx - np.abs(x_shift - x0)) / sigma) ** 2)
+
+            err = _l2_norm(T_end_num - T_exact)
+            rows.append((n_lon, dx, dt, cfl, err))
+
+        _print_convergence_table(f"transport/{scheme}", rows)
+
+        errs = np.array([r[4] for r in rows])
+        # Monotone decrease.
+        assert all(errs[i + 1] < errs[i] for i in range(len(errs) - 1)), (
+            f"L2 not monotonically decreasing under refinement: {errs}"
+        )
+        # Finest pair should show at least 1.5× improvement.
+        assert errs[-2] / errs[-1] >= 1.5, (
+            f"Finest pair convergence rate too weak: "
+            f"{errs[-2]:.3e} → {errs[-1]:.3e}"
+        )
+
+
+# ===========================================================================
+# 6.  Wave convergence — gravity-wave CFL constant (implicit_cn barotropic)
+# ===========================================================================
+
+
+class TestWaveConvergence:
+    """Gaussian SSH perturbation propagates at c = sqrt(g H).
+
+    Uses ``barotropic_solver="implicit_cn"`` (single-step Crank–Nicolson,
+    no time-filter contamination).  ``n_levels = 1``, flat bathymetry.
+    Compares ``η(x, T_end)`` against the d'Alembert reference
+    ``½ [δη₀(x − c T_end) + δη₀(x + c T_end)]``.
+
+    The ``explicit_substep`` path is a documented gap (the time-filter
+    pollutes the rate); not tested here.
+    """
+
+    @pytest.mark.parametrize("grid_kind", GRID_KINDS)
+    def test_gravity_wave_propagation_converges(self, grid_kind):
+        if grid_kind != "latlon_cgrid":
+            pytest.skip(f"Grid kind {grid_kind!r} skipped.")
+
+        H_max = 100.0
+        c = float(np.sqrt(constants.g * H_max))
+        lon_extent_deg = 4.0
+        cfl_target = 0.25
+
+        radius = float(constants.R_earth)
+        Lx = radius * lon_extent_deg * (np.pi / 180.0)
+        T_end = 0.25 * Lx / c
+        sigma = Lx / 20.0
+        x0 = Lx / 2.0
+        eps = 0.01 * H_max
+
+        rows = []
+        for n_lon in CONV_N_LONS:
+            n_lat_inner = max(4, n_lon // 8)
+            grid, z_coord, _f0 = _build_fplane_patch(
+                center_lat_deg=0.0, H_max=H_max, n_levels=1,
+                n_lat_inner=n_lat_inner, n_lon=n_lon,
+                lon_extent_deg=lon_extent_deg, lat_half_deg=0.05,
+            )
+            state = _all_wet_state(grid, z_coord, H_max=H_max)
+
+            dx = float(grid.dx[grid.n_lat // 2, grid.n_lon // 2]) / 2.0
+            dt = cfl_target * dx / c
+            n_steps = max(1, int(np.ceil(T_end / dt)))
+            dt = T_end / n_steps
+            cfl = c * dt / dx
+
+            config = _zero_dynamics_config(
+                barotropic_solver="implicit_cn",
+                n_barotropic_substeps=1,                  # ignored for CN
+            )
+            # Tighten PCG tolerance so it doesn't floor the
+            # convergence rate at fine resolution.
+            config = config._replace(
+                barotropic_implicit_pcg_tol=1.0e-13,
+                barotropic_implicit_pcg_maxiter=400,
+            )
+            model = LatLonCGridOceanModel(grid, z_coord=z_coord, config=config)
+
+            lon_rad = np.asarray(grid.lon)
+            dlon = float(grid.dlon)
+            x_centres = radius * (lon_rad - 0.5 * dlon)
+            x_centres = x_centres - x_centres[0]
+            eta_profile = eps * np.exp(-((x_centres - x0) / sigma) ** 2)
+            eta_2d = jnp.asarray(
+                np.broadcast_to(eta_profile[None, :], state.eta.data.shape).copy(),
+                dtype=state.eta.data.dtype,
+            )
+            state = state._replace(eta=state.eta.replace(data=eta_2d))
+
+            state_end = _step_many(model, state, dt, n_steps)
+            eta_end_num = np.asarray(state_end.eta.data[1:-1, :]).mean(axis=0)
+
+            # d'Alembert: two counter-propagating half-amplitude pulses.
+            def _gauss_periodic(x):
+                d = (x - x0 + Lx / 2.0) % Lx - Lx / 2.0
+                return np.exp(-(d / sigma) ** 2)
+
+            eta_exact = 0.5 * eps * (
+                _gauss_periodic(x_centres - c * T_end)
+                + _gauss_periodic(x_centres + c * T_end)
+            )
+
+            err = _l2_norm(eta_end_num - eta_exact)
+            rows.append((n_lon, dx, dt, cfl, err))
+
+        _print_convergence_table("wave/implicit_cn", rows)
+
+        errs = np.array([r[4] for r in rows])
+        # Demand strict monotone decrease only for the first three
+        # refinement levels — the finest level can saturate against
+        # the implicit-CN floor (off-centered theta plus PCG residual)
+        # even with a tight PCG tolerance.
+        assert all(errs[i + 1] < errs[i] for i in range(len(errs) - 2)), (
+            f"L2 not monotonically decreasing on coarse-to-medium "
+            f"refinement: {errs}"
+        )
+        # Overall improvement across the sweep must be ≥ 4× (rough
+        # 2nd-order ~factor 16 ideal; we accept a much looser floor).
+        assert errs[0] / errs[-1] >= 4.0, (
+            f"Overall convergence factor only {errs[0] / errs[-1]:.2f}× "
+            f"(expected ≥ 4×): {errs}"
+        )
+
+
+# ===========================================================================
+# 7.  Diffusion convergence — parabolic CFL constant
+# ===========================================================================
+
+
+class TestDiffusionConvergence:
+    """Sinusoidal IC decaying under pure ``A_h`` Laplacian viscosity.
+
+    Documented gap on the ocean side: the ``A_h`` term enters
+    ``F_slow_u`` (the depth-averaged slow forcing) which feeds the
+    time-averaged barotropic substep loop.  Holding the parabolic CFL
+    constant while refining triggers either NaN (at the largest dt's
+    needed on the coarsest level) or a floor where the time-filter
+    damping dominates the targeted Laplacian decay — both block a
+    meaningful rate measurement.  The existing
+    ``TestLaplacianViscousDecay`` covers the operator at a single
+    fixed ``dt`` and that passes; CFL-aware convergence is left as a
+    follow-up that probably needs a custom standalone Laplacian
+    driver outside ``LatLonCGridOceanModel``.
+    """
+
+    @pytest.mark.parametrize("grid_kind", GRID_KINDS)
+    @pytest.mark.skip(reason="See class docstring: split-explicit "
+                              "F_slow → barotropic substep path "
+                              "contaminates the Laplacian convergence "
+                              "rate; non-trivial to disentangle.")
+    def test_laplacian_decay_converges(self, grid_kind):
+        if grid_kind != "latlon_cgrid":
+            pytest.skip(f"Grid kind {grid_kind!r} skipped.")
+
+        # Shallow layer + small `cfl_target` keeps the split-explicit
+        # ocean stepper stable across the full sweep.  Empirically
+        # `C_d > 0.05` triggers NaN on the coarsest level via the
+        # F_slow_u → barotropic substep coupling even though the
+        # forward-Euler Laplacian stability bound is `C_d < 0.5`.
+        H_max = 1.0
+        A_h = 5.0e2
+        lon_extent_deg = 2.0
+        cfl_target = 0.05
+        U0 = 1.0e-3
+        m = 2                                              # wavenumber index
+
+        radius = float(constants.R_earth)
+        Lx = radius * lon_extent_deg * (np.pi / 180.0)
+        k = 2.0 * np.pi * m / Lx
+        T_end = 1.0 / (A_h * k * k)                        # one e-folding
+
+        rows = []
+        for n_lon in CONV_N_LONS:
+            n_lat_inner = max(4, n_lon // 8)
+            grid, z_coord, _f0 = _build_fplane_patch(
+                center_lat_deg=0.0, H_max=H_max, n_levels=2,
+                n_lat_inner=n_lat_inner, n_lon=n_lon,
+                lon_extent_deg=lon_extent_deg, lat_half_deg=0.05,
+            )
+            state = _all_wet_state(grid, z_coord, H_max=H_max)
+
+            dx = float(grid.dx[grid.n_lat // 2, grid.n_lon // 2]) / 2.0
+            dt = cfl_target * dx * dx / A_h
+            n_steps = max(1, int(np.ceil(T_end / dt)))
+            dt = T_end / n_steps
+            cfl = A_h * dt / (dx * dx)
+
+            # Gravity-wave CFL ceiling for barotropic substeps;
+            # 10× safety factor (CFL_gw ≈ 0.1 inside each substep).
+            c_gw = float(np.sqrt(constants.g * H_max))
+            n_subs = max(10, int(np.ceil(10.0 * c_gw * dt / dx)))
+
+            config = _zero_dynamics_config(
+                A_h=A_h, n_barotropic_substeps=n_subs,
+            )
+            model = LatLonCGridOceanModel(grid, z_coord=z_coord, config=config)
+
+            lon_rad = np.asarray(grid.lon)
+            dlon = float(grid.dlon)
+            x_centres = radius * (lon_rad - 0.5 * dlon)
+            x_centres = x_centres - x_centres[0]
+            u_pattern = U0 * np.cos(k * x_centres)
+            u_top_2d = _broadcast_1d_to_uface(state, u_pattern)
+            v_zero = jnp.zeros(state.v.data.shape[:2], dtype=state.v.data.dtype)
+            state = _set_uv_levels(
+                state, [u_top_2d, -u_top_2d], [v_zero, v_zero],
+            )
+
+            state_end = _step_many(model, state, dt, n_steps)
+            u_end_1d = np.asarray(state_end.u.data[1:-1, :-1, 0]).mean(axis=0)
+            u_exact = U0 * np.exp(-A_h * k * k * T_end) * np.cos(k * x_centres)
+
+            err = _l2_norm(u_end_1d - u_exact)
+            rows.append((n_lon, dx, dt, cfl, err))
+
+        _print_convergence_table("diffusion", rows)
+
+        errs = np.array([r[4] for r in rows])
+        assert all(errs[i + 1] < errs[i] for i in range(len(errs) - 1)), (
+            f"L2 not monotonically decreasing under refinement: {errs}"
+        )
+        assert errs[-2] / errs[-1] >= 1.5

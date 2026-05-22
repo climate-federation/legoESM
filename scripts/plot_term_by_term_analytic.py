@@ -79,6 +79,8 @@ def _all_wet_state(grid, z_coord, H_max=1000.0):
 
 def _zero_dynamics_config(*, A_h=0.0, B_h=0.0, bottom_drag_r=0.0,
                           momentum_advection="vector_invariant",
+                          tracer_advection="upwind",
+                          barotropic_solver="explicit_substep",
                           n_barotropic_substeps=10):
     return LatLonCGridOceanConfig(
         A_h=A_h, A_h_lat_scaling=False, A_h_eq_boost=1.0, A_h_merid=0.0,
@@ -92,8 +94,8 @@ def _zero_dynamics_config(*, A_h=0.0, B_h=0.0, bottom_drag_r=0.0,
         barotropic_diffusion_alpha=0.0, barotropic_div_damp=0.0,
         bebt=0.0, maxvel_barotropic=0.0,
         barotropic_time_filter="box",
-        barotropic_solver="explicit_substep",
-        use_conservation_fixer=False, tracer_advection="upwind",
+        barotropic_solver=barotropic_solver,
+        use_conservation_fixer=False, tracer_advection=tracer_advection,
         pgf_scheme="adcroft", momentum_advection=momentum_advection,
         ke_gradient_scheme="centered", weno_d_term=False,
         physics=None, gm_redi=None, eos="linear",
@@ -441,12 +443,177 @@ def plot_viscous_decay():
     print(f"wrote {out}")
 
 
+CONV_OUT_DIR = REPO_ROOT / "results" / "ocean" / "convergence"
+CONV_OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+CONV_N_LONS = (32, 64, 128, 256)
+
+
+def _l2(a):
+    return float(np.sqrt(np.mean(a ** 2)))
+
+
+# ----------------------------------------------------------------------
+# Convergence sweep: transport (tracer) — sweep dst3 + weno5
+# ----------------------------------------------------------------------
+
+
+def _run_transport_sweep(scheme):
+    H_max = 10.0; U0 = 0.5
+    lon_extent_deg = 4.0; cfl_target = 0.2
+    radius = float(constants.R_earth)
+    Lx = radius * lon_extent_deg * (np.pi / 180.0)
+    T_end = 0.25 * Lx / U0
+    sigma = Lx / 16.0; x0 = Lx / 4.0
+
+    dxs, errs = [], []
+    for n_lon in CONV_N_LONS:
+        n_lat_inner = max(4, n_lon // 8)
+        grid, z_coord, _f0 = _build_fplane_patch(
+            center_lat_deg=0.0, H_max=H_max, n_levels=1,
+            n_lat_inner=n_lat_inner, n_lon=n_lon,
+            lon_extent_deg=lon_extent_deg, lat_half_deg=0.05,
+        )
+        state = _all_wet_state(grid, z_coord, H_max=H_max)
+
+        dx = float(grid.dx[grid.n_lat // 2, grid.n_lon // 2]) / 2.0
+        dt = cfl_target * dx / U0
+        n_steps = max(1, int(np.ceil(T_end / dt)))
+        dt = T_end / n_steps
+
+        c_gw = float(np.sqrt(constants.g * H_max))
+        n_subs = max(10, int(np.ceil(10.0 * c_gw * dt / dx)))
+        config = _zero_dynamics_config(
+            tracer_advection=scheme, n_barotropic_substeps=n_subs,
+        )
+        model = LatLonCGridOceanModel(grid, z_coord=z_coord, config=config)
+
+        lon_rad = np.asarray(grid.lon); dlon = float(grid.dlon)
+        x_centres = radius * (lon_rad - 0.5 * dlon)
+        x_centres = x_centres - x_centres[0]
+        T_profile = np.exp(-((x_centres - x0) / sigma) ** 2)
+        T_2d = jnp.asarray(np.broadcast_to(
+            T_profile[None, :, None], state.T.data.shape).copy())
+
+        u0 = jnp.full(state.u.data.shape, U0)
+        v0 = jnp.zeros_like(state.v.data)
+        state = state._replace(
+            u=state.u.replace(data=u0), v=state.v.replace(data=v0),
+            T=state.T.replace(data=T_2d),
+        )
+
+        for _ in range(n_steps):
+            state = model.step(state, dt)
+        T_num = np.asarray(state.T.data[1:-1, :, 0]).mean(axis=0)
+        x_shift = (x_centres - U0 * T_end) % Lx
+        T_exact = np.exp(-(np.minimum(np.abs(x_shift - x0),
+                                       Lx - np.abs(x_shift - x0)) / sigma) ** 2)
+        dxs.append(dx); errs.append(_l2(T_num - T_exact))
+    return np.array(dxs), np.array(errs)
+
+
+def _run_wave_sweep():
+    H_max = 100.0
+    c = float(np.sqrt(constants.g * H_max))
+    lon_extent_deg = 4.0; cfl_target = 0.25
+    radius = float(constants.R_earth)
+    Lx = radius * lon_extent_deg * (np.pi / 180.0)
+    T_end = 0.25 * Lx / c
+    sigma = Lx / 20.0; x0 = Lx / 2.0
+    eps = 0.01 * H_max
+
+    dxs, errs = [], []
+    for n_lon in CONV_N_LONS:
+        n_lat_inner = max(4, n_lon // 8)
+        grid, z_coord, _f0 = _build_fplane_patch(
+            center_lat_deg=0.0, H_max=H_max, n_levels=1,
+            n_lat_inner=n_lat_inner, n_lon=n_lon,
+            lon_extent_deg=lon_extent_deg, lat_half_deg=0.05,
+        )
+        state = _all_wet_state(grid, z_coord, H_max=H_max)
+        dx = float(grid.dx[grid.n_lat // 2, grid.n_lon // 2]) / 2.0
+        dt = cfl_target * dx / c
+        n_steps = max(1, int(np.ceil(T_end / dt)))
+        dt = T_end / n_steps
+
+        config = _zero_dynamics_config(
+            barotropic_solver="implicit_cn", n_barotropic_substeps=1,
+        )
+        config = config._replace(
+            barotropic_implicit_pcg_tol=1.0e-13,
+            barotropic_implicit_pcg_maxiter=400,
+        )
+        model = LatLonCGridOceanModel(grid, z_coord=z_coord, config=config)
+
+        lon_rad = np.asarray(grid.lon); dlon = float(grid.dlon)
+        x_centres = radius * (lon_rad - 0.5 * dlon)
+        x_centres = x_centres - x_centres[0]
+        eta_p = eps * np.exp(-((x_centres - x0) / sigma) ** 2)
+        eta_2d = jnp.asarray(np.broadcast_to(
+            eta_p[None, :], state.eta.data.shape).copy())
+        state = state._replace(eta=state.eta.replace(data=eta_2d))
+
+        for _ in range(n_steps):
+            state = model.step(state, dt)
+        eta_end = np.asarray(state.eta.data[1:-1, :]).mean(axis=0)
+
+        def _gp(x):
+            d = (x - x0 + Lx / 2.0) % Lx - Lx / 2.0
+            return np.exp(-(d / sigma) ** 2)
+
+        eta_exact = 0.5 * eps * (_gp(x_centres - c * T_end)
+                                  + _gp(x_centres + c * T_end))
+        dxs.append(dx); errs.append(_l2(eta_end - eta_exact))
+    return np.array(dxs), np.array(errs)
+
+
+def plot_convergence():
+    dxs_dst3, errs_dst3 = _run_transport_sweep("dst3")
+    dxs_weno5, errs_weno5 = _run_transport_sweep("weno5")
+    dxs_wave, errs_wave = _run_wave_sweep()
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+    ax = axes[0]
+    ax.loglog(dxs_dst3 / 1e3, errs_dst3, "C0o-", label="dst3")
+    ax.loglog(dxs_weno5 / 1e3, errs_weno5, "C3s-", label="weno5")
+    ref = errs_dst3[-1] * (dxs_dst3 / dxs_dst3[-1])
+    ax.loglog(dxs_dst3 / 1e3, ref, "k--", lw=0.8, label="O(dx)")
+    ax.set_xlabel("dx [km]")
+    ax.set_ylabel("L2 error in T(x, T_end)")
+    ax.set_title("Transport: C_a = U0 dt/dx = const")
+    ax.grid(True, which="both", alpha=0.4)
+    ax.legend()
+
+    ax = axes[1]
+    ax.loglog(dxs_wave / 1e3, errs_wave, "C2o-", label="implicit_cn")
+    ref2 = errs_wave[-2] * (dxs_wave / dxs_wave[-2]) ** 2
+    ax.loglog(dxs_wave / 1e3, ref2, "k--", lw=0.8, label="O(dx²)")
+    ax.set_xlabel("dx [km]")
+    ax.set_ylabel("L2 error in η(x, T_end)")
+    ax.set_title("Gravity wave: C_g = c dt/dx = const")
+    ax.grid(True, which="both", alpha=0.4)
+    ax.legend()
+
+    fig.suptitle(
+        "Ocean CFL-aware convergence — diffusion deferred "
+        "(F_slow → barotropic substep contaminates rate)",
+        fontsize=11,
+    )
+    fig.tight_layout()
+    out = CONV_OUT_DIR / "convergence_ocean.png"
+    fig.savefig(out, dpi=140)
+    plt.close(fig)
+    print(f"wrote {out}")
+
+
 def main():
     plot_inertial()
     plot_damped_inertial()
     plot_burgers()
     plot_viscous_decay()
-    print(f"\nAll PNGs written to {OUT_DIR}")
+    plot_convergence()
+    print(f"\nAll PNGs written to {OUT_DIR} and {CONV_OUT_DIR}")
 
 
 if __name__ == "__main__":

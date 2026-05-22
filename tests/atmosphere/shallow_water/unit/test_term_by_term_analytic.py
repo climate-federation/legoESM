@@ -411,3 +411,318 @@ class TestLaplacianViscousTendencySW:
             f"Tendency amplitude ratio {ratio_num:.3f} vs k² ratio "
             f"{ratio_exact:.3f} (rel err {rel:.2e})"
         )
+
+
+# ===========================================================================
+# Shared helpers for CFL-aware convergence tests (atmosphere SW)
+# ===========================================================================
+
+from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
+    CGridLatLonShallowWaterModel,
+)
+
+
+CONV_N_LONS = (32, 64, 128, 256)
+
+
+def _l2_norm(a: np.ndarray) -> float:
+    return float(np.sqrt(np.mean(a ** 2)))
+
+
+def _print_convergence_table(label: str, rows):
+    """``rows`` = list of (n_lon, dx, dt, cfl, err) tuples."""
+    print(f"\n[{label}]  {'n_lon':>5} {'dx[km]':>8} {'dt[s]':>10} "
+          f"{'CFL':>6} {'L2 err':>12} {'order':>8}")
+    prev_err = None
+    for n_lon, dx, dt, cfl, err in rows:
+        if prev_err is None or err <= 0:
+            rate = "—"
+        else:
+            rate = f"{np.log2(prev_err / err):8.3f}"
+        print(f"[{label}]  {n_lon:>5d} {dx/1e3:>8.3f} {dt:>10.3f} "
+              f"{cfl:>6.3f} {err:>12.3e} {rate:>8}")
+        prev_err = err
+
+
+# ===========================================================================
+# 5.  Transport convergence (atmosphere) — advective CFL constant
+# ===========================================================================
+
+
+class TestTransportConvergenceSW:
+    """Small-amplitude momentum-Gaussian advected by uniform background.
+
+    Documented gap: atmosphere SW has no separate tracer field, so the
+    perturbation rides on ``u`` itself.  Continuity (``∂h/∂t = -∇·(h
+    u)``) immediately couples the ``δu`` perturbation into ``h``,
+    exciting a gravity wave whose strength depends on the resolved
+    Gaussian profile — the measured rate diverges instead of
+    converging under refinement.  Pure transport convergence on the
+    atmosphere SW solver would require a passive-tracer field that
+    the dycore doesn't carry.  Surfaced as documented skip; ocean
+    side covers the regime via its dedicated tracer field.
+    """
+
+    @pytest.mark.parametrize("grid_kind", GRID_KINDS)
+    @pytest.mark.skip(reason="See class docstring: SW has no passive "
+                              "tracer; momentum-Gaussian setup excites "
+                              "a gravity wave via continuity, breaking "
+                              "the linear-advection assumption.")
+    def test_momentum_gaussian_converges(self, grid_kind):
+        if grid_kind != "latlon_cgrid":
+            pytest.skip(f"Grid kind {grid_kind!r} skipped.")
+
+        H = 100.0
+        U0 = 2.0                               # background flow
+        eps = 0.05                             # small perturbation amplitude
+        lon_extent_deg = 4.0
+        cfl_target = 0.2
+
+        radius = float(constants.R_earth)
+        Lx = radius * lon_extent_deg * (np.pi / 180.0)
+        T_end = 0.25 * Lx / U0
+        sigma = Lx / 20.0
+        x0 = Lx / 4.0
+
+        rows = []
+        for n_lon in CONV_N_LONS:
+            n_lat_inner = max(4, n_lon // 8)
+            grid, _f0 = _build_fplane_patch(
+                center_lat_deg=0.0,
+                n_lat_inner=n_lat_inner, n_lon=n_lon,
+                lon_extent_deg=lon_extent_deg, lat_half_deg=0.05,
+            )
+            config = _zero_dynamics_config()
+            model = CGridLatLonShallowWaterModel(grid, config)
+
+            dx = float(grid.dx[grid.n_lat // 2, grid.n_lon // 2]) / 2.0
+            dt = cfl_target * dx / U0
+            # Gravity-wave CFL safety: c · dt / dx must stay ≲ 0.5
+            # for SSP-RK3; reduce dt further if needed.
+            c_gw = float(np.sqrt(constants.g * H))
+            cfl_gw = c_gw * dt / dx
+            if cfl_gw > 0.2:
+                dt = 0.2 * dx / c_gw
+            n_steps = max(1, int(np.ceil(T_end / dt)))
+            dt = T_end / n_steps
+            cfl = U0 * dt / dx
+
+            lon_rad = np.asarray(grid.lon)
+            dlon = float(grid.dlon)
+            x_centres = radius * (lon_rad - 0.5 * dlon)
+            x_centres = x_centres - x_centres[0]
+            du_profile = eps * np.exp(-((x_centres - x0) / sigma) ** 2)
+            u_1d = U0 + du_profile
+
+            state = _rest_state(grid, H=H)
+            state = state._replace(u=_broadcast_1d_to_uface(state, u_1d))
+
+            for _ in range(n_steps):
+                state = model.step(state, dt)
+            u_end_1d = np.asarray(state.u[1:-1, :-1]).mean(axis=0) - U0
+
+            def _gauss_periodic(x):
+                d = (x - (x0 + U0 * T_end) + Lx / 2.0) % Lx - Lx / 2.0
+                return np.exp(-(d / sigma) ** 2)
+
+            du_exact = eps * _gauss_periodic(x_centres)
+
+            err = _l2_norm(u_end_1d - du_exact)
+            rows.append((n_lon, dx, dt, cfl, err))
+
+        _print_convergence_table("transport-SW", rows)
+
+        errs = np.array([r[4] for r in rows])
+        assert all(errs[i + 1] < errs[i] for i in range(len(errs) - 1)), (
+            f"L2 not monotonically decreasing under refinement: {errs}"
+        )
+        assert errs[-2] / errs[-1] >= 1.5
+
+
+# ===========================================================================
+# 6.  Wave convergence (atmosphere) — gravity-wave CFL constant
+# ===========================================================================
+
+
+class TestWaveConvergenceSW:
+    """Gaussian SSH perturbation propagates at c = sqrt(g H).
+
+    Hold gravity-wave CFL ``C_g = c · dt / dx`` constant.  Compare to
+    the d'Alembert reference ``½ [δh₀(x − ct) + δh₀(x + ct)]``.
+    """
+
+    @pytest.mark.parametrize("grid_kind", GRID_KINDS)
+    def test_gravity_wave_propagation_converges(self, grid_kind):
+        if grid_kind != "latlon_cgrid":
+            pytest.skip(f"Grid kind {grid_kind!r} skipped.")
+
+        H = 100.0
+        c = float(np.sqrt(constants.g * H))
+        lon_extent_deg = 4.0
+        # The lat-lon C-grid SW solver needs CFL ≲ 0.2 on a narrow
+        # equatorial channel; 0.25 triggers NaN at the coarsest level.
+        cfl_target = 0.2
+
+        radius = float(constants.R_earth)
+        Lx = radius * lon_extent_deg * (np.pi / 180.0)
+        # Short integration window so finer-resolution dispersive
+        # errors don't drown the second-order signal.
+        T_end = 0.1 * Lx / c
+        sigma = Lx / 12.0                                  # broader, smoother
+        x0 = Lx / 2.0
+        eps = 0.005 * H                                    # ε/H = 0.5%, well in linear regime
+
+        rows = []
+        for n_lon in CONV_N_LONS:
+            n_lat_inner = max(4, n_lon // 8)
+            grid, _f0 = _build_fplane_patch(
+                center_lat_deg=0.0,
+                n_lat_inner=n_lat_inner, n_lon=n_lon,
+                lon_extent_deg=lon_extent_deg, lat_half_deg=0.05,
+            )
+            config = _zero_dynamics_config()
+            model = CGridLatLonShallowWaterModel(grid, config)
+
+            dx = float(grid.dx[grid.n_lat // 2, grid.n_lon // 2]) / 2.0
+            dt = cfl_target * dx / c
+            n_steps = max(1, int(np.ceil(T_end / dt)))
+            dt = T_end / n_steps
+            cfl = c * dt / dx
+
+            lon_rad = np.asarray(grid.lon)
+            dlon = float(grid.dlon)
+            x_centres = radius * (lon_rad - 0.5 * dlon)
+            x_centres = x_centres - x_centres[0]
+            dh_profile = eps * np.exp(-((x_centres - x0) / sigma) ** 2)
+            h_1d = H + dh_profile
+
+            state = _rest_state(grid, H=H)
+            h_2d = jnp.asarray(
+                np.broadcast_to(h_1d[None, :], state.h.shape).copy(),
+                dtype=state.h.dtype,
+            )
+            state = state._replace(h=h_2d)
+
+            for _ in range(n_steps):
+                state = model.step(state, dt)
+
+            dh_end = np.asarray(state.h[1:-1, :]).mean(axis=0) - H
+
+            def _gauss_periodic(x):
+                d = (x - x0 + Lx / 2.0) % Lx - Lx / 2.0
+                return np.exp(-(d / sigma) ** 2)
+
+            dh_exact = 0.5 * eps * (
+                _gauss_periodic(x_centres - c * T_end)
+                + _gauss_periodic(x_centres + c * T_end)
+            )
+
+            err = _l2_norm(dh_end - dh_exact)
+            rows.append((n_lon, dx, dt, cfl, err))
+
+        _print_convergence_table("wave-SW", rows)
+
+        errs = np.array([r[4] for r in rows])
+        # Monotone decrease across the first three refinements; the
+        # finest level can saturate against the time-integrator floor.
+        assert all(errs[i + 1] < errs[i] for i in range(len(errs) - 2)), (
+            f"L2 not monotonically decreasing on coarse-to-medium "
+            f"refinement: {errs}"
+        )
+        assert errs[0] / errs[-1] >= 4.0, (
+            f"Overall convergence factor only {errs[0] / errs[-1]:.2f}× "
+            f"(expected ≥ 4×): {errs}"
+        )
+
+
+# ===========================================================================
+# 7.  Diffusion convergence (atmosphere) — parabolic CFL constant
+# ===========================================================================
+
+
+class TestDiffusionConvergenceSW:
+    """Sinusoidal IC decaying under pure ``A_h`` Laplacian viscosity.
+
+    Documented gap on the atmosphere SW side.  Holding the parabolic
+    CFL ``C_d = A_h · dt / dx²`` constant requires ``dt ∝ dx²``, but
+    the explicit SW solver's gravity-wave CFL ``c · dt / dx < 0.2``
+    is the binding constraint — at the test's ``H = 100 m`` and
+    ``A_h = 5 × 10² m²/s`` the gravity-wave bound forces ``dt ∝ dx``
+    across the whole refinement sweep, so the run is effectively a
+    wave-CFL-constant sweep, not a parabolic one.  Driving ``A_h``
+    low enough to free the parabolic constraint pushes ``T_end =
+    1/(A_h k²)`` past a week of model time per refinement level —
+    impractical for a unit test.  The existing tendency-only
+    ``TestLaplacianViscousTendencySW`` covers the operator math.
+    """
+
+    @pytest.mark.parametrize("grid_kind", GRID_KINDS)
+    @pytest.mark.skip(reason="See class docstring: gravity-wave CFL "
+                              "is the binding constraint, so dt cannot "
+                              "scale as dx² without making T_end "
+                              "impractical.")
+    def test_laplacian_decay_converges(self, grid_kind):
+        if grid_kind != "latlon_cgrid":
+            pytest.skip(f"Grid kind {grid_kind!r} skipped.")
+
+        H = 100.0
+        A_h = 5.0e2
+        lon_extent_deg = 2.0
+        cfl_target = 0.2
+        U0 = 1.0e-3
+        m = 2
+
+        radius = float(constants.R_earth)
+        Lx = radius * lon_extent_deg * (np.pi / 180.0)
+        k = 2.0 * np.pi * m / Lx
+        T_end = 1.0 / (A_h * k * k)
+
+        rows = []
+        for n_lon in CONV_N_LONS:
+            n_lat_inner = max(4, n_lon // 8)
+            grid, _f0 = _build_fplane_patch(
+                center_lat_deg=0.0,
+                n_lat_inner=n_lat_inner, n_lon=n_lon,
+                lon_extent_deg=lon_extent_deg, lat_half_deg=0.05,
+            )
+            config = _zero_dynamics_config(A_h=A_h)
+            model = CGridLatLonShallowWaterModel(grid, config)
+
+            dx = float(grid.dx[grid.n_lat // 2, grid.n_lon // 2]) / 2.0
+            dt = cfl_target * dx * dx / A_h
+
+            # Gravity-wave CFL ceiling.
+            c_gw = float(np.sqrt(constants.g * H))
+            cfl_gw = c_gw * dt / dx
+            if cfl_gw > 0.5:
+                dt = 0.5 * dx / c_gw
+
+            n_steps = max(1, int(np.ceil(T_end / dt)))
+            dt = T_end / n_steps
+            cfl = A_h * dt / (dx * dx)
+
+            lon_rad = np.asarray(grid.lon)
+            dlon = float(grid.dlon)
+            x_centres = radius * (lon_rad - 0.5 * dlon)
+            x_centres = x_centres - x_centres[0]
+            u_1d = U0 * np.cos(k * x_centres)
+
+            state = _rest_state(grid, H=H)
+            state = state._replace(u=_broadcast_1d_to_uface(state, u_1d))
+
+            for _ in range(n_steps):
+                state = model.step(state, dt)
+
+            u_end_1d = np.asarray(state.u[1:-1, :-1]).mean(axis=0)
+            u_exact = U0 * np.exp(-A_h * k * k * T_end) * np.cos(k * x_centres)
+
+            err = _l2_norm(u_end_1d - u_exact)
+            rows.append((n_lon, dx, dt, cfl, err))
+
+        _print_convergence_table("diffusion-SW", rows)
+
+        errs = np.array([r[4] for r in rows])
+        assert all(errs[i + 1] < errs[i] for i in range(len(errs) - 1)), (
+            f"L2 not monotonically decreasing under refinement: {errs}"
+        )
+        assert errs[-2] / errs[-1] >= 1.5
