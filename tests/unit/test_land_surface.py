@@ -208,6 +208,35 @@ class TestLoadLandFraction:
         assert float(jnp.max(f_land)) > 0.5
         assert float(jnp.min(f_land)) < 0.5
 
+    def test_regrid_icon_unstructured_mask(self, tmp_path):
+        """An ICON unstructured FR_LAND mask is regridded by KD-tree."""
+        import xarray as xr
+
+        # Synthetic ICON-style unstructured grid: scattered cell centroids
+        # with clon/clat in radians and a 1-D FR_LAND field.
+        rng = np.random.default_rng(0)
+        ncell = 4000
+        clon = rng.uniform(-np.pi, np.pi, ncell)
+        clat = np.arcsin(rng.uniform(-1.0, 1.0, ncell))  # area-uniform
+        # Northern hemisphere = land, southern = ocean.
+        fr_land = np.where(clat > 0.0, 1.0, 0.0)
+        ds = xr.Dataset(
+            {"FR_LAND": (("cell",), fr_land)},
+            coords={"clon": (("cell",), clon), "clat": (("cell",), clat)},
+        )
+        path = tmp_path / "icon_extpar_test.nc"
+        ds.to_netcdf(path)
+
+        from legoesm.grids.topography import load_land_fraction
+        grid = create_cubed_sphere(N_CS)
+        f_land = load_land_fraction(grid, str(path))
+
+        assert f_land.shape == (6, N_CS, N_CS)
+        assert jnp.all((f_land >= 0.0) & (f_land <= 1.0))
+        # Both land and ocean cells are picked up by the KD-tree regrid.
+        assert float(jnp.max(f_land)) > 0.5
+        assert float(jnp.min(f_land)) < 0.5
+
 
 class TestStepUnifiedLand:
     def test_jitted_step_unified_threads_T_land(self):

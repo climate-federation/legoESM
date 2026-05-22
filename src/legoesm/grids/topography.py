@@ -216,14 +216,16 @@ class TopographyConfig(NamedTuple):
     clip_negative : bool
         If True, set negative elevations (ocean floor) to 0.
     land_mask_path : str
-        Optional path to a separate land-sea-mask NetCDF file (e.g. CMIP6
-        ``sftlf`` or an ERA5 ``lsm`` invariant).  When set, the land
-        fraction is taken from this file instead of being derived from
-        ``elevation > 0`` — which avoids misclassifying below-sea-level
-        land (Caspian/Dead Sea/Netherlands) as ocean.
+        Optional path to a separate land-sea-mask NetCDF file — a regular
+        lat-lon mask (CMIP6 ``sftlf``, ERA5 ``lsm``) or an ICON
+        unstructured ``extpar`` file (``FR_LAND``); the grid type is
+        auto-detected.  When set, the land fraction is taken from this
+        file instead of being derived from ``elevation > 0`` — which
+        avoids misclassifying below-sea-level land (Caspian/Dead
+        Sea/Netherlands) as ocean.
     land_mask_var : str
         Variable name in ``land_mask_path``.  Empty → auto-detect among
-        ``sftlf``, ``lsm``, ``land_sea_mask``, ``land``,
+        ``FR_LAND``, ``sftlf``, ``lsm``, ``land_sea_mask``, ``land``,
         ``land_area_fraction``.
     """
     source: str = "flat"
@@ -619,6 +621,84 @@ def _target_grid_degrees(grid):
     return target_lat_2d, target_lon_2d, is_gaussian, grid_spacing
 
 
+def _load_land_fraction_icon(
+    grid,
+    path: str,
+    var_name: str = "",
+) -> jnp.ndarray:
+    """Regrid an ICON unstructured land-sea mask to the model grid.
+
+    ICON ``extpar`` files store the land fraction (``FR_LAND``) on the
+    unstructured icosahedral grid: a 1-D ``(cell,)`` field with per-cell
+    centroid coordinates ``clon``/``clat`` in radians.  Regridding uses a
+    KD-tree nearest-neighbour search on the unit sphere — the same
+    approach as the ICON SST/SIC forcing in ``forcing/amip.py``.
+
+    Parameters
+    ----------
+    grid : CubedSphereGrid or GaussianGrid
+        Target model grid (``grid_lat``/``grid_lon`` in radians).
+    path : str
+        ICON unstructured NetCDF (e.g. ``icon_extpar_*.nc``).
+    var_name : str, optional
+        Mask variable name; empty → auto-detect (``FR_LAND`` first).
+
+    Returns
+    -------
+    jax.Array
+        Land fraction in [0, 1], same shape as ``grid.grid_lat``.
+    """
+    import xarray as xr
+    from scipy.spatial import cKDTree
+
+    ds = xr.open_dataset(path)
+    try:
+        all_names = set(ds.data_vars) | set(ds.coords)
+        if var_name:
+            mask_var = var_name
+        else:
+            mask_var = None
+            for c in ("FR_LAND", "fr_land", "sftlf", "lsm",
+                      "land_sea_mask", "land", "land_area_fraction"):
+                if c in all_names:
+                    mask_var = c
+                    break
+            if mask_var is None:
+                raise KeyError(
+                    f"No land-fraction variable in ICON file {path}; "
+                    f"available: {sorted(ds.data_vars)}"
+                )
+        clon = ds["clon"].values.astype(np.float64)   # radians
+        clat = ds["clat"].values.astype(np.float64)
+        mask = ds[mask_var].values.astype(np.float64)
+    finally:
+        ds.close()
+
+    # Land fraction is static — collapse any leading (e.g. time) axis.
+    while mask.ndim > 1:
+        mask = mask[0]
+    mask = np.where(np.isnan(mask), 0.0, mask)
+    if np.nanmax(mask) > 1.5:        # percent → fraction
+        mask = mask / 100.0
+    mask = np.clip(mask, 0.0, 1.0)
+
+    # KD-tree nearest-neighbour from ICON centroids (3-D unit sphere).
+    x_s = np.cos(clat) * np.cos(clon)
+    y_s = np.cos(clat) * np.sin(clon)
+    z_s = np.sin(clat)
+    tree = cKDTree(np.stack([x_s, y_s, z_s], axis=-1))
+
+    grid_lat = np.asarray(grid.grid_lat)   # radians
+    grid_lon = np.asarray(grid.grid_lon)   # radians
+    target_shape = grid_lat.shape
+    x_t = np.cos(grid_lat.ravel()) * np.cos(grid_lon.ravel())
+    y_t = np.cos(grid_lat.ravel()) * np.sin(grid_lon.ravel())
+    z_t = np.sin(grid_lat.ravel())
+    _, idx = tree.query(np.stack([x_t, y_t, z_t], axis=-1))
+
+    return jnp.asarray(mask[idx].reshape(target_shape))
+
+
 def load_land_fraction(
     grid,
     path: str,
@@ -628,15 +708,17 @@ def load_land_fraction(
 
     A standalone entry point for the land fraction alone (independent of
     topography), so a real land-sea mask can be used with any
-    ``topography`` setting — including ``flat``.
+    ``topography`` setting — including ``flat``.  Both regular lat-lon
+    masks (CMIP6 ``sftlf``, ERA5 ``lsm``) and ICON unstructured masks
+    (``icon_extpar_*.nc`` ``FR_LAND``) are supported; the grid type is
+    auto-detected.
 
     Parameters
     ----------
     grid : CubedSphereGrid or GaussianGrid
         Target model grid.
     path : str
-        Land-sea-mask NetCDF (CMIP6 ``sftlf`` percent, ERA5 ``lsm``
-        fraction, etc.).
+        Land-sea-mask NetCDF.
     var_name : str, optional
         Mask variable name; empty → auto-detect.
 
@@ -646,6 +728,17 @@ def load_land_fraction(
         Land fraction in [0, 1], shape ``(6, n, n)`` for cubed-sphere or
         ``(n_lat, n_lon)`` for Gaussian.
     """
+    import xarray as xr
+
+    ds = xr.open_dataset(path)
+    is_icon = (
+        "cell" in ds.dims and "clon" in ds.coords and "clat" in ds.coords
+    )
+    ds.close()
+
+    if is_icon:
+        return _load_land_fraction_icon(grid, path, var_name)
+
     target_lat_2d, target_lon_2d, _, _ = _target_grid_degrees(grid)
     f_land = _load_land_fraction_file(
         path, var_name, target_lat_2d, target_lon_2d
@@ -743,13 +836,13 @@ def load_real_topography(
                             target_lat_2d, target_lon_2d)
 
     # Land fraction: prefer an explicit land-sea-mask file (true land
-    # fraction, including below-sea-level land); otherwise derive it
-    # from sub-grid elevation sampling (elevation > 0).
+    # fraction, including below-sea-level land; regular lat-lon or ICON
+    # unstructured); otherwise derive it from sub-grid elevation
+    # sampling (elevation > 0).
     if config.land_mask_path:
-        f_land = _load_land_fraction_file(
-            config.land_mask_path, config.land_mask_var,
-            target_lat_2d, target_lon_2d,
-        )
+        f_land = np.asarray(load_land_fraction(
+            grid, config.land_mask_path, config.land_mask_var,
+        ))
     else:
         f_land = _derive_land_fraction(lat_src, lon_src, elev_data,
                                        target_lat_2d, target_lon_2d,
