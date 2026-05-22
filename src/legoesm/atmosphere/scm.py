@@ -375,8 +375,20 @@ class SingleColumnModel:
         stateful_turb = physics_config.turbulence.scheme in (
             "tke", "clubb_lite", "edmf"
         )
-        stateful_conv = physics_config.convection.scheme in (
-            "mass_flux", "edmf", "tiedtke", "bechtold",
+        # Every convection scheme except the diagnostic ``sbm``, ``dca``,
+        # ``kuo`` and ``none`` reads/writes ``conv_prog_profile`` (M_b
+        # relaxation, mass-flux carry, profile-carrying closures) or
+        # the AR1 noise state — all unsafe to evaluate with a stale
+        # stage-1 carry under a multi-stage integrator.
+        stateful_conv_schemes = (
+            "mass_flux", "edmf",
+            "zhang_mcfarlane", "kain_fritsch", "emanuel",
+            "tiedtke", "bechtold",
+        )
+        stateful_conv = physics_config.convection.scheme in stateful_conv_schemes
+        throttled_conv = (
+            physics_config.convection.scheme != "none"
+            and getattr(physics_config.convection, "update_interval_steps", 1) != 1
         )
         stateful_gwd = physics_config.gravity_wave_drag.scheme == (
             "prognostic_spectral"
@@ -389,6 +401,8 @@ class SingleColumnModel:
             bad.append(f"turbulence={physics_config.turbulence.scheme!r}")
         if stateful_conv:
             bad.append(f"convection={physics_config.convection.scheme!r}")
+        if throttled_conv:
+            bad.append("convection.update_interval_steps != 1")
         if stateful_gwd:
             bad.append("gravity_wave_drag='prognostic_spectral'")
         if diurnal_rad:
