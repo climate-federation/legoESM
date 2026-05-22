@@ -523,6 +523,15 @@ def compute_moisture_convergence(
     advection in the dycore proper still uses the limiter; this is a
     closure diagnostic, not an advected quantity.
     """
+    # Single-column model: no horizontal flux ⇒ MC ≡ 0. Detected by
+    # ``grid_n_columns == 1`` so the SCM grid stays decoupled from the
+    # heavyweight grid classes. Returning zeros lets schemes that use
+    # MC as a trigger (Tiedtke, Bechtold) run in single-column mode with
+    # closure parameters that depend only on local profile state.
+    if getattr(grid, "grid_n_columns", None) == 1:
+        ncol_flat = q_v_grid.reshape(-1, q_v_grid.shape[-1]).shape[0]
+        return jnp.zeros((ncol_flat, q_v_grid.shape[-1]), dtype=q_v_grid.dtype)
+
     if isinstance(grid, CubedSphereGrid):
         # q_v_grid shape (6, n, n, nlev).  ``fv_flux_divergence_3d``
         # already returns the tendency form ``-div(q·V)`` (see its

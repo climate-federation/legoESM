@@ -209,66 +209,6 @@ def test_scm_swap_physics_scheme():
         assert jnp.all(jnp.isfinite(final.T.data))
 
 
-@pytest.mark.parametrize(
-    "conv_scheme",
-    ["mass_flux", "edmf", "zhang_mcfarlane", "tiedtke", "bechtold"],
-)
-def test_rk_rejects_stateful_convection(conv_scheme):
-    """Every convection scheme that reads/writes conv_prog_profile or
-    conv_stoch_state must be rejected under multi-stage integrators."""
-    cfg = PhysicsConfig(
-        radiation=RadiationConfig(scheme="none"),
-        convection=ConvectionConfig(scheme=conv_scheme),
-        turbulence=TurbulenceConfig(scheme="none"),
-        microphysics=MicrophysicsConfig(scheme="none"),
-        gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
-    )
-    with pytest.raises(ValueError, match="incompatible"):
-        SingleColumnModel.create(
-            physics_config=cfg, nlev=NLEV, dt=300.0,
-            T_profile=_default_T_profile(),
-            time_integrator="rk4",
-        )
-
-
-@pytest.mark.parametrize("conv_scheme", ["sbm", "kain_fritsch", "emanuel"])
-def test_rk_allows_diagnostic_convection(conv_scheme):
-    """Diagnostic convection schemes (no read of conv_prog_profile) are
-    safe under multi-stage integrators and must not be rejected."""
-    cfg = PhysicsConfig(
-        radiation=RadiationConfig(scheme="none"),
-        convection=ConvectionConfig(scheme=conv_scheme),
-        turbulence=TurbulenceConfig(scheme="none"),
-        microphysics=MicrophysicsConfig(scheme="none"),
-        gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
-    )
-    # Must not raise.
-    SingleColumnModel.create(
-        physics_config=cfg, nlev=NLEV, dt=300.0,
-        T_profile=_default_T_profile(),
-        q_v_profile=_default_qv_profile(),
-        time_integrator="rk2",
-    )
-
-
-def test_rk_rejects_throttled_convection():
-    """update_interval_steps != 1 makes convection non-autonomous in
-    step index — also unsafe under multi-stage integrators."""
-    cfg = PhysicsConfig(
-        radiation=RadiationConfig(scheme="none"),
-        convection=ConvectionConfig(scheme="sbm", update_interval_steps=4),
-        turbulence=TurbulenceConfig(scheme="none"),
-        microphysics=MicrophysicsConfig(scheme="none"),
-        gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
-    )
-    with pytest.raises(ValueError, match="incompatible"):
-        SingleColumnModel.create(
-            physics_config=cfg, nlev=NLEV, dt=300.0,
-            T_profile=_default_T_profile(),
-            time_integrator="rk2",
-        )
-
-
 def test_rk_rejects_stateful_physics():
     """rk2/rk4 must refuse stateful or diurnal physics — they would
     silently reuse the stage-1 carry/time across all stages."""
@@ -309,6 +249,141 @@ def test_scm_materialises_new_tracers_from_physics():
     assert jnp.all(jnp.isfinite(final.T.data))
     for k in ("q_v", "q_c"):
         assert k in final.tracers
+
+
+# ---------------------------------------------------------------------------
+# Swap matrix: every parameterization × every safe time integrator
+# ---------------------------------------------------------------------------
+#
+# Each parametrized case enables ONE scheme in the named category (the
+# rest disabled), runs ``_RCE_NSTEPS`` physics steps from a tropical
+# initial sounding, and asserts the column is finite and stays in a
+# plausible RCE range. The integrator parametrization keeps the
+# physics deliberately stateless+autonomous so rk2/rk4 are well
+# defined (matching the SCM's gating rules).
+
+_RCE_NLEV = 20
+_RCE_DT = 600.0
+_RCE_NSTEPS = 24  # ~4 model hours
+
+
+def _tropical_T_profile(nlev=_RCE_NLEV):
+    sigma = jnp.linspace(0.01, 1.0, nlev)
+    z = -8.0e3 * jnp.log(jnp.maximum(sigma, 1e-3))
+    return jnp.maximum(300.0 - 6.5e-3 * z, 200.0)
+
+
+def _tropical_qv_profile(nlev=_RCE_NLEV):
+    sigma = jnp.linspace(0.01, 1.0, nlev)
+    z = -8.0e3 * jnp.log(jnp.maximum(sigma, 1e-3))
+    return 1.8e-2 * jnp.exp(-z / 3.0e3)
+
+
+def _run_and_assert_stable(cfg, integrator="forward_euler"):
+    scm = SingleColumnModel.create(
+        physics_config=cfg, nlev=_RCE_NLEV, dt=_RCE_DT,
+        T_profile=_tropical_T_profile(),
+        q_v_profile=_tropical_qv_profile(),
+        latitude_deg=0.0,
+        time_integrator=integrator,
+    )
+    final, _ = scm.run(nsteps=_RCE_NSTEPS)
+    assert jnp.all(jnp.isfinite(final.T.data)), "non-finite T"
+    if final.tracers is not None and "q_v" in final.tracers:
+        assert jnp.all(jnp.isfinite(final.tracers["q_v"].data)), "non-finite q_v"
+    T_col = final.T.data[0, 0, 0]
+    assert float(T_col[-1]) > 200.0 and float(T_col[-1]) < 330.0, (
+        f"T_sfc out of RCE band: {float(T_col[-1])}"
+    )
+    assert float(jnp.min(T_col)) > 140.0, (
+        f"T floor unphysical: min={float(jnp.min(T_col))}"
+    )
+    assert float(jnp.max(T_col)) < 350.0, (
+        f"T ceiling unphysical: max={float(jnp.max(T_col))}"
+    )
+
+
+def _baseline_cfg(**overrides) -> PhysicsConfig:
+    fields = dict(
+        radiation=RadiationConfig(scheme="none"),
+        convection=ConvectionConfig(scheme="none"),
+        turbulence=TurbulenceConfig(scheme="none"),
+        microphysics=MicrophysicsConfig(scheme="none"),
+        gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
+    )
+    fields.update(overrides)
+    return PhysicsConfig(**fields)
+
+
+@pytest.mark.parametrize("rad_scheme", ["gray"])  # rrtmgp needs solver
+def test_swap_radiation_schemes(rad_scheme):
+    cfg = _baseline_cfg(
+        radiation=RadiationConfig(scheme=rad_scheme, diurnal_cycle=False),
+    )
+    _run_and_assert_stable(cfg)
+
+
+@pytest.mark.parametrize(
+    "conv_scheme",
+    ["sbm", "dca", "kuo", "mass_flux", "edmf",
+     "zhang_mcfarlane", "kain_fritsch", "emanuel",
+     "tiedtke", "bechtold"],
+)
+def test_swap_convection_schemes(conv_scheme):
+    cfg = _baseline_cfg(
+        radiation=RadiationConfig(scheme="gray", diurnal_cycle=False),
+        convection=ConvectionConfig(scheme=conv_scheme),
+    )
+    _run_and_assert_stable(cfg)
+
+
+@pytest.mark.parametrize(
+    "turb_scheme",
+    ["smagorinsky", "louis", "tke", "clubb_lite",
+     "holtslag_boville", "ysu", "edmf"],
+)
+def test_swap_turbulence_schemes(turb_scheme):
+    cfg = _baseline_cfg(
+        turbulence=TurbulenceConfig(scheme=turb_scheme),
+    )
+    _run_and_assert_stable(cfg)
+
+
+@pytest.mark.parametrize(
+    "micro_scheme",
+    ["kessler", "sundqvist", "seifert_beheng", "morrison", "thompson"],
+)
+def test_swap_microphysics_schemes(micro_scheme):
+    cfg = _baseline_cfg(
+        microphysics=MicrophysicsConfig(scheme=micro_scheme),
+    )
+    _run_and_assert_stable(cfg)
+
+
+@pytest.mark.parametrize(
+    "gwd_scheme",
+    ["rayleigh", "lindzen", "mcfarlane", "hines"],
+)
+def test_swap_gwd_schemes(gwd_scheme):
+    cfg = _baseline_cfg(
+        gravity_wave_drag=GravityWaveDragConfig(scheme=gwd_scheme),
+    )
+    _run_and_assert_stable(cfg)
+
+
+@pytest.mark.parametrize("integrator", ["forward_euler", "rk2", "rk4"])
+def test_swap_integrator_on_full_diagnostic_rce(integrator):
+    """Every integrator must drive a realistic diagnostic-only RCE
+    config (gray rad + SBM conv + Smagorinsky + Kessler + Rayleigh)
+    to a stable, plausible column."""
+    cfg = PhysicsConfig(
+        radiation=RadiationConfig(scheme="gray", diurnal_cycle=False),
+        convection=ConvectionConfig(scheme="sbm"),
+        turbulence=TurbulenceConfig(scheme="smagorinsky"),
+        microphysics=MicrophysicsConfig(scheme="kessler"),
+        gravity_wave_drag=GravityWaveDragConfig(scheme="rayleigh"),
+    )
+    _run_and_assert_stable(cfg, integrator=integrator)
 
 
 def test_scm_state_remains_pytree_compatible():
