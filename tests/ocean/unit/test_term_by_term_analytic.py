@@ -803,7 +803,13 @@ class TestWaveConvergence:
         T_end = 0.25 * Lx / c
         sigma = Lx / 20.0
         x0 = Lx / 2.0
-        eps = 0.01 * H_max
+        # ε/H = 1e-4 keeps the O(ε²/H) nonlinear correction well
+        # below the numerical floor across the full sweep.  At
+        # ε/H = 1 % (the original choice) the model correctly
+        # resolves O(ε/H) nonlinear physics that the linearised
+        # d'Alembert reference does not — that gap manifests as a
+        # convergence floor in the L2 error, not a model bug.
+        eps = 1.0e-4 * H_max
 
         rows = []
         for n_lon in CONV_N_LONS:

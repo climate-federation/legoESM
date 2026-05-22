@@ -347,7 +347,9 @@ def _run_wave_sweep_sw():
     Lx = radius * lon_extent_deg * (np.pi / 180.0)
     T_end = 0.1 * Lx / c
     sigma = Lx / 12.0; x0 = Lx / 2.0
-    eps = 0.005 * H
+    # ε/H = 5e-5 keeps O(ε²/H) nonlinearity below the numerical
+    # floor across the sweep — matches the matching test setup.
+    eps = 5.0e-5 * H
 
     dxs, errs = [], []
     for n_lon in CONV_N_LONS:

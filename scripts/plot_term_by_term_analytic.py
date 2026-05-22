@@ -520,7 +520,10 @@ def _run_wave_sweep():
     Lx = radius * lon_extent_deg * (np.pi / 180.0)
     T_end = 0.25 * Lx / c
     sigma = Lx / 20.0; x0 = Lx / 2.0
-    eps = 0.01 * H_max
+    # Small ε so the O(ε²/H) nonlinear correction stays below the
+    # numerical floor — matches the test setup in
+    # `tests/ocean/unit/test_term_by_term_analytic.py`.
+    eps = 1.0e-4 * H_max
 
     dxs, errs = [], []
     for n_lon in CONV_N_LONS:

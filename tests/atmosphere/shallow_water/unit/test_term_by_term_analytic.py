@@ -570,7 +570,12 @@ class TestWaveConvergenceSW:
         T_end = 0.1 * Lx / c
         sigma = Lx / 12.0                                  # broader, smoother
         x0 = Lx / 2.0
-        eps = 0.005 * H                                    # ε/H = 0.5%, well in linear regime
+        # ε/H = 5e-5 keeps the O(ε²/H) nonlinear correction below
+        # the numerical floor across the full refinement sweep.
+        # Larger ε turns the model's correctly-resolved nonlinear
+        # physics into an apparent "convergence floor" against the
+        # linearised d'Alembert reference.
+        eps = 5.0e-5 * H
 
         rows = []
         for n_lon in CONV_N_LONS:
