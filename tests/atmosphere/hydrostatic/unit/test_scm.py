@@ -209,6 +209,67 @@ def test_scm_swap_physics_scheme():
         assert jnp.all(jnp.isfinite(final.T.data))
 
 
+@pytest.mark.parametrize(
+    "conv_scheme",
+    ["mass_flux", "edmf", "zhang_mcfarlane", "tiedtke", "bechtold"],
+)
+def test_rk_rejects_stateful_convection(conv_scheme):
+    """Profile/scalar-carrying convection schemes must be rejected
+    under multi-stage integrators (they read prior conv_prog_profile
+    or conv_stoch_state)."""
+    cfg = PhysicsConfig(
+        radiation=RadiationConfig(scheme="none"),
+        convection=ConvectionConfig(scheme=conv_scheme),
+        turbulence=TurbulenceConfig(scheme="none"),
+        microphysics=MicrophysicsConfig(scheme="none"),
+        gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
+    )
+    with pytest.raises(ValueError, match="incompatible"):
+        SingleColumnModel.create(
+            physics_config=cfg, nlev=NLEV, dt=300.0,
+            T_profile=_default_T_profile(),
+            q_v_profile=_default_qv_profile(),
+            time_integrator="rk4",
+        )
+
+
+@pytest.mark.parametrize("conv_scheme", ["sbm", "kain_fritsch", "emanuel"])
+def test_rk_allows_diagnostic_convection(conv_scheme):
+    """Diagnostic convection (``del conv_prog_profile``) is safe under
+    multi-stage integrators and must NOT be rejected."""
+    cfg = PhysicsConfig(
+        radiation=RadiationConfig(scheme="none"),
+        convection=ConvectionConfig(scheme=conv_scheme),
+        turbulence=TurbulenceConfig(scheme="none"),
+        microphysics=MicrophysicsConfig(scheme="none"),
+        gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
+    )
+    SingleColumnModel.create(
+        physics_config=cfg, nlev=NLEV, dt=300.0,
+        T_profile=_default_T_profile(),
+        q_v_profile=_default_qv_profile(),
+        time_integrator="rk2",
+    )
+
+
+def test_rk_rejects_throttled_convection():
+    """update_interval_steps != 1 makes convection non-autonomous in
+    step index — unsafe under multi-stage integrators."""
+    cfg = PhysicsConfig(
+        radiation=RadiationConfig(scheme="none"),
+        convection=ConvectionConfig(scheme="sbm", update_interval_steps=4),
+        turbulence=TurbulenceConfig(scheme="none"),
+        microphysics=MicrophysicsConfig(scheme="none"),
+        gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
+    )
+    with pytest.raises(ValueError, match="incompatible"):
+        SingleColumnModel.create(
+            physics_config=cfg, nlev=NLEV, dt=300.0,
+            T_profile=_default_T_profile(),
+            time_integrator="rk2",
+        )
+
+
 def test_rk_rejects_stateful_physics():
     """rk2/rk4 must refuse stateful or diurnal physics — they would
     silently reuse the stage-1 carry/time across all stages."""
