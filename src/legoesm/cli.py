@@ -261,8 +261,10 @@ def cmd_test(args):
         try:
             from legoesm.visualization.maps import (
                 plot_global_field, plot_conservation_timeseries,
+                plot_dgrid_winds_per_tile,
             )
             import os
+            import numpy as np
             os.makedirs(args.output, exist_ok=True)
 
             plot_global_field(
@@ -276,6 +278,64 @@ def cmd_test(args):
                 diagnostics, dt=args.dt * diag_interval,
                 title=f"Williamson Test {args.case}: Conservation",
                 save_path=os.path.join(args.output, f"williamson{args.case}_conservation.png"),
+            )
+
+            # Issue #274: emit final winds.  The PlateCarree plots show
+            # geographic east/north components, so they go through
+            # ``dgrid_to_center_geographic`` (rotates BEFORE the corner
+            # → cell-centre 4-point average).  Skipping the rotation —
+            # e.g. via the face-local ``dgrid_to_center_vector`` /
+            # ``_to_sw_state`` path — mislabels face-aligned components
+            # as zonal/meridional and produces spurious O(25 m/s)
+            # ``v_north`` for a purely zonal initial condition.  The
+            # native D-grid arrays then go to a per-tile panel since
+            # no canonical (lon, lat) is defined at the D-grid corners.
+            from legoesm.core.operators_cdgrid import dgrid_to_center_geographic
+            from legoesm.core.field import Field as _Field
+            u_east, v_north = dgrid_to_center_geographic(
+                state.u_d, state.v_d, _cdgrid_tmp,
+            )
+            u_east_field = _Field(
+                data=u_east, name="u_east", dims=("face", "x", "y"),
+                units="m/s", long_name="Zonal (eastward) wind",
+            )
+            v_north_field = _Field(
+                data=v_north, name="v_north", dims=("face", "x", "y"),
+                units="m/s", long_name="Meridional (northward) wind",
+            )
+            wind_lim = float(np.nanmax(np.abs(np.asarray(u_east))))
+            wind_lim = max(
+                wind_lim,
+                float(np.nanmax(np.abs(np.asarray(v_north)))),
+            )
+            wind_lim = wind_lim if wind_lim > 0 else 1.0
+            plot_global_field(
+                u_east_field, grid,
+                title=f"Williamson Test {args.case}: zonal wind u (Day {args.days})",
+                cmap="RdBu_r",
+                vmin=-wind_lim, vmax=wind_lim,
+                projection="platecarree",
+                colorbar_label="u [m/s]",
+                save_path=os.path.join(args.output, f"williamson{args.case}_u_platecarree.png"),
+            )
+            plot_global_field(
+                v_north_field, grid,
+                title=f"Williamson Test {args.case}: meridional wind v (Day {args.days})",
+                cmap="RdBu_r",
+                vmin=-wind_lim, vmax=wind_lim,
+                projection="platecarree",
+                colorbar_label="v [m/s]",
+                save_path=os.path.join(args.output, f"williamson{args.case}_v_platecarree.png"),
+            )
+            plot_dgrid_winds_per_tile(
+                state.u_d, state.v_d,
+                title=(
+                    f"Williamson Test {args.case}: native D-grid winds "
+                    f"(Day {args.days})"
+                ),
+                save_path=os.path.join(
+                    args.output, f"williamson{args.case}_dgrid_winds.png"
+                ),
             )
             logger.info(f"Plots saved to {args.output}/")
         except ImportError:
