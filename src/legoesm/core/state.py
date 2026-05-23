@@ -399,13 +399,27 @@ class PlaneNonHydrostaticState(NamedTuple):
     ``jnp.roll`` / ``jnp.pad(..., mode='wrap')`` in
     ``plane_operators``.
 
+    Staggering — nominal vs operational
+    -----------------------------------
+    Field labels below describe the **nominal Arakawa-C staggering**
+    that the future C-grid refactor will honour. In the current
+    PR2b / PR3b ``plane_compressible_euler_slow_tendencies`` body
+    ``u`` and ``v`` are operationally consumed as **cell-centered**
+    values — the A-grid simplification documented under the
+    "A-grid simplification used in PR2b" section of
+    ``compressible_euler_plane.py``. Downstream callers can rely on
+    the nominal labels; the slow-tendency body is responsible for
+    any interpolation a future C-grid refactor adds.
+
     Fields
     ------
     u : Field
-        Zonal wind [m/s] at x-faces (Arakawa-C).
+        Zonal wind [m/s]. Nominal Arakawa-C x-face; operationally
+        cell-centered for PR2b / PR3b.
         Shape ``(ny, nx, nlev)``.
     v : Field
-        Meridional wind [m/s] at y-faces (Arakawa-C).
+        Meridional wind [m/s]. Nominal Arakawa-C y-face; operationally
+        cell-centered for PR2b / PR3b.
         Shape ``(ny, nx, nlev)``.
     w : Field
         Vertical velocity [m/s] at half (interface) levels.

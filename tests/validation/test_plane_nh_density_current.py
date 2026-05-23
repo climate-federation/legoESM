@@ -59,7 +59,7 @@ NX, NY, NLEV = 16, 4, 16
 DX = DY = 400.0       # m
 LZ = 3_200.0          # m
 DT = 0.5              # s
-N_STEPS = 20          # → 10 s integration
+N_STEPS = 60          # → 30 s integration (3x longer than PR2d via upwind)
 THETA_PERT = -2.0     # K (CI-weakened; Straka uses -15 K)
 L_BUBBLE_X = 1_200.0  # m
 L_BUBBLE_Z = 800.0    # m
