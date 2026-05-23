@@ -938,7 +938,27 @@ def plane_compressible_euler_slow_tendencies(
         )
         dw_dt = dw_dt + _variable_K_diffusion_vlast(w, K_m_half, grid)
 
-    zero_tracers = jnp.zeros_like(state.tracers.data)
+    # 12. Tracer advection (PR3d). Advective form for each tracer
+    #     via the same upwind helpers used for momentum / theta.
+    #     ``state.tracers.data`` has shape ``(ny, nx, nlev,
+    #     n_tracers)``; vmap the helper over the trailing tracer
+    #     axis. ``n_tracers == 0`` short-circuits to a zero-shape
+    #     output (no compute).
+    tracers = state.tracers.data
+    if tracers.shape[-1] > 0:
+        # Vmap over tracer axis: each call handles one (ny, nx, nlev)
+        # tracer slice with the cell-centered u, v.
+        def _tracer_tend_one(q):
+            return (
+                _upwind_advection_x(q, u, grid.dx)
+                + _upwind_advection_y(q, v, grid.dy)
+                + _vertical_advection_plane(q, w, height_coord, J)
+            )
+        dtracers_dt = jax.vmap(_tracer_tend_one, in_axes=-1, out_axes=-1)(
+            tracers,
+        )
+    else:
+        dtracers_dt = jnp.zeros_like(tracers)
     zero_phis = jnp.zeros_like(state.phis.data)
 
     return PlaneNonHydrostaticTendencies(
@@ -948,7 +968,7 @@ def plane_compressible_euler_slow_tendencies(
         dtheta_prime_dt=state.theta_prime.replace(data=dtheta_p_dt),
         drho_prime_dt=state.rho_prime.replace(data=drho_p_dt),
         dphis_dt=state.phis.replace(data=zero_phis),
-        dtracers_dt=state.tracers.replace(data=zero_tracers),
+        dtracers_dt=state.tracers.replace(data=dtracers_dt),
     )
 
 
@@ -1184,13 +1204,11 @@ class PlaneCompressibleEulerModel:
         self,
         state: PlaneNonHydrostaticState,
         dt: float,
+        physics_fn=None,
     ) -> PlaneNonHydrostaticState:
         """Advance the dycore by ``dt`` seconds.
 
         Calls the shared SSP-RK3 split-explicit driver under the hood.
-        PR2b does not accept a ``physics_fn`` — the dycore is dry and
-        does not couple to any physics until PR3 wires microphysics
-        and the LES closures.
 
         Parameters
         ----------
@@ -1198,17 +1216,18 @@ class PlaneCompressibleEulerModel:
             Current prognostic state.
         dt : float
             Outer time step in seconds.
+        physics_fn : callable, optional
+            Physics tendency callable (PR3d). Signature
+            ``physics_fn(state, grid, height_coord, terrain_metric) ->
+            PlaneNonHydrostaticTendencies``. Added to the slow
+            tendency once per outer RK stage (matches MPAS / cubed-
+            sphere convention). ``None`` (default) skips the call.
 
         Returns
         -------
         PlaneNonHydrostaticState
             State after one full SSP-RK3 step with acoustic substeps.
         """
-        if state.tracers.data.shape[-1] != 0:
-            raise NotImplementedError(
-                "PR2b plane dycore only supports n_tracers == 0; tracer "
-                "transport lands in PR3 alongside microphysics."
-            )
         if self.config.fix_mass and self.config.anchor_mass_to_initial:
             if self._target_mass is None:
                 self._target_mass = compute_dry_mass_plane(
@@ -1219,18 +1238,19 @@ class PlaneCompressibleEulerModel:
             target = compute_dry_mass_plane(
                 state, self.grid, self.height_coord, self.terrain_metric,
             )
-        return self._step_jit(state, dt, target)
+        return self._step_jit(state, dt, target, physics_fn)
 
     # ------------------------------------------------------------------
     # JIT boundary
     # ------------------------------------------------------------------
 
-    @functools.partial(jax.jit, static_argnums=0)
+    @functools.partial(jax.jit, static_argnums=(0, 4))
     def _step_jit(
         self,
         state: PlaneNonHydrostaticState,
         dt: float,
         target_mass: jax.Array | None,
+        physics_fn=None,
     ) -> PlaneNonHydrostaticState:
         se_config = SplitExplicitConfig(
             n_substeps=self.config.n_acoustic_substeps,
@@ -1242,6 +1262,29 @@ class PlaneCompressibleEulerModel:
                 s, self.grid, self.height_coord, self.terrain_metric,
                 self.config,
             )
+            if physics_fn is not None:
+                phys = physics_fn(
+                    s, self.grid, self.height_coord, self.terrain_metric,
+                )
+                # Add physics tendencies to dycore slow tendency.
+                tend = PlaneNonHydrostaticTendencies(
+                    du_dt=tend.du_dt.replace(
+                        data=tend.du_dt.data + phys.du_dt.data),
+                    dv_dt=tend.dv_dt.replace(
+                        data=tend.dv_dt.data + phys.dv_dt.data),
+                    dw_dt=tend.dw_dt.replace(
+                        data=tend.dw_dt.data + phys.dw_dt.data),
+                    dtheta_prime_dt=tend.dtheta_prime_dt.replace(
+                        data=tend.dtheta_prime_dt.data
+                        + phys.dtheta_prime_dt.data),
+                    drho_prime_dt=tend.drho_prime_dt.replace(
+                        data=tend.drho_prime_dt.data
+                        + phys.drho_prime_dt.data),
+                    dphis_dt=tend.dphis_dt,
+                    dtracers_dt=tend.dtracers_dt.replace(
+                        data=tend.dtracers_dt.data
+                        + phys.dtracers_dt.data),
+                )
             # Rewrap as ``PlaneNonHydrostaticState`` so the shared
             # ``pytree_axpy`` inside ``split_explicit_step`` can align
             # the leaves — it requires matching NamedTuple types
