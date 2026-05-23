@@ -65,6 +65,7 @@ def bootstrap(
     distributed: bool = False,
     grid_type: str = "cubed_sphere",
     configure_xla: bool = True,
+    allow_level_fallback: bool = False,
 ) -> RuntimeConfig:
     """One-shot runtime initialisation.
 
@@ -92,6 +93,12 @@ def bootstrap(
         ``"cubed_sphere"``, ``"latlon"``, or ``"spectral"``.
     configure_xla : bool
         Apply per-backend XLA flags.
+    allow_level_fallback : bool
+        Issue #273 follow-up.  When True and ``grid_type='cubed_sphere'``
+        and ``n_devices`` fails face-sharding divisibility (e.g. 4),
+        route through the level-parallel cubed-sphere mesh instead
+        of clamping to the nearest face-compatible count.  Default
+        ``False`` preserves the legacy clamp-or-raise behavior.
 
     Returns
     -------
@@ -138,6 +145,7 @@ def bootstrap(
         backend=backend,
         distributed=distributed,
         grid_type=grid_type,
+        allow_level_fallback=allow_level_fallback,
     )
 
     # 5. Build immutable snapshot --------------------------------------------
@@ -206,10 +214,19 @@ def bootstrap_from_yaml_config(config) -> RuntimeConfig:
 
     grid_type = config.get("grid.type", "cubed_sphere")
 
+    # Issue #273 follow-up: opt-in level-fallback when the YAML config
+    # requests it (``hardware.parallelism.allow_level_fallback: true``
+    # or the convenience alias ``shard_radiation_columns: true`` which
+    # implies a non-face-divisible device count is expected).
+    allow_level_fallback = bool(
+        config.get("hardware.parallelism.allow_level_fallback", False)
+    )
+
     return bootstrap(
         precision=precision,
         backend=backend,
         n_devices=n_devices,
         distributed=distributed,
         grid_type=grid_type,
+        allow_level_fallback=allow_level_fallback,
     )

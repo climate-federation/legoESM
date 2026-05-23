@@ -966,6 +966,9 @@ class ModelDriver:
             distributed=self.config.distributed,
             grid_type=self.config.grid.grid_type,
             n_devices=self.config.n_devices,
+            allow_level_fallback=getattr(
+                self.config, "allow_level_fallback", False,
+            ),
         )
         self._device_config = rc.device_config
 

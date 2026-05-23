@@ -1180,17 +1180,52 @@ def build_physics_pipeline(grid, sigma, config):
 
     # Issue #273 follow-up: build a column-shard mesh when the
     # ExperimentConfig opts in.  The mesh shards the flattened column
-    # axis across all visible devices so the per-column radiation
-    # kernel parallelizes on device counts that fail cubed-sphere
-    # face-divisibility (e.g. 4-GPU node).  When the flag is off or
-    # only one device is visible, ``column_mesh`` stays ``None`` and
-    # PhysicsPipeline takes the legacy single-mesh path.
+    # axis across the *runtime-selected* device set so the per-column
+    # radiation kernel parallelizes on device counts that fail
+    # cubed-sphere face-divisibility (e.g. 4-GPU node) while still
+    # honoring whatever subset of visible devices the active
+    # ``ParallelRuntime`` / ``DeviceConfig`` owns.
+    #
+    # Codex adversarial review 019e544b (2026-05-23): using raw
+    # ``jax.devices()`` here would silently override a runtime that
+    # had been bootstrapped onto a subset of devices (e.g. an
+    # ensemble member that explicitly took 2-of-4) and create
+    # hard-to-debug cross-mesh resharding.  Always prefer the active
+    # ``DeviceConfig.mesh.devices``; fall back to ``jax.devices()``
+    # only when no runtime is active (e.g. unit tests that build the
+    # pipeline directly without a bootstrap step).
     column_mesh = None
     if getattr(config, "shard_radiation_columns", False):
+        from legoesm.parallel.column_shard import create_column_mesh
+        from legoesm.parallel.mesh import get_active_config
         import jax
-        if len(jax.devices()) > 1:
-            from legoesm.parallel.column_shard import create_column_mesh
-            column_mesh = create_column_mesh(n_devices=len(jax.devices()))
+
+        active = get_active_config()
+        if active is not None and active.mesh is not None:
+            runtime_devices = list(active.mesh.devices.reshape(-1))
+        else:
+            runtime_devices = list(jax.devices())
+
+        n_runtime_devices = len(runtime_devices)
+        if n_runtime_devices > 1:
+            # Validate up-front so a misconfiguration fails at build
+            # time, not deep inside the JIT'd hot path on the first
+            # radiation call.
+            if adapter.ncol % n_runtime_devices != 0:
+                raise ValueError(
+                    f"shard_radiation_columns=True requires "
+                    f"adapter.ncol={adapter.ncol} divisible by the "
+                    f"runtime-active device count "
+                    f"({n_runtime_devices}).  Pick a device count "
+                    f"that divides 6·n·n on the cubed sphere, "
+                    f"reduce ExperimentConfig.n_devices to a value "
+                    f"that divides ncol, or disable "
+                    f"shard_radiation_columns."
+                )
+            column_mesh = create_column_mesh(
+                n_devices=n_runtime_devices,
+                devices=runtime_devices,
+            )
 
     pipeline = PhysicsPipeline(
         adapter=adapter,

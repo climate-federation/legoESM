@@ -221,6 +221,14 @@ class ExperimentConfig(NamedTuple):
     # production resolutions (C16=1536, C48=13824).  Default off
     # preserves bit-exact behavior.
     shard_radiation_columns: bool = False
+    # Issue #273 follow-up: opt-in level-parallel cubed-sphere mesh
+    # for device counts that fail face-sharding divisibility (e.g.
+    # 4 on a 4×A100 node).  When True, ``bootstrap()`` routes the
+    # dycore mesh to ``cubed_sphere_level`` (replicated horizontal
+    # stencil, level-sharded) instead of clamping to the nearest
+    # face-compatible count.  Pair with ``shard_radiation_columns``
+    # for the full 4-GPU unblock.  Default off.
+    allow_level_fallback: bool = False
 
     def validate_strict(self) -> None:
         """Raise ValueError for invalid parameter values.

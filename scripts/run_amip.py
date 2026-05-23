@@ -304,6 +304,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "on a 4×A100 node where face-sharding clamps to 3."
         ),
     )
+    parser.add_argument(
+        "--allow-level-fallback", action="store_true", default=False,
+        help=(
+            "Issue #273: when the requested device count fails "
+            "cubed-sphere face-sharding divisibility (e.g. 4 on a "
+            "4×A100 node), route the dycore mesh to the level-"
+            "parallel fallback instead of clamping to the nearest "
+            "valid face-shard count (3 on a 4-GPU node).  Pair with "
+            "``--shard-radiation-columns`` for the full 4-GPU "
+            "unblock — dycore runs replicated on the level mesh, "
+            "radiation shards columns across all 4 devices."
+        ),
+    )
 
     # Visualization
     parser.add_argument("--plot", action="store_true", default=False,
@@ -400,6 +413,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         gradient_checkpoint=args.gradient_checkpoint,
         distributed=args.distributed,
         shard_radiation_columns=args.shard_radiation_columns,
+        allow_level_fallback=args.allow_level_fallback,
         ensemble_size=args.ensemble_size,
         ic=args.ic,
         ic_path=args.ic_path,

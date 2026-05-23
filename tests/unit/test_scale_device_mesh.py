@@ -268,11 +268,20 @@ class TestCubedSphereLevelFallback:
 
     def test_create_device_mesh_without_fallback_still_clamps(self):
         """Backward compat: existing call sites that do NOT pass
-        ``allow_level_fallback`` get the legacy clamp-to-nearest
-        behavior so this PR is opt-in."""
+        ``allow_level_fallback`` get the legacy behavior — either
+        clamp-to-available when the requested count exceeds the host
+        device count (single-device host), or raise ``ValueError``
+        when the explicit count fails face-sharding divisibility
+        (multi-device host).  This PR keeps the new fallback strictly
+        opt-in."""
         from legoesm.parallel.mesh import create_device_mesh
-        # On a single-device test host, ``n_devices=4`` clamps to 1.
-        cfg = create_device_mesh(n_devices=4)
-        assert cfg.grid_type == "cubed_sphere"
-        # Single test device → clamps to 1.
-        assert cfg.n_devices == 1
+        if len(jax.devices()) <= 3:
+            # Single-device test host: 4 > 1 → clamp path → n_dev=1.
+            cfg = create_device_mesh(n_devices=4)
+            assert cfg.grid_type == "cubed_sphere"
+            assert cfg.n_devices == 1
+        else:
+            # Multi-device host: 4 ≤ 8 (no clamp), 4 fails
+            # face-divisibility → raise per Codex review contract.
+            with pytest.raises(ValueError, match="divide 6"):
+                create_device_mesh(n_devices=4)

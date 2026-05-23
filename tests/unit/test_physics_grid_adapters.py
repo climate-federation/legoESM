@@ -366,6 +366,21 @@ class TestColumnShardWiring:
     to emulate locally).
     """
 
+    @pytest.fixture(autouse=True)
+    def _reset_active_config(self):
+        """Codex #273 review: the active ``DeviceConfig`` singleton is
+        global state shared across tests.  Earlier tests that called
+        ``create_device_mesh`` leave a stale ``_active_config`` that
+        otherwise leaks into the runtime-aware column-mesh path.
+        Snapshot + restore so each test sees a clean slate."""
+        from legoesm.parallel.mesh import (
+            get_active_config, set_active_config,
+        )
+        prev = get_active_config()
+        set_active_config(None)
+        yield
+        set_active_config(prev)
+
     def test_default_no_column_mesh(self, cs_grid):
         sigma = _make_sigma(NLEV)
         config = _make_config()  # shard_radiation_columns defaults to False
@@ -399,6 +414,70 @@ class TestColumnShardWiring:
             f"test grid ncol={ncol} must divide n_dev={n_dev} "
             f"so the sharded path is exercised cleanly"
         )
+
+    def test_column_mesh_honors_active_runtime_devices(self, cs_grid):
+        """Codex adversarial review 019e544b (#273): the column mesh
+        must use the *runtime-active* device set, not raw
+        ``jax.devices()``.  A bootstrap that explicitly takes a subset
+        (e.g. 2-of-4 devices) must not be overridden by a column mesh
+        that grabs all 4."""
+        if len(jax.devices()) < 4:
+            pytest.skip(
+                "needs ≥4 emulated devices to exercise the subset path"
+            )
+        from legoesm.parallel.mesh import (
+            create_device_mesh, set_active_config, get_active_config,
+        )
+        sigma = _make_sigma(NLEV)
+        config = _make_config(shard_radiation_columns=True)
+        # Force the active DeviceConfig to a 2-device subset.
+        all_devs = jax.devices()
+        prev_active = get_active_config()
+        subset_cfg = create_device_mesh(
+            n_devices=2, devices=all_devs[:2],
+        )
+        set_active_config(subset_cfg)
+        try:
+            pipeline = build_physics_pipeline(cs_grid, sigma, config)
+            assert pipeline.column_mesh is not None
+            # Must match the runtime subset (2), not raw jax.devices() (4).
+            assert pipeline.column_mesh.shape["col"] == 2, (
+                f"column_mesh ignored runtime subset; got "
+                f"col={pipeline.column_mesh.shape['col']}, want 2"
+            )
+            # And the actual device objects must be the subset.
+            mesh_devs = list(pipeline.column_mesh.devices.reshape(-1))
+            assert mesh_devs == list(all_devs[:2])
+        finally:
+            set_active_config(prev_active)
+
+    def test_raises_when_ncol_not_divisible_by_runtime_devices(self, cs_grid):
+        """Codex review: divisibility violation must raise at
+        ``build_physics_pipeline`` time, not silently at JIT trace."""
+        # cs_grid has ncol = 6*4*4 = 96.  Need a runtime device count
+        # that does NOT divide 96 to force the failure.  96 is divisible
+        # by 1,2,3,4,6,8,12,16,24,32,48,96 — pick 5 or 7 if 5+ devices
+        # available.  Otherwise skip.
+        if len(jax.devices()) < 5:
+            pytest.skip("needs ≥5 emulated devices to exercise this")
+        from legoesm.parallel.mesh import (
+            create_device_mesh, set_active_config, get_active_config,
+        )
+        all_devs = jax.devices()
+        # 5 doesn't divide 96 (96 % 5 = 1).
+        prev_active = get_active_config()
+        subset = create_device_mesh(
+            n_devices=5, devices=all_devs[:5],
+            allow_level_fallback=True,
+        )
+        set_active_config(subset)
+        try:
+            sigma = _make_sigma(NLEV)
+            config = _make_config(shard_radiation_columns=True)
+            with pytest.raises(ValueError, match="divisible"):
+                build_physics_pipeline(cs_grid, sigma, config)
+        finally:
+            set_active_config(prev_active)
 
     def test_compute_radiation_core_matches_unsharded(self, cs_grid):
         """Hot-path equivalence: ``compute_radiation_core`` on a
