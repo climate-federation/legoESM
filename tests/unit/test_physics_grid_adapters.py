@@ -348,6 +348,115 @@ class TestBuildPhysicsPipelineSingleColumn:
         assert pipeline.adapter.shape_2d == (1,)
 
 
+class TestColumnShardWiring:
+    """Issue #273 follow-up: ``ExperimentConfig.shard_radiation_columns``
+    drives the construction of a column mesh inside
+    ``build_physics_pipeline``.  Locks the wiring contract:
+
+    1. Flag off (default) → ``pipeline.column_mesh is None``, legacy
+       single-mesh radiation path.
+    2. Flag on + single-device host → ``pipeline.column_mesh is None``
+       (sharding across 1 device is a no-op; helper skips the mesh).
+    3. Flag on + multi-device host → ``pipeline.column_mesh is not None``
+       and the radiation hot path passes the column-format inputs
+       through ``shard_columns``.
+
+    Multi-device assertions only run when at least 2 devices are
+    visible to JAX (use ``XLA_FLAGS=--xla_force_host_platform_device_count=4``
+    to emulate locally).
+    """
+
+    def test_default_no_column_mesh(self, cs_grid):
+        sigma = _make_sigma(NLEV)
+        config = _make_config()  # shard_radiation_columns defaults to False
+        pipeline = build_physics_pipeline(cs_grid, sigma, config)
+        assert pipeline.column_mesh is None
+
+    def test_opt_in_single_device(self, cs_grid):
+        sigma = _make_sigma(NLEV)
+        config = _make_config(shard_radiation_columns=True)
+        pipeline = build_physics_pipeline(cs_grid, sigma, config)
+        if len(jax.devices()) <= 1:
+            # No-op on a single-device host.
+            assert pipeline.column_mesh is None
+        else:
+            assert pipeline.column_mesh is not None
+            assert pipeline.column_mesh.axis_names == ("col",)
+            assert pipeline.column_mesh.shape["col"] == len(jax.devices())
+
+    def test_opt_in_multidevice(self, cs_grid):
+        if len(jax.devices()) < 2:
+            pytest.skip(
+                "single-device host — set XLA_FLAGS to emulate"
+            )
+        sigma = _make_sigma(NLEV)
+        config = _make_config(shard_radiation_columns=True)
+        pipeline = build_physics_pipeline(cs_grid, sigma, config)
+        assert pipeline.column_mesh is not None
+        ncol = pipeline.adapter.ncol
+        n_dev = pipeline.column_mesh.shape["col"]
+        assert ncol % n_dev == 0, (
+            f"test grid ncol={ncol} must divide n_dev={n_dev} "
+            f"so the sharded path is exercised cleanly"
+        )
+
+    def test_compute_radiation_core_matches_unsharded(self, cs_grid):
+        """Hot-path equivalence: ``compute_radiation_core`` on a
+        column-sharded pipeline produces bit-for-bit identical
+        ``dT_dt_rad`` vs the unsharded pipeline on the same inputs.
+        Validates the ``shard_columns`` wiring inside the hot path
+        does not perturb the kernel output."""
+        if len(jax.devices()) < 2:
+            pytest.skip(
+                "single-device host — set XLA_FLAGS to emulate"
+            )
+        sigma = _make_sigma(NLEV)
+        ref_cfg = _make_config(shard_radiation_columns=False)
+        shard_cfg = _make_config(shard_radiation_columns=True)
+        ref = build_physics_pipeline(cs_grid, sigma, ref_cfg)
+        shard = build_physics_pipeline(cs_grid, sigma, shard_cfg)
+
+        # Synthetic state (held_suarez-like).
+        np.random.seed(0)
+        n = cs_grid.n
+        T = jnp.asarray(
+            250.0 + 20.0 * np.random.randn(6, n, n, NLEV)
+        )
+        p_s = jnp.asarray(
+            1.0e5 + 100.0 * np.random.randn(6, n, n)
+        )
+        q_v = jnp.asarray(
+            0.01 * np.abs(np.random.randn(6, n, n, NLEV))
+        )
+        sst = jnp.full((6, n, n), 290.0)
+        sic = jnp.zeros((6, n, n))
+        lat = cs_grid.lat
+        lon = cs_grid.lon
+
+        solar_weights = jnp.zeros((0,))
+        s_0 = 1361.0
+        o3 = None
+        aero = None
+
+        ref_out = ref.compute_radiation_core(
+            T, p_s, q_v, sst, sic, lat, lon,
+            day_of_year=80.0, seconds_of_day=43200.0,
+            solar_weights=solar_weights, s_0=s_0,
+            o3_vmr_precomputed=o3, aerosol_od_precomputed=aero,
+        )
+        shard_out = shard.compute_radiation_core(
+            T, p_s, q_v, sst, sic, lat, lon,
+            day_of_year=80.0, seconds_of_day=43200.0,
+            solar_weights=solar_weights, s_0=s_0,
+            o3_vmr_precomputed=o3, aerosol_od_precomputed=aero,
+        )
+        np.testing.assert_allclose(
+            np.asarray(shard_out[0]),  # dT_dt_rad
+            np.asarray(ref_out[0]),
+            rtol=1.0e-12, atol=1.0e-14,
+        )
+
+
 # ===================================================================
 # Test: physics_step_no_rad through all three grids
 # ===================================================================

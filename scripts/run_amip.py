@@ -290,6 +290,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--distributed", action="store_true", default=False,
                         help="Enable MPI distributed execution (auto-detected from environment)")
     parser.add_argument("--ensemble-size", type=int, default=1)
+    # Issue #273 follow-up: opt-in horizontal-column sharding for the
+    # per-column radiation kernel.  Decouples per-column physics
+    # throughput from cubed-sphere face-divisibility, unblocking
+    # 4-GPU nodes (4 ∉ {1, 2, 3, 6, 24, ...}).  Requires the
+    # flattened column count ``6·n·n`` divisible by the device count
+    # (holds for C16/C48 production resolutions on 1–8 GPUs).
+    parser.add_argument(
+        "--shard-radiation-columns", action="store_true", default=False,
+        help=(
+            "Issue #273: shard the per-column radiation kernel across "
+            "all visible devices.  Required to keep all 4 GPUs busy "
+            "on a 4×A100 node where face-sharding clamps to 3."
+        ),
+    )
 
     # Visualization
     parser.add_argument("--plot", action="store_true", default=False,
@@ -385,6 +399,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         precision=args.precision,
         gradient_checkpoint=args.gradient_checkpoint,
         distributed=args.distributed,
+        shard_radiation_columns=args.shard_radiation_columns,
         ensemble_size=args.ensemble_size,
         ic=args.ic,
         ic_path=args.ic_path,
