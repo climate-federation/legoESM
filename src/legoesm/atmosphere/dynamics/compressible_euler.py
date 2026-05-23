@@ -14,6 +14,74 @@ The A-grid cubed-sphere slow-tendency solver that previously lived here
 has been removed.  Use ``cdgrid_compressible_euler_slow_tendencies`` from
 ``compressible_euler_cdgrid.py`` instead.
 
+Equations solved
+----------------
+Compressible-Euler dry-air system in perturbation form. The prognostic
+state ``NonHydrostaticState`` carries
+
+    u, v          horizontal velocity components
+    w             vertical velocity at half-levels
+    theta_prime   potential-temperature perturbation about ref(z)
+    rho_prime     density perturbation about ref(z)
+    phis          surface geopotential (diagnostic)
+    tracers       passive + reactive tracer mixing ratios
+
+with the full state recovered as
+
+    theta(x, y, z, t) = theta_ref(z) + theta_prime(x, y, z, t)
+    rho(x, y, z, t)   = rho_ref(z)   + rho_prime(x, y, z, t).
+
+The reference profile ``(theta_ref, rho_ref)`` is supplied by
+``HeightCoordinate`` and is hydrostatically balanced. Subtracting it
+keeps the acoustic-substep pressure-gradient terms well-conditioned
+because the dominant background ``g * rho_ref`` cancels analytically.
+
+Acoustic substepping uses the Skamarock-Klemp split-explicit scheme:
+slow horizontal advection + tracer flux divergence + diffusion are
+frozen for ``n_acoustic_substeps`` short substeps that resolve the
+fast acoustic modes. Vertical acoustic terms can be advanced either
+forward-backward (default) or with a tridiagonal implicit solve when
+``semi_implicit_acoustic=True`` — see ``acoustic_substeps`` and
+``acoustic_substeps_semi_implicit`` for the exact update formulas.
+
+Grid callback contract (existing consumers)
+-------------------------------------------
+The acoustic substep routines in this module are grid-agnostic with
+respect to the horizontal stencil: each existing consumer
+(``compressible_euler_cdgrid.py``, ``compressible_euler_mpas.py``,
+``spectral_nh.py``) assembles the horizontal pressure-gradient and
+flux-divergence contributions in its own slow-tendency routine and
+then calls the shared substep kernel for the vertically coupled
+acoustic update.
+
+For that pattern to work, every dycore caller currently must provide:
+
+- ``HeightCoordinate`` exposing ``rho_ref``, ``theta_ref``, ``dz`` and
+  the half-level / full-level arrangement used by the chosen Lorenz
+  staggering.
+- ``TerrainMetric`` exposing the column-local Jacobian ``J`` and
+  half-level scale-factor used inside the vertical implicit solve.
+- A ``physics_fn`` callable that returns physics tendencies on the
+  same state pytree as the dycore, applied between split-explicit
+  outer stages.
+
+This contract is **descriptive, not prescriptive**: it documents the
+shape of what cubed-sphere C-D and MPAS Voronoi do today.
+Plane-specific or lat-lon-specific extensions land in their own
+modules in follow-up PRs of the CRM rollout and may add new optional
+callbacks (vertical-tridiagonal coefficient assembly, periodic-halo
+operator) without changing the existing signatures.
+
+Conservation invariant
+----------------------
+Discrete dry-air mass on each existing grid is ``sum_{cells} rho * J
+* area_cell * dz``. When ``CompressibleEulerConfig.fix_mass=True`` the
+dycore applies a uniform additive correction to ``rho_prime`` so that
+this sum equals a stored target (``anchor_mass_to_initial=True``
+anchors the target to ``t=0`` and prevents drift). The correction is
+constant per outer step and so preserves all spatial gradients used by
+the slow-tendency routine.
+
 References
 ----------
 - Skamarock & Klemp (2008): A Time-Split Nonhydrostatic Atmospheric Model.
