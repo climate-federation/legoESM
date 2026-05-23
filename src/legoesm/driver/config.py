@@ -213,6 +213,14 @@ class ExperimentConfig(NamedTuple):
     distributed: bool = False
     ensemble_size: int = 1
     n_devices: int | str = "auto"  # number of GPUs, or "auto" for all visible
+    # Issue #273 follow-up: opt-in horizontal-column sharding for the
+    # per-column radiation kernel.  Decouples per-column physics
+    # throughput from cubed-sphere face-divisibility (4-GPU node
+    # unblock).  Requires ``6 · n · n`` (the flattened column count)
+    # divisible by the active device count — typically holds for
+    # production resolutions (C16=1536, C48=13824).  Default off
+    # preserves bit-exact behavior.
+    shard_radiation_columns: bool = False
 
     def validate_strict(self) -> None:
         """Raise ValueError for invalid parameter values.
