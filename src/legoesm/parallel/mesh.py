@@ -167,6 +167,7 @@ def create_device_mesh(
     n_devices: int | str = "auto",
     backend: str | None = None,
     devices: Sequence | None = None,
+    allow_level_fallback: bool = False,
 ) -> DeviceConfig:
     """Create a JAX device mesh for cubed-sphere parallelism.
 
@@ -234,15 +235,44 @@ def create_device_mesh(
     if n_devices == "auto":
         n_dev = _largest_valid_cubed_sphere_count(all_count)
         if n_dev != all_count:
+            # Issue #273: when n_devices fails face-sharding divisibility
+            # (e.g. 4 on a 4×A100 node), opt-in level-parallel fallback
+            # keeps every device busy via column-wise sharding instead of
+            # clamping to the nearest face-compatible count.
+            if allow_level_fallback:
+                logger.info(
+                    "create_device_mesh: %d devices fail face-sharding "
+                    "divisibility; allow_level_fallback=True → routing to "
+                    "create_cubed_sphere_level_mesh.",
+                    all_count,
+                )
+                return create_cubed_sphere_level_mesh(
+                    n_devices=all_count, backend=backend, devices=devices,
+                )
             logger.warning(
                 "create_device_mesh: %d device(s) available but %d is not a "
                 "valid cubed-sphere count (must divide 6 for ≤6 devices, or be "
                 "6·k² for >6 devices).  Using %d device(s).  Pass n_devices "
-                "explicitly to suppress this warning.",
-                all_count, all_count, n_dev,
+                "explicitly to suppress this warning, or "
+                "allow_level_fallback=True to keep all %d devices busy on a "
+                "level-parallel mesh (issue #273).",
+                all_count, all_count, n_dev, all_count,
             )
     else:
         n_dev = int(n_devices)
+        if allow_level_fallback:
+            try:
+                _best_tile_factorization(n_dev)
+            except ValueError:
+                logger.info(
+                    "create_device_mesh: n_devices=%d fails face-sharding "
+                    "divisibility; allow_level_fallback=True → routing to "
+                    "create_cubed_sphere_level_mesh.",
+                    n_dev,
+                )
+                return create_cubed_sphere_level_mesh(
+                    n_devices=n_dev, backend=backend, devices=devices,
+                )
 
     if n_dev < 1:
         raise ValueError(f"n_devices must be >= 1, got {n_dev!r}.")
@@ -313,6 +343,120 @@ def create_device_mesh(
         grid_type="cubed_sphere",
     )
     _active_config = config
+    return config
+
+
+# ==============================================================================
+# Cubed-sphere level-parallel fallback (issue #273, 4-GPU unblock)
+# ==============================================================================
+
+def create_cubed_sphere_level_mesh(
+    n_devices: int | str = "auto",
+    backend: str | None = None,
+    devices: Sequence | None = None,
+) -> DeviceConfig:
+    """Create a level-parallel mesh for cubed-sphere on device counts
+    that fail face-sharding divisibility (e.g. 4, 5, 7, 9).
+
+    Replicates the horizontal cubed-sphere stencil across all devices
+    and shards the vertical level axis.  Column-wise physics (radiation,
+    convection, turbulence) parallelizes naturally; the dycore runs
+    replicated on each device (no horizontal halo exchange needed
+    across devices since each holds the full ``(6, n, n)`` field).
+
+    Use case
+    --------
+    Issue #273: 4×A100 GPU node where 4 does not divide 6 and is not
+    ``6·k²``.  Face-only sharding would clamp to 3 GPUs (33 % of the
+    node idle).  Level fallback keeps all 4 GPUs busy on the
+    radiation-dominated workload that drives the throughput gap.
+
+    Status
+    ------
+    *Scaffolding only*.  The mesh is constructed and returned with
+    ``grid_type='cubed_sphere_level'`` so callers can opt in by
+    inspecting the tag.  Full driver integration — replicated-dycore
+    code path, level-axis-aware radiation sharding, vertical halo
+    for level-coupled operators (vertical advection, hydrostatic
+    integration) — is downstream operator work flagged in the
+    issue #273 follow-up plan.
+
+    Parameters
+    ----------
+    n_devices : int or ``"auto"``
+        Number of devices.  ``"auto"`` uses all available.
+    backend : str or None
+        JAX backend.  ``None`` = auto.
+    devices : sequence or None
+        Optional explicit device list.
+
+    Returns
+    -------
+    DeviceConfig
+        ``grid_type='cubed_sphere_level'`` to distinguish from the
+        face-sharded ``cubed_sphere`` path.
+    """
+    global _active_config
+
+    if devices is not None:
+        devices = list(devices)
+    elif backend is not None:
+        try:
+            devices = jax.devices(backend)
+        except RuntimeError:
+            devices = jax.devices()
+    else:
+        devices = jax.devices()
+
+    all_count = len(devices)
+    first_platform = str(getattr(devices[0], "platform", "")) if devices else ""
+    backend_name = (first_platform or jax.default_backend()).upper()
+
+    if n_devices == "auto":
+        n_dev = all_count
+    else:
+        n_dev = min(int(n_devices), all_count)
+
+    if n_dev <= 1:
+        config = DeviceConfig(
+            mesh=None,
+            face_sharding=None,
+            replicated_sharding=None,
+            n_devices=1,
+            backend=backend_name,
+            is_distributed=False,
+            tiling=(1, 1),
+            grid_type="cubed_sphere_level",
+        )
+        _active_config = config
+        return config
+
+    selected = devices[:n_dev]
+    mesh = Mesh(selected, axis_names=("level",))
+    # ``face_sharding`` field reused to carry the level-sharding spec
+    # so existing call sites that read it as "the active partition"
+    # keep working without conditionals.  Tag via ``grid_type`` so
+    # operator code can detect the level path.
+    level_sharding = NamedSharding(mesh, P("level"))
+    replicated_sharding = NamedSharding(mesh, P())
+
+    config = DeviceConfig(
+        mesh=mesh,
+        face_sharding=level_sharding,
+        replicated_sharding=replicated_sharding,
+        n_devices=n_dev,
+        backend=backend_name,
+        is_distributed=False,
+        tiling=(1, 1),
+        grid_type="cubed_sphere_level",
+    )
+    _active_config = config
+    logger.info(
+        "legoESM: %d-device level-parallel cubed-sphere mesh on %s "
+        "(face-sharding divisibility failed; dycore runs replicated, "
+        "physics columns shard over level axis)",
+        n_dev, backend_name,
+    )
     return config
 
 

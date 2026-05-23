@@ -47,6 +47,18 @@ class DycoreConfig(NamedTuple):
     div_damp_scale: float = 1.0
     conservation_fixer: bool = True
     fix_mass: bool = True
+    # Issue #273 Phase 3: Hoskins–Simmons FV3 D-grid implicit
+    # gravity-wave damping.  When ``implicit_grav_wave_use_pcg=True``
+    # and ``implicit_grav_wave_damping > 0``, the post-RK3 surface-
+    # pressure correction switches from explicit forward-Euler
+    # diffusion (conditionally stable at α dt / dx² < 0.5) to an
+    # implicit Helmholtz solve via ``cg_helmholtz_solve`` — removing
+    # the CFL ceiling on the gravity-wave-damping coefficient and
+    # enabling larger production ``dt``.  Empirically supports
+    # α dt / dx² up to ~50 at tol=1e-10 on a (6, n, n) cube.
+    # Default OFF (False, 0.0) preserves legacy bit-exact behavior.
+    implicit_grav_wave_use_pcg: bool = False
+    implicit_grav_wave_damping: float = 0.0
 
 
 class OutputConfig(NamedTuple):

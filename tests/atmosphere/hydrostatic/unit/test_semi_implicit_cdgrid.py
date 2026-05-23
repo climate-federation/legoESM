@@ -476,6 +476,110 @@ class TestStepFV3PCGFallback:
 
 
 # ----------------------------------------------------------------------
+# Stability headroom — CG path enables larger ``α dt / dx²`` than explicit
+# ----------------------------------------------------------------------
+
+
+class TestImplicitStabilityHeadroom:
+    """Issue #273 Phase 3: the CG-driven implicit gravity-wave damping
+    must remain stable at ``α dt / dx²`` ratios where the legacy
+    explicit forward-Euler diffusion (``p_s ← p_s + α dt ∇²p_s``)
+    would violate its CFL bound and blow up.  Locks in the dt-headroom
+    that the Phase-3 solver buys for the production AMIP path."""
+
+    def _build_state(self, grid, sigma, n, nlev):
+        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+            FV3HydrostaticState,
+        )
+        from legoesm.core.field import Field
+        np.random.seed(0)
+        p_s = 1.0e5 + 100.0 * np.random.randn(6, n, n)
+        return FV3HydrostaticState(
+            u_d=Field(data=jnp.zeros((6, n + 1, n + 1, nlev)), name="u_d", dims=()),
+            v_d=Field(data=jnp.zeros((6, n + 1, n + 1, nlev)), name="v_d", dims=()),
+            T=Field(data=jnp.full((6, n, n, nlev), 250.0), name="T", dims=()),
+            p_s=Field(data=jnp.asarray(p_s), name="p_s", dims=()),
+            phis=Field(data=jnp.zeros((6, n, n)), name="phis", dims=()),
+        )
+
+    def _run_n_steps(self, model, state, dt, n_steps):
+        s = state
+        for _ in range(n_steps):
+            s = model._step_fv3(s, dt)
+            jax.block_until_ready(s.p_s.data)
+        return s
+
+    def test_explicit_path_blows_up_at_large_alpha_dt(self):
+        """Baseline: at ``α dt / dx²`` ≈ 5, the legacy explicit
+        forward-Euler diffusion of ``p_s`` is unconditionally unstable
+        (CFL bound is 0.5).  ``p_s`` should diverge to non-finite
+        values within a handful of steps."""
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+            CDGridPrimitiveEquationConfig,
+            CDGridPrimitiveEquationModel,
+        )
+
+        n, nlev = 8, 6
+        grid = create_cubed_sphere(n)
+        sigma = create_sigma_coordinate(nlev)
+        dt = 300.0
+        dx_min = 6.371e6 * (np.pi / 2) / n / np.sqrt(3)
+        alpha = 5.0 * dx_min ** 2 / dt  # α dt / dx² = 5  → explicit unstable
+        cfg_expl = CDGridPrimitiveEquationConfig(
+            implicit_grav_wave_damping=alpha,
+            implicit_grav_wave_use_pcg=False,  # explicit path
+            sponge_tau_sec=-1.0, damp_v=0.0, hyperdiff_coeff=0.0,
+            time_integrator="ssp_rk3",
+        )
+        model_expl = CDGridPrimitiveEquationModel(grid, sigma, cfg_expl)
+        state = self._build_state(grid, sigma, n, nlev)
+        s_expl = self._run_n_steps(model_expl, state, dt, 6)
+        # Explicit path either NaNs or pegs at p_floor (which the
+        # damping run repeatedly forces to the floor when p_s
+        # diverges negative).  Either way ``p_s`` is no longer a
+        # physically reasonable surface-pressure field.
+        ps = np.asarray(s_expl.p_s.data)
+        finite = np.isfinite(ps).all()
+        within_range = (ps.min() > 5.0e4) and (ps.max() < 2.0e5)
+        assert not (finite and within_range), (
+            "explicit gravity-wave damping at α dt / dx²=5 stayed "
+            "bounded — CFL diagnostic is wrong or the test setup "
+            "is too gentle"
+        )
+
+    def test_implicit_pcg_path_stays_stable_at_large_alpha_dt(self):
+        """Phase-3 contract: at the same ``α dt / dx² = 5`` ratio,
+        the implicit CG path remains stable — ``p_s`` finite and
+        within physical bounds for at least 20 steps."""
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+            CDGridPrimitiveEquationConfig,
+            CDGridPrimitiveEquationModel,
+        )
+
+        n, nlev = 8, 6
+        grid = create_cubed_sphere(n)
+        sigma = create_sigma_coordinate(nlev)
+        dt = 300.0
+        dx_min = 6.371e6 * (np.pi / 2) / n / np.sqrt(3)
+        alpha = 5.0 * dx_min ** 2 / dt
+        cfg_pcg = CDGridPrimitiveEquationConfig(
+            implicit_grav_wave_damping=alpha,
+            implicit_grav_wave_use_pcg=True,
+            sponge_tau_sec=-1.0, damp_v=0.0, hyperdiff_coeff=0.0,
+            time_integrator="ssp_rk3",
+        )
+        model_pcg = CDGridPrimitiveEquationModel(grid, sigma, cfg_pcg)
+        state = self._build_state(grid, sigma, n, nlev)
+        s_pcg = self._run_n_steps(model_pcg, state, dt, 20)
+        ps = np.asarray(s_pcg.p_s.data)
+        assert np.isfinite(ps).all()
+        assert ps.min() > 9.0e4, f"p_s min {ps.min():.1f} below physical floor"
+        assert ps.max() < 1.1e5, f"p_s max {ps.max():.1f} above physical ceiling"
+
+
+# ----------------------------------------------------------------------
 # Phase-2 Richardson solver — retained reference / fallback
 # ----------------------------------------------------------------------
 

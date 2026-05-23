@@ -87,12 +87,21 @@ def _supported_device_counts(max_n: int = 1024) -> set[int]:
     return counts
 
 
-def validate_device_count(n: int, grid_type: str = "cubed_sphere") -> None:
+def validate_device_count(
+    n: int,
+    grid_type: str = "cubed_sphere",
+    allow_level_fallback: bool = False,
+) -> None:
     """Raise ``ValueError`` if *n* is not a supported device count.
 
     Unlike the old ``_best_tile_factorization`` which silently rounded
     down, this function fails fast with a precise error message listing
     nearby valid counts.
+
+    Issue #273: pass ``allow_level_fallback=True`` to accept any
+    ``n >= 1`` on the cubed-sphere path — values that fail face-sharding
+    divisibility will route to the level-parallel fallback mesh
+    (``create_cubed_sphere_level_mesh``).
     """
     if grid_type != "cubed_sphere":
         if n < 1:
@@ -104,6 +113,12 @@ def validate_device_count(n: int, grid_type: str = "cubed_sphere") -> None:
 
     valid = _supported_device_counts(max(n * 2, 128))
     if n in valid:
+        return
+
+    if allow_level_fallback:
+        # Level fallback accepts any positive integer; the mesh creator
+        # replicates the horizontal stencil across devices and shards
+        # the level axis.
         return
 
     # Build a helpful suggestion
@@ -120,7 +135,9 @@ def validate_device_count(n: int, grid_type: str = "cubed_sphere") -> None:
         f"Unsupported device count {n} for cubed_sphere. "
         f"Supported counts: 1, 2, 3, 6, 24, 54, 96, 150, 216, 294, 384, ... "
         f"(1/2/3/6 for face-only, or 6*k² for sub-face tiling). "
-        f"{suggestion_str}."
+        f"{suggestion_str}.  Pass allow_level_fallback=True to accept "
+        f"any positive integer via the level-parallel fallback mesh "
+        f"(issue #273)."
     )
 
 

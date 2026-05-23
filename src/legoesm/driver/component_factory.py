@@ -210,6 +210,12 @@ def create_atmosphere_dycore(
             div_damp_coeff=diff.div_damp,
             use_conservation_fixer=dc.conservation_fixer,
             fix_mass=dc.fix_mass,
+            # Issue #273 Phase 3: forward the implicit gravity-wave
+            # damping switches from the canonical driver config.
+            # Default off (both 0/False) keeps the explicit path
+            # bit-exact for existing call sites.
+            implicit_grav_wave_use_pcg=dc.implicit_grav_wave_use_pcg,
+            implicit_grav_wave_damping=dc.implicit_grav_wave_damping,
         )
         return CDGridPrimitiveEquationModel(grid, sigma, cfg)
 

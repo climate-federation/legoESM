@@ -81,6 +81,33 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--start-day", type=float, default=0.0)
     parser.add_argument("--days", type=int, default=200)
     parser.add_argument("--dt", type=float, default=600.0)
+    # Issue #273 Phase 3: implicit gravity-wave damping (semi-implicit
+    # Helmholtz solve via CG).  Off by default to preserve bit-exact
+    # behaviour with the legacy explicit-diffusion path.  Set
+    # ``--implicit-grav-wave-use-pcg --implicit-grav-wave-damping
+    # 1e8`` (typical α ~ 1e7–1e8 m²/s) to remove the explicit-CFL
+    # ceiling and enable larger ``--dt``.
+    parser.add_argument(
+        "--implicit-grav-wave-use-pcg", action="store_true",
+        default=False,
+        help=(
+            "Issue #273 Phase 3: switch the post-RK3 gravity-wave "
+            "damping from explicit forward-Euler to an implicit "
+            "Helmholtz solve via jax.scipy.sparse.linalg.cg.  Removes "
+            "the CFL ceiling on ``--implicit-grav-wave-damping`` and "
+            "enables larger ``--dt``."
+        ),
+    )
+    parser.add_argument(
+        "--implicit-grav-wave-damping", type=float, default=0.0,
+        help=(
+            "Gravity-wave damping coefficient α [m²/s].  ``0`` (default) "
+            "skips the post-RK3 ``p_s`` damping entirely.  Typical "
+            "production: α ~ 1e7–1e8.  At α dt / dx² > 0.5 you MUST "
+            "also pass ``--implicit-grav-wave-use-pcg`` or the "
+            "explicit path will blow up."
+        ),
+    )
     parser.add_argument("--diag-days", type=int, default=5)
 
     # Output
@@ -284,6 +311,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
     dycore_config = DycoreConfig(
         discretization=args.discretization,
         dt=args.dt,
+        implicit_grav_wave_use_pcg=args.implicit_grav_wave_use_pcg,
+        implicit_grav_wave_damping=args.implicit_grav_wave_damping,
     )
 
     output_config = OutputConfig(

@@ -213,3 +213,66 @@ class TestDeviceConfigNamedTuple:
         _ = config.is_distributed
         _ = config.tiling
         _ = config.grid_type
+
+
+# ---------------------------------------------------------------------------
+# Issue #273: level-parallel cubed-sphere fallback for awkward device counts
+# ---------------------------------------------------------------------------
+
+class TestCubedSphereLevelFallback:
+    """Issue #273: 4-GPU A100 nodes fail face-sharding divisibility
+    (4 ∉ {1, 2, 3, 6, 24, ...}).  Level-parallel fallback keeps all 4
+    devices busy by replicating the horizontal stencil and sharding
+    the level axis."""
+
+    def test_create_cubed_sphere_level_mesh_single_device(self):
+        from legoesm.parallel.mesh import create_cubed_sphere_level_mesh
+        cfg = create_cubed_sphere_level_mesh(n_devices=1)
+        assert cfg.n_devices == 1
+        assert cfg.grid_type == "cubed_sphere_level"
+        assert cfg.mesh is None
+
+    def test_validate_accepts_4_with_level_fallback(self):
+        from legoesm.parallel.runtime import validate_device_count
+        # Default validation rejects 4.
+        with pytest.raises(ValueError, match="Unsupported device count 4"):
+            validate_device_count(4, grid_type="cubed_sphere")
+        # With level fallback enabled, accepted.
+        validate_device_count(
+            4, grid_type="cubed_sphere", allow_level_fallback=True,
+        )
+
+    def test_validate_accepts_arbitrary_counts_with_level_fallback(self):
+        from legoesm.parallel.runtime import validate_device_count
+        # Pick a handful of values that fail face-sharding divisibility.
+        for n in (4, 5, 7, 9, 11, 100):
+            validate_device_count(
+                n, grid_type="cubed_sphere", allow_level_fallback=True,
+            )
+
+    def test_create_device_mesh_falls_back_when_allowed(self):
+        """When ``allow_level_fallback=True`` and the requested device
+        count fails face-sharding, the factory routes to the level-
+        parallel mesh instead of raising ValueError."""
+        # ``n_devices=4`` exceeds the single test device, but the
+        # fallback path is exercised before any device-clamp logic.
+        # We assert the path is taken by checking that the returned
+        # config carries the level-mesh ``grid_type`` tag.
+        from legoesm.parallel.mesh import create_device_mesh
+        cfg = create_device_mesh(
+            n_devices=4, allow_level_fallback=True,
+        )
+        # On a single-device host the level mesh degenerates to
+        # ``n_devices=1``, which is still tagged as the level path.
+        assert cfg.grid_type == "cubed_sphere_level"
+
+    def test_create_device_mesh_without_fallback_still_clamps(self):
+        """Backward compat: existing call sites that do NOT pass
+        ``allow_level_fallback`` get the legacy clamp-to-nearest
+        behavior so this PR is opt-in."""
+        from legoesm.parallel.mesh import create_device_mesh
+        # On a single-device test host, ``n_devices=4`` clamps to 1.
+        cfg = create_device_mesh(n_devices=4)
+        assert cfg.grid_type == "cubed_sphere"
+        # Single test device → clamps to 1.
+        assert cfg.n_devices == 1
