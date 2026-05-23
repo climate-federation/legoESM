@@ -834,9 +834,14 @@ def _build_rrtmgp_radiation_fn(config):
     diurnal = config.diurnal_cycle
     S_0 = config.S_0
 
-    # GPU default: Python for-loop unroll over columns (use_scan=False).
-    # Honour the experiment-level override so training/AD workflows can switch
-    # to jax.lax.scan without editing this file.
+    # Issue #273 GPU tuning: defer the scan-vs-unroll choice to
+    # ``rte_utils.recurrent_op_with_halos`` when the experiment
+    # config leaves ``rrtmgp_use_scan`` at its ``None`` default —
+    # auto-picks ``True`` on GPU/TPU (one fused scan kernel) and
+    # ``False`` on CPU/Metal (unrolled).  Explicit ``True``/``False``
+    # in the experiment config still overrides for benchmarking and
+    # AD workflows.
+    _exp_use_scan = getattr(config, 'rrtmgp_use_scan', None)
     rrtmg_config = RRTMGPConfig(
         co2_ppmv=config.co2_ppmv,
         ch4_ppbv=config.ch4_ppbv,
@@ -844,7 +849,7 @@ def _build_rrtmgp_radiation_fn(config):
         sfc_emissivity=config.sfc_emissivity,
         sfc_albedo=config.albedo_ocean,
         S_0=S_0,
-        use_scan=bool(getattr(config, 'rrtmgp_use_scan', False)),
+        use_scan=_exp_use_scan,
         include_clouds=(getattr(config, 'cloud_scheme', 'none') != 'none'),
     )
 

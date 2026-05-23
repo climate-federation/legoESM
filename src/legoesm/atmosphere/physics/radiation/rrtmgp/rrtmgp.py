@@ -180,7 +180,7 @@ class RRTMGP:
       sfc_temperature: Array,
       p_ref_xxc: Array,
       sg_map: dict[str, Array],
-      use_scan: bool = False,
+      use_scan: bool | None = None,
   ) -> dict[str, Array]:
     """Compute the local heating rate due to radiative transfer.
 

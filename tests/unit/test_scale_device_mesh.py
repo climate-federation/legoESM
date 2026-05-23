@@ -7,6 +7,7 @@ device counts and grid types.
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 import jax
 import jax.numpy as jnp
@@ -285,3 +286,76 @@ class TestCubedSphereLevelFallback:
             # face-divisibility → raise per Codex review contract.
             with pytest.raises(ValueError, match="divide 6"):
                 create_device_mesh(n_devices=4)
+
+
+class TestCubedSphereLevelReplicatedDycore:
+    """Issue #273 follow-up: the level-parallel cubed-sphere fallback
+    routes the dycore through a fully-replicated sharding so every
+    device runs the complete horizontal stencil.  Locks in the
+    contract that ``shard_state`` / ``shard_pytree`` on a
+    ``cubed_sphere_level`` mesh do NOT attempt to address a ``face``
+    axis (which the mesh does not have) and instead replicate the
+    state across all devices."""
+
+    def test_sharding_spec_is_replicated(self):
+        """``_make_sharding_spec`` returns ``P()`` for both 3D and 4D
+        face arrays when the mesh is level-parallel."""
+        from legoesm.parallel.mesh import create_cubed_sphere_level_mesh
+        from legoesm.parallel.sharded_dynamics import _make_sharding_spec
+        from jax.sharding import PartitionSpec as P
+        cfg = create_cubed_sphere_level_mesh(n_devices=1)
+        spec = _make_sharding_spec(cfg)
+        assert spec.face_3d == P()
+        assert spec.face_2d == P()
+        assert spec.replicated == P()
+        assert spec.tiled_3d is None
+        assert spec.tiled_2d is None
+
+    def test_shard_pytree_replicates_on_level_mesh(self):
+        """``shard_pytree`` on a level mesh must NOT try to address a
+        ``face`` axis (which would raise a JAX
+        ``unmatched mesh axis`` error)."""
+        if len(jax.devices()) < 2:
+            pytest.skip("multi-device mesh needs ≥2 emulated devices")
+        from legoesm.parallel.mesh import (
+            create_cubed_sphere_level_mesh, shard_pytree,
+        )
+        cfg = create_cubed_sphere_level_mesh(
+            n_devices=len(jax.devices()),
+        )
+        arr_4d = jnp.arange(6 * 4 * 4 * 5, dtype=jnp.float64).reshape(6, 4, 4, 5)
+        arr_3d = jnp.arange(6 * 4 * 4, dtype=jnp.float64).reshape(6, 4, 4)
+        # Must succeed without raising.
+        out = shard_pytree({"u": arr_4d, "p_s": arr_3d}, cfg)
+        # Replicated arrays compare equal element-wise to the original.
+        np.testing.assert_array_equal(np.asarray(out["u"]), np.asarray(arr_4d))
+        np.testing.assert_array_equal(np.asarray(out["p_s"]), np.asarray(arr_3d))
+
+    def test_shard_state_replicates_on_level_mesh(self):
+        """``shard_state`` (the canonical model-driver entry point)
+        must also replicate, not face-shard, on a level mesh."""
+        if len(jax.devices()) < 2:
+            pytest.skip("multi-device mesh needs ≥2 emulated devices")
+        from legoesm.parallel.mesh import create_cubed_sphere_level_mesh
+        from legoesm.parallel.sharded_dynamics import shard_state
+        cfg = create_cubed_sphere_level_mesh(
+            n_devices=len(jax.devices()),
+        )
+
+        # Simulate the prognostic field portion of a HydrostaticState.
+        state = {
+            "u": jnp.zeros((6, 4, 4, 5), dtype=jnp.float64),
+            "v": jnp.zeros((6, 4, 4, 5), dtype=jnp.float64),
+            "T": jnp.full((6, 4, 4, 5), 250.0, dtype=jnp.float64),
+            "p_s": jnp.full((6, 4, 4), 1.0e5, dtype=jnp.float64),
+            "phis": jnp.zeros((6, 4, 4), dtype=jnp.float64),
+        }
+        out = shard_state(state, cfg)
+        # Output preserves values and shapes (replication is a no-op
+        # numerically; only the device placement changes).
+        np.testing.assert_array_equal(
+            np.asarray(out["u"]), np.asarray(state["u"]),
+        )
+        np.testing.assert_array_equal(
+            np.asarray(out["p_s"]), np.asarray(state["p_s"]),
+        )

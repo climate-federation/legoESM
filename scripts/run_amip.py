@@ -136,6 +136,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # when the user did not provide a value.  Resolved to ``1`` after
     # production-profile processing.
     parser.add_argument("--rad-update-steps", type=int, default=None)
+    # Issue #273 GPU tuning: RRTMGP column-recurrence kernel choice.
+    # ``--rrtmgp-use-scan`` forces ``jax.lax.scan`` (smaller graph,
+    # ~5-10× cheaper to JIT — material against the 2600s cold compile
+    # called out in the issue); ``--rrtmgp-no-scan`` forces the
+    # Python for-loop unroll.  Neither flag → auto-pick (scan on
+    # GPU/TPU, unroll on CPU/Metal), which is the new production
+    # default.
+    _rrtmg_scan = parser.add_mutually_exclusive_group()
+    _rrtmg_scan.add_argument(
+        "--rrtmgp-use-scan", dest="rrtmgp_use_scan",
+        action="store_const", const=True, default=None,
+        help=(
+            "Force RRTMGP column recurrence to use jax.lax.scan.  "
+            "Default (no flag) auto-picks scan on GPU/TPU."
+        ),
+    )
+    _rrtmg_scan.add_argument(
+        "--rrtmgp-no-scan", dest="rrtmgp_use_scan",
+        action="store_const", const=False,
+        help=(
+            "Force RRTMGP column recurrence to use a Python for-loop "
+            "(legacy default).  Useful for CPU benchmarking."
+        ),
+    )
     parser.add_argument("--diurnal-cycle", action="store_true", default=False)
     parser.add_argument("--co2-ppmv", type=float, default=415.0)
     parser.add_argument("--ch4-ppbv", type=float, default=1900.0)
@@ -369,6 +393,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         sic_scale=args.sic_scale or 1.0,
         radiation=args.radiation,
         rad_update_steps=args.rad_update_steps,
+        rrtmgp_use_scan=args.rrtmgp_use_scan,
         diurnal_cycle=args.diurnal_cycle,
         co2_ppmv=args.co2_ppmv,
         ch4_ppbv=args.ch4_ppbv,

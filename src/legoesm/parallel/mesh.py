@@ -781,6 +781,16 @@ def shard_pytree(pytree, config: DeviceConfig):
                 return jax.device_put(leaf, config.face_sharding)
             return jax.device_put(leaf, config.replicated_sharding)
 
+        elif config.grid_type == "cubed_sphere_level":
+            # Issue #273 follow-up: level-parallel cubed-sphere mesh.
+            # The dycore runs fully replicated horizontally; the mesh
+            # has only a ``'level'`` axis, so every leaf is placed on
+            # the replicated sharding.  Downstream column-wise physics
+            # builds its own column mesh on the same device set and
+            # shards there (see ``build_physics_pipeline`` for the
+            # column-mesh construction).
+            return jax.device_put(leaf, config.replicated_sharding)
+
         elif config.grid_type == "latlon":
             if leaf.ndim >= 2:
                 return jax.device_put(leaf, config.face_sharding)

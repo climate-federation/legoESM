@@ -637,6 +637,46 @@ class TestRRTMGP:
             assert jnp.all(jnp.isfinite(b))
             assert jnp.allclose(a, b, rtol=1e-5, atol=1e-5)
 
+    def test_use_scan_none_matches_explicit_choice(self):
+        """Issue #273 GPU tuning: ``RRTMGPConfig(use_scan=None)`` (the
+        new production default) must produce the same heating rates
+        as ``use_scan=False`` on CPU and ``use_scan=True`` on GPU/TPU.
+        The local test backend is CPU, so the auto-picked path is
+        the unrolled for-loop.  Equivalence with ``use_scan=False``
+        proves the auto-pick wiring works end-to-end without
+        changing the kernel result."""
+        from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (
+            rrtmgp_radiation,
+            _instance_cache,
+        )
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+
+        ncol, nlev = 3, 20
+        T, p_full, p_half, T_sfc, _, _ = _make_column_data(ncol, nlev)
+        q_v = jnp.full((ncol, nlev), 5.0e-4)
+        cos_zen = jnp.full(ncol, 0.4)
+
+        cfg_explicit = RRTMGPConfig(use_scan=False)
+        cfg_auto = RRTMGPConfig()  # use_scan defaults to None
+        assert cfg_auto.use_scan is None, (
+            "RRTMGPConfig.use_scan default must be None for the "
+            "auto-pick path; production runs rely on this"
+        )
+
+        _instance_cache.clear()
+        out_explicit = rrtmgp_radiation(
+            T, p_full, p_half, T_sfc, q_v, cos_zen, cfg_explicit,
+        )
+        out_auto = rrtmgp_radiation(
+            T, p_full, p_half, T_sfc, q_v, cos_zen, cfg_auto,
+        )
+
+        # CPU host → auto-pick lands on use_scan=False, output identical.
+        assert jnp.allclose(
+            out_explicit.heating_rate, out_auto.heating_rate,
+            rtol=1.0e-12, atol=1.0e-14,
+        )
+
 
 # ===========================================================================
 # Diurnal cycle tests

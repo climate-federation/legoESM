@@ -111,7 +111,13 @@ class ExperimentConfig(NamedTuple):
     #   False = Python for-loop (fully unrolled XLA graph, GPU-friendly default)
     #   True  = jax.lax.scan (smaller graph, often slower per step on GPU but
     #           reduces compile time and is preferred for large nlev or AD)
-    rrtmgp_use_scan: bool = False
+    # Issue #273 GPU tuning: ``None`` defers the choice to
+    # ``rte_utils.recurrent_op_with_halos`` which auto-picks
+    # ``True`` on GPU/TPU (collapses ``nlev`` separate kernel
+    # launches into one fused ``lax.scan`` — the biggest single win
+    # against the 2600s cold-compile time called out in issue #273)
+    # and ``False`` on CPU.  Explicit ``True``/``False`` overrides.
+    rrtmgp_use_scan: bool | None = None
     co2_ppmv: float = 415.0
     ch4_ppbv: float = 1900.0
     n2o_ppbv: float = 332.0
