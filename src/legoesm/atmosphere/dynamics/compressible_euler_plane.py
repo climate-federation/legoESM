@@ -547,6 +547,126 @@ def _horizontal_divergence_centered(
     return _d_dx_centered(u_yxz, grid.dx) + _d_dy_centered(v_yxz, grid.dy)
 
 
+def _variable_K_diffusion_vlast(
+    field_yxz: jax.Array, K_yxz: jax.Array, grid: PlaneGrid,
+) -> jax.Array:
+    """Conservative variable-coefficient diffusion ``∇·(K ∇field)``.
+
+    Discrete flux-form on a uniform doubly-periodic plane:
+
+        ∂_x(K ∂_x f)|_i ≈ (K_{i+1/2}(f_{i+1}-f_i) - K_{i-1/2}(f_i-f_{i-1})) / dx²
+
+    where ``K_{i±1/2} = 0.5(K_i + K_{i±1})`` is the K average to the
+    face. The same in y, summed. Conservative: ``sum(out * area) =
+    0`` under periodic BC. Dissipative: ``sum(f * out * area) ≤ 0``
+    when ``K ≥ 0`` (because the form is ``-sum_faces K |grad f|²`` via
+    discrete integration by parts — verified in
+    :func:`tests/unit/test_plane_nh_smagorinsky.py::test_smag_tendency_is_dissipative`).
+
+    Replaces the naive ``K * laplacian(f)`` which is not conservative
+    when ``K`` is spatially variable.
+
+    Parameters
+    ----------
+    field_yxz : jax.Array
+        The diffused field. Any shape ``(ny, nx, *)`` works.
+    K_yxz : jax.Array
+        Diffusion coefficient. **Must match ``field_yxz.shape``** —
+        the caller is responsible for interpolating K to the right
+        vertical layout (e.g. half-level K for half-level w).
+    """
+    if K_yxz.shape != field_yxz.shape:
+        raise ValueError(
+            f"K_yxz shape {K_yxz.shape} must equal field_yxz shape "
+            f"{field_yxz.shape}; pre-interpolate K to the right "
+            "vertical layout (full level vs half level)."
+        )
+    # Face-averaged K (axis 1 = nx, axis 0 = ny in vlast layout).
+    K_xface_plus = 0.5 * (K_yxz + jnp.roll(K_yxz, -1, axis=1))
+    K_xface_minus = 0.5 * (K_yxz + jnp.roll(K_yxz, 1, axis=1))
+    K_yface_plus = 0.5 * (K_yxz + jnp.roll(K_yxz, -1, axis=0))
+    K_yface_minus = 0.5 * (K_yxz + jnp.roll(K_yxz, 1, axis=0))
+
+    flux_xp = K_xface_plus * (jnp.roll(field_yxz, -1, axis=1) - field_yxz)
+    flux_xm = K_xface_minus * (field_yxz - jnp.roll(field_yxz, 1, axis=1))
+    flux_yp = K_yface_plus * (jnp.roll(field_yxz, -1, axis=0) - field_yxz)
+    flux_ym = K_yface_minus * (field_yxz - jnp.roll(field_yxz, 1, axis=0))
+
+    return (flux_xp - flux_xm) / (grid.dx ** 2) + (
+        flux_yp - flux_ym
+    ) / (grid.dy ** 2)
+
+
+def _compute_smagorinsky_K_m_plane(
+    u_yxz: jax.Array,
+    v_yxz: jax.Array,
+    grid: PlaneGrid,
+    height_coord: HeightCoordinate,
+    c_s: float,
+) -> jax.Array:
+    """Smagorinsky-Lilly eddy viscosity at cell centres.
+
+    ``K_m = (C_s * Δ)^2 * |S|`` with isotropic mixing length
+    ``Δ = (dx * dy * dz)^(1/3)`` and strain-rate magnitude
+    ``|S| = sqrt(2 S_ij S_ij)``. For PR3c the horizontal strain
+    components are computed from cell-centred ``u``, ``v`` via the
+    same centred-difference helpers used by the PG (A-grid
+    simplification carry-over from PR2b — the future C-grid
+    refactor will interpolate to the proper staggered locations).
+
+    Differentiability
+    -----------------
+    ``sqrt`` of the strain-magnitude squared uses the JAX
+    "safe-where" trick (mirrors
+    :func:`core._smagorinsky_visc.compute_smagorinsky_ah_2d`): the
+    forward pass returns exactly zero at zero strain (so the
+    rest-state preservation tests still hold bit-exact), and the
+    backward pass evaluates ``sqrt`` at a safe positive argument
+    so ``jax.grad`` does not see the ``d sqrt(0)`` singularity.
+
+    Parameters
+    ----------
+    u_yxz, v_yxz : jax.Array
+        Cell-centred horizontal velocities, shape ``(ny, nx, nlev)``.
+    grid : PlaneGrid
+        Provides ``dx``, ``dy``.
+    height_coord : HeightCoordinate
+        Provides per-level vertical spacing ``dz`` (shape ``(nlev,)``)
+        for the isotropic mixing length.
+    c_s : float
+        Smagorinsky coefficient. ``0.0`` returns zeros (cheap
+        on/off gating via Python ``if`` in the caller).
+
+    Returns
+    -------
+    K_m : jax.Array
+        Eddy viscosity at cell centres, shape ``(ny, nx, nlev)``.
+    """
+    # Centred strain-rate components (A-grid simplification).
+    du_dx = _d_dx_centered(u_yxz, grid.dx)
+    du_dy = _d_dy_centered(u_yxz, grid.dy)
+    dv_dx = _d_dx_centered(v_yxz, grid.dx)
+    dv_dy = _d_dy_centered(v_yxz, grid.dy)
+
+    S11 = du_dx
+    S22 = dv_dy
+    S12 = 0.5 * (du_dy + dv_dx)
+
+    strain_mag_sq = 2.0 * (S11 * S11 + S22 * S22 + 2.0 * S12 * S12)
+    # Safe-where: forward = sqrt for positive, exactly 0 at zero;
+    # backward dispatches sqrt at safe_x >= 1 so 1/(2*sqrt) stays finite.
+    safe = jnp.where(strain_mag_sq > 0.0, strain_mag_sq, 1.0)
+    strain_mag = jnp.where(
+        strain_mag_sq > 0.0, jnp.sqrt(safe), 0.0,
+    )
+
+    # Isotropic mixing length: cube-root of cell volume.
+    dz = height_coord.dz                              # (nlev,)
+    delta = (grid.dx * grid.dy * dz) ** (1.0 / 3.0)   # (nlev,)
+    delta_sq = (c_s * delta) ** 2                     # (nlev,)
+    return delta_sq * strain_mag
+
+
 def _vertical_advection_plane(
     field_yxz: jax.Array,
     w_yxz_half: jax.Array,
@@ -787,6 +907,37 @@ def plane_compressible_euler_slow_tendencies(
             laplacian_vlast(w, grid), grid,
         )
 
+    # 11. Smagorinsky-Lilly LES eddy viscosity (PR3c). Adds
+    #     ``K_m * Lap(u/v)`` to horizontal momentum, ``K_m / Pr *
+    #     Lap(theta')`` to potential temperature, and
+    #     ``K_m_half * Lap(w)`` to vertical momentum (``K_m`` averaged
+    #     from full to half levels). ``c_s = 0`` skips the branch
+    #     entirely (cheap Python on/off gate).
+    if config.smagorinsky_cs > 0.0:
+        K_m = _compute_smagorinsky_K_m_plane(
+            u, v, grid, height_coord, config.smagorinsky_cs,
+        )
+        # Use conservative variable-K diffusion (flux form):
+        # ``div(K grad f)``. The naive ``K * laplacian(f)`` is not
+        # conservative for spatially varying K and not guaranteed
+        # dissipative — Codex iter-1 finding.
+        du_dt = du_dt + _variable_K_diffusion_vlast(u, K_m, grid)
+        dv_dt = dv_dt + _variable_K_diffusion_vlast(v, K_m, grid)
+        K_h = K_m / config.smagorinsky_prandtl
+        dtheta_p_dt = dtheta_p_dt + _variable_K_diffusion_vlast(
+            theta_p, K_h, grid,
+        )
+        # ``K_m`` is at full levels; interpolate to half levels for w
+        # (vertical centred average for the interior, rigid boundary
+        # K stays at zero so no spurious tendency at the top / bottom
+        # interfaces).
+        K_m_half_interior = 0.5 * (K_m[..., :-1] + K_m[..., 1:])
+        pad_axes = ((0, 0),) * (K_m_half_interior.ndim - 1)
+        K_m_half = jnp.pad(
+            K_m_half_interior, (*pad_axes, (1, 1)),
+        )
+        dw_dt = dw_dt + _variable_K_diffusion_vlast(w, K_m_half, grid)
+
     zero_tracers = jnp.zeros_like(state.tracers.data)
     zero_phis = jnp.zeros_like(state.phis.data)
 
@@ -954,6 +1105,18 @@ def validate_plane_config(config: CompressibleEulerConfig) -> None:
                 "hyperdiffusion damps only with a positive coefficient. "
                 "Pass 0.0 to disable."
             )
+    if config.smagorinsky_cs < 0.0:
+        raise ValueError(
+            f"smagorinsky_cs={config.smagorinsky_cs!r} must be "
+            "non-negative; Smagorinsky-Lilly K_m = (C_s Δ)^2 |S| "
+            "only damps for C_s >= 0. Pass 0.0 to disable."
+        )
+    if config.smagorinsky_cs > 0.0 and config.smagorinsky_prandtl <= 0.0:
+        raise ValueError(
+            f"smagorinsky_prandtl={config.smagorinsky_prandtl!r} must "
+            "be > 0 when smagorinsky_cs > 0; K_h = K_m / Pr inverts "
+            "or NaNs for Pr <= 0."
+        )
 
 
 # --------------------------------------------------------------------- #
