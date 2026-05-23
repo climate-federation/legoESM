@@ -637,6 +637,62 @@ class TestRRTMGP:
             assert jnp.all(jnp.isfinite(b))
             assert jnp.allclose(a, b, rtol=1e-5, atol=1e-5)
 
+    def test_cache_isolates_use_scan_order_sensitive(self):
+        """Codex adversarial review 019e5467 (issue #273): the
+        RRTMGP instance cache must key on ``use_scan`` so the
+        first call's value does not leak into later calls with
+        different ``use_scan``.
+
+        Exercises all 6 orderings of (False, True, None) starting
+        from a clean cache, and asserts the cached instance's
+        ``_config.use_scan`` matches the requested value — i.e.
+        no instance is reused with a stale ``use_scan``."""
+        from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (
+            _instance_cache, _get_instance,
+        )
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+
+        for ordering in [
+            (False, True),
+            (True, False),
+            (False, None),
+            (None, False),
+            (True, None),
+            (None, True),
+        ]:
+            _instance_cache.clear()
+            for use_scan_val in ordering:
+                cfg = RRTMGPConfig(use_scan=use_scan_val)
+                inst = _get_instance(cfg)
+                assert inst._config.use_scan == use_scan_val, (
+                    f"order={ordering}: requested use_scan="
+                    f"{use_scan_val} but cached instance carries "
+                    f"use_scan={inst._config.use_scan} — the cache "
+                    f"reused a stale solver and the auto-pick path "
+                    f"is silently broken"
+                )
+
+    def test_cache_keys_distinguish_use_scan(self):
+        """Companion unit test on the cache-key contract: the
+        instance key must change with ``use_scan`` while the optics
+        key must NOT.  Pins the design so the optics tables are
+        not duplicated per ``use_scan`` value (waste) and instance
+        cache entries do not collide across ``use_scan`` values
+        (correctness)."""
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        cfg_loop = RRTMGPConfig(use_scan=False)
+        cfg_scan = RRTMGPConfig(use_scan=True)
+        cfg_auto = RRTMGPConfig(use_scan=None)
+        # Optics cache key drops use_scan → tables shared.
+        assert RRTMGP._optics_cache_key(cfg_loop) == RRTMGP._optics_cache_key(cfg_scan)
+        assert RRTMGP._optics_cache_key(cfg_loop) == RRTMGP._optics_cache_key(cfg_auto)
+        # Instance cache key keeps use_scan → instances isolated.
+        assert RRTMGP._instance_cache_key(cfg_loop) != RRTMGP._instance_cache_key(cfg_scan)
+        assert RRTMGP._instance_cache_key(cfg_loop) != RRTMGP._instance_cache_key(cfg_auto)
+        assert RRTMGP._instance_cache_key(cfg_scan) != RRTMGP._instance_cache_key(cfg_auto)
+
     def test_use_scan_none_matches_explicit_choice(self):
         """Issue #273 GPU tuning: ``RRTMGPConfig(use_scan=None)`` (the
         new production default) must produce the same heating rates

@@ -413,8 +413,41 @@ class RRTMGP:
   def _cache_key(config):
       """Compute a hashable cache key from an RRTMGPConfig.
 
-      Includes the x64 state so that switching precision between calls
-      invalidates the cache (table dtypes depend on JAX precision mode).
+      .. deprecated:: issue #273 follow-up
+         This key drives **both** the heavy optics-table cache
+         (``_legoesm_optics_cache`` — keyed only on table-shape
+         inputs) and the lighter solver-instance cache
+         (``_instance_cache`` in ``rrtmgp_radiation.py`` — needs to
+         additionally invalidate on solver-behavior fields like
+         ``use_scan``).  Sharing one key for both caches meant a
+         first call with ``use_scan=False`` would cache a solver
+         instance whose ``_config.use_scan`` is ``False``; a later
+         call with ``use_scan=True`` (or the new ``None`` auto-pick)
+         would reuse that stale instance and silently keep running
+         the for-loop path — defeating the GPU scan auto-pick this
+         module ships.
+
+         Production code should call the more specific keys:
+
+         * ``_optics_cache_key(config)`` for the optics tables
+           (omits behavior fields that don't change tables).
+         * ``_instance_cache_key(config)`` for solver instances
+           (includes behavior fields like ``use_scan``).
+
+         ``_cache_key`` remains as a backward-compatible alias for
+         ``_optics_cache_key``.
+      """
+      return RRTMGP._optics_cache_key(config)
+
+  @staticmethod
+  def _optics_cache_key(config):
+      """Hashable key for the optics-table cache.
+
+      Includes only fields that change the loaded NetCDF tables
+      (gas files, cloud files, table-shape inputs) plus the active
+      x64 precision (table dtype depends on it).  Solver-behavior
+      fields like ``use_scan`` deliberately omitted — the tables
+      themselves are independent of how the solver traverses them.
       """
       import jax
       x64 = bool(jax.config.jax_enable_x64)
@@ -423,6 +456,22 @@ class RRTMGP:
               config.include_clouds,
               config.co2_ppmv, config.ch4_ppbv, config.n2o_ppbv,
               x64)
+
+  @staticmethod
+  def _instance_cache_key(config):
+      """Hashable key for the solver-instance cache.
+
+      Extends the optics key with the behavior fields that change
+      the *result* of ``solve_columns`` (or its compile-time graph)
+      without changing the optics tables.  Critically includes
+      ``use_scan`` so the issue-#273 GPU auto-pick (``None`` ⇒ scan
+      on GPU/TPU, for-loop on CPU) is honored even when an earlier
+      call cached an explicit ``False``.
+      """
+      return (
+          RRTMGP._optics_cache_key(config),
+          config.use_scan,
+      )
 
   @staticmethod
   def _build_optics_and_vmr(config):
@@ -437,7 +486,7 @@ class RRTMGP:
       -------
       (optics_lib, vmr_lib)
       """
-      key = RRTMGP._cache_key(config)
+      key = RRTMGP._optics_cache_key(config)
       if key not in _legoesm_optics_cache:
           lw_file = config.lw_gas_file or _DEFAULT_LW_GAS
           sw_file = config.sw_gas_file or _DEFAULT_SW_GAS
@@ -529,7 +578,7 @@ class RRTMGP:
       rank = comm.Get_rank()
       if rank == 0:
           cls.preload(config)
-      key = cls._cache_key(config)
+      key = cls._optics_cache_key(config)
       data = _legoesm_optics_cache.get(key) if rank == 0 else None
       data = comm.bcast(data, root=0)
       if rank != 0:
