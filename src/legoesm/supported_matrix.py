@@ -104,6 +104,13 @@ ATMOSPHERE_MATRIX: tuple[SolverEntry, ...] = (
         "legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid",
     ),
 
+    # -- Doubly-periodic plane (CRM rollout, PR2c) --
+    SolverEntry(
+        "atmosphere", "nonhydrostatic", "plane",
+        "plane_compressible_euler", "PlaneCompressibleEulerModel",
+        "legoesm.atmosphere.dynamics.compressible_euler_plane",
+    ),
+
     # -- Tracer transport --
     SolverEntry(
         "atmosphere", "tracer_transport", "cubed_sphere_cdgrid",

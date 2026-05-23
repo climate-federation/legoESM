@@ -112,6 +112,10 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "MPASCompressibleEulerModel": ("legoesm.atmosphere.dynamics.compressible_euler_mpas", "MPASCompressibleEulerModel"),
     "MPASCompressibleEulerConfig": ("legoesm.atmosphere.dynamics.compressible_euler_mpas", "MPASCompressibleEulerConfig"),
     "mpas_compressible_euler_slow_tendencies": ("legoesm.atmosphere.dynamics.compressible_euler_mpas", "mpas_compressible_euler_slow_tendencies"),
+    # --- Doubly-periodic plane (CRM rollout, PR2c) ---
+    "PlaneCompressibleEulerModel": ("legoesm.atmosphere.dynamics.compressible_euler_plane", "PlaneCompressibleEulerModel"),
+    "plane_compressible_euler_slow_tendencies": ("legoesm.atmosphere.dynamics.compressible_euler_plane", "plane_compressible_euler_slow_tendencies"),
+    "plane_acoustic_substeps": ("legoesm.atmosphere.dynamics.compressible_euler_plane", "plane_acoustic_substeps"),
     # --- Tracer transport ---
     "TracerTransportModel": ("legoesm.atmosphere.dynamics.tracer_transport", "TracerTransportModel"),
     "tracer_tendencies": ("legoesm.atmosphere.dynamics.tracer_transport", "tracer_tendencies"),
@@ -204,6 +208,7 @@ AVAILABLE_SOLVERS = [
     "latlon_cgrid_primitive_equations",
     "mpas_primitive_equations",
     "mpas_compressible_euler",
+    "plane_compressible_euler",
     "tracer_transport",
     "tracer_transport_mpas",
     "tracer_transport_latlon",
@@ -228,7 +233,7 @@ _ALL_SOLVER_NAMES = AVAILABLE_SOLVERS + list(_DEPRECATED_SOLVER_NAMES)
 # Valid values for the two-axis config keys
 DYNAMICS_OPTIONS = ["shallow_water", "hydrostatic", "nonhydrostatic"]
 DISCRETIZATION_OPTIONS = [
-    "cdgrid", "spectral", "sfno", "mpas", "latlon_cgrid",
+    "cdgrid", "spectral", "sfno", "mpas", "latlon_cgrid", "plane",
     # Legacy names kept as valid options (default to cdgrid when grid is
     # unknown; the driver resolves more precisely using grid_type).
     "finite_volume", "centered",
@@ -255,6 +260,7 @@ _AXIS_TO_SOLVER = {
     ("nonhydrostatic", "cdgrid"): "cdgrid_compressible_euler",
     ("nonhydrostatic", "spectral"): "spectral_compressible_euler",
     ("nonhydrostatic", "mpas"): "mpas_compressible_euler",
+    ("nonhydrostatic", "plane"): "plane_compressible_euler",
     ("shallow_water", "latlon_cgrid"): "latlon_cgrid_shallow_water",
     ("hydrostatic", "latlon_cgrid"): "latlon_cgrid_primitive_equations",
     # "finite_volume" and "centered" default to cdgrid when used without
@@ -460,6 +466,7 @@ def create_model(name: str = None, legoesm_config=None, **kwargs):
         "tracer_transport_latlon": "TracerTransportLatLonModel",
         "mpas_primitive_equations": "MPASPrimitiveEquationModel",
         "mpas_compressible_euler": "MPASCompressibleEulerModel",
+        "plane_compressible_euler": "PlaneCompressibleEulerModel",
         "latlon_cgrid_shallow_water": "CGridLatLonShallowWaterModel",
         "latlon_cgrid_primitive_equations": "CGridLatLonPrimitiveEquationModel",
     }

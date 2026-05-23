@@ -231,10 +231,23 @@ class ModelDriver:
         elif gc.grid_type == "voronoi":
             from legoesm.grids.voronoi import create_voronoi_mesh
             self.grid = create_voronoi_mesh(gc.resolution, lloyd_iterations=50)
+        elif gc.grid_type == "plane":
+            # PR2c MVP: square ``resolution x resolution`` doubly-
+            # periodic plane with default ``dx = dy = 10 km``. Users
+            # that need full control (non-square domains, finer dx,
+            # Coriolis, custom ``lat0`` / ``lon0``) should build a
+            # ``PlaneGrid`` via ``create_plane_grid`` directly and pass
+            # the resulting model into the simulation harness instead
+            # of going through ``ExperimentConfig``.
+            from legoesm.grids.plane import create_plane_grid
+            self.grid = create_plane_grid(
+                nx=gc.resolution, ny=gc.resolution, nlev=gc.nlev,
+                dx=10_000.0, dy=10_000.0,
+            )
         else:
             raise ValueError(
                 f"Unknown grid_type={gc.grid_type!r}. "
-                f"Supported: cubed_sphere, gaussian, latlon, voronoi"
+                f"Supported: cubed_sphere, gaussian, latlon, voronoi, plane"
             )
 
         if gc.vertical_coord == "hybrid":
