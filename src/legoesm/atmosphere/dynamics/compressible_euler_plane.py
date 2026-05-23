@@ -68,6 +68,25 @@ rho')``. Slow updates to ``u, v, w`` (and the horizontal slow part of
 substep loop. Tracer transport is deferred to PR3, so PR2b accepts
 only ``n_tracers == 0``.
 
+Hyperdiffusion stability (PR3a)
+-------------------------------
+Biharmonic damping ``-K_h ∇⁴`` is integrated explicitly through the
+slow-tendency path, so the user-supplied ``hyperdiff_coeff``,
+``hyperdiff_rho_coeff``, ``hyperdiff_w_coeff`` must satisfy the
+explicit-Euler CFL bound on the 5-point stencil::
+
+    dt * K * (4/dx² + 4/dy²)² < CFL_max
+
+with ``CFL_max ≈ 2`` for SSP-RK3 (slightly looser than forward
+Euler). For the CI test grid (``dx = dy = 200 m``, ``dt = 0.5 s``)
+the eigenvalue is ``(2·4/200²)² = 4 × 10⁻⁸``, so the bound becomes
+``K < 2 / (0.5 · 4 × 10⁻⁸) = 1 × 10⁸ m⁴/s``; the CI tests use
+``K = 1 × 10⁶`` and ``1 × 10⁷``, well inside the bound. The plane dycore does not check
+the bound at runtime — the same convention as the cubed-sphere and
+MPAS NH dycores. Setting ``K`` near the bound trades increased
+damping for risk of grid-scale oscillation; documented user
+responsibility.
+
 A-grid simplification used in PR2b
 ----------------------------------
 The state class stores ``u`` at x-faces and ``v`` at y-faces per the
@@ -657,6 +676,49 @@ def plane_compressible_euler_slow_tendencies(
     dtheta_p_dt = dtheta_p_dt - sponge_full * theta_p
     dw_dt = dw_dt - sponge_half * w
 
+    # 10. Biharmonic hyperdiffusion. ``-coeff * ∇⁴f`` with the
+    #     discrete 5-point laplacian applied twice; biharmonic damping
+    #     is monotone over all nonzero wavenumbers but the eigenvalue
+    #     grows as ``sin⁴(π k/nx)``, so for the discrete stencil
+    #     2-Δx modes are damped ``(sin(π/2)/sin(π/8))⁴ ≈ 47×`` faster
+    #     than 8-Δx modes (preferential grid-scale damping while
+    #     leaving long wavelengths nearly untouched in CRM-relevant
+    #     timescales). Zero coefficients (default
+    #     ``CompressibleEulerConfig`` values) reproduce the PR2d
+    #     no-hyperdiff behaviour exactly. Explicit-Euler biharmonic
+    #     CFL on a 5-point stencil is ``dt * K * (4/dx² + 4/dy²)² <
+    #     2`` for SSP-RK3 stability; callers exceed this at their own
+    #     risk and the dycore does not guard at runtime (the cost of
+    #     the check inside JIT outweighs the rare benefit; the same
+    #     convention as the cubed-sphere / MPAS NH dycores). The
+    #     hyperdiff CFL bound is documented at the module docstring
+    #     level for users that want to set coefficients near the
+    #     stability limit.
+    if config.hyperdiff_coeff > 0.0:
+        du_dt = du_dt - config.hyperdiff_coeff * laplacian_vlast(
+            laplacian_vlast(u, grid), grid,
+        )
+        dv_dt = dv_dt - config.hyperdiff_coeff * laplacian_vlast(
+            laplacian_vlast(v, grid), grid,
+        )
+        dtheta_p_dt = dtheta_p_dt - config.hyperdiff_coeff * laplacian_vlast(
+            laplacian_vlast(theta_p, grid), grid,
+        )
+    if config.hyperdiff_rho_coeff > 0.0:
+        drho_p_dt = drho_p_dt - config.hyperdiff_rho_coeff * laplacian_vlast(
+            laplacian_vlast(rho_p, grid), grid,
+        )
+    if config.hyperdiff_w_coeff > 0.0:
+        # ``w`` lives on half levels; the laplacian wrapper applies in
+        # the horizontal only (last two axes via ``moveaxis``), so the
+        # half-level layout is preserved end-to-end. The rigid w
+        # boundary values at ``[..., 0]`` and ``[..., -1]`` stay at
+        # zero because laplacian of a uniformly-zero boundary plane is
+        # zero.
+        dw_dt = dw_dt - config.hyperdiff_w_coeff * laplacian_vlast(
+            laplacian_vlast(w, grid), grid,
+        )
+
     zero_tracers = jnp.zeros_like(state.tracers.data)
     zero_phis = jnp.zeros_like(state.phis.data)
 
@@ -804,16 +866,25 @@ def validate_plane_config(config: CompressibleEulerConfig) -> None:
     # sponge is applied inside ``plane_compressible_euler_slow_tendencies``
     # to ``u``, ``v``, ``theta'`` at full levels and ``w`` at half
     # levels via the shared ``_sponge_profile`` taper.
+    # ``hyperdiff_coeff`` and friends are now supported (PR3a) — the
+    # biharmonic ``-coeff * Lap(Lap(field))`` term is added to the
+    # slow tendency in
+    # :func:`plane_compressible_euler_slow_tendencies`. Setting all
+    # three to zero (the ``CompressibleEulerConfig`` default for
+    # plane-friendly setups) reproduces the PR2b behaviour exactly.
+    # Negative coefficients would invert the damping sign and produce
+    # exponential growth — almost certainly a user error — so reject
+    # them up front rather than silently treating them as off.
     for name, value in (
         ("hyperdiff_coeff", config.hyperdiff_coeff),
         ("hyperdiff_rho_coeff", config.hyperdiff_rho_coeff),
         ("hyperdiff_w_coeff", config.hyperdiff_w_coeff),
     ):
-        if value > 0.0:
-            raise NotImplementedError(
-                f"PR2b plane dycore does not implement {name}; set it to "
-                "zero. Biharmonic damping ships in PR3 alongside the LES "
-                "closures."
+        if value < 0.0:
+            raise ValueError(
+                f"{name}={value!r} must be non-negative; biharmonic "
+                "hyperdiffusion damps only with a positive coefficient. "
+                "Pass 0.0 to disable."
             )
 
 

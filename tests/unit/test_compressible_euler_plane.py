@@ -106,9 +106,6 @@ def test_construct_rejects_non_flat_terrain():
     "overrides, match",
     [
         ({"semi_implicit_acoustic": True}, "forward-backward acoustic"),
-        ({"hyperdiff_coeff": 1.0e-6}, "hyperdiff_coeff"),
-        ({"hyperdiff_rho_coeff": 1.0e-6}, "hyperdiff_rho_coeff"),
-        ({"hyperdiff_w_coeff": 1.0e-6}, "hyperdiff_w_coeff"),
     ],
 )
 def test_validate_plane_config_rejects_unsupported_flags(overrides, match):
@@ -121,6 +118,18 @@ def test_validate_plane_config_accepts_sponge_coeff_positive():
     """PR2d wires the Rayleigh sponge; the rejection that PR2b carried
     on ``sponge_coeff > 0`` is now lifted."""
     cfg = _minimal_config(sponge_coeff=0.05)
+    validate_plane_config(cfg)  # no raise
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["hyperdiff_coeff", "hyperdiff_rho_coeff", "hyperdiff_w_coeff"],
+)
+def test_validate_plane_config_accepts_hyperdiff_positive(field):
+    """PR3a wires biharmonic hyperdiffusion for u/v/theta', rho', and
+    w; the PR2b rejection on each of the three coefficients is
+    lifted."""
+    cfg = _minimal_config(**{field: 1.0e-6})
     validate_plane_config(cfg)  # no raise
 
 
