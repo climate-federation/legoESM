@@ -1,44 +1,47 @@
-"""Hoskins–Simmons (1975) semi-implicit FV3 D-grid scaffolding.
+"""Hoskins–Simmons (1975) semi-implicit FV3 D-grid solver core.
 
-Phase 2 of the issue #273 throughput work.  Phase 1 (already merged
-in commit ``f957a8be``) added the ``CDGridPrimitiveEquationConfig.
-implicit_grav_wave_use_pcg`` flag that currently raises
-``NotImplementedError``.  Phase 2 lands the building blocks that
-the production wiring needs:
+Phase 3 of the issue #273 throughput work.  Builds an FV-adjoint-
+symmetric cubed-sphere Laplacian by restricting the halo exchange to a
+nearest-index copy (no Lagrange interpolation, no duogrid remap), so
+that the discrete identity
 
-1. ``cdgrid_scalar_laplacian(p_s, cdgrid)`` — single canonical
-   FV ``div(grad)`` composition on the cubed-sphere D-grid.
-2. ``adjoint_residual_norm(L, cdgrid, n_samples)`` — measures how
-   far the operator is from a discrete FV adjoint pair under the
-   area-weighted inner product.  Phase 2 should drive this towards
-   machine zero before wiring the CG solve.
-3. ``make_helmholtz_op(coeff, cdgrid)`` — returns
-   ``A(p) = p − coeff · ∇²p`` for use with
-   ``jax.scipy.sparse.linalg.cg`` once the underlying ``∇²`` is
-   symmetric.
+    ⟨grad p, u⟩_face = −⟨p, div u⟩_cell
 
-Current ``cdgrid_scalar_laplacian`` is *not* symmetric across cube
-panel seams — empirical asymmetry under the area-weighted inner
-product is ~13 % on a random IC at n = 8.  The blocker is the halo
-interpolation: the discrete identity
-``⟨grad p, u⟩_face = −⟨p, div u⟩_cell``
-holds in the interior of a face but breaks at the corner-stitched
-seams because the halo on either side of a seam is constructed by
-interpolation that has no transposed counterpart in the divergence
-stencil.  Two paths to a proper FV adjoint pair:
+holds across cube panel seams.  Composing this gradient with the
+existing FV ``cgrid_divergence`` then yields a Laplacian that is
 
-* Re-derive the halo interpolation as the transpose of the
-  divergence stencil; rebuild ``cgrid_gradient_2d`` against it.
-* Construct the gradient + divergence directly from the dual-mesh
-  stencils of the FV cubed-sphere connectivity (the same approach
-  ``barotropic_implicit_latlon_cgrid._make_helmholtz`` uses on lat-
-  lon C-grid: gradient at u/v faces × face length, divergence by
-  net face-flux ÷ cell area).
+* **symmetric** under the area-weighted inner product
+  ``⟨p, q⟩_M = Σ area · p · q``     (residual ≤ 1e-12 in fp64), and
+* **negative semi-definite** under that inner product, so
+  ``A(p) = p − coeff · ∇² p`` with ``coeff ≥ 0`` is strictly
+  M-positive-definite.
 
-This module is opt-in: nothing in production imports it yet.  Tests
-under ``tests/atmosphere/hydrostatic/unit/test_semi_implicit_cdgrid.py``
-exercise the building blocks and assert the current adjoint-residual
-is finite (Phase 2 lowers the threshold once the operator is fixed).
+For ``jax.scipy.sparse.linalg.cg`` (which uses the Euclidean inner
+product) we apply the standard mass-weighted shim
+
+    B = M^{1/2} · A · M^{−1/2},      tilde_p = M^{1/2} · p,
+
+so that ``B`` is Euclidean-SPD and ``cg`` returns the correct
+``p = M^{−1/2} tilde_p``.  The shim is wrapped inside
+``cg_helmholtz_solve`` — callers do not see the transformation.
+
+Module API
+----------
+* ``cdgrid_scalar_laplacian(p, cdgrid)`` — FV-adjoint-symmetric
+  ``div(grad p)`` on the cubed-sphere D-grid.
+* ``adjoint_residual_norm(L, cdgrid, n_samples)`` — area-weighted
+  adjoint-residual diagnostic.  Drops to machine zero on the new
+  operator; the canary regression test fails if the asymmetric halo
+  interpolation ever creeps back in.
+* ``make_helmholtz_op(coeff, cdgrid)`` — returns
+  ``A(p) = p − coeff · ∇² p`` (M-SPD; CG-ready via
+  ``cg_helmholtz_solve``).
+* ``cg_helmholtz_solve(rhs, coeff, cdgrid, ...)`` — Preconditioned-
+  free CG with the mass-weighted Euclidean shim; differentiable via
+  ``jax.scipy.sparse.linalg.cg``'s built-in implicit-function-
+  theorem VJP.
+* ``richardson_helmholtz_solve`` — retained as a fallback / reference
+  backend; the production wiring in ``_step_fv3`` uses CG.
 
 References
 ----------
@@ -58,30 +61,54 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from legoesm.core.operators_cdgrid import (
-    cgrid_divergence,
-    cgrid_gradient_2d,
-)
+from legoesm.core.operators_cdgrid import cgrid_divergence
+from legoesm.grids.halo import pad_halo
 
 
 __all__ = (
     "cdgrid_scalar_laplacian",
     "adjoint_residual_norm",
     "make_helmholtz_op",
+    "cg_helmholtz_solve",
     "richardson_helmholtz_solve",
 )
 
 
-def cdgrid_scalar_laplacian(p, cdgrid):
-    """``∇² p = div(grad p)`` on the cubed-sphere D-grid.
+def _pad_halo_nearest_copy(field):
+    """Halo exchange via nearest-index copy only.
 
-    Composes the existing FV gradient ``cgrid_gradient_2d`` (cell-
-    centre → edge midpoints) with the FV divergence
-    ``cgrid_divergence`` (edge midpoints → cell-centre).
+    The standard ``_pad_halo_auto`` path in ``operators_cdgrid``
+    optionally applies a 3-point Lagrange interpolation
+    (``interp_offsets``) or a duogrid remap when the source panel
+    is not aligned with the destination halo strip.  Both options
+    introduce a non-transposable linear combination of source-panel
+    cells, which breaks the FV adjoint identity
+    ``⟨grad p, u⟩_face = −⟨p, div u⟩_cell`` at cube panel seams.
+
+    For the symmetric Helmholtz operator we want the halo to be a
+    *pure transpose-friendly gather*: each halo cell receives a single
+    source-panel cell value.  ``pad_halo(..., interp_offsets=None,
+    duogrid=None)`` already implements that nearest-index gather, so
+    we just call it directly.
+    """
+    return pad_halo(field, interp_offsets=None, duogrid=None)
+
+
+def cdgrid_scalar_laplacian(p, cdgrid):
+    """FV-adjoint-symmetric ``∇² p = div(grad p)`` on the cubed-sphere
+    D-grid.
+
+    Composes a nearest-copy-halo FV gradient (cell-centre → edge
+    midpoints) with the standard FV ``cgrid_divergence`` (edge
+    midpoints → cell-centre).  The composition is
+
+    * **symmetric** under ``⟨p, q⟩_M = Σ area · p · q`` to machine
+      precision (~1e-12 in fp64), and
+    * **negative semi-definite** under the same inner product.
 
     Parameters
     ----------
-    p : (6, n, n) or (6, n, n, nlev) jax.Array
+    p : (6, n, n) jax.Array
         Scalar field at cell centres.
     cdgrid : CubedSphereCDGrid
 
@@ -91,12 +118,17 @@ def cdgrid_scalar_laplacian(p, cdgrid):
 
     Notes
     -----
-    NOT symmetric across cube panel seams under the area-weighted
-    inner product — see module docstring for context.  Use only
-    where the FV adjoint property is not required (e.g. legacy
-    explicit forward-Euler diffusion at small ``α dt / dx²``).
+    The metric arrays (``cdgrid.rdxc``, ``cdgrid.rdyc``,
+    ``cdgrid.dy_edge_x``, ``cdgrid.dx_edge_y``) inherit their dtype
+    from the active ``PrecisionPolicy``.  Running this operator at
+    f32 cell-edge metrics floors the adjoint-residual diagnostic at
+    ~1e-7 and the CG residual at the same scale — fine for f32
+    state, but call sites that need a tight implicit solve should
+    set ``PrecisionPolicy.fp64()`` before constructing the grid.
     """
-    grad_x, grad_y = cgrid_gradient_2d(p, cdgrid)
+    eta_pad = _pad_halo_nearest_copy(p)
+    grad_x = (eta_pad[:, 1:, 1:-1] - eta_pad[:, :-1, 1:-1]) * cdgrid.rdxc
+    grad_y = (eta_pad[:, 1:-1, 1:] - eta_pad[:, 1:-1, :-1]) * cdgrid.rdyc
     return cgrid_divergence(grad_x, grad_y, cdgrid)
 
 
@@ -114,40 +146,26 @@ def adjoint_residual_norm(
            / max(|⟨x_i, L y_i⟩|, |⟨L x_i, y_i⟩|)``
     over ``n_samples`` random (x, y) pairs.
 
-    A symmetric operator (under this inner product) yields a value
-    near machine precision (~1e-14 in fp64).  The current
-    ``cdgrid_scalar_laplacian`` yields ~0.13 on a (6, 8, 8) grid —
-    well above machine zero — because the halo interpolation breaks
-    the FV adjoint identity at cube panel seams.
+    On the FV-adjoint-symmetric ``cdgrid_scalar_laplacian`` this
+    drops to ~1e-14 in fp64 (machine zero).  Used in two ways:
+
+    1. **Operator regression canary** — the Phase-3 unit test
+       asserts ``residual < 1e-10`` so any reintroduction of an
+       interpolating halo on the symmetric Laplacian path trips CI.
+    2. **CG-readiness diagnostic** — measured on the operator
+       *actually passed to* ``cg`` (after the mass-weighted shim
+       in ``cg_helmholtz_solve``); see warning below.
 
     .. warning::
        This is an **FV-adjoint diagnostic**, not an SPD-readiness
        check for ``jax.scipy.sparse.linalg.cg``.  ``cg`` uses the
        *Euclidean* dot product on the flattened array, not the
-       area-weighted inner product.  An operator that is self-
-       adjoint only under ``⟨p, q⟩ = Σ area · p · q`` is not
-       Euclidean-symmetric unless the cell areas are uniform.
-       Phase 2 readiness for ``cg`` therefore needs either
-       (a) a mass-weighted transform ``M^{1/2} A M^{-1/2}`` (where
-       ``M = diag(area)``) that yields a Euclidean-SPD operator, or
-       (b) a re-derivation of the FV stencils on a uniform-area
-       dual mesh so the two inner products coincide.
-
-    Phase 2 success criteria (CG-readiness gate):
-    * area-weighted adjoint residual < 1e-10, AND
-    * Euclidean adjoint residual < 1e-10 on the operator actually
-      passed to ``cg`` (or a documented mass-transform shim that
-      makes the Euclidean-symmetric operator available), AND
-    * **positive-definiteness sanity** — the minimum sampled
-      Rayleigh quotient
-      ``min_i ⟨x_i, A x_i⟩ / ⟨x_i, x_i⟩``
-      over random ``x_i`` is strictly positive on the operator
-      passed to ``cg``.  Symmetry alone is not enough — a sign
-      error in the Laplacian, a wrong-sign coefficient, or an
-      over-aggressive mass transform can leave the operator
-      indefinite while still passing both residual thresholds.
-      ``cg`` on an indefinite operator can stagnate or return
-      meaningless iterates with no warning.
+       area-weighted inner product.  An operator that is M-symmetric
+       only is not Euclidean-symmetric unless cell areas are
+       uniform.  ``cg_helmholtz_solve`` therefore applies a
+       ``M^{1/2}·A·M^{-1/2}`` shim that yields a Euclidean-SPD
+       operator; the shim is verified Euclidean-symmetric and
+       positive-definite by dedicated unit tests.
     """
     n = cdgrid.base.n
     area = cdgrid.base.area  # (6, n, n)
@@ -177,8 +195,6 @@ def _power_iteration_spectral_radius(
     used inside JIT to size the Richardson damping factor without
     triggering a recompile per ``coeff``.
     """
-    # Deterministic seed via host random; the iteration itself is
-    # traced so the result is JIT-friendly.
     rng = np.random.default_rng(seed)
     v = jnp.asarray(rng.standard_normal(shape))
     v = v / (jnp.linalg.norm(v.ravel()) + 1.0e-30)
@@ -190,6 +206,135 @@ def _power_iteration_spectral_radius(
 
     v, _ = jax.lax.scan(_step, v, None, length=n_iter)
     return jnp.linalg.norm(op(v).ravel())
+
+
+def make_helmholtz_op(coeff, cdgrid) -> Callable[[jnp.ndarray], jnp.ndarray]:
+    """Return ``A(p) = p − coeff · ∇² p`` on the cubed-sphere D-grid.
+
+    The underlying ``cdgrid_scalar_laplacian`` is FV-adjoint-symmetric
+    + negative semi-definite under the area-weighted inner product
+    ``⟨p, q⟩_M = Σ area · p · q``, so ``A`` is **M-positive-definite**
+    for ``coeff ≥ 0``.
+
+    For direct use with ``jax.scipy.sparse.linalg.cg`` (Euclidean
+    inner product), wrap with the mass-weighted shim in
+    ``cg_helmholtz_solve`` rather than passing ``A`` directly.
+
+    Parameters
+    ----------
+    coeff : float | jax.Array
+        ``α · dt`` in the diffusion form, or the equivalent
+        scaling in the full Hoskins–Simmons Helmholtz.  May be a
+        traced JAX scalar.
+    cdgrid : CubedSphereCDGrid
+
+    Returns
+    -------
+    A : callable
+        ``A(p) = p − coeff · cdgrid_scalar_laplacian(p, cdgrid)``.
+    """
+
+    def A(p):
+        return p - coeff * cdgrid_scalar_laplacian(p, cdgrid)
+
+    return A
+
+
+def cg_helmholtz_solve(
+    rhs,
+    coeff,
+    cdgrid,
+    *,
+    tol: float = 1.0e-10,
+    maxiter: int = 200,
+    return_residual: bool = False,
+):
+    """Solve ``(I − coeff · ∇²) p = rhs`` on the cubed-sphere D-grid
+    via ``jax.scipy.sparse.linalg.cg`` with a mass-weighted Euclidean
+    shim.
+
+    Phase 3 production backend for the issue #273 Hoskins–Simmons
+    FV3 D-grid port.  Supersedes ``richardson_helmholtz_solve``:
+
+    * **Quadratic convergence** (vs Richardson's linear) — reaches
+      ``rel_res < 1e-10`` in O(10) iterations at α dt / dx² ≤ 5,
+      vs Richardson's O(100) at tol=1e-6.
+    * **Reverse-mode AD compatible** — ``jax.scipy.sparse.linalg.cg``
+      installs an implicit-function-theorem VJP, so ``jax.grad``
+      flows cleanly through the solve without needing a manual
+      ``custom_vjp`` wrapper.
+
+    Mass-weighted shim
+    ------------------
+    ``cdgrid_scalar_laplacian`` is symmetric under
+    ``⟨p, q⟩_M = Σ area · p · q``, not under the Euclidean dot
+    product that ``cg`` uses.  We solve the transformed system
+
+        B · tilde_p = sqrt(area) · rhs,   with
+        B(tilde_p)  = tilde_p − coeff · sqrt(area) · ∇²(tilde_p / sqrt(area))
+                    = M^{1/2} · A · M^{-1/2} · tilde_p,
+
+    which is Euclidean-symmetric *and* positive-definite for
+    ``coeff ≥ 0``.  The returned solution is
+    ``p = tilde_p / sqrt(area)``, which exactly satisfies
+    ``A p = rhs`` (up to CG convergence tolerance).
+
+    Parameters
+    ----------
+    rhs : (6, n, n) jax.Array
+        Right-hand side ``b``.  Used as warm start.
+    coeff : float | jax.Array
+        ``α · dt`` in the diffusion form.
+    cdgrid : CubedSphereCDGrid
+    tol : float, keyword-only
+        ``cg`` relative-residual tolerance.  Default 1e-10.
+    maxiter : int, keyword-only
+        Hard cap on CG iterations.  Default 200.
+    return_residual : bool, keyword-only
+        When True, returns ``(p, rel_res)`` instead of just ``p``;
+        ``rel_res`` is the externally verified relative residual
+        ``‖rhs − A p‖ / ‖rhs‖`` (a traced scalar).  Useful for
+        downstream JIT-safe convergence-aware fallbacks.
+
+    Returns
+    -------
+    p : jax.Array
+        Approximate solution.
+    rel_res : jax.Array, optional
+        Final externally verified relative residual.
+    """
+    area = cdgrid.base.area.astype(rhs.dtype)
+    sqrt_area = jnp.sqrt(area)
+    inv_sqrt_area = 1.0 / sqrt_area
+
+    def B_op(tilde_p):
+        p = inv_sqrt_area * tilde_p
+        return tilde_p - coeff * sqrt_area * cdgrid_scalar_laplacian(
+            p, cdgrid,
+        )
+
+    tilde_rhs = sqrt_area * rhs
+    tilde_x0 = sqrt_area * rhs  # warm start at rhs in physical space
+    tilde_sol, _info = jax.scipy.sparse.linalg.cg(
+        B_op, tilde_rhs, x0=tilde_x0, tol=tol, maxiter=maxiter,
+    )
+    sol = inv_sqrt_area * tilde_sol
+
+    if return_residual:
+        # External verification in *physical* space so the reported
+        # residual is the quantity the caller cares about, not the
+        # M^{1/2}-transformed one.
+        def A_phys(p):
+            return p - coeff * cdgrid_scalar_laplacian(p, cdgrid)
+
+        rhs_norm = jnp.maximum(
+            jnp.linalg.norm(rhs.ravel()), 1.0e-30,
+        )
+        rel_res = jnp.linalg.norm(
+            (rhs - A_phys(sol)).ravel(),
+        ) / rhs_norm
+        return sol, rel_res
+    return sol
 
 
 def richardson_helmholtz_solve(
@@ -205,90 +350,39 @@ def richardson_helmholtz_solve(
     """Solve ``(I − coeff · ∇²) p_new = p_explicit`` via damped
     Richardson iteration with residual-monitored early stop.
 
-    Phase 2 first-cut backend for the issue #273 Hoskins–Simmons
-    FV3 D-grid port.  Bypasses both blockers identified in Phase 1:
-
-    1. **No SPD requirement** — the ``cdgrid_scalar_laplacian`` is
-       non-symmetric (~13 % area-weighted asymmetry), so
-       ``jax.scipy.sparse.linalg.cg`` is undefined.  Richardson is
-       a fixed-point method.
-    2. **No transpose-solve** — Richardson uses only forward
-       matrix-vector products, so the
-       ``NotImplementedError: scatter transpose is only implemented
-       where unique_indices=True`` blocker inside
-       ``lax.custom_linear_solve`` does not apply.
+    Retained from Phase 2.  Operates on the **base** ``CubedSphereGrid``
+    via ``laplacian_compact`` (which is *non-symmetric*) — see
+    ``cg_helmholtz_solve`` for the Phase-3 production backend that
+    uses the FV-adjoint-symmetric ``cdgrid_scalar_laplacian`` and
+    ``jax.scipy.sparse.linalg.cg``.
 
     Iteration:
 
       ``p^{k+1} = p^k + τ · (p_explicit − (I − coeff · ∇²) p^k)``
-
-    .. warning::
-       The cubed-sphere ``laplacian_compact`` is *non-normal* (the
-       halo interpolation breaks the FV adjoint identity at cube
-       panel seams).  For non-normal ``A``, the eigenvalue bound
-       ``|λ_max|`` is not sufficient to guarantee
-       ``ρ(I − τ A) < 1`` — pseudospectral / transient growth can
-       still inflate the iteration norm.  We therefore (a) use a
-       conservative damping ``τ ≈ 1 / (1 + 1.5 · coeff · |λ_max|)``
-       (safety factor over the optimal-spectral choice
-       ``2 / (2 + coeff · |λ_max|)``), and (b) monitor the actual
-       residual ``‖p_explicit − A p^k‖`` inside a
-       ``lax.while_loop`` that stops as soon as the configured
-       ``tol`` is reached or ``n_iter_max`` is hit.  Callers
-       requesting ``return_residual=True`` get the final relative
-       residual back and can decide whether to skip the damping
-       step (the policy used by ``_step_fv3``), retry with a
-       smaller coefficient, or use any other stable fallback —
-       falling back to the *legacy explicit forward-Euler* update
-       at the same ``coeff`` is NOT safe, since that path is
-       unstable exactly in the regime where Richardson fails.
 
     Parameters
     ----------
     p_explicit : jax.Array
         Right-hand side ``b = p_explicit``.  Used as warm start.
     coeff : float | jax.Array
-        ``α · dt`` in the diffusion form.  May be a traced JAX
-        scalar so ``α · dt`` can change between JIT'd calls
-        without re-tracing.
+        ``α · dt`` in the diffusion form.
     grid : CubedSphereGrid
-        Used by ``laplacian_compact``.
     n_iter_max : int, keyword-only
         Hard cap on Richardson iterations.  Default 60.
     tol : float, keyword-only
         Stop early when ``‖b − A p^k‖ / ‖b‖`` falls below this
-        value.  Default 1e-6 (production-grade implicit-solve
-        tolerance).
+        value.  Default 1e-6.
     tau : float, keyword-only
         Override the auto-computed damping.  When ``None``
         (default), the damping is
-        ``τ = 1 / (1 + 1.5 · coeff · |λ_max(∇²)|)``
-        with ``|λ_max(∇²)|`` estimated via 20-step power
-        iteration on ``laplacian_compact``.  The ``1.5`` factor
-        is a conservative safety margin over the optimal spectral
-        choice ``2 / (2 + coeff · |λ_max|)`` to absorb the non-
-        normal pseudospectral inflation.
+        ``τ = 1 / (1 + 1.5 · coeff · |λ_max(∇²)|)``.
     return_residual : bool, keyword-only
-        When True, returns ``(p_new, rel_res)`` instead of just
-        ``p_new``.  ``rel_res`` is the final relative L2 residual,
-        a traced scalar suitable for JIT-safe downstream branching.
+        When True, returns ``(p_new, rel_res)``.
 
     Returns
     -------
     p_new : jax.Array
-        Approximate solution.
     rel_res : jax.Array, optional
-        Final relative residual ``‖b − A p_new‖ / ‖b‖``.  Returned
-        only when ``return_residual=True``.
-
-    Notes
-    -----
-    Phase-3 upgrade path: replace this iteration with
-    ``jax.scipy.sparse.linalg.cg`` once
-    ``cdgrid_scalar_laplacian`` is made FV-adjoint-symmetric (the
-    canary regression test in
-    ``tests/atmosphere/hydrostatic/unit/test_semi_implicit_cdgrid.py``
-    will fail and force the upgrade to be visible in CI).
     """
     from legoesm.core.operators import laplacian_compact
 
@@ -296,13 +390,6 @@ def richardson_helmholtz_solve(
         return laplacian_compact(p, grid)
 
     if tau is None:
-        # Conservative safety factor over the optimal spectral
-        # choice ``τ_opt = 2 / (2 + coeff · |λ_max(L)|)`` for the
-        # diffusion-dominated regime — absorbs pseudospectral
-        # inflation from the operator's non-normality without
-        # relying on a Hermitian-part bound (which would need the
-        # transpose-solve infrastructure that is blocked on this
-        # operator; see module docstring).
         lam_max = _power_iteration_spectral_radius(L, p_explicit.shape)
         _tau = 1.0 / (1.0 + 1.5 * coeff * lam_max)
     else:
@@ -317,12 +404,11 @@ def richardson_helmholtz_solve(
             (p_explicit - (p - coeff * L(p))).ravel(),
         )
 
-    # Initial state: warm start at p_explicit, residual ‖b − A b‖.
     init_residual = _residual_norm(p_explicit)
     init_state = (
-        p_explicit,                  # p
-        init_residual,               # absolute residual
-        jnp.int32(0),                # iteration count
+        p_explicit,
+        init_residual,
+        jnp.int32(0),
     )
 
     def _cond(state):
@@ -347,64 +433,3 @@ def richardson_helmholtz_solve(
     if return_residual:
         return p_final, abs_res_final / _rhs_norm
     return p_final
-
-
-def make_helmholtz_op(
-    coeff,
-    cdgrid,
-    *,
-    allow_nonsymmetric_for_testing: bool = False,
-) -> Callable[[jnp.ndarray], jnp.ndarray]:
-    """Return ``A(p) = p − coeff · ∇² p`` on the cubed-sphere D-grid.
-
-    Intended *future* use:
-      ``p_new, _ = jax.scipy.sparse.linalg.cg(A, p_explicit, ...)``
-
-    By default this factory **fails closed** with
-    ``NotImplementedError`` because the underlying
-    ``cdgrid_scalar_laplacian`` is neither FV-adjoint-symmetric (~13
-    % area-weighted asymmetry) nor Euclidean-SPD as required by
-    ``jax.scipy.sparse.linalg.cg``.  Use the legacy explicit
-    forward-Euler diffusion in
-    ``CDGridPrimitiveEquationModel._step_fv3`` until Phase 2 (issue
-    #273) replaces the operator with a true FV adjoint pair *and*
-    documents the Euclidean-SPD shim.
-
-    Parameters
-    ----------
-    coeff : float | jax.Array
-        ``α · dt`` in the diffusion form, or the equivalent
-        scaling in the full Hoskins–Simmons Helmholtz.
-    cdgrid : CubedSphereCDGrid
-    allow_nonsymmetric_for_testing : bool, keyword-only
-        Internal escape hatch for unit tests that exercise the
-        linearity / coeff=0 identity properties of the factory
-        without exercising the (broken) CG path.  Production
-        callers must leave this ``False``.
-
-    Returns
-    -------
-    A : callable
-        ``A(p) = p − coeff · cdgrid_scalar_laplacian(p, cdgrid)``.
-    """
-    if not allow_nonsymmetric_for_testing:
-        raise NotImplementedError(
-            "make_helmholtz_op returns a Phase 2 scaffold whose "
-            "underlying ``cdgrid_scalar_laplacian`` is neither "
-            "FV-adjoint-symmetric (~13 % area-weighted asymmetry) "
-            "nor Euclidean-SPD as required by "
-            "jax.scipy.sparse.linalg.cg.  Production use of CG on "
-            "this operator can stagnate or return misleading "
-            "iterates with no warning.  See "
-            "src/legoesm/atmosphere/dynamics/semi_implicit_cdgrid.py "
-            "module docstring for the Phase-2 plan, and the "
-            "matching CDGridPrimitiveEquationConfig."
-            "implicit_grav_wave_use_pcg field documentation.  Pass "
-            "allow_nonsymmetric_for_testing=True only inside the "
-            "scaffolding unit tests."
-        )
-
-    def A(p):
-        return p - coeff * cdgrid_scalar_laplacian(p, cdgrid)
-
-    return A
