@@ -8,6 +8,7 @@ Tests cover:
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 import jax
 import jax.numpy as jnp
@@ -1152,3 +1153,104 @@ class TestCloudFraction:
         )(state, grid, sigma)
 
         assert jnp.allclose(tend_clear.dT_dt.data, tend_none.dT_dt.data)
+
+
+class TestColumnShardedRadiation:
+    """Issue #273 follow-up: ``make_radiation_physics(column_mesh=...)``
+    shards the per-column radiation kernel across the supplied mesh.
+    Locks in two contracts:
+
+    1. **Numerical equivalence** — the sharded output matches the
+       single-device baseline bit-for-bit on a divisible
+       ``ncol = 6·n·n``.
+    2. **Divisibility check** — when ``ncol`` does not divide the
+       mesh device count, the factory raises ``ValueError`` instead
+       of silently rounding down.
+
+    The 4-device equivalence test only runs when at least 2 devices
+    are visible to JAX; on a single-device host it is skipped.  Set
+    ``XLA_FLAGS=--xla_force_host_platform_device_count=4`` to
+    exercise locally.
+    """
+
+    def _make_state(self, n=8, nlev=10):
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.atmosphere.held_suarez import held_suarez_init
+        grid = create_cubed_sphere(n)
+        sigma = create_sigma_coordinate(nlev)
+        return grid, sigma, held_suarez_init(grid, sigma)
+
+    def test_sharded_matches_unsharded_on_single_device(self):
+        """Single-device mesh degenerates to no-op sharding; output
+        must still match exactly."""
+        from legoesm.parallel.column_shard import create_column_mesh
+        grid, sigma, state = self._make_state()
+        config = RadiationConfig(scheme="gray")
+        ref = make_radiation_physics(
+            config, model_type="hydrostatic",
+        )(state, grid, sigma)
+        mesh = create_column_mesh(n_devices=1)
+        out = make_radiation_physics(
+            config, model_type="hydrostatic", column_mesh=mesh,
+        )(state, grid, sigma)
+        np.testing.assert_allclose(
+            np.asarray(out.dT_dt.data),
+            np.asarray(ref.dT_dt.data),
+            rtol=1.0e-12, atol=1.0e-14,
+        )
+
+    def test_raises_on_non_divisible_ncol(self):
+        """When the cubed-sphere ``ncol`` does not divide the mesh
+        device count, the factory must raise rather than silently
+        produce wrong results."""
+        if len(jax.devices()) < 2:
+            pytest.skip("non-divisibility check requires >=2 devices")
+        from legoesm.parallel.column_shard import create_column_mesh
+        # Build a grid where ncol = 6*5*5 = 150.  Pick a device count
+        # that does not divide 150 — e.g. 4 (150 % 4 = 2).
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.atmosphere.held_suarez import held_suarez_init
+        grid = create_cubed_sphere(5)
+        sigma = create_sigma_coordinate(8)
+        state = held_suarez_init(grid, sigma)
+        config = RadiationConfig(scheme="gray")
+        n_dev = min(4, len(jax.devices()))
+        if (6 * 5 * 5) % n_dev == 0:
+            pytest.skip(
+                f"chosen ncol={6*5*5} happens to divide n_dev={n_dev}; "
+                f"cannot exercise the failure mode"
+            )
+        mesh = create_column_mesh(n_devices=n_dev)
+        physics_fn = make_radiation_physics(
+            config, model_type="hydrostatic", column_mesh=mesh,
+        )
+        with pytest.raises(ValueError, match="divisible"):
+            physics_fn(state, grid, sigma)
+
+    def test_sharded_matches_unsharded_multidevice(self):
+        """4-device CPU emulation: sharded ``make_radiation_physics``
+        produces identical heating rates to the single-device path."""
+        if len(jax.devices()) < 2:
+            pytest.skip(
+                "single-device host — set XLA_FLAGS to emulate 4 devices"
+            )
+        from legoesm.parallel.column_shard import create_column_mesh
+        grid, sigma, state = self._make_state(n=8, nlev=10)
+        config = RadiationConfig(scheme="gray")
+        ref = make_radiation_physics(
+            config, model_type="hydrostatic",
+        )(state, grid, sigma)
+        # 6*8*8 = 384, divisible by 1, 2, 3, 4, 6, 8, 12 — any common
+        # CPU emulation count works.
+        n_dev = len(jax.devices())
+        mesh = create_column_mesh(n_devices=n_dev)
+        out = make_radiation_physics(
+            config, model_type="hydrostatic", column_mesh=mesh,
+        )(state, grid, sigma)
+        np.testing.assert_allclose(
+            np.asarray(out.dT_dt.data),
+            np.asarray(ref.dT_dt.data),
+            rtol=1.0e-12, atol=1.0e-14,
+        )

@@ -472,6 +472,7 @@ def _call_radiation_backend(
 def make_radiation_physics(
     radiation_config: RadiationConfig,
     model_type: str = "hydrostatic",
+    column_mesh=None,
 ) -> Callable:
     """Create a physics function for radiation matching a model's signature.
 
@@ -481,6 +482,15 @@ def make_radiation_physics(
         Radiation configuration (selects gray or RRTMGP).
     model_type : str
         One of "hydrostatic", "nonhydrostatic", "spectral_pe".
+    column_mesh : jax.sharding.Mesh or None, optional
+        Issue #273 follow-up.  When supplied, the per-column radiation
+        kernel (which is naturally embarrassingly parallel across
+        columns) is sharded across the mesh's ``'col'`` axis.  Use
+        ``legoesm.parallel.column_shard.create_column_mesh`` to build
+        one.  Required invariant: ``ncol`` (the flattened horizontal
+        column count = ``6 · n · n`` on the cubed sphere) must be
+        divisible by the mesh's device count.  Default ``None``
+        preserves single-mesh behavior bit-exact.
 
     Returns
     -------
@@ -513,7 +523,8 @@ def make_radiation_physics(
 
     if model_type == "hydrostatic":
         return _make_hydrostatic_radiation(radiation_config, rrtmgp_solver,
-                                            ml_ozone_coefs=ml_ozone_coefs)
+                                            ml_ozone_coefs=ml_ozone_coefs,
+                                            column_mesh=column_mesh)
     elif model_type == "nonhydrostatic":
         return _make_nonhydrostatic_radiation(radiation_config, rrtmgp_solver,
                                                ml_ozone_coefs=ml_ozone_coefs)
@@ -522,7 +533,8 @@ def make_radiation_physics(
                                             ml_ozone_coefs=ml_ozone_coefs)
     elif model_type == "mpas":
         return _make_mpas_radiation(radiation_config, rrtmgp_solver,
-                                     ml_ozone_coefs=ml_ozone_coefs)
+                                     ml_ozone_coefs=ml_ozone_coefs,
+                                     column_mesh=column_mesh)
     else:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
@@ -538,6 +550,7 @@ def _make_hydrostatic_radiation(
     radiation_config: RadiationConfig,
     rrtmgp_solver=None,
     ml_ozone_coefs=None,
+    column_mesh=None,
 ) -> Callable:
     """Create radiation physics_fn for any hydrostatic model.
 
@@ -546,6 +559,12 @@ def _make_hydrostatic_radiation(
     ``_pack_hydrostatic_tendencies`` helpers.
 
     Signature: (state, grid_or_mesh, sigma_coord) -> HydrostaticTendencies
+
+    When ``column_mesh`` is provided (issue #273 follow-up), the
+    per-column radiation kernel runs sharded across the mesh's
+    ``'col'`` axis.  Caller is responsible for ensuring the flattened
+    column count ``ncol = ∏ shape_2d`` divides the mesh's device
+    count.
     """
     _time, set_time = _make_time_state()
 
@@ -589,6 +608,40 @@ def _make_hydrostatic_radiation(
         )
 
         f_day_col = f_day.reshape(ncol) if f_day is not None else None
+
+        # Issue #273 follow-up: optionally shard the per-column radiation
+        # workload across ``column_mesh`` so a 4×A100 (or any device
+        # count that fails cubed-sphere face-divisibility) keeps every
+        # device busy on the radiation hot path.  Sharding propagates
+        # through ``_call_radiation_backend`` automatically because the
+        # backend kernels are purely functional over the column axis.
+        if column_mesh is not None:
+            from legoesm.parallel.column_shard import shard_columns
+            n_dev = column_mesh.shape["col"]
+            if ncol % n_dev != 0:
+                raise ValueError(
+                    f"column_mesh requires ncol={ncol} divisible by "
+                    f"n_devices={n_dev}.  Pick an n_devices that divides "
+                    f"6·n·n for the cubed-sphere grid, or pre-pad upstream."
+                )
+            T_col = shard_columns(T_col, column_mesh)
+            p_full_col = shard_columns(p_full_col, column_mesh)
+            p_half_col = shard_columns(p_half_col, column_mesh)
+            T_sfc_col = shard_columns(T_sfc_col, column_mesh)
+            lat_col = shard_columns(lat_col, column_mesh)
+            lon_col = shard_columns(lon_col, column_mesh)
+            insol_col = shard_columns(insol_col, column_mesh)
+            if cos_sza_col is not None:
+                cos_sza_col = shard_columns(cos_sza_col, column_mesh)
+            if q_v_col is not None:
+                q_v_col = shard_columns(q_v_col, column_mesh)
+            if q_cloud_col is not None:
+                q_cloud_col = shard_columns(q_cloud_col, column_mesh)
+            if q_ice_col is not None:
+                q_ice_col = shard_columns(q_ice_col, column_mesh)
+            if f_day_col is not None:
+                f_day_col = shard_columns(f_day_col, column_mesh)
+
         rad_out = _call_radiation_backend(
             radiation_config=radiation_config,
             T=T_col,
