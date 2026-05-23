@@ -118,6 +118,7 @@ from legoesm.atmosphere.dynamics import plane_operators as _plane_ops
 from legoesm.atmosphere.dynamics.compressible_euler import (
     CompressibleEulerConfig,
     _acoustic_column_kernel,
+    _sponge_profile,
 )
 from legoesm.atmosphere.physics.thermodynamics import sanitize_theta_rho
 from legoesm.core.field import Field
@@ -636,6 +637,26 @@ def plane_compressible_euler_slow_tendencies(
         (*pad_axes, (1, 1)),
     )
 
+    # 9. Rayleigh sponge layer (top-of-model damping). Zero when
+    #    ``config.sponge_coeff == 0`` — the profile evaluates to zero
+    #    below ``H - sponge_width`` and reaches ``sponge_coeff`` at
+    #    the model top. The same sponge taper is applied to u, v, and
+    #    theta' at full levels and to w at half levels; this matches
+    #    the MPAS NH dycore pattern in
+    #    :func:`compressible_euler_mpas.mpas_compressible_euler_slow_tendencies`.
+    sponge_full = _sponge_profile(
+        height_coord.z_full, height_coord.H,
+        config.sponge_width, config.sponge_coeff,
+    )                                         # (nlev,)
+    sponge_half = _sponge_profile(
+        height_coord.z_half, height_coord.H,
+        config.sponge_width, config.sponge_coeff,
+    )                                         # (nlev+1,)
+    du_dt = du_dt - sponge_full * u
+    dv_dt = dv_dt - sponge_full * v
+    dtheta_p_dt = dtheta_p_dt - sponge_full * theta_p
+    dw_dt = dw_dt - sponge_half * w
+
     zero_tracers = jnp.zeros_like(state.tracers.data)
     zero_phis = jnp.zeros_like(state.phis.data)
 
@@ -779,12 +800,10 @@ def validate_plane_config(config: CompressibleEulerConfig) -> None:
             "follow-up PR that lifts the kernel into the tridiagonal "
             "solver path."
         )
-    if config.sponge_coeff > 0.0:
-        raise NotImplementedError(
-            "PR2b plane dycore does not implement the Rayleigh sponge "
-            "layer; set sponge_coeff=0. Sponge ships with PR2c "
-            "validation benchmarks (rising thermal + Straka)."
-        )
+    # ``sponge_coeff > 0`` is now supported (PR2d) — the Rayleigh
+    # sponge is applied inside ``plane_compressible_euler_slow_tendencies``
+    # to ``u``, ``v``, ``theta'`` at full levels and ``w`` at half
+    # levels via the shared ``_sponge_profile`` taper.
     for name, value in (
         ("hyperdiff_coeff", config.hyperdiff_coeff),
         ("hyperdiff_rho_coeff", config.hyperdiff_rho_coeff),
