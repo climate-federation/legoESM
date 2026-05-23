@@ -220,19 +220,19 @@ class TestMPIAwareness:
     def test_conservation_uses_is_distributed(self):
         """Conservation fixers should use _is_distributed pattern."""
         import inspect
-        from legoesm.ocean.conservation import _ocean_area_sum, _ocean_global_sum
+        from legoesm.ocean.conservation import _ocean_area_sum, ocean_global_sum
 
         area_source = inspect.getsource(_ocean_area_sum)
-        assert "_ocean_global_sum" in area_source, (
-            "_ocean_area_sum should route reductions through _ocean_global_sum"
+        assert "ocean_global_sum" in area_source, (
+            "_ocean_area_sum should route reductions through ocean_global_sum"
         )
 
-        global_source = inspect.getsource(_ocean_global_sum)
+        global_source = inspect.getsource(ocean_global_sum)
         assert "_is_distributed" in global_source, (
-            "_ocean_global_sum must check _is_distributed for MPI"
+            "ocean_global_sum must check _is_distributed for MPI"
         )
         assert "global_sum_mpi" in global_source, (
-            "_ocean_global_sum must call global_sum_mpi for MPI allreduce"
+            "ocean_global_sum must call global_sum_mpi for MPI allreduce"
         )
 
     def test_operators_use_halo_exchange(self):
