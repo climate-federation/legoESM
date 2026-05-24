@@ -41,3 +41,13 @@ jobs:
             mpirun --oversubscribe -np "${n}" \
               python -m pytest -q tests/distributed/test_halo_mpi.py
           done
+
+      - name: Run Plane Pencil MPI Tests (np=2,4)
+        env:
+          MPI4JAX_NO_WARN_JAX_VERSION: "1"
+        run: |
+          for n in 2 4; do
+            echo "=== Plane pencil MPI test, np=${n} ==="
+            mpirun --oversubscribe -np "${n}" \
+              python -m pytest -q tests/distributed/test_plane_pencil_mpi.py
+          done
