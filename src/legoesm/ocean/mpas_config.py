@@ -337,6 +337,19 @@ class MPASOceanConfig(NamedTuple):
     # the recommended setting for partial-cell ETOPO runs.
     # Only meaningful with ``OceanPartialCellCoordinate``.
     vertex_thickness_alpha: float = 0.5
+    # Per-term disable flags for per-term validation tests
+    # (Phase 1A of the Adcroft follow-up plan, docs/ocean/adcroft_followups.md).
+    # ``test_mode = True`` is the explicit signal that this is a non-
+    # production configuration; ``disable_*`` flags then turn off
+    # individual terms.  Production code paths leave all of these False.
+    # Gates are Python ``if`` on static bool capture per the CLAUDE.md
+    # JAX rule (not ``jnp.where``, which would trace both branches).
+    test_mode: bool = False
+    disable_coriolis: bool = False
+    disable_pgf: bool = False
+    disable_momentum_advection: bool = False
+    disable_tracer_advection: bool = False
+    disable_drag: bool = False
 
 
 class MPASSimpleOceanConfig(NamedTuple):
