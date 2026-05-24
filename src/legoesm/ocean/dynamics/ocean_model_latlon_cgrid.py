@@ -746,11 +746,15 @@ class LatLonCGridOceanModel:
         #   u' += dt * f * v'_at_u          (forward: old v')
         #   v' -= dt * f * u'_new_at_v      (backward: new u')
         # This matches the barotropic solver's Coriolis treatment.
-        u_star, v_star = _forward_backward_coriolis_3d(
-            u_star, v_star, dt, self.grid, self.z_coord, self.config,
-            state.u_mask.data, state.v_mask.data, state.land_mask.data,
-            state.eta.data, state.H_bathy.data,
-        )
+        # Per-term test gate: skip Coriolis entirely under
+        # ``disable_coriolis = True``.  Python ``if`` on static bool
+        # capture so JIT caches the branch.
+        if not self.config.disable_coriolis:
+            u_star, v_star = _forward_backward_coriolis_3d(
+                u_star, v_star, dt, self.grid, self.z_coord, self.config,
+                state.u_mask.data, state.v_mask.data, state.land_mask.data,
+                state.eta.data, state.H_bathy.data,
+            )
 
         # Enforce periodic wrap column: u[:,n_lon] must equal u[:,0].
         u_star = u_star.at[:, -1].set(u_star[:, 0])
