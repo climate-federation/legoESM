@@ -585,7 +585,7 @@ def ensure_geometry(
     # regional extents (the 2026-05-17 Petersen-channel investigation
     # caught a 600x dx inflation that damped the gravity-current PGF
     # to ~0.07 m/s vs the Veros peer's 0.86 m/s).
-    return create_latlon_geometry(
+    geom = create_latlon_geometry(
         n_lat=grid.n_lat,
         n_lon=grid.n_lon,
         radius=grid.radius,
@@ -593,6 +593,32 @@ def ensure_geometry(
         lat_1d=getattr(grid, "lat", None),
         lon_1d=getattr(grid, "lon", None),
     )
+    # Preserve any user-customised Coriolis parameter from the input
+    # grid.  Without this, callers who set ``grid._replace(f=...)`` to
+    # build an f-plane (``f=const``), β-plane, or non-default-omega
+    # rotation rate would silently lose the override here because
+    # ``create_latlon_geometry`` recomputes ``f`` from
+    # ``omega × sin(lat)`` with ``constants.Omega`` as the default.
+    # Detected by the Phase 1C.3 gravity-wave test on 2026-05-24 —
+    # the f=0 override was being overwritten back to a global f-plane
+    # at mid-latitude, turning the standing gravity wave into a
+    # Poincaré wave whose dispersion ``ω² = f² + gHk²`` produced
+    # monotonic decay rather than oscillation.
+    if hasattr(grid, "f") and getattr(grid, "f", None) is not None:
+        f_T = jnp.asarray(grid.f).astype(geom.f_T.dtype)
+        if f_T.shape != geom.f_T.shape:
+            raise ValueError(
+                f"ensure_geometry: grid.f has shape {f_T.shape}, "
+                f"expected {geom.f_T.shape}."
+            )
+        # Average to u-faces (lon-face) and v-faces (lat-face) using
+        # the same stencil as the rest of the dycore.
+        f_u_interior = 0.5 * (jnp.roll(f_T, 1, axis=1) + f_T)
+        f_u = jnp.concatenate([f_u_interior, f_u_interior[:, 0:1]], axis=1)
+        f_v_interior = 0.5 * (f_T[:-1] + f_T[1:])
+        f_v = jnp.concatenate([f_T[0:1], f_v_interior, f_T[-1:]], axis=0)
+        geom = geom._replace(f_T=f_T, f_u=f_u, f_v=f_v)
+    return geom
 
 
 class FoldDescriptor(NamedTuple):
