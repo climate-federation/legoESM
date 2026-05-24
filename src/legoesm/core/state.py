@@ -449,6 +449,66 @@ class PlaneNonHydrostaticState(NamedTuple):
     tracers: Field
 
 
+class SpectralPlanePhysicsState(NamedTuple):
+    """Spectral (2D-Fourier xy + physical z) plane non-hydrostatic state.
+
+    Pseudo-spectral counterpart of :class:`PlaneNonHydrostaticState`.
+    Horizontal axes (y, x) are stored as ``rfft2`` complex coefficients
+    of shape ``(ny, nx_r)`` with ``nx_r = nx // 2 + 1``; the vertical
+    axis is unchanged (physical-space full levels at cell centres,
+    half levels for ``w``).
+
+    Fields
+    ------
+    u_hat, v_hat : Field
+        Horizontal-Fourier coefficients of zonal/meridional wind
+        components at full levels, shape ``(ny, nx_r, nlev)`` complex.
+        Stored at the Arakawa-C ``u``-face / ``v``-face location in
+        physical space — but the rfft2 of a face-staggered field is
+        the same as the rfft2 of the cell-centred field (the
+        face/cell distinction in physical space disappears in the
+        spectral representation because the FFT basis functions are
+        already located at every position). The factor-of-``i·kx`` /
+        ``i·ky`` operators applied below ARE the C-grid PG/divergence
+        adjoint pair.
+    w_hat : Field
+        Vertical velocity coefficients at half levels, shape
+        ``(ny, nx_r, nlev+1)`` complex.
+    theta_prime_hat, rho_prime_hat : Field
+        Perturbation potential temperature / density at full levels,
+        shape ``(ny, nx_r, nlev)`` complex.
+    phis : Field
+        Surface geopotential — kept PHYSICAL (real) and static, shape
+        ``(ny, nx)``. Zero on a flat plane; included for parity with
+        the FD plane state.
+    tracers_hat : Field
+        Tracer mixing-ratio coefficients, shape
+        ``(ny, nx_r, nlev, n_tracers)`` complex.
+    """
+    u_hat: Field
+    v_hat: Field
+    w_hat: Field
+    theta_prime_hat: Field
+    rho_prime_hat: Field
+    phis: Field
+    tracers_hat: Field
+
+
+class SpectralPlanePhysicsTendencies(NamedTuple):
+    """Tendencies for the spectral plane non-hydrostatic equations.
+
+    Same pytree shape as :class:`SpectralPlanePhysicsState` so
+    ``jax.tree_util.tree_map`` works for SSP-RK3 averaging.
+    """
+    du_hat_dt: Field
+    dv_hat_dt: Field
+    dw_hat_dt: Field
+    dtheta_prime_hat_dt: Field
+    drho_prime_hat_dt: Field
+    dphis_dt: Field
+    dtracers_hat_dt: Field
+
+
 class PlaneNonHydrostaticTendencies(NamedTuple):
     """Tendencies (time derivatives) for the plane non-hydrostatic equations.
 
