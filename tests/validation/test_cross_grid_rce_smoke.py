@@ -21,10 +21,9 @@ Per-grid coverage
   radiation + Kessler microphysics via factory
   (``model_type='nonhydrostatic'``). No surface flux (lat-lon
   insolation drives the column). 30 steps × dt=2 s.
-* ``test_rce_smoke_mpas`` — MPAS Voronoi NH; DRY smoke (no
-  shared NH-MPAS radiation / microphysics factory yet — gap
-  documented). 30 steps × dt=2 s confirms the dycore stays
-  finite + conserves dry mass with no physics forcing.
+* ``test_rce_smoke_mpas`` — MPAS Voronoi NH with gray radiation
+  + Kessler microphysics via factory (``model_type='mpas_nh'``).
+  30 steps × dt=2 s.
 
 Assertions per grid
 -------------------
@@ -283,19 +282,29 @@ def test_rce_smoke_cubed_sphere():
 
 
 # --------------------------------------------------------------------- #
-# MPAS NH (dry smoke — no NH-MPAS physics factory yet)                  #
+# MPAS NH                                                               #
 # --------------------------------------------------------------------- #
 
 
-def test_rce_smoke_mpas_dry():
-    """MPAS NH dycore stability + conservation smoke. NH-MPAS has no
-    shared radiation/microphysics factory yet (gap — would need
-    `_make_mpas_nh_radiation` / `_make_mpas_nh_microphysics` adapters
-    analogous to the plane variants), so this run is DRY. A warm
-    parcel perturbation drives the response; assertion is that the
-    dycore stays finite + conserves mass over 30 steps."""
+def test_rce_smoke_mpas():
+    """MPAS NH with gray radiation + Kessler microphysics via the new
+    ``model_type='mpas_nh'`` factory. Mirror of the cubed-sphere
+    smoke — same physics composition (field-wise tendency sum of
+    radiation + microphysics)."""
     from legoesm.atmosphere.dynamics.compressible_euler_mpas import (
         MPASCompressibleEulerConfig, MPASCompressibleEulerModel,
+    )
+    from legoesm.atmosphere.physics.microphysics.config import (
+        KesslerConfig, MicrophysicsConfig,
+    )
+    from legoesm.atmosphere.physics.microphysics.integration import (
+        make_microphysics_physics,
+    )
+    from legoesm.atmosphere.physics.radiation.config import (
+        GrayRadiationConfig, RadiationConfig,
+    )
+    from legoesm.atmosphere.physics.radiation.integration import (
+        make_radiation_physics,
     )
     from legoesm.core.field import Field
     from legoesm.core.state import MPASNonHydrostaticState
@@ -338,23 +347,50 @@ def test_rce_smoke_mpas_dry():
                       dims=("nCells", "nlev", "tracer"),
                       units="kg/kg"),
     )
+
+    rad_fn = make_radiation_physics(
+        RadiationConfig(scheme="gray", gray=GrayRadiationConfig()),
+        model_type="mpas_nh",
+    )
+    micro_fn = make_microphysics_physics(
+        MicrophysicsConfig(scheme="kessler", kessler=KesslerConfig()),
+        model_type="mpas_nh", dt=DT,
+    )
+
+    def physics_fn(s, m, hc_in, tm_in):
+        t_rad = rad_fn(s, m, hc_in, tm_in)
+        t_micro = micro_fn(s, m, hc_in, tm_in)
+        out = {}
+        for fname in t_rad._fields:
+            f_rad = getattr(t_rad, fname)
+            f_micro = getattr(t_micro, fname)
+            out[fname] = f_rad.replace(
+                data=f_rad.data + f_micro.data,
+            )
+        return type(t_rad)(**out)
+
     mass_0 = float(model.compute_dry_mass(state))
 
     for _ in range(N_STEPS):
-        state = model.step(state, dt=DT, physics_fn=None)
+        state = model.step(state, dt=DT, physics_fn=physics_fn)
 
     max_w = float(jnp.max(jnp.abs(state.w.data)))
     max_theta_p = float(jnp.max(jnp.abs(state.theta_prime.data)))
+    max_q_v = float(jnp.max(state.tracers.data[..., 0]))
+    min_q_v = float(jnp.min(state.tracers.data[..., 0]))
     mass_f = float(model.compute_dry_mass(state))
     mass_drift = abs(mass_f - mass_0) / abs(mass_0)
 
     print(
-        f"\n[mpas_dry] max|w|={max_w:.2e}  max|θ'|={max_theta_p:.2e}  "
-        f"drift={mass_drift:.2e}"
+        f"\n[mpas] max|w|={max_w:.2e}  max|θ'|={max_theta_p:.2e}  "
+        f"q_v∈[{min_q_v:.2e},{max_q_v:.2e}]  drift={mass_drift:.2e}"
     )
     assert max_w < 50.0
     assert bool(jnp.all(jnp.isfinite(state.w.data)))
+    assert bool(jnp.all(jnp.isfinite(state.tracers.data)))
     assert mass_drift < 1.0e-6
+    assert min_q_v >= -1.0e-12
+    assert max_q_v < 0.030
 
 
 # --------------------------------------------------------------------- #
