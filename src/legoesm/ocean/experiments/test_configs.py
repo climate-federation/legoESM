@@ -7,8 +7,12 @@ the per-term validation tests landed under
 Test configurations are produced through this factory rather than
 ad-hoc kwargs in test files so that:
 
-  1. Production paths cannot accidentally accept a config with disabled
-     terms (factory sets ``test_mode=True`` explicitly).
+  1. ``test_mode=True`` is set by construction.  This is a *convention*
+     marker — production paths do not yet runtime-reject it — but it
+     makes test configs visibly identifiable in the audit trail.
+     Adding a defensive check in ``LatLonCGridOceanModel`` /
+     ``MPASOceanModel`` constructors that refuses ``test_mode=True``
+     for production entry points is a tracked follow-up.
   2. Adding a new per-term test requires adding one named constructor
      here, surfacing the design choice in one place.
   3. The factory is the single place that knows which ``disable_*``

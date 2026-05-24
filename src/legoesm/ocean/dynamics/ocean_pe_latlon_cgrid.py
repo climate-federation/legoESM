@@ -1293,6 +1293,12 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         # Per-term test gate: PV flux contributes nothing.  KE gradient
         # was zeroed above.  ``diag_vortcor_*`` stay at the
         # ``_diag_zero_u/v`` defaults set earlier.
+        # NOTE — the gate sits at the *application* site rather than
+        # at the setup site, so ``zeta``, ``h_vtx``, ``q``, ``v_at_u``,
+        # ``u_at_v``, and friends above were still computed and
+        # traced.  For tiny per-term test domains the wasted work is
+        # negligible; if we ever wire this gate into a large-grid
+        # production-style run, hoist the gate earlier.
         pass
     elif _mom_adv in ("weno5", "weno7"):
         _weno_order = {"weno5": 5, "weno7": 7}[_mom_adv]
@@ -1702,6 +1708,14 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
                                          _A_h_merid * _d2v_dy2)
         dv_dt = dv_dt + _merid_v * v_mask[:, :, jnp.newaxis]
 
+    # Per-term test gate: ``disable_drag`` short-circuits the
+    # *baroclinic* bottom-drag tendency only.  The *barotropic*
+    # substep in ``barotropic_latlon_cgrid.py`` still applies drag
+    # whenever ``config.bottom_drag_r > 0`` — per-term tests that
+    # need fully-zero drag must also set ``bottom_drag_r = 0`` (the
+    # safety baseline ``make_test_config()`` uses already inherits
+    # the dataclass default of 0, so production-grade nonzero drag
+    # never reaches a test-mode config in practice).
     if config.bottom_drag_r > 0 and not config.disable_drag:
         # Drag acts on the full velocity (not perturbation) — the ocean
         # floor sees the total flow.  Consistent with MPAS and MOM6.
