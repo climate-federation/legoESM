@@ -746,9 +746,14 @@ class LatLonCGridOceanModel:
         #   u' += dt * f * v'_at_u          (forward: old v')
         #   v' -= dt * f * u'_new_at_v      (backward: new u')
         # This matches the barotropic solver's Coriolis treatment.
-        # Per-term test gate: skip Coriolis entirely under
-        # ``disable_coriolis = True``.  Python ``if`` on static bool
-        # capture so JIT caches the branch.
+        # Per-term test gate: ``disable_coriolis = True`` skips the
+        # *baroclinic* Matsuno step here.  The *barotropic* substep
+        # still applies Coriolis via the per-face ``f_u``/``f_v`` it
+        # reads from the grid geometry — fully disabling Coriolis
+        # therefore also requires zeroing ``grid.f`` (the f-plane
+        # pattern used by the Phase 1C.3 gravity-wave test, made
+        # reliable by the ``ensure_geometry()`` fix in this PR).
+        # Python ``if`` on static bool capture so JIT caches the branch.
         if not self.config.disable_coriolis:
             u_star, v_star = _forward_backward_coriolis_3d(
                 u_star, v_star, dt, self.grid, self.z_coord, self.config,
