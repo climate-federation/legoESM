@@ -399,27 +399,13 @@ class PlaneNonHydrostaticState(NamedTuple):
     ``jnp.roll`` / ``jnp.pad(..., mode='wrap')`` in
     ``plane_operators``.
 
-    Staggering — nominal vs operational
-    -----------------------------------
-    Field labels below describe the **nominal Arakawa-C staggering**
-    that the future C-grid refactor will honour. In the current
-    PR2b / PR3b ``plane_compressible_euler_slow_tendencies`` body
-    ``u`` and ``v`` are operationally consumed as **cell-centered**
-    values — the A-grid simplification documented under the
-    "A-grid simplification used in PR2b" section of
-    ``compressible_euler_plane.py``. Downstream callers can rely on
-    the nominal labels; the slow-tendency body is responsible for
-    any interpolation a future C-grid refactor adds.
-
     Fields
     ------
     u : Field
-        Zonal wind [m/s]. Nominal Arakawa-C x-face; operationally
-        cell-centered for PR2b / PR3b.
+        Zonal wind [m/s] at x-faces (Arakawa-C).
         Shape ``(ny, nx, nlev)``.
     v : Field
-        Meridional wind [m/s]. Nominal Arakawa-C y-face; operationally
-        cell-centered for PR2b / PR3b.
+        Meridional wind [m/s] at y-faces (Arakawa-C).
         Shape ``(ny, nx, nlev)``.
     w : Field
         Vertical velocity [m/s] at half (interface) levels.
@@ -447,66 +433,6 @@ class PlaneNonHydrostaticState(NamedTuple):
     rho_prime: Field
     phis: Field
     tracers: Field
-
-
-class SpectralPlanePhysicsState(NamedTuple):
-    """Spectral (2D-Fourier xy + physical z) plane non-hydrostatic state.
-
-    Pseudo-spectral counterpart of :class:`PlaneNonHydrostaticState`.
-    Horizontal axes (y, x) are stored as ``rfft2`` complex coefficients
-    of shape ``(ny, nx_r)`` with ``nx_r = nx // 2 + 1``; the vertical
-    axis is unchanged (physical-space full levels at cell centres,
-    half levels for ``w``).
-
-    Fields
-    ------
-    u_hat, v_hat : Field
-        Horizontal-Fourier coefficients of zonal/meridional wind
-        components at full levels, shape ``(ny, nx_r, nlev)`` complex.
-        Stored at the Arakawa-C ``u``-face / ``v``-face location in
-        physical space — but the rfft2 of a face-staggered field is
-        the same as the rfft2 of the cell-centred field (the
-        face/cell distinction in physical space disappears in the
-        spectral representation because the FFT basis functions are
-        already located at every position). The factor-of-``i·kx`` /
-        ``i·ky`` operators applied below ARE the C-grid PG/divergence
-        adjoint pair.
-    w_hat : Field
-        Vertical velocity coefficients at half levels, shape
-        ``(ny, nx_r, nlev+1)`` complex.
-    theta_prime_hat, rho_prime_hat : Field
-        Perturbation potential temperature / density at full levels,
-        shape ``(ny, nx_r, nlev)`` complex.
-    phis : Field
-        Surface geopotential — kept PHYSICAL (real) and static, shape
-        ``(ny, nx)``. Zero on a flat plane; included for parity with
-        the FD plane state.
-    tracers_hat : Field
-        Tracer mixing-ratio coefficients, shape
-        ``(ny, nx_r, nlev, n_tracers)`` complex.
-    """
-    u_hat: Field
-    v_hat: Field
-    w_hat: Field
-    theta_prime_hat: Field
-    rho_prime_hat: Field
-    phis: Field
-    tracers_hat: Field
-
-
-class SpectralPlanePhysicsTendencies(NamedTuple):
-    """Tendencies for the spectral plane non-hydrostatic equations.
-
-    Same pytree shape as :class:`SpectralPlanePhysicsState` so
-    ``jax.tree_util.tree_map`` works for SSP-RK3 averaging.
-    """
-    du_hat_dt: Field
-    dv_hat_dt: Field
-    dw_hat_dt: Field
-    dtheta_prime_hat_dt: Field
-    drho_prime_hat_dt: Field
-    dphis_dt: Field
-    dtracers_hat_dt: Field
 
 
 class PlaneNonHydrostaticTendencies(NamedTuple):

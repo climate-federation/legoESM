@@ -143,7 +143,7 @@ OCEAN_MATRIX: tuple[SolverEntry, ...] = (
     # NOTE: spectral ocean is unsupported — land boundary handling in
     # spectral space causes Gibbs ringing and unreliable masking.
     # Kept for reference; not included in the ocean test matrix.
-    # See https://github.com/leap-stc/legoESM/issues/99
+    # See https://github.com/gentine/legoESM/issues/99
     SolverEntry(
         "ocean", "hydrostatic", "spectral_gaussian",
         "spectral", "SpectralOceanModel",
