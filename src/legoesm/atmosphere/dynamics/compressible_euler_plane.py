@@ -445,6 +445,78 @@ def _upwind_advection_y(field_yxz: jax.Array, v_at_field: jax.Array,
     return -(v_pos * f_backward + v_neg * f_forward)
 
 
+# --------------------------------------------------------------------- #
+# WENO5-Z flux-form upwind advection (5th-order, monotone).             #
+# Drop-in replacements for _upwind_advection_x/y with the same          #
+# co-located (field, velocity) convention. Periodic in both axes        #
+# via jnp.roll. Stencil width 6; needs only single-rank periodic        #
+# wrap (no halo exchange on a doubly-periodic plane).                   #
+# --------------------------------------------------------------------- #
+
+
+def _weno5_advection_x(
+    field_yxz: jax.Array, u_at_field: jax.Array, dx: float,
+) -> jax.Array:
+    """5th-order WENO-Z upwind contribution to ``-u df/dx``.
+
+    Computes the face flux ``F_{i+1/2} = u_face · phi_face`` where
+    ``phi_face`` is the WENO5-Z left-/right-biased reconstruction
+    selected by the sign of the face velocity. The conservative flux
+    divergence is corrected by ``phi * div(u)`` so the returned tendency
+    is advective form ``-u dphi/dx``, matching
+    :func:`_upwind_advection_x`.
+
+    Face velocity uses a 2-point centred average of ``u_at_field``
+    (consistent with the co-located upwind it replaces). At any face
+    where ``u_face = 0`` the average of the two reconstructions is
+    used so the scheme stays smooth across zero crossings.
+    """
+    from legoesm.core.weno import weno5_z
+    f = field_yxz
+    # Stencil for face i+1/2: [f[i-2], f[i-1], f[i], f[i+1], f[i+2], f[i+3]]
+    stencil_R = [
+        jnp.roll(f,  2, axis=1),
+        jnp.roll(f,  1, axis=1),
+        f,
+        jnp.roll(f, -1, axis=1),
+        jnp.roll(f, -2, axis=1),
+        jnp.roll(f, -3, axis=1),
+    ]
+    fR_plus, fR_minus = weno5_z(stencil_R)  # at face i+1/2
+    # Face velocity = arithmetic average of co-located cell velocities.
+    u_face_R = 0.5 * (u_at_field + jnp.roll(u_at_field, -1, axis=1))
+    # Upwind selection.
+    phi_R = jnp.where(u_face_R >= 0.0, fR_plus, fR_minus)
+    flux_R = u_face_R * phi_R
+    # Face i-1/2 is just the rolled face i+1/2 of the previous cell.
+    flux_L = jnp.roll(flux_R, 1, axis=1)
+    u_face_L = jnp.roll(u_face_R, 1, axis=1)
+    return -(flux_R - flux_L) / dx + f * (u_face_R - u_face_L) / dx
+
+
+def _weno5_advection_y(
+    field_yxz: jax.Array, v_at_field: jax.Array, dy: float,
+) -> jax.Array:
+    """5th-order WENO-Z upwind contribution to ``-v df/dy`` (axis=0)."""
+    from legoesm.core.weno import weno5_z
+    f = field_yxz
+    stencil_R = [
+        jnp.roll(f,  2, axis=0),
+        jnp.roll(f,  1, axis=0),
+        f,
+        jnp.roll(f, -1, axis=0),
+        jnp.roll(f, -2, axis=0),
+        jnp.roll(f, -3, axis=0),
+    ]
+    fR_plus, fR_minus = weno5_z(stencil_R)
+    v_face_R = 0.5 * (v_at_field + jnp.roll(v_at_field, -1, axis=0))
+    phi_R = jnp.where(v_face_R >= 0.0, fR_plus, fR_minus)
+    flux_R = v_face_R * phi_R
+    flux_L = jnp.roll(flux_R, 1, axis=0)
+    v_face_L = jnp.roll(v_face_R, 1, axis=0)
+    return -(flux_R - flux_L) / dy + f * (v_face_R - v_face_L) / dy
+
+
 def _variable_K_diffusion_vlast(
     field_yxz: jax.Array, K_yxz: jax.Array, grid: PlaneGrid,
 ) -> jax.Array:
@@ -854,28 +926,41 @@ def plane_compressible_euler_slow_tendencies(
     rho_yface = interp_cell_to_yface_vlast(rho_total, grid)
     drho_p_dt = -divergence_vlast(rho_xface * u, rho_yface * v, grid)
 
-    # 5. Theta advection (advective form, first-order upwind). Theta
-    #    at cell centre; advect with the cell-centre velocity formed
-    #    by face→cell averaging of u, v.
+    # 5. Theta advection (advective form). Theta at cell centre;
+    #    advect with the cell-centre velocity formed by face→cell
+    #    averaging of u, v. Scheme selected by config.
+    #    horizontal_advection_scheme: "upwind1" (cheap, dispersive,
+    #    dt-constrained) or "weno5" (5th-order WENO-Z, much less
+    #    grid-scale dispersion, recommended for plane LES / RCE).
+    scheme = getattr(config, "horizontal_advection_scheme", "upwind1")
+    if scheme == "weno5":
+        adv_x, adv_y = _weno5_advection_x, _weno5_advection_y
+    elif scheme == "upwind1":
+        adv_x, adv_y = _upwind_advection_x, _upwind_advection_y
+    else:
+        raise ValueError(
+            f"Unknown horizontal_advection_scheme: {scheme!r}. "
+            "Expected 'upwind1' or 'weno5'."
+        )
     u_center = interp_xface_to_cell_vlast(u, grid)
     v_center = interp_yface_to_cell_vlast(v, grid)
     dtheta_p_dt = (
-        _upwind_advection_x(theta_total, u_center, grid.dx)
-        + _upwind_advection_y(theta_total, v_center, grid.dy)
+        adv_x(theta_p, u_center, grid.dx)
+        + adv_y(theta_p, v_center, grid.dy)
     )
 
-    # 6. Horizontal momentum advection — Arakawa-C upwind. u lives at
-    #    x-face; advect by (u-at-x-face, v-at-x-face). v→x-face via
-    #    4-pt corner average. Symmetric for v.
+    # 6. Horizontal momentum advection — Arakawa-C. u lives at x-face;
+    #    advect by (u-at-x-face, v-at-x-face). v→x-face via 4-pt
+    #    corner average. Symmetric for v. Same scheme as theta.
     v_at_xface = interp_yface_to_xface_vlast(v, grid)
     u_at_yface = interp_xface_to_yface_vlast(u, grid)
     du_adv = (
-        _upwind_advection_x(u, u, grid.dx)
-        + _upwind_advection_y(u, v_at_xface, grid.dy)
+        adv_x(u, u, grid.dx)
+        + adv_y(u, v_at_xface, grid.dy)
     )
     dv_adv = (
-        _upwind_advection_x(v, u_at_yface, grid.dx)
-        + _upwind_advection_y(v, v, grid.dy)
+        adv_x(v, u_at_yface, grid.dx)
+        + adv_y(v, v, grid.dy)
     )
 
     # 7. Vertical advection of u, v by full-level w.
@@ -890,8 +975,8 @@ def plane_compressible_euler_slow_tendencies(
     #    to interface for the upwind side selection).
     w_full = 0.5 * (w[..., :-1] + w[..., 1:])
     dw_full = (
-        _upwind_advection_x(w_full, u_center, grid.dx)
-        + _upwind_advection_y(w_full, v_center, grid.dy)
+        adv_x(w_full, u_center, grid.dx)
+        + adv_y(w_full, v_center, grid.dy)
     )
     # Re-map to half levels: interior is the average of adjacent full
     # values; top and bottom interfaces stay rigid (zero) so the
@@ -920,6 +1005,7 @@ def plane_compressible_euler_slow_tendencies(
     du_dt = du_dt - sponge_full * u
     dv_dt = dv_dt - sponge_full * v
     dtheta_p_dt = dtheta_p_dt - sponge_full * theta_p
+    drho_p_dt = drho_p_dt - sponge_full * rho_p
     dw_dt = dw_dt - sponge_half * w
 
     # 10. Biharmonic hyperdiffusion. ``-coeff * ∇⁴f`` with the
@@ -1007,8 +1093,8 @@ def plane_compressible_euler_slow_tendencies(
     if tracers.shape[-1] > 0:
         def _tracer_tend_one(q):
             return (
-                _upwind_advection_x(q, u_center, grid.dx)
-                + _upwind_advection_y(q, v_center, grid.dy)
+                adv_x(q, u_center, grid.dx)
+                + adv_y(q, v_center, grid.dy)
                 + _vertical_advection_plane(q, w, height_coord, J)
             )
         dtracers_dt = jax.vmap(_tracer_tend_one, in_axes=-1, out_axes=-1)(

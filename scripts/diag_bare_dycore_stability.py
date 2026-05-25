@@ -60,6 +60,9 @@ def parse_args():
     p.add_argument("--bubble-theta-pert", type=float, default=0.5)
     p.add_argument("--no-bubble", action="store_true",
                    help="Run from pure rest state (no IC perturbation).")
+    p.add_argument("--advection", choices=["upwind1", "weno5"],
+                   default="upwind1",
+                   help="Horizontal advection scheme for theta/u/v/w.")
     return p.parse_args()
 
 
@@ -94,6 +97,7 @@ def main():
         fix_mass=True, anchor_mass_to_initial=True,
         smagorinsky_cs=args.smag_cs, smagorinsky_prandtl=1.0,
         n_acoustic_substeps=args.n_acoustic_substeps,
+        horizontal_advection_scheme=args.advection,
     )
     model = PlaneCompressibleEulerModel(grid, hc, terrain, config=cfg)
     state = make_rest_state(grid, hc, dtype=jnp.float64)

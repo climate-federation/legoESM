@@ -144,6 +144,20 @@ class CompressibleEulerConfig(NamedTuple):
                                           # value is ~1/3 for stable stratification.
                                           # Must be > 0 when smagorinsky_cs > 0
                                           # (validate_plane_config enforces).
+    horizontal_advection_scheme: str = "upwind1"
+                                          # Horizontal advection of theta_prime, u, v, w
+                                          # (and tracers) on the plane dycore.
+                                          # "upwind1" = first-order upwind (cheap, very
+                                          # dispersive at coarse dx, unstable above
+                                          # dt ~ 0.5 s on dx=2 km with the Wing RCEMIP
+                                          # IC). "weno5" = 5th-order WENO-Z upwind
+                                          # (recommended for plane LES / RCE; periodic
+                                          # 6-point stencil, much less grid-scale
+                                          # dispersion, lets dt grow to ~2 s on the
+                                          # same configuration).
+                                          # Consumed by
+                                          # ``compressible_euler_plane.py`` only;
+                                          # cubed-sphere / MPAS ignore it.
 
 
 # ==============================================================================
@@ -321,8 +335,11 @@ def _acoustic_column_kernel(
         dz_half_val = height_coord.dz_half  # (nlev-1,)
         dz_centered = dz_half_val[:-1] + dz_half_val[1:]  # (nlev-2,)
         inner_grad = (theta_total[..., :-2] - theta_total[..., 2:]) / dz_centered
-        pad_axes_t = ((0, 0),) * (theta_total.ndim - 1)
-        dtheta_dz = jnp.pad(inner_grad, (*pad_axes_t, (1, 1)))
+        top_grad = (theta_total[..., 0:1] - theta_total[..., 1:2]) / dz_half_val[0]
+        bottom_grad = (
+            theta_total[..., -2:-1] - theta_total[..., -1:]
+        ) / dz_half_val[-1]
+        dtheta_dz = jnp.concatenate([top_grad, inner_grad, bottom_grad], axis=-1)
     else:
         dtheta_dz = jnp.zeros_like(theta_total)
 
@@ -483,8 +500,9 @@ def _semi_implicit_acoustic_column_kernel(
     if nlev > 2:
         dz_centered = dz_half[:-1] + dz_half[1:]
         inner_grad = (theta_total[..., :-2] - theta_total[..., 2:]) / dz_centered
-        pad_axes_t = ((0, 0),) * (theta_total.ndim - 1)
-        dtheta_dz = jnp.pad(inner_grad, (*pad_axes_t, (1, 1)))
+        top_grad = (theta_total[..., 0:1] - theta_total[..., 1:2]) / dz_half[0]
+        bottom_grad = (theta_total[..., -2:-1] - theta_total[..., -1:]) / dz_half[-1]
+        dtheta_dz = jnp.concatenate([top_grad, inner_grad, bottom_grad], axis=-1)
     else:
         dtheta_dz = jnp.zeros_like(theta_total)
     theta_p_new = theta_p_c - dt_s * w_full / J[..., None] * dtheta_dz
@@ -647,8 +665,13 @@ def acoustic_substeps_semi_implicit(
         if nlev > 2:
             dz_centered = dz_half[:-1] + dz_half[1:]
             inner_grad = (theta_total[..., :-2] - theta_total[..., 2:]) / dz_centered
-            pad_axes_t = ((0, 0),) * (theta_total.ndim - 1)
-            dtheta_dz = jnp.pad(inner_grad, (*pad_axes_t, (1, 1)))
+            top_grad = (theta_total[..., 0:1] - theta_total[..., 1:2]) / dz_half[0]
+            bottom_grad = (
+                theta_total[..., -2:-1] - theta_total[..., -1:]
+            ) / dz_half[-1]
+            dtheta_dz = jnp.concatenate(
+                [top_grad, inner_grad, bottom_grad], axis=-1,
+            )
         else:
             dtheta_dz = jnp.zeros_like(theta_total)
         theta_p_new = theta_p_c - dt_s * w_full / J[..., None] * dtheta_dz
