@@ -102,16 +102,11 @@ def test_construct_rejects_non_flat_terrain():
 # --------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize(
-    "overrides, match",
-    [
-        ({"semi_implicit_acoustic": True}, "forward-backward acoustic"),
-    ],
-)
-def test_validate_plane_config_rejects_unsupported_flags(overrides, match):
-    cfg = _minimal_config(**overrides)
-    with pytest.raises(NotImplementedError, match=match):
-        validate_plane_config(cfg)
+def test_validate_plane_config_accepts_semi_implicit_acoustic():
+    """semi_implicit_acoustic now supported via per-column Thomas
+    solve (plane_acoustic_substeps_semi_implicit)."""
+    cfg = _minimal_config(semi_implicit_acoustic=True)
+    validate_plane_config(cfg)  # no raise
 
 
 def test_validate_plane_config_accepts_sponge_coeff_positive():
@@ -172,3 +167,86 @@ def test_step_compiles_once_for_repeated_dt():
     s2 = model.step(s1, dt=1.0)
     assert jnp.all(jnp.isfinite(s2.u.data))
     assert jnp.all(jnp.isfinite(s2.w.data))
+
+
+# --------------------------------------------------------------------- #
+# Semi-implicit acoustic substeps                                       #
+# --------------------------------------------------------------------- #
+
+
+def test_semi_implicit_acoustic_step_runs():
+    """semi_implicit_acoustic=True path runs end-to-end without
+    NotImplementedError; produces finite output for rest state."""
+    model, state = _setup(semi_implicit_acoustic=True)
+    next_state = model.step(state, dt=1.0)
+    assert jnp.all(jnp.isfinite(next_state.w.data))
+    assert jnp.all(jnp.isfinite(next_state.theta_prime.data))
+    assert jnp.all(jnp.isfinite(next_state.rho_prime.data))
+
+
+def test_semi_implicit_acoustic_matches_explicit_at_rest():
+    """At rest state with zero perturbation, both paths produce
+    identical output (no acoustic activity to differentiate them)."""
+    model_e, state = _setup(semi_implicit_acoustic=False)
+    model_si, _ = _setup(semi_implicit_acoustic=True)
+    s_e = model_e.step(state, dt=1.0)
+    s_si = model_si.step(state, dt=1.0)
+    # Rest state stays at rest under both paths.
+    import numpy as np
+    np.testing.assert_allclose(
+        np.asarray(s_e.w.data), np.asarray(s_si.w.data), atol=1e-14,
+    )
+    np.testing.assert_allclose(
+        np.asarray(s_e.theta_prime.data),
+        np.asarray(s_si.theta_prime.data), atol=1e-14,
+    )
+
+
+def test_semi_implicit_acoustic_jit_compilable():
+    """JIT path compiles cleanly under semi-implicit acoustic."""
+    model, state = _setup(semi_implicit_acoustic=True)
+    fn = jax.jit(lambda s: model.step(s, dt=1.0))
+    out = fn(state)
+    assert jnp.all(jnp.isfinite(out.w.data))
+
+
+def test_semi_implicit_acoustic_stable_on_stretched_grid():
+    """Codex iter-2: regression guard for the feature's actual purpose.
+
+    On a stretched vertical grid with thin surface layer (dz_sfc=50m),
+    the vertical acoustic CFL bounds dt for the explicit
+    forward-backward path at dt ~ 0.3 s. The semi-implicit path lifts
+    this and must remain finite at dt=2.0s with a non-trivial
+    perturbation that excites vertical acoustic modes.
+    """
+    from legoesm.grids.vertical import create_stretched_height_coordinate
+
+    nx = ny = 4
+    nlev = 20
+    grid = create_plane_grid(
+        nx=nx, ny=ny, nlev=nlev, dx=2.0e3, dy=2.0e3, dtype=jnp.float64,
+    )
+    hc = create_stretched_height_coordinate(nlev, H=20.0e3, dz_sfc=50.0)
+    terrain = make_flat_plane_terrain_metric(grid, hc)
+    cfg = _minimal_config(
+        semi_implicit_acoustic=True,
+        n_acoustic_substeps=6,
+        acoustic_off_centering=0.1,
+    )
+    model = PlaneCompressibleEulerModel(grid, hc, terrain, cfg)
+    rest = make_rest_state(grid, hc, dtype=jnp.float64)
+    # Seed vertical acoustic mode via single-cell w-impulse in lowest
+    # interior interface (dz_sfc=50m → fastest vertical mode).
+    w_kick = rest.w.data.at[ny // 2, nx // 2, -2].set(0.5)
+    state = rest._replace(w=rest.w.replace(data=w_kick))
+    # Run a few outer steps at dt=2.0s — explicit path would blow up
+    # at dz_sfc=50m within 1-2 steps (acoustic CFL ≈ 13 even with 24
+    # substeps). Semi-implicit must remain finite.
+    for _ in range(5):
+        state = model.step(state, dt=2.0)
+    assert jnp.all(jnp.isfinite(state.w.data)), (
+        "semi-implicit acoustic must remain finite at dt=2 on a "
+        "dz_sfc=50m stretched grid; explicit path fails here."
+    )
+    assert jnp.all(jnp.isfinite(state.theta_prime.data))
+    assert jnp.all(jnp.isfinite(state.rho_prime.data))

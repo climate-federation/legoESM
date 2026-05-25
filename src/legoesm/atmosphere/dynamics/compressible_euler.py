@@ -407,6 +407,90 @@ def acoustic_substeps(
 # Semi-implicit acoustic substeps (tridiagonal)
 # ==============================================================================
 
+def _semi_implicit_acoustic_column_kernel(
+    w_c: jax.Array,
+    theta_p_c: jax.Array,
+    rho_p_c: jax.Array,
+    height_coord: HeightCoordinate,
+    J: jax.Array,
+    dt_s: float,
+    beta: float,
+    g: float,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Single semi-implicit acoustic substep (column-local algebra).
+
+    Layout-agnostic counterpart of :func:`_acoustic_column_kernel`.
+    Treats the vertical pressure-gradient term in the w equation
+    implicitly via a per-column tridiagonal Thomas solve so the
+    vertical acoustic CFL constraint is lifted.
+
+    Inputs follow the same contract as the explicit kernel:
+    ``[..., nlev+1]`` w (rigid lid/bottom), ``[..., nlev]`` theta'+rho',
+    ``J`` broadcastable to the horizontal leading axes.
+    """
+    c_p = constants.c_pd
+    R_d = constants.R_d
+    c_v = constants.c_vd
+    dz = height_coord.dz
+    dz_half = height_coord.dz_half
+    theta_0 = height_coord.theta_ref
+    rho_0 = height_coord.rho_ref
+    gamma = c_p / c_v
+    T_ref = theta_0 * height_coord.exner_ref           # (nlev,)
+    cs2 = gamma * R_d * T_ref                          # (nlev,)
+    cs2_half = 0.5 * (cs2[:-1] + cs2[1:])              # (nlev-1,)
+    dz_inner = 0.5 * (dz[:-1] + dz[1:])                # (nlev-1,)
+    nlev = theta_p_c.shape[-1]
+
+    theta_total, rho_total = sanitize_theta_rho(
+        theta_0 + theta_p_c, rho_0 + rho_p_c,
+    )
+
+    # --- Explicit RHS for w (same as forward step) ---
+    pi_p = compute_exner_perturbation(rho_p_c, theta_p_c, height_coord)
+    dpi_dz_inner = (pi_p[..., :-1] - pi_p[..., 1:]) / dz_inner
+    theta_half_inner = 0.5 * (theta_total[..., :-1] + theta_total[..., 1:])
+    theta_p_half = 0.5 * (theta_p_c[..., :-1] + theta_p_c[..., 1:])
+    theta_0_half = 0.5 * (theta_0[:-1] + theta_0[1:])
+    buoyancy = g * theta_p_half / theta_0_half
+    dw_dt_inner = (
+        -c_p * theta_half_inner * dpi_dz_inner / J[..., None]
+        + buoyancy
+    )
+    rhs = w_c[..., 1:-1] + dt_s * dw_dt_inner
+
+    # --- Tridiagonal coefficients for implicit w solve ---
+    alpha = dt_s**2 * cs2_half / (dz_inner * J[..., None])**2
+    pad_axes_a = ((0, 0),) * (alpha.ndim - 1)
+    a_tri = jnp.pad(-alpha[..., 1:], (*pad_axes_a, (1, 0)))
+    alpha_interior = jnp.pad(alpha[..., 1:-1], (*pad_axes_a, (1, 1)))
+    b_tri = 1.0 + alpha + alpha_interior
+    c_tri = jnp.pad(-alpha[..., :-1], (*pad_axes_a, (0, 1)))
+    w_inner_new = thomas_solve_batched(a_tri, b_tri, c_tri, rhs)
+    w_new = w_c.at[..., 1:-1].set(w_inner_new)
+
+    # --- Backward: update rho' using continuity ---
+    rho_half = 0.5 * (rho_total[..., :-1] + rho_total[..., 1:])
+    pad_axes_w = ((0, 0),) * (w_new.ndim - 1)
+    rho_w = jnp.pad(rho_half * w_new[..., 1:-1], (*pad_axes_w, (1, 1)))
+    vert_div = (rho_w[..., :-1] - rho_w[..., 1:]) / dz
+    vert_div = vert_div / J[..., None]
+    rho_p_new = rho_p_c - dt_s * vert_div
+    rho_p_new = (1.0 + beta) * rho_p_new - beta * rho_p_c
+
+    # --- Backward: update theta' using w-advection of theta_total ---
+    w_full = 0.5 * (w_new[..., :-1] + w_new[..., 1:])
+    if nlev > 2:
+        dz_centered = dz_half[:-1] + dz_half[1:]
+        inner_grad = (theta_total[..., :-2] - theta_total[..., 2:]) / dz_centered
+        pad_axes_t = ((0, 0),) * (theta_total.ndim - 1)
+        dtheta_dz = jnp.pad(inner_grad, (*pad_axes_t, (1, 1)))
+    else:
+        dtheta_dz = jnp.zeros_like(theta_total)
+    theta_p_new = theta_p_c - dt_s * w_full / J[..., None] * dtheta_dz
+    return (w_new, theta_p_new, rho_p_new)
+
+
 def acoustic_substeps_semi_implicit(
     state: NonHydrostaticState,
     slow_tend: NonHydrostaticTendencies,
