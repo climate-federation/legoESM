@@ -211,6 +211,16 @@ loss:
   w_bias_u: 1.0
   w_bias_v: 1.0
   w_bias_ps: 1.0
+  # v13: CRPS-style probabilistic loss (MAE limit for M=1).  Combined
+  # with MSE this is the NeuralGCM training-loss recipe; the MAE
+  # term penalises large errors more gently than MSE (linear vs
+  # squared) and improves out-of-sample skill.  Weights at ~half the
+  # corresponding MSE weight so both terms contribute on the same
+  # order at the current residual.
+  w_crps_T: 0.5
+  w_crps_u: 0.25
+  w_crps_v: 0.25
+  w_crps_ps: 0.15
   spectral_weight: 0.3
   level_weighting: "pressure"
   normalize_by_scale: true

@@ -227,7 +227,16 @@ def _compute_bias_for_variant(
             order=pe_config.spectral_filter_order,
             cutoff_fraction=pe_config.spectral_filter_strength,
         )
+    # Honor the training rollout horizon for eval so bias/RMSE maps
+    # reflect the model's actual forecast skill at its supervised
+    # horizon.  v12 uses 6-hour pairs; if the config sets
+    # ``aimip_rollout_hours`` we use that, else fall back to a 1-day
+    # rollout (legacy behaviour).  ERA5 cadence is 6 h so the
+    # period_cfg loader also needs rollout_hours threaded in.
     n_steps_per_day = int(86400 / spec_cfg.dt)
+    rollout_hours_cfg = int(base_cfg.get("aimip_rollout_hours", 0) or 0)
+    rollout_hours_eval = rollout_hours_cfg if rollout_hours_cfg > 0 else 24
+    n_steps_eval = int(round(rollout_hours_eval * 3600.0 / spec_cfg.dt))
 
     out: dict[str, dict[str, np.ndarray]] = {}
     for period_name, years in (
@@ -238,6 +247,7 @@ def _compute_bias_for_variant(
         period_cfg = spec_cfg._replace(
             n_train_days=sum(w[2] for w in windows),
             windows=tuple(windows),
+            rollout_hours=rollout_hours_eval,
         )
         logger.info(
             f"[{variant}] loading {period_name} windows "
@@ -253,7 +263,7 @@ def _compute_bias_for_variant(
         for ic, target in zip(ic_states, target_carries):
             pred = spectral_rollout(
                 ic, physics_fn, grid, sigma, pe_config,
-                spec_cfg.dt, n_steps_per_day,
+                spec_cfg.dt, n_steps_eval,
                 sponge_factor, spectral_filter,
             )
             pred_grid = spectral_pe_to_grid(pred, grid, sigma)

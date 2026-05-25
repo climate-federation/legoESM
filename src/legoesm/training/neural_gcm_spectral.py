@@ -793,9 +793,30 @@ def spectral_state_vs_carry_loss(
         bias_v = _area_weighted_mean_3d(dv)
         loss = loss + config.w_bias_v * bias_v ** 2 / wind_norm
 
+    # CRPS contribution (deterministic = MAE).  The fair-CRPS for a
+    # single-member forecast (M=1) reduces to area-weighted |pred -
+    # target|; the M>=2 fair-CRPS would subtract the ensemble
+    # self-spread term ``(1/(2M(M-1))) Σ |x_m - x_m'|``, but we don't
+    # have an ensemble here.  We normalise by the variable scale
+    # (NOT scale^2) because |error| has units of the variable, not
+    # variance.  Weights ``w_crps_{T,u,v,ps}`` default to 0; setting
+    # them non-zero combines an MAE + MSE objective in the NeuralGCM
+    # style.
+    T_scale = config.T_scale if config.normalize_by_scale else 1.0
+    wind_scale = config.wind_scale if config.normalize_by_scale else 1.0
+    ps_scale = config.ps_scale if config.normalize_by_scale else 1.0
+    if config.w_crps_T > 0.0:
+        loss = loss + config.w_crps_T * jnp.mean(jnp.abs(dT) * lev_w) / T_scale
+    if config.w_crps_u > 0.0:
+        loss = loss + config.w_crps_u * jnp.mean(jnp.abs(du) * lev_w) / wind_scale
+    if config.w_crps_v > 0.0:
+        loss = loss + config.w_crps_v * jnp.mean(jnp.abs(dv) * lev_w) / wind_scale
+
     # Surface pressure: (n_lat, n_lon)
     dp = fields['p_s'].astype(jnp.float32) - target_carry.p_s
     loss = loss + config.w_ps * jnp.mean(dp ** 2) / ps_norm
+    if config.w_crps_ps > 0.0:
+        loss = loss + config.w_crps_ps * jnp.mean(jnp.abs(dp)) / ps_scale
     if config.w_bias_ps > 0.0:
         bias_ps = _area_weighted_mean_2d(dp)
         loss = loss + config.w_bias_ps * bias_ps ** 2 / ps_norm
