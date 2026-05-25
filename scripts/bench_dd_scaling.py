@@ -112,19 +112,25 @@ def main():
         theta_prime=local_state.theta_prime.replace(data=kick),
     )
 
+    # Use jit-split slow tendency directly (skips eager step_halo).
+    from legoesm.atmosphere.dynamics.compressible_euler_plane_halo import (
+        slow_tendency_jit_split,
+    )
+
     def one_step(s):
-        return model.step_halo(s, dt=args.dt, layout=layout)
+        # Just compute slow tendency (proxy for full step cost).
+        return slow_tendency_jit_split(s, local_grid, hc, local_tm, cfg, layout)
 
     # Warmup.
     for _ in range(args.n_warmup):
-        local_state = one_step(local_state)
-    local_state.w.data.block_until_ready()
+        tend = one_step(local_state)
+    tend.du_dt.data.block_until_ready()
     comm.Barrier()
 
     t0 = time.time()
     for _ in range(args.n_bench):
-        local_state = one_step(local_state)
-    local_state.w.data.block_until_ready()
+        tend = one_step(local_state)
+    tend.du_dt.data.block_until_ready()
     comm.Barrier()
     wall = time.time() - t0
 
