@@ -35,6 +35,8 @@ staggering) is preserved. No public helper here returns a bare array.
 
 from __future__ import annotations
 
+import functools
+
 import jax
 import jax.numpy as jnp
 
@@ -47,9 +49,16 @@ from legoesm.atmosphere.dynamics.compressible_euler import (
 )
 from legoesm.atmosphere.physics.thermodynamics import sanitize_theta_rho
 from legoesm.core.field import Field
-from legoesm.core.state import PlaneNonHydrostaticState
+from legoesm.core.state import (
+    PlaneNonHydrostaticState,
+    PlaneNonHydrostaticTendencies,
+)
 from legoesm.grids.plane import PlaneGrid
 from legoesm.grids.vertical import HeightCoordinate, TerrainMetric
+from legoesm.timestepping.split_explicit import (
+    SplitExplicitConfig,
+    split_explicit_step,
+)
 
 
 # --------------------------------------------------------------------- #
@@ -114,6 +123,46 @@ def laplacian_vlast(phi_yxz: jax.Array, grid: PlaneGrid) -> jax.Array:
     return _move_vertical_to_back(
         _plane_ops.laplacian_3d(_move_vertical_to_front(phi_yxz), grid)
     )
+
+
+# --------------------------------------------------------------------- #
+# Two-point centered face/cell interpolations (vertical-last).          #
+# Re-added after main merge dropped them; required by                   #
+# plane_compressible_euler_slow_tendencies (non-halo path).             #
+# Periodic in both horizontal axes (jnp.roll wrap).                     #
+# --------------------------------------------------------------------- #
+
+
+def interp_cell_to_xface_vlast(phi_yxz: jax.Array, grid: PlaneGrid) -> jax.Array:
+    """Cell-centre → x-face: average phi[i,j] with phi[i-1,j] (axis=1)."""
+    return 0.5 * (phi_yxz + jnp.roll(phi_yxz, 1, axis=1))
+
+
+def interp_cell_to_yface_vlast(phi_yxz: jax.Array, grid: PlaneGrid) -> jax.Array:
+    """Cell-centre → y-face: average phi[i,j] with phi[i,j-1] (axis=0)."""
+    return 0.5 * (phi_yxz + jnp.roll(phi_yxz, 1, axis=0))
+
+
+def interp_xface_to_cell_vlast(u_yxz: jax.Array, grid: PlaneGrid) -> jax.Array:
+    """x-face → cell-centre: average u[i,j] with u[i+1,j]."""
+    return 0.5 * (u_yxz + jnp.roll(u_yxz, -1, axis=1))
+
+
+def interp_yface_to_cell_vlast(v_yxz: jax.Array, grid: PlaneGrid) -> jax.Array:
+    """y-face → cell-centre: average v[i,j] with v[i,j+1]."""
+    return 0.5 * (v_yxz + jnp.roll(v_yxz, -1, axis=0))
+
+
+def interp_yface_to_xface_vlast(v_yxz: jax.Array, grid: PlaneGrid) -> jax.Array:
+    """y-face → x-face (4-point corner average)."""
+    v_cell = interp_yface_to_cell_vlast(v_yxz, grid)
+    return interp_cell_to_xface_vlast(v_cell, grid)
+
+
+def interp_xface_to_yface_vlast(u_yxz: jax.Array, grid: PlaneGrid) -> jax.Array:
+    """x-face → y-face (4-point corner average)."""
+    u_cell = interp_xface_to_cell_vlast(u_yxz, grid)
+    return interp_cell_to_yface_vlast(u_cell, grid)
 
 
 # --------------------------------------------------------------------- #

@@ -152,7 +152,17 @@ def parse_args():
                         "limit; main benefit on stretched grids).")
     p.add_argument("--hyperdiff", type=float, default=1.0e6)
     p.add_argument("--sponge-coeff", type=float, default=0.05)
-    p.add_argument("--sponge-width", type=float, default=5_000.0)
+    p.add_argument("--sponge-width", type=float, default=10_000.0,
+                   help="Sponge layer width from model top [m]. "
+                        "Default 10 km matches CompressibleEulerConfig. "
+                        "5 km is too thin for H=33 km when gravity-wave "
+                        "wavelengths exceed sponge depth.")
+    p.add_argument("--acoustic-off-centering", type=float, default=0.0,
+                   help="Skamarock-Klemp off-centering parameter beta "
+                        "in [0, 1). 0 = neutral forward-backward. "
+                        "0.05-0.1 damps acoustic modes. Try 0.1 if "
+                        "instability appears as growing rho_prime / w "
+                        "oscillations.")
     p.add_argument("--snapshot-hours", type=float, default=24.0)
     p.add_argument("--snapshot-3d-hours", type=float, default=0.0,
                    help="If > 0, dump full 3D MSE/qv/T volumes "
@@ -187,11 +197,13 @@ def build_height_coord_and_state(args, grid):
         (grid.ny, grid.nx, nlev), dtype=jnp.float64,
     )
     new_tracers = new_tracers.at[..., 0].set(qv_3d)
-    # Convection seed: Wing-style localized warm bubble at lowest
-    # ~1 km, cosine-tapered horizontally over ~10·dx, ΔT_max=0.5 K.
-    # Localised support means acoustic transients are bounded and
-    # damped by the sponge — random whole-domain theta_prime noise
-    # excites grid-scale acoustic modes that grow unboundedly.
+    # Convection seed: warm bubble at lowest ~1 km, cosine-tapered
+    # horizontally over ~10·dx, ΔT_max = 0.5 K. Density perturbation
+    # set so the initial pressure is unperturbed
+    # (ρ'/ρ_ref = −θ'/θ_ref) — the standard warm-bubble IC used by
+    # the validated rising-thermal test. Without this rho' balance
+    # the IC has a pressure imbalance that drives acoustic
+    # transients which grow past step ~70 at 132×132 dx=2 km dt=2.
     ny, nx = grid.ny, grid.nx
     jj = jnp.arange(ny)
     ii = jnp.arange(nx)
@@ -208,9 +220,11 @@ def build_height_coord_and_state(args, grid):
     vert = jnp.where(z < z_top_bubble,
                      0.5 * (1.0 + jnp.cos(jnp.pi * z / z_top_bubble)),
                      0.0)
-    bubble = 0.5 * horiz[:, :, None] * vert[None, None, :]
+    bubble_theta = 0.5 * horiz[:, :, None] * vert[None, None, :]
+    bubble_rho = -hc.rho_ref * bubble_theta / hc.theta_ref
     state = state._replace(
-        theta_prime=state.theta_prime.replace(data=bubble),
+        theta_prime=state.theta_prime.replace(data=bubble_theta),
+        rho_prime=state.rho_prime.replace(data=bubble_rho),
         tracers=state.tracers.replace(data=new_tracers),
     )
     return hc, state
@@ -429,6 +443,7 @@ def main():
         hyperdiff_rho_coeff=args.hyperdiff,
         hyperdiff_w_coeff=args.hyperdiff,
         semi_implicit_acoustic=args.semi_implicit_acoustic,
+        acoustic_off_centering=args.acoustic_off_centering,
         use_coriolis=False,
         fix_mass=True, anchor_mass_to_initial=True,
         smagorinsky_cs=args.smag_cs, smagorinsky_prandtl=1.0,
