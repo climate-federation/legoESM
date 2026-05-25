@@ -28,29 +28,23 @@ keeps single-rank vs multi-rank correctness easy to verify on a
 laptop. The single-rank path is exercised by
 ``tests/unit/test_plane_mpi_pencil.py``.
 
-Multi-rank coverage (staged-not-validated yet)
-----------------------------------------------
-The multi-rank halo exchange path (``layout.n_ranks > 1``) IS
-implemented but is NOT yet exercised by an automated test because
-this dev environment lacks ``libmpi.dylib`` / OpenMPI; the
-``tests/distributed/`` conftest imports ``mpi4jax`` eagerly and
-fails at collection time. A multi-rank smoke test
-(``tests/distributed/test_plane_pencil_mpi.py``) lands in the
-follow-up PR that ships under the OpenMPI-installed CI job, and
-will verify (a) the padded local field equals the slice of a
-globally wrapped reference, (b) AD through ``exchange_halo_plane_yxz``
-returns finite gradients via ``_sendrecv_vjp``, (c) uneven
-decompositions + halo widths > 1.
+Multi-rank coverage
+-------------------
+``layout.n_ranks > 1`` runs a two-stage sendrecv: N/S along the
+``y`` axis first, then E/W of the *already-NS-padded* array so the
+four corner halos arrive via two-axis composition (mirrors the
+cubed-sphere ``_pad_halo_mpi`` pattern). All sendrecv calls flow
+through ``_get_sendrecv_vjp`` so :func:`jax.grad` works through
+the exchange. Validated by ``tests/distributed/test_plane_pencil_mpi.py``
+under the OpenMPI ``mpi-distributed.yml`` CI job (np = 2, 4).
 
 Public-API maturity
 -------------------
 * :func:`make_plane_pencil_layout` — stable.
-* :func:`exchange_halo_plane_yxz` — single-rank stable; multi-rank
-  implemented but pending CI validation under ``mpirun``.
+* :func:`exchange_halo_plane_yxz` — single-rank + multi-rank stable.
 * :func:`scatter_plane_field` — single-rank stable (pure slice).
 * :func:`gather_plane_field` — single-rank identity; multi-rank
-  raises ``NotImplementedError`` (intentional, lands with the
-  distributed test suite).
+  uses ``comm.gather`` to rank 0 with 2D reassembly via layout.
 * :func:`make_plane_pencil_grid` — stable; recomputes ``f_y``,
   ``Lx``, ``Ly``, ``total_area`` against the global plane so
   beta-plane Coriolis is correct on every rank (Codex PR5 iter-1
@@ -273,26 +267,107 @@ def exchange_halo_plane_yxz(
     if layout.n_ranks == 1:
         return jnp.pad(field_yxz, pad_widths, mode="wrap")
 
-    # Multi-rank path is gated until the OpenMPI-installed CI job
-    # lands the distributed validation test
-    # (``tests/distributed/test_plane_pencil_mpi.py``). Codex PR5
-    # iter-2 finding M2: MPI argument order / tags / corner
-    # exchange / ``_sendrecv_vjp`` backward correctness are not
-    # safe to commit implemented-but-untested — they would
-    # deadlock or silently exchange wrong halos on the first
-    # multi-rank run. The reference algorithm (E/W first, then
-    # N/S using already-filled E/W halos so corners arrive via
-    # two-axis composition) is documented in
-    # :mod:`legoesm.parallel.latlon_mpi`'s 1D-band variant and
-    # will be ported here together with the test.
-    raise NotImplementedError(
-        f"Multi-rank plane halo exchange (n_ranks={layout.n_ranks}) "
-        "is staged-not-implemented in PR5. The implementation lands "
-        "together with the distributed validation test in the "
-        "follow-up PR that has OpenMPI + mpi4jax runtime available; "
-        "single-rank ``layout.n_ranks == 1`` is fully supported via "
-        "the JAX fast-path above."
-    )
+    # Multi-rank path. Each axis (y, x) handled INDEPENDENTLY:
+    #   * n_ranks_axis == 1 → local periodic wrap on that axis (no
+    #     MPI). Codex review 2026-05-24: previously the multi-rank
+    #     path always issued sendrecv even when the periodic
+    #     neighbour was the current rank. That triggered two
+    #     self-sendrecv on the same tag base with identical
+    #     `(source, dest)` for both directions — MPI matched the
+    #     messages arbitrarily and filled the east halo with the
+    #     east boundary (instead of the west) or vice versa.
+    #   * n_ranks_axis >  1 → mpi4jax sendrecv with the periodic
+    #     neighbour rank.
+    # NS stage always runs first; the EW stage operates on the
+    # NS-padded array so the four corners arrive via two-axis
+    # composition regardless of which axis used MPI vs local wrap.
+    h = layout.halo
+
+    if layout.n_ranks_y > 1 or layout.n_ranks_x > 1:
+        try:
+            import mpi4jax
+            from mpi4py import MPI
+        except ImportError as exc:
+            raise ImportError(
+                "Multi-rank plane halo exchange requires mpi4jax + "
+                "mpi4py (install with `pip install -e \".[mpi]\"` and "
+                "have OpenMPI available)."
+            ) from exc
+        from legoesm.parallel.halo_exchange import _get_sendrecv_vjp
+        comm = MPI.COMM_WORLD
+        sendrecv = _get_sendrecv_vjp(mpi4jax)
+    else:
+        sendrecv = None  # never used; single-rank shortcut above
+
+    trailing = field_yxz.shape[2:]
+    _TAG_NS = 1_000
+    _TAG_EW = 2_000
+    rank = layout.rank
+
+    # ----- Stage 1: N/S along the y axis -----
+    if layout.n_ranks_y == 1:
+        # Local periodic wrap on y; MPI would self-deadlock or
+        # silently misfill halos for the single-rank-on-y case.
+        ns_padded = jnp.pad(
+            field_yxz,
+            [(h, h), (0, 0)] + [(0, 0)] * (field_yxz.ndim - 2),
+            mode="wrap",
+        )
+    else:
+        flat_shape_ns = (h * layout.nx_local, *trailing)
+        flat_size_ns = int(jnp.prod(jnp.asarray(flat_shape_ns)))
+        send_to_north = field_yxz[-h:].reshape(flat_size_ns)
+        send_to_south = field_yxz[:h].reshape(flat_size_ns)
+        recv_template = jnp.zeros_like(send_to_north)
+        from_south = sendrecv(
+            send_to_south, recv_template,
+            layout.south_rank, layout.south_rank,
+            rank + _TAG_NS, layout.south_rank + _TAG_NS, comm,
+        )
+        from_north = sendrecv(
+            send_to_north, recv_template,
+            layout.north_rank, layout.north_rank,
+            rank + _TAG_NS, layout.north_rank + _TAG_NS, comm,
+        )
+        south_halo = from_south.reshape((h, layout.nx_local, *trailing))
+        north_halo = from_north.reshape((h, layout.nx_local, *trailing))
+        ns_padded = jnp.concatenate(
+            [south_halo, field_yxz, north_halo], axis=0,
+        )
+
+    # ----- Stage 2: E/W of the NS-padded array -----
+    # ns_padded already carries the NS halo rows, so E/W slabs of
+    # ns_padded contain the four corner cells of the periodic halo.
+    if layout.n_ranks_x == 1:
+        padded = jnp.pad(
+            ns_padded,
+            [(0, 0), (h, h)] + [(0, 0)] * (ns_padded.ndim - 2),
+            mode="wrap",
+        )
+    else:
+        ny_padded = ns_padded.shape[0]
+        flat_shape_ew = (ny_padded * h, *trailing)
+        flat_size_ew = int(jnp.prod(jnp.asarray(flat_shape_ew)))
+        send_to_east = ns_padded[:, -h:].reshape(flat_size_ew)
+        send_to_west = ns_padded[:, :h].reshape(flat_size_ew)
+        recv_template_ew = jnp.zeros_like(send_to_east)
+        from_west = sendrecv(
+            send_to_west, recv_template_ew,
+            layout.west_rank, layout.west_rank,
+            rank + _TAG_EW, layout.west_rank + _TAG_EW, comm,
+        )
+        from_east = sendrecv(
+            send_to_east, recv_template_ew,
+            layout.east_rank, layout.east_rank,
+            rank + _TAG_EW, layout.east_rank + _TAG_EW, comm,
+        )
+        west_halo = from_west.reshape((ny_padded, h, *trailing))
+        east_halo = from_east.reshape((ny_padded, h, *trailing))
+        padded = jnp.concatenate(
+            [west_halo, ns_padded, east_halo], axis=1,
+        )
+
+    return padded
 
 
 # --------------------------------------------------------------------- #
@@ -326,36 +401,71 @@ def scatter_plane_field(
 def gather_plane_field(
     local_field_yxz: jax.Array,
     layout: PlanePencilLayout,
-) -> jax.Array:
-    """Gather rank-local sub-blocks back to a global field.
+) -> jax.Array | None:
+    """Gather rank-local sub-blocks back to a global field on rank 0.
 
-    **Staged-not-implemented for multi-rank.** Single-rank
-    short-circuits to identity; ``n_ranks > 1`` raises
-    ``NotImplementedError``. The multi-rank assembly lands together
-    with the distributed test suite in the follow-up PR so the
-    gather logic is validated against a multi-rank ``mpirun`` run
-    rather than committed untested.
+    Uses ``MPI.COMM_WORLD.gather`` (host-side); each rank also sends
+    its ``(ry, rx, iy_start, ix_start, ny_local, nx_local)`` layout
+    metadata so rank 0 can place each sub-block at its global
+    position. The implementation works for uneven decompositions
+    (remainder cells assigned to low ranks) because every rank's
+    contribution carries its actual start/extent rather than assuming
+    a uniform block size.
 
-    On rank 0 the multi-rank path will return the assembled
-    ``(ny_global, nx_global, ...)`` array; on other ranks the local
-    sub-block unchanged (caller responsible for ignoring the
-    non-root return).
+    Parameters
+    ----------
+    local_field_yxz : jax.Array
+        Shape ``(ny_local, nx_local, ...)``.
+    layout : PlanePencilLayout
+
+    Returns
+    -------
+    jax.Array on rank 0 with shape ``(ny_global, nx_global, ...)``;
+    ``None`` on other ranks. On single-rank ``n_ranks == 1`` returns
+    the input unchanged on every rank.
+
+    **Return contract (asymmetric):** non-root ranks receive
+    ``None``; calling code must check ``layout.rank == 0`` (or
+    ``result is not None``) before treating the return as an array.
+    Codex review 2026-05-24 flagged this as easy-to-misuse; rename
+    to ``gather_plane_field_to_root`` if the asymmetry needs to be
+    surfaced more prominently in your call sites.
+
+    Not differentiable: this is an I/O / diagnostic gather and is
+    not intended to participate in gradient flow (mirrors
+    ``gather_state_latlon`` semantics).
     """
     if layout.n_ranks == 1:
         return local_field_yxz
     try:
-        import mpi4jax
         from mpi4py import MPI
-    except ImportError as exc:  # pragma: no cover
+    except ImportError as exc:
         raise ImportError(
-            "Multi-rank gather requires mpi4jax + mpi4py."
+            "Multi-rank gather requires mpi4py (install with "
+            "`pip install -e \".[mpi]\"`)."
         ) from exc
-    # mpi4jax.allgather concatenates along axis 0; reshape + transpose
-    # to reassemble the 2D pencil.
-    raise NotImplementedError(
-        "Multi-rank gather lands with the dedicated tests/distributed/ "
-        "test suite (PR5 follow-up); single-rank gather is identity."
+
+    comm = MPI.COMM_WORLD
+    # Force host-side numpy: comm.gather is a CPU collective; if we
+    # ship a device array, mpi4py copies via DLPack which is slower
+    # and ties up device memory.
+    import numpy as np
+    local_np = np.asarray(local_field_yxz)
+    payload = (
+        layout.iy_start, layout.iy_end,
+        layout.ix_start, layout.ix_end,
+        local_np,
     )
+    gathered = comm.gather(payload, root=0)
+    if layout.rank != 0:
+        return None
+
+    trailing = local_field_yxz.shape[2:]
+    global_shape = (layout.ny_global, layout.nx_global, *trailing)
+    out = np.empty(global_shape, dtype=local_np.dtype)
+    for (iy0, iy1, ix0, ix1, sub) in gathered:
+        out[iy0:iy1, ix0:ix1] = sub
+    return jnp.asarray(out)
 
 
 def make_plane_pencil_grid(
