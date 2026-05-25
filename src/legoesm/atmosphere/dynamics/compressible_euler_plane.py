@@ -1040,6 +1040,29 @@ def plane_compressible_euler_slow_tendencies(
         drho_p_dt = drho_p_dt - config.hyperdiff_rho_coeff * laplacian_vlast(
             laplacian_vlast(rho_p, grid), grid,
         )
+    # Explicit vertical Laplacian dissipation on theta_p.
+    # Form: nu_v * (theta_p[k+1] - 2*theta_p[k] + theta_p[k-1]) / dz_k^2
+    # with rigid (zero-gradient → here zero-value) boundary at k=0 and
+    # k=nlev-1 via jnp.pad. Damps the buoyancy/PG feedback loop that
+    # blows up the dycore at dt > 0.5 s on dx ~ 2 km coarse-vertical
+    # grids. dz uses the full-level half-spacing for consistency with
+    # the acoustic-substep theta gradient.
+    if getattr(config, "vertical_theta_diffusion", 0.0) > 0.0:
+        nu_v = config.vertical_theta_diffusion
+        # Centred 2nd-order Laplacian on the (..., k) axis with rigid
+        # BC. dz_half[k] is the spacing between full levels k and k+1.
+        dz_half = height_coord.dz_half  # shape (nlev-1,)
+        # Compute interior 2nd derivative.
+        tp_above = theta_p[..., 2:]
+        tp_below = theta_p[..., :-2]
+        tp_centre = theta_p[..., 1:-1]
+        dz_avg = 0.5 * (dz_half[:-1] + dz_half[1:])  # (nlev-2,)
+        d2_theta_inner = (tp_above - 2.0 * tp_centre + tp_below) / (dz_avg ** 2)
+        # Pad with zeros at top/bottom so boundary tendencies are zero.
+        pad_axes_v = ((0, 0),) * (theta_p.ndim - 1)
+        d2_theta = jnp.pad(d2_theta_inner, (*pad_axes_v, (1, 1)))
+        dtheta_p_dt = dtheta_p_dt + nu_v * d2_theta
+
     if config.hyperdiff_w_coeff > 0.0:
         # ``w`` lives on half levels; the laplacian wrapper applies in
         # the horizontal only (last two axes via ``moveaxis``), so the

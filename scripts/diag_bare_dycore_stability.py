@@ -63,6 +63,10 @@ def parse_args():
     p.add_argument("--advection", choices=["upwind1", "weno5"],
                    default="upwind1",
                    help="Horizontal advection scheme for theta/u/v/w.")
+    p.add_argument("--vertical-theta-diffusion", type=float, default=0.0,
+                   help="Explicit vertical Laplacian diffusivity on "
+                        "theta_prime [m^2/s]. Tames the buoyancy-driven "
+                        "gravity-wave amplification at coarse dz.")
     return p.parse_args()
 
 
@@ -98,6 +102,7 @@ def main():
         smagorinsky_cs=args.smag_cs, smagorinsky_prandtl=1.0,
         n_acoustic_substeps=args.n_acoustic_substeps,
         horizontal_advection_scheme=args.advection,
+        vertical_theta_diffusion=args.vertical_theta_diffusion,
     )
     model = PlaneCompressibleEulerModel(grid, hc, terrain, config=cfg)
     state = make_rest_state(grid, hc, dtype=jnp.float64)

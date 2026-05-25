@@ -158,6 +158,19 @@ class CompressibleEulerConfig(NamedTuple):
                                           # Consumed by
                                           # ``compressible_euler_plane.py`` only;
                                           # cubed-sphere / MPAS ignore it.
+    vertical_theta_diffusion: float = 0.0
+                                          # Explicit vertical Laplacian diffusivity
+                                          # on theta_prime [m^2/s], applied per outer
+                                          # RK stage. Damps the buoyancy-driven
+                                          # gravity-wave amplification that
+                                          # destabilises the plane NH dycore at
+                                          # dx ~ 2 km / dt > 0.5 s with a coarse
+                                          # vertical grid (dz ~ 1000 m). Rigid (zero)
+                                          # boundary condition at top + bottom.
+                                          # Typical effective value: nu_v ~ 1e3-5e3
+                                          # so dt * nu_v / dz^2 stays below ~0.1
+                                          # (explicit-Euler CFL bound). 0.0 disables.
+                                          # Consumed by plane dycore only.
 
 
 # ==============================================================================
