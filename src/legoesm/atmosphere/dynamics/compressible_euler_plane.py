@@ -1455,6 +1455,85 @@ class PlaneCompressibleEulerModel:
             )
         return self._step_jit(state, dt, target, physics_fn)
 
+    def step_halo(
+        self,
+        state_local: PlaneNonHydrostaticState,
+        dt: float,
+        layout,
+        f_pad_cached: jax.Array | None = None,
+    ) -> PlaneNonHydrostaticState:
+        """Domain-decomposed step using halo-aware slow tendency.
+
+        Each rank owns a local slab. Halo exchange via
+        :func:`packed_exchange_halo_plane_yxz` per slow-tendency call.
+        Acoustic substeps stay vertical-only (column-local) — no MPI.
+
+        Eager-mode only on multi-rank (mpi4jax sendrecv branch not
+        jit-safe on macOS shared-mem). Single-rank gets jit speedup
+        via the existing :meth:`step` path.
+
+        Mass fixer is SKIPPED on multi-rank (compute_dry_mass_plane
+        is a global reduction — separate MPI variant needed). Single
+        rank with ``fix_mass=True`` falls back to :meth:`step`.
+
+        Smagorinsky LES + fix_mass not yet supported on multi-rank
+        path (deferred to follow-up PR).
+        """
+        from legoesm.atmosphere.dynamics.compressible_euler_plane_halo import (
+            plane_compressible_euler_slow_tendencies_halo,
+        )
+        from legoesm.timestepping.split_explicit import (
+            split_explicit_step, SplitExplicitConfig,
+        )
+
+        if layout.n_ranks == 1:
+            # Single-rank: halo path is bit-identical to the standard
+            # jit'd step (proven by test_halo_equiv_*) — route to it
+            # for the JIT speedup. Skips packed exchange overhead +
+            # gives ~14x faster per-step on small grids.
+            return self.step(state_local, dt)
+
+        se_config = SplitExplicitConfig(
+            n_substeps=self.config.n_acoustic_substeps,
+            outer_integrator=self.config.outer_integrator,
+        )
+
+        def slow_tendency_fn(s):
+            tend = plane_compressible_euler_slow_tendencies_halo(
+                s, self.grid, self.height_coord, self.terrain_metric,
+                self.config, layout, f_pad_cached=f_pad_cached,
+            )
+            # Wrap as state for split_explicit_step (same pytree shape).
+            return PlaneNonHydrostaticState(
+                u=s.u.replace(data=tend.du_dt.data),
+                v=s.v.replace(data=tend.dv_dt.data),
+                w=s.w.replace(data=tend.dw_dt.data),
+                theta_prime=s.theta_prime.replace(
+                    data=tend.dtheta_prime_dt.data),
+                rho_prime=s.rho_prime.replace(
+                    data=tend.drho_prime_dt.data),
+                phis=s.phis.replace(data=tend.dphis_dt.data),
+                tracers=s.tracers.replace(data=tend.dtracers_dt.data),
+            )
+
+        if self.config.semi_implicit_acoustic:
+            def acoustic_update_fn(s, slow_tend, dt_s, n_sub, cfg):
+                return plane_acoustic_substeps_semi_implicit(
+                    s, slow_tend, dt_s, n_sub, cfg,
+                    self.height_coord, self.terrain_metric, self.config,
+                )
+        else:
+            def acoustic_update_fn(s, slow_tend, dt_s, n_sub, cfg):
+                return plane_acoustic_substeps(
+                    s, slow_tend, dt_s, n_sub, cfg,
+                    self.height_coord, self.terrain_metric, self.config,
+                )
+
+        return split_explicit_step(
+            state_local, slow_tendency_fn, acoustic_update_fn,
+            dt, se_config,
+        )
+
     # ------------------------------------------------------------------
     # JIT boundary
     # ------------------------------------------------------------------
