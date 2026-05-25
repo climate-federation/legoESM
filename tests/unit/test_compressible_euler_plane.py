@@ -133,14 +133,19 @@ def test_validate_plane_config_accepts_hyperdiff_positive(field):
     validate_plane_config(cfg)  # no raise
 
 
-def test_step_rejects_nonzero_tracer_axis():
+def test_step_accepts_nonzero_tracer_axis_after_pr3d():
+    """PR3d lifted the PR2b ``n_tracers == 0`` restriction. The step
+    should now run with a non-empty tracer axis and return a state
+    of the same shape."""
     model, state = _setup()
     nonzero_tracers = state.tracers.replace(
         data=jnp.zeros(state.tracers.data.shape[:-1] + (2,)),
     )
-    bad_state = state._replace(tracers=nonzero_tracers)
-    with pytest.raises(NotImplementedError, match="n_tracers == 0"):
-        model.step(bad_state, dt=1.0)
+    state_with_tracers = state._replace(tracers=nonzero_tracers)
+    next_state = model.step(state_with_tracers, dt=1.0)
+    assert next_state.tracers.data.shape == state_with_tracers.tracers.data.shape
+    # All-zero tracers + zero rest state stays zero.
+    assert float(jnp.max(jnp.abs(next_state.tracers.data))) == 0.0
 
 
 # --------------------------------------------------------------------- #
