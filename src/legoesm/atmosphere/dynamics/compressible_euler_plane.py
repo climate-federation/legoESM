@@ -741,10 +741,27 @@ def _compute_smagorinsky_K_m_plane(
     )
     strain_mag = _safe_sqrt_strain(strain_mag_sq)
 
-    # Isotropic mixing length: cube-root of cell volume.
+    # LES boundary-layer mixing length:
+    #   l_m = min(c_s · Δ, κ · z)
+    # — caps the Smagorinsky length-scale at the von Kármán
+    # wall-distance scaling so K_m → 0 at the surface and the
+    # log-layer mean velocity profile is recovered under uniform
+    # shear (Mason 1989, Pope 2000 §10.4). Without this cap, ``K_m``
+    # at the first cell ≈ (c_s · Δ)² · |S|, which gives a SHEAR
+    # STRESS far too large at the surface and a quartic-in-z
+    # spurious near-wall acceleration. ``z_full`` is positive
+    # height above the surface (``z_half[-1] = 0`` so
+    # ``z_full[nlev-1] = 0.5 · dz_sfc`` at the lowest centre).
+    # ``κ`` is the von Kármán constant from
+    # :mod:`legoesm.constants` so callers wanting a different
+    # convention (e.g. 0.41) update the central definition once.
+    from legoesm import constants
     delta = (grid.dx * grid.dy * dz_full) ** (1.0 / 3.0)   # (nlev,)
-    delta_sq = (c_s * delta) ** 2                          # (nlev,)
-    return delta_sq * strain_mag
+    l_smag = c_s * delta                                   # (nlev,)
+    l_wall = constants.kappa_von_karman * height_coord.z_full   # (nlev,)
+    l_m = jnp.minimum(l_smag, l_wall)
+    l_m_sq = l_m ** 2                                      # (nlev,)
+    return l_m_sq * strain_mag
 
 
 def _full_level_centred_d_dz(
