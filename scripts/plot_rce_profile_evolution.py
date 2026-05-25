@@ -41,10 +41,14 @@ def _safe_logx(ax, vals):
 def plot_single_profile(npz_path: Path) -> Path:
     data = np.load(npz_path)
     z_km = data["z"] / 1000.0
+    z_half_km = data["z_half"] / 1000.0 if "z_half" in data.files else z_km
     day = float(data["day"])
     fig, axes = plt.subplots(2, 3, figsize=(13, 8))
     for ax, (key, label, kw) in zip(axes.flat, PANELS):
-        ax.plot(data[key], z_km, lw=1.5)
+        # Pick z-coord matching field length (some fields live on
+        # half-levels, e.g. w_variance has shape nlev+1).
+        zc = z_half_km if data[key].shape[0] == z_half_km.shape[0] else z_km
+        ax.plot(data[key], zc, lw=1.5)
         ax.set_xlabel(label)
         ax.set_ylabel("z [km]")
         ax.grid(alpha=0.3)
@@ -62,13 +66,17 @@ def plot_evolution(npz_files, out_png: Path) -> Path:
     series = [np.load(p) for p in npz_files]
     days = np.array([float(d["day"]) for d in series])
     z_km = series[0]["z"] / 1000.0
+    z_half_km = (series[0]["z_half"] / 1000.0
+                 if "z_half" in series[0].files else z_km)
     cmap = plt.get_cmap("viridis")
     norm = plt.Normalize(vmin=days.min(), vmax=max(days.max(), days.min() + 1e-9))
 
     fig, axes = plt.subplots(2, 3, figsize=(13, 8))
     for ax, (key, label, kw) in zip(axes.flat, PANELS):
         for d, data in zip(days, series):
-            ax.plot(data[key], z_km, color=cmap(norm(d)), lw=1.3, alpha=0.85)
+            zc = (z_half_km if data[key].shape[0] == z_half_km.shape[0]
+                  else z_km)
+            ax.plot(data[key], zc, color=cmap(norm(d)), lw=1.3, alpha=0.85)
         ax.set_xlabel(label)
         ax.set_ylabel("z [km]")
         ax.grid(alpha=0.3)
