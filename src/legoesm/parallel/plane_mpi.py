@@ -375,6 +375,54 @@ def exchange_halo_plane_yxz(
 # --------------------------------------------------------------------- #
 
 
+def packed_exchange_halo_plane_yxz(
+    *fields: jax.Array,
+    layout: PlanePencilLayout,
+) -> list[jax.Array]:
+    """Exchange halos for multiple ``(ny_local, nx_local, ...)`` fields
+    in a single MPI round.
+
+    Stacks fields along a NEW trailing axis, performs ONE halo
+    exchange (with proportionally larger MPI messages), then splits
+    + reshapes. Reduces MPI message count from ``len(fields)``
+    exchanges to 1 — critical on macOS shared-memory MPI where the
+    per-call mpi4jax dispatch overhead dominates many-small-message
+    workloads (~2-5 ms per sendrecv vs ~50 μs on cluster IB).
+
+    All fields must share the same ``(ny_local, nx_local)`` prefix +
+    same trailing-axis dimensions (typically same ``nlev``). If
+    trailing-axis shapes differ per field, use the unpacked
+    :func:`exchange_halo_plane_yxz` instead.
+
+    Parameters
+    ----------
+    *fields : jax.Array
+        Local interior arrays, each ``(ny_local, nx_local, ...)``
+        with the same trailing axes.
+    layout : PlanePencilLayout
+
+    Returns
+    -------
+    list[jax.Array]
+        Padded arrays, each shaped like the original input plus the
+        added halo (``ny_local + 2h, nx_local + 2h, ...``).
+    """
+    if not fields:
+        return []
+    ref = fields[0]
+    for f in fields[1:]:
+        if f.shape != ref.shape:
+            raise ValueError(
+                f"packed_exchange_halo_plane_yxz requires all fields "
+                f"share the same shape; got {ref.shape} vs {f.shape}."
+            )
+    # Stack along NEW trailing axis → single (ny, nx, ..., n_fields).
+    stacked = jnp.stack(fields, axis=-1)
+    padded = exchange_halo_plane_yxz(stacked, layout)
+    # Split back along the trailing axis.
+    return [padded[..., i] for i in range(len(fields))]
+
+
 def scatter_plane_field(
     global_field_yxz: jax.Array,
     layout: PlanePencilLayout,
