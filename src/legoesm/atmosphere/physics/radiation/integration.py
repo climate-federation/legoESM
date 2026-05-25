@@ -23,6 +23,8 @@ from legoesm.core.state import (
     HydrostaticTendencies,
     NonHydrostaticState,
     NonHydrostaticTendencies,
+    PlaneNonHydrostaticState,
+    PlaneNonHydrostaticTendencies,
 )
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.vertical import (
@@ -481,7 +483,7 @@ def make_radiation_physics(
     radiation_config : RadiationConfig
         Radiation configuration (selects gray or RRTMGP).
     model_type : str
-        One of "hydrostatic", "nonhydrostatic", "spectral_pe".
+        One of "hydrostatic", "nonhydrostatic", "plane", "spectral_pe", "mpas".
     column_mesh : jax.sharding.Mesh or None, optional
         Issue #273 follow-up.  When supplied, the per-column radiation
         kernel (which is naturally embarrassingly parallel across
@@ -528,6 +530,9 @@ def make_radiation_physics(
     elif model_type == "nonhydrostatic":
         return _make_nonhydrostatic_radiation(radiation_config, rrtmgp_solver,
                                                ml_ozone_coefs=ml_ozone_coefs)
+    elif model_type == "plane":
+        return _make_plane_radiation(radiation_config, rrtmgp_solver,
+                                     ml_ozone_coefs=ml_ozone_coefs)
     elif model_type == "spectral_pe":
         return _make_spectral_pe_radiation(radiation_config, rrtmgp_solver,
                                             ml_ozone_coefs=ml_ozone_coefs)
@@ -538,7 +543,8 @@ def make_radiation_physics(
     else:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
-            f"Choose from 'hydrostatic', 'nonhydrostatic', 'spectral_pe', 'mpas'."
+            f"Choose from 'hydrostatic', 'nonhydrostatic', 'plane', "
+            f"'spectral_pe', 'mpas'."
         )
 
 
@@ -826,6 +832,159 @@ def _make_nonhydrostatic_radiation(
                 data=jnp.zeros_like(state.tracers.data),
                 name="dtracers_dt_rad",
                 dims=dims_tr, units="1/s",
+            ),
+        )
+
+    physics_fn.set_time = set_time
+    return physics_fn
+
+
+# ===========================================================================
+# Plane (doubly-periodic Cartesian CRM)
+# ===========================================================================
+
+def _make_plane_radiation(
+    radiation_config: RadiationConfig,
+    rrtmgp_solver=None,
+    ml_ozone_coefs=None,
+) -> Callable:
+    """Create radiation physics_fn for the plane CompressibleEulerPlaneModel.
+
+    Mirrors :func:`_make_nonhydrostatic_radiation` but for
+    ``PlaneNonHydrostaticState`` (shape ``(ny, nx, nlev)``) and
+    ``PlaneNonHydrostaticGrid`` (``grid_lat``/``grid_lon`` return a
+    constant tropical lat/lon over the plane).
+
+    Signature: ``(state, grid, height_coord, terrain_metric) ->
+    PlaneNonHydrostaticTendencies``.
+    """
+    _time, set_time = _make_time_state()
+
+    def physics_fn(
+        state: PlaneNonHydrostaticState,
+        grid,
+        height_coord: HeightCoordinate,
+        terrain_metric: TerrainMetric,
+    ) -> PlaneNonHydrostaticTendencies:
+        theta_p = state.theta_prime.data   # (ny, nx, nlev)
+        rho_p = state.rho_prime.data       # (ny, nx, nlev)
+        theta_0 = height_coord.theta_ref   # (nlev,)
+        rho_0 = height_coord.rho_ref       # (nlev,)
+
+        theta_total, rho_total = sanitize_theta_rho(
+            theta_0 + theta_p, rho_0 + rho_p,
+        )
+        p = pressure_from_eos(rho_total, theta_total)
+        exner = (p / constants.p_ref) ** constants.kappa
+        T = theta_total * exner
+
+        nlev = height_coord.n_levels
+        shape_3d = theta_p.shape          # (ny, nx, nlev)
+        shape_w = state.w.data.shape      # (ny, nx, nlev+1)
+        shape_2d = state.phis.data.shape  # (ny, nx)
+        ny, nx = shape_2d
+        ncol = ny * nx
+
+        p_half = reconstruct_half_level_pressure_hydrostatic(
+            p_full=p, rho_full=rho_total,
+            z_half=terrain_metric.z_half_3d,
+        )
+        T_sfc = T[..., -1]
+
+        # Plane lat/lon: PlaneGrid.grid_lat returns constant lat0 over
+        # (ny, nx), already in radians (deg2rad applied in property).
+        lat, lon = _get_grid_lat_lon(grid, shape_2d)
+        insol, cos_sza, f_day = _compute_insolation(
+            lat, radiation_config, lon=lon,
+            day_of_year=_time["day_of_year"],
+            seconds_of_day=_time["seconds_of_day"],
+        )
+
+        T_col = T.reshape(ncol, nlev)
+        p_full_col = p.reshape(ncol, nlev)
+        p_half_col = p_half.reshape(ncol, nlev + 1)
+        T_sfc_col = T_sfc.reshape(ncol)
+        lat_col = lat.reshape(ncol)
+        lon_col = lon.reshape(ncol)
+        insol_col = insol.reshape(ncol)
+        cos_sza_col = (
+            cos_sza.reshape(ncol) if cos_sza is not None else None
+        )
+        f_day_col = f_day.reshape(ncol) if f_day is not None else None
+
+        # NH plane state stores water vapor in tracer slot 0; q_c at 1,
+        # q_i at 3 — mirroring the cubed-sphere NH tracer layout used
+        # by ``_make_nonhydrostatic_radiation``.
+        n_tracers = state.tracers.data.shape[-1]
+        if n_tracers > 0:
+            q_v = jnp.clip(state.tracers.data[..., 0], 0.0, None)
+        else:
+            q_v = jnp.zeros_like(T)
+        q_v_col = q_v.reshape(ncol, nlev)
+
+        q_cloud_col = None
+        q_ice_col = None
+        if n_tracers > 1:
+            q_cloud_col = jnp.clip(
+                state.tracers.data[..., 1], 0.0, None,
+            ).reshape(ncol, nlev)
+        if n_tracers > 3:
+            q_ice_col = jnp.clip(
+                state.tracers.data[..., 3], 0.0, None,
+            ).reshape(ncol, nlev)
+
+        rad_out = _call_radiation_backend(
+            radiation_config=radiation_config,
+            T=T_col, p_full=p_full_col, p_half=p_half_col,
+            sfc_temperature=T_sfc_col, lat=lat_col, q_v=q_v_col,
+            insolation=insol_col, cos_sza=cos_sza_col,
+            q_cloud=q_cloud_col, q_ice=q_ice_col, f_day=f_day_col,
+            rrtmgp_solver=rrtmgp_solver, lon=lon_col,
+            ml_ozone_coefs=ml_ozone_coefs,
+        )
+
+        dT_dt = rad_out.heating_rate.reshape(shape_3d)
+        dtheta_prime_dt = dT_dt / jnp.clip(exner, 1e-6, None)
+
+        # Match the PlaneNonHydrostaticState field convention
+        # (("y","x","z"), ("y","x","z_half"), ...) so summed tendencies
+        # across surface_flux + radiation + microphysics carry
+        # consistent metadata for the dycore composer.
+        dims_3d = ("y", "x", "z")
+        dims_w = ("y", "x", "z_half")
+        dims_2d = ("y", "x")
+        dims_tr = ("y", "x", "z", "tracer")
+        _sd = T.dtype
+        _pd = state.phis.data.dtype
+
+        return PlaneNonHydrostaticTendencies(
+            du_dt=Field(
+                data=jnp.zeros(shape_3d, dtype=_sd), name="du_dt_rad",
+                dims=dims_3d, units="m/s^2",
+            ),
+            dv_dt=Field(
+                data=jnp.zeros(shape_3d, dtype=_sd), name="dv_dt_rad",
+                dims=dims_3d, units="m/s^2",
+            ),
+            dw_dt=Field(
+                data=jnp.zeros(shape_w, dtype=_sd), name="dw_dt_rad",
+                dims=dims_w, units="m/s^2",
+            ),
+            dtheta_prime_dt=Field(
+                data=dtheta_prime_dt, name="dtheta_prime_dt_rad",
+                dims=dims_3d, units="K/s",
+            ),
+            drho_prime_dt=Field(
+                data=jnp.zeros(shape_3d, dtype=_sd),
+                name="drho_prime_dt_rad", dims=dims_3d, units="kg/m^3/s",
+            ),
+            dphis_dt=Field(
+                data=jnp.zeros(shape_2d, dtype=_pd), name="dphis_dt_rad",
+                dims=dims_2d, units="m^2/s^3",
+            ),
+            dtracers_dt=Field(
+                data=jnp.zeros_like(state.tracers.data),
+                name="dtracers_dt_rad", dims=dims_tr, units="1/s",
             ),
         )
 

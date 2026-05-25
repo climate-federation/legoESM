@@ -4,34 +4,22 @@ Reference: doi:10.5194/gmd-11-793-2018.
 
 Scope
 -----
-Scaled-down RCEMIP-style radiative-convective equilibrium on the
-plane non-hydrostatic dycore (PR2b-PR3d) wired with:
+RCEMIP-style radiative-convective equilibrium on the plane
+non-hydrostatic dycore (PR2b-PR3d) wired with the same factory
+dispatch the cubed-sphere / MPAS NH harnesses use:
 
 - Bulk surface fluxes via :func:`legoesm.coupler.bulk_flux.simple_bulk_fluxes`
-- Gray radiation via :func:`legoesm.atmosphere.physics.radiation.gray.gray_radiation`
+- Radiation via :func:`legoesm.atmosphere.physics.radiation.integration.make_radiation_physics`
+  with ``model_type="plane"`` (selects gray or RRTMGP from the
+  RadiationConfig scheme literal)
+- Microphysics via
+  :func:`legoesm.atmosphere.physics.microphysics.integration.make_microphysics_physics`
+  with ``model_type="plane"`` (selects kessler, morrison, sundqvist,
+  seifert_beheng, thompson, ml_emulator, or "none" from the
+  MicrophysicsConfig scheme literal)
 - Smagorinsky LES (PR3c, horizontal-only pilot)
 - Hyperdiffusion (PR3a) + sponge (PR2d) + upwind advection (PR3b)
 - ``n_tracers >= 3`` for q_v / q_c / q_r (PR3d)
-
-KNOWN LIMITATIONS
------------------
-* Microphysics column-reshape adapter is **inlined** here for the
-  RCEMIP run; a reusable helper that wraps
-  ``_make_nonhydrostatic_microphysics`` for plane state lands in a
-  follow-up PR after the validation tolerances stabilise.
-* Full RCEMIP1 equilibrium (100 days, 100x100 km, 1 km grid) does
-  not fit in a CI budget; the default CLI is a scaled-down smoke
-  configuration (16x16 cells, 50 steps). The full-resolution
-  benchmark spec is parameterised by CLI flags.
-* The horizontal-only Smag pilot (PR3c) limits the LES energy
-  budget; full 3D Smag lands in a follow-up PR.
-* The dycore inherits the PR2b A-grid simplification — momentum
-  advection is centred / upwind on cell-centred ``u``, ``v``. The
-  energy-consistent C-grid pairing PR will tighten conservation
-  bounds.
-* Cross-grid consistency (plane vs cubed-sphere vs MPAS) is NOT
-  validated in this script — the cubed-sphere / MPAS NH dycores
-  use their own RCE harnesses (see ``scripts/run_rce.py``).
 
 CLI
 ---
@@ -39,8 +27,9 @@ CLI
 
    JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .venv/bin/python \\
        scripts/run_rcemip_plane.py \\
-       --nx 16 --ny 16 --nlev 30 --dx 4000.0 \\
-       --dt 6.0 --steps 50 --output results/rcemip_smoke
+       --nx 16 --ny 16 --nlev 30 --dx 4000.0 --dt 6.0 \\
+       --steps 50 --radiation gray --microphysics kessler \\
+       --output results/rcemip_smoke
 """
 
 from __future__ import annotations
@@ -61,6 +50,14 @@ from legoesm.atmosphere.dynamics.compressible_euler_plane import (
     make_flat_plane_terrain_metric,
     make_rest_state,
 )
+from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
+from legoesm.atmosphere.physics.microphysics.integration import (
+    make_microphysics_physics,
+)
+from legoesm.atmosphere.physics.radiation.config import RadiationConfig
+from legoesm.atmosphere.physics.radiation.integration import (
+    make_radiation_physics,
+)
 from legoesm.core.field import Field
 from legoesm.core.state import PlaneNonHydrostaticTendencies
 from legoesm.grids.plane import create_plane_grid
@@ -76,21 +73,12 @@ jax.config.update("jax_enable_x64", True)
 def _rcemip_theta_profile(z: jax.Array, T_sfc: float = 300.0) -> jax.Array:
     """Wing-inspired simplified θ(z) sounding for the smoke harness.
 
-    **NOT a verbatim Wing 2018 Tab A1 reproduction.** This is a
-    two-segment piecewise profile used to bootstrap the RCEMIP-style
+    Two-segment piecewise profile used to bootstrap the RCEMIP-style
     smoke run; the upper-stratosphere branch of the full Wing 2018
-    sounding (involving the moist-virtual reference T_v and a
-    different lapse above the tropopause) is deferred to the full
-    RCEMIP validation PR that compares against published reference
-    profiles.
-
-    Profile used here:
+    sounding is deferred to the full RCEMIP validation PR.
 
         z < z_t = 15 km:  θ(z) = T_sfc + Γ · z,  Γ = 6.7 × 10⁻³ K/m
         z ≥ z_t:          θ = θ(z_t) (constant tropopause cap)
-
-    At the surface θ = 300 K; at 15 km θ ≈ 400.5 K; constant aloft.
-    Returns θ at the supplied z [m].
     """
     z_t = 15_000.0
     Gamma = 6.7e-3
@@ -109,34 +97,19 @@ def _rcemip_qv_profile(z: jax.Array, q_sfc: float = 0.018) -> jax.Array:
     return jnp.where(z < z_t, q_sfc * jnp.exp(-z / z_q), 1.0e-9)
 
 
-# -------- Physics adapter (column reshape) -------- #
+# -------- Surface-flux physics_fn (bulk_flux only) -------- #
 
 
-def _make_rcemip_physics(
-    grid,
-    height_coord,
-    terrain_metric,
-    Cd: float = 1.0e-3,
-    Ch: float = 1.0e-3,
-    T_sfc: float = 300.0,
-    q_sfc: float = 0.018,
-    olr_target: float = 250.0,
-    radiation_tau: float = 86_400.0 * 5.0,  # 5-day Newtonian damping toward 300 K
+def _make_surface_flux_physics(
+    grid, height_coord, terrain_metric,
+    Cd: float, Ch: float, T_sfc: float, q_sfc: float,
 ):
-    """Build a plane-state ``physics_fn`` combining:
+    """Lowest-level bulk surface fluxes via :mod:`coupler.bulk_flux`.
 
-    * Surface fluxes via :func:`legoesm.coupler.bulk_flux.simple_bulk_fluxes`
-      applied at the lowest model level (k = nlev-1; z_full is
-      top-down).
-    * Simple Newtonian relaxation to a reference temperature
-      profile (placeholder for gray radiation; the full
-      ``gray_radiation`` call needs column reshaping that adds
-      ~200 LOC and lands with the cross-grid consistency PR).
-
-    The returned ``physics_fn`` has signature
-    ``(state, grid, height_coord, terrain_metric) ->
-    PlaneNonHydrostaticTendencies``. ``state.tracers.data[..., 0]``
-    is interpreted as ``q_v``.
+    Returns a ``physics_fn(state, grid, hc, tm) ->
+    PlaneNonHydrostaticTendencies`` whose only non-zero tendencies
+    are momentum drag + sensible-heat + latent-heat at the lowest
+    model level (``k = nlev - 1`` under top-down indexing).
     """
     from legoesm.coupler.bulk_flux import simple_bulk_fluxes
 
@@ -148,23 +121,16 @@ def _make_rcemip_physics(
         theta_total = theta_0 + state.theta_prime.data
         rho_total = rho_0 + state.rho_prime.data
 
-        # Lowest model level (top-down indexing: k = nlev - 1).
         k_sfc = nlev - 1
         u_lo = state.u.data[..., k_sfc]
         v_lo = state.v.data[..., k_sfc]
         rho_lo = rho_total[..., k_sfc]
         theta_lo = theta_total[..., k_sfc]
-        # Convert θ → T at surface via Exner. Use the **reference
-        # Exner** at the lowest full level from height_coord. Codex
-        # iter-2 note: ``hc_in.exner_ref`` ignores Exner perturbations
-        # carried by (rho', theta'); for the PR4 scaffold this is
-        # acceptable because the RCE setup runs near a hydrostatic
-        # reference. A perturbation-aware Exner reconstruction
-        # (calling ``compute_exner_perturbation`` + adding the
-        # reference) is the upgrade path for the full RCEMIP
-        # validation harness; documented here so the next PR knows
-        # what to lift.
-        pi_sfc = hc_in.exner_ref[k_sfc]   # scalar, dimensionless
+        # Reference-Exner-based θ→T conversion at lowest level. See
+        # the docstring of the PR4 scaffold variant of this function
+        # for the caveat about perturbation-Exner; same caveat
+        # applies here.
+        pi_sfc = hc_in.exner_ref[k_sfc]
         T_lo = theta_lo * pi_sfc
         if n_tracers > 0:
             q_lo = state.tracers.data[..., k_sfc, 0]
@@ -179,26 +145,18 @@ def _make_rcemip_physics(
             rho=rho_lo, wind_speed=wind_speed, Cd=Cd, Ch=Ch,
         )
 
-        # Momentum tendencies from surface stress: applied at lowest
-        # level only, dissipated into the layer thickness.
         dz_sfc = hc_in.dz[k_sfc]
         du_sfc = tau_x / (rho_lo * dz_sfc)
         dv_sfc = tau_y / (rho_lo * dz_sfc)
         du_dt_data = jnp.zeros_like(state.u.data).at[..., k_sfc].set(du_sfc)
         dv_dt_data = jnp.zeros_like(state.v.data).at[..., k_sfc].set(dv_sfc)
 
-        # Sensible heat flux warms the lowest layer (convert back from
-        # T-tendency to theta-tendency via the same Exner factor used
-        # above; ``dtheta = dT / π`` since ``T = θ · π``).
         dT_sfc = shflx / (rho_lo * constants.c_pd * dz_sfc)
         dtheta_sfc = dT_sfc / pi_sfc
-        dtheta_p_data = jnp.zeros_like(state.theta_prime.data).at[..., k_sfc].set(dtheta_sfc)
-        # Newtonian radiative cooling toward initial theta_ref (theta'
-        # relaxed to zero), gentle 5-day timescale per RCEMIP-style
-        # placeholder.
-        dtheta_p_data = dtheta_p_data - state.theta_prime.data / radiation_tau
+        dtheta_p_data = jnp.zeros_like(
+            state.theta_prime.data
+        ).at[..., k_sfc].set(dtheta_sfc)
 
-        # Latent heat flux moistens the lowest level (q_v tendency):
         dtracers_data = jnp.zeros_like(state.tracers.data)
         if n_tracers > 0:
             dq_sfc = lhflx / (rho_lo * constants.L_v * dz_sfc)
@@ -221,28 +179,126 @@ def _make_rcemip_physics(
     return physics_fn
 
 
+# -------- Physics composer -------- #
+
+
+def _sum_plane_tendencies(*tendencies):
+    """Sum a list of ``PlaneNonHydrostaticTendencies`` field-wise.
+
+    Each input is a NamedTuple of ``Field`` leaves; the output is one
+    NamedTuple whose ``.data`` arrays are the element-wise sum across
+    all inputs. Field metadata (dims/units/name) comes from the FIRST
+    tendency input. Raises ``ValueError`` on an empty input (caller
+    bug: there's no canonical empty tendency).
+    """
+    if not tendencies:
+        raise ValueError(
+            "_sum_plane_tendencies requires at least one tendency; "
+            "got an empty argument list."
+        )
+    if len(tendencies) == 1:
+        return tendencies[0]
+    head = tendencies[0]
+    # Codex review 2026-05-24: dims must match across all tendencies
+    # so the sum is semantically well-defined; mismatched dims would
+    # indicate a wiring bug (e.g., feeding NH cubed-sphere tendencies
+    # into the plane composer).
+    for t in tendencies[1:]:
+        for fname in head._fields:
+            if getattr(t, fname).dims != getattr(head, fname).dims:
+                raise ValueError(
+                    f"plane tendency dim mismatch on field {fname!r}: "
+                    f"first={getattr(head, fname).dims!r} "
+                    f"vs other={getattr(t, fname).dims!r}"
+                )
+    out = {}
+    for fname in head._fields:
+        head_f = getattr(head, fname)
+        summed = sum(
+            (getattr(t, fname).data for t in tendencies[1:]),
+            start=head_f.data,
+        )
+        out[fname] = head_f.replace(data=summed)
+    return PlaneNonHydrostaticTendencies(**out)
+
+
+def make_rcemip_physics(
+    grid, height_coord, terrain_metric,
+    radiation_config: RadiationConfig | None,
+    microphysics_config: MicrophysicsConfig | None,
+    dt: float,
+    Cd: float = 1.0e-3, Ch: float = 1.0e-3,
+    T_sfc: float = 300.0, q_sfc: float = 0.018,
+):
+    """Compose RCEMIP physics_fn from surface_fluxes + radiation + microphysics.
+
+    Each component is built by the canonical factory (no plane-specific
+    inlining beyond surface fluxes). Pass ``radiation_config=None`` or
+    ``microphysics_config=None`` to skip either branch.
+    """
+    physics_fns = [_make_surface_flux_physics(
+        grid, height_coord, terrain_metric,
+        Cd=Cd, Ch=Ch, T_sfc=T_sfc, q_sfc=q_sfc,
+    )]
+    if radiation_config is not None:
+        physics_fns.append(make_radiation_physics(
+            radiation_config, model_type="plane",
+        ))
+    if microphysics_config is not None:
+        physics_fns.append(make_microphysics_physics(
+            microphysics_config, model_type="plane", dt=dt,
+        ))
+
+    def physics_fn(state, grid_in, hc_in, tm_in):
+        tendencies = [
+            fn(state, grid_in, hc_in, tm_in) for fn in physics_fns
+        ]
+        return _sum_plane_tendencies(*tendencies)
+
+    return physics_fn
+
+
 # -------- IC + main -------- #
 
 
 def _build_rcemip_initial_state(grid, height_coord):
     rest = make_rest_state(grid, height_coord, dtype=jnp.float64)
-    # Allocate q_v + q_c + q_r tracers
     ny, nx, nlev = rest.theta_prime.data.shape
     tracers = jnp.zeros((ny, nx, nlev, 3), dtype=jnp.float64)
     q_v = _rcemip_qv_profile(height_coord.z_full)
-    # Broadcast q_v(z) to (ny, nx, nlev)
     tracers = tracers.at[..., 0].set(
         jnp.broadcast_to(q_v, (ny, nx, nlev)),
     )
-    # theta perturbation = 0 (rest theta_ref already isentropic 300 K
-    # via create_height_coordinate default); add a small random kick
-    # to break the symmetry so convection initiates.
     rng_key = jax.random.PRNGKey(0)
     theta_kick = 0.1 * jax.random.normal(rng_key, rest.theta_prime.data.shape)
     return rest._replace(
         theta_prime=rest.theta_prime.replace(data=theta_kick),
         tracers=rest.tracers.replace(data=tracers),
     )
+
+
+def _build_radiation_config(scheme: str) -> RadiationConfig | None:
+    if scheme == "none":
+        return None
+    if scheme not in ("gray", "rrtmgp"):
+        raise ValueError(
+            f"Unknown --radiation: {scheme!r}; "
+            f"choose from 'gray', 'rrtmgp', 'none'."
+        )
+    return RadiationConfig(scheme=scheme)
+
+
+def _build_microphysics_config(scheme: str) -> MicrophysicsConfig | None:
+    if scheme == "none":
+        return None
+    valid = ("kessler", "morrison", "sundqvist",
+             "seifert_beheng", "thompson", "ml_emulator")
+    if scheme not in valid:
+        raise ValueError(
+            f"Unknown --microphysics: {scheme!r}; "
+            f"choose from {valid + ('none',)}."
+        )
+    return MicrophysicsConfig(scheme=scheme)
 
 
 def parse_args():
@@ -261,6 +317,15 @@ def parse_args():
     p.add_argument("--smag-cs", type=float, default=0.2)
     p.add_argument("--sponge-coeff", type=float, default=0.05)
     p.add_argument("--sponge-width", type=float, default=5_000.0)
+    p.add_argument("--radiation", choices=["gray", "rrtmgp", "none"],
+                   default="gray",
+                   help="Radiation scheme. 'none' skips the radiation branch.")
+    p.add_argument("--microphysics",
+                   choices=["kessler", "morrison", "sundqvist",
+                            "seifert_beheng", "thompson", "ml_emulator",
+                            "none"],
+                   default="kessler",
+                   help="Microphysics scheme. 'none' skips the branch.")
     p.add_argument("--print-every", type=int, default=10)
     p.add_argument("--output", type=Path, default=Path("results/rcemip_plane"))
     return p.parse_args()
@@ -275,6 +340,7 @@ def main():
           f"{args.steps} steps -> t_final={args.steps * args.dt:.1f} s")
     print(f"  T_sfc={args.T_sfc} K, hyperdiff={args.hyperdiff:.2e}, "
           f"smag_cs={args.smag_cs}")
+    print(f"  radiation={args.radiation}, microphysics={args.microphysics}")
 
     grid = create_plane_grid(
         nx=args.nx, ny=args.ny, nlev=args.nlev,
@@ -294,7 +360,16 @@ def main():
         smagorinsky_cs=args.smag_cs, smagorinsky_prandtl=1.0,
     )
     model = PlaneCompressibleEulerModel(grid, hc, tm, cfg)
-    physics_fn = _make_rcemip_physics(grid, hc, tm, T_sfc=args.T_sfc)
+
+    radiation_config = _build_radiation_config(args.radiation)
+    microphysics_config = _build_microphysics_config(args.microphysics)
+    physics_fn = make_rcemip_physics(
+        grid, hc, tm,
+        radiation_config=radiation_config,
+        microphysics_config=microphysics_config,
+        dt=args.dt,
+        T_sfc=args.T_sfc,
+    )
 
     state = _build_rcemip_initial_state(grid, hc)
     mass0 = float(compute_dry_mass_plane(state, grid, hc, tm))
