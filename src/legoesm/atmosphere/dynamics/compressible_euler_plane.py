@@ -87,23 +87,37 @@ MPAS NH dycores. Setting ``K`` near the bound trades increased
 damping for risk of grid-scale oscillation; documented user
 responsibility.
 
-A-grid simplification used in PR2b
-----------------------------------
-The state class stores ``u`` at x-faces and ``v`` at y-faces per the
-PR1 Arakawa-C convention, but the PR2b slow tendency assembles
-horizontal advection of ``u, v, w_full, theta_total, rho_total`` using
-**cell-centred centred differences** of the field as stored
-(equivalent to treating the values as A-grid). The discrete divergence
-used for ``rho'`` continuity is also cell-centred. This intentionally
-trades the energy-consistent C-grid PG / divergence pairing for code
-simplicity in the first runnable dycore — the rest-state preservation
-and dry-mass conservation tests still hold (proof: every tendency
-contains at least one factor of a velocity or perturbation, all zero
-on the balanced rest state). Energy-consistent C-grid discretisation
-lands together with the rising-thermal + Straka validation in a
-follow-up PR once the MVP is wired publicly. See
-:func:`plane_compressible_euler_slow_tendencies` for the explicit
-operator choices.
+Arakawa-C discretisation with energy-consistent PG/divergence pair
+------------------------------------------------------------------
+The slow tendency honours the Arakawa-C staggering in every term:
+``u`` at x-faces, ``v`` at y-faces, scalars at cell centres,
+``w`` at half levels. The horizontal pressure gradient uses
+:func:`grad_x_vlast` / :func:`grad_y_vlast` which return values at
+the x/y-face — exactly where ``u/v`` live — and the discrete
+divergence uses :func:`divergence_vlast` on the face-staggered
+mass fluxes ``rho_face · u`` and ``rho_face · v``. This is the
+adjoint pair documented in
+:mod:`plane_operators` — discrete integration by parts
+``sum(phi · div(u, v)) == -sum(u · grad_x(phi)) -
+sum(v · grad_y(phi))`` holds to machine epsilon, the discrete
+condition for energy-consistent PG / divergence coupling.
+
+Cross-component velocities for momentum advection use the 4-point
+corner-average interpolators
+(:func:`interp_yface_to_xface_vlast`,
+:func:`interp_xface_to_yface_vlast`); scalar advection uses
+face→centre averages (:func:`interp_xface_to_cell_vlast`,
+:func:`interp_yface_to_cell_vlast`). Smagorinsky-Lilly LES
+(below) is the full 3D strain tensor — every component is
+evaluated at its natural Arakawa-C location, then ``S_ij²`` is
+averaged to cell centres for the eddy-viscosity ``K_m``. No
+A-grid simplification anywhere.
+
+Note: horizontal advection of momentum, theta and tracers is
+first-order upwind (dissipative). Full energy-conserving
+vector-invariant momentum advection is a separate item; the
+PG/div pairing alone is the adjoint identity that
+:mod:`plane_operators` proves to machine epsilon.
 
 State convention
 ----------------
@@ -214,6 +228,48 @@ def laplacian_vlast(phi_yxz: jax.Array, grid: PlaneGrid) -> jax.Array:
     """5-point scalar Laplacian, vertical-last."""
     return _move_vertical_to_back(
         _plane_ops.laplacian_3d(_move_vertical_to_front(phi_yxz), grid)
+    )
+
+
+def interp_cell_to_xface_vlast(phi_yxz: jax.Array, grid: PlaneGrid) -> jax.Array:
+    """Cell-centre → x-face interpolation, vertical-last."""
+    return _move_vertical_to_back(
+        _plane_ops.interp_cell_to_xface(_move_vertical_to_front(phi_yxz), grid)
+    )
+
+
+def interp_cell_to_yface_vlast(phi_yxz: jax.Array, grid: PlaneGrid) -> jax.Array:
+    """Cell-centre → y-face interpolation, vertical-last."""
+    return _move_vertical_to_back(
+        _plane_ops.interp_cell_to_yface(_move_vertical_to_front(phi_yxz), grid)
+    )
+
+
+def interp_xface_to_cell_vlast(u_yxz: jax.Array, grid: PlaneGrid) -> jax.Array:
+    """x-face → cell-centre interpolation, vertical-last."""
+    return _move_vertical_to_back(
+        _plane_ops.interp_xface_to_cell(_move_vertical_to_front(u_yxz), grid)
+    )
+
+
+def interp_yface_to_cell_vlast(v_yxz: jax.Array, grid: PlaneGrid) -> jax.Array:
+    """y-face → cell-centre interpolation, vertical-last."""
+    return _move_vertical_to_back(
+        _plane_ops.interp_yface_to_cell(_move_vertical_to_front(v_yxz), grid)
+    )
+
+
+def interp_yface_to_xface_vlast(v_yxz: jax.Array, grid: PlaneGrid) -> jax.Array:
+    """y-face → x-face (4-pt corner average), vertical-last."""
+    return _move_vertical_to_back(
+        _plane_ops.interp_yface_to_xface(_move_vertical_to_front(v_yxz), grid)
+    )
+
+
+def interp_xface_to_yface_vlast(u_yxz: jax.Array, grid: PlaneGrid) -> jax.Array:
+    """x-face → y-face (4-pt corner average), vertical-last."""
+    return _move_vertical_to_back(
+        _plane_ops.interp_xface_to_yface(_move_vertical_to_front(u_yxz), grid)
     )
 
 
@@ -453,98 +509,48 @@ def make_rest_state(
 
 
 # --------------------------------------------------------------------- #
-# Centred-difference helpers (A-grid simplification for PR2b)           #
+# First-order upwind on the Arakawa-C grid                              #
 # --------------------------------------------------------------------- #
 
 
-def _d_dx_centered(field_yxz: jax.Array, dx: float) -> jax.Array:
-    """``df/dx`` at cell centres by centred difference (2 dx wide).
-
-    ``out[..., j, i, k] = (field[..., j, i+1, k] - field[..., j, i-1, k]) /
-    (2 dx)``, periodic via ``jnp.roll``. The horizontal layout is
-    ``(ny, nx, nlev)`` so the x axis is ``axis=1``.
-    """
-    return (jnp.roll(field_yxz, -1, axis=1) - jnp.roll(field_yxz, 1, axis=1)) / (
-        2.0 * dx
-    )
-
-
-def _d_dy_centered(field_yxz: jax.Array, dy: float) -> jax.Array:
-    """``df/dy`` at cell centres by centred difference. Same as
-    :func:`_d_dx_centered` but along ``axis=0``."""
-    return (jnp.roll(field_yxz, -1, axis=0) - jnp.roll(field_yxz, 1, axis=0)) / (
-        2.0 * dy
-    )
-
-
-def _upwind_advection_x(field_yxz: jax.Array, u_yxz: jax.Array,
+def _upwind_advection_x(field_yxz: jax.Array, u_at_field: jax.Array,
                         dx: float) -> jax.Array:
-    """First-order upwind contribution to ``-u df/dx`` at cell centres.
+    """First-order upwind contribution to ``-u df/dx``.
 
-    For each cell pick the one-sided difference on the side the local
-    ``u`` flows from::
+    ``field`` and ``u_at_field`` must live at the SAME horizontal
+    location (a Arakawa-C-grid invariant). For each point pick the
+    one-sided difference on the side the local advector flows from::
 
         out = -max(u, 0) * (f[i] - f[i-1]) / dx
               - min(u, 0) * (f[i+1] - f[i]) / dx
 
     Periodic neighbours via ``jnp.roll`` (axis=1 = x for the
-    ``(ny, nx, nlev)`` layout). Upwind biasing damps the 2-Δx
-    dispersive mode that destabilises centred differencing on
-    advection-dominated plume flow — same role as upwind / flux-
-    limited reconstruction in the ocean ``_van_leer_limiter`` and
-    cubed-sphere ``advect_upwind`` paths.
-
-    A-grid simplification (PR2b carry-over)
-    ---------------------------------------
-    ``field_yxz`` and ``u_yxz`` are assumed to live at the same
-    horizontal location — the cell centre. PR2b made the explicit
-    choice to treat the state's nominally Arakawa-C ``u``, ``v``
-    values as cell-centered for the slow tendency, trading
-    energy-consistent C-grid PG/divergence pairing for simpler
-    advection. PR3b inherits that simplification — the upwind side
-    is picked from the local cell-centered velocity rather than a
-    proper face-staggered interpolation. The energy-consistent
-    C-grid refactor (which would interpolate ``v`` to x-faces for
-    ``u``-advection and so on) lands in a follow-up PR alongside
-    the LES SGS closure.
+    ``(ny, nx, nlev)`` vlast layout). Upwind biasing damps the
+    2-Δx dispersive mode triggered by sharp plume gradients.
 
     Differentiability
     -----------------
     ``jnp.maximum`` / ``jnp.minimum`` against ``0.0`` introduce a
-    kink at ``u = 0`` (or ``v = 0``). JAX returns a finite
-    subgradient at the kink, so ``jax.grad`` flows cleanly even
-    through zero-velocity cells — verified by
-    ``tests/unit/test_plane_nh_upwind.py::test_upwind_grad_through_zero_velocity``.
+    kink at ``u = 0``. JAX returns a finite subgradient at the kink,
+    so ``jax.grad`` flows cleanly even through zero-velocity cells.
     """
     f_backward = (field_yxz - jnp.roll(field_yxz, 1, axis=1)) / dx
     f_forward = (jnp.roll(field_yxz, -1, axis=1) - field_yxz) / dx
-    u_pos = jnp.maximum(u_yxz, 0.0)
-    u_neg = jnp.minimum(u_yxz, 0.0)
+    u_pos = jnp.maximum(u_at_field, 0.0)
+    u_neg = jnp.minimum(u_at_field, 0.0)
     return -(u_pos * f_backward + u_neg * f_forward)
 
 
-def _upwind_advection_y(field_yxz: jax.Array, v_yxz: jax.Array,
+def _upwind_advection_y(field_yxz: jax.Array, v_at_field: jax.Array,
                         dy: float) -> jax.Array:
-    """First-order upwind contribution to ``-v df/dy`` at cell centres.
-    Same algebra as :func:`_upwind_advection_x` but along ``axis=0``."""
+    """First-order upwind contribution to ``-v df/dy``. Same convention
+    as :func:`_upwind_advection_x`: ``field`` and ``v_at_field`` must
+    co-locate."""
     f_backward = (field_yxz - jnp.roll(field_yxz, 1, axis=0)) / dy
     f_forward = (jnp.roll(field_yxz, -1, axis=0) - field_yxz) / dy
-    v_pos = jnp.maximum(v_yxz, 0.0)
-    v_neg = jnp.minimum(v_yxz, 0.0)
+    v_pos = jnp.maximum(v_at_field, 0.0)
+    v_neg = jnp.minimum(v_at_field, 0.0)
     return -(v_pos * f_backward + v_neg * f_forward)
-
-
-def _horizontal_divergence_centered(
-    u_yxz: jax.Array, v_yxz: jax.Array, grid: PlaneGrid
-) -> jax.Array:
-    """Cell-centred divergence ``du/dx + dv/dy`` from centred differences.
-
-    This is the A-grid analogue of :func:`divergence_vlast`; both
-    reduce to the same operator on a doubly-periodic plane when the
-    inputs live at cell centres because the centred operator is
-    equivalent to (forward face flux − backward face flux) / 2.
-    """
-    return _d_dx_centered(u_yxz, grid.dx) + _d_dy_centered(v_yxz, grid.dy)
 
 
 def _variable_K_diffusion_vlast(
@@ -597,74 +603,190 @@ def _variable_K_diffusion_vlast(
     ) / (grid.dy ** 2)
 
 
+def _safe_sqrt_strain(strain_mag_sq: jax.Array) -> jax.Array:
+    """``sqrt(strain_mag_sq)`` with AD-safe ``d/dx sqrt(0) = 0``.
+
+    Forward: zero where input is zero, ``sqrt(input)`` elsewhere
+    (preserves bit-exact zero on the rest state). Backward:
+    evaluates the gradient at a safe positive argument so
+    ``1/(2*sqrt)`` stays finite, then masks the zero-strain
+    contribution. Mirrors the double-where trick in
+    :func:`legoesm.core._smagorinsky_visc.compute_smagorinsky_ah_2d`.
+    """
+    safe = jnp.where(strain_mag_sq > 0.0, strain_mag_sq, 1.0)
+    return jnp.where(strain_mag_sq > 0.0, jnp.sqrt(safe), 0.0)
+
+
 def _compute_smagorinsky_K_m_plane(
     u_yxz: jax.Array,
     v_yxz: jax.Array,
+    w_yxz_half: jax.Array,
     grid: PlaneGrid,
     height_coord: HeightCoordinate,
     c_s: float,
 ) -> jax.Array:
-    """Smagorinsky-Lilly eddy viscosity at cell centres.
+    """Full 3D Smagorinsky-Lilly eddy viscosity on the C-grid plane.
 
-    ``K_m = (C_s * Δ)^2 * |S|`` with isotropic mixing length
-    ``Δ = (dx * dy * dz)^(1/3)`` and strain-rate magnitude
-    ``|S| = sqrt(2 S_ij S_ij)``. For PR3c the horizontal strain
-    components are computed from cell-centred ``u``, ``v`` via the
-    same centred-difference helpers used by the PG (A-grid
-    simplification carry-over from PR2b — the future C-grid
-    refactor will interpolate to the proper staggered locations).
+    ``K_m = (C_s · Δ)² · |S|`` with isotropic mixing length
+    ``Δ = (dx · dy · dz)^(1/3)`` and FULL strain-rate magnitude
+    ``|S| = sqrt(2 S_ij S_ij)`` including vertical-shear components
+    ``S_13``, ``S_23``, ``S_33``. Returned at cell centres.
 
-    Differentiability
-    -----------------
-    ``sqrt`` of the strain-magnitude squared uses the JAX
-    "safe-where" trick (mirrors
-    :func:`core._smagorinsky_visc.compute_smagorinsky_ah_2d`): the
-    forward pass returns exactly zero at zero strain (so the
-    rest-state preservation tests still hold bit-exact), and the
-    backward pass evaluates ``sqrt`` at a safe positive argument
-    so ``jax.grad`` does not see the ``d sqrt(0)`` singularity.
+    Energy-consistent C-grid evaluation
+    -----------------------------------
+    Each strain component is evaluated at its NATURAL Arakawa-C
+    location, then ``S_ij²`` is interpolated to cell centres so the
+    aggregated ``|S|²`` lives where ``K_m`` does:
+
+    * ``S11 = ∂u/∂x`` at cell centre (u face-difference along x).
+    * ``S22 = ∂v/∂y`` at cell centre.
+    * ``S33 = ∂w/∂z`` at cell centre (w half-level difference).
+    * ``S12 = 0.5(∂u/∂y + ∂v/∂x)`` at SW corner via the existing
+      :func:`plane_operators.curl_3d`-style stencil, then averaged
+      to cell centre.
+    * ``S13 = 0.5(∂u/∂z + ∂w/∂x)`` at x-face / vertical full level;
+      averaged to cell centre.
+    * ``S23 = 0.5(∂v/∂z + ∂w/∂y)`` at y-face / vertical full level;
+      averaged to cell centre.
+
+    No A-grid simplification anywhere — every gradient uses the
+    proper face-difference on the Arakawa-C state, replacing the
+    horizontal-only pilot whose ``K_m`` was identically zero under
+    pure vertical shear (Codex review request 2026-05-24).
 
     Parameters
     ----------
-    u_yxz, v_yxz : jax.Array
-        Cell-centred horizontal velocities, shape ``(ny, nx, nlev)``.
+    u_yxz : jax.Array
+        x-face zonal wind, shape ``(ny, nx, nlev)``.
+    v_yxz : jax.Array
+        y-face meridional wind, shape ``(ny, nx, nlev)``.
+    w_yxz_half : jax.Array
+        Half-level vertical velocity, shape ``(ny, nx, nlev+1)``.
     grid : PlaneGrid
-        Provides ``dx``, ``dy``.
     height_coord : HeightCoordinate
-        Provides per-level vertical spacing ``dz`` (shape ``(nlev,)``)
-        for the isotropic mixing length.
+        Provides ``dz`` (per-level full-level thickness, shape
+        ``(nlev,)``) and ``dz_half`` (interface-to-interface
+        spacing, shape ``(nlev-1,)``) for the vertical gradients.
     c_s : float
-        Smagorinsky coefficient. ``0.0`` returns zeros (cheap
-        on/off gating via Python ``if`` in the caller).
 
     Returns
     -------
     K_m : jax.Array
         Eddy viscosity at cell centres, shape ``(ny, nx, nlev)``.
     """
-    # Centred strain-rate components (A-grid simplification).
-    du_dx = _d_dx_centered(u_yxz, grid.dx)
-    du_dy = _d_dy_centered(u_yxz, grid.dy)
-    dv_dx = _d_dx_centered(v_yxz, grid.dx)
-    dv_dy = _d_dy_centered(v_yxz, grid.dy)
+    nlev = u_yxz.shape[-1]
 
-    S11 = du_dx
-    S22 = dv_dy
-    S12 = 0.5 * (du_dy + dv_dx)
+    # --- Horizontal C-grid gradients ---
+    # u at x-face → ∂u/∂x = (u[..., j, i+1] - u[..., j, i]) / dx at cell centre.
+    du_dx_center = (jnp.roll(u_yxz, -1, axis=1) - u_yxz) / grid.dx
+    # v at y-face → ∂v/∂y = (v[..., j+1, i] - v[..., j, i]) / dy at cell centre.
+    dv_dy_center = (jnp.roll(v_yxz, -1, axis=0) - v_yxz) / grid.dy
 
-    strain_mag_sq = 2.0 * (S11 * S11 + S22 * S22 + 2.0 * S12 * S12)
-    # Safe-where: forward = sqrt for positive, exactly 0 at zero;
-    # backward dispatches sqrt at safe_x >= 1 so 1/(2*sqrt) stays finite.
-    safe = jnp.where(strain_mag_sq > 0.0, strain_mag_sq, 1.0)
-    strain_mag = jnp.where(
-        strain_mag_sq > 0.0, jnp.sqrt(safe), 0.0,
+    # --- S12 at SW corner ---
+    # ∂u/∂y at corner = (u[..., j, i] - u[..., j-1, i]) / dy
+    du_dy_corner = (u_yxz - jnp.roll(u_yxz, 1, axis=0)) / grid.dy
+    # ∂v/∂x at corner = (v[..., j, i] - v[..., j, i-1]) / dx
+    dv_dx_corner = (v_yxz - jnp.roll(v_yxz, 1, axis=1)) / grid.dx
+    S12_corner = 0.5 * (du_dy_corner + dv_dx_corner)
+    # Corner→centre average (SW + SE + NW + NE).
+    S12_sq_center = 0.25 * (
+        S12_corner ** 2
+        + jnp.roll(S12_corner, -1, axis=1) ** 2
+        + jnp.roll(S12_corner, -1, axis=0) ** 2
+        + jnp.roll(jnp.roll(S12_corner, -1, axis=0), -1, axis=1) ** 2
     )
 
+    # --- Vertical gradients (w at half levels, u/v at full levels) ---
+    # ∂w/∂z = (w_half[k+1] - w_half[k]) / dz_full[k] at full level (cell centre).
+    dz_full = height_coord.dz                          # (nlev,)
+    dw_dz_center = (
+        w_yxz_half[..., 1:] - w_yxz_half[..., :-1]
+    ) / dz_full
+    S33_center = dw_dz_center
+
+    # ∂u/∂z at x-face, vertical full-level: needs interior centred
+    # difference of u between full levels k+1, k-1 (centred). Edges
+    # use one-sided one-level differences.
+    # Build du/dz_full at x-face (same staggering as u).
+    du_dz = _full_level_centred_d_dz(u_yxz, height_coord)
+    dv_dz = _full_level_centred_d_dz(v_yxz, height_coord)
+
+    # ∂w/∂x at x-face (cell-centre w_full needed first), ∂w/∂y at y-face.
+    # Build w at full level (vertical midpoint of half-level pair) then
+    # take face-difference along x / y → result lives at x-face/y-face.
+    w_full = 0.5 * (w_yxz_half[..., :-1] + w_yxz_half[..., 1:])  # cell centre
+    dw_dx_xface = (w_full - jnp.roll(w_full, 1, axis=1)) / grid.dx
+    dw_dy_yface = (w_full - jnp.roll(w_full, 1, axis=0)) / grid.dy
+
+    S13_xface = 0.5 * (du_dz + dw_dx_xface)            # at x-face
+    S23_yface = 0.5 * (dv_dz + dw_dy_yface)            # at y-face
+
+    # Face → centre via simple two-point average on the appropriate axis.
+    S13_sq_center = 0.5 * (
+        S13_xface ** 2 + jnp.roll(S13_xface, -1, axis=1) ** 2
+    )
+    S23_sq_center = 0.5 * (
+        S23_yface ** 2 + jnp.roll(S23_yface, -1, axis=0) ** 2
+    )
+
+    # --- Aggregate strain magnitude at cell centre ---
+    # |S|² = 2 S_ij S_ij = 2 (S11² + S22² + S33² + 2 S12² + 2 S13² + 2 S23²)
+    strain_mag_sq = 2.0 * (
+        du_dx_center ** 2
+        + dv_dy_center ** 2
+        + S33_center ** 2
+        + 2.0 * S12_sq_center
+        + 2.0 * S13_sq_center
+        + 2.0 * S23_sq_center
+    )
+    strain_mag = _safe_sqrt_strain(strain_mag_sq)
+
     # Isotropic mixing length: cube-root of cell volume.
-    dz = height_coord.dz                              # (nlev,)
-    delta = (grid.dx * grid.dy * dz) ** (1.0 / 3.0)   # (nlev,)
-    delta_sq = (c_s * delta) ** 2                     # (nlev,)
+    delta = (grid.dx * grid.dy * dz_full) ** (1.0 / 3.0)   # (nlev,)
+    delta_sq = (c_s * delta) ** 2                          # (nlev,)
     return delta_sq * strain_mag
+
+
+def _full_level_centred_d_dz(
+    field_yxz: jax.Array, height_coord: HeightCoordinate
+) -> jax.Array:
+    """Vertical derivative ``∂f/∂(level index)`` at full level.
+
+    Uses :attr:`HeightCoordinate.dz_half` which IS the
+    full-level-to-full-level distance (``dz_half[k] =
+    z_full[k] - z_full[k+1]``), positive under the top-to-bottom
+    storage order. The denominator for the interior centred
+    difference is therefore ``dz_half[k-1] + dz_half[k] =
+    z_full[k-1] - z_full[k+1]``, the total distance between
+    ``f[k-1]`` and ``f[k+1]``.
+
+    Top-down convention
+    -------------------
+    ``z_full`` decreases with level index ``k`` (index 0 = model
+    top, index ``nlev-1`` = surface), so the returned value is
+    ``+(f[k+1] - f[k-1]) / (z[k-1] - z[k+1])``, i.e. the derivative
+    with respect to LEVEL INDEX. The sign relative to the physical
+    vertical coordinate ``z`` is opposite; this helper is consumed
+    exclusively inside SQUARED strain components ``S_13²``,
+    ``S_23²`` so the sign drops out of ``|S|²``. Do NOT use the raw
+    return value where a signed ``∂f/∂z_physical`` is required
+    without flipping the sign.
+
+    Interior uses the 2-level centred difference; boundaries fall
+    back to one-sided one-step differences (top: ``(f[0] - f[1]) /
+    dz_half[0]`` written in level-index direction; bottom analogous).
+    Result has the same shape as the input.
+    """
+    nlev = field_yxz.shape[-1]
+    if nlev < 2:
+        return jnp.zeros_like(field_yxz)
+    dz_half = height_coord.dz_half                          # (nlev-1,)
+    interior = (
+        field_yxz[..., 2:] - field_yxz[..., :-2]
+    ) / (dz_half[:-1] + dz_half[1:])
+    bottom = (field_yxz[..., 1:2] - field_yxz[..., 0:1]) / dz_half[0]
+    top = (field_yxz[..., -1:] - field_yxz[..., -2:-1]) / dz_half[-1]
+    return jnp.concatenate([bottom, interior, top], axis=-1)
 
 
 def _vertical_advection_plane(
@@ -730,8 +852,22 @@ def plane_compressible_euler_slow_tendencies(
 
     Evaluated once per outer SSP-RK3 stage and held constant for the
     acoustic substeps. See the module docstring for the equations
-    being solved and the A-grid simplification used for horizontal
-    momentum advection in PR2b.
+    being solved.
+
+    Energy-consistent C-grid pairing
+    --------------------------------
+    All horizontal differential operators consume ``u`` at the
+    x-face (between cells ``i-1`` and ``i``), ``v`` at the y-face,
+    and scalars at cell centres — the Arakawa-C convention encoded
+    by :mod:`plane_operators`. The PG / divergence pairing is the
+    discrete adjoint pair documented in that module's
+    "Inner-product weights and adjoint pairing" docstring:
+    ``sum(phi · div(u, v)) == -sum(u · grad_x(phi)) -
+    sum(v · grad_y(phi))`` to machine epsilon under periodic BC,
+    which is the discrete condition for energy-consistent
+    pressure-gradient / divergence coupling. No A-grid
+    simplification anywhere in the body (replaces the PR2b
+    centred-difference shortcut).
 
     Parameters
     ----------
@@ -742,22 +878,16 @@ def plane_compressible_euler_slow_tendencies(
     height_coord : HeightCoordinate
         Reference profile + vertical metric.
     terrain_metric : TerrainMetric
-        Jacobian (always ``1`` on a flat plane in PR2b).
+        Jacobian (always ``1`` on a flat plane).
     config : CompressibleEulerConfig
-        Acoustic / sponge / hyperdiffusion knobs. PR2b only uses
-        ``config.use_coriolis``; other flags must be the off defaults
-        and are checked by :class:`PlaneCompressibleEulerModel` at
-        construction time, not here.
 
     Returns
     -------
     PlaneNonHydrostaticTendencies
-        Slow tendencies for every prognostic. ``dphis_dt`` and
-        ``dtracers_dt`` are zero arrays (PR2b does not advect either).
     """
-    u = state.u.data           # (ny, nx, nlev)
-    v = state.v.data           # (ny, nx, nlev)
-    w = state.w.data           # (ny, nx, nlev+1)
+    u = state.u.data           # x-face zonal wind, (ny, nx, nlev)
+    v = state.v.data           # y-face meridional wind, (ny, nx, nlev)
+    w = state.w.data           # half-level vertical wind, (ny, nx, nlev+1)
     theta_p = state.theta_prime.data
     rho_p = state.rho_prime.data
 
@@ -776,52 +906,70 @@ def plane_compressible_euler_slow_tendencies(
     )
     pi_p = compute_exner_perturbation(rho_p, theta_p, height_coord)
 
-    # 2. Horizontal pressure gradient at cell centres.
-    grad_pi_x = _d_dx_centered(pi_p, grid.dx)
-    grad_pi_y = _d_dy_centered(pi_p, grid.dy)
-    du_pg = -c_p * theta_total * grad_pi_x
-    dv_pg = -c_p * theta_total * grad_pi_y
+    # 2. C-grid pressure gradient. ``grad_x_vlast(pi_p)`` returns
+    #    the x-face gradient ``(pi[j,i] - pi[j,i-1])/dx`` — exactly
+    #    where ``u`` lives. ``theta_total`` is at cell centres;
+    #    interpolate to the x-face so the PG operand co-locates with
+    #    its target tendency.
+    grad_pi_x_xface = grad_x_vlast(pi_p, grid)
+    grad_pi_y_yface = grad_y_vlast(pi_p, grid)
+    theta_xface = interp_cell_to_xface_vlast(theta_total, grid)
+    theta_yface = interp_cell_to_yface_vlast(theta_total, grid)
+    du_pg = -c_p * theta_xface * grad_pi_x_xface
+    dv_pg = -c_p * theta_yface * grad_pi_y_yface
 
-    # 3. Coriolis (optional; ``f_y`` already broadcasts to (ny, nx, 1)).
+    # 3. Coriolis (optional). f at cell centre; interpolate to the
+    #    target face so f·u_cross acts at the proper Arakawa-C
+    #    location. f varies in y → on the beta-plane the y-face has
+    #    a different f than the cell centre (Codex review
+    #    2026-05-24); f_xface is identical to f_centre because
+    #    x-face shares yc with the cell, but we still interpolate
+    #    for symmetry + so the f-plane / beta-plane branch is
+    #    handled uniformly.
     if config.use_coriolis:
         f_3d = grid.f_y[:, :, None]
-        du_cor = f_3d * v
-        dv_cor = -f_3d * u
+        f_xface = interp_cell_to_xface_vlast(f_3d, grid)
+        f_yface = interp_cell_to_yface_vlast(f_3d, grid)
+        v_xface = interp_yface_to_xface_vlast(v, grid)
+        u_yface = interp_xface_to_yface_vlast(u, grid)
+        du_cor = f_xface * v_xface
+        dv_cor = -f_yface * u_yface
     else:
         du_cor = jnp.zeros_like(u)
         dv_cor = jnp.zeros_like(v)
 
-    # 4. Mass continuity (flux form) — drho'/dt = -d/dx(rho u) - d/dy(rho v).
-    drho_p_dt = -_horizontal_divergence_centered(
-        rho_total * u, rho_total * v, grid,
-    )
+    # 4. Mass continuity (flux form): ``drho'/dt = -div(rho · u)``.
+    #    ``rho_total`` lives at cell centres; interpolate to each face
+    #    so the mass flux has the same staggering as the velocity.
+    rho_xface = interp_cell_to_xface_vlast(rho_total, grid)
+    rho_yface = interp_cell_to_yface_vlast(rho_total, grid)
+    drho_p_dt = -divergence_vlast(rho_xface * u, rho_yface * v, grid)
 
-    # 5. Theta horizontal advection (advective form, first-order
-    #    upwind so the 2-Δx mode triggered by sharp plume gradients
-    #    is damped at the advection step — see PR3a docstring).
-    #    NB: ``u``, ``v`` are passed in as cell-centered velocities
-    #    per the module-level "A-grid simplification used in PR2b"
-    #    section — the same convention is honoured for Sections 6, 7,
-    #    8 below. Field locations therefore match where the upwind
-    #    helper expects them; the Arakawa-C state labels remain in
-    #    place for the future C-grid refactor.
+    # 5. Theta advection (advective form, first-order upwind). Theta
+    #    at cell centre; advect with the cell-centre velocity formed
+    #    by face→cell averaging of u, v.
+    u_center = interp_xface_to_cell_vlast(u, grid)
+    v_center = interp_yface_to_cell_vlast(v, grid)
     dtheta_p_dt = (
-        _upwind_advection_x(theta_total, u, grid.dx)
-        + _upwind_advection_y(theta_total, v, grid.dy)
+        _upwind_advection_x(theta_total, u_center, grid.dx)
+        + _upwind_advection_y(theta_total, v_center, grid.dy)
     )
 
-    # 6. Horizontal momentum advection (advective form, first-order
-    #    upwind on cell-centred ``u``, ``v``).
+    # 6. Horizontal momentum advection — Arakawa-C upwind. u lives at
+    #    x-face; advect by (u-at-x-face, v-at-x-face). v→x-face via
+    #    4-pt corner average. Symmetric for v.
+    v_at_xface = interp_yface_to_xface_vlast(v, grid)
+    u_at_yface = interp_xface_to_yface_vlast(u, grid)
     du_adv = (
         _upwind_advection_x(u, u, grid.dx)
-        + _upwind_advection_y(u, v, grid.dy)
+        + _upwind_advection_y(u, v_at_xface, grid.dy)
     )
     dv_adv = (
-        _upwind_advection_x(v, u, grid.dx)
+        _upwind_advection_x(v, u_at_yface, grid.dx)
         + _upwind_advection_y(v, v, grid.dy)
     )
 
-    # 7. Vertical advection of u, v by full-level w (cell-centred A-grid).
+    # 7. Vertical advection of u, v by full-level w.
     du_vert = _vertical_advection_plane(u, w, height_coord, J)
     dv_vert = _vertical_advection_plane(v, w, height_coord, J)
 
@@ -829,11 +977,12 @@ def plane_compressible_euler_slow_tendencies(
     dv_dt = dv_adv + dv_vert + dv_pg + dv_cor
 
     # 8. w slow part: horizontal advection of w (advective form on
-    #    full-level interpolation; rigid w boundaries at interfaces).
+    #    half-level w; interpolate u, v to cell centre then average
+    #    to interface for the upwind side selection).
     w_full = 0.5 * (w[..., :-1] + w[..., 1:])
     dw_full = (
-        _upwind_advection_x(w_full, u, grid.dx)
-        + _upwind_advection_y(w_full, v, grid.dy)
+        _upwind_advection_x(w_full, u_center, grid.dx)
+        + _upwind_advection_y(w_full, v_center, grid.dy)
     )
     # Re-map to half levels: interior is the average of adjacent full
     # values; top and bottom interfaces stay rigid (zero) so the
@@ -914,23 +1063,26 @@ def plane_compressible_euler_slow_tendencies(
     #     from full to half levels). ``c_s = 0`` skips the branch
     #     entirely (cheap Python on/off gate).
     if config.smagorinsky_cs > 0.0:
+        # Full 3D Smag strain (replaces horizontal-only pilot). Takes
+        # half-level w so the vertical-shear components S13, S23, S33
+        # contribute to |S|. K_m lives at cell centres.
         K_m = _compute_smagorinsky_K_m_plane(
-            u, v, grid, height_coord, config.smagorinsky_cs,
+            u, v, w, grid, height_coord, config.smagorinsky_cs,
         )
-        # Use conservative variable-K diffusion (flux form):
-        # ``div(K grad f)``. The naive ``K * laplacian(f)`` is not
-        # conservative for spatially varying K and not guaranteed
-        # dissipative — Codex iter-1 finding.
-        du_dt = du_dt + _variable_K_diffusion_vlast(u, K_m, grid)
-        dv_dt = dv_dt + _variable_K_diffusion_vlast(v, K_m, grid)
+        # u at x-face, v at y-face on the Arakawa-C grid →
+        # interpolate K_m to each face before the flux-form
+        # diffusion so the operand and diffusivity co-locate.
+        K_m_xface = interp_cell_to_xface_vlast(K_m, grid)
+        K_m_yface = interp_cell_to_yface_vlast(K_m, grid)
+        du_dt = du_dt + _variable_K_diffusion_vlast(u, K_m_xface, grid)
+        dv_dt = dv_dt + _variable_K_diffusion_vlast(v, K_m_yface, grid)
         K_h = K_m / config.smagorinsky_prandtl
         dtheta_p_dt = dtheta_p_dt + _variable_K_diffusion_vlast(
             theta_p, K_h, grid,
         )
-        # ``K_m`` is at full levels; interpolate to half levels for w
-        # (vertical centred average for the interior, rigid boundary
-        # K stays at zero so no spurious tendency at the top / bottom
-        # interfaces).
+        # ``K_m`` at full levels; interpolate to half levels for w
+        # (rigid boundary K stays zero — no spurious tendency at top
+        # / bottom interfaces).
         K_m_half_interior = 0.5 * (K_m[..., :-1] + K_m[..., 1:])
         pad_axes = ((0, 0),) * (K_m_half_interior.ndim - 1)
         K_m_half = jnp.pad(
@@ -938,20 +1090,16 @@ def plane_compressible_euler_slow_tendencies(
         )
         dw_dt = dw_dt + _variable_K_diffusion_vlast(w, K_m_half, grid)
 
-    # 12. Tracer advection (PR3d). Advective form for each tracer
-    #     via the same upwind helpers used for momentum / theta.
-    #     ``state.tracers.data`` has shape ``(ny, nx, nlev,
-    #     n_tracers)``; vmap the helper over the trailing tracer
-    #     axis. ``n_tracers == 0`` short-circuits to a zero-shape
-    #     output (no compute).
+    # 12. Tracer advection. Advective form via upwind on cell-centre
+    #     velocities (face-averaged from ``u``, ``v`` — the C-grid
+    #     pairing for cell-centred scalars). vmap over the trailing
+    #     tracer axis.
     tracers = state.tracers.data
     if tracers.shape[-1] > 0:
-        # Vmap over tracer axis: each call handles one (ny, nx, nlev)
-        # tracer slice with the cell-centered u, v.
         def _tracer_tend_one(q):
             return (
-                _upwind_advection_x(q, u, grid.dx)
-                + _upwind_advection_y(q, v, grid.dy)
+                _upwind_advection_x(q, u_center, grid.dx)
+                + _upwind_advection_y(q, v_center, grid.dy)
                 + _vertical_advection_plane(q, w, height_coord, J)
             )
         dtracers_dt = jax.vmap(_tracer_tend_one, in_axes=-1, out_axes=-1)(

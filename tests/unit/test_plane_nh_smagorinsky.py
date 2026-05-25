@@ -57,7 +57,8 @@ def test_K_m_is_zero_on_rest_state():
     must return zero, not a tiny ``sqrt`` noise floor)."""
     _, grid, hc, _, _ = _setup()
     zero = jnp.zeros((grid.ny, grid.nx, grid.nlev))
-    K = _compute_smagorinsky_K_m_plane(zero, zero, grid, hc, c_s=0.2)
+    zero_w = jnp.zeros((grid.ny, grid.nx, grid.nlev + 1))
+    K = _compute_smagorinsky_K_m_plane(zero, zero, zero_w, grid, hc, c_s=0.2)
     assert float(jnp.max(jnp.abs(K))) == 0.0
 
 
@@ -67,7 +68,10 @@ def test_K_m_is_positive_for_strain_bearing_state():
     rng = np.random.default_rng(0)
     u = jnp.asarray(rng.standard_normal((grid.ny, grid.nx, grid.nlev)))
     v = jnp.asarray(rng.standard_normal((grid.ny, grid.nx, grid.nlev)))
-    K = _compute_smagorinsky_K_m_plane(u, v, grid, hc, c_s=0.2)
+    w = jnp.asarray(
+        rng.standard_normal((grid.ny, grid.nx, grid.nlev + 1)),
+    )
+    K = _compute_smagorinsky_K_m_plane(u, v, w, grid, hc, c_s=0.2)
     assert float(jnp.min(K)) > 0.0
 
 
@@ -78,8 +82,11 @@ def test_K_m_scales_quadratically_in_c_s():
     rng = np.random.default_rng(1)
     u = jnp.asarray(rng.standard_normal((grid.ny, grid.nx, grid.nlev)))
     v = jnp.asarray(rng.standard_normal((grid.ny, grid.nx, grid.nlev)))
-    K_1 = _compute_smagorinsky_K_m_plane(u, v, grid, hc, c_s=0.1)
-    K_2 = _compute_smagorinsky_K_m_plane(u, v, grid, hc, c_s=0.2)
+    w = jnp.asarray(
+        rng.standard_normal((grid.ny, grid.nx, grid.nlev + 1)),
+    )
+    K_1 = _compute_smagorinsky_K_m_plane(u, v, w, grid, hc, c_s=0.1)
+    K_2 = _compute_smagorinsky_K_m_plane(u, v, w, grid, hc, c_s=0.2)
     ratio = K_2 / jnp.where(K_1 > 0.0, K_1, 1.0)
     assert jnp.allclose(ratio, 4.0, atol=1.0e-12)
 
@@ -212,7 +219,10 @@ def test_smag_tendency_is_dissipative():
     rng = np.random.default_rng(7)
     u = jnp.asarray(rng.standard_normal((grid.ny, grid.nx, grid.nlev)))
     v = jnp.asarray(rng.standard_normal((grid.ny, grid.nx, grid.nlev)))
-    K_m = _compute_smagorinsky_K_m_plane(u, v, grid, hc, c_s=0.2)
+    w = jnp.asarray(
+        rng.standard_normal((grid.ny, grid.nx, grid.nlev + 1)),
+    )
+    K_m = _compute_smagorinsky_K_m_plane(u, v, w, grid, hc, c_s=0.2)
     diff_u = _variable_K_diffusion_vlast(u, K_m, grid)
     diff_v = _variable_K_diffusion_vlast(v, K_m, grid)
     # Area cancels (uniform plane). Sum of u · D(u) over the periodic
@@ -234,7 +244,10 @@ def test_smag_diffusion_conserves_field_under_periodic_bc():
     rng = np.random.default_rng(8)
     u = jnp.asarray(rng.standard_normal((grid.ny, grid.nx, grid.nlev)))
     v = jnp.asarray(rng.standard_normal((grid.ny, grid.nx, grid.nlev)))
-    K_m = _compute_smagorinsky_K_m_plane(u, v, grid, hc, c_s=0.2)
+    w = jnp.asarray(
+        rng.standard_normal((grid.ny, grid.nx, grid.nlev + 1)),
+    )
+    K_m = _compute_smagorinsky_K_m_plane(u, v, w, grid, hc, c_s=0.2)
     diff = _variable_K_diffusion_vlast(u, K_m, grid)
     rel = float(jnp.abs(jnp.sum(diff))) / max(
         float(jnp.max(jnp.abs(diff))), 1.0e-30,
@@ -319,7 +332,7 @@ def test_smag_w_branch_shape_consistency():
     w = jnp.asarray(
         rng.standard_normal((grid.ny, grid.nx, grid.nlev + 1)),
     )
-    K_m = _compute_smagorinsky_K_m_plane(u, v, grid, hc, c_s=0.2)
+    K_m = _compute_smagorinsky_K_m_plane(u, v, w, grid, hc, c_s=0.2)
     K_half_interior = 0.5 * (K_m[..., :-1] + K_m[..., 1:])
     K_half = jnp.pad(K_half_interior, ((0, 0), (0, 0), (1, 1)))
     assert K_half.shape == w.shape, (
@@ -330,21 +343,74 @@ def test_smag_w_branch_shape_consistency():
     assert bool(jnp.all(jnp.isfinite(out)))
 
 
-def test_horizontal_only_pilot_K_m_is_zero_for_pure_vertical_shear():
-    """PR3c is a HORIZONTAL-ONLY pilot Smag (config docstring).
-    Vertical-only shear (∂u/∂z != 0 with ∂u/∂x = ∂u/∂y = 0) must
-    give K_m = 0 — documents the intentional limitation."""
+def test_full_3D_strain_picks_up_pure_vertical_shear():
+    """Full 3D Smag strain tensor includes S_13 = 0.5(∂u/∂z + ∂w/∂x).
+    Pure ∂u/∂z shear must give K_m > 0 — the previous horizontal-only
+    pilot returned zero here, masking the vertical mixing path. This
+    is the upgrade pinned by the user request (2026-05-24)."""
     from legoesm.atmosphere.dynamics.compressible_euler_plane import (
         _compute_smagorinsky_K_m_plane,
     )
     _, grid, hc, _, _ = _setup()
-    # u(x, y, z) varies only in z (linear shear).
+    # u(x, y, z) varies only in z (linear shear); v = w = 0.
     k = jnp.arange(grid.nlev, dtype=jnp.float64)
     u = jnp.broadcast_to(k[None, None, :], (grid.ny, grid.nx, grid.nlev))
     v = jnp.zeros_like(u)
-    K = _compute_smagorinsky_K_m_plane(u, v, grid, hc, c_s=0.2)
-    # Pure vertical shear: K_m == 0 by design (horizontal-only).
-    assert float(jnp.max(jnp.abs(K))) == 0.0, (
-        "Horizontal-only pilot returned nonzero K_m for pure vertical "
-        "shear — strain formula may have leaked the vertical axis."
+    w = jnp.zeros((grid.ny, grid.nx, grid.nlev + 1))
+    K = _compute_smagorinsky_K_m_plane(u, v, w, grid, hc, c_s=0.2)
+    # Vertical shear ⇒ S_13² > 0 ⇒ K_m > 0 at every cell where the
+    # one-sided dz difference samples a non-zero u-difference.
+    assert float(jnp.max(K)) > 0.0, (
+        "3D Smag strain returned zero K_m under pure vertical shear "
+        "— S_13 term is not contributing to |S|²."
+    )
+
+
+def test_full_level_centred_d_dz_linear_field_returns_constant():
+    """Codex review 2026-05-24: pin the vertical-derivative helper
+    against a known linear profile. ``u(z) = a · z + b`` must yield
+    ``|∂u/∂z| = |a|`` at every level — interior centred AND the
+    top/bottom one-sided fallbacks. (The sign convention is
+    documented in the helper's docstring; this test compares the
+    absolute magnitude because the helper returns the per-level-
+    index derivative, which is ``-∂u/∂z_physical`` under the
+    top-to-bottom storage order.)"""
+    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+        _full_level_centred_d_dz,
+    )
+    _, grid, hc, _, _ = _setup()
+    a = 2.5
+    b = 7.3
+    # u(z_full) = a*z + b → broadcast to (ny, nx, nlev).
+    u = jnp.broadcast_to(
+        (a * hc.z_full + b)[None, None, :],
+        (grid.ny, grid.nx, grid.nlev),
+    )
+    deriv = _full_level_centred_d_dz(u, hc)
+    # |deriv| == |a| at every cell, every level, including top/bottom.
+    np.testing.assert_allclose(
+        np.asarray(jnp.abs(deriv)),
+        np.full((grid.ny, grid.nx, grid.nlev), abs(a)),
+        rtol=1.0e-12, atol=1.0e-12,
+    )
+
+
+def test_full_3D_strain_picks_up_pure_dw_dz():
+    """Pure ∂w/∂z divergence (no horizontal shear, no w-tilt) must
+    give K_m > 0 via the S_33² term."""
+    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+        _compute_smagorinsky_K_m_plane,
+    )
+    _, grid, hc, _, _ = _setup()
+    u = jnp.zeros((grid.ny, grid.nx, grid.nlev))
+    v = jnp.zeros((grid.ny, grid.nx, grid.nlev))
+    # Vertical-velocity profile: linear in k → ∂w/∂z = const != 0.
+    k_half = jnp.arange(grid.nlev + 1, dtype=jnp.float64)
+    w = jnp.broadcast_to(
+        k_half[None, None, :], (grid.ny, grid.nx, grid.nlev + 1),
+    )
+    K = _compute_smagorinsky_K_m_plane(u, v, w, grid, hc, c_s=0.2)
+    assert float(jnp.max(K)) > 0.0, (
+        "3D Smag strain returned zero K_m under pure dw/dz — S_33 "
+        "term is not contributing."
     )

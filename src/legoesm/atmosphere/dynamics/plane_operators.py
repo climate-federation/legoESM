@@ -193,6 +193,86 @@ def curl_3d(u: jax.Array, v: jax.Array, grid) -> jax.Array:
     return dv_dx - du_dy
 
 
+def interp_cell_to_xface(phi: jax.Array, grid) -> jax.Array:
+    """Cell-centre scalar → x-face (between cells i-1 and i).
+
+    ``out[..., j, i] = 0.5 * (phi[..., j, i] + phi[..., j, i-1])``
+
+    Output shape equals input; the index convention matches
+    :func:`grad_x_3d` and the Arakawa-C ``u``-face position
+    (between cells i-1 and i).
+    """
+    _check_horizontal_shape(phi, grid, "phi")
+    return 0.5 * (phi + jnp.roll(phi, 1, axis=-1))
+
+
+def interp_cell_to_yface(phi: jax.Array, grid) -> jax.Array:
+    """Cell-centre scalar → y-face (between cells j-1 and j).
+
+    ``out[..., j, i] = 0.5 * (phi[..., j, i] + phi[..., j-1, i])``
+    """
+    _check_horizontal_shape(phi, grid, "phi")
+    return 0.5 * (phi + jnp.roll(phi, 1, axis=-2))
+
+
+def interp_xface_to_cell(u: jax.Array, grid) -> jax.Array:
+    """x-face vector ``u`` → cell centre.
+
+    ``out[..., j, i] = 0.5 * (u[..., j, i] + u[..., j, i+1])``
+    """
+    _check_horizontal_shape(u, grid, "u")
+    return 0.5 * (u + jnp.roll(u, -1, axis=-1))
+
+
+def interp_yface_to_cell(v: jax.Array, grid) -> jax.Array:
+    """y-face vector ``v`` → cell centre.
+
+    ``out[..., j, i] = 0.5 * (v[..., j, i] + v[..., j+1, i])``
+    """
+    _check_horizontal_shape(v, grid, "v")
+    return 0.5 * (v + jnp.roll(v, -1, axis=-2))
+
+
+def interp_yface_to_xface(v: jax.Array, grid) -> jax.Array:
+    """y-face vector ``v`` → x-face (4-point corner-average).
+
+    ``out[..., j, i] = 0.25 * (v[..., j, i] + v[..., j, i-1]
+                              + v[..., j+1, i] + v[..., j+1, i-1])``
+
+    The result lives at the x-face position ``(xu[i], yc[j])``, the
+    same Arakawa-C location as ``u``. Used by the momentum advection
+    code to interpolate the cross-component velocity to the
+    target-component's face so the advector at the u-face uses the
+    proper face-local ``v``.
+    """
+    _check_horizontal_shape(v, grid, "v")
+    v_im1 = jnp.roll(v, 1, axis=-1)
+    return 0.25 * (
+        v + v_im1
+        + jnp.roll(v, -1, axis=-2)
+        + jnp.roll(v_im1, -1, axis=-2)
+    )
+
+
+def interp_xface_to_yface(u: jax.Array, grid) -> jax.Array:
+    """x-face vector ``u`` → y-face (4-point corner-average).
+
+    ``out[..., j, i] = 0.25 * (u[..., j, i] + u[..., j-1, i]
+                              + u[..., j, i+1] + u[..., j-1, i+1])``
+
+    The result lives at the y-face position ``(xc[i], yv[j])``, the
+    same Arakawa-C location as ``v``. Companion to
+    :func:`interp_yface_to_xface`.
+    """
+    _check_horizontal_shape(u, grid, "u")
+    u_jm1 = jnp.roll(u, 1, axis=-2)
+    return 0.25 * (
+        u + u_jm1
+        + jnp.roll(u, -1, axis=-1)
+        + jnp.roll(u_jm1, -1, axis=-1)
+    )
+
+
 def laplacian_3d(phi: jax.Array, grid) -> jax.Array:
     """5-point scalar Laplacian at cell centres.
 

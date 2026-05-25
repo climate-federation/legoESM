@@ -21,6 +21,8 @@ from legoesm.core.field import Field
 from legoesm.core.state import (
     HydrostaticState,
     HydrostaticTendencies,
+    MPASNonHydrostaticState,
+    MPASNonHydrostaticTendencies,
     NonHydrostaticState,
     NonHydrostaticTendencies,
     PlaneNonHydrostaticState,
@@ -483,7 +485,8 @@ def make_radiation_physics(
     radiation_config : RadiationConfig
         Radiation configuration (selects gray or RRTMGP).
     model_type : str
-        One of "hydrostatic", "nonhydrostatic", "plane", "spectral_pe", "mpas".
+        One of "hydrostatic", "nonhydrostatic", "plane", "mpas_nh",
+        "spectral_pe", "mpas".
     column_mesh : jax.sharding.Mesh or None, optional
         Issue #273 follow-up.  When supplied, the per-column radiation
         kernel (which is naturally embarrassingly parallel across
@@ -533,6 +536,9 @@ def make_radiation_physics(
     elif model_type == "plane":
         return _make_plane_radiation(radiation_config, rrtmgp_solver,
                                      ml_ozone_coefs=ml_ozone_coefs)
+    elif model_type == "mpas_nh":
+        return _make_mpas_nh_radiation(radiation_config, rrtmgp_solver,
+                                       ml_ozone_coefs=ml_ozone_coefs)
     elif model_type == "spectral_pe":
         return _make_spectral_pe_radiation(radiation_config, rrtmgp_solver,
                                             ml_ozone_coefs=ml_ozone_coefs)
@@ -544,7 +550,7 @@ def make_radiation_physics(
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
             f"Choose from 'hydrostatic', 'nonhydrostatic', 'plane', "
-            f"'spectral_pe', 'mpas'."
+            f"'mpas_nh', 'spectral_pe', 'mpas'."
         )
 
 
@@ -981,6 +987,172 @@ def _make_plane_radiation(
             dphis_dt=Field(
                 data=jnp.zeros(shape_2d, dtype=_pd), name="dphis_dt_rad",
                 dims=dims_2d, units="m^2/s^3",
+            ),
+            dtracers_dt=Field(
+                data=jnp.zeros_like(state.tracers.data),
+                name="dtracers_dt_rad", dims=dims_tr, units="1/s",
+            ),
+        )
+
+    physics_fn.set_time = set_time
+    return physics_fn
+
+
+# ===========================================================================
+# MPAS Voronoi non-hydrostatic compressible Euler
+# ===========================================================================
+
+def _make_mpas_nh_radiation(
+    radiation_config: RadiationConfig,
+    rrtmgp_solver=None,
+    ml_ozone_coefs=None,
+) -> Callable:
+    """Create radiation physics_fn for the MPAS NH dycore.
+
+    Mirrors :func:`_make_nonhydrostatic_radiation` but for
+    ``MPASNonHydrostaticState`` (cell-centred quantities on Voronoi
+    cells, shape ``(nCells, nlev)``; ``u`` on TRiSK edges shape
+    ``(nEdges, nlev)``; ``w`` at half levels shape
+    ``(nCells, nlev+1)``).
+
+    Signature: ``(state, mesh, height_coord, terrain_metric) ->
+    MPASNonHydrostaticTendencies``.
+    """
+    _time, set_time = _make_time_state()
+
+    def physics_fn(
+        state: MPASNonHydrostaticState,
+        mesh,
+        height_coord: HeightCoordinate,
+        terrain_metric: TerrainMetric,
+    ) -> MPASNonHydrostaticTendencies:
+        theta_p = state.theta_prime.data   # (nCells, nlev)
+        rho_p = state.rho_prime.data       # (nCells, nlev)
+        theta_0 = height_coord.theta_ref   # (nlev,)
+        rho_0 = height_coord.rho_ref       # (nlev,)
+
+        theta_total, rho_total = sanitize_theta_rho(
+            theta_0 + theta_p, rho_0 + rho_p,
+        )
+        p = pressure_from_eos(rho_total, theta_total)
+        exner = (p / constants.p_ref) ** constants.kappa
+        T = theta_total * exner
+
+        nlev = height_coord.n_levels
+        shape_2d = (mesh.nCells,)
+        ncol = mesh.nCells
+        shape_cell_3d = (mesh.nCells, nlev)
+        shape_edge_3d = state.u.data.shape          # (nEdges, nlev)
+        shape_w = state.w.data.shape                # (nCells, nlev+1)
+
+        # Half-level pressure from evolving column state (matches the
+        # cubed-sphere NH path).
+        p_half = reconstruct_half_level_pressure_hydrostatic(
+            p_full=p, rho_full=rho_total,
+            z_half=terrain_metric.z_half_3d,
+        )
+        T_sfc = T[..., -1]
+
+        # MPAS lat/lon at cells handled by `_get_grid_lat_lon` via the
+        # `hasattr(grid_or_mesh, 'latCell')` branch.
+        lat, lon = _get_grid_lat_lon(mesh, shape_2d)
+        insol, cos_sza, f_day = _compute_insolation(
+            lat, radiation_config, lon=lon,
+            day_of_year=_time["day_of_year"],
+            seconds_of_day=_time["seconds_of_day"],
+        )
+
+        # Columns are already (ncol, nlev) — no reshape needed for the
+        # cell-centred quantities.
+        T_col = T
+        p_full_col = p
+        p_half_col = p_half
+        T_sfc_col = T_sfc
+        lat_col = lat
+        lon_col = lon
+        insol_col = insol
+        cos_sza_col = cos_sza
+        f_day_col = f_day
+
+        # Tracer slot layout (matches the cubed-sphere NH variant):
+        #   [0] q_v   [1] q_c   [2] q_r   [3] q_i
+        # Codex review 2026-05-24 iter-3: cloud-aware backends MUST
+        # have access to q_c (slot 1) AND q_i (slot 3); otherwise a
+        # caller wiring ``RRTMGPConfig(include_clouds=True)`` with
+        # fewer slots would get a silent CLEAR-SKY run instead of an
+        # error. Hard-fail at call time before we lose the
+        # information.
+        n_tracers = state.tracers.data.shape[-1]
+        _wants_clouds = (
+            radiation_config.scheme == "rrtmgp"
+            and getattr(radiation_config.rrtmgp, "include_clouds", False)
+        )
+        if _wants_clouds and n_tracers < 4:
+            raise ValueError(
+                f"Cloud-aware radiation (scheme='rrtmgp', "
+                f"include_clouds=True) requires state.tracers with "
+                f"at least 4 slots (q_v, q_c, q_r, q_i); MPAS NH "
+                f"state carries {n_tracers}. Allocate the state with "
+                f">= 4 tracers or disable cloud optics."
+            )
+        if n_tracers > 0:
+            q_v = jnp.clip(state.tracers.data[..., 0], 0.0, None)
+        else:
+            q_v = jnp.zeros_like(T)
+        q_v_col = q_v
+
+        q_cloud_col = None
+        q_ice_col = None
+        if n_tracers > 1:
+            q_cloud_col = jnp.clip(
+                state.tracers.data[..., 1], 0.0, None,
+            )
+        if n_tracers > 3:
+            q_ice_col = jnp.clip(
+                state.tracers.data[..., 3], 0.0, None,
+            )
+
+        rad_out = _call_radiation_backend(
+            radiation_config=radiation_config,
+            T=T_col, p_full=p_full_col, p_half=p_half_col,
+            sfc_temperature=T_sfc_col, lat=lat_col, q_v=q_v_col,
+            insolation=insol_col, cos_sza=cos_sza_col,
+            q_cloud=q_cloud_col, q_ice=q_ice_col, f_day=f_day_col,
+            rrtmgp_solver=rrtmgp_solver, lon=lon_col,
+            ml_ozone_coefs=ml_ozone_coefs,
+        )
+
+        dT_dt = rad_out.heating_rate          # (nCells, nlev)
+        dtheta_prime_dt = dT_dt / jnp.clip(exner, 1e-6, None)
+
+        dims_cell = ("nCells", "nlev")
+        dims_edge = ("nEdges", "nlev")
+        dims_w = ("nCells", "nlev_half")
+        dims_2d = ("nCells",)
+        dims_tr = ("nCells", "nlev", "tracer")
+        _sd = T.dtype
+        _pd = state.phis.data.dtype
+
+        return MPASNonHydrostaticTendencies(
+            du_dt=Field(
+                data=jnp.zeros(shape_edge_3d, dtype=_sd),
+                name="du_dt_rad", dims=dims_edge, units="m/s^2",
+            ),
+            dw_dt=Field(
+                data=jnp.zeros(shape_w, dtype=_sd),
+                name="dw_dt_rad", dims=dims_w, units="m/s^2",
+            ),
+            dtheta_prime_dt=Field(
+                data=dtheta_prime_dt, name="dtheta_prime_dt_rad",
+                dims=dims_cell, units="K/s",
+            ),
+            drho_prime_dt=Field(
+                data=jnp.zeros(shape_cell_3d, dtype=_sd),
+                name="drho_prime_dt_rad", dims=dims_cell, units="kg/m^3/s",
+            ),
+            dphis_dt=Field(
+                data=jnp.zeros(shape_2d, dtype=_pd),
+                name="dphis_dt_rad", dims=dims_2d, units="m^2/s^3",
             ),
             dtracers_dt=Field(
                 data=jnp.zeros_like(state.tracers.data),
