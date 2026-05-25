@@ -574,6 +574,17 @@ class LatLonCGridOceanConfig(NamedTuple):
     fix_volume: bool = True
     fix_heat: bool = True
     fix_salt: bool = True
+    # Issue #271: standalone end-of-step volume-drift projection that
+    # runs independently of ``use_conservation_fixer``.  The lat-lon
+    # C-grid path leaks ~0.4 mm/yr of mean eta with ETOPO bathymetry
+    # (0.06 mm/yr flat) because the partial-cell face masking creates a
+    # small mismatch between the depth-integrated tracer transport and
+    # the barotropic ``Hu_avg``.  This projection forces
+    # ``sum(eta_new * area) == sum(eta_old * area) + dt * sum(F_eta * area)``
+    # exactly each step, identical in spirit to MOM6/NEMO/MITgcm
+    # practice.  Default-on for lat-lon C-grid; MPAS already conserves
+    # to machine precision.
+    fix_eta_drift: bool = True
     barotropic_diffusion_alpha: float = 0.01
     barotropic_diffusion_dt_ref: float = 60.0
     barotropic_div_damp: float = 0.0  # Divergence damping on barotropic velocity (dimensionless)
@@ -709,17 +720,3 @@ class LatLonCGridOceanConfig(NamedTuple):
     A_h_cap_lat_deg: float = 75.0
     # Half-width of the polar-cap boost tanh transition [°]; default 5°.
     A_h_cap_width_deg: float = 5.0
-
-    # --- Per-term disable flags for per-term validation tests ---
-    # (Phase 1A of the Adcroft follow-up plan, docs/ocean/adcroft_followups.md).
-    # ``test_mode = True`` is the explicit signal that this is a non-
-    # production configuration; ``disable_*`` flags then turn off
-    # individual terms.  Production code paths leave all of these False.
-    # Gates are Python ``if`` on static bool capture per the CLAUDE.md
-    # JAX rule (not ``jnp.where``, which would trace both branches).
-    test_mode: bool = False
-    disable_coriolis: bool = False
-    disable_pgf: bool = False
-    disable_momentum_advection: bool = False
-    disable_tracer_advection: bool = False
-    disable_drag: bool = False
