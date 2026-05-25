@@ -47,11 +47,34 @@ References
 - Sadourny, R. (1975).  The dynamics of finite-difference models of the
   shallow-water equations.  JAS, 32, 680-689.
 
+Acoustic-substep contract (invariant)
+-------------------------------------
+The shared :func:`compressible_euler.acoustic_substeps` (and its
+semi-implicit variant) updates only the cell-centred fields
+``w``, ``theta_prime``, ``rho_prime`` inside its substep body.  The
+``u`` and ``v`` ``Field`` objects on the input :class:`NonHydrostaticState`
+are passed through to the returned state **with their .data arrays
+unmodified**.  This is what makes the C-grid u (n_lat, n_lon+1, nlev)
+and v (n_lat+1, n_lon, nlev) staggering safe to ship through the
+substep loop: the substep code never re-shapes or interpolates u or
+v, it only consumes the cell-centred trio.  If a future refactor of
+``acoustic_substeps`` ever touches u or v, this assumption breaks --
+the rest-state and shape tests below guard against that.
+
 Status
 ------
-v0 first-cut.  Subject to adversarial review (see ``/codex:adversarial-review``)
-before being used for production benchmarks.  Known limitations and
-TODOs are marked explicitly in the code below.
+v1 (2026-05-25): adversarial review applied.
+  - KE uses Sadourny "square-then-average" form (no double-averaging).
+  - Vertical KE removed from horizontal Bernoulli function.
+  - w advected on its native half-level staggering by vertically
+    averaging the horizontal face velocities to half-levels.
+  - Sponge profile built directly on ``z_half`` (no full-to-half
+    interpolation hack).
+  - Pole-wall projection of v moved to the start of the slow
+    tendency so the Coriolis stencil never sees pole leakage.
+  - Hyperdiffusion on u, v uses the proper C-grid vector Laplacian
+    (grad(div) - curl(curl)) from
+    ``ocean.dynamics.latlon_cgrid_operators``.
 """
 
 from __future__ import annotations
@@ -80,6 +103,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     gradient_y_cgrid,
     interp_cell_to_uface,
     interp_cell_to_vface,
+    vector_laplacian_cgrid,
 )
 from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
     absolute_vorticity_coriolis,
@@ -87,9 +111,7 @@ from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
 from legoesm.core.operators_fv_latlon_3d import (
     cgrid_fv_scalar_advection_latlon_3d,
 )
-from legoesm.grids.halo_latlon import pad_halo_latlon_3d
 from legoesm.timestepping.split_explicit import SplitExplicitConfig
-from legoesm.timestepping.dispatch import dispatch_integrator
 
 
 # ==============================================================================
@@ -144,16 +166,6 @@ class CGridLatLonCompressibleEulerConfig(NamedTuple):
 # ==============================================================================
 
 
-def _face_to_cell_u(u: jnp.ndarray) -> jnp.ndarray:
-    """Average u from lon faces (n_lat, n_lon+1, *) to cell centres (n_lat, n_lon, *)."""
-    return 0.5 * (u[:, :-1] + u[:, 1:])
-
-
-def _face_to_cell_v(v: jnp.ndarray) -> jnp.ndarray:
-    """Average v from lat faces (n_lat+1, n_lon, *) to cell centres (n_lat, n_lon, *)."""
-    return 0.5 * (v[:-1] + v[1:])
-
-
 def _apply_pole_wall(v: jnp.ndarray) -> jnp.ndarray:
     """Enforce wall boundary condition on v at the poles.
 
@@ -161,10 +173,25 @@ def _apply_pole_wall(v: jnp.ndarray) -> jnp.ndarray:
     positions ``j = 0 .. n_lat`` with ``j = 0`` on the south pole and
     ``j = n_lat`` on the north pole.  The kinematic boundary condition
     at each pole is v = 0 (no flow through the pole).  We enforce this
-    after every slow-tendency evaluation so the dycore does not need
-    to track polar singularities elsewhere.
+    both on the *incoming* v passed to :func:`cgrid_latlon_nh_slow_tendencies`
+    (so the Coriolis stencil never sees pole leakage from an unprojected
+    RK3 intermediate stage) **and** on the outgoing slow ``dv_dt``.
     """
     return v.at[0].set(0.0).at[-1].set(0.0)
+
+
+def _full_to_half_vert(field: jnp.ndarray) -> jnp.ndarray:
+    """Average a trailing-axis-(..., nlev) field to (..., nlev+1) half-levels.
+
+    Interior half-levels (k=1..nlev-1) are the arithmetic mean of the
+    two flanking full levels.  Boundary half-levels (k=0 and k=nlev)
+    copy the nearest full-level value (zero-flux extension), so a
+    constant column maps to a constant half-level column.
+    """
+    inner = 0.5 * (field[..., :-1] + field[..., 1:])
+    return jnp.concatenate(
+        [field[..., :1], inner, field[..., -1:]], axis=-1,
+    )
 
 
 # ==============================================================================
@@ -198,7 +225,14 @@ def cgrid_latlon_nh_slow_tendencies(
     NonHydrostaticTendencies
         Pytree of slow tendencies with matching C-grid staggering.
     """
-    u, v, w = state.u, state.v, state.w
+    u, w = state.u, state.w
+    # Project incoming v onto the wall-BC (v=0 at j=0 and j=n_lat)
+    # before any stencil consumes it.  Without this, an SSP-RK3
+    # intermediate stage can deliver a state whose polar v-faces
+    # carry round-off-level non-zero values, contaminating the
+    # 4-point ``u_at_v`` / ``v_at_u`` averages inside the
+    # absolute-vorticity Coriolis at the pole-adjacent faces.
+    v = _apply_pole_wall(state.v)
     theta_p, rho_p = state.theta_prime, state.rho_prime
     theta_0 = height_coord.theta_ref
     rho_0 = height_coord.rho_ref
@@ -210,25 +244,27 @@ def cgrid_latlon_nh_slow_tendencies(
     )
 
     # --- Horizontal kinetic energy + Bernoulli ---
-    # On a C-grid the kinetic-energy gradient must be evaluated from
-    # the cell-centred KE to avoid the chequerboard instability in the
-    # vector-invariant form (Sadourny 1975).  We compute KE at cell
-    # centres from face-averaged u, v.
-    u_c = _face_to_cell_u(u)
-    v_c = _face_to_cell_v(v)
-    KE = 0.5 * (u_c ** 2 + v_c ** 2)
-
-    # Add the 3D vertical-velocity contribution to KE from w at
-    # cell-centre full levels.  ``w`` is on half-levels (Lorenz
-    # staggering); average to full levels for the KE budget.
-    w_full = 0.5 * (w[..., :-1] + w[..., 1:])
-    KE = KE + 0.5 * w_full ** 2
+    # Sadourny "square-then-average" form: KE at cell centres is the
+    # arithmetic mean of u^2, v^2 over the four faces of the cell.
+    # This is the canonical Sadourny (1975) discretisation -- it
+    # avoids the spectral gap that arises when KE is first averaged
+    # face->cell (u_c) and then differentiated cell->face (the
+    # face->cell->face double-averaging that the v0 code did).
+    # Vertical KE (0.5 w^2) is NOT included here: w lives on a
+    # different vertical stagger and the vertical-momentum equation
+    # has its own Bernoulli term inside the acoustic substep.
+    KE = 0.25 * (
+        u[:, :-1] ** 2 + u[:, 1:] ** 2
+        + v[:-1] ** 2 + v[1:] ** 2
+    )
 
     # --- Horizontal pressure-gradient term ---
     # Non-hydrostatic PGF in Exner formulation:
     #   du/dt += -c_p * theta * d(pi)/dx
-    # where pi = pi_0(z) + pi'.  The reference Exner is z-only so its
-    # horizontal gradient vanishes; only pi' contributes.
+    # where pi = pi_0(z) + pi'.  ``compute_exner_perturbation``
+    # returns pi' alone (the reference Exner is z-only and is
+    # subtracted analytically inside the function), so the gradient
+    # below is the full horizontal PGF.
     pi_p = compute_exner_perturbation(rho_p, theta_p, height_coord)
     dpi_p_dx = gradient_x_cgrid(pi_p, grid)   # (n_lat, n_lon+1, nlev)
     dpi_p_dy = gradient_y_cgrid(pi_p, grid)   # (n_lat+1, n_lon, nlev)
@@ -254,90 +290,74 @@ def cgrid_latlon_nh_slow_tendencies(
     dv_dt = -dKE_dy + pgf_v + cor_v
 
     # --- Horizontal scalar advection (PPM) for theta' + rho' ---
-    # The PPM helper operates on cell-centred fields with u, v at
-    # faces -- same C-grid convention as the hydrostatic module.  We
-    # advect the *perturbations* directly.  The vertical advection of
-    # theta' inside the acoustic substep is the dominant tendency for
-    # the rising-bubble class of tests; the horizontal piece below is
-    # for the larger-scale benchmarks (mountain wave, baroclinic
-    # wave).
-    if config.hyperdiff_scalar != 0.0:
-        # TODO: switch to higher-order PPM advection once the scalar
-        # transport operator gains a NH-aware variant.  For v0 the
-        # advection is the same operator used by the hydrostatic
-        # path with theta_prime / rho_prime in place of T / p_s.
-        pass
-    horiz_adv_theta_p = cgrid_fv_scalar_advection_latlon_3d(theta_p, u, v, grid)
-    horiz_adv_rho_p = cgrid_fv_scalar_advection_latlon_3d(rho_p, u, v, grid)
+    horiz_adv_theta_p = cgrid_fv_scalar_advection_latlon_3d(
+        theta_p, u, v, grid,
+    )
+    horiz_adv_rho_p = cgrid_fv_scalar_advection_latlon_3d(
+        rho_p, u, v, grid,
+    )
 
-    # --- Horizontal advection of w (cell-centred, half-level vertical) ---
-    # The KE-gradient term above already absorbs the metric part of
-    # ``v · grad w`` at cell centres into the Bernoulli function for
-    # the horizontal momenta.  For ``w`` itself we still need the
-    # ``v_h · grad_h w`` flux-divergence contribution.  v0: cell-
-    # centred upwind with linear interpolation in z to half-levels.
-    # TODO: replace with C-grid PPM consistent with theta' / rho'.
-    w_cell_full = 0.5 * (w[..., :-1] + w[..., 1:])  # cell-centred, full lev
-    # PPM on cell-centred w
-    horiz_adv_w_full = cgrid_fv_scalar_advection_latlon_3d(
-        w_cell_full, u, v, grid,
+    # --- Horizontal advection of w on its native half-level grid ---
+    # The PPM helper is shape-generic in the trailing axis, so we can
+    # advect w directly on the (n_lat, n_lon, nlev+1) Lorenz-staggered
+    # half-level grid once we provide horizontal face velocities at
+    # half-levels.  We average the full-level (..., nlev) u, v
+    # vertically to (..., nlev+1) half-levels with edge-pad
+    # boundaries; the rigid-lid kinematic BC ``w = 0`` is preserved
+    # because we explicitly zero the tendency at k=0 and k=nlev.
+    u_half = _full_to_half_vert(u)   # (n_lat, n_lon+1, nlev+1)
+    v_half = _full_to_half_vert(v)   # (n_lat+1, n_lon, nlev+1)
+    horiz_adv_w = cgrid_fv_scalar_advection_latlon_3d(
+        w, u_half, v_half, grid,
     )
-    # Map back to half-levels (interior).  Boundaries (k=0, k=nlev)
-    # are rigid (w=0); their tendency is zero.
-    horiz_adv_w_inner = 0.5 * (
-        horiz_adv_w_full[..., :-1] + horiz_adv_w_full[..., 1:]
-    )
-    pad_axes = ((0, 0), (0, 0))
-    horiz_adv_w = jnp.pad(horiz_adv_w_inner, (*pad_axes, (1, 1)))
+    # Rigid lid: top and bottom half-levels carry w = 0 always.
+    horiz_adv_w = horiz_adv_w.at[..., 0].set(0.0).at[..., -1].set(0.0)
 
     # --- Horizontal hyperdiffusion ---
-    # Reuse the (-Δ²) Laplacian-of-Laplacian via successive
-    # ``divergence_cgrid(gradient_*_cgrid(f))`` applications.  v0:
-    # second-order (single Laplacian).
+    # Sign convention: ``+ K * ∇²f`` is the smoothing form (the v0 code
+    # had a stray sign inversion via ``-interp(_laplacian_scalar(...))``
+    # that would have driven anti-diffusion).
+    if config.hyperdiff_uv > 0.0:
+        # Proper C-grid vector Laplacian: grad(div u) - curl(curl u).
+        # Avoids the v0 face -> cell -> Laplacian -> face round-trip
+        # that smeared the mode structure of vector hyperdiffusion.
+        vlap_u, vlap_v = vector_laplacian_cgrid(u, v, grid)
+        du_dt = du_dt + config.hyperdiff_uv * vlap_u
+        dv_dt = dv_dt + config.hyperdiff_uv * vlap_v
+
     def _laplacian_scalar(field: jnp.ndarray) -> jnp.ndarray:
         gx = gradient_x_cgrid(field, grid)
         gy = gradient_y_cgrid(field, grid)
         return divergence_cgrid(gx, gy, grid)
 
-    if config.hyperdiff_uv > 0.0:
-        # On a C-grid u, v live on different faces.  Computing the
-        # Laplacian via grad(div(u, v)) - curl(curl(u, v)) preserves
-        # the vector-Laplacian symmetry.  v0: use scalar Laplacian on
-        # u / v separately as a simpler placeholder.
-        # TODO: replace with the C-grid vector Laplacian from the
-        # ocean module (``vector_laplacian_cgrid``).
-        du_dt = du_dt + config.hyperdiff_uv * (
-            -interp_cell_to_uface(_laplacian_scalar(u_c))
-        )
-        dv_dt = dv_dt + config.hyperdiff_uv * (
-            -interp_cell_to_vface(_laplacian_scalar(v_c))
-        )
-
     if config.hyperdiff_w > 0.0:
-        horiz_adv_w = horiz_adv_w + config.hyperdiff_w * (
-            -_laplacian_scalar(w_full)[..., None]  # broadcast back to half-lev shape
-            .repeat(w.shape[-1], axis=-1)
-        )
+        # w lives at (n_lat, n_lon, nlev+1).  The cell-centred
+        # horizontal Laplacian is shape-generic over the trailing
+        # vertical axis, so we apply it directly to w on its native
+        # half-level grid.
+        horiz_adv_w = horiz_adv_w + config.hyperdiff_w * _laplacian_scalar(w)
     if config.hyperdiff_scalar > 0.0:
-        horiz_adv_theta_p = horiz_adv_theta_p + config.hyperdiff_scalar * (
-            -_laplacian_scalar(theta_p)
+        horiz_adv_theta_p = (
+            horiz_adv_theta_p
+            + config.hyperdiff_scalar * _laplacian_scalar(theta_p)
         )
-        horiz_adv_rho_p = horiz_adv_rho_p + config.hyperdiff_scalar * (
-            -_laplacian_scalar(rho_p)
+        horiz_adv_rho_p = (
+            horiz_adv_rho_p
+            + config.hyperdiff_scalar * _laplacian_scalar(rho_p)
         )
 
     # --- Apply pole wall BC on v slow tendency ---
     dv_dt = _apply_pole_wall(dv_dt)
 
     # --- Sponge layer on w (Rayleigh damping in top sponge) ---
-    z_full = height_coord.z_full
-    H = height_coord.H
-    sponge = _sponge_profile(
-        z_full, H, cfg.sponge_width, cfg.sponge_coeff,
-    )  # (nlev,)
-    sponge_half = jnp.concatenate(
-        [sponge[:1], 0.5 * (sponge[:-1] + sponge[1:]), sponge[-1:]],
-        axis=-1,
+    # Build the Rayleigh damping coefficient directly on the half-level
+    # vertical grid where w lives -- this gives the correct sin^2
+    # profile at the physical w locations.  The v0 code averaged a
+    # full-level sponge profile to half-levels, which mis-located the
+    # tapered region by half a layer.
+    sponge_half = _sponge_profile(
+        height_coord.z_half, height_coord.H,
+        cfg.sponge_width, cfg.sponge_coeff,
     )  # (nlev+1,)
     horiz_adv_w = horiz_adv_w - sponge_half * w
 

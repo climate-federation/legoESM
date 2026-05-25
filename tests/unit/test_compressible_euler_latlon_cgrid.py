@@ -1,11 +1,9 @@
 """Unit tests for the lat-lon C-grid non-hydrostatic compressible Euler dycore.
 
-These are v0 smoke / shape / no-NaN tests for the first-cut
-implementation in
-``src/legoesm/atmosphere/dynamics/compressible_euler_latlon_cgrid.py``.
+Smoke / shape / no-NaN tests + the constant-pressure warm-bubble
+buoyancy check that drove the v1 ``/codex:adversarial-review`` cycle.
 Full benchmark tests (rising bubble, mountain wave, baroclinic wave)
-are wired into the atmosphere test matrix in a follow-up once the
-:func:`/codex:adversarial-review` findings on the dycore are addressed.
+are wired into the atmosphere test matrix as a follow-up.
 """
 
 from __future__ import annotations
@@ -17,6 +15,33 @@ import jax.numpy as jnp
 import pytest
 
 jax.config.update("jax_enable_x64", True)
+
+
+# ----------------------------------------------------------------------
+# Test parameters (kept at module scope per CLAUDE.md hygiene rules so
+# they are named, easy to audit, and live next to the assertion that
+# consumes them rather than buried in a test body).
+# ----------------------------------------------------------------------
+
+# Skamarock-Klemp warm-bubble amplitude.  +1 K is the canonical value
+# used in the Robert (1993) / Wicker & Skamarock (1998) test suite.
+WARM_BUBBLE_DTHETA_K = 1.0
+
+# Outer dycore time step used by the buoyancy check.  Two seconds is
+# well inside the acoustic CFL for the 12 x 24 x 8 grid below and gives
+# w time to climb out of round-off.
+WARM_BUBBLE_DT_S = 2.0
+
+# Tolerance on the rest-state stability test (the discrete rest state
+# is preserved analytically; the residual is round-off in the floor /
+# ratio path inside ``compute_exner_perturbation``).
+REST_STATE_DRIFT_TOL = 1.0e-6
+
+# Lower-bound threshold on the post-step vertical velocity at the
+# half-level just above the warm bubble.  Half a millimetre per second
+# is far above the rest-state round-off floor but is conservative
+# relative to the analytical buoyancy frequency on this 30 km column.
+WARM_BUBBLE_W_MIN_M_S = 1.0e-6
 
 
 # ----------------------------------------------------------------------
@@ -124,26 +149,102 @@ def test_rest_state_remains_at_rest_under_one_step(small_setup, rest_state):
         arr = getattr(new_state, name)
         assert jnp.all(jnp.isfinite(arr)), f"{name} not finite after step"
         # Magnitudes should be tiny (round-off only).
-        assert float(jnp.max(jnp.abs(arr))) < 1.0e-6, (
+        assert float(jnp.max(jnp.abs(arr))) < REST_STATE_DRIFT_TOL, (
             f"{name} drifted from rest: max|.|={float(jnp.max(jnp.abs(arr)))}"
         )
 
 
-def test_warm_bubble_drives_upward_motion(small_setup):
-    """A constant-pressure warm bubble must give positive dw/dt.
+def test_uv_shapes_preserved_through_step(small_setup, rest_state):
+    """C-grid u/v staggered shapes survive a full outer step.
 
-    Classical Skamarock-Klemp warm-bubble sanity check: a +1 K theta'
-    blob centered at mid-column, paired with a matching rho'
-    perturbation that holds pressure constant (so the Exner
-    perturbation vanishes and the pressure-gradient term drops out),
-    should excite an upward acceleration via the residual buoyancy
-    term ``g * theta'/theta_ref``.
-
-    The constant-pressure constraint follows from
-    ``p = R_d * rho * theta * (p/p_0)^kappa`` -> for fixed p we need
-    ``(rho/rho_0) * (theta/theta_0) = 1``, i.e.
-    ``rho'/rho_0 = -theta'/theta_0`` to first order.
+    Guards the acoustic-substep invariant documented in the module
+    docstring: the shared ``acoustic_substeps`` must NOT re-shape u
+    or v.  If a future refactor accidentally interpolates them to
+    cell centres, this test fails immediately.
     """
+    from legoesm.atmosphere.dynamics.compressible_euler_latlon_cgrid import (
+        cgrid_latlon_nh_step,
+    )
+    grid, height, terrain = small_setup
+    new_state = cgrid_latlon_nh_step(
+        rest_state, grid, height, terrain, dt=10.0,
+    )
+    assert new_state.u.shape == rest_state.u.shape
+    assert new_state.v.shape == rest_state.v.shape
+    assert new_state.w.shape == rest_state.w.shape
+
+
+def test_exner_perturbation_zero_at_rest(small_setup):
+    """``pi'`` must vanish (exactly) when theta' = rho' = 0.
+
+    Confirms that ``compute_exner_perturbation`` returns the
+    *perturbation* only (the reference Exner is subtracted
+    analytically inside the function), so the horizontal Exner
+    gradient that drives the slow PGF carries no z-only leakage.
+    """
+    from legoesm.atmosphere.dynamics.compressible_euler import (
+        compute_exner_perturbation,
+    )
+    _, height, _ = small_setup
+    nlev = height.n_levels
+    zero = jnp.zeros((4, 5, nlev))
+    pi_p = compute_exner_perturbation(zero, zero, height)
+    assert jnp.all(pi_p == 0.0), (
+        f"pi_p not exactly zero at rest: max|pi_p|={float(jnp.max(jnp.abs(pi_p)))}"
+    )
+
+
+def test_pgf_zero_at_rest(small_setup, rest_state):
+    """The horizontal PGF must be exactly zero at the rest state.
+
+    The hydrostatic reference state is z-only, so its horizontal
+    Exner gradient should vanish discretely.  This is a regression
+    guard for finding #6 in the v1 review: any future change that
+    leaks the reference Exner into ``pi_p`` would show up here.
+    """
+    from legoesm.atmosphere.dynamics.compressible_euler_latlon_cgrid import (
+        cgrid_latlon_nh_slow_tendencies,
+    )
+    grid, height, terrain = small_setup
+    tend = cgrid_latlon_nh_slow_tendencies(
+        rest_state, grid, height, terrain,
+    )
+    # At rest, du_dt and dv_dt are exactly zero (KE = 0, pi' = 0,
+    # Coriolis vanishes because u = v = 0).
+    assert float(jnp.max(jnp.abs(tend.du_dt.data))) < 1.0e-14
+    assert float(jnp.max(jnp.abs(tend.dv_dt.data))) < 1.0e-14
+
+
+def test_warm_bubble_drives_upward_motion(small_setup):
+    """An exact constant-pressure warm bubble must give positive dw/dt.
+
+    Classical Skamarock-Klemp warm-bubble sanity check: a ``+dtheta``
+    blob centred at mid-column, paired with a matching rho'
+    perturbation that holds the total pressure *exactly* equal to the
+    reference pressure (so the Exner perturbation vanishes
+    analytically), excites an upward acceleration solely via the
+    buoyancy term ``g * theta'/theta_ref`` inside the acoustic loop.
+
+    The exact constant-pressure constraint follows from the dry
+    equation of state
+    ``p = p_0 * (R_d * rho * theta / p_0)^(c_p/c_v)`` ⇒ for fixed
+    ``p = p_0_ref`` we need ``rho * theta = rho_0 * theta_0`` exactly,
+    so
+
+        rho' = rho_0 * theta_0 / (theta_0 + dtheta) - rho_0
+             = -rho_0 * dtheta / (theta_0 + dtheta).
+
+    The v0 test used the first-order approximation
+    ``rho' = -rho_0 * dtheta / theta_0`` which leaves an
+    ``O((dtheta/theta_0)^2)`` residual pi'.  At dtheta = 1 K,
+    theta_0 ≈ 300 K, that residual is ~10⁻⁵, small but visible.
+    The exact construction below makes pi' literally zero (to
+    floating-point) at the seeded cell, so the assertion measures
+    pure buoyancy.
+    """
+    from legoesm.atmosphere.dynamics.compressible_euler import (
+        compute_exner_perturbation,
+    )
     from legoesm.atmosphere.dynamics.compressible_euler_latlon_cgrid import (
         CGridLatLonNonHydrostaticState, cgrid_latlon_nh_step,
     )
@@ -155,15 +256,24 @@ def test_warm_bubble_drives_upward_motion(small_setup):
     zero_w = jnp.zeros((n_lat, n_lon, nlev + 1))
     zero_2d = jnp.zeros((n_lat, n_lon))
 
-    # Constant-pressure warm bubble at (lat_mid, lon_mid, k_mid).
     i_lat, i_lon, k = n_lat // 2, n_lon // 2, nlev // 2
-    dtheta = 1.0
+    dtheta = WARM_BUBBLE_DTHETA_K
     theta_0_k = float(height.theta_ref[k])
     rho_0_k = float(height.rho_ref[k])
-    drho = -rho_0_k * dtheta / theta_0_k
+    # Exact constant-pressure perturbation (no Taylor truncation).
+    drho = rho_0_k * theta_0_k / (theta_0_k + dtheta) - rho_0_k
 
     theta_blob = zero_cell.at[i_lat, i_lon, k].set(dtheta)
     rho_blob = zero_cell.at[i_lat, i_lon, k].set(drho)
+
+    # Sanity assertion on the construction itself: pi' must be
+    # round-off-zero at the seeded cell because rho * theta is
+    # constructed exactly equal to rho_0 * theta_0.
+    pi_p_check = compute_exner_perturbation(rho_blob, theta_blob, height)
+    assert abs(float(pi_p_check[i_lat, i_lon, k])) < 1.0e-12, (
+        f"warm bubble construction failed exact-constant-pressure: "
+        f"pi_p={float(pi_p_check[i_lat, i_lon, k])}"
+    )
 
     warm_state = CGridLatLonNonHydrostaticState(
         u=zero_uface, v=zero_vface, w=zero_w,
@@ -172,9 +282,13 @@ def test_warm_bubble_drives_upward_motion(small_setup):
     )
 
     new_state = cgrid_latlon_nh_step(
-        warm_state, grid, height, terrain, dt=2.0,
+        warm_state, grid, height, terrain, dt=WARM_BUBBLE_DT_S,
     )
-    # The half-level just above (k_mid -> k_mid+1) should be lifted.
+    # The half-level just above the seeded cell should be lifted by
+    # the buoyancy in the acoustic substep.
     w_above = float(new_state.w[i_lat, i_lon, k + 1])
     assert math.isfinite(w_above)
-    assert w_above > 0.0, f"warm bubble did not lift: w_above={w_above}"
+    assert w_above > WARM_BUBBLE_W_MIN_M_S, (
+        f"warm bubble did not lift: w_above={w_above:.3e} m/s "
+        f"(threshold {WARM_BUBBLE_W_MIN_M_S:.1e})"
+    )
