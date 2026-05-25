@@ -146,6 +146,59 @@ def test_packed_exchange_halo_plane_yxz_matches_unpacked():
         np.testing.assert_array_equal(np.asarray(p), np.asarray(i))
 
 
+def _pad_yxz(arr_yxz, halo=1):
+    """Wrap-pad the FIRST two axes for (ny, nx, *) layout."""
+    pad_widths = [(halo, halo)] * 2 + [(0, 0)] * (arr_yxz.ndim - 2)
+    return jnp.pad(arr_yxz, pad_widths, mode="wrap")
+
+
+def test_upwind_advection_x_halo_equiv():
+    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+        _upwind_advection_x,
+    )
+    grid = create_plane_grid(
+        nx=8, ny=6, nlev=4, dx=1000.0, dy=2000.0, dtype=jnp.float64,
+    )
+    rng = np.random.default_rng(3)
+    f = jnp.asarray(rng.standard_normal((6, 8, 4)))
+    u = jnp.asarray(rng.standard_normal((6, 8, 4)))
+    expected = _upwind_advection_x(f, u, grid.dx)
+    actual = ops_h.upwind_advection_x_halo(_pad_yxz(f), _pad_yxz(u), grid.dx)
+    _eq(actual, expected)
+
+
+def test_upwind_advection_y_halo_equiv():
+    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+        _upwind_advection_y,
+    )
+    grid = create_plane_grid(
+        nx=8, ny=6, nlev=4, dx=1000.0, dy=2000.0, dtype=jnp.float64,
+    )
+    rng = np.random.default_rng(4)
+    f = jnp.asarray(rng.standard_normal((6, 8, 4)))
+    v = jnp.asarray(rng.standard_normal((6, 8, 4)))
+    expected = _upwind_advection_y(f, v, grid.dy)
+    actual = ops_h.upwind_advection_y_halo(_pad_yxz(f), _pad_yxz(v), grid.dy)
+    _eq(actual, expected)
+
+
+def test_variable_K_diffusion_vlast_halo_equiv():
+    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+        _variable_K_diffusion_vlast,
+    )
+    grid = create_plane_grid(
+        nx=8, ny=6, nlev=4, dx=1000.0, dy=2000.0, dtype=jnp.float64,
+    )
+    rng = np.random.default_rng(5)
+    f = jnp.asarray(rng.standard_normal((6, 8, 4)))
+    K = jnp.asarray(np.abs(rng.standard_normal((6, 8, 4))))
+    expected = _variable_K_diffusion_vlast(f, K, grid)
+    actual = ops_h.variable_K_diffusion_vlast_halo(
+        _pad_yxz(f), _pad_yxz(K), grid,
+    )
+    _eq(actual, expected)
+
+
 def test_packed_exchange_halo_plane_rejects_shape_mismatch():
     from legoesm.parallel.plane_mpi import (
         make_plane_pencil_layout, packed_exchange_halo_plane_yxz,
